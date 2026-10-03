@@ -188,6 +188,62 @@ describe("AgentSession per-turn prune persistence", () => {
 		expect(rebuiltText?.type === "text" ? rebuiltText.text : undefined).toBe(USELESS_NOTICE);
 	});
 
+	it("settles the run and restores the result when persisting the prune fails", async () => {
+		const rewriteEntries = vi
+			.spyOn(sessionManager, "rewriteEntries")
+			.mockRejectedValueOnce(new Error("injected rewrite failure"));
+		const runStates: string[] = [];
+		const unsubscribeRunState = session.subscribeRunState(state => runStates.push(state));
+		const settles: boolean[] = [];
+		const notices: string[] = [];
+		const unsubscribe = session.subscribe(event => {
+			if (event.type === "agent_end") settles.push(event.isTerminal !== false);
+			if (event.type === "notice") notices.push(event.message);
+		});
+		try {
+			const finalAssistant = {
+				role: "assistant" as const,
+				content: [{ type: "text" as const, text: "Continuing." }],
+				api: "anthropic-messages" as const,
+				provider: "anthropic" as const,
+				model: "claude-sonnet-4-5",
+				stopReason: "stop" as const,
+				usage: {
+					input: 100,
+					output: 10,
+					cacheRead: 0,
+					cacheWrite: 0,
+					totalTokens: 110,
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+				},
+				timestamp: Date.now(),
+			};
+			session.agent.emitExternalEvent({ type: "message_end", message: finalAssistant });
+			session.agent.emitExternalEvent({ type: "agent_end", messages: [finalAssistant] });
+			await session.waitForIdle();
+
+			// The run reports idle and publishes one terminal settle, so the UI
+			// stops its working indicator instead of spinning forever.
+			expect(rewriteEntries).toHaveBeenCalledTimes(1);
+			expect(runStates).toEqual(["idle"]);
+			expect(settles).toEqual([true]);
+			expect(notices.some(message => message.includes("injected rewrite failure"))).toBe(true);
+			// The blanked result was restored: live context matches durable history.
+			expect(liveResultText()).toBe("match line\n".repeat(20000));
+			const entry = sessionManager
+				.getBranch()
+				.find(candidate => candidate.type === "message" && candidate.message.role === "toolResult");
+			expect(entry?.type === "message" ? entry.message : undefined).toMatchObject({
+				content: [{ type: "text", text: "match line\n".repeat(20000) }],
+				prunedAt: undefined,
+			});
+		} finally {
+			unsubscribe();
+			unsubscribeRunState();
+			rewriteEntries.mockRestore();
+		}
+	});
+
 	describe("advisor across the per-turn prune", () => {
 		const usage = {
 			input: 100,

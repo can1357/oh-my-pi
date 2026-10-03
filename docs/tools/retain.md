@@ -22,7 +22,7 @@
 
 ## Registration / Visibility
 - Tool metadata: `strict = true`, `loadMode = "discoverable"`. Approval is dynamic: a call with any `scope: "global"` item has `approval = "write"`, because the write reaches every project's recall; otherwise `approval = "read"`, even though successful calls enqueue or perform memory writes.
-- The tool is registered only for `memory.backend = "hindsight"` or `"mnemopi"`; it is absent for `"off"` and `"local"`.
+- The tool is registered only for `memory.backend = "hindsight"` or `"mnemopi"`; it is absent for `"off"` and `"local"`. Hindsight additionally requires a non-empty configured API URL (`isHindsightConfigured(loadHindsightConfig(...))`).
 - In unrestricted sessions with an explicit tool list, registration auto-includes the shared `recall`/`retain`/`reflect` set for either supported backend. Restricted lists are not widened.
 - In an ordinary `tools.xdev` session, discoverable built-ins may be presented as `xd://retain`; an explicitly requested tool remains top-level.
 - Execution returns one final result and has no progress callback or cancellation parameter.
@@ -46,7 +46,7 @@ Mnemopi:
 - `content[0].type = "text"`
 - `content[0].text = "<count> memory stored."` or `"<count> memories stored."`
 - `details = { count: number }`
-- The tool invokes local writes synchronously, but `rememberScoped(...)` catches each write failure and returns `undefined`; `retain` ignores that return and still reports the requested count. The response is therefore not a per-item durability receipt.
+- The tool writes each item synchronously through `rememberScoped(...)`. A storage failure throws, stops the batch, and reports the failed item, ids of earlier items kept, and whether later items were not attempted. A successful count confirms all synchronous writes, not completion of background extraction.
 
 ## Flow
 1. `MemoryRetainTool.createIf(...)` exposes the tool when `memory.backend` is either `"hindsight"` or `"mnemopi"`.
@@ -56,6 +56,7 @@ Mnemopi:
    - if any item has `scope: "global"`, it resolves `state.getGlobalRetainTarget()` first; under `per-project` scoping that throws `Mnemopi global scope requires global or per-project-tagged scoping.` and nothing in the batch is stored;
    - for each item, it calls `state.rememberScoped(item.content, ...)` with `source: "coding-agent-retain"`, `importance: 0.75`, `scope: "bank"`, `extract: true`, `extractEntities: true`, `veracity: "tool"`, `memoryType: "fact"`, and metadata `{ session_id, cwd, context, tool: "retain" }`;
    - project items go to the scoped retain bank and global items to the global target (passed as `rememberScoped`'s third argument); exact duplicate content in the same session updates the existing working-memory row in the Mnemopi core.
+   - content and options are passed through `redactRememberWrite(...)` before storage.
 4. If the backend is `hindsight`:
    - it fetches `session.getHindsightSessionState()` and throws if the backend was not started;
    - any `scope: "global"` item rejects the batch with `Global memory scope is only available with the Mnemopi backend.` before anything is queued (untagged Hindsight retains are not supported yet);
@@ -93,7 +94,7 @@ Mnemopi:
   - Mnemopi: writes through the session's scoped `Mnemopi` instance, includes `session_id`, `cwd`, and optional `context`, and shares scoped resources with subagents.
 - User-visible prompts / interactive UI
   - Hindsight async flush failures emit `session.emitNotice("warning", ...)`; the model is not told.
-  - Mnemopi write failures are logged by `rememberInScope(...)`; the tool response does not expose per-item failures.
+  - Mnemopi explicit write failures are returned as tool errors with partial-batch information; earlier successful writes are not rolled back.
 - Background work / cancellation
   - Hindsight flush runs later on the debounce timer or queue-size threshold; backend `enqueue(...)` and `clear(...)` explicitly drain it. A session-ownership mismatch at flush time logs and drops the batch.
   - Mnemopi fact/entity extraction and embedding may continue after the synchronous row write. Backend `enqueue(...)` requests full consolidation; backend clear disposes scoped instances before deleting their database files.
@@ -122,7 +123,7 @@ Mnemopi:
 - Hindsight queue enqueue on disposed state throws `Hindsight retain queue is closed.`
 - Hindsight flush-time API failures are caught, logged, and converted into a warning notice instead of a tool error.
 - Hindsight bank/mission creation failures are logged at debug level and swallowed in `ensureBankExists(...)`; the later write still runs.
-- Mnemopi `remember(...)` failures are caught in `MnemopiSessionState.rememberInScope(...)`, logged, and not rethrown to the tool caller.
+- Mnemopi explicit `rememberScoped(...)` failures stop the batch and throw `Mnemopi did not store item <n> of <total>: <reason>. ...`, identifying earlier stored ids and unattempted items. Background auto-retain instead uses `rememberInScope(...)`, which logs and swallows storage failures.
 
 ## Notes
 - Hindsight storage is server-side. `hindsightBackend.clear(...)` drains the local queue, clears local cache/state, and warns that upstream deletion must happen in Hindsight UI or `deleteBank`.

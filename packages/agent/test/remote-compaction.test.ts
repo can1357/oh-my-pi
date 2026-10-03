@@ -22,7 +22,9 @@ import {
 	trimRemoteCompactionInputToContextWindow,
 } from "@oh-my-pi/pi-agent-core/compaction/openai";
 import * as ai from "@oh-my-pi/pi-ai";
+import { NO_AUTH_SENTINEL } from "@oh-my-pi/pi-ai/auth-retry";
 import * as AIError from "@oh-my-pi/pi-ai/error";
+import { clearAwsCredentialCache } from "@oh-my-pi/pi-ai/providers/aws-credentials";
 import {
 	buildTransformedCodexRequestBody,
 	getOpenAICodexTransportDetails,
@@ -36,6 +38,7 @@ import type {
 	ToolResultMessage,
 	UserMessage,
 } from "@oh-my-pi/pi-ai/types";
+import { __resetProxyCache } from "@oh-my-pi/pi-ai/utils/proxy";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import type { ModelSpec } from "@oh-my-pi/pi-catalog/types";
 import * as piUtils from "@oh-my-pi/pi-utils";
@@ -489,6 +492,97 @@ describe("buildOpenAiNativeHistory call-id tracking", () => {
 		);
 		expect(items.some(item => item.type === "function_call_output" && item.call_id === "call_old")).toBe(false);
 		expect(items.some(item => item.type === "function_call_output" && item.call_id === "call_new")).toBe(true);
+	});
+
+	test("drops stored native calls with malformed names and the outputs that answer them", () => {
+		const invocationName = 'bash\0arg_key="command"\0arg_value="ls"';
+		const assistant = codexAssistant([{ callId: "call_bad" }, { callId: "call_ok" }], true);
+		const badBlock = assistant.content[0];
+		if (badBlock?.type !== "toolCall") throw new Error("expected tool call");
+		badBlock.name = invocationName;
+		const payload = assistant.providerPayload;
+		if (payload?.type !== "openaiResponsesHistory") throw new Error("expected native history");
+		payload.items[0]!.name = invocationName;
+		const replacementHistory = {
+			role: "user",
+			content: "",
+			timestamp: Date.now(),
+			providerPayload: {
+				type: "openaiResponsesHistory",
+				provider: "openai-codex",
+				items: [
+					{ type: "function_call", call_id: "call_prev", name: "t".repeat(129), arguments: "{}" },
+					{ type: "function_call", call_id: "call_prev_ok", name: "read", arguments: "{}" },
+					{ type: "function_call_output", call_id: "call_prev", output: "prev result" },
+					{ type: "function_call_output", call_id: "call_prev_ok", output: "prev ok result" },
+				],
+			},
+		} as unknown as UserMessage;
+		const items = buildOpenAiNativeHistory(
+			[replacementHistory, assistant, toolResultFor("call_bad"), toolResultFor("call_ok")],
+			CODEX_MODEL,
+		);
+		expect(items.flatMap(item => (typeof item.call_id === "string" ? [[item.type, item.call_id]] : []))).toEqual([
+			["function_call", "call_prev_ok"],
+			["function_call_output", "call_prev_ok"],
+			["function_call", "call_ok"],
+			["function_call_output", "call_ok"],
+		]);
+	});
+
+	test("pairs a reused call id positionally and keeps a different-kind output", () => {
+		const shared = "call_reused";
+		const history = {
+			role: "user",
+			content: "",
+			timestamp: Date.now(),
+			providerPayload: {
+				type: "openaiResponsesHistory",
+				provider: "openai-codex",
+				items: [
+					{ type: "function_call", call_id: shared, name: "bad invocation", arguments: "{}" },
+					{ type: "custom_tool_call_output", call_id: shared, output: "unrelated custom orphan" },
+					{ type: "function_call_output", call_id: shared, output: "Tool not found" },
+					{ type: "function_call", call_id: shared, name: "read", arguments: "{}" },
+					{ type: "function_call_output", call_id: shared, output: "file contents" },
+				],
+			},
+		} as unknown as UserMessage;
+		const items = buildOpenAiNativeHistory([history], CODEX_MODEL);
+		expect(
+			items.flatMap(item =>
+				typeof item.call_id === "string" ? [[item.type, item.call_id, item.output ?? item.name]] : [],
+			),
+		).toEqual([
+			["custom_tool_call_output", shared, "unrelated custom orphan"],
+			["function_call", shared, "read"],
+			["function_call_output", shared, "file contents"],
+		]);
+	});
+
+	test("does not let a malformed call without an output consume a reused id after a client message", () => {
+		const shared = "call_reused";
+		const history = {
+			role: "user",
+			content: "",
+			timestamp: Date.now(),
+			providerPayload: {
+				type: "openaiResponsesHistory",
+				provider: "openai-codex",
+				items: [
+					{ type: "function_call", call_id: shared, name: "bad invocation", arguments: "{}" },
+					{ type: "message", role: "developer", content: [{ type: "input_text", text: "boundary" }] },
+					{ type: "function_call", call_id: shared, name: "read", arguments: "{}" },
+					{ type: "function_call_output", call_id: shared, output: "file contents" },
+				],
+			},
+		} as unknown as UserMessage;
+		const items = buildOpenAiNativeHistory([history], CODEX_MODEL);
+		expect(items.map(item => [item.type, item.role, item.call_id, item.name ?? item.output])).toEqual([
+			["message", "developer", undefined, undefined],
+			["function_call", undefined, shared, "read"],
+			["function_call_output", undefined, shared, "file contents"],
+		]);
 	});
 });
 
@@ -2685,5 +2779,259 @@ describe("compact() remote compaction failure handling", () => {
 			}),
 		).rejects.toThrow("Remote compaction failed");
 		expect(completeSpy).not.toHaveBeenCalled();
+	});
+});
+
+describe("Amazon Bedrock OpenAI routes", () => {
+	const AWS_ENV_KEYS = [
+		"AWS_REGION",
+		"AWS_DEFAULT_REGION",
+		"AWS_PROFILE",
+		"AWS_BEARER_TOKEN_BEDROCK",
+		"AWS_ACCESS_KEY_ID",
+		"AWS_SECRET_ACCESS_KEY",
+		"AWS_SESSION_TOKEN",
+		"AWS_CONFIG_FILE",
+		"AWS_SHARED_CREDENTIALS_FILE",
+		"AWS_EC2_METADATA_DISABLED",
+	] as const;
+
+	async function withAwsEnv<T>(env: Partial<Record<(typeof AWS_ENV_KEYS)[number], string>>, run: () => Promise<T>) {
+		const previous = new Map(AWS_ENV_KEYS.map(key => [key, Bun.env[key]]));
+		try {
+			for (const key of AWS_ENV_KEYS) {
+				const value = env[key];
+				if (value === undefined) delete Bun.env[key];
+				else Bun.env[key] = value;
+			}
+			clearAwsCredentialCache();
+			return await run();
+		} finally {
+			for (const [key, value] of previous) {
+				if (value === undefined) delete Bun.env[key];
+				else Bun.env[key] = value;
+			}
+			clearAwsCredentialCache();
+		}
+	}
+
+	function makeBedrockModel(
+		baseUrl: string,
+		overrides: Partial<ModelSpec<"openai-responses">> = {},
+	): Model<"openai-responses"> {
+		return makeOpenAiModel({ id: "us.openai.gpt-6-astra", provider: "bedrock-openai", baseUrl, ...overrides });
+	}
+
+	test.each([
+		["bedrock-runtime", "https://bedrock-runtime.us-east-1.amazonaws.com/openai/v1", true],
+		["templated bedrock-mantle", "https://bedrock-mantle.{region}.api.aws/openai/v1", true],
+		["non-Bedrock custom host", "https://llm.example.com/openai/v1", false],
+		[
+			"proxy embedding the Bedrock host",
+			"https://proxy.example.com/bedrock-runtime.us-east-1.amazonaws.com/openai/v1",
+			false,
+		],
+		["Bedrock Anthropic route", "https://bedrock-runtime.us-east-1.amazonaws.com/anthropic", false],
+		["Bedrock root", "https://bedrock-runtime.us-east-1.amazonaws.com", false],
+		["bedrock-runtime FIPS", "https://bedrock-runtime-fips.us-gov-west-1.amazonaws.com/openai/v1", true],
+		["bedrock-mantle documented /v1 base", "https://bedrock-mantle.us-east-1.api.aws/v1", true],
+		// Only Mantle serves the OpenAI APIs at `/v1`; runtime keeps them under `/openai`.
+		["bedrock-runtime /v1", "https://bedrock-runtime.us-east-1.amazonaws.com/v1", false],
+		[
+			"bedrock-runtime PrivateLink",
+			"https://vpce-0a1b2c3d4e5f67890-abcd1234.bedrock-runtime.us-east-1.vpce.amazonaws.com/openai/v1",
+			true,
+		],
+		[
+			"bedrock-mantle zonal PrivateLink",
+			"https://vpce-0a1b2c3d4e5f67890-abcd1234-us-east-1a.bedrock-mantle.us-east-1.vpce.amazonaws.com/v1",
+			true,
+		],
+		[
+			"PrivateLink endpoint for another service",
+			"https://vpce-0a1b2c3d4e5f67890-abcd1234.bedrock-agent-runtime.us-east-1.vpce.amazonaws.com/openai/v1",
+			false,
+		],
+		["plain HTTP", "http://bedrock-runtime.us-east-1.amazonaws.com/openai/v1", false],
+	] as const)(
+		"enables native V1 and V2 compaction without opt-in only on OpenAI routes: %s",
+		(_route, baseUrl, expected) => {
+			const model = makeBedrockModel(baseUrl);
+			expect(shouldUseOpenAiRemoteCompaction(model)).toBe(expected);
+			expect(shouldUseCompactionV2Streaming(model)).toBe(expected);
+		},
+	);
+
+	test("does not enable the Chat Completions API on Bedrock's OpenAI route", () => {
+		const model = buildModel({
+			id: "chat-model",
+			name: "Chat model",
+			api: "openai-completions",
+			provider: "bedrock-openai",
+			baseUrl: "https://bedrock-runtime.us-east-1.amazonaws.com/openai/v1",
+			reasoning: true,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 128000,
+			maxTokens: 32000,
+		});
+		expect(shouldUseOpenAiRemoteCompaction(model)).toBe(false);
+		expect(shouldUseCompactionV2Streaming(model)).toBe(false);
+	});
+
+	test("lets explicit disables win over the Bedrock default", () => {
+		const url = "https://bedrock-runtime.us-east-1.amazonaws.com/openai/v1";
+		const disabled = makeBedrockModel(url, { remoteCompaction: { enabled: false } });
+		expect(shouldUseOpenAiRemoteCompaction(disabled)).toBe(false);
+		expect(shouldUseCompactionV2Streaming(disabled)).toBe(false);
+
+		const v1Only = makeBedrockModel(url, { remoteCompaction: { v2StreamingEnabled: false } });
+		expect(shouldUseOpenAiRemoteCompaction(v1Only)).toBe(true);
+		expect(shouldUseCompactionV2Streaming(v1Only)).toBe(false);
+	});
+
+	function makeMantleModel(): Model<"openai-responses"> {
+		return makeOpenAiModel({
+			id: "openai.gpt-6-sol",
+			provider: "bedrock-mantle",
+			baseUrl: "https://bedrock-mantle.{region}.api.aws/openai/v1",
+		});
+	}
+
+	test("sends V1 compaction for a templated Mantle model to the regional endpoint with the bearer token", async () => {
+		let url: string | undefined;
+		let authorization: string | null | undefined;
+		const fetchMock: FetchImpl = async (input, init) => {
+			url = String(input);
+			authorization = new Headers(init?.headers).get("authorization");
+			return Response.json({ output: [{ type: "compaction", encrypted_content: "enc" }] });
+		};
+
+		await withAwsEnv({ AWS_REGION: "eu-west-2" }, () =>
+			requestOpenAiRemoteCompaction(
+				makeMantleModel(),
+				"mantle-token",
+				[{ type: "message", role: "user", content: [{ type: "input_text", text: "hi" }] }],
+				"instructions",
+				undefined,
+				{ fetch: fetchMock },
+			),
+		);
+
+		expect(url).toBe("https://bedrock-mantle.eu-west-2.api.aws/openai/v1/responses/compact");
+		expect(authorization).toBe("Bearer mantle-token");
+	});
+
+	test("signs V2 compaction for a templated Mantle model with SigV4 when no bearer token exists", async () => {
+		const model = makeMantleModel();
+		const request = buildCompactionV2Request(
+			model,
+			[{ type: "message", role: "user", content: [{ type: "input_text", text: "hi" }] }],
+			"instructions",
+		);
+		let url: string | undefined;
+		let authorization: string | null | undefined;
+		const fetchMock: FetchImpl = async (input, init) => {
+			url = String(input);
+			authorization = new Headers(init?.headers).get("authorization");
+			return sseResponse([
+				{
+					type: "response.output_item.done",
+					output_index: 0,
+					item: { type: "compaction", encrypted_content: "enc" },
+				},
+				{ type: "response.completed" },
+			]);
+		};
+
+		await withAwsEnv(
+			{
+				AWS_REGION: "us-west-2",
+				AWS_ACCESS_KEY_ID: "AKIDEXAMPLE",
+				AWS_SECRET_ACCESS_KEY: "secret",
+				AWS_CONFIG_FILE: "/nonexistent/aws-config",
+				AWS_SHARED_CREDENTIALS_FILE: "/nonexistent/aws-credentials",
+				AWS_EC2_METADATA_DISABLED: "true",
+			},
+			() => requestCompactionV2Streaming(model, NO_AUTH_SENTINEL, request, undefined, { fetch: fetchMock }),
+		);
+
+		expect(url).toBe("https://bedrock-mantle.us-west-2.api.aws/openai/v1/responses");
+		expect(authorization).toContain("/us-west-2/bedrock-mantle/aws4_request");
+	});
+});
+
+describe("Amazon Bedrock compaction request preparation", () => {
+	const nativeInput = [{ type: "message", role: "user", content: [{ type: "input_text", text: "hi" }] }];
+	const runtimeUrl = "https://bedrock-runtime.us-east-1.amazonaws.com/openai/v1";
+
+	function compactionResponse(): Response {
+		return Response.json({ output: [{ type: "compaction", encrypted_content: "enc" }] });
+	}
+
+	function v2Response(): Response {
+		return sseResponse([
+			{ type: "response.output_item.done", output_index: 0, item: { type: "compaction", encrypted_content: "enc" } },
+			{ type: "response.completed" },
+		]);
+	}
+
+	test("sends lazily resolved configured headers instead of a keyless bearer", async () => {
+		const model: Model<"openai-responses"> = {
+			...makeOpenAiModel({ id: "us.openai.gpt-6-astra", provider: "bedrock-lazy-headers", baseUrl: runtimeUrl }),
+			resolveHeaders: async () => ({ Authorization: "Bearer lazy-token" }),
+		};
+		const authorizations: Array<string | null> = [];
+		const fetchMock: FetchImpl = async (input, init) => {
+			authorizations.push(new Headers(init?.headers).get("authorization"));
+			return String(input).endsWith("/compact") ? compactionResponse() : v2Response();
+		};
+
+		await requestOpenAiRemoteCompaction(model, NO_AUTH_SENTINEL, nativeInput, "instructions", undefined, {
+			fetch: fetchMock,
+		});
+		await requestCompactionV2Streaming(
+			model,
+			NO_AUTH_SENTINEL,
+			buildCompactionV2Request(model, nativeInput, "instructions"),
+			undefined,
+			{ fetch: fetchMock },
+		);
+
+		expect(authorizations).toEqual(["Bearer lazy-token", "Bearer lazy-token"]);
+	});
+
+	test("routes compaction through the provider proxy", async () => {
+		const model = makeOpenAiModel({
+			id: "us.openai.gpt-6-astra",
+			provider: "compaction-proxy-test",
+			baseUrl: runtimeUrl,
+		});
+		const previous = Bun.env.PI_PROXY_COMPACTION_PROXY_TEST;
+		Bun.env.PI_PROXY_COMPACTION_PROXY_TEST = "http://proxy.example.test:8080";
+		__resetProxyCache();
+		const proxies: unknown[] = [];
+		const fetchMock: FetchImpl = async (input, init) => {
+			proxies.push((init as { proxy?: unknown } | undefined)?.proxy);
+			return String(input).endsWith("/compact") ? compactionResponse() : v2Response();
+		};
+		try {
+			await requestOpenAiRemoteCompaction(model, "test-key", nativeInput, "instructions", undefined, {
+				fetch: fetchMock,
+			});
+			await requestCompactionV2Streaming(
+				model,
+				"test-key",
+				buildCompactionV2Request(model, nativeInput, "instructions"),
+				undefined,
+				{ fetch: fetchMock },
+			);
+		} finally {
+			if (previous === undefined) delete Bun.env.PI_PROXY_COMPACTION_PROXY_TEST;
+			else Bun.env.PI_PROXY_COMPACTION_PROXY_TEST = previous;
+			__resetProxyCache();
+		}
+
+		expect(proxies).toEqual(["http://proxy.example.test:8080", "http://proxy.example.test:8080"]);
 	});
 });

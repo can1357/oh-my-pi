@@ -213,7 +213,7 @@ export async function runCodeReviewCommand(
 	const cwd = liveCommandCwd(api, ctx);
 	const parsed = extractReviewPrRefFromArgs(splitReviewArgs(args));
 	const focus = parsed.extraInstructions || undefined;
-	const choice = parsed.prRef ? { kind: "pr" as const, ref: parsed.prRef } : await selectReviewChoice(ctx);
+	const choice = parsed.prRef ? { kind: "pr" as const, ref: parsed.prRef } : await selectReviewChoice(ctx, cwd);
 	if (!choice) return undefined;
 	const target =
 		choice.kind === "pr"

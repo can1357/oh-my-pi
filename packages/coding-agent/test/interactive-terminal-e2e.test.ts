@@ -101,7 +101,7 @@ describe("libkitty end-to-end", () => {
 		const drafts = buffer.filter(row => row.includes("MARKER_DRAFT"));
 		if (drafts.length !== 1) dump("scroll buffer after resizes", buffer);
 		expect(drafts.length).toBe(1);
-		const welcomes = buffer.filter(row => row.includes("Welcome back!"));
+		const welcomes = buffer.filter(row => row.includes("vtest"));
 		expect(welcomes.length).toBe(1);
 	});
 
@@ -124,7 +124,7 @@ describe("libkitty end-to-end", () => {
 		const editors = viewport.filter(row => row.includes("MARKER_DRAFT"));
 		if (editors.length !== 1) dump("viewport after overflowing shrink", viewport);
 		expect(editors.length).toBe(1);
-		expect(viewport.filter(row => row.includes("Welcome back!")).length).toBeLessThanOrEqual(1);
+		expect(viewport.filter(row => row.includes("vtest")).length).toBeLessThanOrEqual(1);
 		const buffer = plainRows(term.getScrollBuffer());
 		expect(buffer.filter(row => row.includes("MARKER_DRAFT")).length).toBe(1);
 	});
@@ -157,7 +157,7 @@ describe("libkitty end-to-end", () => {
 		if (drafts.length !== 1) dump("scroll buffer after drag storm", buffer);
 		expect(drafts.length).toBe(1);
 		const viewport = plainRows(term.getViewport());
-		expect(viewport.filter(row => row.includes("Welcome back!")).length).toBeLessThanOrEqual(1);
+		expect(viewport.filter(row => row.includes("vtest")).length).toBeLessThanOrEqual(1);
 
 		// The editor is still live: typing paints into the one surviving editor.
 		term.sendInput("X");

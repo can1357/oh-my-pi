@@ -28,7 +28,6 @@ import {
 } from "@oh-my-pi/pi-ai/providers/openai-shared";
 import { transformMessages } from "@oh-my-pi/pi-ai/providers/transform-messages";
 import type {
-	Api,
 	AssistantMessage,
 	CodexCompactionContext,
 	FetchImpl,
@@ -37,12 +36,14 @@ import type {
 	ProviderSessionState,
 } from "@oh-my-pi/pi-ai/types";
 import {
+	dropMalformedOpenAIResponsesToolCalls,
 	getOpenAIResponsesHistoryItems,
 	getOpenAIResponsesHistoryPayload,
 	normalizeResponsesToolCallId,
 	stripOpenAIResponsesOutputOnlyStatusesForReplay,
 } from "@oh-my-pi/pi-ai/utils";
 import { captureOpenAIHttpError } from "@oh-my-pi/pi-ai/utils/openai-http";
+import { isBedrockOpenAIUrl } from "@oh-my-pi/pi-catalog/hosts";
 import {
 	applyCodexResidencyHeader,
 	CODEX_BASE_URL,
@@ -51,8 +52,11 @@ import {
 	OPENAI_HEADER_VALUES,
 	OPENAI_HEADERS,
 } from "@oh-my-pi/pi-catalog/wire/codex";
-import { $env, isRecord, logger, prompt, stringifyJson, structuredCloneJSON } from "@oh-my-pi/pi-utils";
+import { $env, isRecord, logger, prompt, ptree, stringifyJson, structuredCloneJSON } from "@oh-my-pi/pi-utils";
 import { Tokenizer } from "../tokenizer";
+import { appendAzureApiVersion, resolveAzureOpenAiBaseUrl } from "./azure-openai-endpoint";
+import { prepareBedrockCompactionRequest } from "./bedrock";
+import { isOpenAiRemoteCompactionApi } from "./compaction-v2-streaming";
 import contextWindowTruncatedOutputPrompt from "./prompts/context-window-truncated-output.md" with { type: "text" };
 
 export * from "./compaction-v2-streaming";
@@ -72,8 +76,6 @@ export const OPENAI_REMOTE_COMPACTION_PRESERVE_KEY = "openaiRemoteCompaction";
  * queueing behind it). On timeout the caller falls back to local summarization.
  */
 export const REMOTE_COMPACTION_TIMEOUT_MS = 300_000;
-
-const DEFAULT_AZURE_API_VERSION = "v1";
 
 export const CONTEXT_WINDOW_TRUNCATED_OUTPUT_MESSAGE = prompt.render(contextWindowTruncatedOutputPrompt);
 
@@ -262,13 +264,6 @@ export function assertRemoteCompactionInputFits(trimmed: TrimRemoteCompactionInp
 	);
 }
 
-/** Race the caller's signal against the request timeout; `timeoutMs <= 0` disables the watchdog. */
-function withRequestTimeout(signal: AbortSignal | undefined, timeoutMs: number): AbortSignal | undefined {
-	if (timeoutMs <= 0) return signal;
-	const timeout = AbortSignal.timeout(timeoutMs);
-	return signal ? AbortSignal.any([signal, timeout]) : timeout;
-}
-
 export type OpenAiRemoteCompactionItem = {
 	type: "compaction" | "compaction_summary";
 	encrypted_content?: string;
@@ -309,10 +304,6 @@ export interface RemoteCompactionResponse {
 // OpenAI provider gating + endpoint resolution
 // ============================================================================
 
-export function isOpenAiRemoteCompactionApi(api: Api | undefined): boolean {
-	return api === "openai-responses" || api === "azure-openai-responses" || api === "openai-codex-responses";
-}
-
 export function shouldUseOpenAiRemoteCompaction(model: Model): boolean {
 	if (model.remoteCompaction?.enabled === false) return false;
 	const compactionApi = model.remoteCompaction?.api ?? model.api;
@@ -323,6 +314,8 @@ export function shouldUseOpenAiRemoteCompaction(model: Model): boolean {
 		return (model.remoteCompaction?.endpoint?.trim().length ?? 0) > 0;
 	}
 	if (model.provider === "openai") return true;
+	// Amazon Bedrock's OpenAI routes serve `/responses/compact` without an opt-in.
+	if (compactionApi === "openai-responses" && isBedrockOpenAIUrl(model.baseUrl)) return true;
 	if (model.remoteCompaction?.enabled !== true) return false;
 	return isOpenAiRemoteCompactionApi(compactionApi);
 }
@@ -351,25 +344,6 @@ function resolveAzureOpenAiCompactEndpoint(model: Model, configuredEndpoint: str
 			? configuredEndpoint
 			: `${resolveAzureOpenAiBaseUrl(model)}/responses/compact`;
 	return appendAzureApiVersion(endpoint);
-}
-
-function resolveAzureOpenAiBaseUrl(model: Model): string {
-	const baseUrl = $env.AZURE_OPENAI_BASE_URL?.trim() || undefined;
-	const resourceName = $env.AZURE_OPENAI_RESOURCE_NAME;
-	const resolvedBaseUrl =
-		baseUrl ?? (resourceName ? `https://${resourceName}.openai.azure.com/openai/v1` : undefined) ?? model.baseUrl;
-	if (!resolvedBaseUrl) {
-		throw new Error(
-			"Azure OpenAI base URL is required. Set AZURE_OPENAI_BASE_URL or AZURE_OPENAI_RESOURCE_NAME, or configure model.baseUrl.",
-		);
-	}
-	return resolvedBaseUrl.replace(/\/+$/, "");
-}
-
-function appendAzureApiVersion(endpoint: string): string {
-	if (/[?&]api-version=/.test(endpoint)) return endpoint;
-	const separator = endpoint.includes("?") ? "&" : "?";
-	return `${endpoint}${separator}api-version=${encodeURIComponent($env.AZURE_OPENAI_API_VERSION || DEFAULT_AZURE_API_VERSION)}`;
 }
 
 function resolveOpenAiCompactModel(model: Model): string {
@@ -564,7 +538,10 @@ export function buildOpenAiNativeHistory(
 						}
 					}
 				}
-				const historyItems = adaptComputerHistoryForCompaction(rawHistoryItems, model.supportsComputerUse === true);
+				const historyItems = adaptComputerHistoryForCompaction(
+					dropMalformedOpenAIResponsesToolCalls(rawHistoryItems),
+					model.supportsComputerUse === true,
+				);
 				input.push(...historyItems);
 				addOpenAiCallIds(historyItems, knownCallIds, customCallIds, computerCallIds);
 				msgIndex++;
@@ -616,7 +593,7 @@ export function buildOpenAiNativeHistory(
 					}
 				}
 				const historyItems = adaptComputerHistoryForCompaction(
-					providerPayload.items,
+					dropMalformedOpenAIResponsesToolCalls(providerPayload.items),
 					model.supportsComputerUse === true,
 				);
 				if (providerPayload.dt) {
@@ -805,6 +782,10 @@ export async function requestOpenAiRemoteCompaction(
 		codexCompaction?: CodexCompactionContext;
 	},
 ): Promise<OpenAiRemoteCompactionResponse> {
+	let fetchImpl: FetchImpl = opts?.fetch ?? fetch;
+	if (isBedrockOpenAIUrl(model.baseUrl)) {
+		({ model, apiKey, fetch: fetchImpl } = await prepareBedrockCompactionRequest(model, apiKey, opts?.fetch, signal));
+	}
 	const endpoint = resolveOpenAiCompactEndpoint(model);
 	const requestModel = resolveOpenAiCompactModel(model);
 	const trimmed = trimRemoteCompactionInputToContextWindow(
@@ -889,11 +870,11 @@ export async function requestOpenAiRemoteCompaction(
 		}
 	}
 
-	const response = await (opts?.fetch ?? fetch)(endpoint, {
+	const response = await fetchImpl(endpoint, {
 		method: "POST",
 		headers,
 		body: stringifyJson(request),
-		signal: withRequestTimeout(signal, opts?.timeoutMs ?? REMOTE_COMPACTION_TIMEOUT_MS),
+		signal: ptree.combineSignals(signal, opts?.timeoutMs ?? REMOTE_COMPACTION_TIMEOUT_MS),
 	});
 
 	if (!response.ok) {
@@ -992,7 +973,7 @@ export async function requestRemoteCompaction(
 		method: "POST",
 		headers,
 		body: stringifyJson(body),
-		signal: withRequestTimeout(signal, opts?.timeoutMs ?? REMOTE_COMPACTION_TIMEOUT_MS),
+		signal: ptree.combineSignals(signal, opts?.timeoutMs ?? REMOTE_COMPACTION_TIMEOUT_MS),
 	});
 
 	if (!response.ok) {

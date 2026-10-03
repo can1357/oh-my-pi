@@ -49,16 +49,27 @@ export interface SessionSwitchEvent {
 	previousSessionFile: string | undefined;
 }
 
+/**
+ * What a branch transition does with {@link SessionBeforeBranchEvent.entryId}:
+ * - `"branch"`: rewinds to a user message; `entryId` and everything after it are dropped.
+ * - `"fork"`: forks at a transcript entry; `entryId` is the last entry kept.
+ * - `"btw"`: promotes a `/btw` answer; `entryId` is the last entry kept before it.
+ */
+export type SessionBranchReason = "branch" | "fork" | "btw";
+
 /** Fired before branching a session (can be cancelled) */
 export interface SessionBeforeBranchEvent {
 	type: "session_before_branch";
-	/** ID of the entry to branch from */
+	/** Which transition is running; it decides whether `entryId` is kept or dropped. */
+	reason: SessionBranchReason;
+	/** The entry the transition cuts at; see {@link SessionBranchReason}. */
 	entryId: string;
 }
 
 /** Fired after branching a session */
 export interface SessionBranchEvent {
 	type: "session_branch";
+	reason: SessionBranchReason;
 	previousSessionFile: string | undefined;
 }
 
@@ -382,7 +393,7 @@ export function buildAggregatedToolCallResult(
 
 /**
  * Return type for `tool_result` handlers.
- * Allows handlers to modify tool results.
+ * Allows handlers to modify tool results and attach passive context.
  */
 export interface ToolResultEventResult {
 	/** Replacement content array (text and images) */
@@ -391,6 +402,16 @@ export interface ToolResultEventResult {
 	details?: unknown;
 	/** Override isError flag */
 	isError?: boolean;
+	/**
+	 * Trusted handler-authored instructions for the next provider request,
+	 * delivered like `ToolCallEventResult.additionalContext` but outside the tool
+	 * result. Unlike `tool_call` context it is also delivered when the call
+	 * failed: the handler sees the outcome (`event.isError`) and decides, which is
+	 * how failure-specific guidance reaches the model. Distinct non-blank values from
+	 * every handler are preserved in registration order (repeats are dropped) and precede the call's
+	 * `tool_call` context. Dropped only when the loop skips the call.
+	 */
+	additionalContext?: string;
 }
 
 /** Return type for `session_before_switch` handlers */

@@ -3,14 +3,16 @@ import { TOOL_INTERRUPT_ABORT_REASON } from "@oh-my-pi/pi-agent-core";
 import { AsyncJobManager } from "@oh-my-pi/pi-coding-agent/async/job-manager";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { IrcBus } from "@oh-my-pi/pi-coding-agent/irc/bus";
+import * as daemonClient from "@oh-my-pi/pi-coding-agent/launch/client";
+import type { DaemonBrokerClient } from "@oh-my-pi/pi-coding-agent/launch/client";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { WaitTool } from "@oh-my-pi/pi-coding-agent/tools/wait";
 
-function session(manager?: AsyncJobManager, agentId = "Main"): ToolSession {
+function session(manager?: AsyncJobManager, agentId = "Main", launch = false): ToolSession {
 	return {
 		cwd: process.cwd(),
-		settings: Settings.isolated({ "launch.enabled": false }),
+		settings: Settings.isolated({ "launch.enabled": launch }),
 		agentRegistry: AgentRegistry.global(),
 		asyncJobManager: manager,
 		getAgentId: () => agentId,
@@ -24,6 +26,7 @@ describe("wait", () => {
 	});
 	afterEach(() => {
 		vi.useRealTimers();
+		vi.restoreAllMocks();
 		AgentRegistry.resetGlobalForTests();
 		IrcBus.resetGlobalForTests();
 	});
@@ -278,5 +281,22 @@ describe("wait", () => {
 		expect(result.details?.waited).toMatchObject({ from: "Peer", body: "the file is yours" });
 		expect(manager.getJob(id)?.status).toBe("running");
 		manager.cancel(id);
+	});
+
+	test("a hung daemon broker does not fail the wait; the job result still arrives", async () => {
+		const hungBroker = {
+			request: async () => {
+				throw new Error("Daemon list request timed out");
+			},
+			onCompletion: () => () => {},
+		} as unknown as DaemonBrokerClient;
+		vi.spyOn(daemonClient, "daemonClientForProject").mockResolvedValue(hungBroker);
+		const manager = new AsyncJobManager({ onJobComplete: () => {} });
+		const { promise, resolve } = Promise.withResolvers<string>();
+		const id = manager.register("bash", "build", async () => promise, { ownerId: "Main" });
+		const waiting = new WaitTool(session(manager, "Main", true)).execute("wait-hung-broker", {});
+		resolve("build complete");
+		const result = await waiting;
+		expect(result.details?.jobs?.[0]).toMatchObject({ id, status: "completed", resultText: "build complete" });
 	});
 });

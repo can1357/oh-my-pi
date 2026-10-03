@@ -38,15 +38,105 @@ import {
 import { canReuseCachedPr, createPrCacheContext, isSamePrCacheContext, type PrCacheContext } from "./git-utils";
 import { summarizeUsageResetCredits } from "../overlays/usage-display";
 import { getPreset } from "./presets";
-import { renderSegment, type SegmentContext } from "./segments";
+import { describeSegment, renderSegment, type SegmentContext } from "./segments";
+import type { TspMeterMark, TspProps } from "@oh-my-pi/pi-wire";
+import type { NativeNode, NativeUiEvent } from "../native/node";
+import { col, node, span } from "../native/describe";
+import { getContextMeterThresholds } from "../chrome/context-thresholds";
+import { isNativeRendering } from "../native/state";
 import { getSeparator } from "./separators";
 import type {
 	CollabStatus,
+	ComposerFacts,
+	ComposerFactsSource,
 	EffectiveStatusLineSettings,
+	SegmentView,
 	StatusLineSegmentId,
 	StatusLineSegmentOptions,
 	StatusLineSettings,
 } from "./types";
+
+/** What a click on a native status segment asks omp to open. */
+export type StatusLineNativeAction = "status.model" | "status.context" | "status.git" | "status.cost" | "status.path";
+
+/** Click action per native segment: quick model picker, `/context`, `/git`, `/usage`, the project directory. */
+const NATIVE_SEGMENT_ACTIONS: Partial<Record<string, StatusLineNativeAction>> = {
+	model: "status.model",
+	context_pct: "status.context",
+	context_total: "status.context",
+	git: "status.git",
+	cost: "status.cost",
+	path: "status.path",
+};
+
+/** Segments that outlast every other one as the native bar narrows (model, context, git branch). */
+const PINNED_NATIVE_SEGMENTS: Partial<Record<string, true>> = {
+	model: true,
+	context_pct: true,
+	context_total: true,
+	git: true,
+};
+const PINNED_NATIVE_PRIORITY = 1000;
+
+/**
+ * Segments a TSP terminal shows outside the composer's facts: the model chip,
+ * the context hairline and usage text (context, cost), Tern's pane header
+ * (path, git), the tab title (session name, PR), the HUD pills (subagents),
+ * the editor (vim) and the brand (`pi`; while focus-proxied, the viewed agent
+ * is the composer's viewing header).
+ */
+const COMPOSER_HOMED_SEGMENTS: Partial<Record<StatusLineSegmentId, true>> = {
+	pi: true,
+	model: true,
+	context_pct: true,
+	context_total: true,
+	cost: true,
+	path: true,
+	git: true,
+	pr: true,
+	session_name: true,
+	subagents: true,
+	vim: true,
+};
+
+/** Pull request the native tab title carries. */
+export interface StatusLinePullRequest {
+	readonly number: number;
+	readonly url: string;
+}
+
+/** Last composer facts and the inputs they were built from. */
+interface NativeFactsMemo {
+	facts: ComposerFacts;
+	/** Structural fingerprint (elapsed ages excluded: the terminal already clocks them). */
+	fingerprint: string;
+	renderRevision: number;
+	inputRevision: number;
+	clockTick: number;
+	externalInputs: StatusLineExternalInputs;
+}
+
+/** JSON replacer dropping `age`: a rebuilt `elapsed` differs only by send time. */
+function withoutAges(key: string, value: unknown): unknown {
+	return key === "age" ? undefined : value;
+}
+
+/**
+ * Drop priority of a configured segment: the outer edges matter most, so the
+ * leftmost left segment and the rightmost right segment stay longest.
+ */
+export function statusSegmentPriority(side: "left" | "right", index: number, count: number): number {
+	return side === "left" ? count - index : index + 1;
+}
+
+/** A native `seg` for a segment view; `dim` fades its spans while focus-proxied. */
+function describeSeg(key: string, props: TspProps<"seg">, view: SegmentView, dim: boolean): NativeNode {
+	props.spans = dim ? view.spans.map(part => ({ ...part, s: part.s ? `${part.s} dim` : "dim" })) : view.spans;
+	if (view.icon !== undefined) props.icon = view.icon;
+	if (view.tone !== undefined) props.tone = view.tone;
+	if (view.title !== undefined) props.title = view.title;
+	return node("seg", props, view.motion, key);
+}
 
 /**
  * Freshness window for the git segment's working-tree counts. A whole-worktree
@@ -472,7 +562,9 @@ interface GitViewTaggedRepo extends VcsRepo {
 // StatusLineComponent
 // ═══════════════════════════════════════════════════════════════════════════
 
-export class StatusLineComponent<TSession extends StatusLineSession = StatusLineSession> implements Component {
+export class StatusLineComponent<TSession extends StatusLineSession = StatusLineSession>
+	implements Component, ComposerFactsSource
+{
 	#standalone: false | "full" | "left-only" = false;
 	#topAttachment: ComposerStyle["statusAttachment"] = "top-border";
 	#standaloneGap = false;
@@ -552,6 +644,7 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 	#sortedHookStatuses: readonly string[] = [];
 	#subagentCount: number = 0;
 	#runningSubagentIds = new Set<string>();
+	#subagentTreeCost = 0;
 	/**
 	 * Active-processing accounting for the `time_spent` segment, keyed per
 	 * {@link StatusLineSession} so the focus-controller mid-turn attach path
@@ -650,6 +743,11 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 	// count (matching the provider and the `/context` panel), so a stable
 	// message list + model window yields a stable result we can return verbatim.
 	#contextUsageCache: ContextUsageMemo | undefined;
+	#nativeMemo: NativeFactsMemo | undefined;
+	/** Last pull request reported through {@link onNativePullRequest}. */
+	#nativePullRequest: StatusLinePullRequest | undefined;
+	/** Reused probe buffer for the native memo check; handed to the memo on a rebuild. */
+	#nativeInputsProbe = new StatusLineExternalInputs();
 
 	constructor(
 		private session: TSession,
@@ -793,6 +891,14 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 		this.#invalidateStatusLineRenderCache();
 	}
 
+	/** Host-computed spend of the main session's whole subagent tree (Agent Hub projection). */
+	setSubagentTreeCost(cost: number): void {
+		const next = Number.isFinite(cost) && cost > 0 ? cost : 0;
+		if (next === this.#subagentTreeCost) return;
+		this.#subagentTreeCost = next;
+		this.#invalidateStatusLineRenderCache();
+	}
+
 	/**
 	 * Compatibility shim for callers predating the simplified subagent badge.
 	 * The status line now intentionally shows only the active count.
@@ -802,6 +908,21 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 	/** Active subagent count as currently displayed (collab state mirroring). */
 	get subagentCount(): number {
 		return this.#subagentCount;
+	}
+
+	/**
+	 * Running background jobs outside the subagent badge. Task jobs count only
+	 * until their AgentRegistry ref appears; once it is running, the subagent
+	 * badge represents that same agent. Bash and eval jobs always count.
+	 */
+	runningBackgroundJobCount(): number {
+		return (
+			this.session
+				.getAsyncJobSnapshot()
+				?.running.filter(
+					job => job.type !== "task" || job.agentId === undefined || !this.#runningSubagentIds.has(job.agentId),
+				).length ?? 0
+		);
 	}
 
 	/**
@@ -1080,7 +1201,8 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 	 * the first render after speculation leaves the running state.
 	 */
 	#syncSpeculationBlink(state: "idle" | "running" | "armed"): void {
-		if (state === "running" && !this.#disposed) {
+		// A TSP terminal pulses the icon itself (`fx: "pulse"`).
+		if (state === "running" && !this.#disposed && !isNativeRendering()) {
 			this.#speculationBlinkTimer ??= setInterval(() => {
 				this.#speculationBlinkOn = !this.#speculationBlinkOn;
 				this.invalidate();
@@ -1151,7 +1273,8 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 	}
 
 	#startBrandFadeTimer(): void {
-		if (this.#brandFadeTimer || this.#disposed) return;
+		// The native brand segment is a terminal-clocked spinner; nothing to repaint.
+		if (this.#brandFadeTimer || this.#disposed || isNativeRendering()) return;
 		this.#brandFadeTimer = setInterval(() => {
 			const fade = this.#brandFade;
 			if (!fade || Date.now() - fade.startedAt >= BRAND_FADE_MS) this.#stopBrandFadeTimer();
@@ -2279,6 +2402,9 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 			compactionSpeculation,
 			speculationBlinkOn: this.#speculationBlinkOn,
 			subagentCount: this.#subagentCount,
+			// The tree total describes the main session; a focused subagent's
+			// view falls back to its own completed task results.
+			subagentTreeCost: this.#focusedAgentId ? 0 : this.#subagentTreeCost,
 			activeMs: this.getActiveMs(),
 			turnElapsedMs,
 			now: new Date(nowMs),
@@ -2680,15 +2806,7 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 		}
 
 		if (layout !== "plain-left") {
-			// Count task jobs only until their AgentRegistry ref appears. Once it is
-			// running, the subagent badge represents that same agent; bash and eval
-			// jobs always remain independent background work.
-			const runningBackgroundJobs =
-				this.session
-					.getAsyncJobSnapshot()
-					?.running.filter(
-						job => job.type !== "task" || job.agentId === undefined || !this.#runningSubagentIds.has(job.agentId),
-					).length ?? 0;
+			const runningBackgroundJobs = this.runningBackgroundJobCount();
 			if (runningBackgroundJobs > 0) {
 				rightParts.unshift(theme.fg("statusLineSubagents", `${theme.icon.job} ${runningBackgroundJobs}`));
 			}
@@ -3043,13 +3161,17 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 
 	/**
 	 * Wire this bar into `editor` for a composer layout: the matching top-border
-	 * provider, the autocomplete probe, and the standalone bottom-bar placement.
-	 * Callers re-run it whenever the composer shape changes.
+	 * provider, the autocomplete probe, the standalone bottom-bar placement, and
+	 * the native composer's facts. Callers re-run it whenever the composer shape
+	 * changes.
 	 */
 	attachToEditor(
-		editor: Pick<Editor, "isAutocompleteActive" | "setTopBorderProvider" | "setTopBorder">,
+		editor: Pick<Editor, "isAutocompleteActive" | "setTopBorderProvider" | "setTopBorder"> & {
+			composerFacts: ComposerFactsSource | undefined;
+		},
 		style: Pick<ComposerStyle, "statusAttachment" | "bottomBar" | "bottomBarGap">,
 	): void {
+		editor.composerFacts = this;
 		this.setAutocompleteActiveProbe(() => editor.isAutocompleteActive());
 		switch (style.statusAttachment) {
 			case "top-border":
@@ -3170,6 +3292,297 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 			if (main) lines.push(main);
 		}
 		return lines;
+	}
+
+	/**
+	 * The composer's facts on a TSP terminal, which draws no status strip: the
+	 * context hairline, the model chip label, the usage text, and every other
+	 * configured segment as a `seg` in configured order with its drop priority.
+	 * Returns the same object while nothing changed.
+	 */
+	describeComposerFacts(): ComposerFacts {
+		const effectiveSettings = this.#resolveSettings();
+		const probe = this.#nativeInputsProbe;
+		this.#readStatusLineExternalInputs(probe);
+		const nowMs = Date.now();
+		const clockTick = this.#nativeClock(nowMs, effectiveSettings);
+		const memo = this.#nativeMemo;
+		if (
+			memo &&
+			memo.renderRevision === this.#renderRevision &&
+			memo.inputRevision === this.#statusLineInputRevision &&
+			memo.clockTick === clockTick &&
+			this.#sameStatusLineExternalInputs(memo.externalInputs, probe)
+		) {
+			return memo.facts;
+		}
+		this.#nativeInputsProbe = new StatusLineExternalInputs();
+		const built = this.#buildComposerFacts(effectiveSettings, nowMs);
+		const fingerprint = JSON.stringify(built, withoutAges);
+		this.#nativeMemo = {
+			facts: memo?.fingerprint === fingerprint ? memo.facts : built,
+			fingerprint,
+			renderRevision: this.#renderRevision,
+			inputRevision: this.#statusLineInputRevision,
+			clockTick,
+			externalInputs: probe,
+		};
+		return this.#nativeMemo.facts;
+	}
+
+	/**
+	 * Native status bar for the /settings appearance preview: a `status` of
+	 * `seg`s in configured order, each with its side and a drop priority from
+	 * that order, plus hook-status rows.
+	 */
+	describePreview(): NativeNode {
+		return this.#describeStatusLine(this.#resolveSettings(), Date.now());
+	}
+
+	/**
+	 * Called with the branch's pull request (undefined when there is none) each
+	 * time it changes while the composer facts are described; the native tab
+	 * title carries it. Looked up only when the `pr` segment is configured.
+	 */
+	onNativePullRequest: ((pr: StatusLinePullRequest | undefined) => void) | undefined;
+
+	/** The host's handler for clicks on native segments ({@link NATIVE_SEGMENT_ACTIONS}). */
+	onNativeAction: ((action: StatusLineNativeAction) => void) | undefined;
+
+	handleNativeEvent(event: NativeUiEvent): void {
+		if (event.type !== "action") return;
+		for (const key in NATIVE_SEGMENT_ACTIONS) {
+			const action = NATIVE_SEGMENT_ACTIONS[key];
+			if (action !== event.act) continue;
+			this.onNativeAction?.(action);
+			return;
+		}
+	}
+
+	#buildComposerFacts(effectiveSettings: EffectiveStatusLineSettings, nowMs: number): ComposerFacts {
+		const { leftSegments, rightSegments } = effectiveSettings;
+		const segments = [...leftSegments, ...rightSegments];
+		// Tern's pane header shows the path and branch from the pane's cwd; only the PR is looked up here.
+		const ctx = this.#buildSegmentContext(
+			0,
+			effectiveSettings.segmentOptions,
+			false,
+			false,
+			this.#gitEnabled() && hasPrSegment(segments),
+			nowMs,
+		);
+		const pr = ctx.git.pr ?? undefined;
+		if (pr?.url !== this.#nativePullRequest?.url || pr?.number !== this.#nativePullRequest?.number) {
+			this.#nativePullRequest = pr && { number: pr.number, url: pr.url };
+			this.onNativePullRequest?.(this.#nativePullRequest);
+		}
+
+		const dim = this.#focusedAgentId !== undefined;
+		const facts: NativeNode[] = [];
+		const collect = (side: "left" | "right", ids: readonly StatusLineSegmentId[]): void => {
+			ids.forEach((id, index) => {
+				if (COMPOSER_HOMED_SEGMENTS[id]) return;
+				const view = describeSegment(id, ctx);
+				if (!view) return;
+				const props: TspProps<"seg"> = {
+					role: "omp.composer.fact",
+					priority: statusSegmentPriority(side, index, ids.length),
+				};
+				facts.push(describeSeg(id, props, view, dim));
+			});
+		};
+		collect("left", leftSegments);
+		collect("right", rightSegments);
+		// Hook statuses the `status` segment doesn't already carry trail the configured facts.
+		if ((this.#settings.showHookStatus ?? true) && !segments.includes("status")) {
+			this.#sortedHookStatuses.forEach((status, index) => {
+				const text = sanitizeStatusText(status);
+				if (!text) return;
+				const props: TspProps<"seg"> = { role: "omp.composer.fact", priority: 0 };
+				facts.push(describeSeg(`hook-${index}`, props, { spans: [span(text)] }, dim));
+			});
+		}
+
+		const pct = ctx.contextPercent;
+		const window = ctx.contextWindow;
+		const boundaries = ctx.autoCompactEnabled ? this.#compactionBoundaries(window) : null;
+		const lines = [
+			pct === null ? "Context usage unknown" : `Context ${Math.round(pct)}% used`,
+			window > 0 ? `${formatNumber(ctx.contextTokens)} of ${formatNumber(window)} tokens` : "No context window",
+		];
+		if (boundaries) lines.push(`Auto-compact at ${Math.round(boundaries.thresholdPercent)}%`);
+		const speculation = ctx.compactionSpeculation;
+		if (speculation === "running") lines.push("Compaction summary in progress");
+		else if (speculation === "armed") lines.push("Compaction summary ready");
+		// The line spans the whole window: omp's boundary symbols sit where speculation
+		// starts and compaction fires, and the share past the speculation point is accent.
+		const used = pct === null ? null : Math.min(1, pct / 100);
+		const speculationAt =
+			boundaries?.speculationPercent == null ? null : Math.min(1, boundaries.speculationPercent / 100);
+		const marks: TspMeterMark[] = [];
+		if (boundaries) {
+			if (speculationAt !== null) {
+				const start: TspMeterMark = {
+					at: speculationAt,
+					icon: "context.speculation",
+					title: `Compaction summary starts at ${Math.round(speculationAt * 100)}%`,
+				};
+				// Lit while a background summary runs or waits armed.
+				if (speculation !== "idle") start.tone = "accent";
+				marks.push(start);
+			}
+			marks.push({
+				at: Math.min(1, boundaries.thresholdPercent / 100),
+				icon: "context.compaction",
+				title: `Auto-compact at ${Math.round(boundaries.thresholdPercent)}%`,
+			});
+		}
+		const context = node(
+			"meter",
+			{
+				role: "omp.composer.context",
+				value: used,
+				style: "bar",
+				thresholds: getContextMeterThresholds(window),
+				...(used !== null && speculationAt !== null && used > speculationAt
+					? { parts: [{ value: speculationAt }, { value: used - speculationAt, token: "accent" }] }
+					: {}),
+				...(marks.length > 0 ? { marks } : {}),
+				...(pct === null ? {} : { label: `${Math.round(pct)}%` }),
+				...(window > 0 ? { total: formatNumber(window) } : {}),
+				title: lines.join("\n"),
+				actions: { click: "status.context" },
+			},
+			undefined,
+			"context",
+		);
+
+		// The meter reads the context; the bar's usage is the session's cost.
+		const cost =
+			describeSegment("cost", ctx)
+				?.spans.map(part => part.t)
+				.join("") ?? "";
+		const usage = node(
+			"text",
+			{
+				role: "omp.composer.usage",
+				text: cost,
+				wrap: "none",
+				...(cost ? { title: `Session cost ${cost}` } : {}),
+				actions: { click: "status.cost" },
+			},
+			undefined,
+			"usage",
+		);
+
+		// The effort chip carries the thinking level.
+		const modelCtx: SegmentContext = {
+			...ctx,
+			options: { ...ctx.options, model: { ...ctx.options.model, showThinkingLevel: false } },
+		};
+		return {
+			context,
+			model: describeSegment("model", modelCtx) ?? { spans: [] },
+			extras: node("status", { role: "omp.composer.extras", transparent: true, grow: 1 }, facts, "extras"),
+			usage,
+		};
+	}
+
+	/**
+	 * Wall-clock granularity of the native bar. Spinners, turn timers and the
+	 * brand fade are terminal-clocked, so only wall-clock text (time, loop
+	 * countdowns) and VCS fallback polling advance it.
+	 */
+	#nativeClock(nowMs: number, effectiveSettings: EffectiveStatusLineSettings): number {
+		const segments = [...effectiveSettings.leftSegments, ...effectiveSettings.rightSegments];
+		const includesTime = segments.includes("time");
+		if (
+			(this.#loopModeStatus?.limit?.kind === "duration" && segments.includes("mode")) ||
+			(includesTime && effectiveSettings.segmentOptions?.time?.showSeconds === true)
+		) {
+			return Math.floor(nowMs / 1_000);
+		}
+		if (includesTime) return Math.floor(nowMs / 60_000);
+		if (this.#gitEnabled() && hasGitBackedSegment(segments)) return Math.floor(nowMs / 1_000);
+		if (this.#gitEnabled() && hasPathSegment(segments)) return Math.floor(nowMs / WATCHER_FAILURE_POLL_TTL_MS);
+		return 0;
+	}
+
+	#describeStatusLine(effectiveSettings: EffectiveStatusLineSettings, nowMs: number): NativeNode {
+		const { leftSegments, rightSegments } = effectiveSettings;
+		const segments = [...leftSegments, ...rightSegments];
+		const gitEnabled = this.#gitEnabled();
+		const ctx = this.#buildSegmentContext(
+			0,
+			effectiveSettings.segmentOptions,
+			hasPathSegment(segments),
+			gitEnabled && hasGitSegment(segments),
+			gitEnabled && hasPrSegment(segments),
+			nowMs,
+		);
+		const dim = this.#focusedAgentId !== undefined;
+		const segs: NativeNode[] = [];
+		const push = (key: string, side: "left" | "right", priority: number, view: SegmentView): void => {
+			const pinned = PINNED_NATIVE_SEGMENTS[key] === true;
+			const props: TspProps<"seg"> = {
+				role: `omp.status.${key}`,
+				side,
+				priority: pinned ? PINNED_NATIVE_PRIORITY + priority : priority,
+			};
+			// The path truncates before anything drops.
+			if (key === "path") props.min = { w: "12ch" };
+			const action = NATIVE_SEGMENT_ACTIONS[key];
+			if (action) props.actions = { click: action };
+			segs.push(describeSeg(key, props, view, dim));
+		};
+		const subagentBadge = this.#subagentCount > 0;
+		leftSegments.forEach((id, index) => {
+			if (subagentBadge && id === "subagents") return;
+			const view = describeSegment(id, ctx);
+			if (view) push(id, "left", statusSegmentPriority("left", index, leftSegments.length), view);
+		});
+		// Live-work badges lead the right group, as in the ANSI bar; they sit on
+		// the inner edge, so they drop before any configured segment.
+		if (subagentBadge) {
+			push("subagent-badge", "right", 0, {
+				spans: [{ t: `${this.#subagentCount}`, s: "statusLineSubagents" }],
+				icon: "agents",
+			});
+		}
+		const runningBackgroundJobs = this.runningBackgroundJobCount();
+		if (runningBackgroundJobs > 0) {
+			push("jobs", "right", 0, {
+				spans: [{ t: `${runningBackgroundJobs}`, s: "statusLineSubagents" }],
+				icon: "job",
+			});
+		}
+		rightSegments.forEach((id, index) => {
+			if (subagentBadge && id === "subagents") return;
+			const view = describeSegment(id, ctx);
+			if (view) push(id, "right", statusSegmentPriority("right", index, rightSegments.length), view);
+		});
+		const bar = node(
+			"status",
+			{ role: "omp.status", transparent: effectiveSettings.transparent === true },
+			segs,
+			"bar",
+		);
+		const showHooks = this.#settings.showHookStatus ?? true;
+		if (!showHooks || this.#sortedHookStatuses.length === 0) return bar;
+		return col(
+			[
+				bar,
+				...this.#sortedHookStatuses.map((status, index) =>
+					node(
+						"text",
+						{ text: sanitizeStatusText(status), wrap: "none", role: "omp.status.hook" },
+						undefined,
+						`hook-${index}`,
+					),
+				),
+			],
+			{ role: "omp.status.panel" },
+		);
 	}
 
 	render(width: number): readonly string[] {

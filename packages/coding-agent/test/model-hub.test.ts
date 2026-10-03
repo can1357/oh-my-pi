@@ -8,6 +8,7 @@ import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { Model } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
+import type { ModelKind } from "@oh-my-pi/pi-catalog/types";
 import type { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import {
@@ -66,7 +67,7 @@ function installTestTheme(): void {
 interface RegistryOverrides {
 	refresh?: (mode: string) => Promise<void>;
 	refreshProvider?: ModelRegistry["refreshProvider"];
-	getAvailable?: () => Model[];
+	getAvailable?: (kind?: ModelKind | "all") => Model[];
 	getAll?: () => Model[];
 	getDiscoverableProviders?: () => string[];
 	getProviderDiscoveryState?: (providerId: string) => unknown;
@@ -146,6 +147,7 @@ function createHub(options: {
 			onUnassign: options.callbacks?.onUnassign ?? onUnassign,
 			onLoginRequest: options.callbacks?.onLoginRequest ?? onLoginRequest,
 			onCycleOrderChange: options.callbacks?.onCycleOrderChange,
+			onSavePreset: options.callbacks?.onSavePreset,
 			onFallbackChainChange: options.callbacks?.onFallbackChainChange ?? onFallbackChainChange,
 			onCancel: options.callbacks?.onCancel ?? onCancel,
 		},
@@ -224,6 +226,35 @@ describe("ModelHub", () => {
 			expect(rendered).toContain("Assigning IMAGE");
 			expect(rendered).toContain("image-model");
 			expect(rendered).not.toContain("chat-model");
+		});
+
+		test("a chat-only --models scope keeps non-chat runners and their role assignments (#14016)", () => {
+			// The startup scope only ever holds chat models; judge/search/image
+			// runners must still be browsable and assignable from the catalog.
+			const chat = makeModel("test", "chat-model");
+			const judge = makeModel("openrouter", "~typesafe/jev-latest", 128_000, undefined, "judge");
+			const settings = Settings.isolated({ modelRoles: { judge: "openrouter/~typesafe/jev-latest" } });
+			const { hub } = createHub({
+				models: [chat],
+				scoped: true,
+				settings,
+				registry: { getAvailable: kind => (kind === "all" ? [chat, judge] : [chat]) },
+			});
+
+			hub.handleInput(UP); // All models → Roles.
+			hub.handleInput(OPTION_RIGHT_MAC);
+			hub.handleInput(OPTION_RIGHT_MAC); // Kind roles tab.
+			const judgeRow = hub
+				.render(220)
+				.map(line => stripVTControlCharacters(line))
+				.find(line => line.includes("JUDGE"));
+			expect(judgeRow).toContain("~typesafe/jev-latest");
+
+			hub.handleInput(DOWN); // Roles → All models.
+			for (const ch of "jev") hub.handleInput(ch);
+			const rendered = normalize(hub.render(220));
+			expect(rendered).not.toContain("No matching models");
+			expect(rendered).toContain("● judge");
 		});
 
 		test("tags the selected model's roles in the detail line, including custom roles", () => {
@@ -584,6 +615,39 @@ describe("ModelHub", () => {
 			const call = onAssign.mock.calls[0];
 			expect(call?.[1]).toBe("reviewer");
 			expect(call?.[3]).toBe("test/reviewer-model");
+		});
+
+		test("s saves the current setup as a named model preset", () => {
+			const model = makeModel("test", "preset-model");
+			const onSavePreset = vi.fn();
+			const { hub } = createHub({ models: [model], scoped: true, callbacks: { onSavePreset } });
+			installTestTheme();
+
+			hub.handleInput(UP); // All models → Roles (since Recent is removed)
+			hub.handleInput("\n"); // dive into rows
+			expect(footerLine(hub.render(220))).toContain("save preset");
+
+			hub.handleInput("s");
+			expect(footerLine(hub.render(220))).toContain("Preset name:");
+
+			for (const ch of "work-setup") hub.handleInput(ch);
+			hub.handleInput("\n");
+			expect(onSavePreset).toHaveBeenCalledTimes(1);
+			expect(onSavePreset).toHaveBeenCalledWith("work-setup");
+
+			hub.handleInput("s");
+			for (const ch of "1bad") hub.handleInput(ch);
+			hub.handleInput("\n");
+			expect(onSavePreset).toHaveBeenCalledTimes(1);
+			expect(footerLine(hub.render(220))).toContain("Preset name:");
+
+			const { hub: bareHub } = createHub({ models: [model], scoped: true });
+			bareHub.handleInput(UP); // All models → Roles (since Recent is removed)
+			bareHub.handleInput("\n"); // dive into rows
+			expect(footerLine(bareHub.render(220))).not.toContain("save preset");
+
+			bareHub.handleInput("s");
+			expect(footerLine(bareHub.render(220))).not.toContain("Preset name:");
 		});
 	});
 

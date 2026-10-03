@@ -97,8 +97,13 @@ function nativeHardExit(fn: HardExitFn | undefined): HardExitFn | undefined {
  * guard and loops the rejection storm (#11789). After restoring, `reallyExit`
  * (the low-level primitive) is preferred; `process.exit` and finally `SIGKILL`
  * are fallbacks so a poisoned or absent chain can never leave the process alive.
+ *
+ * Buffered log records are written first: `reallyExit` skips the `exit` event
+ * the logger otherwise flushes on, which would drop the last batch on every
+ * signal and fatal exit.
  */
 export function exitProcess(code: number): never {
+	logger.flush();
 	const reallyExit = nativeHardExit(typeof process.reallyExit === "function" ? process.reallyExit : undefined);
 	const exit = nativeHardExit(process.exit as HardExitFn);
 	if (reallyExit) process.reallyExit = reallyExit as typeof process.reallyExit;

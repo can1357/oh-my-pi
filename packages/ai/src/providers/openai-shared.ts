@@ -28,7 +28,6 @@ import {
 	isRecord,
 	logger,
 	parseImageMetadata,
-	parseStreamingJson,
 	parseStreamingJsonThrottled,
 	stringifyJson,
 	structuredCloneJSON,
@@ -36,6 +35,7 @@ import {
 } from "@oh-my-pi/pi-utils";
 import { NO_AUTH_SENTINEL } from "../auth-retry";
 import * as AIError from "../error";
+import { parseToolCallArguments } from "../utils/tool-call-arguments";
 import {
 	type Api,
 	type AssistantMessage,
@@ -61,6 +61,7 @@ import {
 	type Usage,
 } from "../types";
 import { resolveCopilotRequestIdentity } from "./github-copilot-headers";
+import { resolveXaiBaseUrl } from "./xai-base-url";
 
 export type { OpenAIPromptCacheOptions } from "../types";
 
@@ -255,6 +256,9 @@ export function resolveOpenAIRequestSetup(
 		if (sakanaBaseUrl) {
 			baseUrl = sakanaBaseUrl;
 		}
+	}
+	if (model.provider === "xai" || model.provider === "xai-oauth") {
+		baseUrl = resolveXaiBaseUrl(model.provider, baseUrl, rawApiKey);
 	}
 	if (model.provider === "github-copilot") {
 		const copilotApiKey = parseGitHubCopilotApiKey(rawApiKey);
@@ -2938,7 +2942,7 @@ export function accumulateToolCallArgumentsDelta(
  */
 export function finalizeToolCallArgumentsDone(block: ResponsesToolCallBlock, args: string): void {
 	block[kStreamingPartialJson] = args;
-	block.arguments = parseStreamingJson(block[kStreamingPartialJson]);
+	block.arguments = parseToolCallArguments(block[kStreamingPartialJson]);
 	clearStreamingPartialJson(block);
 }
 
@@ -3510,10 +3514,8 @@ export async function processResponsesStream<TApi extends Api>(
 				const args = block?.[kStreamingArgumentsDone]
 					? block.arguments
 					: item.arguments
-						? parseStreamingJson(item.arguments)
-						: block?.[kStreamingPartialJson]
-							? parseStreamingJson(block[kStreamingPartialJson])
-							: parseStreamingJson("{}");
+						? parseToolCallArguments(item.arguments)
+						: parseToolCallArguments(block?.[kStreamingPartialJson]);
 				const toolCall: ToolCall = {
 					type: "toolCall",
 					id: encodeResponsesToolCallId(item.call_id, item.id),
@@ -3765,7 +3767,7 @@ export function finalizePendingResponsesToolCalls(output: AssistantMessage): voi
 			pending.arguments =
 				pending.customWireName !== undefined
 					? { input: pending[kStreamingPartialJson] }
-					: parseStreamingJson(pending[kStreamingPartialJson]);
+					: parseToolCallArguments(pending[kStreamingPartialJson]);
 		}
 		clearStreamingPartialJson(pending);
 	}

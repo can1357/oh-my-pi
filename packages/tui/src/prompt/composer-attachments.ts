@@ -47,8 +47,10 @@ export function modelChipStyle(label: string, restore = "\x1b[39m\x1b[49m"): str
 /** Every glyph a skill chip may start with, across all symbol presets. */
 const SKILL_ICONS = [...new Set(Object.values(SYMBOL_PRESETS).map(m => m["icon.extensionSkill"]))];
 
-/** Skill names as they appear in chips: word characters and dashes, dots only between segments. */
-const SKILL_NAME_SOURCE = "[\\w-]+(?:\\.[\\w-]+)*";
+/** Skill names as they appear in chips: word characters and dashes, dots only between segments,
+ *  optionally behind one collision namespace (`<namespace>/<name>`). */
+const SKILL_NAME_SEGMENT_SOURCE = "[\\w-]+(?:\\.[\\w-]+)*";
+const SKILL_NAME_SOURCE = `${SKILL_NAME_SEGMENT_SOURCE}(?:/${SKILL_NAME_SEGMENT_SOURCE})?`;
 
 /** Regex source for a chip glyph; word glyphs (ASCII preset) must not continue a preceding word. */
 function glyphSource(icon: string): string {
@@ -214,12 +216,26 @@ export function composerTokenRegex(mentionLabels: Iterable<string>): RegExp {
 
 const VISION_MARKER_REGEX = /\[(Image|Video) #([1-9]\d*)((?:,[^\]\n]*)?)\](?: attachment:\/\/(\2))?/g;
 
-/** Offsets image marker indices, including matching `attachment://` references. */
-export function shiftImageMarkers(text: string, offset: number): string {
-	if (offset === 0) return text;
+/** Marker for the Nth attached image or video preview: `[Image #N, WxH]`, or `[Image #N]` without dims. */
+export function formatVisionMarker(
+	kind: "image" | "video",
+	n: number,
+	dims?: { width: number; height: number },
+): string {
+	const label = `${kind === "video" ? "Video" : "Image"} #${n}`;
+	return dims ? `[${label}, ${dims.width}x${dims.height}]` : `[${label}]`;
+}
+
+/**
+ * Offsets image marker indices, including matching `attachment://` references. With `imageCount`,
+ * markers above it are left alone: like `compactImageMarkers`, they are not this text's attachments.
+ */
+export function shiftImageMarkers(text: string, offset: number, imageCount?: number): string {
+	if (offset === 0 || imageCount === 0) return text;
 	return text.replace(
 		VISION_MARKER_REGEX,
-		(_match, kind: string, idx: string, tail: string, attachmentIdx: string | undefined) => {
+		(match, kind: string, idx: string, tail: string, attachmentIdx: string | undefined) => {
+			if (imageCount !== undefined && Number(idx) > imageCount) return match;
 			const marker = `[${kind} #${Number(idx) + offset}${tail}]`;
 			return attachmentIdx === undefined ? marker : `${marker} attachment://${Number(attachmentIdx) + offset}`;
 		},
@@ -249,8 +265,14 @@ export function collapseImageMarkers(
 /**
  * Drops unreferenced vision attachments from a submission and densely remaps
  * retained image/video markers. Returns `null` when no compaction is needed.
+ * With `byAppearance`, retained markers are also renumbered in the order they first
+ * appear, for editors whose images attach out of order (concurrent path loads).
  */
-export function compactImageMarkers(text: string, imageCount: number): { text: string; keep: number[] } | null {
+export function compactImageMarkers(
+	text: string,
+	imageCount: number,
+	options?: { byAppearance?: boolean },
+): { text: string; keep: number[] } | null {
 	if (imageCount === 0) return null;
 	const referenced = new Set<number>();
 	const scanner = new RegExp(VISION_MARKER_REGEX.source, "g");
@@ -260,8 +282,8 @@ export function compactImageMarkers(text: string, imageCount: number): { text: s
 		const n = Number(match[2]);
 		if (n <= imageCount) referenced.add(n);
 	}
-	if (referenced.size === imageCount) return null;
-	const keep = [...referenced].sort((a, b) => a - b);
+	const keep = options?.byAppearance ? [...referenced] : [...referenced].sort((a, b) => a - b);
+	if (keep.length === imageCount && keep.every((n, i) => n === i + 1)) return null;
 	const remap = new Map<number, number>(keep.map((n, i) => [n, i + 1]));
 	const rewritten = text.replace(
 		VISION_MARKER_REGEX,

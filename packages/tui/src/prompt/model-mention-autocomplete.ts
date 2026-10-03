@@ -50,6 +50,7 @@ export function getModelMentionSuggestions(
 			label: item.selector,
 			description: modelMentionDisplayName(item.model),
 			icon: theme.symbol("icon.model"),
+			iconName: "model",
 		}));
 	return items.length > 0 ? { items, prefix } : null;
 }

@@ -34,7 +34,7 @@ import {
 import type { UsageCache, UsageRequestDescriptor } from "./usage-cache";
 import type { CredentialPool } from "./pool";
 import type { RankingStrategyResolver } from "../usage/registry";
-import { OAUTH_REFRESH_SKEW_MS } from "./refresh";
+import { mergeRefreshedOrganizationScope, OAUTH_REFRESH_SKEW_MS } from "./refresh";
 import type { OAuthRefresher } from "./refresh";
 import { USAGE_REPORT_TTL_MS } from "./sqlite-credential-store";
 import type { AuthCredentialStore } from "./store";
@@ -64,6 +64,9 @@ export function buildRefreshableOauthCredential(credential: UsageCredential): OA
 		orgName: credential.orgName,
 		enterpriseUrl: credential.enterpriseUrl,
 		apiEndpoint: credential.apiEndpoint,
+		region: credential.region,
+		inferenceRegion: credential.inferenceRegion,
+		activeOrganizationId: credential.activeOrganizationId,
 	};
 }
 
@@ -82,8 +85,7 @@ export function mergeRefreshedUsageCredential(
 		email: refreshed.email ?? credential.email,
 		enterpriseUrl: refreshed.enterpriseUrl ?? credential.enterpriseUrl,
 		apiEndpoint: refreshed.apiEndpoint ?? credential.apiEndpoint,
-		orgId: refreshed.orgId ?? credential.orgId,
-		orgName: refreshed.orgName ?? credential.orgName,
+		...mergeRefreshedOrganizationScope(credential, refreshed),
 	};
 }
 
@@ -189,8 +191,11 @@ export class UsageService implements UsageApi {
 			email: next.email ?? entry.credential.email,
 			enterpriseUrl: next.enterpriseUrl ?? entry.credential.enterpriseUrl,
 			apiEndpoint: next.apiEndpoint ?? entry.credential.apiEndpoint,
-			orgId: next.orgId ?? entry.credential.orgId,
-			orgName: next.orgName ?? entry.credential.orgName,
+			orgId: next.orgId,
+			orgName: next.orgName,
+			region: next.region,
+			inferenceRegion: next.inferenceRegion,
+			activeOrganizationId: next.activeOrganizationId,
 		});
 	}
 

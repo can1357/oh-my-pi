@@ -72,7 +72,8 @@ export class StaleSecurityScanPlanError extends Error {
 	}
 }
 
-function pathIsWithin(candidate: string, root: string): boolean {
+/** Lexical containment check: `candidate` equals `root` or lies beneath it (no normalization). */
+export function pathIsWithin(candidate: string, root: string): boolean {
 	return candidate === root || candidate.startsWith(`${root}${path.sep}`);
 }
 

@@ -4,7 +4,7 @@ import * as transcriptions from "../../providers/transcriptions-server";
 import { transcribeAudio } from "../../transcription";
 import { deterministicUuid } from "../../utils/deterministic-id";
 import {
-	type AuthGatewayBootOptions,
+	type AuthGatewayRouteOptions,
 	buildGatewayApiKeyResolver,
 	mirrorRequestAbort,
 	recordGatewayUsage,
@@ -14,7 +14,7 @@ import { gatewayResponseHeaders, json, resolveClientIdentity } from "../http";
 
 /** OpenAI-compatible `POST /v1/audio/transcriptions` gateway handler. */
 export async function handleTranscriptions(
-	bootOpts: AuthGatewayBootOptions,
+	bootOpts: AuthGatewayRouteOptions,
 	req: Request,
 	peer: string,
 ): Promise<Response> {
@@ -51,7 +51,7 @@ export async function handleTranscriptions(
 	const sessionId = deterministicUuid(`transcriptions\u0000${model.provider}/${model.id}`);
 	const apiKey = await resolveGatewayApiKey(bootOpts.storage, model, sessionId, controller.signal, peer);
 	if (controller.signal.aborted) return aborted();
-	if (typeof apiKey !== "string") {
+	if ("status" in apiKey) {
 		return transcriptions.formatError(apiKey.status, apiKey.type, apiKey.message);
 	}
 

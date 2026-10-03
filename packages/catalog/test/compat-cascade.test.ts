@@ -95,6 +95,22 @@ describe("cascade rank precedence", () => {
 		);
 	});
 
+	test("upstream selector adds specificity without changing equal-rank ambiguity", () => {
+		const source = (text: string) => compileCascade([{ file: "providers/test.kdl", text }]);
+		const rules = source(`provider "prov" {
+			supports-store #true
+			on-upstream "up-a" { supports-store #false }
+		}`);
+		expect(resolveCascadeRules(rules, target({ upstream: "up-a" })).wire.supportsStore).toBe(false);
+		expect(resolveCascadeRules(rules, target({ upstream: "up-b" })).wire.supportsStore).toBe(true);
+		expect(resolveCascadeRules(rules, target({})).wire.supportsStore).toBe(true);
+		const ambiguous = source(`provider "prov" {
+			on-upstream "up-a" { supports-store #false }
+			on-api "api" { supports-store #true }
+		}`);
+		expect(() => resolveCascadeRules(ambiguous, target({ upstream: "up-a" }))).toThrow(AmbiguousOverlapError);
+	});
+
 	test("revision range conjunctions must all hold and need a ranked target", () => {
 		const cascade = compile(
 			`class "cls" {

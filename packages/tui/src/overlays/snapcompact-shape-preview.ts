@@ -29,6 +29,9 @@ import {
 } from "@oh-my-pi/snapcompact";
 import { theme } from "../theme/theme";
 import sampleDoc from "./snapcompact-shape-preview-doc.md" with { type: "text" };
+import type { DescribeContext, NativeNode } from "../native/node";
+import { col, node, span, text } from "../native/describe";
+import { registerNativeBlob } from "../native/blobs";
 
 /** Mini-frame edge in px — a small page from the real rasterizer ≈ a zoomed crop. */
 const SRC_FRAME_PX = 128;
@@ -46,7 +49,15 @@ const PREVIEW_TEXT = sampleDoc
 type PreviewEntry =
 	| { state: "rendering" }
 	| { state: "failed" }
-	| { state: "ready"; data: string; edgePx: number; imageId: number; transmitted: boolean };
+	| {
+			state: "ready";
+			data: string;
+			/** The PNG `data` decodes to; a native `image` blob. */
+			bytes: Uint8Array;
+			edgePx: number;
+			imageId: number;
+			transmitted: boolean;
+	  };
 
 export interface SnapcompactShapePreviewOptions {
 	/** Active model (api + id); resolves what `auto` maps to for this reader. */
@@ -63,6 +74,7 @@ export class SnapcompactShapePreview implements Component {
 	#requestRender: () => void;
 	#variant: ShapeVariantName | "auto" = "auto";
 	#entries = new Map<ShapeVariantName, PreviewEntry>();
+	#native: { variant: ShapeVariantName | "auto"; entry: PreviewEntry | undefined; node: NativeNode } | undefined;
 
 	constructor(currentValue: string, options: SnapcompactShapePreviewOptions = {}) {
 		this.#model = options.model;
@@ -76,9 +88,35 @@ export class SnapcompactShapePreview implements Component {
 		this.#variant = isShapeVariantName(value) ? value : "auto";
 	}
 
-	render(width: number): readonly string[] {
+	describe(cx: DescribeContext): NativeNode {
 		const shape = resolveShape(this.#model, this.#variant);
 		const name = resolvedVariantName(shape);
+		const entry = cx.supports("image") ? this.#ensureEntry(name, shape) : undefined;
+		const memo = this.#native;
+		if (memo !== undefined && memo.variant === this.#variant && memo.entry === entry) return memo.node;
+		const { label, stats } = this.#caption(shape, name);
+		let sample: NativeNode;
+		if (!entry) sample = text([span("(graphic sample needs an image-capable terminal)", "dim")]);
+		else if (entry.state === "rendering") sample = node("spinner", { label: [span("rendering sample…", "dim")] });
+		else if (entry.state === "failed") sample = text([span("(sample render failed)", "dim")]);
+		else {
+			sample = node("image", {
+				blob: registerNativeBlob(entry.bytes, "image/png"),
+				alt: `snapcompact ${label} sample`,
+				w: entry.edgePx,
+				h: entry.edgePx,
+				max: { w: `${MAX_IMAGE_COLS}ch`, h: `${MAX_IMAGE_ROWS}lines` },
+			});
+		}
+		const described = col(
+			[text([span(`Sample (zoomed) · ${label} · ${stats}`, "muted")], { wrap: "word" }), sample],
+			{ role: "omp.preview.snapcompact-shape", gap: "sm" },
+		);
+		this.#native = { variant: this.#variant, entry, node: described };
+		return described;
+	}
+
+	#caption(shape: Shape, name: ShapeVariantName): { label: string; stats: string } {
 		const geo = geometry(shape);
 		const label = this.#variant === "auto" ? `auto → ${name}` : name;
 		const chars = geo.capacity >= 1000 ? `${(geo.capacity / 1000).toFixed(1)}k` : String(geo.capacity);
@@ -86,7 +124,13 @@ export class SnapcompactShapePreview implements Component {
 			shape.frameTokenEstimate >= 1000
 				? `${(shape.frameTokenEstimate / 1000).toFixed(1)}k`
 				: String(shape.frameTokenEstimate);
-		const stats = `full frame ${geo.cols}×${geo.rows} cells ≈ ${chars} chars ≈ ${tokens} tokens`;
+		return { label, stats: `full frame ${geo.cols}×${geo.rows} cells ≈ ${chars} chars ≈ ${tokens} tokens` };
+	}
+
+	render(width: number): readonly string[] {
+		const shape = resolveShape(this.#model, this.#variant);
+		const name = resolvedVariantName(shape);
+		const { label, stats } = this.#caption(shape, name);
 		const lines: string[] = [theme.fg("muted", `  Sample (zoomed) · ${label} · ${stats}`), ""];
 
 		if (!this.#budget || !TERMINAL.imageProtocol) {
@@ -158,6 +202,7 @@ export class SnapcompactShapePreview implements Component {
 			this.#entries.set(name, {
 				state: "ready",
 				data: zoomed.toBase64(),
+				bytes: zoomed,
 				edgePx,
 				// Keyed id: reopening settings reuses the id, so data already in the
 				// terminal store is never re-transmitted (enqueueTransmit no-ops).

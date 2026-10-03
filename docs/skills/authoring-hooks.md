@@ -7,7 +7,7 @@ description: Use when creating a new omp hook. Covers HookAPI, event catalog, bl
 
 Hooks are event-driven interceptors that run alongside the agent loop. They are best used for cross-cutting concerns: safety policy, secret redaction, context pruning, audit logging. A hook module registers handlers via `pi.on(event, handler)` and can block tool execution, override tool output, or rewrite the message context before each LLM call.
 
-> **Relationship to extensions:** The hook subsystem (`HookAPI`) is the legacy API. The extension runner now handles everything hooks can do plus more. `ExtensionAPI` supports the hook event model plus extension-only events. Use `ExtensionAPI` for new work; use `HookAPI` only if you are maintaining an existing hook module.
+> **Relationship to extensions:** `HookAPI` and the standalone `HookRunner` are legacy SDK APIs. Normal sessions discover JS/TS hook factories and bind them through the extension runner with `ExtensionAPI`, including factories under `hooks/pre/` and `hooks/post/`. Use `ExtensionAPI` for new work. The legacy contracts below apply when a consumer explicitly uses `HookRunner`; shared events can have different chaining behavior in the extension runner.
 
 ## Factory signature
 
@@ -40,7 +40,7 @@ export default function myExtension(pi: ExtensionAPI): void {
 | Event | Fires | Can return |
 |---|---|---|
 | `tool_call` | Before every tool execution | `{ block?: boolean; reason?: string; input?: Record<string, unknown>; additionalContext?: string }` |
-| `tool_result` | After every tool execution | `{ content?; details?; isError?: boolean }` |
+| `tool_result` | After every tool execution | `{ content?; details?; isError?: boolean; additionalContext?: string }` |
 
 ### Session lifecycle
 
@@ -63,10 +63,10 @@ export default function myExtension(pi: ExtensionAPI): void {
 | Event | Fires | Can return |
 |---|---|---|
 | `before_agent_start` | Before agent starts a turn | `{ message?: { customType; content; display; details; attribution? } }` |
-| `agent_start` | Agent streaming starts | — |
-| `agent_end` | Agent streaming ends | — |
-| `turn_start` | Start of a user→agent turn | — |
-| `turn_end` | End of a user→agent turn | — |
+| `agent_start` | Agent loop starts | — |
+| `agent_end` | Agent loop ends (`willContinue` signals an already-scheduled automatic continuation) | — |
+| `turn_start` | Start of an assistant-response/tool-result iteration within the loop | — |
+| `turn_end` | End of that iteration; carries the message and tool results | — |
 | `context` | Before each LLM API call | `{ messages?: Message[] }` |
 | `auto_compaction_start` | Auto-compaction begins | — |
 | `auto_compaction_end` | Auto-compaction ends | — |
@@ -86,7 +86,7 @@ omp.on("tool_call", async (event, ctx) => {
   if (event.toolName === "bash") {
     const cmd = String(event.input.command ?? "");
     if (/\brm\s+-rf\s+\//.test(cmd)) {
-      return { block: true, reason: "Refusing to delete root filesystem" };
+      return { block: true, reason: "Refusing rm -rf with an absolute-path target" };
     }
   }
 });
@@ -98,12 +98,12 @@ Contract:
 - `reason` becomes the tool error text the LLM sees.
 - If a handler **throws**, the tool is also blocked (fail-closed).
 - A non-blocking handler can return `additionalContext` carrying trusted handler-authored instructions for the next provider request. Distinct non-empty values from all handlers are preserved in registration order and emitted after the batch's tool results in assistant call order with developer/system priority where supported; a call whose joined context is identical to an earlier call's in the same batch is emitted once. They are delivered only when the call runs and returns a non-error result: a later block, approval denial, interrupt skip, or failed execution discards them. Raw tool output and other untrusted data must stay in the tool result.
-- A non-blocking handler can return `input` to replace the raw arguments passed to the tool. The last replacement wins, and handlers do not see earlier input revisions.
+- A non-blocking handler can return `input` to replace the raw arguments passed to the tool. The last replacement wins, and handlers do not see earlier input revisions. Return real tool parameters, not derived gate-only fields from `event.input`. Computer-provider calls do not apply revisions. In the normal extension-backed agent loop, revisions are schema-validated before scheduling, display, persistence, and approval; the standalone `HookToolWrapper` instead passes the handler-owned raw replacement directly to execution.
 - Eval prelude calls such as `browser.open(...)`, direct `BrowserTab` helpers, `tab.run(...)`, direct `computer` helpers, and `computer.run(fnOrCode, options)` are not tool calls and do not emit these hooks.
 
 ## Post-tool override contract
 
-Return `{ content, details, isError }` from a `tool_result` handler to patch what the LLM sees:
+Return `{ content, details, isError, additionalContext }` from a `tool_result` handler to patch what the LLM sees and/or attach trusted guidance outside the tool output:
 
 ```ts
 omp.on("tool_result", async (event, ctx) => {
@@ -115,25 +115,29 @@ omp.on("tool_result", async (event, ctx) => {
         text: chunk.text.replace(/(?:sk|pk)-[a-zA-Z0-9]{20,}/g, "[REDACTED_API_KEY]"),
       };
     });
-    return { content: redacted };
+    return {
+      content: redacted,
+      additionalContext: "Use the redacted result for subsequent reasoning.",
+    };
   }
 });
 ```
 
 Contract:
 
-- Handlers run in registration order. For `HookAPI`, each handler receives the original tool result event, and the last returned override wins.
+- Handlers run in registration order. For `HookAPI`, each handler receives the original tool result event; returned `content`/`details`/`isError` merge per field, so a later handler's defined field wins while fields it leaves unset keep earlier overrides (a handler returning only `details`, `isError`, or `additionalContext` never erases an earlier `content` redaction).
 - `content` replaces the full content array for the LLM.
 - `details` replaces the structured details object.
-- `isError` exists on the shared result type, but `HookToolWrapper` does not propagate it into a successful tool result; on a tool failure, the original error is rethrown after handlers complete.
-- On a tool failure, `tool_result` is still emitted with `isError: true`.
+- `additionalContext` is not part of the tool result. Distinct non-blank values are retained in registration order (repeats, compared ignoring surrounding whitespace, are dropped) and delivered before that call's `tool_call` context; a call whose joined context is identical to an earlier call's in the same batch is delivered once.
+- `isError` exists on the shared result type, but `HookToolWrapper` ignores the override. A returned result with `isError: true` keeps that flag even when its content/details are patched; a thrown tool error is rethrown after handlers complete.
+- On a tool failure, `tool_result` is still emitted with `isError: true`, and returned `additionalContext` is delivered. Filter on `event.isError` so success-only and failure-only handlers cannot fire on the opposite outcome.
 
 ## Context modification contract
 
-Return `{ messages: [...] }` from a `context` handler to rewrite the message list before each LLM API call:
+Return `{ messages: [...] }` from a `context` handler to rewrite the message list before each LLM API call. Use `ExtensionAPI` when filtering custom session messages, as in this example:
 
 ```ts
-omp.on("context", async (event, ctx) => {
+pi.on("context", async (event, ctx) => {
   // Remove debug-only custom messages from LLM context
   const filtered = event.messages.filter(
     msg => !(msg.role === "custom" && msg.customType === "debug-only")
@@ -152,6 +156,8 @@ Contract:
 
 ### 1. rm-rf blocker
 
+This narrow regex matches `rm -rf` followed by any absolute path, including `/tmp/example`. It is not a shell parser or a complete safety policy.
+
 ```ts
 import type { HookAPI } from "@oh-my-pi/pi-coding-agent/extensibility/hooks";
 
@@ -166,12 +172,12 @@ export default function rmRfBlocker(omp: HookAPI): void {
     if (ctx.hasUI) {
       const allow = await ctx.ui.confirm(
         "Dangerous command",
-        `This command deletes from root:\n${cmd}\n\nProceed?`
+        `This command recursively deletes an absolute-path target:\n${cmd}\n\nProceed?`
       );
       if (allow) return;
     }
 
-    return { block: true, reason: "rm -rf / blocked by safety policy" };
+    return { block: true, reason: "rm -rf with an absolute-path target blocked by safety policy" };
   });
 }
 ```
@@ -259,7 +265,7 @@ export default function contextFilter(omp: HookAPI): void {
 
 Pass `{ promptStyle: true }` as the fourth argument when Enter should submit and Shift+Enter should insert a newline. The default hook editor behavior keeps Enter as newline and submits on the `app.message.followUp` chord (`Ctrl+Q` or `Ctrl+Enter`).
 
-`ctx.hasUI` is `false` in headless/print/subagent mode — always guard interactive calls.
+Guard interactive calls with `ctx.hasUI`; print and ordinary headless/subagent sessions have no interactive UI. RPC can supply its own UI bridge in extension contexts. Use `ctx.mode === "tui"` for terminal-only extension UI such as custom TUI components.
 
 ## Further reading
 

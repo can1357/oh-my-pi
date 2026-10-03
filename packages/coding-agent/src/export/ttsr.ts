@@ -427,15 +427,6 @@ export class TtsrManager {
 			if (scope.allowThinking) this.#canMatchThinking = true;
 		}
 
-		logger.debug("TTSR rule registered", {
-			ruleName: rule.name,
-			conditions: rule.condition,
-			astConditions: rule.astCondition,
-			question,
-			scope: rule.scope,
-			globs: rule.globs,
-		});
-
 		return true;
 	}
 

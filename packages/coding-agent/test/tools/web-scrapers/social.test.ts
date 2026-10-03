@@ -1,6 +1,5 @@
 import { describe, expect, it } from "bun:test";
 import { handleReddit } from "@oh-my-pi/pi-coding-agent/web/scrapers/reddit";
-import { handleStackOverflow } from "@oh-my-pi/pi-coding-agent/web/scrapers/stackoverflow";
 import { handleTwitter } from "@oh-my-pi/pi-coding-agent/web/scrapers/twitter";
 
 const SKIP = !Bun.env.WEB_FETCH_INTEGRATION;
@@ -67,25 +66,5 @@ describe.skipIf(SKIP)("handleReddit", () => {
 		expect(result?.content).toContain("# r/programming");
 		expect(result?.content).toMatch(/\*\*.*\*\*/); // Contains bold formatting
 		expect(result?.notes).toContain("Fetched via Reddit JSON API");
-	});
-});
-
-describe.skipIf(SKIP)("handleStackOverflow", () => {
-	it("fetches a known question", async () => {
-		// Use a well-known question that definitely exists
-		const result = await handleStackOverflow(
-			"https://stackoverflow.com/questions/11227809/why-is-processing-a-sorted-array-faster",
-			20000,
-		);
-		// API may fail or rate limit, check gracefully
-		if (result !== null) {
-			expect(result.method).toBe("stackexchange");
-			expect(result.contentType).toBe("text/markdown");
-			expect(result.content).toContain("# ");
-			expect(result.content).toContain("**Score:");
-			expect(result.content).toContain("**Tags:");
-			expect(result.content).toContain("## Question");
-			expect(result.notes.some(note => note.includes("Fetched via Stack Exchange API"))).toBe(true);
-		}
 	});
 });

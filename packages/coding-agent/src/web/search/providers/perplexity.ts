@@ -21,7 +21,7 @@ import { streamOpenAICompletions } from "@oh-my-pi/pi-ai/providers/openai-comple
 import { streamOpenAIResponses } from "@oh-my-pi/pi-ai/providers/openai-responses";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import type { Model, ModelSpec } from "@oh-my-pi/pi-catalog/types";
-import { $env, readSseJson } from "@oh-my-pi/pi-utils";
+import { $env, asRecord, readSseJson } from "@oh-my-pi/pi-utils";
 import type { PerplexityRequest, PerplexitySearchResult } from "../../../web/search/types";
 import type { SearchCitation, SearchResponse, SearchSource } from "../types";
 import { SearchProviderError } from "../../../web/search/types";
@@ -214,11 +214,6 @@ function mergeOAuthEventSnapshot(
 	}
 
 	return merged;
-}
-
-function asRecord(value: unknown): Record<string, unknown> | null {
-	if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
-	return value as Record<string, unknown>;
 }
 
 function parseJson(text: string): unknown | null {
@@ -767,6 +762,22 @@ async function callPerplexityAsk(
 		if (mergedEvent.final || mergedEvent.status === "COMPLETED") {
 			break;
 		}
+	}
+
+	// Anonymous quota exhaustion answers HTTP 200 with a short signup-wall
+	// message ("Sign up and repeat your request.", localized by the upstream
+	// service) and zero sources. A grounded anonymous ask (skip_search_enabled
+	// false + always_search_override) always returns web_results, so a
+	// source-less anonymous response is almost always the wall. Either way an
+	// unsourced answer is useless, so classify it as a provider failure and let
+	// the fallback chain advance, matching the DuckDuckGo/Startpage/Google/SearXNG
+	// wall paths. The check is locale-independent (no text match).
+	if (auth.type === "anonymous" && sourcesByUrl.size === 0) {
+		throw new SearchProviderError(
+			"perplexity",
+			"Perplexity anonymous ask returned no sources (likely signup wall or exhausted anonymous quota); sign in with `/login perplexity` or configure another provider.",
+			429,
+		);
 	}
 
 	return {

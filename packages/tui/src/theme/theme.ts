@@ -7,8 +7,16 @@ import { getCustomThemesDir } from "@oh-my-pi/pi-utils/dirs";
 import * as logger from "@oh-my-pi/pi-utils/logger";
 import { setActiveSymbolTheme } from "./active-symbols";
 import { ansi256ToHex, resolveThemeColors, resolveVarRefs } from "./color";
-import { type CreateThemeOptions, getBuiltinThemes, loadTheme, loadThemeJson, loadThemeSync } from "./loader";
-import type { ThemeColor, ThemeJson } from "./schema";
+import {
+	type CreateThemeOptions,
+	createTheme,
+	getBuiltinThemes,
+	loadTheme,
+	loadThemeJson,
+	loadThemeJsonSync,
+	loadThemeSync,
+} from "./loader";
+import { isValidThemeBg, isValidThemeColor, type ThemeColor, type ThemeJson } from "./schema";
 import type { SymbolPreset } from "./symbols";
 import type { Theme } from "./theme-class";
 
@@ -84,6 +92,8 @@ function getDefaultTheme(): string {
 /** Active theme; imports remain live across initialization, previews, and theme switches. */
 export var theme: Theme;
 var currentThemeName: string | undefined;
+/** Theme shown by `previewTheme` until the next non-preview assignment. */
+var previewThemeName: string | undefined;
 
 type ThemeBinding = (value: Theme) => void;
 var themeBindings: Set<ThemeBinding> | undefined;
@@ -98,8 +108,10 @@ export function bindTheme(binding: ThemeBinding): () => void {
 	};
 }
 
-function assignTheme(value: Theme): void {
+/** `previewName` marks a theme-selector preview; any other assignment ends it. */
+function assignTheme(value: Theme, previewName?: string): void {
 	theme = value;
+	previewThemeName = previewName;
 	setActiveSymbolTheme(value);
 	if (themeBindings) {
 		for (const binding of themeBindings) binding(value);
@@ -121,6 +133,9 @@ export interface ThemeChangeEvent {
 }
 
 var currentSymbolPresetOverride: SymbolPreset | undefined;
+// Process-local preset forced while a Tern Surface Protocol surface is live;
+// wins over the user's preset and is never persisted.
+var nativeSymbolPreset: SymbolPreset | undefined;
 var currentColorBlindMode: boolean = false;
 var themeWatcher: fs.FSWatcher | undefined;
 var themeReloadTimer: NodeJS.Timeout | undefined;
@@ -134,7 +149,7 @@ let themeEpoch = 0;
 
 function getCurrentThemeOptions(): CreateThemeOptions {
 	return {
-		symbolPresetOverride: currentSymbolPresetOverride,
+		symbolPresetOverride: nativeSymbolPreset ?? currentSymbolPresetOverride,
 		colorBlindMode: currentColorBlindMode,
 	};
 }
@@ -162,10 +177,7 @@ export function initThemeSync(
 	lightTheme?: string,
 ): void {
 	const name = configureTheme(symbolPreset, colorBlindMode, darkTheme, lightTheme);
-	const options: CreateThemeOptions = {
-		symbolPresetOverride: currentSymbolPresetOverride,
-		colorBlindMode: currentColorBlindMode,
-	};
+	const options = getCurrentThemeOptions();
 	try {
 		assignTheme(loadThemeSync(name, options));
 	} catch (error) {
@@ -255,7 +267,8 @@ export async function previewTheme(
 		if (requestId !== themeLoadRequestId) {
 			return { success: false, error: "Theme preview superseded by a newer request" };
 		}
-		assignTheme(loadedTheme);
+		// Previewing the active theme again (selector cancel) ends the preview.
+		assignTheme(loadedTheme, name === currentThemeName ? undefined : name);
 		notifyThemeChange(event);
 		return { success: true };
 	} catch (error) {
@@ -335,6 +348,30 @@ export async function setSymbolPreset(preset: SymbolPreset): Promise<void> {
  */
 export function getSymbolPresetOverride(): SymbolPreset | undefined {
 	return currentSymbolPresetOverride;
+}
+
+/**
+ * Force `preset` while a Tern Surface Protocol surface is live (the terminal's
+ * font carries every Nerd Font glyph, so icons need no Glyph Protocol
+ * registration); `undefined` restores the user's preset. Process-local and
+ * never persisted. Rebuilds the active theme synchronously so the next frame
+ * already uses it, and notifies theme listeners like a preset change. Returns
+ * whether the active theme was rebuilt (callers invalidate render caches).
+ */
+export function setNativeSymbolPreset(preset: SymbolPreset | undefined): boolean {
+	if (nativeSymbolPreset === preset) return false;
+	nativeSymbolPreset = preset;
+	if (!currentThemeName || typeof theme === "undefined") return false;
+	++themeLoadRequestId;
+	try {
+		assignTheme(loadThemeSync(currentThemeName, getCurrentThemeOptions()));
+	} catch (error) {
+		// In-memory themes can't be rebuilt by name; they keep their symbols.
+		logger.debug("Native symbol preset: theme rebuild skipped", { theme: currentThemeName, error: String(error) });
+		return false;
+	}
+	notifyThemeChange({ ephemeral: true });
+	return true;
 }
 
 /**
@@ -768,6 +805,71 @@ export async function getResolvedThemeColors(themeName?: string): Promise<Record
 		}
 	}
 	return cssColors;
+}
+
+/** One appearance variant of {@link NativeThemePalette}: token name → `#rrggbb`. */
+export type NativeThemeVariant = Record<string, string>;
+
+/** omp's resolved theme for a Tern Surface Protocol terminal (the `t` verb body minus `sf`). */
+export interface NativeThemePalette {
+	dark?: NativeThemeVariant;
+	light?: NativeThemeVariant;
+	name: { dark?: string; light?: string };
+}
+
+/**
+ * Cheap identity of everything {@link getNativeThemePalette} depends on;
+ * recompute the palette only when it changes.
+ */
+export function getNativeThemePaletteKey(): string {
+	return `${themeEpoch}|${autoDetectedTheme}|${autoDarkTheme}|${autoLightTheme}|${currentThemeName}|${previewThemeName}|${currentColorBlindMode}`;
+}
+
+/** Every token of theme `name` as hex (terminal-default tokens omitted), plus its export colours. */
+function nativeThemeVariant(name: string): { light: boolean; colors: NativeThemeVariant } {
+	const themeJson = loadThemeJsonSync(name);
+	const built = createTheme(themeJson, getCurrentThemeOptions());
+	const raw = resolveThemeColors(themeJson.colors, themeJson.vars);
+	const colors: NativeThemeVariant = {};
+	for (const key in raw) {
+		// Terminal-default tokens stay unset; keys outside the schema are ignored like the theme does.
+		if (raw[key as keyof typeof raw] === "") continue;
+		if (isValidThemeColor(key)) colors[key] = built.getColorHex(key);
+		else if (isValidThemeBg(key)) colors[key] = built.getBgHex(key);
+	}
+	const exported = resolveThemeExportColors(themeJson);
+	for (const key of ["pageBg", "cardBg", "infoBg"] as const) {
+		const value = exported[key];
+		if (value) colors[key] = value;
+	}
+	return { light: isLightThemeJson(themeJson), colors };
+}
+
+/**
+ * omp's theme for a native surface: with auto theme, the configured dark and
+ * light themes; otherwise (or while the theme selector previews one) the
+ * active theme under its own appearance only. Themes without a loadable
+ * definition (in-memory instances) contribute nothing.
+ */
+export function getNativeThemePalette(): NativeThemePalette {
+	const palette: NativeThemePalette = { name: {} };
+	const add = (name: string, as?: "dark" | "light"): void => {
+		try {
+			const variant = nativeThemeVariant(name);
+			const slot = as ?? (variant.light ? "light" : "dark");
+			palette[slot] = variant.colors;
+			palette.name[slot] = name;
+		} catch (error) {
+			logger.debug("Native theme palette: theme not loadable", { name, error: String(error) });
+		}
+	};
+	const single = previewThemeName ?? (autoDetectedTheme ? undefined : currentThemeName);
+	if (single !== undefined) add(single);
+	else {
+		add(autoDarkTheme, "dark");
+		add(autoLightTheme, "light");
+	}
+	return palette;
 }
 
 /**

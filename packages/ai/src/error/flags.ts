@@ -85,6 +85,8 @@ const CONTEXT_OVERFLOW_EVIDENCE_PATTERNS = [
 	/reduce the length of the messages/i, // Groq
 	/maximum context length is \d+ tokens/i, // OpenRouter (all backends)
 	/exceeds the available context size/i, // llama.cpp server
+	/\bprompt\s*\(\s*\d+\s+tokens\s*\)\s*\+\s*max\s+tokens\s*\(\s*\d+\s*\)\s+exceeds\s+the\s+context\s*\(\s*\d+\s*\)/i, // Strata server
+	/\bprompt\s*\(\s*\d+\s+tokens\s*\)\s+leaves\s+no\s+room\s+to\s+answer\s+in\s+the\s+context\s*\(\s*\d+\s*\)/i, // Strata server
 	/requested tokens?.*exceed.*context (window|length|size)/i, // llama.cpp / OpenAI-compatible local servers
 	/context (window|length|size).*(exceeded|overflow|too small)/i, // Generic local server variants
 	/(prompt|input).*(too long|too large).*(context|n_ctx)/i, // llama.cpp phrasing variants

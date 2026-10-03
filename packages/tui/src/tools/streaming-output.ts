@@ -1,3 +1,4 @@
+import * as fs from "node:fs";
 import type { AgentToolUpdateCallback } from "@oh-my-pi/pi-agent-core";
 import { formatBytes, materializeString, sanitizeText } from "@oh-my-pi/pi-utils";
 import { sanitizeWithOptionalSixelPassthrough } from "../render/sixel";
@@ -14,14 +15,15 @@ export const DEFAULT_MAX_BYTES = 50 * 1024;
 export const DEFAULT_MAX_COLUMN = 512;
 
 /**
- * Default artifact-on-disk cap for {@link OutputSink}.
- *
- * `0` means unbounded: by default, `artifact://<id>` references preserve the
- * complete raw stream instead of a capped head/tail sample.
+ * Default artifact-on-disk cap for {@link OutputSink}: 16 MiB, split into a
+ * {@link ARTIFACT_DEFAULT_HEAD_BYTES} head and a rolling tail. `0` means
+ * unbounded (the complete raw stream is preserved).
  */
-export const ARTIFACT_DEFAULT_MAX_BYTES = 0;
+export const ARTIFACT_DEFAULT_MAX_BYTES = 16 * 1024 * 1024; // 16 MiB
 /** Default head budget; the remainder becomes the rolling tail window. */
 export const ARTIFACT_DEFAULT_HEAD_BYTES = 3 * 1024 * 1024; // 3 MiB
+/** Upper bound on how far the rolling artifact tail may outgrow its budget between trims. */
+const ARTIFACT_TAIL_MAX_SLACK_BYTES = 4 * 1024 * 1024;
 
 const NL = "\n";
 const CR = "\r";
@@ -54,6 +56,11 @@ export interface OutputSummary {
 	columnMax?: number;
 	/** Artifact ID for internal URL access (artifact://<id>) when truncated */
 	artifactId?: string;
+	/**
+	 * Bytes the artifact cap dropped from the middle of the saved file. When
+	 * set, `artifact://<id>` holds a head/tail sample, not the full output.
+	 */
+	artifactElidedBytes?: number;
 	/** Full raw output was not completely saved; artifactId is unavailable. */
 	artifactError?: OutputArtifactError;
 }
@@ -86,17 +93,18 @@ export interface OutputSinkOptions {
 	/** Minimum ms between onChunk calls. 0 = every chunk (default). */
 	chunkThrottleMs?: number;
 	/**
-	 * Optional cap on bytes written to the artifact-on-disk file. When the cap
-	 * is hit, the head window is preserved verbatim and subsequent output feeds
-	 * a rolling tail window; on close, the sink writes a single
+	 * Cap on bytes written to the artifact-on-disk file. When the cap is hit,
+	 * the head window is preserved verbatim and subsequent output feeds a
+	 * rolling tail window; on close, the sink writes a single
 	 * `[ARTIFACT TRUNCATED: …]` notice between them. Default
-	 * {@link ARTIFACT_DEFAULT_MAX_BYTES} (unbounded).
+	 * {@link ARTIFACT_DEFAULT_MAX_BYTES} (16 MiB); `0` = unbounded.
 	 */
 	artifactMaxBytes?: number;
 	/**
 	 * Bytes reserved for the head window of the capped artifact file. The
 	 * tail window receives `artifactMaxBytes - artifactHeadBytes`. Default
-	 * {@link ARTIFACT_DEFAULT_HEAD_BYTES}; clamped to `[0, artifactMaxBytes]`.
+	 * {@link ARTIFACT_DEFAULT_HEAD_BYTES}, but at most half of
+	 * `artifactMaxBytes`; clamped to `[0, artifactMaxBytes]`.
 	 */
 	artifactHeadBytes?: number;
 }
@@ -912,20 +920,24 @@ export class OutputSink {
 	readonly #chunkThrottleMs: number;
 	readonly #maxColumns: number;
 
-	// Optional artifact-on-disk cap. When `#artifactMaxBytes > 0` the file sink
-	// owns a head budget + a rolling tail buffer; once the head is closed,
-	// subsequent chunks are diverted into `#artifactTailRing` (bounded by
-	// `#artifactTailBudget`). On `dump()` the tail is flushed back to the sink
-	// behind a `[ARTIFACT TRUNCATED: …]` notice. The default cap is disabled so
-	// advertised `artifact://<id>` captures are lossless.
+	// Artifact-on-disk cap. When `#artifactMaxBytes > 0` the file sink owns a
+	// head budget + a rolling tail buffer; once the head is closed, subsequent
+	// chunks are diverted into `#artifactTailRing` (trimmed back to
+	// `#artifactTailBudget` whenever it outgrows the budget by
+	// `#artifactTailSlack`). On `dump()` the tail is flushed back to the sink
+	// behind a `[ARTIFACT TRUNCATED: …]` notice. `0` disables the cap.
 	readonly #artifactMaxBytes: number;
 	readonly #artifactHeadBudget: number;
 	readonly #artifactTailBudget: number;
+	/** Overshoot tolerated before trimming, so trimming costs amortized O(1) per byte instead of O(budget) per chunk. */
+	readonly #artifactTailSlack: number;
 	#artifactHeadBytesWritten = 0;
 	#artifactHeadClosed = false;
 	#artifactTailRing = "";
 	#artifactTailRingBytes = 0;
 	#artifactTailIncomingBytes = 0;
+	/** Bytes the cap dropped from the artifact middle, recorded when the tail is flushed. */
+	#artifactElidedBytes = 0;
 	constructor(options?: OutputSinkOptions) {
 		const {
 			artifactPath,
@@ -936,7 +948,7 @@ export class OutputSink {
 			onChunk,
 			chunkThrottleMs = 0,
 			artifactMaxBytes = ARTIFACT_DEFAULT_MAX_BYTES,
-			artifactHeadBytes = ARTIFACT_DEFAULT_HEAD_BYTES,
+			artifactHeadBytes,
 		} = options ?? {};
 		this.#artifactPath = artifactPath;
 		this.#artifactId = artifactId;
@@ -946,8 +958,13 @@ export class OutputSink {
 		this.#onChunk = onChunk;
 		this.#chunkThrottleMs = chunkThrottleMs;
 		this.#artifactMaxBytes = Math.max(0, artifactMaxBytes);
-		this.#artifactHeadBudget = Math.max(0, Math.min(artifactHeadBytes, this.#artifactMaxBytes));
+		// The default head yields to the rolling tail on small caps: it takes at
+		// most half, so the most recent output is always kept.
+		const headBytesRequested =
+			artifactHeadBytes ?? Math.min(ARTIFACT_DEFAULT_HEAD_BYTES, Math.floor(this.#artifactMaxBytes / 2));
+		this.#artifactHeadBudget = Math.max(0, Math.min(headBytesRequested, this.#artifactMaxBytes));
 		this.#artifactTailBudget = Math.max(0, this.#artifactMaxBytes - this.#artifactHeadBudget);
+		this.#artifactTailSlack = Math.min(this.#artifactTailBudget, ARTIFACT_TAIL_MAX_SLACK_BYTES);
 	}
 
 	/**
@@ -1251,11 +1268,14 @@ export class OutputSink {
 		}
 		this.#artifactTailRing += chunk;
 		this.#artifactTailRingBytes += chunkBytes;
-		if (this.#artifactTailRingBytes > budget) {
-			const { text, bytes } = truncateTailBytes(this.#artifactTailRing, budget);
-			this.#artifactTailRing = text;
-			this.#artifactTailRingBytes = bytes;
-		}
+		if (this.#artifactTailRingBytes > budget + this.#artifactTailSlack) this.#trimArtifactTail();
+	}
+
+	#trimArtifactTail(): void {
+		if (this.#artifactTailRingBytes <= this.#artifactTailBudget) return;
+		const { text, bytes } = truncateTailBytes(this.#artifactTailRing, this.#artifactTailBudget);
+		this.#artifactTailRing = text;
+		this.#artifactTailRingBytes = bytes;
 	}
 
 	#recordArtifactError(operation: OutputArtifactError): void {
@@ -1290,6 +1310,10 @@ export class OutputSink {
 	async #createFileSink(): Promise<void> {
 		if (!this.#artifactPath || this.#fileReady || this.#artifactError) return;
 		try {
+			// Bun's Windows FileSink defers the open: an unopenable target (e.g. a
+			// directory) only fails on the first write, misreported as a write
+			// failure. Probe the open eagerly so it stays classified — and terminal.
+			if (process.platform === "win32") fs.closeSync(fs.openSync(this.#artifactPath, "w"));
 			const sink = Bun.file(this.#artifactPath).writer();
 			this.#file = { path: this.#artifactPath, artifactId: this.#artifactId, sink };
 			this.#fileReady = true;
@@ -1413,11 +1437,13 @@ export class OutputSink {
 	#flushArtifactTailIfCapped(): void {
 		if (!this.#file || this.#artifactError) return;
 		if (this.#artifactMaxBytes === 0) return;
+		this.#trimArtifactTail();
 		const tailBytes = this.#artifactTailRingBytes;
 		const droppedBytes = Math.max(0, this.#artifactTailIncomingBytes - tailBytes);
 		if (tailBytes === 0 && droppedBytes === 0) return;
 
 		if (droppedBytes > 0) {
+			this.#artifactElidedBytes = droppedBytes;
 			const headWritten = this.#artifactHeadBytesWritten;
 			const totalCapped = headWritten + this.#artifactTailIncomingBytes;
 			const headSep = headWritten > 0 ? "\n" : "";
@@ -1505,6 +1531,10 @@ export class OutputSink {
 			columnTruncatedLines: this.#columnTruncatedLines > 0 ? this.#columnTruncatedLines : undefined,
 			columnMax: this.#columnTruncatedLines > 0 ? this.#maxColumns : undefined,
 			artifactId: this.#artifactError ? undefined : this.#file?.artifactId,
+			artifactElidedBytes:
+				this.#artifactError || !this.#file?.artifactId || this.#artifactElidedBytes === 0
+					? undefined
+					: this.#artifactElidedBytes,
 			artifactError: this.#artifactError,
 		};
 	}

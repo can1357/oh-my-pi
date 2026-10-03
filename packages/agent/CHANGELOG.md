@@ -2,6 +2,39 @@
 
 ## [Unreleased]
 
+## [18.4.11] - 2026-10-02
+
+### Fixed
+
+- Fixed lenient argument validation for tools such as `yield`: malformed tool-call JSON is now reported to the model instead of causing the tool to run with empty arguments.
+
+## [18.4.10] - 2026-10-02
+
+### Fixed
+
+- `streamProxy` no longer finalizes a cut-off tool-call argument buffer into an executable auto-closed preview; such a call gets the parse-error arguments, so the tool is not run and the model receives the parse error ([#13868](https://github.com/can1357/oh-my-pi/pull/13868) by [@alphastorm](https://github.com/alphastorm))
+- OpenAI remote compaction no longer sends stored native tool calls whose names are blank, longer than 128 characters, or contain whitespace or control characters. The outputs that answer those calls are dropped as well ([#13985](https://github.com/can1357/oh-my-pi/pull/13985) by [@Xytronix](https://github.com/Xytronix)).
+
+## [18.4.6] - 2026-10-01
+
+### Added
+
+- Added APIs for improving agent follow-up and steering workflow management, including moving queued follow-ups into steering with a single queue-change notification.
+- Added support for trusted post-tool guidance via `afterToolCall` results, allowing additional context to be included in the next provider request, including after tool failures.
+
+## [18.4.4] - 2026-09-29
+
+### Added
+
+- Added `Agent.replaceQueue()` to replace one pending queue without changing the other queue ([#11872](https://github.com/can1357/oh-my-pi/pull/11872) by [@andrebrait](https://github.com/andrebrait)).
+- Added queued-message grouping so owned companion records and their user prompt are dequeued together in `one-at-a-time` mode ([#11872](https://github.com/can1357/oh-my-pi/pull/11872) by [@andrebrait](https://github.com/andrebrait)).
+- Added `Agent.onQueueChange()`, a listener called whenever a steering/follow-up queue mutator (enqueue, dequeue on delivery, clear, or restore) runs, so hosts can observe queue changes without polling ([#11872](https://github.com/can1357/oh-my-pi/pull/11872) by [@andrebrait](https://github.com/andrebrait)).
+
+### Fixed
+
+- Fixed GPT models on Amazon Bedrock's OpenAI routes (bedrock-runtime and bedrock-mantle `/openai/...`) falling back to a local summary instead of OpenAI's native remote compaction; set `remoteCompaction.enabled: false` to opt out ([#13311](https://github.com/can1357/oh-my-pi/pull/13311) by [@mustafaabidali](https://github.com/mustafaabidali)).
+- Fixed native compaction on Amazon Bedrock's OpenAI routes skipping the provider's request setup, which sent Bedrock Mantle compaction to an unresolved `{region}` host and skipped configured headers and proxies; other providers' compaction requests are unchanged ([#13311](https://github.com/can1357/oh-my-pi/pull/13311) by [@mustafaabidali](https://github.com/mustafaabidali)).
+
 ## [18.4.3] - 2026-09-28
 
 ### Added

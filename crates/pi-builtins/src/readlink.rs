@@ -207,10 +207,12 @@ fn app() -> Command {
 /// The value plain `readlink` prints for `link`.
 ///
 /// A provider path that aliases a host file (`skill://name/SKILL.md`) prints
-/// that file's canonical host path; everything else reads one symlink hop.
+/// that file's canonical host path; everything else reads one symlink hop. The
+/// host path goes through the uucore-style resolver (as `realpath` does), not
+/// `std::fs::canonicalize`, which spells Windows paths with a `\\?\` prefix.
 fn read_link(filesystem: &BlockingFs, link: &Path) -> io::Result<PathBuf> {
 	match filesystem.backing_path(link)? {
-		Some(backing) => BlockingFs::native().canonicalize(backing),
+		Some(backing) => BlockingFs::native().canonicalize_with(backing, &CanonicalizeOptions::default()),
 		None => filesystem.read_link(link),
 	}
 }

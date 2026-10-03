@@ -806,6 +806,30 @@ describe("model thinking derivation", () => {
 		expect(direct.compat.supportsTurnScopedSystem).toBe(true);
 	});
 
+	it("keeps Sonnet 5.5 binding controls and per-message effort off Vertex, which rejects both", () => {
+		const direct = createModel({ id: "claude-sonnet-5-5", api: "anthropic-messages", provider: "anthropic" });
+		const vertex = createModel({
+			id: "claude-sonnet-5-5@default",
+			api: "anthropic-messages",
+			provider: "google-vertex",
+		});
+
+		expect(direct.compat.supportsThinkingBindingControls).toBe(true);
+		expect(direct.compat.supportsPerMessageEffort).toBe(true);
+		expect(vertex.compat.supportsThinkingBindingControls).toBe(false);
+		expect(vertex.compat.supportsPerMessageEffort).toBe(false);
+	});
+
+	it("keeps per-message effort off every Vertex Claude line that takes it on the Claude API", () => {
+		for (const id of ["claude-fable-5-1", "claude-opus-5"]) {
+			const direct = createModel({ id, api: "anthropic-messages", provider: "anthropic" });
+			const vertex = createModel({ id: `${id}@default`, api: "anthropic-messages", provider: "google-vertex" });
+
+			expect(direct.compat.supportsPerMessageEffort).toBe(true);
+			expect(vertex.compat.supportsPerMessageEffort).toBe(false);
+		}
+	});
+
 	it("uses Bedrock Fable 5.1's five supported effort levels", () => {
 		const ids = [
 			"global.anthropic.claude-fable-5-1",
@@ -873,16 +897,16 @@ describe("model thinking derivation", () => {
 				createModel({ id, api: "anthropic-messages", provider: "anthropic" }).compat.supportsServerCompaction,
 			).toBe(false);
 		}
-		expect(
-			createModel({ id: "claude-sonnet-4-6", api: "anthropic-messages", provider: "google-vertex" }).compat
-				.supportsServerCompaction,
-		).toBe(true);
-		for (const provider of ["amazon-bedrock", "opencode-zen"]) {
+		for (const provider of ["google-vertex", "amazon-bedrock", "bedrock-mantle"]) {
 			expect(
 				createModel({ id: "claude-sonnet-4-6", api: "anthropic-messages", provider }).compat
 					.supportsServerCompaction,
-			).toBe(false);
+			).toBe(true);
 		}
+		expect(
+			createModel({ id: "claude-sonnet-4-6", api: "anthropic-messages", provider: "opencode-zen" }).compat
+				.supportsServerCompaction,
+		).toBe(false);
 	});
 
 	it("classifies OpenAI-schema Bedrock models as effort, leaving gpt-oss on budget", () => {
