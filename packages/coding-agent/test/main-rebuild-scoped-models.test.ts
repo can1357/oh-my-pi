@@ -100,8 +100,12 @@ describe("rebuildScopedModelsAfterDiscovery", () => {
 		const session = new FakeSession(await startupScope(["prov/a", "prov/b"], registry, settings));
 		const before = session.scopedModels;
 
-		// A later discovery pass adds an unrelated, out-of-scope model.
-		registry.available = [model("a"), model("b"), model("c")];
+		// A later discovery pass adds an unrelated, out-of-scope model. The
+		// in-scope records keep their original object identity — the real registry
+		// caches stable objects for unchanged providers, so a no-op pass must not
+		// look like a metadata change.
+		const [a, b] = registry.available;
+		registry.available = [a, b, model("c")];
 		await rebuildScopedModelsAfterDiscovery(session, parseArgs([]), registry, settings);
 
 		expect(session.setCalls).toBe(0);

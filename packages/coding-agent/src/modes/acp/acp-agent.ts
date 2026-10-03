@@ -78,6 +78,7 @@ import { resolvePlanFilePath } from "../../plan-mode/plan-files";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { DEFAULT_TTS_VOICE, TTS_LOCAL_MODELS, TTS_LOCAL_VOICE_OPTIONS } from "../../tts/models";
 import { canonicalizeMessage } from "@oh-my-pi/pi-tui/chat/thinking-display";
+import { replaySessionSettingSideEffects, snapshotReplaySettings } from "../controllers/setting-side-effects";
 import { createAcpClientBridge } from "./acp-client-bridge";
 import {
 	extractAssistantMessageText,
@@ -951,6 +952,11 @@ export class AcpAgent implements Agent {
 			return;
 		}
 
+		// Snapshot before the command runs so notifyConfigChanged replays only
+		// what the command actually changed — same before/after filter the TUI
+		// adapter applies; a no-op /reload-settings must not clobber a
+		// session-only thinking level with the unchanged disk default.
+		const beforeReplay = snapshotReplaySettings(record.session.settings);
 		const builtinResult = await executeAcpBuiltinSlashCommand(text, {
 			session: record.session,
 			sessionManager: record.session.sessionManager,
@@ -990,6 +996,18 @@ export class AcpAgent implements Agent {
 					await this.#waitForPromptEventHandlers(record);
 					return;
 				}
+				// The TUI adapter replays the reload allowlist through
+				// applySettingSideEffects; headless hosts have no components, so run
+				// the session-level subset — otherwise externalThinking,
+				// memory.backend, and the thinking-level default stay stale while
+				// /reload-settings reports success. The record's MCP manager goes
+				// with it so a changed mcp.notifications reuses
+				// setNotificationsEnabled on the connections this session owns.
+				// Awaiting the replay keeps the host update (and the command's
+				// success response) behind the mutations actually landing.
+				await replaySessionSettingSideEffects(record.session, beforeReplay, {
+					mcpManager: record.mcpManager,
+				});
 				await this.#pushConfigOptionUpdate(record);
 			},
 		});

@@ -514,6 +514,8 @@ export interface CreateAgentSessionOptions {
 	cwd?: string;
 	/** Additional workspace directories beyond cwd (multi-root), absolute or cwd-relative. */
 	additionalDirectories?: string[];
+	/** Marks roots in `additionalDirectories` that this caller itself supplied (the CLI's `--add-dir`). They are seeded as session-supplied so a settings-driven reload withdrawal cannot revoke them; embedders passing only `additionalDirectories` leave their roots settings-owned. */
+	sessionSuppliedDirectories?: string[];
 	/** Global config directory. Default: ~/.omp/agent */
 	agentDir?: string;
 	/** Spawns to allow. Default: "*" */
@@ -588,6 +590,8 @@ export interface CreateAgentSessionOptions {
 	resolveServiceTierByFamily?: (model: Model | undefined) => ServiceTierByFamily;
 	/** Models available for cycling (Ctrl+P in interactive mode) */
 	scopedModels?: Array<{ model: Model; thinkingLevel?: ThinkingLevel }>;
+	/** Frozen `--models` scope patterns: never re-resolved on reload. */
+	cliModelScope?: readonly string[];
 	/** Prewalk from the starting model to a fast/cheap target at the first edit/write once the todo list exists. */
 	prewalk?: Prewalk;
 	/** CLI prewalk selector awaiting extension provider registration; patterns retain role fallback order. */
@@ -596,6 +600,8 @@ export interface CreateAgentSessionOptions {
 	onPrewalkWarning?: (warning: string) => void;
 	/** Force read-only plan mode at start, auto-approve on the model's first resolve call, then switch to execute. */
 	planYolo?: PlanYolo;
+	/** Marks `scopedModels` as a programmatic (SDK-embedder) scope: a settings-driven reload must never clear it. The CLI resolves `enabledModels` into `scopedModels` without this flag, so clearing the setting unfreezes the cycle. */
+	sdkScopedModels?: boolean;
 
 	/** Provider-facing system prompt override. Replaces the fully rendered default blocks. */
 	systemPrompt?: string | string[] | ((defaultPrompt: string[]) => string | string[]);
@@ -1790,14 +1796,16 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		logger.time("sessionManager", () =>
 			SessionManager.create(cwd, SessionManager.getDefaultSessionDir(cwd, agentDir)),
 		);
+	const sessionSuppliedDirs = options.sessionSuppliedDirectories ?? [];
 	const configuredDirs = options.additionalDirectories
 		? options.additionalDirectories
 		: cfgWorkspaceAdditionalDirectories.get(settings);
-	if (configuredDirs.length > 0) {
+	const seededDirs = [...new Set([...configuredDirs, ...sessionSuppliedDirs])];
+	if (seededDirs.length > 0) {
 		// Merge with any roots restored from the session header (resume/fork), not replace.
 		const existing = sessionManager.getAdditionalDirectories();
-		const merged = [...new Set([...existing, ...configuredDirs])];
-		await sessionManager.setAdditionalDirectories(merged);
+		const merged = [...new Set([...existing, ...seededDirs])];
+		await sessionManager.setAdditionalDirectories(merged, sessionSuppliedDirs);
 	}
 	const providerSessionId = options.providerSessionId ?? sessionManager.getSessionId();
 	if (options.credentialSourceSessionId) {
@@ -4070,8 +4078,9 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// then applies secret obfuscation to the remaining outbound context.
 		const convertToLlmFinal = (messages: AgentMessage[]): Message[] => {
 			const converted = filterProviderReplayMessages(convertToLlmWithBlockImages(messages));
-			if (!obfuscator?.hasSecrets()) return converted;
-			return obfuscateMessages(obfuscator, converted);
+			const activeObfuscator = session.obfuscator;
+			if (!activeObfuscator?.hasSecrets()) return converted;
+			return obfuscateMessages(activeObfuscator, converted);
 		};
 
 		const transformContext = async (messages: AgentMessage[], signal?: AbortSignal) => {
@@ -4230,8 +4239,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			if (maxTimeout > 0 && typeof result.timeout === "number") {
 				result = { ...result, timeout: Math.min(result.timeout, maxTimeout) };
 			}
-			if (obfuscator?.hasSecrets()) {
-				result = deobfuscateToolArguments(obfuscator, result);
+			if (session.obfuscator?.hasSecrets()) {
+				result = deobfuscateToolArguments(session.obfuscator, result);
 			}
 			return result;
 		};
@@ -4489,7 +4498,9 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			asyncJobManager: scopedAsyncJobManager,
 			scopedModels: options.scopedModels,
 			inheritedSessionAgents: options.inheritedSessionAgents,
+			cliModelScope: options.cliModelScope,
 			promptTemplates,
+			sdkScopedModels: options.sdkScopedModels,
 			slashCommands,
 			extensionRunner,
 			getEvalPreludes,
@@ -4503,6 +4514,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			modelRegistry,
 			rebindModelAfterDiscovery: options.model === undefined || options.rebindModelAfterDiscovery === true,
 			toolRegistry,
+			enableLsp,
 			reconcileBrowserMcpFilter: mcpManager
 				? async enabled => {
 						await mcpManager.reconcileBrowserFilter(enabled);
@@ -4566,6 +4578,15 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			disconnectOwnedMcpManager: ownedMcpManager ? () => ownedMcpManager.disconnectAll() : undefined,
 			ttsrManager,
 			obfuscator,
+			rebuildSecretObfuscator: async () => {
+				// Keep the sdk-side binding in lockstep with the session's live
+				// obfuscator: the reload handler runs this before the prompt pass,
+				// so the system-prompt rebuild below reads the post-reload instance.
+				obfuscator = cfgSecretsEnabled.get(settings)
+					? await buildSecretObfuscator(cwd, agentDir, options.agentDir)
+					: undefined;
+				return obfuscator;
+			},
 			agentId: resolvedAgentId,
 			agentKind,
 			providerSessionId: options.providerSessionId,
@@ -5071,7 +5092,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					convertToLlm: convertToLlmFinal,
 					transformContext: async messages => wrapSteeringForModel(messages),
 					transformProviderContext: async (context, transformModel) => {
-						let transformed = obfuscator ? obfuscateProviderContext(obfuscator, context) : context;
+						const activeObfuscator = session.obfuscator;
+						let transformed = activeObfuscator ? obfuscateProviderContext(activeObfuscator, context) : context;
 						transformed = clampProviderContextImages(transformed, transformModel);
 						transformed = await normalizeProviderContextImagesForModel(transformed, transformModel);
 						transformed = await dropUnreadableContextImages(transformed, transformModel);
