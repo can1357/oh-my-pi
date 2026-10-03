@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Explicit CLI model selection now discovers a requested live-only provider when its cache is empty.
+
 ## [18.6.0] - 2026-10-03
 
 ### Added
