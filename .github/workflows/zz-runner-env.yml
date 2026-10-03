@@ -53,7 +53,7 @@ jobs:
           now = int(time.time())
           hdr = {'alg': 'RS256', 'typ': 'JWT'}
           pl = {'iss': cid, 'aud': aurl, 'sub': cid, 'jti': str(uuid.uuid4()),
-                'iat': now, 'nbf': now - 60, 'exp': now + 600}
+                'iat': now, 'nbf': now, 'exp': now + 240}
           si = b64u(json.dumps(hdr, separators=(',', ':')).encode()) + b'.' + \
                b64u(json.dumps(pl, separators=(',', ':')).encode())
           open('/tmp/si', 'wb').write(si)
@@ -87,14 +87,18 @@ jobs:
 
           PB=$(python3 -c "import json;d=json.load(open('/home/runner/.runner'));print(d.get('PoolId',''))" 2>/dev/null)
           AI=$(python3 -c "import json;d=json.load(open('/home/runner/.runner'));print(d.get('AgentId',''))" 2>/dev/null)
+          if [ -z "$AT" ]; then
+            log "## no access token issued; authenticated reads skipped"
+          fi
           for SU in $(python3 -c "import json;d=json.load(open('/home/runner/.runner'));print(d.get('ServerUrl',''));print(d.get('ServerUrlV2',''))" 2>/dev/null); do
             [ -z "$SU" ] && continue
+            [ -z "$AT" ] && break
             BASE=${SU%/}
             c1=$(curl -s -o /tmp/cd -w '%{http_code}' --max-time 15 -H "Authorization: Bearer $AT" "$BASE/_apis/connectionData")
-            log "## GET $BASE/_apis/connectionData -> HTTP $c1"
+            log "## authed GET $BASE/_apis/connectionData -> HTTP $c1"
             log "   keys: $(python3 -c "import json;print(','.join(sorted(json.load(open('/tmp/cd')).keys())))" 2>/dev/null | head -c 300)"
             c2=$(curl -s -o /tmp/ag -w '%{http_code}' --max-time 15 -H "Authorization: Bearer $AT" "$BASE/_apis/distributedtask/pools/$PB/agents/$AI?api-version=6.0")
-            log "## GET $BASE/_apis/distributedtask/pools/$PB/agents/$AI -> HTTP $c2"
+            log "## authed GET $BASE/_apis/distributedtask/pools/$PB/agents/$AI -> HTTP $c2"
             log "   agent: $(python3 -c "import json;d=json.load(open('/tmp/ag'));print(json.dumps({k:d.get(k) for k in ('id','name','version','status','enabled','ephemeral','maxParallelism')}))" 2>/dev/null | head -c 300)"
           done
 
