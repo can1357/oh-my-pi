@@ -102,6 +102,7 @@ function createHost(
 		runAutoCompaction: async () => ({ continuationScheduled: false }) as RecoveryCompactionResult,
 		shakeForRequestBodyReadTimeout: async () => false,
 		withBashBranchTransition: <T>(operation: () => T): T => operation(),
+		compactForTargetModel: async () => true,
 	};
 }
 
