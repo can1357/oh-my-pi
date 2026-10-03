@@ -1,4 +1,5 @@
 import { combine, effect, register, type Setting } from "../config/registry";
+import { CURRENCY_CODES } from "@oh-my-pi/pi-catalog/types";
 import { formatKeyHint, formatKeyHints } from "@oh-my-pi/pi-tui/app-keybindings";
 import { cfgReadToolResultPreview } from "../tools/settings";
 import { MAGIC_KEYWORDS, type MagicKeywordId } from "./magic-keywords";
@@ -270,6 +271,24 @@ export const cfgStatusLineShowHookStatus = register({
 		group: "Status Line",
 		label: "Show Hook Status",
 		description: "Display hook status messages below the status line",
+	},
+});
+
+export const cfgCostDisplayCurrency = register({
+	id: "cost.displayCurrency",
+	type: "enum",
+	values: CURRENCY_CODES,
+	default: "USD",
+	ui: {
+		tab: "appearance",
+		group: "Status Line",
+		label: "Cost Currency",
+		description:
+			"Currency for session cost readouts. A model that publishes an exact card in the selected currency (DeepSeek publishes a native CNY table) is shown in it, down to the peak/off-peak tariff; a model without one keeps its own card and symbol, so a currency is never swapped onto the wrong numbers.",
+		options: [
+			{ value: "USD", label: "USD ($)", description: "US dollars — the canonical card omp accounts against" },
+			{ value: "CNY", label: "CNY (¥)", description: "Chinese yuan, from vendors' native published tables" },
+		],
 	},
 });
 

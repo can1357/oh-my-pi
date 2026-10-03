@@ -2,6 +2,7 @@ import { classifyModel } from "./compat/taxonomy";
 import MODELS from "./models.json" with { type: "json" };
 import type {
 	Api,
+	CurrencyCode,
 	EffectiveTokenCost,
 	KnownProvider,
 	Model,
@@ -10,6 +11,7 @@ import type {
 	TimeBasedCost,
 	TokenCost,
 	Usage,
+	UsageCost,
 } from "./types";
 
 /**
@@ -70,7 +72,22 @@ export function getModelPricingStatus(model: Pick<Model<Api>, "cost" | "pricingS
 	return model.pricingStatus ?? "unknown";
 }
 
-function resolveTokenCost(cost: ModelCost, promptInputTokens: number, timestamp: number | undefined): TokenCost {
+/** ISO 4217 code of a model's base card; an unset card is USD. */
+export function modelCurrency(cost: ModelCost): CurrencyCode {
+	return cost.currency ?? "USD";
+}
+
+/**
+ * The exact rate card a model publishes in `currency`, or `undefined` when it
+ * publishes none. Never converts between currencies: a card is used only when
+ * the vendor published it, so the rendered symbol always matches the numbers.
+ */
+export function currencyCard(cost: ModelCost, currency: CurrencyCode): TokenCost | undefined {
+	return currency === modelCurrency(cost) ? cost : cost.currencyCards?.[currency];
+}
+
+/** Select the base rate card for a timestamp: the latest effective dated card, else the live one. */
+function resolveBaseCard(cost: ModelCost, timestamp: number | undefined): ModelCost | EffectiveTokenCost {
 	let rates: ModelCost | EffectiveTokenCost = cost;
 	let effectiveFrom = -Infinity;
 	if (timestamp !== undefined && cost.timeBased?.effectiveRates) {
@@ -81,12 +98,21 @@ function resolveTokenCost(cost: ModelCost, promptInputTokens: number, timestamp:
 			}
 		}
 	}
-	const longContext = rates.longContext;
-	if (!longContext) return rates;
+	return rates;
+}
+
+/** Apply the long-context tier to a base card; alternate cards are flat vendor cards. */
+function tierFromCard(card: ModelCost | EffectiveTokenCost, promptInputTokens: number): TokenCost {
+	const longContext = card.longContext;
+	if (!longContext) return card;
 	const reachesThreshold =
 		promptInputTokens > longContext.inputThreshold ||
 		(longContext.inputThresholdInclusive === true && promptInputTokens === longContext.inputThreshold);
-	return reachesThreshold ? longContext : rates;
+	return reachesThreshold ? longContext : card;
+}
+
+function resolveTokenCost(cost: ModelCost, promptInputTokens: number, timestamp: number | undefined): TokenCost {
+	return tierFromCard(resolveBaseCard(cost, timestamp), promptInputTokens);
 }
 
 function isPeakPricingPeriod(schedule: TimeBasedCost, timestamp: number): boolean {
@@ -147,20 +173,53 @@ export function calculateUncachedInputCost(cost: ModelCost, promptInputTokens: n
 	return (rates.input / 1_000_000) * promptInputTokens * timeBasedMultiplier(cost.timeBased, pricingTimestamp);
 }
 
-/** Price usage at its request timestamp (Unix ms); only scheduled prices default to now. */
+/** Price one usage record against a single rate card under an already-resolved tariff multiplier. */
+function priceUsage(rates: TokenCost, usage: Usage, multiplier: number): UsageCost {
+	const orchestration = usage.orchestration;
+	const input = (rates.input / 1_000_000) * (usage.input + (orchestration?.input ?? 0)) * multiplier;
+	const output = (rates.output / 1_000_000) * (usage.output + (orchestration?.output ?? 0)) * multiplier;
+	const cacheRead = (rates.cacheRead / 1_000_000) * (usage.cacheRead + (orchestration?.cacheRead ?? 0)) * multiplier;
+	const cacheWrite = cacheWriteCost(rates, usage) * multiplier;
+	return { input, output, cacheRead, cacheWrite, total: input + output + cacheRead + cacheWrite };
+}
+
+/**
+ * Price usage at its request timestamp (Unix ms); only scheduled prices default to now.
+ *
+ * `usage.cost` stays the base-currency view. When the model publishes
+ * alternate-currency cards, each is priced through the same tariff multiplier at
+ * the same timestamp into `usage.costByCurrency`, so a display layer can render
+ * another currency without ever converting money.
+ */
 export function calculateUsageCost(cost: ModelCost, usage: Usage, timestamp?: number): Usage["cost"] {
 	const orchestration = usage.orchestration;
 	const promptInputTokens =
 		usage.input + usage.cacheRead + usage.cacheWrite + (orchestration?.input ?? 0) + (orchestration?.cacheRead ?? 0);
 	const pricingTimestamp = cost.timeBased ? (timestamp ?? Date.now()) : undefined;
-	const rates = resolveTokenCost(cost, promptInputTokens, pricingTimestamp);
 	const multiplier = timeBasedMultiplier(cost.timeBased, pricingTimestamp);
-	usage.cost.input = (rates.input / 1000000) * (usage.input + (orchestration?.input ?? 0)) * multiplier;
-	usage.cost.output = (rates.output / 1000000) * (usage.output + (orchestration?.output ?? 0)) * multiplier;
-	usage.cost.cacheRead =
-		(rates.cacheRead / 1000000) * (usage.cacheRead + (orchestration?.cacheRead ?? 0)) * multiplier;
-	usage.cost.cacheWrite = cacheWriteCost(rates, usage) * multiplier;
-	usage.cost.total = usage.cost.input + usage.cost.output + usage.cost.cacheRead + usage.cost.cacheWrite;
+	// A dated effective card is a complete replacement, including its currency mirrors.
+	const card = resolveBaseCard(cost, pricingTimestamp);
+	const base = priceUsage(tierFromCard(card, promptInputTokens), usage, multiplier);
+	usage.cost.input = base.input;
+	usage.cost.output = base.output;
+	usage.cost.cacheRead = base.cacheRead;
+	usage.cost.cacheWrite = base.cacheWrite;
+	usage.cost.total = base.total;
+	const cards = card.currencyCards;
+	if (cards !== undefined) {
+		const baseCurrency = modelCurrency(cost);
+		const byCurrency: Partial<Record<CurrencyCode, UsageCost>> = { [baseCurrency]: base };
+		for (const code of Object.keys(cards) as CurrencyCode[]) {
+			const card = cards[code];
+			if (card === undefined || code === baseCurrency) continue;
+			byCurrency[code] = priceUsage(card, usage, multiplier);
+		}
+		usage.costByCurrency = byCurrency;
+	} else if (usage.costByCurrency !== undefined) {
+		// A repriced record must not keep a previous model's alternate-currency
+		// totals: the session sums this map, and a stale card would mislabel spend.
+		usage.costByCurrency = undefined;
+	}
 	return usage.cost;
 }
 
