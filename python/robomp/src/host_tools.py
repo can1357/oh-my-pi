@@ -48,6 +48,7 @@ _PRE_PR_TEST_COMMAND = ("bun", "run", "test")
 _BUN_INSTALL_COMMAND = ("bun", "install", "--frozen-lockfile", "--ignore-scripts")
 _BUN_INSTALL_TIMEOUT_SECONDS = 300.0
 _REPO_COMMAND_SCRUBBED_ENV_KEYS: tuple[str, ...] = (
+    "FORGEJO_TOKEN",
     "GITHUB_TOKEN",
     "GITHUB_WEBHOOK_SECRET",
     "ROBOMP_REPLAY_TOKEN",
@@ -131,9 +132,14 @@ class ToolBindings:
     # — the originating issue has already been classified and the PR
     # itself does not carry triage labels.
     inbound_is_pr: bool = False
-    # True only for incoming-PR review tasks. Review tools require it; mutating
-    # branch/PR publication tools reject when it is set.
+    # True for incoming-PR review tasks. Review tools require it; git push / PR
+    # publication tools check block_git_push instead (separate flag so handle_review
+    # can access review tools without blocking push).
     review_mode: bool = False
+    # True when git push / PR publication should be refused (e.g. review_pr tasks).
+    # Separated from review_mode because handle_review needs review tools but must
+    # still be able to push fixes in response to inline review feedback.
+    block_git_push: bool = False
     # Current task is driven by an allowlist/OWNER maintainer directive that
     # authorizes implementation. Gates first-PR creation on non-bug/doc issues.
     impl_authorized: bool = False
@@ -854,7 +860,7 @@ def _repair_commit_message_escapes(bindings: ToolBindings, args: Mapping[str, An
 
 
 def _guarded_push_branch(bindings: ToolBindings, args: Mapping[str, Any], tool_name: str, branch: str) -> str:
-    if bindings.review_mode:
+    if bindings.block_git_push:
         msg = "refusing to push: PR review worktrees are read-only."
         _audit(bindings, tool_name, args, error=msg)
         _raise_command(msg)
@@ -1229,7 +1235,7 @@ def _build_release_retag(bindings: ToolBindings) -> HostTool[Any, Any]:
 # ---------- gh_push_branch ----------
 def _build_push_branch(bindings: ToolBindings) -> HostTool[Any, Any]:
     def execute(args: dict[str, Any], _ctx: HostToolContext[Any]) -> str:
-        if bindings.review_mode:
+        if bindings.block_git_push:
             msg = "refusing to push: PR review worktrees are read-only."
             _audit(bindings, "gh_push_branch", args, error=msg)
             _raise_command(msg)
@@ -1274,7 +1280,7 @@ def _build_push_branch(bindings: ToolBindings) -> HostTool[Any, Any]:
 # ---------- gh_open_pr ----------
 def _build_open_pr(bindings: ToolBindings) -> HostTool[Any, Any]:
     def execute(args: dict[str, Any], _ctx: HostToolContext[Any]) -> str:
-        if bindings.review_mode:
+        if bindings.block_git_push:
             msg = "refusing to open PR: PR review tasks are read-only."
             _audit(bindings, "gh_open_pr", args, error=msg)
             _raise_command(msg)
@@ -2264,56 +2270,7 @@ def _build_submit_pr_review(bindings: ToolBindings) -> HostTool[Any, Any]:
             )
         except GitHubError as exc:
             _audit(bindings, "submit_pr_review", args, error=str(exc))
-            # 422 = validation rejection (e.g. Forgejo can't anchor inline
-            # comments). 500 = Forgejo internal error on the reviews endpoint
-            # (observed on certain PRs — the server crashes instead of returning
-            # a proper 422). Both mean the batched review can't land as-is.
-            # Degrade to visible issue comments (mirrors mira) so findings still
-            # surface and the model doesn't retry and degrade its own output.
-            # Without this fallback, a 500 propagates to the model as a raw
-            # error, triggering a retry-and-simplify loop where the model
-            # strips newlines from its review body on subsequent attempts.
-            if exc.status not in (422, 500):
-                _raise_command(f"GitHub rejected PR review: {exc.status} {exc.message}")
-
-            def _note(comment: Any) -> str:
-                return f"**`{comment.path}:{comment.line}`**\n\n{comment.body}"
-
-            posted_inline = 0
-            try:
-                _run_coro(
-                    bindings.loop,
-                    bindings.github.post_comment(bindings.repo.full_name, bindings.default_comment_number, body),
-                )
-                for comment in staged:
-                    _run_coro(
-                        bindings.loop,
-                        bindings.github.post_comment(
-                            bindings.repo.full_name, bindings.default_comment_number, _note(comment)
-                        ),
-                    )
-                    posted_inline += 1
-            except GitHubError as fexc:
-                _audit(bindings, "submit_pr_review", args, error=str(fexc))
-                _raise_command(
-                    f"Review rejected ({exc.status}) and fallback comment posting failed: {fexc.status} {fexc.message}"
-                )
-
-            cleared = bindings.db.clear_staged_review_comments(bindings.issue_key)
-            _audit(
-                bindings,
-                "submit_pr_review",
-                args,
-                result={
-                    "fallback": "issue_comments",
-                    "summary": True,
-                    "inline": posted_inline,
-                    "cleared": cleared,
-                },
-            )
-            return (
-                f"review rejected ({exc.status}); posted summary + {posted_inline} inline comment(s) as issue comments"
-            )
+            _raise_command(f"GitHub rejected PR review: {exc.status} {exc.message}")
         cleared = bindings.db.clear_staged_review_comments(bindings.issue_key)
         _audit(
             bindings,

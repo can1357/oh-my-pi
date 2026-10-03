@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import json
 import subprocess
 import threading
@@ -126,6 +127,7 @@ def _ctx() -> HostToolContext[Any]:
 def test_repo_command_env_scrubs_secrets_and_uses_workspace_cache(
     db: Database, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    monkeypatch.setenv("FORGEJO_TOKEN", "secret-forgejo")
     monkeypatch.setenv("GITHUB_TOKEN", "secret-token")
     monkeypatch.setenv("GITHUB_WEBHOOK_SECRET", "secret-webhook")
     monkeypatch.setenv("ROBOMP_GH_PROXY_HMAC_KEY", "secret-proxy")
@@ -137,6 +139,7 @@ def test_repo_command_env_scrubs_secrets_and_uses_workspace_cache(
     finally:
         _stop_loop(loop, thread)
 
+    assert env["FORGEJO_TOKEN"] == ""
     assert env["GITHUB_TOKEN"] == ""
     assert env["GITHUB_WEBHOOK_SECRET"] == ""
     assert env["ROBOMP_GH_PROXY_HMAC_KEY"] == ""
@@ -1161,6 +1164,7 @@ def _review_bindings(
         inbound_thread_number=99,
         inbound_is_pr=True,
         review_mode=True,
+        block_git_push=True,
     )
     db.upsert_issue(
         key=bindings.issue_key,
@@ -1502,67 +1506,6 @@ def test_submit_pr_review_skips_validation_when_files_fetch_fails(db: Database, 
     assert "dropped" not in result
 
 
-def test_submit_pr_review_422_falls_back_to_issue_comments(db: Database, tmp_path: Path) -> None:
-    comment_bodies: list[str] = []
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        if request.url.path == "/repos/octo/widget/pulls/99/files":
-            return _pr_files_response(request)
-        if request.url.path.endswith("/reviews"):
-            return httpx.Response(422, json={"message": "Validation failed"})
-        if request.url.path == "/repos/octo/widget/issues/99/comments":
-            body = json.loads(request.content)["body"]
-            comment_bodies.append(body)
-            return httpx.Response(200, json={"id": len(comment_bodies), "body": body})
-        return httpx.Response(404, json={"message": "unrouted"})
-
-    bindings, loop, t = _review_bindings(db, tmp_path, httpx.MockTransport(handler))
-    try:
-        stage_tool = next(x for x in build(bindings) if x.name == "pr_review_comment")
-        submit_tool = next(x for x in build(bindings) if x.name == "submit_pr_review")
-        stage_tool.execute({"path": "src/app.py", "line": 12, "body": "finding"}, _ctx())
-        result = submit_tool.execute({"body": "summary"}, _ctx())
-    finally:
-        _stop_loop(loop, t)
-
-    assert "posted summary + 1 inline comment(s) as issue comments" in result
-    assert comment_bodies == ["summary", "**`src/app.py:12`**\n\nfinding"]
-    assert db.list_staged_review_comments(bindings.issue_key) == []
-
-
-def test_submit_pr_review_500_falls_back_to_issue_comments(db: Database, tmp_path: Path) -> None:
-    """A 500 from Forgejo's reviews endpoint triggers the same fallback as 422.
-
-    Without this, the 500 propagates to the model, causing a retry-and-degrade
-    loop where the model strips newlines from subsequent review bodies.
-    """
-    comment_bodies: list[str] = []
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        if request.url.path == "/repos/octo/widget/pulls/99/files":
-            return _pr_files_response(request)
-        if request.url.path.endswith("/reviews"):
-            return httpx.Response(500, json={"message": "github error"})
-        if request.url.path == "/repos/octo/widget/issues/99/comments":
-            body = json.loads(request.content)["body"]
-            comment_bodies.append(body)
-            return httpx.Response(200, json={"id": len(comment_bodies), "body": body})
-        return httpx.Response(404, json={"message": "unrouted"})
-
-    bindings, loop, t = _review_bindings(db, tmp_path, httpx.MockTransport(handler))
-    try:
-        stage_tool = next(x for x in build(bindings) if x.name == "pr_review_comment")
-        submit_tool = next(x for x in build(bindings) if x.name == "submit_pr_review")
-        stage_tool.execute({"path": "src/app.py", "line": 12, "body": "finding"}, _ctx())
-        result = submit_tool.execute({"body": "summary"}, _ctx())
-    finally:
-        _stop_loop(loop, t)
-
-    assert "posted summary + 1 inline comment(s) as issue comments" in result
-    assert comment_bodies == ["summary", "**`src/app.py:12`**\n\nfinding"]
-    assert db.list_staged_review_comments(bindings.issue_key) == []
-
-
 def test_submit_pr_review_range_requires_both_endpoints_anchorable(db: Database, tmp_path: Path) -> None:
     captured: dict[str, Any] = {}
 
@@ -1729,37 +1672,6 @@ def test_submit_pr_review_forgejo_commit_id_fetch_failure_is_swallowed(
     assert "commit_id" not in captured["body"]
 
 
-def test_submit_pr_review_422_and_fallback_comment_failure_raises_and_keeps_staged(
-    db: Database,
-    tmp_path: Path,
-) -> None:
-    """When the reviews endpoint AND the issue-comments fallback both fail, the
-    tool raises and the staged comments survive for a later retry."""
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        if request.url.path == "/repos/octo/widget/pulls/99/files":
-            return _pr_files_response(request)
-        if request.url.path.endswith("/reviews"):
-            return httpx.Response(422, json={"message": "Validation failed"})
-        if request.url.path == "/repos/octo/widget/issues/99/comments":
-            return httpx.Response(500, json={"message": "internal error"})
-        return httpx.Response(404, json={"message": "unrouted"})
-
-    bindings, loop, t = _review_bindings(db, tmp_path, httpx.MockTransport(handler))
-    try:
-        stage_tool = next(x for x in build(bindings) if x.name == "pr_review_comment")
-        submit_tool = next(x for x in build(bindings) if x.name == "submit_pr_review")
-        stage_tool.execute({"path": "src/app.py", "line": 12, "body": "finding"}, _ctx())
-        with pytest.raises(RpcCommandError, match="fallback comment posting failed"):
-            submit_tool.execute({"body": "summary"}, _ctx())
-    finally:
-        _stop_loop(loop, t)
-
-    rows = db.list_staged_review_comments(bindings.issue_key)
-    assert len(rows) == 1
-    assert rows[0].path == "src/app.py"
-
-
 def test_submit_pr_review_empty_patch_fails_open(db: Database, tmp_path: Path) -> None:
     """A file whose patch the platform omitted is not a rejection reason: the
     comment is kept rather than folded into a 'Not anchored to diff' section."""
@@ -1917,6 +1829,41 @@ def test_review_mode_rejects_push_and_open_pr_before_repo_commands(db: Database,
         _stop_loop(loop, t)
 
     assert calls == []
+
+
+def test_review_mode_without_block_git_push_allows_push_and_open_pr(
+    db: Database, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """review_mode and block_git_push are separate flags: with review_mode=True
+    but block_git_push=False, gh_push_branch/gh_open_pr must proceed past the
+    read-only gate and reach the repo commands (instead of raising the read-only
+    refusal). This is what lets handle_review push fixes while review_pr stays locked."""
+    calls: list[list[str] | tuple[str, ...]] = []
+
+    def record_repo_command(_bindings: ToolBindings, cmd: list[str] | tuple[str, ...], *, timeout: float | None = None):
+        del timeout
+        calls.append(cmd)
+        raise AssertionError("reached repo command past the block_git_push gate")
+
+    bindings, loop, t = _bindings(db, tmp_path, httpx.MockTransport(lambda _r: httpx.Response(500)))
+    db.set_issue_classification(bindings.issue_key, "bug")
+    bindings = dataclasses.replace(bindings, review_mode=True, block_git_push=False)
+    try:
+        monkeypatch.setattr(host_tools, "_run_repo_command", record_repo_command)
+        monkeypatch.setattr(host_tools, "_run_pre_publish_bun_fix", lambda *a, **k: None)
+        monkeypatch.setattr(host_tools, "_run_pre_publish_bun_check", lambda *a, **k: None)
+        push = next(x for x in build(bindings) if x.name == "gh_push_branch")
+        with pytest.raises(AssertionError, match="reached repo command"):
+            push.execute({}, _ctx())
+
+        open_pr = next(x for x in build(bindings) if x.name == "gh_open_pr")
+        body = "## Repro\nr\n\n## Cause\nc\n\n## Fix\nf\n\n## Verification\nv\n\nFixes #42\n"
+        with pytest.raises(AssertionError, match="reached repo command"):
+            open_pr.execute({"title": "fix: x", "body": body}, _ctx())
+    finally:
+        _stop_loop(loop, t)
+
+    assert calls, "review_mode alone must NOT block push; repo command should be reached"
 
 
 @pytest.mark.parametrize("classification", ["enhancement", "proposal"])
