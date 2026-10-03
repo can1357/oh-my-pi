@@ -662,10 +662,18 @@ export class CredentialSelector {
 		// opt-in reclaim (higher-priority sibling measured at or above its
 		// `reclaimAbovePct`). Reclaim's threshold sits above the reserve, so a
 		// session leaves at the reserve and returns only after a reset refills it.
-		const automaticPinWouldBeEvicted = (excludePreflightFailures: boolean): boolean =>
-			!sessionPinIsExplicit &&
-			preferredCandidate !== undefined &&
-			candidates.some(candidate => {
+		// Reclaim evicts only when the reclaiming account is the one ranking would
+		// pick next; otherwise the pin would move to a sibling that never met the
+		// reclaim condition.
+		const automaticPinWouldBeEvicted = (excludePreflightFailures: boolean): boolean => {
+			if (sessionPinIsExplicit || preferredCandidate === undefined) return false;
+			const rankedWinner = candidates.find(
+				candidate =>
+					candidate !== preferredCandidate &&
+					!(excludePreflightFailures && preflightFailures.has(candidate)) &&
+					!this.#deps.blocks.isBlocked(provider, providerKey, candidate.selection.index, blockScopes),
+			);
+			return candidates.some(candidate => {
 				if (candidate === preferredCandidate) return false;
 				if (excludePreflightFailures && preflightFailures.has(candidate)) return false;
 				if (
@@ -682,9 +690,9 @@ export class CredentialSelector {
 					blockScopes,
 				);
 				if (
+					candidate === rankedWinner &&
 					candidate.reclaimReady === true &&
-					(candidate.accountPriority ?? 0) > (preferredCandidate.accountPriority ?? 0) &&
-					candidateUnblocked
+					(candidate.accountPriority ?? 0) > (preferredCandidate.accountPriority ?? 0)
 				) {
 					return true;
 				}
@@ -695,6 +703,7 @@ export class CredentialSelector {
 					candidateUnblocked
 				);
 			});
+		};
 		const pinEvictedBeforePreflight = automaticPinWouldBeEvicted(false);
 		if (
 			!hasPlanRequirement &&

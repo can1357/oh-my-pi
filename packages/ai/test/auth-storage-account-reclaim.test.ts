@@ -260,6 +260,40 @@ describe("accountPolicies reclaimAbovePct", () => {
 			"above the account's reserve (25%)",
 		);
 		expect(() => build({ provider: A, account: { accountId: "a" }, reclaimAbovePct: 101 })).toThrow("at most 100");
-		expect(() => build({ provider: A, account: { accountId: "a" }, reclaimAbovePct: 11 })).not.toThrow();
+	});
+
+	test("reclaims at exactly reclaimAbovePct", async () => {
+		const auth = await setup(A, policies(), ["a", "b"]);
+		await pushOntoBackupThenRecover(auth, 0.6);
+		expect(await next(auth, A, "S1")).toBe("a");
+	});
+
+	test("stays on the backup one point below reclaimAbovePct", async () => {
+		const auth = await setup(A, policies(), ["a", "b"]);
+		await pushOntoBackupThenRecover(auth, 0.61);
+		expect(await next(auth, A, "S1")).toBe("b");
+	});
+
+	test("keeps the warm pin when ranking would hand the session to a sibling other than the reclaiming account", async () => {
+		const auth = await setup(
+			A,
+			[
+				{ provider: A, account: { accountId: "a" }, priority: 10, reservePct: 5, reclaimAbovePct: 10 },
+				{ provider: A, account: { accountId: "b" }, priority: 5 },
+				{ provider: A, account: { accountId: "c" }, priority: 0 },
+			],
+			["a", "b", "c"],
+		);
+		// S1 starts on B: A is inside its reserve and C's 5h window is hot.
+		setUsage(A, "a", 0.97, 0.1);
+		setUsage(A, "b", 0.3, 0.1);
+		setUsage(A, "c", 0.95, 0.1);
+		expect(await next(auth, A, "S1")).toBe("b");
+		// A recovers past its reclaim line, but the hot-window guard ranks C first.
+		await advance(auth, A, 10 * MIN);
+		setUsage(A, "a", 0.88, 0.1);
+		setUsage(A, "b", 0.86, 0.1);
+		setUsage(A, "c", 0, 0.1);
+		expect(await next(auth, A, "S1")).toBe("b");
 	});
 });
