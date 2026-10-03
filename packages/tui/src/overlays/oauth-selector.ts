@@ -405,7 +405,7 @@ export class OAuthSelectorComponent extends OverlayPanel {
 					theme.fg(
 						"dim",
 						this.#removalInFlight
-							? "Removing saved credentials…"
+							? `${formatKeyHint("escape")} close; removal continues`
 							: `${formatKeyHint("enter")} confirm · ${formatKeyHint("escape")} cancel`,
 					),
 					0,
@@ -461,7 +461,7 @@ export class OAuthSelectorComponent extends OverlayPanel {
 		const onRemove = this.#onRemoveCallback;
 		if (!pending || !onRemove || this.#removalInFlight) return;
 		this.#removalInFlight = true;
-		this.#statusMessage = `Removing saved credentials for ${pending.providerName}…`;
+		this.#statusMessage = undefined;
 		const generation = this.#interactionGeneration;
 		this.#updateList();
 		this.#requestRenderCallback?.();

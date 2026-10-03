@@ -2,6 +2,7 @@ import { afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
 import type { AuthStorage } from "@oh-my-pi/pi-ai";
 import { getOAuthProviders } from "@oh-my-pi/pi-ai/oauth";
 import type { OAuthLoginCallbacks, OAuthProviderId } from "@oh-my-pi/pi-ai/oauth/types";
+import { logger } from "@oh-my-pi/pi-utils";
 import { SignInScene } from "@oh-my-pi/pi-tui/setup/scenes/sign-in";
 import type { SetupSceneHost } from "@oh-my-pi/pi-tui/setup/scenes/types";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
@@ -170,6 +171,7 @@ describe("SignInScene", () => {
 	});
 
 	it("preserves saved credentials and skips refresh when storage removal fails", async () => {
+		const warn = vi.spyOn(logger, "warn").mockImplementation(() => {});
 		const fixture = removalScene({ credentials: [["opencode-go", 1]], failRemove: true });
 		searchProvider(fixture.scene, "opencode-go");
 		fixture.scene.handleInput("\x12");
@@ -180,6 +182,10 @@ describe("SignInScene", () => {
 		expect(fixture.refreshes).toEqual([]);
 		expect(fixture.scene.render(100).join("\n")).toContain("Could not remove saved credentials");
 		expect(fixture.scene.render(100).join("\n")).not.toContain("private credential store detail");
+		expect(warn).toHaveBeenCalledWith(
+			"Provider credential removal failed",
+			expect.objectContaining({ providerId: "opencode-go", error: expect.any(Error) }),
+		);
 		fixture.scene.dispose();
 	});
 
@@ -210,6 +216,11 @@ describe("SignInScene", () => {
 		fixture.scene.handleInput("\x12");
 		fixture.scene.handleInput("\n");
 		await removeStarted.promise;
+		const inFlight = fixture.scene
+			.render(120)
+			.map(line => Bun.stripANSI(line))
+			.join(" ");
+		expect(inFlight.match(/Removing saved credentials/g) ?? []).toHaveLength(1);
 		fixture.scene.handleInput("\x1b");
 		expect(fixture.finishes()).toBe(1);
 		const renderCount = fixture.renders();

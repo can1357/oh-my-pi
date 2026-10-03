@@ -246,7 +246,7 @@ describe("OAuthSelectorComponent saved-credential removal", () => {
 		selector.handleInput("\x12");
 
 		expect(removed).toEqual(["opencode-go"]);
-		expect(rendered(selector)).toContain("Removing saved credentials");
+		expect(rendered(selector)).toContain("removal continues");
 		gate.resolve();
 		await gate.promise;
 		await Promise.resolve();

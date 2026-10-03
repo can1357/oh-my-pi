@@ -11,7 +11,7 @@ import { editorKey } from "../../chrome/keybinding-hints";
 import { matchesKey } from "../../keys";
 import { type SgrMouseEvent } from "../../mouse";
 import { wrapTextWithAnsi } from "../../utils";
-import { getAgentDbPath } from "@oh-my-pi/pi-utils";
+import { getAgentDbPath, logger } from "@oh-my-pi/pi-utils";
 import { OAuthSelectorComponent } from "../../overlays/oauth-selector";
 import { theme } from "../../theme/theme";
 import { col, node, span, text } from "../../native/describe";
@@ -137,10 +137,6 @@ export class SignInScene implements SetupSceneController {
 			if (matchesKey(data, "escape") || matchesKey(data, "ctrl+c")) {
 				this.#loginAbort?.abort();
 			}
-			return;
-		}
-		if (this.#removingProvider) {
-			this.#selector.handleInput(data);
 			return;
 		}
 		this.#selector.handleInput(data);
@@ -373,11 +369,11 @@ export class SignInScene implements SetupSceneController {
 			}
 			this.#statusLines = statusLines;
 			this.#host.requestRender();
-		} catch {
+		} catch (error) {
 			if (this.#disposed) return;
+			logger.warn("Provider credential removal failed", { providerId, error });
 			this.#statusLines = [{ text: `Could not remove saved credentials for ${providerId}.`, color: "error" }];
 			this.#host.requestRender();
-			throw new Error("Could not remove saved credentials");
 		} finally {
 			this.#removingProvider = undefined;
 		}
