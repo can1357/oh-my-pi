@@ -12,7 +12,9 @@ use std::{
 use gix::bstr::{BString, ByteSlice};
 
 use super::{
-	GitRepo, normalize_path,
+	GitRepo,
+	filter::WorktreeFilter,
+	normalize_path,
 	open::{load_index_or_empty, load_index_or_head, status_with_fresh_index, status_with_index},
 	read::literal_pathspec,
 };
@@ -1470,13 +1472,14 @@ fn checkout_conflicts(
 	target: &gix::index::File,
 ) -> Result<Vec<String>> {
 	let mut conflicts = Vec::new();
+	let mut filter = WorktreeFilter::staging(repo, "git checkout")?;
 	for entry in current.entries() {
 		let path = entry.path(current).to_str_lossy().into_owned();
 		let target_entry = target.entry_by_path(path.as_bytes().as_bstr());
 		if target_entry.is_some_and(|e| e.id == entry.id && e.mode == entry.mode) {
 			continue;
 		}
-		if worktree_id(repo, &root.join(&path), entry.mode)? != Some(entry.id) {
+		if worktree_id(repo, &mut filter, root, &path, entry.mode)? != Some(entry.id) {
 			conflicts.push(path);
 		}
 	}
@@ -1485,21 +1488,27 @@ fn checkout_conflicts(
 	Ok(conflicts)
 }
 
+/// Blob id the worktree entry at repo-relative `path` would be staged as —
+/// regular files pass through the clean filters, so a CRLF checkout under
+/// `core.autocrlf` matches its LF blob — or `None` when it is missing.
 fn worktree_id(
 	repo: &gix::Repository,
-	path: &Path,
+	filter: &mut WorktreeFilter<'_>,
+	root: &Path,
+	path: &str,
 	mode: gix::index::entry::Mode,
 ) -> Result<Option<gix::hash::ObjectId>> {
-	if !path.exists() && fs::symlink_metadata(path).is_err() {
+	let absolute = root.join(path);
+	if !absolute.exists() && fs::symlink_metadata(&absolute).is_err() {
 		return Ok(None);
 	}
 	let data = if mode == gix::index::entry::Mode::SYMLINK {
-		fs::read_link(path)?
+		fs::read_link(&absolute)?
 			.to_string_lossy()
 			.into_owned()
 			.into_bytes()
 	} else {
-		fs::read(path)?
+		filter.worktree_to_git(path, fs::read(&absolute)?)?
 	};
 	Ok(Some(
 		gix::objs::compute_hash(repo.object_hash(), gix::objs::Kind::Blob, &data)
@@ -1539,20 +1548,21 @@ fn restore_index_paths(
 	index: &gix::index::File,
 	files: &[String],
 ) -> Result<()> {
+	let mut filter = WorktreeFilter::staging(repo, "git restore")?;
 	for entry in index.entries() {
 		let path = entry.path(index).to_str_lossy();
 		if files.is_empty() || files.iter().any(|wanted| path_matches(&path, wanted)) {
 			let object = repo
 				.find_object(entry.id)
 				.map_err(|e| Error::backend("git restore", e))?;
-			let blob = object
+			let mut blob = object
 				.try_into_blob()
 				.map_err(|e| Error::backend("git restore", e))?;
 			let full = root.join(path.as_ref());
 			if let Some(parent) = full.parent() {
 				fs::create_dir_all(parent)?;
 			}
-			fs::write(full, &blob.data)?;
+			fs::write(full, filter.git_to_worktree(&path, blob.take_data())?)?;
 		}
 	}
 	Ok(())
@@ -1801,13 +1811,10 @@ fn branch_is_checked_out(common: &Path, full_ref: &str) -> bool {
 fn tracked_worktree_dirty(repo: &GitRepo) -> Result<bool> {
 	let gix = repo.gix()?;
 	let index = load_index_or_head(&gix, "git worktree remove")?;
+	let mut filter = WorktreeFilter::staging(&gix, "git worktree remove")?;
 	for entry in index.entries() {
-		if worktree_id(
-			&gix,
-			&repo.root().join(entry.path(&index).to_str_lossy().as_ref()),
-			entry.mode,
-		)? != Some(entry.id)
-		{
+		let path = entry.path(&index).to_str_lossy();
+		if worktree_id(&gix, &mut filter, repo.root(), &path, entry.mode)? != Some(entry.id) {
 			return Ok(true);
 		}
 	}
@@ -1904,6 +1911,10 @@ mod tests {
 		// gix reads the developer's `~/.gitconfig`, where a global
 		// `core.hooksPath` would redirect hook lookup away from this fixture.
 		git(temp.path(), &["config", "core.hooksPath", ".git/hooks"]);
+		// Assertions compare exact worktree bytes; Git for Windows' system
+		// `core.autocrlf=true` would check them out as CRLF. Tests covering
+		// line-ending conversion opt back in explicitly.
+		git(temp.path(), &["config", "core.autocrlf", "false"]);
 		fs::write(temp.path().join("a"), "one\n").unwrap();
 		fs::write(temp.path().join("b"), "two\n").unwrap();
 		git(temp.path(), &["add", "."]);
@@ -2267,6 +2278,47 @@ mod tests {
 		repo.reset(ResetMode::Hard, Some(&main)).unwrap();
 		assert!(repo.delete_branch("other", true).unwrap());
 		assert!(!repo.delete_branch("missing", true).unwrap());
+	}
+
+	#[test]
+	fn checkout_restore_and_worktree_remove_honor_autocrlf() {
+		// Regression: conflict and dirty checks hashed raw worktree bytes, so a
+		// CRLF checkout under `core.autocrlf=true` (the Git for Windows default)
+		// read as modified and blocked the next checkout or a non-forced
+		// worktree removal, and restore wrote LF where git writes CRLF.
+		let (temp, repo) = fixture();
+		git(temp.path(), &["config", "core.autocrlf", "true"]);
+		repo.create_branch("other", "HEAD", false).unwrap();
+		fs::write(temp.path().join("a"), "main\n").unwrap();
+		repo.stage_files(&["a".into()]).unwrap();
+		repo
+			.commit_create("main", &CommitOptions::default())
+			.unwrap();
+		repo.checkout("other").unwrap();
+		assert_eq!(fs::read_to_string(temp.path().join("a")).unwrap(), "one\r\n");
+		repo.checkout("main").unwrap();
+		assert_eq!(fs::read_to_string(temp.path().join("a")).unwrap(), "main\r\n");
+		assert_eq!(git(temp.path(), &["status", "--porcelain"]), "");
+
+		fs::write(temp.path().join("a"), "dirty\r\n").unwrap();
+		assert!(matches!(repo.checkout("other"), Err(Error::Conflict { .. })));
+		repo
+			.restore(&RestoreOptions { files: vec!["a".into()], ..Default::default() })
+			.unwrap();
+		assert_eq!(fs::read_to_string(temp.path().join("a")).unwrap(), "main\r\n");
+		assert_eq!(git(temp.path(), &["status", "--porcelain"]), "");
+
+		let linked = temp.path().join("../linked-autocrlf");
+		let _ = fs::remove_dir_all(&linked);
+		repo
+			.worktree_add(&linked, "main", WorktreeAddOptions {
+				detach:       true,
+				clone:        WorktreeClone::Off,
+				keep_changes: false,
+			})
+			.unwrap();
+		assert_eq!(fs::read_to_string(linked.join("a")).unwrap(), "main\r\n");
+		assert!(repo.worktree_remove(&linked, false).unwrap(), "clean CRLF checkout is not dirty");
 	}
 
 	#[test]
@@ -2791,7 +2843,7 @@ mod tests {
 			.unwrap();
 		assert!(
 			git(temp.path(), &["worktree", "list", "--porcelain"])
-				.contains(linked.to_string_lossy().as_ref())
+				.contains(git_metadata_path(&linked).as_ref())
 		);
 		assert!(repo.worktree_remove(&linked, true).unwrap());
 
@@ -2813,7 +2865,7 @@ mod tests {
 		assert_eq!(git(temp.path(), &["rev-parse", "HEAD"]), source_head);
 		assert!(
 			!git(temp.path(), &["worktree", "list", "--porcelain"])
-				.contains(linked.to_string_lossy().as_ref())
+				.contains(git_metadata_path(&linked).as_ref())
 		);
 		assert!(repo.worktree_prune().is_ok());
 		let _ = fs::remove_dir_all(linked);

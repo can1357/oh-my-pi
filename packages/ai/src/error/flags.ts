@@ -552,28 +552,31 @@ function classifyText(
 		) {
 			kinds |= Flag.UsageLimit;
 		}
-		if (isTimeoutText(errorMessage)) kinds |= Flag.Transient | Flag.Timeout;
-		else if (isTransientErrorText(errorMessage)) kinds |= Flag.Transient;
-		// A stream truncation, transport-level stream drop, or forwarded Codex HTTP
-		// body-read failure may not match TRANSIENT_TRANSPORT_PATTERN. Flag it
-		// explicitly so AIError.retriable and the turn-recovery layer treat it as
-		// retryable, matching the provider retry path (isProviderRetryableError).
-		// Separate `if` (not chained onto the else-if) so a timeout whose text also
-		// reads as a truncation keeps Flag.Timeout alongside Flag.Transient. The
-		// string arm applies the strict STREAM_PARSE_DIAGNOSTIC_PATTERN, per the
-		// rationale on isTransientStreamParseError. Skip a phrase that rides on a
-		// terminal 4xx (e.g. a malformed request rejected as "400 unexpected EOF"):
-		// that is a deterministic client error that replays identically, so keep it
-		// terminal. classify() carries the outer terminal status down the cause
-		// chain so a wrapped truncation (ProviderHttpError 400 → cause "unexpected
-		// EOF") is caught here too.
-		if (
-			!isTerminalClientErrorStatus(statusClean) &&
-			(isTransientStreamParseError(errorMessage) ||
+		// Transport/timeout/truncation wording that rides on a terminal 4xx (e.g. a
+		// "400 unexpected EOF" malformed request, or a region/entitlement denial
+		// whose body carries `type=server_error`) describes a deterministic client
+		// error that replays identically, so keep it terminal — the same 4xx policy
+		// as isProviderRetryableError. classify() carries the outer terminal status
+		// down the cause chain so a wrapped phrase (ProviderHttpError 400 → cause
+		// "unexpected EOF") is caught here too.
+		if (!isTerminalClientErrorStatus(statusClean)) {
+			if (isTimeoutText(errorMessage)) kinds |= Flag.Transient | Flag.Timeout;
+			else if (isTransientErrorText(errorMessage)) kinds |= Flag.Transient;
+			// A stream truncation, transport-level stream drop, or forwarded Codex
+			// HTTP body-read failure may not match TRANSIENT_TRANSPORT_PATTERN. Flag
+			// it explicitly so AIError.retriable and the turn-recovery layer treat it
+			// as retryable, matching the provider retry path. Separate `if` (not
+			// chained onto the else-if) so a timeout whose text also reads as a
+			// truncation keeps Flag.Timeout alongside Flag.Transient. The string arm
+			// applies the strict STREAM_PARSE_DIAGNOSTIC_PATTERN, per the rationale
+			// on isTransientStreamParseError.
+			if (
+				isTransientStreamParseError(errorMessage) ||
 				isTransientStreamDropError(errorMessage) ||
-				CODEX_HTTP_BODY_READ_ERROR_PATTERN.test(errorMessage))
-		) {
-			kinds |= Flag.Transient;
+				CODEX_HTTP_BODY_READ_ERROR_PATTERN.test(errorMessage)
+			) {
+				kinds |= Flag.Transient;
+			}
 		}
 		// A concurrency cap (e.g. Vertex "Online prediction concurrent requests
 		// quota exceeded") is transient — shed-and-backoff. The bare wording need
@@ -614,9 +617,10 @@ export function classify(error: unknown, api?: Api): number {
 	const causeTokenEvidence = hasCauseTokenContextOverflowEvidence(error);
 	let link: unknown = error;
 	// A terminal 4xx on an outer link governs its own cause diagnostics: a
-	// wrapped truncation is describing why the deterministic request failed,
-	// not an independently retryable transport fault. Carry it down so the
-	// stream-parse guard in classifyText sees it on the status-less cause.
+	// wrapped truncation or transport phrase is describing why the deterministic
+	// request failed, not an independently retryable transport fault. Carry it
+	// down so the terminal-4xx guard in classifyText sees it on the status-less
+	// cause.
 	let governingTerminalStatus: number | undefined;
 	while (link !== undefined && link !== null) {
 		if (typeof link === "object") {

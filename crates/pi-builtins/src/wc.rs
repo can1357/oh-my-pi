@@ -114,14 +114,22 @@ mod count_fast {
 	
 		#[cfg(windows)]
 		{
-			if let Some(file) = handle.native_file() {
-				if let Ok(metadata) = file.metadata() {
-					let attributes = metadata.file_attributes();
-	
-					if (attributes & FILE_ATTRIBUTE_ARCHIVE) != 0
-						|| (attributes & FILE_ATTRIBUTE_NORMAL) != 0
+			use std::io::{Seek as _, SeekFrom};
+
+			if let Some(mut file) = handle.native_file()
+				&& let Ok(metadata) = file.metadata()
+			{
+				let attributes = metadata.file_attributes();
+
+				if (attributes & FILE_ATTRIBUTE_ARCHIVE) != 0
+					|| (attributes & FILE_ATTRIBUTE_NORMAL) != 0
+				{
+					// Count from the current offset (`{ head -c2; wc -c; } < f`) and
+					// leave the handle at EOF, as reading it would, like the unix path.
+					if let Ok(current) = file.stream_position()
+						&& file.seek(SeekFrom::End(0)).is_ok()
 					{
-						return (metadata.file_size() as usize, None);
+						return (metadata.file_size().saturating_sub(current) as usize, None);
 					}
 				}
 			}

@@ -3,6 +3,7 @@ import { existsSync } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { procmgr } from "@oh-my-pi/pi-utils";
 import { getOrCreateSnapshot, sanitizeSnapshotForBrush } from "@oh-my-pi/pi-coding-agent/utils/shell-snapshot";
 import fnEnvHelper from "../src/utils/shell-snapshot-fn-env.sh" with { type: "text" };
 
@@ -15,6 +16,10 @@ const REAL_BASH = Bun.env.SHELL?.includes("bash") ? Bun.env.SHELL : "/bin/bash";
 // function invokes): macOS has no `/usr/bin/echo`, so hard-coding it makes the
 // replay fail with `No such file or directory` even though the export landed.
 const REAL_ECHO = Bun.which("echo") ?? "/bin/echo";
+// A bare `bash` on Windows usually resolves to the WSL launcher
+// (`WindowsApps\bash.exe`), which runs inside Linux without the spawn env; use
+// the Git Bash the product itself resolves.
+const HELPER_BASH = process.platform === "win32" ? procmgr.resolveWindowsShell() : "bash";
 
 /** Mirrors the per-uid snapshot dir name computed in `getOrCreateSnapshot`. */
 function snapshotDirIn(tmpRoot: string): string {
@@ -122,7 +127,7 @@ describe("shell-snapshot fn-env helper", () => {
 			``,
 		].join("\n");
 
-		const child = Bun.spawn(["bash", "-c", `${fnEnvHelper}\n__omp_emit_referenced_exports`], {
+		const child = Bun.spawn([HELPER_BASH, "-c", `${fnEnvHelper}\n__omp_emit_referenced_exports`], {
 			env: {
 				PATH: process.env.PATH ?? "/usr/bin:/bin",
 				__MISE_EXE: "/opt/echo",
@@ -163,7 +168,7 @@ describe("shell-snapshot fn-env helper", () => {
 			``,
 		].join("\n");
 
-		const child = Bun.spawn(["bash", "-c", `${fnEnvHelper}\n__omp_emit_referenced_exports`], {
+		const child = Bun.spawn([HELPER_BASH, "-c", `${fnEnvHelper}\n__omp_emit_referenced_exports`], {
 			env: {
 				PATH: process.env.PATH ?? "/usr/bin:/bin",
 				GITHUB_TOKEN: "ghp_REDACTED",
@@ -209,7 +214,7 @@ describe("shell-snapshot fn-env helper", () => {
 
 	it("single-quote-escapes values containing apostrophes and preserves newlines", async () => {
 		const funcs = `shout () { echo "$TRICKY_VAL $NL_VAL"; }\n`;
-		const child = Bun.spawn(["bash", "-c", `${fnEnvHelper}\n__omp_emit_referenced_exports`], {
+		const child = Bun.spawn([HELPER_BASH, "-c", `${fnEnvHelper}\n__omp_emit_referenced_exports`], {
 			env: {
 				PATH: process.env.PATH ?? "/usr/bin:/bin",
 				TRICKY_VAL: "it's 'tricky'",
@@ -229,7 +234,7 @@ describe("shell-snapshot fn-env helper", () => {
 
 		// Eval the emitted lines and verify the round-trip values match.
 		const round = Bun.spawn(
-			["bash", "-c", `eval "$1"; printf '%s\\n' "$TRICKY_VAL"; printf '%s\\n' "$NL_VAL"`, "_", out],
+			[HELPER_BASH, "-c", `eval "$1"; printf '%s\\n' "$TRICKY_VAL"; printf '%s\\n' "$NL_VAL"`, "_", out],
 			{ stdout: "pipe", stderr: "ignore" },
 		);
 		const echoed = await readStream(round.stdout as ReadableStream<Uint8Array> | null);
