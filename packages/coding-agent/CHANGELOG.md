@@ -6,6 +6,10 @@
 
 - Added `advisor.messageRole` to opt into user-role transport for advisor feedback while keeping `developer` as the default. Saved feedback retains its delivery role across replay and compaction; legacy messages remain developer-role ([#14185](https://github.com/can1357/oh-my-pi/pull/14185) by [@olegpulatov](https://github.com/olegpulatov)).
 
+### Fixed
+
+- Fixed the IDA integration on Windows: the IDA worker crashed after its first response, and timing out or aborting an IDA request killed the worker instead of interrupting it ([#14186](https://github.com/can1357/oh-my-pi/pull/14186) by [@H4vC](https://github.com/H4vC))
+
 ## [18.5.0] - 2026-10-03
 
 ### Breaking Changes
