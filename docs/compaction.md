@@ -528,7 +528,7 @@ Defined in `packages/coding-agent/src/session/context-settings.ts`:
 - `compaction.supersedeReads` = `true`
 - `compaction.dropUseless` = `true`
 - `snapcompact.systemPrompt` = `"none"` (`"agents-md"` and `"all"` opt into transient system-prompt imaging)
-- `snapcompact.toolResults` = `false` (transient imaging of large historical tool results)
+- `snapcompact.toolResults` = `false` (transient imaging of large tool results, the newest one included. A result's text-or-image form is decided when it is first sent and stays the same on later requests as long as the `snapcompact.*` settings, the model, and the earlier history are unchanged, so the prompt cache and signed thinking after it stay valid. Changing those settings or the model, or compaction and pruning of earlier history, can change earlier forms. When later images push a request over the provider's image cap, the newest imaged results go back to text and the change is marked as a history rewrite, so thinking signed against their frames is dropped rather than rejected)
 - `snapcompact.shape` = `"auto"`
 - `branchSummary.enabled` = `false`
 - `branchSummary.reserveTokens` = `16384`
