@@ -1965,7 +1965,11 @@ export class ExtensionRunner {
 		return transformed;
 	}
 
-	async emitContext(messages: AgentMessage[], signal?: AbortSignal): Promise<AgentMessage[]> {
+	async emitContext(
+		messages: AgentMessage[],
+		signal?: AbortSignal,
+		tools?: readonly string[],
+	): Promise<AgentMessage[]> {
 		const ctx = this.createContext();
 
 		// Check if any extensions actually have context handlers before cloning
@@ -1997,7 +2001,7 @@ export class ExtensionRunner {
 			if (!handlers || handlers.length === 0) continue;
 
 			for (const handler of handlers) {
-				const event: ContextEvent = { type: "context", messages: currentMessages };
+				const event: ContextEvent = { type: "context", messages: currentMessages, tools };
 				const handlerResult = await this.#runHandlerWithTimeout(
 					handler,
 					event,

@@ -4075,7 +4075,14 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		};
 
 		const transformContext = async (messages: AgentMessage[], signal?: AbortSignal) => {
-			const withContext = await extensionRunner.emitContext(messages, signal);
+			// Roster handed to `context` handlers: top-level active names plus tools
+			// mounted under xd://, which are callable via `write xd://<tool>` without
+			// ever appearing top-level. Restricted sessions (vibe directors) grant
+			// neither the transport nor any mounts, so their roster stays reduced.
+			const roster = toolSession.xdev
+				? [...new Set([...activeToolNames, ...toolSession.xdev.mountedNames])]
+				: [...activeToolNames];
+			const withContext = await extensionRunner.emitContext(messages, signal, roster);
 			return wrapSteeringForModel(withContext);
 		};
 		// Per-request provider-context transforms. Obfuscate FIRST so secrets are

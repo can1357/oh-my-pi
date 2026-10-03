@@ -1905,6 +1905,14 @@ describe("createAgentSession defaultInactive tool activation", () => {
 				expect(session.getToolByName(name)).toBeDefined();
 				expect(session.getActiveToolNames()).toContain(name);
 			}
+			// Vibe activation is a restriction, not an addition: every tool outside
+			// the base list is dropped from the active roster (extension tools
+			// included). The extension `context` event exposes this same roster, so
+			// a regression here would make roster-based gating in plugins silently
+			// never fire (e.g. tool-specific notes injected into vibe directors).
+			const baseNames = new Set(["read", "todo", ...VIBE_TOOL_NAMES]);
+			expect(previousActiveToolNames.length).toBeGreaterThan(baseNames.size);
+			expect(session.getActiveToolNames().filter(name => !baseNames.has(name))).toEqual([]);
 
 			await todo.execute("vibe-todo-init", {
 				op: "init",
