@@ -4810,6 +4810,42 @@ describe("AgentSession retry fallback", () => {
 		expect(session.model?.provider).toBe(fallbackModel.provider);
 		expect(session.model?.id).toBe(fallbackModel.id);
 	});
+	it("restores the worker chain head after cooldown while the global policy remains never", async () => {
+		const primaryModel = getBundledModel("anthropic", "claude-sonnet-4-5");
+		const fallbackModel = getBundledModel("openai", "gpt-4o-mini");
+		if (!primaryModel || !fallbackModel) throw new Error("Expected bundled test models");
+		const requestedModels: string[] = [];
+		const agent = createFallbackAgent(primaryModel, requestedModels, { retryAfterMs: 200 });
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"retry.baseDelayMs": 5,
+			"retry.fallbackChains": { critical_worker: [`${fallbackModel.provider}/${fallbackModel.id}`] },
+			"retry.fallbackRevertPolicy": "never",
+			"retry.fallbackRevertPolicies": { critical_worker: "cooldown-expiry" },
+		});
+		settings.setModelRole("critical_worker", `${primaryModel.provider}/${primaryModel.id}`);
+		const sessionManager = SessionManager.inMemory();
+		sessionManager.appendModelChange(`${primaryModel.provider}/${primaryModel.id}`, "critical_worker");
+		session = new AgentSession({ agent, sessionManager, settings, modelRegistry });
+		let now = Date.now();
+		vi.spyOn(Date, "now").mockImplementation(() => now);
+
+		await session.prompt("Worker hits rate limit");
+		await session.waitForIdle();
+		await session.prompt("Worker stays on fallback during cooldown");
+		await session.waitForIdle();
+		now += 240;
+		await session.prompt("Worker retries chain head after cooldown");
+		await session.waitForIdle();
+		expect(requestedModels).toEqual([
+			`${primaryModel.provider}/${primaryModel.id}`,
+			`${fallbackModel.provider}/${fallbackModel.id}`,
+			`${fallbackModel.provider}/${fallbackModel.id}`,
+			`${primaryModel.provider}/${primaryModel.id}`,
+		]);
+		expect(session.servingModel?.isFallback).toBe(false);
+	});
+
 	it("suppresses cooled selectors and lazily reverts to the role primary after cooldown expiry", async () => {
 		const primaryModel = getBundledModel("anthropic", "claude-sonnet-4-5");
 		const fallbackModel = getBundledModel("openai", "gpt-4o-mini");

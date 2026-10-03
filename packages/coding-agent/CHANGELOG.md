@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added per-chain fallback revert policies so worker chains can retry their primary after cooldown while other sessions stay on their fallback.
+
 ## [18.5.1] - 2026-10-03
 
 ### Added
