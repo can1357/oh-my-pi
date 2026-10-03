@@ -11,7 +11,7 @@ import { editorKey } from "../../chrome/keybinding-hints";
 import { matchesKey } from "../../keys";
 import { type SgrMouseEvent } from "../../mouse";
 import { wrapTextWithAnsi } from "../../utils";
-import { getAgentDbPath } from "@oh-my-pi/pi-utils";
+import { getAgentDbPath, logger } from "@oh-my-pi/pi-utils";
 import { OAuthSelectorComponent } from "../../overlays/oauth-selector";
 import { theme } from "../../theme/theme";
 import { col, node, span, text } from "../../native/describe";
@@ -101,6 +101,7 @@ export class SignInScene implements SetupSceneController {
 	#promptAbortCleanup: (() => void) | undefined;
 	#loginAbort: AbortController | undefined;
 	#loggingInProvider: string | undefined;
+	#removingProvider: string | undefined;
 	#disposed = false;
 	#step: WizardStep | undefined;
 	#native = new Memo();
@@ -318,12 +319,74 @@ export class SignInScene implements SetupSceneController {
 				void this.#login(providerId);
 			},
 			() => this.#host.finish("skipped"),
-			{ requestRender: () => this.#host.requestRender(), disabledProviders: this.#host.ctx.disabledProviders },
+			{
+				requestRender: () => this.#host.requestRender(),
+				disabledProviders: this.#host.ctx.disabledProviders,
+				onRemove: providerId => this.#removeSavedCredentials(providerId),
+			},
 		);
 	}
 
+	async #removeSavedCredentials(providerId: string): Promise<void> {
+		if (this.#loggingInProvider || this.#removingProvider || this.#disposed) return;
+		this.#removingProvider = providerId;
+		this.#statusLines = [{ text: `Removing saved credentials for ${providerId}…`, color: "dim" }];
+		this.#host.requestRender();
+		try {
+			await this.#authStorage.credentials.reload();
+			if (this.#disposed) return;
+			if (!this.#authStorage.credentials.has(providerId)) {
+				this.#statusLines = [
+					{ text: `No saved credentials for ${providerId}; nothing was removed.`, color: "warning" },
+				];
+				this.#host.requestRender();
+				return;
+			}
+
+			await this.#authStorage.credentials.remove(providerId);
+
+			let refreshFailed = false;
+			try {
+				await this.#host.ctx.refreshProvider(providerId);
+			} catch {
+				refreshFailed = true;
+			}
+			if (this.#disposed) return;
+
+			const statusLines: StyledLine[] = [{ text: `Removed saved credentials for ${providerId}.`, color: "success" }];
+			const remainingSource = this.#authStorage.keys.describe(providerId);
+			if (remainingSource) {
+				statusLines.push({
+					text: `Still authenticated via ${remainingSource}; external credentials were not removed.`,
+					color: "warning",
+				});
+			}
+			if (refreshFailed) {
+				statusLines.push({
+					text: "Provider model refresh failed; refresh the provider again if its model list is stale.",
+					color: "warning",
+				});
+			}
+			this.#statusLines = statusLines;
+			this.#host.requestRender();
+		} catch (error) {
+			if (this.#disposed) return;
+			logger.warn("Provider credential removal failed", { providerId, error });
+			this.#statusLines = [
+				{
+					text: "Could not remove all saved credentials. Some credentials may have been removed; retry to remove any that remain.",
+					color: "error",
+				},
+			];
+			this.#host.requestRender();
+			throw error;
+		} finally {
+			this.#removingProvider = undefined;
+		}
+	}
+
 	async #login(providerId: string): Promise<void> {
-		if (this.#loggingInProvider || this.#disposed) return;
+		if (this.#loggingInProvider || this.#removingProvider || this.#disposed) return;
 		const useManualInput = PASTE_CODE_LOGIN_PROVIDERS.has(providerId);
 		this.#selector.stopValidation();
 		this.#loggingInProvider = providerId;

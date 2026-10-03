@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `Ctrl+D` in provider setup to remove all saved credentials for the highlighted provider ([#14184](https://github.com/can1357/oh-my-pi/pull/14184) by [@fskaeh](https://github.com/fskaeh)).
+
 ## [18.6.0] - 2026-10-03
 
 ### Fixed
