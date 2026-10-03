@@ -612,11 +612,14 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 		// is runtime work (it pauses across agent()/tool bridge calls), so a cell
 		// can legitimately outlive it in wall time — exactly the case
 		// backgrounding exists for.
-		const clampedCellTimeoutMs =
+		const clampedCellTimeoutSec =
 			cells[0].timeoutMs === 0
 				? undefined
-				: clampTimeout("eval", cells[0].timeoutMs / 1000, cfgToolsMaxTimeout.get(session.settings)) * 1000;
-		const autoBackgroundWaitMs = resolveAutoBackgroundWaitMs(thresholdMs, clampedCellTimeoutMs);
+				: clampTimeout("eval", cells[0].timeoutMs / 1000, cfgToolsMaxTimeout.get(session.settings));
+		const autoBackgroundWaitMs = resolveAutoBackgroundWaitMs(
+			thresholdMs,
+			clampedCellTimeoutSec === undefined ? undefined : clampedCellTimeoutSec * 1000,
+		);
 		const startBackgrounded = autoBackgroundWaitMs === 0;
 
 		const rawLabel = params.title?.trim() || params.code.trim().split("\n", 1)[0] || "eval cell";
@@ -671,8 +674,19 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 			{ ownerId: session.getAgentId?.() ?? undefined, foreground: !startBackgrounded },
 		);
 
+		const backgroundStartResult = (extraNotice?: string) =>
+			this.#buildBackgroundStartResult(
+				jobId,
+				cells,
+				languages,
+				notice,
+				latestText,
+				latestDetails,
+				clampedCellTimeoutSec,
+				extraNotice,
+			);
 		if (startBackgrounded) {
-			return this.#buildBackgroundStartResult(jobId, cells, languages, notice, latestText, latestDetails);
+			return backgroundStartResult();
 		}
 		// The job was registered as foreground-backed: hidden from listings and
 		// delivery-suppressed until backgroundJob() promotes it, so a cell
@@ -704,12 +718,13 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 			waitResult.kind === "steer"
 				? "Backgrounded early to handle an incoming message; the cell keeps running."
 				: undefined;
-		return this.#buildBackgroundStartResult(jobId, cells, languages, notice, latestText, latestDetails, steerNotice);
+		return backgroundStartResult(steerNotice);
 	}
 
 	/**
 	 * Tool result returned when a cell converts into a background job: the live
-	 * output tail plus the background notice, with details carrying the running
+	 * output tail plus the background notice stating the cell's deadline
+	 * (`timeoutSec`, `undefined` when disabled), with details carrying the running
 	 * cell snapshot and the async job marker the transcript renderer keys on.
 	 */
 	#buildBackgroundStartResult(
@@ -719,6 +734,7 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 		notice: string | undefined,
 		previewText: string,
 		latestDetails: EvalToolDetails | undefined,
+		timeoutSec: number | undefined,
 		extraNotice?: string,
 	): AgentToolResult<EvalToolDetails> {
 		// latestDetails snapshots are per-update copies (buildUpdateDetails), so
@@ -745,7 +761,7 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 		if (extraNotice) {
 			lines.push(extraNotice, "");
 		}
-		lines.push(formatBackgroundNotice(jobId));
+		lines.push(formatBackgroundNotice(jobId, timeoutSec));
 		return { content: [{ type: "text", text: lines.join("\n") }], details };
 	}
 

@@ -1,20 +1,25 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
-import type { Component } from "@oh-my-pi/pi-tui";
+import { Editor, type Component } from "@oh-my-pi/pi-tui";
 import { KeybindingsManager } from "@oh-my-pi/pi-tui/app-keybindings";
 import { matchesAppFollowUp } from "@oh-my-pi/pi-tui/keybinding-matchers";
 import { setKeybindings } from "@oh-my-pi/pi-tui/keybindings";
 import { matchesKey } from "@oh-my-pi/pi-tui/keys";
-import { Win32InputModeDecoder } from "@oh-my-pi/pi-tui/windows-input-mode";
+import { Win32InputModeDecoder, Win32PasteMarkerNormalizer } from "@oh-my-pi/pi-tui/windows-input-mode";
 import {
 	createProcessTerminalRenderHarness,
 	type ProcessTerminalRenderHarness,
 } from "./process-terminal-render-harness";
+import { defaultEditorTheme } from "./test-themes";
 
 // Records as the Windows console host emits them: CSI Vk;Sc;Uc;Kd;Cs;Rc _
 const SHIFT_ENTER = "\x1b[13;28;13;1;16;1_";
 const CTRL_ENTER = "\x1b[13;28;10;1;8;1_";
 const ENTER = "\x1b[13;28;13;1;0;1_";
 const ENTER_UP = "\x1b[13;28;13;0;0;1_";
+
+function pasteRecords(text: string): string {
+	return [...text].map(char => `\x1b[231;0;${char.charCodeAt(0)};1;0;1_`).join("");
+}
 
 function decodeOne(data: string): string {
 	const keys = new Win32InputModeDecoder().decode(data);
@@ -174,6 +179,52 @@ describe("ProcessTerminal win32-input-mode fallback", () => {
 		await harness.feed(`\x1b[200~first${ENTER.slice(0, 6)}`, `${ENTER.slice(6)}${ENTER_UP}second\x1b[201~`);
 		await harness.feed(ENTER, ENTER_UP);
 		expect(recorder.received).toEqual(["\x1b[200~first\rsecond\x1b[201~", "\r"]);
+	});
+
+	it("treats paste delimiters encoded as win32 key records as framing across stdin reads", async () => {
+		harness = createProcessTerminalRenderHarness(100, 30, { conpty: true, nativeWindowsConsole: true });
+		const editor = new Editor(defaultEditorTheme);
+		harness.tui.addChild(editor);
+		harness.tui.setFocus(editor);
+		await harness.settle();
+		await harness.feed("\x1b[?61;4;6;7;14;21;22;23;24;28;32;42;52c");
+
+		const start = [..."\x1b[200~"].map(char => `${pasteRecords(char)}\x1b[231;0;0;0;0;1_`).join("");
+		const end = pasteRecords("\x1b[201~");
+		await harness.feed(start.slice(0, 17), start.slice(17), "https://example.com", end.slice(0, 31), end.slice(31));
+		expect(editor.getText()).toBe("https://example.com");
+		await harness.feed(end);
+		expect(editor.getText()).toBe("https://example.com");
+	});
+
+	it("decodes record-encoded payload text and release events inside an encoded paste", async () => {
+		harness = createProcessTerminalRenderHarness(100, 30, { conpty: true, nativeWindowsConsole: true });
+		const editor = new Editor(defaultEditorTheme);
+		harness.tui.addChild(editor);
+		harness.tui.setFocus(editor);
+		await harness.settle();
+		await harness.feed("\x1b[?1;2c");
+
+		await harness.feed(
+			pasteRecords("\x1b[200~") +
+				"\x1b[231;0;126;0;0;1_" +
+				pasteRecords("first") +
+				ENTER +
+				ENTER_UP +
+				pasteRecords("second") +
+				pasteRecords("\x1b[201~"),
+		);
+		expect(editor.getText()).toBe("first\nsecond");
+	});
+
+	it("leaves non-marker key records unchanged when a prefix is interrupted", () => {
+		const emitted: string[] = [];
+		const normalizer = new Win32PasteMarkerNormalizer(data => emitted.push(data));
+		const prefix = pasteRecords("\x1b[20");
+		normalizer.process(prefix.slice(0, 8));
+		normalizer.process(prefix.slice(8) + SHIFT_ENTER);
+		normalizer.flush();
+		expect(emitted.join("")).toBe(prefix + SHIFT_ENTER);
 	});
 
 	it("does not request win32-input-mode when the console is served by sshd (#14034)", async () => {

@@ -91,7 +91,7 @@ import { type EventBus, emitSubagentFrame } from "../utils/event-bus";
 import { trackLateCleanup } from "../utils/late-cleanup";
 import { buildNamedToolChoice } from "../utils/tool-choice";
 import type { WorkspaceTree } from "../workspace-tree";
-import { startCompletionProbe } from "./completion-probe";
+import { isCompletionProbeEnabled, startCompletionProbe } from "./completion-probe";
 import { attributeSubagentError } from "./error-attribution";
 import { generateTaskLabel } from "./label";
 import { resolveAgentPrewalkDefault } from "./prewalk";
@@ -125,7 +125,6 @@ import {
 	cfgTaskSoftRequestBudgetNotice,
 	cfgTaskSoftRequestBudget,
 	cfgTaskAgentIdleTtlMs,
-	cfgTaskCompletionProbeMs,
 	cfgTaskMaxRuntimeMs,
 	cfgTaskMaxRecursionDepth,
 	cfgTaskAgentAdvisor,
@@ -144,7 +143,6 @@ import { cfgCompactionThresholdPercent, cfgCompactionThresholdTokens } from "../
 
 export type { YieldItem } from "@oh-my-pi/pi-tui/tools/task";
 
-const MCP_CALL_TIMEOUT_MS = 60_000;
 const TASK_ABORT_CLEANUP_GRACE_MS = 10_000;
 
 /**
@@ -375,45 +373,6 @@ export function collectIrcPeerRoster(
 	return { peers, parkedCount, omittedCount };
 }
 
-function withAbortTimeout<T>(
-	promise: Promise<T>,
-	timeoutMs: number,
-	signal?: AbortSignal,
-	timeoutController?: AbortController,
-): Promise<T> {
-	if (signal?.aborted) {
-		return Promise.reject(new ToolAbortError());
-	}
-
-	const { promise: wrappedPromise, resolve, reject } = Promise.withResolvers<T>();
-	let settled = false;
-	const timeoutId = setTimeout(() => {
-		if (settled) return;
-		settled = true;
-		timeoutController?.abort(new DOMException(`MCP tool call timed out after ${timeoutMs}ms`, "TimeoutError"));
-		reject(new Error(`MCP tool call timed out after ${timeoutMs}ms`));
-	}, timeoutMs);
-
-	const onAbort = () => {
-		if (settled) return;
-		settled = true;
-		clearTimeout(timeoutId);
-		timeoutController?.abort();
-		reject(new ToolAbortError());
-	};
-
-	if (signal) {
-		signal.addEventListener("abort", onAbort, { once: true });
-	}
-
-	promise.then(resolve, reject).finally(() => {
-		if (signal) signal.removeEventListener("abort", onAbort);
-		clearTimeout(timeoutId);
-	});
-
-	return wrappedPromise;
-}
-
 /** Options for subagent execution */
 export interface ExecutorOptions {
 	cwd: string;
@@ -457,6 +416,12 @@ export interface ExecutorOptions {
 	 * if the resolved subagent model has no working credentials. See #985.
 	 */
 	parentActiveModelPattern?: string;
+	/**
+	 * The model patterns are the parent's live selector without a requested
+	 * level, so a `:level` on them is inherited effort that {@link thinkingLevel}
+	 * outranks rather than a level the caller asked for.
+	 */
+	modelInheritsLiveThinkingLevel?: boolean;
 	thinkingLevel?: ConfiguredThinkingLevel;
 	/** Caller-requested coarse effort (`lo`/`med`/`hi`); maps onto the resolved model's supported thinking range and wins over {@link thinkingLevel}. */
 	effort?: TaskEffort;
@@ -753,7 +718,9 @@ export function finalizeSubprocessOutput(args: FinalizeSubprocessOutputArgs): Fi
 				}
 			} else {
 				const { validator, error: schemaError, normalized } = buildOutputValidator(outputSchema);
-				const completeData = assembled.rawText ? assembled.data : parseStringifiedJson(assembled.data ?? null);
+				const submittedData = assembled.rawText ? assembled.data : parseStringifiedJson(assembled.data ?? null);
+				const completeData =
+					mode === "strict" ? (validator?.normalize(submittedData) ?? submittedData) : submittedData;
 				const validation = validator?.validate(completeData);
 				const failure =
 					validation && !validation.success
@@ -948,8 +915,9 @@ function getUsageTokens(usage: unknown): number {
  * retry, abort handling, and result/provider metadata. The source tool is
  * re-resolved on every call by raw MCP server/tool metadata (not the normalized
  * display name), so a reconnect that swaps the instance in `getTools()` is
- * always honored. The proxy adds only the Task-specific 60s call timeout,
- * combining its abort signal with the caller's around source execution.
+ * always honored. The source transport owns the configured MCP deadline,
+ * including timeout=0; a second Task deadline would silently cap longer calls.
+ * The proxy only races caller cancellation around source execution.
  */
 export function createMCPProxyTools(mcpManager: MCPManager): CustomTool[] {
 	return mcpManager.getTools().map(tool => {
@@ -979,18 +947,13 @@ export function createMCPProxyTools(mcpManager: MCPManager): CustomTool[] {
 					};
 				}
 				try {
-					const timeoutController = new AbortController();
-					const timeoutSignal = timeoutController.signal;
-					const combinedSignal = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal;
-					return await withAbortTimeout(
-						Promise.resolve(source.execute(toolCallId, params, onUpdate, ctx, combinedSignal)),
-						MCP_CALL_TIMEOUT_MS,
-						signal,
-						timeoutController,
-					);
+					return await untilAborted(signal, source.execute(toolCallId, params, onUpdate, ctx, signal));
 				} catch (error) {
 					if (error instanceof ToolAbortError) {
 						throw error;
+					}
+					if (signal?.aborted) {
+						throw new ToolAbortError();
 					}
 					return {
 						content: [
@@ -1145,8 +1108,8 @@ interface RunMonitorArgs {
 	softRequestBudgetNotice: boolean;
 	/** Wall-clock cap in ms; 0 disables the timer. */
 	maxRuntimeMs: number;
-	/** Completion self-estimate period in ms (`task.completionProbeMs`); 0 disables it. */
-	completionProbeMs: number;
+	/** Whether to periodically ask the agent for a completion estimate; see {@link isCompletionProbeEnabled}. */
+	completionProbe: boolean;
 	/** Fires each time a terminal `yield` is recorded for this run. */
 	onYieldAccepted?: () => void;
 }
@@ -1245,7 +1208,7 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 		softRequestBudget,
 		softRequestBudgetNotice,
 		maxRuntimeMs,
-		completionProbeMs,
+		completionProbe,
 	} = args;
 	const startTime = Date.now();
 
@@ -2197,10 +2160,9 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 		setActiveSession: session => {
 			activeSession = session;
 			publishAdvisorState(session);
-			if (session && !completionProbeStarted) {
+			if (session && completionProbe && !completionProbeStarted) {
 				completionProbeStarted = true;
 				startCompletionProbe({
-					intervalMs: completionProbeMs,
 					session: () => activeSession,
 					signal: AbortSignal.any([listenerSignal, abortSignal]),
 					onEstimate: (percent, cost) => {
@@ -3084,7 +3046,7 @@ export function attachIrcWakeTurnMonitor(session: AgentSession, options: IrcWake
 			softRequestBudgetNotice: false,
 			maxRuntimeMs,
 			// Autonomous wake turns answer a peer message; too short to probe.
-			completionProbeMs: 0,
+			completionProbe: false,
 			onYieldAccepted: registerWakeJob,
 		});
 
@@ -3374,8 +3336,8 @@ export interface FollowUpTurnOptions {
 	artifactsDir?: string;
 	/** Wall-clock cap in ms for this turn; 0 disables. */
 	maxRuntimeMs?: number;
-	/** Completion self-estimate period in ms for this turn; 0 or absent disables. */
-	completionProbeMs?: number;
+	/** Periodically ask for a completion estimate during this turn; see {@link isCompletionProbeEnabled}. */
+	completionProbe?: boolean;
 	/** Workpool items accepted by the child yield tool during this turn. */
 	workPoolYieldItems?: WorkPoolYieldItem[];
 }
@@ -3462,7 +3424,7 @@ export async function runSubagentFollowUpTurn(options: FollowUpTurnOptions): Pro
 		softRequestBudget: 0,
 		softRequestBudgetNotice: false,
 		maxRuntimeMs: options.maxRuntimeMs ?? 0,
-		completionProbeMs: options.completionProbeMs ?? 0,
+		completionProbe: options.completionProbe ?? false,
 	});
 
 	const startedPayload = {
@@ -3902,7 +3864,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 		softRequestBudget,
 		softRequestBudgetNotice,
 		maxRuntimeMs,
-		completionProbeMs: Math.max(0, Math.trunc(Number(cfgTaskCompletionProbeMs.get(settings)) || 0)),
+		completionProbe: isCompletionProbeEnabled(settings, parentDepth),
 	});
 	const progress = monitor.progress;
 	let unsubscribe: (() => void) | null = null;
@@ -4072,8 +4034,20 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				options.effort !== undefined
 					? resolveTaskEffortLevel(model, options.effort, spawnEffortCeiling)
 					: undefined;
+			// The parent's live effort rides inherited selectors (and the auth
+			// fallback) as a `:level` suffix; it ranks below the agent definition's
+			// own level so inheriting the parent's model does not override it.
+			const inheritedThinkingLevel =
+				explicitThinkingLevel && (authFallbackUsed || options.modelInheritsLiveThinkingLevel === true);
+			const requestedThinkingLevel =
+				explicitThinkingLevel && !inheritedThinkingLevel ? resolvedThinkingLevel : undefined;
+			// Precedence: caller `effort` > requested `:level` suffix on the resolved
+			// model pattern > agent-definition default (e.g. task's `auto`) >
+			// inherited parent effort / pattern-derived level.
+			const effectiveThinkingLevel = effortLevel ?? requestedThinkingLevel ?? thinkingLevel ?? resolvedThinkingLevel;
 			if (model) {
-				const displayLevel = effortLevel ?? (explicitThinkingLevel ? resolvedThinkingLevel : undefined);
+				const displayLevel =
+					effortLevel ?? requestedThinkingLevel ?? (inheritedThinkingLevel ? effectiveThinkingLevel : undefined);
 				progress.resolvedModelIdentity = formatModelStringWithRouting(model);
 				progress.resolvedThinkingLevel = displayLevel;
 				progress.resolvedModel =
@@ -4081,11 +4055,6 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 						? formatModelSelectorValue(progress.resolvedModelIdentity, displayLevel)
 						: progress.resolvedModelIdentity;
 			}
-			// Precedence: caller `effort` > explicit `:level` suffix on the resolved
-			// model pattern > agent-definition default (e.g. task's `auto`) >
-			// pattern-derived level.
-			const effectiveThinkingLevel =
-				effortLevel ?? (explicitThinkingLevel ? resolvedThinkingLevel : (thinkingLevel ?? resolvedThinkingLevel));
 			resolvedAt = performance.now();
 			const effectiveCwd = worktree ?? cwd;
 			const sessionManagerPromise = sessionFile

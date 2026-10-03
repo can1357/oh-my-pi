@@ -1303,6 +1303,29 @@ describe("AskDialogComponent", () => {
 		expect(output).not.toContain("[Alpha]");
 	});
 
+	it("renders fenced diff questions as blocks separate from prose", () => {
+		const component = new AskDialogComponent(
+			[
+				{
+					id: "diff",
+					question: "Review this patch:\n```diff\n-old()\n+new()\n```",
+					options: [{ label: "Apply" }, { label: "Reject" }],
+				},
+			],
+			{ onSubmit: vi.fn(), onCancel: vi.fn(), onPrompt: vi.fn() },
+		);
+
+		const rows = render(component).split("\n");
+		const questionRow = rows.findIndex(row => row.includes("Review this patch:"));
+		const deletionRow = rows.findIndex(row => row.includes("-old()"));
+		const additionRow = rows.findIndex(row => row.includes("+new()"));
+		expect(questionRow).toBeGreaterThanOrEqual(0);
+		expect(deletionRow).toBeGreaterThanOrEqual(0);
+		expect(deletionRow).toBeGreaterThan(questionRow);
+		expect(additionRow).toBeGreaterThan(deletionRow);
+		expect(rows[deletionRow]).not.toContain("+new()");
+	});
+
 	it("bounds in-body question header for long multi-line questions", () => {
 		const onSubmit = vi.fn();
 		const longQuestion = "This is a very long question ".repeat(30);

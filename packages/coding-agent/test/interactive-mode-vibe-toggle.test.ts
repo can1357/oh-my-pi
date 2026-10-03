@@ -1,3 +1,4 @@
+import { Effort } from "@oh-my-pi/pi-catalog/effort";
 /**
  * Contracts: /vibe mode toggle on InteractiveMode.
  *
@@ -653,6 +654,7 @@ describe("InteractiveMode vibe mode toggle", () => {
 
 	it("passes the session's active model into vibe rehydration on resume", async () => {
 		await mode.init({ suppressWelcomeIntro: true });
+		session.setThinkingLevel(Effort.High);
 		await mode.handleVibeModeCommand();
 		await session.sessionManager.ensureOnDisk();
 		const sessionFile = session.sessionFile;
@@ -671,9 +673,9 @@ describe("InteractiveMode vibe mode toggle", () => {
 		expect(await session.switchSession(sessionFile)).toBe(true);
 
 		// Rehydration must resolve workers against the reopened session's active
-		// model (so the `good`/pi/task worker tracks it), not the settings default.
+		// model (so the `good`/pi/task worker tracks it), including its selected effort, not the settings default.
 		expect(rehydrateCalled).toBe(true);
-		expect(activeModelDuringRehydrate).toBe(`${expectedModel.provider}/${expectedModel.id}`);
+		expect(activeModelDuringRehydrate).toBe(`${expectedModel.provider}/${expectedModel.id}:high`);
 	});
 
 	it("suspends the old scope without tombstones when switching to another vibe parent", async () => {
@@ -734,10 +736,12 @@ describe("InteractiveMode vibe mode toggle", () => {
 		await session.sessionManager.ensureOnDisk();
 		const sessionFile = session.sessionFile;
 		if (!sessionFile) throw new Error("Expected persisted session file");
+		const entryId = session.sessionManager.appendMessage({ role: "user", content: "seed", timestamp: Date.now() });
 
 		await expect(session.newSession()).rejects.toThrow("Exit vibe mode first");
 		await expect(session.newSession({ drop: true })).rejects.toThrow("Exit vibe mode first");
 		await expect(session.fork()).rejects.toThrow("Exit vibe mode first");
+		await expect(session.fork(entryId)).rejects.toThrow("Exit vibe mode first");
 		await expect(session.moveSession(path.join(tempDir.path(), "other-project"))).rejects.toThrow(
 			"Exit vibe mode first",
 		);

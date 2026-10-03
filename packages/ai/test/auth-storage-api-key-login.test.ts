@@ -12,7 +12,7 @@ import { removeWithRetries } from "../../utils/src/temp";
 function countCredentialRows(dbPath: string, provider: string): number {
 	const db = new Database(dbPath, { readonly: true });
 	try {
-		const row = db.prepare("SELECT COUNT(*) AS count FROM auth_credentials WHERE provider = ?").get(provider) as
+		const row = db.query("SELECT COUNT(*) AS count FROM auth_credentials WHERE provider = ?").get(provider) as
 			| { count?: number }
 			| undefined;
 		return row?.count ?? 0;
@@ -26,7 +26,7 @@ function countCredentialRowsByDisabledState(dbPath: string, provider: string, di
 	const db = new Database(dbPath, { readonly: true });
 	try {
 		const row = db
-			.prepare(
+			.query(
 				`SELECT COUNT(*) AS count FROM auth_credentials WHERE provider = ? AND disabled_cause ${disabledClause}`,
 			)
 			.get(provider) as { count?: number } | undefined;

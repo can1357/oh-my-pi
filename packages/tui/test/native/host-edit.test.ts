@@ -52,6 +52,22 @@ describe("TSP edit event", () => {
 		await h.render();
 		expect(h.byId(node.id)?.p).toMatchObject({ text: "hello there", cursor: 11 });
 	});
+
+	it("undo reverts the last edit, and is a no-op with nothing to undo", async () => {
+		const editor = new Editor(defaultEditorTheme);
+		harness = await TspHarness.start(tui => tui.addChild(editor));
+		const h = harness;
+		const node = h.find(n => n.k === "editor")!;
+		const sf = h.terminal.surface!;
+		h.event({ ev: "undo", sf, id: node.id });
+		expect(editor.getText()).toBe("");
+		h.event({ ev: "edit", sf, id: node.id, from: 0, to: 0, text: "hi", cursor: 2, len: 0 });
+		expect(editor.getText()).toBe("hi");
+		h.event({ ev: "undo", sf, id: node.id });
+		expect(editor.getText()).toBe("");
+		await h.render();
+		expect(h.byId(node.id)?.p).toMatchObject({ text: "", cursor: 0 });
+	});
 });
 
 describe("Editor.applyHostEdit", () => {

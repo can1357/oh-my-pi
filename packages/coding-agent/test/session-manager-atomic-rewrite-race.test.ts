@@ -338,7 +338,7 @@ describe("SessionManager cross-process rewrite freshness", () => {
 		);
 	const ourTurnsAfter = Array.from({ length: 5 }, (_, turn) => `our turn ${turn} after the conflict`);
 
-	/** Reports `ownedElsewhere` as held by another live process, as `claimSessionFile` does for a file a second omp writes. */
+	/** Reports session `ownedElsewhere` as held by another live process, as `claimSession` does for a session a second omp writes. */
 	class OwnedElsewhereStorage extends FileSessionStorage {
 		readonly #ownedElsewhere: string;
 
@@ -347,8 +347,8 @@ describe("SessionManager cross-process rewrite freshness", () => {
 			this.#ownedElsewhere = ownedElsewhere;
 		}
 
-		override claimSessionFile(sessionPath: string): (() => void) | null {
-			return sessionPath === this.#ownedElsewhere ? null : super.claimSessionFile(sessionPath);
+		override claimSession(sessionId: string, sessionPath: string): (() => void) | null {
+			return sessionId === this.#ownedElsewhere ? null : super.claimSession(sessionId, sessionPath);
 		}
 	}
 
@@ -524,11 +524,12 @@ describe("SessionManager cross-process rewrite freshness", () => {
 			creator.appendMessage(userTurn("our turn before the conflict"));
 			const artifactId = await creator.saveArtifact("tool output", "bash");
 			const owned = creator.getSessionFile();
+			const ownedId = creator.getSessionId();
 			if (!owned || !artifactId) throw new Error("Expected session file and artifact");
 			await creator.close();
 			const ownedBytes = await Bun.file(owned).text();
 
-			const storage = new OwnedElsewhereStorage(owned);
+			const storage = new OwnedElsewhereStorage(ownedId);
 			const ours = await SessionManager.open(owned, tempDir.path(), storage, { suppressBreadcrumb: true });
 			const ownedSessionId = ours.getSessionId();
 			const notices: SessionPersistenceNotice[] = [];

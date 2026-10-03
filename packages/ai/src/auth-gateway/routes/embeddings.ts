@@ -4,7 +4,7 @@ import { classifyGatewayError } from "../../error/gateway";
 import * as embeddings from "../../providers/embeddings-server";
 import { deterministicUuid } from "../../utils/deterministic-id";
 import {
-	type AuthGatewayBootOptions,
+	type AuthGatewayRouteOptions,
 	buildGatewayApiKeyResolver,
 	mirrorRequestAbort,
 	recordGatewayUsage,
@@ -14,7 +14,7 @@ import { gatewayResponseHeaders, json, resolveClientIdentity } from "../http";
 
 /** OpenAI-compatible `POST /v1/embeddings` gateway handler. */
 export async function handleEmbeddings(
-	bootOpts: AuthGatewayBootOptions,
+	bootOpts: AuthGatewayRouteOptions,
 	req: Request,
 	peer: string,
 ): Promise<Response> {

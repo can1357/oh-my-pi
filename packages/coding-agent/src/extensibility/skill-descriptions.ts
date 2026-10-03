@@ -3,7 +3,15 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { type AgentTelemetry, instrumentedCompleteSimple } from "@oh-my-pi/pi-agent-core";
 import type { Api, Model } from "@oh-my-pi/pi-ai";
-import { getAgentDir, isBunTestRuntime, logger, postmortem, prompt } from "@oh-my-pi/pi-utils";
+import {
+	getAgentDir,
+	getSkillDescriptionsDbPath,
+	isBunTestRuntime,
+	isEexist,
+	logger,
+	postmortem,
+	prompt,
+} from "@oh-my-pi/pi-utils";
 import type { ModelRegistry } from "../config/model-registry";
 import { getModelMatchPreferences, parseModelPattern, resolveRoleSelection } from "../config/model-resolver";
 import type { Settings } from "../config/settings";
@@ -105,7 +113,7 @@ function validCompression(text: string): string | null {
 let shared: SkillDescriptionStore | null | undefined;
 
 /**
- * Process-wide store at `<agentDir>/skill-descriptions.db`, opened on first use
+ * Process-wide store at {@link getSkillDescriptionsDbPath}, opened on first use
  * and closed at exit. Opening per render and per compression write created and
  * deleted the `-wal`/`-shm` sidecars and re-ran PRAGMA/CREATE/chmod every time.
  * `undefined` when it cannot be opened (logged once; prompts keep the bounded
@@ -136,10 +144,56 @@ export function sharedSkillDescriptionStore(): SkillDescriptionStore | undefined
 export function openSessionSkillDescriptionStore(agentDir: string): SkillDescriptionStore | undefined {
 	if (isBunTestRuntime()) return undefined;
 	try {
-		return SkillDescriptionStore.open(path.join(agentDir, "skill-descriptions.db"));
+		return SkillDescriptionStore.open(resolveSkillDescriptionsDbPath(agentDir));
 	} catch (error) {
 		logger.warn("Skill description cache unavailable", { agentDir, error: String(error) });
 		return undefined;
+	}
+}
+
+/**
+ * Skill-description database for `agentDir` (default: the process agent dir).
+ * When XDG relocates it away from `<agentDir>/skill-descriptions.db`, a legacy
+ * database is adopted once so enabling XDG does not discard every cached
+ * compression and re-bill the model for it.
+ */
+function resolveSkillDescriptionsDbPath(agentDir?: string): string {
+	const dbPath = getSkillDescriptionsDbPath(agentDir);
+	adoptLegacyDatabase(path.join(agentDir ?? getAgentDir(), "skill-descriptions.db"), dbPath);
+	return dbPath;
+}
+
+/**
+ * Best-effort one-time copy of a legacy SQLite database. `VACUUM INTO` takes a
+ * consistent snapshot including uncheckpointed WAL frames, which a plain file
+ * copy would drop; hard-linking the staged file into place publishes it
+ * atomically and never clobbers a database another process adopted or created
+ * first. Where hard links are unsupported (some FUSE, exFAT, or network
+ * mounts) an exclusive copy keeps the no-clobber guarantee. The legacy file
+ * stays for older omp versions sharing the profile.
+ */
+function adoptLegacyDatabase(legacyPath: string, dbPath: string): void {
+	if (legacyPath === dbPath || fs.existsSync(dbPath) || !fs.existsSync(legacyPath)) return;
+	const staging = `${dbPath}.adopt-${process.pid}`;
+	try {
+		fs.mkdirSync(path.dirname(dbPath), { recursive: true, mode: 0o700 });
+		fs.rmSync(staging, { force: true });
+		const legacy = new Database(legacyPath, { readonly: true });
+		try {
+			legacy.run("VACUUM INTO ?", [staging]);
+		} finally {
+			legacy.close();
+		}
+		try {
+			fs.linkSync(staging, dbPath);
+		} catch (error) {
+			if (isEexist(error)) return;
+			fs.copyFileSync(staging, dbPath, fs.constants.COPYFILE_EXCL);
+		}
+	} catch (error) {
+		logger.debug("Skill description cache not adopted", { legacyPath, dbPath, error: String(error) });
+	} finally {
+		fs.rmSync(staging, { force: true });
 	}
 }
 
@@ -162,7 +216,7 @@ export class SkillDescriptionStore {
 	 * Open (creating if needed) the store at `dbPath`.
 	 * @throws when the directory or database cannot be created.
 	 */
-	static open(dbPath: string = path.join(getAgentDir(), "skill-descriptions.db")): SkillDescriptionStore {
+	static open(dbPath: string = resolveSkillDescriptionsDbPath()): SkillDescriptionStore {
 		fs.mkdirSync(path.dirname(dbPath), { recursive: true, mode: 0o700 });
 		const db = new Database(dbPath, { create: true });
 		try {

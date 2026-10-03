@@ -2,12 +2,85 @@
 
 ## [Unreleased]
 
+## [18.5.1] - 2026-10-03
+
 ### Added
 
-- Added display of subagent completion percent in agent tree, task, and wait views
+- Added native terminal support for submitting explicit composer prompts atomically, preserving displaced drafts and attachments for local recall.
+- Added progress percentages to subagent entries in the agent tree, task, and wait views.
+- Added a `Rebuilding…` indicator for lengthy tmux resize redraws without flashing it for quick updates.
+- Added `writeTerminalSequence()` for sending supported terminal escape sequences through the active terminal output stream, with stdout fallback when no terminal is active.
+
+### Changed
+
+- Clipboard payloads are now represented by their length in `PI_TUI_WRITE_LOG` rather than by their contents.
+
 ### Fixed
 
-- Fixed multiline paste on Windows inserting `[13;28;13;1;0;1_`-style codes instead of line breaks ([#14065](https://github.com/can1357/oh-my-pi/issues/14065))
+- Fixed pending clipboard-image attachments being bypassed when subsequent input or native prompts were submitted before loading completed.
+- Improved narrow `/models` layouts by retaining the scope sidebar while simplifying and truncating model rows as needed.
+- Fixed Markdown rendering with themes that do not define their own symbol set; the active theme's symbols are now used as a fallback.
+- Fixed model role assignment showing models that are unavailable for the selected provider.
+- Improved tmux resize, zoom, and rebuild behavior, including smoother coalesced redraws, reduced visual artifacts and extra output, correct transcript restoration after rapid size changes, and preservation of history when panes are resized.
+- Fixed multiline paste on Windows inserting escape-code fragments instead of line breaks, and prevented bracketed-paste markers from appearing in the composer.
+- Fixed terminal notifications occasionally corrupting the screen with stray escape-code fragments during streaming output.
+- Added rendering and notification compatibility for Monstar terminals, including Kitty graphics, hyperlinks, synchronized output, styled underlines, progress keepalives, and Monstar-focused desktop notifications.
+- Fixed Agent Hub transcripts crashing when assistant messages do not include usage or cost data.
+- Fixed idle terminal activity notifications while preserving bracketed-paste recovery during input and rendering.
+- Fixed diff blocks in ask questions losing their layout; additions and removals now retain separate diff highlighting.
+- Fixed duplicate ASCII Plan, Prewalk, and Goal labels in the status line.
+- Improved Markdown rendering for long and streamed messages, including display math, fenced code, reference links, lists, whitespace, emphasis, and line breaks, so completed content no longer shows raw markup, misplaced blank lines, or broken block layout.
+
+## [18.5.0] - 2026-10-03
+
+### Breaking Changes
+
+- `WelcomeComponent` no longer takes a model or provider: its constructor is `(version)`, and `setModel()`, `setRecentSessions()`, `setLspServers()`, `handleNativeEvent()`, `RecentSession`, `LspServerInfo`, `WELCOME_SESSION_SLOTS` and `WELCOME_LSP_SLOTS` are gone; `ComposerWelcomeUpdate` drops `modelName`/`providerName`/`recentSessions`/`lspServers`, and `ComposerCache` drops `writeWelcome()`, `writeRecentSessions()`, `writeLspServers()`, `ComposerWelcomeCache` and the `welcome`/`recentSessions`/`lspServers` fields of `ComposerStartupCache`.
+- `renderWelcomeTip()` returns its lines without an indent, `Tip:` and the body wrapped together, for the caller to place.
+
+### Added
+
+- Added `ReportPanel`, a read-only command report: a `/btw`-style titled box with an Esc hint in text mode (above the editor, or as a full-screen page whose body scrolls on the arrow/page/Home/End keys and the wheel), and natively a `/usage`-style sheet whose body the terminal scrolls once it is long, with a Close button ([#14136](https://github.com/can1357/oh-my-pi/pull/14136) by [@H4vC](https://github.com/H4vC)).
+- Added `contextUsageHead()`, the `/context` title naming the model and its window ([#14136](https://github.com/can1357/oh-my-pi/pull/14136) by [@H4vC](https://github.com/H4vC)).
+- Added `Composer.rowsBelow()`, the rows the chrome under a below-transcript root took in the last frame ([#14136](https://github.com/can1357/oh-my-pi/pull/14136) by [@H4vC](https://github.com/H4vC)).
+- Added `Composer.pinInputToBottom()`, which keeps the input on the bottom row after chrome above the editor closes when rows it displaced went to scrollback ([#14136](https://github.com/can1357/oh-my-pi/pull/14136) by [@H4vC](https://github.com/H4vC)).
+- Added a repeatable native `reveal` (`{ at, n }`): a described node scrolls into view again whenever its `n` changes, without being re-added.
+
+### Changed
+
+- `ContextUsageView` is now a bare report body without its own title, rules or card; `setBreakdown()` was removed ([#14136](https://github.com/can1357/oh-my-pi/pull/14136) by [@H4vC](https://github.com/H4vC)).
+- The terminal welcome banner is the gradient logo beside the `omp` wordmark with the version under it and the tip, centered in the terminal; the logo stands alone when the lockup does not fit, and the tip drops below 50 columns. It no longer greets with "Welcome back!", natively either.
+
+### Fixed
+
+- Fixed tool previews on Windows showing a working directory on another drive as a raw absolute path instead of its home-shortened `~/…` form.
+- Fixed pasted drive-less `file:///…` URLs (forwarded from a macOS pasteboard or remote session) staying undecoded on Windows instead of loading as image paths.
+- Fixed an output artifact whose file cannot be opened (e.g. a directory in the way) being reported on Windows as a write failure and retried later, instead of a terminal open failure.
+- Fixed plan review's Contents in Tern: clicking an entry, or moving through them with the arrow keys, now scrolls the plan to that section.
+
+### Removed
+
+- Removed `JobsPanel`, the `/jobs` transcript block; `/jobs` now opens `JobsSheet` natively ([#14138](https://github.com/can1357/oh-my-pi/pull/14138) by [@H4vC](https://github.com/H4vC)).
+
+## [18.4.12] - 2026-10-02
+
+### Changed
+
+- Changed Ctrl+Z in Tern's native composer to undo the last edit (TSP `undo` event) instead of suspending
+
+## [18.4.11] - 2026-10-02
+
+### Added
+
+- Added subagent completion percentages to the agent tree, task, and wait views.
+
+### Changed
+
+- Updated notebook evaluation cells in native hosts to use directional gutter indicators for inputs and outputs, with a progress indicator while a cell is running.
+
+### Fixed
+
+- Fixed multiline paste on Windows so pasted line breaks are inserted correctly instead of terminal escape sequences.
 
 ## [18.4.10] - 2026-10-02
 
@@ -2944,14 +3017,4 @@ Initial release under @oh-my-pi scope. See previous releases at [badlogic/pi-mon
 - Crash in `visibleWidth()` and grapheme iteration when encountering undefined code points ([#372](https://github.com/badlogic/pi-mono/pull/372) by [@HACKE-RC](https://github.com/HACKE-RC))
 - ZWJ emoji sequences (rainbow flag, family, etc.) now render with correct width instead of being split into multiple characters ([#369](https://github.com/badlogic/pi-mono/pull/369) by [@nathyong](https://github.com/nathyong))
 
-## [0.29.0] - 2025-12-25
-
-### Added
-
-- **Auto-space before pasted file paths**: When pasting a file path (starting with `/`, `~`, or `.`) and the cursor is after a word character, a space is automatically prepended for better readability. Useful when dragging screenshots from macOS. ([#307](https://github.com/badlogic/pi-mono/pull/307) by [@mitsuhiko](https://github.com/mitsuhiko))
-- **Word navigation for Input component**: Added Ctrl+Left/Right and Alt+Left/Right support for word-by-word cursor movement. ([#306](https://github.com/badlogic/pi-mono/pull/306) by [@kim0](https://github.com/kim0))
-- **Full Unicode input**: Input component now accepts Unicode characters beyond ASCII. ([#306](https://github.com/badlogic/pi-mono/pull/306) by [@kim0](https://github.com/kim0))
-
-### Fixed
-
-- **Readline-style Ctrl+W**: Now skips trailing whitespace before deleting the preceding word, matching standard readline behavior. ([#306](https://github.com/badlogic/pi-mono/pull/306) by [@kim0](https://github.com/kim0))
+Older entries are archived in [packages/tui/CHANGELOG.md@bac7e83b5b0e](https://github.com/can1357/oh-my-pi/blob/bac7e83b5b0eb86c909c17830a6666efc359578b/packages/tui/CHANGELOG.md).

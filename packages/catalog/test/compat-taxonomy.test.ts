@@ -55,6 +55,39 @@ describe("classifyModel", () => {
 		expect(classifyModel("cerebras", "zai-glm-4.7")).toEqual({ class: "glm", revision: "4.7.0" });
 	});
 
+	test("bare K3 SKUs and provider-qualified selectors retain Kimi K3 identity", () => {
+		for (const [provider, model] of [
+			["", "k3"],
+			["", "kimi-code/k3"],
+			["", "kimi-coding/k3"],
+			["kimi-code", "k3"],
+			["kimi-coding", "K3"],
+			["", "k3-256k"],
+			["", "K3-256K"],
+			["", "kimi-code/k3-256k"],
+			["", "kimi-coding/K3-256K"],
+			["kimi-code", "k3-256k"],
+			["kimi-coding", "K3-256K"],
+		] as const) {
+			expect(classifyModel(provider, model)).toEqual({ class: "kimi", family: "k3" });
+		}
+	});
+
+	test("K3 identity does not absorb adjacent bare names", () => {
+		for (const model of [
+			"k30",
+			"k3-custom",
+			"k3anthropic",
+			"k3-256",
+			"k3-256kb",
+			"k3-256k-custom",
+			"kimi-code/k3-256kb",
+		]) {
+			expect(classifyModel("", model)).toEqual({ class: "unknown" });
+		}
+		expect(classifyModel("moonshot", "kimi-k3")).toEqual({ class: "kimi", family: "k3" });
+	});
+
 	test("-thinking suffix collapses to the logical id", () => {
 		expect(classifyModel("vercel-ai-gateway", "glm-4.6-thinking")).toMatchObject({
 			class: "glm",

@@ -4,6 +4,7 @@ import { BarList } from "../charts";
 import {
 	formatCompact,
 	formatDurationMs,
+	formatErrorRate,
 	formatEstimatedCost,
 	formatFolder,
 	formatInteger,
@@ -296,7 +297,7 @@ function folderColumns(maxRequests: number, maxCost: number): Column<FolderRowVi
 			render: row => (
 				<span title={`${formatInteger(row.failedRequests)} failed`}>
 					<Badge tone={row.failedRequests > 0 ? errorRateTone(row.errorRate) : "neutral"} mono>
-						{formatPercent(row.errorRate)}
+						{formatErrorRate(row.errorRate)}
 					</Badge>
 				</span>
 			),

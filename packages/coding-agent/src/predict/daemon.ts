@@ -14,7 +14,7 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import type { Database } from "bun:sqlite";
 import { type PredictedWord, TextPredictor } from "@oh-my-pi/pi-natives";
-import { getHistoryDbPath, isEnoent, logger, VERSION } from "@oh-my-pi/pi-utils";
+import { getHistoryDbPath, getPredictStateDir, isEnoent, logger, VERSION } from "@oh-my-pi/pi-utils";
 import { JsonLineServer } from "../tiny/worker-server";
 import { openSqliteReadConnection } from "../tools/sqlite-reader";
 import { blendPredictions } from "./blend";
@@ -323,7 +323,7 @@ class TextPredictDaemon {
 	}
 
 	async #open(method: TextPredictMethod): Promise<Engine> {
-		const stateDir = path.join(this.#agentDir, "predict", method);
+		const stateDir = getPredictStateDir(this.#agentDir, method);
 		await fs.mkdir(stateDir, { recursive: true });
 		let modelDir: string | undefined;
 		if (method === "smollm") {

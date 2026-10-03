@@ -16,6 +16,7 @@ import type {
 } from "../../src/extensibility/extensions/types";
 import { createWarpEventBridgeExtension, createWarpEventEmitter } from "../../src/modes/warp-events";
 import { SILENT_ABORT_MARKER, SKILL_PROMPT_MESSAGE_TYPE, USER_INTERRUPT_LABEL } from "../../src/session/messages";
+import { type ActiveTerminalHarness, startActiveTerminal } from "../helpers/active-terminal";
 
 const originalTerminalId = terminalCapabilities.TERMINAL.id;
 const originalProtocolVersion = process.env.WARP_CLI_AGENT_PROTOCOL_VERSION;
@@ -716,7 +717,7 @@ describe("Warp CLI-agent events", () => {
 		sessionId = "session-branched";
 		write.mockClear();
 
-		sessionBranch({ type: "session_branch", previousSessionFile: undefined }, context);
+		sessionBranch({ type: "session_branch", reason: "branch", previousSessionFile: undefined }, context);
 		agentEnd({
 			type: "agent_end",
 			messages: [{ role: "assistant", content: [{ type: "text", text: "orphan stop" }] } as never],
@@ -773,5 +774,31 @@ describe("Warp CLI-agent events", () => {
 			project,
 			plugin_version: VERSION,
 		});
+	});
+});
+
+/** Warp events must not tear a TUI frame: while a terminal owns stdout, both write sites take its ordered write path. */
+describe("Warp CLI-agent event routing", () => {
+	let harness: ActiveTerminalHarness | undefined;
+
+	afterEach(() => {
+		harness?.dispose();
+		harness = undefined;
+	});
+
+	it.each([
+		["plain", false],
+		["tmux-wrapped", true],
+	] as const)("writes the %s OSC 777 through the active terminal, never straight to stdout", (_form, inTmux) => {
+		enableWarpProtocol();
+		vi.spyOn(terminalCapabilities, "isInsideTmux").mockReturnValue(inTmux);
+		harness = startActiveTerminal();
+		const emitter = createWarpEventEmitter({ sessionId: "session-123" });
+
+		emitter?.emit({ event: "stop" });
+
+		expect(harness.routed).toHaveLength(1);
+		expect(harness.routed[0]).toContain(OSC_PREFIX);
+		expect(harness.direct.join("")).not.toContain("]777;");
 	});
 });
