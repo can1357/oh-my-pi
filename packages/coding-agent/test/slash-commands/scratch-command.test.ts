@@ -112,6 +112,34 @@ describe("/scratch slash command", () => {
 		expect(await readConfig()).toHaveProperty("startup.scratchDir", cwd);
 	});
 
+	it("treats a bare / as the filesystem root, not the session cwd", async () => {
+		await run("/scratch /");
+
+		const root = path.parse(cwd).root;
+		expect(cfgStartupScratchDir.get(settings)).toBe(root);
+		expect(await readConfig()).toHaveProperty("startup.scratchDir", root);
+	});
+
+	it("reports the global value startup uses even when project config shadows it", async () => {
+		await Bun.write(path.join(cwd, ".omp", "config.yml"), `startup:\n  scratchDir: ${JSON.stringify(cwd)}\n`);
+		settings.cancelPendingSaves();
+		settings = await Settings.loadIsolated({ cwd, agentDir });
+		expect(cfgStartupScratchDir.get(settings)).toBe(cwd);
+
+		await run("/scratch status");
+		expect(output).toEqual(["Scratch directory not set; launches from ~ use the default temp directory."]);
+
+		const globalDir = tempDir.join("global-scratch");
+		await fs.mkdir(globalDir);
+		output.length = 0;
+		await run(`/scratch "${globalDir}"`);
+		output.length = 0;
+		await run("/scratch status");
+
+		expect(output).toEqual([`Scratch directory: ${globalDir}`]);
+		expect(await readConfig()).toHaveProperty("startup.scratchDir", globalDir);
+	});
+
 	it("uses the TUI session cwd and displays validation failures as errors", async () => {
 		const sessionCwd = tempDir.join("session-project");
 		await fs.mkdir(sessionCwd);
