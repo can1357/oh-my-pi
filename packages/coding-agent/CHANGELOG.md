@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Workpools now settle rejected batches and remain usable after background-job admission fails. ([#12286](https://github.com/can1357/oh-my-pi/pull/12286) by [@iliaal](https://github.com/iliaal))
+
 ## [18.5.1] - 2026-10-03
 
 ### Added
