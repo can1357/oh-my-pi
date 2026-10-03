@@ -101,7 +101,7 @@ export function bindHistoryScope(storage: HistoryStorage, scope: () => HistorySc
 /** A storage bound to a live scope, plus the key an editor re-seeds on when that scope changes. */
 export interface HistorySource {
 	storage: ScopedHistoryStorage;
-	/** Identity of the scope and its repository membership, not a revision of prompt rows. */
+	/** Identity of the scope and its stored-directory membership, not a revision of prompt rows. */
 	sourceKey: () => string;
 }
 
@@ -117,8 +117,10 @@ export function bindHistorySource(storage: HistoryStorage, resolveScope: () => H
 		sourceKey: () => {
 			const scope = resolveScope();
 			const key = historyScopeKey(scope);
-			// Repository membership can change without a history write or a different root.
-			return scope.kind === "repo" ? `${key}\0${storage.getRepoScopeKey(scope.value)}` : key;
+			// Stored aliases or repository boundaries can move without a history write.
+			return scope.kind === "cwd" || scope.kind === "repo"
+				? `${key}\0${storage.getDirectoryScopeKey(scope.kind, scope.value)}`
+				: key;
 		},
 	};
 }

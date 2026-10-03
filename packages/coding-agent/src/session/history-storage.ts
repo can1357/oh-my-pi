@@ -301,9 +301,9 @@ ON CONFLICT(prompt) DO UPDATE SET
 		return rows.map(row => this.#toEntry(row));
 	}
 
-	/** Stable signature of the stored directories currently belonging to this repository. */
-	getRepoScopeKey(root?: string): string {
-		return JSON.stringify(this.#scopeDirs("repo", root).sort());
+	/** Stable signature of the raw stored directories currently selected by this directory scope. */
+	getDirectoryScopeKey(kind: "cwd" | "repo", target?: string): string {
+		return JSON.stringify(this.#scopeDirs(kind, target).sort());
 	}
 
 	/** Finds unique prompts matching every query token, newest first, restricted to `scope`. */

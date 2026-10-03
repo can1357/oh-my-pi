@@ -1146,7 +1146,7 @@ export class InputController {
 					);
 					return;
 				}
-				if (await this.#invokeSkillCommand(text, "steer", inputImages, inputImageLinks)) {
+				if (await this.#invokeSkillCommand(text, "steer", recordedHistoryText, inputImages, inputImageLinks)) {
 					// The dispatch above ran the turn inline without resolving the input
 					// callback, so nothing re-enters `getUserInput` to arm the next
 					// iteration. Arm it here, now that the turn has settled.
@@ -1682,13 +1682,16 @@ export class InputController {
 	/**
 	 * Dispatch a `/skill:<name> [args]` invocation through `promptCustomMessage`
 	 * using the supplied `streamingBehavior`. Returns false when the text is not
-	 * a registered skill command and leaves the editor state untouched. Registered
-	 * skills consume the full composer draft (text plus pending images) before
-	 * dispatch; if dispatch rejects, the draft is restored so the user can retry.
+	 * a registered skill command and leaves the editor state untouched.
+	 * A distinct skill body returned by a builtin is recorded before dispatch, without
+	 * recording the original submission twice. Preserve newer composer state when the
+	 * submitted draft is already detached; otherwise consume it. Restore the submitted
+	 * text and images on rejection so the user can retry.
 	 */
 	async #invokeSkillCommand(
 		text: string,
 		streamingBehavior: "steer" | "followUp",
+		recordedHistoryText: string | undefined,
 		images?: ImageContent[],
 		imageLinks?: (string | undefined)[],
 		preserveDraft = false,
@@ -1713,10 +1716,13 @@ export class InputController {
 			}
 		};
 
-		// No history write here: the slash block above already filed the text before dispatch, so a
-		// second write would bill the same submission twice in `use_count`, and a write after the
-		// command ran would file it under the context the command switched to.
-		if (!preserveDraft) this.ctx.editor.clearDraft();
+		// The wrapper is already filed; a distinct returned skill invocation is new input.
+		const historyText = text === recordedHistoryText ? undefined : text;
+		if (preserveDraft) {
+			if (historyText !== undefined) this.ctx.editor.addToHistory(historyText);
+		} else {
+			this.ctx.editor.clearDraft(historyText);
+		}
 		try {
 			const dispatched = await invokeSkillCommandFromText(this.ctx, text, streamingBehavior, {
 				images: draftImages,
@@ -1965,20 +1971,18 @@ export class InputController {
 			}
 		}
 
-		// A guest gets the same refusal on this path as on submit: the dispatcher left slash text it
-		// did not consume — a host-only builtin, a skill, an unknown command — and this path would
-		// otherwise run it locally and record it (skills record inside `#invokeSkillCommand`, below).
+		// The dispatcher can leave a skill or unknown slash command unconsumed for a guest.
+		// Refuse it without touching the composer: this submission was detached before the awaits.
 		// Bash and python input stay ungated here, as they always were.
 		if (this.ctx.collabGuest && text.startsWith("/")) {
 			this.ctx.showStatus(`${text.split(/\s+/, 1)[0]} is host-only during a collab session`);
-			this.ctx.editor.setText("");
 			return;
 		}
 
 		// Skill commands invoke through the custom-message path regardless of
 		// which keybinding submitted them. Enter routes them as `steer`;
 		// Ctrl+Enter (this handler) routes them as `followUp`.
-		if (text && (await this.#invokeSkillCommand(text, "followUp", images, imageLinks, true))) {
+		if (text && (await this.#invokeSkillCommand(text, "followUp", recordedHistoryText, images, imageLinks, true))) {
 			return;
 		}
 

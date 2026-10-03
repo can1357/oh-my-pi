@@ -9,6 +9,9 @@
 
 ### Fixed
 
+- Fixed collaboration guests losing a newer composer draft when a Ctrl+Enter slash command is refused ([#11995](https://github.com/can1357/oh-my-pi/pull/11995) by [@jerome-benoit](https://github.com/jerome-benoit)).
+- Directory-scoped prompt recall now follows retargeted directory symlinks without another history write ([#11995](https://github.com/can1357/oh-my-pi/pull/11995) by [@jerome-benoit](https://github.com/jerome-benoit)).
+- Skill invocations returned by `/loop` and `/force` are now retained in prompt history without double-counting direct submissions ([#11995](https://github.com/can1357/oh-my-pi/pull/11995) by [@jerome-benoit](https://github.com/jerome-benoit)).
 - Fixed queued Ctrl+Enter submissions clearing a newer draft and its attachments when the submitted command is excluded from prompt history ([#11995](https://github.com/can1357/oh-my-pi/pull/11995) by [@jerome-benoit](https://github.com/jerome-benoit)).
 - Fixed slash submissions counting twice in prompt history; intentional resubmissions still increment their usage ([#11995](https://github.com/can1357/oh-my-pi/pull/11995) by [@jerome-benoit](https://github.com/jerome-benoit)).
 - Repository-scoped prompt recall now drops entries belonging to a newly nested repository without requiring another history write, while retaining canceled drafts ([#11995](https://github.com/can1357/oh-my-pi/pull/11995) by [@jerome-benoit](https://github.com/jerome-benoit)).

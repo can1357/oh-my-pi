@@ -155,6 +155,89 @@ afterEach(async () => {
 });
 
 describe("interactive native input ingress", () => {
+	it("Ctrl+Enter guest refusal preserves a newer draft and attachments after an async input hook", async () => {
+		const entered = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		const h = await createHarness(pi => {
+			pi.on("input", async () => {
+				entered.resolve();
+				await release.promise;
+			});
+		});
+		h.ctx.collabGuest = {
+			readOnly: false,
+			sendPrompt: vi.fn(),
+		} as unknown as InteractiveModeContext["collabGuest"];
+		const storage = attachHistory(h.editor);
+		h.editor.setText("/unknown");
+		const submitting = h.pressSubmit(FOLLOW_UP);
+		await entered.promise;
+		h.draftWithImage("next draft [Image #1]", newerImage, "local://newer.jpg");
+		release.resolve();
+		await submitting;
+
+		expect(h.editor.getExpandedText()).toBe("next draft [Image #1]");
+		expect(h.editor.pendingImages).toEqual([newerImage]);
+		expect(h.editor.pendingImageLinks).toEqual(["local://newer.jpg"]);
+		expect(h.editor.imageLinks).toEqual(["local://newer.jpg"]);
+		expect(storage.getRecent(10)).toEqual([]);
+		expect(h.prompt).not.toHaveBeenCalled();
+		expect(h.session.promptCustomMessage).not.toHaveBeenCalled();
+	});
+
+	for (const [label, key] of [
+		["Enter", ENTER],
+		["Ctrl+Enter", FOLLOW_UP],
+	] as const) {
+		for (const wrapper of ["/loop", "/force read"] as const) {
+			it(
+				label +
+					" records the distinct skill body returned by " +
+					wrapper +
+					" without double-counting direct resubmission",
+				async () => {
+					const h = await createHarness(() => {});
+					const storage = attachHistory(h.editor);
+					const filePath = historyTemp!.join("SKILL.md");
+					await Bun.write(
+						filePath,
+						"---\nname: probe\ndescription: History regression probe\n---\nExecute the request.\n",
+					);
+					h.ctx.skillCommands.set("skill:probe", {
+						name: "probe",
+						description: "",
+						filePath,
+						baseDir: historyTemp!.path(),
+						source: "test",
+					});
+					const body = "/skill:probe arg";
+					const command = wrapper + " " + body;
+					h.ctx.handleLoopCommand = async () => body;
+					h.ctx.session.setForcedToolChoice = vi.fn();
+					h.editor.setText(command);
+					await h.pressSubmit(key);
+					expect(h.ctx.showError).not.toHaveBeenCalled();
+					expect(h.session.promptCustomMessage).toHaveBeenCalledTimes(1);
+					expect(Object.fromEntries(storage.getRecent(10).map(row => [row.prompt, row.useCount]))).toEqual({
+						[command]: 1,
+						[body]: 1,
+					});
+
+					h.editor.setText(body);
+					await h.pressSubmit(key);
+					expect(h.session.promptCustomMessage).toHaveBeenCalledTimes(2);
+					expect(h.prompt).not.toHaveBeenCalled();
+					expect(Object.fromEntries(storage.getRecent(10).map(row => [row.prompt, row.useCount]))).toEqual({
+						[command]: 1,
+						[body]: 2,
+					});
+					h.editor.handleInput("\x1b[A");
+					expect(h.editor.getExpandedText()).toBe(body);
+				},
+			);
+		}
+	}
+
 	it("Ctrl+Enter keeps the next draft and attachments when compaction filters a secret", async () => {
 		const entered = Promise.withResolvers<void>();
 		const release = Promise.withResolvers<void>();

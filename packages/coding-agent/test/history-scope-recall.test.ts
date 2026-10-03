@@ -141,6 +141,30 @@ describe("scoped prompt recall", () => {
 		expect(recall(editor)).toBe("");
 	});
 
+	it("retires and admits prompts when a stored alias retargets without a history write", async () => {
+		const dir = tempDir!;
+		const one = dir.join("one");
+		const two = dir.join("two");
+		const link = dir.join("link");
+		await fs.promises.mkdir(one);
+		await fs.promises.mkdir(two);
+		await fs.promises.symlink(one, link, "junction");
+		const storage = HistoryStorage.open(dir.join("history.db"));
+		await storage.add("VIA_LINK", link, "s1");
+		const from = bindEditor(storage, { setting: "cwd", context: { sessionId: "s1", cwd: one } });
+		const to = bindEditor(storage, { setting: "cwd", context: { sessionId: "s1", cwd: two } });
+		expect(recall(from)).toBe("VIA_LINK");
+		expect(recall(to)).toBe("");
+
+		await fs.promises.unlink(link);
+		await fs.promises.symlink(two, link, "junction");
+		// Keep the active browse pointer: re-seeding must retire its text, not just its list.
+		from.handleInput("\x1b[A");
+		to.handleInput("\x1b[A");
+		expect(from.getText()).toBe("");
+		expect(to.getText()).toBe("VIA_LINK");
+	});
+
 	it("retires an active repo prompt while preserving canceled paste payloads", async () => {
 		const dir = tempDir!;
 		const outer = dir.join("outer");
@@ -166,24 +190,26 @@ describe("scoped prompt recall", () => {
 		expect(editor.getText()).toBe("");
 	});
 
-	it("advances Up and Down when repository membership is unchanged", async () => {
-		const dir = tempDir!;
-		const outer = dir.join("outer");
-		const inner = path.join(outer, "inner");
-		await fs.promises.mkdir(inner, { recursive: true });
-		runGit(outer, "init", "--quiet");
-		const storage = HistoryStorage.open(dir.join("history.db"));
-		await storage.add("OLDER", inner, "s1");
-		await storage.add("NEWER", outer, "s1");
-		const editor = bindEditor(storage, { setting: "repo", context: { sessionId: "s1", cwd: outer } });
-		expect(recall(editor)).toBe("NEWER");
-		editor.handleInput("\x1b[A");
-		expect(editor.getText()).toBe("OLDER");
-		editor.handleInput("\x1b[B");
-		expect(editor.getText()).toBe("NEWER");
-		editor.handleInput("\x1b[B");
-		expect(editor.getText()).toBe("");
-	});
+	for (const setting of ["cwd", "repo"] as const) {
+		it("advances Up and Down when " + setting + " membership is unchanged", async () => {
+			const dir = tempDir!;
+			const outer = dir.join("outer");
+			const inner = path.join(outer, "inner");
+			await fs.promises.mkdir(inner, { recursive: true });
+			runGit(outer, "init", "--quiet");
+			const storage = HistoryStorage.open(dir.join("history.db"));
+			await storage.add("OLDER", setting === "repo" ? inner : outer, "s1");
+			await storage.add("NEWER", outer, "s1");
+			const editor = bindEditor(storage, { setting, context: { sessionId: "s1", cwd: outer } });
+			expect(recall(editor)).toBe("NEWER");
+			editor.handleInput("\x1b[A");
+			expect(editor.getText()).toBe("OLDER");
+			editor.handleInput("\x1b[B");
+			expect(editor.getText()).toBe("NEWER");
+			editor.handleInput("\x1b[B");
+			expect(editor.getText()).toBe("");
+		});
+	}
 
 	it("keeps prompts submitted through the bound editor readable in cwd and repo scopes", async () => {
 		const dir = tempDir!;
