@@ -167,7 +167,7 @@ export class TerminalInfo {
 		 * (macOS narrow, otherwise UAX#11).
 		 */
 		public readonly hangulJamoWidth: HangulCompatibilityJamoWidth = "platform",
-	) { }
+	) {}
 
 	/**
 	 * Mutable clone for the {@link TERMINAL} singleton: copies every field and
@@ -276,26 +276,6 @@ export class TerminalInfo {
 		});
 		if (routed) return;
 		const formatted = this.formatNotification(message);
-		// Under tmux, terminals whose notify protocol is OSC 9 / OSC 99 would
-		// otherwise lose the notification entirely: tmux does not forward bare
-		// OSC 9/99 to the outer terminal, and the bare sequence does not flag
-		// tmux's own `monitor-bell` / `monitor-activity`. Wrap the OSC in tmux's
-		// DCS passthrough envelope so users with `allow-passthrough on` still
-		// get the desktop toast, then append a BEL so `monitor-bell` flags the
-		// pane/window for everyone else — the only signal a backgrounded pane
-		// has that the agent finished or is waiting for input. `Bell` protocol
-		// already self-flags via tmux's bell monitoring, so leave it alone.
-		if (this.notifyProtocol !== NotifyProtocol.Bell && hasTerminalMultiplexerSession("tmux")) {
-			writeTerminalSequence(`${wrapTmuxPassthrough(formatted)}\x07`);
-			return;
-		}
-		// Zellij drops OSC 9/99 and has no DCS passthrough envelope, but raises its
-		// `[!]` bell flag on a bare BEL — the same backgrounded-pane signal tmux
-		// users get. So follow the (Zellij-swallowed) OSC with a plain BEL.
-		if (this.notifyProtocol !== NotifyProtocol.Bell && hasTerminalMultiplexerSession("zellij")) {
-			writeTerminalSequence(`${formatted}\x07`);
-			return;
-		}
 		writeTerminalSequence(formatted);
 		// VTE-family terminals (Ptyxis, GNOME Terminal, Tilix, …) plus Alacritty
 		// and bare xterm-on-Wayland have no in-band escape that surfaces an
