@@ -20,6 +20,7 @@ from omp_rpc import (
     NoticeEvent,
     SessionSettledEvent,
     SessionState,
+    SkillDiagnosticsUpdateEvent,
     SubagentEvent,
     ThinkingLevelChangedEvent,
     TodoReminderEvent,
@@ -42,6 +43,101 @@ GOAL = {
     "createdAt": 1,
     "updatedAt": 2,
 }
+
+
+def valid_skill_snapshot() -> dict[str, object]:
+    entry = {"name": "review", "filePath": "/a/SKILL.md", "source": "native:user"}
+    return {
+        "cwd": "/workspace",
+        "showStartupDiagnostics": True,
+        "diagnostics": [
+            {
+                "name": "review",
+                "reason": "source-order",
+                "skills": [entry],
+                "duplicates": [
+                    {
+                        "skill": {**entry, "pluginName": "p"},
+                        "retained": entry,
+                    }
+                ],
+            }
+        ],
+    }
+
+
+def _diagnostic(snapshot: dict[str, object]) -> dict[str, object]:
+    return snapshot["diagnostics"][0]  # type: ignore[index]
+
+
+def _duplicate(snapshot: dict[str, object]) -> dict[str, object]:
+    return _diagnostic(snapshot)["duplicates"][0]  # type: ignore[index]
+
+
+def _duplicate_skill(snapshot: dict[str, object]) -> dict[str, object]:
+    return _duplicate(snapshot)["skill"]  # type: ignore[return-value]
+
+
+def _set(target: dict[str, object], key: str, value: object) -> None:
+    target[key] = value
+
+
+def _drop(target: dict[str, object], key: str) -> None:
+    del target[key]
+
+
+class SkillDiagnosticsProtocolTests(unittest.TestCase):
+    def test_valid_snapshot_parses_through_state_and_update(self) -> None:
+        snapshot = valid_skill_snapshot()
+
+        state = parse_session_state({"sessionId": "s", "skillDiagnostics": snapshot})
+        update = parse_notification(
+            {"type": "skill_diagnostics_update", "data": snapshot}
+        )
+
+        assert state.skill_diagnostics is not None
+        assert isinstance(update, SkillDiagnosticsUpdateEvent)
+        self.assertEqual(state.skill_diagnostics, update.data)
+        duplicate = state.skill_diagnostics.diagnostics[0].duplicates[0]
+        self.assertEqual(duplicate.skill.plugin_name, "p")
+        self.assertIsNone(duplicate.retained.plugin_name)
+
+    def test_rejects_malformed_skill_diagnostics_with_value_error(self) -> None:
+        # One row per distinct boundary: bool leaf, required arrays (missing and
+        # null must not become empty), object items, literal, str leaf, and the
+        # optional leaf. Every failure must be the module's ValueError.
+        mutations = {
+            "bool leaf": lambda s: _set(s, "showStartupDiagnostics", "false"),
+            "diagnostics missing": lambda s: _drop(s, "diagnostics"),
+            "diagnostics null": lambda s: _set(s, "diagnostics", None),
+            "diagnostics not list": lambda s: _set(s, "diagnostics", {}),
+            "diagnostic not object": lambda s: _set(s, "diagnostics", ["x"]),
+            "reason unknown": lambda s: _set(_diagnostic(s), "reason", "newest"),
+            "skills missing": lambda s: _drop(_diagnostic(s), "skills"),
+            "skills null": lambda s: _set(_diagnostic(s), "skills", None),
+            "skill not object": lambda s: _set(_diagnostic(s), "skills", [1]),
+            "duplicates missing": lambda s: _drop(_diagnostic(s), "duplicates"),
+            "duplicates null": lambda s: _set(_diagnostic(s), "duplicates", None),
+            "duplicate not object": lambda s: _set(_diagnostic(s), "duplicates", [1]),
+            "duplicate retained missing": lambda s: _drop(_duplicate(s), "retained"),
+            "entry leaf not string": lambda s: _set(_duplicate_skill(s), "filePath", 7),
+            "pluginName not string": lambda s: _set(
+                _duplicate_skill(s), "pluginName", 7
+            ),
+        }
+
+        for label, mutate in mutations.items():
+            snapshot = valid_skill_snapshot()
+            mutate(snapshot)
+            with self.subTest(label=label, path="state"), self.assertRaises(ValueError):
+                parse_session_state({"sessionId": "s", "skillDiagnostics": snapshot})
+            with (
+                self.subTest(label=label, path="update"),
+                self.assertRaises(ValueError),
+            ):
+                parse_notification(
+                    {"type": "skill_diagnostics_update", "data": snapshot}
+                )
 
 
 class ProtocolParsingTests(unittest.TestCase):
