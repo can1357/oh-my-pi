@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed `wait` failing with "Nothing to wait for" right after a parent messages its idle subagent; the parent can now wait for that follow-up turn's result ([#14203](https://github.com/can1357/oh-my-pi/pull/14203) by [@kimprap](https://github.com/kimprap))
+
 ## [18.5.1] - 2026-10-03
 
 ### Added
