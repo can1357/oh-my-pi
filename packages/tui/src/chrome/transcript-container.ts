@@ -199,6 +199,7 @@ export class TranscriptContainer extends Container {
 	 */
 	#frameRows = new Map<TranscriptEntry, readonly string[]>();
 	#frameRowsWidth = 0;
+	#releaseFailures = new WeakSet<Component>();
 	/** The `children` array `#entries` last mirrored; see {@link #syncEntries}. */
 	#syncedChildren: Component[] | undefined;
 	/** Forces the next {@link #syncEntries} to compare every entry, not just the live tail. */
@@ -759,6 +760,7 @@ export class TranscriptContainer extends Container {
 			const entry = this.#entries[index]!;
 			this.#setAllocation(entry.component, Number.MAX_SAFE_INTEGER, this.#lastFrame);
 			const block = trimBlankEdges(entry.component.render(width));
+			if (entry.state === "committed") this.#releaseRenderCaches(entry);
 			if (block.length === 0) continue;
 			if (rows.length > 0) rows.unshift("");
 			rows.unshift(...block);
@@ -806,6 +808,7 @@ export class TranscriptContainer extends Container {
 		for (const entry of this.#entries) {
 			this.#setAllocation(entry.component, Number.MAX_SAFE_INTEGER, this.#lastFrame);
 			const block = this.#renderEntry(entry, width);
+			if (entry.state === "committed") this.#releaseRenderCaches(entry);
 			if (block.length === 0) continue;
 			if (rows.length > 0) rows.push("");
 			this.#childStartRows.set(entry.component, rows.length);
@@ -1010,6 +1013,7 @@ export class TranscriptContainer extends Container {
 				if (rows.length > 0) rows.push("");
 				rows.push(...block);
 			}
+			if (entry.state === "committed") this.#releaseRenderCaches(entry);
 			if (budgetMs !== undefined && performance.now() - startedAt >= budgetMs) break;
 		}
 		if (trailingBlank && rows.length > 0) rows.push("");
@@ -1045,6 +1049,23 @@ export class TranscriptContainer extends Container {
 		entry.stableRows = EMPTY_STABLE_ROWS;
 		entry.renderedStableByWidth = new Map();
 		entry.stableRowCountByWidth = new Map();
+		this.#frameRows.delete(entry);
+		this.#releaseRenderCaches(entry);
+	}
+
+	#releaseRenderCaches(entry: TranscriptEntry): void {
+		const release = entry.component.releaseRenderCaches;
+		if (release === undefined) return;
+		try {
+			release.call(entry.component);
+		} catch (err) {
+			if (this.#releaseFailures.has(entry.component)) return;
+			this.#releaseFailures.add(entry.component);
+			logger.warn("Transcript block failed to release render caches", {
+				component: entry.component.constructor.name,
+				error: String(err),
+			});
+		}
 	}
 
 	#startReplay(): void {

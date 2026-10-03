@@ -129,7 +129,7 @@ function renderMarkdownMCPResult(
 				applyBg: false,
 			};
 		},
-		{ paddingX: 0, paddingY: 0 },
+		{ paddingX: 0, paddingY: 0, onReleaseRenderCaches: () => markdown.releaseRenderCaches() },
 	);
 }
 

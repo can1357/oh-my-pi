@@ -539,6 +539,12 @@ export class AssistantMessageComponent extends Container {
 		}
 	}
 
+	override releaseRenderCaches(): void {
+		super.releaseRenderCaches();
+		this.#dropStableRenders();
+		this.#emergencyText?.releaseRenderCaches();
+	}
+
 	setHideThinkingBlock(hide: boolean): void {
 		this.#hideThinkingBlock = hide;
 		this.#thinkingCollapsed.clear();

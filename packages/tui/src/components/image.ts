@@ -768,6 +768,11 @@ export class Image implements Component {
 		this.#cachedWidth = undefined;
 	}
 
+	releaseRenderCaches(): void {
+		this.#cachedLines = undefined;
+		this.#cachedWidth = undefined;
+	}
+
 	/**
 	 * A native `image` backed by a content-addressed blob; the terminal fits
 	 * it. Cell caps become `ch`/`lines` bounds. The inline-image budget and

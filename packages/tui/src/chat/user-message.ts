@@ -169,6 +169,12 @@ export class UserMessageComponent extends Container implements ReactionTarget {
 		this.addChild(markdown);
 	}
 
+	override releaseRenderCaches(): void {
+		this.#zoneSource = undefined;
+		this.#zoneLines = undefined;
+		super.releaseRenderCaches();
+	}
+
 	setReaction(emoji: string): void {
 		if (this.#reaction === emoji) return;
 		this.#reaction = emoji;
@@ -326,6 +332,10 @@ class SyntheticSummary implements Component {
 		this.#summary = summary;
 	}
 
+	releaseRenderCaches(): void {
+		this.#cache = undefined;
+	}
+
 	invalidate(): void {
 		this.#cache = undefined;
 	}
@@ -412,6 +422,10 @@ export class CollapsedSyntheticMessageComponent implements Component {
 
 	invalidate(): void {
 		this.#disclosure.invalidate();
+	}
+
+	releaseRenderCaches(): void {
+		this.#disclosure.releaseRenderCaches();
 	}
 
 	dispose(): void {
