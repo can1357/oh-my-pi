@@ -87,7 +87,9 @@ export class HistoryStorage {
 	private constructor(db: Database) {
 		this.#db = db;
 
-		const hadFts = this.#db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='history_fts'").get();
+		// One-shot statements go through the query cache, which close() finalizes; a
+		// stray prepare() would turn close() into a zombie that keeps the files open.
+		const hadFts = this.#db.query("SELECT 1 FROM sqlite_master WHERE type='table' AND name='history_fts'").get();
 		this.#db.run(`
 PRAGMA journal_mode=WAL;
 PRAGMA synchronous=NORMAL;
@@ -296,7 +298,7 @@ ON CONFLICT(prompt) DO UPDATE SET
 	}
 
 	#historySchemaHasColumn(column: string): boolean {
-		const columns = this.#db.prepare("PRAGMA table_info(history)").all() as Array<{ name: string }>;
+		const columns = this.#db.query("PRAGMA table_info(history)").all() as Array<{ name: string }>;
 		return columns.some(col => col.name === column);
 	}
 
@@ -318,13 +320,13 @@ ON CONFLICT(prompt) DO UPDATE SET
 	 * caller can rebuild the FTS index.
 	 */
 	#rebuildHistory(): boolean {
-		const versionRow = this.#db.prepare("PRAGMA user_version").get() as { user_version: number };
+		const versionRow = this.#db.query("PRAGMA user_version").get() as { user_version: number };
 		if (versionRow.user_version >= HISTORY_DATA_VERSION) return false;
 		let rows: HistoryRow[];
 		try {
 			const sessionIdSelection = this.#historySchemaHasColumn("session_id") ? "session_id" : "NULL AS session_id";
 			rows = this.#db
-				.prepare(`SELECT id, prompt, created_at, cwd, ${sessionIdSelection}, use_count FROM history`)
+				.query(`SELECT id, prompt, created_at, cwd, ${sessionIdSelection}, use_count FROM history`)
 				.all() as HistoryRow[];
 		} catch (error) {
 			logger.error("HistoryStorage rebuild dump failed", { error: String(error) });
@@ -352,7 +354,7 @@ ON CONFLICT(prompt) DO UPDATE SET
 			this.#db.run("DROP TABLE IF EXISTS history_fts");
 			this.#db.run("DROP TABLE history");
 			this.#db.run(HISTORY_TABLE_DDL);
-			const insert = this.#db.prepare(
+			const insert = this.#db.query(
 				"INSERT INTO history (id, prompt, created_at, cwd, session_id, use_count) VALUES (?, ?, ?, ?, ?, ?)",
 			);
 			for (const row of winners.values()) {

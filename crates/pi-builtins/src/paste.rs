@@ -16,7 +16,7 @@ use clap::{Arg, ArgAction, ArgMatches, Command};
 use pi_vfs::File;
 use uucore::{display::Quotable, i18n::charmap::mb_char_len};
 
-use crate::host::{Host, Stdin, Utility, format_usage, matches_parser, os_bytes, util};
+use crate::host::{Host, Stdin, Utility, format_usage, matches_parser, os_bytes, strip_errno, util};
 
 mod options {
 	pub const DELIMITER: &str = "delimiters";
@@ -359,14 +359,6 @@ impl BufRead for InputSource<'_> {
 			Self::StandardInput(stdin) => stdin.borrow_mut().read_until(byte, buf),
 		}
 	}
-}
-
-fn strip_errno(error: &io::Error) -> String {
-	let mut message = error.to_string();
-	if let Some(position) = message.find(" (os error ") {
-		message.truncate(position);
-	}
-	message
 }
 
 /// Creates the `paste` builtin registration.

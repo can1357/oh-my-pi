@@ -197,8 +197,14 @@ function normalizePastedPath(path: string): string {
 		try {
 			return url.fileURLToPath(unquoted);
 		} catch {
-			// Malformed file URL: drop through to the shell-unescape branch
-			// so the caller can still reject it as a non-explicit path.
+			// Windows rejects drive-less URLs (`file:///Users/…`, forwarded from a
+			// macOS pasteboard or a remote session); decode them as POSIX paths.
+			try {
+				return url.fileURLToPath(unquoted, { windows: false });
+			} catch {
+				// Malformed file URL: drop through to the shell-unescape branch
+				// so the caller can still reject it as a non-explicit path.
+			}
 		}
 	}
 	return unquoted.replace(SHELL_ESCAPED_PATH_CHAR_REGEX, "$1");

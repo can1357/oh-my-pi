@@ -12,6 +12,7 @@ import {
 	parseZrokUrl,
 	startExposure,
 } from "../src/blob-broker/exposure";
+import { writeFakeExecutable } from "./helpers/fake-executable";
 
 const PORT = 43127;
 const originalPath = process.env.PATH;
@@ -36,10 +37,6 @@ function exposure(kind: ExposureConfig["kind"], overrides: Partial<ExposureConfi
 	} as ExposureConfig;
 }
 
-function shellLiteral(value: string): string {
-	return `'${value.replaceAll("'", `'\\''`)}'`;
-}
-
 function prepareFake(output: string, options: { exitCode?: number; restartOnce?: boolean } = {}): FakeInvocation {
 	const suffix = String(invocationSequence++);
 	const invocationDir = path.join(fakeBinDir, suffix);
@@ -48,33 +45,36 @@ function prepareFake(output: string, options: { exitCode?: number; restartOnce?:
 	const runsFile = path.join(invocationDir, "runs.txt");
 	const signalsFile = path.join(invocationDir, "signals.txt");
 	const restartMarker = options.restartOnce ? path.join(invocationDir, "restart.txt") : undefined;
-	const target = path.join(invocationDir, "fake-tunnel");
-	fs.writeFileSync(
-		target,
-		`#!/bin/sh\n` +
-			// Publish argv atomically: adapters with a configured publicBaseUrl
-			// resolve before the tunnel prints anything, so tests may read the
-			// file while a (re)started process is still writing it.
-			`tmp=${shellLiteral(argsFile)}.$$\n` +
-			`: > "$tmp"\n` +
-			`for arg do printf '%s\\n' "$arg" >> "$tmp"; done\n` +
-			`/bin/mv "$tmp" ${shellLiteral(argsFile)}\n` +
-			`printf 'run\\n' >> ${shellLiteral(runsFile)}\n` +
-			`trap 'printf "SIGINT\\n" >> ${shellLiteral(signalsFile)}; exit 0' INT\n` +
-			`trap 'printf "SIGTERM\\n" >> ${shellLiteral(signalsFile)}; exit 0' TERM\n` +
-			`printf '%s\\n' ${shellLiteral(output)}\n` +
-			(restartMarker
-				? `if [ ! -e ${shellLiteral(restartMarker)} ]; then\n` +
-					`  printf 'first\\n' > ${shellLiteral(restartMarker)}\n` +
-					`  exit 23\n` +
-					`fi\n` +
-					`printf 'restarted\\n' >> ${shellLiteral(restartMarker)}\n`
-				: "") +
-			(options.exitCode === undefined ? `while :; do /bin/sleep 1; done\n` : `exit ${options.exitCode}\n`),
-	);
-	fs.chmodSync(target, 0o755);
+	// Publish argv atomically: adapters with a configured publicBaseUrl
+	// resolve before the tunnel prints anything, so tests may read the file
+	// while a (re)started process is still writing it.
+	const source = `import * as fs from "node:fs";
+const config = ${JSON.stringify({ argsFile, runsFile, signalsFile, restartMarker, output, exitCode: options.exitCode })};
+const tmp = \`\${config.argsFile}.\${process.pid}\`;
+fs.writeFileSync(tmp, process.argv.slice(2).map(arg => \`\${arg}\\n\`).join(""));
+fs.renameSync(tmp, config.argsFile);
+fs.appendFileSync(config.runsFile, "run\\n");
+for (const signal of ["SIGINT", "SIGTERM"]) {
+	process.on(signal, () => {
+		fs.appendFileSync(config.signalsFile, \`\${signal}\\n\`);
+		process.exit(0);
+	});
+}
+fs.writeSync(1, \`\${config.output}\\n\`);
+if (config.restartMarker) {
+	if (!fs.existsSync(config.restartMarker)) {
+		fs.writeFileSync(config.restartMarker, "first\\n");
+		process.exit(23);
+	}
+	fs.appendFileSync(config.restartMarker, "restarted\\n");
+}
+if (config.exitCode !== undefined) process.exit(config.exitCode);
+// A live tunnel never exits on its own; the timer only keeps the stub alive
+// until the adapter kills it (nothing here waits on wall-clock time).
+setInterval(() => {}, 60_000);
+`;
 	for (const name of ["ssh", "devtunnel", "zrok", "bore", "cloudflared"]) {
-		fs.symlinkSync(target, path.join(invocationDir, name));
+		writeFakeExecutable(invocationDir, name, source);
 	}
 	process.env.PATH = invocationDir;
 	return { argsFile, runsFile, signalsFile, restartMarker };
@@ -117,6 +117,13 @@ async function waitForSignal(invocation: FakeInvocation): Promise<void> {
 }
 
 async function stopAndObserve(exposure: ActiveExposure, invocation: FakeInvocation): Promise<void> {
+	if (process.platform === "win32") {
+		// Windows kill() is TerminateProcess: there is no catchable SIGTERM for
+		// the fake to record, so only observe that the tunnel process ended.
+		exposure.stop();
+		await exposure.exited;
+		return;
+	}
 	const signalObserved = waitForSignal(invocation);
 	exposure.stop();
 	await Promise.all([exposure.exited, signalObserved]);

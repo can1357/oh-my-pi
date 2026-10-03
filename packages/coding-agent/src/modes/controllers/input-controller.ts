@@ -491,6 +491,9 @@ export class InputController {
 			if (this.ctx.hasActiveCleanse() && this.ctx.handleCleanseEscape()) {
 				return;
 			}
+			if (this.ctx.dismissCommandReport()) {
+				return;
+			}
 
 			if (!this.ctx.focusedAgentId) {
 				const viewSession = this.ctx.viewSession;

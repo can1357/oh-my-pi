@@ -92,6 +92,7 @@ async function createHarness(factory: ExtensionFactory) {
 		hasActiveBtw: () => false,
 		hasActiveOmfg: () => false,
 		hasActiveCleanse: () => false,
+		dismissCommandReport: () => false,
 		updateEditorBorderColor: vi.fn(),
 		updatePendingMessagesDisplay: vi.fn(),
 		flushPendingBashComponents: vi.fn(),
