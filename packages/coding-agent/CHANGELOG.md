@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Python eval preserves multiline strings containing magic-looking lines such as `!cmd` or `%%bash`. ([#12334](https://github.com/can1357/oh-my-pi/pull/12334) by [@iliaal](https://github.com/iliaal))
+
 ## [18.5.1] - 2026-10-03
 
 ### Added

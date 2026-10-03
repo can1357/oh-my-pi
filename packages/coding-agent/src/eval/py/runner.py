@@ -942,6 +942,8 @@ def _magic_line_indices(lines: list[str]) -> set[int]:
         )
         last_row = -1
         string_depth = 0
+        bracket_depth = 0
+        statement_row = offset
         try:
             for item in tokenize.generate_tokens(lambda: next(stream, "")):
                 if item.type in _STRING_START_TOKENS:
@@ -949,15 +951,26 @@ def _magic_line_indices(lines: list[str]) -> set[int]:
                 elif item.type in _STRING_END_TOKENS:
                     string_depth -= 1
                     continue
-                if string_depth or item.type in (
-                    tokenize.NL, tokenize.NEWLINE, tokenize.INDENT,
+                if string_depth:
+                    continue
+                if item.type == tokenize.OP:
+                    if item.string in ("(", "[", "{"):
+                        bracket_depth += 1
+                    elif item.string in (")", "]", "}"):
+                        bracket_depth -= 1
+                if item.type == tokenize.NL:
+                    if bracket_depth == 1:
+                        statement_row = offset + item.end[0] - 1
+                    continue
+                if item.type in (
+                    tokenize.NEWLINE, tokenize.INDENT,
                     tokenize.DEDENT, tokenize.ENDMARKER, tokenize.COMMENT,
                 ) or (item.type == tokenize.ERRORTOKEN and item.string.isspace()):
                     # Python < 3.12 emits indentation before `!` as one
                     # whitespace ERRORTOKEN per column.
                     continue
                 row = offset + item.start[0] - 2
-                if row < offset or row >= len(lines) or row == last_row:
+                if row < offset or row >= len(lines) or row == last_row or row != statement_row:
                     continue
                 last_row = row
                 stripped = lines[row].lstrip()
@@ -1005,7 +1018,7 @@ def transform_cell(source: str) -> str:
     if "%" not in source and "!" not in source:
         return source
 
-    lines = source.splitlines()
+    lines = source.replace("\r\n", "\n").replace("\r", "\n").split("\n")
     magic_lines = _magic_line_indices(lines)
     out: list[str] = []
     i = 0
