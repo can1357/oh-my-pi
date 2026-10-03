@@ -85,7 +85,7 @@ import type {
 	ExtensionWidgetContent,
 	ExtensionWidgetOptions,
 } from "../extensibility/extensions";
-import type { CompactOptions } from "../extensibility/extensions/types";
+import type { CompactOptions, PlanReviewChoice, PlanReviewOption } from "../extensibility/extensions/types";
 import type { Skill } from "../extensibility/skills";
 import type { FileSlashCommand } from "../extensibility/slash-commands";
 import { loadSlashCommands } from "../extensibility/slash-commands";
@@ -1552,7 +1552,16 @@ export class InteractiveMode implements InteractiveModeContext {
 	#jobsSheetHandle: OverlayHandle | undefined;
 	/** Re-renders the open jobs sheet so output tails and pids stay live. */
 	#jobsSheetTimer: NodeJS.Timeout | undefined;
+	#planReviewOwner: object | undefined;
 	#planReviewCancel: (() => void) | undefined;
+	#planReviewPick: ((choice: string) => void) | undefined;
+	#pendingPlanReview:
+		| {
+				reviewId: string;
+				options: PlanReviewOption[];
+				remote?: { choice: PlanReviewChoice; feedback?: string };
+		  }
+		| undefined;
 	/** Serializable review annotations keyed by the resolved plan file path. */
 	#planReviewAnnotationState = new Map<string, PlanReviewAnnotationState>();
 	/** Annotation state held until the associated queued refinement actually starts. */
@@ -5214,14 +5223,23 @@ export class InteractiveMode implements InteractiveModeContext {
 		extra?: { slider?: HookSelectorSlider },
 	): Promise<string | undefined> {
 		this.#hidePlanReview();
+		const pending = this.#pendingPlanReview;
+		const owner = pending ?? {};
 		const { promise, resolve } = Promise.withResolvers<string | undefined>();
 		let settled = false;
 		const finish = (choice: string | undefined): void => {
 			if (settled) return;
 			settled = true;
+			if (this.#planReviewOwner === owner) {
+				this.#planReviewCancel = undefined;
+				this.#planReviewPick = undefined;
+			}
+			if (pending && this.#pendingPlanReview === pending) this.#pendingPlanReview = undefined;
 			resolve(choice);
 		};
+		this.#planReviewOwner = owner;
 		this.#planReviewCancel = () => finish(undefined);
+		this.#planReviewPick = choice => finish(choice);
 		const overlay = new PlanReviewOverlay(
 			planContent,
 			{
@@ -5258,18 +5276,32 @@ export class InteractiveMode implements InteractiveModeContext {
 		return promise;
 	}
 
-	#hidePlanReview(): void {
+	#hidePlanReview(owner?: object): void {
+		if (owner !== undefined && this.#planReviewOwner !== owner) return;
+		this.#planReviewCancel?.();
 		this.#planReviewCancel = undefined;
+		this.#planReviewPick = undefined;
 		this.#planReviewOverlayHandle?.hide();
 		this.#planReviewOverlayHandle = undefined;
 		this.#planReviewOverlay = undefined;
+		this.#planReviewOwner = undefined;
 	}
 
 	#dismissPlanReview(): void {
-		const cancel = this.#planReviewCancel;
-		this.#planReviewCancel = undefined;
-		cancel?.();
 		this.#hidePlanReview();
+	}
+
+	resolvePlanReview(reviewId: string, choice: PlanReviewChoice, input?: { feedback?: string }): boolean {
+		const pending = this.#pendingPlanReview;
+		const pick = this.#planReviewPick;
+		if (!pending || pending.reviewId !== reviewId || !pick) return false;
+		const option = pending.options.find(item => item.id === choice);
+		if (!option || option.disabled) return false;
+		const feedback = input?.feedback?.trim();
+		if (choice === "refine" && !feedback) return false;
+		pending.remote = { choice, feedback };
+		pick(option.label);
+		return true;
 	}
 
 	#getPlanApprovalContextUsage(): ContextUsage | undefined {
@@ -5399,8 +5431,13 @@ export class InteractiveMode implements InteractiveModeContext {
 		}
 	}
 
-	async #savePlanAndQuit(planContent: string, title: string, annotationStateKey: string): Promise<void> {
-		const selectedPath = await this.#promptPlanSavePath(planContent, title);
+	async #savePlanAndQuit(
+		planContent: string,
+		title: string,
+		annotationStateKey: string,
+		presetPath?: string,
+	): Promise<void> {
+		const selectedPath = presetPath ?? (await this.#promptPlanSavePath(planContent, title));
 		if (!selectedPath) return;
 
 		let destination: string;
@@ -5533,6 +5570,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			preserveContext?: boolean;
 			compactBeforeExecute?: boolean;
 			executionModel?: ResolvedRoleModel;
+			reviewOwner: object;
 		},
 	): Promise<boolean> {
 		const previousPresentation = this.#planModePreviousToolPresentation ?? {
@@ -5686,9 +5724,10 @@ export class InteractiveMode implements InteractiveModeContext {
 		// stays intact. Deferring the hide past the awaited `setSessionName` also
 		// prevents restored editor focus from letting operator keystrokes submit a
 		// normal turn ahead of the approved execution turn (PR #5689 review).
-		// `#hidePlanReview` is idempotent, so the caller's trailing `closePlanReview()`
-		// — and the cancelled/error early returns above — stay safe no-ops.
-		this.#hidePlanReview();
+		// The ownership-bound hide is idempotent, so the caller's trailing
+		// `closePlanReview()` — and a stale continuation after a replacement review
+		// opened — stay safe no-ops.
+		this.#hidePlanReview(options.reviewOwner);
 		this.ui.requestRender();
 		// A user turn queued during compaction was already fired by
 		// `flushCompactionQueue` before we returned from `handleCompactCommand`; the
@@ -6422,6 +6461,13 @@ export class InteractiveMode implements InteractiveModeContext {
 		const contextUsage = this.#getPlanApprovalContextUsage();
 		const keepContextLabel = this.#formatKeepContextLabel(contextUsage);
 		const keepContextDisabled = this.#isKeepContextDisabled(contextUsage);
+		const reviewOptions: PlanReviewOption[] = [
+			{ id: "execute", label: "Approve and execute", disabled: false },
+			{ id: "compact", label: "Approve and compact context", disabled: false },
+			{ id: "keep", label: keepContextLabel, disabled: keepContextDisabled },
+			{ id: "refine", label: "Refine plan", disabled: false },
+			{ id: "save", label: PLAN_SAVE_AND_QUIT_OPTION, disabled: false },
+		];
 
 		// Model-tier slider: let the operator pick which configured role model
 		// (smol/default/slow/…) executes the approved plan. The slider always starts
@@ -6457,16 +6503,14 @@ export class InteractiveMode implements InteractiveModeContext {
 		let feedback = "";
 		const annotationStateKey = this.#resolvePlanFilePath(planFilePath);
 
-		const choice = await this.showPlanReview(
+		const reviewId = crypto.randomUUID();
+		const reviewSessionId = this.sessionManager.getSessionId();
+		this.#pendingPlanReview = { reviewId, options: reviewOptions };
+		const pending = this.#pendingPlanReview;
+		const choicePromise = this.showPlanReview(
 			planContent,
 			"Plan mode - next step",
-			[
-				"Approve and execute",
-				"Approve and compact context",
-				keepContextLabel,
-				"Refine plan",
-				PLAN_SAVE_AND_QUIT_OPTION,
-			],
+			reviewOptions.map(option => option.label),
 			{
 				helpText,
 				onExternalEditor: () => void this.#openPlanInExternalEditor(planFilePath),
@@ -6486,8 +6530,32 @@ export class InteractiveMode implements InteractiveModeContext {
 			},
 			{ slider },
 		);
+		const extensionRunner = this.session.extensionRunner;
+		const requestedDelivery = extensionRunner?.emit({
+			type: "plan_review_requested",
+			reviewId,
+			sessionId: reviewSessionId,
+			title: details.title,
+			planFilePath,
+			planContent,
+			options: reviewOptions,
+		});
+		const choice = await choicePromise;
+		if (this.#pendingPlanReview === pending) this.#pendingPlanReview = undefined;
+		const remote = pending.remote;
+		if (requestedDelivery) {
+			void requestedDelivery.then(() =>
+				extensionRunner?.emit({
+					type: "plan_review_resolved",
+					reviewId,
+					sessionId: reviewSessionId,
+					choice: reviewOptions.find(option => option.label === choice)?.id,
+					by: remote ? "extension" : "local",
+				}),
+			);
+		}
 		const closePlanReview = (): void => {
-			this.#hidePlanReview();
+			this.#hidePlanReview(pending);
 			this.ui.requestRender();
 		};
 
@@ -6499,7 +6567,12 @@ export class InteractiveMode implements InteractiveModeContext {
 					this.showError(`Plan file not found at ${planFilePath}`);
 					return;
 				}
-				await this.#savePlanAndQuit(latestPlanContent, details.title, annotationStateKey);
+				await this.#savePlanAndQuit(
+					latestPlanContent,
+					details.title,
+					annotationStateKey,
+					remote?.choice === "save" ? planSaveFileName(details.title) : undefined,
+				);
 			} catch (error) {
 				this.showError(`Failed to save plan: ${error instanceof Error ? error.message : String(error)}`);
 			}
@@ -6554,6 +6627,7 @@ export class InteractiveMode implements InteractiveModeContext {
 					preserveContext: choice !== "Approve and execute",
 					compactBeforeExecute: choice === "Approve and compact context",
 					executionModel,
+					reviewOwner: pending,
 				});
 				if (executionDispatched) this.#planReviewAnnotationState.delete(annotationStateKey);
 			} catch (error) {
@@ -6566,15 +6640,15 @@ export class InteractiveMode implements InteractiveModeContext {
 		}
 
 		if (choice === "Refine plan") {
-			const refinement = feedback.trim();
+			const refinement = remote?.choice === "refine" ? (remote.feedback ?? "") : feedback;
 			try {
-				if (refinement) {
+				if (refinement.trim()) {
 					if (this.onInputCallback) {
-						const input = this.startPendingSubmission({ text: feedback });
+						const input = this.startPendingSubmission({ text: refinement });
 						this.#planReviewAnnotationStateBySubmission.set(input, annotationStateKey);
 						this.onInputCallback(input);
 					} else {
-						await this.session.prompt(feedback);
+						await this.session.prompt(refinement);
 						this.#planReviewAnnotationState.delete(annotationStateKey);
 					}
 				} else {
@@ -6683,6 +6757,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	}
 
 	stop(): void {
+		this.#hidePlanReview();
 		this.#appearanceRefreshRequest = undefined;
 		this.#streamPublisher?.dispose();
 		this.#streamPublisher = undefined;
