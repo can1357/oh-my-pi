@@ -31,6 +31,7 @@
  */
 
 import { isServiceTierOpenAISettingValue, SERVICE_TIER_OPENAI_VALUES } from "../config/service-tier";
+import { parseTitleSpinnerInterval } from "../config/title-spinner";
 import type { ConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
 import type { Args } from "./args";
 import { CliUsageError } from "./usage-error";
@@ -166,6 +167,13 @@ export const STRING_SETTERS: Record<string, StringSetter> = {
 			);
 		}
 		result.serviceTier = value;
+	},
+	"--title-spinner-interval": (result, value) => {
+		try {
+			result.titleSpinnerInterval = parseTitleSpinnerInterval(value);
+		} catch (error) {
+			throw new CliUsageError(`--title-spinner-interval: ${(error as Error).message}`);
+		}
 	},
 	"--api-key": (result, value) => {
 		result.apiKey = value;

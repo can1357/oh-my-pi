@@ -83,6 +83,8 @@ export interface Args {
 	skills?: string[];
 	noRules?: boolean;
 	noTitle?: boolean;
+	/** `--title-spinner-interval <ms>`: ephemeral `tui.titleSpinnerInterval` override (0 = static). */
+	titleSpinnerInterval?: number;
 	/** RPC modes only: run extensions without a UI; `rpc-ui` tool UI remains enabled. */
 	noUi?: boolean;
 	autoApprove?: boolean;

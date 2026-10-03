@@ -6,6 +6,7 @@ import { type GeneratedProvider, getBundledModel } from "@oh-my-pi/pi-catalog/mo
 import { formatModelStringWithRouting, resolveModelOverride } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { tinyTitleClient } from "@oh-my-pi/pi-coding-agent/tiny/title-client";
+import { TITLE_SPINNER_INTERVAL_MS } from "@oh-my-pi/pi-coding-agent/config/title-spinner";
 import {
 	disposeTerminalTitleState,
 	generateSessionTitle,
@@ -1006,7 +1007,7 @@ describe("terminal title runtime", () => {
 			expect(emittedTitles()).toEqual(["π ⠋ windows-project"]);
 
 			resetEmitted();
-			vi.advanceTimersByTime(160);
+			vi.advanceTimersByTime(TITLE_SPINNER_INTERVAL_MS * 2);
 			const titles = emittedTitles();
 			expect(titles.length).toBeGreaterThan(0);
 			expect(titles.every(title => SPINNER_FRAMES.some(frame => title.includes(frame)))).toBe(true);

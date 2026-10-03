@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added the `tui.titleSpinnerInterval` setting, `PI_TITLE_SPINNER_INTERVAL` environment variable, and `--title-spinner-interval <ms>` flag to set how often the terminal-title working spinner advances; `0` shows a static `:` while working. Every frame is an OSC title write the terminal must parse and repaint a tab for — and under tmux control mode each attached client does — so the default period is now 250 ms (4 frames/s) instead of 80 ms ([#14201](https://github.com/can1357/oh-my-pi/pull/14201) by [@mccraigmccraig](https://github.com/mccraigmccraig)).
+
 ## [18.5.1] - 2026-10-03
 
 ### Added

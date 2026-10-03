@@ -207,6 +207,7 @@ import {
 	setSessionTerminalTitle,
 	setTerminalSessionFileSource,
 	setTerminalTitlePullRequest,
+	setTerminalTitleSpinnerInterval,
 	setTerminalTitleSpinnerStyle,
 	setTerminalTitleStateEnabled,
 } from "../utils/title-generator";
@@ -365,6 +366,7 @@ import {
 	cfgTuiTextSizing,
 	cfgTuiTight,
 	cfgTuiTitleSpinner,
+	cfgTuiTitleSpinnerInterval,
 	cfgTuiTitleState,
 	cfgTuiVimMode,
 	cfgTuiVimModeDisplay,
@@ -428,6 +430,7 @@ const cfgLiveUiSettings = combine({
 	"tui.hyperlinks": cfgTuiHyperlinks,
 	"tui.titleState": cfgTuiTitleState,
 	"tui.titleSpinner": cfgTuiTitleSpinner,
+	"tui.titleSpinnerInterval": cfgTuiTitleSpinnerInterval,
 	"statusLine.preset": cfgStatusLinePreset,
 	"statusLine.leftSegments": cfgStatusLineLeftSegments,
 	"statusLine.rightSegments": cfgStatusLineRightSegments,
@@ -2243,6 +2246,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		initTerminalTitleState();
 		setTerminalTitleStateEnabled(cfgTuiTitleState.get(this.settings));
 		setTerminalTitleSpinnerStyle(cfgTuiTitleSpinner.get(this.settings));
+		setTerminalTitleSpinnerInterval(cfgTuiTitleSpinnerInterval.get(this.settings));
 		setTerminalSessionFileSource(() => this.sessionManager.getSessionFile());
 		setSessionTerminalTitle(this.sessionManager.getSessionName(), this.sessionManager.getCwd());
 		// Seeds the border, the status-line `vim` segment, and the cursor shape in one call.
@@ -3529,6 +3533,9 @@ export class InteractiveMode implements InteractiveModeContext {
 		}
 		if (any("tui.titleState")) setTerminalTitleStateEnabled(cfgTuiTitleState.get(this.settings));
 		if (any("tui.titleSpinner")) setTerminalTitleSpinnerStyle(cfgTuiTitleSpinner.get(this.settings));
+		if (any("tui.titleSpinnerInterval")) {
+			setTerminalTitleSpinnerInterval(cfgTuiTitleSpinnerInterval.get(this.settings));
+		}
 
 		if (
 			any(

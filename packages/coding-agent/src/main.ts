@@ -163,6 +163,7 @@ import {
 	cfgTuiImeSafeCursor,
 	cfgTuiMaxInlineImages,
 	cfgTuiResizeScrollback,
+	cfgTuiTitleSpinnerInterval,
 	cfgUpdateChannel,
 } from "./modes/settings";
 import {
@@ -1921,6 +1922,10 @@ export async function runRootCommand(
 		// Apply --external-thinking CLI flag (ephemeral, not persisted)
 		if (parsedArgs.externalThinking) {
 			cfgExternalThinking.override(settingsInstance, true);
+		}
+		// Apply --title-spinner-interval CLI flag (ephemeral, not persisted)
+		if (parsedArgs.titleSpinnerInterval !== undefined) {
+			cfgTuiTitleSpinnerInterval.override(settingsInstance, parsedArgs.titleSpinnerInterval);
 		}
 
 		await logger.time(

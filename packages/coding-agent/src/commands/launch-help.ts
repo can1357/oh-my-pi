@@ -103,6 +103,10 @@ export const launchHelp = {
 		"no-rules": Flags.boolean({ description: "Disable rules discovery and loading" }),
 		export: Flags.string({ description: "Export session file to HTML and exit" }),
 		"no-title": Flags.boolean({ description: "Disable title auto-generation" }),
+		"title-spinner-interval": Flags.string({
+			description:
+				"Milliseconds between terminal-title spinner frames while working (default 250; 0 = static ':'). Overrides tui.titleSpinnerInterval for this run",
+		}),
 		"no-ui": Flags.boolean({
 			description: "With --mode rpc or rpc-ui: run extensions headless (rpc-ui tool UI remains enabled)",
 		}),

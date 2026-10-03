@@ -18,6 +18,7 @@ import { applyHyperlinkSetting } from "@oh-my-pi/pi-tui/render/hyperlink";
 import { setInlineImageMaxColumns, setInlineImageMaxRows } from "@oh-my-pi/pi-tui/render/render-utils";
 import { setShimmerMode } from "@oh-my-pi/pi-tui/theme/shimmer";
 import { setAutoThemeMapping, setColorBlindMode, setSymbolPreset } from "@oh-my-pi/pi-tui/theme/theme";
+import { parseTitleSpinnerInterval, TITLE_SPINNER_INTERVAL_MS } from "../config/title-spinner";
 
 const EMPTY_UNKNOWN_RECORD: Record<string, unknown> = {};
 
@@ -480,6 +481,32 @@ export const cfgTuiTitleSpinner = register({
 			{ value: "pulse", label: "Pulse", description: "Moon filling ○◑● then emptying" },
 			{ value: "dots", label: "Dots", description: "Single braille dots cycling" },
 			{ value: "line", label: "Line", description: "ASCII - \\ | / for fonts without braille coverage" },
+		],
+	},
+});
+
+export const cfgTuiTitleSpinnerInterval = register({
+	id: "tui.titleSpinnerInterval",
+	type: "number",
+	default: TITLE_SPINNER_INTERVAL_MS,
+	env: "PI_TITLE_SPINNER_INTERVAL",
+	// `validate` runs on every load for every setting, with `undefined`/`null` when unconfigured.
+	validate: raw => {
+		if (raw !== undefined && raw !== null) parseTitleSpinnerInterval(raw);
+	},
+	normalize: parseTitleSpinnerInterval,
+	ui: {
+		tab: "appearance",
+		group: "Display",
+		label: "Terminal Title Spinner Interval (ms)",
+		description:
+			"Milliseconds between working-state spinner frames in the terminal title. Each frame is a title write the terminal must process (and under tmux control mode, every attached client repaints a tab), so a slower spinner saves CPU and battery. 0 shows a static ':' while working",
+		options: [
+			{ value: "0", label: "Static", description: "No animation: ':' while working" },
+			{ value: "100", label: "100 ms", description: "10 frames/s" },
+			{ value: "250", label: "250 ms", description: "4 frames/s (default)" },
+			{ value: "500", label: "500 ms", description: "2 frames/s" },
+			{ value: "1000", label: "1 s", description: "1 frame/s" },
 		],
 	},
 });
