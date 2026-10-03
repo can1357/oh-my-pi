@@ -102,6 +102,31 @@ export const stateDefs = {
 		"UsageLimitLowPriority | UsageLimitWrapUp",
 		"Provider-neutral state of an account past its usage limit, discriminated by `stage`.",
 	),
+	SkillSelectionReason: doc(
+		"'source-order' | 'custom-directory' | 'authored-over-installed'",
+		"Rule that ordered the active variants of one skill name.",
+	),
+	SkillDiagnosticEntry: doc(
+		{ name: "string", filePath: "string", source: "string", "pluginName?": "string" },
+		"Allowlisted identity of one discovered skill file.",
+	),
+	SkillDiagnosticDuplicate: doc(
+		{ skill: "SkillDiagnosticEntry", retained: "SkillDiagnosticEntry" },
+		"A file identical to a loaded skill and so not loaded; `retained` is the skill that stands for it.",
+	),
+	SkillResolutionDiagnostic: doc(
+		{
+			name: "string",
+			reason: "SkillSelectionReason",
+			skills: "SkillDiagnosticEntry[]",
+			duplicates: "SkillDiagnosticDuplicate[]",
+		},
+		"A skill name that resolved into several active variants and/or left redundant copies unloaded.",
+	),
+	SkillDiagnosticsSnapshot: doc(
+		{ cwd: "string", showStartupDiagnostics: "boolean", diagnostics: "SkillResolutionDiagnostic[]" },
+		"Current skill resolution; an empty `diagnostics` means no conflicts or redundant installations.",
+	),
 	SessionState: {
 		"model?": "ModelInfo",
 		"thinkingLevel?": "ThinkingLevel",
@@ -143,6 +168,7 @@ export const stateDefs = {
 		dumpTools: absentAs("ToolDescriptor[]", []),
 		"contextUsage?": "ContextUsage",
 		goal: absentAs(doc("GoalModeState | null", "Current goal mode; null when the session has no goal."), null),
+		"skillDiagnostics?": doc("SkillDiagnosticsSnapshot", "Same snapshot as `get_skill_diagnostics`."),
 	},
 
 	BashResult: {

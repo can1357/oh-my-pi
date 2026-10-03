@@ -147,6 +147,11 @@ outside the transcript. It lists the bare default (when included), namespaced
 variants, redundant copies, their backing paths and sources, and the selection
 rule. A shared name does not establish that two skills have the same lineage.
 
+RPC hosts can inspect the same resolution through `get_skill_diagnostics`,
+`get_state.skillDiagnostics`, and `skill_diagnostics_update` frames, including
+when notices are off. `set_skill_startup_diagnostics` changes the same native
+preference and returns its effective value. See the [RPC contract](rpc.md#skill-diagnostics).
+
 Startup notices are enabled by default, including when `startup.quiet` hides the
 welcome banner. Disable them in `/settings` → Tasks → Commands & Skills →
 **Skill Startup Notices**, or persist the setting from a shell:
