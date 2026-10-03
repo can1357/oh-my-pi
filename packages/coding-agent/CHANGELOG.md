@@ -17,6 +17,7 @@
 ### Fixed
 
 - Fixed an `EPIPE: broken pipe` unhandled rejection crashing the session when a debug adapter, eval kernel, IDA worker, or RPC server exits mid-write (seen on Windows) ([#14196](https://github.com/can1357/oh-my-pi/pull/14196) by [@andrebrait](https://github.com/andrebrait))
+- Fixed browser `tab.click()`/`dblclick()`/`check()`/`uncheck()` and element-handle clicks on an element that never becomes clickable (hidden, `opacity:0`, zero size, off-screen, replaced by the page) timing out with no reason; the timeout now names the last check that failed, such as `display:none` ([#14230](https://github.com/can1357/oh-my-pi/pull/14230) by [@will-bogusz](https://github.com/will-bogusz))
 
 ## [18.5.1] - 2026-10-03
 

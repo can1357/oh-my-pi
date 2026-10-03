@@ -77,6 +77,7 @@ interface PageShadowRoot {
 interface PageElement {
 	readonly tagName: string;
 	id: string;
+	readonly isConnected: boolean;
 	type: string;
 	checked: boolean;
 	files: unknown;
@@ -119,6 +120,17 @@ interface PageGlobals {
 	DragEvent: new (type: string, options: { bubbles: boolean; cancelable: boolean; dataTransfer: unknown }) => unknown;
 }
 
+/**
+ * Why the latest {@link actionableClickPoint} wait on a signal was still refusing its element,
+ * so the op that times out on that signal can say why the click never landed.
+ */
+const clickRefusals = new WeakMap<AbortSignal, string>();
+
+/** The reason the click waiting on `signal` was last refused, if it never became clickable. */
+export function lastClickRefusal(signal: AbortSignal): string | undefined {
+	return clickRefusals.get(signal);
+}
+
 function requireFiniteNumber(value: number, label: string): void {
 	if (!Number.isFinite(value)) throw new ToolError(`${label} must be a finite number`);
 }
@@ -129,6 +141,10 @@ export async function isClickActionable(handle: ElementHandle, signal?: AbortSig
 		handle.evaluate(el => {
 			const element = el as unknown as PageElement;
 			const page = globalThis as unknown as PageGlobals;
+			// A node the page replaced (e.g. a re-render) has no computed style; say so rather than misread it.
+			if (!element.isConnected) {
+				return { ok: false as const, reason: "detached (the page replaced this element; look it up again)" };
+			}
 			const style = page.getComputedStyle(element);
 			if (style.display === "none") return { ok: false as const, reason: "display:none" };
 			if (style.visibility === "hidden" || style.visibility === "collapse") {
@@ -195,9 +211,20 @@ async function actionableClickPoint(handle: ElementHandle, label: string, signal
 			Math.abs(previous.height - current.height) < 0.5;
 		const result = await isClickActionable(handle, signal);
 		// ElementHandle.boundingBox() is relative to the main frame; elementFromPoint() above is frame-local.
-		if (stable && result.ok && current) return { x: current.x + result.x, y: current.y + result.y };
+		if (stable && result.ok && current) {
+			if (signal) clickRefusals.delete(signal);
+			return { x: current.x + result.x, y: current.y + result.y };
+		}
 		if (stable && !result.ok && result.coveredBy) {
 			throw new ToolError(`${label} blocked: covered by ${result.coveredBy}`);
+		}
+		if (signal) {
+			const refusal = result.ok
+				? "still moving"
+				: result.coveredBy
+					? `covered by ${result.coveredBy}`
+					: result.reason;
+			clickRefusals.set(signal, refusal);
 		}
 		previous = current;
 		await untilAborted(signal, () => Bun.sleep(34));
