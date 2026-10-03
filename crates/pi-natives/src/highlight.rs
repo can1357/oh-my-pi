@@ -11,9 +11,7 @@ use napi::{JsString, Result};
 use napi_derive::napi;
 use pi_shell::rayon_global_pool_available;
 use rayon::prelude::*;
-use syntect::parsing::{
-	ParseState, Scope, ScopeStack, ScopeStackOp, SyntaxDefinition, SyntaxReference, SyntaxSet,
-};
+use syntect::parsing::{ParseState, Scope, ScopeStack, ScopeStackOp, SyntaxReference, SyntaxSet};
 
 use crate::{
 	js::{self, InlineStr},
@@ -36,33 +34,11 @@ thread_local! {
 	static SCOPE_COLOR_CACHE: RefCell<HashMap<Scope, usize>> = RefCell::new(HashMap::with_capacity(256));
 }
 
-/// Syntaxes bundled in addition to syntect's defaults: syntect ships none of
-/// these, so we vendor their `.sublime-syntax` sources and fold them into the
-/// set.
-const EXTRA_SYNTAXES: &[&str] = &[
-	include_str!("syntaxes/Julia.sublime-syntax"),
-	include_str!("syntaxes/Nix.sublime-syntax"),
-	include_str!("syntaxes/Mermaid.sublime-syntax"),
-	include_str!("syntaxes/TypeScript.sublime-syntax"),
-	include_str!("syntaxes/TypeScriptReact.sublime-syntax"),
-	include_str!("syntaxes/Astro.sublime-syntax"),
-];
-
 fn get_syntax_set() -> &'static SyntaxSet {
-	SYNTAX_SET.get_or_init(build_syntax_set)
-}
-
-/// Load syntect's newline-aware defaults and add the vendored extra syntaxes.
-/// A vendored syntax that fails to parse is skipped rather than breaking all
-/// highlighting; the bundled-language tests guard against silent absence.
-fn build_syntax_set() -> SyntaxSet {
-	let mut builder = SyntaxSet::load_defaults_newlines().into_builder();
-	for src in EXTRA_SYNTAXES {
-		if let Ok(def) = SyntaxDefinition::load_from_str(src, true, None) {
-			builder.add(def);
-		}
-	}
-	builder.build()
+	SYNTAX_SET.get_or_init(|| {
+		syntect::dumps::from_uncompressed_data(include_bytes!(env!("OMP_SYNTAX_SET")))
+			.expect("bundled syntax set should match the syntect build")
+	})
 }
 
 /// Pre-compiled scope patterns for fast matching.
@@ -754,7 +730,72 @@ pub fn get_supported_languages() -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
+	use syntect::parsing::SyntaxDefinition;
+
 	use super::*;
+
+	fn legacy_syntax_set() -> &'static SyntaxSet {
+		static LEGACY_SYNTAX_SET: OnceLock<SyntaxSet> = OnceLock::new();
+		LEGACY_SYNTAX_SET.get_or_init(|| {
+			let mut builder = SyntaxSet::load_defaults_newlines().into_builder();
+			for source in [
+				include_str!("syntaxes/Julia.sublime-syntax"),
+				include_str!("syntaxes/Nix.sublime-syntax"),
+				include_str!("syntaxes/Mermaid.sublime-syntax"),
+				include_str!("syntaxes/TypeScript.sublime-syntax"),
+				include_str!("syntaxes/TypeScriptReact.sublime-syntax"),
+				include_str!("syntaxes/Astro.sublime-syntax"),
+			] {
+				builder.add(SyntaxDefinition::load_from_str(source, true, None).unwrap());
+			}
+			builder.build()
+		})
+	}
+
+	#[test]
+	fn generated_syntax_set_preserves_supported_languages() {
+		let expected: Vec<String> = legacy_syntax_set()
+			.syntaxes()
+			.iter()
+			.map(|syntax| syntax.name.clone())
+			.collect();
+		assert_eq!(get_supported_languages(), expected);
+	}
+
+	#[test]
+	fn generated_syntax_set_preserves_highlighting() {
+		let colors = test_colors();
+		let ss = legacy_syntax_set();
+		let extra_snippets = [
+			("julia", "function greet(name)\n  # Unicode\n  println(\"héllo $name\")\nend\n"),
+			("nix", "let name = \"world\"; in { message = ''héllo ${name}''; }\n"),
+			("mermaid", "graph TD\n  A[\"Start\"] --> B\n  %% note\n"),
+			(
+				"astro",
+				"---\nimport { Menu } from '@lucide/astro';\nconst name: string = \
+				 'world';\n---\n<style>a { color: red; }</style>\n<a>{name}</a>\n",
+			),
+		];
+		for &(language, code) in WARM_SNIPPETS.iter().chain(extra_snippets.iter()) {
+			let syntax = find_syntax(ss, language).unwrap();
+			let mut parse_state = ParseState::new(syntax);
+			let mut scope_stack = ScopeStack::new();
+			let mut expected = String::new();
+			highlight_into(
+				code,
+				ss,
+				&mut parse_state,
+				&mut scope_stack,
+				&palette(&colors),
+				&mut expected,
+			);
+			assert_eq!(
+				highlight_code_impl(code, Some(language), &colors),
+				expected,
+				"generated grammar changed {language} highlighting"
+			);
+		}
+	}
 
 	fn test_colors() -> HighlightColors {
 		HighlightColors {
