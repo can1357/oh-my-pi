@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `Ctrl+R` in provider setup to remove all saved credentials for the highlighted provider.
+
 ## [18.5.0] - 2026-10-03
 
 ### Breaking Changes

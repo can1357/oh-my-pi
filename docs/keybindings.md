@@ -51,6 +51,10 @@ app.history.search: []
 | `app.live.toggle`            | `Ctrl+L`                                                              | Start or stop live voice mode (same as `/live`)                                                                                                                                      |
 | `app.agents.hub`             | `Alt+A`                                                               | [Open the Agent Hub](./agent-hub.md)                                                                                                                                                 |
 
+## Contextual shortcuts
+
+In `/providers`, `Ctrl+R` opens a confirmation to remove all saved credentials for the highlighted provider. The shortcut and native action appear only when that provider has saved credentials. This selector-specific chord does not change the global `app.history.search` binding.
+
 ## Recover a cleared prompt
 
 Press `Ctrl+C` to clear an unsent composer draft, then `Up` to recall it. Older drafts and submitted prompts share the existing Up/Down navigation. Recalled drafts remain editable and are never sent until you submit them.

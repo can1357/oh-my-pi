@@ -1,5 +1,6 @@
 import { afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
 import type { AuthStorage } from "@oh-my-pi/pi-ai";
+import { getOAuthProviders } from "@oh-my-pi/pi-ai/oauth";
 import type { OAuthLoginCallbacks, OAuthProviderId } from "@oh-my-pi/pi-ai/oauth/types";
 import { SignInScene } from "@oh-my-pi/pi-tui/setup/scenes/sign-in";
 import type { SetupSceneHost } from "@oh-my-pi/pi-tui/setup/scenes/types";
@@ -14,7 +15,236 @@ afterEach(() => {
 	vi.restoreAllMocks();
 });
 
+function removalScene(options: {
+	credentials: readonly (readonly [string, number])[];
+	externalSources?: readonly (readonly [string, string])[];
+	removeGate?: Promise<void>;
+	removeStarted?: () => void;
+	failRemove?: boolean;
+	failRefresh?: boolean;
+	onRefresh?: (providerId: string) => void;
+	onReload?: (credentials: Map<string, number>) => void;
+}): {
+	scene: SignInScene;
+	credentials: Map<string, number>;
+	refreshes: string[];
+	renders: () => number;
+	finishes: () => number;
+	focusEvents: () => number;
+} {
+	const credentials = new Map(options.credentials);
+	const externalSources = new Map(options.externalSources ?? []);
+	const refreshes: string[] = [];
+	let renders = 0;
+	let finishes = 0;
+	let focusEvents = 0;
+	const authStorage = {
+		credentials: {
+			has: (providerId: string) => credentials.has(providerId),
+			async reload(): Promise<void> {
+				options.onReload?.(credentials);
+			},
+			async remove(providerId: string): Promise<void> {
+				options.removeStarted?.();
+				await options.removeGate;
+				if (options.failRemove) throw new Error("private credential store detail");
+				credentials.delete(providerId);
+			},
+		},
+		keys: {
+			source: (providerId: string) =>
+				credentials.has(providerId)
+					? { kind: "api_key", concrete: true }
+					: externalSources.has(providerId)
+						? { kind: "env", concrete: true, envVar: externalSources.get(providerId) }
+						: undefined,
+			describe: (providerId: string) => externalSources.get(providerId),
+		},
+	} as unknown as AuthStorage;
+	const host = {
+		ctx: {
+			authStorage,
+			disabledProviders: [],
+			async refreshProvider(providerId: string): Promise<void> {
+				refreshes.push(providerId);
+				options.onRefresh?.(providerId);
+				if (options.failRefresh) throw new Error("discovery endpoint unavailable");
+			},
+		},
+		requestRender(): void {
+			renders++;
+		},
+		finish(): void {
+			finishes++;
+		},
+		setFocus(): void {
+			focusEvents++;
+		},
+		restoreFocus(): void {
+			focusEvents++;
+		},
+	} as unknown as SetupSceneHost;
+	return {
+		scene: new SignInScene(host),
+		credentials,
+		refreshes,
+		renders: () => renders,
+		finishes: () => finishes,
+		focusEvents: () => focusEvents,
+	};
+}
+
+function searchProvider(scene: SignInScene, providerId: string): void {
+	for (const character of providerId) scene.handleInput(character);
+}
+
 describe("SignInScene", () => {
+	it("keeps the removal warning and cancel action visible on a short screen", () => {
+		const target = getOAuthProviders()[0];
+		if (!target) throw new Error("OAuth provider fixture is empty");
+		const fixture = removalScene({ credentials: [[target.id, 1]] });
+		fixture.scene.handleInput("\x12");
+
+		const output = fixture.scene
+			.render(80, 12)
+			.map(line => Bun.stripANSI(line))
+			.join(" ")
+			.replaceAll("│", " ")
+			.replace(/\s+/g, " ");
+		expect(output).toContain("Remove all saved credentials");
+		expect(output).toContain("Environment variables and config files are unchanged");
+		expect(output).toContain("cancel");
+		fixture.scene.dispose();
+	});
+
+	it("removes every saved credential for the provider and refreshes only that provider", async () => {
+		const refreshStarted = Promise.withResolvers<void>();
+		const fixture = removalScene({
+			credentials: [
+				["opencode-go", 2],
+				["opencode-zen", 1],
+			],
+			onRefresh: () => refreshStarted.resolve(),
+		});
+		searchProvider(fixture.scene, "opencode-go");
+		fixture.scene.handleInput("\x12");
+		fixture.scene.handleInput("\n");
+		await refreshStarted.promise;
+		await Bun.sleep(0);
+
+		expect(fixture.credentials.has("opencode-go")).toBe(false);
+		expect(fixture.credentials.get("opencode-zen")).toBe(1);
+		expect(fixture.refreshes).toEqual(["opencode-go"]);
+		expect(fixture.scene.render(100).join("\n")).toContain("Removed saved credentials for opencode-go");
+		fixture.scene.dispose();
+	});
+
+	it("cancels removal without deleting credentials, refreshing models, or finishing setup", () => {
+		const fixture = removalScene({ credentials: [["opencode-go", 1]] });
+		searchProvider(fixture.scene, "opencode-go");
+		fixture.scene.handleInput("\x12");
+		fixture.scene.handleInput("\x1b");
+
+		expect(fixture.credentials.get("opencode-go")).toBe(1);
+		expect(fixture.refreshes).toEqual([]);
+		expect(fixture.finishes()).toBe(0);
+		fixture.scene.dispose();
+	});
+
+	it("shows an external auth source after removing the saved credential", async () => {
+		const fixture = removalScene({
+			credentials: [["opencode-go", 1]],
+			externalSources: [["opencode-go", "OPENCODE_GO_API_KEY"]],
+		});
+		searchProvider(fixture.scene, "opencode-go");
+		fixture.scene.handleInput("\x12");
+		fixture.scene.handleInput("\n");
+		await Bun.sleep(0);
+
+		const output = fixture.scene.render(120).join("\n");
+		expect(fixture.credentials.has("opencode-go")).toBe(false);
+		expect(output).toContain("OPENCODE_GO_API_KEY");
+		expect(output).toContain("Still authenticated");
+		expect(output).not.toContain("Logged out");
+		fixture.scene.dispose();
+	});
+
+	it("preserves saved credentials and skips refresh when storage removal fails", async () => {
+		const fixture = removalScene({ credentials: [["opencode-go", 1]], failRemove: true });
+		searchProvider(fixture.scene, "opencode-go");
+		fixture.scene.handleInput("\x12");
+		fixture.scene.handleInput("\n");
+		await Bun.sleep(0);
+
+		expect(fixture.credentials.has("opencode-go")).toBe(true);
+		expect(fixture.refreshes).toEqual([]);
+		expect(fixture.scene.render(100).join("\n")).toContain("Could not remove saved credentials");
+		expect(fixture.scene.render(100).join("\n")).not.toContain("private credential store detail");
+		fixture.scene.dispose();
+	});
+
+	it("reports model refresh failure separately after credentials are removed", async () => {
+		const fixture = removalScene({ credentials: [["opencode-go", 1]], failRefresh: true });
+		searchProvider(fixture.scene, "opencode-go");
+		fixture.scene.handleInput("\x12");
+		fixture.scene.handleInput("\n");
+		await Bun.sleep(0);
+
+		const output = fixture.scene.render(120).join("\n");
+		expect(fixture.credentials.has("opencode-go")).toBe(false);
+		expect(fixture.refreshes).toEqual(["opencode-go"]);
+		expect(output).toContain("Removed saved credentials for opencode-go");
+		expect(output).toContain("refresh");
+		fixture.scene.dispose();
+	});
+
+	it("does not update focus or render after disposal while removal awaits", async () => {
+		const removeGate = Promise.withResolvers<void>();
+		const removeStarted = Promise.withResolvers<void>();
+		const fixture = removalScene({
+			credentials: [["opencode-go", 1]],
+			removeGate: removeGate.promise,
+			removeStarted: () => removeStarted.resolve(),
+		});
+		searchProvider(fixture.scene, "opencode-go");
+		fixture.scene.handleInput("\x12");
+		fixture.scene.handleInput("\n");
+		await removeStarted.promise;
+		fixture.scene.handleInput("\x1b");
+		expect(fixture.finishes()).toBe(1);
+		const renderCount = fixture.renders();
+		const focusCount = fixture.focusEvents();
+		fixture.scene.dispose();
+		removeGate.resolve();
+		await removeGate.promise;
+		await Bun.sleep(0);
+
+		expect(fixture.credentials.has("opencode-go")).toBe(false);
+		expect(fixture.renders()).toBe(renderCount);
+		expect(fixture.focusEvents()).toBe(focusCount);
+		expect(fixture.refreshes).toEqual(["opencode-go"]);
+	});
+
+	it("detects a credential removed by another process during storage reload", async () => {
+		const fixture = removalScene({
+			credentials: [["opencode-go", 1]],
+			onReload(credentials) {
+				credentials.delete("opencode-go");
+			},
+		});
+		searchProvider(fixture.scene, "opencode-go");
+		fixture.scene.handleInput("\x12");
+		fixture.scene.handleInput("\n");
+		await Bun.sleep(0);
+
+		const output = fixture.scene.render(100).join("\n");
+		expect(fixture.credentials.has("opencode-go")).toBe(false);
+		expect(fixture.refreshes).toEqual([]);
+		expect(output).toContain("No saved credentials");
+		expect(output).not.toContain("Removed saved credentials for opencode-go");
+		fixture.scene.dispose();
+	});
+
 	it("masks secret input and keeps the OSC8 login link and manual-code prompt above clipped rows", async () => {
 		const url = `https://example.com/oauth/authorize?client_id=omp&redirect_uri=http%3A%2F%2Flocalhost%3A45454%2Fcallback&state=${"a".repeat(96)}`;
 		const loginGate = Promise.withResolvers<void>();

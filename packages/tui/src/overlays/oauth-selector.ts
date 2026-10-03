@@ -8,10 +8,12 @@ import {
 	ScrollView,
 	type SgrMouseEvent,
 	Spacer,
+	Text,
 	TruncatedText,
 	visibleWidth,
 } from "../index";
 import { theme } from "../theme/theme";
+import { formatKeyHint } from "../app-keybindings";
 import { matchesSelectCancel, matchesSelectDown, matchesSelectUp } from "../keybinding-matchers";
 import { OverlayPanel } from "../chrome/overlay-box";
 import { Input } from "../components/input";
@@ -64,6 +66,16 @@ export class OAuthSelectorComponent extends OverlayPanel {
 	#authStorage: OAuthSelectorAuthSource;
 	#onSelectCallback: (providerId: string) => void;
 	#onCancelCallback: () => void;
+	#onRemoveCallback?: (providerId: string) => Promise<void>;
+	#pendingRemoval:
+		| {
+				readonly selectorProviderId: string;
+				readonly providerId: string;
+				readonly providerName: string;
+		  }
+		| undefined;
+	#removalInFlight = false;
+	#interactionGeneration = 0;
 	#statusMessage: string | undefined;
 	#validateAuthCallback?: (providerId: string) => Promise<boolean>;
 	#requestRenderCallback?: () => void;
@@ -87,6 +99,7 @@ export class OAuthSelectorComponent extends OverlayPanel {
 			disabledProviders?: readonly string[];
 			validateAuth?: (providerId: string) => Promise<boolean>;
 			requestRender?: () => void;
+			onRemove?: (providerId: string) => Promise<void>;
 		},
 	) {
 		super(mode === "login" ? "Select provider to login" : "Select provider to logout", "omp.overlay.oauth");
@@ -94,6 +107,7 @@ export class OAuthSelectorComponent extends OverlayPanel {
 		this.#authStorage = authStorage;
 		this.#onSelectCallback = onSelect;
 		this.#onCancelCallback = onCancel;
+		this.#onRemoveCallback = options?.onRemove;
 		this.#validateAuthCallback = options?.validateAuth;
 		this.#requestRenderCallback = options?.requestRender;
 		this.#menu = new MenuSelection<OAuthProviderInfo>([], {
@@ -111,6 +125,7 @@ export class OAuthSelectorComponent extends OverlayPanel {
 	}
 
 	stopValidation(): void {
+		this.#interactionGeneration += 1;
 		this.#validationGeneration += 1;
 		this.#stopSpinner();
 	}
@@ -123,10 +138,11 @@ export class OAuthSelectorComponent extends OverlayPanel {
 	 * (clipped by the host) before dropping below three visible rows.
 	 */
 	setMaxHeight(lines: number): void {
-		// Above the rows: LIST_ROW_OFFSET; below: search status + border.
-		const strict = lines - LIST_ROW_OFFSET - 2;
-		// Keeps only the rows + search status inside `lines`.
-		const relaxed = lines - LIST_ROW_OFFSET - 1;
+		// Reserve rows below the list for search status and border, plus the
+		// contextual removal hint when the selected provider has saved auth.
+		const statusRows = 2 + (!this.#pendingRemoval && this.#canRemoveSelected() ? 1 : 0);
+		const strict = lines - LIST_ROW_OFFSET - statusRows;
+		const relaxed = lines - LIST_ROW_OFFSET - Math.max(1, statusRows - 1);
 		const rows = Math.min(OAUTH_SELECTOR_MAX_VISIBLE, Math.max(1, strict, Math.min(relaxed, 3)));
 		if (rows === this.#maxVisible) return;
 		this.#maxVisible = rows;
@@ -136,6 +152,15 @@ export class OAuthSelectorComponent extends OverlayPanel {
 		return this.#mode === "logout"
 			? this.#authStorage.credentials.has(providerId)
 			: this.#authStorage.keys.source(providerId) !== undefined;
+	}
+
+	#canRemoveSelected(): boolean {
+		const selected = this.#menu.selectedItem;
+		return (
+			this.#onRemoveCallback !== undefined &&
+			selected !== undefined &&
+			this.#authStorage.credentials.has(selected.storeCredentialsAs ?? selected.id)
+		);
 	}
 
 	#loadProviders(disabledProviders: readonly string[] = []): void {
@@ -318,60 +343,172 @@ export class OAuthSelectorComponent extends OverlayPanel {
 		this.#scrollStart = startIndex;
 		this.#visibleCount = endIndex - startIndex;
 
-		const rows: string[] = [];
-		for (let i = startIndex; i < endIndex; i++) {
-			const provider = items[i];
-			if (!provider) continue;
-			const isSelected = i === this.#menu.selectedIndex;
-			const isAvailable = provider.available;
-			const statusIndicator = this.#getStatusIndicator(provider.id);
+		if (!this.#pendingRemoval) {
+			const rows: string[] = [];
+			for (let i = startIndex; i < endIndex; i++) {
+				const provider = items[i];
+				if (!provider) continue;
+				const isSelected = i === this.#menu.selectedIndex;
+				const isAvailable = provider.available;
+				const statusIndicator = this.#getStatusIndicator(provider.id);
 
-			let line = "";
-			if (isSelected) {
-				const prefix = theme.fg("accent", `${theme.nav.cursor} `);
-				const text = isAvailable ? theme.fg("accent", provider.name) : theme.fg("dim", provider.name);
-				line = prefix + text + statusIndicator;
-			} else {
-				const text = isAvailable ? `  ${provider.name}` : theme.fg("dim", `  ${provider.name}`);
-				line = text + statusIndicator;
+				let line = "";
+				if (isSelected) {
+					const prefix = theme.fg("accent", `${theme.nav.cursor} `);
+					const text = isAvailable ? theme.fg("accent", provider.name) : theme.fg("dim", provider.name);
+					line = prefix + text + statusIndicator;
+				} else {
+					const text = isAvailable ? `  ${provider.name}` : theme.fg("dim", `  ${provider.name}`);
+					line = text + statusIndicator;
+				}
+				if (!isSelected && i === this.#hoveredIndex) {
+					line = theme.bg("selectedBg", line);
+				}
+				rows.push(line);
 			}
-			if (!isSelected && i === this.#hoveredIndex) {
-				line = theme.bg("selectedBg", line);
+
+			if (rows.length > 0) {
+				const sv = new ScrollView(rows, {
+					height: rows.length,
+					scrollbar: "auto",
+					totalRows: total,
+					theme: { track: t => theme.fg("muted", t), thumb: t => theme.fg("accent", t) },
+				});
+				sv.setScrollOffset(startIndex);
+				this.#listContainer.addChild(sv);
 			}
-			rows.push(line);
-		}
 
-		if (rows.length > 0) {
-			const sv = new ScrollView(rows, {
-				height: rows.length,
-				scrollbar: "auto",
-				totalRows: total,
-				theme: { track: t => theme.fg("muted", t), thumb: t => theme.fg("accent", t) },
-			});
-			sv.setScrollOffset(startIndex);
-			this.#listContainer.addChild(sv);
-		}
+			// Search status line (scrollbar covers overflow indication)
+			if (this.#shouldRenderSearchStatus()) {
+				this.#listContainer.addChild(new TruncatedText(this.#renderStatusLine(total), 0, 0));
+			}
 
-		// Search status line (scrollbar covers overflow indication)
-		if (this.#shouldRenderSearchStatus()) {
-			this.#listContainer.addChild(new TruncatedText(this.#renderStatusLine(total), 0, 0));
-		}
-
-		if (total === 0) {
-			const message =
-				this.#menu.items.length === 0
-					? this.#mode === "login"
-						? "No OAuth providers available"
-						: "No stored provider credentials to log out"
-					: "No matching providers";
-			this.#listContainer.addChild(new TruncatedText(theme.fg("muted", message), 0, 0));
+			if (total === 0) {
+				const message =
+					this.#menu.items.length === 0
+						? this.#mode === "login"
+							? "No OAuth providers available"
+							: "No stored provider credentials to log out"
+						: "No matching providers";
+				this.#listContainer.addChild(new TruncatedText(theme.fg("muted", message), 0, 0));
+			}
 		}
 		if (this.#statusMessage) {
 			this.#listContainer.addChild(new Spacer(1));
 			this.#listContainer.addChild(new TruncatedText(theme.fg("warning", this.#statusMessage), 0, 0));
 		}
+		if (this.#pendingRemoval) {
+			this.#listContainer.addChild(new Spacer(1));
+			this.#listContainer.addChild(new Text(theme.fg("warning", this.#removalConfirmationText()), 1, 0));
+			this.#listContainer.addChild(
+				new TruncatedText(
+					theme.fg(
+						"dim",
+						this.#removalInFlight
+							? "Removing saved credentials…"
+							: `${formatKeyHint("enter")} confirm · ${formatKeyHint("escape")} cancel`,
+					),
+					0,
+					0,
+				),
+			);
+		} else if (this.#canRemoveSelected()) {
+			this.#listContainer.addChild(
+				new TruncatedText(theme.fg("dim", `${formatKeyHint("ctrl+r")} remove saved credentials`), 0, 0),
+			);
+		}
 	}
+
+	#removalConfirmationText(): string {
+		const pending = this.#pendingRemoval;
+		if (!pending) return "";
+		return `Remove all saved credentials for ${pending.providerName} (${pending.providerId})? This removes every saved account and API key. Environment variables and config files are unchanged.`;
+	}
+
+	#clearNativeCache(): void {
+		this.#nativeItems = undefined;
+		this.#nativeItemsSource = undefined;
+		this.#pickerItems = undefined;
+		this.#nativeRoot = undefined;
+		this.#pickerRoot = undefined;
+	}
+
+	#requestRemoval(): void {
+		if (!this.#canRemoveSelected() || this.#pendingRemoval || this.#removalInFlight) return;
+		const selected = this.#menu.selectedItem;
+		if (!selected) return;
+		const providerId = selected.storeCredentialsAs ?? selected.id;
+		this.#statusMessage = undefined;
+		this.#pendingRemoval = Object.freeze({
+			selectorProviderId: selected.id,
+			providerId,
+			providerName: selected.name,
+		});
+		this.#updateList();
+		this.#requestRenderCallback?.();
+	}
+
+	#cancelRemoval(): void {
+		if (!this.#pendingRemoval || this.#removalInFlight) return;
+		this.#pendingRemoval = undefined;
+		this.#statusMessage = undefined;
+		this.#updateList();
+		this.#requestRenderCallback?.();
+	}
+
+	async #confirmRemoval(): Promise<void> {
+		const pending = this.#pendingRemoval;
+		const onRemove = this.#onRemoveCallback;
+		if (!pending || !onRemove || this.#removalInFlight) return;
+		this.#removalInFlight = true;
+		this.#statusMessage = `Removing saved credentials for ${pending.providerName}…`;
+		const generation = this.#interactionGeneration;
+		this.#updateList();
+		this.#requestRenderCallback?.();
+		try {
+			await onRemove(pending.providerId);
+			if (generation !== this.#interactionGeneration) return;
+			this.#removalInFlight = false;
+			this.#pendingRemoval = undefined;
+			this.#statusMessage = undefined;
+			this.#validationGeneration += 1;
+			this.#stopSpinner();
+			this.#authState.delete(pending.selectorProviderId);
+			this.#authState.delete(pending.providerId);
+			this.#menu.setItems(this.#menu.items, pending.selectorProviderId);
+			this.#clearNativeCache();
+			this.#updateList();
+			this.#startValidation();
+		} catch {
+			if (generation !== this.#interactionGeneration) return;
+			this.#removalInFlight = false;
+			this.#pendingRemoval = undefined;
+			this.#statusMessage = "Could not remove saved credentials. Check the credential store and try again.";
+			this.#clearNativeCache();
+			this.#updateList();
+		}
+		this.#requestRenderCallback?.();
+	}
+
 	handleInput(keyData: string): void {
+		if (this.#removalInFlight) {
+			if (matchesSelectCancel(keyData)) {
+				this.stopValidation();
+				this.#onCancelCallback();
+			}
+			return;
+		}
+		if (this.#pendingRemoval) {
+			if (matchesSelectCancel(keyData)) this.#cancelRemoval();
+			else if (matchesKey(keyData, "enter") || matchesKey(keyData, "return") || keyData === "\n") {
+				void this.#confirmRemoval();
+			}
+			return;
+		}
+		if (matchesKey(keyData, "ctrl+r")) {
+			this.#requestRemoval();
+			return;
+		}
 		// Escape or Ctrl+C
 		if (matchesSelectCancel(keyData)) {
 			this.stopValidation();
@@ -413,6 +550,7 @@ export class OAuthSelectorComponent extends OverlayPanel {
 
 	/** Confirm the selected provider (Enter or mouse click). */
 	#confirmSelection(): void {
+		if (this.#pendingRemoval || this.#removalInFlight) return;
 		const selectedProvider = this.#menu.selectedItem;
 		if (selectedProvider?.available) {
 			this.#statusMessage = undefined;
@@ -488,7 +626,24 @@ export class OAuthSelectorComponent extends OverlayPanel {
 		this.#pickerItems ??= all.map(provider => this.#pickerItem(provider));
 		const query = this.#menu.query;
 		const login = this.#mode === "login";
+		const pendingRemoval = this.#pendingRemoval;
 		const search = this.#shouldRenderSearchStatus() ? pickerQuery(this.#search) : pickerQuery(null);
+		const actions = [];
+		if (pendingRemoval) {
+			if (!this.#removalInFlight) actions.push(pickerAction("cancel-remove", "Keep credentials", "escape"));
+			else actions.push(CLOSE_ACTION);
+		} else {
+			actions.push(
+				pickerAction("confirm", login ? "Sign in" : "Sign out", "enter", {
+					primary: true,
+					...(!login ? { danger: true } : {}),
+				}),
+			);
+			if (this.#canRemoveSelected()) {
+				actions.push(pickerAction("remove", "Remove saved credentials", "ctrl+r", { danger: true }));
+			}
+			actions.push(CLOSE_ACTION);
+		}
 		this.#pickerRoot = dockedPicker({
 			title: login ? "Sign in" : "Sign out",
 			subtitle: login ? "Pick a provider" : "Remove stored credentials",
@@ -505,15 +660,11 @@ export class OAuthSelectorComponent extends OverlayPanel {
 			total: all.length,
 			empty: login ? "No OAuth providers available" : "No stored provider credentials to log out",
 			...(this.#statusMessage ? { message: this.#statusMessage } : {}),
-			actions: [
-				pickerAction(
-					"confirm",
-					login ? "Sign in" : "Sign out",
-					"enter",
-					login ? { primary: true } : { primary: true, danger: true },
-				),
-				CLOSE_ACTION,
-			],
+			actions,
+			confirm:
+				pendingRemoval && !this.#removalInFlight
+					? { text: this.#removalConfirmationText(), act: "confirm-remove", label: "Remove" }
+					: null,
 		});
 		return this.#pickerRoot;
 	}
@@ -549,6 +700,40 @@ export class OAuthSelectorComponent extends OverlayPanel {
 				),
 			);
 		}
+		if (this.#pendingRemoval) {
+			children.push(
+				node(
+					"text",
+					{ spans: [span(this.#removalConfirmationText(), "warning")], wrap: "word" },
+					undefined,
+					"remove-warning",
+				),
+				node(
+					"text",
+					{
+						spans: [
+							span(
+								this.#removalInFlight
+									? "Removing saved credentials…"
+									: `${formatKeyHint("enter")} confirm · ${formatKeyHint("escape")} cancel`,
+								"dim",
+							),
+						],
+					},
+					undefined,
+					"remove-hint",
+				),
+			);
+		} else if (this.#canRemoveSelected()) {
+			children.push(
+				node(
+					"text",
+					{ spans: [span(`${formatKeyHint("ctrl+r")} remove saved credentials`, "dim")] },
+					undefined,
+					"remove-hint",
+				),
+			);
+		}
 		const empty =
 			this.#menu.items.length === 0
 				? this.#mode === "login"
@@ -577,7 +762,16 @@ export class OAuthSelectorComponent extends OverlayPanel {
 	handleNativeEvent(event: NativeUiEvent): void {
 		const ev = pickerEvent(event, PICKER_KEY);
 		if (ev?.kind === "action") {
-			if (ev.act === "confirm") this.#confirmSelection();
+			if (ev.act === "confirm-remove") void this.#confirmRemoval();
+			else if (ev.act === "cancel-remove") this.#cancelRemoval();
+			else if (ev.act === "remove") this.#requestRemoval();
+			else if (this.#removalInFlight && (ev.act === "close" || ev.act === "cancel")) {
+				this.stopValidation();
+				this.#onCancelCallback();
+			} else if (this.#pendingRemoval && !this.#removalInFlight && (ev.act === "close" || ev.act === "cancel")) {
+				this.#cancelRemoval();
+			} else if (this.#pendingRemoval || this.#removalInFlight) return;
+			else if (ev.act === "confirm") this.#confirmSelection();
 			else if (ev.act === "clear") {
 				this.#search.setValue("");
 				this.#syncSearchQuery();
@@ -588,6 +782,7 @@ export class OAuthSelectorComponent extends OverlayPanel {
 			return;
 		}
 		if (ev?.kind === "select") {
+			if (this.#pendingRemoval || this.#removalInFlight) return;
 			const index = this.#menu.visibleItems.findIndex(provider => provider.id === ev.item);
 			if (index < 0 || index === this.#menu.selectedIndex) return;
 			this.#menu.setSelectedIndex(index);
@@ -597,6 +792,7 @@ export class OAuthSelectorComponent extends OverlayPanel {
 		}
 		if ((event.type !== "select" && event.type !== "activate") || (event.key !== "list" && ev?.kind !== "activate"))
 			return;
+		if (this.#pendingRemoval || this.#removalInFlight) return;
 		const index = this.#menu.visibleItems.findIndex(provider => provider.id === event.item);
 		if (index < 0) return;
 		if (index !== this.#menu.selectedIndex) {
@@ -609,6 +805,7 @@ export class OAuthSelectorComponent extends OverlayPanel {
 
 	/** Move the selection one step for a wheel notch (clamped, no wrap). */
 	handleWheel(delta: -1 | 1): void {
+		if (this.#pendingRemoval || this.#removalInFlight) return;
 		if (this.#menu.visibleItems.length === 0) return;
 		if (!this.#menu.move(delta, false)) return;
 		this.#statusMessage = undefined;
@@ -622,6 +819,7 @@ export class OAuthSelectorComponent extends OverlayPanel {
 	 * drives the hover band, and a left click selects and confirms like Enter.
 	 */
 	routeMouse(event: SgrMouseEvent, line: number, _col: number): void {
+		if (this.#pendingRemoval || this.#removalInFlight) return;
 		if (event.wheel !== null) {
 			this.handleWheel(event.wheel);
 			return;
