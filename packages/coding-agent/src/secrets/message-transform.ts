@@ -119,7 +119,9 @@ export function obfuscateToolArguments(
 	sharedRegexSecretValues?: ReadonlySet<string>,
 ): Record<string, unknown> {
 	if (!obfuscator.hasSecrets()) return args;
-	const regexSecretValues = sharedRegexSecretValues ?? collectJsonRegexSecretValues(obfuscator, args as JsonValue);
+	const regexSecretValues =
+		sharedRegexSecretValues ??
+		obfuscator.collectRegexSecretValuesBatch(() => collectJsonRegexSecretValues(obfuscator, args as JsonValue));
 	return mapJsonStrings(args as JsonValue, s => obfuscator.obfuscate(s, regexSecretValues)) as Record<string, unknown>;
 }
 
@@ -651,7 +653,9 @@ function collectMessageRegexSecretValues(obfuscator: SecretObfuscator, messages:
  */
 export function obfuscateMessages(obfuscator: SecretObfuscator, messages: Message[]): Message[] {
 	if (!obfuscator.obfuscates()) return messages;
-	const sharedRegexSecretValues = collectMessageRegexSecretValues(obfuscator, messages);
+	const sharedRegexSecretValues = obfuscator.collectRegexSecretValuesBatch(() =>
+		collectMessageRegexSecretValues(obfuscator, messages),
+	);
 	let changed = false;
 	const result = messages.map((message): Message => {
 		let current = message;

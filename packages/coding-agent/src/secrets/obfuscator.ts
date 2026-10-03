@@ -38,6 +38,7 @@ import {
 	regexHasUnresolvableShortMatchFallback,
 	regexRematchesInContext,
 } from "./replacement";
+import { SecretCollisionSnapshots, SecretTextCache, SecretTextResultCache } from "./scan-cache";
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Types
@@ -113,6 +114,62 @@ export class SecretObfuscator {
 
 	/** Regex values seen in the current obfuscate input, used to keep friendly labels from exposing normalized matches that are discovered later in the same pass. */
 	#currentRegexSecretValues = new Set<string>();
+
+	/** Shared values stay immutable during a batch; do not copy the whole set for every string. */
+	#sharedRegexSecretValues: ReadonlySet<string> = new Set();
+
+	#collectionCache = new SecretTextCache<readonly string[]>();
+	#obfuscationCache = new SecretTextResultCache();
+	#prefixCache = new SecretTextResultCache(1024 * 1024);
+	#collisionSnapshots = new SecretCollisionSnapshots();
+	#cacheState = -1;
+	#aliasPolicyRevision = 0;
+	#regexMappings = new Map<string, number>();
+	#orderedPlainMappings: [string, number][] = [];
+	#orderedReplaceMappings: [string, string][] = [];
+
+	/**
+	 * Registries only grow (alias recursion can change in place). Include every
+	 * recognition/replacement registry, including lazy key self-redaction. A
+	 * computation that mutates these registries is never cached under its new state.
+	 */
+	#scanState(): number {
+		const state =
+			this.#configuredSecretValues.size +
+			this.#replaceMappings.size +
+			this.#obfuscateMappings.size +
+			this.#deobfuscateMap.size +
+			this.#generatedPlaceholders.size +
+			this.#generatedReplaceChunks.size +
+			this.#aliasPolicyRevision +
+			(this.#key === undefined ? 0 : 1);
+		if (state !== this.#cacheState) {
+			this.#cacheState = state;
+			this.#collectionCache.clear();
+			this.#obfuscationCache.clear();
+			this.#prefixCache.clear();
+		}
+		return state;
+	}
+
+	get #replaceEntries(): [string, string][] {
+		if (this.#orderedReplaceMappings.length !== this.#replaceMappings.size) {
+			this.#orderedReplaceMappings = [...this.#replaceMappings].sort((a, b) => b[0].length - a[0].length);
+		}
+		return this.#orderedReplaceMappings;
+	}
+
+	/** Collect the whole batch before redaction, then freeze its actual collision membership. */
+	collectRegexSecretValuesBatch(collect: () => ReadonlySet<string>): ReadonlySet<string> {
+		const unresolvedKey = this.#key === undefined;
+		let values = collect();
+		// Lazy key self-redaction can introduce regex values in any batch field,
+		// including fields collected before the match that first needs the key.
+		if (unresolvedKey && this.#key !== undefined) {
+			values = collect();
+		}
+		return this.#collisionSnapshots.prepare(values);
+	}
 
 	/** Placeholder base-key (exact value for :M, case-folded otherwise) → base hash. */
 	#placeholderBaseByKey = new Map<string, string>();
@@ -217,6 +274,7 @@ export class SecretObfuscator {
 
 		this.#nextIndex = index;
 		this.#hasAny = hasRealSec;
+		this.#orderedPlainMappings = [...this.#plainMappings].sort((a, b) => b[0].length - a[0].length);
 	}
 
 	/**
@@ -230,6 +288,9 @@ export class SecretObfuscator {
 		this.#key = key;
 		this.#replaceMappings.set(key, this.#generateSecretReplacement(key));
 		this.#configuredSecretValues.add(key);
+		// A configured replace entry can already have this key as its literal,
+		// so registration can replace a value without changing the map's size.
+		this.#orderedReplaceMappings = [];
 	}
 
 	/** Resolve the placeholder key once, minting its self-redaction on first use. */
@@ -241,20 +302,6 @@ export class SecretObfuscator {
 			this.#setPlaceholderKey(key);
 		}
 		return key;
-	}
-
-	/** Whether this pass will mint a keyed placeholder from a regex match. */
-	#willMintRegexPlaceholder(secretValues: ReadonlySet<string>): boolean {
-		for (const entry of this.#regexEntries) {
-			if (entry.mode !== "obfuscate") continue;
-			for (const value of secretValues) {
-				entry.regex.lastIndex = 0;
-				const matches = entry.regex.test(value);
-				entry.regex.lastIndex = 0;
-				if (matches) return true;
-			}
-		}
-		return false;
 	}
 
 	hasSecrets(): boolean {
@@ -277,17 +324,25 @@ export class SecretObfuscator {
 	/** Obfuscate all secrets in text. Bidirectional placeholders for obfuscate mode, one-way for replace. */
 	obfuscate(text: string, sharedRegexSecretValues?: ReadonlySet<string>): string {
 		if (!this.obfuscates()) return text;
+		const collision = this.#collisionSnapshots.prepare(sharedRegexSecretValues);
+		const state = this.#scanState();
+		const cached = this.#obfuscationCache.get(text, collision.id);
+		if (cached !== undefined) return cached;
+		try {
+			const result = this.#obfuscateUncached(text, collision);
+			if (state === this.#scanState()) {
+				this.#obfuscationCache.set(text, collision.id, result);
+			}
+			return result;
+		} finally {
+			this.#currentRegexSecretValues = new Set();
+			this.#sharedRegexSecretValues = this.#collisionSnapshots.prepare();
+		}
+	}
+
+	#obfuscateUncached(text: string, sharedRegexSecretValues: ReadonlySet<string>): string {
 		this.#currentRegexSecretValues = this.collectRegexSecretValuesForObfuscation(text);
-		for (const secretValue of sharedRegexSecretValues ?? []) {
-			this.#currentRegexSecretValues.add(secretValue);
-		}
-		// Resolve a lazy key before the replace phase whenever this pass will mint
-		// a regex placeholder. The key registers itself as a replace-mode secret;
-		// resolving it later, while processing the regex match, would expose key
-		// bytes already present in this same provider-visible input.
-		if (this.#keyProvider !== undefined && this.#willMintRegexPlaceholder(this.#currentRegexSecretValues)) {
-			this.#getKey();
-		}
+		this.#sharedRegexSecretValues = sharedRegexSecretValues;
 		let result = text;
 		// `origin` runs parallel to `result` (one tag char per result char): "I" for
 		// bytes carried from the INPUT (placeholders from a PRIOR obfuscate() call)
@@ -300,7 +355,7 @@ export class SecretObfuscator {
 		// to equal a prior one (same secret seen raw again) eligible for cross-match.
 		let origin = "I".repeat(text.length);
 		// 1. Process replace-mode plain secrets
-		for (const [secret, replacement] of [...this.#replaceMappings].sort((a, b) => b[0].length - a[0].length)) {
+		for (const [secret, replacement] of this.#replaceEntries) {
 			({ text: result, origin } = this.#replaceOutsidePlaceholdersTracked(result, origin, secret, replacement, "I"));
 		}
 		for (const secretValue of this.#collectRegexSecretValues(result)) {
@@ -309,13 +364,10 @@ export class SecretObfuscator {
 		for (const secretValue of this.#collectRegexSecretValuesAfterRegexReplacements(result, origin)) {
 			this.#currentRegexSecretValues.add(secretValue);
 		}
-		for (const secretValue of sharedRegexSecretValues ?? []) {
-			this.#currentRegexSecretValues.add(secretValue);
-		}
 		({ text: result, origin } = this.#stripUnsafeFriendlyPrefixes(result, origin));
 
 		// 2. Process obfuscate-mode plain secrets
-		for (const [secret, index] of [...this.#plainMappings].sort((a, b) => b[0].length - a[0].length)) {
+		for (const [secret, index] of this.#orderedPlainMappings) {
 			const mapping = this.#obfuscateMappings.get(index)!;
 			({ text: result, origin } = this.#replaceOutsidePlaceholdersTracked(
 				result,
@@ -457,6 +509,7 @@ export class SecretObfuscator {
 						);
 						this.#obfuscateMappings.set(index, { secret: match.canonicalValue, placeholder });
 						this.#generatedPlaceholders.add(placeholder);
+						this.#regexMappings.set(match.canonicalValue, index);
 					}
 					const mapping = this.#obfuscateMappings.get(index)!;
 					const placeholder = this.#placeholderForCurrentInput(mapping.placeholder);
@@ -472,7 +525,6 @@ export class SecretObfuscator {
 		}
 		({ text: result, origin } = this.#stabilizeReplaceRegexPlaceholderSpillover(result, origin));
 
-		this.#currentRegexSecretValues = new Set();
 		return result;
 	}
 
@@ -752,15 +804,7 @@ export class SecretObfuscator {
 
 	/** Find the obfuscate index for a known secret value. */
 	#findObfuscateIndex(secret: string): number | undefined {
-		// Check plain mappings first
-		const plainIndex = this.#plainMappings.get(secret);
-		if (plainIndex !== undefined) return plainIndex;
-
-		// Check regex-discovered mappings
-		for (const [index, mapping] of this.#obfuscateMappings) {
-			if (mapping.secret === secret) return index;
-		}
-		return undefined;
+		return this.#plainMappings.get(secret) ?? this.#regexMappings.get(secret);
 	}
 
 	#createPlaceholder(secret: string, friendlyName?: string, recursive: boolean = false): string {
@@ -893,6 +937,17 @@ export class SecretObfuscator {
 					entry.regex.lastIndex++;
 					continue;
 				}
+				// Use the actual contextual match, not regex.test(match[0]):
+				// lookbehind/lookahead matches may not match their bare value.
+				// Register self-redaction before collection simulates plain replaces.
+				if (
+					this.#keyProvider !== undefined &&
+					this.obfuscates() &&
+					entry.mode === "obfuscate" &&
+					match[0].length >= MIN_OBFUSCATE_SECRET_LEN
+				) {
+					this.#getKey();
+				}
 				values.add(match[0]);
 			}
 			entry.regex.lastIndex = 0;
@@ -901,10 +956,17 @@ export class SecretObfuscator {
 	}
 
 	collectRegexSecretValuesForObfuscation(text: string): Set<string> {
+		// Simulated replacement scans can depend on the active local/shared
+		// collision values. Only the standalone, whole-batch collection is reused.
+		const reusable =
+			this.obfuscates() && this.#currentRegexSecretValues.size === 0 && this.#sharedRegexSecretValues.size === 0;
+		const state = this.#scanState();
+		const cached = reusable ? this.#collectionCache.get(text) : undefined;
+		if (cached !== undefined) return new Set(cached);
 		const values = this.#collectRegexSecretValues(text);
 		let result = text;
 		let origin = "I".repeat(text.length);
-		for (const [secret, replacement] of [...this.#replaceMappings].sort((a, b) => b[0].length - a[0].length)) {
+		for (const [secret, replacement] of this.#replaceEntries) {
 			({ text: result, origin } = this.#replaceOutsidePlaceholdersTracked(result, origin, secret, replacement, "I"));
 		}
 		for (const secretValue of this.#collectRegexSecretValues(result)) {
@@ -912,6 +974,14 @@ export class SecretObfuscator {
 		}
 		for (const secretValue of this.#collectRegexSecretValuesAfterRegexReplacements(result, origin)) {
 			values.add(secretValue);
+		}
+		if (reusable && state === this.#scanState()) {
+			const retained = [...values];
+			this.#collectionCache.set(
+				text,
+				retained,
+				retained.reduce((length, value) => length + value.length, 0),
+			);
 		}
 		return values;
 	}
@@ -997,24 +1067,40 @@ export class SecretObfuscator {
 	}
 
 	stripUnsafeFriendlyPlaceholderPrefixes(text: string, sharedRegexSecretValues: ReadonlySet<string>): string {
+		if (!text.includes("$$")) return text;
+		const collision = this.#collisionSnapshots.prepare(sharedRegexSecretValues);
+		const state = this.#scanState();
+		const cached = this.#prefixCache.get(text, collision.id);
+		if (cached !== undefined) return cached;
 		const previousRegexSecretValues = this.#currentRegexSecretValues;
-		this.#currentRegexSecretValues = new Set(sharedRegexSecretValues);
+		const previousSharedValues = this.#sharedRegexSecretValues;
+		this.#currentRegexSecretValues = new Set();
+		this.#sharedRegexSecretValues = collision;
 		try {
-			return this.#stripUnsafeFriendlyPrefixes(text, "I".repeat(text.length)).text;
+			const result = this.#stripUnsafeFriendlyPrefixes(text, "I".repeat(text.length)).text;
+			if (state === this.#scanState()) {
+				this.#prefixCache.set(text, collision.id, result);
+			}
+			return result;
 		} finally {
 			this.#currentRegexSecretValues = previousRegexSecretValues;
+			this.#sharedRegexSecretValues = previousSharedValues;
 		}
 	}
 
 	#registerDeobfuscationAlias(placeholder: string, secret: string, recursive: boolean): void {
 		const existing = this.#deobfuscateMap.get(placeholder);
 		if (existing === undefined || existing.secret === secret) {
+			if (existing !== undefined && existing.recursive !== recursive) this.#aliasPolicyRevision++;
 			this.#deobfuscateMap.set(placeholder, { secret, recursive });
 		}
 		const unprefixed = placeholderWithoutFriendlyName(placeholder);
 		if (unprefixed !== undefined) {
 			const existingUnprefixed = this.#deobfuscateMap.get(unprefixed);
 			if (existingUnprefixed === undefined || existingUnprefixed.secret === secret) {
+				if (existingUnprefixed !== undefined && existingUnprefixed.recursive !== recursive) {
+					this.#aliasPolicyRevision++;
+				}
 				this.#deobfuscateMap.set(unprefixed, { secret, recursive });
 			}
 		}
@@ -1036,6 +1122,10 @@ export class SecretObfuscator {
 			if (sanitizedLabelCollidesWithSecret(prefix, sanitizedSecret)) return true;
 		}
 		for (const secretValue of this.#currentRegexSecretValues) {
+			const sanitizedSecret = sanitizeForCollisionCheck(secretValue);
+			if (sanitizedLabelCollidesWithSecret(prefix, sanitizedSecret)) return true;
+		}
+		for (const secretValue of this.#sharedRegexSecretValues) {
 			const sanitizedSecret = sanitizeForCollisionCheck(secretValue);
 			if (sanitizedLabelCollidesWithSecret(prefix, sanitizedSecret)) return true;
 		}
@@ -1125,6 +1215,7 @@ export class SecretObfuscator {
 			const placeholder = this.#createPlaceholder(secret, friendlyName);
 			this.#obfuscateMappings.set(index, { secret, placeholder });
 			this.#generatedPlaceholders.add(placeholder);
+			this.#regexMappings.set(secret, index);
 		}
 		return this.#placeholderForCurrentInput(this.#obfuscateMappings.get(index)!.placeholder);
 	}

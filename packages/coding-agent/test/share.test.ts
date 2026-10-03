@@ -10,6 +10,7 @@ import {
 	shareSession,
 } from "../src/export/share";
 import { SecretObfuscator } from "../src/secrets/obfuscator";
+import { generateDeterministicReplacement } from "../src/secrets/replacement";
 import type { SessionEntry } from "../src/session/session-entries";
 import type { SessionManager } from "../src/session/session-manager";
 
@@ -413,6 +414,38 @@ describe("buildShareSnapshot", () => {
 		expect(recovered).toContain(plainSecret);
 		expect(recovered).toContain(regexSecret);
 		expect(obfuscator.deobfuscate(recovered)).toBe(recovered);
+	});
+
+	test("recollects header regex collisions after a later entry resolves the lazy key", () => {
+		const key = "advisor-batch-lazy-key";
+		const replacement = generateDeterministicReplacement(key);
+		const friendlyName = replacement.toUpperCase();
+		const header = { ...sessionData([], "e1").header!, title: `key=${key}` };
+		const entries = [messageEntry("e1", null, "firstsecret")];
+		const sm = {
+			getHeader: () => header,
+			getEntries: () => entries,
+			getLeafId: () => "e1",
+		} as unknown as SessionManager;
+		const obfuscator = new SecretObfuscator(
+			[
+				{ type: "regex", content: "firstsecret", friendlyName },
+				{ type: "regex", content: `(?<=key=)${replacement}`, mode: "replace", replacement: "[masked]" },
+			],
+			() => key,
+		);
+
+		const snapshot = buildShareSnapshot(sm, { obfuscator });
+		const flat = JSON.stringify(snapshot);
+
+		expect(snapshot.header?.title).toBe("key=[masked]");
+		expect(flat).not.toContain(key);
+		expect(flat).not.toContain("firstsecret");
+		expect(flat).not.toContain(`${friendlyName}_`);
+		expect(snapshot.entries).toHaveLength(1);
+		expect(snapshot.leafId).toBe("e1");
+		expect(header.title).toBe(`key=${key}`);
+		expect(JSON.stringify(entries)).toContain("firstsecret");
 	});
 
 	test("skips raw image payload bytes when collecting regex-protected values, so image data cannot spuriously trigger friendly-prefix collision avoidance", () => {

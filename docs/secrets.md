@@ -23,6 +23,10 @@ secrets:
 
 3. Live model-authored tool arguments are deep-walked and placeholders are restored before the tool executes. Session context restores placeholders for local display/resume and re-obfuscates it before provider replay. Replace-mode substitutions are one-way and are not restored.
 
+Unchanged text reuses bounded, session-local scan and redaction caches, including when history is rebuilt into new message objects. Both outbound stages still check provider-visible content. New or changed text is scanned; changes to placeholder/key state or batch collision values invalidate affected reuse. Full-batch discovery still runs before redaction so a later secret can remove an unsafe friendly label from earlier history. Advisor history uses the same caches.
+
+Collection and redaction caches each retain at most 4,096 text entries and 4 Mi UTF-16 characters, counting keys and retained values. Oversized inputs bypass retention; larger histories can evict each other and rescan even without changes. Eviction never skips protection. Cold history, newly discovered secrets and expensive custom regexes can still block the event loop; caching does not move matching to a worker.
+
 Two modes control what happens to each secret:
 
 | Mode                  | Behavior                                                                                      | Reversible |
@@ -42,6 +46,8 @@ Define custom secret entries in YAML. Two locations are checked:
 | Project | `<cwd>/.omp/secrets.yml`   | Project-specific secrets    |
 
 Project entries override global entries with matching `content`. The global location follows the session's agent directory, including named profiles and explicit SDK agent-directory overrides.
+
+Rules are loaded for the session, not watched for changes. Start a new session after editing `secrets.yml` or changing the project whose rules you need. Disabling and re-enabling secret hiding preserves the existing rules and reversible placeholders; it does not reload files.
 
 ### Schema
 

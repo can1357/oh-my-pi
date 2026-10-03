@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Reduced repeated secret-scanning work when preparing long conversations by reusing results for unchanged text while preserving redaction safety checks.
+
 ## [18.5.0] - 2026-10-03
 
 ### Breaking Changes

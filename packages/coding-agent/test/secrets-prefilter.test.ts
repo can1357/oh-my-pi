@@ -4,8 +4,8 @@
  * representative token of every alternative (and every case variant a
  * case-insensitive pattern accepts) is redacted identically with and without
  * the metadata; a custom regex without metadata is always scanned. The gate
- * exists because the whole provider context is rescanned on every request,
- * and the regex pass was the dominant synchronous cost in a long session.
+ * exists because unchanged provider history must avoid both regex execution
+ * and literal probes; new content still needs the same credential coverage.
  */
 import { describe, expect, it } from "bun:test";
 import { builtinCredentialSecretEntries } from "@oh-my-pi/pi-coding-agent/secrets";

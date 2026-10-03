@@ -8,7 +8,8 @@ import {
 	obfuscateNativeReplay,
 	obfuscateToolArguments,
 } from "../secrets/message-transform";
-import type { SecretObfuscator } from "../secrets/obfuscator";
+import type { JsonValue, SecretObfuscator } from "../secrets/obfuscator";
+import { collectJsonRegexSecretValues } from "../secrets/placeholder-scan";
 import {
 	formatExecutionSourcePreview,
 	formatSessionHistoryMarkdown,
@@ -768,12 +769,9 @@ export class AdvisorRuntime {
 	 * list: the second call discovers nothing new and skips the strip.
 	 */
 	#collectAdvisorSecrets(obfuscator: SecretObfuscator, delta: AgentMessage[], renderedMd: string): boolean {
-		let discoveredNewRegexSecretValue = false;
 		const addRegexValues = (text: string): void => {
 			for (const secretValue of obfuscator.collectRegexSecretValuesForObfuscation(text) ?? []) {
-				if (this.#advisorRegexSecretValues.has(secretValue)) continue;
 				this.#advisorRegexSecretValues.add(secretValue);
-				discoveredNewRegexSecretValue = true;
 			}
 		};
 		const addTextualContent = (content: TextualContent): void => {
@@ -785,20 +783,24 @@ export class AdvisorRuntime {
 				if (block.type === "text") addRegexValues(block.text);
 			}
 		};
-		for (const message of delta) {
-			if (
-				message.role === "custom" &&
-				PRIMARY_CONTEXT_CUSTOM_TYPES.has(message.customType) &&
-				typeof message.content === "string"
-			) {
-				addRegexValues(message.content);
-			}
-			if (message.role === "toolResult") addTextualContent(message.content as TextualContent);
-		}
-		addRegexValues(renderedMd);
-		discoveredNewRegexSecretValue =
-			scrubAdvisorHistory(obfuscator, this.agent.state.messages, this.#advisorRegexSecretValues) ||
-			discoveredNewRegexSecretValue;
+		const discoveredNewRegexSecretValue = scrubAdvisorHistory(
+			obfuscator,
+			this.agent.state.messages,
+			this.#advisorRegexSecretValues,
+			() => {
+				for (const message of delta) {
+					if (
+						message.role === "custom" &&
+						PRIMARY_CONTEXT_CUSTOM_TYPES.has(message.customType) &&
+						typeof message.content === "string"
+					) {
+						addRegexValues(message.content);
+					}
+					if (message.role === "toolResult") addTextualContent(message.content as TextualContent);
+				}
+				addRegexValues(renderedMd);
+			},
+		);
 		if (discoveredNewRegexSecretValue) {
 			this.#refreshPendingSecretPrefixes(obfuscator);
 		}
@@ -847,11 +849,11 @@ export class AdvisorRuntime {
 		// advisor's own history and refresh pending placeholder prefixes (shared
 		// helper — see #collectAdvisorSecrets; idempotent for this drain's
 		// single-block pass over the same prepared list).
-		const probeMd = formatSessionHistoryMarkdown(delta, {
-			...ADVISOR_RENDER_OPTIONS,
-			includeThinking: this.#includeThinking,
-		});
-		if (obfuscator?.hasSecrets()) {
+		if (obfuscator?.obfuscates()) {
+			const probeMd = formatSessionHistoryMarkdown(delta, {
+				...ADVISOR_RENDER_OPTIONS,
+				includeThinking: this.#includeThinking,
+			});
 			this.#collectAdvisorSecrets(obfuscator, delta, probeMd);
 		}
 
@@ -860,12 +862,12 @@ export class AdvisorRuntime {
 		// structured fields), because the old path's contract is whole-delta text
 		// obfuscation as the final pass. Expanding to every role would mint
 		// different placeholders and break byte-equivalence with the old render.
-		const renderDelta = obfuscator?.hasSecrets() ? this.#obfuscatePrimaryContextMessages(obfuscator, delta) : delta;
+		const renderDelta = obfuscator?.obfuscates() ? this.#obfuscatePrimaryContextMessages(obfuscator, delta) : delta;
 
 		const chunks = renderAdvisorDeltaChunks(renderDelta, {
 			wip,
 			includeThinking: this.#includeThinking,
-			obfuscator: obfuscator?.hasSecrets() ? obfuscator : undefined,
+			obfuscator: obfuscator?.obfuscates() ? obfuscator : undefined,
 			advisorRegexSecretValues: this.#advisorRegexSecretValues,
 		});
 		return chunks;
@@ -912,7 +914,7 @@ export class AdvisorRuntime {
 			includeThinking: this.#includeThinking,
 		});
 		if (!md.trim()) return null;
-		if (obfuscator?.hasSecrets()) {
+		if (obfuscator?.obfuscates()) {
 			this.#collectAdvisorSecrets(obfuscator, delta, md);
 			md = formatSessionHistoryMarkdown(this.#obfuscatePrimaryContextMessages(obfuscator, delta), {
 				...ADVISOR_RENDER_OPTIONS,
@@ -1128,7 +1130,7 @@ export class AdvisorRuntime {
 				// concurrent collisions. Collect before scrubbing and refresh both queues
 				// before another round can send history or the popped batch to compaction.
 				const obfuscator = this.host.obfuscator;
-				if (obfuscator?.hasSecrets()) {
+				if (obfuscator?.obfuscates()) {
 					if (scrubAdvisorHistory(obfuscator, this.agent.state.messages, this.#advisorRegexSecretValues)) {
 						this.#refreshPendingSecretPrefixes(obfuscator);
 					}
@@ -1820,24 +1822,94 @@ function obfuscateAdvisorMessage(
 	}
 }
 
+/** Collect exactly the ordinary fields transformed by obfuscateAdvisorMessage. */
+function collectAdvisorMessageRegexSecretValues(
+	obfuscator: SecretObfuscator,
+	message: AgentMessage,
+	values: Set<string>,
+): void {
+	const addText = (text: string): void => {
+		for (const value of obfuscator.collectRegexSecretValuesForObfuscation(text)) values.add(value);
+	};
+	const addContent = (content: TextualContent): void => {
+		if (typeof content === "string") {
+			addText(content);
+			return;
+		}
+		for (const block of content) {
+			if (block.type === "text") addText(block.text);
+		}
+	};
+	const addJson = (value: Record<string, unknown>): void => {
+		for (const secret of collectJsonRegexSecretValues(obfuscator, value as JsonValue)) values.add(secret);
+	};
+	switch (message.role) {
+		case "user":
+		case "developer":
+			addContent(message.content as TextualContent);
+			break;
+		case "toolResult": {
+			const msg = message as AgentMessage & { content: TextualContent; details?: Record<string, unknown> };
+			addContent(msg.content);
+			if (typeof msg.details?.diff === "string") addText(msg.details.diff);
+			break;
+		}
+		case "assistant":
+			for (const block of (message as AssistantMessage).content) {
+				if (block.type === "text") addText(block.text);
+				else if (block.type === "thinking") addText(block.thinking);
+				else if (block.type === "toolCall") addJson(block.arguments);
+			}
+			break;
+		case "custom":
+		case "hookMessage": {
+			if (!formatSessionHistoryMarkdown([message], { expandPrimaryContext: true }).trim()) break;
+			const msg = message as AgentMessage & { content: TextualContent; details?: Record<string, unknown> };
+			addContent(msg.content);
+			if (msg.details) addJson(msg.details);
+			break;
+		}
+		case "bashExecution":
+			addText(formatExecutionSourcePreview((message as AgentMessage & { command: string }).command));
+			break;
+		case "pythonExecution":
+			addText(formatExecutionSourcePreview((message as AgentMessage & { code: string }).code));
+			break;
+		case "branchSummary":
+		case "compactionSummary":
+			addText((message as AgentMessage & { summary: string }).summary);
+			break;
+		case "fileMention":
+			for (const file of (message as AgentMessage & { files: Array<{ path: string }> }).files) addText(file.path);
+			break;
+	}
+}
+
 function scrubAdvisorHistory(
 	obfuscator: SecretObfuscator,
 	messages: AgentMessage[],
 	sharedRegexSecretValues: Set<string>,
+	collectAdditionalRegexSecretValues?: () => void,
 ): boolean {
 	const previousSize = sharedRegexSecretValues.size;
-	// Collect across the entire history first: redacting a search-only regex
-	// value would otherwise erase the evidence needed to scrub an earlier prefix.
-	for (const message of messages) {
-		if (
-			message.role === "user" ||
-			message.role === "developer" ||
-			message.role === "assistant" ||
-			message.role === "compactionSummary"
-		) {
-			collectNativeReplayRegexSecretValues(obfuscator, message, sharedRegexSecretValues);
+	// Retry collection, not redaction: lazy key self-replacement can reveal a
+	// collision in a field scanned before the field that first registers the key.
+	const regexSecretValues = obfuscator.collectRegexSecretValuesBatch(() => {
+		collectAdditionalRegexSecretValues?.();
+		// Redacting a search-only value would erase the evidence for earlier prefixes.
+		for (const message of messages) {
+			if (
+				message.role === "user" ||
+				message.role === "developer" ||
+				message.role === "assistant" ||
+				message.role === "compactionSummary"
+			) {
+				collectNativeReplayRegexSecretValues(obfuscator, message, sharedRegexSecretValues);
+			}
+			collectAdvisorMessageRegexSecretValues(obfuscator, message, sharedRegexSecretValues);
 		}
-	}
+		return sharedRegexSecretValues;
+	});
 	for (let index = 0; index < messages.length; index++) {
 		const message = messages[index]!;
 		const replay =
@@ -1845,9 +1917,9 @@ function scrubAdvisorHistory(
 			message.role === "developer" ||
 			message.role === "assistant" ||
 			message.role === "compactionSummary"
-				? obfuscateNativeReplay(obfuscator, message, sharedRegexSecretValues)
+				? obfuscateNativeReplay(obfuscator, message, regexSecretValues)
 				: message;
-		const next = obfuscateAdvisorMessage(obfuscator, replay, sharedRegexSecretValues);
+		const next = obfuscateAdvisorMessage(obfuscator, replay, regexSecretValues);
 		if (next !== message) messages[index] = next;
 	}
 	return sharedRegexSecretValues.size !== previousSize;

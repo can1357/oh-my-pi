@@ -256,7 +256,7 @@ function redactShareHeader(
 }
 
 function redactSessionDataForShare(o: SecretObfuscator, data: SessionData): SessionData {
-	const sharedRegexSecretValues = collectShareRegexSecretValues(o, data);
+	const sharedRegexSecretValues = o.collectRegexSecretValuesBatch(() => collectShareRegexSecretValues(o, data));
 	return {
 		...data,
 		header: redactShareHeader(o, data.header, sharedRegexSecretValues),

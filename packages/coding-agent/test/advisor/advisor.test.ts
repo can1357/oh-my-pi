@@ -40,6 +40,7 @@ import { createAdvisorMessageCard } from "@oh-my-pi/pi-tui/chat/advisor-message"
 import { getThemeByName } from "@oh-my-pi/pi-tui/theme";
 import { obfuscateMessages } from "../../src/secrets/message-transform";
 import { SecretObfuscator } from "../../src/secrets/obfuscator";
+import { generateDeterministicReplacement } from "../../src/secrets/replacement";
 import { getOpenAiRemoteCompactionPayload } from "../../src/session/session-context";
 import { formatSessionHistoryMarkdown } from "../../src/session/session-history-format";
 import { YieldQueue } from "../../src/session/yield-queue";
@@ -2143,6 +2144,104 @@ describe("advisor", () => {
 			expect(promptText(promptInputs[0])).not.toContain(secret);
 		});
 
+		it("skips advisor secret collection and redaction while a retained obfuscator is disabled, then resumes protection", async () => {
+			const plainSecret = "ADVISOR_SECRET_TOKEN_123";
+			const previousSecret = "advisor_secret_previous";
+			const retainedSecret = "advisor_secret_retained";
+			const maintenanceSecret = "advisor_secret_maintenance";
+			const obfuscator = new SecretObfuscator([
+				{ type: "plain", content: plainSecret },
+				{ type: "regex", content: "advisor_secret_[a-z0-9]+" },
+			]);
+			const previousPlaceholder = obfuscator.obfuscate(previousSecret);
+			expect(previousPlaceholder).not.toBe(previousSecret);
+			obfuscator.setObfuscating(false);
+			expect(obfuscator.hasSecrets()).toBe(true);
+			expect(obfuscator.obfuscates()).toBe(false);
+
+			const promptInputs: Array<string | AgentMessage[]> = [];
+			const agent = makeAgent(promptInputs);
+			const retainedMessage = {
+				role: "user",
+				content: `retained ${plainSecret} ${retainedSecret} ${previousPlaceholder}`,
+				timestamp: 0,
+			} as AgentMessage;
+			agent.state.messages.push(retainedMessage);
+			const messages: AgentMessage[] = [
+				{ role: "user", content: `raw ${plainSecret} advisor_secret_disabled`, timestamp: 1 } as AgentMessage,
+			];
+			const maintenanceInputs: Array<string | AgentMessage[]> = [];
+			const maintenanceMessages: AgentMessage[] = [];
+			const runtime = new AdvisorRuntime(agent, {
+				snapshotMessages: () => messages,
+				obfuscator,
+				maintainContext: async input => {
+					maintenanceInputs.push([input]);
+					const message = {
+						role: "user",
+						content: `maintenance ${maintenanceSecret}`,
+						timestamp: maintenanceInputs.length,
+					} as AgentMessage;
+					maintenanceMessages.push(message);
+					agent.state.messages.push(message);
+					return false;
+				},
+			});
+			const collect = vi.spyOn(obfuscator, "collectRegexSecretValuesForObfuscation");
+			const obfuscate = vi.spyOn(obfuscator, "obfuscate");
+			try {
+				runtime.onTurnEnd();
+				await runtime.waitForCatchup(1000, 1);
+
+				const rawUpdate = `### Session update\n\n${formatSessionHistoryMarkdown(messages, {
+					includeToolIntent: true,
+					watchedRoles: true,
+					expandPrimaryContext: true,
+					expandEditDiffs: true,
+					expandToolIO: true,
+				})}`;
+				expect(promptInputs).toHaveLength(1);
+				expect(promptText(promptInputs[0]!)).toBe(rawUpdate);
+				expect(maintenanceInputs).toHaveLength(1);
+				expect(promptText(maintenanceInputs[0]!)).toBe(rawUpdate);
+				expect(agent.state.messages).toEqual([retainedMessage, maintenanceMessages[0]]);
+				expect(obfuscator.deobfuscate(previousPlaceholder)).toBe(previousSecret);
+				expect(collect).not.toHaveBeenCalled();
+				expect(obfuscate).not.toHaveBeenCalled();
+
+				obfuscator.setObfuscating(true);
+				messages.push({
+					role: "user",
+					content: `protected ${plainSecret} advisor_secret_enabled`,
+					timestamp: 2,
+				} as AgentMessage);
+				runtime.onTurnEnd();
+				await runtime.waitForCatchup(1000, 1);
+
+				expect(promptInputs).toHaveLength(2);
+				expect(maintenanceInputs).toHaveLength(2);
+				expect(collect).toHaveBeenCalled();
+				expect(obfuscate).toHaveBeenCalled();
+				const protectedUpdate = promptText(promptInputs[1]!);
+				expect(protectedUpdate).not.toContain(plainSecret);
+				expect(protectedUpdate).not.toContain("advisor_secret_enabled");
+				expect(promptText(maintenanceInputs[1]!)).toBe(protectedUpdate);
+				expect(obfuscator.deobfuscate(protectedUpdate)).toContain(
+					`protected ${plainSecret} advisor_secret_enabled`,
+				);
+				const protectedHistory = promptText(agent.state.messages);
+				expect(protectedHistory).not.toContain(plainSecret);
+				expect(protectedHistory).not.toContain(retainedSecret);
+				expect(protectedHistory).not.toContain(maintenanceSecret);
+				expect(obfuscator.deobfuscate(protectedHistory)).toContain(retainedSecret);
+				expect(obfuscator.deobfuscate(protectedHistory)).toContain(maintenanceSecret);
+				expect(obfuscator.deobfuscate(previousPlaceholder)).toBe(previousSecret);
+			} finally {
+				collect.mockRestore();
+				obfuscate.mockRestore();
+			}
+		});
+
 		it("falls back to one redacted update when a regex secret spans source messages", async () => {
 			const obfuscator = new SecretObfuscator([{ type: "regex", content: "BEGIN[\\s\\S]*END" }]);
 			const promptInputs: Array<string | AgentMessage[]> = [];
@@ -2703,6 +2802,336 @@ describe("advisor", () => {
 			expect(promptText(promptInputs[0])).not.toContain("tok_abc123");
 			expect(promptText(promptInputs[1])).not.toContain("OTHERSECRET");
 			expect(promptText(promptInputs[1])).not.toContain("TOKABC123_");
+		});
+
+		it.each(["retained", "maintenance"])(
+			"recollects %s native history before redaction when a later field registers the lazy key",
+			async stage => {
+				const key = "advisor-batch-lazy-key";
+				const replacement = generateDeterministicReplacement(key);
+				const label = replacement.toUpperCase();
+				const loadKey = vi.fn(() => key);
+				const obfuscator = new SecretObfuscator(
+					[
+						{ type: "regex", content: "firstsecret", friendlyName: label },
+						{ type: "regex", content: `(?<=key=)${replacement}`, mode: "replace", replacement: "[masked]" },
+					],
+					loadKey,
+				);
+				const promptInputs: Array<string | AgentMessage[]> = [];
+				const agent = makeAgent(promptInputs);
+				const items = [
+					{ type: "message", role: "user", content: [{ type: "input_text", text: `key=${key}` }] },
+					{ type: "message", role: "user", content: [{ type: "input_text", text: "firstsecret" }] },
+				];
+				const retained = {
+					role: "user",
+					content: "public native holder",
+					timestamp: 0,
+					providerPayload: { type: "openaiResponsesHistory", items },
+					preserveData: { openaiRemoteCompaction: { replacementHistory: items } },
+				} as AgentMessage;
+				if (stage === "retained") agent.state.messages.push(retained);
+				const messages: AgentMessage[] = [{ role: "user", content: "public warmup", timestamp: 1 }];
+				const runtime = new AdvisorRuntime(agent, {
+					snapshotMessages: () => messages,
+					obfuscator,
+					maintainContext: async () => {
+						if (stage === "maintenance") {
+							expect(loadKey).not.toHaveBeenCalled();
+							agent.state.messages.push(retained);
+						}
+						return false;
+					},
+				});
+				try {
+					runtime.onTurnEnd();
+					expect(await runtime.waitForCatchup(1000, 1)).toBe(true);
+					expect(promptInputs).toHaveLength(1);
+					expect(loadKey).toHaveBeenCalledTimes(1);
+					const history = JSON.stringify(agent.state.messages);
+					expect(history).toContain("[masked]");
+					expect(history).not.toContain(`${label}_`);
+					expect(history).not.toContain(key);
+					expect(history).not.toContain("firstsecret");
+					expect(obfuscator.deobfuscate(history)).toContain("firstsecret");
+				} finally {
+					runtime.dispose();
+				}
+			},
+		);
+
+		it("recollects primary delta and rendered collision values after native history registers the lazy key", async () => {
+			const key = "advisor-batch-lazy-key";
+			const replacement = generateDeterministicReplacement(key);
+			const label = replacement.toUpperCase();
+			const obfuscator = new SecretObfuscator(
+				[
+					{ type: "regex", content: "firstsecret", friendlyName: label },
+					{ type: "regex", content: `(?<=key=)${replacement}`, mode: "replace", replacement: "[masked]" },
+				],
+				() => key,
+			);
+			const promptInputs: Array<string | AgentMessage[]> = [];
+			const agent = makeAgent(promptInputs);
+			agent.state.messages.push({
+				role: "user",
+				content: "public native holder",
+				timestamp: 0,
+				providerPayload: {
+					type: "openaiResponsesHistory",
+					items: [{ type: "message", role: "user", content: [{ type: "input_text", text: "firstsecret" }] }],
+				},
+			} as AgentMessage);
+			const messages: AgentMessage[] = [{ role: "user", content: `key=${key}`, timestamp: 1 }];
+			const runtime = new AdvisorRuntime(agent, { snapshotMessages: () => messages, obfuscator });
+			try {
+				runtime.onTurnEnd();
+				expect(await runtime.waitForCatchup(1000, 1)).toBe(true);
+				expect(promptInputs).toHaveLength(1);
+				expect(promptText(promptInputs[0]!)).toContain("[masked]");
+				expect(promptText(promptInputs[0]!)).not.toContain(key);
+				const history = JSON.stringify(agent.state.messages);
+				expect(history).not.toContain(`${label}_`);
+				expect(history).not.toContain("firstsecret");
+				expect(obfuscator.deobfuscate(history)).toContain("firstsecret");
+			} finally {
+				runtime.dispose();
+			}
+		});
+
+		it("recollects untruncated delta fields when a later tool result registers the lazy key", async () => {
+			const key = "advisor-batch-lazy-key";
+			const replacement = generateDeterministicReplacement(key);
+			const label = replacement.toUpperCase();
+			const obfuscator = new SecretObfuscator(
+				[
+					{ type: "regex", content: "firstsecret", friendlyName: label },
+					{ type: "regex", content: `(?<=key=)${replacement}`, mode: "replace", replacement: "[masked]" },
+				],
+				() => key,
+			);
+			const promptInputs: Array<string | AgentMessage[]> = [];
+			const agent = makeAgent(promptInputs);
+			const messages: AgentMessage[] = [
+				{
+					role: "toolResult",
+					toolCallId: "c1",
+					toolName: "read",
+					content: `${"head".repeat(2000)} key=${key} ${"tail".repeat(2000)}`,
+					isError: false,
+					timestamp: 1,
+				} as unknown as AgentMessage,
+				{
+					role: "toolResult",
+					toolCallId: "c2",
+					toolName: "read",
+					content: "firstsecret",
+					isError: false,
+					timestamp: 2,
+				} as unknown as AgentMessage,
+			];
+			const probe = formatSessionHistoryMarkdown(messages, {
+				expandToolIO: true,
+			});
+			expect(probe).not.toContain(key);
+			const runtime = new AdvisorRuntime(agent, { snapshotMessages: () => messages, obfuscator });
+			try {
+				runtime.onTurnEnd();
+				expect(await runtime.waitForCatchup(1000, 1)).toBe(true);
+				expect(promptInputs).toHaveLength(1);
+				const prompt = promptText(promptInputs[0]!);
+				expect(prompt).not.toContain(`${label}_`);
+				expect(prompt).not.toContain(key);
+				expect(prompt).not.toContain("firstsecret");
+				expect(obfuscator.deobfuscate(prompt)).toContain("firstsecret");
+			} finally {
+				runtime.dispose();
+			}
+		});
+
+		it.each(["retained", "maintenance"])(
+			"collects all %s ordinary history fields before a later field registers the lazy key",
+			async stage => {
+				const key = "advisor-batch-lazy-key";
+				const replacement = generateDeterministicReplacement(key);
+				const label = replacement.toUpperCase();
+				const loadKey = vi.fn(() => key);
+				const obfuscator = new SecretObfuscator(
+					[
+						{ type: "regex", content: "firstsecret", friendlyName: label },
+						{ type: "regex", content: `(?<=key=)${replacement}`, mode: "replace", replacement: "[masked]" },
+					],
+					loadKey,
+				);
+				const promptInputs: Array<string | AgentMessage[]> = [];
+				const agent = makeAgent(promptInputs);
+				const retained: AgentMessage[] = [
+					{ role: "user", content: `key=${key}`, timestamp: 0 },
+					{ role: "user", content: "firstsecret", timestamp: 1 },
+				];
+				if (stage === "retained") agent.state.messages.push(...retained);
+				const messages: AgentMessage[] = [{ role: "user", content: "public warmup", timestamp: 2 }];
+				const runtime = new AdvisorRuntime(agent, {
+					snapshotMessages: () => messages,
+					obfuscator,
+					maintainContext: async () => {
+						if (stage === "maintenance") {
+							expect(loadKey).not.toHaveBeenCalled();
+							agent.state.messages.push(...retained);
+						}
+						return false;
+					},
+				});
+				try {
+					runtime.onTurnEnd();
+					expect(await runtime.waitForCatchup(1000, 1)).toBe(true);
+					expect(promptInputs).toHaveLength(1);
+					expect(loadKey).toHaveBeenCalledTimes(1);
+					const history = JSON.stringify(agent.state.messages);
+					expect(history).toContain("[masked]");
+					expect(history).not.toContain(`${label}_`);
+					expect(history).not.toContain(key);
+					expect(history).not.toContain("firstsecret");
+					const outbound = obfuscateMessages(obfuscator, defaultConvertToLlm(agent.state.messages));
+					expect(JSON.stringify(outbound)).not.toContain(`${label}_`);
+					expect(obfuscator.deobfuscate(JSON.stringify(outbound))).toContain("firstsecret");
+				} finally {
+					runtime.dispose();
+				}
+			},
+		);
+
+		it("collects later ordinary history collisions before earlier friendly prefixes lose their source evidence", async () => {
+			const obfuscator = new SecretObfuscator([
+				{ type: "plain", content: "OTHERSECRET", friendlyName: "TOKABC123" },
+				{ type: "regex", content: "tok_[a-z0-9]+", mode: "replace" },
+			]);
+			const stale = obfuscator.obfuscate("OTHERSECRET");
+			expect(stale).toContain("TOKABC123_");
+			const promptInputs: Array<string | AgentMessage[]> = [];
+			const agent = makeAgent(promptInputs);
+			agent.state.messages.push(
+				{ role: "user", content: `earlier ${stale}`, timestamp: 0 },
+				{ role: "user", content: "later tok_abc123", timestamp: 1 },
+			);
+			const runtime = new AdvisorRuntime(agent, {
+				snapshotMessages: () => [{ role: "user", content: "public update", timestamp: 2 }],
+				obfuscator,
+			});
+			try {
+				runtime.onTurnEnd();
+				expect(await runtime.waitForCatchup(1000, 1)).toBe(true);
+				expect(promptInputs).toHaveLength(1);
+				const history = JSON.stringify(agent.state.messages);
+				expect(history).not.toContain("TOKABC123_");
+				expect(history).not.toContain("tok_abc123");
+				const outbound = obfuscateMessages(obfuscator, defaultConvertToLlm(agent.state.messages));
+				expect(JSON.stringify(outbound)).not.toContain("TOKABC123_");
+				expect(obfuscator.deobfuscate(JSON.stringify(outbound))).toContain("OTHERSECRET");
+			} finally {
+				runtime.dispose();
+			}
+		});
+
+		it("does not collect ordinary retained fields excluded from advisor redaction", async () => {
+			const obfuscator = new SecretObfuscator([
+				{ type: "plain", content: "OTHERSECRET", friendlyName: "TOKABC123" },
+				{ type: "regex", content: "tok_[a-z0-9]+", mode: "replace" },
+			]);
+			const stale = obfuscator.obfuscate("OTHERSECRET");
+			const promptInputs: Array<string | AgentMessage[]> = [];
+			const agent = makeAgent(promptInputs);
+			const excluded = [
+				{ role: "user", content: [{ type: "image", data: "tok_abc123", mimeType: "image/png" }], timestamp: 1 },
+				{
+					role: "assistant",
+					content: [
+						{ type: "thinking", thinking: "public", thinkingSignature: "tok_abc123" },
+						{
+							type: "toolCall",
+							id: "c1",
+							name: "read",
+							arguments: {},
+							intent: "tok_abc123",
+							rawBlock: "tok_abc123",
+						},
+					],
+					timestamp: 2,
+				},
+				{ role: "toolResult", content: "public", details: { ignored: "tok_abc123" }, timestamp: 3 },
+				{
+					role: "custom",
+					customType: "extension-payload",
+					content: "tok_abc123",
+					details: { ignored: "tok_abc123" },
+					display: false,
+					timestamp: 4,
+				},
+				{ role: "fileMention", files: [{ path: "public.txt", content: "tok_abc123" }], timestamp: 5 },
+				{ role: "compactionSummary", summary: "public", shortSummary: "tok_abc123", timestamp: 6 },
+			] as unknown as AgentMessage[];
+			agent.state.messages.push({ role: "user", content: stale, timestamp: 0 }, ...excluded);
+			const runtime = new AdvisorRuntime(agent, {
+				snapshotMessages: () => [{ role: "user", content: "public update", timestamp: 7 }],
+				obfuscator,
+			});
+			try {
+				runtime.onTurnEnd();
+				expect(await runtime.waitForCatchup(1000, 1)).toBe(true);
+				expect(promptInputs).toHaveLength(1);
+				expect(promptText(agent.state.messages.slice(0, 1))).toContain("TOKABC123_");
+				expect(agent.state.messages.slice(1)).toEqual(excluded);
+			} finally {
+				runtime.dispose();
+			}
+		});
+
+		it("does not rescan unchanged retained advisor history after warmup while scanning a new harmless delta", async () => {
+			const source = "advisor_secret_[a-z0-9]{24}";
+			const obfuscator = new SecretObfuscator([{ type: "regex", content: source }]);
+			const retainedMarker = "retained-advisor-history";
+			const retainedText = `${retainedMarker}\n${"public project notes\n".repeat(256)}`;
+			const deltaMarker = "new-harmless-advisor-delta";
+			const promptInputs: Array<string | AgentMessage[]> = [];
+			const agent = makeAgent(promptInputs);
+			agent.state.messages.push({ role: "user", content: retainedText, timestamp: 0 } as AgentMessage);
+			const messages: AgentMessage[] = [{ role: "user", content: "warmup", timestamp: 1 } as AgentMessage];
+			const runtime = new AdvisorRuntime(agent, {
+				snapshotMessages: () => messages,
+				obfuscator,
+			});
+			const originalExec = RegExp.prototype.exec;
+			let retainedScans = 0;
+			let deltaScans = 0;
+			RegExp.prototype.exec = function (value: string) {
+				if (this.source === source) {
+					if (value.includes(retainedMarker)) retainedScans++;
+					if (value.includes(deltaMarker)) deltaScans++;
+				}
+				return originalExec.call(this, value);
+			};
+			try {
+				runtime.onTurnEnd();
+				await runtime.waitForCatchup(1000, 1);
+				expect(promptInputs).toHaveLength(1);
+				// Prove retained history reaches the custom regex before measuring reuse.
+				expect(retainedScans).toBeGreaterThan(0);
+				retainedScans = 0;
+				deltaScans = 0;
+
+				messages.push({ role: "user", content: deltaMarker, timestamp: 2 } as AgentMessage);
+				runtime.onTurnEnd();
+				await runtime.waitForCatchup(1000, 1);
+
+				expect(promptInputs).toHaveLength(2);
+				expect(promptText(promptInputs[1]!)).toContain(deltaMarker);
+				expect(promptText(agent.state.messages)).toContain(retainedText);
+				expect(retainedScans).toBe(0);
+				expect(deltaScans).toBeGreaterThan(0);
+			} finally {
+				RegExp.prototype.exec = originalExec;
+			}
 		});
 
 		it("scrubs prior advisor prompts when a later replace regex collides with their friendly prefix", async () => {
