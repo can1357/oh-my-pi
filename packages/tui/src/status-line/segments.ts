@@ -28,7 +28,15 @@ import type { TspSpan, TspTone } from "@oh-my-pi/pi-wire";
 import { node, span } from "../native/describe";
 import { thinkingLevelToken } from "../theme/theme-class";
 import type { StatusLineSession } from "./host";
-import type { RenderedSegment, SegmentContext, SegmentView, StatusLineSegment, StatusLineSegmentId } from "./types";
+import type {
+	RenderedSegment,
+	SegmentContext,
+	SegmentView,
+	StatusLineSegment,
+	StatusLineSegmentId,
+	StatusLineUsage,
+	UsageSegmentOptions,
+} from "./types";
 
 export type { SegmentContext } from "./types";
 
@@ -1137,8 +1145,6 @@ function pickUsageColor(percent: number): "muted" | "warning" | "error" {
 	return "muted";
 }
 
-type UsageSegmentOptions = NonNullable<SegmentContext["options"]["usage"]>;
-
 /** One styled piece of a quota window; an absent color renders unstyled. */
 type QuotaPiece = [text: string, color?: "muted" | "warning" | "error"];
 
@@ -1182,7 +1188,7 @@ function quotaWindowPieces(
  * The present quota windows in display order, shared by the ANSI renderer and
  * its native twin. Windows whose parts are all hidden drop out.
  */
-function quotaWindows(u: NonNullable<SegmentContext["usage"]>, opts: UsageSegmentOptions): QuotaPiece[][] {
+function quotaWindows(u: StatusLineUsage, opts: UsageSegmentOptions): QuotaPiece[][] {
 	const windows = [
 		u.fiveHour && quotaWindowPieces(opts, "5h", u.fiveHour.percent, u.fiveHour.resetMinutes, "m", "round"),
 		u.daily && quotaWindowPieces(opts, "1d", u.daily.percent, u.daily.resetMinutes, "m", "round"),
@@ -1223,8 +1229,7 @@ const usageSegment: StatusLineSegment = {
 			const tier = truncateToWidth(sanitizeStatusText(u.tier), TRUNCATE_LENGTHS.SHORT);
 			if (tier) parts.push(accentFg(ctx, "accent", tier));
 		}
-		// Contexts built outside the status line (tests, fixtures) may omit options.
-		for (const pieces of quotaWindows(u, ctx.options?.usage ?? {})) {
+		for (const pieces of quotaWindows(u, ctx.options.usage ?? {})) {
 			parts.push(pieces.map(([text, color]) => (color ? theme.fg(color, text) : text)).join(""));
 		}
 		if (u.resetCredits) {
@@ -1256,7 +1261,7 @@ const usageSegment: StatusLineSegment = {
 			const tier = sanitizeStatusText(u.tier);
 			if (tier) parts.push([span(tier, accentToken(ctx, "accent"))]);
 		}
-		for (const pieces of quotaWindows(u, ctx.options?.usage ?? {})) {
+		for (const pieces of quotaWindows(u, ctx.options.usage ?? {})) {
 			parts.push(pieces.map(([text, color]) => span(text, color)));
 		}
 		if (u.resetCredits) {

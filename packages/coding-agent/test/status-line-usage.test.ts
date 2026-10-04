@@ -83,6 +83,7 @@ describe("usage status-line segment", () => {
 	it("renders untiered five-hour and seven-day limits", () => {
 		const result = renderSegment("usage", {
 			usage: { fiveHour: { percent: 24, resetMinutes: 30 }, sevenDay: { percent: 8, resetHours: 141 } },
+			options: {},
 		} as unknown as SegmentContext);
 		const content = stripVTControlCharacters(result.content);
 
@@ -483,6 +484,7 @@ describe("usage status-line segment", () => {
 				tier: "\u001b[31mbad\t tier\nvalue\u001b[0m",
 				fiveHour: { percent: 50 },
 			},
+			options: {},
 		} as unknown as SegmentContext);
 		const content = stripVTControlCharacters(result.content);
 
@@ -508,7 +510,10 @@ describe("usage status-line segment", () => {
 	});
 
 	it("renders five-hour usage without seven-day usage", () => {
-		const result = renderSegment("usage", { usage: { fiveHour: { percent: 80 } } } as unknown as SegmentContext);
+		const result = renderSegment("usage", {
+			usage: { fiveHour: { percent: 80 } },
+			options: {},
+		} as unknown as SegmentContext);
 		const content = stripVTControlCharacters(result.content);
 
 		expect(result.visible).toBe(true);
@@ -520,6 +525,7 @@ describe("usage status-line segment", () => {
 	it("renders monthly Cursor usage when five-hour and seven-day windows are absent", () => {
 		const result = renderSegment("usage", {
 			usage: { monthly: { percent: 1.88, resetHours: 743 } },
+			options: {},
 		} as unknown as SegmentContext);
 		const content = stripVTControlCharacters(result.content);
 
@@ -680,8 +686,14 @@ describe("usage status-line segment", () => {
 	});
 
 	it("uses a distinct error color at the eighty-percent threshold", () => {
-		const high = renderSegment("usage", { usage: { fiveHour: { percent: 80 } } } as unknown as SegmentContext);
-		const low = renderSegment("usage", { usage: { fiveHour: { percent: 24 } } } as unknown as SegmentContext);
+		const high = renderSegment("usage", {
+			usage: { fiveHour: { percent: 80 } },
+			options: {},
+		} as unknown as SegmentContext);
+		const low = renderSegment("usage", {
+			usage: { fiveHour: { percent: 24 } },
+			options: {},
+		} as unknown as SegmentContext);
 		const highWithoutValue = high.content.replace("80%", "PCT");
 		const lowWithoutValue = low.content.replace("24%", "PCT");
 

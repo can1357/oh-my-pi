@@ -40,8 +40,31 @@ export interface StatusLineSegmentOptions {
 	path?: { abbreviate?: boolean; maxLength?: number; stripWorkPrefix?: boolean };
 	git?: { showBranch?: boolean; showStaged?: boolean; showUnstaged?: boolean; showUntracked?: boolean };
 	time?: { format?: "12h" | "24h"; showSeconds?: boolean };
-	/** Quota-window parts of the `usage` segment; each part shows unless set to `false`. `compact` drops the spaces and parentheses. */
-	usage?: { showLabel?: boolean; showPercent?: boolean; showReset?: boolean; compact?: boolean };
+	usage?: UsageSegmentOptions;
+}
+
+/** Quota-window parts of the `usage` segment; each part shows unless set to `false`. `compact` drops the spaces and parentheses. */
+export interface UsageSegmentOptions {
+	showLabel?: boolean;
+	showPercent?: boolean;
+	showReset?: boolean;
+	compact?: boolean;
+}
+
+/** Subscription quota snapshot rendered by the `usage` segment. */
+export interface StatusLineUsage {
+	tier?: string;
+	fiveHour?: { percent: number; resetMinutes?: number };
+	daily?: { percent: number; resetMinutes?: number };
+	sevenDay?: { percent: number; resetHours?: number };
+	monthly?: { percent: number; resetHours?: number };
+	resetCredits?: {
+		bankedCount: number;
+		redeemableCount: number;
+		expiryHours?: number;
+		expired?: boolean;
+		unavailableReason?: string;
+	};
 }
 
 export interface StatusLineSettings {
@@ -192,20 +215,7 @@ export interface SegmentContext {
 	 * the worktree/branch is already shown by the git segment.
 	 */
 	worktree: { projectName: string; worktreeName: string } | null;
-	usage: {
-		tier?: string;
-		fiveHour?: { percent: number; resetMinutes?: number };
-		daily?: { percent: number; resetMinutes?: number };
-		sevenDay?: { percent: number; resetHours?: number };
-		monthly?: { percent: number; resetHours?: number };
-		resetCredits?: {
-			bankedCount: number;
-			redeemableCount: number;
-			expiryHours?: number;
-			expired?: boolean;
-			unavailableReason?: string;
-		};
-	} | null;
+	usage: StatusLineUsage | null;
 }
 
 export interface RenderedSegment {
