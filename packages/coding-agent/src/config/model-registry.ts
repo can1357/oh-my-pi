@@ -1,5 +1,6 @@
 import * as path from "node:path";
 import type { ApiKeyResolver, FetchImpl, ResolvedApiKey, UsageProvider } from "@oh-my-pi/pi-ai";
+import { resolvedApiKeyBearer } from "@oh-my-pi/pi-ai/auth-retry";
 import type { AuthApiKeyOptions } from "@oh-my-pi/pi-ai/auth-storage";
 import { registerCustomApi, unregisterCustomApis } from "@oh-my-pi/pi-ai/api-registry";
 import { registerOAuthProvider, unregisterOAuthProvider, unregisterOAuthProviders } from "@oh-my-pi/pi-ai/oauth";
@@ -46,11 +47,16 @@ import {
 } from "@oh-my-pi/pi-catalog/provider-models";
 import { toModelSpec } from "@oh-my-pi/pi-catalog/provider-models/bundled-references";
 import { modelKind, type ModelKind } from "@oh-my-pi/pi-catalog/types";
-import { getAgentDir, isBunTestRuntime, logger, wrapFetchForExtraCa } from "@oh-my-pi/pi-utils";
+import { getAgentDir, isBunTestRuntime, logger, untilAborted, wrapFetchForExtraCa } from "@oh-my-pi/pi-utils";
 import { resolveProviderModelReference } from "../config/model-resolver";
 import { generateCodexAttestation } from "../live/attestation";
 import type { AuthStorage } from "../session/auth-storage";
-import { type ApiKeyResolverModel, type ApiKeyResolverOptions, createApiKeyResolver } from "./api-key-resolver";
+import {
+	ApiKeyCommandError,
+	type ApiKeyResolverModel,
+	type ApiKeyResolverOptions,
+	createApiKeyResolver,
+} from "./api-key-resolver";
 import type { ConfigError, ConfigFile } from "./config-file";
 import {
 	buildCustomModelOverlay,
@@ -62,6 +68,7 @@ import {
 	resolveModelOverrideWithAliases,
 } from "./custom-models";
 import {
+	commandFailureRetryAfterMs,
 	createConfigHeaderResolver,
 	invalidateAllCommandConfigs,
 	invalidateCommandConfig,
@@ -2799,13 +2806,24 @@ export class ModelRegistry {
 
 	/**
 	 * Whether the provider's configured API key is resolved from a command.
+	 * False for a disabled provider, which gets no credential at all.
 	 *
 	 * Callers use this to distinguish the registry's command-first resolver
 	 * path from lower-priority credentials in {@link authStorage}.
 	 */
 	hasCommandBackedApiKey(provider: string): boolean {
+		if (this.#isProviderDisabled(provider)) return false;
 		const keyConfig = this.#customProviderApiKeys.get(provider);
 		return isCommandConfigValue(keyConfig);
+	}
+
+	/**
+	 * Whether a missing key for the provider means its `!command` apiKey produced
+	 * nothing, which a turn's request reports retryably ({@link turnResolver}).
+	 * False for a provider whose catalog dispatches without a key instead.
+	 */
+	retriesFailedCommandKey(provider: string): boolean {
+		return this.hasCommandBackedApiKey(provider) && !getProviderDefinition(provider)?.allowsMissingApiKey;
 	}
 
 	getDiscoverableProviders(): string[] {
@@ -3009,19 +3027,48 @@ export class ModelRegistry {
 	 * session id (`resolver(model, sessionId)`) which derives `baseUrl`/`modelId`
 	 * from the model. Callers that need the initial key for a guard can call
 	 * `resolveApiKeyOnce(resolver)`.
+	 *
+	 * For a provider whose apiKey is a `!command`, the initial resolve settles as
+	 * soon as the request's signal aborts instead of waiting on the command. Other
+	 * providers resolve as before: a request already scheduled when its signal
+	 * aborts still gets its key.
 	 */
 	resolver(provider: string, options?: ApiKeyResolverOptions): ApiKeyResolver;
 	resolver(model: ApiKeyResolverModel, sessionId?: string): ApiKeyResolver;
 	resolver(target: string | ApiKeyResolverModel, optionsOrSessionId?: ApiKeyResolverOptions | string): ApiKeyResolver {
 		const options = typeof optionsOrSessionId === "string" ? { sessionId: optionsOrSessionId } : optionsOrSessionId;
-		if (typeof target === "string") {
-			return createApiKeyResolver(this, target, options);
-		}
-		return createApiKeyResolver(this, target.provider, {
-			...options,
-			baseUrl: target.baseUrl,
-			modelId: target.id,
-		});
+		const provider = typeof target === "string" ? target : target.provider;
+		const resolve =
+			typeof target === "string"
+				? createApiKeyResolver(this, target, options)
+				: createApiKeyResolver(this, target.provider, { ...options, baseUrl: target.baseUrl, modelId: target.id });
+		if (!this.hasCommandBackedApiKey(provider)) return resolve;
+		return async ctx => (ctx.error === undefined ? untilAborted(ctx.signal, async () => resolve(ctx)) : resolve(ctx));
+	}
+
+	/**
+	 * The {@link resolver} for an agent turn's requests. When the provider's
+	 * configured apiKey is a `!command` that produced no key, the initial resolve
+	 * throws {@link ApiKeyCommandError} instead of returning no key, so the turn
+	 * fails retryably and turn recovery runs the command again. Other callers
+	 * keep {@link resolver}, where such a request fails at once as a missing key.
+	 */
+	turnResolver(model: ApiKeyResolverModel, sessionId?: string): ApiKeyResolver {
+		const resolve = this.resolver(model, sessionId);
+		return async ctx => {
+			const resolved = await resolve(ctx);
+			if (
+				ctx.error === undefined &&
+				resolvedApiKeyBearer(resolved) === undefined &&
+				this.retriesFailedCommandKey(model.provider)
+			) {
+				throw new ApiKeyCommandError(
+					model.provider,
+					commandFailureRetryAfterMs(this.#customProviderApiKeys.get(model.provider)),
+				);
+			}
+			return resolved;
+		};
 	}
 
 	async #peekApiKeyForProvider(provider: string): Promise<string | undefined> {

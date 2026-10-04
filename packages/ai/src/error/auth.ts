@@ -19,6 +19,19 @@ export class MissingApiKeyError extends Error {
 	}
 }
 
+/**
+ * A configured credential source produced no key for this request (for example
+ * a key helper failed). Unlike {@link MissingApiKeyError} it is transient: the
+ * same source may produce a key on retry.
+ */
+export class CredentialUnavailableError extends Error {
+	constructor(message: string) {
+		super(message);
+		this.name = "CredentialUnavailableError";
+		attach(this, create(Flag.Transient));
+	}
+}
+
 /** A user-facing login flow required an `onPrompt` callback that was not supplied. */
 export class OnPromptRequiredError extends Error {
 	constructor(providerLabel: string) {

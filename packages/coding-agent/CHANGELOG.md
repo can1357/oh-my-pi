@@ -5,6 +5,7 @@
 ### Fixed
 
 - Fixed follow-up hashline edits being rejected as anchored on lines "never displayed" after an earlier edit shifted those lines, when the replacement carries the anchored content; genuinely stale line numbers are still rejected ([#14254](https://github.com/can1357/oh-my-pi/pull/14254) by [@abilliontokens](https://github.com/abilliontokens)).
+- A provider `apiKey: "!command"` that fails, times out, or prints nothing is now retried by turn auto-retry, which runs the command again up to 3 times, each after its 30-second failure backoff, instead of ending the turn (or subagent) with "No API key" ([#14031](https://github.com/can1357/oh-my-pi/pull/14031) by [@sjawhar](https://github.com/sjawhar)).
 
 ## [18.6.0] - 2026-10-03
 
