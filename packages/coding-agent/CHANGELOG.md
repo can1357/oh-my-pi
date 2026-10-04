@@ -5,7 +5,7 @@
 ### Fixed
 
 - Fixed follow-up hashline edits being rejected as anchored on lines "never displayed" after an earlier edit shifted those lines, when the replacement carries the anchored content; genuinely stale line numbers are still rejected ([#14254](https://github.com/can1357/oh-my-pi/pull/14254) by [@abilliontokens](https://github.com/abilliontokens)).
-- A model role whose model is not in the catalog right now (a discovery-backed provider that has not listed it yet) no longer shows as unassigned in `/model`; the role keeps its configured selector and reads as unavailable instead of cleared.
+- A model role whose model is not in the catalog right now (a discovery-backed provider that has not listed it yet) no longer shows as unassigned in `/model`; the role keeps its configured selector and reads as unavailable instead of cleared ([#14271](https://github.com/can1357/oh-my-pi/pull/14271) by [@iacore](https://github.com/iacore)).
 
 ## [18.6.0] - 2026-10-03
 
