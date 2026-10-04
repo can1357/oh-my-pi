@@ -632,13 +632,19 @@ function policyEnabledProviders(
 ): Set<string> {
 	const providers = new Set<string>();
 	if (!options) return providers;
+	const globalTaperEnabled = (options.globalReserveTaperHours ?? 0) > 0;
 	for (const account of accounts) {
-		if (account.type === "oauth" && options.getAccountPolicy(account.provider, accountOAuthIdentity(account))) {
+		if (
+			account.type === "oauth" &&
+			(globalTaperEnabled || options.getAccountPolicy(account.provider, accountOAuthIdentity(account)))
+		) {
 			providers.add(account.provider);
 		}
 	}
 	for (const report of reports) {
-		if (options.getAccountPolicy(report.provider, metadataIdentity(report))) providers.add(report.provider);
+		if (globalTaperEnabled || options.getAccountPolicy(report.provider, metadataIdentity(report))) {
+			providers.add(report.provider);
+		}
 	}
 	return providers;
 }
