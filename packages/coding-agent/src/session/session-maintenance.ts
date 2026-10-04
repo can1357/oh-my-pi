@@ -465,7 +465,7 @@ export interface SessionMaintenanceHost {
 	}): ContextUsageBreakdown | undefined;
 	getContextUsage(options?: { contextWindow?: number }): ContextUsage | undefined;
 	shake(mode: ShakeMode, options?: { config?: ShakeConfig; signal?: AbortSignal }): Promise<ShakeResult>;
-	dropImages(): Promise<{ removed: number }>;
+	dropImages(): Promise<{ removed: number; tokensFreed: number }>;
 	generateHandoffDocument(
 		customInstructions?: string,
 		options?: SessionHandoffOptions,
@@ -751,45 +751,87 @@ export class SessionMaintenance {
 	 * provider sessions caching message identity (Codex Responses) are torn
 	 * down to force a clean replay on the next turn.
 	 *
-	 * No-op when the branch carries no images; returns `{ removed: 0 }` and
-	 * skips the disk rewrite.
+	 * Every stripped block is measured with the active tokenizer so callers can
+	 * report real savings, and the share of those savings that predates the
+	 * transcript usage anchor is recorded against it. Without that correction
+	 * the anchor keeps charging the provider-reported prompt for images that are
+	 * gone and the context meter reads stale-high until the next response.
+	 *
+	 * No-op when the branch carries no images; returns `{ removed: 0, tokensFreed: 0 }`
+	 * and skips the disk rewrite.
 	 */
-	async dropImages(): Promise<{ removed: number }> {
+	async dropImages(): Promise<{ removed: number; tokensFreed: number }> {
 		const branchEntries = this.#host.sessionManager.getBranch();
+		const countOptions = { excludeEncryptedReasoning: true } as const;
+		const latestCompaction = getLatestCompactionEntry(branchEntries);
+		const compactionIndex = latestCompaction ? branchEntries.lastIndexOf(latestCompaction) : -1;
+		const hasRemoteReplacementHistory = getOpenAiRemoteCompactionPayload(latestCompaction) !== undefined;
+		let anchorIndex = -1;
+		for (let index = branchEntries.length - 1; index > compactionIndex; index--) {
+			const entry = branchEntries[index];
+			if (entry.type !== "message" || !isTranscriptUsageAnchor(entry.message)) continue;
+			anchorIndex = index;
+			break;
+		}
 		let removed = 0;
-		for (const entry of branchEntries) {
+		let tokensFreed = 0;
+		let anchoredTokensRemoved = 0;
+		for (const [index, entry] of branchEntries.entries()) {
+			// Only entries the anchor's provider-reported prompt already carried may
+			// be subtracted from it, and a remote compaction's replacement history
+			// hides everything before its cutoff from the wire.
+			const anchored = index < anchorIndex && (!hasRemoteReplacementHistory || index > compactionIndex);
 			if (entry.type === "message") {
-				removed += stripImagesFromMessage(entry.message);
+				const before = this.#tokenizer.countMessage(entry.message, countOptions);
+				const dropped = stripImagesFromMessage(entry.message);
+				if (dropped === 0) continue;
+				const saved = Math.max(0, before - this.#tokenizer.countMessage(entry.message, countOptions));
+				removed += dropped;
+				tokensFreed += saved;
+				if (anchored) anchoredTokensRemoved += saved;
 				continue;
 			}
-			if (entry.type === "custom_message" && typeof entry.content !== "string") {
-				const kept: typeof entry.content = [];
-				let dropped = 0;
-				for (const part of entry.content) {
-					if (part.type === "image") {
-						dropped++;
-					} else {
-						kept.push(part);
-					}
-				}
-				if (dropped > 0) {
-					if (kept.length === 0) {
-						kept.push({ type: "text", text: "[image removed]" });
-					}
-					entry.content = kept;
-					removed += dropped;
+			if (entry.type !== "custom_message" || typeof entry.content === "string") continue;
+			// A `CustomMessageEntry` has no `AgentMessage` of its own, so count its
+			// part array through a throwaway probe of the message the prompt builds.
+			const probe: AgentMessage = {
+				role: "custom",
+				customType: entry.customType,
+				display: false,
+				content: entry.content,
+				timestamp: 0,
+			};
+			const before = this.#tokenizer.countMessage(probe, countOptions);
+			const kept: typeof entry.content = [];
+			let dropped = 0;
+			for (const part of entry.content) {
+				if (part.type === "image") {
+					dropped++;
+				} else {
+					kept.push(part);
 				}
 			}
+			if (dropped === 0) continue;
+			if (kept.length === 0) {
+				kept.push({ type: "text", text: "[image removed]" });
+			}
+			entry.content = kept;
+			// A spread keeps the second count off the probe's memoized identity.
+			const saved = Math.max(0, before - this.#tokenizer.countMessage({ ...probe, content: kept }, countOptions));
+			removed += dropped;
+			tokensFreed += saved;
+			if (anchored) anchoredTokensRemoved += saved;
 		}
 		if (removed === 0) {
-			return { removed: 0 };
+			return { removed: 0, tokensFreed: 0 };
 		}
+		this.#host.recordAnchoredHistoryRewrite(anchoredTokensRemoved);
 		await this.#host.sessionManager.rewriteEntries();
 		const sessionContext = this.#host.buildDisplaySessionContext();
 		this.#host.agent.replaceMessages(sessionContext.messages);
 		this.#host.resetAdvisorRuntimes("drop-images");
 		this.#host.closeCodexProviderSessionsForHistoryRewrite();
-		return { removed };
+		return { removed, tokensFreed };
 	}
 
 	/**
@@ -817,8 +859,8 @@ export class SessionMaintenance {
 		} = {},
 	): Promise<ShakeResult> {
 		if (mode === "images") {
-			const { removed } = await this.#host.dropImages();
-			return { mode, toolResultsDropped: 0, blocksDropped: 0, imagesDropped: removed, tokensFreed: 0 };
+			const { removed, tokensFreed } = await this.#host.dropImages();
+			return { mode, toolResultsDropped: 0, blocksDropped: 0, imagesDropped: removed, tokensFreed };
 		}
 
 		if (mode === "thinking") {

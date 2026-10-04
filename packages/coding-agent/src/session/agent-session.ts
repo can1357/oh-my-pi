@@ -6138,7 +6138,7 @@ export class AgentSession implements SettingsScope {
 		return this.#maintenance.speculationState;
 	}
 	/** Strip image content from the current branch and persist the rewrite. */
-	dropImages(): Promise<{ removed: number }> {
+	dropImages(): Promise<{ removed: number; tokensFreed: number }> {
 		return this.#maintenance.dropImages();
 	}
 

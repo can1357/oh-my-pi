@@ -3,7 +3,7 @@ import * as path from "node:path";
 import { scheduler } from "node:timers/promises";
 import { Agent, type AgentMessage, RESCUE_SHAKE_CONFIG, Tokenizer } from "@oh-my-pi/pi-agent-core";
 import * as compactionModule from "@oh-my-pi/pi-agent-core/compaction";
-import type { AssistantMessage, ImageContent, ToolResultMessage } from "@oh-my-pi/pi-ai";
+import type { AssistantMessage, ImageContent, ToolResultMessage, UserMessage } from "@oh-my-pi/pi-ai";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -382,6 +382,39 @@ describe("AgentSession shake", () => {
 			const userMsg = branch.find(e => e.type === "message" && (e.message as { role?: string }).role === "user");
 			const content = (userMsg as { message: { content: unknown } }).message.content as Array<{ type: string }>;
 			expect(content.some(b => b.type === "image")).toBe(false);
+		});
+
+		it("credits the removed image tokens against the provider-anchored context meter", async () => {
+			const png: ImageContent = { type: "image", data: "iVBORw0KGgo", mimeType: "image/png" };
+			const withImage: UserMessage = {
+				role: "user",
+				content: [{ type: "text", text: "look" }, png],
+				timestamp: Date.now() - 1,
+			};
+			sessionManager.appendMessage(withImage);
+			sessionManager.appendMessage({
+				role: "assistant",
+				content: [{ type: "text", text: "latest answer" }],
+				...apiInfo,
+				stopReason: "stop",
+				usage: { ...usage, input: 20_000, totalTokens: 20_008 },
+				timestamp: Date.now(),
+			});
+			session.agent.replaceMessages(session.buildDisplaySessionContext().messages);
+			expect(session.getContextUsage()?.tokens).toBe(20_000);
+
+			// What the image block alone costs: the same message with and without it.
+			const tokenizer = new Tokenizer();
+			const imageTokens =
+				tokenizer.countMessage(withImage) -
+				tokenizer.countMessage({ ...withImage, content: [{ type: "text", text: "look" }] });
+			expect(imageTokens).toBeGreaterThan(0);
+
+			const result = await session.shake("images");
+
+			expect(result.imagesDropped).toBe(1);
+			expect(result.tokensFreed).toBe(imageTokens);
+			expect(session.getContextUsage()?.tokens).toBe(20_000 - imageTokens);
 		});
 	});
 

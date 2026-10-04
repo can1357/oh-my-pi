@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed `/shake images` leaving the context percentage unchanged: the tokens freed by the removed image blocks are now reported and subtracted from the last provider-reported context, so the status line drops right away instead of staying high until the next response ([#5029](https://github.com/can1357/oh-my-pi/issues/5029))
+
 ## [18.6.2] - 2026-10-04
 
 ### Fixed
