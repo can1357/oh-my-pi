@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { Marked, type Token } from "../src/marked";
 import {
 	MathBlockScan,
 	mathBlockAt,
@@ -6,6 +7,7 @@ import {
 	mathBlockMayCloseAt,
 	mathOpenerAt,
 	mathSpanAt,
+	mathSpanInContext,
 	mathStartIndex,
 } from "../src/math-delimiters";
 
@@ -175,5 +177,114 @@ describe("mathBlockCloserIndex", () => {
 		const more = source.indexOf("more");
 		expect(mathBlockCloserIndex(source, more, "$$")).toBeUndefined();
 		expect(mathBlockCloserIndex(source, more, "\\[")).toBe(source.indexOf("\\]"));
+	});
+});
+
+describe("math spans for a marked inline tokenizer", () => {
+	const mathMarked = () =>
+		new Marked().use({
+			extensions: [
+				{
+					name: "math",
+					level: "inline",
+					startFrom: mathStartIndex,
+					tokenizer(rest) {
+						const span = mathSpanInContext(this, rest);
+						return span ? { type: "math", raw: rest.slice(0, span.end), text: span.body } : undefined;
+					},
+				},
+			],
+		});
+	const shape = (tokens: readonly Token[]): unknown[] =>
+		tokens.map(token =>
+			"tokens" in token && token.tokens ? [token.type, token.raw, shape(token.tokens)] : [token.type, token.raw],
+		);
+	const lexMath = (source: string) => {
+		const [paragraph] = mathMarked().lexer(source);
+		return paragraph && "tokens" in paragraph && paragraph.tokens ? shape(paragraph.tokens) : paragraph;
+	};
+
+	// One context stands for one inline source. A closer scan there also answers for the openers it passed, so every
+	// other offset must still find the span `mathSpanAt` finds in the rest of the source: past a `$` before a digit,
+	// and past an escaped `$` that opens nothing, or only a body of whitespace.
+	test("finds at every offset of one source the span mathSpanAt finds in the rest of it", () => {
+		const sources = [
+			"$1*$2*$3 x\n$y$ $4 and $z$",
+			"$a $b$ c\\$d$ $\\$ e$",
+			"\\(a \\(b \\[c \\[d $$e $$f",
+			"\\(a\\) \\(b $$c$$ $$ $$ $$d \\\\(e\\)",
+			"$a$1 b$ c",
+			"$a\\$ x$ b",
+			"$a\\$\u00a0$ b",
+		];
+		for (const source of sources) {
+			const context = { source };
+			for (let at = 0; at < source.length; at++) {
+				const rest = source.slice(at);
+				expect([at, mathSpanInContext(context, rest)]).toEqual([at, mathSpanAt(rest, 0)]);
+			}
+		}
+	});
+
+	// Inside emphasis or a link label the text ends before its closer: a closer past that end closes no span there.
+	test("finds math inside emphasis and a link label only up to their end", () => {
+		expect(lexMath("*a \\(b* c \\) [d $e](u) f$")).toEqual([
+			[
+				"em",
+				"*a \\(b*",
+				[
+					["text", "a "],
+					["escape", "\\("],
+					["text", "b"],
+				],
+			],
+			["text", " c "],
+			["escape", "\\)"],
+			["text", " "],
+			["link", "[d $e](u)", [["text", "d $e"]]],
+			["text", " f$"],
+		]);
+		expect(lexMath("*a $b$ \\(c\\)* [$d$](u)")).toEqual([
+			[
+				"em",
+				"*a $b$ \\(c\\)*",
+				[
+					["text", "a "],
+					["math", "$b$"],
+					["text", " "],
+					["math", "\\(c\\)"],
+				],
+			],
+			["text", " "],
+			["link", "[$d$](u)", [["math", "$d$"]]],
+		]);
+	});
+
+	// Generous bound: each shape takes a tokenizer that rescans for a closer at every opener several seconds. The
+	// engine runs the `\)` search (`indexOf`), so a long word follows those openers: each search runs to the end.
+	test.each([
+		["$ openers before digits (80 KB)", "$1*".repeat(26_667)],
+		["\\( openers before a long word (1.8 MB)", `${"\\(a ".repeat(40_000)}${"a".repeat(1_600_000)}`],
+	])("lexes a long paragraph of unclosed %s in under two seconds", (_name, src) => {
+		const marked = mathMarked();
+		// Compile the lexing paths first, so the bound measures the lexing.
+		marked.lexer(src.slice(0, 2_000));
+		const start = performance.now();
+		marked.lexer(src);
+		expect(performance.now() - start).toBeLessThan(2_000);
+	});
+
+	// Every nesting level opens a span that closes only past the last level, so a closer scan per level would read to
+	// the end of the paragraph. A long word inside the levels makes each such scan long.
+	test.each([
+		["$", `${"*a b$1 ".repeat(4_000)}${"a".repeat(200_000)}${" b*".repeat(4_000)} x$`],
+		["\\(", `${"*a \\(b ".repeat(8_000)}${"a".repeat(6_400_000)}${" b*".repeat(8_000)} \\)`],
+	])("lexes nested emphasis whose every level opens a %s span closed past it in under two seconds", (_name, src) => {
+		const marked = mathMarked();
+		// Compile the lexing paths first, so the bound measures the lexing.
+		marked.lexer(src.slice(0, 2_000));
+		const start = performance.now();
+		marked.lexer(src);
+		expect(performance.now() - start).toBeLessThan(2_000);
 	});
 });

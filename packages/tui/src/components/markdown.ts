@@ -3,8 +3,8 @@ import {
 	Lexer,
 	Marked,
 	type Token,
-	Tokenizer,
 	type TokenizerAndRendererExtension,
+	type TokenizerThis,
 	type Tokens,
 	type TokensList,
 } from "@oh-my-pi/pi-utils/marked";
@@ -15,7 +15,7 @@ import {
 	mathBlockCloserIndex,
 	mathBlockMayCloseAt,
 	mathBlockOpenerAt,
-	mathSpanAt,
+	mathSpanInContext,
 	mathStartIndex,
 } from "@oh-my-pi/pi-utils/math-delimiters";
 import { latexToBlock } from "../latex-block";
@@ -25,6 +25,7 @@ import { md } from "../native/describe";
 import type { DescribeContext, NativeNode } from "../native/node";
 import type { SymbolTheme } from "../symbols";
 import { TERMINAL } from "../terminal-capabilities";
+import { getSymbolTheme } from "../theme/theme";
 import type { Component } from "../tui";
 import {
 	applyBackgroundToLine,
@@ -39,8 +40,6 @@ import {
 	visibleWidth,
 	wrapTextWithAnsi,
 } from "../utils";
-
-const STRICT_STRIKETHROUGH_REGEX = /^(~~)(?=[^\s~])((?:\\.|[^\\])*?(?:\\.|[^\s~\\]))\1(?=[^~]|$)/;
 
 // Marked treats the backslash in an ST-terminated OSC 8 sequence (`ESC \\`) as
 // Markdown punctuation when it is immediately followed by markup such as a
@@ -521,27 +520,85 @@ function hangWrapTreeGuideLines(text: string, width: number): string[] | undefin
 	return out;
 }
 
-class StrictStrikethroughTokenizer extends Tokenizer {
-	override del(src: string): Tokens.Del | undefined {
-		const match = STRICT_STRIKETHROUGH_REGEX.exec(src);
-		if (!match) {
-			return undefined;
-		}
+const WHITESPACE = /\s/;
+const LINE_TERMINATOR = /[\n\r\u2028\u2029]/;
 
-		const text = match[2];
-		return {
-			type: "del",
-			raw: match[0],
-			text,
-			tokens: this.lexer.inlineTokens(text),
-		};
+/**
+ * GFM strikethrough as upstream marked's rule reads it, with `~~` only: an opener not followed by whitespace or `~`,
+ * text read in units of one character or a backslash and the character after it (not a line break), and the first
+ * `~~` that follows a unit other than whitespace, `~` or a lone `\` and is not followed by another `~`. One scanner
+ * serves one inline source and the link labels and emphasis inside it. A scan also answers for every opener it
+ * passed, which meets the same closer or none, so a line of unclosed openers is read once, not once per opener.
+ */
+class StrikethroughScanner {
+	readonly #source: string;
+	// The last opener whose scan ran, where that scan stopped, and whether a closer stopped it there.
+	#open = -1;
+	#stop = -1;
+	#closed = false;
+
+	constructor(source: string) {
+		this.#source = source;
+	}
+
+	/** The offset of the `~~` closing the strikethrough opened at `open`, or -1. */
+	closeAt(open: number): number {
+		const src = this.#source;
+		const first = src[open + 2];
+		if (!src.startsWith("~~", open) || first === undefined || first === "~" || WHITESPACE.test(first)) return -1;
+		// Past the opener's own "~~" its units are the last scan's, so they meet the same closer or stop.
+		if (this.#open < open && open < this.#stop) return this.#closed ? this.#stop : -1;
+		let at = open + 2;
+		let close = -1;
+		while (at < src.length) {
+			let end: number;
+			let final: boolean;
+			if (src.charCodeAt(at) === 0x5c /* \ */) {
+				if (at + 1 === src.length || LINE_TERMINATOR.test(src[at + 1]!)) break;
+				end = at + 2;
+				final = true;
+			} else {
+				end = at + 1;
+				final = src[at] !== "~" && !WHITESPACE.test(src[at]!);
+			}
+			if (final && src.startsWith("~~", end) && src[end + 2] !== "~") {
+				close = end;
+				break;
+			}
+			at = end;
+		}
+		this.#open = open;
+		this.#stop = close === -1 ? at : close;
+		this.#closed = close !== -1;
+		return close;
 	}
 }
 
+const strikethroughScanners = new WeakMap<TokenizerThis, StrikethroughScanner>();
+
+// Registered after every other inline extension: at a `~~` no built-in rule before marked's `del` can match, so this
+// gives the tokens a `del` override would, and the `del` override below keeps marked's own looser rule out.
+const strikethroughExtension: TokenizerAndRendererExtension = {
+	name: "strictStrikethrough",
+	level: "inline",
+	// No start hint: inline text already stops at every `~`.
+	tokenizer(src) {
+		if (!src.startsWith("~~")) return undefined;
+		const source = this.source ?? src;
+		// Inside a link label or emphasis the text ends at `end`, before its closer (`]`, `*` or `_`), which is not a
+		// `~`, so a closer that ends there closes as it would at the end of the text.
+		const end = this.end ?? source.length;
+		let scanner = strikethroughScanners.get(this);
+		if (!scanner) strikethroughScanners.set(this, (scanner = new StrikethroughScanner(source)));
+		const open = end - src.length;
+		const close = scanner.closeAt(open);
+		if (close === -1 || close + 2 > end) return undefined;
+		const text = source.slice(open + 2, close);
+		return { type: "del", raw: source.slice(open, close + 2), text, tokens: this.lexer.inlineTokens(text) };
+	},
+};
+
 const markdownParser = new Marked();
-markdownParser.setOptions({
-	tokenizer: new StrictStrikethroughTokenizer(),
-});
 
 // Math spans (`$$…$$`, `\[…\]`, `$…$`, `\(…\)`) are tokenized as a dedicated
 // `math` inline token before markdown's escape/emphasis/link rules run, so
@@ -605,9 +662,9 @@ const customHrExtension: TokenizerAndRendererExtension = {
 const mathExtension: TokenizerAndRendererExtension = {
 	name: "math",
 	level: "inline",
-	start: mathStartIndex,
+	startFrom: mathStartIndex,
 	tokenizer(src) {
-		const span = mathSpanAt(src, 0);
+		const span = mathSpanInContext(this, src);
 		if (!span) return undefined;
 		return { type: "math", raw: src.slice(0, span.end), text: span.body, display: span.display };
 	},
@@ -693,64 +750,12 @@ const mathEnvBlockExtension: TokenizerAndRendererExtension = {
 // tokenizer at a valid start. Candidates at a legal boundary fall through
 // (return undefined) to marked's own autolink handling unchanged.
 const AUTOLINK_SCHEME_REGEX = /^(?:www\.|https?:\/\/|ftp:\/\/)/i;
-// Case-insensitive scheme scan replacing /www\.|https?:\/\/|ftp:\/\//i in
-// boundedAutolinkExtension.start — like `mathStartIndex`, this runs on the
-// remaining source at every inline position (part of a ~4.3% CPU start() scan
-// tail in profiles). charCode-only: no allocation, no toLowerCase copies.
-// `| 32` lower-cases ASCII letters; `.`/`:`/`/` are compared exactly, matching
-// the regex's ASCII-only `i` semantics. charCodeAt past the end returns NaN,
-// which fails every comparison, so no explicit bounds checks are needed.
-function isAutolinkSchemeAt(src: string, i: number): boolean {
-	const c = src.charCodeAt(i) | 32;
-	if (c === 119 /* w */) {
-		// www.
-		return (
-			(src.charCodeAt(i + 1) | 32) === 119 &&
-			(src.charCodeAt(i + 2) | 32) === 119 &&
-			src.charCodeAt(i + 3) === 46 /* . */
-		);
-	}
-	if (c === 104 /* h */) {
-		// http:// | https://
-		if (
-			(src.charCodeAt(i + 1) | 32) !== 116 /* t */ ||
-			(src.charCodeAt(i + 2) | 32) !== 116 /* t */ ||
-			(src.charCodeAt(i + 3) | 32) !== 112 /* p */
-		) {
-			return false;
-		}
-		let j = i + 4;
-		if ((src.charCodeAt(j) | 32) === 115 /* s */) j++;
-		return src.charCodeAt(j) === 58 /* : */ && src.charCodeAt(j + 1) === 47 /* / */ && src.charCodeAt(j + 2) === 47;
-	}
-	if (c === 102 /* f */) {
-		// ftp://
-		return (
-			(src.charCodeAt(i + 1) | 32) === 116 /* t */ &&
-			(src.charCodeAt(i + 2) | 32) === 112 /* p */ &&
-			src.charCodeAt(i + 3) === 58 /* : */ &&
-			src.charCodeAt(i + 4) === 47 /* / */ &&
-			src.charCodeAt(i + 5) === 47 /* / */
-		);
-	}
-	return false;
-}
-
-/** @internal exported for tests — must stay index-identical to the old regex scan. */
-export function autolinkSchemeScanIndex(src: string): number | undefined {
-	for (let i = 0; i < src.length; i++) {
-		const c = src.charCodeAt(i) | 32;
-		if ((c === 119 || c === 104 || c === 102) && isAutolinkSchemeAt(src, i)) return i;
-	}
-	return undefined;
-}
 const VALID_AUTOLINK_LEFT_BOUNDARY = /[\s*_~(]/;
 const boundedAutolinkExtension: TokenizerAndRendererExtension = {
 	name: "boundedAutolink",
 	level: "inline",
-	start(src) {
-		return autolinkSchemeScanIndex(src);
-	},
+	// No start hint: inline text already stops at every `www.`, `http://`, `https://` and `ftp://`, the only places
+	// this tokenizer matches.
 	tokenizer(src, tokens) {
 		const match = AUTOLINK_SCHEME_REGEX.exec(src);
 		if (!match) return undefined;
@@ -764,58 +769,15 @@ const boundedAutolinkExtension: TokenizerAndRendererExtension = {
 	},
 };
 markdownParser.use({
-	extensions: [customHrExtension, mathBlockExtension, mathEnvBlockExtension, mathExtension, boundedAutolinkExtension],
+	extensions: [
+		customHrExtension,
+		mathBlockExtension,
+		mathEnvBlockExtension,
+		mathExtension,
+		boundedAutolinkExtension,
+		strikethroughExtension,
+	],
 });
-
-// ---------------------------------------------------------------------------
-// GFM `url` tokenizer gate
-// ---------------------------------------------------------------------------
-// marked tries the bundled GFM `url` tokenizer at every inline tokenization
-// step, and its regex is expensive to FAIL: the email alternative
-// `^[A-Za-z0-9._+-]+(@)…` linearly consumes an identifier run, then backtracks
-// it one character at a time when no `@` follows. A 71414-sample / 1ms CPU
-// profile of the TUI put 73.3% of total CPU (74.9s of a 102s capture) inside
-// this single regex. The override below runs an O(bounded) charCode gate first
-// and only falls through to the built-in tokenizer — by returning `false`,
-// marked's tokenizer-override fallback contract — when a match is possible.
-//
-// Conservativeness argument. The built-in rule (no flags) is
-//   /^((?:[hH][tT][tT][pP][sS]?|[fF][tT][pP]):\/\/|www\.)(?:[a-zA-Z0-9\-]+\.?)+[^\s<]*
-//    |^[A-Za-z0-9._+-]+(@)[a-zA-Z0-9-_]+(?:\.[a-zA-Z0-9-_]*[a-zA-Z0-9])+(?![-_])/
-// Both alternatives are anchored, so any match constrains the head of src:
-//  • Branch 1 requires src to start with `http://`, `https://`, `ftp://`
-//    (scheme letters in any case) or lowercase `www.`. The gate accepts all of
-//    these via isAutolinkSchemeAt(src, 0); it also over-accepts `WWW.`, a
-//    harmless false positive (the built-in regex simply fails to match).
-//  • Branch 2 requires src to start with one-or-more chars from
-//    `[A-Za-z0-9._+-]` immediately followed by `@`. The gate scans that exact
-//    class: if the run ends within URL_GATE_EMAIL_SCAN_LIMIT chars it accepts
-//    iff the terminator is `@`; a run reaching the limit is accepted
-//    unconditionally. Every src branch 2 can match is therefore accepted —
-//    the gate never rejects a src the built-in regex would match.
-const URL_GATE_EMAIL_SCAN_LIMIT = 320;
-
-/** @internal exported for tests — must never return false for a src the built-in url regex matches. */
-export function urlTokenPossible(src: string): boolean {
-	if (isAutolinkSchemeAt(src, 0)) return true;
-	let i = 0;
-	while (i < URL_GATE_EMAIL_SCAN_LIMIT) {
-		const c = src.charCodeAt(i);
-		const isLocalChar =
-			(c >= 97 && c <= 122) /* a-z */ ||
-			(c >= 65 && c <= 90) /* A-Z */ ||
-			(c >= 48 && c <= 57) /* 0-9 */ ||
-			c === 46 /* . */ ||
-			c === 95 /* _ */ ||
-			c === 43 /* + */ ||
-			c === 45; /* - */
-		if (!isLocalChar) break;
-		i++;
-	}
-	if (i === 0) return false;
-	if (i >= URL_GATE_EMAIL_SCAN_LIMIT) return true; // over-long run: give up conservatively
-	return src.charCodeAt(i) === 64; /* @ */
-}
 
 // Setext-underline pre-gate for marked's `lheading` rule. The rule's lazy body
 // `((?:.|\n(?!<block-start>))+?)` re-runs its block-start lookahead while
@@ -843,12 +805,11 @@ markdownParser.use({
 	tokenizer: {
 		// `false` → marked falls back to the built-in tokenizer;
 		// `undefined` → no token here, built-in never runs.
-		url(src: string): Tokens.Link | undefined | false {
-			return urlTokenPossible(src) ? false : undefined;
-		},
 		lheading(src: string): Tokens.Heading | undefined | false {
 			return lheadingPossible(src) ? false : undefined;
 		},
+		// Strikethrough is `strikethroughExtension`'s: marked's own looser rule never runs.
+		del: () => undefined,
 	},
 });
 
@@ -1598,7 +1559,12 @@ export interface MarkdownTheme {
 	 * Return null to fall back to fenced code rendering.
 	 */
 	resolveMermaidAscii?: (source: string, maxWidth?: number) => string | null;
-	symbols: SymbolTheme;
+	/**
+	 * Glyphs for quote borders, rules, tables and color swatches. Optional so themes
+	 * built to the upstream pi-tui `MarkdownTheme` shape (which has no `symbols`)
+	 * still render; omitted symbols fall back to the active theme's set.
+	 */
+	symbols?: SymbolTheme;
 }
 
 interface InlineStyleContext {
@@ -1874,6 +1840,8 @@ interface RenderSignature {
 	textSizing: boolean;
 	bgColorProbe: string;
 	headingProbe: string;
+	/** Fallback glyphs for themes without `symbols`; their identity alone cannot tell presets apart. */
+	symbolsProbe: string;
 }
 
 /** A shorter prefix the cached rows grew from: its length, its token count and the row count its rows end at. */
@@ -2008,6 +1976,8 @@ export class Markdown implements Component {
 	#paddingY: number; // Top/bottom padding
 	#defaultTextStyle?: DefaultTextStyle;
 	#theme: MarkdownTheme;
+	#symbols: SymbolTheme;
+	#symbolsProbe: string;
 	#defaultStylePrefix?: string;
 	/** Number of spaces used to indent code block content. */
 	#codeBlockIndent: number;
@@ -2103,6 +2073,9 @@ export class Markdown implements Component {
 		this.#paddingX = paddingX;
 		this.#paddingY = paddingY;
 		this.#theme = theme;
+		this.#symbols = theme.symbols ?? getSymbolTheme();
+		const { quoteBorder, hrChar, colorSwatch, table } = this.#symbols;
+		this.#symbolsProbe = theme.symbols ? "" : [quoteBorder, hrChar, colorSwatch, ...Object.values(table)].join("");
 		this.#defaultTextStyle = defaultTextStyle;
 		this.#codeBlockIndent = Math.max(0, Math.floor(codeBlockIndent));
 	}
@@ -2610,7 +2583,7 @@ export class Markdown implements Component {
 							: renderTextWithSwatches(
 									normalizeHtmlEntitiesForTerminal(deltaTabs),
 									applyText,
-									this.#theme.symbols.colorSwatch || DEFAULT_COLOR_SWATCH_GLYPH,
+									this.#symbols.colorSwatch || DEFAULT_COLOR_SWATCH_GLYPH,
 								));
 					const wrapped = wrapTextWithAnsi(grown, contentWidth);
 					const fastPaddingX = this.#ignoreTight ? this.#paddingX : getPaddingX(this.#paddingX);
@@ -2783,6 +2756,7 @@ export class Markdown implements Component {
 			textSizing: TERMINAL.textSizing,
 			bgColorProbe,
 			headingProbe,
+			symbolsProbe: this.#symbolsProbe,
 		};
 	}
 	// All-primitive signature — compare via the canonical render-cache encoding.
@@ -2791,7 +2765,7 @@ export class Markdown implements Component {
 	}
 
 	#renderCacheKey(normalizedText: string, signature: RenderSignature): string {
-		return `${normalizedText}\x00${signature.width}\x00${signature.paddingX}\x00${signature.paddingY}\x00${signature.codeBlockIndent}\x00${signature.themeId}\x00${signature.defaultTextStyleId}\x00${signature.imageProtocol}\x00${signature.hyperlinks ? 1 : 0}\x00${signature.textSizing ? 1 : 0}\x00${signature.bgColorProbe}\x00${signature.headingProbe}`;
+		return `${normalizedText}\x00${signature.width}\x00${signature.paddingX}\x00${signature.paddingY}\x00${signature.codeBlockIndent}\x00${signature.themeId}\x00${signature.defaultTextStyleId}\x00${signature.imageProtocol}\x00${signature.hyperlinks ? 1 : 0}\x00${signature.textSizing ? 1 : 0}\x00${signature.bgColorProbe}\x00${signature.headingProbe}\x00${signature.symbolsProbe}`;
 	}
 
 	#renderStreamingContentLines(
@@ -3570,7 +3544,7 @@ export class Markdown implements Component {
 
 	/** Render a horizontal rule line themed to `width`, matching `sourceChar` when given. */
 	#renderHrLine(width: number, sourceChar = ""): string {
-		const fillChar = getHrChar(sourceChar, this.#theme.symbols.hrChar);
+		const fillChar = getHrChar(sourceChar, this.#symbols.hrChar);
 		return this.#theme.hr(fillChar.repeat(Math.min(width, 80)));
 	}
 
@@ -3602,7 +3576,7 @@ export class Markdown implements Component {
 			} else {
 				const styledLine = applyQuoteStyle(quoteLine.text);
 				for (const wrappedLine of wrapTextWithAnsi(styledLine, quoteContentWidth)) {
-					lines.push(renderedLine(this.#theme.quoteBorder(`${this.#theme.symbols.quoteBorder} `) + wrappedLine));
+					lines.push(renderedLine(this.#theme.quoteBorder(`${this.#symbols.quoteBorder} `) + wrappedLine));
 				}
 			}
 		}
@@ -3663,7 +3637,7 @@ export class Markdown implements Component {
 			const segments: string[] = text.split("\n");
 			return segments.map((segment: string) => (segment === "" ? "" : applyText(segment))).join("\n");
 		};
-		const swatchGlyph = this.#theme.symbols.colorSwatch || DEFAULT_COLOR_SWATCH_GLYPH;
+		const swatchGlyph = this.#symbols.colorSwatch || DEFAULT_COLOR_SWATCH_GLYPH;
 		// Set by a line break: the next line's own leading whitespace is dropped.
 		// Every token consumes it, so the space after a styled span that starts
 		// the line stays; a token that renders nothing passes it on.
@@ -4109,7 +4083,7 @@ export class Markdown implements Component {
 			}
 		}
 
-		const t = this.#theme.symbols.table;
+		const t = this.#symbols.table;
 		const h = t.horizontal;
 		const v = t.vertical;
 

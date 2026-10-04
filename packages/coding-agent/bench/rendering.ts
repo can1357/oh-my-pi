@@ -45,19 +45,7 @@ bench("truncateToVisualLines", () => {
 	truncateToVisualLines(longText, 20, WIDTH, 1);
 });
 
-const welcome = new WelcomeComponent(
-	"8.12.3",
-	"claude-3.7",
-	"anthropic",
-	[
-		{ name: "Test session", timeAgo: "2m" },
-		{ name: "Another session", timeAgo: "1h" },
-	],
-	[
-		{ name: "tsserver", status: "ready", fileTypes: ["ts", "tsx", "js"] },
-		{ name: "rust-analyzer", status: "connecting", fileTypes: ["rs"] },
-	],
-);
+const welcome = new WelcomeComponent("8.12.3");
 
 bench("WelcomeComponent.render", () => {
 	welcome.render(WIDTH);

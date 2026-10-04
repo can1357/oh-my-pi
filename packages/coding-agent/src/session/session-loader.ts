@@ -1,5 +1,5 @@
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
-import { ConcatSink, getBlobsDir, isEnoent, isEnotdir, parseJsonlLenient } from "@oh-my-pi/pi-utils";
+import { ConcatSink, getBlobsDir, isEisdir, isEnoent, isEnotdir, parseJsonlLenient } from "@oh-my-pi/pi-utils";
 import * as snapcompact from "@oh-my-pi/snapcompact";
 import { Semaphore } from "../task/parallel";
 import {
@@ -29,6 +29,60 @@ const STREAM_LOAD_THRESHOLD_BYTES = 8 * 1024 * 1024;
 const STREAM_YIELD_BYTES = 1 * 1024 * 1024;
 const STREAM_YIELD_ENTRIES = 8_192;
 const BLOB_READ_CONCURRENCY = 8;
+
+/**
+ * Complete optional accounting fields from persisted/imported assistant turns.
+ * Complete provider usage is left untouched; missing prices never discard reported tokens.
+ */
+export function normalizeAssistantUsage(message: Extract<AgentMessage, { role: "assistant" }>): boolean {
+	const usage = message.usage;
+	if (
+		usage &&
+		usage.input !== undefined &&
+		usage.output !== undefined &&
+		usage.cacheRead !== undefined &&
+		usage.cacheWrite !== undefined &&
+		usage.totalTokens !== undefined &&
+		usage.cost?.input !== undefined &&
+		usage.cost.output !== undefined &&
+		usage.cost.cacheRead !== undefined &&
+		usage.cost.cacheWrite !== undefined &&
+		usage.cost.total !== undefined
+	) {
+		return false;
+	}
+	const input = usage?.input ?? 0;
+	const output = usage?.output ?? 0;
+	const cacheRead = usage?.cacheRead ?? 0;
+	const cacheWrite = usage?.cacheWrite ?? 0;
+	const cost = usage?.cost;
+	message.usage = {
+		...usage,
+		input,
+		output,
+		cacheRead,
+		cacheWrite,
+		totalTokens:
+			usage?.totalTokens ??
+			input +
+				output +
+				cacheRead +
+				cacheWrite +
+				(usage?.orchestration?.input ?? 0) +
+				(usage?.orchestration?.cacheRead ?? 0) +
+				(usage?.orchestration?.output ?? 0),
+		cost: {
+			...cost,
+			input: cost?.input ?? 0,
+			output: cost?.output ?? 0,
+			cacheRead: cost?.cacheRead ?? 0,
+			cacheWrite: cost?.cacheWrite ?? 0,
+			total:
+				cost?.total ?? (cost?.input ?? 0) + (cost?.output ?? 0) + (cost?.cacheRead ?? 0) + (cost?.cacheWrite ?? 0),
+		},
+	};
+	return true;
+}
 
 export interface VisitEntriesFromFileStreamOptions {
 	/** Stop after the visitor returns `false`. */
@@ -111,6 +165,32 @@ export function parseSessionContent(content: string): SessionLoadResult {
 		sourceSize: Buffer.byteLength(content, "utf8"),
 		invalidHeader: entries.length > 0 ? !isValidSessionHeader(entries[0]) : malformedRecords > 0,
 	};
+}
+
+/** Upper bound on the bytes read to find a header: real headers (and the title slot before them) are far smaller. */
+const SESSION_HEADER_READ_LIMIT = 1024 * 1024;
+
+/**
+ * The session id in `filePath`'s header, or `undefined` when there is no file
+ * there or it does not start with a valid session header. Reads at most one
+ * record and {@link SESSION_HEADER_READ_LIMIT} bytes.
+ */
+export async function readSessionHeaderId(filePath: string): Promise<string | undefined> {
+	let id: string | undefined;
+	try {
+		await visitEntriesFromFileStream(
+			filePath,
+			entry => {
+				if (isValidSessionHeader(entry)) id = entry.id;
+				return false;
+			},
+			{ maxRecords: 1, maxBytes: SESSION_HEADER_READ_LIMIT },
+		);
+	} catch (err) {
+		if (isEnoent(err) || isEnotdir(err) || isEisdir(err)) return undefined;
+		throw err;
+	}
+	return id;
 }
 
 /** Parse session JSONL and visit each entry without retaining prior entries. */
@@ -384,7 +464,10 @@ export async function loadSessionFile(
 	}
 }
 
-/** Load the valid entries from a session file, skipping malformed records. */
+/**
+ * Load the valid entries from a session file, skipping malformed records.
+ * Each call returns freshly parsed entries owned by the caller.
+ */
 export async function loadEntriesFromFile(
 	filePath: string,
 	storage: SessionStorage = new FileSessionStorage(),
@@ -511,18 +594,31 @@ function blobRefSites(values: readonly unknown[]): BlobRefSite[] {
 	return sites;
 }
 
+function blobSiteKey(site: BlobRefSite): string {
+	return `${site.asDataUrl ? "url" : "base64"}:${site.ref}`;
+}
+
 async function resolveBlobRefs(values: readonly unknown[], blobStore: BlobStore): Promise<void> {
 	const semaphore = new Semaphore(BLOB_READ_CONCURRENCY);
+	const resolved = new Map<string, Promise<string>>();
 	await Promise.all(
 		blobRefSites(values).map(async site => {
-			await semaphore.acquire();
-			try {
-				site.holder[site.key] = await (site.asDataUrl
-					? resolveImageDataUrl(blobStore, site.ref)
-					: resolveImageData(blobStore, site.ref));
-			} finally {
-				semaphore.release();
+			const key = blobSiteKey(site);
+			let data = resolved.get(key);
+			if (!data) {
+				data = (async () => {
+					await semaphore.acquire();
+					try {
+						return await (site.asDataUrl
+							? resolveImageDataUrl(blobStore, site.ref)
+							: resolveImageData(blobStore, site.ref));
+					} finally {
+						semaphore.release();
+					}
+				})();
+				resolved.set(key, data);
 			}
+			site.holder[site.key] = await data;
 		}),
 	);
 }
@@ -541,10 +637,17 @@ export async function resolveBlobRefsInEntries(entries: FileEntry[], blobStore: 
 
 /** Synchronous {@link resolveBlobRefsInEntries}. */
 export function resolveBlobRefsInEntriesSync(entries: FileEntry[], blobStore: BlobStore): void {
+	const resolved = new Map<string, string>();
 	for (const site of blobRefSites(entriesForBlobResolution(entries))) {
-		site.holder[site.key] = site.asDataUrl
-			? resolveImageDataUrlSync(blobStore, site.ref)
-			: resolveImageDataSync(blobStore, site.ref);
+		const key = blobSiteKey(site);
+		let data = resolved.get(key);
+		if (data === undefined) {
+			data = site.asDataUrl
+				? resolveImageDataUrlSync(blobStore, site.ref)
+				: resolveImageDataSync(blobStore, site.ref);
+			resolved.set(key, data);
+		}
+		site.holder[site.key] = data;
 	}
 }
 

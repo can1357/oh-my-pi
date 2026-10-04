@@ -689,8 +689,9 @@ interface EvalCellSection {
 }
 
 /**
- * A notebook cell with separate input and output gutters. Only multi-cell
- * calls repeat titles; prompts show execution state, never invented counts.
+ * A notebook cell: a gutter mark beside the input (←, muted until the cell
+ * runs, omp's thinking starburst while it does) and beside its output (→).
+ * Only multi-cell calls repeat titles; marks never invent execution counts.
  */
 function evalCellSection(cell: EvalCellSection, index: number, total: number): NativeNode {
 	let head: TspSpan[] | undefined;
@@ -701,7 +702,15 @@ function evalCellSection(cell: EvalCellSection, index: number, total: number): N
 		if (cell.status === "error") head.push(span(" · failed", "error"));
 		if (cell.durationMs !== undefined) head.push(span(` · ${(cell.durationMs / 1000).toFixed(2)}s`, "muted"));
 	}
-	const prompt = cell.status === "running" ? "In [*]:" : !cell.status || cell.status === "pending" ? "In [ ]:" : "In:";
+	const inputMark =
+		cell.status === "running"
+			? node("spinner", { style: "starburst", role: "omp.tool.eval.prompt", aria: "Running" })
+			: node("icon", {
+					name: "arrow-left",
+					role: "omp.tool.eval.prompt",
+					aria: "Input",
+					tone: !cell.status || cell.status === "pending" ? "muted" : undefined,
+				});
 	return node(
 		"col",
 		{
@@ -714,7 +723,7 @@ function evalCellSection(cell: EvalCellSection, index: number, total: number): N
 				"row",
 				{ role: "omp.tool.eval.input", align: "start" },
 				[
-					text(prompt, { role: "omp.tool.eval.prompt", wrap: "none" }),
+					inputMark,
 					keyed(codeNode(cell.code, { lang: languageForHighlighter(cell.language), numbers: false }), "code"),
 				],
 				"input",
@@ -724,7 +733,7 @@ function evalCellSection(cell: EvalCellSection, index: number, total: number): N
 						"row",
 						{ role: "omp.tool.eval.result", align: "start" },
 						[
-							text("Out:", { role: "omp.tool.eval.prompt", wrap: "none" }),
+							node("icon", { name: "arrow-right", role: "omp.tool.eval.prompt", aria: "Output" }),
 							node("col", { role: "omp.tool.eval.outputs" }, cell.output),
 						],
 						"output",

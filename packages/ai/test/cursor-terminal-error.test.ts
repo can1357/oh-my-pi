@@ -28,6 +28,7 @@ type Scenario =
 	| { kind: "connect-error-after-turn" }
 	| { kind: "connect-detailed-error-after-turn" }
 	| { kind: "connect-classification-detail-after-turn" }
+	| { kind: "connect-cursor-error-details-after-turn"; isRetryable: boolean }
 	| { kind: "connect-structured-error-after-turn" }
 	| { kind: "grpc-trailer-after-turn" }
 	| { kind: "end-before-turn" }
@@ -265,6 +266,29 @@ async function startServer(): Promise<string> {
 			return;
 		}
 
+		if (scenario.kind === "connect-cursor-error-details-after-turn") {
+			// Shape captured from a live Cursor outage: bare `unavailable: Error`
+			// with the retry verdict only inside the typed detail's debug JSON.
+			stream.write(
+				connectEndErrorFrame("unavailable", "Error", [
+					{
+						type: "aiserver.v1.ErrorDetails",
+						debug: {
+							error: "ERROR_OPENAI",
+							details: {
+								title: "Unable to reach the model provider",
+								detail: "We're having trouble connecting to the model provider.",
+								isRetryable: scenario.isRetryable,
+							},
+							isExpected: false,
+						},
+					},
+				]),
+			);
+			stream.end();
+			return;
+		}
+
 		if (scenario.kind === "connect-structured-error-after-turn") {
 			const details = create(ErrorDetailsSchema, {
 				error: CursorError.ERROR_RATE_LIMITED,
@@ -418,6 +442,15 @@ describe("Cursor terminal lifecycle after turnEnded", () => {
 		const { result } = await collectStream(makeModel(baseUrl));
 		expect(result.errorMessage).toContain("quota exceeded for this account");
 		expect(AIError.is(result.errorId, AIError.Flag.UsageLimit)).toBe(false);
+	});
+
+	it.each([true, false])("follows Cursor's ErrorDetails.isRetryable=%p verdict for recovery", async isRetryable => {
+		scenario = { kind: "connect-cursor-error-details-after-turn", isRetryable };
+		const baseUrl = await startServer();
+		const { result } = await collectStream(makeModel(baseUrl));
+		expect(result.stopReason).toBe("error");
+		expect(result.errorMessage).toContain("Unable to reach the model provider");
+		expect(AIError.is(result.errorId, AIError.Flag.Transient)).toBe(isRetryable);
 	});
 
 	it("maps Cursor ErrorDetails into retryable provider status and message", async () => {

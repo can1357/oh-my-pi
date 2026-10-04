@@ -788,9 +788,12 @@ describe("LSP diagnostics freshness", () => {
 	});
 
 	it("suppresses TypeScript project diagnostics for orphan files but keeps syntax errors", async () => {
+		// Use a marker that cannot exist above the OS temp dir: real markers like package.json are
+		// common in home directories (e.g. C:\Users\<name>\package.json), which would make the
+		// "orphan" file look like it belongs to a project.
 		const server: ServerConfig = {
 			...TEST_SERVER,
-			rootMarkers: ["package.json", "tsconfig.json", "jsconfig.json"],
+			rootMarkers: ["omp-lsp-orphan-test-root.marker"],
 		};
 		const orphanDir = TempDir.createSync("@omp-lsp-orphan-");
 		try {

@@ -20,7 +20,7 @@ This document describes operator-visible behavior for session export, sharing, c
 
 | Operation                               | Entry path                   | Session mutation                              | Session file creation/switch                                                               | Output artifact                                                                     |
 | --------------------------------------- | ---------------------------- | --------------------------------------------- | ------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------- |
-| `/dump`                                 | Slash command (TUI/headless) | No                                            | No                                                                                         | Clipboard/command text plus best-effort temporary JSON sidecar                      |
+| `/dump [all]`                           | Slash command (TUI/headless) | No                                            | No                                                                                         | Clipboard/command text plus best-effort temporary JSON sidecar; `all`: temp zip    |
 | `/export [--themes] [path]`             | Slash command (TUI/headless) | No                                            | No                                                                                         | HTML file                                                                           |
 | `--export <session.jsonl> [outputPath]` | CLI startup fast-path        | No runtime session mutation                   | No active session; reads target file                                                       | HTML file                                                                           |
 | `/share`                                | Slash command (TUI/headless) | No                                            | No                                                                                         | Encrypted share link (gist or share server); temp HTML only for TUI custom handlers |
@@ -55,7 +55,7 @@ Behavior details:
 
 - `--copy`, `clipboard`, and `copy` arguments are explicitly rejected with a warning to use `/dump`.
 - Export embeds session header/entries/leaf plus current `systemPrompt` and tool descriptions from agent state. `previousSessionFiles` is omitted from exported headers.
-- Subagent transcripts stored next to the session file (`<session>/<AgentId>.jsonl`, recursively for nested spawns) are embedded as `subSessions` (`collectSubSessions` in `src/export/html/index.ts`; disable with `includeSubSessions: false` in `ExportOptions`). In the page, agent ids in task tool cards open a breadcrumbed sub-session overlay.
+- Subagent transcripts stored next to the session file (`<session>/<AgentId>.jsonl`, recursively for nested spawns) are embedded as `subSessions` (`collectSubSessions` in `src/session/sub-sessions.ts`; disable with `includeSubSessions: false` in `ExportOptions`). Discovery skips advisor transcripts (`__advisor*.jsonl`), descends only into real child directories, and flags tombstoned (killed) agents as `aborted`. In the page, agent ids in task tool cards open a breadcrumbed sub-session overlay.
 - Tool calls render through the `<omp-tool-view>` web component — the React per-tool renderers shared with collab-web (`packages/collab-web/src/tool-render/`), prebuilt into `src/export/html/tool-views.generated.js` by `bun run gen:tool-views`.
 - No session entries are appended during export.
 - The default filename is `omp-session-<session-file-stem>.html` in the current directory. HTML export is not secret-redacted or encrypted; it can contain raw context, image data, and extension payloads.
@@ -104,6 +104,17 @@ Dump transcript content includes:
 The best-effort JSON sidecar is named `omp-llm-request-<id>.json` under the OS temporary directory. It contains the current model, thinking level, service tier, system prompt, wire tool schemas, and LLM-converted messages. It persists after the command and can contain raw context or secrets; protect or remove it accordingly. A sidecar failure does not suppress the transcript (the TUI reports the failure; headless execution silently omits the path).
 
 No session persistence entries are appended by dumping.
+
+### `/dump all` (zip of per-agent dumps)
+
+`/dump all` calls `session.dumpSessionArchiveToTmpDir()`, which writes
+`omp-dump-<id>.zip` under the OS temporary directory with:
+
+- `session.md` — the same main transcript `/dump` copies
+- `llm-request.json` — the same payload as the `/dump` sidecar (best-effort; omitted if conversion fails)
+- `subagents/<path>.md` — one file per persisted subagent found by `collectSubSessions` (e.g. `subagents/Scout.md`, `subagents/Scout/Helper.md`), headed `# Subagent: <path>` with the persisted model, thinking level, `Status: aborted` for killed agents, and the messages on the subagent's last-entry branch, deobfuscated like the main session
+
+Subagent system prompts and tool inventories are not persisted, so subagent files omit them. Subagents with no messages are skipped. If subagent discovery fails, the archive still holds the main dump and the report says why subagents are missing. The TUI copies the archive path to the clipboard and lists its members; headless/ACP returns the same report as command output. Like the sidecar, the archive persists and can contain raw context or secrets.
 
 ## Share
 
@@ -304,6 +315,19 @@ Interactive `/fork` creates a new session from the current one and switches the 
 - In-memory session manager returns `undefined` from `fork()`.
 - `AgentSession.fork()` returns `false`.
 - UI reports `Fork failed (session not persisted or cancelled)`.
+
+### Fork at an entry (`AgentSession.fork(entryId)`, RPC `fork`)
+
+`AgentSession.fork(entryId)` forks from a transcript point instead of the whole session. The RPC `fork` command calls it when `entryId` is given and plain `fork()` otherwise.
+
+- Like the whole-session fork, it is rejected while vibe mode is active.
+- `entryId` must be a `message` entry (user, assistant, or any other message role); anything else throws `Invalid entry ID for forking`.
+- It throws `SessionBusyError` while `AgentSession.isBusyForSnapshot` is true (a response is streaming, or user bash/eval, compaction, handoff, or retry work is running). The check runs before `session_before_branch`, again after it, and once more after pending bash output and session writes flush. That last check comes before anything of the old session is discarded (pending next-turn messages, async jobs, the auto-learn capture), so a refused fork leaves the session as it was. A prompt admitted during the remaining drain awaits is dropped by the prompt-generation bump at the cut, as for `branch()`. `/btw` branches use the same predicate.
+- When `entryId` sits inside an assistant tool-call batch (the assistant message, or a tool result answering it), the cut extends through the batch's recorded tool results, following the tree from `entryId` and stepping over lone non-message entries between results. A fork therefore never ends on tool calls whose results exist in the source session; calls that never got a result stay as they are.
+- The transition is the one `AgentSession.branch()` uses, cut at the resolved entry rather than before it: `session_before_branch` with reason `"fork"` (cancellable; `entryId` is the last kept entry, not a dropped one as for `branch()`), `SessionManager.createBranchedSession(leafId, { copyArtifacts: true })`, rebuilt agent messages, then `session_branch` with reason `"fork"`.
+- The new file keeps the root-to-entry path including the resolved entry, carries labels for kept entries, keeps the title, and sets `parentSession` to the previous session file. The whole artifact directory is copied in the background (including artifacts only cited by dropped entries), and the new session's artifact manager waits for the copy before allocating ids or resolving `artifact://`, so kept `artifact://N` references still resolve and new artifacts get fresh ids. Unlike the whole-session fork, the provider prompt-cache key is not inherited (same as `branch()`).
+- Works in non-persistent mode (in-memory replacement), unlike the whole-session fork.
+- `AgentSession.fork(undefined, { requireIdle: true })` applies the same idle rule to the whole-session fork (before `session_before_switch` and again after the flushes). RPC `fork` passes it for both variants, so both reject with `code: "session_busy"`. Interactive `/fork` does not, so it can still carry a running bash command into the new session.
 
 ### CLI `--fork <id|path>`
 

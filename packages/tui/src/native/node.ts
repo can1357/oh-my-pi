@@ -29,10 +29,12 @@ export type NativeNode = {
 		 */
 		readonly key?: string;
 		/**
-		 * Scroll the node into view, placed like the `reveal` op, when it is
-		 * added. Key a node by what it points at to reveal it again on a move.
+		 * Scroll the node into view, placed like the `reveal` op. A placement
+		 * reveals it when it is added: key a node by what it points at to
+		 * reveal it again on a move. A {@link NativeReveal} reveals it whenever
+		 * its `n` differs from the previous description of the same node.
 		 */
-		readonly reveal?: "start" | "end" | "nearest";
+		readonly reveal?: NativeRevealAt | NativeReveal;
 		/**
 		 * Keyboard scrolling forwarded to the terminal (PgUp/PgDn/End reach the
 		 * program): moves the scroller at or above the node by `by` whenever
@@ -43,6 +45,19 @@ export type NativeNode = {
 		readonly scroll?: NativeScroll;
 	};
 }[TspKind];
+
+/** Where a revealed node lands in its scroller. */
+export type NativeRevealAt = "start" | "end" | "nearest";
+
+/**
+ * A repeatable {@link NativeNode.reveal}: bump `n` to bring an existing node
+ * into view again (a Contents entry jumping to its section). A freshly added
+ * node is not revealed.
+ */
+export interface NativeReveal {
+	readonly at: NativeRevealAt;
+	readonly n: number;
+}
 
 /** A {@link NativeNode.scroll} request. */
 export interface NativeScroll {
@@ -113,7 +128,11 @@ export type NativeUiEvent =
 			readonly value: boolean | number | string | readonly string[] | null;
 	  }
 	/** An edit over the terminal's own selection in an `editor`/`input` node (see {@link NativeTextEdit}). */
-	| ({ readonly type: "edit"; readonly key: string } & NativeTextEdit);
+	| ({ readonly type: "edit"; readonly key: string } & NativeTextEdit)
+	/** Undo the last change to an `editor`/`input` node's text (the terminal's ⌃Z); a no-op with no history. */
+	| { readonly type: "undo"; readonly key: string }
+	/** Submit an explicit prompt through the composer's normal path, preserving the previous draft for recall. */
+	| { readonly type: "send"; readonly key: string; readonly text: string };
 
 /**
  * A primitive edit the terminal made over its own text selection (cut,

@@ -204,10 +204,18 @@ export interface ChatUsageSnapshot {
 
 /** Context passed to the cost estimator. */
 export interface CostEstimatorContext {
+	/** OTel provider label (`gen_ai.provider.name`). */
 	readonly provider: string;
+	/** Provider id before OTel normalization (e.g. `openai-codex` for the `openai` label). */
+	readonly providerId: string | undefined;
+	/** Model id reported on the response; a provider may report a served model instead of the requested one. */
 	readonly model: string;
+	/** Requested model id, when the caller knows it. */
+	readonly modelId: string | undefined;
 	readonly serviceTier: ServiceTier | undefined;
 	readonly usage: ChatUsageSnapshot;
+	/** Cost the provider already computed for this request; the value persisted with the message. */
+	readonly usageCost: Usage["cost"];
 }
 
 /**
@@ -1138,6 +1146,8 @@ export async function finishChatSpan(
 	message: AssistantMessage,
 	options: {
 		readonly stepNumber: number;
+		/** Requested model id; `message.model` may name a served fallback model instead. */
+		readonly modelId?: string;
 		readonly serviceTier?: ServiceTier;
 		readonly responseHeaders?: Readonly<Record<string, string>>;
 		readonly baseUrl?: string;
@@ -1147,7 +1157,7 @@ export async function finishChatSpan(
 	applyChatResponseAttributes(span, message);
 	applyUsageAttributes(span, message.usage);
 	applyGatewayAttributes(span, options.responseHeaders, options.baseUrl);
-	const cost = applyCostEstimate(telemetry, span, message, options.serviceTier, options.stepNumber);
+	const cost = applyCostEstimate(telemetry, span, message, options.serviceTier, options.stepNumber, options.modelId);
 	if (telemetry) {
 		await emitChatUsage(telemetry, span, {
 			operation: GenAIOperation.Chat,
@@ -1367,10 +1377,12 @@ function applyCostEstimate(
 	message: AssistantMessage,
 	serviceTier: ServiceTier | undefined,
 	stepNumber: number | undefined,
+	modelId: string | undefined,
 ): AppliedCostEstimate {
 	if (!telemetry) return EMPTY_COST;
 	return applyCostEstimateForUsage(telemetry, span, {
 		model: message.model,
+		modelId,
 		provider: message.provider,
 		serviceTier,
 		stepNumber,
@@ -1383,6 +1395,7 @@ function applyCostEstimateForUsage(
 	span: Span,
 	input: {
 		readonly model: string;
+		readonly modelId: string | undefined;
 		readonly provider: string | undefined;
 		readonly serviceTier: ServiceTier | undefined;
 		readonly stepNumber: number | undefined;
@@ -1398,9 +1411,12 @@ function applyCostEstimateForUsage(
 	try {
 		result = estimator({
 			provider,
+			providerId: input.provider,
 			model: input.model,
+			modelId: input.modelId,
 			serviceTier: input.serviceTier,
 			usage,
+			usageCost: input.usage.cost,
 		});
 	} catch (err) {
 		emitTelemetryWarning(telemetry, {
@@ -1620,6 +1636,7 @@ export async function recordManualChatTelemetry(
 	if (telemetry) {
 		const applied = applyCostEstimateForUsage(telemetry, span, {
 			model: options.responseModel ?? options.model.id,
+			modelId: options.model.id,
 			provider: options.model.provider,
 			serviceTier: options.serviceTier,
 			stepNumber: options.stepNumber,
@@ -1889,6 +1906,7 @@ export async function instrumentedCompleteSimple<TApi extends Api>(
 				: await runOnce();
 			await finishChatSpan(telemetry, chatSpan, message, {
 				stepNumber,
+				modelId: model.id,
 				serviceTier: options.serviceTier,
 				responseHeaders: capturedHeaders,
 				baseUrl: model.baseUrl,

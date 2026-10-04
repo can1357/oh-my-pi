@@ -671,6 +671,8 @@ export class NativeBackend {
 			case "action":
 			case "change":
 			case "edit":
+			case "undo":
+			case "send":
 				this.#routeUiEvent(event);
 				return;
 			case "focus": {
@@ -687,11 +689,17 @@ export class NativeBackend {
 	}
 
 	#routeUiEvent(
-		event: Extract<TspEvent, { ev: "toggle" | "select" | "activate" | "action" | "change" | "edit" }>,
+		event: Extract<
+			TspEvent,
+			{ ev: "toggle" | "select" | "activate" | "action" | "change" | "edit" | "undo" | "send" }
+		>,
 	): void {
 		const reconciler = this.#surfaceFor(event.sf)?.reconciler;
 		const target = reconciler?.target(event.id);
 		if (!reconciler || !target?.component.handleNativeEvent) return;
+		// Explicit sends must address the live editor, not a stale or invented
+		// descendant id that merely shares the component's namespace.
+		if (event.ev === "send" && (!this.#live || reconciler.focusTarget(target.component) !== event.id)) return;
 		// A list's items are nodes (`<list>/<key>`, or a component's root id) and
 		// map back to their described key. Data-first kinds (picker, prefs) send
 		// the program's own item ids (model ids, paths), which pass through.
@@ -721,6 +729,12 @@ export class NativeBackend {
 				ui = { type: "edit", key: target.keypath, from, to, text, cursor, len };
 				break;
 			}
+			case "undo":
+				ui = { type: "undo", key: target.keypath };
+				break;
+			case "send":
+				ui = { type: "send", key: target.keypath, text: event.text };
+				break;
 		}
 		target.component.handleNativeEvent(ui);
 		this.#host.requestRender();

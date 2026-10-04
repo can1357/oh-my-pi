@@ -29,7 +29,7 @@ import {
 	ModelVendorId,
 } from "../src/discovery/cursor-proto";
 import { create, fromBinary, toBinary } from "../src/discovery/protobuf";
-import { collapseBuiltVariants } from "../src/compat/collapse";
+import { collapseBuiltVariants, getVariantAliasSources, resolveVariantSelector } from "../src/compat/collapse";
 import { resolveProviderModels } from "../src/model-manager";
 import { cursorModelManagerOptions } from "../src/provider-models/special";
 import { getModelPricingStatus } from "../src/models";
@@ -44,6 +44,9 @@ const FIXTURE_MODEL_IDS = [
 	"kimi-k3-high",
 	"kimi-k3-low",
 	"kimi-k3-max",
+	"k3",
+	"cursor/k3",
+	"CURSOR/K3",
 	"cursor-grok-4.5",
 	"cursor-grok-4.5-fast",
 	"cursor-grok-4.6",
@@ -51,11 +54,14 @@ const FIXTURE_MODEL_IDS = [
 	"composer-2.5",
 	"composer-2.5-fast",
 	// Similar but unverified ids must not inherit image routing.
+	"K3",
 	"composer-3",
 	"composer-2.50",
 	"cursor-grok-5",
 	"grok-code-fast-2",
 	"k3-256k",
+	"cursor/k3-256k",
+	"K3-256K",
 	// Versioned Cursor Grok siblings: the id marks them reasoning.
 	"cursor-grok-4.5-high",
 	"cursor-grok-4.6-xhigh",
@@ -120,6 +126,26 @@ describe("cursor discovery input modalities (issue #4726)", () => {
 		expect(byId.get("cursor-grok-5")?.input).toEqual(["text"]);
 		expect(byId.get("grok-code-fast-2")?.input).toEqual(["text"]);
 		expect(byId.get("k3-256k")?.input).toEqual(["text"]);
+	});
+
+	it("preserves verified K3 aliases without inflating unverified K3 selector capabilities", async () => {
+		const byId = await discover();
+		for (const id of ["kimi-k3-high", "kimi-k3-low", "kimi-k3-max", "k3", "cursor/k3", "CURSOR/K3"]) {
+			const spec = byId.get(id);
+			expect(spec).toBeDefined();
+			if (spec) {
+				expect(buildModel(spec).input).toEqual(["text", "image"]);
+				expect(buildModel(spec).contextWindow).toBe(1_000_000);
+			}
+		}
+		for (const id of ["K3", "k3-256k", "cursor/k3-256k", "K3-256K"]) {
+			const spec = byId.get(id);
+			expect(spec).toBeDefined();
+			if (spec) {
+				expect(buildModel(spec).input).toEqual(["text"]);
+				expect(buildModel(spec).contextWindow).toBe(200_000);
+			}
+		}
 	});
 
 	it("recognizes reference-less Kimi K3 effort variants as reasoning models", async () => {
@@ -1045,8 +1071,8 @@ describe("cursor rich discovery review regressions", () => {
 			expect(built).toEqual(spec.cost);
 			return built;
 		};
-		expect(cost("grok-4.5")).toEqual({ input: 2, output: 6, cacheRead: 0.5, cacheWrite: 0 });
-		expect(cost("grok-4.5-fast")).toEqual({ input: 4, output: 18, cacheRead: 1, cacheWrite: 0 });
+		expect(cost("cursor-grok-4.5")).toEqual({ input: 2, output: 6, cacheRead: 0.5, cacheWrite: 0 });
+		expect(cost("cursor-grok-4.5-fast")).toEqual({ input: 4, output: 18, cacheRead: 1, cacheWrite: 0 });
 		expect(cost("gpt-5.2")).toEqual({ input: 1.75, output: 14, cacheRead: 0.175, cacheWrite: 0 });
 		expect(cost("gpt-5.2-fast")).toEqual({ input: 3.5, output: 28, cacheRead: 0.35, cacheWrite: 0 });
 		expect(cost("gpt-5.4")).toEqual({ input: 2.5, output: 15, cacheRead: 0.25, cacheWrite: 0 });
@@ -1122,5 +1148,78 @@ describe("cursor rich discovery review regressions", () => {
 		for (const effort of model.thinking?.efforts ?? []) {
 			expect(model.thinking?.effortRouting?.[effort]).toBe("claude-4.5-sonnet-thinking");
 		}
+	});
+
+	it("keeps Cursor Grok logical ids stable whether or not AvailableModels answers (#14164)", async () => {
+		const efforts = ["low", "medium", "high", "xhigh"];
+		const slugs = efforts.flatMap(effort => [`cursor-grok-4.6-${effort}`, `cursor-grok-4.6-${effort}-fast`]);
+		const usable = toBinary(
+			GetUsableModelsResponseSchema,
+			create(GetUsableModelsResponseSchema, {
+				models: slugs.map(modelId => create(ModelDetailsSchema, { modelId })),
+			}),
+		);
+		// AvailableModels names the model `grok-4.6`; only its slugs carry `cursor-`.
+		const available = toBinary(
+			AvailableModelsResponseSchema,
+			create(AvailableModelsResponseSchema, {
+				models: [
+					create(AvailableModelsResponse_ModelDetailsSchema, {
+						name: "grok-4.6",
+						clientDisplayName: "Grok 4.6",
+						supportsAgent: true,
+						legacySlugs: slugs,
+						parameterDefinitions: [booleanParameter("fast", "2x more expensive")],
+						variants: efforts.flatMap(effort => [
+							richVariant(
+								`cursor-grok-4.6-${effort}`,
+								{ reasoning: effort, fast: "false" },
+								{ isDefaultNonMaxConfig: effort === "medium" },
+							),
+							richVariant(`cursor-grok-4.6-${effort}-fast`, { reasoning: effort, fast: "true" }),
+						]),
+					}),
+				],
+			}),
+		);
+		const discoverIds = async (availableStatus: number): Promise<string[]> => {
+			const server = serveCursorRpcStatuses({
+				"/agent.v1.AgentService/GetUsableModels": { status: 200, body: usable },
+				"/aiserver.v1.AiService/AvailableModels": { status: availableStatus, body: available },
+			});
+			try {
+				const result = await resolveProviderModels(
+					{
+						...cursorModelManagerOptions({ apiKey: "t", baseUrl: server.url.toString() }),
+						cacheDbPath: await createTempCachePath(),
+						staticModels: [],
+					},
+					"online",
+				);
+				return result.models.map(model => model.id).sort();
+			} finally {
+				server.stop(true);
+			}
+		};
+
+		const expected = ["cursor-grok-4.6", "cursor-grok-4.6-fast"];
+		expect(await discoverIds(200)).toEqual(expected);
+		expect(await discoverIds(503)).toEqual(expected);
+	});
+
+	it("migrates selectors and overrides keyed by the retired unprefixed rich Grok lane ids (#14164)", () => {
+		for (const [retired, stable] of [
+			["grok-4.5", "cursor-grok-4.5"],
+			["grok-4.5-fast", "cursor-grok-4.5-fast"],
+			["grok-4.6", "cursor-grok-4.6"],
+			["grok-4.6-fast", "cursor-grok-4.6-fast"],
+		] as const) {
+			expect(resolveVariantSelector("cursor", retired)).toBe(stable);
+			// models.yml `modelOverrides` re-key through the reverse index.
+			expect(getVariantAliasSources("cursor", stable)).toContain(retired);
+		}
+		// Grok 4.7 lanes were always unprefixed; they must not be re-keyed.
+		expect(resolveVariantSelector("cursor", "grok-4.7")).toBeUndefined();
+		expect(getVariantAliasSources("cursor", "cursor-grok-4.7")).not.toContain("grok-4.7");
 	});
 });
