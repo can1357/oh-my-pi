@@ -598,26 +598,12 @@ function detectOpenAICompat(
 	};
 }
 
-const DSML_HEALING_PROVIDERS: Record<string, true> = {
-	ollama: true,
-	"ollama-cloud": true,
-	nvidia: true,
-	deepseek: true,
-	fireworks: true,
-	nanogpt: true,
-	"opencode-go": true,
-	openrouter: true,
-	// Transparent gateways / user-configured hosts forward the upstream model's
-	// native chat template unchanged, so a deepseek-classed model behind them
-	// still emits DSML tool-call envelopes and needs the DSML healer.
-	litellm: true,
-	nous: true,
-};
-
 /**
  * Default leaked-markup healer. Kimi/DeepSeek dedicated grammars are keyed on
  * identity class; official OpenAI heals nothing; everything else defaults to
- * the generic `thinking` healer.
+ * the generic `thinking` healer. DSML is DeepSeek's own tool-call grammar, so
+ * every host serving a DeepSeek model gets it — gateways, local backends, and
+ * custom providers alike.
  */
 function detectStreamMarkupHealing(
 	provider: string,
@@ -628,7 +614,7 @@ function detectStreamMarkupHealing(
 	// Kimi ids keep the generic healer, matching the census.
 	const isKimiK2 = facts.is("kimi") && facts.identity.family?.startsWith("k2") === true;
 	if (provider === "kimi-code" || provider === "moonshot" || isKimiK2) return "kimi";
-	if (facts.is("deepseek") && DSML_HEALING_PROVIDERS[provider] === true) return "dsml";
+	if (facts.is("deepseek")) return "dsml";
 	if (isOfficialOpenAIEndpoint(provider, baseUrl)) return undefined;
 	return "thinking";
 }

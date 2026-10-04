@@ -2,6 +2,18 @@
 
 ## [Unreleased]
 
+## [18.6.1] - 2026-10-04
+
+### Fixed
+
+- Fixed native OpenAI context compaction for sessions containing many screenshots, preventing image-size estimates from incorrectly causing compaction requests to be rejected.
+
+## [18.6.0] - 2026-10-03
+
+### Fixed
+
+- When a DeepSeek turn ends with raw `<｜DSML｜…>` tool-call text that could not be parsed into a real call, and no tool call was made, the broken markup is now removed from the message before it is saved to history. The agent then tells the model the tool call failed, shows it the correct format, and asks it again, at most twice in a row. Previously the markup stayed in history, and the agent stopped as if the model had finished ([#14202](https://github.com/can1357/oh-my-pi/pull/14202) by [@H4vC](https://github.com/H4vC)).
+
 ## [18.5.1] - 2026-10-03
 
 ### Added
