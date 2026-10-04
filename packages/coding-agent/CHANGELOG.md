@@ -5,6 +5,7 @@
 ### Fixed
 
 - Fixed follow-up hashline edits being rejected as anchored on lines "never displayed" after an earlier edit shifted those lines, when the replacement carries the anchored content; genuinely stale line numbers are still rejected ([#14254](https://github.com/can1357/oh-my-pi/pull/14254) by [@abilliontokens](https://github.com/abilliontokens)).
+- `queue_update` events and the `get_state` queue snapshot now carry a `liveSteered` count: the leading `steering` entries are live steering already sent into the streaming response, which `remove_queued_message` cannot reach. The events also fire when steering is adopted live, withdrawn by the interrupt path, or lands in the transcript, so queue views no longer go stale while a steer is in flight ([#14268](https://github.com/can1357/oh-my-pi/pull/14268) by [@jchanghong023](https://github.com/jchanghong023)).
 
 ## [18.6.0] - 2026-10-03
 

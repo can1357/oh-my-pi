@@ -1884,7 +1884,11 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 					hasPendingAsyncWork: session.hasPendingAsyncWork(),
 					// A scheduled goal continuation will start a turn: not settled.
 					isSettled: isRpcSessionSettled(session, goalTurnScheduled),
-					queuedMessages: { steering: [...queuedMessages.steering], followUp: [...queuedMessages.followUp] },
+					queuedMessages: {
+						steering: [...queuedMessages.steering],
+						followUp: [...queuedMessages.followUp],
+						liveSteered: queuedMessages.liveSteered,
+					},
 					todoPhases: session.getTodoPhases(),
 					fastModeEnabled: session.isFastModeEnabled(),
 					tokensPerSecond: calculateTokensPerSecond(session.messages, session.isStreaming),

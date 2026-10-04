@@ -40,7 +40,17 @@ export const stateDefs = {
 	TodoPhase: { name: "string", tasks: "TodoItem[]" },
 	ContextUsage: { tokens: "number.integer", contextWindow: "number.integer", percent: "number" },
 	QueuedMessagesState: doc(
-		{ steering: "string[]", followUp: "string[]" },
+		{
+			steering: "string[]",
+			followUp: "string[]",
+			liveSteered: absentAs(
+				doc(
+					"number.integer",
+					"Leading `steering` entries are live steering already sent into the streaming response; `remove_queued_message` cannot reach them.",
+				),
+				0,
+			),
+		},
 		"Displayable queue-chip text for pending user-authored messages; accepted verbatim by `remove_queued_message`.",
 	),
 	ToolDescriptor: { name: "string", description: "string", "parameters?": "unknown", "examples?": "unknown[]" },
@@ -90,7 +100,7 @@ export const stateDefs = {
 			doc("boolean", "Idle with nothing queued or pending; same predicate as `session_settled`."),
 			false,
 		),
-		queuedMessages: absentAs("QueuedMessagesState", { steering: [], followUp: [] }),
+		queuedMessages: absentAs("QueuedMessagesState", { steering: [], followUp: [], liveSteered: 0 }),
 		todoPhases: absentAs("TodoPhase[]", []),
 		systemPrompt: absentAs(doc("string[]", "System prompt sections, for session dumps."), []),
 		dumpTools: absentAs("ToolDescriptor[]", []),

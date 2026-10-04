@@ -26,6 +26,7 @@ import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
 interface QueueSnapshot {
 	steering: readonly string[];
 	followUp: readonly string[];
+	liveSteered: number;
 }
 
 describe("AgentSession queue_update events", () => {
@@ -74,7 +75,11 @@ describe("AgentSession queue_update events", () => {
 		const updates: QueueSnapshot[] = [];
 		target.subscribe(event => {
 			if (event.type === "queue_update")
-				updates.push({ steering: [...event.steering], followUp: [...event.followUp] });
+				updates.push({
+					steering: [...event.steering],
+					followUp: [...event.followUp],
+					liveSteered: event.liveSteered,
+				});
 		});
 		return updates;
 	}
@@ -122,7 +127,7 @@ describe("AgentSession queue_update events", () => {
 		// displayable snapshot (steering still holds "kept"); it must not emit.
 		target.agent.clearFollowUpQueue();
 
-		expect(updates).toEqual([{ steering: ["kept"], followUp: [] }]);
+		expect(updates).toEqual([{ steering: ["kept"], followUp: [], liveSteered: 0 }]);
 	});
 
 	it("satisfies the snapshot-string-removal invariant for every queued chip", async () => {
@@ -147,9 +152,9 @@ describe("AgentSession queue_update events", () => {
 
 		await target.prompt("hello");
 
-		expect(snapshot).toEqual({ steering: ["steer one"], followUp: ["follow one", "follow two"] });
+		expect(snapshot).toEqual({ steering: ["steer one"], followUp: ["follow one", "follow two"], liveSteered: 0 });
 		expect(removed).toEqual([true, true, true]);
-		expect(remaining).toEqual({ steering: [], followUp: [] });
+		expect(remaining).toEqual({ steering: [], followUp: [], liveSteered: 0 });
 	});
 
 	it("keeps the queue snapshot truthful while a steer is claimed live", async () => {
@@ -181,13 +186,13 @@ describe("AgentSession queue_update events", () => {
 		await target.steer("use tabs");
 		await claimed.promise;
 
-		const afterClaim = { steering: ["use tabs"], followUp: [] };
+		const afterClaim = { steering: ["use tabs"], followUp: [], liveSteered: 1 };
 		expect(target.getQueuedMessages()).toEqual(afterClaim);
 		expect(updates.at(-1)).toEqual(afterClaim);
 
 		// The interrupt path (Esc) is what takes a live-steered message back.
 		expect(target.clearQueue({ forInterrupt: true }).steering.map(message => message.text)).toEqual(["use tabs"]);
-		expect(updates.at(-1)).toEqual({ steering: [], followUp: [] });
+		expect(updates.at(-1)).toEqual({ steering: [], followUp: [], liveSteered: 0 });
 		await target.abort();
 		await running;
 	});

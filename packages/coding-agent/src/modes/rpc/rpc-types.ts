@@ -158,8 +158,10 @@ export interface RpcSessionState {
 	isSettled: boolean;
 	/** Displayable queue-chip text for pending user-authored messages, mirroring
 	 *  `AgentSession.getQueuedMessages()`. Render the queue from this snapshot
-	 *  (and the `queue_update` event) instead of tracking chips independently. */
-	queuedMessages: { steering: string[]; followUp: string[] };
+	 *  (and the `queue_update` event) instead of tracking chips independently.
+	 *  `liveSteered` counts the leading `steering` entries already sent into the
+	 *  streaming response; `remove_queued_message` cannot reach them. */
+	queuedMessages: { steering: string[]; followUp: string[]; liveSteered: number };
 	todoPhases: TodoPhase[];
 	/** For session dump / export (plain-text parity with /dump). */
 	systemPrompt?: string[];
