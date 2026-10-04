@@ -917,7 +917,8 @@ export class Agent {
 	}
 
 	/** Register a listener notified after any steering/follow-up queue mutator
-	 *  (enqueue, dequeue-on-delivery, clear, restore) runs. Internal-only signal —
+	 *  (enqueue, dequeue-on-delivery, clear, restore, live-steering adoption,
+	 *  withdrawal, and landing in the transcript) runs. Internal-only signal —
 	 *  the queue itself has no concept of display filtering — so listeners
 	 *  recompute their own snapshot from `peekSteeringQueue()`/`peekFollowUpQueue()`
 	 *  (or a higher-level view) on notification. */
@@ -1044,10 +1045,12 @@ export class Agent {
 
 	/** Move steering live steering took out of the queue-delivery records into {@link #liveSteered}. */
 	#adoptLiveSteering(taken: readonly AgentMessage[]): void {
+		let adopted = false;
 		for (const delivery of this.#queuedMessageDeliveries) {
 			const pending = delivery.messages.slice(delivery.next);
 			const kept = pending.filter(message => !taken.includes(message));
 			if (kept.length === pending.length) continue;
+			adopted = true;
 			for (const message of pending) {
 				if (taken.includes(message)) this.#liveSteered.push({ message, controller: delivery.controller });
 			}
@@ -1058,6 +1061,10 @@ export class Agent {
 				delivery.next = 0;
 			}
 		}
+		// The adopted messages move into #liveSteered, which queue snapshots
+		// (peekLiveSteeredMessages) count as still pending; listeners must hear
+		// about the swap or their queue view goes stale for the rest of the turn.
+		if (adopted) this.#emitQueueChanged();
 	}
 
 	/**
@@ -1067,6 +1074,9 @@ export class Agent {
 	withdrawLiveSteering(): AgentMessage[] {
 		const messages = this.peekLiveSteeredMessages();
 		this.#liveSteered = [];
+		// Every snapshot counts live-steered messages as pending, so clearing
+		// them is a queue change even when the caller re-queues them right after.
+		if (messages.length > 0) this.#emitQueueChanged();
 		return messages;
 	}
 
@@ -1271,6 +1281,9 @@ export class Agent {
 		const live = this.#liveSteered.findIndex(entry => entry.message === m);
 		if (live >= 0) {
 			this.#liveSteered.splice(live, 1);
+			// The message landed in the transcript, so it stops counting as
+			// queued pending input; snapshots shrink and listeners must hear it.
+			this.#emitQueueChanged();
 			return;
 		}
 		for (const delivery of this.#queuedMessageDeliveries) {
