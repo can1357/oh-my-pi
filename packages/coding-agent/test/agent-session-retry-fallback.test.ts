@@ -1417,22 +1417,25 @@ describe("AgentSession retry fallback", () => {
 
 	it.each([
 		// Default: `/slow` on Claude leaves usage-aware fallback unchanged.
-		["anthropic", false, "auto", "openai"],
+		["anthropic", false, "auto", "openai", undefined],
 		// Opted in: low priority serves past the limit, so Claude keeps the turn.
-		["anthropic", true, "auto", "anthropic"],
+		["anthropic", true, "auto", "anthropic", undefined],
 		// Opted in, but `/slow` is off: nothing serves past the limit.
-		["anthropic", true, "off", "openai"],
+		["anthropic", true, "off", "openai", undefined],
 		// Opted in with `/slow` on as the flex tier, which stops at the limit.
-		["openai-codex", true, "auto", "openai"],
+		["openai-codex", true, "auto", "openai", undefined],
+		// A custom Anthropic endpoint cannot use the subscription slow lane.
+		["anthropic", true, "auto", "openai", "https://custom.example.com/anthropic"],
 	] as const)(
 		"preflight from a depleted %s model with preferSlowMode %p and Claude slow mode %s serves %s",
-		async (primaryProvider, preferSlowMode, slowMode, servedProvider) => {
-			const primaryModel =
+		async (primaryProvider, preferSlowMode, slowMode, servedProvider, baseUrl) => {
+			const bundled =
 				primaryProvider === "anthropic"
 					? getBundledModel("anthropic", "claude-sonnet-4-5")
 					: getBundledModel("openai-codex", "gpt-5.6-sol");
 			const fallbackModel = getBundledModel("openai", "gpt-4o-mini");
-			if (!primaryModel || !fallbackModel) throw new Error("Expected bundled slow-mode preflight models");
+			if (!bundled || !fallbackModel) throw new Error("Expected bundled slow-mode preflight models");
+			const primaryModel = baseUrl ? { ...bundled, baseUrl } : bundled;
 			const requestedModels: string[] = [];
 			const mock = createMockModel({ responses: [{ content: ["kept working"] }] });
 			const agent = new Agent({
