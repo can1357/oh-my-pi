@@ -123,6 +123,7 @@ export interface SegmentContext {
 		display: "text" | "icon" | "none";
 	} | null;
 	collab: CollabStatus | null;
+	peers?: { address: string; receiving: boolean };
 	stream: { viewers: number } | null;
 	/** A `/record` capture of this screen is running. */
 	recording: boolean;

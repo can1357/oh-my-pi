@@ -9,6 +9,10 @@ import { settings } from "../config/settings";
 import { parseExportArgs } from "../export/html/args";
 import { shareSession } from "../export/share";
 import { theme } from "@oh-my-pi/pi-tui/theme";
+import { normalizePeerAlias } from "../mailbox/protocol";
+import { formatPeerRow } from "../mailbox/peer-rows";
+import { formatMailboxState, MailboxService } from "../mailbox/service";
+import { cfgIrcCrossProcess, cfgIrcPeerAlias } from "../irc/settings";
 import type { InteractiveModeContext } from "../modes/types";
 import { sanitizeDisplayLine } from "@oh-my-pi/pi-tui/overlays/extensions/display-text";
 import { extractLastCodeBlock, extractLastCommand, extractLastLink } from "@oh-my-pi/pi-tui/overlays/copy-targets";
@@ -59,6 +63,55 @@ function showCollabLink(ctx: InteractiveModeContext, host: CollabHost, heading: 
 }
 
 export const BUILTIN_COLLABORATION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
+	{
+		name: "peers",
+		icon: "inbox",
+		description: "Discover and message other omp processes, or name this peer",
+		acpDescription: "Toggle, list, or name cross-process peers",
+		acpInputHint: "[on|off|status|list|name [alias]]",
+		subcommands: [
+			{ name: "on", description: "Enable cross-process peers for this session" },
+			{ name: "off", description: "Disable cross-process peers for this session" },
+			{ name: "status", description: "Show cross-process peer status" },
+			{ name: "list", description: "List other omp processes with peers on" },
+			{ name: "name", description: "Set this session's peer alias (omit to clear)", usage: "[alias]" },
+		],
+		allowArgs: true,
+		getTuiAutocompleteDescription: runtime => `Peers: ${cfgIrcCrossProcess.get(runtime.ctx.settings) ? "on" : "off"}`,
+		handle: async (command, runtime) => {
+			const { verb, rest } = parseSubcommand(command.args);
+			const arg = verb || "status";
+			if (!["on", "off", "status", "list", "name"].includes(arg) || (arg !== "name" && rest)) {
+				return usage("Usage: /peers [on|off|status|list|name [alias]]", runtime);
+			}
+			if (arg === "name") {
+				const value = rest ? normalizePeerAlias(rest) : "";
+				if (value === null || value !== rest) {
+					return usage(
+						`Invalid alias "${sanitizeDisplayLine(rest)}": use letters, digits, - or _ (max 48), not an address.`,
+						runtime,
+					);
+				}
+				cfgIrcPeerAlias.override(runtime.settings, value);
+			}
+			if (arg === "on" || arg === "off") {
+				cfgIrcCrossProcess.override(runtime.settings, arg === "on");
+			}
+			const mailbox = MailboxService.global();
+			await mailbox.whenSettled();
+			if (arg === "list") {
+				const peers = await mailbox.listPeers();
+				await runtime.output(
+					peers.length
+						? peers.map(peer => formatPeerRow(peer)).join("\n")
+						: "No other omp processes have peers on.",
+				);
+			} else {
+				await runtime.output(formatMailboxState(mailbox.state(runtime.session.getAgentId() ?? "Main")));
+			}
+			return commandConsumed();
+		},
+	},
 	{
 		name: "advisor",
 		icon: "advisor",

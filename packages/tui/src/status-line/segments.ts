@@ -1052,6 +1052,20 @@ const collabSegment: StatusLineSegment = {
 	},
 };
 
+const peersSegment: StatusLineSegment = {
+	id: "peers",
+	render(ctx) {
+		if (!ctx.peers) return { content: "", visible: false };
+		const label = `peers:${ctx.peers.address}${ctx.peers.receiving ? "" : " (send)"}`;
+		return { content: accentFg(ctx, "accent", label), visible: true };
+	},
+	describe(ctx) {
+		if (!ctx.peers) return null;
+		const label = `peers:${ctx.peers.address}${ctx.peers.receiving ? "" : " (send)"}`;
+		return segView([span(label, accentToken(ctx, "accent"))]);
+	},
+};
+
 const streamSegment: StatusLineSegment = {
 	id: "stream",
 	render(ctx) {
@@ -1300,6 +1314,7 @@ export const SEGMENTS: Record<StatusLineSegmentId, StatusLineSegment> = {
 	session_name: sessionNameSegment,
 	usage: usageSegment,
 	collab: collabSegment,
+	peers: peersSegment,
 	stream: streamSegment,
 	vim: vimSegment,
 };

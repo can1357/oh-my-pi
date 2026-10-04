@@ -75,10 +75,10 @@ import { appKey, editorKey, rawKeyHint } from "@oh-my-pi/pi-tui/chrome/keybindin
 import { formatModelStringWithRouting, type ResolvedModelRoleValue } from "../config/model-resolver";
 import { isSettingsInitialized, Settings, settings } from "../config/settings";
 import { clearClaudePluginRootsCache } from "../discovery/helpers";
+import { formatMailboxState, type MailboxTargetState } from "../mailbox/service";
 import type {
 	AutocompleteProviderFactory,
 	ContextUsage,
-	ExtensionCustomOptions,
 	ExtensionUIContext,
 	ExtensionUIDialogOptions,
 	ExtensionUISelectItem,
@@ -256,7 +256,7 @@ import { BtwController } from "./controllers/btw-controller";
 import { CleanseCommandController } from "./controllers/cleanse-command-controller";
 import { CommandController } from "./controllers/command-controller";
 import { EventController } from "./controllers/event-controller";
-import { ExtensionUiController } from "./controllers/extension-ui-controller";
+import { ExtensionUiController, type HookEditorPresentationOptions } from "./controllers/extension-ui-controller";
 import { InputController } from "./controllers/input-controller";
 import { LiveCommandController } from "./controllers/live-command-controller";
 import { MCPCommandController } from "./controllers/mcp-command-controller";
@@ -7190,6 +7190,15 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#uiHelpers.showStatus(message, options);
 	}
 
+	showMailboxState(state: MailboxTargetState): void {
+		this.showStatus(formatMailboxState(state));
+		this.statusLine.setPeersStatus(
+			state.enabled ? { address: state.address, receiving: state.receiving } : undefined,
+		);
+		this.statusLine.invalidate();
+		this.ui.requestRender();
+	}
+
 	showError(message: string): void {
 		this.#pendingSubmittedInput = undefined;
 		this.#pendingSubmissionPreservesDraft = false;
@@ -8204,7 +8213,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		title: string,
 		prefill?: string,
 		dialogOptions?: ExtensionUIDialogOptions,
-		editorOptions?: { promptStyle?: boolean },
+		editorOptions?: HookEditorPresentationOptions,
 	): Promise<string | undefined> {
 		return this.#extensionUiController.showHookEditor(title, prefill, dialogOptions, editorOptions);
 	}
@@ -8224,7 +8233,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			keybindings: KeybindingsManager,
 			done: (result: T) => void,
 		) => (Component & { dispose?(): void }) | Promise<Component & { dispose?(): void }>,
-		options?: ExtensionCustomOptions,
+		options?: HookEditorPresentationOptions,
 	): Promise<T> {
 		return this.#extensionUiController.showHookCustom(factory, options);
 	}

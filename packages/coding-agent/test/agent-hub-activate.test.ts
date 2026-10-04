@@ -10,7 +10,11 @@ import * as path from "node:path";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { IrcBus } from "@oh-my-pi/pi-coding-agent/irc/bus";
 import { AgentHubOverlayComponent } from "@oh-my-pi/pi-tui/overlays/agent-hub";
+import { MailboxService, type MailboxPeer } from "@oh-my-pi/pi-coding-agent/mailbox/service";
+import { HookEditorComponent } from "@oh-my-pi/pi-tui/overlays/hook-editor";
 import { SelectorController } from "@oh-my-pi/pi-coding-agent/modes/controllers/selector-controller";
+import { ExtensionUiController } from "@oh-my-pi/pi-coding-agent/modes/controllers/extension-ui-controller";
+import * as externalEditor from "@oh-my-pi/pi-coding-agent/utils/external-editor";
 import { SessionObserverRegistry } from "@oh-my-pi/pi-tui/overlays/session-observer-registry";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
@@ -119,6 +123,7 @@ describe("Agent hub Enter activation", () => {
 
 	afterEach(() => {
 		resetSettingsForTest();
+		vi.restoreAllMocks();
 	});
 
 	it("Enter focuses the selected agent and closes the hub", async () => {
@@ -191,6 +196,123 @@ describe("Agent hub Enter activation", () => {
 		expect(setFocus).toHaveBeenCalledWith(expect.anything());
 		expect(onDone).not.toHaveBeenCalled();
 		hub.dispose();
+	});
+
+	it("peer composition uses the external editor, sends as the active agent, and restores Hub focus on failure", async () => {
+		const agents = new AgentRegistry();
+		const bus = new IrcBus(agents);
+		vi.spyOn(IrcBus, "global").mockReturnValue(bus);
+		const send = vi.spyOn(bus, "send").mockResolvedValue({
+			to: "project-deadbeef",
+			outcome: "failed",
+			error: "Peer unavailable.",
+		});
+		const settings = Settings.isolated({ "irc.crossProcess": true });
+		vi.spyOn(MailboxService, "global").mockReturnValue({
+			listPeers: async (): Promise<MailboxPeer[]> => [
+				{
+					address: "project-deadbeef",
+					id: "process-id",
+					pid: 123,
+					conversation: null,
+					alias: "reviewer",
+					cwd: TEST_CWD,
+					title: "Review",
+					busy: false,
+				},
+			],
+		} as never);
+		const focusAgent = vi.fn(async () => {});
+		const onDone = vi.fn();
+		const hide = vi.fn(() => setFocus(hub));
+		const setFocus = vi.fn();
+		let mounted = Promise.withResolvers<void>();
+		const resumed = Promise.withResolvers<void>();
+		let composer: HookEditorComponent | undefined;
+		const ui = {
+			showOverlay: vi.fn((component: HookEditorComponent) => {
+				composer = component;
+				mounted.resolve();
+				return { hide };
+			}),
+			setFocus,
+			requestRender: () => {},
+			requestComponentRender: () => {},
+			stop: vi.fn(),
+			start: () => resumed.resolve(),
+		};
+		const presenter = new ExtensionUiController({
+			ui,
+			editor: { getText: () => "" },
+		} as unknown as InteractiveModeContext);
+		vi.spyOn(externalEditor, "getEditorCommand").mockReturnValue("configured-editor");
+		const edit = vi.spyOn(externalEditor, "openInEditor").mockResolvedValue("Please review the edited change.");
+		const renderedFailure = Promise.withResolvers<void>();
+		let submitted = false;
+		const hub = new AgentHubOverlayComponent({
+			...createAgentHubRuntime({ settings, registry: agents, senderId: "acp:active-conversation" }),
+			observers: new SessionObserverRegistry(),
+			hubKeys: [],
+			onDone,
+			requestRender: () => {
+				if (submitted && Bun.stripANSI(hub.render(120).join("\n")).includes("Peer unavailable."))
+					renderedFailure.resolve();
+			},
+			focusAgent,
+			showPeerEditor: (title, signal) =>
+				presenter.showHookEditor(
+					title,
+					undefined,
+					{ signal },
+					{
+						promptStyle: true,
+						overlay: true,
+						restoreOverlayFocus: true,
+					},
+				),
+			ui: ui as never,
+		});
+		try {
+			await hub.initialRowsReady;
+			hub.handleInput("\r");
+			await mounted.promise;
+			expect(composer).toBeInstanceOf(HookEditorComponent);
+			composer!.pasteText("Please review the change.");
+			composer!.handleInput("\x07");
+			await resumed.promise;
+			expect(edit).toHaveBeenCalledWith("configured-editor", "Please review the change.");
+			submitted = true;
+			composer!.handleInput("\r");
+			await renderedFailure.promise;
+			expect(send).toHaveBeenCalledWith(
+				{
+					from: "acp:active-conversation",
+					to: "project-deadbeef",
+					body: "Please review the edited change.",
+				},
+				{ suppressRelay: false },
+			);
+			expect(hide).toHaveBeenCalledTimes(1);
+			expect(setFocus.mock.calls.at(-1)?.[0]).toBe(hub);
+			expect(focusAgent).not.toHaveBeenCalled();
+			expect(onDone).not.toHaveBeenCalled();
+			expect(agents.list()).toEqual([]);
+			mounted = Promise.withResolvers<void>();
+			hub.handleInput("\r");
+			await mounted.promise;
+			const stale = composer!;
+			mounted = Promise.withResolvers<void>();
+			hub.handleInput("\r");
+			await mounted.promise;
+			stale.handleInput("\r");
+			hub.dispose();
+			composer!.pasteText("Must not send after disposal.");
+			composer!.handleInput("\r");
+			await Promise.resolve();
+			expect(send).toHaveBeenCalledTimes(1);
+		} finally {
+			hub.dispose();
+		}
 	});
 
 	it("lists persisted subagent session files after restart", async () => {
@@ -579,7 +701,7 @@ describe("Agent hub Enter activation", () => {
 				focusedIds.push(id);
 				focusResolved.resolve();
 			},
-			session: { getToolByName: () => undefined, extensionRunner: undefined },
+			session: { getAgentId: () => "Main", getToolByName: () => undefined, extensionRunner: undefined },
 			sessionManager: { getCwd: () => TEST_CWD, getSessionFile: () => null },
 			hideThinkingBlock: false,
 		};
@@ -606,15 +728,17 @@ describe("Agent hub double-← gating", () => {
 
 	afterEach(() => {
 		resetSettingsForTest();
+		vi.restoreAllMocks();
 	});
 
-	function setup(agents: AgentRegistry, sessionFile: string | null = null) {
+	function setup(agents: AgentRegistry, sessionFile: string | null = null, settings = Settings.isolated()) {
 		let shown: AgentHubOverlayComponent | undefined;
 		let overlayOptions: Record<string, unknown> | undefined;
 		const shownReady = Promise.withResolvers<AgentHubOverlayComponent>();
 		const editor = {};
 		const focusTargets: unknown[] = [];
 		const ctx = {
+			settings,
 			keybindings: { getKeys: () => [] },
 			ui: {
 				showOverlay: (component: AgentHubOverlayComponent, options: Record<string, unknown>) => {
@@ -636,7 +760,7 @@ describe("Agent hub double-← gating", () => {
 			},
 			collabGuest: { agentRegistry: agents, hubRemote: undefined },
 			focusAgentSession: async () => {},
-			session: { getToolByName: () => undefined, extensionRunner: undefined },
+			session: { getAgentId: () => "Main", getToolByName: () => undefined, extensionRunner: undefined },
 			sessionManager: { getCwd: () => TEST_CWD, getSessionFile: () => sessionFile },
 			hideThinkingBlock: false,
 		};
@@ -689,6 +813,35 @@ describe("Agent hub double-← gating", () => {
 
 		expect(shown()).toBeDefined();
 		shown()!.dispose();
+	});
+
+	it("requireContent waits for peer discovery before rejecting a peers-only hub", async () => {
+		const settings = Settings.isolated({ "irc.crossProcess": true });
+		const peerReady = Promise.withResolvers<MailboxPeer[]>();
+		vi.spyOn(MailboxService, "global").mockReturnValue({ listPeers: () => peerReady.promise } as never);
+		const agents = new AgentRegistry();
+		const { controller, shown, shownReady } = setup(agents, null, settings);
+		controller.showAgentHub(new SessionObserverRegistry(), { requireContent: true });
+		expect(shown()).toBeUndefined();
+		peerReady.resolve([
+			{
+				address: "project-deadbeef",
+				id: "process-id",
+				pid: 123,
+				conversation: null,
+				alias: null,
+				cwd: TEST_CWD,
+				title: null,
+				busy: false,
+			},
+		]);
+		const hub = await shownReady;
+		try {
+			expect(renderedRosterIds(hub, 120)).toEqual(["project-deadbeef"]);
+			expect(agents.list()).toEqual([]);
+		} finally {
+			hub.dispose();
+		}
 	});
 
 	it("requireContent opens the hub after persisted subagents load", async () => {

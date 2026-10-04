@@ -866,6 +866,8 @@ The `cost` segment shows recorded session costs. For an active provider/model wi
 | `input.bareExitOnEmptySession` | boolean | `true` | Submitting exactly `exit`, `quit`, or `q` (case-insensitive) before the first message quits. |
 | `input.bareSlashCommands` | boolean | `false` | Run an exact command name without `/`; after session messages exist, Enter must be pressed twice to confirm. |
 | `tui.vimMode` | boolean | `false` | Enable modal prompt editing; `tui.vimModeDisplay` selects `text`, `icon`, or `none` (default `text`). |
+| `irc.crossProcess` | boolean | `false` | Let main agents discover and message omp processes on this machine (same user). `/peers on\|off` overrides it for one process; see [Cross-process peers](./agent-hub.md#cross-process-peers). |
+| `irc.peerAlias` | string | `""` | Alias other omp processes can use to message this session (`agent://<alias>`): letters, digits, `-`, `_`, max 48. `/peers name <alias>` overrides it for one process. |
 | `startup.quiet` | boolean | `false` | Suppress welcome/startup chrome, including the splash. |
 | `startup.showSplash` | boolean | `false` | Show the full setup animation on ordinary interactive startup without rerunning setup. |
 | `startup.changelogMode` | enum | `summary` | `summary`, `expanded`, `hidden`: choose startup release-note presentation. |

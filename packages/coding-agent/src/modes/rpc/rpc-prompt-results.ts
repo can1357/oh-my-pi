@@ -1,5 +1,5 @@
 /**
- * Prompt completion reporting for RPC mode.
+ * Prompt completion attribution shared by RPC and print mode.
  *
  * Every accepted `prompt`/`abort_and_prompt` that is not answered synchronously
  * with `data.agentInvoked: false` gets exactly one `prompt_result` frame, emitted
@@ -7,6 +7,8 @@
  * commands and failures, or after the terminal `agent_end` of the run the prompt
  * started or joined. Hosts correlate on the command `id` instead of inferring
  * ownership of an `agent_end` that carries no prompt identity.
+ * Print hosts omit wire output and capture the attributed assistant through
+ * the synchronous completion callback, before unrelated peer turns can finish.
  */
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
@@ -24,6 +26,7 @@ export interface RpcPromptTicket {
 interface RunOutcome {
 	status: RpcPromptStatus;
 	error?: RpcPromptError;
+	assistantMessage?: AssistantMessage;
 }
 
 interface OpenPrompt {
@@ -33,6 +36,7 @@ interface OpenPrompt {
 	ownOutcome?: RunOutcome;
 	/** Settled while another run was live: reported at the next yield that leaves nothing queued. */
 	waiting: boolean;
+	onComplete?: (message: AssistantMessage | undefined) => void;
 }
 
 /**
@@ -53,16 +57,17 @@ export class RpcPromptResults {
 	#agentStarts = 0;
 	#open = new Map<RpcPromptTicket, OpenPrompt>();
 	readonly #session: RpcSettleSession;
-	readonly #output: (frame: RpcPromptResultFrame) => void;
+	readonly #output: ((frame: RpcPromptResultFrame) => void) | undefined;
 	readonly #scheduledTurn: RpcScheduledTurnProbe | undefined;
 
 	/**
 	 * @param session read for queue state and, at report time, the `sessionSettled` predicate.
+	 * @param output RPC frame sink; omit when only capturing the attributed assistant.
 	 * @param scheduledTurn reports a host-scheduled turn not yet admitted (not settled).
 	 */
 	constructor(
 		session: RpcSettleSession,
-		output: (frame: RpcPromptResultFrame) => void,
+		output?: (frame: RpcPromptResultFrame) => void,
 		scheduledTurn?: RpcScheduledTurnProbe,
 	) {
 		this.#session = session;
@@ -70,10 +75,13 @@ export class RpcPromptResults {
 		this.#scheduledTurn = scheduledTurn;
 	}
 
-	/** Open a ticket before the prompt starts any work. Close it with exactly one report or {@link discard}. */
-	begin(id: string | undefined): RpcPromptTicket {
+	/**
+	 * Open a ticket before the prompt starts any work. Close it with exactly one report or {@link discard}.
+	 * `onComplete` receives that prompt's assistant synchronously when its result is attributed.
+	 */
+	begin(id: string | undefined, onComplete?: (message: AssistantMessage | undefined) => void): RpcPromptTicket {
 		const ticket: RpcPromptTicket = { id };
-		this.#open.set(ticket, { startsAtBegin: this.#agentStarts, waiting: false });
+		this.#open.set(ticket, { startsAtBegin: this.#agentStarts, waiting: false, onComplete });
 		return ticket;
 	}
 
@@ -147,7 +155,11 @@ export class RpcPromptResults {
 	}
 
 	#report(ticket: RpcPromptTicket, agentInvoked: boolean, outcome: RunOutcome): void {
-		if (!this.#open.delete(ticket)) return;
+		const open = this.#open.get(ticket);
+		if (!open || !this.#open.delete(ticket)) return;
+		open.onComplete?.(outcome.assistantMessage);
+		const output = this.#output;
+		if (!output) return;
 		// A prompt command's response is written after the handler's remaining
 		// microtasks; deferring to the next macrotask keeps every prompt_result
 		// behind the response for the same id and lets queue drains land before
@@ -161,7 +173,7 @@ export class RpcPromptResults {
 				sessionSettled: isRpcSessionSettled(this.#session, this.#scheduledTurn),
 			};
 			if (outcome.error) frame.error = outcome.error;
-			this.#output(frame);
+			output(frame);
 		});
 	}
 }
@@ -171,9 +183,11 @@ function runOutcome(messages: readonly AgentMessage[]): RunOutcome {
 	for (let index = messages.length - 1; index >= 0; index--) {
 		const message = messages[index];
 		if (message.role !== "assistant") continue;
-		if (message.stopReason === "error") return { status: "error", error: promptError(message) };
-		if (message.stopReason === "aborted") return { status: "aborted" };
-		return { status: "completed" };
+		if (message.stopReason === "error") {
+			return { status: "error", error: promptError(message), assistantMessage: message };
+		}
+		if (message.stopReason === "aborted") return { status: "aborted", assistantMessage: message };
+		return { status: "completed", assistantMessage: message };
 	}
 	return { status: "completed" };
 }

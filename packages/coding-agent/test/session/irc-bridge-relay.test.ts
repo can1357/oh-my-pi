@@ -3,12 +3,14 @@ import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import { IrcBridge, type IrcBridgeHost } from "@oh-my-pi/pi-coding-agent/session/irc-bridge";
 import type { CustomMessage } from "@oh-my-pi/pi-coding-agent/session/messages";
 
-function makeBridge() {
+function makeBridge(hasObserver = true) {
 	const woken: AgentMessage[][] = [];
 	const host = {
 		isDisposed: () => false,
 		isStreaming: () => false,
 		planModeEnabled: () => false,
+		isIrcAdmissionBlocked: () => false,
+		hasIrcWakeTurnObserver: () => hasObserver,
 		emitSessionEvent: async () => {},
 		wakeForIrc: (records: AgentMessage[]) => {
 			woken.push(records);
@@ -44,5 +46,18 @@ describe("IrcBridge wake-relay marking", () => {
 		const record = woken[0][0] as CustomMessage;
 		expect(record.details).not.toHaveProperty("wakeRelay");
 		expect(record.content).toContain("is delivered to");
+	});
+
+	it("does not promise a stop relay for an ACP-like non-Main root without an observer", async () => {
+		const { bridge, woken } = makeBridge(false);
+		await bridge.deliver({ id: "acp-root", from: "Peer", to: "acp:conversation", body: "status?", ts: 1 });
+		expect((woken[0][0] as CustomMessage).content).toContain("No one replies on your behalf");
+		expect((woken[0][0] as CustomMessage).content).not.toContain("is delivered to");
+	});
+
+	it("never promises a stop relay for a remote wake, even with an observer", async () => {
+		const { bridge, woken } = makeBridge();
+		await bridge.deliver({ id: "remote", from: "Peer", to: "Sub", body: "status?", ts: 1, remote: true });
+		expect((woken[0][0] as CustomMessage).content).toContain("No one replies on your behalf");
 	});
 });

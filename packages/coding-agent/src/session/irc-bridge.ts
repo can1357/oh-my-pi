@@ -1,9 +1,10 @@
-import type { Agent, AgentMessage } from "@oh-my-pi/pi-agent-core";
+import { type Agent, type AgentMessage, ASIDE_MESSAGE_COMMIT, ASIDE_MESSAGE_DISCARD } from "@oh-my-pi/pi-agent-core";
 import { prompt } from "@oh-my-pi/pi-utils";
 import { type IrcMessage } from "@oh-my-pi/pi-tui/tools/irc";
+import { IrcDeliveryRejectedError } from "../irc/bus";
 import parentIrcSteerTemplate from "../prompts/steering/parent-irc.md" with { type: "text" };
 import ircIncomingTemplate from "../prompts/system/irc-incoming.md" with { type: "text" };
-import { AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-registry";
+import { AgentRegistry } from "../registry/agent-registry";
 import type { AgentSessionEvent } from "./agent-session-events";
 import { escapeHarnessTags } from "./harness-tags";
 import type { CustomMessage } from "./messages";
@@ -15,6 +16,8 @@ export interface IrcBridgeHost {
 	sessionManager: SessionManager;
 	isDisposed(): boolean;
 	isStreaming(): boolean;
+	isIrcAdmissionBlocked(): boolean;
+	hasIrcWakeTurnObserver(): boolean;
 	planModeEnabled(): boolean;
 	emitSessionEvent(event: AgentSessionEvent): Promise<void>;
 	wakeForIrc(records: AgentMessage[]): void;
@@ -31,6 +34,8 @@ export class IrcBridge {
 	#deferredWakes: AgentMessage[] = [];
 	/** In-flight wake-turn relays owed to peers. */
 	readonly #pendingReplies = new Set<Promise<void>>();
+	readonly #pendingRemote = new Map<AgentMessage, number>();
+	#pendingRemoteBytes = 0;
 
 	constructor(host: IrcBridgeHost) {
 		this.#host = host;
@@ -42,8 +47,10 @@ export class IrcBridge {
 	}
 
 	/** Whether any undelivered IRC record remains queued. */
-	hasPending(): boolean {
-		return this.#interrupts.length > 0 || this.#asides.length > 0 || this.#deferredWakes.length > 0;
+	hasPending(eligible?: (record: AgentMessage) => boolean): boolean {
+		return eligible
+			? this.#interrupts.some(eligible) || this.#asides.some(eligible) || this.#deferredWakes.some(eligible)
+			: this.#interrupts.length > 0 || this.#asides.length > 0 || this.#deferredWakes.length > 0;
 	}
 
 	/** Waits until every in-flight wake-turn relay has settled. */
@@ -79,6 +86,7 @@ export class IrcBridge {
 		this.#interrupts = [];
 		this.#asides = [];
 		this.#deferredWakes = [];
+		this.consume([...snapshot.interrupts, ...snapshot.asides, ...snapshot.deferredWakes]);
 		return snapshot;
 	}
 
@@ -95,12 +103,14 @@ export class IrcBridge {
 		this.#interrupts = [...snapshot.interrupts, ...this.#interrupts];
 		this.#asides = [...snapshot.asides, ...this.#asides];
 		this.#deferredWakes = [...snapshot.deferredWakes, ...this.#deferredWakes];
+		this.#trackRemote([...snapshot.interrupts, ...snapshot.asides, ...snapshot.deferredWakes]);
 	}
 
 	/** Queues records for the next step-boundary aside injection: IRC wakes deferred by a
 	 *  session transition, and extension `deliverAs: "aside"` sends. */
 	queueAside(records: AgentMessage[]): void {
 		this.#asides.push(...records);
+		this.#trackRemote(records);
 	}
 
 	/** Parks wake-intended records while a pooled contract owns the worker. Unlike
@@ -108,6 +118,7 @@ export class IrcBridge {
 	 *  aside poll) and resume into a monitored wake once the contract clears. */
 	queueDeferredWake(records: AgentMessage[]): void {
 		this.#deferredWakes.push(...records);
+		this.#trackRemote(records);
 	}
 
 	/** Takes parked wake records for a post-clear monitored wake, oldest first. */
@@ -165,6 +176,7 @@ export class IrcBridge {
 					ts: record.timestamp,
 					...(typeof replyTo === "string" ? { replyTo } : {}),
 				});
+				this.consume([record]);
 			}
 		}
 		this.#interrupts = remainingInterrupts;
@@ -172,16 +184,69 @@ export class IrcBridge {
 		return messages;
 	}
 
+	#trackRemote(records: AgentMessage[]): void {
+		for (const record of records) {
+			if (
+				this.#pendingRemote.has(record) ||
+				record.role !== "custom" ||
+				!record.details ||
+				typeof record.details !== "object" ||
+				Reflect.get(record.details, "remote") !== true
+			)
+				continue;
+			const body = Reflect.get(record.details, "message");
+			if (typeof body !== "string") continue;
+			const bytes = Buffer.byteLength(body, "utf8");
+			this.#pendingRemote.set(record, bytes);
+			this.#pendingRemoteBytes += bytes;
+			const settle = () => this.consume([record]);
+			Object.defineProperties(record, {
+				[ASIDE_MESSAGE_COMMIT]: { configurable: true, value: settle },
+				[ASIDE_MESSAGE_DISCARD]: { configurable: true, value: settle },
+			});
+		}
+	}
+
+	/** Releases capacity when a pending record reaches context or is discarded. */
+	consume(records: AgentMessage[]): void {
+		for (const record of records) {
+			const bytes = this.#pendingRemote.get(record);
+			if (bytes === undefined) continue;
+			this.#pendingRemote.delete(record);
+			this.#pendingRemoteBytes -= bytes;
+		}
+	}
+
+	/** Remote admission is shared with the bus's waiter route. */
+	admissionError(msg: IrcMessage): string | undefined {
+		if (msg.remote !== true) return;
+		if (this.#host.isIrcAdmissionBlocked()) {
+			return "Recipient is switching or compacting its session; retry shortly.";
+		}
+		if (
+			this.#pendingRemote.size >= 100 ||
+			this.#pendingRemoteBytes + Buffer.byteLength(msg.body, "utf8") > 4 * 1024 * 1024
+		) {
+			return "Recipient has too many pending peer messages (limit 100 messages / 4 MiB); retry later.";
+		}
+	}
+
 	/** Delivers an IRC message into the recipient session without awaiting any wake turn. */
 	async deliver(msg: IrcMessage): Promise<"injected" | "woken"> {
+		const rejection = this.admissionError(msg);
+		if (rejection) throw new IrcDeliveryRejectedError(rejection);
 		if (this.#host.isDisposed()) throw new Error("Recipient session is disposed.");
 		const streaming = this.#host.isStreaming();
-		const planModeIdle = !streaming && this.#host.planModeEnabled();
-		const fromParent = AgentRegistry.global().get(msg.to)?.parentId === msg.from;
-		// An idle subagent runs a monitored wake turn whose output is relayed
-		// back to the sender (task executor `relayWakeTurnOutput`); the main
-		// agent and mid-turn asides have no such relay.
-		const relayOnStop = !streaming && !planModeIdle && msg.to !== MAIN_AGENT_ID && msg.wakeRelay !== true;
+		const appendIdle = !streaming && (this.#host.planModeEnabled() || msg.noWake === true);
+		const fromParent = msg.remote !== true && AgentRegistry.global().get(msg.to)?.parentId === msg.from;
+		// Only an executor-installed observer can relay a local idle wake's
+		// output back to its sender. Remote wakes never promise that relay.
+		const relayOnStop =
+			!streaming &&
+			!appendIdle &&
+			msg.remote !== true &&
+			this.#host.hasIrcWakeTurnObserver() &&
+			msg.wakeRelay !== true;
 		// The body is agent-authored (a peer's message, or a wake relay's
 		// `<task-result>` around a subagent's output), so it must not close the
 		// harness envelope it is rendered into or open a forged one, e.g. a parent
@@ -191,9 +256,9 @@ export class IrcBridge {
 			role: "custom",
 			customType: "irc:incoming",
 			content: prompt.render(ircIncomingTemplate, {
-				from: msg.from,
+				from: escapeHarnessTags(msg.from),
 				message: envelopeBody,
-				replyTo: msg.replyTo ?? "",
+				replyTo: escapeHarnessTags(msg.replyTo ?? ""),
 				interrupting: streaming,
 				relayOnStop,
 			}),
@@ -204,17 +269,24 @@ export class IrcBridge {
 				message: msg.body,
 				...(msg.replyTo ? { replyTo: msg.replyTo } : {}),
 				...(msg.wakeRelay ? { wakeRelay: true } : {}),
+				...(msg.remote !== undefined ? { remote: msg.remote } : {}),
+				...(msg.noWake === true ? { noWake: true } : {}),
+				...(msg.senderDisplay ? { senderDisplay: msg.senderDisplay } : {}),
 				...(fromParent ? { fromParent: true } : {}),
 			},
 			attribution: "agent",
 			timestamp: msg.ts,
 		};
+		this.#trackRemote([record]);
 		void this.#host.emitSessionEvent({ type: "irc_message", message: record });
 		if (streaming) {
 			if (fromParent) {
 				this.#host.agent.steer({
 					role: "user",
-					content: prompt.render(parentIrcSteerTemplate, { from: msg.from, message: envelopeBody }),
+					content: prompt.render(parentIrcSteerTemplate, {
+						from: escapeHarnessTags(msg.from),
+						message: envelopeBody,
+					}),
 					attribution: "agent",
 					timestamp: msg.ts,
 					steering: true,
@@ -224,7 +296,8 @@ export class IrcBridge {
 			}
 			return "injected";
 		}
-		if (this.#host.planModeEnabled()) {
+		if (appendIdle) {
+			this.consume([record]);
 			this.#host.agent.appendMessage(record);
 			this.#host.sessionManager.appendCustomMessageEntry(
 				record.customType,
@@ -246,7 +319,9 @@ export class IrcBridge {
 
 	/** Persists queued IRC records that missed their step-boundary injection. */
 	flushPending(): void {
-		for (const record of this.drainPending()) {
+		const records = this.drainPending();
+		this.consume(records);
+		for (const record of records) {
 			this.#host.agent.emitExternalEvent({ type: "message_start", message: record });
 			this.#host.agent.emitExternalEvent({ type: "message_end", message: record });
 		}

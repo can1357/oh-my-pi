@@ -38,6 +38,7 @@ import {
 	type SkillPromptInput,
 } from "../../extensibility/skills";
 import { type Theme, theme } from "@oh-my-pi/pi-tui/theme";
+import { MailboxService } from "../../mailbox/service";
 import { AgentLifecycleManager } from "../../registry/agent-lifecycle";
 import {
 	type WordCompletionEngine,
@@ -1206,6 +1207,8 @@ export interface RpcModeOptions {
 	input?: ReadableStream<Uint8Array>;
 	/** Builds `live_start` sessions; defaults to the real {@link LiveSessionController}. */
 	createLiveSession?: RpcLiveSessionFactory;
+	/** Binds peer receiving only after extensions and protocol event output are ready. */
+	bindMailboxTarget?: () => () => void;
 }
 
 /**
@@ -1213,6 +1216,14 @@ export interface RpcModeOptions {
  * Listens for JSON commands on stdin, outputs events and responses on stdout.
  */
 export async function runRpcMode(session: AgentSession, options: RpcModeOptions = {}): Promise<never> {
+	try {
+		return await runRpcModeCore(session, options);
+	} finally {
+		if (options.bindMailboxTarget) await MailboxService.global().close();
+	}
+}
+
+async function runRpcModeCore(session: AgentSession, options: RpcModeOptions): Promise<never> {
 	const { setToolUIContext, headless = false, subagentEventBus, input = claimRpcInput(), createLiveSession } = options;
 	// Signal to RPC clients that the server is ready to accept commands
 	// Suppress terminal notifications: they write \x07 (BEL) or OSC sequences directly to
@@ -1229,7 +1240,10 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 	const stdout = process.platform === "win32" ? fs.createWriteStream("", { fd: 1, autoClose: false }) : process.stdout;
 	const outputWriter = new RpcOutputWriter(stdout, failure => {
 		logger.error("RPC output delivery failed", { error: String(failure) });
-		void session.dispose().finally(() => process.exit(1));
+		void session.dispose().finally(async () => {
+			await MailboxService.global().close();
+			process.exit(1);
+		});
 	});
 	outputWriter.write(
 		frameEncoder.encodeFrames({
@@ -1551,6 +1565,10 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 			persistenceFailure = error;
 		},
 	);
+	if (options.bindMailboxTarget) {
+		session.addDisposer(options.bindMailboxTarget());
+		await MailboxService.global().whenSettled();
+	}
 
 	/**
 	 * Dispose the session, then end the process. A store failure still latched
@@ -1589,11 +1607,13 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 			} catch {
 				// A mirror that cannot be written must not cost the exit code.
 			}
+			await MailboxService.global().close();
 			process.exit(1);
 		}
 		// A failure that already reported and then recovered still leaves its notice
 		// queued here, so the success path drains the same queue before it exits.
 		await outputWriter.close();
+		await MailboxService.global().close();
 		process.exit(0);
 	};
 

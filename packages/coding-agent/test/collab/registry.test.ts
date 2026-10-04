@@ -14,6 +14,7 @@ import {
 	publishCollabHost,
 	resolveCollabHostLink,
 } from "@oh-my-pi/pi-coding-agent/collab/registry";
+import { rawRequest } from "../helpers/raw-request";
 
 const cleanupDirs: string[] = [];
 const openPublications: CollabHostPublication[] = [];
@@ -101,26 +102,6 @@ async function readSoleToken(dir: string): Promise<string> {
 	if (!name) throw new Error("published registry metadata is missing");
 	const meta = await Bun.file(path.join(dir, name)).json();
 	return meta.token as string;
-}
-
-/** Connects to `endpoint`, sends one JSON request line, returns the raw response line. */
-function rawRequest(endpoint: string, request: object): Promise<string> {
-	const { promise, resolve, reject } = Promise.withResolvers<string>();
-	let buffer = "";
-	const socket = net.createConnection({ path: endpoint });
-	const done = (fn: () => void): void => {
-		socket.destroy();
-		fn();
-	};
-	socket.setEncoding("utf8");
-	socket.once("error", err => done(() => reject(err)));
-	socket.once("connect", () => socket.write(`${JSON.stringify(request)}\n`));
-	socket.on("data", chunk => {
-		buffer += chunk;
-		const nl = buffer.indexOf("\n");
-		if (nl >= 0) done(() => resolve(buffer.slice(0, nl)));
-	});
-	return promise;
 }
 
 function auxEndpoint(dir: string, label: string): string {

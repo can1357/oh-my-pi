@@ -78,6 +78,7 @@ Argument handling:
 | `--config <file>` | Load an extra `config.yml`-style overlay for this run (repeatable). |
 | `--session-dir <dir>` | Directory for session storage and lookup. |
 | `--no-session` | Don't save the session (ephemeral). |
+| `--mailbox` | Enable cross-process peer messaging for this process; in print mode, also receive messages. See [Cross-process peers](./agent-hub.md#cross-process-peers). |
 
 #### Session history
 
@@ -266,6 +267,7 @@ Run `omp <command> --help` for each command's own flags and examples.
 | `join` | Join a shared collab session (same as `/join`). | [collab](./collab.md) |
 | `login` | Log in to a model provider from the terminal (counterpart of `/login`). | |
 | `models` | List, search, and refresh available models. | [models](./models.md) |
+| `peers` | List omp processes on this machine that have cross-process peers on (`peers list [--json]`), or send one message (`peers send <address\|alias> <message>`). | [cross-process peers](./agent-hub.md#cross-process-peers) |
 | `plugin`, `plugins` | Manage plugins (install, uninstall, list, etc.). | [extensions](./extensions.md), [marketplace](./marketplace.md) |
 | `play` | Replay a `/record` recording in the terminal; Space pauses and `q` quits. | |
 | `predict` | Compare word-completion engines' live ghost text for a prompt. | |

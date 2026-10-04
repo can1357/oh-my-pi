@@ -93,6 +93,10 @@ class LazyFakeSession {
 		this.agent = { sessionId: this.sessionId, waitForIdle: async () => {} };
 	}
 
+	getAgentId(): string | undefined {
+		return undefined;
+	}
+
 	get sessionName(): string {
 		return this.sessionManager.getHeader()?.title ?? `Session ${this.sessionId}`;
 	}

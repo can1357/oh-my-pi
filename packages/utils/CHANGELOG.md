@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `slugify()`, the shared lowercase ASCII kebab-case helper (optional `maxLength`) ([#14263](https://github.com/can1357/oh-my-pi/pull/14263) by [@jaredlyon](https://github.com/jaredlyon))
+
 ## [18.5.1] - 2026-10-03
 
 ### Added

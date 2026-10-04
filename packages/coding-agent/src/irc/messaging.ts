@@ -2,6 +2,7 @@ import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import type { IrcMessage } from "@oh-my-pi/pi-tui/tools/irc";
 import type { CoordinationDetails } from "@oh-my-pi/pi-tui/tools/wait";
 import type { Settings } from "../config/settings";
+import { cfgIrcCrossProcess } from "./settings";
 import { IrcBus } from "./bus";
 import { type AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-registry";
 import { ensurePersistedRoster } from "../registry/persisted-agents";
@@ -13,9 +14,10 @@ function coordinationErrorResult(text: string, details: CoordinationDetails): Ag
 	return { content: [{ type: "text", text }], details, isError: true };
 }
 
-/** Messaging is available to subagents and to top-level sessions able to spawn peers. */
+/** Messaging is available to subagents and roots able to spawn or message cross-process peers. */
 export function isIrcEnabled(settings: Settings, taskDepth: number): boolean {
 	if (taskDepth > 0) return true;
+	if (taskDepth === 0 && cfgIrcCrossProcess.get(settings)) return true;
 	const maxDepth = cfgTaskMaxRecursionDepth.get(settings);
 	return canSpawnAtDepth(maxDepth, taskDepth);
 }
@@ -92,7 +94,9 @@ export async function executeSend(
 				? `Failed: ${to} ${unavailable ? "is not running" : "could not receive the message"}. ${receipt.error ?? ""}`.trimEnd()
 				: receipt.outcome === "revived"
 					? `Queued for ${to} (was parked; revived).`
-					: `Delivered to ${to}.`;
+					: receipt.outcome === "woken"
+						? `Delivered to ${to}; it started a turn to handle the message.`
+						: `Delivered to ${to}; added to its context without starting a turn.`;
 	}
 	return {
 		content: [{ type: "text", text }],

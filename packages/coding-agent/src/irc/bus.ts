@@ -15,6 +15,24 @@ import { AgentLifecycleManager } from "../registry/agent-lifecycle";
 import { AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-registry";
 import type { CustomMessage } from "../session/messages";
 
+export interface IrcRemoteRouter {
+	handles(to: string): boolean;
+	send(message: IrcMessage): Promise<IrcDeliveryReceipt>;
+}
+
+/** Thrown by a recipient session to refuse an IRC message outright (no mailbox fallback, no retry queue). */
+export class IrcDeliveryRejectedError extends Error {
+	constructor(message: string) {
+		super(message);
+		this.name = "IrcDeliveryRejectedError";
+	}
+}
+
+interface IrcRecipientSession {
+	getIrcAdmissionError?(message: IrcMessage): string | undefined;
+	deliverIrcMessage(message: IrcMessage): Promise<"injected" | "woken">;
+}
+
 interface IrcWaiter {
 	from?: string;
 	resolve: (msg: IrcMessage) => void;
@@ -45,12 +63,17 @@ export class IrcBus {
 	readonly #waiters = new Map<string, IrcWaiter[]>();
 	/** Timestamp of the latest successful send per `from` → `to`; see {@link sentSince}. */
 	readonly #lastSent = new Map<string, Map<string, number>>();
+	#remoteRouter: IrcRemoteRouter | null = null;
 
 	constructor(registry: AgentRegistry = AgentRegistry.global(), lifecycle?: AgentLifecycleManager) {
 		this.#registry = registry;
 		// Lazy: the lifecycle global self-constructs against the global registry,
 		// so only touch it when a parked recipient actually needs reviving.
 		this.#lifecycle = () => lifecycle ?? AgentLifecycleManager.global();
+	}
+
+	setRemoteRouter(router: IrcRemoteRouter | null): void {
+		this.#remoteRouter = router;
 	}
 
 	/**
@@ -97,6 +120,7 @@ export class IrcBus {
 	async #deliver(message: IrcMessage, opts?: { suppressRelay?: boolean }): Promise<IrcDeliveryReceipt> {
 		const ref = this.#registry.get(message.to);
 		if (!ref) {
+			if (this.#remoteRouter?.handles(message.to)) return this.#remoteRouter.send(message);
 			return {
 				to: message.to,
 				outcome: "failed",
@@ -151,6 +175,9 @@ export class IrcBus {
 				};
 			}
 		}
+		const session: IrcRecipientSession | null | undefined = this.#registry.get(message.to)?.session;
+		const rejection = message.remote === true ? session?.getIrcAdmissionError?.(message) : undefined;
+		if (rejection) return { to: message.to, outcome: "failed", error: rejection };
 
 		// A pending `wait` from the recipient consumes the message directly —
 		// it is returned from their irc tool call and never hits the inbox or
@@ -162,7 +189,6 @@ export class IrcBus {
 			return { to: message.to, outcome: revived ? "revived" : "injected" };
 		}
 
-		const session = this.#registry.get(message.to)?.session;
 		if (!session) {
 			return { to: message.to, outcome: "failed", error: `Agent "${message.to}" has no live session.` };
 		}
@@ -172,6 +198,9 @@ export class IrcBus {
 			if (!opts?.suppressRelay) this.#relayToMainUi(message);
 			return { to: message.to, outcome: revived ? "revived" : delivery };
 		} catch (error) {
+			if (error instanceof IrcDeliveryRejectedError) {
+				return { to: message.to, outcome: "failed", error: error.message };
+			}
 			// Live hand-off failed (e.g. recipient disposed mid-shutdown): buffer
 			// the message so a later `wait`/`inbox` from the recipient can still
 			// pick it up. The receipt stays "failed" — the recipient has not

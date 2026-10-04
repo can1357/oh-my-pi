@@ -677,6 +677,7 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 	 */
 	#vibeWorkerTokenRate: (() => number | null) | null = null;
 	#collabStatus: CollabStatus | null = null;
+	#peersStatus: SegmentContext["peers"];
 	#streamStatus: { viewers: number } | null = null;
 	#recording = false;
 	#focusedAgentId: string | undefined;
@@ -1100,6 +1101,14 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 			return;
 		}
 		this.#collabStatus = status;
+		this.#invalidateStatusLineRenderCache();
+	}
+
+	setPeersStatus(status: SegmentContext["peers"]): void {
+		if (this.#peersStatus?.address === status?.address && this.#peersStatus?.receiving === status?.receiving) {
+			return;
+		}
+		this.#peersStatus = status;
 		this.#invalidateStatusLineRenderCache();
 	}
 
@@ -2392,6 +2401,7 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 			vibeMode: this.#vibeModeStatus,
 			vim: this.#vimStatus,
 			collab: this.#collabStatus,
+			peers: this.#peersStatus,
 			stream: this.#streamStatus,
 			recording: this.#recording,
 			usageStats,

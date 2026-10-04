@@ -75,6 +75,11 @@ export const commands: CommandEntry[] = [
 		help: commandHelp.collabHelp,
 	},
 	{
+		name: "peers",
+		load: () => import("./commands/peers").then(m => m.default),
+		help: commandHelp.peersHelp,
+	},
+	{
 		name: "commit",
 		load: () => import("./commands/commit").then(m => m.default),
 		help: commandHelp.commitHelp,

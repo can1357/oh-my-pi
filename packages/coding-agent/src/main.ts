@@ -71,7 +71,9 @@ import { loadExtensions } from "./extensibility/extensions/loader";
 import { ExtensionRunner } from "./extensibility/extensions/runner";
 import type { ExtensionUIContext } from "./extensibility/extensions/types";
 import { scheduleMarketplaceAutoUpdate } from "./extensibility/plugins/marketplace-auto-update";
+import { IrcBus } from "./irc/bus";
 import { registerDaemonProjectPresence } from "./launch/presence";
+import { MailboxService } from "./mailbox/service";
 import type { MCPManager } from "./mcp";
 import type { InteractiveMode } from "./modes/interactive-mode";
 import type { PrintModeOptions } from "./modes/print-mode";
@@ -165,6 +167,7 @@ import {
 	cfgTuiResizeScrollback,
 	cfgUpdateChannel,
 } from "./modes/settings";
+import { cfgIrcCrossProcess } from "./irc/settings";
 import {
 	cfgDefaultThinkingLevel,
 	cfgExternalThinking,
@@ -672,6 +675,17 @@ async function runInteractiveMode(
 				autoStartCollab: joinLink === undefined,
 			}),
 		);
+		session.addDisposer(
+			MailboxService.global().bindTarget({
+				agentId: session.getAgentId() ?? "Main",
+				conversation: null,
+				settings: session.settings,
+				receive: true,
+				describe: () => ({ title: session.sessionName ?? null, busy: session.isStreaming }),
+				notify: state => mode.showMailboxState(state),
+			}),
+		);
+		await MailboxService.global().whenSettled();
 		startDeferredStartupWork?.();
 
 		if (setupWizard && playStartupSplash) {
@@ -1914,6 +1928,10 @@ export async function runRootCommand(
 		if (parsedArgs.hideThinking) {
 			cfgHideThinkingBlock.override(settingsInstance, true);
 		}
+		// Apply --mailbox CLI flag (ephemeral, not persisted)
+		if (parsedArgs.mailbox) {
+			cfgIrcCrossProcess.override(settingsInstance, true);
+		}
 		// Apply --advisor CLI flag (ephemeral, not persisted)
 		if (parsedArgs.advisor) {
 			cfgAdvisorEnabled.override(settingsInstance, true);
@@ -2246,6 +2264,8 @@ export async function runRootCommand(
 			) {
 				process.exit(2);
 			}
+			MailboxService.global().initialize(cwd);
+			IrcBus.global().setRemoteRouter(MailboxService.global());
 			const createAcpSession = createAcpSessionFactory({
 				baseOptions: sessionOptions,
 				settings: settingsInstance,
@@ -2405,6 +2425,8 @@ export async function runRootCommand(
 				// runInteractiveMode validates once init has painted the first frame.
 				deferRetryFallbackValidation: isInteractive,
 			});
+			MailboxService.global().initialize(cwd);
+			IrcBus.global().setRemoteRouter(MailboxService.global());
 
 			const sessionToolNames = session.getAllToolNames();
 			try {
@@ -2527,6 +2549,14 @@ export async function runRootCommand(
 					headless: parsedArgs.noUi === true,
 					subagentEventBus,
 					input: rpcInput,
+					bindMailboxTarget: () =>
+						MailboxService.global().bindTarget({
+							agentId: session.getAgentId() ?? "Main",
+							conversation: null,
+							settings: settingsInstance,
+							receive: true,
+							describe: () => ({ title: session.sessionName ?? null, busy: session.isStreaming }),
+						}),
 				});
 			} else if (isInteractive) {
 				const versionCheckPromise = checkForNewVersion(VERSION).catch(() => undefined);
@@ -2598,6 +2628,14 @@ export async function runRootCommand(
 					printThoughts: initialArgs.printThoughts,
 					planYolo: parsedArgs.planYolo,
 					mcpManager,
+					bindMailboxTarget: () =>
+						MailboxService.global().bindTarget({
+							agentId: session.getAgentId() ?? "Main",
+							conversation: null,
+							settings: settingsInstance,
+							receive: parsedArgs.mailbox === true,
+							describe: () => ({ title: session.sessionName ?? null, busy: session.isStreaming }),
+						}),
 				});
 				if ($env.PI_TIMING) {
 					logger.printTimings();

@@ -31,11 +31,11 @@ export interface AgentHubSession {
 	};
 	abort(options?: { reason?: string }): Promise<void>;
 }
-/** Structural view of an agent-registry record. */
+/** Structural view of a local registry record or presentation-only peer row. */
 export interface AgentRecordLike {
 	id: string;
 	displayName: string;
-	kind: "main" | "sub" | "advisor";
+	kind: "main" | "sub" | "advisor" | "peer";
 	parentId?: string;
 	status: AgentStatus;
 	session: AgentHubSession | null;
@@ -43,6 +43,8 @@ export interface AgentRecordLike {
 	createdAt: number;
 	lastActivity: number;
 	activity?: string;
+	/** Display metadata for another process; never a local session or lifecycle target. */
+	peer?: { cwd: string; title: string | null };
 	history?: {
 		agent?: string;
 		modelRole?: string;

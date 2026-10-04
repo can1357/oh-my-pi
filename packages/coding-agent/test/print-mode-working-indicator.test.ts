@@ -66,6 +66,7 @@ function createDelayedSession(
 	const session = {
 		state: { messages },
 		getLastAssistantMessage: () => messages.findLast(message => message.role === "assistant"),
+		getQueuedMessages: () => ({ steering: [], followUp: [] }),
 		sessionManager: {
 			getHeader: () => undefined,
 			buildSessionContext: () => ({ messages: [] }),
@@ -121,9 +122,11 @@ function createDelayedSession(
 		prompt: async () => {
 			planModeAtPrompt = planModeState;
 			if (advisorDrainPrepared) throw new Error("headless advisor delivery armed before prompt completion");
+			subscriber?.({ type: "agent_start" });
 			markPromptStarted();
 			await promptReleased;
 			messages.push(finalMessage);
+			subscriber?.({ type: "agent_end", messages: [finalMessage], isTerminal: true });
 			return true;
 		},
 		prepareForHeadlessAdvisorDrain: () => {
@@ -300,6 +303,7 @@ describe("print mode working indicator", () => {
 		const session = {
 			state: { messages },
 			getLastAssistantMessage: () => messages.findLast(message => message.role === "assistant"),
+			getQueuedMessages: () => ({ steering: [], followUp: [] }),
 			sessionManager: {
 				getHeader: () => undefined,
 				buildSessionContext: () => ({ messages: [] }),
@@ -315,6 +319,8 @@ describe("print mode working indicator", () => {
 			},
 			prompt: async () => {
 				messages.push(message);
+				subscriber?.({ type: "agent_start" });
+				subscriber?.({ type: "agent_end", messages: [message], isTerminal: true });
 				return true;
 			},
 			prepareForHeadlessAdvisorDrain: () => {},
@@ -360,9 +366,11 @@ describe("print mode working indicator", () => {
 		const { promise: catchupStarted, resolve: markCatchupStarted } = Promise.withResolvers<void>();
 		let disposed = false;
 		let catchupTimeoutMs: number | undefined;
+		let subscriber: ((event: AgentSessionEvent) => void) | undefined;
 		const session = {
 			state: { messages },
 			getLastAssistantMessage: () => messages.findLast(message => message.role === "assistant"),
+			getQueuedMessages: () => ({ steering: [], followUp: [] }),
 			sessionManager: {
 				getHeader: () => undefined,
 				buildSessionContext: () => ({ messages: [] }),
@@ -372,9 +380,14 @@ describe("print mode working indicator", () => {
 			},
 			settings: Settings.isolated(),
 			extensionRunner: undefined,
-			subscribe: () => () => {},
+			subscribe: (listener: (event: AgentSessionEvent) => void) => {
+				subscriber = listener;
+				return () => {};
+			},
 			prompt: async () => {
 				messages.push(message);
+				subscriber?.({ type: "agent_start" });
+				subscriber?.({ type: "agent_end", messages: [message], isTerminal: true });
 				return true;
 			},
 			setTextOutputCommitted: () => {},
@@ -406,9 +419,11 @@ describe("print mode working indicator", () => {
 		message.errorMessage = "primary request failed";
 		const messages: AssistantMessage[] = [];
 		let disposed = false;
+		let subscriber: ((event: AgentSessionEvent) => void) | undefined;
 		const session = {
 			state: { messages },
 			getLastAssistantMessage: () => messages.findLast(message => message.role === "assistant"),
+			getQueuedMessages: () => ({ steering: [], followUp: [] }),
 			sessionManager: {
 				getHeader: () => undefined,
 				buildSessionContext: () => ({ messages: [] }),
@@ -418,9 +433,14 @@ describe("print mode working indicator", () => {
 			},
 			settings: Settings.isolated(),
 			extensionRunner: undefined,
-			subscribe: () => () => {},
+			subscribe: (listener: (event: AgentSessionEvent) => void) => {
+				subscriber = listener;
+				return () => {};
+			},
 			prompt: async () => {
 				messages.push(message);
+				subscriber?.({ type: "agent_start" });
+				subscriber?.({ type: "agent_end", messages: [message], isTerminal: true });
 				return true;
 			},
 			prepareForHeadlessAdvisorDrain: () => {},

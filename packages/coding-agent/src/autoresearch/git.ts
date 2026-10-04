@@ -1,5 +1,6 @@
 import type { VcsGitRepo } from "@oh-my-pi/pi-natives";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
+import { slugify } from "@oh-my-pi/pi-utils";
 import type { ExtensionAPI } from "../extensibility/extensions";
 import { normalizePathSpec } from "./helpers";
 
@@ -195,12 +196,7 @@ async function allocateBranchName(repository: VcsGitRepo, goal: string | null): 
 }
 
 function slugifyGoal(goal: string | null): string {
-	const normalized = (goal ?? "")
-		.toLowerCase()
-		.replace(/[^a-z0-9]+/g, "-")
-		.replace(/^-+|-+$/g, "");
-	const trimmed = normalized.slice(0, BRANCH_NAME_MAX_LENGTH).replace(/-+$/g, "");
-	return trimmed || "session";
+	return slugify(goal ?? "", { maxLength: BRANCH_NAME_MAX_LENGTH }) || "session";
 }
 
 function currentDateStamp(): string {

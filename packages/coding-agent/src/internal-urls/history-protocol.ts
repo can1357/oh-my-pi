@@ -19,8 +19,10 @@
  */
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
+import { isIrcEnabled } from "../irc/messaging";
+import { MailboxService } from "../mailbox/service";
 import type { AgentRef } from "../registry/agent-registry";
-import { AgentRegistry } from "../registry/agent-registry";
+import { AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-registry";
 import { ensurePersistedRoster } from "../registry/persisted-agents";
 import { formatSessionHistoryMarkdown } from "../session/session-history-format";
 import {
@@ -374,7 +376,27 @@ export class HistoryProtocolHandler implements ProtocolHandler {
 		const agentId = url.rawHost || url.hostname;
 		if (!agentId) {
 			const { visible, preferredArtifactDir } = await this.#roster(context);
-			const content = await this.#renderIndex(visible, preferredArtifactDir);
+			let content = await this.#renderIndex(visible, preferredArtifactDir);
+			const session = context?.session;
+			const settings = session?.settings ?? context?.settings;
+			const mailbox = MailboxService.global();
+			if (
+				settings &&
+				session?.enableIrc !== false &&
+				isIrcEnabled(settings, session?.taskDepth ?? 0) &&
+				mailbox.state(session?.getAgentId?.() ?? MAIN_AGENT_ID).enabled
+			) {
+				const peers = await mailbox.listPeers();
+				content += "\n## Peers (other omp processes)\n\n";
+				content += peers.length
+					? `${peers
+							.map(
+								peer =>
+									`- ${peer.address}  ${peer.cwd}${peer.title ? `  "${peer.title}"` : ""}  ${peer.busy ? "busy" : "idle"} — message with write agent://${peer.address}`,
+							)
+							.join("\n")}\n`
+					: "No other omp processes have peers on.\n";
+			}
 			return {
 				url: url.href,
 				content,
@@ -389,6 +411,21 @@ export class HistoryProtocolHandler implements ProtocolHandler {
 			// Serve its transcript straight from disk if the session file persists.
 			const disk = await this.#resolveFromDisk(agentId, preferredArtifactDir);
 			if (disk) return { ...disk, url: url.href };
+
+			const mailbox = MailboxService.global();
+			if (mailbox.handles(agentId)) {
+				const resolution = await mailbox.resolvePeer(agentId);
+				if (resolution.status === "found") {
+					const address = resolution.peer.address;
+					const content = `"${address}" is an omp peer in another process; its transcript is not readable. Message it with write agent://${address}.`;
+					return {
+						url: url.href,
+						content,
+						contentType: "text/markdown",
+						size: Buffer.byteLength(content, "utf-8"),
+					};
+				}
+			}
 
 			const known = visible.map(candidate => candidate.id);
 			const knownStr = known.length > 0 ? known.join(", ") : "none";

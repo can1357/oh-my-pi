@@ -586,6 +586,9 @@ type AgentEndEvent = Extract<AgentEvent, { type: "agent_end" }>;
 /** How a settle describes what happens next; see {@link AgentSession} `#settleAgentEnd`. */
 type AgentEndSettleOptions = { willContinue?: boolean; awaitingAsyncWork?: boolean };
 
+/** Wake ownership survives recovery until its terminal settlement reaches subscribers. */
+type IrcWakeTurn = { generation: number; terminalEnd?: AgentSessionEvent };
+
 type PostPromptSkipReason = "aborted" | "stale-generation";
 
 type AgentContinueSkipReason =
@@ -1116,6 +1119,18 @@ export class AgentSession implements SettingsScope {
 		this.#resumeStrandedIrcAsides();
 	}
 
+	/** Shared wake eligibility for terminal settlement and stranded-aside routing. */
+	#canWakeForIrc = (record: AgentMessage): boolean => {
+		if (this.#planModeState?.enabled) return false;
+		const incoming = record.role === "custom" && record.customType === "irc:incoming";
+		const noWake =
+			incoming &&
+			record.details !== null &&
+			typeof record.details === "object" &&
+			Reflect.get(record.details, "noWake") === true;
+		return !noWake && (!this.#advisors.autoResumeSuppressed || incoming);
+	};
+
 	/** IRC records that arrive after the loop's final aside poll — or while an abort skipped that
 	 *  poll — land in pending IRC queues with no loop left to drain them; the queued-message drain's
 	 *  gate (agent.hasQueuedMessages()) does not count peer IRC interrupts. Once idle, wake a turn so
@@ -1142,29 +1157,13 @@ export class AgentSession implements SettingsScope {
 		// Parked wake records resume alongside ordinary stranded asides; they were
 		// already decided wake-intended at deferral time.
 		const records = [...this.#irc.drainDeferredWakes(), ...this.#irc.drainPending()];
-		if (this.#planModeState?.enabled) {
-			// Plan mode: fold stranded IRC asides into context without waking an
-			// autonomous turn. Convergence to ask/resolve stays user-driven.
-			this.#foldStrandedIrcAsidesIntoContext(records);
-			return;
+		const wake: AgentMessage[] = [];
+		const fold: AgentMessage[] = [];
+		for (const record of records) {
+			(this.#canWakeForIrc(record) ? wake : fold).push(record);
 		}
-		if (this.#advisors.autoResumeSuppressed) {
-			// A user interrupt is still in effect (clearQueue({ forInterrupt: true }) already
-			// dropped these same records from the agent-core queues to keep the run the user
-			// stopped from auto-resuming). Only a real peer IRC message justifies waking a fresh
-			// turn here; extension/user asides fold into context like the plan-mode branch above,
-			// staying user-driven until the next deliberate prompt.
-			const wake: AgentMessage[] = [];
-			const fold: AgentMessage[] = [];
-			for (const record of records) {
-				if (record.role === "custom" && record.customType === "irc:incoming") wake.push(record);
-				else fold.push(record);
-			}
-			this.#foldStrandedIrcAsidesIntoContext(fold);
-			if (wake.length > 0) this.#wakeForIrc(wake);
-			return;
-		}
-		this.#wakeForIrc(records);
+		this.#foldStrandedIrcAsidesIntoContext(fold);
+		if (wake.length > 0) this.#wakeForIrc(wake);
 	}
 
 	/** Persist stranded IRC/extension asides into context without starting a turn — shared by the
@@ -1175,6 +1174,7 @@ export class AgentSession implements SettingsScope {
 	 *  went stranded mid-stream gets the message_end its sender's rebuild-skip decision expects
 	 *  (extension-ui-controller's #applyCustomMessageDisplay), matching IrcBridge.flushPending(). */
 	#foldStrandedIrcAsidesIntoContext(records: AgentMessage[]): void {
+		this.#irc.consume(records);
 		for (const record of records) {
 			this.agent.emitExternalEvent({ type: "message_start", message: record });
 			this.agent.emitExternalEvent({ type: "message_end", message: record });
@@ -1194,6 +1194,13 @@ export class AgentSession implements SettingsScope {
 			await settled;
 		}
 		return false;
+	}
+
+	#remoteWakeTurn: IrcWakeTurn | undefined;
+
+	/** Whether the current wake turn was started by another omp process. */
+	isRemoteWakeTurn(): boolean {
+		return this.#remoteWakeTurn?.generation === this.#promptGeneration;
 	}
 
 	/** Fire-and-forget wake turn for incoming IRC — idle delivery and stranded-aside resume both
@@ -1225,6 +1232,7 @@ export class AgentSession implements SettingsScope {
 		// deferred wake runs no turn, so observing it would capture the next
 		// turn's yield/output and relay it as this wake's reply.
 		let finishObservation: ((error?: unknown) => void | Promise<void>) | undefined;
+		let remoteWakeTurn: IrcWakeTurn | undefined;
 		this.#resetPromptMaintenanceState();
 		// Capture the generation before the wake so its post-prompt recovery wait
 		// bails the instant an abort (which bumps #promptGeneration) supersedes
@@ -1265,9 +1273,25 @@ export class AgentSession implements SettingsScope {
 				} catch (error) {
 					logger.warn("IRC wake turn observer failed to start", { error: String(error) });
 				}
+				if (
+					records.some(
+						record =>
+							record.role === "custom" &&
+							record.details !== null &&
+							typeof record.details === "object" &&
+							Reflect.get(record.details, "remote") === true,
+					)
+				) {
+					remoteWakeTurn = { generation };
+					this.#remoteWakeTurn = remoteWakeTurn;
+				}
+				this.#irc.consume(records);
 				return this.agent.prompt(records);
 			})
 			.catch(error => {
+				if (error instanceof AgentBusyError && remoteWakeTurn && this.#remoteWakeTurn === remoteWakeTurn) {
+					this.#remoteWakeTurn = undefined;
+				}
 				if (error instanceof AgentBusyError) {
 					// Lost the prompt race after passing the checks above: an
 					// ordinary running turn takes these as asides, but a pooled
@@ -1290,6 +1314,9 @@ export class AgentSession implements SettingsScope {
 				} catch (error) {
 					turnError ??= error;
 					logger.warn("IRC wake turn recovery failed", { error: String(error) });
+				}
+				if (turnError && remoteWakeTurn && this.#remoteWakeTurn === remoteWakeTurn) {
+					this.#remoteWakeTurn = undefined;
 				}
 				if (parkedFollowUps.length > 0) {
 					this.agent.replaceQueues(
@@ -1391,7 +1418,7 @@ export class AgentSession implements SettingsScope {
 			!this.#queuedMessageDrainBlocked &&
 			this.#canAutoContinueForFollowUp() &&
 			this.agent.hasQueuedMessages();
-		const ircContinuation = canDrain && !this.#isDisposed && !this.#planModeState?.enabled && this.#irc.hasPending();
+		const ircContinuation = canDrain && !this.#isDisposed && this.#irc.hasPending(this.#canWakeForIrc);
 		this.#emit(queuedContinuation || ircContinuation ? { ...pending, isTerminal: false } : pending);
 	}
 
@@ -1507,6 +1534,12 @@ export class AgentSession implements SettingsScope {
 			isStreaming: () => this.isStreaming,
 			planModeEnabled: () => this.#planModeState?.enabled === true,
 			emitSessionEvent: event => this.#emitSessionEvent(event),
+			isIrcAdmissionBlocked: () =>
+				this.#isDisposed ||
+				this.isSessionTransitioning ||
+				this.isCompacting ||
+				this.#unsubscribeAgent === undefined,
+			hasIrcWakeTurnObserver: () => this.hasIrcWakeTurnObserver(),
 			wakeForIrc: records => this.#wakeForIrc(records),
 		};
 		this.#irc = new IrcBridge(ircHost);
@@ -2891,6 +2924,7 @@ export class AgentSession implements SettingsScope {
 
 	/** Emit an event to all listeners */
 	#emit(event: AgentSessionEvent): void {
+		const remoteWakeTurn = this.#remoteWakeTurn;
 		// Copy array before iteration to avoid mutation during iteration.
 		const listeners = [...this.#eventListeners];
 		for (const l of listeners) {
@@ -2910,6 +2944,15 @@ export class AgentSession implements SettingsScope {
 					error: err instanceof Error ? err.message : String(err),
 				});
 			}
+		}
+		if (
+			event.type === "agent_end" &&
+			event.isTerminal === true &&
+			remoteWakeTurn?.terminalEnd === event &&
+			this.#remoteWakeTurn === remoteWakeTurn &&
+			remoteWakeTurn.generation === this.#promptGeneration
+		) {
+			this.#remoteWakeTurn = undefined;
 		}
 	}
 
@@ -3141,6 +3184,7 @@ export class AgentSession implements SettingsScope {
 	 * the recovery wait always sees the in-flight handler and blocks until it — and
 	 * everything it schedules — settles. */
 	#dispatchAgentEvent = async (event: AgentEvent): Promise<void> => {
+		const remoteWakeTurn = this.#remoteWakeTurn;
 		if (event.type === "tool_execution_end" && this.#isTerminalYieldToolResult(event)) {
 			const alreadyTerminated = this.#synchronouslyTerminatedYieldToolCallIds.delete(event.toolCallId);
 			if (!alreadyTerminated) {
@@ -3167,7 +3211,9 @@ export class AgentSession implements SettingsScope {
 			const message = toError(error).message;
 			logger.error("agent_end maintenance failed", { error: message });
 			this.emitNotice("warning", `Post-turn maintenance failed: ${message}`, "agent-end");
-			if (this.#settledAgentEnd !== event) await this.#settleAgentEnd(event, [...this.agent.state.messages]);
+			if (this.#settledAgentEnd !== event) {
+				await this.#settleAgentEnd(event, [...this.agent.state.messages], undefined, remoteWakeTurn);
+			}
 		} finally {
 			resolve();
 		}
@@ -3499,6 +3545,7 @@ export class AgentSession implements SettingsScope {
 
 	#processAgentEvent = async (event: AgentEvent): Promise<void> => {
 		const eventPromptGeneration = this.#promptGeneration;
+		const remoteWakeTurn = this.#remoteWakeTurn;
 		if (event.type === "agent_end" && this.#activeAgentContinue) {
 			this.#activeAgentContinue.turnEnded = true;
 		}
@@ -3878,7 +3925,7 @@ export class AgentSession implements SettingsScope {
 			// maintenance can emit agent_end, so preserve the state at settle entry.
 			const ttsrAbortPendingAtAgentEnd = this.#ttsr.abortPending;
 			const emitAgentEndNotification = (options?: AgentEndSettleOptions) =>
-				this.#settleAgentEnd(event, activeMessages, options);
+				this.#settleAgentEnd(event, activeMessages, options, remoteWakeTurn);
 			const usage = this.getSessionStats().tokens;
 			await this.#goalRuntime.onAgentEnd({
 				currentUsage: {
@@ -4724,6 +4771,7 @@ export class AgentSession implements SettingsScope {
 		event: AgentEndEvent,
 		activeMessages: AgentMessage[],
 		options?: AgentEndSettleOptions,
+		remoteWakeTurn?: IrcWakeTurn,
 	): Promise<void> {
 		this.#settledAgentEnd = event;
 		this.#emitRunState("idle");
@@ -4734,12 +4782,23 @@ export class AgentSession implements SettingsScope {
 		// `yielded` alone also covers queued steer/follow-up and IRC continuations,
 		// which `#flushPendingAgentEnd` re-tags non-terminal.
 		const awaitingAsyncWork = options?.willContinue === true && options.awaitingAsyncWork === true;
-		await this.#emitSessionEvent({
+		const settledEvent: AgentSessionEvent = {
 			...event,
 			isTerminal: !options?.willContinue,
 			yielded: !options?.willContinue || awaitingAsyncWork,
 			...(awaitingAsyncWork ? { awaitingAsyncWork } : {}),
-		});
+		};
+		if (
+			!options?.willContinue &&
+			remoteWakeTurn &&
+			this.#remoteWakeTurn === remoteWakeTurn &&
+			remoteWakeTurn.generation === this.#promptGeneration
+		) {
+			// The public end may be buffered while recovery owns the in-flight
+			// bracket. Clear only after this exact terminal frame is emitted.
+			remoteWakeTurn.terminalEnd = settledEvent;
+		}
+		await this.#emitSessionEvent(settledEvent);
 		void this.#emitAgentEndNotification([...activeMessages], options).catch(err => {
 			logger.error("Agent end extension notification failed", { err });
 		});
@@ -5572,6 +5631,7 @@ export class AgentSession implements SettingsScope {
 		//     re-deliver stale tool output into the cleared conversation
 		//     (mirrors newSession()).
 		this.#promptGeneration++;
+		this.#remoteWakeTurn = undefined;
 		await this.#cancelPostPromptTasks();
 		this.#cancelOwnAsyncJobs();
 
@@ -7103,6 +7163,7 @@ export class AgentSession implements SettingsScope {
 
 		let dispatched = false;
 		try {
+			this.#remoteWakeTurn = undefined;
 			dispatched = await this.#promptWithMessage(message, expandedText, {
 				...options,
 				images: normalizedImages,
@@ -7280,6 +7341,7 @@ export class AgentSession implements SettingsScope {
 			outcome.sessionClaimed = true;
 			return true;
 		}
+		this.#remoteWakeTurn = undefined;
 		outcome.sessionClaimed = await this.#promptWithMessage(preparedMessage, textContent, {
 			...options,
 			prependMessages:
@@ -9131,6 +9193,7 @@ export class AgentSession implements SettingsScope {
 			for (const controller of this.#imageDescriptionAbortControllers) controller.abort(options?.reason);
 			this.abortRetry();
 			this.#promptGeneration++;
+			this.#remoteWakeTurn = undefined;
 			// Cancel any awaited pre-dispatch setup (e.g. Hindsight auto-recall) so the
 			// admitted submission unwinds now instead of at the recall timeout (#12668).
 			this.#promptSetupAbortController?.abort(options?.reason);
@@ -9396,7 +9459,10 @@ export class AgentSession implements SettingsScope {
 			try {
 				// No file means fork() is a no-op. Otherwise invalidate admitted
 				// prompt setup before the asynchronous identity rewrite begins.
-				if (previousSessionFile) this.#promptGeneration++;
+				if (previousSessionFile) {
+					this.#promptGeneration++;
+					this.#remoteWakeTurn = undefined;
+				}
 				forkResult = await this.sessionManager.fork();
 			} catch (error) {
 				this.#bash.finishSessionTransition(bashTransition, false);
@@ -10382,6 +10448,11 @@ export class AgentSession implements SettingsScope {
 		return this.#irc.drainInboxMessages(agentId, opts);
 	}
 
+	/** Checks remote admission before either waiter or session delivery. */
+	getIrcAdmissionError(msg: IrcMessage): string | undefined {
+		return this.#irc.admissionError(msg);
+	}
+
 	/** Delivers an IRC message into this recipient session. */
 	deliverIrcMessage(msg: IrcMessage): Promise<"injected" | "woken"> {
 		return this.#irc.deliver(msg);
@@ -10402,6 +10473,11 @@ export class AgentSession implements SettingsScope {
 		observer: ((records: AgentMessage[]) => ((error?: unknown) => void | Promise<void>) | undefined) | undefined,
 	): void {
 		this.#ircWakeTurnObserver = observer;
+	}
+
+	/** Whether an executor is installed to relay autonomous wake-turn output. */
+	hasIrcWakeTurnObserver(): boolean {
+		return this.#ircWakeTurnObserver !== undefined;
 	}
 
 	/** Emits an IRC relay observation for UI rendering without persisting it. */
@@ -11120,6 +11196,7 @@ export class AgentSession implements SettingsScope {
 				// A prompt admitted during the drain awaits above belongs to the history
 				// being replaced; the generation bump drops its pending setup.
 				this.#promptGeneration++;
+				this.#remoteWakeTurn = undefined;
 				if (!leafId) {
 					const title = this.sessionManager.getSessionName();
 					const titleSource = this.sessionManager.titleSource;
@@ -11241,6 +11318,7 @@ export class AgentSession implements SettingsScope {
 				// A prompt may have been admitted during the flush/drain awaits
 				// after the idle check. It still belongs to the pre-branch context.
 				this.#promptGeneration++;
+				this.#remoteWakeTurn = undefined;
 				this.sessionManager.createBranchedSession(leafId);
 				this.#bash.markSessionTransition(bashTransition);
 				this.#advisors.clearCost();
@@ -11510,6 +11588,7 @@ export class AgentSession implements SettingsScope {
 		// All cancellation/no-op exits are behind us. Invalidate prompt setup
 		// admitted on the abandoned branch before committing any tree changes.
 		this.#promptGeneration++;
+		this.#remoteWakeTurn = undefined;
 
 		// Determine the new leaf position based on target type
 		let newLeafId: string | null;

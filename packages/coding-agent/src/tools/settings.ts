@@ -5,6 +5,7 @@ import { cfgCompactionExperimentalContextManagement } from "../session/context-s
 import { cfgEvalJs, cfgEvalPy } from "../eval/settings";
 import { cfgIdaAvailable } from "../ida/install";
 import { cfgLspEnabled } from "../lsp/settings";
+import { cfgIrcCrossProcess } from "../irc/settings";
 import { cfgTaskMaxRecursionDepth } from "../task/settings";
 
 const EMPTY_STRING_ARRAY: string[] = [];
@@ -1029,6 +1030,7 @@ export const cfgBuiltinToolGates = combine({
 	glob: cfgGlobEnabled,
 	grep: cfgGrepEnabled,
 	ida: cfgIdaAvailable,
+	ircCrossProcess: cfgIrcCrossProcess,
 	launch: cfgLaunchEnabled,
 	lsp: cfgLspEnabled,
 	security: cfgSecurityEnabled,

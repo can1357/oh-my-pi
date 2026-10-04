@@ -34,6 +34,7 @@ import * as secretsSettings from "../secrets/settings";
 import * as ttsSettings from "../tts/settings";
 import * as sttSettings from "../stt/settings";
 import * as liveSettings from "../live/settings";
+import * as ircSettings from "../irc/settings";
 import * as collabSettings from "../collab/settings";
 import * as commandsSettings from "../commands/settings";
 import * as streamSettings from "../stream/settings";
@@ -82,6 +83,7 @@ const DOMAINS: readonly Readonly<Record<string, unknown>>[] = [
 const PLACED_DOMAINS: readonly { domain: Readonly<Record<string, unknown>>; before: AnySetting }[] = [
 	{ domain: liveSettings, before: sessionSettings.cfgProvidersFetch },
 	{ domain: ttsSettings, before: sessionSettings.cfgProvidersFetch },
+	{ domain: ircSettings, before: modesSettings.cfgSteeringMode },
 ];
 
 let ordered: readonly AnySetting[] | undefined;

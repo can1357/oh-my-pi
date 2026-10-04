@@ -8,7 +8,7 @@
  *   the JSONL session file.
  * - An unknown id fails with an error listing the known ids.
  */
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -22,6 +22,7 @@ import {
 	registerArtifactsDir,
 	resetRegisteredArtifactDirsForTests,
 } from "@oh-my-pi/pi-coding-agent/internal-urls/registry-helpers";
+import { MailboxService } from "@oh-my-pi/pi-coding-agent/mailbox/service";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { CURRENT_SESSION_VERSION, type SessionEntry } from "@oh-my-pi/pi-coding-agent/session/session-entries";
@@ -159,6 +160,7 @@ describe("history:// protocol", () => {
 	});
 
 	afterEach(() => {
+		vi.restoreAllMocks();
 		InternalUrlRouter.resetForTests();
 		AgentRegistry.resetGlobalForTests();
 		resetRegisteredArtifactDirsForTests();
@@ -577,6 +579,71 @@ describe("history:// protocol", () => {
 			expect(resource.sourcePath).toBe(path.join(artifactsDir, "Sub1.jsonl"));
 			expect(resource.notes?.join("\n")).toContain("unregistered");
 		});
+	});
+
+	it("reads an address-shaped disk transcript before treating the id as a peer", async () => {
+		await withTempDir(async dir => {
+			const address = "project-abcdef12";
+			const transcript = path.join(dir, `${address}.jsonl`);
+			await Bun.write(transcript, sessionFixtureJsonl());
+			registerArtifactsDir(dir);
+			const mailbox = MailboxService.global();
+			vi.spyOn(mailbox, "handles").mockReturnValue(true);
+			const resolve = vi.spyOn(mailbox, "resolvePeer").mockResolvedValue({ status: "not_found" });
+
+			const router = InternalUrlRouter.instance();
+			expect(await router.locate(`history://${address}`)).toBe(transcript);
+			const resource = await router.resolve(`history://${address}`);
+			expect(resource.content).toContain("parked hello");
+			expect(resource.sourcePath).toBe(transcript);
+			expect(resolve).not.toHaveBeenCalled();
+		});
+	});
+
+	it("reports a dead address as an unknown agent instead of claiming it is a live peer", async () => {
+		const address = "project-abcdef12";
+		const mailbox = MailboxService.global();
+		vi.spyOn(mailbox, "handles").mockReturnValue(true);
+		vi.spyOn(mailbox, "resolvePeer").mockResolvedValue({ status: "not_found" });
+
+		await expect(InternalUrlRouter.instance().resolve(`history://${address}`)).rejects.toThrow(
+			`Unknown agent: ${address}\nKnown agents: none\nList all with history://`,
+		);
+	});
+
+	it("uses a live alias's canonical address when explaining remote transcript access", async () => {
+		const address = "project-abcdef12.abcd1234";
+		const mailbox = MailboxService.global();
+		vi.spyOn(mailbox, "handles").mockImplementation(id => id === "worker");
+		vi.spyOn(mailbox, "resolvePeer").mockResolvedValue({
+			status: "found",
+			peer: {
+				address,
+				id: "peer-id",
+				pid: 123,
+				cwd: "/other/project",
+				conversation: "abcd1234",
+				title: null,
+				busy: false,
+				alias: "worker",
+			},
+		});
+
+		const resource = await InternalUrlRouter.instance().resolve("history://worker");
+		expect(resource.content).toBe(
+			`"${address}" is an omp peer in another process; its transcript is not readable. Message it with write agent://${address}.`,
+		);
+	});
+
+	it("keeps ambiguous peer aliases on the existing unknown-agent error path", async () => {
+		const mailbox = MailboxService.global();
+		vi.spyOn(mailbox, "handles").mockReturnValue(true);
+		vi.spyOn(mailbox, "resolvePeer").mockResolvedValue({
+			status: "ambiguous",
+			candidates: ["project-abcdef12", "project-abcd1234"],
+		});
+
+		await expect(InternalUrlRouter.instance().resolve("history://worker")).rejects.toThrow("Unknown agent: worker");
 	});
 
 	it("resolves an on-disk-only transcript case-insensitively", async () => {

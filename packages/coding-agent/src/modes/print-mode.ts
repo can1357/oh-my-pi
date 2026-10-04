@@ -6,8 +6,9 @@
  * - `omp --mode json "prompt"` - JSON event stream
  */
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
-import type { ImageContent } from "@oh-my-pi/pi-ai";
+import type { AssistantMessage, ImageContent } from "@oh-my-pi/pi-ai";
 import { $flag, logger, postmortem, sanitizeText } from "@oh-my-pi/pi-utils";
+import { MailboxService } from "../mailbox/service";
 import type { MCPManager } from "../mcp/manager";
 import { resolveMCPTimeoutMs } from "../mcp/timeout";
 import { type AgentSession, type AgentSessionEvent, SHUTDOWN_CONSOLIDATE_BUDGET_MS } from "../session/agent-session";
@@ -20,6 +21,7 @@ import {
 	formatPersistenceNotice,
 } from "./persistence-failure";
 import { initializeExtensions } from "./runtime-init";
+import { RpcPromptResults } from "./rpc/rpc-prompt-results";
 
 import { cfgPlanDefaultOnStartup, cfgPlanEnabled } from "../plan-mode/settings";
 
@@ -41,6 +43,8 @@ export interface PrintModeOptions {
 	planYolo?: boolean;
 	/** Manager returned by session creation; only print mode waits for its servers. */
 	mcpManager?: MCPManager;
+	/** Binds peers after extensions, event output and MCP tools are ready; returns admission cutoff. */
+	bindMailboxTarget?: () => () => void;
 }
 
 /** Matches the longest built-in provider request deadline while bounding tool-loop stalls. */
@@ -114,14 +118,30 @@ export async function runPrintMode(session: AgentSession, options: PrintModeOpti
 	// through postmortem (130/143/129). Record the reason so the aborted-response
 	// branch below never races that with its own ordinary failure status.
 	let signalReason: postmortem.Reason | undefined;
+	let unbindMailboxTarget: (() => void) | undefined;
+	const stopReceiving = (): void => {
+		unbindMailboxTarget?.();
+		unbindMailboxTarget = undefined;
+	};
 	const cancelSignalTeardown = postmortem.register("print-mode-session", reason => {
 		signalReason = reason;
 		return session.dispose({ reason, mnemopiConsolidateTimeoutMs: SHUTDOWN_CONSOLIDATE_BUDGET_MS });
 	});
 	try {
-		return await runPrintModeCore(session, options, () => signalReason !== undefined);
+		return await runPrintModeCore(
+			session,
+			options,
+			() => signalReason !== undefined,
+			async () => {
+				unbindMailboxTarget = options.bindMailboxTarget?.();
+				if (unbindMailboxTarget) await MailboxService.global().whenSettled();
+			},
+			stopReceiving,
+		);
 	} finally {
 		cancelSignalTeardown();
+		stopReceiving();
+		if (options.bindMailboxTarget) await MailboxService.global().whenSettled();
 	}
 }
 
@@ -129,6 +149,8 @@ async function runPrintModeCore(
 	session: AgentSession,
 	options: PrintModeOptions,
 	signalTeardownActive: () => boolean,
+	bindMailboxTarget: () => Promise<void>,
+	stopReceiving: () => void,
 ): Promise<number> {
 	const { mode, messages = [], initialMessage, initialImages, printThoughts, planYolo = false } = options;
 
@@ -228,8 +250,12 @@ async function runPrintModeCore(
 		writeStderrLine(`Warning: ${formatPersistenceNotice(notice)}`);
 	});
 
+	let assistantMsg: AssistantMessage | undefined;
+	let dispatched = false;
+	const promptResults = new RpcPromptResults(session);
 	// Always subscribe to enable session persistence via _handleAgentEvent
 	session.subscribe(event => {
+		promptResults.observe(event);
 		// In JSON mode, output all events
 		if (mode === "json") {
 			writeStdoutLine(`${JSON.stringify(printableEvent(event))}\n`);
@@ -275,42 +301,75 @@ async function runPrintModeCore(
 		wroteTextWorkingIndicator = true;
 	};
 
-	// Send initial message with attachments
-	if (!strictMCPFailure && initialMessage !== undefined) {
-		writeTextWorkingIndicator();
-		if (mode === "text") session.setTextOutputCommitted(false);
-		await logger.time("print:prompt:initial", () => session.prompt(initialMessage, { images: initialImages }));
-	}
+	// Reuse RPC attribution so a peer wake after this prompt yields cannot replace its answer.
+	const dispatch = async (label: string, text: string, images?: ImageContent[]): Promise<void> => {
+		dispatched = true;
+		const ticket = promptResults.begin(undefined, message => {
+			assistantMsg = message;
+		});
+		try {
+			await logger.time(label, () => session.prompt(text, { images, streamingBehavior: "followUp" }));
+			promptResults.settle(ticket);
+		} catch (error) {
+			promptResults.discard(ticket);
+			throw error;
+		}
+		while (session.isStreaming) await session.waitForIdle();
+		// Hidden next-turn reminders legitimately outlive the final prompt.
+		if (session.getQueuedMessages().followUp.length > 0) {
+			throw new Error("print mode: the prompt was queued behind another turn and never dispatched");
+		}
+	};
 
-	// Send remaining messages
-	if (!strictMCPFailure) {
-		for (const message of messages) {
+	let terminalFailure = false;
+	try {
+		if (!strictMCPFailure) await bindMailboxTarget();
+		// Send initial message with attachments
+		if (!strictMCPFailure && initialMessage !== undefined) {
 			writeTextWorkingIndicator();
 			if (mode === "text") session.setTextOutputCommitted(false);
-			await logger.time("print:prompt:next", () => session.prompt(message));
+			await dispatch("print:prompt:initial", initialMessage, initialImages);
 		}
+
+		// Send remaining messages
+		if (!strictMCPFailure) {
+			for (const message of messages) {
+				writeTextWorkingIndicator();
+				if (mode === "text") session.setTextOutputCommitted(false);
+				await dispatch("print:prompt:next", message);
+			}
+		}
+
+		// Admission cutoff: stop new peer turns before draining late arrivals.
+		stopReceiving();
+		while (session.isStreaming) await session.waitForIdle();
+		// With no CLI prompt, preserve the existing resumed-session output.
+		if (!dispatched) assistantMsg = session.getLastAssistantMessage();
+
+		// From this point onward a late blocker must be recorded without starting a
+		// primary turn whose response print mode would never emit.
+		session.prepareForHeadlessAdvisorDrain();
+
+		// The terminal stop reason decides the process exit code in every output
+		// mode: `--mode json` used to report success for the same turn-fatal error
+		// text mode exits 1 on (issue #11498). Silent aborts (plan-mode compaction
+		// transitions) and aborts initiated by signal teardown stay non-fatal here;
+		// postmortem owns the signal-specific exit code (130/143/129).
+		terminalFailure =
+			!strictMCPFailure &&
+			assistantMsg !== undefined &&
+			(assistantMsg.stopReason === "error" || assistantMsg.stopReason === "aborted") &&
+			!isSilentAbort(assistantMsg) &&
+			!signalTeardownActive();
+	} catch (error) {
+		stopReceiving();
+		await session.dispose({ mnemopiConsolidateTimeoutMs: SHUTDOWN_CONSOLIDATE_BUDGET_MS }).catch(disposeError => {
+			logger.error("print mode: dispose after a failed run also failed", {
+				error: disposeError instanceof Error ? disposeError.message : String(disposeError),
+			});
+		});
+		throw error;
 	}
-
-	// From this point onward a late blocker must be recorded without starting a
-	// primary turn whose response print mode would never emit.
-	session.prepareForHeadlessAdvisorDrain();
-
-	// Read via the session accessor, not the raw state tail: a classifier
-	// refusal is pruned from active context at settle, and an aborted turn
-	// can trail synthetic tool results — both would hide the terminal
-	// assistant message (and its error) from a last-element read.
-	const assistantMsg = session.getLastAssistantMessage();
-	// The terminal stop reason decides the process exit code in every output
-	// mode: `--mode json` used to report success for the same turn-fatal error
-	// text mode exits 1 on (issue #11498). Silent aborts (plan-mode compaction
-	// transitions) and aborts initiated by signal teardown stay non-fatal here;
-	// postmortem owns the signal-specific exit code (130/143/129).
-	const terminalFailure =
-		!strictMCPFailure &&
-		assistantMsg !== undefined &&
-		(assistantMsg.stopReason === "error" || assistantMsg.stopReason === "aborted") &&
-		!isSilentAbort(assistantMsg) &&
-		!signalTeardownActive();
 
 	// In text mode, output the final response. A terminal failure prints only
 	// the error line below; JSON mode already emitted the assistant message and

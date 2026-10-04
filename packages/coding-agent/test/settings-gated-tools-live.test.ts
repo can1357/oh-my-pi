@@ -12,6 +12,7 @@ import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manage
 import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
 
 import { cfgBashEnabled } from "@oh-my-pi/pi-coding-agent/exec/settings";
+import { cfgIrcCrossProcess } from "@oh-my-pi/pi-coding-agent/irc/settings";
 import { cfgGithubEnabled, cfgGrepEnabled } from "@oh-my-pi/pi-coding-agent/tools/settings";
 
 // Tool-gating settings (`grep.enabled`, `*.enabled`, ...) must reconcile a live
@@ -86,6 +87,27 @@ describe("settings-gated tools in a live session", () => {
 		await settle(session);
 		expect(session.getActiveToolNames()).toContain("grep");
 		expect(session.systemPrompt.join("\n")).toContain(GREP_POLICY);
+	});
+
+	it("mounts wait when peers are enabled at runtime with subagent recursion disabled", async () => {
+		const settings = Settings.isolated({
+			"task.maxRecursionDepth": 0,
+			"irc.crossProcess": false,
+			"async.enabled": false,
+			"launch.enabled": false,
+		});
+		const session = await startSession(settings);
+		expect(session.getActiveToolNames()).not.toContain("wait");
+
+		cfgIrcCrossProcess.override(settings, true);
+		await settle(session);
+		expect(session.getActiveToolNames()).toContain("wait");
+		expect(session.getToolByName("wait")).toBeDefined();
+
+		cfgIrcCrossProcess.override(settings, false);
+		await settle(session);
+		expect(session.getActiveToolNames()).not.toContain("wait");
+		expect(session.getToolByName("wait")).toBeUndefined();
 	});
 
 	it("never widens an explicit tool list", async () => {

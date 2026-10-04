@@ -23,6 +23,7 @@ import * as path from "node:path";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import { fuzzyFilter } from "@oh-my-pi/pi-tui/fuzzy";
 import { formatDuration, isEnoent, prompt } from "@oh-my-pi/pi-utils";
+import { MailboxService } from "../mailbox/service";
 import { type AgentRef, AgentRegistry } from "../registry/agent-registry";
 import { ensurePersistedRoster } from "../registry/persisted-agents";
 import { executeSend, isIrcEnabled } from "../irc/messaging";
@@ -406,7 +407,7 @@ export class AgentProtocolHandler implements ProtocolHandler {
 		return { foundPath, jsonPath, anyDirExists, availableIds };
 	}
 
-	async complete(): Promise<UrlCompletion[]> {
+	async complete(_query = "", context?: ResolveContext): Promise<UrlCompletion[]> {
 		const ids = new Set<string>();
 		for (const dir of artifactsDirsFromRegistry()) {
 			let files: string[];
@@ -418,6 +419,19 @@ export class AgentProtocolHandler implements ProtocolHandler {
 			}
 			for (const f of files) {
 				if (f.endsWith(".md")) ids.add(f.slice(0, -3));
+			}
+		}
+		const mailbox = MailboxService.global();
+		const agentId = context?.session?.getAgentId?.();
+		const enabled = agentId
+			? mailbox.state(agentId).enabled
+			: AgentRegistry.global()
+					.list()
+					.some(ref => mailbox.state(ref.id).enabled);
+		if (enabled && context?.session?.enableIrc !== false) {
+			for (const peer of await mailbox.listPeers({ signal: context?.signal })) {
+				ids.add(peer.address);
+				if (peer.alias) ids.add(peer.alias);
 			}
 		}
 		return [...ids].sort().map(value => ({ value }));

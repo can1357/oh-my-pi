@@ -105,6 +105,37 @@ Advisor transcript files (`__advisor*.jsonl`) appear as `advisor`-kind rows unde
 
 Collab does not replicate advisor rows or serve their transcripts to guests; the host also rejects advisor chat, revive, and kill requests by id.
 
+## Cross-process peers
+
+Main agents in separate omp processes on the same machine and OS user can message each other. Turn it on with any of:
+
+- **Cross-Process Peers** in `/settings` (Interaction → Agent), saved as `irc.crossProcess`;
+- `/peers on` for this process only (`/peers off` turns this process off even when the setting is saved on);
+- `--mailbox` at launch.
+
+Once a process is on, omp prints `Peers: on — this session is <address>` and the footer shows `peers:<address>`. The address is the cwd name plus eight hex characters (`oh-my-pi-a5ad716a`). It stays fixed for the life of the process, including across `/new`, resume, and fork.
+
+- `/peers list` shows the other processes that have peers on; `/peers status` shows this process's state. Peers also appear in the Agent Hub (`/hub`) as send-only rows: `Enter` opens a composer, and transcript, focus, revive, and kill are unavailable for them.
+- `/peers name <alias>` gives this process an alias that peers can use instead of the address (`write agent://<alias>`); `/peers name` clears it. Save one with the **Peer Alias** setting (`irc.peerAlias`), globally or in a project's settings file. Aliases use letters, digits, `-`, and `_` (max 48). An alias resolves only when exactly one live peer has it; otherwise the send fails and lists the matching addresses. A local agent with the same id always wins over a peer alias.
+- `read history://` lists peers under **Peers (other omp processes)**.
+- `write agent://<address>` sends to a peer. A peer receives it exactly like a subagent message to Main: an aside at the next step boundary while busy, a new turn while idle, and appended without a turn in plan mode. The write result says whether the peer started a turn or only added the message to its context. The incoming card shows the sender's address, session title, and workspace.
+- A reply sent during a turn that a peer message started is delivered without waking the recipient, so two idle sessions cannot ping-pong.
+- When `completion.notify` is on, a peer message raises a terminal notification.
+- A peer refuses messages while it is switching sessions or compacting, and when 100 messages or 4 MiB from peers are already waiting; the sender gets a failed delivery to retry later.
+- Only main agents publish and send. Subagents keep their in-process messaging and never see peers.
+
+Limits: `agent://all` broadcasts to local agents only, not peers. `write` cannot set a reply-to thread id. `wait` does not block on peer replies alone. A peer's subagents cannot be addressed.
+
+From a shell, `omp peers list [--json]` lists peers and `omp peers send <address|alias> <message>` sends one message (exit code 1 when delivery fails). Neither starts a model or makes the shell discoverable, and both work whether or not the setting is on.
+
+Mode notes:
+
+- **Print** (`-p`, `--mode json`, piped stdin): can send, but does not receive unless launched with `--mailbox`.
+- **RPC**: incoming messages arrive as `irc_message` events, followed by the turn they start.
+- **ACP**: each editor conversation is a separate peer at `<address>.<8 hex>`, advertised with its own workspace; `/peers on` applies to the conversation it runs in. Peer messages and the turns they start are streamed to the editor, and `session/cancel` stops a peer-started turn.
+
+Each process serves its own endpoint: a named pipe on Windows, a Unix socket elsewhere. Discovery metadata lives in `~/.omp/run/irc-peers/`, which is private to your OS user. Every request carries the publishing process's random bearer token from that metadata. A process that dies without cleaning up is pruned the next time anyone lists peers.
+
 ## Related surfaces
 
 Agent Hub is the human-facing live session view. Adjacent commands and internal URLs serve narrower purposes:
@@ -114,7 +145,7 @@ Agent Hub is the human-facing live session view. Adjacent commands and internal 
 - `/jobs` prints a snapshot of running and recently settled asynchronous tool jobs. It does not replace the per-agent transcript or control view.
 - `history://<id>` gives the coding agent a concise transcript for a live/parked subagent or a retained on-disk transcript.
 - `agent://<id>` resolves a subagent's saved final output artifact; it is not the live transcript. Before that artifact exists, a registered agent resolves to its status, the `yield` payloads it has submitted so far, and its latest assistant text.
-- `write agent://<id>` steers or follows up with a normal subagent; `agent://all` broadcasts to visible live peers. Messaging a parked subagent revives it. `read history://` lists registered agents and retained on-disk transcripts, refreshing the caller root's persisted roster first, the same as `history://<id>` lookups.
+- `write agent://<id>` steers or follows up with a normal subagent; `agent://all` broadcasts to visible live local agents (not cross-process peers). Messaging a parked subagent revives it. `read history://` lists registered agents and retained on-disk transcripts, refreshing the caller root's persisted roster first, the same as `history://<id>` lookups.
 - `read proc://` lists background jobs and project services; `read proc://<id>` inspects status/output without consuming delivery.
 
 Advisor rows are intentionally excluded from the agent-facing peer roster, `history://` index, and `agent://` messaging workflows.
