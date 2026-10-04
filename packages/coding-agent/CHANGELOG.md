@@ -2,11 +2,14 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Explicit CLI model selection now discovers a requested live-only provider when its cache is empty.
+
 ## [18.6.1] - 2026-10-04
 
 ### Fixed
 
-- Explicit CLI model selection now discovers a requested live-only provider when its cache is empty.
 - Fixed waiting for subagent follow-up messages: responses now appear as background jobs that can be waited on or canceled, and are delivered only once.
 - Improved `/switch` autocomplete so model and role suggestions use the same relevance ordering as the model picker, including support for `@role` aliases.
 - Fixed concurrent `skill://` searches blocking other filesystem operations and delaying subagent artifact publication.

@@ -5,6 +5,7 @@
 ### Added
 
 - Added keyless OpenZoo authentication, with optional credentials for protected proxy endpoints.
+
 ## [18.6.1] - 2026-10-04
 
 ### Fixed
