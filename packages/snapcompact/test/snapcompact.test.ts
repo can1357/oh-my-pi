@@ -1152,6 +1152,88 @@ describe("compact", () => {
 	});
 });
 
+describe("frame data budget", () => {
+	const codex = { api: "openai-codex-responses", id: "gpt-6-astra" } as const;
+	const sonnet = { api: "anthropic-messages", id: "claude-sonnet-4-5" } as const;
+	const opus = { api: "anthropic-messages", id: "claude-opus-4-8" } as const;
+	const highResFrames = Math.floor(snapcompact.FRAME_DATA_BYTES_BUDGET / snapcompact.FRAME_DATA_BYTES_ESTIMATE);
+	// Variants that render inkier pages than the measured auto shapes.
+	const inkyVariants = ["8x13-bw", "6x12-dim", "doc-8on16-sent-dim"] as const;
+
+	/** Seeded tool-heavy transcript: read calls returning code-like lines.
+	 *  Its frames render at the sizes measured in real capped archives
+	 *  (~105 KB at 1568px for Codex, ~110 KB for Sonnet, ~160 KB at 1932px). */
+	function toolHeavyTranscript(): Message[] {
+		let seed = 1;
+		const random = () => {
+			seed = (seed + 0x6d2b79f5) | 0;
+			let t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
+			t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+			return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+		};
+		const pick = <T>(items: readonly T[]): T => items[Math.floor(random() * items.length)];
+		const words =
+			"const return await function if else for of import export from type interface string number boolean undefined null true false this new throw Error async let map filter reduce push length options result frame shape session message entry model provider budget bytes tokens archive context settings value index path file text data".split(
+				" ",
+			);
+		const joiners = [" ", ".", "(", ", ", ": ", " = ", ");", " => ", "[", "]", " {", "}"];
+		const codeLine = () => {
+			let line = "\t".repeat(Math.floor(random() * 4));
+			const tokens = Math.floor(random() * 10);
+			for (let i = 0; i < tokens; i++) line += pick(words) + pick(joiners);
+			return line;
+		};
+		const messages: Message[] = [];
+		for (let i = 0; i < 400; i++) {
+			const id = `call-${i}`;
+			const file = `src/module-${i}.ts`;
+			messages.push(
+				createUserMessage(`Read ${file} and explain it.`),
+				createAssistantMessage([{ type: "toolCall", id, name: "read", arguments: { path: file } }]),
+				{
+					role: "toolResult",
+					toolCallId: id,
+					toolName: "read",
+					content: [{ type: "text", text: Array.from({ length: 200 }, codeLine).join("\n") }],
+					isError: false,
+					timestamp: 0,
+				},
+			);
+		}
+		return messages;
+	}
+
+	it("gives the measured 1568px shapes more of the same byte budget", () => {
+		expect(snapcompact.maxFramesForDataBudget(snapcompact.resolveShape(opus))).toBe(highResFrames);
+		expect(snapcompact.maxFramesForDataBudget(snapcompact.resolveShape(codex))).toBe(26);
+		expect(snapcompact.maxFramesForDataBudget(snapcompact.resolveShape(sonnet))).toBe(26);
+		// Frames larger than 1932px keep the 1932px charge rather than losing frames.
+		const gemini = snapcompact.resolveShape({ api: "google-generative-ai", id: "gemini-3.5-flash" });
+		expect(snapcompact.maxFramesForDataBudget(gemini)).toBe(highResFrames);
+		// Unmeasured 1568px variants keep the 1932px charge.
+		for (const variant of [...inkyVariants, "8on16-bw", "silver16-bw"] as const) {
+			expect(snapcompact.maxFramesForDataBudget(snapcompact.resolveShape(codex, variant))).toBe(highResFrames);
+		}
+	});
+
+	it("keeps a full archive of real-sized frames within the byte budget", async () => {
+		const preparation = makePreparation({ messagesToSummarize: toolHeavyTranscript() });
+		const cases = [
+			{ model: codex, shape: snapcompact.resolveShape(codex) },
+			{ model: sonnet, shape: snapcompact.resolveShape(sonnet) },
+			{ model: opus, shape: snapcompact.resolveShape(opus) },
+			...inkyVariants.map(variant => ({ model: codex, shape: snapcompact.resolveShape(codex, variant) })),
+		];
+		for (const { model, shape } of cases) {
+			const maxFrames = snapcompact.maxFramesForDataBudget(shape);
+			const result = await snapcompact.compact(preparation, { model, shape, maxFrames });
+			const frames = snapcompact.getPreservedArchive(result.preserveData)?.frames ?? [];
+			expect(frames).toHaveLength(maxFrames);
+			expect(snapcompact.frameDataBytes(frames)).toBeLessThanOrEqual(snapcompact.FRAME_DATA_BYTES_BUDGET);
+		}
+	});
+});
+
 describe("archive helpers", () => {
 	it("getPreservedArchive rejects malformed payloads", () => {
 		expect(snapcompact.getPreservedArchive(undefined)).toBeUndefined();

@@ -160,7 +160,7 @@ describe("AgentSession snapcompact frame-budget sizing", () => {
 		const maxFrames = opts?.maxFrames;
 		expect(maxFrames).toBeDefined();
 		expect(maxFrames).toBeLessThan(snapcompact.MAX_FRAMES_DEFAULT);
-		expect(maxFrames).toBeLessThanOrEqual(snapcompact.maxFramesForDataBudget());
+		expect(maxFrames).toBeLessThanOrEqual(snapcompact.maxFramesForDataBudget(snapcompact.resolveShape(model)));
 		expect(maxFrames).toBeGreaterThan(0);
 
 		// Verify the FULL projection — base (non-message + kept-recent) +
@@ -259,7 +259,14 @@ describe("AgentSession snapcompact frame-budget sizing", () => {
 
 		await session.compact(undefined, { mode: "snapcompact" });
 
-		expect(compactSpy.mock.calls[0]?.[1]?.maxFrames).toBe(snapcompact.maxFramesForDataBudget());
+		// Sonnet 4.5 renders 1568px frames, which cost less of the byte budget
+		// than the 1932px high-res frames.
+		const shape = snapcompact.resolveShape(model);
+		expect(shape.frameSize).toBe(1568);
+		expect(compactSpy.mock.calls[0]?.[1]?.maxFrames).toBe(snapcompact.maxFramesForDataBudget(shape));
+		expect(compactSpy.mock.calls[0]?.[1]?.maxFrames).toBeGreaterThan(
+			Math.floor(snapcompact.FRAME_DATA_BYTES_BUDGET / snapcompact.FRAME_DATA_BYTES_ESTIMATE),
+		);
 	});
 
 	it("caps maxFrames at the provider image budget so unknown gateways do not archive frames the send path will drop", async () => {

@@ -3573,10 +3573,11 @@ export class SessionMaintenance {
 	 */
 	#computeSnapcompactMaxFrames(preparation: CompactionPreparation, settings: EngineCompactionSettings): number {
 		const ctxWindow = this.#model?.contextWindow ?? 0;
+		const shape = snapcompact.resolveShape(this.#model, cfgSnapcompactShape.get(this.#host.settings));
 		if (ctxWindow <= 0) {
 			return Math.min(
 				snapcompact.MAX_FRAMES_DEFAULT,
-				snapcompact.maxFramesForDataBudget(),
+				snapcompact.maxFramesForDataBudget(shape),
 				snapcompact.providerFrameBudget(this.#model?.provider),
 			);
 		}
@@ -3613,7 +3614,6 @@ export class SessionMaintenance {
 		//   drift on denser content (e.g. dense JSON / tool-result blobs).
 		// - Summary template (intro + FILES section + grid notes) bills
 		//   ~2k tokens for typical sessions.
-		const shape = snapcompact.resolveShape(this.#model, cfgSnapcompactShape.get(this.#host.settings));
 		const edgeCap = snapcompact.geometry(shape).capacity;
 		const textEdgeTokens = Math.ceil((2 * edgeCap * 1.15) / 4);
 		const SUMMARY_TEMPLATE_TOKENS = 2000;
@@ -3623,7 +3623,7 @@ export class SessionMaintenance {
 		return Math.min(
 			Math.floor(frameBudget / snapcompact.FRAME_TOKEN_ESTIMATE),
 			snapcompact.MAX_FRAMES_DEFAULT,
-			snapcompact.maxFramesForDataBudget(),
+			snapcompact.maxFramesForDataBudget(shape),
 			snapcompact.providerFrameBudget(this.#model?.provider),
 		);
 	}
@@ -3966,10 +3966,11 @@ export class SessionMaintenance {
 	 */
 	#computeSnapcompactRescueMaxFrames(settings: EngineCompactionSettings, keptTailTokens: number): number {
 		const ctxWindow = this.#model?.contextWindow ?? 0;
+		const shape = snapcompact.resolveShape(this.#model, cfgSnapcompactShape.get(this.#host.settings));
 		if (ctxWindow <= 0) {
 			return Math.min(
 				snapcompact.MAX_FRAMES_DEFAULT,
-				snapcompact.maxFramesForDataBudget(),
+				snapcompact.maxFramesForDataBudget(shape),
 				snapcompact.providerFrameBudget(this.#model?.provider),
 			);
 		}
@@ -3980,7 +3981,6 @@ export class SessionMaintenance {
 			this.#tokenizer,
 			this.#host.settings.revision,
 		);
-		const shape = snapcompact.resolveShape(this.#model, cfgSnapcompactShape.get(this.#host.settings));
 		const edgeCap = snapcompact.geometry(shape).capacity;
 		const textEdgeTokens = Math.ceil((2 * edgeCap * 1.15) / 4);
 		const SUMMARY_TEMPLATE_TOKENS = 2000;
@@ -3993,7 +3993,7 @@ export class SessionMaintenance {
 		return Math.min(
 			Math.floor(frameBudget / snapcompact.FRAME_TOKEN_ESTIMATE),
 			snapcompact.MAX_FRAMES_DEFAULT,
-			snapcompact.maxFramesForDataBudget(),
+			snapcompact.maxFramesForDataBudget(shape),
 			snapcompact.providerFrameBudget(this.#model?.provider),
 		);
 	}

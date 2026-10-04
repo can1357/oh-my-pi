@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Breaking Changes
+
+- `maxFramesForDataBudget()` now requires the frame shape and drops its optional byte-budget parameter. It charges the default `8on22-bw`/`11on16-bw` shapes below 1932px by pixel area (1568px: 26 frames under `FRAME_DATA_BYTES_BUDGET` instead of 17); other variants keep the 170 KB charge ([#14277](https://github.com/can1357/oh-my-pi/pull/14277) by [@will-bogusz](https://github.com/will-bogusz)).
+
 ## [18.2.9] - 2026-09-22
 
 ### Fixed

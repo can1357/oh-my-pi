@@ -5,6 +5,7 @@
 ### Fixed
 
 - Fixed follow-up hashline edits being rejected as anchored on lines "never displayed" after an earlier edit shifted those lines, when the replacement carries the anchored content; genuinely stale line numbers are still rejected ([#14254](https://github.com/can1357/oh-my-pi/pull/14254) by [@abilliontokens](https://github.com/abilliontokens)).
+- Fixed snapcompact archives on models that read 1568px frames with the default shape (OpenAI and Codex, Claude before Opus 4.7) stopping at 17 frames: the 3 MB image payload cap is now sized by frame area, so they keep 26 frames ([#14277](https://github.com/can1357/oh-my-pi/pull/14277) by [@will-bogusz](https://github.com/will-bogusz)).
 
 ## [18.6.0] - 2026-10-03
 
