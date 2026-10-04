@@ -4430,13 +4430,13 @@ function isExecOwnedToolCall(toolCall: { tool?: { case?: string } } | undefined)
  * so reparsing unconditionally would erase the arguments of every such block
  * caught open by a truncated stream.
  *
- * Server-owned blocks are also paired here. `connect-scm` and `todo` are
- * stamped {@link kCursorExecResolved} the moment they open, so `agent-loop.ts`
- * synthesizes no placeholder for them and only their `toolCallCompleted` frame
- * pairs a result. A transport that closes before that frame would leave the
- * call unpaired, and `buildSessionContext` strips a dangling call from every
- * rebuilt transcript — the interaction disappears. An interrupted result is
- * emitted instead.
+ * Server-owned blocks are also paired here. `connect-scm`, `todo` and
+ * `web-fetch` are stamped {@link kCursorExecResolved} the moment they open,
+ * so `agent-loop.ts` synthesizes no placeholder for them and only their
+ * `toolCallCompleted` frame pairs a result. A transport that closes before
+ * that frame would leave the call unpaired, and `buildSessionContext` strips
+ * a dangling call from every rebuilt transcript — the interaction disappears.
+ * An interrupted result is emitted instead.
  *
  * MCP blocks are excluded even when resolved: the exec dispatch that marked
  * them owns their result, and `drainInFlightDispatches` awaits it before this
@@ -4457,7 +4457,7 @@ export function flushOpenToolCalls(
 			clearStreamingPartialJson(block);
 		}
 		const kind = block[kStreamingBlockKind];
-		if (kind === "connect-scm" || kind === "todo" || kind === "cursor-edit") {
+		if (kind === "connect-scm" || kind === "todo" || kind === "cursor-edit" || kind === "web-fetch") {
 			if (!(kind === "cursor-edit" && state.pairedEditToolCallIds?.has(block.id))) {
 				state.onToolResult?.({
 					role: "toolResult",
