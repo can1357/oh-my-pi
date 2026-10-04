@@ -114,7 +114,18 @@ export type RpcCommand =
 
 	// Messages
 	| { id?: string; type: "get_messages" }
-	| { id?: string; type: "get_messages_page"; cursor?: string; limit?: number }
+	| {
+			id?: string;
+			type: "get_messages_page";
+			cursor?: string;
+			limit?: number;
+			/** Walk direction for a cursor-less request; a provided cursor dictates its own direction. */
+			order?: "asc" | "desc";
+			/** Anchor cursor: page taken immediately before the anchor offset (exclusive), newest-first. */
+			before?: string;
+			/** Anchor cursor: page taken starting at the anchor offset (inclusive), oldest-first. */
+			after?: string;
+	  }
 
 	// Login
 	| { id?: string; type: "get_login_providers" }

@@ -2799,7 +2799,7 @@ func (v *SessionStats) decodeFrom(raw map[string]json.RawMessage) error {
 type MessagesPage struct {
 	Messages      []AgentMessage `json:"messages"`
 	TotalMessages int64          `json:"totalMessages"`
-	// Opaque cursor for the next page; absent on the last page.
+	// Opaque cursor for the next page in the page's own walk direction; absent on the last page of that direction.
 	NextCursor *string `json:"nextCursor,omitempty"`
 }
 
@@ -7392,6 +7392,12 @@ func (c Commands) GetMessages(ctx context.Context) ([]AgentMessage, error) {
 type GetMessagesPageCommand struct {
 	Cursor *string `json:"cursor,omitempty"`
 	Limit  *int64  `json:"limit,omitempty"`
+	// Walk direction for a cursor-less request: newest-first (`desc`) or oldest-first (default). A provided cursor dictates its own direction.
+	Order *GetMessagesPageCommandOrder `json:"order,omitempty"`
+	// Anchor cursor: one page taken immediately before the anchor offset (exclusive), newest-first.
+	Before *string `json:"before,omitempty"`
+	// Anchor cursor: one page taken starting at the anchor offset (inclusive), oldest-first.
+	After *string `json:"after,omitempty"`
 }
 
 // GetMessagesPage sends "get_messages_page": One stable page of messages.
@@ -7399,6 +7405,26 @@ func (c Commands) GetMessagesPage(ctx context.Context, p GetMessagesPageCommand)
 	var out MessagesPage
 	err := c.call(ctx, "get_messages_page", p, 0, &out)
 	return out, err
+}
+
+type GetMessagesPageCommandOrder string
+
+const (
+	GetMessagesPageCommandOrderAsc  GetMessagesPageCommandOrder = "asc"
+	GetMessagesPageCommandOrderDesc GetMessagesPageCommandOrder = "desc"
+)
+
+func (v *GetMessagesPageCommandOrder) UnmarshalJSON(data []byte) error {
+	s, err := decodeString(data, "GetMessagesPageCommandOrder")
+	if err != nil {
+		return err
+	}
+	switch value := GetMessagesPageCommandOrder(s); value {
+	case GetMessagesPageCommandOrderAsc, GetMessagesPageCommandOrderDesc:
+		*v = value
+		return nil
+	}
+	return unknownValue("GetMessagesPageCommandOrder", s)
 }
 
 // GetLoginProviders sends "get_login_providers": List OAuth providers and their authentication status.
