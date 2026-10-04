@@ -26,6 +26,10 @@ Never invoke `tsc`/`npx tsc` directly — `bun run check` is the typecheck gate.
 changing the React tool renderers under `collab-web/src/tool-render/`, rebuild them
 with `bun run gen:tool-views`.
 
+Scope fake timers to the deadline a test exercises, then restore real timers
+before real socket listeners are started. Bun's mocked clock can defer
+`server.listen` callbacks, leaving registry publication and teardown waiting.
+
 ## Boot flow
 
 ```text

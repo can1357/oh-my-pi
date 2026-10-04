@@ -108,9 +108,9 @@ export function sanitizeAssistantForReparentedHistory(message: AssistantMessage)
 
 /**
  * Collapses degenerate repeated lines and bounds an ephemeral side-channel
- * reply to 4 KiB.
+ * reply to `maxBytes` (4 KiB unless the caller reads replies in full).
  */
-export function dedupeEphemeralReply(text: string): string {
+export function dedupeEphemeralReply(text: string, maxBytes = EPHEMERAL_REPLY_MAX_BYTES): string {
 	if (!text) return text;
 	const lines = text.split("\n");
 	const out: string[] = [];
@@ -127,9 +127,9 @@ export function dedupeEphemeralReply(text: string): string {
 		i = j;
 	}
 	let result = out.join("\n");
-	if (Buffer.byteLength(result, "utf8") > EPHEMERAL_REPLY_MAX_BYTES) {
+	if (Buffer.byteLength(result, "utf8") > maxBytes) {
 		const suffix = "\n[…truncated]";
-		const budget = EPHEMERAL_REPLY_MAX_BYTES - Buffer.byteLength(suffix, "utf8");
+		const budget = maxBytes - Buffer.byteLength(suffix, "utf8");
 		while (Buffer.byteLength(result, "utf8") > budget) {
 			result = result.slice(0, -1);
 		}

@@ -13,8 +13,9 @@
  * arrows/PgUp/PgDn, vim motions (`j`/`k`/`h`/`l`/`g`/`G`), and mouse
  * clicks/wheel. All toolbar buttons are clickable and mirrored by keys:
  * `v` cycles the view (`1`–`4` pick one), `alt+↓`/`alt+↑` jump hunks and roll
- * into the adjacent file at the edges, `]`/`[` switch files, `s`/`u`
- * stage/unstage (hunk-aware), `x` discards a hunk, `delete` discards the
+ * into the adjacent file at the edges, `space` stages/unstages the focused
+ * diff row (the focused hunk in hunk view), `s`/`u` stage/unstage
+ * (hunk-aware), `x` discards a hunk, `delete` discards the
  * whole file (press twice to confirm), `w` wraps, `b` cycles
  * whitespace handling (exact → ignore whitespace → ignore
  * formatting/import-only changes), `c` jumps to the commit form, `r`
@@ -669,14 +670,20 @@ class GitTuiComponent implements Component {
 			else if (matchesKey(data, "up") || data === "k") this.#pane.moveCursor(-1, false);
 			else if (matchesKey(data, "down") || data === "j") this.#pane.moveCursor(1, false);
 			else if (matchesKey(data, "pageUp")) this.#pane.moveCursor(-Math.max(1, this.#contentHeight - 2), false);
-			else if (matchesKey(data, "pageDown") || data === " ")
-				this.#pane.moveCursor(Math.max(1, this.#contentHeight - 2), false);
+			else if (matchesKey(data, "pageDown")) this.#pane.moveCursor(Math.max(1, this.#contentHeight - 2), false);
 			else if (matchesKey(data, "left") || data === "h") this.#pane.scrollLeftBy(-8);
 			else if (matchesKey(data, "right") || data === "l") this.#pane.scrollLeftBy(8);
 			else if (matchesKey(data, "home") || data === "g") this.#pane.cursorToEdge("start");
 			else if (matchesKey(data, "end") || data === "G") this.#pane.cursorToEdge("end");
 			else if (matchesKey(data, "enter")) return this.#jumpHunkOrFile(1);
-			else if (data === "s" || data === "u") {
+			else if (matchesKey(data, "space")) {
+				// Hunk-view rows do not map back to document rows, so Space acts on the focused hunk there.
+				const target = this.#pane.patchTarget;
+				const hunk = this.#pane.mode === "hunk" ? this.#pane.currentHunk : null;
+				if (target && hunk) void this.#hunkAction(hunk, target);
+				else if (target && this.#pane.selection) void this.#lineAction(target);
+				return;
+			} else if (data === "s" || data === "u") {
 				if (this.#pane.selection?.explicit && this.#pane.patchTarget) {
 					void this.#lineAction(this.#pane.patchTarget);
 					return;

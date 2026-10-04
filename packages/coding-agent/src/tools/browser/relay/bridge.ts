@@ -22,6 +22,7 @@
  *   shared root session and passed through verbatim
  */
 import { createHash } from "node:crypto";
+import { VERSION } from "@oh-my-pi/pi-utils/dirs";
 import { DISCARDED_TABS_PROTOCOL_VERSION } from "./protocol";
 import type { ExtToRelayMessage, RelayRpcRequest, RelayToExtMessage, TabSnapshot } from "./protocol";
 
@@ -296,6 +297,7 @@ export class RelayBridge {
 			"V8-Version": "",
 			"WebKit-Version": "",
 			webSocketDebuggerUrl: wsUrl,
+			ompRelayVersion: VERSION,
 			ompRelayDiscardedTabsProtocol: String(DISCARDED_TABS_PROTOCOL_VERSION),
 			ompExtensionDiscardedTabsProtocol: String(hasCompatibleExtension ? DISCARDED_TABS_PROTOCOL_VERSION : 0),
 		};

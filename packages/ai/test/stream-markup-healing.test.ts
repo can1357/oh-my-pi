@@ -424,6 +424,38 @@ describe("StreamMarkupHealing DSML envelope pattern", () => {
 		expect(after.text).toBe("\nAfter");
 	});
 
+	it("keeps quoted prose after an unclosed wrapper with no invoke", () => {
+		const input =
+			"之前这些源的完整 `<｜DSML｜tool_calls>` 信封显示为纯文本，工具从不执行。\n\n## Next section\nmore text";
+		const healing = new StreamMarkupHealing({ pattern: "dsml" });
+		let visible = "";
+		for (let i = 0; i < input.length; i += 7) visible += healing.feed(input.slice(i, i + 7));
+		visible += healing.flushPending();
+		expect(visible).toBe(input);
+		expect(stripDsmlToolMarkup(visible)).toBeUndefined();
+		expect(healing.drainCompleted()).toEqual([]);
+	});
+
+	it("passes an unclosed, unquoted wrapper to leak recovery without losing later prose", () => {
+		const input = "Intro. <|DSML|tool_calls>broken call\n\nThe build passed.";
+		const healing = new StreamMarkupHealing({ pattern: "dsml" });
+		let visible = "";
+		for (let i = 0; i < input.length; i += 5) visible += healing.feed(input.slice(i, i + 5));
+		visible += healing.flushPending();
+		expect(stripDsmlToolMarkup(visible)).toBe("Intro.\n\nThe build passed.");
+		expect(healing.drainCompleted()).toEqual([]);
+	});
+
+	it("passes a closed wrapper without an invoke to leak recovery", () => {
+		const input = "Intro.<|DSML|tool_calls>broken</|DSML|tool_calls>Outro.";
+		const healing = new StreamMarkupHealing({ pattern: "dsml" });
+		let visible = "";
+		for (let i = 0; i < input.length; i += 6) visible += healing.feed(input.slice(i, i + 6));
+		visible += healing.flushPending();
+		expect(stripDsmlToolMarkup(visible)).toBe("Intro.\n\nOutro.");
+		expect(healing.drainCompleted()).toEqual([]);
+	});
+
 	it("drops partial calls when the stream ends mid-envelope", () => {
 		const healing = new StreamMarkupHealing({ pattern: "dsml" });
 		const truncated = REPORTED_DSML_LEAK.slice(0, REPORTED_DSML_LEAK.length - 30);

@@ -566,6 +566,8 @@ export interface EphemeralTurnOptions {
 	onTextDelta?: (delta: string) => void | Promise<void>;
 	signal?: AbortSignal;
 	dedupeReply?: boolean;
+	/** UTF-8 byte cap of the deduped reply (default 4 KiB); `Infinity` keeps a long answer whole. */
+	replyMaxBytes?: number;
 }
 
 /** A side-turn response that is not appended to session history. */

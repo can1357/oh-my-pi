@@ -637,7 +637,10 @@ fn compile_find_patterns(
 /// Search source files with ast-grep patterns; returns a promise resolved on a
 /// worker thread.
 #[napi]
-pub fn ast_grep(options: AstFindOptions<'_>) -> task::Promise<AstFindResult> {
+pub fn ast_grep<'env>(
+	env: &'env Env,
+	options: AstFindOptions<'_>,
+) -> Result<PromiseRaw<'env, AstFindResult>> {
 	let AstFindOptions {
 		patterns,
 		lang,
@@ -659,7 +662,7 @@ pub fn ast_grep(options: AstFindOptions<'_>) -> task::Promise<AstFindResult> {
 	let normalized_limit = limit.unwrap_or(DEFAULT_FIND_LIMIT).max(1);
 	let normalized_offset = offset.unwrap_or(0);
 
-	task::blocking("ast_grep", ct, move |ct| {
+	task::filesystem(env, "ast_grep", ct, fs, move |fs, ct| {
 		let patterns = normalize_pattern_list(patterns)?;
 		let strictness = resolve_strictness(strictness);
 		let include_meta = include_meta.unwrap_or(false);
@@ -907,7 +910,10 @@ pub fn ast_match(options: AstMatchOptions<'_>) -> task::Promise<AstMatchResult> 
 /// Apply ast-grep rewrite rules to matching files; honors `dryRun` and returns
 /// a promise.
 #[napi]
-pub fn ast_edit(options: AstReplaceOptions<'_>) -> task::Promise<AstReplaceResult> {
+pub fn ast_edit<'env>(
+	env: &'env Env,
+	options: AstReplaceOptions<'_>,
+) -> Result<PromiseRaw<'env, AstReplaceResult>> {
 	let AstReplaceOptions {
 		rewrites,
 		lang,
@@ -926,7 +932,7 @@ pub fn ast_edit(options: AstReplaceOptions<'_>) -> task::Promise<AstReplaceResul
 
 	let fs = ShellFilesystem::blocking(filesystem);
 	let ct = task::CancelToken::new(timeout_ms, signal);
-	task::blocking("ast_edit", ct, move |ct| {
+	task::filesystem(env, "ast_edit", ct, fs, move |fs, ct| {
 		ast_edit_blocking(
 			ct,
 			&fs,

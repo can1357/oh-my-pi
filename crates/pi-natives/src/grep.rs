@@ -2612,11 +2612,12 @@ pub fn has_match(
 /// # Returns
 /// Aggregated results across matching files.
 #[napi]
-pub fn grep(
+pub fn grep<'env>(
+	env: &'env Env,
 	options: GrepOptions<'_>,
 	#[napi(ts_arg_type = "((error: Error | null, match: GrepMatch) => void) | undefined | null")]
 	on_match: Option<ThreadsafeFunction<GrepMatch>>,
-) -> task::Promise<GrepResult> {
+) -> Result<PromiseRaw<'env, GrepResult>> {
 	let GrepOptions {
 		pattern,
 		path,
@@ -2643,30 +2644,31 @@ pub fn grep(
 
 	let ct = task::CancelToken::new(timeout_ms, signal);
 	let stream = on_matches.map(|callback| Arc::new(JsMatchStream::new(callback, ct.clone())));
-	let config = GrepConfig {
-		filesystem: ShellFilesystem::blocking(filesystem),
-		stream: stream
-			.clone()
-			.map(|stream| -> Arc<dyn MatchSink> { stream }),
-		pattern,
-		path,
-		glob,
-		recursive,
-		type_filter: r#type,
-		ignore_case,
-		multiline,
-		hidden,
-		gitignore,
-		max_count,
-		max_count_per_file,
-		offset,
-		context_before,
-		context_after,
-		context,
-		max_columns,
-		mode,
-	};
-	task::blocking("grep", ct, move |ct| {
+	let filesystem = ShellFilesystem::blocking(filesystem);
+	task::filesystem(env, "grep", ct, filesystem, move |filesystem, ct| {
+		let config = GrepConfig {
+			filesystem,
+			stream: stream
+				.clone()
+				.map(|stream| -> Arc<dyn MatchSink> { stream }),
+			pattern,
+			path,
+			glob,
+			recursive,
+			type_filter: r#type,
+			ignore_case,
+			multiline,
+			hidden,
+			gitignore,
+			max_count,
+			max_count_per_file,
+			offset,
+			context_before,
+			context_after,
+			context,
+			max_columns,
+			mode,
+		};
 		let result = grep_sync(config, on_match.as_ref(), ct);
 		match stream {
 			Some(stream) => stream.settle(result),

@@ -344,6 +344,99 @@ describe("pi-natives", () => {
 	});
 
 	describe("grep", () => {
+		it("completes concurrent provider searches without starving pooled filesystem reads", async () => {
+			const script = `
+import * as fs from "node:fs/promises";
+import * as os from "node:os";
+import * as path from "node:path";
+import { grep, glob } from ${JSON.stringify(addonUrl)};
+
+const root = await fs.mkdtemp(path.join(os.tmpdir(), "natives-provider-pool-"));
+try {
+	const fixture = path.join(root, "SKILL.md");
+	const temp = path.join(root, "result.md.tmp");
+	const artifact = path.join(root, "result.md");
+	await fs.writeFile(fixture, "# Heading\\nbody\\n");
+	const filesystem = {
+		nativeLocalPaths: true,
+		handler: async (_error, request) => {
+			await fs.stat(fixture);
+			return { local: request.path === "skill://stall" ? root : fixture };
+		},
+	};
+	const results = await Promise.all(Array.from({ length: 8 }, () =>
+		grep({ pattern: "^# ", path: "skill://stall/SKILL.md", filesystem, timeoutMs: 2_000 })
+	));
+	if (results.some(result => result.totalMatches !== 1)) throw new Error("provider grep missed heading");
+	const listings = await Promise.all(Array.from({ length: 8 }, () =>
+		glob({ pattern: "*.md", path: "skill://stall", filesystem, timeoutMs: 2_000 })
+	));
+	if (listings.some(result => result.totalMatches !== 1)) throw new Error("provider glob missed file");
+	await Bun.write(temp, "published");
+	const readback = await Bun.file(temp).slice(0, 1).arrayBuffer();
+	if (readback.byteLength !== 1) throw new Error("artifact verification read failed");
+	await fs.rename(temp, artifact);
+	const controller = new AbortController();
+	const entered = Promise.withResolvers();
+	const stalledFilesystem = {
+		nativeLocalPaths: true,
+		handler: async () => {
+			entered.resolve();
+			await Promise.withResolvers().promise;
+			return { local: fixture };
+		},
+	};
+	const cancelled = grep({
+		pattern: "^# ",
+		path: "skill://pending/SKILL.md",
+		filesystem: stalledFilesystem,
+		signal: controller.signal,
+	});
+	await entered.promise;
+	controller.abort();
+	try {
+		await cancelled;
+		throw new Error("cancelled search fulfilled");
+	} catch (error) {
+		if (error.name !== "AbortError") throw error;
+	}
+	// Exercise the native deadline against a provider Promise that cannot settle.
+	try {
+		await grep({ pattern: "^# ", path: "skill://pending/SKILL.md", filesystem: stalledFilesystem, timeoutMs: 50 });
+		throw new Error("timed-out search fulfilled");
+	} catch (error) {
+		if (!String(error).includes("Aborted: Timeout")) throw error;
+	}
+	if (await fs.readFile(artifact, "utf8") !== "published") throw new Error("artifact not published");
+	console.log("ok");
+} finally {
+	await fs.rm(root, { recursive: true, force: true });
+}
+`;
+			const child = Bun.spawn([process.execPath, "--eval", script], {
+				env: { ...process.env, UV_THREADPOOL_SIZE: "4" },
+				stdout: "pipe",
+				stderr: "pipe",
+			});
+			// A stuck native callback never reaches a JS timeout; kill the subprocess on regression.
+			const timer = setTimeout(() => child.kill("SIGKILL"), 6_000);
+			try {
+				const [stdout, stderr, exitCode] = await Promise.all([
+					new Response(child.stdout).text(),
+					new Response(child.stderr).text(),
+					child.exited,
+				]);
+				expect({ stdout: stdout.trim(), stderr: stderr.trim(), exitCode }).toEqual({
+					stdout: "ok",
+					stderr: "",
+					exitCode: 0,
+				});
+			} finally {
+				clearTimeout(timer);
+				if (child.exitCode === null) child.kill("SIGKILL");
+			}
+		}, 10_000);
+
 		it("delivers a completed result after the JS thread resumes past its deadline", async () => {
 			const pending = grep({
 				pattern: "TODO",

@@ -1,6 +1,8 @@
 import { afterEach, describe, expect, it } from "bun:test";
+import { VERSION } from "@oh-my-pi/pi-utils/dirs";
 import { findFreeCdpPort } from "@oh-my-pi/pi-coding-agent/tools/browser/attach";
 import { waitForRelayExtension } from "@oh-my-pi/pi-coding-agent/tools/browser/relay/probe";
+import { DISCARDED_TABS_PROTOCOL_VERSION } from "@oh-my-pi/pi-coding-agent/tools/browser/relay/protocol";
 import {
 	type RelayServer,
 	type RelayUnavailableInfo,
@@ -47,6 +49,7 @@ describe("waitForRelayExtension", () => {
 
 	it("fails fast when the relay outlived the dial window without ever seeing an extension", async () => {
 		const info: RelayUnavailableInfo = {
+			ompRelayVersion: VERSION,
 			error: "relay extension is not connected",
 			extensionSeen: false,
 			uptimeMs: 60_000,
@@ -76,6 +79,49 @@ describe("waitForRelayExtension", () => {
 				}),
 		});
 		expect(await waitForRelayExtension(`http://127.0.0.1:${fake.port}`)).toBe("outdated-relay");
+	});
+
+	it("reports a stale relay before blaming its extension, even if the capability marker matches", async () => {
+		fake = Bun.serve({
+			hostname: "127.0.0.1",
+			port: 0,
+			fetch: () =>
+				Response.json({
+					ompRelayVersion: "18.5.1",
+					ompRelayDiscardedTabsProtocol: "1",
+					ompExtensionDiscardedTabsProtocol: "0",
+				}),
+		});
+		expect(await waitForRelayExtension(`http://127.0.0.1:${fake.port}`)).toBe("outdated-relay");
+	});
+
+	it("accepts a compatible relay from another OMP version", async () => {
+		fake = Bun.serve({
+			hostname: "127.0.0.1",
+			port: 0,
+			fetch: () =>
+				Response.json({
+					ompRelayVersion: "18.5.1",
+					ompRelayDiscardedTabsProtocol: String(DISCARDED_TABS_PROTOCOL_VERSION),
+					ompExtensionDiscardedTabsProtocol: String(DISCARDED_TABS_PROTOCOL_VERSION),
+				}),
+		});
+		expect(await waitForRelayExtension(`http://127.0.0.1:${fake.port}`)).toBe("ready");
+	});
+
+	it("identifies a stale relay before its extension connects, without waiting for the dial window", async () => {
+		fake = Bun.serve({
+			hostname: "127.0.0.1",
+			port: 0,
+			fetch: () =>
+				Response.json(
+					{ error: "relay extension is not connected", extensionSeen: false, uptimeMs: 60_000 },
+					{ status: 503 },
+				),
+		});
+		const started = performance.now();
+		expect(await waitForRelayExtension(`http://127.0.0.1:${fake.port}`)).toBe("outdated-relay");
+		expect(performance.now() - started).toBeLessThan(2_000);
 	});
 
 	it("rejects an extension without discarded-tab snapshots, even when it has no tabs", async () => {

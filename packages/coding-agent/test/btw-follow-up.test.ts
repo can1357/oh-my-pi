@@ -855,7 +855,10 @@ describe("BTW follow-up lifecycle", () => {
 	});
 });
 
-function composer(onFollowUp: (record: BtwHistoryRecord, question: string) => Promise<boolean>) {
+function composer(
+	onFollowUp: (record: BtwHistoryRecord, question: string) => Promise<boolean>,
+	extra: readonly BtwHistoryRecord[] = [],
+) {
 	const record: BtwHistoryRecord = {
 		id: "composer-root",
 		leafId: "main-leaf",
@@ -869,7 +872,7 @@ function composer(onFollowUp: (record: BtwHistoryRecord, question: string) => Pr
 	const onCopy = vi.fn();
 	const onCancel = vi.fn();
 	const panel = new BtwHistoryPanel({
-		records: [record],
+		records: [record, ...extra],
 		onClose,
 		onCopy,
 		onCancel,
@@ -900,10 +903,26 @@ describe("BTW follow-up composer", () => {
 	});
 
 	it("switches history panes with Ctrl+/ like Tab", () => {
-		const tabbed = composer(vi.fn(async () => true));
+		// A lone record has no list to switch to; panes need a second one.
+		const other: BtwHistoryRecord = {
+			id: "composer-other",
+			leafId: "main-leaf",
+			question: "Other question",
+			answer: "Other answer",
+			status: "complete",
+			createdAt: 0,
+			updatedAt: 0,
+		};
+		const tabbed = composer(
+			vi.fn(async () => true),
+			[other],
+		);
 		tabbed.panel.handleInput("\t");
 		const tabRender = Bun.stripANSI(tabbed.panel.render(120).join("\n"));
-		const slashed = composer(vi.fn(async () => true));
+		const slashed = composer(
+			vi.fn(async () => true),
+			[other],
+		);
 		slashed.panel.handleInput(String.fromCharCode(31));
 		expect(Bun.stripANSI(slashed.panel.render(120).join("\n"))).toBe(tabRender);
 		expect(Bun.stripANSI(slashed.panel.render(120).join("\n"))).toContain("switch pane");

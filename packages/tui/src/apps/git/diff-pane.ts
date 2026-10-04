@@ -184,6 +184,10 @@ export interface DiffBuildOptions {
 	streamResult?: DiffStreamResult;
 }
 
+function filePatchHeader(filePath: string): string {
+	return `diff --git a/${filePath} b/${filePath}\n--- a/${filePath}\n+++ b/${filePath}\n`;
+}
+
 /** Build the aligned document for one file from its raw old/new texts. */
 export function buildDiffDocument(
 	oldRaw: string,
@@ -376,10 +380,11 @@ export function buildDiffDocument(
 	// cannot use the raw streamed result because its equality basis differs.
 	const canPatch = !ignoreWs;
 	const tightHunks = streamed?.hunks ?? structuredPatchHunks(oldBasis, newBasis, DIFF_CONTEXT_LINES);
+	const patchHeader = canPatch && tightHunks.length > 0 ? filePatchHeader(filePath) : "";
 	const allHunks: HunkBlock[] = tightHunks.map(hunk => ({
 		header: `@@ -${hunk.oldStart},${hunk.oldLines} +${hunk.newStart},${hunk.newLines} @@`,
 		patch: canPatch
-			? `--- a/${filePath}\n+++ b/${filePath}\n@@ -${hunk.oldStart},${hunk.oldLines} +${hunk.newStart},${hunk.newLines} @@\n${hunk.lines.join("\n")}\n`
+			? `${patchHeader}@@ -${hunk.oldStart},${hunk.oldLines} +${hunk.newStart},${hunk.newLines} @@\n${hunk.lines.join("\n")}\n`
 			: "",
 		rows: walkHunk(hunk, false),
 	}));
@@ -476,7 +481,7 @@ export function buildLineSelectionPatch(
 				`@@ -${hunk.oldStart},${hunk.oldLines} +${hunk.newStart},${hunk.newLines} @@\n${hunk.lines.join("\n")}`,
 		)
 		.join("\n");
-	return `--- a/${doc.filePath}\n+++ b/${doc.filePath}\n${body}\n`;
+	return `${filePatchHeader(doc.filePath)}${body}\n`;
 }
 
 // ── palette ──────────────────────────────────────────────────────────────────
@@ -721,6 +726,7 @@ export class DiffPane {
 		this.scrollLeft = 0;
 		this.cursor = 0;
 		this.anchor = null;
+		if (mode === "hunk") this.selectedHunk = 0;
 	}
 
 	cycleMode(): void {
@@ -771,6 +777,7 @@ export class DiffPane {
 			this.anchor = null;
 		}
 		this.cursor = Math.max(0, Math.min(total - 1, this.cursor + delta));
+		this.#syncHunkToCursor();
 		this.scrollTop = scrollOffsetForRow(this.scrollTop, this.cursor, total, this.#lastHeight);
 		this.#clampScroll();
 	}
@@ -854,6 +861,7 @@ export class DiffPane {
 		if (total === 0) return;
 		this.anchor = null;
 		this.cursor = edge === "start" ? 0 : total - 1;
+		this.#syncHunkToCursor();
 		this.scrollTop = scrollOffsetForRow(this.scrollTop, this.cursor, total, this.#lastHeight);
 		this.#clampScroll();
 	}
@@ -867,6 +875,19 @@ export class DiffPane {
 			this.anchor = null;
 			this.scrollTop = clampScrollOffset(header - 1, visuals.length, this.#lastHeight);
 			this.#clampScroll();
+		}
+	}
+
+	/** Keep the hunk action and highlighted header on the cursor's hunk, including blank separators. */
+	#syncHunkToCursor(): void {
+		if (this.mode !== "hunk") return;
+		const visuals = this.#layout(this.#lastWidth || 80);
+		for (let row = this.cursor; row >= 0; row--) {
+			const visual = visuals[row];
+			if (visual?.t === "header") {
+				this.selectedHunk = visual.hunk;
+				return;
+			}
 		}
 	}
 
@@ -917,6 +938,10 @@ export class DiffPane {
 		const hit = this.#hits[row];
 		if (hit && this.#doc) {
 			this.selectedHunk = hit.hunk;
+			if (this.mode === "hunk") {
+				this.cursor = this.scrollTop + row;
+				this.anchor = null;
+			}
 			if (hit.primary && col >= hit.primary[0] && col < hit.primary[1] && this.patchTarget) {
 				return { type: "hunk-action", hunk: this.#doc.hunks[hit.hunk], action: this.patchTarget };
 			}
@@ -933,6 +958,7 @@ export class DiffPane {
 				this.anchor = null;
 			}
 			this.cursor = visual;
+			this.#syncHunkToCursor();
 			return { type: "handled" };
 		}
 		return null;

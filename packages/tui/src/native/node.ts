@@ -11,7 +11,8 @@
  * `rows` fallback node rendered through `render(cx.cols)`.
  *
  * See `packages/wire/src/tsp.ts` for the wire vocabulary and
- * `crates/tern/SURFACE_PROTOCOL.md` (Stencil repository) for the spec.
+ * the Tern SDK's Surface Protocol reference (`docs/sdk/src/protocol` in the
+ * Stencil repository, https://docs.stencil.so/tern/protocol/) for the spec.
  */
 import type { TspEvent, TspKind, TspProps, TspScrollBy, TspSpan } from "@oh-my-pi/pi-wire";
 import type { Component } from "../tui";
