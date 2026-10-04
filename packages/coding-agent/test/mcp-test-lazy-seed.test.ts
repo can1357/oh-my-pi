@@ -72,11 +72,12 @@ function createController(options: { toolsAfterReconnect?: boolean } = {}) {
 		getSource: vi.fn(() => undefined),
 		getAllServerNames: vi.fn((): string[] => []),
 	};
-	const presentCommandOutput = vi.fn();
+	const showCommandReport = vi.fn();
 	const controller = new MCPCommandController({
 		chatContainer: { addChild: vi.fn() },
 		present: vi.fn(),
-		presentCommandOutput,
+		presentCommandOutput: vi.fn(),
+		showCommandReport,
 		ui: { requestRender: vi.fn() },
 		editor: {},
 		showError: vi.fn(),
@@ -94,7 +95,7 @@ function createController(options: { toolsAfterReconnect?: boolean } = {}) {
 		},
 		mcpManager,
 	} as never);
-	return { controller, mcpManager, refreshMCPTools, presentCommandOutput };
+	return { controller, mcpManager, refreshMCPTools, showCommandReport };
 }
 
 async function writeProjectConfig(projectDir: string, servers: Record<string, MCPServerConfig>): Promise<void> {
@@ -334,7 +335,7 @@ describe("/mcp list distinguishes a dormant lazy server from an unreachable one"
 			lazysrv: { type: "stdio", command: "lazy-cmd", lazy: true },
 			downsrv: { type: "stdio", command: "down-cmd" },
 		});
-		const { controller, mcpManager, presentCommandOutput } = createController();
+		const { controller, mcpManager, showCommandReport } = createController();
 		mcpManager.getTools.mockReturnValue([
 			{ name: "fixture_tool", mcpServerName: "lazysrv" },
 			{ name: "other_tool", mcpServerName: "lazysrv" },
@@ -342,8 +343,8 @@ describe("/mcp list distinguishes a dormant lazy server from an unreachable one"
 
 		await controller.handle("/mcp list");
 
-		const block = presentCommandOutput.mock.calls[0]?.[0] as { render(width: number): string[] };
-		const lines = block.render(200).map(line => Bun.stripANSI(line).trim());
+		const report = showCommandReport.mock.calls[0]?.[0] as { body: { render(width: number): string[] } };
+		const lines = report.body.render(200).map(line => Bun.stripANSI(line).trim());
 		const lazyLine = lines.find(line => line.startsWith("lazysrv")) ?? "";
 		const downLine = lines.find(line => line.startsWith("downsrv")) ?? "";
 		expect(lazyLine).toContain("2 tools");
