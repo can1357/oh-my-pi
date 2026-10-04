@@ -428,6 +428,13 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 	priority: { key: "priority", set: "catalog", shape: "scalar" },
 	"service-tier-cost": { key: "serviceTierCost", set: "catalog", shape: "object" },
 	"time-based-cost": { key: "timeBased", set: "catalog", shape: "object" },
+	/**
+	 * Effort the vendor applies when a request omits it, per the vendor's
+	 * published docs. Read only by the `vendor` auto-thinking backend; unlike
+	 * `thinking-default-level` it never overrides the user's default level.
+	 * Discovery-reported values win over rules.
+	 */
+	"vendor-default-effort": { key: "vendorDefaultEffort", set: "catalog", shape: "scalar", values: EFFORTS },
 
 	// ── catalog: routed-subscription registry ──
 	// A gateway whose proxy fans one model out to several upstreams (Factory

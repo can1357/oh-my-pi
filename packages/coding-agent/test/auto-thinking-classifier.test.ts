@@ -489,4 +489,92 @@ describe("auto thinking classifier helpers", () => {
 			expect(parseConfiguredThinkingLevel(selector)).toBeUndefined();
 		}
 	});
+
+	describe("vendor default source", () => {
+		// No judge is registered: any classifier call would throw, so a resolved
+		// level proves the vendor path skipped classification.
+		const vendorDeps = (model: Model, maxEffort: "xhigh" | "max" = "xhigh") => ({
+			settings: Settings.isolated({
+				"providers.autoThinkingSource": "vendor",
+				"providers.autoThinkingMaxEffort": maxEffort,
+			}),
+			registry: createRegistry([]),
+			model,
+		});
+		const vendorModel = (spec: { id: string; provider: string; api: ai.Api }, efforts?: Effort[], vde?: Effort) =>
+			buildModel({
+				...spec,
+				name: spec.id,
+				baseUrl: "https://example.com",
+				reasoning: true,
+				thinking: efforts ? { mode: "effort", efforts } : undefined,
+				vendorDefaultEffort: vde,
+				input: ["text"],
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+				contextWindow: 128_000,
+				maxTokens: 4096,
+			});
+
+		it("uses the vendor default without classifying, with no low floor", async () => {
+			const opus = vendorModel({ id: "claude-opus-5-5", provider: "anthropic", api: "anthropic-messages" });
+			expect(await classifyDifficulty({ request: "rename a helper" }, vendorDeps(opus))).toBe(Effort.Medium);
+
+			const lite = vendorModel({ id: "gemini-3.5-flash-lite", provider: "google", api: "google-generative-ai" });
+			expect(await classifyDifficulty({ request: "cut over the storage layer" }, vendorDeps(lite))).toBe(
+				Effort.Minimal,
+			);
+		});
+
+		it("snaps the vendor default onto the ladder", async () => {
+			const model = vendorModel(
+				{ id: "mock-snap", provider: "mock", api: "openai-completions" },
+				[Effort.Low, Effort.Medium],
+				Effort.Minimal,
+			);
+			expect(await classifyDifficulty({ request: "x" }, vendorDeps(model))).toBe(Effort.Low);
+		});
+
+		it("respects the auto ceiling", async () => {
+			const maxDefault = vendorModel(
+				{ id: "mock-max-default", provider: "mock", api: "openai-completions" },
+				MAX_LADDER,
+				Effort.Max,
+			);
+			expect(await classifyDifficulty({ request: "x" }, vendorDeps(maxDefault))).toBe(Effort.XHigh);
+			expect(await classifyDifficulty({ request: "x" }, vendorDeps(maxDefault, "max"))).toBe(Effort.Max);
+
+			// Nothing at or below the default ceiling: no level, never `max`.
+			const maxOnly = vendorModel(
+				{ id: "mock-max-only", provider: "mock", api: "openai-completions" },
+				[Effort.Max],
+				Effort.Max,
+			);
+			expect(await classifyDifficulty({ request: "x" }, vendorDeps(maxOnly))).toBeUndefined();
+		});
+
+		it("falls back to omp's model default under the ceiling when no concrete publisher default exists", async () => {
+			const ompDefault = buildModel({
+				...buildLadderModel("mock-omp-default", MAX_LADDER),
+				thinking: { mode: "effort", efforts: MAX_LADDER, defaultLevel: Effort.Max },
+			});
+			expect(await classifyDifficulty({ request: "x" }, vendorDeps(ompDefault, "max"))).toBe(Effort.Max);
+			expect(await classifyDifficulty({ request: "x" }, vendorDeps(ompDefault))).toBe(Effort.XHigh);
+			const offDefault = buildModel({ ...ompDefault, vendorDefaultEffort: "none" });
+			expect(await classifyDifficulty({ request: "x" }, vendorDeps(offDefault, "max"))).toBe(Effort.Max);
+		});
+
+		it("prefers publisher metadata over omp's model default", async () => {
+			const model = buildModel({
+				...buildLadderModel("mock-precedence", MAX_LADDER),
+				thinking: { mode: "effort", efforts: MAX_LADDER, defaultLevel: Effort.Max },
+				vendorDefaultEffort: Effort.Medium,
+			});
+			expect(await classifyDifficulty({ request: "x" }, vendorDeps(model, "max"))).toBe(Effort.Medium);
+		});
+
+		it("throws for the normal Auto fallback when neither default is concrete", async () => {
+			const model = buildModel({ ...buildLadderModel("mock-none", XHIGH_LADDER), vendorDefaultEffort: "none" });
+			await expect(classifyDifficulty({ request: "x" }, vendorDeps(model))).rejects.toThrow();
+		});
+	});
 });

@@ -9,6 +9,7 @@
 
 import { resolveDiscoveryApi, resolveModelPolicy } from "./compat/resolve";
 import type { ModelIdentity } from "./compat/types";
+import { THINKING_EFFORTS } from "./effort";
 import { resolveModelTokenizer } from "./model-tokenizer";
 import { materializeTimeBasedCost } from "./pricing";
 import { type Api, MODEL_KINDS, type Model, type ModelSpec } from "./types";
@@ -70,8 +71,8 @@ function isInputModalities(value: unknown): value is ("text" | "image")[] {
  * `context-window-floor`) overwrite upstream values; selection metadata
  * (`priority`, `apply-patch-tool-type`, `service-tier-cost`,
  * `requires-cursor-tool-schema-projection`, `requires-tool-result-image-hoisting`,
- * `supports-assistant-prefill`) is rule-owned; `context-promotion-target` fills
- * only when the spec left it unset.
+ * `supports-assistant-prefill`) is rule-owned; `context-promotion-target` and
+ * `vendor-default-effort` fill only when the spec left them unset.
  */
 function applyCatalogAssignments<TApi extends Api>(model: Model<TApi>, catalog: Record<string, unknown>): void {
 	const kind = MODEL_KINDS.find(value => value === catalog.kind);
@@ -159,6 +160,13 @@ function applyCatalogAssignments<TApi extends Api>(model: Model<TApi>, catalog: 
 	const contextPromotionTarget = catalog.contextPromotionTarget;
 	if (typeof contextPromotionTarget === "string" && model.contextPromotionTarget === undefined) {
 		model.contextPromotionTarget = contextPromotionTarget;
+	}
+	// Only reasoning models have an effort to default. An effort-pinned id
+	// (`claude-opus-4-8-low`) already fixes its effort; the lineage's vendor
+	// default does not describe it.
+	if (model.reasoning && model.vendorDefaultEffort === undefined && model.identity.effort === undefined) {
+		const vendorDefaultEffort = THINKING_EFFORTS.find(effort => effort === catalog.vendorDefaultEffort);
+		if (vendorDefaultEffort !== undefined) model.vendorDefaultEffort = vendorDefaultEffort;
 	}
 }
 

@@ -82,6 +82,30 @@ class "gemini" {
 		}
 	}
 
+	// Vendor default thinking level: what `thinkingLevel` resolves to when
+	// omitted, per the per-model table. Pinned per revision; defaults differ
+	// by line and generation.
+	// https://ai.google.dev/gemini-api/docs/thinking
+	family "pro" {
+		revision ">=3 <3.2" {
+			vendor-default-effort "high"
+		}
+	}
+	family "flash" {
+		revision "=3" {
+			vendor-default-effort "high"
+		}
+		revision ">=3.5 <3.9" {
+			vendor-default-effort "medium"
+		}
+	}
+	family "lite" {
+		// 3.1 Flash-Lite is unset: the table lists only its `-image` variant.
+		revision "=3.5" {
+			vendor-default-effort "minimal"
+		}
+	}
+
 	revision ">=3" {
 		// Replaces the Google multimodal function-response baseline.
 		multimodal-function-response #true

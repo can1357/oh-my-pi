@@ -136,6 +136,10 @@
 ### Changed
 
 - Reduced CPU use while streaming with several agents active: extension `message_update` handlers are delivered through a lighter queue, and RPC no longer processes subagent events unless a client subscribed to them ([#13244](https://github.com/can1357/oh-my-pi/pull/13244) by [@iliaal](https://github.com/iliaal)).
+- Added periodic completion estimates for running subagents: every 2 minutes each working subagent is asked, through a cached `/btw`-style side request, how far along it is, and the `XY%` shows next to it in wait and task views. Each check sees the subagent's previous estimate and any tool call it is still writing, so long file writes no longer read as 0%. Set the interval or turn it off with `task.completionProbeMs`.
+- Added a `goal` command for RPC hosts (`--mode rpc` and `rpc-ui`) to create, read, pause, resume and drop goals, the current goal in `get_state`, and opt-in automatic goal continuation with `goal.continuationModes: ["rpc"]` ([#13952](https://github.com/can1357/oh-my-pi/pull/13952) by [@shawnkoh](https://github.com/shawnkoh))
+- Added `--goal <objective>` for interactive launches: it starts a fresh session in goal mode and begins working on the objective immediately, without typing `/goal` ([#13879](https://github.com/can1357/oh-my-pi/pull/13879) by [@shawnkoh](https://github.com/shawnkoh))
+- Added an Auto Thinking Source setting (`providers.autoThinkingSource`): `vendor` makes the `auto` thinking level use the model vendor's default effort (for example `medium` on Claude Opus 5.5 and GPT-5.6, `high` on other Claude models) instead of classifying each prompt ([#14114](https://github.com/can1357/oh-my-pi/pull/14114) by [@andrebrait](https://github.com/andrebrait))
 
 ### Fixed
 

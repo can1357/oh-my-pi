@@ -1201,6 +1201,31 @@ describe("model thinking derivation", () => {
 	});
 });
 
+describe("vendor default effort rules", () => {
+	const vendorDefault = (provider: Provider, id: string, api: Api = "anthropic-messages") =>
+		createModel({ id, api, provider }).vendorDefaultEffort;
+
+	it("pins documented per-revision defaults, including the Opus 5.5 step down", () => {
+		expect(vendorDefault("anthropic", "claude-opus-5")).toBe(Effort.High);
+		expect(vendorDefault("anthropic", "claude-opus-5-5")).toBe(Effort.Medium);
+		expect(vendorDefault("openrouter", "anthropic/claude-opus-5.5", "openai-completions")).toBe(Effort.Medium);
+		expect(vendorDefault("openai", "gpt-5.5", "openai-responses")).toBe(Effort.Medium);
+		expect(vendorDefault("openai", "gpt-5.5-pro", "openai-responses")).toBe(Effort.High);
+		// A route suffix must not drop the pro tier to the revision-wide default.
+		expect(vendorDefault("openrouter", "openai/gpt-5.5-pro:batch", "openai-completions")).toBe(Effort.High);
+		expect(vendorDefault("anthropic", "claude-sonnet-5-5")).toBe(Effort.High);
+		expect(vendorDefault("google", "gemini-3.5-flash-lite", "google-generative-ai")).toBe(Effort.Minimal);
+	});
+
+	it("leaves undocumented and none-default models unset", () => {
+		expect(vendorDefault("anthropic", "claude-haiku-4-5")).toBeUndefined();
+		expect(vendorDefault("openai", "gpt-5.4", "openai-responses")).toBeUndefined();
+		expect(vendorDefault("openai", "gpt-6-astra", "openai-responses")).toBeUndefined();
+		// The id pins its effort, so the lineage default does not apply.
+		expect(vendorDefault("cursor", "claude-opus-4-8-low", "cursor-agent")).toBeUndefined();
+	});
+});
+
 describe("model thinking runtime helpers", () => {
 	it("clamps from explicit metadata instead of inferring from model id", () => {
 		const model = createModel({

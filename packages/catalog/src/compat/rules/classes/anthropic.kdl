@@ -108,6 +108,40 @@ class "anthropic" {
 			thinking-prefix-binding #true
 		}
 	}
+	// Vendor default effort: what the API applies when `effort` is omitted.
+	// Pinned per documented model, not class-wide, because defaults move
+	// between releases (Opus 5.5 dropped to medium). A new model gets an entry
+	// only after the docs name its default.
+	// https://platform.claude.com/docs/en/build-with-claude/effort
+	family "fable" {
+		revision ">=5 <5.2" {
+			vendor-default-effort "high"
+		}
+	}
+	family "mythos" {
+		revision ">=5 <5.2" {
+			vendor-default-effort "high"
+		}
+	}
+	models "*claude-mythos-preview" {
+		vendor-default-effort "high"
+	}
+	family "opus" {
+		revision ">=4.5 <5.1" {
+			vendor-default-effort "high"
+		}
+		revision "=5.5" {
+			vendor-default-effort "medium"
+		}
+	}
+	family "sonnet" {
+		revision ">=4.6 <5.1" {
+			vendor-default-effort "high"
+		}
+		revision "=5.5" {
+			vendor-default-effort "high"
+		}
+	}
 	on "anthropic" "cloudflare-ai-gateway" "google-vertex" {
 		family "fable" {
 			revision ">=5" {
