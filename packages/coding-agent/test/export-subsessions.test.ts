@@ -190,11 +190,13 @@ describe("collectSubSessions under session.storage: sql", () => {
 	});
 
 	test("terminates when a transcript stem names the directory itself", async () => {
+		// "..jsonl" has the stem "." and ".jsonl" the empty stem; both name `main` itself.
 		await storage.writeText(path.join(root, "main/..jsonl"), sessionJsonl("dot", ["d1"]));
+		await storage.writeText(path.join(root, "main/.jsonl"), sessionJsonl("empty", ["e1"]));
 		await storage.writeText(path.join(root, "main/Scout.jsonl"), sessionJsonl("scout", ["s1"]));
 
 		const subs = await collectSubSessions(mainFile);
 
-		expect(Object.keys(subs).sort()).toEqual([".", "Scout"]);
+		expect(Object.keys(subs).sort()).toEqual(["", ".", "Scout"]);
 	});
 });

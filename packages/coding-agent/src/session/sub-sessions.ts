@@ -113,21 +113,21 @@ async function listDirectoryFiles(dir: string): Promise<StoredSubSessionFile[]> 
 
 /**
  * Transcripts a key-indexed storage holds directly under `dir`. It has no
- * directories, so every stem is searched for children except "." and "..",
- * which would revisit `dir` or its parent. Kill tombstones are written beside
- * the transcript path on local disk whatever the storage.
+ * directories, so every stem is searched for children unless its directory is
+ * not strictly inside `dir`: the stems "", "." and ".." would revisit `dir` or
+ * its parent. Kill tombstones are written beside the transcript path on local
+ * disk whatever the storage.
  */
 async function listStoredFiles(dir: string, storage: SessionStorage): Promise<StoredSubSessionFile[]> {
 	const byName = new Map(storage.listFilesSync(dir, "*.jsonl").map(file => [path.basename(file), file]));
 	return Promise.all(
 		[...byName.keys()].sort().map(async name => {
 			const file = byName.get(name)!;
-			const stem = name.slice(0, -6);
 			return {
 				name,
 				file,
 				aborted: await Bun.file(getAgentTombstonePath(file)).exists(),
-				descend: stem !== "." && stem !== "..",
+				descend: path.dirname(path.join(dir, name.slice(0, -6))) === path.join(dir),
 			};
 		}),
 	);
