@@ -1313,12 +1313,14 @@ describe("createAgentSession deferred model pattern resolution", () => {
 
 	test.each([
 		// Default: `/slow` on Claude leaves the startup preflight unchanged.
-		[false, "runtime-provider/runtime-fallback-model"],
+		[false, "confirm", "runtime-provider/runtime-fallback-model"],
 		// Opted in: low priority serves past the 5-hour limit, so start on Claude.
-		[true, "anthropic/claude-sonnet-4-5"],
+		[true, "confirm", "anthropic/claude-sonnet-4-5"],
+		// Fail closed never spends quota, even when the user prefers the slow lane.
+		[true, "fail-closed", undefined],
 	] as const)(
-		"with slow mode on and preferSlowMode %p, a spent 5-hour Claude limit starts on %s",
-		async (preferSlowMode, expected) => {
+		"with slow mode on, preferSlowMode %p and policy %s, a spent Claude limit yields %s",
+		async (preferSlowMode, reservePolicy, expected) => {
 			const authStorage = createInMemoryAuthStorage();
 			authStoragesToClose.push(authStorage);
 			await authStorage.credentials.set("anthropic", [
@@ -1351,9 +1353,10 @@ describe("createAgentSession deferred model pattern resolution", () => {
 				"providers.anthropic.slowMode": "auto",
 				"retry.preferSlowMode": preferSlowMode,
 				"retry.usageAwareFallback": true,
+				"retry.usageReservePolicy": reservePolicy,
 			});
 			settings.setModelRole("task", "anthropic/claude-sonnet-4-5,runtime-provider/runtime-fallback-model");
-			const { session } = await createAgentSession({
+			const creating = createAgentSession({
 				...buildSessionOptions("task"),
 				authStorage,
 				modelRegistry: new ModelRegistry(authStorage, path.join(tempDir, "models.yml")),
@@ -1361,6 +1364,11 @@ describe("createAgentSession deferred model pattern resolution", () => {
 				settings,
 				hasUI: false,
 			});
+			if (expected === undefined) {
+				await expect(creating).rejects.toThrow("reserve policy is fail-closed");
+				return;
+			}
+			const { session } = await creating;
 			try {
 				expect(`${session.model?.provider}/${session.model?.id}`).toBe(expected);
 			} finally {
