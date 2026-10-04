@@ -30,7 +30,9 @@ import type {
 	Model,
 } from "@oh-my-pi/pi-ai";
 import { logger } from "@oh-my-pi/pi-utils";
+import type { Settings } from "../config/settings";
 import type { AuthStorage } from "./auth-storage";
+import { cfgProvidersAnthropicSlowMode, cfgRetryPreferSlowMode } from "./settings";
 import type { UsageLimitState } from "./usage-limit";
 
 /** Why an active slow-mode window ended. */
@@ -538,6 +540,28 @@ export class AnthropicSlowModeLanes {
 
 /** The process-wide lane registry shared by every session in this process. */
 export const anthropicSlowModeLanes = new AnthropicSlowModeLanes();
+
+/**
+ * Whether `/slow` on `model` is subscription low priority, which keeps serving
+ * past the usage limit, rather than a flex service tier, which stops at it.
+ */
+export function isAnthropicSlowModeModel(model: Model): boolean {
+	return model.provider === "anthropic";
+}
+
+/**
+ * Whether usage-aware fallback leaves `model` alone (`retry.preferSlowMode`):
+ * `/slow` is on and the model's slow mode keeps serving past usage limits.
+ * A limit the lane cannot serve still fails the request, and error-driven
+ * fallback moves the turn.
+ */
+export function prefersSlowModeOverUsageFallback(model: Model, settings: Settings): boolean {
+	return (
+		cfgRetryPreferSlowMode.get(settings) &&
+		isAnthropicSlowModeModel(model) &&
+		cfgProvidersAnthropicSlowMode.get(settings) === "auto"
+	);
+}
 
 /**
  * Auto-accept gate: take the slow lane only when no sibling Claude OAuth
