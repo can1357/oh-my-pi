@@ -29,7 +29,9 @@ import type {
 	AnthropicSlowModeSignal,
 	Model,
 } from "@oh-my-pi/pi-ai";
-import { resolveModelPolicy } from "@oh-my-pi/pi-catalog/compat/resolve";
+import { resolveDirectAnthropicBaseUrl } from "@oh-my-pi/pi-ai/providers/anthropic-state";
+import { isOfficialAnthropicApiUrl } from "@oh-my-pi/pi-catalog/compat/anthropic";
+import { resolveCatalogPolicy } from "@oh-my-pi/pi-catalog/compat/catalog-policy";
 import { logger } from "@oh-my-pi/pi-utils";
 import type { Settings } from "../config/settings";
 import type { AuthStorage } from "./auth-storage";
@@ -547,7 +549,7 @@ export const anthropicSlowModeLanes = new AnthropicSlowModeLanes();
  * past the usage limit, rather than a flex service tier, which stops at it.
  */
 export function isAnthropicSlowModeModel(model: Model): boolean {
-	return resolveModelPolicy(model).catalog.subscriptionSlowMode === true;
+	return resolveCatalogPolicy(model).subscriptionSlowMode === true;
 }
 
 /**
@@ -561,7 +563,8 @@ export function prefersSlowModeOverUsageFallback(model: Model, settings: Setting
 		cfgRetryPreferSlowMode.get(settings) &&
 		cfgRetryUsageReservePolicy.get(settings) !== "fail-closed" &&
 		isAnthropicSlowModeModel(model) &&
-		cfgProvidersAnthropicSlowMode.get(settings) === "auto"
+		cfgProvidersAnthropicSlowMode.get(settings) === "auto" &&
+		isOfficialAnthropicApiUrl(resolveDirectAnthropicBaseUrl(model))
 	);
 }
 
