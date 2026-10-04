@@ -1,3 +1,4 @@
+import { inheritAssistantMessageIdentity } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, Message } from "@oh-my-pi/pi-ai";
 import { type OverlayHandle, replaceTabs } from "@oh-my-pi/pi-tui";
 import { logger, prompt, Snowflake, toError, withTimeout } from "@oh-my-pi/pi-utils";
@@ -52,7 +53,11 @@ function assistantMessageWithReplyText(assistantMessage: AssistantMessage, reply
 		replacedText = true;
 	}
 	if (!replacedText) content.push({ type: "text", text: replyText });
-	return { ...assistantMessage, content, providerPayload: undefined };
+	return inheritAssistantMessageIdentity(assistantMessage, {
+		...assistantMessage,
+		content,
+		providerPayload: undefined,
+	});
 }
 
 export class BtwController {

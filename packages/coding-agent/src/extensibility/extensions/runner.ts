@@ -8,6 +8,7 @@ import {
 	type AgentToolContext,
 	type AgentToolResult,
 	type AgentToolUpdateCallback,
+	inheritAssistantMessageIdentity,
 	isNonBlankContext,
 	joinAdditionalContext,
 } from "@oh-my-pi/pi-agent-core";
@@ -1981,6 +1982,9 @@ export class ExtensionRunner {
 		let currentMessages: AgentMessage[];
 		try {
 			currentMessages = structuredClone(messages);
+			for (let index = 0; index < currentMessages.length; index++) {
+				inheritAssistantMessageIdentity(messages[index]!, currentMessages[index]!);
+			}
 		} catch {
 			// Messages may contain non-cloneable objects (e.g. in ToolResultMessage.details
 			// or ProviderPayload). Fall back to a shallow array clone — extensions should
@@ -2033,6 +2037,7 @@ export class ExtensionRunner {
 			clearContextHistoryIndex(message);
 			if (historyMessage) clearContextHistoryIndex(historyMessage);
 			if (!unchanged) markPerCallContextMessage(message);
+			else if (historyMessage) inheritAssistantMessageIdentity(historyMessage, message);
 		}
 		for (const message of messages) clearContextHistoryIndex(message);
 		// An aborted handler is skipped and its input kept unchanged. Never hand that

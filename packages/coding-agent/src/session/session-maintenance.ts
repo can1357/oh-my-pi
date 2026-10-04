@@ -5,6 +5,7 @@ import {
 	type Agent,
 	type AgentMessage,
 	type AgentTurnEndContext,
+	inheritAssistantMessageIdentity,
 	type MessageCountOptions,
 	resolveTelemetry,
 	type StreamFn,
@@ -980,7 +981,12 @@ export class SessionMaintenance {
 			this.#host.recordAnchoredHistoryRewrite(anchoredTokensRemoved);
 			await this.#host.sessionManager.rewriteEntries();
 		} catch (error) {
-			for (const [entry, snapshot] of entrySnapshots) Object.assign(entry, snapshot);
+			for (const [entry, snapshot] of entrySnapshots) {
+				if (entry.type === "message" && snapshot.type === "message") {
+					inheritAssistantMessageIdentity(entry.message, snapshot.message);
+				}
+				Object.assign(entry, snapshot);
+			}
 			const sessionContext = this.#host.buildDisplaySessionContext();
 			this.#host.agent.replaceMessages(sessionContext.messages);
 			throw error;
@@ -3114,7 +3120,13 @@ export class SessionMaintenance {
 					this.#host.emitNotice("error", finalError, "compaction");
 					// Without this the dropped turn leaves no error behind, so the task
 					// executor reads the run as idle and re-prompts it into the same loop.
-					this.#host.retainTerminalFailure({ ...assistantMessage, stopReason: "error", errorMessage: finalError });
+					this.#host.retainTerminalFailure(
+						inheritAssistantMessageIdentity(assistantMessage, {
+							...assistantMessage,
+							stopReason: "error",
+							errorMessage: finalError,
+						}),
+					);
 					return COMPACTION_CHECK_BLOCK_AUTOMATIC_CONTINUATION;
 				}
 				this.#incompleteRecoveryAttempts++;

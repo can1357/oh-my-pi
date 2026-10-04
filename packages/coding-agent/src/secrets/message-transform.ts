@@ -1,4 +1,4 @@
-import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
+import { type AgentMessage, inheritAssistantMessageIdentity } from "@oh-my-pi/pi-agent-core";
 import type {
 	AnthropicCompactionPayload,
 	AssistantMessage,
@@ -43,7 +43,7 @@ export function deobfuscateAgentMessages(obfuscator: SecretObfuscator, messages:
 				const content = deobfuscateAssistantContent(obfuscator, message.content);
 				if (content === message.content) return message;
 				changed = true;
-				return { ...message, content };
+				return inheritAssistantMessageIdentity(message, { ...message, content });
 			}
 			case "branchSummary": {
 				const summary = deob(message.summary);

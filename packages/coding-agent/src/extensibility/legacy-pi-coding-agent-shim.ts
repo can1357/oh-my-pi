@@ -16,6 +16,7 @@ import { Database } from "bun:sqlite";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import {
+	inheritAssistantMessageIdentity,
 	type AgentMessage,
 	type AgentToolResult,
 	type AgentToolUpdateCallback,
@@ -1571,7 +1572,7 @@ export function sessionEntryToContextMessages(entry: SessionEntry): AgentMessage
 				message.role === "custom") &&
 			message.content == null
 		) {
-			return [{ ...message, content: [] }];
+			return [inheritAssistantMessageIdentity(message, { ...message, content: [] })];
 		}
 		return [message];
 	}

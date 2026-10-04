@@ -32,6 +32,7 @@ import {
 	type AgentToolContext,
 	type AgentToolResult,
 	type AgentTurnEndContext,
+	inheritAssistantMessageIdentity,
 	AppendOnlyContextManager,
 	type AsideMessage,
 	type BeforeToolCallContext,
@@ -393,7 +394,7 @@ import type { CacheWarmer, CacheWarmingMode, CacheWarmingStatus } from "./cache-
 import { isUserRequestEntry, transcriptEntryMessage, userTurnDraft } from "@oh-my-pi/pi-tui/chat/transcript-entry";
 import { formatSessionDumpText, formatSubagentDumpText, type SessionDumpArchive } from "./session-dump-format";
 import { collectSubSessions, type SubSession } from "./sub-sessions";
-import type { BranchSummaryEntry, NewSessionOptions } from "./session-entries";
+import type { BranchSummaryEntry, NewSessionOptions, SessionEntry } from "./session-entries";
 import { SessionHandoff, type SessionHandoffHost } from "./session-handoff";
 import {
 	COMPACTION_CHECK_NONE,
@@ -881,7 +882,7 @@ export class AgentSession implements SettingsScope {
 	#turnIndex = 0;
 	#messageEndPersistenceTail: Promise<void> = Promise.resolve();
 	#pendingMessageEndPersistence = new Map<string, Promise<void>>();
-	#persistedMessageKeys: { anchor: string; keys: Set<string> } | undefined;
+	#persistedMessageKeys: { anchor: SessionEntry | undefined; revision: number; keys: Set<string> } | undefined;
 
 	// Custom commands (TypeScript slash commands)
 	#customCommands: LoadedCustomCommand[] = [];
@@ -3205,11 +3206,9 @@ export class AgentSession implements SettingsScope {
 	 * display-side rewrite can make the assistant look missing after its tool
 	 * results have already persisted.
 	 *
-	 * Coherency is anchor-based, not invalidation-based: every branch mutation
-	 * (rewind, branch switch, new session, custom-entry append) changes the
-	 * session manager's leaf id or session file, so `#ensurePersistedMessageKeys`
-	 * detects staleness itself and rebuilds. No mutation call site has to
-	 * remember to invalidate anything.
+	 * Coherency follows the canonical leaf object and the manager's history
+	 * rewrite revision. The revision catches ancestor removal/reparenting that
+	 * retains the leaf object; ordinary appends update this cache incrementally.
 	 *
 	 * Pre-#3629 the equivalent was `sessionManager.getBranch()` called twice
 	 * per turn message, each call rebuilding the path via O(n²) `unshift` and
@@ -3221,15 +3220,19 @@ export class AgentSession implements SettingsScope {
 		return this.#ensurePersistedMessageKeys();
 	}
 
-	#persistedMessageKeysAnchor(): string {
-		return `${this.sessionManager.getSessionFile() ?? ""}\u0000${this.sessionManager.getLeafId() ?? ""}`;
+	#persistedMessageKeysAnchor(): SessionEntry | undefined {
+		// Reload can replace every message while retaining the file and leaf ID.
+		// Anchor to the canonical leaf object, not its serialized identity.
+		const leafId = this.sessionManager.getLeafId();
+		return leafId ? this.sessionManager.getEntry(leafId) : undefined;
 	}
 
 	#ensurePersistedMessageKeys(): Set<string> {
 		const anchor = this.#persistedMessageKeysAnchor();
+		const revision = this.sessionManager.getHistoryRewriteRevision();
 		let cache = this.#persistedMessageKeys;
-		if (cache === undefined || cache.anchor !== anchor) {
-			cache = { anchor, keys: this.#buildPersistedMessageKeySet() };
+		if (cache === undefined || cache.anchor !== anchor || cache.revision !== revision) {
+			cache = { anchor, revision, keys: this.#buildPersistedMessageKeySet() };
 			this.#persistedMessageKeys = cache;
 		}
 		return cache.keys;
@@ -3246,39 +3249,23 @@ export class AgentSession implements SettingsScope {
 	}
 
 	/**
-	 * True when {@link message} is structurally identical to a message already
-	 * appended to the current branch. Uses the current branch's memoized
-	 * persistence-key cache for the common missing-key case, and only walks the
-	 * branch to verify content when a key hit could be a rare collision.
-	 *
-	 * Error turns need one extra discriminator. An empty error turn carries no
-	 * content at all, so every failed attempt of one retry saga serializes to the
-	 * same `[]` — and when two attempts land in the same wall-clock millisecond
-	 * (mocked/zero retry delay, or a fast provider failure) they also share a
-	 * persistence key of `assistant:<ts>:<provider>:<model>::error`. Content
-	 * equality alone then reports the aggregated terminal turn ("Retry budget
-	 * exhausted after N retries: …") as a duplicate of the attempt error it
-	 * supersedes, and the session journal silently loses the record of why the
-	 * run stopped. The failure text is the only thing that distinguishes them.
+	 * True when the current branch already contains this emission. Assistant
+	 * identities are unique; other roles retain the structural collision check.
 	 */
 	#sessionMessageAlreadyPersisted(message: AgentMessage): boolean {
 		const key = sessionMessagePersistenceKey(message);
 		if (key === undefined) return false;
 		const keys = this.#ensurePersistedMessageKeys();
 		if (!keys.has(key)) return false;
+		// The validated anchor/revision makes this a current-branch membership
+		// check, without walking the branch again for every assistant redelivery.
+		if (message.role === "assistant") return true;
 		const branch = this.sessionManager.getBranch();
 		for (let index = branch.length - 1; index >= 0; index--) {
 			const entry = branch[index];
 			if (entry.type !== "message") continue;
 			if (sessionMessagePersistenceKey(entry.message) !== key) continue;
 			if (!sameMessageContent(entry.message, message)) continue;
-			if (
-				entry.message.role === "assistant" &&
-				message.role === "assistant" &&
-				entry.message.errorMessage !== message.errorMessage
-			) {
-				continue;
-			}
 			return true;
 		}
 		return false;
@@ -3294,7 +3281,10 @@ export class AgentSession implements SettingsScope {
 			| FileMentionMessage,
 	): string {
 		const cache = this.#persistedMessageKeys;
-		const wasFresh = cache !== undefined && cache.anchor === this.#persistedMessageKeysAnchor();
+		const wasFresh =
+			cache !== undefined &&
+			cache.anchor === this.#persistedMessageKeysAnchor() &&
+			cache.revision === this.sessionManager.getHistoryRewriteRevision();
 		const entryId = this.sessionManager.appendMessage(message);
 		if (message.role === "assistant") {
 			(message as PersistedAssistantMessage)[kPersistedSessionEntryId] = entryId;
@@ -3644,7 +3634,10 @@ export class AgentSession implements SettingsScope {
 			const message = event.message;
 			const deobfuscatedContent = deobfuscateAssistantContent(obfuscator, message.content);
 			if (deobfuscatedContent !== message.content) {
-				displayEvent = { ...event, message: { ...message, content: deobfuscatedContent } };
+				displayEvent = {
+					...event,
+					message: inheritAssistantMessageIdentity(message, { ...message, content: deobfuscatedContent }),
+				};
 			}
 		}
 
@@ -9962,7 +9955,9 @@ export class AgentSession implements SettingsScope {
 				if (calls.length > 0) {
 					const callIds = new Set(calls.map(call => call.id));
 					this.sessionManager.appendMessage(
-						sanitizeAssistantForReparentedHistory({ ...turn.message, content: calls }),
+						sanitizeAssistantForReparentedHistory(
+							inheritAssistantMessageIdentity(turn.message, { ...turn.message, content: calls }),
+						),
 					);
 					for (const result of siblingResults) {
 						if (callIds.has(result.toolCallId)) this.sessionManager.appendMessage(result);
@@ -10558,9 +10553,12 @@ export class AgentSession implements SettingsScope {
 					// 'H.content.filter')`. Normalize to `[]` so the recap surfaces an empty reply
 					// instead of turning a malformed side-channel response into a session-mute crash.
 					const rawContent = Array.isArray(event.message.content) ? event.message.content : [];
-					assistantMessage = this.#obfuscator?.hasSecrets()
-						? { ...event.message, content: deobfuscateAssistantContent(this.#obfuscator, rawContent) }
-						: { ...event.message, content: rawContent };
+					assistantMessage = inheritAssistantMessageIdentity(
+						event.message,
+						this.#obfuscator?.hasSecrets()
+							? { ...event.message, content: deobfuscateAssistantContent(this.#obfuscator, rawContent) }
+							: { ...event.message, content: rawContent },
+					);
 					break;
 				}
 				if (event.type === "error") {
@@ -10579,10 +10577,10 @@ export class AgentSession implements SettingsScope {
 		if (args.onTextDelta && replyText.length > emittedReplyText.length) {
 			await args.onTextDelta(replyText.slice(emittedReplyText.length));
 		}
-		const sanitizedMessage: AssistantMessage = {
+		const sanitizedMessage = inheritAssistantMessageIdentity(assistantMessage, {
 			...assistantMessage,
 			content: assistantMessage.content.filter(block => block.type !== "toolCall"),
-		};
+		});
 		return {
 			replyText:
 				args.dedupeReply === false ? replyText.trim() : dedupeEphemeralReply(replyText.trim(), args.replyMaxBytes),

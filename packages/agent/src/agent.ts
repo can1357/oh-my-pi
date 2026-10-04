@@ -64,7 +64,7 @@ import type {
 	ToolCallContext,
 	ToolChoiceDirective,
 } from "./types";
-import { isSoftToolRequirement } from "./types";
+import { inheritAssistantMessageIdentity, isSoftToolRequirement } from "./types";
 import { EventLoopKeepalive } from "./utils/yield";
 
 /**
@@ -1978,14 +1978,14 @@ export class Agent {
 			for (const { toolCallId } of bufferedCursorResults) retainedToolCallIds.add(toolCallId);
 			const errorMsg: AssistantMessage =
 				shouldEmitVisibleError && assistantPartial
-					? {
+					? inheritAssistantMessageIdentity(assistantPartial, {
 							...assistantPartial,
 							content: assistantPartial.content.filter(
 								block => block.type !== "toolCall" || retainedToolCallIds.has(block.id),
 							),
 							stopReason: "error",
 							errorMessage,
-						}
+						})
 					: {
 							role: "assistant",
 							content: [{ type: "text", text: "" }],

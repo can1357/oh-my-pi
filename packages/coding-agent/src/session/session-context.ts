@@ -1,4 +1,4 @@
-import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
+import { type AgentMessage, assistantMessageIdentity, inheritAssistantMessageIdentity } from "@oh-my-pi/pi-agent-core";
 import { customMessageEntryMessage, isUserRequestEntry } from "@oh-my-pi/pi-tui/chat/transcript-entry";
 import { getAnthropicCompactionPayload, isTurnStartEntry } from "@oh-my-pi/pi-agent-core/compaction";
 import {
@@ -317,6 +317,8 @@ export function buildSessionContext(
 		} else if (entry.type === "service_tier_change") {
 			serviceTier = coerceServiceTierByFamily(entry.serviceTier);
 		} else if (entry.type === "message" && entry.message.role === "assistant") {
+			// Stamp the canonical journal object before replay/display normalization copies it.
+			assistantMessageIdentity(entry.message);
 			// Legacy fallback: infer default model from assistant messages only
 			// when no explicit `model_change` (role=default) entry has been
 			// recorded yet. Newer sessions always record an explicit default
@@ -705,7 +707,7 @@ export function buildSessionContext(
 			if (normalized.length === 0 && !options?.transcript) {
 				messages.splice(i, 1);
 			} else {
-				const rewritten = { ...message, content: normalized };
+				const rewritten = inheritAssistantMessageIdentity(message, { ...message, content: normalized });
 				if (options?.transcript) {
 					// Display transcript: keep the turn (even content-less) and mark
 					// how many calls were dropped so the TUI renders a placeholder

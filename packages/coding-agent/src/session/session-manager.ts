@@ -9,7 +9,7 @@ import type {
 	TextContent,
 	Usage,
 } from "@oh-my-pi/pi-ai";
-import { createSyntheticToolResultMessage } from "@oh-my-pi/pi-agent-core";
+import { createSyntheticToolResultMessage, inheritAssistantMessageIdentity } from "@oh-my-pi/pi-agent-core";
 import {
 	directoryIsEnterable,
 	getBlobsDir,
@@ -803,6 +803,7 @@ export class SessionManager {
 	#hasTitleSlot = true;
 	#entries: SessionEntry[] = [];
 	#index = new SessionEntryIndex();
+	#historyRewriteRevision = 0;
 
 	/** File reflects all current entries; appends can go incrementally. */
 	#fileIsCurrent = false;
@@ -1895,6 +1896,7 @@ export class SessionManager {
 	}
 
 	#applyEntries(header: SessionHeader, entries: SessionEntry[]): void {
+		this.#historyRewriteRevision++;
 		this.#header = header;
 		this.#entries = entries;
 		this.#sessionId = header.id;
@@ -1945,6 +1947,7 @@ export class SessionManager {
 	}
 
 	#rollbackAtomicEntryBatch(batch: AtomicEntryBatch): void {
+		this.#historyRewriteRevision++;
 		const retainedAncestor = (id: string | null): string | null => {
 			const seen = new Set<string>();
 			while (id && batch.entryIds.has(id) && !seen.has(id)) {
@@ -2550,6 +2553,13 @@ export class SessionManager {
 		manager.#header.additionalDirectories =
 			manager.#additionalDirectories.length > 0 ? [...manager.#additionalDirectories] : undefined;
 		manager.#entries = structuredClone(this.#entries);
+		for (let index = 0; index < this.#entries.length; index++) {
+			const source = this.#entries[index]!;
+			const copy = manager.#entries[index]!;
+			if (source.type === "message" && copy.type === "message") {
+				inheritAssistantMessageIdentity(source.message, copy.message);
+			}
+		}
 		manager.#index.rebuild(manager.#entries);
 		manager.#forceFileCreation = true;
 		await manager.#rewriteAtomically();
@@ -3424,6 +3434,8 @@ export class SessionManager {
 	 * outputs). Use sparingly.
 	 */
 	async rewriteEntries(): Promise<void> {
+		// Callers may have mutated existing entries, retaining the leaf object.
+		this.#historyRewriteRevision++;
 		if (!this.#persist || !this.#sessionFile) return;
 		await this.#rewriteAtomically();
 	}
@@ -3526,6 +3538,11 @@ export class SessionManager {
 
 	getLeafEntry(): SessionEntry | undefined {
 		return this.#index.leafEntry();
+	}
+
+	/** Changes when existing history is rewritten, not on ordinary appends. */
+	getHistoryRewriteRevision(): number {
+		return this.#historyRewriteRevision;
 	}
 
 	/**
@@ -3647,6 +3664,7 @@ export class SessionManager {
 		const canReparentChildren = children.every(child => child.type === "service_tier_change");
 		let leafId = entry.parentId;
 		if (canReparentChildren) {
+			this.#historyRewriteRevision++;
 			for (const child of children) {
 				child.parentId = leafId;
 				leafId = child.id;
@@ -3732,6 +3750,7 @@ export class SessionManager {
 		}
 
 		this.#header = header;
+		this.#historyRewriteRevision++;
 		this.#entries = [...entriesToKeep, ...labels];
 		this.#sessionId = newSessionId;
 		this.#sessionName = header.title;
