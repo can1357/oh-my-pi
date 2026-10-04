@@ -172,7 +172,7 @@ export const cfgAdvisorJudgeGate = register({
 		group: "Advisor",
 		label: "Advisor Judge Gate (experimental)",
 		description:
-			"Before each in-progress review, ask the 'judge' model role whether the update shows risk. Low-risk updates are held for the next review instead of costing a full advisor turn. Final turns are always reviewed; judge failures review anyway.",
+			"Before each in-progress review, ask the 'judge' model role whether the update shows risk. Low-risk updates are held for the next review instead of costing a full advisor turn. Final turns are never gated, though review cadence can still hold them; judge failures review anyway.",
 		condition: "advisorEnabled",
 	},
 });

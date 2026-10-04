@@ -1769,6 +1769,34 @@ describe("advisor", () => {
 			expect(review).toContain("final step two");
 		});
 
+		it("does not let a late gate verdict review updates held after it", async () => {
+			const promptInputs: Array<string | AgentMessage[]> = [];
+			const agent = makeAgent(promptInputs);
+			const verdictA = Promise.withResolvers<boolean>();
+			const verdicts = [verdictA.promise, Promise.resolve(false)];
+			const messages: AgentMessage[] = [{ role: "user", content: "step A", timestamp: 1 } as AgentMessage];
+			const runtime = new AdvisorRuntime(agent, {
+				snapshotMessages: () => messages,
+				gateReview: () => verdicts.shift()!,
+			});
+
+			runtime.onTurnEnd(messages, { willContinue: true });
+			messages.push({ role: "user", content: "final step B", timestamp: 2 } as AgentMessage);
+			runtime.onTurnEnd(messages);
+			await runtime.waitForCatchup(1_000, 1);
+			messages.push({ role: "user", content: "routine step C", timestamp: 3 } as AgentMessage);
+			runtime.onTurnEnd(messages, { willContinue: true });
+			verdictA.resolve(true);
+			// The runtime's reaction to A's verdict runs before ours; any review it queued drains here.
+			await verdictA.promise;
+			await runtime.waitForCatchup(1_000, 1);
+
+			// A rode along with B's review; C was judged low-risk and stays held.
+			expect(promptInputs).toHaveLength(1);
+			expect(promptText(promptInputs[0])).toContain("step A");
+			expect(promptText(promptInputs[0])).not.toContain("routine step C");
+		});
+
 		it("reviews an in-progress update when the review gate fails", async () => {
 			const promptInputs: Array<string | AgentMessage[]> = [];
 			const agent = makeAgent(promptInputs);
