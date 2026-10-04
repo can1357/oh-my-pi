@@ -47,7 +47,7 @@ import {
 	splitPathAndSelPreferringLiteral,
 } from "./path-utils";
 import { type LineRange, parseLineRanges, selectorLineRanges } from "@oh-my-pi/pi-tui/tools/line-ranges";
-import { splitPathAndSel } from "@oh-my-pi/pi-tui/tools/read";
+import { isReadableUrlPath, splitPathAndSel } from "@oh-my-pi/pi-tui/tools/read";
 import { toPathList } from "@oh-my-pi/pi-tui/render/render-utils";
 import { isRawSelector } from "./read-selector";
 import { formatCodeFrameLine } from "@oh-my-pi/pi-tui/render/render-utils";
@@ -168,6 +168,14 @@ async function parsePathSpecs(rawEntries: readonly string[], cwd: string): Promi
 		if (!literalFilesystemMatch && split.sel) {
 			const parsed = parseLineRanges(split.sel);
 			if (!parsed) {
+				// Readable URLs accept read display-mode selectors (:raw/:conflicts):
+				// strip the selector and search the whole resource — the display
+				// mode carries no meaning for content search (#14092). Matches the
+				// internal-URL handling above.
+				if (isReadableUrlPath(split.path) && isReadSelectorGrammar(split.sel)) {
+					specs.push({ original: entry, clean: split.path, ranges: undefined });
+					continue;
+				}
 				throw new ToolError(
 					`path entry "${entry}" — only line-range selectors like ":50-100" are supported (no ":raw"/":conflicts")`,
 				);
@@ -407,7 +415,9 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 			}
 			const scopedPaths = toPathList(rawPath);
 			const effectivePaths = scopedPaths.length > 0 ? scopedPaths : ["."];
-			const rawEntries = await expandDelimitedPathEntries(effectivePaths, this.session.cwd);
+			const rawEntries = await expandDelimitedPathEntries(effectivePaths, this.session.cwd, {
+				routedUrlPredicate: entry => InternalUrlRouter.instance().canHandle(entry),
+			});
 			const pathSpecs = await parsePathSpecs(rawEntries, this.session.cwd);
 			const resolveContext = sessionResolveContext(this.session, { signal });
 			// Internal URLs resolve inside the native search, bounded by the tier this call was approved at.
