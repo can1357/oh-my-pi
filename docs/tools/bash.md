@@ -11,8 +11,10 @@
   - `packages/coding-agent/src/internal-urls/url-filesystem.ts` — router-backed shell filesystem for `scheme://` paths.
   - `packages/coding-agent/src/tools/bash-pty-selection.ts` — `canUseInteractiveBashPty()` decides whether a call may use the local PTY overlay.
   - `packages/coding-agent/src/tools/gh-cache-invalidation.ts` — drops `github-cache` rows for mutating `gh issue`/`gh pr` subcommands.
+  - `packages/coding-agent/src/tools/bash-worktree-rewrite.ts` — optional `git worktree add` clone rewrite.
+  - `packages/coding-agent/src/launch/services.ts` — named-service validation and launch-broker calls.
   - `packages/coding-agent/src/exec/bash-executor.ts` — non-PTY shell execution.
-  - `packages/coding-agent/src/session/streaming-output.ts` — tail buffer, truncation, artifact spill.
+  - `packages/tui/src/tools/streaming-output.ts` — streaming buffer, truncation, artifact spill.
   - `packages/coding-agent/src/tools/tool-timeouts.ts` — timeout clamp bounds.
   - `packages/coding-agent/src/exec/settings.ts` — default interceptor rules.
   - `docs/bash-tool-runtime.md` — deeper executor/runtime notes; use as the companion doc for shell-session internals.
@@ -22,13 +24,16 @@
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
 | `command` | `string` | Yes | Shell command text to execute. A leading `cd <path> && ...` is rewritten into `cwd` only when `cwd` was omitted. |
-| `timeout` | `number` | No | Timeout in seconds. Default `300`. `0` disables the deadline. Positive values are capped by `tools.maxTimeout` when that setting is positive, then clamped to the Bash range `1..3600`. |
-| `cwd` | `string` | No | Working directory, resolved against `session.cwd` via `resolveToCwd`. Must exist and be a directory. |
-| `pty` | `boolean` | No | Request PTY mode. Default `false`. Foreground PTY requires a UI and `PI_NO_PTY !== "1"`; named services forward this setting to the broker. |
+| `timeout` | `number` | No | Timeout in seconds. Default `300`. `0` disables the deadline. Nonzero values (including the default) are capped by a positive `tools.maxTimeout`, then clamped to `1..3600`. |
+| `cwd` | `string` | No | Working directory, resolved against `session.cwd` via `resolveToCwd`, or a registered internal URL directory for embedded-shell execution. Must exist and be a directory. |
+| `pty` | `boolean` | No | Request PTY mode. Default `false` for finite commands, `true` for named services. Foreground PTY requires a UI and `PI_NO_PTY !== "1"`; named services forward this setting to the broker. |
 | `async` | `boolean` | No | Background execution request. Present only when `async.enabled` is true for the session. Returns immediately with a job id instead of waiting; it does not change the effective deadline, including a disabled deadline from `timeout: 0`. |
-| `name` | `string` | No | Supervised service name (≤48 characters; project-unique). Present only when `launch.enabled` and the session can launch. A live name restarts using the new spec. Incompatible with `async` and `timeout`. |
-| `ready` | `{ log?: string; port?: number; host?: string; timeout?: number }` | No | Service readiness: output regex and/or TCP port must pass; host defaults to `127.0.0.1`, timeout to 30 seconds. Only with `name`. |
-| `env` | `Record<string, string>` | No | Environment overrides for the service. Only with `name`. |
+| `name` | `string` | No | Project-unique supervised service name: 1–48 letters, numbers, dots, underscores, or hyphens, starting with a letter or number. Present only when `launch.enabled` and Bash is active. Blank names select finite-command mode. A live name restarts using the new spec. Incompatible with `async: true` or any supplied `timeout`. |
+| `ready` | `{ log?: string; port?: number; host?: string; timeout?: number }` | No | Service readiness requires a nonblank log regex and/or integer TCP port `1..65535`; all supplied conditions must pass. Host defaults to `127.0.0.1`, timeout to 30 seconds (clamped to `0.05..3600`). Without `name`, a nonempty spec is ignored with a notice. |
+
+There is no `env` input. Named services inherit the configured shell environment; put command-specific assignments in `command`.
+
+Without `name`, `pty`, or a client terminal, commands run in the embedded POSIX-compatible brush shell, even when `shellPath` points to PowerShell or another external shell. `shellPath` selects the external shell for named services, supported terminal routes, and interactive `!` commands; a bash path may still supply environment and rc snapshots to the embedded session. To use PowerShell syntax in a plain tool call, invoke `pwsh -Command '...'` explicitly, quoting so brush preserves PowerShell's `$` variables.
 
 Named service example:
 ```json
@@ -36,20 +41,20 @@ Named service example:
 ```
 
 ## Outputs
-The tool returns a single `text` content block plus optional `details`.
+The tool returns a `text` content block plus optional `details` and image blocks decoded from terminal graphics.
 
 - Success, foreground:
   - `content[0].text`: command output, or `(no output)` when the command produced nothing.
   - `details.timeoutSeconds`: effective positive timeout after global/per-tool clamping, or `details.timeoutDisabled: true` when `timeout: 0`.
-  - `details.requestedTimeoutSeconds`: present when a positive requested timeout differed from the effective timeout.
+  - `details.requestedTimeoutSeconds`: present when the requested/default timeout differs from the effective timeout, including `0` when the deadline is disabled.
   - `details.wallTimeMs`: elapsed wall-clock milliseconds for completed local/client-terminal runs.
-  - `details.terminalId`: present when execution was routed through a client terminal bridge.
+  - `details.terminalId`: present in streaming updates when execution is routed through a client terminal bridge; not retained in the completed result.
   - `details.exitCode`: present when the command completed with a non-zero exit code.
-  - `details.timedOut: true`: present on local/PTY timeout results.
+  - `details.timedOut: true`: present on local, PTY, and client-terminal timeout results.
   - `details.meta.truncation`: present when output was truncated in memory; includes `artifactId` when full output spilled to an artifact.
-  - non-zero exits and local/PTY timeouts return a tool result marked `isError`; definite non-zero output ends with `Command exited with code <n>`.
+  - non-zero exits and timeouts return a tool result marked `isError`; definite non-zero output ends with `Command exited with code <n>`.
 - Success, background start (`async: true` or auto-background):
-  - `content[0].text`: optional preview tail and notices, followed by `Backgrounded as job <id>; result will be delivered automatically.`
+  - `content[0].text`: optional preview tail and notices, followed by `Backgrounded as job <id> (killed once it has run <n>s in total; …)` — or `(no deadline)` under `timeout: 0` — and the no-polling instruction (`formatBackgroundNotice` in `packages/tui/src/tools/bash.ts`), so the model sees the job's deadline before it waits on the result. The deadline counts from job start, so an auto-backgrounded command has already spent its foreground wait.
   - `details.async`: `{ state: "running", jobId, type: "bash" }`.
   - `read proc://` lists owned jobs and project services; `read proc://<id>` inspects status/output without consuming result delivery; `write proc://<id>/kill` cancels the job without requiring `content`.
 - Success, named service (`name`): executes `command` through the user's shell under the launch broker, returning readiness, exit, or readiness timeout with state and log tail. A live name is stopped and restarted with the new spec; exit notifications still auto-deliver. `read proc://<name>` inspects status/logs; `write proc://<name>` sends stdin (appends Enter unless content already ends with newline, including empty content); `write proc://<name>/kill` stops it. `write proc://<name>/mode` accepts `persist`, `session`, or `detached`.
@@ -58,7 +63,7 @@ The tool returns a single `text` content block plus optional `details`.
   - running updates contain tail text and `details.async.state: "running"` only after the job is considered backgrounded.
   - completion/failure updates carry final text and `details.async.state: "completed" | "failed"`. A non-zero exit or timeout is recorded as a failed background job.
 - Failure:
-  - cancellation, missing exit status, validation failures, intercepted commands, and client-terminal-bridge timeouts throw `ToolError` / `ToolAbortError`.
+  - cancellation, missing exit status, validation failures, and intercepted commands throw `ToolError` / `ToolAbortError`; timeouts return an error result.
 
 Stdout and stderr are merged before the model sees them. Definite non-zero exit codes are appended to the returned error result text as `Command exited with code <n>`.
 
@@ -73,7 +78,7 @@ Two independent settings can prevent a Bash subprocess from starting. They serve
 
 ### `bash.patterns`: permission policy
 
-`bash.patterns` is for commands that must be allowed, confirmed by a person, or refused regardless of whether another tool could perform the work. Rules are ordered; the first matching rule wins. Each rule has a `match` glob and an `approval` value of `allow`, `prompt`, or `deny`.
+`bash.patterns` is for commands that must be allowed, confirmed by a person, or refused regardless of whether another tool could perform the work. Rules are ordered; the first matching rule wins. Each rule has a `match` glob and an `approval` value of `allow`, `prompt`, or `deny`. Whitespace runs in both the glob and the command collapse to a single space before matching, so a newline in a glob matches any whitespace (`"*\n*"` behaves like `"* *"`).
 
 ```yaml
 bash:
@@ -88,7 +93,8 @@ bash:
 
 - `deny` stops the call before `BashTool.execute()` runs, including in `yolo` mode.
 - `prompt` displays an approval request. Only an accepted request proceeds to `BashTool.execute()`.
-- `allow` can lower the approval tier for a simple command, but it cannot approve a compound command. For example, `match: "git *"` does not approve `git status && rm -rf build`.
+- By default, `allow` can lower the approval tier for a simple command, but cannot approve a compound command. For example, `match: "git *"` does not approve `git status && rm -rf build`.
+- With `bash.allowCompoundCommands: true` (default `false`) and a configured POSIX shell, literal `&&` chains are evaluated per command. Every segment needs an `allow` rule to allow the chain; an unmatched segment retains normal exec-tier approval. Segment rules remain first-match-wins, any segment or chain-wide deny wins, and prompts are retained. Expansions, other shell operators, and critical command patterns do not gain an allow bypass.
 - `deny` and `prompt` check the complete command and each shell command segment. A rule such as `match: "rm -rf *"` therefore catches `cd /tmp && rm -rf build`.
 
 Use this setting for safety and user control. It remains useful for commands with no appropriate replacement tool, such as destructive removal, network access, deployment scripts, or project-specific scripts.
@@ -133,16 +139,18 @@ Choose the setting by the desired outcome:
 - Use `bash.patterns` when the question is **whether the command may execute**.
 - Use `bashInterceptor.patterns` when the question is **which tool should perform the operation**.
 
+## Flow
+
 1. `BashTool.execute()` in `packages/coding-agent/src/tools/bash.ts` reads `command`. A `name` selects supervised service mode (through the user's shell and launch broker); normal Bash execution defaults `timeout` to `300`.
 2. If `cwd` is absent, it rewrites a leading `cd <path> && ...` into the structured `cwd` field and strips that prefix from `command`.
 3. If `async: true` is requested while `async.enabled` is off, it throws `ToolError` before any execution.
 4. If `bashInterceptor.enabled` is on, `checkBashInterception()` runs against both the original command and the `cd`-stripped command. For each form, configured regexes still check the complete input first, then each flat command separated by unquoted/unescaped `&&`, `||`, `;`, `|`, `|&`, `&`, or newlines (excluding stages that consume piped stdin from `|` or `|&`, including across blank/comment continuations), followed by versions of those fragments without leading `NAME=value` assignments. A matching enabled rule throws before execution.
-5. The command text is passed through unchanged; a per-run `InternalUrlFilesystem` is injected into the native shell so every `scheme://` path resolves at operation time.
+5. When `worktree.clone` is enabled, recognized literal `git worktree add` commands are rewritten to the clone-backed worktree helper. GitHub cache invalidation then runs. A per-run `InternalUrlFilesystem` is injected into the native shell so `scheme://` paths resolve at operation time.
 6. A host `cwd` resolves against `session.cwd` and `fs.stat()` verifies it is a directory; a URL `cwd` is checked through the URL filesystem and handed to the shell as-is (service and PTY modes refuse it).
-7. `timeout: 0` disables the deadline. Otherwise `clampTimeout("bash", requestedTimeoutSec, tools.maxTimeout)` applies a positive global ceiling (when configured), then `TOOL_TIMEOUTS.bash` (`min: 1`, `max: 3600`). When clamped, `#buildCompletedResult()` / `#buildBackgroundStartResult()` append a notice line.
+7. Named services dispatch before finite-command timeout handling, default PTY to `true`, and use `ready.timeout` only for readiness. For finite commands, `timeout: 0` disables the deadline; otherwise `clampTimeout("bash", requestedTimeoutSec, tools.maxTimeout)` applies a positive global ceiling, then `TOOL_TIMEOUTS.bash` (`min: 1`, `max: 3600`). Clamping adds a notice line.
 8. Execution path splits:
    1. `async: true` -> `#startManagedBashJob()` registers a session async job and returns immediately.
-   2. Non-PTY with `bash.autoBackground.enabled`, an async job manager below its running-job cap, and no client-terminal bridge available (the bridge wins when both apply) -> starts a managed job, waits up to `min(thresholdMs, timeoutMs - 1000)`, and either returns the completed result or converts the run into a background job.
+   2. Non-PTY with `bash.autoBackground.enabled`, an async job manager below its running-job cap, and no client-terminal bridge available (the bridge wins when both apply) -> starts a managed job, waits up to `min(thresholdMs, max(0, timeoutMs - 1000))` when a deadline exists, and either returns the completed result or converts the run into a background job.
    3. Non-PTY client-terminal bridge, when the session advertises terminal capability and `pty` is false -> creates a remote terminal, streams/polls current output, and releases the terminal after completion.
    4. Otherwise runs foreground execution.
 9. Foreground non-PTY without client terminal calls `executeBash()` from `packages/coding-agent/src/exec/bash-executor.ts`; that path performs direnv/devenv preflight itself.
@@ -152,7 +160,7 @@ Choose the setting by the desired outcome:
 13. `runInteractiveBashPty()` creates a `PtySession`, overlays an xterm-backed console UI, forwards user key input into the PTY, captures output through `OutputSink`, and kills the PTY on dismiss/dispose.
 14. Client-terminal bridge mode calls `session.getClientBridge().createTerminal(...)`, emits `terminalId` updates, polls output until exit/timeout/abort, maps signal exits to `137`, and releases the handle in `finally`.
 15. On completion, `#buildCompletedResult()` formats `(no output)` when needed, attaches truncation metadata from the output summary, appends wall-time/timeout/exit notices, and re-checks unfinished status before returning.
-16. Local/PTY timeout outcomes become `isError` results with `details.timedOut`; client-terminal timeout and cancellation/missing exit status paths throw with captured output when available.
+16. Local, PTY, and client-terminal timeout outcomes become `isError` results with `details.timedOut`. Client-terminal allocation/polling races the deadline; on timeout, late allocations are cleaned up or the live terminal is killed before a bounded final output read. Cancellation and missing exit status still throw.
 
 ## Modes / Variants
 1. Foreground non-PTY local
@@ -174,8 +182,8 @@ Choose the setting by the desired outcome:
    - Requires `bash.autoBackground.enabled`, no PTY/client-terminal bridge, and an async job manager below its running-job cap.
    - Starts like a foreground managed job, then backgrounds it when it outlives the wait window; at capacity, Bash falls back to direct foreground execution.
 6. Named supervised service
-   - Requires `launch.enabled` and a launch-capable session; `async` and `timeout` are incompatible.
-   - Runs through the launch broker with project-unique `name`, optional `env`, and optional readiness conditions. Reusing a live name restarts it with the new spec.
+   - Requires `launch.enabled` and an active Bash tool; `async: true` and any supplied `timeout` are incompatible.
+   - Runs through the launch broker with project-unique `name`, the configured shell environment, PTY defaulting to `true`, and optional readiness conditions. Reusing a live name restarts it with the new spec.
    - Readiness waits for all supplied log/port conditions, service exit, or timeout. Inspect with `read proc://<name>`.
 7. Intercepted command
    - No subprocess created.
@@ -208,11 +216,12 @@ Choose the setting by the desired outcome:
 - Default timeout: `300s` (`TOOL_TIMEOUTS.bash.default` in `packages/coding-agent/src/tools/tool-timeouts.ts`).
 - `timeout: 0` disables the command deadline.
 - Positive timeout clamp: `tools.maxTimeout` is an optional global ceiling (`0` means no global ceiling), followed by the Bash `1..3600s` range.
-- Auto-background default threshold: `60_000ms` (`DEFAULT_AUTO_BACKGROUND_THRESHOLD_MS` in `packages/coding-agent/src/tools/bash.ts`), further capped to `timeoutMs - 1000` when a deadline exists; a disabled deadline leaves the threshold uncapped.
-- Non-PTY executor with a deadline arms a host-side timer at `max(1_000, timeoutMs)` and passes the same positive timeout to the native run; `timeout: 0` passes no deadline. A timed-out persistent shell session is quarantined (`packages/coding-agent/src/exec/bash-executor.ts`).
-- In-memory output tail cap: `50 * 1024` bytes (`DEFAULT_MAX_BYTES` in `packages/coding-agent/src/session/streaming-output.ts`). Once exceeded, the sink keeps only the tail window in memory.
+- Auto-background default threshold: `60_000ms` (`cfgBashAutoBackgroundThresholdMs`, `bash.autoBackground.thresholdMs`, in `packages/coding-agent/src/exec/settings.ts`), further capped to `max(0, timeoutMs - 1000)` when a deadline exists; a disabled deadline leaves the threshold uncapped.
+- Non-PTY tool execution passes its positive timeout to the native run, which owns deadline enforcement. A host-side watchdog waits `max(1_000, timeoutMs) + 5_000ms` for native cancellation/output draining; if it wins, the result warns that output may be incomplete and quarantines the persistent session. `timeout: 0` arms neither deadline nor watchdog (`packages/coding-agent/src/exec/bash-executor.ts`).
+- Streaming-update tail cap: `50 * 1024` bytes (`DEFAULT_MAX_BYTES` in `packages/tui/src/tools/streaming-output.ts`). The local executor's result sink defaults to the same byte budget and preserves an initial head window (`tools.artifactHeadBytes`, default 20 KiB) alongside the rolling tail; set that setting to `0` for tail-only retention.
+- Result postprocessing uses `tools.artifactSpillThreshold` (default 50 KiB) and head/tail windows (both default 20 KiB). The final Bash boundary also applies the spill threshold plus 2 KiB of notice slack. `tools.outputMaxColumns` defaults to a 768-byte per-line cap for streaming output.
 - Streaming callback throttle in `executeBash()`: `50ms` between `onChunk` calls when streaming is enabled.
-- TUI collapsed preview: `10` visual lines (`BASH_DEFAULT_PREVIEW_LINES`) when rendered inline in the agent UI; this is a renderer cap, not a tool output cap.
+- TUI collapsed preview: `10` visual lines (`DEFAULT_TERMINAL_PREVIEW_LINES`) when rendered inline in the agent UI; this is a renderer cap, not a tool output cap.
 
 ## Errors
 - Input validation:
@@ -227,9 +236,9 @@ Choose the setting by the desired outcome:
 - Execution:
   - non-zero exit -> returned tool result marked `isError`, with `details.exitCode` and text ending in `Command exited with code <n>`.
   - missing exit code -> thrown `ToolError` with `Command failed: missing exit status`.
-  - timeout -> local/PTY execution returns an `isError` result with `details.timedOut: true` and a timeout notice; the client-terminal bridge throws `ToolError` after killing the terminal and attempting a final output read. Managed background execution records either form as a failed job.
+  - timeout -> local, PTY, and client-terminal execution return an `isError` result with `details.timedOut: true` and a timeout notice. Managed background execution records it as a failed job.
   - user abort -> `ToolAbortError` when the caller signal is aborted.
-- Artifact allocation / artifact save failures are swallowed in `saveBashOriginalArtifact()` and `OutputSink.#createFileSink()`; execution continues without that artifact.
+- Artifact allocation/save failures in `saveBashOriginalArtifact()` do not fail the command. Sink artifact failures also permit execution to continue, but return `artifactError` metadata and an incomplete-capture notice instead of advertising an incomplete artifact as full output.
 
 ## Notes
 - `strict = true` is set on `BashTool`; `concurrency` is resolved per call: `pty: true` is `"exclusive"` (it takes over the terminal UI), everything else is `"shared"`, so multiple non-pty bash calls in one assistant message run in parallel. When parallel calls overlap on the same shell session key, the first owns the persistent `Shell`; the rest run in isolated one-shot shells (see `shellSessionsInUse` in `bash-executor.ts`).
@@ -244,7 +253,6 @@ Choose the setting by the desired outcome:
   - `sed -i`, `perl -i`, `awk -i inplace` -> `edit`
   - `echo|printf|cat <<` with redirection -> `write`
 - PTY mode is ignored in non-UI contexts and when `PI_NO_PTY=1` (gated by `canUseInteractiveBashPty()`); the tool falls back to non-PTY execution and appends a `pty requested but unavailable in this environment; ran without a terminal` notice.
-- Non-PTY runs layer `NON_INTERACTIVE_ENV` via `buildNonInteractiveEnv()`; PTY runs instead inherit the user environment with `TERM=xterm-256color` prepended before any direnv-provided values.
+- Non-PTY runs layer `NON_INTERACTIVE_ENV` via `buildNonInteractiveEnv()`; PTY runs instead get the shell spawn environment (`getShellConfig().env`) minus `GIT_EDITOR`, `GPG_TTY`, `CI`, and `NO_COLOR`, then `TERM=xterm-256color`, then any direnv-provided values, which win.
 - When the shell minimizer rewrites output inside `executeBash()`, the visible output is replaced with minimized text and a `[raw output: artifact://<id>]` footer may be appended if `onMinimizedSave` persisted the original text.
-- The TUI renderer parses partial JSON to recover `env` assignments early in streaming previews; that behavior is display-only.
 - For executor internals that are not tool-specific — shell session reuse keys, snapshots, prefix handling, and native timeout behavior — see `docs/bash-tool-runtime.md`.

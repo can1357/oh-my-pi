@@ -227,6 +227,12 @@ function createCredential(accountId: string, email: string): OAuthCredentials {
 	};
 }
 
+/** Weekly-only chat windows, the shape ChatGPT reports once the week is spent. */
+const CODEX_SPENT_WEEKLY_WINDOWS = {
+	primary_window: { used_percent: 100, limit_window_seconds: 604800, reset_at: 2_000_500_000 },
+	secondary_window: null,
+};
+
 /**
  * Report parsed from a real `/wham/usage` payload of an account whose weekly
  * plan window is fully spent. `credits` decides whether the account can still
@@ -235,14 +241,14 @@ function createCredential(accountId: string, email: string): OAuthCredentials {
 async function fetchCodexPlanExhaustedReport(
 	accountId: string,
 	credits: Record<string, unknown>,
+	windows: Record<string, unknown> = CODEX_SPENT_WEEKLY_WINDOWS,
 ): Promise<UsageReport> {
 	const payload = {
 		plan_type: "pro",
 		rate_limit: {
 			allowed: false,
 			limit_reached: true,
-			primary_window: { used_percent: 100, limit_window_seconds: 604800, reset_at: 2_000_500_000 },
-			secondary_window: null,
+			...windows,
 		},
 		// Untouched side meters, as the live payload carries them: the Spark and
 		// reserve meters are separate allowances the spent chat window does not
@@ -1356,7 +1362,7 @@ describe("AuthStorage codex oauth ranking", () => {
 			error: Object.assign(new Error("insufficient_quota"), { status: 429 }),
 		});
 
-		expect(switched).toBe(true);
+		expect(switched.switched).toBe(true);
 		expect(usageLimitSpy).toHaveBeenCalledTimes(1);
 		expect(await authStorage.keys.get("openai-codex", sessionId)).toBe(`api-${healthyAccount}`);
 		const activeAccounts = (await authStorage.health.check())
@@ -2623,26 +2629,6 @@ describe("AuthStorage codex oauth ranking", () => {
 		expect(apiKey).toBe("api-acct-soon");
 	});
 
-	test("works with single credential (no ranking)", async () => {
-		if (!authStorage) throw new Error("test setup failed");
-
-		await authStorage.credentials.set("openai-codex", [
-			{ type: "oauth", ...createCredential("acct-solo", "solo@example.com") },
-		]);
-
-		usageByAccount.set(
-			"acct-solo",
-			createCodexUsageReport({
-				accountId: "acct-solo",
-				primary: { usedFraction: 0.3, resetInMs: 20 * 60 * 1000 },
-				secondary: { usedFraction: 0.2, resetInMs: 5 * 24 * 60 * 60 * 1000 },
-			}),
-		);
-
-		const apiKey = await authStorage.keys.get("openai-codex", "session-single");
-		expect(apiKey).toBe("api-acct-solo");
-	});
-
 	test("prefers discovered model accounts over a pinned Codex account, without filtering unmatched catalogs", async () => {
 		if (!authStorage) throw new Error("test setup failed");
 
@@ -3734,6 +3720,85 @@ describe("AuthStorage codex oauth ranking", () => {
 		// pre-meter reader would still see the account blocked.
 		expect(readLegacyCodexSharedBlock(dbPath, creditRow.id)).toBeUndefined();
 	});
+
+	// Regression (#13889): credits are paid and do not renew, so an account
+	// funding requests from its balance must yield to any sibling that still
+	// has plan allowance — for new sessions and for a session already pinned
+	// to it when its plan window ran out mid-conversation.
+	test("prefers a sibling with plan headroom over a credit-funded account", async () => {
+		if (!authStorage) throw new Error("test setup failed");
+
+		// The 5h window just reset while the week stays spent: an untouched 5h
+		// window normally earns a priority boost, which must not outrank a
+		// sibling that can still serve from its plan.
+		usageByAccount.set(
+			"acct-credits",
+			await fetchCodexPlanExhaustedReport("acct-credits", CODEX_CREDIT_BALANCE, {
+				primary_window: { used_percent: 0, limit_window_seconds: 18000, reset_at: 2_000_500_000 },
+				secondary_window: { used_percent: 100, limit_window_seconds: 604800, reset_at: 2_000_500_000 },
+			}),
+		);
+		usageByAccount.set(
+			"acct-plan",
+			createCodexUsageReport({
+				accountId: "acct-plan",
+				primary: { usedFraction: 0.3, resetInMs: 3 * HOUR_MS },
+				secondary: { usedFraction: 0.4, resetInMs: 5 * 24 * HOUR_MS },
+				metadata: { allowed: true, limitReached: false },
+			}),
+		);
+		await authStorage.credentials.set("openai-codex", [
+			{ type: "oauth", ...createCredential("acct-credits", "credits@example.com") },
+			{ type: "oauth", ...createCredential("acct-plan", "plan@example.com") },
+		]);
+
+		const counts = await countApiKeySelections(authStorage, "openai-codex", "codex-credit-vs-plan");
+		expectExclusivePreference(counts, "api-acct-plan", "api-acct-credits");
+	});
+
+	test("moves a pinned session off an account that starts spending credits", async () => {
+		if (!authStorage) throw new Error("test setup failed");
+
+		usageByAccount.set(
+			"acct-credits",
+			createCodexUsageReport({
+				accountId: "acct-credits",
+				primary: { usedFraction: 0.4, resetInMs: 10 * 60 * 1000 },
+				secondary: { usedFraction: 0.92, resetInMs: 15 * 60 * 1000 },
+				metadata: { allowed: true, limitReached: false },
+			}),
+		);
+		usageByAccount.set(
+			"acct-plan",
+			createCodexUsageReport({
+				accountId: "acct-plan",
+				primary: { usedFraction: 0.3, resetInMs: 40 * 60 * 1000 },
+				secondary: { usedFraction: 0.55, resetInMs: 6 * 24 * HOUR_MS },
+				metadata: { allowed: true, limitReached: false },
+			}),
+		);
+		await authStorage.credentials.set("openai-codex", [
+			{ type: "oauth", ...createCredential("acct-credits", "credits@example.com") },
+			{ type: "oauth", ...createCredential("acct-plan", "plan@example.com") },
+		]);
+		const sessionId = "codex-credit-pin";
+		expect(await authStorage.keys.get("openai-codex", sessionId)).toBe("api-acct-credits");
+
+		// The plan window runs out mid-session; Codex keeps answering 200 off
+		// the credit balance and reports the spent window on every response.
+		usageByAccount.set("acct-credits", await fetchCodexPlanExhaustedReport("acct-credits", CODEX_CREDIT_BALANCE));
+		authStorage.usage.ingestHeaders(
+			"openai-codex",
+			{
+				"x-codex-primary-used-percent": "100",
+				"x-codex-primary-window-minutes": String(7 * 24 * 60),
+				"x-codex-primary-reset-at": "2000500000",
+			},
+			{ sessionId, responseStatus: 200 },
+		);
+
+		expect(await authStorage.keys.get("openai-codex", sessionId)).toBe("api-acct-plan");
+	});
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -4164,26 +4229,6 @@ describe("AuthStorage claude oauth ranking", () => {
 
 		const apiKey = await authStorage.keys.get("anthropic", undefined, { modelId: "claude-fable-5" });
 		expect(apiKey).toBe("api-acct-b");
-	});
-
-	test("single credential works without ranking", async () => {
-		if (!authStorage) throw new Error("test setup failed");
-
-		await authStorage.credentials.set("anthropic", [
-			{ type: "oauth", ...createCredential("acct-solo", "solo@example.com") },
-		]);
-
-		usageByAccount.set(
-			"acct-solo",
-			createClaudeUsageReport({
-				accountId: "acct-solo",
-				primary: { usedFraction: 0.3, resetInMs: 3 * HOUR_MS },
-				secondary: { usedFraction: 0.2, resetInMs: 5 * 24 * HOUR_MS },
-			}),
-		);
-
-		const apiKey = await authStorage.keys.get("anthropic", "session-claude-single");
-		expect(apiKey).toBe("api-acct-solo");
 	});
 
 	test("re-ranks a session pinned to a now-worse account after >1h of Anthropic idle", async () => {

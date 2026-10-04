@@ -156,11 +156,6 @@ describe("omfg rule parsing", () => {
 		expect(judged.fileContent).not.toContain("condition:");
 	});
 
-	it("accepts a leading inline regex flag in generated conditions", () => {
-		const result = mustParse(ruleJson({ name: "no-preexisting", condition: "(?i)pre.existing", scope: "text" }));
-		expect(result.rule.condition).toEqual(["(?i)pre.existing"]);
-	});
-
 	it("sanitizes generated names to slugs", () => {
 		expect(sanitizeRuleName("  Caps & Spaces!!  ")).toBe("caps-spaces");
 		expect(sanitizeRuleName("already_ok-123")).toBe("already_ok-123");

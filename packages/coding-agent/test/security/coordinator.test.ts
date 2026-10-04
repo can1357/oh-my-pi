@@ -282,6 +282,9 @@ describe("native security coordinator", () => {
 		await $`git init --initial-branch=main`.cwd(repositoryRoot).quiet();
 		await $`git config user.name Fixture`.cwd(repositoryRoot).quiet();
 		await $`git config user.email fixture@example.invalid`.cwd(repositoryRoot).quiet();
+		// The checked-out head is compared byte-for-byte; Git for Windows'
+		// system `core.autocrlf=true` would check it out as CRLF.
+		await $`git config core.autocrlf false`.cwd(repositoryRoot).quiet();
 		await $`git add src/app.ts`.cwd(repositoryRoot).quiet();
 		await $`git commit -m base`.cwd(repositoryRoot).quiet();
 		const baseRevision = (await $`git rev-parse HEAD`.cwd(repositoryRoot).text()).trim();

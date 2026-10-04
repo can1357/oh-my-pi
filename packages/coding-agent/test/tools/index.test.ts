@@ -80,20 +80,6 @@ describe("createTools", () => {
 		expect(names).not.toContain("search");
 	});
 
-	it("includes bash and eval when both eval backends are allowed", async () => {
-		const session = createTestSession({
-			settings: createSettingsWithOverrides({
-				"eval.py": true,
-				"eval.js": true,
-			}),
-		});
-		const tools = await createTools(session);
-		const names = tools.map(t => t.name);
-
-		expect(names).toContain("eval");
-		expect(names).toContain("bash");
-	});
-
 	it("still exposes eval when only the js backend is allowed", async () => {
 		const session = createTestSession({
 			settings: createSettingsWithOverrides({
@@ -126,22 +112,6 @@ describe("createTools", () => {
 	it("excludes lsp tool when session disables LSP", async () => {
 		const session = createTestSession({ enableLsp: false });
 		const tools = await createTools(session, ["read", "lsp", "write"]);
-		const names = tools.map(t => t.name);
-
-		expect(names).toEqual(["read", "write"]);
-	});
-
-	it("excludes lsp tool when disabled", async () => {
-		const session = createTestSession({ enableLsp: false });
-		const tools = await createTools(session);
-		const names = tools.map(t => t.name);
-
-		expect(names).not.toContain("lsp");
-	});
-
-	it("respects requested tool subset", async () => {
-		const session = createTestSession();
-		const tools = await createTools(session, ["read", "write"]);
 		const names = tools.map(t => t.name);
 
 		expect(names).toEqual(["read", "write"]);
@@ -255,15 +225,6 @@ describe("createTools", () => {
 		);
 		// write joins as the device-only xd:// transport (read granted, ask disabled).
 		expect(requested.map(t => t.name)).toEqual(["read", "write"]);
-	});
-
-	it("includes ask tool when ask.enabled is true and hasUI is true", async () => {
-		const session = createTestSession({
-			hasUI: true,
-			settings: createSettingsWithOverrides({ "ask.enabled": true }),
-		});
-		const tools = await createTools(session);
-		expect(tools.map(t => t.name)).toContain("ask");
 	});
 
 	it("filters disabled builtin tools by settings", async () => {

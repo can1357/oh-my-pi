@@ -27,7 +27,7 @@ interface GitHubUrl {
 }
 
 interface GitHubIssueComment {
-	user: { login: string };
+	user: { login: string } | null;
 	created_at: string;
 	body: string;
 }
@@ -203,7 +203,7 @@ async function renderGitHubIssue(
 		title: string;
 		number: number;
 		state: string;
-		user: { login: string };
+		user: { login: string } | null;
 		created_at: string;
 		updated_at: string;
 		body: string | null;
@@ -213,7 +213,7 @@ async function renderGitHubIssue(
 	};
 
 	let md = `# ${issue.title}\n\n`;
-	md += `**#${issue.number}** · ${issue.state} · opened by @${issue.user.login}\n`;
+	md += `**#${issue.number}** · ${issue.state} · opened by @${issue.user?.login ?? "ghost"}\n`;
 	md += `Created: ${issue.created_at} · Updated: ${issue.updated_at}\n`;
 	if (issue.labels.length > 0) {
 		md += `Labels: ${issue.labels.map(l => l.name).join(", ")}\n`;
@@ -230,7 +230,7 @@ async function renderGitHubIssue(
 				issue.comments > comments.length ? `${comments.length} of ${issue.comments}` : `${comments.length}`;
 			md += `## Comments (${commentCount})\n\n`;
 			for (const comment of comments) {
-				md += `### @${comment.user.login} · ${comment.created_at}\n\n`;
+				md += `### @${comment.user?.login ?? "ghost"} · ${comment.created_at}\n\n`;
 				md += `${comment.body}\n\n---\n\n`;
 			}
 		}
@@ -335,7 +335,7 @@ async function renderGitHubIssuesList(
 		number: number;
 		title: string;
 		state: string;
-		user: { login: string };
+		user: { login: string } | null;
 		created_at: string;
 		comments: number;
 		labels: Array<{ name: string }>;
@@ -348,7 +348,7 @@ async function renderGitHubIssuesList(
 		if (issue.pull_request) continue; // Skip PRs in issues list
 		const labels = issue.labels.length > 0 ? ` [${issue.labels.map(l => l.name).join(", ")}]` : "";
 		md += `- **#${issue.number}** ${issue.title}${labels}\n`;
-		md += `  by @${issue.user.login} · ${issue.comments} comments · ${issue.created_at}\n\n`;
+		md += `  by @${issue.user?.login ?? "ghost"} · ${issue.comments} comments · ${issue.created_at}\n\n`;
 	}
 
 	return { content: md, ok: true };

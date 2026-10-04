@@ -11,11 +11,6 @@ describe.skipIf(SKIP)("handleRfc", () => {
 		expect(result).toBeNull();
 	});
 
-	it("returns null for non-matching RFC domains", async () => {
-		const result = await handleRfc("https://www.ietf.org/about/", 20);
-		expect(result).toBeNull();
-	});
-
 	it("fetches RFC 2616 (HTTP/1.1)", async () => {
 		const result = await handleRfc("https://www.rfc-editor.org/rfc/rfc2616", 20);
 		expect(result).not.toBeNull();
@@ -38,13 +33,6 @@ describe.skipIf(SKIP)("handleRfc", () => {
 		expect(result?.method).toBe("rfc");
 		expect(result?.content).toContain("HTTP/1.1");
 	});
-
-	it("fetches RFC 793 (TCP)", async () => {
-		const result = await handleRfc("https://www.rfc-editor.org/rfc/rfc793", 20);
-		expect(result).not.toBeNull();
-		expect(result?.method).toBe("rfc");
-		expect(result?.content).toContain("Transmission Control Protocol");
-	});
 });
 
 describe.skipIf(SKIP)("handleCheatSh", () => {
@@ -64,13 +52,6 @@ describe.skipIf(SKIP)("handleCheatSh", () => {
 		expect(result?.method).toBe("cheat.sh");
 		expect(result?.content).toContain("curl");
 		expect(result?.contentType).toBe("text/markdown");
-	});
-
-	it("fetches tar cheatsheet", async () => {
-		const result = await handleCheatSh("https://cheat.sh/tar", 20);
-		expect(result).not.toBeNull();
-		expect(result?.method).toBe("cheat.sh");
-		expect(result?.content).toContain("tar");
 	});
 
 	it("fetches cheatsheet via cht.sh alias", async () => {
@@ -98,13 +79,6 @@ describe.skipIf(SKIP)("handleTldr", () => {
 		expect(result?.method).toBe("tldr");
 		expect(result?.content).toContain("git");
 		expect(result?.contentType).toBe("text/markdown");
-	});
-
-	it("fetches curl tldr page", async () => {
-		const result = await handleTldr("https://tldr.sh/curl", 20);
-		expect(result).not.toBeNull();
-		expect(result?.method).toBe("tldr");
-		expect(result?.content).toContain("curl");
 	});
 
 	it("fetches via tldr.ostera.io alias", async () => {

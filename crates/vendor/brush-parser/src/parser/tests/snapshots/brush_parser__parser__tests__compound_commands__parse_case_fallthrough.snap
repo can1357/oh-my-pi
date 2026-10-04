@@ -1,0 +1,88 @@
+---
+source: brush-parser/src/parser/tests/compound_commands.rs
+expression: "ParseResult { input, result: &result }"
+---
+ParseResult(
+  input: "case x in a) echo a;& b) echo b;; esac",
+  result: Program(
+    complete_commands: [
+      CompoundList([
+        CompoundListItem(AndOrList(
+          first: Pipeline(
+            seq: [
+              Compound(CaseClause(CaseClauseCommand(
+                value: Word(
+                  value: "x",
+                  loc: "[location]",
+                ),
+                cases: [
+                  CaseItem(
+                    patterns: [
+                      Word(
+                        value: "a",
+                        loc: "[location]",
+                      ),
+                    ],
+                    cmd: Some(CompoundList([
+                      CompoundListItem(AndOrList(
+                        first: Pipeline(
+                          seq: [
+                            Simple(SimpleCommand(
+                              word_or_name: Some(Word(
+                                value: "echo",
+                                loc: "[location]",
+                              )),
+                              suffix: Some(CommandSuffix([
+                                Word(Word(
+                                  value: "a",
+                                  loc: "[location]",
+                                )),
+                              ])),
+                            )),
+                          ],
+                        ),
+                      ), Sequence),
+                    ])),
+                    post_action: UnconditionallyExecuteNextCaseItem,
+                    loc: "[location]",
+                  ),
+                  CaseItem(
+                    patterns: [
+                      Word(
+                        value: "b",
+                        loc: "[location]",
+                      ),
+                    ],
+                    cmd: Some(CompoundList([
+                      CompoundListItem(AndOrList(
+                        first: Pipeline(
+                          seq: [
+                            Simple(SimpleCommand(
+                              word_or_name: Some(Word(
+                                value: "echo",
+                                loc: "[location]",
+                              )),
+                              suffix: Some(CommandSuffix([
+                                Word(Word(
+                                  value: "b",
+                                  loc: "[location]",
+                                )),
+                              ])),
+                            )),
+                          ],
+                        ),
+                      ), Sequence),
+                    ])),
+                    post_action: ExitCase,
+                    loc: "[location]",
+                  ),
+                ],
+                loc: "[location]",
+              )), None),
+            ],
+          ),
+        ), Sequence),
+      ]),
+    ],
+  ),
+)

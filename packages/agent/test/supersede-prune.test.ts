@@ -3,10 +3,12 @@ import { type AgentMessage, Tokenizer } from "@oh-my-pi/pi-agent-core";
 import type { SessionEntry, SessionMessageEntry } from "@oh-my-pi/pi-agent-core/compaction";
 import {
 	DEFAULT_PRUNE_CONFIG,
+	type PruneResult,
 	pruneSupersededToolResults,
 	pruneToolOutputs,
 	readToolSupersedeKey,
 	SUPERSEDED_NOTICE,
+	type SupersedeCompleteFn,
 	type SupersedePruneConfig,
 	USELESS_NOTICE,
 } from "@oh-my-pi/pi-agent-core/compaction";
@@ -67,6 +69,17 @@ function readPair(path: string, text: string, timestamp: number): [SessionMessag
 	];
 }
 
+/** Read pair whose result {@link testComplete} reports as incomplete (a summary, page, or notice). */
+function partialPair(path: string, timestamp: number): [SessionMessageEntry, SessionMessageEntry] {
+	const [call, result] = readPair(path, FILE_CONTENT, timestamp);
+	resultMessage(result).details = { complete: false };
+	return [call, result];
+}
+
+/** Test completeness: incomplete only when marked by {@link partialPair}. */
+const testComplete: SupersedeCompleteFn = message =>
+	(message.details as { complete?: boolean } | undefined)?.complete !== false;
+
 /** Assistant toolCall entry + paired toolResult entry flagged contextually useless. */
 function uselessPair(
 	toolName: string,
@@ -101,6 +114,19 @@ function cfg(over: Partial<SupersedePruneConfig> = {}): SupersedePruneConfig {
 	return { supersedeKey: readToolSupersedeKey, protectedTools: [], ...over };
 }
 
+/** Supersede-only run of one path with {@link testComplete}: the per-turn stale pass, or overflow pruning with age/size pruning disabled. */
+function pruneWith(mode: "stale" | "overflow", entries: SessionEntry[], now: number): PruneResult {
+	return mode === "stale"
+		? pruneSupersededToolResults(entries, tokenizer, cfg({ supersedeComplete: testComplete, now }))
+		: pruneToolOutputs(entries, tokenizer, {
+				protectTokens: 1_000_000,
+				minimumSavings: 0,
+				protectedTools: [],
+				supersedeKey: readToolSupersedeKey,
+				supersedeComplete: testComplete,
+			});
+}
+
 const T0 = Date.UTC(2026, 5, 10, 12, 0, 0);
 const FILE_CONTENT = "export function alpha() { return 1; }\n".repeat(50);
 // Comfortably above any small suffixTokenLimit used below.
@@ -119,13 +145,13 @@ describe("readToolSupersedeKey", () => {
 		expect(readToolSupersedeKey("read", { path: "https://example.com/page" })).toBeUndefined();
 	});
 
-	test("strips trailing selectors into a \\u0000-separated key", () => {
+	test("keys line-range selectors under the bare path and alternate forms apart from it", () => {
 		expect(readToolSupersedeKey("read", { path: "src/foo.ts:50-200" })).toBe("src/foo.ts\u000050-200");
-		expect(readToolSupersedeKey("read", { path: "src/foo.ts:raw" })).toBe("src/foo.ts\u0000raw");
-		expect(readToolSupersedeKey("read", { path: "src/foo.ts:conflicts" })).toBe("src/foo.ts\u0000conflicts");
-		expect(readToolSupersedeKey("read", { path: "src/foo.ts:2-4:raw" })).toBe("src/foo.ts\u00002-4:raw");
 		expect(readToolSupersedeKey("read", { path: "src/foo.ts:5-16,960-973" })).toBe("src/foo.ts\u00005-16,960-973");
 		expect(readToolSupersedeKey("read", { path: "src/foo.ts:50+150" })).toBe("src/foo.ts\u000050+150");
+		expect(readToolSupersedeKey("read", { path: "src/foo.ts:raw" })).toBe("src/foo.ts\u0001raw");
+		expect(readToolSupersedeKey("read", { path: "src/foo.ts:conflicts" })).toBe("src/foo.ts\u0001conflicts");
+		expect(readToolSupersedeKey("read", { path: "src/foo.ts:2-4:raw" })).toBe("src/foo.ts\u00012-4:raw");
 	});
 
 	test("does not strip non-selector colon segments", () => {
@@ -251,6 +277,92 @@ describe("pruneSupersededToolResults — selectors", () => {
 	});
 });
 
+for (const mode of ["stale", "overflow"] as const) {
+	describe(`${mode} pruning — completeness`, () => {
+		test.each([
+			{
+				name: "an incomplete bare read keeps an earlier range",
+				older: "src/foo.ts:50-200",
+				newer: "src/foo.ts",
+				partial: true,
+				pruned: 0,
+			},
+			{
+				name: "a complete bare read replaces an earlier range",
+				older: "src/foo.ts:50-200",
+				newer: "src/foo.ts",
+				partial: false,
+				pruned: 1,
+			},
+			{
+				name: "a complete bare read keeps an earlier raw read",
+				older: "src/foo.ts:raw",
+				newer: "src/foo.ts",
+				partial: false,
+				pruned: 0,
+			},
+			{
+				name: "an incomplete same-selector re-read replaces the older copy",
+				older: "src/foo.ts:50-200",
+				newer: "src/foo.ts:50-200",
+				partial: true,
+				pruned: 1,
+			},
+		])("$name", ({ older, newer, partial, pruned }) => {
+			const [call1, result1] = readPair(older, FILE_CONTENT, T0);
+			const [call2, result2] = partial ? partialPair(newer, T0 + 1_000) : readPair(newer, FILE_CONTENT, T0 + 1_000);
+			const entries: SessionEntry[] = [call1, result1, call2, result2];
+
+			const result = pruneWith(mode, entries, T0 + 1_000);
+
+			expect(result.prunedCount).toBe(pruned);
+			expect(resultText(result1)).toBe(pruned ? SUPERSEDED_NOTICE : FILE_CONTENT);
+			expect(resultText(result2)).toBe(FILE_CONTENT);
+		});
+
+		test("a complete bare read replaced by a newer summary cannot erase an earlier range", () => {
+			const [call1, result1] = readPair("src/foo.ts:1-20", FILE_CONTENT, T0);
+			const [call2, result2] = readPair("src/foo.ts", FILE_CONTENT, T0 + 1_000);
+			const [call3, result3] = partialPair("src/foo.ts", T0 + 2_000);
+			const entries: SessionEntry[] = [call1, result1, call2, result2, call3, result3];
+
+			const result = pruneWith(mode, entries, T0 + 2_000);
+
+			expect(result.prunedCount).toBe(1);
+			expect(resultText(result1)).toBe(FILE_CONTENT);
+			expect(resultText(result2)).toBe(SUPERSEDED_NOTICE);
+			expect(resultText(result3)).toBe(FILE_CONTENT);
+		});
+
+		test("a newer error keeps an earlier success but replaces an earlier error", () => {
+			const [call1, result1] = readPair("src/foo.ts", FILE_CONTENT, T0);
+			const [call2, result2] = readPair("src/foo.ts", "Error: EACCES", T0 + 1_000);
+			resultMessage(result2).isError = true;
+			const [call3, result3] = readPair("src/foo.ts", "Error: EACCES", T0 + 2_000);
+			resultMessage(result3).isError = true;
+			const entries: SessionEntry[] = [call1, result1, call2, result2, call3, result3];
+
+			const result = pruneWith(mode, entries, T0 + 2_000);
+
+			expect(result.prunedCount).toBe(1);
+			expect(resultText(result1)).toBe(FILE_CONTENT);
+			expect(resultText(result2)).toBe(SUPERSEDED_NOTICE);
+		});
+
+		test("an earlier failed range read is replaced by a later incomplete bare read", () => {
+			const [call1, result1] = readPair("src/foo.ts:50-200", "Error: ENOENT", T0);
+			resultMessage(result1).isError = true;
+			const [call2, result2] = partialPair("src/foo.ts", T0 + 1_000);
+			const entries: SessionEntry[] = [call1, result1, call2, result2];
+
+			const result = pruneWith(mode, entries, T0 + 1_000);
+
+			expect(result.prunedCount).toBe(1);
+			expect(resultText(result1)).toBe(SUPERSEDED_NOTICE);
+		});
+	});
+}
+
 describe("pruneSupersededToolResults — protection & latest", () => {
 	test("(e) latest read never pruned, even with idle flush", () => {
 		const [call1, result1] = readPair("src/foo.ts", FILE_CONTENT, T0);
@@ -348,7 +460,7 @@ describe("pruneToolOutputs — supersede priority fold", () => {
 			minimumSavings: 0,
 			protectedTools: [],
 		});
-		expect(protectedRun).toEqual({ prunedCount: 0, tokensSaved: 0 });
+		expect(protectedRun).toMatchObject({ prunedCount: 0, tokensSaved: 0 });
 		expect(resultText(protectedFixture.oldResult)).toBe(FILE_CONTENT);
 		expect(resultText(protectedFixture.newResult)).toBe(FILE_CONTENT);
 

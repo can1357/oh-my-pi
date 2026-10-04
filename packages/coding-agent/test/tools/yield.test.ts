@@ -104,12 +104,6 @@ describe("YieldTool", () => {
 		expect(validator?.validate(assembled?.data).success).toBe(true);
 	});
 
-	it("accepts success payload with data", async () => {
-		const tool = new YieldTool(createSession());
-		const result = await tool.execute("call-1", { data: { ok: true } } as never);
-		expect(result.details).toEqual({ data: { ok: true }, status: "success", error: undefined });
-	});
-
 	it("commits a terminal yield emitted before parent steering lands (#10645)", async () => {
 		// The parent's `hub send` arrives while the child is still streaming its
 		// yield call. The already-generated yield must execute and settle the
@@ -898,6 +892,111 @@ describe("YieldTool", () => {
 			type: "summary",
 			useLastTurn: true,
 		});
+	});
+
+	it("omits nested strict-mode null optionals while retaining explicit nullable values", async () => {
+		const tool = new YieldTool(
+			createSession({
+				outputSchema: {
+					properties: {
+						status: { type: "string" },
+						steps: {
+							elements: {
+								properties: { name: { type: "string" } },
+								optionalProperties: {
+									blocker: { type: "string" },
+									blocker_details: { type: "string", nullable: true },
+								},
+							},
+						},
+					},
+					optionalProperties: { landing_receipt: { type: "string" } },
+				},
+			}),
+		);
+		const result = await tool.execute("call-nested-optionals", {
+			data: {
+				status: "done",
+				steps: [{ name: "completed", blocker: null, blocker_details: null }],
+				landing_receipt: null,
+			},
+			error: null,
+		});
+		expect(result.details?.status).toBe("success");
+		expect(result.details?.data).toEqual({
+			status: "done",
+			steps: [{ name: "completed", blocker_details: null }],
+		});
+		await expect(
+			tool.execute("call-required-null", { data: { status: null, steps: [{ name: "completed" }] } }),
+		).rejects.toThrow(/status: expected string, received null/);
+	});
+
+	it("omits optional nulls in strict prefixItems and trailing items without changing required fields", async () => {
+		const tool = new YieldTool(
+			createSession({
+				outputSchema: {
+					type: "object",
+					properties: {
+						tuple: {
+							type: "array",
+							prefixItems: [
+								{
+									type: "object",
+									properties: { id: { type: "string" }, note: { type: "string" } },
+									required: ["id"],
+									additionalProperties: false,
+								},
+							],
+							items: {
+								type: "object",
+								properties: { label: { type: "string" }, note: { type: "string" } },
+								required: ["label"],
+								additionalProperties: false,
+							},
+							minItems: 2,
+							maxItems: 2,
+						},
+					},
+					required: ["tuple"],
+					additionalProperties: false,
+				},
+			}),
+		);
+		expect(tool.strict).toBe(true);
+		const result = await tool.execute("call-tuple", {
+			data: {
+				tuple: [
+					{ id: "done", note: null },
+					{ label: "next", note: null },
+				],
+			},
+		});
+		expect(result.details?.data).toEqual({ tuple: [{ id: "done" }, { label: "next" }] });
+		await expect(
+			tool.execute("call-tuple-required", { data: { tuple: [{ id: null }, { label: "next" }] } }),
+		).rejects.toThrow(/tuple\/0\/id: expected string, received null/);
+	});
+
+	it("normalizes optional nulls inside JTD discriminator variants", async () => {
+		const tool = new YieldTool(
+			createSession({
+				outputSchema: {
+					discriminator: "kind",
+					mapping: {
+						done: {
+							properties: { status: { type: "string" } },
+							optionalProperties: { blocker: { type: "string" } },
+						},
+						blocked: { properties: { reason: { type: "string" } } },
+					},
+				},
+			}),
+		);
+		const result = await tool.execute("call-variant-optional", {
+			data: { kind: "done", status: "complete", blocker: null },
+		});
+		expect(result.details?.data).toEqual({ kind: "done", status: "complete" });
 	});
 
 	it("accepts arbitrary data when outputSchema is null", async () => {

@@ -683,6 +683,76 @@ describe("AgentSession auto-compaction queue resume", () => {
 		expect(prompted[0]?.some(message => message.synthetic === true)).toBe(false);
 	});
 
+	it("does not schedule a spurious resume when a busy custom prompt reflects a real turn", async () => {
+		// The busy branch of #dispatchCustomPrompt must record whether the agent
+		// genuinely owns a turn at refusal time (sessionClaimed), not leave the
+		// default false: a false release lets the deferred compaction resume fire
+		// even though a real turn already supersedes it (a duplicate dispatch).
+		cfgCompactionKeepRecentTokens.set(session.settings, 1);
+		cfgCompactionAutoContinue.override(session.settings, true);
+		sessionManager.appendMessage({
+			role: "assistant",
+			content: [{ type: "text", text: "previous answer" }],
+			api: "anthropic-messages",
+			provider: "anthropic",
+			model: "claude-sonnet-4-5",
+			stopReason: "stop",
+			usage: {
+				input: 1_000,
+				output: 100,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 1_100,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			timestamp: Date.now(),
+		});
+		session.agent.replaceMessages(session.buildDisplaySessionContext().messages);
+
+		session.agent.state.isStreaming = true;
+		vi.spyOn(session, "abort").mockImplementation(async () => {
+			session.agent.state.isStreaming = false;
+		});
+		type Dispatched = { role: string; customType?: string; synthetic?: boolean };
+		const prompted: Dispatched[][] = [];
+		vi.spyOn(session.agent, "prompt").mockImplementation(async message => {
+			prompted.push((Array.isArray(message) ? message : [message]) as Dispatched[]);
+		});
+
+		const gate = Promise.withResolvers<void>();
+		(globalThis as typeof globalThis & { __ompManualCompactGate?: Promise<void> }).__ompManualCompactGate =
+			gate.promise;
+		const compacted = session.compact();
+		while (!getRuntimeSignals().includes("before_compact:enter")) {
+			await Promise.resolve();
+		}
+		const peerPrompt = session.promptCustomMessage({
+			customType: "collab-prompt",
+			content: "peer redirect",
+			display: true,
+			attribution: "user",
+		});
+		// Parked: nothing reaches the agent while the compaction is in flight.
+		await Promise.resolve();
+		expect(prompted).toHaveLength(0);
+
+		// A second dispatch reaches the agent core and genuinely claims the
+		// session while the peer prompt above is still parked on the barrier.
+		session.agent.state.isStreaming = true;
+		gate.resolve();
+		await compacted;
+		await expect(peerPrompt).rejects.toThrow(AgentBusyError);
+		// The busy check above already captured isStreaming; release the
+		// simulated real turn so waitForIdle settles whether or not a spurious
+		// resume was scheduled (it must not have been — asserted below).
+		session.agent.state.isStreaming = false;
+		await session.waitForIdle();
+
+		// The busy refusal reflects the real turn it observed: no spurious
+		// compaction-resume dispatch races the turn that already owns the session.
+		expect(prompted).toHaveLength(0);
+	});
+
 	it("hands the resume back when the prompt submitted during compaction is a local command", async () => {
 		// An extension command typed during a manual compaction parks on the same
 		// barrier as a real prompt, but it is handled inside prompt() and starts no

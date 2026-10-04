@@ -37,8 +37,9 @@ describe("print mode disposes the session before terminating", () => {
 			sessionManager: {
 				buildSessionContext: () => ({ messages: [] }),
 				getEntries: () => [],
-				// Print mode subscribes to store failures (issue #11493).
+				// Print mode subscribes to store failures (issue #11493) and session moves.
 				onPersistenceError: () => () => {},
+				onPersistenceNotice: () => () => {},
 			},
 			state: { messages: [errorMsg] },
 			getLastAssistantMessage: () => errorMsg,
@@ -76,7 +77,8 @@ describe("print mode disposes the session before terminating", () => {
 		expect(stderrLines.join("")).toContain("boom");
 	});
 
-	it("disposes an active print session before SIGTERM exits", async () => {
+	// Windows cannot deliver a catchable SIGTERM via process.kill: libuv terminates the process outright.
+	it.skipIf(process.platform === "win32")("disposes an active print session before SIGTERM exits", async () => {
 		using tempDir = TempDir.createSync("@omp-print-signal-");
 		const marker = tempDir.join("disposed");
 		const fixture = path.join(import.meta.dir, "..", "fixtures", "print-mode-signal.js");
@@ -117,6 +119,7 @@ describe("print mode disposes the session before terminating", () => {
 				buildSessionContext: () => ({ messages: [] }),
 				getEntries: () => [],
 				onPersistenceError: () => () => {},
+				onPersistenceNotice: () => () => {},
 			},
 			getLastAssistantMessage: () => abortedMsg,
 			prepareForHeadlessAdvisorDrain: () => {},

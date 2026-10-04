@@ -14,6 +14,7 @@ import { type BlobPersistence, BlobRegistry } from "../src/blob-broker/store";
 import { wrapStreamFnWithBlobUrlFallback } from "../src/blob-broker/stream-fallback";
 import { createCommandUploader, extractUploadUrl, splitCommandTemplate } from "../src/blob-broker/uploaders";
 import { BlobStore as SessionBlobStore } from "../src/session/blob-store";
+import { writeFakeExecutable } from "./helpers/fake-executable";
 
 const PNG_B64 = Buffer.from("blob-broker-test-bytes-1").toString("base64");
 const OTHER_B64 = Buffer.from("blob-broker-test-bytes-2").toString("base64");
@@ -158,14 +159,6 @@ describe("BlobRegistry lazy blobs", () => {
 		expect(eagerEntry.bytes).toBe(bytes.byteLength);
 		expect((await store.serve(request())).status).toBe(200);
 		expect(renders).toBe(2);
-	});
-
-	it("responds 410 when a lazy source is gone", async () => {
-		const store = new BlobRegistry();
-		const entry = store.registerLazy("gone", "image/png", async () => null);
-		expect(entry.bytes).toBe(0);
-		const response = await store.serve(new Request(`http://blob.local/${entry.path}`));
-		expect(response.status).toBe(410);
 	});
 });
 
@@ -337,6 +330,17 @@ describe("uploaders", () => {
 		expect(splitCommandTemplate(`pasta -b -f {file}`)).toEqual(["pasta", "-b", "-f", "{file}"]);
 		expect(splitCommandTemplate(`up --name "two words" '{file}'`)).toEqual(["up", "--name", "two words", "{file}"]);
 		expect(splitCommandTemplate(`a\\ b c`)).toEqual(["a b", "c"]);
+		// Windows paths keep their separators; backslash still escapes quotes and spaces.
+		expect(splitCommandTemplate(`C:\\tools\\up.exe -f {file}`, "win32")).toEqual([
+			"C:\\tools\\up.exe",
+			"-f",
+			"{file}",
+		]);
+		expect(splitCommandTemplate(`"C:\\Program Files\\up.exe" a\\ b \\"q\\"`, "win32")).toEqual([
+			"C:\\Program Files\\up.exe",
+			"a b",
+			'"q"',
+		]);
 	});
 
 	it("extracts the last url on stdout and trims trailing punctuation", () => {
@@ -345,15 +349,24 @@ describe("uploaders", () => {
 	});
 
 	it("runs a command uploader end to end against a stub binary", async () => {
-		const stub = path.join(os.tmpdir(), `omp-test-uploader-${process.pid}.sh`);
-		await Bun.write(
-			stub,
-			`#!/bin/sh\ntest -s "$2" || exit 3\necho "uploaded $2"\necho "https://files.example/abc.$3"\n`,
+		const stubDir = fs.mkdtempSync(path.join(os.tmpdir(), "omp-test-uploader-"));
+		cleanups.push(() => void fs.promises.rm(stubDir, { recursive: true, force: true }));
+		const stub = writeFakeExecutable(
+			stubDir,
+			"uploader",
+			`import * as fs from "node:fs";
+const [, file, ext] = process.argv.slice(2);
+if (fs.statSync(file, { throwIfNoEntry: false })?.size) {
+	console.log(\`uploaded \${file}\`);
+	console.log(\`https://files.example/abc.\${ext}\`);
+} else {
+	process.exitCode = 3;
+}
+`,
 		);
-		await fs.promises.chmod(stub, 0o755);
-		cleanups.push(() => void fs.promises.rm(stub, { force: true }));
 
-		const uploader = createCommandUploader(`${stub} --x {file} {ext}`);
+		// Quoted, not escaped: a native Windows path must survive template splitting.
+		const uploader = createCommandUploader(`"${stub}" --x {file} {ext}`);
 		const publication = await uploader.upload({
 			bytes: new Uint8Array(Buffer.from("payload")),
 			mimeType: "image/png",

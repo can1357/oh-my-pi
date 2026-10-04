@@ -18,7 +18,7 @@ use brush_core::{ShellExtensions, builtins::Registration};
 use clap::{ArgAction, Parser};
 use similar::{Algorithm, DiffOp, DiffTag, capture_diff_slices};
 
-use crate::host::{Host, Utility, util};
+use crate::host::{Host, Utility, forward_slash_display, strip_errno, util};
 
 /// Parsed `diff` invocation.
 #[derive(Parser)]
@@ -290,7 +290,7 @@ fn classify(name: &Path, new_file: bool, host: &Host) -> Result<Operand, String>
 		Ok(meta) if meta.is_dir() => Ok(Operand::Dir(resolved)),
 		Ok(_) => Ok(Operand::File(resolved)),
 		Err(err) if err.kind() == std::io::ErrorKind::NotFound && new_file => Ok(Operand::Absent),
-		Err(err) => Err(format!("{}: {}", name.display(), io_msg(&err))),
+		Err(err) => Err(format!("{}: {}", name.display(), strip_errno(&err))),
 	}
 }
 
@@ -307,14 +307,14 @@ fn read_operand(
 			let mut buf = Vec::new();
 			host.stdin
 				.read_to_end(&mut buf)
-				.map_err(|err| format!("-: {}", io_msg(&err)))?;
+				.map_err(|err| format!("-: {}", strip_errno(&err)))?;
 			Ok((buf, None))
 		},
 		Operand::File(resolved) => {
 			let fs = host.fs();
 			let bytes = fs
 				.read(resolved)
-				.map_err(|err| format!("{}: {}", name.display(), io_msg(&err)))?;
+				.map_err(|err| format!("{}: {}", name.display(), strip_errno(&err)))?;
 			let mtime = fs.metadata(resolved).ok().and_then(|meta| meta.modified().ok());
 			Ok((bytes, mtime))
 		},
@@ -411,7 +411,7 @@ fn is_suppressed(
 /// Writes one line to the builtin's stdout, mapping I/O failures like the
 /// rest of this module.
 fn wline(host: &mut Host, line: std::fmt::Arguments<'_>) -> Result<(), String> {
-	writeln!(host.stdout, "{line}").map_err(|e| io_msg(&e))
+	writeln!(host.stdout, "{line}").map_err(|e| strip_errno(&e))
 }
 
 /// Diffs one pair of already-read inputs. `prefix` is the `diff -r A/x B/x`
@@ -745,9 +745,9 @@ fn diff_dirs(
 		let entries = host
 			.fs()
 			.read_dir(dir_res)
-			.map_err(|err| format!("{}: {}", dir_name.display(), io_msg(&err)))?;
+			.map_err(|err| format!("{}: {}", dir_name.display(), strip_errno(&err)))?;
 		for entry in entries {
-			let entry = entry.map_err(|err| format!("{}: {}", dir_name.display(), io_msg(&err)))?;
+			let entry = entry.map_err(|err| format!("{}: {}", dir_name.display(), strip_errno(&err)))?;
 			let name = entry.file_name();
 			if !is_excluded(&name, opts.excludes) {
 				names.insert(name);
@@ -760,8 +760,7 @@ fn diff_dirs(
 		if host.is_cancelled() {
 			return Err("interrupted".to_string());
 		}
-		let (child_name_a, child_name_b) =
-			(pi_vfs::join_path(name_a, Path::new(&name)), pi_vfs::join_path(name_b, Path::new(&name)));
+		let (child_name_a, child_name_b) = (child_display(name_a, &name), child_display(name_b, &name));
 		// Resolve every recursively discovered display path through the host too;
 		// the process's current directory is unrelated to the shell's.
 		let child_res_a = host.resolve(&child_name_a);
@@ -810,11 +809,11 @@ fn diff_dirs(
 				let bytes_a = host
 					.fs()
 					.read(&child_res_a)
-					.map_err(|err| format!("{}: {}", child_name_a.display(), io_msg(&err)))?;
+					.map_err(|err| format!("{}: {}", child_name_a.display(), strip_errno(&err)))?;
 				let bytes_b = host
 					.fs()
 					.read(&child_res_b)
-					.map_err(|err| format!("{}: {}", child_name_b.display(), io_msg(&err)))?;
+					.map_err(|err| format!("{}: {}", child_name_b.display(), strip_errno(&err)))?;
 				let prefix = pair_prefix(&child_name_a, &child_name_b, opts);
 				differed |= diff_pair(
 					&child_name_a,
@@ -839,7 +838,7 @@ fn diff_dirs(
 					let bytes = host
 						.fs()
 						.read(present_res)
-						.map_err(|err| format!("{}: {}", present_name.display(), io_msg(&err)))?;
+						.map_err(|err| format!("{}: {}", present_name.display(), strip_errno(&err)))?;
 					let prefix = pair_prefix(&child_name_a, &child_name_b, opts);
 					let present_mtime = meta.modified().ok();
 					let epoch = Some(SystemTime::UNIX_EPOCH);
@@ -884,13 +883,11 @@ fn is_binary(bytes: &[u8]) -> bool {
 	bytes.iter().take(8192).any(|&byte| byte == 0)
 }
 
-/// Renders an I/O error without Rust's ` (os error N)` suffix.
-fn io_msg(err: &std::io::Error) -> String {
-	let msg = err.to_string();
-	match msg.find(" (os error") {
-		Some(idx) => msg[..idx].to_string(),
-		None => msg,
-	}
+/// Display path of entry `name` inside the operand directory `dir`. GNU diff
+/// joins with `/`; `Path::join` alone would print `a\sub` on Windows.
+fn child_display(dir: &Path, name: &OsStr) -> PathBuf {
+	let joined = pi_vfs::join_path(dir, Path::new(name));
+	forward_slash_display(&joined).unwrap_or(joined)
 }
 
 /// Creates the `diff` builtin registration.

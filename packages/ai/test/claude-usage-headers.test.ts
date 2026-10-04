@@ -387,6 +387,8 @@ describe("claude usage request headers", () => {
 		expect(calls.filter(url => url.endsWith("/usage"))).toEqual(["https://api.anthropic.com/api/oauth/usage"]);
 		expect(report?.limits.map(limit => limit.id)).toEqual(["anthropic:extra"]);
 		expect(report?.limits[0]?.amount).toEqual({ used: 12.34, unit: "usd" });
+		// No limit → no used fraction → no status (not "unknown").
+		expect(report?.limits[0]?.status).toBeUndefined();
 	});
 
 	it("accepts a legacy-only extra payload on the first usage fetch", async () => {

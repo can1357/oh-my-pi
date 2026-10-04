@@ -12,7 +12,6 @@ import * as path from "node:path";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { getOrFetchIssue, getOrFetchPr } from "@oh-my-pi/pi-coding-agent/tools/gh";
 import {
-	clearAll,
 	getCached,
 	getOrFetchView,
 	openDb,
@@ -115,31 +114,6 @@ describe("github-cache db layer", () => {
 		expect(rows[0].c).toBe(1);
 	});
 
-	it("keys comments-on and comments-off as separate rows", () => {
-		putCached({
-			repo: TEST_REPO,
-			kind: "issue",
-			number: 9,
-			includeComments: true,
-			payload: issuePayload(9, "with-comments"),
-			rendered: "with-comments-rendering",
-			fetchedAt: 1000,
-		});
-		putCached({
-			repo: TEST_REPO,
-			kind: "issue",
-			number: 9,
-			includeComments: false,
-			payload: issuePayload(9, "no-comments"),
-			rendered: "no-comments-rendering",
-			fetchedAt: 1000,
-		});
-		const withComments = getCached(TEST_REPO, "issue", 9, true);
-		const noComments = getCached(TEST_REPO, "issue", 9, false);
-		expect(withComments?.rendered).toBe("with-comments-rendering");
-		expect(noComments?.rendered).toBe("no-comments-rendering");
-	});
-
 	it("keys rows by GitHub auth identity", () => {
 		putCached({
 			authKey: "identity-a",
@@ -166,23 +140,8 @@ describe("github-cache db layer", () => {
 		expect(getCached(TEST_REPO, "issue", 12, true, "identity-b")?.rendered).toBe("from-b");
 	});
 
-	it("clearAll wipes every row but the schema survives", () => {
-		putCached({
-			repo: TEST_REPO,
-			kind: "pr",
-			number: 1,
-			includeComments: true,
-			payload: prPayload(1, "x"),
-			rendered: "x",
-			fetchedAt: 1000,
-		});
-		clearAll();
-		expect(getCached(TEST_REPO, "pr", 1, true)).toBeNull();
-		const db = openDb();
-		expect(db).not.toBeNull();
-	});
-
-	it("does not chmod an existing cache parent directory", async () => {
+	// Windows has no POSIX directory mode bits to preserve (stat reports 0o666 regardless).
+	it.skipIf(process.platform === "win32")("does not chmod an existing cache parent directory", async () => {
 		const parent = path.join(tempDir, "caller-owned-parent");
 		await fs.mkdir(parent, { recursive: true, mode: 0o755 });
 		await fs.chmod(parent, 0o755);

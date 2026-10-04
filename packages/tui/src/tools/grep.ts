@@ -1,6 +1,10 @@
 import type { Component } from "../tui";
 import { Text } from "../components/text";
-import type { RenderResultOptions, ToolRenderer } from "./renderer";
+import type { NativeToolHead, NativeToolView, RenderResultOptions, ToolRenderer } from "./renderer";
+import { getLanguageFromPath } from "../lang-from-path";
+import { compact } from "../native/describe";
+import type { NativeChild } from "../native/node";
+import { footnoteText, inlineErrorView, resultText } from "./native-view";
 import { type Theme } from "../theme/theme";
 import type { OutputMeta } from "./output-meta";
 import type { TruncationResult } from "./streaming-output";
@@ -24,7 +28,7 @@ import {
 	PREVIEW_LIMITS,
 	replaceTabs,
 } from "../render/render-utils";
-import { classifyGroupedLines, groupLineIndicesByBlank } from "./grouped-file-output";
+import { classifyGroupedLines, describeGroupedOutput, groupLineIndicesByBlank } from "./grouped-file-output";
 
 /** Display metadata for grep tool results. */
 export interface GrepToolDetails {
@@ -78,6 +82,9 @@ const COLLAPSED_TEXT_LIMIT = PREVIEW_LIMITS.COLLAPSED_LINES * 2;
  * reveals more matches with context, but still bounded so a single hot file
  * whose matches span the whole file can't dump its entire length. */
 const EXPANDED_TEXT_LIMIT = PREVIEW_LIMITS.EXPANDED_LINES * 2;
+
+/** Files a collapsed native grep shows (§7.3). */
+const NATIVE_COLLAPSED_FILES = 2;
 
 const SEARCH_CODE_FRAME_LINE_RE = /^\s*\*?(\d+)│/;
 
@@ -381,5 +388,79 @@ export const grepToolRenderer = {
 			{ paddingX: 1 },
 		);
 	},
+	describeCall(args: GrepRenderArgs): NativeToolView {
+		return { tool: grepNativeHead(args), inline: true };
+	},
+
+	/**
+	 * Inline (§7.3 grep): `Grep “pattern”  5 matches · 2 files  in src`, then
+	 * the matches grouped by file; collapsed shows the first two files.
+	 */
+	describeResult(
+		result: { content: Array<{ type: string; text?: string }>; details?: GrepToolDetails; isError?: boolean },
+		options: RenderResultOptions,
+		args?: GrepRenderArgs,
+	): NativeToolView {
+		const details = result.details;
+		if (result.isError || details?.error) {
+			return inlineErrorView(grepNativeHead(args), details?.error || resultText(result) || "Unknown error");
+		}
+		const textContent = details?.displayContent ?? resultText(result);
+		const missing = details?.missingPaths ?? [];
+		const missingNote = missing.length > 0 ? `skipped missing: ${missing.join(", ")}` : undefined;
+		const scope = details?.scopePath ? `in ${details.scopePath}` : undefined;
+		const hasDetailedData = details?.matchCount !== undefined || details?.fileCount !== undefined;
+		const matchCount = details?.matchCount ?? 0;
+		if (
+			(!hasDetailedData && (!textContent || textContent === "No matches found")) ||
+			(hasDetailedData && matchCount === 0)
+		) {
+			const foot = footnoteText(compact([missingNote]));
+			return {
+				tool: grepNativeHead(args, compact(["0 matches", scope])),
+				tone: "warning",
+				inline: true,
+				body: foot ? [foot] : undefined,
+			};
+		}
+		const truncated = Boolean(
+			details?.truncated || details?.meta?.truncation || details?.meta?.limits?.columnTruncated,
+		);
+		const fileCount = details?.fileCount ?? 0;
+		const counts = hasDetailedData
+			? `${formatCount("match", matchCount)} · ${formatCount("file", fileCount)}`
+			: undefined;
+		const head = grepNativeHead(args, compact([counts, scope]));
+		const hiddenFiles = options.expanded ? 0 : Math.max(0, fileCount - NATIVE_COLLAPSED_FILES);
+		const foot = footnoteText(
+			compact([hiddenFiles > 0 && formatCount("more file", hiddenFiles), missingNote]),
+			details?.meta,
+		);
+		return {
+			tool: truncated ? { ...head, badges: [{ text: "truncated", tone: "warning" }] } : head,
+			inline: true,
+			body: compact<NativeChild>([
+				...describeGroupedOutput(textContent.split("\n"), {
+					lang: getLanguageFromPath,
+					maxFiles: options.expanded ? undefined : NATIVE_COLLAPSED_FILES,
+				}),
+				foot,
+			]),
+			preview: { lines: PREVIEW_LIMITS.EXPANDED_LINES },
+		};
+	},
 	mergeCallAndResult: true,
 } satisfies ToolRenderer<GrepRenderArgs, GrepToolDetails>;
+
+/** Native grep head: the pattern, then the result `meta` or, before a result, the scope/flag arguments. */
+function grepNativeHead(args: GrepRenderArgs | undefined, meta?: readonly string[]): NativeToolHead {
+	const parts = meta ? [...meta] : [];
+	if (!meta && args) {
+		const paths = toPathList(args.path ?? args.paths);
+		if (paths.length) parts.push(`in ${paths.join(", ")}`);
+		if (args.case === false) parts.push("case:insensitive");
+		if (args.gitignore === false) parts.push("gitignore:false");
+		if (args.skip !== undefined && args.skip > 0) parts.push(`skip:${args.skip}`);
+	}
+	return { title: "Grep", target: args?.pattern || "?", targetKind: "pattern", meta: parts };
+}

@@ -17,6 +17,7 @@ interface BundledPackage {
 const BUNDLED_PACKAGES: readonly BundledPackage[] = [
 	{ dir: "agent", identifier: "PiAgentCore", rootShim: null },
 	{ dir: "ai", identifier: "PiAi", rootShim: "legacy-pi-ai-shim.ts" },
+	{ dir: "catalog", identifier: "PiCatalog", rootShim: null },
 	{ dir: "coding-agent", identifier: "PiCodingAgent", rootShim: "legacy-pi-coding-agent-shim.ts" },
 	{ dir: "natives", identifier: "PiNatives", rootShim: null },
 	{ dir: "tui", identifier: "PiTui", rootShim: "legacy-pi-tui-shim.ts" },
@@ -55,7 +56,7 @@ function bindingForSubpath(identifier: string, subpath: string): string {
 		.filter(Boolean)
 		.map(segment =>
 			segment
-				.split(/[-_]/)
+				.split(/[^a-zA-Z0-9]+/)
 				.filter(Boolean)
 				.map(part => part.charAt(0).toUpperCase() + part.slice(1))
 				.join(""),
@@ -67,7 +68,7 @@ function isSafeWildcardBasename(basename: string): boolean {
 	if (!basename || basename.startsWith(".") || basename.startsWith("_")) return false;
 	if (SKIPPED_WILDCARD_BASENAMES.has(basename)) return false;
 	if (MAIN_THREAD_UNSAFE_WILDCARD_BASENAMES.has(basename)) return false;
-	return !/\.(test|spec|d|generated|bench)$/.test(basename);
+	return !/\.(test|spec|d|d\.json|generated|bench)$/.test(basename);
 }
 
 function parseWildcardPattern(exportKey: string, sourcePattern: string): WildcardPattern | null {
@@ -97,8 +98,8 @@ function shimSpecifier(file: string): string {
 
 /**
  * Derive the bundled legacy Pi module surface from current package exports.
- * Named wildcard exports are expanded from source; root catch-alls stay out to
- * avoid importing CLI entrypoints and other non-extension surfaces.
+ * Named wildcard exports are expanded from source. Only catalog's root catch-all
+ * is safe to expand: other packages expose CLI entrypoints at that level.
  */
 export async function collectBundledPiEntries(): Promise<BundledPiEntry[]> {
 	const entries: BundledPiEntry[] = [];
@@ -138,7 +139,8 @@ export async function collectBundledPiEntries(): Promise<BundledPiEntry[]> {
 			if (!sourcePattern) continue;
 			const pattern = parseWildcardPattern(exportKey, sourcePattern);
 			if (!pattern || !/\.(ts|tsx|mts|cts|js|mjs|cjs|jsx)$/.test(pattern.sourceSuffix)) continue;
-			if (pattern.exportPrefix === "" || pattern.exportPrefix === "/") continue;
+			const catalogRootWildcard = pkg.dir === "catalog" && exportKey === "./*";
+			if ((pattern.exportPrefix === "" || pattern.exportPrefix === "/") && !catalogRootWildcard) continue;
 
 			const sourceDir = path.join(packageRoot, pattern.sourcePrefix);
 			try {
@@ -159,6 +161,7 @@ export async function collectBundledPiEntries(): Promise<BundledPiEntry[]> {
 				matches.sort();
 				for (const match of matches) {
 					if (!match.endsWith(pattern.sourceSuffix)) continue;
+					if (catalogRootWildcard && match.includes("/")) continue;
 					const basename = match.slice(0, match.length - pattern.sourceSuffix.length);
 					const segments = basename.split("/");
 					// Every directory on the way has to be importable too: a private or

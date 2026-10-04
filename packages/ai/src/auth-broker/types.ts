@@ -96,12 +96,15 @@ export interface DisabledCredentialsResponse {
 /** POST /v1/credential/:id/block request body. */
 export type CredentialBlockRequest = CredentialBlockSnapshot;
 
+/** DELETE /v1/credential/:id/block request body; empty scope targets only the global row. */
+export type CredentialBlockDeleteRequest = Pick<CredentialBlockSnapshot, "providerKey" | "blockScope">;
+
 /** POST /v1/credential/:id/block response body. */
 export interface CredentialBlockResponse {
 	ok: boolean;
 }
 
-/** DELETE /v1/credential/:id/blocks response body. */
+/** DELETE /v1/credential/:id/block or /blocks response body. */
 export interface CredentialBlocksDeleteResponse {
 	ok: boolean;
 }

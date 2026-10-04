@@ -87,5 +87,15 @@
 		"pageBg": "#F8F1EA",
 		"cardBg": "#FFF8F1",
 		"infoBg": "#EEDCCB"
+	},
+	"terminal": {
+		"background": "canyonBg",
+		"foreground": "#4a3b33",
+		"chrome": "#f2e8dd",
+		"widget": "canyonSurface",
+		"ansi": [
+			"#3d302a", "errorRed", "#68823d", "#967507", "#55749f", "#9a5a85", "riverTeal", "#bba897",
+			"dimBrown", "#d96859", "#78934e", "#a88525", "#6c8cb8", "#b774a0", "#619194", "canyonSurface"
+		]
 	}
 }

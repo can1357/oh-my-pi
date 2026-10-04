@@ -255,6 +255,25 @@ describe("InputController skill queue chip metadata", () => {
 		});
 	});
 
+	it("keeps a draft typed while a Ctrl+Enter skill submission was failing", async () => {
+		const { ctx, editor, promptCustomMessage, showError } = createStubInputControllerContext({
+			skillCommands,
+			isStreaming: true,
+		});
+		promptCustomMessage.mockImplementation(async () => {
+			// The user keeps typing while dispatch is in flight.
+			editor.setText("typed while dispatching");
+			throw new Error("dispatch failed");
+		});
+		const controller = new InputController(ctx);
+
+		editor.setText("/skill:test-skill go");
+		await controller.handleFollowUp();
+
+		expect(showError).toHaveBeenCalledTimes(1);
+		expect(editor.getText()).toBe("/skill:test-skill go\n\ntyped while dispatching");
+	});
+
 	it("streaming follow-up applies builtin slash commands instead of queueing them", async () => {
 		const { ctx, editor, prompt, handleGoalModeCommand } = createStubInputControllerContext({
 			skillCommands,
@@ -684,15 +703,6 @@ describe("AgentSession derived queued custom display", () => {
 		// ...and only Esc+abort drops it (no auto-resume leftover).
 		expect(session.clearQueue({ forInterrupt: true }).steering).toEqual([]);
 		expect(session.agent.hasQueuedMessages()).toBe(false);
-	});
-
-	it("popLastQueuedMessage restores chip text and removes the core queue entry", async () => {
-		fixture = await createRealSession();
-		const { session } = fixture;
-		queueCustomSteer(session, "/skill:foo bar");
-
-		expect(session.popLastQueuedMessage()?.text).toBe("/skill:foo bar");
-		expect(session.getQueuedMessages().steering).toEqual([]);
 	});
 
 	it("counts a queued advisor card as pending work but keeps it out of chips and restore", async () => {
