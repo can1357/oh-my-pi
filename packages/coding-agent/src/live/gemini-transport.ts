@@ -2,6 +2,7 @@ import { type } from "@oh-my-pi/omptype";
 import type { AuthStorage, ImageContent } from "@oh-my-pi/pi-ai";
 import { getProxyForUrl } from "@oh-my-pi/pi-ai/utils/proxy";
 import { AudioPlayback } from "@oh-my-pi/pi-natives";
+import { logger } from "@oh-my-pi/pi-utils";
 import { resizeImage } from "../utils/image-resize";
 import { decodePcm16, encodePcm16 } from "../stt/wav";
 import type { LiveClientMessage } from "./protocol";
@@ -344,12 +345,20 @@ export class GeminiLiveTransport {
 		if (this.#audioQueue.length > 0 || this.#controlQueue.length > 0) this.#scheduleDrain(SEND_PACE_MS);
 	}
 
+	#reportToolError(id: string, name: string, response: Record<string, unknown>): void {
+		if (typeof response.error !== "string" || response.cancelled === true) return;
+		const message = this.#redact(response.error);
+		logger.warn("Gemini Live tool failed", { id, name, error: message });
+		this.#options.callbacks.onToolError?.(name, message);
+	}
+
 	#respond(
 		id: string,
 		name: string,
 		response: Record<string, unknown>,
 		parts?: Array<{ inlineData: { data: string; mimeType: string } }>,
 	): void {
+		this.#reportToolError(id, name, response);
 		this.#enqueueControl({
 			toolResponse: {
 				functionResponses: [{ id, name, response, ...(parts?.length ? { parts } : {}) }],
@@ -364,6 +373,7 @@ export class GeminiLiveTransport {
 		response: Record<string, unknown>,
 		parts?: Array<{ inlineData: { data: string; mimeType: string } }>,
 	): void {
+		this.#reportToolError(id, name, response);
 		this.#enqueueControl(
 			{
 				toolResponse: {
@@ -444,6 +454,7 @@ export class GeminiLiveTransport {
 	#handleToolCall(call: GeminiFunctionCall): void {
 		const { id, name } = call;
 		if (this.#pending.has(id)) return;
+		logger.debug("Gemini Live tool requested", { id, name });
 		if (name === "delegate") {
 			const args = geminiDelegateArguments(call.args ?? {});
 			if (args instanceof type.errors) {

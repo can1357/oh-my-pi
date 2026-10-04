@@ -48,6 +48,8 @@ class LiveSignalingError extends Error {
 export interface LiveTransportCallbacks {
 	onEvent(event: LiveServerEvent): void;
 	onOutputLevel(level: number): void;
+	/** Reports a recoverable tool failure without closing the live call. */
+	onToolError?(name: string, message: string): void;
 	/** Stops and drains one controller-owned delegated task. */
 	onCancelDelegation?(id: string): Promise<void>;
 }

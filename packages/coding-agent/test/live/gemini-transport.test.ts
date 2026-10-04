@@ -34,6 +34,7 @@ async function harness(
 	const incoming = new Inbox<unknown>();
 	const events = new Inbox<LiveServerEvent>();
 	const played = new Inbox<Float32Array>();
+	const toolErrors = new Inbox<{ name: string; message: string }>();
 	const stopped = new Inbox<void>();
 	const accepted = Promise.withResolvers<Bun.ServerWebSocket<undefined>>();
 	const received: unknown[] = [];
@@ -81,6 +82,7 @@ async function harness(
 		callbacks: {
 			onEvent: event => events.push(event),
 			onOutputLevel: () => undefined,
+			onToolError: (name, message) => toolErrors.push({ name, message }),
 			...(options.onCancelDelegation ? { onCancelDelegation: options.onCancelDelegation } : {}),
 		},
 	});
@@ -94,6 +96,7 @@ async function harness(
 			peer,
 			incoming,
 			events,
+			toolErrors,
 			played,
 			received,
 			setup,
@@ -369,6 +372,48 @@ describe("Gemini Live websocket", () => {
 			expect(await h.events.next()).toEqual({
 				type: "turn.done",
 				turn: { role: "assistant", transcript: "done" },
+			});
+		} finally {
+			await h.close();
+		}
+	});
+
+	test("direct tool errors redact credentials and keep subsequent speech active", async () => {
+		const h = await harness("string", {
+			execution: {
+				codeEnabled: true,
+				desktopEnabled: false,
+				async executeCode() {
+					throw new Error("Connection refused: local-test-key");
+				},
+				async executeDesktop() {
+					throw new Error("Desktop disabled");
+				},
+				async close() {},
+			},
+		});
+		try {
+			h.peer.send(
+				JSON.stringify({
+					toolCall: {
+						functionCalls: [{ id: "failed", name: "execute", args: { code: "connect()", language: "js" } }],
+					},
+				}),
+			);
+			expect(await h.toolErrors.next()).toEqual({ name: "execute", message: "Connection refused: [redacted]" });
+			expect(await h.incoming.next()).toEqual({
+				toolResponse: {
+					functionResponses: [
+						{ id: "failed", name: "execute", response: { error: "Connection refused: [redacted]" } },
+					],
+				},
+			});
+			h.peer.send(JSON.stringify({ serverContent: { inputTranscription: { text: "Keep listening" } } }));
+			expect(await h.events.next()).toEqual({ type: "transcript.started", role: "user" });
+			expect(await h.events.next()).toEqual({ type: "input_transcript.added", item: { text: "Keep listening" } });
+			expect(await h.events.next()).toEqual({
+				type: "turn.done",
+				turn: { role: "user", transcript: "Keep listening" },
 			});
 		} finally {
 			await h.close();

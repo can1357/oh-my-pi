@@ -49,6 +49,8 @@ export interface LiveSessionCallbacks {
 	onLevels(input: number, output: number): void;
 	/** Reports the latest available conversational transcript. */
 	onTranscript(transcript: LiveTranscript | undefined): void;
+	/** Reports a recoverable tool failure; the microphone remains active. */
+	onToolError?(name: string, message: string): void;
 	/** Reports one terminal stop, optionally carrying its cause. */
 	onTerminal(error?: Error): void;
 }
@@ -205,6 +207,7 @@ export class LiveSessionController {
 				onEvent: (event: LiveServerEvent) => this.#guardEvent(() => this.#handleLiveEvent(event)),
 				onOutputLevel: (level: number) => this.#guardEvent(() => this.#handleOutputLevel(level)),
 				onCancelDelegation: id => this.#cancelDelegation(id),
+				onToolError: (name, message) => this.#guardEvent(() => this.#callbacks.onToolError?.(name, message)),
 			};
 			let transport = this.#dependencies.createTransport?.(callbacks, instructions);
 			if (!transport) {

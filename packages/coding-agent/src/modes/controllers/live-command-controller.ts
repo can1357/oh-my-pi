@@ -2,6 +2,7 @@ import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import { logger } from "@oh-my-pi/pi-utils";
 import { LiveSessionController, type LiveSessionControllerOptions, type LiveTranscript } from "../../live/controller";
 import { LiveVisualizer } from "@oh-my-pi/pi-tui/apps/live-visualizer";
+import { replaceTabs } from "@oh-my-pi/pi-tui";
 import { vocalizer } from "../../tts/vocalizer";
 import type { AssistantMessageComponent } from "@oh-my-pi/pi-tui/chat/assistant-message";
 import type { CustomEditor } from "@oh-my-pi/pi-tui/prompt/custom-editor";
@@ -133,6 +134,10 @@ export class LiveCommandController {
 					} else {
 						this.#presentAssistantTranscript(transcript);
 					}
+				},
+				onToolError: (name, message) => {
+					if (this.#visualizer !== visualizer) return;
+					this.#ctx.showError(replaceTabs(`Gemini Live ${name}: ${message}`));
 				},
 				onTerminal: error => this.#finish(session, error),
 			},

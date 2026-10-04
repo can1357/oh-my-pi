@@ -15,6 +15,7 @@
 - Fixed Gemini Live user utterances merging or waiting for an assistant turn to finish ([#14302](https://github.com/can1357/oh-my-pi/pull/14302) by [@mitnichiter](https://github.com/mitnichiter)).
 - Fixed Gemini Live microphone backlogs disconnecting congested sessions while function results were being sent ([#14302](https://github.com/can1357/oh-my-pi/pull/14302) by [@mitnichiter](https://github.com/mitnichiter)).
 - Fixed Gemini Live reporting cancellation before its owned execution drained and retaining coding work after Live stopped ([#14302](https://github.com/can1357/oh-my-pi/pull/14302) by [@mitnichiter](https://github.com/mitnichiter)).
+- Fixed Gemini Live hiding direct-tool errors from the terminal while continuing to listen ([#14302](https://github.com/can1357/oh-my-pi/pull/14302) by [@mitnichiter](https://github.com/mitnichiter)).
 
 ## [18.6.0] - 2026-10-03
 
