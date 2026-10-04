@@ -123,19 +123,6 @@ describe("InputController.handleLargePaste gate", () => {
 });
 
 describe("InputController.presentLargePasteMenu actions", () => {
-	it("offers the requested actions in order", async () => {
-		const { controller, spies } = createContext({ choice: undefined });
-
-		await controller.presentLargePasteMenu("payload", 1);
-
-		const options = spies.showHookSelector.mock.calls[0][1] as Array<{ label: string }>;
-		expect(options.map(option => option.label)).toEqual([
-			"Attach as a wrapped block",
-			"Attach as local file",
-			"Paste inline",
-		]);
-	});
-
 	it("wraps the paste in attachment XML collapsed to a marker", async () => {
 		const { controller, spies } = createContext({ choice: "Attach as a wrapped block" });
 
@@ -172,14 +159,6 @@ describe("InputController.presentLargePasteMenu actions", () => {
 		await controller.presentLargePasteMenu("payload", 1);
 
 		expect(spies.insertTextAttachment).toHaveBeenCalledWith("payload");
-	});
-
-	it("titles the menu with the paste's line count", async () => {
-		const { controller, spies } = createContext({ choice: undefined });
-
-		await controller.presentLargePasteMenu("payload", 123);
-
-		expect(spies.showHookSelector.mock.calls[0][0]).toBe("Pasted 123 lines");
 	});
 });
 

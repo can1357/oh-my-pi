@@ -26,10 +26,9 @@ type SettingsRow = {
 	value: string;
 };
 
-/** Row shape for model_usage table queries */
+/** Row shape for the model_usage MRU query (ordering column stays in SQL) */
 type ModelUsageRow = {
 	model_key: string;
-	last_used_at: number;
 };
 
 /** Row shape for model_perf table queries */
@@ -99,8 +98,14 @@ export interface ModelPerfStats {
 const MODEL_PERF_DECAY_AT = 256;
 /** meta-table marker set once historical stats.db rows have been imported into model_perf. */
 const MODEL_PERF_BACKFILL_KEY = "model_perf_backfill";
-/** Batch window for deferred model_perf writes; matches prompt-history's drain cadence. */
-const MODEL_PERF_FLUSH_DELAY_MS = 100;
+/**
+ * Batch window for deferred model_perf writes. Perf aggregates are advisory, so
+ * one transaction per minute replaces one per turn; the timer is unref'd and the
+ * pending batch is flushed by {@link AgentStorage.close}, which the exit-only
+ * postmortem hook runs on every real exit (normal, signal, fatal), and by
+ * {@link AgentStorage.getModelPerf}, so in-process reads never lag the window.
+ */
+const MODEL_PERF_FLUSH_DELAY_MS = 60_000;
 /** Backfill ignores stats.db history older than this; decay makes stale provider speeds worthless anyway. */
 const MODEL_PERF_BACKFILL_MAX_AGE_MS = 90 * 86_400_000;
 /** Rows fetched per synchronous backfill chunk — keeps per-chunk event-loop blocking under ~20ms even on cold I/O. */
@@ -163,7 +168,7 @@ export class AgentStorage {
 	/** One backfill *check* per process; the persistent gate is the meta marker. */
 	#perfBackfillChecked = false;
 	/** Coalesces per-turn perf samples into one deferred transaction off the turn's hot path. */
-	#perfDrain = new AsyncDrain<ModelPerfInsert>(MODEL_PERF_FLUSH_DELAY_MS);
+	#perfDrain = new AsyncDrain<ModelPerfInsert>(MODEL_PERF_FLUSH_DELAY_MS, { unref: true });
 	#closing = false;
 
 	private constructor(db: Database, dbPath: string) {
@@ -180,9 +185,7 @@ export class AgentStorage {
 		this.#upsertModelUsageStmt = this.#db.prepare(
 			`INSERT INTO model_usage (model_key, last_used_at) VALUES (?, ${SQLITE_NOW_EPOCH}) ON CONFLICT(model_key) DO UPDATE SET last_used_at = ${SQLITE_NOW_EPOCH}`,
 		);
-		this.#listModelUsageStmt = this.#db.prepare(
-			"SELECT model_key, last_used_at FROM model_usage ORDER BY last_used_at DESC",
-		);
+		this.#listModelUsageStmt = this.#db.prepare("SELECT model_key FROM model_usage ORDER BY last_used_at DESC");
 		// Recency-weighted upsert: past MODEL_PERF_DECAY_AT samples, every new
 		// sample first halves the aggregates so old measurements fade out.
 		this.#upsertModelPerfStmt = this.#db.prepare(
@@ -260,7 +263,10 @@ CREATE TABLE IF NOT EXISTS meta (
 CREATE TABLE IF NOT EXISTS schema_version (version INTEGER PRIMARY KEY);
 `);
 
-		const settingsInfo = this.#db.prepare("PRAGMA table_info(settings)").all() as Array<{ name?: string }>;
+		// One-off statements are scoped with `using`: an unfinalized statement keeps the SQLite
+		// connection (and agent.db) open after close() until GC collects it.
+		using settingsInfoStmt = this.#db.prepare("PRAGMA table_info(settings)");
+		const settingsInfo = settingsInfoStmt.all() as Array<{ name?: string }>;
 		const hasSettingsTable = settingsInfo.length > 0;
 		const hasKey = settingsInfo.some(column => column.name === "key");
 		const hasValue = settingsInfo.some(column => column.name === "value");
@@ -276,7 +282,8 @@ CREATE TABLE settings (
 		} else if (!hasKey || !hasValue) {
 			// Migrate v1 schema: single JSON blob in `data` column → per-key rows
 			let legacySettings: Record<string, unknown> | null = null;
-			const row = this.#db.prepare("SELECT data FROM settings WHERE id = 1").get() as { data?: string } | undefined;
+			using legacyRowStmt = this.#db.prepare("SELECT data FROM settings WHERE id = 1");
+			const row = legacyRowStmt.get() as { data?: string } | undefined;
 			if (row?.data) {
 				try {
 					const parsed = JSON.parse(row.data);
@@ -300,7 +307,7 @@ CREATE TABLE settings (
 );
 `);
 				if (settings) {
-					const insert = this.#db.prepare(
+					using insert = this.#db.prepare(
 						`INSERT INTO settings (key, value, updated_at) VALUES (?, ?, ${SQLITE_NOW_EPOCH})`,
 					);
 					for (const [key, value] of Object.entries(settings)) {
@@ -315,9 +322,8 @@ CREATE TABLE settings (
 			migrate(legacySettings);
 		}
 
-		const versionRow = this.#db.prepare("SELECT version FROM schema_version ORDER BY version DESC LIMIT 1").get() as
-			| { version?: number }
-			| undefined;
+		using versionStmt = this.#db.prepare("SELECT version FROM schema_version ORDER BY version DESC LIMIT 1");
+		const versionRow = versionStmt.get() as { version?: number } | undefined;
 		const schemaVersion = typeof versionRow?.version === "number" ? versionRow.version : 0;
 		if (versionRow?.version !== undefined && versionRow.version !== SCHEMA_VERSION) {
 			logger.warn("AgentStorage schema version mismatch", {
@@ -327,8 +333,11 @@ CREATE TABLE settings (
 		}
 		if (schemaVersion < SCHEMA_VERSION) {
 			this.#migrateSchema(schemaVersion);
+			// Only an upgrade (or a fresh db) records the version; rewriting the same
+			// row on every open was a write transaction per process start.
+			using recordVersionStmt = this.#db.prepare("INSERT OR REPLACE INTO schema_version(version) VALUES (?)");
+			recordVersionStmt.run(SCHEMA_VERSION);
 		}
-		this.#db.prepare("INSERT OR REPLACE INTO schema_version(version) VALUES (?)").run(SCHEMA_VERSION);
 	}
 
 	#migrateSchema(fromVersion: number): void {
@@ -345,7 +354,8 @@ CREATE TABLE settings (
 			// Purge the old aggregates and re-arm the stats.db backfill so
 			// history is re-imported through the corrected fold.
 			this.#db.run("DELETE FROM model_perf");
-			this.#db.prepare("DELETE FROM meta WHERE key = ?").run(MODEL_PERF_BACKFILL_KEY);
+			using clearBackfillStmt = this.#db.prepare("DELETE FROM meta WHERE key = ?");
+			clearBackfillStmt.run(MODEL_PERF_BACKFILL_KEY);
 		}
 	}
 
@@ -577,9 +587,12 @@ FROM model_usage_legacy
 	 * Returns recency-weighted TPS/TTFT averages for every model with recorded
 	 * requests, keyed by "provider/modelId". Read by the /models browser.
 	 * Also kicks the one-time background stats.db import; until it completes,
-	 * models without live samples are simply absent.
+	 * models without live samples are simply absent. Drains the pending perf
+	 * batch first so reads reflect every sample this process has recorded.
 	 */
 	getModelPerf(): Map<string, ModelPerfStats> {
+		// The drain handler runs synchronously, so the batch is committed before the read.
+		void this.#perfDrain.flush();
 		this.#kickModelPerfBackfill();
 		const stats = new Map<string, ModelPerfStats>();
 		try {
@@ -611,15 +624,15 @@ FROM model_usage_legacy
 		if (!this.#autoPerfBackfill || this.#perfBackfillChecked) return;
 		this.#perfBackfillChecked = true;
 		try {
-			const marker = this.#db.prepare("SELECT value FROM meta WHERE key = ?").get(MODEL_PERF_BACKFILL_KEY);
+			using markerStmt = this.#db.prepare("SELECT value FROM meta WHERE key = ?");
+			const marker = markerStmt.get(MODEL_PERF_BACKFILL_KEY);
 			if (marker) return;
 			const statsDbPath = getStatsDbPath();
 			if (!fs.existsSync(statsDbPath)) return;
 			void this.backfillModelPerfFromStats(statsDbPath)
 				.then(imported => {
-					this.#db
-						.prepare("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)")
-						.run(MODEL_PERF_BACKFILL_KEY, "complete");
+					using markCompleteStmt = this.#db.prepare("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)");
+					markCompleteStmt.run(MODEL_PERF_BACKFILL_KEY, "complete");
 					logger.info("AgentStorage imported model perf history from stats.db", { imported });
 				})
 				.catch(error => {
@@ -649,7 +662,7 @@ FROM model_usage_legacy
 		const statsDb = new Database(statsDbPath, { readonly: true });
 		try {
 			statsDb.run(`PRAGMA busy_timeout = ${getDbBusyTimeoutMs()}`);
-			const select = statsDb.prepare(
+			using select = statsDb.prepare(
 				`SELECT rowid, timestamp, provider, model, output_tokens, duration, ttft
 FROM messages
 WHERE (timestamp < ?1 OR (timestamp = ?1 AND rowid < ?2))
@@ -698,7 +711,7 @@ LIMIT ?4`,
 				await Bun.sleep(0);
 			}
 			if (sums.size > 0) {
-				const upsert = this.#db.prepare(
+				using upsert = this.#db.prepare(
 					`INSERT INTO model_perf (model_key, samples, output_tokens, gen_ms, ttft_samples, ttft_ms, updated_at)
 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ${SQLITE_NOW_EPOCH})
 ON CONFLICT(model_key) DO UPDATE SET
@@ -750,7 +763,7 @@ ON CONFLICT(model_key) DO UPDATE SET
 		const credentials = this.#authStore.listAuthCredentials(provider);
 		if (!includeDisabled) return credentials;
 
-		const stmt = this.#db.prepare(
+		using stmt = this.#db.prepare(
 			provider
 				? "SELECT id, provider, credential_type, data, disabled_cause FROM auth_credentials WHERE provider = ? ORDER BY id ASC"
 				: "SELECT id, provider, credential_type, data, disabled_cause FROM auth_credentials ORDER BY id ASC",
@@ -843,19 +856,30 @@ ON CONFLICT(model_key) DO UPDATE SET
 		this.#authStore.cleanExpiredCache();
 	}
 
+	/**
+	 * Restricts the agent dir to 0700 and the db to 0600, touching each only when
+	 * its mode differs. POSIX modes are meaningless on Windows, so it is a no-op there.
+	 */
 	#hardenPermissions(dbPath: string): void {
+		if (process.platform === "win32") return;
 		const dir = path.dirname(dbPath);
-		try {
-			fs.chmodSync(dir, 0o700);
-		} catch (error) {
-			logger.warn("AgentStorage failed to chmod agent dir", { path: dir, error: String(error) });
-		}
+		AgentStorage.#chmodIfNeeded(dir, 0o700, "AgentStorage failed to chmod agent dir");
+		AgentStorage.#chmodIfNeeded(dbPath, 0o600, "AgentStorage failed to chmod db file");
+	}
 
-		if (!fs.existsSync(dbPath)) return;
+	static #chmodIfNeeded(target: string, mode: number, failureMessage: string): void {
+		let current: number;
 		try {
-			fs.chmodSync(dbPath, 0o600);
+			current = fs.statSync(target).mode & 0o777;
+		} catch {
+			// Missing target (e.g. db not yet materialized): nothing to harden.
+			return;
+		}
+		if (current === mode) return;
+		try {
+			fs.chmodSync(target, mode);
 		} catch (error) {
-			logger.warn("AgentStorage failed to chmod db file", { path: dbPath, error: String(error) });
+			logger.warn(failureMessage, { path: target, error: String(error) });
 		}
 	}
 }

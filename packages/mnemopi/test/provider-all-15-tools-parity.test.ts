@@ -122,7 +122,7 @@ describe("provider all-tools parity", () => {
 		expect(validate.status).toBe("validation_attest");
 		const diagnose = await handleToolCall("mnemopi_diagnose", { bank: "ops" });
 		expect(diagnose.status).toBe("ok");
-		expect(diagnose.db_path).toContain("banks/ops/mnemopi.db");
+		expect(diagnose.db_path).toContain(join("banks", "ops", "mnemopi.db"));
 		const graphQuery = await handleToolCall("mnemopi_graph_query", { seed_memory_id: memoryId, bank: "ops" });
 		expect(graphQuery).toMatchObject({
 			status: "ok",

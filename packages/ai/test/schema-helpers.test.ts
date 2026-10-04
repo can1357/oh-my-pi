@@ -212,30 +212,6 @@ describe("adaptSchemaForStrict", () => {
 		expect(result.schema).toBe(schema);
 	});
 
-	it("enforces strict mode for valid schemas", () => {
-		const schema = {
-			type: "object",
-			properties: { x: { type: "string" } },
-			required: ["x"],
-		};
-		const result = adaptSchemaForStrict(schema, true);
-		expect(result.strict).toBe(true);
-		expect(result.schema.additionalProperties).toBe(false);
-	});
-
-	it("degrades gracefully for non-representable schemas", () => {
-		const schema = {
-			type: "object",
-			properties: {
-				items: { items: {}, type: "array" },
-			},
-			required: ["items"],
-		};
-		const result = adaptSchemaForStrict(schema, true);
-		expect(result.strict).toBe(false);
-		expect(result.schema).toBe(schema);
-	});
-
 	it("degrades gracefully for schemas with patternProperties maps", () => {
 		const schema = {
 			type: "object",

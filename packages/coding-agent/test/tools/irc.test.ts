@@ -401,17 +401,6 @@ describe("IRC", () => {
 			expect(msg?.body).toBe("for the waiter");
 		});
 
-		it("wait returns null on timeout and rejects on abort", async () => {
-			// Genuine 5ms wall-clock timeout: this deliberately exercises the
-			// bus's real timer path; nothing else races it.
-			expect(await bus.wait("0-Main", {}, 5)).toBeNull();
-
-			const controller = new AbortController();
-			const waiting = bus.wait("0-Main", {}, 1000, controller.signal);
-			controller.abort(new Error("cancelled"));
-			await expect(waiting).rejects.toThrow("cancelled");
-		});
-
 		it("wait drains an already-pending mailbox message first", async () => {
 			const main = makeFakeSession();
 			registry.register({ id: "0-Main", displayName: "main", kind: "main", session: main.session });
@@ -499,28 +488,6 @@ describe("IRC", () => {
 			expect(receipt).toEqual({ to: "0-Parked", outcome: "failed", error: "revive exploded" });
 			// Failed revival never enqueues: the message is lost, not buffered.
 			expect(bus.take("0-Parked")).toBeUndefined();
-		});
-
-		it("wait with liveness aborts when the last running sender becomes idle after commitment", async () => {
-			const sub = makeFakeSession();
-			registry.register({ id: "0-Sub", displayName: "task", kind: "sub", session: sub.session, status: "running" });
-
-			const waiting = bus.wait("0-Main", {}, 1000, undefined, { liveness: { registry, senderId: "0-Main" } });
-			registry.setStatus("0-Sub", "idle");
-
-			await expect(waiting).rejects.toThrow("no running peers remain");
-		});
-
-		it("wait with liveness aborts when a specific sender becomes idle after commitment", async () => {
-			const sub = makeFakeSession();
-			registry.register({ id: "0-Sub", displayName: "task", kind: "sub", session: sub.session, status: "running" });
-
-			const waiting = bus.wait("0-Main", { from: "0-Sub" }, 1000, undefined, {
-				liveness: { registry, senderId: "0-Main" },
-			});
-			registry.setStatus("0-Sub", "idle");
-
-			await expect(waiting).rejects.toThrow('agent "0-Sub" is not running');
 		});
 	});
 

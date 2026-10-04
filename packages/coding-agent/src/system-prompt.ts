@@ -28,6 +28,7 @@ import friendlyPersonality from "./prompts/system/personalities/friendly.md" wit
 import pragmaticPersonality from "./prompts/system/personalities/pragmatic.md" with { type: "text" };
 import projectPromptTemplate from "./prompts/system/project-prompt.md" with { type: "text" };
 import systemPromptTemplate from "./prompts/system/system-prompt.md" with { type: "text" };
+import userAppendPromptTemplate from "./prompts/system/user-append.md" with { type: "text" };
 import { normalizeConcurrencyLimit } from "./task/parallel";
 import type { ActiveRepoContext } from "@oh-my-pi/pi-tui/status-line/host";
 import { XD_URL_PREFIX } from "@oh-my-pi/pi-tui/tools/xd-url";
@@ -586,6 +587,11 @@ export interface BuildSystemPromptOptions {
 	autoQaEnabled?: boolean;
 	/** Whether active `write` is restricted to xd:// dispatch and the plan artifact sandbox. */
 	writeTransportOnly?: boolean;
+	/**
+	 * Whether this prompt is for a subagent session. Replaces the Verify workflow with a hand-off:
+	 * the main agent verifies once after all subagents land, so parallel children don't storm the CPU.
+	 */
+	subagent?: boolean;
 }
 
 /** Result of building provider-facing system prompt messages. */
@@ -602,22 +608,13 @@ export interface BuildSystemPromptResult {
 	xdevCatalogNames?: readonly string[];
 }
 
-/**
- * Heading that separates the user's append prompt (`APPEND_SYSTEM.md`,
- * `--append-system-prompt`) from the generated blocks that precede it.
- */
-export const USER_APPEND_HEADING =
-	"## User Instructions\n\nThe following instructions are user-authored (session configuration or CLI). They are authoritative and supersede conflicting guidance above.";
+/** Static wrapper; compiled (not rendered) so user-authored Markdown passes through byte-for-byte. */
+const renderUserAppend = prompt.compile(userAppendPromptTemplate.trimEnd());
 
 /**
  * Join generated append blocks (memory, auto-learn, `xd://` routes, MCP server
- * instructions) with the user's append prompt.
- *
- * The generated blocks end with `## MCP Server Instructions`, whose text tells
- * the model it is server-controlled and may not be verified. Concatenating the
- * user's append text directly behind it, with no heading of its own, rendered
- * user-authored instructions as a trailing paragraph of that section, so the
- * user's text gets a boundary heading whenever generated blocks precede it.
+ * instructions) with the user's append prompt. Keep the user text in its own
+ * section so it is not misclassified as MCP server-controlled instructions.
  */
 export function composeAppendPrompt(appendParts: readonly string[], appendSystemPrompt?: string): string | undefined {
 	const generated = appendParts.length > 0 ? appendParts.join("\n\n") : undefined;
@@ -627,7 +624,7 @@ export function composeAppendPrompt(appendParts: readonly string[], appendSystem
 	if (!generated) {
 		return appendSystemPrompt;
 	}
-	return `${generated}\n\n${USER_APPEND_HEADING}\n\n${appendSystemPrompt}`;
+	return renderUserAppend({ generatedAppend: generated, userAppend: appendSystemPrompt });
 }
 
 /** Build the system prompt with tools, guidelines, and context */
@@ -677,6 +674,7 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		xdevDocs = "",
 		autoQaEnabled = false,
 		writeTransportOnly = false,
+		subagent = false,
 		activeRepoContext: providedActiveRepoContext,
 	} = options;
 	const inlineToolDescriptors = providedInlineToolDescriptors ?? false;
@@ -1005,6 +1003,7 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		xdevDocs,
 		autoQaEnabled,
 		writeTransportOnly,
+		subagent,
 	};
 	const selectedTemplate = resolvedCustomPrompt
 		? customSystemPromptTemplate
@@ -1028,16 +1027,16 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		const guidance = prelude.guidance?.trim();
 		if (guidance) systemPrompt.push(guidance);
 	}
-	// Literal overrides render context files and append text in their wrapper.
-	// Both the bundled template and user templates receive them in the footer.
+	// Working-directory content (context files with their paths, workspace
+	// tree/roots, active repo) and session append text form one trailing
+	// `<project-context>` block after every static block, so sessions in
+	// different directories share the static prefix and the Anthropic head
+	// cache breakpoint lands right before this block.
 	const projectPrompt = prompt
-		.render(projectPromptTemplate, resolvedCustomPrompt ? { ...data, contextFiles: [], appendPrompt: "" } : data)
+		.render(projectPromptTemplate, { ...data, activeRepoContext: activeRepoContextPrompt })
 		.trim();
 	if (projectPrompt) {
 		systemPrompt.push(projectPrompt);
-	}
-	if (activeRepoContextPrompt) {
-		systemPrompt.push(activeRepoContextPrompt);
 	}
 
 	// Claim delivery only when the rendered block 0 actually carries the xd://

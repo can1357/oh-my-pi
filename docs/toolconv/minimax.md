@@ -15,9 +15,14 @@ tools:
 
 `tools.format: minimax` forces this owned dialect for the session. In `auto` mode, OMP keeps provider-native tool calling unless the selected model explicitly has `supportsTools: false`; for a MiniMax-family model id, that fallback resolves to `minimax`. See [`tools.format`](../settings.md#tools-and-approvals).
 
-When an owned dialect is active, OMP:
+`PI_DIALECT=minimax` also selects it when configuration resolves to no owned
+dialect. Unset that environment variable when choosing `native`: the agent
+uses it as a fallback even when `tools.format` resolves to native tools.
+Dialect resolution runs for each provider request.
 
-1. removes the native structured `tools` field from the provider request;
+With an owned dialect and a non-empty tool list, OMP:
+
+1. removes the native structured `tools` field and tool choice from the provider request;
 2. appends an in-band tool catalog and the MiniMax format guide to the system prompt;
 3. rewrites prior structured assistant calls and tool-result messages into this text protocol; and
 4. scans the model's text stream back into structured tool-call events.
@@ -63,8 +68,8 @@ Encoding uses the selected tool's schema:
 | Declared/value kind | Rendered parameter body | Parsed value |
 | --- | --- | --- |
 | Schema-declared string whose runtime value is a string | Verbatim text, including leading/trailing spaces and newlines | Verbatim string |
-| Number, boolean, `null`, array, or object | JSON | Parsed JSON value |
-| Value without a matching string schema | JSON, including quotes around a string | Parsed JSON when valid |
+| Non-string runtime value for a schema-treated string argument | JSON | That JSON text retained as a string |
+| Argument not treated as a string | JSON, including quotes around runtime strings | Parsed JSON when valid |
 
 Example:
 
@@ -72,12 +77,17 @@ Example:
 <invoke name="write"><parameter name="path">notes/a & b.txt</parameter><parameter name="options">{"append":false,"tags":["x","y"]}</parameter></invoke>
 ```
 
-The scanner resolves string arguments from the supplied tool schemas. A parameter attribute can override that decision:
+The scanner resolves string arguments from the supplied tool schemas or an explicit `stringArgs` callback. A string-only schema remains a string schema when nullable; enums, constants, and union branches also contribute to type detection. A parameter attribute can override that decision:
 
 - `string="true"` (and any value except `false`, `0`, or `no`) forces verbatim string handling.
 - `string="false"`, `string="0"`, or `string="no"` forces JSON parsing even for a schema-declared string.
 
 For a non-string parameter, surrounding whitespace is trimmed only for the JSON parse. OMP uses its repair-capable JSON parser; if parsing still fails, the original body is retained as a string rather than dropping the argument. Empty bodies also remain empty strings. A parameter with no usable `name` is ignored.
+
+The scanner does not validate tool membership or the full argument schema.
+Repeated parameter names overwrite earlier values at call completion. Attribute
+values are not entity-decoded; the delimiter parser is not an XML round trip
+for tool/argument names containing characters that require entity escaping.
 
 ## Multiple and parallel calls
 
@@ -129,7 +139,19 @@ reasoning text
 </thinking>
 ```
 
-In the normal owned-tool stream, thinking parsing is enabled. The MiniMax scanner recognizes `<thinking>`, `<think>`, and `<scratchpad>` (including the supported prefixed forms), emits separate thinking events, and keeps the content out of visible assistant text. If `parseThinking` is disabled for a direct scanner consumer, those tags remain visible text. An unterminated thinking block is closed logically on stream flush and its accumulated content is retained.
+`renderThinking` and the direct transcript renderer preserve reasoning in this
+form. When the input consists entirely of complete `<thinking>` wrappers,
+nested/adjacent wrappers are flattened before adding the delimiter pair.
+Normal history conversion of a call-bearing assistant message keeps only prose
+and rendered calls, dropping its original thinking blocks.
+
+In the normal owned-tool stream, thinking parsing is enabled. The MiniMax
+scanner recognizes `<thinking>`, `<think>`, and `<scratchpad>` (including
+supported prefixed forms), emits separate thinking events, and keeps the
+content out of visible text. A direct scanner defaults to thinking parsing
+disabled; outside call wrappers those tags then remain visible text. Non-call
+text inside a wrapper is discarded. An unterminated thinking block is closed
+logically on flush and retains its accumulated content.
 
 Visible prose may precede the tool envelope. Text outside calls remains assistant text; non-call text inside the wrapper is discarded by the scanner.
 
@@ -146,12 +168,16 @@ Important failure behavior:
 - **Missing call name:** no tool lifecycle is emitted for that invoke.
 - **Missing parameter name:** that parameter is ignored.
 - **Malformed JSON:** falls back to the original parameter text.
-- **Very large parameter:** input is capped at 1,000,000 JavaScript string code units; overflow is replaced by the accepted prefix plus an explicit truncation marker.
+- **Very large parameter:** the retained parameter value and its argument deltas are capped at 1,000,000 JavaScript string code units; the completed value gets an explicit truncation marker on overflow. The diagnostic `rawBlock` still retains the full invoke, so this is not a cap on total input or raw capture.
 - **Incomplete invoke:** flush resets scanner-local call state and emits no `toolEnd`. However, OMP's stream projector has already materialized a call from `toolStart`; on a normally stopped response it retains that partial call, marks the turn as tool use, and may dispatch it. Already streamed argument text remains uncoerced, and a call with no argument text has `{}`. A provider `length` stop remains `length` rather than becoming runnable tool use.
 - **Incomplete wrapper after complete invokes:** already closed invokes remain valid; the wrapper close is not required to emit their `toolEnd` events.
 - **Incomplete thinking:** retained as thinking and logically ended at flush.
 
 OMP also guards against a model fabricating tool output after its call. For this dialect, the first `<function_results>` or `<tool_response>` boundary stops projection. With the default `tools.abortOnFabricatedResult: true`, generation is aborted immediately; when disabled, OMP drains the provider stream but discards the fabricated continuation.
+
+If the provider emits native structured calls despite owned mode, the first
+named native or in-band call selects the channel for that turn. Calls from the
+other channel are discarded to avoid double dispatch.
 
 ## End-to-end example
 
@@ -208,4 +234,6 @@ The assistant can then answer normally or emit another complete MiniMax call env
 - `packages/ai/src/dialect/catalog.ts` and `prompt-template.md` — tool catalog and system-prompt injection.
 - `packages/ai/src/dialect/history.ts` and `owned-stream.ts` — history conversion, streamed projection, incomplete-call behavior, and fabricated-result boundary.
 - `packages/catalog/src/identity/dialect.ts` and `packages/coding-agent/src/sdk.ts` — MiniMax family affinity and `tools.format` resolution.
+- `packages/agent/src/agent-loop.ts` — environment fallback, non-empty-tool gating, and native-tool-choice suppression.
+- `packages/ai/src/dialect/coercion.ts` and `rendering.ts` — schema string detection, literal parameter encoding, and thinking-wrapper flattening.
 - `packages/ai/test/inband-tools.test.ts` — prompt rendering, call round trips, chunked argument deltas, raw blocks, MiniMax wrapper recovery, and result rendering.

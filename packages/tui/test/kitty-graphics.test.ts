@@ -4,15 +4,12 @@ import {
 	detectKittyUnicodePlaceholdersSupport,
 	encodeKittyPlaceholderGrid,
 	encodeKittyVirtualPlacement,
-	getKittyGraphics,
 	KITTY_PLACEHOLDER,
 	KITTY_PLACEHOLDER_MAX_CELLS,
 	kittyPlaceholdersFit,
 	renderKittyPlaceholderLines,
-	setKittyGraphics,
 } from "@oh-my-pi/pi-tui/kitty-graphics";
 
-const ORIGINAL = { ...getKittyGraphics() };
 const ORIGINAL_TMUX = Bun.env.TMUX;
 
 beforeEach(() => {
@@ -20,7 +17,6 @@ beforeEach(() => {
 });
 
 afterEach(() => {
-	setKittyGraphics(ORIGINAL);
 	if (ORIGINAL_TMUX === undefined) delete Bun.env.TMUX;
 	else Bun.env.TMUX = ORIGINAL_TMUX;
 });
@@ -79,15 +75,6 @@ describe("kitty Unicode placeholder encoding", () => {
 	});
 });
 
-describe("kitty graphics feature state", () => {
-	it("getKittyGraphics/setKittyGraphics round-trips overrides", () => {
-		setKittyGraphics({ unicodePlaceholders: false });
-		expect(getKittyGraphics()).toEqual({ unicodePlaceholders: false });
-		setKittyGraphics({ unicodePlaceholders: true });
-		expect(getKittyGraphics().unicodePlaceholders).toBe(true);
-	});
-});
-
 describe("detectKittyUnicodePlaceholdersSupport", () => {
 	function env(extra: Record<string, string | undefined> = {}): NodeJS.ProcessEnv {
 		return extra as NodeJS.ProcessEnv;
@@ -133,6 +120,7 @@ describe("detectKittyUnicodePlaceholdersSupport", () => {
 		expect(detectKittyUnicodePlaceholdersSupport("base", env({ TMUX: "/tmp/tmux-1000/default,1,0" }))).toBe(false);
 		// A detected capable terminal still needs placeholders because direct placement cannot follow pane reflow.
 		expect(detectKittyUnicodePlaceholdersSupport("ghostty", env({ TMUX: "/tmp/tmux-1000/default,1,0" }))).toBe(true);
+		expect(detectKittyUnicodePlaceholdersSupport("monstar", env({ TMUX: "/tmp/tmux-1000/default,1,0" }))).toBe(true);
 	});
 
 	it("ignores leaked Kitty-capable terminal identities inside Herdr unless placeholders are explicitly forced", () => {

@@ -13,6 +13,24 @@ pub struct AtSpiAx {
 	connection: atspi::AccessibilityConnection,
 }
 
+/// An AT-SPI top-level frame and whether its reported screen position is real.
+///
+/// Native Wayland clients cannot learn where the compositor placed them, so
+/// their toolkits answer `CoordType::Screen` with window-relative coordinates
+/// (usually `0,0`). Consumers that map `window` bounds onto a desktop capture
+/// (the Wayland window crop) must refuse when `position_known` is false.
+pub struct AtSpiWindow {
+	pub window:         DesktopWindow,
+	/// Screen and window-relative origins differ, so `window.x`/`window.y` are
+	/// global compositor coordinates. False also covers a window genuinely at
+	/// the global origin, which is indistinguishable over AT-SPI.
+	#[cfg_attr(
+		not(any(feature = "wayland-pipewire", test)),
+		expect(dead_code, reason = "only read by the pipewire capture crop")
+	)]
+	pub position_known: bool,
+}
+
 impl AtSpiAx {
 	pub(crate) fn new() -> CoreResult<Self> {
 		let rt = Builder::new_current_thread()
@@ -33,7 +51,7 @@ impl AtSpiAx {
 		}
 	}
 
-	pub(crate) fn windows(&self) -> CoreResult<Vec<DesktopWindow>> {
+	pub(crate) fn windows(&self) -> CoreResult<Vec<AtSpiWindow>> {
 		self.rt.block_on(async {
 			let mut windows = Vec::new();
 			for app in Self::apps(&self.connection)
@@ -80,19 +98,26 @@ impl AtSpiAx {
 					if width < 16 || height < 16 {
 						continue;
 					}
+					let position_known = component
+						.get_extents(CoordType::Window)
+						.await
+						.is_ok_and(|(window_x, window_y, ..)| (window_x, window_y) != (x, y));
 					let id = atspi_window_id(&frame);
-					windows.push(DesktopWindow {
-						id,
-						title,
-						app: app_name.clone(),
-						pid,
-						x,
-						y,
-						width: width as u32,
-						height: height as u32,
-						focused: state.as_ref().is_some_and(|states| {
-							states.contains(State::Focused) || states.contains(State::Active)
-						}),
+					windows.push(AtSpiWindow {
+						window: DesktopWindow {
+							id,
+							title,
+							app: app_name.clone(),
+							pid,
+							x,
+							y,
+							width: width as u32,
+							height: height as u32,
+							focused: state.as_ref().is_some_and(|states| {
+								states.contains(State::Focused) || states.contains(State::Active)
+							}),
+						},
+						position_known,
 					});
 					if windows.len() == 48 {
 						return Ok(windows);
@@ -224,15 +249,16 @@ impl AtSpiAx {
 	}
 
 	async fn find_focused(
-		connection: &atspi::AccessibilityConnection,
+		connection: &atspi::zbus::Connection,
 		root: ObjectRefOwned,
 		depth: u8,
 	) -> Result<Option<ObjectRefOwned>, String> {
-		if depth > 40 {
+		// Chromium/Electron frames report children that are the AT-SPI null object.
+		if depth > 40 || root.is_null() {
 			return Ok(None);
 		}
 		let proxy = root
-			.as_accessible_proxy(connection.connection())
+			.as_accessible_proxy(connection)
 			.await
 			.map_err(|err| err.to_string())?;
 		if proxy
@@ -716,7 +742,7 @@ impl AxBackend for AtSpiAx {
 				.await
 				.map_err(DesktopError::ax_failed)?
 			{
-				if let Some(found) = Self::find_focused(&self.connection, app, 0)
+				if let Some(found) = Self::find_focused(self.connection.connection(), app, 0)
 					.await
 					.map_err(DesktopError::ax_failed)?
 				{
@@ -781,5 +807,71 @@ mod tests {
 		assert!(native_window_for_frame(&windows, 30, "Document").is_err());
 		windows.push(window("3", 20));
 		assert!(native_window_for_frame(&windows, 20, "Document").is_err());
+	}
+
+	#[test]
+	fn focused_search_skips_null_child_refs() {
+		use atspi::zbus::{
+			connection::Builder as ConnectionBuilder, interface, zvariant::OwnedObjectPath,
+		};
+
+		/// Minimal `org.a11y.atspi.Accessible` node: a state set plus `(name,
+		/// path)` children.
+		struct Node {
+			state:    Vec<u32>,
+			children: Vec<(String, OwnedObjectPath)>,
+		}
+
+		#[interface(name = "org.a11y.atspi.Accessible")]
+		impl Node {
+			fn get_state(&self) -> Vec<u32> {
+				self.state.clone()
+			}
+
+			fn get_children(&self) -> Vec<(String, OwnedObjectPath)> {
+				self.children.clone()
+			}
+		}
+
+		const PEER: &str = ":1.7";
+		let path = |p: &str| OwnedObjectPath::try_from(p).unwrap();
+		let focused = State::Focused as u64;
+		let rt = Builder::new_current_thread().enable_all().build().unwrap();
+		let found = rt.block_on(async {
+			let (client, server) = tokio::net::UnixStream::pair().unwrap();
+			let root = Node {
+				state:    vec![0, 0],
+				// Chromium frames report children that are all the AT-SPI null object.
+				children: vec![
+					(PEER.to_owned(), path("/org/a11y/atspi/null")),
+					(PEER.to_owned(), path("/focus")),
+				],
+			};
+			let leaf =
+				Node { state: vec![focused as u32, (focused >> 32) as u32], children: Vec::new() };
+			let guid = atspi::zbus::Guid::generate();
+			let server = ConnectionBuilder::unix_stream(server)
+				.server(guid)
+				.unwrap()
+				.p2p()
+				.serve_at("/root", root)
+				.unwrap()
+				.serve_at("/focus", leaf)
+				.unwrap()
+				.build();
+			let client = ConnectionBuilder::unix_stream(client).p2p().build();
+			let (server, client) = tokio::try_join!(server, client).unwrap();
+			let root = ObjectRefOwned::from_static_str_unchecked(PEER, "/root");
+			let found = AtSpiAx::find_focused(&client, root, 0).await;
+			drop(server);
+			found
+		});
+		let found = found.expect("null child refs must not fail the focused search");
+		assert_eq!(
+			found
+				.map(|object| object.path_as_str().to_owned())
+				.as_deref(),
+			Some("/focus")
+		);
 	}
 }

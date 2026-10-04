@@ -15,6 +15,7 @@
 import { throwIfAborted } from "../../tool-errors";
 import { probeCdpResponse } from "../attach";
 import type { RelayUnavailableInfo } from "./server";
+import { DISCARDED_TABS_PROTOCOL_VERSION } from "./protocol";
 
 /**
  * One extension keepalive alarm period (30s, `background.js`) plus the dial
@@ -26,12 +27,16 @@ const POLL_INTERVAL_MS = 150;
 
 /** Outcome of {@link waitForRelayExtension}. */
 export type RelayWaitOutcome =
-	/** `/json/version` answered 200: puppeteer can connect. */
+	/** `/json/version` has the required relay and extension capabilities. */
 	| "ready"
 	/** Nothing (or something that is not a relay) is serving the endpoint. */
 	| "unreachable"
 	/** The relay is serving but no extension connected within the dial window. */
-	| "no-extension";
+	| "no-extension"
+	/** An older relay server is still running. */
+	| "outdated-relay"
+	/** The relay extension is older than the running server. */
+	| "outdated-extension";
 
 function parseUnavailableInfo(body: string): RelayUnavailableInfo | null {
 	try {
@@ -52,6 +57,29 @@ function parseUnavailableInfo(body: string): RelayUnavailableInfo | null {
 	return null;
 }
 
+function readyOutcome(body: string): RelayWaitOutcome {
+	try {
+		const parsed: unknown = JSON.parse(body);
+		if (
+			typeof parsed !== "object" ||
+			parsed === null ||
+			!("ompRelayDiscardedTabsProtocol" in parsed) ||
+			parsed.ompRelayDiscardedTabsProtocol !== String(DISCARDED_TABS_PROTOCOL_VERSION)
+		) {
+			return "outdated-relay";
+		}
+		if (
+			!("ompExtensionDiscardedTabsProtocol" in parsed) ||
+			parsed.ompExtensionDiscardedTabsProtocol !== String(DISCARDED_TABS_PROTOCOL_VERSION)
+		) {
+			return "outdated-extension";
+		}
+		return "ready";
+	} catch {
+		return "outdated-relay";
+	}
+}
+
 /**
  * Poll the relay at `cdpUrl` until its extension is connected. Gives up
  * immediately when nothing serves the endpoint, after one dial window when
@@ -66,7 +94,7 @@ export async function waitForRelayExtension(cdpUrl: string, signal?: AbortSignal
 		const response = await probeCdpResponse(probeUrl, { timeoutMs: PROBE_TIMEOUT_MS, signal });
 		throwIfAborted(signal);
 		if (response === null) return "unreachable";
-		if (response.status >= 200 && response.status < 300) return "ready";
+		if (response.status >= 200 && response.status < 300) return readyOutcome(response.body);
 		if (response.status !== 503) return "unreachable";
 		const info = parseUnavailableInfo(response.body);
 		if (info && !info.extensionSeen) {

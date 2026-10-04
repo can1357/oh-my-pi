@@ -1,7 +1,4 @@
-import { scheduler } from "node:timers/promises";
 import type { Terminal } from "@oh-my-pi/pi-tui";
-import * as logger from "@oh-my-pi/pi-utils/logger";
-import type { LspServerInfo, RecentSession } from "@oh-my-pi/pi-tui/prompt/welcome";
 import {
 	COMPOSER_DEFAULTS,
 	Composer,
@@ -9,11 +6,9 @@ import {
 	type ComposerWelcomeUpdate,
 } from "@oh-my-pi/pi-tui/prompt/composer";
 import {
+	type ComposerCache,
 	type ComposerThemePreferences,
-	readComposerStartupCache,
-	writeComposerLspCache,
-	writeComposerRecentSessionsCache,
-	writeComposerUiCache,
+	sharedComposerCache,
 } from "@oh-my-pi/pi-tui/prompt/composer-cache";
 import { setMagicKeywords } from "@oh-my-pi/pi-tui/prompt/magic-keywords";
 import { initThemeSync } from "@oh-my-pi/pi-tui/theme";
@@ -28,7 +23,6 @@ export interface PrepaintComposerOptions {
 	readonly cwd?: string;
 	readonly preferences?: Partial<ComposerPreferences>;
 	readonly theme?: ComposerThemePreferences;
-	readonly recentSessions?: () => Promise<RecentSession[]>;
 	readonly cache?: boolean;
 }
 
@@ -40,8 +34,8 @@ export interface PrepaintComposerPreferences extends ComposerPreferences {
 interface PendingComposer {
 	readonly composer: Composer;
 	readonly cwd: string;
-	readonly cache: boolean;
-	recentSessions?: Promise<RecentSession[] | undefined>;
+	/** Speculation store to refresh; `undefined` when caching is off or unavailable. */
+	readonly cache: ComposerCache | undefined;
 }
 
 let pendingComposer: PendingComposer | undefined;
@@ -49,13 +43,10 @@ let pendingComposer: PendingComposer | undefined;
 /** Ownership token that transfers one already-started Composer to InteractiveMode. */
 export class ComposerLease {
 	readonly composer: Composer;
-	/** Recent-session rows already loading in parallel with the runtime module graph. */
-	readonly recentSessions?: Promise<RecentSession[] | undefined>;
 	#adopted = false;
 
-	constructor(composer: Composer, recentSessions?: Promise<RecentSession[] | undefined>) {
+	constructor(composer: Composer) {
 		this.composer = composer;
-		this.recentSessions = recentSessions;
 	}
 
 	/** Transfer terminal ownership exactly once. */
@@ -74,32 +65,17 @@ export class ComposerLease {
 	}
 }
 
-/** Start the canonical Composer with speculative cached state, then refresh recent sessions. */
+/** Start the canonical Composer with speculative cached state. */
 export function beginStartupComposer(options: PrepaintComposerOptions = {}): void {
 	if (pendingComposer) throw new Error("A prepaint composer is already active");
 	const cwd = options.cwd ?? process.cwd();
-	const useCache = options.cache !== false;
-	const cached = useCache
-		? readComposerStartupCache(cwd)
-		: {
-				preferences: undefined,
-				theme: undefined,
-				welcome: undefined,
-				recentSessions: [],
-				lspServers: [],
-				status: undefined,
-			};
+	const cache = options.cache === false ? undefined : sharedComposerCache();
+	const cached = cache ? cache.read(cwd) : { preferences: undefined, theme: undefined, status: undefined };
 	const theme = { ...cached.theme, ...options.theme };
 	initThemeSync(theme.symbolPreset, theme.colorBlindMode, theme.darkTheme, theme.lightTheme);
 	setMagicKeywords(MAGIC_KEYWORDS);
 	const preferences = { ...COMPOSER_DEFAULTS, ...cached.preferences, ...options.preferences };
-	const welcome: ComposerWelcomeUpdate = {
-		version: options.version ?? "",
-		modelName: cached.welcome?.modelName,
-		providerName: cached.welcome?.providerName,
-		recentSessions: cached.recentSessions,
-		lspServers: cached.lspServers,
-	};
+	const welcome: ComposerWelcomeUpdate = { version: options.version ?? "" };
 	const composer = new Composer({
 		terminal: options.terminal,
 		exit: options.exit,
@@ -116,18 +92,14 @@ export function beginStartupComposer(options: PrepaintComposerOptions = {}): voi
 		} catch {}
 		throw error;
 	}
-	const pending: PendingComposer = { composer, cwd, cache: useCache };
-	pendingComposer = pending;
-	// Keep filesystem discovery out of the synchronous prepaint turn. Composer.start()
-	// has queued the first frame; recents can begin once the event loop yields.
-	pending.recentSessions = loadRecentSessionsAfterFirstFrame(pending, options.recentSessions);
+	pendingComposer = { composer, cwd, cache };
 }
 
 /** Take the live prepaint composer away from the module-level startup owner. */
 export function takeStartupComposerLease(): ComposerLease | undefined {
 	const pending = pendingComposer;
 	pendingComposer = undefined;
-	return pending ? new ComposerLease(pending.composer, pending.recentSessions) : undefined;
+	return pending ? new ComposerLease(pending.composer) : undefined;
 }
 
 /** Stop and forget any prepaint composer that never reached InteractiveMode. */
@@ -157,55 +129,5 @@ export function applyStartupComposerPreferences(update: PrepaintComposerPreferen
 	// responsive again: take raw-input ownership now. The kernel echoed (and
 	// buffered) everything typed during the load; the editor replays it here.
 	pending.composer.enableInput();
-	if (pending.cache) {
-		void writeComposerUiCache(pending.cwd, preferences, update.theme).catch(error => {
-			logger.debug("composer UI cache write failed", { error });
-		});
-	}
-}
-
-/** Apply discovered project LSP rows and cache them for the next first frame. */
-export function setStartupComposerLspServers(servers: LspServerInfo[]): void {
-	const pending = pendingComposer;
-	if (!pending) return;
-	pending.composer.updateWelcome({ lspServers: servers });
-	if (pending.cache) {
-		void writeComposerLspCache(pending.cwd, servers).catch(error => {
-			logger.debug("composer LSP cache write failed", { error });
-		});
-	}
-}
-
-async function loadRecentSessionsAfterFirstFrame(
-	pending: PendingComposer,
-	loadOverride: (() => Promise<RecentSession[]>) | undefined,
-): Promise<RecentSession[] | undefined> {
-	await scheduler.yield();
-	try {
-		const sessions = loadOverride ? await loadOverride() : await loadRecentSessions(pending.cwd);
-		if (pending.cache) {
-			void writeComposerRecentSessionsCache(pending.cwd, sessions).catch(error => {
-				logger.debug("composer recent sessions cache write failed", { error });
-			});
-		}
-		if (pendingComposer === pending) {
-			pending.composer.updateWelcome({ recentSessions: sessions });
-		}
-		return sessions;
-	} catch (error) {
-		logger.debug("composer recent sessions load failed", { error });
-		return undefined;
-	}
-}
-
-async function loadRecentSessions(cwd: string): Promise<RecentSession[]> {
-	const [{ getRecentSessions }, { computeDefaultSessionDir }, { FileSessionStorage }] = await Promise.all([
-		import("../session/session-listing"),
-		import("../session/session-paths"),
-		import("../session/session-storage"),
-	]);
-	const storage = new FileSessionStorage();
-	const dir = computeDefaultSessionDir(cwd, storage);
-	const list = await getRecentSessions(dir, 4, storage);
-	return list.map(session => ({ name: session.name, timeAgo: session.timeAgo }));
+	pending.cache?.writeUi(pending.cwd, preferences, update.theme);
 }

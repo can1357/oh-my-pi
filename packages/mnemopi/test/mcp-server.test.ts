@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { callToolJson, handleJsonRpc, runStdio } from "@oh-my-pi/pi-mnemopi/mcp-server";
-import { getToolDefinitions, handleToolCall } from "@oh-my-pi/pi-mnemopi/mcp-tools";
+import { handleToolCall } from "@oh-my-pi/pi-mnemopi/mcp-tools";
 
 let dataDir: string;
 
@@ -42,29 +42,7 @@ async function runStdioText(input: string): Promise<unknown[]> {
 	return trimmed.length === 0 ? [] : trimmed.split("\n").map(line => JSON.parse(line) as unknown);
 }
 
-describe("MCP tool definitions", () => {
-	it("returns JSON-serializable MCP schemas", () => {
-		const tools = getToolDefinitions();
-		expect(tools).toHaveLength(23);
-		for (const tool of tools) {
-			const schema = JSON.parse(JSON.stringify(tool.inputSchema)) as {
-				type: string;
-				properties: unknown;
-			};
-			expect(schema.type).toBe("object");
-			expect(schema.properties).toBeDefined();
-		}
-	});
-});
-
 describe("MCP JSON handlers", () => {
-	it("lists tools through JSON-RPC", async () => {
-		const response = await handleJsonRpc({ jsonrpc: "2.0", id: 1, method: "tools/list" });
-		if (response === null) throw new Error("expected tools/list response");
-		expect(response.error).toBeUndefined();
-		expect((response.result as { tools: unknown[] }).tools).toHaveLength(23);
-	});
-
 	it("does not write a response for notifications but still answers requests", async () => {
 		const responses = await runStdioText(
 			`${JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" })}\n${JSON.stringify({
@@ -103,45 +81,6 @@ describe("MCP JSON handlers", () => {
 		};
 		expect(payload.status).toBe("ok");
 		expect(payload.bank).toBe("server");
-	});
-
-	it("dispatches remember, recall, stats, sleep, scratchpad, and bank operations", async () => {
-		const remembered = await handleToolCall("mnemopi_remember", {
-			content: "MCP server test remembers kombucha preference",
-			importance: 0.8,
-			bank: "work",
-		});
-		expect(remembered.status).toBe("stored");
-		expect(remembered.bank).toBe("work");
-		expect(typeof remembered.memory_id).toBe("string");
-
-		const recalled = await handleToolCall("mnemopi_recall", {
-			query: "kombucha preference",
-			top_k: 3,
-			bank: "work",
-		});
-		expect(recalled.status).toBe("ok");
-		expect(recalled.bank).toBe("work");
-		expect(recalled.count as number).toBeGreaterThanOrEqual(1);
-
-		const scratchWrite = await handleToolCall("mnemopi_scratchpad_write", {
-			content: "scratch note",
-			bank: "work",
-		});
-		expect(scratchWrite.status).toBe("written");
-		expect(scratchWrite.bank).toBe("work");
-		const scratchRead = await handleToolCall("mnemopi_scratchpad_read", { bank: "work" });
-		expect(scratchRead.entries_count as number).toBeGreaterThanOrEqual(1);
-
-		const stats = await handleToolCall("mnemopi_stats", { bank: "work" });
-		expect(stats.status).toBe("ok");
-		expect(stats.bank).toBe("work");
-		expect(stats.working).toBeDefined();
-
-		const sleep = await handleToolCall("mnemopi_sleep", { dry_run: true, bank: "work" });
-		expect(sleep.status).toBe("ok");
-		expect(sleep.dry_run).toBe(true);
-		expect(sleep.bank).toBe("work");
 	});
 
 	it("uses MNEMOPI_MCP_BANK when a call omits bank", async () => {

@@ -66,7 +66,7 @@ describe("InteractiveMode model-cycle track", () => {
 
 	it("renders into the anchored container, not the chat scrollback", () => {
 		const before = mode.chatContainer.children.length;
-		mode.showModelCycleTrack("default>slow");
+		mode.showModelCycleTrack([{ label: "default>slow" }], 0);
 
 		expect(renderCycle(mode)).toContain("default>slow");
 		// The whole point of the move: the track never lands in the scrollback,
@@ -75,9 +75,9 @@ describe("InteractiveMode model-cycle track", () => {
 	});
 
 	it("rebuilds in place without stacking duplicate tracks on repeated cycles", () => {
-		mode.showModelCycleTrack("track-one");
+		mode.showModelCycleTrack([{ label: "track-one" }], 0);
 		const childCountAfterFirst = mode.modelCycleContainer.children.length;
-		mode.showModelCycleTrack("track-two");
+		mode.showModelCycleTrack([{ label: "track-two" }], 0);
 
 		const rendered = renderCycle(mode);
 		expect(rendered).not.toContain("track-one");
@@ -88,7 +88,7 @@ describe("InteractiveMode model-cycle track", () => {
 
 	it("auto-clears the track after lingering", () => {
 		vi.useFakeTimers();
-		mode.showModelCycleTrack("temporary-track");
+		mode.showModelCycleTrack([{ label: "temporary-track" }], 0);
 		expect(renderCycle(mode)).toContain("temporary-track");
 
 		// Still lingering shortly after.

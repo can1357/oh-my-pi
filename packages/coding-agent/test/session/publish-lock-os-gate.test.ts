@@ -71,4 +71,27 @@ describe("publish lock OS gate", () => {
 		storage.writeTextSync(sessionPath, "A-content\n");
 		expect(fs.readFileSync(sessionPath, "utf8")).toBe("A-content\n");
 	});
+
+	it("holds an append while another writer owns the gate", async () => {
+		const storage = new FileSessionStorage();
+		const sessionPath = path.join(tempDir, "session.jsonl");
+		storage.writeTextSync(sessionPath, "original\n");
+		const writer = storage.openWriter(sessionPath);
+		const appendSync = writer.appendSync?.bind(writer);
+		if (!appendSync) throw new Error("File writer must expose appendSync");
+		// Appends no longer claim the lockfile, so the gate is the only thing
+		// keeping them out of another process's check-then-rename. A holder
+		// mid-publish must make the append fail closed rather than land in the
+		// file its rename is about to replace.
+		const gate = NativeFileLock.tryAcquire(osGatePath(path.join(tempDir, ".session.jsonl.lock")));
+		expect(gate.acquired).toBe(true);
+		try {
+			expect(() => appendSync("lost\n")).toThrow(SessionLockError);
+		} finally {
+			gate.release();
+		}
+		// The failed append poisons the writer; close surfaces it.
+		await expect(writer.close()).rejects.toBeInstanceOf(SessionLockError);
+		expect(fs.readFileSync(sessionPath, "utf8")).toBe("original\n");
+	});
 });

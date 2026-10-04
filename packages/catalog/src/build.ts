@@ -76,6 +76,11 @@ function isInputModalities(value: unknown): value is ("text" | "image")[] {
 function applyCatalogAssignments<TApi extends Api>(model: Model<TApi>, catalog: Record<string, unknown>): void {
 	const kind = MODEL_KINDS.find(value => value === catalog.kind);
 	if (kind !== undefined) model.kind = kind;
+	if (catalog.contextWindowAuthoritative === true) {
+		model.contextWindowAuthoritative = true;
+	} else {
+		delete model.contextWindowAuthoritative;
+	}
 	const webSearch = catalog.webSearch;
 	if (
 		webSearch === "gemini" ||
@@ -87,6 +92,11 @@ function applyCatalogAssignments<TApi extends Api>(model: Model<TApi>, catalog: 
 	) {
 		model.webSearch = webSearch;
 	}
+	if (typeof catalog.webSearchModel === "string") model.webSearchModel = catalog.webSearchModel;
+	if (catalog.hostedImage === true) model.hostedImage = true;
+	else if (catalog.hostedImage === false) delete model.hostedImage;
+	if (typeof catalog.imageModel === "string") model.imageModel = catalog.imageModel;
+	else if (catalog.imageModel === false) delete model.imageModel;
 	const serviceTierCost = objectPayload(catalog.serviceTierCost);
 	if (serviceTierCost !== undefined) {
 		const flex = numberField(serviceTierCost, "flex");
@@ -115,6 +125,15 @@ function applyCatalogAssignments<TApi extends Api>(model: Model<TApi>, catalog: 
 	if (editPromptVariant === "full" || editPromptVariant === "compact") {
 		model.editPromptVariant = editPromptVariant;
 	}
+	const pricingStatus = catalog.pricingStatus;
+	if (
+		pricingStatus === "free" ||
+		pricingStatus === "included" ||
+		pricingStatus === "variable" ||
+		pricingStatus === "unknown"
+	) {
+		model.pricingStatus = pricingStatus;
+	}
 	const requiresCursorToolSchemaProjection = catalog.requiresCursorToolSchemaProjection;
 	if (requiresCursorToolSchemaProjection === true) {
 		model.requiresCursorToolSchemaProjection = true;
@@ -132,6 +151,11 @@ function applyCatalogAssignments<TApi extends Api>(model: Model<TApi>, catalog: 
 	} else {
 		delete model.supportsAssistantPrefill;
 	}
+	// The same KDL output-cap contract gates host options and the Responses
+	// transport. Materialize it because the transport consumes the model field.
+	if (typeof catalog.omitMaxOutputTokens === "boolean" && model.omitMaxOutputTokens === undefined) {
+		model.omitMaxOutputTokens = catalog.omitMaxOutputTokens;
+	}
 	const contextPromotionTarget = catalog.contextPromotionTarget;
 	if (typeof contextPromotionTarget === "string" && model.contextPromotionTarget === undefined) {
 		model.contextPromotionTarget = contextPromotionTarget;
@@ -140,8 +164,8 @@ function applyCatalogAssignments<TApi extends Api>(model: Model<TApi>, catalog: 
 
 /**
  * Applies reviewed catalog-data value corrections (`cost-patch`,
- * `limits-patch`, `long-context-cost`, `context-window-floor`,
- * `input-modalities`) onto an upstream-sourced spec. Applied by
+ * `cache-read-at-input-rate`, `limits-patch`, `long-context-cost`,
+ * `context-window-floor`, `input-modalities`) onto an upstream-sourced spec. Applied by
  * `buildModel` to every upstream-sourced spec; user-authored overrides are
  * recomposed after building by the override applicators, so explicit user
  * limits and pricing still win.
@@ -219,6 +243,14 @@ export function applyCatalogCorrections(
 			// permanent off-peak and never wake at the dated boundary.
 			applyEffectiveFallbackRates(model.cost, Reflect.get(fallback, "effectiveRates"));
 		}
+	}
+	if (catalog.cacheReadAtInputRate === true) {
+		const { longContext } = model.cost;
+		model.cost = {
+			...model.cost,
+			cacheRead: model.cost.input,
+			...(longContext && { longContext: { ...longContext, cacheRead: longContext.input } }),
+		};
 	}
 	if (catalog.timeBased !== undefined) {
 		model.cost = { ...model.cost, timeBased: materializeTimeBasedCost(catalog.timeBased) };
@@ -331,5 +363,7 @@ export function buildModel<TApi extends Api>(spec: ModelSpec<TApi>): Model<TApi>
 	};
 	applyCatalogAssignments(model, policy.catalog);
 	applyCatalogCorrections(model, policy.catalog);
+	// Configured lifetimes replace catalog lifetimes rather than merging with them.
+	if (spec.promptCacheConfig !== undefined) model.promptCache = { ...spec.promptCacheConfig };
 	return model;
 }

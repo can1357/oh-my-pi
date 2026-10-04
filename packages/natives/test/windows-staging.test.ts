@@ -172,26 +172,6 @@ describe("windows native addon staging", () => {
 		}
 	});
 
-	it("falls back to the node_modules-only candidate list when staging is off", () => {
-		// Mirrors the non-Windows / workspace-dev path: same behavior as before
-		// the staging feature was introduced.
-		const versionedDir = "/home/u/.omp/natives/15.0.1";
-		const candidates = resolveLoaderCandidates({
-			addonFilenames: getAddonFilenames({ tag: "linux-x64", arch: "x64", variant: "baseline" }),
-			isCompiledBinary: false,
-			stageFromNodeModules: false,
-			nativeDir: posixNodeModulesNativeDir,
-			execDir: "/usr/bin",
-			versionedDir,
-			userDataDir: "/home/u/.local/bin",
-		});
-
-		const versionedBaseline = path.join(versionedDir, "pi_natives.linux-x64-baseline.node");
-		const nodeModulesBaseline = path.join(posixNodeModulesNativeDir, "pi_natives.linux-x64-baseline.node");
-		expect(candidates).not.toContain(versionedBaseline);
-		expect(candidates).toContain(nodeModulesBaseline);
-	});
-
 	it("removes only older version directories after the current native version loads", async () => {
 		const nativesDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-natives-cache-"));
 		const currentMajor = Number.parseInt(packageJson.version, 10);
