@@ -48,7 +48,7 @@ function timestampMs(timestamp: Timestamp): number {
 	return Number(timestamp.seconds) * 1_000 + timestamp.nanos / 1_000_000;
 }
 
-/** Stored credential bytes; `devinCliMetadata` encodes them for the wire by shape. */
+/** Stored credential of either storage kind, trimmed. */
 function devinCredential(credential: UsageCredential): string | undefined {
 	const raw = credential.type === "oauth" ? credential.accessToken : credential.apiKey;
 	const token = raw?.trim();

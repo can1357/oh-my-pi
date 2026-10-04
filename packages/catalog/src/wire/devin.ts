@@ -43,15 +43,7 @@ const DEVIN_DISCOVERY_METADATA = {
 	os: DEVIN_OS,
 } as const;
 
-/**
- * Credential bytes as the Cascade wire expects them. The Devin CLI sends the
- * stored key verbatim; its own login stores Devin session tokens (JWTs) with
- * the `devin-session-token$` scheme prefix and legacy Windsurf Enterprise keys
- * (`sk-ws-...`) bare. OMP's Devin login and `DEVIN_API_KEY` may hold a session
- * token without the prefix, so the prefix is added to JWT-shaped tokens only;
- * every other key goes out unchanged. The shape decides, not the storage kind:
- * a legacy key can be stored as either an API key or an OAuth access token.
- */
+/** Prefixes bare JWT-shaped session tokens; every other key, legacy `sk-ws-` ones included, goes out as stored. */
 function encodeDevinCredential(apiKey: string | undefined): string {
 	const key = apiKey?.trim();
 	if (!key) return "";
@@ -61,8 +53,7 @@ function encodeDevinCredential(apiKey: string | undefined): string {
 
 /**
  * Fields for `Metadata` on released-CLI calls (`GetUserJwt`, `AssignModel`,
- * `GetChatMessage`, `GetUserStatus`). `userJwt` stays empty for the calls
- * authenticated by the credential alone (auth, model assignment, usage).
+ * `GetChatMessage`, `GetUserStatus`).
  */
 export function devinCliMetadata(apiKey: string | undefined, userJwt = "") {
 	return {

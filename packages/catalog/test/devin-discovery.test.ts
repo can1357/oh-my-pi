@@ -454,7 +454,7 @@ describe("devin native discovery request", () => {
 
 	it("sends legacy Windsurf keys bare and never doubles the session-token prefix", async () => {
 		// The Devin CLI sends stored keys verbatim: legacy `sk-ws-` keys are
-		// rejected with the prefix and accepted without it (#12958).
+		// rejected with the prefix and accepted without it.
 		const legacy = captureDiscoveryKey();
 		expect(await fetchDevinModels({ apiKey: "sk-ws-01-legacy", fetch: legacy.fetch })).not.toBeNull();
 		const prefixed = captureDiscoveryKey();

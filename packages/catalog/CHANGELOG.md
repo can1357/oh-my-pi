@@ -4,7 +4,7 @@
 
 ### Changed
 
-- Devin model discovery makes one request with the native Devin CLI identity and sends legacy Windsurf Enterprise keys unprefixed, the way the Devin CLI does, instead of retrying under a pinned Windsurf editor identity that returns a smaller model list ([#13677](https://github.com/can1357/oh-my-pi/pull/13677) by [@will-bogusz](https://github.com/will-bogusz))
+- Changed Devin model discovery to send legacy Windsurf Enterprise keys unprefixed in one request, dropping the Windsurf-editor retry that returned a smaller model list ([#13677](https://github.com/can1357/oh-my-pi/pull/13677) by [@will-bogusz](https://github.com/will-bogusz))
 
 ## [18.4.9] - 2026-10-01
 

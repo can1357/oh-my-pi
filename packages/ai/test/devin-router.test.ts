@@ -179,8 +179,8 @@ describe("streamDevin router assignment", () => {
 	});
 
 	it("sends a legacy Windsurf key bare on the first and only auth attempt", async () => {
-		// Legacy `sk-ws-` keys are rejected with the session-token prefix (#12958),
-		// so they must go out bare everywhere, without a failing prefixed probe.
+		// Legacy `sk-ws-` keys are rejected with the session-token prefix, so they
+		// must go out bare everywhere, without a failing prefixed probe.
 		const { fetch: fetchImpl, recorded } = fakeDevin({
 			assignment: { assignmentJwt: "assign-jwt", modelUid: "claude-sonnet-4-5" },
 		});

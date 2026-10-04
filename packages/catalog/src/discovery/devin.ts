@@ -324,14 +324,14 @@ export async function fetchDevinModels(
 	const timer = setTimeout(() => controller.abort(), timeoutMs);
 	const signal = options.signal ? AbortSignal.any([controller.signal, options.signal]) : controller.signal;
 
+	const request = create(GetCliModelConfigsRequestSchema, {
+		metadata: create(MetadataSchema, {
+			...devinDiscoveryMetadata(options.apiKey),
+			supportedModelDisplays: [...DEVIN_SUPPORTED_MODEL_DISPLAYS],
+		}),
+	});
+	let payload: Uint8Array;
 	try {
-		const request = create(GetCliModelConfigsRequestSchema, {
-			metadata: create(MetadataSchema, {
-				...devinDiscoveryMetadata(options.apiKey),
-				supportedModelDisplays: [...DEVIN_SUPPORTED_MODEL_DISPLAYS],
-			}),
-		});
-		const body = toBinary(GetCliModelConfigsRequestSchema, request);
 		const response = await discoveryFetch(options.fetch)(requestUrl, {
 			method: "POST",
 			headers: {
@@ -339,33 +339,29 @@ export async function fetchDevinModels(
 				"connect-protocol-version": "1",
 				accept: "*/*",
 			},
-			body,
+			body: toBinary(GetCliModelConfigsRequestSchema, request),
 			signal,
 		});
 		if (!response.ok) return null;
-
-		const decoded = decodeDevinUnaryMessage(
-			GetCliModelConfigsResponseSchema,
-			new Uint8Array(await response.arrayBuffer()),
-		);
-		if (!decoded) return null;
-		const models = normalizeDevinModels(decoded.clientModelConfigs, options.baseUrl);
-		if (models.length === 0) {
-			// The backend gates the native catalog on the pinned client identity;
-			// an empty-but-200 response is the failure signature of a stale pin.
-			// Treat it as failed discovery so the static seed survives. This runs
-			// after filtering: only disabled or internal configs is equally unusable.
-			logger.warn("Devin returned an empty model catalog; the pinned client identity may be stale", {
-				metadata: devinDiscoveryMetadata(undefined),
-			});
-			return null;
-		}
-		return models;
+		payload = new Uint8Array(await response.arrayBuffer());
 	} catch {
 		return null;
 	} finally {
 		clearTimeout(timer);
 	}
+
+	const decoded = decodeDevinUnaryMessage(GetCliModelConfigsResponseSchema, payload);
+	if (!decoded) return null;
+	const models = normalizeDevinModels(decoded.clientModelConfigs, options.baseUrl);
+	if (models.length === 0) {
+		// The backend gates the native catalog on the pinned client identity;
+		// an empty-but-200 response is the failure signature of a stale pin.
+		logger.warn("Devin returned an empty model catalog; the pinned client identity may be stale", {
+			metadata: devinDiscoveryMetadata(undefined),
+		});
+		return null;
+	}
+	return models;
 }
 
 /**
