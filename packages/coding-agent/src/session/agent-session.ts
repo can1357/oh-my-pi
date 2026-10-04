@@ -8010,7 +8010,13 @@ export class AgentSession implements SettingsScope {
 		}
 		this.#allowQueuedMessageDrainRetry();
 		// Publish the complete group without yielding: removal owns contiguous companions.
+		// A `^` mention in a steered or follow-up message mints a new alias mid-turn.
+		// The hidden session-agent notice (which idle prompts deliver via
+		// #promptWithMessage) must ride the queued message too, or the model never
+		// learns the alias and reads the tag as plain text (#14093).
 		if (mode === "followUp") {
+			const sessionAgentNotice = this.#tools.takeSessionAgentNotice();
+			if (sessionAgentNotice) this.agent.followUp(sessionAgentNotice);
 			for (const notice of prependMessages) this.agent.followUp(notice);
 			for (const notice of attachmentSourceNotices) this.agent.followUp(notice);
 			if (imageDescriptionNotice) this.agent.followUp(imageDescriptionNotice);
@@ -8023,6 +8029,8 @@ export class AgentSession implements SettingsScope {
 			this.#queuedMessageRawText.set(userMessage, rawText);
 			this.agent.followUp(userMessage);
 		} else {
+			const sessionAgentNotice = this.#tools.takeSessionAgentNotice();
+			if (sessionAgentNotice) this.agent.steer(sessionAgentNotice);
 			for (const notice of prependMessages) this.agent.steer(notice);
 			for (const notice of attachmentSourceNotices) this.agent.steer(notice);
 			if (imageDescriptionNotice) this.agent.steer(imageDescriptionNotice);
