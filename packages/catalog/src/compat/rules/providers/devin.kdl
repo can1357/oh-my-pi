@@ -14,16 +14,10 @@ provider "devin" {
 	// bundle would misstate every other account's entitlements and leave zombie
 	// rows behind (see CREDENTIAL_SCOPED_PROVIDERS in generate-models.ts). The
 	// seed's `default-model` (`swe-2`) must resolve synchronously at boot,
-	// before credential-scoped runtime discovery replaces the seed. SWE-2 is
-	// the server's own account default (`default_override_model_config`,
-	// CLI 3000.11.3) and listed for every tier. Cascade encodes effort in the
-	// wire uid and rejects the bare `swe-2` slug, so the seed carries the three
-	// live effort lanes and the reviewed `swe-2` variant family collapses them
-	// onto the logical id (default lane `swe-2-high`). Both SWE-1.6 lanes stay
-	// seeded so a saved SWE-1.6 selection still resolves when discovery fails
-	// on a cold start. Discovery is authoritative, so an account whose roster
-	// lacks SWE-2 (an admin-curated legacy Windsurf seat) starts on its first
-	// listed model, as with any roster missing a provider default. Field shape
+	// before credential-scoped runtime discovery replaces the seed. Cascade
+	// rejects the bare `swe-2` uid, so the seed carries its effort lanes and the
+	// `swe-2` variant family collapses them onto the default. The SWE-1.6 lanes
+	// keep saved selections resolvable when discovery fails. Field shape
 	// mirrors `devinModelSpec` so seeded and discovered rows are
 	// indistinguishable downstream.
 	seed api="devin-agent" base-url="https://server.codeium.com" bundle="always" {

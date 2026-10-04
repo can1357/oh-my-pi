@@ -750,7 +750,6 @@ describe("devin catalog seed", () => {
 		const collapsed = collapseVariants(seedModels("devin"));
 		expect(collapsed.map(model => model.id)).toEqual(["swe-2", "swe-1-6-fast", "swe-1-6"]);
 		const swe2 = collapsed[0];
-		expect(swe2?.id).toBe("swe-2");
 		expect(swe2?.requestModelId).toBe("swe-2-high");
 		expect(swe2?.thinking?.effortRouting).toEqual({
 			medium: "swe-2-medium",
@@ -767,9 +766,15 @@ describe("devin catalog seed", () => {
 
 		const fast = buildModel(collapsed[1] as ModelSpec<"devin-agent">);
 		expect(fast.cost).toEqual({ input: 0.3, output: 1.5, cacheRead: 0.03, cacheWrite: 0 });
+		expect(fast.contextWindow).toBe(200_000);
+		expect(fast.maxTokens).toBe(128_000);
+		expect(fast.compat.supportsParallelToolCalls).toBe(true);
 		// Image-blind lanes ship text-only (see DEVIN_IMAGE_BLIND_UIDS).
 		expect(fast.input).toEqual(["text"]);
+		// One wire uid per lane: Cascade encodes effort in the uid, so a seeded
+		// lane reasons without exposing a selectable ladder.
 		expect(fast.thinking).toBeUndefined();
+		expect(fast.reasoning).toBe(true);
 	});
 
 	it("pins the seed to a configured Cascade host", () => {
