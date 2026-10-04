@@ -2,7 +2,7 @@ import { clearSubmittedText } from "./helpers/draft";
 import { Spacer } from "@oh-my-pi/pi-tui";
 import { APP_NAME, formatAge } from "@oh-my-pi/pi-utils";
 import { formatKeyHint } from "@oh-my-pi/pi-tui/app-keybindings";
-import { CollabGuestLink } from "../collab/guest";
+import { assertCollabReplicaStorage, CollabGuestLink } from "../collab/guest";
 import type { CollabHost } from "../collab/host";
 import { type CollabHostSnapshot, listCollabHosts } from "../collab/registry";
 import { settings } from "../config/settings";
@@ -455,6 +455,8 @@ export const BUILTIN_COLLABORATION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpe
 				return;
 			}
 			try {
+				// Refuse before any teardown, so a refused join leaves hosting and pending starts alone.
+				assertCollabReplicaStorage();
 				// Stop stale/ending ownership and cancel pending starts, not a live room.
 				if (!ctx.collabController.host) await ctx.collabController.stop("joining another session");
 				// Recheck after teardown: a concurrent manual start may have won.

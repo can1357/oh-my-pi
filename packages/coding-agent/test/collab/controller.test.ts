@@ -19,7 +19,12 @@ import { CollabController } from "@oh-my-pi/pi-coding-agent/collab/controller";
 import { importRoomKey } from "@oh-my-pi/pi-coding-agent/collab/crypto";
 import { CollabGuestLink } from "@oh-my-pi/pi-coding-agent/collab/guest";
 import { CollabHost, CollabHostStoppedError } from "@oh-my-pi/pi-coding-agent/collab/host";
-import { COLLAB_PROTO, type CollabFrame, parseCollabLink } from "@oh-my-pi/pi-coding-agent/collab/protocol";
+import {
+	COLLAB_PROTO,
+	type CollabFrame,
+	formatCollabLink,
+	parseCollabLink,
+} from "@oh-my-pi/pi-coding-agent/collab/protocol";
 import * as registry from "@oh-my-pi/pi-coding-agent/collab/registry";
 import { CollabSocket } from "@oh-my-pi/pi-coding-agent/collab/relay-client";
 import { parseArgs } from "@oh-my-pi/pi-coding-agent/cli/args";
@@ -36,12 +41,15 @@ import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { HistoryStorage } from "@oh-my-pi/pi-coding-agent/session/history-storage";
 import { resetSessionIndexForTests } from "@oh-my-pi/pi-coding-agent/session/session-index";
+import { FileSessionStorage, setDefaultSessionStorage } from "@oh-my-pi/pi-coding-agent/session/session-storage";
+import { SqlSessionStorage } from "@oh-my-pi/pi-coding-agent/session/sql-session-storage";
 import { executeBuiltinSlashCommand } from "@oh-my-pi/pi-coding-agent/slash-commands/builtin-registry";
 import { getProjectDir, setProjectDir } from "@oh-my-pi/pi-utils";
 import * as utils from "@oh-my-pi/pi-utils";
 import { VirtualTerminal } from "../../../tui/test/virtual-terminal";
 import { createTestSession, type TestSessionContext } from "../utilities";
 import { FakeWebSocket, installInMemoryRelay, uninstallInMemoryRelay } from "./helpers/in-memory-relay";
+import { SQL } from "bun";
 
 import { cfgCollabAutoStart } from "@oh-my-pi/pi-coding-agent/collab/settings";
 import {
@@ -1202,6 +1210,39 @@ describe("CollabController", () => {
 		const room = await controller.start({ access: "control" });
 		expect(controller.host).toBe(room);
 		expect(await registry.listCollabHosts({ dir: tmp })).toMatchObject([{ generation: 2, access: "control" }]);
+	});
+
+	it("/join refused under session.storage: sql leaves a pending /collab start running", async () => {
+		const { ctx, state } = makeControllerContext();
+		controller = new CollabController(ctx);
+		ctx.collabController = controller;
+		const errors: string[] = [];
+		ctx.showError = message => {
+			errors.push(message);
+		};
+		// A manual start queued behind the session transition: no room yet.
+		const transition = Promise.withResolvers<void>();
+		const waiting = Promise.withResolvers<void>();
+		state.transition = transition.promise;
+		state.transitionWaited = waiting.resolve;
+		const starting = controller.start({ access: "control" });
+		// What main.ts installs for `session.storage: sql`.
+		const client = new SQL("sqlite::memory:");
+		setDefaultSessionStorage(await SqlSessionStorage.create({ client }));
+		try {
+			await waiting.promise;
+			const link = formatCollabLink(RELAY_URL, "refused-room", crypto.getRandomValues(new Uint8Array(32)));
+			await executeBuiltinSlashCommand(`/join ${link}`, { ctx });
+		} finally {
+			setDefaultSessionStorage(new FileSessionStorage());
+			await client.end();
+			state.transition = undefined;
+			transition.resolve();
+		}
+		expect(errors).toEqual([expect.stringMatching(/session\.storage/)]);
+		const room = await starting;
+		expect(controller.host).toBe(room);
+		expect(await registry.listCollabHosts({ dir: tmp })).toMatchObject([{ generation: 1, access: "control" }]);
 	});
 
 	it("keeps a manual control upgrade when a session rotation overlaps its predecessor stop", async () => {
