@@ -316,7 +316,7 @@ test("the Roles view picker names the active preset and ctrl+←/→ switches it
 	);
 	hubs.push(hub);
 	const subtitleText = () => {
-		const subtitle = props(hub.describe(withPicker)).subtitle;
+		const subtitle = props(hub.describe(withPicker)!).subtitle;
 		return Array.isArray(subtitle) ? subtitle.map(part => part.t).join("") : subtitle;
 	};
 
