@@ -3,7 +3,10 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
+import { SQL } from "bun";
 import { exportFromFile } from "../src/export/html";
+import { FileSessionStorage, setDefaultSessionStorage } from "../src/session/session-storage";
+import { SqlSessionStorage } from "../src/session/sql-session-storage";
 import { collectSubSessions } from "../src/session/sub-sessions";
 
 /**
@@ -146,5 +149,52 @@ describe("collectSubSessions", () => {
 	test("returns empty record when no subagent dir exists", async () => {
 		expect(await collectSubSessions(mainFile)).toEqual({});
 		expect(await collectSubSessions(path.join(root, "not-a-session"))).toEqual({});
+	});
+});
+
+describe("collectSubSessions under session.storage: sql", () => {
+	let root: string;
+	let mainFile: string;
+	let client: SQL;
+	let storage: SqlSessionStorage;
+
+	beforeEach(async () => {
+		root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-subsessions-sql-"));
+		mainFile = path.join(root, "main.jsonl");
+		// What main.ts installs for `session.storage: sql`: transcripts live only in the table.
+		client = new SQL("sqlite::memory:");
+		storage = await SqlSessionStorage.create({ client });
+		setDefaultSessionStorage(storage);
+		await storage.writeText(mainFile, sessionJsonl("main", ["m1"]));
+	});
+
+	afterEach(async () => {
+		setDefaultSessionStorage(new FileSessionStorage());
+		await client.end();
+		await removeWithRetries(root);
+	});
+
+	test("collects nested subagent sessions the table holds, with kill tombstones from disk", async () => {
+		await storage.writeText(path.join(root, "main/Alpha.jsonl"), sessionJsonl("alpha", ["a1", "a2"]));
+		await storage.writeText(path.join(root, "main/Alpha/Child.jsonl"), sessionJsonl("child", ["c1"]));
+		await storage.writeText(path.join(root, "main/Beta.jsonl"), sessionJsonl("beta", ["b1"]));
+		// The kill marker is a local file beside the transcript path whatever the storage.
+		await Bun.write(path.join(root, "main/Beta.jsonl.tombstone"), "");
+
+		const subs = await collectSubSessions(mainFile);
+
+		expect(Object.keys(subs).sort()).toEqual(["Alpha", "Alpha/Child", "Beta"]);
+		expect(subs.Alpha.entries.map(e => e.id)).toEqual(["a1", "a2"]);
+		expect(subs["Alpha/Child"]).toMatchObject({ agentId: "Child", parent: "Alpha", leafId: "c1", aborted: false });
+		expect(subs.Beta.aborted).toBe(true);
+	});
+
+	test("terminates when a transcript stem names the directory itself", async () => {
+		await storage.writeText(path.join(root, "main/..jsonl"), sessionJsonl("dot", ["d1"]));
+		await storage.writeText(path.join(root, "main/Scout.jsonl"), sessionJsonl("scout", ["s1"]));
+
+		const subs = await collectSubSessions(mainFile);
+
+		expect(Object.keys(subs).sort()).toEqual([".", "Scout"]);
 	});
 });
