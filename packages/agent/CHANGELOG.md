@@ -22,13 +22,17 @@
 
 - `Agent.withdrawUndeliveredQueuedMessages()` replaces `withdrawLiveSteering()` and returns `{ steering, followUp }`: it also takes back queued input already dequeued for the next model call, which the aborted run then neither records nor reports in `agent_end` ([#14179](https://github.com/can1357/oh-my-pi/pull/14179) by [@andrebrait](https://github.com/andrebrait))
 
+### Fixed
+
+- Fixed `queue_update` events going stale while a queued steer was adopted into the running turn as live steering, withdrawn by the interrupt path, or landed in the transcript; those transitions now notify queue listeners like every other queue mutator ([#14268](https://github.com/can1357/oh-my-pi/pull/14268) by [@jchanghong023](https://github.com/jchanghong023)).
+
 ## [18.6.1] - 2026-10-04
 
 ### Fixed
 
 - Fixed native OpenAI context compaction for sessions containing many screenshots, preventing image-size estimates from incorrectly causing compaction requests to be rejected.
 - Fixed native (OpenAI) compaction being refused as over the context window in sessions with many screenshots. Images were counted as about 1,200 tokens when deciding to compact but 12,000 when checking whether the compaction request fits; both checks now estimate images from their actual dimensions, and a request is no longer refused when only the image estimate pushes it over the window ([#14260](https://github.com/can1357/oh-my-pi/pull/14260) by [@H4vC](https://github.com/H4vC)).
-- Fixed `queue_update` events going stale while a queued steer was adopted into the running turn as live steering, withdrawn by the interrupt path, or landed in the transcript; those transitions now notify queue listeners like every other queue mutator ([#14268](https://github.com/can1357/oh-my-pi/pull/14268) by [@jchanghong023](https://github.com/jchanghong023)).
+
 
 ## [18.6.0] - 2026-10-03
 

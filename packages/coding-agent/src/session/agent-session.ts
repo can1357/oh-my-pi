@@ -8704,12 +8704,14 @@ export class AgentSession implements SettingsScope {
 
 	/** Chip texts for the queue display. Steering live steering took for the streaming response
 	 *  stays listed until the transcript records it, when the model actually switches to it. */
-	getQueuedMessages(): { steering: readonly string[]; followUp: readonly string[] } {
+	getQueuedMessages(): { steering: readonly string[]; followUp: readonly string[]; liveSteered: number } {
+		const liveSteered = this.agent.peekLiveSteeredMessages().filter(isUserAuthoredQueuedMessage).length;
 		return {
 			steering: [...this.agent.peekLiveSteeredMessages(), ...this.agent.peekSteeringQueue()]
 				.filter(isUserAuthoredQueuedMessage)
 				.map(queueChipText),
 			followUp: this.agent.peekFollowUpQueue().filter(isUserAuthoredQueuedMessage).map(queueChipText),
+			liveSteered,
 		};
 	}
 
@@ -8718,7 +8720,9 @@ export class AgentSession implements SettingsScope {
 	 *  externally observable transitions RPC/ACP/TUI subscribers actually care
 	 *  about, so a mutation that leaves the displayable queue unchanged (e.g. an
 	 *  agent-authored aside, or a claim/restore round-trip) never re-emits. */
-	#lastEmittedQueueSnapshot: { steering: readonly string[]; followUp: readonly string[] } | undefined;
+	#lastEmittedQueueSnapshot:
+		| { steering: readonly string[]; followUp: readonly string[]; liveSteered: number }
+		| undefined;
 
 	#emitQueueUpdateIfChanged(): void {
 		const snapshot = this.getQueuedMessages();
@@ -8727,11 +8731,17 @@ export class AgentSession implements SettingsScope {
 			last !== undefined &&
 			last.steering.length === snapshot.steering.length &&
 			last.followUp.length === snapshot.followUp.length &&
+			last.liveSteered === snapshot.liveSteered &&
 			last.steering.every((text, i) => text === snapshot.steering[i]) &&
 			last.followUp.every((text, i) => text === snapshot.followUp[i]);
 		if (unchanged) return;
 		this.#lastEmittedQueueSnapshot = snapshot;
-		this.#emit({ type: "queue_update", steering: [...snapshot.steering], followUp: [...snapshot.followUp] });
+		this.#emit({
+			type: "queue_update",
+			steering: [...snapshot.steering],
+			followUp: [...snapshot.followUp],
+			liveSteered: snapshot.liveSteered,
+		});
 	}
 
 	/**
