@@ -154,6 +154,7 @@ export class LiveSessionController {
 	#userTranscriptTurn = 0;
 	#assistantTranscriptTurn = 0;
 	#lastTranscript: LiveTranscript | undefined;
+	#discardSupersededUserTurn = false;
 
 	constructor(options: LiveSessionControllerOptions, dependencies: LiveSessionControllerDependencies = {}) {
 		this.#session = options.session;
@@ -292,6 +293,20 @@ export class LiveSessionController {
 		}
 	}
 
+	/** Sends a typed user turn directly to the active realtime model. */
+	async sendText(text: string): Promise<void> {
+		const normalized = text.trim();
+		if (!normalized) throw new Error("Live text must not be empty");
+		const transport = this.#transport;
+		if (!this.#started || this.#stopped || !transport) throw new Error("No active live session");
+		await transport.sendText(normalized);
+		if (this.#stopped || this.#transport !== transport)
+			throw new Error("The live session stopped while sending text");
+		this.#discardSupersededUserTurn = Boolean(this.#userTranscript && !this.#userTranscriptFinal);
+		this.#startTranscriptTurn("user");
+		this.#storeTranscript("user", normalized, true);
+	}
+
 	/** Stops recording, closes the live session, and emits one terminal callback. */
 	stop(): Promise<void> {
 		if (!this.#stopPromise) this.#stopPromise = this.#stop();
@@ -361,6 +376,7 @@ export class LiveSessionController {
 				break;
 			case "transcript.started":
 				if (event.role === "user") {
+					this.#discardSupersededUserTurn = false;
 					this.#userTranscript = "";
 					this.#userTranscriptFinal = false;
 				} else {
@@ -369,13 +385,17 @@ export class LiveSessionController {
 				}
 				break;
 			case "input_transcript.added":
-				this.#addTranscript("user", event.item.text);
+				if (!this.#discardSupersededUserTurn) this.#addTranscript("user", event.item.text);
 				break;
 			case "output_transcript.added":
 				this.#addTranscript("assistant", event.item.text);
 				break;
 			case "turn.done":
-				this.#finishTranscript(event.turn.role, event.turn.transcript);
+				if (event.turn.role === "user" && this.#discardSupersededUserTurn) {
+					this.#discardSupersededUserTurn = false;
+				} else {
+					this.#finishTranscript(event.turn.role, event.turn.transcript);
+				}
 				break;
 			case "interaction.status":
 				this.#backgroundWorking = event.working;

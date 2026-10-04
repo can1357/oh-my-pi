@@ -161,7 +161,7 @@ describe("Gemini Live websocket", () => {
 		}
 	});
 
-	test("microphone PCM is clipped/encoded; mute ends input; barge-in drops queued playback", async () => {
+	test("typed turns send while muted without resuming audio; closed transports reject sends", async () => {
 		const h = await harness();
 		try {
 			h.transport.pushAudio(new Float32Array([-2, -0.5, 0, 0.5, 2]));
@@ -173,6 +173,13 @@ describe("Gemini Live websocket", () => {
 			expect(packet.realtimeInput.audio.mimeType).toBe("audio/pcm;rate=16000");
 			await h.transport.setMuted(true);
 			expect(await h.incoming.next()).toEqual({ realtimeInput: { audioStreamEnd: true } });
+			await h.transport.sendText("  typed while muted  ");
+			expect(await h.incoming.next()).toEqual({
+				clientContent: {
+					turns: [{ role: "user", parts: [{ text: "typed while muted" }] }],
+					turnComplete: true,
+				},
+			});
 			h.transport.pushAudio(new Float32Array([1]));
 			await h.transport.setMuted(false);
 			h.transport.pushAudio(new Float32Array([0.25]));
@@ -215,6 +222,8 @@ describe("Gemini Live websocket", () => {
 				}),
 			);
 			expect(Array.from(await h.played.next())).toEqual([0.5]);
+			await h.transport.close();
+			await expect(h.transport.sendText("after close")).rejects.toThrow("not connected");
 		} finally {
 			await h.close();
 		}

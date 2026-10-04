@@ -10,6 +10,8 @@ import { LiveWebRtcPeer } from "@oh-my-pi/pi-natives";
 import { generateCodexAttestation } from "./attestation";
 import {
 	buildLiveSessionPayload,
+	buildSessionContextAppend,
+	chunkLiveContext,
 	type LiveClientMessage,
 	type LiveServerEvent,
 	parseLiveServerEvent,
@@ -69,6 +71,7 @@ export interface LiveTransport {
 	connect(): Promise<void>;
 	pushAudio(samples: Float32Array): void;
 	setMuted(muted: boolean): Promise<void>;
+	sendText(text: string): Promise<void>;
 	send(message: LiveClientMessage): Promise<void>;
 	close(): Promise<void>;
 	/** Completes an asynchronous Gemini function call with the agent's final result. */
@@ -395,6 +398,15 @@ export class CodexLiveTransport {
 		});
 		this.#sendTail = operation.catch(() => {});
 		return operation;
+	}
+
+	/** Append a typed user turn to the active Frameless Bidi session. */
+	async sendText(text: string): Promise<void> {
+		const normalized = text.trim();
+		if (!normalized) throw new Error("Live text must not be empty");
+		for (const chunk of chunkLiveContext(normalized)) {
+			await this.send(buildSessionContextAppend(chunk));
+		}
 	}
 
 	/** Queue 16 kHz mono Float32 PCM for native Opus transmission. */

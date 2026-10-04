@@ -5,7 +5,7 @@ import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import { createMockModel, type MockHandler } from "@oh-my-pi/pi-ai/providers/mock";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { LiveSessionController } from "@oh-my-pi/pi-coding-agent/live/controller";
+import { LiveSessionController, type LiveTranscript } from "@oh-my-pi/pi-coding-agent/live/controller";
 import type { LiveClientMessage, LiveServerEvent } from "@oh-my-pi/pi-coding-agent/live/protocol";
 import type { LiveTransport, LiveTransportCallbacks } from "@oh-my-pi/pi-coding-agent/live/transport";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
@@ -51,6 +51,7 @@ class TestTransport implements LiveTransport {
 	async setMuted(muted: boolean): Promise<void> {
 		this.muted.push(muted);
 	}
+	sendText = async (): Promise<void> => undefined;
 	async send(message: LiveClientMessage): Promise<void> {
 		this.sent.push(message);
 	}
@@ -117,13 +118,16 @@ describe("LiveSessionController delegation ownership", () => {
 		const transport = new TestTransport();
 		let transportCallbacks: LiveTransportCallbacks | undefined;
 		let captureAudio: ((error: Error | null, samples: Float32Array) => void) | undefined;
+		const transcripts: LiveTranscript[] = [];
 		controller = new LiveSessionController(
 			{
 				session,
 				callbacks: {
 					onPhase: () => undefined,
 					onLevels: () => undefined,
-					onTranscript: () => undefined,
+					onTranscript: transcript => {
+						if (transcript) transcripts.push(transcript);
+					},
 					onTerminal: () => undefined,
 				},
 				extractAssistantText: assistantText,
@@ -147,8 +151,49 @@ describe("LiveSessionController delegation ownership", () => {
 			emit: (event: LiveServerEvent) => transportCallbacks!.onEvent(event),
 			outputLevel: (level: number) => transportCallbacks!.onOutputLevel(level),
 			captureAudio,
+			transcripts,
 		};
 	}
+
+	it("keeps a typed turn final when a superseded microphone transcript completes late", async () => {
+		const h = await harness([]);
+		h.emit({ type: "transcript.started", role: "user" });
+		h.emit({ type: "input_transcript.added", item: { text: "partial voice" } });
+
+		await controller!.sendText("typed question");
+		expect(h.transcripts.at(-1)).toEqual({ role: "user", turn: 2, text: "typed question", final: true });
+
+		h.emit({ type: "input_transcript.added", item: { text: "partial voice completed late" } });
+		h.emit({ type: "turn.done", turn: { role: "user", transcript: "partial voice completed late" } });
+		expect(h.transcripts.filter(transcript => transcript.text === "typed question")).toHaveLength(1);
+
+		h.emit({ type: "transcript.started", role: "user" });
+		h.emit({ type: "input_transcript.added", item: { text: "partial voice completed late" } });
+		h.emit({ type: "turn.done", turn: { role: "user", transcript: "partial voice completed late" } });
+		expect(h.transcripts.at(-1)).toEqual({
+			role: "user",
+			turn: 3,
+			text: "partial voice completed late",
+			final: true,
+		});
+	});
+
+	it("accepts new speech after typed input even when the interrupted microphone turn never finalized", async () => {
+		const h = await harness([]);
+		h.emit({ type: "transcript.started", role: "user" });
+		h.emit({ type: "input_transcript.added", item: { text: "interrupted voice" } });
+		await controller!.sendText("typed request");
+
+		h.emit({ type: "transcript.started", role: "user" });
+		h.emit({ type: "input_transcript.added", item: { text: "next spoken request" } });
+		h.emit({ type: "turn.done", turn: { role: "user", transcript: "next spoken request" } });
+		expect(h.transcripts.at(-1)).toEqual({
+			role: "user",
+			turn: 3,
+			text: "next spoken request",
+			final: true,
+		});
+	});
 
 	it("never attributes a cancelled turn's terminal result to its replacement", async () => {
 		const oldStarted = Promise.withResolvers<void>();

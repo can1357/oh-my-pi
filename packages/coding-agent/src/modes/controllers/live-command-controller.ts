@@ -105,6 +105,17 @@ export class LiveCommandController {
 				void this.stop().catch(cause => this.#ctx.showError(errorFrom(cause).message));
 			},
 			onToggleMute: () => this.#session?.toggleMute(),
+			onSendText: async text => {
+				try {
+					const session = this.#session;
+					if (!session) throw new Error("No active live session");
+					await session.sendText(text);
+				} catch (cause) {
+					const error = errorFrom(cause);
+					this.#ctx.showError(replaceTabs(error.message));
+					throw error;
+				}
+			},
 			stopKeys: this.#ctx.keybindings.getKeys("app.live.toggle"),
 		});
 		this.#mountVisualizer(visualizer);

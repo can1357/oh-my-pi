@@ -249,6 +249,24 @@ export class GeminiLiveTransport {
 		}
 	}
 
+	/** Send a typed user turn without changing microphone state. */
+	async sendText(text: string): Promise<void> {
+		const normalized = text.trim();
+		if (!normalized) throw new Error("Live text must not be empty");
+		const socket = this.#socket;
+		if (this.#closed || !this.#connected || socket?.readyState !== WebSocket.OPEN) {
+			throw new Error("Gemini Live transport is not connected");
+		}
+		socket.send(
+			JSON.stringify({
+				clientContent: {
+					turns: [{ role: "user", parts: [{ text: normalized }] }],
+					turnComplete: true,
+				},
+			}),
+		);
+	}
+
 	async send(message: LiveClientMessage): Promise<void> {
 		if (message.type === "session.close") {
 			await this.close();
