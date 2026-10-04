@@ -45,6 +45,13 @@ export interface InitializeExtensionsOptions {
 		change: () => Promise<T>,
 		options: { detachesRun: boolean },
 	) => Promise<T>;
+	/**
+	 * Runs inside the startup hold, after `discoverStartupSkillPaths()` and before
+	 * any held extension send dispatches. A task subagent persists `session_init`
+	 * here, so the revival contract carries the post-discovery prompt and precedes
+	 * the conversation records a startup send writes.
+	 */
+	afterStartupDiscovery?: (session: AgentSession) => void | Promise<void>;
 }
 
 /**
@@ -68,14 +75,21 @@ export async function initializeExtensions(session: AgentSession, options: Initi
 		trackExtensionSend,
 		filterActiveTools,
 		wrapSessionChange = change => change(),
+		afterStartupDiscovery,
 	} = options;
 	const shutdown = onShutdown ?? (() => {});
 
+	// resources_discover and session_start handlers share this action context, so
+	// a handler calling sendMessage/sendUserMessage starts an async session send
+	// that the action itself does not expose a promise for (callers only see
+	// trackAgentInvokingMessage/markAgentInvokingMessage side effects). Every
+	// such send dispatches through the runner, which holds it until startup
+	// discovery below has rebuilt the prompt and tracks it for draining.
 	runner.initialize(
 		// ExtensionActions
 		{
 			sendMessage: (message, sendOptions) => {
-				const sendTask = session.sendCustomMessage(message, sendOptions);
+				const sendTask = runner.sends.dispatch(() => session.sendCustomMessage(message, sendOptions));
 				trackExtensionSend?.(sendTask);
 				if (sendOptions?.triggerTurn || sendOptions?.deliverAs === "aside") {
 					// sendCustomMessage resolves `false` for outcomes that provably start no turn
@@ -100,21 +114,23 @@ export async function initializeExtensions(session: AgentSession, options: Initi
 						);
 					}
 				}
-				sendTask.catch(e => {
+				const trackedSend = sendTask.catch(e => {
 					reportSendError("extension_send", e instanceof Error ? e : new Error(String(e)));
 				});
+				runner.sends.track(trackedSend);
 			},
 			sendUserMessage: (content, sendOptions) => {
-				const sendTask = session.sendUserMessage(content, sendOptions);
+				const sendTask = runner.sends.dispatch(() => session.sendUserMessage(content, sendOptions));
 				trackExtensionSend?.(sendTask);
 				if (trackAgentInvokingMessage) {
 					trackAgentInvokingMessage(sendTask);
 				} else {
 					markAgentInvokingMessage?.();
 				}
-				sendTask.catch(e => {
+				const trackedSend = sendTask.catch(e => {
 					reportSendError("extension_send_user", e instanceof Error ? e : new Error(String(e)));
 				});
+				runner.sends.track(trackedSend);
 			},
 			appendEntry: (customType, data) => {
 				session.sessionManager.appendCustomEntry(customType, data);
@@ -209,5 +225,24 @@ export async function initializeExtensions(session: AgentSession, options: Initi
 	);
 
 	runner.onError(reportRuntimeError);
-	await runner.emit({ type: "session_start" });
+	// A `session_start` or `resources_discover` handler can call
+	// sendMessage/sendUserMessage synchronously; a triggered turn would read the
+	// system prompt before `discoverStartupSkillPaths()` has folded any
+	// extension-contributed skill directories into it (PR #9379 review). Hold
+	// those sends until discovery has rebuilt the prompt so that turn sees the
+	// same skills a prompt issued after startup would.
+	await runner.sends.withHeld(async () => {
+		await runner.emit({ type: "session_start" });
+		// resources_discover fires after `session_start` per its public contract
+		// (extensibility/extensions/types.ts) — only now are runtime actions and
+		// `onError` wired, so extension-contributed skill directories are folded
+		// into the session's skill snapshot before the first prompt.
+		await session.discoverStartupSkillPaths();
+		await afterStartupDiscovery?.(session);
+	});
+	// Settle every extension-triggered send before returning. Without this the
+	// caller (print mode's immediate session.prompt(), print-mode.ts) can
+	// observe the session as still streaming and throw AgentBusyError, or
+	// reorder the initial turn.
+	await runner.sends.drain();
 }

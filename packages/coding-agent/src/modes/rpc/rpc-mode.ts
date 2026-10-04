@@ -1488,6 +1488,15 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 	const onPromptError = (id: string | undefined, command: string) => (promptError: Error) =>
 		output(error(id, command, promptError.message));
 
+	// Output all agent events as JSON; prompt results follow the frame that settled them.
+	session.subscribe(event => {
+		sessionEvents.forward(event);
+		// Before the prompt-result and settle reports: a goal continuation decided at this
+		// agent_end is scheduled (and reported as pending) before either reads settlement.
+		goalController.observe(event);
+		promptResults.observe(event);
+		settleWatcher.observe(event);
+	});
 	// Set up extensions with RPC-based UI context
 	await initializeExtensions(session, {
 		mode: "rpc",
@@ -1530,15 +1539,6 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 		uiContext: headless ? undefined : rpcUiContext,
 	});
 
-	// Output all agent events as JSON; prompt results follow the frame that settled them.
-	session.subscribe(event => {
-		sessionEvents.forward(event);
-		// Before the prompt-result and settle reports: a goal continuation decided at this
-		// agent_end is scheduled (and reported as pending) before either reads settlement.
-		goalController.observe(event);
-		promptResults.observe(event);
-		settleWatcher.observe(event);
-	});
 	await goalController.reconcile();
 	await goalController.settled();
 

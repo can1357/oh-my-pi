@@ -24,27 +24,31 @@ The capability validator only requires `name` and `path`; individual providers i
 
 ### Directory layout
 
-For conventional provider roots (native/Claude/Codex/Agents/plugins), skills are discovered as **one level under `skills/`**:
+For conventional provider roots (native/Claude/Codex/Agents/plugins) and `skills.customDirectories`, skills are discovered as **one level under `skills/`**, with one additional namespace level tolerated when that top-level directory has no `SKILL.md` of its own:
 
 - `<skills-root>/<skill-name>/SKILL.md`
+- `<skills-root>/<namespace>/<skill-name>/SKILL.md` — only when `<skills-root>/<namespace>/SKILL.md` is absent
 
-Nested patterns like `<skills-root>/group/<skill>/SKILL.md` are not discovered recursively. The Claude-plugin provider also accepts manifest-declared skill directories containing `SKILL.md` directly, in addition to their immediate children. Agent Plugins packages use only the fixed `skills/<name>/SKILL.md` layout; registry-installed Skillshare packages have a root `SKILL.md`.
-
-For `skills.customDirectories`, scanning uses the same non-recursive layout (`*/SKILL.md`).
+Deeper nesting (two or more namespace levels below `skills-root`) is not discovered. The Claude-plugin provider also accepts manifest-declared skill directories containing `SKILL.md` directly, in addition to their immediate children. Agent Plugins packages use only the fixed `skills/<name>/SKILL.md` layout; registry-installed Skillshare packages have a root `SKILL.md`.
 
 ```text
-Provider-discovered layout (non-recursive under skills/):
+Provider-discovered layout:
 
 <root>/skills/
   ├─ postgres/
-  │   └─ SKILL.md      ✅ discovered
+  │   └─ SKILL.md              ✅ discovered
   ├─ pdf/
-  │   └─ SKILL.md      ✅ discovered
+  │   └─ SKILL.md              ✅ discovered
+  ├─ core-ops/
+  │   └─ deel/
+  │       └─ SKILL.md          ✅ discovered (one namespace level deep)
   └─ team/
       └─ internal/
-          └─ SKILL.md  ❌ not discovered by provider loaders
+          └─ nested/
+              └─ SKILL.md      ❌ not discovered (two levels deep)
 
-Custom-directory scanning is also non-recursive, so nested paths are ignored unless you point `customDirectories` at that nested parent.
+Custom-directory scanning follows the same one-level-of-namespace rule, so a
+deeper taxonomy still needs `customDirectories` pointed at the nested parent.
 ```
 
 ### `SKILL.md` frontmatter
@@ -246,5 +250,5 @@ No fallback search is performed for missing assets.
 - Put each skill in its own directory: `<skills-root>/<skill-name>/SKILL.md`
 - Always include explicit `name` and `description` frontmatter
 - Keep referenced assets under the same skill directory and access with `skill://<name>/...`
-- For nested taxonomy (`team/domain/skill`), point `skills.customDirectories` to the nested parent directory; scanning itself remains non-recursive
+- One namespace level (`<skills-root>/<namespace>/<skill-name>/SKILL.md`) is discovered automatically when `<namespace>` has no `SKILL.md` of its own; for deeper taxonomy (`team/domain/skill`), point `skills.customDirectories` at the nested parent directory instead — scanning remains non-recursive beyond that one tolerated level
 - On a name collision, the higher-precedence skill keeps the bare name; identical copies collapse, and differing copies remain reachable under a namespace.

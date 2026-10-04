@@ -29,6 +29,7 @@ import type { ForeignSessionSource } from "../session/foreign-session-store";
 import type { HistoryStorage } from "../session/history-storage";
 import type { SessionContext } from "../session/session-context";
 import type { SessionManager } from "../session/session-manager";
+import type { RefreshSkillsOptions } from "../session/session-tools";
 import type { ShakeMode } from "../session/shake-types";
 import type { DictationTarget } from "../stt";
 import type { SpaceHoldHandler } from "@oh-my-pi/pi-tui/space-hold";
@@ -470,8 +471,8 @@ export interface InteractiveModeContext {
 	): Promise<CompactionOutcome>;
 	openInBrowser(urlOrPath: string): void;
 	refreshSlashCommandState(cwd?: string): Promise<void>;
-	/** Reload session skills and derived `/skill:<name>` commands. */
-	refreshSkillState(): Promise<void>;
+	/** Reload session skills and derived `/skill:<name>` commands; `rediscover` re-emits `resources_discover`. */
+	refreshSkillState(options?: RefreshSkillsOptions): Promise<void>;
 	applyCwdChange(newCwd: string): Promise<boolean>;
 
 	// Selector handling

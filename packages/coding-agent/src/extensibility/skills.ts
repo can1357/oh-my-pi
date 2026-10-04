@@ -27,6 +27,13 @@ export { allowsSkillTokens, SKILL_TOKEN_RE };
 
 /** Provider id for skills loaded from `skills.customDirectories` (see `loadSkills`). */
 const CUSTOM_DIR_PROVIDER_ID = "custom";
+/** Provider id for skills loaded from extension `resources_discover` directories (see `loadSkills`). */
+const EXTENSION_DIR_PROVIDER_ID = "extension";
+
+/** Whether a skill came from an explicitly configured directory: `skills.customDirectories` or an extension's `resources_discover` dir. */
+function isConfiguredDirectoryProvider(provider: string | undefined): boolean {
+	return provider === CUSTOM_DIR_PROVIDER_ID || provider === EXTENSION_DIR_PROVIDER_ID;
+}
 
 export interface Skill {
 	name: string;
@@ -122,12 +129,14 @@ interface CollisionResolution {
  *   1. An authored skill always outranks a registry-installed package
  *      (`omp skill install`, the `skillshare` provider) — installed steps
  *      aside regardless of admission order.
- *   2. A custom-directory skill always outranks a provider skill (#7190's
- *      override contract) — the provider skill steps aside even though it
- *      was admitted first (custom directories are merged after providers).
+ *   2. A configured-directory skill (`skills.customDirectories`, or an
+ *      extension's `resources_discover` directory) always outranks a provider
+ *      skill (#7190's override contract) — the provider skill steps aside even
+ *      though it was admitted first (configured directories are merged after
+ *      providers).
  *   3. Otherwise, whichever was admitted first — provider-priority order for
- *      providers, array order within `skills.customDirectories` for custom
- *      directories — keeps the bare name.
+ *      providers; for configured directories, `skills.customDirectories` in
+ *      array order, then extension directories — keeps the bare name.
  * - A candidate that outranks the bare holder always takes the bare name (the
  *   override contract is about which FILE is authoritative, not which text
  *   renders the same). Registered copies with identical body AND frontmatter
@@ -153,8 +162,8 @@ function resolveCollision(
 	const bareSkill = skillMap.get(candidate.name);
 	const candidateInstalled = candidate._source?.provider === SKILLSHARE_PROVIDER_ID;
 	const bareInstalled = bareSkill?._source?.provider === SKILLSHARE_PROVIDER_ID;
-	const candidateCustom = candidate._source?.provider === CUSTOM_DIR_PROVIDER_ID;
-	const bareCustom = bareSkill?._source?.provider === CUSTOM_DIR_PROVIDER_ID;
+	const candidateCustom = isConfiguredDirectoryProvider(candidate._source?.provider);
+	const bareCustom = isConfiguredDirectoryProvider(bareSkill?._source?.provider);
 	const identical = existingEntries
 		.filter(([_, e]) => e.body === candidateBody && Bun.deepEquals(e.frontmatter, candidateFrontmatter))
 		.map(([name]) => name);
@@ -280,6 +289,11 @@ export interface LoadSkillsOptions extends SkillsSettings {
 	 * extensions all survive outside the construction-time invocation scope.
 	 */
 	extensionRoots?: EffectiveExtensionRoots;
+	/**
+	 * Skill directories contributed by extensions via the `resources_discover`
+	 * event (`skillPaths`). Scanned like `customDirectories`; not a settings key.
+	 */
+	extensionDirectories?: string[];
 }
 
 /**
@@ -298,6 +312,7 @@ export async function loadSkills(options: LoadSkillsOptions = {}): Promise<LoadS
 		enableAgentsUser = true,
 		enableAgentsProject = true,
 		customDirectories = [],
+		extensionDirectories = [],
 		ignoredSkills = [],
 		includeSkills = [],
 		disabledExtensions = [],
@@ -467,44 +482,61 @@ export async function loadSkills(options: LoadSkillsOptions = {}): Promise<LoadS
 			realPathSet.add(resolvedPath);
 	}
 
-	const customDirectoryResults = await Promise.all(
-		customDirectories.map(async dir => {
+	// Explicitly configured directory sources: user settings first, then
+	// extension-contributed (resources_discover). Order matters — first-wins
+	// among configured sources, so settings beat extensions on name collisions.
+	const configuredDirectorySources = [
+		...customDirectories.map(dir => ({
+			dir,
+			source: "custom:user",
+			providerId: CUSTOM_DIR_PROVIDER_ID,
+			providerName: "Custom",
+		})),
+		...extensionDirectories.map(dir => ({
+			dir,
+			source: "extension:user",
+			providerId: EXTENSION_DIR_PROVIDER_ID,
+			providerName: "Extension",
+		})),
+	];
+	const configuredDirectoryResults = await Promise.all(
+		configuredDirectorySources.map(async ({ dir, source, providerId, providerName }) => {
 			const expandedDir = expandTilde(dir);
 			const scanResult = await scanSkillsFromDir(
 				{ cwd, home: os.homedir(), repoRoot: null },
 				{
 					dir: expandedDir,
-					providerId: CUSTOM_DIR_PROVIDER_ID,
+					providerId,
 					level: "user",
 					requireDescription: true,
 				},
 			);
-			return { expandedDir, scanResult };
+			return { expandedDir, source, providerName, scanResult };
 		}),
 	);
 
-	const allCustomSkills: Array<{
+	const allConfiguredSkills: Array<{
 		skill: Skill;
 		path: string;
 		body: string;
 		frontmatter: SkillFrontmatter | undefined;
 		namespace: string;
 	}> = [];
-	for (const { expandedDir, scanResult } of customDirectoryResults) {
+	for (const { expandedDir, source, providerName, scanResult } of configuredDirectoryResults) {
 		for (const capSkill of scanResult.items) {
 			if (disabledSkillNames.has(capSkill.name)) continue;
 			if (matchesIgnorePatterns(capSkill.name)) continue;
-			allCustomSkills.push({
+			allConfiguredSkills.push({
 				skill: {
 					name: capSkill.name,
 					description:
 						typeof capSkill.frontmatter?.description === "string" ? capSkill.frontmatter.description : "",
 					filePath: capSkill.path,
 					baseDir: capSkill.path.replace(/[\\/]SKILL\.md$/, ""),
-					source: "custom:user",
+					source,
 					...(capSkill.containRoot !== undefined && { containRoot: capSkill.containRoot }),
 					hide: capSkill.frontmatter?.hide === true || capSkill.frontmatter?.disableModelInvocation === true,
-					_source: { ...capSkill._source, providerName: "Custom" },
+					_source: { ...capSkill._source, providerName },
 				},
 				path: capSkill.path,
 				body: capSkill.content,
@@ -515,8 +547,8 @@ export async function loadSkills(options: LoadSkillsOptions = {}): Promise<LoadS
 		collisionWarnings.push(...(scanResult.warnings ?? []).map(message => ({ skillPath: expandedDir, message })));
 	}
 
-	const customRealPaths = await Promise.all(
-		allCustomSkills.map(async ({ path }) => {
+	const configuredRealPaths = await Promise.all(
+		allConfiguredSkills.map(async ({ path }) => {
 			try {
 				return await fs.realpath(path);
 			} catch {
@@ -525,10 +557,21 @@ export async function loadSkills(options: LoadSkillsOptions = {}): Promise<LoadS
 		}),
 	);
 
-	for (let i = 0; i < allCustomSkills.length; i++) {
-		const { skill, body, frontmatter, namespace } = allCustomSkills[i];
-		const resolvedPath = customRealPaths[i];
-		if (realPathSet.has(resolvedPath)) continue;
+	for (let i = 0; i < allConfiguredSkills.length; i++) {
+		const { skill, body, frontmatter, namespace } = allConfiguredSkills[i];
+		const resolvedPath = configuredRealPaths[i];
+		const existing = skillMap.get(skill.name);
+		if (realPathSet.has(resolvedPath)) {
+			// The same file is already loaded. When a DEFAULT-path provider loaded
+			// it under this name, the configured alias takes over the entry so its
+			// tier holds: a later extension skill of the same name must not replace
+			// a skill the user configured via skills.customDirectories (PR #9379 review).
+			if (existing && !isConfiguredDirectoryProvider(existing._source?.provider)) {
+				const existingRealPath = await fs.realpath(existing.filePath).catch(() => existing.filePath);
+				if (existingRealPath === resolvedPath) skillMap.set(skill.name, skill);
+			}
+			continue;
+		}
 		if (admit(skill, body, frontmatter, namespace) !== undefined) realPathSet.add(resolvedPath);
 	}
 
@@ -571,11 +614,12 @@ export async function loadSkills(options: LoadSkillsOptions = {}): Promise<LoadS
 		const resolvedPath = managedRealPaths[i];
 		if (realPathSet.has(resolvedPath)) continue;
 		if (enabledAuthoredNames.has(capSkill.name)) continue; // an enabled authored skill owns this name
-		// Already claimed — e.g. by a custom-directory skill. LOAD-BEARING: custom
-		// dirs never enter `result.all`, so they are absent from `enabledAuthoredNames`
-		// above; this map check is the ONLY veto that lets a custom-dir authored skill
-		// win over a same-named managed one. The custom-dir loop (which populates
-		// skillMap, ~30 lines up) MUST run before this block — do not reorder.
+		// Already claimed — e.g. by a configured-directory skill. LOAD-BEARING:
+		// custom/extension dirs never enter `result.all`, so they are absent from
+		// `enabledAuthoredNames` above; this map check is the ONLY veto that lets a
+		// configured-dir authored skill win over a same-named managed one. The
+		// configured-dir loop (which populates skillMap, ~30 lines up) MUST run
+		// before this block — do not reorder.
 		if (skillMap.has(capSkill.name)) continue;
 		const rawDescription =
 			typeof capSkill.frontmatter?.description === "string" ? capSkill.frontmatter.description : "";

@@ -42,6 +42,7 @@ import type { BranchHandler, NavigateTreeHandler, NewSessionHandler } from "../s
 import { accumulateToolCallResult, buildAggregatedToolCallResult } from "../shared-events";
 import { ManagedTimers } from "./managed-timers";
 import { createExtensionModelQuery } from "./model-api";
+import { ExtensionSendQueue } from "./send-queue";
 import type { ComposerShapeDefinition } from "@oh-my-pi/pi-tui/overlays/composer-shape-registry";
 import type {
 	AfterProviderResponseEvent,
@@ -544,6 +545,12 @@ export class ExtensionRunner {
 	 * pressure. Drained in {@link initialize} once the runtime/UI context is wired.
 	 */
 	#pendingMcpNotifications: Array<Omit<McpNotificationEvent, "type">> = [];
+
+	/**
+	 * Extension-originated sends, held during startup and reload discovery and
+	 * drained afterwards; see {@link ExtensionSendQueue}.
+	 */
+	readonly sends = new ExtensionSendQueue();
 
 	/**
 	 * Timers scheduled by extensions through the sanctioned `ctx.setInterval` /
@@ -1908,6 +1915,33 @@ export class ExtensionRunner {
 		const promptPaths: Array<{ path: string; extensionPath: string }> = [];
 		const themePaths: Array<{ path: string; extensionPath: string }> = [];
 
+		// Handler throws are isolated inside #runHandlerWithTimeout, but a
+		// malformed *return value* (e.g. `{ skillPaths: "./skills" }`, whose
+		// truthy `.length` used to reach `.map`) would throw here in the
+		// aggregation — and startup awaits this emitter in every mode, so one
+		// bad extension return would abort session initialization. Validate
+		// each field, report through the extension error listener, and skip.
+		const validatedPaths = (ext: Extension, field: string, value: unknown): string[] => {
+			if (value === undefined || value === null) return [];
+			if (!Array.isArray(value)) {
+				this.emitError({
+					extensionPath: ext.path,
+					event: "resources_discover",
+					error: `resources_discover result field \`${field}\` must be an array of strings, got ${typeof value}`,
+				});
+				return [];
+			}
+			const strings = value.filter((entry): entry is string => typeof entry === "string");
+			if (strings.length !== value.length) {
+				this.emitError({
+					extensionPath: ext.path,
+					event: "resources_discover",
+					error: `resources_discover result field \`${field}\` contains ${value.length - strings.length} non-string entr${value.length - strings.length === 1 ? "y" : "ies"}; they were skipped`,
+				});
+			}
+			return strings;
+		};
+
 		for (const ext of this.extensions) {
 			const handlers = ext.handlers.get("resources_discover");
 			if (!handlers || handlers.length === 0) continue;
@@ -1922,16 +1956,20 @@ export class ExtensionRunner {
 					extensionHandlerTimeoutMs,
 				);
 				const result = handlerResult as ResourcesDiscoverResult | undefined;
+				if (!result) continue;
 
-				if (result?.skillPaths?.length) {
-					skillPaths.push(...result.skillPaths.map(path => ({ path, extensionPath: ext.path })));
-				}
-				if (result?.promptPaths?.length) {
-					promptPaths.push(...result.promptPaths.map(path => ({ path, extensionPath: ext.path })));
-				}
-				if (result?.themePaths?.length) {
-					themePaths.push(...result.themePaths.map(path => ({ path, extensionPath: ext.path })));
-				}
+				skillPaths.push(
+					...validatedPaths(ext, "skillPaths", result.skillPaths).map(path => ({ path, extensionPath: ext.path })),
+				);
+				promptPaths.push(
+					...validatedPaths(ext, "promptPaths", result.promptPaths).map(path => ({
+						path,
+						extensionPath: ext.path,
+					})),
+				);
+				themePaths.push(
+					...validatedPaths(ext, "themePaths", result.themePaths).map(path => ({ path, extensionPath: ext.path })),
+				);
 			}
 		}
 

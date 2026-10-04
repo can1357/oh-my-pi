@@ -38,6 +38,8 @@ export interface PluginManifest {
 	hooks?: string;
 	/** Extension entry points (relative paths from package root) */
 	extensions?: string[];
+	/** Skill directories (relative paths from package root) */
+	skills?: string[];
 	/** Command files (relative paths from package root) */
 	commands?: string[];
 

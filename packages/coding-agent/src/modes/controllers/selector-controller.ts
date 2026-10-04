@@ -319,7 +319,7 @@ export class SelectorController {
 					onPluginsChanged: async () => {
 						const projectPath = await resolveActiveProjectRegistryPath(this.ctx.sessionManager.getCwd());
 						clearPluginRootsAndCaches(projectPath ? [projectPath] : undefined);
-						await this.ctx.refreshSkillState();
+						await this.ctx.refreshSkillState({ rediscover: true });
 						await this.ctx.refreshSlashCommandState();
 						resetCapabilities();
 						this.ctx.ui.requestRender();

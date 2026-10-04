@@ -138,6 +138,7 @@ import { modelMentionDisplayName } from "@oh-my-pi/pi-tui/prompt/model-mention-s
 import { modelMentionChipLabel, shiftImageMarkers } from "@oh-my-pi/pi-tui/prompt/composer-attachments";
 import type { SessionContext } from "../session/session-context";
 import type { SessionManager } from "../session/session-manager";
+import type { RefreshSkillsOptions } from "../session/session-tools";
 import type { ShakeMode } from "../session/shake-types";
 import { BUILTIN_SLASH_COMMAND_RESERVED_NAMES, buildTuiBuiltinSlashCommands } from "../slash-commands/builtin-registry";
 import { buildStaticInlineHint } from "../slash-commands/builtin-completions";
@@ -2579,10 +2580,27 @@ export class InteractiveMode implements InteractiveModeContext {
 		return [...builtinCommands, ...hookCommands, ...customCommands, ...skillCommandList];
 	}
 
+	/**
+	 * Rebuilds the pending slash commands, including `/skill:<name>` entries, from
+	 * live session state and re-points the editor's autocomplete provider at the
+	 * result. The provider snapshots `#pendingSlashCommands` when
+	 * `refreshSlashCommandState` builds it, and `init:slashCommands` runs before
+	 * the startup `resources_discover` pass — so without the rebuild, skills an
+	 * extension contributes at startup are invocable but never offered in
+	 * autocomplete until the next reload. Reuses the session's already
+	 * discovered file commands, so this never re-walks the providers.
+	 */
+	#syncSkillSlashCommands(): void {
+		this.#pendingSlashCommands = this.#buildPendingSlashCommands();
+		if (this.#baseAutocompleteProvider) {
+			this.#rebuildSlashCommandAutocomplete(this.sessionManager.getCwd());
+		}
+	}
+
 	/** Reload session skills and the `/skill:<name>` command list. */
-	async refreshSkillState(): Promise<void> {
+	async refreshSkillState(options?: RefreshSkillsOptions): Promise<void> {
 		// The session's command-metadata notification rebuilds the picker.
-		await this.session.refreshSkills();
+		await this.session.refreshSkills(options);
 	}
 
 	/** Reload slash commands and autocomplete for the provided working directory. */
@@ -8156,8 +8174,15 @@ export class InteractiveMode implements InteractiveModeContext {
 	}
 
 	// Hook UI methods
-	initHooksAndCustomTools(): Promise<void> {
-		return this.#extensionUiController.initHooksAndCustomTools();
+	async initHooksAndCustomTools(): Promise<void> {
+		await this.#extensionUiController.initHooksAndCustomTools();
+		// The controller's startup resources_discover pass may have
+		// contributed a new skill directory (session.skills), but the
+		// subscribeCommandMetadataChanged listener that keeps skillCommands
+		// in sync is registered later, in init() — sync once here so a skill
+		// discovered at startup is immediately recognized by `/skill:<name>`
+		// and offered in autocomplete instead of waiting for a later reload.
+		this.#syncSkillSlashCommands();
 	}
 
 	getToolUIContext(): ExtensionUIContext | undefined {
