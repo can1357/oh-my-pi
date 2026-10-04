@@ -334,10 +334,15 @@ pub(crate) fn run_sync_capped(
 ///
 /// Safe under concurrency by construction: the lock is *optional*, so git
 /// skips the write when another process holds `index.lock` rather than
-/// waiting or failing. The fsmonitor and untracked-cache pins in
-/// [`hardened_args`] still apply, so the transient-subprocess state mutation
-/// that hardening targets remains blocked — only the stat refresh is allowed
-/// through.
+/// waiting or failing.
+///
+/// The call runs as the user's own `git status` would, so the repository's
+/// fsmonitor and untracked cache are used and kept, as on every other read.
+/// Pinning them off here would not be inert: with the index write allowed,
+/// git honours a `core.fsmonitor=false` or `core.untrackedCache=false` pin by
+/// dropping the index's fsmonitor and untracked-cache extensions and writing
+/// that removal back, undoing on every poll what the user's own `git status`
+/// built.
 pub(crate) fn run_sync_refreshing_capped(
 	cwd: &Path,
 	args: &[String],
@@ -348,9 +353,10 @@ pub(crate) fn run_sync_refreshing_capped(
 }
 
 /// Shared implementation behind [`run_sync_capped`] and
-/// [`run_sync_refreshing_capped`]. `allow_index_refresh` permits the one
-/// opportunistic write git performs on a read: persisting the index stat
-/// cache it just refreshed. Every other optional lock stays disabled.
+/// [`run_sync_refreshing_capped`]. `allow_index_refresh` permits the
+/// opportunistic index write a plain `git status` performs: the stat cache it
+/// just refreshed, and the fsmonitor and untracked-cache state the
+/// repository's own config maintains.
 fn run_sync_with(
 	cwd: &Path,
 	args: &[String],
@@ -358,7 +364,11 @@ fn run_sync_with(
 	limit: usize,
 	allow_index_refresh: bool,
 ) -> Result<CliOutput> {
-	let argv = hardened_args(args, !allow_index_refresh);
+	let argv = if allow_index_refresh {
+		args.to_vec()
+	} else {
+		hardened_args(args, true)
+	};
 	let mut cmd = std::process::Command::new("git");
 	cmd.args(&argv)
 		.current_dir(cwd)

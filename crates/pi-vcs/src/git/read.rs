@@ -1869,6 +1869,44 @@ mod tests {
 		Ok(())
 	}
 
+	/// A refreshing status must leave the repository's own index caches in
+	/// place. With the index write allowed, a `core.untrackedCache=false` or
+	/// `core.fsmonitor=false` pin is not inert: git drops the untracked-cache
+	/// (`UNTR`) and fsmonitor (`FSMN`) extensions to honour it and writes the
+	/// removal back, so every status poll would undo what the user's own
+	/// `git status` built.
+	#[cfg(unix)]
+	#[test]
+	fn cli_status_porcelain_keeps_index_cache_extensions() -> TestResult {
+		use std::os::unix::fs::PermissionsExt;
+		let (dir, repo) = repo()?;
+		let root = dir.path();
+		commit(root, "tracked", "tracked\n", "seed")?;
+		fs::write(root.join("untracked"), "untracked\n")?;
+		// A version-2 fsmonitor hook that reports every path as possibly changed.
+		let hook = root.join(".git").join("fsmonitor-all.sh");
+		fs::write(&hook, "#!/bin/sh\nprintf 'token\\0/\\0'\n")?;
+		fs::set_permissions(&hook, fs::Permissions::from_mode(0o755))?;
+		git(root, &["config", "core.untrackedCache", "true"])?;
+		git(root, &["config", "core.fsmonitor", &hook.display().to_string()])?;
+		git(root, &["config", "core.fsmonitorHookVersion", "2"])?;
+		let extensions = || -> std::result::Result<[bool; 2], Box<dyn std::error::Error>> {
+			let index = fs::read(root.join(".git").join("index"))?;
+			let has = |tag: &[u8]| index.windows(tag.len()).any(|window| window == tag);
+			Ok([has(b"UNTR"), has(b"FSMN")])
+		};
+		git(root, &["status", "--porcelain"])?;
+		assert_eq!(extensions()?, [true, true], "the user's own git status builds both caches");
+
+		assert_eq!(repo.status_porcelain(&StatusOptions::default())?, "?? untracked\n");
+		assert_eq!(
+			extensions()?,
+			[true, true],
+			"status_porcelain must keep the untracked-cache and fsmonitor extensions",
+		);
+		Ok(())
+	}
+
 	#[test]
 	fn concurrent_stage_survives_stale_stat_refresh_writeback() -> TestResult {
 		let (dir, repo) = repo()?;
