@@ -27,10 +27,7 @@ export type UsageCandidate<T extends AuthCredential> = {
 	allowanceSpent?: boolean;
 	/** Present after policy-aware ranking: the account's configured `priority` (0 when unset). */
 	accountPriority?: number;
-	/**
-	 * Present after policy-aware ranking: the account is unblocked and measured at or above
-	 * its `reclaimAbovePct`, so it may take warm automatic pins back from lower-priority siblings.
-	 */
+	/** Present after policy-aware ranking: unblocked and measured at or above its `reclaimAbovePct`. */
 	reclaimReady?: boolean;
 };
 

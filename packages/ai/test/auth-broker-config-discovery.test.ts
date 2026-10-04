@@ -252,10 +252,10 @@ describe("resolveAuthBrokerConfig config discovery", () => {
 					"    - provider: openai-codex",
 					"      account:",
 					"        email: preferred@example.com",
-					"      reclaimAbovePct: 0",
+					"      reclaimAbovePct: high",
 					"",
 				].join("\n"),
-				error: "auth.accountPolicies[0].reclaimAbovePct must be above 0 and at most 100",
+				error: "auth.accountPolicies[0].reclaimAbovePct must be a finite number",
 			},
 			{
 				yaml: [

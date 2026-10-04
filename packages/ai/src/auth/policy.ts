@@ -109,18 +109,13 @@ export class AccountPolicies {
 
 	validateUsageCapability(provider: string, canFetchUsage: boolean): void {
 		if (canFetchUsage) return;
-		for (let index = 0; index < this.#accountPolicies.length; index += 1) {
-			const policy = this.#accountPolicies[index]!;
-			if (policy.provider !== provider) continue;
-			const field =
-				policy.reservePct !== undefined
-					? "reservePct"
-					: policy.reclaimAbovePct !== undefined
-						? "reclaimAbovePct"
-						: undefined;
-			if (field) {
+		for (const field of ["reservePct", "reclaimAbovePct"] as const) {
+			const policyIndex = this.#accountPolicies.findIndex(
+				policy => policy.provider === provider && policy[field] !== undefined,
+			);
+			if (policyIndex !== -1) {
 				throw new AIError.ConfigurationError(
-					`auth.accountPolicies[${index}].${field} requires a usage provider for ${provider}`,
+					`auth.accountPolicies[${policyIndex}].${field} requires a usage provider for ${provider}`,
 				);
 			}
 		}

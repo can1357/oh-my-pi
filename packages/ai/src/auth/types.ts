@@ -62,11 +62,7 @@ export interface AuthAccountPolicy {
 	readonly priority?: number;
 	/** Protected remaining quota percentage for this account. */
 	readonly reservePct?: number;
-	/**
-	 * Opt-in failback: while this account's measured remaining quota is at least this
-	 * percentage, running sessions warm-pinned to a lower-priority sibling move back to it.
-	 * Must exceed the account's effective reserve so leaving and returning cannot oscillate.
-	 */
+	/** Remaining quota percentage, above the reserve, at which this account takes back lower-priority warm pins. */
 	readonly reclaimAbovePct?: number;
 }
 

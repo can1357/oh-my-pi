@@ -176,16 +176,11 @@ function parseAuthAccountPolicies(value: unknown): AuthAccountPolicies {
 		) {
 			throw new AIError.ConfigurationError(`${path}.reservePct must be between 0 and 100`);
 		}
-		// The reserve band (`reclaimAbovePct` above the effective reserve) is checked by
-		// AccountPolicies, which knows the global `retry.usageReservePct` fallback.
 		if (
 			policy.reclaimAbovePct !== undefined &&
-			(typeof policy.reclaimAbovePct !== "number" ||
-				!Number.isFinite(policy.reclaimAbovePct) ||
-				policy.reclaimAbovePct <= 0 ||
-				policy.reclaimAbovePct > 100)
+			(typeof policy.reclaimAbovePct !== "number" || !Number.isFinite(policy.reclaimAbovePct))
 		) {
-			throw new AIError.ConfigurationError(`${path}.reclaimAbovePct must be above 0 and at most 100`);
+			throw new AIError.ConfigurationError(`${path}.reclaimAbovePct must be a finite number`);
 		}
 
 		return {
