@@ -71,6 +71,7 @@ function printSession(manager: MCPManager, refreshGate?: Promise<void>, onRefres
 			await refreshGate;
 			offered = tools.map(tool => tool.name);
 		},
+		getQueuedMessages: () => ({ steering: [], followUp: [] }),
 		prompt: async () => {
 			prompted = [...offered];
 		},

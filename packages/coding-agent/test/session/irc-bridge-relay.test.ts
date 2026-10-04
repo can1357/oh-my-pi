@@ -3,12 +3,13 @@ import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import { IrcBridge, type IrcBridgeHost } from "@oh-my-pi/pi-coding-agent/session/irc-bridge";
 import type { CustomMessage } from "@oh-my-pi/pi-coding-agent/session/messages";
 
-function makeBridge() {
+function makeBridge(opts: { relaysWakeTurnOutput: boolean } = { relaysWakeTurnOutput: true }) {
 	const woken: AgentMessage[][] = [];
 	const host = {
 		isDisposed: () => false,
 		isStreaming: () => false,
 		planModeEnabled: () => false,
+		relaysWakeTurnOutput: () => opts.relaysWakeTurnOutput,
 		emitSessionEvent: async () => {},
 		wakeForIrc: (records: AgentMessage[]) => {
 			woken.push(records);
@@ -37,12 +38,23 @@ describe("IrcBridge wake-relay marking", () => {
 		expect(record.content).toContain("No one replies on your behalf");
 	});
 
-	it("still advertises the stop relay for genuine messages", async () => {
+	it("advertises the stop relay for a genuine message to a monitored subagent", async () => {
 		const { bridge, woken } = makeBridge();
 		await bridge.deliver({ id: "irc-2", from: "B", to: "A", body: "status?", ts: Date.now() });
 
 		const record = woken[0][0] as CustomMessage;
 		expect(record.details).not.toHaveProperty("wakeRelay");
 		expect(record.content).toContain("is delivered to");
+	});
+
+	it("does not promise a stop relay to a root with no wake-turn monitor, whatever its id (#14071)", async () => {
+		// A custom-id `main` in an isolated SDK registry is idle and woken like a subagent, but only the
+		// task executor's monitor relays a wake turn's output — a root has none.
+		const { bridge, woken } = makeBridge({ relaysWakeTurnOutput: false });
+		await bridge.deliver({ id: "irc-3", from: "@mesh/peer", to: "acp:session-1", body: "status?", ts: Date.now() });
+
+		const record = woken[0][0] as CustomMessage;
+		expect(record.content).toContain("No one replies on your behalf");
+		expect(record.content).not.toContain("is delivered to");
 	});
 });

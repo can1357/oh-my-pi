@@ -85,8 +85,8 @@ export function renderIsolationSummary(context: IsolationSummaryContext): string
 }
 
 /** Record artifact locations for `agent://` and mark the result as an isolated run. */
-function rememberAgentArtifacts(result: SingleResult): SingleResult {
-	AgentRegistry.global().setHistory(result.id, {
+function rememberAgentArtifacts(registry: AgentRegistry, result: SingleResult): SingleResult {
+	registry.setHistory(result.id, {
 		outputPath: result.outputPath,
 		patchPath: result.patchPath,
 		branchName: result.branchName,
@@ -381,6 +381,7 @@ function renderIsolationError(context: IsolationErrorContext): string {
  * sibling and its path is named in the resulting error.
  */
 export async function runIsolatedSubprocess(opts: IsolatedRunOptions): Promise<SingleResult> {
+	const registry = opts.baseOptions.agentRegistry ?? AgentRegistry.global();
 	let taskBaseline: WorktreeBaseline | undefined;
 	/** Fingerprint of the delta already handed to the caller at run end; release only re-captures on change. */
 	let handedOff: bigint | number | undefined;
@@ -424,7 +425,7 @@ export async function runIsolatedSubprocess(opts: IsolatedRunOptions): Promise<S
 					);
 				}
 				const patchResult = capture.artifacts;
-				AgentRegistry.global().setHistory(opts.agentId, {
+				registry.setHistory(opts.agentId, {
 					patchPath: patchResult.patchPath,
 					nestedPatchPaths: patchResult.nestedPatchPaths,
 				});
@@ -438,7 +439,7 @@ export async function runIsolatedSubprocess(opts: IsolatedRunOptions): Promise<S
 					opts.description,
 					undefined,
 				);
-				AgentRegistry.global().setHistory(opts.agentId, {
+				registry.setHistory(opts.agentId, {
 					patchPath: patchResult.patchPath,
 					branchName: commitResult?.branchName,
 					nestedPatchPaths: patchResult.nestedPatchPaths,
@@ -506,7 +507,7 @@ export async function runIsolatedSubprocess(opts: IsolatedRunOptions): Promise<S
 				const msg = mergeErr instanceof Error ? mergeErr.message : String(mergeErr);
 				try {
 					const capture = await writeIsolationPatch(isolationDir, baseline, opts.artifactsDir, opts.agentId);
-					return rememberAgentArtifacts({
+					return rememberAgentArtifacts(registry, {
 						...result,
 						...capture.artifacts,
 						error: renderIsolationError({ kind: "merge-failed", message: msg, rescueBranch }),
@@ -514,7 +515,7 @@ export async function runIsolatedSubprocess(opts: IsolatedRunOptions): Promise<S
 				} catch (patchErr) {
 					retainWorkspace = true;
 					const retained = await retainIsolationWorkspace(isolationDir, isolationBackend);
-					return rememberAgentArtifacts({
+					return rememberAgentArtifacts(registry, {
 						...result,
 						error: renderIsolationError({
 							kind: "merge-failed",
@@ -536,7 +537,7 @@ export async function runIsolatedSubprocess(opts: IsolatedRunOptions): Promise<S
 					opts.agentId,
 					commitResult?.nestedPatches ?? [],
 				);
-				return rememberAgentArtifacts({
+				return rememberAgentArtifacts(registry, {
 					...result,
 					branchName: commitResult?.branchName,
 					branchBaseSha: commitResult?.baseSha,
@@ -546,7 +547,7 @@ export async function runIsolatedSubprocess(opts: IsolatedRunOptions): Promise<S
 			} catch (persistErr) {
 				retainWorkspace = true;
 				const retained = await retainIsolationWorkspace(isolationDir, isolationBackend);
-				return rememberAgentArtifacts({
+				return rememberAgentArtifacts(registry, {
 					...result,
 					branchName: commitResult?.branchName,
 					branchBaseSha: commitResult?.baseSha,
@@ -564,11 +565,11 @@ export async function runIsolatedSubprocess(opts: IsolatedRunOptions): Promise<S
 			try {
 				const capture = await writeIsolationPatch(isolationDir, baseline, opts.artifactsDir, opts.agentId);
 				handedOff = capture.fingerprint;
-				return rememberAgentArtifacts({ ...result, ...capture.artifacts });
+				return rememberAgentArtifacts(registry, { ...result, ...capture.artifacts });
 			} catch (patchErr) {
 				retainWorkspace = true;
 				const retained = await retainIsolationWorkspace(isolationDir, isolationBackend);
-				return rememberAgentArtifacts({
+				return rememberAgentArtifacts(registry, {
 					...result,
 					error: renderIsolationError({
 						kind: "patch-capture-failed",
@@ -579,15 +580,15 @@ export async function runIsolatedSubprocess(opts: IsolatedRunOptions): Promise<S
 				});
 			}
 		}
-		return rememberAgentArtifacts(result);
+		return rememberAgentArtifacts(registry, result);
 	} catch (err) {
-		return rememberAgentArtifacts(opts.buildFailureResult(err));
+		return rememberAgentArtifacts(registry, opts.buildFailureResult(err));
 	} finally {
 		if (
 			handle &&
 			!retainWorkspace &&
 			!releasePromise &&
-			!(opts.baseOptions.keepAlive !== false && AgentLifecycleManager.global().has(opts.agentId))
+			!(opts.baseOptions.keepAlive !== false && AgentLifecycleManager.forRegistry(registry).has(opts.agentId))
 		) {
 			if (deferredCleanup) {
 				trackLateCleanup(deferredCleanup.then(cleanupHandle), {

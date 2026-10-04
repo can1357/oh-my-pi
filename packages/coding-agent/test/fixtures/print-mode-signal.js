@@ -15,6 +15,9 @@ const session = {
 		onPersistenceNotice: () => () => {},
 	},
 	setTextOutputCommitted() {},
+	getQueuedMessages() {
+		return { steering: [], followUp: [] };
+	},
 	async prompt() {
 		process.kill(process.pid, "SIGTERM");
 		await Promise.withResolvers().promise;

@@ -103,6 +103,7 @@ describe("headless persistence-failure surface", () => {
 			prepareForHeadlessAdvisorDrain: () => {},
 			setTextOutputCommitted: () => {},
 			waitForAdvisorCatchup: async () => true,
+			getQueuedMessages: () => ({ steering: [], followUp: [] }),
 			prompt: async () => {
 				manager.appendMessage({ role: "user", content: "boom-user", timestamp: Date.now() } as never);
 			},
@@ -150,6 +151,7 @@ describe("headless persistence-failure surface", () => {
 			prepareForHeadlessAdvisorDrain: () => {},
 			setTextOutputCommitted: () => {},
 			waitForAdvisorCatchup: async () => true,
+			getQueuedMessages: () => ({ steering: [], followUp: [] }),
 			prompt: async () => {
 				// The store rejects this entry and keeps it in memory...
 				manager.appendMessage({ role: "user", content: "boom-user", timestamp: Date.now() } as never);
@@ -204,6 +206,7 @@ describe("headless persistence-failure surface", () => {
 		const manager = await SessionManager.open(original, dir.path(), storage, { suppressBreadcrumb: true });
 		const session = {
 			...assistantSession(manager, () => manager.close()),
+			getQueuedMessages: () => ({ steering: [], followUp: [] }),
 			prompt: async () => {
 				manager.appendMessage({ role: "user", content: "moved-user", timestamp: Date.now() } as never);
 			},
@@ -252,6 +255,7 @@ describe("headless persistence-failure surface", () => {
 			prepareForHeadlessAdvisorDrain: () => {},
 			setTextOutputCommitted: () => {},
 			waitForAdvisorCatchup: async () => true,
+			getQueuedMessages: () => ({ steering: [], followUp: [] }),
 			prompt: async () => {
 				notifyPersistenceError?.(persistenceError);
 			},
@@ -293,6 +297,7 @@ describe("headless persistence-failure surface", () => {
 			prepareForHeadlessAdvisorDrain: () => {},
 			setTextOutputCommitted: () => {},
 			waitForAdvisorCatchup: async () => true,
+			getQueuedMessages: () => ({ steering: [], followUp: [] }),
 			prompt: async () => {
 				manager.appendMessage({ role: "user", content: "boom-user", timestamp: Date.now() } as never);
 			},

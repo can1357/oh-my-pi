@@ -2,9 +2,14 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added cross-process IRC for extensions: `pi.irc.setRemoteTransport(namespace, transport)` claims an `@<namespace>/…` id space and routes `write agent://@<namespace>/<name>` through the transport, `pi.irc.registerRemotePeer` lists those peers as `remote` rows in `read history://`, and `pi.irc.deliverInbound` hands a message from another process to a local agent as a peer message. Independent root sessions sharing one registry co-own a bridge's claim, and a disabled bridge releases it. A runnable reference bridge and peer CLI live in `examples/extensions/remote-irc-bridge/` ([#14071](https://github.com/can1357/oh-my-pi/pull/14071) by [@mccraigmccraig](https://github.com/mccraigmccraig)).
+
 ### Fixed
 
 - Fixed follow-up hashline edits being rejected as anchored on lines "never displayed" after an earlier edit shifted those lines, when the replacement carries the anchored content; genuinely stale line numbers are still rejected ([#14254](https://github.com/can1357/oh-my-pi/pull/14254) by [@abilliontokens](https://github.com/abilliontokens)).
+- Fixed `-p` print mode dying with `AgentBusyError` when a bridged peer message woke the session before the initial prompt dispatched; the prompt now queues behind the wake turn ([#14071](https://github.com/can1357/oh-my-pi/pull/14071) by [@mccraigmccraig](https://github.com/mccraigmccraig)).
 
 ## [18.6.0] - 2026-10-03
 

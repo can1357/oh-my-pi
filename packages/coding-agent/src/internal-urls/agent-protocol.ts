@@ -23,8 +23,9 @@ import * as path from "node:path";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import { fuzzyFilter } from "@oh-my-pi/pi-tui/fuzzy";
 import { formatDuration, isEnoent, prompt } from "@oh-my-pi/pi-utils";
-import { type AgentRef, AgentRegistry } from "../registry/agent-registry";
+import { type AgentRef, AgentRegistry, isMessageablePeer } from "../registry/agent-registry";
 import { ensurePersistedRoster } from "../registry/persisted-agents";
+import { malformedRemoteIdError, REMOTE_ID_PREFIX, remoteNamespaceOf } from "../registry/remote-id";
 import { executeSend, isIrcEnabled } from "../irc/messaging";
 import agentPromptDoc from "../prompts/internal-urls/agent.md" with { type: "text" };
 import agentProgressTemplate from "../prompts/tools/agent-url-progress.md" with { type: "text" };
@@ -144,6 +145,7 @@ export class AgentProtocolHandler implements ProtocolHandler {
 	readonly spec: SchemeSpec = {
 		backing: "file",
 		selectors: "lines",
+		agentIdAuthority: true,
 		immutable: true,
 		linkable: true,
 		write: { via: "handler", payload: "verbatim", scope: "coordination", tier: () => "read" },
@@ -162,7 +164,7 @@ export class AgentProtocolHandler implements ProtocolHandler {
 	async locate(url: InternalUrl, context?: ResolveContext): Promise<string | null> {
 		const outputId = url.rawHost || url.hostname;
 		if (!outputId) throw new Error("agent:// URL requires an output ID: agent://<id>");
-		if (outputId === "all" || hasPathExtraction(url)) return null;
+		if (outputId === "all" || outputId.startsWith(REMOTE_ID_PREFIX) || hasPathExtraction(url)) return null;
 		if (isSuperseded(context?.agentRegistry ?? AgentRegistry.global(), outputId)) return null;
 		const dirs = await this.#outputDirs(context);
 		if (dirs.length === 0) return null;
@@ -178,12 +180,14 @@ export class AgentProtocolHandler implements ProtocolHandler {
 			!registry ||
 			!senderId ||
 			session.enableIrc === false ||
-			!isIrcEnabled(session.settings, session.taskDepth ?? 0)
+			!isIrcEnabled(session.settings, session.taskDepth ?? 0, registry)
 		) {
 			throw new Error("Peer messaging is unavailable in this session.");
 		}
 		const to = url.rawHost || url.hostname;
 		if (!to) throw new Error("agent:// URL requires a recipient: agent://<id>");
+		const malformedTo = malformedRemoteIdError(to);
+		if (malformedTo) throw malformedTo;
 		if (hasPathExtraction(url)) {
 			throw new Error("agent:// message target cannot have a JSON-path suffix.");
 		}
@@ -209,6 +213,14 @@ export class AgentProtocolHandler implements ProtocolHandler {
 		if (outputId === "all") throw new Error("agent://all is write-only; use it to broadcast a message.");
 		if (!outputId) {
 			throw new Error("agent:// URL requires an output ID: agent://<id>");
+		}
+		// A remote peer (`@ns/name`) runs in another process: it is a message target, never an output.
+		const malformedId = malformedRemoteIdError(outputId);
+		if (malformedId) throw malformedId;
+		if (remoteNamespaceOf(outputId) !== undefined) {
+			throw new Error(
+				`${outputId} is a remote peer and has no local output to read. Message it with \`write agent://${outputId}\`; list peers with \`read history://\`.`,
+			);
 		}
 
 		const extraction = hasPathExtraction(url);
@@ -406,7 +418,13 @@ export class AgentProtocolHandler implements ProtocolHandler {
 		return { foundPath, jsonPath, anyDirExists, availableIds };
 	}
 
-	async complete(): Promise<UrlCompletion[]> {
+	/**
+	 * Output ids (readable) plus messageable peers (write targets) from the caller's registry — an
+	 * SDK/ACP session with its own `AgentRegistry` sees its `@namespace/name` peers, not the global
+	 * session's. Remote peers appear here, not under history://, because `write agent://@ns/name` is
+	 * the only thing one can do with them.
+	 */
+	async complete(_query?: string, context?: ResolveContext): Promise<UrlCompletion[]> {
 		const ids = new Set<string>();
 		for (const dir of artifactsDirsFromRegistry()) {
 			let files: string[];
@@ -420,6 +438,11 @@ export class AgentProtocolHandler implements ProtocolHandler {
 				if (f.endsWith(".md")) ids.add(f.slice(0, -3));
 			}
 		}
-		return [...ids].sort().map(value => ({ value }));
+		const completions: UrlCompletion[] = [...ids].sort().map(value => ({ value }));
+		for (const ref of (context?.agentRegistry ?? AgentRegistry.global()).list()) {
+			if (!isMessageablePeer(ref.kind) || ids.has(ref.id)) continue;
+			completions.push({ value: ref.id, description: `${ref.status} · ${ref.kind} · message with write` });
+		}
+		return completions;
 	}
 }

@@ -275,42 +275,76 @@ async function runPrintModeCore(
 		wroteTextWorkingIndicator = true;
 	};
 
-	// Send initial message with attachments
-	if (!strictMCPFailure && initialMessage !== undefined) {
-		writeTextWorkingIndicator();
-		if (mode === "text") session.setTextOutputCommitted(false);
-		await logger.time("print:prompt:initial", () => session.prompt(initialMessage, { images: initialImages }));
-	}
+	// A bridge extension claims its IRC namespace during extension load, so an inbound peer message
+	// can wake this session into a real turn before the first dispatch below. `prompt()` without a
+	// streaming behaviour throws AgentBusyError on a busy session; queue behind the wake turn as a
+	// follow-up instead (irrelevant when idle: the prompt then runs to completion as before). A
+	// queued prompt returns while the wake turn is still streaming, so wait until nothing is in
+	// flight (a stranded follow-up re-arms as a tracked continue, hence the loop) and the response
+	// read after each dispatch is the prompt's own, not the wake turn's reply. A user-authored
+	// follow-up still queued once everything is idle (the queued drain was refused, e.g. by a
+	// usage-limit denial) is this prompt, undispatched: it must not pass as the printed answer of
+	// another turn, so fail loudly; the catch below still disposes. Only the follow-up queue counts:
+	// hidden next-turn reminders legitimately outlive the last dispatch.
+	const dispatch = async (label: string, text: string, images?: ImageContent[]): Promise<void> => {
+		await logger.time(label, () => session.prompt(text, { images, streamingBehavior: "followUp" }));
+		while (session.isStreaming) await session.waitForIdle();
+		if (session.getQueuedMessages().followUp.length > 0) {
+			throw new Error("print mode: the prompt was queued behind another turn and never dispatched");
+		}
+	};
 
-	// Send remaining messages
-	if (!strictMCPFailure) {
-		for (const message of messages) {
+	let assistantMsg: AgentMessage | undefined;
+	let terminalFailure = false;
+	try {
+		// Send initial message with attachments
+		if (!strictMCPFailure && initialMessage !== undefined) {
 			writeTextWorkingIndicator();
 			if (mode === "text") session.setTextOutputCommitted(false);
-			await logger.time("print:prompt:next", () => session.prompt(message));
+			await dispatch("print:prompt:initial", initialMessage, initialImages);
 		}
+
+		// Send remaining messages
+		if (!strictMCPFailure) {
+			for (const message of messages) {
+				writeTextWorkingIndicator();
+				if (mode === "text") session.setTextOutputCommitted(false);
+				await dispatch("print:prompt:next", message);
+			}
+		}
+
+		// From this point onward a late blocker must be recorded without starting a
+		// primary turn whose response print mode would never emit.
+		session.prepareForHeadlessAdvisorDrain();
+
+		// Read via the session accessor, not the raw state tail: a classifier
+		// refusal is pruned from active context at settle, and an aborted turn
+		// can trail synthetic tool results — both would hide the terminal
+		// assistant message (and its error) from a last-element read.
+		assistantMsg = session.getLastAssistantMessage();
+		// The terminal stop reason decides the process exit code in every output
+		// mode: `--mode json` used to report success for the same turn-fatal error
+		// text mode exits 1 on (issue #11498). Silent aborts (plan-mode compaction
+		// transitions) and aborts initiated by signal teardown stay non-fatal here;
+		// postmortem owns the signal-specific exit code (130/143/129).
+		terminalFailure =
+			!strictMCPFailure &&
+			assistantMsg !== undefined &&
+			(assistantMsg.stopReason === "error" || assistantMsg.stopReason === "aborted") &&
+			!isSilentAbort(assistantMsg) &&
+			!signalTeardownActive();
+	} catch (error) {
+		// A throw here (provider setup, a dropped prompt, a bug) used to escape before the dispose
+		// below, so the extensions never saw `session_shutdown` and a bridge's IRC claims, transports
+		// and remote proxies leaked for the life of the process. Release the session first; the
+		// original error still decides the exit.
+		await session.dispose({ mnemopiConsolidateTimeoutMs: SHUTDOWN_CONSOLIDATE_BUDGET_MS }).catch(disposeError => {
+			logger.error("print mode: dispose after a failed run also failed", {
+				error: disposeError instanceof Error ? disposeError.message : String(disposeError),
+			});
+		});
+		throw error;
 	}
-
-	// From this point onward a late blocker must be recorded without starting a
-	// primary turn whose response print mode would never emit.
-	session.prepareForHeadlessAdvisorDrain();
-
-	// Read via the session accessor, not the raw state tail: a classifier
-	// refusal is pruned from active context at settle, and an aborted turn
-	// can trail synthetic tool results — both would hide the terminal
-	// assistant message (and its error) from a last-element read.
-	const assistantMsg = session.getLastAssistantMessage();
-	// The terminal stop reason decides the process exit code in every output
-	// mode: `--mode json` used to report success for the same turn-fatal error
-	// text mode exits 1 on (issue #11498). Silent aborts (plan-mode compaction
-	// transitions) and aborts initiated by signal teardown stay non-fatal here;
-	// postmortem owns the signal-specific exit code (130/143/129).
-	const terminalFailure =
-		!strictMCPFailure &&
-		assistantMsg !== undefined &&
-		(assistantMsg.stopReason === "error" || assistantMsg.stopReason === "aborted") &&
-		!isSilentAbort(assistantMsg) &&
-		!signalTeardownActive();
 
 	// In text mode, output the final response. A terminal failure prints only
 	// the error line below; JSON mode already emitted the assistant message and

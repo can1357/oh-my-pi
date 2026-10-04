@@ -1,1 +1,1 @@
-`agent://<id>`: output (status + progress while unpublished); nested IDs dotted, `/key/index` JSON path; write = message, `agent://all` broadcast only.
+`agent://<id>`: output (status + progress while unpublished); nested IDs dotted, `/key/index` JSON path; write = message, `agent://all` broadcast only. Remote peers (other processes) are `@<namespace>/<name>` — spell the whole id, e.g. `write agent://@double-down/leia`; they have no output to read.

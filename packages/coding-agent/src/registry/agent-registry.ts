@@ -17,13 +17,20 @@ import { MAIN_AGENT_ID, type AgentStatus, type AgentMetricsSummary } from "@oh-m
 export { MAIN_AGENT_ID };
 export type { AgentStatus, AgentMetricsSummary };
 
+/** Reserved pseudo-recipient for `hub send --to all` (broadcast fan-out); never a real/registered agent id. */
+export const BROADCAST_ID = "all";
+
 /**
- * - `main`/`sub`: the user-facing agent tree (driving agent + task subagents).
- * - `advisor`: a passive review transcript persisted like a subagent for usage
- *   attribution and Agent Hub observability, but never a peer — hidden from
- *   agent-facing rosters (`proc://`, `history://`) and not messageable/revivable.
+ * - `main`/`sub`: the user-facing agent tree (driving agent + task subagents) — messageable
+ *   peers with a locally-managed session.
+ * - `advisor`: a passive review transcript, persisted for usage attribution + Agent Hub
+ *   observability, but never a peer — hidden from agent-facing rosters (`proc://`, `history://`)
+ *   and not messageable/revivable.
+ * - `remote`: a proxy for an agent on another node (murmur-q00p) — a messageable peer with NO
+ *   local session (controlled over IRC/the transport, not the local lifecycle).
+ * See the capability predicates below (isMessageablePeer / isLocalSession / hasLocalPresence).
  */
-export type AgentKind = "main" | "sub" | "advisor";
+export type AgentKind = "main" | "sub" | "advisor" | "remote";
 
 /**
  * Run lifecycle milestones, stamped as they happen and scoped to the CURRENT
@@ -39,6 +46,26 @@ export interface AgentRunLifecycle {
 	acceptedAt?: number;
 	/** When the ref last left `running` for a terminal status. */
 	terminalAt?: number;
+}
+
+/** Messageable peer: appears in the IRC roster and is a broadcast target (main | sub | remote). */
+export function isMessageablePeer(kind: AgentKind): boolean {
+	return kind !== "advisor";
+}
+/**
+ * Locally-managed session (main | sub): focus/revive/kill via the local lifecycle,
+ * disk-restorable, drivable by collab guests, readable via the agent-facing `history://`.
+ * A `remote` proxy is controlled over IRC (no local session); an `advisor` is read-only.
+ */
+export function isLocalSession(kind: AgentKind): boolean {
+	return kind === "main" || kind === "sub";
+}
+/**
+ * Has a local presence to display/read — a live/parked session or a persisted transcript
+ * (main | sub | advisor); a `remote` proxy has neither.
+ */
+export function hasLocalPresence(kind: AgentKind): boolean {
+	return kind !== "remote";
 }
 
 /** Historical identity and telemetry that remain available after the live session is disposed. */
@@ -321,13 +348,13 @@ export class AgentRegistry {
 	}
 
 	/**
-	 * Returns every alive agent (running | idle) except the caller. Advisor refs
-	 * are observability-only transcripts, never peers, so they are excluded.
-	 * Flat namespace: every other agent is visible.
+	 * Every alive (running | idle) messageable peer except the caller — the IRC roster /
+	 * broadcast target set. Advisors are observability-only (never peers); remote proxies are
+	 * included when live, since the bridge registers them running/idle (murmur-q00p).
 	 */
 	listVisibleTo(id: string): AgentRef[] {
 		return this.list().filter(
-			ref => ref.id !== id && ref.kind !== "advisor" && (ref.status === "running" || ref.status === "idle"),
+			ref => ref.id !== id && isMessageablePeer(ref.kind) && (ref.status === "running" || ref.status === "idle"),
 		);
 	}
 

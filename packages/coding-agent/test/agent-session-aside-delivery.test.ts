@@ -784,6 +784,7 @@ describe("AgentSession aside delivery", () => {
 			isDisposed: () => false,
 			isStreaming: () => false,
 			planModeEnabled: () => planMode,
+			relaysWakeTurnOutput: () => false,
 			emitSessionEvent: async () => {},
 			wakeForIrc: records => wakeRecords.push(...records),
 		};
@@ -859,6 +860,7 @@ describe("AgentSession aside delivery", () => {
 			isDisposed: () => false,
 			isStreaming: () => false,
 			planModeEnabled: () => false,
+			relaysWakeTurnOutput: () => false,
 			emitSessionEvent: async () => {},
 			wakeForIrc: () => {},
 		};
@@ -901,6 +903,7 @@ describe("AgentSession aside delivery", () => {
 			isDisposed: () => false,
 			isStreaming: () => false,
 			planModeEnabled: () => false,
+			relaysWakeTurnOutput: () => false,
 			emitSessionEvent: async () => {},
 			wakeForIrc: () => {},
 		};
@@ -935,6 +938,7 @@ describe("AgentSession aside delivery", () => {
 			isDisposed: () => false,
 			isStreaming: () => false,
 			planModeEnabled: () => false,
+			relaysWakeTurnOutput: () => false,
 			emitSessionEvent: async () => {},
 			wakeForIrc: () => {},
 		};

@@ -12,6 +12,7 @@ import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import type { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
@@ -780,6 +781,7 @@ describe("advisor tool-call loop guard", () => {
 		const started = performance.now();
 		await finalizeSubagentLifecycle({
 			id: "strict-reviewer-subagent",
+			registry: AgentRegistry.global(),
 			session: live,
 			aborted: false,
 			keepAlive: false,
