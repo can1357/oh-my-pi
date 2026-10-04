@@ -1,7 +1,9 @@
 import { Buffer } from "node:buffer";
+import { type } from "@oh-my-pi/omptype";
 import type { IrcDeliveryReceipt, IrcMessage } from "@oh-my-pi/pi-tui/tools/irc";
 import { logger, postmortem, Serial } from "@oh-my-pi/pi-utils";
 import { boundField } from "../collab/registry";
+import { combine } from "../config/registry";
 import type { Settings } from "../config/settings";
 import {
 	listLocalEndpoints,
@@ -20,6 +22,7 @@ import {
 	MAILBOX_MAX_BODY_BYTES,
 	MAILBOX_REGISTRY,
 	mailboxAddress,
+	mailboxSnapshotSchema,
 	type MailboxSnapshot,
 	type MailboxTargetSnapshot,
 	normalizePeerAlias,
@@ -66,49 +69,12 @@ interface BoundTarget {
 	unsubscribe: () => void;
 }
 
-function isSnapshot(value: unknown): value is MailboxSnapshot {
-	if (!value || typeof value !== "object") return false;
-	const snapshot = value as Record<string, unknown>;
-	return (
-		typeof snapshot.address === "string" &&
-		MAILBOX_ADDRESS_PATTERN.test(snapshot.address) &&
-		!snapshot.address.includes(".") &&
-		typeof snapshot.id === "string" &&
-		typeof snapshot.pid === "number" &&
-		typeof snapshot.cwd === "string" &&
-		typeof snapshot.startedAt === "number" &&
-		Array.isArray(snapshot.targets) &&
-		snapshot.targets.every(
-			(target: unknown) =>
-				!!target &&
-				typeof target === "object" &&
-				"conversation" in target &&
-				(target.conversation === null ||
-					(typeof target.conversation === "string" && /^[0-9a-f]{8}$/.test(target.conversation))) &&
-				"title" in target &&
-				(target.title === null || typeof target.title === "string") &&
-				"alias" in target &&
-				(target.alias === null ||
-					(typeof target.alias === "string" && normalizePeerAlias(target.alias) === target.alias)) &&
-				"cwd" in target &&
-				(target.cwd === null || typeof target.cwd === "string") &&
-				"busy" in target &&
-				typeof target.busy === "boolean",
-		)
-	);
-}
-
-function isReceipt(value: unknown): value is IrcDeliveryReceipt {
-	return (
-		!!value &&
-		typeof value === "object" &&
-		"to" in value &&
-		typeof value.to === "string" &&
-		"outcome" in value &&
-		["injected", "woken", "revived", "failed"].includes(String(value.outcome)) &&
-		(!("error" in value) || typeof value.error === "string")
-	);
-}
+const receiptSchema = type({
+	to: "string",
+	outcome: "'injected' | 'woken' | 'revived' | 'failed'",
+	"error?": "string",
+});
+const senderDisplaySchema = type({ cwd: "string", title: "string | null" });
 
 export class MailboxService implements IrcRemoteRouter {
 	static #global: MailboxService | undefined;
@@ -123,7 +89,6 @@ export class MailboxService implements IrcRemoteRouter {
 	}
 
 	readonly id = Bun.randomUUIDv7();
-	readonly #startedAt = Date.now();
 	readonly #registry: LocalEndpointRegistry;
 	readonly #bus: IrcBus;
 	readonly #agentRegistry: AgentRegistry;
@@ -135,7 +100,6 @@ export class MailboxService implements IrcRemoteRouter {
 	#publication: LocalEndpointPublication | undefined;
 	#publicationError: string | undefined;
 	#cancelExit: (() => void) | undefined;
-	#registeredExit = false;
 	#pending: Promise<void> = Promise.resolve();
 	#closed = false;
 	#closePromise: Promise<void> | undefined;
@@ -164,29 +128,19 @@ export class MailboxService implements IrcRemoteRouter {
 		if ([...this.#targets.values()].some(bound => bound.target.conversation === target.conversation)) {
 			throw new Error(`Mailbox conversation "${target.conversation}" is already bound.`);
 		}
+		const config = combine({ enabled: cfgIrcCrossProcess, alias: cfgIrcPeerAlias.map(normalizePeerAlias) });
 		const bound: BoundTarget = {
 			target,
-			enabled: cfgIrcCrossProcess.get(target.settings),
-			alias: normalizePeerAlias(cfgIrcPeerAlias.get(target.settings)),
+			...config.get(target.settings),
 			unsubscribe: () => {},
 		};
 		this.#targets.set(target.agentId, bound);
-		const unsubscribeEnabled = cfgIrcCrossProcess.listen(target.settings, enabled => {
+		bound.unsubscribe = config.listen(target.settings, ({ enabled, alias }, previous) => {
 			bound.enabled = enabled;
-			this.#notifications.add(bound);
-			this.#schedule();
-		});
-		const unsubscribeAlias = cfgIrcPeerAlias.listen(target.settings, value => {
-			const alias = normalizePeerAlias(value);
-			if (alias === bound.alias) return;
 			bound.alias = alias;
-			if (bound.enabled) this.#notifications.add(bound);
+			if (enabled || enabled !== previous.enabled) this.#notifications.add(bound);
 			this.#schedule();
 		});
-		bound.unsubscribe = () => {
-			unsubscribeEnabled();
-			unsubscribeAlias();
-		};
 		if (bound.enabled) this.#notifications.add(bound);
 		this.#schedule();
 		return () => {
@@ -245,8 +199,7 @@ export class MailboxService implements IrcRemoteRouter {
 						instanceId: this.address,
 					});
 					this.#publicationError = undefined;
-					if (!this.#registeredExit) {
-						this.#registeredExit = true;
+					if (!this.#cancelExit) {
 						this.#cancelExit = postmortem.register("mailbox", () => this.close(), { exitOnly: true });
 					}
 				} catch (error) {
@@ -274,7 +227,6 @@ export class MailboxService implements IrcRemoteRouter {
 				id: this.id,
 				pid: process.pid,
 				cwd: boundField(this.#cwd!),
-				startedAt: this.#startedAt,
 				targets: [...this.#targets.values()]
 					.filter(bound => !this.#closed && bound.enabled && bound.target.receive)
 					.map(({ target, alias }) => {
@@ -313,14 +265,7 @@ export class MailboxService implements IrcRemoteRouter {
 		}
 		let display: IrcMessage["senderDisplay"];
 		if (senderDisplay !== undefined) {
-			if (
-				!senderDisplay ||
-				typeof senderDisplay !== "object" ||
-				!("cwd" in senderDisplay) ||
-				typeof senderDisplay.cwd !== "string" ||
-				!("title" in senderDisplay) ||
-				(senderDisplay.title !== null && typeof senderDisplay.title !== "string")
-			) {
+			if (!senderDisplaySchema.allows(senderDisplay)) {
 				return { ok: false, error: "malformed_request" };
 			}
 			display = {
@@ -354,7 +299,11 @@ export class MailboxService implements IrcRemoteRouter {
 				);
 				if (result.status !== "ok") return result;
 				const snapshot = result.value.snapshot;
-				if (result.value.ok !== true || !isSnapshot(snapshot) || snapshot.address !== entry.meta.instanceId) {
+				if (
+					result.value.ok !== true ||
+					!mailboxSnapshotSchema.allows(snapshot) ||
+					snapshot.address !== entry.meta.instanceId
+				) {
 					return { status: "skip" };
 				}
 				return { status: "ok", value: snapshot };
@@ -443,7 +392,7 @@ export class MailboxService implements IrcRemoteRouter {
 						: (result.error ?? `Peer ${message.to} did not return a valid delivery receipt.`),
 				);
 			}
-			return isReceipt(result.value.receipt)
+			return receiptSchema.allows(result.value.receipt)
 				? result.value.receipt
 				: fail(`Peer ${message.to} did not return a valid delivery receipt.`);
 		} catch {

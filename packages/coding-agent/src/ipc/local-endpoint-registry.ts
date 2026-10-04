@@ -4,6 +4,7 @@ import * as fs from "node:fs";
 import * as net from "node:net";
 import * as path from "node:path";
 import { isEnoent } from "@oh-my-pi/pi-utils";
+import { mapWithConcurrencyLimit } from "../task/parallel";
 
 export interface LocalEndpointRegistry {
 	/** Private metadata directory (created 0700 on POSIX; symlink/foreign-owner rejected). */
@@ -50,7 +51,6 @@ export interface LocalEndpointEntry {
 const INSTANCE_ID_PATTERN = /^[a-z0-9-]{8,64}$/;
 const SUN_PATH_LIMIT = process.platform === "darwin" ? 104 : 108;
 const DEFAULT_SOCKET_FALLBACK_BASE = "/tmp";
-const LIST_CONCURRENCY = 8;
 
 function parseMetadata(text: string): LocalEndpointMetadata | null {
 	let raw: unknown;
@@ -414,27 +414,25 @@ export function readLocalEndpointEntries(registry: LocalEndpointRegistry): Promi
 	return readEntries(registry, false);
 }
 
-/** Probe every entry (concurrency 8 by default); prune those whose probe reports "dead". */
+/** Probe every entry (concurrency 8); prune those whose probe reports "dead". */
 export async function listLocalEndpoints<T>(
 	registry: LocalEndpointRegistry,
 	probe: (entry: LocalEndpointEntry) => Promise<LocalEndpointQueryResult<T>>,
-	options?: { concurrency?: number; signal?: AbortSignal },
+	options?: { signal?: AbortSignal },
 ): Promise<Array<{ entry: LocalEndpointEntry; value: T }>> {
 	if (options?.signal?.aborted) return [];
 	const entries = await readEntries(registry, true, options?.signal);
 	const live: Array<{ entry: LocalEndpointEntry; value: T }> = [];
-	const concurrency = options?.concurrency ?? LIST_CONCURRENCY;
-	if (!Number.isInteger(concurrency) || concurrency < 1) throw new Error("invalid local endpoint listing concurrency");
-	let next = 0;
-	const worker = async (): Promise<void> => {
-		while (next < entries.length && !options?.signal?.aborted) {
-			const entry = entries[next++];
+	await mapWithConcurrencyLimit(
+		entries,
+		8,
+		async entry => {
 			const result = await probe(entry);
 			if (options?.signal?.aborted) return;
 			if (result.status === "ok") live.push({ entry, value: result.value });
 			else if (result.status === "dead") await pruneEntry(registry, `${entry.entryId}.json`, entry.meta);
-		}
-	};
-	await Promise.all(Array.from({ length: Math.min(concurrency, entries.length) }, worker));
+		},
+		options?.signal,
+	);
 	return live;
 }

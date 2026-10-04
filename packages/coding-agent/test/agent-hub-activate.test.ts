@@ -13,6 +13,8 @@ import { AgentHubOverlayComponent } from "@oh-my-pi/pi-tui/overlays/agent-hub";
 import { MailboxService, type MailboxPeer } from "@oh-my-pi/pi-coding-agent/mailbox/service";
 import { HookEditorComponent } from "@oh-my-pi/pi-tui/overlays/hook-editor";
 import { SelectorController } from "@oh-my-pi/pi-coding-agent/modes/controllers/selector-controller";
+import { ExtensionUiController } from "@oh-my-pi/pi-coding-agent/modes/controllers/extension-ui-controller";
+import * as externalEditor from "@oh-my-pi/pi-coding-agent/utils/external-editor";
 import { SessionObserverRegistry } from "@oh-my-pi/pi-tui/overlays/session-observer-registry";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
@@ -196,7 +198,7 @@ describe("Agent hub Enter activation", () => {
 		hub.dispose();
 	});
 
-	it("peer activation composes through HookEditor and sends as the active agent, showing delivery failure without focusing", async () => {
+	it("peer composition uses the external editor, sends as the active agent, and restores Hub focus on failure", async () => {
 		const agents = new AgentRegistry();
 		const bus = new IrcBus(agents);
 		vi.spyOn(IrcBus, "global").mockReturnValue(bus);
@@ -222,13 +224,29 @@ describe("Agent hub Enter activation", () => {
 		} as never);
 		const focusAgent = vi.fn(async () => {});
 		const onDone = vi.fn();
-		const hide = vi.fn();
+		const hide = vi.fn(() => setFocus(hub));
 		const setFocus = vi.fn();
+		let mounted = Promise.withResolvers<void>();
+		const resumed = Promise.withResolvers<void>();
 		let composer: HookEditorComponent | undefined;
-		const showOverlay = vi.fn((component: HookEditorComponent) => {
-			composer = component;
-			return { hide };
-		});
+		const ui = {
+			showOverlay: vi.fn((component: HookEditorComponent) => {
+				composer = component;
+				mounted.resolve();
+				return { hide };
+			}),
+			setFocus,
+			requestRender: () => {},
+			requestComponentRender: () => {},
+			stop: vi.fn(),
+			start: () => resumed.resolve(),
+		};
+		const presenter = new ExtensionUiController({
+			ui,
+			editor: { getText: () => "" },
+		} as unknown as InteractiveModeContext);
+		vi.spyOn(externalEditor, "getEditorCommand").mockReturnValue("configured-editor");
+		const edit = vi.spyOn(externalEditor, "openInEditor").mockResolvedValue("Please review the edited change.");
 		const renderedFailure = Promise.withResolvers<void>();
 		let submitted = false;
 		const hub = new AgentHubOverlayComponent({
@@ -241,13 +259,28 @@ describe("Agent hub Enter activation", () => {
 					renderedFailure.resolve();
 			},
 			focusAgent,
-			ui: { showOverlay, setFocus, requestRender: () => {}, requestComponentRender: () => {} } as never,
+			showPeerEditor: (title, signal) =>
+				presenter.showHookEditor(
+					title,
+					undefined,
+					{ signal },
+					{
+						promptStyle: true,
+						overlay: true,
+						restoreOverlayFocus: true,
+					},
+				),
+			ui: ui as never,
 		});
 		try {
 			await hub.initialRowsReady;
 			hub.handleInput("\r");
+			await mounted.promise;
 			expect(composer).toBeInstanceOf(HookEditorComponent);
 			composer!.pasteText("Please review the change.");
+			composer!.handleInput("\x07");
+			await resumed.promise;
+			expect(edit).toHaveBeenCalledWith("configured-editor", "Please review the change.");
 			submitted = true;
 			composer!.handleInput("\r");
 			await renderedFailure.promise;
@@ -255,7 +288,7 @@ describe("Agent hub Enter activation", () => {
 				{
 					from: "acp:active-conversation",
 					to: "project-deadbeef",
-					body: "Please review the change.",
+					body: "Please review the edited change.",
 				},
 				{ suppressRelay: false },
 			);
@@ -264,6 +297,19 @@ describe("Agent hub Enter activation", () => {
 			expect(focusAgent).not.toHaveBeenCalled();
 			expect(onDone).not.toHaveBeenCalled();
 			expect(agents.list()).toEqual([]);
+			mounted = Promise.withResolvers<void>();
+			hub.handleInput("\r");
+			await mounted.promise;
+			const stale = composer!;
+			mounted = Promise.withResolvers<void>();
+			hub.handleInput("\r");
+			await mounted.promise;
+			stale.handleInput("\r");
+			hub.dispose();
+			composer!.pasteText("Must not send after disposal.");
+			composer!.handleInput("\r");
+			await Promise.resolve();
+			expect(send).toHaveBeenCalledTimes(1);
 		} finally {
 			hub.dispose();
 		}

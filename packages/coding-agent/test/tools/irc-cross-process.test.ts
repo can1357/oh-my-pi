@@ -1,11 +1,16 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
-import { Agent } from "@oh-my-pi/pi-agent-core";
+import {
+	Agent,
+	ASIDE_MESSAGE_COMMIT,
+	ASIDE_MESSAGE_DISCARD,
+	type CommittableAsideMessage,
+} from "@oh-my-pi/pi-agent-core";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import type { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
 import { InternalUrlRouter } from "@oh-my-pi/pi-coding-agent/internal-urls";
-import { AgentProtocolHandler } from "@oh-my-pi/pi-coding-agent/internal-urls/agent-protocol";
 import { resetRegisteredArtifactDirsForTests } from "@oh-my-pi/pi-coding-agent/internal-urls/registry-helpers";
 import { IrcBus, type IrcRemoteRouter } from "@oh-my-pi/pi-coding-agent/irc/bus";
 import { isIrcEnabled } from "@oh-my-pi/pi-coding-agent/irc/messaging";
@@ -15,6 +20,7 @@ import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import type { CustomMessage } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
+import { IrcBridge } from "@oh-my-pi/pi-coding-agent/session/irc-bridge";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import type { IrcDeliveryReceipt, IrcMessage } from "@oh-my-pi/pi-tui/tools/irc";
@@ -78,42 +84,6 @@ afterEach(async () => {
 });
 
 describe("cross-process IRC integration", () => {
-	it("delegates registry misses but preserves unknown-agent errors without a matching router", async () => {
-		const bus = IrcBus.global();
-		const message = { from: "Main", to: address, body: "status?" };
-		const failure: IrcDeliveryReceipt = {
-			to: address,
-			outcome: "failed",
-			error: `Unknown agent "${address}" — check the subagent roster or read history:// for known peers.`,
-		};
-		expect(await bus.send(message)).toEqual(failure);
-		const router = remoteRouter();
-		const send = vi.spyOn(router, "send");
-		bus.setRemoteRouter(router);
-		expect(await bus.send(message)).toEqual({ to: address, outcome: "woken" });
-		expect(send.mock.calls[0]?.[0]).toMatchObject(message);
-		expect(bus.sentSince("Main", address, 0)).toBe(true);
-		vi.spyOn(router, "handles").mockReturnValue(false);
-		expect(await bus.send(message)).toEqual(failure);
-		bus.setRemoteRouter(null);
-		expect(await bus.send(message)).toEqual(failure);
-	});
-
-	it("delivers to a local registered id even when the remote router handles it", async () => {
-		const session = createSession();
-		AgentRegistry.global().register({ id: address, displayName: "local", kind: "main", session });
-		const delivered = vi.spyOn(session, "deliverIrcMessage").mockResolvedValue("injected");
-		const router = remoteRouter();
-		const send = vi.spyOn(router, "send");
-		IrcBus.global().setRemoteRouter(router);
-		expect(await IrcBus.global().send({ from: "Main", to: address, body: "local first" })).toEqual({
-			to: address,
-			outcome: "injected",
-		});
-		expect(delivered.mock.calls[0]?.[0].body).toBe("local first");
-		expect(send).not.toHaveBeenCalled();
-	});
-
 	it("appends and persists an idle noWake message without starting a turn", async () => {
 		const session = createSession();
 		const prompt = vi.spyOn(session.agent, "prompt").mockResolvedValue(undefined);
@@ -179,6 +149,7 @@ describe("cross-process IRC integration", () => {
 				for (let index = 0; index < count; index++) {
 					expect((await bus.send({ from: address, to: "Main", body, remote: true })).outcome).toBe("injected");
 				}
+				const waiting = bus.wait("Main", {}, 0, undefined, { drainPending: false });
 				expect(await bus.send({ from: address, to: "Main", body: overflow, remote: true })).toEqual({
 					to: "Main",
 					outcome: "failed",
@@ -187,6 +158,7 @@ describe("cross-process IRC integration", () => {
 				expect(bus.unreadCount("Main")).toBe(0);
 				// The remote cap must not alter existing local aside semantics.
 				expect((await bus.send({ from: "Local", to: "Main", body: "local" })).outcome).toBe("injected");
+				expect((await waiting)?.body).toBe("local");
 				session.drainPendingIrcInboxMessages("Main", { limit: 1 });
 				expect((await bus.send({ from: address, to: "Main", body: overflow, remote: true })).outcome).toBe(
 					"injected",
@@ -197,9 +169,10 @@ describe("cross-process IRC integration", () => {
 		},
 	);
 
-	it("rejects remote delivery while newSession is transitioning without emitting or queueing it", async () => {
+	it("rejects remote delivery during newSession before consuming a pending waiter", async () => {
 		const session = createSession();
 		AgentRegistry.global().register({ id: "Main", displayName: "main", kind: "main", session });
+		const waiting = IrcBus.global().wait("Main", {}, 0, undefined, { drainPending: false });
 		const arrivals: string[] = [];
 		session.subscribe(event => {
 			if (event.type === "irc_message") arrivals.push(event.message.customType);
@@ -217,72 +190,172 @@ describe("cross-process IRC integration", () => {
 			expect(IrcBus.global().unreadCount("Main")).toBe(0);
 			expect(arrivals).toEqual([]);
 			expect(session.drainPendingIrcInboxMessages("Main")).toEqual([]);
+			expect((await IrcBus.global().send({ from: "Local", to: "Main", body: "local" })).outcome).toBe("injected");
+			expect((await waiting)?.body).toBe("local");
 		} finally {
 			await transition;
 		}
 	});
 
-	it("keeps a remote wake marked across automatic retry until terminal settlement", async () => {
-		const model = getBundledModel("anthropic", "claude-sonnet-4-5")!;
-		const mock = createMockModel({
-			responses: [{ stopReason: "error", errorMessage: "503 Service Unavailable" }, { content: ["reply to peer"] }],
-		});
-		const authStorage = await AuthStorage.create(":memory:");
-		authStorage.keys.setRuntime("anthropic", "test-key");
-		const session = new AgentSession({
-			agent: new Agent({
-				getApiKey: () => "test-key",
-				initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] },
-				streamFn: mock.stream,
-			}),
-			sessionManager: SessionManager.inMemory("/tmp"),
-			settings: Settings.isolated({
-				"compaction.enabled": false,
-				"retry.baseDelayMs": 5,
-				"retry.maxRetries": 1,
-				"retry.modelFallback": false,
-			}),
-			modelRegistry: new ModelRegistry(authStorage),
-		});
-		sessions.push(session);
-		const duringRequests: boolean[] = [];
-		const stream = session.agent.streamFn;
-		vi.spyOn(session.agent, "streamFn").mockImplementation((streamModel, context, options) => {
-			duringRequests.push(session.isRemoteWakeTurn());
-			return stream(streamModel, context, options);
-		});
-		const settlements: Array<{ terminal: boolean | undefined; remote: boolean }> = [];
-		const retryOwnership: boolean[] = [];
-		session.subscribe(event => {
-			if (event.type === "auto_retry_start") retryOwnership.push(session.isRemoteWakeTurn());
-			if (event.type === "agent_end") {
-				settlements.push({ terminal: event.isTerminal, remote: session.isRemoteWakeTurn() });
+	it.each(["retry", "session_stop"] as const)(
+		"keeps a remote wake marked across %s until terminal settlement",
+		async continuation => {
+			const model = getBundledModel("anthropic", "claude-sonnet-4-5")!;
+			const mock = createMockModel({
+				responses: [
+					continuation === "retry"
+						? { stopReason: "error", errorMessage: "503 Service Unavailable" }
+						: { content: ["first settle"] },
+					{ content: ["reply to peer"] },
+					{ content: ["fresh user turn"] },
+				],
+			});
+			const authStorage = await AuthStorage.create(":memory:");
+			authStorage.keys.setRuntime("anthropic", "test-key");
+			let sessionStopCalls = 0;
+			const extensionRunner =
+				continuation === "session_stop"
+					? ({
+							emit: async () => {},
+							emitBeforeAgentStart: async () => undefined,
+							hasHandlers: (eventType: string) => eventType === "session_stop",
+							emitSessionStop: async () =>
+								++sessionStopCalls === 1
+									? { continue: true, additionalContext: "hook says continue" }
+									: undefined,
+						} as unknown as ExtensionRunner)
+					: undefined;
+			const session = new AgentSession({
+				agent: new Agent({
+					getApiKey: () => "test-key",
+					initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] },
+					streamFn: mock.stream,
+				}),
+				sessionManager: SessionManager.inMemory("/tmp"),
+				settings: Settings.isolated({
+					"compaction.enabled": false,
+					"retry.baseDelayMs": 5,
+					"retry.maxRetries": 1,
+					"retry.modelFallback": false,
+				}),
+				modelRegistry: new ModelRegistry(authStorage),
+				extensionRunner,
+			});
+			sessions.push(session);
+			const duringRequests: boolean[] = [];
+			const stream = session.agent.streamFn;
+			vi.spyOn(session.agent, "streamFn").mockImplementation((streamModel, context, options) => {
+				duringRequests.push(session.isRemoteWakeTurn());
+				return stream(streamModel, context, options);
+			});
+			const settlements: Array<{ terminal: boolean | undefined; remote: boolean }> = [];
+			const retryOwnership: boolean[] = [];
+			session.subscribe(event => {
+				if (event.type === "auto_retry_start") retryOwnership.push(session.isRemoteWakeTurn());
+				if (event.type === "agent_end") {
+					settlements.push({ terminal: event.isTerminal, remote: session.isRemoteWakeTurn() });
+				}
+			});
+			const { promise: observed, resolve: observe } = Promise.withResolvers<void>();
+			session.setIrcWakeTurnObserver(() => () => observe());
+			try {
+				await session.deliverIrcMessage({
+					id: "remote-wake",
+					from: address,
+					to: "Main",
+					body: "wake",
+					ts: 1,
+					remote: true,
+				});
+				await observed;
+				expect(duringRequests).toEqual([true, true]);
+				expect(retryOwnership).toEqual(continuation === "retry" ? [true] : []);
+				expect(settlements.at(-1)).toEqual({ terminal: true, remote: true });
+				expect(session.isRemoteWakeTurn()).toBe(false);
+				await session.prompt("fresh user prompt");
+				expect(duringRequests).toEqual([true, true, false]);
+			} finally {
+				await session.dispose();
+				sessions.splice(sessions.indexOf(session), 1);
+				authStorage.close();
 			}
+		},
+	);
+
+	it("emits a terminal end when only a noWake aside strands after the final poll", async () => {
+		const session = createSession();
+		const ends: Array<boolean | undefined> = [];
+		session.subscribe(event => {
+			if (event.type === "agent_end") ends.push(event.isTerminal);
 		});
-		const { promise: observed, resolve: observe } = Promise.withResolvers<void>();
-		session.setIrcWakeTurnObserver(() => () => observe());
-		try {
+		const finished = Promise.withResolvers<void>();
+		session.setIrcWakeTurnObserver(() => () => finished.resolve());
+		const prompt = vi.spyOn(session.agent, "prompt").mockImplementation(async () => {
+			session.agent.emitExternalEvent({ type: "agent_start" });
+			// The final poll is over, but the wake's in-flight bracket still owns delivery.
 			await session.deliverIrcMessage({
-				id: "remote-wake",
+				id: "late-relay",
 				from: address,
 				to: "Main",
-				body: "wake",
-				ts: 1,
+				body: "late reply",
+				ts: 2,
 				remote: true,
+				noWake: true,
 			});
-			await observed;
-			expect(duringRequests).toEqual([true, true]);
-			// Nonterminal ends are buffered inside the wake's in-flight bracket
-			// and can be replaced by the retry's terminal frame before subscribe
-			// sees them. The retry event and second provider call prove recovery.
-			expect(retryOwnership).toEqual([true]);
-			expect(settlements.at(-1)).toEqual({ terminal: true, remote: true });
-			expect(session.isRemoteWakeTurn()).toBe(false);
-		} finally {
-			await session.dispose();
-			sessions.splice(sessions.indexOf(session), 1);
-			authStorage.close();
-		}
+			session.agent.emitExternalEvent({ type: "agent_end", messages: [] });
+		});
+		await session.deliverIrcMessage({
+			id: "wake",
+			from: address,
+			to: "Main",
+			body: "wake",
+			ts: 1,
+			remote: true,
+		});
+		await finished.promise;
+		expect(prompt).toHaveBeenCalledTimes(1);
+		expect(ends).toEqual([true]);
+		expect(session.isRemoteWakeTurn()).toBe(false);
+		expect(session.messages).toContainEqual(
+			expect.objectContaining({
+				customType: "irc:incoming",
+				details: expect.objectContaining({ id: "late-relay" }),
+			}),
+		);
+	});
+
+	it("holds drained remote capacity until commit or discard, including rollback and repeated settlement", async () => {
+		const session = createSession();
+		const bridge = new IrcBridge({
+			agent: session.agent,
+			sessionManager: session.sessionManager,
+			isDisposed: () => false,
+			isStreaming: () => true,
+			isIrcAdmissionBlocked: () => false,
+			hasIrcWakeTurnObserver: () => false,
+			planModeEnabled: () => false,
+			emitSessionEvent: async () => {},
+			wakeForIrc: () => {},
+		});
+		const message: IrcMessage = { id: "pending", from: address, to: "Main", body: "x", ts: 1, remote: true };
+		for (let index = 0; index < 100; index++) await bridge.deliver({ ...message, id: `${index}` });
+		const records = bridge.drainPending() as CommittableAsideMessage[];
+		await expect(bridge.deliver(message)).rejects.toThrow("too many pending peer messages");
+		records[0]![ASIDE_MESSAGE_COMMIT]?.();
+		records[0]![ASIDE_MESSAGE_COMMIT]?.();
+		records[0]![ASIDE_MESSAGE_DISCARD]?.(new Error("already committed"));
+		await bridge.deliver(message);
+		await expect(bridge.deliver(message)).rejects.toThrow("too many pending peer messages");
+		records[1]![ASIDE_MESSAGE_DISCARD]?.(new Error("loop ended"));
+		records[1]![ASIDE_MESSAGE_DISCARD]?.(new Error("already discarded"));
+		await bridge.deliver(message);
+		await expect(bridge.deliver(message)).rejects.toThrow("too many pending peer messages");
+		const snapshot = bridge.clearPending();
+		bridge.restorePending(snapshot);
+		await expect(bridge.deliver(message)).rejects.toThrow("too many pending peer messages");
+		(snapshot.interrupts[0] as CommittableAsideMessage)[ASIDE_MESSAGE_COMMIT]?.();
+		await expect(bridge.deliver(message)).resolves.toBe("injected");
+		await expect(bridge.deliver(message)).rejects.toThrow("too many pending peer messages");
 	});
 
 	it("does not mark a local wake as remote", async () => {
@@ -348,7 +421,7 @@ describe("cross-process IRC integration", () => {
 		]);
 	});
 
-	it("lists enabled peers, completes their addresses, and refuses remote transcript reads", async () => {
+	it("includes peers in the history index only while enabled", async () => {
 		const mailbox = MailboxService.global();
 		const peer: MailboxPeer = {
 			address: conversationAddress,
@@ -367,24 +440,16 @@ describe("cross-process IRC integration", () => {
 			alias: null,
 		});
 		const list = vi.spyOn(mailbox, "listPeers").mockResolvedValue([peer]);
-		vi.spyOn(mailbox, "handles").mockImplementation(to => to === conversationAddress);
-		vi.spyOn(mailbox, "resolvePeer").mockResolvedValue({ status: "found", peer });
 		const session = createSession();
 		AgentRegistry.global().register({ id: "Main", displayName: "main", kind: "main", session });
 		const context = { session: toolSession() };
 		const index = await InternalUrlRouter.instance().resolve("history://", context);
 		expect(index.content).toContain("## Peers (other omp processes)");
 		expect(index.content).toContain(`message with write agent://${conversationAddress}`);
-		expect((await new AgentProtocolHandler().complete()).map(item => item.value)).toContain(conversationAddress);
-		const remote = await InternalUrlRouter.instance().resolve(`history://${conversationAddress}`, context);
-		expect(remote.content).toBe(
-			`"${conversationAddress}" is an omp peer in another process; its transcript is not readable. Message it with write agent://${conversationAddress}.`,
-		);
 		list.mockClear();
 		vi.spyOn(mailbox, "state").mockReturnValue({ enabled: false });
 		const disabled = await InternalUrlRouter.instance().resolve("history://", context);
 		expect(disabled.content).not.toContain("## Peers (other omp processes)");
-		expect((await new AgentProtocolHandler().complete()).map(item => item.value)).not.toContain(conversationAddress);
 		expect(list).not.toHaveBeenCalled();
 	});
 });

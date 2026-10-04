@@ -547,10 +547,6 @@ function buildUsageLimit(args: {
 	};
 }
 
-function slugifyClaudeLimitDisplayName(displayName: string): string {
-	return slugify(displayName);
-}
-
 /**
  * Scoped weekly rows are per-model-family counters, not account-wide windows.
  * They deliberately leave `scope.shared` unset so credential-wide exhaustion
@@ -562,7 +558,7 @@ function buildScopedWeeklyUsageLimits(entries: readonly ParsedApiLimitEntry[]): 
 	const limits: UsageLimit[] = [];
 	for (const entry of entries) {
 		if (entry.kind !== "weekly_scoped" || !entry.displayName) continue;
-		const slug = slugifyClaudeLimitDisplayName(entry.displayName);
+		const slug = slugify(entry.displayName);
 		if (!slug || seenSlugs.has(slug)) continue;
 		seenSlugs.add(slug);
 		const limit = buildUsageLimit({

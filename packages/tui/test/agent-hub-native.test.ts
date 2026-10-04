@@ -4,7 +4,6 @@ import type { TspKind, TspPickerProps } from "@oh-my-pi/pi-wire";
 import type { DescribeContext, NativeChild, NativeNode } from "../src/native/node";
 import { type AgentHubDeps, AgentHubOverlayComponent } from "../src/overlays/agent-hub";
 import type { AgentRecordLike } from "../src/overlays/agent-hub-types";
-import { HookEditorComponent } from "../src/overlays/hook-editor";
 import { SessionObserverRegistry } from "../src/overlays/session-observer-registry";
 import { initTheme } from "../src/theme";
 
@@ -146,7 +145,7 @@ test("the By parent action and the t key both switch the picker to the parent tr
 test("peer rows offer Send, reject forged local actions, and never pretend to be spawned by Main", async () => {
 	const focused: string[] = [];
 	const sendPeer = vi.fn(async () => "Delivered.");
-	const showOverlay = vi.fn((_component: unknown, _options: unknown) => ({ hide: () => {} }));
+	const showPeerEditor = vi.fn(async () => undefined);
 	const lifecycle = vi.fn(() => {
 		throw new Error("peer must not use local lifecycle");
 	});
@@ -159,9 +158,9 @@ test("peer rows offer Send, reject forged local actions, and never pretend to be
 	const hub = createHub([], focused, {
 		listPeers: async () => [peer],
 		sendPeer,
+		showPeerEditor,
 		lifecycle,
 		remote,
-		ui: { showOverlay, setFocus: () => {}, requestRender: () => {}, requestComponentRender: () => {} } as never,
 	});
 	try {
 		await hub.initialRowsReady;
@@ -175,7 +174,7 @@ test("peer rows offer Send, reject forged local actions, and never pretend to be
 		hub.openChat(peer.id);
 		hub.handleInput("r");
 		hub.handleInput("x");
-		expect(showOverlay).not.toHaveBeenCalled();
+		expect(showPeerEditor).not.toHaveBeenCalled();
 		expect(lifecycle).not.toHaveBeenCalled();
 		expect(focused).toEqual([]);
 		expect(remote.chat).not.toHaveBeenCalled();
@@ -191,9 +190,8 @@ test("peer rows offer Send, reject forged local actions, and never pretend to be
 		expect(rendered).not.toContain("only parked agents can be revived");
 		expect(rendered).toContain(":send");
 		hub.handleNativeEvent({ type: "action", key: "", act: "send", mods: [] });
-		const composer = showOverlay.mock.calls[0]?.[0];
-		expect(composer).toBeInstanceOf(HookEditorComponent);
-		(composer as HookEditorComponent).handleInput("\x1b");
+		await Promise.resolve();
+		expect(showPeerEditor).toHaveBeenCalledWith("Message reviewer", expect.any(AbortSignal));
 		expect(sendPeer).not.toHaveBeenCalled();
 	} finally {
 		hub.dispose();

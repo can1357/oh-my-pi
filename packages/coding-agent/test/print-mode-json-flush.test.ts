@@ -93,7 +93,7 @@ describe("print-mode JSON flush (#7635)", () => {
 		vi.restoreAllMocks();
 	});
 
-	it("blocks exit until the final agent_end write drains, then delivers it in full", async () => {
+	it("delivers publication-time peer messages and waits for the final agent_end write to drain", async () => {
 		const writes: string[] = [];
 		let releaseAgentEnd: (() => void) | undefined;
 		const { promise: agentEndWriteIssued, resolve: markAgentEndWriteIssued } = Promise.withResolvers<void>();
@@ -117,7 +117,25 @@ describe("print-mode JSON flush (#7635)", () => {
 		const payload = "x".repeat(1_500_000);
 		const harness = createFlushHarness();
 
-		const run = runPrintMode(harness.session, { mode: "json", initialMessage: "hello" });
+		const peerEvent: AgentSessionEvent = {
+			type: "message_end",
+			message: {
+				role: "custom",
+				customType: "irc:incoming",
+				content: "peer arrived at publication",
+				display: true,
+				attribution: "agent",
+				timestamp: Date.now(),
+			},
+		};
+		const run = runPrintMode(harness.session, {
+			mode: "json",
+			initialMessage: "hello",
+			bindMailboxTarget: () => {
+				harness.emit(peerEvent);
+				return () => {};
+			},
+		});
 		let settled = false;
 		void run.then(() => {
 			settled = true;
@@ -144,6 +162,7 @@ describe("print-mode JSON flush (#7635)", () => {
 
 		expect(settled).toBe(true);
 		expect(harness.disposed()).toBe(true);
+		expect(writes.map(line => JSON.parse(line))).toContainEqual(peerEvent);
 
 		const agentEndLine = writes.find(line => line.includes('"type":"agent_end"'));
 		expect(agentEndLine).toBeDefined();

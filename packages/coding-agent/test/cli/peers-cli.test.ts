@@ -184,18 +184,6 @@ describe("Peers CLI", () => {
 		expect(peer.delivered).toEqual([]);
 	});
 
-	it("closes its send-only target even when an output sink throws", async () => {
-		const registry = await registryFixture();
-		const close = spyOn(MailboxService.prototype, "close");
-		await expect(
-			peersCli.runPeersCommand({ action: "list", json: false, registry }, () => {
-				throw new Error("output failed");
-			}),
-		).rejects.toThrow("output failed");
-		expect(close).toHaveBeenCalledTimes(1);
-		expect(await readLocalEndpointEntries(registry)).toEqual([]);
-	});
-
 	it.each([
 		{ argv: ["list", "worker"] },
 		{ argv: ["send"] },

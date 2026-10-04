@@ -2253,6 +2253,18 @@ export class SelectorController {
 			expandKeys: this.ctx.keybindings.getKeys("app.tools.expand"),
 			initialSection: options?.initialSection,
 			onDone: done,
+			showPeerEditor: (title, signal) =>
+				this.ctx.showHookEditor(
+					title,
+					undefined,
+					{ signal },
+					{
+						promptStyle: true,
+						overlay: true,
+						restoreOverlayFocus: true,
+						overlayOptions: { width: "90%", margin: 1 },
+					},
+				),
 			requestRender: () => this.ctx.ui.requestRender(),
 			remote: this.ctx.collabGuest?.hubRemote,
 			ui: this.ctx.ui,

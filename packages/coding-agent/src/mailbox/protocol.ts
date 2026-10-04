@@ -1,4 +1,5 @@
 import * as path from "node:path";
+import { type } from "@oh-my-pi/omptype";
 import { getBaseConfigRoot, slugify } from "@oh-my-pi/pi-utils";
 import type { LocalEndpointRegistry } from "../ipc/local-endpoint-registry";
 import { sanitizeAgentId } from "../task/name-generator";
@@ -41,22 +42,29 @@ export function normalizePeerAlias(value: string): string | null {
 	return alias && !MAILBOX_ADDRESS_PATTERN.test(alias) ? alias : null;
 }
 
-export interface MailboxTargetSnapshot {
-	conversation: string | null;
-	title: string | null;
-	busy: boolean;
-	alias: string | null;
+const mailboxTargetSnapshotSchema = type({
+	conversation: type("string")
+		.matching(/^[0-9a-f]{8}$/)
+		.or("null"),
+	title: "string | null",
+	busy: "boolean",
+	alias: type("string")
+		.narrow(alias => normalizePeerAlias(alias) === alias)
+		.or("null"),
 	/** Conversation workspace; null → use the process cwd. */
-	cwd: string | null;
-}
+	cwd: "string | null",
+});
 
-export interface MailboxSnapshot {
-	address: string;
-	id: string;
-	pid: number;
-	cwd: string;
-	startedAt: number;
-	targets: MailboxTargetSnapshot[];
-}
+export type MailboxTargetSnapshot = typeof mailboxTargetSnapshotSchema.infer;
 
-export type MailboxDeliverError = "invalid_sender" | "unknown_target" | "not_receiving" | "body_too_large";
+export const mailboxSnapshotSchema = type({
+	address: type("string")
+		.matching(MAILBOX_ADDRESS_PATTERN)
+		.narrow(address => !address.includes(".")),
+	id: "string",
+	pid: "number",
+	cwd: "string",
+	targets: mailboxTargetSnapshotSchema.array(),
+});
+
+export type MailboxSnapshot = typeof mailboxSnapshotSchema.infer;

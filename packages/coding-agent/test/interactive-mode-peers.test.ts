@@ -3,13 +3,12 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { MailboxService, type MailboxTargetState } from "@oh-my-pi/pi-coding-agent/mailbox/service";
 import { InteractiveMode } from "@oh-my-pi/pi-coding-agent/modes/interactive-mode";
 import { cfgIrcCrossProcess } from "@oh-my-pi/pi-coding-agent/irc/settings";
-import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import { UiHelpers } from "@oh-my-pi/pi-coding-agent/modes/utils/ui-helpers";
 import { executeAcpBuiltinSlashCommand } from "@oh-my-pi/pi-coding-agent/slash-commands/acp-builtins";
 import type { SlashCommandRuntime } from "@oh-my-pi/pi-coding-agent/slash-commands/types";
-import { type Component, Container } from "@oh-my-pi/pi-tui";
 import { createStartupStatusLine } from "@oh-my-pi/pi-tui/status-line/startup";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
+import { createInteractiveModeContext } from "./helpers/interactive-mode-context";
 
 beforeAll(async () => {
 	await initTheme();
@@ -22,7 +21,6 @@ afterEach(() => {
 describe("interactive peers notices", () => {
 	it("shows mailbox state, updates the footer and merges the command's duplicate status", async () => {
 		const settings = Settings.isolated();
-		const chatContainer = new Container();
 		const statusLine = createStartupStatusLine({
 			settings: { preset: "default" },
 			gitEnabled: false,
@@ -33,14 +31,8 @@ describe("interactive peers notices", () => {
 			compactionBoundaries: null,
 		});
 		statusLine.setComposerStyle({ statusAttachment: "none", bottomBar: "full", bottomBarGap: false });
-		const ctx = {
-			chatContainer,
-			statusLine,
-			ui: { requestRender: vi.fn() },
-			present: (content: Component | readonly Component[]) => {
-				for (const item of Array.isArray(content) ? content : [content]) chatContainer.addChild(item);
-			},
-		} as unknown as InteractiveModeContext;
+		const ctx = createInteractiveModeContext({ settings, statusLine });
+		const { chatContainer } = ctx;
 		const helpers = new UiHelpers(ctx);
 		ctx.showStatus = helpers.showStatus.bind(helpers);
 		const state = (): MailboxTargetState =>

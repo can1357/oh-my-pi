@@ -96,10 +96,6 @@ function buildPercentAmount(usagePercent: number): UsageAmount {
 	};
 }
 
-function slugifyProduct(product: string): string {
-	return slugify(product);
-}
-
 function buildPeriodWindow(period: XaiBillingPeriod): UsageWindow {
 	return {
 		id: "1w",
@@ -259,7 +255,7 @@ function buildLimits(config: XaiBillingConfig, accountId: string | undefined): U
 
 		for (const item of config.productUsage) {
 			const amount = buildPercentAmount(item.usagePercent);
-			const slug = slugifyProduct(item.product);
+			const slug = slugify(item.product);
 			if (!slug) continue;
 			limits.push({
 				id: `${PROVIDER_ID}:product:${slug}:1w`,

@@ -7,13 +7,10 @@ import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { runPrintMode } from "@oh-my-pi/pi-coding-agent/modes/print-mode";
-import { MCPManager } from "@oh-my-pi/pi-coding-agent/mcp/manager";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
-import { createTools, type ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { Snowflake } from "@oh-my-pi/pi-utils";
-import * as utils from "@oh-my-pi/pi-utils";
 
 // Ported from #14071: an inbound IRC wake can own the session before print
 // dispatches. The printed response must belong to the prompt, not that wake.
@@ -46,14 +43,6 @@ describe("print mode with an inbound IRC wake in flight", () => {
 		releaseWakeTurn = wakeGate.resolve;
 		wakeTurnStarted = wakeStarted.promise;
 
-		const toolSession: ToolSession = {
-			cwd: tempDir,
-			hasUI: false,
-			getSessionFile: () => null,
-			getSessionSpawns: () => "*",
-			settings: Settings.isolated(),
-		};
-		const tools = await createTools(toolSession);
 		const model = createMockModel({
 			id: "mock-irc-wake",
 			handler: async () => {
@@ -80,7 +69,7 @@ describe("print mode with an inbound IRC wake in flight", () => {
 		});
 		const agent = new Agent({
 			getApiKey: () => "mock-key",
-			initialState: { model, systemPrompt: ["Test"], tools },
+			initialState: { model, systemPrompt: ["Test"], tools: [] },
 			streamFn: (m, context, options) => model.stream(m, context, options),
 		});
 		authStorage = await AuthStorage.create(path.join(tempDir, "auth.db"));
@@ -178,31 +167,6 @@ describe("print mode with an inbound IRC wake in flight", () => {
 		expect(await runPrintMode(session, { mode: "text", initialMessage: "Reply with exactly: OK" })).toBe(0);
 		expect(modelCalls).toEqual(["prompt"]);
 		expect(stdoutOutput.join("")).toContain("OK");
-	});
-
-	it("does not publish a receiver or dispatch when strict MCP readiness fails", async () => {
-		const mcpManager = new MCPManager(tempDir);
-		vi.spyOn(mcpManager, "waitForStartup").mockResolvedValue({
-			connected: [],
-			pending: [],
-			failed: [{ name: "broken", error: "unavailable" }],
-		});
-		vi.spyOn(mcpManager, "getTools").mockReturnValue([]);
-		const readFlag = utils.$flag;
-		vi.spyOn(utils, "$flag").mockImplementation((name, fallback) =>
-			name === "OMP_MCP_REQUIRE_READY" ? true : readFlag(name, fallback),
-		);
-		const bindMailboxTarget = vi.fn(() => () => {});
-		expect(
-			await runPrintMode(session, {
-				mode: "text",
-				initialMessage: "use MCP tools",
-				mcpManager,
-				bindMailboxTarget,
-			}),
-		).toBe(1);
-		expect(bindMailboxTarget).not.toHaveBeenCalled();
-		expect(modelCalls).toEqual([]);
 	});
 
 	it("disposes and withdraws receiving when dispatch throws, preserving the original error", async () => {

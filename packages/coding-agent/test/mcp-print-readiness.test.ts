@@ -1,5 +1,5 @@
 import * as path from "node:path";
-import { afterEach, describe, expect, it, spyOn } from "bun:test";
+import { afterEach, describe, expect, it, spyOn, vi } from "bun:test";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { callTool } from "@oh-my-pi/pi-coding-agent/mcp/client";
 import { MCPManager } from "@oh-my-pi/pi-coding-agent/mcp/manager";
@@ -88,7 +88,7 @@ function printSession(manager: MCPManager, refreshGate?: Promise<void>, onRefres
 }
 
 describe("headless MCP readiness", () => {
-	it("offers all three tools to the first print prompt, independent of a slow tools/call", async () => {
+	it("waits for all three tools before publication and the first print prompt, independent of a slow tools/call", async () => {
 		const { manager } = await startServers();
 		const slowConnection = manager.getConnection("slowcall");
 		if (!slowConnection) throw new Error("slowcall did not complete its handshake");
@@ -96,14 +96,25 @@ describe("headless MCP readiness", () => {
 		const refreshStarted = Promise.withResolvers<void>();
 		const refreshGate = Promise.withResolvers<void>();
 		const capture = printSession(manager, refreshGate.promise, refreshStarted.resolve);
+		const bindMailboxTarget = vi.fn(() => {
+			expect(capture.offered()).toEqual(expectedTools);
+			return () => {};
+		});
 		Bun.env.OMP_MCP_TIMEOUT_MS = "2500";
 		delete Bun.env.OMP_MCP_REQUIRE_READY;
-		const run = runPrintMode(capture.session, { mode: "text", initialMessage: "use tools", mcpManager: manager });
+		const run = runPrintMode(capture.session, {
+			mode: "text",
+			initialMessage: "use tools",
+			mcpManager: manager,
+			bindMailboxTarget,
+		});
 		await refreshStarted.promise;
 		expect(capture.prompted()).toBeUndefined();
+		expect(bindMailboxTarget).not.toHaveBeenCalled();
 		refreshGate.resolve();
 		const code = await run;
 		expect(code).toBe(0);
+		expect(bindMailboxTarget).toHaveBeenCalledTimes(1);
 		expect(capture.prompted()).toEqual(expectedTools);
 		expect(await slowCall).toMatchObject({ content: [{ text: "MARKER_OK::slowcall" }] });
 		expect(capture.disposed()).toBe(true);
@@ -158,6 +169,7 @@ describe("headless MCP readiness", () => {
 		managers.push(manager);
 		await manager.connectServers({ broken: { type: "stdio", command: "" } }, {});
 		const capture = printSession(manager);
+		const bindMailboxTarget = vi.fn(() => () => {});
 		Bun.env.OMP_MCP_REQUIRE_READY = "1";
 		const output: string[] = [];
 		const stderrSpy = spyOn(process.stderr, "write").mockImplementation((chunk: string | Uint8Array) => {
@@ -166,12 +178,18 @@ describe("headless MCP readiness", () => {
 		});
 		try {
 			expect(
-				await runPrintMode(capture.session, { mode: "text", initialMessage: "use tools", mcpManager: manager }),
+				await runPrintMode(capture.session, {
+					mode: "text",
+					initialMessage: "use tools",
+					mcpManager: manager,
+					bindMailboxTarget,
+				}),
 			).toBe(1);
 		} finally {
 			stderrSpy.mockRestore();
 		}
 		expect(capture.prompted()).toBeUndefined();
+		expect(bindMailboxTarget).not.toHaveBeenCalled();
 		expect(output.join("")).toContain('Warning: MCP server "broken" failed to connect:');
 		expect(output.join("")).toContain("Error: MCP servers not ready: broken");
 	}, 2_000);

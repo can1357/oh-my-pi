@@ -1119,6 +1119,18 @@ export class AgentSession implements SettingsScope {
 		this.#resumeStrandedIrcAsides();
 	}
 
+	/** Shared wake eligibility for terminal settlement and stranded-aside routing. */
+	#canWakeForIrc = (record: AgentMessage): boolean => {
+		if (this.#planModeState?.enabled) return false;
+		const incoming = record.role === "custom" && record.customType === "irc:incoming";
+		const noWake =
+			incoming &&
+			record.details !== null &&
+			typeof record.details === "object" &&
+			Reflect.get(record.details, "noWake") === true;
+		return !noWake && (!this.#advisors.autoResumeSuppressed || incoming);
+	};
+
 	/** IRC records that arrive after the loop's final aside poll — or while an abort skipped that
 	 *  poll — land in pending IRC queues with no loop left to drain them; the queued-message drain's
 	 *  gate (agent.hasQueuedMessages()) does not count peer IRC interrupts. Once idle, wake a turn so
@@ -1144,27 +1156,11 @@ export class AgentSession implements SettingsScope {
 		if (this.#canAutoContinueForFollowUp() && this.agent.hasQueuedMessages()) return;
 		// Parked wake records resume alongside ordinary stranded asides; they were
 		// already decided wake-intended at deferral time.
-		const records = [...this.#irc.drainDeferredWakes(), ...this.#irc.drainPending(false)];
-		if (this.#planModeState?.enabled) {
-			// Plan mode: fold stranded IRC asides into context without waking an
-			// autonomous turn. Convergence to ask/resolve stays user-driven.
-			this.#foldStrandedIrcAsidesIntoContext(records);
-			return;
-		}
+		const records = [...this.#irc.drainDeferredWakes(), ...this.#irc.drainPending()];
 		const wake: AgentMessage[] = [];
 		const fold: AgentMessage[] = [];
 		for (const record of records) {
-			const incoming = record.role === "custom" && record.customType === "irc:incoming";
-			const noWake =
-				incoming &&
-				record.details !== null &&
-				typeof record.details === "object" &&
-				Reflect.get(record.details, "noWake") === true;
-			// Relay-hop messages never justify a fresh turn, even after a busy
-			// aside goes stranded. User/extension asides also stay user-driven
-			// while a user interrupt suppresses advisor auto-resume.
-			if (noWake || (this.#advisors.autoResumeSuppressed && !incoming)) fold.push(record);
-			else wake.push(record);
+			(this.#canWakeForIrc(record) ? wake : fold).push(record);
 		}
 		this.#foldStrandedIrcAsidesIntoContext(fold);
 		if (wake.length > 0) this.#wakeForIrc(wake);
@@ -1422,7 +1418,7 @@ export class AgentSession implements SettingsScope {
 			!this.#queuedMessageDrainBlocked &&
 			this.#canAutoContinueForFollowUp() &&
 			this.agent.hasQueuedMessages();
-		const ircContinuation = canDrain && !this.#isDisposed && !this.#planModeState?.enabled && this.#irc.hasPending();
+		const ircContinuation = canDrain && !this.#isDisposed && this.#irc.hasPending(this.#canWakeForIrc);
 		this.#emit(queuedContinuation || ircContinuation ? { ...pending, isTerminal: false } : pending);
 	}
 
@@ -7167,6 +7163,7 @@ export class AgentSession implements SettingsScope {
 
 		let dispatched = false;
 		try {
+			this.#remoteWakeTurn = undefined;
 			dispatched = await this.#promptWithMessage(message, expandedText, {
 				...options,
 				images: normalizedImages,
@@ -7344,6 +7341,7 @@ export class AgentSession implements SettingsScope {
 			outcome.sessionClaimed = true;
 			return true;
 		}
+		this.#remoteWakeTurn = undefined;
 		outcome.sessionClaimed = await this.#promptWithMessage(preparedMessage, textContent, {
 			...options,
 			prependMessages:
@@ -7506,7 +7504,6 @@ export class AgentSession implements SettingsScope {
 		this.#beginInFlight();
 		const generation = this.#promptGeneration;
 		this.#promptSequence++;
-		this.#remoteWakeTurn = undefined;
 		const setupAbort = new AbortController();
 		this.#promptSetupAbortController = setupAbort;
 		try {
@@ -10449,6 +10446,11 @@ export class AgentSession implements SettingsScope {
 	/** Surfaces and consumes pending IRC records before automatic injection. */
 	drainPendingIrcInboxMessages(agentId: string, opts?: { from?: string; limit?: number }): IrcMessage[] {
 		return this.#irc.drainInboxMessages(agentId, opts);
+	}
+
+	/** Checks remote admission before either waiter or session delivery. */
+	getIrcAdmissionError(msg: IrcMessage): string | undefined {
+		return this.#irc.admissionError(msg);
 	}
 
 	/** Delivers an IRC message into this recipient session. */

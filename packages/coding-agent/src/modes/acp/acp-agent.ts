@@ -184,7 +184,6 @@ type ManagedSessionRecord = {
 	// in `#disposeSessionRecord`. Lives independent of any prompt turn.
 	lifetimeUnsubscribe: (() => void) | undefined;
 	mailboxUnbind: (() => void) | undefined;
-	mailboxSessionId: string | undefined;
 	closedError: PromptLifecycleError | undefined;
 	promptEventHandlers: Set<Promise<void>>;
 	extensionUserMessageTasks: Set<Promise<void>>;
@@ -906,8 +905,8 @@ export class AcpAgent implements Agent {
 		return Object.assign(new Error(message), { code: "ACP_SESSION_CLOSED" as const });
 	}
 
-	#trackPromptEvent(record: ManagedSessionRecord, event: AgentSessionEvent): void {
-		const handling = this.#handlePromptEvent(record, event).catch((error: unknown) => {
+	#trackPromptEvent(record: ManagedSessionRecord, event: AgentSessionEvent, autonomous = false): void {
+		const handling = this.#handlePromptEvent(record, event, autonomous).catch((error: unknown) => {
 			logger.warn("ACP prompt event handler failed", { error });
 		});
 		record.promptEventHandlers.add(handling);
@@ -1357,67 +1356,36 @@ export class AcpAgent implements Agent {
 			extensionUserMessageTasks: new Set(),
 			lifetimeUnsubscribe: undefined,
 			mailboxUnbind: undefined,
-			mailboxSessionId: undefined,
 		};
 	}
 
 	#syncMailboxTarget(record: ManagedSessionRecord): void {
 		const session = record.session;
-		if (record.closedError || !record.lifetimeUnsubscribe || record.mailboxSessionId === session.sessionId) return;
+		if (record.closedError || !record.lifetimeUnsubscribe) return;
 		const agentId = session.getAgentId();
 		if (!agentId) return;
-		// Binding can synchronously emit a lifetime event; reserve the identity first.
-		record.mailboxSessionId = session.sessionId;
 		const previousUnbind = record.mailboxUnbind;
 		record.mailboxUnbind = undefined;
 		previousUnbind?.();
-		try {
-			record.mailboxUnbind = MailboxService.global().bindTarget({
-				agentId,
-				conversation: mailboxConversationSuffix(session.sessionId),
-				// Builtins receive this same per-conversation Settings instance.
-				settings: session.settings,
-				receive: true,
-				describe: () => ({
-					title: session.sessionName ?? null,
-					busy: session.isStreaming,
-					cwd: session.sessionManager.getCwd(),
-				}),
-			});
-		} catch (error) {
-			record.mailboxSessionId = undefined;
-			throw error;
-		}
+		record.mailboxUnbind = MailboxService.global().bindTarget({
+			agentId,
+			conversation: mailboxConversationSuffix(session.sessionId),
+			// Builtins receive this same per-conversation Settings instance.
+			settings: session.settings,
+			receive: true,
+			describe: () => ({
+				title: session.sessionName ?? null,
+				busy: session.isStreaming,
+				cwd: session.sessionManager.getCwd(),
+			}),
+		});
 	}
 
 	async #handleLifetimeEvent(record: ManagedSessionRecord, event: AgentSessionEvent): Promise<void> {
 		if (record.closedError) return;
-		this.#syncMailboxTarget(record);
 		if (event.type !== "thinking_level_changed" && event.type !== "model_changed") {
 			if (isPromptTurnInFlight(record.promptTurn)) return;
-			if (event.type === "agent_start") record.autonomousTurnError = { errorTextDelivery: undefined };
-			const turnError = record.autonomousTurnError;
-			const delivery = this.#emitLiveSessionEvent(record, event, turnError).then(async () => {
-				if (event.type === "agent_end") {
-					if (record.closedError) return;
-					await this.#flushMissedFinalAssistantText(record, event);
-					if (record.closedError) return;
-					await this.#flushUnreportedTurnError(record, event, turnError);
-					if (record.closedError) return;
-					await this.#emitEndOfTurnUpdates(record);
-					if (record.closedError) return;
-					record.liveMessageId = undefined;
-					record.liveMessageProgress = undefined;
-				}
-			});
-			record.promptEventHandlers.add(delivery);
-			try {
-				await delivery;
-			} catch (error) {
-				logger.warn("ACP idle event handler failed", { sessionId: record.session.sessionId, error });
-			} finally {
-				record.promptEventHandlers.delete(delivery);
-			}
+			this.#trackPromptEvent(record, event, true);
 			return;
 		}
 		// Config delivery is part of command completion, even though the
@@ -1474,31 +1442,35 @@ export class AcpAgent implements Agent {
 		return storedSession.path;
 	}
 
-	async #handlePromptEvent(record: ManagedSessionRecord, event: AgentSessionEvent): Promise<void> {
-		const promptTurn = record.promptTurn;
-		if (!promptTurn || promptTurn.settled || promptTurn.cancelRequested) {
+	async #handlePromptEvent(
+		record: ManagedSessionRecord,
+		event: AgentSessionEvent,
+		autonomous: boolean,
+	): Promise<void> {
+		const promptTurn = autonomous ? undefined : record.promptTurn;
+		if (!autonomous && (!promptTurn || promptTurn.settled || promptTurn.cancelRequested)) {
 			return;
 		}
-
-		this.#syncMailboxTarget(record);
-		await this.#emitLiveSessionEvent(record, event, promptTurn);
+		if (autonomous && event.type === "agent_start") record.autonomousTurnError = { errorTextDelivery: undefined };
+		await this.#emitLiveSessionEvent(record, event, promptTurn ?? record.autonomousTurnError);
 		if (record.closedError) return;
 
 		if (event.type === "agent_end") {
-			await this.#flushMissedFinalAssistantText(record, event);
-			if (record.closedError) return;
-			await this.#flushUnreportedTurnError(record, event, promptTurn);
-			if (record.closedError) return;
-			await this.#emitEndOfTurnUpdates(record);
-			if (record.closedError) return;
-			await this.#waitForAcpPromptIdle(record);
-			if (record.closedError) return;
+			if (promptTurn) {
+				await this.#waitForAcpPromptIdle(record);
+				if (record.closedError) return;
+			}
 			record.liveMessageId = undefined;
 			record.liveMessageProgress = undefined;
-			this.#finishPrompt(record, {
-				stopReason: this.#resolveStopReason(event, promptTurn.cancelRequested),
-				usage: this.#buildTurnUsage(promptTurn.usageBaseline, record.session.sessionManager.getUsageStatistics()),
-			});
+			if (promptTurn) {
+				this.#finishPrompt(record, {
+					stopReason: this.#resolveStopReason(event, promptTurn.cancelRequested),
+					usage: this.#buildTurnUsage(
+						promptTurn.usageBaseline,
+						record.session.sessionManager.getUsageStatistics(),
+					),
+				});
+			}
 		}
 	}
 
@@ -1551,6 +1523,14 @@ export class AcpAgent implements Agent {
 			record.toolArgsById.delete(event.toolCallId);
 		}
 		this.#clearLiveAssistantMessageAfterEvent(record, event);
+		if (event.type === "agent_end") {
+			if (record.closedError) return;
+			await this.#flushMissedFinalAssistantText(record, event);
+			if (record.closedError) return;
+			await this.#flushUnreportedTurnError(record, event, turnError);
+			if (record.closedError) return;
+			await this.#emitEndOfTurnUpdates(record);
+		}
 	}
 
 	/**
@@ -2199,12 +2179,16 @@ export class AcpAgent implements Agent {
 						logger.warn("Failed to emit ACP available commands update", { error: String(error) });
 					});
 				});
+				const unsubscribeSessionChanges = record.session.registerSessionChangeCallback(() =>
+					this.#syncMailboxTarget(record),
+				);
 				record.lifetimeUnsubscribe = () => {
 					unsubscribeEvents();
 					unsubscribeCommands();
+					unsubscribeSessionChanges();
 				};
+				this.#syncMailboxTarget(record);
 			}
-			this.#syncMailboxTarget(record);
 			void this.#emitBootstrapUpdates(sessionId, record);
 		}, ACP_BOOTSTRAP_RACE_GUARD_MS);
 	}
@@ -2717,7 +2701,6 @@ export class AcpAgent implements Agent {
 				waitForIdle: () => record.session.agent.waitForIdle(),
 				newSession: async options => {
 					const success = await record.session.newSession({ parentSession: options?.parentSession });
-					this.#syncMailboxTarget(record);
 					if (success && options?.setup) {
 						await options.setup(record.session.sessionManager);
 					}
@@ -2725,7 +2708,6 @@ export class AcpAgent implements Agent {
 				},
 				branch: async entryId => {
 					const result = await record.session.branch(entryId);
-					this.#syncMailboxTarget(record);
 					return { cancelled: result.cancelled };
 				},
 				navigateTree: async (targetId, options) => {
@@ -2734,13 +2716,9 @@ export class AcpAgent implements Agent {
 				},
 				switchSession: async sessionPath => {
 					const success = await record.session.switchSession(sessionPath);
-					this.#syncMailboxTarget(record);
 					return { cancelled: !success };
 				},
-				reload: async () => {
-					await record.session.reload();
-					this.#syncMailboxTarget(record);
-				},
+				reload: () => record.session.reload(),
 				compact: instructionsOrOptions => runExtensionCompact(record.session, instructionsOrOptions),
 			},
 			uiContext,

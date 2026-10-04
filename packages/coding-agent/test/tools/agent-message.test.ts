@@ -58,23 +58,32 @@ afterEach(() => {
 });
 
 describe("write agent:// messaging", () => {
-	it("delivers the exact content to a live peer and reports a receipt", async () => {
-		registerPeer("Scout");
-		const tool = new WriteTool(makeSession());
-		expect(tool.approval({ path: "agent://Scout", content: "question" })).toBe("read");
-		const result = await tool.execute("send", { path: "agent://Scout", content: "question\nanswer?" });
-		expect(result.content).toEqual([
-			{ type: "text", text: "Delivered to Scout; added to its context without starting a turn." },
-		]);
-		expect(result.details?.message).toMatchObject({
-			op: "send",
-			to: "Scout",
-			receipts: [{ to: "Scout", outcome: "injected" }],
-		});
-		expect(received.get("Scout")?.map(message => [message.from, message.body])).toEqual([
-			["Main", "question\nanswer?"],
-		]);
-	});
+	it.each(["running", "idle"] as const)(
+		"delivers exact content to a %s peer and reports its receipt",
+		async status => {
+			registerPeer("Scout", status);
+			const tool = new WriteTool(makeSession());
+			expect(tool.approval({ path: "agent://Scout", content: "question" })).toBe("read");
+			const result = await tool.execute("send", { path: "agent://Scout", content: "question\nanswer?" });
+			expect(result.content).toEqual([
+				{
+					type: "text",
+					text:
+						status === "idle"
+							? "Delivered to Scout; it started a turn to handle the message."
+							: "Delivered to Scout; added to its context without starting a turn.",
+				},
+			]);
+			expect(result.details?.message).toMatchObject({
+				op: "send",
+				to: "Scout",
+				receipts: [{ to: "Scout", outcome: status === "idle" ? "woken" : "injected" }],
+			});
+			expect(received.get("Scout")?.map(message => [message.from, message.body])).toEqual([
+				["Main", "question\nanswer?"],
+			]);
+		},
+	);
 
 	it("broadcasts to live peers without reviving parked agents", async () => {
 		registerPeer("Scout");

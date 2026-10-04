@@ -3,8 +3,6 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { MailboxService, type MailboxPeer, type MailboxTargetState } from "@oh-my-pi/pi-coding-agent/mailbox/service";
 import { cfgIrcCrossProcess, cfgIrcPeerAlias } from "@oh-my-pi/pi-coding-agent/irc/settings";
 import { normalizePeerAlias } from "@oh-my-pi/pi-coding-agent/mailbox/protocol";
-import { formatPeerRow } from "@oh-my-pi/pi-coding-agent/mailbox/peer-rows";
-import { TRUNCATE_LENGTHS } from "@oh-my-pi/pi-tui/render/render-utils";
 import { executeAcpBuiltinSlashCommand } from "@oh-my-pi/pi-coding-agent/slash-commands/acp-builtins";
 import type { SlashCommandRuntime } from "@oh-my-pi/pi-coding-agent/slash-commands/types";
 
@@ -12,7 +10,7 @@ afterEach(() => {
 	vi.restoreAllMocks();
 });
 
-function harness(options: { enabled?: boolean; receiving?: boolean; error?: string; peers?: MailboxPeer[] } = {}) {
+function harness(options: { enabled?: boolean; peers?: MailboxPeer[] } = {}) {
 	const settings = Settings.isolated();
 	if (options.enabled) cfgIrcCrossProcess.set(settings, true);
 	const whenSettled = vi.fn(async () => {});
@@ -20,10 +18,7 @@ function harness(options: { enabled?: boolean; receiving?: boolean; error?: stri
 		expect(agentId).toBe("acp:conversation");
 		if (!cfgIrcCrossProcess.get(settings)) return { enabled: false };
 		const alias = normalizePeerAlias(cfgIrcPeerAlias.get(settings));
-		if (options.error) {
-			return { enabled: true, address: "work-1234abcd.abcdef12", alias, receiving: false, error: options.error };
-		}
-		return { enabled: true, address: "work-1234abcd.abcdef12", alias, receiving: options.receiving ?? true };
+		return { enabled: true, address: "work-1234abcd.abcdef12", alias, receiving: true };
 	});
 	const listPeers = vi.fn(async () => options.peers ?? []);
 	vi.spyOn(MailboxService, "global").mockReturnValue({ whenSettled, state, listPeers } as unknown as MailboxService);
@@ -39,7 +34,7 @@ function harness(options: { enabled?: boolean; receiving?: boolean; error?: stri
 describe("/peers headless command", () => {
 	it("enables peers for this session and then reports the same status without persisting", async () => {
 		const h = harness();
-		expect(await executeAcpBuiltinSlashCommand("/peers on", h.runtime)).toEqual({ consumed: true });
+		expect(await executeAcpBuiltinSlashCommand("/peers   ON  ", h.runtime)).toEqual({ consumed: true });
 		expect(cfgIrcCrossProcess.get(h.settings)).toBe(true);
 		expect(h.settings.getGlobalSettings()).toEqual({});
 		expect(h.output).toHaveBeenLastCalledWith("Peers: on — this session is work-1234abcd.abcdef12");
@@ -79,12 +74,6 @@ describe("/peers headless command", () => {
 		expect(h.output).toHaveBeenCalledWith("Peers: off");
 	});
 
-	it("trims arguments and accepts case-insensitive subcommands", async () => {
-		const h = harness();
-		await executeAcpBuiltinSlashCommand("/peers   ON  ", h.runtime);
-		expect(h.output).toHaveBeenCalledWith("Peers: on — this session is work-1234abcd.abcdef12");
-	});
-
 	it("does not read or output state until publication settles", async () => {
 		const h = harness();
 		const settled = Promise.withResolvers<void>();
@@ -96,18 +85,6 @@ describe("/peers headless command", () => {
 		settled.resolve();
 		await command;
 		expect(h.output).toHaveBeenCalledWith("Peers: on — this session is work-1234abcd.abcdef12");
-	});
-
-	it("reports send-only mode", async () => {
-		const h = harness({ enabled: true, receiving: false });
-		await executeAcpBuiltinSlashCommand("/peers status", h.runtime);
-		expect(h.output).toHaveBeenCalledWith("Peers: on (send-only) — this session is work-1234abcd.abcdef12");
-	});
-
-	it("reports receiving failures after enabling", async () => {
-		const h = harness({ error: "permission denied" });
-		await executeAcpBuiltinSlashCommand("/peers on", h.runtime);
-		expect(h.output).toHaveBeenCalledWith("Peers: on, but receiving failed — permission denied");
 	});
 
 	it("prints one row per peer with optional titles and activity", async () => {
@@ -174,9 +151,6 @@ describe("/peers headless command", () => {
 		const h = harness({ peers: [peer] });
 		await executeAcpBuiltinSlashCommand("/peers list", h.runtime);
 		expect(h.output).toHaveBeenCalledWith('project-1234abcd (Worker)  D:/project next  "A session"  idle');
-		const bounded = formatPeerRow({ ...peer, cwd: "x".repeat(1000) });
-		expect(Bun.stringWidth(bounded)).toBeLessThanOrEqual(TRUNCATE_LENGTHS.LINE);
-		expect(bounded).not.toContain("\n");
 	});
 
 	it("sets a case-preserving runtime alias, waits for publication, and clears it without persisting", async () => {

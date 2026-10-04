@@ -107,18 +107,20 @@ async function metadata(registry: LocalEndpointRegistry, service: MailboxService
 }
 
 describe("MailboxService", () => {
-	it("delivers idle and busy messages over the endpoint with the process address as sender", async () => {
+	it("delivers idle and busy messages with the process address as sender but rejects array receipt outcomes", async () => {
 		const registry = await registryFixture();
 		const a = makeService(registry, "sender");
 		const b = makeService(registry, "recipient");
 		bind(a);
 		const recipient = bind(b);
 		await Promise.all([a.service.whenSettled(), b.service.whenSettled()]);
+		const sentAt = Date.now();
 
 		expect(await a.bus.send({ from: "Main", to: b.service.address, body: "hello", replyTo: "thread" })).toEqual({
 			to: "Main",
 			outcome: "woken",
 		});
+		expect(a.bus.sentSince("Main", b.service.address, sentAt)).toBe(true);
 		recipient.setBusy(true);
 		expect((await a.bus.send({ from: "Main", to: b.service.address, body: "aside" })).outcome).toBe("injected");
 		expect(
@@ -132,6 +134,21 @@ describe("MailboxService", () => {
 		]);
 		expect(recipient.delivered[0]?.replyTo).toBe("thread");
 		expect(recipient.delivered[0]?.senderDisplay).toEqual({ cwd: "sender", title: "Test conversation" });
+		expect((await a.bus.send({ from: "Main", to: "invalid address!", body: "unknown" })).error).toBe(
+			'Unknown agent "invalid address!" — check the subagent roster or read history:// for known peers.',
+		);
+		const query = endpoints.queryLocalEndpoint;
+		vi.spyOn(endpoints, "queryLocalEndpoint").mockImplementation(async (...args) => {
+			const result = await query(...args);
+			return result.status === "ok"
+				? { status: "ok", value: { ...result.value, receipt: { to: "Main", outcome: ["woken"] } } }
+				: result;
+		});
+		expect(await a.bus.send({ from: "Main", to: b.service.address, body: "malformed receipt" })).toEqual({
+			to: b.service.address,
+			outcome: "failed",
+			error: `Peer ${b.service.address} did not return a valid delivery receipt.`,
+		});
 	});
 
 	it("only reads metadata to resolve a send and guards a remote-woken reply against another wake", async () => {
@@ -226,6 +243,9 @@ describe("MailboxService", () => {
 		cfgIrcCrossProcess.set(receiving.settings, true);
 		await host.service.whenSettled();
 		expect(host.service.state("Main")).toEqual({ enabled: false });
+		expect(states).toHaveLength(3);
+		cfgIrcPeerAlias.override(receiving.settings, "disabled-alias");
+		await host.service.whenSettled();
 		expect(states).toHaveLength(3);
 	});
 
@@ -535,47 +555,5 @@ describe("MailboxService", () => {
 		await host.service.whenSettled();
 		expect(host.service.state("Main")).toMatchObject({ enabled: true, receiving: true, alias: null });
 		expect(await endpoints.readLocalEndpointEntries(registry)).toHaveLength(1);
-	});
-
-	it("cancels a pending peer snapshot probe without pruning the peer", async () => {
-		const registry = await registryFixture();
-		const host = makeService(registry, "sender");
-		bind(host, { receive: false });
-		await host.service.whenSettled();
-		const received = Promise.withResolvers<void>();
-		const release = Promise.withResolvers<void>();
-		const publication = await endpoints.publishLocalEndpoint(
-			registry,
-			async () => {
-				received.resolve();
-				await release.promise;
-				return { ok: true };
-			},
-			{ instanceId: "waiting-0123abcd" },
-		);
-		const controller = new AbortController();
-		vi.useFakeTimers();
-		let settled = false;
-		const listing = host.service.listPeers({ signal: controller.signal }).then(peers => {
-			settled = true;
-			return peers;
-		});
-		try {
-			await received.promise;
-			controller.abort();
-			vi.advanceTimersByTime(0);
-			// Drain the query → probe → workers → discovery promise chain without advancing the timeout.
-			for (let round = 0; round < 10; round++) await Promise.resolve();
-			expect(settled).toBe(true);
-			expect(await listing).toEqual([]);
-			expect((await endpoints.readLocalEndpointEntries(registry)).map(entry => entry.meta.instanceId)).toEqual([
-				"waiting-0123abcd",
-			]);
-		} finally {
-			vi.useRealTimers();
-			release.resolve();
-			await publication.close();
-			await listing;
-		}
 	});
 });

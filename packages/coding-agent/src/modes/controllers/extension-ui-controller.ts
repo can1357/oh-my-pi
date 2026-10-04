@@ -44,6 +44,12 @@ import { getEditorCommand, openInEditor } from "../../utils/external-editor";
 
 const MAX_WIDGET_LINES = 10;
 
+export type HookEditorPresentationOptions = ExtensionCustomOptions & {
+	promptStyle?: boolean;
+	/** Let the overlay handle restore its previous focus instead of focusing the main editor. */
+	restoreOverlayFocus?: boolean;
+};
+
 /**
  * Footer hint for a guest-rendered ask selector. The guest's selector handles
  * the keys, so the host can't know its bindings: advertise the defaults.
@@ -1076,8 +1082,18 @@ export class ExtensionUiController {
 		title: string,
 		prefill?: string,
 		dialogOptions?: ExtensionUIDialogOptions,
-		editorOptions?: { promptStyle?: boolean },
+		editorOptions?: HookEditorPresentationOptions,
 	): Promise<string | undefined> {
+		if (editorOptions?.overlay) {
+			return this.showHookCustom<string | undefined>(
+				(tui, _theme, _keys, done) =>
+					new HookEditorComponent(tui, title, prefill, done, () => done(undefined), {
+						...editorOptions,
+						externalEditor: editDialogExternally,
+					}),
+				{ ...editorOptions, signal: dialogOptions?.signal ?? editorOptions.signal },
+			);
+		}
 		return this.#presentDialog(dialogOptions?.signal, settle => {
 			this.ctx.hookEditor = new HookEditorComponent(
 				this.ctx.ui,
@@ -1130,7 +1146,7 @@ export class ExtensionUiController {
 			keybindings: KeybindingsManager,
 			done: (result: T) => void,
 		) => (Component & { dispose?(): void }) | Promise<Component & { dispose?(): void }>,
-		options?: ExtensionCustomOptions,
+		options?: HookEditorPresentationOptions,
 	): Promise<T> {
 		const savedText = this.ctx.editor.getText();
 		const keybindings = KeybindingsManager.inMemory();
@@ -1150,7 +1166,7 @@ export class ExtensionUiController {
 				this.ctx.editorContainer.addChild(this.ctx.editor);
 				this.ctx.editor.setText(savedText);
 			}
-			this.ctx.ui.setFocus(this.ctx.editor);
+			if (!options?.overlay || !options.restoreOverlayFocus) this.ctx.ui.setFocus(this.ctx.editor);
 			this.ctx.ui.requestRender();
 		};
 		const finish = (settle: () => void) => {

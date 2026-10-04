@@ -7,7 +7,6 @@ import { cfgIrcCrossProcess } from "@oh-my-pi/pi-coding-agent/irc/settings";
 import type { CreateAgentSessionResult } from "@oh-my-pi/pi-coding-agent/sdk";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import type { AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
-import { MCPManager } from "@oh-my-pi/pi-coding-agent/mcp/manager";
 import * as runtimeInit from "@oh-my-pi/pi-coding-agent/modes/runtime-init";
 import { runRpcMode } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-mode";
 import { RpcOutputWriter } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-output";
@@ -38,7 +37,7 @@ describe("--mailbox", () => {
 	] as const) {
 		it(
 			mailboxFlag
-				? "lets print receive only with --mailbox after readiness and withdraws before shutdown"
+				? "enables print receiving only with --mailbox and withdraws before shutdown"
 				: `keeps print send-only with peers ${savedEnabled ? "on" : "off"} and retains the toggle target`,
 			async () => {
 				const dir = TempDir.createSync("@pi-main-mailbox-");
@@ -52,10 +51,6 @@ describe("--mailbox", () => {
 				let bound = false;
 				let captured = false;
 				let subscriber: ((event: AgentSessionEvent) => void) | undefined;
-				let toolsReady = false;
-				const mcpManager = new MCPManager(dir.path());
-				vi.spyOn(mcpManager, "waitForStartup").mockResolvedValue({ connected: [], pending: [], failed: [] });
-				vi.spyOn(mcpManager, "getTools").mockReturnValue([]);
 				const session = {
 					extensionRunner: undefined,
 					model: { provider: "anthropic", id: "test-model" },
@@ -70,9 +65,6 @@ describe("--mailbox", () => {
 					getAgentId: () => "Main",
 					getAllToolNames: () => [],
 					getQueuedMessages: () => ({ steering: [], followUp: [] }),
-					refreshMCPTools: async () => {
-						toolsReady = true;
-					},
 					prepareForHeadlessAdvisorDrain: () => {
 						expect(bound).toBe(false);
 						captured = true;
@@ -92,13 +84,6 @@ describe("--mailbox", () => {
 				const bindSpy = vi.spyOn(service, "bindTarget").mockImplementation(target => {
 					expect(target.receive).toBe(mailboxFlag);
 					expect(cfgIrcCrossProcess.get(target.settings)).toBe(savedEnabled || mailboxFlag);
-					if (mailboxFlag) {
-						expect(subscriber).toBeDefined();
-						expect(toolsReady).toBe(true);
-						// A peer arriving at publication is already visible to the output subscriber.
-						subscriber?.({ type: "agent_start" });
-						subscriber?.({ type: "agent_end", messages: [], isTerminal: true });
-					}
 					bound = true;
 					return () => {
 						bound = false;
@@ -118,7 +103,7 @@ describe("--mailbox", () => {
 					await runRootCommand(args, rawArgs, {
 						discoverAuthStorage: async () => authStorage,
 						settings,
-						createAgentSession: async () => ({ session, mcpManager }) as unknown as CreateAgentSessionResult,
+						createAgentSession: async () => ({ session }) as unknown as CreateAgentSessionResult,
 					});
 					expect(bindSpy).toHaveBeenCalledTimes(1);
 					expect(captured).toBe(true);

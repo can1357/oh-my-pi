@@ -93,7 +93,6 @@ import { type DescribeContext, leafKey, type NativeChild, type NativeNode, type 
 import { hintsRow, type NativeHint, overlayCard } from "../native/overlay";
 import { CLOSE_ACTION, picker, pickerQuery } from "../native/picker";
 import { Input } from "../components/input";
-import { HookEditorComponent } from "./hook-editor";
 
 /** A chrome-less search field: the hub draws its own prompt. */
 function filterInput(): Input {
@@ -297,6 +296,8 @@ export interface AgentHubDeps<TRecord extends AgentRecordLike = AgentRecordLike>
 	listPeers?: () => Promise<AgentRecordLike[]>;
 	/** Send through the host's IRC path, returning the delivery result text. */
 	sendPeer?: (id: string, message: string) => Promise<string>;
+	/** Present the host's multiline editor above the Hub, returning undefined on cancellation. */
+	showPeerEditor?: (title: string, signal: AbortSignal) => Promise<string | undefined>;
 	/** Resolve lifecycle actions lazily when a local action needs them. */
 	lifecycle: () => AgentLifecycleLike<TRecord>;
 	/** Host message bus supplying unread counts. */
@@ -355,10 +356,10 @@ export class AgentHubOverlayComponent<TRecord extends AgentRecordLike = AgentRec
 	readonly initialRowsReady: Promise<void>;
 	#listPeers: AgentHubDeps["listPeers"];
 	#sendPeer: AgentHubDeps["sendPeer"];
+	#showPeerEditor: AgentHubDeps["showPeerEditor"];
 	#peers = new Map<string, AgentRecordLike>();
 	#peerDiscovery: Promise<void> | undefined;
-	#peerComposer: HookEditorComponent | undefined;
-	#peerOverlay: OverlayHandle | undefined;
+	#peerDialog?: AbortController;
 	/** Prevent the async persisted-session scan from flashing a false empty state. */
 	#loadingPersistedSubagents = false;
 	#section: AgentHubSection;
@@ -501,6 +502,7 @@ export class AgentHubOverlayComponent<TRecord extends AgentRecordLike = AgentRec
 		this.#remote = deps.remote;
 		this.#listPeers = deps.listPeers;
 		this.#sendPeer = deps.sendPeer;
+		this.#showPeerEditor = deps.showPeerEditor;
 		this.#loadingPersistedSubagents = !this.#remote && Boolean(deps.sessionFile?.endsWith(".jsonl"));
 		this.#ui =
 			deps.ui ??
@@ -570,7 +572,7 @@ export class AgentHubOverlayComponent<TRecord extends AgentRecordLike = AgentRec
 			this.#dataChangeTimer = undefined;
 		}
 		this.#closeTranscriptOverlay();
-		this.#closePeerComposer();
+		this.#peerDialog?.abort();
 	}
 
 	override render(width: number): readonly string[] {
@@ -696,49 +698,6 @@ export class AgentHubOverlayComponent<TRecord extends AgentRecordLike = AgentRec
 			if (typeof this.#ui.setFocus === "function") this.#ui.setFocus(this);
 			this.#requestRender();
 		}
-	}
-
-	#closePeerComposer(): void {
-		this.#peerOverlay?.hide();
-		this.#peerOverlay = undefined;
-		this.#peerComposer?.dispose();
-		this.#peerComposer = undefined;
-		if (!this.#disposed) {
-			this.#ui.setFocus?.(this);
-			this.#requestRender();
-		}
-	}
-
-	#composePeer(ref: AgentRecordLike): void {
-		if (this.#disposed || ref.kind !== "peer" || !this.#sendPeer || typeof this.#ui.showOverlay !== "function")
-			return;
-		this.#closePeerComposer();
-		const composer = new HookEditorComponent(
-			this.#ui,
-			`Message ${sanitizeDisplaySingleLine(ref.displayName || ref.id)}`,
-			undefined,
-			message => {
-				if (this.#disposed || this.#peerComposer !== composer) return;
-				this.#closePeerComposer();
-				void this.#sendPeer!(ref.id, message)
-					.then(result => {
-						if (this.#disposed) return;
-						this.#notice = sanitizeDisplaySingleLine(result);
-						this.#requestRender();
-					})
-					.catch((error: unknown) => {
-						if (this.#disposed) return;
-						this.#notice = sanitizeDisplaySingleLine(error instanceof Error ? error.message : String(error));
-						this.#requestRender();
-					});
-			},
-			() => this.#closePeerComposer(),
-			{ promptStyle: true },
-		);
-		this.#peerComposer = composer;
-		this.#peerOverlay = this.#ui.showOverlay(composer, { width: "90%", margin: 1 });
-		this.#ui.setFocus(composer);
-		this.#requestRender();
 	}
 
 	// ========================================================================
@@ -894,7 +853,7 @@ export class AgentHubOverlayComponent<TRecord extends AgentRecordLike = AgentRec
 		switch (event.act) {
 			case "send": {
 				const ref = this.#rows[this.#selectedRow];
-				if (ref?.kind === "peer") this.#composePeer(ref);
+				if (ref?.kind === "peer") this.#activateAgent(ref);
 				return;
 			}
 			case "open": {
@@ -2657,7 +2616,24 @@ export class AgentHubOverlayComponent<TRecord extends AgentRecordLike = AgentRec
 	#activateAgent(ref: AgentRecordLike): void {
 		if (this.#disposed) return;
 		if (ref.kind === "peer") {
-			this.#composePeer(ref);
+			if (!this.#sendPeer || !this.#showPeerEditor) return;
+			this.#peerDialog?.abort();
+			const dialog = (this.#peerDialog = new AbortController());
+			void (async () => {
+				try {
+					const message = await this.#showPeerEditor!(
+						`Message ${sanitizeDisplaySingleLine(ref.displayName || ref.id)}`,
+						dialog.signal,
+					);
+					if (dialog.signal.aborted || message === undefined) return;
+					const result = await this.#sendPeer!(ref.id, message);
+					if (!this.#disposed) this.#notice = sanitizeDisplaySingleLine(result);
+				} catch (error) {
+					if (!dialog.signal.aborted)
+						this.#notice = sanitizeDisplaySingleLine(error instanceof Error ? error.message : String(error));
+				}
+				if (!this.#disposed) this.#requestRender();
+			})();
 			return;
 		}
 		this.#notice = undefined;

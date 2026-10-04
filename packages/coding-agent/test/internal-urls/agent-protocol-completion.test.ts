@@ -23,7 +23,6 @@ const snapshot: MailboxSnapshot = {
 	id: "remote-peer",
 	pid: process.pid,
 	cwd: "/other/project",
-	startedAt: 1,
 	targets: [{ conversation: null, title: null, busy: false, alias: "worker", cwd: null }],
 };
 
@@ -73,7 +72,7 @@ describe("agent:// peer completion", () => {
 		expect((await handler.complete()).map(item => item.value)).toEqual([address, "worker"]);
 	});
 
-	it("discards an aborted discovery response without pruning the peer endpoint", async () => {
+	it("promptly cancels discovery without waiting for the peer or pruning its endpoint", async () => {
 		const started = Promise.withResolvers<void>();
 		const release = Promise.withResolvers<void>();
 		publication = await publishLocalEndpoint(
@@ -86,14 +85,15 @@ describe("agent:// peer completion", () => {
 			{ instanceId: address },
 		);
 		const controller = new AbortController();
+		vi.useFakeTimers();
 		const completion = new AgentProtocolHandler().complete("", { signal: controller.signal });
 		try {
 			await started.promise;
 			controller.abort();
-			release.resolve();
 			expect(await completion).toEqual([]);
 			expect((await readLocalEndpointEntries(registry)).map(entry => entry.meta.instanceId)).toEqual([address]);
 		} finally {
+			vi.useRealTimers();
 			release.resolve();
 			await completion;
 		}

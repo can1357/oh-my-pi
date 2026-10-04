@@ -1,4 +1,4 @@
-import type { Agent, AgentMessage } from "@oh-my-pi/pi-agent-core";
+import { type Agent, type AgentMessage, ASIDE_MESSAGE_COMMIT, ASIDE_MESSAGE_DISCARD } from "@oh-my-pi/pi-agent-core";
 import { prompt } from "@oh-my-pi/pi-utils";
 import { type IrcMessage } from "@oh-my-pi/pi-tui/tools/irc";
 import { IrcDeliveryRejectedError } from "../irc/bus";
@@ -47,8 +47,10 @@ export class IrcBridge {
 	}
 
 	/** Whether any undelivered IRC record remains queued. */
-	hasPending(): boolean {
-		return this.#interrupts.length > 0 || this.#asides.length > 0 || this.#deferredWakes.length > 0;
+	hasPending(eligible?: (record: AgentMessage) => boolean): boolean {
+		return eligible
+			? this.#interrupts.some(eligible) || this.#asides.some(eligible) || this.#deferredWakes.some(eligible)
+			: this.#interrupts.length > 0 || this.#asides.length > 0 || this.#deferredWakes.length > 0;
 	}
 
 	/** Waits until every in-flight wake-turn relay has settled. */
@@ -65,11 +67,10 @@ export class IrcBridge {
 	}
 
 	/** Takes every queued IRC record in interrupt-before-aside order. */
-	drainPending(consume = true): AgentMessage[] {
+	drainPending(): AgentMessage[] {
 		const records = [...this.#interrupts, ...this.#asides];
 		this.#interrupts = [];
 		this.#asides = [];
-		if (consume) this.consume(records);
 		return records;
 	}
 
@@ -198,6 +199,11 @@ export class IrcBridge {
 			const bytes = Buffer.byteLength(body, "utf8");
 			this.#pendingRemote.set(record, bytes);
 			this.#pendingRemoteBytes += bytes;
+			const settle = () => this.consume([record]);
+			Object.defineProperties(record, {
+				[ASIDE_MESSAGE_COMMIT]: { configurable: true, value: settle },
+				[ASIDE_MESSAGE_DISCARD]: { configurable: true, value: settle },
+			});
 		}
 	}
 
@@ -211,20 +217,24 @@ export class IrcBridge {
 		}
 	}
 
+	/** Remote admission is shared with the bus's waiter route. */
+	admissionError(msg: IrcMessage): string | undefined {
+		if (msg.remote !== true) return;
+		if (this.#host.isIrcAdmissionBlocked()) {
+			return "Recipient is switching or compacting its session; retry shortly.";
+		}
+		if (
+			this.#pendingRemote.size >= 100 ||
+			this.#pendingRemoteBytes + Buffer.byteLength(msg.body, "utf8") > 4 * 1024 * 1024
+		) {
+			return "Recipient has too many pending peer messages (limit 100 messages / 4 MiB); retry later.";
+		}
+	}
+
 	/** Delivers an IRC message into the recipient session without awaiting any wake turn. */
 	async deliver(msg: IrcMessage): Promise<"injected" | "woken"> {
-		let remoteBodyBytes: number | undefined;
-		if (msg.remote === true) {
-			if (this.#host.isIrcAdmissionBlocked()) {
-				throw new IrcDeliveryRejectedError("Recipient is switching or compacting its session; retry shortly.");
-			}
-			remoteBodyBytes = Buffer.byteLength(msg.body, "utf8");
-			if (this.#pendingRemote.size >= 100 || this.#pendingRemoteBytes + remoteBodyBytes > 4 * 1024 * 1024) {
-				throw new IrcDeliveryRejectedError(
-					"Recipient has too many pending peer messages (limit 100 messages / 4 MiB); retry later.",
-				);
-			}
-		}
+		const rejection = this.admissionError(msg);
+		if (rejection) throw new IrcDeliveryRejectedError(rejection);
 		if (this.#host.isDisposed()) throw new Error("Recipient session is disposed.");
 		const streaming = this.#host.isStreaming();
 		const appendIdle = !streaming && (this.#host.planModeEnabled() || msg.noWake === true);
@@ -267,10 +277,7 @@ export class IrcBridge {
 			attribution: "agent",
 			timestamp: msg.ts,
 		};
-		if (remoteBodyBytes !== undefined) {
-			this.#pendingRemote.set(record, remoteBodyBytes);
-			this.#pendingRemoteBytes += remoteBodyBytes;
-		}
+		this.#trackRemote([record]);
 		void this.#host.emitSessionEvent({ type: "irc_message", message: record });
 		if (streaming) {
 			if (fromParent) {
@@ -312,7 +319,9 @@ export class IrcBridge {
 
 	/** Persists queued IRC records that missed their step-boundary injection. */
 	flushPending(): void {
-		for (const record of this.drainPending()) {
+		const records = this.drainPending();
+		this.consume(records);
+		for (const record of records) {
 			this.#host.agent.emitExternalEvent({ type: "message_start", message: record });
 			this.#host.agent.emitExternalEvent({ type: "message_end", message: record });
 		}

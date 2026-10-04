@@ -28,6 +28,11 @@ export class IrcDeliveryRejectedError extends Error {
 	}
 }
 
+interface IrcRecipientSession {
+	getIrcAdmissionError?(message: IrcMessage): string | undefined;
+	deliverIrcMessage(message: IrcMessage): Promise<"injected" | "woken">;
+}
+
 interface IrcWaiter {
 	from?: string;
 	resolve: (msg: IrcMessage) => void;
@@ -170,6 +175,9 @@ export class IrcBus {
 				};
 			}
 		}
+		const session: IrcRecipientSession | null | undefined = this.#registry.get(message.to)?.session;
+		const rejection = message.remote === true ? session?.getIrcAdmissionError?.(message) : undefined;
+		if (rejection) return { to: message.to, outcome: "failed", error: rejection };
 
 		// A pending `wait` from the recipient consumes the message directly —
 		// it is returned from their irc tool call and never hits the inbox or
@@ -181,7 +189,6 @@ export class IrcBus {
 			return { to: message.to, outcome: revived ? "revived" : "injected" };
 		}
 
-		const session = this.#registry.get(message.to)?.session;
 		if (!session) {
 			return { to: message.to, outcome: "failed", error: `Agent "${message.to}" has no live session.` };
 		}

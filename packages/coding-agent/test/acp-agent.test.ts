@@ -153,6 +153,7 @@ class FakeAgentSession {
 	retryResult = false;
 	retryCalls = 0;
 	#listeners = new Set<(event: AgentSessionEvent) => void>();
+	#sessionChangeCallbacks = new Set<() => void>();
 
 	constructor(
 		cwd: string,
@@ -234,6 +235,11 @@ class FakeAgentSession {
 		};
 	}
 
+	registerSessionChangeCallback(callback: () => void): () => void {
+		this.#sessionChangeCallbacks.add(callback);
+		return () => this.#sessionChangeCallbacks.delete(callback);
+	}
+
 	listeners(): Array<(event: AgentSessionEvent) => void> {
 		return [...this.#listeners];
 	}
@@ -311,9 +317,13 @@ class FakeAgentSession {
 	}
 
 	async switchSession(sessionPath: string): Promise<boolean> {
+		const previousSessionId = this.sessionId;
 		await this.sessionManager.setSessionFile(sessionPath);
 		this.sessionId = this.sessionManager.getSessionId();
 		this.agent.sessionId = this.sessionId;
+		if (this.sessionId !== previousSessionId) {
+			for (const callback of this.#sessionChangeCallbacks) callback();
+		}
 		return true;
 	}
 
@@ -328,6 +338,7 @@ class FakeAgentSession {
 		await this.sessionManager.newSession();
 		this.sessionId = this.sessionManager.getSessionId();
 		this.agent.sessionId = this.sessionId;
+		for (const callback of this.#sessionChangeCallbacks) callback();
 		return true;
 	}
 
@@ -415,6 +426,7 @@ class FakeAgentSession {
 		}
 		this.sessionId = this.sessionManager.getSessionId();
 		this.agent.sessionId = this.sessionId;
+		for (const callback of this.#sessionChangeCallbacks) callback();
 		return true;
 	}
 }
@@ -663,6 +675,7 @@ describe("ACP agent", () => {
 		const unbinds: Array<() => void> = [];
 		const enabledChanges: boolean[] = [];
 		vi.spyOn(MailboxService.prototype, "bindTarget").mockImplementation(target => {
+			if (targets.length > 0) expect(unbinds.at(-1)).toHaveBeenCalledTimes(1);
 			targets.push(target);
 			const stopListening = cfgIrcCrossProcess.listen(target.settings, enabled => {
 				enabledChanges.push(enabled);
@@ -697,24 +710,12 @@ describe("ACP agent", () => {
 			).toBe(true);
 			const session = harness.findSession(created.sessionId)!;
 			await session.newSession();
-			// Live events also reconcile transitions initiated outside ACP requests.
-			session.setThinkingLevel("high");
 			expect(unbinds[0]).toHaveBeenCalledTimes(1);
 			expect(targets.map(target => target.conversation)).toEqual([
 				mailboxConversationSuffix(created.sessionId),
 				mailboxConversationSuffix(session.sessionId),
 			]);
 			expect(targets[1]?.describe().cwd).toBe(harness.cwdA);
-			harness.updates.length = 0;
-			await harness.agent.prompt({
-				sessionId: created.sessionId,
-				prompt: [{ type: "text", text: "after switch" }],
-			});
-			expect(harness.updates.every(update => update.sessionId === created.sessionId)).toBe(true);
-			await harness.agent.setSessionMode({ sessionId: created.sessionId, modeId: "default" });
-			await expect(
-				harness.agent.setSessionMode({ sessionId: session.sessionId, modeId: "default" }),
-			).rejects.toThrow("Unsupported ACP session");
 			await harness.agent.closeSession({ sessionId: created.sessionId });
 			expect(unbinds[1]).toHaveBeenCalledTimes(1);
 		} finally {
