@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `remote` to the Agent Hub record kinds: the hub lists only agents with a local session or transcript (remote cross-process peers stay reachable via `read history://` and `write agent://`), and `write agent://` receipt rows sanitize externally supplied recipient ids and error text before rendering ([#14071](https://github.com/can1357/oh-my-pi/pull/14071) by [@mccraigmccraig](https://github.com/mccraigmccraig)).
+
 ## [18.6.0] - 2026-10-03
 
 ### Fixed
