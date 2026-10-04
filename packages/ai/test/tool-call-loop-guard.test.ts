@@ -367,3 +367,221 @@ describe("ToolCallLoopGuard multi-call turns", () => {
 		expect(guard.recordTurn(turn(b()))).toBeNull();
 	});
 });
+
+describe("ToolCallLoopGuard failing-call block", () => {
+	function failingTurn(id: string, command: string, resultText = "Command exited with code 1") {
+		return {
+			message: {
+				role: "assistant",
+				content: [{ type: "toolCall", id, name: "bash", arguments: { command } }],
+				api: "openai-responses",
+				provider: "openai",
+				model: "test-model",
+				usage: zeroUsage,
+				stopReason: "toolUse",
+				timestamp: Date.now(),
+			} satisfies AssistantMessage,
+			toolResults: [
+				{
+					role: "toolResult",
+					toolCallId: id,
+					toolName: "bash",
+					content: [{ type: "text", text: resultText }],
+					isError: true,
+					timestamp: Date.now(),
+				} satisfies ToolResultMessage,
+			],
+		};
+	}
+
+	function successTurn(id: string, command: string) {
+		return {
+			message: {
+				role: "assistant",
+				content: [{ type: "toolCall", id, name: "bash", arguments: { command } }],
+				api: "openai-responses",
+				provider: "openai",
+				model: "test-model",
+				usage: zeroUsage,
+				stopReason: "toolUse",
+				timestamp: Date.now(),
+			} satisfies AssistantMessage,
+			toolResults: [
+				{
+					role: "toolResult",
+					toolCallId: id,
+					toolName: "bash",
+					content: [{ type: "text", text: "1263 passed, 4 skipped" }],
+					isError: false,
+					timestamp: Date.now(),
+				} satisfies ToolResultMessage,
+			],
+		};
+	}
+
+	test("blocks the next identical call only after ten consecutive failures", () => {
+		const guard = new ToolCallLoopGuard({ threshold: 5, exemptTools: [] });
+		for (let index = 0; index < 9; index++) {
+			guard.recordTurn(failingTurn(`fail-${index}`, "grep Clerk"));
+			expect(guard.blockCall("bash", { command: "grep Clerk" })).toBeNull();
+		}
+		guard.recordTurn(failingTurn("fail-9", "grep Clerk"));
+		expect(guard.blockCall("bash", { command: "grep Clerk" })).toEqual({
+			kind: "blocked_failing_tool_call",
+			toolName: "bash",
+			count: 10,
+			resultSummary: "Command exited with code 1",
+			argumentsSummary: '{"command":"grep Clerk"}',
+		});
+	});
+
+	test("does not block identical calls that succeed", () => {
+		const guard = new ToolCallLoopGuard({ threshold: 2, exemptTools: [], blockThreshold: 2 });
+		guard.recordTurn(successTurn("a", "pytest -q"));
+		guard.recordTurn(successTurn("b", "pytest -q"));
+		expect(guard.blockCall("bash", { command: "pytest -q" })).toBeNull();
+	});
+
+	test("a turn with no tool calls clears the failing streak", () => {
+		const guard = new ToolCallLoopGuard({ threshold: 5, exemptTools: [], blockThreshold: 2 });
+		guard.recordTurn(failingTurn("a", "grep Clerk"));
+		guard.recordTurn(failingTurn("b", "grep Clerk"));
+		guard.recordTurn({
+			message: {
+				role: "assistant",
+				content: [{ type: "text", text: "trying something else" }],
+				api: "openai-responses",
+				provider: "openai",
+				model: "test-model",
+				usage: zeroUsage,
+				stopReason: "stop",
+				timestamp: Date.now(),
+			},
+			toolResults: [],
+		});
+		expect(guard.blockCall("bash", { command: "grep Clerk" })).toBeNull();
+	});
+
+	test("a successful result clears the failing streak", () => {
+		const guard = new ToolCallLoopGuard({ threshold: 5, exemptTools: [], blockThreshold: 2 });
+		guard.recordTurn(failingTurn("a", "grep Clerk"));
+		guard.recordTurn(failingTurn("b", "grep Clerk"));
+		expect(guard.blockCall("bash", { command: "grep Clerk" })).toMatchObject({ count: 2 });
+		guard.recordTurn(successTurn("c", "grep Clerk"));
+		expect(guard.blockCall("bash", { command: "grep Clerk" })).toBeNull();
+	});
+
+	test("a different failing call disarms the previous block", () => {
+		const guard = new ToolCallLoopGuard({ threshold: 5, exemptTools: [], blockThreshold: 2 });
+		guard.recordTurn(failingTurn("a", "grep Clerk"));
+		guard.recordTurn(failingTurn("b", "grep Clerk"));
+		guard.recordTurn(failingTurn("c", "grep other"));
+		expect(guard.blockCall("bash", { command: "grep Clerk" })).toBeNull();
+		expect(guard.blockCall("bash", { command: "grep other" })).toBeNull();
+	});
+
+	test("does not block exempt tools that fail repeatedly", () => {
+		const guard = new ToolCallLoopGuard({ threshold: 2, exemptTools: ["job"], blockThreshold: 2 });
+		for (const id of ["a", "b", "c"]) {
+			guard.recordTurn({
+				message: {
+					role: "assistant",
+					content: [{ type: "toolCall", id, name: "job", arguments: { poll: ["abc"] } }],
+					api: "openai-responses",
+					provider: "openai",
+					model: "test-model",
+					usage: zeroUsage,
+					stopReason: "toolUse",
+					timestamp: Date.now(),
+				},
+				toolResults: [
+					{
+						role: "toolResult",
+						toolCallId: id,
+						toolName: "job",
+						content: [{ type: "text", text: "still running" }],
+						isError: true,
+						timestamp: Date.now(),
+					},
+				],
+			});
+		}
+		expect(guard.blockCall("job", { poll: ["abc"] })).toBeNull();
+	});
+
+	test("an exempt-only turn leaves an armed failing block in place", () => {
+		const guard = new ToolCallLoopGuard({ threshold: 5, exemptTools: ["wait"], blockThreshold: 2 });
+		guard.recordTurn(failingTurn("a", "grep Clerk"));
+		guard.recordTurn(failingTurn("b", "grep Clerk"));
+		guard.recordTurn({
+			message: {
+				role: "assistant",
+				content: [{ type: "toolCall", id: "wait-1", name: "wait", arguments: { seconds: 1 } }],
+				api: "openai-responses",
+				provider: "openai",
+				model: "test-model",
+				usage: zeroUsage,
+				stopReason: "toolUse",
+				timestamp: Date.now(),
+			},
+			toolResults: [],
+		});
+		expect(guard.blockCall("bash", { command: "grep Clerk" })).toMatchObject({ count: 2 });
+	});
+
+	test("matches a repeated failure when argument key order or intent fields differ", () => {
+		const guard = new ToolCallLoopGuard({ threshold: 5, exemptTools: [], blockThreshold: 1 });
+		guard.recordTurn({
+			message: {
+				role: "assistant",
+				content: [
+					{
+						type: "toolCall",
+						id: "a",
+						name: "bash",
+						arguments: { command: "grep Clerk", timeout: 30, [INTENT_FIELD]: "look up clerk" },
+					},
+				],
+				api: "openai-responses",
+				provider: "openai",
+				model: "test-model",
+				usage: zeroUsage,
+				stopReason: "toolUse",
+				timestamp: Date.now(),
+			},
+			toolResults: [
+				{
+					role: "toolResult",
+					toolCallId: "a",
+					toolName: "bash",
+					content: [{ type: "text", text: "Command exited with code 1" }],
+					isError: true,
+					timestamp: Date.now(),
+				},
+			],
+		});
+		expect(
+			guard.blockCall("bash", { timeout: 30, [INTENT_FIELD]: "try again", command: "grep Clerk" }),
+		).toMatchObject({
+			count: 1,
+			argumentsSummary: '{"command":"grep Clerk","timeout":30}',
+		});
+	});
+
+	test("keeps the original failure text after later errors in the same streak", () => {
+		const guard = new ToolCallLoopGuard({ threshold: 5, exemptTools: [], blockThreshold: 2 });
+		guard.recordTurn(failingTurn("a", "grep Clerk", "Command exited with code 1"));
+		guard.recordTurn(failingTurn("b", "grep Clerk", "This exact bash call failed 2 times and was not run again"));
+		expect(guard.blockCall("bash", { command: "grep Clerk" })).toMatchObject({
+			count: 2,
+			resultSummary: "Command exited with code 1",
+		});
+	});
+
+	test("blockThreshold of zero never blocks", () => {
+		const guard = new ToolCallLoopGuard({ threshold: 2, exemptTools: [], blockThreshold: 0 });
+		guard.recordTurn(failingTurn("a", "grep Clerk"));
+		guard.recordTurn(failingTurn("b", "grep Clerk"));
+		expect(guard.blockCall("bash", { command: "grep Clerk" })).toBeNull();
+	});
+});

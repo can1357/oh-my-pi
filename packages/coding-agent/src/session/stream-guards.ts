@@ -14,6 +14,7 @@ import geminiToolReminderTemplate from "../prompts/system/gemini-tool-call-remin
 import type { CustomMessage } from "./messages";
 import type { SessionManager } from "./session-manager";
 import {
+	renderToolCallLoopBlock,
 	renderToolCallLoopRedirect,
 	TOOL_CALL_LOOP_REDIRECT_TYPE,
 	toolCallLoopRedirectDetails,
@@ -23,6 +24,7 @@ import { cfgEditStreamingAbort } from "../edit/settings";
 import {
 	cfgModelLoopGuardEnabled,
 	cfgModelLoopGuardToolCallReminder,
+	cfgModelToolCallLoopGuardBlockThreshold,
 	cfgModelToolCallLoopGuardEnabled,
 	cfgModelToolCallLoopGuardExemptTools,
 	cfgModelToolCallLoopGuardThreshold,
@@ -130,14 +132,26 @@ export class LoopGuards {
 		this.#host = host;
 	}
 
-	/** Records a completed turn and injects a redirect when calls repeat. */
+	/** Records a completed turn and injects one redirect when calls first repeat. */
 	recordTurn(messages: AgentMessage[], context: AgentTurnEndContext | undefined): void {
 		if (context?.message.role !== "assistant") return;
 		const detection = this.#activeToolCallLoopGuard()?.recordTurn({
 			message: context.message,
 			toolResults: context.toolResults,
 		});
-		if (detection) this.#injectToolCallLoopRedirect(messages, detection);
+		const threshold = Math.max(1, Math.trunc(cfgModelToolCallLoopGuardThreshold.get(this.#host.settings)));
+		if (detection && detection.count === threshold) this.#injectToolCallLoopRedirect(messages, detection);
+	}
+
+	/**
+	 * Reason to refuse this call before it runs, once the same arguments have
+	 * failed `blockThreshold` times. Undefined when the call should proceed.
+	 */
+	blockRepeatedCall(toolName: string, args: unknown): string | undefined {
+		const detection = this.#activeToolCallLoopGuard()?.blockCall(toolName, args);
+		if (!detection) return undefined;
+		logger.warn("blocking repeated failing tool call", { toolName: detection.toolName, count: detection.count });
+		return renderToolCallLoopBlock(detection);
 	}
 
 	/** Feeds a streamed assistant event to the Gemini header-runaway detector. */
@@ -162,12 +176,13 @@ export class LoopGuards {
 			return undefined;
 		}
 		const threshold = cfgModelToolCallLoopGuardThreshold.get(this.#host.settings);
+		const blockThreshold = cfgModelToolCallLoopGuardBlockThreshold.get(this.#host.settings);
 		const exemptTools = cfgModelToolCallLoopGuardExemptTools
 			.get(this.#host.settings)
 			.filter((tool): tool is string => typeof tool === "string" && tool.length > 0);
-		const settingsKey = `${threshold}:${JSON.stringify(exemptTools)}`;
+		const settingsKey = `${threshold}:${blockThreshold}:${JSON.stringify(exemptTools)}`;
 		if (!this.#toolCallLoopGuard || this.#toolCallLoopGuardSettingsKey !== settingsKey) {
-			this.#toolCallLoopGuard = new ToolCallLoopGuard({ threshold, exemptTools });
+			this.#toolCallLoopGuard = new ToolCallLoopGuard({ threshold, blockThreshold, exemptTools });
 			this.#toolCallLoopGuardSettingsKey = settingsKey;
 		}
 		return this.#toolCallLoopGuard;

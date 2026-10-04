@@ -4,6 +4,7 @@
 
 ### Fixed
 
+- Repeated identical failing tool calls are blocked after 10 failures, and the model is told to continue the same goal another way. The warning for a repeated call is injected once, instead of again on every further repeat.
 - Fixed follow-up hashline edits being rejected as anchored on lines "never displayed" after an earlier edit shifted those lines, when the replacement carries the anchored content; genuinely stale line numbers are still rejected ([#14254](https://github.com/can1357/oh-my-pi/pull/14254) by [@abilliontokens](https://github.com/abilliontokens)).
 
 ## [18.6.0] - 2026-10-03

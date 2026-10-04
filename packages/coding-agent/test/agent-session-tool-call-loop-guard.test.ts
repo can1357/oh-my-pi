@@ -118,4 +118,94 @@ describe("AgentSession tool-call loop guard", () => {
 		expect(redirects).toHaveLength(1);
 		expect(redirects[0]!.display).toBe(false);
 	});
+
+	it("stops executing a tool once the same arguments have failed past the block threshold", async () => {
+		const model = createMockModel({ provider: "openai", id: "gpt-test" }).model;
+		const modelRegistry = new ModelRegistry(authStorage);
+		const contexts: Context[] = [];
+		let executions = 0;
+		const bashTool: AgentTool = {
+			name: "bash",
+			label: "Bash",
+			description: "Mock bash tool",
+			parameters: type({ "command?": "string" }),
+			execute: async () => {
+				executions++;
+				return { content: [{ type: "text" as const, text: "Command exited with code 1" }], isError: true };
+			},
+		};
+		let modelCalls = 0;
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model, systemPrompt: ["Test"], tools: [bashTool], messages: [] },
+			convertToLlm,
+			streamFn: (_model, context) => {
+				contexts.push(context);
+				const toolCallTurn = modelCalls < 4;
+				const toolCallId = `tc-${modelCalls}`;
+				modelCalls++;
+				const message: AssistantMessage = toolCallTurn
+					? {
+							role: "assistant",
+							content: [
+								{ type: "toolCall", id: toolCallId, name: "bash", arguments: { command: "grep Clerk" } },
+							],
+							api: model.api,
+							provider: model.provider,
+							model: model.id,
+							usage: zeroUsage,
+							stopReason: "toolUse",
+							timestamp: Date.now(),
+						}
+					: {
+							role: "assistant",
+							content: [{ type: "text", text: "Stopped repeating." }],
+							api: model.api,
+							provider: model.provider,
+							model: model.id,
+							usage: zeroUsage,
+							stopReason: "stop",
+							timestamp: Date.now(),
+						};
+				const stream = new AssistantMessageEventStream();
+				queueMicrotask(() => {
+					stream.push({ type: "start", partial: message });
+					stream.push({ type: "done", reason: toolCallTurn ? "toolUse" : "stop", message });
+				});
+				return stream;
+			},
+		});
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"todo.enabled": false,
+			"model.toolCallLoopGuard.enabled": true,
+			"model.toolCallLoopGuard.threshold": 2,
+			"model.toolCallLoopGuard.blockThreshold": 3,
+			"model.toolCallLoopGuard.exemptTools": ["wait"],
+		});
+		settings.setModelRole("default", `${model.provider}/${model.id}`);
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(tempDir.path()),
+			settings,
+			modelRegistry,
+			toolRegistry: new Map([[bashTool.name, bashTool]]),
+		});
+
+		await session.prompt("find Clerk");
+		await session.waitForIdle();
+
+		expect(executions).toBe(3);
+		expect(modelCalls).toBe(5);
+		expect(agent.state.error).toBeUndefined();
+		const redirects = session.agent.state.messages.filter(
+			(message): message is CustomMessage =>
+				message.role === "custom" && message.customType === "tool-call-loop-redirect",
+		);
+		expect(redirects).toHaveLength(1);
+		const blockedTurn = JSON.stringify(contexts[4]!.messages);
+		expect(blockedTurn).toContain("was not run again");
+		expect(blockedTurn).toContain("Command exited with code 1");
+		expect(blockedTurn).toContain("Continue the current goal");
+	});
 });

@@ -24,6 +24,7 @@ import {
 import { DEFAULT_WEB_SEARCH_TIMEOUT_SECONDS, MAX_WEB_SEARCH_TIMEOUT_SECONDS } from "../web/search/types";
 import { DEFAULT_USAGE_RESERVE_PCT } from "@oh-my-pi/pi-ai/auth-storage";
 import { configureProviderMaxInFlightRequests } from "@oh-my-pi/pi-ai/stream";
+import { DEFAULT_TOOL_CALL_LOOP_BLOCK_THRESHOLD } from "@oh-my-pi/pi-ai/utils/tool-call-loop-guard";
 import { THINKING_EFFORTS } from "@oh-my-pi/pi-catalog/effort";
 import { formatKeyHint } from "@oh-my-pi/pi-tui/app-keybindings";
 import { AUTO_THINKING, getConfiguredThinkingLevelMetadata, getThinkingLevelMetadata } from "@oh-my-pi/pi-tui/thinking";
@@ -328,6 +329,19 @@ export const cfgModelToolCallLoopGuardExemptTools = register({
 		group: "Thinking",
 		label: "Tool-Call Loop Exempt Tools",
 		description: "Tool names that may repeat consecutively without triggering the cross-turn loop guard",
+	},
+});
+
+export const cfgModelToolCallLoopGuardBlockThreshold = register({
+	id: "model.toolCallLoopGuard.blockThreshold",
+	type: "number",
+	default: DEFAULT_TOOL_CALL_LOOP_BLOCK_THRESHOLD,
+	ui: {
+		tab: "model",
+		group: "Thinking",
+		label: "Tool-Call Fail Block",
+		description:
+			"Consecutive identical failing tool calls before the next identical call is blocked and the model is told to continue the same goal another way. Zero disables blocking. Successful repeats are not blocked",
 	},
 });
 

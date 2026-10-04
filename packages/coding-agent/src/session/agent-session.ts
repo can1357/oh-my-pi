@@ -4615,6 +4615,8 @@ export class AgentSession implements SettingsScope {
 	 * execution still emit there).
 	 */
 	async #beforeToolCall(ctx: BeforeToolCallContext, signal?: AbortSignal): Promise<BeforeToolCallResult | undefined> {
+		const loopBlockReason = this.#loopGuards.blockRepeatedCall(ctx.tool.name, ctx.toolCall.arguments);
+		if (loopBlockReason) return { block: true, reason: loopBlockReason };
 		const runner = this.#extensionRunner;
 		runner?.markLoopToolCall?.(ctx.toolCall.id, ctx.tool.name);
 		const ttsrResult = await this.#ttsr.beforeToolCall(ctx);
