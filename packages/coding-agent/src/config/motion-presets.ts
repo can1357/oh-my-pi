@@ -1,4 +1,4 @@
-// The `tui.motion` preset: one switch over every animation knob, for sessions nobody is watching
+// The `tui.motion` preset: one switch over every animation, for sessions nobody is watching
 // closely (dozens of panes, a shared screen) or for reduced-motion needs. Free of coding-agent imports so the
 // flag table and the setting declarations can import it during CLI bootstrap; the `Derived` that
 // applies it lives beside the setting handles in `modes/settings.ts`.
@@ -23,12 +23,14 @@ export interface MotionSettings {
 
 /**
  * Preset values. `full` is exactly the historical behaviour; `reduced` keeps motion legible at a
- * fraction of the frames; `none` stops every animation (content still repaints under the ceiling).
+ * fraction of the frames; `none` stops every animation. Neither lowers the frame ceiling: the
+ * animations pace themselves, and the ceiling would only throttle content (streaming text) — that is
+ * what an explicit `tui.maxFps` is for.
  */
 export const MOTION_PRESETS: Readonly<Record<MotionMode, Readonly<MotionSettings>>> = {
 	full: { spinnerInterval: DEFAULT_SPINNER_INTERVAL_MS, maxFps: DEFAULT_MAX_FPS, shimmer: "classic", effects: true },
-	reduced: { spinnerInterval: 250, maxFps: 4, shimmer: "disabled", effects: false },
-	none: { spinnerInterval: SPINNER_INTERVAL_STATIC, maxFps: 4, shimmer: "disabled", effects: false },
+	reduced: { spinnerInterval: 250, maxFps: DEFAULT_MAX_FPS, shimmer: "disabled", effects: false },
+	none: { spinnerInterval: SPINNER_INTERVAL_STATIC, maxFps: DEFAULT_MAX_FPS, shimmer: "disabled", effects: false },
 };
 
 /** Which of the governed settings the user set explicitly (file, flag, or env); each wins over the preset. */

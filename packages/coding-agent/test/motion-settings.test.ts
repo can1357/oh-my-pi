@@ -29,13 +29,17 @@ describe("tui.motion", () => {
 
 	it("an explicitly set knob wins over the preset; unset knobs follow it", () => {
 		// `none` would still the spinners, but the user asked for the default cadence explicitly:
-		// the spinners animate while the ceiling, shimmer and effects still follow the preset.
+		// the spinners animate while shimmer and effects still follow the preset.
 		expect(resolveMotion("none", { spinnerInterval: DEFAULT_SPINNER_INTERVAL_MS })).toEqual({
 			spinnerInterval: DEFAULT_SPINNER_INTERVAL_MS,
-			maxFps: 4,
+			maxFps: DEFAULT_MAX_FPS,
 			shimmer: "disabled",
 			effects: false,
 		});
+		// The presets never lower the ceiling: content keeps streaming at full rate unless asked.
+		expect(MOTION_PRESETS.reduced.maxFps).toBe(DEFAULT_MAX_FPS);
+		expect(MOTION_PRESETS.none.maxFps).toBe(DEFAULT_MAX_FPS);
+		expect(resolveMotion("reduced", { maxFps: 4 }).maxFps).toBe(4);
 		expect(resolveMotion("reduced", { shimmer: "kitt", maxFps: 60 })).toEqual({
 			spinnerInterval: 250,
 			maxFps: 60,
@@ -52,11 +56,11 @@ describe("tui.motion", () => {
 		expect(cfgMotionResolved.get(settings)).toEqual(MOTION_PRESETS.none);
 
 		// Setting the spinner interval explicitly to the default value is still explicit: it beats
-		// the preset's 0 while the ceiling keeps the preset's 4.
+		// the preset's 0 while shimmer stays off.
 		cfgTuiSpinnerInterval.override(settings, DEFAULT_SPINNER_INTERVAL_MS);
 		expect(cfgMotionResolved.get(settings)).toMatchObject({
 			spinnerInterval: DEFAULT_SPINNER_INTERVAL_MS,
-			maxFps: 4,
+			shimmer: "disabled",
 		});
 
 		cfgDisplayShimmer.override(settings, "kitt");
