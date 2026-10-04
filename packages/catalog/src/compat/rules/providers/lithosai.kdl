@@ -46,13 +46,56 @@ provider "lithosai" {
 	supports-developer-role #true
 	supports-store #false
 
+	// Every roster row is a DeepSeek V4.1 Flash, GLM-5.3 or Kimi K3 deployment,
+	// and the endpoint takes two effort shapes (both verified live 2026-10-04):
+	// the named strings `none|minimal|low|medium|high|xhigh|max`, and a float
+	// in `[0, 0.99]`. An unknown value returns 400 naming both —
+	// `reasoning_effort.literal[...]` then `reasoning_effort.constrained-float:
+	// Input should be less than or equal to 0.99`. The float is not the model's
+	// own 1-100 budget (`low`=50, `high`=75, `max`=100, default `high`, per the
+	// `encoding/README.md` on huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash):
+	// integers on that scale are rejected here, so neither form reaches
+	// `thinking.efforts`.
+	//
+	// The selectable tiers are DeepSeek's published ones — the class's
+	// low/high/max ladder, whose mid-range aliases (`minimal`/`medium`/`xhigh`)
+	// fold onto those same three points
+	// (api-docs.deepseek.com/guides/thinking_mode) — and the off state is
+	// `none`, which the endpoint honors as a real switch (`reasoning_content`
+	// empty, `reasoning_tokens` 0). `none` is not an effort tier here, so it is
+	// expressed with `reasoning-disable-mode` rather than in the ladder.
+	//
+	// The same block declares the vision modality: the endpoint reads image_url
+	// content on every roster row (a 2×2 PNG returned `image_tokens: 184` plus a
+	// correct description, 2026-10-04), while live discovery seeds `input:
+	// ["text"]`. As on OpenCode Go, clearing `strip-image-input` alone would
+	// leave the row text-only, so the modality is declared here too.
+	//
+	// Matched by selector rather than a provider-wide axis so the four tier ids
+	// keep text wording and the `-chat` serving variants are covered with their
+	// non-chat siblings: no capability difference between them is observed
+	// (identical reasoning behavior and the same null
+	// `completion_tokens_details`), so the console's `-chat` label is a naming
+	// variant, not a capability axis.
+	models "deepseek-ai/DeepSeek-V4.1-Flash*" "zai-org/GLM-5.3*" "moonshotai/Kimi-K3*" {
+		thinking-upgrade-neutral #true
+		thinking-efforts "low" "high" "max"
+		reasoning-disable-mode "none-effort"
+		input-modalities "text" "image"
+		strip-image-input #false
+	}
+
 	// residue: the console tariff table, which no selector can isolate — the
 	// roster ids are namespaced by upstream org (`deepseek-ai/`, `zai-org/`,
 	// `moonshotai/`) and the tiers are serving variants, not taxonomy
 	// families. `-chat` rows are priced by the vendor at the same rate as
 	// their non-chat sibling and carry the same card, so each pair shares one
 	// block. Context is 1,048,576 on every row; the endpoint reports no
-	// limits, so `limits-patch` states the documented window.
+	// limits, so `limits-patch` states the documented window. Unlike DeepSeek's
+	// own API (which rejects `max_tokens` above 393216), this endpoint accepts
+	// any value that fits the window — 1048000 succeeded, 1048576 was rejected
+	// as exceeding the 1048576-token context — so the output cap is the context
+	// window rather than the model's published 384K.
 	models "deepseek-ai/DeepSeek-V4.1-Flash" {
 		cost-patch {
 			input 0.15
@@ -62,6 +105,7 @@ provider "lithosai" {
 		}
 		limits-patch {
 			context-window 1048576
+			max-tokens 1048576
 		}
 	}
 	models "deepseek-ai/DeepSeek-V4.1-Flash-fast" {
@@ -73,6 +117,7 @@ provider "lithosai" {
 		}
 		limits-patch {
 			context-window 1048576
+			max-tokens 1048576
 		}
 	}
 	models "deepseek-ai/DeepSeek-V4.1-Flash-ultra" "deepseek-ai/DeepSeek-V4.1-Flash-ultra-chat" {
@@ -84,6 +129,7 @@ provider "lithosai" {
 		}
 		limits-patch {
 			context-window 1048576
+			max-tokens 1048576
 		}
 	}
 	models "zai-org/GLM-5.3" {
@@ -95,6 +141,7 @@ provider "lithosai" {
 		}
 		limits-patch {
 			context-window 1048576
+			max-tokens 1048576
 		}
 	}
 	models "zai-org/GLM-5.3-Flash" "zai-org/GLM-5.3-Flash-ultra" "zai-org/GLM-5.3-Flash-ultra-chat" {
@@ -106,6 +153,7 @@ provider "lithosai" {
 		}
 		limits-patch {
 			context-window 1048576
+			max-tokens 1048576
 		}
 	}
 	models "zai-org/GLM-5.3-ultra-chat" {
@@ -117,6 +165,7 @@ provider "lithosai" {
 		}
 		limits-patch {
 			context-window 1048576
+			max-tokens 1048576
 		}
 	}
 	models "moonshotai/Kimi-K3" {
@@ -128,6 +177,7 @@ provider "lithosai" {
 		}
 		limits-patch {
 			context-window 1048576
+			max-tokens 1048576
 		}
 	}
 	models "moonshotai/Kimi-K3-fast" {
@@ -139,6 +189,7 @@ provider "lithosai" {
 		}
 		limits-patch {
 			context-window 1048576
+			max-tokens 1048576
 		}
 	}
 	models "moonshotai/Kimi-K3-ultra" "moonshotai/Kimi-K3-ultra-chat" {
@@ -150,6 +201,7 @@ provider "lithosai" {
 		}
 		limits-patch {
 			context-window 1048576
+			max-tokens 1048576
 		}
 	}
 }

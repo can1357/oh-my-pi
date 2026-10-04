@@ -88,20 +88,45 @@ describe("LithosAI provider support", () => {
 	});
 
 	test("keeps roster rows on the deployment wire shape", () => {
-		// The endpoint publishes no capability flags or effort vocabulary per
-		// row — only ids — so every row keeps the discovery defaults for those
-		// axes and inherits the provider-wide request shape instead of the
-		// openai-completions default (`max_completion_tokens`). Cost and context
-		// window are rule-owned and asserted separately.
+		// The endpoint publishes no capability flags per row — only ids — so the
+		// reviewed rules repair the discovery defaults: every roster id is a
+		// DeepSeek V4.1 Flash, GLM-5.3 or Kimi K3 deployment whose endpoint
+		// accepts DeepSeek's `low`/`high`/`max` effort ladder plus a `none` stop
+		// (measured live 2026-10-04). The request shape is provider-wide and
+		// overrides the openai-completions default (`max_completion_tokens`).
+		// Cost and context window are rule-owned and asserted separately.
 		for (const id of LITHOSAI_ROSTER) {
 			const model = buildModel(lithosSpec(id));
-			expect(model.reasoning).toBe(false);
-			expect(model.thinking).toBeUndefined();
-			expect(model.maxTokens).toBeNull();
+			expect(model.reasoning).toBe(true);
+			expect(model.thinking).toMatchObject({ mode: "effort", efforts: ["low", "high", "max"] });
+			expect(model.compat.reasoningDisableMode).toBe("none-effort");
+			// The endpoint reads images on every roster row, so discovery's
+			// text-only seed must not survive into the built model.
+			expect(model.input).toEqual(["text", "image"]);
+			// The endpoint's own ceiling is the context window, not DeepSeek's
+			// published 384K output cap.
+			expect(model.maxTokens).toBe(1048576);
 			expect(model.compat.maxTokensField).toBe("max_tokens");
 			expect(model.compat.reasoningContentField).toBe("reasoning_content");
 			expect(model.compat.supportsDeveloperRole).toBe(true);
 			expect(model.compat.supportsStore).toBe(false);
+		}
+	});
+
+	test("advertises the effort ladder and its off switch on every tier id", () => {
+		// The roster splits each family into base/-fast/-ultra/-chat ids, and the
+		// taxonomy folds `-chat` into a `chat`-less sibling while `-ultra` names
+		// its own family — neither inherits the DeepSeek class ladder. A rule
+		// has to match the ids themselves, so this pins that the tier suffix
+		// shape does not fall back to the generic `minimal..xhigh` default and
+		// that `none` reaches the wire as `reasoning_effort: "none"` rather than
+		// being folded into the ladder as a tier.
+		for (const id of LITHOSAI_ROSTER) {
+			const model = buildModel(lithosSpec(id));
+			expect(model.thinking?.efforts).toEqual(["low", "high", "max"]);
+			expect(model.thinking?.efforts).not.toContain("minimal");
+			expect(model.thinking?.efforts).not.toContain("xhigh");
+			expect(model.thinking?.efforts).not.toContain("none");
 		}
 	});
 
