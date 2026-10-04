@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- `get_messages_page` accepts `order: "desc"` for newest-first walks and `before`/`after` anchor cursors for prefetching around a known offset, so RPC hosts can page a transcript from the tail instead of walking the whole history forward ([#14270](https://github.com/can1357/oh-my-pi/pull/14270) by [@jchanghong023](https://github.com/jchanghong023)).
+
 ### Fixed
 
 - Fixed follow-up hashline edits being rejected as anchored on lines "never displayed" after an earlier edit shifted those lines, when the replacement carries the anchored content; genuinely stale line numbers are still rejected ([#14254](https://github.com/can1357/oh-my-pi/pull/14254) by [@abilliontokens](https://github.com/abilliontokens)).

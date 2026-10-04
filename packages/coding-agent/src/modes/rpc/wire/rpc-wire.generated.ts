@@ -589,7 +589,7 @@ export interface SessionStats {
 export interface MessagesPage {
 	messages: AgentMessage[];
 	totalMessages: number;
-	/** Opaque cursor for the next page; absent on the last page. */
+	/** Opaque cursor for the next page in the page's own walk direction; absent on the last page of that direction. */
 	nextCursor?: string;
 }
 
@@ -1598,6 +1598,12 @@ export interface GetMessagesResult {
 export interface GetMessagesPageParams {
 	cursor?: string;
 	limit?: number;
+	/** Walk direction for a cursor-less request: newest-first (`desc`) or oldest-first (default). A provided cursor dictates its own direction. */
+	order?: "asc" | "desc";
+	/** Anchor cursor: one page taken immediately before the anchor offset (exclusive), newest-first. */
+	before?: string;
+	/** Anchor cursor: one page taken starting at the anchor offset (inclusive), oldest-first. */
+	after?: string;
 }
 
 export interface GetLoginProvidersResult {

@@ -292,7 +292,22 @@ export const rpcCommands: readonly RpcCommandSpec[] = [
 	{
 		name: "get_messages_page",
 		doc: "One stable page of messages.",
-		params: { "cursor?": "string", "limit?": "number.integer" },
+		params: {
+			"cursor?": "string",
+			"limit?": "number.integer",
+			"order?": doc(
+				"'asc' | 'desc'",
+				"Walk direction for a cursor-less request: newest-first (`desc`) or oldest-first (default). A provided cursor dictates its own direction.",
+			),
+			"before?": doc(
+				"string",
+				"Anchor cursor: one page taken immediately before the anchor offset (exclusive), newest-first.",
+			),
+			"after?": doc(
+				"string",
+				"Anchor cursor: one page taken starting at the anchor offset (inclusive), oldest-first.",
+			),
+		},
 		result: "MessagesPage",
 	},
 
