@@ -13,7 +13,8 @@ export interface AxTreeElision {
 /** One tree row, read in render order: role, label, ref. */
 export interface TreeRow {
 	indent: number;
-	bullet: "-" | "+" | "~";
+	/** A `+` or `~` bullet: the report marked the row added or changed. */
+	marked: boolean;
 	role: string;
 	labelled: boolean;
 	/** Ref token span `[start, end)`, including its leading space. */
@@ -118,19 +119,13 @@ export function parseTreeRow(line: string): TreeRow | undefined {
 	if (!ref) return undefined;
 	return {
 		indent: match[1].length,
-		bullet: match[2] as TreeRow["bullet"],
+		marked: match[2] !== "-",
 		role: match[3],
 		labelled,
 		refStart: position,
 		refEnd: position + ref[0].length,
 		ref: ref[1],
 	};
-}
-
-/** Whether a line is a row a report marked added or changed. */
-export function isMarkedRow(line: string): boolean {
-	const bullet = parseTreeRow(line)?.bullet;
-	return bullet !== undefined && bullet !== "-";
 }
 
 function toElisionRow(line: string, index: number): Row | undefined {
@@ -149,7 +144,7 @@ function toElisionRow(line: string, index: number): Row | undefined {
 		subtreeEnd: 0,
 		text: parsed.labelled || value,
 		control: CONTROL_ROLES[parsed.role] === true,
-		marked: parsed.bullet !== "-",
+		marked: parsed.marked,
 		subtreeText: false,
 		subtreeControl: false,
 		subtreeMarked: false,

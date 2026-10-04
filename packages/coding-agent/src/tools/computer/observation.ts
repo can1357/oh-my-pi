@@ -6,7 +6,7 @@
  * the model last received.
  */
 import type { DesktopDisplay, DesktopWindow, DiffRun } from "@oh-my-pi/pi-natives";
-import { elideAxTree, isMarkedRow, parseTreeRow } from "./ax-tree";
+import { elideAxTree, parseTreeRow } from "./ax-tree";
 
 /**
  * `"42" Code "main.ts"`: the id JSON-quoted, as `window()` takes it (ids are
@@ -475,8 +475,8 @@ export function renderReadBack(readBack: ReadBack): string {
 	const tree = change?.text ?? readBack.text;
 	const elided = elideAxTree(tree, REPORT_TREE_BUDGET_BYTES);
 	if (elided) {
-		const lostMarks =
-			tree.split("\n").filter(isMarkedRow).length - elided.text.split("\n").filter(isMarkedRow).length;
+		const marked = (text: string): number => text.split("\n").filter(line => parseTreeRow(line)?.marked).length;
+		const lostMarks = marked(tree) - marked(elided.text);
 		summary += `; ${elided.elidedRows} rows elided to fit (${lostMarks === 0 ? "every changed row kept" : `${lostMarks} changed rows among them`}) — \`win.ax()\`/\`win.find()\` reach them`;
 	}
 	const lines = [`${name} after ${describeCause(touched)} — ${summary}:`, elided?.text ?? tree];

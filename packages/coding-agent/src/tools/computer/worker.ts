@@ -829,8 +829,12 @@ export class ComputerWorkerCore {
 			failure(error);
 		}
 		const focused = roster?.find(window => window.focused);
-		if (focused) observer.ledger.attributeToFocused(pending, focused);
 		const sections: string[] = [];
+		if (focused) observer.ledger.attributeToFocused(pending, focused);
+		else if (pending.unattributed.length > 0)
+			sections.push(
+				`${pending.unattributed.join(", ")} — no window to read back (no focused window found); look before continuing`,
+			);
 		for (const touched of pending.touched) {
 			const window = roster?.find(candidate => candidate.id === touched.id);
 			if (roster && !window) {

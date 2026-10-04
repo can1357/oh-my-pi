@@ -90,6 +90,21 @@ describe("eval prelude cell settlement", () => {
 		expect(settled).toEqual([{ calls: 3, failed: false, output: expect.stringContaining("cell body") }]);
 	});
 
+	it("hands the settle hook the cell's JSON displays as well as what it printed", async () => {
+		const settled: Settled[] = [];
+		const tool = new EvalTool(
+			evalSession([countingPrelude(settled)], `prelude-settle-display-${crypto.randomUUID()}`),
+		);
+
+		await tool.execute("settle-display", {
+			language: "js",
+			code: "await counter.hit(); display({ tree: '- window \"W\" [ref=e7]' }); console.log('cell body');",
+		});
+		expect(settled).toEqual([
+			{ calls: 1, failed: false, output: expect.stringMatching(/cell body[\s\S]*\[ref=e7\]/) },
+		]);
+	});
+
 	it("keeps the cell's output and the other preludes' replies when one settle throws", async () => {
 		const settled: Settled[] = [];
 		const throwing: EvalPreludeDefinition = {

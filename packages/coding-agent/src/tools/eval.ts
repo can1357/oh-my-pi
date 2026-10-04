@@ -990,9 +990,16 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 					flushUpdate();
 					activeLiveCell = undefined;
 				}
+				// JSON displays, formatted once: the settle hook must see them as printed too.
+				const formattedDisplays = result.displayOutputs.map(output =>
+					output.type === "json" ? formatDisplayJson(output.data, artifactPath !== undefined) : undefined,
+				);
 				const preludeReplies: string[] = [];
 				if (!result.cancelled) {
 					const failed = result.exitCode !== undefined && result.exitCode !== 0;
+					const output = [result.output, ...formattedDisplays.map(formatted => formatted?.previewText ?? "")].join(
+						"\n",
+					);
 					for (const prelude of getEnabledEvalPreludes(session.getEvalPreludes?.() ?? [])) {
 						if (!prelude.settleCell) continue;
 						let reply: EvalPreludeSettleReply | undefined;
@@ -1000,7 +1007,7 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 							// A hook that never settles must not hold the cell past its abort.
 							reply = await untilAborted(
 								preludeCell.signal,
-								prelude.settleCell(preludeCell, { failed, output: result.output }),
+								prelude.settleCell(preludeCell, { failed, output }),
 							);
 						} catch (error) {
 							if (preludeCell.signal.aborted) break;
@@ -1020,9 +1027,9 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 				const cellDisplayTexts: string[] = [];
 				const cellImageNotes: string[] = [];
 				let cellHasMarkdown = false;
-				for (const output of result.displayOutputs) {
-					if (output.type === "json") {
-						const formatted = formatDisplayJson(output.data, artifactPath !== undefined);
+				for (const [index, output] of result.displayOutputs.entries()) {
+					const formatted = formattedDisplays[index];
+					if (formatted && output.type === "json") {
 						const label = `display[${cellDisplayTexts.length + 1}]:\n`;
 						jsonOutputs.push(formatted.detailsValue);
 						cellDisplayTexts.push(`${label}${formatted.previewText}`);

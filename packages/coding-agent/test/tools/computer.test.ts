@@ -1407,6 +1407,18 @@ describe("computer cell settlement", () => {
 		expect(report).not.toContain('window "43" Code "Other" after');
 	});
 
+	it("says so when desktop input reached no window it could read back", async () => {
+		const transport = new MemoryTransport();
+		const native = new EditableWindowSession();
+		new ComputerWorkerCore(transport, () => native);
+		native.windows = [{ ...windowFixture, focused: false }];
+
+		await runWorker(transport, "root", 'await desktop.press("cmd+e")');
+		expect(await settleWorker(transport, "settle-root")).toBe(
+			"desktop press cmd+e — no window to read back (no focused window found); look before continuing",
+		);
+	});
+
 	it("reports desktop pointer input on the window under the pointer, not the focused one", async () => {
 		const transport = new MemoryTransport();
 		const native = new EditableWindowSession();

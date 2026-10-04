@@ -90,9 +90,10 @@ export interface EvalPreludeDefinition {
 	 * cell's output, after everything the cell printed, so a prelude can report
 	 * what the cell's calls left behind once, instead of once per call. Called
 	 * for every enabled prelude after each cell that was not cancelled; `failed`
-	 * when the cell ended with an error, `output` the text the cell printed (what
-	 * the model already sees). The text is appended whole: unlike the kernel's
-	 * own output it is not cut at `tools.outputMaxColumns`. A hook that throws is
+	 * when the cell ended with an error, `output` the text the cell printed and
+	 * its JSON displays (what the model already sees). The text is appended
+	 * whole: unlike the kernel's own output it is not cut at
+	 * `tools.outputMaxColumns`. A hook that throws is
 	 * logged and adds nothing. A cell cancelled while settling ends cancelled.
 	 */
 	settleCell?(
