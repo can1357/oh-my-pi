@@ -1452,16 +1452,23 @@ describe("AgentSession retry fallback", () => {
 		["openai-codex", true, "auto", "openai", undefined],
 		// A custom Anthropic endpoint cannot use the subscription slow lane.
 		["anthropic", true, "auto", "openai", "https://custom.example.com/anthropic"],
+		// A custom alias may inherit catalog metadata, but has no subscription hooks.
+		["anthropic-alias", true, "auto", "openai", undefined],
 	] as const)(
 		"preflight from a depleted %s model with preferSlowMode %p and Claude slow mode %s serves %s",
 		async (primaryProvider, preferSlowMode, slowMode, servedProvider, baseUrl) => {
 			const bundled =
-				primaryProvider === "anthropic"
-					? getBundledModel("anthropic", "claude-sonnet-4-5")
-					: getBundledModel("openai-codex", "gpt-5.6-sol");
+				primaryProvider === "openai-codex"
+					? getBundledModel("openai-codex", "gpt-5.6-sol")
+					: getBundledModel("anthropic", "claude-sonnet-4-5");
 			const fallbackModel = getBundledModel("openai", "gpt-4o-mini");
 			if (!bundled || !fallbackModel) throw new Error("Expected bundled slow-mode preflight models");
-			const primaryModel = baseUrl ? { ...bundled, baseUrl } : bundled;
+			const primaryModel =
+				primaryProvider === "anthropic-alias"
+					? { ...bundled, provider: primaryProvider, providerType: "anthropic" }
+					: baseUrl
+						? { ...bundled, baseUrl }
+						: bundled;
 			const requestedModels: string[] = [];
 			const mock = createMockModel({ responses: [{ content: ["kept working"] }] });
 			const agent = new Agent({
@@ -1488,8 +1495,9 @@ describe("AgentSession retry fallback", () => {
 			session = new AgentSession({ agent, sessionManager: SessionManager.inMemory(), settings, modelRegistry });
 			// `/slow on` for the active model: low priority on Claude, the flex tier on
 			// Codex (where the persisted Claude setting still reads `auto`).
-			if (slowMode === "auto") expect(session.setSlowMode(true)).toBe(true);
-			expect(session.isSlowModeEnabled()).toBe(slowMode === "auto");
+			const slowSupported = primaryProvider !== "anthropic-alias";
+			if (slowMode === "auto") expect(session.setSlowMode(true)).toBe(slowSupported);
+			expect(session.isSlowModeEnabled()).toBe(slowMode === "auto" && slowSupported);
 
 			await session.prompt("Keep working through the usage limit");
 			await session.waitForIdle();
