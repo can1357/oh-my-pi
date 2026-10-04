@@ -1701,6 +1701,51 @@ describe("advisor", () => {
 			expect(review).toContain("now raise the limit");
 		});
 
+		it("holds in-progress updates the review gate passes on until the final review", async () => {
+			const promptInputs: Array<string | AgentMessage[]> = [];
+			const agent = makeAgent(promptInputs);
+			const gated: string[] = [];
+			const messages: AgentMessage[] = [{ role: "user", content: "routine step one", timestamp: 1 } as AgentMessage];
+			const runtime = new AdvisorRuntime(agent, {
+				snapshotMessages: () => messages,
+				gateReview: update => {
+					gated.push(update);
+					return Promise.resolve(false);
+				},
+			});
+
+			runtime.onTurnEnd(messages, { willContinue: true });
+			await Promise.resolve();
+			await Promise.resolve();
+			expect(promptInputs).toHaveLength(0);
+
+			messages.push({ role: "user", content: "final step two", timestamp: 2 } as AgentMessage);
+			runtime.onTurnEnd(messages);
+			await runtime.waitForCatchup(1_000, 1);
+
+			// Only the in-progress update was judged; the final one reviews both.
+			expect(gated).toHaveLength(1);
+			expect(promptInputs).toHaveLength(1);
+			const review = promptText(promptInputs[0]);
+			expect(review).toContain("routine step one");
+			expect(review).toContain("final step two");
+		});
+
+		it("reviews an in-progress update when the review gate fails", async () => {
+			const promptInputs: Array<string | AgentMessage[]> = [];
+			const agent = makeAgent(promptInputs);
+			const messages: AgentMessage[] = [{ role: "user", content: "risky step", timestamp: 1 } as AgentMessage];
+			const runtime = new AdvisorRuntime(agent, {
+				snapshotMessages: () => messages,
+				gateReview: () => Promise.reject(new Error("judge unavailable")),
+			});
+
+			runtime.onTurnEnd(messages, { willContinue: true });
+			await settleUntil(() => promptInputs.length > 0);
+
+			expect(promptText(promptInputs[0])).toContain("risky step");
+		});
+
 		it("preserves the next user turn when an accepted empty stop is pruned", async () => {
 			const promptInputs: Array<string | AgentMessage[]> = [];
 			const agent = makeAgent(promptInputs);

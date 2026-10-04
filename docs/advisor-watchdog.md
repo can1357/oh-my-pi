@@ -394,6 +394,8 @@ Advisor usage is separate model usage. `/advisor status` computes token/context 
 
 On prefix-bound thinking models, that eviction also drops signed reasoning after the pruning boundary, including reasoning in the latest review. Primary deltas and advice notes are not evicted.
 
+`advisor.judgeGate` (experimental, default `false`) puts a cheap decision model in front of in-progress reviews. At each in-progress boundary the review cadence schedules, the `judge` model role (for example `typesafe/jev-latest`) answers four yes/no risk questions about the redacted update: destructive side effect, guessed behavior, repeated attempt, stub or shortcut. When every probability is below 0.2 the update is held, exactly like a cadence-skipped boundary, and rides along with the next review; otherwise it is reviewed now. Final boundaries are never gated, and a judge error or 4-second timeout reviews anyway. The judge runs off the primary's critical path, so `advisor.syncBacklog` does not wait on gated in-progress reviews. Gate decisions log at debug level as `advisor review gate`.
+
 The advisor has its own append-only context. Before each advisor prompt, `AgentSession` estimates incoming tokens and may maintain advisor context:
 
 1. try model-level context promotion when enabled and a larger compatible model is available

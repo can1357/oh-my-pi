@@ -469,6 +469,7 @@ Advisors review primary turns on a configurable cadence and can inject advice. E
 | `advisor.reviewInterval` | number | `1` | Default advisor only: review every Nth eligible update. Skipped updates are sent with the next scheduled review; pending advice delivery never depends on cadence. Applies live. |
 | `advisor.maxNotesPerUpdate` | number | `4` | Non-blocker notes accepted per advisor review, from 1–32. Higher-severity notes can replace only pending notes from the same review. `WATCHDOG.yml` top-level or per-advisor values override this default. |
 | `advisor.evictStaleResults` | boolean | `true` | Before each review, replace the advisor's `read`/`grep`/`glob` output from older reviews with a short placeholder. The latest review is kept. |
+| `advisor.judgeGate` | boolean | `false` | Experimental. Before each in-progress review, the `judge` model role scores the update for risk; low-risk updates are held for the next review instead of costing a full advisor turn. Final turns are always reviewed; judge failures review anyway. |
 
 ### Thinking
 

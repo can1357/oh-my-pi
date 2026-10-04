@@ -92,6 +92,14 @@ export interface AdvisorRuntimeHost {
 	 *  hard-stops), so the host can repaint UI that reflects whether the
 	 *  advisor is still going to comment on the current yield. */
 	notifyIdle?(): void;
+	/**
+	 * Experimental review gate for in-progress updates. Return `undefined` to
+	 * dispatch normally; otherwise the update is held and dispatched (with every
+	 * earlier held update) only if the promise resolves `true` or rejects.
+	 * Final (non-`willContinue`) updates are never gated.
+	 */
+	// ponytail: judges only the newest update, so cross-update loops surface at the final review; pass held text if that proves too late.
+	gateReview?(update: string): Promise<boolean> | undefined;
 }
 
 /**
@@ -423,16 +431,32 @@ export class AdvisorRuntime {
 			this.#releaseFailureWaiters();
 			logger.warn("advisor delta render failed", { err: String(err) });
 		}
-		if (opts?.dispatch === false) {
+		// The experimental gate may hold an in-progress update the cadence scheduled.
+		const verdict = opts?.dispatch !== false && rendered && wip ? this.host.gateReview?.(rendered.text) : undefined;
+		if (opts?.dispatch === false || verdict) {
 			if (!rendered) return;
 			// The batch renders from `rawMessages` only when a later boundary
 			// dispatches it, after the primary's per-turn prune may have elided
 			// these tool results in place. Detach the held copies so the review
 			// sees what the primary saw at this boundary.
 			this.#held.push({ ...rendered, rawMessages: rendered.rawMessages.map(message => ({ ...message })), turns: 1 });
+			if (verdict) void this.#dispatchIfGatePasses(verdict);
 			return;
 		}
 		this.#dispatch(rendered ? { ...rendered, turns: 1 } : undefined);
+	}
+
+	/** Dispatch held updates once the gate says review; a gate error fails open. */
+	async #dispatchIfGatePasses(verdict: Promise<boolean>): Promise<void> {
+		const epoch = this.#epoch;
+		let review = true;
+		try {
+			review = await verdict;
+		} catch (err) {
+			logger.debug("advisor review gate failed; reviewing", { err: String(err) });
+		}
+		if (!review || epoch !== this.#epoch || this.disposed || this.#quotaExhausted || this.#halted) return;
+		this.#dispatch(undefined);
 	}
 
 	/**

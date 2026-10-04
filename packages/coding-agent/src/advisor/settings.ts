@@ -139,3 +139,18 @@ export const cfgAdvisorEvictStaleResults = register({
 		condition: "advisorEnabled",
 	},
 });
+
+export const cfgAdvisorJudgeGate = register({
+	id: "advisor.judgeGate",
+	protocolDefault: ["rpc", "acp"],
+	type: "boolean",
+	default: false,
+	ui: {
+		tab: "model",
+		group: "Advisor",
+		label: "Advisor Judge Gate (experimental)",
+		description:
+			"Before each in-progress review, ask the 'judge' model role whether the update shows risk. Low-risk updates are held for the next review instead of costing a full advisor turn. Final turns are always reviewed; judge failures review anyway.",
+		condition: "advisorEnabled",
+	},
+});
