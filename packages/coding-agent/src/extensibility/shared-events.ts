@@ -49,16 +49,27 @@ export interface SessionSwitchEvent {
 	previousSessionFile: string | undefined;
 }
 
+/**
+ * What a branch transition does with {@link SessionBeforeBranchEvent.entryId}:
+ * - `"branch"`: rewinds to a user message; `entryId` and everything after it are dropped.
+ * - `"fork"`: forks at a transcript entry; `entryId` is the last entry kept.
+ * - `"btw"`: promotes a `/btw` answer; `entryId` is the last entry kept before it.
+ */
+export type SessionBranchReason = "branch" | "fork" | "btw";
+
 /** Fired before branching a session (can be cancelled) */
 export interface SessionBeforeBranchEvent {
 	type: "session_before_branch";
-	/** ID of the entry to branch from */
+	/** Which transition is running; it decides whether `entryId` is kept or dropped. */
+	reason: SessionBranchReason;
+	/** The entry the transition cuts at; see {@link SessionBranchReason}. */
 	entryId: string;
 }
 
 /** Fired after branching a session */
 export interface SessionBranchEvent {
 	type: "session_branch";
+	reason: SessionBranchReason;
 	previousSessionFile: string | undefined;
 }
 

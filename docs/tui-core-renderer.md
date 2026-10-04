@@ -171,6 +171,56 @@ immediately and fall back to rows if the terminal does not confirm it. The
 debug socket's `doc` op returns the reference document
 (every sent frame applied by `native/apply.ts`), and `tsp` returns recent frames.
 
+#### Explicit composer submission
+
+omp's `q: "hello"` advertises `features: ["edit", "undo", "send"]`.
+The `editor`/`input` prop `sendable` is separate from text editability:
+`sendable: true` means the owner is ready to accept an atomic prompt submission.
+An absent or false value is not ready, even if the field is writable or focused.
+Base `Editor` and `Input` fields publish false because they do not handle `send`.
+The prompt `CustomEditor` publishes true only when its `onSubmit` handler exists
+and `disableSubmit` is false.
+
+During interactive bootstrap the composer stays writable with `sendable: false`.
+Once all handlers and subscriptions are ready, init lifts the submit gate and
+requests a render to publish `sendable: true`, without requiring user input.
+A terminal must retain a pending prompt until that readiness update arrives; it
+must not dispatch early, sleep, poll, or defer a simulated Enter.
+
+A terminal that sees `"send"` and a ready composer may submit a supplied prompt
+with an `e` message:
+
+```json
+{"ev":"send","sf":"s:1","id":"k.line/input","text":"First line\nSecond line"}
+```
+
+`sf` must name a live surface and `id` its editable composer node (the
+`editor` descendant of the `omp.editor` role, normally `<component>.line/input`),
+not the composer wrapper or its Send button. All three payload fields are
+required strings; surface and node ids must be nonempty. Malformed payloads,
+unknown or closed surfaces, and stale/noneditable node targets are ignored.
+The terminal must also require `sendable === true` on the addressed node before
+dispatching the advertised `send` event. The backend resolves the node's owner and delivers
+`{ type: "send", key: "line/input", text }`, independent of keyboard focus.
+
+`CustomEditor` submits this text once through its ordinary `submit()` /
+`onSubmit` path. Multiline text remains one prompt; the usual loaded-text
+normalization, outer-whitespace trimming, command processing, main-versus-viewed
+agent routing and submitted history rules still apply. This is not a paste:
+large prompts do not open the large-paste selection menu, and the terminal
+must not follow the event with a simulated Enter. Empty or whitespace-only
+text is a no-op, never a submission of the existing draft or a stream interrupt.
+Disabled or not-yet-wired composers also leave the draft untouched.
+
+Before a nonblank send replaces a draft, the old text, paste expansions and
+attachments are retained in local recall history (not persisted as a submitted
+prompt). The explicit payload is submitted by itself, without those old
+attachments or paste expansions. Sends wait in the input FIFO until any
+in-flight clipboard/attachment work settles, including failures, so the
+displaced draft is saved only after its pending attachments finish arriving.
+Native Send-button actions keep their existing behavior: they submit the
+current draft rather than an explicit payload.
+
 ## 6. Inline images and memory
 
 Kitty images are transmit-once, place-many. `ImageBudget` retains only the most

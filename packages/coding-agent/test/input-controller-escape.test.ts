@@ -224,6 +224,7 @@ function createContext(): {
 		hasActiveOmfg,
 		handleCleanseEscape,
 		hasActiveCleanse,
+		dismissCommandReport: vi.fn(() => false),
 		showTreeSelector: vi.fn(),
 		showUserMessageSelector: vi.fn(),
 		showSessionSelector: vi.fn(),

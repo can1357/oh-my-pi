@@ -159,7 +159,7 @@ function forwardStream<TApi extends Api>(
 				// `idleTimeoutMs` while we're still legitimately waiting on the model's
 				// first response (slow first-token from reasoning models, cold proxies, etc.).
 				isProgressItem: event => (event as AssistantMessageEvent).type !== "start",
-				hasPendingLocalWork: localWorkSource ? () => localWorkSource.hasPendingLocalWork : undefined,
+				localWork: localWorkSource,
 			});
 
 			for await (const event of watchedSource) {

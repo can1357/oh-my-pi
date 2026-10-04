@@ -27,6 +27,7 @@ import {
 } from "@oh-my-pi/pi-ai/utils/block-symbols";
 import type { KeyId } from "@oh-my-pi/pi-tui";
 import { logger } from "@oh-my-pi/pi-utils";
+import { refreshShellConfigCache } from "@oh-my-pi/pi-utils/procmgr";
 import { MAIN_AGENT_RULE_NAME } from "../../capability/rule";
 import type { ModelRegistry } from "../../config/model-registry";
 import { type Settings, withActiveSettings } from "../../config/settings";
@@ -165,6 +166,13 @@ function handlerTimeoutForEvent(eventType: string): number {
 
 const EXTENSION_HANDLER_TIMEOUT = Symbol("extensionHandlerTimeout");
 const EXTENSION_HANDLER_ABORTED = Symbol("extensionHandlerAborted");
+
+/** Events after which the session file and id may differ from what child shells last saw. */
+const SESSION_IDENTITY_EVENTS: Record<string, true> = {
+	session_start: true,
+	session_switch: true,
+	session_branch: true,
+};
 
 interface HandlerTimeoutBudget {
 	pause(): void;
@@ -1339,6 +1347,9 @@ export class ExtensionRunner {
 	 * metadata, `signal`/`onUpdate` default to the wrapper's own channels so aborting the outer tool
 	 * call stops the native one and native progress still streams, and `depth` bounds recursion per
 	 * call chain. Explicit options passed to `invokeTool` override the inherited `signal`/`onUpdate`.
+	 *
+	 * `agent` replaces this runner's identity as `ctx.agent` for work done on behalf of another
+	 * agent that shares the runner (the advisor's toolset, see `ExtensionToolWrapper`).
 	 */
 	createContext(
 		model?: Model,
@@ -1349,6 +1360,7 @@ export class ExtensionRunner {
 			signal?: AbortSignal;
 			onUpdate?: AgentToolUpdateCallback;
 		},
+		agent: ExtensionAgentIdentity = this.agent,
 	): ExtensionContext {
 		const getModel = model ? () => model : this.#getModel;
 		const runEphemeralTurn = this.#runEphemeralTurnFn;
@@ -1363,7 +1375,7 @@ export class ExtensionRunner {
 			sessionManager: this.sessionManager,
 			modelRegistry: this.modelRegistry,
 			isProjectTrusted: () => true,
-			agent: this.agent,
+			agent,
 			get model() {
 				return getModel();
 			},
@@ -1623,6 +1635,18 @@ export class ExtensionRunner {
 			}
 		}
 
+		// Handlers for these events export session-scoped environment (a session
+		// id, per-session tool config). The shell spawn environment is a cached
+		// copy that may predate them or belong to the previous session, so capture
+		// process.env for it as soon as they have run. Only the main agent's events
+		// do this: in-process subagents share process.env, and a subagent's session
+		// start must not hand its values to the parent's commands. A process that
+		// hosts several top-level sessions (ACP) still has one spawn environment,
+		// which follows the latest of their events.
+		if (ctx !== undefined && this.agent.kind === "main" && SESSION_IDENTITY_EVENTS[event.type] === true) {
+			refreshShellConfigCache();
+		}
+
 		return result as RunnerEmitResult<TEvent>;
 	}
 
@@ -1717,8 +1741,11 @@ export class ExtensionRunner {
 	 * `content`/`details`/`isError` triple only when a handler modified the
 	 * result; joined `additionalContext` rides along whenever any handler set it.
 	 */
-	async emitToolResult(event: ToolResultEvent): Promise<ToolResultEventResult | undefined> {
-		const ctx = this.createContext();
+	async emitToolResult(
+		event: ToolResultEvent,
+		agent?: ExtensionAgentIdentity,
+	): Promise<ToolResultEventResult | undefined> {
+		const ctx = this.createContext(undefined, undefined, agent);
 		const currentEvent: ToolResultEvent = { ...event };
 		let modified = false;
 		const contexts: string[] = [];
@@ -1780,9 +1807,15 @@ export class ExtensionRunner {
 	 * symmetric with the existing error path below and safer for a
 	 * pre-execution gate — an unresponsive extension MUST NOT be treated as
 	 * silent consent to run the tool.
+	 *
+	 * `agent` overrides `ctx.agent` when the tool runs for another agent sharing this runner.
 	 */
-	async emitToolCall(event: ToolCallEvent, signal?: AbortSignal): Promise<ToolCallEventResult | undefined> {
-		const ctx = this.createContext();
+	async emitToolCall(
+		event: ToolCallEvent,
+		signal?: AbortSignal,
+		agent?: ExtensionAgentIdentity,
+	): Promise<ToolCallEventResult | undefined> {
+		const ctx = this.createContext(undefined, undefined, agent);
 		const timeoutMs = normalizeHandlerTimeout(
 			(this.settings ? cfgExtensionHandlersToolCallTimeoutMs.get(this.settings) : undefined) ??
 				extensionHandlerTimeoutMs,

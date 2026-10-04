@@ -1318,38 +1318,43 @@ describe("CursorExecHandlers mounted tool bridge", () => {
 		}
 	});
 
-	it("refuses a download onto a FIFO instead of blocking on it", async () => {
-		// A write-only open of a FIFO blocks until a reader attaches, and
-		// `download_path` comes from the server — so a named pipe planted (or
-		// simply present) in the workspace hung the turn forever, with the
-		// non-regular-file guard sitting unreachable behind the open. The refusal
-		// has to come from the open itself, which is what `O_NONBLOCK` buys.
-		const workspace = await fs.mkdtemp(path.join(os.tmpdir(), "cursor-mcp-fifo-"));
-		try {
-			const fifo = path.join(workspace, "pipe");
-			const mkfifo = Bun.spawn(["mkfifo", fifo]);
-			if ((await mkfifo.exited) !== 0) throw new Error("mkfifo failed");
-			const handlers = new CursorExecHandlers({
-				cwd: workspace,
-				tools: new Map(),
-				getToolContext: () => yoloToolContext(),
-				mcpResources: {
-					serverNames: () => ["files"],
-					getServerResources: async () => undefined,
-					readServerResource: async (_name, uri) => ({ contents: [{ uri, text: "payload" }] }),
-				},
-			});
+	// Windows has no FIFOs (an MSYS `mkfifo` leaves a plain file the open accepts).
+	it.skipIf(process.platform === "win32")(
+		"refuses a download onto a FIFO instead of blocking on it",
+		async () => {
+			// A write-only open of a FIFO blocks until a reader attaches, and
+			// `download_path` comes from the server — so a named pipe planted (or
+			// simply present) in the workspace hung the turn forever, with the
+			// non-regular-file guard sitting unreachable behind the open. The refusal
+			// has to come from the open itself, which is what `O_NONBLOCK` buys.
+			const workspace = await fs.mkdtemp(path.join(os.tmpdir(), "cursor-mcp-fifo-"));
+			try {
+				const fifo = path.join(workspace, "pipe");
+				const mkfifo = Bun.spawn(["mkfifo", fifo]);
+				if ((await mkfifo.exited) !== 0) throw new Error("mkfifo failed");
+				const handlers = new CursorExecHandlers({
+					cwd: workspace,
+					tools: new Map(),
+					getToolContext: () => yoloToolContext(),
+					mcpResources: {
+						serverNames: () => ["files"],
+						getServerResources: async () => undefined,
+						readServerResource: async (_name, uri) => ({ contents: [{ uri, text: "payload" }] }),
+					},
+				});
 
-			await expect(
-				handlers.readMcpResource({ server: "files", uri: "files://x", downloadPath: "pipe" }),
-			).rejects.toThrow(/special file|non-regular file/);
-		} finally {
-			await removeWithRetries(workspace);
-		}
-		// A regression does not fail this assertion — it never reaches it, because
-		// the open never returns. The timeout IS the detector, raised off the 5s
-		// default only so a slow runner cannot claim the same verdict.
-	}, 20_000);
+				await expect(
+					handlers.readMcpResource({ server: "files", uri: "files://x", downloadPath: "pipe" }),
+				).rejects.toThrow(/special file|non-regular file/);
+			} finally {
+				await removeWithRetries(workspace);
+			}
+			// A regression does not fail this assertion — it never reaches it, because
+			// the open never returns. The timeout IS the detector, raised off the 5s
+			// default only so a slow runner cannot claim the same verdict.
+		},
+		20_000,
+	);
 
 	it("refuses a download when the session withheld file mutation or policy denies it", async () => {
 		// Download mode creates and overwrites workspace files without going
@@ -1885,7 +1890,8 @@ describe("CursorExecHandlers Pi frame translation", () => {
 		await handlers.piGrep({ toolCallId: "c3", args: { pattern: "x", path: ".", glob: "**/*.ts" } } as never);
 		await handlers.piGrep({ toolCallId: "c4", args: { pattern: "x", path: "src", glob: "/abs/**/*.ts" } } as never);
 
-		expect((calls[0] as { path: string }).path).toBe("src/**/*.ts");
+		// `piJoinPath` joins with `node:path`; the local tools normalize separators.
+		expect((calls[0] as { path: string }).path).toBe(path.join("src", "**/*.ts"));
 		// An absent or "." path leaves the glob standing alone: a "./"-prefixed
 		// spec is a needlessly different path expression for the same scope.
 		expect((calls[1] as { path: string }).path).toBe("**/*.ts");
@@ -2090,7 +2096,7 @@ describe("CursorExecHandlers Pi frame translation", () => {
 		await handlers.piFind({ toolCallId: "c3", args: { pattern: "*.ts" } } as never);
 
 		expect(calls).toEqual([
-			{ path: "src/*.ts", limit: 10 },
+			{ path: path.join("src", "*.ts"), limit: 10 },
 			// `optional int32`: a present 0 is clamped to 1 (as the reference
 			// does), not silently widened to the tool's default.
 			{ path: "*.ts", limit: 1 },

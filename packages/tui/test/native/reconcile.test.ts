@@ -220,6 +220,20 @@ describe("Reconciler", () => {
 		expect(scrolls(reconciler.reconcile(regions, { ...cx, feature: () => false }))).toEqual([]);
 	});
 
+	it("reveals a node with a repeatable reveal when its `n` moves, never on its own add or re-add", () => {
+		const comp = new Described();
+		const reveals = (ops: readonly TspOp[]) => ops.filter(op => op[0] === "reveal");
+		const reconciler = new Reconciler("s:t");
+		const regions = { main: [comp], dock: [], layer: [] };
+		comp.current = { ...node("md", { text: "## Beta" }), reveal: { at: "start", n: 1 } };
+		expect(reveals(reconciler.reconcile(regions, cx))).toEqual([]);
+		comp.current = { ...node("md", { text: "## Beta" }), reveal: { at: "start", n: 2 } };
+		expect(reveals(reconciler.reconcile(regions, cx))).toEqual([["reveal", nativeComponentId(comp), "start"]]);
+		// Annotated, the section is re-added as a column: still where it was.
+		comp.current = { ...node("col", {}), reveal: { at: "start", n: 2 } };
+		expect(reveals(reconciler.reconcile(regions, cx))).toEqual([]);
+	});
+
 	it("moves a component to a new parent instead of re-adding it", () => {
 		const child = new Described();
 		child.current = node("text", { text: "kept" });
