@@ -15,6 +15,7 @@ import {
 	type ProviderSessionState,
 	type ToolCall,
 } from "@oh-my-pi/pi-ai";
+import { resolveApiKeyOnce } from "@oh-my-pi/pi-ai/auth-retry";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { createMockModel, type MockResponse } from "@oh-my-pi/pi-ai/providers/mock";
 import { CodexApiError } from "@oh-my-pi/pi-ai/providers/openai-codex/response-handler";
@@ -1293,55 +1294,80 @@ describe("AgentSession retry fallback", () => {
 		expect(confirmFallback).toHaveBeenCalledTimes(1);
 		expect(usageHealth).toHaveBeenCalledTimes(3);
 	});
-	it("reselects a healthy same-provider account before considering a model fallback", async () => {
+	it("slow-mode preference retains healthy same-model account rotation", async () => {
 		const primaryModel = getBundledModel("anthropic", "claude-sonnet-4-5");
 		const fallbackModel = getBundledModel("openai", "gpt-4o-mini");
 		if (!primaryModel || !fallbackModel) throw new Error("Expected bundled pooled fallback models");
+		authStorage.keys.removeRuntime("anthropic");
+		await authStorage.credentials.set("anthropic", [
+			{
+				type: "oauth",
+				access: "reserve-access",
+				refresh: "reserve-refresh",
+				expires: Date.now() + 60 * 60_000,
+				accountId: "reserve",
+			},
+			{
+				type: "oauth",
+				access: "healthy-access",
+				refresh: "healthy-refresh",
+				expires: Date.now() + 60 * 60_000,
+				accountId: "healthy",
+			},
+		]);
+		authStorage.usage.setProvider("anthropic", {
+			id: "anthropic",
+			fetchUsage: async params => ({
+				provider: "anthropic",
+				fetchedAt: Date.now(),
+				limits: [
+					{
+						id: "anthropic:7d",
+						label: "Claude 7 Day",
+						scope: { provider: "anthropic", windowId: "7d", shared: true },
+						window: { id: "7d", label: "7 Day", resetsAt: Date.now() + 24 * 60 * 60_000 },
+						amount: { usedFraction: params.credential.accountId === "reserve" ? 0.95 : 0.2, unit: "percent" },
+						status: "ok",
+					},
+				],
+			}),
+		});
 		const requestedModels: string[] = [];
+		const requestedKeys: (string | undefined)[] = [];
 		const mock = createMockModel({ responses: [{ content: ["same provider continued"] }] });
-		const agent = new Agent({
-			getApiKey: model => `${model.provider}-test-key`,
+		const agent: Agent = new Agent({
+			getApiKey: model => modelRegistry.resolver(model, agent.sessionId),
 			initialState: { model: primaryModel, systemPrompt: ["Test"], tools: [], messages: [] },
-			streamFn: (model, context, options) => {
+			streamFn: async (model, context, options) => {
 				requestedModels.push(`${model.provider}/${model.id}`);
+				requestedKeys.push(await resolveApiKeyOnce(options?.apiKey, options?.signal));
 				return mock.stream(model, context, options);
 			},
 		});
 		const settings = Settings.isolated({
 			"compaction.enabled": false,
 			"retry.usageAwareFallback": true,
-			"retry.fallbackChains": {
-				default: [`${fallbackModel.provider}/${fallbackModel.id}`],
-			},
+			"retry.preferSlowMode": true,
+			"providers.anthropic.slowMode": "auto",
+			"retry.fallbackChains": { default: [`${fallbackModel.provider}/${fallbackModel.id}`] },
 		});
 		settings.setModelRole("default", `${primaryModel.provider}/${primaryModel.id}`);
-		vi.spyOn(modelRegistry.authStorage.health, "model").mockResolvedValue({
-			state: "healthy",
-			accounts: [
-				{
-					credentialId: 1,
-					credentialType: "oauth",
-					selected: true,
-					state: "reserve",
-					remainingFraction: 0.05,
-				},
-				{ credentialId: 2, credentialType: "oauth", state: "healthy", remainingFraction: 0.8 },
-			],
-		});
-		const release = vi.spyOn(modelRegistry.authStorage.sessions, "release").mockReturnValue(true);
-		const confirmFallback = vi.fn(async () => true);
-		session = new AgentSession({
-			agent,
-			sessionManager: SessionManager.inMemory(),
-			settings,
-			modelRegistry,
-		});
-		session.setUsageFallbackConfirmer(confirmFallback);
-		await session.prompt("Stay on this provider");
-		await session.waitForIdle();
-		expect(release).toHaveBeenCalledWith(primaryModel.provider, session.sessionId);
-		expect(confirmFallback).not.toHaveBeenCalled();
-		expect(requestedModels).toEqual([`${primaryModel.provider}/${primaryModel.id}`]);
+		try {
+			session = new AgentSession({ agent, sessionManager: SessionManager.inMemory(), settings, modelRegistry });
+			const reserved = authStorage.credentials
+				.list("anthropic")
+				.find(entry => entry.credential.type === "oauth" && entry.credential.accountId === "reserve");
+			if (!reserved) throw new Error("Expected the stored reserve account");
+			expect(authStorage.sessions.pin("anthropic", session.sessionId, reserved.id)).toBe(true);
+			await session.prompt("Stay on Claude using the healthy sibling");
+			await session.waitForIdle();
+			expect(requestedModels).toEqual([`${primaryModel.provider}/${primaryModel.id}`]);
+			expect(requestedKeys).toEqual(["healthy-access"]);
+		} finally {
+			authStorage.usage.removeProvider("anthropic");
+			await authStorage.credentials.remove("anthropic");
+			authStorage.keys.setRuntime("anthropic", "anthropic-test-key");
+		}
 	});
 
 	it("reselects a healthy sibling before applying a same-provider model fallback", async () => {
