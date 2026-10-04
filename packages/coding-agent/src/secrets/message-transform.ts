@@ -12,6 +12,7 @@ import { isRecord } from "@oh-my-pi/pi-utils";
 import type { SessionContext } from "../session/session-context";
 import type { JsonValue, SecretObfuscator } from "./obfuscator";
 import { collectJsonRegexSecretValues, mapJsonStrings } from "./placeholder-scan";
+import { SecretValueSet } from "./placeholder";
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Display restore (inbound, persisted/provider → local display)
@@ -119,8 +120,14 @@ export function obfuscateToolArguments(
 	sharedRegexSecretValues?: ReadonlySet<string>,
 ): Record<string, unknown> {
 	if (!obfuscator.hasSecrets()) return args;
-	const regexSecretValues = sharedRegexSecretValues ?? collectJsonRegexSecretValues(obfuscator, args as JsonValue);
-	return mapJsonStrings(args as JsonValue, s => obfuscator.obfuscate(s, regexSecretValues)) as Record<string, unknown>;
+	// `batch()` joins an outer batch when one is already open.
+	return obfuscator.batch(() => {
+		const regexSecretValues = sharedRegexSecretValues ?? collectJsonRegexSecretValues(obfuscator, args as JsonValue);
+		return mapJsonStrings(args as JsonValue, s => obfuscator.obfuscate(s, regexSecretValues)) as Record<
+			string,
+			unknown
+		>;
+	});
 }
 
 /** Copy native replay containers only when a provider-visible plaintext field changes. */
@@ -592,8 +599,8 @@ function anthropicCompactionFilesText(message: Message): string | undefined {
 	return typeof filesText === "string" && filesText.length > 0 ? filesText : undefined;
 }
 
-function collectMessageRegexSecretValues(obfuscator: SecretObfuscator, messages: Message[]): Set<string> {
-	const values = new Set<string>();
+function collectMessageRegexSecretValues(obfuscator: SecretObfuscator, messages: Message[]): SecretValueSet {
+	const values = new SecretValueSet();
 	const addText = (text: string | undefined): void => {
 		if (text === undefined) return;
 		for (const value of obfuscator.collectRegexSecretValuesForObfuscation(text)) {
@@ -651,6 +658,10 @@ function collectMessageRegexSecretValues(obfuscator: SecretObfuscator, messages:
  */
 export function obfuscateMessages(obfuscator: SecretObfuscator, messages: Message[]): Message[] {
 	if (!obfuscator.obfuscates()) return messages;
+	return obfuscator.batch(() => obfuscateMessageBatch(obfuscator, messages));
+}
+
+function obfuscateMessageBatch(obfuscator: SecretObfuscator, messages: Message[]): Message[] {
 	const sharedRegexSecretValues = collectMessageRegexSecretValues(obfuscator, messages);
 	let changed = false;
 	const result = messages.map((message): Message => {

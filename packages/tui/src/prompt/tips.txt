@@ -1,4 +1,8 @@
 Tired of typing "keep going"? Just send a '.'
+Type `#` anywhere in your prompt for quick actions — copy the line or the whole prompt, undo, jump the cursor
+Type `/` at the start of your prompt to browse every command
+Start your prompt with `!` to run it as bash — `!!` runs it without adding the output to context
+Start your prompt with `$ ` to run Python — `$$ ` runs it without adding the output to context
 You can /btw to ask a side question
 Use /tan to fork the current conversation into a background agent
 With default keybindings, {key:ctrl+d} deletes the character under the cursor instead of quitting your draft — see /hotkeys for your exit key

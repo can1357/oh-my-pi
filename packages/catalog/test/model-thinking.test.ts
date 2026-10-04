@@ -347,6 +347,40 @@ describe("model thinking derivation", () => {
 		expect(getSupportedEfforts(pro)).toEqual([Effort.Low, Effort.High, Effort.Max]);
 	});
 
+	it("keeps Go LongCat reasoning without inventing an effort selector", () => {
+		const longcat = createModel({
+			id: "longcat-2.5-preview-free",
+			api: "openai-completions",
+			provider: "opencode-go",
+			baseUrl: "https://opencode.ai/zen/go/v1",
+		});
+
+		expect(longcat.reasoning).toBe(true);
+		expect(getSupportedEfforts(longcat)).toEqual([]);
+		expect(clampThinkingLevelForModel(longcat, Effort.High)).toBeUndefined();
+	});
+
+	it("offers Go Space Bunny only its published effort tiers through max", () => {
+		const spaceBunny = createModel({
+			id: "space-bunny-free",
+			api: "openai-completions",
+			provider: "opencode-go",
+			baseUrl: "https://opencode.ai/zen/go/v1",
+		});
+
+		expect(getSupportedEfforts(spaceBunny)).toEqual([
+			Effort.Low,
+			Effort.Medium,
+			Effort.High,
+			Effort.XHigh,
+			Effort.Max,
+		]);
+		expect(requireSupportedEffort(spaceBunny, Effort.Max)).toBe(Effort.Max);
+		expect(() => requireSupportedEffort(spaceBunny, Effort.Minimal)).toThrow(
+			/Supported efforts: low, medium, high, xhigh, max/,
+		);
+	});
+
 	it("grants the low/high/max ladder to OpenRouter deepseek-v4-pro-0813 but not the undated route (issue #8517)", () => {
 		// OpenRouter's /models advertises reasoning.supported_efforts
 		// [low, high, max] for the dated SKU; the discovered ladder is baked

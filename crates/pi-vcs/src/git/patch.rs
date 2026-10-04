@@ -24,6 +24,7 @@ use gix::{
 
 use super::{
 	GitRepo,
+	filter::WorktreeFilter,
 	mutate::update_reference,
 	open::{load_index_or_head, status_with_index},
 };
@@ -112,21 +113,16 @@ impl GitRepo {
 		}
 		let patches = parse_patch(patch_text).map_err(ApplyFailure::into_error)?;
 		let repo = self.gix()?;
-		let mut state = if options.cached {
-			index_map_at(&repo, options.index_path.as_deref())?
-		} else {
-			worktree_map(self, &repo)?
-		};
-		if !options.cached {
-			augment_patch_sources(self, &repo, &mut state, &patches, options.reverse)?;
-		}
-		apply_patches_to_map(&repo, &mut state, &patches, options)?;
 		if options.cached {
-			write_index_map_at(&repo, &state, options.index_path.as_deref())?;
-		} else {
-			write_patch_worktree(self, &patches, options.reverse, &state)?;
+			let mut state = index_map_at(&repo, options.index_path.as_deref())?;
+			apply_patches_to_map(&repo, &mut state, &patches, options)?;
+			return write_index_map_at(&repo, &state, options.index_path.as_deref());
 		}
-		Ok(())
+		let mut filter = apply_filter(&repo, &patches, options.reverse)?;
+		let mut state = worktree_map(self, &repo, &mut filter)?;
+		augment_patch_sources(self, &repo, &mut filter, &mut state, &patches, options.reverse)?;
+		apply_patches_to_map(&repo, &mut state, &patches, options)?;
+		write_patch_worktree(self, &repo, &mut filter, &patches, options.reverse, &state)
 	}
 
 	/// Check whether a patch applies without changing the index or worktree.
@@ -141,11 +137,11 @@ impl GitRepo {
 		let mut state = if options.cached {
 			index_map_at(&repo, options.index_path.as_deref())?
 		} else {
-			worktree_map(self, &repo)?
+			let mut filter = apply_filter(&repo, &patches, options.reverse)?;
+			let mut state = worktree_map(self, &repo, &mut filter)?;
+			augment_patch_sources(self, &repo, &mut filter, &mut state, &patches, options.reverse)?;
+			state
 		};
-		if !options.cached {
-			augment_patch_sources(self, &repo, &mut state, &patches, options.reverse)?;
-		}
 		match apply_patches_to_map(&repo, &mut state, &patches, options) {
 			Ok(()) => Ok(true),
 			Err(Error::PatchFailed { .. } | Error::Conflict { .. }) => Ok(false),
@@ -279,6 +275,7 @@ impl GitRepo {
 			.cloned()
 			.collect();
 		let unstaged = unstaged_changed_paths(&repo, &head_map, &changed)?;
+		let mut filter = WorktreeFilter::staging(&repo, "git cherry-pick")?;
 		// Picked paths with unstaged edits get `HEAD + edits + pick` in the
 		// worktree, merged the same fail-clean way as the pick itself.
 		let local_map;
@@ -292,7 +289,7 @@ impl GitRepo {
 				.map_err(|err| Error::backend("git cherry-pick edit tree", err))?;
 			for path in &unstaged {
 				let mode = head_map.get(path).map_or(Mode::FILE, |entry| entry.mode);
-				match read_worktree_entry(&self.root().join(path), mode)? {
+				match read_worktree_entry(self, &mut filter, path, mode)? {
 					Some((bytes, mode)) => {
 						let id = repo
 							.write_blob(bytes)
@@ -349,7 +346,7 @@ impl GitRepo {
 		repo
 			.commit_as(committer, author, "HEAD", message.as_ref(), merged_tree, [head_id])
 			.map_err(|err| Error::backend("git cherry-pick commit", err))?;
-		checkout_changed_paths(self, &repo, &merged, worktree, &changed, &unstaged)
+		checkout_changed_paths(self, &repo, &mut filter, &merged, worktree, &changed, &unstaged)
 	}
 
 	/// Clear cherry-pick state; fail-clean single-commit picks create none.
@@ -375,8 +372,9 @@ impl GitRepo {
 			.detach();
 		let head_map = tree_map(&repo, head_tree)?;
 		let index = index_map(&repo)?;
-		let tracked_worktree = tracked_worktree_map(self, &repo, &index)?;
-		let untracked = untracked_worktree_map(self, &repo, &index)?;
+		let mut filter = WorktreeFilter::staging(&repo, "git stash")?;
+		let tracked_worktree = tracked_worktree_map(self, &repo, &mut filter, &index)?;
+		let untracked = untracked_worktree_map(self, &repo, &mut filter, &index)?;
 		if index == head_map && tracked_worktree == index && untracked.is_empty() {
 			return Ok(false);
 		}
@@ -404,7 +402,7 @@ impl GitRepo {
 			format!("On HEAD: {label}"),
 			true,
 		)?;
-		write_worktree_map(self, &tracked_worktree, &head_map)?;
+		write_worktree_map(self, &repo, &mut filter, &tracked_worktree, &head_map)?;
 		write_index_map(&repo, &head_map)?;
 		for path in untracked.keys() {
 			remove_worktree_path(self, path)?;
@@ -442,7 +440,8 @@ impl GitRepo {
 			.map_err(|err| Error::backend("git stash tree", err))?
 			.detach();
 		let current_index = index_map(&repo)?;
-		let current_worktree = tracked_worktree_map(self, &repo, &current_index)?;
+		let mut filter = WorktreeFilter::staging(&repo, "git stash")?;
+		let current_worktree = tracked_worktree_map(self, &repo, &mut filter, &current_index)?;
 		let current_tree = write_tree_map(&repo, &current_worktree)?;
 		let Some(merged_worktree) = merge_tree_maps(&repo, base_tree, current_tree, stash_tree)?
 		else {
@@ -482,9 +481,9 @@ impl GitRepo {
 				return Ok(false);
 			}
 		}
-		write_worktree_map(self, &current_worktree, &merged_worktree)?;
+		write_worktree_map(self, &repo, &mut filter, &current_worktree, &merged_worktree)?;
 		for (path, entry) in &untracked {
-			write_worktree_entry(self, path, entry, &repo)?;
+			write_worktree_entry(self, &repo, &mut filter, path, entry)?;
 		}
 		if let Some(merged_index) = merged_index {
 			write_index_map(&repo, &merged_index)?;
@@ -1312,13 +1311,47 @@ fn tree_map(repo: &gix::Repository, tree: gix::ObjectId) -> Result<BTreeMap<Stri
 	Ok(map)
 }
 
-fn worktree_map(repo: &GitRepo, gix_repo: &gix::Repository) -> Result<BTreeMap<String, FileEntry>> {
+fn worktree_map(
+	repo: &GitRepo,
+	gix_repo: &gix::Repository,
+	filter: &mut WorktreeFilter<'_>,
+) -> Result<BTreeMap<String, FileEntry>> {
 	let index = index_map(gix_repo)?;
-	tracked_worktree_map(repo, gix_repo, &index)
+	tracked_worktree_map(repo, gix_repo, filter, &index)
 }
+
+/// `git apply` reads worktree files renormalized, except paths whose patch
+/// preimage itself carries CRLF line endings: those are read verbatim
+/// (`CONV_EOL_KEEP_CRLF`) so the CRLF context still matches.
+fn apply_filter<'repo>(
+	repo: &'repo gix::Repository,
+	patches: &[FilePatch],
+	reverse: bool,
+) -> Result<WorktreeFilter<'repo>> {
+	let mut filter = WorktreeFilter::renormalizing(repo, "git apply")?;
+	filter.keep_verbatim(
+		patches
+			.iter()
+			.filter(|patch| crlf_in_preimage(patch, reverse))
+			.filter_map(|patch| patch_sides(patch, reverse).0.map(str::to_owned))
+			.collect(),
+	);
+	Ok(filter)
+}
+
+/// Mirrors git's `check_old_for_crlf`: a complete preimage line (context, or
+/// removed — added when reversed) ending in CRLF.
+fn crlf_in_preimage(patch: &FilePatch, reverse: bool) -> bool {
+	let removed = if reverse { b'+' } else { b'-' };
+	patch.hunks.iter().flat_map(|hunk| &hunk.lines).any(|line| {
+		(line.kind == b' ' || line.kind == removed) && !line.no_newline && line.data.ends_with(b"\r")
+	})
+}
+
 fn augment_patch_sources(
 	repo: &GitRepo,
 	gix_repo: &gix::Repository,
+	filter: &mut WorktreeFilter<'_>,
 	state: &mut BTreeMap<String, FileEntry>,
 	patches: &[FilePatch],
 	reverse: bool,
@@ -1337,7 +1370,7 @@ fn augment_patch_sources(
 			continue;
 		}
 		let mode = source_mode.or(target_mode).unwrap_or(Mode::FILE);
-		if let Some((bytes, mode)) = read_worktree_entry(&repo.root().join(path), mode)? {
+		if let Some((bytes, mode)) = read_worktree_entry(repo, filter, path, mode)? {
 			let id = gix_repo
 				.write_blob(bytes)
 				.map_err(|err| Error::backend("git hash patch source", err))?
@@ -1351,12 +1384,12 @@ fn augment_patch_sources(
 fn tracked_worktree_map(
 	repo: &GitRepo,
 	gix_repo: &gix::Repository,
+	filter: &mut WorktreeFilter<'_>,
 	index: &BTreeMap<String, FileEntry>,
 ) -> Result<BTreeMap<String, FileEntry>> {
 	let mut map = BTreeMap::new();
 	for (path, entry) in index {
-		let absolute = repo.root().join(path);
-		if let Some((bytes, mode)) = read_worktree_entry(&absolute, entry.mode)? {
+		if let Some((bytes, mode)) = read_worktree_entry(repo, filter, path, entry.mode)? {
 			let id = gix_repo
 				.write_blob(bytes)
 				.map_err(|err| Error::backend("git hash worktree blob", err))?
@@ -1370,6 +1403,7 @@ fn tracked_worktree_map(
 fn untracked_worktree_map(
 	repo: &GitRepo,
 	gix_repo: &gix::Repository,
+	filter: &mut WorktreeFilter<'_>,
 	index: &BTreeMap<String, FileEntry>,
 ) -> Result<BTreeMap<String, FileEntry>> {
 	let mut walk_index = load_index_or_head(gix_repo, "git read index for untracked files")?;
@@ -1401,8 +1435,7 @@ fn untracked_worktree_map(
 		if index.contains_key(&path) {
 			continue;
 		}
-		let absolute = repo.root().join(&path);
-		if let Some((bytes, mode)) = read_worktree_entry(&absolute, Mode::FILE)? {
+		if let Some((bytes, mode)) = read_worktree_entry(repo, filter, &path, Mode::FILE)? {
 			let id = gix_repo
 				.write_blob(bytes)
 				.map_err(|err| Error::backend("git hash untracked blob", err))?
@@ -1413,7 +1446,15 @@ fn untracked_worktree_map(
 	Ok(map)
 }
 
-fn read_worktree_entry(path: &Path, index_mode: Mode) -> Result<Option<(Vec<u8>, Mode)>> {
+/// Read the worktree entry at repo-relative `rela_path` in its blob form:
+/// symlink targets as-is, regular files through the clean filters.
+fn read_worktree_entry(
+	repo: &GitRepo,
+	filter: &mut WorktreeFilter<'_>,
+	rela_path: &str,
+	index_mode: Mode,
+) -> Result<Option<(Vec<u8>, Mode)>> {
+	let path = &repo.root().join(rela_path);
 	let metadata = match fs::symlink_metadata(path) {
 		Ok(metadata) => metadata,
 		Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -1434,7 +1475,7 @@ fn read_worktree_entry(path: &Path, index_mode: Mode) -> Result<Option<(Vec<u8>,
 		return Ok(None);
 	}
 	let mode = worktree_file_mode(&metadata, index_mode);
-	Ok(Some((fs::read(path)?, mode)))
+	Ok(Some((filter.worktree_to_git(rela_path, fs::read(path)?)?, mode)))
 }
 
 #[cfg(unix)]
@@ -1525,6 +1566,8 @@ fn entry_kind(mode: Mode) -> EntryKind {
 
 fn write_patch_worktree(
 	repo: &GitRepo,
+	gix_repo: &gix::Repository,
+	filter: &mut WorktreeFilter<'_>,
 	patches: &[FilePatch],
 	reverse: bool,
 	state: &BTreeMap<String, FileEntry>,
@@ -1540,7 +1583,7 @@ fn write_patch_worktree(
 			let entry = state.get(target).ok_or_else(|| Error::PatchFailed {
 				message: format!("missing applied path {target}"),
 			})?;
-			write_worktree_entry(repo, target, entry, &repo.gix()?)?;
+			write_worktree_entry(repo, gix_repo, filter, target, entry)?;
 		}
 	}
 	Ok(())
@@ -1548,10 +1591,11 @@ fn write_patch_worktree(
 
 fn write_worktree_map(
 	repo: &GitRepo,
+	gix_repo: &gix::Repository,
+	filter: &mut WorktreeFilter<'_>,
 	previous: &BTreeMap<String, FileEntry>,
 	next: &BTreeMap<String, FileEntry>,
 ) -> Result<()> {
-	let gix_repo = repo.gix()?;
 	for path in previous.keys() {
 		if !next.contains_key(path) {
 			remove_worktree_path(repo, path)?;
@@ -1559,7 +1603,7 @@ fn write_worktree_map(
 	}
 	for (path, entry) in next {
 		if previous.get(path) != Some(entry) || !repo.root().join(path).exists() {
-			write_worktree_entry(repo, path, entry, &gix_repo)?;
+			write_worktree_entry(repo, gix_repo, filter, path, entry)?;
 		}
 	}
 	Ok(())
@@ -1664,6 +1708,7 @@ fn unstaged_changed_paths(
 fn checkout_changed_paths(
 	repo: &GitRepo,
 	gix_repo: &gix::Repository,
+	filter: &mut WorktreeFilter<'_>,
 	merged: &BTreeMap<String, FileEntry>,
 	worktree: &BTreeMap<String, FileEntry>,
 	changed: &BTreeSet<String>,
@@ -1671,7 +1716,7 @@ fn checkout_changed_paths(
 ) -> Result<()> {
 	for path in changed {
 		match worktree.get(path) {
-			Some(entry) => write_worktree_entry(repo, path, entry, gix_repo)?,
+			Some(entry) => write_worktree_entry(repo, gix_repo, filter, path, entry)?,
 			None => remove_worktree_path(repo, path)?,
 		}
 	}
@@ -1702,11 +1747,14 @@ fn checkout_changed_paths(
 		.map_err(|err| Error::backend("git write index", err))
 }
 
+/// Materialize `entry` at repo-relative `path`, regular files through the
+/// smudge filters as a checkout would.
 fn write_worktree_entry(
 	repo: &GitRepo,
+	gix_repo: &gix::Repository,
+	filter: &mut WorktreeFilter<'_>,
 	path: &str,
 	entry: &FileEntry,
-	gix_repo: &gix::Repository,
 ) -> Result<()> {
 	validate_repo_path(path).map_err(ApplyFailure::into_error)?;
 	let absolute = repo.root().join(path);
@@ -1725,7 +1773,7 @@ fn write_worktree_entry(
 		fs::write(&absolute, bytes)?;
 		return Ok(());
 	}
-	fs::write(&absolute, bytes)?;
+	fs::write(&absolute, filter.git_to_worktree(path, bytes)?)?;
 	#[cfg(unix)]
 	{
 		use std::os::unix::fs::PermissionsExt;
@@ -1816,6 +1864,10 @@ mod tests {
 		git(temp.path(), &["init", "-q"]);
 		git(temp.path(), &["config", "user.name", "Patch Test"]);
 		git(temp.path(), &["config", "user.email", "patch@example.com"]);
+		// Assertions compare exact worktree bytes and stat-sensitive status;
+		// Git for Windows' system `core.autocrlf=true` would rewrite them as
+		// CRLF. `patch_apply_under_autocrlf_matches_git` covers conversion.
+		git(temp.path(), &["config", "core.autocrlf", "false"]);
 		for (path, bytes) in files {
 			let absolute = temp.path().join(path);
 			if let Some(parent) = absolute.parent() {
@@ -2018,6 +2070,89 @@ mod tests {
 			git(ours.path(), &["status", "--porcelain"]),
 			git(oracle.path(), &["status", "--porcelain"])
 		);
+	}
+
+	/// Repo whose blobs are committed verbatim, then checked out again under
+	/// `core.autocrlf=true` so LF blobs land as CRLF worktree files.
+	fn init_autocrlf(files: &[(&str, &[u8])]) -> TempDir {
+		let temp = tempfile::tempdir().expect("tempdir");
+		git(temp.path(), &["init", "-q"]);
+		git(temp.path(), &["config", "user.name", "Patch Test"]);
+		git(temp.path(), &["config", "user.email", "patch@example.com"]);
+		git(temp.path(), &["config", "core.autocrlf", "false"]);
+		for (path, bytes) in files {
+			fs::write(temp.path().join(path), bytes).expect("write fixture");
+		}
+		git(temp.path(), &["add", "-A"]);
+		git(temp.path(), &["commit", "-qm", "base"]);
+		git(temp.path(), &["config", "core.autocrlf", "true"]);
+		for (path, _) in files {
+			fs::remove_file(temp.path().join(path)).expect("remove fixture");
+		}
+		git(temp.path(), &["checkout", "--", "."]);
+		temp
+	}
+
+	#[test]
+	fn patch_apply_under_autocrlf_matches_git() {
+		// Regression: worktree files were patched as raw bytes, so an LF patch
+		// never matched a CRLF checkout under `core.autocrlf=true` (the Git for
+		// Windows default) and clean CRLF files read as stashable edits.
+		// `crlf.txt` keeps CRLF in its blob, so its patch carries CRLF context
+		// that git matches against the unconverted file.
+		let files: Vec<(&str, &[u8])> =
+			vec![("text.txt", b"alpha\nbeta\ngamma\n"), ("crlf.txt", b"one\r\ntwo\r\n")];
+		let ours = init_autocrlf(&files);
+		let oracle = init_autocrlf(&files);
+		assert_eq!(
+			fs::read(ours.path().join("text.txt")).expect("read checkout"),
+			b"alpha\r\nbeta\r\ngamma\r\n"
+		);
+		assert!(
+			!repo(ours.path())
+				.stash_push(None)
+				.expect("stash clean checkout")
+		);
+
+		fs::write(ours.path().join("text.txt"), b"alpha\r\nBETA\r\ngamma\r\n").expect("edit text");
+		fs::write(ours.path().join("crlf.txt"), b"one\r\nTWO\r\n").expect("edit crlf");
+		let patch = git(ours.path(), &["diff", "--no-ext-diff"]);
+		assert!(patch.contains("+BETA\n"), "{patch}");
+		assert!(patch.contains("+TWO\r\n"), "{patch}");
+		reset(ours.path());
+
+		for reverse in [false, true] {
+			let options = ApplyOptions { reverse, ..ApplyOptions::default() };
+			assert!(
+				repo(ours.path())
+					.can_apply_patch(&patch, &options)
+					.expect("check patch"),
+				"reverse={reverse}"
+			);
+			repo(ours.path())
+				.apply_patch(&patch, &options)
+				.expect("apply worktree");
+			let patch_file = oracle.path().join("change.patch");
+			fs::write(&patch_file, &patch).expect("write patch");
+			let args: &[&str] = if reverse {
+				&["apply", "--reverse", "change.patch"]
+			} else {
+				&["apply", "change.patch"]
+			};
+			git(oracle.path(), args);
+			fs::remove_file(patch_file).expect("remove patch");
+			for (path, _) in &files {
+				assert_eq!(
+					fs::read(ours.path().join(path)).expect("read ours"),
+					fs::read(oracle.path().join(path)).expect("read oracle"),
+					"{path} reverse={reverse}"
+				);
+			}
+			assert_eq!(
+				git(ours.path(), &["status", "--porcelain"]),
+				git(oracle.path(), &["status", "--porcelain"])
+			);
+		}
 	}
 
 	#[test]

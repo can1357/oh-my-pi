@@ -309,7 +309,16 @@ describe("RPC subagent registry", () => {
 
 		expect(frames).toHaveLength(1);
 		expect(frames[0]).toEqual({ type: "subagent_event", payload: eventPayload });
+		registry.setSubscriptionLevel("progress");
+		eventBus.emit(TASK_SUBAGENT_EVENT_CHANNEL, eventPayload);
+		expect(frames).toHaveLength(1);
+		registry.setSubscriptionLevel("events");
+		eventBus.emit(TASK_SUBAGENT_EVENT_CHANNEL, eventPayload);
+		expect(frames).toHaveLength(2);
 		registry.dispose();
+		registry.setSubscriptionLevel("events");
+		eventBus.emit(TASK_SUBAGENT_EVENT_CHANNEL, eventPayload);
+		expect(frames).toHaveLength(2);
 	});
 });
 
@@ -428,7 +437,8 @@ function handle(frame) {
 		client.onSessionEvent(event => sessionEventTypes.push(event.type));
 
 		await client.start();
-		await expect(client.setSubagentSubscription("events")).resolves.toBe("events");
+		// Plain await, not `.resolves`: on Windows Bun's in-place promise wait never services the child pipe.
+		expect(await client.setSubagentSubscription("events")).toBe("events");
 		await client.promptAndWait("Trigger subagent frames");
 		expect(await client.getSubagents()).toHaveLength(1);
 		expect(await client.getSubagentMessages({ sessionFile: "/tmp/subagent.jsonl" })).toMatchObject({

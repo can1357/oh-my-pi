@@ -11,6 +11,7 @@
  * - Prompt completion: one `prompt_result` per accepted prompt, correlated by the command `id`
  * - Extension UI: Extension UI requests are emitted, client responds with extension_ui_response
  */
+import * as fs from "node:fs";
 import * as path from "node:path";
 import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import { getOAuthProviders } from "@oh-my-pi/pi-ai/oauth";
@@ -68,6 +69,7 @@ import { MAX_RPC_FRAME_BYTES, MAX_RPC_REASSEMBLED_BYTES, RpcFrameEncoder } from 
 import { claimRpcInput, readRpcInputFrames } from "./rpc-input";
 import { pageRpcMessages, RPC_MESSAGES_PAGE_BUSY_ERROR, RpcMessagesPageError } from "./rpc-messages";
 import { RpcGoalController } from "./rpc-goal";
+import { RpcLiveBridge, type RpcLiveSessionFactory } from "./rpc-live";
 import { RpcOutputWriter } from "./rpc-output";
 import {
 	RpcExtensionUserMessageTracker,
@@ -407,7 +409,7 @@ export function dispatchRpcControlFrame(parsed: unknown, deps: RpcInputFrameDeps
  * the serial tail.)
  * A Set, not a Record: `type` is untrusted input and must not hit prototype keys.
  */
-const BACKGROUND_COMMANDS: ReadonlySet<string> = new Set<RpcCommand["type"]>(["bash", "predict_word"]);
+const BACKGROUND_COMMANDS: ReadonlySet<string> = new Set<RpcCommand["type"]>(["bash", "predict_word", "live_start"]);
 
 /**
  * Dispatch a single parsed frame from the RPC input stream.
@@ -423,13 +425,14 @@ const BACKGROUND_COMMANDS: ReadonlySet<string> = new Set<RpcCommand["type"]>(["b
  * while a shell command runs, or `abort` (and `steer`/`follow_up`/`get_state`)
  * while a `prompt` or `steer_subagent` is still admitting. `predict_word` is
  * backgrounded too, so a cold prediction engine never stalls the command queue
- * behind a keystroke.
+ * behind a keystroke. `live_start` responds only once the realtime session is
+ * connected and recording, so it is backgrounded and `live_stop` can cancel it.
  * Response correlation is preserved via each command's `id`; ordering across
  * concurrent commands is not guaranteed and clients MUST match on `id`.
  *
  * @returns `undefined` when the frame was routed to a side-channel handler
  *   (extension UI response, host tool/URI frames) or dispatched in the
- *   background (`bash`, `predict_word`, `prompt`, `steer`, `follow_up`, `steer_subagent`). Otherwise a promise that
+ *   background (`bash`, `predict_word`, `live_start`, `prompt`, `steer`, `follow_up`, `steer_subagent`). Otherwise a promise that
  *   resolves once the response for the command has been emitted via `output`.
  *   Errors from `handleCommand` on a command dispatched inline propagate; the
  *   caller is expected to wrap them.
@@ -1201,6 +1204,8 @@ export interface RpcModeOptions {
 	headless?: boolean;
 	subagentEventBus?: EventBus;
 	input?: ReadableStream<Uint8Array>;
+	/** Builds `live_start` sessions; defaults to the real {@link LiveSessionController}. */
+	createLiveSession?: RpcLiveSessionFactory;
 }
 
 /**
@@ -1208,7 +1213,7 @@ export interface RpcModeOptions {
  * Listens for JSON commands on stdin, outputs events and responses on stdout.
  */
 export async function runRpcMode(session: AgentSession, options: RpcModeOptions = {}): Promise<never> {
-	const { setToolUIContext, headless = false, subagentEventBus, input = claimRpcInput() } = options;
+	const { setToolUIContext, headless = false, subagentEventBus, input = claimRpcInput(), createLiveSession } = options;
 	// Signal to RPC clients that the server is ready to accept commands
 	// Suppress terminal notifications: they write \x07 (BEL) or OSC sequences directly to
 	// process.stdout with no newline, which the reader merges with the next JSON line and
@@ -1217,7 +1222,12 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 	process.env.PI_NOTIFICATIONS = "off";
 
 	const frameEncoder = new RpcFrameEncoder();
-	const outputWriter = new RpcOutputWriter(process.stdout, failure => {
+	// Bun on Windows writes a piped process.stdout with a blocking WriteFile on the
+	// JS thread and never reports backpressure, so a client that stops reading
+	// stdout froze the whole worker, stdin reader included. An fd write stream
+	// writes from the threadpool and reports backpressure, letting the writer spool.
+	const stdout = process.platform === "win32" ? fs.createWriteStream("", { fd: 1, autoClose: false }) : process.stdout;
+	const outputWriter = new RpcOutputWriter(stdout, failure => {
 		logger.error("RPC output delivery failed", { error: String(failure) });
 		void session.dispose().finally(() => process.exit(1));
 	});
@@ -1269,6 +1279,8 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 	const pendingExtensionRequests = new RpcPendingExtensionRequests();
 	const hostToolBridge = new RpcHostToolBridge(output);
 	const hostUriBridge = new RpcHostUriBridge(output);
+	// Live frames go straight to `output`, so `set_event_filter` (session events only) never drops them.
+	const liveBridge = new RpcLiveBridge(session, output, createLiveSession);
 	const subagentRegistry = subagentEventBus ? new RpcSubagentRegistry(subagentEventBus, output) : undefined;
 
 	// Shutdown request flag (wrapped in object to allow mutation with const)
@@ -1550,6 +1562,8 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 	 */
 	const disposeAndExit = async (): Promise<never> => {
 		try {
+			// Close the realtime call (microphone, socket) before the session it delegates into.
+			await liveBridge.stop();
 			await session.dispose();
 		} catch (error) {
 			if (!persistenceFailure || error !== persistenceFailure) throw error;
@@ -1950,6 +1964,31 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 				const rpcTools = hostToolBridge.setTools(tools);
 				await session.refreshRpcHostTools(rpcTools);
 				return success(id, "set_host_tools", { toolNames: tools.map(tool => tool.name) });
+			}
+
+			case "live_start": {
+				try {
+					return success(
+						id,
+						"live_start",
+						await liveBridge.start({ voice: command.voice, instructions: command.instructions }),
+					);
+				} catch (err) {
+					return error(id, "live_start", err instanceof Error ? err.message : String(err));
+				}
+			}
+
+			case "live_stop": {
+				await liveBridge.stop();
+				return success(id, "live_stop");
+			}
+
+			case "live_mute": {
+				try {
+					return success(id, "live_mute", liveBridge.setMuted(command.muted));
+				} catch (err) {
+					return error(id, "live_mute", err instanceof Error ? err.message : String(err));
+				}
 			}
 
 			case "set_host_uri_schemes": {
@@ -2434,6 +2473,7 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 	pendingExtensionRequests.rejectAll("RPC client disconnected before extension UI response completed");
 	hostToolBridge.close("RPC client disconnected before host tool execution completed");
 	hostUriBridge.clear("RPC client disconnected before host URI request completed");
+	await liveBridge.stop();
 	await inputDispatcher.drain();
 	await shutdownCoordinator.drain();
 	subagentRegistry?.dispose();

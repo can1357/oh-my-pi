@@ -2403,12 +2403,20 @@ describe("runGcCommand stale state", () => {
 		const agentDir = path.join(root, "agent");
 		const collabDir = path.join(root, "collab");
 		const resumed = await writeAged(collabDir, "room-resumed.jsonl", "{}\n", 60);
-		const held = await writeAged(collabDir, "room-held.jsonl", "{}\n", 60);
+		// Unique per run: the lease is machine-wide, so a fixed id would contend
+		// with the same test running concurrently elsewhere.
+		const heldId = Bun.randomUUIDv7();
+		const held = await writeAged(
+			collabDir,
+			"room-held.jsonl",
+			`${JSON.stringify({ type: "session", id: heldId, timestamp: new Date().toISOString(), cwd: root })}\n`,
+			60,
+		);
 		const idle = await writeAged(collabDir, "room-idle.jsonl", "{}\n", 60);
 		// `--continue` in this terminal reopens the replica it last switched to.
 		await writeAged(getTerminalSessionsDir(agentDir), "tty-guest", `${root}\n${resumed}\n`);
-		// A live guest writing its replica holds the session ownership lease.
-		const release = new FileSessionStorage().claimSessionFile(held);
+		// A live guest writing its replica holds the session's ownership lease.
+		const release = new FileSessionStorage().claimSession(heldId, held);
 		if (!release) throw new Error("Expected to claim the replica lease");
 		let result: GcResult;
 		try {

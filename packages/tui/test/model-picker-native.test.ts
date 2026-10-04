@@ -287,6 +287,42 @@ test("pointer events drive the hub through the same paths as its keys", () => {
 	expect(calls.cancel).toBe(1);
 });
 
+test("the Roles view picker names the active preset and ctrl+←/→ switches it", () => {
+	const presets = { names: ["fast", "slow"], active: "fast" as string | undefined };
+	let revision = 0;
+	const switched: string[] = [];
+	const base = source({ default: "demo/demo" }, []);
+	const hub = new ModelHubComponent(
+		ui,
+		Object.defineProperty({ ...base, getModelPresets: () => presets }, "revision", { get: () => revision }),
+		registry(MODELS),
+		MODELS.map(entry => ({ model: entry })),
+		{
+			onAssign: () => {},
+			onUnassign: () => {},
+			onCancel: () => {},
+			onSwitchPreset: name => {
+				switched.push(name);
+				presets.active = name;
+				revision++;
+			},
+		},
+	);
+	hubs.push(hub);
+	const subtitleText = () => {
+		const subtitle = props(hub.describe(withPicker)).subtitle;
+		return Array.isArray(subtitle) ? subtitle.map(part => part.t).join("") : subtitle;
+	};
+
+	hub.handleInput("\x1b[A"); // All models → Roles
+	expect(subtitleText()).toStartWith("Preset fast");
+	hub.handleInput("\x1b[1;5C");
+	expect(switched).toEqual(["slow"]);
+	expect(subtitleText()).toStartWith("Preset slow");
+	hub.handleInput("\x1b[1;5D");
+	expect(switched).toEqual(["slow", "fast"]);
+});
+
 test("the quick picker is an md sheet with the summary below and a task-model toggle", () => {
 	const picked: string[] = [];
 	const picker = new ModelPickerComponent(

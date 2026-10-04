@@ -28,7 +28,7 @@ const enum ToolCallStatus {
  * `convertAnthropicMessages` (and friends) unchanged, so the `_dupN` suffix
  * MUST not push a normalized id past this bound.
  */
-const MAX_TOOL_CALL_ID_LENGTH = 64;
+export const MAX_TOOL_CALL_ID_LENGTH = 64;
 
 /**
  * OpenAI Responses-family APIs mint composite tool ids (`call_id|item_id`);
@@ -128,7 +128,7 @@ function toolCallPairingKey(id: string, originScope: ToolCallOriginScope): strin
 	return originScope.responsesComponents.has(prefix) ? prefix : id;
 }
 
-function appendDuplicateSuffix(originalId: string, suffix: string, maxLength: number): string {
+export function appendDuplicateSuffix(originalId: string, suffix: string, maxLength: number): string {
 	// Responses-family ids are composites (`callId|itemId`): the wire call_id is
 	// the FIRST segment (normalizeResponsesToolCallId splits on `|`), so the
 	// suffix must land on every segment or the duplicate collapses back onto the
