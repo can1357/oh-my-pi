@@ -858,12 +858,21 @@ export async function listRecentProjects(
  * `idPrefix`, located by filename without reading content. Prefixes outside
  * `[A-Za-z0-9_-]` match nothing, so the prefix is never interpreted as a glob.
  */
-export async function findSessionFiles(idPrefix: string, sessionsRoot: string = getSessionsDir()): Promise<string[]> {
+export async function findSessionFiles(
+	idPrefix: string,
+	sessionsRoot: string = getSessionsDir(),
+	storage: SessionStorage = defaultSessionStorage(),
+): Promise<string[]> {
 	if (!/^[\w-]+$/.test(idPrefix)) return [];
 	try {
-		const files = await Array.fromAsync(new Bun.Glob(`*/*_${idPrefix}*.jsonl`).scan(sessionsRoot), name =>
-			path.join(sessionsRoot, name),
-		);
+		// Key-indexed storages match only `*`, `*.ext` and exact names, so they
+		// list every session and leave the id match to the filter below.
+		const files =
+			storage instanceof FileSessionStorage
+				? await Array.fromAsync(new Bun.Glob(`*/*_${idPrefix}*.jsonl`).scan(sessionsRoot), name =>
+						path.join(sessionsRoot, name),
+					)
+				: storage.listFilesSync(sessionsRoot, "*/*.jsonl");
 		// `*_` can also match an underscore inside an id; keep true id-prefix matches only.
 		return files.filter(file => sessionIdFromSessionPath(file)?.startsWith(idPrefix));
 	} catch {

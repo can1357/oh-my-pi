@@ -14,8 +14,11 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { HistoryStorage } from "@oh-my-pi/pi-coding-agent/session/history-storage";
 import { recordSessionRecap, resetSessionIndexForTests } from "@oh-my-pi/pi-coding-agent/session/session-index";
 import { sessionDirForCwd } from "@oh-my-pi/pi-coding-agent/session/session-paths";
+import { FileSessionStorage, setDefaultSessionStorage } from "@oh-my-pi/pi-coding-agent/session/session-storage";
+import { SqlSessionStorage } from "@oh-my-pi/pi-coding-agent/session/sql-session-storage";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { getConfigRootDir, removeSyncWithRetries, setAgentDir } from "@oh-my-pi/pi-utils";
+import { SQL } from "bun";
 import { makeAssistantMessage } from "./session-manager/helpers";
 
 const originalAgentDir = process.env.PI_CODING_AGENT_DIR;
@@ -23,17 +26,13 @@ let root: string;
 let app: string;
 let lib: string;
 
-/** Writes a session file with mtime `at` and an id starting with `label`; returns the id. */
-function writeSession(
-	cwd: string,
-	label: string,
+/** JSONL transcript of session `id`, created at `at` in `cwd`. */
+function sessionContent(
+	id: string,
 	at: string,
+	cwd: string,
 	options: { prompt?: string; answered?: boolean } = {},
 ): string {
-	const time = new Date(at);
-	const id = `${label}-${crypto.randomUUID()}`;
-	const dir = sessionDirForCwd(cwd);
-	fs.mkdirSync(dir, { recursive: true });
 	const entries: unknown[] = [{ type: "session", version: 3, id, timestamp: at, cwd }];
 	if (options.prompt) {
 		entries.push({
@@ -46,8 +45,22 @@ function writeSession(
 	if (options.answered) {
 		entries.push({ type: "message", id: "a1", parentId: "u1", message: makeAssistantMessage() });
 	}
+	return `${entries.map(entry => JSON.stringify(entry)).join("\n")}\n`;
+}
+
+/** Writes a session file with mtime `at` and an id starting with `label`; returns the id. */
+function writeSession(
+	cwd: string,
+	label: string,
+	at: string,
+	options: { prompt?: string; answered?: boolean } = {},
+): string {
+	const time = new Date(at);
+	const id = `${label}-${crypto.randomUUID()}`;
+	const dir = sessionDirForCwd(cwd);
+	fs.mkdirSync(dir, { recursive: true });
 	const file = path.join(dir, `${time.getTime()}_${id}.jsonl`);
-	fs.writeFileSync(file, `${entries.map(entry => JSON.stringify(entry)).join("\n")}\n`);
+	fs.writeFileSync(file, sessionContent(id, at, cwd, options));
 	fs.utimesSync(file, time, time);
 	return id;
 }
@@ -148,5 +161,28 @@ describe("archive prelude", () => {
 
 	it("rejects misspelled options instead of falling back to the default scope", async () => {
 		await expect(call({ action: "sessions", projects: "*" })).rejects.toThrow("invalid arguments");
+	});
+});
+
+describe("archive prelude under session.storage: sql", () => {
+	it("opens a session it lists by that session's id prefix", async () => {
+		// What main.ts installs for `session.storage: sql`: the transcript lives only in the table.
+		const client = new SQL("sqlite::memory:");
+		const storage = await SqlSessionStorage.create({ client });
+		setDefaultSessionStorage(storage);
+		try {
+			const at = "2024-06-01T00:00:00.000Z";
+			const id = `sql-${crypto.randomUUID()}`;
+			const file = path.join(sessionDirForCwd(app), `${new Date(at).getTime()}_${id}.jsonl`);
+			await storage.writeText(file, sessionContent(id, at, app, { prompt: "sql work", answered: true }));
+
+			const listed = await call<ArchiveSession[]>({ action: "sessions" });
+			expect(listed.map(session => session.id)).toEqual([id]);
+			const detail = await call<ArchiveSessionDetail>({ action: "session", id: id.slice(0, 12) });
+			expect([detail.id, detail.file]).toEqual([id, file]);
+		} finally {
+			setDefaultSessionStorage(new FileSessionStorage());
+			await client.end();
+		}
 	});
 });
