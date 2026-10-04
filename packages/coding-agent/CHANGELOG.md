@@ -10,7 +10,7 @@
 
 ### Added
 
-- Main agents in separate omp processes on the same machine can now message each other with `write agent://<address>`: enable **Cross-Process Peers** in `/settings`, run `/peers on` for one process, or launch with `--mailbox`. `/peers list` and `read history://` list peers, and incoming messages are delivered like subagent messages (aside while busy, a new turn while idle). Works on Windows (named pipes) and Linux/macOS (Unix sockets).
+- Main agents in separate omp processes on the same machine can now message each other with `write agent://<address>`: enable **Cross-Process Peers** in `/settings`, run `/peers on` for one process, or launch with `--mailbox`. `/peers list` and `read history://` list peers, and incoming messages are delivered like subagent messages (aside while busy, a new turn while idle). Works on Windows (named pipes) and Linux/macOS (Unix sockets) ([#14263](https://github.com/can1357/oh-my-pi/pull/14263) by [@jaredlyon](https://github.com/jaredlyon))
 - The `/models` Roles view shows which saved model preset is in effect, and Ctrl+←/→ (or `p`/`P` on the role rows, for macOS where Ctrl+←/→ switches Spaces) switches to the next or previous one, in Tern and text mode ([#14210](https://github.com/can1357/oh-my-pi/pull/14210) by [@H4vC](https://github.com/H4vC))
 
 ### Changed

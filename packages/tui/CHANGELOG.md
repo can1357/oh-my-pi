@@ -5,7 +5,7 @@
 ## [18.6.0] - 2026-10-03
 ### Added
 
-- Added a `peers` status-line segment that shows this process's cross-process peer address while peer messaging is on.
+- Added a `peers` status-line segment that shows this process's cross-process peer address while peer messaging is on ([#14263](https://github.com/can1357/oh-my-pi/pull/14263) by [@jaredlyon](https://github.com/jaredlyon))
 
 ### Fixed
 
