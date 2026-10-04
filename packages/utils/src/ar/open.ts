@@ -217,7 +217,23 @@ export async function extractArchive(
 			throw new ArchiveError(`Archive symlink escapes extraction dir: ${link.path} -> ${link.target}`);
 		}
 		await fs.mkdir(path.dirname(outputPath), { recursive: true });
-		await fs.symlink(path.relative(path.dirname(outputPath), resolvedTarget) || ".", outputPath);
+		const relativeTarget = path.relative(path.dirname(outputPath), resolvedTarget) || ".";
+		try {
+			await fs.symlink(relativeTarget, outputPath);
+		} catch (error) {
+			if (process.platform !== "win32" || (error as NodeJS.ErrnoException).code !== "EPERM") throw error;
+			// Windows without the symlink privilege: degrade to a directory
+			// junction or a file copy so extraction still yields usable
+			// content instead of failing the whole archive.
+			const targetStat = await fs.stat(resolvedTarget).catch(() => undefined);
+			if (targetStat?.isDirectory()) {
+				await fs.symlink(resolvedTarget, outputPath, "junction");
+			} else if (targetStat?.isFile()) {
+				await fs.copyFile(resolvedTarget, outputPath);
+			} else {
+				throw error;
+			}
+		}
 		count++;
 	}
 
