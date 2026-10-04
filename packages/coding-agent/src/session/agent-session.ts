@@ -557,7 +557,12 @@ import {
 	resetWindowModes,
 	resetWindowSettings,
 } from "./settings";
-import { type AnthropicSlowModeLane, anthropicSlowModeLanes, formatUsageLimitLabel } from "./anthropic-slow-mode";
+import {
+	type AnthropicSlowModeLane,
+	anthropicSlowModeLanes,
+	formatUsageLimitLabel,
+	isAnthropicSlowModeModel,
+} from "./anthropic-slow-mode";
 import type { UsageLimitState } from "./usage-limit";
 import { cfgInterruptMode } from "../modes/settings";
 import { cfgFollowUpMode } from "../modes/settings";
@@ -12739,7 +12744,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	#slowModeTarget(): { kind: "flex"; family: ServiceTierFamily } | { kind: "anthropic" } | undefined {
 		const model = this.model;
 		if (!model) return undefined;
-		if (model.provider === "anthropic") return { kind: "anthropic" };
+		if (isAnthropicSlowModeModel(model)) return { kind: "anthropic" };
 		const family = serviceTierFamily(model);
 		return family && isServiceTierForFamily(family, "flex") ? { kind: "flex", family } : undefined;
 	}

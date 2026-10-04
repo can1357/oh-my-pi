@@ -46,6 +46,7 @@ import {
 } from "@oh-my-pi/pi-tui/thinking";
 import type { EditModeSetting } from "../edit/settings";
 import type { AgentSessionEvent } from "./agent-session-events";
+import { prefersSlowModeOverUsageFallback } from "./anthropic-slow-mode";
 import type { ResetRecoveryResult } from "./codex-auto-reset";
 import type {
 	InitialRetryFallbackState,
@@ -1990,6 +1991,9 @@ export class TurnRecovery {
 		if (!cfgRetryUsageAwareFallback.get(this.#host.settings)) return false;
 		const currentModel = this.#host.model();
 		if (!currentModel) return false;
+		// Low priority serves past usage limits; a limit it cannot serve fails the
+		// request and the error-driven fallback takes over.
+		if (prefersSlowModeOverUsageFallback(currentModel, this.#host.settings)) return false;
 		const sessionId = this.#host.sessionManager.getSessionId();
 		const currentSelector = formatRetryFallbackSelector(currentModel, this.#host.thinkingLevel());
 		let health: ModelUsageHealth;
