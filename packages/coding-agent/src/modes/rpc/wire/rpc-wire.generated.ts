@@ -484,18 +484,24 @@ export type UsageLimitState = UsageLimitLowPriority | UsageLimitWrapUp;
 /** Rule that ordered the active variants of one skill name. */
 export type SkillSelectionReason = "source-order" | "custom-directory" | "authored-over-installed";
 
-/** Allowlisted identity of one discovered skill file. */
+/** Allowlisted identity of one discovered skill file; `repository`/`version` are what its plugin declares. */
 export interface SkillDiagnosticEntry {
 	name: string;
 	filePath: string;
 	source: string;
 	pluginName?: string;
+	repository?: string;
+	version?: string;
 }
 
-/** A file identical to a loaded skill and so not loaded; `retained` is the skill that stands for it. */
+/** Why a duplicate is not loaded: identical SKILL.md content, or a same-origin variant (`skills.dedupeSameOrigin`). */
+export type SkillDuplicateMatch = "content" | "origin";
+
+/** A file not loaded because `retained` stands for it; older snapshots imply `match: content`. */
 export interface SkillDiagnosticDuplicate {
 	skill: SkillDiagnosticEntry;
 	retained: SkillDiagnosticEntry;
+	match?: SkillDuplicateMatch;
 }
 
 /** A skill name that resolved into several active variants and/or left redundant copies unloaded. */

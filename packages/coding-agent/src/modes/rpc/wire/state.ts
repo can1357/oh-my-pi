@@ -107,12 +107,27 @@ export const stateDefs = {
 		"Rule that ordered the active variants of one skill name.",
 	),
 	SkillDiagnosticEntry: doc(
-		{ name: "string", filePath: "string", source: "string", "pluginName?": "string" },
-		"Allowlisted identity of one discovered skill file.",
+		{
+			name: "string",
+			filePath: "string",
+			source: "string",
+			"pluginName?": "string",
+			"repository?": "string",
+			"version?": "string",
+		},
+		"Allowlisted identity of one discovered skill file; `repository`/`version` are what its plugin declares.",
+	),
+	SkillDuplicateMatch: doc(
+		"'content' | 'origin'",
+		"Why a duplicate is not loaded: identical SKILL.md content, or a same-origin variant (`skills.dedupeSameOrigin`).",
 	),
 	SkillDiagnosticDuplicate: doc(
-		{ skill: "SkillDiagnosticEntry", retained: "SkillDiagnosticEntry" },
-		"A file identical to a loaded skill and so not loaded; `retained` is the skill that stands for it.",
+		{
+			skill: "SkillDiagnosticEntry",
+			retained: "SkillDiagnosticEntry",
+			match: absentAs("SkillDuplicateMatch", "content"),
+		},
+		"A file not loaded because `retained` stands for it; older snapshots imply `match: content`.",
 	),
 	SkillResolutionDiagnostic: doc(
 		{

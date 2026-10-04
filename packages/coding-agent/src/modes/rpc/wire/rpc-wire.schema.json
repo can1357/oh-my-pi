@@ -2651,6 +2651,12 @@
 				},
 				"pluginName": {
 					"type": "string"
+				},
+				"repository": {
+					"type": "string"
+				},
+				"version": {
+					"type": "string"
 				}
 			},
 			"required": [
@@ -2658,7 +2664,15 @@
 				"filePath",
 				"source"
 			],
-			"description": "Allowlisted identity of one discovered skill file."
+			"description": "Allowlisted identity of one discovered skill file; `repository`/`version` are what its plugin declares."
+		},
+		"SkillDuplicateMatch": {
+			"enum": [
+				"content",
+				"origin"
+			],
+			"type": "string",
+			"description": "Why a duplicate is not loaded: identical SKILL.md content, or a same-origin variant (`skills.dedupeSameOrigin`)."
 		},
 		"SkillDiagnosticDuplicate": {
 			"type": "object",
@@ -2668,13 +2682,17 @@
 				},
 				"retained": {
 					"$ref": "#/$defs/SkillDiagnosticEntry"
+				},
+				"match": {
+					"$ref": "#/$defs/SkillDuplicateMatch",
+					"default": "content"
 				}
 			},
 			"required": [
 				"skill",
 				"retained"
 			],
-			"description": "A file identical to a loaded skill and so not loaded; `retained` is the skill that stands for it."
+			"description": "A file not loaded because `retained` stands for it; older snapshots imply `match: content`."
 		},
 		"SkillResolutionDiagnostic": {
 			"type": "object",

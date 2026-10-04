@@ -2521,12 +2521,14 @@ func (v *SkillSelectionReason) UnmarshalJSON(data []byte) error {
 	return unknownValue("SkillSelectionReason", s)
 }
 
-// Allowlisted identity of one discovered skill file.
+// Allowlisted identity of one discovered skill file; `repository`/`version` are what its plugin declares.
 type SkillDiagnosticEntry struct {
 	Name       string  `json:"name"`
 	FilePath   string  `json:"filePath"`
 	Source     string  `json:"source"`
 	PluginName *string `json:"pluginName,omitempty"`
+	Repository *string `json:"repository,omitempty"`
+	Version    *string `json:"version,omitempty"`
 }
 
 func (v *SkillDiagnosticEntry) UnmarshalJSON(data []byte) error {
@@ -2540,6 +2542,8 @@ func (v *SkillDiagnosticEntry) decodeFrom(raw map[string]json.RawMessage) error 
 	d.required("filePath", &out.FilePath)
 	d.required("source", &out.Source)
 	d.optional("pluginName", &out.PluginName)
+	d.optional("repository", &out.Repository)
+	d.optional("version", &out.Version)
 	if d.err != nil {
 		return d.err
 	}
@@ -2547,10 +2551,32 @@ func (v *SkillDiagnosticEntry) decodeFrom(raw map[string]json.RawMessage) error 
 	return nil
 }
 
-// A file identical to a loaded skill and so not loaded; `retained` is the skill that stands for it.
+// Why a duplicate is not loaded: identical SKILL.md content, or a same-origin variant (`skills.dedupeSameOrigin`).
+type SkillDuplicateMatch string
+
+const (
+	SkillDuplicateMatchContent SkillDuplicateMatch = "content"
+	SkillDuplicateMatchOrigin  SkillDuplicateMatch = "origin"
+)
+
+func (v *SkillDuplicateMatch) UnmarshalJSON(data []byte) error {
+	s, err := decodeString(data, "SkillDuplicateMatch")
+	if err != nil {
+		return err
+	}
+	switch value := SkillDuplicateMatch(s); value {
+	case SkillDuplicateMatchContent, SkillDuplicateMatchOrigin:
+		*v = value
+		return nil
+	}
+	return unknownValue("SkillDuplicateMatch", s)
+}
+
+// A file not loaded because `retained` stands for it; older snapshots imply `match: content`.
 type SkillDiagnosticDuplicate struct {
 	Skill    SkillDiagnosticEntry `json:"skill"`
 	Retained SkillDiagnosticEntry `json:"retained"`
+	Match    SkillDuplicateMatch  `json:"match"`
 }
 
 func (v *SkillDiagnosticDuplicate) UnmarshalJSON(data []byte) error {
@@ -2562,6 +2588,7 @@ func (v *SkillDiagnosticDuplicate) decodeFrom(raw map[string]json.RawMessage) er
 	d := fieldDecoder{raw: raw, owner: "SkillDiagnosticDuplicate"}
 	d.required("skill", &out.Skill)
 	d.required("retained", &out.Retained)
+	d.defaulted("match", &out.Match, `"content"`)
 	if d.err != nil {
 		return d.err
 	}
