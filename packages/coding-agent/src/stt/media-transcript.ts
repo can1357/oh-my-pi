@@ -17,10 +17,13 @@ import { sttClient } from "./asr-client";
 import { isSttModelCached } from "./downloader";
 import { DEFAULT_ENDPOINTER_CONFIG } from "./endpointer";
 import { resolveSttModelSpec, type SttModel } from "./models";
-import { type AudioChunk, AudioChunker, type SttSegment, trimSegmentsToSpeech } from "./transcript";
-
-/** The speech models take 16 kHz mono input. */
-const TRANSCRIBE_SAMPLE_RATE = 16_000;
+import {
+	type AudioChunk,
+	AudioChunker,
+	type SttSegment,
+	TRANSCRIBE_SAMPLE_RATE,
+	trimSegmentsToSpeech,
+} from "./transcript";
 
 /** A file that cannot be transcribed for a reason the agent can act on. Message is user-facing. */
 export class MediaTranscriptError extends Error {}
@@ -94,7 +97,7 @@ const inFlightTranscripts = new Map<string, TranscriptJob>();
 /**
  * Transcribe the first audio stream of an audio or video file. Throws
  * {@link MediaTranscriptError} when the file has no audio stream or the speech
- * model is not downloaded (reads never download the ~hundreds-of-MB model).
+ * model is not downloaded (reads never download it).
  */
 export async function transcribeMediaFile(
 	absolutePath: string,
@@ -196,7 +199,7 @@ async function produceTranscript(
 			segments.push({ start: segment.start + offset, end: segment.end + offset, text: segment.text });
 		}
 	};
-	const chunker = new AudioChunker({ sampleRate: TRANSCRIBE_SAMPLE_RATE });
+	const chunker = new AudioChunker();
 	for await (const samples of decodeAudioPcm(absolutePath, TRANSCRIBE_SAMPLE_RATE, signal)) {
 		for (const chunk of chunker.push(samples)) await transcribeChunk(chunk);
 	}

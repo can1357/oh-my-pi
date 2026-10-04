@@ -126,7 +126,10 @@ export function trimSegmentsToSpeech(
 	const rms = new Float64Array(frameCount);
 	for (let index = 0; index < frameCount; index++) {
 		let sum = 0;
-		for (let i = index * frame; i < (index + 1) * frame; i++) sum += audio[i]! * audio[i]!;
+		for (let i = index * frame; i < (index + 1) * frame; i++) {
+			const sample = audio[i]!;
+			sum += sample * sample;
+		}
 		rms[index] = Math.sqrt(sum / frame);
 	}
 	const quiet = Float64Array.from(rms).sort()[Math.floor(frameCount * TRIM_QUIET_PERCENTILE)]!;
@@ -156,84 +159,57 @@ export interface AudioChunk {
 	audio: Float32Array;
 }
 
-export interface AudioChunkerConfig {
-	sampleRate: number;
-	/** Longest window handed to the model. Whisper's receptive field is 30 s. */
-	maxChunkS: number;
-	/** How far back from the window end to look for a quiet place to cut. */
-	searchS: number;
-	/** Energy analysis frame. */
-	frameMs: number;
-	/** Frames averaged when ranking cut points, so a pause beats a momentary dip inside a word. */
-	smoothFrames: number;
-}
-
-export const DEFAULT_AUDIO_CHUNKER_CONFIG: AudioChunkerConfig = {
-	sampleRate: 16_000,
-	maxChunkS: 30,
-	searchS: 8,
-	frameMs: 30,
-	smoothFrames: 7,
-};
+/** The speech models take 16 kHz mono input. */
+export const TRANSCRIBE_SAMPLE_RATE = 16_000;
+/** Longest window handed to the model: Whisper's 30 s receptive field. */
+const CHUNK_MAX_SAMPLES = 30 * TRANSCRIBE_SAMPLE_RATE;
+/** How far back from the window end to look for a quiet place to cut. */
+const CHUNK_SEARCH_SAMPLES = 8 * TRANSCRIBE_SAMPLE_RATE;
+/** 30 ms energy analysis frame. */
+const CHUNK_FRAME_SAMPLES = (30 * TRANSCRIBE_SAMPLE_RATE) / 1000;
+/** Frames averaged when ranking cut points, so a pause beats a momentary dip inside a word. */
+const CHUNK_SMOOTH_FRAMES = 7;
 
 /**
  * Sample index in `[from, to)` at the centre of the quietest run of
- * `smoothFrames` analysis frames. Ties keep the latest run so windows stay long.
+ * {@link CHUNK_SMOOTH_FRAMES} analysis frames. Ties keep the latest run so windows stay long.
  */
-export function quietestCut(
-	audio: Float32Array,
-	from: number,
-	to: number,
-	frameSamples: number,
-	smoothFrames: number,
-): number {
-	const frameCount = Math.floor((to - from) / frameSamples);
-	if (frameCount <= 0) return to;
+function quietestCut(audio: Float32Array, from: number, to: number): number {
+	const frameCount = Math.floor((to - from) / CHUNK_FRAME_SAMPLES);
 	const energy = new Float64Array(frameCount);
 	for (let frame = 0; frame < frameCount; frame++) {
-		const base = from + frame * frameSamples;
+		const base = from + frame * CHUNK_FRAME_SAMPLES;
 		let sum = 0;
-		for (let i = base; i < base + frameSamples; i++) sum += audio[i]! * audio[i]!;
+		for (let i = base; i < base + CHUNK_FRAME_SAMPLES; i++) {
+			const sample = audio[i]!;
+			sum += sample * sample;
+		}
 		energy[frame] = sum;
 	}
-	const run = Math.min(smoothFrames, frameCount);
 	let windowSum = 0;
-	for (let frame = 0; frame < run; frame++) windowSum += energy[frame]!;
+	for (let frame = 0; frame < CHUNK_SMOOTH_FRAMES; frame++) windowSum += energy[frame]!;
 	let best = windowSum;
 	let bestStart = 0;
-	for (let frame = run; frame < frameCount; frame++) {
-		windowSum += energy[frame]! - energy[frame - run]!;
+	for (let frame = CHUNK_SMOOTH_FRAMES; frame < frameCount; frame++) {
+		windowSum += energy[frame]! - energy[frame - CHUNK_SMOOTH_FRAMES]!;
 		if (windowSum <= best) {
 			best = windowSum;
-			bestStart = frame - run + 1;
+			bestStart = frame - CHUNK_SMOOTH_FRAMES + 1;
 		}
 	}
-	return from + Math.round((bestStart + run / 2) * frameSamples);
+	return from + Math.round((bestStart + CHUNK_SMOOTH_FRAMES / 2) * CHUNK_FRAME_SAMPLES);
 }
 
 /**
- * Cuts a stream of 16 kHz mono samples into windows of at most `maxChunkS`,
- * ending each window at the quietest point in its last `searchS` seconds so
- * a cut rarely lands inside a word. Chunks are contiguous and cover every
- * sample exactly once.
+ * Cuts a stream of {@link TRANSCRIBE_SAMPLE_RATE} mono samples into windows of at
+ * most 30 s, ending each window at the quietest point in its last 8 s so a cut
+ * rarely lands inside a word. Chunks are contiguous and cover every sample
+ * exactly once.
  */
 export class AudioChunker {
-	readonly #maxSamples: number;
-	readonly #searchSamples: number;
-	readonly #frameSamples: number;
-	readonly #smoothFrames: number;
-	#buffer: Float32Array;
+	#buffer = new Float32Array(CHUNK_MAX_SAMPLES * 2);
 	#length = 0;
 	#offset = 0;
-
-	constructor(config: Partial<AudioChunkerConfig> = {}) {
-		const cfg = { ...DEFAULT_AUDIO_CHUNKER_CONFIG, ...config };
-		this.#maxSamples = Math.round(cfg.sampleRate * cfg.maxChunkS);
-		this.#searchSamples = Math.min(this.#maxSamples - 1, Math.round(cfg.sampleRate * cfg.searchS));
-		this.#frameSamples = Math.max(1, Math.round((cfg.sampleRate * cfg.frameMs) / 1000));
-		this.#smoothFrames = Math.max(1, cfg.smoothFrames);
-		this.#buffer = new Float32Array(this.#maxSamples * 2);
-	}
 
 	/** Append samples; returns every window that is now complete. */
 	push(samples: Float32Array): AudioChunk[] {
@@ -246,15 +222,10 @@ export class AudioChunker {
 		this.#buffer.set(samples, this.#length);
 		this.#length = needed;
 		const chunks: AudioChunk[] = [];
-		while (this.#length >= this.#maxSamples) {
-			const cut = quietestCut(
-				this.#buffer,
-				this.#maxSamples - this.#searchSamples,
-				this.#maxSamples,
-				this.#frameSamples,
-				this.#smoothFrames,
+		while (this.#length >= CHUNK_MAX_SAMPLES) {
+			chunks.push(
+				this.#take(quietestCut(this.#buffer, CHUNK_MAX_SAMPLES - CHUNK_SEARCH_SAMPLES, CHUNK_MAX_SAMPLES)),
 			);
-			chunks.push(this.#take(cut));
 		}
 		return chunks;
 	}

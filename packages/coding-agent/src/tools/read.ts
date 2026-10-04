@@ -1108,10 +1108,10 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 	async #applyMediaSelectorFallback(
 		literalSplit: { path: string; sel?: string },
 		readPath: string,
-		transcribeFiles: boolean,
 	): Promise<{ path: string; sel?: string }> {
 		const mediaSplit =
-			(transcribeFiles ? splitTranscriptReadTarget(readPath) : null) ?? splitVideoReadTarget(readPath);
+			(cfgSttTranscribeFiles.get(this.session.settings) ? splitTranscriptReadTarget(readPath) : null) ??
+			splitVideoReadTarget(readPath);
 		if (!mediaSplit) return literalSplit;
 		if ((await probeLiteralPathExists(mediaSplit.path, this.session.cwd)) === "missing") return literalSplit;
 		if ((await probeLiteralPathExists(readPath, this.session.cwd)) === "exists") return literalSplit;
@@ -1223,14 +1223,15 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 	 * timestamped transcript from the on-device speech model. Line selectors
 	 * page the transcript the way they page converted documents.
 	 */
-	async #readMediaTranscript(
-		absolutePath: string,
-		parsed: ParsedSelector,
-		fileSize: number,
-		suffixResolution: { from: string; to: string } | undefined,
-		question: string | undefined,
-		signal?: AbortSignal,
-	): Promise<AgentToolResult<ReadToolDetails>> {
+	async #readMediaTranscript(options: {
+		absolutePath: string;
+		parsed: ParsedSelector;
+		fileSize: number;
+		suffixResolution?: { from: string; to: string };
+		question?: string;
+		signal?: AbortSignal;
+	}): Promise<AgentToolResult<ReadToolDetails>> {
+		const { absolutePath, parsed, fileSize, suffixResolution, question, signal } = options;
 		if (question !== undefined) throw new ToolError(IMAGE_QUESTION_SELECTOR_ERROR);
 		const displayPath = formatPathRelativeToCwd(absolutePath, this.session.cwd);
 		if (parsed.kind === "image") {
@@ -1779,7 +1780,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		const transcribeFiles = cfgSttTranscribeFiles.get(this.session.settings);
 		const localTarget = pdfImageRead
 			? { path: pdfImageRead.pdfPath, sel: undefined }
-			: await this.#applyMediaSelectorFallback(literalSplit, readPath, transcribeFiles);
+			: await this.#applyMediaSelectorFallback(literalSplit, readPath);
 		const localReadPath = localTarget.path;
 		// `:transcript` switches a video read to its soundtrack's transcript (audio
 		// files transcribe without it); any line selector after it pages the text.
@@ -1965,7 +1966,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 			| undefined;
 
 		if (transcribeFiles && (isAudioPath(absolutePath) || (transcriptSel && isVideoPath(absolutePath)))) {
-			return this.#readMediaTranscript(absolutePath, parsed, fileSize, suffixResolution, question, signal);
+			return this.#readMediaTranscript({ absolutePath, parsed, fileSize, suffixResolution, question, signal });
 		}
 		if (isVideoPath(absolutePath)) {
 			return this.#readVideoFile(absolutePath, localTarget.sel, fileSize, suffixResolution, question, signal);

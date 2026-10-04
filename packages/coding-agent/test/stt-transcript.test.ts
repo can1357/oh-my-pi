@@ -17,8 +17,8 @@ const rounded = (segments: SttSegment[]) =>
 		text: segment.text,
 	}));
 
-// Parakeet TDT 0.6B v3 (sherpa-onnx 1.13) on `say` speech: speech ends at 3.52 s,
-// a 2.2 s pause follows, and the model emits the first sentence's period at 5.04 s.
+// Parakeet TDT tokens for synthesized speech: speech ends at 3.52 s, a 2.2 s
+// pause follows, and the model emits the first sentence's period at 5.04 s.
 const PARAKEET_TOKENS = {
 	tokens: [
 		" H",
@@ -235,7 +235,7 @@ describe("AudioChunker", () => {
 	}
 
 	it("cuts inside pauses and covers every sample exactly once at the right offset", () => {
-		const chunker = new AudioChunker({ sampleRate: SAMPLE_RATE });
+		const chunker = new AudioChunker();
 		const chunks = [];
 		for (let start = 0; start < signal.length; start += 12_345) {
 			chunks.push(...chunker.push(signal.subarray(start, Math.min(signal.length, start + 12_345))));
