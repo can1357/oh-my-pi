@@ -25,13 +25,36 @@ export function encodePcm16Wav(chunks: readonly Float32Array[], sampleRate = 16_
 
 	let offset = 44;
 	for (const chunk of chunks) {
-		for (const sample of chunk) {
-			const clamped = Math.max(-1, Math.min(1, sample));
-			view.setInt16(offset, clamped < 0 ? clamped * 0x8000 : clamped * 0x7fff, true);
-			offset += bytesPerSample;
-		}
+		offset = writePcm16(chunk, view, offset);
 	}
 	return wav;
+}
+
+/** Encode mono normalized floats as raw signed 16-bit little-endian PCM. */
+export function encodePcm16(samples: Float32Array): Uint8Array {
+	const bytes = new Uint8Array(samples.length * 2);
+	writePcm16(samples, new DataView(bytes.buffer), 0);
+	return bytes;
+}
+
+function writePcm16(samples: Float32Array, view: DataView, offset: number): number {
+	for (const sample of samples) {
+		const clamped = Math.max(-1, Math.min(1, sample));
+		view.setInt16(offset, clamped < 0 ? clamped * 0x8000 : clamped * 0x7fff, true);
+		offset += 2;
+	}
+	return offset;
+}
+
+/** Decode raw signed 16-bit little-endian PCM for native floating-point playback. */
+export function decodePcm16(bytes: Uint8Array): Float32Array {
+	if (bytes.byteLength % 2 !== 0) throw new Error("PCM16 audio has an incomplete sample");
+	const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+	const samples = new Float32Array(bytes.byteLength / 2);
+	for (let index = 0; index < samples.length; index++) {
+		samples[index] = view.getInt16(index * 2, true) / 0x8000;
+	}
+	return samples;
 }
 
 function writeAscii(target: Uint8Array, offset: number, text: string): void {

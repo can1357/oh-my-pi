@@ -60,6 +60,17 @@ export interface LiveTransportOptions {
 	signal?: AbortSignal;
 }
 
+/** Provider-independent lifecycle driven by the live session controller. */
+export interface LiveTransport {
+	connect(): Promise<void>;
+	pushAudio(samples: Float32Array): void;
+	setMuted(muted: boolean): Promise<void>;
+	send(message: LiveClientMessage): Promise<void>;
+	close(): Promise<void>;
+	/** Completes an asynchronous Gemini function call with the agent's final result. */
+	completeDelegation?(id: string, text: string): Promise<void>;
+}
+
 /** Extracts the server-assigned `rtc_*` call ID from a signaling Location header. */
 export function parseLiveCallId(location: string | null): string | undefined {
 	if (!location) return undefined;

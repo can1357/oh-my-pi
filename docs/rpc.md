@@ -1184,8 +1184,8 @@ Set top-level `isError: true` on `host_tool_result` to reject the pending host t
 
 ## Live Voice Sub-Protocol
 
-RPC hosts can run a GPT live voice session (the realtime surface behind the
-terminal's `/live`) bound to the RPC session. The realtime model talks to the
+RPC hosts can run a Codex or Gemini live voice session (the realtime surface behind the
+terminal's `/live`) bound to the RPC session. `live.provider` selects the provider. The realtime model talks to the
 user through the machine's microphone and speakers and delegates work into the
 RPC session as ordinary turns, so delegated work runs with the session's model
 and any host tools registered through `set_host_tools`. At most one live
@@ -1200,10 +1200,12 @@ session runs per RPC server.
 `live_start` responds once the session is connected and recording, so it is
 dispatched concurrently like `bash`; `live_stop` sent meanwhile cancels the
 connection and the pending `live_start` then fails. `voice` defaults to the
-`live.voice` setting and the response reports the voice used. `instructions`
+`live.voice` setting for Codex, or `live.google.voice` for Gemini, and the response reports the voice used. `instructions`
 replaces the bundled live prompt; it is rendered as a Handlebars template with
-`{{username}}` and `{{firstName}}` of the local OS account. Starting while a
+`{{username}}` and `{{firstName}}` of the local session. Starting while a
 session is connecting, active, or closing fails.
+
+Gemini uses the stored `google` API key or `GEMINI_API_KEY` and defaults to `gemini-3.8-live-extended-thinking`. Configure `live.google.model`, `live.google.voice`, and `live.google.thinkingLevel` before starting; the selected configuration is fixed for that live connection. Codex remains the default provider. This integration supports Gemini voice and delegated coding, not direct desktop functions.
 
 `live_stop` responds after the session has stopped and succeeds when none is
 active. `live_mute` sets the microphone mute, or toggles it when `muted` is

@@ -47,7 +47,7 @@ const ORIGIN_LABELS = {
 	env: "env",
 };
 /**
- * Component that renders an OAuth provider selector.
+ * Component that renders a provider authentication selector.
  */
 export class OAuthSelectorComponent extends OverlayPanel {
 	#listContainer: Container;
@@ -89,7 +89,7 @@ export class OAuthSelectorComponent extends OverlayPanel {
 			requestRender?: () => void;
 		},
 	) {
-		super(mode === "login" ? "Select provider to login" : "Select provider to logout", "omp.overlay.oauth");
+		super(mode === "login" ? "Select provider to authenticate" : "Select provider to logout", "omp.overlay.oauth");
 		this.#mode = mode;
 		this.#authStorage = authStorage;
 		this.#onSelectCallback = onSelect;

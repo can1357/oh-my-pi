@@ -122,6 +122,7 @@ export type LoginProviderId =
 	| "gitlab-duo"
 	| "gitlab-duo-agent"
 	| "gmi-cloud"
+	| "google"
 	| "google-antigravity"
 	| "google-gemini-cli"
 	| "helmcode"

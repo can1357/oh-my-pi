@@ -71,6 +71,20 @@ describe("provider registry auth surface", () => {
 		expect(ids).not.toContain("openai");
 	});
 
+	test("Google Gemini login stores a trimmed API key under google and requests secret input", async () => {
+		const store = new SqliteAuthCredentialStore(new Database(":memory:"));
+		const storage = new AuthStorage(store);
+		await storage.credentials.reload();
+		const onAuth = vi.fn();
+		const onPrompt = vi.fn(async () => "  AIza-test-key  ");
+
+		await expect(storage.oauth.login("google", { onAuth, onPrompt })).resolves.toEqual({ type: "api_key" });
+
+		expect(onPrompt).toHaveBeenCalledWith(expect.objectContaining({ secret: true }));
+		expect(store.getApiKey("google")).toBe("AIza-test-key");
+		expect(await storage.keys.get("google")).toBe("AIza-test-key");
+	});
+
 	test("paste-code login set is derived from pasteCodeFlow", () => {
 		expect([...PASTE_CODE_LOGIN_PROVIDERS].sort()).toEqual(
 			[
@@ -126,7 +140,7 @@ describe("provider registry auth surface", () => {
 			login: async () => "fixture-key",
 		});
 
-		await storage.oauth.login("fixture-x", { onAuth: () => {}, onPrompt: async () => "" });
+		await storage.oauth.login("fixture-x", { onAuth: () => { }, onPrompt: async () => "" });
 
 		expect(store.getApiKey("fixture-x")).toBe("fixture-key");
 	});
@@ -136,7 +150,7 @@ describe("provider registry auth surface", () => {
 		const storage = new AuthStorage(store);
 		await storage.credentials.reload();
 
-		await storage.oauth.login("llama.cpp", { onAuth: () => {}, onPrompt: async () => "" });
+		await storage.oauth.login("llama.cpp", { onAuth: () => { }, onPrompt: async () => "" });
 
 		expect(store.getApiKey("llama.cpp")).toBe("llama-cpp-local");
 	});

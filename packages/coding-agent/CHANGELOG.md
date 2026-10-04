@@ -21,6 +21,14 @@
 ### Fixed
 
 - Fixed an `EPIPE: broken pipe` unhandled rejection crashing the session when a debug adapter, eval kernel, IDA worker, or RPC server exits mid-write (seen on Windows) ([#14196](https://github.com/can1357/oh-my-pi/pull/14196) by [@andrebrait](https://github.com/andrebrait))
+### Added
+
+- Added Google AI Studio API-key import through `/login google`, `omp login google`, and broker login with secret input.
+- Added Gemini Live Extended Thinking voice sessions in `/live` and RPC, with asynchronous coding tasks while retaining the selected coding model.
+
+### Fixed
+
+- Fixed Gemini Live connections failing with an unsupported websocket payload error when receiving binary messages.
 
 ## [18.5.1] - 2026-10-03
 

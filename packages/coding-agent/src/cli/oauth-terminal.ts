@@ -8,6 +8,7 @@
  * piped stdin never sees lines the first one already consumed.
  */
 import * as readline from "node:readline";
+import { Writable } from "node:stream";
 import {
 	type AuthStorage,
 	type OAuthLoginIdentity,
@@ -17,17 +18,57 @@ import {
 } from "@oh-my-pi/pi-ai";
 import { openPath } from "../utils/open";
 
+class LoginPromptOutput extends Writable {
+	muted = false;
+
+	override _write(chunk: string | Buffer, encoding: BufferEncoding, callback: (error?: Error | null) => void): void {
+		if (this.muted) {
+			callback();
+			return;
+		}
+		process.stdout.write(chunk, encoding, callback);
+	}
+}
+
+const LOGIN_PROMPT_OUTPUTS = new WeakMap<readline.Interface, LoginPromptOutput>();
+
+/**
+ * Create the shared readline host for provider authentication. Its output can
+ * suppress terminal echo for secret prompts without mutating stdout or using
+ * readline internals; one interface still owns the full piped input stream.
+ */
+export function createLoginReadline(): readline.Interface {
+	const output = new LoginPromptOutput();
+	const rl = readline.createInterface({
+		input: process.stdin,
+		output,
+		terminal: process.stdout.isTTY,
+	});
+	LOGIN_PROMPT_OUTPUTS.set(rl, output);
+	return rl;
+}
+
 /**
  * Interactive `readline` prompt that cleanly tears down on Ctrl-C / Escape so
  * cancelling a half-finished login flow doesn't leave the terminal in raw mode.
+ * Secret prompts mute readline's echo sink; piped input is already non-echoing.
  *
  * Rejects with "Login cancelled" on Ctrl-C / Escape or when stdin closes
  * before an answer, or with the signal's reason when `signal` aborts.
  */
-export function promptLine(rl: readline.Interface, question: string, signal?: AbortSignal): Promise<string> {
+export function promptLine(
+	rl: readline.Interface,
+	question: string,
+	signal?: AbortSignal,
+	secret = false,
+): Promise<string> {
 	const { promise, resolve, reject } = Promise.withResolvers<string>();
 	const input = process.stdin as NodeJS.ReadStream;
 	const supportsRawMode = input.isTTY && typeof input.setRawMode === "function";
+	const secretOutput = secret ? LOGIN_PROMPT_OUTPUTS.get(rl) : undefined;
+	if (secret && !secretOutput) {
+		return Promise.reject(new Error("Secret login prompt requires createLoginReadline()"));
+	}
 	const wasRaw = supportsRawMode ? input.isRaw : false;
 	let settled = false;
 
@@ -38,6 +79,10 @@ export function promptLine(rl: readline.Interface, question: string, signal?: Ab
 		if (supportsRawMode) {
 			input.off("keypress", onKeypress);
 			input.setRawMode?.(wasRaw);
+		}
+		if (secretOutput?.muted) {
+			secretOutput.muted = false;
+			process.stdout.write("\n");
 		}
 	};
 
@@ -76,15 +121,20 @@ export function promptLine(rl: readline.Interface, question: string, signal?: Ab
 	rl.once("SIGINT", onSigint);
 	rl.once("close", cancel);
 	try {
+		const readlineQuestion = secretOutput ? "" : question;
+		if (secretOutput) {
+			process.stdout.write(question);
+			secretOutput.muted = true;
+		}
 		if (signal?.aborted) {
 			onAbort();
 		} else if (signal) {
 			signal.addEventListener("abort", onAbort, { once: true });
-			rl.question(question, { signal }, answer => {
+			rl.question(readlineQuestion, { signal }, answer => {
 				finish(() => resolve(answer));
 			});
 		} else {
-			rl.question(question, answer => {
+			rl.question(readlineQuestion, answer => {
 				finish(() => resolve(answer));
 			});
 		}
@@ -115,7 +165,7 @@ export async function pickIndex(rl: readline.Interface, title: string, labels: r
 }
 
 /**
- * Numbered picker over OAuth providers; resolves with the chosen provider id.
+ * Numbered picker over registered login providers; resolves with the chosen provider id.
  *
  * @throws when `providers` is empty or the selection is invalid/cancelled.
  */
@@ -124,7 +174,7 @@ export async function pickOAuthProvider(
 	providers: readonly OAuthProviderInfo[],
 ): Promise<string> {
 	if (providers.length === 0) {
-		throw new Error("No OAuth providers registered");
+		throw new Error("No login providers registered");
 	}
 	const index = await pickIndex(
 		rl,
@@ -135,8 +185,8 @@ export async function pickOAuthProvider(
 }
 
 /**
- * Run `provider`'s OAuth flow against `storage`, printing the auth URL and
- * progress to stdout and reading prompts from stdin. Resolves with the stored
+ * Run `provider`'s authentication flow against `storage`, printing any auth URL
+ * and progress to stdout and reading prompts from stdin. Resolves with the stored
  * identity (`undefined` when the flow stored nothing).
  *
  * `openBrowser` additionally opens the auth URL in the local default browser
@@ -150,7 +200,6 @@ export async function runTerminalOAuthLogin(
 	provider: OAuthProviderId,
 	options: { openBrowser?: boolean } = {},
 ): Promise<OAuthLoginIdentity | undefined> {
-	const ask = (msg: string, signal?: AbortSignal) => promptLine(rl, `${msg} `, signal);
 	// Only paste-code providers (fixed non-loopback redirect, e.g. GitLab Duo
 	// Agent's vscode:// URI) get the manual paste fallback. An explicit
 	// `onManualCodeInput` is honored for ANY provider (the storage escape hatch),
@@ -181,12 +230,13 @@ export async function runTerminalOAuthLogin(
 			process.stdout.write(`${message}\n`);
 		},
 		onPrompt(p) {
-			return ask(`${p.message}${p.placeholder ? ` (${p.placeholder})` : ""}:`);
+			const message = `${p.message}${p.placeholder ? ` (${p.placeholder})` : ""}: `;
+			return promptLine(rl, message, undefined, p.secret);
 		},
 		...(usesManualInput
 			? {
 					onManualCodeInput(signal) {
-						return ask("Paste the authorization code (or full redirect URL):", signal);
+						return promptLine(rl, "Paste the authorization code (or full redirect URL): ", signal);
 					},
 				}
 			: undefined),

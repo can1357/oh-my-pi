@@ -1,0 +1,1 @@
+Delegate coding, repository investigation, file edits, commands, browser tasks, or verification to the current omp session. request: complete plain-language task plus relevant conversation context. The tool runs asynchronously; continue conversation while waiting. NEVER claim completion before the result arrives.

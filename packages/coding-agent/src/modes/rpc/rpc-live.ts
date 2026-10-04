@@ -1,12 +1,11 @@
 /**
- * GPT live voice sessions for RPC mode: binds a {@link LiveSessionController} to the
+ * Live voice sessions for RPC mode: binds a {@link LiveSessionController} to the
  * RPC AgentSession (so delegated work runs with the host's tools) and forwards its
  * callbacks as unsolicited `live_*` frames.
  */
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import { LiveSessionController, type LiveSessionControllerOptions } from "../../live/controller";
-import { cfgLiveVoice } from "../../live/settings";
-import { DEFAULT_LIVE_VOICE } from "../../live/voices";
+import { resolveLiveVoice } from "../../live/settings";
 import type { AgentSession } from "../../session/agent-session";
 import type { RpcLiveFrame } from "./rpc-types";
 
@@ -68,7 +67,7 @@ export class RpcLiveBridge {
 	/** Connects a live session and resolves once it is recording. */
 	async start(options: RpcLiveStartOptions = {}): Promise<{ voice: string }> {
 		if (this.#controller) throw new Error("A live session is already active");
-		const voice = options.voice?.trim() || cfgLiveVoice.get(this.#session.settings) || DEFAULT_LIVE_VOICE;
+		const voice = options.voice?.trim() || resolveLiveVoice(this.#session.settings);
 		let terminated = false;
 		const controller = this.#createSession({
 			session: this.#session,

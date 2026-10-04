@@ -3,6 +3,9 @@
 ## [Unreleased]
 
 ## [18.6.0] - 2026-10-03
+### Added
+
+- Added Google AI Studio API-key authentication to the login provider catalog.
 
 ### Fixed
 

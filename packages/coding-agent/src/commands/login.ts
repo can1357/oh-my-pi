@@ -1,5 +1,5 @@
 /**
- * Log in to a model provider from the terminal.
+ * Authenticate with a model provider from the terminal.
  */
 
 import { APP_NAME } from "@oh-my-pi/pi-utils";
@@ -11,7 +11,7 @@ export default class Login extends Command {
 	static description = commandHelp.description;
 	static args = {
 		provider: Args.string({
-			description: "OAuth provider id (e.g. anthropic, openai-codex); omit to pick interactively",
+			description: "Provider id (e.g. google, anthropic, openai-codex); omit to pick interactively",
 			required: false,
 		}),
 	};

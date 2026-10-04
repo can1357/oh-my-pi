@@ -6,7 +6,6 @@
  * contributed by extensions, then re-runs that provider's model discovery so
  * the next session sees the models the credential unlocked.
  */
-import * as readline from "node:readline";
 import { getOAuthProviders } from "@oh-my-pi/pi-ai";
 import { APP_NAME, getAgentDbPath, getProjectDir } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
@@ -14,29 +13,29 @@ import { ModelRegistry } from "../config/model-registry";
 import { Settings } from "../config/settings";
 import { discoverAuthStorage, loadCliExtensionProviders } from "../sdk";
 import { resolveAuthBrokerConfig } from "../session/auth-broker-config";
-import { formatLoginIdentity, pickOAuthProvider, runTerminalOAuthLogin } from "./oauth-terminal";
+import { createLoginReadline, formatLoginIdentity, pickOAuthProvider, runTerminalOAuthLogin } from "./oauth-terminal";
 
 /**
  * Log in to `provider`, or to one picked interactively when omitted.
  *
  * An unknown/unavailable provider, a cancelled selection or prompt, and a
- * failed OAuth flow print `Login failed: …` to stderr and set exit code 1.
+ * failed authentication flow print `Login failed: …` to stderr and set exit code 1.
  */
 export async function runLoginCommand(provider: string | undefined): Promise<void> {
 	const cwd = getProjectDir();
 	const settings = await Settings.init({ cwd });
 	const authStorage = await discoverAuthStorage(undefined, { settings });
-	const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+	const rl = createLoginReadline();
 	try {
 		const modelRegistry = new ModelRegistry(authStorage);
-		// Extensions may register OAuth providers; load them so they are listed.
+		// Extensions may register authentication providers; load them so they are listed.
 		await loadCliExtensionProviders(modelRegistry, settings, cwd);
 
 		const providers = getOAuthProviders().filter(p => p.available);
 		const providerId = provider ?? (await pickOAuthProvider(rl, providers));
 		const info = providers.find(p => p.id === providerId);
 		if (!info) {
-			throw new Error(`Unknown OAuth provider '${providerId}'. Run \`${APP_NAME} login\` to pick one.`);
+			throw new Error(`Unknown login provider '${providerId}'. Run \`${APP_NAME} login\` to pick one.`);
 		}
 
 		const identity = await runTerminalOAuthLogin(rl, authStorage, info.id, { openBrowser: true });

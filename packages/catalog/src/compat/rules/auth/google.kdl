@@ -1,3 +1,8 @@
 auth "google" {
 	name "Google Gemini"
+	login "api-key" {
+		auth-url "https://aistudio.google.com/app/apikey"
+		instructions "Create or copy a Gemini API key from Google AI Studio"
+		prompt "Paste your Gemini API key" placeholder="AIza..."
+	}
 }

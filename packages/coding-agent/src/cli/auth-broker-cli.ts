@@ -38,7 +38,7 @@ import { $ } from "bun";
 import { refreshManagedMcpOAuthCredential } from "../mcp/oauth-credentials";
 import { isManagedMCPOAuthCredentialId, mcpOAuthServerUrlFromCredentialId } from "../mcp/oauth-flow";
 import { resolveAuthBrokerConfig } from "../session/auth-broker-config";
-import { pickIndex, pickOAuthProvider, runTerminalOAuthLogin } from "./oauth-terminal";
+import { createLoginReadline, pickIndex, pickOAuthProvider, runTerminalOAuthLogin } from "./oauth-terminal";
 import { generateToken, readTokenFile, writeTokenFile } from "./token-file";
 
 export type AuthBrokerAction = "serve" | "token" | "login" | "logout" | "status" | "import" | "migrate" | "list";
@@ -186,13 +186,13 @@ async function runLogin(flags: AuthBrokerCommandArgs["flags"]): Promise<void> {
 	const providers = getOAuthProviders();
 	// One interface for picker + login prompts; closed before `--via` hands
 	// stdin to ssh.
-	const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+	const rl = createLoginReadline();
 	let providerArg: string;
 	try {
 		providerArg = flags.provider ?? (await pickOAuthProvider(rl, providers));
 		if (!providers.some(p => p.id === providerArg)) {
 			throw new Error(
-				`Unknown OAuth provider '${providerArg}'. Known: ${providers
+				`Unknown login provider '${providerArg}'. Known: ${providers
 					.map(p => p.id)
 					.sort()
 					.join(", ")}`,
@@ -209,7 +209,7 @@ async function runLogin(flags: AuthBrokerCommandArgs["flags"]): Promise<void> {
 }
 
 async function runLocalLogin(rl: readline.Interface, provider: string): Promise<void> {
-	// Drive the per-provider OAuth dance in-process. Persists into the same
+	// Drive the provider authentication flow in-process. Persists into the same
 	// SQLite store the broker uses.
 	const store = await SqliteAuthCredentialStore.open(getAgentDbPath());
 	const storage = new AuthStorage(store);

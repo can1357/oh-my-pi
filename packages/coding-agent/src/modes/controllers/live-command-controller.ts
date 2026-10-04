@@ -1,7 +1,6 @@
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import { logger } from "@oh-my-pi/pi-utils";
 import { LiveSessionController, type LiveSessionControllerOptions, type LiveTranscript } from "../../live/controller";
-import { LIVE_MODEL } from "../../live/protocol";
 import { LiveVisualizer } from "@oh-my-pi/pi-tui/apps/live-visualizer";
 import { vocalizer } from "../../tts/vocalizer";
 import type { AssistantMessageComponent } from "@oh-my-pi/pi-tui/chat/assistant-message";
@@ -9,8 +8,6 @@ import type { CustomEditor } from "@oh-my-pi/pi-tui/prompt/custom-editor";
 import { theme } from "@oh-my-pi/pi-tui/theme";
 import type { InteractiveModeContext } from "../types";
 import { createAssistantMessageComponent } from "@oh-my-pi/pi-tui/prompt/interactive-context-helpers";
-
-import { cfgLiveVoice } from "../../live/settings";
 
 const ANIMATION_INTERVAL_MS = 80;
 type LiveSessionFactory = (options: LiveSessionControllerOptions) => LiveSessionController;
@@ -108,7 +105,6 @@ export class LiveCommandController {
 		const options: LiveSessionControllerOptions = {
 			session: this.#ctx.session,
 			extractAssistantText: message => this.#ctx.extractAssistantText(message),
-			voice: cfgLiveVoice.get(this.#ctx.settings),
 			callbacks: {
 				onPhase: phase => {
 					if (this.#visualizer !== visualizer) return;
@@ -149,6 +145,8 @@ export class LiveCommandController {
 	}
 
 	#presentAssistantTranscript(transcript: LiveTranscript): void {
+		const session = this.#session;
+		if (!session) return;
 		if (
 			transcript.turn < this.#assistantTranscriptTurn ||
 			(transcript.turn === this.#assistantTranscriptTurn && !this.#assistantTranscriptComponent)
@@ -170,9 +168,9 @@ export class LiveCommandController {
 		const message: AssistantMessage = {
 			role: "assistant",
 			content: [{ type: "text", text: transcript.text }],
-			api: "openai-codex-responses",
-			provider: "openai-codex",
-			model: LIVE_MODEL,
+			api: session.provider === "google" ? "google-generative-ai" : "openai-codex-responses",
+			provider: session.provider,
+			model: session.model,
 			usage: { ...LIVE_MESSAGE_USAGE },
 			stopReason: "stop",
 			timestamp: this.#assistantTranscriptStartedAt,
