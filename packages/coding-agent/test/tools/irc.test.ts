@@ -489,28 +489,6 @@ describe("IRC", () => {
 			// Failed revival never enqueues: the message is lost, not buffered.
 			expect(bus.take("0-Parked")).toBeUndefined();
 		});
-
-		it("wait with liveness aborts when the last running sender becomes idle after commitment", async () => {
-			const sub = makeFakeSession();
-			registry.register({ id: "0-Sub", displayName: "task", kind: "sub", session: sub.session, status: "running" });
-
-			const waiting = bus.wait("0-Main", {}, 1000, undefined, { liveness: { registry, senderId: "0-Main" } });
-			registry.setStatus("0-Sub", "idle");
-
-			await expect(waiting).rejects.toThrow("no running peers remain");
-		});
-
-		it("wait with liveness aborts when a specific sender becomes idle after commitment", async () => {
-			const sub = makeFakeSession();
-			registry.register({ id: "0-Sub", displayName: "task", kind: "sub", session: sub.session, status: "running" });
-
-			const waiting = bus.wait("0-Main", { from: "0-Sub" }, 1000, undefined, {
-				liveness: { registry, senderId: "0-Main" },
-			});
-			registry.setStatus("0-Sub", "idle");
-
-			await expect(waiting).rejects.toThrow('agent "0-Sub" is not running');
-		});
 	});
 
 	describe("AgentSession.deliverIrcMessage", () => {

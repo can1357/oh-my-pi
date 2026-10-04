@@ -15,13 +15,20 @@ import { IrcBus } from "../irc/bus";
 import { AgentLifecycleManager } from "../registry/agent-lifecycle";
 import { type AgentRef, AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-registry";
 import { registerPersistedSubagents, sessionFileBelongsToRoot } from "../registry/persisted-agents";
-import { parseSessionEntries } from "../session/session-loader";
+import { normalizeAssistantUsage, parseSessionEntries } from "../session/session-loader";
 
 /** Filesystem and parser used by local and host-backed transcript viewers. */
 export const agentTranscriptSource: AgentTranscriptSource = {
 	fs,
-	parseEntries: text =>
-		parseSessionEntries(text).filter(entry => entry.type === "message" || entry.type === "model_change"),
+	parseEntries: text => {
+		const entries = parseSessionEntries(text).filter(
+			entry => entry.type === "message" || entry.type === "model_change",
+		);
+		for (const entry of entries) {
+			if (entry.type === "message" && entry.message.role === "assistant") normalizeAssistantUsage(entry.message);
+		}
+		return entries;
+	},
 };
 
 /** Host services used by the roster, without exposing runtime implementation to tui. */

@@ -41,6 +41,7 @@ export default class AuthGateway extends Command {
 
 	static examples = [
 		"# Boot the gateway against the configured broker\n  omp auth-gateway serve",
+		'# Serve the same routes as JSON lines on stdin/stdout with your own credentials\n  echo \'{"id":1,"path":"/v1/chat/completions","body":{"model":"@smol","messages":[{"role":"user","content":"hi"}]}}\' | omp auth-gateway stdio',
 		"# Boot on a non-default port\n  omp auth-gateway serve --bind=127.0.0.1:4000",
 		"# Trust client IP headers from a trusted reverse proxy\n  omp auth-gateway serve --trust-proxy-headers",
 		"# Print the gateway bearer token (creates one on first run)\n  omp auth-gateway token",

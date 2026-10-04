@@ -252,6 +252,48 @@ describe("Factory Droid OAuth", () => {
 		expect(credentials.region).toBe("eu");
 	});
 
+	it("rejects a fresh org-less login when Factory refuses the bearer", async () => {
+		const access = makeJwt({ sub: "user_1", exp: Math.floor(Date.now() / 1000) + 3600 });
+		const fetchImpl: FetchImpl = async url => {
+			if (String(url).endsWith("/authorize/device")) return jsonResponse(200, DEVICE_AUTH);
+			if (String(url).endsWith("/api/cli/whoami")) {
+				return jsonResponse(401, { detail: "User not affiliated with an organization" });
+			}
+			return jsonResponse(200, { access_token: access, refresh_token: "refresh-1" });
+		};
+
+		await expect(loginViaRegistry({ fetch: fetchImpl })).rejects.toThrow(
+			/Factory identity check failed \(401\).*User not affiliated with an organization/,
+		);
+	});
+
+	it("accepts a token without an org claim when Factory resolves its organization", async () => {
+		const access = makeJwt({ sub: "user_1", exp: Math.floor(Date.now() / 1000) + 3600 });
+		const fetchImpl: FetchImpl = async url => {
+			if (String(url).endsWith("/authorize/device")) return jsonResponse(200, DEVICE_AUTH);
+			if (String(url).endsWith("/api/cli/whoami")) {
+				return jsonResponse(200, { orgId: "factory-org", region: "eu" });
+			}
+			return jsonResponse(200, { access_token: access, refresh_token: "refresh-1" });
+		};
+
+		const credential = await loginViaRegistry({ fetch: fetchImpl });
+		expect(credential).toMatchObject({ orgId: "factory-org", region: "eu" });
+	});
+
+	it("rejects a fresh login if neither the token nor whoami resolves an organization", async () => {
+		const access = makeJwt({ sub: "user_1", exp: Math.floor(Date.now() / 1000) + 3600 });
+		const fetchImpl: FetchImpl = async url => {
+			if (String(url).endsWith("/authorize/device")) return jsonResponse(200, DEVICE_AUTH);
+			if (String(url).endsWith("/api/cli/whoami")) return jsonResponse(200, {});
+			return jsonResponse(200, { access_token: access, refresh_token: "refresh-1" });
+		};
+
+		await expect(loginViaRegistry({ fetch: fetchImpl })).rejects.toThrow(
+			"Factory login did not resolve an organization",
+		);
+	});
+
 	it("rejects a device token response without a refresh grant", async () => {
 		const access = makeJwt({ sub: "user_1", exp: Math.floor(Date.now() / 1000) + 3600 });
 		let whoamiCalled = false;

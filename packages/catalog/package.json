@@ -1,6 +1,6 @@
 {
 	"name": "@oh-my-pi/pi-catalog",
-	"version": "18.4.9",
+	"version": "18.6.0",
 	"description": "Model catalog for omp: bundled model database, provider discovery descriptors, model identity, classification, and equivalence",
 	"keywords": [
 		"ai",

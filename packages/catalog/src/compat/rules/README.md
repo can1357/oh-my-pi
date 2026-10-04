@@ -209,7 +209,7 @@ The directive vocabulary is closed and lives in **`src/compat/axes.ts`** — one
 The three value shapes are:
 
 - **Scalar**: exactly one KDL boolean, integer, float, or string argument and no children. `#null` is rejected.
-- **Array**: one or more scalar arguments and no children; it resolves to a JSON array. Axes marked `emptyArray` in `axes.ts` also accept a bare directive, which assigns an explicit empty list (`region-upstreams-eu` with no arguments: the region never serves the model).
+- **Array**: one or more scalar arguments and no children; it resolves to a JSON array. Axes marked `emptyArray` in `axes.ts` also accept a bare directive, which assigns an explicit empty list (`region-upstreams-eu` with no arguments: the region never serves the model). Bare `thinking-efforts` keeps a reasoning-capable deployment without selectable effort tiers off the effort dial.
 - **Object**: no arguments and a child block, including an empty block. Child names are kebab-case: an axis-directive spelling compiles to its resolved axis key (`template-reasoning-effort` → `qwenTemplateReasoningEffort`), anything else converts mechanically (`input-threshold` → `inputThreshold`); camelCase names are a compile error. `extra-body` payloads (top-level or nested) are the exception — their child names are literal wire JSON keys copied verbatim (`enable_thinking`). Each child is either one scalar or another object; arrays are not representable inside an object payload.
 
 A rule cannot assign the same resolved axis twice in one block.

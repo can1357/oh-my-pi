@@ -341,6 +341,23 @@ const KEY_GAP: Duration = Duration::from_millis(8);
 /// How long raising an occluded target may take to become visible to
 /// hit-testing.
 const UNCOVER_TIMEOUT: Duration = Duration::from_millis(300);
+/// Largest pixel delta per axis in one wheel event of an ordinary scroll.
+const MAX_WHEEL_STEP: u32 = 30;
+/// Upper bound on the wheel events of one scroll, which keeps the wheel train
+/// under about 0.6 s; beyond 1200 px the events grow instead.
+const MAX_WHEEL_EVENTS: u32 = 40;
+/// Pacing between the wheel events of one scroll, roughly one 60 Hz frame
+/// like a physical wheel's detents.
+const WHEEL_STEP_GAP: Duration = Duration::from_millis(16);
+/// Distances from the scroll point of the `MouseMoved` primer's moves, in
+/// order. They lie on the side of the point facing the target window's
+/// centre, and the farthest is hit-tested before a takeover scroll.
+const PRIMER_OFFSETS: [f64; 3] = [2.0, 1.0, 0.0];
+/// Spacing of the primer's moves.
+const PRIMER_GAP: Duration = Duration::from_millis(20);
+/// Wait after the primer for the surface under the pointer to take the new
+/// position before the first wheel.
+const PRIMER_SETTLE: Duration = Duration::from_millis(50);
 
 #[link(name = "CoreGraphics", kind = "framework")]
 unsafe extern "C" {
@@ -974,7 +991,15 @@ fn foreground_pointer(
 			let mut occluder = None;
 			let result = uncover(window, pid, wid, &event, &mut occluder)
 				.and_then(|()| skylight::require_front_window(pid, wid))
-				.and_then(|()| global_pointer(source, event));
+				.and_then(|()| match event {
+					PointerEvent::Scroll { x, y, dx, dy } => {
+						let side = primer_side(window, x);
+						global_scroll(source, x, y, dx, dy, side, || {
+							skylight::require_front_window(pid, wid)
+						})
+					},
+					event => global_pointer(source, event),
+				});
 			// Capture before raising, so even a failed raise/re-hit-test retains
 			// the restoration token. Never reorder over a user-selected app.
 			let cleanup = if skylight::is_front_window(pid, wid) {
@@ -1010,7 +1035,7 @@ fn uncover(
 	event: &PointerEvent,
 	occluder: &mut Option<Occluder>,
 ) -> CoreResult<()> {
-	let points = event_points(event);
+	let points = event_points(window, event);
 	let covering = || -> CoreResult<Option<ax::PointOwner>> {
 		let mut first = None;
 		for (x, y) in points.into_iter().flatten() {
@@ -1063,13 +1088,25 @@ fn covers(owner: &ax::PointOwner, pid: libc::pid_t, wid: u32) -> bool {
 	owner.pid != pid || owner.window != Some(wid)
 }
 
-/// The global points a pointer event hits first and last.
-fn event_points(event: &PointerEvent) -> [Option<(f64, f64)>; 2] {
+/// The global points a pointer event hits first and last. A scroll's primer
+/// starts beside the scroll point.
+fn event_points(window: &DesktopWindow, event: &PointerEvent) -> [Option<(f64, f64)>; 2] {
 	match event {
-		PointerEvent::Click { x, y, .. }
-		| PointerEvent::Move { x, y }
-		| PointerEvent::Scroll { x, y, .. } => [Some((*x, *y)), None],
+		PointerEvent::Click { x, y, .. } | PointerEvent::Move { x, y } => [Some((*x, *y)), None],
+		PointerEvent::Scroll { x, y, .. } => {
+			[Some((primer_side(window, *x).mul_add(PRIMER_OFFSETS[0], *x), *y)), Some((*x, *y))]
+		},
 		PointerEvent::Drag { path, .. } => [path.first().copied(), path.last().copied()],
+	}
+}
+
+/// The horizontal direction from a scroll point toward the centre of
+/// `window`, where the primer starts: `1.0` right, `-1.0` left.
+fn primer_side(window: &DesktopWindow, x: f64) -> f64 {
+	if x < f64::from(window.x) + f64::from(window.width) / 2.0 {
+		1.0
+	} else {
+		-1.0
 	}
 }
 
@@ -1221,25 +1258,99 @@ fn global_pointer(source: &CGEventSource, event: PointerEvent) -> CoreResult<()>
 		PointerEvent::Drag { path, button, modifiers } => {
 			global_drag(&path, button, modifiers, source)
 		},
-		PointerEvent::Scroll { x, y, dx, dy } => {
-			let point = point(x, y)?;
-			let wheel_x = finite_i32(dx, "horizontal scroll delta")?;
-			let wheel_y = finite_i32(dy, "vertical scroll delta")?;
-			let event = CGEvent::new_scroll_event(
-				source.clone(),
-				ScrollEventUnit::PIXEL,
-				2,
-				wheel_y,
-				wheel_x,
-				0,
-			)
-			.map_err(|()| DesktopError::input_failed("failed to create a Quartz scroll event"))?;
-			event.set_location(point);
-			// Wheel events go to the window under the real pointer.
-			warp_pointer(point);
-			post_global(&event)
-		},
+		// The desktop root has no window to stay inside; approach from the left.
+		PointerEvent::Scroll { x, y, dx, dy } => global_scroll(source, x, y, dx, dy, -1.0, || Ok(())),
 	}
+}
+
+/// HID wheel scroll at `(x, y)` with the real pointer primed there from the
+/// `approach` side (`1.0` right, `-1.0` left).
+///
+/// The delta goes out as `wheel_steps` paced `WHEEL_STEP_GAP` apart, and
+/// `before_wheel` runs before each wheel event so a takeover can stop once the
+/// target loses focus instead of scrolling whatever window is under the
+/// pointer by then.
+fn global_scroll(
+	source: &CGEventSource,
+	x: f64,
+	y: f64,
+	dx: f64,
+	dy: f64,
+	approach: f64,
+	mut before_wheel: impl FnMut() -> CoreResult<()>,
+) -> CoreResult<()> {
+	let point = point(x, y)?;
+	let steps = wheel_steps(
+		finite_i32(dx, "horizontal scroll delta")?,
+		finite_i32(dy, "vertical scroll delta")?,
+	);
+	if steps.is_empty() {
+		return Ok(());
+	}
+	// Wheel events go to the window under the real pointer.
+	warp_pointer(point);
+	prime_pointer(source, point, approach)?;
+	for (index, &(wheel_x, wheel_y)) in steps.iter().enumerate() {
+		if index > 0 {
+			thread::sleep(WHEEL_STEP_GAP);
+		}
+		before_wheel()?;
+		let event =
+			CGEvent::new_scroll_event(source.clone(), ScrollEventUnit::PIXEL, 2, wheel_y, wheel_x, 0)
+				.map_err(|()| DesktopError::input_failed("failed to create a Quartz scroll event"))?;
+		event.set_location(point);
+		post_global(&event)?;
+	}
+	Ok(())
+}
+
+/// Posts real `MouseMoved` events `PRIMER_OFFSETS` away from `point` on
+/// `side`, ending at `point`.
+///
+/// A warp moves the cursor without generating any pointer event, and
+/// pixel-forwarding surfaces such as iPhone Mirroring only route wheel input
+/// to the view under a pointer position they have been sent since their last
+/// activation. Without this, a just-activated surface drops the wheel.
+fn prime_pointer(source: &CGEventSource, point: CGPoint, side: f64) -> CoreResult<()> {
+	for (index, offset) in PRIMER_OFFSETS.into_iter().enumerate() {
+		if index > 0 {
+			thread::sleep(PRIMER_GAP);
+		}
+		post_global_mouse(
+			source,
+			CGEventType::MouseMoved,
+			CGMouseButton::Left,
+			CGPoint::new(side.mul_add(offset, point.x), point.y),
+			0,
+			0,
+			CGEventFlags::CGEventFlagNull,
+		)?;
+	}
+	thread::sleep(PRIMER_SETTLE);
+	Ok(())
+}
+
+/// Splits a pixel scroll into at most `MAX_WHEEL_EVENTS` wheel events whose
+/// deltas sum exactly to `(dx, dy)`, each at most `MAX_WHEEL_STEP` pixels per
+/// axis unless the distance needs more than `MAX_WHEEL_EVENTS` such events.
+///
+/// Surfaces that forward wheels to another device cap the distance of one
+/// event (iPhone Mirroring moves about 99 points however large it is); in the
+/// `AppKit` scroll views measured, per-event pixel deltas add up.
+fn wheel_steps(dx: i32, dy: i32) -> Vec<(i32, i32)> {
+	let count = dx
+		.unsigned_abs()
+		.max(dy.unsigned_abs())
+		.div_ceil(MAX_WHEEL_STEP)
+		.min(MAX_WHEEL_EVENTS);
+	// `index <= count` keeps each share between 0 and `total`, so it fits i32.
+	let share =
+		|total: i32, index: u32| (i64::from(total) * i64::from(index) / i64::from(count)) as i32;
+	(0..count)
+		.map(|index| {
+			(share(dx, index + 1) - share(dx, index), share(dy, index + 1) - share(dy, index))
+		})
+		.collect()
 }
 
 /// HID drag along `path` with the real pointer following it.
@@ -1421,5 +1532,58 @@ mod tests {
 		assert!(covers(&owner(7, None), 7, 42));
 		assert!(covers(&owner(8, Some(42)), 7, 42));
 		assert!(covers(&owner(8, None), 7, 42));
+	}
+
+	#[test]
+	fn scroll_primer_starts_inside_the_target_window() {
+		let window = DesktopWindow {
+			id:      "42".to_string(),
+			title:   String::new(),
+			app:     String::new(),
+			pid:     Some(7),
+			x:       100,
+			y:       50,
+			width:   300,
+			height:  200,
+			focused: false,
+		};
+		let scroll = |x| PointerEvent::Scroll { x, y: 80.0, dx: 0.0, dy: -30.0 };
+		for x in [100.0, 101.0, 249.0, 250.0, 398.0, 399.0] {
+			let [Some((start, _)), Some((end, _))] = event_points(&window, &scroll(x)) else {
+				panic!("a scroll at {x} must hit-test its primer start and its point");
+			};
+			assert_eq!(end, x);
+			assert!((100.0..400.0).contains(&start), "primer for {x} starts outside at {start}");
+			assert_eq!((start - x).abs(), PRIMER_OFFSETS[0]);
+		}
+	}
+
+	#[test]
+	fn wheel_steps_split_into_bounded_events_that_sum_to_the_request() {
+		assert_eq!(wheel_steps(0, -300), vec![(0, -30); 10]);
+		assert_eq!(wheel_steps(0, 30), vec![(0, 30)]);
+		assert_eq!(wheel_steps(0, 0), Vec::<(i32, i32)>::new());
+		// (dx, dy, event count, largest per-axis step allowed)
+		for (dx, dy, count, largest) in [
+			(0, -31, 2, 30),
+			(7, 95, 4, 30),
+			(-301, 44, 11, 30),
+			(1, -1, 1, 30),
+			(0, 1200, 40, 30),
+			(0, -1201, 40, 31),
+			(-100_003, 2, 40, 2501),
+			(i32::MIN, i32::MAX, 40, 53_687_092),
+		] {
+			let steps = wheel_steps(dx, dy);
+			assert_eq!(steps.len(), count, "({dx}, {dy})");
+			assert!(
+				steps
+					.iter()
+					.all(|&(x, y)| x.unsigned_abs() <= largest && y.unsigned_abs() <= largest),
+				"({dx}, {dy}) exceeded {largest} px per event: {steps:?}"
+			);
+			assert_eq!(steps.iter().map(|step| step.0).sum::<i32>(), dx);
+			assert_eq!(steps.iter().map(|step| step.1).sum::<i32>(), dy);
+		}
 	}
 }

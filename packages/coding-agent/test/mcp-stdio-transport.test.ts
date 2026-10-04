@@ -284,6 +284,27 @@ describe("resolveStdioSpawnCommand", () => {
 		}
 	});
 
+	it("spawns a missing path-qualified Windows command directly instead of through cmd.exe", async () => {
+		// cmd.exe would only print "not recognized" and close stdout; a direct spawn fails with ENOENT.
+		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-mcp-missing-"));
+		try {
+			const missing = path.join(tempDir, "missing-server");
+			const result = await resolveStdioSpawnCommand(
+				{ type: "stdio", command: missing, args: ["serve"] },
+				{
+					cwd: tempDir,
+					env: { COMSPEC: "C:\\Windows\\System32\\cmd.exe", PATH: "", PATHEXT: ".cmd" },
+					platform: "win32",
+				},
+			);
+
+			expect(result.cmd).toEqual([missing, "serve"]);
+			expect(result.windowsVerbatimArguments).toBeUndefined();
+		} finally {
+			await removeWithRetries(tempDir);
+		}
+	});
+
 	it("wraps explicit Windows .cmd commands in an escaped cmd.exe command line", async () => {
 		const result = await resolveStdioSpawnCommand(
 			{ type: "stdio", command: "codegraph.cmd", args: ["serve", "--mcp"] },

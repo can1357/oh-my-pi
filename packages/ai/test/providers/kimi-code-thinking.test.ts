@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "bun:test";
 import { getBundledModel } from "@oh-my-pi/pi-catalog";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
+import { kimiCodeModelManagerOptions } from "@oh-my-pi/pi-catalog/provider-models/openai-compat";
 import type { ModelSpec } from "@oh-my-pi/pi-catalog/types";
 import type { MessageCreateParamsStreaming } from "../../src/providers/anthropic-wire";
 import { type KimiApiFormat, type KimiOptions, streamKimi } from "../../src/providers/kimi";
@@ -348,6 +349,109 @@ describe("Kimi K3 thinking transport", () => {
 
 		await capturePayload(K3_MODEL, { type: "tool", name: "missing_tool" }, []);
 		expect((payload as { tool_choice?: unknown }).tool_choice).toBeUndefined();
+	});
+
+	for (const disableReasoning of [false, true]) {
+		it(`honors forced tool use on bundled and discovered K3 transports with reasoning ${disableReasoning ? "disabled" : "enabled"}`, async () => {
+			vi.spyOn(kimiOauth, "getKimiCommonHeaders").mockReturnValue(KIMI_HEADERS);
+			const ids = ["k3", "k3-256k"];
+			const fetchDynamicModels = kimiCodeModelManagerOptions({
+				apiKey: "test-key",
+				fetch: async () =>
+					Response.json({
+						data: ids.map(id => ({
+							id,
+							display_name: id,
+							context_length: id === "k3" ? 1_048_576 : 262_144,
+							supports_reasoning: true,
+							supports_thinking_type: "only",
+							think_efforts: {
+								support: true,
+								valid_efforts: ["low", "high", "max"],
+								default_effort: "max",
+							},
+							protocol: null,
+						})),
+					}),
+			}).fetchDynamicModels;
+			if (!fetchDynamicModels) throw new Error("Kimi Code dynamic discovery is not configured");
+			const discovered =
+				(await fetchDynamicModels())?.map(spec => buildModel(spec as ModelSpec<"openai-completions">)) ?? [];
+			expect(discovered.map(model => model.id)).toEqual(ids);
+			const models = [...ids.map(id => getBundledModel<"openai-completions">("kimi-code", id)), ...discovered];
+
+			for (const model of models) {
+				expect(model.identity).toMatchObject({ class: "kimi", family: "k3" });
+				for (const format of ["openai", "anthropic"] as const) {
+					let payload: Record<string, unknown> | undefined;
+					const stream = streamKimi(model, TITLE_CONTEXT, {
+						apiKey: "test-key",
+						format,
+						reasoning: Effort.Max,
+						disableReasoning,
+						toolChoice: { type: "tool", name: "set_title" },
+						onPayload: body => {
+							payload = body as Record<string, unknown>;
+							throw new Error("stop after payload capture");
+						},
+					});
+					await stream.result();
+
+					if (format === "openai") {
+						expect(payload?.tool_choice).toEqual(
+							disableReasoning ? { type: "function", function: { name: "set_title" } } : "required",
+						);
+						expect(payload?.thinking).toEqual(
+							disableReasoning ? { type: "disabled" } : { type: "enabled", effort: Effort.Max },
+						);
+					} else {
+						expect(payload?.tool_choice).toEqual({ type: "tool", name: "set_title" });
+						// Forced Anthropic choices omit thinking; native K3 keeps its
+						// mandatory provider default rather than receiving a disabled block.
+						expect(payload?.thinking).toBeUndefined();
+					}
+				}
+			}
+		});
+	}
+
+	it("honors native Moonshot K3 forced choice without relaxing other Anthropic hosts", async () => {
+		for (const { provider, baseUrl, forced } of [
+			{ provider: "moonshot", baseUrl: "https://api.moonshot.ai/v1", forced: true },
+			{ provider: "synthetic", baseUrl: "https://api.moonshot.ai/v1", forced: false },
+			{ provider: "synthetic", baseUrl: "https://shim.example/v1", forced: true },
+		]) {
+			const model = buildModel({
+				...K3_MODEL,
+				id: "kimi-k3",
+				provider,
+				baseUrl,
+				compat: K3_MODEL.compatConfig,
+			} satisfies ModelSpec<"openai-completions">);
+			let payload: MessageCreateParamsStreaming | undefined;
+			const stream = streamOpenAIAnthropicShim(
+				model,
+				TITLE_CONTEXT,
+				{
+					apiKey: "test-key",
+					reasoning: Effort.Max,
+					toolChoice: { type: "tool", name: "set_title" },
+					onPayload: body => {
+						payload = body as MessageCreateParamsStreaming;
+						throw new Error("stop after payload capture");
+					},
+				},
+				{ anthropicBaseUrl: baseUrl, defaultFormat: "anthropic" },
+			);
+			await stream.result();
+
+			expect(payload?.tool_choice).toEqual(forced ? { type: "tool", name: "set_title" } : { type: "auto" });
+			if (forced) {
+				expect(payload?.thinking).toBeUndefined();
+			} else {
+				expect(payload?.thinking).toMatchObject({ type: "enabled" });
+			}
+		}
 	});
 });
 
