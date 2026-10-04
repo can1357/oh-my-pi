@@ -1349,6 +1349,56 @@ export type ExtensionServiceTier<Family extends ServiceTierFamily> = Family exte
 		? "flex" | "priority"
 		: ServiceTier;
 
+/** An agent registry entry visible to an extension. */
+export interface ExtensionAgentInfo {
+	/**
+	 * Registry id. Usually the agent's name; when that name is already
+	 * registered to another agent (another session's in this process, or this
+	 * session's own from an earlier transcript), the agent is registered under
+	 * a qualified id (`<parent id>/<name>`) instead.
+	 */
+	id: string;
+	status: "running" | "idle" | "parked" | "aborted";
+	kind: "main" | "sub" | "advisor";
+	sessionFile?: string;
+}
+
+/**
+ * Named registry agents available to an extension, scoped to the calling
+ * session: its own agent and that agent's registry descendants, including
+ * persisted children of the session's earlier transcripts (after `/new` or
+ * `ctx.switchSession()`). Agents of other sessions in the same process (ACP
+ * hosts several) are never visible, whatever id is passed.
+ */
+export interface ExtensionAgentsApi {
+	/** Snapshot of the agents visible to this session. */
+	list(): ExtensionAgentInfo[];
+	/**
+	 * Look up a visible agent by registry id or by name. A name resolves to
+	 * this session's own agent even when it is registered under a qualified
+	 * id, preferring the one backed by the session's current transcript over a
+	 * same-named agent from an earlier transcript. Returns `undefined` when no
+	 * visible agent matches.
+	 */
+	get(id: string): ExtensionAgentInfo | undefined;
+	/**
+	 * Revive a parked/idle agent to a live session, resolving `id` as {@link get}
+	 * does (preferring agents under `parentSessionFile` when that is this
+	 * session's own transcript). When `parentSessionFile` is this session's own
+	 * current transcript and `id` resolves to no visible agent, or only to one
+	 * from an earlier transcript, first rescan the persisted subagent
+	 * transcripts under it. Another session's transcript is never scanned.
+	 * Resolves when the agent is live; rejects when the agent is not visible to
+	 * this session, or with the underlying error if no ref or reviver exists.
+	 */
+	ensureLive(id: string, options?: { parentSessionFile?: string }): Promise<ExtensionAgentInfo>;
+	/**
+	 * Deliver a follow-up turn to a visible live/revivable agent, resolved as
+	 * {@link get} does, without going through the hub UI.
+	 */
+	prompt(id: string, text: string, options?: { deliverAs?: "steer" | "followUp" }): Promise<void>;
+}
+
 /**
  * ExtensionAPI passed to extension factory functions.
  *
@@ -1373,6 +1423,9 @@ export interface ExtensionAPI {
 
 	/** Injected pi-coding-agent exports for accessing SDK utilities */
 	pi: typeof PiCodingAgent;
+
+	/** Named registry agents visible to this session. */
+	agents: ExtensionAgentsApi;
 
 	// =========================================================================
 	// Event Subscription
@@ -1836,6 +1889,21 @@ export type SendUserMessageHandler = (
 
 export type AppendEntryHandler = <T = unknown>(customType: string, data?: T) => void;
 
+export type AgentsListHandler = () => ExtensionAgentInfo[];
+
+export type AgentsGetHandler = (id: string) => ExtensionAgentInfo | undefined;
+
+export type AgentsEnsureLiveHandler = (
+	id: string,
+	options?: { parentSessionFile?: string },
+) => Promise<ExtensionAgentInfo>;
+
+export type AgentsPromptHandler = (
+	id: string,
+	text: string,
+	options?: { deliverAs?: "steer" | "followUp" },
+) => Promise<void>;
+
 export type GetActiveToolsHandler = () => string[];
 
 export type GetAllToolsHandler = () => ToolInfo[];
@@ -1870,6 +1938,10 @@ export interface ExtensionActions {
 	sendMessage: SendMessageHandler;
 	sendUserMessage: SendUserMessageHandler;
 	appendEntry: AppendEntryHandler;
+	agentsList?: AgentsListHandler;
+	agentsGet?: AgentsGetHandler;
+	agentsEnsureLive?: AgentsEnsureLiveHandler;
+	agentsPrompt?: AgentsPromptHandler;
 	setLabel: (targetId: string, label: string | undefined) => void;
 	getActiveTools: GetActiveToolsHandler;
 	getAllTools: GetAllToolsHandler;
@@ -1915,6 +1987,10 @@ export interface ExtensionCommandContextActions {
 /** Full runtime = state + actions, including host-compatible service-tier fallbacks. */
 export interface ExtensionRuntime extends ExtensionRuntimeState, ExtensionActions {
 	getServiceTiers: GetServiceTiersHandler;
+	agentsList: AgentsListHandler;
+	agentsGet: AgentsGetHandler;
+	agentsEnsureLive: AgentsEnsureLiveHandler;
+	agentsPrompt: AgentsPromptHandler;
 	setServiceTier: SetServiceTierHandler;
 }
 
