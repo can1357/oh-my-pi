@@ -1,0 +1,34 @@
+---
+source: brush-parser/src/parser/tests/pipelines.rs
+expression: "ParseResult { input, result: &result }"
+---
+ParseResult(
+  input: "echo |& wc",
+  result: Program(
+    complete_commands: [
+      CompoundList([
+        CompoundListItem(AndOrList(
+          first: Pipeline(
+            seq: [
+              Simple(SimpleCommand(
+                word_or_name: Some(Word(
+                  value: "echo",
+                  loc: "[location]",
+                )),
+                suffix: Some(CommandSuffix([
+                  IoRedirect(File(Some(2), DuplicateOutput, Fd(1))),
+                ])),
+              )),
+              Simple(SimpleCommand(
+                word_or_name: Some(Word(
+                  value: "wc",
+                  loc: "[location]",
+                )),
+              )),
+            ],
+          ),
+        ), Sequence),
+      ]),
+    ],
+  ),
+)

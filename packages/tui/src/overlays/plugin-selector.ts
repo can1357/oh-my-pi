@@ -8,6 +8,8 @@ import { type SelectItem, SelectList, type SgrMouseEvent } from "../index";
 import { getSelectListTheme } from "../theme/theme";
 import { OverlayPanel } from "../chrome/overlay-box";
 import { routeSelectListMouseWithTopBorder } from "../chrome/select-list-mouse-routing";
+import type { DescribeContext, NativeNode, NativeUiEvent } from "../native/node";
+import { SelectListSheet } from "../native/picker";
 
 export interface PluginSelectorCallbacks {
 	onSelect: (pluginName: string, marketplace: string, scope?: "user" | "project") => void;
@@ -23,6 +25,7 @@ export interface PluginItem {
 
 export class PluginSelectorComponent extends OverlayPanel {
 	#selectList: SelectList;
+	#sheet: SelectListSheet;
 
 	constructor(
 		marketplaceCount: number,
@@ -30,7 +33,7 @@ export class PluginSelectorComponent extends OverlayPanel {
 		installedIds: Set<string>,
 		callbacks: PluginSelectorCallbacks,
 	) {
-		super("Plugins");
+		super("Plugins", "omp.overlay.plugins");
 
 		const items: SelectItem[] = plugins.map(({ plugin, marketplace, scope }) => {
 			// Encode scope into the value so onSelect can recover it without a parallel Map.
@@ -75,6 +78,23 @@ export class PluginSelectorComponent extends OverlayPanel {
 		};
 
 		this.addChild(this.#selectList);
+		this.#sheet = new SelectListSheet(this.#selectList, {
+			title: "Plugins",
+			icon: "plus",
+			noun: "plugins",
+			confirm: "Install",
+			decorate: item => (item.hint ? { facts: { marketplace: item.hint } } : undefined),
+			columns: [{ id: "marketplace", format: "dim" }],
+		});
+	}
+
+	override describe(cx: DescribeContext): NativeNode | null {
+		return cx.supports("picker") ? this.#sheet.describe() : super.describe(cx);
+	}
+
+	/** Picker pointer events drive the list exactly as its keys do. */
+	handleNativeEvent(event: NativeUiEvent): void {
+		this.#sheet.handle(event);
 	}
 
 	getSelectList(): SelectList {

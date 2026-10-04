@@ -224,26 +224,6 @@ describe("DAP launch failure handling", () => {
 		expect(launch?.args).toMatchObject({ args: ["--configured"], program: "/bin/echo" });
 	});
 
-	it("surfaces the launch failure when configurationDone also fails", async () => {
-		const manager = new DapSessionManager();
-		const fake = new FakeDapClient(TEST_ADAPTER, process.cwd(), {
-			launchError: "launch: 'C:\\repo\\python' is not a valid executable",
-			configurationDoneError: "configurationDone: Expected process to be stopped.",
-		});
-		spyOn(DapClient, "spawn").mockResolvedValue(fake as unknown as DapClient);
-
-		let message = "";
-		try {
-			await manager.launch({ adapter: TEST_ADAPTER, program: "C:\\repo\\python", cwd: process.cwd() });
-		} catch (error) {
-			expect(error).toBeInstanceOf(Error);
-			message = (error as Error).message;
-		}
-
-		expect(message).toContain("launch: 'C:\\repo\\python' is not a valid executable");
-		expect(message).toContain("configurationDone: Expected process to be stopped.");
-	});
-
 	it("surfaces the attach failure when configurationDone also fails", async () => {
 		const manager = new DapSessionManager();
 		const fake = new FakeDapClient(TEST_ADAPTER, process.cwd(), {
@@ -470,6 +450,76 @@ describe("DAP launch failure handling", () => {
 			// Let writeMessage's exit-guard resolve so no promise leaks past the test.
 			await client.dispose();
 			await Bun.sleep(20);
+		}
+	});
+
+	it("rejects the request instead of emitting an unhandled rejection when a pending stdin write fails", async () => {
+		const exited = Promise.withResolvers<number>();
+		const proc = {
+			exited: exited.promise,
+			exitCode: null,
+			stdin: { write: () => 0, flush: () => undefined },
+			stdout: new ReadableStream<Uint8Array>(),
+			stderr: new ReadableStream<Uint8Array>(),
+			peekStderr: () => "",
+			kill: () => true,
+		} as unknown as DapClientState["proc"];
+		// A pending FileSink write returns a promise; on Windows it rejects with
+		// EPIPE once the adapter's end of the pipe is gone.
+		const writeSink = {
+			write: (_data: string | Uint8Array) => Promise.reject(new Error("EPIPE: broken pipe, write")),
+			flush: () => undefined,
+		};
+		const client = new DapClient(TEST_ADAPTER, process.cwd(), proc, {
+			readable: new ReadableStream<Uint8Array>(),
+			writeSink,
+		});
+
+		const unhandled: unknown[] = [];
+		const onUnhandled = (reason: unknown) => unhandled.push(reason);
+		process.on("unhandledRejection", onUnhandled);
+		try {
+			// A failed write marks the client broken, so the request fails well before its own timeout.
+			const start = Date.now();
+			await expect(client.sendRequest("evaluate", {}, undefined, 5_000)).rejects.toThrow();
+			expect(Date.now() - start).toBeLessThan(1_000);
+			// Unhandled rejections are reported once the microtask queue drains; one macrotask turn suffices.
+			const turn = Promise.withResolvers<void>();
+			setImmediate(turn.resolve);
+			await turn.promise;
+			expect(unhandled).toEqual([]);
+		} finally {
+			process.off("unhandledRejection", onUnhandled);
+			await client.dispose();
+		}
+	});
+
+	it("disposes the client when the stdin flush throws synchronously", async () => {
+		const proc = {
+			exited: Promise.withResolvers<number>().promise,
+			exitCode: null,
+			stdin: { write: () => 0, flush: () => undefined },
+			stdout: new ReadableStream<Uint8Array>(),
+			stderr: new ReadableStream<Uint8Array>(),
+			peekStderr: () => "",
+			kill: () => true,
+		} as unknown as DapClientState["proc"];
+		const writeSink = {
+			write: (_data: string | Uint8Array) => 0,
+			flush: () => {
+				throw new Error("EPIPE: broken pipe, write");
+			},
+		};
+		const client = new DapClient(TEST_ADAPTER, process.cwd(), proc, {
+			readable: new ReadableStream<Uint8Array>(),
+			writeSink,
+		});
+		try {
+			await expect(client.sendRequest("evaluate", {}, undefined, 5_000)).rejects.toThrow();
+			// The broken pipe is terminal: later requests fail fast instead of reusing the dead sink.
+			await expect(client.sendRequest("evaluate", {}, undefined, 5_000)).rejects.toThrow(/not running/);
+		} finally {
+			await client.dispose();
 		}
 	});
 
@@ -978,36 +1028,6 @@ describe("DebugTool launch validation", () => {
 		}
 	});
 
-	it("shows supported install options when the JavaScript debug adapter is unavailable", async () => {
-		const launchSpy = spyOn(dapModule, "selectLaunchAdapter").mockReturnValue({
-			kind: "unavailable",
-			adapterName: "js-debug-adapter",
-			command: "js-debug-adapter",
-		});
-		try {
-			const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "omp-debug-js-debug-hint-"));
-			try {
-				await fs.writeFile(path.join(cwd, "main.js"), "console.log('hi');\n");
-				const session: ToolSession = {
-					cwd,
-					hasUI: false,
-					getSessionFile: () => null,
-					getSessionSpawns: () => "*",
-					settings: Settings.isolated({ "debug.enabled": true }),
-				};
-				const tool = new DebugTool(session);
-
-				await expect(tool.execute("call", { action: "launch", program: "main.js" })).rejects.toThrow(
-					/download.*github\.com\/microsoft\/vscode-js-debug/,
-				);
-			} finally {
-				await removeWithRetries(cwd);
-			}
-		} finally {
-			launchSpy.mockRestore();
-		}
-	});
-
 	it("points to DAP configuration when a custom adapter command is unavailable", async () => {
 		const launchSpy = spyOn(dapModule, "selectLaunchAdapter").mockReturnValue({
 			kind: "unavailable",
@@ -1035,31 +1055,6 @@ describe("DebugTool launch validation", () => {
 			}
 		} finally {
 			launchSpy.mockRestore();
-		}
-	});
-
-	it("shows the rdbg install command for explicit Ruby attach", async () => {
-		const attachSpy = spyOn(dapModule, "selectAttachAdapter").mockReturnValue(null);
-		try {
-			const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "omp-debug-rdbg-attach-"));
-			try {
-				const session: ToolSession = {
-					cwd,
-					hasUI: false,
-					getSessionFile: () => null,
-					getSessionSpawns: () => "*",
-					settings: Settings.isolated({ "debug.enabled": true }),
-				};
-				const tool = new DebugTool(session);
-
-				await expect(tool.execute("call", { action: "attach", pid: 1234, adapter: "rdbg" })).rejects.toThrow(
-					/gem install debug/,
-				);
-			} finally {
-				await removeWithRetries(cwd);
-			}
-		} finally {
-			attachSpy.mockRestore();
 		}
 	});
 

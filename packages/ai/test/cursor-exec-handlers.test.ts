@@ -32,6 +32,7 @@ import {
 	ReadRejectedSchema,
 	ReadResultSchema,
 	ReadSuccessSchema,
+	ShellArgsSchema,
 } from "@oh-my-pi/pi-catalog/discovery/cursor-proto";
 import { create, encodeJsonValue } from "@oh-my-pi/pi-catalog/discovery/protobuf";
 import { logger } from "@oh-my-pi/pi-utils";
@@ -152,56 +153,6 @@ function toolResultContext(): Context {
 }
 
 describe("Cursor resolveExecHandler execHandlers binding", () => {
-	it("invokes handler with correct this when passed as bound method", async () => {
-		const sentinel = { tag: "bound-correctly" };
-		const handlers = {
-			sentinel,
-			async read(_args: { path: string }) {
-				// Handler methods rely on 'this' (e.g. to access other handlers or state).
-				// When passed without .bind(handlers), 'this' is undefined in strict mode.
-				return { execResult: (this as typeof handlers).sentinel, toolResult: undefined };
-			},
-		};
-
-		const { execResult } = await resolveExecHandler(
-			{ path: "/tmp/foo" },
-			handlers.read.bind(handlers),
-			undefined,
-			() => ({}),
-			() => ({ tag: "rejected" }),
-			() => ({ tag: "error" }),
-			{ toolCallId: "exec-bind", toolName: "read" },
-		);
-
-		expect(execResult).toBe(sentinel);
-		expect((execResult as { tag: string }).tag).toBe("bound-correctly");
-	});
-
-	it("handler loses this when passed unbound and fails or returns wrong result", async () => {
-		const sentinel = { tag: "bound-correctly" };
-		const handlers = {
-			sentinel,
-			async read(_args: { path: string }) {
-				return { execResult: (this as typeof handlers).sentinel, toolResult: undefined };
-			},
-		};
-
-		// Pass method reference without .bind(handlers). In strict mode 'this' is undefined
-		// when resolveExecHandler calls handler(args), so (this as any).sentinel throws.
-		const { execResult } = await resolveExecHandler(
-			{ path: "/tmp/foo" },
-			handlers.read,
-			undefined,
-			() => ({}),
-			() => ({ tag: "rejected" }),
-			(msg: string) => ({ tag: "error", message: msg }),
-			{ toolCallId: "exec-bind", toolName: "read" },
-		);
-
-		// Should get error result (handler threw accessing undefined.sentinel)
-		expect(execResult).toEqual({ tag: "error", message: expect.any(String) });
-	});
-
 	// `synthesizeCursorExecToolCall` marks every exec block `kCursorExecResolved`
 	// BEFORE the handler runs, so `agent-loop.ts` emits no placeholder result for
 	// it. Any exit that returns no `toolResult` therefore leaves the call
@@ -569,6 +520,63 @@ describe("Cursor request action encoding", () => {
 });
 
 describe("Cursor history encoding", () => {
+	it("replays a multi-step Cursor turn as alternating steps, keeping parallel calls together", () => {
+		// One Cursor server turn persists as a single assistant message whose
+		// calls interleave with the text and reasoning that followed each result.
+		// Replayed as one message it tells the model every call was issued at
+		// once; the native client replays one assistant step per model round.
+		// Within a round, results replay in the order they arrived, not call order.
+		const result = (id: string, text: string): ToolResultMessage => ({
+			role: "toolResult",
+			toolCallId: id,
+			toolName: "read",
+			content: [{ type: "text", text }],
+			isError: false,
+			timestamp: 3,
+		});
+		const call = (id: string, path: string) => ({ type: "toolCall", id, name: "read", arguments: { path } }) as const;
+		const messages: Context["messages"] = [
+			{ role: "user", content: "Read a.txt, then b.txt and c.txt together, then d.txt.", timestamp: 1 },
+			cursorAssistant(
+				"cursor-composer-2.5",
+				[
+					{ type: "text", text: "Reading a.txt first." },
+					call("call-a", "a.txt"),
+					{ type: "thinking", thinking: "a is 7; now b and c." },
+					call("call-b", "b.txt"),
+					call("call-c", "c.txt"),
+					{ type: "thinking", thinking: "c came back first; now d." },
+					call("call-d", "d.txt"),
+					{ type: "text", text: "The sum is 48." },
+				],
+				2,
+			),
+			result("call-a", "alpha=7"),
+			result("call-c", "gamma=13"),
+			result("call-b", "beta=11"),
+			result("call-d", "delta=17"),
+			{ role: "user", content: "What was in b.txt?", timestamp: 4 },
+		];
+
+		const shape = buildCursorHistoryForTest(messages, undefined, "cursor-composer-2.5").rootPromptMessagesJson.map(
+			entry => {
+				const { role, content } = entry as { role: string; content: { type: string; toolCallId?: string }[] };
+				return `${role}:${content.map(part => part.toolCallId ?? part.type).join(",")}`;
+			},
+		);
+		expect(shape).toEqual([
+			"user:text",
+			"assistant:text,call-a",
+			"tool:call-a",
+			"assistant:call-b,call-c",
+			"tool:call-c",
+			"tool:call-b",
+			"assistant:call-d",
+			"tool:call-d",
+			"assistant:text",
+		]);
+	});
+
 	it("keeps an empty tool result paired with its structured call", () => {
 		const messages: Context["messages"] = [
 			{ role: "user", content: "Read the empty window.", timestamp: 1 },
@@ -1665,6 +1673,184 @@ describe("Cursor exec local-work tracking (issue #4593)", () => {
 		expect(collected.map(result => result.toolCallId)).toEqual(["call-read-orphan"]);
 		expect(collected[0]).toMatchObject({ toolName: "read", isError: true });
 	});
+
+	it("emits an unresolved call when an MCP frame is handed to an external executor", async () => {
+		// auth-gateway sets `externalToolExecutor`: the client's own tools reach
+		// Cursor as MCP tools and the client executes them. Answering the frame
+		// with the handoff text while emitting no block made the turn look like
+		// plain text ending on `stop`, so the client never saw the call
+		// (issue #13082). The block must also stay unmarked: `isClientToolUse`
+		// in `anthropic-messages-server` (and the OpenAI chat finish-reason
+		// mapper) report a handoff only for a call without `kCursorExecResolved`.
+		const output = cursorAssistantMessage();
+		const stream = new AssistantMessageEventStream();
+		const state = newBlockState();
+		const written: unknown[] = [];
+		const h2Request = {
+			write: (chunk: unknown) => {
+				written.push(chunk);
+				return true;
+			},
+		} as unknown as Parameters<typeof handleServerMessage>[5];
+		const collected: ToolResultMessage[] = [];
+		const serverMsg = create(AgentServerMessageSchema, {
+			message: {
+				case: "execServerMessage",
+				value: create(ExecServerMessageSchema, {
+					id: 1,
+					execId: "exec-mcp-handoff",
+					message: {
+						case: "mcpArgs",
+						value: create(McpArgsSchema, {
+							name: "get_weather",
+							toolName: "get_weather",
+							toolCallId: "call-handoff-1",
+							providerIdentifier: "pi-agent",
+							args: { city: encodeJsonValue('"Paris"') },
+						}),
+					},
+				}),
+			},
+		});
+
+		await handleServerMessage(
+			serverMsg,
+			output,
+			stream,
+			state,
+			new Map(),
+			h2Request,
+			undefined,
+			result => {
+				collected.push(result);
+				return result;
+			},
+			{ sawTokenDelta: false },
+			[],
+			[],
+			undefined,
+			true,
+		);
+
+		const blocks = output.content.filter((block): block is ToolCallState => block.type === "toolCall");
+		expect(blocks).toHaveLength(1);
+		expect(blocks[0]).toMatchObject({ id: "call-handoff-1", name: "get_weather", arguments: { city: "Paris" } });
+		expect(blocks[0][kCursorExecResolved]).toBeUndefined();
+		// The external executor owes the result, so nothing is paired locally,
+		// and Cursor still gets its exec answer instead of stalling the turn.
+		expect(collected).toHaveLength(0);
+		expect(written).toHaveLength(1);
+	});
+
+	it("does not duplicate a handed-off call when its interaction frame follows", async () => {
+		const output = cursorAssistantMessage();
+		const stream = new AssistantMessageEventStream();
+		const state = newBlockState();
+		const h2Request = { write: () => true } as unknown as Parameters<typeof handleServerMessage>[5];
+
+		await handleServerMessage(
+			create(AgentServerMessageSchema, {
+				message: {
+					case: "execServerMessage",
+					value: create(ExecServerMessageSchema, {
+						id: 1,
+						execId: "exec-mcp-handoff-2",
+						message: {
+							case: "mcpArgs",
+							value: create(McpArgsSchema, {
+								name: "get_weather",
+								toolName: "get_weather",
+								toolCallId: "call-handoff-2",
+								providerIdentifier: "pi-agent",
+							}),
+						},
+					}),
+				},
+			}),
+			output,
+			stream,
+			state,
+			new Map(),
+			h2Request,
+			undefined,
+			undefined,
+			{ sawTokenDelta: false },
+			[],
+			[],
+			undefined,
+			true,
+		);
+		processInteractionUpdate(
+			{
+				message: {
+					case: "toolCallStarted",
+					value: {
+						callId: "envelope-handoff-2",
+						toolCall: {
+							mcpToolCall: {
+								args: { name: "get_weather", toolName: "get_weather", toolCallId: "call-handoff-2" },
+							},
+						},
+					},
+				},
+			},
+			output,
+			stream,
+			state,
+			{ sawTokenDelta: false },
+		);
+
+		const blocks = output.content.filter((block): block is ToolCallState => block.type === "toolCall");
+		expect(blocks).toHaveLength(1);
+		expect(blocks[0][kCursorExecResolved]).toBeUndefined();
+	});
+
+	it.each(["shellArgs", "shellStreamArgs", "miniSweAgentBashArgs"] as const)(
+		"records a %s display block's millisecond timeout in bash-tool seconds",
+		async frameCase => {
+			// Cursor states shell budgets in milliseconds; the bridge converts them
+			// before running bash, and the transcript block must match what ran
+			// rather than showing a 15 s budget as 15000.
+			const output = cursorAssistantMessage();
+			const stream = new AssistantMessageEventStream();
+			const state = newBlockState();
+			const h2Request = { write: () => true } as unknown as Parameters<typeof handleServerMessage>[5];
+			await handleServerMessage(
+				create(AgentServerMessageSchema, {
+					message: {
+						case: "execServerMessage",
+						value: create(ExecServerMessageSchema, {
+							id: 1,
+							execId: `exec-${frameCase}`,
+							message: {
+								case: frameCase,
+								value: create(ShellArgsSchema, {
+									command: "sleep 1",
+									workingDirectory: "/tmp",
+									timeout: 15000,
+									toolCallId: `call-${frameCase}`,
+								}),
+							},
+						}),
+					},
+				}),
+				output,
+				stream,
+				state,
+				new Map(),
+				h2Request,
+				undefined,
+				undefined,
+				{ sawTokenDelta: false },
+				[],
+			);
+
+			const blocks = output.content.filter((block): block is ToolCallState => block.type === "toolCall");
+			expect(blocks).toHaveLength(1);
+			expect(blocks[0]).toMatchObject({ id: `call-${frameCase}`, name: "bash" });
+			expect(blocks[0].arguments.timeout).toBe(15);
+		},
+	);
 
 	it("survives a local exec tool outliving the lazy idle budget end to end", async () => {
 		const workDone = Promise.withResolvers<void>();

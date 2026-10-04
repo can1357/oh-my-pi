@@ -1427,7 +1427,7 @@ export const cfgThinkingBudgetsXhigh = register({ id: "thinkingBudgets.xhigh", t
 
 export const cfgThinkingBudgetsMax = register({ id: "thinkingBudgets.max", type: "number", default: 32768 });
 
-/** Token budget per thinking level (`thinkingBudgets.*`), passed to providers on every request. */
+/** Token budget per thinking level (`thinkingBudgets.*`) on transports that accept reasoning token budgets. */
 export const cfgThinkingBudgets = combine({
 	minimal: cfgThinkingBudgetsMinimal,
 	low: cfgThinkingBudgetsLow,

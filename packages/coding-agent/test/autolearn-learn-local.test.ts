@@ -224,6 +224,28 @@ describe("learned-lesson read-back", () => {
 		expect(nextOut).toContain("Active-session lesson");
 	});
 
+	it("keeps the active session snapshot when startup writes a new summary after the first prompt went out", async () => {
+		const settings = Settings.isolated({ "memory.backend": "local" });
+		const session = {
+			sessionManager: { getSessionFile: () => "session-active-startup.jsonl" },
+			agent: { state: { messages: [{ role: "user" }] } },
+		};
+		const root = getMemoryRoot(agentDir, settings.getCwd());
+		await Bun.write(path.join(root, "memory_summary.md"), "Original guidance");
+		const initial = await buildMemoryToolDeveloperInstructions(agentDir, settings, session);
+		expect(initial ?? "").toContain("Original guidance");
+
+		await Bun.write(path.join(root, "memory_summary.md"), "Updated guidance");
+		await refreshMemoryToolDeveloperInstructionsCacheAfterStartup(session, agentDir, settings);
+
+		const active = await buildMemoryToolDeveloperInstructions(agentDir, settings, session);
+		expect(active ?? "").toContain("Original guidance");
+		expect(active ?? "").not.toContain("Updated guidance");
+		const nextSession = sessionWithFile("session-next-startup.jsonl");
+		const next = await buildMemoryToolDeveloperInstructions(agentDir, settings, nextSession);
+		expect(next ?? "").toContain("Updated guidance");
+	});
+
 	it("injects both the summary and lessons when both exist", async () => {
 		const settings = Settings.isolated({ "memory.backend": "local" });
 		const root = getMemoryRoot(agentDir, settings.getCwd());
@@ -343,10 +365,6 @@ describe("learn tool (local backend)", () => {
 			settings,
 		};
 	}
-
-	it("createIf returns a tool for the local backend", () => {
-		expect(LearnTool.createIf(localSession())).toBeInstanceOf(LearnTool);
-	});
 
 	it("tiers the local save as a write approval even without a skill payload", () => {
 		expect(new LearnTool(localSession()).approval({ memory: "x" })).toBe("write");

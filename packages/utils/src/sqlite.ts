@@ -1,6 +1,7 @@
 /** Shared SQLite opening, error attribution, and result-code classification for persistent stores. */
 import { Database } from "bun:sqlite";
 import * as fs from "node:fs";
+import * as path from "node:path";
 import { getDbBusyTimeoutMs } from "./env";
 import { withFileLockSync } from "./file-lock";
 import { isEnoent } from "./fs-error";
@@ -11,6 +12,55 @@ const BUSY_BASE_DELAY_MS = 100;
 const SQLITE_STORE_SUFFIXES = ["-wal", "-shm", "-journal", ""];
 
 type SqliteFileIdentity = string | null | undefined;
+
+/**
+ * Corrupt handles held open by in-process openers awaiting recovery, keyed by
+ * resolved store path. Windows refuses to unlink a file any handle still holds,
+ * so the opener that quarantines the store closes its peers' dead handles too.
+ */
+const pendingCorruptHandles = new Map<string, Set<Database>>();
+
+function corruptHandleKey(dbPath: string): string {
+	const resolved = path.resolve(dbPath);
+	return process.platform === "win32" ? resolved.toLowerCase() : resolved;
+}
+
+function registerCorruptHandle(dbPath: string, db: Database | undefined): void {
+	if (!db) return;
+	const key = corruptHandleKey(dbPath);
+	let handles = pendingCorruptHandles.get(key);
+	if (!handles) {
+		handles = new Set();
+		pendingCorruptHandles.set(key, handles);
+	}
+	handles.add(db);
+}
+
+function unregisterCorruptHandle(dbPath: string, db: Database | undefined): void {
+	if (!db) return;
+	const key = corruptHandleKey(dbPath);
+	const handles = pendingCorruptHandles.get(key);
+	if (!handles) return;
+	handles.delete(db);
+	if (handles.size === 0) pendingCorruptHandles.delete(key);
+}
+
+/** Closes peers' failed handles on the store; each peer still closes (idempotently) and adopts on its own path. */
+function closePeerCorruptHandles(dbPath: string, own: Database | undefined): void {
+	const handles = pendingCorruptHandles.get(corruptHandleKey(dbPath));
+	if (!handles) return;
+	for (const peer of handles) {
+		if (peer === own) continue;
+		try {
+			peer.close();
+		} catch (error) {
+			logger.warn("Failed to close a peer's corrupt SQLite handle before quarantine", {
+				path: dbPath,
+				error: String(error),
+			});
+		}
+	}
+}
 
 class SqliteAttemptFailure extends Error {
 	readonly original: unknown;
@@ -58,6 +108,31 @@ export interface SqliteOpenOptions {
 	onCorruptionPreserved?: (backupPath: string, error: unknown) => void;
 }
 
+/**
+ * Bun's multi-statement `db.run()` reports only the final statement's step
+ * error (oven-sh/bun#37415), so a corrupt page hit mid-script can resurface as
+ * an unrelated failure such as "no such table". When an initializer fails for
+ * any other reason, a `quick_check` on the still-open handle decides whether
+ * the store itself is damaged. Runs only on the failure path.
+ */
+function revealHiddenCorruption(db: Database | undefined, error: unknown): unknown {
+	if (!db || isSqliteCorruptionError(error) || isSqliteBusyError(error)) return error;
+	let detail: string;
+	let code: unknown = "SQLITE_CORRUPT";
+	let errno: unknown = 11;
+	try {
+		const rows = db.query<{ quick_check: string }, []>("PRAGMA quick_check(1)").all();
+		if (rows[0]?.quick_check === "ok") return error;
+		detail = `database disk image is malformed (${rows[0]?.quick_check})`;
+	} catch (probeError) {
+		if (!isSqliteCorruptionError(probeError)) return error;
+		detail = probeError instanceof Error ? probeError.message : String(probeError);
+		({ code, errno } = probeError as { code: unknown; errno?: unknown });
+	}
+	const original = error instanceof Error ? error.message : String(error);
+	return Object.assign(new Error(`${detail}; initialization failed: ${original}`, { cause: error }), { code, errno });
+}
+
 async function openWithBusyRetries<T>(
 	dbPath: string,
 	initialize: (db: Database) => T | Promise<T>,
@@ -71,8 +146,10 @@ async function openWithBusyRetries<T>(
 			// WAL recovery can bypass the busy handler; both it and retries are needed (#2421).
 			db.run(`PRAGMA busy_timeout = ${getDbBusyTimeoutMs()}`);
 			return await initialize(db);
-		} catch (error) {
+		} catch (caught) {
+			const error = options.recoverCorruption ? revealHiddenCorruption(db, caught) : caught;
 			if (options.recoverCorruption && isSqliteCorruptionError(error)) {
+				registerCorruptHandle(dbPath, db);
 				throw new SqliteAttemptFailure(error, identity, { db });
 			}
 			closeFailedDatabase(db, error, identity);
@@ -91,8 +168,10 @@ function openOnce<T>(dbPath: string, initialize: (db: Database) => T, options: S
 		db = new Database(dbPath);
 		db.run(`PRAGMA busy_timeout = ${getDbBusyTimeoutMs()}`);
 		return initialize(db);
-	} catch (error) {
+	} catch (caught) {
+		const error = options.recoverCorruption ? revealHiddenCorruption(db, caught) : caught;
 		if (options.recoverCorruption && isSqliteCorruptionError(error)) {
+			registerCorruptHandle(dbPath, db);
 			throw new SqliteAttemptFailure(error, identity, { db });
 		}
 		closeFailedDatabase(db, error, identity);
@@ -116,6 +195,10 @@ function quarantineCorruptSqliteStore(dbPath: string, db: Database | undefined):
 		}
 	}
 	db?.close();
+	// Only Windows refuses to unlink a file another handle still holds. Elsewhere
+	// each peer must keep its own handle until it closes it after adopting the
+	// replacement; closing it here races the peer's recovery on POSIX.
+	if (process.platform === "win32") closePeerCorruptHandles(dbPath, db);
 
 	const removed: string[] = [];
 	try {
@@ -172,6 +255,7 @@ function recoverCorruptDatabase(dbPath: string, error: unknown, options: SqliteO
 				return quarantineCorruptSqliteStore(dbPath, failure.db);
 			});
 		} finally {
+			unregisterCorruptHandle(dbPath, failure.db);
 			closeFailedDatabase(failure.db, failure.original, failure.identity);
 		}
 	} catch (preservationError) {
@@ -240,7 +324,7 @@ export function openSqliteDatabaseSync<T>(
 /** Adds the failing store's path to an error without losing SQLite result codes or its original stack. */
 export function annotateSqliteError(error: unknown, dbPath: string): Error {
 	const annotated = error instanceof Error ? error : new Error(String(error));
-	annotated.message = `Database ${JSON.stringify(dbPath)}: ${annotated.message}`;
+	annotated.message = `Database "${dbPath}": ${annotated.message}`;
 	return annotated;
 }
 

@@ -78,7 +78,7 @@ export type NativeDesktopSessionFactory = (
 	options: DesktopSessionOptions,
 ) => NativeDesktopSession | Promise<NativeDesktopSession>;
 
-type WindowFilter = { id?: string; app?: string; title?: string };
+type WindowFilter = { id?: string | number; app?: string; title?: string };
 type InputOptions = { takeover?: boolean };
 type ScreenshotOptions = { silent?: boolean };
 type ClickOptions = InputOptions & { button?: string; count?: number; modifiers?: string[] };
@@ -170,7 +170,7 @@ function matchesFilter(window: DesktopWindow, filter?: WindowFilter): boolean {
 	const app = filter.app?.toLocaleLowerCase();
 	const title = filter.title?.toLocaleLowerCase();
 	return (
-		(filter.id === undefined || window.id === filter.id) &&
+		(filter.id === undefined || window.id === String(filter.id)) &&
 		(!app || window.app.toLocaleLowerCase().includes(app)) &&
 		(!title || window.title.toLocaleLowerCase().includes(title))
 	);
@@ -721,12 +721,12 @@ export class ComputerWorkerCore {
 					matchesFilter(window, filter),
 				);
 			},
-			window: async (selector: string | WindowFilter): Promise<Win> => {
+			window: async (selector: string | number | WindowFilter): Promise<Win> => {
 				const { signal } = getContext();
 				const windows = await nativeCall(signal, () => session.listWindows());
 				const matches =
-					typeof selector === "string"
-						? windows.filter(window => window.id === selector)
+					typeof selector === "string" || typeof selector === "number"
+						? windows.filter(window => window.id === String(selector))
 						: windows.filter(window => matchesFilter(window, selector));
 				if (matches.length === 0) throw new ToolError(`no window matches ${JSON.stringify(selector)}`);
 				if (matches.length > 1) {

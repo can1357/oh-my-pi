@@ -1,4 +1,10 @@
-import type { ToolRenderer } from "./renderer";
+import type { NativeToolHead, NativeToolView, ToolRenderer, ToolRenderResult } from "./renderer";
+import type { TspSpan } from "@oh-my-pi/pi-wire";
+import { compact, md, node, row, span, text } from "../native/describe";
+import type { NativeChild, NativeNode } from "../native/node";
+import { OwnerMemo } from "../native/memo";
+import { plainText } from "../native/spans";
+import { noteText, resultText } from "./native-view";
 
 import {
 	type Component,
@@ -281,8 +287,158 @@ function renderAnswerOptionLines(
 	return out;
 }
 
+function askHead(question: string | undefined, meta?: string): NativeToolHead {
+	const first = question ? plainText(sanitizeCarriageReturns(question)).trim().split("\n")[0] : "";
+	return { title: "Ask", target: first || undefined, targetKind: "text", meta: meta ? [meta] : undefined };
+}
+
+/** One question of a multi-question result: the question as markdown over its answers. */
+function describeQuestionSection(id: string, question: string, rest: readonly NativeChild[]): NativeNode {
+	return node("section", {}, [md(plainText(question)), ...rest], id);
+}
+
+/** An answer row: a success check before the chosen label, or a quiet unchosen label. */
+function answerRow(key: string, label: TspSpan[], chosen: boolean): NativeNode {
+	return row(
+		compact([chosen ? node("icon", { name: "check", tone: "success" }) : undefined, text(label, { wrap: "word" })]),
+		{ gap: "sm", align: "baseline", role: chosen ? "omp.tool.answer" : "omp.tool.answer.off", key },
+	);
+}
+
+/**
+ * Answered option list: every offered option marked chosen or not, plus any
+ * quoted custom answer and a muted note. A lone "Cancelled" line when nothing was chosen.
+ */
+function describeAnswers(
+	options: string[] | undefined,
+	selectedOptions: string[] | undefined,
+	customInput: string | undefined,
+	note: string | undefined,
+	selectedIndices: ReadonlySet<number> | undefined,
+): NativeChild[] {
+	const selected = new Set(selectedOptions ?? []);
+	if (selected.size === 0 && customInput === undefined && note === undefined) {
+		return [text([span("Cancelled", "warning")], { tone: "warning" })];
+	}
+	const labels = options && options.length > 0 ? options : (selectedOptions ?? []);
+	const rows = labels.map((label, index) => {
+		const isSelected = selectedIndices !== undefined ? selectedIndices.has(index) : selected.has(label);
+		return answerRow(`${index}`, [span(plainText(label), isSelected ? "toolOutput" : "muted")], isSelected);
+	});
+	if (customInput !== undefined) {
+		rows.push(answerRow("custom", [span(`\u201c${plainText(customInput)}\u201d`, "toolOutput")], true));
+	}
+	return compact([
+		...rows,
+		note !== undefined
+			? text([span(plainText(note), "muted")], { wrap: "word", role: "omp.tool.context" })
+			: undefined,
+	]);
+}
+
+/** Pending ask: an inline head naming the question; the ask dialog owns the form. */
+function describeAskCall(args: AskRenderArgs): NativeToolView {
+	const questions = normalizeRenderQuestions(args.questions);
+	const first = questions?.[0]?.question ?? (typeof args.question === "string" ? args.question : undefined);
+	const more = questions && questions.length > 1 ? `${questions.length} questions` : undefined;
+	return {
+		tool: askHead(first, more),
+		inline: true,
+		body: [text([span("Waiting for your answer…", "muted")])],
+	};
+}
+
+function describeAskResult(result: ToolRenderResult<AskToolDetails>, args: AskRenderArgs | undefined): NativeToolView {
+	const rawDetails = result.details;
+	const fallback = plainText(sanitizeCarriageReturns(resultText(result)));
+	const argQuestion =
+		normalizeRenderQuestions(args?.questions)?.[0]?.question ??
+		(typeof args?.question === "string" ? args.question : undefined);
+	if (!rawDetails) {
+		return { tool: askHead(argQuestion), tone: "warning", body: fallback ? [noteText(fallback)] : undefined };
+	}
+	const details = sanitizeAskResultDetails(rawDetails);
+
+	if (details.chatRedirect) {
+		return {
+			tool: askHead(details.questions?.[0] ?? argQuestion, "chat redirect"),
+			tone: "info",
+			body: (details.questions ?? []).map(q => md(plainText(q))),
+		};
+	}
+
+	if (details.results && details.results.length > 0) {
+		const results = details.results;
+		const rawResults = rawDetails.results ?? [];
+		const answered = results.some(
+			r =>
+				r.customInput !== undefined || r.note !== undefined || (r.selectedOptions && r.selectedOptions.length > 0),
+		);
+		return {
+			tool: askHead(results[0]?.question, results.length > 1 ? `${results.length} questions` : undefined),
+			tone: answered ? undefined : "warning",
+			// Sanitizing preserves order and length, so raw indices align with `r`.
+			body: results.map((r, index) =>
+				describeQuestionSection(
+					r.id,
+					r.question,
+					describeAnswers(
+						r.options,
+						r.selectedOptions,
+						r.customInput,
+						r.note,
+						selectedIndicesFor(rawResults[index]?.options, rawResults[index]?.selectedOptions),
+					),
+				),
+			),
+		};
+	}
+
+	if (!details.question) {
+		return { tool: askHead(argQuestion), body: fallback ? [text(fallback, { wrap: "word" })] : undefined };
+	}
+
+	const answered =
+		details.customInput !== undefined ||
+		details.note !== undefined ||
+		(details.selectedOptions && details.selectedOptions.length > 0);
+	return {
+		tool: askHead(details.question),
+		tone: answered ? undefined : "warning",
+		body: compact([
+			md(plainText(details.question)),
+			...describeAnswers(
+				details.options,
+				details.selectedOptions,
+				details.customInput,
+				details.note,
+				selectedIndicesFor(rawDetails.options, rawDetails.selectedOptions),
+			),
+			details.timedOut
+				? text([span("auto-selected after timeout — not a user choice", "muted")], {
+						wrap: "word",
+						role: "omp.tool.notice",
+					})
+				: undefined,
+		]),
+	};
+}
+
+const askCallMemo = new OwnerMemo<NativeToolView | undefined>();
+const askResultMemo = new OwnerMemo<NativeToolView | undefined>();
+
 /** Render question forms and their recorded answers. */
 export const askToolRenderer = {
+	describeCall(args: AskRenderArgs): NativeToolView | undefined {
+		return askCallMemo.get(args, [JSON.stringify(args)], () => describeAskCall(args));
+	},
+	describeResult(
+		result: ToolRenderResult<AskToolDetails>,
+		_options?: RenderResultOptions,
+		args?: AskRenderArgs,
+	): NativeToolView | undefined {
+		return askResultMemo.get(result, [], () => describeAskResult(result, args));
+	},
 	mergeCallAndResult: true,
 	renderCall(args: AskRenderArgs, _options: RenderResultOptions, uiTheme: Theme): Component {
 		const label = formatTitle("Ask", uiTheme);

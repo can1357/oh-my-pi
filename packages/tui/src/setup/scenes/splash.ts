@@ -1,8 +1,11 @@
 import { centerLine, visibleWidth } from "../../utils";
 import { padToWidth } from "../../render/utils";
-import { gradientEscape, gradientLogo, PI_LOGO, type ShineConfig } from "../../prompt/welcome";
+import { gradientEscape, gradientLogo, logoNode, PI_LOGO, type ShineConfig } from "../../prompt/welcome";
 import { theme } from "../../theme/theme";
 import { formatKeyHint } from "../../app-keybindings";
+import { col, node, span, text } from "../../native/describe";
+import type { NativeNode } from "../../native/node";
+import { Memo } from "../../native/memo";
 
 export const SETUP_SPLASH_MS = 2600;
 export const SETUP_TICK_MS = 33;
@@ -179,6 +182,30 @@ export function renderSetupSplash(width: number, height: number, elapsedMs: numb
 	for (const ch of hint) put(col++, hintRow, ch === " " ? " " : theme.fg("dim", ch));
 
 	return cells.map(row => row.join(""));
+}
+
+const splashMemo = new Memo();
+
+/**
+ * Native splash: the 2x brand mark with a terminal-clocked shimmer, the
+ * wordmark, and the skip hint pinned to the bottom. The water and starfield
+ * are cell paintings with no semantic counterpart. A click on the splash
+ * sends the `skip` action.
+ */
+export function describeSetupSplash(): NativeNode {
+	const hint = skipHint();
+	return splashMemo.get([hint], () =>
+		col(
+			[
+				node("spacer", { grow: 1 }),
+				logoNode(LARGE_LOGO, true),
+				text([span("O h   M y   P i", "strong")], { wrap: "none" }),
+				node("spacer", { grow: 1 }),
+				text([span(hint, "dim")], { wrap: "none" }),
+			],
+			{ align: "center", gap: "md", grow: 1, role: "omp.setup.splash", actions: { click: "skip" } },
+		),
+	);
 }
 
 /** Centered fallback for windows too small to hold the full scene. */

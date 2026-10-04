@@ -100,7 +100,7 @@ export function quotaTierFor(provider: string, model: string): string | undefine
 	for (const fallback of rule.fallbacks) {
 		if (model.includes(fallback.substring)) return fallback.label;
 	}
-	return undefined;
+	return rule.defaultTier;
 }
 
 /** UTC offset for a provider's timezone-naive absolute retry-reset timestamps. */

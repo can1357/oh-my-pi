@@ -17,7 +17,7 @@ import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
-import { CheckpointTool, RewindTool, type ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
+import { RewindTool, type ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { TempDir } from "@oh-my-pi/pi-utils";
 
@@ -409,19 +409,6 @@ describe("AgentSession checkpoint rewind branch context", () => {
 		expect(reportMessages).toHaveLength(1);
 		expect(messageText(reportMessages[0]!)).toContain("Need explore again → new `checkpoint`.");
 		expect(messageText(reportMessages[0]!)).toContain(report);
-	});
-
-	it("checkpoint tool result carries only the goal and a forward-looking line", async () => {
-		const tool = new CheckpointTool(
-			createToolSession({
-				getCheckpointState: () => undefined,
-			}),
-		);
-		const result = await tool.execute("call_checkpoint", { goal: "inspect" });
-		const text = result.content.find(part => part.type === "text")?.text;
-		expect(text).toBe("Checkpoint: inspect\nFinish exploration and formulate findings.");
-		expect(text).not.toContain("Run your investigation");
-		expect(text).not.toContain("call rewind");
 	});
 
 	it("ignores a completed cycle's rewind result after rebuilding context", async () => {

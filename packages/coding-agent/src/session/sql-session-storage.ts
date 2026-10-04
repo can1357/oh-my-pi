@@ -4,6 +4,7 @@ import {
 	type SessionStorageIndexEntry,
 } from "./indexed-session-storage";
 import { SessionWriteConflictError } from "./session-storage";
+import { enoent } from "./session-storage-errors";
 import type { SessionTitleUpdate } from "./session-title-slot";
 
 /**
@@ -112,15 +113,6 @@ interface SliceRow {
 const DEFAULT_TABLE = "omp_session_files";
 const IDENT_RE = /^[A-Za-z_][A-Za-z0-9_]{0,62}$/;
 const utf8Decoder = new TextDecoder("utf-8");
-
-function enoent(p: string): NodeJS.ErrnoException {
-	const err = new Error(`ENOENT: no such file, '${p}'`) as NodeJS.ErrnoException;
-	err.code = "ENOENT";
-	err.errno = -2;
-	err.path = p;
-	err.syscall = "open";
-	return err;
-}
 
 function detectAdapter(client: SqlSessionStorageClient): SqlSessionStorageAdapter {
 	const reported = String(client.options?.adapter ?? "").toLowerCase();

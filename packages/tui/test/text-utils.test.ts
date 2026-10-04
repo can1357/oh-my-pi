@@ -8,15 +8,6 @@ import {
 } from "@oh-my-pi/pi-tui/utils";
 
 describe("text utils", () => {
-	it("computes visible width for ANSI and tabs", () => {
-		const text = `\x1b[31mhi\tthere\x1b[0m`;
-		expect(visibleWidth(text)).toBe(2 + 3 + 5);
-	});
-
-	it("does not double-count pure ASCII tabs", () => {
-		expect(visibleWidth("a\tb")).toBe(1 + 3 + 1);
-	});
-
 	it("ignores OSC hyperlinks in visible width", () => {
 		const text = "\x1b]8;;https://example.com\x07link\x1b]8;;\x07";
 		expect(visibleWidth(text)).toBe(4);
@@ -37,6 +28,35 @@ describe("text utils", () => {
 		expect(visibleWidth(`a\x1b[1m${emoji}\x1b[22mb`)).toBe(1 + 2 + 1);
 		// Plain styled ASCII is unaffected — ANSI strips to its visible text.
 		expect(visibleWidth("\x1b[31mhello\x1b[0m")).toBe(visibleWidth("hello"));
+	});
+
+	it("counts ASCII SGR spans without counting their parameter bytes", () => {
+		expect(visibleWidth("\x1b[m\x1b[1;38;2;255;128;0mhello ~\x1b[;m")).toBe(7);
+		expect(visibleWidth("\x1b[0m\x1b[31m")).toBe(0);
+		const longLine = "\x1b[38;5;123mhello\x1b[0m ".repeat(100);
+		expect(visibleWidth(longLine)).toBe(600);
+	});
+
+	it("preserves native width semantics and corrections after an ASCII SGR prefix", () => {
+		for (const suffix of [
+			"\x1b",
+			"\x1b[",
+			"\x1b[31",
+			"\x1b[31 ",
+			"\x1b[2Ktail",
+			"\x1b[38:2::255:0:0mred",
+			"\x1b]8;;https://example.com\x07link\x1b]8;;\x07",
+			"界",
+			"\r\n",
+			"\x7f",
+		]) {
+			const text = `\x1b[31mASCII\x1b[0m${suffix}`;
+			expect(visibleWidth(text)).toBe(
+				Bun.stringWidth(text, { countAnsiEscapeCodes: false, ambiguousIsNarrow: true }),
+			);
+		}
+		expect(visibleWidth("\x1b[31mASCII\x1b[0m\x1b_payload\x07")).toBe(5);
+		expect(visibleWidth("\x1b[31mASCII\x1b[0m\x1b]66;s=2;Hi\x07")).toBe(9);
 	});
 
 	it("counts a VS16 emoji-presentation symbol as 2 cells", () => {

@@ -1,4 +1,7 @@
 import type { MouseRoutable, SgrMouseEvent } from "../../mouse";
+import type { TspProps } from "@oh-my-pi/pi-wire";
+import { col, node, row } from "../../native/describe";
+import type { DescribeContext, NativeNode } from "../../native/node";
 import type { Component } from "../../tui";
 import { visibleWidth } from "../../utils";
 import {
@@ -11,6 +14,9 @@ import {
 	type LayoutRect,
 	layoutRatio,
 	layoutSize,
+	nativeLayoutChild,
+	nativeLayoutGap,
+	nativeSlotProps,
 	optionalLayoutSize,
 	uniqueLayoutComponents,
 } from "./geometry";
@@ -88,6 +94,16 @@ export class SplitPane implements Component, MouseRoutable {
 	#measureMemo: SplitMeasureMemo | undefined;
 	#rowMode: "split" | PaneSide = "split";
 	#rowLeftWidth = -1;
+	#native:
+		| {
+				leftSize: SplitPaneSize;
+				rightMinWidth: number;
+				narrowPane: PaneSide | undefined;
+				divider: LayoutDecoration | undefined;
+				height: number | undefined;
+				node: NativeNode;
+		  }
+		| undefined;
 
 	constructor(options: SplitPaneOptions) {
 		this.#left = options.left;
@@ -266,6 +282,55 @@ export class SplitPane implements Component, MouseRoutable {
 		};
 		this.#measureMemo = { width, prefix, divider, suffix, geometry };
 		return geometry;
+	}
+
+	/**
+	 * Two flex slots in a `row`: the left pane fixed (`ch`) or a fraction of
+	 * the width within its bounds, the right pane growing from its minimum.
+	 * With a narrow pane configured the row may wrap, stacking the panes on
+	 * narrow terminals instead of hiding one.
+	 */
+	describe(_cx: DescribeContext): NativeNode {
+		const cached = this.#native;
+		if (
+			cached?.leftSize === this.#leftSize &&
+			cached.rightMinWidth === this.#rightMinWidth &&
+			cached.narrowPane === this.#narrowPane &&
+			cached.divider === this.#divider &&
+			cached.height === this.#height
+		) {
+			return cached.node;
+		}
+		const size = this.#leftSize;
+		const leftProps: TspProps<"col"> =
+			size.fixed !== undefined
+				? nativeSlotProps("w", { fixed: size.fixed })
+				: {
+						...nativeSlotProps("w", { grow: 0, min: size.min, max: size.max }),
+						basis: layoutRatio(size.ratio, 0.5),
+					};
+		const rightProps = nativeSlotProps("w", { grow: 1, min: this.#rightMinWidth });
+		const height = this.#height;
+		const described = row(
+			[
+				node("col", leftProps, [nativeLayoutChild(this.#left)], "left"),
+				node("col", rightProps, [nativeLayoutChild(this.#right)], "right"),
+			],
+			{ gap: nativeLayoutGap(this.#divider), align: this.#align, wrap: this.#narrowPane !== undefined },
+		);
+		const result =
+			height === undefined
+				? described
+				: col([described], { min: { h: `${height}lines` }, max: { h: `${height}lines` } });
+		this.#native = {
+			leftSize: size,
+			rightMinWidth: this.#rightMinWidth,
+			narrowPane: this.#narrowPane,
+			divider: this.#divider,
+			height,
+			node: result,
+		};
+		return result;
 	}
 
 	/** Translate a split-local point into pane-local coordinates. */

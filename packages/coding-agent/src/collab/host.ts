@@ -182,6 +182,18 @@ export class CollabHostStoppedError extends Error {
 	}
 }
 
+/**
+ * `start()` rejects with this when the relay never opened the room: the first
+ * connection closed or timed out. The room was never joinable or published, so
+ * an owner may retry it without guests or the registry having seen it.
+ */
+export class CollabRelayUnavailableError extends Error {
+	constructor(message: string) {
+		super(message);
+		this.name = "CollabRelayUnavailableError";
+	}
+}
+
 export class CollabHost {
 	#ctx: InteractiveModeContext;
 	#socket: CollabSocket | null = null;
@@ -399,7 +411,9 @@ export class CollabHost {
 			this.#relayConnected = false;
 			if (this.#stopping || this.#stopped) return;
 			if (!opened) {
-				firstOpen.reject(new Error(reason));
+				// A close the socket would retry (unreachable relay, dropped handshake)
+				// means the relay is unavailable; a fatal one means it refused the room.
+				firstOpen.reject(willReconnect ? new CollabRelayUnavailableError(reason) : new Error(reason));
 				return;
 			}
 			if (willReconnect) {
@@ -413,7 +427,7 @@ export class CollabHost {
 		socket.connect();
 
 		const timeout = setTimeout(
-			() => firstOpen.reject(new Error("timed out connecting to relay")),
+			() => firstOpen.reject(new CollabRelayUnavailableError("timed out connecting to relay")),
 			CONNECT_TIMEOUT_MS,
 		);
 		try {

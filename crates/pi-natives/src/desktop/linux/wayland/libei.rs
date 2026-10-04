@@ -1,5 +1,6 @@
 use std::{
 	os::{fd::AsFd, unix::net::UnixStream},
+	thread,
 	time::Duration,
 };
 
@@ -22,6 +23,7 @@ use crate::desktop::{
 };
 
 const DEVICE_DISCOVERY_DRAIN_TIMEOUT: Duration = Duration::from_millis(500);
+const DRAG_STEP_DELAY: Duration = Duration::from_millis(8);
 
 #[derive(Clone, Copy)]
 struct DiscoveryTargets {
@@ -57,6 +59,7 @@ pub(super) struct Libei {
 	sequence:       u32,
 	runtime:        &'static tokio::runtime::Runtime,
 	events:         Option<EiConvertEventStream>,
+	disconnected:   bool,
 	portal_session: Option<PortalSession>,
 }
 
@@ -93,7 +96,24 @@ fn close_session(runtime: &tokio::runtime::Runtime, session: &RemoteDesktopSessi
 	});
 }
 
+fn pace_drag(
+	path: &[(f64, f64)],
+	mut send_motion: impl FnMut(f64, f64) -> CoreResult<()>,
+) -> CoreResult<()> {
+	for &(x, y) in path.iter().skip(1) {
+		thread::sleep(DRAG_STEP_DELAY);
+		send_motion(x, y)?;
+	}
+	// Keep the final motion observable before the button release.
+	thread::sleep(DRAG_STEP_DELAY);
+	Ok(())
+}
+
 impl Libei {
+	pub(super) const fn disconnected(&self) -> bool {
+		self.disconnected
+	}
+
 	pub(super) fn new() -> CoreResult<Self> {
 		let runtime = super::portal::portal_runtime()?;
 		let (context, portal_session, targets) = match ei::Context::connect_to_env() {
@@ -111,6 +131,7 @@ impl Libei {
 			sequence: 1,
 			runtime,
 			events: None,
+			disconnected: false,
 			portal_session,
 		};
 		let (connection, mut events) = runtime
@@ -316,6 +337,7 @@ impl Libei {
 			},
 			EiEvent::Disconnected(event) => {
 				self.devices.clear();
+				self.disconnected = true;
 				return Err(DesktopError::input_failed(format!(
 					"libei disconnected: {}",
 					event.explanation
@@ -335,10 +357,15 @@ impl Libei {
 		let result = runtime.block_on(async {
 			for _ in 0..256 {
 				match tokio::time::timeout(Duration::from_millis(1), events.next()).await {
-					Ok(Some(event)) => self.handle_event(event.map_err(|err| {
-						DesktopError::input_failed(format!("libei device state: {err}"))
-					})?)?,
-					Ok(None) => return Err(DesktopError::input_failed("libei disconnected")),
+					Ok(Some(Ok(event))) => self.handle_event(event)?,
+					Ok(Some(Err(err))) => {
+						self.disconnected = true;
+						return Err(DesktopError::input_failed(format!("libei device state: {err}")));
+					},
+					Ok(None) => {
+						self.disconnected = true;
+						return Err(DesktopError::input_failed("libei disconnected"));
+					},
 					Err(_) => return Ok(()),
 				}
 			}
@@ -502,6 +529,7 @@ impl Libei {
 			device.device.device().frame(serial, *time);
 			*time = time.saturating_add(1);
 		};
+		let mut gesture_result = Ok(());
 		match event {
 			PointerEvent::Move { x, y } | PointerEvent::Scroll { x, y, .. } => {
 				move_to(x, y, &mut time);
@@ -525,10 +553,16 @@ impl Libei {
 					interface.button(code, ei::button::ButtonState::Press);
 					device.device.device().frame(serial, time);
 					time = time.saturating_add(1);
-					for &(x, y) in path.iter().skip(1) {
-						move_to(x, y, &mut time);
-					}
+					gesture_result = self.flush().and_then(|()| {
+						pace_drag(&path, |x, y| {
+							time = Self::timestamp()?.max(time);
+							move_to(x, y, &mut time);
+							self.flush()
+						})
+					});
+					// Release even when a motion or transport flush failed.
 					interface.button(code, ei::button::ButtonState::Released);
+					time = Self::timestamp().unwrap_or(time).max(time);
 					device.device.device().frame(serial, time);
 					time = time.saturating_add(1);
 				}
@@ -546,7 +580,8 @@ impl Libei {
 				}
 			}
 		}
-		self.flush()
+		let flush_result = self.flush();
+		gesture_result.and(flush_result)
 	}
 
 	pub(super) fn key_chord(&mut self, keys: &[KeyName]) -> CoreResult<()> {
@@ -808,6 +843,25 @@ fn evdev_char(character: char) -> Option<(u32, bool)> {
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	#[test]
+	fn drag_motions_and_release_are_spaced_for_event_consumers() {
+		use std::time::Instant;
+
+		let started = Instant::now();
+		let mut previous = started;
+		let mut received = Vec::new();
+		pace_drag(&[(450.0, 400.0), (600.0, 411.0), (750.0, 422.0)], |x, y| {
+			let now = Instant::now();
+			assert!(now.duration_since(previous) >= DRAG_STEP_DELAY);
+			previous = now;
+			received.push((x, y));
+			Ok(())
+		})
+		.unwrap();
+		assert_eq!(received, [(600.0, 411.0), (750.0, 422.0)]);
+		assert!(previous.elapsed() >= DRAG_STEP_DELAY, "release must not overtake the final motion");
+	}
 
 	#[test]
 	fn printable_text_without_a_keymap_never_assumes_us_layout() {

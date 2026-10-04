@@ -4,7 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { type LocalProtocolOptions, resolveLocalRoot } from "@oh-my-pi/pi-coding-agent/internal-urls";
 import { InternalUrlFilesystem } from "@oh-my-pi/pi-coding-agent/internal-urls/url-filesystem";
-import { ShellFsFileType, ShellFsOp } from "@oh-my-pi/pi-natives";
+import { executeShell, ShellFsFileType, ShellFsOp } from "@oh-my-pi/pi-natives";
 
 const READ = { read: true, write: false, append: false, truncate: false, create: false, createNew: false };
 const CREATE = { read: false, write: true, append: false, truncate: true, create: true, createNew: false };
@@ -15,6 +15,18 @@ let localRoot: string;
 
 function shellFs(tier: "read" | "write" | "exec" = "exec"): InternalUrlFilesystem {
 	return new InternalUrlFilesystem({ context: { localProtocolOptions: localOptions }, tier });
+}
+
+/**
+ * Create `link` holding the literal `target`, as the native shell's `ln -s` does.
+ * Node's `fs.symlink` rewrites `/` to `\` in the target on Windows, mangling a URL.
+ */
+async function nativeSymlink(target: string, link: string): Promise<void> {
+	const result = await executeShell({
+		command: `ln -s '${target}' '${path.basename(link)}'`,
+		cwd: path.dirname(link),
+	});
+	if (result.exitCode !== 0) throw new Error(`ln -s ${target} ${link} exited ${result.exitCode}`);
 }
 
 beforeEach(async () => {
@@ -36,8 +48,11 @@ describe("InternalUrlFilesystem local://", () => {
 	});
 
 	it("addresses entry names that need percent-encoding, as the first segment and below", async () => {
-		const name = "we?ird #%41 a@b:1";
-		const encoded = "we%3Fird%20%23%2541%20a@b:1";
+		// `?` and `:` are illegal in Windows file names; the rest still needs encoding.
+		const [name, encoded] =
+			process.platform === "win32"
+				? ["we ird #%41 a@b", "we%20ird%20%23%2541%20a@b"]
+				: ["we?ird #%41 a@b:1", "we%3Fird%20%23%2541%20a@b:1"];
 		await fs.mkdir(path.join(localRoot, name), { recursive: true });
 		await fs.writeFile(path.join(localRoot, name, name), "x");
 
@@ -75,7 +90,7 @@ describe("InternalUrlFilesystem local://", () => {
 		});
 		expect(link).toEqual({ local: path.join(localRoot, "link") });
 		// What the native side does with that redirect: the link stores the URL verbatim.
-		await fs.symlink("local://source.txt", path.join(localRoot, "link"));
+		await nativeSymlink("local://source.txt", path.join(localRoot, "link"));
 
 		await expect(shellFs().handle({ op: ShellFsOp.Open, path: "local://link", open: READ })).resolves.toEqual({
 			local: path.join(localRoot, "source.txt"),
@@ -90,7 +105,7 @@ describe("InternalUrlFilesystem local://", () => {
 
 	it("applies the link target's write policy when writing through a URL symlink", async () => {
 		await fs.mkdir(localRoot, { recursive: true });
-		await fs.symlink("omp://README.md", path.join(localRoot, "doc"));
+		await nativeSymlink("omp://README.md", path.join(localRoot, "doc"));
 
 		const response = await shellFs().handle({ op: ShellFsOp.Open, path: "local://doc", open: CREATE });
 

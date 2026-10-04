@@ -70,18 +70,22 @@ async function runLegacyCommitCommand(args: CommitCommandArgs): Promise<void> {
 async function updateChangelog(cwd: string, args: CommitCommandArgs): Promise<void> {
 	const settings = await Settings.init({ cwd });
 	const authStorage = await discoverAuthStorage(undefined, { settings });
-	const registry = new ModelRegistry(authStorage);
-	await registry.refresh();
-	await loadCliExtensionProviders(registry, settings, cwd);
-	const primary = await resolvePrimaryModel(args.model, settings, registry);
-	await runChangelogFlow({
-		cwd,
-		model: primary.model,
-		apiKey: primary.apiKey,
-		thinkingLevel: primary.thinkingLevel,
-		stagedFiles: await vcs.requireGit(cwd).changedFiles({ cached: true }),
-		dryRun: false,
-		maxDiffChars: cfgCommitChangelogMaxDiffChars.get(settings),
-		onProgress: message => process.stdout.write(`${message}\n`),
-	});
+	try {
+		const registry = new ModelRegistry(authStorage);
+		await registry.refresh();
+		await loadCliExtensionProviders(registry, settings, cwd);
+		const primary = await resolvePrimaryModel(args.model, settings, registry);
+		await runChangelogFlow({
+			cwd,
+			model: primary.model,
+			apiKey: primary.apiKey,
+			thinkingLevel: primary.thinkingLevel,
+			stagedFiles: await vcs.requireGit(cwd).changedFiles({ cached: true }),
+			dryRun: false,
+			maxDiffChars: cfgCommitChangelogMaxDiffChars.get(settings),
+			onProgress: message => process.stdout.write(`${message}\n`),
+		});
+	} finally {
+		authStorage.close();
+	}
 }
