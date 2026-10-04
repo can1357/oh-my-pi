@@ -1733,6 +1733,17 @@ export async function runRootCommand(
 			}
 			let result: string;
 			try {
+				// The session to export is read through the configured storage (a table row
+				// under `session.storage: sql`); the install below runs only after this branch.
+				// A refusal exits through the catch with the same message that install prints.
+				setDefaultSessionStorage(
+					await resolveSessionStorage({
+						settings:
+							deps.settings ??
+							(await Settings.loadReadOnly({ cwd: getProjectDir(), configFiles: parsedArgs.config })),
+						env: process.env,
+					}),
+				);
 				const outputPath = parsedArgs.messages.length > 0 ? parsedArgs.messages[0] : undefined;
 				const { exportFromFile } = await import("./export/html");
 				result = await exportFromFile(parsedArgs.export, outputPath);
