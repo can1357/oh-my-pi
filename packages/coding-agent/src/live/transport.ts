@@ -48,6 +48,8 @@ class LiveSignalingError extends Error {
 export interface LiveTransportCallbacks {
 	onEvent(event: LiveServerEvent): void;
 	onOutputLevel(level: number): void;
+	/** Stops and drains one controller-owned delegated task. */
+	onCancelDelegation?(id: string): Promise<void>;
 }
 
 /** Configuration required to establish a Codex live call. */

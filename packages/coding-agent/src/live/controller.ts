@@ -17,9 +17,15 @@ import {
 } from "./protocol";
 import { CodexLiveTransport, type LiveTransport, type LiveTransportCallbacks } from "./transport";
 import { GeminiLiveTransport } from "./gemini-transport";
-import { cfgLiveGoogleModel, cfgLiveGoogleThinking, cfgLiveProvider, resolveLiveVoice } from "./settings";
+import { GeminiLiveExecution } from "./execution";
+import {
+	cfgLiveComputer,
+	cfgLiveGoogleThinking,
+	cfgLiveProvider,
+	resolveLiveModel,
+	resolveLiveVoice,
+} from "./settings";
 import geminiInstructionsTemplate from "./prompts/gemini-instructions.md" with { type: "text" };
-import { LIVE_MODEL } from "./protocol";
 import type { LivePhase } from "@oh-my-pi/pi-tui/apps/live-visualizer";
 
 const OUTPUT_ACTIVE_LEVEL = 0.015;
@@ -153,7 +159,7 @@ export class LiveSessionController {
 		this.#extractAssistantText = options.extractAssistantText;
 		this.#dependencies = dependencies;
 		this.provider = cfgLiveProvider.get(this.#session.settings);
-		this.model = this.provider === "google" ? cfgLiveGoogleModel.get(this.#session.settings).trim() : LIVE_MODEL;
+		this.model = resolveLiveModel(this.#session.settings);
 		this.#voice = options.voice?.trim() || resolveLiveVoice(this.#session.settings);
 		this.#instructionsTemplate =
 			options.instructions ?? (this.provider === "google" ? geminiInstructionsTemplate : liveInstructionsTemplate);
@@ -186,10 +192,19 @@ export class LiveSessionController {
 
 		try {
 			const user = currentUser();
-			const instructions = prompt.render(this.#instructionsTemplate, user);
+			const execution =
+				this.provider === "google" && !this.#dependencies.createTransport
+					? new GeminiLiveExecution(this.#session, cfgLiveComputer.get(this.#session.settings))
+					: undefined;
+			const instructions = prompt.render(this.#instructionsTemplate, {
+				...user,
+				computer: execution?.desktopEnabled ?? false,
+				codeExecution: execution?.codeEnabled ?? false,
+			});
 			const callbacks: LiveTransportCallbacks = {
 				onEvent: (event: LiveServerEvent) => this.#guardEvent(() => this.#handleLiveEvent(event)),
 				onOutputLevel: (level: number) => this.#guardEvent(() => this.#handleOutputLevel(level)),
+				onCancelDelegation: id => this.#cancelDelegation(id),
 			};
 			let transport = this.#dependencies.createTransport?.(callbacks, instructions);
 			if (!transport) {
@@ -202,6 +217,7 @@ export class LiveSessionController {
 						model: this.model,
 						thinkingLevel: cfgLiveGoogleThinking.get(this.#session.settings),
 						callbacks,
+						execution,
 					});
 				} else {
 					transport = new CodexLiveTransport({
@@ -281,6 +297,8 @@ export class LiveSessionController {
 
 	async #stop(): Promise<void> {
 		this.#stopped = true;
+		const active = this.#activeDelegation;
+		const abort = this.provider === "google" && active ? this.#cancelDelegation(active.id) : undefined;
 		for (const task of this.#delegations.values()) {
 			if (task !== this.#activeDelegation) task.cancelled = true;
 		}
@@ -299,6 +317,8 @@ export class LiveSessionController {
 		}
 
 		await this.#sendChain;
+		if (abort) await abort;
+		if (this.provider === "google") await this.#delegationChain;
 		const transport = this.#transport;
 		this.#transport = undefined;
 		if (transport) {
@@ -359,7 +379,7 @@ export class LiveSessionController {
 				this.#refreshAudioPhase();
 				break;
 			case "delegation.cancelled":
-				this.#cancelDelegation(event.id);
+				void this.#cancelDelegation(event.id);
 				break;
 			case "delegation.created":
 				this.#handleDelegation(event);
@@ -385,14 +405,16 @@ export class LiveSessionController {
 			.catch(cause => this.#reportFailure(errorFrom(cause)));
 	}
 
-	#cancelDelegation(id: string): void {
+	async #cancelDelegation(id: string): Promise<void> {
 		const task = this.#delegations.get(id);
 		if (!task) return;
 		task.cancelled = true;
-		if (this.#activeDelegation !== task) return;
-		this.#activeDelegation = undefined;
-		task.abortPromise ??= this.#session.abort().catch(cause => this.#reportFailure(errorFrom(cause)));
-		this.#refreshAudioPhase();
+		if (this.#activeDelegation === task) {
+			this.#activeDelegation = undefined;
+			task.abortPromise ??= this.#session.abort().catch(cause => this.#reportFailure(errorFrom(cause)));
+			this.#refreshAudioPhase();
+		}
+		await task.abortPromise;
 	}
 
 	async #runDelegation(task: DelegationTask): Promise<void> {

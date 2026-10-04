@@ -5,6 +5,7 @@
 ### Added
 
 - Added Google AI Studio API-key authentication to the login provider catalog ([#14302](https://github.com/can1357/oh-my-pi/pull/14302) by [@mitnichiter](https://github.com/mitnichiter)).
+- Added provider-owned Live model defaults in catalog rules, while preserving explicit Live model overrides ([#14302](https://github.com/can1357/oh-my-pi/pull/14302) by [@mitnichiter](https://github.com/mitnichiter)).
 
 ## [18.6.0] - 2026-10-03
 

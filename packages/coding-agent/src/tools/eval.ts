@@ -105,6 +105,7 @@ const evalCellCommonFields = {
 	"title?": type("string").describe("Short transcript label."),
 	"timeout?": type("number").describe("Cell deadline in seconds; 0 disables it."),
 	"reset?": type("boolean").describe("Wipe only this kernel."),
+	"foreground?": type("boolean").describe("Await cell completion without automatic backgrounding."),
 };
 
 /**
@@ -603,7 +604,12 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 		const autoBgManager = session.asyncJobManager;
 		// At the running-job cap, fall through to direct foreground execution
 		// instead of failing every eval call until a slot frees up.
-		if (!cfgEvalAutoBackgroundEnabled.get(session.settings) || !autoBgManager || autoBgManager.atCapacity) {
+		if (
+			params.foreground === true ||
+			!cfgEvalAutoBackgroundEnabled.get(session.settings) ||
+			!autoBgManager ||
+			autoBgManager.atCapacity
+		) {
 			return await run(signal, emitToolUpdate);
 		}
 

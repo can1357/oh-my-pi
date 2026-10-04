@@ -1,9 +1,9 @@
 /**
  * Typed accessors over the compiled catalog-provider entries
- * (`rules/providers/<id>.kdl`): default model, env keys, discovery flags, and
- * authored seed rows. `provider-models/descriptors.ts` pairs these with the
- * per-provider model-manager factories; the generator bundles seed rows per
- * each entry's `bundle` policy.
+ * (`rules/providers/<id>.kdl`): default chat and Live models, env keys,
+ * discovery flags, and authored seed rows. `provider-models/descriptors.ts`
+ * pairs these with the per-provider model-manager factories; the generator
+ * bundles seed rows per each entry's `bundle` policy.
  */
 import rules from "./rules.json";
 import type { Api, ModelSpec } from "../types";
@@ -19,6 +19,11 @@ export function providerEntries(): Readonly<Record<string, CompiledProvider>> {
 /** One provider's catalog entry, or `undefined` for ids without one. */
 export function providerEntry(provider: string): CompiledProvider | undefined {
 	return rules.providers[provider];
+}
+
+/** One provider's preferred realtime Live API model, when declared. */
+export function defaultLiveModelFor(provider: string): string | undefined {
+	return rules.providers[provider]?.defaultLiveModel;
 }
 
 /**

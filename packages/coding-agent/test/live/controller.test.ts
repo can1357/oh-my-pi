@@ -94,7 +94,7 @@ describe("LiveSessionController delegation ownership", () => {
 		tempDir.removeSync();
 	});
 
-	async function harness(responses: MockHandler[]) {
+	async function harness(responses: MockHandler[], provider: "openai-codex" | "google" = "openai-codex") {
 		const mock = createMockModel({ provider: "openai", id: "gpt-live-controller-test", responses });
 		const agent = new Agent({
 			getApiKey: () => "test-key",
@@ -102,7 +102,11 @@ describe("LiveSessionController delegation ownership", () => {
 			streamFn: mock.stream,
 			convertToLlm,
 		});
-		const settings = Settings.isolated({ "compaction.enabled": false, "todo.enabled": false });
+		const settings = Settings.isolated({
+			"live.provider": provider,
+			"compaction.enabled": false,
+			"todo.enabled": false,
+		});
 		settings.setModelRole("default", `${mock.model.provider}/${mock.model.id}`);
 		session = new AgentSession({
 			agent,
@@ -209,6 +213,27 @@ describe("LiveSessionController delegation ownership", () => {
 		await setImmediate();
 		unsubscribe();
 
+		expect(h.mock.calls).toHaveLength(1);
+	});
+
+	it("stopping Gemini Live aborts its owned coding turn before stop resolves", async () => {
+		const started = Promise.withResolvers<void>();
+		const h = await harness(
+			[
+				() => {
+					started.resolve();
+					return { content: ["must not complete after stop"], delayMs: 60_000 };
+				},
+			],
+			"google",
+		);
+		h.emit(delegation("owned", "long-running Live task"));
+		await started.promise;
+		expect(session!.isStreaming).toBe(true);
+
+		await controller!.stop();
+
+		expect(session!.isStreaming).toBe(false);
 		expect(h.mock.calls).toHaveLength(1);
 	});
 

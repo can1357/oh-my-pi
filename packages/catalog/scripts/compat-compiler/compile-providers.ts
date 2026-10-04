@@ -4,10 +4,10 @@
  *
  * A provider file's root `provider "<id>"` node mixes two vocabularies: the
  * cascade (selectors + compat axes, `compile-cascade.ts`) and the catalog
- * entry nodes handled here — `default-model`, `env`, the boolean flags,
- * `discovery`, `kind-apis`, and `seed`. A file that declares `default-model`
- * is a catalog provider; a file without it is wire-compat only and may not
- * carry any other catalog node.
+ * entry nodes handled here — `default-model`, `default-live-model`, `env`,
+ * the boolean flags, `discovery`, `kind-apis`, and `seed`. A file that
+ * declares `default-model` is a catalog provider; a file without it is
+ * wire-compat only and may not carry any other catalog node.
  *
  * Seed rows *define* models rather than patching them. Wire and thinking axis
  * directives inside a seed `model` block become the row's explicit `compat` /
@@ -76,6 +76,7 @@ const DISCOVERY_PROPS = ["label", "oauth-provider", "allow-unauthenticated"] as 
 /** Provider-root node names owned by this compiler; the cascade compiler skips them. */
 export const PROVIDER_CATALOG_NODES: ReadonlySet<string> = new Set([
 	"default-model",
+	"default-live-model",
 	"env",
 	"allow-unauthenticated",
 	"dynamic-models-authoritative",
@@ -344,6 +345,12 @@ function parseProvider(node: KdlNodeView): ParsedProvider | undefined {
 			case "default-model":
 				if (defaultModel !== undefined) malformed(child);
 				defaultModel = requiredName(child);
+				validateProps(child, []);
+				if (child.children) malformed(child);
+				break;
+			case "default-live-model":
+				if (provider.defaultLiveModel !== undefined) malformed(child);
+				provider.defaultLiveModel = requiredName(child);
 				validateProps(child, []);
 				if (child.children) malformed(child);
 				break;

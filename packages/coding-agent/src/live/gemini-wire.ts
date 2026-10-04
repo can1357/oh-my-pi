@@ -1,6 +1,6 @@
 import { type } from "@oh-my-pi/omptype";
 
-const transcription = type({ text: "string", "finished?": "boolean" });
+const transcription = type({ text: "string" });
 export const geminiFunctionCall = type({ id: "string", name: "string", "args?": "unknown" });
 export type GeminiFunctionCall = typeof geminiFunctionCall.infer;
 
@@ -11,7 +11,9 @@ export const geminiServerMessage = type({
 	"serverContent?": {
 		"interrupted?": "boolean",
 		"turnComplete?": "boolean",
+		"generationComplete?": "boolean",
 		"inputTranscription?": transcription,
+		"interimInputTranscription?": transcription,
 		"outputTranscription?": transcription,
 		"interactionStatus?": "string",
 		"interaction_status?": "string",
@@ -23,4 +25,7 @@ export const geminiServerMessage = type({
 	"toolCallCancellation?": { ids: "string[]" },
 });
 
-export const geminiToolArguments = type({ "request?": "string" });
+export const geminiDelegateArguments = type({ "request?": "string" });
+export const geminiExecuteArguments = type({ "code?": "string", "language?": "'js' | 'py'" });
+export const geminiDesktopArguments = type({ "code?": "string", "read_only?": "boolean" });
+export const geminiCancelArguments = type({ "id?": "string" });

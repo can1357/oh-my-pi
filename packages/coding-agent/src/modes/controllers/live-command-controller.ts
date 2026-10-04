@@ -8,6 +8,7 @@ import type { CustomEditor } from "@oh-my-pi/pi-tui/prompt/custom-editor";
 import { theme } from "@oh-my-pi/pi-tui/theme";
 import type { InteractiveModeContext } from "../types";
 import { createAssistantMessageComponent } from "@oh-my-pi/pi-tui/prompt/interactive-context-helpers";
+import { cfgLiveComputer, cfgLiveProvider } from "../../live/settings";
 
 const ANIMATION_INTERVAL_MS = 80;
 type LiveSessionFactory = (options: LiveSessionControllerOptions) => LiveSessionController;
@@ -91,6 +92,11 @@ export class LiveCommandController {
 	}
 
 	async #start(): Promise<void> {
+		if (cfgLiveProvider.get(this.#ctx.settings) === "google" && cfgLiveComputer.get(this.#ctx.settings)) {
+			this.#ctx.showWarning(
+				"Gemini Live desktop access is enabled. Requested screenshots are sent to Google; mouse and keyboard actions affect real apps.",
+			);
+		}
 		this.#assistantTranscriptTurn = 0;
 		this.#assistantTranscriptStartedAt = 0;
 		const visualizer = new LiveVisualizer({

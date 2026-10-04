@@ -1,7 +1,9 @@
 /** Settings for the realtime voice surface. */
+import { defaultLiveModelFor } from "@oh-my-pi/pi-catalog/compat/providers";
 import { register } from "../config/registry";
 import type { Settings } from "../config/settings";
 import { DEFAULT_LIVE_VOICE, LIVE_VOICE_OPTIONS, LIVE_VOICE_VALUES } from "./voices";
+import { LIVE_MODEL } from "./protocol";
 
 export const cfgLiveProvider = register({
 	id: "live.provider",
@@ -37,12 +39,24 @@ export const cfgLiveVoice = register({
 export const cfgLiveGoogleModel = register({
 	id: "live.google.model",
 	type: "string",
-	default: "gemini-3.8-live-extended-thinking",
+	default: "",
 	ui: {
 		tab: "providers",
 		group: "Services",
 		label: "Gemini Live Model",
 		description: "Gemini Live API model resource ID",
+	},
+});
+
+export const cfgLiveComputer = register({
+	id: "live.computer",
+	type: "boolean",
+	default: false,
+	ui: {
+		tab: "providers",
+		group: "Services",
+		label: "Gemini Live Computer Control",
+		description: "Allow Gemini Live to send screenshots to Google and control your real keyboard and mouse",
 	},
 });
 
@@ -70,6 +84,16 @@ export const cfgLiveGoogleThinking = register({
 		],
 	},
 });
+
+/** Resolve the selected provider's Live model; Google overrides precede its catalog default. */
+export function resolveLiveModel(settings: Settings): string {
+	if (cfgLiveProvider.get(settings) !== "google") return LIVE_MODEL;
+	const override = cfgLiveGoogleModel.get(settings).trim();
+	if (override) return override;
+	const catalogDefault = defaultLiveModelFor("google");
+	if (catalogDefault === undefined) throw new Error("Google catalog entry has no default Live model");
+	return catalogDefault;
+}
 
 /** Provider-specific default; RPC's explicit voice still takes precedence. */
 export function resolveLiveVoice(settings: Settings): string {
