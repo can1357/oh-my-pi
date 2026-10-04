@@ -143,6 +143,7 @@ FAKE_SERVER = textwrap.dedent(
                         "source": "custom:user",
                         "pluginName": "second",
                     },
+                    "match": "content",
                 }
             ],
         }

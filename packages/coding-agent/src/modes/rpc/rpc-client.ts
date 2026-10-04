@@ -195,17 +195,28 @@ function requireSkillDiagnosticsString(value: Record<string, unknown>, key: stri
 	return candidate;
 }
 
+function optionalSkillDiagnosticsString(
+	value: Record<string, unknown>,
+	key: string,
+	field: string,
+): string | undefined {
+	const candidate = value[key];
+	if (candidate !== undefined && typeof candidate !== "string") throw new Error(`${field}.${key} must be a string`);
+	return candidate;
+}
+
 function parseSkillDiagnosticEntry(value: unknown, field: string): SkillDiagnosticEntry {
 	if (!isRecord(value)) throw new Error(`${field} must be an object`);
-	const pluginName = value.pluginName;
-	if (pluginName !== undefined && typeof pluginName !== "string") {
-		throw new Error(`${field}.pluginName must be a string`);
-	}
+	const pluginName = optionalSkillDiagnosticsString(value, "pluginName", field);
+	const repository = optionalSkillDiagnosticsString(value, "repository", field);
+	const version = optionalSkillDiagnosticsString(value, "version", field);
 	return {
 		name: requireSkillDiagnosticsString(value, "name", field),
 		filePath: requireSkillDiagnosticsString(value, "filePath", field),
 		source: requireSkillDiagnosticsString(value, "source", field),
 		...(pluginName !== undefined && { pluginName }),
+		...(repository !== undefined && { repository }),
+		...(version !== undefined && { version }),
 	};
 }
 
@@ -224,9 +235,12 @@ function parseSkillResolutionDiagnostic(value: unknown, field: string): SkillRes
 		duplicates: value.duplicates.map((duplicate, index) => {
 			const duplicateField = `${field}.duplicates[${index}]`;
 			if (!isRecord(duplicate)) throw new Error(`${duplicateField} must be an object`);
+			const match = duplicate.match ?? "content";
+			if (match !== "content" && match !== "origin") throw new Error(`${duplicateField}.match is invalid`);
 			return {
 				skill: parseSkillDiagnosticEntry(duplicate.skill, `${duplicateField}.skill`),
 				retained: parseSkillDiagnosticEntry(duplicate.retained, `${duplicateField}.retained`),
+				match,
 			};
 		}),
 	};
