@@ -665,6 +665,19 @@ export const cfgTierAdvisor = register({
 // Retries
 export const cfgRetryEnabled = register({ id: "retry.enabled", type: "boolean", default: true });
 
+export const cfgRetryWaitForConnection = register({
+	id: "retry.waitForConnection",
+	type: "boolean",
+	default: true,
+	ui: {
+		tab: "model",
+		group: "Retry & Fallback",
+		label: "Wait for Connection",
+		description:
+			"Keep waiting for a failed provider connection until it recovers or you cancel. Connection failures do not use the API retry budget; HTTP errors retain their normal retry policy.",
+	},
+});
+
 export const cfgRetryMaxRetries = register({
 	id: "retry.maxRetries",
 	type: "number",
@@ -827,6 +840,7 @@ export const cfgRetryFallbackRevertPolicy = register({
 /** Retry/backoff and usage-aware fallback policy (`retry.*` except fallback chains/revert policy). */
 export const cfgRetry = combine({
 	enabled: cfgRetryEnabled,
+	waitForConnection: cfgRetryWaitForConnection,
 	maxRetries: cfgRetryMaxRetries,
 	baseDelayMs: cfgRetryBaseDelayMs,
 	maxDelayMs: cfgRetryMaxDelayMs,

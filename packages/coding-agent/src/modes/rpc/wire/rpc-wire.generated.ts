@@ -784,6 +784,8 @@ export interface AutoRetryStartEvent {
 	maxAttempts: number;
 	delayMs: number;
 	errorMessage: string;
+	/** Waiting without an attempt limit for a failed provider connection. */
+	connectivity?: boolean;
 	errorId?: number;
 }
 

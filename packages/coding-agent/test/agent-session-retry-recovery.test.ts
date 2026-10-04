@@ -539,6 +539,8 @@ describe("AgentSession retry recovery", () => {
 			"retry.baseDelayMs": 5,
 			"retry.maxDelayMs": 100,
 			"retry.maxRetries": maxRetries,
+			// Exercise the finite fallback policy when connection waiting is opted out.
+			"retry.waitForConnection": false,
 			"retry.modelFallback": true,
 			"retry.fallbackChains": { default: [fallback] },
 		});

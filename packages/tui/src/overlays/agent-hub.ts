@@ -81,6 +81,7 @@ import {
 	treeMetadataIndent,
 } from "./agent-hub-renderer";
 import { sanitizeDisplaySingleLine } from "./extensions/display-text";
+import { formatRetryStatus } from "../render/retry-status";
 import { AgentTranscriptViewer, type AgentTranscriptSource } from "./agent-transcript-viewer";
 import type { AgentRoleDisplay } from "./agent-hub-renderer";
 import { fuzzyMatch } from "../fuzzy";
@@ -1368,7 +1369,10 @@ export class AgentHubOverlayComponent<TRecord extends AgentRecordLike = AgentRec
 			const value = [span(sanitizeDisplaySingleLine(current))];
 			if (progress?.retryState) {
 				value.push(
-					span(`${dot}retry ${progress.retryState.attempt}/${progress.retryState.maxAttempts}`, "warning"),
+					span(
+						`${dot}${formatRetryStatus(progress.retryState.attempt, progress.retryState.maxAttempts)}`,
+						"warning",
+					),
 				);
 			}
 			facts.push({ k: "Current", v: value });
@@ -2062,7 +2066,7 @@ export class AgentHubOverlayComponent<TRecord extends AgentRecordLike = AgentRec
 			section("Current");
 			addWrapped(current);
 			if (progress?.retryState) {
-				add(theme.fg("warning", `retry ${progress.retryState.attempt}/${progress.retryState.maxAttempts}`));
+				add(theme.fg("warning", formatRetryStatus(progress.retryState.attempt, progress.retryState.maxAttempts)));
 			}
 		}
 

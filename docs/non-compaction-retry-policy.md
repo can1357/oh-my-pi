@@ -15,6 +15,16 @@ It explicitly excludes context-overflow recovery via auto-compaction. Overflow i
 - [`../packages/coding-agent/src/modes/rpc/rpc-client.ts`](../packages/coding-agent/src/modes/rpc/rpc-client.ts)
 - [`../packages/coding-agent/src/modes/rpc/rpc-types.ts`](../packages/coding-agent/src/modes/rpc/rpc-types.ts)
 
+## Connection loss
+
+With `retry.enabled` and `retry.waitForConnection` enabled (both default to `true`), a lost provider connection takes a separate path before model fallback and post-turn maintenance. DNS failures, unreachable networks, refused/reset connections, failed fetches, and unexpected socket closes wait without consuming the ordinary HTTP retry budget. HTTP rejections (including 408, 429, and 5xx), generic request timeouts, authentication failures, and quota errors keep their existing policies.
+
+The running session retries the same provider/model request after exponential backoff starting at `retry.baseDelayMs`, with jitter and a 30-second ceiling. The request itself checks the connection; there is no public-internet probe. Escape, RPC abort, disposal, or a superseding prompt cancels recovery. A misconfigured endpoint is indistinguishable from an unavailable one, so the UI says “Waiting for provider connection,” not “Internet is offline.” `retry.waitForConnection: false` opts out.
+
+Replay safety is unchanged: retry an uncommitted turn, preserve resolved tool-call/result pairs, or continue committed text-only output with a resume instruction. Completed tool results stay in context; unknown tool outcomes, images, and server-side tool actions are not automatically replayed. Retained Responses sockets and server-prefix state are reset before reconnection. Other request-scoped transports are recreated on the next request.
+
+Connection waits emit `auto_retry_start` with `connectivity: true` and `maxAttempts: 0` (unlimited), then the existing `auto_retry_end` on recovery or cancellation. Repeated empty connection failures keep one persisted outage diagnostic rather than growing the transcript on every probe. This is live-process recovery, not persistence across application crashes or restarts.
+
 ## Scope boundary vs compaction
 
 Retry and compaction are checked from the same `agent_end` path, but they are intentionally separated:

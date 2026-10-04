@@ -207,6 +207,33 @@ describe("collab guest extension lifecycle mirror", () => {
 		}
 	});
 
+	it("preserves the connection-wait marker through the guest extension lifecycle", async () => {
+		const writeSpy = spyOn(Bun, "write").mockResolvedValue(0);
+		const renameSpy = spyOn(fsp, "rename").mockResolvedValue(undefined);
+		const harness = await makeHarness("connection-lifecycle-room");
+		try {
+			harness.hostSocket.send({
+				t: "event",
+				event: {
+					type: "auto_retry_start",
+					connectivity: true,
+					attempt: 25,
+					maxAttempts: 0,
+					delayMs: 30_000,
+					errorMessage: "fetch failed",
+				},
+			} as CollabFrame);
+			await harness.barrier();
+			expect(harness.emitted).toContainEqual(
+				expect.objectContaining({ type: "auto_retry_start", connectivity: true, maxAttempts: 0 }),
+			);
+		} finally {
+			writeSpy.mockRestore();
+			renameSpy.mockRestore();
+			await harness.cleanup();
+		}
+	});
+
 	it("maps a non-terminal agent_end settle to willContinue: true", async () => {
 		const writeSpy = spyOn(Bun, "write").mockResolvedValue(0);
 		const renameSpy = spyOn(fsp, "rename").mockResolvedValue(undefined);

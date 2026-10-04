@@ -4036,6 +4036,14 @@ export class AgentSession implements SettingsScope {
 				maintenanceRoute("empty-stop-retry-cap");
 			}
 
+			// A failed connection is neither quota exhaustion nor model failure.
+			// Let its replay-safe wait own the turn before fallback/maintenance.
+			if (await this.#recovery.handleConnectivityError(msg)) {
+				maintenanceRoute("connection-recovery");
+				await emitAgentEndNotification({ willContinue: this.#recovery.isRetrying });
+				return;
+			}
+
 			// Record quota exhaustion before deciding whether this failed turn may be
 			// replayed. Visible/side-effecting output then remains terminal while its
 			// credential is still blocked or rotated exactly once.
@@ -4180,6 +4188,7 @@ export class AgentSession implements SettingsScope {
 				// persisting one would replay an empty assistant turn on reload.
 				await this.#recovery.persistTerminalEmptyErrorTurn(msg);
 			}
+			const settledRetryAttempt = this.#recovery.attempt;
 			this.#recovery.resolveRetry();
 
 			if (!checkedCompaction) {
@@ -4191,7 +4200,7 @@ export class AgentSession implements SettingsScope {
 			if (compactionResult.automaticContinuationBlocked && AIError.isPayloadRejection(msg)) {
 				await this.#recovery.persistTerminalEmptyErrorTurn(msg);
 			}
-			await this.#recovery.onErrorSettledWithoutRetry(msg, compactionResult);
+			await this.#recovery.onErrorSettledWithoutRetry(msg, compactionResult, settledRetryAttempt);
 			// Stop-time todo reconciliation only fires at a text-only final stop. A run
 			// that ends still mid-tool-use (deadline hit, context full, etc.) skips the
 			// reminder so we don't pile a follow-up onto an already in-flight turn.

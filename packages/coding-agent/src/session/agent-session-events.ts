@@ -46,6 +46,8 @@ export type AgentSessionEvent =
 	  }
 	| {
 			type: "auto_retry_start";
+			/** Waiting without an attempt limit for a failed provider connection. */
+			connectivity?: boolean;
 			attempt: number;
 			maxAttempts: number;
 			delayMs: number;

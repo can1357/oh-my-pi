@@ -497,7 +497,12 @@ export class GuestClient {
 				this.#pushNotice(event.level, event.message);
 				break;
 			case "auto_retry_start":
-				this.#pushNotice("info", `retry ${event.attempt}/${event.maxAttempts}: ${event.errorMessage}`);
+				this.#pushNotice(
+					"info",
+					event.connectivity
+						? "Waiting for provider connection"
+						: `retry ${event.attempt}/${event.maxAttempts}: ${event.errorMessage}`,
+				);
 				break;
 			case "auto_retry_end":
 				if (!event.success) this.#pushNotice("error", event.finalError ?? "retry failed");

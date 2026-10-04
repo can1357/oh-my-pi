@@ -2481,7 +2481,7 @@ export class EventController {
 		this.#syntheticFailureCards.clear();
 		this.#stopWorkingLoader();
 		this.ctx.statusContainer.disposeChildren();
-		if (AIError.is(event.errorId, AIError.Flag.ThinkingLoop)) {
+		if (event.connectivity || AIError.is(event.errorId, AIError.Flag.ThinkingLoop)) {
 			// The retry path drops the failed assistant from runtime context. Do not
 			// restore its inline Error row; just unpin the fixed-region banner so the
 			// retry UI is the visible state.
@@ -2491,22 +2491,28 @@ export class EventController {
 			this.ctx.clearPinnedError();
 		}
 		const retryStartMs = Date.now();
-		const retryLabel = `Retrying (${event.attempt}/${event.maxAttempts})`;
+		const retryLabel = event.connectivity
+			? "Waiting for provider connection"
+			: `Retrying (${event.attempt}/${event.maxAttempts})`;
 		this.ctx.retryLoader = new Loader(
 			this.ctx.ui,
 			spinner => theme.fg("warning", spinner),
 			text => theme.fg("muted", text),
 			() => {
 				const remaining = Math.max(0, event.delayMs - (Date.now() - retryStartMs));
-				return `${retryLabel} in ${formatDuration(remaining)}…${this.#maintenanceEscHint()}`;
+				return `${retryLabel}${event.connectivity ? " · checking" : ""} in ${formatDuration(remaining)}…${this.#maintenanceEscHint()}`;
 			},
 			getSymbolTheme().spinnerFrames,
 		);
 		this.ctx.retryLoader.setWorkingRow(
 			() => ({
-				label: `Retrying · attempt ${event.attempt} of ${event.maxAttempts}`,
+				label: event.connectivity
+					? "Waiting for provider connection"
+					: `Retrying · attempt ${event.attempt} of ${event.maxAttempts}`,
 				startedAt: retryStartMs,
-				variant: { kind: "retry", attempt: event.attempt, max: event.maxAttempts, delayMs: event.delayMs },
+				variant: event.connectivity
+					? undefined
+					: { kind: "retry", attempt: event.attempt, max: event.maxAttempts, delayMs: event.delayMs },
 				interruptKey: this.ctx.maintenanceInterruptKey(),
 			}),
 			() => this.ctx.interruptFromPointer(),

@@ -31,6 +31,7 @@ import { formatModelStringWithRouting, resolveModelOverride } from "../config/mo
 
 import type { Settings } from "../config/settings";
 import type { RetryErrorUpdate } from "../extensibility/shared-events";
+import connectionContinueTemplate from "../prompts/system/connection-continue.md" with { type: "text" };
 import emptyStopRetryTemplate from "../prompts/system/empty-stop-retry.md" with { type: "text" };
 import malformedFunctionCallRetryTemplate from "../prompts/system/malformed-function-call-retry.md" with { type: "text" };
 import streamStallContinueTemplate from "../prompts/system/stream-stall-continue.md" with { type: "text" };
@@ -238,6 +239,7 @@ export interface TurnRecoveryHost {
 		delayMs?: number;
 		generation?: number;
 		shouldContinue?: () => boolean;
+		onSkip?: () => void;
 		onError?: (error: unknown) => void;
 	}): void;
 	waitForSessionMessagePersistence(message: AssistantMessage): Promise<void>;
@@ -305,6 +307,7 @@ export class TurnRecovery {
 	readonly #host: TurnRecoveryHost;
 	#retryAbortController: AbortController | undefined;
 	#retryAttempt = 0;
+	#connectionAttempt = 0;
 	#requestBodyReadTimeoutRecoveryPromptSequence: number | undefined;
 	#retryPromise: Promise<void> | undefined;
 	#retryResolve: (() => void) | undefined;
@@ -374,7 +377,7 @@ export class TurnRecovery {
 
 	/** Current automatic retry attempt. */
 	get attempt(): number {
-		return this.#retryAttempt;
+		return this.#connectionAttempt || this.#retryAttempt;
 	}
 
 	/** Promise settled when the active retry saga finishes. */
@@ -516,7 +519,7 @@ export class TurnRecovery {
 				role: this.#activeRetryFallback.role,
 			});
 		}
-		if (this.#retryAttempt === 0) {
+		if (this.attempt === 0) {
 			return;
 		}
 		const retryErrors = await this.#markPendingRetryErrors({
@@ -526,7 +529,7 @@ export class TurnRecovery {
 		await this.#host.emitSessionEvent({
 			type: "auto_retry_end",
 			success: true,
-			attempt: this.#retryAttempt,
+			attempt: this.attempt,
 			retryErrors,
 		});
 		this.#clearPendingRetryErrors();
@@ -535,10 +538,14 @@ export class TurnRecovery {
 	}
 
 	/** Closes a failed retry saga when no compaction continuation took ownership. */
-	async onErrorSettledWithoutRetry(message: AssistantMessage, compaction: RecoveryCompactionResult): Promise<void> {
-		if (message.stopReason !== "error" || this.#retryAttempt === 0 || compaction.continuationScheduled) return;
-		const attempt = this.#retryAttempt;
+	async onErrorSettledWithoutRetry(
+		message: AssistantMessage,
+		compaction: RecoveryCompactionResult,
+		attempt = this.attempt,
+	): Promise<void> {
+		if (message.stopReason !== "error" || attempt === 0 || compaction.continuationScheduled) return;
 		this.#retryAttempt = 0;
+		this.#connectionAttempt = 0;
 		await this.#host.emitSessionEvent({
 			type: "auto_retry_end",
 			success: false,
@@ -556,6 +563,145 @@ export class TurnRecovery {
 	/** Handles empty terminal assistant turns and schedules bounded recovery. */
 	handleEmptyAssistantStop(message: AssistantMessage): Promise<"continue" | "terminal" | undefined> {
 		return this.#handleEmptyAssistantStop(message);
+	}
+
+	/**
+	 * Wait for a failed connection without spending the HTTP retry budget or
+	 * changing models/accounts. The next normal provider request is the probe:
+	 * no unrelated internet endpoint, extra model call, or tool replay is needed.
+	 * This only owns replay-safe turns, resolved tool turns, and text-only resume.
+	 */
+	async handleConnectivityError(message: AssistantMessage): Promise<boolean> {
+		const settings = cfgRetry.get(this.#host.settings);
+		if (
+			!settings.enabled ||
+			!settings.waitForConnection ||
+			message.stopReason !== "error" ||
+			this.#host.abortInProgress() ||
+			this.#host.isDisposed() ||
+			this.#host.streamingEditAbortTriggered() ||
+			AIError.is(message.errorId, AIError.Flag.AuthFailed) ||
+			AIError.is(message.errorId, AIError.Flag.UsageLimit) ||
+			AIError.is(message.errorId, AIError.Flag.Abort)
+		) {
+			return false;
+		}
+		const errorStatus =
+			message.errorStatus ??
+			(message.errorId !== undefined && message.errorId >= 300 && message.errorId <= 599
+				? message.errorId
+				: undefined);
+		if (
+			!AIError.isConnectivityError({
+				message: message.errorClassificationMessage ?? message.errorMessage,
+				errorStatus,
+			})
+		) {
+			return false;
+		}
+
+		// Never discard server-side actions or unknown tool outcomes. Existing
+		// results (including positive proof of non-execution) are kept in context.
+		if (message.content.some(block => block.type === "image" || block.type === "anthropicServerTool")) return false;
+		const preserveToolTurn = this.#hasResolvedToolCalls(message);
+		const resumeText =
+			this.#host.textOutputCommitted() &&
+			message.content.some(block => block.type === "text" && hasNonWhitespace(block.text)) &&
+			message.content.every(block => block.type === "text" || block.type === "thinking");
+		if (this.#hasReplayUnsafeOutput(message) && !preserveToolTurn && !resumeText) return false;
+
+		const generation = this.#host.promptGeneration();
+		this.#connectionAttempt++;
+		if (!this.#retryPromise) {
+			const { promise, resolve } = Promise.withResolvers<void>();
+			this.#retryPromise = promise;
+			this.#retryResolve = resolve;
+		}
+		const baseDelayMs = Number.isFinite(settings.baseDelayMs) ? Math.max(1, settings.baseDelayMs) : 500;
+		const delayMs = Math.min(
+			30_000,
+			Math.ceil(
+				Math.min(30_000, baseDelayMs * 2 ** Math.min(this.#connectionAttempt - 1, 30)) *
+					(0.8 + Math.random() * 0.4),
+			),
+		);
+		const controller = new AbortController();
+		const attempt = this.#connectionAttempt;
+		const retryPromise = this.#retryPromise;
+		this.#retryAbortController?.abort();
+		this.#retryAbortController = controller;
+		// Keep one outage diagnostic rather than accumulating an empty error
+		// entry for every connection probe during a flight or overnight outage.
+		if (this.#connectionAttempt === 1 || preserveToolTurn || resumeText) {
+			await this.#recordPendingRetryError(message, this.#classifyRetryMessage(message), {
+				switchedCredential: false,
+				switchedModel: false,
+				delayMs,
+			});
+		}
+		if (!preserveToolTurn && !resumeText) this.removeAssistantMessageFromActiveContext(message, "connection-wait");
+		if (
+			controller.signal.aborted ||
+			this.#host.abortInProgress() ||
+			this.#host.isDisposed() ||
+			this.#host.promptGeneration() !== generation
+		) {
+			if (this.#retryAbortController === controller) await this.#endCancelledRetry(attempt);
+			return true;
+		}
+		await this.#host.emitSessionEvent({
+			type: "auto_retry_start",
+			connectivity: true,
+			attempt: this.#connectionAttempt,
+			maxAttempts: 0, // No attempt limit for connection waits.
+			delayMs,
+			errorMessage: message.errorMessage ?? "Provider connection failed",
+			errorId: message.errorId,
+		});
+		try {
+			await sleepLong(delayMs, controller.signal);
+		} catch {
+			if (this.#retryAbortController === controller) await this.#endCancelledRetry(attempt);
+			return true;
+		}
+		if (this.#retryAbortController !== controller) return true;
+		this.#retryAbortController = undefined;
+		if (
+			this.#host.promptGeneration() !== generation ||
+			this.#host.isDisposed() ||
+			this.#host.abortInProgress() ||
+			!cfgRetry.get(this.#host.settings).enabled ||
+			!cfgRetry.get(this.#host.settings).waitForConnection ||
+			this.#connectionAttempt === 0
+		) {
+			await this.#endCancelledRetry(attempt);
+			return true;
+		}
+
+		// Responses retains a socket/server prefix across requests. Retire that
+		// state before reconnecting; other request-scoped transports recreate it.
+		this.#host.resetCurrentResponsesProviderSession("connection-recovery");
+		if (resumeText) {
+			this.#host.agent.appendMessage({
+				role: "developer",
+				content: [{ type: "text", text: prompt.render(connectionContinueTemplate, {}) }],
+				attribution: "agent",
+				timestamp: Date.now(),
+			});
+		} else if (!preserveToolTurn) {
+			this.#stripFailedAssistantTail();
+		}
+		this.#host.scheduleAgentContinue({
+			source: "connection-recovery",
+			delayMs: 1,
+			generation,
+			shouldContinue: () => this.#connectionAttempt > 0,
+			onSkip: () => {
+				if (this.#retryPromise === retryPromise) void this.#endCancelledRetry(attempt);
+			},
+			onError: error => void this.#failRetryAfterLocalContinueError(message, error),
+		});
+		return true;
 	}
 
 	/** Classifies suspicious terminal stops and schedules bounded recovery. */
@@ -789,6 +935,7 @@ export class TurnRecovery {
 
 	/** Resolve the pending retry promise */
 	resolveRetry(): void {
+		this.#connectionAttempt = 0;
 		if (this.#retryResolve) {
 			this.#retryResolve();
 			this.#retryResolve = undefined;
@@ -874,7 +1021,7 @@ export class TurnRecovery {
 			entryId: branchEntry.id,
 			persistenceKey,
 			recovery,
-			attempt: this.#retryAttempt,
+			attempt: this.attempt,
 			note,
 		});
 	}
@@ -1522,7 +1669,11 @@ export class TurnRecovery {
 			((message.stopReason === "aborted" && AIError.is(id, AIError.Flag.Abort)) || genericAbort);
 		if (!reasonlessAbort && !this.#isMidStreamTransportFailure(message, id)) return undefined;
 		if (reasonlessAbort && genericAbort) message.errorId = AIError.create(AIError.Flag.Abort);
+		if (!this.#hasResolvedToolCalls(message)) return undefined;
+		return reasonlessAbort ? "reasonless-abort" : "stream-stall";
+	}
 
+	#hasResolvedToolCalls(message: AssistantMessage): boolean {
 		// Idle stall and HTTP/2 RST both close the Cursor Connect stream:
 		// the lazy watchdog aborts the request signal, and cursor.ts then
 		// calls `h2Request.close()`. There is no in-flight server exec to
@@ -1534,7 +1685,7 @@ export class TurnRecovery {
 			if (block.type !== "toolCall") continue;
 			resolvedToolCallIds.push(block.id);
 		}
-		if (resolvedToolCallIds.length === 0) return undefined;
+		if (resolvedToolCallIds.length === 0) return false;
 
 		const messages = this.#host.agent.state.messages;
 		let assistantIndex = -1;
@@ -1545,15 +1696,14 @@ export class TurnRecovery {
 				break;
 			}
 		}
-		if (assistantIndex < 0) return undefined;
+		if (assistantIndex < 0) return false;
 
 		const unresolvedToolCallIds = new Set(resolvedToolCallIds);
 		for (let i = assistantIndex + 1; i < messages.length; i++) {
 			const candidate = messages[i];
 			if (candidate.role === "toolResult") unresolvedToolCallIds.delete(candidate.toolCallId);
 		}
-		if (unresolvedToolCallIds.size > 0) return undefined;
-		return reasonlessAbort ? "reasonless-abort" : "stream-stall";
+		return unresolvedToolCallIds.size === 0;
 	}
 
 	/**
@@ -2392,6 +2542,7 @@ export class TurnRecovery {
 		// not a retry loop, so it runs even when the user disabled retries: it switches
 		// the model once and lets the base turn proceed.
 		if (!retrySettings.enabled && !options?.fireworksFastFallback) return false;
+		this.#connectionAttempt = 0;
 		const classifierRefusal = this.isClassifierRefusal(message);
 
 		const generation = this.#host.promptGeneration();
@@ -2843,8 +2994,7 @@ export class TurnRecovery {
 	}
 
 	/** Closes a retry saga whose credential wait or backoff sleep was aborted. */
-	async #endCancelledRetry(): Promise<false> {
-		const attempt = this.#retryAttempt;
+	async #endCancelledRetry(attempt = this.attempt): Promise<false> {
 		this.#retryAttempt = 0;
 		this.#retryAbortController = undefined;
 		await this.#host.emitSessionEvent({
@@ -2885,8 +3035,8 @@ export class TurnRecovery {
 	 * resolve the retry promise so the in-flight prompt() unwinds (issue #5382).
 	 */
 	async #failRetryAfterLocalContinueError(message: AssistantMessage, error: unknown): Promise<void> {
-		if (this.#retryAttempt === 0) return;
-		const attempt = this.#retryAttempt;
+		if (this.attempt === 0) return;
+		const attempt = this.attempt;
 		this.#retryAttempt = 0;
 		const localError = error instanceof Error ? error.message : String(error);
 		await this.persistTerminalEmptyErrorTurn(message);

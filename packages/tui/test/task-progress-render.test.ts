@@ -869,4 +869,26 @@ describe("task result detail-less state", () => {
 		expect(stripped).toContain(theme.status.done);
 		expect(stripped).not.toContain(theme.status.error);
 	});
+
+	it("shows an unlimited child connection wait without a zero-denominator retry counter", async () => {
+		const theme = (await getThemeByName("dark"))!;
+		setThemeInstance(theme);
+		const progress = runningProgress({
+			retryState: {
+				attempt: 25,
+				maxAttempts: 0,
+				delayMs: 30_000,
+				errorMessage: "ENETUNREACH",
+				startedAtMs: Date.now(),
+			},
+		});
+		const component = taskToolRenderer.renderResult(
+			{ content: [], details: detailsFor(progress) },
+			{ expanded: true, isPartial: true },
+			theme,
+		);
+		const text = Bun.stripANSI(component.render(180).join("\n"));
+		expect(text).not.toContain("25/0");
+		expect(text).toContain("waiting for connection");
+	});
 });

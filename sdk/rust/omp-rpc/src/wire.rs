@@ -3532,6 +3532,9 @@ pub struct AutoRetryStartEvent {
 	pub delay_ms: i64,
 	#[serde(rename = "errorMessage")]
 	pub error_message: String,
+	/// Waiting without an attempt limit for a failed provider connection.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub connectivity: Option<bool>,
 	#[serde(rename = "errorId", default, skip_serializing_if = "Option::is_none")]
 	pub error_id: Option<i64>,
 }

@@ -195,6 +195,7 @@ export function extensionEventFromSessionEvent(
 		case "auto_retry_start":
 			return {
 				type: "auto_retry_start",
+				connectivity: event.connectivity,
 				attempt: event.attempt,
 				maxAttempts: event.maxAttempts,
 				delayMs: event.delayMs,

@@ -3459,6 +3459,10 @@
 				"errorMessage": {
 					"type": "string"
 				},
+				"connectivity": {
+					"type": "boolean",
+					"description": "Waiting without an attempt limit for a failed provider connection."
+				},
 				"errorId": {
 					"type": "integer"
 				}

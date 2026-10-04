@@ -17,6 +17,7 @@ import { renderProgressBar, type ProgressBarStyle } from "../components/progress
 import { fgOrPlain, theme } from "../theme/theme";
 import { createLiveBoard, type LiveBoardOutput } from "../chrome/live-board";
 import type { AgentProgress } from "../tools/task";
+import { formatRetryStatus } from "../render/retry-status";
 import type { TspSpan } from "@oh-my-pi/pi-wire";
 import { col, elapsed, keyed, node, row, span, stableKey, text } from "../native/describe";
 import type { DescribeContext, NativeNode } from "../native/node";
@@ -424,15 +425,18 @@ function describeAgentLane(agentName: string, agent: RunningAgent, now: number):
 						age: progress.currentToolStartMs ? Math.max(0, now - progress.currentToolStartMs) : undefined,
 					}
 				: null,
-			retry: progress?.retryState
-				? {
-						attempt: progress.retryState.attempt,
-						max: progress.retryState.maxAttempts,
-						age: Math.max(0, now - progress.retryState.startedAtMs),
-						delay: progress.retryState.delayMs,
-						error: progress.retryState.errorMessage,
-					}
-				: null,
+			retry:
+				progress?.retryState && progress.retryState.maxAttempts !== 0
+					? {
+							attempt: progress.retryState.attempt,
+							max: progress.retryState.maxAttempts,
+							age: Math.max(0, now - progress.retryState.startedAtMs),
+							delay: progress.retryState.delayMs,
+							error: progress.retryState.errorMessage,
+						}
+					: null,
+			badges:
+				progress?.retryState?.maxAttempts === 0 ? [{ text: "waiting for connection", tone: "warning" }] : undefined,
 			stats: {
 				tools: progress?.toolCount || undefined,
 				tokens: progress?.tokens || undefined,
@@ -451,7 +455,10 @@ function describeActivity(progress: AgentProgress | undefined): TspSpan[] {
 	if (!progress) return [span("starting", "dim")];
 	if (progress.retryState) {
 		return [
-			span(`rate-limited · retry ${progress.retryState.attempt}/${progress.retryState.maxAttempts}`, "warning"),
+			span(
+				formatRetryStatus(progress.retryState.attempt, progress.retryState.maxAttempts, "rate-limited · retry"),
+				"warning",
+			),
 		];
 	}
 	const intent = sanitizeDisplaySingleLine(progress.lastIntent ?? "")
@@ -526,7 +533,7 @@ function agentActivity(progress: AgentProgress | undefined): string {
 	if (progress.retryState) {
 		return fgOrPlain(
 			"warning",
-			`rate-limited · retry ${progress.retryState.attempt}/${progress.retryState.maxAttempts}`,
+			formatRetryStatus(progress.retryState.attempt, progress.retryState.maxAttempts, "rate-limited · retry"),
 		);
 	}
 	const intent = truncateToWidth(

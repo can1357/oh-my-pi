@@ -42,6 +42,7 @@ import {
 } from "../render/render-utils";
 import { renderStatusLine } from "../render/index";
 import { framedToolCard } from "../render/tool-card";
+import { formatRetryStatus } from "../render/retry-status";
 import { formatOutputInline, renderJsonTreeLines } from "./json-tree";
 import { repairDoubleEncodedJsonString } from "./task-repair-args";
 import { getSubprocessToolRenderer } from "./subprocess";
@@ -765,7 +766,7 @@ function renderAgentProgress(
 		const remainingMs = Math.max(0, progress.retryState.startedAtMs + progress.retryState.delayMs - nowMs);
 		const waitLabel = remainingMs > 0 ? `in ${formatDuration(remainingMs)}` : "now";
 		const summary =
-			`retrying ${progress.retryState.attempt}/${progress.retryState.maxAttempts} ${waitLabel}: ` +
+			`${formatRetryStatus(progress.retryState.attempt, progress.retryState.maxAttempts, "retrying")} ${waitLabel}: ` +
 			previewLine(sanitizeText(progress.retryState.errorMessage), 60);
 		lines.push(`${continuePrefix}${theme.tree.hook} ${theme.fg("warning", summary)}`);
 	} else if (progress.retryFailure && progress.status !== "running") {
@@ -1815,7 +1816,7 @@ function describeProgressAgent(progress: AgentProgress, state: AgentDescribeStat
 				}
 			: null;
 	const retry =
-		running && progress.retryState
+		running && progress.retryState && progress.retryState.maxAttempts !== 0
 			? {
 					attempt: progress.retryState.attempt,
 					max: progress.retryState.maxAttempts,
@@ -1843,7 +1844,13 @@ function describeProgressAgent(progress: AgentProgress, state: AgentDescribeStat
 				...(running ? { age: progress.durationMs } : { took: progress.durationMs }),
 			},
 			retry,
-			badges: agentBadges(state.background, undefined),
+			badges:
+				running && progress.retryState?.maxAttempts === 0
+					? [
+							...(agentBadges(state.background, undefined) ?? []),
+							{ text: "waiting for connection", tone: "warning" },
+						]
+					: agentBadges(state.background, undefined),
 			depth: depth > 0 ? depth : undefined,
 			collapsible: true,
 			collapsed: !state.expanded,

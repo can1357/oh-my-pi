@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Preserve nested connection-failure evidence when SDK errors are flattened into provider error messages.
+
 ## [18.6.0] - 2026-10-03
 
 ### Fixed

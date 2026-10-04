@@ -3570,6 +3570,8 @@ type AutoRetryStartEvent struct {
 	MaxAttempts  int64  `json:"maxAttempts"`
 	DelayMs      int64  `json:"delayMs"`
 	ErrorMessage string `json:"errorMessage"`
+	// Waiting without an attempt limit for a failed provider connection.
+	Connectivity *bool  `json:"connectivity,omitempty"`
 	ErrorID      *int64 `json:"errorId,omitempty"`
 }
 
@@ -3585,6 +3587,7 @@ func (v *AutoRetryStartEvent) decodeFrom(raw map[string]json.RawMessage) error {
 	d.required("maxAttempts", &out.MaxAttempts)
 	d.required("delayMs", &out.DelayMs)
 	d.required("errorMessage", &out.ErrorMessage)
+	d.optional("connectivity", &out.Connectivity)
 	d.optional("errorId", &out.ErrorID)
 	if d.err != nil {
 		return d.err
