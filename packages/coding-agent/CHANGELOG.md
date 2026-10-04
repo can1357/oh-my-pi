@@ -2,9 +2,22 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added Google AI Studio API-key import through `/login google`, `omp login google`, and broker login with secret input ([#14302](https://github.com/can1357/oh-my-pi/pull/14302) by [@mitnichiter](https://github.com/mitnichiter)).
+- Added Gemini Live Extended Thinking voice sessions in `/live` and RPC, with direct session-approved code execution, opt-in native computer control, and asynchronous delegation to the selected coding model ([#14302](https://github.com/can1357/oh-my-pi/pull/14302) by [@mitnichiter](https://github.com/mitnichiter)).
+- Added `m` text input in Live mode, including while muted; `Enter` sends to the Live model and `Esc` returns to Live controls ([#14302](https://github.com/can1357/oh-my-pi/pull/14302) by [@mitnichiter](https://github.com/mitnichiter)).
+
 ### Fixed
 
 - Fixed follow-up hashline edits being rejected as anchored on lines "never displayed" after an earlier edit shifted those lines, when the replacement carries the anchored content; genuinely stale line numbers are still rejected ([#14254](https://github.com/can1357/oh-my-pi/pull/14254) by [@abilliontokens](https://github.com/abilliontokens)).
+- Fixed Gemini Live connections failing with an unsupported websocket payload error when receiving binary messages ([#14302](https://github.com/can1357/oh-my-pi/pull/14302) by [@mitnichiter](https://github.com/mitnichiter)).
+- Fixed cancelled Live coding tasks completing a replacement request before its own result was ready ([#14302](https://github.com/can1357/oh-my-pi/pull/14302) by [@mitnichiter](https://github.com/mitnichiter)).
+- Fixed Gemini Live user utterances merging or waiting for an assistant turn to finish ([#14302](https://github.com/can1357/oh-my-pi/pull/14302) by [@mitnichiter](https://github.com/mitnichiter)).
+- Fixed Gemini Live microphone backlogs disconnecting congested sessions while function results were being sent ([#14302](https://github.com/can1357/oh-my-pi/pull/14302) by [@mitnichiter](https://github.com/mitnichiter)).
+- Fixed Gemini Live reporting cancellation before its owned execution drained and retaining coding work after Live stopped ([#14302](https://github.com/can1357/oh-my-pi/pull/14302) by [@mitnichiter](https://github.com/mitnichiter)).
+- Fixed Gemini Live hiding direct-tool errors from the terminal while continuing to listen ([#14302](https://github.com/can1357/oh-my-pi/pull/14302) by [@mitnichiter](https://github.com/mitnichiter)).
+- Corrected Gemini Live desktop instructions to use supported waits and inspect completed actions before retrying app launches ([#14302](https://github.com/can1357/oh-my-pi/pull/14302) by [@mitnichiter](https://github.com/mitnichiter)).
 
 ## [18.6.0] - 2026-10-03
 

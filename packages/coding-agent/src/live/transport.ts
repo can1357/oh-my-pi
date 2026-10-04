@@ -10,6 +10,8 @@ import { LiveWebRtcPeer } from "@oh-my-pi/pi-natives";
 import { generateCodexAttestation } from "./attestation";
 import {
 	buildLiveSessionPayload,
+	buildSessionContextAppend,
+	chunkLiveContext,
 	type LiveClientMessage,
 	type LiveServerEvent,
 	parseLiveServerEvent,
@@ -48,6 +50,10 @@ class LiveSignalingError extends Error {
 export interface LiveTransportCallbacks {
 	onEvent(event: LiveServerEvent): void;
 	onOutputLevel(level: number): void;
+	/** Reports a recoverable tool failure without closing the live call. */
+	onToolError?(name: string, message: string): void;
+	/** Stops and drains one controller-owned delegated task. */
+	onCancelDelegation?(id: string): Promise<void>;
 }
 
 /** Configuration required to establish a Codex live call. */
@@ -58,6 +64,18 @@ export interface LiveTransportOptions {
 	voice: string;
 	callbacks: LiveTransportCallbacks;
 	signal?: AbortSignal;
+}
+
+/** Provider-independent lifecycle driven by the live session controller. */
+export interface LiveTransport {
+	connect(): Promise<void>;
+	pushAudio(samples: Float32Array): void;
+	setMuted(muted: boolean): Promise<void>;
+	sendText(text: string): Promise<void>;
+	send(message: LiveClientMessage): Promise<void>;
+	close(): Promise<void>;
+	/** Completes an asynchronous Gemini function call with the agent's final result. */
+	completeDelegation?(id: string, text: string): Promise<void>;
 }
 
 /** Extracts the server-assigned `rtc_*` call ID from a signaling Location header. */
@@ -380,6 +398,15 @@ export class CodexLiveTransport {
 		});
 		this.#sendTail = operation.catch(() => {});
 		return operation;
+	}
+
+	/** Append a typed user turn to the active Frameless Bidi session. */
+	async sendText(text: string): Promise<void> {
+		const normalized = text.trim();
+		if (!normalized) throw new Error("Live text must not be empty");
+		for (const chunk of chunkLiveContext(normalized)) {
+			await this.send(buildSessionContextAppend(chunk));
+		}
 	}
 
 	/** Queue 16 kHz mono Float32 PCM for native Opus transmission. */

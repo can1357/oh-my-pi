@@ -26,10 +26,11 @@ function createContext(): ContextHarness {
 	const focused: unknown[] = [];
 	const mounted: unknown[] = [];
 	const refocused = Promise.withResolvers<void>();
+	const settings = Settings.isolated({ "live.voice": "vale" });
 	const ctx = {
-		settings: Settings.isolated({ "live.voice": "vale" }),
+		settings,
 		keybindings: { getKeys: vi.fn(() => ["ctrl+l"]) },
-		session: {},
+		session: { settings },
 		extractAssistantText: vi.fn(() => ""),
 		editor,
 		editorContainer: {
@@ -60,28 +61,9 @@ afterEach(() => {
 });
 
 describe("LiveCommandController", () => {
-	it("forwards the selected voice across the live-session boundary", async () => {
-		const { ctx } = createContext();
-		let receivedVoice: string | undefined;
-		const controller = new LiveCommandController(ctx, options => {
-			receivedVoice = options.voice;
-			const session = new LiveSessionController(options);
-			vi.spyOn(session, "start").mockResolvedValue();
-			vi.spyOn(session, "stop").mockResolvedValue();
-			return session;
-		});
-
-		try {
-			await controller.handleCommand();
-			expect(receivedVoice).toBe("vale");
-		} finally {
-			await controller.stop();
-		}
-	});
-
 	it("stops the session and restores the editor when the live-toggle chord hits the focused visualizer", async () => {
 		const { ctx, editor, focused, mounted, editorRefocused } = createContext();
-		const stop = vi.fn(async () => {});
+		const stop = vi.fn(async () => undefined);
 		const controller = new LiveCommandController(ctx, options => {
 			const session = new LiveSessionController(options);
 			vi.spyOn(session, "start").mockResolvedValue();

@@ -881,23 +881,29 @@ async function killSession(session: JsSession, error: Error, options: { force: b
 	for (const toolSession of session.stateSessions) {
 		updateEvalState(toolSession, { language: "js", kernelId: session.kernelId, alive: false });
 	}
+	const pendingRuns: PendingRun[] = [];
 	for (const pending of session.pending.values()) {
 		if (pending.settled) continue;
+		pendingRuns.push(pending);
+		pending.aborted = true;
 		pending.settled = true;
 		for (const ctrl of pending.toolCalls.values()) ctrl.abort(error);
-		pending.reject(error);
 	}
 	session.pending.clear();
 	for (const pending of session.pendingSnapshots.values()) pending.reject(error);
 	session.pendingSnapshots.clear();
 	for (const pending of session.pendingShadowRuns.values()) pending.reject(error);
 	session.pendingShadowRuns.clear();
-	if (options.force) {
-		await session.worker.terminate().catch(() => undefined);
-		return;
+	// A cancelled cell must not settle while its worker can still execute host code.
+	try {
+		if (options.force) {
+			await session.worker.terminate().catch(() => undefined);
+		} else if (!(await session.worker.close().catch(() => false))) {
+			await session.worker.terminate().catch(() => undefined);
+		}
+	} finally {
+		for (const pending of pendingRuns) pending.reject(error);
 	}
-	if (await session.worker.close().catch(() => false)) return;
-	await session.worker.terminate().catch(() => undefined);
 }
 
 function markJsSessionAlive(session: JsSession, toolSession: ToolSession, environment: string | undefined): void {

@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added a Live message field opened with `m`, with Enter-to-send and Esc-to-close controls that preserve microphone mute state ([#14302](https://github.com/can1357/oh-my-pi/pull/14302) by [@mitnichiter](https://github.com/mitnichiter)).
+
+### Fixed
+
+- API-key login prompts now mask pasted keys rather than rendering them as ordinary text ([#14302](https://github.com/can1357/oh-my-pi/pull/14302) by [@mitnichiter](https://github.com/mitnichiter)).
+
 ## [18.6.0] - 2026-10-03
 
 ### Fixed

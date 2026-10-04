@@ -433,6 +433,7 @@ describe("provider catalog grammar", () => {
 			src(
 				provider("p", [
 					'\tdefault-model "m"',
+					'\tdefault-live-model "live-m"',
 					'\tenv "P_KEY" "P_ALT"',
 					"\tdynamic-models-authoritative #true",
 					'\tdiscovery label="P" oauth-provider="p" allow-unauthenticated=#true { env "P_GEN" }',
@@ -443,6 +444,7 @@ describe("provider catalog grammar", () => {
 		expect(compiled.p).toEqual({
 			id: "p",
 			defaultModel: "m",
+			defaultLiveModel: "live-m",
 			envVars: ["P_KEY", "P_ALT"],
 			dynamicModelsAuthoritative: true,
 			discovery: { label: "P", oauthProvider: "p", allowUnauthenticated: true, envVars: ["P_GEN"] },

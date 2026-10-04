@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added Google Gemini API-key login with secure prompt metadata and login-sourced credential storage ([#14302](https://github.com/can1357/oh-my-pi/pull/14302) by [@mitnichiter](https://github.com/mitnichiter)).
+
+### Fixed
+
+- API-key login prompts now request secret input instead of displaying pasted credentials ([#14302](https://github.com/can1357/oh-my-pi/pull/14302) by [@mitnichiter](https://github.com/mitnichiter)).
+
 ## [18.6.0] - 2026-10-03
 
 ### Fixed

@@ -656,6 +656,8 @@ export interface CompiledProvider {
 	id: string;
 	/** Preferred model id when no explicit selection is made. */
 	defaultModel: string;
+	/** Preferred realtime Live API model id when no explicit selection is made. */
+	defaultLiveModel?: string;
 	/** Env vars consulted, in order, for the runtime API-key fallback. */
 	envVars?: string[];
 	/** The runtime creates a model manager even without a valid API key. */

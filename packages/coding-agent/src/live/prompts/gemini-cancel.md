@@ -1,0 +1,1 @@
+Immediately stop running work. Supply id to stop one direct or delegated task; omit id to stop all pending work. Use this tool before speaking when the user asks to stop, cancel, abort, or replace ongoing work. NEVER acknowledge cancellation until the tool confirms it.

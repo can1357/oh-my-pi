@@ -378,6 +378,8 @@ Hook names are validated against the hook tables in `@oh-my-pi/pi-ai/src/registr
 
 The root `provider "<id>"` node of `providers/<id>.kdl` carries the catalog entry next to the cascade rules. A file that declares `default-model` is a catalog provider (a member of the generated `KnownProvider` union in `src/compat/provider-ids.ts`); a file without it is wire-compat only (custom provider ids such as `llama.cpp`) and may not carry any other entry node. The compiled entries live in `rules.json` under `providers`, keyed by id; runtime accessors are in `src/compat/providers.ts`, and `provider-models/descriptors.ts` pairs each entry with its model-manager factory — the only provider fact that stays in code.
 
+`default-live-model "<id>"` is an optional non-empty provider entry for a separate realtime model. It compiles to `defaultLiveModel` and is read through `defaultLiveModelFor(provider)`; it does not change the ordinary `default-model` or override explicit Live settings.
+
 ```kdl
 provider "sakana" {
     default-model "fugu"                          // required for a catalog entry

@@ -2,6 +2,7 @@ import { formatKeyHint } from "../app-keybindings";
 import type { Component } from "../tui";
 import { OverlayPanel, PanelRows } from "../chrome/overlay-box";
 import { type KeyId, matchesKey } from "../keys";
+import { Input } from "../components/input";
 import { sliceWithWidth, truncateToWidth, visibleWidth } from "../utils";
 import { sanitizeDisplaySingleLine } from "../overlays/extensions/display-text";
 import { type ThemeColor, theme } from "../theme/theme";
@@ -46,6 +47,8 @@ const METER_STEPS = 20;
 export interface LiveVisualizerOptions {
 	onStop(): void;
 	onToggleMute(): void;
+	/** Sends a typed user turn directly to the active Live model. */
+	onSendText?: (text: string) => Promise<void>;
 	/** Configured `app.live.toggle` chords that also end the call (Ctrl+L by default). */
 	stopKeys?: readonly KeyId[];
 }
@@ -71,6 +74,9 @@ export class LiveVisualizer implements Component {
 	#displayLevel = 0;
 	#frame = 0;
 	#userTranscript = "";
+	readonly #textInput = new Input();
+	#textMode = false;
+	#textSubmissionPending = false;
 	readonly #native = new Memo();
 
 	#cache:
@@ -86,6 +92,9 @@ export class LiveVisualizer implements Component {
 
 	constructor(options: LiveVisualizerOptions) {
 		this.#options = options;
+		this.#textInput.prompt = "message › ";
+		this.#textInput.onEscape = () => this.#closeTextMode();
+		this.#textInput.onSubmit = value => this.#submitText(value);
 		this.#body.setHeight(3);
 		this.#panel.addChild(this.#body);
 	}
@@ -134,6 +143,20 @@ export class LiveVisualizer implements Component {
 
 	/** Processes user keypresses. */
 	handleInput(data: string): void {
+		if (this.#textMode) {
+			if (matchesKey(data, "escape")) {
+				this.#closeTextMode();
+				return;
+			}
+			if (matchesKey(data, "ctrl+c") || this.#options.stopKeys?.some(key => matchesKey(data, key))) {
+				this.#options.onStop();
+				return;
+			}
+			this.#textInput.handleInput(data);
+			this.invalidate();
+			return;
+		}
+
 		if (
 			matchesKey(data, "escape") ||
 			matchesKey(data, "ctrl+c") ||
@@ -142,7 +165,16 @@ export class LiveVisualizer implements Component {
 			this.#options.onStop();
 		} else if (matchesKey(data, "space")) {
 			this.#options.onToggleMute();
+		} else if (this.#options.onSendText && (matchesKey(data, "m") || matchesKey(data, "shift+m"))) {
+			this.#openTextMode();
 		}
+	}
+
+	/** Routes enhanced clipboard pastes into the active message field. */
+	pasteText(text: string): void {
+		if (!this.#textMode) return;
+		this.#textInput.pasteText(text);
+		this.invalidate();
 	}
 
 	/** Clears the render cache. */
@@ -151,53 +183,89 @@ export class LiveVisualizer implements Component {
 		this.#panel.invalidate();
 	}
 
-	/** The call panel's buttons run the same code as their keys. */
+	/** The call panel's buttons and native input events run the same code as their keys. */
 	handleNativeEvent(event: NativeUiEvent): void {
+		if (this.#textMode && (event.type === "edit" || event.type === "undo")) {
+			this.#textInput.handleNativeEvent(event);
+			this.invalidate();
+			return;
+		}
 		if (event.type !== "action") return;
 		if (event.act === "mute") this.#options.onToggleMute();
 		else if (event.act === "end") this.#options.onStop();
+		else if (event.act === "message") this.#openTextMode();
+		else if (event.act === "send" && this.#textMode) this.#textInput.submit();
+		else if (event.act === "close-message") this.#closeTextMode();
 	}
 
 	/**
 	 * Native call panel: phase status (a spinner while working), the mic level
-	 * as a `meter` (a `progress` bar on terminals without it), the streaming
-	 * transcript and the Mute/End buttons. The spectrum animation is
-	 * ANSI-only; frame ticks leave this node unchanged.
+	 * as a `meter` (a `progress` bar on terminals without it), then either the
+	 * streaming transcript or the active message input and its contextual actions.
+	 * The spectrum animation is ANSI-only; frame ticks leave this node unchanged.
 	 */
 	describe(cx: DescribeContext): NativeNode {
 		const energy = this.#phase === "muted" ? 0 : Math.min(1, Math.sqrt(this.#displayLevel * 5));
 		const level = Math.round(energy * METER_STEPS) / METER_STEPS;
 		const meter = cx.supports("meter");
-		return this.#native.get([this.#phase, level, this.#userTranscript, meter], () => {
-			const phase = this.#phase;
-			const status =
-				phase === "working"
-					? node("spinner", { label: [span(phase, PHASE_COLORS[phase])], tone: PHASE_TONES[phase] })
-					: text([span(`${PHASE_ICONS[phase]} ${phase}`, PHASE_COLORS[phase])]);
-			const tone = phase === "muted" ? "muted" : phase === "error" ? "error" : "success";
-			return card({ role: "omp.app.live", tone: PHASE_TONES[phase] }, [
-				node("row", { gap: "sm", align: "center" }, [status], "head"),
-				meter
-					? row(
-							[
-								text([span("mic", "muted")]),
-								node("meter", { value: level, style: "bar", size: "md", tone, grow: 1 }),
-							],
-							{
-								gap: "sm",
-								align: "center",
-								role: "omp.app.live.level",
-							},
-						)
-					: node("progress", { value: level, tone, label: [span("mic", "muted")] }),
-				text([span(this.#userTranscript, "accent")], { wrap: "none", truncate: "start" }),
-				actionBar([
-					null,
-					actionButton(phase === "muted" ? "Unmute" : "Mute", "mute", { keys: "space" }),
-					actionButton("End call", "end", { keys: "escape", tone: "error" }),
-				]),
-			]);
-		});
+		return this.#native.get(
+			[
+				this.#phase,
+				level,
+				this.#userTranscript,
+				meter,
+				this.#textMode,
+				this.#textSubmissionPending,
+				this.#options.onSendText !== undefined,
+				this.#textInput.getValue(),
+				this.#textInput.getCursor(),
+			],
+			() => {
+				const phase = this.#phase;
+				const status =
+					phase === "working"
+						? node("spinner", { label: [span(phase, PHASE_COLORS[phase])], tone: PHASE_TONES[phase] })
+						: text([span(`${PHASE_ICONS[phase]} ${phase}`, PHASE_COLORS[phase])]);
+				const tone = phase === "muted" ? "muted" : phase === "error" ? "error" : "success";
+				this.#textInput.focused = this.#textMode;
+				const content = this.#textMode
+					? this.#textInput
+					: text([span(this.#userTranscript, "accent")], { wrap: "none", truncate: "start" });
+				const actions = this.#textMode
+					? actionBar([
+							null,
+							actionButton("Close", "close-message", { keys: "escape" }),
+							actionButton(this.#textSubmissionPending ? "Sending…" : "Send", "send", {
+								keys: "enter",
+								tone: "accent",
+							}),
+						])
+					: actionBar([
+							null,
+							this.#options.onSendText ? actionButton("Message", "message", { keys: "m" }) : null,
+							actionButton(phase === "muted" ? "Unmute" : "Mute", "mute", { keys: "space" }),
+							actionButton("End call", "end", { keys: "escape", tone: "error" }),
+						]);
+				return card({ role: "omp.app.live", tone: PHASE_TONES[phase] }, [
+					node("row", { gap: "sm", align: "center" }, [status], "head"),
+					meter
+						? row(
+								[
+									text([span("mic", "muted")]),
+									node("meter", { value: level, style: "bar", size: "md", tone, grow: 1 }),
+								],
+								{
+									gap: "sm",
+									align: "center",
+									role: "omp.app.live.level",
+								},
+							)
+						: node("progress", { value: level, tone, label: [span("mic", "muted")] }),
+					content,
+					actions,
+				]);
+			},
+		);
 	}
 
 	/** Renders the microphone spectrum into a compact fixed-height panel. */
@@ -237,20 +305,23 @@ export class LiveVisualizer implements Component {
 			return [
 				top,
 				...spectrum.map(row => border(theme.fg(spectrumColor, row))),
-				border(this.#renderTranscript(this.#userTranscript, innerWidth)),
+				border(this.#renderContent(innerWidth)),
 				this.#renderFooter(width, innerWidth),
 			];
 		}
 
 		const contentWidth = width - 4;
 		const spectrum = this.#generateSpectrum(contentWidth, 2);
-		this.#body.setLines([
-			...spectrum.map(row => theme.fg(spectrumColor, row)),
-			this.#renderTranscript(this.#userTranscript, contentWidth),
-		]);
+		this.#body.setLines([...spectrum.map(row => theme.fg(spectrumColor, row)), this.#renderContent(contentWidth)]);
 		const lines = [...this.#panel.render(width)];
 		lines[lines.length - 1] = this.#renderFooter(width, width - 2);
 		return lines;
+	}
+
+	#renderContent(width: number): string {
+		if (!this.#textMode) return this.#renderTranscript(this.#userTranscript, width);
+		this.#textInput.focused = true;
+		return this.#textInput.render(width)[0] ?? "";
 	}
 
 	#renderTranscript(transcript: string, width: number): string {
@@ -263,7 +334,11 @@ export class LiveVisualizer implements Component {
 		const frames = theme.spinnerFrames;
 		const icon = this.#phase === "working" ? frames[this.#frame % frames.length] : PHASE_ICONS[this.#phase];
 		const status = `${icon} ${this.#phase}`;
-		const fullLabel = ` ${status} · ${formatKeyHint("space")} mute · ${formatKeyHint("escape")} end `;
+		const fullLabel = this.#textMode
+			? ` ${status} · ${formatKeyHint("enter")} send · ${formatKeyHint("escape")} close `
+			: this.#options.onSendText
+				? ` ${status} · ${formatKeyHint("m")} message · ${formatKeyHint("space")} mute · ${formatKeyHint("escape")} end `
+				: ` ${status} · ${formatKeyHint("space")} mute · ${formatKeyHint("escape")} end `;
 		const shortLabel = ` ${status} `;
 		const label =
 			innerWidth >= visibleWidth(fullLabel) + 1
@@ -283,6 +358,48 @@ export class LiveVisualizer implements Component {
 			theme.fg("border", `${bottomLeft}${horizontal}`) +
 			theme.fg(PHASE_COLORS[this.#phase], truncateToWidth(label, innerWidth - 1)) +
 			theme.fg("border", `${horizontal.repeat(remaining)}${width > 1 ? bottomRight : ""}`)
+		);
+	}
+
+	#openTextMode(): void {
+		if (!this.#options.onSendText || this.#textMode) return;
+		this.#textMode = true;
+		this.#textInput.focused = true;
+		this.invalidate();
+	}
+
+	#closeTextMode(): void {
+		if (!this.#textMode) return;
+		this.#textMode = false;
+		this.#textInput.focused = false;
+		this.invalidate();
+	}
+
+	#submitText(text: string): void {
+		const send = this.#options.onSendText;
+		if (!send || this.#textSubmissionPending || text.trim().length === 0) return;
+		this.#textSubmissionPending = true;
+		this.invalidate();
+
+		let submission: Promise<void>;
+		try {
+			submission = send(text);
+		} catch {
+			this.#textSubmissionPending = false;
+			this.invalidate();
+			return;
+		}
+
+		void submission.then(
+			() => {
+				if (this.#textInput.getValue() === text) this.#textInput.setValue("");
+				this.#textSubmissionPending = false;
+				this.invalidate();
+			},
+			() => {
+				this.#textSubmissionPending = false;
+				this.invalidate();
+			},
 		);
 	}
 

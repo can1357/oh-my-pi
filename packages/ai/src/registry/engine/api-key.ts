@@ -75,6 +75,7 @@ export function createApiKeyLogin(
 		const answer = await options.onPrompt({
 			message: rule.prompt,
 			placeholder: rule.placeholder,
+			secret: true,
 			...(rule.emptyFallback !== undefined ? { allowEmpty: true } : {}),
 		});
 		if (options.signal?.aborted) {

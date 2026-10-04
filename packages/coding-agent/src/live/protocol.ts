@@ -52,6 +52,9 @@ export type LiveServerEvent =
 			};
 	  }
 	| { type: "error"; message: string }
+	| { type: "interaction.status"; working: boolean }
+	| { type: "delegation.cancelled"; id: string }
+	| { type: "transcript.started"; role: "user" | "assistant" }
 	| { type: "unknown"; wireType: string };
 
 type UnknownRecord = Record<string, unknown>;

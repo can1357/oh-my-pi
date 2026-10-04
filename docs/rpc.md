@@ -1184,8 +1184,8 @@ Set top-level `isError: true` on `host_tool_result` to reject the pending host t
 
 ## Live Voice Sub-Protocol
 
-RPC hosts can run a GPT live voice session (the realtime surface behind the
-terminal's `/live`) bound to the RPC session. The realtime model talks to the
+RPC hosts can run a Codex or Gemini live voice session (the realtime surface behind the
+terminal's `/live`) bound to the RPC session. `live.provider` selects the provider. The realtime model talks to the
 user through the machine's microphone and speakers and delegates work into the
 RPC session as ordinary turns, so delegated work runs with the session's model
 and any host tools registered through `set_host_tools`. At most one live
@@ -1200,10 +1200,16 @@ session runs per RPC server.
 `live_start` responds once the session is connected and recording, so it is
 dispatched concurrently like `bash`; `live_stop` sent meanwhile cancels the
 connection and the pending `live_start` then fails. `voice` defaults to the
-`live.voice` setting and the response reports the voice used. `instructions`
+`live.voice` setting for Codex, or `live.google.voice` for Gemini, and the response reports the voice used. `instructions`
 replaces the bundled live prompt; it is rendered as a Handlebars template with
-`{{username}}` and `{{firstName}}` of the local OS account. Starting while a
+`{{username}}`, `{{firstName}}`, `{{computer}}`, and `{{codeExecution}}` of the local session. Starting while a
 session is connecting, active, or closing fails.
+
+Gemini uses the stored `google` API key or `GEMINI_API_KEY`. Its default Live model comes from the Google catalog's `default-live-model`; a non-empty `live.google.model` overrides it. Configure `live.google.voice` and `live.google.thinkingLevel` before starting; the selected configuration is fixed for that connection. Codex remains the default provider.
+
+Gemini's non-blocking `execute` function runs its own JavaScript/Python through the session's allowed Eval tool. The non-blocking `desktop` function is exposed only when both `live.computer` and `computer.enabled` are enabled. It uses the existing native computer surface and sends screenshots to Google. These are host execution paths governed by session permissions, not a Google code sandbox; interactive-only approvals fail closed. Larger tasks can still use `delegate` and the RPC session's selected coding model.
+
+Gemini function calls are asynchronous: spoken turn completion does not mean work has finished. `cancel` drains the requested direct or delegated task before returning and sends a terminal cancellation result for its original function ID. Cancelling a delegated request clears its result ownership and drains its abort before a replacement starts. Stopping Gemini Live cancels its owned coding turn and prevents waiting requests from starting; unrelated coding work is not cancelled. Codex's ordinary-stop behavior is unchanged.
 
 `live_stop` responds after the session has stopped and succeeds when none is
 active. `live_mute` sets the microphone mute, or toggles it when `muted` is

@@ -1076,19 +1076,20 @@ Authenticate via the [`omp`](https://omp.sh) coding-agent CLI, which drives this
 
 ```bash
 omp auth-broker login              # interactive provider selection
+omp auth-broker login google       # securely paste a Google AI Studio Gemini API key
 omp auth-broker login anthropic    # login to a specific provider
 omp auth-broker login vllm         # store vLLM API key (or placeholder for local no-auth)
 omp auth-broker list               # list supported providers
 omp auth-broker logout             # interactive — pick a stored credential to remove
 ```
 
-Credentials are saved to `agent.db` in the agent directory. `/login qianfan` opens the Qianfan console and stores the pasted API key.
+Credentials are saved to `agent.db` in the agent directory. `/login google` opens Google AI Studio and stores the pasted key under the `google` provider; `/login qianfan` does the same for Qianfan.
 
 If SQLite reports corruption during startup, the damaged database and remaining journal sidecars are preserved beside it as private `agent.db.corrupt-<timestamp>-<id>*` backups before a fresh database is created. The log records the backup path. This restores startup, not unreadable credentials: log in again; retain the backups for manual data recovery. Lock contention and other non-corruption errors never reset the database.
 
 `login` supports OAuth providers (Anthropic, OpenAI Codex, GitHub Copilot, Gemini CLI, Antigravity) and API-key onboarding flows.
 
-For the current API-key onboarding flows, the library covers Together, Moonshot, Qianfan, NVIDIA, NanoGPT, Novita, DeepInfra, Hugging Face, Venice, Xiaomi, vLLM, LiteLLM, Cloudflare AI Gateway, Qwen Portal, and Ollama Cloud. Ollama remains the local runtime integration; set `OLLAMA_API_KEY` only when your local or self-hosted deployment enforces bearer auth.
+For the current API-key onboarding flows, the library covers Google Gemini, Together, Moonshot, Qianfan, NVIDIA, NanoGPT, Novita, DeepInfra, Hugging Face, Venice, Xiaomi, vLLM, LiteLLM, Cloudflare AI Gateway, Qwen Portal, and Ollama Cloud. Ollama remains the local runtime integration; set `OLLAMA_API_KEY` only when your local or self-hosted deployment enforces bearer auth.
 
 ### Programmatic OAuth
 

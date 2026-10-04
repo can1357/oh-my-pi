@@ -51,6 +51,12 @@ app.history.search: []
 | `app.live.toggle`            | `Ctrl+L`                                                              | Start or stop live voice mode (same as `/live`)                                                                                                                                      |
 | `app.agents.hub`             | `Alt+A`                                                               | [Open the Agent Hub](./agent-hub.md)                                                                                                                                                 |
 
+## Live controls
+
+While `/live` is active, press `m` to open a message field for the Live model. `Enter` sends the message and keeps the field open; `Esc` closes the field without ending the call. Text works while the microphone is muted and does not change mute state. Spaces and `m` are ordinary text while editing. Successful sends clear the unchanged draft; failed sends and closing the field preserve it.
+
+Outside the message field, `Space` toggles mute and `Esc` ends Live. The configured `app.live.toggle` chord (`Ctrl+L` by default) also ends the call while editing.
+
 ## Recover a cleared prompt
 
 Press `Ctrl+C` to clear an unsent composer draft, then `Up` to recall it. Older drafts and submitted prompts share the existing Up/Down navigation. Recalled drafts remain editable and are never sent until you submit them.
