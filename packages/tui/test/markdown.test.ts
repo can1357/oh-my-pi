@@ -1606,6 +1606,26 @@ bar`,
 			expect(output.includes("\x1b]8;;https://example.com\x07"), "Label should stay hyperlinked").toBeTruthy();
 		});
 
+		it("keeps the URL suffix on terminals that cannot render OSC 8", () => {
+			const previousHyperlinks = TERMINAL.hyperlinks;
+			TERMINAL.hyperlinks = false;
+			try {
+				const markdown = new Markdown(
+					"[my internal notes](artifact://notes/xyz)",
+					0,
+					0,
+					defaultMarkdownTheme,
+				);
+				markdown.linkUrls = false;
+
+				const plain = stripTerminalSequences(markdown.render(80).join("\n"));
+				expect(plain.includes("my internal notes"), "Should contain link text").toBeTruthy();
+				expect(plain.includes("(artifact://notes/xyz)"), "Suffix keeps the target visible without OSC 8").toBeTruthy();
+			} finally {
+				TERMINAL.hyperlinks = previousHyperlinks;
+			}
+		});
+
 		it("renders two concurrently configured renderers independently", () => {
 			const showing = new Markdown("[click here](https://example.com)", 0, 0, defaultMarkdownTheme);
 			const hiding = new Markdown("[click here](https://example.com)", 0, 0, defaultMarkdownTheme);

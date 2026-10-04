@@ -3647,7 +3647,12 @@ export class Markdown implements Component {
 					// For mailto: links, strip the prefix before comparing (autolinked emails have
 					// text="foo@bar.com" but href="mailto:foo@bar.com")
 					const hrefForComparison = href.startsWith("mailto:") ? href.slice(7) : href;
-					const showUrlSuffix = this.linkUrls && href && token.text !== href && token.text !== hrefForComparison;
+					const labelCarriesHref = token.text === href || token.text === hrefForComparison;
+					// With linkUrls off the label keeps its OSC 8 hyperlink, so the
+					// target stays reachable on hover wherever the terminal renders
+					// OSC 8. On a terminal that cannot, dropping the suffix would
+					// lose the destination entirely: keep it there.
+					const showUrlSuffix = href && (this.linkUrls ? !labelCarriesHref : !TERMINAL.hyperlinks);
 					if (showUrlSuffix) {
 						const styledLinkUrl = this.#theme.linkUrl(`(${href})`);
 						result += `${clickableLinkText} ${formatHyperlink(styledLinkUrl, target)}${stylePrefix}`;
