@@ -1436,7 +1436,7 @@ describe("RelayBridge auto-attach gating", () => {
 		expect(bridge.versionInfo("ws://relay/cdp").ompExtensionDiscardedTabsProtocol).toBe("1");
 	});
 
-	it("eagerly attaches live tabs and retracts discarded tabs", async () => {
+	it("mints sessions for live tabs without attaching and retracts discarded tabs", async () => {
 		const bridge = new RelayBridge();
 		const ext = new FakeExtSocket();
 		connect(bridge, ext, [tab({ tabId: 1, discarded: true }), tab({ tabId: 2 })]);
@@ -1455,13 +1455,13 @@ describe("RelayBridge auto-attach gating", () => {
 				params: { autoAttach: true, flatten: true, waitForDebuggerOnStart: true },
 			}),
 		);
-		ack(bridge, ext, "attach");
 		await flush();
 
-		expect(ext.rpcs("attach").map(r => r.tabId)).toEqual([2]);
-		const attached = attachedIds(cdp);
-		expect(attached).toContain(`TAB${ANON}.2`);
-		expect(attached).not.toContain(`TAB${ANON}.1`);
+		// Lazy attach: sessions are minted for downstream clients without a
+		// single chrome.debugger roundtrip; the debugger attaches only when a
+		// tab is actually driven or revived.
+		expect(ext.rpcs("attach")).toEqual([]);
+		expect(attachedIds(cdp)).toContain(`TAB${ANON}.2`);
 		// The discarded tab was announced by setDiscoverTargets. Retract it
 		// so Puppeteer's connect() can finish.
 		expect(destroyedIds(cdp)).toContain(`PAGE${ANON}.1`);
@@ -1482,24 +1482,24 @@ describe("RelayBridge auto-attach gating", () => {
 			connId,
 			JSON.stringify({ id: ++msgSeq, method: "Target.setAutoAttach", params: { autoAttach: true } }),
 		);
-		ack(bridge, ext, "attach");
 		await flush();
 
-		// Chrome reloads the discarded tab when the user activates it.
+		// Chrome reloads the discarded tab when the user activates it; the
+		// revival path attaches it so auto-attach clients see it live.
 		bridge.extMessage(ext, JSON.stringify({ t: "tabUpdated", tab: tab({ tabId: 1, discarded: false }) }));
 		ack(bridge, ext, "attach");
 		await flush();
 		expect(attachedIds(cdp)).toContain(`TAB${ANON}.1`);
 
-		// A previously attached tab becomes discarded.
+		// A previously announced tab becomes discarded: retract it. It was
+		// never debugger-attached at connect, so no detach RPC is owed.
 		bridge.extMessage(ext, JSON.stringify({ t: "tabUpdated", tab: tab({ tabId: 2, discarded: true }) }));
 		await flush();
 		expect(destroyedIds(cdp)).toContain(`PAGE${ANON}.2`);
-		expect(ext.rpcs("detach").map(r => r.tabId)).toContain(2);
-		ack(bridge, ext, "detach");
+		expect(ext.rpcs("detach")).toEqual([]);
 	});
 
-	it("does not reattach an initially discovered tab discarded during attach", async () => {
+	it("retracts an initially discovered tab discarded during connect", async () => {
 		const bridge = new RelayBridge();
 		const ext = new FakeExtSocket();
 		connect(bridge, ext, [tab({ tabId: 1 })]);
@@ -1515,11 +1515,11 @@ describe("RelayBridge auto-attach gating", () => {
 			JSON.stringify({ id: ++msgSeq, method: "Target.setAutoAttach", params: { autoAttach: true } }),
 		);
 		bridge.extMessage(ext, JSON.stringify({ t: "tabUpdated", tab: tab({ tabId: 1, discarded: true }) }));
-		ack(bridge, ext, "attach");
 		await flush();
 		expect(destroyedIds(cdp)).toContain(`PAGE${ANON}.1`);
-		expect(attachedIds(cdp)).not.toContain(`TAB${ANON}.1`);
-		expect(ext.rpcs("detach").map(r => r.tabId)).toEqual([1]);
+		// No debugger attach ever happened, so no attach or detach RPC is owed.
+		expect(ext.rpcs("attach")).toEqual([]);
+		expect(ext.rpcs("detach")).toEqual([]);
 	});
 
 	it("does not reattach a newly announced tab discarded during attach", async () => {
@@ -1547,7 +1547,7 @@ describe("RelayBridge auto-attach gating", () => {
 		expect(ext.rpcs("detach").map(r => r.tabId)).toEqual([1]);
 	});
 
-	it("releases auto-attach promptly and retries after an in-flight attach fails on discard", async () => {
+	it("answers setAutoAttach without attach RPCs and serves a later explicit attach", async () => {
 		const bridge = new RelayBridge();
 		const ext = new FakeExtSocket();
 		connect(bridge, ext, [tab({ tabId: 1 })]);
@@ -1563,23 +1563,23 @@ describe("RelayBridge auto-attach gating", () => {
 			connId,
 			JSON.stringify({ id: setAutoAttachId, method: "Target.setAutoAttach", params: { autoAttach: true } }),
 		);
-		expect(ext.pending("attach")).toHaveLength(1);
-
-		bridge.extMessage(ext, JSON.stringify({ t: "tabUpdated", tab: tab({ tabId: 1, discarded: true }) }));
-		try {
-			await flush();
-			expect(cdp.messages.some(message => message.id === setAutoAttachId && "result" in message)).toBe(true);
-		} finally {
-			nack(bridge, ext, "attach", "discarded tab");
-			await flush();
-		}
-
-		bridge.extMessage(ext, JSON.stringify({ t: "tabUpdated", tab: tab({ tabId: 1 }) }));
 		await flush();
+		// Lazy attach: connect() finishes without waiting on any extension RPC.
+		expect(cdp.messages.some(message => message.id === setAutoAttachId && "result" in message)).toBe(true);
+		expect(ext.pending("attach")).toHaveLength(0);
+
+		// A discard/revive cycle re-announces the tab and attaches it once for
+		// auto-attach clients; a later explicit attach reuses it without a
+		// second debugger roundtrip.
+		bridge.extMessage(ext, JSON.stringify({ t: "tabUpdated", tab: tab({ tabId: 1, discarded: true }) }));
+		await flush();
+		bridge.extMessage(ext, JSON.stringify({ t: "tabUpdated", tab: tab({ tabId: 1 }) }));
 		ack(bridge, ext, "attach");
 		await flush();
-		expect(bridge.listTargets().map(target => target.id)).toContain(`PAGE${ANON}.1`);
-		expect(attachedIds(cdp)).toContain(`TAB${ANON}.1`);
+		expect(ext.rpcs("attach").map(rpc => rpc.tabId)).toEqual([1]);
+		const sessionId = await attachPage(bridge, ext, cdp, connId, 1);
+		expect(sessionId).toBeTruthy();
+		expect(ext.rpcs("attach")).toHaveLength(1);
 	});
 
 	it("rejects stale explicit attachment requests for discarded targets without an extension RPC", async () => {
@@ -1642,7 +1642,7 @@ describe("RelayBridge auto-attach gating", () => {
 		expect(replacement.rpcs("attach").map(rpc => rpc.tabId)).toEqual([1]);
 		expect(attachedIds(cdp).filter(id => id === `TAB${ANON}.1`)).toHaveLength(2);
 	});
-	it("clears cancelled attach state when a discarded extension reconnects", async () => {
+	it("does not attach across an extension reconnect and serves a later explicit attach", async () => {
 		const bridge = new RelayBridge();
 		const firstExtension = new FakeExtSocket();
 		connect(bridge, firstExtension, [tab({ tabId: 1 })]);
@@ -1657,8 +1657,7 @@ describe("RelayBridge auto-attach gating", () => {
 			JSON.stringify({ id: ++msgSeq, method: "Target.setAutoAttach", params: { autoAttach: true } }),
 		);
 		await flush();
-		expect(firstExtension.pending("attach")).toHaveLength(1);
-		bridge.extMessage(firstExtension, JSON.stringify({ t: "tabUpdated", tab: tab({ tabId: 1, discarded: true }) }));
+		expect(firstExtension.rpcs("attach")).toHaveLength(0);
 
 		const replacement = new FakeExtSocket();
 		connect(bridge, replacement, [tab({ tabId: 1, discarded: true })]);
@@ -1666,17 +1665,12 @@ describe("RelayBridge auto-attach gating", () => {
 		expect(replacement.rpcs("attach")).toHaveLength(0);
 
 		bridge.extMessage(replacement, JSON.stringify({ t: "tabUpdated", tab: tab({ tabId: 1 }) }));
-		await flush();
-		expect(replacement.pending("attach")).toHaveLength(1);
-		bridge.extMessage(replacement, JSON.stringify({ t: "tabUpdated", tab: tab({ tabId: 1, discarded: true }) }));
-		nack(bridge, replacement, "attach", "discarded tab again");
-		await flush();
-
-		bridge.extMessage(replacement, JSON.stringify({ t: "tabUpdated", tab: tab({ tabId: 1 }) }));
-		await flush();
 		ack(bridge, replacement, "attach");
 		await flush();
-		expect(attachedIds(cdp)).toContain(`TAB${ANON}.1`);
+		// The revival attach is the only debugger roundtrip; the explicit
+		// attach reuses it.
+		await attachPage(bridge, replacement, cdp, connId, 1);
+		expect(replacement.rpcs("attach").map(rpc => rpc.tabId)).toEqual([1]);
 	});
 });
 

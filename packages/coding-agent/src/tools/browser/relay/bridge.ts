@@ -792,7 +792,7 @@ export class RelayBridge {
 		// fails this command with a named error instead of wedging the client.
 		if (realSessionId === undefined && !(await this.#ensureAttached(tab))) {
 			this.#replyError(conn, msg, attachFailureMessage(tab));
-			return;
+			return false;
 		}
 		try {
 			const result = await this.#rpc(
