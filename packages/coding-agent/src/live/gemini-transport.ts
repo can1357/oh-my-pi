@@ -8,6 +8,12 @@ import { type GeminiFunctionCall, geminiServerMessage, geminiToolArguments } fro
 import type { LiveTransportCallbacks } from "./transport";
 import delegateDescription from "./prompts/gemini-delegate.md" with { type: "text" };
 
+const ENDPOINT =
+	"wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent";
+const CONNECT_TIMEOUT_MS = 20_000;
+const MAX_BUFFERED_AUDIO_BYTES = 1_048_576;
+const UTF8_DECODER = new TextDecoder();
+
 type Playback = Pick<AudioPlayback, "write" | "stop">;
 
 export interface GeminiLiveTransportOptions {

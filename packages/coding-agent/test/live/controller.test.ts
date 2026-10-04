@@ -44,7 +44,7 @@ class TestTransport implements LiveTransport {
 	readonly muted: boolean[] = [];
 	readonly sent: LiveClientMessage[] = [];
 
-	async connect(): Promise<void> { }
+	connect = async (): Promise<void> => undefined;
 	pushAudio(samples: Float32Array): void {
 		this.pushedAudio.push(samples);
 	}
@@ -54,7 +54,7 @@ class TestTransport implements LiveTransport {
 	async send(message: LiveClientMessage): Promise<void> {
 		this.sent.push(message);
 	}
-	async close(): Promise<void> { }
+	close = async (): Promise<void> => undefined;
 	async completeDelegation(id: string, text: string): Promise<void> {
 		this.completions.push({ id, text });
 	}
@@ -68,9 +68,11 @@ function delegation(id: string, request: string): LiveServerEvent {
 }
 
 function assistantText(message: AssistantMessage): string {
-	return message.content
-		.map(content => (content.type === "text" ? content.text : ""))
-		.join("");
+	let text = "";
+	for (const content of message.content) {
+		if (content.type === "text") text += content.text;
+	}
+	return text;
 }
 
 describe("LiveSessionController delegation ownership", () => {

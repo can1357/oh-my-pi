@@ -61,8 +61,8 @@ async function harness(payloadType: "string" | "blob" | "buffer" | "arraybuffer"
 		instructions: "Local protocol test",
 		createSocket: () => {
 			const socket = new WebSocket(`ws://127.0.0.1:${server.port}`);
-			if (payloadType !== "string")
-				socket.binaryType = payloadType === "buffer" ? "nodebuffer" : payloadType;
+			if (payloadType === "arraybuffer") socket.binaryType = "arraybuffer";
+			else if (payloadType === "blob") socket.binaryType = "blob";
 			return socket;
 		},
 		createPlayback: () => ({ write: samples => played.push(samples), stop: () => stopped.push() }),
