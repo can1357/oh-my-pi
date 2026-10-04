@@ -19,6 +19,7 @@ import {
 	mapStainlessOs,
 	streamAnthropic,
 	stripClaudeToolPrefix,
+	wrapFetchForCch,
 } from "@oh-my-pi/pi-ai/providers/anthropic";
 import type { MessageCreateParams } from "@oh-my-pi/pi-ai/providers/anthropic-wire";
 import { getClaudeCodeVersion } from "@oh-my-pi/pi-ai/providers/claude-code-fingerprint";
@@ -191,7 +192,7 @@ describe("Anthropic request fingerprint alignment", () => {
 		expect(headers["User-Agent"]).toBe(`claude-cli/${getClaudeCodeVersion()} (external, cli)`);
 		expect(headers["X-Stainless-Arch"]).toBe(mapStainlessArch(process.arch));
 		expect(headers["X-Stainless-OS"]).toBe(mapStainlessOs(process.platform));
-		expect(headers["X-Stainless-Package-Version"]).toBe("0.112.1");
+		expect(headers["X-Stainless-Package-Version"]).toBe("0.128.0");
 		expect(headers["X-Stainless-Runtime-Version"]).toBe("v26.3.0");
 		expect(headers["X-Stainless-Timeout"]).toBe("600");
 		expect(headers["anthropic-client-platform"]).toBeUndefined();
@@ -3011,7 +3012,7 @@ describe("Anthropic request fingerprint alignment", () => {
 });
 
 describe("cch attestation", () => {
-	it("wrapFetchForCch: replaces cch=00000 with correct XXHash64 in outgoing request body", async () => {
+	it("streamAnthropic over OAuth sends the billing header with cch patched in", async () => {
 		const { promise: bodyPromise, resolve: bodyResolve } = Promise.withResolvers<string>();
 		const controller = new AbortController();
 
@@ -3038,15 +3039,63 @@ describe("cch attestation", () => {
 		const capturedBody = await bodyPromise;
 
 		// The placeholder must have been replaced before the request was sent.
-		expect(capturedBody).toContain("cch=");
+		expect(capturedBody).toMatch(/cch=[0-9a-f]{5};/);
 		expect(capturedBody).not.toContain("cch=00000");
-		const m = capturedBody.match(/cch=([0-9a-f]{5})/);
-		expect(m).not.toBeNull();
+	});
 
-		// Self-consistency: hashing the body with the placeholder restored must reproduce the embedded cch.
-		const CCH_SEED = 0x4d659218e32a3268n;
-		const withPlaceholder = capturedBody.replace(/cch=[0-9a-f]{5}/, "cch=00000");
-		const h = Bun.hash.xxHash64(new TextEncoder().encode(withPlaceholder), CCH_SEED);
-		expect(m![1]).toBe((h & 0xfffffn).toString(16).padStart(5, "0"));
+	/** Sends `body` through wrapFetchForCch and returns what reached the network. */
+	async function sendThroughCch(body: string): Promise<string> {
+		let sent = "";
+		const fetchImpl = wrapFetchForCch(async (_input, init) => {
+			const wire = init?.body;
+			if (!(wire instanceof Uint8Array))
+				throw new Error(`wrapFetchForCch sent a ${typeof wire} body, expected bytes`);
+			sent = new TextDecoder().decode(wire);
+			return new Response("{}");
+		});
+		await fetchImpl("https://api.anthropic.com/v1/messages?beta=true", { method: "POST", body });
+		return sent;
+	}
+	const billing = `"system":[{"type":"text","text":"x-anthropic-billing-header: cc_version=2.1.289.3e9; cc_entrypoint=cli; cch=00000;"}]`;
+	const cchOf = (body: string) => /cch=([0-9a-f]{5});/.exec(body)![1];
+
+	// Expected values below are what the Claude Code 2.1.289 binary itself wrote for these exact bodies.
+	it("hashes the body without the spans Claude Code 2.1.289 excludes", async () => {
+		const body = `{"model":"claude-opus-5-5","max_tokens":128000,"messages":[],${billing},"fallbacks":[{"model":"claude-sonnet-5-5","note":"]\\"["}],"fallback_credit_token":"tok","stream":true}`;
+		const sent = await sendThroughCch(body);
+		expect(sent).toBe(body.replace("cch=00000", "cch=7a6e2"));
+	});
+
+	it("keeps a max_tokens schema property (no digits) in the hash", async () => {
+		const schema = `"tools":[{"name":"web_search","input_schema":{"properties":{"max_tokens":{"type":"number"}}}}]`;
+		const sent = await sendThroughCch(`{"model":"m","max_tokens":128000,"messages":[],${billing},${schema}}`);
+		expect(cchOf(sent)).toBe("0f4d3");
+	});
+
+	it("folds the preceding comma when excluded fields close their object", async () => {
+		expect(cchOf(await sendThroughCch(`{"messages":[],${billing},"max_tokens":64000}`))).toBe("990bf");
+		// Adjacent trailing exclusions fold only one comma each, leaving `,}` in the hashed bytes.
+		const adjacent = `{"messages":[],${billing},"max_tokens":1,"fallbacks":[],"fallback_credit_token":"t"}`;
+		expect(cchOf(await sendThroughCch(adjacent))).toBe("d737b");
+	});
+
+	it("keeps cch stable across model fallbacks but not across content changes", async () => {
+		const body = (model: string, maxTokens: number, text: string) =>
+			`{"model":"${model}","messages":[{"role":"user","content":"${text}"}],${billing},"max_tokens":${maxTokens},"stream":true}`;
+		expect(cchOf(await sendThroughCch(body("claude-opus-5-5", 128000, "hi")))).toBe("dd667");
+		expect(cchOf(await sendThroughCch(body("claude-sonnet-5-5", 64000, "hi")))).toBe("dd667");
+		expect(cchOf(await sendThroughCch(body("claude-opus-5-5", 128000, "ho")))).not.toBe("dd667");
+	});
+
+	it("patches only a placeholder ending within 300 bytes of the first system array", async () => {
+		const padded = (gap: number) =>
+			`{"system":[{"type":"text","text":"x-anthropic-billing-header: ${"x".repeat(gap)}cch=00000;"}]}`;
+		// Window is [anchor, anchor+300) from the start of `"system":[`; the placeholder must end by +300.
+		const edge = 300 - `"system":[{"type":"text","text":"x-anthropic-billing-header: cch=00000`.length;
+		expect(await sendThroughCch(padded(edge))).not.toContain("cch=00000");
+		expect(await sendThroughCch(padded(edge + 1))).toContain("cch=00000");
+		// Claude Code anchors on the first `"system":[` in the body, even inside a tool input.
+		const toolInput = `{"messages":[{"role":"assistant","content":[{"type":"tool_use","input":{"system":[]}}]}],"pad":"${"x".repeat(300)}",${billing}}`;
+		expect(await sendThroughCch(toolInput)).toContain("cch=00000");
 	});
 });

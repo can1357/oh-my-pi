@@ -12,9 +12,9 @@
  * Pinned Claude Code CLI version: the offline fallback for {@link getClaudeCodeVersion}.
  * Bumped to the latest npm release by `bun run check-spoofed-versions --update`.
  */
-export const DEFAULT_CLAUDE_CODE_VERSION = "2.1.280";
+export const DEFAULT_CLAUDE_CODE_VERSION = "2.1.289";
 /** `@anthropic-ai/sdk` version bundled by the current Claude Code release. */
-export const claudeCodeSdkVersion = "0.112.1";
+export const claudeCodeSdkVersion = "0.128.0";
 
 const SEMVER_PATTERN = /^(\d+)\.(\d+)\.(\d+)$/;
 const VERSION_TOO_OLD_CODE = "claude_code_version_too_old";

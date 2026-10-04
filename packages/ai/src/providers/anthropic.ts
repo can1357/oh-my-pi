@@ -15,6 +15,7 @@ import {
 	parseStreamingJsonThrottled,
 	readSseEvents,
 } from "@oh-my-pi/pi-utils";
+import { BACKSLASH, COMMA, LBRACKET, QUOTE, RBRACKET } from "@oh-my-pi/pi-utils/json-lexer";
 import { NO_AUTH_SENTINEL } from "../auth-retry";
 import { renderDemotedThinking } from "../dialect/demotion";
 import * as AIError from "../error";
@@ -655,39 +656,120 @@ function createClaudeBillingHeader(firstUserMessageText: string): string {
 	return `${CLAUDE_BILLING_HEADER_PREFIX} cc_version=${version}.${versionSuffix}; cc_entrypoint=cli; ${CCH_PLACEHOLDER_STR};`;
 }
 
-// cch attestation: XXHash64(body_with_placeholder, seed) low-20-bits, 5 hex chars.
+// cch attestation, as Claude Code 2.1.289 computes it:
+// XXHash64(filtered body with the placeholder, seed) low-20-bits, 5 hex chars.
 const CCH_SEED = 0x4d659218e32a3268n;
 const CCH_PLACEHOLDER_STR = "cch=00000";
 const cchEncoder = new TextEncoder();
 const CCH_PLACEHOLDER = cchEncoder.encode(CCH_PLACEHOLDER_STR);
-// Combined anchor for the billing-header placeholder inside system[0].
-// "system":[{"type":"text","text":"x-anthropic-billing-header:
-// Matches the exact JSON prefix of the first system block when
-// createClaudeBillingHeader injects system[0].  "messages" serializes before
-// "system" in Anthropic SDK payloads (~byte 29 vs ~byte 4705), so user content
-// in the messages array can never match this sequence.  User system prompt text
-// lives in system[2] and therefore also cannot match.
+// Claude Code writes the hash only when the placeholder lies within CCH_SEARCH_WINDOW
+// bytes of the body's first `"system":[`, counted from the start of that anchor.
+const CCH_SYSTEM_ANCHOR = cchEncoder.encode(`"system":[`);
+const CCH_SEARCH_WINDOW = 300;
+// Exact JSON prefix of the billing block oh-my-pi injects as system[0]; tells
+// "unanchored" from "no-billing-header" once the anchor check has failed.
 const BILLING_SYSTEM_MARKER = cchEncoder.encode(`"system":[{"type":"text","text":"${CLAUDE_BILLING_HEADER_PREFIX}`);
-const CCH_BILLING_SEARCH_WINDOW = 150;
+
+/** End (exclusive) of the JSON array opening at `open`, skipping brackets inside strings; -1 if unterminated. */
+function cchArrayEnd(body: Buffer, open: number): number {
+	let depth = 0;
+	let inString = false;
+	for (let i = open; i < body.length; i++) {
+		const byte = body[i];
+		if (inString) {
+			if (byte === BACKSLASH) i++;
+			else if (byte === QUOTE) inString = false;
+		} else if (byte === QUOTE) {
+			inString = true;
+		} else if (byte === LBRACKET) {
+			depth++;
+		} else if (byte === RBRACKET && --depth === 0) {
+			return i + 1;
+		}
+	}
+	return -1;
+}
+
+/** A field Claude Code leaves out of the hash so one attestation survives model fallbacks and credit grants. */
+interface CchExcludedField {
+	key: Uint8Array;
+	/** End (exclusive) of the value starting at `value`; -1 when the bytes there are not this field. */
+	valueEnd(view: Buffer, value: number): number;
+	/** Cut only the value, keeping the key and its comma. */
+	valueOnly?: boolean;
+}
+
+const CCH_EXCLUDED_FIELDS: CchExcludedField[] = [
+	// Up to the next `"`, with no escape handling.
+	{ key: cchEncoder.encode(`"model":"`), valueEnd: (view, value) => view.indexOf(QUOTE, value), valueOnly: true },
+	{ key: cchEncoder.encode(`"fallbacks":[`), valueEnd: (view, value) => cchArrayEnd(view, value - 1) },
+	{
+		key: cchEncoder.encode(`"fallback_credit_token":"`),
+		valueEnd: (view, value) => {
+			const close = view.indexOf(QUOTE, value);
+			return close === -1 ? -1 : close + 1;
+		},
+	},
+	// Needs at least one digit, so a tool schema's `"max_tokens":{...}` property is kept.
+	{
+		key: cchEncoder.encode(`"max_tokens":`),
+		valueEnd: (view, value) => {
+			let end = value;
+			while (end < view.length && view[end] >= 0x30 && view[end] <= 0x39) end++;
+			return end > value ? end : -1;
+		},
+	},
+];
+
+/**
+ * The bytes Claude Code hashes for `cch`: the body without each CCH_EXCLUDED_FIELDS
+ * match, a whole field taking one adjacent comma with it (the following one, else the
+ * preceding one). Matched on raw bytes: in serialized JSON an unescaped `"key":` can
+ * only be a key.
+ */
+function cchHashInput(view: Buffer): Buffer {
+	const cuts: Array<[number, number]> = [];
+	for (const field of CCH_EXCLUDED_FIELDS) {
+		for (let at = view.indexOf(field.key); at !== -1; at = view.indexOf(field.key, at + 1)) {
+			const value = at + field.key.length;
+			let end = field.valueEnd(view, value);
+			if (end === -1) continue;
+			let start = at;
+			if (field.valueOnly) start = value;
+			else if (view[end] === COMMA) end++;
+			else if (view[start - 1] === COMMA) start--;
+			cuts.push([start, end]);
+		}
+	}
+	if (cuts.length === 0) return view;
+
+	cuts.sort((a, b) => a[0] - b[0]);
+	const kept: Buffer[] = [];
+	let copied = 0;
+	for (const [start, end] of cuts) {
+		if (start > copied) kept.push(view.subarray(copied, start));
+		copied = Math.max(copied, end);
+	}
+	kept.push(view.subarray(copied));
+	return Buffer.concat(kept);
+}
 
 function patchCch(body: Uint8Array): "patched" | "no-billing-header" | "unanchored" {
 	// Zero-copy Buffer view over the same memory; its `indexOf` is a native memmem,
-	// ~7.5x faster than a hand-rolled byte loop here — the marker sits ~99% through
-	// the body because `messages` serializes before `system`, so a JS scan would
-	// walk almost the entire payload (benchmarked: 563µs -> 75µs on a 1MB body).
+	// ~7.5x faster than a hand-rolled byte loop here — the system array sits ~99%
+	// through the body because `messages` serializes before `system`, so a JS scan
+	// would walk almost the entire payload (benchmarked: 563µs -> 75µs on a 1MB body).
 	const view = Buffer.from(body.buffer, body.byteOffset, body.byteLength);
 
-	// Find the combined system[0] + billing-header prefix marker.
-	const markerIdx = view.indexOf(BILLING_SYSTEM_MARKER);
-	if (markerIdx === -1) return "no-billing-header"; // no CC billing header injected
+	const anchor = view.indexOf(CCH_SYSTEM_ANCHOR);
+	const offset = anchor === -1 ? -1 : view.subarray(anchor, anchor + CCH_SEARCH_WINDOW).indexOf(CCH_PLACEHOLDER);
+	if (offset === -1) {
+		return view.indexOf(BILLING_SYSTEM_MARKER) === -1 ? "no-billing-header" : "unanchored";
+	}
+	const idx = anchor + offset;
 
-	// Placeholder must sit within CCH_BILLING_SEARCH_WINDOW bytes after the marker.
-	const searchFrom = markerIdx + BILLING_SYSTEM_MARKER.length;
-	const idx = view.indexOf(CCH_PLACEHOLDER, searchFrom);
-	if (idx === -1 || idx - searchFrom > CCH_BILLING_SEARCH_WINDOW) return "unanchored";
-
-	// Hash the body with the placeholder in place (matches CC's in-place behaviour).
-	const h = Bun.hash.xxHash64(body, CCH_SEED);
+	// Hash with the placeholder in place (matches CC's in-place behaviour).
+	const h = Bun.hash.xxHash64(cchHashInput(view), CCH_SEED);
 	const cch = (h & 0xfffffn).toString(16).padStart(5, "0");
 
 	for (let i = 0; i < 5; i++) body[idx + 4 + i] = cch.charCodeAt(i);
@@ -704,12 +786,11 @@ export function wrapFetchForCch(base: FetchImpl): FetchImpl {
 		if (init?.body && typeof init.body === "string" && init.body.includes(CCH_PLACEHOLDER_STR)) {
 			const encoded = cchEncoder.encode(init.body);
 			if (patchCch(encoded) === "unanchored") {
-				// The OAuth billing placeholder is anchored to system[0] but we couldn't
-				// patch it — e.g. an `onPayload` hook reordered the first system block's keys
-				// so BILLING_SYSTEM_MARKER no longer matches. Send the body as-is (cch stays
-				// `00000`, the prior behaviour) rather than failing the request, but surface the
-				// fingerprint regression instead of letting it ship silently. A `cch=00000`
-				// literal in user content alone ("no-billing-header") is not a regression.
+				// We injected the billing block but it fails Claude Code's anchor check — e.g. a
+				// tool input holding a `"system":[` array precedes the system prompt. Claude Code sends such
+				// bodies with `cch=00000` too, so send it as-is rather than failing the request,
+				// but surface it instead of letting it ship silently. A `cch=00000` literal in
+				// user content alone ("no-billing-header") is not a regression.
 				logger.warn("anthropic: cch billing placeholder present but not patched; sending unattested request");
 			}
 			return base(input, { ...init, body: encoded });
