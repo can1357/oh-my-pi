@@ -41,6 +41,17 @@ provider "deepseek" {
 			output 1.20
 			cache-read 0.006
 			cache-write 0
+			// DeepSeek's native CNY table (api-docs.deepseek.com/zh-cn → 缓存命中/未命中/输出
+			// ¥0.04 / ¥2 / ¥8). Copied exactly: the CNY and USD cards are not related by
+			// one FX rate (implied 6.6667 vs 6.8182 for Pro), so neither derives from the other.
+			currency-cards {
+				cny {
+					input 2
+					output 8
+					cache-read 0.04
+					cache-write 0
+				}
+			}
 		}
 	}
 	// residue: the pricing page documents this SKU (DeepSeek-V4.1-Flash) as 1M
@@ -59,6 +70,15 @@ provider "deepseek" {
 			output 3.96
 			cache-read 0.044
 			cache-write 0
+			// Native CNY table (¥0.30 / ¥9 / ¥27); exact, not an FX conversion of the USD card.
+			currency-cards {
+				cny {
+					input 9
+					output 27
+					cache-read 0.30
+					cache-write 0
+				}
+			}
 		}
 		time-based-cost {
 			off-peak-multiplier 0.5
@@ -81,6 +101,15 @@ provider "deepseek" {
 					output 1.20
 					cache-read 0.006
 					cache-write 0
+					// The same dated transition in CNY, so off-peak pricing stays exact per currency.
+					currency-cards {
+						cny {
+							input 2
+							output 8
+							cache-read 0.04
+							cache-write 0
+						}
+					}
 				}
 			}
 		}

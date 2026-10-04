@@ -44,6 +44,9 @@
 - Fixed diff blocks in ask questions losing their layout; additions and removals now retain separate diff highlighting.
 - Fixed duplicate ASCII Plan, Prewalk, and Goal labels in the status line.
 - Improved Markdown rendering for long and streamed messages, including display math, fenced code, reference links, lists, whitespace, emphasis, and line breaks, so completed content no longer shows raw markup, misplaced blank lines, or broken block layout.
+### Added
+
+- The status line can show session cost in a model's native published currency: setting `cost.displayCurrency` to `CNY` renders DeepSeek spend as `¥` from DeepSeek's own CNY table, keeping the peak/off-peak arrow; a model that publishes no card in the selected currency keeps its own card and symbol ([#14151](https://github.com/can1357/oh-my-pi/pull/14151) by [@WICKII](https://github.com/WICKII)).
 
 ## [18.5.0] - 2026-10-03
 

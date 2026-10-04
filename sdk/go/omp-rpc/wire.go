@@ -494,6 +494,8 @@ type Usage struct {
 	Cttl            map[string]json.RawMessage `json:"cttl,omitempty"`
 	Server          map[string]json.RawMessage `json:"server,omitempty"`
 	Credits         map[string]json.RawMessage `json:"credits,omitempty"`
+	// Base-currency `cost` re-priced through every alternate currency card the model publishes (e.g. `CNY`), at the same request timestamp.
+	CostByCurrency map[string]UsageCost `json:"costByCurrency,omitempty"`
 	// Extra holds undeclared keys and declared keys whose value did not decode (that field stays zero).
 	// Encoding writes them back, over a declared field with the same key.
 	Extra map[string]json.RawMessage `json:"-"`
@@ -519,6 +521,7 @@ func (v *Usage) decodeFrom(raw map[string]json.RawMessage) error {
 	d.optional("cttl", &out.Cttl)
 	d.optional("server", &out.Server)
 	d.optional("credits", &out.Credits)
+	d.optional("costByCurrency", &out.CostByCurrency)
 	out.Extra = d.rest()
 	if d.err != nil {
 		return d.err

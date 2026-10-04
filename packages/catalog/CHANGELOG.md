@@ -40,6 +40,9 @@
 - Fixed Google Antigravity Gemini 3.1 Flash Image being recognized as an image-capable model for image roles and fallback chains.
 - Fixed GitHub Copilot base models reporting an incorrect long-context window when a separate -1m model is available.
 - Fixed newer OpenAI and Anthropic model families being incorrectly marked as accepting sampling parameters when accessed through compatible providers such as Amazon Bedrock, Google, Devin, or OpenRouter; explicit compatibility overrides continue to take precedence.
+### Added
+
+- Added exact per-model alternate-currency rate cards (`cost-patch { currency-cards { … } }` KDL axis, `ModelCost.currencyCards`), and published DeepSeek's native CNY table for `deepseek-flash`/`deepseek-v4-flash` (¥2 input, ¥8 output, ¥0.04 cached) and `deepseek-v4-pro` (¥9 / ¥27 / ¥0.30, plus the CNY mirror of the 2026-09-14 flash-price switch). Alternate cards are copied from the vendor's published table, never derived from the USD card by an exchange rate ([#14151](https://github.com/can1357/oh-my-pi/pull/14151) by [@WICKII](https://github.com/WICKII)).
 
 ## [18.5.0] - 2026-10-03
 

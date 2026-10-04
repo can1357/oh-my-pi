@@ -261,6 +261,8 @@ class Usage(TypedDict):
     cttl: NotRequired[JsonObject]
     server: NotRequired[JsonObject]
     credits: NotRequired[JsonObject]
+    costByCurrency: NotRequired[dict[str, UsageCost]]
+    """Base-currency `cost` re-priced through every alternate currency card the model publishes (e.g. `CNY`), at the same request timestamp."""
 
 
 class UserMessage(TypedDict):

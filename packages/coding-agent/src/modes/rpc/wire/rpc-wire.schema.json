@@ -1000,6 +1000,14 @@
 					"type": "object",
 					"properties": {},
 					"additionalProperties": {}
+				},
+				"costByCurrency": {
+					"type": "object",
+					"properties": {},
+					"additionalProperties": {
+						"$ref": "#/$defs/UsageCost"
+					},
+					"description": "Base-currency `cost` re-priced through every alternate currency card the model publishes (e.g. `CNY`), at the same request timestamp."
 				}
 			},
 			"required": [

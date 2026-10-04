@@ -87,6 +87,8 @@ export interface Usage {
 	cttl?: Record<string, unknown>;
 	server?: Record<string, unknown>;
 	credits?: Record<string, unknown>;
+	/** Base-currency `cost` re-priced through every alternate currency card the model publishes (e.g. `CNY`), at the same request timestamp. */
+	costByCurrency?: Record<string, UsageCost>;
 }
 
 export interface UserMessage {

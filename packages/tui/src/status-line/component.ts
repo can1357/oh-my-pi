@@ -2375,6 +2375,7 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 			session: this.session,
 			focusedAgentId: this.#focusedAgentId,
 			sessionAccent: sessionAccentEnabled,
+			costCurrency: this.#resolveSettings().costCurrency,
 			previewTitle,
 			activeRepo: activeRepoCache.activeRepo,
 			width,

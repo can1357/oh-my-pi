@@ -26,6 +26,7 @@ import {
 	toError,
 } from "@oh-my-pi/pi-utils";
 import type { StructuredSubagentSchemaMode } from "@oh-my-pi/pi-tui/tools/task";
+import type { CurrencyCode } from "@oh-my-pi/pi-catalog/types";
 import { moveFileAcrossDevices } from "../utils/atomic-file";
 import { ArtifactManager } from "./artifacts";
 import { type BlobPutOptions, type BlobPutResult, BlobStore, lazyImageDataSync } from "./blob-store";
@@ -431,6 +432,51 @@ function addUsage(target: UsageStatistics, usage: Usage | undefined): void {
 	target.orchestrationCacheRead += usage.orchestration?.cacheRead ?? 0;
 	target.premiumRequests += usage.premiumRequests ?? 0;
 	target.cost += usage.cost.total;
+	target.costByCurrency = addCostByCurrency(target.costByCurrency, usage.costByCurrency);
+	target.costByCurrencyCoverage = addCostByCurrencyCoverage(
+		target.costByCurrencyCoverage,
+		usage.costByCurrency,
+		usage.cost.total,
+	);
+}
+
+/**
+ * Track how much of the base-currency ledger each alternate card covers: a
+ * record that carried a card in code C contributes its base-currency total to
+ * C's coverage. Shared by the display layer to tell a fully CNY-priced session
+ * from a mixed one, where relabelling the total would hide the base spend.
+ */
+function addCostByCurrencyCoverage(
+	target: Partial<Record<CurrencyCode, number>> | undefined,
+	source: Usage["costByCurrency"],
+	baseTotal: number,
+): Partial<Record<CurrencyCode, number>> | undefined {
+	if (source === undefined) return target;
+	const next = target ?? {};
+	for (const code of Object.keys(source) as CurrencyCode[]) {
+		if (source[code] === undefined) continue;
+		next[code] = (next[code] ?? 0) + baseTotal;
+	}
+	return next;
+}
+
+/**
+ * Fold one record's `costByCurrency` totals into a per-currency accumulator.
+ * Shared by the session ledger and its subagent subtotal so both stay keyed by
+ * the exact card that priced the record — never by an exchange rate.
+ */
+function addCostByCurrency(
+	target: Partial<Record<CurrencyCode, number>> | undefined,
+	source: Usage["costByCurrency"],
+): Partial<Record<CurrencyCode, number>> | undefined {
+	if (source === undefined) return target;
+	const next = target ?? {};
+	for (const code of Object.keys(source) as CurrencyCode[]) {
+		const amount = source[code];
+		if (amount === undefined) continue;
+		next[code] = (next[code] ?? 0) + amount.total;
+	}
+	return next;
 }
 
 /**
@@ -530,6 +576,10 @@ class SessionEntryIndex {
 		// status line can split the session's own cost from its subagents'.
 		if (usage && entry.type === "message" && entry.message.role === "toolResult") {
 			this.#usage.subagentCost += usage.cost.total;
+			this.#usage.subagentCostByCurrency = addCostByCurrency(
+				this.#usage.subagentCostByCurrency,
+				usage.costByCurrency,
+			);
 		}
 	}
 

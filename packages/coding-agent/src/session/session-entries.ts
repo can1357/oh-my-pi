@@ -7,6 +7,7 @@ import type {
 	TextContent,
 	Usage,
 } from "@oh-my-pi/pi-ai";
+import type { CurrencyCode } from "@oh-my-pi/pi-catalog/types";
 import type { StructuredSubagentSchemaMode } from "@oh-my-pi/pi-tui/tools/task";
 import type { CompactionMethod } from "./compaction-methods";
 import type { RetryFallbackRole } from "./retry-fallback-chains";
@@ -345,6 +346,25 @@ export interface UsageStatistics {
 	cost: number;
 	/** Portion of {@link cost} carried by completed `task` results (direct children's spend). */
 	subagentCost: number;
+	/**
+	 * Session spend per ISO 4217 code, summed from each record's
+	 * `usage.costByCurrency` at its own request timestamp. Present only for
+	 * models that publish alternate-currency cards; `cost` stays the base view.
+	 */
+	costByCurrency?: Partial<Record<CurrencyCode, number>>;
+	/**
+	 * Base-currency total of the records that carried a card in each ISO 4217
+	 * code, keyed the same as {@link costByCurrency}. It equals {@link cost} only
+	 * when every record was priced in that code, so a display layer can refuse
+	 * to relabel the session total with a currency it only partially covers.
+	 */
+	costByCurrencyCoverage?: Partial<Record<CurrencyCode, number>>;
+	/**
+	 * Portion of {@link costByCurrency} carried by completed `task` results, in
+	 * the same per-currency map, so the subagent split stays exact in an
+	 * alternate-currency readout without converting between currencies.
+	 */
+	subagentCostByCurrency?: Partial<Record<CurrencyCode, number>>;
 }
 /**
  * True when a raw JSONL line is a complete `message` record carrying an

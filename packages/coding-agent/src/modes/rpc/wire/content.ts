@@ -78,6 +78,10 @@ export const messageDefs = {
 		"server?": JSON_OBJECT,
 		"credits?": JSON_OBJECT,
 		cost: "UsageCost",
+		"costByCurrency?": doc(
+			"Record<string, UsageCost>",
+			"Base-currency `cost` re-priced through every alternate currency card the model publishes (e.g. `CNY`), at the same request timestamp.",
+		),
 	},
 
 	UserMessage: {

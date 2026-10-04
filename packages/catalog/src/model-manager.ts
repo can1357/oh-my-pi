@@ -4,11 +4,12 @@ import { collapseBuiltVariants } from "./compat/collapse";
 import { applyCatalogMetrics, CatalogMetricsIndex } from "./identity/metrics";
 import { readModelCache, writeModelCache } from "./model-cache";
 import { type GeneratedProvider, getBundledModels } from "./models";
-import { isTimeBasedCost } from "./pricing";
+import { isCurrencyCards, isTimeBasedCost } from "./pricing";
 import {
 	type Api,
 	type Model,
 	type ModelCost,
+	isCurrencyCode,
 	modelKind,
 	type ModelSpec,
 	type Provider,
@@ -633,6 +634,10 @@ function mergeDynamicModel<TApi extends Api>(existingModel: Model<TApi>, dynamic
 		: existingModel.reasoning || dynamicModel.reasoning;
 	const longContextCost = dynamicModel.cost.longContext ?? existingModel.cost.longContext;
 	const timeBasedCost = dynamicModel.cost.timeBased ?? existingModel.cost.timeBased;
+	// Currency travels with the card it names: an existing alternate card must not
+	// be dropped (or its code swapped) just because discovery overlaid the rates.
+	const currency = dynamicModel.cost.currency ?? existingModel.cost.currency;
+	const currencyCards = dynamicModel.cost.currencyCards ?? existingModel.cost.currencyCards;
 	const existingHeaders = existingModel.resolveHeaders ?? existingModel.headers;
 	const dynamicHeaders = dynamicModel.resolveHeaders ?? dynamicModel.headers;
 	let resolveHeaders = dynamicModel.resolveHeaders ?? existingModel.resolveHeaders;
@@ -662,6 +667,8 @@ function mergeDynamicModel<TApi extends Api>(existingModel: Model<TApi>, dynamic
 			output: preferDiscoveryCost(dynamicModel.cost.output, existingModel.cost.output),
 			cacheRead: preferDiscoveryCost(dynamicModel.cost.cacheRead, existingModel.cost.cacheRead),
 			cacheWrite: preferDiscoveryCost(dynamicModel.cost.cacheWrite, existingModel.cost.cacheWrite),
+			...(currency ? { currency } : {}),
+			...(currencyCards ? { currencyCards } : {}),
 			...(longContextCost ? { longContext: longContextCost } : {}),
 			...(timeBasedCost ? { timeBased: timeBasedCost } : {}),
 		},
@@ -822,8 +829,17 @@ function isTokenCost(value: unknown): value is TokenCost {
 
 function isModelCost(value: unknown): value is ModelCost {
 	if (!isTokenCost(value)) return false;
-	const cost = value as TokenCost & { longContext?: unknown; timeBased?: unknown };
+	const cost = value as TokenCost & {
+		longContext?: unknown;
+		timeBased?: unknown;
+		currency?: unknown;
+		currencyCards?: unknown;
+	};
 	if (cost.timeBased !== undefined && !isTimeBasedCost(cost.timeBased)) return false;
+	// Alternate-currency cards flow into `priceUsage` at request time; a malformed
+	// cached card would otherwise put `NaN` into `costByCurrency`.
+	if (cost.currency !== undefined && !isCurrencyCode(cost.currency)) return false;
+	if (cost.currencyCards !== undefined && !isCurrencyCards(cost.currencyCards)) return false;
 	const longContext = cost.longContext;
 	if (longContext === undefined) return true;
 	if (!isTokenCost(longContext) || !isRecord(longContext)) return false;

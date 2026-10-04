@@ -675,6 +675,8 @@ pub struct Usage {
 	pub cttl: Option<Map<String, Value>>,
 	pub server: Option<Map<String, Value>>,
 	pub credits: Option<Map<String, Value>>,
+	/// Base-currency `cost` re-priced through every alternate currency card the model publishes (e.g. `CNY`), at the same request timestamp.
+	pub cost_by_currency: Option<BTreeMap<String, UsageCost>>,
 	/// Every key not decoded into a declared field.
 	pub extra: Map<String, Value>,
 }
@@ -721,6 +723,9 @@ impl Serialize for Usage {
 		if let Some(value) = &self.credits {
 			map.serialize_entry("credits", value)?;
 		}
+		if let Some(value) = &self.cost_by_currency {
+			map.serialize_entry("costByCurrency", value)?;
+		}
 		for (key, value) in &self.extra {
 			match key.as_str() {
 				"input" if self.input.is_some() => continue,
@@ -736,6 +741,7 @@ impl Serialize for Usage {
 				"cttl" if self.cttl.is_some() => continue,
 				"server" if self.server.is_some() => continue,
 				"credits" if self.credits.is_some() => continue,
+				"costByCurrency" if self.cost_by_currency.is_some() => continue,
 				_ => {}
 			}
 			map.serialize_entry(key, value)?;
@@ -761,6 +767,7 @@ impl<'de> Deserialize<'de> for Usage {
 			cttl: take(&mut extra, "cttl"),
 			server: take(&mut extra, "server"),
 			credits: take(&mut extra, "credits"),
+			cost_by_currency: take(&mut extra, "costByCurrency"),
 			extra,
 		})
 	}

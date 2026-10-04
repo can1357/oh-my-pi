@@ -835,6 +835,7 @@ tui:
 | `statusLine.sessionAccent`    | boolean | `true`           | Tint the editor border with the session color.                            |
 | `statusLine.transparent`      | boolean | `false`          | Use the terminal background for the status line.                          |
 | `statusLine.showHookStatus`   | boolean | `true`           | Show hook status messages.                                                |
+| `cost.displayCurrency`        | enum    | `USD`            | Currency session cost readouts prefer: `USD`, `CNY`. A model that publishes an exact card in the selected currency is shown in it (DeepSeek's native ¥ table); one without such a card keeps its own card and symbol. |
 | `terminal.showImages`         | boolean | `true`           | Render images inline (when the terminal supports it).                     |
 | `images.autoResize`           | boolean | `true`           | Resize large images for model compatibility.                              |
 | `images.blockImages`          | boolean | `false`          | Never send images to providers.                                           |
@@ -848,7 +849,7 @@ For a custom status line, set `statusLine.preset: custom` and configure `statusL
 
 The `path` segment abbreviates the home directory to `~`. On Windows, shared path formatting recognizes both the long home name and its existing 8.3 aliases (such as `ADMINI~1`), including in tool labels and error text. Only the home prefix is abbreviated; remaining path components keep their spelling, and formatting does not change the working directory or environment. Set `statusLine.segmentOptions.path.abbreviate: false` to keep the full path in the status line.
 
-The `cost` segment shows recorded session costs. For an active provider/model with scheduled pricing, it appends `↑` during peak hours or `↓` off-peak, refreshing at boundaries even while idle. The arrow reflects the current tariff, not past spending; flat-price models and explicit cost overrides have no arrow. See [usage costs and time-based pricing](models.md#usage-costs-and-time-based-pricing) for the UTC schedule and estimation semantics.
+The `cost` segment shows recorded session costs. For an active provider/model with scheduled pricing, it appends `↑` during peak hours or `↓` off-peak, refreshing at boundaries even while idle. The arrow reflects the current tariff, not past spending; flat-price models and explicit cost overrides have no arrow. Set `cost.displayCurrency` to `CNY` to show spend from the active model's own native ¥ card when it publishes one (DeepSeek does, and the peak/off-peak arrow still applies); a model without a card in that currency keeps its base card and symbol rather than mislabelling the amount. See [usage costs and time-based pricing](models.md#usage-costs-and-time-based-pricing) for the UTC schedule and estimation semantics.
 
 ### Interaction
 
