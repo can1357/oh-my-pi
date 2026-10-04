@@ -4,6 +4,11 @@ import { Stack } from "../components/layout/stack";
 import { matchesKey } from "../keys";
 import { theme } from "../theme/theme";
 import { truncateToWidth, visibleWidth } from "../utils";
+import type { TspText } from "@oh-my-pi/pi-wire";
+import { node, span, text } from "../native/describe";
+import type { NativeChild, NativeNode } from "../native/node";
+import { overlayCard } from "../native/overlay";
+import { plainText } from "../native/spans";
 
 /** A scope row shared by fullscreen hubs, with hub-specific kinds and metadata. */
 export interface SidebarEntry<TKind extends string> {
@@ -55,6 +60,81 @@ export function moveStripSelection(strip: StripState<StripChip<unknown>>, data: 
 	return false;
 }
 
+/**
+ * Native sidebar: a `list` whose `item`s are keyed by entry id (the `item` of
+ * `select`/`activate` events), separators as `rule`s. Scrolling and clipping
+ * are the terminal's; `style` supplies icon, annotation and muting.
+ */
+export function describeHubSidebar<TEntry extends SidebarEntry<string>>(
+	entries: readonly TEntry[],
+	selectedId: string,
+	style: (entry: TEntry, index: number) => Pick<SidebarStyle, "icon" | "annotation" | "muted">,
+	key = "sidebar",
+): NativeNode {
+	const items: NativeNode[] = [];
+	for (let i = 0; i < entries.length; i++) {
+		const entry = entries[i]!;
+		if (entry.kind === "separator") {
+			items.push(node("rule", undefined, undefined, entry.id));
+			continue;
+		}
+		const decoration = style(entry, i);
+		items.push(
+			node(
+				"item",
+				{
+					label: decoration.icon
+						? [
+								span(`${plainText(decoration.icon)} `, "muted"),
+								span(entry.label, decoration.muted ? "dim" : undefined),
+							]
+						: [span(entry.label, decoration.muted ? "dim" : undefined)],
+					value: decoration.annotation ? plainText(decoration.annotation) : undefined,
+				},
+				undefined,
+				entry.id,
+			),
+		);
+	}
+	return node("list", { selected: selectedId }, items, key);
+}
+
+/**
+ * Native footer chip strip: a `tabs` node whose tab ids are the chip indices
+ * (`select` events carry the index as `item`), with an optional prefix label.
+ */
+export function describeHubChips(strip: StripState<StripChip<unknown>>, prefix?: TspText, key = "chips"): NativeNode {
+	const tabs = node(
+		"tabs",
+		{
+			items: strip.chips.map((chip, index) => ({ id: String(index), label: chip.label })),
+			active: String(strip.index),
+		},
+		undefined,
+		"tabs",
+	);
+	const children: NativeChild[] = prefix === undefined ? [tabs] : [text(prefix), tabs];
+	return node("row", { gap: "sm", align: "center" }, children, key);
+}
+
+/**
+ * Native fullscreen hub: a root card titled `title` over a sidebar/body row and
+ * a footer. The split geometry, ring and dividers are the terminal's.
+ */
+export function describeHubFrame(
+	role: string,
+	title: TspText,
+	sidebar: NativeChild,
+	body: NativeChild,
+	footer: NativeChild,
+): NativeNode {
+	return overlayCard(role, title, [
+		node("row", { gap: "md", align: "start", grow: 1 }, [sidebar, body], "split"),
+		node("rule", undefined, undefined, "divider"),
+		footer,
+	]);
+}
+
 /** Persistent fullscreen split frame, sidebar viewport, and footer chip renderer. */
 export class HubFrame {
 	/** Current sidebar viewport offset, shared with the hub's navigation. */
@@ -69,6 +149,10 @@ export class HubFrame {
 	readonly #stack: Stack;
 	readonly #title: string;
 	readonly #sidebarBounds: { min: number; max: number };
+	/** Whether narrow layouts may reduce the body floor to keep the sidebar usable. */
+	readonly #preserveSidebar: boolean;
+	/** Preferred body floor, reduced only as needed to retain sidebar navigation. */
+	readonly #bodyMinWidth: number;
 
 	/** Compose hub-specific sidebar and body renderers into a persistent frame. */
 	constructor(
@@ -76,9 +160,12 @@ export class HubFrame {
 		sidebarBounds: { min: number; max: number },
 		renderSidebar: (width: number, rows: number) => string[],
 		renderBody: (width: number, height: number | undefined) => readonly string[],
+		options: { bodyMinWidth?: number; preserveSidebar?: boolean } = {},
 	) {
 		this.#title = title;
 		this.#sidebarBounds = sidebarBounds;
+		this.#preserveSidebar = options.preserveSidebar ?? false;
+		this.#bodyMinWidth = options.bodyMinWidth ?? 0;
 		this.#split = new SplitPane({
 			left: (width, height) => {
 				const rows = Math.max(0, Math.floor(height ?? 10));
@@ -87,6 +174,7 @@ export class HubFrame {
 				return lines.slice(0, rows);
 			},
 			right: renderBody,
+			rightMinWidth: this.#bodyMinWidth,
 			prefix: () => `${theme.fg("border", theme.boxRound.vertical)} `,
 			divider: () => ` ${theme.fg("border", theme.boxRound.vertical)} `,
 			suffix: () => ` ${theme.fg("border", theme.boxRound.vertical)}`,
@@ -250,7 +338,17 @@ export class HubFrame {
 	/** Paint a complete fullscreen hub with its title, width bounds, and contextual footer. */
 	render(width: number, height: number, entries: readonly SidebarEntry<string>[], footer: string): readonly string[] {
 		const contentRows = Math.max(10, height - 4);
-		this.#split.setLeftSize({ fixed: this.sidebarWidth(entries) });
+		const sidebarWidth = this.sidebarWidth(entries);
+		this.#split.setLeftSize({
+			fixed: sidebarWidth,
+			min: this.#preserveSidebar ? this.#sidebarBounds.min : undefined,
+		});
+		if (this.#preserveSidebar && this.#bodyMinWidth > 0) {
+			const geometry = this.#split.measure(width);
+			const splitWidth = (geometry.left?.width ?? 0) + (geometry.right?.width ?? 0);
+			const rightMinWidth = Math.max(0, Math.min(this.#bodyMinWidth, splitWidth - this.#sidebarBounds.min));
+			this.#split.setRightMinWidth(rightMinWidth);
+		}
 		const leftWidth = this.#split.measure(width).left?.width ?? 0;
 		this.#top.setLines([topBorderSplit(width, this.#title, leftWidth)]);
 		this.#divider.setLines([dividerSplit(width, leftWidth)]);

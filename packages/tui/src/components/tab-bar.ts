@@ -10,6 +10,9 @@
  */
 import { formatKeyHint } from "../app-keybindings";
 import { matchesKey } from "../keys";
+import { compactText, styledSpans, styleSpans } from "../native/spans";
+import { node, row } from "../native/describe";
+import type { DescribeContext, NativeNode, NativeUiEvent } from "../native/node";
 import type { Component } from "../tui";
 import { truncateToWidth, visibleWidth } from "../utils";
 
@@ -60,6 +63,7 @@ export class TabBar implements Component {
 	#theme: TabBarTheme;
 	#label: string;
 	#hoverTabId: string | null = null;
+	#native?: { signature: string; node: NativeNode };
 	/** Per-render tab hit zones: 0-based line + [start, end) columns. */
 	#hitZones: { line: number; start: number; end: number; index: number }[] = [];
 
@@ -159,6 +163,44 @@ export class TabBar implements Component {
 
 	invalidate(): void {
 		// No cached state to invalidate
+	}
+
+	/**
+	 * A native `tabs` strip (muted tabs keep the muted token), preceded by the
+	 * bar label and followed by the cycle hint when present. Shrinking to
+	 * `short` labels and wrapping are the terminal's.
+	 */
+	describe(_cx: DescribeContext): NativeNode {
+		// Tabs are a caller-owned mutable array (render keeps no cache either), so key on content.
+		let signature = `${this.#activeIndex}\0${this.#label}\0${this.showHint}`;
+		for (const tab of this.#tabs) signature += `\0${tab.id}\x01${tab.label}\x01${tab.muted === true}`;
+		if (this.#native?.signature === signature) return this.#native.node;
+		const tabs = node("tabs", {
+			items: this.#tabs.map(tab => {
+				const label = styledSpans(tab.label);
+				return {
+					id: tab.id,
+					label: tab.muted
+						? label.map(part => ({ ...part, s: part.s ? `${part.s} muted` : "muted" }))
+						: compactText(label),
+				};
+			}),
+			active: this.#tabs[this.#activeIndex]?.id,
+		});
+		const parts: NativeNode[] = [];
+		if (this.#label) parts.push(node("text", { spans: styleSpans(`${this.#label}:`, this.#theme.label) }));
+		parts.push(tabs);
+		if (this.showHint) {
+			parts.push(node("text", { spans: styleSpans(`(${formatKeyHint("tab")} to cycle)`, this.#theme.hint) }));
+		}
+		const described = parts.length === 1 ? tabs : row(parts, { gap: "md", align: "center" });
+		this.#native = { signature, node: described };
+		return described;
+	}
+
+	/** A click on a tab activates it (muted tabs stay inert). */
+	handleNativeEvent(event: NativeUiEvent): void {
+		if (event.type === "select" || event.type === "activate") this.selectTab(event.item);
 	}
 
 	/**

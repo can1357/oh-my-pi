@@ -347,6 +347,40 @@ describe("model thinking derivation", () => {
 		expect(getSupportedEfforts(pro)).toEqual([Effort.Low, Effort.High, Effort.Max]);
 	});
 
+	it("keeps Go LongCat reasoning without inventing an effort selector", () => {
+		const longcat = createModel({
+			id: "longcat-2.5-preview-free",
+			api: "openai-completions",
+			provider: "opencode-go",
+			baseUrl: "https://opencode.ai/zen/go/v1",
+		});
+
+		expect(longcat.reasoning).toBe(true);
+		expect(getSupportedEfforts(longcat)).toEqual([]);
+		expect(clampThinkingLevelForModel(longcat, Effort.High)).toBeUndefined();
+	});
+
+	it("offers Go Space Bunny only its published effort tiers through max", () => {
+		const spaceBunny = createModel({
+			id: "space-bunny-free",
+			api: "openai-completions",
+			provider: "opencode-go",
+			baseUrl: "https://opencode.ai/zen/go/v1",
+		});
+
+		expect(getSupportedEfforts(spaceBunny)).toEqual([
+			Effort.Low,
+			Effort.Medium,
+			Effort.High,
+			Effort.XHigh,
+			Effort.Max,
+		]);
+		expect(requireSupportedEffort(spaceBunny, Effort.Max)).toBe(Effort.Max);
+		expect(() => requireSupportedEffort(spaceBunny, Effort.Minimal)).toThrow(
+			/Supported efforts: low, medium, high, xhigh, max/,
+		);
+	});
+
 	it("grants the low/high/max ladder to OpenRouter deepseek-v4-pro-0813 but not the undated route (issue #8517)", () => {
 		// OpenRouter's /models advertises reasoning.supported_efforts
 		// [low, high, max] for the dated SKU; the discovered ladder is baked
@@ -806,6 +840,30 @@ describe("model thinking derivation", () => {
 		expect(direct.compat.supportsTurnScopedSystem).toBe(true);
 	});
 
+	it("keeps Sonnet 5.5 binding controls and per-message effort off Vertex, which rejects both", () => {
+		const direct = createModel({ id: "claude-sonnet-5-5", api: "anthropic-messages", provider: "anthropic" });
+		const vertex = createModel({
+			id: "claude-sonnet-5-5@default",
+			api: "anthropic-messages",
+			provider: "google-vertex",
+		});
+
+		expect(direct.compat.supportsThinkingBindingControls).toBe(true);
+		expect(direct.compat.supportsPerMessageEffort).toBe(true);
+		expect(vertex.compat.supportsThinkingBindingControls).toBe(false);
+		expect(vertex.compat.supportsPerMessageEffort).toBe(false);
+	});
+
+	it("keeps per-message effort off every Vertex Claude line that takes it on the Claude API", () => {
+		for (const id of ["claude-fable-5-1", "claude-opus-5"]) {
+			const direct = createModel({ id, api: "anthropic-messages", provider: "anthropic" });
+			const vertex = createModel({ id: `${id}@default`, api: "anthropic-messages", provider: "google-vertex" });
+
+			expect(direct.compat.supportsPerMessageEffort).toBe(true);
+			expect(vertex.compat.supportsPerMessageEffort).toBe(false);
+		}
+	});
+
 	it("uses Bedrock Fable 5.1's five supported effort levels", () => {
 		const ids = [
 			"global.anthropic.claude-fable-5-1",
@@ -873,16 +931,16 @@ describe("model thinking derivation", () => {
 				createModel({ id, api: "anthropic-messages", provider: "anthropic" }).compat.supportsServerCompaction,
 			).toBe(false);
 		}
-		expect(
-			createModel({ id: "claude-sonnet-4-6", api: "anthropic-messages", provider: "google-vertex" }).compat
-				.supportsServerCompaction,
-		).toBe(true);
-		for (const provider of ["amazon-bedrock", "opencode-zen"]) {
+		for (const provider of ["google-vertex", "amazon-bedrock", "bedrock-mantle"]) {
 			expect(
 				createModel({ id: "claude-sonnet-4-6", api: "anthropic-messages", provider }).compat
 					.supportsServerCompaction,
-			).toBe(false);
+			).toBe(true);
 		}
+		expect(
+			createModel({ id: "claude-sonnet-4-6", api: "anthropic-messages", provider: "opencode-zen" }).compat
+				.supportsServerCompaction,
+		).toBe(false);
 	});
 
 	it("classifies OpenAI-schema Bedrock models as effort, leaving gpt-oss on budget", () => {

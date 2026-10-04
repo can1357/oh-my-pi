@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { setProcessName, TempDir } from "@oh-my-pi/pi-utils";
+import { procmgr, setProcessName, TempDir } from "@oh-my-pi/pi-utils";
 import { Settings } from "../../src/config/settings";
 import { AsyncJobManager } from "../../src/async/job-manager";
 import { ProcProtocolHandler } from "../../src/internal-urls/proc-protocol";
@@ -33,6 +33,24 @@ function startBroker(projectDir: string, runtimeDir: string): Promise<void> {
 	return broker;
 }
 
+// Services really spawn the configured shell with POSIX command lines. Windows
+// has no `/bin/sh`, so use the product's own Git Bash discovery there.
+const SERVICE_SHELL = process.platform === "win32" ? procmgr.resolveWindowsShell() : "/bin/sh";
+
+/**
+ * Settles a broker-backed call with a plain `await`. On Windows, Bun's
+ * `expect(promise).rejects` waits on the promise without servicing the
+ * in-process broker's named-pipe I/O, so the request stalls until its timeout.
+ */
+async function rejectionMessage(promise: Promise<unknown>): Promise<string> {
+	try {
+		await promise;
+	} catch (error) {
+		return error instanceof Error ? error.message : String(error);
+	}
+	throw new Error("Expected the promise to reject");
+}
+
 function toolSession(cwd: string, manager?: AsyncJobManager, options: { launch?: boolean } = {}): ToolSession {
 	return {
 		cwd,
@@ -48,7 +66,7 @@ function toolSession(cwd: string, manager?: AsyncJobManager, options: { launch?:
 			"bash.autoBackground.thresholdMs": 60_000,
 			"bashInterceptor.enabled": false,
 			"worktree.clone": false,
-			shellPath: "/bin/sh",
+			shellPath: SERVICE_SHELL,
 		}),
 	} as unknown as ToolSession;
 }
@@ -148,6 +166,44 @@ describe("proc:// background jobs", () => {
 			await expect(
 				write.execute("missing-stdin", write.parameters.assert({ path: `proc://${id}` })),
 			).rejects.toThrow("content is required");
+			expect(manager.getJob(id)?.status).toBe("running");
+			const result = await write.execute("kill", write.parameters.assert({ path: `proc://${id}/kill` }));
+			await manager.getJob(id)?.promise;
+			expect(result.details?.proc).toMatchObject({ op: "cancel", cancelled: [{ id, status: "cancelled" }] });
+			expect(manager.getJob(id)?.status).toBe("cancelled");
+		} finally {
+			await manager.dispose();
+		}
+	});
+
+	it.each([
+		{ label: "plan mode", deviceOnlyWrite: false },
+		{ label: "plan mode with device-only write", deviceOnlyWrite: true },
+	])("kills owned jobs under $label while stdin stays guarded (issue #13803)", async ({ deviceOnlyWrite }) => {
+		const manager = new AsyncJobManager({});
+		const pending = Promise.withResolvers<string>();
+		const id = manager.register(
+			"task",
+			"exploring the wrong track",
+			async ({ signal }) => {
+				signal.addEventListener("abort", () => pending.resolve("cancelled"), { once: true });
+				return pending.promise;
+			},
+			{ ownerId: "Main" },
+		);
+		const session = toolSession(process.cwd(), manager, { launch: false });
+		session.getPlanModeState = () => ({
+			enabled: true,
+			planFilePath: "local://PLAN.md",
+			workflow: "parallel",
+			reentry: false,
+		});
+		session.deviceOnlyWrite = deviceOnlyWrite || undefined;
+		const write = new WriteTool(session);
+		try {
+			await expect(write.execute("stdin", { path: `proc://${id}`, content: "go" })).rejects.toThrow(
+				deviceOnlyWrite ? "limited to the xd:// device transport" : "Plan mode",
+			);
 			expect(manager.getJob(id)?.status).toBe("running");
 			const result = await write.execute("kill", write.parameters.assert({ path: `proc://${id}/kill` }));
 			await manager.getJob(id)?.promise;
@@ -259,6 +315,56 @@ describe("proc:// background jobs", () => {
 			await manager.dispose();
 		}
 	});
+
+	it("keeps listing jobs and agents when the daemon broker hangs, flagging agents with no live turn", async () => {
+		const broker = vi.spyOn(daemonClient, "daemonClientForProject").mockResolvedValue({
+			request: async () => {
+				throw new Error("Daemon list request timed out");
+			},
+			onCompletion: () => () => {},
+		} as unknown as daemonClient.DaemonBrokerClient);
+		const manager = new AsyncJobManager({});
+		const blocked = Promise.withResolvers<string>();
+		manager.register(
+			"bash",
+			"long build",
+			async ({ signal }) => {
+				signal.addEventListener("abort", () => blocked.resolve("cancelled"), { once: true });
+				return blocked.promise;
+			},
+			{ id: "build-job", ownerId: "Main" },
+		);
+		const registry = new AgentRegistry();
+		// Claims `running` but no session is streaming: the run is over.
+		registry.register({ id: "Visuals", displayName: "Visuals", kind: "sub", parentId: "Main", session: null });
+		const session = toolSession(process.cwd(), manager, { launch: true });
+		session.agentRegistry = registry;
+		const proc = new ProcProtocolHandler();
+		try {
+			const list = await proc.resolve(parseInternalUrl("proc://"), { session });
+			expect(list.content).toContain("build-job [bash] running");
+			expect(list.content).toContain("Visuals [task] running up");
+			expect(list.content).toContain("no turn in flight");
+			expect(list.content).toContain("Services unavailable (daemon broker): Daemon list request timed out");
+			const single = await proc.resolve(parseInternalUrl("proc://Visuals"), { session });
+			expect(single.content).toContain("no turn in flight");
+			await expect(proc.resolve(parseInternalUrl("proc://web"), { session })).rejects.toThrow(
+				"services unavailable: Daemon list request timed out",
+			);
+			// The suggested kill works without the broker; service-only actions still surface its error.
+			const killed = await proc.write(parseInternalUrl("proc://Visuals/kill"), "", { session });
+			expect(killed.details?.proc).toMatchObject({ cancelled: [{ id: "Visuals", status: "cancelled" }] });
+			expect(registry.get("Visuals")).toBeUndefined();
+			const killedJob = await proc.write(parseInternalUrl("proc://build-job/kill"), "", { session });
+			expect(killedJob.details?.proc).toMatchObject({ cancelled: [{ id: "build-job", status: "cancelled" }] });
+			await expect(proc.write(parseInternalUrl("proc://web"), "go\n", { session })).rejects.toThrow(
+				"Daemon list request timed out",
+			);
+		} finally {
+			broker.mockRestore();
+			await manager.dispose();
+		}
+	});
 });
 
 describe("bash services via proc://", () => {
@@ -298,12 +404,12 @@ describe("bash services via proc://", () => {
 				{ id: "echo-service", ownerId: "Main" },
 			);
 			expect(collisionId).toBe("echo-service");
-			await expect(proc.resolve(parseInternalUrl("proc://echo-service"), { session })).rejects.toThrow(
+			expect(await rejectionMessage(proc.resolve(parseInternalUrl("proc://echo-service"), { session }))).toContain(
 				"both job echo-service and service echo-service",
 			);
-			await expect(proc.write(parseInternalUrl("proc://echo-service/kill"), "", { session })).rejects.toThrow(
-				"both job echo-service and service echo-service",
-			);
+			expect(
+				await rejectionMessage(proc.write(parseInternalUrl("proc://echo-service/kill"), "", { session })),
+			).toContain("both job echo-service and service echo-service");
 			manager.cancel(collisionId, { ownerId: "Main" });
 			await manager.getJob(collisionId)?.promise;
 			await manager.dispose({ timeoutMs: 1_000 });
@@ -341,23 +447,22 @@ describe("bash services via proc://", () => {
 			const persisted = await proc.write(parseInternalUrl("proc://echo-service/mode"), "persist", { session });
 			expect(persisted.content[0]?.type === "text" ? persisted.content[0].text : "").toContain("persistent");
 			expect(persisted.details?.proc).toMatchObject({ action: "mode", mode: "persist", daemon: { persist: true } });
-			const metadata: { spec: { persist: boolean } } = await Bun.file(
-				path.join(runtimeDir, "daemons", "echo-service", "meta.json"),
+			const spec: { persist: boolean } = await Bun.file(
+				path.join(runtimeDir, "daemons", "echo-service", "spec.json"),
 			).json();
-			expect(metadata.spec.persist).toBeTrue();
+			expect(spec.persist).toBeTrue();
 			const sessionMode = await proc.write(parseInternalUrl("proc://echo-service/mode"), "session", { session });
 			expect(sessionMode.content[0]?.type === "text" ? sessionMode.content[0].text : "").toContain("mode=session");
-			const sessionMetadata: { spec: { persist: boolean } } = await Bun.file(
-				path.join(runtimeDir, "daemons", "echo-service", "meta.json"),
+			const sessionSpec: { persist: boolean } = await Bun.file(
+				path.join(runtimeDir, "daemons", "echo-service", "spec.json"),
 			).json();
-			expect(sessionMetadata.spec.persist).toBeFalse();
+			expect(sessionSpec.persist).toBeFalse();
 			const restarted = await bash.execute("restart", {
 				command: "printf 'REPLACED\\n'; read line",
 				name: "echo-service",
 				ready: { log: "REPLACED", host: "", timeout: 5 },
 				pty: false,
 				async: false,
-				env: {},
 			});
 			expect(restarted.content[0]?.type === "text" ? restarted.content[0].text : "").toContain("REPLACED");
 			const write = new WriteTool(session);
@@ -374,13 +479,15 @@ describe("bash services via proc://", () => {
 			expect(detached.content[0]?.type === "text" ? detached.content[0].text : "").toContain("detached");
 			const detachedRead = await proc.resolve(parseInternalUrl("proc://detach-candidate"), { session });
 			expect(detachedRead.content).toContain("detached=true");
-			const detachedMetadata: { spec: { persist: boolean; detached: boolean; pty: boolean } } = await Bun.file(
-				path.join(runtimeDir, "daemons", "detach-candidate", "meta.json"),
+			const detachedSpec: { persist: boolean; detached: boolean; pty: boolean } = await Bun.file(
+				path.join(runtimeDir, "daemons", "detach-candidate", "spec.json"),
 			).json();
-			expect(detachedMetadata.spec).toMatchObject({ detached: true, persist: true, pty: false });
-			await expect(
-				proc.write(parseInternalUrl("proc://detach-candidate/mode"), "session", { session }),
-			).rejects.toThrow("must remain persistent");
+			expect(detachedSpec).toMatchObject({ detached: true, persist: true, pty: false });
+			expect(
+				await rejectionMessage(
+					proc.write(parseInternalUrl("proc://detach-candidate/mode"), "session", { session }),
+				),
+			).toContain("must remain persistent");
 			await proc.write(parseInternalUrl("proc://detach-candidate/kill"), "", { session });
 			await expect(bash.execute("invalid", { command: "true", name: "bad", async: true })).rejects.toThrow(
 				"does not accept async or timeout",
@@ -430,7 +537,6 @@ describe("bash services via proc://", () => {
 				async: false,
 				name: "",
 				ready: { log: "", port: 1, host: "", timeout: 1 },
-				env: {},
 			});
 			expect(materialized.details?.service).toBeUndefined();
 			expect(textOf(materialized)).toContain("PLAIN");
@@ -440,19 +546,11 @@ describe("bash services via proc://", () => {
 				command: "printf 'BLANK\\n'",
 				name: "   ",
 				ready: { log: "", host: "" },
-				env: {},
 			});
 			expect(blank.details?.service).toBeUndefined();
 			expect(textOf(blank)).not.toContain("Ignored");
 
-			const orphanEnv = await bash.execute("orphan-env", {
-				command: "printf 'ENV\\n'",
-				env: { SERVICE_ONLY: "1" },
-			});
-			expect(orphanEnv.details?.service).toBeUndefined();
-			expect(textOf(orphanEnv)).toContain("Ignored env");
-
-			expect(commands).toEqual(["printf 'PLAIN\\n'", "printf 'BLANK\\n'", "printf 'ENV\\n'"]);
+			expect(commands).toEqual(["printf 'PLAIN\\n'", "printf 'BLANK\\n'"]);
 		} finally {
 			spy.mockRestore();
 		}

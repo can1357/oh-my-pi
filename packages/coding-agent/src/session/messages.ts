@@ -86,6 +86,8 @@ export function logProviderTurnError(msg: AssistantMessage): void {
 
 const EPHEMERAL_REPLY_MAX_BYTES = 4096;
 const REPLAN_TITLE_CONTEXT_TURN_LIMIT = 6;
+/** Max chars kept from each anchored user request in the replan title context. */
+const REPLAN_TITLE_ANCHOR_CHARS = 400;
 
 /**
  * Removes replay-bound provider state before reparenting an assistant message
@@ -136,27 +138,51 @@ export function dedupeEphemeralReply(text: string): string {
 	return result;
 }
 
-/** Builds the recent user/assistant context supplied to title regeneration. */
+/**
+ * Builds the recent user/assistant context supplied to title regeneration.
+ * The session's opening request and the latest user request always lead the
+ * context: in a long tool loop the recent window is all assistant notes, and
+ * follow-ups ("fix all") rarely restate the goal, so without them title models
+ * name the current micro-step (a file or symbol) instead of the session goal.
+ */
 export function buildReplanTitleContext(messages: AgentMessage[]): string {
-	const turns: TitleConversationTurn[] = [];
-	for (let i = messages.length - 1; i >= 0 && turns.length < REPLAN_TITLE_CONTEXT_TURN_LIMIT; i--) {
+	const recent: TitleConversationTurn[] = [];
+	let i = messages.length - 1;
+	for (; i >= 0 && recent.length < REPLAN_TITLE_CONTEXT_TURN_LIMIT; i--) {
 		const message = messages[i];
 		if (!message) continue;
 		const turn = titleConversationTurnFromMessage(message);
-		if (turn) turns.push(turn);
+		if (turn) recent.push(turn);
 	}
-	turns.reverse();
-	return formatTitleConversationContext(turns);
+	recent.reverse();
+	// Earlier user turns outside the window, oldest first.
+	const earlierUsers: TitleConversationTurn[] = [];
+	for (let j = 0; j <= i; j++) {
+		const message = messages[j];
+		const turn = message && titleConversationTurnFromMessage(message);
+		if (turn?.role === "user") earlierUsers.push(turn);
+	}
+	const anchors: TitleConversationTurn[] = [];
+	const opening = earlierUsers[0];
+	if (opening) anchors.push(opening);
+	const latest = earlierUsers.at(-1);
+	if (latest && latest !== opening && !recent.some(turn => turn.role === "user")) anchors.push(latest);
+	// Bound anchors so a long pasted request cannot crowd the recent turns out
+	// of the shared truncation budget.
+	const bounded = anchors.map(turn => ({ ...turn, text: turn.text?.slice(0, REPLAN_TITLE_ANCHOR_CHARS) }));
+	return formatTitleConversationContext([...bounded, ...recent]);
 }
 
 /**
- * True when a settled assistant message contributes reply text or thinking to
- * {@link buildReplanTitleContext}. Deferred auto-titling waits for one before
- * retitling from conversation context; aborted/errored turns do not count.
+ * Words of thinking plus reply text a settled assistant message contributes to
+ * {@link buildReplanTitleContext}. Deferred auto-titling accumulates these and
+ * retitles once the assistant has said enough to reveal the task; aborted and
+ * errored turns count zero.
  */
-export function isTitleContextReply(message: AssistantMessage): boolean {
-	if (message.stopReason === "aborted" || message.stopReason === "error") return false;
-	return textFromContent(message.content) !== "" || thinkingFromContent(message.content) !== "";
+export function titleContextWordCount(message: AssistantMessage): number {
+	if (message.stopReason === "aborted" || message.stopReason === "error") return 0;
+	const text = `${thinkingFromContent(message.content)} ${textFromContent(message.content)}`;
+	return text.match(/\S+/g)?.length ?? 0;
 }
 
 /**

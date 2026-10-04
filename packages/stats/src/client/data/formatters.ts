@@ -1,18 +1,25 @@
 import { format, formatDistanceToNow } from "@oh-my-pi/pi-utils/dates";
 import type { MessageStats } from "../types";
 
+/**
+ * Every number on the dashboard uses one fixed locale. Labels, percents
+ * (`toFixed`), durations and dates are English, so following the browser
+ * locale mixed conventions (e.g. `1,4 Mr` beside `97.0%` on a tr-TR browser).
+ */
+const NUMBER_LOCALE = "en-US";
+
 export function formatInteger(value: number): string {
-	return value.toLocaleString();
+	return value.toLocaleString(NUMBER_LOCALE);
 }
 
 export function formatCompact(value: number): string {
-	return value.toLocaleString(undefined, { notation: "compact" });
+	return value.toLocaleString(NUMBER_LOCALE, { notation: "compact" });
 }
 
 export function formatCost(value: number, digits?: number): string {
 	if (value === 0) return "$0";
 	const fractionDigits = digits !== undefined ? digits : value > 0 && value < 0.01 ? 4 : 2;
-	return `$${value.toLocaleString(undefined, {
+	return `$${value.toLocaleString(NUMBER_LOCALE, {
 		minimumFractionDigits: fractionDigits,
 		maximumFractionDigits: fractionDigits,
 	})}`;
@@ -47,6 +54,13 @@ export function formatMessageCost(
 
 export function formatPercent(value: number, digits = 1): string {
 	return `${(value * 100).toFixed(digits)}%`;
+}
+
+/** Show small nonzero failure rates without rounding them to zero. */
+export function formatErrorRate(value: number): string {
+	const percent = value * 100;
+	if (percent > 0 && percent < 0.005) return "<0.01%";
+	return formatPercent(value, percent > 0 && percent < 0.1 ? 2 : 1);
 }
 
 export function formatDurationMs(value: number | null, digits?: number): string {

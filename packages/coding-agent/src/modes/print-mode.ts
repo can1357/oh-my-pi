@@ -14,7 +14,11 @@ import { type AgentSession, type AgentSessionEvent, SHUTDOWN_CONSOLIDATE_BUDGET_
 import { CREDENTIAL_DISABLED_NOTICE_SOURCE } from "../session/credential-disabled-notice";
 import { isSilentAbort } from "../session/messages";
 import { flushTelemetryExport } from "../telemetry-export";
-import { formatPersistenceDurabilityFailure, formatPersistenceFailure } from "./persistence-failure";
+import {
+	formatPersistenceDurabilityFailure,
+	formatPersistenceFailure,
+	formatPersistenceNotice,
+} from "./persistence-failure";
 import { initializeExtensions } from "./runtime-init";
 
 import { cfgPlanDefaultOnStartup, cfgPlanEnabled } from "../plan-mode/settings";
@@ -234,6 +238,9 @@ async function runPrintModeCore(
 		persistenceFailure = error;
 		writeStderrLine(formatPersistenceFailure(error.message));
 	});
+	session.sessionManager.onPersistenceNotice(notice => {
+		writeStderrLine(`Warning: ${formatPersistenceNotice(notice)}`);
+	});
 
 	const timeoutMs = resolveMCPTimeoutMs();
 	let strictMCPFailure = false;
@@ -335,10 +342,11 @@ async function runPrintModeCore(
 	// A turn-fatal exit cannot hold automation for the full normal drain budget.
 	if (!strictMCPFailure) {
 		// Print mode's drain budget covers a fallback-chain switch; the reviewer's
-		// verdict is the point of a headless advisor run, so wait through recovery.
+		// verdict is the point of a headless advisor run, so wait through recovery,
+		// and wait on `strict` reviewers past the budget like every primary boundary.
 		await session.waitForAdvisorCatchup(
 			terminalFailure ? PRINT_MODE_ERROR_ADVISOR_DRAIN_TIMEOUT_MS : PRINT_MODE_ADVISOR_DRAIN_TIMEOUT_MS,
-			{ waitThroughRecovery: true },
+			{ waitThroughRecovery: true, strictWithoutDeadline: true },
 		);
 	}
 	// Error spans must reach the exporter; the postmortem `exit` handler can't await.

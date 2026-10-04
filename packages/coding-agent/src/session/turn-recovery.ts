@@ -101,13 +101,26 @@ const HTTP2_STREAM_RESET_ERROR_RE =
 	/stream closed with error code\s+nghttp2_(?:internal_error|refused_stream)|nghttp2_(?:internal_error|refused_stream)|HTTP2(?:StreamReset|RefusedStream)/i;
 // Gateway/provider closes a stream mid-generation without its terminal chunk
 // (openai-completions "finish_reason", openai/azure responses "terminal
-// response event", Codex "terminal completion event"). Same transport-failure
-// class as the stall/reset entries: retriable, and eligible for preserved-turn
-// continuation on resolved tool turns.
+// response event", Codex "terminal completion event", Cursor "turnEnded" —
+// an HTTP/2 reset can settle as the stream end rather than the RST error).
+// Same transport-failure class as the stall/reset entries: retriable, and
+// eligible for preserved-turn continuation on resolved tool turns.
 const PREMATURE_STREAM_CLOSE_ERROR_RE =
-	/(?:stream closed before a (?:finish_reason|terminal response event)|Codex stream ended before terminal completion event)/i;
+	/(?:stream closed before a (?:finish_reason|terminal response event)|Codex stream ended before terminal completion event|Cursor stream ended before turnEnded)/i;
 const IMMUTABLE_ANTHROPIC_THINKING_ERROR_PATTERN =
 	/messages\.\d+\.content\.\d+.*\b(?:thinking|redacted_thinking)\b.*\blatest assistant message cannot be modified\b/is;
+
+/**
+ * Bare abort sentinels with no provider reason: our own `"Request was aborted"`
+ * plus Node/Bun `AbortError`s (`"The operation was aborted"`) surfaced by
+ * transports when an internal (non-caller) abort fires.
+ */
+const GENERIC_ABORT_MESSAGES: Record<string, true> = {
+	"Request was aborted": true,
+	"Request was aborted.": true,
+	"The operation was aborted": true,
+	"The operation was aborted.": true,
+};
 
 function hasNonWhitespace(value: string): boolean {
 	return NON_WHITESPACE_RE.test(value);
@@ -182,7 +195,6 @@ function toolReplayStart(messages: readonly AgentMessage[]): number | undefined 
 
 /** Result shape shared with automatic maintenance recovery. */
 export interface RecoveryCompactionResult {
-	deferredHandoff: boolean;
 	continuationScheduled: boolean;
 	automaticContinuationBlocked?: boolean;
 	historyRewritten?: boolean;
@@ -247,8 +259,6 @@ export interface TurnRecoveryHost {
 	runAutoCompaction(
 		reason: "overflow" | "threshold" | "idle" | "incomplete",
 		willRetry: boolean,
-		deferred?: boolean,
-		allowDefer?: boolean,
 		options?: {
 			autoContinue?: boolean;
 			triggerContextTokens?: number;
@@ -690,10 +700,9 @@ export class TurnRecovery {
 	runRecoveryCompactionWithRollback(
 		reason: "overflow" | "incomplete",
 		message: AssistantMessage,
-		allowDefer: boolean,
 		options: { autoContinue: boolean; triggerContextTokens?: number; excludeMediaMethods?: boolean },
 	): Promise<RecoveryCompactionResult> {
-		return this.#runRecoveryCompactionWithRollback(reason, message, allowDefer, options);
+		return this.#runRecoveryCompactionWithRollback(reason, message, options);
 	}
 
 	/**
@@ -1182,12 +1191,11 @@ export class TurnRecovery {
 	async #runRecoveryCompactionWithRollback(
 		reason: "overflow" | "incomplete",
 		assistantMessage: AssistantMessage,
-		allowDefer: boolean,
 		options: { autoContinue: boolean; triggerContextTokens?: number; excludeMediaMethods?: boolean },
 	): Promise<RecoveryCompactionResult> {
 		const compactionEntryBefore = getLatestCompactionEntry(this.#host.sessionManager.getBranch());
 		await this.dropPersistedAssistantTurn(assistantMessage);
-		const result = await this.#host.runAutoCompaction(reason, true, false, allowDefer, {
+		const result = await this.#host.runAutoCompaction(reason, true, {
 			autoContinue: options.autoContinue,
 			triggerContextTokens: options.triggerContextTokens,
 			phase: "mid_turn",
@@ -1351,7 +1359,7 @@ export class TurnRecovery {
 
 		const id = this.#classifyRetryMessage(message);
 		if (message.stopReason === "aborted" && AIError.is(id, AIError.Flag.Abort)) return true;
-		if (message.errorMessage !== "Request was aborted" && message.errorMessage !== "Request was aborted.") {
+		if (message.errorMessage === undefined || !Object.hasOwn(GENERIC_ABORT_MESSAGES, message.errorMessage)) {
 			return false;
 		}
 
@@ -1505,7 +1513,7 @@ export class TurnRecovery {
 	classifyResolvedInterruptedToolTurn(message: AssistantMessage): "reasonless-abort" | "stream-stall" | undefined {
 		const id = this.#classifyRetryMessage(message);
 		const genericAbort =
-			message.errorMessage === "Request was aborted" || message.errorMessage === "Request was aborted.";
+			message.errorMessage !== undefined && Object.hasOwn(GENERIC_ABORT_MESSAGES, message.errorMessage);
 		const reasonlessAbort =
 			(message.stopReason === "aborted" || message.stopReason === "error") &&
 			!this.#host.abortInProgress() &&
@@ -1606,6 +1614,29 @@ export class TurnRecovery {
 				message.model === "grok-4.6" &&
 				message.api === "openai-responses" &&
 				/OpenAI responses stream closed before a terminal response event was received/i.test(errorMessage))
+		);
+	}
+	/**
+	 * First-attempt mid-stream socket drop with streamed progress: the transport
+	 * died after the model had already emitted reasoning or tool calls, so the
+	 * failure says nothing about model health — retry the same model once before
+	 * consulting the fallback chain. A drop with no streamed content keeps the
+	 * immediate fallback (a different route may genuinely help), as do later
+	 * attempts. Never applies once the retry budget is spent (e.g.
+	 * `retry.maxRetries: 0`): there is no same-model retry left, so the
+	 * fallback-chain consult is the only recovery. Mirrors the stall handler's
+	 * socket check, extended to turns with tool calls.
+	 */
+	#isFirstAttemptMidStreamSocketDrop(message: AssistantMessage, id: number, retryBudgetExhausted: boolean): boolean {
+		if (this.#retryAttempt !== 1 || retryBudgetExhausted) return false;
+		if (message.stopReason !== "error" || !AIError.retriable(id)) return false;
+		if (this.#host.streamingEditAbortTriggered()) return false;
+		if (!isUnexpectedSocketCloseMessage(message.errorMessage ?? "")) return false;
+		return message.content.some(
+			block =>
+				(block.type === "thinking" && block.thinking.trim().length > 0) ||
+				block.type === "toolCall" ||
+				(block.type === "text" && block.text.trim().length > 0),
 		);
 	}
 
@@ -2602,7 +2633,8 @@ export class TurnRecovery {
 				retrySettings.modelFallback &&
 				!thinkingLoop &&
 				!waitForSiblingCredential &&
-				!(retryBudgetExhausted && classifierRefusal)
+				!(retryBudgetExhausted && classifierRefusal) &&
+				!this.#isFirstAttemptMidStreamSocketDrop(message, id, retryBudgetExhausted)
 			) {
 				if (!classifierRefusal) {
 					this.noteRetryFallbackCooldown(currentSelector, parsedRetryAfterMs, errorMessage);

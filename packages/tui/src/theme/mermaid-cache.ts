@@ -1,4 +1,5 @@
 import type { MermaidRenderOptions } from "@oh-my-pi/pi-natives";
+import { LRUCache } from "@oh-my-pi/pi-utils/lru";
 import * as mermaidAscii from "@oh-my-pi/pi-utils/mermaid-ascii";
 
 /**
@@ -19,7 +20,15 @@ export interface MermaidResolveOptions extends MermaidRenderOptions {
 // Memoizes rendered ASCII (and failures) keyed on the render options + the
 // layout-direction variant + source. Width selection happens per call against
 // the cached renders, so a terminal resize re-decides without re-rendering.
-const cache = new Map<string, string | null>();
+// Bounded by entry count and by UTF-16 length of key (which embeds the whole
+// source) plus rendered ASCII, so long sessions cannot pin every diagram.
+const MERMAID_CACHE_MAX = 256;
+const MERMAID_CACHE_MAX_SIZE = 4 * 1024 * 1024;
+const cache = new LRUCache<string, string | null>({
+	max: MERMAID_CACHE_MAX,
+	maxSize: MERMAID_CACHE_MAX_SIZE,
+	sizeCalculation: (ascii, key) => key.length + (ascii?.length ?? 0),
+});
 
 /** Display columns, ignoring ANSI so themed diagrams are measured as drawn. */
 const DISPLAY_WIDTH = { countAnsiEscapeCodes: false } as const;

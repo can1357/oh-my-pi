@@ -16,7 +16,9 @@ import {
 	clearClaudePluginRootsCache,
 	listClaudePluginRoots,
 	resolveActiveProjectRegistryPath,
+	resolveOrDefaultProjectRegistryPath,
 } from "@oh-my-pi/pi-coding-agent/discovery/helpers";
+import { MarketplaceManager } from "@oh-my-pi/pi-coding-agent/extensibility/plugins/marketplace/manager";
 import type { InstalledPluginEntry } from "@oh-my-pi/pi-coding-agent/extensibility/plugins/marketplace";
 import {
 	addInstalledPlugin,
@@ -127,6 +129,66 @@ describe("resolveActiveProjectRegistryPath", () => {
 
 		expect(fromRoot).not.toBeNull();
 		expect(fromRoot).toBe(fromSrc);
+	});
+
+	it("keeps a user plugin in user scope with trailing-slash or symlinked home", async () => {
+		const home = path.join(tmpDir, "home");
+		const cwd = path.join(home, "work");
+		const link = path.join(tmpDir, "home-link");
+		const registryPath = path.join(home, ".omp", "plugins", "installed_plugins.json");
+		fs.mkdirSync(cwd, { recursive: true });
+		fs.mkdirSync(path.dirname(registryPath), { recursive: true });
+		fs.symlinkSync(home, link, "dir");
+		await writeInstalledPluginsRegistry(registryPath, {
+			version: 2,
+			plugins: { "sample@local": [makeEntry(path.join(tmpDir, "sample"))] },
+		});
+
+		for (const alias of [`${home}${path.sep}`, link]) {
+			vi.spyOn(os, "homedir").mockReturnValue(alias);
+			expect(await resolveActiveProjectRegistryPath(cwd)).toBeNull();
+			const projectPath = await resolveOrDefaultProjectRegistryPath(cwd);
+			const manager = new MarketplaceManager({
+				marketplacesRegistryPath: path.join(home, ".omp", "plugins", "marketplaces.json"),
+				installedRegistryPath: registryPath,
+				projectInstalledRegistryPath: projectPath,
+				marketplacesCacheDir: path.join(tmpDir, "marketplaces"),
+				pluginsCacheDir: path.join(tmpDir, "plugins"),
+			});
+			expect((await manager.listInstalledPlugins()).map(({ scope }) => scope)).toEqual(["user"]);
+			await manager.uninstallPlugin("sample@local", undefined, { dryRun: true });
+			expect(await resolveOrDefaultProjectRegistryPath(home)).toBeUndefined();
+		}
+	});
+
+	it("does not use an aliased user config as a project registry even at a git root", async () => {
+		const home = path.join(tmpDir, "home");
+		const project = path.join(home, "work");
+		fs.mkdirSync(path.join(home, ".omp"), { recursive: true });
+		fs.mkdirSync(path.join(project, ".git"), { recursive: true });
+		fs.symlinkSync(path.join(home, ".omp"), path.join(project, ".omp"), "dir");
+		vi.spyOn(os, "homedir").mockReturnValue(home);
+
+		expect(await resolveActiveProjectRegistryPath(project)).toBeNull();
+		expect(await resolveOrDefaultProjectRegistryPath(project)).toBeUndefined();
+	});
+
+	it("keeps a custom-home plugin in user scope during discovery", async () => {
+		const home = path.join(tmpDir, "sdk-home");
+		const cwd = path.join(home, "work");
+		const registryPath = path.join(home, ".omp", "plugins", "installed_plugins.json");
+		fs.mkdirSync(cwd, { recursive: true });
+		await writeInstalledPluginsRegistry(registryPath, {
+			version: 2,
+			plugins: { "sample@local": [makeEntry(path.join(tmpDir, "sample"))] },
+		});
+
+		try {
+			const { roots } = await listClaudePluginRoots(home, cwd);
+			expect(roots.filter(root => root.id === "sample@local").map(root => root.scope)).toEqual(["user"]);
+		} finally {
+			clearClaudePluginRootsCache();
+		}
 	});
 });
 

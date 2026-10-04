@@ -4,12 +4,16 @@ import { type Component, Container, Text } from "../index";
 import type { Theme } from "../theme/theme";
 import { replaceTabs } from "../render/render-utils";
 import type { RenderResultOptions, ToolActivitySummary, ToolRenderer } from "./renderer";
-import { renderDefaultToolExecution } from "./default-renderer";
+import { describeDefaultToolExecution, renderDefaultToolExecution } from "./default-renderer";
+import type { NativeToolView } from "./renderer";
+import { text } from "../native/describe";
 import { parseMCPToolName } from "./mcp";
 
 /** Mounted device display callbacks, independent of tool execution state. */
 export interface XdevMountedRenderer {
 	label?: string;
+	describeCall?: ToolRenderer["describeCall"];
+	describeResult?: ToolRenderer["describeResult"];
 	renderCall?(...args: Parameters<ToolRenderer["renderCall"]>): unknown;
 	renderResult?(...args: Parameters<ToolRenderer["renderResult"]>): unknown;
 	mergeCallAndResult?: boolean;
@@ -160,6 +164,65 @@ export function renderXdevCall(
 		return isComponent(rendered) ? rendered : undefined;
 	}
 	return renderDefaultToolExecution({ label: mounted?.label ?? name, args, options }, theme);
+}
+
+/** Native form of {@link resolveDeviceRenderer}: the first renderer that can describe. */
+function resolveDeviceDescriber(
+	name: string,
+	mounted: XdevMountedRenderer | undefined,
+): XdevMountedRenderer | undefined {
+	if (mounted && (mounted.describeCall || mounted.describeResult)) return mounted;
+	return rendererLookup?.(name);
+}
+
+/** TSP call view for an `xd://` write: queued card until execution, then the device renderer's own view. */
+export function describeXdevCall(
+	name: string,
+	content: unknown,
+	options: RenderResultOptions,
+	resolveMounted?: (name: string) => XdevMountedRenderer | undefined,
+): NativeToolView | undefined {
+	const mounted = resolveMounted?.(name);
+	const args = decodeInnerArgs(content);
+	if (!options.executionStarted) {
+		return describeDefaultToolExecution({
+			label: `queued ${displayDeviceLabel(name, mounted)}`,
+			args: displayDeviceArgs(args),
+			options: { ...options, isPartial: true, spinnerFrame: undefined },
+		});
+	}
+	const renderer = resolveDeviceDescriber(name, mounted);
+	if (renderer?.describeCall) return renderer.describeCall(args, options);
+	return describeDefaultToolExecution({ label: mounted?.label ?? name, args, options });
+}
+
+/** TSP result view for an `xd://` dispatch, forwarded to the device renderer. */
+export function describeXdevResult(
+	dispatch: XdevRenderDispatch,
+	result: { content: Array<{ type: string; text?: string }>; isError?: boolean },
+	options: RenderResultOptions,
+	resolveMounted?: (name: string) => XdevMountedRenderer | undefined,
+): NativeToolView | undefined {
+	const output = result.content
+		.map(block => (block.type === "text" ? block.text : ""))
+		.filter(Boolean)
+		.join("\n");
+	if (dispatch.mode === "help") return output ? { body: [text(output, { wrap: "word" })] } : undefined;
+	const mounted = resolveMounted?.(dispatch.tool);
+	const renderer = resolveDeviceDescriber(dispatch.tool, mounted);
+	if (renderer?.describeResult) {
+		const innerResult = { content: result.content, details: dispatch.inner, isError: result.isError };
+		const view = renderer.describeResult(innerResult, options, dispatch.args ?? {});
+		if (!view || renderer.mergeCallAndResult || !renderer.describeCall) return view;
+		const call = renderer.describeCall(dispatch.args ?? {}, { ...options, isPartial: false });
+		return { ...view, head: view.head ?? call?.head, body: [...(call?.body ?? []), ...(view.body ?? [])] };
+	}
+	return describeDefaultToolExecution({
+		label: mounted?.label ?? dispatch.tool,
+		args: dispatch.args ?? {},
+		result: { output, isError: result.isError },
+		options,
+	});
 }
 
 /** Forward an `xd://` dispatch result to the mounted tool's renderer. */

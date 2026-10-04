@@ -144,6 +144,7 @@ async function loadSkills(ctx: LoadContext): Promise<LoadResult<Skill>> {
 						providerId: PROVIDER_ID,
 						level: root.level,
 						requireDescription: true,
+						pluginName: root.name,
 						// A manifest entry may point directly at a skill directory rather
 						// than a collection root (issue: PR #9379 review) — scan it the
 						// same way the Claude-manifest loader does.

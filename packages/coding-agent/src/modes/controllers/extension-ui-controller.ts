@@ -19,13 +19,19 @@ import type {
 	ExtensionUiComponent,
 	ExtensionWidgetContent,
 	ExtensionWidgetOptions,
+	SendMessageHandler,
 	TerminalInputHandler,
 } from "../../extensibility/extensions";
 import { getSessionSlashCommands } from "../../extensibility/extensions/get-commands-handler";
-import { AskDialogComponent, boundPromptTitle, normalizeDialogQuestions } from "@oh-my-pi/pi-tui/overlays/ask-dialog";
+import {
+	type AskDialogPrompt,
+	type AskDialogPromptValue,
+	AskDialogComponent,
+	normalizeDialogQuestions,
+} from "@oh-my-pi/pi-tui/overlays/ask-dialog";
 import { installExtensionComposerShape } from "@oh-my-pi/pi-tui/overlays/composer-shape-registry";
 import { EditorTopGap } from "@oh-my-pi/pi-tui/prompt/editor-top-gap";
-import { HookEditorComponent } from "@oh-my-pi/pi-tui/overlays/hook-editor";
+import { boundPromptTitle, HookEditorComponent, type HookEditorOptions } from "@oh-my-pi/pi-tui/overlays/hook-editor";
 import { HookInputComponent } from "@oh-my-pi/pi-tui/overlays/hook-input";
 import { HookSelectorComponent, type HookSelectorSlider } from "@oh-my-pi/pi-tui/overlays/hook-selector";
 import { getAvailableThemesWithPaths, getThemeByName, setTheme, type Theme, theme } from "@oh-my-pi/pi-tui/theme";
@@ -187,6 +193,7 @@ export class ExtensionUiController {
 		// caller issues the first prompt (PR #9379 review).
 		const actions: ExtensionActions = {
 			sendMessage: (message, options) => {
+				if (this.#extensionMessageStartsTurn(options) && this.#rejectGuestExtensionTurn()) return;
 				const wasStreaming = this.ctx.session.isStreaming;
 				const normalized = normalizeCustomMessagePayload(message);
 				const sendTask = extensionRunner.sends.dispatch(() =>
@@ -202,6 +209,7 @@ export class ExtensionUiController {
 				extensionRunner.sends.track(trackedSend);
 			},
 			sendUserMessage: (content, options) => {
+				if (this.#rejectGuestExtensionTurn()) return;
 				const sendTask = extensionRunner.sends.dispatch(() => this.ctx.session.sendUserMessage(content, options));
 				const trackedSend = sendTask.catch((err: unknown) => {
 					this.ctx.showError(
@@ -446,6 +454,7 @@ export class ExtensionUiController {
 		// discovery round (`refreshSkills`) holds and drains these sends too.
 		const actions: ExtensionActions = {
 			sendMessage: (message, options) => {
+				if (this.#extensionMessageStartsTurn(options) && this.#rejectGuestExtensionTurn()) return;
 				const wasStreaming = this.ctx.session.isStreaming;
 				const normalized = normalizeCustomMessagePayload(message);
 				const trackedSend = extensionRunner.sends
@@ -458,6 +467,7 @@ export class ExtensionUiController {
 				extensionRunner.sends.track(trackedSend);
 			},
 			sendUserMessage: (content, options) => {
+				if (this.#rejectGuestExtensionTurn()) return;
 				const trackedSend = extensionRunner.sends
 					.dispatch(() => this.ctx.session.sendUserMessage(content, options))
 					.catch((err: unknown) => {
@@ -701,7 +711,7 @@ export class ExtensionUiController {
 	): Promise<ExtensionAskDialogResult | undefined> {
 		return this.#presentDialog<ExtensionAskDialogResult>(dialogOptions?.signal, settle => {
 			let promptEditor: HookEditorComponent | undefined;
-			let promptResolve: ((value: string | undefined) => void) | undefined;
+			let promptResolve: ((value: AskDialogPromptValue | undefined) => void) | undefined;
 			let closed = false;
 			const draftEditor = this.ctx.editor;
 			const inputGuard =
@@ -731,7 +741,7 @@ export class ExtensionUiController {
 				this.ctx.ui.requestRender();
 			};
 
-			const finishPrompt = (value: string | undefined): void => {
+			const finishPrompt = (value: AskDialogPromptValue | undefined): void => {
 				const resolvePrompt = promptResolve;
 				promptResolve = undefined;
 				promptEditor?.dispose();
@@ -741,27 +751,51 @@ export class ExtensionUiController {
 				// making the dialog visible and interactive again. This single-hop
 				// deferral relies on #promptForCustomInput/#promptForNote clearing
 				// #promptActive in the synchronous resume after their lone
-				// `await onPrompt(...)` (no await before the `finally`); adding one
+				// `await this.#openPrompt(...)` (no await before the `finally`); adding one
 				// there reopens the drop-Enter race, so revisit this deferral then.
 				queueMicrotask(restoreAskDialog);
 			};
 
-			const promptForText = (title: string, prefill?: string): Promise<string | undefined> => {
-				if (closed) return Promise.resolve(undefined);
-				const { promise, resolve } = Promise.withResolvers<string | undefined>();
-				promptResolve = resolve;
+			const openPrompt = (
+				prompt: AskDialogPrompt,
+				prefill: string | undefined,
+				options: HookEditorOptions,
+			): void => {
 				promptEditor = new HookEditorComponent(
 					this.ctx.ui,
-					title,
+					prompt.title,
 					prefill,
-					value => finishPrompt(value),
+					(text, images) => finishPrompt({ text, images }),
 					() => finishPrompt(undefined),
-					{ promptStyle: true, externalEditor: editDialogExternally },
+					{ promptStyle: true, externalEditor: editDialogExternally, question: prompt.question, ...options },
 				);
 				this.ctx.editorContainer.clear();
 				this.ctx.editorContainer.addChild(promptEditor);
 				this.ctx.ui.setFocus(promptEditor);
 				this.ctx.ui.requestRender();
+			};
+
+			const promptForText = (prompt: AskDialogPrompt, prefill?: string): Promise<string | undefined> => {
+				if (closed) return Promise.resolve(undefined);
+				const { promise, resolve } = Promise.withResolvers<string | undefined>();
+				promptResolve = value => resolve(value?.text);
+				openPrompt(prompt, prefill, {});
+				return promise;
+			};
+
+			const promptWithImages = (
+				prompt: AskDialogPrompt,
+				prefill: AskDialogPromptValue | undefined,
+			): Promise<AskDialogPromptValue | undefined> => {
+				if (closed) return Promise.resolve(undefined);
+				const { promise, resolve } = Promise.withResolvers<AskDialogPromptValue | undefined>();
+				promptResolve = resolve;
+				openPrompt(prompt, prefill?.text, {
+					acceptImages: true,
+					images: prefill?.images,
+					onPasteImage: () => this.ctx.handleImagePaste(),
+					onPasteImagePath: path => this.ctx.handleImagePathPaste(path),
+				});
 				return promise;
 			};
 
@@ -771,6 +805,7 @@ export class ExtensionUiController {
 					onSubmit: result => settle(result),
 					onCancel: () => settle(undefined),
 					onPrompt: promptForText,
+					onImagePrompt: dialogOptions?.acceptImages ? promptWithImages : undefined,
 				},
 				{
 					timeout: dialogOptions?.timeout,
@@ -1286,6 +1321,28 @@ export class ExtensionUiController {
 
 	async #updateSessionName(name: string): Promise<void> {
 		await this.ctx.sessionManager.setSessionName(name, "user");
+	}
+
+	/**
+	 * Collab guest: the replica session only mirrors the host, and mirrored host
+	 * lifecycle events (`agent_end`, `turn_end`, …) reach guest extensions. An
+	 * extension reacting to them must not start or queue a turn on the replica —
+	 * it would run on the guest's local model and diverge from the host. Refuse
+	 * like typed prompts are refused (input-controller); true when dropped.
+	 */
+	#rejectGuestExtensionTurn(): boolean {
+		if (!this.ctx.collabGuest) return false;
+		this.ctx.showStatus("Extension-initiated turns are host-only during a collab session");
+		return true;
+	}
+
+	#extensionMessageStartsTurn(options: Parameters<SendMessageHandler>[1]): boolean {
+		return (
+			options?.triggerTurn === true ||
+			options?.deliverAs === "steer" ||
+			options?.deliverAs === "followUp" ||
+			options?.deliverAs === "aside"
+		);
 	}
 
 	#applyCustomMessageDisplay(wasStreaming: boolean, shouldDisplay: boolean | undefined): void {

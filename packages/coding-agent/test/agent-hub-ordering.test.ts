@@ -1020,6 +1020,8 @@ describe("Agent hub row ordering", () => {
 		}
 	});
 	it("keeps tree rails continuous across task and metrics rows", () => {
+		// Equal activity timestamps keep the sibling order used by the rail assertions deterministic.
+		setSystemTime(1_000);
 		geometry = stubStdoutGeometry(120);
 		geometry.setRows(32);
 		const agents = new AgentRegistry();

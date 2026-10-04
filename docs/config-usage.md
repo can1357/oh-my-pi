@@ -19,7 +19,6 @@ Key integration points:
 - `packages/coding-agent/src/capability/index.ts`
 - `packages/coding-agent/src/discovery/index.ts`
 - `packages/coding-agent/src/extensibility/skills.ts`
-- `packages/coding-agent/src/extensibility/hooks/loader.ts`
 - `packages/coding-agent/src/extensibility/custom-tools/loader.ts`
 - `packages/coding-agent/src/extensibility/extensions/loader.ts`
 
@@ -61,7 +60,7 @@ Key integration points:
 User-level bases:
 
 - OMP native: `~/<PI_CONFIG_DIR>/agent` (normally `~/.omp/agent`; a named profile changes this as described below)
-- `~/.claude`
+- Claude's active config directory (`~/.claude` by default; `CLAUDE_CONFIG_DIR` overrides it)
 - `~/.codex`
 - `~/.gemini`
 
@@ -110,6 +109,8 @@ Options:
 
 This API is used for directory-based config lookups (commands, hooks, tools, agents, etc.).
 
+Disabled foreign user sources (`isUserSourceEnabled`) are omitted from the user entries; project entries are not filtered by this helper. Claude user paths honor `CLAUDE_CONFIG_DIR` (trimmed and resolved relative to the process working directory).
+
 ## `findConfigFile(subpath, options)` / `findConfigFileWithMeta(...)`
 
 Searches for the first existing file across ordered bases, returns first match (path-only or path+metadata).
@@ -134,6 +135,8 @@ Supported formats:
 Behavior:
 
 - Validates parsed data against a provided omptype schema.
+- A `.yml` target falls back to its sibling `.yaml` when `.yml` is absent; an existing `.yaml` also suppresses JSON migration. A `.yaml` target does not fall back to `.yml`.
+- Both `.json` and `.jsonc` are parsed as JSONC.
 - Caches load result until `invalidate()`.
 - Returns tri-state result via `tryLoad()`:
   - `ok`
@@ -161,7 +164,7 @@ Each setting is declared once with `register({ id, type, default, env?, protocol
 - `cfgX.provenance(scope)` — layer supplying the value: `"env" | "runtime" | "overlay" | "project" | "global" | "default"`.
 - `cfgX.layered(scope)` — the value from the settings layers alone, ignoring the environment variable (what the settings panel shows and edits).
 
-A configured value that does not fit the declared type (or enum values) is ignored with a warning and the default is used; a definition's `validate` rejects malformed values on load, on every reload, and before every write. A keep-last-good watcher reload, and a save that merges external edits to `config.yml`, keep only the invalid file's layer at its last good values (the warning names the file) while the other layers still refresh. A configured `null` counts as unset everywhere.
+A configured value that does not fit the declared type (or enum values) is ignored with a warning and the default is used; a definition's `validate` rejects malformed values on load, on every reload, and before every write. A keep-last-good watcher reload, and a save that merges external edits to `config.yml`, keep only the invalid file's layer at its last good values (the warning names the file) while the other layers still refresh. A configured `null` generally counts as unset. Record entries such as model roles and model presets can use `null` in runtime or overlay layers as tombstones that hide lower-layer entries; project/global null entries remain unset.
 
 ### Layers (`src/config/settings.ts`)
 
@@ -182,7 +185,7 @@ Definitions with `protocolDefault: ["rpc", "acp"]` make RPC/ACP hosts start from
 
 Subagents receive `parent.overlay(overrides)`: reads fall through to the parent live, while the overrides and any later writes stay in the child and are never persisted.
 
-Project settings and config overlays are read-only from the settings API.
+Generic setting-handle writes target the global layer; config overlays are read-only. Model roles have explicit project-write APIs: `setProjectModelRole()` / `clearProjectModelRole()` update the project layer and persist only the changed roles to `<cwd>/.omp/config.yml`. If an existing runtime override would shadow the role, setting a project role temporarily replaces it; clearing removes that runtime slot. The original override is captured for restoration when changing project scope.
 
 ### Settings load failures
 
@@ -224,8 +227,8 @@ Providers are sorted by numeric priority (higher first). Full set:
 - Cline: `40`
 - GitHub Copilot: `30`
 - VS Code: `20`
-- agents-md (`AGENTS.md` files): `10`
-- mcp-json / ssh-json: `5`
+- agents-md (`AGENTS.md` files) / claude-md (standalone `CLAUDE.md` files): `10`
+- mcp-json / ssh-json / managed-skills (auto-learn): `5`
 - Built-in default rules (`builtin-defaults`): `1`
 
 ```text
@@ -243,8 +246,9 @@ cursor / windsurf       priority  50
 cline                   priority  40
 github                  priority  30
 vscode                  priority  20
-agents-md               priority  10
-mcp-json / ssh-json     priority   5
+agents-md / claude-md   priority  10
+mcp-json / ssh-json /
+  managed-skills        priority   5
 builtin-defaults        priority   1
 ```
 
@@ -277,12 +281,13 @@ Native provider (`id: native`) reads native config from:
 
 - Slash commands, directory rules, prompts, instructions, hooks, tools, extensions, extension modules, and settings use a project/user root only when the root directory exists and is non-empty.
 - Skills scan `<ancestor>/.omp/skills` for each ancestor from the current working directory up to the repo root/home boundary, plus `~/.omp/agent/skills`, without requiring the root `.omp` directory itself to be non-empty.
-- `SYSTEM.md`, `RULES.md`, and `.omp/AGENTS.md` read user-level files directly and use the nearest non-empty ancestor `.omp` directory for project files. `RULES.md` becomes an always-apply sticky rule. See [`docs/system-prompt-customization.md`](./system-prompt-customization.md) for the full `SYSTEM.md` / `APPEND_SYSTEM.md` contract.
+- `SYSTEM.md`, `SYSTEM_TEMPLATE.md`, `RULES.md`, and `.omp/AGENTS.md` read user-level files directly and use the nearest non-empty ancestor `.omp` directory for project files. Project system-prompt entries load before user entries. `RULES.md` becomes an always-apply sticky rule. See [`docs/system-prompt-customization.md`](./system-prompt-customization.md) for the full `SYSTEM.md` / `APPEND_SYSTEM.md` contract.
 - MCP does not use the non-empty-root admission helper. It reads project `.omp/mcp.json` then `.omp/.mcp.json`, followed by user `mcp.json` then `.mcp.json`, directly.
 
 ### Scope-specific loading
 
 - Skills: `<ancestor>/.omp/skills/*/SKILL.md` and `~/.omp/agent/skills/*/SKILL.md`
+- Managed skills: `~/.omp/agent/managed-skills/*/SKILL.md`, through a separate priority-5 provider; authored skills from any other provider win name collisions. Discovery is unconditional; `autolearn.enabled` gates writing/nudging, not loading.
 - Slash commands: `commands/*.md`
 - Rules: `rules/*.{md,mdc}` plus top-level `RULES.md`
 - Prompts: `prompts/*.md`
@@ -296,7 +301,7 @@ Native provider (`id: native`) reads native config from:
 
 ### Nearest-project lookup nuance
 
-For `SYSTEM.md`, `RULES.md`, and `.omp/AGENTS.md`, the native provider walks upward to the nearest non-empty project `.omp` directory.
+For `SYSTEM.md`, `SYSTEM_TEMPLATE.md`, `RULES.md`, and `.omp/AGENTS.md`, the native provider walks upward to the nearest non-empty project `.omp` directory.
 
 ## 7) How major subsystems consume config
 
@@ -327,8 +332,8 @@ Generate a session name using lowercase `<type>:<primary-objective>`.
 
 ## Hooks subsystem
 
-- `discoverAndLoadHooks()` resolves hook paths from hook capability + explicit configured paths.
-- Then loads modules via Bun import.
+- `discoverExtensionPaths()` (in `extensibility/extensions/loader.ts`) appends `.ts`/`.js` hook paths from the hook capability to the extension module list.
+- Those modules then load and run through the extension loader and runner, like any other extension.
 
 ## Tools subsystem
 

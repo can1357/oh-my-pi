@@ -188,6 +188,12 @@ export interface InstallOptions {
 	force?: boolean;
 	/** Preview changes without applying */
 	dryRun?: boolean;
+	/**
+	 * Runtime state to keep instead of the fresh-install default (enabled, default
+	 * features). Used by upgrades so the lock file is written once, inside the
+	 * install's rollback scope. Features no longer offered by the new version drop out.
+	 */
+	preserveState?: Pick<PluginRuntimeState, "enabled" | "enabledFeatures">;
 }
 
 export interface DoctorOptions {

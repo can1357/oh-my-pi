@@ -87,5 +87,15 @@
 		"pageBg": "#F2F7FA",
 		"cardBg": "#FAFDFF",
 		"infoBg": "#E6EFF4"
+	},
+	"terminal": {
+		"background": "glacierBg",
+		"foreground": "#1f303b",
+		"chrome": "glacierPanel",
+		"widget": "glacierSurface",
+		"ansi": [
+			"#1f303b", "errorRed", "#408c58", "#a47405", "crevasseBlue", "#8e5b99", "#238994", "glacierBorder",
+			"dimText", "#dd6660", "#459b61", "#b68105", "frostBlue", "#b076bd", "#2499a5", "glacierSurface"
+		]
 	}
 }

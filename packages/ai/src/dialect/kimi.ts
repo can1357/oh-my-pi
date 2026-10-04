@@ -1,5 +1,5 @@
-import { parseJsonWithRepair } from "@oh-my-pi/pi-utils";
 import type { Message, ToolCall } from "../types";
+import { parseToolCallArguments } from "../utils/tool-call-arguments";
 import { asRecord, normalizeKimiFunctionName, partialSuffixOverlapAny } from "./coercion";
 import dialectPrompt from "./kimi.md" with { type: "text" };
 import { assistantTranscriptParts, collectToolResultRun, messageContentText, stringifyJson } from "./rendering";
@@ -212,11 +212,7 @@ export class KimiInbandScanner implements InbandScanner {
 
 	#parseArgs(rawArgs: string): Record<string, unknown> {
 		if (rawArgs.length === 0) return {};
-		try {
-			return asRecord(parseJsonWithRepair<unknown>(rawArgs));
-		} catch {
-			return {};
-		}
+		return asRecord(parseToolCallArguments(rawArgs));
 	}
 
 	#nextTokenIndex(): number {

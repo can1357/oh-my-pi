@@ -1,5 +1,6 @@
 import { parseJsonWithRepair, parseStreamingJson } from "@oh-my-pi/pi-utils";
 import type { Message, ToolCall } from "../types";
+import { parseToolCallArguments } from "../utils/tool-call-arguments";
 import { asRecord, mintToolCallId, partialSuffixOverlapAny } from "./coercion";
 import dialectPrompt from "./hermes.md" with { type: "text" };
 import { renderChatMlTranscript, renderDelimitedThinking, renderToolResponseResults, stringifyJson } from "./rendering";
@@ -147,11 +148,7 @@ export class HermesInbandScanner implements InbandScanner {
 			if (typeof parsed.name !== "string" || parsed.name.length === 0) return undefined;
 			let args = parsed.arguments;
 			if (typeof args === "string") {
-				try {
-					args = parseJsonWithRepair<unknown>(args);
-				} catch {
-					args = {};
-				}
+				args = parseToolCallArguments(args);
 			}
 			return { name: parsed.name, arguments: asRecord(args) };
 		} catch {

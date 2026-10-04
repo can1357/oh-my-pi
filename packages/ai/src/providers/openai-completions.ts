@@ -4,9 +4,16 @@ import { resolveWireModelId } from "@oh-my-pi/pi-catalog/model-thinking";
 import { calculateCost } from "@oh-my-pi/pi-catalog/models";
 import type { ResolvedOpenAICompat } from "@oh-my-pi/pi-catalog/types";
 import { clinePassClientHeaders } from "@oh-my-pi/pi-catalog/wire/cline-pass";
-import { $env, logger, parseStreamingJson, parseStreamingJsonThrottled } from "@oh-my-pi/pi-utils";
+import {
+	$env,
+	logger,
+	parseStreamingJson,
+	parseStreamingJsonThrottled,
+	type ServerSentEvent,
+} from "@oh-my-pi/pi-utils";
 import { renderDemotedThinking } from "../dialect/demotion";
 import * as AIError from "../error";
+import { parseToolCallArguments } from "../utils/tool-call-arguments";
 import { getKimiCommonHeaders } from "../registry/oauth/kimi";
 import { getEnvApiKey } from "../stream";
 import type {
@@ -16,7 +23,6 @@ import type {
 	MessageAttribution,
 	Model,
 	ProviderSessionState,
-	RawSseEvent,
 	ServiceTier,
 	StopReason,
 	StreamFunction,
@@ -65,6 +71,7 @@ import type {
 	ChatCompletionContentPartText,
 	ChatCompletionMessageFunctionToolCall,
 	ChatCompletionMessageParam,
+	ChatCompletionMistralThinkingPart,
 	ChatCompletionTool,
 	ChatCompletionToolMessageParam,
 } from "./openai-chat-wire";
@@ -800,28 +807,29 @@ const streamOpenAICompletionsOnce = (
 		// Track the OpenAI `[DONE]` sentinel independently of `onSseEvent`: it is
 		// the streaming protocol's terminal signal, so a stream that ends with it
 		// completed by server agreement even when no `finish_reason` chunk arrived.
+		// It arrives through `onDoneSentinel`, so the diagnostic observer below
+		// stays unset (and raw wire-line capture off) when nobody listens.
 		let sawDoneSentinel = false;
-		const rawSseObserver = (event: RawSseEvent) => {
-			if (event.data === "[DONE]") sawDoneSentinel = true;
-			if (onSseEvent) {
-				if (!event.event && event.data && event.data !== "[DONE]") {
-					try {
-						const parsed = JSON.parse(event.data);
-						const resolvedEvent =
-							typeof parsed.type === "string"
-								? parsed.type
-								: typeof parsed.object === "string"
-									? parsed.object
-									: null;
-						if (resolvedEvent) {
-							event.event = resolvedEvent;
-							event.raw = [`event: ${resolvedEvent}`, ...event.raw];
-						}
-					} catch {}
+		const rawSseObserver = onSseEvent
+			? (event: ServerSentEvent) => {
+					if (!event.event && event.data && event.data !== "[DONE]") {
+						try {
+							const parsed = JSON.parse(event.data);
+							const resolvedEvent =
+								typeof parsed.type === "string"
+									? parsed.type
+									: typeof parsed.object === "string"
+										? parsed.object
+										: null;
+							if (resolvedEvent) {
+								event.event = resolvedEvent;
+								event.raw = [`event: ${resolvedEvent}`, ...event.raw];
+							}
+						} catch {}
+					}
+					onSseEvent({ event: event.event, data: event.data, raw: [...event.raw] }, model);
 				}
-				onSseEvent(event, model);
-			}
-		};
+			: undefined;
 		// Assigned once the block helpers exist (they are scoped to the `try`);
 		// the catch handler uses it to close open blocks before emitting the
 		// terminal error so both exit paths obey the same block lifecycle.
@@ -931,7 +939,11 @@ const streamOpenAICompletionsOnce = (
 						// bounds every attempt and backoff sleep — retries cannot
 						// extend the deadline.
 						onSseEvent: rawSseObserver,
+						onDoneSentinel: () => {
+							sawDoneSentinel = true;
+						},
 					});
+					responseHeaders = response.headers;
 					// Disarm the first-event watchdog as soon as headers arrive — a slow
 					// onResponse callback must not abort an already-connected stream.
 					clearTimeout(requestTimeout);
@@ -943,6 +955,10 @@ const streamOpenAICompletionsOnce = (
 					clearTimeout(requestTimeout);
 				}
 			};
+			// droid CLI parity: cache-read details can arrive on the
+			// `fireworks-cached-prompt-tokens` response header when the SSE body
+			// omits `cached_tokens`; captured here for the usage parser.
+			let responseHeaders: Headers | undefined;
 			let openaiStream: AsyncIterable<ChatCompletionChunk>;
 			try {
 				openaiStream = await createCompletionsStream();
@@ -1030,9 +1046,19 @@ const streamOpenAICompletionsOnce = (
 			};
 			let currentBlock: OpenAIStreamBlock | undefined;
 			let messageThoughtSignature: GeminiMessageThoughtSignature | undefined;
+			// Content blocks are append-only for the lifetime of the stream, so each
+			// block's index is stable once pushed. Map block → index to keep the
+			// per-delta contentIndex lookup O(1): a linear `indexOf` per delta turns a
+			// long turn (many blocks × many deltas) quadratic, as openai-shared's
+			// Responses decoder documents (issue #10605).
+			const contentIndexByBlock = new Map<OpenAIStreamBlock, number>();
+			const pushContentBlock = (block: OpenAIStreamBlock): void => {
+				contentIndexByBlock.set(block, output.content.length);
+				output.content.push(block);
+			};
 			const blockIndex = (block: OpenAIStreamBlock | undefined): number => {
 				if (!block) return Math.max(0, output.content.length - 1);
-				return output.content.indexOf(block);
+				return contentIndexByBlock.get(block) ?? output.content.indexOf(block);
 			};
 			const finishToolCallBlock = (block: ToolCallStreamBlock): void => {
 				if (block.partialArgs === undefined) return;
@@ -1053,7 +1079,7 @@ const streamOpenAICompletionsOnce = (
 					}
 				}
 				block.arguments =
-					typeof block.partialArgs === "string" ? parseStreamingJson(block.partialArgs) : block.partialArgs;
+					typeof block.partialArgs === "string" ? parseToolCallArguments(block.partialArgs) : block.partialArgs;
 				delete block.partialArgs;
 				if (block.streamIndex !== undefined) {
 					toolCallBlockByIndex.delete(block.streamIndex);
@@ -1087,11 +1113,7 @@ const streamOpenAICompletionsOnce = (
 				if (currentBlock?.type !== "toolCall") finishCurrentBlock(currentBlock);
 				finishPendingToolCallBlocks();
 			};
-			const appendText = (
-				message: AssistantMessage,
-				eventStream: AssistantMessageEventStream,
-				text: string,
-			): void => {
+			const appendText = (text: string): void => {
 				if (currentBlock?.type !== "text") {
 					// Leave toolCall blocks pending across text transitions: chunks after
 					// the first typically carry only `index`, so a finished (de-registered)
@@ -1099,15 +1121,15 @@ const streamOpenAICompletionsOnce = (
 					// resume. The stream-end sweep finalizes pending calls.
 					if (currentBlock?.type !== "toolCall") finishCurrentBlock(currentBlock);
 					currentBlock = { type: "text", text: "" };
-					message.content.push(currentBlock);
-					eventStream.push({ type: "text_start", contentIndex: blockIndex(currentBlock), partial: message });
+					pushContentBlock(currentBlock);
+					stream.push({ type: "text_start", contentIndex: blockIndex(currentBlock), partial: output });
 				}
 				currentBlock.text += text;
-				eventStream.push({
+				stream.push({
 					type: "text_delta",
 					contentIndex: blockIndex(currentBlock),
 					delta: text,
-					partial: message,
+					partial: output,
 				});
 			};
 			const openThinkingBlock = (signature?: string): ThinkingContent => {
@@ -1116,7 +1138,7 @@ const streamOpenAICompletionsOnce = (
 				if (currentBlock?.type !== "toolCall") finishCurrentBlock(currentBlock);
 				const block: ThinkingContent = { type: "thinking", thinking: "", thinkingSignature: signature };
 				currentBlock = block;
-				output.content.push(block);
+				pushContentBlock(block);
 				stream.push({ type: "thinking_start", contentIndex: blockIndex(block), partial: output });
 				return block;
 			};
@@ -1177,7 +1199,7 @@ const streamOpenAICompletionsOnce = (
 			const appendTextDelta = (text: string): void => {
 				if (!text) return;
 				if (!firstTokenTime) firstTokenTime = performance.now();
-				appendText(output, stream, text);
+				appendText(text);
 			};
 			// Tracks the last full cumulative reasoning snapshot per signature (the
 			// reasoning field name) so dedup survives block transitions. Required
@@ -1249,7 +1271,7 @@ const streamOpenAICompletionsOnce = (
 				};
 				block.arguments = parseStreamingJson(call.arguments);
 				currentBlock = block;
-				output.content.push(block);
+				pushContentBlock(block);
 				stream.push({ type: "toolcall_start", contentIndex: blockIndex(block), partial: output });
 				stream.push({
 					type: "toolcall_delta",
@@ -1286,7 +1308,13 @@ const streamOpenAICompletionsOnce = (
 			let sawUsagePayload = false;
 			let awaitTrailingUsageDetails = false;
 			const applyUsagePayload = (rawUsage: object): void => {
-				output.usage = parseChunkUsage(rawUsage, model, premiumRequestsTotal, output.timestamp);
+				output.usage = parseChunkUsage(
+					rawUsage,
+					model,
+					premiumRequestsTotal,
+					output.timestamp,
+					parseFireworksCachedPromptTokens(responseHeaders),
+				);
 				sawUsagePayload = true;
 				awaitTrailingUsageDetails = !hasPositiveCacheReadTokenField(rawUsage);
 			};
@@ -1394,10 +1422,27 @@ const streamOpenAICompletionsOnce = (
 					// and `thinking_blocks`; only the latter carries the signature, so
 					// it wins and the text alias is skipped to avoid duplication.
 					const liteLLMThinkingBlocks = getLiteLLMThinkingBlocksDelta(choice.delta);
+					// Mistral's native reasoning is embedded in content parts.
+					// When a chunk also carries a top-level reasoning alias, prefer
+					// the typed parts to avoid replaying the same thinking twice.
+					const mistralContent: unknown = model.compat.mistralReasoningContentParts
+						? choice.delta.content
+						: undefined;
+					const mistralParts = Array.isArray(mistralContent)
+						? (mistralContent as Array<{ type?: unknown; text?: unknown; thinking?: unknown } | null>)
+						: undefined;
+					const hasTypedThinking = mistralParts?.some(
+						part =>
+							part?.type === "thinking" &&
+							Array.isArray(part.thinking) &&
+							part.thinking.some(
+								inner => inner?.type === "text" && typeof inner.text === "string" && inner.text.length > 0,
+							),
+					);
 					if (liteLLMThinkingBlocks) {
 						for (const entry of liteLLMThinkingBlocks) appendLiteLLMThinkingBlock(entry);
 						suppressHealedThinking = true;
-					} else if (foundReasoningField) {
+					} else if (foundReasoningField && !hasTypedThinking) {
 						appendThinkingDelta(
 							foundReasoningDelta,
 							foundReasoningField,
@@ -1405,8 +1450,31 @@ const streamOpenAICompletionsOnce = (
 						);
 						suppressHealedThinking = true;
 					}
+					if (mistralParts) {
+						for (const part of mistralParts) {
+							if (part?.type === "thinking" && Array.isArray(part.thinking)) {
+								for (const inner of part.thinking as Array<{ type?: unknown; text?: unknown } | null>) {
+									if (inner?.type === "text" && typeof inner.text === "string" && inner.text.length > 0) {
+										appendThinkingDelta(inner.text, "mistral-content-parts");
+										suppressHealedThinking = true;
+									}
+								}
+							} else if (part?.type === "text" && typeof part.text === "string") {
+								if (streamMarkupHealing) {
+									const hasStructuredToolCalls =
+										Array.isArray(choice.delta.tool_calls) && choice.delta.tool_calls.length > 0;
+									const events = hasStructuredToolCalls
+										? streamMarkupHealing.feedEventsWithoutCalls(part.text)
+										: streamMarkupHealing.feedEvents(part.text);
+									for (const event of events) emitHealingEvent(event, suppressHealedThinking);
+								} else {
+									appendProcessedText(part.text);
+								}
+							}
+						}
+					}
 
-					const normalizedDeltaText = normalizeStreamingContentText(choice.delta.content);
+					const normalizedDeltaText = mistralParts ? "" : normalizeStreamingContentText(choice.delta.content);
 					if (normalizedDeltaText.length > 0) {
 						if (!firstTokenTime) firstTokenTime = performance.now();
 						const hasStructuredToolCalls =
@@ -1473,7 +1541,7 @@ const streamOpenAICompletionsOnce = (
 								if (streamIndex !== undefined) toolCallBlockByIndex.set(streamIndex, block);
 								pendingToolCallBlocks.push(block);
 								currentBlock = block;
-								output.content.push(block);
+								pushContentBlock(block);
 								stream.push({
 									type: "toolcall_start",
 									contentIndex: blockIndex(block),
@@ -2095,11 +2163,22 @@ function buildParams(
 	};
 }
 
+/** droid CLI parity: the Factory completions route can report prompt-cache
+ * hits via the `fireworks-cached-prompt-tokens` response header when the SSE
+ * body omits `cached_tokens`. Returns a positive count or undefined. */
+function parseFireworksCachedPromptTokens(headers: Headers | undefined): number | undefined {
+	const raw = headers?.get("fireworks-cached-prompt-tokens");
+	if (!raw) return undefined;
+	const value = Number(raw);
+	return Number.isFinite(value) && value > 0 ? value : undefined;
+}
+
 export function parseChunkUsage(
 	rawUsage: object,
 	model: Model<"openai-completions">,
 	premiumRequests: number | undefined,
 	timestamp?: number,
+	cachedTokensHeader?: number,
 ): AssistantMessage["usage"] {
 	const usageLike = rawUsage as OpenAICompletionsUsageLike;
 	const rawPromptTokenDetails = usageLike.prompt_tokens_details;
@@ -2122,15 +2201,30 @@ export function parseChunkUsage(
 	const completionReasoningTokens = completionTokenDetails?.reasoning_tokens;
 	const cacheWriteTokens = promptTokenDetails?.cache_write_tokens;
 	const outputTokens = typeof completionTokens === "number" ? completionTokens : 0;
+	// droid CLI parity: the Factory completions route can report prompt-cache
+	// hits only through the `fireworks-cached-prompt-tokens` response header
+	// when the body omits `cached_tokens` (the CLI's transport reads it as a
+	// fallback for exactly that case). Body fields win when present.
+	const bodyCachedTokens = firstPositiveNumber(
+		cachedTokens,
+		promptCacheHitTokens,
+		promptTokenCachedTokens,
+		cachedContentTokenCount,
+	);
+	const resolvedCachedTokens =
+		bodyCachedTokens > 0 ||
+		cachedTokens === 0 ||
+		promptCacheHitTokens === 0 ||
+		promptTokenCachedTokens === 0 ||
+		cachedContentTokenCount === 0
+			? bodyCachedTokens
+			: typeof cachedTokensHeader === "number" && cachedTokensHeader > 0
+				? cachedTokensHeader
+				: 0;
 	const accounting = calculateOpenAIUsageAccounting({
 		promptTokens: typeof promptTokens === "number" ? promptTokens : 0,
 		outputTokens,
-		cachedTokens: firstPositiveNumber(
-			cachedTokens,
-			promptCacheHitTokens,
-			promptTokenCachedTokens,
-			cachedContentTokenCount,
-		),
+		cachedTokens: resolvedCachedTokens,
 		reasoningTokens: typeof completionReasoningTokens === "number" ? completionReasoningTokens : 0,
 		cacheWriteOpenRouter: typeof cacheWriteTokens === "number" ? cacheWriteTokens : undefined,
 		cacheWriteDeepSeek: typeof promptCacheMissTokens === "number" ? promptCacheMissTokens : undefined,
@@ -2367,7 +2461,20 @@ export function convertMessages(
 			const thinkingBlocks = msg.content.filter(b => b.type === "thinking") as ThinkingContent[];
 			// Filter out empty thinking blocks to avoid API validation errors
 			const nonEmptyThinkingBlocks = thinkingBlocks.filter(b => b.thinking && b.thinking.trim().length > 0);
-			if (nonEmptyThinkingBlocks.length > 0) {
+			if (compat.mistralReasoningContentParts && nonEmptyThinkingBlocks.length > 0) {
+				// Mistral Medium 3.5 reads thinking from ordered content parts,
+				// not a top-level reasoning_content field. Preserve boundaries
+				// across mixed thinking/text and tool-call assistant turns.
+				const parts: Array<ChatCompletionContentPartText | ChatCompletionMistralThinkingPart> = [];
+				for (const block of msg.content) {
+					if (block.type === "thinking" && block.thinking.trim()) {
+						parts.push({ type: "thinking", thinking: [{ type: "text", text: block.thinking.toWellFormed() }] });
+					} else if (block.type === "text" && block.text.trim()) {
+						parts.push({ type: "text", text: block.text.toWellFormed() });
+					}
+				}
+				assistantMsg.content = parts;
+			} else if (nonEmptyThinkingBlocks.length > 0) {
 				if (compat.requiresThinkingAsText) {
 					const thinkingText = nonEmptyThinkingBlocks
 						.map(b => renderDemotedThinking(model.id, b.thinking))
@@ -2511,8 +2618,10 @@ export function convertMessages(
 			}
 			// Tier 2: When the provider requires reasoning_content but there are genuinely no
 			// thinking blocks at all (e.g. proxy stripped reasoning_content from the response),
-			// emit an empty string. The field must be present; an empty string is the most honest
-			// representation of "no reasoning was captured."
+			// emit the configured fallback (empty string by default — the most honest
+			// representation of "no reasoning was captured"). Providers that validate
+			// the exact value opt in via `syntheticReasoningContentFallback` (the droid
+			// proxy's DeepSeek family requires a single space).
 			if (
 				needsReasoningField &&
 				!hasReasoningField &&
@@ -2520,7 +2629,7 @@ export function convertMessages(
 				!compat.allowsSyntheticReasoningContentForToolCalls
 			) {
 				const reasoningField = compat.reasoningContentField ?? "reasoning_content";
-				assistantMsg[reasoningField] = "";
+				assistantMsg[reasoningField] = compat.syntheticReasoningContentFallback ?? "";
 				hasReasoningField = true;
 			}
 			// Tier 3: For providers that accept synthetic placeholders (Kimi, OpenRouter).

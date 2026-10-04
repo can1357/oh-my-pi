@@ -11,6 +11,7 @@ import { writeModelCache } from "@oh-my-pi/pi-catalog/model-cache";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { resolveModelCacheProviderId, resolveOllamaModelCacheProviderId } from "@oh-my-pi/pi-catalog/provider-models";
 import type { ModelKind, ModelSpec, OpenAICompat } from "@oh-my-pi/pi-catalog/types";
+import { CODEX_CLIENT_VERSION } from "@oh-my-pi/pi-catalog/wire/codex";
 import {
 	discoverOllamaModels,
 	discoverOpenAIModelsList,
@@ -32,6 +33,7 @@ describe("ModelRegistry runtime discovery", () => {
 	let originalOllamaHost: string | undefined;
 	let originalOllamaContextLength: string | undefined;
 	let originalAnthropicApiKey: string | undefined;
+	let originalLlamaCppBaseUrl: string | undefined;
 
 	beforeEach(async () => {
 		resetSettingsForTest();
@@ -43,6 +45,9 @@ describe("ModelRegistry runtime discovery", () => {
 		delete Bun.env.OLLAMA_HOST;
 		delete Bun.env.OLLAMA_CONTEXT_LENGTH;
 		delete Bun.env.ANTHROPIC_API_KEY;
+		// The developer's shell or ~/.omp/agent/.env must not redirect llama.cpp discovery probes.
+		originalLlamaCppBaseUrl = Bun.env.LLAMA_CPP_BASE_URL;
+		delete Bun.env.LLAMA_CPP_BASE_URL;
 		tempDir = path.join(os.tmpdir(), `pi-test-model-registry-${Snowflake.next()}`);
 		fs.mkdirSync(tempDir, { recursive: true });
 		modelsJsonPath = path.join(tempDir, "models.json");
@@ -74,6 +79,11 @@ describe("ModelRegistry runtime discovery", () => {
 			delete Bun.env.ANTHROPIC_API_KEY;
 		} else {
 			Bun.env.ANTHROPIC_API_KEY = originalAnthropicApiKey;
+		}
+		if (originalLlamaCppBaseUrl === undefined) {
+			delete Bun.env.LLAMA_CPP_BASE_URL;
+		} else {
+			Bun.env.LLAMA_CPP_BASE_URL = originalLlamaCppBaseUrl;
 		}
 		authStorage.close();
 		if (tempDir && fs.existsSync(tempDir)) {
@@ -302,6 +312,31 @@ describe("ModelRegistry runtime discovery", () => {
 		expect(registry.find("gateway", "old-model")).toBeUndefined();
 	});
 
+	test("refreshIfStale rebuilds only after models config changes on disk", async () => {
+		const gateway = (ids: string[]) => ({
+			gateway: {
+				baseUrl: "http://127.0.0.1:9991",
+				api: "openai-completions",
+				auth: "none",
+				models: ids.map(id => ({ id, reasoning: false, input: ["text"] })),
+			},
+		});
+		writeRawModelsJson(gateway(["first-model"]));
+		const registry = new ModelRegistry(authStorage, modelsJsonPath);
+
+		expect(await registry.refreshIfStale()).toBe(false);
+
+		const previousMtime = fs.statSync(modelsJsonPath).mtimeMs;
+		writeRawModelsJson(gateway(["first-model", "added-model"]));
+		const changedTime = new Date(previousMtime + 1_000);
+		fs.utimesSync(modelsJsonPath, changedTime, changedTime);
+
+		expect(registry.find("gateway", "added-model")).toBeUndefined();
+		expect(await registry.refreshIfStale()).toBe(true);
+		expect(registry.find("gateway", "added-model")).toBeDefined();
+		expect(await registry.refreshIfStale()).toBe(false);
+	});
+
 	test("refreshProvider online refreshes expired anthropic OAuth before model discovery", async () => {
 		const { refreshCalls } = await useAuthStorageWithRefreshTracker();
 		await authStorage.credentials.set("anthropic", {
@@ -490,6 +525,123 @@ describe("ModelRegistry runtime discovery", () => {
 
 		expect(modelListCalls).toBe(1);
 		expect(registry.find("openai-codex", "runtime-codex-model")).toBeDefined();
+	});
+
+	test("Codex discovery follows a configured baseUrl and sends only the configured key there (#13830)", async () => {
+		writeRawModelsJson({
+			"openai-codex": { baseUrl: "https://codex-proxy.example/backend-api/", apiKey: "sk-gateway" },
+		});
+		await authStorage.credentials.set("openai-codex", {
+			type: "oauth",
+			access: "chatgpt-oauth-token",
+			refresh: "chatgpt-refresh",
+			expires: Date.now() + 3_600_000,
+		});
+		const requests: { url: string; authorization: string | null }[] = [];
+		const fetchMock: FetchImpl = async (input, init) => {
+			const url = String(input);
+			requests.push({ url, authorization: new Headers(init?.headers).get("Authorization") });
+			if (url.startsWith("https://codex-proxy.example/backend-api/codex/models")) {
+				return Response.json({
+					models: [
+						{
+							slug: "gpt-6.1-sol",
+							display_name: "GPT-6.1 Sol",
+							context_window: 272_000,
+							supported_in_api: true,
+							input_modalities: ["text", "image"],
+						},
+					],
+				});
+			}
+			throw new Error(`Unexpected URL: ${url}`);
+		};
+		const registry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: fetchMock });
+
+		await registry.refreshProvider("openai-codex", "online");
+
+		expect(requests).toEqual([
+			{
+				url: `https://codex-proxy.example/backend-api/codex/models?client_version=${CODEX_CLIENT_VERSION}`,
+				authorization: "Bearer sk-gateway",
+			},
+		]);
+		expect(registry.find("openai-codex", "gpt-6.1-sol")?.baseUrl).toBe("https://codex-proxy.example/backend-api/");
+	});
+
+	/** Serve an official Codex roster; any other URL fails the test. */
+	function mockOfficialCodexRoster(requests: { url: string; authorization: string | null }[]): FetchImpl {
+		return async (input, init) => {
+			const url = String(input);
+			requests.push({ url, authorization: new Headers(init?.headers).get("Authorization") });
+			if (url.startsWith("https://chatgpt.com/backend-api/codex/models")) {
+				return Response.json({
+					models: [
+						{
+							slug: "official-live-model",
+							display_name: "Official Live Model",
+							context_window: 272_000,
+							supported_in_api: true,
+							input_modalities: ["text"],
+						},
+					],
+				});
+			}
+			throw new Error(`Unexpected URL: ${url}`);
+		};
+	}
+
+	const officialOAuthDiscovery = {
+		url: `https://chatgpt.com/backend-api/codex/models?client_version=${CODEX_CLIENT_VERSION}`,
+		authorization: "Bearer chatgpt-oauth-token",
+	};
+
+	test("Codex discovery keeps stored ChatGPT OAuth on chatgpt.com when a relay baseUrl is configured", async () => {
+		writeRawModelsJson({ "openai-codex": { baseUrl: "https://codex-proxy.example/backend-api" } });
+		await authStorage.credentials.set("openai-codex", {
+			type: "oauth",
+			access: "chatgpt-oauth-token",
+			refresh: "chatgpt-refresh",
+			expires: Date.now() + 3_600_000,
+		});
+		const requests: { url: string; authorization: string | null }[] = [];
+		const registry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: mockOfficialCodexRoster(requests) });
+
+		await registry.refreshProvider("openai-codex", "online");
+
+		expect(requests).toEqual([officialOAuthDiscovery]);
+		expect(registry.find("openai-codex", "official-live-model")).toBeDefined();
+	});
+
+	test("Codex discovery keeps a live OAuth token off a runtime provider's custom baseUrl despite a command key", async () => {
+		// An extension provider that owns /login installs its command apiKey as a
+		// fallback, so `peek` still returns the unexpired ChatGPT OAuth token.
+		await authStorage.credentials.set("openai-codex", {
+			type: "oauth",
+			access: "chatgpt-oauth-token",
+			refresh: "chatgpt-refresh",
+			expires: Date.now() + 3_600_000,
+		});
+		const requests: { url: string; authorization: string | null }[] = [];
+		const registry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: mockOfficialCodexRoster(requests) });
+		const sourceId = "ext://codex-proxy";
+		try {
+			registry.registerProvider(
+				"openai-codex",
+				{
+					baseUrl: "https://codex-proxy.example/backend-api",
+					apiKey: "!printf sk-proxy-command",
+					oauth: { name: "Codex Proxy", login: async () => "proxy-login-token" },
+				},
+				sourceId,
+			);
+
+			await registry.refreshProvider("openai-codex", "online");
+
+			expect(requests).toEqual([officialOAuthDiscovery]);
+		} finally {
+			registry.clearSourceRegistrations(sourceId);
+		}
 	});
 
 	test("Codex discovery aborts (keeps bundled models) when any account credential fails to refresh", async () => {
@@ -2408,6 +2560,79 @@ describe("ModelRegistry runtime discovery", () => {
 			.getAll()
 			.find(m => m.provider === "openai-test" && m.id === "openai-test/no-context-model");
 		expect(fallback?.contextWindow).toBe(128000);
+	});
+	test("openai-models-list uses nested token limits with existing context precedence", async () => {
+		writeRawModelsJson({
+			"openai-test": {
+				baseUrl: "http://127.0.0.1:9994",
+				api: "openai-completions",
+				auth: "none",
+				discovery: { type: "openai-models-list" },
+			},
+		});
+		const fetchMock: FetchImpl = async input => {
+			const url = String(input);
+			if (url === "http://127.0.0.1:9994/v1/models") {
+				return new Response(
+					JSON.stringify({
+						data: [
+							{ id: "gpt-6.1-sol", limits: { max_input_tokens: 922_000, max_output_tokens: 128_000 } },
+							{
+								id: "openai-test/context-priority",
+								context_length: 100_000,
+								limits: { max_input_tokens: 922_000, max_output_tokens: 128_000 },
+							},
+							{ id: "openai-test/no-limits" },
+							{
+								id: "openai-test/malformed-limits",
+								limits: { max_input_tokens: "invalid", max_output_tokens: "invalid" },
+							},
+							{ id: "openai-test/incomplete-limits", limits: { max_input_tokens: 922_000 } },
+							{
+								id: "openai-test/overflowing-limits",
+								limits: { max_input_tokens: Number.MAX_SAFE_INTEGER, max_output_tokens: 32_768 },
+							},
+							{
+								id: "openai-test/output-limit-with-invalid-input",
+								limits: { max_input_tokens: "invalid", max_output_tokens: 64_000 },
+							},
+							{ id: "gpt-6-sol" },
+						],
+					}),
+					{ status: 200, headers: { "Content-Type": "application/json" } },
+				);
+			}
+			throw new Error(`Unexpected URL: ${url}`);
+		};
+		const registry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: fetchMock });
+		await registry.refresh();
+
+		const aiproxyModel = registry.find("openai-test", "gpt-6.1-sol");
+		expect(aiproxyModel?.contextWindow).toBe(1_050_000);
+		expect(aiproxyModel?.maxTokens).toBe(128_000);
+
+		const contextPriority = registry.find("openai-test", "openai-test/context-priority");
+		expect(contextPriority?.contextWindow).toBe(100_000);
+		expect(contextPriority?.maxTokens).toBe(100_000);
+
+		for (const id of [
+			"openai-test/no-limits",
+			"openai-test/malformed-limits",
+			"openai-test/incomplete-limits",
+			"openai-test/overflowing-limits",
+		]) {
+			const model = registry.find("openai-test", id);
+			expect(model?.contextWindow).toBe(128_000);
+			expect(model?.maxTokens).toBe(32_768);
+		}
+
+		const independentOutputLimit = registry.find("openai-test", "openai-test/output-limit-with-invalid-input");
+		expect(independentOutputLimit?.contextWindow).toBe(128_000);
+		expect(independentOutputLimit?.maxTokens).toBe(64_000);
+
+		const legacyReference = registry.find("openai-test", "gpt-6-sol");
+		expect(legacyReference?.contextWindow).toBe(1_050_000);
+		expect(legacyReference?.maxTokens).toBe(128_000);
 	});
 
 	test("openai-models-list discovery enriches thin /v1/models payloads from the bundled reference catalog", async () => {

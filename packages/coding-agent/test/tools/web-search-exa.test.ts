@@ -673,36 +673,11 @@ describe("searchExa", () => {
 		expect(receivedKey).toBe("stored-key-xyz");
 	});
 
-	it("reports unavailable for the auto chain without EXA_API_KEY or stored credentials", async () => {
+	it("joins the auto chain without credentials so the public MCP runs", async () => {
 		delete process.env.EXA_API_KEY;
 		const available = await withInMemoryAuthStorage(authStorage =>
 			Promise.resolve(new ExaProvider().isAvailable(authStorage)),
 		);
-		expect(available).toBe(false);
-	});
-
-	it("reports explicitly available without credentials so the MCP fallback runs", async () => {
-		delete process.env.EXA_API_KEY;
-		const explicit = await withInMemoryAuthStorage(authStorage =>
-			Promise.resolve(new ExaProvider().isExplicitlyAvailable(authStorage)),
-		);
-		expect(explicit).toBe(true);
-	});
-
-	it("reports available with EXA_API_KEY", async () => {
-		process.env.EXA_API_KEY = "test-key-123";
-		const available = await withInMemoryAuthStorage(authStorage =>
-			Promise.resolve(new ExaProvider().isAvailable(authStorage)),
-		);
-		expect(available).toBe(true);
-	});
-
-	it("reports available when AuthStorage holds a credential", async () => {
-		delete process.env.EXA_API_KEY;
-		const available = await withInMemoryAuthStorage(authStorage => {
-			authStorage.keys.setRuntime("exa", "stored-key");
-			return Promise.resolve(new ExaProvider().isAvailable(authStorage));
-		});
 		expect(available).toBe(true);
 	});
 

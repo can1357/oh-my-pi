@@ -144,10 +144,10 @@ Treat `package.json` as a contract. Merge intentionally.
 
 ## 8) Remove old compatibility layers
 
-Unless requested, remove upstream compatibility shims.
+Do not add parallel implementations for APIs replaced by the native architecture. Preserve intentional extension compatibility adapters under `packages/coding-agent/src/extensibility/legacy-*.ts` and `plugins/legacy-pi-compat.ts`; removing them would break existing pi extensions.
 
-- Delete old APIs that were replaced.
-- Update all call sites to the new API directly.
+- Migrate native callers to replacement APIs; delete obsolete internal implementations.
+- Keep legacy extension imports behind the existing adapters instead of routing new native code through them.
 - Do not keep `*_v2` or parallel versions.
 
 ## 9) Update docs and references
@@ -202,7 +202,7 @@ If the diff shows the file was **reworked** (not just patched):
 
 Then you must **read the new implementation thoroughly** before porting. Blind merging of reworked code loses functionality because:
 
-Note: interactive mode was recently split into controllers/utils/types. When backporting related changes, port updates into the individual files we created and ensure `interactive-mode.ts` wiring stays in sync.
+Interactive mode is split across `packages/coding-agent/src/modes/interactive-mode.ts`, `modes/controllers/`, and supporting modules. Shared TUI components now live in `packages/tui/src/` (including `chat/`, `overlays/`, and `status-line/`). Port changes into the implementing module rather than recreating components in coding-agent, and keep interactive-mode wiring in sync.
 
 1. **Defaults change silently** - A new variable `defaultFoo = [a, b]` may replace an old `getAllFoo()` that returned `[a, b, c, d, e]`.
 
@@ -316,8 +316,8 @@ Our fork has architectural decisions that differ from upstream. **Do not port th
 
 | Upstream                     | Our Fork                |
 | ---------------------------- | ----------------------- |
-| `extension-input.ts`         | `hook-input.ts`         |
-| `extension-selector.ts`      | `hook-selector.ts`      |
+| `extension-input.ts`         | `packages/tui/src/overlays/hook-input.ts` |
+| `extension-selector.ts`      | `packages/tui/src/overlays/hook-selector.ts` |
 | `ExtensionInputComponent`    | `HookInputComponent`    |
 | `ExtensionSelectorComponent` | `HookSelectorComponent` |
 
@@ -325,7 +325,7 @@ Our fork has architectural decisions that differ from upstream. **Do not port th
 
 | Upstream                                 | Our Fork                                 | Notes                                     |
 | ---------------------------------------- | ---------------------------------------- | ----------------------------------------- |
-| `sessionManager.appendSessionInfo(name)` | `sessionManager.setSessionName(name)`    | We use `sessionName` throughout           |
+| `sessionManager.appendSessionInfo(name)` | `await sessionManager.setSessionName(name, source?)` | Async; returns whether accepted; automatic titles cannot overwrite a user title |
 | `sessionManager.getSessionName()`        | `sessionManager.getSessionName()`        | Same (we unified to match upstream's RPC) |
 | `agent.sessionName` / `setSessionName()` | `agent.sessionName` / `setSessionName()` | Same                                      |
 
@@ -333,20 +333,20 @@ Our fork has architectural decisions that differ from upstream. **Do not port th
 
 | Upstream                                           | Our Fork                                                  | Reason                                        |
 | -------------------------------------------------- | --------------------------------------------------------- | --------------------------------------------- |
-| `clipboard.ts` + `clipboard-image.ts` (tool files) | `src/utils/clipboard.ts` backed by `@oh-my-pi/pi-natives` | Native implementation with a small TS wrapper |
+| `clipboard.ts` + `clipboard-image.ts` (tool files) | `packages/coding-agent/src/utils/clipboard.ts` backed by `@oh-my-pi/pi-natives` | Native implementation with a small TS wrapper |
 
 ### Test Framework
 
 | Upstream                  | Our Fork                      |
 | ------------------------- | ----------------------------- |
-| `vitest` with `vi.mock()` | `bun:test` with `vi` from bun |
+| `vitest` with `vi.mock()` | `bun:test` (`vi`, `mock`, `spyOn`, and assertions from `bun:test`) |
 | `node:test` assertions    | `expect()` matchers           |
 
 ### Tool Architecture
 
 | Upstream                            | Our Fork                                                                                                      | Notes                                                     |
 | ----------------------------------- | ------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------- |
-| `createTool(cwd: string, options?)` | `createTools(session: ToolSession)` via `BUILTIN_TOOLS` registry                                              | Tool factories accept `ToolSession` and can return `null` |
+| `createTool(cwd: string, options?)` | `await createTools(session: ToolSession, toolNames?)` via `BUILTIN_TOOLS`/`HIDDEN_TOOLS` | Factories accept `ToolSession` and return `Tool`, `null`, or a promise |
 | Per-tool `*Operations` interfaces   | Only current per-tool override interfaces remain (for example `GlobOperations` in `tools/glob.ts`); `FindOperations` survives only in the legacy shim (`src/extensibility/legacy-pi-coding-agent-shim.ts`) after the find→glob rename | Used for SSH/remote overrides where present               |
 | Node.js `fs/promises` everywhere    | Bun file APIs for simple file writes/reads, `node:fs/promises` for dirs, selected sync `node:fs` where needed | Prefer Bun APIs when they simplify                        |
 
@@ -354,18 +354,24 @@ Our fork has architectural decisions that differ from upstream. **Do not port th
 
 | Upstream                        | Our Fork                                    | Notes                                        |
 | ------------------------------- | ------------------------------------------- | -------------------------------------------- |
-| `proper-lockfile` + `auth.json` | `agent.db` (bun:sqlite)                     | Credentials stored exclusively in `agent.db` |
-| Single credential per provider  | Multi-credential with round-robin selection | Session affinity and backoff logic preserved |
+| `proper-lockfile` + `auth.json` | Local `agent.db` (`bun:sqlite`) or `RemoteAuthCredentialStore` | Broker mode replaces local credential storage; runtime/config/env keys remain separate |
+| Single credential per provider  | Usage-aware multi-account selection with priority/reserve policy | Preserve session affinity, plan/model access checks, blocks, and refresh single-flight/leases |
+
+Native auth callers use namespaces on `AuthStorage`: `credentials`, `keys`,
+`oauth`, `sessions`, `usage`, `health`, `limits`, `resets`, and `blocks`.
+Implementations live in `packages/ai/src/auth/`; `auth-storage.ts` composes
+them. Do not port upstream flat methods over this facade. See
+[auth-broker-gateway.md](./auth-broker-gateway.md) for remote-store behavior.
 
 ### Extensions
 
 | Upstream                                                               | Our Fork                                                                                                                                                                                                                                                                                     |
 | ---------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `jiti` for TypeScript loading                                          | Native Bun `import()`                                                                                                                                                                                                                                                                        |
+| `jiti` for TypeScript loading                                          | Bun loading through the existing `loadLegacyPiModule()` adapter (including legacy specifier rewriting)                                                                                                                                                                                                                                                                        |
 | `pkg.pi` manifest field                                                | `pkg.omp` preferred; fallback to `pkg.pi` remains                                                                                                                                                                                                                                            |
 | `StringEnum` from `pi-ai`                                              | `Type.Enum` from `pi.typebox`, or `pi.arktype.enumerated(...)`; `pi-ai` no longer exports `StringEnum`                                                                                                                                                                                       |
 | `formatSize` from `pi-coding-agent`                                    | `formatBytes` from `@oh-my-pi/pi-utils`                                                                                                                                                                                                                                                      |
-| Upstream resource/package/settings managers as the native architecture | Capability-based discovery (`loadCapability(...)`), the `Settings` singleton, and `EventBus`; legacy extension imports of `DefaultResourceLoader`, `DefaultPackageManager`, and `SettingsManager` are compatibility shims in `legacy-pi-coding-agent-shim.ts`, not the native implementation |
+| Upstream resource/package/settings managers as the native architecture | Capability-based discovery (`loadCapability(...)`), session-scoped `Settings` instances, and `EventBus`; legacy extension imports of `DefaultResourceLoader`, `DefaultPackageManager`, and `SettingsManager` are compatibility shims in `legacy-pi-coding-agent-shim.ts`, not the native implementation |
 | `SettingsManager.create(cwd)` returns a synchronous manager with `getGlobalSettings()`/`getProjectSettings()` | The shim's `SettingsManager.create()` is synchronous and resolves the active extension session's `Settings`, then a live instance matching `cwd`/`agentDir`, or an isolated fallback; `Settings` exposes `getGlobalSettings()`/`getProjectSettings()` that deep-clone the raw global/project layers so extensions can read their own namespaced keys (#10397) |
 
 ### Skip These Upstream Features
@@ -373,16 +379,17 @@ Our fork has architectural decisions that differ from upstream. **Do not port th
 When porting, **skip** these files/features entirely:
 
 - `footer-data-provider.ts` — we use StatusLineComponent
-- `clipboard-image.ts` — image clipboard support is exposed through `src/utils/clipboard.ts` backed by `@oh-my-pi/pi-natives`
+- `clipboard-image.ts` — image clipboard support is exposed through `packages/coding-agent/src/utils/clipboard.ts` backed by `@oh-my-pi/pi-natives`
 - GitHub workflow files — we have our own CI
-- `models.generated.ts` — auto-generated, regenerate locally (as models.json instead)
+- `models.generated.ts` — regenerate the local `packages/catalog/src/models.json` via `bun run gen:models`; provider/model/auth policy is authored in `packages/catalog/src/compat/rules/**/*.kdl`
 
 ### Features We Added (Preserve These)
 
 These exist in our fork but not upstream. **Never overwrite:**
 
 - `StatusLineComponent` in interactive mode
-- Multi-credential auth with session affinity
+- Multi-credential auth with session affinity, usage-aware routing, and optional broker/gateway storage
+- `@oh-my-pi/omptype` schemas and their provider-boundary JSON Schema normalization ([omptype-guide.md](./omptype-guide.md))
 - Capability-based discovery system (`defineCapability`, `registerProvider`, `loadCapability`, `skillCapability`, etc.)
 - MCP/Exa/SSH integrations
 - LSP writethrough for format-on-save

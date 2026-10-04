@@ -6,11 +6,15 @@ import { centerLine, padding } from "../utils";
 import { padToWidth } from "../render/utils";
 import { routeSgrMouseInput, type SgrMouseEvent } from "../mouse";
 import { APP_NAME } from "@oh-my-pi/pi-utils";
-import { gradientLogo, PI_LOGO } from "../prompt/welcome";
+import { gradientLogo, logoNode, PI_LOGO } from "../prompt/welcome";
 import { theme } from "../theme/theme";
+import { col, node, span, text } from "../native/describe";
+import type { NativeNode, NativeUiEvent } from "../native/node";
+import { Memo } from "../native/memo";
+import { isNativeRendering } from "../native/state";
 import type { SetupHost } from "./scenes/types";
-import { renderSetupOutro, SETUP_OUTRO_MS } from "./scenes/outro";
-import { renderSetupSplash, SETUP_SPLASH_MS, SETUP_TICK_MS } from "./scenes/splash";
+import { describeSetupOutro, renderSetupOutro, SETUP_OUTRO_MS } from "./scenes/outro";
+import { describeSetupSplash, renderSetupSplash, SETUP_SPLASH_MS, SETUP_TICK_MS } from "./scenes/splash";
 import type { SetupScene, SetupSceneController, SetupSceneHost, SetupSceneResult } from "./scenes/types";
 
 type WizardPhase = "splash" | "transition" | "scene" | "outro" | "done";
@@ -19,6 +23,21 @@ const SCENE_MARGIN_X = 4;
 const MIN_CONTENT_WIDTH = 20;
 /** Cross-dissolve duration from the splash into the first scene. */
 const SCENE_TRANSITION_MS = 420;
+
+/** How long each timed phase lasts before the wizard advances on its own. */
+const PHASE_LIMIT_MS: Partial<Record<WizardPhase, number>> = {
+	splash: SETUP_SPLASH_MS,
+	transition: SCENE_TRANSITION_MS,
+	outro: SETUP_OUTRO_MS,
+};
+
+/** Nothing left to show once the wizard completed. */
+const DONE_NODE = col([]);
+
+function sceneFooterHint(): string {
+	const navKeys = editorKeys("tui.select.up", "tui.select.down");
+	return `${navKeys} select · ${editorKey("tui.select.confirm")} confirm · ${editorKey("tui.select.cancel")} skip · ${formatKeyHint("ctrl+c")} exit setup`;
+}
 
 function indentLine(line: string, width: number, indent: number): string {
 	const prefix = padding(Math.min(indent, Math.max(0, width - 1)));
@@ -54,6 +73,10 @@ export class SetupWizardComponent implements Component, OverlayFocusOwner {
 	#sceneIndex = 0;
 	#activeScene: SetupSceneController | undefined;
 	#timer: NodeJS.Timeout | undefined;
+	/** Native path: one-shot at the end of a timed phase; the terminal clocks the motion. */
+	#deadline: NodeJS.Timeout | undefined;
+	#nativeScene = new Memo();
+	#nativeRoot = new Memo();
 	#done = Promise.withResolvers<void>();
 	#disposed = false;
 	/** Screen row where the active scene's body began in the last rendered frame. */
@@ -80,6 +103,7 @@ export class SetupWizardComponent implements Component, OverlayFocusOwner {
 	}
 
 	invalidate(): void {
+		this.#nativeScene.clear();
 		this.#activeScene?.invalidate?.();
 	}
 
@@ -182,6 +206,74 @@ export class SetupWizardComponent implements Component, OverlayFocusOwner {
 		return this.#fitToScreen(lines, safeWidth, height);
 	}
 
+	/**
+	 * Fullscreen description: splash, the active scene inside the wizard
+	 * frame (brand header, step counter, title, footer hints), or the outro.
+	 * The splash→scene dissolve is a row effect with no native counterpart, so
+	 * a transition describes as the scene.
+	 */
+	describe(): NativeNode {
+		let content: NativeNode;
+		switch (this.#phase) {
+			case "splash":
+				content = describeSetupSplash();
+				break;
+			case "transition":
+			case "scene":
+				content = this.#describeScene();
+				break;
+			case "outro":
+				content = describeSetupOutro();
+				break;
+			case "done":
+				content = DONE_NODE;
+				break;
+		}
+		return this.#nativeRoot.get([content], () =>
+			col([{ ...content, key: this.#phase === "transition" ? "scene" : this.#phase }], {
+				grow: 1,
+				role: "omp.app.setup",
+			}),
+		);
+	}
+
+	handleNativeEvent(event: NativeUiEvent): void {
+		if (event.type !== "action") return;
+		if (event.act === "skip" && this.#phase === "splash") this.#beginScene();
+		else if (event.act === "continue" && this.#phase === "outro") this.#complete();
+	}
+
+	#describeScene(): NativeNode {
+		const scene = this.scenes[this.#sceneIndex];
+		const active = this.#activeScene;
+		const title = active?.title ?? scene?.title ?? "Setup";
+		const subtitle = active?.subtitle;
+		const footer = sceneFooterHint();
+		return this.#nativeScene.get([this.#sceneIndex, this.scenes.length, active, title, subtitle, footer], () => {
+			const heading: NativeNode[] = [text([span(title, "strong")])];
+			if (subtitle) heading.push(text([span(subtitle, "muted")]));
+			return col(
+				[
+					col(
+						[
+							logoNode(PI_LOGO, false),
+							text([span(APP_NAME, "accent strong")], { wrap: "none" }),
+							text([span(`Setup step ${this.#sceneIndex + 1} of ${this.scenes.length}`, "muted")], {
+								wrap: "none",
+							}),
+						],
+						{ align: "center" },
+					),
+					col(heading),
+					// Keyed by scene so a new scene's nodes never reuse the previous one's ids.
+					node("col", { grow: 1 }, active ? [active] : [], `body:${scene?.id ?? this.#sceneIndex}`),
+					col([text([span(footer, "dim")])], { align: "center" }),
+				],
+				{ gap: "md", grow: 1, role: "omp.setup.scene" },
+			);
+		});
+	}
+
 	#renderScene(width: number, height: number): string[] {
 		const scene = this.scenes[this.#sceneIndex];
 		const title = this.#activeScene?.title ?? scene?.title ?? "Setup";
@@ -202,9 +294,7 @@ export class SetupWizardComponent implements Component, OverlayFocusOwner {
 		header.push("");
 		this.#bodyRowStart = header.length;
 
-		const navKeys = editorKeys("tui.select.up", "tui.select.down");
-		const footerHint = `${navKeys} select · ${editorKey("tui.select.confirm")} confirm · ${editorKey("tui.select.cancel")} skip · ${formatKeyHint("ctrl+c")} exit setup`;
-		const footer = ["", centerLine(theme.fg("dim", footerHint), width)];
+		const footer = ["", centerLine(theme.fg("dim", sceneFooterHint()), width)];
 		const maxBodyLines = Math.max(0, height - header.length - footer.length);
 		const body = this.#activeScene?.render(contentWidth, maxBodyLines).slice(0, maxBodyLines) ?? [];
 		const lines = [...header, ...body.map(line => indentLine(line, width, SCENE_MARGIN_X))];
@@ -223,26 +313,52 @@ export class SetupWizardComponent implements Component, OverlayFocusOwner {
 		return fitted;
 	}
 
+	/**
+	 * ANSI: repaint every tick and advance timed phases from it. Native: no
+	 * repaint loop; a one-shot fires when the current timed phase ends (none
+	 * while a scene is up). Call again whenever the phase changes.
+	 */
 	#startTimer(): void {
-		if (this.#timer) return;
-		this.#timer = setInterval(() => {
-			if (this.#disposed) return;
-			const elapsed = performance.now() - this.#phaseStartedAt;
-			if (this.#phase === "splash" && elapsed >= SETUP_SPLASH_MS) {
-				this.#beginScene();
-			} else if (this.#phase === "transition" && elapsed >= SCENE_TRANSITION_MS) {
-				this.#phase = "scene";
-				this.#phaseStartedAt = performance.now();
-				this.ctx.ui.requestRender();
-			} else if (this.#phase === "outro" && elapsed >= SETUP_OUTRO_MS) {
-				this.#complete();
-			} else {
-				this.ctx.ui.requestRender();
+		if (isNativeRendering()) {
+			if (this.#timer) {
+				clearInterval(this.#timer);
+				this.#timer = undefined;
 			}
-		}, SETUP_TICK_MS);
+			clearTimeout(this.#deadline);
+			this.#deadline = undefined;
+			const limit = PHASE_LIMIT_MS[this.#phase];
+			if (limit === undefined) return;
+			const remaining = limit - (performance.now() - this.#phaseStartedAt);
+			this.#deadline = setTimeout(() => this.#tick(), Math.max(0, remaining));
+			return;
+		}
+		if (this.#timer) return;
+		this.#timer = setInterval(() => this.#tick(), SETUP_TICK_MS);
+	}
+
+	#tick(): void {
+		if (this.#disposed) return;
+		const elapsed = performance.now() - this.#phaseStartedAt;
+		if (this.#phase === "splash" && elapsed >= SETUP_SPLASH_MS) {
+			this.#beginScene();
+		} else if (this.#phase === "transition" && elapsed >= SCENE_TRANSITION_MS) {
+			this.#phase = "scene";
+			this.#phaseStartedAt = performance.now();
+			this.#startTimer();
+			this.ctx.ui.requestRender();
+		} else if (this.#phase === "outro" && elapsed >= SETUP_OUTRO_MS) {
+			this.#complete();
+		} else if (isNativeRendering() || !this.#timer) {
+			// Re-arm the deadline, or switch loops when the native surface opened/closed.
+			this.#startTimer();
+		} else {
+			this.ctx.ui.requestRender();
+		}
 	}
 
 	#stopTimer(): void {
+		clearTimeout(this.#deadline);
+		this.#deadline = undefined;
 		if (!this.#timer) return;
 		clearInterval(this.#timer);
 		this.#timer = undefined;
@@ -274,13 +390,14 @@ export class SetupWizardComponent implements Component, OverlayFocusOwner {
 		this.#phaseStartedAt = performance.now();
 		this.#sceneFocusTarget = undefined;
 		this.ctx.ui.setFocus(this);
+		this.#startTimer();
 		void this.#activeScene.onMount?.();
 		this.ctx.ui.requestRender();
 	}
 
-	/** Enter the first scene through a dissolve from the splash. */
+	/** Enter the first scene through a dissolve from the splash (a row effect, so native cuts straight in). */
 	#beginScene(): void {
-		this.#mountSceneController("transition");
+		this.#mountSceneController(isNativeRendering() ? "scene" : "transition");
 	}
 
 	#mountCurrentScene(): void {
