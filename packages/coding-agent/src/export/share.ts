@@ -26,10 +26,12 @@ import { DEFAULT_SHARE_URL } from "@oh-my-pi/pi-wire";
 import { $ } from "bun";
 import { obfuscateToolArguments } from "../secrets/message-transform";
 import type { SecretObfuscator } from "../secrets/obfuscator";
+import { SecretValueSet } from "../secrets/placeholder";
 import { type SessionEntry, type SessionHeader, TITLE_CHANGE_ENTRY_TYPE } from "../session/session-entries";
 import type { SessionManager } from "../session/session-manager";
 import type { OutputMeta } from "@oh-my-pi/pi-tui/tools/output-meta";
-import { buildSessionData, type SessionData, type SubSession } from "./html";
+import type { SubSession } from "../session/sub-sessions";
+import { buildSessionData, type SessionData } from "./html";
 
 export { DEFAULT_SHARE_URL };
 
@@ -104,8 +106,8 @@ export function buildShareSnapshot(sm: SessionManager, options?: ShareSessionOpt
  * extension `details`/`data`, `mode_change.data`, structured output schemas)
  * are dropped so they cannot leak.
  */
-function collectShareRegexSecretValues(o: SecretObfuscator, data: SessionData): Set<string> {
-	const values = new Set<string>();
+function collectShareRegexSecretValues(o: SecretObfuscator, data: SessionData): SecretValueSet {
+	const values = new SecretValueSet();
 	const add = (value: string | undefined): void => {
 		if (value === undefined) return;
 		for (const secretValue of o.collectRegexSecretValuesForObfuscation(value)) {
@@ -255,6 +257,10 @@ function redactShareHeader(
 }
 
 function redactSessionDataForShare(o: SecretObfuscator, data: SessionData): SessionData {
+	return o.batch(() => redactSessionDataBatch(o, data));
+}
+
+function redactSessionDataBatch(o: SecretObfuscator, data: SessionData): SessionData {
 	const sharedRegexSecretValues = collectShareRegexSecretValues(o, data);
 	return {
 		...data,

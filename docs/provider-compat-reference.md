@@ -108,7 +108,7 @@ Types: `OpenAICompat` / `ResolvedOpenAISharedCompat` in `packages/catalog/src/ty
 | --- | --- | --- |
 | `reasoningDeltasMayBeCumulative` | MiniMax hosts | Stream parser treats reasoning deltas as cumulative snapshots, not increments |
 | `stripDeepseekSpecialTokens` | DeepSeek on NVIDIA NIM or direct API | Strips leaked chat-template tokens (`<｜User｜>`, …) from visible text |
-| `streamMarkupHealingPattern` | `"kimi"` (K2-family or Kimi/Moonshot provider), `"dsml"` (DeepSeek DSML hosts), `"thinking"` otherwise; unset on official OpenAI | Selects the leaked-markup healer; `"qwen"` is also an explicit supported pattern |
+| `streamMarkupHealingPattern` | `"kimi"` (K2-family or Kimi/Moonshot provider), `"dsml"` (any DeepSeek-class model, on any host including local backends and custom providers), `"thinking"` otherwise; unset on official OpenAI | Selects the leaked-markup healer; `"qwen"` is also an explicit supported pattern |
 | `emptyLengthFinishIsContextError` | Ollama | Empty completion with `finish_reason: "length"` → context-overflow error |
 | `streamFirstEventTimeoutMs` | `0` for local backends | First-event watchdog hint (`0` = unbounded prefill/model-load time) |
 | `streamIdleTimeoutMs` | GLM/Alibaba coding plans 600 s; selected MiMo/Kimi/DeepSeek and local backends 300 s; some deployments use `0` | Fallback idle budget; request options and timeout env vars take precedence |

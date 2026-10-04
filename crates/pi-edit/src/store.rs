@@ -262,6 +262,19 @@ impl EditStore {
 			.map(|v| v.snapshot.clone())
 	}
 
+	/// Every retained snapshot for a path, newest first.
+	pub fn versions(&self, path: &Path) -> Vec<Snapshot> {
+		let mut state = self.inner.lock();
+		touch(&mut state, path);
+		state.histories.get(path).map_or_else(Vec::new, |history| {
+			history
+				.versions
+				.iter()
+				.map(|version| version.snapshot.clone())
+				.collect()
+		})
+	}
+
 	/// Return the most recent version matching a tag and refresh path recency.
 	pub fn by_hash(&self, path: &Path, hash: &str) -> Option<Snapshot> {
 		let mut state = self.inner.lock();
@@ -466,6 +479,20 @@ mod tests {
 		let head = store.head(path).unwrap();
 		assert_eq!(&*head.text, "one");
 		assert_eq!(head.seen_lines.unwrap(), BTreeSet::from([1, 3]));
+	}
+
+	#[test]
+	fn versions_lists_newest_first() {
+		let store = EditStore::new();
+		let path = Path::new("a.ts");
+		store.record(path, "one", Some(&[1]));
+		store.record(path, "two", Some(&[2]));
+		let texts: Vec<String> = store
+			.versions(path)
+			.iter()
+			.map(|snapshot| snapshot.text.to_string())
+			.collect();
+		assert_eq!(texts, ["two", "one"]);
 	}
 
 	#[test]

@@ -20,7 +20,6 @@ import {
 	hashPath,
 	normalizePathForComparison,
 	readLines,
-	tryAcquireFileLock,
 	type FileLockHandle,
 } from "@oh-my-pi/pi-utils";
 import { Settings } from "../config/settings";
@@ -29,7 +28,8 @@ import type { Setting } from "../config/registry";
 import { BLOB_HASH_RE, BLOB_STAGING_RE, blobStagingPath } from "../session/blob-store";
 import { listSessionsReadOnly, type SessionInfo, type SessionStatus } from "../session/session-listing";
 import { parseTerminalBreadcrumb } from "../session/session-paths";
-import { FileSessionStorage, sessionOwnerLeasePath } from "../session/session-storage";
+import { readSessionHeaderId } from "../session/session-loader";
+import { FileSessionStorage, tryAcquireSessionLease } from "../session/session-storage";
 import {
 	cfgGcArchive,
 	cfgGcBlobs,
@@ -734,7 +734,7 @@ async function runStaleGc(options: ResolvedGcOptions): Promise<StaleGcResult> {
 		errors: [],
 	};
 	for (const candidate of candidates) {
-		const lease = candidate.ownedSession ? tryAcquireSessionLease(candidate.ownedSession) : undefined;
+		const lease = candidate.ownedSession ? await tryAcquireSessionFileLease(candidate.ownedSession) : undefined;
 		if (lease === null) continue;
 		try {
 			result[candidate.kind] += 1;
@@ -756,12 +756,17 @@ async function runStaleGc(options: ResolvedGcOptions): Promise<StaleGcResult> {
 }
 
 /**
- * Take `sessionFile`'s ownership lease, or null while a running process holds
- * it (or the lease cannot be probed: an unknown owner is treated as live).
+ * Take the ownership lease of the session in `sessionFile`, or null while a
+ * running process holds it (or the lease cannot be probed: an unknown owner is
+ * treated as live). The lease is keyed by the header's session id. Undefined
+ * when the file has no session header: omp writes the header with the first
+ * bytes of a session, so no running writer owns such a file (and candidates
+ * are past the write grace, so none is mid-write).
  */
-function tryAcquireSessionLease(sessionFile: string): FileLockHandle | null {
+async function tryAcquireSessionFileLease(sessionFile: string): Promise<FileLockHandle | null | undefined> {
 	try {
-		return tryAcquireFileLock(sessionOwnerLeasePath(sessionFile));
+		const sessionId = await readSessionHeaderId(sessionFile);
+		return sessionId === undefined ? undefined : tryAcquireSessionLease(sessionId);
 	} catch {
 		return null;
 	}
@@ -996,16 +1001,13 @@ function sqliteNumber(value: number | bigint | null | undefined): number {
 	return 0;
 }
 
+// Every statement below is scoped with `using`: an unfinalized statement keeps the SQLite
+// connection (and its db/-wal/-shm files) open after close() until GC, and Windows refuses
+// to delete or replace a file that is still open.
 function tableExists(db: Database, table: string): boolean {
-	const row = db
-		.prepare("SELECT 1 AS present FROM sqlite_master WHERE type IN ('table','view') AND name = ?")
-		.get(table) as { present?: number } | null;
+	using stmt = db.prepare("SELECT 1 AS present FROM sqlite_master WHERE type IN ('table','view') AND name = ?");
+	const row = stmt.get(table) as { present?: number } | null;
 	return row?.present === 1;
-}
-
-function historyHasSessionId(db: Database): boolean {
-	const rows = db.prepare("PRAGMA table_info(history)").all() as Array<{ name?: string | null }>;
-	return rows.some(row => row.name === "session_id");
 }
 
 function deleteHistoryRowsForSessions(dbPath: string, sessionIds: string[]): { deleted: number; ftsRebuilt: boolean } {
@@ -1013,13 +1015,13 @@ function deleteHistoryRowsForSessions(dbPath: string, sessionIds: string[]): { d
 	const db = new Database(dbPath);
 	try {
 		db.run("PRAGMA busy_timeout = 5000");
-		const hasHistory = tableExists(db, "history") && historyHasSessionId(db);
+		const hasHistory = tableExists(db, "history") && tableHasColumn(db, "history", "session_id");
 		const hasRecaps = tableExists(db, "session_recaps");
 		if (!hasHistory && !hasRecaps) return { deleted: 0, ftsRebuilt: false };
 		const hasFts = hasHistory && tableExists(db, "history_fts");
-		const deleteStmt = hasHistory ? db.prepare("DELETE FROM history WHERE session_id = ?") : undefined;
+		using deleteStmt = hasHistory ? db.prepare("DELETE FROM history WHERE session_id = ?") : undefined;
 		// Recaps are session-scoped side output with no life beyond their session.
-		const deleteRecapsStmt = hasRecaps ? db.prepare("DELETE FROM session_recaps WHERE session_id = ?") : undefined;
+		using deleteRecapsStmt = hasRecaps ? db.prepare("DELETE FROM session_recaps WHERE session_id = ?") : undefined;
 		let deleted = 0;
 		const tx = db.transaction((ids: string[]) => {
 			for (const id of ids) {
@@ -1139,7 +1141,8 @@ function statsIdentityKeys(identities: Record<StatsEntryTable, StatsEntryIdentit
 }
 
 function tableHasColumn(db: Database, table: string, column: string): boolean {
-	const rows = db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name?: string | null }>;
+	using stmt = db.prepare(`PRAGMA table_info(${table})`);
+	const rows = stmt.all() as Array<{ name?: string | null }>;
 	return rows.some(row => row.name === column);
 }
 
@@ -1147,7 +1150,8 @@ function collectStoredStatsSessionPaths(db: Database): string[] {
 	const sessionPaths = new Set<string>();
 	for (const table of STATS_SESSION_TABLES) {
 		if (!tableExists(db, table) || !tableHasColumn(db, table, "session_file")) continue;
-		const rows = db.prepare(`SELECT DISTINCT session_file FROM ${table}`).all() as Array<{
+		using stmt = db.prepare(`SELECT DISTINCT session_file FROM ${table}`);
+		const rows = stmt.all() as Array<{
 			session_file?: string | null;
 		}>;
 		for (const row of rows) {
@@ -1485,12 +1489,15 @@ function reconcileStatsRowsForSessions(dbPath: string, plans: StatsCleanupPlan[]
 				PRIMARY KEY (table_name, entry_id, timestamp, tool_call_id)
 			)
 		`);
-		const clearRetainedEntries = db.prepare("DELETE FROM gc_retained_entries");
-		const insertRetainedEntry = db.prepare(`
+		using statements = new DisposableStack();
+		const clearRetainedEntries = statements.use(db.prepare("DELETE FROM gc_retained_entries"));
+		const insertRetainedEntry = statements.use(
+			db.prepare(`
 			INSERT OR IGNORE INTO gc_retained_entries (
 				table_name, entry_id, timestamp, tool_call_id, target_session_file
 			) VALUES (?, ?, ?, ?, ?)
-		`);
+		`),
+		);
 		const transferStatements = entryTables.map(table => {
 			const toolCallMatch =
 				table === "tool_calls" ? `retained.tool_call_id = ${table}.tool_call_id` : "retained.tool_call_id = ''";
@@ -1500,7 +1507,8 @@ function reconcileStatsRowsForSessions(dbPath: string, plans: StatsCleanupPlan[]
 				AND retained.timestamp = ${table}.timestamp
 				AND ${toolCallMatch}
 			`;
-			return db.prepare(`
+			return statements.use(
+				db.prepare(`
 				UPDATE OR IGNORE ${table}
 				SET session_file = (
 					SELECT retained.target_session_file
@@ -1513,11 +1521,14 @@ function reconcileStatsRowsForSessions(dbPath: string, plans: StatsCleanupPlan[]
 						FROM gc_retained_entries AS retained
 						WHERE ${identityMatch}
 					)
-			`);
+			`),
+			);
 		});
 		const deletionStatements = sessionTables.map(table => ({
 			table,
-			statement: db.prepare(`DELETE FROM ${table} WHERE session_file = ? OR instr(session_file, ?) = 1`),
+			statement: statements.use(
+				db.prepare(`DELETE FROM ${table} WHERE session_file = ? OR instr(session_file, ?) = 1`),
+			),
 		}));
 		let deleted = 0;
 		const tx = db.transaction((cleanupPlans: StatsCleanupPlan[]) => {
@@ -1754,7 +1765,8 @@ async function checkpointWal(dbPath: string, apply: boolean): Promise<WalCheckpo
 	let checkpointAttempted = false;
 	try {
 		db.run("PRAGMA busy_timeout = 5000");
-		const row = db.prepare("PRAGMA wal_checkpoint(TRUNCATE)").get() as WalCheckpointRow | null;
+		using checkpointStmt = db.prepare("PRAGMA wal_checkpoint(TRUNCATE)");
+		const row = checkpointStmt.get() as WalCheckpointRow | null;
 		checkpointAttempted = true;
 		result.busy = sqliteNumber(row?.busy);
 		result.log = sqliteNumber(row?.log);

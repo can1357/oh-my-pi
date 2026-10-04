@@ -175,7 +175,7 @@ function RequestDetailsBody({ details, aborted }: { details: RequestDetails; abo
 				</div>
 			</section>
 
-			<JsonBlock data={output} title="Output message" />
+			{output != null && <JsonBlock data={output} title="Output message" />}
 			<JsonBlock data={messages} title="Session entry" initialCollapsed />
 			<JsonBlock data={row} title="Stats row" initialCollapsed />
 		</>

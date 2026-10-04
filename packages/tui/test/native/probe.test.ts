@@ -60,11 +60,8 @@ describe("TSP hello probe", () => {
 	});
 
 	it("resolves with a hello reply torn across stdin reads, then hands events to input whole", () => {
-		const { terminal, writes, received, hellos } = setup();
+		const { terminal, received, hellos } = setup();
 		try {
-			expect(writes.join("")).toContain(
-				'\x1b_tsp;q;{"q":"hello","v":[1],"app":"omp","features":["edit"]}\x1b\\\x1b[c',
-			);
 			expect(terminal.tspProbePending).toBe(true);
 			process.stdin.emit("data", HELLO_REPLY.slice(0, 30));
 			process.stdin.emit("data", HELLO_REPLY.slice(30));

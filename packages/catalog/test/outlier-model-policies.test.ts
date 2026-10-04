@@ -46,6 +46,14 @@ describe("outlier catalog policies", () => {
 		}
 	});
 
+	test("discovered Antigravity image SKUs build as image models while sibling Flash SKUs stay chat", () => {
+		// Antigravity discovery emits image SKUs as text-only rows without a kind.
+		const image = buildModel(chatSpec("google-antigravity", "google-gemini-cli", "gemini-3.1-flash-image"));
+		const chat = buildModel(chatSpec("google-antigravity", "google-gemini-cli", "gemini-3.1-flash-lite"));
+		expect(image.kind).toBe("image");
+		expect(chat.kind).toBeUndefined();
+	});
+
 	test("chat providers carry their grounding capability", () => {
 		const cases = [
 			["google", "google-generative-ai", "gemini"],

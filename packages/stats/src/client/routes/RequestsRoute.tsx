@@ -3,11 +3,11 @@ import { getRecentRequests } from "../api";
 import {
 	formatCompact,
 	formatDurationMs,
+	formatErrorRate,
 	formatEstimatedCost,
 	formatFolder,
 	formatInteger,
 	formatMessageCost,
-	formatPercent,
 	formatRelativeTime,
 	formatTimestamp,
 } from "../data/formatters";
@@ -125,7 +125,7 @@ export function RequestsRoute({ active, range, onRequestClick }: RequestsRoutePr
 							<Stat
 								label="Failed"
 								value={formatInteger(summary.failed)}
-								hint={`${summary.requests > 0 ? formatPercent(summary.failed / summary.requests) : "–"} · ${formatInteger(summary.aborted)} aborted`}
+								hint={`${summary.requests > 0 ? formatErrorRate(summary.failed / summary.requests) : "–"} · ${formatInteger(summary.aborted)} aborted`}
 							/>
 							<Stat
 								label="Tokens"

@@ -4,7 +4,7 @@ import * as speechWire from "../../providers/speech-server";
 import { isSpeechApi, synthesizeSpeech } from "../../speech";
 import { deterministicUuid } from "../../utils/deterministic-id";
 import {
-	type AuthGatewayBootOptions,
+	type AuthGatewayRouteOptions,
 	buildGatewayApiKeyResolver,
 	mirrorRequestAbort,
 	recordGatewayUsage,
@@ -12,7 +12,7 @@ import {
 } from "../dispatch";
 import { gatewayResponseHeaders, resolveClientIdentity } from "../http";
 
-export async function handleSpeech(bootOpts: AuthGatewayBootOptions, req: Request, peer: string): Promise<Response> {
+export async function handleSpeech(bootOpts: AuthGatewayRouteOptions, req: Request, peer: string): Promise<Response> {
 	const startedAt = performance.now();
 	const requestId = crypto.randomUUID();
 	const controller = mirrorRequestAbort(req);

@@ -710,9 +710,10 @@ export class AssistantMessageComponent extends Container {
 	 * A `col` (role `omp.assistant`) of `md` nodes keyed by content index, so
 	 * streamed deltas reach the terminal as `text append` on the same node;
 	 * the tail block carries `stream: true` until the message finalizes.
-	 * Thinking blocks are quiet collapsible `section`s (collapsed per
-	 * `hideThinkingBlock`): a muted "Thinking…" shimmer while live, then
-	 * "Thought for 12s"; tokens and rate ride in the head's `title`.
+	 * Thinking blocks are quiet collapsible `section`s: a muted "Thinking…"
+	 * shimmer while live, then "Thought for 12s"; tokens and rate ride in the
+	 * head's `title`. With `hideThinkingBlock` only the live head shows (collapsed)
+	 * and a finished thought emits nothing.
 	 */
 	override describe(): NativeNode {
 		const tail = this.#displayedMessage ? this.#thinkingTailIndex(this.#displayedMessage) : undefined;
@@ -804,6 +805,8 @@ export class AssistantMessageComponent extends Container {
 					} else if (clock && clock.end === undefined) {
 						clock.end = performance.now();
 					}
+					// Hidden (Ctrl+T): only the live "Thinking…" head shows; a finished thought leaves nothing.
+					if (this.#hideThinkingBlock && !thinkingLive) continue;
 					const tokens = thinkingLive ? this.#thinkingTokens : (clock?.tokens ?? 0);
 					const title = tokens > 0 ? `${formatNumber(tokens)} tokens` : undefined;
 					// Live: starburst · "Thinking…" · ticking timer · tok/s. Done: "Thought for 12s".
@@ -826,12 +829,7 @@ export class AssistantMessageComponent extends Container {
 							"section",
 							{
 								// `.live` while streaming: the body clamps to its tail under a fade.
-								// `.ghost` while thinking is hidden (Ctrl+T): only a faint "Thought for 12s" stays.
-								role: thinkingLive
-									? "omp.thinking.live"
-									: this.#hideThinkingBlock
-										? "omp.thinking.ghost"
-										: "omp.thinking",
+								role: thinkingLive ? "omp.thinking.live" : "omp.thinking",
 								collapsible: true,
 								// Open while it streams; a finished thought folds to its "Thought for 12s" line.
 								collapsed: this.#thinkingCollapsed.get(index) ?? (this.#hideThinkingBlock || !thinkingLive),

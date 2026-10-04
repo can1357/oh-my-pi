@@ -32,7 +32,8 @@ import {
 } from "./proc-render";
 import type { TspTone } from "@oh-my-pi/pi-wire";
 import { code, compact, node, span } from "../native/describe";
-import type { NativeChild } from "../native/node";
+import { registerNativeBlob } from "../native/blobs";
+import type { NativeChild, NativeNode } from "../native/node";
 import { diagnosticsBadge, diagnosticsSection, displayPath, errorText, fileHref, resultText } from "./native-view";
 import { describeCfgWrite, renderCfgWrite, type CfgWriteDetails } from "./cfg-render";
 import type { FileDiagnosticsResult } from "./lsp";
@@ -90,6 +91,37 @@ interface WriteRenderArgs {
 const WRITE_PREVIEW_LINES = 6;
 /** Collapsed native write body: the first lines of the file (§7.3). */
 const NATIVE_WRITE_PREVIEW = { lines: 8 } as const;
+/** Tallest rendered SVG preview, in lines; collapsed, the card shows just the picture. */
+const NATIVE_SVG_PREVIEW_LINES = 16;
+
+/** A write tool result as the renderer receives it. */
+interface WriteResult {
+	content: Array<{ type: string; text?: string }>;
+	details?: WriteToolDetails;
+	isError?: boolean;
+}
+
+/** Cached SVG preview node on its result, so the content is encoded and hashed once per write. */
+const kSvgPreview = Symbol("write.svgPreview");
+
+interface TaggedWriteResult extends WriteResult {
+	[kSvgPreview]?: { content: string; node: NativeNode };
+}
+
+/** Native `image` node drawing written SVG `content`, cached on `result`. */
+function describeSvgPreview(result: TaggedWriteResult, content: string, alt: string): NativeNode {
+	const cached = result[kSvgPreview];
+	if (cached?.content === content) return cached.node;
+	const blob = registerNativeBlob(new TextEncoder().encode(content), "image/svg+xml");
+	const preview = node("image", {
+		blob,
+		alt,
+		role: "omp.tool.write.image",
+		max: { h: `${NATIVE_SVG_PREVIEW_LINES}lines` },
+	});
+	result[kSvgPreview] = { content, node: preview };
+	return preview;
+}
 
 function countLines(text: string): number {
 	if (!text) return 0;
@@ -589,7 +621,7 @@ export const writeToolRenderer = {
 	},
 
 	renderResult(
-		result: { content: Array<{ type: string; text?: string }>; details?: WriteToolDetails; isError?: boolean },
+		result: WriteResult,
 		options: RenderResultOptions & { renderContext?: WriteRenderContext },
 		uiTheme: Theme,
 		args?: WriteRenderArgs,
@@ -722,7 +754,7 @@ export const writeToolRenderer = {
 	},
 
 	describeResult(
-		result: { content: Array<{ type: string; text?: string }>; details?: WriteToolDetails; isError?: boolean },
+		result: WriteResult,
 		options: RenderResultOptions & { renderContext?: WriteRenderContext },
 		args?: WriteRenderArgs,
 	): NativeToolView | undefined {
@@ -744,10 +776,13 @@ export const writeToolRenderer = {
 		});
 		if (result.isError) return { tool, tone: "error", body: [errorText(resultText(result))] };
 		const progressText = resultText(result);
+		// A finished SVG write leads with the drawing; its source follows below the collapsed clamp.
+		const svg = !isPartial && fileContent.trim().length > 0 && rawPath.toLowerCase().endsWith(".svg");
 		const body = compact<NativeChild>([
 			isPartial &&
 				progressText.length > 0 &&
 				node("text", { spans: [span(progressText, "muted")], truncate: "end" }),
+			svg && describeSvgPreview(result, fileContent, displayPath(rawPath)),
 			fileContent.length > 0 &&
 				code(fileContent, {
 					lang: rawPath ? getLanguageFromPath(rawPath) : undefined,
@@ -755,7 +790,7 @@ export const writeToolRenderer = {
 				}),
 			diagnosticsSection(diagnostics),
 		]);
-		return { tool, body, preview: NATIVE_WRITE_PREVIEW };
+		return { tool, body, preview: svg ? { lines: NATIVE_SVG_PREVIEW_LINES } : NATIVE_WRITE_PREVIEW };
 	},
 	mergeCallAndResult: true,
 	// The collapsed pending preview follows the streaming edge with a tail

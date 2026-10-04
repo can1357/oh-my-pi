@@ -714,12 +714,12 @@ export class SpeculativeOperationCoordinator {
 		try {
 			validatedArgs = validateToolArguments(tool, toolCall);
 		} catch {
-			if (!tool.lenientArgValidation) {
+			// Lenience covers schema mismatches; a parse failure has no args to hand over.
+			if (!tool.lenientArgValidation || "__parseError" in toolCall.arguments) {
 				this.ineligible(toolCall, "tool arguments are not valid", source, parentToolCallId);
 				return undefined;
 			}
-			validatedArgs = { ...(toolCall.arguments as Record<string, unknown>) };
-			delete validatedArgs.__parseError;
+			validatedArgs = { ...toolCall.arguments };
 			delete validatedArgs.__rawJson;
 		}
 		let executionArgs: Record<string, unknown>;

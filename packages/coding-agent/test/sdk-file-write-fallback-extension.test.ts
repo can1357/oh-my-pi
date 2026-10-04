@@ -137,6 +137,8 @@ describe("registerFileWriteFallback end-to-end (real extension, real session)", 
 	});
 
 	afterAll(() => {
+		// The discovered auth DB lives in registryAuthDir; Windows cannot delete it while open.
+		modelRegistry.authStorage.close();
 		removeSyncWithRetries(registryAuthDir);
 	});
 
