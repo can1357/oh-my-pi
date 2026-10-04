@@ -206,6 +206,8 @@ describe("AgentSession tool-call loop guard", () => {
 		const blockedTurn = JSON.stringify(contexts[4]!.messages);
 		expect(blockedTurn).toContain("was not run again");
 		expect(blockedTurn).toContain("Command exited with code 1");
+		expect(blockedTurn).toContain("First failure in this streak");
+		expect(blockedTurn).toContain("determine why this call failed");
 		expect(blockedTurn).toContain("Continue the current goal");
 	});
 });
