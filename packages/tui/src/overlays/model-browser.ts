@@ -164,8 +164,28 @@ export interface RoleAssignment {
 	autoSelected: boolean;
 }
 
+/**
+ * A role with a persisted value whose model does not currently resolve — a
+ * discovery-backed provider mid-refresh, or a catalog that dropped the row.
+ * The assignment has no model to render, but the role is still configured:
+ * the hub must offer to clear it rather than silently treat it as unassigned
+ * and overwrite it on the next pick.
+ */
+export interface UnresolvedRoleAssignment {
+	/** The persisted selector, exactly as configured. */
+	selector: string;
+	autoSelected: false;
+}
+
 /** Map of role id to its resolved assignment (absent roles are unresolved). */
-export type RoleAssignments = Record<string, RoleAssignment | undefined>;
+export type RoleAssignments = Record<string, RoleAssignment | UnresolvedRoleAssignment | undefined>;
+
+/** Narrowing helper: the entry carries a resolved model. */
+export function isResolvedAssignment(
+	assignment: RoleAssignment | UnresolvedRoleAssignment | undefined,
+): assignment is RoleAssignment {
+	return assignment !== undefined && "model" in assignment;
+}
 
 /**
  * Resolve every known role to its display assignment: configured role values
@@ -216,14 +236,28 @@ export function resolveRoleAssignments(
 		const roleValue = settings.getModelRole(role);
 		if (!roleValue) continue;
 		configuredRoles.add(role);
-		const resolved = settings.resolveRoleValue(roleValue, eligible(allModels, catalogByAccepts, role));
+		const eligibleModels = eligible(allModels, catalogByAccepts, role);
+		const resolved = settings.resolveRoleValue(roleValue, eligibleModels);
 		if (resolved.model) {
 			roles[role] = {
 				model: resolved.model,
 				thinkingLevel: resolvedThinkingLevel(role, resolved),
 				autoSelected: false,
 			};
+			continue;
 		}
+		// Unresolved for one of two reasons. If the model resolves against the
+		// whole catalog but not against this role's accepted kinds, the role is
+		// genuinely unassigned (a `default` pointing at an image model). If it
+		// resolves against neither, its provider currently lists no such model —
+		// a discovery-backed provider mid-refresh, or a catalog that dropped the
+		// row. Keep the persisted selector in that case so the hub reports the
+		// role as configured instead of showing it cleared and overwriting it on
+		// the next pick.
+		// `eligible` returns a fresh array; the resolver takes a mutable pool.
+		const catalogMatch = settings.resolveRoleValue(roleValue, [...allModels]);
+		if (catalogMatch.model) continue;
+		roles[role] = { selector: roleValue.trim(), autoSelected: false };
 	}
 
 	if (autoCandidates.length > 0) {
@@ -272,7 +306,7 @@ function computeModelRank(model: Model, roles: RoleAssignments): number {
 	let i = 0;
 	while (i < MODEL_ROLE_IDS.length) {
 		const assigned = roles[MODEL_ROLE_IDS[i]];
-		if (assigned && modelsAreEqual(assigned.model, model)) {
+		if (isResolvedAssignment(assigned) && modelsAreEqual(assigned.model, model)) {
 			break;
 		}
 		i++;
@@ -493,7 +527,7 @@ export function buildSearchAffinity(
 		if (seenRoles.has(role)) return;
 		seenRoles.add(role);
 		const assignment = roles[role];
-		if (assignment && !assignment.autoSelected) {
+		if (isResolvedAssignment(assignment) && !assignment.autoSelected) {
 			addModel(`${assignment.model.provider}/${assignment.model.id}`);
 			const provider = assignment.model.provider.toLowerCase();
 			const current = roleStats.get(provider);
@@ -1091,7 +1125,7 @@ export class ModelBrowser implements Component {
 		if (this.#mruOrder.includes(item.selector)) return true;
 		for (const role in this.#roles) {
 			const r = this.#roles[role];
-			if (r && modelsAreEqual(r.model, item.model)) return true;
+			if (isResolvedAssignment(r) && modelsAreEqual(r.model, item.model)) return true;
 		}
 		return false;
 	}
@@ -1386,7 +1420,7 @@ export class ModelBrowser implements Component {
 			if (seen.has(role)) return;
 			seen.add(role);
 			const assignment = this.#roles[role];
-			if (!assignment || !modelsAreEqual(assignment.model, model)) return;
+			if (!isResolvedAssignment(assignment) || !modelsAreEqual(assignment.model, model)) return;
 			if (this.#settings.getRoleInfo(role).hidden) return;
 			chips.push(formatRoleChip(role, assignment, this.#settings));
 		};
@@ -1651,7 +1685,7 @@ export class ModelBrowser implements Component {
 					if (seen.has(role)) return;
 					seen.add(role);
 					const assignment = this.#roles[role];
-					if (!assignment || !modelsAreEqual(assignment.model, model)) return;
+					if (!isResolvedAssignment(assignment) || !modelsAreEqual(assignment.model, model)) return;
 					if (this.#settings.getRoleInfo(role).hidden) return;
 					if (chips.length > 0) chips.push(span(" · ", "dim"));
 					chips.push(...roleChipSpans(role, assignment, this.#settings));
@@ -1793,7 +1827,7 @@ export class ModelBrowser implements Component {
 			if (seen.has(role)) return;
 			seen.add(role);
 			const assignment = this.#roles[role];
-			if (!assignment || !modelsAreEqual(assignment.model, model)) return;
+			if (!isResolvedAssignment(assignment) || !modelsAreEqual(assignment.model, model)) return;
 			if (this.#settings.getRoleInfo(role).hidden) return;
 			held.push({ role, assignment });
 		};

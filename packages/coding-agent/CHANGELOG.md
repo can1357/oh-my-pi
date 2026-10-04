@@ -5,9 +5,12 @@
 ### Fixed
 
 - Fixed follow-up hashline edits being rejected as anchored on lines "never displayed" after an earlier edit shifted those lines, when the replacement carries the anchored content; genuinely stale line numbers are still rejected ([#14254](https://github.com/can1357/oh-my-pi/pull/14254) by [@abilliontokens](https://github.com/abilliontokens)).
+- A model role whose model is not in the catalog right now (a discovery-backed provider that has not listed it yet) no longer shows as unassigned in `/model`; the role keeps its configured selector and reads as unavailable instead of cleared.
 
 ## [18.6.0] - 2026-10-03
 
+- The `/btw` panel now keeps one blank line above its top border instead of sitting flush against the answer above it ([#12695](https://github.com/can1357/oh-my-pi/pull/12695) by [@iacore](https://github.com/iacore)).
+- Fixed multi-second UI freezes after every turn in long sessions caused by rescanning the whole provider context with every credential regex on each request; built-in patterns now skip text that contains none of their literal prefixes (1018 ms → 19 ms on a 716 KB context) ([#12666](https://github.com/can1357/oh-my-pi/pull/12666) by [@DarkPhilosophy](https://github.com/DarkPhilosophy)).
 ### Added
 
 - The `/models` Roles view shows which saved model preset is in effect, and Ctrl+←/→ (or `p`/`P` on the role rows, for macOS where Ctrl+←/→ switches Spaces) switches to the next or previous one, in Tern and text mode ([#14210](https://github.com/can1357/oh-my-pi/pull/14210) by [@H4vC](https://github.com/H4vC))

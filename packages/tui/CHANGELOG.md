@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- The model hub's role list keeps a configured role whose model is absent from the current catalog visible as configured (with its selector marked unavailable) instead of showing it cleared, and no longer offers to re-assign over it.
+
 ## [18.6.0] - 2026-10-03
 
 ### Fixed

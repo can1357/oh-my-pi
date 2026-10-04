@@ -8,6 +8,7 @@ import {
 	buildBrowserItems,
 	buildSearchAffinity,
 	rankModelItems,
+	isResolvedAssignment,
 	ModelBrowser,
 	type RoleAssignments,
 	resolveRoleAssignments,
@@ -67,7 +68,7 @@ describe("resolveRoleAssignments", () => {
 		const roles = resolveRoleAssignments(createModelBrowserSource(settings), [chat, image], [chat, image]);
 
 		expect(roles.default).toBeUndefined();
-		expect(roles.image?.model).toBe(image);
+		expect(isResolvedAssignment(roles.image) ? roles.image.model : undefined).toBe(image);
 	});
 
 	test("shows configured smol for an unconfigured tiny role", () => {
@@ -86,8 +87,8 @@ describe("resolveRoleAssignments", () => {
 			[smol, priorityHead],
 		);
 
-		expect(roles.smol?.model).toBe(smol);
-		expect(roles.tiny?.model).toBe(smol);
+		expect(isResolvedAssignment(roles.smol) ? roles.smol.model : undefined).toBe(smol);
+		expect(isResolvedAssignment(roles.tiny) ? roles.tiny.model : undefined).toBe(smol);
 		expect(roles.tiny?.autoSelected).toBe(true);
 	});
 
@@ -107,8 +108,8 @@ describe("resolveRoleAssignments", () => {
 			[slow, priorityHead],
 		);
 
-		expect(roles.slow?.model).toBe(slow);
-		expect(roles.advisor?.model).toBe(slow);
+		expect(isResolvedAssignment(roles.slow) ? roles.slow.model : undefined).toBe(slow);
+		expect(isResolvedAssignment(roles.advisor) ? roles.advisor.model : undefined).toBe(slow);
 		expect(roles.advisor?.autoSelected).toBe(true);
 	});
 });
