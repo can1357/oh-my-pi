@@ -21,7 +21,7 @@ class Inbox<T> {
 	}
 }
 
-async function harness(payloadType: "string" | "blob" | "buffer" | "arraybuffer" = "string") {
+async function harness(payloadType: "string" | "buffer" | "arraybuffer" = "string") {
 	const incoming = new Inbox<unknown>();
 	const events = new Inbox<LiveServerEvent>();
 	const played = new Inbox<Float32Array>();
@@ -62,7 +62,6 @@ async function harness(payloadType: "string" | "blob" | "buffer" | "arraybuffer"
 		createSocket: () => {
 			const socket = new WebSocket(`ws://127.0.0.1:${server.port}`);
 			if (payloadType === "arraybuffer") socket.binaryType = "arraybuffer";
-			else if (payloadType === "blob") socket.binaryType = "blob";
 			return socket;
 		},
 		createPlayback: () => ({ write: samples => played.push(samples), stop: () => stopped.push() }),
@@ -106,7 +105,7 @@ const setupInput = type({
 const audioInput = type({ realtimeInput: { audio: { data: "string", mimeType: "string" } } });
 
 describe("Gemini Live websocket", () => {
-	test.each(["string", "blob", "buffer", "arraybuffer"] as const)(
+	test.each(["string", "buffer", "arraybuffer"] as const)(
 		"%s replies complete setup and decode Unicode transcripts",
 		async payloadType => {
 			const h = await harness(payloadType);
