@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Changed native OpenAI compaction to truncate over-long replayed message IDs with the shared `truncateResponseItemId`; IDs are unchanged ([#14374](https://github.com/can1357/oh-my-pi/pull/14374) by [@jaredlyon](https://github.com/jaredlyon))
+
 ### Fixed
 
 - Fixed OpenAI V1 remote compaction re-attaching a prior Anthropic native payload after a successful compact ([#15041](https://github.com/can1357/oh-my-pi/pull/15041) by [@PaleRoses](https://github.com/PaleRoses))
