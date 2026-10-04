@@ -84,6 +84,22 @@ provider "openai" {
 			limits context=8192
 			supports-tools #false
 		}
+		// GPT Image 2.5 (2026-09-08) is ahead of models.dev; it only runs as the
+		// `image_generation` tool's `model` on a Responses carrier, not via the Image API.
+		model "gpt-image-2.5-sunburst" name="GPT Image 2.5 Sunburst" {
+			reasoning #false
+			input "text" "image"
+			cost input=5 output=30 cache-read=1.25 cache-write=0
+			limits context=10000
+			supports-tools #false
+		}
+		model "gpt-image-2.5-flare" name="GPT Image 2.5 Flare" {
+			reasoning #false
+			input "text" "image"
+			cost input=5 output=30 cache-read=1.25 cache-write=0
+			limits context=10000
+			supports-tools #false
+		}
 	}
 
 	models "whisper-1" "gpt-4o-transcribe" "gpt-4o-mini-transcribe" {
@@ -91,6 +107,9 @@ provider "openai" {
 	}
 	models "text-embedding-3-small" "text-embedding-3-large" "text-embedding-ada-002" {
 		kind "embedding"
+	}
+	models "gpt-image-2.5-sunburst" "gpt-image-2.5-flare" {
+		kind "image"
 	}
 
 	// Replaces the strict-mode provider whitelist entry.
