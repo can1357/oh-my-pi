@@ -642,18 +642,18 @@ export const cfgTuiMotion = register({
 		group: "Display",
 		label: "Motion",
 		description:
-			"One switch over every animation: spinner cadence, repaint ceiling, shimmer, and decorative blink/fade. A setting you set explicitly (spinner interval, max fps, shimmer) still wins over the preset. For many panes, a shared screen, or reduced-motion needs",
+			"One switch over every animation: spinner cadence, shimmer, and decorative blink/fade. Content (streaming text) keeps repainting at the frame ceiling, which the presets leave alone; set Max Frames Per Second to throttle that too. A setting you set explicitly (spinner interval, max fps, shimmer) still wins over the preset. For many panes, a shared screen, or reduced-motion needs",
 		options: [
 			{ value: "full", label: "Full", description: "Every animation at its own setting (default)" },
 			{
 				value: "reduced",
 				label: "Reduced",
-				description: "Spinners at 250 ms, 4 fps ceiling, no shimmer, no blink/fade",
+				description: "Spinners at 250 ms, no shimmer, no blink/fade; text still streams at full rate",
 			},
 			{
 				value: "none",
 				label: "None",
-				description: "Static spinners and title, 4 fps ceiling, no shimmer, no blink/fade",
+				description: "Static spinners and title, no shimmer, no blink/fade; text still streams at full rate",
 			},
 		],
 	},

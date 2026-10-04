@@ -113,7 +113,7 @@ export const launchHelp = {
 		}),
 		motion: Flags.string({
 			description:
-				"One switch over every animation: full (default), reduced (spinners 250 ms, 4 fps, no shimmer or blink), or none (static). Explicit spinner-interval/max-fps/shimmer settings still win. Overrides tui.motion for this run; PI_MOTION takes precedence",
+				"One switch over every animation: full (default), reduced (spinners 250 ms, no shimmer or blink), or none (static). Streaming text keeps its frame rate; cap it with --max-fps. Explicit spinner-interval/max-fps/shimmer settings still win. Overrides tui.motion for this run; PI_MOTION takes precedence",
 		}),
 		shimmer: Flags.string({
 			description:
