@@ -21,11 +21,18 @@ import type { RpcMessagesPage } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-me
 import type {
 	RpcAgentSessionEventFrame,
 	RpcAskDialogQuestion,
+	RpcAttachedFrame,
 	RpcAvailableCommandsUpdateFrame,
 	RpcAvailableSlashCommand,
+	RpcClientInfo,
+	RpcClientsChangedFrame,
 	RpcCommand,
+	RpcCommandOutputFrame,
+	RpcConfigUpdateFrame,
+	RpcEntryFrame,
 	RpcExtensionUIRequest,
 	RpcExtensionUIResponse,
+	RpcHelloFrame,
 	RpcHostToolCallRequest,
 	RpcHostToolCancelRequest,
 	RpcHostToolDefinition,
@@ -40,12 +47,19 @@ import type {
 	RpcLivePhaseFrame,
 	RpcLiveTranscriptFrame,
 	RpcOpenSessionResult,
+	RpcPreconditions,
 	RpcPromptError,
 	RpcPromptResultFrame,
+	RpcQueueAttachments,
 	RpcReadyFrame,
 	RpcResponse,
+	RpcResumedFrame,
+	RpcSessionInfoUpdateFrame,
+	RpcSessionOrigin,
+	RpcSessionReplacedFrame,
 	RpcSessionSettledFrame,
 	RpcSessionState,
+	RpcSnapshot,
 	RpcSubagentEventFrame,
 	RpcSubagentLifecycleFrame,
 	RpcSubagentMessagesResult,
@@ -122,7 +136,11 @@ type Same<A, B> = [A] extends [B] ? ([B] extends [A] ? true : { left: A; right: 
 // --- Commands -------------------------------------------------------------
 
 type CommandName = RpcCommand["type"];
-type ServerParams<K extends CommandName> = Omit<Extract<RpcCommand, { type: K }>, "id" | "type">;
+/** Preconditions travel with every command beside `id`/`type`; the wire declares them once as `RpcPreconditions`. */
+type ServerParams<K extends CommandName> = Omit<
+	Extract<RpcCommand, { type: K }>,
+	"id" | "type" | keyof RpcPreconditions
+>;
 type ServerResult<K extends CommandName> =
 	Extract<RpcResponse, { command: K; success: true }> extends infer R
 		? R extends { data?: infer D }
@@ -220,7 +238,22 @@ export type Frames = Assert<
 		uiConfirm: Inbound<Wire.ConfirmUiResponse, Extract<RpcExtensionUIResponse, { confirmed: unknown }>>;
 		uiCancel: Inbound<Wire.CancelUiResponse, Extract<RpcExtensionUIResponse, { cancelled: unknown }>>;
 		uiAnswers: Inbound<Wire.AnswersUiResponse, Extract<RpcExtensionUIResponse, { answers: unknown }>>;
+		uiChat: Inbound<Wire.ChatUiResponse, Extract<RpcExtensionUIResponse, { chat: unknown }>>;
 		responseFailure: Outbound<Extract<RpcResponse, { success: false }>, Wire.RpcResponse>;
+		preconditions: Inbound<Wire.RpcPreconditions, RpcPreconditions>;
+		commandOutput: Outbound<RpcCommandOutputFrame, Wire.CommandOutputEvent>;
+		configUpdate: Outbound<RpcConfigUpdateFrame, Wire.ConfigUpdateEvent>;
+		sessionInfoUpdate: Outbound<RpcSessionInfoUpdateFrame, Wire.SessionInfoUpdateEvent>;
+		attached: Outbound<RpcAttachedFrame, Wire.AttachedEvent>;
+		resumed: Outbound<RpcResumedFrame, Wire.ResumedEvent>;
+		entry: Outbound<RpcEntryFrame, Wire.EntryEvent>;
+		sessionReplaced: Outbound<RpcSessionReplacedFrame, Wire.SessionReplacedEvent>;
+		clientsChanged: Outbound<RpcClientsChangedFrame, Wire.ClientsChangedEvent>;
+		/** The wire carries `protocolVersion` as an integer: generators take only string enums. */
+		hello: Inbound<Omit<Wire.HelloFrame, "protocolVersion">, Omit<RpcHelloFrame, "protocolVersion">>;
+		helloClient: Inbound<Wire.ClientIdentity, RpcHelloFrame["client"]>;
+		helloCapabilities: Inbound<Wire.ClientCapabilities, RpcHelloFrame["capabilities"]>;
+		helloResume: Inbound<Wire.ResumePoint, NonNullable<RpcHelloFrame["resume"]>>;
 	}>
 >;
 /** Every inbound frame type the server reads is a wire inbound frame. */
@@ -256,6 +289,11 @@ export type State = Assert<
 		slashCommand: Outbound<RpcAvailableSlashCommand, Wire.AvailableSlashCommand>;
 		slashSubcommand: Outbound<NonNullable<RpcAvailableSlashCommand["subcommands"]>[number], Wire.SlashSubcommand>;
 		subagentSnapshot: Outbound<RpcSubagentSnapshot, Wire.SubagentSnapshot>;
+		snapshot: Outbound<RpcSnapshot, Wire.SessionSnapshot>;
+		streamingMessage: Outbound<NonNullable<RpcSnapshot["streaming"]>, Wire.StreamingMessage>;
+		clientInfo: Outbound<RpcClientInfo, Wire.ClientInfo>;
+		sessionOrigin: Outbound<RpcSessionOrigin, Wire.SessionOrigin>;
+		queueAttachments: Outbound<RpcQueueAttachments, Wire.QueueAttachments>;
 		subagentMessages: Outbound<RpcSubagentMessagesResult, Wire.SubagentMessages>;
 		model: OutboundSubset<Model, Wire.ModelInfo>;
 		modelCost: OutboundSubset<Model["cost"], Wire.ModelCost>;

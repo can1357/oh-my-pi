@@ -22,10 +22,10 @@ afterEach(async () => {
 const BIG_IMAGE_B64 = Buffer.alloc(1024, 7).toString("base64");
 
 describe("SessionManager collab replication", () => {
-	it("onEntryAppended receives the in-memory entry with inline image data while the persisted line externalizes it", async () => {
+	it("subscribeEntryAppended receives the in-memory entry with inline image data while the persisted line externalizes it", async () => {
 		const { manager } = makeManager();
 		const captured: SessionEntry[] = [];
-		manager.onEntryAppended = entry => captured.push(entry);
+		manager.subscribeEntryAppended(entry => captured.push(entry));
 
 		manager.appendMessage({
 			role: "user",
@@ -56,11 +56,27 @@ describe("SessionManager collab replication", () => {
 
 	it("swallows hook failures so persistence is never broken by a broadcast error", () => {
 		const { manager } = makeManager();
-		manager.onEntryAppended = () => {
+		manager.subscribeEntryAppended(() => {
 			throw new Error("socket exploded");
-		};
+		});
 		const id = manager.appendMessage({ role: "user", content: "still works", timestamp: Date.now() });
 		expect(manager.getEntry(id)?.id).toBe(id);
+	});
+
+	it("delivers each appended entry to every subscriber, isolating a throwing one", () => {
+		const { manager } = makeManager();
+		const first: string[] = [];
+		const second: string[] = [];
+		const offFirst = manager.subscribeEntryAppended(entry => first.push(entry.id));
+		manager.subscribeEntryAppended(() => {
+			throw new Error("boom");
+		});
+		manager.subscribeEntryAppended(entry => second.push(entry.id));
+		const a = manager.appendMessage({ role: "user", content: "a", timestamp: Date.now() });
+		offFirst();
+		const b = manager.appendMessage({ role: "user", content: "b", timestamp: Date.now() });
+		expect(first).toEqual([a]);
+		expect(second).toEqual([a, b]);
 	});
 
 	it("ingestReplicatedEntry preserves foreign ids and advances the leaf", async () => {

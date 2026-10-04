@@ -458,7 +458,7 @@ function makeHostContext(): InteractiveModeContext {
 				header: { type: "session", id: "sess-proto", timestamp: new Date().toISOString(), cwd: "/tmp" },
 				entries: [],
 			}),
-			onEntryAppended: undefined,
+			subscribeEntryAppended: () => () => {},
 		},
 		session: {
 			isStreaming: false,

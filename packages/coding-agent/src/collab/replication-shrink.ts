@@ -21,7 +21,7 @@
  *   every string/array pass returned the payload untouched;
  * - a payload nested past the engine's own serialization limit: the walk
  *   recursed once per level and threw `RangeError: Maximum call stack size
- *   exceeded` out of the `onEntryAppended` chokepoint. Every caller swallows
+ *   exceeded` out of the `subscribeEntryAppended` chokepoint. Every caller swallows
  *   that throw, so the real symptom was silent: the entry never reached
  *   guests (live path), or a `snapshot-chunk` train ended without its
  *   `final: true` terminator and the guest's join timed out while the host
@@ -341,7 +341,7 @@ function omittedDetail(type: string, bytes: number | null): string {
  * Typed on the host's own entry union rather than the wire skeleton: the
  * frame carries the rich entry and only *serializes* into the wire shape.
  *
- * Never throws: it is called from the `onEntryAppended` chokepoint, whose
+ * Never throws: it is called from the `subscribeEntryAppended` chokepoint, whose
  * caller swallows exceptions, and from the snapshot chunker, where a throw
  * would strand the guest without a `final` chunk.
  */

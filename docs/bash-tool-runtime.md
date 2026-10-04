@@ -307,7 +307,7 @@ This table covers finite-command execution; named-service routing is described s
 | Print mode tool call           | `BashTool.execute`                                    | No (no UI context)                                    | No TUI overlay; output appears in event stream/final assistant text flow | Same tool error mapping                          |
 | RPC tool call (agent tooling)  | `BashTool.execute`                                    | Usually no UI -> non-PTY                              | Structured tool events/results                                           | Same tool error mapping                          |
 | Interactive bang command (`!`) | `AgentSession.executeBash` + `BashExecutionComponent` | Headless PTY for supported zsh/fish user shells; not the interactive overlay | Dedicated bash execution component with PTY replay when used | Controller catches exceptions and shows UI error |
-| RPC `bash` command             | `rpc-mode` -> `session.executeBash`                   | No                                                    | Returns `BashResult` directly                                            | Consumer handles returned fields                 |
+| RPC `bash` command             | `rpc-server` -> `session.executeBash`                 | No                                                    | Returns `BashResult` directly                                            | Consumer handles returned fields                 |
 
 ## Operational caveats
 
@@ -336,5 +336,5 @@ This table covers finite-command execution; named-service routing is described s
 - [`src/session/bash-runner.ts`](../packages/coding-agent/src/session/bash-runner.ts) — bang-command execution, result ownership, message recording, and abort lifecycle.
 - [`packages/tui/src/chat/bash-execution.ts`](../packages/tui/src/chat/bash-execution.ts) — interactive `!` command execution component.
 - [`src/modes/controllers/command-controller.ts`](../packages/coding-agent/src/modes/controllers/command-controller.ts) — wiring for interactive `!` command UI stream/update completion.
-- [`src/modes/rpc/rpc-mode.ts`](../packages/coding-agent/src/modes/rpc/rpc-mode.ts) — RPC `bash` and `abort_bash` command surface.
+- [`src/modes/rpc/rpc-server.ts`](../packages/coding-agent/src/modes/rpc/rpc-server.ts) — RPC `bash` and `abort_bash` command surface.
 - [`src/internal-urls/artifact-protocol.ts`](../packages/coding-agent/src/internal-urls/artifact-protocol.ts) — `artifact://<id>` resolution.

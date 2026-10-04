@@ -123,7 +123,7 @@ function makeControllerContext(over: { autoStart?: "off" | "view" | "control"; r
 				},
 				entries: [],
 			}),
-			onEntryAppended: undefined,
+			subscribeEntryAppended: () => () => {},
 		},
 		session: {
 			get isSessionTransitioning() {

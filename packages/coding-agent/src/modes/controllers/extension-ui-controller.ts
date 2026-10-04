@@ -185,6 +185,10 @@ export class ExtensionUiController {
 		if (!extensionRunner) {
 			return; // No hooks loaded
 		}
+		// The extensions of a hosted session run on its host. Initializing this replica's runner would hand their
+		// handlers the replica's actions (send a message, set the model, append entries, start or switch sessions) and
+		// fire `session_start` into it, so a hosted client leaves the runner as it is: nothing in it ever runs here.
+		if (this.ctx.hostedClientMode) return;
 
 		const actions: ExtensionActions = {
 			sendMessage: this.#sendExtensionMessage,
@@ -407,6 +411,9 @@ export class ExtensionUiController {
 		if (!extensionRunner) {
 			return;
 		}
+		// Same reason as in `initHooksAndCustomTools`: this entry is public (`InteractiveMode.initializeHookRunner`), so
+		// a caller re-initializing the runner must not hand a hosted client's replica to extension code either.
+		if (this.ctx.hostedClientMode) return;
 
 		const actions: ExtensionActions = {
 			sendMessage: this.#sendExtensionMessage,
@@ -1206,9 +1213,11 @@ export class ExtensionUiController {
 	}
 
 	/**
-	 * Show an extension error in the UI.
+	 * Install an extension's raw terminal-input handler. Extension code does not run in a hosted client, so it is
+	 * refused there rather than given the keystrokes.
 	 */
 	addExtensionTerminalInputListener(handler: TerminalInputHandler): () => void {
+		if (this.ctx.hostedClientMode) throw new Error("Extension terminal input is unavailable when attached.");
 		const unsubscribe = this.ctx.ui.addInputListener(handler);
 		this.#extensionTerminalInputUnsubscribers.add(unsubscribe);
 		return () => {

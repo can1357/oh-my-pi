@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Added
+
+- `CollabStatus.role` accepts `"hosted"` for a terminal attached to a session host, with an optional `contextUsage` that replaces the footer's local context estimate; the status line's collab segment shows it as `⇄ hosted:N` ([#14166](https://github.com/can1357/oh-my-pi/pull/14166) by [@andrebrait](https://github.com/andrebrait))
+- Added `clearAssistantMessageLinkTargets()` to invalidate cached assistant file-link targets after a host switch or relocation ([#14166](https://github.com/can1357/oh-my-pi/pull/14166) by [@andrebrait](https://github.com/andrebrait)).
+
 ## [18.6.0] - 2026-10-03
 
 ### Fixed

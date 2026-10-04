@@ -8,6 +8,7 @@ import type { Component, OverlayHandle } from "@oh-my-pi/pi-tui";
 import { Loader, Spacer, Text } from "@oh-my-pi/pi-tui";
 import { formatKeyHint } from "@oh-my-pi/pi-tui/app-keybindings";
 import { appKey, editorKey } from "@oh-my-pi/pi-tui/chrome/keybinding-hints";
+import type { ModelPickerRegistry } from "@oh-my-pi/pi-tui/overlays/model-picker";
 import {
 	getAgentDbPath,
 	getAgentDir,
@@ -258,6 +259,7 @@ export class SelectorController {
 	}
 
 	showSettingsSelector(): void {
+		if (this.#unavailableWhenHosted("Settings")) return;
 		getAvailableThemes().then(availableThemes => {
 			// Fullscreen settings editor on the alternate screen: the overlay
 			// enables mouse tracking (click/hover/wheel) for its lifetime and
@@ -623,11 +625,85 @@ export class SelectorController {
 	}
 
 	showModelSelector(options?: { temporaryOnly?: boolean }): void {
+		if (this.ctx.hostedClientMode) {
+			// The host's `set_model` is session-only, so one picker covers both gestures; there is no role editing.
+			void this.#showHostedModelPicker();
+			return;
+		}
 		if (options?.temporaryOnly) {
 			this.#showModelPicker();
 			return;
 		}
 		this.#showModelHub({});
+	}
+
+	/** A hosted client has no local session or settings to change: say so instead of opening what would change them. */
+	#unavailableWhenHosted(what: string): boolean {
+		if (!this.ctx.hostedClientMode) return false;
+		this.ctx.showStatus(`${what} is unavailable when attached`);
+		return true;
+	}
+
+	/**
+	 * Hosted client: pick from the models the HOST can use (this client's registry has neither its credentials nor
+	 * its custom models). The pick is the host's `set_model`; the new model reaches this status line as the host's
+	 * state, and no local role, setting, or session changes.
+	 */
+	async #showHostedModelPicker(): Promise<void> {
+		const host = this.ctx.hostedClient;
+		if (!host) {
+			this.ctx.showStatus("Not connected to the session host yet");
+			return;
+		}
+		let models: Model[];
+		try {
+			models = await host.availableModels();
+		} catch (error) {
+			this.ctx.showError(error instanceof Error ? error.message : String(error));
+			return;
+		}
+		const registry: ModelPickerRegistry = {
+			getError: () => undefined,
+			getAvailable: () => models,
+			getAll: () => models,
+			refreshIfStale: async () => false,
+		};
+		const { ModelPickerComponent } = loadModelOverlayComponents();
+		const current = this.ctx.session.model;
+		let closed = false;
+		const done = () => {
+			if (closed) return;
+			closed = true;
+			overlayHandle?.hide();
+			this.focusActiveEditorArea();
+			this.ctx.ui.requestRender();
+		};
+		const picker = new ModelPickerComponent(
+			this.ctx.ui,
+			createModelBrowserSource(this.ctx.settings),
+			registry,
+			[],
+			{
+				onPick: async model => {
+					try {
+						await host.setModel(model.provider, model.id);
+					} catch (error) {
+						this.ctx.showError(error instanceof Error ? error.message : String(error));
+					}
+					done();
+				},
+				onCancel: done,
+			},
+			{ currentSelector: current ? `${current.provider}/${current.id}` : undefined },
+		);
+		const overlayHandle = this.ctx.ui.showOverlay(picker, {
+			anchor: "bottom-center",
+			width: "100%",
+			maxHeight: "100%",
+			margin: 0,
+		});
+		this.ctx.ui.setFocus(picker);
+		this.ctx.ui.requestRender();
 	}
 
 	/**
@@ -1121,6 +1197,7 @@ export class SelectorController {
 	}
 
 	showUserMessageSelector(): void {
+		if (this.#unavailableWhenHosted("Rewinding")) return;
 		const entries = this.ctx.sessionManager.getBranch().filter(isTranscriptEntry);
 		if (entries.length === 0) {
 			this.ctx.showStatus("No messages to branch from");
@@ -1307,6 +1384,7 @@ export class SelectorController {
 	}
 
 	showTreeSelector(): void {
+		if (this.#unavailableWhenHosted("The session tree")) return;
 		const tree = this.ctx.sessionManager.getTree();
 		const realLeafId = this.ctx.sessionManager.getLeafId();
 
@@ -1575,6 +1653,7 @@ export class SelectorController {
 	}
 
 	async showSessionSelector(source?: ForeignSessionSource): Promise<void> {
+		if (this.#unavailableWhenHosted("Switching sessions")) return;
 		let sessions: SessionInfo[];
 		let onSelectSession: (session: SessionInfo) => Promise<boolean>;
 		let selectorOptions: SessionSelectorOptions<SessionInfo>;
@@ -1743,6 +1822,7 @@ export class SelectorController {
 	}
 
 	async handleResumeSession(sessionPath: string, options?: { settingsFlushed?: boolean }): Promise<boolean> {
+		if (this.#unavailableWhenHosted("Switching sessions")) return false;
 		const previousCwd = this.ctx.sessionManager.getCwd();
 		// Flush pending settings writes before switching sessions so a save
 		// failure leaves the session, process project dir, and Settings in the
@@ -2193,6 +2273,7 @@ export class SelectorController {
 	}
 
 	async showDebugSelector(): Promise<void> {
+		if (this.#unavailableWhenHosted("The debug panel")) return;
 		const { DebugSelectorComponent } = await import("../../debug");
 		this.showSelector(done => {
 			const selector = new DebugSelectorComponent(this.ctx, done);
@@ -2222,6 +2303,7 @@ export class SelectorController {
 	}
 
 	showAgentHub(observers: SessionObserverRegistry, options?: AgentHubOpenOptions): void {
+		if (this.#unavailableWhenHosted("The agent hub")) return;
 		const hubKeys = [
 			...this.ctx.keybindings.getKeys("app.agents.hub"),
 			...this.ctx.keybindings.getKeys("app.session.observe"),

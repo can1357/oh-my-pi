@@ -1,4 +1,4 @@
-import { clearSubmittedText } from "./helpers/draft";
+import { clearSubmittedText, restoreDetachedDraft } from "./helpers/draft";
 import type { AutocompleteItem } from "@oh-my-pi/pi-tui";
 import { COLLAB_GUEST_ALLOWED_COMMANDS } from "../collab/guest";
 import { BUILTIN_COLLABORATION_SLASH_COMMANDS } from "./builtin-collaboration";
@@ -130,11 +130,30 @@ export function buildTuiBuiltinSlashCommands(runtime: TuiSlashCommandRuntime): R
 export const BUILTIN_SLASH_COMMANDS_INTERNAL: ReadonlyArray<SlashCommandSpec> = BUILTIN_SLASH_COMMAND_REGISTRY;
 
 /**
+ * Builtins that keep running in this process while the UI is a client of a session host: they read or move only
+ * what is on this screen or this machine (hotkeys, clipboard, links) or end this client.
+ */
+const HOSTED_LOCAL_COMMANDS: Readonly<Record<string, true>> = {
+	hotkeys: true,
+	copy: true,
+	open: true,
+	detach: true,
+	attach: true,
+	exit: true,
+	quit: true,
+};
+
+/**
  * Execute a builtin slash command in the interactive TUI.
  *
  * Returns `false` when no builtin matched. Returns `true` when a command
  * consumed the input entirely. Returns a `string` when the command was handled
  * but remaining text should be sent as a prompt.
+ *
+ * A hosted client (`ctx.hostedClientMode`) runs only {@link HOSTED_LOCAL_COMMANDS} here. A command with a
+ * headless `handle` returns `false` as well, so the caller sends the submitted text to the host, which runs it;
+ * the rest cannot run anywhere. Those, and any builtin given arguments it does not take, stay in the editor
+ * with a status: for a hosted client the generic "not a command" `false` below would reach the host's model.
  */
 export async function executeBuiltinSlashCommand(
 	text: string,
@@ -145,6 +164,31 @@ export async function executeBuiltinSlashCommand(
 
 	const command = BUILTIN_SLASH_COMMAND_LOOKUP.get(parsed.name);
 	if (!command) return false;
+	if (runtime.ctx.hostedClientMode) {
+		// Decided before the arguments check below, whose `false` means "ordinary prompt": for a hosted client that
+		// would hand a command that cannot run here, or that takes no arguments, to the host's model.
+		const local = HOSTED_LOCAL_COMMANDS[command.name] === true;
+		const takesNoArgs = parsed.args.length > 0 && !command.allowArgs;
+		const refusal =
+			!local && !command.handle
+				? `/${command.name} is unavailable when attached`
+				: takesNoArgs
+					? `/${command.name} takes no arguments`
+					: undefined;
+		if (refusal !== undefined) {
+			runtime.ctx.showStatus(refusal);
+			// Nothing ran and nothing was sent: the submission goes back to the editor.
+			const { editor } = runtime.ctx;
+			if (runtime.draftDetached) {
+				restoreDetachedDraft(editor, text, runtime.input?.images, runtime.input?.imageLinks);
+			} else {
+				editor.setCollapsedText(text);
+			}
+			return true;
+		}
+		// The host runs what has a headless handler; the caller sends it the submitted text unchanged.
+		if (!local) return false;
+	}
 	if (parsed.args.length > 0 && !command.allowArgs) {
 		return false;
 	}

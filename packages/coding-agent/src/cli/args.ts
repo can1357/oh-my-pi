@@ -20,7 +20,7 @@ import { CliUsageError } from "./usage-error";
 
 export { getExtraHelpText };
 
-export type Mode = "text" | "json" | "rpc" | "acp" | "rpc-ui";
+export type Mode = "text" | "json" | "rpc" | "acp" | "rpc-ui" | "host";
 
 export interface Args {
 	cwd?: string;
@@ -66,6 +66,8 @@ export interface Args {
 	fork?: string;
 	/** Collab link to join at startup (set by the `join` subcommand; no CLI flag). */
 	join?: string;
+	/** Session host target (host id, session id, or session path) to attach to (set by the `attach` subcommand; no CLI flag). */
+	attach?: string;
 	models?: string[];
 	tools?: string[];
 	noTools?: boolean;
@@ -85,6 +87,13 @@ export interface Args {
 	noTitle?: boolean;
 	/** RPC modes only: run extensions without a UI; `rpc-ui` tool UI remains enabled. */
 	noUi?: boolean;
+	/** `--mode host`: this host's registry id, 16 lowercase hex digits (`--host-id`). */
+	hostId?: string;
+	/**
+	 * `--mode host`: the absolute registry directory to publish in (`--host-registry-dir`, set by
+	 * `spawnSessionHost`). A flag, not an environment variable: the host's children must not inherit it.
+	 */
+	hostRegistryDir?: string;
 	autoApprove?: boolean;
 	approvalMode?: "always-ask" | "write" | "yolo";
 	messages: string[];

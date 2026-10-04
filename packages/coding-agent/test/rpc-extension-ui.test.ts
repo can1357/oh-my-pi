@@ -507,6 +507,61 @@ describe("RPC ask dialog", () => {
 		expect(onTimeout).not.toHaveBeenCalled();
 	});
 
+	it("resolves a chat response as the chat result, distinct from a cancel", async () => {
+		const pendingRequests = new Map<string, PendingExtensionRequest>();
+		const output = vi.fn<(frame: object) => void>();
+		const onTimeout = vi.fn();
+		const result = requestRpcAskDialog(pendingRequests, output, [dbQuestion], { onTimeout });
+
+		respond(pendingRequests, requireRequest(output.mock.calls[0]?.[0]).id, { chat: true });
+
+		expect(await result).toEqual({ kind: "chat" });
+		expect(onTimeout).not.toHaveBeenCalled();
+	});
+
+	it("keeps an answer's notes and pasted images, and rejects malformed ones instead of dropping them", async () => {
+		const image = { type: "image", data: "aGk=", mimeType: "image/png" };
+		const pendingRequests = new Map<string, PendingExtensionRequest>();
+		const output = vi.fn<(frame: object) => void>();
+		const answered = requestRpcAskDialog(pendingRequests, output, [dbQuestion]);
+		respond(pendingRequests, requireRequest(output.mock.calls[0]?.[0]).id, {
+			answers: [
+				{
+					id: "db",
+					selectedOptions: ["Postgres"],
+					note: "prod uses it [Image #1]",
+					noteImages: [image],
+					customInputImages: [image],
+				},
+			],
+		});
+		expect(await answered).toMatchObject({
+			kind: "submit",
+			results: [
+				{
+					id: "db",
+					selectedOptions: ["Postgres"],
+					note: "prod uses it [Image #1]",
+					noteImages: [image],
+					customInputImages: [image],
+				},
+			],
+		});
+
+		for (const [field, value] of [
+			["note", 7],
+			["noteImages", "not a list"],
+			["customInputImages", [{ type: "image", data: 1, mimeType: "image/png" }]],
+		] as const) {
+			const malformed = requestRpcAskDialog(pendingRequests, output, [dbQuestion]);
+			const request = requireRequest(output.mock.calls.at(-1)?.[0]);
+			respond(pendingRequests, request.id, {
+				answers: [{ id: "db", selectedOptions: ["Postgres"], [field]: value }],
+			});
+			await expect(malformed).rejects.toThrow(new RegExp(field));
+		}
+	});
+
 	it("keeps select prompts until the host opts in, then sends each ask as one dialog", async () => {
 		await using temp = await TempDir.create("@rpc-ask-dialog-");
 		const extensionPath = temp.join("scripted-ask.ts");

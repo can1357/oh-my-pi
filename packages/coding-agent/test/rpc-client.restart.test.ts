@@ -186,6 +186,25 @@ describe("RpcClient lifecycle (issue #4079 B)", () => {
 		}
 	}, 10_000);
 
+	test("a transport lost during protocol negotiation rejects start() without onClose, and the same client then starts", async () => {
+		const env: Record<string, string> = { MOCK_RPC_V2: "1", MOCK_RPC_INVALID_OUTPUT: "1" };
+		using client = new RpcClient({ cliPath: MOCK_AGENT, env, terminationGraceMs: 10 });
+		const closes: Error[] = [];
+		client.onClose(error => closes.push(error));
+
+		// `ready` arrives, then the worker's answer to `negotiate_protocol` is unparseable.
+		await expect(client.start()).rejects.toThrow(/Agent output reader failed/);
+		expect(closes).toEqual([]);
+
+		// Without v2 there is no negotiation: the retry starts, and only then does a lost transport notify.
+		delete env.MOCK_RPC_V2;
+		await client.start();
+		expect(closes).toEqual([]);
+		await expect(client.getState()).rejects.toThrow(/Agent output reader failed/);
+		expect(closes).toHaveLength(1);
+		expect(closes[0].message).toMatch(/Agent output reader failed/);
+	}, 10_000);
+
 	test("reports exit code and stderr when a ready worker exits", async () => {
 		using client = new RpcClient({
 			cliPath: MOCK_AGENT,

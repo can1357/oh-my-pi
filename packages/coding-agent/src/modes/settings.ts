@@ -1000,6 +1000,19 @@ export const cfgStartupQuiet = register({
 	},
 });
 
+export const cfgTuiHosted = register({
+	id: "tui.hosted",
+	type: "boolean",
+	default: false,
+	env: "OMP_TUI_HOSTED",
+	ui: {
+		tab: "interaction",
+		group: "Startup & Updates",
+		label: "Hosted Sessions (Experimental)",
+		description: "Run each session in a detached host process; terminals attach as clients.",
+	},
+});
+
 export const cfgStartupShowSplash = register({
 	id: "startup.showSplash",
 	type: "boolean",

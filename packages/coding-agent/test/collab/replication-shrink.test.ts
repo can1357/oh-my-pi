@@ -195,7 +195,7 @@ interface HostReplicationSource {
 	getSessionId(): string;
 	getCwd(): string;
 	snapshotForReplication(copy?: <T>(value: T) => T): HostSnapshot;
-	onEntryAppended?: ((entry: SessionEntry) => void) | undefined;
+	subscribeEntryAppended(listener: (entry: SessionEntry) => void): () => void;
 }
 
 function makeHostContext(snapshot: HostSnapshot): HostHarness {
@@ -203,7 +203,7 @@ function makeHostContext(snapshot: HostSnapshot): HostHarness {
 		getSessionId: () => snapshot.header.id,
 		getCwd: () => snapshot.header.cwd,
 		snapshotForReplication: () => snapshot,
-		onEntryAppended: undefined,
+		subscribeEntryAppended: () => () => {},
 	});
 }
 

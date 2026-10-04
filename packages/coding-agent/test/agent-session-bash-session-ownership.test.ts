@@ -56,6 +56,7 @@ describe("AgentSession bash session ownership", () => {
 		sessionManager: SessionManager = SessionManager.inMemory(tempDir.path()),
 		extensionRunner?: ExtensionRunner,
 		responseContent: () => string[] = () => ["Done"],
+		passiveReplica = false,
 	): AgentSession {
 		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
 		if (!model) throw new Error("Expected claude-sonnet-4-5 model to exist");
@@ -72,6 +73,7 @@ describe("AgentSession bash session ownership", () => {
 			settings: Settings.isolated({ "compaction.enabled": false }),
 			modelRegistry,
 			extensionRunner,
+			passiveReplica,
 		});
 		return session;
 	}
@@ -533,6 +535,29 @@ describe("AgentSession bash session ownership", () => {
 		expect(
 			session.messages.some(message => message.role === "bashExecution" && message.command === "old-branch-command"),
 		).toBe(false);
+	});
+
+	it.each([
+		{ label: "an ordinary session drops", passiveReplica: false, probe: "unset" },
+		{ label: "a passive replica leaves", passiveReplica: true, probe: "alive" },
+	])("$label the persistent shell its transcript id scopes when disposed", async ({ passiveReplica, probe }) => {
+		if (process.platform === "win32") return;
+		createSession(SessionManager.inMemory(tempDir.path()), undefined, undefined, passiveReplica);
+		// A passive replica adopts its host's id, so that id's shell is the host's, not the replica's.
+		const sessionKey = session.sessionManager.getSessionId();
+		const cwd = tempDir.path();
+		await bashExecutor.executeBash("export OMP_SHELL_OWNER_PROBE=alive", { cwd, timeout: 5000, sessionKey });
+
+		await session.dispose();
+
+		// oxlint-disable-next-line no-template-curly-in-string -- this is a bash variable expansion
+		const after = await bashExecutor.executeBash('printf "%s" "${OMP_SHELL_OWNER_PROBE:-unset}"', {
+			cwd,
+			timeout: 5000,
+			sessionKey,
+		});
+		bashExecutor.releaseShellSessions(sessionKey);
+		expect(after.output).toBe(probe);
 	});
 });
 

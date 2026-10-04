@@ -28,7 +28,14 @@ import type { TspSpan, TspTone } from "@oh-my-pi/pi-wire";
 import { node, span } from "../native/describe";
 import { thinkingLevelToken } from "../theme/theme-class";
 import type { StatusLineSession } from "./host";
-import type { RenderedSegment, SegmentContext, SegmentView, StatusLineSegment, StatusLineSegmentId } from "./types";
+import type {
+	CollabStatus,
+	RenderedSegment,
+	SegmentContext,
+	SegmentView,
+	StatusLineSegment,
+	StatusLineSegmentId,
+} from "./types";
 
 export type { SegmentContext } from "./types";
 
@@ -1036,18 +1043,22 @@ const sessionNameSegment: StatusLineSegment = {
 	},
 };
 
+const COLLAB_ROLE_LABEL: Record<CollabStatus["role"], string> = {
+	host: "collab",
+	guest: "collab guest",
+	hosted: "hosted",
+};
+
 const collabSegment: StatusLineSegment = {
 	id: "collab",
 	render(ctx) {
 		if (!ctx.collab) return { content: "", visible: false };
-		const participants = `${ctx.collab.participantCount}`;
-		const label = ctx.collab.role === "host" ? `⇄ collab:${participants}` : `⇄ collab guest:${participants}`;
+		const label = `⇄ ${COLLAB_ROLE_LABEL[ctx.collab.role]}:${ctx.collab.participantCount}`;
 		return { content: accentFg(ctx, "accent", label), visible: true };
 	},
 	describe(ctx) {
 		if (!ctx.collab) return null;
-		const participants = `${ctx.collab.participantCount}`;
-		const label = ctx.collab.role === "host" ? `collab:${participants}` : `collab guest:${participants}`;
+		const label = `${COLLAB_ROLE_LABEL[ctx.collab.role]}:${ctx.collab.participantCount}`;
 		return segView([span(label, accentToken(ctx, "accent"))], "collab");
 	},
 };

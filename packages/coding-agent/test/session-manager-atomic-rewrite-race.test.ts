@@ -1060,7 +1060,7 @@ describe("SessionManager atomic entry batches", () => {
 		const sessionFile = manager.getSessionFile();
 		if (!sessionFile) throw new Error("Expected session file");
 		const notifiedIds: string[] = [];
-		manager.onEntryAppended = entry => notifiedIds.push(entry.id);
+		manager.subscribeEntryAppended(entry => notifiedIds.push(entry.id));
 		const failure = storage.failNextAtomicWrite(new Error("batch publish failed"));
 		let stagedId = "";
 		const commit = manager.appendEntriesAtomically(() => {
@@ -1079,6 +1079,30 @@ describe("SessionManager atomic entry batches", () => {
 		const content = await storage.readText(sessionFile);
 		expect(content).not.toContain('"customType":"staged-terminal"');
 		expect(content).toContain('"customType":"concurrent-survivor"');
+		await manager.close();
+	});
+
+	it("keeps a withheld notification's leaf on the surviving branch when the staged batch rolls back around an off-branch append", async () => {
+		const storage = new GatedAtomicFailureStorage();
+		const manager = SessionManager.create("/cwd", "/sessions", storage);
+		const rootId = manager.appendCustomEntry("root");
+		await manager.ensureOnDisk();
+		const notified: Array<[string, string | null]> = [];
+		manager.subscribeEntryAppended((entry, leafId) => notified.push([entry.id, leafId]));
+		const failure = storage.failNextAtomicWrite(new Error("batch publish failed"));
+		const commit = manager.appendEntriesAtomically(() => {
+			manager.appendCustomEntry("staged-terminal");
+		});
+		await failure.started;
+		// Appended while the staged entry is the leaf: the leaf stays on it, and the notification is withheld.
+		const retainedId = manager.appendMessageToBranch({ role: "user", content: "retained", timestamp: 1 }, rootId);
+		failure.release();
+
+		await expect(commit).rejects.toThrow("batch publish failed");
+		// The staged entry is gone, so the branch is where the batch found it, and so is the leaf the listener hears.
+		expect(manager.getLeafId()).toBe(rootId);
+		expect(manager.getEntries().find(entry => entry.id === retainedId)?.parentId).toBe(rootId);
+		expect(notified).toEqual([[retainedId, rootId]]);
 		await manager.close();
 	});
 

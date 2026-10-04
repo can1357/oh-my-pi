@@ -79,6 +79,18 @@ import type { RpcModeOptions } from "./modes/rpc/rpc-mode";
 import { claimRpcInput } from "./modes/rpc/rpc-input";
 import { CURRENT_SETUP_VERSION } from "@oh-my-pi/pi-tui/setup/setup-version";
 import type * as SetupWizardModule from "./modes/setup";
+import { exitAfterHostDispose, runSessionHost } from "./session-host/host";
+import {
+	assertHostedLaunchSupported,
+	attachHostedUi,
+	createHostedLocalSession,
+	ensureHostForResolvedSession,
+	type HostedStartup,
+	type HostLaunch,
+	hostLaunchArgs,
+	resolveAttachTarget,
+} from "./session-host/hosted-startup";
+import type { SessionHostEntry } from "./session-host/registry";
 import type { SetupScene } from "@oh-my-pi/pi-tui/setup/scenes/types";
 import { invokeSkillCommandFromText, isKnownSkillCommand } from "./modes/skill-command";
 import {
@@ -160,6 +172,7 @@ import {
 	cfgSymbolPreset,
 	cfgThemeDark,
 	cfgThemeLight,
+	cfgTuiHosted,
 	cfgTuiImeSafeCursor,
 	cfgTuiMaxInlineImages,
 	cfgTuiResizeScrollback,
@@ -620,6 +633,7 @@ async function runInteractiveMode(
 	startDeferredStartupWork?: () => void,
 	startupLease?: ComposerLease,
 	startupGoal?: string,
+	hosted?: HostedStartup,
 ): Promise<void> {
 	const InteractiveModeConstructor = await loadInteractiveModeConstructor();
 	let mode: InteractiveMode;
@@ -640,6 +654,8 @@ async function runInteractiveMode(
 		startupLease?.dispose();
 		throw error;
 	}
+	// Before `init()`: from here on this UI is a client of a session host and runs nothing of its own.
+	if (hosted) mode.hostedClientMode = true;
 
 	let setupWizard: typeof SetupWizardModule | undefined;
 	let setupScenes: SetupScene[] = [];
@@ -651,8 +667,9 @@ async function runInteractiveMode(
 		// barrel only when setup is stale, forced, or the explicit startup splash
 		// setting needs the shared setup splash renderer.
 		const storedSetupVersion = cfgSetupVersion.get(settings);
+		// A hosted terminal runs no setup wizard, login, or splash: the host's configuration is the host's.
 		setupWizard =
-			forceSetupWizard || storedSetupVersion < CURRENT_SETUP_VERSION || showStartupSplash
+			!hosted && (forceSetupWizard || storedSetupVersion < CURRENT_SETUP_VERSION || showStartupSplash)
 				? await import("./modes/setup")
 				: undefined;
 		setupScenes = setupWizard
@@ -667,9 +684,9 @@ async function runInteractiveMode(
 
 		await logger.time("InteractiveMode.init", () =>
 			mode.init({
-				suppressWelcomeIntro: resuming || setupScenes.length > 0 || playStartupSplash,
+				suppressWelcomeIntro: hosted !== undefined || resuming || setupScenes.length > 0 || playStartupSplash,
 				clearInitialTerminalHistory: true,
-				autoStartCollab: joinLink === undefined,
+				autoStartCollab: joinLink === undefined && hosted === undefined,
 			}),
 		);
 		startDeferredStartupWork?.();
@@ -689,9 +706,14 @@ async function runInteractiveMode(
 		// Replaying resumed transcript rows and repainting the viewport is enough;
 		// another clear would only archive the startup frame. In-process session
 		// replacements still request `clearTerminalHistory` at their own callsites.
-		await logger.time("InteractiveMode.renderInitialMessages", () =>
-			mode.renderInitialMessages({ preserveExistingChat: true }),
-		);
+		if (hosted) {
+			// The first snapshot replaces the empty local replica's transcript and repaints the view.
+			await logger.time("HostedClientLink.connect", () => attachHostedUi(mode, hosted));
+		} else {
+			await logger.time("InteractiveMode.renderInitialMessages", () =>
+				mode.renderInitialMessages({ preserveExistingChat: true }),
+			);
+		}
 		// A resolved version check must not insert its banner into a partial transcript.
 		checkedVersionPromise.then(newVersion => {
 			if (!cfgStartupCheckUpdate.get(settings)) {
@@ -702,7 +724,7 @@ async function runInteractiveMode(
 			}
 		});
 
-		const advisorConfigWarnings = session.getAdvisorConfigWarnings();
+		const advisorConfigWarnings = hosted ? [] : session.getAdvisorConfigWarnings();
 		if (advisorConfigWarnings.length > 0) {
 			// Pulled here, not pushed from SessionAdvisors: the constructor-time
 			// `emitNotice` fired before the UI subscribed and was silently lost.
@@ -737,6 +759,11 @@ async function runInteractiveMode(
 	} catch (error) {
 		// Init publishes before startup dialogs, so any later startup failure
 		// must withdraw the room before restoring the terminal.
+		if (hosted) {
+			await mode.hostedClient?.detach().catch(error => {
+				logger.warn("Failed to detach hosted client after startup failure", { error: String(error) });
+			});
+		}
 		try {
 			await mode.collabController.shutdown("startup failed");
 		} catch (cleanupError) {
@@ -744,9 +771,33 @@ async function runInteractiveMode(
 		} finally {
 			mode.stop();
 		}
+		if (hosted) await disposeSessionQuietly(session);
 		throw error;
 	}
 
+	if (hosted) {
+		// The host runs the turn: CLI prompts go through its link, never to the local replica session, and titles are
+		// the host's business (no local title generation).
+		const prompts: Array<{ text: string; images?: ImageContent[] }> = [
+			...(initialMessage === undefined ? [] : [{ text: initialMessage, images: initialImages }]),
+			...initialMessages.map(text => ({ text })),
+		];
+		for (const { text, images } of prompts) {
+			const link = mode.hostedClient;
+			if (!link) break; // closed while connecting or sending: a shutdown is under way
+			try {
+				using _keepalive = new EventLoopKeepalive();
+				await link.prompt(text, images, "steer");
+			} catch (error: unknown) {
+				mode.showError(error instanceof Error ? error.message : "Unknown error occurred");
+			}
+		}
+		// Input reaches the host straight from the editor, never through the loop below. The process ends in
+		// `shutdown()` (/exit, /detach, Ctrl+C, SIGHUP, or a lost connection), which exits the process.
+		await Promise.withResolvers<never>().promise;
+	}
+
+	// A hosted launch refuses `--goal` (assertHostedLaunchSupported), so a goal never reaches the branch above.
 	if (startupGoal !== undefined) {
 		session.maybeStartTitleGeneration(startupGoal);
 		try {
@@ -1694,6 +1745,107 @@ export async function disposeSessionQuietly(session: AgentSession): Promise<void
 	await session.dispose().catch(() => undefined);
 }
 
+/**
+ * Run this terminal as a client of a session host (`tui.hosted` or `omp attach <target>`): find or start the host of
+ * the session the launch flags (or the attach target) name, then run the TUI on a lean passive replica of it. The
+ * host keeps the launch flags (model, tools, extensions, ...) as given; nothing of them starts in this process.
+ * Does not return normally: the process ends in `InteractiveMode.shutdown()`.
+ */
+async function runHostedInteractive(options: {
+	parsedArgs: Args;
+	rawArgs: string[];
+	cwd: string;
+	sessionManager: SessionManager | undefined;
+	settings: Settings;
+	authStorage: AuthStorage;
+	modelRegistry: ModelRegistry;
+	notifs: (InteractiveModeNotify | null)[];
+	createAgentSessionImpl: typeof createAgentSession;
+	pipedInput: string | undefined;
+}): Promise<void> {
+	const { parsedArgs, cwd, settings: activeSettings } = options;
+	// From the argv as given, before anything below makes the local session lean.
+	const launch: HostLaunch = {
+		cwd,
+		args: hostLaunchArgs(options.rawArgs),
+		sessionDir: parsedArgs.sessionDir,
+	};
+	const processedFiles =
+		parsedArgs.fileArgs.length > 0
+			? await logger.time("processFileArguments", () =>
+					processFileArguments(parsedArgs.fileArgs, {
+						autoResizeImages: cfgImagesAutoResize.get(activeSettings),
+					}),
+				)
+			: undefined;
+
+	let entry: SessionHostEntry;
+	try {
+		validateSessionPersistenceArgs(parsedArgs);
+		entry =
+			parsedArgs.attach !== undefined
+				? await resolveAttachTarget(parsedArgs.attach, launch)
+				: await ensureHostForResolvedSession(options.sessionManager, launch);
+	} catch (error: unknown) {
+		process.stderr.write(`${chalk.red(`Error: ${error instanceof Error ? error.message : String(error)}`)}\n`);
+		process.exit(1);
+	}
+
+	const { initialMessage, initialImages } = buildInitialMessage({
+		parsed: parsedArgs,
+		fileText: processedFiles?.text,
+		fileImages: processedFiles?.images,
+		stdinContent: options.pipedInput,
+	});
+
+	const eventBus = new EventBus();
+	const subagentEventBus = new EventBus();
+	const { session, setToolUIContext } = await createHostedLocalSession({
+		cwd,
+		authStorage: options.authStorage,
+		modelRegistry: options.modelRegistry,
+		settings: activeSettings,
+		eventBus,
+		subagentEventBus,
+		createSession: sessionOptions =>
+			logger.time("createAgentSession", options.createAgentSessionImpl, sessionOptions),
+	});
+
+	activeSettings.startWatching();
+	postmortem.register("settings-file-watcher", () => activeSettings.stopWatching(), { exitOnly: true });
+	const versionCheckPromise = checkForNewVersion(VERSION).catch(() => undefined);
+	const startupLease = takeStartupComposerLease();
+	try {
+		stopStartupWatchdog();
+		logger.endTiming();
+		await runInteractiveMode(
+			session,
+			VERSION,
+			undefined,
+			options.notifs,
+			versionCheckPromise,
+			parsedArgs.messages,
+			setToolUIContext,
+			undefined,
+			undefined,
+			Boolean(parsedArgs.continue || parsedArgs.resume),
+			false,
+			false,
+			eventBus,
+			subagentEventBus,
+			initialMessage,
+			initialImages,
+			undefined,
+			undefined,
+			startupLease,
+			undefined, // no startup goal: assertHostedLaunchSupported refuses `--goal`
+			{ entry, launch },
+		);
+	} finally {
+		startupLease?.dispose();
+	}
+}
+
 export async function runRootCommand(
 	parsed: Args,
 	rawArgs: string[],
@@ -1742,9 +1894,15 @@ export async function runRootCommand(
 			process.exit(0);
 		}
 
-		if ((parsedArgs.mode === "rpc" || parsedArgs.mode === "rpc-ui") && parsedArgs.fileArgs.length > 0) {
+		if (
+			(parsedArgs.mode === "rpc" || parsedArgs.mode === "rpc-ui" || parsedArgs.mode === "host") &&
+			parsedArgs.fileArgs.length > 0
+		) {
 			process.stderr.write(`${chalk.red("Error: @file arguments are not supported in RPC mode")}\n`);
 			process.exit(1);
+		}
+		if (parsedArgs.mode === "host" && !parsedArgs.hostId) {
+			throw new CliUsageError("--mode host requires --host-id <16 lowercase hex digits>");
 		}
 		// A pending invalid `--mode` leaves `mode` unset; report it (exit 2) at the
 		// post-extension recheck before judging `--no-ui` against the mode.
@@ -1785,7 +1943,7 @@ export async function runRootCommand(
 		// Classify the host before opening auth or settings storage so every
 		// session-critical database connection picks the right busy timeout.
 		// See getDbBusyTimeoutMs().
-		const isProtocolMode = mode === "rpc" || mode === "rpc-ui" || mode === "acp";
+		const isProtocolMode = mode === "rpc" || mode === "rpc-ui" || mode === "acp" || mode === "host";
 		// Protocol modes own stdin; treating it as prompt text would consume JSON-RPC frames before their transports start.
 		const pipedInput = isProtocolMode ? undefined : await logger.time("readPipedInput", readPipedInput);
 		// Without a terminal on stdin the TUI cannot run, so such a launch is always
@@ -1855,10 +2013,24 @@ export async function runRootCommand(
 			// setup-time checks (e.g. #wrapToolForAcpPermission) also see the yolo intent.
 			cfgToolsApprovalMode.override(settingsInstance, "yolo");
 		}
-		if (parsedArgs.mode === "rpc" || parsedArgs.mode === "rpc-ui") {
+		if (parsedArgs.mode === "rpc" || parsedArgs.mode === "rpc-ui" || parsedArgs.mode === "host") {
 			applyProtocolDefaults("rpc", settingsInstance);
 		} else if (parsedArgs.mode === "acp") {
 			applyProtocolDefaults("acp", settingsInstance);
+		}
+
+		// A hosted terminal is only a client of a session host (`tui.hosted`, or `omp attach`). An interactive launch
+		// on a terminal qualifies; RPC, ACP, print, and collab join keep their in-process paths.
+		const hostedRequested =
+			isInteractive &&
+			stdinIsTerminal &&
+			process.stdout.isTTY === true &&
+			parsedArgs.join === undefined &&
+			(parsedArgs.attach !== undefined || cfgTuiHosted.get(settingsInstance));
+		if (hostedRequested) {
+			// No extension loads here to own a flag the bootstrap parse rejected, so a bad value is final.
+			if (reportInvalidFlagValues(parsedArgs)) process.exit(2);
+			assertHostedLaunchSupported(parsedArgs);
 		}
 
 		// The registry composes policy-dependent metadata synchronously, including
@@ -1876,14 +2048,16 @@ export async function runRootCommand(
 		const credentialScopedCacheHydration = logger.time("hydrateCredentialScopedModelCaches", () =>
 			modelRegistry.hydrateCredentialScopedModelCaches(),
 		);
-		if (parsedArgs.noPty || parsedArgs.mode === "rpc-ui") {
+		if (parsedArgs.noPty || parsedArgs.mode === "rpc-ui" || parsedArgs.mode === "host") {
 			Bun.env.PI_NO_PTY = "1";
 		}
 		if (
 			parsedArgs.noTitle ||
+			hostedRequested ||
 			parsedArgs.mode === "rpc" ||
 			parsedArgs.mode === "rpc-ui" ||
-			parsedArgs.mode === "acp"
+			parsedArgs.mode === "acp" ||
+			parsedArgs.mode === "host"
 		) {
 			Bun.env.PI_NO_TITLE = "1";
 		}
@@ -1953,13 +2127,11 @@ export async function runRootCommand(
 		});
 
 		await credentialScopedCacheHydration;
-		let scopedModels = await logger.time(
-			"resolveModelScope",
-			resolveScopedModels,
-			parsedArgs,
-			modelRegistry,
-			settingsInstance,
-		);
+		// The host resolves models. A lean terminal must not trigger provider discovery (or paid metadata work) to
+		// populate selectors it never executes.
+		let scopedModels: ScopedModel[] = hostedRequested
+			? []
+			: await logger.time("resolveModelScope", resolveScopedModels, parsedArgs, modelRegistry, settingsInstance);
 
 		// Resolve an explicit `--continue <id>` before extension flags are loaded.
 		// Reading the token immediately after `--continue` distinguishes the session
@@ -2029,7 +2201,7 @@ export async function runRootCommand(
 					const message = error instanceof Error ? error.message : String(error);
 					throw new SessionResolutionError(`Failed to import ${sourceName} session: ${message}`);
 				}
-			} else {
+			} else if (parsedArgs.attach === undefined) {
 				sessionManager = await logger.time(
 					"createSessionManager",
 					createSessionManager,
@@ -2065,7 +2237,7 @@ export async function runRootCommand(
 				// Destination project may scope a different `enabledModels`; re-resolve
 				// so the model UI and session options reflect it (explicit `--models`
 				// stays fixed inside resolveScopedModels).
-				scopedModels = await resolveScopedModels(parsedArgs, modelRegistry, settingsInstance);
+				if (!hostedRequested) scopedModels = await resolveScopedModels(parsedArgs, modelRegistry, settingsInstance);
 			}
 		}
 
@@ -2136,7 +2308,7 @@ export async function runRootCommand(
 			notifyResumeCwdFallback(parsedArgs, resumedProject, cwd);
 			if (cwd !== previousCwd) {
 				parsedArgs.cwd = cwd;
-				scopedModels = await resolveScopedModels(parsedArgs, modelRegistry, settingsInstance);
+				if (!hostedRequested) scopedModels = await resolveScopedModels(parsedArgs, modelRegistry, settingsInstance);
 			}
 		}
 
@@ -2153,6 +2325,21 @@ export async function runRootCommand(
 					process.stderr.write(`${chalk.yellow(`${pendingToolWarning}\n`)}`);
 				}
 			}
+		}
+		if (hostedRequested) {
+			await runHostedInteractive({
+				parsedArgs,
+				rawArgs,
+				cwd,
+				sessionManager,
+				settings: settingsInstance,
+				authStorage,
+				modelRegistry,
+				notifs,
+				createAgentSessionImpl: deps.createAgentSession ?? createAgentSession,
+				pipedInput,
+			});
+			return;
 		}
 		await pluginPreloadPromise;
 		// Pure file I/O: overlap it with session-option building, but land it before
@@ -2180,7 +2367,8 @@ export async function runRootCommand(
 		);
 		sessionOptions.authStorage = authStorage;
 		sessionOptions.modelRegistry = modelRegistry;
-		sessionOptions.hasUI = isInteractive || mode === "rpc-ui";
+		// A host routes tool UI over the protocol to its UI-capable clients, as `rpc-ui` does.
+		sessionOptions.hasUI = isInteractive || mode === "rpc-ui" || mode === "host";
 		sessionOptions.settingsApproval = isInteractive;
 		sessionOptions.settings = settingsInstance;
 		sessionOptions.onPrewalkWarning = warning => {
@@ -2509,7 +2697,7 @@ export async function runRootCommand(
 				process.exit(1);
 			}
 
-			if (mode === "rpc" || mode === "rpc-ui" || isInteractive) {
+			if (mode === "rpc" || mode === "rpc-ui" || mode === "host" || isInteractive) {
 				// Long-lived hosts apply on-disk config edits (config.yml, project
 				// settings, `--config` overlays) live. No-op unless this is the
 				// persisting process-global instance.
@@ -2527,6 +2715,25 @@ export async function runRootCommand(
 					headless: parsedArgs.noUi === true,
 					subagentEventBus,
 					input: rpcInput,
+				});
+			} else if (mode === "host") {
+				stopStartupWatchdog();
+				// The host is a long-lived server: stop recording spans, or every later session and subagent
+				// appends to the timing tree for its life.
+				logger.endTiming();
+				// A closed terminal must not end the host (spec D7). postmortem's SIGHUP handler runs its
+				// cleanup and exits 129, so it is replaced rather than joined. SIGTERM/SIGINT keep postmortem's
+				// exit, whose cleanup disposes the session and withdraws the registry entry (runSessionHost
+				// registers both).
+				process.removeAllListeners("SIGHUP");
+				process.on("SIGHUP", () => {});
+				await runSessionHost(session, {
+					hostId: parsedArgs.hostId!,
+					registryDir: parsedArgs.hostRegistryDir,
+					setToolUIContext,
+					headless: false,
+					subagentEventBus,
+					onExit: () => exitAfterHostDispose(session),
 				});
 			} else if (isInteractive) {
 				const versionCheckPromise = checkForNewVersion(VERSION).catch(() => undefined);

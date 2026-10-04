@@ -18,7 +18,6 @@
  * Everything renders through the same components, so ctrl+o, theming, and
  * transcript behavior are native by construction.
  */
-import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import type { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { ImageContent } from "@oh-my-pi/pi-ai";
@@ -27,10 +26,17 @@ import type { AgentHubRemote, AgentHubRemoteTranscript } from "@oh-my-pi/pi-tui/
 import type { InteractiveModeContext } from "../modes/types";
 import { AgentRegistry } from "../registry/agent-registry";
 import type { AgentSessionEvent } from "../session/agent-session";
+import {
+	applyReplicaEvent,
+	applyReplicaHostState,
+	ingestReplicaEntry,
+	loadReplica,
+	ReplicaActivationCancelledError,
+	resetReplicaEventState,
+} from "../session/replica-view";
 import type { SessionEntry } from "../session/session-entries";
 import { mintSessionId } from "../session/session-manager";
 import { FileSessionStorage } from "../session/session-storage";
-import { shouldDisableReasoning, toReasoningEffort } from "@oh-my-pi/pi-tui/thinking";
 import { emitSubagentFrame } from "../utils/event-bus";
 import { GuestLifecycleEmitter } from "../extensibility/extensions/lifecycle-mirror";
 import { setSessionTerminalTitle } from "../utils/title-generator";
@@ -214,8 +220,6 @@ export class CollabGuestLink {
 	#writeToken: string | undefined;
 	/** True when the host marked this peer read-only (view link). */
 	#readOnly = false;
-	/** False until the first assistant message_start (real or synthesized) since (re)sync. */
-	#assistantStreamSynced = false;
 	/** Mirrors host lifecycle events into the local extension runner while joined. */
 	#lifecycleEmitter = new GuestLifecycleEmitter();
 	state: CollabSessionState | null = null;
@@ -479,26 +483,18 @@ export class CollabGuestLink {
 			parentSession: pending.header.id,
 			providerPromptCacheKey: pending.header.providerPromptCacheKey ?? pending.header.id,
 		};
-		const lines = [header, ...pending.entries].map(entry => JSON.stringify(entry)).join("\n");
-		const storage = new FileSessionStorage();
-		this.#replicaLease ??= storage.claimSession(this.#replicaId, replicaPath) ?? undefined;
-		// Published atomically: `omp gc` reads the replica's header to find its
-		// lease, so a resync must never expose a truncated, headerless file.
-		const tempPath = `${replicaPath}.${mintSessionId()}.tmp`;
-		try {
-			await Bun.write(tempPath, `${lines}\n`);
-			await fs.rename(tempPath, replicaPath);
-		} catch (err) {
-			await fs.unlink(tempPath).catch(() => {});
+		this.#replicaLease ??= new FileSessionStorage().claimSession(this.#replicaId, replicaPath) ?? undefined;
+		// Resume through AgentSession without adopting the host's cwd. The replica
+		// keeps one id and file across resyncs; loadReplica publishes it atomically.
+		const activated = await loadReplica(this.#ctx.session, replicaPath, header, pending.entries, {
+			isLive: () => !this.#left,
+		}).catch((err: unknown) => {
+			if (err instanceof ReplicaActivationCancelledError) {
+				throw new Error("Collab replica activation was cancelled", { cause: err });
+			}
 			throw err;
-		}
-		if (this.#left) return;
-
-		// Resume through AgentSession without adopting the host's cwd.
-		const switched = await this.#ctx.session.switchSession(replicaPath, { preserveLocalCwd: true });
-		if (switched === false) {
-			throw new Error("Collab replica activation was cancelled");
-		}
+		});
+		if (!activated) return;
 		this.#replicaActivated = true;
 		if (this.#left) return;
 		const orphanedLiveBlocks = [
@@ -514,7 +510,7 @@ export class CollabGuestLink {
 		this.#ctx.resetObserverRegistry();
 		this.#applyAgentSnapshots(pending.agents);
 		this.#ctx.syncRunningSubagentBadge();
-		this.#assistantStreamSynced = false;
+		resetReplicaEventState(this.#ctx);
 		setSessionTerminalTitle(pending.state.sessionName ?? pending.header.title, pending.state.cwd);
 		// No eager teardown here: renderInitialMessages() stages the replacement
 		// transcript and disposes the visible children only when the staged tree
@@ -590,24 +586,11 @@ export class CollabGuestLink {
 
 	#applyFrame(frame: CollabFrame): void {
 		switch (frame.t) {
-			case "entry": {
+			case "entry":
 				// Entries are never rendered directly — rendering is events-only
-				// (prevents double-render). They keep the replica file, the agent's
-				// message array (/dump, context estimates), and todos current.
-				this.#ctx.sessionManager.ingestReplicatedEntry(frame.entry);
-				if (frame.entry.type === "message") {
-					this.#ctx.session.agent.replaceMessages([...this.#ctx.session.messages, frame.entry.message]);
-				} else if (frame.entry.type === "compaction" || frame.entry.type === "branch_summary") {
-					// Compaction/branch entries rewrite the host's model context: the
-					// pre-boundary transcript collapses behind a summary. Appending
-					// the entry alone leaves the replica holding the stale full
-					// history, so rebuild the message array from the ingested entries
-					// exactly as the host does after appendCompaction/branchWithSummary
-					// (session-maintenance.ts, agent-session.ts).
-					this.#ctx.session.agent.replaceMessages(this.#ctx.session.buildDisplaySessionContext().messages);
-				}
+				// (prevents double-render); see ingestReplicaEntry.
+				ingestReplicaEntry(this.#ctx.session, frame.entry);
 				break;
-			}
 			case "event":
 				this.#applyEvent(frame.event);
 				break;
@@ -660,29 +643,15 @@ export class CollabGuestLink {
 	}
 
 	#applyEvent(event: AgentSessionEvent): void {
-		// Orphan-delta guard: when joining mid-turn the message_start for the
-		// in-flight assistant message predates the snapshot. message_update
-		// carries the full accumulating message, so synthesize the missing start
-		// before the first orphaned update; every other handler is tolerant of
-		// unknown anchors (guarded by streamingComponent/pendingTools lookups).
-		if (event.type === "message_start" && event.message.role === "assistant") {
-			this.#assistantStreamSynced = true;
-		} else if (
-			event.type === "message_update" &&
-			event.message.role === "assistant" &&
-			!this.#assistantStreamSynced
-		) {
-			this.#assistantStreamSynced = true;
-			void this.#ctx.eventController.handleEvent({ type: "message_start", message: event.message });
-		}
-		void this.#ctx.eventController.handleEvent(event);
+		void applyReplicaEvent(this.#ctx, event);
 		// Lifecycle mirror: the guest's own agent loop never runs, so the session's
 		// extension-event path stays silent. Route the mirrored wire event through
 		// the same mapping the session uses so extension-installed lifecycle
 		// integrations (Herdr pane state, RPC trackers, stats) observe host
-		// working/idle transitions while joined. Emissions chain (ordered but never
-		// awaited inline) so a slow extension handler neither stalls frame
-		// application nor completes out of order.
+		// working/idle transitions while joined. Only the host's own events are
+		// mirrored (the view's synthesized orphan `message_start` is UI-only).
+		// Emissions chain (ordered but never awaited inline) so a slow extension
+		// handler neither stalls frame application nor completes out of order.
 		const runner = this.#ctx.session.extensionRunner;
 		if (runner) this.#lifecycleEmitter.emit(runner, event);
 	}
@@ -714,24 +683,12 @@ export class CollabGuestLink {
 		}
 	}
 
-	/**
-	 * Apply the host's real model/thinking state to the replica agent so model
-	 * display and context-window math are native (no display-string overrides).
-	 * Pure agent-state mutation: session.setModel/setThinkingLevel would
-	 * persist entries and clamp to local credentials.
-	 */
+	/** Mirror the host's real model/thinking state onto the replica agent (see applyReplicaHostState). */
 	#applyHostState(state: CollabSessionState): void {
-		const session = this.#ctx.session;
-		if (
-			state.model &&
-			(session.agent.state.model?.id !== state.model.id ||
-				session.agent.state.model?.provider !== state.model.provider)
-		) {
-			session.agent.setModel(state.model);
-		}
-		const level = state.thinkingLevel as ThinkingLevel | undefined;
-		session.agent.setThinkingLevel(toReasoningEffort(level));
-		session.agent.setDisableReasoning(shouldDisableReasoning(level));
+		applyReplicaHostState(this.#ctx.session, {
+			model: state.model,
+			thinkingLevel: state.thinkingLevel as ThinkingLevel | undefined,
+		});
 	}
 
 	/** Diff a host agent snapshot into the local registry (refs keep `session: null`). */

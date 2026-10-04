@@ -55,7 +55,7 @@ export function makeHostContext(snapshot: Snapshot, seen: HostObservations): Int
 			getSessionId: () => snapshot.header.id,
 			getCwd: () => snapshot.header.cwd,
 			snapshotForReplication: () => snapshot,
-			onEntryAppended: undefined,
+			subscribeEntryAppended: () => () => {},
 		},
 		session: {
 			isStreaming: false,

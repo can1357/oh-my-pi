@@ -171,7 +171,8 @@ See [providers](./providers.md) and [models](./models.md) for model resolution.
 
 | Flag | Description |
 | --- | --- |
-| `--mode <mode>` | Output/transport mode: `text` (default), `json`, `rpc`, `acp`, or `rpc-ui`. See [output modes](#output-modes---mode). |
+| `--mode <mode>` | Output/transport mode: `text` (default), `json`, `rpc`, `acp`, `rpc-ui`, or `host`. See [output modes](#output-modes---mode). |
+| `--host-id <16 hex>` | Session host id for `--mode host`: 16 lowercase hex digits. Internal; passed by the tools that spawn hosts. |
 | `--print`, `-p` | Process prompts non-interactively and exit. |
 | `--no-ui` | With `rpc`/`rpc-ui`, make extensions headless without disabling rpc-ui tool UI. |
 
@@ -230,8 +231,87 @@ print-mode disposal semantics when the advisor runtime is enabled.
 | `rpc` | Line-delimited JSON command/response/event transport over stdio (not JSON-RPC 2.0). See [RPC](./rpc.md). |
 | `rpc-ui` | RPC transport with UI extension events enabled. |
 | `acp` | Agent Client Protocol server over stdio. Equivalent to the [`acp`](#subcommands) subcommand; see [approval mode → ACP sessions](./approval-mode.md#acp-sessions). |
+| `host` | Long-lived session host serving local clients over a Unix socket (a named pipe on Windows); requires `--host-id`. See [RPC → session hosts](./rpc.md#session-hosts). |
 
 `--no-ui` (with `--mode rpc` or `--mode rpc-ui`) runs extensions headless: `ctx.hasUI` is `false`, extension dialogs resolve to defaults, and extension presentation updates are dropped. In `rpc-ui`, tool UI such as `ask` still sends `extension_ui_request` frames for the host to answer. Host-issued `login` UI is unaffected. See [RPC startup](./rpc.md#startup).
+
+### Hosted sessions (experimental)
+
+Normally an interactive session runs inside the terminal's own process. With hosted sessions, the session runs in a detached [session host](./rpc.md#session-hosts) (`omp --mode host`) and the terminal is a client that renders it. Closing the terminal does not stop the session: attach again from the same or another terminal, and attach several terminals to one session at once. The feature is opt-in and off by default. Print mode, JSON mode, RPC, ACP, host mode, and `omp join` never use it, and neither does an interactive launch whose stdin or stdout is not a terminal.
+
+| Setting | Environment variable | Default |
+| --- | --- | --- |
+| `tui.hosted` | `OMP_TUI_HOSTED` | `false` |
+
+```sh
+# One launch
+OMP_TUI_HOSTED=1 omp
+
+# Every interactive launch
+omp config set tui.hosted true
+```
+
+#### Starting and attaching
+
+- **Plain `omp` with the setting on.** The session is chosen exactly as without it (`--resume`, `--continue`, the bare `--resume` picker, `autoResume`, `--session-dir`, or a new session). The terminal then attaches to the host that owns that session, or starts one. A new session starts a host without `--resume`. With `--no-session`, the host runs an in-memory session and no saved session is leased. The initial prompt and `@file` attachments are read by the terminal and sent to the host as the first prompt.
+- **Host options.** Launch flags that configure a session (model, provider, tools, extensions, configuration) go to a newly started host and are never applied to the terminal. Session-source flags, positional prompts, `@file` arguments, and `--cwd` are not passed on: the terminal resolves the session and the directory first. A host that already runs the chosen session cannot change its options, so a launch with host options is refused instead of silently dropping them; attach by host ID without them. A host that `/attach` starts receives the same options as this terminal's own launch.
+- **Unsupported flags.** `--fork`, `--from-claude`, `--from-codex`, `--goal`, and flags registered only by extensions fail with a usage error. Extensions load in the host, not in the terminal; goal mode runs only in an unhosted terminal (`/goal` is unavailable when attached).
+- **`omp attach`** with no target lists running hosts; `--json` prints them for scripts without their tokens.
+- **`omp attach <target>`** opens the hosted terminal. The target is a host ID (16 lowercase hex digits), a session ID, or a session path (a value containing a path separator or ending in `.jsonl`; relative paths resolve against the current directory, and the file must be a session file). A 16-digit hex value that matches no running host is looked up as a session ID. A session ID matches by case-insensitive prefix: the start of the session ID, of the session file name, or of the ID after the last `_` in the file name. A prefix that matches several sessions selects the first one found, so give a longer prefix when in doubt. The lookup searches the current project's session directory first and then every saved session; inside a terminal launched with `--session-dir`, `/attach` searches only that directory. When no host runs the session, one is started; when another process that is not a host has the session open, attach fails and names that cause. A target that matches nothing fails with `No session host or session matches "<target>"`. Attach requires an interactive terminal (otherwise it exits with status 1) and takes no launch flags, so a host it starts has no launch options. `--json` and a target cannot be combined.
+
+#### Working directory
+
+The terminal keeps the directory it was launched in and uses it only locally: it resolves `@file` arguments and appears in the footer with its git state. Tools, shell commands, and edits run in the host's directory, which `omp attach` lists. A host started by the launch runs in the resolved launch directory, and stays there unless `/move` or `/wt` moves the host's session to another directory. Attaching never moves the host to the terminal's directory or the terminal to the host's.
+
+Editor completion is local as well. `@` file suggestions list the terminal's directory, but an `@path` in a sent prompt is resolved by the host, in the host's directory, so the two differ when you attach from another directory. The slash-command menu offers the terminal's built-in commands only: it does not suggest the host's skills, prompt templates, or extension commands, which still work when typed.
+
+Links in the host's replies follow the host, not the terminal. A Markdown link to a relative path opens that file in the host's directory, and a `local://` link opens the file in the host session's own `local://` directory (under its artifact directory, or in the host's temp directory when its session is in memory), so a report the host wrote can be opened from the terminal; none of it is copied here. The links follow the host's session when it is replaced (the transcript is redrawn) or moved (the replies on screen are re-linked in place, without a redraw; rows already in your terminal's scrollback keep the link they had), and the terminal's own temp directory is never consulted. The footer, completion, and `@file` above stay local. A host that does not report where its session lives (one started by an older build) is refused with an error telling you to stop it and attach again, instead of showing links that would open the wrong files. While no host is attached, its links are left as written.
+
+#### Leaving and moving
+
+| Command | Effect |
+| --- | --- |
+| `/detach` | Disconnect this terminal and exit; the host and its session keep running. Ctrl+C or Ctrl+D quitting, `SIGHUP`, and closing the terminal do the same. The terminal prints `omp attach <hostId>` (with `--profile` when one is active) for returning. |
+| `/exit`, `/quit` | Ask the host to exit. The host stops, ending the session's process, only when this is its last attached client; otherwise this acts as `/detach` and the others keep working. |
+| `/attach [host\|session]` | Move this terminal to another host, using the target forms above and starting a host for a session that has none. Without an argument, it opens a selector over the other running hosts. The target is resolved before the current connection is touched. If connecting fails, the terminal returns once to the previous host with a fresh snapshot, and exits with status 1 if that also fails. |
+
+Outside a hosted terminal, `/detach` and `/attach` only report that they need a hosted session.
+
+Unsent editor text is not saved when a hosted terminal detaches or exits, and attaching never restores a saved draft. In-process sessions still keep their Ctrl+D draft.
+
+Each terminal keeps its own copy of the host's transcript for rendering, in `<config root>/run/hosted-replicas/` (directory mode `0700`, files `0600`). Copies are not sessions: `/resume` never lists them, and the terminal deletes its own when it leaves. A terminal that dies without running its exit path (`SIGKILL`, an out-of-memory kill, power loss) leaves its copy behind, and nothing removes it: the copies include the transcript and any images, so delete leftover files in that directory by hand.
+
+#### Connection loss
+
+The terminal does not reconnect automatically. When the connection ends unexpectedly (the host exits or is killed, the socket breaks, or a host update cannot be applied), the terminal prints what happened, including whether the host process is still running, and exits with status 1. Rejoin with `omp attach <hostId>`. A command whose outcome is unknown after a loss is never sent again on its own. `/detach` and `/exit` never reconnect. Automatic reconnect is a required follow-up before hosted sessions can become the default.
+
+#### What works when attached
+
+- Prompting, steering, follow-ups, and Esc to abort the host's run, including images. A prompt the host rejects, or that was written for a session that has since changed, returns to the editor and is not retried.
+- The queue display of the host. The dequeue shortcut takes the newest queued message back into the editor only when it is text and nothing else: it restores the newest message with that text, and leaves the queue untouched when the message carries an attachment, when the host does not report attachments, or when the message was already delivered.
+- Model and thinking changes: the model picker lists the host's models, and selecting one, cycling forward, and cycling thinking levels are changes to the host's session only. All attached terminals show the new setting.
+- Extension dialogs (`select`, `confirm`, `input`, `editor`) and the `ask` dialog with its notes, images, and "discuss instead" choice. The first terminal to answer wins, and the others' dialogs close.
+- Slash commands that have a headless handler run on the host, and their output appears as a status line. Extension commands, skill commands, and prompt templates are sent to the host as the text you typed. `/hotkeys`, `/copy`, `/open`, `/detach`, `/attach`, `/exit`, and `/quit` run in the terminal.
+- Images pasted from the clipboard travel to the host as image data. A large text paste offers only the wrapped-block and inline choices, because a local file would sit on the terminal's side.
+
+#### Unavailable when attached
+
+Commands and shortcuts below report that they are unavailable when attached, and typed input stays in the editor. Nothing runs locally or is silently forwarded in its place. Automation and automatic titles are simply off.
+
+| Area | Unavailable | Notes |
+| --- | --- | --- |
+| Modes | `/plan`, `/plan-review`, `/goal`, `/guided-goal`, `/loop`, `/vibe`, the plan-mode and live-mode shortcuts, the `.` and `c` continue shortcuts | Their state machines still live in the terminal and have not moved to the host. |
+| Queue editing | `/queue` and the queue shorthand; taking back a queued message that carries an attachment | Follow-ups still queue with their shortcut. |
+| Session changes | `/new`, `/clear`, `/delete`, `/fork`, `/branch`, `/tree`, `/resume`, `/restart`, and their shortcuts and selectors (session tree, rewind, session switching) | A session replacement that happens on the host, for example from a forwarded command, is followed by every attached terminal. |
+| Local execution | `!` and `$` input, and PTY overlays | Commands would run on the terminal's machine, not the session's. |
+| Retry | The retry shortcut and its hint row | The `/retry` command runs on the host. |
+| Model controls | Cycling to the previous model, per-role model editing, a separate temporary-model picker | One picker applies a session-only change to the host. |
+| Titles | Automatic title generation in the terminal | Titles set by the host, such as with `/rename`, appear in all terminals. |
+| Settings and login | `/settings`, `/setup`, `/login`, `/logout`, and the setup wizard and splash at startup | The host uses its own configuration and credentials. |
+| Panels | `/extensions`, `/agents`, `/hub`, `/git`, `/debug`, `/skills`, focusing a subagent, and the `/btw` side question | `/btw` waits for host ownership of its lifecycle. |
+| Collaboration and capture | `/collab`, `/join`, `/leave`, `/live`, `/record`, `/pause`, `/tan`, `/omfg`, `/cleanse`, and collab auto-hosting | |
+| Extension UI | Custom components (`custom()`), `setFooter`, `setHeader`, `setEditorComponent`, raw terminal input, component-factory widgets, and extension keyboard shortcuts | Extensions run in the host with the same UI limits as [RPC](./rpc.md#extension-ui-sub-protocol). Status, notifications, string-array widgets, titles, and editor text from the host are shown, but those sent before a terminal attached are not replayed. |
+| Automation | Idle compaction, idle recap, goal continuation, loop auto-submit, plan-mode model reconciliation, and automatic todo clearing | Terminal-owned automation is off so that several terminals never run it more than once; it has not moved to the host yet. |
 
 ## Subcommands
 
@@ -241,6 +321,7 @@ Run `omp <command> --help` for each command's own flags and examples.
 | --- | --- | --- |
 | `launch` | Start a coding session (the default command). | [Launch flags](#launch-flags) |
 | `acp` | Run omp as an ACP (Agent Client Protocol) server over stdio. | [approval mode](./approval-mode.md#acp-sessions) |
+| `attach` | List running session hosts (`--json` for scripts), or attach this terminal to one by host ID, session ID, or session path. | [Hosted sessions](#hosted-sessions-experimental), [RPC → session hosts](./rpc.md#session-hosts) |
 | `auth-broker` | Manage the omp auth-broker (credential vault). | [auth broker / gateway](./auth-broker-gateway.md) |
 | `auth-gateway` | Run an auth-gateway: an HTTP forward proxy backed by the configured broker (`serve`), or JSON lines on stdin/stdout for a parent process with your own credentials (`stdio`). | [auth broker / gateway](./auth-broker-gateway.md) |
 | `agents` | Manage bundled task agents. | [task agent discovery](./task-agent-discovery.md) |
