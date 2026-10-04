@@ -565,6 +565,9 @@ export async function getRequestDetails(id: number): Promise<RequestDetails | nu
 	if (!msg) return null;
 
 	const entry = await getSessionEntry(msg.sessionFile, msg.entryId);
+	// Role-model attempts (judge, auto-thinking, …) journal only a `model_usage`
+	// record: usage and outcome, no request or response payload.
+	if (entry?.type === "model_usage") return { ...msg, messages: [entry], output: null };
 	if (entry?.type !== "message" || !("message" in entry)) return null;
 
 	return {

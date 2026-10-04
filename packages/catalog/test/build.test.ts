@@ -862,6 +862,20 @@ describe("openai-completions wire-quirk compat detection", () => {
 		).toBe("dsml");
 	});
 
+	it("selects the DSML healer for DeepSeek models on any host", () => {
+		// DSML is the model's own tool-call grammar: any server running its chat
+		// template without a working tool parser leaks it, whatever the provider.
+		const pattern = (provider: string, id: string, baseUrl: string) =>
+			resolveModelPolicy(completionsSpec({ provider, id, baseUrl })).compat.streamMarkupHealingPattern;
+		expect(pattern("llama.cpp", "deepseek-v4-flash", "http://192.168.1.20:8080/v1")).toBe("dsml");
+		expect(pattern("vllm", "deepseek-ai/DeepSeek-V4-Flash", "http://10.0.0.5:8000/v1")).toBe("dsml");
+		// User-configured providers, local or remote.
+		expect(pattern("my-box", "deepseek-v4-pro", "http://127.0.0.1:9000/v1")).toBe("dsml");
+		expect(pattern("my-box", "deepseek-v4-pro", "https://inference.example.com/v1")).toBe("dsml");
+		// Other model classes keep the generic healer.
+		expect(pattern("llama.cpp", "qwen3-coder", "http://127.0.0.1:8080/v1")).toBe("thinking");
+	});
+
 	it("derives Responses obfuscation opt-out and wire mode per surface", () => {
 		expect(
 			resolveModelPolicy(

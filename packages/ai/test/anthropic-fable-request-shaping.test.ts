@@ -140,8 +140,8 @@ function answered(text: string, turn: CapturedTurn): AssistantMessage {
 const READ_TOOL = { name: "read", description: "Read a file.", parameters: { type: "object", properties: {} } };
 
 describe("Anthropic preserved-thinking request shaping", () => {
-	it("opts Fable 5.1 into dropping prefix-mismatched thinking", async () => {
-		const payload = await capturePayload(makeAnthropicModel("claude-fable-5-1"), {
+	it.each(["claude-fable-5-1", "claude-opus-5-5"])("opts %s into dropping prefix-mismatched thinking", async id => {
+		const payload = await capturePayload(makeAnthropicModel(id), {
 			thinkingEnabled: true,
 			reasoning: Effort.High,
 		});
