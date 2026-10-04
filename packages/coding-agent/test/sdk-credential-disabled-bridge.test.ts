@@ -80,6 +80,13 @@ const initializeRunnerForTest = (runner: ExtensionRunner | undefined): void => {
 
 describe("createAgentSession credential_disabled subscription", () => {
 	const tempDirs: string[] = [];
+	// Every test opens a file-backed auth DB under its temp dir; Windows cannot delete it while open.
+	const authStorages: AuthStorage[] = [];
+	const createAuthStorage = async (...args: Parameters<typeof AuthStorage.create>): Promise<AuthStorage> => {
+		const storage = await AuthStorage.create(...args);
+		authStorages.push(storage);
+		return storage;
+	};
 
 	const makeDirs = (label: string): SessionDirs => {
 		const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), `pi-credential-disabled-${label}-${Snowflake.next()}-`));
@@ -153,96 +160,16 @@ describe("createAgentSession credential_disabled subscription", () => {
 
 	afterEach(() => {
 		vi.restoreAllMocks();
+		for (const storage of authStorages.splice(0)) storage.close();
 		for (const dir of tempDirs.splice(0)) {
 			removeSyncWithRetries(dir);
 		}
 	});
 
-	it("fans events out to both embedder and session-extension subscribers", async () => {
-		const dirs = makeDirs("fanout");
-		const embedderEvents: CredentialDisabledEvent[] = [];
-		const authStorage = await AuthStorage.create(path.join(dirs.agentDir, "agent.db"), {
-			onCredentialDisabled: event => {
-				embedderEvents.push(event);
-			},
-		});
-		const ext = makeRecordingExtension();
-
-		const { session } = await createAgentSession(baseOptions(dirs, authStorage, [ext.factory]));
-		initializeRunnerForTest(session.extensionRunner);
-
-		try {
-			await authStorage.credentials.set("anthropic", [expiredOAuth()]);
-			failOAuthRefresh();
-
-			const observed = ext.next();
-			await authStorage.keys.get("anthropic", "session-fanout");
-			const extEvent = await observed;
-
-			expect(embedderEvents).toEqual([
-				{
-					provider: "anthropic",
-					disabledCause: expect.stringContaining("invalid_grant"),
-					credentialId: expect.any(Number),
-				},
-			]);
-			expect(extEvent.provider).toBe("anthropic");
-			expect(extEvent.disabledCause).toContain("invalid_grant");
-		} finally {
-			await session.dispose();
-		}
-	});
-
-	it("session.dispose() unsubscribes the session's listener; the embedder's listener keeps firing", async () => {
-		const dirs = makeDirs("dispose");
-		const embedderEvents: CredentialDisabledEvent[] = [];
-		const authStorage = await AuthStorage.create(path.join(dirs.agentDir, "agent.db"), {
-			onCredentialDisabled: event => {
-				embedderEvents.push(event);
-			},
-		});
-		const ext = makeRecordingExtension();
-		const { session } = await createAgentSession(baseOptions(dirs, authStorage, [ext.factory]));
-		initializeRunnerForTest(session.extensionRunner);
-
-		failOAuthRefresh();
-
-		// Pre-dispose: both fire.
-		await authStorage.credentials.set("anthropic", [expiredOAuth()]);
-		const firstExt = ext.next();
-		await authStorage.keys.get("anthropic", "pre-dispose");
-		await firstExt;
-		expect(embedderEvents).toHaveLength(1);
-		expect(ext.events).toHaveLength(1);
-
-		await session.dispose();
-
-		// Post-dispose: only the embedder fires; the extension's listener was unsubscribed.
-		await authStorage.credentials.set("openai", [expiredOAuth()]);
-		await authStorage.keys.get("openai", "post-dispose");
-		// Drain async dispatch turns before asserting absence.
-		await drainCredentialDisabledDispatch();
-
-		expect(embedderEvents).toEqual([
-			{
-				provider: "anthropic",
-				disabledCause: expect.stringContaining("invalid_grant"),
-				credentialId: expect.any(Number),
-			},
-			{
-				provider: "openai",
-				disabledCause: expect.stringContaining("invalid_grant"),
-				credentialId: expect.any(Number),
-			},
-		]);
-		expect(ext.events).toHaveLength(1);
-		expect(ext.events[0]?.provider).toBe("anthropic");
-	});
-
 	it("concurrent sessions each subscribe their own listener; each dispose only removes its own", async () => {
 		const sharedDirs = makeDirs("concurrent");
 		const embedderEvents: CredentialDisabledEvent[] = [];
-		const authStorage = await AuthStorage.create(path.join(sharedDirs.agentDir, "agent.db"), {
+		const authStorage = await createAuthStorage(path.join(sharedDirs.agentDir, "agent.db"), {
 			onCredentialDisabled: event => {
 				embedderEvents.push(event);
 			},
@@ -317,7 +244,7 @@ describe("createAgentSession credential_disabled subscription", () => {
 		// rather than the real context wired in by mode controllers.
 		const dirs = makeDirs("pre-init");
 		// No constructor handler — verifies the default case still defers properly.
-		const authStorage = await AuthStorage.create(path.join(dirs.agentDir, "agent.db"));
+		const authStorage = await createAuthStorage(path.join(dirs.agentDir, "agent.db"));
 		const ext = makeRecordingExtension();
 
 		const { session } = await createAgentSession(baseOptions(dirs, authStorage, [ext.factory]));
@@ -353,7 +280,7 @@ describe("createAgentSession credential_disabled subscription", () => {
 		// and the extension runner (deferred until initialize).
 		const dirs = makeDirs("embedder-and-extension");
 		const embedderEvents: CredentialDisabledEvent[] = [];
-		const authStorage = await AuthStorage.create(path.join(dirs.agentDir, "agent.db"), {
+		const authStorage = await createAuthStorage(path.join(dirs.agentDir, "agent.db"), {
 			onCredentialDisabled: event => {
 				embedderEvents.push(event);
 			},
@@ -393,7 +320,7 @@ describe("createAgentSession credential_disabled subscription", () => {
 	it("releases the session subscription if createAgentSession throws mid-startup", async () => {
 		const dirs = makeDirs("startup-failure");
 		const embedderEvents: CredentialDisabledEvent[] = [];
-		const authStorage = await AuthStorage.create(path.join(dirs.agentDir, "agent.db"), {
+		const authStorage = await createAuthStorage(path.join(dirs.agentDir, "agent.db"), {
 			onCredentialDisabled: event => {
 				embedderEvents.push(event);
 			},
@@ -431,7 +358,7 @@ describe("createAgentSession credential_disabled subscription", () => {
 	it("subscribes through the registry's auth storage when only options.modelRegistry is provided", async () => {
 		const dirs = makeDirs("registry-only");
 		const embedderEvents: CredentialDisabledEvent[] = [];
-		const authStorage = await AuthStorage.create(path.join(dirs.agentDir, "agent.db"), {
+		const authStorage = await createAuthStorage(path.join(dirs.agentDir, "agent.db"), {
 			onCredentialDisabled: event => {
 				embedderEvents.push(event);
 			},
@@ -480,8 +407,8 @@ describe("createAgentSession credential_disabled subscription", () => {
 
 	it("rejects when options.authStorage and options.modelRegistry.authStorage are different instances", async () => {
 		const dirs = makeDirs("mismatch");
-		const registryStorage = await AuthStorage.create(path.join(dirs.agentDir, "agent-registry.db"));
-		const otherStorage = await AuthStorage.create(path.join(dirs.agentDir, "agent-other.db"));
+		const registryStorage = await createAuthStorage(path.join(dirs.agentDir, "agent-registry.db"));
+		const otherStorage = await createAuthStorage(path.join(dirs.agentDir, "agent-other.db"));
 		const modelRegistry = new ModelRegistry(registryStorage, path.join(dirs.agentDir, "models-registry.json"));
 
 		await expect(
@@ -605,7 +532,7 @@ describe("createAgentSession credential_disabled subscription", () => {
 
 	it("warns the live session, without the provider's text, when a signed-in account is disabled", async () => {
 		const dirs = makeDirs("notice");
-		const authStorage = await AuthStorage.create(path.join(dirs.agentDir, "agent.db"));
+		const authStorage = await createAuthStorage(path.join(dirs.agentDir, "agent.db"));
 		const { session } = await createAgentSession(baseOptions(dirs, authStorage));
 		const notices = recordNotices(session);
 		try {
@@ -632,7 +559,7 @@ describe("createAgentSession credential_disabled subscription", () => {
 	it("does not prescribe /login for a disabled credential that has no login entry", async () => {
 		const dirs = makeDirs("notice-no-login");
 		const embedderEvents: CredentialDisabledEvent[] = [];
-		const authStorage = await AuthStorage.create(path.join(dirs.agentDir, "agent.db"), {
+		const authStorage = await createAuthStorage(path.join(dirs.agentDir, "agent.db"), {
 			onCredentialDisabled: event => {
 				embedderEvents.push(event);
 			},

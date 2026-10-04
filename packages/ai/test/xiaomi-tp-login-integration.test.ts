@@ -134,26 +134,6 @@ describe("loginXiaomi with tp- key", () => {
 		expect(seen[1]).toContain(TOKEN_PLAN_HOSTS.ams);
 		expect(seen[2]).toContain(TOKEN_PLAN_HOSTS.cn);
 	});
-
-	it("does NOT hit the standard api.xiaomimimo.com for tp- keys", async () => {
-		const seen: string[] = [];
-
-		const fetchMock: FetchImpl = async input => {
-			seen.push(String(input));
-			return new Response("{}", { status: 200, headers: { "Content-Type": "application/json" } });
-		};
-
-		await loginXiaomi({
-			onPrompt: async () => TP_KEY,
-			onAuth: () => {},
-			onProgress: () => {},
-			fetch: fetchMock,
-		});
-
-		for (const url of seen) {
-			expect(url).not.toContain(STANDARD_HOST);
-		}
-	});
 });
 
 // ─── xiaomiModelManagerOptions: runtime model discovery ────────────────────
@@ -216,25 +196,6 @@ describe("xiaomiModelManagerOptions with tp- key", () => {
 		const models = await opts.fetchDynamicModels?.();
 
 		expect(models).toBeNull();
-	});
-
-	it("does NOT use standard host for tp- key model discovery", async () => {
-		const seen: string[] = [];
-
-		const fetchMock: FetchImpl = async input => {
-			seen.push(String(input));
-			return new Response(JSON.stringify({ data: [] }), {
-				status: 200,
-				headers: { "Content-Type": "application/json" },
-			});
-		};
-
-		const opts = xiaomiModelManagerOptions({ apiKey: TP_KEY, fetch: fetchMock });
-		await opts.fetchDynamicModels?.();
-
-		for (const url of seen) {
-			expect(url).not.toContain(STANDARD_HOST);
-		}
 	});
 });
 

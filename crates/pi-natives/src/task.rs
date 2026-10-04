@@ -146,6 +146,13 @@ impl CancelToken {
 		self.core.aborted()
 	}
 
+	/// Return explicit abort-flag state, without treating an elapsed deadline
+	/// as an abort. Result settlement can be delayed by a busy JS thread after
+	/// work already completed within its time budget.
+	pub fn abort_reason(&self) -> Option<AbortReason> {
+		self.core.abort_reason().map(Into::into)
+	}
+
 	pub fn into_core(self) -> core_cancel::CancelToken {
 		self.core
 	}
@@ -219,9 +226,25 @@ where
 		}
 	}
 
-	fn resolve(&mut self, _env: Env, output: Self::Output) -> Result<Self::JsValue> {
+	fn resolve(&mut self, env: Env, output: Self::Output) -> Result<Self::JsValue> {
+		if let Some(reason) = self.cancel_token.abort_reason() {
+			return Err(abort_error(env, reason));
+		}
 		Ok(output)
 	}
+}
+
+/// Construct the same named rejection napi uses when an `AbortSignal` cancels
+/// async work. This path handles cancellation observed after `compute` has
+/// already returned successfully.
+pub fn abort_error(env: Env, reason: AbortReason) -> Error {
+	let message = format!("Aborted: {reason:?}");
+	let built: Result<Error> = (|| {
+		let mut error = env.create_error(Error::new(Status::Cancelled, message.clone()))?;
+		error.set_named_property("name", "AbortError")?;
+		Ok(Error::from(error.to_unknown()))
+	})();
+	built.unwrap_or_else(|_| Error::new(Status::Cancelled, message))
 }
 
 /// Dispose of a caught panic payload without any possibility of a second
@@ -268,6 +291,7 @@ where
 	/// Domain error stashed by `compute` for `reject` to convert with `Env`.
 	error:        Option<E>,
 	reject_hook:  fn(Env, E) -> Error,
+	cancel_hook:  fn(Env, AbortReason) -> Error,
 }
 /// Boxed work closure for [`BlockingMapped`].
 type MappedWork<T, E> = Box<dyn FnOnce(CancelToken) -> std::result::Result<T, E> + Send>;
@@ -318,7 +342,10 @@ where
 		}
 	}
 
-	fn resolve(&mut self, _env: Env, output: Self::Output) -> Result<Self::JsValue> {
+	fn resolve(&mut self, env: Env, output: Self::Output) -> Result<Self::JsValue> {
+		if let Some(reason) = self.cancel_token.abort_reason() {
+			return Err((self.cancel_hook)(env, reason));
+		}
 		Ok(output)
 	}
 }
@@ -333,6 +360,7 @@ pub fn blocking_mapped<T, E, F>(
 	tag: &'static str,
 	cancel_token: impl Into<CancelToken>,
 	reject_hook: fn(Env, E) -> Error,
+	cancel_hook: fn(Env, AbortReason) -> Error,
 	work: F,
 ) -> MappedPromise<T, E>
 where
@@ -346,6 +374,7 @@ where
 		work: Some(Box::new(work)),
 		error: None,
 		reject_hook,
+		cancel_hook,
 	})
 }
 

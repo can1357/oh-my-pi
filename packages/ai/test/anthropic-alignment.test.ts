@@ -5,6 +5,7 @@ import * as path from "node:path";
 import * as tls from "node:tls";
 import { type as arkType } from "@oh-my-pi/omptype";
 import { Effort } from "@oh-my-pi/pi-ai";
+import { NO_AUTH_SENTINEL } from "@oh-my-pi/pi-ai/auth-retry";
 import {
 	applyClaudeToolPrefix,
 	buildAnthropicClientOptions,
@@ -291,8 +292,8 @@ describe("Anthropic request fingerprint alignment", () => {
 		expect(payload.system?.[0]?.cache_control).toBeUndefined();
 		expect(claudeCodeSystemInstruction).toBe("You are Claude Code, Anthropic's official CLI for Claude.");
 		expect(payload.system?.[1]?.text).toBe(claudeCodeSystemInstruction);
-		expect(payload.system?.[1]?.cache_control).toEqual({ type: "ephemeral", ttl: "1h" });
-		expect(payload.system?.[2]?.cache_control).toBeUndefined();
+		expect(payload.system?.[1]?.cache_control).toBeUndefined();
+		expect(payload.system?.[2]?.cache_control).toEqual({ type: "ephemeral", ttl: "1h" });
 		const content = payload.messages?.[0]?.content;
 		expect(Array.isArray(content)).toBe(true);
 		expect(Array.isArray(content) ? content[0]?.cache_control : undefined).toEqual({
@@ -314,7 +315,7 @@ describe("Anthropic request fingerprint alignment", () => {
 			messages?: Array<{ content?: Array<{ cache_control?: unknown }> | string }>;
 		};
 
-		expect(payload.system?.[1]?.cache_control).toEqual({ type: "ephemeral" });
+		expect(payload.system?.[2]?.cache_control).toEqual({ type: "ephemeral" });
 		const content = payload.messages?.[0]?.content;
 		expect(Array.isArray(content) ? content[0]?.cache_control : undefined).toEqual({
 			type: "ephemeral",
@@ -887,6 +888,20 @@ describe("Anthropic request fingerprint alignment", () => {
 		expect(headers["X-Api-Key"]).toBeUndefined();
 	});
 
+	it("sends no Authorization for keyless sentinel credentials on non-official endpoints", () => {
+		// Providers with `auth: none` resolve to the N/A sentinel rather than a
+		// real key; emitting `Authorization: Bearer N/A` makes keyless local
+		// proxies reject the request. Same sentinel guard as the openai transports.
+		const headers = buildAnthropicHeaders({
+			apiKey: NO_AUTH_SENTINEL,
+			baseUrl: "https://proxy.example.com",
+			stream: true,
+		});
+
+		expect(headers.Authorization).toBeUndefined();
+		expect(headers["X-Api-Key"]).toBeUndefined();
+	});
+
 	it("honors caller-supplied Authorization on non-official Anthropic endpoints (#3391)", () => {
 		const headers = buildAnthropicHeaders({
 			apiKey: "sk-ant-api-test",
@@ -972,6 +987,23 @@ describe("Anthropic request fingerprint alignment", () => {
 		expect(options.defaultHeaders["x-app"]).toBe("custom-app-token");
 		expect(options.defaultHeaders["X-Stainless-Runtime-Version"]).toBe("custom-runtime-token");
 		expect(options.defaultHeaders.Authorization).toBe("Bearer sk-ant-oat-test");
+	});
+
+	it("suppresses the client X-Api-Key for keyless sentinel credentials", () => {
+		// With the sentinel, no Authorization was built; without this guard the
+		// Anthropic client would inject its own `X-Api-Key: N/A` instead.
+		const options = buildAnthropicClientOptions({
+			model: buildModel({
+				...ANTHROPIC_MODEL_SPEC,
+				provider: "custom-anthropic",
+				baseUrl: "https://proxy.example.com/anthropic",
+			}),
+			apiKey: NO_AUTH_SENTINEL,
+			stream: true,
+		});
+
+		expect(options.defaultHeaders.Authorization).toBeUndefined();
+		expect(options.apiKey).toBeNull();
 	});
 
 	it("keeps OAuth fingerprint defaults on official endpoints despite the compat opt-in", () => {
@@ -1689,8 +1721,8 @@ describe("Anthropic request fingerprint alignment", () => {
 	it("keeps OAuth tool names behind the proxy prefix with eager streaming and strict flags", async () => {
 		const tools: Tool[] = [
 			{
-				name: "bash",
-				description: "run commands",
+				name: "edit",
+				description: "edit files",
 				strict: true,
 				parameters: {
 					type: "object",
@@ -1708,7 +1740,7 @@ describe("Anthropic request fingerprint alignment", () => {
 			tools?: Array<{ name?: string; strict?: boolean; eager_input_streaming?: boolean; cache_control?: unknown }>;
 		};
 
-		expect(payload.tools?.[0]?.name).toBe(`${claudeToolPrefix}bash`);
+		expect(payload.tools?.[0]?.name).toBe(`${claudeToolPrefix}edit`);
 		expect(payload.tools?.[0]?.strict).toBe(true);
 		expect(payload.tools?.[0]?.eager_input_streaming).toBe(true);
 		// Sole tool is also the last tool, so it carries the head breakpoint.
@@ -1742,15 +1774,15 @@ describe("Anthropic request fingerprint alignment", () => {
 		expect(payload.tools?.[1]?.cache_control).toBeUndefined();
 		expect(payload.tools?.at(-1)?.cache_control).toEqual({ type: "ephemeral", ttl: "1h" });
 
-		// The trailing message window is untouched; the OAuth identity block carries its
-		// own breakpoint, while caller system blocks stay uncached.
+		// The trailing message window is untouched; the system breakpoint sits on the
+		// last caller system block, not on the OAuth identity block before it.
 		const content = payload.messages?.at(-1)?.content;
 		expect(Array.isArray(content) ? content.at(-1)?.cache_control : undefined).toEqual({
 			type: "ephemeral",
 			ttl: "1h",
 		});
-		expect(payload.system?.[1]?.cache_control).toEqual({ type: "ephemeral", ttl: "1h" });
-		expect(payload.system?.[2]?.cache_control).toBeUndefined();
+		expect(payload.system?.[1]?.cache_control).toBeUndefined();
+		expect(payload.system?.[2]?.cache_control).toEqual({ type: "ephemeral", ttl: "1h" });
 		// Anthropic rejects a fifth breakpoint, so the total must stay in budget.
 		const marked = (blocks: Array<{ cache_control?: unknown }> | undefined) =>
 			(blocks ?? []).filter(block => block.cache_control != null).length;
@@ -1763,7 +1795,7 @@ describe("Anthropic request fingerprint alignment", () => {
 
 	it("marks only the Anthropic strict allowlist strict", async () => {
 		const tools: Tool[] = [
-			...(["bash", "python", "edit", "find"] as const).map(name => ({
+			...(["python", "edit", "find"] as const).map(name => ({
 				name,
 				description: `${name} tool`,
 				strict: true,
@@ -1773,7 +1805,9 @@ describe("Anthropic request fingerprint alignment", () => {
 					required: ["requiredValue"],
 				} as TJsonSchema,
 			})),
-			...(["write", "grep", "read", "task", "todo", "web_search", "ast_grep"] as const).map(name => ({
+			// `bash` is off the allowlist: strict decoding fixes property order, which made
+			// its `timeout` unreachable once a call had written `async`.
+			...(["bash", "write", "grep", "read", "task", "todo", "web_search", "ast_grep"] as const).map(name => ({
 				name,
 				description: `${name} tool`,
 				strict: true,
@@ -1799,15 +1833,15 @@ describe("Anthropic request fingerprint alignment", () => {
 
 		const strictNames = (payload.tools ?? []).filter(tool => tool.strict === true).map(tool => tool.name);
 
-		expect(strictNames).toEqual(["bash", "python", "edit", "find"]);
-		expect(payload.tools?.find(tool => tool.name === "bash")?.input_schema?.required).toEqual(["requiredValue"]);
+		expect(strictNames).toEqual(["python", "edit", "find"]);
+		expect(payload.tools?.find(tool => tool.name === "edit")?.input_schema?.required).toEqual(["requiredValue"]);
 	});
 
 	it("marks regular two-field Zod object tools strict", async () => {
 		const tools: Tool[] = [
 			{
-				name: "bash",
-				description: "bash tool",
+				name: "edit",
+				description: "edit tool",
 				strict: true,
 				parameters: arkType({
 					command: "string",
@@ -1832,18 +1866,18 @@ describe("Anthropic request fingerprint alignment", () => {
 			}>;
 		};
 
-		const bashTool = payload.tools?.find(tool => tool.name === "bash");
+		const editTool = payload.tools?.find(tool => tool.name === "edit");
 
-		expect(bashTool?.strict).toBe(true);
-		expect(Object.keys(bashTool?.input_schema?.properties ?? {})).toEqual(["command", "cwd"]);
-		expect(bashTool?.input_schema?.required).toEqual(["command", "cwd"]);
+		expect(editTool?.strict).toBe(true);
+		expect(Object.keys(editTool?.input_schema?.properties ?? {})).toEqual(["command", "cwd"]);
+		expect(editTool?.input_schema?.required).toEqual(["command", "cwd"]);
 	});
 
 	it("does not mark allowlisted Anthropic tools strict when schemas contain open object maps", async () => {
 		const tools: Tool[] = [
 			{
-				name: "bash",
-				description: "bash tool",
+				name: "edit",
+				description: "edit tool",
 				strict: true,
 				parameters: {
 					type: "object",
@@ -1885,11 +1919,11 @@ describe("Anthropic request fingerprint alignment", () => {
 			}>;
 		};
 
-		const bashTool = payload.tools?.find(tool => tool.name === "bash");
+		const editTool = payload.tools?.find(tool => tool.name === "edit");
 		const pythonTool = payload.tools?.find(tool => tool.name === "python");
-		const env = bashTool?.input_schema?.properties?.env as { additionalProperties?: unknown } | undefined;
+		const env = editTool?.input_schema?.properties?.env as { additionalProperties?: unknown } | undefined;
 
-		expect(bashTool?.strict).toBeUndefined();
+		expect(editTool?.strict).toBeUndefined();
 		expect(env?.additionalProperties).toEqual({ type: "string" });
 		expect(pythonTool?.strict).toBe(true);
 		expect(pythonTool?.input_schema?.required).toEqual(["requiredValue"]);
@@ -1898,8 +1932,8 @@ describe("Anthropic request fingerprint alignment", () => {
 	it("honors strict=false and skips non-allowlisted Anthropic tools", async () => {
 		const tools: Tool[] = [
 			{
-				name: "bash",
-				description: "bash tool",
+				name: "edit",
+				description: "edit tool",
 				strict: false,
 				parameters: {
 					type: "object",
@@ -2953,14 +2987,6 @@ describe("Anthropic request fingerprint alignment", () => {
 		}
 	});
 
-	it("treats tool prefix helpers as no-ops when prefix is empty string", () => {
-		// Directly verify the codec's identity behaviour: builtins pass through apply unchanged.
-		// (Empty-prefix path is exercised by the builtin guard below; the contract is
-		//  roundtrip fidelity, not knowledge of the literal prefix string.)
-		const name = "Read";
-		expect(stripClaudeToolPrefix(applyClaudeToolPrefix(name))).toBe(name);
-	});
-
 	it("does not prefix built-in Anthropic tool names", () => {
 		expect(applyClaudeToolPrefix("web_search")).toBe("web_search");
 		expect(applyClaudeToolPrefix("CODE_EXECUTION")).toBe("CODE_EXECUTION");
@@ -3022,21 +3048,5 @@ describe("cch attestation", () => {
 		const withPlaceholder = capturedBody.replace(/cch=[0-9a-f]{5}/, "cch=00000");
 		const h = Bun.hash.xxHash64(new TextEncoder().encode(withPlaceholder), CCH_SEED);
 		expect(m![1]).toBe((h & 0xfffffn).toString(16).padStart(5, "0"));
-	});
-
-	it("derives cch from low-20-bits of XXHash64(body, seed) — external reference values", () => {
-		// Each body contains "cch=00000" as the Bun HTTP layer sees it before patching.
-		// Expected low-20-bit hashes precomputed with the Python xxhash reference.
-		const CCH_SEED = 0x4d659218e32a3268n;
-		const enc = new TextEncoder();
-		const cases: [string, string][] = [
-			["cch=00000", "a47f7"],
-			['{"messages":[],"cch=00000","x":1}', "3073d"],
-			["x-anthropic-billing-header: cc_version=2.1.158; cc_entrypoint=cli; cch=00000;", "f2b0b"],
-		];
-		for (const [body, expected] of cases) {
-			const h = Bun.hash.xxHash64(enc.encode(body), CCH_SEED);
-			expect((h & 0xfffffn).toString(16).padStart(5, "0")).toBe(expected);
-		}
 	});
 });

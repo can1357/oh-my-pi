@@ -45,7 +45,7 @@ import { type EvalBackendsAllowance, resolveEvalBackends } from "./eval-backends
 import { generateCodeModeDeclarations } from "@oh-my-pi/pi-tui/tools/eval-format/code-mode-declarations";
 import { upsertStatusEvent } from "@oh-my-pi/pi-tui/tools/eval";
 import { formatOutputNotice } from "@oh-my-pi/pi-tui/tools/output-meta";
-import { resolveOutputMaxColumns, resolveOutputSinkHeadBytes } from "./output-meta";
+import { resolveOutputMaxColumns, resolveOutputSinkArtifactMaxBytes, resolveOutputSinkHeadBytes } from "./output-meta";
 import { ToolAbortError, throwIfAborted } from "./tool-errors";
 import { hasWaitTool } from "./wait";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
@@ -59,7 +59,7 @@ import {
 	cfgEvalToolsEnabled,
 } from "../eval/settings";
 import { cfgTaskMaxRecursionDepth } from "../task/settings";
-import { cfgToolsMaxTimeout } from "./settings";
+import { cfgToolsMaxTimeout, cfgToolsSpeculativeExecutionEnabled } from "./settings";
 
 /** Language tokens the eval tool accepts, in stable display order. */
 export type EvalLanguageToken = "py" | "js";
@@ -466,6 +466,9 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 		stream: {
 			open: async context => {
 				if (!this.session) return undefined;
+				// The coordinator also exists for `task.speculativeLaunch`; eval shadows
+				// belong to the read/eval speculation slice only.
+				if (!cfgToolsSpeculativeExecutionEnabled.get(this.session.settings)) return undefined;
 				if (cfgEvalAutoBackgroundEnabled.get(this.session.settings)) return undefined;
 				const parentToolCallId = context.parentToolCallId;
 				const cell = new EvalShadowCellSession({
@@ -609,11 +612,14 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 		// is runtime work (it pauses across agent()/tool bridge calls), so a cell
 		// can legitimately outlive it in wall time — exactly the case
 		// backgrounding exists for.
-		const clampedCellTimeoutMs =
+		const clampedCellTimeoutSec =
 			cells[0].timeoutMs === 0
 				? undefined
-				: clampTimeout("eval", cells[0].timeoutMs / 1000, cfgToolsMaxTimeout.get(session.settings)) * 1000;
-		const autoBackgroundWaitMs = resolveAutoBackgroundWaitMs(thresholdMs, clampedCellTimeoutMs);
+				: clampTimeout("eval", cells[0].timeoutMs / 1000, cfgToolsMaxTimeout.get(session.settings));
+		const autoBackgroundWaitMs = resolveAutoBackgroundWaitMs(
+			thresholdMs,
+			clampedCellTimeoutSec === undefined ? undefined : clampedCellTimeoutSec * 1000,
+		);
 		const startBackgrounded = autoBackgroundWaitMs === 0;
 
 		const rawLabel = params.title?.trim() || params.code.trim().split("\n", 1)[0] || "eval cell";
@@ -668,8 +674,19 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 			{ ownerId: session.getAgentId?.() ?? undefined, foreground: !startBackgrounded },
 		);
 
+		const backgroundStartResult = (extraNotice?: string) =>
+			this.#buildBackgroundStartResult(
+				jobId,
+				cells,
+				languages,
+				notice,
+				latestText,
+				latestDetails,
+				clampedCellTimeoutSec,
+				extraNotice,
+			);
 		if (startBackgrounded) {
-			return this.#buildBackgroundStartResult(jobId, cells, languages, notice, latestText, latestDetails);
+			return backgroundStartResult();
 		}
 		// The job was registered as foreground-backed: hidden from listings and
 		// delivery-suppressed until backgroundJob() promotes it, so a cell
@@ -701,12 +718,13 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 			waitResult.kind === "steer"
 				? "Backgrounded early to handle an incoming message; the cell keeps running."
 				: undefined;
-		return this.#buildBackgroundStartResult(jobId, cells, languages, notice, latestText, latestDetails, steerNotice);
+		return backgroundStartResult(steerNotice);
 	}
 
 	/**
 	 * Tool result returned when a cell converts into a background job: the live
-	 * output tail plus the background notice, with details carrying the running
+	 * output tail plus the background notice stating the cell's deadline
+	 * (`timeoutSec`, `undefined` when disabled), with details carrying the running
 	 * cell snapshot and the async job marker the transcript renderer keys on.
 	 */
 	#buildBackgroundStartResult(
@@ -716,6 +734,7 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 		notice: string | undefined,
 		previewText: string,
 		latestDetails: EvalToolDetails | undefined,
+		timeoutSec: number | undefined,
 		extraNotice?: string,
 	): AgentToolResult<EvalToolDetails> {
 		// latestDetails snapshots are per-update copies (buildUpdateDetails), so
@@ -742,7 +761,7 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 		if (extraNotice) {
 			lines.push(extraNotice, "");
 		}
-		lines.push(formatBackgroundNotice(jobId));
+		lines.push(formatBackgroundNotice(jobId, timeoutSec));
 		return { content: [{ type: "text", text: lines.join("\n") }], details };
 	}
 
@@ -791,8 +810,9 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 				if (spilledDisplays.length === 0) return;
 				// Artifact persistence confirmed: keep the bounded preview. Otherwise
 				// restore the full value so `details` never points at an artifact that
-				// was never (fully) written.
-				if (summary?.artifactId !== undefined) {
+				// was never (fully) written — including one the size cap cut, whose
+				// elided middle may have held the spilled value.
+				if (summary?.artifactId !== undefined && !summary.artifactElidedBytes) {
 					spilledDisplays.length = 0;
 					return;
 				}
@@ -870,6 +890,7 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 				artifactPath,
 				artifactId,
 				headBytes: resolveOutputSinkHeadBytes(session.settings),
+				artifactMaxBytes: resolveOutputSinkArtifactMaxBytes(session.settings),
 				maxColumns: resolveOutputMaxColumns(session.settings),
 				onChunk: chunk => {
 					appendTail(chunk);
@@ -1039,39 +1060,16 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 					appendTail(cellOutput);
 				}
 
-				if (result.cancelled) {
-					cellResult.status = "error";
-					pushUpdate();
-					const errorMsg = result.output || "Command aborted";
-					const combinedOutput = cellOutputs.join("\n\n");
-					const outputText = combinedOutput || errorMsg;
-
-					const summaryForMeta = await summarizeFinal(combinedOutput, finalizeOutput);
-					commitDisplaySpills(summaryForMeta);
-					const details: EvalToolDetails = {
-						language: languages[0],
-						languages,
-						cells: cellResults,
-						jsonOutputs: jsonOutputs.length > 0 ? jsonOutputs : undefined,
-						statusEvents: statusEvents.length > 0 ? statusEvents : undefined,
-						isError: true,
-					};
-					if (notice) details.notice = notice;
-
-					return toolResult(details)
-						.content([{ type: "text", text: outputText }, ...images])
-						.truncationFromSummary(summaryForMeta, { direction: "tail" })
-						.error()
-						.done();
-				}
-
-				if (result.exitCode !== 0 && result.exitCode !== undefined) {
+				if (result.cancelled || (result.exitCode !== 0 && result.exitCode !== undefined)) {
 					cellResult.status = "error";
 					pushUpdate();
 					const combinedOutput = cellOutputs.join("\n\n");
-					const outputText = combinedOutput
-						? `${combinedOutput}\n\nCommand exited with code ${result.exitCode}`
-						: `Command exited with code ${result.exitCode}`;
+					const exitLine = `Command exited with code ${result.exitCode}`;
+					const outputText = result.cancelled
+						? combinedOutput || result.output || "Command aborted"
+						: combinedOutput
+							? `${combinedOutput}\n\n${exitLine}`
+							: exitLine;
 
 					const summaryForMeta = await summarizeFinal(combinedOutput, finalizeOutput);
 					commitDisplaySpills(summaryForMeta);
@@ -1157,6 +1155,7 @@ async function summarizeFinal(
 		outputLines,
 		outputBytes,
 		artifactId: rawSummary.artifactId,
+		artifactElidedBytes: rawSummary.artifactElidedBytes,
 		artifactError: rawSummary.artifactError,
 		columnDroppedBytes: rawSummary.columnDroppedBytes,
 		columnTruncatedLines: rawSummary.columnTruncatedLines,

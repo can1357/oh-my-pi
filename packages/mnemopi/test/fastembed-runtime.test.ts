@@ -21,10 +21,16 @@ describe("fastembed runtime version pins", () => {
 		expect(plan.install.dependencies).toEqual({
 			fastembed: packageManifest.peerDependencies.fastembed,
 		});
-		expect(plan.install.overrides).toBeUndefined();
+		expect(plan.install.overrides?.["onnxruntime-node"]).toBeUndefined();
 		expect(plan.install.trustedDependencies).toEqual(["onnxruntime-node"]);
 		expect(plan.versionKey).toContain("transitive-ort");
 		expect(plan.versionKey).not.toContain("forced-ort");
+	});
+
+	test("runtime install overrides tokenizers to a release with linux-arm64 bindings", () => {
+		const plan = fastembedRuntimeInstallPlan();
+		expect(plan.install.overrides).toEqual({ "@anush008/tokenizers": "0.6.0" });
+		expect(plan.versionKey).toContain("tokenizers-0.6.0");
 	});
 
 	test("Windows preload selects fastembed's ORT DLL before inherited paths", async () => {

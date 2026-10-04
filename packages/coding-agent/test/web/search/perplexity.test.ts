@@ -4,7 +4,6 @@ import { PerplexityProvider, searchPerplexity } from "@oh-my-pi/pi-coding-agent/
 import { getAvailableAuthMethods } from "@oh-my-pi/pi-coding-agent/web/search/providers/perplexity-auth";
 
 const API_URL = "https://api.perplexity.ai/chat/completions";
-const OPENROUTER_API_URL = "https://openrouter.ai/api/v1/chat/completions";
 const RESPONSES_URL = "https://api.perplexity.ai/v1/responses";
 
 // API-key path only: OAuth access returns undefined so findPerplexityAuth
@@ -173,30 +172,20 @@ describe("Perplexity API-key request shape", () => {
 
 		expect(response.relatedQuestions).toBeUndefined();
 	});
-	it("falls back to OpenRouter with the selected API-key config after a non-retryable direct Perplexity failure", async () => {
+	it("never bills an OpenRouter key when the direct Perplexity call fails", async () => {
 		process.env.OPENROUTER_API_KEY = "openrouter-test-key";
 		const urls: string[] = [];
-		const bodies: Record<string, unknown>[] = [];
-		const fetchMock: FetchImpl = async (input, init) => {
+		const fetchMock: FetchImpl = async input => {
 			const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
 			urls.push(url);
-			bodies.push(JSON.parse(init?.body as string));
 			if (url === API_URL) return new Response("direct failed", { status: 400 });
-			if (url === OPENROUTER_API_URL) return sseResponse(baseResponse());
-			return new Response("not mocked", { status: 500 });
+			return sseResponse(baseResponse());
 		};
 
-		const response = await searchPerplexity({
-			query: "quic vs tcp",
-			authStorage: apiKeyAuthStorage,
-			fetch: fetchMock,
-		});
-
-		expect(urls).toEqual([API_URL, OPENROUTER_API_URL]);
-		expect(bodies[0]?.model).toBe("sonar-pro");
-		expect(bodies[1]?.model).toBe("perplexity/sonar-pro");
-		expect(response.authMode).toBe("api_key");
-		expect(response.answer).toBe("answer");
+		await expect(
+			searchPerplexity({ query: "quic vs tcp", authStorage: apiKeyAuthStorage, fetch: fetchMock, explicit: true }),
+		).rejects.toThrow();
+		expect(urls).toEqual([API_URL]);
 	});
 	it("rejects with the classified upstream error instead of a generic 401 when the only method fails", async () => {
 		delete process.env.OPENROUTER_API_KEY;
@@ -495,7 +484,7 @@ describe("Perplexity OAuth transport failure (issue #5315)", () => {
 			get: async (provider: string) => (provider === "perplexity" ? "oauth-session-jwt" : undefined),
 			source: (provider: string) => (provider === "perplexity" ? { kind: "oauth", concrete: true } : undefined),
 		},
-		limits: { rotate: async () => false },
+		limits: { rotate: async () => ({ switched: false }) },
 	} as unknown as AuthStorage;
 
 	it("does not emit a direct api-key config from the OAuth session token", async () => {
@@ -503,7 +492,7 @@ describe("Perplexity OAuth transport failure (issue #5315)", () => {
 		expect(methods.some(m => m.type === "oauth")).toBe(true);
 		// The OAuth JWT must never appear as a Perplexity api_key config — that is
 		// what got sent as a Bearer to api.perplexity.ai and rejected with 401.
-		expect(methods.some(m => m.type === "api_key" && m.provider === "perplexity")).toBe(false);
+		expect(methods.some(m => m.type === "api_key")).toBe(false);
 	});
 
 	it("retries the ask endpoint once on transport failure and never falls through to /chat/completions", async () => {
@@ -616,6 +605,34 @@ describe("Perplexity anonymous fallback", () => {
 		]);
 	});
 
+	it("classifies the source-less anonymous signup wall as a provider failure (issue #12756)", async () => {
+		// Anonymous quota exhausted: HTTP 200, a (localized) signup-wall answer, no web_results.
+		const answerPayload = { answer: "Sign up and repeat your request." };
+		const event = {
+			final: true,
+			display_model: "turbo",
+			uuid: "req-wall",
+			text: JSON.stringify([{ step_type: "FINAL", content: { answer: JSON.stringify(answerPayload) }, uuid: "" }]),
+		};
+		const sseBody = `data: ${JSON.stringify(event)}\n\ndata: [DONE]\n\n`;
+		const fetchMock: FetchImpl = async input => {
+			const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+			if (url === OAUTH_ASK_URL) {
+				return new Response(sseBody, { status: 200, headers: { "Content-Type": "text/event-stream" } });
+			}
+			return new Response("not mocked", { status: 500 });
+		};
+
+		await expect(
+			searchPerplexity({
+				query: "Zen Browser version",
+				authStorage: anonymousAuthStorage,
+				fetch: fetchMock,
+				explicit: true,
+			}),
+		).rejects.toThrow(/anonymous ask returned no sources \(likely signup wall or exhausted anonymous quota\)/);
+	});
+
 	it("rejects an automatic authless request before using the anonymous transport", async () => {
 		const fetchMock = vi.fn<FetchImpl>();
 
@@ -623,13 +640,6 @@ describe("Perplexity anonymous fallback", () => {
 			searchPerplexity({ query: "automatic search", authStorage: anonymousAuthStorage, fetch: fetchMock }),
 		).rejects.toThrow("No authentication method available.");
 		expect(fetchMock).not.toHaveBeenCalled();
-	});
-
-	it("keeps anonymous Perplexity out of auto provider selection but allows explicit selection", () => {
-		const provider = new PerplexityProvider();
-
-		expect(provider.isAvailable(anonymousAuthStorage)).toBe(false);
-		expect(provider.isExplicitlyAvailable(anonymousAuthStorage)).toBe(true);
 	});
 });
 
@@ -669,8 +679,6 @@ describe("Perplexity OpenRouter auto-chain admission (issue #3251)", () => {
 		// get a chance instead of silently routing through OpenRouter's
 		// `perplexity/sonar-pro` and billing the user for an unrequested path.
 		expect(provider.isAvailable(openrouterOnly)).toBe(false);
-		// Explicit selection still admits the provider so `webSearch: perplexity`
-		// can opt into the OpenRouter-backed path on purpose.
 		expect(provider.isExplicitlyAvailable(openrouterOnly)).toBe(true);
 	});
 

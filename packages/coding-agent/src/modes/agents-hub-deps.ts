@@ -112,15 +112,30 @@ export function createAgentsHubDeps(
 			});
 			return selection ? (selection.model ?? "@advisor") : undefined;
 		},
-		setDisabledAgents: names => cfgTaskDisabledAgents.set(settings, names),
-		setOverrides: (property, overrides) => {
+		setAgentDisabled: (name, { disabled }) => cfgTaskDisabledAgents.setMember(settings, name, { member: disabled }),
+		setAgentOverride: (property, name, value) => {
 			const setting =
 				property === "model"
 					? cfgTaskAgentModelOverrides
 					: property === "prewalk"
 						? cfgTaskAgentPrewalk
 						: cfgTaskAgentAdvisor;
-			setting.set(settings, overrides);
+			if (property !== "model") {
+				setting.setEntry(settings, name, value);
+				return;
+			}
+			// A session-only pick (Alt+P) is a runtime override of the whole map and would mask this
+			// saved entry. Drop the override for `name` only; other agents keep their session picks.
+			const active = cfgTaskAgentModelOverrides.get(settings);
+			cfgTaskAgentModelOverrides.setEntry(settings, name, value);
+			cfgTaskAgentModelOverrides.clearOverride(settings);
+			const persisted = cfgTaskAgentModelOverrides.get(settings);
+			const sessionPicks = Object.entries(active).filter(
+				([agent, pick]) => agent !== name && JSON.stringify(pick) !== JSON.stringify(persisted[agent]),
+			);
+			if (sessionPicks.length > 0) {
+				cfgTaskAgentModelOverrides.override(settings, { ...persisted, ...Object.fromEntries(sessionPicks) });
+			}
 		},
 		generateAgent: async (description, onText) => {
 			await modelRegistry.refresh();

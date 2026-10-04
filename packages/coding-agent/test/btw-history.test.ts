@@ -362,13 +362,14 @@ describe("BtwHistoryStore", () => {
 		const files = (await fs.readdir(directory, { recursive: true, withFileTypes: true }))
 			.filter(entry => entry.isFile())
 			.map(entry => path.relative(scopedRoot, path.join(entry.parentPath, entry.name)));
-		// One entry per scope, each in its own directory directly under the scoped root.
-		expect(files).toHaveLength(3);
+		// One record per scope; some platforms also retain advisory lock files.
+		const records = files.filter(file => file.endsWith(".json"));
+		expect(records).toHaveLength(3);
 		for (const file of files) {
 			expect(file.startsWith("..") || path.isAbsolute(file)).toBe(false);
 			expect(file.split(path.sep)).toHaveLength(2);
 		}
-		expect(new Set(files.map(file => path.dirname(file))).size).toBe(3);
+		expect(new Set(records.map(file => path.dirname(file))).size).toBe(3);
 	});
 
 	it("retains write failures through flush and refuses to overwrite later corruption", async () => {

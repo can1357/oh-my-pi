@@ -18,6 +18,7 @@ import * as path from "node:path";
 import { Agent } from "@oh-my-pi/pi-agent-core";
 import type { ImageContent } from "@oh-my-pi/pi-ai";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
+import { ADVISOR_RENDER_OPTIONS } from "@oh-my-pi/pi-coding-agent/advisor/delta-split";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -27,6 +28,7 @@ import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/typ
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
+import { formatSessionHistoryMarkdown } from "@oh-my-pi/pi-coding-agent/session/session-history-format";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { setAgentDir } from "@oh-my-pi/pi-utils";
 import { beginSettingsTest, restoreSettingsTestState, type SettingsTestState } from "./helpers/settings-test-state";
@@ -156,6 +158,34 @@ describe("path-pasted image source path (#12244)", () => {
 		expect(editor.pendingImageLinks[0]).toBe(imagePath);
 	});
 
+	it("names the pasted file in the advisor's session update, where the image itself is only `[image]`", async () => {
+		if (!session) throw new Error("Session was not initialized");
+		const { editor, imagePath } = await pasteImageFile();
+
+		await session.prompt("What is in [Image #1]?", { images: [...editor.pendingImages] });
+
+		// The advisor sees a text-only transcript; without the full path it cannot `read` the image.
+		const advisorView = formatSessionHistoryMarkdown(session.messages, ADVISOR_RENDER_OPTIONS);
+		expect(advisorView).toContain("[image]");
+		expect(advisorView).toContain(`[image-attachment] Image #1: ${imagePath}`);
+	});
+
+	it("names the pasted file for notices persisted before they carried structured details", async () => {
+		if (!session) throw new Error("Session was not initialized");
+		const { editor, imagePath } = await pasteImageFile();
+
+		await session.prompt("What is in [Image #1]?", { images: [...editor.pendingImages] });
+
+		// Sessions written by older builds stored only the rendered notice text.
+		const legacyMessages = session.messages.map(message =>
+			message.role === "custom" && message.customType === "image-attachment"
+				? { ...message, details: undefined }
+				: message,
+		);
+		const advisorView = formatSessionHistoryMarkdown(legacyMessages, ADVISOR_RENDER_OPTIONS);
+		expect(advisorView).toContain(`[image-attachment] Image #1: ${imagePath}`);
+	});
+
 	async function pasteClipboardBitmap(sessionManager: SessionManager): Promise<StubEditor> {
 		const { ctx, editor } = createPasteContext(sessionManager);
 		const controller = new InputController(ctx, {
@@ -250,4 +280,25 @@ describe("path-pasted image source path (#12244)", () => {
 		await session.prompt("What is in [Image #1]?", { images: [...editor.pendingImages] });
 		expect(modelVisibleText(session)).toContain(url);
 	});
+
+	for (const dequeue of ["popLastQueuedMessage", "clearQueue"] as const) {
+		it(`drops a queued image's hidden path notice with its prompt on ${dequeue}`, async () => {
+			if (!session) throw new Error("Session was not initialized");
+			const { editor } = await pasteImageFile();
+			const text = "What is in [Image #1]?";
+			await session.followUp(text, [...editor.pendingImages]);
+			expect(
+				session.agent
+					.peekFollowUpQueue()
+					.map(message => (message.role === "custom" ? message.customType : message.role)),
+			).toEqual(["image-attachment", "user"]);
+
+			if (dequeue === "clearQueue")
+				expect(session.clearQueue().followUp.map(message => message.text)).toEqual([text]);
+			else expect(session.popLastQueuedMessage()?.text).toBe(text);
+
+			// A notice left behind would be delivered later as its own orphaned turn.
+			expect(session.agent.peekFollowUpQueue()).toEqual([]);
+		});
+	}
 });

@@ -226,7 +226,7 @@ describe("EventController async update finalization", () => {
 			type: "tool_execution_end",
 			toolCallId: "tc-bash",
 			toolName: "bash",
-			result: bashResult(formatBackgroundNotice("bash-1")),
+			result: bashResult(formatBackgroundNotice("bash-1", 300)),
 			isError: false,
 		});
 

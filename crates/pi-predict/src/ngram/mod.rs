@@ -84,7 +84,10 @@ mod text;
 mod vocab;
 mod web;
 
-use std::path::{Path, PathBuf};
+use std::{
+	io::Write,
+	path::{Path, PathBuf},
+};
 
 use anyhow::Context;
 pub use model::Params;
@@ -154,9 +157,13 @@ fn write_atomic(dir: &Path, name: &str, bytes: &[u8]) -> anyhow::Result<()> {
 	std::fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;
 	let target = dir.join(name);
 	let temp = dir.join(format!("{name}.{}.tmp", std::process::id()));
-	let written = std::fs::write(&temp, bytes)
-		.and_then(|()| std::fs::File::open(&temp)?.sync_all())
-		.and_then(|()| std::fs::rename(&temp, &target));
+	let written = (|| {
+		let mut file = std::fs::File::create(&temp)?;
+		file.write_all(bytes)?;
+		file.sync_all()?;
+		drop(file);
+		std::fs::rename(&temp, &target)
+	})();
 	if let Err(error) = written {
 		let _ = std::fs::remove_file(&temp);
 		return Err(error).with_context(|| format!("write {}", target.display()));

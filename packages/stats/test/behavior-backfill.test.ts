@@ -3,7 +3,7 @@ import { describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { syncAllSessions } from "@oh-my-pi/omp-stats/aggregator";
-import { closeDb, getBehaviorOverall, getFileOffset, initDb } from "@oh-my-pi/omp-stats/db";
+import { closeDb, getFileOffset, getFrustrationOverall, initDb } from "@oh-my-pi/omp-stats/db";
 import { getAgentDir, getStatsDbPath } from "@oh-my-pi/pi-utils";
 import { installStatsTestIsolation } from "./helpers/temp-agent";
 
@@ -60,7 +60,7 @@ describe("behavior backfill", () => {
 		const database = new Database(getStatsDbPath());
 		database
 			.prepare("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)")
-			.run("user_messages_v8", "1778589361860");
+			.run("user_messages_v9", "1778589361860");
 		database
 			.prepare("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)")
 			.run("user_message_links_v1", "1778589361862");
@@ -70,29 +70,29 @@ describe("behavior backfill", () => {
 		database.close();
 
 		const synced = await syncAllSessions();
-		const behavior = getBehaviorOverall(null);
+		const counts = getFrustrationOverall(null);
 
 		expect(synced.files).toBe(1);
-		expect(behavior.totalMessages).toBe(1);
-		expect(behavior.totalYelling).toBe(1);
+		expect(counts.messages).toBe(1);
+		expect(counts.annoyed).toBe(1);
 	});
 
 	it("does not re-wipe existing progress when the backfill sentinel is already pending", async () => {
 		const sessionFile = await writeSessionFile();
 		await syncAllSessions();
-		expect(getBehaviorOverall(null).totalMessages).toBe(1);
+		expect(getFrustrationOverall(null).messages).toBe(1);
 		expect(getFileOffset(sessionFile)).not.toBeNull();
 		closeDb();
 
 		const database = new Database(getStatsDbPath());
-		database.prepare("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)").run("user_messages_v8", "pending");
+		database.prepare("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)").run("user_messages_v9", "pending");
 		database
 			.prepare("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)")
 			.run("user_message_links_v1", "pending");
 		database.close();
 
 		await initDb();
-		expect(getBehaviorOverall(null).totalMessages).toBe(1);
+		expect(getFrustrationOverall(null).messages).toBe(1);
 		expect(getFileOffset(sessionFile)).not.toBeNull();
 	});
 
@@ -104,7 +104,7 @@ describe("behavior backfill", () => {
 		const database = new Database(getStatsDbPath(), { readonly: true });
 		const rows = database
 			.query(
-				"SELECT key, value FROM meta WHERE key IN ('user_messages_v8', 'tool_calls_v2', 'user_message_links_v1', 'premium_requests_priority_v1') ORDER BY key",
+				"SELECT key, value FROM meta WHERE key IN ('user_messages_v9', 'tool_calls_v2', 'user_message_links_v1', 'premium_requests_priority_v1') ORDER BY key",
 			)
 			.all() as { key: string; value: string }[];
 		database.close();
@@ -113,7 +113,7 @@ describe("behavior backfill", () => {
 			{ key: "premium_requests_priority_v1", value: "complete" },
 			{ key: "tool_calls_v2", value: "complete" },
 			{ key: "user_message_links_v1", value: "complete" },
-			{ key: "user_messages_v8", value: "complete" },
+			{ key: "user_messages_v9", value: "complete" },
 		]);
 	});
 });

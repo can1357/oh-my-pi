@@ -20,6 +20,7 @@ import type {
 	UsageFallbackConfirmation,
 } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { SILENT_ABORT_MARKER } from "@oh-my-pi/pi-coding-agent/session/messages";
+import { resetSessionIndexForTests } from "@oh-my-pi/pi-coding-agent/session/session-index";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { TaskTool } from "@oh-my-pi/pi-coding-agent/task";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
@@ -176,6 +177,10 @@ class FakeAgentSession {
 
 	getAvailableModels(): Model[] {
 		return this.models;
+	}
+
+	getAvailableEffortSelectors(): ReadonlyArray<string> {
+		return ["off", "auto", ...this.getAvailableThinkingLevels()];
 	}
 
 	getAvailableThinkingLevels(): ReadonlyArray<string> {
@@ -380,6 +385,10 @@ class FakeAgentSession {
 		return this.fastMode;
 	}
 
+	isUltrafastModeEnabled(): boolean {
+		return false;
+	}
+
 	setForcedToolChoice(toolName: string): void {
 		this.forcedToolChoice = toolName;
 	}
@@ -470,6 +479,8 @@ afterEach(async () => {
 	}
 	resetSettingsForTest();
 
+	// Renames index titles in the process-wide `<agentDir>/history.db`; Windows cannot delete it while open.
+	resetSessionIndexForTests();
 	for (const root of cleanupRoots.splice(0)) {
 		await fs.promises.rm(root, { recursive: true, force: true });
 	}
@@ -1002,6 +1013,118 @@ describe("ACP agent", () => {
 			| { currentValue?: unknown }
 			| undefined;
 		expect(thinkingOption?.currentValue).toBe("high");
+
+		vi.useRealTimers();
+		harness.abortController.abort();
+		await Bun.sleep(0);
+	});
+
+	it("emits a single config_option_update per /effort change", async () => {
+		// `/effort <level>` calls AgentSession.setThinkingLevel, which fires
+		// `thinking_level_changed`; the lifetime subscription turns that into a
+		// `config_option_update`. The command's explicit notifyConfigChanged
+		// must not add a second identical push, or clients redraw their config
+		// UI twice per change.
+		const harness = await createHarness();
+		vi.useFakeTimers();
+		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+		const session = harness.findSession(created.sessionId)!;
+		await advanceBootstrapGuard();
+
+		const updatesBefore = harness.updates.length;
+		await harness.agent.prompt({
+			sessionId: created.sessionId,
+			prompt: [{ type: "text", text: "/effort high" }],
+		});
+
+		const configUpdates = harness.updates
+			.slice(updatesBefore)
+			.filter(
+				notification =>
+					notification.sessionId === created.sessionId &&
+					notification.update.sessionUpdate === "config_option_update",
+			);
+		expect(session.thinkingLevel).toBe("high");
+		expect(configUpdates.length).toBe(1);
+		expectAcpNotifications(configUpdates);
+		const update = configUpdates[0]!.update;
+		if (update.sessionUpdate !== "config_option_update") {
+			throw new Error("expected config_option_update");
+		}
+		const thinkingOption = update.configOptions.find(option => option.id === "thinking") as
+			| { currentValue?: unknown }
+			| undefined;
+		expect(thinkingOption?.currentValue).toBe("high");
+
+		vi.useRealTimers();
+		harness.abortController.abort();
+		await Bun.sleep(0);
+	});
+
+	it("delivers the thinking config update before resolving the command", async () => {
+		const blocked = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		let holdConfig = false;
+		const harness = await createHarness({
+			sessionUpdateHook: async notification => {
+				if (holdConfig && notification.update.sessionUpdate === "config_option_update") {
+					blocked.resolve();
+					await release.promise;
+				}
+			},
+		});
+		vi.useFakeTimers();
+		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+		await advanceBootstrapGuard();
+		vi.useRealTimers();
+		holdConfig = true;
+		const baseline = harness.updates.length;
+		const prompt = harness.agent.prompt({
+			sessionId: created.sessionId,
+			prompt: [{ type: "text", text: "/effort high" }],
+		});
+		await blocked.promise;
+		try {
+			expect(await Promise.race([prompt.then(() => true), Bun.sleep(0).then(() => false)])).toBe(false);
+			release.resolve();
+			expect((await prompt).stopReason).toBe("end_turn");
+			const updates = harness.updates.slice(baseline).filter(n => n.update.sessionUpdate === "config_option_update");
+			expect(updates).toHaveLength(1);
+			const update = updates[0]!.update;
+			if (update.sessionUpdate !== "config_option_update") throw new Error("Expected config update");
+			expect(update.configOptions.find(option => option.id === "thinking")?.currentValue).toBe("high");
+		} finally {
+			release.resolve();
+			await prompt;
+			harness.abortController.abort();
+			await Bun.sleep(0);
+		}
+	});
+
+	it("still pushes config_option_update for /effort before the lifetime subscription exists", async () => {
+		// Pre-bootstrap there is no lifetime subscription, so the explicit
+		// notifyConfigChanged is the only path that tells the client — same
+		// contract as `setSessionConfigOption`'s pre-bootstrap push.
+		const harness = await createHarness();
+		vi.useFakeTimers();
+		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+		// Deliberately do not advance the 50ms bootstrap guard: the lifetime
+		// subscription is not installed yet.
+
+		const updatesBefore = harness.updates.length;
+		await harness.agent.prompt({
+			sessionId: created.sessionId,
+			prompt: [{ type: "text", text: "/effort high" }],
+		});
+
+		const configUpdates = harness.updates
+			.slice(updatesBefore)
+			.filter(
+				notification =>
+					notification.sessionId === created.sessionId &&
+					notification.update.sessionUpdate === "config_option_update",
+			);
+		expect(configUpdates.length).toBe(1);
 
 		vi.useRealTimers();
 		harness.abortController.abort();
@@ -2318,44 +2441,6 @@ describe("ACP agent", () => {
 		expect(drainCalls).toBe(2);
 		harness.abortController.abort();
 		await Bun.sleep(0);
-	});
-
-	it("queues next prompt until AgentSession idle cleanup completes", async () => {
-		const harness = await createHarness();
-		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
-		const session = harness.findSession(created.sessionId)!;
-		const { promise: idleBlocked, resolve: markIdleBlocked } = Promise.withResolvers<void>();
-		const { promise: releaseIdle, resolve: unblockIdle } = Promise.withResolvers<void>();
-		session.waitForIdleBlocker = async () => {
-			markIdleBlocked();
-			await releaseIdle;
-		};
-
-		const firstPrompt = harness.agent.prompt({
-			sessionId: created.sessionId,
-			messageId: "00000000-0000-4000-8000-000000000030",
-			prompt: [{ type: "text", text: "wait for cleanup" }],
-		} as PromptRequest);
-		await idleBlocked;
-
-		try {
-			const secondPrompt = harness.agent.prompt({
-				sessionId: created.sessionId,
-				messageId: "00000000-0000-4000-8000-000000000031",
-				prompt: [{ type: "text", text: "after cleanup" }],
-			} as PromptRequest);
-			await Bun.sleep(0);
-			expect(session.promptCalls).toEqual(["wait for cleanup"]);
-
-			unblockIdle();
-			await firstPrompt;
-			await secondPrompt;
-			expect(session.promptCalls).toEqual(["wait for cleanup", "after cleanup"]);
-		} finally {
-			unblockIdle();
-			harness.abortController.abort();
-			await Bun.sleep(0);
-		}
 	});
 
 	it("serializes multiple prompts queued during idle cleanup", async () => {

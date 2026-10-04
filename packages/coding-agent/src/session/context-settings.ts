@@ -83,7 +83,8 @@ export const cfgCompactionMidTurnEnabled = register({
 		tab: "context",
 		group: "Compaction",
 		label: "Mid-Turn Compaction",
-		description: "Check thresholds at safe mid-turn tool-loop boundaries before the next provider request",
+		description:
+			"Check thresholds at safe mid-turn tool-loop boundaries before the next provider request; subagents always check, since their whole assignment is one turn",
 	},
 });
 
