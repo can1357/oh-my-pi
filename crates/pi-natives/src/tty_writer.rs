@@ -23,7 +23,7 @@
 use std::{
 	sync::{
 		Arc,
-		atomic::{AtomicBool, AtomicUsize, Ordering},
+		atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
 	},
 	thread::JoinHandle,
 	time::{Duration, Instant},
@@ -39,13 +39,16 @@ struct Inner {
 	/// Bytes accepted from JS but not yet claimed by the pump thread. The
 	/// pump swaps this out wholesale, so enqueue cost is an in-place append
 	/// and chunks coalesce into one contiguous drain buffer per drain cycle.
-	back:    Mutex<Vec<u8>>,
+	back:        Mutex<Vec<u8>>,
 	/// Bytes accepted but not yet written to the fd.
-	pending: AtomicUsize,
+	pending:     AtomicUsize,
 	/// Signals the pump thread on enqueue/stop, and waiters on drain.
-	cv:      Condvar,
-	stop:    AtomicBool,
-	dead:    AtomicBool,
+	cv:          Condvar,
+	stop:        AtomicBool,
+	dead:        AtomicBool,
+	/// Bumped by [`TtyWriter::discard`]. The pump abandons a buffer it claimed
+	/// under an older generation at its next chunk boundary.
+	discard_gen: AtomicU64,
 }
 
 /// Keep each Unix PTY syscall small enough for terminal emulators to consume
@@ -60,9 +63,13 @@ fn write_all_with(
 	mut write: impl FnMut(&[u8]) -> std::io::Result<usize>,
 	buf: &[u8],
 	mut on_progress: impl FnMut(usize),
+	mut abort: impl FnMut() -> bool,
 ) -> std::io::Result<()> {
 	let mut off = 0usize;
 	while off < buf.len() {
+		if abort() {
+			return Ok(());
+		}
 		let end = (off + MAX_TTY_WRITE_CHUNK_BYTES).min(buf.len());
 		match write(&buf[off..end]) {
 			Ok(0) => return Err(std::io::ErrorKind::WriteZero.into()),
@@ -99,7 +106,12 @@ fn wait_writable(fd: i32) -> std::io::Result<()> {
 }
 
 #[cfg(unix)]
-fn write_all(fd: i32, buf: &[u8], on_progress: impl FnMut(usize)) -> std::io::Result<()> {
+fn write_all(
+	fd: i32,
+	buf: &[u8],
+	on_progress: impl FnMut(usize),
+	abort: impl FnMut() -> bool,
+) -> std::io::Result<()> {
 	write_all_with(
 		|chunk| loop {
 			// SAFETY: `chunk` is a valid initialized slice; `fd` is owned by
@@ -117,6 +129,7 @@ fn write_all(fd: i32, buf: &[u8], on_progress: impl FnMut(usize)) -> std::io::Re
 		},
 		buf,
 		on_progress,
+		abort,
 	)
 }
 
@@ -124,7 +137,7 @@ fn write_all(fd: i32, buf: &[u8], on_progress: impl FnMut(usize)) -> std::io::Re
 fn pump_loop(fd: i32, inner: &Inner) {
 	let mut front: Vec<u8> = Vec::new();
 	loop {
-		{
+		let generation = {
 			let mut back = inner.back.lock();
 			while back.is_empty() {
 				if inner.stop.load(Ordering::Acquire) {
@@ -133,7 +146,10 @@ fn pump_loop(fd: i32, inner: &Inner) {
 				inner.cv.wait(&mut back);
 			}
 			std::mem::swap(&mut *back, &mut front);
-		}
+			// Read under the lock `discard` bumps it under: a discard either
+			// precedes this claim (and cleared `back` first) or aborts it.
+			inner.discard_gen.load(Ordering::Acquire)
+		};
 		if inner.dead.load(Ordering::Acquire) {
 			// Dead fd: drain-drop so enqueuers observing `pending` never wedge.
 			inner.pending.fetch_sub(front.len(), Ordering::AcqRel);
@@ -143,22 +159,36 @@ fn pump_loop(fd: i32, inner: &Inner) {
 			// watchdog and frame gate read a shrinking `pending()` as the sole
 			// liveness signal for a slow-but-alive terminal (#10430).
 			let mut written = 0usize;
-			let result = write_all(fd, &front, |n| {
-				written += n;
-				inner.pending.fetch_sub(n, Ordering::AcqRel);
-			});
+			let result = write_all(
+				fd,
+				&front,
+				|n| {
+					written += n;
+					inner.pending.fetch_sub(n, Ordering::AcqRel);
+				},
+				|| inner.discard_gen.load(Ordering::Acquire) != generation,
+			);
+			let rest = front.len() - written;
 			if result.is_err() {
 				inner.dead.store(true, Ordering::Release);
 				// Chunks already written were subtracted above; drop the rest —
 				// the unwritten front remainder plus everything still queued.
 				let mut back = inner.back.lock();
-				let dropped = back.len() + (front.len() - written);
+				let dropped = back.len() + rest;
 				back.clear();
 				inner.pending.fetch_sub(dropped, Ordering::AcqRel);
+			} else if rest > 0 {
+				// A discard abandoned the unwritten rest of this buffer.
+				inner.pending.fetch_sub(rest, Ordering::AcqRel);
 			}
 		}
 		front.clear();
-		// Wake `flushSync` waiters parked on the same condvar.
+		// Wake `flushSync` waiters parked on the same condvar. `pending` drops
+		// outside the `back` lock, so without it this notify could land between
+		// a waiter's `pending` check under the lock and its `wait_for`, and the
+		// waiter would sleep its whole timeout on an already-drained queue.
+		// Taking the lock first means any waiter that saw bytes is parked.
+		drop(inner.back.lock());
 		inner.cv.notify_all();
 	}
 }
@@ -193,11 +223,12 @@ impl TtyWriter {
 				)));
 			}
 			let inner = Arc::new(Inner {
-				back:    Mutex::new(Vec::new()),
-				pending: AtomicUsize::new(0),
-				cv:      Condvar::new(),
-				stop:    AtomicBool::new(false),
-				dead:    AtomicBool::new(false),
+				back:        Mutex::new(Vec::new()),
+				pending:     AtomicUsize::new(0),
+				cv:          Condvar::new(),
+				stop:        AtomicBool::new(false),
+				dead:        AtomicBool::new(false),
+				discard_gen: AtomicU64::new(0),
 			});
 			let thread_inner = Arc::clone(&inner);
 			let thread = std::thread::Builder::new()
@@ -292,6 +323,21 @@ impl TtyWriter {
 		self.inner.pending.load(Ordering::Acquire) == 0
 	}
 
+	/// Drop every byte accepted so far and not yet written. The pump abandons
+	/// the rest of the buffer it is writing at its next chunk boundary (at most
+	/// one chunk later); bytes written after this call are unaffected. Exit and
+	/// terminal-handoff paths only.
+	#[napi]
+	pub fn discard(&self) {
+		let mut back = self.inner.back.lock();
+		self.inner.discard_gen.fetch_add(1, Ordering::AcqRel);
+		let dropped = back.len();
+		back.clear();
+		self.inner.pending.fetch_sub(dropped, Ordering::AcqRel);
+		drop(back);
+		self.inner.cv.notify_all();
+	}
+
 	/// Flush (bounded by `flush_timeout_ms`), stop the pump thread, and join it.
 	///
 	/// A pump stuck in a blocked `write(2)` (stalled-but-alive PTY consumer)
@@ -304,7 +350,13 @@ impl TtyWriter {
 			return;
 		};
 		let drained = self.flush_sync(flush_timeout_ms);
-		self.inner.stop.store(true, Ordering::Release);
+		// Store under `back`: the idle pump checks `stop` under that lock and then
+		// parks, so a store and notify landing between the two would be lost and
+		// the join below would wait forever.
+		{
+			let _back = self.inner.back.lock();
+			self.inner.stop.store(true, Ordering::Release);
+		}
 		self.inner.cv.notify_all();
 		if !drained && !self.inner.dead.load(Ordering::Acquire) {
 			// Likely mid-blocking-write; detach and leak the fd.
@@ -345,6 +397,7 @@ mod tests {
 			},
 			&frame,
 			|n| progress.push(n),
+			|| false,
 		)
 		.unwrap();
 
@@ -368,6 +421,33 @@ mod tests {
 		(fds[0], fds[1])
 	}
 
+	/// Read from `fd` until the received bytes end with `marker` or `timeout`
+	/// passes, whichever comes first.
+	fn read_until(fd: i32, marker: &[u8], timeout: Duration) -> Vec<u8> {
+		let deadline = Instant::now() + timeout;
+		let mut received = Vec::new();
+		let mut buf = vec![0u8; 64 * 1024];
+		while !received.ends_with(marker) {
+			let now = Instant::now();
+			if now >= deadline {
+				break;
+			}
+			let wait_ms = (deadline - now).as_millis().min(i32::MAX as u128) as i32;
+			let mut pollfd = libc::pollfd { fd, events: libc::POLLIN, revents: 0 };
+			// SAFETY: pollfd points to one valid element; fd is test-owned.
+			if unsafe { libc::poll(&mut pollfd, 1, wait_ms) } <= 0 {
+				continue;
+			}
+			// SAFETY: buf is a valid out-buffer for read(2); fd is test-owned.
+			let n = unsafe { libc::read(fd, buf.as_mut_ptr().cast(), buf.len()) };
+			if n <= 0 {
+				break;
+			}
+			received.extend_from_slice(&buf[..n as usize]);
+		}
+		received
+	}
+
 	#[test]
 	fn writes_in_order_and_drains() {
 		let (read_fd, write_fd) = pipe_pair();
@@ -382,6 +462,36 @@ mod tests {
 		assert_eq!(&buf[..n as usize], b"hello world");
 		writer.stop(1_000);
 		// SAFETY: closing test-owned fds.
+		unsafe {
+			libc::close(read_fd);
+			libc::close(write_fd);
+		}
+	}
+
+	#[test]
+	fn discard_drops_queued_output_and_keeps_later_writes() {
+		let (read_fd, write_fd) = pipe_pair();
+		let mut writer = TtyWriter::new(write_fd).unwrap();
+		// No reader yet: the pump claims the whole push and blocks once the pipe fills.
+		push(&writer, &vec![b'x'; 4 * 1024 * 1024]);
+		// Discard only once the pump has claimed the push, so the in-flight
+		// abort path runs rather than the unclaimed-`back` clear alone.
+		let deadline = Instant::now() + Duration::from_secs(5);
+		while !writer.inner.back.lock().is_empty() {
+			assert!(Instant::now() < deadline, "pump never claimed the queued output");
+			std::thread::sleep(Duration::from_millis(1));
+		}
+		writer.discard();
+		push(&writer, b"TAIL");
+		let received = read_until(read_fd, b"TAIL", Duration::from_secs(5));
+		assert!(received.ends_with(b"TAIL"));
+		// At most the pipe buffer plus one in-flight chunk of the discarded bytes
+		// arrived.
+		assert!(received.len() < 1024 * 1024, "discarded bytes were written: {}", received.len());
+		assert!(writer.flush_sync(1000));
+		assert_eq!(writer.pending(), 0);
+		writer.stop(1_000);
+		// SAFETY: the pump has stopped; closing test-owned fds.
 		unsafe {
 			libc::close(read_fd);
 			libc::close(write_fd);

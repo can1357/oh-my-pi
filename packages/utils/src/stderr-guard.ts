@@ -62,7 +62,7 @@ function libcFdOps(): LibcFdOps | null {
  * the user already redirected (`2>file`, `2>/dev/null`, a different tty) must
  * keep flowing untouched.
  */
-function stderrSharesStdoutTerminal(): boolean {
+export function stderrSharesStdoutTerminal(): boolean {
 	if (!process.stdout.isTTY || !process.stderr.isTTY) return false;
 	try {
 		const stdoutStat = fs.fstatSync(STDOUT_FILENO);

@@ -5,6 +5,8 @@
 ### Fixed
 
 - Fixed follow-up hashline edits being rejected as anchored on lines "never displayed" after an earlier edit shifted those lines, when the replacement carries the anchored content; genuinely stale line numbers are still rejected ([#14254](https://github.com/can1357/oh-my-pi/pull/14254) by [@abilliontokens](https://github.com/abilliontokens)).
+- Fixed quitting a long session leaving the resume hint in the middle of output: it is now the last line, and nothing keeps painting after omp exits. When the terminal stops reading during the quit, omp waits for it to take the terminal restore and the hint before exiting ([#13794](https://github.com/can1357/oh-my-pi/pull/13794) by [@sjawhar](https://github.com/sjawhar)).
+- Fixed quitting after a large write sometimes leaving the terminal or tmux window title set to omp's title instead of restoring the previous one ([#13794](https://github.com/can1357/oh-my-pi/pull/13794) by [@sjawhar](https://github.com/sjawhar)).
 
 ## [18.6.0] - 2026-10-03
 

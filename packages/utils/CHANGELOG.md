@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `stderrSharesStdoutTerminal()`, which reports whether stderr is the terminal stdout writes to ([#13794](https://github.com/can1357/oh-my-pi/pull/13794) by [@sjawhar](https://github.com/sjawhar)).
+
 ## [18.5.1] - 2026-10-03
 
 ### Added

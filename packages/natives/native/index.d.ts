@@ -454,6 +454,13 @@ export declare class TtyWriter {
    */
   flushSync(timeoutMs: number): boolean
   /**
+   * Drop every byte accepted so far and not yet written. The pump abandons
+   * the rest of the buffer it is writing at its next chunk boundary (at most
+   * one chunk later); bytes written after this call are unaffected. Exit and
+   * terminal-handoff paths only.
+   */
+  discard(): void
+  /**
    * Flush (bounded by `flush_timeout_ms`), stop the pump thread, and join it.
    *
    * A pump stuck in a blocked `write(2)` (stalled-but-alive PTY consumer)
