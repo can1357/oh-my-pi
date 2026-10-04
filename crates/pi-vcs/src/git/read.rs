@@ -1339,6 +1339,13 @@ fn cap_bytes(mut bytes: Vec<u8>, max: Option<usize>) -> ShowResult {
 /// and skips the persist if it no longer matches what the walk started
 /// from — losing the write still costs only speed (the next call retries
 /// the refresh); it must never destroy someone else's write.
+///
+/// For the same reason it never drops index state gitoxide cannot write.
+/// `gix_index::File::write()` serializes only the cache tree and the
+/// sparse-index marker, so an index that carries an untracked cache, fsmonitor
+/// state or resolve-undo records is left as git wrote it. git refreshes such
+/// an index's stat data itself. A fresh `jj workspace add` index, the case
+/// this write-back exists for, carries none of them.
 fn persist_stat_refresh(outcome: Option<gix::status::Outcome>) {
 	// Populated only for a fully drained iteration; an early exit or a worker
 	// error leaves nothing to persist.
@@ -1346,13 +1353,23 @@ fn persist_stat_refresh(outcome: Option<gix::status::Outcome>) {
 	if !outcome.has_changes() {
 		return;
 	}
-	let unchanged = match &outcome.worktree_index {
-		gix::worktree::IndexPersistedOrInMemory::Persisted(index) => on_disk_index_unchanged(index),
-		gix::worktree::IndexPersistedOrInMemory::InMemory(index) => on_disk_index_unchanged(index),
+	let writable = match &outcome.worktree_index {
+		gix::worktree::IndexPersistedOrInMemory::Persisted(index) => can_persist(index),
+		gix::worktree::IndexPersistedOrInMemory::InMemory(index) => can_persist(index),
 	};
-	if unchanged {
+	if writable {
 		let _ = outcome.write_changes();
 	}
+}
+
+/// Whether writing `index` back loses nothing: it carries no extension
+/// `gix_index::File::write()` would drop, and no other writer has replaced the
+/// on-disk index since it was read.
+fn can_persist(index: &gix::index::File) -> bool {
+	index.untracked().is_none()
+		&& index.fs_monitor().is_none()
+		&& index.resolve_undo().is_none()
+		&& on_disk_index_unchanged(index)
 }
 
 /// Whether the on-disk index at `index.path()` still matches the checksum
@@ -1869,15 +1886,13 @@ mod tests {
 		Ok(())
 	}
 
-	/// A refreshing status must leave the repository's own index caches in
-	/// place. With the index write allowed, a `core.untrackedCache=false` or
-	/// `core.fsmonitor=false` pin is not inert: git drops the untracked-cache
-	/// (`UNTR`) and fsmonitor (`FSMN`) extensions to honour it and writes the
-	/// removal back, so every status poll would undo what the user's own
-	/// `git status` built.
+	/// A repository whose index carries what the user's own `git status`
+	/// builds with the untracked cache and an fsmonitor hook configured: the
+	/// untracked-cache (`UNTR`) and fsmonitor (`FSMN`) extensions. One file is
+	/// tracked and one untracked.
 	#[cfg(unix)]
-	#[test]
-	fn cli_status_porcelain_keeps_index_cache_extensions() -> TestResult {
+	fn repo_with_index_cache_extensions()
+	-> std::result::Result<(TempDir, GitRepo), Box<dyn std::error::Error>> {
 		use std::os::unix::fs::PermissionsExt;
 		let (dir, repo) = repo()?;
 		let root = dir.path();
@@ -1890,19 +1905,69 @@ mod tests {
 		git(root, &["config", "core.untrackedCache", "true"])?;
 		git(root, &["config", "core.fsmonitor", &hook.display().to_string()])?;
 		git(root, &["config", "core.fsmonitorHookVersion", "2"])?;
-		let extensions = || -> std::result::Result<[bool; 2], Box<dyn std::error::Error>> {
-			let index = fs::read(root.join(".git").join("index"))?;
-			let has = |tag: &[u8]| index.windows(tag.len()).any(|window| window == tag);
-			Ok([has(b"UNTR"), has(b"FSMN")])
-		};
 		git(root, &["status", "--porcelain"])?;
-		assert_eq!(extensions()?, [true, true], "the user's own git status builds both caches");
+		assert_eq!(
+			index_cache_extensions(root)?,
+			[true, true],
+			"the user's own git status builds both caches"
+		);
+		Ok((dir, repo))
+	}
 
+	/// Whether the on-disk index carries the `UNTR` and `FSMN` extensions.
+	#[cfg(unix)]
+	fn index_cache_extensions(
+		root: &Path,
+	) -> std::result::Result<[bool; 2], Box<dyn std::error::Error>> {
+		let index = fs::read(root.join(".git").join("index"))?;
+		let has = |tag: &[u8]| index.windows(tag.len()).any(|window| window == tag);
+		Ok([has(b"UNTR"), has(b"FSMN")])
+	}
+
+	/// A refreshing status must leave the repository's own index caches in
+	/// place. With the index write allowed, a `core.untrackedCache=false` or
+	/// `core.fsmonitor=false` pin is not inert: git drops the untracked-cache
+	/// (`UNTR`) and fsmonitor (`FSMN`) extensions to honour it and writes the
+	/// removal back, so every status poll would undo what the user's own
+	/// `git status` built.
+	#[cfg(unix)]
+	#[test]
+	fn cli_status_porcelain_keeps_index_cache_extensions() -> TestResult {
+		let (dir, repo) = repo_with_index_cache_extensions()?;
 		assert_eq!(repo.status_porcelain(&StatusOptions::default())?, "?? untracked\n");
 		assert_eq!(
-			extensions()?,
+			index_cache_extensions(dir.path())?,
 			[true, true],
 			"status_porcelain must keep the untracked-cache and fsmonitor extensions",
+		);
+		Ok(())
+	}
+
+	/// The in-process stat write-back must not drop index extensions gitoxide
+	/// cannot serialize. `gix_index::File::write()` writes only the cache tree
+	/// and the sparse-index marker, so persisting a refresh over an index the
+	/// user's own git built with an untracked cache or fsmonitor state would
+	/// erase both.
+	#[cfg(unix)]
+	#[test]
+	fn gix_stat_refresh_keeps_index_extensions_it_cannot_write() -> TestResult {
+		let (dir, repo) = repo_with_index_cache_extensions()?;
+		let root = dir.path();
+		// Age the tracked file's mtime, content unchanged, so the walk hashes it
+		// and collects a stat refresh worth writing back.
+		fs::File::options()
+			.write(true)
+			.open(root.join("tracked"))?
+			.set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000_000))?;
+		// A cap below one path forces the in-process walk, as in
+		// `gix_ls_files_others_persists_index_stat_refresh`.
+		assert_eq!(with_capture_limit(1, || repo.ls_files(true, true))?, vec![
+			"untracked".to_owned()
+		]);
+		assert_eq!(
+			index_cache_extensions(root)?,
+			[true, true],
+			"the gitoxide stat write-back must keep the untracked-cache and fsmonitor extensions",
 		);
 		Ok(())
 	}
