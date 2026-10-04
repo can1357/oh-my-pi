@@ -153,6 +153,7 @@ import { isMCPToolName } from "../tools/builtin-names";
 import type { LspStartupServerInfo } from "../tools";
 import { resolvePlanFilePath } from "../plan-mode/plan-files";
 import { resolveToCwd } from "../tools/path-utils";
+import { defaultGhHost, GITHUB_HOST, parseRepoRef, tryResolveCurrentRepo } from "../tools/gh-common";
 import { StreamPublisher } from "../stream/publisher";
 import { newRecordingPath, SessionRecorder } from "../stream/recording";
 import { StreamRedactor } from "../stream/redactor";
@@ -216,7 +217,7 @@ import {
 	type VibeParentSession,
 	VibeSessionRegistry,
 } from "../vibe/runtime";
-import { AssistantMessageComponent } from "@oh-my-pi/pi-tui/chat/assistant-message";
+import { AssistantMessageComponent, setProseGithubRepo } from "@oh-my-pi/pi-tui/chat/assistant-message";
 import { setTranscriptActionHandler } from "@oh-my-pi/pi-tui/chat/transcript-actions";
 import { StatusNotice } from "@oh-my-pi/pi-tui/chrome/status-notice";
 import { ReadToolGroupComponent } from "@oh-my-pi/pi-tui/chat/read-tool-group";
@@ -1600,6 +1601,27 @@ export class InteractiveMode implements InteractiveModeContext {
 			rules: session.ttsrManager?.getRules(),
 		});
 	}
+	/**
+	 * Resolve the cwd's github.com repo (gh's default-repo pick, memoized per
+	 * cwd) off the render path so bare `#N` refs in assistant prose link to it.
+	 */
+	#refreshProseGithubRepo(): void {
+		const cwd = this.sessionManager.getCwd();
+		// Drop the previous cwd's repo so nothing links against it while this lookup is pending.
+		if (setProseGithubRepo(undefined)) {
+			this.ui.invalidate();
+			this.ui.requestRender();
+		}
+		void tryResolveCurrentRepo(cwd, undefined).then(repo => {
+			if (this.sessionManager.getCwd() !== cwd) return;
+			const ref = repo === undefined ? undefined : parseRepoRef(repo);
+			const slug = ref && (ref.host?.toLowerCase() ?? defaultGhHost()) === GITHUB_HOST ? ref.slug : undefined;
+			if (!setProseGithubRepo(slug)) return;
+			this.ui.invalidate();
+			this.ui.requestRender();
+		});
+	}
+
 	get focusedAgentId(): string | undefined {
 		return this.#focusController.focusedAgentId;
 	}
@@ -2245,6 +2267,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		setTerminalTitleSpinnerStyle(cfgTuiTitleSpinner.get(this.settings));
 		setTerminalSessionFileSource(() => this.sessionManager.getSessionFile());
 		setSessionTerminalTitle(this.sessionManager.getSessionName(), this.sessionManager.getCwd());
+		this.#refreshProseGithubRepo();
 		// Seeds the border, the status-line `vim` segment, and the cursor shape in one call.
 		// Deliberately here rather than beside #applyVimMode in the constructor: that runs before
 		// #focusController exists, which updateEditorBorderColor dereferences.
@@ -2763,6 +2786,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		}
 		setSessionTerminalTitle(this.sessionManager.getSessionName(), this.sessionManager.getCwd());
 		this.statusLine.applyCwdChange();
+		this.#refreshProseGithubRepo();
 		return true;
 	}
 

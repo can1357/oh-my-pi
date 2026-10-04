@@ -45,6 +45,19 @@ function thoughtLabel(clock: { start: number; end?: number } | undefined): strin
 	return `Thought for ${ms < 60_000 ? `${Math.max(1, Math.round(ms / 1000))}s` : formatDuration(ms)}`;
 }
 
+/** Session GitHub repo (`owner/repo`) that bare `#N` refs in assistant prose link to. */
+let proseGithubRepo: string | undefined;
+
+/**
+ * Install the session's GitHub repo for bare `#N` prose refs. Returns whether
+ * it changed; callers then invalidate the UI so cached prose themes rebuild.
+ */
+export function setProseGithubRepo(repo: string | undefined): boolean {
+	if (repo === proseGithubRepo) return false;
+	proseGithubRepo = repo;
+	return true;
+}
+
 type ThinkingContentBlock = Extract<AssistantMessage["content"][number], { type: "thinking" }>;
 type DisplayThinkingContentBlock = ThinkingContentBlock & { rawThinking?: string };
 type StablePartKind = "thinking" | "text";
@@ -365,7 +378,15 @@ export class AssistantMessageComponent extends Container {
 		if (this.#markdownTheme) return this.#markdownTheme;
 		const base = getMarkdownTheme();
 		const snapshot = this.#linkTargets;
-		const markdownTheme = snapshot.size > 0 ? { ...base, resolveLink: (href: string) => snapshot.get(href) } : base;
+		const githubRepo = proseGithubRepo;
+		const markdownTheme =
+			snapshot.size > 0 || githubRepo
+				? {
+						...base,
+						githubRepo,
+						resolveLink: snapshot.size > 0 ? (href: string) => snapshot.get(href) : undefined,
+					}
+				: base;
 		this.#markdownTheme = markdownTheme;
 		return markdownTheme;
 	}
