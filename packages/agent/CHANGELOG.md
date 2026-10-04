@@ -2,6 +2,33 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed native (OpenAI) compaction being refused as over the context window in sessions with many screenshots. Images were counted as about 1,200 tokens when deciding to compact but 12,000 when checking whether the compaction request fits; both checks now estimate images from their actual dimensions, and a request is no longer refused when only the image estimate pushes it over the window ([#14260](https://github.com/can1357/oh-my-pi/pull/14260) by [@H4vC](https://github.com/H4vC)).
+
+## [18.6.0] - 2026-10-03
+
+### Fixed
+
+- When a DeepSeek turn ends with raw `<｜DSML｜…>` tool-call text that could not be parsed into a real call, and no tool call was made, the broken markup is now removed from the message before it is saved to history. The agent then tells the model the tool call failed, shows it the correct format, and asks it again, at most twice in a row. Previously the markup stayed in history, and the agent stopped as if the model had finished ([#14202](https://github.com/can1357/oh-my-pi/pull/14202) by [@H4vC](https://github.com/H4vC)).
+
+## [18.5.1] - 2026-10-03
+
+### Added
+
+- Added provider-reported usage cost, the unnormalized provider ID, and the requested model ID to CostEstimatorContext, allowing cost estimators to use the cost already recorded for a request instead of recomputing it from token counts.
+
+### Changed
+
+- Improved tool-result supersession so path reads with selectors are tracked independently from bare-path reads, while failed results supersede only earlier failed results for the same key.
+
+### Fixed
+
+- Fixed parallel tool calls with reused or empty IDs executing with another call’s arguments or merging results; each call now executes and reports its own payload.
+- Fixed completed tool calls being retried after a transient provider-stream read error; incomplete calls from the affected turn are now discarded.
+- Fixed previously read code being removed from context when a subsequent read returned a summary, truncated content, or an error.
+- Fixed intent tracing for tools that define i as a real argument, preserving the argument and its declared schema order.
+
 ## [18.4.11] - 2026-10-02
 
 ### Fixed

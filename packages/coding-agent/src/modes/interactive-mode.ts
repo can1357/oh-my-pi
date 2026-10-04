@@ -70,8 +70,8 @@ import { restartArgv } from "../cli/flag-tables";
 import type { CollabGuestLink } from "../collab/guest";
 import { CollabController } from "../collab/controller";
 import type { CollabHost } from "../collab/host";
-import { formatKeyHint, KeybindingsManager } from "@oh-my-pi/pi-tui/app-keybindings";
-import { appKey, editorKey } from "@oh-my-pi/pi-tui/chrome/keybinding-hints";
+import { KeybindingsManager } from "@oh-my-pi/pi-tui/app-keybindings";
+import { appKey, editorKey, rawKeyHint } from "@oh-my-pi/pi-tui/chrome/keybinding-hints";
 import { formatModelStringWithRouting, type ResolvedModelRoleValue } from "../config/model-resolver";
 import { isSettingsInitialized, Settings, settings } from "../config/settings";
 import { clearClaudePluginRootsCache } from "../discovery/helpers";
@@ -1857,6 +1857,9 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.historyStorage.setSessionResolver(() => this.sessionManager.getSessionId());
 			// The prediction daemon learns from history.db; nudge it once each prompt is durable.
 			this.historyStorage.setAddListener(syncTextPrediction);
+			this.historyStorage.setErrorListener(() => {
+				this.showWarning("Prompt history could not be saved; this prompt may be unavailable after restart.");
+			});
 		} catch (error) {
 			logger.warn("History storage unavailable", { error: String(error) });
 		}
@@ -2498,6 +2501,8 @@ export class InteractiveMode implements InteractiveModeContext {
 		// `streamingBehavior: "steer"`, so whichever lands second queues into the
 		// other's turn instead of dying.
 		this.editor.disableSubmit = false;
+		// Publish native send readiness even when no user input triggers another frame.
+		this.ui.requestRender();
 	}
 
 	/** Reload the title-generation system prompt override for the provided working
@@ -7472,14 +7477,15 @@ export class InteractiveMode implements InteractiveModeContext {
 		// Never contend with a live loader (working/auto-retry/compaction).
 		if (!show || this.statusContainer.children.length > 0) return;
 		const retryKey = this.keybindings.getKeys("app.retry")[0] ?? "f5";
+		// Laid out as the working row it replaces: a blank row above, then the
+		// key in the column where the working row's interrupt key stood.
+		const hint = new Container();
+		hint.addChild(new Spacer(1));
+		hint.addChild(new Text(` ${rawKeyHint(retryKey, "to retry")}`, 1, 0));
 		this.#retryHintRow = new DescribedComponent(
-			new Text(
-				`${theme.fg("muted", theme.icon.loop)} ${theme.fg("dim", `${formatKeyHint(retryKey)} to Retry`)}`,
-				1,
-				0,
-			),
-			row([node("icon", { name: "loop", tone: "muted" }), kbd(retryKey, "key"), text([span("to Retry", "dim")])], {
-				gap: "xs",
+			hint,
+			row([node("icon", { name: "loop", tone: "muted" }), kbd(retryKey, "key"), text([span("to retry", "muted")])], {
+				gap: "sm",
 				align: "center",
 				role: "omp.hint.retry",
 			}),

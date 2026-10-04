@@ -63,7 +63,7 @@ export interface MessageStatsInput extends Omit<MessageStats, "usage" | "costUnp
 export interface RequestDetails extends MessageStats {
 	/** The full conversation history or just the last turn. */
 	messages: unknown[];
-	/** The model's response. */
+	/** The model's response; `null` for `model_usage` entries, which journal no payload. */
 	output: unknown;
 }
 

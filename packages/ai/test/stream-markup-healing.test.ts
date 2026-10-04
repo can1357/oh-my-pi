@@ -10,6 +10,7 @@ import { streamOpenAICompletions } from "@oh-my-pi/pi-ai/providers/openai-comple
 import { stream } from "@oh-my-pi/pi-ai/stream";
 import type { Context, FetchImpl, Model, TextContent, ThinkingContent, Tool, ToolCall } from "@oh-my-pi/pi-ai/types";
 import { getStreamMarkupHealingPattern, StreamMarkupHealing } from "@oh-my-pi/pi-ai/utils/stream-markup-healing";
+import { stripDsmlToolMarkup } from "@oh-my-pi/pi-ai/utils/dsml-leak";
 import { validateToolArguments } from "@oh-my-pi/pi-ai/utils/validation";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
@@ -474,6 +475,21 @@ describe("StreamMarkupHealing DSML envelope pattern", () => {
 		const visible = healing.feed(leaked) + healing.flushPending();
 		expect(visible).toBe("分析文本。\n\n\n\n");
 		expect(healing.drainCompleted()).toHaveLength(0);
+	});
+
+	it("keeps a malformed call's closers so its removal stops before following prose", () => {
+		// A bare parameter opener (no tool_calls/invoke wrapper) cannot be healed.
+		// Its closers must survive as the call's end marker; stripping them as
+		// orphans would leave no boundary and the prose after would be lost.
+		const leaked =
+			'Intro.\nbash\n<｜DSML｜parameter name="command" string="true">echo hi</｜DSML｜parameter>\n</｜DSML｜invoke>\n</｜DSML｜tool_calls>\nThe build passed.';
+		const healing = new StreamMarkupHealing({ pattern: "dsml" });
+		let visible = "";
+		for (let i = 0; i < leaked.length; i += 6) visible += healing.feed(leaked.slice(i, i + 6));
+		visible += healing.flushPending();
+		expect(visible).toBe(leaked);
+		expect(healing.drainCompleted()).toHaveLength(0);
+		expect(stripDsmlToolMarkup(visible)).toBe("Intro.\n\nThe build passed.");
 	});
 
 	it("preserves whitespace after orphan DSML closers split across chunk boundaries", () => {

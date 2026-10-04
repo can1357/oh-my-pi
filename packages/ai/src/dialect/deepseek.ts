@@ -99,6 +99,11 @@ const DSML_INVOKE_TOKENS = [
 ] as const;
 const DSML_PARAMETER_CLOSE_TOKENS = [DSML_PARAMETER_CLOSE_FULLWIDTH, DSML_PARAMETER_CLOSE_ASCII] as const;
 
+// A DSML invoke/parameter opener in visible text: a call whose `tool_calls`
+// wrapper is missing, so the envelope scanner never consumed it.
+const BARE_DSML_OPEN = /<[｜|]DSML[｜|](?:invoke|parameter)\b/u;
+const VISIBLE_TAIL_LIMIT = 48;
+
 type State =
 	| "outside"
 	| "thinking"
@@ -125,6 +130,15 @@ export class DeepSeekInbandScanner implements InbandScanner {
 	#dsmlParamRaw = "";
 	#rawBlock = "";
 	#stripLeadingWhitespace = false;
+	/**
+	 * Visible text already carries a bare DSML `invoke`/`parameter` opener (a
+	 * malformed call missing its `tool_calls` wrapper). Its closers are then kept
+	 * verbatim instead of stripped as orphans, so the agent loop can find where
+	 * the broken call ends and remove exactly that span, keeping prose after it.
+	 */
+	#bareDsmlOpenVisible = false;
+	/** Last few visible characters, so a bare opener split across chunks is still seen. */
+	#visibleTail = "";
 
 	constructor(options: InbandScannerOptions = {}) {
 		this.#parseThinking = options.parseThinking ?? true;
@@ -201,12 +215,11 @@ export class DeepSeekInbandScanner implements InbandScanner {
 			const match = findEarliestToken(this.#buffer, OUTSIDE_TOKENS);
 			if (!match) {
 				const hold = final ? 0 : partialSuffixOverlapAny(this.#buffer, OUTSIDE_TOKENS);
-				const emit = this.#buffer.slice(0, this.#buffer.length - hold);
-				if (emit.length > 0) events.push({ type: "text", text: emit });
+				this.#emitText(this.#buffer.slice(0, this.#buffer.length - hold), events);
 				this.#buffer = this.#buffer.slice(this.#buffer.length - hold);
 				return;
 			}
-			if (match.index > 0) events.push({ type: "text", text: this.#buffer.slice(0, match.index) });
+			this.#emitText(this.#buffer.slice(0, match.index), events);
 			this.#buffer = this.#buffer.slice(match.index);
 			if (this.#buffer.startsWith(DEEPSEEK_TOOL_CALLS_BEGIN)) {
 				this.#buffer = this.#buffer.slice(DEEPSEEK_TOOL_CALLS_BEGIN.length);
@@ -241,17 +254,34 @@ export class DeepSeekInbandScanner implements InbandScanner {
 			}
 			const orphanClose = this.#matchingOrphanDsmlClose();
 			if (orphanClose) {
+				if (this.#bareDsmlOpenVisible) this.#emitText(orphanClose, events);
 				this.#buffer = this.#buffer.slice(orphanClose.length);
 				continue;
 			}
 			const control = this.#matchingControlToken();
 			if (control) {
 				this.#buffer = this.#buffer.slice(control.length);
+				if (
+					this.#bareDsmlOpenVisible &&
+					(control === DSML_TOOL_CALLS_CLOSE_FULLWIDTH || control === DSML_TOOL_CALLS_CLOSE_ASCII)
+				) {
+					// Closes the malformed call: keep it as its end marker.
+					this.#emitText(control, events);
+					this.#bareDsmlOpenVisible = false;
+					continue;
+				}
 				this.#stripLeadingWhitespace = true;
 				continue;
 			}
 			this.#buffer = this.#buffer.slice(match.token.length);
 		}
+	}
+
+	#emitText(text: string, events: InbandScanEvent[]): void {
+		if (text.length === 0) return;
+		events.push({ type: "text", text });
+		this.#visibleTail = (this.#visibleTail + text).slice(-VISIBLE_TAIL_LIMIT);
+		if (!this.#bareDsmlOpenVisible && BARE_DSML_OPEN.test(this.#visibleTail)) this.#bareDsmlOpenVisible = true;
 	}
 
 	#consumeThinking(final: boolean, events: InbandScanEvent[]): void {

@@ -1234,9 +1234,11 @@ const ASCII_SYMBOLS: SymbolMap = {
 	"sep.pipe": " | ",
 	// Icons
 	"icon.model": "[M]",
-	"icon.plan": "plan",
-	"icon.prewalk": "prewalk",
-	"icon.goal": "goal",
+	// Mode icons are always followed by their word label ("Plan", "Prewalk", "Goal");
+	// an ASCII word here would just repeat it, so render the label alone.
+	"icon.plan": "",
+	"icon.prewalk": "",
+	"icon.goal": "",
 	"icon.pause": "||",
 	"icon.loop": "loop",
 	"icon.folder": "[D]",

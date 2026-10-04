@@ -13,6 +13,15 @@ const EXTENSION_HELLO = {
 	browserVersion: "Chrome/151.0.0.0",
 	tabs: [],
 	attachedTabIds: [],
+	discardedTabsProtocol: 1,
+} as const;
+
+const LEGACY_EXTENSION_HELLO = {
+	t: "hello",
+	userAgent: "test",
+	browserVersion: "Chrome/151.0.0.0",
+	tabs: [],
+	attachedTabIds: [],
 } as const;
 
 describe("waitForRelayExtension", () => {
@@ -50,6 +59,31 @@ describe("waitForRelayExtension", () => {
 		const started = performance.now();
 		expect(await waitForRelayExtension(`http://127.0.0.1:${fake.port}`)).toBe("no-extension");
 		expect(performance.now() - started).toBeLessThan(2_000);
+	});
+
+	it("rejects an already-running relay without discarded-tab metadata", async () => {
+		fake = Bun.serve({
+			hostname: "127.0.0.1",
+			port: 0,
+			fetch: () =>
+				Response.json({
+					Browser: "Chrome/151",
+					"Protocol-Version": "1.3",
+					"User-Agent": "test",
+					"V8-Version": "",
+					"WebKit-Version": "",
+					webSocketDebuggerUrl: `ws://127.0.0.1:${fake!.port}/cdp`,
+				}),
+		});
+		expect(await waitForRelayExtension(`http://127.0.0.1:${fake.port}`)).toBe("outdated-relay");
+	});
+
+	it("rejects an extension without discarded-tab snapshots, even when it has no tabs", async () => {
+		const port = await findFreeCdpPort();
+		relay = startRelayServer({ port });
+		extension = new WebSocket(`ws://127.0.0.1:${port}/ext`);
+		extension.addEventListener("open", () => extension?.send(JSON.stringify(LEGACY_EXTENSION_HELLO)), { once: true });
+		expect(await waitForRelayExtension(`http://127.0.0.1:${port}`)).toBe("outdated-extension");
 	});
 
 	it("keeps polling a young relay and reports ready once the extension handshakes", async () => {

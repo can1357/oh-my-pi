@@ -176,6 +176,44 @@ describe("proc:// background jobs", () => {
 		}
 	});
 
+	it.each([
+		{ label: "plan mode", deviceOnlyWrite: false },
+		{ label: "plan mode with device-only write", deviceOnlyWrite: true },
+	])("kills owned jobs under $label while stdin stays guarded (issue #13803)", async ({ deviceOnlyWrite }) => {
+		const manager = new AsyncJobManager({});
+		const pending = Promise.withResolvers<string>();
+		const id = manager.register(
+			"task",
+			"exploring the wrong track",
+			async ({ signal }) => {
+				signal.addEventListener("abort", () => pending.resolve("cancelled"), { once: true });
+				return pending.promise;
+			},
+			{ ownerId: "Main" },
+		);
+		const session = toolSession(process.cwd(), manager, { launch: false });
+		session.getPlanModeState = () => ({
+			enabled: true,
+			planFilePath: "local://PLAN.md",
+			workflow: "parallel",
+			reentry: false,
+		});
+		session.deviceOnlyWrite = deviceOnlyWrite || undefined;
+		const write = new WriteTool(session);
+		try {
+			await expect(write.execute("stdin", { path: `proc://${id}`, content: "go" })).rejects.toThrow(
+				deviceOnlyWrite ? "limited to the xd:// device transport" : "Plan mode",
+			);
+			expect(manager.getJob(id)?.status).toBe("running");
+			const result = await write.execute("kill", write.parameters.assert({ path: `proc://${id}/kill` }));
+			await manager.getJob(id)?.promise;
+			expect(result.details?.proc).toMatchObject({ op: "cancel", cancelled: [{ id, status: "cancelled" }] });
+			expect(manager.getJob(id)?.status).toBe("cancelled");
+		} finally {
+			await manager.dispose();
+		}
+	});
+
 	it("scopes a caller without an agent id to unowned jobs and parentless agents", async () => {
 		const manager = new AsyncJobManager({});
 		const pending = Promise.withResolvers<string>();
