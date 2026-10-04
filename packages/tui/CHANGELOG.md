@@ -4,7 +4,7 @@
 
 ### Added
 
-- Added `statusLine.segmentOptions.usage` with `showLabel`, `showPercent`, and `showReset` toggles and a `compact` option that renders quota windows as `5h24%4h47m` instead of `5h 24% (4h 47m)`.
+- Added `statusLine.segmentOptions.usage` with `showLabel`, `showPercent`, and `showReset` toggles and a `compact` option that renders quota windows as `5h24%4h47m` instead of `5h 24% (4h 47m)` ([#14304](https://github.com/can1357/oh-my-pi/pull/14304) by [@iddqdld](https://github.com/iddqdld)).
 
 ## [18.6.0] - 2026-10-03
 
