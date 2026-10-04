@@ -1111,7 +1111,10 @@ impl LineFormat {
 		// openssl's tagged format does not put a space before (filename)
 
 		let par_idx = rest.iter().position(|&b| b == b'(')?;
-		let sub_case = if rest[par_idx - 1] == b' ' {
+		// A line whose first byte is '(' has no algorithm substring; indexing
+		// one byte before it would underflow and panic instead of letting the
+		// caller report an improperly formatted line.
+		let sub_case = if par_idx > 0 && rest[par_idx - 1] == b' ' {
 			SubCase::Posix
 		} else {
 			SubCase::OpenSSL
@@ -1853,6 +1856,12 @@ mod tests {
             (b" MD5(weirdfilename2) = )= fds65dsf46as5df4d6f54asds5d7f7g9", Some((b"MD5", None, b"weirdfilename2) = ", b"fds65dsf46as5df4d6f54asds5d7f7g9"))),
             (b" MD5 (weirdfilename3)= ) = fds65dsf46as5df4d6f54asds5d7f7g9", Some((b"MD5", None, b"weirdfilename3)= ", b"fds65dsf46as5df4d6f54asds5d7f7g9"))),
             (b" MD5 (weirdfilename4) = ) = fds65dsf46as5df4d6f54asds5d7f7g9", Some((b"MD5", None, b"weirdfilename4) = ", b"fds65dsf46as5df4d6f54asds5d7f7g9"))),
+            // A '(' in first position has no algorithm before it; these used
+            // to underflow `par_idx - 1` and panic instead of parsing to None.
+            (b"(weirdparenline) = fds65dsf46as5df4d6f54asds5d7f7g9", None),
+            (b"(weirdparenline)= fds65dsf46as5df4d6f54asds5d7f7g9", None),
+            (b"\\(weirdparenline) = fds65dsf46as5df4d6f54asds5d7f7g9", None),
+            (b"(", None),
             (b" MD5(weirdfilename5)= ) = fds65dsf46as5df4d6f54asds5d7f7g9", None),
             (b" MD5(weirdfilename6) = ) = fds65dsf46as5df4d6f54asds5d7f7g9", None),
             (b" MD5 (weirdfilename7)= )= fds65dsf46as5df4d6f54asds5d7f7g9", None),
