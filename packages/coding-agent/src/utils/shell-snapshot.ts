@@ -9,6 +9,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { getSafeProjectCwd, logger, postmortem } from "@oh-my-pi/pi-utils";
+import { quotePosixArgument } from "./shell-quote";
 import fnEnvHelper from "./shell-snapshot-fn-env.sh" with { type: "text" };
 
 const cachedSnapshotPaths = new Map<string, string>();
@@ -107,8 +108,7 @@ function generateSnapshotScript(shell: string, snapshotPath: string, rcFile: str
 	const commonToolsRegex =
 		"^(ls|dir|vdir|cat|head|tail|less|more|grep|egrep|fgrep|rg|find|fd|locate|sed|awk|perl|cp|mv|rm|mkdir|rmdir|touch|chmod|chown|ln|pwd|readlink|stat|cut|sort|uniq|xargs|tee|tr|basename|dirname)$";
 
-	// Escape the snapshot path for shell
-	const escapedPath = snapshotPath.replace(/'/g, "'\\''");
+	const quotedPath = quotePosixArgument(snapshotPath);
 
 	// Function extraction differs between bash and zsh. Each form prints function
 	// bodies on stdout so we can both persist them AND scan their bodies for
@@ -141,7 +141,7 @@ echo "shopt -s expand_aliases" >> "$SNAPSHOT_FILE"
 `;
 
 	return `
-SNAPSHOT_FILE='${escapedPath}'
+SNAPSHOT_FILE=${quotedPath}
 
 # Snapshot may inline env-var values referenced by captured functions (#3470).
 # Defence in depth: (a) JS caller pre-creates the file at 0600 so the shell's

@@ -15,56 +15,68 @@ import {
 	shouldEnableHyperlinksByDefault,
 	shouldEnableSynchronizedOutputByDefault,
 	synchronizedOutputUserOverride,
-	isInsideHerdr,
+	classifyTerminalMultiplexer,
+	hasTerminalMultiplexerSession,
 	isInsideTerminalMultiplexer,
 } from "@oh-my-pi/pi-tui/terminal-capabilities";
 
-describe("isInsideHerdr", () => {
-	it("is true for HERDR_ENV=1", () => {
-		expect(isInsideHerdr({ HERDR_ENV: "1" })).toBe(true);
+describe("hasTerminalMultiplexerSession", () => {
+	it("recognizes Herdr session identity while ignoring client-only settings", () => {
+		expect(hasTerminalMultiplexerSession("herdr", { HERDR_ENV: "1" })).toBe(true);
+		for (const env of [{ HERDR_PANE_ID: "abc" }, { HERDR_TAB_ID: "t1" }, { HERDR_WORKSPACE_ID: "w1" }]) {
+			expect(hasTerminalMultiplexerSession("herdr", env)).toBe(true);
+		}
+		for (const env of [
+			{ HERDR_ENV: "0" },
+			{ HERDR_PANE_ID: "" },
+			{ HERDR_TAB_ID: "" },
+			{ HERDR_WORKSPACE_ID: "" },
+			{ HERDR_SOCKET_PATH: "/tmp/x" },
+			{ HERDR_BIN_PATH: "/usr/bin/herdr" },
+			{ HERDR_SESSION: "s1" },
+			{ HERDR_CONFIG_PATH: "/tmp/herdr.toml" },
+			{ HERDR_CLIENT_SOCKET_PATH: "/tmp/client.sock" },
+		]) {
+			expect(hasTerminalMultiplexerSession("herdr", env)).toBe(false);
+		}
 	});
 
-	it("is true for each pane identity var", () => {
-		expect(isInsideHerdr({ HERDR_PANE_ID: "abc" })).toBe(true);
-		expect(isInsideHerdr({ HERDR_TAB_ID: "t1" })).toBe(true);
-		expect(isInsideHerdr({ HERDR_WORKSPACE_ID: "w1" })).toBe(true);
+	it("matches explicit provider markers and excludes TERM fallbacks", () => {
+		expect(hasTerminalMultiplexerSession("tmux", { TMUX: "/tmp/tmux,1,0" })).toBe(true);
+		expect(hasTerminalMultiplexerSession("screen", { STY: "1234.pts-0.host" })).toBe(true);
+		expect(hasTerminalMultiplexerSession("zellij", { ZELLIJ: "0" })).toBe(true);
+		expect(hasTerminalMultiplexerSession("cmux", { CMUX_WORKSPACE_ID: "workspace" })).toBe(true);
+		expect(hasTerminalMultiplexerSession("cmux", { CMUX_SURFACE_ID: "surface" })).toBe(true);
+		expect(hasTerminalMultiplexerSession("cmux", { CMUX_REMOTE_TRANSPORT: "ssh" })).toBe(true);
+		expect(hasTerminalMultiplexerSession("cmux", { CMUX_SOCKET_PATH: "/tmp/cmux.sock" })).toBe(false);
+		expect(hasTerminalMultiplexerSession("tmux", { TERM: "tmux-256color" })).toBe(false);
+		expect(classifyTerminalMultiplexer({ TERM: "tmux-256color" })).toBe("tmux");
 	});
 
-	it("is false for empty identity vars", () => {
-		expect(isInsideHerdr({ HERDR_PANE_ID: "" })).toBe(false);
-		expect(isInsideHerdr({ HERDR_TAB_ID: "" })).toBe(false);
-		expect(isInsideHerdr({ HERDR_WORKSPACE_ID: "" })).toBe(false);
-	});
-
-	it("is false for client-only Herdr vars", () => {
-		expect(isInsideHerdr({ HERDR_SOCKET_PATH: "/tmp/x" })).toBe(false);
-		expect(isInsideHerdr({ HERDR_BIN_PATH: "/usr/bin/herdr" })).toBe(false);
-		expect(isInsideHerdr({ HERDR_SESSION: "s1" })).toBe(false);
-		expect(isInsideHerdr({ HERDR_CONFIG_PATH: "/tmp/herdr.toml" })).toBe(false);
-		expect(isInsideHerdr({ HERDR_CLIENT_SOCKET_PATH: "/tmp/client.sock" })).toBe(false);
-	});
-
-	it("is false for HERDR_ENV=0", () => {
-		expect(isInsideHerdr({ HERDR_ENV: "0" })).toBe(false);
+	it("recognizes wmux session markers but not CLI overrides", () => {
+		expect(hasTerminalMultiplexerSession("wmux", { WMUX: "1" })).toBe(true);
+		expect(hasTerminalMultiplexerSession("wmux", { WMUX_SURFACE_ID: "3f2a" })).toBe(true);
+		expect(hasTerminalMultiplexerSession("wmux", { WMUX: "0" })).toBe(false);
+		expect(hasTerminalMultiplexerSession("wmux", { WMUX_SURFACE_ID: "" })).toBe(false);
+		expect(hasTerminalMultiplexerSession("wmux", { WMUX_CLI: "C:/wmux/wmux.exe" })).toBe(false);
+		expect(hasTerminalMultiplexerSession("wmux", { WMUX_PIPE: "\\\\.\\pipe\\wmux" })).toBe(false);
 	});
 });
 
-describe("isInsideTerminalMultiplexer", () => {
-	it("is true for HERDR_PANE_ID without HERDR_ENV", () => {
-		expect(isInsideTerminalMultiplexer({ HERDR_PANE_ID: "p1" })).toBe(true);
+describe("terminal multiplexer classification", () => {
+	it("preserves nested-provider precedence and TERM-only classification", () => {
+		expect(classifyTerminalMultiplexer({ HERDR_PANE_ID: "p1", TMUX: "session" })).toBe("herdr");
+		expect(classifyTerminalMultiplexer({ TMUX: "session", STY: "screen" })).toBe("tmux");
+		expect(classifyTerminalMultiplexer({ STY: "screen", ZELLIJ: "session" })).toBe("screen");
+		expect(classifyTerminalMultiplexer({ TERM: "screen-256color" })).toBe("screen");
 	});
 
-	it("is true for a wmux pane (WMUX=1 and native WMUX_SURFACE_ID)", () => {
+	it("recognizes session markers through the generic render-path gate", () => {
+		expect(isInsideTerminalMultiplexer({ HERDR_PANE_ID: "p1" })).toBe(true);
 		expect(isInsideTerminalMultiplexer({ WMUX: "1" })).toBe(true);
 		expect(isInsideTerminalMultiplexer({ WMUX_SURFACE_ID: "3f2a" })).toBe(true);
-	});
-
-	it("is false for WMUX=0 or an empty surface id", () => {
 		expect(isInsideTerminalMultiplexer({ WMUX: "0" })).toBe(false);
 		expect(isInsideTerminalMultiplexer({ WMUX_SURFACE_ID: "" })).toBe(false);
-	});
-
-	it("is false for client-only wmux CLI vars", () => {
 		expect(isInsideTerminalMultiplexer({ WMUX_CLI: "C:/wmux/wmux.exe" })).toBe(false);
 		expect(isInsideTerminalMultiplexer({ WMUX_PIPE: "\\\\.\\pipe\\wmux" })).toBe(false);
 	});

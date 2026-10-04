@@ -27,7 +27,8 @@ import {
 	setTerminalGlyphProtocol,
 	TERMINAL,
 } from "./terminal-capabilities";
-import { isInsideTmux, wrapTmuxPassthrough } from "./tmux";
+import { hasTerminalMultiplexerSession } from "./terminal-multiplexer";
+import { wrapTmuxPassthrough } from "./tmux";
 import { setHangulCompatibilityJamoWidth } from "./utils";
 import { translateWindowsAltGrSequence } from "./windows-altgr";
 import { Win32InputModeDecoder, Win32PasteMarkerNormalizer } from "./windows-input-mode";
@@ -945,7 +946,7 @@ export class ProcessTerminal implements Terminal {
 		if (token >= this.#nextAppearanceRequestToken) {
 			this.#nextAppearanceRequestToken = token + 1;
 		}
-		this.#queryBackgroundColor(isInsideTmux() ? "tmux" : "direct", token);
+		this.#queryBackgroundColor(hasTerminalMultiplexerSession("tmux") ? "tmux" : "direct", token);
 		return token;
 	}
 

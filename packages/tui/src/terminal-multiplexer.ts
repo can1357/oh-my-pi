@@ -1,17 +1,38 @@
-/** True when this process is running inside a Herdr pane. */
-export function isInsideHerdr(env: NodeJS.ProcessEnv = Bun.env): boolean {
-	// HERDR_ENV=1 is canonical. Identity vars survive env-sanitizing launchers
-	// that drop HERDR_ENV. Do not use HERDR_SOCKET_PATH, HERDR_BIN_PATH,
-	// HERDR_SESSION, HERDR_CONFIG_PATH, or HERDR_CLIENT_SOCKET_PATH here: they
-	// are client-side and can be set outside a Herdr pane, matching the
-	// CMUX_SOCKET_PATH warning below.
-	if (env.HERDR_ENV === "1") return true;
-	if (env.HERDR_PANE_ID || env.HERDR_TAB_ID || env.HERDR_WORKSPACE_ID) return true;
-	return false;
-}
+import { cmuxMultiplexer } from "./multiplexers/cmux";
+import { herdrMultiplexer } from "./multiplexers/herdr";
+import { screenMultiplexer } from "./multiplexers/screen";
+import { wmuxMultiplexer } from "./multiplexers/wmux";
+import { zellijMultiplexer } from "./multiplexers/zellij";
+import { tmuxMultiplexer } from "./tmux";
 
 /** Terminal multiplexers omp recognizes as owning the screen grid. */
 export type TerminalMultiplexer = "herdr" | "tmux" | "screen" | "zellij" | "cmux" | "wmux";
+
+/**
+ * Whether an explicit session marker identifies the current provider.
+ *
+ * TERM is intentionally excluded: it is a classification fallback, not proof
+ * that a particular multiplexer session owns the current grid.
+ */
+export function hasTerminalMultiplexerSession(
+	multiplexer: TerminalMultiplexer,
+	env: NodeJS.ProcessEnv = Bun.env,
+): boolean {
+	switch (multiplexer) {
+		case "herdr":
+			return herdrMultiplexer.isInside(env);
+		case "tmux":
+			return tmuxMultiplexer.isInside(env);
+		case "screen":
+			return screenMultiplexer.isInside(env);
+		case "zellij":
+			return zellijMultiplexer.isInside(env);
+		case "cmux":
+			return cmuxMultiplexer.isInside(env);
+		case "wmux":
+			return wmuxMultiplexer.isInside(env);
+	}
+}
 
 /**
  * Classify which terminal multiplexer owns the current screen grid, or `null`
@@ -27,12 +48,12 @@ export type TerminalMultiplexer = "herdr" | "tmux" | "screen" | "zellij" | "cmux
  * pane in place and exports WMUX=1 plus a native WMUX_SURFACE_ID.
  */
 export function classifyTerminalMultiplexer(env: NodeJS.ProcessEnv = Bun.env): TerminalMultiplexer | null {
-	if (isInsideHerdr(env)) return "herdr";
-	if (env.TMUX) return "tmux";
-	if (env.STY) return "screen";
-	if (env.ZELLIJ) return "zellij";
-	if (env.CMUX_WORKSPACE_ID || env.CMUX_SURFACE_ID || env.CMUX_REMOTE_TRANSPORT) return "cmux";
-	if (env.WMUX === "1" || env.WMUX_SURFACE_ID) return "wmux";
+	if (hasTerminalMultiplexerSession("herdr", env)) return "herdr";
+	if (hasTerminalMultiplexerSession("tmux", env)) return "tmux";
+	if (hasTerminalMultiplexerSession("screen", env)) return "screen";
+	if (hasTerminalMultiplexerSession("zellij", env)) return "zellij";
+	if (hasTerminalMultiplexerSession("cmux", env)) return "cmux";
+	if (hasTerminalMultiplexerSession("wmux", env)) return "wmux";
 	const term = env.TERM?.toLowerCase() ?? "";
 	if (term.startsWith("tmux")) return "tmux";
 	if (term.startsWith("screen")) return "screen";

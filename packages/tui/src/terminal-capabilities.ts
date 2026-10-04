@@ -10,12 +10,12 @@ import {
 	renderKittyPlaceholderLines,
 	setKittyGraphics,
 } from "./kitty-graphics";
-import { isInsideHerdr, isInsideTerminalMultiplexer } from "./terminal-multiplexer";
-import { isInsideTmux, resolveTmuxClientTerminalName, wrapTmuxPassthrough, wrapTmuxPassthroughIfNeeded } from "./tmux";
+import { hasTerminalMultiplexerSession, isInsideTerminalMultiplexer } from "./terminal-multiplexer";
+import { resolveTmuxClientTerminalName, wrapTmuxPassthrough, wrapTmuxPassthroughIfNeeded } from "./tmux";
 import type { HangulCompatibilityJamoWidth } from "./utils";
 
 export * from "./terminal-multiplexer";
-export { isInsideTmux, wrapTmuxPassthrough } from "./tmux";
+export { wrapTmuxPassthrough } from "./tmux";
 
 export enum ImageProtocol {
 	Kitty = "\x1b_G",
@@ -47,6 +47,21 @@ export type TerminalId =
 
 const CMUX_NOTIFICATION_TITLE = "omp";
 const CMUX_SURFACE_ID_PATTERN = /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/iu;
+
+// Notification delivery tries the innermost pane, then its containing surface,
+// before provider-specific OSC fallbacks.
+const NOTIFICATION_MULTIPLEXER_ORDER = ["herdr", "cmux", "tmux", "zellij"] as const;
+type NotificationMultiplexer = (typeof NOTIFICATION_MULTIPLEXER_ORDER)[number];
+
+function dispatchNotificationMultiplexer(
+	handle: (multiplexer: NotificationMultiplexer) => boolean,
+	env: NodeJS.ProcessEnv = Bun.env,
+): boolean {
+	for (const multiplexer of NOTIFICATION_MULTIPLEXER_ORDER) {
+		if (hasTerminalMultiplexerSession(multiplexer, env) && handle(multiplexer)) return true;
+	}
+	return false;
+}
 
 /** Title and body for an out-of-band multiplexer notification (cmux, Herdr). */
 function notificationTitleAndBody(message: string | TerminalNotification): { title: string; body: string } {
@@ -103,10 +118,8 @@ const HERDR_USAGE_TOKENS = new Set(["help", "--help", "-h"]);
  * fallback is preserved when the pane id is absent or the binary is missing.
  */
 function sendHerdrNotification(message: string | TerminalNotification, env: NodeJS.ProcessEnv = Bun.env): boolean {
-	// Pane-only detection, like `isInsideHerdr`: an env-sanitizing launcher can
-	// drop HERDR_ENV and keep the pane identity, and that pane can still be
-	// backgrounded. The pane id itself is what the CLI needs, so it stays required.
-	if (!isInsideHerdr(env)) return false;
+	// The typed dispatcher matched Herdr; retain the exact pane ID because it
+	// identifies the destination for the CLI call.
 	const paneId = env.HERDR_PANE_ID?.trim();
 	if (!paneId || !HERDR_PANE_ID_PATTERN.test(paneId)) return false;
 
@@ -236,33 +249,33 @@ export class TerminalInfo {
 
 	sendNotification(message: string | TerminalNotification): void {
 		if (isNotificationSuppressed() || isTerminalHeadless()) return;
-		// Innermost surface first. A Herdr pane launched inside a cmux surface
-		// inherits both `HERDR_PANE_ID` and the outer `CMUX_SURFACE_ID`; routing to
-		// cmux there would flag the containing surface and leave the backgrounded
-		// Herdr pane — the one actually waiting — without a sound or a marker.
-		if (sendHerdrNotification(message)) return;
-		if (sendCmuxNotification(message)) return;
+		// The order is deliberate: a Herdr pane inside cmux must receive its own
+		// signal before the containing surface, followed by mux OSC fallbacks.
+		const routed = dispatchNotificationMultiplexer(multiplexer => {
+			switch (multiplexer) {
+				case "herdr":
+					return sendHerdrNotification(message);
+				case "cmux":
+					return sendCmuxNotification(message);
+				case "tmux": {
+					// tmux swallows bare OSCs; passthrough preserves the toast and BEL
+					// flags the pane. Bell notifications already provide that signal.
+					if (this.notifyProtocol === NotifyProtocol.Bell) return false;
+					const formatted = this.formatNotification(message);
+					writeTerminalSequence(`${wrapTmuxPassthrough(formatted)}\x07`);
+					return true;
+				}
+				case "zellij": {
+					// Zellij drops OSCs and has no DCS passthrough; a bare BEL raises its bell flag.
+					if (this.notifyProtocol === NotifyProtocol.Bell) return false;
+					const formatted = this.formatNotification(message);
+					writeTerminalSequence(`${formatted}\x07`);
+					return true;
+				}
+			}
+		});
+		if (routed) return;
 		const formatted = this.formatNotification(message);
-		// Under tmux, terminals whose notify protocol is OSC 9 / OSC 99 would
-		// otherwise lose the notification entirely: tmux does not forward bare
-		// OSC 9/99 to the outer terminal, and the bare sequence does not flag
-		// tmux's own `monitor-bell` / `monitor-activity`. Wrap the OSC in tmux's
-		// DCS passthrough envelope so users with `allow-passthrough on` still
-		// get the desktop toast, then append a BEL so `monitor-bell` flags the
-		// pane/window for everyone else — the only signal a backgrounded pane
-		// has that the agent finished or is waiting for input. `Bell` protocol
-		// already self-flags via tmux's bell monitoring, so leave it alone.
-		if (this.notifyProtocol !== NotifyProtocol.Bell && isInsideTmux()) {
-			writeTerminalSequence(`${wrapTmuxPassthrough(formatted)}\x07`);
-			return;
-		}
-		// Zellij drops OSC 9/99 and has no DCS passthrough envelope, but raises its
-		// `[!]` bell flag on a bare BEL — the same backgrounded-pane signal tmux
-		// users get. So follow the (Zellij-swallowed) OSC with a plain BEL.
-		if (this.notifyProtocol !== NotifyProtocol.Bell && isInsideZellij()) {
-			writeTerminalSequence(`${formatted}\x07`);
-			return;
-		}
 		writeTerminalSequence(formatted);
 		// VTE-family terminals (Ptyxis, GNOME Terminal, Tilix, …) plus Alacritty
 		// and bare xterm-on-Wayland have no in-band escape that surfaces an
@@ -274,15 +287,6 @@ export class TerminalInfo {
 			sendDesktopNotification(message);
 		}
 	}
-}
-
-/**
- * Whether the agent process is running inside a Zellij session. Read fresh on
- * each call (like {@link isInsideTmux}) so a session attached/detached mid-run
- * is observed and tests can toggle `Bun.env.ZELLIJ` per case.
- */
-export function isInsideZellij(env: NodeJS.ProcessEnv = Bun.env): boolean {
-	return Boolean(env.ZELLIJ);
 }
 
 /**
@@ -402,7 +406,7 @@ export function shouldEnableSynchronizedOutputByDefault(
 
 	if (advertisesSynchronizedOutput(env.TERM_FEATURES)) return true;
 	if (env.WT_SESSION && (!env.TERM_PROGRAM || env.TERM_PROGRAM.toLowerCase() === "windows_terminal")) return true;
-	if (isInsideHerdr(env)) return true;
+	if (hasTerminalMultiplexerSession("herdr", env)) return true;
 
 	// Risky multiplexers start off even when an inner terminal id leaks through:
 	// older tmux/screen synchronized-output handling is flaky and a mux may not
@@ -556,19 +560,25 @@ export function shouldEnableHyperlinksByDefault(
 	const override = hyperlinksUserOverride(env);
 	if (override !== null) return override;
 
-	if (isInsideHerdr(env) && !env.STY && !env.TMUX) return true;
+	if (
+		hasTerminalMultiplexerSession("herdr", env) &&
+		!hasTerminalMultiplexerSession("screen", env) &&
+		!hasTerminalMultiplexerSession("tmux", env)
+	) {
+		return true;
+	}
 
 	if (!getTerminalInfo(terminalId).hyperlinks) return false;
 
 	// STY is GNU screen's explicit session marker. It vetoes tmux enabling when
 	// multiplexers are nested because screen cannot forward OSC 8 anywhere in the
 	// path.
-	if (env.STY) return false;
+	if (hasTerminalMultiplexerSession("screen", env)) return false;
 
 	// tmux check before TERM heuristics: TMUX is the authoritative current-session
 	// signal and supersedes TERM, which may be `screen-256color` under tmux's
 	// historical default-terminal setting.
-	if (env.TMUX) {
+	if (hasTerminalMultiplexerSession("tmux", env)) {
 		const version = parseTmuxVersionFromEnv(env);
 		if (!version) return false;
 		return version.major > 3 || (version.major === 3 && version.minor >= 4);
@@ -653,7 +663,7 @@ export function resolveImageProtocol(
 	// Herdr owns the pane grid but does not expose whether the attached client
 	// enabled its experimental Kitty renderer. Outer-terminal identity variables
 	// can leak into the pane, so only the explicit protocol override is safe.
-	if (imageProtocol !== null && isInsideHerdr(env)) {
+	if (imageProtocol !== null && hasTerminalMultiplexerSession("herdr", env)) {
 		return null;
 	}
 	return imageProtocol;

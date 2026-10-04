@@ -29,13 +29,13 @@ import { col } from "./native/describe";
 import { TSP_PREFIX, type TspHello } from "./native/encode";
 import type { DescribeContext, NativeNode, NativeScreen, NativeSurfaceProvider, NativeUiEvent } from "./native/node";
 import { STDOUT_BACKLOG_CLEAR_BYTES, setAltScreenActive, type Terminal } from "./terminal";
+import { hasTerminalMultiplexerSession } from "./terminal-multiplexer";
 import {
 	encodeKittyDeleteAllImages,
 	encodeKittyDeleteImage,
 	encodeKittyPlacementLine,
 	ImageProtocol,
 	isImageProtocolForced,
-	isInsideHerdr,
 	isInsideTerminalMultiplexer,
 	parseKittyDirectPlacementLine,
 	setCellDimensions,
@@ -1421,7 +1421,7 @@ export class TUI extends Container {
 			// still disable: status 4 is permanently reset, and a three-argument
 			// callback (`status` omitted) is a definitive unsupported from a
 			// custom Terminal that does not distinguish DECRPM codes.
-			if (!supported && isInsideHerdr() && status === 0) return;
+			if (!supported && hasTerminalMultiplexerSession("herdr") && status === 0) return;
 			this.#setSynchronizedOutput(supported);
 		});
 		// Icons painted before the Glyph Protocol registration landed may sit in
