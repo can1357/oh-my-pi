@@ -3168,7 +3168,7 @@ pub struct SessionState {
 	/// Current goal mode; null when the session has no goal.
 	#[serde(default = "default_session_state_goal")]
 	pub goal: Option<GoalModeState>,
-	/// Same snapshot as `get_skill_diagnostics`.
+	/// Current skill-resolution details; absent when connected to an older server.
 	#[serde(rename = "skillDiagnostics", default, skip_serializing_if = "Option::is_none")]
 	pub skill_diagnostics: Option<SkillDiagnosticsSnapshot>,
 }

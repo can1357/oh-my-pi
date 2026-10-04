@@ -2874,7 +2874,7 @@
 				},
 				"skillDiagnostics": {
 					"$ref": "#/$defs/SkillDiagnosticsSnapshot",
-					"description": "Same snapshot as `get_skill_diagnostics`."
+					"description": "Current skill-resolution details; absent when connected to an older server."
 				}
 			},
 			"required": [

@@ -2656,7 +2656,7 @@ type SessionState struct {
 	ContextUsage *ContextUsage    `json:"contextUsage,omitempty"`
 	// Current goal mode; null when the session has no goal.
 	Goal *GoalModeState `json:"goal"`
-	// Same snapshot as `get_skill_diagnostics`.
+	// Current skill-resolution details; absent when connected to an older server.
 	SkillDiagnostics *SkillDiagnosticsSnapshot `json:"skillDiagnostics,omitempty"`
 }
 

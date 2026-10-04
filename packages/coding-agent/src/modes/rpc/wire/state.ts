@@ -168,7 +168,10 @@ export const stateDefs = {
 		dumpTools: absentAs("ToolDescriptor[]", []),
 		"contextUsage?": "ContextUsage",
 		goal: absentAs(doc("GoalModeState | null", "Current goal mode; null when the session has no goal."), null),
-		"skillDiagnostics?": doc("SkillDiagnosticsSnapshot", "Same snapshot as `get_skill_diagnostics`."),
+		"skillDiagnostics?": doc(
+			"SkillDiagnosticsSnapshot",
+			"Current skill-resolution details; absent when connected to an older server.",
+		),
 	},
 
 	BashResult: {
