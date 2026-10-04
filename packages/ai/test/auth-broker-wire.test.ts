@@ -127,6 +127,23 @@ describe("auth-broker wire surface", () => {
 		}
 	});
 
+	test("GET /v1/snapshot orders tied credential blocks by updatedAtMs", async () => {
+		const credentialId = storage!.credentials.snapshot().credentials[0]!.id;
+		const blockedUntilMs = Date.now() + 60_000;
+		const block = { credentialId, providerKey: "anthropic:oauth", blockScope: "", blockedUntilMs };
+		// SQLite's primary key cannot hold this tie, so feed it straight to the
+		// snapshot builder: only the server's sort decides the wire order, and it
+		// must match the client store's canonical order (oldest update first).
+		vi.spyOn(storage!.blocks, "list").mockReturnValue([
+			{ ...block, updatedAtMs: 2_000 },
+			{ ...block, updatedAtMs: 1_000 },
+		]);
+
+		const result = await new AuthBrokerClient({ url: handle!.url, token }).fetchSnapshot();
+		if (result.status !== 200) throw new Error("expected snapshot");
+		expect(credentialBlocks(result.snapshot, credentialId).map(entry => entry.updatedAtMs)).toEqual([1_000, 2_000]);
+	});
+
 	test("preserves an HTTP rejection when the caller aborts while reading its body", async () => {
 		const client = new AuthBrokerClient({
 			url: "http://broker.invalid",

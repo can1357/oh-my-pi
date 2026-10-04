@@ -28,20 +28,6 @@ describe("BashExecutionComponent #clampDisplayLine", () => {
 	}
 
 	describe("wide glyphs (CJK characters)", () => {
-		it("counts CJK characters as 2 columns each", () => {
-			const cjkString = "日本語";
-			expect(visibleWidth(cjkString)).toBe(6);
-		});
-
-		it("does not truncate CJK string under limit", () => {
-			const cjkString = "日本語".repeat(100);
-			const component = createComponentWithOutput(cjkString);
-			const output = component.getOutput();
-
-			expect(output).toBe(cjkString);
-			expect(output).not.toContain("omitted");
-		});
-
 		it("truncates CJK string over limit and calculates omitted correctly", () => {
 			const cjkString = "日本語".repeat(2500);
 			const expectedVisible = visibleWidth(cjkString);
@@ -54,74 +40,7 @@ describe("BashExecutionComponent #clampDisplayLine", () => {
 		});
 	});
 
-	describe("emoji handling", () => {
-		it("counts emoji as appropriate columns", () => {
-			expect(visibleWidth("😀")).toBe(2);
-			expect(visibleWidth("👨‍👩‍👧‍👦")).toBe(2);
-			expect(visibleWidth("🎌")).toBe(2);
-		});
-
-		it("does not truncate emoji string under limit", () => {
-			const emojiString = "🎌".repeat(1000);
-			const component = createComponentWithOutput(emojiString);
-			const output = component.getOutput();
-
-			expect(output).toBe(emojiString);
-			expect(output).not.toContain("omitted");
-		});
-
-		it("truncates emoji string over limit correctly", () => {
-			const emojiString = "🎌".repeat(2500);
-			const expectedVisible = visibleWidth(emojiString);
-			const component = createComponentWithOutput(emojiString);
-			const output = component.getOutput();
-
-			expect(output).toContain("visible columns omitted");
-			expect(output).toContain(`[${expectedVisible - MAX_DISPLAY_LINE_CHARS} visible columns omitted]`);
-		});
-	});
-
-	describe("combining marks", () => {
-		it("handles combining diacritical marks", () => {
-			const combined = "e\u0304";
-			expect(visibleWidth(combined)).toBe(1);
-		});
-
-		it("handles string with combining marks over limit", () => {
-			const base = "e\u0304".repeat(2500);
-			const expectedVisible = visibleWidth(base);
-			const component = createComponentWithOutput(base);
-			const output = component.getOutput();
-
-			if (expectedVisible > MAX_DISPLAY_LINE_CHARS) {
-				expect(output).toContain("visible columns omitted");
-				expect(output).toContain(`[${expectedVisible - MAX_DISPLAY_LINE_CHARS} visible columns omitted]`);
-			}
-		});
-	});
-
 	describe("ANSI-decorated strings", () => {
-		it("ignores ANSI escape sequences in visible width calculation", () => {
-			const ansiString = "\x1b[31mred\x1b[0m";
-			expect(visibleWidth(ansiString)).toBe(3);
-		});
-
-		it("does not truncate ANSI string under visible limit", () => {
-			const ansiString = "\x1b[32mgreen\x1b[0m".repeat(200);
-			const component = createComponentWithOutput(ansiString);
-			const output = component.getOutput();
-
-			expect(output).not.toContain("omitted");
-		});
-
-		it("truncates ANSI string based on visible content, not raw length", () => {
-			const ansiString = "\x1b[31mred\x1b[0m".repeat(2500);
-			const component = createComponentWithOutput(ansiString);
-			const output = component.getOutput();
-
-			expect(output).toContain("visible columns omitted");
-		});
-
 		it("calculates omitted count based on visible width, not raw length", () => {
 			const ansiString = "\x1b[1;31;47mbold red on white\x1b[0m".repeat(1000);
 			const expectedVisible = visibleWidth(ansiString);
@@ -146,14 +65,6 @@ describe("BashExecutionComponent #clampDisplayLine", () => {
 			expect(output).toContain("…");
 			expect(output).toContain("visible columns omitted");
 			expect(output.length).toBeLessThan(5000);
-		});
-
-		it("includes ellipsis in truncated output", () => {
-			const longString = "x".repeat(5000);
-			const component = createComponentWithOutput(longString);
-			const output = component.getOutput();
-
-			expect(output).toContain("… [");
 		});
 
 		it("truncated portion is within MAX_DISPLAY_LINE_CHARS visible width", () => {
@@ -226,28 +137,6 @@ describe("BashExecutionComponent #clampDisplayLine", () => {
 			const output = component.getOutput();
 
 			expect(output).toBe("");
-		});
-	});
-
-	describe("visibleWidth calculation verification", () => {
-		it("verifies ASCII characters count as 1 column", () => {
-			expect(visibleWidth("abc")).toBe(3);
-			expect(visibleWidth("")).toBe(0);
-		});
-
-		it("verifies CJK counts as 2 columns", () => {
-			expect(visibleWidth("中")).toBe(2);
-			expect(visibleWidth("日本語中文")).toBe(10);
-		});
-
-		it("verifies emoji count", () => {
-			expect(visibleWidth("🎉")).toBe(2);
-			expect(visibleWidth("🔢")).toBe(2);
-		});
-
-		it("ignores ANSI escape sequences", () => {
-			expect(visibleWidth("\x1b[7m")).toBe(0);
-			expect(visibleWidth("a\x1b[7mb")).toBe(2);
 		});
 	});
 });

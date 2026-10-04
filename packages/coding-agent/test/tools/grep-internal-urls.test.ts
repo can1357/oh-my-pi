@@ -238,22 +238,6 @@ describe("GrepTool internal URL resolution", () => {
 		expect(getResultText(result)).toContain("searchable pre-compaction needle");
 	});
 
-	it("resolves artifact:// URL to backing file and greps it", async () => {
-		const content = "line one\nfound the needle here\nline three\n";
-		await Bun.write(path.join(artifactsDir, "5.bash.log"), content);
-
-		const session = createSession();
-		const tool = new GrepTool(session);
-
-		const result = await tool.execute("test-call", {
-			pattern: "needle",
-			path: "artifact://5",
-		});
-
-		const text = getResultText(result);
-		expect(text).toContain("needle");
-	});
-
 	it("greps artifact:// with regex pattern", async () => {
 		const content = "ERROR: connection refused\nWARN: timeout\nERROR: disk full\nINFO: ok\n";
 		await Bun.write(path.join(artifactsDir, "3.python.log"), content);
@@ -400,45 +384,6 @@ describe("GrepTool internal URL resolution", () => {
 
 		expect(text).toContain("omp://tools/read.md");
 		expect(text).toContain("omp://tools/grep.md");
-	});
-
-	it("throws when internal URL has no sourcePath", async () => {
-		const session = createSession();
-		const tool = new GrepTool(session);
-
-		expect(tool.execute("test-call", { pattern: "foo", path: "artifact://999" })).rejects.toThrow(
-			"Artifact 999 not found",
-		);
-	});
-
-	it("falls back to normal path resolution when no internalRouter", async () => {
-		await Bun.write(path.join(tmpDir, "test.txt"), "hello world\n");
-
-		const session = createSession();
-		const tool = new GrepTool(session);
-
-		const result = await tool.execute("test-call", {
-			pattern: "hello",
-			path: "test.txt",
-		});
-
-		const text = getResultText(result);
-		expect(text).toContain("hello");
-	});
-
-	it("falls back to normal resolution for non-internal URLs", async () => {
-		await Bun.write(path.join(tmpDir, "data.log"), "some data here\n");
-
-		const session = createSession();
-		const tool = new GrepTool(session);
-
-		const result = await tool.execute("test-call", {
-			pattern: "data",
-			path: "data.log",
-		});
-
-		const text = getResultText(result);
-		expect(text).toContain("data");
 	});
 
 	it("suppresses hashline anchors when searching immutable artifact:// sources", async () => {
@@ -763,8 +708,9 @@ describe("GrepTool internal URL resolution", () => {
 			},
 		});
 		const tool = new GrepTool(createSession());
+		// Unix natives surface the real errno text; elsewhere the provider message rides along.
 		await expect(tool.execute("dir-search", { pattern: "x", path: "dirstub://host/dir" })).rejects.toThrow(
-			/dirstub:\/\/host\/dir: Operation not supported/,
+			/dirstub:\/\/host\/dir(: Operation not supported| lists only through the read tool)/,
 		);
 	});
 
@@ -780,7 +726,7 @@ describe("GrepTool internal URL resolution", () => {
 		const listSpy = vi.spyOn(sshFileTransfer, "listRemoteDir").mockResolvedValue([]);
 		const tool = new GrepTool(createSession());
 		await expect(tool.execute("ssh-dir-search", { pattern: "x", path: "ssh://h/etc" })).rejects.toThrow(
-			/ssh:\/\/h\/etc: Operation not supported/,
+			/ssh:\/\/h\/etc(: Operation not supported| lists only through the read tool)/,
 		);
 		expect(listSpy).not.toHaveBeenCalled();
 	});

@@ -364,6 +364,15 @@ export declare class Shell {
    * dropping it (which would SIGKILL them via kill-on-drop).
    */
   liveBackgroundJobCount(): Promise<number>
+  /**
+   * Pids of the still-alive processes spawned by this session's in-flight
+   * `run`, in spawn order: foreground commands, pipeline stages, and `&`
+   * jobs started by that run. Builtins run in-process and never appear.
+   * Empty when no run is executing; children that outlive their run are no
+   * longer reported once it returns. Synchronous and never waits on the
+   * running command.
+   */
+  pids(): Array<number>
 }
 
 /** One word-completion engine running on its own thread. */
@@ -416,9 +425,9 @@ export declare class TextPredictor {
 /**
  * Dedicated writer thread for one terminal fd.
  *
- * Constructed by the TUI's `ProcessTerminal` around stdout. The fd is
- * `dup(2)`'d at construction and closed on drop, so later manipulation of the
- * original descriptor does not affect the pump.
+ * `dup(2)`'d at construction and closed on drop. The duplicate keeps the
+ * pump's fd alive if the original is closed or replaced; file-status flags
+ * such as `O_NONBLOCK` are shared and handled by polling for `POLLOUT`.
  */
 export declare class TtyWriter {
   /**
@@ -554,6 +563,11 @@ export declare class VcsGitRepo {
   stageHunks(selections: Array<VcsHunkSelection>, rawDiff?: string | undefined | null, signal?: unknown | undefined | null): Promise<undefined>
   /** Create commit. */
   commitCreate(message: string, options: VcsCommitOptions, signal?: unknown | undefined | null): Promise<string>
+  /**
+   * Write a commit object for `tree` on `parents` without moving any ref or
+   * touching the index/worktree (`git commit-tree`).
+   */
+  commitTree(tree: string, parents: Array<string>, message: string, author?: VcsCommitAuthor | undefined | null, signal?: unknown | undefined | null): Promise<string>
   /** Checkout revision. */
   checkout(rev: string, signal?: unknown | undefined | null): Promise<undefined>
   /** Create branch. */
@@ -1567,6 +1581,9 @@ export declare function execReplace(argv: Array<string>): void
  */
 export declare function executeShell(options: ShellExecuteOptions, onChunk?: ((error: Error | null, chunk: string) => void) | undefined | null): Promise<ShellRunResult>
 
+/** Expand Windows 8.3 components without resolving symlinks or junctions. */
+export declare function expandWindowsLongPath(path: string): string
+
 /** Locate `*** Edit File: path` payloads the model emitted as plain text. */
 export declare function extractInlineSloppyRegions(text: string): Array<InlineSloppyRegion>
 
@@ -1643,6 +1660,9 @@ export interface FuzzyFindResult {
 
 /** Get list of supported languages. */
 export declare function getSupportedLanguages(): Array<string>
+
+/** Get the existing Windows 8.3 spelling; preserve the input when unavailable. */
+export declare function getWindowsShortPath(path: string): string
 
 /**
  * Get work profile data from the last N seconds.
@@ -1733,7 +1753,8 @@ export interface GlobResult {
  *
  * # Arguments
  * - `options`: Pattern, path, filters, and output mode.
- * - `on_match`: Optional callback invoked per match/result.
+ * - `on_match`: Optional callback invoked per returned match/result, after the
+ *   search (never called when `options.onMatches` streams instead).
  *
  * # Returns
  * Aggregated results across matching files.
@@ -1810,6 +1831,17 @@ export interface GrepOptions {
    * absent).
    */
   filesystem?: ShellFilesystem
+  /**
+   * Stream results instead of returning them: called on the JS thread with
+   * batches (at most 1024 entries, files in no particular order) of what
+   * `matches` would hold, while the search runs. A slow callback pauses the
+   * search instead of buffering. Successful completion waits for every
+   * callback and carries counts with empty `matches`; cancellation also
+   * interrupts delivery waits, though already queued callbacks may still run.
+   * A throw rejects the search with it. Incompatible with `maxCount` and
+   * `offset`.
+   */
+  onMatches?: (matches: GrepMatch[]) => void
 }
 
 /** Output mode for [`search`] and [`grep`] (string values match JS callers). */
@@ -2571,6 +2603,17 @@ export declare function rasterizeSvg(input: Uint8Array, maxWidthPx: number, maxH
 export declare function readImageFromClipboard(): Promise<ClipboardImage | undefined | null>
 
 /**
+ * Read plain text from the system clipboard.
+ *
+ * Returns `Ok(None)` when the clipboard holds no text, so callers can tell
+ * "empty" from "unreadable" without spawning a shell bridge.
+ *
+ * # Errors
+ * Returns an error if clipboard access fails.
+ */
+export declare function readTextFromClipboard(): Promise<string | undefined | null>
+
+/**
  * Render Mermaid diagram text (flowchart, state, sequence, class, ER, or
  * xychart) to ASCII/Unicode art. Synchronous: callers render inside the
  * TUI compositor.
@@ -3130,7 +3173,21 @@ export interface SpellingRange {
  */
 export declare function structuredPatchHunks(oldText: string, newText: string, context?: number | undefined | null): Array<PatchHunk>
 
+/**
+ * Summarize source structure synchronously on the calling thread.
+ *
+ * Prefer [`summarize_code_async`] on hot paths: the tree-sitter parse blocks
+ * the JS thread for the whole call.
+ */
 export declare function summarizeCode(options: SummaryOptions): SummaryResult
+
+/**
+ * Summarize source structure on libuv's thread pool.
+ *
+ * Same result as [`summarize_code`], but the parse and summary run off the
+ * JS thread; only argument and result marshalling happen on it.
+ */
+export declare function summarizeCodeAsync(options: SummaryOptions): Promise<SummaryResult>
 
 export interface SummaryOptions {
   /** Source code to summarize. */

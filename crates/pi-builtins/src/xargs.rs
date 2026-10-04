@@ -13,7 +13,9 @@ use std::{
 use brush_core::{ShellExtensions, builtins::Registration};
 use clap::{Arg, ArgAction, ArgMatches};
 
-use crate::host::{CommandStatus, Host, ShellCommand, Utility, matches_parser, util};
+use crate::host::{
+	CommandStatus, Host, RunningCommand, ShellCommand, Utility, matches_parser, util,
+};
 
 mod options {
 	pub const COMMAND: &str = "COMMAND";
@@ -41,6 +43,7 @@ struct Options {
 	max_args:                Option<usize>,
 	max_chars:               Option<usize>,
 	max_lines:               Option<usize>,
+	max_procs:               usize,
 	no_run_if_empty:         bool,
 	null:                    bool,
 	replace:                 Option<String>,
@@ -313,6 +316,67 @@ impl Display for CommandExecutionError {
 
 impl Error for CommandExecutionError {}
 
+/// Maps how a command ended onto xargs' verdict for it.
+fn command_outcome(
+	status: io::Result<CommandStatus>,
+) -> Result<CommandResult, CommandExecutionError> {
+	match status {
+		Ok(CommandStatus::Exited(0)) => Ok(CommandResult::Success),
+		Ok(CommandStatus::Exited(255)) => Err(CommandExecutionError::UrgentlyFailed),
+		Ok(CommandStatus::Exited(_)) => Ok(CommandResult::Failure),
+		Ok(CommandStatus::Signaled(signal)) => Err(CommandExecutionError::Killed { signal }),
+		Err(e) if e.kind() == io::ErrorKind::NotFound => Err(CommandExecutionError::NotFound),
+		Err(e) => Err(CommandExecutionError::CannotRun(e)),
+	}
+}
+
+/// Commands launched and not yet reaped, at most `limit` at once (`-P`).
+struct Jobs {
+	limit:   usize,
+	running: Vec<RunningCommand>,
+	result:  CommandResult,
+}
+
+impl Jobs {
+	fn new(limit: usize) -> Self {
+		Self { limit, running: Vec::new(), result: CommandResult::Success }
+	}
+
+	/// Starts `argv`, then waits until fewer than `limit` commands run, so
+	/// `-P 1` runs each command to completion before reading more input.
+	fn spawn(&mut self, host: &mut Host, argv: Vec<OsString>) -> Result<(), CommandExecutionError> {
+		let command = host
+			.spawn_command(ShellCommand::new(argv))
+			.map_err(CommandExecutionError::CannotRun)?;
+		self.running.push(command);
+		while self.running.len() >= self.limit {
+			self.reap()?;
+		}
+		Ok(())
+	}
+
+	/// Waits for one running command and folds its status into the result.
+	fn reap(&mut self) -> Result<(), CommandExecutionError> {
+		if let Some(status) = RunningCommand::wait_any(&mut self.running) {
+			self.result.combine(command_outcome(status)?);
+		}
+		Ok(())
+	}
+
+	/// Waits for every running command, so none outlives xargs; the first
+	/// fatal error is reported only once all have finished.
+	fn finish(mut self) -> Result<CommandResult, CommandExecutionError> {
+		let mut outcome = Ok(());
+		while !self.running.is_empty() {
+			let reaped = self.reap();
+			if outcome.is_ok() {
+				outcome = reaped;
+			}
+		}
+		outcome.map(|()| self.result)
+	}
+}
+
 enum ExecAction {
 	Command(Vec<OsString>),
 	Echo,
@@ -361,7 +425,7 @@ impl CommandBuilder<'_> {
 		Ok(())
 	}
 
-	fn execute(self, host: &mut Host) -> Result<CommandResult, CommandExecutionError> {
+	fn execute(self, host: &mut Host, jobs: &mut Jobs) -> Result<(), CommandExecutionError> {
 		let (entry_point, initial_args): (&OsStr, &[OsString]) = match &self.options.action {
 			ExecAction::Command(args) => (&args[0], &args[1..]),
 			ExecAction::Echo => (OsStr::new("echo"), &[]),
@@ -405,7 +469,7 @@ impl CommandBuilder<'_> {
 				response.push(byte[0]);
 			}
 			if !matches!(response.first(), Some(b'y' | b'Y')) {
-				return Ok(CommandResult::Success);
+				return Ok(());
 			}
 		} else if self.options.verbose {
 			// GNU-style `-t`: echo the command line about to run on stderr.
@@ -415,18 +479,7 @@ impl CommandBuilder<'_> {
 		match &self.options.action {
 			ExecAction::Command(_) => {
 				let argv = std::iter::once(entry_point.to_owned()).chain(final_args).collect();
-				match host.run_command(ShellCommand::new(argv)) {
-					Ok(CommandStatus::Exited(0)) => Ok(CommandResult::Success),
-					Ok(CommandStatus::Exited(255)) => Err(CommandExecutionError::UrgentlyFailed),
-					Ok(CommandStatus::Exited(_)) => Ok(CommandResult::Failure),
-					Ok(CommandStatus::Signaled(signal)) => {
-						Err(CommandExecutionError::Killed { signal })
-					},
-					Err(e) if e.kind() == io::ErrorKind::NotFound => {
-						Err(CommandExecutionError::NotFound)
-					},
-					Err(e) => Err(CommandExecutionError::CannotRun(e)),
-				}
+				jobs.spawn(host, argv)
 			},
 			ExecAction::Echo => {
 				let _ = writeln!(
@@ -439,7 +492,7 @@ impl CommandBuilder<'_> {
 						.collect::<Vec<_>>()
 						.join(" ")
 				);
-				Ok(CommandResult::Success)
+				Ok(())
 			},
 		}
 	}
@@ -660,6 +713,7 @@ struct InputProcessOptions {
 	exit_if_pass_char_limit: bool,
 	max_args:                Option<usize>,
 	max_lines:               Option<usize>,
+	max_procs:               usize,
 	no_run_if_empty:         bool,
 }
 
@@ -668,26 +722,43 @@ impl InputProcessOptions {
 		exit_if_pass_char_limit: bool,
 		max_args: Option<usize>,
 		max_lines: Option<usize>,
+		max_procs: usize,
 		no_run_if_empty: bool,
 	) -> Self {
-		Self { exit_if_pass_char_limit, max_args, max_lines, no_run_if_empty }
+		Self { exit_if_pass_char_limit, max_args, max_lines, max_procs, no_run_if_empty }
 	}
 }
 
+/// Runs command lines built from `args`, up to `options.max_procs` at once,
+/// and waits for all of them.
 fn process_input(
+	host: &mut Host,
+	builder_options: &CommandBuilderOptions,
+	args: Box<dyn ArgumentReader>,
+	options: &InputProcessOptions,
+) -> Result<CommandResult, XargsError> {
+	let mut jobs = Jobs::new(options.max_procs);
+	let launched = launch_commands(host, builder_options, args, options, &mut jobs);
+	let finished = jobs.finish();
+	launched?;
+	Ok(finished?)
+}
+
+/// Builds command lines from `args` and hands each to `jobs`.
+fn launch_commands(
 	host: &mut Host,
 	builder_options: &CommandBuilderOptions,
 	mut args: Box<dyn ArgumentReader>,
 	options: &InputProcessOptions,
-) -> Result<CommandResult, XargsError> {
+	jobs: &mut Jobs,
+) -> Result<(), XargsError> {
 	let mut current_builder = CommandBuilder::new(builder_options);
 	let mut have_pending_command = false;
-	let mut result = CommandResult::Success;
 
 	while let Some(arg) = args.next(host)? {
 		// Stop launching new children once the host has cancelled the command.
 		if host.is_cancelled() {
-			return Ok(result);
+			return Ok(());
 		}
 		if let Err(ExhaustedCommandSpace { arg, out_of_chars }) = current_builder.add_arg(arg) {
 			if out_of_chars
@@ -697,7 +768,7 @@ fn process_input(
 				return Err(XargsError::ArgumentTooLarge);
 			}
 			if have_pending_command {
-				result.combine(current_builder.execute(host)?);
+				current_builder.execute(host, jobs)?;
 			}
 
 			current_builder = CommandBuilder::new(builder_options);
@@ -710,14 +781,14 @@ fn process_input(
 	}
 
 	if host.is_cancelled() {
-		return Ok(result);
+		return Ok(());
 	}
 
 	if have_pending_command || (!options.no_run_if_empty && builder_options.replace.is_none()) {
-		result.combine(current_builder.execute(host)?);
+		current_builder.execute(host, jobs)?;
 	}
 
-	Ok(result)
+	Ok(())
 }
 
 fn parse_delimiter(s: &str) -> Result<u8, String> {
@@ -877,7 +948,7 @@ fn app() -> clap::Command {
 			Arg::new(options::MAX_PROCS)
 				.short('P')
 				.long(options::MAX_PROCS)
-				.help("Run up to this many commands in parallel [NOT IMPLEMENTED]")
+				.help("Run up to this many commands in parallel; 0 runs as many as possible")
 				.value_parser(clap::value_parser!(usize)),
 		)
 		.arg(
@@ -952,6 +1023,11 @@ fn do_xargs(matches: &ArgMatches, host: &mut Host) -> Result<CommandResult, Xarg
 		max_args:                matches.get_one::<usize>(options::MAX_ARGS).copied(),
 		max_chars:               matches.get_one::<usize>(options::MAX_CHARS).copied(),
 		max_lines:               matches.get_one::<usize>(options::MAX_LINES).copied(),
+		max_procs:               match matches.get_one::<usize>(options::MAX_PROCS) {
+			None => 1,
+			Some(0) => usize::MAX,
+			Some(&max_procs) => max_procs,
+		},
 		no_run_if_empty:         matches.get_flag(options::NO_RUN_IF_EMPTY),
 		null:                    matches.get_flag(options::NULL),
 		replace:                 [options::REPLACE_I, options::REPLACE]
@@ -1022,6 +1098,7 @@ fn do_xargs(matches: &ArgMatches, host: &mut Host) -> Result<CommandResult, Xarg
 			options.exit_if_pass_char_limit,
 			max_args,
 			max_lines,
+			options.max_procs,
 			options.no_run_if_empty,
 		),
 	)?;
@@ -1443,6 +1520,19 @@ mod tests {
 		let (code, _, err) = run_simple(&["sh", "-c", "kill -TERM $$", "_"], "x\n").await;
 		assert_eq!(code, 125);
 		assert!(err.contains("signal"), "got: {err:?}");
+	}
+
+	/// Contract: `-P N` runs up to N commands at once. Each command waits (up
+	/// to 5s) until all three have started, which only succeeds concurrently.
+	#[cfg(unix)]
+	#[tokio::test]
+	async fn max_procs_runs_commands_concurrently() {
+		let dir = tempfile::TempDir::new().expect("tempdir");
+		let script = "touch \"$1\"; i=0; while [ \"$(ls | wc -l)\" -lt 3 ]; do i=$((i+1)); [ $i -gt \
+		              500 ] && exit 1; sleep 0.01; done";
+		let (code, _, err) =
+			xargs_in(dir.path(), &["-n", "1", "-P", "3", "sh", "-c", script, "_"], "a b c\n").await;
+		assert_eq!(code, 0, "stderr: {err:?}");
 	}
 
 	#[tokio::test]

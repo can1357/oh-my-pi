@@ -70,8 +70,14 @@ export interface OpenAIStreamRequestInit {
 	fetch?: FetchImpl;
 	/** Optional caller-specific gate composed with shared transport retry exclusions. */
 	shouldRetryResponse?: (response: Response, bodyText: string) => boolean | Promise<boolean>;
-	/** Raw wire-frame observer (`onSseEvent` debug pipeline). */
+	/**
+	 * Raw wire-frame observer (`onSseEvent` debug pipeline). Leave it unset
+	 * when no diagnostic listener exists: any observer turns on per-line raw
+	 * capture for every frame.
+	 */
 	onSseEvent?: SseEventObserver;
+	/** Called when the stream ends on the OpenAI `[DONE]` sentinel; independent of {@link onSseEvent}. */
+	onDoneSentinel?: () => void;
 }
 
 export interface OpenAIStreamHandle<TEvent> {
@@ -117,7 +123,7 @@ export async function postOpenAIStream<TEvent>(init: OpenAIStreamRequestInit): P
 		});
 	}
 	return {
-		events: decodeStream<TEvent>(response.body, init.signal, init.onSseEvent),
+		events: decodeStream<TEvent>(response.body, init.signal, init.onSseEvent, init.onDoneSentinel),
 		response,
 		requestId: response.headers.get("x-request-id"),
 	};
@@ -140,8 +146,9 @@ async function* decodeStream<TEvent>(
 	body: ReadableStream<Uint8Array>,
 	signal: AbortSignal | undefined,
 	onSseEvent: SseEventObserver | undefined,
+	onDoneSentinel: (() => void) | undefined,
 ): AsyncGenerator<TEvent> {
-	for await (const frame of readSseJsonOrText<TEvent>(body, signal, onSseEvent)) {
+	for await (const frame of readSseJsonOrText<TEvent>(body, signal, onSseEvent, onDoneSentinel)) {
 		if (typeof frame === "string") {
 			const inBand = AIError.createInBandProviderErrorFromText(frame);
 			if (inBand) throw inBand;

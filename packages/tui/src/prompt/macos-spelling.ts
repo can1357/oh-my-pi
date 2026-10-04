@@ -96,10 +96,27 @@ export class MacOSSpellingProvider implements EditorTextAssistProvider {
 		context: SpellingDecorationContext,
 		decorate: (span: string) => string = value => value,
 	): string {
-		if (!this.#available || !this.#features.typoDetection || text.length === 0) return decorate(text);
-		if (!this.#prose.isProse(context, context.startCol, context.startCol + text.length)) {
-			return decorate(text);
+		const ranges = this.typoRanges(text, context);
+		if (ranges.length === 0) return decorate(text);
+		let rendered = "";
+		let cursor = 0;
+		for (const range of ranges) {
+			const end = range.start + range.length;
+			rendered += decorate(text.slice(cursor, range.start));
+			rendered += this.#marks.start + decorate(text.slice(range.start, end)) + this.#marks.end;
+			cursor = end;
 		}
+		return rendered + decorate(text.slice(cursor));
+	}
+
+	/**
+	 * Misspelled prose ranges in `text` (offsets into it), in order and
+	 * non-overlapping. Schedules the verification check for uncached text; its
+	 * result arrives through {@link onUpdate}.
+	 */
+	typoRanges(text: string, context: SpellingDecorationContext): readonly native.SpellingRange[] {
+		if (!this.#available || !this.#features.typoDetection || text.length === 0) return [];
+		if (!this.#prose.isProse(context, context.startCol, context.startCol + text.length)) return [];
 		const lane = `${context.line}:${context.startCol}`;
 		const cached = this.#typoCache.get(text);
 		// A cache hit obsoletes any older text queued for this lane. A miss must
@@ -110,9 +127,8 @@ export class MacOSSpellingProvider implements EditorTextAssistProvider {
 		if (cached === undefined) this.#scheduleTypoRanges(text, lane);
 		else this.#automaticTypoQueue.delete(lane);
 		const ranges = cached ?? this.#projectTypoRanges(text);
-		if (!ranges) return decorate(text);
-		if (ranges.length === 0) return decorate(text);
-		let rendered = "";
+		if (!ranges || ranges.length === 0) return [];
+		const kept: native.SpellingRange[] = [];
 		let cursor = 0;
 		for (const range of ranges) {
 			const end = range.start + range.length;
@@ -123,11 +139,10 @@ export class MacOSSpellingProvider implements EditorTextAssistProvider {
 			if (!this.#prose.isProse(context, context.startCol + range.start, context.startCol + end)) {
 				continue;
 			}
-			rendered += decorate(text.slice(cursor, range.start));
-			rendered += this.#marks.start + decorate(text.slice(range.start, end)) + this.#marks.end;
+			kept.push(range);
 			cursor = end;
 		}
-		return rendered + decorate(text.slice(cursor));
+		return kept;
 	}
 
 	/** Return the confident macOS correction after a completed prose word. */

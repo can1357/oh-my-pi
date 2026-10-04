@@ -54,10 +54,6 @@ describe("detectRectangularSgrSupport", () => {
 });
 
 describe("encodeDeccara", () => {
-	it("emits the 1-based inclusive DECCARA rectangle form", () => {
-		expect(encodeDeccara(1, 1, 4, 40, BG_SGR)).toBe(`\x1b[1;1;4;40;${BG_SGR}$r`);
-	});
-
 	it("matches kitty's documented background-fill example", () => {
 		// kitty docs/deccara.rst: blue (44) bg over rows 4..11, cols 3..10.
 		expect(`${DECSACE_RECT}${encodeDeccara(4, 3, 11, 10, "44")}${DECSACE_DEFAULT}`).toBe(

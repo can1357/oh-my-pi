@@ -87,5 +87,15 @@
 		"pageBg": "porcelainWhite",
 		"cardBg": "#ffffff",
 		"infoBg": "paleBlue"
+	},
+	"terminal": {
+		"background": "porcelainWhite",
+		"foreground": "cobaltBlack",
+		"chrome": "paleBlue",
+		"widget": "#ffffff",
+		"ansi": [
+			"cobaltBlack", "crimsonRed", "#507050", "darkGold", "wedgwoodBlue", "#864a81", "#2f757c", "mutedBlue",
+			"#606870", "#d8625c", "#69926a", "#ab8b3c", "softBlue", "#a5679f", "#4b8f97", "delicateGray"
+		]
 	}
 }

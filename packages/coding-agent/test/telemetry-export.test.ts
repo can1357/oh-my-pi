@@ -1,6 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { fileURLToPath } from "node:url";
+import type { CostEstimatorContext } from "@oh-my-pi/pi-agent-core";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { initTelemetryExport, isTelemetryExportEnabled } from "@oh-my-pi/pi-coding-agent/telemetry-export";
+import { estimateProviderCost } from "@oh-my-pi/pi-coding-agent/telemetry-export-otlp";
+import { cfgTelemetryOtlpExportEnabled } from "@oh-my-pi/pi-coding-agent/telemetry-settings";
 
 /**
  * Gating contract for the OTLP export bootstrap. These cases all short-circuit
@@ -40,46 +44,53 @@ afterEach(() => {
 
 describe("initTelemetryExport gating", () => {
 	it("stays disabled when no OTLP endpoint is configured", async () => {
-		await initTelemetryExport();
+		await initTelemetryExport(true);
+		expect(isTelemetryExportEnabled()).toBe(false);
+	});
+
+	it("keeps OTLP export disabled when the user opts out despite configured endpoints", async () => {
+		process.env.OTEL_EXPORTER_OTLP_TRACES_ENDPOINT = "http://localhost:4318/v1/traces";
+		const settings = Settings.isolated({ "telemetry.otlpExportEnabled": false });
+		await initTelemetryExport(cfgTelemetryOtlpExportEnabled.get(settings));
 		expect(isTelemetryExportEnabled()).toBe(false);
 	});
 
 	it("stays disabled when OTEL_SDK_DISABLED=true even with an endpoint", async () => {
 		process.env.OTEL_EXPORTER_OTLP_ENDPOINT = "http://localhost:4318";
 		process.env.OTEL_SDK_DISABLED = "true";
-		await initTelemetryExport();
+		await initTelemetryExport(true);
 		expect(isTelemetryExportEnabled()).toBe(false);
 	});
 
 	it("stays disabled when OTEL_TRACES_EXPORTER=none and only the traces endpoint is set", async () => {
 		process.env.OTEL_EXPORTER_OTLP_TRACES_ENDPOINT = "http://localhost:4318";
 		process.env.OTEL_TRACES_EXPORTER = "none";
-		await initTelemetryExport();
+		await initTelemetryExport(true);
 		expect(isTelemetryExportEnabled()).toBe(false);
 	});
 
 	it("declines unsupported OTLP protocols instead of misrouting spans", async () => {
 		process.env.OTEL_EXPORTER_OTLP_ENDPOINT = "http://localhost:4317";
 		process.env.OTEL_EXPORTER_OTLP_PROTOCOL = "grpc";
-		await initTelemetryExport();
+		await initTelemetryExport(true);
 		expect(isTelemetryExportEnabled()).toBe(false);
 
 		process.env.OTEL_EXPORTER_OTLP_TRACES_PROTOCOL = "http/json";
-		await initTelemetryExport();
+		await initTelemetryExport(true);
 		expect(isTelemetryExportEnabled()).toBe(false);
 	});
 
 	it("honors the kill-switches case-insensitively per the OTEL env contract", async () => {
 		process.env.OTEL_EXPORTER_OTLP_ENDPOINT = "http://localhost:4318";
 		process.env.OTEL_SDK_DISABLED = "TRUE";
-		await initTelemetryExport();
+		await initTelemetryExport(true);
 		expect(isTelemetryExportEnabled()).toBe(false);
 
 		delete process.env.OTEL_SDK_DISABLED;
 		process.env.OTEL_TRACES_EXPORTER = "otlp,None";
 		process.env.OTEL_LOGS_EXPORTER = "none";
 		process.env.OTEL_METRICS_EXPORTER = "none";
-		await initTelemetryExport();
+		await initTelemetryExport(true);
 		expect(isTelemetryExportEnabled()).toBe(false);
 	});
 
@@ -88,7 +99,7 @@ describe("initTelemetryExport gating", () => {
 		process.env.OTEL_TRACES_EXPORTER = "none";
 		process.env.OTEL_LOGS_EXPORTER = "none";
 		process.env.OTEL_METRICS_EXPORTER = "none";
-		await initTelemetryExport();
+		await initTelemetryExport(true);
 		expect(isTelemetryExportEnabled()).toBe(false);
 	});
 });
@@ -143,4 +154,56 @@ describe("initTelemetryExport signals export path", () => {
 			"resource attributes": 0,
 		});
 	}, 20_000);
+});
+
+describe("estimateProviderCost", () => {
+	// A Codex subscription request: OTel labels the provider `openai`, and the
+	// response may name a served model rather than the requested one.
+	const context: CostEstimatorContext = {
+		provider: "openai",
+		providerId: "openai-codex",
+		model: "served-model",
+		modelId: "requested-model",
+		serviceTier: undefined,
+		usage: {
+			inputTokens: 1_500,
+			outputTokens: 500,
+			totalTokens: 2_000,
+			cachedInputTokens: 400,
+			cacheWriteTokens: 100,
+			reasoningOutputTokens: 0,
+		},
+		usageCost: { input: 0.2, output: 0.8, cacheRead: 0.04, cacheWrite: 0.06, total: 1.1 },
+	};
+
+	it("reports the request's computed cost when the requested model has known pricing", () => {
+		const result = estimateProviderCost(
+			context,
+			(providerId, modelId) => providerId === "openai-codex" && modelId === "requested-model",
+		);
+
+		expect(result).toEqual({ usd: 1.1, inputUsd: 0.2, outputUsd: 0.8 });
+	});
+	it("preserves a provider-reported charge while distinguishing unpriced zero from a free priced request", () => {
+		const providerReported: CostEstimatorContext = {
+			...context,
+			usageCost: { input: 0.42, output: 0, cacheRead: 0, cacheWrite: 0, total: 0.42 },
+		};
+		expect(estimateProviderCost(providerReported, () => false)).toEqual({
+			usd: 0.42,
+			inputUsd: 0.42,
+			outputUsd: 0,
+		});
+
+		const unpricedZero: CostEstimatorContext = {
+			...context,
+			usageCost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+		};
+		expect(estimateProviderCost(unpricedZero, () => false)).toEqual({ unavailable: "model_price_unavailable" });
+		expect(estimateProviderCost(unpricedZero, () => true)).toEqual({
+			usd: 0,
+			inputUsd: 0,
+			outputUsd: 0,
+		});
+	});
 });

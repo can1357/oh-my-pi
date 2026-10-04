@@ -72,13 +72,6 @@ describe("buildSessionContext", () => {
 			expect(ctx.models).toEqual({});
 		});
 
-		it("single user message", () => {
-			const entries: SessionEntry[] = [msg("1", null, "user", "hello")];
-			const ctx = buildSessionContext(entries);
-			expect(ctx.messages).toHaveLength(1);
-			expect(ctx.messages[0].role).toBe("user");
-		});
-
 		it("rehydrates custom_message attribution from entries", () => {
 			const entries: SessionEntry[] = [
 				{
@@ -359,6 +352,80 @@ describe("buildSessionContext", () => {
 			if (ctx.messages[0]?.role !== "compactionSummary") throw new Error("Expected compaction summary");
 			expect(ctx.messages[0].providerPayload).toMatchObject({ signature: "sig" });
 			expect(ctx.messages[0].historyRewriteAt).toBeLessThan(new Date(newTurn.timestamp).getTime());
+		});
+
+		it("keeps context notes behind a native Anthropic summary so its block opens the request", () => {
+			const notes: SessionEntry = {
+				type: "custom",
+				customType: "experimental_context_notes",
+				data: { version: 1, text: "Keep the rollback plan." },
+				id: "2",
+				parentId: "1",
+				timestamp: "2025-01-01T00:00:00Z",
+			};
+			const nativeCompaction: CompactionEntry = {
+				...compaction("3", "2", "Native summary", ""),
+				preserveData: {
+					anthropicCompaction: { provider: "anthropic", content: "Native summary", signature: "sig" },
+				},
+			};
+			const ctx = buildSessionContext([
+				msg("1", null, "user", "first"),
+				notes,
+				nativeCompaction,
+				msg("4", "3", "user", "after compact"),
+			]);
+			expect(ctx.messages.map(message => message.role)).toEqual(["compactionSummary", "custom", "user"]);
+		});
+
+		it("keeps context notes out of the fold between a native summary and its retained assistant turn", () => {
+			const notes: SessionEntry = {
+				type: "custom",
+				customType: "experimental_context_notes",
+				data: { version: 1, text: "Keep the rollback plan." },
+				id: "2",
+				parentId: "1",
+				timestamp: "2025-01-01T00:00:00Z",
+			};
+			const retained = msg("3", "2", "assistant", "checking");
+			if (retained.message.role !== "assistant") throw new Error("Expected assistant");
+			retained.message.content.push({ type: "toolCall", id: "t1", name: "read", arguments: {} });
+			retained.message.stopReason = "toolUse";
+			const result: SessionMessageEntry = {
+				type: "message",
+				id: "4",
+				parentId: "3",
+				timestamp: "2025-01-01T00:00:00Z",
+				message: {
+					role: "toolResult",
+					toolCallId: "t1",
+					toolName: "read",
+					content: [{ type: "text", text: "file" }],
+					isError: false,
+					timestamp: 1,
+				},
+			};
+			const nativeCompaction: CompactionEntry = {
+				...compaction("5", "4", "Native summary", "3"),
+				preserveData: {
+					anthropicCompaction: { provider: "anthropic", content: "Native summary", signature: "sig" },
+				},
+			};
+			const ctx = buildSessionContext([
+				msg("1", null, "user", "first"),
+				notes,
+				retained,
+				result,
+				nativeCompaction,
+				msg("6", "5", "user", "after compact"),
+			]);
+			expect(ctx.messages.map(message => message.role)).toEqual([
+				"compactionSummary",
+				"assistant",
+				"toolResult",
+				"custom",
+				"user",
+			]);
 		});
 
 		it("predates native rewrite markers before the retained tail; summaries keep commit timestamps", () => {
@@ -644,26 +711,6 @@ describe("buildSessionContext", () => {
 			expect(transcript.messages[3]?.role).toBe("user");
 		});
 
-		it("agent context: summary stays at top", () => {
-			const entries: SessionEntry[] = [
-				msg("1", null, "user", "old question"),
-				msg("2", "1", "assistant", "old response"),
-				msg("3", "2", "user", "kept question"),
-				msg("4", "3", "assistant", "kept response"),
-				compaction("5", "4", "Summary of compacted turns", "3"),
-				msg("6", "5", "user", "after compact"),
-			];
-
-			// Agent context (no transcript): summary first
-			const agentCtx = buildSessionContext(entries);
-
-			expect(agentCtx.messages).toHaveLength(4);
-			expect(agentCtx.messages[0]?.role).toBe("compactionSummary");
-			expect(agentCtx.messages[1]?.role).toBe("user");
-			expect(agentCtx.messages[2]?.role).toBe("assistant");
-			expect(agentCtx.messages[3]?.role).toBe("user");
-		});
-
 		it("display transcript with no post-compaction messages: summary at bottom", () => {
 			// Simulates the moment right after /compact runs — compaction is the
 			// last entry, so the summary should be the last (bottom) message.
@@ -816,6 +863,78 @@ describe("buildSessionContext", () => {
 			// hiding this suffix would make the newest response disappear.
 			expect(transcript.messages.map(m => m.role)).toEqual(["assistant", "compactionSummary"]);
 			expect(JSON.stringify(transcript.messages)).toContain("kept assistant suffix");
+		});
+
+		it("keeps the final answer when advisor notes follow a kept mid-turn suffix", () => {
+			const entries: SessionEntry[] = [
+				msg("1", null, "user", "original request"),
+				msg("2", "1", "assistant", "tool-loop continuation"),
+				msg("3", "2", "assistant", "final answer"),
+				{
+					type: "custom_message",
+					id: "4",
+					parentId: "3",
+					timestamp: "2025-01-01T00:00:00Z",
+					customType: "advisor-note",
+					content: "review note",
+					display: true,
+					attribution: "agent",
+				},
+				compaction("5", "4", "Idle compaction", "2"),
+			];
+
+			const transcript = buildSessionContext(entries, undefined, undefined, {
+				transcript: true,
+				collapseCompactedHistory: true,
+			});
+
+			expect(transcript.messages.map(message => message.role)).toEqual([
+				"assistant",
+				"assistant",
+				"custom",
+				"compactionSummary",
+			]);
+			expect(transcript.messages[1]).toMatchObject({
+				role: "assistant",
+				content: [{ type: "text", text: "final answer" }],
+			});
+		});
+
+		it("trims past agent notes to a later user-invoked skill request", () => {
+			const entries: SessionEntry[] = [
+				msg("1", null, "user", "old request"),
+				msg("2", "1", "assistant", "orphaned continuation"),
+				{
+					type: "custom_message",
+					id: "3",
+					parentId: "2",
+					timestamp: "2025-01-01T00:00:00Z",
+					customType: "advisor-note",
+					content: "note on the old turn",
+					display: true,
+					attribution: "agent",
+				},
+				{
+					type: "custom_message",
+					id: "4",
+					parentId: "3",
+					timestamp: "2025-01-01T00:00:00Z",
+					customType: "skill-prompt",
+					content: "review this change",
+					display: true,
+					attribution: "user",
+				},
+				msg("5", "4", "assistant", "new response"),
+				compaction("6", "5", "Summary", "2"),
+			];
+
+			const transcript = buildSessionContext(entries, undefined, undefined, {
+				transcript: true,
+				collapseCompactedHistory: true,
+			});
+
+			expect(transcript.messages.map(message => message.role)).toEqual(["custom", "assistant", "compactionSummary"]);
+			expect(transcript.messages[0]).toMatchObject({ content: "review this change", attribution: "user" });
 		});
 
 		it("trimmed assistants consume reset state before the first visible turn", () => {

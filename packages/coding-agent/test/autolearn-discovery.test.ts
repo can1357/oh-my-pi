@@ -91,6 +91,20 @@ describe("managed-skills discovery", () => {
 		expect(quxes[0]?.source).toBe("custom:user");
 	});
 
+	it("never lets a managed skill take the bare name of a collided authored skill", async () => {
+		// A custom-directory skill overrides the native `foo` (which moves to a
+		// namespaced alias); the managed `foo` must still defer to both.
+		const customDir = path.join(tempHome, "custom-skills");
+		await writeSkill(authoredDir, "foo", "Authored foo (native).");
+		await writeSkill(customDir, "foo", "Authored foo (custom).");
+		await writeSkill(managedDir, "foo", "Managed foo.");
+		const { skills } = await loadSkills({ cwd: tempCwd, customDirectories: [customDir] });
+		expect(skills.some(s => s.source === "omp-managed:user")).toBe(false);
+		expect(skills.find(s => s.name === "foo")?.source).toBe("custom:user");
+		const nativeAliases = skills.filter(s => s.source === "native:user" && s.name.endsWith("/foo"));
+		expect(nativeAliases).toHaveLength(1);
+	});
+
 	it("keeps a managed skill visible even when a disabled provider has the same name", async () => {
 		// loadCapability dedupes before source filtering, so a fully-DISABLED higher-
 		// priority authored skill must not consume the managed fallback. claude is

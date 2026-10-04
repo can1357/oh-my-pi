@@ -382,13 +382,12 @@ export const xaiOauthUsageProvider: UsageProvider = {
 					: null;
 		}
 
-		// When an account is marked unified billing and weekly credits were only inferred
-		// from an omitted percentage field:
-		// - If a positive monthly quota is returned, use the monthly quota alone.
-		// - If the monthly endpoint returned a valid config without positive monthly quota,
-		//   confirm that this account relies on the weekly reset cycle and use weekly.
-		// - If the monthly fetch failed (transient network error), reject inferred weekly
-		//   so AuthStorage's retain-last-good cache preserves the previous valid snapshot.
+		// A positive monthly quota normally wins over an inferred weekly percentage.
+		// If that monthly counter is already over its limit while weekly credits
+		// have an active period, the two shapes cannot establish which one gates
+		// requests. Keep the counter visible but do not use it for dispatch.
+		// A failed monthly fetch still rejects inferred weekly usage so
+		// AuthStorage can retain its last good snapshot.
 		let effectiveWeekly = weekly;
 		if (weekly?.inferredPercent && creditsLooksUnified) {
 			if (monthly) {
@@ -403,11 +402,22 @@ export const xaiOauthUsageProvider: UsageProvider = {
 				}
 			}
 		}
+		const monthlyQuotaAdvisory =
+			weekly?.inferredPercent === true && creditsLooksUnified && monthly !== null && monthly.used >= monthly.limit;
 		if (!effectiveWeekly && !monthly) return null;
 
 		const limits: UsageLimit[] = [];
 		if (effectiveWeekly) limits.push(...buildLimits(effectiveWeekly, accountId));
-		if (monthly) limits.push(...buildLimits(monthly, accountId));
+		if (monthly) {
+			const monthlyLimits = buildLimits(monthly, accountId);
+			if (monthlyQuotaAdvisory && monthlyLimits[0]) {
+				monthlyLimits[0].status = "unknown";
+				monthlyLimits[0].notes = [
+					"Monthly counter exceeds its limit, but active weekly credits leave enforcement uncertain.",
+				];
+			}
+			limits.push(...monthlyLimits);
+		}
 		// Deduplicate on-demand if both shapes carried the same cap (keep first).
 		const seen = new Set<string>();
 		const deduped = limits.filter(limit => {
@@ -435,6 +445,7 @@ export const xaiOauthUsageProvider: UsageProvider = {
 				endpoint,
 				source: BILLING_SOURCE,
 				billingKind,
+				...(monthlyQuotaAdvisory ? { monthlyQuotaAdvisory: true } : {}),
 				...(accountId ? { accountId } : {}),
 				...(email ? { email } : {}),
 			},
@@ -449,6 +460,7 @@ export const xaiOauthUsageProvider: UsageProvider = {
  */
 export const xaiOauthRankingStrategy: CredentialRankingStrategy = {
 	scopeLimits(report) {
+		if (report.metadata?.monthlyQuotaAdvisory === true) return [];
 		// Spent credits/included quota keeps serving on the on-demand cap; only hard-block
 		// the credential once no on-demand headroom remains.
 		const onDemand = report.limits.find(limit => limit.id === `${PROVIDER_ID}:on-demand`);
@@ -458,6 +470,7 @@ export const xaiOauthRankingStrategy: CredentialRankingStrategy = {
 		);
 	},
 	findWindowLimits(report) {
+		if (report.metadata?.monthlyQuotaAdvisory === true) return {};
 		const credits = report.limits.find(limit => limit.id === `${PROVIDER_ID}:credits:1w`);
 		const included = report.limits.find(limit => limit.id === `${PROVIDER_ID}:included:1mo`);
 		return {

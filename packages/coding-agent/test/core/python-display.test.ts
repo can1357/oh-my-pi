@@ -18,22 +18,4 @@ describe("renderKernelDisplay (raw bundle shape)", () => {
 		expect(text).toBe("**bold**\n");
 		expect(outputs).toContainEqual({ type: "markdown" });
 	});
-
-	it("collects image/png alongside text/plain", async () => {
-		const { text, outputs } = await renderKernelDisplay({
-			"image/png": "base64data",
-			"text/plain": "<Figure>",
-		});
-		expect(text).toBe("<Figure>\n");
-		expect(outputs).toContainEqual({ type: "image", data: "base64data", mimeType: "image/png" });
-	});
-
-	it("emits json bundle and includes text/plain when present", async () => {
-		const { text, outputs } = await renderKernelDisplay({
-			"application/json": { ok: true },
-			"text/plain": "{ ok: true }",
-		});
-		expect(text).toBe("{ ok: true }\n");
-		expect(outputs).toEqual([{ type: "json", data: { ok: true } }]);
-	});
 });

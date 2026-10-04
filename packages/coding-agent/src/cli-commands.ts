@@ -324,7 +324,7 @@ const RESERVED_TOP_LEVEL_WORDS: Record<string, string> = {
 	discover:
 		'`omp discover` is not a top-level command. Use `omp plugin discover [marketplace]` to browse available plugins, or run `omp launch discover` if you meant to send "discover" as a prompt.',
 	upgrade:
-		'`omp upgrade` is not a top-level command. Use `omp plugin upgrade [name@marketplace]` to upgrade plugins, or run `omp launch upgrade` if you meant to send "upgrade" as a prompt.',
+		'`omp upgrade` is not a top-level command. Use `omp plugin upgrade [name]` to upgrade plugins, or run `omp launch upgrade` if you meant to send "upgrade" as a prompt.',
 	enable:
 		'`omp enable` is not a top-level command. Use `omp plugin enable <name@marketplace>` to enable a plugin, or run `omp launch enable` if you meant to send "enable" as a prompt.',
 	disable:

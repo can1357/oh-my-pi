@@ -1,4 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
+import * as fs from "node:fs/promises";
+import * as os from "node:os";
+import * as path from "node:path";
 import { AsyncJobManager } from "@oh-my-pi/pi-coding-agent/async/job-manager";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-lifecycle";
@@ -21,9 +24,10 @@ function createSession(options: {
 	manager: AsyncJobManager;
 	settings?: Record<string, unknown>;
 	spawns?: string | boolean;
+	cwd?: string;
 }): ToolSession {
 	return {
-		cwd: "/tmp",
+		cwd: options.cwd ?? "/tmp",
 		hasUI: false,
 		settings: Settings.isolated({ "async.enabled": true, ...options.settings }),
 		getSessionFile: () => null,
@@ -160,5 +164,61 @@ describe("task async preflight", () => {
 		expect(runSubprocess).not.toHaveBeenCalled();
 		expect(jobs.getJob("Invalid")).toBeUndefined();
 		expect(jobs.getJob("Valid")).toBeUndefined();
+	});
+
+	it("names the searched agent directories, home-shortened, when the agent is unknown", async () => {
+		const home = await fs.mkdtemp(path.join(os.tmpdir(), "omp-unknown-agent-"));
+		try {
+			const projectDir = path.join(home, "project");
+			await fs.mkdir(path.join(projectDir, ".omp", "agents"), { recursive: true });
+			vi.spyOn(os, "homedir").mockReturnValue(home);
+			const tool = await TaskTool.create(createSession({ manager: manager(), cwd: projectDir }));
+
+			const result = await tool.execute("unknown", {
+				agent: "missing",
+				name: "Unknown",
+				task: "Work.",
+			} as TaskParams);
+
+			const text = textOf(result);
+			// shortenPath renders home paths as portable `~/…` on every platform.
+			expect(text).toContain("Searched: ~/project/.omp/agents");
+			expect(text).not.toContain(home);
+		} finally {
+			await fs.rm(home, { recursive: true, force: true });
+		}
+	});
+
+	it("routes a per-call model on a task item into the spawn", async () => {
+		mockDiscovery();
+		const runSubprocess = vi.spyOn(executorModule, "runSubprocess").mockResolvedValue(resultFor("Router"));
+		const jobs = manager();
+		const tool = await TaskTool.create(
+			createSession({ manager: jobs, settings: { "async.enabled": false, "task.batch": true } }),
+		);
+
+		await tool.execute("per-call-model", {
+			context: "Shared context.",
+			tasks: [{ name: "Router", agent: "task", task: "Do the work.", model: "p/requested:high" }],
+		} as TaskParams);
+
+		expect(runSubprocess.mock.calls[0]?.[0]?.modelOverride).toEqual(["p/requested:high"]);
+	});
+
+	it("rejects an ambiguous per-call model before dispatching the item", async () => {
+		mockDiscovery();
+		const runSubprocess = vi.spyOn(executorModule, "runSubprocess").mockResolvedValue(resultFor("unexpected"));
+		const jobs = manager();
+		const tool = await TaskTool.create(
+			createSession({ manager: jobs, settings: { "async.enabled": false, "task.batch": true } }),
+		);
+
+		const result = await tool.execute("ambiguous-model", {
+			context: "Shared context.",
+			tasks: [{ name: "Ambiguous", agent: "task", task: "Do the work.", model: "default" }],
+		} as TaskParams);
+
+		expect(textOf(result)).toContain('"@default"');
+		expect(runSubprocess).not.toHaveBeenCalled();
 	});
 });

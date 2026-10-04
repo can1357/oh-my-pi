@@ -3,7 +3,11 @@ import { Settings } from "../config/settings";
 import { type OutputArtifactError, OutputSink } from "@oh-my-pi/pi-tui/tools/streaming-output";
 import { statusEventKey } from "@oh-my-pi/pi-tui/tools/eval";
 import type { ToolSession } from "../tools";
-import { resolveOutputMaxColumns, resolveOutputSinkHeadBytes } from "../tools/output-meta";
+import {
+	resolveOutputMaxColumns,
+	resolveOutputSinkArtifactMaxBytes,
+	resolveOutputSinkHeadBytes,
+} from "../tools/output-meta";
 import { EVAL_TIMEOUT_PAUSE_OP, EVAL_TIMEOUT_RESUME_OP, isEvalTimeoutControlEvent } from "./bridge-timeout";
 import type { JsStatusEvent } from "./js/shared/types";
 import type { KernelDisplayOutput } from "./py/display";
@@ -82,6 +86,8 @@ export interface KernelExecutionResult {
 	cancelled: boolean;
 	truncated: boolean;
 	artifactId: string | undefined;
+	/** Bytes the artifact cap dropped from the saved file's middle (the artifact is a head/tail sample). */
+	artifactElidedBytes?: number;
 	artifactError?: OutputArtifactError;
 	totalLines: number;
 	totalBytes: number;
@@ -400,39 +406,6 @@ export interface SessionOwners {
 	hasFallbackOwner: boolean;
 }
 
-/**
- * Resolve the session key an owner's eval cell runs on, forking `reset` away
- * from shared kernels.
- *
- * Eval sessions are shared across agents by design (subagents inherit the
- * parent's eval session id), so honoring `reset` on a co-owned kernel would
- * destroy every other agent's state — including cells executing at that
- * moment. When the requester does not exclusively own the live base session,
- * its reset resolves to a deterministic per-owner fork key: the requester
- * starts a fresh private kernel while co-owners keep the shared one. Once
- * forked, the owner keeps resolving to its fork, and per-owner dispose reaps
- * the fork since the requester is its only registered owner.
- */
-export function resolveOwnerScopedSessionKey(options: {
-	baseKey: string;
-	ownerId: string | undefined;
-	reset: boolean;
-	/** True when a live or starting session exists under `key`. */
-	hasSession: (key: string) => boolean;
-	/** Owner registry for the session under `key`, when inspectable. */
-	getOwners: (key: string) => SessionOwners | undefined;
-}): string {
-	const { baseKey, ownerId } = options;
-	if (ownerId === undefined) return baseKey;
-	const forkKey = `${baseKey}\0fork\0${ownerId}`;
-	if (options.hasSession(forkKey)) return forkKey;
-	if (!options.reset) return baseKey;
-	const base = options.getOwners(baseKey);
-	if (!base) return baseKey;
-	const exclusive = !base.hasFallbackOwner && base.ownerIds.size === 1 && base.ownerIds.has(ownerId);
-	return exclusive ? baseKey : forkKey;
-}
-
 // ---------------------------------------------------------------------------
 // Base executor implementation
 // ---------------------------------------------------------------------------
@@ -476,6 +449,7 @@ export async function executeWithKernelBase<
 		artifactPath: options?.artifactPath,
 		artifactId: options?.artifactId,
 		headBytes: resolveOutputSinkHeadBytes(settings),
+		artifactMaxBytes: resolveOutputSinkArtifactMaxBytes(settings),
 		maxColumns: resolveOutputMaxColumns(settings),
 	});
 
@@ -565,6 +539,7 @@ export async function executeWithKernelBase<
 				truncated: dumped.truncated,
 				output: dumped.output,
 				artifactId: dumped.artifactId ?? undefined,
+				artifactElidedBytes: dumped.artifactElidedBytes,
 				artifactError: dumped.artifactError,
 				totalLines: dumped.totalLines,
 				totalBytes: dumped.totalBytes,
@@ -583,6 +558,7 @@ export async function executeWithKernelBase<
 				truncated: dumped.truncated,
 				output: dumped.output,
 				artifactId: dumped.artifactId ?? undefined,
+				artifactElidedBytes: dumped.artifactElidedBytes,
 				artifactError: dumped.artifactError,
 				totalLines: dumped.totalLines,
 				totalBytes: dumped.totalBytes,
@@ -601,6 +577,7 @@ export async function executeWithKernelBase<
 			truncated: dumped.truncated,
 			output: dumped.output,
 			artifactId: dumped.artifactId ?? undefined,
+			artifactElidedBytes: dumped.artifactElidedBytes,
 			artifactError: dumped.artifactError,
 			totalLines: dumped.totalLines,
 			totalBytes: dumped.totalBytes,
@@ -621,6 +598,7 @@ export async function executeWithKernelBase<
 				truncated: dumped.truncated,
 				output: dumped.output,
 				artifactId: dumped.artifactId ?? undefined,
+				artifactElidedBytes: dumped.artifactElidedBytes,
 				artifactError: dumped.artifactError,
 				totalLines: dumped.totalLines,
 				totalBytes: dumped.totalBytes,

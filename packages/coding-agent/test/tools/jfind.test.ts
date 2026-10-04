@@ -10,6 +10,7 @@ import { InternalUrlFilesystem } from "@oh-my-pi/pi-coding-agent/internal-urls/u
 import { FindTool } from "@oh-my-pi/pi-coding-agent/tools/jfind";
 import { runCascade } from "@oh-my-pi/pi-coding-agent/tools/jfind/cascade";
 import { keywordsFromQuery } from "@oh-my-pi/pi-coding-agent/tools/jfind/keywords";
+import { grepIndex } from "@oh-my-pi/pi-coding-agent/tools/jfind/lexical";
 import {
 	mergeHeat,
 	type Passage,
@@ -150,6 +151,25 @@ describe("jfind readText", () => {
 			expect(read).toEqual({ text: "first line\n", bytes: 11, truncated: true });
 			const whole = await readText(filesystem, path.join(dir, "text.txt"), 100);
 			expect(whole.truncated).toBe(false);
+		} finally {
+			await removeWithRetries(dir);
+		}
+	});
+});
+
+describe("jfind lexical index", () => {
+	it("counts keyword occurrences case-insensitively over every streamed matching line", async () => {
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "jfind-lexical-"));
+		try {
+			// Far more matching lines than one streamed batch carries.
+			await Bun.write(path.join(dir, "dense.txt"), "ΣΊΣΥΦΟΣ Service_Tier service_tier\n".repeat(3_000));
+			await Bun.write(path.join(dir, "other.txt"), "SERVICE_TIER\nunrelated\n");
+			const index = await grepIndex(dir, ["Σίσυφος", "service_tier"], {
+				includeHidden: false,
+				filesystem: urlFs(dir).shellFilesystem(),
+			});
+			expect(index.filesScanned).toBe(2);
+			expect(Object.fromEntries(index.perFileKw)).toEqual({ "dense.txt": [3_000, 6_000], "other.txt": [0, 1] });
 		} finally {
 			await removeWithRetries(dir);
 		}

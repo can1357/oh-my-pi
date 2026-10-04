@@ -133,7 +133,8 @@ export const cfgMnemopiPolyphonicRecall = register({
 		tab: "memory",
 		group: "Mnemopi",
 		label: "Mnemopi Polyphonic Recall",
-		description: "Enable 4-voice recall (vector, graph, fact, temporal) fused with reciprocal rank fusion",
+		description:
+			"Fuse recall with graph, fact, vector and temporal voices so linked memories surface without a keyword match",
 		condition: "mnemopiActive",
 	},
 });
@@ -146,7 +147,8 @@ export const cfgMnemopiEnhancedRecall = register({
 		tab: "memory",
 		group: "Mnemopi",
 		label: "Mnemopi Enhanced Recall",
-		description: "Enable the tiered query result cache for repeated and similar recall queries",
+		description:
+			"Cache recall results for repeated and similar queries with identical options; any memory write clears it",
 		condition: "mnemopiActive",
 	},
 });

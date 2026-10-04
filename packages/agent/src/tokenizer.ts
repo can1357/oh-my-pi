@@ -1,9 +1,11 @@
 import type { Model } from "@oh-my-pi/pi-ai";
 import type { ModelTokenizer } from "@oh-my-pi/pi-catalog/types";
 import * as natives from "@oh-my-pi/pi-natives";
-import { stringifyJson } from "@oh-my-pi/pi-utils";
+import { materializeString, stringifyJson } from "@oh-my-pi/pi-utils";
+import { LRUCache } from "@oh-my-pi/pi-utils/lru";
 import * as snapcompact from "@oh-my-pi/snapcompact";
 import { isEstimateCacheable, messageEstimateVersion } from "./compaction/message-cache";
+import { estimateImageContentTokens } from "./image-tokens";
 import type { AgentMessage } from "./types";
 
 const testEnv = Bun.env.NODE_ENV === "test";
@@ -67,13 +69,43 @@ interface NativeTokenCount {
 	exact: boolean;
 }
 
+// Growing streamed text and large tool results must not evict the reusable
+// short fragments. Account for UTF-16 key storage plus a per-entry allowance.
+const NATIVE_CACHE_MAX_LENGTH = 16 * 1024;
+
+function countNativeFragment(
+	text: string,
+	encoding: natives.Encoding | null | undefined,
+	counts: LRUCache<string, number>,
+): number {
+	if (text.length > NATIVE_CACHE_MAX_LENGTH) return natives.countTokens(text, encoding);
+	const cached = counts.get(text);
+	if (cached !== undefined) return cached;
+	const tokens = natives.countTokens(text, encoding);
+	// Detach sliced strings so a small key cannot retain a much larger source.
+	counts.set(materializeString(text), tokens);
+	return tokens;
+}
+
 function countTokensNat(
 	text: string | string[],
 	encoding: natives.Encoding | null | undefined,
 	mode: TokenCountMode,
+	counts: LRUCache<string, number>,
 ): NativeTokenCount {
 	try {
-		return { tokens: natives.countTokens(text, encoding), exact: true };
+		let tokens: number;
+		if (typeof text === "string") {
+			tokens = countNativeFragment(text, encoding, counts);
+		} else if (text.length > 0 && text.length < 16) {
+			// The native API sums independent fragments, not their concatenation.
+			// Keep its parallel batch path for arrays of 16 or more fragments.
+			tokens = 0;
+			for (const fragment of text) tokens += countNativeFragment(fragment, encoding, counts);
+		} else {
+			tokens = natives.countTokens(text, encoding);
+		}
+		return { tokens, exact: true };
 	} catch (error) {
 		if (
 			!(error instanceof Error) ||
@@ -101,12 +133,6 @@ export interface TokenBudgetCheck {
 }
 
 /**
- * Image content has no tokenizer representation; charge a fixed estimate
- * matching what providers typically bill for inline images.
- */
-const IMAGE_TOKEN_ESTIMATE = 1200;
-
-/**
  * Memoized estimates for one message under this tokenizer's encoding, split by
  * the {@link MessageCountOptions.excludeEncryptedReasoning} option so the two
  * variants never collide. `version` snapshots {@link messageEstimateVersion} at
@@ -131,6 +157,13 @@ interface MessageEstimate {
 export class Tokenizer {
 	readonly #encoding: natives.Encoding | null;
 
+	/** Exact counts only; byte fallbacks remain mode-dependent and uncached. */
+	readonly #nativeCounts = new LRUCache<string, number>({
+		max: 256,
+		maxSize: 512 * 1024,
+		sizeCalculation: (_tokens, text) => text.length * 2 + 64,
+	});
+
 	/**
 	 * Per-message estimate memo. Keyed by message identity, deliberately not a
 	 * symbol-tagged property: callers spread messages to derive throwaway
@@ -150,9 +183,10 @@ export class Tokenizer {
 	}
 
 	countTokens(text: string | string[], mode: TokenCountMode = "approximate"): number {
-		if (mode === "strict") return countTokensNat(text, this.#encoding, mode).tokens;
-		if (!testEnv && this.#encoding !== null) return countTokensNat(text, this.#encoding, mode).tokens;
-		if (accurate) return countTokensNat(text, undefined, mode).tokens;
+		if (mode === "strict") return countTokensNat(text, this.#encoding, mode, this.#nativeCounts).tokens;
+		if (!testEnv && this.#encoding !== null)
+			return countTokensNat(text, this.#encoding, mode, this.#nativeCounts).tokens;
+		if (accurate) return countTokensNat(text, undefined, mode, this.#nativeCounts).tokens;
 		return sumFragments(text, mode === "upperbound" ? byteLength : byteEstimate);
 	}
 
@@ -170,7 +204,7 @@ export class Tokenizer {
 	checkTokenBudget(text: string | string[], budget: number): TokenBudgetCheck {
 		const bound = sumFragments(text, byteLength);
 		if (bound <= budget) return { fits: true, tokens: bound, exact: false };
-		const result = countTokensNat(text, this.#encoding, "strict");
+		const result = countTokensNat(text, this.#encoding, "strict", this.#nativeCounts);
 		return { fits: result.tokens <= budget, tokens: result.tokens, exact: result.exact };
 	}
 
@@ -180,7 +214,8 @@ export class Tokenizer {
 	 * Settled historical messages are counted once and reused until an owner
 	 * (prune/shake/strip-images) calls `invalidateMessageCache`; streaming
 	 * assistants bypass the memo entirely (see the message-cache settle-gate
-	 * invariant). Image blocks charge a fixed per-image estimate.
+	 * invariant). Image blocks charge {@link estimateImageContentTokens}, the
+	 * same dimension-based estimate the native remote-compaction probe applies.
 	 */
 	countMessage(message: AgentMessage, options?: MessageCountOptions): number {
 		const floored = options?.excludeEncryptedReasoning === true;
@@ -234,7 +269,7 @@ export class Tokenizer {
 						if (block.type === "text" && block.text) {
 							fragments.push(block.text);
 						} else if (block.type === "image") {
-							extra += IMAGE_TOKEN_ESTIMATE;
+							extra += estimateImageContentTokens(block);
 						}
 					}
 				}
@@ -284,7 +319,7 @@ export class Tokenizer {
 						if (block.type === "text" && block.text) {
 							fragments.push(block.text);
 						} else if (block.type === "image") {
-							extra += IMAGE_TOKEN_ESTIMATE;
+							extra += estimateImageContentTokens(block);
 						}
 					}
 				}
