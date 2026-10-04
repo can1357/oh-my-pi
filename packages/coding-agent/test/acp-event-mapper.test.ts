@@ -112,6 +112,49 @@ class ReplayTestSession {
 }
 
 describe("ACP event mapper", () => {
+	it("shows remote peer arrivals using their raw body without leaking local coordination", () => {
+		const message = {
+			role: "custom" as const,
+			customType: "irc:incoming",
+			content: "<harness-envelope>private relay instructions</harness-envelope>",
+			display: true,
+			timestamp: Date.now(),
+			details: { from: "project-12345678", message: "hello peer", remote: true },
+		};
+		const updates = mapAgentSessionEventToAcpSessionUpdates(
+			{ type: "irc_message", message } as AgentSessionEvent,
+			"client-session",
+		);
+		expect(updates).toEqual([
+			{
+				sessionId: "client-session",
+				update: {
+					sessionUpdate: "agent_message_chunk",
+					content: { type: "text", text: "**Peer message from project-12345678:** hello peer" },
+				},
+			},
+		]);
+		expectAcpNotifications(updates);
+		expect(
+			mapAgentSessionEventToAcpSessionUpdates(
+				{
+					type: "irc_message",
+					message: { ...message, details: { ...message.details, remote: false } },
+				} as AgentSessionEvent,
+				"client-session",
+			),
+		).toEqual([]);
+		expect(
+			mapAgentSessionEventToAcpSessionUpdates(
+				{
+					type: "irc_message",
+					message: { ...message, customType: "irc:observation" },
+				} as AgentSessionEvent,
+				"client-session",
+			),
+		).toEqual([]);
+	});
+
 	it("attaches a stable messageId to live assistant chunks", () => {
 		const assistantMessage = makeAssistantMessage("chunk");
 		const getMessageId = (message: unknown): string | undefined =>

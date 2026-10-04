@@ -429,7 +429,10 @@ export class AgentProtocolHandler implements ProtocolHandler {
 					.list()
 					.some(ref => mailbox.state(ref.id).enabled);
 		if (enabled && context?.session?.enableIrc !== false) {
-			for (const peer of await mailbox.listPeers()) ids.add(peer.address);
+			for (const peer of await mailbox.listPeers({ signal: context?.signal })) {
+				ids.add(peer.address);
+				if (peer.alias) ids.add(peer.alias);
+			}
 		}
 		return [...ids].sort().map(value => ({ value }));
 	}

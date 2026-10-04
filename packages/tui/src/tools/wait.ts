@@ -4,6 +4,7 @@ import { visibleWidth } from "../utils";
 import { formatAge } from "@oh-my-pi/pi-utils";
 import { shimmerEnabled, shimmerText } from "../theme/shimmer";
 import type { Theme } from "../theme/theme";
+import { sanitizeDisplayLine } from "../overlays/extensions/display-text";
 import { Ellipsis, Hasher, type RenderCache, renderStatusLine, renderTreeList, truncateToWidth } from "../render/index";
 import { formatArtifactErrorNotice, stripOutputNotice, type OutputMeta } from "./output-meta";
 import {
@@ -17,6 +18,7 @@ import {
 	isFeedModelBadgeEnabled,
 	PREVIEW_LIMITS,
 	replaceTabs,
+	shortenPath,
 	type ToolUIColor,
 	type ToolUIStatus,
 	cappedHeadLines,
@@ -523,6 +525,7 @@ export function createIrcMessageCard(
 		to?: string;
 		body?: string;
 		replyTo?: string;
+		senderDisplay?: IrcMessage["senderDisplay"];
 		timestamp?: number;
 		pool?: string;
 		mode?: string;
@@ -530,7 +533,7 @@ export function createIrcMessageCard(
 	getExpanded: () => boolean,
 	uiTheme: Theme,
 ): Component {
-	const from = card.from?.trim() || "?";
+	const from = sanitizeDisplayLine(card.from?.trim() || "?");
 	const title =
 		card.kind === "incoming"
 			? `IRC ${uiTheme.nav.back} ${from}`
@@ -540,6 +543,10 @@ export function createIrcMessageCard(
 					? `Pool ${card.pool?.trim() || "?"} ${uiTheme.nav.selected} ${card.to?.trim() || "?"}`
 					: `IRC ${from} ${uiTheme.nav.selected} ${card.to?.trim() || "?"}`;
 	const body = card.body ?? "";
+	const senderDisplay = card.kind === "incoming" ? card.senderDisplay : undefined;
+	const displayLine = senderDisplay
+		? `${senderDisplay.title ? `"${sanitizeDisplayLine(senderDisplay.title)}" · ` : ""}${shortenPath(sanitizeDisplayLine(senderDisplay.cwd))}`
+		: undefined;
 	const meta: string[] = [];
 	if (card.kind === "autoreply") meta.push("auto");
 	if (card.kind === "workpool" && card.mode) meta.push(card.mode);
@@ -550,6 +557,7 @@ export function createIrcMessageCard(
 		getExpanded,
 		(width, expanded) => {
 			const lines = [renderStatusLine({ iconOverride: ircGlyph(uiTheme), title, meta }, uiTheme)];
+			if (displayLine !== undefined) lines.push(`  ${uiTheme.fg("muted", displayLine)}`);
 			if (body.trim()) {
 				lines.push(...bodyLines(body, expanded, uiTheme, { indent: "  ", collapsedLines: 3 }));
 			}
@@ -570,6 +578,7 @@ export function createIrcMessageCard(
 			preview: { lines: 3 },
 		},
 		compact([
+			displayLine !== undefined ? text([span(displayLine, "muted")], { truncate: "end" }) : undefined,
 			card.timestamp
 				? row([elapsed(Date.now() - card.timestamp), text([span("ago", "dim")])], { gap: "xs" })
 				: undefined,

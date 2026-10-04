@@ -690,18 +690,6 @@ export const cfgTuiImeSafeCursor = register({
 // Interaction
 // ────────────────────────────────────────────────────────────────────────
 
-export const cfgIrcCrossProcess = register({
-	id: "irc.crossProcess",
-	type: "boolean",
-	default: false,
-	ui: {
-		tab: "interaction",
-		group: "Agent",
-		label: "Cross-Process Peers",
-		description: "Let this omp process discover and message other omp processes on this machine (same user)",
-	},
-});
-
 // Conversation flow
 export const cfgSteeringMode = register({
 	id: "steeringMode",

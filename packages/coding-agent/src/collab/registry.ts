@@ -230,7 +230,7 @@ function parseSnapshot(raw: unknown): CollabHostSnapshot | null {
 	};
 }
 
-function boundField(value: string): string {
+export function boundField(value: string): string {
 	return value.length > MAX_SNAPSHOT_FIELD_CHARS ? value.slice(0, MAX_SNAPSHOT_FIELD_CHARS) : value;
 }
 

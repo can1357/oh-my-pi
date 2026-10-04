@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Main agents in separate omp processes on the same machine can now message each other with `write agent://<address>`: enable **Cross-Process Peers** in `/settings`, run `/peers on` for one process, or launch with `--mailbox`. `/peers list`, the Agent Hub (`/hub`), and `read history://` list peers; incoming messages are delivered like subagent messages (aside while busy, a new turn while idle) and raise a terminal notification when `completion.notify` is on. `/peers name <alias>` or the **Peer Alias** setting lets peers write to `agent://<alias>`, and `omp peers list|send` lists or messages peers from a shell. Works on Windows (named pipes) and Linux/macOS (Unix sockets) ([#14263](https://github.com/can1357/oh-my-pi/pull/14263) by [@jaredlyon](https://github.com/jaredlyon))
+
 ### Fixed
 
 - Fixed follow-up hashline edits being rejected as anchored on lines "never displayed" after an earlier edit shifted those lines, when the replacement carries the anchored content; genuinely stale line numbers are still rejected ([#14254](https://github.com/can1357/oh-my-pi/pull/14254) by [@abilliontokens](https://github.com/abilliontokens)).
@@ -10,7 +14,6 @@
 
 ### Added
 
-- Main agents in separate omp processes on the same machine can now message each other with `write agent://<address>`: enable **Cross-Process Peers** in `/settings`, run `/peers on` for one process, or launch with `--mailbox`. `/peers list` and `read history://` list peers, and incoming messages are delivered like subagent messages (aside while busy, a new turn while idle). Works on Windows (named pipes) and Linux/macOS (Unix sockets) ([#14263](https://github.com/can1357/oh-my-pi/pull/14263) by [@jaredlyon](https://github.com/jaredlyon))
 - The `/models` Roles view shows which saved model preset is in effect, and Ctrl+←/→ (or `p`/`P` on the role rows, for macOS where Ctrl+←/→ switches Spaces) switches to the next or previous one, in Tern and text mode ([#14210](https://github.com/can1357/oh-my-pi/pull/14210) by [@H4vC](https://github.com/H4vC))
 
 ### Changed

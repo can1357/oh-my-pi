@@ -25,6 +25,8 @@ export interface IrcMessage {
 	remote?: boolean;
 	/** Deliver without starting a wake turn (relay-hop guard). */
 	noWake?: boolean;
+	/** Sender display captured by the sending process (remote messages only). Never rendered into the model prompt. */
+	senderDisplay?: { cwd: string; title: string | null };
 }
 
 /** Delivery outcome for one peer recipient. */

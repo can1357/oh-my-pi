@@ -2246,6 +2246,7 @@ export class SelectorController {
 				registry: this.ctx.collabGuest?.agentRegistry,
 				remote: this.ctx.collabGuest?.hubRemote,
 				sessionFile: this.ctx.sessionManager.getSessionFile() ?? null,
+				senderId: this.ctx.session.getAgentId(),
 			}),
 			observers,
 			hubKeys,
@@ -2267,8 +2268,8 @@ export class SelectorController {
 
 		const showReadyHub = () => {
 			if (closed) return;
-			// The double-← gesture stays inert when neither live nor persisted
-			// subagents are available, so wait for discovery before making the gate.
+			// The double-← gesture stays inert with no local agents or peers,
+			// so wait for both discovery sources before making the gate.
 			if (options?.requireContent && hub.isEmpty) {
 				done();
 				return;
@@ -2281,7 +2282,7 @@ export class SelectorController {
 		};
 
 		if (options?.requireContent && hub.isEmpty) {
-			void hub.persistedSubagentsReady.then(showReadyHub);
+			void hub.initialRowsReady.then(showReadyHub);
 		} else {
 			showReadyHub();
 		}

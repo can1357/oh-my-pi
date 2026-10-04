@@ -8,6 +8,7 @@ import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import { type Component } from "../tui";
 import { formatBytes, formatDuration } from "@oh-my-pi/pi-utils";
 import type { JobSnapshot } from "../tools/wait";
+import type { IrcMessage } from "../tools/irc";
 import type { DaemonSnapshot } from "../tools/daemon";
 import { type CustomMessage, type FileMentionMessage, resolveAbortLabel, shouldRenderAbortReason } from "./messages";
 import { createIrcMessageCard } from "../tools/wait";
@@ -123,6 +124,7 @@ export function buildIrcMessageCard(message: CustomOrHookMessage, getExpanded: (
 			message?: string;
 			body?: string;
 			replyTo?: string;
+			senderDisplay?: IrcMessage["senderDisplay"];
 			pool?: string;
 			mode?: string;
 		}>
@@ -142,6 +144,7 @@ export function buildIrcMessageCard(message: CustomOrHookMessage, getExpanded: (
 			to: details?.to,
 			body: kind === "incoming" ? details?.message : details?.body,
 			replyTo: details?.replyTo,
+			senderDisplay: details?.senderDisplay,
 			timestamp: message.timestamp,
 			pool: details?.pool,
 			mode: details?.mode,

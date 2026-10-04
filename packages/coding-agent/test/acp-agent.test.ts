@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, spyOn, vi } from "bun:test";
+import { afterEach, describe, expect, it, type Mock, spyOn, vi } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -10,7 +10,7 @@ import type { ExtensionUIContext } from "@oh-my-pi/pi-coding-agent/extensibility
 import { resolveLocalUrlToPath } from "@oh-my-pi/pi-coding-agent/internal-urls";
 import { mailboxConversationSuffix } from "@oh-my-pi/pi-coding-agent/mailbox/protocol";
 import { MailboxService, type MailboxTarget } from "@oh-my-pi/pi-coding-agent/mailbox/service";
-import { cfgIrcCrossProcess } from "@oh-my-pi/pi-coding-agent/modes/settings";
+import { cfgIrcCrossProcess } from "@oh-my-pi/pi-coding-agent/irc/settings";
 import {
 	ACP_BOOTSTRAP_RACE_GUARD_MS,
 	AcpAgent,
@@ -22,7 +22,7 @@ import type {
 	AgentSessionEvent,
 	UsageFallbackConfirmation,
 } from "@oh-my-pi/pi-coding-agent/session/agent-session";
-import { SILENT_ABORT_MARKER } from "@oh-my-pi/pi-coding-agent/session/messages";
+import { SILENT_ABORT_MARKER, USER_INTERRUPT_LABEL } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { resetSessionIndexForTests } from "@oh-my-pi/pi-coding-agent/session/session-index";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { TaskTool } from "@oh-my-pi/pi-coding-agent/task";
@@ -448,7 +448,7 @@ function holdPromptStreaming(session: FakeAgentSession): () => void {
 	return () => finishPrompt();
 }
 
-type SetToolUIContextSpy = (uiContext: ExtensionUIContext, hasUI: boolean) => void;
+type SetToolUIContextSpy = Mock<(uiContext: ExtensionUIContext, hasUI: boolean) => void>;
 
 interface AgentHarness {
 	agent: AcpAgent;
@@ -674,7 +674,7 @@ describe("ACP agent", () => {
 		vi.spyOn(MailboxService.prototype, "whenSettled").mockResolvedValue(undefined);
 		vi.spyOn(MailboxService.prototype, "state").mockImplementation(() =>
 			cfgIrcCrossProcess.get(conversationSettings)
-				? { enabled: true, address: "project-12345678.87654321", receiving: true }
+				? { enabled: true, address: "project-12345678.87654321", receiving: true, alias: null }
 				: { enabled: false },
 		);
 		try {
@@ -704,11 +704,18 @@ describe("ACP agent", () => {
 				mailboxConversationSuffix(created.sessionId),
 				mailboxConversationSuffix(session.sessionId),
 			]);
-			await harness.agent.setSessionMode({ sessionId: session.sessionId, modeId: "default" });
+			expect(targets[1]?.describe().cwd).toBe(harness.cwdA);
+			harness.updates.length = 0;
+			await harness.agent.prompt({
+				sessionId: created.sessionId,
+				prompt: [{ type: "text", text: "after switch" }],
+			});
+			expect(harness.updates.every(update => update.sessionId === created.sessionId)).toBe(true);
+			await harness.agent.setSessionMode({ sessionId: created.sessionId, modeId: "default" });
 			await expect(
-				harness.agent.setSessionMode({ sessionId: created.sessionId, modeId: "default" }),
+				harness.agent.setSessionMode({ sessionId: session.sessionId, modeId: "default" }),
 			).rejects.toThrow("Unsupported ACP session");
-			await harness.agent.closeSession({ sessionId: session.sessionId });
+			await harness.agent.closeSession({ sessionId: created.sessionId });
 			expect(unbinds[1]).toHaveBeenCalledTimes(1);
 		} finally {
 			await harness.agent.dispose();
@@ -729,6 +736,7 @@ describe("ACP agent", () => {
 		});
 		try {
 			const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+			await advanceBootstrapGuard();
 			await harness.agent.prompt({
 				sessionId: created.sessionId,
 				prompt: [{ type: "text", text: "persist this conversation" }],
@@ -738,18 +746,292 @@ describe("ACP agent", () => {
 				cwd: harness.cwdA,
 				mcpServers: [],
 			});
+			await advanceBootstrapGuard();
 			await harness.agent.closeSession({ sessionId: created.sessionId });
 			await harness.agent.loadSession({
 				sessionId: created.sessionId,
 				cwd: harness.cwdA,
 				mcpServers: [],
 			});
+			await advanceBootstrapGuard();
 			expect(conversations).toEqual([
 				mailboxConversationSuffix(created.sessionId),
 				mailboxConversationSuffix(forked.sessionId),
 				mailboxConversationSuffix(created.sessionId),
 			]);
 		} finally {
+			await harness.agent.dispose();
+		}
+	});
+
+	it("keeps wire updates and extension elicitations on the advertised id with peers off after newSession", async () => {
+		const elicitations: CreateElicitationRequest[] = [];
+		const harness = await createHarness({
+			settings: Settings.isolated({ "irc.crossProcess": false }),
+			elicitationHandler: async request => {
+				elicitations.push(request);
+				return { action: "accept", content: { value: true } };
+			},
+		});
+		vi.useFakeTimers();
+		vi.spyOn(FakeAgentSession.prototype, "getAgentId").mockImplementation(function (this: FakeAgentSession) {
+			return `acp:${this.sessionId}`;
+		});
+		vi.spyOn(MailboxService.prototype, "bindTarget").mockReturnValue(() => {});
+		try {
+			const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+			await advanceBootstrapGuard();
+			const session = harness.findSession(created.sessionId)!;
+			const ui = harness.setToolUIContextSpies[0]!.mock.calls[0]![0] as ExtensionUIContext;
+			await session.newSession();
+			expect(session.sessionId).not.toBe(created.sessionId);
+			harness.updates.length = 0;
+			await ui.confirm("Continue?", "After the extension switched sessions");
+			await harness.agent.prompt({ sessionId: created.sessionId, prompt: [{ type: "text", text: "ping" }] });
+			await harness.agent.setSessionMode({ sessionId: created.sessionId, modeId: "default" });
+			expect(elicitations[0]).toMatchObject({ sessionId: created.sessionId });
+			expect(harness.updates.filter(update => update.update.sessionUpdate === "agent_message_chunk")).toHaveLength(
+				1,
+			);
+			expect(harness.updates.every(update => update.sessionId === created.sessionId)).toBe(true);
+			await expect(
+				harness.agent.setSessionMode({ sessionId: session.sessionId, modeId: "default" }),
+			).rejects.toThrow("Unsupported ACP session");
+			await harness.agent.closeSession({ sessionId: created.sessionId });
+			expect(session.disposed).toBe(true);
+		} finally {
+			await harness.agent.dispose();
+		}
+	});
+
+	it("does not expose a receiver until guarded lifetime output is subscribed", async () => {
+		const harness = await createHarness();
+		vi.useFakeTimers();
+		vi.spyOn(FakeAgentSession.prototype, "getAgentId").mockReturnValue("acp:bootstrap");
+		const bind = vi.spyOn(MailboxService.prototype, "bindTarget").mockImplementation(() => {
+			const session = harness.sessions.at(-1)!;
+			for (const listener of session.listeners()) {
+				listener({
+					type: "message_update",
+					message: makeAssistantMessage("first peer wake"),
+					assistantMessageEvent: { type: "text_delta", delta: "first peer wake" },
+				} as AgentSessionEvent);
+			}
+			return () => {};
+		});
+		try {
+			const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+			expect(bind).not.toHaveBeenCalled();
+			await harness.agent.prompt({
+				sessionId: created.sessionId,
+				prompt: [{ type: "text", text: "before bootstrap" }],
+			});
+			expect(bind).not.toHaveBeenCalled();
+			harness.updates.length = 0;
+			await advanceBootstrapGuard();
+			expect(bind).toHaveBeenCalledTimes(1);
+			expect(harness.updates).toContainEqual({
+				sessionId: created.sessionId,
+				update: {
+					sessionUpdate: "agent_message_chunk",
+					content: { type: "text", text: "first peer wake" },
+					messageId: expect.any(String),
+				},
+			});
+		} finally {
+			await harness.agent.dispose();
+		}
+	});
+
+	it("cancel aborts an autonomous turn and waits for its cleanup without a prompt response", async () => {
+		const harness = await createHarness();
+		vi.useFakeTimers();
+		const release = Promise.withResolvers<void>();
+		try {
+			const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+			await advanceBootstrapGuard();
+			const session = harness.findSession(created.sessionId)!;
+			session.isStreaming = true;
+			const abort = vi.spyOn(session, "abort").mockImplementation(async () => {
+				await release.promise;
+				session.isStreaming = false;
+			});
+			let settled = false;
+			const cancellation = harness.agent.cancel({ sessionId: created.sessionId }).then(() => {
+				settled = true;
+			});
+			await Promise.resolve();
+			expect(abort).toHaveBeenCalledTimes(1);
+			expect(abort).toHaveBeenCalledWith({ reason: USER_INTERRUPT_LABEL });
+			expect(settled).toBe(false);
+			release.resolve();
+			await cancellation;
+			expect(session.isStreaming).toBe(false);
+			expect(session.promptCalls).toEqual([]);
+		} finally {
+			release.resolve();
+			await harness.agent.dispose();
+		}
+	});
+
+	it("closes an autonomous conversation when cancel cleanup times out", async () => {
+		const harness = await createHarness();
+		vi.useFakeTimers();
+		try {
+			const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+			const session = harness.findSession(created.sessionId)!;
+			harness.agent.setCancelCleanupTimeoutForTesting(10);
+			vi.spyOn(session, "abort").mockImplementation(() => Promise.withResolvers<void>().promise);
+			const cancellation = harness.agent.cancel({ sessionId: created.sessionId });
+			vi.advanceTimersByTime(10);
+			await cancellation;
+			expect(session.disposed).toBe(true);
+			await expect(
+				harness.agent.setSessionMode({ sessionId: created.sessionId, modeId: "default" }),
+			).rejects.toThrow("Unsupported ACP session");
+		} finally {
+			await harness.agent.dispose();
+		}
+	});
+
+	it("surfaces each autonomous provider error once, resetting delivery tracking per turn", async () => {
+		let settled = Promise.withResolvers<void>();
+		const harness = await createHarness({
+			sessionUpdateHook: notification => {
+				if (notification.update.sessionUpdate === "session_info_update") settled.resolve();
+			},
+		});
+		vi.useFakeTimers();
+		try {
+			const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+			await advanceBootstrapGuard();
+			await settled.promise;
+			harness.updates.length = 0;
+			const session = harness.findSession(created.sessionId)!;
+			for (const streamed of [true, false]) {
+				settled = Promise.withResolvers<void>();
+				const text = streamed ? "streamed wake failure" : "unstreamed wake failure";
+				const message = { ...makeAssistantMessage(""), stopReason: "error" as const, errorMessage: text };
+				for (const listener of session.listeners()) {
+					listener({ type: "agent_start" });
+					if (streamed)
+						listener({
+							type: "message_update",
+							message,
+							assistantMessageEvent: { type: "error", error: { errorMessage: text } },
+						} as AgentSessionEvent);
+					listener({ type: "agent_end", messages: [message] } as AgentSessionEvent);
+				}
+				await settled.promise;
+			}
+			const chunks = harness.updates.filter(update => update.update.sessionUpdate === "agent_message_chunk");
+			expect(chunks.map(update => update.update)).toEqual([
+				expect.objectContaining({ content: { type: "text", text: "streamed wake failure" } }),
+				expect.objectContaining({ content: { type: "text", text: "unstreamed wake failure" } }),
+			]);
+		} finally {
+			await harness.agent.dispose();
+		}
+	});
+
+	it("retries an autonomous error through the agent_end fallback when streamed delivery fails", async () => {
+		let settled = Promise.withResolvers<void>();
+		let rejectError = false;
+		const harness = await createHarness({
+			sessionUpdateHook: notification => {
+				if (notification.update.sessionUpdate === "session_info_update") settled.resolve();
+				if (rejectError && notification.update.sessionUpdate === "agent_message_chunk") {
+					rejectError = false;
+					throw new Error("first transport write failed");
+				}
+			},
+		});
+		vi.useFakeTimers();
+		try {
+			const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+			await advanceBootstrapGuard();
+			await settled.promise;
+			settled = Promise.withResolvers<void>();
+			rejectError = true;
+			harness.updates.length = 0;
+			const session = harness.findSession(created.sessionId)!;
+			const message = { ...makeAssistantMessage(""), stopReason: "error" as const, errorMessage: "wake failure" };
+			for (const listener of session.listeners()) {
+				listener({ type: "agent_start" });
+				listener({
+					type: "message_update",
+					message,
+					assistantMessageEvent: { type: "error", error: { errorMessage: "wake failure" } },
+				} as AgentSessionEvent);
+				listener({ type: "agent_end", messages: [message] } as AgentSessionEvent);
+			}
+			await settled.promise;
+			expect(harness.updates.filter(update => update.update.sessionUpdate === "agent_message_chunk")).toEqual([
+				{
+					sessionId: created.sessionId,
+					update: {
+						sessionUpdate: "agent_message_chunk",
+						content: { type: "text", text: "wake failure" },
+						messageId: expect.any(String),
+					},
+				},
+			]);
+		} finally {
+			await harness.agent.dispose();
+		}
+	});
+
+	it("drains an idle handler on close without emitting its trailing updates", async () => {
+		const blocked = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		const bootstrapped = Promise.withResolvers<void>();
+		let hold = false;
+		const harness = await createHarness({
+			sessionUpdateHook: async notification => {
+				if (notification.update.sessionUpdate === "session_info_update") bootstrapped.resolve();
+				if (hold && notification.update.sessionUpdate === "agent_message_chunk") {
+					blocked.resolve();
+					await release.promise;
+				}
+			},
+		});
+		vi.useFakeTimers();
+		try {
+			const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+			await advanceBootstrapGuard();
+			await bootstrapped.promise;
+			// The hook observes delivery just before the harness records it.
+			await Promise.resolve();
+			harness.updates.length = 0;
+			hold = true;
+			const session = harness.findSession(created.sessionId)!;
+			const listeners = session.listeners();
+			const message = { ...makeAssistantMessage(""), stopReason: "error" as const, errorMessage: "wake failure" };
+			for (const listener of listeners) {
+				listener({ type: "agent_start" });
+				listener({
+					type: "message_update",
+					message,
+					assistantMessageEvent: { type: "error", error: { errorMessage: "wake failure" } },
+				} as AgentSessionEvent);
+				listener({ type: "agent_end", messages: [message] } as AgentSessionEvent);
+			}
+			await blocked.promise;
+			let closed = false;
+			const closing = harness.agent.closeSession({ sessionId: created.sessionId }).then(() => {
+				closed = true;
+			});
+			await Promise.resolve();
+			expect(closed).toBe(false);
+			release.resolve();
+			await closing;
+			expect(harness.updates.map(update => update.update.sessionUpdate)).toEqual(["agent_message_chunk"]);
+			harness.updates.length = 0;
+			for (const listener of listeners) listener({ type: "agent_end", messages: [message] } as AgentSessionEvent);
+			await Promise.resolve();
+			expect(harness.updates).toEqual([]);
+		} finally {
+			release.resolve();
 			await harness.agent.dispose();
 		}
 	});
@@ -3676,9 +3958,6 @@ describe("ACP agent", () => {
 		});
 
 		it("reads the sessionId getter on every elicitation so mid-flight session changes are reflected", async () => {
-			// `record.session.sessionId` mutates when an extension command calls
-			// `ctx.switchSession` / `ctx.newSession`. Snapshotting it once at
-			// factory time would route later elicitations to the pre-switch id.
 			const { connection, calls } = createElicitConnection(async () => ({
 				action: "accept",
 				content: { value: "ok" },

@@ -23,6 +23,7 @@ import { TtsrNotificationComponent } from "@oh-my-pi/pi-tui/chat/ttsr-notificati
 import { createUsageRowBlock, TurnUsageTally, turnElapsedMs } from "@oh-my-pi/pi-tui/overlays/usage-row";
 import { appKey } from "@oh-my-pi/pi-tui/chrome/keybinding-hints";
 import { getSymbolTheme, theme } from "@oh-my-pi/pi-tui/theme";
+import { sanitizeDisplayLine } from "@oh-my-pi/pi-tui/overlays/extensions/display-text";
 import type { InteractiveModeContext } from "../../modes/types";
 import type { TodoPhase } from "@oh-my-pi/pi-tui/tools/todo";
 import idleRecapPrompt from "../../prompts/system/recap-user.md" with { type: "text" };
@@ -1217,6 +1218,20 @@ export class EventController {
 			return;
 		}
 		this.#renderedCustomMessages.add(signature);
+		const details = event.message.details;
+		if (
+			event.message.customType === "irc:incoming" &&
+			isRecord(details) &&
+			details.remote === true &&
+			cfgCompletionNotify.get(this.ctx.settings) !== "off"
+		) {
+			TERMINAL.sendNotification({
+				title: sanitizeDisplayLine(this.ctx.sessionManager.getSessionName() || "omp"),
+				body: `Peer message from ${sanitizeDisplayLine(typeof details.from === "string" ? details.from : "?")}`,
+				type: "info",
+				actions: "focus",
+			});
+		}
 		this.#resetReadGroup();
 		const components = this.ctx.addMessageToChat(event.message);
 		this.#scheduleIrcExpiry(signature, components);

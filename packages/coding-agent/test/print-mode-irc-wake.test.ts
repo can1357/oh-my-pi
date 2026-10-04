@@ -7,11 +7,13 @@ import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { runPrintMode } from "@oh-my-pi/pi-coding-agent/modes/print-mode";
+import { MCPManager } from "@oh-my-pi/pi-coding-agent/mcp/manager";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { createTools, type ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { Snowflake } from "@oh-my-pi/pi-utils";
+import * as utils from "@oh-my-pi/pi-utils";
 
 // Ported from #14071: an inbound IRC wake can own the session before print
 // dispatches. The printed response must belong to the prompt, not that wake.
@@ -23,7 +25,7 @@ describe("print mode with an inbound IRC wake in flight", () => {
 	let releaseWakeTurn: () => void;
 	let wakeTurnStarted: Promise<void>;
 	let modelCalls: string[];
-	let scenario: "wake" | "next-turn";
+	let scenario: "wake" | "next-turn" | "tail-wake";
 
 	beforeEach(async () => {
 		tempDir = path.join(os.tmpdir(), `omp-irc-wake-${Snowflake.next()}`);
@@ -55,7 +57,10 @@ describe("print mode with an inbound IRC wake in flight", () => {
 		const model = createMockModel({
 			id: "mock-irc-wake",
 			handler: async () => {
-				if (scenario === "wake" && modelCalls.length === 0) {
+				if (
+					(scenario === "wake" && modelCalls.length === 0) ||
+					(scenario === "tail-wake" && modelCalls.length === 1)
+				) {
 					modelCalls.push("wake");
 					wakeStarted.resolve();
 					await wakeGate.promise;
@@ -126,7 +131,7 @@ describe("print mode with an inbound IRC wake in flight", () => {
 		const run = runPrintMode(session, {
 			mode: "text",
 			initialMessage: "Reply with exactly: OK",
-			unbindMailboxTarget: () => {
+			bindMailboxTarget: () => () => {
 				expect(session.isStreaming).toBe(false);
 				receiving = false;
 			},
@@ -142,11 +147,62 @@ describe("print mode with an inbound IRC wake in flight", () => {
 		expect(disposeSpy).toHaveBeenCalled();
 	});
 
+	it("keeps the CLI answer when a peer wakes during the prompt's tail window", async () => {
+		scenario = "tail-wake";
+		const realPrompt = session.prompt.bind(session);
+		vi.spyOn(session, "prompt").mockImplementation(async (text, options) => {
+			const result = await realPrompt(text, options);
+			expect(
+				await session.deliverIrcMessage({
+					id: Snowflake.next(),
+					ts: Date.now(),
+					from: "other-01234567",
+					to: "Main",
+					body: "late peer message",
+					remote: true,
+				}),
+			).toBe("woken");
+			await wakeTurnStarted;
+			return result;
+		});
+		const run = runPrintMode(session, { mode: "text", initialMessage: "Reply with exactly: OK" });
+		await wakeTurnStarted;
+		releaseWakeTurn();
+		expect(await run).toBe(0);
+		expect(modelCalls).toEqual(["prompt", "wake"]);
+		expect(stdoutOutput.join("")).toBe("OK\n");
+	});
+
 	it("does not mistake a hidden next-turn message for an undispatched prompt", async () => {
 		scenario = "next-turn";
 		expect(await runPrintMode(session, { mode: "text", initialMessage: "Reply with exactly: OK" })).toBe(0);
 		expect(modelCalls).toEqual(["prompt"]);
 		expect(stdoutOutput.join("")).toContain("OK");
+	});
+
+	it("does not publish a receiver or dispatch when strict MCP readiness fails", async () => {
+		const mcpManager = new MCPManager(tempDir);
+		vi.spyOn(mcpManager, "waitForStartup").mockResolvedValue({
+			connected: [],
+			pending: [],
+			failed: [{ name: "broken", error: "unavailable" }],
+		});
+		vi.spyOn(mcpManager, "getTools").mockReturnValue([]);
+		const readFlag = utils.$flag;
+		vi.spyOn(utils, "$flag").mockImplementation((name, fallback) =>
+			name === "OMP_MCP_REQUIRE_READY" ? true : readFlag(name, fallback),
+		);
+		const bindMailboxTarget = vi.fn(() => () => {});
+		expect(
+			await runPrintMode(session, {
+				mode: "text",
+				initialMessage: "use MCP tools",
+				mcpManager,
+				bindMailboxTarget,
+			}),
+		).toBe(1);
+		expect(bindMailboxTarget).not.toHaveBeenCalled();
+		expect(modelCalls).toEqual([]);
 	});
 
 	it("disposes and withdraws receiving when dispatch throws, preserving the original error", async () => {
@@ -158,7 +214,7 @@ describe("print mode with an inbound IRC wake in flight", () => {
 			runPrintMode(session, {
 				mode: "text",
 				initialMessage: "hello",
-				unbindMailboxTarget: () => {
+				bindMailboxTarget: () => () => {
 					receiving = false;
 				},
 			}),

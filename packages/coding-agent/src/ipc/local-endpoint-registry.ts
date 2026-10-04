@@ -279,7 +279,9 @@ export function queryLocalEndpoint(
 	meta: LocalEndpointMetadata,
 	request: object,
 	timeoutMs: number,
+	signal?: AbortSignal,
 ): Promise<LocalEndpointQueryResult<Record<string, unknown>>> {
+	if (signal?.aborted) return Promise.resolve({ status: "skip", error: "aborted" });
 	if (meta.version !== registry.version) return Promise.resolve({ status: "skip", error: "unsupported_protocol" });
 	const { promise, resolve } = Promise.withResolvers<LocalEndpointQueryResult<Record<string, unknown>>>();
 	let buffer = "";
@@ -290,9 +292,11 @@ export function queryLocalEndpoint(
 		if (finished) return;
 		finished = true;
 		clearTimeout(timer);
+		signal?.removeEventListener("abort", abort);
 		socket.destroy();
 		resolve(result);
 	};
+	const abort = (): void => finish({ status: "skip", error: "aborted" });
 	socket.setEncoding("utf8");
 	socket.once("error", err => {
 		// Resource/permission errors say nothing about liveness; never prune them.
@@ -334,6 +338,8 @@ export function queryLocalEndpoint(
 		finish({ status: "ok", value: record });
 	});
 	socket.once("close", () => finish({ status: "skip" }));
+	signal?.addEventListener("abort", abort, { once: true });
+	if (signal?.aborted) abort();
 	return promise;
 }
 
@@ -366,7 +372,11 @@ async function pruneEntry(
 	}
 }
 
-async function readEntries(registry: LocalEndpointRegistry, prune: boolean): Promise<LocalEndpointEntry[]> {
+async function readEntries(
+	registry: LocalEndpointRegistry,
+	prune: boolean,
+	signal?: AbortSignal,
+): Promise<LocalEndpointEntry[]> {
 	let names: string[];
 	try {
 		await assertPrivateDir(registry, registry.dir);
@@ -377,6 +387,7 @@ async function readEntries(registry: LocalEndpointRegistry, prune: boolean): Pro
 	}
 	const entries: LocalEndpointEntry[] = [];
 	for (const name of names.filter(name => name.endsWith(".json")).sort()) {
+		if (signal?.aborted) break;
 		let text: string;
 		try {
 			text = await Bun.file(path.join(registry.dir, name)).text();
@@ -385,12 +396,12 @@ async function readEntries(registry: LocalEndpointRegistry, prune: boolean): Pro
 		}
 		const meta = parseMetadata(text);
 		if (!meta) {
-			if (prune) await pruneEntry(registry, name, null);
+			if (prune && !signal?.aborted) await pruneEntry(registry, name, null);
 			continue;
 		}
 		if (meta.version !== registry.version) {
 			// Preserve a different version's state while its owning process is alive.
-			if (prune && !pidAlive(meta.pid)) await pruneEntry(registry, name, meta);
+			if (prune && !signal?.aborted && !pidAlive(meta.pid)) await pruneEntry(registry, name, meta);
 			continue;
 		}
 		entries.push({ entryId: name.slice(0, -".json".length), meta });
@@ -407,17 +418,19 @@ export function readLocalEndpointEntries(registry: LocalEndpointRegistry): Promi
 export async function listLocalEndpoints<T>(
 	registry: LocalEndpointRegistry,
 	probe: (entry: LocalEndpointEntry) => Promise<LocalEndpointQueryResult<T>>,
-	options?: { concurrency?: number },
+	options?: { concurrency?: number; signal?: AbortSignal },
 ): Promise<Array<{ entry: LocalEndpointEntry; value: T }>> {
-	const entries = await readEntries(registry, true);
+	if (options?.signal?.aborted) return [];
+	const entries = await readEntries(registry, true, options?.signal);
 	const live: Array<{ entry: LocalEndpointEntry; value: T }> = [];
 	const concurrency = options?.concurrency ?? LIST_CONCURRENCY;
 	if (!Number.isInteger(concurrency) || concurrency < 1) throw new Error("invalid local endpoint listing concurrency");
 	let next = 0;
 	const worker = async (): Promise<void> => {
-		while (next < entries.length) {
+		while (next < entries.length && !options?.signal?.aborted) {
 			const entry = entries[next++];
 			const result = await probe(entry);
+			if (options?.signal?.aborted) return;
 			if (result.status === "ok") live.push({ entry, value: result.value });
 			else if (result.status === "dead") await pruneEntry(registry, `${entry.entryId}.json`, entry.meta);
 		}

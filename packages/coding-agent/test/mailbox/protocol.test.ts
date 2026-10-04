@@ -5,6 +5,7 @@ import {
 	mailboxAddress,
 	mailboxConversationSuffix,
 	mailboxSlug,
+	normalizePeerAlias,
 } from "@oh-my-pi/pi-coding-agent/mailbox/protocol";
 
 describe("mailbox addresses", () => {
@@ -29,5 +30,14 @@ describe("mailbox addresses", () => {
 		expect(mailboxConversationSuffix(id)).toBe("45abcdef");
 		expect(MAILBOX_ADDRESS_PATTERN.test(`${address}.0123abcd`)).toBe(true);
 		expect(MAILBOX_ADDRESS_PATTERN.test(`${address}.not-hex`)).toBe(false);
+	});
+
+	it("sanitizes aliases like local agent ids without permitting empty names or canonical addresses", () => {
+		expect(normalizePeerAlias(" Worker.Name_1-! ")).toBe("WorkerName_1-");
+		expect(normalizePeerAlias("x".repeat(60))).toBe("x".repeat(48));
+		expect(normalizePeerAlias("日本語!")).toBeNull();
+		expect(normalizePeerAlias("")).toBeNull();
+		expect(normalizePeerAlias("peer-0123abcd")).toBeNull();
+		expect(normalizePeerAlias("peer-0123abcd.89abcdef")).toBeNull();
 	});
 });

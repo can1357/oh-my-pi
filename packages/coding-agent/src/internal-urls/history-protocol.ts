@@ -309,7 +309,6 @@ export class HistoryProtocolHandler implements ProtocolHandler {
 		const { ref, preferredArtifactDir } = await this.#lookup(agentId, context);
 		if (ref?.sessionFile) return ref.sessionFile;
 		if (ref?.session) return null;
-		if (!ref && MailboxService.global().handles(agentId)) return null;
 		return (await this.#findOnDisk(ref?.id ?? agentId, preferredArtifactDir))?.file ?? null;
 	}
 
@@ -408,19 +407,25 @@ export class HistoryProtocolHandler implements ProtocolHandler {
 
 		const { ref, visible, preferredArtifactDir } = await this.#lookup(agentId, context);
 		if (!ref) {
-			if (MailboxService.global().handles(agentId)) {
-				const content = `"${agentId}" is an omp peer in another process; its transcript is not readable. Message it with write agent://${agentId}.`;
-				return {
-					url: url.href,
-					content,
-					contentType: "text/markdown",
-					size: Buffer.byteLength(content, "utf-8"),
-				};
-			}
 			// Registry miss — the agent may have been unregistered or lost on resume.
 			// Serve its transcript straight from disk if the session file persists.
 			const disk = await this.#resolveFromDisk(agentId, preferredArtifactDir);
 			if (disk) return { ...disk, url: url.href };
+
+			const mailbox = MailboxService.global();
+			if (mailbox.handles(agentId)) {
+				const resolution = await mailbox.resolvePeer(agentId);
+				if (resolution.status === "found") {
+					const address = resolution.peer.address;
+					const content = `"${address}" is an omp peer in another process; its transcript is not readable. Message it with write agent://${address}.`;
+					return {
+						url: url.href,
+						content,
+						contentType: "text/markdown",
+						size: Buffer.byteLength(content, "utf-8"),
+					};
+				}
+			}
 
 			const known = visible.map(candidate => candidate.id);
 			const knownStr = known.length > 0 ? known.join(", ") : "none";

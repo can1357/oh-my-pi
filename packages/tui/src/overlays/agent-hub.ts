@@ -2,14 +2,15 @@
  * Agent Hub overlay component.
  *
  * One overlay, two views:
- * - Table view: every registered agent except Main (Main IS the ambient
- *   chat), live from the global AgentHubRegistry — status, unread irc count,
- *   current/last task, last activity. Navigate with keys, wheel, hover, and
- *   click; `r` revives a parked agent, `x` aborts + releases one.
+ * - Table view: local agents except Main plus presentation-only process peers,
+ *   live from the registry and bounded peer discovery. Navigate with keys,
+ *   wheel, hover and click; local rows support revive and abort/release.
  * - Chat view: per-agent transcript (incremental session-file tail, absorbed
  *   from the old session observer overlay) plus an input line. Submitting
  *   revives a parked agent, then prompts/steers it; the message lands in the
  *   agent's persisted history via the normal prompt path.
+ * - Peer activation: the existing multiline hook editor sends through host IRC;
+ *   peer transcripts and lifecycle actions are unavailable.
  *
  * Replaces the old SessionObserverOverlayComponent (ctrl+s observer).
  */
@@ -92,6 +93,7 @@ import { type DescribeContext, leafKey, type NativeChild, type NativeNode, type 
 import { hintsRow, type NativeHint, overlayCard } from "../native/overlay";
 import { CLOSE_ACTION, picker, pickerQuery } from "../native/picker";
 import { Input } from "../components/input";
+import { HookEditorComponent } from "./hook-editor";
 
 /** A chrome-less search field: the hub draws its own prompt. */
 function filterInput(): Input {
@@ -127,6 +129,10 @@ const VIEW_TABS = [
 const AGENT_HINTS: Readonly<Record<HubViewMode, readonly NativeHint[]>> = {
 	roster: agentHints("by parent"),
 	tree: agentHints("flat"),
+};
+const PEER_HINTS: Readonly<Record<HubViewMode, readonly NativeHint[]>> = {
+	roster: agentHints("by parent", true),
+	tree: agentHints("flat", true),
 };
 const ACTIVITY_HINTS: readonly NativeHint[] = [
 	{ keys: ["j", "k"], label: "select" },
@@ -177,14 +183,18 @@ const ACTIVITY_KIND_ICON: Readonly<Record<AgentActivityKind, string>> = {
 	lifecycle: "activity",
 };
 
-function agentHints(nextView: string): readonly NativeHint[] {
+function agentHints(nextView: string, peer = false): readonly NativeHint[] {
 	return [
 		{ keys: ["j", "k"], label: "select" },
-		{ keys: ["enter"], label: "open" },
+		{ keys: ["enter"], label: peer ? "send" : "open" },
 		{ keys: ["t"], label: nextView },
 		{ keys: ["/"], label: "filter" },
-		{ keys: ["r"], label: "revive" },
-		{ keys: ["x"], label: "kill" },
+		...(peer
+			? []
+			: ([
+					{ keys: ["r"], label: "revive" },
+					{ keys: ["x"], label: "kill" },
+				] satisfies NativeHint[])),
 		{ keys: ["escape"], label: "close" },
 	];
 }
@@ -283,6 +293,10 @@ export interface AgentHubDeps<TRecord extends AgentRecordLike = AgentRecordLike>
 	requestRender: () => void;
 	/** Registry supplying the roster. */
 	registry: AgentHubRegistry<TRecord>;
+	/** Presentation-only rows discovered outside the local registry. */
+	listPeers?: () => Promise<AgentRecordLike[]>;
+	/** Send through the host's IRC path, returning the delivery result text. */
+	sendPeer?: (id: string, message: string) => Promise<string>;
 	/** Resolve lifecycle actions lazily when a local action needs them. */
 	lifecycle: () => AgentLifecycleLike<TRecord>;
 	/** Host message bus supplying unread counts. */
@@ -337,6 +351,14 @@ export class AgentHubOverlayComponent<TRecord extends AgentRecordLike = AgentRec
 	#disposed = false;
 	/** Resolves after persisted historical subagents have been registered and rows refreshed. */
 	readonly persistedSubagentsReady: Promise<void>;
+	/** Initial local and peer discovery, used by the empty-content gate. */
+	readonly initialRowsReady: Promise<void>;
+	#listPeers: AgentHubDeps["listPeers"];
+	#sendPeer: AgentHubDeps["sendPeer"];
+	#peers = new Map<string, AgentRecordLike>();
+	#peerDiscovery: Promise<void> | undefined;
+	#peerComposer: HookEditorComponent | undefined;
+	#peerOverlay: OverlayHandle | undefined;
 	/** Prevent the async persisted-session scan from flashing a false empty state. */
 	#loadingPersistedSubagents = false;
 	#section: AgentHubSection;
@@ -354,13 +376,13 @@ export class AgentHubOverlayComponent<TRecord extends AgentRecordLike = AgentRec
 	#activitySyncStamp = new Map<string, string>();
 
 	// Table state
-	#rows: TRecord[] = [];
+	#rows: AgentRecordLike[] = [];
 	#statusCounts: Record<AgentStatus, number> = { running: 0, idle: 0, parked: 0, aborted: 0 };
 	#selectedRow = 0;
 	/** Stable roster order captured on first refresh: keyboard navigation must
 	 *  not jump as agents heartbeat. Existing agent generations keep their rank
 	 *  while the hub is open; newly appearing generations append at the end. */
-	#rowOrder: Map<TRecord, number> | undefined;
+	#rowOrder: Map<AgentRecordLike, number> | undefined;
 	#nextRowOrder = 0;
 	#hoveredRow: number | null = null;
 	/** Per-render screen-line to agent-row map, shared by click and hover routing. */
@@ -389,7 +411,7 @@ export class AgentHubOverlayComponent<TRecord extends AgentRecordLike = AgentRec
 		reportedAgents: 0,
 		activeDurationAgents: 0,
 	};
-	#childrenByParent = new Map<string, TRecord[]>();
+	#childrenByParent = new Map<string, AgentRecordLike[]>();
 	/** Transcript-derived fallback stats are sampled only on the bounded age cadence. */
 	#sessionMetrics = new WeakMap<object, { metrics: AgentMetrics | undefined }>();
 	/** Avoid a cadence-time row scan for the common persisted-only roster. */
@@ -477,6 +499,8 @@ export class AgentHubOverlayComponent<TRecord extends AgentRecordLike = AgentRec
 		};
 		this.#hubKeys = deps.hubKeys;
 		this.#remote = deps.remote;
+		this.#listPeers = deps.listPeers;
+		this.#sendPeer = deps.sendPeer;
 		this.#loadingPersistedSubagents = !this.#remote && Boolean(deps.sessionFile?.endsWith(".jsonl"));
 		this.#ui =
 			deps.ui ??
@@ -496,6 +520,7 @@ export class AgentHubOverlayComponent<TRecord extends AgentRecordLike = AgentRec
 		this.#unsubscribers.push(this.#registry.onChange(() => this.#scheduleDataChange()));
 		this.#unsubscribers.push(this.#observers.onChange(() => this.#scheduleDataChange()));
 		this.#ageTimer = setInterval(() => {
+			void this.#discoverPeers();
 			if (this.#hasFallbackLiveSessions) {
 				this.#refreshAggregate(true);
 			}
@@ -519,13 +544,13 @@ export class AgentHubOverlayComponent<TRecord extends AgentRecordLike = AgentRec
 							this.#requestRender();
 						}
 					});
+		this.initialRowsReady = Promise.all([this.persistedSubagentsReady, this.#discoverPeers()]).then(() => {});
 		this.#refreshRows();
 	}
 
 	/**
-	 * Whether the current table view has no agents to show (every registered agent
-	 * except Main). Persisted historical rows may arrive later; callers that need
-	 * those included must wait for {@link persistedSubagentsReady} first.
+	 * Whether the current table view has no local agents or peers to show.
+	 * Callers gating an empty hub must wait for {@link initialRowsReady}.
 	 */
 	get isEmpty(): boolean {
 		return this.#rows.length === 0;
@@ -545,6 +570,7 @@ export class AgentHubOverlayComponent<TRecord extends AgentRecordLike = AgentRec
 			this.#dataChangeTimer = undefined;
 		}
 		this.#closeTranscriptOverlay();
+		this.#closePeerComposer();
 	}
 
 	override render(width: number): readonly string[] {
@@ -620,7 +646,8 @@ export class AgentHubOverlayComponent<TRecord extends AgentRecordLike = AgentRec
 	 * restored when the viewer closes. No-op without a real TUI (render-only test stub).
 	 */
 	openChat(id: string, entryId?: string): void {
-		if (this.#disposed || !this.#registry.get(id)) return;
+		const ref = this.#registry.get(id);
+		if (this.#disposed || !ref || ref.kind === "peer") return;
 		if (typeof this.#ui.showOverlay !== "function") return;
 		this.#closeTranscriptOverlay();
 		this.#notice = undefined;
@@ -669,6 +696,49 @@ export class AgentHubOverlayComponent<TRecord extends AgentRecordLike = AgentRec
 			if (typeof this.#ui.setFocus === "function") this.#ui.setFocus(this);
 			this.#requestRender();
 		}
+	}
+
+	#closePeerComposer(): void {
+		this.#peerOverlay?.hide();
+		this.#peerOverlay = undefined;
+		this.#peerComposer?.dispose();
+		this.#peerComposer = undefined;
+		if (!this.#disposed) {
+			this.#ui.setFocus?.(this);
+			this.#requestRender();
+		}
+	}
+
+	#composePeer(ref: AgentRecordLike): void {
+		if (this.#disposed || ref.kind !== "peer" || !this.#sendPeer || typeof this.#ui.showOverlay !== "function")
+			return;
+		this.#closePeerComposer();
+		const composer = new HookEditorComponent(
+			this.#ui,
+			`Message ${sanitizeDisplaySingleLine(ref.displayName || ref.id)}`,
+			undefined,
+			message => {
+				if (this.#disposed || this.#peerComposer !== composer) return;
+				this.#closePeerComposer();
+				void this.#sendPeer!(ref.id, message)
+					.then(result => {
+						if (this.#disposed) return;
+						this.#notice = sanitizeDisplaySingleLine(result);
+						this.#requestRender();
+					})
+					.catch((error: unknown) => {
+						if (this.#disposed) return;
+						this.#notice = sanitizeDisplaySingleLine(error instanceof Error ? error.message : String(error));
+						this.#requestRender();
+					});
+			},
+			() => this.#closePeerComposer(),
+			{ promptStyle: true },
+		);
+		this.#peerComposer = composer;
+		this.#peerOverlay = this.#ui.showOverlay(composer, { width: "90%", margin: 1 });
+		this.#ui.setFocus(composer);
+		this.#requestRender();
 	}
 
 	// ========================================================================
@@ -822,9 +892,14 @@ export class AgentHubOverlayComponent<TRecord extends AgentRecordLike = AgentRec
 			return;
 		}
 		switch (event.act) {
+			case "send": {
+				const ref = this.#rows[this.#selectedRow];
+				if (ref?.kind === "peer") this.#composePeer(ref);
+				return;
+			}
 			case "open": {
 				const ref = this.#rows[this.#selectedRow];
-				if (ref) this.#activateAgent(ref);
+				if (ref && ref.kind !== "peer") this.#activateAgent(ref);
 				return;
 			}
 			case "revive":
@@ -867,15 +942,36 @@ export class AgentHubOverlayComponent<TRecord extends AgentRecordLike = AgentRec
 
 	#agentPickerProps(): PickerBody {
 		const selected = this.#rows[this.#selectedRow];
-		const readOnly = selected?.kind === "advisor" ? "Read-only advisor transcript" : undefined;
+		const peer = selected?.kind === "peer";
+		const readOnly = peer
+			? "Unavailable for another omp process"
+			: selected?.kind === "advisor"
+				? "Read-only advisor transcript"
+				: undefined;
 		const actions: TspPickerAction[] = [
 			{
 				id: "open",
 				label: "Open transcript",
-				keys: ["enter"],
-				primary: true,
-				disabled: selected ? undefined : true,
+				keys: peer ? undefined : ["enter"],
+				primary: !peer,
+				disabled: peer ? readOnly : selected ? undefined : true,
 			},
+			...(peer
+				? [
+						{
+							id: "send",
+							label: "Send message",
+							keys: ["enter"],
+							primary: true,
+							disabled: this.#sendPeer ? undefined : true,
+						} satisfies TspPickerAction,
+						{
+							id: "focus",
+							label: "Focus",
+							disabled: readOnly,
+						} satisfies TspPickerAction,
+					]
+				: []),
 			{
 				id: "revive",
 				label: "Revive",
@@ -896,7 +992,10 @@ export class AgentHubOverlayComponent<TRecord extends AgentRecordLike = AgentRec
 			columns: AGENT_COLUMNS,
 			items: this.#rows.map(ref => this.#pickerAgentItem(ref)),
 			selected: selected?.id ?? null,
-			total: this.#registry.list().length - (this.#registry.get(MAIN_AGENT_ID) ? 1 : 0),
+			total:
+				this.#registry.list().length -
+				(this.#registry.get(MAIN_AGENT_ID) ? 1 : 0) +
+				Array.from(this.#peers.keys()).filter(id => !this.#registry.get(id)).length,
 			state: this.#rows.length === 0 && this.#loadingPersistedSubagents ? "loading" : "ready",
 			empty: "No agents in this session. Finished, parked and killed subagents stay with the session that created them.",
 			actions,
@@ -904,7 +1003,7 @@ export class AgentHubOverlayComponent<TRecord extends AgentRecordLike = AgentRec
 		};
 	}
 
-	#pickerAgentItem(ref: TRecord): TspPickerItem {
+	#pickerAgentItem(ref: AgentRecordLike): TspPickerItem {
 		const observed = this.#observableFor(ref.id);
 		const metrics = this.#metricsFor(ref, observed);
 		const task = observed?.description ?? observed?.progress?.task ?? ref.activity;
@@ -915,6 +1014,7 @@ export class AgentHubOverlayComponent<TRecord extends AgentRecordLike = AgentRec
 			badges.push({ text: sanitizeDisplaySingleLine(info.tag ?? info.name ?? modelRole), title: "Model role" });
 		}
 		if (ref.kind === "advisor") badges.push({ text: "read-only", tone: "warning" });
+		if (ref.kind === "peer") badges.push({ text: "peer", tone: "muted" });
 		const unread = this.#irc.unreadCount(ref.id);
 		if (unread > 0) badges.push({ text: `${unread} unread`, tone: "warning" });
 		if (this.#viewMode === "roster" && ref.parentId && ref.parentId !== MAIN_AGENT_ID) {
@@ -923,7 +1023,7 @@ export class AgentHubOverlayComponent<TRecord extends AgentRecordLike = AgentRec
 		const model = modelChip(ref, observed);
 		const item: TspPickerItem = {
 			id: ref.id,
-			label: sanitizeDisplaySingleLine(ref.id),
+			label: sanitizeDisplaySingleLine(ref.kind === "peer" ? ref.displayName : ref.id),
 			mono: true,
 			dot: statusDot(ref.status),
 			detail: task ? taskSummary(task) : undefined,
@@ -957,7 +1057,7 @@ export class AgentHubOverlayComponent<TRecord extends AgentRecordLike = AgentRec
 	}
 
 	/** Selected agent's preview: title with status, facts, context meter, recent activity. */
-	#describePreview(ref: TRecord | undefined, meter: boolean): NativeChild[] {
+	#describePreview(ref: AgentRecordLike | undefined, meter: boolean): NativeChild[] {
 		this.#recentByKey.clear();
 		if (!ref) return [];
 		const observed = this.#observableFor(ref.id);
@@ -1147,7 +1247,9 @@ export class AgentHubOverlayComponent<TRecord extends AgentRecordLike = AgentRec
 				node("text", { spans: [span(this.#notice, "error")], wrap: "word", tone: "error" }, undefined, "notice"),
 			);
 		}
-		children.push(hintsRow(AGENT_HINTS[this.#viewMode]));
+		children.push(
+			hintsRow((this.#rows[this.#selectedRow]?.kind === "peer" ? PEER_HINTS : AGENT_HINTS)[this.#viewMode]),
+		);
 		return children;
 	}
 
@@ -1213,7 +1315,7 @@ export class AgentHubOverlayComponent<TRecord extends AgentRecordLike = AgentRec
 		);
 	}
 
-	#agentLabel(ref: TRecord, selected: boolean, showParent: boolean): TspSpan[] {
+	#agentLabel(ref: AgentRecordLike, selected: boolean, showParent: boolean): TspSpan[] {
 		const label = [
 			statusGlyphSpan(ref.status),
 			span(" "),
@@ -1223,12 +1325,19 @@ export class AgentHubOverlayComponent<TRecord extends AgentRecordLike = AgentRec
 			label.push(span(`  ↳ ${sanitizeDisplaySingleLine(ref.parentId)}`, "dim"));
 		}
 		if (ref.kind === "advisor") label.push(span("  read-only", "warning"));
+		if (ref.kind === "peer")
+			label.push(
+				span(
+					`  peer${ref.displayName !== ref.id ? ` · ${sanitizeDisplaySingleLine(ref.displayName)}` : ""}`,
+					"dim",
+				),
+			);
 		const unread = this.#irc.unreadCount(ref.id);
 		if (unread > 0) label.push(span(`  ⧉ ${unread}`, "warning"));
 		return label;
 	}
 
-	#modelSpans(ref: TRecord, observed: ObservableSession | undefined): TspSpan[] | undefined {
+	#modelSpans(ref: AgentRecordLike, observed: ObservableSession | undefined): TspSpan[] | undefined {
 		const spans: TspSpan[] = [];
 		const modelRole = observed?.progress?.modelRole ?? ref.history?.modelRole;
 		if (modelRole && this.#getRoleInfo) spans.push(roleBadgeSpan(modelRole, this.#getRoleInfo(modelRole)));
@@ -1240,12 +1349,19 @@ export class AgentHubOverlayComponent<TRecord extends AgentRecordLike = AgentRec
 		return spans.length > 0 ? spans : undefined;
 	}
 
-	#describeAgentItem(ref: TRecord, selected: boolean, showParent: boolean): NativeNode {
+	#describeAgentItem(ref: AgentRecordLike, selected: boolean, showParent: boolean): NativeNode {
 		const observed = this.#observableFor(ref.id);
 		const metrics = this.#metricsFor(ref, observed);
 		const age = formatAge(Math.max(1, Math.round((Date.now() - ref.lastActivity) / 1000)));
 		const detail = [
-			span(metrics ? `${metricsText(metrics)}${theme.sep.dot}${age}` : `usage${theme.sep.dot}${age}`, "dim"),
+			span(
+				ref.kind === "peer"
+					? shortenPath(sanitizeDisplaySingleLine(ref.peer?.cwd ?? ""))
+					: metrics
+						? `${metricsText(metrics)}${theme.sep.dot}${age}`
+						: `usage${theme.sep.dot}${age}`,
+				"dim",
+			),
 		];
 		const task = observed?.description ?? observed?.progress?.task ?? ref.activity;
 		if (task) detail.push(span(theme.sep.dot, "dim"), span(sanitizeDisplaySingleLine(task), "muted"));
@@ -1280,7 +1396,7 @@ export class AgentHubOverlayComponent<TRecord extends AgentRecordLike = AgentRec
 		return roots;
 	}
 
-	#describeDetail(ref: TRecord | undefined): NativeNode {
+	#describeDetail(ref: AgentRecordLike | undefined): NativeNode {
 		const layout = {
 			grow: 2,
 			min: { w: `${DETAIL_MIN_WIDTH}ch` },
@@ -1307,11 +1423,13 @@ export class AgentHubOverlayComponent<TRecord extends AgentRecordLike = AgentRec
 		];
 		const duration = metrics ? formatMetricDuration(metrics) : undefined;
 		if (duration) state.push(text([span(duration, "dim")]));
-		state.push(
-			text([span("last active", "dim")]),
-			node("elapsed", { age: Math.max(0, Date.now() - ref.lastActivity), format: "short" }),
-			text([span("ago", "dim")]),
-		);
+		if (ref.kind !== "peer") {
+			state.push(
+				text([span("last active", "dim")]),
+				node("elapsed", { age: Math.max(0, Date.now() - ref.lastActivity), format: "short" }),
+				text([span("ago", "dim")]),
+			);
+		}
 		out.push(node("row", { gap: "sm", wrap: true, align: "baseline" }, state, "state"));
 		const model = this.#modelSpans(ref, observed);
 		if (model) out.push(node("text", { spans: model }, undefined, "model"));
@@ -1351,10 +1469,18 @@ export class AgentHubOverlayComponent<TRecord extends AgentRecordLike = AgentRec
 
 	/** Inspector facts shared by the fallback detail pane and the picker preview. */
 	#detailFacts(
-		ref: TRecord,
+		ref: AgentRecordLike,
 		observed: ObservableSession | undefined,
 		metrics: AgentMetrics | undefined,
 	): Array<{ k: string; v: TspSpan[] | string }> {
+		if (ref.kind === "peer") {
+			return [
+				{ k: "Peer", v: sanitizeDisplaySingleLine(ref.id) },
+				{ k: "Workspace", v: shortenPath(sanitizeDisplaySingleLine(ref.peer?.cwd ?? "")) },
+				...(ref.peer?.title ? [{ k: "Title", v: sanitizeDisplaySingleLine(ref.peer.title) }] : []),
+				{ k: "Actions", v: "Send message · transcript and lifecycle unavailable" },
+			];
+		}
 		const progress = observed?.progress;
 		const children = this.#childrenByParent.get(ref.id) ?? [];
 		const dot = theme.sep.dot;
@@ -1510,9 +1636,44 @@ export class AgentHubOverlayComponent<TRecord extends AgentRecordLike = AgentRec
 		this.#requestRender();
 	}
 
+	#discoverPeers(): Promise<void> {
+		if (this.#disposed || !this.#listPeers) return Promise.resolve();
+		let changed = false;
+		if (this.#peerDiscovery) return this.#peerDiscovery;
+		this.#peerDiscovery = Promise.resolve()
+			.then(() => (this.#disposed ? [] : this.#listPeers!()))
+			.then(rows => {
+				if (this.#disposed || (rows.length === 0 && this.#peers.size === 0)) return;
+				changed = true;
+				const live = new Set<string>();
+				for (const row of rows) {
+					if (row.kind !== "peer" || this.#registry.get(row.id)) continue;
+					live.add(row.id);
+					const cached = this.#peers.get(row.id);
+					if (cached) Object.assign(cached, row);
+					else this.#peers.set(row.id, row);
+				}
+				for (const id of this.#peers.keys()) if (!live.has(id)) this.#peers.delete(id);
+			})
+			.catch((error: unknown) => {
+				if (!this.#disposed) logger.warn("Failed to discover omp peers", { error });
+			})
+			.finally(() => {
+				this.#peerDiscovery = undefined;
+				if (!this.#disposed && changed) {
+					this.#refreshRows();
+					this.#requestRender();
+				}
+			});
+		return this.#peerDiscovery;
+	}
+
 	#refreshRows(): void {
 		const selectedId = this.#rows[this.#selectedRow]?.id;
-		const refs = this.#registry.list().filter(ref => ref.id !== MAIN_AGENT_ID);
+		const refs = [
+			...this.#registry.list().filter(ref => ref.id !== MAIN_AGENT_ID),
+			...Array.from(this.#peers.values()).filter(ref => !this.#registry.get(ref.id)),
+		];
 		this.#observedById = new Map();
 		for (const session of this.#observers.getSessions()) this.#observedById.set(session.id, session);
 		// Stable roster order: capture the status+recency ranking once so keyboard
@@ -1522,7 +1683,7 @@ export class AgentHubOverlayComponent<TRecord extends AgentRecordLike = AgentRec
 		// mid-scan refresh cannot freeze a partial roster (the remaining agents
 		// would otherwise append in readdir order instead of being ranked).
 		const rowOrder = this.#rowOrder;
-		let ordered: TRecord[];
+		let ordered: AgentRecordLike[];
 		if (!rowOrder) {
 			ordered = refs.sort(
 				(a, b) =>
@@ -1576,6 +1737,7 @@ export class AgentHubOverlayComponent<TRecord extends AgentRecordLike = AgentRec
 
 		this.#childrenByParent.clear();
 		for (const ref of rosterRows) {
+			if (ref.kind === "peer") continue;
 			const parent = ref.parentId ?? MAIN_AGENT_ID;
 			const children = this.#childrenByParent.get(parent);
 			if (children) children.push(ref);
@@ -1588,7 +1750,7 @@ export class AgentHubOverlayComponent<TRecord extends AgentRecordLike = AgentRec
 		this.#refreshActivityRows();
 	}
 
-	#refreshActivityData(refs: readonly TRecord[]): void {
+	#refreshActivityData(refs: readonly AgentRecordLike[]): void {
 		if (this.#manageActivityLive) {
 			const liveIds = new Set<string>();
 			for (const ref of refs) {
@@ -1606,6 +1768,7 @@ export class AgentHubOverlayComponent<TRecord extends AgentRecordLike = AgentRec
 		const generation = ++this.#activitySyncGeneration;
 		const pending: Promise<void>[] = [];
 		for (const ref of refs) {
+			if (ref.kind === "peer") continue;
 			if (!this.#remote && !ref.sessionFile) continue;
 			const stamp = `${ref.sessionFile ?? ""}:${ref.lastActivity}`;
 			if (this.#activitySyncStamp.get(ref.id) === stamp) continue;
@@ -1661,7 +1824,7 @@ export class AgentHubOverlayComponent<TRecord extends AgentRecordLike = AgentRec
 		else this.#selectedActivityRow = Math.min(this.#selectedActivityRow, rows.length - 1);
 	}
 
-	#metricsFor(ref: TRecord, observed: ObservableSession | undefined): AgentMetrics | undefined {
+	#metricsFor(ref: AgentRecordLike, observed: ObservableSession | undefined): AgentMetrics | undefined {
 		return hubRowMetrics(ref, observed, this.#sessionMetrics);
 	}
 
@@ -1795,6 +1958,8 @@ export class AgentHubOverlayComponent<TRecord extends AgentRecordLike = AgentRec
 
 	#footer(showingNarrowDetails: boolean, availableWidth: number): string {
 		const nextView = this.#viewMode === "roster" ? "by parent" : "flat";
+		const peer = this.#rows[this.#selectedRow]?.kind === "peer";
+		const activation = peer ? "send" : "open";
 		const filter = this.#agentFilterEditing
 			? `/${filterText(this.#agentFilter)}  ·  `
 			: this.#agentFilter.getValue()
@@ -1803,18 +1968,18 @@ export class AgentHubOverlayComponent<TRecord extends AgentRecordLike = AgentRec
 		if (showingNarrowDetails) {
 			return theme.fg(
 				"dim",
-				`${filter}1:agents  2:activity  ${formatKeyHint("tab")}:roster  ${formatKeyHints(["pageUp", "pageDown"])}:scroll  ${formatKeyHint("enter")}:open  ${formatKeyHint("t")}:${nextView}  ${formatKeyHint("escape")}:roster`,
+				`${filter}1:agents  2:activity  ${formatKeyHint("tab")}:roster  ${formatKeyHints(["pageUp", "pageDown"])}:scroll  ${formatKeyHint("enter")}:${activation}  ${formatKeyHint("t")}:${nextView}  ${formatKeyHint("escape")}:roster`,
 			);
 		}
 		if (availableWidth < 96) {
 			return theme.fg(
 				"dim",
-				`${filter}${formatKeyHints(["j", "k"])}:select  ${formatKeyHint("enter")}:open  ${formatKeyHint("t")}:${nextView}  ${formatKeyHint("tab")}:details  ${formatKeyHints(["r", "x"])}:manage  ${formatKeyHint("escape")}:close`,
+				`${filter}${formatKeyHints(["j", "k"])}:select  ${formatKeyHint("enter")}:${activation}  ${formatKeyHint("t")}:${nextView}  ${formatKeyHint("tab")}:details  ${peer ? "" : `${formatKeyHints(["r", "x"])}:manage  `}${formatKeyHint("escape")}:close`,
 			);
 		}
 		return theme.fg(
 			"dim",
-			`${filter}1:agents  2:activity  ${formatKeyHints(["j", "k"])}/wheel:select  ${formatKeyHints(["pageUp", "pageDown"])}:details  ${formatKeyHint("enter")}/click:open  ${formatKeyHint("t")}:${nextView}  ${formatKeyHint("r")}:revive  ${formatKeyHint("x")}:kill  ${formatKeyHint("escape")}:close`,
+			`${filter}1:agents  2:activity  ${formatKeyHints(["j", "k"])}/wheel:select  ${formatKeyHints(["pageUp", "pageDown"])}:details  ${formatKeyHint("enter")}/click:${activation}  ${formatKeyHint("t")}:${nextView}  ${peer ? "" : `${formatKeyHint("r")}:revive  ${formatKeyHint("x")}:kill  `}${formatKeyHint("escape")}:close`,
 		);
 	}
 
@@ -2011,7 +2176,7 @@ export class AgentHubOverlayComponent<TRecord extends AgentRecordLike = AgentRec
 	}
 
 	#renderDetailPanel(
-		ref: TRecord | undefined,
+		ref: AgentRecordLike | undefined,
 		width: number,
 		rows: number,
 		_observedById: ReadonlyMap<string, ObservableSession>,
@@ -2035,6 +2200,14 @@ export class AgentHubOverlayComponent<TRecord extends AgentRecordLike = AgentRec
 
 		add(`${statusGlyph(ref.status)} ${theme.bold(sanitizeDisplaySingleLine(ref.displayName || ref.id))}`);
 		if (ref.displayName && ref.displayName !== ref.id) add(theme.fg("dim", sanitizeDisplaySingleLine(ref.id)));
+		if (ref.kind === "peer") {
+			add(statusText(ref.status, ref.status));
+			for (const fact of this.#detailFacts(ref, undefined, undefined)) {
+				addWrapped(`${fact.k}: ${typeof fact.v === "string" ? fact.v : ""}`);
+			}
+			while (lines.length < rows) lines.push("");
+			return lines.slice(0, rows);
+		}
 		const lifecycleDetails = [
 			metrics ? formatMetricDuration(metrics) : undefined,
 			`active ${formatAge(Math.max(1, Math.round((Date.now() - ref.lastActivity) / 1000)))}`,
@@ -2123,7 +2296,7 @@ export class AgentHubOverlayComponent<TRecord extends AgentRecordLike = AgentRec
 	 * only those dense secondary fields.
 	 */
 	#renderEntry(
-		ref: TRecord,
+		ref: AgentRecordLike,
 		selected: boolean,
 		width: number,
 		observed: ObservableSession | undefined,
@@ -2140,6 +2313,11 @@ export class AgentHubOverlayComponent<TRecord extends AgentRecordLike = AgentRec
 		const id = sanitizeDisplaySingleLine(ref.id);
 		const styledId = selected ? theme.bold(theme.fg("accent", id)) : theme.bold(id);
 		const fields: string[] = [`${cursor} ${branch}${statusGlyph(ref.status)} ${styledId}`];
+		if (ref.kind === "peer") {
+			fields.push(theme.fg("dim", "peer"));
+			if (ref.displayName !== ref.id) fields.push(theme.fg("muted", sanitizeDisplaySingleLine(ref.displayName)));
+			return [truncateToWidth(fields.join("  "), max)];
+		}
 		if (this.#viewMode === "roster" && ref.parentId && ref.parentId !== MAIN_AGENT_ID) {
 			fields.push(theme.fg("dim", `↳ ${sanitizeDisplaySingleLine(ref.parentId)}`));
 		}
@@ -2476,7 +2654,12 @@ export class AgentHubOverlayComponent<TRecord extends AgentRecordLike = AgentRec
 	 * exact parity by construction. Collab guests (no local sessions) keep the
 	 * in-hub chat view.
 	 */
-	#activateAgent(ref: TRecord): void {
+	#activateAgent(ref: AgentRecordLike): void {
+		if (this.#disposed) return;
+		if (ref.kind === "peer") {
+			this.#composePeer(ref);
+			return;
+		}
 		this.#notice = undefined;
 		const focusAgent = this.#focusAgent;
 		// Aborted agents and advisor refs are read-only transcripts with no
@@ -2498,7 +2681,7 @@ export class AgentHubOverlayComponent<TRecord extends AgentRecordLike = AgentRec
 
 	#reviveSelected(): void {
 		const ref = this.#rows[this.#selectedRow];
-		if (!ref) return;
+		if (this.#disposed || !ref || ref.kind === "peer") return;
 		if (ref.kind === "advisor") {
 			this.#notice = `"${ref.id}" is a read-only advisor transcript — nothing to revive.`;
 			this.#requestRender();
@@ -2527,7 +2710,7 @@ export class AgentHubOverlayComponent<TRecord extends AgentRecordLike = AgentRec
 
 	#killSelected(): void {
 		const ref = this.#rows[this.#selectedRow];
-		if (!ref) return;
+		if (this.#disposed || !ref || ref.kind === "peer") return;
 		if (ref.kind === "advisor") {
 			this.#notice = `"${ref.id}" is a read-only advisor transcript — cannot be killed.`;
 			this.#requestRender();
@@ -2545,7 +2728,8 @@ export class AgentHubOverlayComponent<TRecord extends AgentRecordLike = AgentRec
 				if (ref.status === "running" && ref.session) {
 					await ref.session.abort({ reason: USER_INTERRUPT_LABEL });
 				}
-				await this.#lifecycle().release(ref.id, ref, { tombstone: true });
+				const local = this.#registry.get(ref.id);
+				if (local === ref) await this.#lifecycle().release(ref.id, local, { tombstone: true });
 			} catch (error) {
 				logger.warn("Agent hub: kill failed", { id: ref.id, error: String(error) });
 				this.#notice = error instanceof Error ? error.message : String(error);

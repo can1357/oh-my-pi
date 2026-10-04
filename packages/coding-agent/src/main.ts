@@ -148,7 +148,6 @@ import {
 	cfgColorBlindMode,
 	cfgComposerShape,
 	cfgImagesAutoResize,
-	cfgIrcCrossProcess,
 	cfgMarketplaceAutoUpdate,
 	cfgSetupVersion,
 	cfgShowHardwareCursor,
@@ -168,6 +167,7 @@ import {
 	cfgTuiResizeScrollback,
 	cfgUpdateChannel,
 } from "./modes/settings";
+import { cfgIrcCrossProcess } from "./irc/settings";
 import {
 	cfgDefaultThinkingLevel,
 	cfgExternalThinking,
@@ -2540,16 +2540,6 @@ export async function runRootCommand(
 			}
 
 			if (mode === "rpc" || mode === "rpc-ui") {
-				session.addDisposer(
-					MailboxService.global().bindTarget({
-						agentId: session.getAgentId() ?? "Main",
-						conversation: null,
-						settings: settingsInstance,
-						receive: true,
-						describe: () => ({ title: session.sessionName ?? null, busy: session.isStreaming }),
-					}),
-				);
-				await MailboxService.global().whenSettled();
 				// Branch-only protocol runner: keep RPC host code out of normal interactive startup.
 				const runRpcMode: RunRpcMode = (await import("./modes/rpc/rpc-mode")).runRpcMode;
 				stopStartupWatchdog();
@@ -2559,6 +2549,14 @@ export async function runRootCommand(
 					headless: parsedArgs.noUi === true,
 					subagentEventBus,
 					input: rpcInput,
+					bindMailboxTarget: () =>
+						MailboxService.global().bindTarget({
+							agentId: session.getAgentId() ?? "Main",
+							conversation: null,
+							settings: settingsInstance,
+							receive: true,
+							describe: () => ({ title: session.sessionName ?? null, busy: session.isStreaming }),
+						}),
 				});
 			} else if (isInteractive) {
 				const versionCheckPromise = checkForNewVersion(VERSION).catch(() => undefined);
@@ -2622,14 +2620,6 @@ export async function runRootCommand(
 				// long `-p` run's subagents do not keep growing it.
 				if (!$env.PI_TIMING) logger.endTiming();
 				const runPrintMode: RunPrintMode = (await import("./modes/print-mode")).runPrintMode;
-				const unbindMailboxTarget = MailboxService.global().bindTarget({
-					agentId: session.getAgentId() ?? "Main",
-					conversation: null,
-					settings: settingsInstance,
-					receive: parsedArgs.mailbox === true,
-					describe: () => ({ title: session.sessionName ?? null, busy: session.isStreaming }),
-				});
-				await MailboxService.global().whenSettled();
 				const exitCode = await runPrintMode(session, {
 					mode,
 					messages: initialArgs.messages,
@@ -2638,7 +2628,14 @@ export async function runRootCommand(
 					printThoughts: initialArgs.printThoughts,
 					planYolo: parsedArgs.planYolo,
 					mcpManager,
-					unbindMailboxTarget,
+					bindMailboxTarget: () =>
+						MailboxService.global().bindTarget({
+							agentId: session.getAgentId() ?? "Main",
+							conversation: null,
+							settings: settingsInstance,
+							receive: parsedArgs.mailbox === true,
+							describe: () => ({ title: session.sessionName ?? null, busy: session.isStreaming }),
+						}),
 				});
 				if ($env.PI_TIMING) {
 					logger.printTimings();

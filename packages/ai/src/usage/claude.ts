@@ -1,6 +1,7 @@
 import { scheduler } from "node:timers/promises";
 import { classifyModel } from "@oh-my-pi/pi-catalog/compat/taxonomy";
 import { toNumber } from "@oh-my-pi/pi-catalog/utils";
+import { slugify } from "@oh-my-pi/pi-utils";
 import * as AIError from "../error";
 import {
 	type CredentialRankingContext,
@@ -547,11 +548,7 @@ function buildUsageLimit(args: {
 }
 
 function slugifyClaudeLimitDisplayName(displayName: string): string {
-	return displayName
-		.trim()
-		.toLowerCase()
-		.replace(/[^a-z0-9]+/g, "-")
-		.replace(/^-+|-+$/g, "");
+	return slugify(displayName);
 }
 
 /**

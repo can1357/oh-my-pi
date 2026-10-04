@@ -821,4 +821,33 @@ describe("AgentSession advisor auto-resume suppression", () => {
 		expect(userMessageText(session.agent.state.messages)).not.toContain("then add the test");
 		expect(mock.calls.length).toBe(2);
 	});
+
+	it.each([false, true])(
+		"folds a stranded remote noWake aside without a reply turn (interrupted: %s)",
+		async interrupted => {
+			const { session, mock, streamStarted } = await createParkedSession([{ content: ["must not wake"] }]);
+			const running = session.prompt("do the thing");
+			await streamStarted;
+			await session.deliverIrcMessage({
+				id: "no-wake",
+				from: "peer",
+				to: "me",
+				body: "relay response",
+				ts: Date.now(),
+				remote: true,
+				noWake: true,
+			});
+			await session.abort({ reason: interrupted ? USER_INTERRUPT_LABEL : "internal" });
+			await session.waitForIdle();
+			await running.catch(() => {});
+			expect(mock.calls.length).toBe(1);
+			expect(session.sessionManager.getEntries()).toContainEqual(
+				expect.objectContaining({
+					type: "custom_message",
+					customType: "irc:incoming",
+					details: expect.objectContaining({ remote: true, noWake: true, message: "relay response" }),
+				}),
+			);
+		},
+	);
 });

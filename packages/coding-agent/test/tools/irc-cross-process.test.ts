@@ -1,5 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import { Agent } from "@oh-my-pi/pi-agent-core";
+import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
+import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
+import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { InternalUrlRouter } from "@oh-my-pi/pi-coding-agent/internal-urls";
 import { AgentProtocolHandler } from "@oh-my-pi/pi-coding-agent/internal-urls/agent-protocol";
@@ -11,6 +14,7 @@ import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import type { CustomMessage } from "@oh-my-pi/pi-coding-agent/session/messages";
+import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import type { IrcDeliveryReceipt, IrcMessage } from "@oh-my-pi/pi-tui/tools/irc";
@@ -161,39 +165,128 @@ describe("cross-process IRC integration", () => {
 		}
 	});
 
-	it("marks only a remote wake turn and clears the mark synchronously at agent_end", async () => {
+	it.each([
+		{ count: 100, body: "x", overflow: "x" },
+		{ count: 32, body: "é".repeat(64 * 1024), overflow: "x" },
+	])(
+		"rejects a pending remote backlog at $count messages without a retry mailbox",
+		async ({ count, body, overflow }) => {
+			const session = createSession();
+			AgentRegistry.global().register({ id: "Main", displayName: "main", kind: "main", session });
+			Object.defineProperty(session, "isStreaming", { value: true, configurable: true });
+			const bus = IrcBus.global();
+			try {
+				for (let index = 0; index < count; index++) {
+					expect((await bus.send({ from: address, to: "Main", body, remote: true })).outcome).toBe("injected");
+				}
+				expect(await bus.send({ from: address, to: "Main", body: overflow, remote: true })).toEqual({
+					to: "Main",
+					outcome: "failed",
+					error: "Recipient has too many pending peer messages (limit 100 messages / 4 MiB); retry later.",
+				});
+				expect(bus.unreadCount("Main")).toBe(0);
+				// The remote cap must not alter existing local aside semantics.
+				expect((await bus.send({ from: "Local", to: "Main", body: "local" })).outcome).toBe("injected");
+				session.drainPendingIrcInboxMessages("Main", { limit: 1 });
+				expect((await bus.send({ from: address, to: "Main", body: overflow, remote: true })).outcome).toBe(
+					"injected",
+				);
+			} finally {
+				Reflect.deleteProperty(session, "isStreaming");
+			}
+		},
+	);
+
+	it("rejects remote delivery while newSession is transitioning without emitting or queueing it", async () => {
 		const session = createSession();
-		const { promise: started, resolve: start } = Promise.withResolvers<void>();
-		const { promise: stop, resolve: finish } = Promise.withResolvers<void>();
+		AgentRegistry.global().register({ id: "Main", displayName: "main", kind: "main", session });
+		const arrivals: string[] = [];
+		session.subscribe(event => {
+			if (event.type === "irc_message") arrivals.push(event.message.customType);
+		});
+		const transition = session.newSession();
+		expect(session.isSessionTransitioning).toBe(true);
+		try {
+			expect(
+				await IrcBus.global().send({ from: address, to: "Main", body: "old conversation", remote: true }),
+			).toEqual({
+				to: "Main",
+				outcome: "failed",
+				error: "Recipient is switching or compacting its session; retry shortly.",
+			});
+			expect(IrcBus.global().unreadCount("Main")).toBe(0);
+			expect(arrivals).toEqual([]);
+			expect(session.drainPendingIrcInboxMessages("Main")).toEqual([]);
+		} finally {
+			await transition;
+		}
+	});
+
+	it("keeps a remote wake marked across automatic retry until terminal settlement", async () => {
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5")!;
+		const mock = createMockModel({
+			responses: [{ stopReason: "error", errorMessage: "503 Service Unavailable" }, { content: ["reply to peer"] }],
+		});
+		const authStorage = await AuthStorage.create(":memory:");
+		authStorage.keys.setRuntime("anthropic", "test-key");
+		const session = new AgentSession({
+			agent: new Agent({
+				getApiKey: () => "test-key",
+				initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] },
+				streamFn: mock.stream,
+			}),
+			sessionManager: SessionManager.inMemory("/tmp"),
+			settings: Settings.isolated({
+				"compaction.enabled": false,
+				"retry.baseDelayMs": 5,
+				"retry.maxRetries": 1,
+				"retry.modelFallback": false,
+			}),
+			modelRegistry: new ModelRegistry(authStorage),
+		});
+		sessions.push(session);
+		const duringRequests: boolean[] = [];
+		const stream = session.agent.streamFn;
+		vi.spyOn(session.agent, "streamFn").mockImplementation((streamModel, context, options) => {
+			duringRequests.push(session.isRemoteWakeTurn());
+			return stream(streamModel, context, options);
+		});
+		const settlements: Array<{ terminal: boolean | undefined; remote: boolean }> = [];
+		const retryOwnership: boolean[] = [];
+		session.subscribe(event => {
+			if (event.type === "auto_retry_start") retryOwnership.push(session.isRemoteWakeTurn());
+			if (event.type === "agent_end") {
+				settlements.push({ terminal: event.isTerminal, remote: session.isRemoteWakeTurn() });
+			}
+		});
 		const { promise: observed, resolve: observe } = Promise.withResolvers<void>();
 		session.setIrcWakeTurnObserver(() => () => observe());
-		let remoteAtEnd: boolean | undefined;
-		vi.spyOn(session.agent, "prompt").mockImplementation(async () => {
-			session.agent.emitExternalEvent({ type: "agent_start" });
-			start();
-			await stop;
-			session.agent.emitExternalEvent({ type: "agent_end", messages: [] });
-			remoteAtEnd = session.isRemoteWakeTurn();
-		});
-		expect(session.isRemoteWakeTurn()).toBe(false);
-		await session.deliverIrcMessage({
-			id: "remote-wake",
-			from: address,
-			to: "Main",
-			body: "wake",
-			ts: 1,
-			remote: true,
-		});
-		await started;
 		try {
-			expect(session.isRemoteWakeTurn()).toBe(true);
+			await session.deliverIrcMessage({
+				id: "remote-wake",
+				from: address,
+				to: "Main",
+				body: "wake",
+				ts: 1,
+				remote: true,
+			});
+			await observed;
+			expect(duringRequests).toEqual([true, true]);
+			// Nonterminal ends are buffered inside the wake's in-flight bracket
+			// and can be replaced by the retry's terminal frame before subscribe
+			// sees them. The retry event and second provider call prove recovery.
+			expect(retryOwnership).toEqual([true]);
+			expect(settlements.at(-1)).toEqual({ terminal: true, remote: true });
+			expect(session.isRemoteWakeTurn()).toBe(false);
 		} finally {
-			finish();
+			await session.dispose();
+			sessions.splice(sessions.indexOf(session), 1);
+			authStorage.close();
 		}
-		await observed;
-		expect(remoteAtEnd).toBe(false);
-		expect(session.isRemoteWakeTurn()).toBe(false);
+	});
 
+	it("does not mark a local wake as remote", async () => {
+		const session = createSession();
 		const { promise: localFinished, resolve: finishLocal } = Promise.withResolvers<void>();
 		session.setIrcWakeTurnObserver(() => () => finishLocal());
 		let duringLocalWake: boolean | undefined;
@@ -265,10 +358,17 @@ describe("cross-process IRC integration", () => {
 			conversation: "abcd1234",
 			title: "Peer work",
 			busy: true,
+			alias: null,
 		};
-		vi.spyOn(mailbox, "state").mockReturnValue({ enabled: true, address: "local-project-abcdef12", receiving: true });
+		vi.spyOn(mailbox, "state").mockReturnValue({
+			enabled: true,
+			address: "local-project-abcdef12",
+			receiving: true,
+			alias: null,
+		});
 		const list = vi.spyOn(mailbox, "listPeers").mockResolvedValue([peer]);
 		vi.spyOn(mailbox, "handles").mockImplementation(to => to === conversationAddress);
+		vi.spyOn(mailbox, "resolvePeer").mockResolvedValue({ status: "found", peer });
 		const session = createSession();
 		AgentRegistry.global().register({ id: "Main", displayName: "main", kind: "main", session });
 		const context = { session: toolSession() };

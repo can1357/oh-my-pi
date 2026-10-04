@@ -2,7 +2,7 @@ import { afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { MailboxService, type MailboxTargetState } from "@oh-my-pi/pi-coding-agent/mailbox/service";
 import { InteractiveMode } from "@oh-my-pi/pi-coding-agent/modes/interactive-mode";
-import { cfgIrcCrossProcess } from "@oh-my-pi/pi-coding-agent/modes/settings";
+import { cfgIrcCrossProcess } from "@oh-my-pi/pi-coding-agent/irc/settings";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import { UiHelpers } from "@oh-my-pi/pi-coding-agent/modes/utils/ui-helpers";
 import { executeAcpBuiltinSlashCommand } from "@oh-my-pi/pi-coding-agent/slash-commands/acp-builtins";
@@ -45,7 +45,7 @@ describe("interactive peers notices", () => {
 		ctx.showStatus = helpers.showStatus.bind(helpers);
 		const state = (): MailboxTargetState =>
 			cfgIrcCrossProcess.get(settings)
-				? { enabled: true, address: "project-1234abcd", receiving: true }
+				? { enabled: true, address: "project-1234abcd", receiving: true, alias: null }
 				: { enabled: false };
 		vi.spyOn(MailboxService, "global").mockReturnValue({
 			state,

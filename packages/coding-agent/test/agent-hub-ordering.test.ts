@@ -10,13 +10,17 @@ import { afterEach, beforeAll, describe, expect, it, setSystemTime, vi } from "b
 import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { IrcBus } from "@oh-my-pi/pi-coding-agent/irc/bus";
+import { MailboxService } from "@oh-my-pi/pi-coding-agent/mailbox/service";
+import { cfgIrcCrossProcess } from "@oh-my-pi/pi-coding-agent/irc/settings";
 import { type AgentHubDeps, AgentHubOverlayComponent } from "@oh-my-pi/pi-tui/overlays/agent-hub";
 import { SessionObserverRegistry } from "@oh-my-pi/pi-tui/overlays/session-observer-registry";
+import type { AgentRecordLike } from "@oh-my-pi/pi-tui/overlays/agent-hub-types";
 import { initTheme, theme } from "@oh-my-pi/pi-tui/theme";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { visibleWidth } from "@oh-my-pi/pi-tui/utils";
 import { AgentActivityIndex, type AgentActivityRow } from "../src/activity";
+const TEST_PEER_CWD = "C:/peer-project";
 
 interface GeometryStub {
 	setRows(n: number): void;
@@ -150,6 +154,145 @@ describe("Agent hub row ordering", () => {
 			expect(rendered).toContain("No agents in this session");
 			expect(rendered).toContain("Finished, parked, and killed subagents remain with the session");
 			expect(rendered).toContain("Resume that session with omp-dev --continue, or spawn a task here.");
+		} finally {
+			hub.dispose();
+		}
+	});
+
+	it("discovers peer-only rows asynchronously, preserves address ordering across polls, and removes vanished peers", async () => {
+		vi.useFakeTimers();
+		geometry = stubStdoutGeometry(120);
+		const discovery = Promise.withResolvers<AgentRecordLike[]>();
+		const peer = (id: string, status: "idle" | "running" = "idle"): AgentRecordLike => ({
+			id,
+			displayName: id,
+			kind: "peer",
+			status,
+			session: null,
+			sessionFile: null,
+			createdAt: 0,
+			lastActivity: 0,
+			peer: { cwd: TEST_PEER_CWD, title: null },
+		});
+		const listPeers = vi.fn(() => discovery.promise);
+		const agents = new AgentRegistry();
+		let pollStarted = false;
+		let pollReady = Promise.withResolvers<void>();
+		const hub = makeHub(agents, {
+			listPeers,
+			requestRender: () => {
+				if (pollStarted) pollReady.resolve();
+			},
+		});
+		try {
+			expect(hub.isEmpty).toBe(true);
+			await Promise.resolve();
+			vi.advanceTimersByTime(10_000);
+			expect(listPeers).toHaveBeenCalledTimes(1);
+			discovery.resolve([peer("project-deadbeef.11111111"), peer("project-deadbeef.22222222")]);
+			await hub.initialRowsReady;
+			expect(renderedAgentIds(hub)).toEqual(["project-deadbeef.11111111", "project-deadbeef.22222222"]);
+			hub.handleInput("j");
+			expect(selectedAgentId(hub)).toBe("project-deadbeef.22222222");
+			listPeers.mockImplementation(async () => {
+				pollStarted = true;
+				return [peer("project-deadbeef.22222222", "running"), peer("project-deadbeef.11111111")];
+			});
+			vi.advanceTimersByTime(5_000);
+			await pollReady.promise;
+			expect(renderedAgentIds(hub)).toEqual(["project-deadbeef.11111111", "project-deadbeef.22222222"]);
+			expect(selectedAgentId(hub)).toBe("project-deadbeef.22222222");
+			expect(agents.list()).toEqual([]);
+			pollStarted = false;
+			pollReady = Promise.withResolvers<void>();
+			listPeers.mockImplementation(async () => {
+				pollStarted = true;
+				return [];
+			});
+			vi.advanceTimersByTime(5_000);
+			await pollReady.promise;
+			expect(hub.isEmpty).toBe(true);
+		} finally {
+			hub.dispose();
+		}
+	});
+
+	it("ignores an in-flight peer discovery after disposal and catches failed discovery", async () => {
+		geometry = stubStdoutGeometry(120);
+		const discovery = Promise.withResolvers<AgentRecordLike[]>();
+		const requestRender = vi.fn();
+		const hub = makeHub(new AgentRegistry(), { listPeers: () => discovery.promise, requestRender });
+		await Promise.resolve();
+		hub.dispose();
+		requestRender.mockClear();
+		discovery.resolve([
+			{
+				id: "project-deadbeef",
+				displayName: "remote",
+				kind: "peer",
+				status: "idle",
+				session: null,
+				sessionFile: null,
+				createdAt: 0,
+				lastActivity: 0,
+			},
+		]);
+		await hub.initialRowsReady;
+		expect(hub.isEmpty).toBe(true);
+		expect(requestRender).not.toHaveBeenCalled();
+		const rejected = makeHub(new AgentRegistry(), {
+			listPeers: async () => {
+				throw new Error("discovery unavailable");
+			},
+		});
+		try {
+			await rejected.initialRowsReady;
+			expect(rejected.isEmpty).toBe(true);
+			expect(Bun.stripANSI(rejected.render(120).join("\n"))).toContain("No agents in this session");
+		} finally {
+			rejected.dispose();
+		}
+	});
+
+	it("runtime gates discovery with effective peers settings and local ids win over peer rows", async () => {
+		geometry = stubStdoutGeometry(120);
+		const settings = Settings.isolated({ "irc.crossProcess": false });
+		const listPeers = vi.fn(async () => [
+			{
+				address: "project-deadbeef",
+				id: "process-id",
+				pid: 123,
+				conversation: null,
+				alias: "reviewer",
+				cwd: TEST_PEER_CWD,
+				title: "Review",
+				busy: true,
+			},
+		]);
+		vi.spyOn(MailboxService, "global").mockReturnValue({ listPeers } as never);
+		const agents = new AgentRegistry();
+		const runtime = createAgentHubRuntime({ settings, registry: agents });
+		expect(await runtime.listPeers!()).toEqual([]);
+		expect(listPeers).not.toHaveBeenCalled();
+		cfgIrcCrossProcess.override(settings, true);
+		const rows = await runtime.listPeers!();
+		expect(rows[0]).toMatchObject({
+			id: "project-deadbeef",
+			displayName: "reviewer",
+			kind: "peer",
+			status: "running",
+			session: null,
+			sessionFile: null,
+		});
+		agents.register({ id: "project-deadbeef", displayName: "Local", kind: "sub", status: "idle", session: null });
+		const hub = makeHub(agents, { listPeers: runtime.listPeers });
+		try {
+			await hub.initialRowsReady;
+			expect(renderedAgentIds(hub)).toEqual(["project-deadbeef"]);
+			expect(Bun.stripANSI(hub.render(120).join("\n"))).not.toContain("reviewer");
+			expect(agents.get("project-deadbeef")?.kind).toBe("sub");
+			cfgIrcCrossProcess.override(settings, false);
+			expect(await runtime.listPeers!()).toEqual([]);
 		} finally {
 			hub.dispose();
 		}

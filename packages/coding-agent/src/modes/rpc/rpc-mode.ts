@@ -1207,6 +1207,8 @@ export interface RpcModeOptions {
 	input?: ReadableStream<Uint8Array>;
 	/** Builds `live_start` sessions; defaults to the real {@link LiveSessionController}. */
 	createLiveSession?: RpcLiveSessionFactory;
+	/** Binds peer receiving only after extensions and protocol event output are ready. */
+	bindMailboxTarget?: () => () => void;
 }
 
 /**
@@ -1214,6 +1216,14 @@ export interface RpcModeOptions {
  * Listens for JSON commands on stdin, outputs events and responses on stdout.
  */
 export async function runRpcMode(session: AgentSession, options: RpcModeOptions = {}): Promise<never> {
+	try {
+		return await runRpcModeCore(session, options);
+	} finally {
+		if (options.bindMailboxTarget) await MailboxService.global().close();
+	}
+}
+
+async function runRpcModeCore(session: AgentSession, options: RpcModeOptions): Promise<never> {
 	const { setToolUIContext, headless = false, subagentEventBus, input = claimRpcInput(), createLiveSession } = options;
 	// Signal to RPC clients that the server is ready to accept commands
 	// Suppress terminal notifications: they write \x07 (BEL) or OSC sequences directly to
@@ -1555,6 +1565,10 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 			persistenceFailure = error;
 		},
 	);
+	if (options.bindMailboxTarget) {
+		session.addDisposer(options.bindMailboxTarget());
+		await MailboxService.global().whenSettled();
+	}
 
 	/**
 	 * Dispose the session, then end the process. A store failure still latched

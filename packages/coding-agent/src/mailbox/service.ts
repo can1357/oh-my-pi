@@ -1,6 +1,7 @@
 import { Buffer } from "node:buffer";
 import type { IrcDeliveryReceipt, IrcMessage } from "@oh-my-pi/pi-tui/tools/irc";
-import { logger, postmortem } from "@oh-my-pi/pi-utils";
+import { logger, postmortem, Serial } from "@oh-my-pi/pi-utils";
+import { boundField } from "../collab/registry";
 import type { Settings } from "../config/settings";
 import {
 	listLocalEndpoints,
@@ -12,7 +13,7 @@ import {
 	readLocalEndpointEntries,
 } from "../ipc/local-endpoint-registry";
 import { IrcBus, type IrcRemoteRouter } from "../irc/bus";
-import { cfgIrcCrossProcess } from "../modes/settings";
+import { cfgIrcCrossProcess, cfgIrcPeerAlias } from "../irc/settings";
 import { AgentRegistry } from "../registry/agent-registry";
 import {
 	MAILBOX_ADDRESS_PATTERN,
@@ -21,6 +22,7 @@ import {
 	mailboxAddress,
 	type MailboxSnapshot,
 	type MailboxTargetSnapshot,
+	normalizePeerAlias,
 } from "./protocol";
 
 export interface MailboxTarget {
@@ -28,14 +30,14 @@ export interface MailboxTarget {
 	conversation: string | null;
 	settings: Settings;
 	receive: boolean;
-	describe(): { title: string | null; busy: boolean };
+	describe(): { title: string | null; busy: boolean; cwd?: string };
 	notify?(state: MailboxTargetState): void;
 }
 
 export type MailboxTargetState =
 	| { enabled: false }
-	| { enabled: true; address: string; receiving: boolean }
-	| { enabled: true; address: string; receiving: false; error: string };
+	| { enabled: true; address: string; receiving: boolean; alias: string | null }
+	| { enabled: true; address: string; receiving: false; alias: string | null; error: string };
 
 export interface MailboxPeer extends MailboxTargetSnapshot {
 	address: string;
@@ -44,16 +46,23 @@ export interface MailboxPeer extends MailboxTargetSnapshot {
 	cwd: string;
 }
 
+export type MailboxPeerResolution =
+	| { status: "found"; peer: MailboxPeer }
+	| { status: "not_found" }
+	| { status: "ambiguous"; candidates: string[] };
+
 export function formatMailboxState(state: MailboxTargetState): string {
 	if (!state.enabled) return "Peers: off";
 	if ("error" in state) return `Peers: on, but receiving failed — ${state.error}`;
-	if (!state.receiving) return `Peers: on (send-only) — this session is ${state.address}`;
-	return `Peers: on — this session is ${state.address}`;
+	const address = `${state.address}${state.alias ? ` (alias ${state.alias})` : ""}`;
+	if (!state.receiving) return `Peers: on (send-only) — this session is ${address}`;
+	return `Peers: on — this session is ${address}`;
 }
 
 interface BoundTarget {
 	target: MailboxTarget;
 	enabled: boolean;
+	alias: string | null;
 	unsubscribe: () => void;
 }
 
@@ -78,6 +87,11 @@ function isSnapshot(value: unknown): value is MailboxSnapshot {
 					(typeof target.conversation === "string" && /^[0-9a-f]{8}$/.test(target.conversation))) &&
 				"title" in target &&
 				(target.title === null || typeof target.title === "string") &&
+				"alias" in target &&
+				(target.alias === null ||
+					(typeof target.alias === "string" && normalizePeerAlias(target.alias) === target.alias)) &&
+				"cwd" in target &&
+				(target.cwd === null || typeof target.cwd === "string") &&
 				"busy" in target &&
 				typeof target.busy === "boolean",
 		)
@@ -115,6 +129,7 @@ export class MailboxService implements IrcRemoteRouter {
 	readonly #agentRegistry: AgentRegistry;
 	readonly #targets = new Map<string, BoundTarget>();
 	readonly #notifications = new Set<BoundTarget>();
+	readonly #serial = new Serial();
 	#cwd: string | undefined;
 	#address: string | undefined;
 	#publication: LocalEndpointPublication | undefined;
@@ -149,13 +164,29 @@ export class MailboxService implements IrcRemoteRouter {
 		if ([...this.#targets.values()].some(bound => bound.target.conversation === target.conversation)) {
 			throw new Error(`Mailbox conversation "${target.conversation}" is already bound.`);
 		}
-		const bound: BoundTarget = { target, enabled: cfgIrcCrossProcess.get(target.settings), unsubscribe: () => {} };
+		const bound: BoundTarget = {
+			target,
+			enabled: cfgIrcCrossProcess.get(target.settings),
+			alias: normalizePeerAlias(cfgIrcPeerAlias.get(target.settings)),
+			unsubscribe: () => {},
+		};
 		this.#targets.set(target.agentId, bound);
-		bound.unsubscribe = cfgIrcCrossProcess.listen(target.settings, enabled => {
+		const unsubscribeEnabled = cfgIrcCrossProcess.listen(target.settings, enabled => {
 			bound.enabled = enabled;
 			this.#notifications.add(bound);
 			this.#schedule();
 		});
+		const unsubscribeAlias = cfgIrcPeerAlias.listen(target.settings, value => {
+			const alias = normalizePeerAlias(value);
+			if (alias === bound.alias) return;
+			bound.alias = alias;
+			if (bound.enabled) this.#notifications.add(bound);
+			this.#schedule();
+		});
+		bound.unsubscribe = () => {
+			unsubscribeEnabled();
+			unsubscribeAlias();
+		};
 		if (bound.enabled) this.#notifications.add(bound);
 		this.#schedule();
 		return () => {
@@ -172,9 +203,14 @@ export class MailboxService implements IrcRemoteRouter {
 		if (this.#closed || !bound?.enabled) return { enabled: false };
 		const address = `${this.address}${bound.target.conversation === null ? "" : `.${bound.target.conversation}`}`;
 		if (bound.target.receive && this.#publicationError !== undefined) {
-			return { enabled: true, address, receiving: false, error: this.#publicationError };
+			return { enabled: true, address, alias: bound.alias, receiving: false, error: this.#publicationError };
 		}
-		return { enabled: true, address, receiving: bound.target.receive && this.#publication !== undefined };
+		return {
+			enabled: true,
+			address,
+			alias: bound.alias,
+			receiving: bound.target.receive && this.#publication !== undefined,
+		};
 	}
 
 	async whenSettled(): Promise<void> {
@@ -189,7 +225,8 @@ export class MailboxService implements IrcRemoteRouter {
 	}
 
 	#schedule(): void {
-		this.#pending = this.#pending.then(() => this.#reconcile());
+		this.#pending = this.#serial.run(() => this.#reconcile());
+		void this.#pending.catch(error => logger.warn("Mailbox reconciliation failed", { error }));
 	}
 
 	async #reconcile(): Promise<void> {
@@ -236,16 +273,25 @@ export class MailboxService implements IrcRemoteRouter {
 				address: this.address,
 				id: this.id,
 				pid: process.pid,
-				cwd: this.#cwd!,
+				cwd: boundField(this.#cwd!),
 				startedAt: this.#startedAt,
 				targets: [...this.#targets.values()]
 					.filter(bound => !this.#closed && bound.enabled && bound.target.receive)
-					.map(({ target }) => ({ conversation: target.conversation, ...target.describe() })),
+					.map(({ target, alias }) => {
+						const { title, busy, cwd } = target.describe();
+						return {
+							conversation: target.conversation,
+							title: title === null ? null : boundField(title),
+							busy,
+							alias: alias === null ? null : boundField(alias),
+							cwd: cwd === undefined ? null : boundField(cwd),
+						};
+					}),
 			};
 			return { ok: true, snapshot };
 		}
 		if (request.op !== "deliver") return { ok: false, error: "malformed_request" };
-		const { from, body, to, replyTo, noWake } = request;
+		const { from, body, to, replyTo, noWake, senderDisplay } = request;
 		if (
 			typeof from !== "string" ||
 			!MAILBOX_ADDRESS_PATTERN.test(from) ||
@@ -265,35 +311,83 @@ export class MailboxService implements IrcRemoteRouter {
 		) {
 			return { ok: false, error: "malformed_request" };
 		}
-		const receipt = await this.#bus.send({ from, to: bound.target.agentId, body, replyTo, remote: true, noWake });
+		let display: IrcMessage["senderDisplay"];
+		if (senderDisplay !== undefined) {
+			if (
+				!senderDisplay ||
+				typeof senderDisplay !== "object" ||
+				!("cwd" in senderDisplay) ||
+				typeof senderDisplay.cwd !== "string" ||
+				!("title" in senderDisplay) ||
+				(senderDisplay.title !== null && typeof senderDisplay.title !== "string")
+			) {
+				return { ok: false, error: "malformed_request" };
+			}
+			display = {
+				cwd: boundField(senderDisplay.cwd),
+				title: senderDisplay.title === null ? null : boundField(senderDisplay.title),
+			};
+		}
+		const receipt = await this.#bus.send({
+			from,
+			to: bound.target.agentId,
+			body,
+			replyTo,
+			remote: true,
+			noWake,
+			senderDisplay: display,
+		});
 		return { ok: true, receipt };
 	}
 
-	async listPeers(): Promise<MailboxPeer[]> {
-		const snapshots = await listLocalEndpoints<MailboxSnapshot>(this.#registry, async entry => {
-			if (entry.meta.instanceId === this.#address) return { status: "skip" };
-			const result = await queryLocalEndpoint(this.#registry, entry.meta, { op: "snapshot" }, 1500);
-			if (result.status !== "ok") return result;
-			const snapshot = result.value.snapshot;
-			if (result.value.ok !== true || !isSnapshot(snapshot) || snapshot.address !== entry.meta.instanceId) {
-				return { status: "skip" };
-			}
-			return { status: "ok", value: snapshot };
-		});
+	async listPeers(options?: { signal?: AbortSignal }): Promise<MailboxPeer[]> {
+		const snapshots = await listLocalEndpoints<MailboxSnapshot>(
+			this.#registry,
+			async entry => {
+				if (entry.meta.instanceId === this.#address) return { status: "skip" };
+				const result = await queryLocalEndpoint(
+					this.#registry,
+					entry.meta,
+					{ op: "snapshot" },
+					1500,
+					options?.signal,
+				);
+				if (result.status !== "ok") return result;
+				const snapshot = result.value.snapshot;
+				if (result.value.ok !== true || !isSnapshot(snapshot) || snapshot.address !== entry.meta.instanceId) {
+					return { status: "skip" };
+				}
+				return { status: "ok", value: snapshot };
+			},
+			options,
+		);
 		return snapshots.flatMap(({ value }) =>
 			value.targets.map(target => ({
 				...target,
 				address: `${value.address}${target.conversation === null ? "" : `.${target.conversation}`}`,
 				id: value.id,
 				pid: value.pid,
-				cwd: value.cwd,
+				cwd: target.cwd ?? value.cwd,
 			})),
 		);
 	}
 
+	/** Canonical address or alias → live peer. Exact matches only. */
+	async resolvePeer(to: string, options?: { signal?: AbortSignal }): Promise<MailboxPeerResolution> {
+		const peers = await this.listPeers(options);
+		const exact = peers.filter(peer => peer.address === to);
+		const matches = exact.length > 0 ? exact : peers.filter(peer => peer.alias === to);
+		const unique = [...new Map(matches.map(peer => [peer.address, peer])).values()];
+		if (unique.length === 0) return { status: "not_found" };
+		if (unique.length > 1) return { status: "ambiguous", candidates: unique.map(peer => peer.address).sort() };
+		return { status: "found", peer: unique[0]! };
+	}
+
 	handles(to: string): boolean {
 		return (
-			!this.#closed && MAILBOX_ADDRESS_PATTERN.test(to) && [...this.#targets.values()].some(bound => bound.enabled)
+			!this.#closed &&
+			(MAILBOX_ADDRESS_PATTERN.test(to) || normalizePeerAlias(to) === to) &&
+			[...this.#targets.values()].some(bound => bound.enabled)
 		);
 	}
 
@@ -304,16 +398,41 @@ export class MailboxService implements IrcRemoteRouter {
 		if (this.#closed || !sender.enabled) return fail("Cross-process peers are off for this session — run /peers on.");
 		const from = `${this.address}${sender.target.conversation === null ? "" : `.${sender.target.conversation}`}`;
 		const noWake = this.#agentRegistry.get(message.from)?.session?.isRemoteWakeTurn() === true;
-		const [address, conversation] = message.to.split(".");
+		let to = message.to;
 		try {
+			if (!MAILBOX_ADDRESS_PATTERN.test(to)) {
+				const resolution = await this.resolvePeer(to);
+				if (resolution.status === "not_found") {
+					return fail(`No local agent or omp peer named "${to}" — read history:// to list agents and peers.`);
+				}
+				if (resolution.status === "ambiguous") {
+					return fail(
+						`"${to}" matches more than one omp peer; use an address: ${resolution.candidates.join(", ")}`,
+					);
+				}
+				to = resolution.peer.address;
+			}
+			const [address, conversation] = to.split(".");
 			const entry = (await readLocalEndpointEntries(this.#registry)).find(
 				candidate => candidate.meta.instanceId === address,
 			);
 			if (!entry) return fail(`No omp peer "${message.to}" is running — read history:// to list peers.`);
+			const { cwd, title } = sender.target.describe();
 			const result = await queryLocalEndpoint(
 				this.#registry,
 				entry.meta,
-				{ op: "deliver", from, to: conversation ?? null, body: message.body, replyTo: message.replyTo, noWake },
+				{
+					op: "deliver",
+					from,
+					to: conversation ?? null,
+					body: message.body,
+					replyTo: message.replyTo,
+					noWake,
+					senderDisplay: {
+						cwd: boundField(cwd ?? this.#cwd!),
+						title: title === null ? null : boundField(title),
+					},
+				},
 				30_000,
 			);
 			if (result.status === "dead") return fail(`Peer ${message.to} is not reachable.`);

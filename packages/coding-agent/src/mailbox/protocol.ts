@@ -1,6 +1,7 @@
 import * as path from "node:path";
-import { getBaseConfigRoot } from "@oh-my-pi/pi-utils";
+import { getBaseConfigRoot, slugify } from "@oh-my-pi/pi-utils";
 import type { LocalEndpointRegistry } from "../ipc/local-endpoint-registry";
+import { sanitizeAgentId } from "../task/name-generator";
 
 export const MAILBOX_PROTOCOL_VERSION = 1;
 export const MAILBOX_MAX_BODY_BYTES = 128 * 1024;
@@ -15,20 +16,12 @@ export const MAILBOX_REGISTRY: LocalEndpointRegistry = {
 	},
 	pipePrefix: "omp-irc",
 	version: MAILBOX_PROTOCOL_VERSION,
-	maxRequestBytes: 256 * 1024,
-	maxResponseBytes: 256 * 1024,
+	maxRequestBytes: 1024 * 1024,
+	maxResponseBytes: 1024 * 1024,
 };
 
 export function mailboxSlug(cwd: string): string {
-	return (
-		path
-			.basename(cwd)
-			.toLowerCase()
-			.replace(/[^a-z0-9]+/g, "-")
-			.replace(/^-+|-+$/g, "")
-			.slice(0, 32)
-			.replace(/-+$/g, "") || "omp"
-	);
+	return slugify(path.basename(cwd), { maxLength: 32 }) || "omp";
 }
 
 export function mailboxAddress(cwd: string, id: string): string {
@@ -41,10 +34,20 @@ export function mailboxConversationSuffix(sessionId: string): string {
 
 export const MAILBOX_ADDRESS_PATTERN = /^[a-z0-9]+(?:-[a-z0-9]+)*-[0-9a-f]{8}(?:\.[0-9a-f]{8})?$/;
 
+/** Peer aliases reuse local agent-id sanitization and cannot be canonical addresses. */
+export function normalizePeerAlias(value: string): string | null {
+	if (MAILBOX_ADDRESS_PATTERN.test(value)) return null;
+	const alias = sanitizeAgentId(value);
+	return alias && !MAILBOX_ADDRESS_PATTERN.test(alias) ? alias : null;
+}
+
 export interface MailboxTargetSnapshot {
 	conversation: string | null;
 	title: string | null;
 	busy: boolean;
+	alias: string | null;
+	/** Conversation workspace; null → use the process cwd. */
+	cwd: string | null;
 }
 
 export interface MailboxSnapshot {

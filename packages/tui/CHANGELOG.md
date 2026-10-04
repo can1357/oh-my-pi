@@ -2,11 +2,11 @@
 
 ## [Unreleased]
 
-## [18.6.0] - 2026-10-03
 ### Added
 
-- Added a `peers` status-line segment that shows this process's cross-process peer address while peer messaging is on ([#14263](https://github.com/can1357/oh-my-pi/pull/14263) by [@jaredlyon](https://github.com/jaredlyon))
+- Added a `peers` status-line segment that shows this process's cross-process peer address while peer messaging is on, send-only peer rows in the Agent Hub, and the sender's session title and workspace on incoming peer message cards ([#14263](https://github.com/can1357/oh-my-pi/pull/14263) by [@jaredlyon](https://github.com/jaredlyon))
 
+## [18.6.0] - 2026-10-03
 ### Fixed
 
 - Fixed Alt+Up (restore queued steering), arrows and other escape-sequence keys on Windows acting as Esc (interrupting the turn) and typing `[1;3A` into the editor when the console host relays them one byte at a time ([#14216](https://github.com/can1357/oh-my-pi/pull/14216) by [@H4vC](https://github.com/H4vC)).

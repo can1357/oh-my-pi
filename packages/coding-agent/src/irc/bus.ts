@@ -20,6 +20,14 @@ export interface IrcRemoteRouter {
 	send(message: IrcMessage): Promise<IrcDeliveryReceipt>;
 }
 
+/** Thrown by a recipient session to refuse an IRC message outright (no mailbox fallback, no retry queue). */
+export class IrcDeliveryRejectedError extends Error {
+	constructor(message: string) {
+		super(message);
+		this.name = "IrcDeliveryRejectedError";
+	}
+}
+
 interface IrcWaiter {
 	from?: string;
 	resolve: (msg: IrcMessage) => void;
@@ -183,6 +191,9 @@ export class IrcBus {
 			if (!opts?.suppressRelay) this.#relayToMainUi(message);
 			return { to: message.to, outcome: revived ? "revived" : delivery };
 		} catch (error) {
+			if (error instanceof IrcDeliveryRejectedError) {
+				return { to: message.to, outcome: "failed", error: error.message };
+			}
 			// Live hand-off failed (e.g. recipient disposed mid-shutdown): buffer
 			// the message so a later `wait`/`inbox` from the recipient can still
 			// pick it up. The receipt stays "failed" — the recipient has not

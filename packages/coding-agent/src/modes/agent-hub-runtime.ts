@@ -8,10 +8,14 @@ import {
 } from "@oh-my-pi/pi-tui/overlays/agent-hub-projection";
 import type { AgentTranscriptSource } from "@oh-my-pi/pi-tui/overlays/agent-transcript-viewer";
 import type { ObservableSession, SessionObserverRegistry } from "@oh-my-pi/pi-tui/overlays/session-observer-registry";
+import type { AgentRecordLike } from "@oh-my-pi/pi-tui/overlays/agent-hub-types";
 import { AgentActivityIndex } from "../activity";
 import { getRoleInfo } from "../config/model-roles";
 import type { Settings } from "../config/settings";
 import { IrcBus } from "../irc/bus";
+import { executeSend } from "../irc/messaging";
+import { MailboxService } from "../mailbox/service";
+import { cfgIrcCrossProcess } from "../irc/settings";
 import { AgentLifecycleManager } from "../registry/agent-lifecycle";
 import { type AgentRef, AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-registry";
 import { registerPersistedSubagents, sessionFileBelongsToRoot } from "../registry/persisted-agents";
@@ -41,10 +45,20 @@ export function createAgentHubRuntime(
 		remote?: AgentHubRemote;
 		settings?: Settings;
 		sessionFile?: string | null;
+		senderId?: string;
 	} = {},
 ): Pick<
 	AgentHubDeps<AgentRef>,
-	"registry" | "lifecycle" | "irc" | "activity" | "manageActivityLive" | "transcript" | "loadPersisted" | "getRoleInfo"
+	| "registry"
+	| "lifecycle"
+	| "irc"
+	| "activity"
+	| "manageActivityLive"
+	| "transcript"
+	| "loadPersisted"
+	| "getRoleInfo"
+	| "listPeers"
+	| "sendPeer"
 > {
 	const registry = options.registry ?? AgentRegistry.global();
 	return {
@@ -56,6 +70,28 @@ export function createAgentHubRuntime(
 		transcript: agentTranscriptSource,
 		loadPersisted: shouldContinue => registerPersistedSubagents(registry, options.sessionFile, { shouldContinue }),
 		getRoleInfo: options.settings ? role => getRoleInfo(role, options.settings!) : undefined,
+		listPeers: async () => {
+			if (!options.settings || !cfgIrcCrossProcess.get(options.settings)) return [];
+			const peers = await MailboxService.global().listPeers();
+			if (!cfgIrcCrossProcess.get(options.settings)) return [];
+			return peers.map((peer): AgentRecordLike => ({
+				id: peer.address,
+				displayName: peer.alias ?? peer.address,
+				kind: "peer",
+				status: peer.busy ? "running" : "idle",
+				session: null,
+				sessionFile: null,
+				createdAt: 0,
+				lastActivity: 0,
+				peer: { cwd: peer.cwd, title: peer.title },
+			}));
+		},
+		sendPeer: options.senderId
+			? async (to, message) => {
+					const result = await executeSend({ registry, senderId: options.senderId! }, { to, message });
+					return result.content.flatMap(content => (content.type === "text" ? [content.text] : [])).join("\n");
+				}
+			: undefined,
 	};
 }
 

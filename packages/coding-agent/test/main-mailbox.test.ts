@@ -3,9 +3,14 @@ import { parseArgs } from "@oh-my-pi/pi-coding-agent/cli/args";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { MailboxService } from "@oh-my-pi/pi-coding-agent/mailbox/service";
 import { runRootCommand } from "@oh-my-pi/pi-coding-agent/main";
-import { cfgIrcCrossProcess } from "@oh-my-pi/pi-coding-agent/modes/settings";
+import { cfgIrcCrossProcess } from "@oh-my-pi/pi-coding-agent/irc/settings";
 import type { CreateAgentSessionResult } from "@oh-my-pi/pi-coding-agent/sdk";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import type { AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import { MCPManager } from "@oh-my-pi/pi-coding-agent/mcp/manager";
+import * as runtimeInit from "@oh-my-pi/pi-coding-agent/modes/runtime-init";
+import { runRpcMode } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-mode";
+import { RpcOutputWriter } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-output";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { logger, postmortem, TempDir } from "@oh-my-pi/pi-utils";
@@ -26,11 +31,15 @@ describe("--mailbox", () => {
 		expect(args.messages).toEqual(["hello"]);
 	});
 
-	for (const mailboxFlag of [false, true]) {
+	for (const [savedEnabled, mailboxFlag] of [
+		[true, false],
+		[false, true],
+		[false, false],
+	] as const) {
 		it(
 			mailboxFlag
-				? "lets print receive only with --mailbox and withdraws before capturing the answer"
-				: "keeps print send-only despite a saved enabled setting and withdraws before capture",
+				? "lets print receive only with --mailbox after readiness and withdraws before shutdown"
+				: `keeps print send-only with peers ${savedEnabled ? "on" : "off"} and retains the toggle target`,
 			async () => {
 				const dir = TempDir.createSync("@pi-main-mailbox-");
 				tempDirs.push(dir);
@@ -38,31 +47,42 @@ describe("--mailbox", () => {
 				const manager = SessionManager.create(dir.path(), `${dir.path()}/sessions`);
 				const settings = Settings.isolated({
 					"marketplace.autoUpdate": "off",
-					"irc.crossProcess": !mailboxFlag,
+					"irc.crossProcess": savedEnabled,
 				});
 				let bound = false;
 				let captured = false;
+				let subscriber: ((event: AgentSessionEvent) => void) | undefined;
+				let toolsReady = false;
+				const mcpManager = new MCPManager(dir.path());
+				vi.spyOn(mcpManager, "waitForStartup").mockResolvedValue({ connected: [], pending: [], failed: [] });
+				vi.spyOn(mcpManager, "getTools").mockReturnValue([]);
 				const session = {
 					extensionRunner: undefined,
 					model: { provider: "anthropic", id: "test-model" },
 					settings,
 					sessionManager: manager,
 					isStreaming: false,
-					subscribe: () => () => {},
+					subscribe: (listener: (event: AgentSessionEvent) => void) => {
+						subscriber = listener;
+						return () => {};
+					},
 					addDisposer: () => {},
 					getAgentId: () => "Main",
 					getAllToolNames: () => [],
 					getQueuedMessages: () => ({ steering: [], followUp: [] }),
-					getLastAssistantMessage: () => {
+					refreshMCPTools: async () => {
+						toolsReady = true;
+					},
+					prepareForHeadlessAdvisorDrain: () => {
 						expect(bound).toBe(false);
 						captured = true;
-						return undefined;
 					},
-					prepareForHeadlessAdvisorDrain: () => {},
 					setTextOutputCommitted: () => {},
 					waitForAdvisorCatchup: async () => true,
 					prompt: async () => {
 						expect(bound).toBe(true);
+						subscriber?.({ type: "agent_start" });
+						subscriber?.({ type: "agent_end", messages: [], isTerminal: true });
 					},
 					dispose: () => manager.close(),
 				} as unknown as AgentSession;
@@ -71,7 +91,14 @@ describe("--mailbox", () => {
 				vi.spyOn(service, "whenSettled").mockResolvedValue(undefined);
 				const bindSpy = vi.spyOn(service, "bindTarget").mockImplementation(target => {
 					expect(target.receive).toBe(mailboxFlag);
-					expect(cfgIrcCrossProcess.get(target.settings)).toBe(true);
+					expect(cfgIrcCrossProcess.get(target.settings)).toBe(savedEnabled || mailboxFlag);
+					if (mailboxFlag) {
+						expect(subscriber).toBeDefined();
+						expect(toolsReady).toBe(true);
+						// A peer arriving at publication is already visible to the output subscriber.
+						subscriber?.({ type: "agent_start" });
+						subscriber?.({ type: "agent_end", messages: [], isTerminal: true });
+					}
 					bound = true;
 					return () => {
 						bound = false;
@@ -91,7 +118,7 @@ describe("--mailbox", () => {
 					await runRootCommand(args, rawArgs, {
 						discoverAuthStorage: async () => authStorage,
 						settings,
-						createAgentSession: async () => ({ session }) as unknown as CreateAgentSessionResult,
+						createAgentSession: async () => ({ session, mcpManager }) as unknown as CreateAgentSessionResult,
 					});
 					expect(bindSpy).toHaveBeenCalledTimes(1);
 					expect(captured).toBe(true);
@@ -104,4 +131,80 @@ describe("--mailbox", () => {
 			15_000,
 		);
 	}
+
+	it("forwards a peer event arriving at RPC publication and withdraws on EOF", async () => {
+		using dir = TempDir.createSync("@pi-rpc-mailbox-");
+		const manager = SessionManager.create(dir.path(), dir.join("sessions"));
+		let subscriber: ((event: AgentSessionEvent) => void) | undefined;
+		let initialized = false;
+		let receiving = false;
+		const disposers: Array<() => void> = [];
+		const session = {
+			settings: Settings.isolated(),
+			sessionManager: manager,
+			goalRuntime: { clearAccounting: () => {} },
+			setGoalModeState: () => {},
+			getGoalModeState: () => undefined,
+			customCommands: [],
+			skills: [],
+			setSlashCommands: () => {},
+			subscribeCommandMetadataChanged: () => () => {},
+			subscribe: (listener: (event: AgentSessionEvent) => void) => {
+				subscriber = listener;
+				return () => {};
+			},
+			addDisposer: (disposer: () => void) => disposers.push(disposer),
+			dispose: async () => {
+				for (const dispose of disposers) dispose();
+				await manager.close();
+			},
+		} as unknown as AgentSession;
+		vi.spyOn(runtimeInit, "initializeExtensions").mockImplementation(async () => {
+			expect(receiving).toBe(false);
+			initialized = true;
+		});
+		const frames: unknown[] = [];
+		vi.spyOn(RpcOutputWriter.prototype, "write").mockImplementation(lines => {
+			for (const line of lines) frames.push(JSON.parse(line));
+		});
+		vi.spyOn(MailboxService.global(), "whenSettled").mockResolvedValue(undefined);
+		vi.spyOn(MailboxService.global(), "close").mockResolvedValue(undefined);
+		const exited = new Error("test RPC exit");
+		vi.spyOn(process, "exit").mockImplementation(() => {
+			throw exited;
+		});
+		const notifications = process.env.PI_NOTIFICATIONS;
+		try {
+			await expect(
+				runRpcMode(session, {
+					input: new ReadableStream({ start: controller => controller.close() }),
+					bindMailboxTarget: () => {
+						expect(initialized).toBe(true);
+						expect(subscriber).toBeDefined();
+						receiving = true;
+						subscriber?.({
+							type: "notice",
+							level: "info",
+							message: "peer arrived at publication",
+							source: "mailbox-test",
+						});
+						return () => {
+							receiving = false;
+						};
+					},
+				}),
+			).rejects.toBe(exited);
+			expect(frames).toContainEqual({
+				type: "notice",
+				level: "info",
+				message: "peer arrived at publication",
+				source: "mailbox-test",
+			});
+			expect(receiving).toBe(false);
+		} finally {
+			if (notifications === undefined) delete process.env.PI_NOTIFICATIONS;
+			else process.env.PI_NOTIFICATIONS = notifications;
+			await manager.close().catch(() => {});
+		}
+	});
 });

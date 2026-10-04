@@ -1,9 +1,10 @@
-import { beforeAll, expect, test } from "bun:test";
+import { beforeAll, expect, test, vi } from "bun:test";
 import * as fs from "node:fs";
 import type { TspKind, TspPickerProps } from "@oh-my-pi/pi-wire";
 import type { DescribeContext, NativeChild, NativeNode } from "../src/native/node";
-import { AgentHubOverlayComponent } from "../src/overlays/agent-hub";
+import { type AgentHubDeps, AgentHubOverlayComponent } from "../src/overlays/agent-hub";
 import type { AgentRecordLike } from "../src/overlays/agent-hub-types";
+import { HookEditorComponent } from "../src/overlays/hook-editor";
 import { SessionObserverRegistry } from "../src/overlays/session-observer-registry";
 import { initTheme } from "../src/theme";
 
@@ -38,7 +39,11 @@ function agent(id: string, lastActivity: number, extra?: Partial<AgentRecordLike
 	};
 }
 
-function createHub(agents: AgentRecordLike[], focused: string[] = []): AgentHubOverlayComponent {
+function createHub(
+	agents: AgentRecordLike[],
+	focused: string[] = [],
+	overrides: Partial<AgentHubDeps> = {},
+): AgentHubOverlayComponent {
 	return new AgentHubOverlayComponent({
 		observers: new SessionObserverRegistry(),
 		transcript: { fs, parseEntries: () => [] },
@@ -59,6 +64,7 @@ function createHub(agents: AgentRecordLike[], focused: string[] = []): AgentHubO
 		focusAgent: async id => {
 			focused.push(id);
 		},
+		...overrides,
 	});
 }
 
@@ -132,6 +138,63 @@ test("the By parent action and the t key both switch the picker to the parent tr
 
 		hub.handleInput("t");
 		expect(pickerProps(hub).layout).toBe("rows");
+	} finally {
+		hub.dispose();
+	}
+});
+
+test("peer rows offer Send, reject forged local actions, and never pretend to be spawned by Main", async () => {
+	const focused: string[] = [];
+	const sendPeer = vi.fn(async () => "Delivered.");
+	const showOverlay = vi.fn((_component: unknown, _options: unknown) => ({ hide: () => {} }));
+	const lifecycle = vi.fn(() => {
+		throw new Error("peer must not use local lifecycle");
+	});
+	const remote = { chat: vi.fn(), revive: vi.fn(), kill: vi.fn(), readTranscript: vi.fn(async () => null) };
+	const peer = agent("project-deadbeef", 0, {
+		kind: "peer",
+		displayName: "reviewer",
+		peer: { cwd: "C:/project\x1b]52;c;payload\x07\ninjected", title: "Review\nworkspace" },
+	});
+	const hub = createHub([], focused, {
+		listPeers: async () => [peer],
+		sendPeer,
+		lifecycle,
+		remote,
+		ui: { showOverlay, setFocus: () => {}, requestRender: () => {}, requestComponentRender: () => {} } as never,
+	});
+	try {
+		await hub.initialRowsReady;
+		const props = pickerProps(hub);
+		expect(props.items?.map(item => [item.id, item.label])).toEqual([["project-deadbeef", "reviewer"]]);
+		expect(props.actions?.find(action => action.id === "send")?.disabled).toBeUndefined();
+		for (const action of ["open", "focus", "revive", "kill"]) {
+			expect(props.actions?.find(item => item.id === action)?.disabled).toBeTruthy();
+			hub.handleNativeEvent({ type: "action", key: "", act: action, mods: [] });
+		}
+		hub.openChat(peer.id);
+		hub.handleInput("r");
+		hub.handleInput("x");
+		expect(showOverlay).not.toHaveBeenCalled();
+		expect(lifecycle).not.toHaveBeenCalled();
+		expect(focused).toEqual([]);
+		expect(remote.chat).not.toHaveBeenCalled();
+		expect(remote.revive).not.toHaveBeenCalled();
+		expect(remote.kill).not.toHaveBeenCalled();
+		expect(remote.readTranscript).not.toHaveBeenCalled();
+		const raw = hub.render(160).join("\n");
+		const rendered = Bun.stripANSI(raw);
+		expect(rendered).not.toContain("Spawned by Main");
+		expect(rendered).not.toContain("Shared workspace");
+		expect(raw).not.toContain("\x1b]52");
+		expect(rendered).not.toContain(":revive");
+		expect(rendered).not.toContain("only parked agents can be revived");
+		expect(rendered).toContain(":send");
+		hub.handleNativeEvent({ type: "action", key: "", act: "send", mods: [] });
+		const composer = showOverlay.mock.calls[0]?.[0];
+		expect(composer).toBeInstanceOf(HookEditorComponent);
+		(composer as HookEditorComponent).handleInput("\x1b");
+		expect(sendPeer).not.toHaveBeenCalled();
 	} finally {
 		hub.dispose();
 	}

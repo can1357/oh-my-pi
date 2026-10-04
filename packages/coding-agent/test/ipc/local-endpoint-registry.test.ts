@@ -175,4 +175,70 @@ describe("local endpoint registry", () => {
 		expect(await rawRequest(publication.endpoint, line + line)).toEqual({ ok: true, v: 1, answer: 42 });
 		expect(handler).toHaveBeenCalledTimes(1);
 	});
+
+	it("skips an already-aborted query before opening a socket and leaves stale metadata untouched", async () => {
+		const { registry, publication, meta } = await publish(() => ({ ok: true }));
+		await publication.close();
+		await Bun.write(path.join(registry.dir, `${publication.entryId}.json`), JSON.stringify(meta));
+		const controller = new AbortController();
+		controller.abort();
+		const connect = vi.spyOn(net, "createConnection");
+		expect(await queryLocalEndpoint(registry, meta, {}, 1500, controller.signal)).toEqual({
+			status: "skip",
+			error: "aborted",
+		});
+		expect(connect).not.toHaveBeenCalled();
+		expect(
+			await listLocalEndpoints(
+				registry,
+				entry => queryLocalEndpoint(registry, entry.meta, {}, 1500, controller.signal),
+				{ signal: controller.signal },
+			),
+		).toEqual([]);
+		expect(await readLocalEndpointEntries(registry)).toEqual([{ entryId: publication.entryId, meta }]);
+	});
+
+	it("aborts a connected query, closes its client, and permits later queries to the same live endpoint", async () => {
+		const received = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		const { registry, meta } = await publish(async () => {
+			received.resolve();
+			await release.promise;
+			return { ok: true, answer: 42 };
+		});
+		const controller = new AbortController();
+		const connect = vi.spyOn(net, "createConnection");
+		const query = queryLocalEndpoint(registry, meta, {}, 30_000, controller.signal);
+		try {
+			await received.promise;
+			controller.abort();
+			expect(await query).toEqual({ status: "skip", error: "aborted" });
+			const socket = connect.mock.results[0]?.value;
+			if (!(socket instanceof net.Socket)) throw new Error("Query did not create a client socket");
+			expect(socket.destroyed).toBe(true);
+			expect(await readLocalEndpointEntries(registry)).toHaveLength(1);
+		} finally {
+			release.resolve();
+		}
+		expect(await queryLocalEndpoint(registry, meta, {}, 1500)).toMatchObject({
+			status: "ok",
+			value: { answer: 42 },
+		});
+	});
+
+	it("does not prune a dead probe result when cancellation wins the listing race", async () => {
+		const { registry, publication, meta } = await publish(() => ({ ok: true }));
+		const controller = new AbortController();
+		expect(
+			await listLocalEndpoints(
+				registry,
+				async () => {
+					controller.abort();
+					return { status: "dead" };
+				},
+				{ signal: controller.signal },
+			),
+		).toEqual([]);
+		expect(await readLocalEndpointEntries(registry)).toEqual([{ entryId: publication.entryId, meta }]);
+	});
 });

@@ -10,6 +10,7 @@
  */
 
 import { toNumber } from "@oh-my-pi/pi-catalog/utils";
+import { slugify } from "@oh-my-pi/pi-utils";
 import { isUsageLimitExhausted } from "../auth/usage-report";
 import {
 	buildXAICliBillingUrl,
@@ -96,11 +97,7 @@ function buildPercentAmount(usagePercent: number): UsageAmount {
 }
 
 function slugifyProduct(product: string): string {
-	return product
-		.trim()
-		.toLowerCase()
-		.replace(/[^a-z0-9]+/g, "-")
-		.replace(/^-+|-+$/g, "");
+	return slugify(product);
 }
 
 function buildPeriodWindow(period: XaiBillingPeriod): UsageWindow {
