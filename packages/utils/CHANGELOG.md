@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed archive extraction failing entirely on Windows without the symlink privilege when the archive contains symlinks; directory links now degrade to junctions and file links to copies ([#14267](https://github.com/can1357/oh-my-pi/pull/14267) by [@jchanghong023](https://github.com/jchanghong023)).
+
 ## [18.5.1] - 2026-10-03
 
 ### Added
