@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Reduced CPU spent on SSE framing and event dispatch while streaming long reasoning and tool-call turns ([#14311](https://github.com/can1357/oh-my-pi/pull/14311) by [@abilliontokens](https://github.com/abilliontokens)).
+
 ## [18.5.1] - 2026-10-03
 
 ### Added

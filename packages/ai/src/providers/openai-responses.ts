@@ -1451,6 +1451,46 @@ export function mapOpenAIResponsesToolChoiceForTools(
 	return customTool ? { type: "custom", name: customTool.customWireName ?? customTool.name } : mapped;
 }
 
+/**
+ * Memoized per-tool conversions for {@link convertTools}. Tool-heavy sessions
+ * (MCP catalogs) otherwise replay 3-4 deep schema walks per tool on every
+ * turn over byte-identical definitions. Entries key on the parameters-object
+ * identity — the upstream `stamp` memoization in `toolWireSchema` keeps those
+ * references stable across turns for unchanged tools — plus every scalar that
+ * affects the output. Only clean function conversions are cached; quarantined
+ * tools re-evaluate (and re-fire `onQuarantine`) every call, and the
+ * computer/custom branches stay direct. Converted items are treated as
+ * immutable downstream (filter/map/serialize only), matching the sharing the
+ * pipeline already assumes for schema references.
+ */
+type ConvertedToolCacheKey = { anchor: object; key: string };
+const convertedToolCache = new WeakMap<object, Map<string, OpenAITool>>();
+
+function convertedToolKey(
+	tool: Tool,
+	strict: boolean,
+	flavor: string | undefined,
+	allowFreeform: boolean,
+	rejectRootObjectUnion: boolean | undefined,
+	computerUse: boolean,
+	strictAllowed: boolean,
+): ConvertedToolCacheKey | undefined {
+	const params: unknown = tool.parameters;
+	if ((typeof params !== "object" || params === null) && typeof params !== "function") return undefined;
+	const key = [
+		tool.name,
+		tool.description ?? "",
+		tool.customWireName ?? "",
+		String(tool.strict ?? ""),
+		String(strict),
+		flavor ?? "",
+		String(allowFreeform),
+		String(rejectRootObjectUnion ?? ""),
+		String(computerUse),
+		String(strictAllowed),
+	].join(" ");
+	return { anchor: params, key };
+}
 /** @internal Exported for tests. */
 export function convertTools(
 	tools: Tool[],
@@ -1463,6 +1503,9 @@ export function convertTools(
 ): OpenAITool[] {
 	const allowFreeform = supportsFreeformApplyPatch(model);
 	const rejectRootObjectUnion = model.compat.rejectRootObjectUnion;
+	const toolSchemaFlavor = model.compat.toolSchemaFlavor;
+	const computerUse = model.supportsComputerUse === true;
+	const strictAllowed = !NO_STRICT;
 	const out: OpenAITool[] = [];
 	for (const tool of tools) {
 		if (tool.native?.type === "computer" && model.supportsComputerUse === true) {
@@ -1488,7 +1531,21 @@ export function convertTools(
 			} as unknown as OpenAITool);
 			continue;
 		}
-		const strict = !NO_STRICT && strictMode && tool.strict !== false;
+		const strict = strictAllowed && strictMode && tool.strict !== false;
+		const cacheKey = convertedToolKey(
+			tool,
+			strict,
+			toolSchemaFlavor,
+			allowFreeform,
+			rejectRootObjectUnion,
+			computerUse,
+			strictAllowed,
+		);
+		const cached = cacheKey === undefined ? undefined : convertedToolCache.get(cacheKey.anchor)?.get(cacheKey.key);
+		if (cached !== undefined) {
+			out.push(cached);
+			continue;
+		}
 		const baseParameters = toolWireSchema(tool);
 		// MFJS must run AFTER the Responses sanitizer: the sanitizer normalizes
 		// `{}` → `true` (issue #1179), and Moonshot's validator rejects boolean
@@ -1497,7 +1554,7 @@ export function convertTools(
 		const sanitized = sanitizeSchemaForOpenAIResponses(baseParameters);
 		const providerParameters = rejectRootObjectUnion ? flattenExclusiveRequiredRootUnion(sanitized) : sanitized;
 		const responseParameters =
-			model.compat.toolSchemaFlavor === "moonshot-mfjs"
+			toolSchemaFlavor === "moonshot-mfjs"
 				? (normalizeSchemaForMoonshot(providerParameters) as Record<string, unknown>)
 				: providerParameters;
 		const { schema: parameters, strict: effectiveStrict } = adaptSchemaForStrict(responseParameters, strict);
@@ -1511,7 +1568,7 @@ export function convertTools(
 			onQuarantine(tool.name, violation);
 			continue;
 		}
-		out.push({
+		const converted = {
 			type: "function",
 			name: tool.name,
 			description: tool.description || "",
@@ -1526,10 +1583,19 @@ export function convertTools(
 			// (#4527).
 			...(effectiveStrict
 				? { strict: true }
-				: !NO_STRICT && strictMode && tool.strict === false
+				: strictAllowed && strictMode && tool.strict === false
 					? { strict: false }
 					: {}),
-		} as OpenAITool);
+		} as OpenAITool;
+		if (cacheKey !== undefined) {
+			let inner = convertedToolCache.get(cacheKey.anchor);
+			if (!inner) {
+				inner = new Map<string, OpenAITool>();
+				convertedToolCache.set(cacheKey.anchor, inner);
+			}
+			inner.set(cacheKey.key, converted);
+		}
+		out.push(converted);
 	}
 	return out;
 }

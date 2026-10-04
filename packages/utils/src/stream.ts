@@ -341,6 +341,61 @@ export async function* readSseJson<T>(
 }
 
 /**
+ * Classify one `data:` frame for the lenient reader: skip empties, stop at the
+ * `[DONE]` sentinel (reporting through `onDone`) and at recoverable truncated
+ * tails, otherwise resolve to the parsed value or the raw text `JSON.parse`
+ * rejected. Shared by every `readSseJsonOrText` path so frame semantics cannot
+ * diverge between them.
+ */
+function dispatchDataFrame<T>(
+	data: string,
+	isTrailing: boolean,
+	onDone: (() => void) | undefined,
+): { stop: boolean; value?: T | string } {
+	if (data === "" || data === "[DONE]") {
+		if (data === "[DONE]") {
+			onDone?.();
+			return { stop: true };
+		}
+		return { stop: false };
+	}
+	try {
+		return { stop: false, value: JSON.parse(data) as T };
+	} catch (err) {
+		if (err instanceof SyntaxError && isTrailing && isRecoverableTrailingJson(data)) {
+			return { stop: true };
+		}
+		if (err instanceof SyntaxError) return { stop: false, value: data };
+		throw err;
+	}
+}
+
+/**
+ * Bank one wire line into a `data:` accumulation buffer. Covers exactly what
+ * the lenient reader observes: `data:` values (with one optional space) and
+ * the bare-`data` empty-value form the SSE spec defines. Comment lines never
+ * reach here; every other field is invisible downstream and ignored by the
+ * caller. Shared by the hot loop and the stream tail below.
+ */
+function appendDataLine(data: string | null, line: string): string | null {
+	if (line === "data") {
+		return data === null ? "" : `${data}\n`;
+	}
+	if (
+		line.charCodeAt(0) === 0x64 /* d */ &&
+		line.charCodeAt(1) === 0x61 /* a */ &&
+		line.charCodeAt(2) === 0x74 /* t */ &&
+		line.charCodeAt(3) === 0x61 /* a */ &&
+		line.charCodeAt(4) === 0x3a /* : */
+	) {
+		let value = line.slice(5);
+		if (value.charCodeAt(0) === 0x20 /* ' ' */) value = value.slice(1);
+		return data === null ? value : `${data}\n${value}`;
+	}
+	return data;
+}
+
+/**
  * Like {@link readSseJson}, but a `data:` frame that is not valid JSON is yielded
  * as its raw text instead of raising a `SyntaxError`. Cut-off container-shaped
  * stream tails stay recoverable, exactly as they are in {@link readSseJson}.
@@ -369,9 +424,90 @@ export async function* readSseJsonOrText<T>(
 	 */
 	onDone?: () => void,
 ): AsyncGenerator<T | string> {
-	for await (const frame of readSseFrames<T>(stream, signal, onEvent, onDone)) {
-		if (!frame.ok) yield frame.raw;
-		else yield frame.value;
+	if (onEvent !== undefined) {
+		// Diagnostic path: full event objects with raw wire lines for observers.
+		for await (const sse of readSseEvents(stream, signal, { captureRaw: true })) {
+			notifySseEventObserver(onEvent, sse);
+			const outcome = dispatchDataFrame<T>(sse.data, trailingEvents.has(sse), onDone);
+			if (outcome.stop) return;
+			if (outcome.value !== undefined) yield outcome.value;
+		}
+		return;
+	}
+	// Hot path: the token decode attaches no observer, so frames assemble
+	// straight off the byte stream with no ServerSentEvent allocation. The
+	// line scan mirrors readSseEvents (LF fast path gated on a per-batch CR
+	// check); frame semantics stay shared via dispatchDataFrame. Keep the two
+	// in sync.
+	const lineBuffer = new ConcatSink();
+	let data: string | null = null;
+	try {
+		for await (const chunk of abortableSource(stream, signal)) {
+			const text = lineBuffer.appendAndFlushText(chunk, SSE_DECODER);
+			if (text === undefined) continue;
+			const hasCR = text.indexOf("\r") !== -1;
+			let start = 0;
+			while (start < text.length) {
+				let lineEnd: number;
+				let advance: number;
+				if (!hasCR) {
+					lineEnd = text.indexOf("\n", start);
+					if (lineEnd === -1) lineEnd = text.length;
+					advance = lineEnd + 1;
+				} else {
+					lineEnd = start;
+					while (lineEnd < text.length) {
+						const code = text.charCodeAt(lineEnd);
+						if (code === LF || code === CR) break;
+						lineEnd++;
+					}
+					advance = lineEnd + 1;
+					if (text.charCodeAt(lineEnd) === CR && text.charCodeAt(lineEnd + 1) === LF) advance++;
+				}
+				const line = text.slice(start, lineEnd);
+				if (line.length === 0) {
+					if (data !== null) {
+						const outcome = dispatchDataFrame<T>(data, false, onDone);
+						data = null;
+						if (outcome.stop) return;
+						if (outcome.value !== undefined) yield outcome.value;
+					}
+				} else if (line.charCodeAt(0) !== 0x3a /* ':' */) {
+					data = appendDataLine(data, line);
+				}
+				start = advance;
+			}
+		}
+		// Treat any trailing partial line (no terminating line ending) as
+		// complete, dispatched trailing so a cut-off container tail ends
+		// iteration cleanly.
+		if (!lineBuffer.isEmpty) {
+			const tail = lineBuffer.flush();
+			if (tail) {
+				lineBuffer.clear();
+				const line = SSE_DECODER.decode(tail);
+				if (line.length !== 0 && line.charCodeAt(0) !== 0x3a /* ':' */) {
+					data = appendDataLine(data, line);
+				}
+				if (data !== null) {
+					const outcome = dispatchDataFrame<T>(data, true, onDone);
+					data = null;
+					if (outcome.stop) return;
+					if (outcome.value !== undefined) yield outcome.value;
+				}
+			}
+		}
+		// A stream without a closing blank line leaves a pending event behind:
+		// flush it trailing.
+		if (data !== null) {
+			const outcome = dispatchDataFrame<T>(data, true, onDone);
+			data = null;
+			if (outcome.stop) return;
+			if (outcome.value !== undefined) yield outcome.value;
+		}
+	} catch (err) {
+		if (signal?.aborted) return;
+		throw err;
 	}
 }
 
@@ -538,20 +674,35 @@ export async function* readSseEvents(
 		for await (const chunk of source) {
 			const text = lineBuffer.appendAndFlushText(chunk, SSE_DECODER);
 			if (text === undefined) continue;
-			let start = 0;
-			while (start < text.length) {
-				let lineEnd = start;
-				while (lineEnd < text.length) {
-					const code = text.charCodeAt(lineEnd);
-					if (code === LF || code === CR) break;
-					lineEnd++;
+			if (text.indexOf("\r") === -1) {
+				// LF-only fast path: one engine scan per line instead of a
+				// per-character loop. A per-line "\r" search would rescan the
+				// whole batch tail on LF-only streams (quadratic), so CR/CRLF
+				// batches keep the exact loop below.
+				let start = 0;
+				while (start < text.length) {
+					let lineEnd = text.indexOf("\n", start);
+					if (lineEnd === -1) lineEnd = text.length;
+					const event = pushSseLine(text.slice(start, lineEnd), state);
+					if (event) yield event;
+					start = lineEnd + 1;
 				}
-				const event = pushSseLine(text.slice(start, lineEnd), state);
-				if (event) yield event;
-				if (text.charCodeAt(lineEnd) === CR && text.charCodeAt(lineEnd + 1) === LF) {
-					lineEnd++;
+			} else {
+				let start = 0;
+				while (start < text.length) {
+					let lineEnd = start;
+					while (lineEnd < text.length) {
+						const code = text.charCodeAt(lineEnd);
+						if (code === LF || code === CR) break;
+						lineEnd++;
+					}
+					const event = pushSseLine(text.slice(start, lineEnd), state);
+					if (event) yield event;
+					if (text.charCodeAt(lineEnd) === CR && text.charCodeAt(lineEnd + 1) === LF) {
+						lineEnd++;
+					}
+					start = lineEnd + 1;
 				}
-				start = lineEnd + 1;
 			}
 		}
 		// Treat any trailing partial line (no terminating line ending) as complete.

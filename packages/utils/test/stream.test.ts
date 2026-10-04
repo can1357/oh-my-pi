@@ -428,6 +428,24 @@ describe("readSseJsonOrText", () => {
 		expect(await collectAsync(readSseJsonOrText(bytesStreamFromChunks(chunks)))).toEqual(['{"a":1', { b: 2 }]);
 		await expect(collectAsync(readSseJson(bytesStreamFromChunks(chunks)))).rejects.toThrow(SyntaxError);
 	});
+
+	it("parses comment/field/CRLF/bare-data streams like the shared framing", async () => {
+		// The no-observer hot path frames without ServerSentEvent objects; pin
+		// its field parsing (comments, non-data fields, CRLF, the bare-`data`
+		// empty-value form) against the shared machine's observable output.
+		const text =
+			": keep-alive\n" +
+			'event: message\nid: 7\nretry: 3000\ndata: {"a":1}\n\n' +
+			'data: {"b":2}\r\n\r\n' +
+			"datum: x\ndata\ndata: " +
+			'{"c":3}\n\n';
+		const expected = [{ a: 1 }, { b: 2 }, { c: 3 }];
+		const whole = [encoder.encode(text)];
+		expect(await collectAsync(readSseJsonOrText(bytesStreamFromChunks(whole)))).toEqual(expected);
+		const split = Array.from(encoder.encode(text), byte => Uint8Array.of(byte));
+		expect(await collectAsync(readSseJsonOrText(bytesStreamFromChunks(split)))).toEqual(expected);
+		expect(await collectAsync(readSseJson(bytesStreamFromChunks(whole)))).toEqual(expected);
+	});
 });
 
 function bytesStreamFromChunks(chunks: Uint8Array[]): ReadableStream<Uint8Array> {
