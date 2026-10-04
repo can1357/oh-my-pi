@@ -926,7 +926,7 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 	// - require an active tool that declares `skill://` read capability (any tool
 	//   name, not just `read`, so custom resolvers count once projected; mounted
 	//   xd:// tools count too when their metadata is projected);
-	// - drop skills with frontmatter `hide: true` (still loadable via skill:// and /skill:<name>).
+	// - drop hidden skills (frontmatter `hide: true` or `skills.optInSkills`; still loadable via skill:// and /skill:<name>).
 	const hasSkillReader =
 		tools === undefined
 			? toolNames.includes("read")

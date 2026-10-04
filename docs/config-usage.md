@@ -327,7 +327,7 @@ Generate a session name using lowercase `<type>:<primary-objective>`.
 ## Skills subsystem
 
 - `extensibility/skills.ts` loads via `loadCapability(skillCapability.id, { cwd })`.
-- Applies source toggles and filters (`ignoredSkills`, `includeSkills`, custom dirs).
+- Applies source toggles and filters (`ignoredSkills`, `includeSkills`, custom dirs), then marks `optInSkills` matches hidden from the model prompt.
 - Legacy-named toggles still exist (`skills.enablePiUser`, `skills.enablePiProject`) but they gate the native provider (`provider === "native"`).
 
 ## Hooks subsystem
