@@ -191,18 +191,31 @@ class Importer {
 	}
 
 	#lowerArray(node: JsonSchema): IR {
-		if (Array.isArray(node.prefixItems)) {
-			const minItems = typeof node.minItems === "number" ? node.minItems : node.prefixItems.length;
-			const prefix: TupleItemIR[] = node.prefixItems.map((item, index) => ({
+		const modernPrefix = Array.isArray(node.prefixItems) ? node.prefixItems : undefined;
+		const tupleItems = modernPrefix ?? (Array.isArray(node.items) ? node.items : undefined);
+		if (tupleItems !== undefined) {
+			const minItems =
+				typeof node.minItems === "number" ? node.minItems : modernPrefix === undefined ? 0 : tupleItems.length;
+			const tail = modernPrefix === undefined ? (node.additionalItems ?? true) : node.items;
+			const prefix: TupleItemIR[] = tupleItems.map((item, index) => ({
 				val: this.lower(item),
 				opt: index >= minItems,
 			}));
-			return {
+			const tuple: IR = {
 				k: "tuple",
 				prefix,
 				postfix: [],
-				...(node.items !== undefined && node.items !== false ? { variadic: this.lower(node.items) } : {}),
+				...(tail !== undefined && tail !== false ? { variadic: this.lower(tail) } : {}),
 			};
+			// Tuple IR encodes required prefix positions and closure, but not bounds
+			// on the variadic tail or a maximum shorter than the prefix.
+			if (modernPrefix === undefined && (minItems > prefix.length || typeof node.maxItems === "number")) {
+				const bounds: IR = { k: "array", el: { k: "unknown" } };
+				if (minItems > prefix.length) bounds.min = minItems;
+				if (typeof node.maxItems === "number") bounds.max = node.maxItems;
+				return { k: "intersection", members: [tuple, bounds] };
+			}
+			return tuple;
 		}
 		const ir: IR = { k: "array", el: node.items === undefined ? { k: "unknown" } : this.lower(node.items) };
 		if (typeof node.minItems === "number") ir.min = node.minItems;
