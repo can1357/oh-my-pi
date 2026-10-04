@@ -545,14 +545,6 @@ export class AnthropicSlowModeLanes {
 export const anthropicSlowModeLanes = new AnthropicSlowModeLanes();
 
 /**
- * Whether `/slow` on `model` is subscription low priority, which keeps serving
- * past the usage limit, rather than a flex service tier, which stops at it.
- */
-export function isAnthropicSlowModeModel(model: Model): boolean {
-	return resolveCatalogPolicy(model).subscriptionSlowMode === true;
-}
-
-/**
  * Whether usage-aware fallback leaves `model` alone (`retry.preferSlowMode`):
  * `/slow` is on and the model's slow mode keeps serving past usage limits.
  * A limit the lane cannot serve still fails the request, and error-driven
@@ -562,7 +554,9 @@ export function prefersSlowModeOverUsageFallback(model: Model, settings: Setting
 	return (
 		cfgRetryPreferSlowMode.get(settings) &&
 		cfgRetryUsageReservePolicy.get(settings) !== "fail-closed" &&
-		isAnthropicSlowModeModel(model) &&
+		// Custom aliases inherit catalog policy but do not install subscription hooks.
+		(model.providerType === undefined || model.providerType === model.provider) &&
+		resolveCatalogPolicy(model).subscriptionSlowMode === true &&
 		cfgProvidersAnthropicSlowMode.get(settings) === "auto" &&
 		isOfficialAnthropicApiUrl(resolveDirectAnthropicBaseUrl(model))
 	);

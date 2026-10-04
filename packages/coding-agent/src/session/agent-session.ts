@@ -547,12 +547,7 @@ import {
 	cfgProvidersAnthropicSlowMode,
 	type ResetAutoRedeemMode,
 } from "./settings";
-import {
-	type AnthropicSlowModeController,
-	anthropicSlowModeLanes,
-	formatUsageLimitLabel,
-	isAnthropicSlowModeModel,
-} from "./anthropic-slow-mode";
+import { type AnthropicSlowModeController, anthropicSlowModeLanes, formatUsageLimitLabel } from "./anthropic-slow-mode";
 import type { UsageLimitState } from "./usage-limit";
 import { cfgInterruptMode } from "../modes/settings";
 import { cfgFollowUpMode } from "../modes/settings";
@@ -11871,7 +11866,7 @@ export class AgentSession implements SettingsScope {
 	#slowModeTarget(): { kind: "flex"; family: ServiceTierFamily } | { kind: "anthropic" } | undefined {
 		const model = this.model;
 		if (!model) return undefined;
-		if (isAnthropicSlowModeModel(model)) return { kind: "anthropic" };
+		if (model.provider === "anthropic") return { kind: "anthropic" };
 		const family = serviceTierFamily(model);
 		return family && isServiceTierForFamily(family, "flex") ? { kind: "flex", family } : undefined;
 	}

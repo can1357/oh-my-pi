@@ -2030,7 +2030,7 @@ export class TurnRecovery {
 		// Keep same-model account rotation above, but let low priority serve past
 		// usage limits instead of switching models. Refused requests still fall back.
 		if (prefersSlowModeOverUsageFallback(currentModel, this.#host.settings)) {
-			this.#usageReserveApprovedSelector = undefined;
+			this.#usageReserveApproval = undefined;
 			return false;
 		}
 		if (
