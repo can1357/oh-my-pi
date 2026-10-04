@@ -3011,19 +3011,34 @@ export function attachIrcWakeTurnMonitor(session: AgentSession, options: IrcWake
 		// with the turn's outcome. A turn another peer woke opens it only once
 		// the yield is accepted — before the ref goes idle — so the parent is not
 		// handed the outcome of a conversation it never started.
+		const ownerId = AgentRegistry.global().get(id)?.parentId;
 		let wakeJob: { ownerId: string; outcome: PromiseWithResolvers<AsyncJobRunResult> } | undefined;
 		const registerWakeJob = (): void => {
 			if (wakeJob) return;
-			const ownerId = AgentRegistry.global().get(id)?.parentId;
 			const manager = session.asyncJobManager;
 			if (!ownerId || !manager) return;
 			const outcome = Promise.withResolvers<AsyncJobRunResult>();
 			try {
-				manager.register("task", id, ({ signal }) => untilAborted(signal, outcome.promise), {
+				manager.register(
+					"task",
 					id,
-					agentId: id,
-					ownerId,
-				});
+					({ signal }) => {
+						// Cancelling the job must stop the turn it stands for, as a
+						// first run's job signal does. Otherwise the turn runs on and
+						// its answer is lost: the job is already settled and the relay
+						// skips the owner.
+						signal.addEventListener(
+							"abort",
+							() =>
+								turnMonitor.requestAbort(
+									signal.reason === ASYNC_JOB_MANAGER_SHUTDOWN_REASON ? "shutdown" : "signal",
+								),
+							{ once: true },
+						);
+						return untilAborted(signal, outcome.promise);
+					},
+					{ id, agentId: id, ownerId },
+				);
 				wakeJob = { ownerId, outcome };
 			} catch (error) {
 				logger.warn("IRC wake-turn job registration failed", {
@@ -3032,8 +3047,6 @@ export function attachIrcWakeTurnMonitor(session: AgentSession, options: IrcWake
 				});
 			}
 		};
-		const ownerId = AgentRegistry.global().get(id)?.parentId;
-		if (ownerId && wakeSources(records, id).some(source => source.from === ownerId)) registerWakeJob();
 		const turnMonitor = createSubagentRunMonitor({
 			index,
 			id,
@@ -3054,6 +3067,7 @@ export function attachIrcWakeTurnMonitor(session: AgentSession, options: IrcWake
 			completionProbe: false,
 			onYieldAccepted: registerWakeJob,
 		});
+		if (ownerId && wakeSources(records, id).some(source => source.from === ownerId)) registerWakeJob();
 
 		const startedPayload = {
 			id,

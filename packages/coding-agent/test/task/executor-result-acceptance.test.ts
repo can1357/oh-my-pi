@@ -469,4 +469,28 @@ describe("runSubprocess result acceptance", () => {
 			await manager.dispose({ timeoutMs: 1000 });
 		}
 	});
+
+	it("aborts a parent-woken turn when the parent cancels its job mid-turn", async () => {
+		const manager = new AsyncJobManager({});
+		const harness = createHarness({ asyncJobManager: manager });
+		const abort = vi.spyOn(harness.session, "abort");
+		registerIdleChild(harness.session);
+		attachIrcWakeTurnMonitor(harness.session, { id: AGENT_ID, agent: baseAgent });
+		const observer = harness.wakeObserver();
+		if (!observer) throw new Error("wake-turn observer was not registered");
+
+		try {
+			const finish = observer([ircFrom("Parent", "msg-1")]);
+			const [job] = manager.getRunningJobs({ ownerId: "Parent" });
+			if (!job) throw new Error("parent-woken turn opened no job");
+
+			expect(manager.cancel(job.id, { ownerId: "Parent" })).toBe(true);
+			expect(abort).toHaveBeenCalledTimes(1);
+			await finish?.(undefined);
+			await manager.waitForAll();
+			expect(job.status).toBe("cancelled");
+		} finally {
+			await manager.dispose({ timeoutMs: 1000 });
+		}
+	});
 });
