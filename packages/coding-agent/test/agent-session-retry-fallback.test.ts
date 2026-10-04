@@ -8,13 +8,16 @@ import {
 	type AnthropicFallbackCreditHandle,
 	type Api,
 	type AssistantMessage,
+	type Context,
 	Effort,
 	type Message,
 	type Model,
 	type ModelUsageHealth,
 	type ProviderSessionState,
+	type SimpleStreamOptions,
 	type ToolCall,
 } from "@oh-my-pi/pi-ai";
+import { registerCustomApi, unregisterCustomApis } from "@oh-my-pi/pi-ai/api-registry";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { buildParams } from "@oh-my-pi/pi-ai/providers/openai-responses";
@@ -33,9 +36,13 @@ import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import { AgentSession, type AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import {
+	getRetryFallbackRole,
+	installRetryFallbackRole,
 	type ServingModel,
 	validateRetryFallbackChains,
 } from "@oh-my-pi/pi-coding-agent/session/retry-fallback-chains";
+import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-lifecycle";
+import { runSubprocess } from "@oh-my-pi/pi-coding-agent/task/executor";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
@@ -4910,40 +4917,136 @@ describe("AgentSession retry fallback", () => {
 		expect(session.model?.provider).toBe(fallbackModel.provider);
 		expect(session.model?.id).toBe(fallbackModel.id);
 	});
-	it("restores the worker chain head after cooldown while the global policy remains never", async () => {
-		const primaryModel = getBundledModel("anthropic", "claude-sonnet-4-5");
-		const fallbackModel = getBundledModel("openai", "gpt-4o-mini");
-		if (!primaryModel || !fallbackModel) throw new Error("Expected bundled test models");
-		const requestedModels: string[] = [];
-		const agent = createFallbackAgent(primaryModel, requestedModels, { retryAfterMs: 200 });
-		const settings = Settings.isolated({
-			"compaction.enabled": false,
-			"retry.baseDelayMs": 5,
-			"retry.fallbackChains": { critical_worker: [`${fallbackModel.provider}/${fallbackModel.id}`] },
-			"retry.fallbackRevertPolicy": "never",
-			"retry.fallbackRevertPolicies": { critical_worker: "cooldown-expiry" },
+	for (const revived of [false, true]) {
+		it(`restores the installed subagent chain head after cooldown with global never (${revived ? "cold revival" : "fresh spawn"})`, async () => {
+			const primaryModel = getBundledModel("anthropic", "claude-sonnet-4-5");
+			const fallbackModel = getBundledModel("openai", "gpt-4o-mini");
+			if (!primaryModel || !fallbackModel) throw new Error("Expected bundled test models");
+			const requestedModels: string[] = [];
+			const agent = createFallbackAgent(primaryModel, requestedModels, { retryAfterMs: 200 });
+			const config = {
+				"compaction.enabled": false,
+				"retry.baseDelayMs": 5,
+				"retry.fallbackChains": { critical_worker: [`${fallbackModel.provider}/${fallbackModel.id}`] },
+				"retry.fallbackRevertPolicy": "never",
+				"retry.fallbackRevertPolicies": { critical_worker: "cooldown-expiry" },
+			};
+			let settings = Settings.isolated(config);
+			const role = "subagent:scoped-revert-worker";
+			installRetryFallbackRole(settings, role, {
+				primary: `${primaryModel.provider}/${primaryModel.id}`,
+				chain: [`${fallbackModel.provider}/${fallbackModel.id}`],
+				policyKey: "critical_worker",
+			});
+			if (revived) {
+				const persisted = getRetryFallbackRole(settings, role);
+				if (!persisted) throw new Error("Expected installed subagent fallback");
+				settings = Settings.isolated(config);
+				installRetryFallbackRole(settings, role, JSON.parse(JSON.stringify(persisted)));
+			}
+			const sessionManager = SessionManager.inMemory();
+			sessionManager.appendModelChange(`${primaryModel.provider}/${primaryModel.id}`, role);
+			session = new AgentSession({ agent, sessionManager, settings, modelRegistry });
+			let now = Date.now();
+			vi.spyOn(Date, "now").mockImplementation(() => now);
+
+			await session.prompt("Worker hits rate limit");
+			await session.waitForIdle();
+			await session.prompt("Worker stays on fallback during cooldown");
+			await session.waitForIdle();
+			now += 240;
+			await session.prompt("Worker retries chain head after cooldown");
+			await session.waitForIdle();
+			expect(requestedModels).toEqual([
+				`${primaryModel.provider}/${primaryModel.id}`,
+				`${fallbackModel.provider}/${fallbackModel.id}`,
+				`${fallbackModel.provider}/${fallbackModel.id}`,
+				`${primaryModel.provider}/${primaryModel.id}`,
+			]);
+			expect(session.servingModel?.isFallback).toBe(false);
 		});
-		settings.setModelRole("critical_worker", `${primaryModel.provider}/${primaryModel.id}`);
-		const sessionManager = SessionManager.inMemory();
-		sessionManager.appendModelChange(`${primaryModel.provider}/${primaryModel.id}`, "critical_worker");
-		session = new AgentSession({ agent, sessionManager, settings, modelRegistry });
+	}
+
+	it("restores an @smol subagent primary through the real spawn path despite global never", async () => {
+		const requestedModels: string[] = [];
+		let primaryAttempts = 0;
+		let fallbackAttempts = 0;
 		let now = Date.now();
 		vi.spyOn(Date, "now").mockImplementation(() => now);
-
-		await session.prompt("Worker hits rate limit");
-		await session.waitForIdle();
-		await session.prompt("Worker stays on fallback during cooldown");
-		await session.waitForIdle();
-		now += 240;
-		await session.prompt("Worker retries chain head after cooldown");
-		await session.waitForIdle();
-		expect(requestedModels).toEqual([
-			`${primaryModel.provider}/${primaryModel.id}`,
-			`${fallbackModel.provider}/${fallbackModel.id}`,
-			`${fallbackModel.provider}/${fallbackModel.id}`,
-			`${primaryModel.provider}/${primaryModel.id}`,
-		]);
-		expect(session.servingModel?.isFallback).toBe(false);
+		const primary = createMockModel({
+			provider: "scoped-primary",
+			id: "primary",
+			handler: context => {
+				if (!(context.tools ?? []).some(tool => tool.name === "yield")) return { content: ["label"] };
+				requestedModels.push("primary");
+				if (primaryAttempts++ === 0) return { throw: "rate limit exceeded retry-after-ms=200" };
+				return { content: [{ type: "toolCall", name: "yield", arguments: { type: "result", data: "restored" } }] };
+			},
+		});
+		const fallback = createMockModel({
+			provider: "scoped-fallback",
+			id: "fallback",
+			handler: context => {
+				if (!(context.tools ?? []).some(tool => tool.name === "yield")) return { content: ["label"] };
+				requestedModels.push("fallback");
+				if (++fallbackAttempts === 2) now += 240;
+				return { content: ["continue working"] };
+			},
+		});
+		const registry = new ModelRegistry(authStorage, path.join(tempDir.path(), "spawn-models.yml"));
+		const stream = (model: Model, context: Context, options?: SimpleStreamOptions) =>
+			(model.provider === primary.provider ? primary : fallback).stream(model, context, options);
+		for (const model of [primary, fallback]) {
+			registry.registerProvider(
+				model.provider,
+				{
+					api: "scoped-revert-test",
+					apiKey: "test-key",
+					baseUrl: "https://local.invalid",
+					models: [{ ...model, api: "scoped-revert-test" }],
+					streamSimple: stream,
+				},
+			);
+		}
+		registerCustomApi("scoped-revert-test", stream, "test/scoped-revert-spawn");
+		try {
+			const result = await runSubprocess({
+				cwd: tempDir.path(),
+				agent: {
+					name: "task",
+					description: "test",
+					systemPrompt: "test",
+					tools: ["read"],
+					model: ["@smol"],
+					source: "bundled",
+				},
+				task: "report done",
+				index: 0,
+				id: "ScopedRevertSpawn",
+				authStorage,
+				modelRegistry: registry,
+				settings: Settings.isolated({
+					"async.enabled": false,
+					"compaction.enabled": false,
+					"retry.baseDelayMs": 5,
+					"retry.fallbackRevertPolicy": "never",
+					"retry.fallbackRevertPolicies": { smol: "cooldown-expiry" },
+					"retry.fallbackChains": { smol: ["scoped-fallback/fallback"] },
+					modelRoles: { smol: "scoped-primary/primary" },
+					"task.agentIdleTtlMs": 0,
+					"todo.enabled": false,
+					"advisor.enabled": false,
+				}),
+				enableLsp: false,
+				enableMCP: false,
+				enableIrc: false,
+			});
+			expect(result.exitCode).toBe(0);
+			expect(requestedModels).toEqual(["primary", "fallback", "fallback", "primary"]);
+		} finally {
+			await AgentLifecycleManager.global().dispose();
+			unregisterCustomApis("test/scoped-revert-spawn");
+		}
 	});
 
 	it("suppresses cooled selectors and lazily reverts to the role primary after cooldown expiry", async () => {

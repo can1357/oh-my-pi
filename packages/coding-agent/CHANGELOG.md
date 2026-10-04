@@ -4,7 +4,7 @@
 
 ### Added
 
-- Added per-chain fallback revert policies so worker chains can retry their primary after cooldown while other sessions stay on their fallback ([#14193](https://github.com/can1357/oh-my-pi/pull/14193) by [@schickling-assistant](https://github.com/schickling-assistant)).
+- Added per-chain fallback revert policies so worker chains can retry their primary after cooldown while other sessions stay on their fallback, including role policy inheritance across task spawning and cold revival and warnings for orphan policy keys ([#14193](https://github.com/can1357/oh-my-pi/pull/14193) by [@schickling-assistant](https://github.com/schickling-assistant)).
 
 ### Changed
 

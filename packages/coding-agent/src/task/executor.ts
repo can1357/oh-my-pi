@@ -77,7 +77,7 @@ import { type ArtifactManager, writeArtifact } from "../session/artifacts";
 import { ASYNC_RESULT_MESSAGE_TYPE } from "../session/async-job-delivery";
 import type { AuthStorage } from "../session/auth-storage";
 import { SKILL_PROMPT_MESSAGE_TYPE } from "../session/messages";
-import { hasConversationalHistory, SessionManager } from "../session/session-manager";
+import { extractSessionInit, hasConversationalHistory, SessionManager } from "../session/session-manager";
 import { truncateTail } from "@oh-my-pi/pi-tui/tools/streaming-output";
 import {
 	type ConfiguredThinkingLevel,
@@ -304,6 +304,7 @@ function installSubagentRetryFallbackChain(args: {
 	settings: Settings;
 	id: string;
 	candidates: SubagentRetryFallbackCandidate[];
+	policyKey?: string;
 	inheritedFallbackChain: string[] | undefined;
 	model: Model<Api> | undefined;
 	authFallbackUsed: boolean;
@@ -327,7 +328,11 @@ function installSubagentRetryFallbackChain(args: {
 	}
 
 	const role = subagentRetryFallbackRole(id);
-	installRetryFallbackRole(settings, role, { primary: candidates[selectedIndex].selector, chain: fallbackChain });
+	installRetryFallbackRole(settings, role, {
+		primary: candidates[selectedIndex].selector,
+		chain: fallbackChain,
+		policyKey: args.policyKey,
+	});
 	return role;
 }
 
@@ -3818,6 +3823,13 @@ function createWarmSubagentReviver(capture: WarmReviveCapture): AgentReviver {
 			reopened.adoptArtifactManager(capture.parentArtifactManager);
 		}
 		await refreshSubagentIrcRoot(capture.spec.prompt, reopened, capture.sessionFile);
+		const settings = restoreSubagentSettings(capture.settings);
+		const policyKey = extractSessionInit(reopened.getEntries())?.retryFallback?.policyKey;
+		const role = subagentRetryFallbackRole(id);
+		const fallback = getRetryFallbackRole(settings, role);
+		if (fallback && policyKey !== undefined) {
+			installRetryFallbackRole(settings, role, { ...fallback, policyKey });
+		}
 		const mcpManager = capture.spec.options.mcpManager;
 		const mcpFollower = mcpManager ? followMCPTools(mcpManager, explicitSubagentToolNames(capture.spec)) : undefined;
 		let revived: AgentSession;
@@ -3828,7 +3840,7 @@ function createWarmSubagentReviver(capture: WarmReviveCapture): AgentReviver {
 			({ session: revived } = await createAgentSession({
 				...buildSubagentSessionOptions(
 					capture.spec,
-					restoreSubagentSettings(capture.settings),
+					settings,
 					reopened,
 					expectedAgentRef,
 				),
@@ -4118,12 +4130,14 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			checkAbort();
 
 			const configuredModelPatterns = resolveConfiguredModelPatterns(modelPatterns, settings);
+			const retryFallbackPolicyKey =
+				modelRole ?? resolveExplicitModelRole(modelPatterns, subagentSettings) ?? "default";
 			const inheritedRetryFallbackChain =
 				configuredModelPatterns.length === 1
 					? resolveSubagentInheritedRetryFallbackChain(
 							subagentSettings,
 							modelRegistry,
-							modelRole ?? resolveExplicitModelRole(modelPatterns, subagentSettings),
+							retryFallbackPolicyKey,
 						)
 					: undefined;
 			const {
@@ -4175,6 +4189,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				id,
 				candidates: resolveSubagentRetryFallbackCandidates(modelPatterns, modelRegistry, subagentSettings),
 				inheritedFallbackChain: inheritedRetryFallbackChain,
+				policyKey: retryFallbackPolicyKey,
 				model,
 				authFallbackUsed,
 			});
@@ -4316,6 +4331,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 						model || modelOverride === undefined ? undefined : options.parentActiveModelPattern,
 					modelPatternFallbackRole:
 						model || modelOverride === undefined ? undefined : subagentRetryFallbackRole(id),
+					modelPatternFallbackPolicyKey: retryFallbackPolicyKey,
 					modelPatternDefaultFallbackChain:
 						model || modelOverride === undefined ? undefined : inheritedRetryFallbackChain,
 					thinkingLevel: effectiveThinkingLevel,

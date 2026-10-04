@@ -317,6 +317,17 @@ describe("retry fallback kind-role validation", () => {
 		getProviderModels: (provider: string) => models.filter(model => model.provider === provider),
 	};
 
+	it("warns on orphan revert policy keys but accepts roles inheriting the default chain", () => {
+		const settings = Settings.isolated({
+			modelRoles: { smol: `${chatModel.provider}/${chatModel.id}` },
+			"retry.fallbackChains": { default: [`${chatModel.provider}/${chatModel.id}`] },
+			"retry.fallbackRevertPolicies": { smol: "never", critcal_worker: "cooldown-expiry" },
+		});
+		const warnings: string[] = [];
+		validateRetryFallbackChains(settings, registry, warning => warnings.push(warning));
+		expect(warnings).toEqual(["retry.fallbackRevertPolicies key owns no fallback chain: critcal_worker"]);
+	});
+
 	it("accepts aliases and fuzzy patterns that resolve to the role's model kind", () => {
 		const settings = Settings.isolated({
 			modelRoles: { judge: `${judgeModel.provider}/${judgeModel.id}` },
