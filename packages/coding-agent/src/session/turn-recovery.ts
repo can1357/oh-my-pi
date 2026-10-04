@@ -1982,9 +1982,6 @@ export class TurnRecovery {
 		if (!cfgRetryUsageAwareFallback.get(this.#host.settings)) return false;
 		const currentModel = this.#host.model();
 		if (!currentModel) return false;
-		// Low priority serves past usage limits; a limit it cannot serve fails the
-		// request and the error-driven fallback takes over.
-		if (prefersSlowModeOverUsageFallback(currentModel, this.#host.settings)) return false;
 		const sessionId = this.#host.sessionManager.getSessionId();
 		const currentSelector = formatRetryFallbackSelector(currentModel, this.#host.thinkingLevel());
 		let health: ModelUsageHealth;
@@ -2029,6 +2026,12 @@ export class TurnRecovery {
 			throw new Error(
 				`${USAGE_PREFLIGHT_BLOCKED_PREFIX} ${condition} for ${currentSelector}; reserve policy is fail-closed.`,
 			);
+		}
+		// Keep same-model account rotation above, but let low priority serve past
+		// usage limits instead of switching models. Refused requests still fall back.
+		if (prefersSlowModeOverUsageFallback(currentModel, this.#host.settings)) {
+			this.#usageReserveApprovedSelector = undefined;
+			return false;
 		}
 		if (
 			reservePolicy === "confirm" &&
