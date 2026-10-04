@@ -1442,7 +1442,7 @@ describe("AgentSession retry fallback", () => {
 			const primaryModel =
 				primaryProvider === "anthropic"
 					? getBundledModel("anthropic", "claude-sonnet-4-5")
-					: getBundledModel("openai-codex", "gpt-5.5");
+					: getBundledModel("openai-codex", "gpt-5.6-sol");
 			const fallbackModel = getBundledModel("openai", "gpt-4o-mini");
 			if (!primaryModel || !fallbackModel) throw new Error("Expected bundled slow-mode preflight models");
 			const requestedModels: string[] = [];
@@ -1901,7 +1901,7 @@ describe("AgentSession retry fallback", () => {
 		expect(requestedModels).toEqual([]);
 	});
 
-	it("enforces fail-closed usage health when model fallback is disabled", async () => {
+	it("fail-closed overrides slow-mode preference even when model fallback is disabled", async () => {
 		const primaryModel = getBundledModel("anthropic", "claude-sonnet-4-5");
 		if (!primaryModel) throw new Error("Expected bundled fail-closed model");
 		const agent = new Agent({
@@ -1914,6 +1914,8 @@ describe("AgentSession retry fallback", () => {
 			"retry.modelFallback": false,
 			"retry.usageAwareFallback": true,
 			"retry.usageReservePolicy": "fail-closed",
+			"retry.preferSlowMode": true,
+			"providers.anthropic.slowMode": "auto",
 		});
 		vi.spyOn(modelRegistry.authStorage.health, "model").mockResolvedValue({
 			state: "reserve",
@@ -2042,6 +2044,8 @@ describe("AgentSession retry fallback", () => {
 			"compaction.enabled": false,
 			"retry.usageAwareFallback": true,
 			"retry.usageReservePolicy": "fail-closed",
+			"retry.preferSlowMode": true,
+			"providers.anthropic.slowMode": "auto",
 		});
 		settings.setModelRole("default", `${primaryModel.provider}/${primaryModel.id}`);
 		const usageHealth = vi.spyOn(modelRegistry.authStorage.health, "model").mockImplementation(async () =>
