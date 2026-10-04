@@ -25,7 +25,7 @@ import type {
 	Usage,
 } from "../types";
 import { shouldSendServiceTier } from "../types";
-import { normalizeSystemPrompts } from "../utils";
+import { normalizeSystemPrompts, normalizeToolCallId } from "../utils";
 import { AssistantMessageEventStream } from "../utils/event-stream";
 import type { RawHttpRequestDump } from "../utils/http-inspector";
 import { normalizeSchemaForCCA, normalizeSchemaForGoogle, toolWireSchema } from "../utils/schema";
@@ -161,10 +161,6 @@ function resolveThoughtSignature(isSameProviderAndModel: boolean, signature: str
 export function convertMessages<T extends GoogleApiType>(model: Model<T>, context: Context): Content[] {
 	const contents: Content[] = [];
 	const emittedToolCallNames = new Map<string, string>();
-
-	const normalizeToolCallId = (id: string): string => {
-		return id.replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 64);
-	};
 
 	const transformedMessages = transformMessages(context.messages, model, normalizeToolCallId);
 

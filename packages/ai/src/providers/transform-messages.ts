@@ -30,6 +30,11 @@ const enum ToolCallStatus {
  */
 export const MAX_TOOL_CALL_ID_LENGTH = 64;
 
+/** Replace unsupported tool-call ID characters and cap the result for strict replay providers. */
+export function normalizeToolCallId(id: string): string {
+	return id.replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, MAX_TOOL_CALL_ID_LENGTH);
+}
+
 /**
  * OpenAI Responses-family APIs mint composite tool ids (`call_id|item_id`);
  * opaque Chat Completions ids do not (openai-completions preserves same-model
@@ -408,11 +413,10 @@ function normalizeAnthropicTargetToolCallId<TApi extends Api>(
 	id: string,
 	model: Model<TApi>,
 	source: AssistantMessage,
-	normalizeToolCallId?: (id: string, model: Model<TApi>, source: AssistantMessage) => string,
+	normalizeId?: (id: string, model: Model<TApi>, source: AssistantMessage) => string,
 ): string {
 	if (isValidAnthropicToolCallId(id)) return id;
-	const normalized =
-		normalizeToolCallId?.(id, model, source) ?? id.replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, MAX_TOOL_CALL_ID_LENGTH);
+	const normalized = normalizeId?.(id, model, source) ?? normalizeToolCallId(id);
 	if (isValidAnthropicToolCallId(normalized)) return normalized;
 	return fallbackAnthropicToolCallId(id);
 }
