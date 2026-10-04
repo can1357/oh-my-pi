@@ -104,13 +104,10 @@ function createBankFixture(bank: string, metadataRows: readonly Record<string, u
 }
 
 describe("computeMnemopiBankScope (#2412)", () => {
-	// #2412: the derivation before the raw-cwd hash walked
-	// `git.repo.resolveSync(cwd)?.repoRoot ?? path.resolve(cwd)`, so a stray
-	// ancestor `.git` that is not a repository repointed the same conversation
-	// directory to a different bank and stranded its memories. Native
-	// discovery only accepts a `.git` that resolves to a repository, so such a
-	// marker must not move the bank. A real repository created above the cwd
-	// does move it: the bank follows the enclosing repository's primary root.
+	// #2412: a `.git` above the cwd that is not a repository must not move the
+	// bank; native discovery only accepts a `.git` that resolves to a
+	// repository. A real repository created above the cwd does move it: the
+	// bank follows the enclosing repository's primary root.
 	it("ignores an ancestor .git that is not a repository", async () => {
 		const baseDir = await TempDir.create("@mnemopi-stable-bank-");
 		try {
@@ -119,8 +116,6 @@ describe("computeMnemopiBankScope (#2412)", () => {
 			const withoutGit = computeMnemopiBankScope(undefined, project, "per-project").bank;
 
 			// Plant an ancestor `.git` gitfile whose target is not a repository.
-			// The pre-#2412 lookup resolved `project` to `baseDir/projects` from
-			// this file alone, producing a `projects-<hash>` bank id.
 			await fs.mkdir(baseDir.join("projects"), { recursive: true });
 			await fs.writeFile(baseDir.join("projects", ".git"), "gitdir: /dev/null\n");
 			const withAncestorGit = computeMnemopiBankScope(undefined, project, "per-project").bank;
