@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Changed Claude, xAI and Codex usage-limit IDs to use the shared `slugify` from `@oh-my-pi/pi-utils`; IDs are unchanged ([#14283](https://github.com/can1357/oh-my-pi/pull/14283) by [@jaredlyon](https://github.com/jaredlyon))
+
 ## [18.8.7] - 2026-10-09
 
 ### Added

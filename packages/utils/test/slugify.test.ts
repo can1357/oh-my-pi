@@ -23,6 +23,11 @@ describe("slugify", () => {
 		expect(slugify("  ABC / DEFG  ", { maxLength: 4 })).toBe("abc");
 	});
 
+	it("rejects a maxLength that is not a non-negative integer", () => {
+		expect(() => slugify("ab", { maxLength: -1 })).toThrow(RangeError);
+		expect(() => slugify("ab", { maxLength: 1.5 })).toThrow(RangeError);
+	});
+
 	it("returns empty for a zero-length limit", () => {
 		expect(slugify("Hello world", { maxLength: 0 })).toBe("");
 	});

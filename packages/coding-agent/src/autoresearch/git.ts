@@ -185,7 +185,8 @@ export function normalizeStatusPath(rawPath: string): string {
 }
 
 async function allocateBranchName(repository: VcsGitRepo, goal: string | null): Promise<string> {
-	const baseName = `${AUTORESEARCH_BRANCH_PREFIX}${slugifyGoal(goal)}-${currentDateStamp()}`;
+	const goalSlug = slugify(goal ?? "", { maxLength: BRANCH_NAME_MAX_LENGTH }) || "session";
+	const baseName = `${AUTORESEARCH_BRANCH_PREFIX}${goalSlug}-${currentDateStamp()}`;
 	let candidate = baseName;
 	let suffix = 2;
 	while (await repository.refExists(`refs/heads/${candidate}`)) {
@@ -193,10 +194,6 @@ async function allocateBranchName(repository: VcsGitRepo, goal: string | null): 
 		suffix += 1;
 	}
 	return candidate;
-}
-
-function slugifyGoal(goal: string | null): string {
-	return slugify(goal ?? "", { maxLength: BRANCH_NAME_MAX_LENGTH }) || "session";
 }
 
 function currentDateStamp(): string {

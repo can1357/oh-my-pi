@@ -1,4 +1,4 @@
-import { logger } from "@oh-my-pi/pi-utils";
+import { logger, slugify } from "@oh-my-pi/pi-utils";
 import { collapseVariants, type EffortVariantFamily } from "../compat/collapse";
 import { Effort, THINKING_EFFORTS } from "../effort";
 import type { DevinCompat, FetchImpl, ModelCost, ModelSpec } from "../types";
@@ -228,10 +228,7 @@ function collectDevinFamilyLane(lanes: Map<string, DevinFamilyLane>, config: Cli
 	if (thinking === false) effort = "off";
 
 	// Family label as an OMP id: "GPT-5.6 Sol" -> "gpt-5-6-sol".
-	const baseId = label
-		.toLowerCase()
-		.replace(/[^a-z0-9]+/g, "-")
-		.replace(/^-+|-+$/g, "");
+	const baseId = slugify(label);
 	if (!baseId) return;
 	const laneId = `${baseId}${oneMillionContext ? "-1m" : ""}${fast ? "-fast" : ""}`;
 	let lane = lanes.get(laneId);
