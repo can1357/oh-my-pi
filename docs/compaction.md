@@ -214,11 +214,19 @@ Including `snapcompact` in `compaction.methodOrder` replaces the LLM summarizati
 - No model, API key, or network is involved, so snapcompact is also safe for overflow recovery. It requires a vision-capable current model (`model.input` includes `"image"`); otherwise automatic maintenance skips it and advances to the next configured method. Manual `/compact` honors the method order unless custom instructions are given (those imply a directed LLM summary).
 - Rationale: the shape table comes from the snapcompact 200k-token evals in `packages/snapcompact`, where bitmap frames preserved QA recall at lower billed-token cost than raw text for vision-capable models.
 
-The archive's 80-frame default is an upper bound, not a promised frame count. Session maintenance also caps frames by available context, the provider image budget, and `FRAME_DATA_BYTES_BUDGET` (3,000,000 bytes). A rendered archive that exceeds standing-payload or context budgets is rejected/skipped rather than committed as an unusable prompt.
+The archive is sized from the room under the compaction trigger, not from the window. Session maintenance resolves the same threshold the auto-compaction decision uses (`compaction.thresholdTokens` / `thresholdPercent`), subtracts what the compacted context carries anyway (system prompt and tools, kept recent turns, the archive's text edges and summary), and gives the archive `snapcompact.archiveShare` (default `0.5`, range `0.1`–`0.9`) of what is left. Frames are priced by the same token counter that drives the trigger, so the planned archive is what the trigger counts after the commit. If the trigger leaves no room for even one frame, maintenance warns once per model and trigger. `/context` shows the archive's frames, their tokens, and the room left before the next compaction.
+
+60% of the trigger is a sizing target, not a guarantee. The budget never plans past it, and a render that overshoots its estimate is re-rendered (at most twice) with the oldest frames dropped. A one-frame archive cannot shrink further, so:
+
+- automatic maintenance accepts a result up to the 80% recovery band and hands anything above it to the next configured method;
+- manual `/compact` keeps only its reduction and window-fit checks, so under a tiny trigger it can commit an archive that leaves the context above the trigger;
+- with an unknown context window there is no trigger to size against, and only the safety caps below apply.
+
+Safety caps bound the result whatever the room: the 80-frame default, the provider's image limits (per request, and per message where the API has one: Bedrock Converse accepts 20 images per message, and the archive is one message), and `FRAME_DATA_BYTES_BUDGET` (16,000,000 bytes of frame base64 per request, under Anthropic's 32 MB request limit). The send path enforces the same image limits on every request, dropping the oldest images first. A rendered archive that exceeds standing-payload or context budgets is rejected/skipped rather than committed as an unusable prompt.
 
 ### Maintenance progress guard
 
-Automatic maintenance checks that the rewritten context creates real headroom (normally at or below 80% of the resolved threshold) before scheduling continuation. No-progress passes can try local rescue: re-render an existing snapcompact archive with a smaller frame budget, elide heavy blocks to recoverable artifacts, or drop attached images. Archive rescue can truncate the oldest carried source text; image dropping is destructive. If maintenance still cannot create headroom, it emits a warning and blocks automatic continuation instead of looping on the same oversized context.
+Automatic maintenance checks that the rewritten context creates real headroom (normally at or below 80% of the resolved threshold) before scheduling continuation. No-progress passes can try local rescue: re-render an existing snapcompact archive for the current model under the recovery band, elide heavy blocks to recoverable artifacts, or drop attached images. The archive rescue is judged by what the current model is charged, not by frame count, so an archive written for a larger model can be re-rendered at the same frame count when the new model's frames cost less; a rebuild that would not cost less is not committed. Archive rescue can truncate the oldest carried source text; image dropping is destructive. If maintenance still cannot create headroom, it emits a warning and blocks automatic continuation instead of looping on the same oversized context.
 
 ### Display transcript
 
@@ -530,6 +538,7 @@ Defined in `packages/coding-agent/src/session/context-settings.ts`:
 - `snapcompact.systemPrompt` = `"none"` (`"agents-md"` and `"all"` opt into transient system-prompt imaging)
 - `snapcompact.toolResults` = `false` (transient imaging of large historical tool results)
 - `snapcompact.shape` = `"auto"`
+- `snapcompact.archiveShare` = `0.5` (share of the room under the compaction trigger a snapcompact archive may fill; `0.1`–`0.9`)
 - `branchSummary.enabled` = `false`
 - `branchSummary.reserveTokens` = `16384`
 

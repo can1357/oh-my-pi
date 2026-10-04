@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Raised the snapcompact frame payload cap from 3 MB to 16 MB per request and capped archives on Bedrock at its 20-images-per-message limit ([#14285](https://github.com/can1357/oh-my-pi/pull/14285) by [@will-bogusz](https://github.com/will-bogusz))
+
 ## [18.2.9] - 2026-09-22
 
 ### Fixed

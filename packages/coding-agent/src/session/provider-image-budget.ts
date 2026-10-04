@@ -13,7 +13,7 @@ import type {
 import { decodeDataUri } from "@oh-my-pi/pi-ai/providers/openai-data-uri";
 import { isRecord } from "@oh-my-pi/pi-utils";
 import { LRUCache } from "@oh-my-pi/pi-utils/lru";
-import { providerImageBudget } from "@oh-my-pi/snapcompact";
+import { providerImageBudget, providerMessageImageBudget } from "@oh-my-pi/snapcompact";
 import { supportsRemoteImageUrls } from "../blob-broker/context-images";
 import { imageDecodeFailureReason } from "@oh-my-pi/pi-tui/chat/image-loading";
 
@@ -22,9 +22,9 @@ const TOOL_RESULT_IMAGE_OMISSION: TextContent = {
 	text: "[image omitted: provider image limit]",
 };
 
-function countImages(context: Context): number {
+function countImages(messages: readonly Message[]): number {
 	let count = 0;
-	for (const message of context.messages) {
+	for (const message of messages) {
 		if (!Array.isArray(message.content)) continue;
 		for (const part of message.content) {
 			if (part.type === "image") count++;
@@ -69,28 +69,60 @@ function clampToolResultMessage(message: ToolResultMessage, state: { remainingDr
 	return { ...message, content: content.length > 0 ? content : [TOOL_RESULT_IMAGE_OMISSION] };
 }
 
-/** Drops oldest transient image blocks so outgoing vision requests fit the active provider's image cap. */
+function clampMessage(message: Message, state: { remainingDrops: number }): Message {
+	switch (message.role) {
+		case "user":
+			return clampUserMessage(message, state);
+		case "developer":
+			return clampDeveloperMessage(message, state);
+		case "toolResult":
+			return clampToolResultMessage(message, state);
+		case "assistant":
+			return message;
+	}
+	return message;
+}
+
+/**
+ * Drops each wire message's oldest images past the provider's per-message
+ * limit. A run of consecutive tool results counts as one message: providers
+ * such as Bedrock Converse send them as a single user message.
+ */
+function clampMessageImages(messages: readonly Message[], limit: number): readonly Message[] {
+	let clamped: Message[] | undefined;
+	for (let start = 0; start < messages.length;) {
+		let end = start + 1;
+		if (messages[start].role === "toolResult") {
+			while (end < messages.length && messages[end].role === "toolResult") end++;
+		}
+		const group = messages.slice(start, end);
+		const images = countImages(group);
+		if (images > limit) {
+			clamped ??= messages.slice(0, start);
+			const state = { remainingDrops: images - limit };
+			for (const message of group) clamped.push(clampMessage(message, state));
+		} else {
+			clamped?.push(...group);
+		}
+		start = end;
+	}
+	return clamped ?? messages;
+}
+
+/**
+ * Drops oldest transient image blocks so outgoing vision requests fit the
+ * active provider's image caps: first each message's limit, then the request's.
+ */
 export function clampProviderContextImages(context: Context, model: Model): Context {
 	if (!model.input.includes("image")) return context;
+	let messages = clampMessageImages(context.messages, providerMessageImageBudget(model.provider));
 	const limit = providerImageBudget(model.provider);
-	const totalImages = countImages(context);
-	if (totalImages <= limit) return context;
-
-	const state = { remainingDrops: totalImages - limit };
-	const messages = context.messages.map(message => {
-		switch (message.role) {
-			case "user":
-				return clampUserMessage(message, state);
-			case "developer":
-				return clampDeveloperMessage(message, state);
-			case "toolResult":
-				return clampToolResultMessage(message, state);
-			case "assistant":
-				return message;
-		}
-		return message;
-	});
-	return { ...context, messages };
+	const totalImages = countImages(messages);
+	if (totalImages > limit) {
+		const state = { remainingDrops: totalImages - limit };
+		messages = messages.map(message => clampMessage(message, state));
+	}
+	return messages === context.messages ? context : { ...context, messages: [...messages] };
 }
 
 /**

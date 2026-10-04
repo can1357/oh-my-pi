@@ -33,6 +33,9 @@ import {
 const LEGACY_SNAPCOMPACT_FRAME_COUNT_GUARD = 16;
 const LEGACY_SNAPCOMPACT_ARCHIVE_TEXT_GUARD = 250_000;
 const LEGACY_SNAPCOMPACT_TRUNCATED_CHARS_GUARD = 1_000_000;
+// The per-request frame byte budget those artifacts were written under. Legacy
+// archives keep it; `snapcompact.FRAME_DATA_BYTES_BUDGET` caps current ones.
+const LEGACY_SNAPCOMPACT_FRAME_DATA_GUARD = 3_000_000;
 const SUPERSEDED_COMPACTION_SUMMARY = "[Superseded compaction summary elided after a newer compaction]";
 const SUPERSEDED_COMPACTION_SHORT_SUMMARY = "Superseded compaction elided";
 
@@ -66,7 +69,7 @@ function hasCrashRiskSnapcompactFramePayload(
 ): boolean {
 	return (
 		archive.frames.length >= LEGACY_SNAPCOMPACT_FRAME_COUNT_GUARD ||
-		snapcompactFrameDataBytes(archive, resolveFrameData) >= snapcompact.FRAME_DATA_BYTES_BUDGET
+		snapcompactFrameDataBytes(archive, resolveFrameData) >= LEGACY_SNAPCOMPACT_FRAME_DATA_GUARD
 	);
 }
 

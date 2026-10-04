@@ -476,16 +476,18 @@ export const FRAME_TOKEN_ESTIMATE = 5024;
 
 /** Conservative upper bound for one persisted frame's base64 payload. The
  *  measured high-res Anthropic `8x13`/`11on16` PNG frames sit around 159 KB;
- *  170 KB leaves margin for denser glyph pages without permitting multi-MB
- *  standing request bodies at large context windows. */
+ *  170 KB leaves margin for denser glyph pages. */
 export const FRAME_DATA_BYTES_ESTIMATE = 170_000;
 
-/** Maximum snapcompact image base64 carried in every rebuilt provider request.
- *  Above this, provider backends can accept the HTTP body but fail mid-stream
- *  with opaque 5xx errors. Keep this independent from visual-token budgeting:
- *  a 1M-token model can afford 70 images on paper, but not the resulting
- *  ~11 MB JSON payload on every turn. */
-export const FRAME_DATA_BYTES_BUDGET = 3_000_000;
+/** Safety cap on snapcompact image base64 carried in every rebuilt provider
+ *  request. Archive size is set by the compaction trigger's room (see the
+ *  coding agent's `snapcompact.archiveShare`); this only bounds the request
+ *  body. 16 MB stays under Anthropic's 32 MB request limit with room for the
+ *  text, and single frames (~170 KB) sit far below the strictest per-image
+ *  limit (Bedrock Converse, 3.75 MB). Measured without failures: 70 Opus
+ *  frames / 12 MB and 23.6 MB in one Anthropic request, 200 frames / 17 MB on
+ *  Codex. */
+export const FRAME_DATA_BYTES_BUDGET = 16_000_000;
 
 /** Frame-count cap implied by {@link FRAME_DATA_BYTES_BUDGET}. */
 export function maxFramesForDataBudget(maxFrameDataBytes: number = FRAME_DATA_BYTES_BUDGET): number {
@@ -524,9 +526,28 @@ export function providerImageBudget(provider: string | undefined): number {
 	return (provider !== undefined ? PROVIDER_IMAGE_BUDGETS[provider] : undefined) ?? DEFAULT_PROVIDER_IMAGE_BUDGET;
 }
 
-/** Archive frame cap for `provider`: image budget, never above {@link MAX_FRAMES_DEFAULT}. */
+/**
+ * Per-message image-count limits by provider id, for APIs that cap images in
+ * a single message on top of the request. Bedrock Converse accepts at most 20
+ * images per `Message`
+ * (https://docs.aws.amazon.com/bedrock/latest/APIReference/API_runtime_Message.html),
+ * and a snapcompact archive travels as one user message. Providers absent
+ * here have no per-message limit below their request budget.
+ */
+export const PROVIDER_MESSAGE_IMAGE_BUDGETS: Record<string, number> = {
+	"amazon-bedrock": 20,
+};
+
+/** Images one message may carry for `provider`: its per-message limit, never above the request budget. */
+export function providerMessageImageBudget(provider: string | undefined): number {
+	const requestBudget = providerImageBudget(provider);
+	const messageBudget = provider !== undefined ? PROVIDER_MESSAGE_IMAGE_BUDGETS[provider] : undefined;
+	return messageBudget === undefined ? requestBudget : Math.min(messageBudget, requestBudget);
+}
+
+/** Archive frame cap for `provider`: the images one message may carry, never above {@link MAX_FRAMES_DEFAULT}. */
 export function providerFrameBudget(provider: string | undefined): number {
-	return Math.min(providerImageBudget(provider), MAX_FRAMES_DEFAULT);
+	return Math.min(providerMessageImageBudget(provider), MAX_FRAMES_DEFAULT);
 }
 
 /** Key under `CompactionEntry.preserveData` holding the frame archive. */

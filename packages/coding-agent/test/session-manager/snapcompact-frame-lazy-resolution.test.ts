@@ -9,7 +9,8 @@ import { getAgentDir, getBlobsDir, setAgentDir } from "@oh-my-pi/pi-utils";
 import * as snapcompact from "@oh-my-pi/snapcompact";
 
 const FRAME_COUNT = 10;
-const FRAME_RAW_BYTES = 300_000;
+// Seven frames' base64 fits the per-request frame budget, eight do not.
+const FRAME_RAW_BYTES = Math.floor((snapcompact.FRAME_DATA_BYTES_BUDGET / 7.5) * 0.75);
 
 function frameData(index: number): string {
 	return Buffer.alloc(FRAME_RAW_BYTES, index + 1).toString("base64");

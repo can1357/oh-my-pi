@@ -63,11 +63,19 @@ export interface ContextUsageSession extends NonMessageTokenSource {
 		| undefined;
 }
 
+/** Snapcompact frame archive carried in the current context. */
+export interface SnapcompactArchiveUsage {
+	frames: number;
+	/** Billed-token estimate of the frames (the same charge the compaction trigger counts). */
+	tokens: number;
+}
+
 export interface ContextUsageOptions {
 	compaction: CompactionSettings;
 	sourceRevision?: number;
 	skillful?: boolean;
 	snapcompact?: ContextSavingsEstimate;
+	snapcompactArchive?: SnapcompactArchiveUsage;
 }
 
 const GRID_COLS = 20;
@@ -101,6 +109,8 @@ export interface ContextBreakdown {
 	thresholdTokens?: number;
 	/** Estimated snapcompact wire savings; set when requested and a snapcompact.* setting is enabled. */
 	snapcompact?: ContextSavingsEstimate;
+	/** Snapcompact archive in context; set when the context carries archive frames. */
+	snapcompactArchive?: SnapcompactArchiveUsage;
 }
 
 /** Percent positions (0–100 of the context window) for the auto-compaction boundaries. */
@@ -494,6 +504,7 @@ export function computeContextBreakdown(session: ContextUsageSession, options: C
 		freeTokens,
 		thresholdTokens,
 		snapcompact: options.snapcompact,
+		snapcompactArchive: options.snapcompactArchive,
 	};
 }
 
@@ -638,10 +649,25 @@ function buildLegendParts(breakdown: ContextBreakdown): LegendPart[][] {
 	return lines;
 }
 
-/** Snapcompact savings lines of the legend; empty when no snapcompact setting is on. */
+/** Snapcompact archive and savings lines of the legend; empty when there is no archive and no snapcompact setting is on. */
 function buildSnapcompactParts(breakdown: ContextBreakdown): LegendPart[][] {
 	const lines: LegendPart[][] = [];
-	const { usedTokens } = breakdown;
+	const { usedTokens, thresholdTokens } = breakdown;
+	const archive = breakdown.snapcompactArchive;
+	if (archive) {
+		const line: LegendPart[] = [
+			{ t: "Snapcompact archive: " },
+			{ t: `${archive.frames} frame${archive.frames === 1 ? "" : "s"}`, s: "strong" },
+			{ t: ` ≈ ${formatNumber(archive.tokens)} tokens`, s: "dim" },
+		];
+		if (thresholdTokens !== undefined) {
+			line.push(
+				{ t: " · room before next compaction " },
+				{ t: formatNumber(Math.max(0, thresholdTokens - usedTokens)), s: "strong" },
+			);
+		}
+		lines.push(line);
+	}
 	const snap = breakdown.snapcompact;
 	if (snap) {
 		if (!snap.visionCapable) {

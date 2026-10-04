@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- `/context` shows the snapcompact archive: frames, their tokens and the room left before the next compaction ([#14285](https://github.com/can1357/oh-my-pi/pull/14285) by [@will-bogusz](https://github.com/will-bogusz))
+
 ## [18.6.0] - 2026-10-03
 
 ### Fixed

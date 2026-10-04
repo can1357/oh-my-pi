@@ -30,6 +30,14 @@ export function buildContextReportText(runtime: SlashCommandRuntime): string {
 			const fraction = breakdown.freeTokens / breakdown.contextWindow;
 			lines.push(`  ${"Free".padEnd(16)} ${renderAsciiBar(fraction)}  ${breakdown.freeTokens} tokens`);
 		}
+		const archive = breakdown.snapcompactArchive;
+		if (archive) {
+			const room =
+				breakdown.thresholdTokens !== undefined
+					? `, ${Math.max(0, breakdown.thresholdTokens - breakdown.usedTokens)} tokens of room before the next compaction`
+					: "";
+			lines.push(`Snapcompact archive: ${archive.frames} frames ≈ ${archive.tokens} tokens${room}`);
+		}
 		const snap = breakdown.snapcompact;
 		if (snap) {
 			if (!snap.visionCapable) {

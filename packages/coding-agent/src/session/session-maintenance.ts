@@ -104,6 +104,13 @@ import { buildSessionContext, getLatestCompactionEntry, getOpenAiRemoteCompactio
 import type { CompactionEntry, SessionEntry } from "./session-entries";
 import type { SessionManager } from "./session-manager";
 import type { ShakeMode, ShakeResult } from "./shake-types";
+import {
+	archiveFrameTokens,
+	SNAPCOMPACT_POST_COMPACTION_TARGET,
+	shapeFrameTokens,
+	snapcompactArchiveFrames,
+	snapcompactFrameImages,
+} from "./snapcompact-archive-budget";
 import { resolveSpeculationLeadTokens, SPECULATION_LEAD_MIN_TOKENS } from "./speculation-lead";
 import experimentalContextNotesReminderPrompt from "../prompts/system/experimental-context-notes-reminder.md" with { type: "text" };
 import experimentalContextRolloverPrompt from "../prompts/system/experimental-context-rollover.md" with { type: "text" };
@@ -116,6 +123,7 @@ import {
 	cfgCompactionEnabled,
 	cfgCompactionMethodOrder,
 	cfgContextPromotionEnabled,
+	cfgSnapcompactArchiveShare,
 	cfgSnapcompactShape,
 } from "./context-settings";
 import { cfgRetry } from "./settings";
@@ -322,6 +330,9 @@ const PRUNE_IDLE_FLUSH_MS = 90 * 60_000;
  */
 const COMPACTION_RECOVERY_BAND = 0.8;
 
+/** Snapcompact summary template (intro + FILES section + grid notes), in tokens, for typical sessions. */
+const SNAPCOMPACT_SUMMARY_TEMPLATE_TOKENS = 2000;
+
 /** Payload-shaped 413s share text patterns with overflow; trust the payload classification when local
  *  occupancy stays under this ceiling (≥10% headroom) and reported usage stays within the window (#9235). */
 const PAYLOAD_REJECTION_OCCUPANCY_CEILING = 0.9;
@@ -521,6 +532,8 @@ export class SessionMaintenance {
 	 * persisted turn, but a new agent loop still gets its own live-array guard.
 	 */
 	#midTurnDeadEndPendingPrePrompt = false;
+	/** Model/trigger pairs already warned that the trigger leaves no room for a snapcompact archive. */
+	readonly #snapcompactNoRoomWarned = new Set<string>();
 	/** In-flight or armed background speculative compaction, if any. */
 	#speculation: SpeculationRun | undefined;
 	/**
@@ -1306,13 +1319,13 @@ export class SessionMaintenance {
 			let details: unknown;
 			let codexCompaction: CodexCompactionContext | undefined;
 
-			// Snapcompact runs locally first. The frame cap is sized from the live
-			// model window via #computeSnapcompactMaxFrames so the post-render context
-			// fits without the warning loop (issue #3247). A local blocker rejects
+			// Snapcompact runs locally first. The frame cap is sized from the room
+			// under the compaction trigger via #computeSnapcompactMaxFrames (and
+			// never past the window fit, issue #3247). A local blocker rejects
 			// this method, allowing the configured preference order to continue.
 			let snapcompactResult: snapcompact.CompactionResult | undefined;
 			if (snapcompactReady) {
-				const maxFrames = this.#computeSnapcompactMaxFrames(preparation, effectiveSettings);
+				const maxFrames = await this.#computeSnapcompactMaxFrames(preparation, effectiveSettings);
 				if (maxFrames < 1) {
 					logger.warn("Snapcompact skipped: kept history alone exceeds the context budget", {
 						model: this.#model?.id,
@@ -1328,13 +1341,17 @@ export class SessionMaintenance {
 					if (!shape) {
 						throw new Error("snapcompact shape was not resolved before rendering.");
 					}
-					snapcompactResult = await snapcompact.compact(preparation, {
-						convertToLlm,
-						model: this.#model,
-						...(snapcompactShapeSetting === "auto" ? {} : { shape }),
+					snapcompactResult = await this.#renderSnapcompactArchive(
+						preparation,
+						{
+							convertToLlm,
+							model: this.#model,
+							...(snapcompactShapeSetting === "auto" ? {} : { shape }),
+							includeThinking: snapcompactIncludeThinking,
+						},
 						maxFrames,
-						includeThinking: snapcompactIncludeThinking,
-					});
+						effectiveSettings,
+					);
 					const framePayloadBytes = this.#snapcompactFramePayloadBytes(snapcompactResult);
 					if (framePayloadBytes > snapcompact.FRAME_DATA_BYTES_BUDGET) {
 						logger.warn("Snapcompact exceeded the per-request frame payload budget", {
@@ -3539,93 +3556,152 @@ export class SessionMaintenance {
 		return { kind: "needsLlm", hookContext, hookPrompt, preserveData };
 	}
 
-	/**
-	 * Cap on snapcompact frames the post-compaction context can carry without
-	 * busting the model window. Mirrors the per-frame token charge used by the
-	 * projection ({@link snapcompact.FRAME_TOKEN_ESTIMATE}, the conservative
-	 * high-res Anthropic ceiling), so picking `maxFrames` from this helper makes
-	 * {@link #projectSnapcompactContextTokens} succeed by construction.
-	 *
-	 * Skip vs. cap use different reserves on purpose. The **skip** decision
-	 * (return `0`) trips only when kept-recent plus non-message tokens already
-	 * eat the entire `ctxWindow − reserve` envelope: at that point no archive
-	 * shape — frame-bearing or text-only — can fit, and the caller MUST
-	 * shortcut to the LLM summarizer instead of re-running snapcompact to
-	 * re-emit the "could not bring the context under the limit" warning every
-	 * threshold tick. The **cap** calculation subtracts a shape-aware reserve
-	 * (`2 × geometry(shape).capacity` chars worth of text edges, billed at the
-	 * tiktoken cl100k baseline, plus a 2k summary-template allowance) sized
-	 * from the same `shape` snapcompact will use, so the projection still
-	 * passes once frames land — but it MUST NOT gate the skip decision, since
-	 * a frame-less archive (`text.length <= 2 * edgeCap` short-circuit in
-	 * `planArchive`) typically costs only a few hundred tokens of summary
-	 * lead and would fit under residual headroom far smaller than the cap
-	 * reserve (chatgpt-codex reviews on #3249).
-	 *
-	 * Returns `1` when the frame charge would overflow but the text-only path
-	 * still has room: snapcompact's planner picks the frame-less layout
-	 * automatically when the discarded text fits in the edges, so giving it
-	 * the minimum cap lets it succeed instead of being skipped outright.
-	 *
-	 * Without this cap, the bundled `MAX_FRAMES_DEFAULT = 80` × 5024 tokens =
-	 * ~402k frame-token projection always overflows any sub-1M-token window
-	 * (issue #3247).
-	 */
-	#computeSnapcompactMaxFrames(preparation: CompactionPreparation, settings: EngineCompactionSettings): number {
-		const ctxWindow = this.#model?.contextWindow ?? 0;
-		if (ctxWindow <= 0) {
-			return Math.min(
-				snapcompact.MAX_FRAMES_DEFAULT,
-				snapcompact.maxFramesForDataBudget(),
-				snapcompact.providerFrameBudget(this.#model?.provider),
-			);
-		}
-		const reserve = effectiveReserveTokens(ctxWindow, settings);
-		let baseTokens = computeNonMessageTokens(
-			this.#host.nonMessageTokenSource(),
-			this.#tokenizer,
-			this.#host.settings.revision,
-		);
-		baseTokens += this.#tokenizer.countMessages(preparation.recentMessages);
-		const totalBudget = ctxWindow - reserve;
-		// Skip iff there is no headroom whatsoever; a text-only archive costs
-		// far less than the cap reserve below, so any positive residual is
-		// worth attempting and the projection guard catches actual overflow.
-		if (baseTokens >= totalBudget) return 0;
-		// Cap reserve mirrors what `countMessage(summaryMessage)` will charge
-		// when frames > 0: `countTokens(summaryTemplate ‖ textHead ‖ textTail)`
-		// plus `numFrames × FRAME_TOKEN_ESTIMATE`. Resolve the shape this
-		// snapcompact pass will actually use (matches the `shape` argument
-		// passed to `snapcompact.compact` in the auto and manual paths) so the
-		// text-edge cost reflects the live frame geometry rather than a fixed
-		// approximation. Reviewer (chatgpt-codex on #3249): a 4k reserve
-		// undersized the ~7k text-edge cost on the default Anthropic
-		// 11on16-bw shape, so the projection then rejected the `maxFrames`
-		// the cap had picked and the warning loop reappeared.
-		//
-		// - `textHead` and `textTail` each consume up to `geometry.capacity`
-		//   chars when frames > 0 (one HQ-capacity page per edge: see
-		//   `TEXT_EDGE_PAGES = 1` in `planArchive`), so 2 × capacity chars
-		//   total. Per-shape capacity: Anthropic 11on16-bw ~13.9k, Opus
-		//   1932px ~21k, Gemini 8on22-bw 2048px ~23.8k, OpenAI 1568px ~13.9k.
-		// - tiktoken cl100k ≈ 4 chars/token on ASCII (verified empirically
-		//   for prose, code, and JSON); a 1.15 multiplier absorbs tokenizer
-		//   drift on denser content (e.g. dense JSON / tool-result blobs).
-		// - Summary template (intro + FILES section + grid notes) bills
-		//   ~2k tokens for typical sessions.
-		const shape = snapcompact.resolveShape(this.#model, cfgSnapcompactShape.get(this.#host.settings));
-		const edgeCap = snapcompact.geometry(shape).capacity;
-		const textEdgeTokens = Math.ceil((2 * edgeCap * 1.15) / 4);
-		const SUMMARY_TEMPLATE_TOKENS = 2000;
-		const capReserve = textEdgeTokens + SUMMARY_TEMPLATE_TOKENS;
-		const frameBudget = totalBudget - baseTokens - capReserve;
-		if (frameBudget < snapcompact.FRAME_TOKEN_ESTIMATE) return 1;
+	/** Frame caps that hold whatever the context budget allows: the engine default, the per-request payload, and the provider's image count. */
+	#snapcompactFrameHardCap(): number {
 		return Math.min(
-			Math.floor(frameBudget / snapcompact.FRAME_TOKEN_ESTIMATE),
 			snapcompact.MAX_FRAMES_DEFAULT,
 			snapcompact.maxFramesForDataBudget(),
 			snapcompact.providerFrameBudget(this.#model?.provider),
 		);
+	}
+
+	/**
+	 * Text a frame-bearing archive carries besides its frames, in tokens:
+	 * `textHead` and `textTail` each hold up to one HQ page
+	 * (`geometry(shape).capacity` chars; `TEXT_EDGE_PAGES = 1` in
+	 * `planArchive`), billed at the cl100k ~4 chars/token baseline with a 1.15
+	 * margin for denser content, plus a ~2k summary template (intro + FILES +
+	 * grid notes). A 4k flat reserve undersized the ~7k edges of 11on16-bw and
+	 * let the projection reject the cap it had picked (chatgpt-codex on #3249).
+	 */
+	#snapcompactArchiveTextTokens(shape: snapcompact.Shape): number {
+		const textEdgeTokens = Math.ceil((2 * snapcompact.geometry(shape).capacity * 1.15) / 4);
+		return textEdgeTokens + SNAPCOMPACT_SUMMARY_TEMPLATE_TOKENS;
+	}
+
+	/**
+	 * Frame cap for a snapcompact pass, sized from the room under the
+	 * compaction trigger rather than the window: `snapcompact.archiveShare` of
+	 * `threshold − (system prompt + tools + kept recent + archive text)`,
+	 * divided by what the trigger's own tokenizer charges for one frame of the
+	 * shape this pass renders ({@link shapeFrameTokens}), so the plan is in the
+	 * same units the trigger counts after the commit. The threshold is resolved
+	 * from the same settings the trigger decision reads, so a low trigger on a
+	 * large window gets a small archive and the next compaction is not due a
+	 * few turns later. {@link snapcompactArchiveFrames} also never plans past
+	 * {@link SNAPCOMPACT_POST_COMPACTION_TARGET} of the trigger; the window fit
+	 * and {@link #snapcompactFrameHardCap} bound it from above.
+	 *
+	 * Returns `0` (skip) only when kept-recent plus non-message tokens already
+	 * fill `window − reserve`: no archive shape can fit, and re-running would
+	 * re-emit the overflow warning every tick. When the room fits no frame but
+	 * the window still has headroom it returns `1`: `planArchive` falls back to
+	 * the frame-less text layout when the discarded text fits in the edges, so
+	 * the minimum cap lets it succeed instead of being skipped (chatgpt-codex on
+	 * #3249), and the user is warned once that the trigger leaves no room.
+	 */
+	async #computeSnapcompactMaxFrames(
+		preparation: CompactionPreparation,
+		settings: EngineCompactionSettings,
+	): Promise<number> {
+		const hardCap = this.#snapcompactFrameHardCap();
+		const ctxWindow = this.#model?.contextWindow ?? 0;
+		if (ctxWindow <= 0) return hardCap;
+		const totalBudget = ctxWindow - effectiveReserveTokens(ctxWindow, settings);
+		const keptTokens =
+			computeNonMessageTokens(this.#host.nonMessageTokenSource(), this.#tokenizer, this.#host.settings.revision) +
+			this.#tokenizer.countMessages(preparation.recentMessages);
+		if (keptTokens >= totalBudget) return 0;
+		// Same shape the auto and manual paths pass to `snapcompact.compact`.
+		const shape = snapcompact.resolveShape(this.#model, cfgSnapcompactShape.get(this.#host.settings));
+		const frameTokens = await shapeFrameTokens(this.#tokenizer, shape);
+		const fixedTokens = keptTokens + this.#snapcompactArchiveTextTokens(shape);
+		const thresholdTokens = resolveThresholdTokens(ctxWindow, settings);
+		const roomFrames = snapcompactArchiveFrames({
+			thresholdTokens,
+			fixedTokens,
+			frameTokens,
+			share: cfgSnapcompactArchiveShare.get(this.#host.settings),
+		});
+		const windowFrames = Math.floor((totalBudget - fixedTokens) / frameTokens);
+		const frames = Math.min(roomFrames, windowFrames, hardCap);
+		if (frames >= 1) return frames;
+		if (roomFrames < 1) this.#warnNoSnapcompactArchiveRoom(thresholdTokens, fixedTokens);
+		return 1;
+	}
+
+	/** Once per model and trigger: the configured trigger leaves no room for even one archive frame. */
+	#warnNoSnapcompactArchiveRoom(thresholdTokens: number, fixedTokens: number): void {
+		const key = `${this.#model?.provider}/${this.#model?.id}@${thresholdTokens}`;
+		if (this.#snapcompactNoRoomWarned.has(key)) return;
+		this.#snapcompactNoRoomWarned.add(key);
+		logger.warn("Snapcompact archive has no room under the compaction trigger", {
+			model: this.#model?.id,
+			thresholdTokens,
+			fixedTokens,
+		});
+		this.#host.emitNotice(
+			"warning",
+			`snapcompact: the compaction trigger (${thresholdTokens.toLocaleString()} tokens) leaves no room for an image archive after ~${fixedTokens.toLocaleString()} tokens of system prompt, kept turns and summary text, so archives are cut to a single frame. Raise compaction.thresholdTokens or lower compaction.keepRecentTokens.`,
+			"compaction",
+		);
+	}
+
+	/**
+	 * Render a snapcompact archive at `maxFrames`, then steer it toward the
+	 * sizing target: while the compacted context would sit above
+	 * {@link SNAPCOMPACT_POST_COMPACTION_TARGET} of the threshold (the text
+	 * estimate in {@link #computeSnapcompactMaxFrames} ran short), re-render
+	 * with enough of the oldest frames dropped to fit — at most twice: the first
+	 * pass removes the estimated excess, the second absorbs per-frame variance.
+	 * A single frame cannot shrink further, so the target is best effort;
+	 * whether the result is acceptable is the caller's call
+	 * ({@link #snapcompactLeavesNoHeadroom} for automatic passes).
+	 */
+	async #renderSnapcompactArchive(
+		preparation: CompactionPreparation,
+		options: snapcompact.Options<AgentMessage>,
+		maxFrames: number,
+		settings: EngineCompactionSettings,
+	): Promise<snapcompact.CompactionResult> {
+		let result = await snapcompact.compact(preparation, { ...options, maxFrames });
+		const ctxWindow = this.#model?.contextWindow ?? 0;
+		if (ctxWindow <= 0) return result;
+		const targetTokens = Math.floor(SNAPCOMPACT_POST_COMPACTION_TARGET * resolveThresholdTokens(ctxWindow, settings));
+		for (let rerender = 0; rerender < 2; rerender++) {
+			const archive = snapcompact.getPreservedArchive(result.preserveData);
+			if (!archive || archive.frames.length <= 1) break;
+			const projected = this.#projectSnapcompactContextTokens(preparation, result, {
+				excludeEncryptedReasoning: true,
+			});
+			if (projected <= targetTokens) break;
+			const perFrame = archiveFrameTokens(this.#tokenizer, snapcompactFrameImages(archive)) / archive.frames.length;
+			const fitted = Math.max(1, archive.frames.length - Math.ceil((projected - targetTokens) / perFrame));
+			logger.debug("Snapcompact archive re-rendered toward the post-compaction target", {
+				model: this.#model?.id,
+				projected,
+				targetTokens,
+				frames: archive.frames.length,
+				fitted,
+			});
+			result = await snapcompact.compact(preparation, { ...options, maxFrames: fitted });
+		}
+		return result;
+	}
+
+	/**
+	 * Whether a rendered archive would leave the compacted context above
+	 * `COMPACTION_RECOVERY_BAND × threshold` — the band
+	 * {@link #compactionCreatedHeadroom} requires after the commit. Committing
+	 * such an archive (e.g. one frame plus its text edges under a trigger
+	 * barely above the kept turns) only re-enters the no-headroom rescue, so
+	 * automatic maintenance rejects it and lets the next configured method try.
+	 * Manual `/compact` keeps its window-fit check only: the user asked for it.
+	 */
+	#snapcompactLeavesNoHeadroom(projectedTokens: number, settings: EngineCompactionSettings): boolean {
+		const ctxWindow = this.#model?.contextWindow ?? 0;
+		if (ctxWindow <= 0) return false;
+		return projectedTokens > Math.floor(resolveThresholdTokens(ctxWindow, settings) * COMPACTION_RECOVERY_BAND);
 	}
 
 	#snapcompactFramePayloadBytes(result: snapcompact.CompactionResult): number {
@@ -3957,51 +4033,58 @@ export class SessionMaintenance {
 	 * {@link #compactionCreatedHeadroom} re-tests), not the window-fit budget
 	 * {@link #computeSnapcompactMaxFrames} sizes against — a rebuilt archive
 	 * must land back under the maintenance trigger, or the next settle
-	 * re-enters the same dead-end. Cap reserve mirrors
-	 * #computeSnapcompactMaxFrames (text edges + summary template), and
-	 * `keptTailTokens` charges the kept entries AFTER the archive so the
-	 * budget mirrors what #compactionCreatedHeadroom will actually measure.
-	 * Returns 0 when not even one frame fits that budget — the rebuild could
-	 * never create headroom, so the caller must not append it.
+	 * re-enters the same dead-end. The text reserve mirrors
+	 * #computeSnapcompactMaxFrames; `frameTokens` is the receiving model's
+	 * price for one frame of the rebuild's shape; `keptTailTokens` charges the
+	 * kept entries around the archive so the budget mirrors what
+	 * #compactionCreatedHeadroom will actually measure. Returns 0 when not even
+	 * one frame fits that budget — the rebuild could never create headroom, so
+	 * the caller must not append it.
 	 */
-	#computeSnapcompactRescueMaxFrames(settings: EngineCompactionSettings, keptTailTokens: number): number {
-		const ctxWindow = this.#model?.contextWindow ?? 0;
-		if (ctxWindow <= 0) {
-			return Math.min(
-				snapcompact.MAX_FRAMES_DEFAULT,
-				snapcompact.maxFramesForDataBudget(),
-				snapcompact.providerFrameBudget(this.#model?.provider),
-			);
-		}
-		const thresholdTokens = resolveThresholdTokens(ctxWindow, settings);
-		const recoveryBandTokens = Math.floor(thresholdTokens * COMPACTION_RECOVERY_BAND);
-		const baseTokens = computeNonMessageTokens(
-			this.#host.nonMessageTokenSource(),
-			this.#tokenizer,
-			this.#host.settings.revision,
-		);
-		const shape = snapcompact.resolveShape(this.#model, cfgSnapcompactShape.get(this.#host.settings));
-		const edgeCap = snapcompact.geometry(shape).capacity;
-		const textEdgeTokens = Math.ceil((2 * edgeCap * 1.15) / 4);
-		const SUMMARY_TEMPLATE_TOKENS = 2000;
-		const frameBudget = recoveryBandTokens - baseTokens - keptTailTokens - textEdgeTokens - SUMMARY_TEMPLATE_TOKENS;
-		if (frameBudget < snapcompact.FRAME_TOKEN_ESTIMATE) return 0;
+	#computeSnapcompactRescueMaxFrames(
+		settings: EngineCompactionSettings,
+		keptTailTokens: number,
+		shape: snapcompact.Shape,
+		frameTokens: number,
+	): number {
 		// Same hard caps as #computeSnapcompactMaxFrames: a threshold-derived
 		// count above the per-request payload or provider image budget would
 		// "shrink" a huge archive to a frame count the rebuilt prompt can never
 		// attach anyway.
-		return Math.min(
-			Math.floor(frameBudget / snapcompact.FRAME_TOKEN_ESTIMATE),
-			snapcompact.MAX_FRAMES_DEFAULT,
-			snapcompact.maxFramesForDataBudget(),
-			snapcompact.providerFrameBudget(this.#model?.provider),
+		const hardCap = this.#snapcompactFrameHardCap();
+		const ctxWindow = this.#model?.contextWindow ?? 0;
+		if (ctxWindow <= 0) return hardCap;
+		const frameBudget =
+			this.#snapcompactRescueBandTokens(settings, ctxWindow) -
+			keptTailTokens -
+			this.#snapcompactArchiveTextTokens(shape);
+		return Math.min(Math.max(0, Math.floor(frameBudget / frameTokens)), hardCap);
+	}
+
+	/** Recovery-band tokens left for a rebuilt archive's summary message after the system prompt and tools. */
+	#snapcompactRescueBandTokens(settings: EngineCompactionSettings, ctxWindow: number): number {
+		const recoveryBandTokens = Math.floor(resolveThresholdTokens(ctxWindow, settings) * COMPACTION_RECOVERY_BAND);
+		return (
+			recoveryBandTokens -
+			computeNonMessageTokens(this.#host.nonMessageTokenSource(), this.#tokenizer, this.#host.settings.revision)
+		);
+	}
+
+	/** What the active tokenizer charges for a compaction summary carrying `preserveData`'s archive. */
+	#snapcompactSummaryTokens(summary: string, preserveData: Record<string, unknown> | undefined): number {
+		const archive = snapcompact.getPreservedArchive(preserveData);
+		const blocks = archive
+			? snapcompact.historyBlocks(archive, { maxFrameDataBytes: snapcompact.FRAME_DATA_BYTES_BUDGET })
+			: undefined;
+		return this.#tokenizer.countMessage(
+			createCompactionSummaryMessage(summary, 0, new Date().toISOString(), { blocks }),
 		);
 	}
 
 	/**
 	 * Dead-end rescue for a branch whose latest snapcompact CompactionEntry is
 	 * itself billed past the maintenance threshold
-	 * (`FRAME_TOKEN_ESTIMATE × frames`). Reaching the `!preparation` dead-end
+	 * (each frame at its billed price). Reaching the `!preparation` dead-end
 	 * proves everything after that entry is already kept-recent (nothing to
 	 * summarize), so the archive is the irreducible cost — and the elide/image
 	 * tiers can never touch it: `collectShakeRegions` and `dropImages()` only
@@ -4058,18 +4141,26 @@ export class SessionMaintenance {
 		if (!archive || archive.frames.length <= 1) return undefined;
 		const archiveText = snapcompact.archiveSourceText(archive);
 		if (!archiveText) return undefined;
-		const maxFrames = this.#computeSnapcompactRescueMaxFrames(settings, keptTailTokens);
-		if (maxFrames < 1 || maxFrames >= archive.frames.length) return undefined;
+		const shapeSetting = cfgSnapcompactShape.get(this.#host.settings);
+		const shape = snapcompact.resolveShapeForText(archiveText, this.#model, shapeSetting);
+		// Progress is judged by what the receiving model's counter charges, not by
+		// frame count: after a model switch the stale frames keep their old
+		// geometry and price, so re-rendering the same number of frames at the new
+		// shape can still free room (e.g. 56 Opus 1932px frames read by Codex).
+		const frameTokens = await shapeFrameTokens(this.#tokenizer, shape);
+		const staleFrameTokens = archiveFrameTokens(this.#tokenizer, snapcompactFrameImages(archive));
+		const maxFrames = Math.min(
+			this.#computeSnapcompactRescueMaxFrames(settings, keptTailTokens, shape, frameTokens),
+			archive.frames.length,
+		);
+		if (maxFrames < 1 || maxFrames * frameTokens >= staleFrameTokens) return undefined;
 
 		const staleDetails = staleEntry.details as snapcompact.CompactionDetails | undefined;
 		const fileOps = snapcompact.createFileOps();
 		for (const file of staleDetails?.readFiles ?? []) fileOps.read.add(file);
 		for (const file of staleDetails?.modifiedFiles ?? []) fileOps.edited.add(file);
-		const shapeSetting = cfgSnapcompactShape.get(this.#host.settings);
-		const shape = snapcompact.resolveShapeForText(archiveText, this.#model, shapeSetting);
-		let result: snapcompact.CompactionResult;
-		try {
-			result = await snapcompact.compact(
+		const render = (frames: number) =>
+			snapcompact.compact(
 				{
 					firstKeptEntryId: staleEntry.firstKeptEntryId,
 					messagesToSummarize: [],
@@ -4083,9 +4174,32 @@ export class SessionMaintenance {
 					convertToLlm,
 					model: this.#model,
 					...(shapeSetting === "auto" ? {} : { shape }),
-					maxFrames,
+					maxFrames: frames,
 				},
 			);
+		// Verify the rendered archive before committing it: the text edges can
+		// run past the reserve, so a render still above the band is re-fitted
+		// once, and a rebuild that does not cost less than the stale archive
+		// under the receiving model is dropped.
+		const ctxWindow = this.#model.contextWindow ?? 0;
+		const bandTokens =
+			ctxWindow > 0
+				? this.#snapcompactRescueBandTokens(settings, ctxWindow) - keptTailTokens
+				: Number.POSITIVE_INFINITY;
+		let result: snapcompact.CompactionResult;
+		let rebuiltTokens: number;
+		try {
+			result = await render(maxFrames);
+			rebuiltTokens = this.#snapcompactSummaryTokens(result.summary, result.preserveData);
+			const rendered = snapcompact.getPreservedArchive(result.preserveData);
+			if (rebuiltTokens > bandTokens && rendered && rendered.frames.length > 1) {
+				const perFrame =
+					archiveFrameTokens(this.#tokenizer, snapcompactFrameImages(rendered)) / rendered.frames.length;
+				result = await render(
+					Math.max(1, rendered.frames.length - Math.ceil((rebuiltTokens - bandTokens) / perFrame)),
+				);
+				rebuiltTokens = this.#snapcompactSummaryTokens(result.summary, result.preserveData);
+			}
 		} catch (error) {
 			logger.warn("Dead-end snapcompact frame rescue failed", {
 				error: error instanceof Error ? error.message : String(error),
@@ -4094,7 +4208,8 @@ export class SessionMaintenance {
 		}
 		if (signal.aborted) return undefined;
 		const rebuilt = snapcompact.getPreservedArchive(result.preserveData);
-		if (!rebuilt || rebuilt.frames.length >= archive.frames.length) return undefined;
+		const staleTokens = this.#snapcompactSummaryTokens(staleEntry.summary, staleEntry.preserveData);
+		if (!rebuilt || rebuiltTokens >= staleTokens) return undefined;
 
 		const rebuiltEntryId = this.#host.sessionManager.appendCompaction(
 			result.summary,
@@ -4140,7 +4255,7 @@ export class SessionMaintenance {
 		}
 		this.#host.emitNotice(
 			"info",
-			`Compaction dead-end recovery: rebuilt the trailing snapcompact archive at a smaller frame budget (${archive.frames.length} → ${rebuilt.frames.length} frames) so maintenance could make progress.`,
+			`Compaction dead-end recovery: rebuilt the trailing snapcompact archive for the current model (${archive.frames.length} → ${rebuilt.frames.length} frames, ~${staleTokens.toLocaleString()} → ~${rebuiltTokens.toLocaleString()} tokens) so maintenance could make progress.`,
 			"compaction",
 		);
 		return result;
@@ -4618,11 +4733,12 @@ export class SessionMaintenance {
 			let details: unknown;
 
 			// Snapcompact runs locally first. The post-compaction context = kept-recent
-			// + a summary message carrying the imaged archive at FRAME_TOKEN_ESTIMATE
-			// per frame; #computeSnapcompactMaxFrames sizes the frame cap from the
-			// live window so we don't run snapcompact just to overflow every threshold
-			// tick. Any local blocker (unsupported snapcompact glyphs, kept-history too
-			// large, post-render overflow) advances automatic maintenance to the next
+			// + a summary message carrying the imaged archive at each frame's billed
+			// price; #computeSnapcompactMaxFrames sizes the frame cap from the room
+			// under the trigger so the compaction leaves space for new turns instead
+			// of re-firing a few turns later. Any local blocker (unsupported
+			// snapcompact glyphs, kept-history too large, post-render overflow)
+			// advances automatic maintenance to the next
 			// configured preference instead of wedging the session (#3659). Manual
 			// `/compact snapcompact` remains local-only because its one-method override
 			// leaves no fallback.
@@ -4653,7 +4769,7 @@ export class SessionMaintenance {
 					});
 					snapcompactBlocker = `snapcompact disabled: unsupported characters for selected snapcompact font (${percent}%); trying the next preferred compaction method.`;
 				} else {
-					const maxFrames = this.#computeSnapcompactMaxFrames(preparation, effectiveSettings);
+					const maxFrames = await this.#computeSnapcompactMaxFrames(preparation, effectiveSettings);
 					if (maxFrames < 1) {
 						logger.warn("Snapcompact skipped: kept history alone exceeds the context budget", {
 							model: this.#model?.id,
@@ -4661,13 +4777,17 @@ export class SessionMaintenance {
 						snapcompactBlocker =
 							"snapcompact: kept history alone exceeds the context budget; trying the next preferred compaction method.";
 					} else {
-						snapcompactResult = await snapcompact.compact(preparation, {
-							convertToLlm,
-							model: this.#model,
-							...(shapeSetting === "auto" ? {} : { shape }),
+						snapcompactResult = await this.#renderSnapcompactArchive(
+							preparation,
+							{
+								convertToLlm,
+								model: this.#model,
+								...(shapeSetting === "auto" ? {} : { shape }),
+								includeThinking: snapcompactIncludeThinking,
+							},
 							maxFrames,
-							includeThinking: snapcompactIncludeThinking,
-						});
+							effectiveSettings,
+						);
 						const framePayloadBytes = this.#snapcompactFramePayloadBytes(snapcompactResult);
 						if (framePayloadBytes > snapcompact.FRAME_DATA_BYTES_BUDGET) {
 							logger.warn("Snapcompact exceeded the per-request frame payload budget", {
@@ -4723,6 +4843,14 @@ export class SessionMaintenance {
 								});
 								snapcompactBlocker =
 									"snapcompact could not bring the context under the limit; trying the next preferred compaction method.";
+								snapcompactResult = undefined;
+							} else if (this.#snapcompactLeavesNoHeadroom(projectedForReduction, effectiveSettings)) {
+								logger.warn("Snapcompact archive leaves no room under the compaction trigger", {
+									model: this.#model?.id,
+									projected: projectedForReduction,
+								});
+								snapcompactBlocker =
+									"snapcompact could not leave room under the compaction trigger; trying the next preferred compaction method.";
 								snapcompactResult = undefined;
 							}
 						}

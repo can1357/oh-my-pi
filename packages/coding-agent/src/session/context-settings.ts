@@ -523,6 +523,43 @@ export const cfgSnapcompactShape = register({
 	},
 });
 
+/** Accepted range of `snapcompact.archiveShare`. */
+export const SNAPCOMPACT_ARCHIVE_SHARE_MIN = 0.1;
+export const SNAPCOMPACT_ARCHIVE_SHARE_MAX = 0.9;
+
+export const cfgSnapcompactArchiveShare = register({
+	id: "snapcompact.archiveShare",
+	type: "number",
+	default: 0.5,
+	validate: raw => {
+		if (typeof raw === "number" && !(raw >= SNAPCOMPACT_ARCHIVE_SHARE_MIN && raw <= SNAPCOMPACT_ARCHIVE_SHARE_MAX)) {
+			throw new Error(
+				`Invalid value for snapcompact.archiveShare: ${raw} (expected a number from ${SNAPCOMPACT_ARCHIVE_SHARE_MIN} to ${SNAPCOMPACT_ARCHIVE_SHARE_MAX})`,
+			);
+		}
+	},
+	ui: {
+		tab: "context",
+		group: "Experimental",
+		label: "Snapcompact Archive Share",
+		description:
+			"Share of the room under the compaction trigger (after the system prompt and kept recent turns) that a snapcompact image archive may fill. The rest is left for new turns before the next compaction.",
+		options: [
+			{
+				value: "0.3",
+				label: "30%",
+				description: "Small archive, compacts less often, forgets older history sooner.",
+			},
+			{ value: "0.5", label: "50%", description: "Default: half the room for the archive, half for new turns." },
+			{
+				value: "0.7",
+				label: "70%",
+				description: "Large archive; the budget still never plans past 60% of the trigger.",
+			},
+		],
+	},
+});
+
 // Branch summaries
 export const cfgBranchSummaryEnabled = register({
 	id: "branchSummary.enabled",

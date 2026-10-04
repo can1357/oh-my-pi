@@ -64,6 +64,7 @@ const result = await compact(preparation, { model });
 - **Text**: `serializeConversation`, `normalize`, `scanRenderability`, `renderabilityProbeText`, `dimStopwords`, `wrap`
 - **Budgets**: `providerImageBudget`, `MAX_FRAMES_DEFAULT`, `FRAME_TOKEN_ESTIMATE`, `HQ_EDGE_FRAMES`
 - **File ops**: `createFileOps`, `computeFileLists`, `upsertFileOperations`
+- **Payload and image limits**: `FRAME_DATA_BYTES_BUDGET`, `maxFramesForDataBudget`, `providerMessageImageBudget`, `providerFrameBudget`
 
 ## References
 

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Snapcompact archives are now sized from the room under the compaction trigger instead of the context window, taking half of it by default (new `snapcompact.archiveShare` setting) ([#14285](https://github.com/can1357/oh-my-pi/pull/14285) by [@will-bogusz](https://github.com/will-bogusz))
+
 ### Fixed
 
 - Fixed follow-up hashline edits being rejected as anchored on lines "never displayed" after an earlier edit shifted those lines, when the replacement carries the anchored content; genuinely stale line numbers are still rejected ([#14254](https://github.com/can1357/oh-my-pi/pull/14254) by [@abilliontokens](https://github.com/abilliontokens)).
