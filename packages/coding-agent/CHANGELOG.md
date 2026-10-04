@@ -6,6 +6,10 @@
 
 - Renamed the browser `tab.clickAt()` option `clickCount` to `count`, matching `tab.click()`
 
+### Added
+
+- Added cross-process IRC for extensions: `pi.irc.setRemoteTransport(namespace, transport)` claims an `@<namespace>/…` id space and routes `write agent://@<namespace>/<name>` through the transport, `pi.irc.registerRemotePeer` lists those peers as `remote` rows in `read history://`, and `pi.irc.deliverInbound` hands a message from another process to a local agent as a peer message. Independent root sessions sharing one registry co-own a bridge's claim, and a disabled bridge releases it. A runnable reference bridge and peer CLI live in `examples/extensions/remote-irc-bridge/` ([#14071](https://github.com/can1357/oh-my-pi/pull/14071) by [@mccraigmccraig](https://github.com/mccraigmccraig)).
+
 ### Changed
 
 - Browser `waitForUrl`, `waitForResponse` and `requests({ filter })` treat a URL string containing `*` as a glob, like `tab.route()`; other strings still match as substrings
@@ -17,6 +21,7 @@
 - `ida` `exec` output no longer starts with IDA 9.5 `DeprecationWarning`s from omp's preloaded helpers; on IDA 9.5+ `func()` returns a `func_entry_info_t` (same `start_ea`/`end_ea`/`size()`) instead of `func_t`
 - `web_search` no longer returns Perplexity's "Sign up and repeat your request." wall as an answer when the stored Perplexity login or `PERPLEXITY_COOKIES` has expired; it reports the expired login and moves on to the next provider in the chain
 - `edit` rejections of an unknown tag now offer the file's current tag for the rows shown, instead of only sending the model back to output it already copied from ([#19332](https://github.com/can1357/oh-my-pi/pull/19332) by [@Xytronix](https://github.com/Xytronix))
+- Fixed `-p` print mode dying with `AgentBusyError` when a bridged peer message woke the session before the initial prompt dispatched; the prompt now queues behind the wake turn ([#14071](https://github.com/can1357/oh-my-pi/pull/14071) by [@mccraigmccraig](https://github.com/mccraigmccraig)).
 - The browser tool's `webmcpList` and `webmcpInvoke` now find the tools a page registers in Chrome and Chromium 157 and later, instead of reporting that Chrome does not expose WebMCP to the page ([#19232](https://github.com/can1357/oh-my-pi/pull/19232) by [@tuschla](https://github.com/tuschla))
 - Ask and remember (`always-ask-cached`) now prompts before `read`, `grep`, `glob`, `find` and `ast_grep` reach a private host written with a trailing dot (`http://intranet./`, `http://localhost.:8080/`, `http://db.corp.internal./`) instead of treating it as a public page ([#19228](https://github.com/can1357/oh-my-pi/pull/19228) by [@XYZ1024-alt](https://github.com/XYZ1024-alt))
 - Fixed the TUI freezing when a session was resumed from `/resume` typed into an open tool approval; switching sessions now closes the pending approval instead of waiting on it ([#19239](https://github.com/can1357/oh-my-pi/issues/19239))
