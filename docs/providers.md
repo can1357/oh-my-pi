@@ -376,6 +376,12 @@ providers:
         maxTokens: 8192
 ```
 
+OpenAI-compatible endpoints can also be managed from the `/models` hub instead of editing the file: `Ctrl+N` (or the `+ Add provider…` row) adds one, and on a provider declared in `models.yml`, `Ctrl+E` edits its endpoint or key (`Ctrl+X` on the key step clears it) and `Ctrl+D` deletes it.
+
+- Saves rewrite only the edited provider: comments, line endings, indentation and every other entry are kept, and a save that would not load is refused before anything is written.
+- Keys go to the credential store, never into `models.yml`; a provider that defines its own `models` keeps its `apiKey` in the file, so edit that one by hand.
+- Providers configured through environment variables (for example `OLLAMA_HOST`) are untouched unless you add a provider with the same ID.
+
 ### Zhipu BigModel account-balance keys
 
 `/login zai` targets the global Z.AI Coding Plan endpoint, and `/login zhipu-coding-plan` targets the domestic Zhipu Coding Plan endpoint. Neither flow configures the general pay-as-you-go BigModel endpoint at `https://open.bigmodel.cn/api/paas/v4`.

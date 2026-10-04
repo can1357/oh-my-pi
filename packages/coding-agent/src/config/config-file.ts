@@ -232,7 +232,9 @@ export class ConfigFile<T> implements IConfigFile<T> {
 		return result;
 	}
 
-	#parseContent(content: string): LoadResult<T> {
+	/** Parse and validate `content`; `record` also caches the outcome and logs failures, as a real load does. */
+	#parseContent(content: string, record: boolean): LoadResult<T> {
+		const done = (result: LoadResult<T>): LoadResult<T> => (record ? this.#storeCache(result) : result);
 		try {
 			let parsed: unknown;
 			const readPath = this.#resolveReadPath();
@@ -251,8 +253,8 @@ export class ConfigFile<T> implements IConfigFile<T> {
 					message: error.problem,
 				}));
 				const error = new ConfigError(this.id, schemaErrors);
-				logger.warn("Failed to parse config file", { path: this.path(), error });
-				return this.#storeCache({ error, status: "error" });
+				if (record) logger.warn("Failed to parse config file", { path: this.path(), error });
+				return done({ error, status: "error" });
 			}
 			const value = checked as T;
 			try {
@@ -262,16 +264,25 @@ export class ConfigFile<T> implements IConfigFile<T> {
 					error instanceof ConfigError
 						? error
 						: new ConfigError(this.id, undefined, { err: error, stage: "AuxValidate" });
-				return this.#storeCache({ error: wrapped, status: "error" });
+				return done({ error: wrapped, status: "error" });
 			}
-			return this.#storeCache({ value, status: "ok" });
+			return done({ value, status: "ok" });
 		} catch (error) {
-			logger.warn("Failed to parse config file", { path: this.path(), error });
-			return this.#storeCache({
+			if (record) logger.warn("Failed to parse config file", { path: this.path(), error });
+			return done({
 				error: new ConfigError(this.id, undefined, { err: error, stage: "Unexpected" }),
 				status: "error",
 			});
 		}
+	}
+
+	/**
+	 * Run the load pipeline (parse, schema, aux validators) over `content` exactly as {@link tryLoad}
+	 * would for a file holding it, without touching the cache or the log. Lets a writer prove a
+	 * candidate file loads before publishing it.
+	 */
+	check(content: string): LoadResult<T> {
+		return this.#parseContent(content.trim(), false);
 	}
 
 	tryLoad(): LoadResult<T> {
@@ -291,7 +302,7 @@ export class ConfigFile<T> implements IConfigFile<T> {
 				status: "error",
 			});
 		}
-		return this.#parseContent(content);
+		return this.#parseContent(content, true);
 	}
 
 	load(): T | null {
