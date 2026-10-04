@@ -40,6 +40,8 @@ export interface StatusLineSegmentOptions {
 	path?: { abbreviate?: boolean; maxLength?: number; stripWorkPrefix?: boolean };
 	git?: { showBranch?: boolean; showStaged?: boolean; showUnstaged?: boolean; showUntracked?: boolean };
 	time?: { format?: "12h" | "24h"; showSeconds?: boolean };
+	/** Quota-window parts of the `usage` segment; each part shows unless set to `false`. `compact` drops the spaces and parentheses. */
+	usage?: { showLabel?: boolean; showPercent?: boolean; showReset?: boolean; compact?: boolean };
 }
 
 export interface StatusLineSettings {

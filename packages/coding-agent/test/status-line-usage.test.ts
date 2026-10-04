@@ -3,7 +3,7 @@ import { stripVTControlCharacters } from "node:util";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { StatusLineComponent } from "@oh-my-pi/pi-tui/status-line";
 import { statusLineHost } from "@oh-my-pi/pi-coding-agent/modes/status-line-host";
-import { renderSegment } from "@oh-my-pi/pi-tui/status-line/segments";
+import { describeSegment, renderSegment } from "@oh-my-pi/pi-tui/status-line/segments";
 import type { SegmentContext } from "@oh-my-pi/pi-tui/status-line/types";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import { StatusLineTestComponents } from "./helpers/status-line";
@@ -93,6 +93,47 @@ describe("usage status-line segment", () => {
 		expect(content).toContain("7d");
 		expect(content).toContain("8%");
 		expect(content).toContain("5d 21h");
+	});
+
+	describe("quota-window options", () => {
+		const usage = { fiveHour: { percent: 24, resetMinutes: 287 }, sevenDay: { percent: 8, resetHours: 141 } };
+		const contextWith = (options: Record<string, unknown>) => ({ usage, options }) as unknown as SegmentContext;
+
+		it("keeps the spaced, parenthesized format by default", () => {
+			const content = stripVTControlCharacters(renderSegment("usage", contextWith({})).content);
+
+			expect(content).toContain("5h 24% (4h 47m) · 7d 8% (5d 21h)");
+		});
+
+		it("joins label, percent, and reset without spaces or parentheses when compact", () => {
+			const ctx = contextWith({ usage: { compact: true } });
+			const content = stripVTControlCharacters(renderSegment("usage", ctx).content);
+			const native = describeSegment("usage", ctx)
+				?.spans.map(s => s.t)
+				.join("");
+
+			expect(content).toContain("5h24%4h47m · 7d8%5d21h");
+			expect(content).not.toContain("(");
+			expect(native).toBe("5h24%4h47m · 7d8%5d21h");
+		});
+
+		it("drops hidden parts without leaving separators behind", () => {
+			const percentOnly = contextWith({ usage: { showLabel: false, showReset: false } });
+			const labelAndReset = contextWith({ usage: { showPercent: false } });
+
+			expect(stripVTControlCharacters(renderSegment("usage", percentOnly).content)).toMatch(/(^|\s)24% · 8%$/);
+			expect(stripVTControlCharacters(renderSegment("usage", labelAndReset).content)).toContain(
+				"5h (4h 47m) · 7d (5d 21h)",
+			);
+		});
+
+		it("hides the segment when every quota-window part is hidden", () => {
+			const ctx = contextWith({ usage: { showLabel: false, showPercent: false, showReset: false } });
+			const result = renderSegment("usage", ctx);
+
+			expect(result.visible).toBe(false);
+			expect(describeSegment("usage", ctx)).toBeNull();
+		});
 	});
 
 	it("renders tiered usage fetched from provider reports", async () => {
