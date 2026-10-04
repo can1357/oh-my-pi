@@ -87,9 +87,14 @@ export class SessionFocusController {
 		if (sameSession) {
 			if (!attachment) return;
 		} else {
+			const previous = this.#focusedAgentId;
+			if (previous && previous !== id) this.lifecycle().unhold(previous);
 			++this.#attachGeneration;
 			this.#focusedAgentId = id;
 			this.#attachedSession = session;
+			// Pin the viewed agent: its idle/park transition must not dispose the
+			// live session (which would blank the view) while it is on screen.
+			this.lifecycle().hold(id);
 			this.#registryUnsubscribe ??= this.registry.onChange(e => this.#onRegistryEvent(e));
 			attachment = this.#attach(session);
 			this.#focusAttachment = attachment;
@@ -137,8 +142,10 @@ export class SessionFocusController {
 	 */
 	async #detachToMain(): Promise<void> {
 		if (!this.#focusedAgentId) return;
+		const previous = this.#focusedAgentId;
 		this.#focusedAgentId = undefined;
 		this.#attachedSession = undefined;
+		this.lifecycle().unhold(previous);
 		const attached = await this.#attach(this.ctx.session);
 		if (attached && this.#focusedAgentId === undefined) this.ctx.showStatus("Returned to main session");
 	}
@@ -148,6 +155,7 @@ export class SessionFocusController {
 		// teardown: invalidate both generations the way leave-main does.
 		this.#focusRequestSeq++;
 		++this.#attachGeneration;
+		if (this.#focusedAgentId) this.lifecycle().unhold(this.#focusedAgentId);
 		this.#registryUnsubscribe?.();
 		this.#registryUnsubscribe = undefined;
 	}
@@ -238,6 +246,7 @@ export class SessionFocusController {
 			return true;
 		} catch (error) {
 			if (generation === this.#attachGeneration) {
+				if (this.#focusedAgentId) this.lifecycle().unhold(this.#focusedAgentId);
 				this.#focusedAgentId = undefined;
 				this.#attachedSession = undefined;
 				// Keep a failed main replay subscribed; never recursively recover it.

@@ -4,6 +4,7 @@ import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import { prompt, Snowflake, untilAborted } from "@oh-my-pi/pi-utils";
 import backgroundTanDispatchPrompt from "../../prompts/system/background-tan-dispatch.md" with { type: "text" };
 import tanContextSwitchPrompt from "../../prompts/system/tan-context-switch.md" with { type: "text" };
+import { AgentLifecycleManager } from "../../registry/agent-lifecycle";
 import { AgentRegistry, MAIN_AGENT_ID } from "../../registry/agent-registry";
 import * as sdk from "../../sdk";
 import type { AgentSession } from "../../session/agent-session";
@@ -13,7 +14,7 @@ import { createMCPProxyTools, createSubagentSettings } from "../../task/executor
 import { USER_TODO_EDIT_CUSTOM_TYPE } from "../../tools/todo";
 import type { InteractiveModeContext } from "../types";
 
-import { cfgTaskEnableLsp } from "../../task/settings";
+import { cfgTaskAgentIdleTtlMs, cfgTaskEnableLsp } from "../../task/settings";
 
 const TAN_LABEL_PREVIEW_LENGTH = 80;
 
@@ -178,6 +179,17 @@ export class TanCommandController {
 							localProtocolOptions,
 						});
 						clone = created.session;
+						// Switch the view to the tangent's live session so the user
+						// watches it work; focusing after it parks is impossible
+						// (parking drops the in-memory transcript). Best-effort: a
+						// focus failure must not abort the dispatched work.
+						try {
+							await this.ctx.focusAgentSession(cloneId);
+						} catch (error) {
+							this.ctx.showWarning(
+								`Could not switch the view to /tan agent: ${error instanceof Error ? error.message : String(error)}`,
+							);
+						}
 						clone.sessionManager?.appendSessionInit?.({
 							systemPrompt: clone.systemPrompt ? clone.systemPrompt.join("\n\n") : systemPrompt.join("\n\n"),
 							task: trimmedWork,
@@ -270,6 +282,17 @@ export class TanCommandController {
 							if (signal.aborted) {
 								agentRegistry.setStatus(cloneId, "aborted");
 								await clone.dispose();
+							} else if (this.ctx.focusedAgentId === cloneId) {
+								// The user is watching this tangent answer. Parking it would
+								// dispose the session under the view and yank the transcript
+								// back to main. Leave it live and hand it to the lifecycle
+								// manager: the focus controller holds it while it stays on
+								// screen, so it parks (task.agentIdleTtlMs) only after the
+								// view moves away.
+								agentRegistry.setStatus(cloneId, "idle");
+								AgentLifecycleManager.global().adopt(cloneId, {
+									idleTtlMs: Math.trunc(Number(cfgTaskAgentIdleTtlMs.get(this.ctx.settings)) || 0),
+								});
 							} else {
 								agentRegistry.setStatus(cloneId, "parked");
 								await clone.dispose();
