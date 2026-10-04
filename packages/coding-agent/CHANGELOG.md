@@ -6,6 +6,10 @@
 
 - Fixed the `/usage` sheet in Tern missing the Close button the other report sheets have ([#14455](https://github.com/can1357/oh-my-pi/pull/14455) by [@H4vC](https://github.com/H4vC)).
 
+### Added
+
+- `get_messages_page` accepts `order: "desc"` for newest-first walks and `before`/`after` anchor cursors for prefetching around a known offset, so RPC hosts can page a transcript from the tail instead of walking the whole history forward ([#14270](https://github.com/can1357/oh-my-pi/pull/14270) by [@jchanghong023](https://github.com/jchanghong023)).
+
 ## [18.6.2] - 2026-10-04
 
 ### Fixed
@@ -14,7 +18,15 @@
 - Fixed the agent's `goal` calls asking for approval under `--approval-mode write`, which paused goal-mode loops at `complete`; `always-ask` still prompts for goal changes but not `get` ([#14368](https://github.com/can1357/oh-my-pi/issues/14368))
 - Fixed MCP server connection progress popping up a toast for every server that connects or fails in native terminals such as Tern; it now shows only in the classic terminal transcript
 
+### Added
+
+
+### Fixed
+
+
 ## [18.6.1] - 2026-10-04
+
+### Added
 
 ### Fixed
 
