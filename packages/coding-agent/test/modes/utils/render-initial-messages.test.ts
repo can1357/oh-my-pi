@@ -73,6 +73,7 @@ function makeCtx(): RenderInitialMessagesTestContext {
 	const ctx = {
 		chatContainer,
 		pendingMessagesContainer: { clear: vi.fn(), disposeChildren: vi.fn() },
+		updatePendingMessagesDisplay: vi.fn(),
 		pendingBashComponents: [],
 		pendingPythonComponents: [],
 		transcriptMessageComponents: new WeakMap<AgentMessage, Component>(),
@@ -155,6 +156,9 @@ function makeRenderCtx(
 	const ctx = {
 		chatContainer,
 		pendingMessagesContainer: new Container(),
+		updatePendingMessagesDisplay: () => helpers.updatePendingMessagesDisplay(),
+		compactionQueuedMessages: [],
+		keybindings: { getKeys: () => [] },
 		pendingBashComponents: [],
 		pendingPythonComponents: [],
 		transcriptMessageComponents: new WeakMap<AgentMessage, Component>(),
@@ -185,6 +189,7 @@ function makeRenderCtx(
 		focusedAgentId: undefined,
 		editor: { addToHistory: vi.fn() },
 		viewSession: {
+			getQueuedMessages: () => ({ steering: [], followUp: [] }),
 			buildTranscriptSessionContext: () => transcript,
 			getToolByName: () => undefined,
 			hasBuiltInTool: () => true,
@@ -251,6 +256,23 @@ describe("UiHelpers.renderInitialMessages — clearTerminalHistory", () => {
 			([force, opts]) => force === true && (opts as { clearScrollback?: boolean } | undefined)?.clearScrollback,
 		);
 		expect(clearedCall).toBeUndefined();
+	});
+});
+
+describe("UiHelpers.renderInitialMessages — queued messages", () => {
+	it("keeps the queued-message bar after a mid-turn rebuild such as rewind (#13680)", async () => {
+		const { ctx } = makeRenderCtx(makeEmptyContext());
+		vi.spyOn(ctx.viewSession, "getQueuedMessages").mockReturnValue({
+			steering: ["steer now"],
+			followUp: ["queued one", "queued two"],
+		});
+
+		await new UiHelpers(ctx).renderInitialMessages({ clearTerminalHistory: true });
+
+		const pending = Bun.stripANSI(ctx.pendingMessagesContainer.render(100).join("\n"));
+		expect(pending).toContain("steer now");
+		expect(pending).toContain("queued one");
+		expect(pending).toContain("queued two");
 	});
 });
 

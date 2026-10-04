@@ -2,6 +2,20 @@
 
 ## [Unreleased]
 
+## [18.6.0] - 2026-10-03
+
+### Fixed
+
+- Fixed the Frustration page splitting DeepSeek V4 provider variants and the V4.1 Flash alias into separate model-version rows ([#14194](https://github.com/can1357/oh-my-pi/issues/14194)).
+
+## [18.5.1] - 2026-10-03
+
+### Fixed
+
+- Fixed stats dashboard request rows for Judge and other role-model calls so they open correctly and display usage details.
+- Fixed stats and summary error-rate formatting so small nonzero percentages are displayed accurately instead of as 0.0%.
+- Fixed a visual fringe on the edges of the stats dashboard’s “Classify with judge” button.
+
 ## [18.4.4] - 2026-09-29
 
 ### Added

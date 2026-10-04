@@ -14,7 +14,9 @@ async function importedModules(entry: string): Promise<string[]> {
 		proc.exited,
 	]);
 	expect(code, err).toBe(0);
-	return JSON.parse(out.trim().split("\n").at(-1)!);
+	const registry: string[] = JSON.parse(out.trim().split("\n").at(-1)!);
+	// Windows registry keys use `\`; normalize so the path assertions below are portable.
+	return registry.map(module => module.replaceAll("\\", "/"));
 }
 
 function expectGraphExcludes(modules: string[], forbidden: RegExp[]): void {

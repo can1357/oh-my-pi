@@ -249,6 +249,11 @@ export class PlanReviewOverlay implements Component {
 	#nativeRoot: NativeNode | undefined;
 	/** Content the memoized root was built from. */
 	#nativeRootContent: NativePlanContent | undefined;
+	/**
+	 * The section the last Contents jump targets under a native surface, which
+	 * scrolls the body itself: `n` counts the jumps, so each one reveals it again.
+	 */
+	#jump: { section: number; n: number } | undefined;
 
 	constructor(
 		planContent: string,
@@ -798,6 +803,7 @@ export class PlanReviewOverlay implements Component {
 	#scrubBodyToToc(): void {
 		const sectionIndex = this.#toc[this.#tocCursor];
 		if (sectionIndex === undefined) return;
+		this.#jump = { section: sectionIndex, n: (this.#jump?.n ?? 0) + 1 };
 		const offset = this.#sectionOffsets[sectionIndex];
 		if (offset !== undefined) {
 			this.#scrollView.setScrollOffset(offset);
@@ -1404,6 +1410,7 @@ export class PlanReviewOverlay implements Component {
 		const sig = [
 			this.#focus,
 			this.#tocCursor,
+			this.#jump?.n ?? 0,
 			this.#selectedIndex,
 			this.#sliderIndex,
 			this.#committed ? `committed:${this.#committedLabel ?? ""}` : "",
@@ -1419,10 +1426,17 @@ export class PlanReviewOverlay implements Component {
 		const children: NativeChild[] = [];
 		const tools = this.#describeTools();
 		if (tools) children.push(tools);
+		// The section a Contents jump targets scrolls to the body's top.
+		const jump = this.#jump;
+		const body = jump
+			? content.body.map((section): NativeNode =>
+					section.key === `s${jump.section}` ? { ...section, reveal: { at: "start", n: jump.n } } : section,
+				)
+			: content.body;
 		const bodyCol = node(
 			"col",
 			{ role: "omp.plan.body", grow: 1, gap: "md", tone: this.#focus === "body" ? "accent" : undefined },
-			content.body,
+			body,
 			"body",
 		);
 		if (this.#sidebarShown) {

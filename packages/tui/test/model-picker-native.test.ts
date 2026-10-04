@@ -91,13 +91,13 @@ afterEach(() => {
 	for (const hub of hubs.splice(0)) hub.dispose();
 });
 
-function openHub(calls: { assign: string[]; cancel: number }): ModelHubComponent {
+function openHub(calls: { assign: string[]; cancel: number }, models: Model[] = MODELS): ModelHubComponent {
 	const hub = new ModelHubComponent(
 		ui,
 		source({ default: "demo/demo" }, ["demo/demo"]),
-		registry(MODELS),
+		registry(models),
 		// A `--models` scope skips the background online refresh.
-		MODELS.map(entry => ({ model: entry })),
+		models.map(entry => ({ model: entry })),
 		{
 			onAssign: (_model, role, _level, selector) => {
 				calls.assign.push(`${role}=${selector}`);
@@ -165,6 +165,20 @@ test("the model hub describes a data-first picker when the terminal has the kind
 	expect(titleOf(root.c)).toBe("demo");
 	// Unchanged state keeps the node.
 	expect(hub.describe(withPicker)).toBe(root);
+});
+
+test("Factory Droid rows carry the base credit rate and a credit-only model is never free", () => {
+	const priced = { ...model("factory-droid", "claude-opus-5"), factoryDroidCredits: 2 };
+	const creditOnly = {
+		...model("factory-droid", "preview-credit-model", { cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } }),
+		factoryDroidCredits: 0.5,
+	};
+	const hub = openHub({ assign: [], cancel: 0 }, [...MODELS, priced, creditOnly]);
+	const items = props(hub.describe(withPicker)).items ?? [];
+	const row = (id: string) => items.find(entry => entry.id === `factory-droid/${id}`);
+	expect(row("claude-opus-5")?.facts?.price).toBe("$3·15 2×");
+	expect(row("preview-credit-model")?.facts?.price).toBe("0.5×");
+	expect(row("preview-credit-model")?.badges ?? []).not.toContainEqual({ text: "free", tone: "success" });
 });
 
 test("typing changes the order, hits, counts and head total but never the catalogue", () => {
@@ -271,6 +285,42 @@ test("pointer events drive the hub through the same paths as its keys", () => {
 	expect(calls.cancel).toBe(0);
 	act("close");
 	expect(calls.cancel).toBe(1);
+});
+
+test("the Roles view picker names the active preset and ctrl+←/→ switches it", () => {
+	const presets = { names: ["fast", "slow"], active: "fast" as string | undefined };
+	let revision = 0;
+	const switched: string[] = [];
+	const base = source({ default: "demo/demo" }, []);
+	const hub = new ModelHubComponent(
+		ui,
+		Object.defineProperty({ ...base, getModelPresets: () => presets }, "revision", { get: () => revision }),
+		registry(MODELS),
+		MODELS.map(entry => ({ model: entry })),
+		{
+			onAssign: () => {},
+			onUnassign: () => {},
+			onCancel: () => {},
+			onSwitchPreset: name => {
+				switched.push(name);
+				presets.active = name;
+				revision++;
+			},
+		},
+	);
+	hubs.push(hub);
+	const subtitleText = () => {
+		const subtitle = props(hub.describe(withPicker)).subtitle;
+		return Array.isArray(subtitle) ? subtitle.map(part => part.t).join("") : subtitle;
+	};
+
+	hub.handleInput("\x1b[A"); // All models → Roles
+	expect(subtitleText()).toStartWith("Preset fast");
+	hub.handleInput("\x1b[1;5C");
+	expect(switched).toEqual(["slow"]);
+	expect(subtitleText()).toStartWith("Preset slow");
+	hub.handleInput("\x1b[1;5D");
+	expect(switched).toEqual(["slow", "fast"]);
 });
 
 test("the quick picker is an md sheet with the summary below and a task-model toggle", () => {

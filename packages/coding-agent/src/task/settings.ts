@@ -308,6 +308,19 @@ export const cfgTaskMaxRuntimeMs = register({
 	},
 });
 
+export const cfgTaskCompletionProbe = register({
+	id: "task.completionProbe",
+	type: "boolean",
+	default: true,
+	ui: {
+		tab: "tasks",
+		group: "Subagents",
+		label: "Subagent Completion Probe",
+		description:
+			"Ask a working subagent, through a cached side request like /btw, to estimate how complete its task is: after 2, 5, 10 and 30 more minutes, then hourly. The estimate shows next to the subagent in wait and task views. Only subagents spawned by the main agent of an interactive session are asked; print, RPC, ACP and SDK runs never probe.",
+	},
+});
+
 export const cfgTaskAgentIdleTtlMs = register({
 	id: "task.agentIdleTtlMs",
 	type: "number",

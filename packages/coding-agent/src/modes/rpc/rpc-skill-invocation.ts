@@ -4,6 +4,7 @@
  * importing `rpc-mode` from there would load the slash-command registry
  * while it is still initializing.
  */
+import type { ImageContent } from "@oh-my-pi/pi-ai";
 import {
 	type BuiltSkillPromptMessage,
 	buildSkillPromptMessage,
@@ -40,25 +41,27 @@ export function resolveRpcSkillInvocation(session: RpcSkillCommandSession, text:
  * and dispatches it through the full prompt pipeline (usage preflight,
  * compaction checks, provider calls). Resolves once the turn is scheduled.
  * Must not run on the RPC serial queue's response path — register it with
- * watchAndReportLocalOnlyPromptResult and answer the command first.
+ * watchAndReportPromptResult and answer the command once it is admitted.
  */
 export async function runRpcSkillCommand(
 	session: RpcSkillCommandSession,
 	invocation: RpcSkillInvocation,
 	streamingBehavior: "steer" | "followUp" | "aside" = "steer",
 	prebuilt?: BuiltSkillPromptMessage,
+	onPromptAdmitted?: () => void,
+	images?: ImageContent[],
 	tag?: string,
 ): Promise<boolean> {
 	const built = prebuilt ?? (await buildSkillPromptMessage(invocation.skill, invocation, "user"));
 	return session.promptCustomMessage(
 		{
 			customType: SKILL_PROMPT_MESSAGE_TYPE,
-			content: built.message,
+			content: images?.length ? [{ type: "text", text: built.message }, ...images] : built.message,
 			display: true,
 			details: built.details,
 			attribution: "user",
 			...(tag !== undefined && { tag }),
 		},
-		{ streamingBehavior, queueChipText: invocation.queueChipText },
+		{ streamingBehavior, queueChipText: invocation.queueChipText, onPromptAdmitted },
 	);
 }

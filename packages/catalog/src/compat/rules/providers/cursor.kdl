@@ -8,6 +8,11 @@ provider "cursor" {
 	}
 
 	thinking-mode "effort"
+	// Cursor's default route selects a differently priced backing model per request.
+	models "default" {
+		pricing-status "variable"
+	}
+
 	class "anthropic" {
 		family "fable" {
 			requires-cursor-tool-schema-projection #true
@@ -23,12 +28,14 @@ provider "cursor" {
 		}
 	}
 	// GetUsableModels advertises no input modalities or context windows.
-	// K3 (including the bare `k3` alias Cursor serves) is natively
-	// multimodal and 1M-context.
+	// Reviewed full-context K3 aliases are multimodal and 1M-context.
+	// K3 family identity alone does not verify other Cursor SKUs such as k3-256k.
 	class "kimi" {
 		family "k3" {
-			input-modalities "text" "image"
-			context-window-floor 1000000
+			models "*kimi-k3*" "k3" "*/k3" {
+				input-modalities "text" "image"
+				context-window-floor 1000000
+			}
 		}
 		family "k2.7-code" {
 			// Cursor advertised Kimi K2.7 Code Context window 262k.
@@ -50,10 +57,6 @@ provider "cursor" {
 			// raises unlabeled -fast variants from the 200k default.
 			context-window-floor 272000
 		}
-	}
-	models "k3" "*/k3" {
-		input-modalities "text" "image"
-		context-window-floor 1000000
 	}
 	models "default" {
 		context-window-floor 256000
@@ -211,9 +214,10 @@ provider "cursor" {
 		}
 	}
 	// Claude Opus 5 Fast: the docs name the fast wire ids but publish no
-	// fast multiplier, so fast bills at the base Opus 5 card.
+	// fast rate. Discovery applies AvailableModels' declared fast multiplier
+	// (2x); the base card only seeds rows discovery left unpriced.
 	models "claude-opus-5-high-fast" "claude-opus-5-low-fast" "claude-opus-5-medium-fast" "claude-opus-5-thinking-max-fast" "claude-opus-5-thinking-xhigh-fast" {
-		cost-patch {
+		cost-fallback {
 			input 5.0
 			output 25.0
 			cache-read 0.5
@@ -231,9 +235,10 @@ provider "cursor" {
 		}
 	}
 	// Claude Opus 5.5 Fast: the docs name the fast wire id but publish no
-	// fast multiplier, so fast bills at the base Opus 5.5 card.
+	// fast rate. Discovery prices it from AvailableModels' declared fast
+	// multiplier; the base card only seeds rows discovery left unpriced.
 	models "claude-opus-5-5-fast" {
-		cost-patch {
+		cost-fallback {
 			input 4.0
 			output 20.0
 			cache-read 0.2
@@ -267,8 +272,9 @@ provider "cursor" {
 			cache-write 0
 		}
 	}
-	// Grok 4.5: $2/$6, cache read $0.50, no write fee.
-	models "cursor-grok-4.5" {
+	// Grok 4.5: $2/$6, cache read $0.50, no write fee. Legacy id plus the
+	// per-effort wire slugs AvailableModels serves.
+	models "cursor-grok-4.5" "cursor-grok-4.5-low" "cursor-grok-4.5-medium" "cursor-grok-4.5-high" {
 		cost-patch {
 			input 2.0
 			output 6.0
@@ -277,7 +283,7 @@ provider "cursor" {
 		}
 	}
 	// Grok 4.5 Fast: $4/$18, cache read $1.00. Output is 3x base per docs.
-	models "cursor-grok-4.5-fast" {
+	models "cursor-grok-4.5-fast" "cursor-grok-4.5-low-fast" "cursor-grok-4.5-medium-fast" "cursor-grok-4.5-high-fast" {
 		cost-patch {
 			input 4.0
 			output 18.0
@@ -285,8 +291,9 @@ provider "cursor" {
 			cache-write 0
 		}
 	}
-	// Grok 4.6: $2/$6, cache read $0.50, no write fee.
-	models "cursor-grok-4.6" {
+	// Grok 4.6: $2/$6, cache read $0.50, no write fee. Legacy id plus the
+	// per-effort wire slugs AvailableModels serves.
+	models "cursor-grok-4.6" "cursor-grok-4.6-low" "cursor-grok-4.6-medium" "cursor-grok-4.6-high" "cursor-grok-4.6-xhigh" {
 		cost-patch {
 			input 2.0
 			output 6.0
@@ -295,7 +302,8 @@ provider "cursor" {
 		}
 	}
 	// Grok 4.6 Fast: $4/$12, cache read $1.00.
-	models "cursor-grok-4.6-fast" {
+	models "cursor-grok-4.6-fast" "cursor-grok-4.6-low-fast" "cursor-grok-4.6-medium-fast" "cursor-grok-4.6-high-fast" \
+		"cursor-grok-4.6-xhigh-fast" {
 		cost-patch {
 			input 4.0
 			output 12.0
@@ -448,10 +456,10 @@ provider "cursor" {
 			cache-write 0
 		}
 	}
-	// GPT-5.2 Fast: the docs publish no fast multiplier, so fast bills at
-	// the base GPT-5.2 card.
+	// GPT-5.2 Fast: the docs publish no fast rate. Discovery applies the
+	// declared fast multiplier; the base card only seeds unpriced rows.
 	models "gpt-5.2-fast" "gpt-5.2-high-fast" "gpt-5.2-low-fast" "gpt-5.2-xhigh-fast" {
-		cost-patch {
+		cost-fallback {
 			input 1.75
 			output 14.0
 			cache-read 0.175
@@ -486,9 +494,10 @@ provider "cursor" {
 			cache-write 0
 		}
 	}
-	// GPT-5.3 Codex Fast: no fast multiplier published; base card applies.
+	// GPT-5.3 Codex Fast: no fast rate published; discovery applies the
+	// declared multiplier, and the base card only seeds unpriced rows.
 	models "gpt-5.3-codex-fast" "gpt-5.3-codex-high-fast" "gpt-5.3-codex-low-fast" "gpt-5.3-codex-xhigh-fast" {
-		cost-patch {
+		cost-fallback {
 			input 1.75
 			output 14.0
 			cache-read 0.175
@@ -543,9 +552,10 @@ provider "cursor" {
 			cache-write 0
 		}
 	}
-	// GPT-5.5 Fast: higher fast rates are unpublished; base card applies.
+	// GPT-5.5 Fast: fast rates are unpublished; discovery applies the declared
+	// multiplier, and the base card only seeds unpriced rows.
 	models "gpt-5.5-fast" {
-		cost-patch {
+		cost-fallback {
 			input 5.0
 			output 30.0
 			cache-read 0.5

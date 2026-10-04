@@ -1,6 +1,6 @@
 {
 	"name": "@oh-my-pi/pi-coding-agent",
-	"version": "18.4.4",
+	"version": "18.6.0",
 	"description": "Coding agent CLI with read, bash, edit, write tools and session management",
 	"keywords": [
 		"agent",
@@ -530,6 +530,7 @@
 		"format-prompts": "bun scripts/format-prompts.ts",
 		"gen:tool-views": "bun --cwd=../collab-web run gen:tool-views",
 		"gen:bundle": "bun scripts/bundle-dist.ts",
+		"gen:rpc": "bun scripts/gen-rpc/index.ts",
 		"gen:native": "bun --cwd=../natives run gen:native",
 		"gen:native:reset": "bun --cwd=../natives run gen:native:reset",
 		"prepack": "bun run gen:tool-views && bun run gen:bundle",

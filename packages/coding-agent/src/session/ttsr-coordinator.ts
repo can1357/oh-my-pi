@@ -7,6 +7,7 @@ import {
 	type AgentEvent,
 	type AgentMessage,
 	type AgentTool,
+	type AgentToolContext,
 	type AgentToolResult,
 	type BeforeToolCallContext,
 	type BeforeToolCallResult,
@@ -259,21 +260,36 @@ export class TtsrCoordinator {
 		this.#releaseDeferredReservation(deliveryId, ruleNames);
 	}
 
-	/** Folds per-tool reminders into the matched tool's result. */
+	/** Delivers per-tool reminders through the trusted passive-context channel. */
 	afterToolCall(ctx: AfterToolCallContext): AfterToolCallResult | undefined {
-		return this.#buildToolReminder(ctx.toolCall.id, ctx.result);
+		const reminder = this.#buildToolReminder(ctx.toolCall.id);
+		return reminder ? { additionalContext: reminder } : undefined;
 	}
 
-	afterBridgedToolCall(toolCallId: string, result: AgentToolResult): AgentToolResult | undefined {
-		const reminder = this.#buildToolReminder(toolCallId, result);
-		return reminder ? { ...result, ...reminder } : undefined;
+	/**
+	 * Bridged calls (Cursor exec handlers, eval) bypass the agent loop's `afterToolCall`. When the caller
+	 * installed a passive-context sink the reminder goes there and the result stays untouched; without one
+	 * (eval-bridged calls) it is folded into the result as a leading block, the only channel left.
+	 */
+	afterBridgedToolCall(
+		toolCallId: string,
+		result: AgentToolResult,
+		context?: AgentToolContext,
+	): AgentToolResult | undefined {
+		const reminder = this.#buildToolReminder(toolCallId);
+		if (!reminder) return undefined;
+		if (context?.addAdditionalContext) {
+			context.addAdditionalContext(reminder);
+			return undefined;
+		}
+		return { ...result, content: [{ type: "text", text: reminder }, ...result.content] };
 	}
 
 	cancelBridgedToolCall(toolCallId: string): void {
 		this.#perToolInjections.delete(toolCallId);
 	}
 
-	#buildToolReminder(toolCallId: string, result: AgentToolResult): AfterToolCallResult | undefined {
+	#buildToolReminder(toolCallId: string): string | undefined {
 		const rules = this.#perToolInjections.get(toolCallId);
 		if (!rules || rules.length === 0) return undefined;
 		this.#perToolInjections.delete(toolCallId);
@@ -288,7 +304,7 @@ export class TtsrCoordinator {
 			.join("\n\n");
 		const ruleNames = rules.map(rule => rule.name.trim()).filter(name => name.length > 0);
 		if (ruleNames.length > 0) this.#markInjected(ruleNames);
-		return { content: [{ type: "text", text: reminder }, ...result.content] };
+		return reminder;
 	}
 
 	/** Resolves and clears the current resume gate. */
@@ -678,11 +694,12 @@ export class TtsrCoordinator {
 					);
 					this.#markInjected(details.rules);
 				}
-				try {
-					await this.#host.agent.continue();
-				} catch {
-					this.resolveResume();
-				}
+				this.#host.scheduleAgentContinue({
+					source: "ttsr-interrupt",
+					generation,
+					onSkip: () => this.resolveResume(),
+					onError: () => this.resolveResume(),
+				});
 			},
 			{ delayMs: 50 },
 		);

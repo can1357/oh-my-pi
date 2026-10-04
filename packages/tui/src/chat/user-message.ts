@@ -222,7 +222,8 @@ export class UserMessageComponent extends Container implements ReactionTarget {
 				if (!image.mimeType.startsWith("image/")) return;
 				const label = `#${i + 1}`;
 				const link = this.#imageLinks?.[i];
-				const open = link ? { href: link, actions: { click: "open" } } : {};
+				// A click zooms the image in the terminal; the file opens from its context menu.
+				const open = link ? { href: link, actions: { menu: ["open"] } } : {};
 				thumbs.push(base64ImageNode(image.data, image.mimeType, { alt: label, title: label, ...open }, label));
 			});
 		}

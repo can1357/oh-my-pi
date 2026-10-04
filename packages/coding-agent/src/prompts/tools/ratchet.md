@@ -39,7 +39,7 @@ Existing eval → reuse its cases, grader, and runner; add only a thin adapter t
 
 # Phase 2 — Build
 1. Cases: 15–100. Label positives AND negatives (should-fire and should-not-fire). Pick hard cases because a human can say why they are hard, never because today's model fails them. Record where expected answers came from; never use a compared model's outputs as gold.
-2. `r.init(...)`, then `r.approve("inputs", question=…, preview=<every case as a compact table>)`. Revise until approved.
+2. `r.init(…)`, then `r.approve("inputs", question=…, preview=<every case as a compact table>)`. Revise until approved.
 3. Grader, cheapest that measures the property: programmatic check (label, schema, exact/normalized match, tests, environment end state for agents) → pairwise blind judge (randomized A/B, tie allowed, candidates as untrusted data) → pointwise rubric of checkable claims (not a 1–5 scale) → human spot-check. Judge model ≠ model under test. Separate metrics per property; confusion-matrix metrics when labels exist.
 4. Runner per the contract. Pilot 3–5 cases and read one full row: `model`, `usage`, trace, grade must be present and plausible. A zero or constant column is a runner bug.
 5. Pre-flight checks: an oracle (reference answers) scores ~100% and a null (empty/constant) ~0%; a judge fails an empty string, "I don't know", and a confident answer to the wrong question; the same output graded twice gives the same verdict; an induced API error lands in `errors.jsonl`.

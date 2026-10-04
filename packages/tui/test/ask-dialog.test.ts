@@ -436,7 +436,7 @@ describe("AskDialogComponent", () => {
 		await Promise.resolve();
 
 		expect(onPrompt).toHaveBeenCalledTimes(1);
-		expect(onPrompt.mock.calls[0][0]).toBe("Note for Option A: Choose one?");
+		expect(onPrompt.mock.calls[0][0]).toEqual({ title: "Note for Option A", question: "Choose one?" });
 
 		// Verify note is saved by submitting
 		component.handleInput(ENTER);
@@ -552,7 +552,7 @@ describe("AskDialogComponent", () => {
 		await Promise.resolve();
 
 		expect(onPrompt).toHaveBeenCalledTimes(1);
-		expect(onPrompt.mock.calls[0][0]).toBe("Note for Option A: Choose one?");
+		expect(onPrompt.mock.calls[0][0]).toEqual({ title: "Note for Option A", question: "Choose one?" });
 		// No prior note → prefill is undefined.
 		expect(onPrompt.mock.calls[0][1]).toBeUndefined();
 
@@ -1030,9 +1030,9 @@ describe("AskDialogComponent", () => {
 		expect(onTimeout).toHaveBeenCalledTimes(1);
 	});
 
-	it("bounds custom input prompt title for long multi-line questions", async () => {
+	it("hands the custom answer prompt the whole question, unwrapped", async () => {
 		const onPrompt = vi.fn().mockReturnValue(Promise.resolve("custom"));
-		const longQuestion = "This is a very long question ".repeat(20);
+		const longQuestion = "This is a very long\nmulti-line question ".repeat(20);
 		const questions: ExtensionAskDialogQuestion[] = [
 			{
 				id: "q1",
@@ -1054,47 +1054,8 @@ describe("AskDialogComponent", () => {
 		await Promise.resolve();
 
 		expect(onPrompt).toHaveBeenCalledTimes(1);
-		const title = onPrompt.mock.calls[0][0] as string;
-		const lines = title.split("\n");
-		// Title must be bounded to at most MAX_PROMPT_TITLE_ROWS lines.
-		expect(lines.length).toBeLessThanOrEqual(3);
-		// Each line must fit within the terminal content width.
-		for (const line of lines) {
-			expect(stripVTControlCharacters(line).length).toBeLessThanOrEqual((process.stdout.columns ?? 80) - 4);
-		}
-		// Must contain the prefix and a truncation indicator on the last line.
-		expect(stripVTControlCharacters(title)).toContain("Custom answer:");
-	});
-
-	it("bounds note prompt title for long multi-line questions", async () => {
-		const onPrompt = vi.fn().mockReturnValue(Promise.resolve("note"));
-		const longQuestion = "Multi\nline\nquestion ".repeat(30);
-		const questions: ExtensionAskDialogQuestion[] = [
-			{
-				id: "q1",
-				question: longQuestion,
-				options: [{ label: "Option A" }],
-			},
-		];
-
-		const component = new AskDialogComponent(questions, {
-			onSubmit: vi.fn(),
-			onCancel: vi.fn(),
-			onPrompt,
-		});
-
-		// Press 'n' on the highlighted option to trigger the note prompt.
-		component.handleInput("n");
-		await Promise.resolve();
-		await Promise.resolve();
-
-		expect(onPrompt).toHaveBeenCalledTimes(1);
-		const title = onPrompt.mock.calls[0][0] as string;
-		const lines = title.split("\n");
-		// Title must be bounded to at most MAX_PROMPT_TITLE_ROWS lines.
-		expect(lines.length).toBeLessThanOrEqual(3);
-		// The multi-line question must be flattened (no raw newlines expanding rows).
-		expect(stripVTControlCharacters(title)).toContain("Note for Option A:");
+		// Bounding to the terminal is the prompt's job (HookEditorOptions.question): native hosts show all of it.
+		expect(onPrompt.mock.calls[0][0]).toEqual({ title: "Custom answer", question: longQuestion });
 	});
 
 	it("scrolls question rows when cursor moves below the viewport", () => {
@@ -1340,6 +1301,29 @@ describe("AskDialogComponent", () => {
 		// …but the question line is just the question, not "[Alpha] First question?".
 		expect(output).toContain("First question?");
 		expect(output).not.toContain("[Alpha]");
+	});
+
+	it("renders fenced diff questions as blocks separate from prose", () => {
+		const component = new AskDialogComponent(
+			[
+				{
+					id: "diff",
+					question: "Review this patch:\n```diff\n-old()\n+new()\n```",
+					options: [{ label: "Apply" }, { label: "Reject" }],
+				},
+			],
+			{ onSubmit: vi.fn(), onCancel: vi.fn(), onPrompt: vi.fn() },
+		);
+
+		const rows = render(component).split("\n");
+		const questionRow = rows.findIndex(row => row.includes("Review this patch:"));
+		const deletionRow = rows.findIndex(row => row.includes("-old()"));
+		const additionRow = rows.findIndex(row => row.includes("+new()"));
+		expect(questionRow).toBeGreaterThanOrEqual(0);
+		expect(deletionRow).toBeGreaterThanOrEqual(0);
+		expect(deletionRow).toBeGreaterThan(questionRow);
+		expect(additionRow).toBeGreaterThan(deletionRow);
+		expect(rows[deletionRow]).not.toContain("+new()");
 	});
 
 	it("bounds in-body question header for long multi-line questions", () => {

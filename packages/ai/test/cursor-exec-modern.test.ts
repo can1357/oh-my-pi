@@ -313,10 +313,11 @@ describe("Cursor stream teardown", () => {
 		expect(state.currentToolCall).toBeNull();
 	});
 
-	it("salvages a truncated streamed argument buffer into partial arguments", async () => {
+	it("reparses a truncated streamed argument buffer on teardown into a parse error", async () => {
 		// The other half of the same contract: blocks that *do* stream their args
-		// must still be reparsed on teardown, or a cut-short call renders with no
-		// arguments at all.
+		// must still be reparsed on teardown. A cut-short buffer keeps its raw text in
+		// the parse-error arguments, so the call shows what streamed but never runs
+		// from an auto-closed preview.
 		const output = cursorAssistantMessage();
 		const stream = new AssistantMessageEventStream();
 		const state = newBlockState();
@@ -343,7 +344,7 @@ describe("Cursor stream teardown", () => {
 
 		flushOpenToolCalls(output, stream, state);
 
-		expect(block.arguments).toEqual({ path: "/repo/a.ts" });
+		expect(block.arguments).toEqual({ __parseError: expect.any(String), __rawJson: '{"path":"/repo/a.ts"' });
 	});
 
 	it("pairs a server-owned call the transport cut short", async () => {

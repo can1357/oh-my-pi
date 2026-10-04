@@ -1,11 +1,12 @@
 import { afterEach, describe, expect, it } from "bun:test";
 import {
+	decodeTernReply,
 	isTernUnavailable,
 	TernBrowserError,
 	TernFrameReader,
 	TernSocketClient,
 } from "@oh-my-pi/pi-coding-agent/tools/browser/tern/wire";
-import { type FakeDaemon, frame, startFakeDaemon } from "./tern-fake-daemon";
+import { type FakeDaemon, frame, jsonPayload, startFakeDaemon } from "./tern-fake-daemon";
 
 let daemon: FakeDaemon | undefined;
 let client: TernSocketClient | undefined;
@@ -18,8 +19,8 @@ afterEach(async () => {
 });
 
 describe("TernSocketClient", () => {
-	it("greets as a protocol-6 script client and correlates answers by id", async () => {
-		const held: bigint[] = [];
+	it("greets with a JSON hello and correlates answers by id", async () => {
+		const held: number[] = [];
 		daemon = await startFakeDaemon((op, id) => {
 			if (op.op === "slow") {
 				held.push(id);
@@ -33,9 +34,37 @@ describe("TernSocketClient", () => {
 		expect(fast).toEqual({ echo: 7 });
 		daemon.answer(held[0]!, { ok: "late" });
 		expect(await slow).toBe("late");
-		// [len=7][tag 0][u32 LE 6][identity absent][ClientKind::Cli]
-		expect([...daemon.hellos[0]!]).toEqual([0x00, 6, 0, 0, 0, 0x00, 0x01]);
-		expect(frame(daemon.hellos[0]!).slice(0, 4)).toEqual(new Uint8Array([7, 0, 0, 0]));
+		expect(daemon.requests.map(request => request.id)).toEqual([1, 2]);
+		// The bytes a real daemon reads: a JSON object first, which is how Tern tells it from its protobuf clients.
+		expect(new TextDecoder().decode(daemon.hellos[0])).toBe('{"hello":{}}');
+		expect(frame(daemon.hellos[0]!).slice(0, 4)).toEqual(new Uint8Array([12, 0, 0, 0]));
+	});
+
+	it("skips members and message kinds it does not know and rejects frames that are not answers", () => {
+		expect(decodeTernReply(jsonPayload({ welcome: { version: 99 } }))).toEqual({ type: "welcome" });
+		expect(decodeTernReply(jsonPayload({ id: 3, output: {} }))).toEqual({ type: "other" });
+		expect(decodeTernReply(jsonPayload({ id: 3, browser: { ok: 1 }, extra: true }))).toEqual({
+			type: "browser",
+			id: 3,
+			answer: { ok: 1 },
+		});
+		for (const payload of [
+			new Uint8Array([0x0a, 0x04]),
+			jsonPayload([1, 2]),
+			jsonPayload({ browser: { ok: 1 } }),
+			new Uint8Array([0x7b, 0xff, 0x7d]),
+		]) {
+			const failure = (() => {
+				try {
+					decodeTernReply(payload);
+					return undefined;
+				} catch (error) {
+					return error;
+				}
+			})();
+			expect(failure).toBeInstanceOf(TernBrowserError);
+			expect((failure as TernBrowserError).kind).toBe("protocol");
+		}
 	});
 
 	it("turns an error envelope into a TernBrowserError carrying its kind", async () => {
@@ -48,16 +77,13 @@ describe("TernSocketClient", () => {
 		expect(isTernUnavailable(failure)).toBe(true);
 	});
 
-	it("reports a version refusal naming both protocol versions", async () => {
-		daemon = await startFakeDaemon(() => ({ ok: {} }), {
-			refusal: "the session daemon speaks protocol 7, this window 6",
-		});
+	it("treats a Tern from before the JSON protocol, which hangs up on the hello, as unavailable", async () => {
+		daemon = await startFakeDaemon(() => ({ ok: {} }), { hangUp: true });
 		client = new TernSocketClient({ socketPath: daemon.socketPath });
 		const failure = await client.connect().catch((error: unknown) => error);
 		expect(failure).toBeInstanceOf(TernBrowserError);
-		expect((failure as TernBrowserError).kind).toBe("refused");
-		expect((failure as TernBrowserError).message).toContain("protocol 7");
-		expect((failure as TernBrowserError).message).toContain("omp speaks Tern protocol 6");
+		expect((failure as TernBrowserError).kind).toBe("connect");
+		expect((failure as TernBrowserError).message).toContain("without omp's JSON protocol");
 		expect(isTernUnavailable(failure)).toBe(true);
 	});
 
@@ -81,7 +107,7 @@ describe("TernSocketClient", () => {
 	});
 
 	it("hands a late answer of an abandoned op to its onLateAnswer hook", async () => {
-		const received = Promise.withResolvers<bigint>();
+		const received = Promise.withResolvers<number>();
 		daemon = await startFakeDaemon((_op, id) => {
 			received.resolve(id);
 			return null;

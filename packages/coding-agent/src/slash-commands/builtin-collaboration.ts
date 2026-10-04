@@ -19,6 +19,7 @@ import { copyToClipboard } from "../utils/clipboard";
 import { refreshStatusLine } from "./builtin-modes";
 import { CollabQrCodeComponent, collabBrowserLink } from "@oh-my-pi/pi-tui/chrome/collab-qrcode";
 import { commandConsumed, errorMessage, parseSubcommand, usage } from "./helpers/parse";
+import { formatDumpArchiveReport } from "../session/session-dump-format";
 import type { SlashCommandSpec } from "./types";
 
 import { cfgBrowserEnabled, cfgBrowserHeadless } from "../tools/browser/settings";
@@ -231,8 +232,26 @@ export const BUILTIN_COLLABORATION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpe
 		icon: "clipboard",
 		description: "Copy session transcript to clipboard (and write LLM request JSON to tmp)",
 		acpDescription: "Return full transcript as plain text, with LLM request JSON path",
+		acpInputHint: "[all]",
+		subcommands: [
+			{
+				name: "all",
+				description: "Write a zip with the main transcript, LLM request JSON, and one file per subagent",
+			},
+		],
 		allowArgs: true,
-		handle: async (_command, runtime) => {
+		handle: async (command, runtime) => {
+			const { verb } = parseSubcommand(command.args);
+			if (verb === "all") {
+				const archive = await runtime.session.dumpSessionArchiveToTmpDir();
+				if (!archive) {
+					await runtime.output("No messages to dump yet.");
+					return commandConsumed();
+				}
+				await runtime.output(formatDumpArchiveReport(archive).join("\n"));
+				return commandConsumed();
+			}
+			if (verb) return usage("Usage: /dump [all]", runtime);
 			const text = runtime.session.formatSessionAsText();
 			if (!text) {
 				await runtime.output("No messages to dump yet.");
@@ -254,8 +273,11 @@ export const BUILTIN_COLLABORATION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpe
 			await runtime.output(lines.join("\n"));
 			return commandConsumed();
 		},
-		handleTui: async (_command, runtime) => {
-			await runtime.ctx.handleDumpCommand();
+		handleTui: async (command, runtime) => {
+			const { verb } = parseSubcommand(command.args);
+			if (verb === "all") await runtime.ctx.handleDumpAllCommand();
+			else if (verb) runtime.ctx.showStatus("Usage: /dump [all]");
+			else await runtime.ctx.handleDumpCommand();
 			clearSubmittedText(runtime);
 		},
 	},
