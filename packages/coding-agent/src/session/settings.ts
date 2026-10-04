@@ -894,7 +894,7 @@ export const cfgRetryPreferSlowMode = register({
 		group: "Retry & Fallback",
 		label: "Prefer Slow Mode Over Fallback",
 		description:
-			"When /slow is on and the model has a low-priority lane (Claude subscriptions), keep the model past its usage limits instead of switching to a fallback; fall back only when the provider refuses the request (e.g. the weekly limit).",
+			"When /slow is on and the model has a low-priority lane (Claude subscriptions), keep the model past its usage limits instead of switching to a fallback; fall back only when the provider refuses the request (e.g. the weekly limit). Fail-closed reserve policy takes precedence.",
 		condition: "usageAwareFallbackEnabled",
 	},
 });
