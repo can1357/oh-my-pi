@@ -82,6 +82,9 @@
 - Fixed notes-backed context rollover restoring an outdated parent assignment when reviving a subagent.
 - Advisor tool calls now report the advisor as the calling agent to extension tool-call and tool-result handlers.
 - Fixed the IDA integration on Windows: the IDA worker crashed after its first response, and timing out or aborting an IDA request killed the worker instead of interrupting it ([#14186](https://github.com/can1357/oh-my-pi/pull/14186) by [@H4vC](https://github.com/H4vC))
+### Added
+
+- RPC clients can now stop a turn the way Esc does in the TUI with `abort_and_restore_queue`: queued steering and follow-up messages are taken back and returned for the editor instead of running in a new turn after the abort ([#14179](https://github.com/can1357/oh-my-pi/pull/14179) by [@andrebrait](https://github.com/andrebrait))
 
 ## [18.5.0] - 2026-10-03
 

@@ -23,6 +23,7 @@ import {
 	type RpcMessagesPageOptions,
 } from "./rpc-messages";
 import type {
+	RpcAbortAndRestoreQueueResult,
 	RpcAvailableCommandsUpdateFrame,
 	RpcAvailableSlashCommand,
 	RpcCommand,
@@ -712,6 +713,15 @@ export class RpcClient {
 	 */
 	async abortAndPrompt(message: string, images?: ImageContent[]): Promise<void> {
 		await this.#send({ type: "abort_and_prompt", message, images });
+	}
+
+	/**
+	 * Withdraw queued user steering/follow-up messages, then abort (the TUI Esc path).
+	 * Returns the withdrawn messages so the caller can restore them to its editor.
+	 */
+	async abortAndRestoreQueue(): Promise<RpcAbortAndRestoreQueueResult> {
+		const response = await this.#send({ type: "abort_and_restore_queue" });
+		return this.#getData(response);
 	}
 
 	/**

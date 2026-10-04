@@ -131,6 +131,7 @@ Important edge behavior from runtime:
 - `{ id?, type: "promote_queued_message", message: string }`
 - `{ id?, type: "abort" }`
 - `{ id?, type: "abort_and_prompt", message: string, images?: ImageContent[] }`
+- `{ id?, type: "abort_and_restore_queue" }`
 - `{ id?, type: "new_session", parentSession?: string }`
 - `{ id?, type: "open_session", sessionDir: string }`
 
@@ -380,6 +381,21 @@ The command moves the existing queued message, including its attachments and con
 Since `prompt` acknowledges only once the message is admitted (see above), a `promote_queued_message` sent immediately after a queued `prompt`'s acknowledgement reliably observes it. Older runtimes reject this command; clients must not fall back to `steer`, which would enqueue a duplicate. The TypeScript client exposes `promoteQueuedMessage(message): Promise<{ promoted: boolean }>`, and its `prompt(message, images?, streamingBehavior?)` accepts `"steer"` or `"followUp"` to queue a prompt sent while the agent is busy.
 
 The official Python client exposes `promote_queued_message(message) -> PromoteQueuedMessageResult`; inspect its `.promoted` boolean rather than the result object's truthiness.
+
+### `abort_and_restore_queue` payload
+
+Take queued user input back and abort, atomically — the RPC equivalent of pressing Esc in the TUI:
+
+```json
+{"id":"req_4","type":"abort_and_restore_queue"}
+{"id":"req_4","type":"response","command":"abort_and_restore_queue","success":true,"data":{"steering":[{"text":"Use the existing parser"}],"followUp":[{"text":"Then run the tests","images":[{"type":"image","mimeType":"image/png","data":"..."}]}]}}
+```
+
+Before aborting, the server withdraws every user-authored steering and follow-up message, including steering the aborted response already claimed but never recorded in the transcript. Non-user internal steers (goal/plan/budget notices, IRC and extension asides) are dropped, except advisor cards, which the abort keeps as visible advice. Nothing withdrawn runs after the abort, so no new turn starts from the old queue. A plain `abort` instead requeues stranded steers and drains them into a fresh turn; withdrawing them first with `remove_queued_message` races the agent loop.
+
+`data.steering` and `data.followUp` list the withdrawn messages oldest first, as `{ text, images? }` with `text` being the queue-chip text, so a client can put them back in its editor. The command otherwise behaves like `abort`: it stops goal continuation, cancels input received before it that is not yet admitted (that input is dropped, not returned), and responds after the abort completes. Older runtimes reject this command. The TypeScript client exposes `abortAndRestoreQueue(): Promise<{ steering, followUp }>`.
+
+The response always succeeds, even when the withdrawn input is too large for one response under the negotiated protocol (1 MiB per frame on v1, 64 MiB reassembled on v2). Instead of failing with a transport-limit error, which would lose the already-withdrawn input, the server first omits every entry's `images` and sets `data.imagesDropped: true`, keeping all texts. If the texts alone still do not fit, it returns only the oldest entries that fit (steering first, then follow-ups) and sets `data.truncated: true`; entries after the last one listed are gone. Neither flag is present when the full result fits.
 
 ### `get_state` payload
 

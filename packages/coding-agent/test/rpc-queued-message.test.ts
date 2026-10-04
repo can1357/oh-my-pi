@@ -2,22 +2,30 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import { RpcClient } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-client";
-import type { RpcPromptResultFrame } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-types";
-import { removeWithRetries, withTimeout } from "@oh-my-pi/pi-utils";
+import { fitAbortAndRestoreQueueResponse } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-mode";
+import type { RpcPromptResultFrame, RpcResponse, RpcSessionState } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-types";
+import { USER_INTERRUPT_LABEL } from "@oh-my-pi/pi-coding-agent/session/messages";
+import { isRecord, readJsonl, removeWithRetries, withTimeout } from "@oh-my-pi/pi-utils";
 import { rejectionOf } from "./helpers/rejection";
 
 describe("RPC queued-message editing", () => {
 	let client: RpcClient;
 	let directory: string;
 
-	beforeEach(async () => {
-		directory = await fs.mkdtemp(path.join(os.tmpdir(), "omp-rpc-queued-"));
-		client = new RpcClient({
+	/** `script` selects a scripted first model call; see the fixture's QUEUED_RPC_SCRIPT. */
+	function createClient(script?: "internal-steer" | "live-steer"): RpcClient {
+		return new RpcClient({
 			command: [process.execPath, path.join(import.meta.dir, "fixtures", "queued-message-rpc-agent.ts")],
 			cwd: directory,
-			env: { PI_CODING_AGENT_DIR: directory, PI_NO_TITLE: "1" },
+			env: { PI_CODING_AGENT_DIR: directory, PI_NO_TITLE: "1", QUEUED_RPC_SCRIPT: script ?? "" },
 		});
+	}
+
+	beforeEach(async () => {
+		directory = await fs.mkdtemp(path.join(os.tmpdir(), "omp-rpc-queued-"));
+		client = createClient();
 	});
 
 	afterEach(async () => {
@@ -194,4 +202,187 @@ describe("RPC queued-message editing", () => {
 			unsubscribe();
 		}
 	}, 30_000);
+
+	describe("abort_and_restore_queue", () => {
+		/** Starts the fixture under `script` with a first turn that is still streaming. */
+		async function startStreamingTurn(script?: "internal-steer" | "live-steer"): Promise<void> {
+			if (script) client = createClient(script);
+			await client.start();
+			const agentStarted = Promise.withResolvers<void>();
+			const unsubscribe = client.onEvent(event => {
+				if (event.type === "agent_start") agentStarted.resolve();
+			});
+			try {
+				await client.prompt("start a long turn");
+				await withTimeout(agentStarted.promise, 10_000, "First turn never started streaming");
+			} finally {
+				unsubscribe();
+			}
+		}
+
+		/** Re-reads session state until `check` holds. The fixture changes these queues inside
+		 *  the model call without emitting an event, so each `get_state` round trip is the wait. */
+		async function untilState(check: (state: RpcSessionState) => boolean, message: string): Promise<void> {
+			await withTimeout(
+				(async () => {
+					while (!check(await client.getState()));
+				})(),
+				10_000,
+				message,
+			);
+		}
+
+		/** Runs one more prompt to completion and returns the transcript. A withdrawn message the
+		 *  abort left behind would start its own turn and be recorded before (or instead of) it. */
+		async function transcriptAfterNextPrompt(): Promise<AgentMessage[]> {
+			const reportedIds = new Set<string | undefined>();
+			const reported = Promise.withResolvers<void>();
+			let promptId: string | undefined;
+			const unsubscribe = client.onPromptResult(result => {
+				reportedIds.add(result.id);
+				if (result.id === promptId) reported.resolve();
+			});
+			try {
+				promptId = await client.prompt("after abort");
+				if (reportedIds.has(promptId)) reported.resolve();
+				await withTimeout(reported.promise, 10_000, "Post-abort prompt never reported its result");
+			} finally {
+				unsubscribe();
+			}
+			return client.getMessages();
+		}
+
+		function userTexts(messages: AgentMessage[]): unknown[] {
+			return messages.filter(message => message.role === "user").map(message => message.content);
+		}
+
+		const expectedUserTurns = [
+			[{ type: "text", text: "start a long turn" }],
+			[{ type: "text", text: "after abort" }],
+		];
+
+		test("returns queued steering and follow-ups, interrupts as the user, and runs none of them after", async () => {
+			await startStreamingTurn();
+			await client.steer("queued steer");
+			await client.followUp("queued follow-up");
+
+			expect(await client.abortAndRestoreQueue()).toEqual({
+				steering: [{ text: "queued steer" }],
+				followUp: [{ text: "queued follow-up" }],
+			});
+			expect((await client.getState()).queuedMessageCount).toBe(0);
+			const messages = await transcriptAfterNextPrompt();
+			expect(userTexts(messages)).toEqual(expectedUserTurns);
+			// The transcript marks the stop as a deliberate user interrupt, as TUI Esc does.
+			expect(
+				messages.find(message => message.role === "assistant" && message.stopReason === "aborted"),
+			).toMatchObject({ errorMessage: USER_INTERRUPT_LABEL });
+		}, 30_000);
+
+		test("drops a queued non-user steer without returning or running it", async () => {
+			await startStreamingTurn("internal-steer");
+			await untilState(state => state.queuedMessageCount === 1, "Internal steer was never queued");
+			await client.steer("queued steer");
+
+			expect(await client.abortAndRestoreQueue()).toEqual({ steering: [{ text: "queued steer" }], followUp: [] });
+			expect((await client.getState()).queuedMessageCount).toBe(0);
+			const messages = await transcriptAfterNextPrompt();
+			expect(messages.filter(message => message.role === "custom")).toEqual([]);
+			expect(userTexts(messages)).toEqual(expectedUserTurns);
+		}, 30_000);
+
+		test("withdraws a steer the streaming response already claimed live", async () => {
+			await startStreamingTurn("live-steer");
+			await client.steer("live steer");
+			// Claimed: it left the pending queue but stays listed until the transcript records it.
+			await untilState(
+				state => state.queuedMessageCount === 0 && state.queuedMessages.steering.includes("live steer"),
+				"Provider never claimed the steer",
+			);
+
+			expect(await client.abortAndRestoreQueue()).toEqual({ steering: [{ text: "live steer" }], followUp: [] });
+			expect(userTexts(await transcriptAfterNextPrompt())).toEqual(expectedUserTurns);
+		}, 30_000);
+
+		test("under protocol v1, a result over the frame limit drops images and still returns every text", async () => {
+			// RpcClient always negotiates v2, so speak raw v1 JSONL to the fixture.
+			const child = Bun.spawn(
+				[process.execPath, path.join(import.meta.dir, "fixtures", "queued-message-rpc-agent.ts")],
+				{
+					cwd: directory,
+					env: { ...Bun.env, PI_CODING_AGENT_DIR: directory, PI_NO_TITLE: "1", QUEUED_RPC_SCRIPT: "hold" },
+					stdin: "pipe",
+					stdout: "pipe",
+					stderr: "ignore",
+				},
+			);
+			const frames = readJsonl<unknown>(child.stdout)[Symbol.asyncIterator]();
+			const next = (match: (frame: Record<string, unknown>) => boolean, message: string) =>
+				withTimeout(
+					(async () => {
+						for (;;) {
+							const { value, done } = await frames.next();
+							if (done) throw new Error(`RPC output ended: ${message}`);
+							if (isRecord(value) && match(value)) return value;
+						}
+					})(),
+					10_000,
+					message,
+				);
+			const send = async (frame: object) => {
+				child.stdin.write(`${JSON.stringify(frame)}\n`);
+				await child.stdin.flush();
+			};
+			const isResponse = (id: string) => (frame: Record<string, unknown>) =>
+				frame.type === "response" && frame.id === id;
+			try {
+				await next(frame => frame.type === "ready", "Fixture never became ready");
+				await send({ id: "start", type: "prompt", message: "start a long turn" });
+				await next(frame => frame.type === "agent_start", "First turn never started streaming");
+				// Each steer fits one v1 frame; together they exceed it. Undecodable image bytes skip
+				// resizing, so the queued images keep their size.
+				const image = { type: "image", mimeType: "image/png", data: "A".repeat(700 * 1024) };
+				for (const id of ["first", "second"]) {
+					await send({ id, type: "steer", message: `${id} steer`, images: [image] });
+					expect(await next(isResponse(id), `Steer ${id} was never acknowledged`)).toMatchObject({
+						success: true,
+					});
+				}
+
+				await send({ id: "stop", type: "abort_and_restore_queue" });
+				expect(await next(isResponse("stop"), "abort_and_restore_queue never responded")).toEqual({
+					id: "stop",
+					type: "response",
+					command: "abort_and_restore_queue",
+					success: true,
+					data: {
+						steering: [{ text: "first steer" }, { text: "second steer" }],
+						followUp: [],
+						imagesDropped: true,
+					},
+				});
+			} finally {
+				child.kill();
+				await child.exited;
+			}
+		}, 30_000);
+
+		test("keeps an oldest-first prefix flagged truncated when even the texts exceed the limit", () => {
+			const first = { text: "a".repeat(100) };
+			const restored = {
+				steering: [{ ...first, images: [{ type: "image" as const, mimeType: "image/png", data: "AAAA" }] }],
+				followUp: [{ text: "b".repeat(100) }, { text: "c" }],
+			};
+			const expected: RpcResponse = {
+				id: "stop",
+				type: "response",
+				command: "abort_and_restore_queue",
+				success: true,
+				data: { steering: [first], followUp: [], imagesDropped: true, truncated: true },
+			};
+			// Exactly the size of the expected response: the boundary must still admit `first`.
+			const maxBytes = Buffer.byteLength(JSON.stringify(expected));
+			expect(fitAbortAndRestoreQueueResponse("stop", restored, maxBytes)).toEqual(expected);
+		});
+	});
 });
