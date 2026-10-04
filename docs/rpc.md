@@ -142,6 +142,7 @@ Important edge behavior from runtime:
 
 - `{ id?, type: "get_state" }`
 - `{ id?, type: "set_fast_mode", enabled: boolean }`
+- `{ id?, type: "set_slow_mode", enabled: boolean }`
 - `{ id?, type: "goal", op: "get" | "create" | "resume" | "pause" | "drop", objective?: string, token_budget?: number }`
 - `{ id?, type: "set_ask_dialog", enabled: boolean }`
 - `{ id?, type: "get_available_commands" }`
@@ -396,6 +397,26 @@ remain `true` while `fastModeActive` is `false`. An explicit `set_fast_mode`
 enable expresses retry intent and clears that fallback so the provider attempt
 is re-armed.
 
+`slowModeSupported` reports whether `/slow` applies to the active model: the
+`flex` service tier on OpenAI- and Google-family models, or the low-priority
+lane on direct Anthropic models. `slowModeEnabled` reports whether it is on for
+the active model, so it is always `false` when `slowModeSupported` is `false`.
+That does not mean a persisted setting was turned off. `slowModeScope` says
+where the active model's setting lives: `global` for persisted config that
+survives model switches and applies to every session and terminal (Claude low
+priority, `providers.anthropic.slowMode`), or `session` for this session's
+per-family flex tier. It is absent when unsupported. Re-read all three after a
+model change; a `global` change made by another session emits no event.
+
+`usageLimit` reports the active model's account past its usage limit, in a
+provider-neutral shape. `stage` is `wrap_up` during a short allowance after the
+limit or `low_priority` once the account is served on spare capacity.
+`resetsAtSec` is an epoch timestamp for client-local formatting; low priority
+may also report `allowanceLeftPercent`, while wrap-up reports whether
+`extraUsage` follows. Claude subscriptions are the only producer today. The
+field is absent outside both stages. No event carries it, so re-read
+`get_state` while a run is active, after `agent_end`, and after slash commands.
+
 ```json
 {
   "model": { "provider": "...", "id": "..." },
@@ -411,6 +432,14 @@ is re-armed.
   "fastModeEnabled": false,
   "tokensPerSecond": null,
   "fastModeActive": false,
+  "slowModeSupported": true,
+  "slowModeEnabled": true,
+  "slowModeScope": "global",
+  "usageLimit": {
+    "stage": "low_priority",
+    "resetsAtSec": 1770000000,
+    "allowanceLeftPercent": 62
+  },
   "autoCompactionEnabled": true,
   "messageCount": 0,
   "queuedMessageCount": 0,
@@ -502,6 +531,39 @@ turn, sent as a hidden `goal-continuation` message.
 
 When the agent completes the goal, the goal tool is removed again and
 `get_state.goal` becomes `null`.
+
+### `set_slow_mode` payload
+
+`set_slow_mode` turns `/slow` on or off for the active model, exactly like the
+slash command: on OpenAI/Google models it sets or clears this session's `flex`
+tier for that family; on direct Anthropic models it writes the persisted global
+`providers.anthropic.slowMode` setting (`auto`/`off`), entering an offered
+low-priority window on enable and stopping an active one on disable.
+
+```json
+{ "id": "req_slow_on", "type": "set_slow_mode", "enabled": true }
+```
+
+On success, `data.enabled` reports whether `/slow` is now on for the active
+model:
+
+```json
+{
+  "id": "req_slow_on",
+  "type": "response",
+  "command": "set_slow_mode",
+  "success": true,
+  "data": { "enabled": true }
+}
+```
+
+Enabling on a model without a slow mode fails with
+`"Slow mode is unavailable for the current model."`. Disabling on such a model
+succeeds with `{ "enabled": false }` and changes nothing, so it never clears
+another provider's persisted setting. A non-boolean `enabled` is rejected with
+`"set_slow_mode requires boolean enabled"`. A change made mid-run applies from
+the next request (stopping an active Claude low-priority window takes effect
+immediately); no event announces it, so re-read `get_state`.
 
 ### `set_fast_mode` payload
 

@@ -142,6 +142,17 @@
 				"clientOmit": []
 			},
 			{
+				"name": "set_slow_mode",
+				"doc": "Turn `/slow` on or off for the active model; returns whether it is now on.",
+				"params": "SetSlowModeParams",
+				"result": "SetSlowModeResult",
+				"nullable": false,
+				"unwrap": "enabled",
+				"timeoutMs": null,
+				"completion": null,
+				"clientOmit": []
+			},
+			{
 				"name": "goal",
 				"doc": "Read or change goal mode with the lifecycle of the interactive `/goal` command.",
 				"params": "GoalParams",
@@ -2382,6 +2393,67 @@
 			],
 			"description": "Outcome of every `goal` op; both fields are null when the session has no goal."
 		},
+		"SlowModeScope": {
+			"enum": [
+				"session",
+				"global"
+			],
+			"type": "string",
+			"description": "Where `/slow` lives: persisted config shared by every session, or this session's flex tier."
+		},
+		"UsageLimitLowPriority": {
+			"type": "object",
+			"properties": {
+				"stage": {
+					"const": "low_priority"
+				},
+				"resetsAtSec": {
+					"type": "number",
+					"description": "Epoch seconds when the limit that was hit resets."
+				},
+				"allowanceLeftPercent": {
+					"type": "integer",
+					"description": "Percent of the low-priority allowance still available, when reported."
+				}
+			},
+			"required": [
+				"stage",
+				"resetsAtSec"
+			],
+			"description": "Requests are served on the provider's low-priority (slow) lane."
+		},
+		"UsageLimitWrapUp": {
+			"type": "object",
+			"properties": {
+				"stage": {
+					"const": "wrap_up"
+				},
+				"extraUsage": {
+					"type": "boolean",
+					"description": "Whether paid extra usage serves requests once the allowance is spent."
+				},
+				"resetsAtSec": {
+					"type": "number",
+					"description": "Epoch seconds when the limit that was hit resets, if reported."
+				}
+			},
+			"required": [
+				"stage",
+				"extraUsage"
+			],
+			"description": "Requests run on a short wrap-up allowance past the limit."
+		},
+		"UsageLimitState": {
+			"anyOf": [
+				{
+					"$ref": "#/$defs/UsageLimitLowPriority"
+				},
+				{
+					"$ref": "#/$defs/UsageLimitWrapUp"
+				}
+			],
+			"description": "Provider-neutral state of an account past its usage limit, discriminated by `stage`."
+		},
 		"SessionState": {
 			"type": "object",
 			"properties": {
@@ -2431,6 +2503,24 @@
 				"fastModeActive": {
 					"type": "boolean",
 					"default": false
+				},
+				"slowModeSupported": {
+					"type": "boolean",
+					"description": "`/slow` applies to the active model.",
+					"default": false
+				},
+				"slowModeEnabled": {
+					"type": "boolean",
+					"description": "`/slow` is on for the active model; always `false` when `slowModeSupported` is `false`.",
+					"default": false
+				},
+				"slowModeScope": {
+					"$ref": "#/$defs/SlowModeScope",
+					"description": "Where the active model's `/slow` lives; absent when unsupported."
+				},
+				"usageLimit": {
+					"$ref": "#/$defs/UsageLimitState",
+					"description": "Usage-limit stage of the active model's account; absent outside wrap-up and low priority."
 				},
 				"tokensPerSecond": {
 					"anyOf": [
@@ -5522,6 +5612,28 @@
 			]
 		},
 		"SetFastModeParams": {
+			"type": "object",
+			"properties": {
+				"enabled": {
+					"type": "boolean"
+				}
+			},
+			"required": [
+				"enabled"
+			]
+		},
+		"SetSlowModeParams": {
+			"type": "object",
+			"properties": {
+				"enabled": {
+					"type": "boolean"
+				}
+			},
+			"required": [
+				"enabled"
+			]
+		},
+		"SetSlowModeResult": {
 			"type": "object",
 			"properties": {
 				"enabled": {

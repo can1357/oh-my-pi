@@ -31,6 +31,7 @@ import type {
 } from "@oh-my-pi/pi-ai";
 import { logger } from "@oh-my-pi/pi-utils";
 import type { AuthStorage } from "./auth-storage";
+import type { UsageLimitState } from "./usage-limit";
 
 /** Why an active slow-mode window ended. */
 export type AnthropicSlowModeEndReason =
@@ -108,6 +109,20 @@ export function formatSlowModeResetClock(resetsAtSec: number, now = Date.now()):
 	return resetsAtSec * 1000 - now > SAME_DAY_RESET_MS
 		? at.toLocaleString([], { weekday: "short", hour: "2-digit", minute: "2-digit" })
 		: at.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+}
+
+/** TUI status-line label for a usage-limit state. */
+export function formatUsageLimitLabel(status: UsageLimitState | undefined, now = Date.now()): string | undefined {
+	if (status?.stage === "low_priority") {
+		return `low priority until ${formatSlowModeResetClock(status.resetsAtSec, now)}${
+			status.allowanceLeftPercent === undefined ? "" : ` · ${status.allowanceLeftPercent}% left`
+		}`;
+	}
+	if (!status) return undefined;
+	if (status.extraUsage) return "limit reached · wrap-up, then extra usage";
+	return `limit reached · wrapping up${
+		status.resetsAtSec === undefined ? "" : ` · resets ${formatSlowModeResetClock(status.resetsAtSec, now)}`
+	}`;
 }
 
 const END_NOTICES: Record<AnthropicSlowModeEndReason, { level: NoticeLevel; message: string } | undefined> = {
@@ -197,20 +212,32 @@ export class AnthropicSlowModeController {
 		return wrapUp.epoch;
 	}
 
+	/** Structured usage-limit state, or `undefined` outside wrap-up and low priority. */
+	status(now = Date.now(), lowPriority = true): UsageLimitState | undefined {
+		const resetsAtSec = lowPriority ? this.activeResetsAtSec(now) : undefined;
+		if (resetsAtSec !== undefined) {
+			const allowanceLeftPercent = this.allowanceLeftPercent();
+			return {
+				stage: "low_priority",
+				resetsAtSec,
+				...(allowanceLeftPercent === undefined ? {} : { allowanceLeftPercent }),
+			};
+		}
+		const wrapUp = this.#currentWrapUp(now);
+		if (!wrapUp) return undefined;
+		return {
+			stage: "wrap_up",
+			...(wrapUp.resetsAtSec === undefined ? {} : { resetsAtSec: wrapUp.resetsAtSec }),
+			extraUsage: wrapUp.extraUsage,
+		};
+	}
+
 	/**
 	 * Compact status-line label, or `undefined` outside both stages. The
 	 * low-priority label shows only when `lowPriority` (this session's `/slow`).
 	 */
 	statusLabel(now = Date.now(), lowPriority = true): string | undefined {
-		const resetsAtSec = lowPriority ? this.activeResetsAtSec(now) : undefined;
-		if (resetsAtSec !== undefined) {
-			const left = this.allowanceLeftPercent();
-			return `low priority until ${formatSlowModeResetClock(resetsAtSec, now)}${left === undefined ? "" : ` · ${left}% left`}`;
-		}
-		const wrapUp = this.#currentWrapUp(now);
-		if (!wrapUp) return undefined;
-		if (wrapUp.extraUsage) return "limit reached · wrap-up, then extra usage";
-		return `limit reached · wrapping up${wrapUp.resetsAtSec === undefined ? "" : ` · resets ${formatSlowModeResetClock(wrapUp.resetsAtSec, now)}`}`;
+		return formatUsageLimitLabel(this.status(now, lowPriority), now);
 	}
 
 	/** Whether the slow lane can be entered now, and on which window. */

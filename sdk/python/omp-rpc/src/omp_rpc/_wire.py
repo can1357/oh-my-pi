@@ -129,6 +129,12 @@ _SUBAGENT_STATUS_VALUES: Final[frozenset[str]] = frozenset({"pending", "running"
 _decode_subagent_status = cast("Decoder[SubagentStatus]", literal(_SUBAGENT_STATUS_VALUES))
 
 
+SlowModeScope: TypeAlias = Literal["session", "global"]
+"""Where `/slow` lives: persisted config shared by every session, or this session's flex tier."""
+_SLOW_MODE_SCOPE_VALUES: Final[frozenset[str]] = frozenset({"session", "global"})
+_decode_slow_mode_scope = cast("Decoder[SlowModeScope]", literal(_SLOW_MODE_SCOPE_VALUES))
+
+
 AutoCompactionReason: TypeAlias = Literal["threshold", "overflow", "idle", "incomplete"]
 _AUTO_COMPACTION_REASON_VALUES: Final[frozenset[str]] = frozenset({"threshold", "overflow", "idle", "incomplete"})
 _decode_auto_compaction_reason = cast("Decoder[AutoCompactionReason]", literal(_AUTO_COMPACTION_REASON_VALUES))
@@ -602,6 +608,26 @@ class GoalResult:
 
 
 @dataclass(slots=True, frozen=True, kw_only=True)
+class UsageLimitLowPriority:
+    """Requests are served on the provider's low-priority (slow) lane."""
+    stage: Literal["low_priority"] = "low_priority"
+    resets_at_sec: float
+    """Epoch seconds when the limit that was hit resets."""
+    allowance_left_percent: int | None = None
+    """Percent of the low-priority allowance still available, when reported."""
+
+
+@dataclass(slots=True, frozen=True, kw_only=True)
+class UsageLimitWrapUp:
+    """Requests run on a short wrap-up allowance past the limit."""
+    stage: Literal["wrap_up"] = "wrap_up"
+    extra_usage: bool
+    """Whether paid extra usage serves requests once the allowance is spent."""
+    resets_at_sec: float | None = None
+    """Epoch seconds when the limit that was hit resets, if reported."""
+
+
+@dataclass(slots=True, frozen=True, kw_only=True)
 class SessionState:
     session_id: str
     model: ModelInfo | None = None
@@ -616,6 +642,14 @@ class SessionState:
     auto_compaction_enabled: bool = False
     fast_mode_enabled: bool = False
     fast_mode_active: bool = False
+    slow_mode_supported: bool = False
+    """`/slow` applies to the active model."""
+    slow_mode_enabled: bool = False
+    """`/slow` is on for the active model; always `false` when `slowModeSupported` is `false`."""
+    slow_mode_scope: SlowModeScope | None = None
+    """Where the active model's `/slow` lives; absent when unsupported."""
+    usage_limit: UsageLimitState | None = None
+    """Usage-limit stage of the active model's account; absent outside wrap-up and low priority."""
     tokens_per_second: float | None = None
     message_count: int = 0
     queued_message_count: int = 0
@@ -1474,6 +1508,10 @@ AssistantMessageEvent: TypeAlias = AssistantStartEvent | AssistantTextStartEvent
 """Streaming update for one assistant message, discriminated by `type`."""
 
 
+UsageLimitState: TypeAlias = UsageLimitLowPriority | UsageLimitWrapUp
+"""Provider-neutral state of an account past its usage limit, discriminated by `stage`."""
+
+
 RpcAgentEvent: TypeAlias = AgentStartEvent | AgentEndEvent | TurnStartEvent | TurnEndEvent | MessageStartEvent | MessageUpdateEvent | MessageEndEvent | ToolExecutionStartEvent | ToolExecutionUpdateEvent | ToolStreamUpdateEvent | ToolExecutionEndEvent | AutoCompactionStartEvent | AutoCompactionEndEvent | AutoRetryStartEvent | AutoRetryEndEvent | CacheWarmingStartEvent | CacheWarmingEndEvent | RetryFallbackAppliedEvent | RetryFallbackSucceededEvent | ModelChangedEvent | ConfigWarningsChangedEvent | AdvisorCostChangedEvent | AdvisorYieldedEvent | TtsrTriggeredEvent | TodoReminderEvent | TodoAutoClearEvent | IrcMessageEvent | NoticeEvent | ThinkingLevelChangedEvent | GoalUpdatedEvent | QueueUpdateEvent
 """A session event, discriminated by `type`; `set_event_filter` selects which are sent."""
 
@@ -1769,6 +1807,24 @@ def parse_goal_result(value: object, path: str = "GoalResult") -> GoalResult:
     )
 
 
+def parse_usage_limit_low_priority(value: object, path: str = "UsageLimitLowPriority") -> UsageLimitLowPriority:
+    payload = expect_object(value, path)
+    required(payload, "stage", cast('Decoder[Literal["low_priority"]]', literal(frozenset({"low_priority"}))), path)
+    return UsageLimitLowPriority(
+        resets_at_sec=required(payload, "resetsAtSec", decode_float, path),
+        allowance_left_percent=optional(payload, "allowanceLeftPercent", decode_int, path),
+    )
+
+
+def parse_usage_limit_wrap_up(value: object, path: str = "UsageLimitWrapUp") -> UsageLimitWrapUp:
+    payload = expect_object(value, path)
+    required(payload, "stage", cast('Decoder[Literal["wrap_up"]]', literal(frozenset({"wrap_up"}))), path)
+    return UsageLimitWrapUp(
+        extra_usage=required(payload, "extraUsage", decode_bool, path),
+        resets_at_sec=optional(payload, "resetsAtSec", decode_float, path),
+    )
+
+
 def parse_session_state(value: object, path: str = "SessionState") -> SessionState:
     payload = expect_object(value, path)
     return SessionState(
@@ -1785,6 +1841,10 @@ def parse_session_state(value: object, path: str = "SessionState") -> SessionSta
         auto_compaction_enabled=defaulted(payload, "autoCompactionEnabled", decode_bool, path, False),
         fast_mode_enabled=defaulted(payload, "fastModeEnabled", decode_bool, path, False),
         fast_mode_active=defaulted(payload, "fastModeActive", decode_bool, path, False),
+        slow_mode_supported=defaulted(payload, "slowModeSupported", decode_bool, path, False),
+        slow_mode_enabled=defaulted(payload, "slowModeEnabled", decode_bool, path, False),
+        slow_mode_scope=optional(payload, "slowModeScope", _decode_slow_mode_scope, path),
+        usage_limit=optional(payload, "usageLimit", parse_usage_limit_state, path),
         tokens_per_second=defaulted(payload, "tokensPerSecond", nullable(decode_float), path, None),
         message_count=defaulted(payload, "messageCount", decode_int, path, 0),
         queued_message_count=defaulted(payload, "queuedMessageCount", decode_int, path, 0),
@@ -2761,6 +2821,10 @@ def parse_negotiate_protocol_result(value: object, path: str = "NegotiateProtoco
     )
 
 
+def parse_usage_limit_state(value: object, path: str = "UsageLimitState") -> UsageLimitState:
+    return dispatch("stage", _USAGE_LIMIT_STATE_CASES)(value, path)
+
+
 def parse_rpc_agent_event(value: object, path: str = "RpcAgentEvent") -> RpcAgentEvent:
     return dispatch("type", _RPC_AGENT_EVENT_CASES)(value, path)
 
@@ -2772,6 +2836,12 @@ def parse_notification(value: object, path: str = "notification") -> RpcNotifica
     if not isinstance(tag, str) or tag not in _RPC_NOTIFICATION_CASES:
         return UnknownNotification(decode_json_object(payload, path))
     return _RPC_NOTIFICATION_CASES[tag](payload, tag)
+
+
+_USAGE_LIMIT_STATE_CASES: Final[dict[str, Decoder[UsageLimitState]]] = {
+        "low_priority": parse_usage_limit_low_priority,
+        "wrap_up": parse_usage_limit_wrap_up,
+}
 
 
 _RPC_AGENT_EVENT_CASES: Final[dict[str, Decoder[RpcAgentEvent]]] = {
@@ -2929,6 +2999,12 @@ class WireClient:
         params: dict[str, object] = {}
         params["enabled"] = enabled
         return parse_fast_mode_result(self._command("set_fast_mode", params), "set_fast_mode")
+
+    def set_slow_mode(self, enabled: bool) -> bool:
+        """Turn `/slow` on or off for the active model; returns whether it is now on."""
+        params: dict[str, object] = {}
+        params["enabled"] = enabled
+        return required(expect_object(self._command("set_slow_mode", params), "set_slow_mode"), "enabled", decode_bool, "set_slow_mode")
 
     def goal(self, op: GoalOp, *, objective: str | None = None, token_budget: int | None = None) -> GoalResult:
         """Read or change goal mode with the lifecycle of the interactive `/goal` command."""
@@ -3542,6 +3618,7 @@ __all__ = [
     "SlashCommandInput",
     "SlashCommandSource",
     "SlashSubcommand",
+    "SlowModeScope",
     "StopReason",
     "StreamingBehavior",
     "SubagentEvent",
@@ -3580,6 +3657,9 @@ __all__ = [
     "TurnStartEvent",
     "Usage",
     "UsageCost",
+    "UsageLimitLowPriority",
+    "UsageLimitState",
+    "UsageLimitWrapUp",
     "UserContent",
     "UserMessage",
     "WidgetPlacement",
@@ -3729,6 +3809,9 @@ __all__ = [
     "parse_turn_start_event",
     "parse_usage",
     "parse_usage_cost",
+    "parse_usage_limit_low_priority",
+    "parse_usage_limit_state",
+    "parse_usage_limit_wrap_up",
     "parse_user_content",
     "parse_user_message",
 ]

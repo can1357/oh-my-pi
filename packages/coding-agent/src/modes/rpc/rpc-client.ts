@@ -752,6 +752,8 @@ export class RpcClient {
 			...state,
 			fastModeEnabled: state.fastModeEnabled === true,
 			fastModeActive: state.fastModeActive === true,
+			slowModeSupported: state.slowModeSupported === true,
+			slowModeEnabled: state.slowModeEnabled === true,
 			goal: state.goal ?? null,
 			tokensPerSecond:
 				typeof state.tokensPerSecond === "number" && Number.isFinite(state.tokensPerSecond)
@@ -765,6 +767,16 @@ export class RpcClient {
 	 */
 	async setFastMode(enabled: boolean): Promise<{ enabled: boolean; active: boolean }> {
 		const response = await this.#send({ type: "set_fast_mode", enabled });
+		return this.#getData(response);
+	}
+
+	/**
+	 * Enable or disable `/slow` for the active model: the flex tier for this
+	 * session on OpenAI/Google, or the persisted Claude low-priority setting
+	 * (`providers.anthropic.slowMode`) on Anthropic.
+	 */
+	async setSlowMode(enabled: boolean): Promise<{ enabled: boolean }> {
+		const response = await this.#send({ type: "set_slow_mode", enabled });
 		return this.#getData(response);
 	}
 

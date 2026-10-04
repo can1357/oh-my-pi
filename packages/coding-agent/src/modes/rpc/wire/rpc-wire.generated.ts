@@ -453,6 +453,30 @@ export interface GoalResult {
 	state: GoalModeState | null;
 }
 
+/** Where `/slow` lives: persisted config shared by every session, or this session's flex tier. */
+export type SlowModeScope = "session" | "global";
+
+/** Requests are served on the provider's low-priority (slow) lane. */
+export interface UsageLimitLowPriority {
+	stage: "low_priority";
+	/** Epoch seconds when the limit that was hit resets. */
+	resetsAtSec: number;
+	/** Percent of the low-priority allowance still available, when reported. */
+	allowanceLeftPercent?: number;
+}
+
+/** Requests run on a short wrap-up allowance past the limit. */
+export interface UsageLimitWrapUp {
+	stage: "wrap_up";
+	/** Whether paid extra usage serves requests once the allowance is spent. */
+	extraUsage: boolean;
+	/** Epoch seconds when the limit that was hit resets, if reported. */
+	resetsAtSec?: number;
+}
+
+/** Provider-neutral state of an account past its usage limit, discriminated by `stage`. */
+export type UsageLimitState = UsageLimitLowPriority | UsageLimitWrapUp;
+
 export interface SessionState {
 	sessionId: string;
 	model?: ModelInfo;
@@ -467,6 +491,14 @@ export interface SessionState {
 	autoCompactionEnabled?: boolean;
 	fastModeEnabled?: boolean;
 	fastModeActive?: boolean;
+	/** `/slow` applies to the active model. */
+	slowModeSupported?: boolean;
+	/** `/slow` is on for the active model; always `false` when `slowModeSupported` is `false`. */
+	slowModeEnabled?: boolean;
+	/** Where the active model's `/slow` lives; absent when unsupported. */
+	slowModeScope?: SlowModeScope;
+	/** Usage-limit stage of the active model's account; absent outside wrap-up and low priority. */
+	usageLimit?: UsageLimitState;
 	tokensPerSecond?: number | null;
 	messageCount?: number;
 	queuedMessageCount?: number;
@@ -1398,6 +1430,14 @@ export interface SetFastModeParams {
 	enabled: boolean;
 }
 
+export interface SetSlowModeParams {
+	enabled: boolean;
+}
+
+export interface SetSlowModeResult {
+	enabled: boolean;
+}
+
 export interface GoalParams {
 	op: GoalOp;
 	objective?: string;
@@ -1642,6 +1682,7 @@ export interface RpcWireCommands {
 	open_session: { params: OpenSessionParams; result: OpenSessionResult };
 	get_state: { params: undefined; result: SessionState };
 	set_fast_mode: { params: SetFastModeParams; result: FastModeResult };
+	set_slow_mode: { params: SetSlowModeParams; result: SetSlowModeResult };
 	goal: { params: GoalParams; result: GoalResult };
 	set_ask_dialog: { params: SetAskDialogParams; result: SetAskDialogResult };
 	get_available_commands: { params: undefined; result: GetAvailableCommandsResult };

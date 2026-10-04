@@ -87,6 +87,13 @@ export const rpcCommands: readonly RpcCommandSpec[] = [
 		result: "FastModeResult",
 	},
 	{
+		name: "set_slow_mode",
+		doc: "Turn `/slow` on or off for the active model; returns whether it is now on.",
+		params: { enabled: "boolean" },
+		result: { enabled: "boolean" },
+		unwrap: "enabled",
+	},
+	{
 		name: "goal",
 		doc: "Read or change goal mode with the lifecycle of the interactive `/goal` command.",
 		params: { op: "GoalOp", "objective?": "string", "token_budget?": "number.integer" },

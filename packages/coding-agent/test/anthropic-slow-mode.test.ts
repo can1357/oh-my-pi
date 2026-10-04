@@ -164,10 +164,14 @@ describe("AnthropicSlowModeController", () => {
 		expect(controller.isActive(Date.now() + 7_300_000)).toBe(false);
 	});
 
-	it("reports the remaining allowance in the status label", async () => {
+	it("reports structured low-priority state without host-formatted time", async () => {
 		await hooks().onFailure(wall(nowSec() + 3_600));
 		hooks().observe(signal({ status: "active", budgetUtilization: 0.38 }), LANE);
-		expect(controller.statusLabel()).toContain("62% left");
+		expect(controller.status()).toEqual({
+			stage: "low_priority",
+			resetsAtSec: expect.any(Number),
+			allowanceLeftPercent: 62,
+		});
 	});
 
 	describe("wrap-up allowance", () => {
@@ -179,9 +183,13 @@ describe("AnthropicSlowModeController", () => {
 				...overrides,
 			});
 
-		it("labels the window and hints only when low priority cannot pick the work up", () => {
+		it("reports structured wrap-up state and hints only when low priority cannot pick the work up", () => {
 			hooks().observe(graceSignal(), LANE);
-			expect(controller.statusLabel()).toStartWith("limit reached · wrapping up · resets ");
+			expect(controller.status()).toEqual({
+				stage: "wrap_up",
+				resetsAtSec: expect.any(Number),
+				extraUsage: false,
+			});
 			expect(notices).toHaveLength(1);
 			// `/slow on` and the lane is still offerable: low priority carries on, no hint.
 			expect(controller.wrapUpHintKey(true)).toBeUndefined();

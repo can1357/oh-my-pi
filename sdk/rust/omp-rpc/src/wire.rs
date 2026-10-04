@@ -2955,6 +2955,85 @@ pub struct GoalResult {
 	pub state: Option<GoalModeState>,
 }
 
+/// Where `/slow` lives: persisted config shared by every session, or this session's flex tier.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum SlowModeScope {
+	#[serde(rename = "session")]
+	Session,
+	#[serde(rename = "global")]
+	Global,
+}
+
+impl SlowModeScope {
+	/// Wire value.
+	pub fn as_str(self) -> &'static str {
+		match self {
+			Self::Session => "session",
+			Self::Global => "global",
+		}
+	}
+}
+
+/// Requests are served on the provider's low-priority (slow) lane.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct UsageLimitLowPriority {
+	/// Epoch seconds when the limit that was hit resets.
+	#[serde(rename = "resetsAtSec")]
+	pub resets_at_sec: f64,
+	/// Percent of the low-priority allowance still available, when reported.
+	#[serde(rename = "allowanceLeftPercent", default, skip_serializing_if = "Option::is_none")]
+	pub allowance_left_percent: Option<i64>,
+}
+
+/// Requests run on a short wrap-up allowance past the limit.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct UsageLimitWrapUp {
+	/// Whether paid extra usage serves requests once the allowance is spent.
+	#[serde(rename = "extraUsage")]
+	pub extra_usage: bool,
+	/// Epoch seconds when the limit that was hit resets, if reported.
+	#[serde(rename = "resetsAtSec", default, skip_serializing_if = "Option::is_none")]
+	pub resets_at_sec: Option<f64>,
+}
+
+/// Provider-neutral state of an account past its usage limit, discriminated by `stage`.
+#[derive(Debug, Clone, PartialEq)]
+pub enum UsageLimitState {
+	/// Requests are served on the provider's low-priority (slow) lane.
+	LowPriority(UsageLimitLowPriority),
+	/// Requests run on a short wrap-up allowance past the limit.
+	WrapUp(UsageLimitWrapUp),
+}
+
+impl UsageLimitState {
+	/// Decodes from JSON, dispatching on `stage`.
+	pub fn from_value(value: Value) -> Result<Self, serde_json::Error> {
+		let decode: fn(Value) -> Result<Self, serde_json::Error> = match value.get("stage").and_then(Value::as_str) {
+			Some("low_priority") => |value| serde_json::from_value(value).map(Self::LowPriority),
+			Some("wrap_up") => |value| serde_json::from_value(value).map(Self::WrapUp),
+			other => {
+				return Err(serde_json::Error::custom(format!("unknown UsageLimitState stage {other:?}")));
+			}
+		};
+		decode(value)
+	}
+}
+
+impl Serialize for UsageLimitState {
+	fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+		match self {
+			Self::LowPriority(member) => serialize_tagged(member, &[("stage", "low_priority")], serializer),
+			Self::WrapUp(member) => serialize_tagged(member, &[("stage", "wrap_up")], serializer),
+		}
+	}
+}
+
+impl<'de> Deserialize<'de> for UsageLimitState {
+	fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+		Self::from_value(Value::deserialize(deserializer)?).map_err(D::Error::custom)
+	}
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SessionState {
 	#[serde(rename = "sessionId")]
@@ -2983,6 +3062,18 @@ pub struct SessionState {
 	pub fast_mode_enabled: bool,
 	#[serde(rename = "fastModeActive", default = "default_session_state_fast_mode_active")]
 	pub fast_mode_active: bool,
+	/// `/slow` applies to the active model.
+	#[serde(rename = "slowModeSupported", default = "default_session_state_slow_mode_supported")]
+	pub slow_mode_supported: bool,
+	/// `/slow` is on for the active model; always `false` when `slowModeSupported` is `false`.
+	#[serde(rename = "slowModeEnabled", default = "default_session_state_slow_mode_enabled")]
+	pub slow_mode_enabled: bool,
+	/// Where the active model's `/slow` lives; absent when unsupported.
+	#[serde(rename = "slowModeScope", default, skip_serializing_if = "Option::is_none")]
+	pub slow_mode_scope: Option<SlowModeScope>,
+	/// Usage-limit stage of the active model's account; absent outside wrap-up and low priority.
+	#[serde(rename = "usageLimit", default, skip_serializing_if = "Option::is_none")]
+	pub usage_limit: Option<UsageLimitState>,
 	#[serde(rename = "tokensPerSecond", default = "default_session_state_tokens_per_second")]
 	pub tokens_per_second: Option<f64>,
 	#[serde(rename = "messageCount", default = "default_session_state_message_count")]
@@ -4876,6 +4967,16 @@ pub struct SetFastModeParams {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SetSlowModeParams {
+	pub enabled: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SetSlowModeResult {
+	pub enabled: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct GoalParams {
 	pub op: GoalOp,
 	#[serde(default, skip_serializing_if = "Option::is_none")]
@@ -5488,6 +5589,14 @@ fn default_session_state_fast_mode_active() -> bool {
 	serde_json::from_str("false").expect("valid wire default")
 }
 
+fn default_session_state_slow_mode_supported() -> bool {
+	serde_json::from_str("false").expect("valid wire default")
+}
+
+fn default_session_state_slow_mode_enabled() -> bool {
+	serde_json::from_str("false").expect("valid wire default")
+}
+
 fn default_session_state_tokens_per_second() -> Option<f64> {
 	serde_json::from_str("null").expect("valid wire default")
 }
@@ -5753,6 +5862,22 @@ impl Command for SetFastModeCommand {
 
 	fn decode(data: Option<Value>) -> Result<Self::Output, serde_json::Error> {
 		serde_json::from_value::<FastModeResult>(data.unwrap_or_else(|| Value::Object(Map::new())))
+	}
+}
+
+/// Turn `/slow` on or off for the active model; returns whether it is now on.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SetSlowModeCommand {
+	pub enabled: bool,
+}
+
+impl Command for SetSlowModeCommand {
+	const NAME: &'static str = "set_slow_mode";
+	const TIMEOUT_MS: Option<u64> = None;
+	type Output = bool;
+
+	fn decode(data: Option<Value>) -> Result<Self::Output, serde_json::Error> {
+		serde_json::from_value::<SetSlowModeResult>(data.unwrap_or_else(|| Value::Object(Map::new()))).map(|result| result.enabled)
 	}
 }
 

@@ -65,6 +65,33 @@ export const stateDefs = {
 		{ goal: "Goal | null", state: "GoalModeState | null" },
 		"Outcome of every `goal` op; both fields are null when the session has no goal.",
 	),
+	SlowModeScope: doc(
+		"'session' | 'global'",
+		"Where `/slow` lives: persisted config shared by every session, or this session's flex tier.",
+	),
+	UsageLimitLowPriority: doc(
+		{
+			stage: "'low_priority'",
+			resetsAtSec: doc("number", "Epoch seconds when the limit that was hit resets."),
+			"allowanceLeftPercent?": doc(
+				"number.integer",
+				"Percent of the low-priority allowance still available, when reported.",
+			),
+		},
+		"Requests are served on the provider's low-priority (slow) lane.",
+	),
+	UsageLimitWrapUp: doc(
+		{
+			stage: "'wrap_up'",
+			"resetsAtSec?": doc("number", "Epoch seconds when the limit that was hit resets, if reported."),
+			extraUsage: doc("boolean", "Whether paid extra usage serves requests once the allowance is spent."),
+		},
+		"Requests run on a short wrap-up allowance past the limit.",
+	),
+	UsageLimitState: doc(
+		"UsageLimitLowPriority | UsageLimitWrapUp",
+		"Provider-neutral state of an account past its usage limit, discriminated by `stage`.",
+	),
 	SessionState: {
 		"model?": "ModelInfo",
 		"thinkingLevel?": "ThinkingLevel",
@@ -79,6 +106,16 @@ export const stateDefs = {
 		autoCompactionEnabled: absentAs("boolean", false),
 		fastModeEnabled: absentAs("boolean", false),
 		fastModeActive: absentAs("boolean", false),
+		slowModeSupported: absentAs(doc("boolean", "`/slow` applies to the active model."), false),
+		slowModeEnabled: absentAs(
+			doc("boolean", "`/slow` is on for the active model; always `false` when `slowModeSupported` is `false`."),
+			false,
+		),
+		"slowModeScope?": doc("SlowModeScope", "Where the active model's `/slow` lives; absent when unsupported."),
+		"usageLimit?": doc(
+			"UsageLimitState",
+			"Usage-limit stage of the active model's account; absent outside wrap-up and low priority.",
+		),
 		tokensPerSecond: absentAs("number | null", null),
 		messageCount: absentAs("number.integer", 0),
 		queuedMessageCount: absentAs("number.integer", 0),
