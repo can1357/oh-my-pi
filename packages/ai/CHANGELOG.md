@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed Claude Pro/Max (OAuth) requests carrying a billing-header `cch` value that no longer matched current Claude Code, which computes it without the model, `max_tokens` and fallback fields.
+
 ## [18.18.4] - 2026-11-09
 
 ### Added
