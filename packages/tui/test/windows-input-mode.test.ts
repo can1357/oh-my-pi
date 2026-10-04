@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import { Editor, type Component } from "@oh-my-pi/pi-tui";
 import { KeybindingsManager } from "@oh-my-pi/pi-tui/app-keybindings";
 import { matchesAppFollowUp } from "@oh-my-pi/pi-tui/keybinding-matchers";
@@ -99,6 +99,32 @@ describe("Win32InputModeDecoder", () => {
 		// Record-shaped text without ESC is ordinary pasted content.
 		expect(decoder.decodePaste("see [13;28;13;1;0;1_ here")).toBe("see [13;28;13;1;0;1_ here");
 	});
+
+	it("reassembles escape sequences a VT host relays as one text record per byte", () => {
+		// Captured from ConPTY when the host terminal writes `ESC [ 1 ; 3 A` (Alt+Up).
+		const relay = (text: string) => [...text].map(ch => `\x1b[0;0;${ch.charCodeAt(0)};1;0;1_`);
+		const decoder = new Win32InputModeDecoder();
+		const keys = relay("\x1b[1;3A").flatMap(record => decoder.decode(record)!);
+		expect(keys).toEqual(["\x1b[1;3A"]);
+		expect(matchesKey(keys[0]!, "alt+up")).toBe(true);
+		expect(relay("\x1b\x1b[A").flatMap(record => decoder.decode(record)!)).toEqual(["\x1b\x1b[A"]);
+		expect(decoder.hasPendingSequence).toBe(false);
+
+		// A lone relayed ESC is held, then released as Escape; plain text is not held.
+		expect(decoder.decode(relay("\x1b")[0]!)).toEqual([]);
+		expect(decoder.flushPendingSequence()).toEqual(["\x1b"]);
+		expect(decoder.decode(relay("x")[0]!)).toEqual(["x"]);
+		// A real key record ends a held ESC instead of being swallowed into it.
+		decoder.decode(relay("\x1b")[0]!);
+		expect(decoder.decode(ENTER)).toEqual(["\x1b", "\r"]);
+
+		// Escape then Alt+d stays two keys; only `ESC ESC [` / `ESC ESC O` group as meta-CSI/SS3.
+		const split = relay("\x1b\x1bd").flatMap(record => decoder.decode(record)!);
+		expect(split).toEqual(["\x1b", "\x1bd"]);
+		expect(matchesKey(split[0]!, "escape")).toBe(true);
+		expect(matchesKey(split[1]!, "alt+d")).toBe(true);
+		expect(decoder.hasPendingSequence).toBe(false);
+	});
 });
 
 class InputRecorder implements Component {
@@ -123,6 +149,7 @@ describe("ProcessTerminal win32-input-mode fallback", () => {
 	});
 
 	afterEach(() => {
+		vi.useRealTimers();
 		harness?.dispose();
 		harness = undefined;
 		for (const [key, value] of originalSshEnv) {
@@ -165,6 +192,40 @@ describe("ProcessTerminal win32-input-mode fallback", () => {
 		expect(harness.terminal.kittyProtocolActive).toBe(true);
 		expect(out.indexOf("\x1b[?9001l")).toBeGreaterThan(out.indexOf("\x1b[?9001h"));
 		expect(out).toContain("\x1b[>1u");
+	});
+
+	it("releases a relayed lone Escape after a single wait window", async () => {
+		harness = createProcessTerminalRenderHarness(100, 30, { conpty: true, nativeWindowsConsole: true });
+		const recorder = new InputRecorder();
+		harness.tui.addChild(recorder);
+		harness.tui.setFocus(recorder);
+		await harness.settle();
+		await harness.feed("\x1b[?1;2c");
+		vi.useFakeTimers();
+
+		// The paste-marker normalizer and the decoder both hold a relayed ESC; their
+		// 75 ms waits must not stack into ~150 ms.
+		process.stdin.emit("data", "\x1b[0;0;27;1;0;1_");
+		vi.advanceTimersByTime(74);
+		expect(recorder.received).toEqual([]);
+		vi.advanceTimersByTime(1);
+		expect(recorder.received).toEqual(["\x1b"]);
+	});
+
+	it("delivers a held relayed Escape when a late kitty reply turns the mode off", async () => {
+		harness = createProcessTerminalRenderHarness(100, 30, { conpty: true, nativeWindowsConsole: true });
+		const recorder = new InputRecorder();
+		harness.tui.addChild(recorder);
+		harness.tui.setFocus(recorder);
+		await harness.settle();
+		await harness.feed("\x1b[?1;2c");
+		vi.useFakeTimers();
+
+		process.stdin.emit("data", "\x1b[0;0;27;1;0;1_");
+		process.stdin.emit("data", "\x1b[?0u");
+		expect(harness.terminal.kittyProtocolActive).toBe(true);
+		vi.runAllTimers();
+		expect(recorder.received).toEqual(["\x1b"]);
 	});
 
 	it("pastes line breaks the console host sent as key records, then submits on a later Enter (#14065)", async () => {

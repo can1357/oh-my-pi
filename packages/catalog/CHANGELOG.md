@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [18.6.0] - 2026-10-03
+
 ### Fixed
 
 - Fixed DeepSeek V4 model IDs and the V4.1 Flash alias lacking version information in model identity and dashboards ([#14194](https://github.com/can1357/oh-my-pi/issues/14194)).
