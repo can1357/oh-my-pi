@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Changed
+
+- `/tan` switches the view to the new agent so you can watch the tangent run ([#14352](https://github.com/can1357/oh-my-pi/pull/14352) by [@iacore](https://github.com/iacore)).
+- Viewing a subagent no longer returns to the main session when it finishes; the view stays on its transcript until you leave it ([#14352](https://github.com/can1357/oh-my-pi/pull/14352) by [@iacore](https://github.com/iacore)).
+
 ## [18.6.1] - 2026-10-04
 
 ### Fixed

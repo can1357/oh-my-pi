@@ -9,6 +9,7 @@ import type { PreparedExtension } from "@oh-my-pi/pi-coding-agent/extensibility/
 import { resolveLocalRoot } from "@oh-my-pi/pi-coding-agent/internal-urls/local-protocol";
 import { TanCommandController } from "@oh-my-pi/pi-coding-agent/modes/controllers/tan-command-controller";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
+import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-lifecycle";
 import { AgentRegistry, MAIN_AGENT_ID } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import type { CreateAgentSessionOptions, CreateAgentSessionResult } from "@oh-my-pi/pi-coding-agent/sdk";
 import * as sdkModule from "@oh-my-pi/pi-coding-agent/sdk";
@@ -106,6 +107,7 @@ function createContext(overrides?: {
 	preparedExtensions?: unknown;
 	effectiveExtensionRoots?: unknown;
 	extensionPaths?: unknown;
+	focusedAgentId?: string;
 }) {
 	const tempDir = TempDir.createSync("@omp-tan-controller-");
 	const parentFile = path.join(tempDir.path(), "parent.jsonl");
@@ -157,7 +159,7 @@ function createContext(overrides?: {
 		getSessionFile: vi.fn(() => cloneFile),
 		appendCustomEntry: vi.fn(),
 	} as unknown as SessionManager;
-	const ctx = {
+	const ctxRecord = {
 		session,
 		sessionManager,
 		settings: Settings.isolated({ "task.enableLsp": true }),
@@ -165,7 +167,10 @@ function createContext(overrides?: {
 		showWarning: vi.fn(),
 		showError: vi.fn(),
 		rebuildChatFromMessages: vi.fn(),
-	} as unknown as InteractiveModeContext;
+		focusedAgentId: overrides?.focusedAgentId as string | undefined,
+		focusAgentSession: vi.fn(async () => {}),
+	};
+	const ctx = ctxRecord as unknown as InteractiveModeContext;
 	return {
 		tempDir,
 		parentFile,
@@ -173,6 +178,10 @@ function createContext(overrides?: {
 		cloneFile,
 		cloneManager,
 		ctx,
+		/** Simulate the view having landed on an agent (what focusAgentSession does). */
+		setFocusedAgentId: (id: string | undefined) => {
+			ctxRecord.focusedAgentId = id;
+		},
 		getArtifactsDir,
 		getSessionId,
 		register,
@@ -647,6 +656,55 @@ describe("TanCommandController", () => {
 		);
 		// The compaction listener is released once the tan finishes.
 		expect(stub.compactionListener).toBeUndefined();
+	});
+
+	it("switches the view to the new tan agent once its session exists", async () => {
+		const harness = createContext();
+		vi.spyOn(SessionManager, "forkFrom").mockResolvedValue(harness.cloneManager);
+		const { clone } = createCloneStub();
+		vi.spyOn(sdkModule, "createAgentSession").mockResolvedValue({
+			session: clone,
+		} as unknown as CreateAgentSessionResult);
+		const controller = new TanCommandController(harness.ctx);
+
+		await controller.start("watch me");
+		const run = harness.capturedRun;
+		if (!run) throw new Error("run function was not captured");
+		await run({ jobId: "job-123", signal: new AbortController().signal, reportProgress: async () => {} });
+
+		const cloneId = harness.capturedOptions?.agentId;
+		expect(cloneId).toMatch(/^Tan-/);
+		expect(harness.ctx.focusAgentSession).toHaveBeenCalledWith(cloneId);
+	});
+
+	it("keeps a viewed tan live (idle, adopted) instead of parking it under the view", async () => {
+		const harness = createContext();
+		vi.spyOn(SessionManager, "forkFrom").mockResolvedValue(harness.cloneManager);
+		const { clone } = createCloneStub();
+		vi.spyOn(sdkModule, "createAgentSession").mockResolvedValue({
+			session: clone,
+		} as unknown as CreateAgentSessionResult);
+		const registry = AgentRegistry.global();
+		const setStatus = vi.spyOn(registry, "setStatus");
+		const detachSession = vi.spyOn(registry, "detachSession");
+		const adopt = vi.spyOn(AgentLifecycleManager.global(), "adopt").mockImplementation(() => {});
+		const controller = new TanCommandController(harness.ctx);
+
+		await controller.start("stay with me");
+		const cloneId = harness.capturedOptions?.agentId;
+		if (!cloneId) throw new Error("clone id was not captured");
+		// The focus controller set the view on this tan while it was running.
+		harness.setFocusedAgentId(cloneId);
+
+		const run = harness.capturedRun;
+		if (!run) throw new Error("run function was not captured");
+		await run({ jobId: "job-123", signal: new AbortController().signal, reportProgress: async () => {} });
+
+		expect(setStatus).toHaveBeenCalledWith(cloneId, "idle");
+		expect(setStatus).not.toHaveBeenCalledWith(cloneId, "parked");
+		expect(detachSession).not.toHaveBeenCalled();
+		expect(clone.dispose).not.toHaveBeenCalled();
+		expect(adopt).toHaveBeenCalledWith(cloneId, expect.objectContaining({ idleTtlMs: expect.any(Number) }));
 	});
 
 	it("does not duplicate the request when compaction runs before the initial dispatch", async () => {

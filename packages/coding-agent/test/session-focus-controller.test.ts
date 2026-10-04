@@ -1,4 +1,4 @@
-import { beforeAll, describe, expect, it } from "bun:test";
+import { afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
 import { Container } from "@oh-my-pi/pi-tui";
 import {
 	pickRecentFocusableAgentId,
@@ -164,6 +164,10 @@ describe("SessionFocusController", () => {
 	beforeAll(async () => {
 		// updatePendingMessagesDisplay renders through the global theme singleton.
 		await initTheme(false);
+	});
+
+	afterEach(() => {
+		vi.restoreAllMocks();
 	});
 
 	it("focusAgent retargets subscription, transcript anchors, and status line onto the worker session", async () => {
@@ -355,12 +359,37 @@ describe("SessionFocusController", () => {
 		]);
 	});
 
+	it("holds the viewed agent from parking, releasing it only when the view moves away", async () => {
+		const hold = vi.spyOn(AgentLifecycleManager.prototype, "hold");
+		const unhold = vi.spyOn(AgentLifecycleManager.prototype, "unhold");
+		const h = makeHarness();
+		const worker = makeSessionStub();
+		const parent = makeSessionStub();
+		registerSub(h.registry, "Worker", worker.session, MAIN_AGENT_ID);
+		registerSub(h.registry, "Parent", parent.session, MAIN_AGENT_ID);
+
+		await h.controller.focusAgent("Worker");
+		expect(hold).toHaveBeenCalledWith("Worker");
+		expect(unhold).not.toHaveBeenCalled();
+
+		// Switching the view releases the previous agent and holds the new one.
+		await h.controller.focusAgent("Parent");
+		expect(unhold).toHaveBeenCalledWith("Worker");
+		expect(hold).toHaveBeenCalledWith("Parent");
+
+		// Returning to main releases the last held agent.
+		await h.controller.unfocus();
+		expect(unhold).toHaveBeenCalledWith("Parent");
+	});
+
 	it("drops a slower focus that resolves after a newer request", async () => {
 		const h = makeHarness();
 		const slow = makeSessionStub();
 		const fast = makeSessionStub();
 		const { promise: slowGate, resolve: releaseSlow } = Promise.withResolvers<AgentSession>();
 		const lifecycle = {
+			hold: () => {},
+			unhold: () => {},
 			ensureLive: (id: string) => (id === "Slow" ? slowGate : Promise.resolve(fast.session)),
 		};
 		const controller = new SessionFocusController(
@@ -384,6 +413,8 @@ describe("SessionFocusController", () => {
 		const slow = makeSessionStub();
 		const { promise: slowGate, resolve: releaseSlow } = Promise.withResolvers<AgentSession>();
 		const lifecycle = {
+			hold: () => {},
+			unhold: () => {},
 			ensureLive: (_id: string) => slowGate,
 		};
 		const controller = new SessionFocusController(
@@ -405,6 +436,8 @@ describe("SessionFocusController", () => {
 		const fast = makeSessionStub();
 		const { promise: slowGate, reject: failSlow } = Promise.withResolvers<AgentSession>();
 		const lifecycle = {
+			hold: () => {},
+			unhold: () => {},
 			ensureLive: (id: string) => (id === "Slow" ? slowGate : Promise.resolve(fast.session)),
 		};
 		const controller = new SessionFocusController(
@@ -428,6 +461,8 @@ describe("SessionFocusController", () => {
 		const slow = makeSessionStub();
 		const { promise: slowGate, resolve: releaseSlow } = Promise.withResolvers<AgentSession>();
 		const lifecycle = {
+			hold: () => {},
+			unhold: () => {},
 			ensureLive: (_id: string) => slowGate,
 		};
 		const controller = new SessionFocusController(
@@ -457,6 +492,8 @@ describe("SessionFocusController", () => {
 		});
 		const { promise: reviveB, resolve: releaseReviveB } = Promise.withResolvers<AgentSession>();
 		const lifecycle = {
+			hold: () => {},
+			unhold: () => {},
 			ensureLive: (id: string) => (id === "A" ? Promise.resolve(slowA.session) : reviveB),
 		};
 		const controller = new SessionFocusController(
@@ -493,6 +530,8 @@ describe("SessionFocusController", () => {
 		});
 		const { promise: reviveB, reject: failReviveB } = Promise.withResolvers<AgentSession>();
 		const lifecycle = {
+			hold: () => {},
+			unhold: () => {},
 			ensureLive: (id: string) => (id === "A" ? Promise.resolve(slowA.session) : reviveB),
 		};
 		const controller = new SessionFocusController(
@@ -529,6 +568,8 @@ describe("SessionFocusController", () => {
 			},
 		});
 		const lifecycle = {
+			hold: () => {},
+			unhold: () => {},
 			ensureLive: (_id: string) => Promise.resolve(slow.session),
 		};
 		const controller = new SessionFocusController(
@@ -559,6 +600,8 @@ describe("SessionFocusController", () => {
 		const worker = makeSessionStub();
 		worker.setQueue({ steering: ["queued worker input"] });
 		const lifecycle = {
+			hold: () => {},
+			unhold: () => {},
 			ensureLive: (_id: string) => Promise.resolve(worker.session),
 		};
 		const controller = new SessionFocusController(
@@ -614,6 +657,8 @@ describe("SessionFocusController", () => {
 		const worker = makeSessionStub();
 		const { promise: revive, resolve: releaseRevive } = Promise.withResolvers<AgentSession>();
 		const lifecycle = {
+			hold: () => {},
+			unhold: () => {},
 			ensureLive: (_id: string) => revive,
 		};
 		const controller = new SessionFocusController(
@@ -639,6 +684,8 @@ describe("SessionFocusController", () => {
 		const slow = makeSessionStub();
 		const { promise: slowGate, resolve: releaseSlow } = Promise.withResolvers<AgentSession>();
 		const lifecycle = {
+			hold: () => {},
+			unhold: () => {},
 			ensureLive: (id: string) => (id === "Slow" ? slowGate : Promise.resolve(focused.session)),
 		};
 		const controller = new SessionFocusController(
@@ -664,6 +711,8 @@ describe("SessionFocusController", () => {
 		const slow = makeSessionStub();
 		const { promise: slowGate, resolve: releaseSlow } = Promise.withResolvers<AgentSession>();
 		const lifecycle = {
+			hold: () => {},
+			unhold: () => {},
 			ensureLive: (id: string) => (id === "Slow" ? slowGate : Promise.resolve(focused.session)),
 		};
 		const controller = new SessionFocusController(
