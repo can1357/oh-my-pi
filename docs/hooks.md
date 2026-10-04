@@ -166,6 +166,8 @@ helpers, `tab.run(...)`, direct `computer` helpers, and
 `computer.run(fnOrCode, options)` are host bridge calls, not AgentTool calls,
 so they do not emit `tool_call` or `tool_result`.
 
+The TUI renders passive tool context as one sanitized dim `Context:` line on the batch's final tool card; the complete marked developer message remains in session history for replay.
+
 ```text
 Hook tool interception flow
 
