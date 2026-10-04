@@ -1087,6 +1087,12 @@ These frames are UI metadata, not transcript messages or model input.
 Older runtimes may omit the state field or reject these commands; treat that as
 unavailable support, not a clean resolution.
 
+The diagnostics types, commands, and update frame are also defined in the
+canonical wire schema and generated into the Python, Go, and Rust SDKs by
+`bun run gen:rpc`. Generated Python decoders follow the shared SDK convention:
+null optional package identity is treated as absent; required snapshot fields,
+arrays, and non-null field types remain validated. OMP emits `pluginName` only
+as a string or omits it.
 ### Pi-compatible history/tree commands with OMP-native entry payloads
 
 The commands and reconciliation semantics below are Pi-compatible, but the

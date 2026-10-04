@@ -715,7 +715,7 @@ class SessionState:
     goal: GoalModeState | None = None
     """Current goal mode; null when the session has no goal."""
     skill_diagnostics: SkillDiagnosticsSnapshot | None = None
-    """Same snapshot as `get_skill_diagnostics`."""
+    """Current skill-resolution details; absent when connected to an older server."""
 
 
 @dataclass(slots=True, frozen=True, kw_only=True)
