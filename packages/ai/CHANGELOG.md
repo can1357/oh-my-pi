@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed DeepSeek replies ending early when their visible text contained an incomplete DSML tool-call wrapper ([#14272](https://github.com/can1357/oh-my-pi/issues/14272)).
+
 ## [18.6.0] - 2026-10-03
 
 ### Fixed
