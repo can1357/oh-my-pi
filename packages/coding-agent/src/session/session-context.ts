@@ -175,6 +175,13 @@ export interface BuildSessionContextOptions {
 	 * hides the call the agent is still waiting on.
 	 */
 	keepDanglingToolCalls?: boolean;
+	/**
+	 * Tool calls the live agent loop is still executing. They count as paired,
+	 * so a mid-turn rebuild of the agent context (shake, prune, image drop)
+	 * keeps the in-flight assistant turn intact; the loop appends its results
+	 * after the rebuild. Ids absent from the resolved path have no effect.
+	 */
+	inFlightToolCallIds?: ReadonlySet<string>;
 	/** Price and resolve persisted snapcompact frame payloads on demand. */
 	resolveFrameData?: (data: string) => snapcompact.LazyFrameData | undefined;
 }
@@ -679,7 +686,7 @@ export function buildSessionContext(
 	// a pending block instead of vanishing from the chat.)
 	const keepDangling = options?.transcript === true && options.keepDanglingToolCalls === true;
 	if (!keepDangling) {
-		const pairedToolResultIds = new Set<string>();
+		const pairedToolResultIds = new Set<string>(options?.inFlightToolCallIds);
 		for (const message of messages) {
 			if (message.role === "toolResult") pairedToolResultIds.add(message.toolCallId);
 		}

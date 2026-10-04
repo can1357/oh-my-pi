@@ -5,6 +5,7 @@
 ### Fixed
 
 - Fixed follow-up hashline edits being rejected as anchored on lines "never displayed" after an earlier edit shifted those lines, when the replacement carries the anchored content; genuinely stale line numbers are still rejected ([#14254](https://github.com/can1357/oh-my-pi/pull/14254) by [@abilliontokens](https://github.com/abilliontokens)).
+- Fixed `/shake` (and other history rewrites) run while a tool is executing leaving the context meter on a stale pre-shake estimate until the next response, and dropping that in-flight tool call from the agent's history ([#14261](https://github.com/can1357/oh-my-pi/pull/14261) by [@will-bogusz](https://github.com/will-bogusz)).
 
 ## [18.6.0] - 2026-10-03
 
