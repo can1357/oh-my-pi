@@ -5,6 +5,13 @@
 ### Added
 
 - Added `statusLine.segmentOptions.usage` with `showLabel`, `showPercent`, and `showReset` toggles and a `compact` option that renders quota windows as `5h24%4h47m` instead of `5h 24% (4h 47m)` ([#14304](https://github.com/can1357/oh-my-pi/pull/14304) by [@iddqdld](https://github.com/iddqdld)).
+## [18.6.1] - 2026-10-04
+
+### Fixed
+
+- Fixed the Space key in the Git diff pane so it stages or unstages the focused hunk instead of scrolling or acting on the wrong change.
+- Fixed the BTW history sheet in Tern: the history list no longer collapses beside a long answer, the panes lose their foldable `##` headings, and the arrow/page keys scroll the answer ([#14331](https://github.com/can1357/oh-my-pi/pull/14331) by [@H4vC](https://github.com/H4vC))
+- Fixed a single saved side question in the BTW history panel opening on its one-row list: its answer now has focus, and Enter or `f` to follow up jumps to the bottom of the conversation ([#14331](https://github.com/can1357/oh-my-pi/pull/14331) by [@H4vC](https://github.com/H4vC))
 
 ## [18.6.0] - 2026-10-03
 
