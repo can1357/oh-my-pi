@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- The model hub's role list keeps a configured role whose model is absent from the current catalog visible as configured (with its selector marked unavailable) instead of showing it cleared, and no longer offers to re-assign over it ([#14271](https://github.com/can1357/oh-my-pi/pull/14271) by [@iacore](https://github.com/iacore)).
+
 ## [18.6.0] - 2026-10-03
 
 ### Fixed
