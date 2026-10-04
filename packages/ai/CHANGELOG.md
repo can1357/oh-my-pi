@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed a hosted Cursor `web_fetch` tool call being stripped from every rebuilt transcript when the connection closed mid-fetch; `flushOpenToolCalls` now pairs an interrupted result for it like it already did for `connect-scm`, `todo`, and `cursor-edit` blocks ([#14266](https://github.com/can1357/oh-my-pi/pull/14266) by [@jchanghong023](https://github.com/jchanghong023)).
+
 ## [18.6.0] - 2026-10-03
 
 ### Fixed
