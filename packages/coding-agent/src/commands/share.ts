@@ -15,6 +15,8 @@ import { shareSession } from "../export/share";
 import { buildSecretObfuscator } from "../secrets";
 import { resolveResumableSession } from "../session/session-listing";
 import { SessionManager } from "../session/session-manager";
+import { setDefaultSessionStorage } from "../session/session-storage";
+import { resolveSessionStorage, SessionStorageConfigError } from "../session/session-storage-config";
 
 import { cfgSecretsEnabled } from "../secrets/settings";
 import { cfgShareRedactSecrets, cfgShareServerUrl, cfgShareStore } from "./settings";
@@ -36,6 +38,21 @@ export default class Share extends Command {
 
 	async run(): Promise<void> {
 		const { args, flags } = await this.parse(Share);
+		// Read the session through the configured storage (a table row under
+		// `session.storage: sql`): this command never reaches the CLI's start-up install.
+		try {
+			setDefaultSessionStorage(
+				await resolveSessionStorage({
+					settings: await Settings.loadReadOnly({ cwd: process.cwd() }),
+					env: process.env,
+				}),
+			);
+		} catch (err) {
+			if (!(err instanceof SessionStorageConfigError)) throw err;
+			process.stderr.write(`Error: ${err.message}\n`);
+			process.exitCode = 1;
+			return;
+		}
 
 		const sessionArg = args.session ?? "";
 		let sessionPath: string | undefined = sessionArg;
