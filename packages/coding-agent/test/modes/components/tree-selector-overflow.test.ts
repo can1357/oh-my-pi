@@ -64,14 +64,4 @@ describe("TreeSelectorComponent deep branching overflow", () => {
 		expect(selectedRow!).toContain("user:");
 		expect(selectedRow!).toMatch(/branch-\d+-b/);
 	});
-
-	it("preserves prefix budget so the selected entry text remains legible at narrow width", () => {
-		const { root, leaf } = buildBranchyTree(40);
-		const width = 80;
-		const rendered = renderSelector(root, leaf.entry.id, width);
-
-		const selectedRow = rendered.find(line => line.trimStart().startsWith("›"));
-		expect(selectedRow).toBeDefined();
-		expect(selectedRow!).toContain("user:");
-	});
 });

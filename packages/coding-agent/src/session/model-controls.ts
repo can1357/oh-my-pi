@@ -1,11 +1,18 @@
 import { type Agent, ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { Model, ProviderSessionState, ServiceTier, ServiceTierByFamily, ServiceTierFamily } from "@oh-my-pi/pi-ai";
-import { Effort, realizesPriorityServiceTier, resolveModelServiceTier, serviceTierFamily } from "@oh-my-pi/pi-ai";
+import {
+	Effort,
+	realizesPriorityServiceTier,
+	resolveModelServiceTier,
+	serviceTierFamily,
+	shouldSendServiceTier,
+} from "@oh-my-pi/pi-ai";
 import {
 	clearAnthropicFastModeFallback,
 	isAnthropicFastModeFallbackDisabled,
 } from "@oh-my-pi/pi-ai/providers/anthropic-state";
 import { isFireworksFastModelId } from "@oh-my-pi/pi-catalog/fireworks-model-id";
+import { THINKING_EFFORTS } from "@oh-my-pi/pi-catalog/effort";
 import { getSupportedEfforts } from "@oh-my-pi/pi-catalog/model-thinking";
 import { modelsAreEqual } from "@oh-my-pi/pi-catalog/models";
 import { logger } from "@oh-my-pi/pi-utils";
@@ -566,18 +573,25 @@ export class ModelControls {
 		this.setThinkingLevel(this.#autoThinking ? AUTO_THINKING : (preferredDefault ?? this.#thinkingLevel));
 	}
 
+	/** All selectable effort selectors for the active model, in cycle order. */
+	getAvailableEffortSelectors(): ConfiguredThinkingLevel[] {
+		if (!this.#model?.reasoning) return [];
+		const efforts = this.getAvailableThinkingLevels();
+		const ceiling = this.#thinkingLevelCeiling;
+		const selectable =
+			ceiling === undefined
+				? efforts
+				: efforts.filter(level => THINKING_EFFORTS.indexOf(level) <= THINKING_EFFORTS.indexOf(ceiling));
+		return [ThinkingLevel.Off, AUTO_THINKING, ...selectable];
+	}
+
 	/**
 	 * Cycle to next thinking level: off → auto → minimal..max → off.
 	 * @returns New selector, or undefined if model doesn't support thinking
 	 */
 	cycleThinkingLevel(): ConfiguredThinkingLevel | undefined {
-		if (!this.#model?.reasoning) return undefined;
-
-		const levels: ConfiguredThinkingLevel[] = [
-			ThinkingLevel.Off,
-			AUTO_THINKING,
-			...this.getAvailableThinkingLevels(),
-		];
+		const levels = this.getAvailableEffortSelectors();
+		if (levels.length === 0) return undefined;
 		const configured = this.configuredThinkingLevel();
 		const currentLevel = configured === ThinkingLevel.Inherit ? ThinkingLevel.Off : configured;
 		const currentIndex = currentLevel ? levels.indexOf(currentLevel) : -1;
@@ -632,12 +646,10 @@ export class ModelControls {
 						signal: controller.signal,
 						metadataResolver: provider => this.#host.agent.metadataForProvider(provider),
 						onUsage: usage => {
-							const entryId = this.#host.sessionManager.appendModelUsage(
-								{ purpose: "auto-thinking", ...usage },
-								usageOwner,
-							);
+							const entryId = this.#host.sessionManager.appendModelUsage(usage, usageOwner);
 							if (entryId) usageOwner.parentId = entryId;
 						},
+						telemetry: this.#host.agent.telemetry,
 					},
 				);
 			} catch (error) {
@@ -674,28 +686,44 @@ export class ModelControls {
 	}
 
 	/**
-	 * True when the currently selected model's family is set to `priority` — the
-	 * `/fast` on/off state for the active model. Returns false when no model is
-	 * selected or the model exposes no service-tier family (e.g. Fireworks, which
-	 * has its own Providers › Fireworks Tier toggle).
+	 * True when the currently selected model's family is set to a fast tier —
+	 * `priority`, or `ultrafast` on the OpenAI family — the `/fast` on/off state
+	 * for the active model. Returns false when no model is selected or the
+	 * model exposes no service-tier family (e.g. Fireworks, which has its own
+	 * Providers › Fireworks Tier toggle).
 	 *
-	 * For "is priority actually applied to the next request?" use
+	 * For "is a fast tier actually applied to the next request?" use
 	 * {@link isFastModeActive} instead.
 	 */
 	isFastModeEnabled(): boolean {
 		const family = this.#model ? serviceTierFamily(this.#model) : undefined;
-		return family ? this.#serviceTierByFamily[family] === "priority" : false;
+		const tier = family ? this.#serviceTierByFamily[family] : undefined;
+		return tier === "priority" || tier === "ultrafast";
+	}
+
+	/** True when the active model's OpenAI family is set to `ultrafast` (`/fast ultra`). */
+	isUltrafastModeEnabled(): boolean {
+		const model = this.#model;
+		return (
+			model !== undefined &&
+			serviceTierFamily(model) === "openai" &&
+			this.#serviceTierByFamily.openai === "ultrafast"
+		);
 	}
 
 	/**
-	 * True when `priority` is actually realized on the wire for the currently
-	 * selected model (OpenAI/Google `service_tier`, direct Anthropic fast mode,
-	 * or Fireworks priority). Returns false for tiers the active model can't
-	 * realize and when no model is selected.
+	 * True when a fast tier is actually realized on the wire for the currently
+	 * selected model: `priority` (OpenAI/Google `service_tier`, direct Anthropic
+	 * fast mode, or Fireworks priority), or `ultrafast` where the model offers
+	 * it. Returns false for tiers the active model can't realize and when no
+	 * model is selected.
 	 */
 	isFastModeActive(): boolean {
 		const model = this.#model;
-		if (!model || !realizesPriorityServiceTier(this.effectiveServiceTier(model), model)) return false;
+		if (!model) return false;
+		const tier = this.effectiveServiceTier(model);
+		if (tier === "ultrafast") return shouldSendServiceTier(tier, model);
+		if (!realizesPriorityServiceTier(tier, model)) return false;
 		if (model.provider === "anthropic") {
 			return !isAnthropicFastModeFallbackDisabled(this.#host.providerSessionState, model);
 		}
@@ -746,13 +774,16 @@ export class ModelControls {
 
 	/**
 	 * `/fast on|off` targets the family of the currently selected model: it sets
-	 * (or clears) that family's `priority` tier. Returns `false` when the model
-	 * has no service-tier family, so callers can report that fast mode is
+	 * (or clears) that family's `priority` tier. `off` also clears `ultrafast`.
+	 * Returns `false` when the model has no service-tier family, or when it is an
+	 * OpenAI-family model that cannot take `priority` (a Codex model whose
+	 * discovered tier list omits it), so callers can report that fast mode is
 	 * unavailable instead of claiming success.
 	 */
 	setFastMode(enabled: boolean): boolean {
-		const family = this.#model ? serviceTierFamily(this.#model) : undefined;
-		if (!family) {
+		const model = this.#model;
+		const family = model ? serviceTierFamily(model) : undefined;
+		if (!model || !family) {
 			this.#host.emitNotice(
 				"info",
 				"The current model has no service-tier control for /fast to toggle.",
@@ -761,13 +792,42 @@ export class ModelControls {
 			return false;
 		}
 		if (!enabled) {
-			if (this.#serviceTierByFamily[family] === "priority") this.setServiceTierFamily(family, undefined);
+			const tier = this.#serviceTierByFamily[family];
+			if (tier === "priority" || tier === "ultrafast") this.setServiceTierFamily(family, undefined);
 			return true;
+		}
+		if (family === "openai" && !shouldSendServiceTier("priority", model)) {
+			this.#host.emitNotice(
+				"info",
+				"The current model does not offer the priority (Fast) service tier.",
+				"priority",
+			);
+			return false;
 		}
 		if (family === "anthropic" && this.#serviceTierByFamily.anthropic === "priority") {
 			clearAnthropicFastModeFallback(this.#host.providerSessionState);
 		}
 		this.setServiceTierFamily(family, "priority");
+		return true;
+	}
+
+	/**
+	 * `/fast ultra` sets the OpenAI family to `ultrafast`. Enabling requires the
+	 * active model to realize it (first-party OpenAI, or a Codex model whose
+	 * discovery advertises the tier); otherwise the tier is left unchanged and
+	 * `false` is returned. Disabling clears only an `ultrafast` selection.
+	 */
+	setUltrafastMode(enabled: boolean): boolean {
+		const model = this.#model;
+		if (!enabled) {
+			if (this.#serviceTierByFamily.openai === "ultrafast") this.setServiceTierFamily("openai", undefined);
+			return true;
+		}
+		if (!model || serviceTierFamily(model) !== "openai" || !shouldSendServiceTier("ultrafast", model)) {
+			this.#host.emitNotice("info", "The current model does not offer the Ultrafast service tier.", "priority");
+			return false;
+		}
+		this.setServiceTierFamily("openai", "ultrafast");
 		return true;
 	}
 

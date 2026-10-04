@@ -909,20 +909,19 @@ jobs:
                     binary_path: packages/coding-agent/binaries/omp-darwin-x64,
                     native_targets: darwin-x64-baseline,
                     cache_scope: release-darwin-x64,
-                    fallback_scope: release-darwin-arm64-macos15,
+                    fallback_scope: "",
                  }
-               # Same image as darwin-x64 so the two scopes can seed each
-               # other's exec-config actions (proc-macros, build scripts): a
-               # macos-14 probe restoring the arm64 archive got 584 disk-cache
-               # hits for the x64 build, macos-15 got 0 across images.
+               # Apple Foundation Models needs Swift 6.4 and the macOS 27 SDK;
+               # the xcode-27 image is arm64, so keep the Intel cross-build on
+               # macos-15 and its own disk cache.
                - {
-                    os: macos-15,
+                    os: xcode-27,
                     platform: darwin,
                     target_id: darwin-arm64,
                     binary_path: packages/coding-agent/binaries/omp-darwin-arm64,
                     native_targets: darwin-arm64,
-                    cache_scope: release-darwin-arm64-macos15,
-                    fallback_scope: release-darwin-x64,
+                    cache_scope: release-darwin-arm64-xcode27,
+                    fallback_scope: "",
                  }
       runs-on: ${{ matrix.os }}
       permissions:
@@ -955,6 +954,18 @@ jobs:
               cache-scope: ${{ matrix.cache_scope }}
               fallback-scope: ${{ matrix.fallback_scope }}
               save: "false"
+         - name: Verify Apple Foundation Models bridge
+           if: matrix.target_id == 'darwin-arm64'
+           run: |
+              addon=packages/natives/native/pi_natives.darwin-arm64.node
+              # The bridge is embedded as a separate dylib (module OmpAppleFm),
+              # never linked: a linked Swift runtime crashes the addon on load
+              # on older macOS.
+              grep -aqF OmpAppleFm "$addon" ||
+                 { echo "::error::Darwin arm64 addon was built without the Apple Foundation Models bridge"; exit 1; }
+              if otool -L "$addon" | grep -E 'libswift|FoundationModels'; then
+                 echo "::error::Darwin arm64 addon links the Swift runtime or FoundationModels directly"; exit 1
+              fi
          - name: Build release binary
            env:
               RELEASE_TARGETS: ${{ matrix.target_id }}

@@ -82,7 +82,13 @@ export function detectKittyUnicodePlaceholdersSupport(terminalId: string, env: N
 	const insideMultiplexer = isInsideTerminalMultiplexer(env);
 	if (insideMultiplexer && env.PI_FORCE_IMAGE_PROTOCOL?.trim().toLowerCase() === "kitty") return true;
 	if (isInsideHerdr(env)) return false;
-	return terminalId === "kitty" || terminalId === "ghostty" || terminalId === "otty" || terminalId === "rio";
+	return (
+		terminalId === "kitty" ||
+		terminalId === "ghostty" ||
+		terminalId === "monstar" ||
+		terminalId === "otty" ||
+		terminalId === "rio"
+	);
 }
 
 let features: KittyGraphicsFeatures = {

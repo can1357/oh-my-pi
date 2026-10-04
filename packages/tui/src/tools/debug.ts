@@ -11,7 +11,11 @@ import {
 	TRUNCATE_LENGTHS,
 	truncateToWidth,
 } from "../render/render-utils";
-import type { RenderResultOptions, ToolRenderer } from "./renderer";
+import type { NativeToolView, RenderResultOptions, ToolRenderer, ToolRenderResult } from "./renderer";
+import { ansi, kv } from "../native/describe";
+import type { NativeChild } from "../native/node";
+import { OwnerMemo } from "../native/memo";
+import { errorView, noteText, resultText, toolHead } from "./native-view";
 
 /** Display fields captured from a debugger session. */
 export interface DebugSessionSnapshot {
@@ -115,6 +119,68 @@ function summarizeDebugCall(args: DebugRenderArgs): string {
 	return action;
 }
 
+/** Untruncated `[action, target]` for native heads; mirrors {@link summarizeDebugCall}'s field precedence. */
+function debugCallParts(args: DebugRenderArgs | undefined, fallbackAction: string): [string, string | undefined] {
+	const action = (args?.action ?? fallbackAction).replaceAll("_", " ");
+	if (!args) return [action, undefined];
+	const target =
+		args.program ||
+		(args.file && args.line !== undefined ? `${args.file}:${args.line}` : undefined) ||
+		args.function ||
+		args.expression ||
+		args.command ||
+		args.memory_reference ||
+		args.instruction_reference ||
+		args.data_id ||
+		args.name ||
+		undefined;
+	return [action, target];
+}
+
+function describeDebugResult(
+	result: ToolRenderResult<DebugToolDetails>,
+	args: DebugRenderArgs | undefined,
+): NativeToolView {
+	const [action, target] = debugCallParts(args, result.details?.action ?? "debug");
+	const output = resultText(result);
+	if (result.isError) return errorView("Debug", output || "Debug failed", action, target);
+	const snapshot = result.details?.snapshot;
+	const body: NativeChild[] = [];
+	let sessionRows = 0;
+	if (snapshot) {
+		const location = formatLocation(snapshot);
+		const rows: [string, string | undefined][] = [
+			["Session", snapshot.id],
+			["Adapter", snapshot.adapter],
+			["Status", snapshot.status],
+			["CWD", snapshot.cwd],
+			["Program", snapshot.program],
+			["Stop reason", snapshot.stopReason],
+			["Frame", snapshot.frameName],
+			["Instruction pointer", snapshot.instructionPointerReference],
+			["Location", location ?? undefined],
+			[
+				"Configuration",
+				snapshot.needsConfigurationDone ? "pending configurationDone; set breakpoints, then continue." : undefined,
+			],
+			["Exit code", snapshot.exitCode !== undefined ? String(snapshot.exitCode) : undefined],
+		];
+		const grid = kv(rows);
+		if (grid) {
+			body.push(grid);
+			sessionRows = rows.filter(([, value]) => value).length;
+		}
+	}
+	body.push(output ? ansi(output) : noteText("No output"));
+	return {
+		head: toolHead("Debug", action, target),
+		body,
+		preview: { lines: sessionRows + PREVIEW_LIMITS.COLLAPSED_LINES },
+	};
+}
+
+const debugResultMemo = new OwnerMemo<NativeToolView | undefined>();
+
 /** Renders debugger calls and captured execution snapshots. */
 export const debugToolRenderer = {
 	animatedPartialResult: true,
@@ -161,6 +227,17 @@ export const debugToolRenderer = {
 				applyBg: false,
 			};
 		});
+	},
+	describeCall(args: DebugRenderArgs): NativeToolView {
+		const [action, target] = debugCallParts(args, "request");
+		return { head: toolHead("Debug", action, target) };
+	},
+	describeResult(
+		result: ToolRenderResult<DebugToolDetails>,
+		_options: RenderResultOptions,
+		args?: DebugRenderArgs,
+	): NativeToolView | undefined {
+		return debugResultMemo.get(result, [], () => describeDebugResult(result, args));
 	},
 	mergeCallAndResult: true,
 	inline: true,

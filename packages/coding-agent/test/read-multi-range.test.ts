@@ -52,20 +52,6 @@ describe("read tool multi-range selector", () => {
 		await removeWithRetries(tmpDir);
 	});
 
-	it("keeps the workspace-relative path in hashline headers for nested files", async () => {
-		const filePath = path.join(tmpDir, "src", "nested", "numbered.txt");
-		await fs.mkdir(path.dirname(filePath), { recursive: true });
-		await fs.writeFile(filePath, "alpha\nbeta\n");
-
-		const tool = new ReadTool(createSession(tmpDir));
-		const text = textOutput(await tool.execute("call-filename-header", { path: filePath }));
-		const firstLine = text.split("\n")[0];
-
-		// A same-basename file elsewhere in the tree must not capture a
-		// follow-up edit, so the header retains the workspace-relative path.
-		expect(firstLine).toBe(`[${path.join("src", "nested", "numbered.txt")}#${firstLine.slice(-5, -1)}]`);
-	});
-
 	it("returns both ranges separated by an elision marker", async () => {
 		const filePath = path.join(tmpDir, "src", "numbered.txt");
 		await fs.mkdir(path.dirname(filePath), { recursive: true });

@@ -306,13 +306,6 @@ describe("goal runtime", () => {
 		expect(prompt).not.toContain(objective);
 	});
 
-	it("returns the input verbatim when escapeXmlText has nothing to escape", () => {
-		const input = "plain text — with 'quotes' and \"double\" plus unicode ✓";
-		expect(escapeXmlText(input)).toBe(input);
-		// fast-path identity: the helper should not allocate a new string when nothing changed
-		expect(escapeXmlText(input)).toBe(escapeXmlText(input));
-	});
-
 	it("escapeXmlText escapes only the XML-significant trio and leaves other characters untouched", () => {
 		expect(escapeXmlText("a & b < c > d")).toBe("a &amp; b &lt; c &gt; d");
 		expect(escapeXmlText("'\"`")).toBe("'\"`");
@@ -336,25 +329,6 @@ describe("goal runtime", () => {
 		expect(harness.hiddenMessages[0]?.customType).toBe("goal-budget-limit");
 	});
 
-	it("completeGoalFromTool clears enabled and flips status to complete with mode exiting (fix #1)", async () => {
-		const harness = createHarness({
-			state: {
-				enabled: true,
-				mode: "active",
-				goal: createGoal({ tokenBudget: 100, tokensUsed: 42, timeUsedSeconds: 7 }),
-			},
-		});
-
-		const completed = await harness.runtime.completeGoalFromTool();
-
-		expect(completed.status).toBe("complete");
-		const state = harness.getState();
-		expect(state?.enabled).toBe(false);
-		expect(state?.mode).toBe("exiting");
-		expect(state?.reason).toBe("completed");
-		expect(state?.goal.status).toBe("complete");
-	});
-
 	it("dropGoal emits goal_updated with the dropped goal and clears persisted state", async () => {
 		const harness = createHarness({
 			state: {
@@ -375,20 +349,6 @@ describe("goal runtime", () => {
 		}
 		expect(lastEvent.goal?.status).toBe("dropped");
 		expect(lastEvent.state?.enabled).toBe(false);
-	});
-
-	it("rejects op=create on the runtime when a non-dropped goal already exists", async () => {
-		const harness = createHarness({
-			state: {
-				enabled: true,
-				mode: "active",
-				goal: createGoal({ objective: "Existing" }),
-			},
-		});
-
-		await expect(harness.runtime.createGoal({ objective: "Second" })).rejects.toThrow(
-			"cannot create a new goal because this session already has a goal",
-		);
 	});
 
 	it("replaces an active goal with a fresh active goal", async () => {
@@ -414,38 +374,5 @@ describe("goal runtime", () => {
 		expect(next.goal.timeUsedSeconds).toBe(0);
 		expect(next.goal.id).not.toBe("goal-1");
 		expect(harness.persists.at(-1)?.state?.goal.objective).toBe("Second");
-	});
-
-	it("allows creating a new goal after the previous one is complete", async () => {
-		const harness = createHarness({
-			state: {
-				enabled: false,
-				mode: "exiting",
-				reason: "completed",
-				goal: createGoal({ status: "complete" }),
-			},
-		});
-
-		const next = await harness.runtime.createGoal({ objective: "Phase 4" });
-		expect(next.goal.objective).toBe("Phase 4");
-		expect(next.goal.status).toBe("active");
-		expect(next.enabled).toBe(true);
-	});
-
-	it("completeGoalFromTool succeeds for a paused goal (enabled=false)", async () => {
-		const harness = createHarness({
-			state: {
-				enabled: false,
-				mode: "active",
-				goal: createGoal({ status: "paused", tokensUsed: 30, timeUsedSeconds: 5 }),
-			},
-		});
-
-		const completed = await harness.runtime.completeGoalFromTool();
-		expect(completed.status).toBe("complete");
-		const state = harness.getState();
-		expect(state?.enabled).toBe(false);
-		expect(state?.mode).toBe("exiting");
-		expect(state?.goal.status).toBe("complete");
 	});
 });

@@ -87,5 +87,15 @@
 		"pageBg": "#EEF6F8",
 		"cardBg": "#F7FBFD",
 		"infoBg": "#DDEBF0"
+	},
+	"terminal": {
+		"background": "lagoonBg",
+		"foreground": "#24434f",
+		"chrome": "sandMist",
+		"widget": "lagoonSurface",
+		"ansi": [
+			"#2b4450", "errorRed", "#25815f", "#986a11", "turquoise", "#9253a0", "#1a7f7a", "#b8cbd3",
+			"mutedText", "coral", "#409875", "#b57e0b", "#3591bf", "#b46ec0", "#399690", "lagoonElevated"
+		]
 	}
 }

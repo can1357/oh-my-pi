@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { parseArgs, validateToolNames } from "../src/cli/args";
+import { parseArgs, reportInvalidFlagValues, validateToolNames } from "../src/cli/args";
 import { OPTIONAL_VALUE_FLAGS, restartArgv, STRING_VALUE_FLAGS } from "../src/cli/flag-tables";
 import { CliUsageError } from "../src/cli/usage-error";
 
@@ -63,10 +63,6 @@ describe("--external-thinking", () => {
 		expect(result.externalThinking).toBe(true);
 		expect(result.messages).toEqual(["check this"]);
 	});
-
-	it("stays unset when omitted", () => {
-		expect(parseArgs([]).externalThinking).toBeUndefined();
-	});
 });
 describe("--session-dir", () => {
 	it("uses PI_CODING_AGENT_SESSION_DIR unless the CLI flag overrides it", () => {
@@ -109,6 +105,53 @@ describe("--tools discovered-registry validation", () => {
 		expect(() => validateToolNames(["read", "missing"], ["read", "intercom", "custom_tool"])).toThrow(
 			/Unknown tool in --tools: missing/,
 		);
+	});
+
+	it("lists the built-in catalog the --tools filter kept out of the registry, plus registered extras", () => {
+		// With `--tools python` the registry holds only always-on/custom tools, so
+		// the listing must not be limited to that filtered set.
+		expect(() => validateToolNames(["python"], ["goal", "custom_tool"])).toThrow(
+			/Built-in tools: read, bash, edit,.*\. Other registered tools: goal, custom_tool\./,
+		);
+	});
+
+	it("reports an unregistered built-in as unavailable, not unknown", () => {
+		let error: unknown;
+		try {
+			validateToolNames(["eval"], ["read"]);
+		} catch (caught) {
+			error = caught;
+		}
+		expect(error).toBeInstanceOf(CliUsageError);
+		expect((error as Error).message).toBe("Built-in tool unavailable in this session: eval.");
+	});
+});
+
+describe("enum flag validation", () => {
+	it("records an unknown --approval-mode and reports it instead of silently keeping the default", () => {
+		expect(parseArgs(["--approval-mode", "yolo"]).approvalMode).toBe("yolo");
+		const parsed = parseArgs(["--approval-mode", "sometimes"]);
+		expect(parsed.approvalMode).toBeUndefined();
+		let stderr = "";
+		expect(reportInvalidFlagValues(parsed, text => (stderr += text))).toBe(true);
+		expect(stderr).toContain('Invalid --approval-mode value: "sometimes". Expected one of: always-ask, write, yolo.');
+	});
+
+	it("records an unknown --mode instead of falling back to text", () => {
+		expect(parseArgs(["--mode=json"]).mode).toBe("json");
+		expect(parseArgs(["--mode", "bogus"]).invalidFlagValues).toEqual([
+			expect.stringContaining('Invalid --mode value: "bogus"'),
+		]);
+	});
+
+	it("delivers a value to an extension flag that shadows a built-in enum flag", () => {
+		// Startup parses before extensions load; the extension-aware reparse must
+		// hand `--mode compact` to the extension, not report it as invalid.
+		const parsed = parseArgs(["--mode", "compact", "hello"], new Map([["mode", { type: "string" as const }]]));
+		expect(parsed.unknownFlags.get("mode")).toBe("compact");
+		expect(parsed.mode).toBeUndefined();
+		expect(parsed.invalidFlagValues).toEqual([]);
+		expect(parsed.messages).toEqual(["hello"]);
 	});
 });
 

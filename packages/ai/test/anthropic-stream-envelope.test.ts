@@ -11,6 +11,7 @@ import type {
 	WebSearchToolResultBlockParam,
 } from "@oh-my-pi/pi-ai/providers/anthropic-wire";
 import type { AssistantMessageEvent, Context, Model, ModelSpec, ProviderSessionState } from "@oh-my-pi/pi-ai/types";
+import { validateToolArguments } from "@oh-my-pi/pi-ai/utils/validation";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { structuredCloneJSON } from "@oh-my-pi/pi-utils";
 import { withEnv, withOfficialAnthropicEndpoint } from "./helpers";
@@ -1493,8 +1494,11 @@ describe("anthropic stream envelope handling", () => {
 		if (toolCall?.type !== "toolCall") {
 			throw new Error("Expected toolCall content in degraded payload");
 		}
-		// Best-effort arguments recovered by the throttled streaming parser are retained.
-		expect(toolCall.arguments).toEqual({ city: "Par" });
+		// Keep the turn non-fatal, but never execute the auto-closed preview.
+		expect(toolCall.arguments).toEqual({ __parseError: expect.any(String), __rawJson: '{"city":"Par' });
+		expect(() =>
+			validateToolArguments({ name: "lookup_weather", description: "", parameters: cityObjectSchema }, toolCall),
+		).toThrow("Tool call arguments are not valid JSON");
 		expect((toolCall as unknown as Record<string, unknown>).partialJson).toBeUndefined();
 	});
 

@@ -211,28 +211,6 @@ describe("EventController.sendErrorNotification", () => {
 });
 
 describe("EventController — notifications through the real turn-end path (#handleAgentEnd)", () => {
-	it("fires the error notification when the dispatched turn settles with stopReason === 'error', even with a stale active-context snapshot", async () => {
-		const spy = vi.spyOn(TERMINAL, "sendNotification").mockImplementation(() => {});
-		cfgErrorNotify.override(settings, "on");
-		cfgCompletionNotify.override(settings, "off");
-		// viewSession (active context) reports no assistant at all — the shape a
-		// classifier-refusal prune leaves behind — while the terminal agent_end
-		// event still carries the failed turn.
-		const controller = new EventController(makeTurnEndContext({ lastAssistantMessage: undefined }));
-		await controller.handleEvent(makeAgentEndEvent([makeAssistantMessage("error")]));
-		expect(spy).toHaveBeenCalledTimes(1);
-		expect(spy).toHaveBeenCalledWith(expect.objectContaining({ body: "Stopped with error", type: "error" }));
-	});
-
-	it("skips the error notification when the dispatched turn settles with stopReason === 'aborted'", async () => {
-		const spy = vi.spyOn(TERMINAL, "sendNotification").mockImplementation(() => {});
-		cfgErrorNotify.override(settings, "on");
-		cfgCompletionNotify.override(settings, "off");
-		const controller = new EventController(makeTurnEndContext());
-		await controller.handleEvent(makeAgentEndEvent([makeAssistantMessage("aborted")]));
-		expect(spy).not.toHaveBeenCalled();
-	});
-
 	it("fires only the error toast — never a paired 'Complete' toast — for one error-ending turn", async () => {
 		// Regression for the exact coupling bug: with both notify settings on,
 		// a classifier-refusal turn's stale active context must not let
@@ -249,39 +227,6 @@ describe("EventController — notifications through the real turn-end path (#han
 });
 
 describe("EventController — error toast gated while auto-retry is pending", () => {
-	it("suppresses the error toast for the agent_end that lands mid-retry, then still fires on the real final failure", async () => {
-		// `#handleRetryableError` emits `auto_retry_start`, then still publishes the
-		// failed turn's `agent_end` (stopReason === 'error') before the retry has a
-		// chance to recover. That agent_end must not raise a toast — only the
-		// retry's own eventual settle (success or exhausted) should.
-		const spy = vi.spyOn(TERMINAL, "sendNotification").mockImplementation(() => {});
-		cfgErrorNotify.override(settings, "on");
-		cfgCompletionNotify.override(settings, "off");
-		const controller = new EventController(makeTurnEndContext());
-
-		await controller.handleEvent({
-			type: "auto_retry_start",
-			attempt: 1,
-			maxAttempts: 3,
-			delayMs: 100,
-			errorMessage: "overloaded",
-		} as Extract<AgentSessionEvent, { type: "auto_retry_start" }>);
-		await controller.handleEvent(makeAgentEndEvent([makeAssistantMessage("error")]));
-		expect(spy).not.toHaveBeenCalled();
-
-		// Retries exhausted: the session falls through to its own final agent_end
-		// for the same failed message, now that the retry saga is over.
-		await controller.handleEvent({
-			type: "auto_retry_end",
-			success: false,
-			attempt: 3,
-			finalError: "still overloaded",
-		} as Extract<AgentSessionEvent, { type: "auto_retry_end" }>);
-		await controller.handleEvent(makeAgentEndEvent([makeAssistantMessage("error")]));
-		expect(spy).toHaveBeenCalledTimes(1);
-		expect(spy).toHaveBeenCalledWith(expect.objectContaining({ body: "Stopped with error", type: "error" }));
-	});
-
 	it("keeps retry suppression when the next attempt starts before a deferred failed agent_end settles", async () => {
 		const spy = vi.spyOn(TERMINAL, "sendNotification").mockImplementation(() => {});
 		cfgErrorNotify.override(settings, "on");

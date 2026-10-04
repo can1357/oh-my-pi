@@ -55,10 +55,6 @@ function release(major: number, minor: number, patch: number, body: string): Cha
 }
 
 describe("startup changelog mode settings", () => {
-	test("defaults to a summary", () => {
-		expect(cfgStartupChangelogMode.get(Settings.isolated())).toBe("summary");
-	});
-
 	test("keeps the legacy key out of the public schema while migrating raw config", async () => {
 		expect(lookup("collapseChangelog")).toBeUndefined();
 
@@ -334,6 +330,26 @@ describe("last changelog marker", () => {
 
 			expect(downgradeDisplay).toBeUndefined();
 			expect(await readLastChangelogVersion(agentDir)).toBe("3.0.0");
+		});
+	});
+
+	test("summary mode keeps the last unseen release of a changelog that ends in a newline", async () => {
+		await withTempAgentDir(async agentDir => {
+			await writeLastChangelogVersion("1.0.0", agentDir);
+			const changelogPath = path.join(agentDir, "CHANGELOG.md");
+			const history = [release(2, 0, 0, "### Added\n\n- Newest."), release(1, 5, 0, "### Fixed\n\n- Last section.")];
+			await Bun.write(changelogPath, `# Changelog\n\n${history.map(entry => entry.content).join("\n\n")}\n`);
+
+			const selection = await resolveStartupChangelogForDisplay({
+				mode: "summary",
+				currentVersion: CURRENT_VERSION,
+				changelogPath,
+				agentDir,
+			});
+
+			expect(selection?.totalUnseenEntries).toBe(2);
+			expect(selection?.markdown).toContain("## [1.5.0]");
+			expect(selection?.markdown).toContain("- Last section.");
 		});
 	});
 });

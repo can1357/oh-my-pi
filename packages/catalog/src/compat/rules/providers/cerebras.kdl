@@ -10,6 +10,9 @@ provider "cerebras" {
 	// Replaces the Cerebras provider branches in the completions baseline.
 	supports-usage-in-streaming #false
 	tool-strict-mode "all_strict"
+	// Prompt caching carries no discount: cached input tokens bill at the
+	// standard input rate (https://inference-docs.cerebras.ai/capabilities/prompt-caching).
+	cache-read-at-input-rate #true
 	// Cerebras serves Gemma 4 with vision enabled; its /v1/models rows carry
 	// no modality metadata.
 	models "gemma-4-31b" {

@@ -120,6 +120,8 @@ interface ResolvedVibeWorker {
 	modelOverride?: string | string[];
 	/** Pre-expansion role alias behind {@link modelOverride}, when the worker agent named one. */
 	modelRole?: string;
+	/** {@link modelOverride} is the parent's live selector; its `:level` ranks below the agent's own level. */
+	modelInheritsLiveThinkingLevel?: boolean;
 }
 
 interface VibeTurn {
@@ -143,6 +145,8 @@ interface VibeRecord {
 	modelOverride?: string | string[];
 	/** Pre-expansion role alias behind {@link modelOverride}, when the worker agent named one. */
 	modelRole?: string;
+	/** {@link modelOverride} is the parent's live selector; its `:level` ranks below the agent's own level. */
+	modelInheritsLiveThinkingLevel?: boolean;
 	state: VibeSessionState;
 	createdAt: number;
 	lastActivityAt: number;
@@ -268,21 +272,29 @@ export class VibeSessionRegistry {
 	/**
 	 * Insert a bare worker record without the spawn machinery. Test-only —
 	 * lets focused runtime tests attach an optional synthetic in-flight job.
+	 * Keyed like a real spawn in the `test-parent-session` scope (null file), so
+	 * id lookups (`vibe_wait` with named sessions, `vibe_kill`) resolve.
 	 */
 	registerRecordForTests(record: {
 		id: string;
 		cli?: VibeCli;
 		ownerId: string;
 		state?: VibeSessionState;
+		killed?: boolean;
 		jobId?: string;
 	}): void {
 		const now = Date.now();
-		this.#records.set(record.id, {
-			id: record.id,
-			cli: record.cli ?? "fast",
+		const scope: VibeOwnerScope = {
 			ownerId: record.ownerId,
 			parentSessionId: "test-parent-session",
 			parentSessionFile: null,
+		};
+		this.#records.set(scopeKey(scope, record.id), {
+			id: record.id,
+			cli: record.cli ?? "fast",
+			ownerId: record.ownerId,
+			parentSessionId: scope.parentSessionId,
+			parentSessionFile: scope.parentSessionFile,
 			agent: getBundledAgent("sonic")!,
 			state: record.state ?? "running",
 			createdAt: now,
@@ -292,7 +304,7 @@ export class VibeSessionRegistry {
 				: undefined,
 			queue: [],
 			turnCount: 0,
-			killed: false,
+			killed: record.killed ?? false,
 			suspended: false,
 			terminalPersisted: false,
 		});
@@ -351,14 +363,19 @@ export class VibeSessionRegistry {
 		// Same contract as the task spawn path: the expansion discards the role
 		// alias (`@task`, `@smol`), so patterns and role identity come from one
 		// call — the child's inherited retry-fallback chain is keyed off the role.
-		const { patterns, role } = resolveAgentModelSelection({
+		const { patterns, role, inheritsLiveThinkingLevel } = resolveAgentModelSelection({
 			settingsOverride: agentModelOverrides[agentName],
 			agentModel: agent.model,
 			settings: session.settings,
 			activeModelPattern: session.getActiveModelString?.(),
 			fallbackModelPattern: session.getModelString?.(),
 		});
-		return { agent, modelOverride: patterns, modelRole: role };
+		return {
+			agent,
+			modelOverride: patterns,
+			modelRole: role,
+			modelInheritsLiveThinkingLevel: inheritsLiveThinkingLevel,
+		};
 	}
 
 	async #appendLifecycleEvent(
@@ -545,6 +562,7 @@ export class VibeSessionRegistry {
 			id: record.id,
 			cli: record.cli,
 			state: record.state,
+			killed: record.killed,
 			model: record.resolvedModel,
 			turns: record.turnCount,
 			queued: record.queue.length,
@@ -749,7 +767,10 @@ export class VibeSessionRegistry {
 				existing.sessionFile === childSessionFile &&
 				(existing.status === "idle" || existing.status === "parked");
 			const blockedByCollision = Boolean(existing && !existingIsResumable);
-			const { agent, modelOverride, modelRole } = this.#resolveWorker(session, spawn.cli);
+			const { agent, modelOverride, modelRole, modelInheritsLiveThinkingLevel } = this.#resolveWorker(
+				session,
+				spawn.cli,
+			);
 			if (!existing) {
 				AgentRegistry.global().register({
 					id: spawn.id,
@@ -771,6 +792,7 @@ export class VibeSessionRegistry {
 				agent,
 				modelOverride,
 				modelRole,
+				modelInheritsLiveThinkingLevel,
 				state: "idle",
 				createdAt: spawn.createdAt,
 				lastActivityAt: candidate.lastActivityAt,
@@ -805,7 +827,10 @@ export class VibeSessionRegistry {
 			throw new ToolError("Vibe mode has exited; enter Vibe mode again before spawning a worker.");
 		}
 		const manager = this.#manager(session);
-		const { agent, modelOverride, modelRole } = this.#resolveWorker(session, args.cli);
+		const { agent, modelOverride, modelRole, modelInheritsLiveThinkingLevel } = this.#resolveWorker(
+			session,
+			args.cli,
+		);
 		if (!session.agentOutputManager) {
 			session.agentOutputManager = new AgentOutputManager(session.getArtifactsDir ?? (() => null));
 		}
@@ -830,6 +855,7 @@ export class VibeSessionRegistry {
 			agent,
 			modelOverride,
 			modelRole,
+			modelInheritsLiveThinkingLevel,
 			state: "starting",
 			createdAt,
 			lastActivityAt: createdAt,
@@ -1283,6 +1309,7 @@ export class VibeSessionRegistry {
 			detached: true,
 			modelOverride: record.modelOverride,
 			modelRole: record.modelRole,
+			modelInheritsLiveThinkingLevel: record.modelInheritsLiveThinkingLevel,
 			parentActiveModelPattern: session.getActiveModelString?.(),
 			thinkingLevel: record.agent.thinkingLevel,
 			sessionFile,
@@ -1296,6 +1323,7 @@ export class VibeSessionRegistry {
 			authStorage: session.authStorage,
 			modelRegistry: session.modelRegistry,
 			settings: session.settings,
+			inheritedSessionAgents: session.getSessionAgents?.(),
 			mcpManager: session.mcpManager ?? MCPManager.instance(),
 			contextFiles: session.contextFiles?.filter(file => path.basename(file.path).toLowerCase() !== "agents.md"),
 			skills: [...(session.skills ?? [])],
@@ -1310,7 +1338,6 @@ export class VibeSessionRegistry {
 			parentHindsightSessionState: session.getHindsightSessionState?.(),
 			parentMnemopiSessionState: session.getMnemopiSessionState?.(),
 			parentTelemetry: session.getTelemetry?.(),
-			parentEvalSessionId: session.getEvalSessionId?.() ?? undefined,
 			parentAgentId: session.getAgentId?.() ?? MAIN_AGENT_ID,
 			parentServiceTier: session.getServiceTierByFamily ? (session.getServiceTierByFamily() ?? null) : undefined,
 			keepAlive: true,

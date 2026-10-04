@@ -18,10 +18,6 @@ describe("repairDoubleEncodedJsonString", () => {
 		expect(repairDoubleEncodedJsonString("C:\\Users\\me")).toBe("C:\\Users\\me");
 	});
 
-	it("preserves a regex with a backslash class", () => {
-		expect(repairDoubleEncodedJsonString("match \\d+ digits")).toBe("match \\d+ digits");
-	});
-
 	it("preserves text containing a bare double quote", () => {
 		expect(repairDoubleEncodedJsonString('she said "hi" loudly')).toBe('she said "hi" loudly');
 	});

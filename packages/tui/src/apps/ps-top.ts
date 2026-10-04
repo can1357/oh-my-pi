@@ -6,6 +6,7 @@
  * `x` kill, `r` restart, `a` toggle all scopes, `q`/`esc`/`ctrl+c` quit.
  * Sub-views (info, logs): `esc`/`q` back.
  */
+import * as path from "node:path";
 import { formatKeyHint, formatKeyHints } from "../app-keybindings";
 import { KeyValueList, type KeyValueRow } from "../components/key-value-list";
 import { ScrollView } from "../components/scroll-view";
@@ -13,6 +14,11 @@ import { renderTableRow, type TableColumn } from "../components/table";
 import { matchesKey } from "../keys";
 import { ProcessTerminal } from "../terminal";
 import { type Component, TUI } from "../tui";
+import type { TspSpan, TspText, TspTone } from "@oh-my-pi/pi-wire";
+import { col, compact, elapsed, keyed, node, row, span, stableKey, text } from "../native/describe";
+import type { NativeNode, NativeUiEvent } from "../native/node";
+import { actionBar, actionButton } from "../native/overlay";
+import { Memo } from "../native/memo";
 import { truncateToWidth } from "../utils";
 import { formatDuration } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
@@ -26,6 +32,7 @@ import {
 	type PsScopeReport,
 	type PsTarget,
 	scopeHeader,
+	flagsCell,
 	TABLE_HEADER,
 	TERMINAL_STATES,
 	tableCells,
@@ -41,6 +48,15 @@ interface FlatRow {
 }
 
 type PsTopView = "table" | "info" | "logs";
+
+type PsStatusTone = "success" | "warning" | "error" | "muted";
+
+const STATUS_PAINT: Record<PsStatusTone, (text: string) => string> = {
+	success: chalk.green,
+	warning: chalk.yellow,
+	error: chalk.red,
+	muted: chalk.dim,
+};
 
 /** Options accepted by the interactive monitor: scope selection from the list flags. */
 export interface PsTopOptions extends PsTarget {
@@ -81,8 +97,14 @@ export class PsTopComponent implements Component {
 	#refreshing = false;
 	#lastRefresh = 0;
 	#status = "";
+	#statusText = "";
+	#statusTone: PsStatusTone = "muted";
 	#statusAt = 0;
+	#logsError: string | undefined;
+	/** Process key a pointer `Kill` waits on for confirmation. */
+	#killConfirm: string | undefined;
 	#disposed = false;
+	readonly #native = new Memo();
 
 	constructor(ui: TUI, options: PsTopOptions, host: PsTopHost) {
 		this.#ui = ui;
@@ -122,7 +144,7 @@ export class PsTopComponent implements Component {
 			this.#restoreSelection();
 			this.#ui.requestRender();
 		} catch (error) {
-			this.#setStatus(chalk.red(error instanceof Error ? error.message : String(error)));
+			this.#setStatus("error", error instanceof Error ? error.message : String(error));
 		} finally {
 			this.#refreshing = false;
 		}
@@ -140,8 +162,10 @@ export class PsTopComponent implements Component {
 		this.#selectedKey = this.#flat[this.#selected] ? flatKey(this.#flat[this.#selected]) : undefined;
 	}
 
-	#setStatus(text: string): void {
-		this.#status = text;
+	#setStatus(tone: PsStatusTone, text: string): void {
+		this.#status = STATUS_PAINT[tone](text);
+		this.#statusText = text;
+		this.#statusTone = tone;
 		this.#statusAt = Date.now();
 		this.#ui.requestRender();
 	}
@@ -152,19 +176,16 @@ export class PsTopComponent implements Component {
 		const entry = this.#flat[this.#selected];
 		if (!entry) return;
 		const name = entry.row.snapshot.name;
-		this.#setStatus(chalk.yellow(`${verb} ${name}…`));
+		this.#setStatus("warning", `${verb} ${name}…`);
 		try {
 			const daemon = await this.#host.act(entry.scope, name, verb);
 			this.#setStatus(
-				chalk.green(
-					`${verb === "restart" ? "Restarted" : verb === "kill" ? "Killed" : "Stopped"} ${daemonLabel(daemon)}`,
-				),
+				"success",
+				`${verb === "restart" ? "Restarted" : verb === "kill" ? "Killed" : "Stopped"} ${daemonLabel(daemon)}`,
 			);
 			void this.#refresh();
 		} catch (error) {
-			this.#setStatus(
-				chalk.red(`${verb} ${name} failed: ${error instanceof Error ? error.message : String(error)}`),
-			);
+			this.#setStatus("error", `${verb} ${name} failed: ${error instanceof Error ? error.message : String(error)}`);
 		}
 	}
 
@@ -176,7 +197,7 @@ export class PsTopComponent implements Component {
 			this.#view = "info";
 			this.#ui.requestRender();
 		} catch (error) {
-			this.#setStatus(chalk.red(error instanceof Error ? error.message : String(error)));
+			this.#setStatus("error", error instanceof Error ? error.message : String(error));
 		}
 	}
 
@@ -186,6 +207,7 @@ export class PsTopComponent implements Component {
 		this.#view = "logs";
 		this.#logsLines = [];
 		this.#logsState = "";
+		this.#logsError = undefined;
 		const poll = async (): Promise<void> => {
 			const current = this.#flat[this.#selected];
 			if (this.#disposed || this.#view !== "logs" || !current) return;
@@ -197,9 +219,11 @@ export class PsTopComponent implements Component {
 				);
 				this.#logsLines = result.terminalRows ?? result.text.replace(/\n$/, "").split("\n");
 				this.#logsState = result.state;
+				this.#logsError = undefined;
 				this.#ui.requestRender();
 			} catch (error) {
-				this.#logsLines = [chalk.red(error instanceof Error ? error.message : String(error))];
+				this.#logsError = error instanceof Error ? error.message : String(error);
+				this.#logsLines = [chalk.red(this.#logsError)];
 				this.#ui.requestRender();
 			}
 		};
@@ -236,15 +260,18 @@ export class PsTopComponent implements Component {
 		}
 		if (matchesKey(data, "up") || data === "k") this.#moveSelection(-1);
 		else if (matchesKey(data, "down") || data === "j") this.#moveSelection(1);
-		else if (data === "a") {
-			this.#all = !this.#all;
-			this.#setStatus(chalk.dim(this.#all ? "Showing all scopes" : "Showing current scope"));
-			void this.#refresh();
-		} else if (matchesKey(data, "enter") || data === "i") void this.#openInfo();
+		else if (data === "a") this.#toggleAll();
+		else if (matchesKey(data, "enter") || data === "i") void this.#openInfo();
 		else if (data === "l") this.#openLogs();
 		else if (data === "s") void this.#act("stop");
 		else if (data === "x") void this.#act("kill");
 		else if (data === "r") void this.#act("restart");
+	}
+
+	#toggleAll(): void {
+		this.#all = !this.#all;
+		this.#setStatus("muted", this.#all ? "Showing all scopes" : "Showing current scope");
+		void this.#refresh();
 	}
 
 	#moveSelection(delta: number): void {
@@ -252,6 +279,340 @@ export class PsTopComponent implements Component {
 		this.#selected = Math.max(0, Math.min(this.#flat.length - 1, this.#selected + delta));
 		this.#selectedKey = flatKey(this.#flat[this.#selected]);
 		this.#ui.requestRender();
+	}
+
+	// -- native --------------------------------------------------------------
+
+	/**
+	 * Pointer actions: a click selects a process, a double click opens its info
+	 * (Enter); the scope control switches between the current and all scopes;
+	 * the action bar runs the same code as the keys, except that a pointer
+	 * `Kill` asks first (the `x` key stays immediate).
+	 */
+	handleNativeEvent(event: NativeUiEvent): void {
+		if (event.type === "action") {
+			this.#nativeAction(event.act);
+			return;
+		}
+		if (event.type !== "select" && event.type !== "activate") return;
+		if (event.item === "current" || event.item === "all") {
+			if ((event.item === "all") !== this.#all) this.#toggleAll();
+			return;
+		}
+		if (this.#view !== "table") return;
+		const index = this.#flat.findIndex(entry => stableKey(flatKey(entry)) === event.item);
+		if (index < 0) return;
+		this.#selected = index;
+		this.#selectedKey = flatKey(this.#flat[index]);
+		this.#killConfirm = undefined;
+		if (event.type === "activate") void this.#openInfo();
+		else this.#ui.requestRender();
+	}
+
+	#nativeAction(act: string): void {
+		switch (act) {
+			case "info":
+				void this.#openInfo();
+				return;
+			case "logs":
+				this.#openLogs();
+				return;
+			case "stop":
+			case "restart":
+				void this.#act(act);
+				return;
+			case "kill":
+				this.#killConfirm = this.#selectedKey;
+				this.#ui.requestRender();
+				return;
+			case "kill-confirm":
+				this.#killConfirm = undefined;
+				void this.#act("kill");
+				return;
+			case "kill-cancel":
+				this.#killConfirm = undefined;
+				this.#ui.requestRender();
+				return;
+			case "back":
+				this.#closeView();
+				return;
+			case "quit":
+				this.#done.resolve();
+				return;
+		}
+	}
+
+	/**
+	 * The process monitor as a native page: a head (title, counts, the scope
+	 * control, freshness, close), one section per broker scope with a
+	 * selectable process list, the transient status, and an action bar that
+	 * mirrors the keys. Info and logs replace the list.
+	 */
+	describe(): NativeNode {
+		const statusVisible = Date.now() - this.#statusAt < STATUS_TTL_MS;
+		return this.#native.get(
+			[
+				this.#view,
+				this.#reports,
+				this.#selected,
+				this.#all,
+				this.#lastRefresh,
+				this.#info,
+				this.#logsLines,
+				this.#logsState,
+				this.#logsError,
+				statusVisible,
+				this.#statusText,
+				this.#statusTone,
+				this.#killConfirm,
+			],
+			() => {
+				const body =
+					this.#view === "info"
+						? this.#describeInfo()
+						: this.#view === "logs"
+							? this.#describeLogs()
+							: this.#describeTable();
+				return col(
+					compact([
+						this.#describeHead(),
+						body,
+						statusVisible &&
+							this.#statusText !== "" &&
+							keyed(
+								text([span(this.#statusText, this.#statusTone)], { wrap: "word", role: "omp.app.status" }),
+								"status",
+							),
+						this.#describeActions(),
+					]),
+					{ role: "omp.app.ps", gap: "md" },
+				);
+			},
+		);
+	}
+
+	#describeHead(): NativeNode {
+		const entry = this.#flat[this.#selected];
+		const left: NativeNode[] = [];
+		if (this.#view === "table") {
+			const running = this.#flat.filter(flat => !TERMINAL_STATES[flat.row.snapshot.state]).length;
+			const stopped = this.#flat.length - running;
+			left.push(
+				text("Processes", { role: "omp.app.title" }),
+				text(
+					[
+						span(`${running} running`, running > 0 ? "success" : "muted"),
+						...(stopped > 0 ? [span(` · ${stopped} stopped`, "muted")] : []),
+						span(` · ${this.#reports.length} scope${this.#reports.length === 1 ? "" : "s"}`, "muted"),
+					],
+					{ truncate: "end" },
+				),
+			);
+		} else {
+			left.push(
+				node("icon", {
+					name: "back",
+					role: "omp.app.ibtn",
+					title: "Back  esc",
+					aria: "Back",
+					actions: { click: "back" },
+				}),
+				text(
+					this.#view === "logs" ? `Logs · ${entry?.row.snapshot.name ?? "?"}` : (entry?.row.snapshot.name ?? "?"),
+					{
+						role: "omp.app.title",
+						truncate: "end",
+					},
+				),
+			);
+			const daemon = this.#view === "info" ? this.#info?.daemon : entry?.row.snapshot;
+			if (daemon) left.push(node("badge", { text: stateLabel(daemon), tone: daemonTone(daemon) }));
+			if (this.#view === "logs" && this.#logsState) left.push(text([span(this.#logsState, "muted")]));
+		}
+		const right: NativeNode[] = [];
+		if (this.#view === "table") {
+			right.push(
+				node(
+					"tabs",
+					{
+						items: [
+							{
+								id: "current",
+								label:
+									this.#target.dir !== undefined || this.#target.global !== undefined
+										? "Target"
+										: "This project",
+							},
+							{ id: "all", label: "All scopes" },
+						],
+						active: this.#all ? "all" : "current",
+						role: "omp.app.seg",
+					},
+					undefined,
+					"scope",
+				),
+			);
+		}
+		right.push(
+			this.#lastRefresh
+				? row(
+						[text([span("updated", "dim")]), elapsed(Date.now() - this.#lastRefresh), text([span("ago", "dim")])],
+						{
+							gap: "xs",
+							align: "center",
+							role: "omp.app.fresh",
+						},
+					)
+				: row([node("spinner", { style: "dots" }), text([span("updating", "dim")])], {
+						gap: "xs",
+						align: "center",
+						role: "omp.app.fresh",
+					}),
+			node("icon", { name: "x", role: "omp.app.ibtn", title: "Quit  q", aria: "Quit", actions: { click: "quit" } }),
+		);
+		return keyed(
+			row(
+				[
+					row(left, { gap: "sm", align: "center", role: "omp.app.where" }),
+					row(right, { gap: "md", align: "center", role: "omp.app.tools" }),
+				],
+				{ justify: "between", align: "center", role: "omp.app.head" },
+			),
+			"head",
+		);
+	}
+
+	/** The action bar for the view, or the kill confirmation that replaces it. */
+	#describeActions(): NativeNode {
+		const entry = this.#flat[this.#selected];
+		if (
+			this.#view === "table" &&
+			entry &&
+			this.#killConfirm === this.#selectedKey &&
+			this.#killConfirm !== undefined
+		) {
+			const pid = entry.row.snapshot.pid;
+			return keyed(
+				row(
+					[
+						text(
+							[
+								span(`Kill ${entry.row.snapshot.name}${pid === undefined ? "" : ` (pid ${pid})`}?`, "strong"),
+								span("  It stops at once, without cleanup.", "muted"),
+							],
+							{ truncate: "end", grow: 1 },
+						),
+						actionButton("Cancel", "kill-cancel"),
+						actionButton("Kill", "kill-confirm", { tone: "error" }),
+					],
+					{ gap: "sm", align: "center", role: "omp.app.confirm", tone: "error" },
+				),
+				"actions",
+			);
+		}
+		if (this.#view !== "table") {
+			return actionBar([
+				actionButton("Back", "back", { keys: "escape", tone: "accent" }),
+				...(this.#view === "info" ? [actionButton("Logs", "logs")] : []),
+			]);
+		}
+		if (!entry) return actionBar([null, actionButton("Quit", "quit", { keys: "q" })]);
+		return actionBar([
+			actionButton("Info", "info", { keys: "enter", tone: "accent" }),
+			actionButton("Logs", "logs", { keys: "l" }),
+			actionButton("Restart", "restart", { keys: "r" }),
+			actionButton("Stop", "stop", { keys: "s" }),
+			actionButton("Kill", "kill", { keys: "x", tone: "error", title: "Kill the process (asks first)" }),
+			null,
+			actionButton("Quit", "quit", { keys: "q" }),
+		]);
+	}
+
+	#describeTable(): NativeNode {
+		if (this.#reports.length === 0) {
+			return keyed(
+				col(
+					[
+						text("No broker scopes", { role: "omp.app.empty-title" }),
+						text([
+							span("No omp process broker runs here. ", "muted"),
+							span(this.#all ? "Nothing runs anywhere." : "Show every scope with ", "muted"),
+							...(this.#all ? [] : [span("a", "key"), span(".", "muted")]),
+						]),
+					],
+					{ gap: "xs", align: "center", role: "omp.app.empty" },
+				),
+				"empty",
+			);
+		}
+		const selected = this.#flat[this.#selected];
+		const sections = this.#reports.map(report =>
+			node(
+				"section",
+				{ head: scopeSpans(report.scope), role: "omp.app.ps.scope" },
+				[
+					node(
+						"list",
+						{
+							selected:
+								selected && selected.scope.runtimeDir === report.scope.runtimeDir
+									? stableKey(flatKey(selected))
+									: null,
+							empty: "No processes",
+							role: "omp.ps.processes",
+						},
+						report.daemons.map(daemon => describeProcess(report.scope, daemon)),
+					),
+				],
+				stableKey(report.scope.runtimeDir),
+			),
+		);
+		return keyed(col(sections, { gap: "lg", grow: 1, role: "omp.app.ps.scopes" }), "scopes");
+	}
+
+	#describeInfo(): NativeNode {
+		const info = this.#info;
+		if (!info) {
+			return keyed(
+				row([node("spinner", { style: "dots" }), text([span("Loading…", "muted")])], { gap: "sm" }),
+				"info",
+			);
+		}
+		const { daemon, spec } = info;
+		const items: { k: string; v: TspText }[] = [
+			{ k: "Command", v: [span(collapseCommand(formatCommand(spec)), "mono")] },
+			{ k: "Directory", v: [span(spec.cwd, "path")] },
+		];
+		if (daemon.pid !== undefined && !TERMINAL_STATES[daemon.state])
+			items.push({ k: "PID", v: [span(String(daemon.pid), "num")] });
+		if (daemon.exitReason) items.push({ k: "Exit", v: [span(daemon.exitReason, "error")] });
+		items.push({ k: "Restarts", v: `${daemon.restartCount} (policy ${spec.restart})` });
+		items.push({ k: "Owner", v: daemon.owner ?? "—" });
+		const flags = [spec.pty && "pty", spec.persist && "persist", spec.detached && "detached"].filter(Boolean);
+		items.push({ k: "Flags", v: flags.length > 0 ? flags.join(" · ") : "—" });
+		const body: NativeNode[] = [];
+		if (!TERMINAL_STATES[daemon.state]) {
+			body.push(
+				row([text([span("Up for", "muted")]), elapsed(Date.now() - daemon.startedAt)], {
+					gap: "xs",
+					role: "omp.app.fresh",
+				}),
+			);
+		}
+		body.push(node("kv", { items, layout: "grid" }));
+		return keyed(col(body, { role: "omp.ps.info", gap: "md" }), "info");
+	}
+
+	#describeLogs(): NativeNode {
+		if (this.#logsError) {
+			return keyed(text([span(this.#logsError, "error mono")], { wrap: "word", role: "omp.ps.logs" }), "logs");
+		}
+		return node(
+			"ansi",
+			{ text: this.#logsLines.join("\n"), follow: true, role: "omp.ps.logs", grow: 1 },
+			undefined,
+			"logs",
+		);
 	}
 
 	// -- render ------------------------------------------------------------
@@ -405,6 +766,76 @@ export class PsTopComponent implements Component {
 
 function flatKey(entry: FlatRow): string {
 	return `${entry.scope.runtimeDir}\u0000${entry.row.snapshot.name}`;
+}
+
+/** Semantic tone of a process state (the ANSI STATE cell's colour). */
+function daemonTone(snapshot: DaemonSnapshot): TspTone {
+	if (snapshot.state === "ready" || snapshot.state === "running") return "success";
+	if (snapshot.state === "failed") return "error";
+	return TERMINAL_STATES[snapshot.state] ? "muted" : "warning";
+}
+
+/** Scope heading spans, e.g. `project /work/pi — broker pid 1234`. */
+function scopeSpans(scope: PsScope): TspSpan[] {
+	const spans =
+		scope.kind === "global"
+			? [span("global "), span(scope.service ?? path.basename(scope.runtimeDir), "strong")]
+			: [span("project "), span(scope.projectDir ?? path.basename(scope.runtimeDir), "strong path")];
+	spans.push(span(" — ", "dim"));
+	spans.push(
+		scope.brokerPid !== undefined
+			? span(`broker pid ${scope.brokerPid}`, "success")
+			: span("broker not running", "dim"),
+	);
+	return spans;
+}
+
+/** A state as the table shows it: `ready`, `exited(143)`. */
+function stateLabel(snapshot: DaemonSnapshot): string {
+	return TERMINAL_STATES[snapshot.state] && snapshot.exitCode !== undefined
+		? `${snapshot.state}(${snapshot.exitCode})`
+		: snapshot.state;
+}
+
+/** Status icon of a process state (tinted by {@link daemonTone}). */
+const STATE_ICON: Record<TspTone, string> = {
+	success: "check",
+	error: "x",
+	muted: "stop",
+	warning: "clock",
+	neutral: "activity",
+	accent: "activity",
+	info: "activity",
+	pending: "clock",
+	user: "user",
+};
+
+/** One selectable process row: name, state/pid/uptime/restarts/flags, and the launch command. */
+function describeProcess(scope: PsScope, daemon: PsDaemonRow): NativeNode {
+	const { snapshot } = daemon;
+	const terminal = TERMINAL_STATES[snapshot.state] === true;
+	const state = stateLabel(snapshot);
+	const meta = [
+		snapshot.pid !== undefined && !terminal ? `pid ${snapshot.pid}` : undefined,
+		terminal ? undefined : formatDuration(Date.now() - snapshot.startedAt),
+		`${snapshot.restartCount} restart${snapshot.restartCount === 1 ? "" : "s"}`,
+		flagsCell(daemon) || undefined,
+	].filter(part => part !== undefined);
+	const command = collapseCommand(daemon.command);
+	const tone = daemonTone(snapshot);
+	return node(
+		"item",
+		{
+			label: [span(snapshot.name, terminal ? "dim" : "strong")],
+			detail: command ? [span(command, "mono muted")] : undefined,
+			value: [span(state, tone === "muted" ? "dim" : tone), span(` · ${meta.join(" · ")}`, "muted")],
+			icon: STATE_ICON[tone],
+			tone,
+			title: daemonLabel(snapshot),
+		},
+		undefined,
+		stableKey(flatKey({ scope, row: daemon })),
+	);
 }
 
 /** Run the fullscreen interactive process monitor until the user quits. */

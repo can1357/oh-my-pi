@@ -4,9 +4,13 @@
 //!
 //! Every filesystem access goes through the shell's [`BlockingFs`], so
 //! `scheme://` paths work as sources and destinations. Kernel fast paths
-//! (`FICLONE`, `copy_file_range`, `SEEK_DATA` sparse copies, `clonefile`)
-//! only run when both ends are native host files; other pairs stream through
-//! the provider's handles. Diagnostics follow GNU cp.
+//! (copy-on-write clones through [`pi_iso::cow`], `copy_file_range`,
+//! `SEEK_DATA` sparse copies) only run when both ends are native host files;
+//! other pairs stream through the provider's handles. Diagnostics follow GNU
+//! cp.
+//!
+//! Copies clone by default (`--reflink=auto`, or macOS's `-c`) and fall back
+//! to a data copy wherever cloning is impossible, e.g. across filesystems.
 
 use std::{
 	cmp::Ordering,
@@ -36,7 +40,7 @@ use uucore::{
 
 use crate::{
 	file_backup::{backup_display, backup_path, determine_backup_mode, determine_backup_suffix},
-	host::{Host, Utility, format_usage, matches_parser, util},
+	host::{Host, Utility, format_usage, matches_parser, strip_errno, util},
 	progress::stderr_draw_target,
 };
 
@@ -71,15 +75,6 @@ enum CpError {
 
 type CopyResult<T> = Result<T, CpError>;
 
-/// Renders an I/O error like `strerror`, without Rust's ` (os error N)`.
-fn strip_errno(error: &io::Error) -> String {
-	let mut message = error.to_string();
-	if let Some(position) = message.find(" (os error ") {
-		message.truncate(position);
-	}
-	message
-}
-
 /// `ENOTSUP`-style failure for operations a filesystem cannot perform.
 fn operation_not_supported() -> io::Error {
 	io::Error::new(io::ErrorKind::Unsupported, "Operation not supported")
@@ -105,22 +100,14 @@ enum OverwriteMode {
 	NoClobber,
 }
 
-/// Possible arguments for `--reflink`.
-#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+/// Possible arguments for `--reflink`; clones go through
+/// [`pi_iso::cow::clone_file`].
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Default)]
 enum ReflinkMode {
 	Always,
+	#[default]
 	Auto,
 	Never,
-}
-
-impl Default for ReflinkMode {
-	fn default() -> Self {
-		if cfg!(any(target_os = "linux", target_os = "android", target_os = "macos")) {
-			Self::Auto
-		} else {
-			Self::Never
-		}
-	}
 }
 
 /// Possible arguments for `--sparse`.
@@ -253,8 +240,8 @@ struct Options {
 /// Debug states of the offload and reflink actions.
 #[derive(Debug, Clone, Copy)]
 #[cfg_attr(
-	not(any(target_os = "linux", target_os = "android", target_os = "macos")),
-	allow(dead_code, reason = "only the Linux and macOS fast paths report offloads")
+	not(any(target_os = "linux", target_os = "android")),
+	allow(dead_code, reason = "only the Linux fast paths detect offloads")
 )]
 enum OffloadReflinkDebug {
 	Unknown,
@@ -334,6 +321,7 @@ mod options {
 	pub const ARCHIVE: &str = "archive";
 	pub const ATTRIBUTES_ONLY: &str = "attributes-only";
 	pub const CLI_SYMBOLIC_LINKS: &str = "cli-symbolic-links";
+	pub const CLONE: &str = "c";
 	pub const CONTEXT: &str = "context";
 	pub const COPY_CONTENTS: &str = "copy-contents";
 	pub const DEREFERENCE: &str = "dereference";
@@ -418,6 +406,7 @@ fn uu_app() -> Command {
 	const MODE_ARGS: &[&str] = &[
 		options::LINK,
 		options::REFLINK,
+		options::CLONE,
 		options::SYMBOLIC_LINK,
 		options::ATTRIBUTES_ONLY,
 		options::COPY_CONTENTS,
@@ -566,6 +555,14 @@ fn uu_app() -> Command {
 				.value_parser(ShortcutValueParser::new(["auto", "always", "never"]))
 				.num_args(0..=1)
 				.help("control clone/CoW copies. See below"),
+		)
+		.arg(
+			// macOS cp's spelling, which falls back to a copy like `auto`.
+			Arg::new(options::CLONE)
+				.short('c')
+				.overrides_with_all(MODE_ARGS)
+				.help("clone files where the filesystem allows, else copy; same as --reflink=auto")
+				.action(ArgAction::SetTrue),
 		)
 		.arg(
 			Arg::new(options::ATTRIBUTES_ONLY)
@@ -1009,7 +1006,12 @@ impl Options {
 
 		let copy_mode = CopyMode::from_matches(matches);
 
-		let reflink_mode = match matches.get_one::<String>(options::REFLINK).map(String::as_str) {
+		let reflink = if matches.get_flag(options::CLONE) {
+			Some("auto")
+		} else {
+			matches.get_one::<String>(options::REFLINK).map(String::as_str)
+		};
+		let reflink_mode = match reflink {
 			Some("always") => ReflinkMode::Always,
 			Some("auto") => ReflinkMode::Auto,
 			Some("never") => ReflinkMode::Never,
@@ -2052,7 +2054,7 @@ fn handle_copy_mode(
 	source_metadata: &Metadata,
 	source_in_command_line: bool,
 	backed_up: bool,
-) -> CopyResult<()> {
+) -> CopyResult<DestFate> {
 	let filesystem = host.fs().clone();
 	let source_fs = host.resolve(source);
 	let dest_fs = host.resolve(dest);
@@ -2081,7 +2083,7 @@ fn handle_copy_mode(
 			})?;
 		},
 		CopyMode::Copy | CopyMode::Update => {
-			copy_helper(host, state, source, dest, options, source_metadata)?;
+			return copy_helper(host, state, source, dest, options, source_metadata);
 		},
 		CopyMode::SymLink => {
 			if !source.is_absolute()
@@ -2108,7 +2110,19 @@ fn handle_copy_mode(
 		},
 	}
 
-	Ok(())
+	Ok(DestFate::Kept)
+}
+
+/// What a copy did to an existing destination, which decides the
+/// destination's permissions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DestFate {
+	/// Written in place, or swapped for a clone standing in for it; an
+	/// existing destination keeps its permissions.
+	Kept,
+	/// Removed and created anew (`-f`, special files); the destination takes
+	/// the source's permissions.
+	Recreated,
 }
 
 /// The process umask; `0` where there is none.
@@ -2346,7 +2360,7 @@ fn copy_file(
 		print_verbose_output(host, state, source, dest, backup.as_deref());
 	}
 
-	handle_copy_mode(
+	let fate = handle_copy_mode(
 		host,
 		state,
 		source,
@@ -2361,13 +2375,9 @@ fn copy_file(
 	let copied_data = !source_metadata.is_symlink()
 		&& !matches!(options.copy_mode, CopyMode::Link | CopyMode::SymLink);
 	if !dest_is_symlink && copied_data {
-		// An existing destination keeps its permissions, unless `-f` had to
-		// replace it with a new file.
-		let replaced = dest_metadata.as_ref().is_some_and(|before| {
-			let after = filesystem.symlink_metadata(&dest_fs).ok().and_then(|m| m.file_id());
-			matches!((before.file_id(), after), (Some(before), Some(after)) if before != after)
-		});
-		let kept = dest_metadata.as_ref().filter(|_| !replaced);
+		let kept = dest_metadata
+			.as_ref()
+			.filter(|_| fate == DestFate::Kept);
 		let dest_permissions = calculate_dest_permissions(kept, &source_metadata, options);
 		// Here, to match GNU semantics, we quietly ignore an error
 		// if a user does not have the correct ownership to modify
@@ -2435,7 +2445,7 @@ fn copy_helper(
 	dest: &Path,
 	options: &Options,
 	source_metadata: &Metadata,
-) -> CopyResult<()> {
+) -> CopyResult<DestFate> {
 	let filesystem = host.fs().clone();
 	let dest_fs = host.resolve(dest);
 	if path_ends_with_terminator(dest) && !filesystem.is_dir(&dest_fs) {
@@ -2476,15 +2486,13 @@ fn copy_helper(
 
 	if source_metadata.is_symlink() {
 		copy_link(host, state, source, dest, options)?;
-	} else {
-		let copy_debug = copy_data(host, state, source, dest, options, source_metadata)?;
-
-		if !options.attributes_only && options.debug {
-			state.say(host, copy_debug);
-		}
+		return Ok(DestFate::Kept);
 	}
-
-	Ok(())
+	let (copy_debug, fate) = copy_data(host, state, source, dest, options, source_metadata)?;
+	if !options.attributes_only && options.debug {
+		state.say(host, copy_debug);
+	}
+	Ok(fate)
 }
 
 /// "Copies" a FIFO, socket, or device node by creating a new one with `mode`
@@ -2495,7 +2503,7 @@ fn copy_special(
 	options: &Options,
 	kind: NodeKind,
 	mode: u32,
-) -> CopyResult<()> {
+) -> CopyResult<DestFate> {
 	let filesystem = host.fs().clone();
 	let dest_fs = host.resolve(dest);
 	if filesystem.exists(&dest_fs) {
@@ -2503,7 +2511,7 @@ fn copy_special(
 		filesystem.remove_file(&dest_fs)?;
 	}
 
-	match kind {
+	let created = match kind {
 		NodeKind::Fifo => filesystem
 			.make_fifo(&dest_fs, mode)
 			.map_err(|e| CpError::IoErrContext(e, format!("cannot create fifo {}", dest.quote()))),
@@ -2517,7 +2525,8 @@ fn copy_special(
 		_ => filesystem.make_node(&dest_fs, kind, mode).map_err(|e| {
 			CpError::IoErrContext(e, format!("cannot create special file {}", dest.quote()))
 		}),
-	}
+	};
+	created.map(|()| DestFate::Recreated)
 }
 
 fn copy_link(
@@ -2597,7 +2606,7 @@ fn copy_data(
 	dest: &Path,
 	options: &Options,
 	source_metadata: &Metadata,
-) -> CopyResult<CopyDebug> {
+) -> CopyResult<(CopyDebug, DestFate)> {
 	let filesystem = host.fs().clone();
 	let source_fs = host.resolve(source);
 	let dest_fs = host.resolve(dest);
@@ -2608,38 +2617,39 @@ fn copy_data(
 		check_streamed_modes(options, source, dest)?;
 	}
 
-	#[cfg(target_os = "macos")]
-	let mut reflink_debug = OffloadReflinkDebug::No;
-	#[cfg(target_os = "macos")]
-	if native && !source_is_stream {
-		if options.sparse_mode == SparseMode::Always {
-			return Err(CpError::Error("--sparse is only supported on linux".to_string()));
-		}
-		if macos::clone(&filesystem, &source_fs, &dest_fs, options.reflink_mode, source, dest)? {
-			// A clone carries the source's timestamps; an ordinary copy is new.
-			if !matches!(options.attributes.timestamps, Preserve::Yes { .. }) {
-				filesystem
-					.set_times(&dest_fs, FileTime::Now, FileTime::Now, true)
-					.map_err(|e| CpError::IoErrContext(e, context_for(source, dest)))?;
-			}
-			return Ok(CopyDebug {
-				offload:          OffloadReflinkDebug::Unknown,
-				reflink:          OffloadReflinkDebug::Yes,
-				sparse_detection: SparseDebug::Unsupported,
-			});
-		}
-		if options.reflink_mode != ReflinkMode::Never {
-			reflink_debug = OffloadReflinkDebug::Unsupported;
-		}
+	#[cfg(not(any(target_os = "linux", target_os = "android")))]
+	if native && !source_is_stream && options.sparse_mode == SparseMode::Always {
+		return Err(CpError::Error("--sparse is only supported on linux".to_string()));
 	}
 
-	#[cfg(not(any(target_os = "linux", target_os = "android", target_os = "macos")))]
-	if native && !source_is_stream {
-		if options.reflink_mode != ReflinkMode::Never {
-			return Err(CpError::Error("--reflink is only supported on linux and macOS".to_string()));
-		}
-		if options.sparse_mode == SparseMode::Always {
-			return Err(CpError::Error("--sparse is only supported on linux".to_string()));
+	// Clone before opening anything; `auto` copies the data wherever the
+	// files cannot share extents (another filesystem, ext4, NTFS, ...).
+	let mut reflink_debug = OffloadReflinkDebug::No;
+	if native && !source_is_stream && options.reflink_mode != ReflinkMode::Never {
+		match pi_iso::cow::clone_file(&source_fs, &dest_fs) {
+			Ok(()) => {
+				// An APFS clone carries the source's timestamps; a copy is new.
+				if !matches!(options.attributes.timestamps, Preserve::Yes { .. }) {
+					filesystem
+						.set_times(&dest_fs, FileTime::Now, FileTime::Now, true)
+						.map_err(|e| CpError::IoErrContext(e, context_for(source, dest)))?;
+				}
+				let copy_debug = CopyDebug {
+					offload:          OffloadReflinkDebug::Unknown,
+					reflink:          OffloadReflinkDebug::Yes,
+					sparse_detection: SparseDebug::Unsupported,
+				};
+				return Ok((copy_debug, DestFate::Kept));
+			},
+			Err(_) if options.reflink_mode == ReflinkMode::Auto => {
+				reflink_debug = OffloadReflinkDebug::Unsupported;
+			},
+			Err(error) => {
+				return Err(CpError::IoErrContext(
+					error,
+					format!("failed to clone {} from {}", dest.quote(), source.quote()),
+				));
+			},
 		}
 	}
 
@@ -2659,14 +2669,15 @@ fn copy_data(
 		.mode(create_mode);
 	let cannot_create =
 		|e| CpError::IoErrContext(e, format!("cannot create regular file {}", dest.quote()));
-	let dest_file = match filesystem.open_with(&dest_fs, &dest_options) {
-		Ok(file) => file,
+	let (dest_file, fate) = match filesystem.open_with(&dest_fs, &dest_options) {
+		Ok(file) => (file, DestFate::Kept),
 		// `-f`: remove a destination that cannot be opened, and try again.
 		Err(_) if options.unlink_after_failed_open() && filesystem.symlink_metadata(&dest_fs).is_ok() => {
 			delete_path(host, state, dest, options)?;
-			filesystem
+			let file = filesystem
 				.open_with(&dest_fs, &dest_options)
-				.map_err(cannot_create)?
+				.map_err(cannot_create)?;
+			(file, DestFate::Recreated)
 		},
 		Err(error) => return Err(cannot_create(error)),
 	};
@@ -2687,15 +2698,15 @@ fn copy_data(
 				let dest_is_fifo = dest_native
 					.metadata()
 					.is_ok_and(|metadata| std::os::unix::fs::FileTypeExt::is_fifo(&metadata.file_type()));
-				Some(linux::copy(
+				let copy_debug = linux::copy(
 					source_native,
 					dest_native,
 					dest_is_fifo,
-					options.reflink_mode,
 					options.sparse_mode,
 					source,
 					dest,
-				)?)
+				)?;
+				Some(CopyDebug { reflink: reflink_debug, ..copy_debug })
 			},
 			_ => None,
 		};
@@ -2706,14 +2717,7 @@ fn copy_data(
 			Some(copy_debug) => copy_debug,
 			None => {
 				copy_stream_data(host, &source_file, &dest_file, source, dest)?;
-				#[cfg(target_os = "macos")]
-				{
-					CopyDebug { reflink: reflink_debug, ..CopyDebug::STREAMED }
-				}
-				#[cfg(not(target_os = "macos"))]
-				{
-					CopyDebug::STREAMED
-				}
+				CopyDebug { reflink: reflink_debug, ..CopyDebug::STREAMED }
 			},
 		}
 	};
@@ -2722,7 +2726,7 @@ fn copy_data(
 	dest_file
 		.close()
 		.map_err(|e| CpError::IoErrContext(e, format!("failed to close {}", dest.quote())))?;
-	Ok(copy_debug)
+	Ok((copy_debug, fate))
 }
 
 /// Generate an error message if `target` is not the correct `target_type`
@@ -3083,73 +3087,9 @@ fn build_dir(
 		.map_err(|e| CpError::IoErrContext(e, format!("cannot create directory {}", path.quote())))
 }
 
-/// Native macOS copy-on-write through `clonefile(2)`.
-#[cfg(target_os = "macos")]
-mod macos {
-	use std::{ffi::CString, io, os::unix::ffi::OsStrExt as _, path::Path};
-
-	use pi_vfs::BlockingFs;
-	use uucore::display::Quotable;
-
-	use super::{CopyResult, CpError, ReflinkMode};
-
-	/// `clonefile(source, dest)` on native paths.
-	fn clonefile(source: &Path, dest: &Path) -> io::Result<()> {
-		let source = CString::new(source.as_os_str().as_bytes())?;
-		let dest = CString::new(dest.as_os_str().as_bytes())?;
-		// SAFETY: both strings are NUL-terminated and outlive the call.
-		if unsafe { libc::clonefile(source.as_ptr(), dest.as_ptr(), 0) } == 0 {
-			Ok(())
-		} else {
-			Err(io::Error::last_os_error())
-		}
-	}
-
-	/// Tries to clone the native file `source_fs` to `dest_fs`; `Ok(false)`
-	/// means the caller copies the data instead.
-	///
-	/// `clonefile` cannot overwrite, so with `--reflink=auto` an existing
-	/// destination is copied into in place (keeping its identity, as GNU
-	/// does); `--reflink=always` replaces a writable one.
-	pub(super) fn clone(
-		filesystem: &BlockingFs,
-		source_fs: &Path,
-		dest_fs: &Path,
-		reflink_mode: ReflinkMode,
-		source: &Path,
-		dest: &Path,
-	) -> CopyResult<bool> {
-		let dest_exists = filesystem.symlink_metadata(dest_fs).is_ok();
-		match reflink_mode {
-			ReflinkMode::Never => Ok(false),
-			ReflinkMode::Auto if dest_exists => Ok(false),
-			ReflinkMode::Auto => Ok(clonefile(source_fs, dest_fs).is_ok()),
-			ReflinkMode::Always => {
-				let mut result = clonefile(source_fs, dest_fs);
-				if result
-					.as_ref()
-					.is_err_and(|error| error.kind() == io::ErrorKind::AlreadyExists)
-					&& source_fs != dest_fs
-					&& filesystem
-						.metadata(dest_fs)
-						.is_ok_and(|metadata| !metadata.permissions().readonly())
-				{
-					let _ = filesystem.remove_file(dest_fs);
-					result = clonefile(source_fs, dest_fs);
-				}
-				result.map(|()| true).map_err(|error| {
-					CpError::IoErrContext(
-						error,
-						format!("failed to clone {} from {}", dest.quote(), source.quote()),
-					)
-				})
-			},
-		}
-	}
-}
-
-/// Native Linux copies: `FICLONE`, `copy_file_range` (through `io::copy`),
-/// and `SEEK_DATA`/`SEEK_HOLE` sparse copies on already opened descriptors.
+/// Native Linux data copies after a declined or failed clone:
+/// `copy_file_range` (through `io::copy`) and `SEEK_DATA`/`SEEK_HOLE` sparse
+/// copies on already opened descriptors.
 #[cfg(any(target_os = "linux", target_os = "android"))]
 mod linux {
 	use std::{
@@ -3162,25 +3102,16 @@ mod linux {
 		path::Path,
 	};
 
-	use uucore::display::Quotable;
-
 	use super::{
-		CopyDebug, CopyResult, CpError, OffloadReflinkDebug, ReflinkMode, SparseDebug, SparseMode,
-		context_for,
+		CopyDebug, CopyResult, CpError, OffloadReflinkDebug, SparseDebug, SparseMode, context_for,
 	};
 
-	/// The fallback behavior for [`clone`] on failed system call.
-	#[derive(Clone, Copy)]
-	enum CloneFallback {
-		/// Raise an error.
-		Error,
-		/// Use a plain kernel copy.
-		FSCopy,
-		/// Use [`sparse_copy`]
-		SparseCopy,
-		/// Use [`sparse_copy_without_hole`]
-		SparseCopyWithoutHole,
-	}
+	/// Debug report of a copy whose source could not be inspected.
+	const UNDETECTED: CopyDebug = CopyDebug {
+		offload:          OffloadReflinkDebug::Unknown,
+		reflink:          OffloadReflinkDebug::No,
+		sparse_detection: SparseDebug::No,
+	};
 
 	/// Type of method used for copying files
 	#[derive(Clone, Copy)]
@@ -3200,24 +3131,6 @@ mod linux {
 	/// `io::copy` uses `copy_file_range`/`sendfile` between files.
 	fn fs_copy(source: &File, dest: &File) -> io::Result<()> {
 		io::copy(&mut &*source, &mut &*dest).map(drop)
-	}
-
-	/// Use the Linux `ioctl_ficlone` API to do a copy-on-write clone.
-	///
-	/// `fallback` controls what to do if the system call fails.
-	fn clone(source: &File, dest: &File, fallback: CloneFallback) -> io::Result<()> {
-		// SAFETY: both descriptors are borrowed from live files for the call.
-		let result = unsafe { libc::ioctl(dest.as_raw_fd(), libc::FICLONE, source.as_raw_fd()) };
-		if result == 0 {
-			return Ok(());
-		}
-		let error = io::Error::last_os_error();
-		match fallback {
-			CloneFallback::Error => Err(error),
-			CloneFallback::FSCopy => fs_copy(source, dest),
-			CloneFallback::SparseCopy => sparse_copy(source, dest),
-			CloneFallback::SparseCopyWithoutHole => sparse_copy_without_hole(source, dest),
-		}
 	}
 
 	/// Checks whether a file contains any non null bytes i.e. any byte != 0x0
@@ -3325,156 +3238,49 @@ mod linux {
 		Ok(())
 	}
 
-	/// Copies the native file `source` into the freshly truncated `dest`
-	/// using copy-on-write if possible.
+	/// Copies the native file `source` into the freshly truncated `dest`,
+	/// making holes per `sparse_mode`. The report's `reflink` is `No`; the
+	/// caller accounts for its own clone attempt.
 	pub(super) fn copy(
 		source: &File,
 		dest: &File,
 		dest_is_fifo: bool,
-		reflink_mode: ReflinkMode,
 		sparse_mode: SparseMode,
 		source_path: &Path,
 		dest_path: &Path,
 	) -> CopyResult<CopyDebug> {
-		let mut copy_debug = CopyDebug {
-			offload:          OffloadReflinkDebug::Unknown,
-			reflink:          OffloadReflinkDebug::Unsupported,
-			sparse_detection: SparseDebug::No,
-		};
-		let result = match (reflink_mode, sparse_mode) {
-			(ReflinkMode::Never, SparseMode::Always) => {
-				copy_debug.sparse_detection = SparseDebug::Zeros;
-				copy_debug.reflink = OffloadReflinkDebug::No;
-				let mut copy_method = CopyMethod::Default;
-				if let Ok((debug, method)) = handle_reflink_never_sparse_always(source, dest_is_fifo) {
-					copy_debug = debug;
-					copy_method = method;
-				}
-				match copy_method {
+		let (copy_debug, result) = match sparse_mode {
+			SparseMode::Always => {
+				let (debug, method) = detect_sparse_always(source, dest_is_fifo).unwrap_or((
+					CopyDebug { sparse_detection: SparseDebug::Zeros, ..UNDETECTED },
+					CopyMethod::Default,
+				));
+				let result = match method {
 					CopyMethod::FSCopy => fs_copy(source, dest),
 					_ => sparse_copy(source, dest),
-				}
+				};
+				(debug, result)
 			},
-			(ReflinkMode::Never, SparseMode::Never) => {
-				copy_debug.reflink = OffloadReflinkDebug::No;
-				if let Ok(debug) = handle_reflink_never_sparse_never(source) {
-					copy_debug = debug;
-				}
-				fs_copy(source, dest)
+			SparseMode::Never => {
+				(detect_sparse_never(source).unwrap_or(UNDETECTED), fs_copy(source, dest))
 			},
-			(ReflinkMode::Never, SparseMode::Auto) => {
-				copy_debug.reflink = OffloadReflinkDebug::No;
-				let mut copy_method = CopyMethod::Default;
-				if let Ok((debug, method)) = handle_reflink_never_sparse_auto(source, dest_is_fifo) {
-					copy_debug = debug;
-					copy_method = method;
-				}
-				match copy_method {
+			SparseMode::Auto => {
+				let (debug, method) = detect_sparse_auto(source, dest_is_fifo)
+					.unwrap_or((UNDETECTED, CopyMethod::Default));
+				let result = match method {
 					CopyMethod::SparseCopyWithoutHole => sparse_copy_without_hole(source, dest),
 					_ => fs_copy(source, dest),
-				}
-			},
-			(ReflinkMode::Auto, SparseMode::Always) => {
-				copy_debug.sparse_detection = SparseDebug::Zeros;
-				let mut copy_method = CopyMethod::Default;
-				if let Ok((debug, method)) = handle_reflink_auto_sparse_always(source, dest_is_fifo) {
-					copy_debug = debug;
-					copy_method = method;
-				}
-				match copy_method {
-					CopyMethod::FSCopy => clone(source, dest, CloneFallback::FSCopy),
-					_ => clone(source, dest, CloneFallback::SparseCopy),
-				}
-			},
-			(ReflinkMode::Auto, SparseMode::Never) => {
-				copy_debug.reflink = OffloadReflinkDebug::No;
-				if let Ok(debug) = handle_reflink_auto_sparse_never(source) {
-					copy_debug = debug;
-				}
-				clone(source, dest, CloneFallback::FSCopy)
-			},
-			(ReflinkMode::Auto, SparseMode::Auto) => {
-				let mut copy_method = CopyMethod::Default;
-				if let Ok((debug, method)) = handle_reflink_auto_sparse_auto(source, dest_is_fifo) {
-					copy_debug = debug;
-					copy_method = method;
-				}
-				match copy_method {
-					CopyMethod::SparseCopyWithoutHole => {
-						clone(source, dest, CloneFallback::SparseCopyWithoutHole)
-					},
-					_ => clone(source, dest, CloneFallback::FSCopy),
-				}
-			},
-			(ReflinkMode::Always, SparseMode::Auto) => {
-				copy_debug.sparse_detection = SparseDebug::No;
-				copy_debug.reflink = OffloadReflinkDebug::Yes;
-
-				return clone(source, dest, CloneFallback::Error).map(|()| copy_debug).map_err(
-					|error| {
-						CpError::IoErrContext(
-							error,
-							format!("failed to clone {} from {}", dest_path.quote(), source_path.quote()),
-						)
-					},
-				);
-			},
-			(ReflinkMode::Always, _) => {
-				return Err(CpError::Usage(
-					"--reflink can be used only with --sparse=auto".to_string(),
-				));
+				};
+				(debug, result)
 			},
 		};
 		result.map_err(|e| CpError::IoErrContext(e, context_for(source_path, dest_path)))?;
 		Ok(copy_debug)
 	}
 
-	/// Handles debug results when flags are "--reflink=auto" and
-	/// "--sparse=always" and specifies what type of copy should be used
-	fn handle_reflink_auto_sparse_always(
-		source: &File,
-		dest_is_fifo: bool,
-	) -> io::Result<(CopyDebug, CopyMethod)> {
-		let mut copy_debug = CopyDebug {
-			offload:          OffloadReflinkDebug::Unknown,
-			reflink:          OffloadReflinkDebug::Unsupported,
-			sparse_detection: SparseDebug::Zeros,
-		};
-		let mut copy_method = CopyMethod::Default;
-		let (data_flag, size, blocks) = check_for_data(source)?;
-		let sparse_flag = check_sparse_detection(source)?;
-
-		if data_flag || size < 512 {
-			copy_debug.offload = OffloadReflinkDebug::Avoided;
-		}
-		match (sparse_flag, data_flag, blocks) {
-			(true, true, 0) => {
-				// Handling funny files with 0 block allocation but has data
-				// in it
-				copy_method = CopyMethod::FSCopy;
-				copy_debug.sparse_detection = SparseDebug::SeekHoleZeros;
-			},
-			(false, true, 0) => copy_method = CopyMethod::FSCopy,
-
-			(true, false, 0) | (true, false, _) => copy_debug.sparse_detection = SparseDebug::SeekHole,
-			(true, true, _) => copy_debug.sparse_detection = SparseDebug::SeekHoleZeros,
-
-			(_, _, _) => (),
-		}
-		if dest_is_fifo {
-			copy_method = CopyMethod::FSCopy;
-		}
-		Ok((copy_debug, copy_method))
-	}
-
-	/// Handles debug results when flags are "--reflink=never" and
-	/// "--sparse=never"
-	fn handle_reflink_never_sparse_never(source: &File) -> io::Result<CopyDebug> {
-		let mut copy_debug = CopyDebug {
-			offload:          OffloadReflinkDebug::Unknown,
-			reflink:          OffloadReflinkDebug::No,
-			sparse_detection: SparseDebug::No,
-		};
+	/// Debug report for `--sparse=never`.
+	fn detect_sparse_never(source: &File) -> io::Result<CopyDebug> {
+		let mut copy_debug = UNDETECTED;
 		let (data_flag, size, _blocks) = check_for_data(source)?;
 		let sparse_flag = check_sparse_detection(source)?;
 
@@ -3488,40 +3294,12 @@ mod linux {
 		Ok(copy_debug)
 	}
 
-	/// Handles debug results when flags are "--reflink=auto" and
-	/// "--sparse=never", files will be copied through cloning them with
-	/// fallback switching to a plain kernel copy
-	fn handle_reflink_auto_sparse_never(source: &File) -> io::Result<CopyDebug> {
-		let mut copy_debug = CopyDebug {
-			offload:          OffloadReflinkDebug::Unknown,
-			reflink:          OffloadReflinkDebug::No,
-			sparse_detection: SparseDebug::No,
-		};
-
-		let (data_flag, size, _blocks) = check_for_data(source)?;
-		let sparse_flag = check_sparse_detection(source)?;
-
-		if sparse_flag {
-			copy_debug.sparse_detection = SparseDebug::SeekHole;
-		}
-
-		if data_flag || size < 512 {
-			copy_debug.offload = OffloadReflinkDebug::Avoided;
-		}
-		Ok(copy_debug)
-	}
-
-	/// Handles debug results when flags are "--reflink=auto" and
-	/// "--sparse=auto" and specifies what type of copy should be used
-	fn handle_reflink_auto_sparse_auto(
+	/// Debug report and copy method for `--sparse=auto`.
+	fn detect_sparse_auto(
 		source: &File,
 		dest_is_fifo: bool,
 	) -> io::Result<(CopyDebug, CopyMethod)> {
-		let mut copy_debug = CopyDebug {
-			offload:          OffloadReflinkDebug::Unknown,
-			reflink:          OffloadReflinkDebug::Unsupported,
-			sparse_detection: SparseDebug::No,
-		};
+		let mut copy_debug = UNDETECTED;
 
 		let mut copy_method = CopyMethod::Default;
 		let (data_flag, size, blocks) = check_for_data(source)?;
@@ -3554,54 +3332,12 @@ mod linux {
 		Ok((copy_debug, copy_method))
 	}
 
-	/// Handles debug results when flags are "--reflink=never" and
-	/// "--sparse=auto" and specifies what type of copy should be used
-	fn handle_reflink_never_sparse_auto(
+	/// Debug report and copy method for `--sparse=always`.
+	fn detect_sparse_always(
 		source: &File,
 		dest_is_fifo: bool,
 	) -> io::Result<(CopyDebug, CopyMethod)> {
-		let mut copy_debug = CopyDebug {
-			offload:          OffloadReflinkDebug::Unknown,
-			reflink:          OffloadReflinkDebug::No,
-			sparse_detection: SparseDebug::No,
-		};
-
-		let (data_flag, size, blocks) = check_for_data(source)?;
-		let sparse_flag = check_sparse_detection(source)?;
-
-		let mut copy_method = CopyMethod::Default;
-		if data_flag || size < 512 {
-			copy_debug.offload = OffloadReflinkDebug::Avoided;
-		}
-
-		if sparse_flag {
-			if blocks == 0 && data_flag {
-				// Handles virtual files which have size > 0 but no disk allocation
-				copy_method = CopyMethod::FSCopy;
-			} else {
-				// Handles regular sparse-files
-				copy_method = CopyMethod::SparseCopyWithoutHole;
-			}
-			copy_debug.sparse_detection = SparseDebug::SeekHole;
-		}
-
-		if dest_is_fifo {
-			copy_method = CopyMethod::FSCopy;
-		}
-		Ok((copy_debug, copy_method))
-	}
-
-	/// Handles debug results when flags are "--reflink=never" and
-	/// "--sparse=always" and specifies what type of copy should be used
-	fn handle_reflink_never_sparse_always(
-		source: &File,
-		dest_is_fifo: bool,
-	) -> io::Result<(CopyDebug, CopyMethod)> {
-		let mut copy_debug = CopyDebug {
-			offload:          OffloadReflinkDebug::Unknown,
-			reflink:          OffloadReflinkDebug::No,
-			sparse_detection: SparseDebug::Zeros,
-		};
+		let mut copy_debug = CopyDebug { sparse_detection: SparseDebug::Zeros, ..UNDETECTED };
 		let mut copy_method = CopyMethod::SparseCopy;
 
 		let (data_flag, size, blocks) = check_for_data(source)?;
@@ -3649,6 +3385,37 @@ mod tests {
 
 	use super::Cp;
 	use crate::host::run_util;
+
+	#[test]
+	#[cfg(any(target_os = "linux", target_os = "android", target_os = "macos"))]
+	fn clone_overwrite_keeps_destination_mode_and_hard_links() {
+		use std::os::unix::fs::PermissionsExt as _;
+
+		let fixture = tempdir().unwrap();
+		let path = |name: &str| fixture.path().join(name);
+		fs::write(path("source"), b"new").unwrap();
+		fs::write(path("private"), b"old").unwrap();
+		fs::set_permissions(path("private"), fs::Permissions::from_mode(0o600)).unwrap();
+		fs::write(path("linked"), b"old").unwrap();
+		fs::hard_link(path("linked"), path("alias")).unwrap();
+
+		for dest in ["private", "linked"] {
+			let (code, capture) = run_util::<Cp>(&["-c", "source", dest], "", fixture.path());
+			assert_eq!(code, 0, "{}", capture.err());
+		}
+
+		// A clone swapped in for `private` must still pass for an in-place copy.
+		assert_eq!(fs::read(path("private")).unwrap(), b"new");
+		assert_eq!(fs::metadata(path("private")).unwrap().permissions().mode() & 0o777, 0o600);
+		// A hard-linked destination cannot be swapped; every link sees the data.
+		assert_eq!(fs::read(path("alias")).unwrap(), b"new");
+		let mut names: Vec<_> = fs::read_dir(fixture.path())
+			.unwrap()
+			.map(|entry| entry.unwrap().file_name())
+			.collect();
+		names.sort();
+		assert_eq!(names, ["alias", "linked", "private", "source"], "no temporary clone is left");
+	}
 
 	#[test]
 	fn recursive_copy_creates_missing_target_then_nests_into_existing_one() {
