@@ -3028,16 +3028,21 @@ export class ModelRegistry {
 	 * from the model. Callers that need the initial key for a guard can call
 	 * `resolveApiKeyOnce(resolver)`.
 	 *
-	 * The initial resolve settles as soon as the request's signal aborts.
+	 * For a provider whose apiKey is a `!command`, the initial resolve settles as
+	 * soon as the request's signal aborts instead of waiting on the command. Other
+	 * providers resolve as before: a request already scheduled when its signal
+	 * aborts still gets its key.
 	 */
 	resolver(provider: string, options?: ApiKeyResolverOptions): ApiKeyResolver;
 	resolver(model: ApiKeyResolverModel, sessionId?: string): ApiKeyResolver;
 	resolver(target: string | ApiKeyResolverModel, optionsOrSessionId?: ApiKeyResolverOptions | string): ApiKeyResolver {
 		const options = typeof optionsOrSessionId === "string" ? { sessionId: optionsOrSessionId } : optionsOrSessionId;
+		const provider = typeof target === "string" ? target : target.provider;
 		const resolve =
 			typeof target === "string"
 				? createApiKeyResolver(this, target, options)
 				: createApiKeyResolver(this, target.provider, { ...options, baseUrl: target.baseUrl, modelId: target.id });
+		if (!this.hasCommandBackedApiKey(provider)) return resolve;
 		return async ctx => (ctx.error === undefined ? untilAborted(ctx.signal, async () => resolve(ctx)) : resolve(ctx));
 	}
 
