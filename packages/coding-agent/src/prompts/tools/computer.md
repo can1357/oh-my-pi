@@ -1,4 +1,4 @@
-Control the host desktop from JavaScript or Python Eval with the global `computer` object: windows, screenshots, native input, OS accessibility (AX) trees, clipboard. It is not a standalone tool.
+Control the host desktop from JavaScript or Python Eval with the global `computer` object: windows, screenshots, native input, OS accessibility (AX) trees, clipboard. It is not a standalone tool. No need to `read` this guide first: it arrives once, after the output of the cell with your first `computer.window(…)`.
 
 <instruction>
 - Direct helpers each run one approved call in the persistent desktop session and return real structured values; screenshots auto-display as Eval images.

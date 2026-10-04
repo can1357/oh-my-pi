@@ -5,7 +5,7 @@ import { classifyModel } from "@oh-my-pi/pi-catalog/identity";
 import type { DesktopCapabilities } from "@oh-my-pi/pi-natives";
 import { once } from "@oh-my-pi/pi-utils";
 import { callSessionTool } from "../eval/js/tool-bridge";
-import type { EvalPreludeContext, EvalPreludeDefinition } from "../eval/preludes";
+import type { EvalPreludeCell, EvalPreludeContext, EvalPreludeDefinition } from "../eval/preludes";
 import computerUsePrompt from "../prompts/system/computer-use.md" with { type: "text" };
 import { enforceInlineByteCap } from "@oh-my-pi/pi-tui/tools/streaming-output";
 import { type ComputerCallStep, isReadOnlyComputerCall, renderComputerCall } from "./computer/call";
@@ -129,6 +129,12 @@ export function createComputerPrelude(
 	// JavaScript or Python kernel actually asks for its enabled preludes.
 	const { computerPreludeAssets } = require("./computer/prelude-definition");
 	let closed = false;
+	// Conversations (by session id) that already received the guide; the
+	// prelude outlives `/new` and session switches.
+	const taught = new Set<string | null>();
+	// Cells that looked a window up directly: the conversation's first to settle
+	// carries the guide, whether the lookup hit, missed or was caught.
+	const lookups = new WeakSet<EvalPreludeCell>();
 	const lifetime: ComputerLifetime = {
 		isClosed: () => closed,
 		close: async () => {
@@ -154,9 +160,23 @@ export function createComputerPrelude(
 			if (parsed instanceof type.errors) {
 				throw new ToolError(`computer received invalid arguments: ${parsed.summary}`);
 			}
+			const [first, ...rest] = parsed.action === "call" ? parsed.chain : [];
+			if (context.cell && rest.length === 0 && (first?.method === "window" || first?.method === "focusedWindow")) {
+				lookups.add(context.cell);
+			}
 			return await invokeComputer(session, controller, parsed, context, lifetime);
 		},
 		status: describeComputerCall,
+		settleCell: async cell => {
+			// A session that cannot `read` has the guide inline in the eval description.
+			if (!lookups.has(cell) || cell.signal.aborted || session.isToolActive?.("read") === false) return undefined;
+			const conversation = session.getSessionId?.() ?? null;
+			if (taught.has(conversation)) return undefined;
+			taught.add(conversation);
+			return {
+				text: `Computer guide (sent once per conversation; also at xd://eval/computer):\n${computerPreludeAssets.documentation}`,
+			};
+		},
 	};
 }
 

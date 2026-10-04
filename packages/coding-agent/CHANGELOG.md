@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added the `computer` guide to the output of the Eval cell that makes a conversation's first `computer.window(…)` or `computer.focusedWindow()` call, hit or miss, so desktop tasks no longer open with a `read` of `xd://eval/computer`; eval preludes gain a `settleCell` hook that appends text after a cell's output ([#13688](https://github.com/can1357/oh-my-pi/pull/13688) by [@will-bogusz](https://github.com/will-bogusz))
+
 ## [18.6.1] - 2026-10-04
 
 ### Fixed
