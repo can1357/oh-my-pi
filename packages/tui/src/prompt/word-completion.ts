@@ -44,10 +44,14 @@ const CACHE_LIMIT = 256;
 /** Context sent with each query: the editor text before the word, capped to a recent tail. */
 const BEFORE_LIMIT = 2_000;
 
-interface WordQuery {
-	key: string;
+/** The prose word ending at the cursor and the editor text before it: what an engine is asked to complete. */
+export interface WordCompletionQuery {
 	before: string;
 	prefix: string;
+}
+
+interface WordQuery extends WordCompletionQuery {
+	key: string;
 }
 
 /** Editor text before the word starting at `start`, truncated to its last {@link BEFORE_LIMIT} code units. */
@@ -62,6 +66,28 @@ function textBefore(lines: readonly string[], cursorLine: number, start: number)
 	const unit = text.charCodeAt(cut);
 	if (unit >= 0xdc00 && unit <= 0xdfff) cut++;
 	return text.slice(cut);
+}
+
+/**
+ * The query for the prose word ending at the cursor, or `undefined` where no
+ * ghost text applies (mid-word, no word, code, paths, commands). `prose`
+ * memoizes the whole-buffer mask; pass one instance across keystrokes.
+ */
+export function wordCompletionQuery(
+	lines: readonly string[],
+	cursorLine: number,
+	cursorCol: number,
+	prose: ProseSource = new ProseSource(),
+): WordCompletionQuery | undefined {
+	const line = lines[cursorLine] ?? "";
+	if (WORD_CONTINUES.test(line.slice(cursorCol))) return undefined;
+	// Single letters are asked too (`figure o|ut`); engines own their minimum prefix.
+	const match = WORD_SUFFIX.exec(line.slice(0, cursorCol));
+	if (!match) return undefined;
+	const start = cursorCol - match[0].length;
+	if (!isProseWord(line, maskNonProse(line), start, cursorCol)) return undefined;
+	if (!prose.isProse(lineContext(lines, cursorLine), start, cursorCol)) return undefined;
+	return { before: textBefore(lines, cursorLine, start), prefix: match[0] };
 }
 
 /**
@@ -145,19 +171,11 @@ export class WordCompletionProvider implements EditorTextAssistProvider {
 
 	#query(lines: readonly string[], cursorLine: number, cursorCol: number): WordQuery | undefined {
 		if (this.#method === "off") return undefined;
-		const line = lines[cursorLine] ?? "";
-		if (WORD_CONTINUES.test(line.slice(cursorCol))) return undefined;
-		// Single letters are asked too (`figure o|ut`); engines own their minimum prefix.
-		const match = WORD_SUFFIX.exec(line.slice(0, cursorCol));
-		if (!match) return undefined;
-		const start = cursorCol - match[0].length;
-		if (!isProseWord(line, maskNonProse(line), start, cursorCol)) return undefined;
-		if (!this.#prose.isProse(lineContext(lines, cursorLine), start, cursorCol)) return undefined;
-		const prefix = match[0];
-		const before = textBefore(lines, cursorLine, start);
+		const query = wordCompletionQuery(lines, cursorLine, cursorCol, this.#prose);
+		if (!query) return undefined;
 		// The method keeps a request still in flight for the previous engine from
 		// shadowing the same word state on the new one.
-		return { key: `${this.#method}\u0000${prefix}\u0000${before}`, before, prefix };
+		return { key: `${this.#method}\u0000${query.prefix}\u0000${query.before}`, ...query };
 	}
 
 	#project(query: WordQuery): string | null {

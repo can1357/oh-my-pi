@@ -140,6 +140,26 @@ const underlineStyler = chalk.underline;
 const strikethroughStyler = chalk.strikethrough;
 const inverseStyler = chalk.inverse;
 
+/** Theme token of a thinking/effort level name (`off`…`max`); unknown levels (`auto`) map to `thinkingOff`. */
+export function thinkingLevelToken(level: string): ThemeColor {
+	switch (level) {
+		case "minimal":
+			return "thinkingMinimal";
+		case "low":
+			return "thinkingLow";
+		case "medium":
+			return "thinkingMedium";
+		case "high":
+			return "thinkingHigh";
+		case "xhigh":
+			return "thinkingXhigh";
+		case "max":
+			return "thinkingMax";
+		default:
+			return "thinkingOff";
+	}
+}
+
 export class Theme {
 	#fgColors: Record<ThemeColor, string>;
 	#bgColors: Record<ThemeBg, string>;
@@ -419,25 +439,10 @@ export class Theme {
 
 	/** Border color for a thinking/effort level name (`off`…`max`); unknown levels fall back to `thinkingOff`. */
 	getThinkingBorderColor(level: string): (str: string) => string {
-		switch (level) {
-			case "off":
-				return (str: string) => this.fg("thinkingOff", str);
-			case "minimal":
-				return (str: string) => this.fg("thinkingMinimal", str);
-			case "low":
-				return (str: string) => this.fg("thinkingLow", str);
-			case "medium":
-				return (str: string) => this.fg("thinkingMedium", str);
-			case "high":
-				return (str: string) => this.fg("thinkingHigh", str);
-			case "xhigh":
-				return (str: string) => this.fg("thinkingXhigh", str);
-			case "max":
-				// thinkingMax is optional; themes without it resolve to the xhigh color.
-				return (str: string) => this.fg(this.#fgColors.thinkingMax ? "thinkingMax" : "thinkingXhigh", str);
-			default:
-				return (str: string) => this.fg("thinkingOff", str);
-		}
+		const token = thinkingLevelToken(level);
+		// thinkingMax is optional; themes without it resolve to the xhigh color.
+		const color = token === "thinkingMax" && !this.#fgColors.thinkingMax ? "thinkingXhigh" : token;
+		return (str: string) => this.fg(color, str);
 	}
 
 	getBashModeBorderColor(): (str: string) => string {

@@ -7,7 +7,21 @@
  *   (Ctrl+Q / Ctrl+Enter) submits, bordered popup
  * - Prompt-style (ask): Enter submits, Shift+Enter inserts newline, legacy ask chrome
  */
-import { Editor, type Focusable, matchesKey, Spacer, Text, type TUI } from "../index";
+import type { ImageContent } from "@oh-my-pi/pi-ai";
+import { compactImageMarkers, formatVisionMarker, PLACEHOLDER_REGEX } from "../prompt/composer-attachments";
+import { extractImagePastePathsFromText } from "../prompt/custom-editor";
+import {
+	Editor,
+	Ellipsis,
+	type Focusable,
+	matchesKey,
+	replaceTabs,
+	Spacer,
+	Text,
+	type TUI,
+	truncateToWidth,
+	wrapTextWithAnsi,
+} from "../index";
 import { BracketedPasteHandler } from "../bracketed-paste";
 import { getEditorTheme, theme } from "../theme/theme";
 import { matchesAppExternalEditor, matchesAppFollowUp, matchesAppInterrupt } from "../keybinding-matchers";
@@ -16,12 +30,59 @@ import { OverlayPanel } from "../chrome/overlay-box";
 import { FormField } from "../components/form";
 import { formatKeyHint, formatKeyHints } from "../app-keybindings";
 import { boundKeys, editorKey, interruptKey } from "../chrome/keybinding-hints";
+import { node, span } from "../native/describe";
+import type { DescribeContext, NativeChild, NativeNode } from "../native/node";
+import { hintsRow, type NativeHint, overlayCard } from "../native/overlay";
+import { plainText } from "../native/spans";
+import { sanitizeCarriageReturns } from "../render/render-utils";
+
+/** Most title rows the terminal prompt shows, so a long question cannot push the input row off-screen. */
+const MAX_PROMPT_TITLE_ROWS = 3;
+/** Border (2) + padX (2) columns consumed by the panel chrome. */
+const PROMPT_TITLE_CHROME_COLUMNS = 4;
+
+/**
+ * `prefix` and `question` flattened onto one line, wrapped to the terminal's width and cut to
+ * {@link MAX_PROMPT_TITLE_ROWS} rows (the last ends in `…` when cut). For terminal rendering only:
+ * native hosts get the question whole ({@link HookEditorOptions.question}).
+ */
+export function boundPromptTitle(prefix: string, question: string): string {
+	const width = Math.max(1, (process.stdout.columns ?? 80) - PROMPT_TITLE_CHROME_COLUMNS);
+	const flat = replaceTabs(`${prefix}${question}`).replace(/\s+/g, " ").trim();
+	const wrapped = wrapTextWithAnsi(flat, width);
+	if (wrapped.length <= MAX_PROMPT_TITLE_ROWS) return wrapped.join("\n");
+	const kept = wrapped.slice(0, MAX_PROMPT_TITLE_ROWS - 1);
+	const last = truncateToWidth(wrapped.slice(MAX_PROMPT_TITLE_ROWS - 1).join(" "), width, Ellipsis.Unicode);
+	return [...kept, last].join("\n");
+}
 
 export interface HookEditorOptions {
 	/** Edit text with the host's configured external editor. */
 	externalEditor?: (text: string) => Promise<string | null>;
 	/** When true, use prompt-style keybindings with the legacy ask prompt chrome. */
 	promptStyle?: boolean;
+	/**
+	 * The question the text answers (the ask tool's custom answers and notes). The terminal
+	 * shows it after `<title>: `, wrapped and cut to three rows; native hosts put it whole,
+	 * as markdown, under the title.
+	 */
+	question?: string;
+	/** Allow clipboard images to be attached to this prompt. */
+	acceptImages?: boolean;
+	/** Images already represented by markers in the prefilled text. */
+	images?: readonly ImageContent[];
+	/**
+	 * With `acceptImages`, called for an empty bracketed paste, which is how terminals that own
+	 * the paste key send an image-only clipboard (#3601). Same signature as
+	 * `CustomEditor.onPasteImage`; the host calls `beginPaste` before its first await.
+	 */
+	onPasteImage?: () => Promise<boolean>;
+	/**
+	 * With `acceptImages`, called for each path of a bracketed paste made only of image paths.
+	 * Same signature as `CustomEditor.onPasteImagePath`; calls are not awaited in turn, so images
+	 * attach as they finish loading and are renumbered in text order on submit.
+	 */
+	onPasteImagePath?: (path: string) => void | Promise<void>;
 	/**
 	 * Max rows the inner Editor may occupy. When omitted, the editor is
 	 * bounded to the current terminal height minus the component's chrome
@@ -35,15 +96,21 @@ export interface HookEditorOptions {
 export class HookEditorComponent extends OverlayPanel implements Focusable {
 	#editor: Editor;
 	#field: FormField;
-	#onSubmitCallback: (value: string) => void;
+	#onSubmitCallback: (value: string, images?: ImageContent[]) => void;
 	#onCancelCallback: () => void;
 	#tui: TUI;
 	#promptStyle: boolean;
+	#acceptImages: boolean;
+	#images: ImageContent[];
 	#externalEditor: HookEditorOptions["externalEditor"];
+	#onPasteImage: HookEditorOptions["onPasteImage"];
+	#onPasteImagePath: HookEditorOptions["onPasteImagePath"];
 	#pasteHandler = new BracketedPasteHandler();
 	#pendingPastes: { settled: boolean; text: string | undefined }[] = [];
 	#submitQueued = false;
 	#disposed = false;
+	/** Detail lines, hints and the editor under the title; every part is fixed, so it is built once. */
+	#nativeRoot: NativeNode;
 	/** Focus state mirrored to the nested editor during rendering. */
 	focused = false;
 
@@ -51,21 +118,27 @@ export class HookEditorComponent extends OverlayPanel implements Focusable {
 		tui: TUI,
 		title: string,
 		prefill: string | undefined,
-		onSubmit: (value: string) => void,
+		onSubmit: (value: string, images?: ImageContent[]) => void,
 		onCancel: () => void,
 		options?: HookEditorOptions,
 	) {
 		// First title line insets into the panel border; remaining lines (e.g. the
-		// bounded ask question under "◆ Other (type your own)") stay as body rows
-		// so they are never truncated into the one-row border.
-		const [titleLine = "", ...detailLines] = title.split("\n");
-		super(titleLine);
+		// bounded ask question) stay as body rows so they are never truncated into
+		// the one-row border.
+		const question = options?.question;
+		const terminalTitle = question === undefined ? title : boundPromptTitle(`${title}: `, question);
+		const [titleLine = "", ...detailLines] = terminalTitle.split("\n");
+		super(titleLine, "omp.overlay.hook-editor");
 
 		this.#tui = tui;
 		this.#onSubmitCallback = onSubmit;
 		this.#onCancelCallback = onCancel;
 		this.#promptStyle = options?.promptStyle ?? false;
+		this.#acceptImages = options?.acceptImages ?? false;
+		this.#images = this.#acceptImages ? [...(options?.images ?? [])] : [];
 		this.#externalEditor = options?.externalEditor;
+		this.#onPasteImage = options?.onPasteImage;
+		this.#onPasteImagePath = options?.onPasteImagePath;
 
 		// Editor
 		this.#editor = new Editor(getEditorTheme());
@@ -74,6 +147,8 @@ export class HookEditorComponent extends OverlayPanel implements Focusable {
 			this.#editor.setPromptGutter("> ");
 			this.#editor.disableSubmit = true;
 		}
+		// Image markers delete as a unit, like the main editor's attachment tokens.
+		if (options?.acceptImages) this.#editor.atomicTokenPattern = PLACEHOLDER_REGEX;
 		// Bound the editor so long content scrolls instead of pushing the
 		// submit hint off-screen. Caller may override via options.maxHeight.
 		const termRows = this.#tui.terminal?.rows ?? process.stdout.rows ?? 40;
@@ -99,6 +174,54 @@ export class HookEditorComponent extends OverlayPanel implements Focusable {
 		});
 		this.addChild(this.#field);
 		this.addChild(new Spacer(1));
+
+		const externalHint: NativeHint = {
+			keys: boundKeys("app.editor.external", ["ctrl+g"]).slice(0, 1),
+			label: "external editor",
+		};
+		const nativeHints: NativeHint[] = this.#promptStyle
+			? [
+					{ keys: ["enter", primaryFollowUpKey], label: "submit" },
+					{ keys: ["escape"], label: "cancel" },
+					externalHint,
+				]
+			: [
+					{ keys: followUpKeys, label: "submit" },
+					{ keys: boundKeys("app.interrupt", ["escape"]).slice(0, 1), label: "cancel" },
+					externalHint,
+				];
+		const nativeChildren: NativeChild[] = [];
+		if (question !== undefined) {
+			nativeChildren.push(
+				node(
+					"md",
+					{ text: replaceTabs(sanitizeCarriageReturns(question)), role: "omp.ask.question" },
+					undefined,
+					"question",
+				),
+			);
+		} else if (detailLines.length > 0) {
+			nativeChildren.push(
+				node(
+					"text",
+					{ spans: [span(plainText(detailLines.join("\n")), "accent")], wrap: "word" },
+					undefined,
+					"detail",
+				),
+			);
+		}
+		nativeChildren.push(this.#editor, hintsRow(nativeHints));
+		this.#nativeRoot = overlayCard(
+			this.nativeRole,
+			plainText(question === undefined ? titleLine : title),
+			nativeChildren,
+		);
+	}
+
+	/** The editor (which describes itself) under the title and detail lines, with the key hints below. */
+	override describe(_cx: DescribeContext): NativeNode {
+		this.#field.focused = this.focused;
+		return this.#nativeRoot;
 	}
 
 	/** Keep the nested editor's software/hardware cursor mode aligned with the dialog focus target. */
@@ -117,7 +240,20 @@ export class HookEditorComponent extends OverlayPanel implements Focusable {
 		const paste = this.#pasteHandler.process(keyData);
 		if (paste.handled) {
 			if (paste.pasteContent === undefined) return;
-			this.pasteText(paste.pasteContent);
+			// Hosts reserve ordered delivery synchronously inside these callbacks, so input
+			// that followed the paste in this chunk (e.g. Enter) still waits for the image.
+			const content = paste.pasteContent;
+			const acceptsImages = this.acceptsImages;
+			if (acceptsImages && content.length === 0 && this.#onPasteImage) {
+				void this.#onPasteImage();
+			} else {
+				const imagePaths = acceptsImages ? extractImagePastePathsFromText(content) : undefined;
+				if (imagePaths && this.#onPasteImagePath) {
+					for (const path of imagePaths) void this.#onPasteImagePath(path);
+				} else {
+					this.pasteText(content);
+				}
+			}
 			if (paste.remaining.length > 0) this.handleInput(paste.remaining);
 			return;
 		}
@@ -134,10 +270,34 @@ export class HookEditorComponent extends OverlayPanel implements Focusable {
 			this.#submitQueued = true;
 			return;
 		}
-		const text = this.#editor.getExpandedText();
+		let text = this.#editor.getExpandedText();
 		if (requireText && text.trim().length === 0) return;
+		let images: ImageContent[] | undefined;
+		if (this.#images.length > 0) {
+			// Path pastes attach as they finish loading; submit numbers images in text order.
+			const compacted = compactImageMarkers(text, this.#images.length, { byAppearance: true });
+			if (compacted) {
+				text = compacted.text;
+				images = compacted.keep.map(index => this.#images[index]);
+			} else {
+				images = this.#images;
+			}
+		}
 		this.dispose();
-		this.#onSubmitCallback(text);
+		if (images?.length) this.#onSubmitCallback(text, images);
+		else this.#onSubmitCallback(text);
+	}
+
+	/** Whether this prompt opted into clipboard image attachments. */
+	get acceptsImages(): boolean {
+		return this.#acceptImages && !this.#disposed;
+	}
+
+	/** Attach an image; returns its `[Image #N, WxH]` marker for the caller to deliver. */
+	attachImage(image: ImageContent, dims?: { width: number; height: number }): string | undefined {
+		if (!this.acceptsImages) return undefined;
+		this.#images.push(image);
+		return formatVisionMarker("image", this.#images.length, dims);
 	}
 
 	/** Reserve ordered clipboard delivery. Completion accepts nonempty text once, or releases on undefined. */

@@ -19,7 +19,6 @@ import {
 	parseArchivePathCandidates,
 } from "@oh-my-pi/pi-utils/ar";
 import { getEditStore } from "../edit/store";
-import { formatHashlineHeader } from "@oh-my-pi/pi-tui/tools/hashline-format";
 import { sessionResolveContext } from "../internal-urls/context";
 import { InternalUrlRouter } from "../internal-urls/router";
 import { InternalUrlFilesystem } from "../internal-urls/url-filesystem";
@@ -32,7 +31,7 @@ import type { ToolSession } from ".";
 import { resolveToolTier } from "./approval";
 import { materializeReadUrlToFile, parseReadUrlTarget } from "./fetch";
 import { createFileRecorder, formatResultPath, resultSnapshotPath } from "./file-recorder";
-import { formatGroupedFiles } from "@oh-my-pi/pi-tui/tools/grouped-file-output";
+import { type FileMatchSection, formatFileMatches } from "@oh-my-pi/pi-tui/tools/grouped-file-output";
 import { formatMatchLine } from "@oh-my-pi/pi-tui/tools/match-line-format";
 import { isFindEnabled } from "./jfind";
 import {
@@ -851,7 +850,7 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 						if (tag) hashContexts.set(relativePath, { tag, path: snapshotPath });
 					}
 				}
-				const renderMatchesForFile = (relativePath: string): { model: string[]; display: string[] } => {
+				const renderMatchesForFile = (relativePath: string): FileMatchSection => {
 					const modelOut: string[] = [];
 					const displayOut: string[] = [];
 					const fileMatches = matchesByFile.get(relativePath) ?? [];
@@ -900,38 +899,11 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 							modelOut.join("\n"),
 						);
 					}
-					return { model: modelOut, display: displayOut };
+					return { model: modelOut, display: displayOut, tag: hashContext?.tag };
 				};
-				const useGroupedOutput = isDirectory || isMultiScope;
-				if (useGroupedOutput) {
-					const grouped = formatGroupedFiles(fileList, relativePath => {
-						const rendered = renderMatchesForFile(relativePath);
-						const hashContext = hashContexts.get(relativePath);
-						return {
-							modelLines: rendered.model,
-							displayLines: rendered.display,
-							headerSuffix: hashContext?.tag ? `#${hashContext.tag}` : "",
-							skip: rendered.model.length === 0,
-						};
-					});
-					outputLines.push(...grouped.model);
-					displayLines.push(...grouped.display);
-				} else {
-					for (const relativePath of fileList) {
-						const rendered = renderMatchesForFile(relativePath);
-						if (rendered.model.length === 0) continue;
-						if (outputLines.length > 0) {
-							outputLines.push("");
-							displayLines.push("");
-						}
-						const hashContext = hashContexts.get(relativePath);
-						if (hashContext?.tag) {
-							outputLines.push(formatHashlineHeader(relativePath, hashContext.tag));
-						}
-						outputLines.push(...rendered.model);
-						displayLines.push(...rendered.display);
-					}
-				}
+				const matchOutput = formatFileMatches(fileList, isDirectory || isMultiScope, renderMatchesForFile);
+				outputLines.push(...matchOutput.model);
+				displayLines.push(...matchOutput.display);
 				if (limitMessage) {
 					outputLines.push("", limitMessage);
 				}

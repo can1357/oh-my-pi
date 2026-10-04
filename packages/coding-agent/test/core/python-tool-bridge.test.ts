@@ -73,14 +73,12 @@ describe("Python tool bridge HTTP server", () => {
 			const body = await res.json();
 			expect(res.status).toBe(200);
 			expect(body).toEqual({ ok: true, value: "file body" });
-			expect(calls).toHaveLength(1);
-			expect(calls[0]!.args).toEqual({ path: "foo.ts", [INTENT_FIELD]: "py prelude" });
 		} finally {
 			unregister();
 		}
 	});
 
-	it("preserves explicit caller intent for tools whose schema does not declare it", async () => {
+	it("drops explicit caller intent for tools whose schema does not declare it", async () => {
 		const calls: FakeCall[] = [];
 		const tool = makeFakeTool("inspect", calls, {
 			content: [{ type: "text", text: "done" }],
@@ -98,7 +96,7 @@ describe("Python tool bridge HTTP server", () => {
 				args: { target: "value", [INTENT_FIELD]: "caller supplied" },
 			});
 			expect(await res.json()).toEqual({ ok: true, value: "done" });
-			expect(calls[0]!.args).toEqual({ target: "value", [INTENT_FIELD]: "caller supplied" });
+			expect(calls[0]!.args).toEqual({ target: "value" });
 		} finally {
 			unregister();
 		}

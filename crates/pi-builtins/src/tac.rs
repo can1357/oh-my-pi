@@ -15,7 +15,7 @@ use pi_vfs::File;
 use thiserror::Error;
 use uucore::display::Quotable;
 
-use crate::host::{Host, Utility, format_usage, matches_parser, util};
+use crate::host::{Host, Utility, format_usage, matches_parser, strip_errno, util};
 
 mod options {
 	pub static BEFORE: &str = "before";
@@ -38,14 +38,6 @@ enum TacError {
 	/// An error writing the reversed contents of a file or stdin.
 	#[error("failed to write to stdout: {}", strip_errno(.0))]
 	Write(std::io::Error),
-}
-
-fn strip_errno(error: &std::io::Error) -> String {
-	let mut message = error.to_string();
-	if let Some(position) = message.find(" (os error ") {
-		message.truncate(position);
-	}
-	message
 }
 
 /// Parsed `tac` invocation.

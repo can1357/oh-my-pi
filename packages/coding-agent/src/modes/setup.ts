@@ -1,4 +1,3 @@
-import type { Model, WebSearchGrounding } from "@oh-my-pi/pi-catalog/types";
 import { runProviderSetupWizard as runProviderWizard } from "@oh-my-pi/pi-tui/setup/lazy";
 import type { SetupHost, SetupScene } from "@oh-my-pi/pi-tui/setup/scenes/types";
 import {
@@ -9,13 +8,9 @@ import {
 	selectSetupScenes as selectScenes,
 	type SetupSceneSelectionOptions,
 } from "@oh-my-pi/pi-tui/setup/wizard";
-import { formatModelString, resolveModelRoleValue, rolePriorityDefaults } from "../config/model-resolver";
-import { getRoleInfo, roleCandidatePool } from "../config/model-roles";
 import type { Settings } from "../config/settings";
 import { captureBrowserSession } from "../utils/browser-session";
 import { copyToClipboard } from "../utils/clipboard";
-import { getGroundedSearchProvider, getSearchProvider } from "../web/search/provider";
-import { SEARCH_PROVIDER_OPTIONS, type SearchProviderId } from "../web/search/types";
 import { createModelBrowserSource } from "./model-browser-source";
 import type { InteractiveModeContext } from "./types";
 
@@ -33,48 +28,6 @@ export { ALL_SCENES, CURRENT_SETUP_VERSION };
 export type { SetupScene, SetupSceneHost } from "@oh-my-pi/pi-tui/setup/scenes/types";
 export { runStartupSplash } from "@oh-my-pi/pi-tui/setup/startup-splash";
 
-const WEB_SEARCH_GROUNDINGS: Readonly<Record<WebSearchGrounding, true>> = {
-	gemini: true,
-	anthropic: true,
-	codex: true,
-	openai: true,
-	xai: true,
-	openrouter: true,
-};
-
-function isWebSearchGrounding(id: SearchProviderId): id is WebSearchGrounding {
-	return id in WEB_SEARCH_GROUNDINGS;
-}
-
-/**
- * Web-role candidate pools, lazily: the credentialed pool the runtime resolves
- * against first (#13023), then the full catalog so an unconfigured provider can
- * still be saved and highlighted as the preference.
- */
-function* webRolePools(ctx: InteractiveModeContext): Generator<Model[]> {
-	yield roleCandidatePool("web", ctx.settings, ctx.session.modelRegistry);
-	yield ctx.session.modelRegistry.getAll("all").filter(getRoleInfo("web", ctx.settings).accepts);
-}
-
-function resolveWebSearchSelection(ctx: InteractiveModeContext, id: SearchProviderId) {
-	for (const models of webRolePools(ctx)) {
-		if (!isWebSearchGrounding(id)) {
-			const selector = `web/${id}`;
-			const model = resolveModelRoleValue(selector, models, { settings: ctx.settings }).model;
-			if (model) return { selector, model };
-			continue;
-		}
-
-		for (const selector of rolePriorityDefaults("web")) {
-			const model = resolveModelRoleValue(selector, models, { settings: ctx.settings }).model;
-			if (model?.webSearch === id) return { selector, model };
-		}
-		const model = models.find(candidate => candidate.webSearch === id);
-		if (model) return { selector: formatModelString(model), model };
-	}
-	return undefined;
-}
-
 /** Bind application preferences and runtime effects to the setup presentation. */
 export function createSetupHost(ctx: InteractiveModeContext): SetupHost {
 	const modelSource = createModelBrowserSource(ctx.settings);
@@ -91,20 +44,6 @@ export function createSetupHost(ctx: InteractiveModeContext): SetupHost {
 		},
 		get colorBlindMode() {
 			return cfgColorBlindMode.get(ctx.settings);
-		},
-		get webSearchOrder() {
-			const configured = ctx.settings.getModelRole("web")?.trim();
-			if (!configured) return [];
-			let model: Model | undefined;
-			for (const models of webRolePools(ctx)) {
-				model = resolveModelRoleValue(configured, models, { settings: ctx.settings }).model;
-				if (model) break;
-			}
-			if (model?.provider === "web") {
-				const option = SEARCH_PROVIDER_OPTIONS.find(candidate => candidate.value === model.id);
-				if (option && option.value !== "auto" && option.value !== "none") return [option.value];
-			}
-			return model?.webSearch ? [model.webSearch] : [];
 		},
 		get disabledProviders() {
 			return cfgDisabledProviders.get(ctx.settings);
@@ -138,22 +77,6 @@ export function createSetupHost(ctx: InteractiveModeContext): SetupHost {
 		},
 		saveTheme: (mode, name) => {
 			(mode === "dark" ? cfgThemeDark : cfgThemeLight).set(ctx.settings, name);
-		},
-		isSearchProviderAvailable: async id => {
-			const selection = resolveWebSearchSelection(ctx, id);
-			if (!selection) return false;
-			const provider = selection.model.webSearch
-				? await getGroundedSearchProvider(selection.model.webSearch)
-				: await getSearchProvider(selection.model.id);
-			return provider.isExplicitlyAvailable(ctx.session.modelRegistry.authStorage, selection.model);
-		},
-		saveSearchProvider: id => {
-			if (id === "auto") {
-				ctx.settings.setModelRole("web", undefined);
-				return;
-			}
-			const selection = resolveWebSearchSelection(ctx, id);
-			if (selection) ctx.settings.setModelRole("web", selection.selector);
 		},
 		captureBrowserSession,
 		copyToClipboard,

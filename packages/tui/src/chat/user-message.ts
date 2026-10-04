@@ -3,6 +3,8 @@ import { type Component, Container } from "../tui";
 import { Disclosure } from "../components/disclosure";
 import { Markdown } from "../components/markdown";
 import { formatBytes } from "@oh-my-pi/pi-utils";
+import type { ImageContent } from "@oh-my-pi/pi-ai";
+import type { TspSpan } from "@oh-my-pi/pi-wire";
 import { ensureThemeSync, getMarkdownTheme, theme } from "../theme";
 import {
 	attachmentSgr,
@@ -19,6 +21,11 @@ import { expandKeyHint, fileHyperlink } from "../render";
 import { imageReferenceHyperlink } from "../prompt/image-references";
 import { highlightMagicKeywords } from "../prompt/magic-keywords";
 import type { ReactionTarget } from "./reaction";
+import { card, md, node, row, span, text } from "../native/describe";
+import { base64ImageNode } from "../native/blobs";
+import { hasTranscriptActions, runTranscriptAction } from "./transcript-actions";
+import { type NativeChild, type NativeNode, type NativeUiEvent, rootToggleExpanded } from "../native/node";
+import { Memo } from "../native/memo";
 
 // OSC 133 shell integration: marks prompt zones for terminal multiplexers.
 //
@@ -46,12 +53,16 @@ const OSC133_ZONE_CLOSE = OSC133_ZONE_END + OSC133_COMMAND_START + OSC133_COMMAN
 export interface UserBubbleOptions {
 	/** Materialized `file://` targets per attached image, indexed by chip number. */
 	imageLinks?: readonly (string | undefined)[];
+	/** The message's attached images in chip order (`#1` first); a native bubble shows them. */
+	images?: readonly ImageContent[];
 	/** Agent-attributed input: dim, flat prose. */
 	synthetic?: boolean;
 	/** Delivered into the response that was streaming; marked `*` at the bubble's top-left. */
 	liveSteered?: boolean;
 	/** SKILL.md path for a skill chip by name; `undefined` leaves the chip unlinked. */
 	skillPath?: (name: string) => string | undefined;
+	/** When the message was sent (ms); shown beside the native hover toolbar. */
+	timestamp?: number;
 }
 
 /**
@@ -116,7 +127,16 @@ export class UserMessageComponent extends Container implements ReactionTarget {
 	#zoneLines: string[] | undefined;
 	readonly #bgColor: (value: string) => string;
 	readonly #liveSteered: boolean;
+	readonly #synthetic: boolean;
+	readonly #timestamp: number | undefined;
+	readonly #images: readonly ImageContent[];
+	readonly #imageLinks: readonly (string | undefined)[] | undefined;
+	/** Display text: image markers collapsed to chips and model mentions to their labels. */
+	readonly #text: string;
+	/** Matches the composer tokens in {@link #text} (chips, skills, this message's mentions). */
+	readonly #tokens: RegExp;
 	#reaction: string | undefined;
+	#native: NativeNode | undefined;
 
 	constructor(text: string, options: UserBubbleOptions = {}) {
 		super();
@@ -135,18 +155,108 @@ export class UserMessageComponent extends Container implements ReactionTarget {
 		const bgColor = (value: string) => theme.bg("userMessageBg", value);
 		this.#bgColor = bgColor;
 		this.#liveSteered = options.liveSteered === true;
-		const md = new Markdown(text, 1, 1, getMarkdownTheme(), {
+		this.#synthetic = options.synthetic === true;
+		this.#timestamp = options.timestamp;
+		this.#images = options.images ?? [];
+		this.#imageLinks = options.imageLinks;
+		this.#text = text;
+		this.#tokens = composerTokenRegex(mentionLabels);
+		const markdown = new Markdown(text, 1, 1, getMarkdownTheme(), {
 			bgColor,
-			color: userBubbleColor(options, composerTokenRegex(mentionLabels)),
+			color: userBubbleColor(options, this.#tokens),
 		});
-		md.setIgnoreTight(true);
-		this.addChild(md);
+		markdown.setIgnoreTight(true);
+		this.addChild(markdown);
 	}
 
 	setReaction(emoji: string): void {
 		if (this.#reaction === emoji) return;
 		this.#reaction = emoji;
 		this.#zoneLines = undefined;
+		this.#native = undefined;
+	}
+
+	/**
+	 * A head-less user-toned frame with the prompt as markdown under its
+	 * attached images (titled `#N` like their chips, opening the materialized
+	 * file on click): the fill says "you". A quiet toolbar (time, Copy, Rewind) fades in on hover when the
+	 * host handles transcript actions. The live-steering marker and the
+	 * agent's reaction are chips at the bottom-right, so a reaction landing
+	 * later updates the frame in place, even deep in scrollback.
+	 */
+	override describe(): NativeNode {
+		if (this.#native) return this.#native;
+		const children: NativeChild[] = [];
+		if (!this.#synthetic && hasTranscriptActions()) {
+			const tools: NativeChild[] = [];
+			if (this.#timestamp !== undefined) {
+				const at = new Date(this.#timestamp);
+				tools.push(
+					text([span(at.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }), "dim mono")], {
+						role: "omp.user.time",
+						title: at.toLocaleString(),
+					}),
+				);
+			}
+			tools.push(
+				// `copy-message`, not Tern's local `copy` (that would copy the label).
+				text("Copy", {
+					role: "omp.user.tool",
+					actions: { click: "copy-message" },
+					title: "Copy message",
+					key: "copy",
+				}),
+				text("Rewind", {
+					role: "omp.user.tool",
+					actions: { click: "rewind" },
+					title: "Rewind the conversation to an earlier message",
+					key: "rewind",
+				}),
+			);
+			children.push(node("row", { gap: "xs", role: "omp.user.tools" }, tools, "tools"));
+		}
+		// Videos keep their chip only: the native image node decodes stills.
+		const thumbs: NativeNode[] = [];
+		if (!this.#synthetic) {
+			this.#images.forEach((image, i) => {
+				if (!image.mimeType.startsWith("image/")) return;
+				const label = `#${i + 1}`;
+				const link = this.#imageLinks?.[i];
+				// A click zooms the image in the terminal; the file opens from its context menu.
+				const open = link ? { href: link, actions: { menu: ["open"] } } : {};
+				thumbs.push(base64ImageNode(image.data, image.mimeType, { alt: label, title: label, ...open }, label));
+			});
+		}
+		if (thumbs.length > 0) {
+			children.push(row(thumbs, { gap: "sm", wrap: true, align: "start", role: "omp.user.images" }));
+		}
+		const marks = this.#synthetic ? [] : tokenMarks(this.#text, this.#tokens);
+		children.push(md(this.#text, marks.length > 0 ? { marks } : undefined));
+		const badges: NativeChild[] = [];
+		if (this.#liveSteered) {
+			badges.push(
+				node("badge", {
+					text: "steered",
+					tone: "accent",
+					title: "Delivered into the response that was streaming",
+				}),
+			);
+		}
+		if (this.#reaction !== undefined) badges.push(node("badge", { text: this.#reaction, role: "omp.reaction" }));
+		if (badges.length > 0)
+			children.push(node("row", { gap: "xs", justify: "end", role: "omp.user.badges" }, badges, "badges"));
+		this.#native = card(
+			{ role: this.#synthetic ? "omp.user.synthetic" : "omp.user", tone: this.#synthetic ? "muted" : "user" },
+			children,
+		);
+		return this.#native;
+	}
+
+	/** Hover toolbar clicks: omp's own copy and rewind commands. */
+	handleNativeEvent(event: NativeUiEvent): void {
+		if (event.type !== "action") return;
+		if (event.act === "copy-message") runTranscriptAction({ act: "copy", text: this.#text });
+		else if (event.act === "rewind") runTranscriptAction({ act: "rewind" });
 	}
 
 	/**
@@ -176,6 +286,31 @@ export class UserMessageComponent extends Container implements ReactionTarget {
 		this.#zoneLines = wrapped;
 		return wrapped;
 	}
+}
+
+/**
+ * The composer tokens in `text` as `md` marks, styled as the composer
+ * decorates them (`CustomEditor.describeDecorations`), so a sent prompt keeps
+ * its chips highlighted.
+ */
+function tokenMarks(text: string, tokens: RegExp): TspSpan[] {
+	// One mark per distinct token: Tern styles every occurrence of its text.
+	const styles = new Map<string, string>();
+	const mark = (s: string) => (label: string) => {
+		styles.set(label, s);
+		return "";
+	};
+	renderPlaceholders(
+		text,
+		{
+			renderText: () => "",
+			renderSkill: mark("customMessageLabel strong"),
+			renderMention: mark("statusLineModel strong"),
+			renderReference: mark("accent strong"),
+		},
+		tokens,
+	);
+	return [...styles].map(([t, s]) => ({ t, s }));
 }
 
 /**
@@ -220,6 +355,8 @@ class SyntheticSummary implements Component {
  */
 export class CollapsedSyntheticMessageComponent implements Component {
 	#disclosure: Disclosure;
+	#expanded = false;
+	readonly #native = new Memo();
 
 	readonly #text: string;
 	readonly #imageLinks?: readonly (string | undefined)[];
@@ -238,7 +375,34 @@ export class CollapsedSyntheticMessageComponent implements Component {
 
 	/** ctrl+o toggle: reveal/hide the full Markdown body. */
 	setExpanded(expanded: boolean): void {
+		this.#expanded = expanded;
 		this.#disclosure.setExpanded(expanded);
+	}
+
+	/**
+	 * A muted collapsible card whose head is the one-line summary. The
+	 * (potentially huge) markdown body is only described while expanded, so
+	 * collapsed history costs no layout on either side; a native toggle
+	 * expands it through {@link handleNativeEvent}.
+	 */
+	describe(): NativeNode {
+		return this.#native.get([this.#expanded], () =>
+			card(
+				{
+					role: "omp.user.synthetic",
+					tone: "muted",
+					head: [span(summarizeSyntheticInput(this.#text), "dim")],
+					collapsible: true,
+					collapsed: !this.#expanded,
+				},
+				this.#expanded ? [md(this.#text)] : [],
+			),
+		);
+	}
+
+	handleNativeEvent(event: NativeUiEvent): void {
+		const expanded = rootToggleExpanded(event);
+		if (expanded !== undefined) this.setExpanded(expanded);
 	}
 
 	setIgnoreTight(ignore: boolean): this {

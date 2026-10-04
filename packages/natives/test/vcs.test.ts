@@ -32,6 +32,9 @@ async function repository() {
 	await git(root, "init", "-b", "main");
 	await git(root, "config", "user.name", "Native Test");
 	await git(root, "config", "user.email", "native@example.test");
+	// Assertions compare exact LF bytes; Git for Windows' system
+	// `core.autocrlf=true` would check files out as CRLF.
+	await git(root, "config", "core.autocrlf", "false");
 	await writeFile(join(root, "tracked.txt"), "one\ntwo\n");
 	await git(root, "add", "tracked.txt");
 	await git(root, "commit", "-m", "initial");

@@ -71,6 +71,7 @@ async function loadSkills(ctx: LoadContext): Promise<LoadResult<Skill>> {
 				providerId: PROVIDER_ID,
 				level: root.level,
 				requireDescription: true,
+				pluginName: root.name,
 			}),
 		),
 	);

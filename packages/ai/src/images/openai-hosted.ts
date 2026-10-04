@@ -1,4 +1,4 @@
-import type { Api, Model } from "@oh-my-pi/pi-catalog/types";
+import { type Api, type Model, modelKind } from "@oh-my-pi/pi-catalog/types";
 import {
 	applyCodexResidencyHeader,
 	CODEX_BASE_URL,
@@ -155,7 +155,10 @@ export async function generateHostedImage(
 		action: content.length > 1 ? "edit" : "generate",
 		output_format: "webp",
 		...(size ? { size } : {}),
-		...(model.api === "openai-responses" ? { model: model.requestModelId ?? model.id } : {}),
+		// A chat model generating on its own lets the host pick the image model.
+		...(model.api === "openai-responses" && modelKind(model) === "image"
+			? { model: model.requestModelId ?? model.id }
+			: {}),
 	};
 	const body = {
 		model: carrier.requestModelId ?? carrier.id,

@@ -2,6 +2,7 @@ import { beforeAll, describe, expect, it } from "bun:test";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { TUI } from "../src/index";
+import type { DescribeContext } from "../src/native/node";
 import {
 	AdvisorConfigOverlayComponent,
 	type AdvisorConfigDeps,
@@ -28,7 +29,45 @@ const deps: AdvisorConfigDeps = {
 	availableToolNames: [],
 };
 
-describe("advisor config editor warnings and synthetic default row", () => {
+describe("advisor review mode picker", () => {
+	beforeAll(async () => {
+		const theme = await getThemeByName("dark");
+		if (!theme) throw new Error("theme unavailable");
+		setThemeInstance(theme);
+	});
+
+	it("preserves configured mode when accepting current selection and saving", async () => {
+		let saved: WatchdogConfigDoc | undefined;
+		const overlay = new AdvisorConfigOverlayComponent(
+			{} as TUI,
+			deps,
+			"project",
+			{ advisors: [{ name: "Reviewer", reviewMode: "agent-end", reviewInterval: 3 }] },
+			{
+				loadDoc: async () => ({ advisors: [] }),
+				save: async (_scope, doc) => {
+					saved = structuredClone(doc);
+				},
+				close: () => {},
+				requestRender: () => {},
+				notify: () => {},
+			},
+		);
+
+		overlay.handleInput("\r"); // Advisor detail.
+		for (let i = 0; i < 3; i++) overlay.handleInput("\x1b[B");
+		overlay.handleInput("\r"); // Review mode.
+		overlay.handleInput("\r"); // Accept current mode without navigating.
+		overlay.handleInput("\x1b"); // Back to roster.
+		for (let i = 0; i < 4; i++) overlay.handleInput("\x1b[B");
+		overlay.handleInput("\r"); // Save & apply.
+		await Promise.resolve();
+
+		expect(saved?.advisors).toEqual([{ name: "Reviewer", reviewMode: "agent-end", reviewInterval: 3 }]);
+	});
+});
+
+describe("advisor sync backlog picker", () => {
 	beforeAll(async () => {
 		const theme = await getThemeByName("dark");
 		if (!theme) throw new Error("theme unavailable");
@@ -44,6 +83,98 @@ describe("advisor config editor warnings and synthetic default row", () => {
 			notify: () => {},
 		});
 
+	it("applies an explicit strict override through the picker and saves it", async () => {
+		let saved: WatchdogConfigDoc | undefined;
+		const overlay = buildOverlay({ advisors: [{ name: "Reviewer" }] }, doc => {
+			saved = structuredClone(doc);
+		});
+
+		overlay.handleInput("\r"); // Advisor detail.
+		for (let i = 0; i < 5; i++) overlay.handleInput("\x1b[B");
+		overlay.handleInput("\r"); // Sync backlog picker (inherit selected).
+		for (let i = 0; i < 5; i++) overlay.handleInput("\x1b[B");
+		overlay.handleInput("\r"); // Pick strict.
+		overlay.handleInput("\x1b"); // Back to roster.
+		for (let i = 0; i < 4; i++) overlay.handleInput("\x1b[B");
+		overlay.handleInput("\r"); // Save & apply.
+		await Promise.resolve();
+
+		expect(saved?.advisors).toEqual([{ name: "Reviewer", syncBacklog: "strict" }]);
+	});
+
+	it("clears an explicit override back to inherit", async () => {
+		let saved: WatchdogConfigDoc | undefined;
+		const overlay = buildOverlay({ advisors: [{ name: "Reviewer", syncBacklog: "off" }] }, doc => {
+			saved = structuredClone(doc);
+		});
+
+		overlay.handleInput("\r"); // Advisor detail.
+		for (let i = 0; i < 5; i++) overlay.handleInput("\x1b[B");
+		overlay.handleInput("\r"); // Sync backlog picker (off selected).
+		overlay.handleInput("\x1b[A"); // Up to inherit.
+		overlay.handleInput("\r"); // Pick inherit.
+		overlay.handleInput("\x1b"); // Back to roster.
+		for (let i = 0; i < 4; i++) overlay.handleInput("\x1b[B");
+		overlay.handleInput("\r"); // Save & apply.
+		await Promise.resolve();
+
+		expect(saved?.advisors).toEqual([{ name: "Reviewer" }]);
+	});
+
+	it("keeps a sync backlog edit on the seeded default row instead of discarding the roster", async () => {
+		let saved: WatchdogConfigDoc | undefined;
+		const overlay = buildOverlay({ advisors: [] }, doc => {
+			saved = structuredClone(doc);
+		});
+
+		overlay.handleInput("\r"); // Seeded "default" advisor detail.
+		for (let i = 0; i < 5; i++) overlay.handleInput("\x1b[B");
+		overlay.handleInput("\r"); // Sync backlog picker (inherit selected).
+		for (let i = 0; i < 5; i++) overlay.handleInput("\x1b[B");
+		overlay.handleInput("\r"); // Pick strict.
+		overlay.handleInput("\x1b"); // Back to roster.
+		for (let i = 0; i < 4; i++) overlay.handleInput("\x1b[B");
+		overlay.handleInput("\r"); // Save & apply.
+		await Promise.resolve();
+
+		// A real edit must survive: the seeded row is no longer synthetic, so the
+		// save must not collapse the roster to empty (which would delete the file).
+		expect(saved?.advisors).toEqual([{ name: "default", syncBacklog: "strict" }]);
+	});
+
+	it("edits cadence from the native prefs page, saving defaults and inherit as omitted fields", async () => {
+		let saved: WatchdogConfigDoc | undefined;
+		const overlay = buildOverlay({ advisors: [{ name: "Reviewer", syncBacklog: "off" }] }, doc => {
+			saved = structuredClone(doc);
+		});
+		const change = (item: string, value: string | number | null) =>
+			overlay.handleNativeEvent({ type: "change", key: "", item, value });
+
+		overlay.handleNativeEvent({ type: "action", key: "", act: "page", value: "advisor:0", mods: [] });
+		change("reviewMode", "agent-end");
+		change("reviewInterval", 3);
+		change("reviewInterval", null); // Reset to the default interval.
+		change("syncBacklog", "inherit");
+		overlay.handleNativeEvent({ type: "action", key: "", act: "save", mods: [] });
+		await Promise.resolve();
+
+		expect(saved?.advisors).toEqual([{ name: "Reviewer", reviewMode: "agent-end" }]);
+	});
+
+	it("docks as a side sheet like /settings only where the terminal draws prefs with aside", () => {
+		const overlay = buildOverlay({ advisors: [] }, () => {});
+		const cx: DescribeContext = {
+			cols: 120,
+			reduceMotion: false,
+			dark: true,
+			supports: () => true,
+			feature: () => true,
+		};
+		expect(overlay.nativeSheet(cx)).toBe(true);
+		expect(overlay.nativeSheet({ ...cx, feature: name => name !== "aside" })).toBe(false);
+		expect(overlay.nativeSheet({ ...cx, supports: kind => kind !== "prefs" })).toBe(false);
+	});
+
 	it("still drops the untouched seeded default row on save", async () => {
 		let saved: WatchdogConfigDoc | undefined;
 		const overlay = buildOverlay({ advisors: [] }, doc => {
@@ -55,6 +186,22 @@ describe("advisor config editor warnings and synthetic default row", () => {
 		await Promise.resolve();
 
 		expect(saved?.advisors).toEqual([]);
+	});
+
+	it("preserves a real default advisor carrying only maxNotesPerUpdate on save", async () => {
+		let saved: WatchdogConfigDoc | undefined;
+		const overlay = buildOverlay({ advisors: [{ name: "default", maxNotesPerUpdate: 2 }] }, doc => {
+			saved = structuredClone(doc);
+		});
+
+		for (let i = 0; i < 4; i++) overlay.handleInput("\x1b[B");
+		overlay.handleInput("\r"); // Save & apply without touching the row.
+		await Promise.resolve();
+
+		// The row is a real roster entry (per-advisor budget, not editable in the
+		// overlay), not the synthetic seed: save must not collapse the roster to
+		// empty, which would silently delete the entry from the file.
+		expect(saved?.advisors).toEqual([{ name: "default", maxNotesPerUpdate: 2 }]);
 	});
 
 	it("surfaces the newly active file's warnings on scope switch, and only there", async () => {

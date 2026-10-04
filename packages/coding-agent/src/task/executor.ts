@@ -9,12 +9,19 @@ import path from "node:path";
 import type { AgentEvent, AgentIdentity, AgentMessage, AgentTelemetryConfig } from "@oh-my-pi/pi-agent-core";
 import { AgentBusyError, EventLoopKeepalive, recordHandoff, resolveTelemetry } from "@oh-my-pi/pi-agent-core";
 import type { Api, Model, ServiceTierByFamily, Usage } from "@oh-my-pi/pi-ai";
-import { logger, popLoopPhase, prompt, pushLoopPhase, untilAborted } from "@oh-my-pi/pi-utils";
+import { isRecord, logger, popLoopPhase, prompt, pushLoopPhase, sanitizeText, untilAborted } from "@oh-my-pi/pi-utils";
 import { ASYNC_JOB_MANAGER_SHUTDOWN_REASON, AsyncJobError, AsyncJobManager, type AsyncJobRunResult } from "../async";
 import type { Rule } from "../capability/rule";
 import type { EffectiveExtensionRoots } from "../capability/types";
 import { ModelRegistry } from "../config/model-registry";
 import { formatModelSelectorValue } from "@oh-my-pi/pi-tui/overlays/model-selector";
+import {
+	previewLine,
+	replaceTabs,
+	shortenToolArgumentPaths,
+	TRUNCATE_LENGTHS,
+} from "@oh-my-pi/pi-tui/render/render-utils";
+import { type EditMode, getEditInputPaths } from "@oh-my-pi/pi-tui/tools/edit";
 import {
 	formatModelStringWithRouting,
 	resolveAgentAdvisorSelection,
@@ -33,12 +40,10 @@ import {
 	type ServiceTierInheritSettingValue,
 } from "../config/service-tier";
 import type { CompactionThresholdPair } from "../config/compaction-threshold";
-import { Settings } from "../config/settings";
+import { type OverlayLayers, Settings } from "../config/settings";
 
 import type { ToolPathWithSource } from "../extensibility/custom-tools";
 import type { CustomTool } from "../extensibility/custom-tools/types";
-import { runExtensionCompact, runExtensionSetModel } from "../extensibility/extensions/compact-handler";
-import { getSessionSlashCommands } from "../extensibility/extensions/get-commands-handler";
 import type { PreparedExtension } from "../extensibility/extensions/types";
 import { buildSkillPromptMessage, type Skill } from "../extensibility/skills";
 import type { HindsightSessionState } from "../hindsight/state";
@@ -64,7 +69,7 @@ import {
 import { type ArtifactManager, writeArtifact } from "../session/artifacts";
 import { ASYNC_RESULT_MESSAGE_TYPE } from "../session/async-job-delivery";
 import type { AuthStorage } from "../session/auth-storage";
-import { SKILL_PROMPT_MESSAGE_TYPE, USER_INTERRUPT_LABEL } from "../session/messages";
+import { SKILL_PROMPT_MESSAGE_TYPE } from "../session/messages";
 import { hasConversationalHistory, SessionManager } from "../session/session-manager";
 import { truncateTail } from "@oh-my-pi/pi-tui/tools/streaming-output";
 import {
@@ -86,6 +91,7 @@ import { type EventBus, emitSubagentFrame } from "../utils/event-bus";
 import { trackLateCleanup } from "../utils/late-cleanup";
 import { buildNamedToolChoice } from "../utils/tool-choice";
 import type { WorkspaceTree } from "../workspace-tree";
+import { isCompletionProbeEnabled, startCompletionProbe } from "./completion-probe";
 import { attributeSubagentError } from "./error-attribution";
 import { generateTaskLabel } from "./label";
 import { resolveAgentPrewalkDefault } from "./prewalk";
@@ -131,12 +137,12 @@ import {
 	cfgRetryFallbackChains,
 	cfgDefaultThinkingLevel,
 } from "../session/settings";
-import { cfgModelRoles, cfgDisabledProviders } from "../config/model-settings";
+import { cfgDisabledProviders } from "../config/model-settings";
+import { getRetryFallbackRole, installRetryFallbackRole } from "../session/retry-fallback-chains";
 import { cfgCompactionThresholdPercent, cfgCompactionThresholdTokens } from "../session/context-settings";
 
 export type { YieldItem } from "@oh-my-pi/pi-tui/tools/task";
 
-const MCP_CALL_TIMEOUT_MS = 60_000;
 const TASK_ABORT_CLEANUP_GRACE_MS = 10_000;
 
 /**
@@ -211,7 +217,10 @@ function normalizeModelPatterns(value: string | string[] | undefined): string[] 
 		.filter(Boolean);
 }
 
-const SUBAGENT_RETRY_FALLBACK_ROLE_PREFIX = "subagent:";
+/** Session-scoped role owning subagent `id`'s retry fallback chain; cold revival reinstalls it under this name. */
+export function subagentRetryFallbackRole(id: string): string {
+	return `subagent:${id}`;
+}
 
 interface SubagentRetryFallbackCandidate {
 	model: Model<Api>;
@@ -295,7 +304,6 @@ function installSubagentRetryFallbackChain(args: {
 	);
 	if (selectedIndex < 0) return undefined;
 	const fallbackSelectors = candidates.slice(selectedIndex + 1).map(candidate => candidate.selector);
-	const existingFallbackChains = cfgRetryFallbackChains.get(settings);
 	// A single configured model may reuse its role's (or the default) configured chain, but never an implicit parent fallback.
 	const fallbackChain = fallbackSelectors.length > 0 ? fallbackSelectors : inheritedFallbackChain;
 	if (
@@ -306,27 +314,8 @@ function installSubagentRetryFallbackChain(args: {
 		return undefined;
 	}
 
-	const role = `${SUBAGENT_RETRY_FALLBACK_ROLE_PREFIX}${id}`;
-	const modelRoles: Record<string, string> = {};
-	const existingRoles = settings.getModelRoles();
-	for (const existingRole in existingRoles) {
-		const selector = existingRoles[existingRole];
-		if (selector) {
-			modelRoles[existingRole] = selector;
-		}
-	}
-	modelRoles[role] = candidates[selectedIndex].selector;
-	cfgModelRoles.override(settings, modelRoles);
-	// Insert the task-specific role first so another role assigned to the same model cannot capture fallback routing.
-	const fallbackChains: Record<string, string[]> = {
-		[role]: fallbackChain,
-	};
-	for (const existingRole in existingFallbackChains) {
-		if (existingRole !== role) {
-			fallbackChains[existingRole] = existingFallbackChains[existingRole];
-		}
-	}
-	cfgRetryFallbackChains.override(settings, fallbackChains);
+	const role = subagentRetryFallbackRole(id);
+	installRetryFallbackRole(settings, role, { primary: candidates[selectedIndex].selector, chain: fallbackChain });
 	return role;
 }
 
@@ -384,50 +373,6 @@ export function collectIrcPeerRoster(
 	return { peers, parkedCount, omittedCount };
 }
 
-function withAbortTimeout<T>(
-	promise: Promise<T>,
-	timeoutMs: number,
-	signal?: AbortSignal,
-	timeoutController?: AbortController,
-): Promise<T> {
-	if (signal?.aborted) {
-		return Promise.reject(new ToolAbortError());
-	}
-
-	const { promise: wrappedPromise, resolve, reject } = Promise.withResolvers<T>();
-	let settled = false;
-	const timeoutId = setTimeout(() => {
-		if (settled) return;
-		settled = true;
-		timeoutController?.abort(new DOMException(`MCP tool call timed out after ${timeoutMs}ms`, "TimeoutError"));
-		reject(new Error(`MCP tool call timed out after ${timeoutMs}ms`));
-	}, timeoutMs);
-
-	const onAbort = () => {
-		if (settled) return;
-		settled = true;
-		clearTimeout(timeoutId);
-		timeoutController?.abort();
-		reject(new ToolAbortError());
-	};
-
-	if (signal) {
-		signal.addEventListener("abort", onAbort, { once: true });
-	}
-
-	promise.then(resolve, reject).finally(() => {
-		if (signal) signal.removeEventListener("abort", onAbort);
-		clearTimeout(timeoutId);
-	});
-
-	return wrappedPromise;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-	if (!value || typeof value !== "object") return false;
-	return !Array.isArray(value);
-}
-
 /** Options for subagent execution */
 export interface ExecutorOptions {
 	cwd: string;
@@ -471,6 +416,12 @@ export interface ExecutorOptions {
 	 * if the resolved subagent model has no working credentials. See #985.
 	 */
 	parentActiveModelPattern?: string;
+	/**
+	 * The model patterns are the parent's live selector without a requested
+	 * level, so a `:level` on them is inherited effort that {@link thinkingLevel}
+	 * outranks rather than a level the caller asked for.
+	 */
+	modelInheritsLiveThinkingLevel?: boolean;
 	thinkingLevel?: ConfiguredThinkingLevel;
 	/** Caller-requested coarse effort (`lo`/`med`/`hi`); maps onto the resolved model's supported thinking range and wins over {@link thinkingLevel}. */
 	effort?: TaskEffort;
@@ -767,7 +718,9 @@ export function finalizeSubprocessOutput(args: FinalizeSubprocessOutputArgs): Fi
 				}
 			} else {
 				const { validator, error: schemaError, normalized } = buildOutputValidator(outputSchema);
-				const completeData = assembled.rawText ? assembled.data : parseStringifiedJson(assembled.data ?? null);
+				const submittedData = assembled.rawText ? assembled.data : parseStringifiedJson(assembled.data ?? null);
+				const completeData =
+					mode === "strict" ? (validator?.normalize(submittedData) ?? submittedData) : submittedData;
 				const validation = validator?.validate(completeData);
 				const failure =
 					validation && !validation.success
@@ -871,21 +824,45 @@ export function finalizeSubprocessOutput(args: FinalizeSubprocessOutputArgs): Fi
 	return { rawOutput, exitCode, stderr, abortedViaYield, hasYield, structuredOutput };
 }
 
+function formatToolArgsPreview(value: string, key: string): { value: string; key: string } {
+	const safe = shortenToolArgumentPaths(replaceTabs(sanitizeText(value)), key);
+	return { value: previewLine(safe, TRUNCATE_LENGTHS.CONTENT), key };
+}
+
 /**
- * Extract a short preview from tool args for display.
+ * Extract bounded display arguments after path and terminal sanitation. The key names which argument
+ * was chosen so the renderer can shorten home paths in path-valued arguments without rewriting a
+ * literal search pattern.
  */
-function extractToolArgsPreview(args: Record<string, unknown>): string {
+function extractToolArgsPreview(
+	args: Record<string, unknown>,
+	toolName: string,
+	editMode?: EditMode,
+): { value: string; key: string } | undefined {
 	// Priority order for preview
 	const previewKeys = ["command", "file_path", "path", "pattern", "query", "url", "task", "prompt"];
-
+	const isEdit = toolName === "edit" || toolName === "apply_patch";
+	if (isEdit && typeof args.input === "string") {
+		const paths = getEditInputPaths(args.input, editMode);
+		if (paths.length > 0) return formatToolArgsPreview(paths.join(", "), "path");
+	}
+	const compoundEdits = args.edits;
+	if (isEdit && Array.isArray(compoundEdits)) {
+		const paths = new Set<string>();
+		if (typeof args.path === "string" && args.path) paths.add(args.path);
+		for (const edit of compoundEdits) {
+			if (!isRecord(edit)) continue;
+			if (typeof edit.path === "string" && edit.path) paths.add(edit.path);
+			if (typeof edit.rename === "string" && edit.rename) paths.add(edit.rename);
+		}
+		if (paths.size > 0) return formatToolArgsPreview([...paths].join(", "), "path");
+	}
 	for (const key of previewKeys) {
-		if (args[key] && typeof args[key] === "string") {
-			const value = args[key] as string;
-			return value.length > 60 ? `${value.slice(0, 59)}…` : value;
+		if (typeof args[key] === "string" && args[key]) {
+			return formatToolArgsPreview(args[key] as string, key);
 		}
 	}
-
-	return "";
+	return undefined;
 }
 
 function getNumberField(record: Record<string, unknown>, key: string): number | undefined {
@@ -938,8 +915,9 @@ function getUsageTokens(usage: unknown): number {
  * retry, abort handling, and result/provider metadata. The source tool is
  * re-resolved on every call by raw MCP server/tool metadata (not the normalized
  * display name), so a reconnect that swaps the instance in `getTools()` is
- * always honored. The proxy adds only the Task-specific 60s call timeout,
- * combining its abort signal with the caller's around source execution.
+ * always honored. The source transport owns the configured MCP deadline,
+ * including timeout=0; a second Task deadline would silently cap longer calls.
+ * The proxy only races caller cancellation around source execution.
  */
 export function createMCPProxyTools(mcpManager: MCPManager): CustomTool[] {
 	return mcpManager.getTools().map(tool => {
@@ -969,18 +947,13 @@ export function createMCPProxyTools(mcpManager: MCPManager): CustomTool[] {
 					};
 				}
 				try {
-					const timeoutController = new AbortController();
-					const timeoutSignal = timeoutController.signal;
-					const combinedSignal = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal;
-					return await withAbortTimeout(
-						Promise.resolve(source.execute(toolCallId, params, onUpdate, ctx, combinedSignal)),
-						MCP_CALL_TIMEOUT_MS,
-						signal,
-						timeoutController,
-					);
+					return await untilAborted(signal, source.execute(toolCallId, params, onUpdate, ctx, signal));
 				} catch (error) {
 					if (error instanceof ToolAbortError) {
 						throw error;
+					}
+					if (signal?.aborted) {
+						throw new ToolAbortError();
 					}
 					return {
 						content: [
@@ -1135,6 +1108,8 @@ interface RunMonitorArgs {
 	softRequestBudgetNotice: boolean;
 	/** Wall-clock cap in ms; 0 disables the timer. */
 	maxRuntimeMs: number;
+	/** Whether to periodically ask the agent for a completion estimate; see {@link isCompletionProbeEnabled}. */
+	completionProbe: boolean;
 	/** Fires each time a terminal `yield` is recorded for this run. */
 	onYieldAccepted?: () => void;
 }
@@ -1233,6 +1208,7 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 		softRequestBudget,
 		softRequestBudgetNotice,
 		maxRuntimeMs,
+		completionProbe,
 	} = args;
 	const startTime = Date.now();
 
@@ -1272,6 +1248,7 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 	const abortController = new AbortController();
 	const abortSignal = abortController.signal;
 	let activeSession: AgentSession | null = null;
+	let completionProbeStarted = false;
 	let yieldCalled = false;
 	let yieldCallPending = false;
 	/**
@@ -1635,6 +1612,17 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 	};
 
 	/**
+	 * Tool calls in flight, by call id. Sibling calls run concurrently, so one call ending must not
+	 * blank or relabel another that is still running: the live row shows the newest started call, and
+	 * when that call ends it falls back to the oldest one still running.
+	 */
+	const activeTools = new Map<
+		string,
+		{ tool: string; args?: string; argsKey?: string; intent?: string; startMs: number }
+	>();
+	let visibleToolCallId: string | undefined;
+
+	/**
 	 * Soft request budget: steer at the budget, stop the free-running turn at
 	 * 1.5x, and hard-abort {@link BUDGET_STOP_GRACE_REQUESTS} requests later if
 	 * the forced final yield never lands.
@@ -1704,9 +1692,30 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 				} else if (isRecord(event.args)) {
 					startArgs = event.args;
 				}
-				progress.currentToolArgs = extractToolArgsPreview(startArgs);
+				const editMode =
+					event.toolName === "apply_patch"
+						? "apply_patch"
+						: ((activeSession?.getToolByName(event.toolName) as { mode?: EditMode } | undefined)?.mode ??
+							undefined);
+				const preview = extractToolArgsPreview(startArgs, event.toolName, editMode);
+				progress.currentToolArgs = preview?.value;
+				progress.currentToolArgsKey = preview?.key;
 				progress.currentToolStartMs = now;
-				const intent = event.intent?.trim();
+				const intent = event.intent?.trim() || undefined;
+				// Per call: intent-optional tools (e.g. MCP) start without one, and
+				// `lastIntent` would otherwise label them with the previous call's.
+				progress.currentToolIntent = intent;
+				activeTools.set(event.toolCallId, {
+					tool: event.toolName,
+					args: preview?.value,
+					argsKey: preview?.key,
+					intent,
+					startMs: now,
+				});
+				visibleToolCallId = event.toolCallId;
+				// A fast tool may finish before the coalesced update fires.
+				// Publish both lifecycle edges rather than dropping its start.
+				flushProgress = true;
 				if (intent) {
 					progress.lastIntent = intent;
 				}
@@ -1722,10 +1731,15 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 			}
 
 			case "tool_execution_end": {
-				if (progress.currentTool) {
+				const finished = activeTools.get(event.toolCallId);
+				activeTools.delete(event.toolCallId);
+				if (finished) {
 					progress.recentTools.unshift({
-						tool: progress.currentTool,
-						args: progress.currentToolArgs || "",
+						tool: finished.tool,
+						args: finished.args ?? "",
+						argsKey: finished.argsKey,
+						intent: finished.intent,
+						isError: event.isError,
 						endMs: now,
 					});
 					// Keep only last 5
@@ -1733,9 +1747,16 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 						progress.recentTools.pop();
 					}
 				}
-				progress.currentTool = undefined;
-				progress.currentToolArgs = undefined;
-				progress.currentToolStartMs = undefined;
+				if (visibleToolCallId === event.toolCallId) {
+					const remaining = activeTools.entries().next().value;
+					visibleToolCallId = remaining?.[0];
+					const visible = remaining?.[1];
+					progress.currentTool = visible?.tool;
+					progress.currentToolArgs = visible?.args;
+					progress.currentToolArgsKey = visible?.argsKey;
+					progress.currentToolIntent = visible?.intent;
+					progress.currentToolStartMs = visible?.startMs;
+				}
 				// The finalized TaskToolDetails will be captured below into
 				// `extractedToolData.task`; drop the in-flight snapshot so the
 				// renderer doesn't double-count it against the final entry.
@@ -2139,6 +2160,19 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 		setActiveSession: session => {
 			activeSession = session;
 			publishAdvisorState(session);
+			if (session && completionProbe && !completionProbeStarted) {
+				completionProbeStarted = true;
+				startCompletionProbe({
+					session: () => activeSession,
+					signal: AbortSignal.any([listenerSignal, abortSignal]),
+					onEstimate: (percent, cost) => {
+						if (resolved) return;
+						progress.completionPercent = percent;
+						progress.cost += cost;
+						scheduleProgress(true);
+					},
+				});
+			}
 		},
 		takeActiveSession: () => {
 			const session = activeSession;
@@ -3011,6 +3045,8 @@ export function attachIrcWakeTurnMonitor(session: AgentSession, options: IrcWake
 			softRequestBudget: 0,
 			softRequestBudgetNotice: false,
 			maxRuntimeMs,
+			// Autonomous wake turns answer a peer message; too short to probe.
+			completionProbe: false,
 			onYieldAccepted: registerWakeJob,
 		});
 
@@ -3300,6 +3336,8 @@ export interface FollowUpTurnOptions {
 	artifactsDir?: string;
 	/** Wall-clock cap in ms for this turn; 0 disables. */
 	maxRuntimeMs?: number;
+	/** Periodically ask for a completion estimate during this turn; see {@link isCompletionProbeEnabled}. */
+	completionProbe?: boolean;
 	/** Workpool items accepted by the child yield tool during this turn. */
 	workPoolYieldItems?: WorkPoolYieldItem[];
 }
@@ -3386,6 +3424,7 @@ export async function runSubagentFollowUpTurn(options: FollowUpTurnOptions): Pro
 		softRequestBudget: 0,
 		softRequestBudgetNotice: false,
 		maxRuntimeMs: options.maxRuntimeMs ?? 0,
+		completionProbe: options.completionProbe ?? false,
 	});
 
 	const startedPayload = {
@@ -3467,6 +3506,195 @@ export async function runSubagentFollowUpTurn(options: FollowUpTurnOptions): Pro
 		sessionFile,
 		startTime,
 	});
+}
+
+/** Inputs of a subagent's rendered system prompt, fixed at spawn. */
+interface SubagentPromptInputs {
+	id: string;
+	agentSystemPrompt: string;
+	context: string;
+	planReference: string;
+	planReferencePath: string;
+	worktree: string;
+	outputSchema: unknown;
+	outputSchemaOverridesAgent: boolean;
+	ircEnabled: boolean;
+	/** Root resolved by the latest roster ensure; peer rows render scoped to it, so a session switch hides stale parked trees. */
+	ircRoot: { sessionFile?: string };
+}
+
+/**
+ * The spawn-time inputs of a subagent session. The live run and the lifecycle reviver both build
+ * their {@link createAgentSession} options from it, so the reviver retains this plain capture
+ * rather than the spawning run's options, monitor, abort signals, progress sinks or settings.
+ */
+interface SubagentSessionSpec {
+	options: Omit<
+		CreateAgentSessionOptions,
+		| "settings"
+		| "sessionManager"
+		| "expectedAgentRef"
+		| "systemPrompt"
+		| "resolveServiceTierByFamily"
+		| "onFirstChatDispatch"
+	>;
+	prompt: SubagentPromptInputs;
+}
+
+/** Launch-only session inputs: a revived session restores these from its transcript or goes without. */
+interface SubagentLaunchInputs {
+	workPoolYieldItems: readonly WorkPoolYieldItem[];
+	resolveServiceTierByFamily?: CreateAgentSessionOptions["resolveServiceTierByFamily"];
+	onFirstChatDispatch?: () => void;
+}
+
+function buildSubagentSessionOptions(
+	spec: SubagentSessionSpec,
+	settings: Settings,
+	sessionManager: SessionManager,
+	expectedAgentRef: CreateAgentSessionOptions["expectedAgentRef"],
+	launch?: SubagentLaunchInputs,
+): CreateAgentSessionOptions {
+	const inputs = spec.prompt;
+	return {
+		...spec.options,
+		settings,
+		sessionManager,
+		expectedAgentRef,
+		resolveServiceTierByFamily: launch?.resolveServiceTierByFamily,
+		onFirstChatDispatch: launch?.onFirstChatDispatch,
+		systemPrompt: defaultPrompt => {
+			const ircRoster = inputs.ircEnabled
+				? collectIrcPeerRoster(AgentRegistry.global(), inputs.id, inputs.ircRoot.sessionFile)
+				: undefined;
+			const subagentPrompt = prompt.render(subagentSystemPromptTemplate, {
+				agent: inputs.agentSystemPrompt,
+				context: inputs.context,
+				planReference: inputs.planReference,
+				planReferencePath: inputs.planReferencePath,
+				worktree: inputs.worktree,
+				outputSchema: inputs.outputSchema,
+				outputSchemaOverridesAgent: inputs.outputSchemaOverridesAgent,
+				// Read the live item set through the registry instead of capturing the session, which
+				// would pin its whole graph past park. A revive builds while the registry session is
+				// null, so it renders the cleared set rather than the launch-time pooled instructions.
+				workPoolYieldItems:
+					AgentRegistry.global().get(inputs.id)?.session?.getWorkPoolYieldItems?.() ??
+					launch?.workPoolYieldItems ??
+					[],
+				ircPeers: ircRoster?.peers ?? [],
+				ircParkedCount: ircRoster?.parkedCount ?? 0,
+				ircOmittedCount: ircRoster?.omittedCount ?? 0,
+				ircSelfId: inputs.ircEnabled ? inputs.id : "",
+			});
+			// Per-spawn text (context, worktree, IRC roster) goes after the trailing
+			// `<project-context>` block so spawns of the same agent share the static
+			// prompt prefix as a cache hit.
+			return [...defaultPrompt, subagentPrompt];
+		},
+	};
+}
+
+/** Re-resolves the IRC roster root a subagent's prompt scopes its peer rows to. */
+async function refreshSubagentIrcRoot(
+	inputs: SubagentPromptInputs,
+	sessionManager: SessionManager,
+	sessionFile: string | null,
+): Promise<void> {
+	if (!inputs.ircEnabled) return;
+	const registry = AgentRegistry.global();
+	inputs.ircRoot.sessionFile = await ensurePersistedRoster(
+		registry,
+		sessionManager.getSessionFile() ??
+			sessionFile ??
+			registry.get(inputs.id)?.sessionFile ??
+			registry.get(MAIN_AGENT_ID)?.sessionFile,
+	);
+}
+
+/** Recipe for a subagent's settings overlay: its parent plus the overlay's own writes. */
+interface SubagentSettingsRecipe {
+	parent: Settings;
+	layers: OverlayLayers;
+	rootThresholds: CompactionThresholdPair | undefined;
+}
+
+function captureSubagentSettings(parent: Settings, settings: SubagentChainSettings): SubagentSettingsRecipe {
+	return { parent, layers: settings.overlayLayers(), rootThresholds: settings[kRootCompactionThresholds] };
+}
+
+function restoreSubagentSettings(recipe: SubagentSettingsRecipe): Settings {
+	const settings: SubagentChainSettings = recipe.parent.restoreOverlay(recipe.layers);
+	settings[kRootCompactionThresholds] = recipe.rootThresholds;
+	return settings;
+}
+
+/** Everything the lifecycle reviver of a kept-alive subagent needs, captured explicitly. */
+interface WarmReviveCapture {
+	sessionFile: string;
+	spec: SubagentSessionSpec;
+	/** Re-captured whenever the live session is disposed, so a revive restores its latest settings writes. */
+	settings: SubagentSettingsRecipe;
+	parentArtifactManager: ArtifactManager | undefined;
+	/** Todos are parent-owned and stripped from subagents, except under prewalk (its todo gate needs them). */
+	keepTodo: boolean;
+	wake: IrcWakeTurnMonitorOptions;
+}
+
+/** Keeps `capture.settings` current with `session`'s overlay writes until the session is disposed. */
+function trackSubagentSettings(session: AgentSession, capture: WarmReviveCapture): void {
+	const parent = capture.settings.parent;
+	session.addDisposer(() => {
+		capture.settings = captureSubagentSettings(parent, session.settings);
+	});
+}
+
+/**
+ * Lifecycle reviver for a parked subagent: park closed the JSONL writer, so reopening takes the
+ * single-writer lock cleanly and restores the full message history (createAgentSession →
+ * agent.replaceMessages). Isolated runs keep their worktree for the same lifecycle, so they use
+ * this path too. Built at module scope and handed nothing but `capture`: JSC keeps an enclosing
+ * function's `arguments` reachable from its arrow closures, so any extra parameter would be pinned.
+ */
+function createWarmSubagentReviver(capture: WarmReviveCapture): AgentReviver {
+	return async expectedAgentRef => {
+		const { id } = capture.spec.prompt;
+		const reopened = await SessionManager.open(capture.sessionFile, undefined, undefined, {
+			suppressBreadcrumb: true,
+			throwIfMissing: true,
+		});
+		if (!hasConversationalHistory(reopened.getEntries())) {
+			await reopened.close();
+			throw new Error(
+				`Cannot revive subagent "${id}": session file "${capture.sessionFile}" has no message history ` +
+					`(truncated to header/session_init). The agent was not revived.`,
+			);
+		}
+		if (capture.parentArtifactManager) {
+			reopened.adoptArtifactManager(capture.parentArtifactManager);
+		}
+		await refreshSubagentIrcRoot(capture.spec.prompt, reopened, capture.sessionFile);
+		const { session: revived } = await createAgentSession(
+			buildSubagentSessionOptions(
+				capture.spec,
+				restoreSubagentSettings(capture.settings),
+				reopened,
+				expectedAgentRef,
+			),
+		);
+		trackSubagentSettings(revived, capture);
+		// Re-run the executor's extension wiring on the rebuilt session. Skipping it leaves the
+		// runner pre-init, so a `tool_call` handler touching a runtime action trips the
+		// fail-closed gate and blocks every tool (including `yield`) in the revived agent (issue #8824).
+		await initializeExtensions(revived, {
+			reportSendError: (action, err) => logger.error("Extension send failed", { action, error: err.message }),
+			reportRuntimeError: err => logger.error("Extension error", { path: err.extensionPath, error: err.error }),
+			filterActiveTools: toolNames => (capture.keepTodo ? toolNames : toolNames.filter(name => name !== "todo")),
+		});
+		AgentRegistry.global().syncSessionStatus(id, revived);
+		attachIrcWakeTurnMonitor(revived, capture.wake);
+		return revived;
+	};
 }
 
 /**
@@ -3636,29 +3864,28 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 		softRequestBudget,
 		softRequestBudgetNotice,
 		maxRuntimeMs,
+		completionProbe: isCompletionProbeEnabled(settings, parentDepth),
 	});
 	const progress = monitor.progress;
 	let unsubscribe: (() => void) | null = null;
 	let registryAbortUnsubscribe: (() => void) | null = null;
 	let reviveSession: AgentReviver | null = null;
-	const installIrcWakeTurnMonitor = (target: AgentSession): void => {
-		attachIrcWakeTurnMonitor(target, {
-			id,
-			index,
-			agent,
-			description: options.description,
-			modelOverride,
-			modelRole,
-			eventBus: options.eventBus,
-			subagentEventBus: options.subagentEventBus,
-			parentToolCallId: options.parentToolCallId,
-			sessionFile: subtaskSessionFile,
-			maxRuntimeMs,
-			outputSchema,
-			outputSchemaMode: options.outputSchemaMode,
-			outputSchemaSource: options.outputSchemaSource,
-			artifactsDir: options.artifactsDir,
-		});
+	const wakeOptions: IrcWakeTurnMonitorOptions = {
+		id,
+		index,
+		agent,
+		description: options.description,
+		modelOverride,
+		modelRole,
+		eventBus: options.eventBus,
+		subagentEventBus: options.subagentEventBus,
+		parentToolCallId: options.parentToolCallId,
+		sessionFile: subtaskSessionFile,
+		maxRuntimeMs,
+		outputSchema,
+		outputSchemaMode: options.outputSchemaMode,
+		outputSchemaSource: options.outputSchemaSource,
+		artifactsDir: options.artifactsDir,
 	};
 
 	const runSubagent = async (): Promise<{
@@ -3807,8 +4034,20 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				options.effort !== undefined
 					? resolveTaskEffortLevel(model, options.effort, spawnEffortCeiling)
 					: undefined;
+			// The parent's live effort rides inherited selectors (and the auth
+			// fallback) as a `:level` suffix; it ranks below the agent definition's
+			// own level so inheriting the parent's model does not override it.
+			const inheritedThinkingLevel =
+				explicitThinkingLevel && (authFallbackUsed || options.modelInheritsLiveThinkingLevel === true);
+			const requestedThinkingLevel =
+				explicitThinkingLevel && !inheritedThinkingLevel ? resolvedThinkingLevel : undefined;
+			// Precedence: caller `effort` > requested `:level` suffix on the resolved
+			// model pattern > agent-definition default (e.g. task's `auto`) >
+			// inherited parent effort / pattern-derived level.
+			const effectiveThinkingLevel = effortLevel ?? requestedThinkingLevel ?? thinkingLevel ?? resolvedThinkingLevel;
 			if (model) {
-				const displayLevel = effortLevel ?? (explicitThinkingLevel ? resolvedThinkingLevel : undefined);
+				const displayLevel =
+					effortLevel ?? requestedThinkingLevel ?? (inheritedThinkingLevel ? effectiveThinkingLevel : undefined);
 				progress.resolvedModelIdentity = formatModelStringWithRouting(model);
 				progress.resolvedThinkingLevel = displayLevel;
 				progress.resolvedModel =
@@ -3816,11 +4055,6 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 						? formatModelSelectorValue(progress.resolvedModelIdentity, displayLevel)
 						: progress.resolvedModelIdentity;
 			}
-			// Precedence: caller `effort` > explicit `:level` suffix on the resolved
-			// model pattern > agent-definition default (e.g. task's `auto`) >
-			// pattern-derived level.
-			const effectiveThinkingLevel =
-				effortLevel ?? (explicitThinkingLevel ? resolvedThinkingLevel : (thinkingLevel ?? resolvedThinkingLevel));
 			resolvedAt = performance.now();
 			const effectiveCwd = worktree ?? cwd;
 			const sessionManagerPromise = sessionFile
@@ -3908,140 +4142,102 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			}
 
 			const { normalized: normalizedOutputSchema } = normalizeSchema(outputSchema);
-			// Root resolved by the latest roster ensure; the prompt callback renders
-			// live peer rows scoped to it, so a session switch hides stale parked trees.
-			let ircRootSessionFile: string | undefined;
-
-			// Captured by the lifecycle reviver: rebuilding an equivalent session from
-			// the same JSONL file re-invokes createAgentSession with the exact options
-			// of the original run (same agent id, tools, model, system prompt,
-			// artifacts dir) — only the SessionManager differs.
-			const buildSubagentSessionOptions = (
-				sessionManagerForRun: SessionManager,
-				expectedAgentRef: CreateAgentSessionOptions["expectedAgentRef"],
-				// Parked workers always revive with an empty runtime yield set; a
-				// pooled follow-up reinstalls its items explicitly before turning.
-				// Without this, the registry lookup below misses (session === null
-				// while the replacement builds) and the revived prompt resurrects
-				// the launch-time pooled instructions against an ordinary runtime.
-				forRevive = false,
-			): CreateAgentSessionOptions => ({
-				cwd: worktree ?? cwd,
-				additionalDirectories: worktree !== undefined ? undefined : options.additionalDirectories,
-				authStorage,
-				modelRegistry,
-				getApiKey: options.getApiKey,
-				credentialSourceSessionId: options.credentialSourceSessionId,
-				inheritedSessionAgents: options.inheritedSessionAgents,
-				settings: subagentSettings,
-				model,
-				modelPattern: model || modelOverride === undefined ? undefined : modelPatterns,
-				modelPatternAuthFallback:
-					model || modelOverride === undefined ? undefined : options.parentActiveModelPattern,
-				modelPatternFallbackRole:
-					model || modelOverride === undefined ? undefined : `${SUBAGENT_RETRY_FALLBACK_ROLE_PREFIX}${id}`,
-				modelPatternDefaultFallbackChain:
-					model || modelOverride === undefined ? undefined : inheritedRetryFallbackChain,
-				thinkingLevel: effectiveThinkingLevel,
-				thinkingLevelCeiling: spawnEffortCeiling,
-				// Subagents are short-lived; never schedule background warm requests.
-				cacheWarming: false,
-				// A revived session restores the tier history it persisted (including
-				// tiers a provider rejected or an extension changed since spawn); only
-				// the fresh spawn resolves the per-agent override.
-				resolveServiceTierByFamily: forRevive ? undefined : resolveServiceTierByFamily,
-				toolNames,
-				outputSchema,
-				outputSchemaMode: options.outputSchemaMode,
-				restrictToolNames: options.restrictToolNames,
-				requireYieldTool: true,
-				contextFiles: options.contextFiles,
-				skills: options.skills,
-				promptTemplates: options.promptTemplates,
-				workspaceTree: options.workspaceTree,
-				rules: options.rules,
-				extensionRoots: options.extensionRoots,
-				preloadedExtensionPaths: restrictToolNames ? [] : options.preloadedExtensionPaths,
-				preloadedPreparedExtensions: options.preloadedPreparedExtensions,
-				preloadedCustomToolPaths: restrictToolNames ? [] : options.preloadedCustomToolPaths,
-				systemPrompt: defaultPrompt => {
-					const ircRoster = ircEnabled
-						? collectIrcPeerRoster(AgentRegistry.global(), id, ircRootSessionFile)
-						: undefined;
-					const subagentPrompt = prompt.render(subagentSystemPromptTemplate, {
-						agent: agent.systemPrompt,
-						context: options.context?.trim() ?? "",
-						planReference: options.planReference?.content ?? "",
-						planReferencePath: options.planReference?.path ?? "",
-						worktree: worktree ?? "",
-						outputSchema: normalizedOutputSchema,
-						outputSchemaOverridesAgent: options.outputSchemaOverridesAgent === true,
-						// Read the live item set through the registry instead of capturing
-						// the session: this callback outlives the turn via the lifecycle
-						// reviver, and a captured session would pin its whole graph past
-						// TTL park disposal. Parked revivals build while the registry
-						// session is null, so render the cleared set rather than
-						// resurrecting the launch-time pooled instructions.
-						workPoolYieldItems:
-							AgentRegistry.global().get(id)?.session?.getWorkPoolYieldItems?.() ??
-							(forRevive ? [] : (options.workPoolYieldItems ?? [])),
-						ircPeers: ircRoster?.peers ?? [],
-						ircParkedCount: ircRoster?.parkedCount ?? 0,
-						ircOmittedCount: ircRoster?.omittedCount ?? 0,
-						ircSelfId: ircEnabled ? id : "",
-					});
-					// Per-spawn text (context, worktree, IRC roster) goes after the
-					// trailing `<project-context>` block so spawns of the same agent
-					// share the static prompt prefix as a cache hit.
-					return [...defaultPrompt, subagentPrompt];
+			// Rebuilding an equivalent session from the same JSONL file re-invokes
+			// createAgentSession with this spec (same agent id, tools, model, system
+			// prompt, artifacts dir) — only the SessionManager and settings differ.
+			const sessionSpec: SubagentSessionSpec = {
+				options: {
+					cwd: worktree ?? cwd,
+					additionalDirectories: worktree !== undefined ? undefined : options.additionalDirectories,
+					authStorage,
+					modelRegistry,
+					getApiKey: options.getApiKey,
+					credentialSourceSessionId: options.credentialSourceSessionId,
+					inheritedSessionAgents: options.inheritedSessionAgents,
+					model,
+					modelPattern: model || modelOverride === undefined ? undefined : modelPatterns,
+					modelPatternAuthFallback:
+						model || modelOverride === undefined ? undefined : options.parentActiveModelPattern,
+					modelPatternFallbackRole:
+						model || modelOverride === undefined ? undefined : subagentRetryFallbackRole(id),
+					modelPatternDefaultFallbackChain:
+						model || modelOverride === undefined ? undefined : inheritedRetryFallbackChain,
+					thinkingLevel: effectiveThinkingLevel,
+					thinkingLevelCeiling: spawnEffortCeiling,
+					// Subagents are short-lived; never schedule background warm requests.
+					cacheWarming: false,
+					toolNames,
+					outputSchema,
+					outputSchemaMode: options.outputSchemaMode,
+					restrictToolNames: options.restrictToolNames,
+					requireYieldTool: true,
+					contextFiles: options.contextFiles,
+					skills: options.skills,
+					promptTemplates: options.promptTemplates,
+					workspaceTree: options.workspaceTree,
+					rules: options.rules,
+					extensionRoots: options.extensionRoots,
+					preloadedExtensionPaths: restrictToolNames ? [] : options.preloadedExtensionPaths,
+					preloadedPreparedExtensions: options.preloadedPreparedExtensions,
+					preloadedCustomToolPaths: restrictToolNames ? [] : options.preloadedCustomToolPaths,
+					hasUI: false,
+					prewalk,
+					spawns: spawnsEnv,
+					taskDepth: childDepth,
+					// The whole spawn tree shares the root session's observability bus,
+					// so nested lifecycle/progress/event frames reach its surfaces
+					// without leaking into another root session's traffic.
+					subagentEventBus: options.subagentEventBus,
+					parentHindsightSessionState: options.parentHindsightSessionState,
+					parentMnemopiSessionState: options.parentMnemopiSessionState,
+					parentTaskPrefix: id,
+					parentAgentId: options.parentAgentId,
+					agentId: id,
+					agentDisplayName: agent.name,
+					agentName: agent.name,
+					enableLsp: lspEnabled,
+					enableIrc: options.enableIrc,
+					skipPythonPreflight,
+					enableMCP,
+					mcpManager,
+					customTools: sessionCustomTools.length > 0 ? sessionCustomTools : undefined,
+					localProtocolOptions: options.localProtocolOptions,
+					telemetry: subagentTelemetry,
 				},
-				sessionManager: sessionManagerForRun,
-				hasUI: false,
-				prewalk,
-				spawns: spawnsEnv,
-				taskDepth: childDepth,
-				// The whole spawn tree shares the root session's observability bus,
-				// so nested lifecycle/progress/event frames reach its surfaces
-				// without leaking into another root session's traffic.
-				subagentEventBus: options.subagentEventBus,
-				parentHindsightSessionState: options.parentHindsightSessionState,
-				parentMnemopiSessionState: options.parentMnemopiSessionState,
-				parentTaskPrefix: id,
-				parentAgentId: options.parentAgentId,
-				agentId: id,
-				agentDisplayName: agent.name,
-				agentName: agent.name,
-				expectedAgentRef,
-				enableLsp: lspEnabled,
-				enableIrc: options.enableIrc,
-				skipPythonPreflight,
-				enableMCP,
-				mcpManager,
-				customTools: sessionCustomTools.length > 0 ? sessionCustomTools : undefined,
-				localProtocolOptions: options.localProtocolOptions,
-				telemetry: subagentTelemetry,
-				onFirstChatDispatch: () => {
-					firstChatDispatchAt ??= performance.now();
+				prompt: {
+					id,
+					agentSystemPrompt: agent.systemPrompt,
+					context: options.context?.trim() ?? "",
+					planReference: options.planReference?.content ?? "",
+					planReferencePath: options.planReference?.path ?? "",
+					worktree: worktree ?? "",
+					outputSchema: normalizedOutputSchema,
+					outputSchemaOverridesAgent: options.outputSchemaOverridesAgent === true,
+					ircEnabled,
+					ircRoot: {},
 				},
-			});
+			};
 
 			const sessionManager = await awaitAbortable(sessionManagerPromise);
 			if (options.parentArtifactManager) {
 				sessionManager.adoptArtifactManager(options.parentArtifactManager);
 			}
 			sessionOpenedAt = performance.now();
-			if (ircEnabled) {
-				ircRootSessionFile = await ensurePersistedRoster(
-					AgentRegistry.global(),
-					sessionManager.getSessionFile() ??
-						sessionFile ??
-						AgentRegistry.global().get(id)?.sessionFile ??
-						AgentRegistry.global().get(MAIN_AGENT_ID)?.sessionFile,
-				);
-			}
+			await refreshSubagentIrcRoot(sessionSpec.prompt, sessionManager, sessionFile);
 
 			const hasExistingModelRole = sessionManager.getLastModelChangeRole() !== undefined;
-			const sessionPromise = createAgentSession(buildSubagentSessionOptions(sessionManager, null));
+			const sessionPromise = createAgentSession(
+				buildSubagentSessionOptions(sessionSpec, subagentSettings, sessionManager, null, {
+					workPoolYieldItems: options.workPoolYieldItems ?? [],
+					// A revived session restores the tier history it persisted (including
+					// tiers a provider rejected or an extension changed since spawn); only
+					// the fresh spawn resolves the per-agent override.
+					resolveServiceTierByFamily,
+					onFirstChatDispatch: () => {
+						firstChatDispatchAt ??= performance.now();
+					},
+				}),
+			);
 			let session: AgentSession;
 			try {
 				({ session } = await awaitAbortable(sessionPromise));
@@ -4086,52 +4282,21 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				// createAgentSession was returning.
 				if (runRef.status === "aborted") monitor.requestAbort("signal");
 			}
+			// Todos are parent-owned bookkeeping and stripped from subagents —
+			// except under prewalk, whose plan nudge + todo gate require the
+			// subagent to commit its own todo list before the hand-off.
+			const isParentOwnedTool = (name: string): boolean => !prewalk && name === "todo";
 			if (sessionFile !== null) {
-				// Lifecycle reviver: park closed the JSONL writer, so reopening takes
-				// the single-writer lock cleanly and restores the full message history
-				// (createAgentSession → agent.replaceMessages). Isolated runs keep their
-				// worktree for the same lifecycle, so they can use this path too.
-				reviveSession = async expectedAgentRef => {
-					const reopened = await SessionManager.open(sessionFile, undefined, undefined, {
-						suppressBreadcrumb: true,
-						throwIfMissing: true,
-					});
-					if (!hasConversationalHistory(reopened.getEntries())) {
-						await reopened.close();
-						throw new Error(
-							`Cannot revive subagent "${id}": session file "${sessionFile}" has no message history ` +
-								`(truncated to header/session_init). The agent was not revived.`,
-						);
-					}
-					if (options.parentArtifactManager) {
-						reopened.adoptArtifactManager(options.parentArtifactManager);
-					}
-					if (ircEnabled) {
-						ircRootSessionFile = await ensurePersistedRoster(
-							AgentRegistry.global(),
-							reopened.getSessionFile() ??
-								sessionFile ??
-								AgentRegistry.global().get(id)?.sessionFile ??
-								AgentRegistry.global().get(MAIN_AGENT_ID)?.sessionFile,
-						);
-					}
-					const { session: revived } = await createAgentSession(
-						buildSubagentSessionOptions(reopened, expectedAgentRef, true),
-					);
-					// Re-run the executor's extension wiring on the rebuilt session.
-					// Skipping it leaves the runner pre-init, so a `tool_call` handler
-					// touching a runtime action trips the fail-closed gate and blocks
-					// every tool (including `yield`) in the revived agent (issue #8824).
-					await initializeExtensions(revived, {
-						reportSendError: (action, err) =>
-							logger.error("Extension send failed", { action, error: err.message }),
-						reportRuntimeError: err =>
-							logger.error("Extension error", { path: err.extensionPath, error: err.error }),
-					});
-					AgentRegistry.global().syncSessionStatus(id, revived);
-					installIrcWakeTurnMonitor(revived);
-					return revived;
+				const reviveCapture: WarmReviveCapture = {
+					sessionFile,
+					spec: sessionSpec,
+					settings: captureSubagentSettings(settings, subagentSettings),
+					parentArtifactManager: options.parentArtifactManager,
+					keepTodo: prewalk !== undefined,
+					wake: wakeOptions,
 				};
+				trackSubagentSettings(session, reviveCapture);
+				reviveSession = createWarmSubagentReviver(reviveCapture);
 			}
 
 			// Emit lifecycle start event
@@ -4148,10 +4313,6 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			};
 			emitSubagentFrame(options.eventBus, options.subagentEventBus, TASK_SUBAGENT_LIFECYCLE_CHANNEL, startedPayload);
 
-			// Todos are parent-owned bookkeeping and stripped from subagents —
-			// except under prewalk, whose plan nudge + todo gate require the
-			// subagent to commit its own todo list before the hand-off.
-			const isParentOwnedTool = (name: string): boolean => !prewalk && name === "todo";
 			const subagentToolNames = session.getEnabledToolNames();
 			const filteredSubagentTools = subagentToolNames.filter(name => !isParentOwnedTool(name));
 			if (filteredSubagentTools.length !== subagentToolNames.length) {
@@ -4177,6 +4338,9 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				agent: agent.name,
 				modelRole: modelRole ?? resolveExplicitModelRole(modelOverride ?? agent.model, subagentSettings),
 				resolvedModel: progress.resolvedModel,
+				// Deferred model resolution installs this role inside createAgentSession,
+				// so read it back from the settings both install paths write.
+				retryFallback: getRetryFallbackRole(subagentSettings, subagentRetryFallbackRole(id)),
 				readOnly: isReadOnlyAgent(agent),
 				spawns: spawnsEnv,
 				readSummarize: agent.readSummarize,
@@ -4205,67 +4369,23 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				void monitor.abortActiveSession();
 			}
 
+			// No closure in this block may capture `session`: JSC gives every closure in a
+			// block one shared scope object, so the lifecycle reviver built above would
+			// then pin the parked, disposed session for the life of the process.
 			const pendingExtensionMessages: Array<Promise<unknown>> = [];
-			const extensionRunner = session.extensionRunner;
-			if (extensionRunner) {
-				extensionRunner.initialize(
-					{
-						sendMessage: (message, options) => {
-							const sendPromise = session.sendCustomMessage(message, options).catch(e => {
-								logger.error("Extension sendMessage failed", {
-									error: e instanceof Error ? e.message : String(e),
-								});
-							});
-							pendingExtensionMessages.push(sendPromise);
-						},
-						sendUserMessage: (content, options) => {
-							const sendPromise = session.sendUserMessage(content, options).catch(e => {
-								logger.error("Extension sendUserMessage failed", {
-									error: e instanceof Error ? e.message : String(e),
-								});
-							});
-							pendingExtensionMessages.push(sendPromise);
-						},
-						appendEntry: (customType, data) => {
-							session.sessionManager.appendCustomEntry(customType, data);
-						},
-						setLabel: (targetId, label) => {
-							session.sessionManager.appendLabelChange(targetId, label);
-						},
-						getActiveTools: () => session.getEnabledToolNames(),
-						getAllTools: () => session.getAllToolInfos(),
-						setActiveTools: (toolNames: string[]) =>
-							session.setActiveToolsByName(toolNames.filter(name => !isParentOwnedTool(name))),
-						getCommands: () => getSessionSlashCommands(session),
-						setModel: model => runExtensionSetModel(session, model),
-						getThinkingLevel: () => session.thinkingLevel,
-						setThinkingLevel: level => session.setThinkingLevel(level),
-						getServiceTiers: () => session.serviceTierByFamily,
-						setServiceTier: (family, tier) => session.setServiceTierFamily(family, tier),
-						getSessionName: () => session.sessionManager.getSessionName(),
-						setSessionName: async name => {
-							await session.sessionManager.setSessionName(name, "user");
-						},
+			await awaitAbortable(
+				initializeExtensions(session, {
+					reportSendError: (action, err) => logger.error("Extension send failed", { action, error: err.message }),
+					reportRuntimeError: err =>
+						logger.error("Extension error", { path: err.extensionPath, error: err.error }),
+					trackExtensionSend: task => {
+						pendingExtensionMessages.push(task.catch(() => {}));
 					},
-					{
-						getModel: () => session.model,
-						isIdle: () => !session.isStreaming,
-						abort: () => session.abort({ reason: USER_INTERRUPT_LABEL }),
-						hasPendingMessages: () => session.queuedMessageCount > 0,
-						shutdown: () => {},
-						getContextUsage: () => session.getContextUsage(),
-						getSystemPrompt: () => session.systemPrompt,
-						runEphemeralTurn: args => session.runEphemeralTurn(args),
-						compact: instructionsOrOptions => runExtensionCompact(session, instructionsOrOptions),
-					},
-				);
-				extensionRunner.onError(err => {
-					logger.error("Extension error", { path: err.extensionPath, error: err.error });
-				});
-				await awaitAbortable(extensionRunner.emit({ type: "session_start" }));
-				while (pendingExtensionMessages.length > 0) {
-					await awaitAbortable(Promise.all(pendingExtensionMessages.splice(0)));
-				}
+					filterActiveTools: toolNames => toolNames.filter(name => !isParentOwnedTool(name)),
+				}),
+			);
+			while (pendingExtensionMessages.length > 0) {
+				await awaitAbortable(Promise.all(pendingExtensionMessages.splice(0)));
 			}
 
 			unsubscribe = monitor.attach(session);
@@ -4378,7 +4498,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			if (session) {
 				monitor.captureSalvage(session);
 				if (options.keepAlive !== false) {
-					installIrcWakeTurnMonitor(session);
+					attachIrcWakeTurnMonitor(session, wakeOptions);
 				}
 				await finalizeSubagentLifecycle({
 					id,

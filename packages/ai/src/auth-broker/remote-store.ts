@@ -17,6 +17,7 @@ import {
 	type OAuthCredential,
 	type OAuthRefreshReason,
 	REMOTE_REFRESH_SENTINEL,
+	type RemoteOAuthCredential,
 	type StoredAuthCredential,
 	type StoredCredentialBlock,
 } from "../auth/types";
@@ -24,7 +25,9 @@ import * as AIError from "../error";
 import type { OAuthCredentials } from "../registry/oauth/types";
 import type { Provider } from "../types";
 import type { ClientUsageIdentity, ObservedUsageEntry, UsageReport } from "../usage";
+import { raceSignal } from "../auth/abort";
 import { type AuthBrokerClient, AuthBrokerError, AuthBrokerStreamUnsupportedError } from "./client";
+import { compareCredentialBlockSnapshots } from "./protocol";
 import type {
 	CredentialBlockSnapshot,
 	RefresherSchedule,
@@ -66,16 +69,6 @@ const BACKGROUND_BACKOFF_INITIAL_MS = 500;
 const BACKGROUND_BACKOFF_MAX_MS = 30_000;
 /** Idle window after the last foreground store use before background sync parks. */
 const BACKGROUND_IDLE_MS = 20_000;
-
-function compareCredentialBlockSnapshots(a: CredentialBlockSnapshot, b: CredentialBlockSnapshot): number {
-	const provider = a.providerKey.localeCompare(b.providerKey);
-	if (provider !== 0) return provider;
-	const scope = a.blockScope.localeCompare(b.blockScope);
-	if (scope !== 0) return scope;
-	const blockedUntil = a.blockedUntilMs - b.blockedUntilMs;
-	if (blockedUntil !== 0) return blockedUntil;
-	return (a.updatedAtMs ?? 0) - (b.updatedAtMs ?? 0);
-}
 
 function toCredentialBlockSnapshot(block: StoredCredentialBlock): CredentialBlockSnapshot {
 	return {
@@ -857,15 +850,7 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 
 	async markCredentialSuspect(credentialId: number, opts: { signal?: AbortSignal } = {}): Promise<void> {
 		this.#noteActivity();
-		const { entry } = await this.#client.refreshCredential(credentialId, opts.signal, "auth-recovery");
-		if (entry.credential.type !== "oauth") {
-			throw new AIError.AuthBrokerError(`Broker returned non-OAuth credential for id=${credentialId}`);
-		}
-		if (!this.#applyCredentialEntry(entry)) {
-			throw new AIError.AuthBrokerError(
-				`Broker refreshed credential id=${credentialId} outside the configured account pool`,
-			);
-		}
+		await this.#refreshThroughBroker(credentialId, opts.signal, "auth-recovery");
 		this.#maybeRefreshSnapshot("suspect credential refresh");
 	}
 
@@ -1176,21 +1161,12 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 		reason?: OAuthRefreshReason,
 	): Promise<OAuthCredentials> {
 		this.#noteActivity();
-		const { entry } = await this.#client.refreshCredential(credentialId, signal, reason);
-		if (entry.credential.type !== "oauth") {
-			throw new AIError.AuthBrokerError(`Broker returned non-OAuth credential for id=${credentialId}`);
-		}
-		if (!this.#applyCredentialEntry(entry)) {
-			throw new AIError.AuthBrokerError(
-				`Broker refreshed credential id=${credentialId} outside the configured account pool`,
-			);
-		}
+		const refreshed = await this.#refreshThroughBroker(credentialId, signal, reason);
 		if (!this.#streamingActive) {
 			await this.refreshSnapshot().catch(error => {
 				logger.debug("auth-broker snapshot refresh after credential refresh failed", { error: String(error) });
 			});
 		}
-		const refreshed = entry.credential;
 		return {
 			access: refreshed.access,
 			refresh: REMOTE_REFRESH_SENTINEL,
@@ -1203,13 +1179,45 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 	}
 
 	/**
+	 * Refresh one credential through the broker and apply the reply. If this
+	 * client's copy changed to something else while the request was in flight,
+	 * the reply may be stale, so the broker's current row wins: a logout stays
+	 * logged out and a newer login is kept.
+	 */
+	async #refreshThroughBroker(
+		credentialId: number,
+		signal?: AbortSignal,
+		reason?: OAuthRefreshReason,
+	): Promise<RemoteOAuthCredential> {
+		const local = () => this.#snapshot.credentials.find(candidate => candidate.id === credentialId);
+		const before = JSON.stringify(local()?.credential);
+		let { entry } = await this.#client.refreshCredential(credentialId, signal, reason);
+		const current = JSON.stringify(local()?.credential);
+		if (current !== before && current !== JSON.stringify(entry.credential)) {
+			await this.refreshSnapshot();
+			const latest = local();
+			if (!latest) throw new AIError.AuthBrokerError(`Credential id=${credentialId} was removed during refresh`);
+			entry = latest;
+		}
+		if (entry.credential.type !== "oauth") {
+			throw new AIError.AuthBrokerError(`Broker returned non-OAuth credential for id=${credentialId}`);
+		}
+		if (!this.#applyCredentialEntry(entry)) {
+			throw new AIError.AuthBrokerError(
+				`Broker refreshed credential id=${credentialId} outside the configured account pool`,
+			);
+		}
+		return entry.credential;
+	}
+
+	/**
 	 * Store-level hook consumed by `AuthStorage.usage.reports()` — proxies
 	 * to the broker's `/v1/usage` endpoint. Shared per-credential caches and
 	 * cooldowns keep separate clients from multiplying provider probes.
 	 */
 	async fetchUsageReports(signal?: AbortSignal): Promise<UsageReport[] | null> {
 		this.#noteActivity();
-		const reports = await this.#raceWithSignal(this.#loadUsageReports(), signal);
+		const reports = await raceSignal(this.#loadUsageReports(), signal, "auth-broker request aborted");
 		if (!reports) return null;
 		return this.#filterUsageReports(this.#applyUsageOverlays(reports));
 	}
@@ -1229,7 +1237,7 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 		signal?: AbortSignal,
 	): Promise<UsageReport | null> {
 		this.#noteActivity();
-		const reports = await this.#raceWithSignal(this.#loadUsageReports(), signal);
+		const reports = await raceSignal(this.#loadUsageReports(), signal, "auth-broker request aborted");
 		const visibleReports = reports ? this.#filterUsageReports(reports) : null;
 		const matched = visibleReports ? matchUsageReport(visibleReports, provider, credential) : null;
 		const overlay = this.#getActiveUsageOverlay(provider, credential);
@@ -1308,34 +1316,6 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 			}
 		}
 		return merged;
-	}
-
-	/**
-	 * Reject the awaited promise when the caller's signal aborts, without
-	 * affecting the shared upstream fetch. Used to give each caller their
-	 * own cancel without one caller's abort cascading into a peer's in-flight
-	 * request through the single-flight `#usageInflight`.
-	 */
-	#raceWithSignal<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> {
-		if (!signal) return promise;
-		if (signal.aborted) return Promise.reject(new AIError.AbortError("auth-broker request aborted"));
-		return new Promise<T>((resolve, reject) => {
-			const onAbort = (): void => {
-				signal.removeEventListener("abort", onAbort);
-				reject(new AIError.AbortError("auth-broker request aborted"));
-			};
-			signal.addEventListener("abort", onAbort, { once: true });
-			promise.then(
-				value => {
-					signal.removeEventListener("abort", onAbort);
-					resolve(value);
-				},
-				err => {
-					signal.removeEventListener("abort", onAbort);
-					reject(err);
-				},
-			);
-		});
 	}
 
 	#replaceBrokerUsageAccounts(entries: readonly SnapshotEntry[]): void {

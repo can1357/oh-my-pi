@@ -1,6 +1,11 @@
 import type * as XtermModule from "@oh-my-pi/pi-utils/vterm";
 import type { Terminal as XtermTerminalType } from "@oh-my-pi/pi-utils/vterm";
+import type { TspSpan } from "@oh-my-pi/pi-wire";
 import type { Component } from "../tui";
+import { ansi, col, row, span, text } from "../native/describe";
+import { Memo } from "../native/memo";
+import type { DescribeContext, NativeNode, NativeUiEvent } from "../native/node";
+import { actionBar, actionButton } from "../native/overlay";
 import { extractPrintableText, matchesKey, parseKey, parseKittySequence } from "../keys";
 import { padding, truncateToWidth, visibleWidth } from "../utils";
 import type { Theme } from "../theme/theme";
@@ -15,6 +20,10 @@ export interface BashInteractiveTerminalBackend {
 
 // The capture sink owns final output; this caps only the live display backlog.
 const MAX_LIVE_WRITE_QUEUE_CHUNKS = 512;
+// Cells the native full sheet's insets take from the pane width.
+const NATIVE_SHEET_INSET_COLS = 8;
+// Action id of the native Force kill button (mirrors Esc).
+const KILL_ACTION = "kill";
 
 function normalizeInputForPty(data: string, applicationCursorKeysMode: boolean): string {
 	const kitty = parseKittySequence(data);
@@ -78,6 +87,8 @@ function normalizeInputForPty(data: string, applicationCursorKeysMode: boolean):
 }
 /** Interactive terminal overlay driven by an external PTY controller. */
 export class BashInteractiveOverlayComponent implements Component {
+	/** Native sheet: a full-pane glass overlay titled Console. */
+	readonly nativeOverlay = { role: "omp.overlay.console", size: "full", head: "Console" } as const;
 	#terminal: XtermTerminalType;
 	#state: "running" | "complete" | "timed_out" | "killed" = "running";
 	#exitCode: number | undefined;
@@ -94,6 +105,9 @@ export class BashInteractiveOverlayComponent implements Component {
 	#writeOffset = 0;
 	#flushResolvers: Array<() => void> = [];
 	#writing = false;
+	/** Bumped whenever the virtual terminal processed a chunk, so `describe` knows the screen changed. */
+	#screenVersion = 0;
+	readonly #native = new Memo();
 
 	constructor(
 		command: string,
@@ -160,6 +174,7 @@ export class BashInteractiveOverlayComponent implements Component {
 		const data = this.#writeQueue[this.#writeOffset]!;
 		this.#terminal.write(data, () => {
 			this.#writing = false;
+			this.#screenVersion += 1;
 			this.#writeOffset += 1;
 			if (this.#writeOffset >= this.#writeQueue.length) {
 				this.#writeQueue = [];
@@ -206,7 +221,7 @@ export class BashInteractiveOverlayComponent implements Component {
 
 	handleInput(data: string): void {
 		if (this.#state === "running" && (matchesKey(data, "escape") || matchesKey(data, "esc"))) {
-			this.#onDismiss();
+			this.#forceKill();
 			return;
 		}
 		if (this.#state !== "running") {
@@ -217,6 +232,73 @@ export class BashInteractiveOverlayComponent implements Component {
 			return;
 		}
 		this.#onInput(normalizedInput);
+	}
+
+	/** The Force kill button runs the Esc path. */
+	handleNativeEvent(event: NativeUiEvent): void {
+		if (event.type === "action" && event.act === KILL_ACTION) this.#forceKill();
+	}
+
+	#forceKill(): void {
+		if (this.#state === "running") this.#onDismiss();
+	}
+
+	#syncPtySize(cols: number, rows: number): void {
+		if (cols === this.#lastCols && rows === this.#lastRows) return;
+		this.#lastCols = cols;
+		this.#lastRows = rows;
+		try {
+			this.#backend.resize(cols, rows);
+		} catch {
+			// Session may have ended
+		}
+	}
+
+	#maxContentRows(): number {
+		const maxOverlayRows = Math.max(5, Math.floor(this.#getTerminalRows() * 0.8));
+		return Math.max(1, maxOverlayRows - 4);
+	}
+
+	#stateSpan(): TspSpan {
+		if (this.#state === "running") return span("running", "warning");
+		if (this.#state === "timed_out") return span("timed out", "warning");
+		if (this.#state === "killed") return span("killed", "warning");
+		if (this.#exitCode === 0) return span("exit 0", "success");
+		if (this.#exitCode === undefined) return span("exited", "warning");
+		return span(`exit ${this.#exitCode}`, "error");
+	}
+
+	/**
+	 * Native view: the command with its state badge, the PTY screen as an
+	 * `ansi` node (SGR kept, fixed to the PTY grid), and a footer with the
+	 * Force kill action while running.
+	 */
+	describe(cx: DescribeContext): NativeNode {
+		const cols = Math.max(20, cx.cols - NATIVE_SHEET_INSET_COLS);
+		const rows = this.#maxContentRows();
+		this.#syncPtySize(cols, rows);
+		this.#terminal.resize(cols, rows);
+		const deps = [this.#screenVersion, cols, rows, this.#state, this.#exitCode];
+		return this.#native.get(deps, () => {
+			const viewportY = this.#terminal.buffer.active.viewportY;
+			const screen = readTerminalRows(this.#terminal, viewportY, rows).map(line => styleTerminalRow(line, ""));
+			const head = row(
+				[
+					text([span(replaceTabs(this.#command), "muted")], { wrap: "none", truncate: "end" }),
+					text([span("[", "dim"), this.#stateSpan(), span("]", "dim")]),
+				],
+				{ gap: "sm", align: "baseline", justify: "between" },
+			);
+			const footer =
+				this.#state === "running"
+					? actionBar([
+							text([span("Input forwarded to PTY", "dim")]),
+							null,
+							actionButton("Force kill", KILL_ACTION, { keys: "escape", tone: "error" }),
+						])
+					: actionBar([text([span("Session finished", "dim")])]);
+			return col([head, ansi(screen.join("\n"), { cols }), footer], { gap: "sm" });
+		});
 	}
 	#stateText(): string {
 		if (this.#state === "running") return this.#uiTheme.fg("warning", "running");
@@ -237,21 +319,8 @@ export class BashInteractiveOverlayComponent implements Component {
 	render(width: number): readonly string[] {
 		const safeWidth = Math.max(20, width);
 		const innerWidth = Math.max(1, safeWidth - 2);
-		const maxOverlayRows = Math.max(5, Math.floor(this.#getTerminalRows() * 0.8));
-		const chromeRows = 4;
-		const maxContentRows = Math.max(1, maxOverlayRows - chromeRows);
-		// Propagate terminal resize to PTY session
-		const currentCols = innerWidth;
-		const currentRows = maxContentRows;
-		if (currentCols !== this.#lastCols || currentRows !== this.#lastRows) {
-			this.#lastCols = currentCols;
-			this.#lastRows = currentRows;
-			try {
-				this.#backend.resize(currentCols, currentRows);
-			} catch {
-				// Session may have ended
-			}
-		}
+		const maxContentRows = this.#maxContentRows();
+		this.#syncPtySize(innerWidth, maxContentRows);
 		const statusIcon =
 			this.#state === "running"
 				? formatStatusIcon("running", this.#uiTheme)

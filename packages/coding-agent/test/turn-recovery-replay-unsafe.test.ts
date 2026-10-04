@@ -99,8 +99,7 @@ function createHost(
 		syncAfterModelChange: async () => {},
 		resetCurrentResponsesProviderSession: () => {},
 		maybeAutoRedeemReset: async () => ({ restored: false }),
-		runAutoCompaction: async () =>
-			({ deferredHandoff: false, continuationScheduled: false }) as RecoveryCompactionResult,
+		runAutoCompaction: async () => ({ continuationScheduled: false }) as RecoveryCompactionResult,
 		shakeForRequestBodyReadTimeout: async () => false,
 		withBashBranchTransition: <T>(operation: () => T): T => operation(),
 	};
@@ -364,16 +363,16 @@ describe("TurnRecovery replay-unsafe output classification", () => {
 	});
 
 	it("excludes a Fireworks Fast failed turn with partial visible text from Fast→base fallback", () => {
-		const fastModel = getBundledModel("fireworks", "kimi-k2.6-fast");
-		if (!fastModel) throw new Error("Expected bundled model kimi-k2.6-fast");
+		const fastModel = getBundledModel("fireworks", "kimi-k3-fast");
+		if (!fastModel) throw new Error("Expected bundled model kimi-k3-fast");
 		const recovery = new TurnRecovery(createHost(fastModel, modelRegistry));
 		const message = makeMessage([{ type: "text", text: "partial visible output" }], fastModel);
 		expect(recovery.isFireworksFastFallbackEligible(message)).toBe(false);
 	});
 
 	it("keeps a Fireworks Fast empty/whitespace failed turn eligible for Fast→base fallback", () => {
-		const fastModel = getBundledModel("fireworks", "kimi-k2.6-fast");
-		if (!fastModel) throw new Error("Expected bundled model kimi-k2.6-fast");
+		const fastModel = getBundledModel("fireworks", "kimi-k3-fast");
+		if (!fastModel) throw new Error("Expected bundled model kimi-k3-fast");
 		const recovery = new TurnRecovery(createHost(fastModel, modelRegistry));
 		expect(recovery.isFireworksFastFallbackEligible(makeMessage([], fastModel))).toBe(true);
 		expect(recovery.isFireworksFastFallbackEligible(makeMessage([{ type: "text", text: "   \n" }], fastModel))).toBe(
@@ -876,6 +875,18 @@ describe("TurnRecovery replay-unsafe output classification", () => {
 			);
 		});
 
+		it.each([
+			"Request was aborted",
+			"Request was aborted.",
+			"The operation was aborted",
+			"The operation was aborted.",
+		])("resumes a generic %s abort after resolved tool calls", errorMessage => {
+			const message = cursorMessage([execToolCall("call-1")], errorMessage);
+			expect(recoveryForReset(message, [realResult("call-1")]).classifyResolvedInterruptedToolTurn(message)).toBe(
+				"reasonless-abort",
+			);
+		});
+
 		it("continues a Cursor HTTP/2 reset after an unmarked MCP result", () => {
 			const message = cursorMessage([mcpToolCall("mcp-1")], nghttp2Internal);
 			const recovery = recoveryForReset(message, [realResult("mcp-1", "mcp__databricks_production_execute_sql")]);
@@ -917,6 +928,7 @@ describe("TurnRecovery replay-unsafe output classification", () => {
 		const completionsClose = "OpenAI completions stream closed before a finish_reason was received";
 		const responsesClose = "OpenAI responses stream closed before a terminal response event was received";
 		const codexClose = "Codex stream ended before terminal completion event";
+		const cursorClose = "Cursor stream ended before turnEnded";
 
 		function gatewayMessage(content: AssistantMessage["content"], errorMessage: string): AssistantMessage {
 			const message = makeMessage(content, model);
@@ -936,6 +948,7 @@ describe("TurnRecovery replay-unsafe output classification", () => {
 			["completions", completionsClose],
 			["responses", responsesClose],
 			["Codex responses", codexClose],
+			["Cursor", cursorClose],
 		])("continues a premature %s close after a resolved tool call", (_provider, errorMessage) => {
 			const message = gatewayMessage(
 				[{ type: "toolCall", id: "call-1", name: "bash", arguments: { command: "pwd" } }],

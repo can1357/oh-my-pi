@@ -92,6 +92,8 @@ export interface AsyncJob {
 	 * attempt, redelivery, and `proc://` snapshot reads it from here.
 	 */
 	structured?: StructuredSubagentOutput;
+	/** Latest progress text the running job reported (a bash job's output tail). */
+	progressText?: string;
 	/** Latest tool-render details reported by the running job. */
 	latestDetails?: AsyncJobDetails;
 	/**
@@ -107,6 +109,8 @@ export interface AsyncJob {
 	 * id differs from the agent id (vibe turn jobs, tan clones).
 	 */
 	agentId?: string;
+	/** The process the job runs, when it spawns one. */
+	process?: AsyncJobProcess;
 	/**
 	 * Job is registered but parked behind a caller-managed gate (e.g. a task
 	 * batch semaphore). Queued jobs do not count toward the running-job limit
@@ -129,6 +133,19 @@ export interface AsyncJob {
 	 * outlive the job row it was kept alive for.
 	 */
 	retainedArtifactsCleanup?: () => Promise<void>;
+}
+
+/**
+ * The process a job runs, for job inspectors (the jobs sheet): set by bodies
+ * that spawn one (bash), absent for in-process work (eval, task).
+ */
+export interface AsyncJobProcess {
+	/** Full command line; the job label is cut to 120 characters. */
+	readonly command: string;
+	/** Directory the command started in. */
+	readonly cwd: string;
+	/** Live pids the command spawned, in spawn order; empty before it starts and after it ends. */
+	pids(): readonly number[];
 }
 
 /** Delivery callback for a settled job's result text. */
@@ -217,6 +234,8 @@ export interface AsyncJobRegisterOptions {
 	queued?: boolean;
 	/** Register the job as backing a foreground call; see {@link AsyncJob.foreground}. */
 	foreground?: boolean;
+	/** The process the job runs; see {@link AsyncJob.process}. */
+	process?: AsyncJobProcess;
 }
 
 /**
@@ -362,11 +381,13 @@ export class AsyncJobManager {
 			promise: Promise.resolve(),
 			ownerId: options?.ownerId,
 			agentId: options?.agentId,
+			process: options?.process,
 			queued: options?.queued === true,
 			...(options?.foreground ? { foreground: true } : {}),
 		};
 
 		const reportProgress = async (text: string, details?: AsyncJobDetails): Promise<void> => {
+			job.progressText = text;
 			if (details) job.latestDetails = details;
 			if (!options?.onProgress) return;
 			try {

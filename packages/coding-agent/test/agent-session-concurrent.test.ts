@@ -8,7 +8,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { scheduler } from "node:timers/promises";
 import { type } from "@oh-my-pi/omptype";
-import { Agent, type AgentMessage, type AgentTool } from "@oh-my-pi/pi-agent-core";
+import { Agent, AgentBusyError, type AgentMessage, type AgentTool } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, AssistantMessageEvent, ToolCall } from "@oh-my-pi/pi-ai";
 import {
 	accumulateToolCallArgumentsDelta,
@@ -995,6 +995,57 @@ describe("AgentSession TTSR resume gate", () => {
 		expect(session.isStreaming).toBe(false);
 	});
 
+	it("retries a TTSR continuation when the interrupted run is still busy", async () => {
+		collapseSchedulerSettleDelays();
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5")!;
+		const ttsrManager = new TtsrManager({
+			enabled: true,
+			contextMode: "discard",
+			interruptMode: "always",
+			repeatMode: "once",
+			repeatGap: 10,
+		});
+		ttsrManager.addRule(testRule);
+		let requests = 0;
+		let sawInjection = false;
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model, systemPrompt: ["Test"], tools: [] },
+			convertToLlm,
+			streamFn: (_model, context, options) => {
+				requests++;
+				const stream = new AssistantMessageEventStream();
+				if (requests === 1) {
+					pushAbortableTtsrStream(stream, options?.signal);
+				} else {
+					sawInjection = context.messages.some(
+						message =>
+							message.role === "developer" &&
+							typeof message.content !== "string" &&
+							message.content.some(
+								part => part.type === "text" && part.text.includes('reason="rule_violation"'),
+							),
+					);
+					pushContinuationStream(stream, () => {});
+				}
+				return stream;
+			},
+		});
+		vi.spyOn(agent, "continue").mockRejectedValueOnce(new AgentBusyError());
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings: Settings.isolated(),
+			modelRegistry: sharedModelRegistry,
+			ttsrManager,
+		});
+
+		await session.prompt("Write some Rust code");
+
+		expect(requests).toBe(2);
+		expect(sawInjection).toBe(true);
+	});
+
 	it("marks extension agent_end willContinue for TTSR abort and not ordinary abort", async () => {
 		collapseSchedulerSettleDelays();
 		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
@@ -1932,14 +1983,21 @@ describe("AgentSession TTSR resume gate", () => {
 		expect(toolExecuted).toBe(true);
 		expect(streamCallCount).toBe(2);
 
-		// The matched tool's result must carry the in-band reminder.
+		// The tool output remains unmodified; the harness-authored reminder is a
+		// separate developer message after the result.
 		const toolResult = agent.state.messages.find(
 			(m): m is Extract<typeof m, { role: "toolResult" }> =>
 				m.role === "toolResult" && m.toolCallId === toolCallContent.id,
 		);
-		expect(toolResult).toBeDefined();
-		const text = Array.isArray(toolResult?.content)
-			? toolResult.content
+		expect(toolResult?.content).toEqual([{ type: "text", text: "edit applied" }]);
+		const reminder = agent.state.messages.find(
+			(m): m is Extract<typeof m, { role: "developer" }> =>
+				m.role === "developer" &&
+				Array.isArray(m.content) &&
+				m.content.some(c => c.type === "text" && c.text.includes("<system-reminder")),
+		);
+		const text = Array.isArray(reminder?.content)
+			? reminder.content
 					.filter((c): c is { type: "text"; text: string } => c.type === "text")
 					.map(c => c.text)
 					.join("\n")
@@ -1947,7 +2005,6 @@ describe("AgentSession TTSR resume gate", () => {
 		expect(text).toContain("<system-reminder");
 		expect(text).toContain('rule="no-unwrap"');
 		expect(text).toContain("Do not use .unwrap()");
-		expect(text.indexOf("<system-reminder")).toBeLessThan(text.indexOf("edit applied"));
 	});
 
 	it.each(["always", "never"] as const)(
@@ -2355,12 +2412,14 @@ describe("AgentSession TTSR resume gate", () => {
 			});
 
 			await session.prompt("Write the probe");
-			const result = agent.state.messages.find(
-				(message): message is Extract<typeof message, { role: "toolResult" }> =>
-					message.role === "toolResult" && message.toolCallId === toolCall.id,
+			const contextMessage = agent.state.messages.find(
+				(message): message is Extract<typeof message, { role: "developer" }> =>
+					message.role === "developer" &&
+					Array.isArray(message.content) &&
+					message.content.some(c => c.type === "text" && c.text.includes("<system-reminder")),
 			);
-			const reminder = Array.isArray(result?.content)
-				? result.content
+			const reminder = Array.isArray(contextMessage?.content)
+				? contextMessage.content
 						.filter((content): content is { type: "text"; text: string } => content.type === "text")
 						.map(content => content.text)
 						.join("\n")
@@ -2471,14 +2530,20 @@ describe("AgentSession TTSR resume gate", () => {
 			(message): message is Extract<typeof message, { role: "toolResult" }> =>
 				message.role === "toolResult" && message.toolCallId === toolCall.id,
 		);
-		const reminder = Array.isArray(result?.content)
-			? result.content
+		expect(result?.content).toEqual([{ type: "text", text: "probe ran" }]);
+		const contextMessage = agent.state.messages.find(
+			(message): message is Extract<typeof message, { role: "developer" }> =>
+				message.role === "developer" &&
+				Array.isArray(message.content) &&
+				message.content.some(c => c.type === "text" && c.text.includes("<system-reminder")),
+		);
+		const reminder = Array.isArray(contextMessage?.content)
+			? contextMessage.content
 					.filter((content): content is { type: "text"; text: string } => content.type === "text")
 					.map(content => content.text)
 					.join("\n")
 			: "";
 		expect(reminder).toContain('rule="probe-args"');
-		expect(reminder.indexOf("<system-reminder")).toBeLessThan(reminder.indexOf("probe ran"));
 	});
 
 	it("interruptMode never deduplicates the reminder across sibling tool calls in one batch", async () => {
@@ -2596,12 +2661,20 @@ describe("AgentSession TTSR resume gate", () => {
 			(m): m is Extract<typeof m, { role: "toolResult" }> => m.role === "toolResult",
 		);
 		expect(toolResults).toHaveLength(3);
-		const withReminder = toolResults.filter(r =>
-			Array.isArray(r.content)
-				? r.content.some(c => c.type === "text" && c.text.includes("<system-reminder"))
-				: false,
+		expect(
+			toolResults.every(result =>
+				Array.isArray(result.content)
+					? result.content.every(content => content.type !== "text" || !content.text.includes("<system-reminder"))
+					: true,
+			),
+		).toBe(true);
+		const reminders = agent.state.messages.filter(
+			(message): message is Extract<typeof message, { role: "developer" }> =>
+				message.role === "developer" &&
+				Array.isArray(message.content) &&
+				message.content.some(content => content.type === "text" && content.text.includes("<system-reminder")),
 		);
-		expect(withReminder).toHaveLength(1);
+		expect(reminders).toHaveLength(1);
 	});
 
 	it("prompt() waits for context-promotion continuation to finish", async () => {

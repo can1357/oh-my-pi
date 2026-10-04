@@ -1893,18 +1893,7 @@ describe("Settings", () => {
 			expectedChains: Record<string, string[]>,
 		];
 
-		const webDefaultCandidates = MODEL_PRIO.web.flatMap(selector => {
-			if (selector === "google/gemini-2.5-flash") {
-				return [
-					"google-gemini-cli/gemini-2.5-flash",
-					"google-antigravity/gemini-2.5-flash",
-					"google/gemini-2.5-flash",
-				];
-			}
-			if (selector === "google-antigravity/gemini-2.5-flash") return [];
-			return [selector];
-		});
-		const webExaCandidates = ["web/exa", ...webDefaultCandidates.filter(selector => selector !== "web/exa")];
+		const webExaCandidates = ["web/exa", ...MODEL_PRIO.web.filter(selector => selector !== "web/exa")];
 		const webOrderedHead = [
 			"google-gemini-cli/gemini-2.5-flash",
 			"google-antigravity/gemini-2.5-flash",
@@ -1913,28 +1902,20 @@ describe("Settings", () => {
 			"openai-codex/gpt-5.6-luna",
 			"xai/grok-4.5",
 			"web/exa",
+			"web/tavily",
 		];
 		const webOrderedCandidates = [
 			...webOrderedHead,
-			...webDefaultCandidates.filter(selector => !webOrderedHead.includes(selector)),
+			...MODEL_PRIO.web.filter(selector => !webOrderedHead.includes(selector)),
 		];
-		const webExcludedCandidates = webDefaultCandidates.filter(
-			selector => selector !== "web/public" && !selector.startsWith("xai/") && !selector.startsWith("xai-oauth/"),
-		);
-		const webGeminiOverrideCandidates = MODEL_PRIO.web.flatMap(selector => {
-			if (selector === "google/gemini-2.5-flash") {
-				return ["google-gemini-cli/gemini-custom", "google-antigravity/gemini-custom", "google/gemini-custom"];
-			}
-			if (selector === "google-antigravity/gemini-2.5-flash") return [];
-			return [selector];
-		});
+		const webExcludedCandidates = MODEL_PRIO.web.filter(selector => selector !== "web/public");
 		const imageOrderedHead = [
-			"openai/gpt-image-1",
-			"openai-codex/gpt-image-1",
+			"openai/gpt-image-2",
+			"openai-codex/gpt-image-2",
 			"google-antigravity/gemini-3-pro-image",
 			"xai/grok-imagine-image",
-			"openrouter/google/gemini-3-pro-image-preview",
-			"google/gemini-3-pro-image-preview",
+			"openrouter/google/gemini-3-pro-image",
+			"google/gemini-3-pro-image",
 			"deepinfra/black-forest-labs/FLUX-2-pro",
 		];
 		const imageOrderedCandidates = [
@@ -1949,7 +1930,7 @@ describe("Settings", () => {
 			[
 				"web search order",
 				"providers.webSearchOrder",
-				["gemini", "anthropic", "codex", "xai", "exa"],
+				["gemini", "anthropic", "codex", "xai", "exa", "tavily"],
 				{ web: webOrderedCandidates[0] },
 				{ web: webOrderedCandidates.slice(1) },
 			],
@@ -1960,13 +1941,7 @@ describe("Settings", () => {
 				{ web: webExcludedCandidates[0] },
 				{ web: webExcludedCandidates.slice(1) },
 			],
-			[
-				"Gemini web model override",
-				"providers.webSearchGeminiModel",
-				"gemini-custom",
-				{ web: webGeminiOverrideCandidates[0] },
-				{ web: webGeminiOverrideCandidates.slice(1) },
-			],
+			["Gemini web model override", "providers.webSearchGeminiModel", "gemini-custom", {}, {}],
 			[
 				"image order",
 				"providers.imageOrder",

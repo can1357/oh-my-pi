@@ -43,3 +43,26 @@ export function renderError(e: unknown): string {
 	}
 	return String(e);
 }
+
+/** Clone-safe error metadata a tool worker sends back across the worker boundary. */
+export interface WorkerErrorPayload {
+	name: string;
+	message: string;
+	stack?: string;
+	isToolError: boolean;
+	isAbort: boolean;
+}
+
+/** Serialize a thrown value into {@link WorkerErrorPayload} for a worker `tool-reply`. */
+export function toWorkerErrorPayload(error: unknown): WorkerErrorPayload {
+	if (error instanceof Error) {
+		return {
+			name: error.name,
+			message: error.message,
+			stack: error.stack,
+			isAbort: error.name === "AbortError" || error.name === "ToolAbortError",
+			isToolError: error instanceof ToolError || error.name === "ToolError",
+		};
+	}
+	return { name: "Error", message: String(error), isAbort: false, isToolError: false };
+}

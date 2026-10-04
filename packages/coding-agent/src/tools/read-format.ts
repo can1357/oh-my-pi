@@ -142,6 +142,22 @@ export function countTextLines(text: string): number {
 	return text.length === 0 ? 0 : countNewlines(text) + 1;
 }
 
+/** `(raw ? text.split("\n") : splitAddressableFileLines(text)).length` without splitting. */
+function countSplitLines(text: string, raw: boolean): number {
+	if (raw) return countNewlines(text) + 1;
+	if (text.length === 0) return 0;
+	return countNewlines(text) + (text.endsWith("\n") ? 0 : 1);
+}
+
+/** `lines.slice(start, end).join("\n")` as a substring of the `text` that `lines` was split from. */
+function sliceLineRange(text: string, lines: readonly string[], start: number, end: number): string {
+	let from = 0;
+	for (let i = 0; i < start; i++) from += lines[i].length + 1;
+	let to = from;
+	for (let i = start; i < end; i++) to += lines[i].length + 1;
+	return text.slice(from, Math.max(from, to - 1));
+}
+
 export function contiguousLineNumbers(startLine: number, count: number): number[] {
 	const lines: number[] = [];
 	for (let offset = 0; offset < count; offset++) lines.push(startLine + offset);
@@ -262,7 +278,7 @@ export function buildInMemorySelectorResult(
 	options: Omit<InMemoryTextOptions, "raw">,
 ): AgentToolResult<ReadToolDetails> {
 	const raw = isRawSelector(parsed);
-	const totalLines = raw ? text.split("\n").length : splitAddressableFileLines(text).length;
+	const totalLines = countSplitLines(text, raw);
 	const sel = resolveTailSelector(parsed, totalLines);
 	if (sel.kind === "lines" && sel.ranges.length > 1) {
 		return buildInMemoryMultiRangeResult(session, text, sel.ranges, { ...options, raw });
@@ -329,9 +345,13 @@ export function buildInMemoryTextResult(
 	}
 
 	const endLine = endLineExpanded;
-	const selectedContent = allLines.slice(startLine, endLine).join("\n");
+	// Measure the range as a substring of `text` (equal to joining it) so a large range isn't
+	// copied only for `truncateHead` to keep its head. Branches that emit the whole range
+	// re-join it so the result never pins `text` through a substring.
+	const selectedRange = sliceLineRange(text, allLines, startLine, endLine);
+	const joinSelectedLines = (): string => allLines.slice(startLine, endLine).join("\n");
 	const userLimitedLines = limit !== undefined ? endLine - startLine : undefined;
-	const truncation = ignoreResultLimits ? noTruncResult(selectedContent) : truncateHead(selectedContent);
+	const truncation = ignoreResultLimits ? noTruncResult(selectedRange) : truncateHead(selectedRange);
 
 	const shouldAddHashLines = displayMode.hashLines;
 	const shouldAddLineNumbers = shouldAddHashLines ? false : displayMode.lineNumbers;
@@ -428,7 +448,7 @@ export function buildInMemoryTextResult(
 
 		if (options.raw === true) {
 			rawSeenLines = contiguousLineNumbers(startLineDisplay, userLimitedLines);
-			outputText = formatText(selectedContent, startLineDisplay);
+			outputText = formatText(joinSelectedLines(), startLineDisplay);
 		} else {
 			outputText = formatLineEntries(buildLineEntries(endLine), startLineDisplay);
 		}
@@ -436,7 +456,7 @@ export function buildInMemoryTextResult(
 	} else {
 		if (options.raw === true) {
 			rawSeenLines = contiguousLineNumbers(startLineDisplay, endLine - startLine);
-			outputText = formatText(truncation.content, startLineDisplay);
+			outputText = formatText(joinSelectedLines(), startLineDisplay);
 		} else {
 			outputText = formatLineEntries(buildLineEntries(endLine), startLineDisplay);
 		}

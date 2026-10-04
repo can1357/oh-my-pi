@@ -40,6 +40,7 @@ import {
 	sanitizeRehydratedOpenAIResponsesAssistantMessage,
 	stripInternalDetailsFields,
 } from "./messages";
+import type { RetryFallbackRole } from "./retry-fallback-chains";
 import { type BuildSessionContextOptions, buildSessionContext, type SessionContext } from "./session-context";
 import {
 	type BranchSummaryEntry,
@@ -79,8 +80,11 @@ import {
 import {
 	loadEntriesFromFile,
 	loadSessionFile,
+	normalizeAssistantUsage,
 	parseSessionContent,
+	readSessionHeaderId,
 	resolveBlobRefsInEntries,
+	resolveBlobRefsInEntriesSync,
 	type SessionLoadResult,
 	visitEntriesFromFile,
 } from "./session-loader";
@@ -100,6 +104,7 @@ import {
 	MemorySessionStorage,
 	type SessionStorage,
 	type SessionStorageWriter,
+	SessionWriteConflictError,
 } from "./session-storage";
 import { type SessionTitleUpdate, serializeTitleSlot } from "./session-title-slot";
 import {
@@ -112,9 +117,27 @@ import { recordSessionRecap, recordSessionTitle } from "./session-index";
 const JSONL_SUFFIX_LENGTH = ".jsonl".length;
 const DRAFT_ONLY_SESSION_MARKER = ".draft-only-session";
 const DISCARDED_ENTRY_BRANCH_MARKER = "discarded-entry-branch";
+/**
+ * Read-back-and-retry passes one full rewrite makes after meeting another
+ * writer's entries. Each pass re-reads the file, so only a writer that appends
+ * inside every read-to-publish window exhausts them.
+ */
+const MAX_WRITE_CONFLICT_RECOVERIES = 3;
 
-function mintSessionId(): string {
+/** A fresh session id. */
+export function mintSessionId(): string {
 	return Bun.randomUUIDv7();
+}
+
+/**
+ * `moveTo` refused before anything moved: another live omp process writes the
+ * session, or the session file at the destination.
+ */
+export class SessionMoveRefusedError extends Error {
+	constructor(message: string) {
+		super(message);
+		this.name = "SessionMoveRefusedError";
+	}
 }
 
 function nowIso(): string {
@@ -130,24 +153,41 @@ function artifactsDirectoryFor(sessionFile: string | undefined): string | null {
 	return sessionFile.slice(0, -JSONL_SUFFIX_LENGTH);
 }
 
-/** Copy a session's artifact directory to another session, matching interactive `/fork`. */
+/**
+ * Copy a session's artifact directory to another session, matching interactive
+ * `/fork`. Never overwrites: a destination file written while the copy runs
+ * (a session that already moved and kept working) wins over the source's copy.
+ * Failures are logged, never thrown.
+ */
 export async function copySessionArtifacts(sourceSessionFile: string, destinationSessionFile: string): Promise<void> {
-	const sourceArtifactsDir = artifactsDirectoryFor(sourceSessionFile);
+	// Artifacts sit beside the journal's real name: a session reached through a
+	// symlink keeps them next to the link's target, not next to the link.
+	let realSource = sourceSessionFile;
+	try {
+		realSource = await fs.promises.realpath(sourceSessionFile);
+	} catch {}
+	const sourceArtifactsDir = artifactsDirectoryFor(realSource);
 	const destinationArtifactsDir = artifactsDirectoryFor(destinationSessionFile);
 	if (!sourceArtifactsDir || !destinationArtifactsDir) return;
 	if (path.resolve(sourceArtifactsDir) === path.resolve(destinationArtifactsDir)) return;
-
 	try {
-		const sourceStat = await fs.promises.stat(sourceArtifactsDir);
-		if (sourceStat.isDirectory()) {
-			await fs.promises.cp(sourceArtifactsDir, destinationArtifactsDir, { recursive: true });
+		if ((await fs.promises.stat(sourceArtifactsDir)).isDirectory()) {
+			// Create the destination first and merge into it: Bun's `cp` fails with
+			// EEXIST when another writer (the moved session's artifact manager,
+			// `local://`) creates the directory while the copy is starting.
+			await fs.promises.mkdir(destinationArtifactsDir, { recursive: true });
+			await fs.promises.cp(sourceArtifactsDir, destinationArtifactsDir, {
+				recursive: true,
+				force: false,
+				errorOnExist: false,
+			});
 		}
 	} catch (error) {
 		if (!isEnoent(error)) {
-			logger.warn("Failed to copy artifacts during fork", {
+			logger.warn("Failed to copy session artifacts", {
 				sourceArtifactsDir,
 				destinationArtifactsDir,
-				error: error instanceof Error ? error.message : String(error),
+				error: toError(error).message,
 			});
 		}
 	}
@@ -350,6 +390,7 @@ function emptyUsageStatistics(): UsageStatistics {
 		orchestrationCacheRead: 0,
 		premiumRequests: 0,
 		cost: 0,
+		subagentCost: 0,
 	};
 }
 
@@ -368,22 +409,15 @@ function entryUsage(entry: SessionEntry): Usage | undefined {
 	return undefined;
 }
 
-/**
- * Give a usage-less assistant message zero usage so renderers and totals never
- * dereference `undefined`. Persisted and imported transcripts can predate usage
- * metadata, so this is legitimate history, not a producer bug.
- */
-function repairMissingUsage(entry: SessionEntry): boolean {
-	if (entry.type !== "message" || entry.message.role !== "assistant" || entry.message.usage) return false;
-	entry.message.usage = {
-		input: 0,
-		output: 0,
-		cacheRead: 0,
-		cacheWrite: 0,
-		totalTokens: 0,
-		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-	};
-	return true;
+/** Complete incomplete assistant usage in loaded history; returns how many messages were repaired. */
+function normalizeLoadedUsage(entries: SessionEntry[]): number {
+	let repaired = 0;
+	for (const entry of entries) {
+		if (entry.type === "message" && entry.message.role === "assistant" && normalizeAssistantUsage(entry.message)) {
+			repaired++;
+		}
+	}
+	return repaired;
 }
 
 function addUsage(target: UsageStatistics, usage: Usage | undefined): void {
@@ -491,7 +525,13 @@ class SessionEntryIndex {
 			else this.#labels.delete(entry.targetId);
 		}
 
-		addUsage(this.#usage, entryUsage(entry));
+		const usage = entryUsage(entry);
+		addUsage(this.#usage, usage);
+		// Completed `task` results carry the child's spend; tracked apart so the
+		// status line can split the session's own cost from its subagents'.
+		if (usage && entry.type === "message" && entry.message.role === "toolResult") {
+			this.#usage.subagentCost += usage.cost.total;
+		}
 	}
 
 	has(id: string): boolean {
@@ -687,6 +727,27 @@ export class SessionPersistenceIndeterminateError extends AggregateError {
 		this.recoveryErrors = [...recoveryErrors];
 	}
 }
+
+/**
+ * This session moved to a new file and keeps saving there. Not a failure:
+ * nothing is latched. Delivered through {@link SessionManager.onPersistenceNotice}.
+ */
+export interface SessionPersistenceNotice {
+	/**
+	 * `"open-elsewhere"`: another live omp process wrote `from` first and still
+	 * has it open, so this process saves its entries elsewhere instead of mixing
+	 * them into that file. `"replaced"`: `from` changed on disk and no longer
+	 * reads as this session's journal, so it is left untouched. `"contested"`:
+	 * a writer without the ownership lease kept changing `from` through every
+	 * read-back-and-retry pass, so this session stops racing it.
+	 */
+	reason: "open-elsewhere" | "replaced" | "contested";
+	/** The session file this session was saving to. */
+	from: string;
+	/** The fresh sibling it saves to from now on: same directory, a new session id whose `parentSession` is the old one. */
+	to: string;
+}
+
 /**
  * Thrown by {@link SessionManager.forkFrom} when the fork source is missing.
  * The CLI maps this to a clean session-resolution failure at its own boundary
@@ -830,6 +891,21 @@ export class SessionManager {
 	#breadcrumbFresh = false;
 	#sessionNameChangedCallbacks = new Set<() => void>();
 	#persistenceErrorCallbacks = new Set<(error: Error) => void>();
+	#persistenceNoticeCallbacks = new Set<(notice: SessionPersistenceNotice) => void>();
+	/** Every notice raised so far, replayed to each later subscriber. */
+	#persistenceNotices: SessionPersistenceNotice[] = [];
+	/**
+	 * This process's ownership claim on the session it last wrote (file storage
+	 * only), keyed by session id so every path to the journal meets it.
+	 * `release` is unset while another live process holds the session, and
+	 * after {@link close} gave the claim up.
+	 */
+	#sessionClaim: { sessionId: string; release: (() => void) | undefined } | undefined;
+	/**
+	 * The background artifact copy a move or branch to `sessionFile` started (see
+	 * {@link #moveOffSessionFile}, {@link createBranchedSession}). Never rejects.
+	 */
+	#pendingArtifactCopy: { sessionFile: string; done: Promise<void> } | undefined;
 
 	private constructor(cwd: string, sessionDir: string, persist: boolean, storage: SessionStorage) {
 		this.#cwd = cwd;
@@ -843,7 +919,10 @@ export class SessionManager {
 
 	#rememberBreadcrumb(cwd: string, sessionFile: string, fresh = false): void {
 		this.#breadcrumbFresh = fresh;
-		if (!this.#suppressBreadcrumb) writeTerminalBreadcrumb(cwd, sessionFile, fresh);
+		if (this.#suppressBreadcrumb) return;
+		writeTerminalBreadcrumb(cwd, sessionFile, fresh, {
+			remoteStorage: !(this.#storage instanceof FileSessionStorage),
+		});
 	}
 
 	/**
@@ -861,21 +940,21 @@ export class SessionManager {
 	}
 
 	/**
-	 * Deliver one store failure to a single observer. Observer failures are
+	 * Deliver one failure or notice to a single observer. Observer failures are
 	 * swallowed: a host surface that throws must not corrupt session teardown.
 	 */
-	#invokePersistenceErrorObserver(observer: (error: Error) => void, error: Error): void {
+	#invokePersistenceObserver<T>(observer: (value: T) => void, value: T): void {
 		try {
-			observer(error);
+			observer(value);
 		} catch (callbackError) {
-			logger.warn("Session persistence error observer failed", {
+			logger.warn("Session persistence observer failed", {
 				error: toError(callbackError).message,
 			});
 		}
 	}
 
 	#notifyPersistenceErrorObservers(error: Error): void {
-		for (const observer of this.#persistenceErrorCallbacks) this.#invokePersistenceErrorObserver(observer, error);
+		for (const observer of this.#persistenceErrorCallbacks) this.#invokePersistenceObserver(observer, error);
 	}
 
 	#noteDiskFailure(errorLike: unknown): Error {
@@ -893,6 +972,206 @@ export class SessionManager {
 		}
 
 		return this.#diskFailure;
+	}
+
+	#notifyPersistenceNotice(notice: SessionPersistenceNotice): void {
+		logger.warn("Session moved to a new file", { ...notice });
+		this.#persistenceNotices.push(notice);
+		for (const observer of this.#persistenceNoticeCallbacks) this.#invokePersistenceObserver(observer, notice);
+	}
+
+	/**
+	 * Hold this process's ownership claim on `#sessionId`, moving it off a
+	 * previous session. Only write paths claim, so the first process to write a
+	 * session owns it and inspection (`omp share`, `--export`, `render`) never
+	 * does. A failed claim is retried on the next write, so a writer takes over
+	 * once the owner closed the session or exited.
+	 */
+	#claimSession(): void {
+		const sessionId = this.#sessionId;
+		const sessionFile = this.#sessionFile;
+		if (!this.#persist || !sessionFile || !this.#storage.claimSession) return;
+		const current = this.#sessionClaim;
+		if (current?.sessionId === sessionId && current.release) return;
+		if (current && current.sessionId !== sessionId) current.release?.();
+		// The storage also checks that the path still holds this session: if
+		// another session was moved onto it, the claim fails and the next write
+		// moves this session to a sibling instead of appending into that journal.
+		this.#sessionClaim = { sessionId, release: this.#storage.claimSession(sessionId, sessionFile) ?? undefined };
+	}
+
+	/**
+	 * Whether another live omp process owns this session, claiming it first
+	 * when it is free. A non-owner never writes the session's file: its next
+	 * write moves this session to a sibling with a new id instead, so two
+	 * processes never mix their entries in one journal and the owner's full
+	 * rewrites never race the other process's appends.
+	 */
+	#sessionOwnedElsewhere(): boolean {
+		if (this.#released || this.#sessionFileRelocating) return false;
+		this.#claimSession();
+		const claim = this.#sessionClaim;
+		return claim !== undefined && claim.sessionId === this.#sessionId && claim.release === undefined;
+	}
+
+	/**
+	 * `#sessionFile` when `error` reports that it changed since this manager
+	 * last wrote it, which the caller can recover from; `undefined` reports the
+	 * conflict as before. A fresh file that already exists is never recovered,
+	 * so a colliding sibling cannot move again. Backends that defer sync
+	 * publishes also report as before: there a conflict can be this manager
+	 * racing its own unconfirmed publish, not another writer.
+	 */
+	#conflictedSessionFile(error: unknown): string | undefined {
+		const sessionFile = this.#sessionFile;
+		if (
+			!(error instanceof SessionWriteConflictError) ||
+			error.expectedSize === null ||
+			!sessionFile ||
+			path.resolve(error.path) !== path.resolve(sessionFile) ||
+			!this.#persist ||
+			this.#released ||
+			this.#sessionFileRelocating ||
+			this.#storage.defersSyncPublish
+		) {
+			return undefined;
+		}
+		return sessionFile;
+	}
+
+	/** The entries `content` holds that this manager does not, or `undefined` when it is not this session's journal. */
+	#foreignEntriesIn(content: string): SessionEntry[] | undefined {
+		const { entries, invalidHeader } = parseSessionContent(content);
+		const header = entries[0];
+		if (invalidHeader || header?.type !== "session" || header.id !== this.#sessionId) return undefined;
+		const foreign: SessionEntry[] = [];
+		for (let i = 1; i < entries.length; i++) {
+			const entry = entries[i] as SessionEntry;
+			if (!this.#index.has(entry.id)) foreign.push(entry);
+		}
+		return foreign;
+	}
+
+	/**
+	 * Keep the entries another writer added to `#sessionFile`, whose bytes now
+	 * measure `diskSize`. They join this session's tree as a side branch (their
+	 * parents are entries both writers loaded), the active leaf stays this
+	 * session's, and the retried rewrite republishes them with the rest.
+	 */
+	#adoptForeignEntries(foreign: readonly SessionEntry[], diskSize: number): void {
+		const leaf = this.#index.leafId();
+		let adopted = 0;
+		for (const entry of foreign) {
+			// A recovery that raced this one may already have kept it.
+			if (this.#index.has(entry.id)) continue;
+			this.#entries.push(entry);
+			this.#index.insert(entry);
+			adopted++;
+		}
+		this.#index.setLeaf(leaf);
+		this.#expectedDiskSize = diskSize;
+		if (adopted > 0)
+			logger.warn("Kept session entries another writer added", { sessionFile: this.#sessionFile, adopted });
+	}
+
+	/**
+	 * A synchronous full rewrite of `#sessionFile` met bytes this manager did
+	 * not write: usually a writer without the ownership lease (an older omp,
+	 * an external tool) appending to the file this process owns. Overwriting
+	 * would erase those entries and retrying blindly can never succeed, so read
+	 * the file back, keep its new entries, and retry against the size just read.
+	 * A deleted file is recreated; a file that no longer reads as this session
+	 * is left untouched and the session moves to a sibling.
+	 *
+	 * After {@link MAX_WRITE_CONFLICT_RECOVERIES} passes (`recoveries`) the
+	 * other writer is still racing every read-to-publish window: leave the file
+	 * to it and move to a sibling rather than re-serializing on every write.
+	 *
+	 * Returns the path to retry, or `undefined` to report the conflict as before.
+	 */
+	#recoverFromWriteConflictSync(error: unknown, recoveries: number): string | undefined {
+		const contested = this.#conflictedSessionFile(error);
+		if (!contested) return undefined;
+		if (recoveries >= MAX_WRITE_CONFLICT_RECOVERIES) return this.#moveOffSessionFile("contested");
+		if (!this.#storage.readTextSync) return undefined;
+		let content: string;
+		try {
+			content = this.#storage.readTextSync(contested);
+		} catch (readError) {
+			if (!isEnoent(readError)) return this.#moveOffSessionFile("replaced");
+			this.#expectedDiskSize = null;
+			return contested;
+		}
+		const foreign = this.#foreignEntriesIn(content);
+		if (!foreign) return this.#moveOffSessionFile("replaced");
+		resolveBlobRefsInEntriesSync(foreign, this.#blobs);
+		this.#adoptForeignEntries(foreign, Buffer.byteLength(content, "utf8"));
+		return contested;
+	}
+
+	/** Asynchronous {@link #recoverFromWriteConflictSync}. */
+	async #recoverFromWriteConflict(error: unknown, recoveries: number): Promise<string | undefined> {
+		const contested = this.#conflictedSessionFile(error);
+		if (!contested) return undefined;
+		if (recoveries >= MAX_WRITE_CONFLICT_RECOVERIES) return this.#moveOffSessionFile("contested");
+		const epoch = this.#diskEpoch;
+		let content: string;
+		try {
+			content = await this.#storage.readText(contested);
+		} catch (readError) {
+			// A synchronous rewrite during the read already recovered; retry against its result.
+			if (this.#diskEpoch !== epoch || this.#sessionFile !== contested) return this.#sessionFile;
+			if (!isEnoent(readError)) return this.#moveOffSessionFile("replaced");
+			this.#expectedDiskSize = null;
+			return contested;
+		}
+		if (this.#diskEpoch !== epoch || this.#sessionFile !== contested) return this.#sessionFile;
+		const foreign = this.#foreignEntriesIn(content);
+		if (!foreign) return this.#moveOffSessionFile("replaced");
+		await resolveBlobRefsInEntries(foreign, this.#blobs);
+		if (this.#diskEpoch !== epoch || this.#sessionFile !== contested) return this.#sessionFile;
+		this.#adoptForeignEntries(foreign, Buffer.byteLength(content, "utf8"));
+		return contested;
+	}
+
+	/**
+	 * Leave `#sessionFile` untouched and continue as a fresh session in a
+	 * sibling file. It gets a new session id whose header points back through
+	 * `parentSession` and keeps the provider prompt-cache key, as {@link fork}
+	 * does, so resume-by-id, the title index, and the picker never see two
+	 * files for one id. Nothing durable exists there yet: the caller publishes
+	 * the whole transcript once and appends incrementally after that.
+	 *
+	 * The artifact copy runs in the background so a move never blocks the turn
+	 * loop on a large artifacts directory; the sibling's artifact manager waits
+	 * for it before scanning ids or resolving `artifact://`, and flush/close
+	 * await it. Returns the sibling.
+	 */
+	#moveOffSessionFile(reason: SessionPersistenceNotice["reason"]): string {
+		const from = this.#sessionFile as string;
+		const previousSessionId = this.#sessionId;
+		const timestamp = nowIso();
+		this.#sessionId = mintSessionId();
+		const to = path.join(path.dirname(from), `${fileSafeTimestamp(timestamp)}_${this.#sessionId}.jsonl`);
+		this.#header = {
+			...this.#header,
+			id: this.#sessionId,
+			timestamp,
+			parentSession: previousSessionId,
+			providerPromptCacheKey: this.#header.providerPromptCacheKey ?? previousSessionId,
+		};
+		this.#closeWriterEventually();
+		this.#sessionFile = to;
+		this.#expectedDiskSize = null;
+		this.#fileIsCurrent = false;
+		this.#rewriteRequired = true;
+		this.#artifactManager = null;
+		this.#artifactManagerSessionFile = null;
+		this.#pendingArtifactCopy = { sessionFile: to, done: copySessionArtifacts(from, to) };
+		this.#rememberBreadcrumb(this.#cwd, to);
+		this.#claimSession();
+		this.#notifyPersistenceNotice({ reason, from, to });
+		return to;
 	}
 
 	#scheduleDiskWork(work: () => Promise<void>, options: DiskQueueOptions = {}): Promise<void> {
@@ -1066,11 +1345,18 @@ export class SessionManager {
 		sessionFile: string,
 		operationError: Error,
 		commitGuard?: () => boolean,
+		recoveries = 0,
 	): Promise<void> {
+		const target =
+			sessionFile === this.#sessionFile && this.#sessionOwnedElsewhere()
+				? this.#moveOffSessionFile("open-elsewhere")
+				: sessionFile;
 		const body = this.#fileBody();
 		try {
-			await this.#storage.writeTextAtomic(sessionFile, body, { expectedSize: this.#expectedDiskSize, commitGuard });
+			await this.#storage.writeTextAtomic(target, body, { expectedSize: this.#expectedDiskSize, commitGuard });
 		} catch (error) {
+			const retryPath = await this.#recoverFromWriteConflict(error, recoveries);
+			if (retryPath) return this.#publishAuthoritativeBody(retryPath, operationError, commitGuard, recoveries + 1);
 			const recoveryErrors = [toError(error)];
 			try {
 				await this.#storage.drain();
@@ -1079,7 +1365,7 @@ export class SessionManager {
 			}
 			let actual: string;
 			try {
-				actual = await this.#storage.readText(sessionFile);
+				actual = await this.#storage.readText(target);
 			} catch (readFailure) {
 				recoveryErrors.push(toError(readFailure));
 				throw this.#latchIndeterminate(operationError, recoveryErrors);
@@ -1204,15 +1490,26 @@ export class SessionManager {
 	#rewriteSynchronously(): void {
 		if (this.#released) return;
 		if (!this.#persist || !this.#shouldHaveSessionFile()) return;
-		const targetPath = this.#liveRelocationWritePath() ?? this.#sessionFile;
+		let targetPath = this.#liveRelocationWritePath() ?? this.#sessionFile;
 		if (!targetPath) return;
 
 		try {
-			const body = this.#fileBody();
+			if (this.#sessionOwnedElsewhere()) targetPath = this.#moveOffSessionFile("open-elsewhere");
+			let body = this.#fileBody();
 			this.#diskEpoch++;
 			this.#diskTail = Promise.resolve();
 			this.#closeWriterEventually();
-			this.#storage.writeTextSync(targetPath, body, { expectedSize: this.#expectedDiskSize });
+			for (let recoveries = 0; ; recoveries++) {
+				try {
+					this.#storage.writeTextSync(targetPath, body, { expectedSize: this.#expectedDiskSize });
+					break;
+				} catch (err) {
+					const retryPath = this.#recoverFromWriteConflictSync(err, recoveries);
+					if (!retryPath) throw err;
+					targetPath = retryPath;
+					body = this.#fileBody();
+				}
+			}
 			this.#clearDiskError();
 			if (this.#storage.defersSyncPublish) {
 				// The publish is only queued: record nothing and stay non-current
@@ -1312,10 +1609,12 @@ export class SessionManager {
 	async #runFencedAtomicRewrite(epoch: number): Promise<boolean> {
 		if (this.#released) return false;
 		this.#atomicRewriteFenceEpoch = epoch;
+		let recoveries = 0;
 		try {
 			do {
 				this.#atomicRewriteDirty = false;
 				await this.#closeWriterHandle();
+				if (this.#sessionOwnedElsewhere()) this.#moveOffSessionFile("open-elsewhere");
 				const sessionFile = this.#sessionFile;
 				if (!sessionFile) return false;
 				if (this.#diskEpoch !== epoch) return false;
@@ -1326,6 +1625,12 @@ export class SessionManager {
 						commitGuard: () => !this.#released && this.#diskEpoch === epoch,
 					});
 				} catch (error) {
+					if (await this.#recoverFromWriteConflict(error, recoveries)) {
+						recoveries++;
+						// Publish the whole transcript against what the recovery found on the next pass.
+						this.#atomicRewriteDirty = true;
+						continue;
+					}
 					try {
 						if ((await this.#storage.readText(sessionFile)) === body) this.#recordFullRewrite(body);
 					} catch {
@@ -1411,9 +1716,10 @@ export class SessionManager {
 			this.#rewriteSynchronously();
 			return;
 		}
-		// Cold/divergent: not on disk yet, or in-memory entries diverged from the
-		// file → rewrite the whole file synchronously and keep going.
-		if (!this.#fileIsCurrent || this.#rewriteRequired) {
+		// Cold/divergent: not on disk yet, in-memory entries diverged from the
+		// file, or another live process owns it → rewrite the whole file
+		// synchronously (to a sibling in the last case) and keep going.
+		if (!this.#fileIsCurrent || this.#rewriteRequired || this.#sessionOwnedElsewhere()) {
 			this.#rewriteSynchronously();
 			return;
 		}
@@ -1484,7 +1790,8 @@ export class SessionManager {
 			!this.#fileIsCurrent ||
 			this.#rewriteRequired ||
 			!this.#hasTitleSlot ||
-			!this.#storage.existsSync(this.#sessionFile)
+			!this.#storage.existsSync(this.#sessionFile) ||
+			this.#sessionOwnedElsewhere()
 		) {
 			await this.#rewriteAtomically();
 			return;
@@ -1595,6 +1902,8 @@ export class SessionManager {
 		this.#sessionName = header.title;
 		this.#titleSource = header.titleSource;
 		this.#titleUpdatedAt = header.timestamp;
+		const repairedUsage = normalizeLoadedUsage(entries);
+		if (repairedUsage > 0) logger.warn("Loaded assistant messages with incomplete usage", { count: repairedUsage });
 		this.#index.rebuild(entries);
 	}
 
@@ -1620,7 +1929,9 @@ export class SessionManager {
 			logger.warn("Dropped session entry appended after terminal release", { type: entry.type });
 			return;
 		}
-		if (repairMissingUsage(entry)) logger.warn("Assistant message recorded without usage", { id: entry.id });
+		if (entry.type === "message" && entry.message.role === "assistant" && normalizeAssistantUsage(entry.message)) {
+			logger.warn("Assistant message recorded with incomplete usage", { id: entry.id });
+		}
 		this.#entries.push(entry);
 		this.#index.insert(entry);
 		const batch = this.#atomicEntryBatch;
@@ -1694,7 +2005,11 @@ export class SessionManager {
 
 		if (this.#artifactManager && this.#artifactManagerSessionFile === sessionFile) return this.#artifactManager;
 
-		this.#artifactManager = new ArtifactManager(sessionFile.slice(0, -JSONL_SUFFIX_LENGTH));
+		const pendingCopy = this.#pendingArtifactCopy;
+		this.#artifactManager = new ArtifactManager(
+			sessionFile.slice(0, -JSONL_SUFFIX_LENGTH),
+			pendingCopy?.sessionFile === sessionFile ? pendingCopy.done : undefined,
+		);
 		this.#artifactManagerSessionFile = sessionFile;
 		return this.#artifactManager;
 	}
@@ -1849,6 +2164,10 @@ export class SessionManager {
 		await this.#drainAndCloseWriter();
 		this.#clearDiskError();
 		this.#draftOnlySessionCleanupArmed = false;
+		// A switch gives up the previous file. Opening claims nothing: the first
+		// write does, so inspecting a session never counts as owning it.
+		this.#sessionClaim?.release?.();
+		this.#sessionClaim = undefined;
 
 		const resolvedSessionFile = path.resolve(sessionFile);
 		const loaded = loadedSession ?? (await loadSessionFile(resolvedSessionFile, this.#storage));
@@ -2016,6 +2335,52 @@ export class SessionManager {
 			return;
 		}
 
+		// A move writes both paths: it must neither move a session another live
+		// omp process writes nor replace a destination one writes. Checked before
+		// relocation starts (appends still go to the source) and before any
+		// directory is created, so a refusal touches nothing.
+		let destination: { id: string; release: () => void } | undefined;
+		// Hold the lease of the session in the destination file until the move
+		// settles, so its owner cannot start writing mid-move. Our own id is
+		// refcounted, never contended.
+		const claimDestination = async (file: string): Promise<void> => {
+			const id = await readSessionHeaderId(file);
+			if (id === undefined || id === destination?.id) return;
+			const release = this.#storage.claimSession?.(id, file);
+			if (release === null) {
+				throw new SessionMoveRefusedError(
+					`Cannot move session to "${file}": another live omp process writes the session there. Nothing was moved.`,
+				);
+			}
+			destination?.release();
+			destination = release ? { id, release } : undefined;
+		};
+		// The file at the source path must still be this session: if another
+		// session replaced it, moving it would carry that session away from its
+		// writer, whose lease our id never covered.
+		const assertSourceIsOurs = async (file: string): Promise<void> => {
+			const id = await readSessionHeaderId(file);
+			if (id !== undefined && id !== this.#sessionId) {
+				throw new SessionMoveRefusedError(
+					`Cannot move session "${file}": the file now holds a different session. Nothing was moved.`,
+				);
+			}
+		};
+		if (this.#persist && this.#sessionFile && this.#storage.claimSession) {
+			// Every persisted move rewrites the journal (at least its header cwd),
+			// even when the path stays the same.
+			await assertSourceIsOurs(this.#sessionFile);
+			this.#claimSession();
+			if (this.#sessionClaim?.release === undefined) {
+				throw new SessionMoveRefusedError(
+					`Cannot move session "${this.#sessionFile}": another live omp process writes it. Nothing was moved.`,
+				);
+			}
+			if (expectedSessionFile && path.resolve(this.#sessionFile) !== path.resolve(expectedSessionFile)) {
+				await claimDestination(expectedSessionFile);
+			}
+		}
+
 		let sessionFileExisted = false;
 		// Track source+dest for concurrent completed appends during relocation
 		// (see `#sessionFileRelocating`). Existence of either path decides the
@@ -2044,12 +2409,15 @@ export class SessionManager {
 					newArtifactsDir !== null &&
 					path.resolve(oldArtifactsDir) !== path.resolve(newArtifactsDir);
 				sessionFileExisted = this.#storage.existsSync(oldSessionFile);
-
 				let sessionMoved = false;
 				let artifactsRenamed = false;
 
 				try {
 					if (sessionFileExisted && sessionPathChanged) {
+						// The drain awaited: re-check that both paths still hold the
+						// sessions we checked.
+						await assertSourceIsOurs(oldSessionFile);
+						await claimDestination(newSessionFile);
 						try {
 							await fs.promises.rename(oldSessionFile, newSessionFile);
 						} catch (error) {
@@ -2149,6 +2517,8 @@ export class SessionManager {
 			if (this.#sessionFile) this.#rememberBreadcrumb(resolvedCwd, this.#sessionFile);
 		} finally {
 			this.#sessionFileRelocating = null;
+			// The destination is ours or untouched now.
+			destination?.release();
 		}
 	}
 
@@ -2285,6 +2655,7 @@ export class SessionManager {
 		await this.#scheduleDiskWork(async () => {
 			await this.#storage.drain();
 		});
+		await this.#pendingArtifactCopy?.done;
 		if (this.#diskFailure) throw this.#diskFailure;
 	}
 
@@ -2359,6 +2730,10 @@ export class SessionManager {
 	/** Flush, then close the append writer. */
 	async close(): Promise<void> {
 		if (!this.#persist) return;
+		// Closing gives up this process's ownership claim; a later write reclaims it.
+		const claim = this.#sessionClaim;
+		claim?.release?.();
+		if (claim) claim.release = undefined;
 		// A prior `flushSync` can self-conflict with this manager's own
 		// unconfirmed deferred publish; drain despite the latch so that
 		// publish can still confirm before we give up on the transcript.
@@ -2371,6 +2746,7 @@ export class SessionManager {
 			},
 			{ ignorePriorError: true },
 		);
+		await this.#pendingArtifactCopy?.done;
 		await this.#dropIfEmptyAndNoDraft();
 		// Wait for any queued backing writes (IndexedSessionStorage per-path
 		// tail) to become durable so a graceful shutdown does not exit while
@@ -2446,6 +2822,7 @@ export class SessionManager {
 		this.seal();
 		this.#entries = [];
 		this.#index.clear();
+		this.#inMemoryArtifacts = null;
 		this.#closeWriterEventually();
 		this.#entriesReleased = true;
 	}
@@ -2646,10 +3023,12 @@ export class SessionManager {
 	}
 
 	async allocateArtifactPath(toolType: string): Promise<{ id?: string; path?: string }> {
+		if (this.#released) return {};
 		return (await this.#artifactManagerForSession()?.allocatePath(toolType)) ?? {};
 	}
 
 	async saveArtifact(content: string, toolType: string): Promise<string | undefined> {
+		if (this.#released) return undefined;
 		const manager = this.#artifactManagerForSession();
 		if (manager) return manager.save(content, toolType);
 
@@ -2751,9 +3130,24 @@ export class SessionManager {
 	onPersistenceError(cb: (error: Error) => void): () => void {
 		this.#persistenceErrorCallbacks.add(cb);
 		const latched = this.#diskFailure;
-		if (latched) this.#invokePersistenceErrorObserver(cb, latched);
+		if (latched) this.#invokePersistenceObserver(cb, latched);
 		return () => {
 			this.#persistenceErrorCallbacks.delete(cb);
+		};
+	}
+
+	/**
+	 * Subscribe to {@link SessionPersistenceNotice}s: this session moved to a new
+	 * file and keeps saving there, which the user should hear about but which is
+	 * not a failure. Every notice raised before this call is replayed to the new
+	 * subscriber, as {@link onPersistenceError} replays a latched failure, so each
+	 * subscriber sees each notice once however late it subscribed.
+	 */
+	onPersistenceNotice(cb: (notice: SessionPersistenceNotice) => void): () => void {
+		for (const notice of this.#persistenceNotices) this.#invokePersistenceObserver(cb, notice);
+		this.#persistenceNoticeCallbacks.add(cb);
+		return () => {
+			this.#persistenceNoticeCallbacks.delete(cb);
 		};
 	}
 
@@ -2960,6 +3354,7 @@ export class SessionManager {
 		agent?: string;
 		modelRole?: string;
 		resolvedModel?: string;
+		retryFallback?: RetryFallbackRole;
 		readOnly?: boolean;
 		outputSchema?: unknown;
 		outputSchemaMode?: StructuredSubagentSchemaMode;
@@ -3190,25 +3585,16 @@ export class SessionManager {
 		});
 	}
 
-	/**
-	 * Repair loaded assistant entries: strip stale OpenAI Responses replay
-	 * metadata and give usage-less messages zero usage.
-	 */
+	/** Strip stale OpenAI Responses replay metadata from loaded assistant entries. */
 	sanitizeLoadedOpenAIResponsesReplayMetadata(): boolean {
 		let changed = false;
-		let missingUsage = 0;
 		for (const entry of this.#entries) {
 			if (entry.type !== "message" || entry.message.role !== "assistant") continue;
-			if (repairMissingUsage(entry)) missingUsage++;
-
 			const sanitized = sanitizeRehydratedOpenAIResponsesAssistantMessage(entry.message);
 			if (sanitized === entry.message) continue;
 
 			entry.message = sanitized;
 			changed = true;
-		}
-		if (missingUsage > 0) {
-			logger.warn("Loaded assistant messages without usage; treating as zero", { count: missingUsage });
 		}
 
 		return changed;
@@ -3297,9 +3683,12 @@ export class SessionManager {
 
 	/**
 	 * Create a new session file containing only the path from root to `leafId`.
+	 * With `copyArtifacts`, the source artifact directory is copied in the background;
+	 * the new artifact manager waits for it before allocating ids or resolving
+	 * `artifact://`, so kept references stay valid and new ids cannot collide.
 	 * Returns the new file path, or undefined when not persisting.
 	 */
-	createBranchedSession(leafId: string): string | undefined {
+	createBranchedSession(leafId: string, options?: { copyArtifacts?: boolean }): string | undefined {
 		const sourceSessionFile = this.#sessionFile;
 		const branchPath = this.getBranch(leafId);
 		if (branchPath.length === 0) throw new Error(`Entry ${leafId} not found`);
@@ -3363,6 +3752,12 @@ export class SessionManager {
 		}
 
 		this.#sessionFile = newSessionFile;
+		if (options?.copyArtifacts && sourceSessionFile) {
+			this.#pendingArtifactCopy = {
+				sessionFile: newSessionFile,
+				done: copySessionArtifacts(sourceSessionFile, newSessionFile),
+			};
+		}
 		this.#expectedDiskSize = null;
 		this.#rewriteSynchronously();
 		this.#rememberBreadcrumb(this.#cwd, newSessionFile);
@@ -3442,9 +3837,7 @@ export class SessionManager {
 		// the loader swallows ENOENT by default for fresh-session opens, so fork opts out.
 		let sourceEntries: FileEntry[];
 		try {
-			sourceEntries = structuredClone(
-				await loadEntriesFromFile(sourcePath, storage, { throwIfMissing: true }),
-			) as FileEntry[];
+			sourceEntries = await loadEntriesFromFile(sourcePath, storage, { throwIfMissing: true });
 		} catch (err) {
 			if (isEnoent(err) || isEnotdir(err)) throw new ForkSourceNotFoundError(sourcePath);
 			throw err;
@@ -3454,6 +3847,7 @@ export class SessionManager {
 
 		const sourceHeader = sourceEntries.find(entry => entry.type === "session") as SessionHeader | undefined;
 		const history = sourceEntries.filter(entry => entry.type !== "session") as SessionEntry[];
+		normalizeLoadedUsage(history);
 		if (options?.resetInheritedCost) SessionManager.#resetInheritedUsageCost(history);
 		manager.#resetToNewSession(
 			{
@@ -3720,10 +4114,21 @@ export class SessionManager {
 					const manager = await SessionManager.open(breadcrumb.sessionFile, undefined, storage, {
 						initialCwd: breadcrumbCwd,
 					});
-					await manager.moveTo(cwd, sessionDir);
-					return manager;
-				}
-				if (candidateForMove) {
+					try {
+						await manager.moveTo(cwd, sessionDir);
+						return manager;
+					} catch (err) {
+						if (!(err instanceof SessionMoveRefusedError)) throw err;
+						// Another live omp process still writes the session (the
+						// project was renamed under it): leave it there and continue
+						// as if no move were possible.
+						logger.warn("Not re-rooting moved session: it is open in another omp process", {
+							from: breadcrumbCwd,
+							to: resolvedCwd,
+						});
+						await manager.close();
+					}
+				} else if (candidateForMove) {
 					logger.warn(
 						"Not relocating session: project directory is unavailable and there is no evidence it moved here",
 						{ from: breadcrumbCwd, to: resolvedCwd },
@@ -3809,6 +4214,7 @@ export interface PersistedSessionInit {
 	agent?: string;
 	modelRole?: string;
 	resolvedModel?: string;
+	retryFallback?: RetryFallbackRole;
 	readOnly?: boolean;
 	outputSchema?: unknown;
 	outputSchemaMode?: StructuredSubagentSchemaMode;
@@ -3835,6 +4241,7 @@ export function extractSessionInit(entries: readonly FileEntry[]): PersistedSess
 			agent: entry.agent,
 			modelRole: entry.modelRole,
 			resolvedModel: entry.resolvedModel,
+			retryFallback: entry.retryFallback,
 			readOnly: entry.readOnly,
 			outputSchema: entry.outputSchema,
 			outputSchemaMode: entry.outputSchemaMode,
