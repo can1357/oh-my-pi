@@ -25,11 +25,18 @@
 - Fixed Anthropic OAuth billing headers changing during developer-first sessions and side turns, preserving the prompt-cache prefix ([#14495](https://github.com/can1357/oh-my-pi/issues/14495)).
 - Fixed OpenAI-compatible chat-completions gateways recording completed turns as client-cancelled because the connection closed before their `[DONE]` sentinel arrived ([#14481](https://github.com/can1357/oh-my-pi/issues/14481)).
 
+### Fixed
+
+- Fixed a hosted Cursor `web_fetch` tool call being stripped from every rebuilt transcript when the connection closed mid-fetch; `flushOpenToolCalls` now pairs an interrupted result for it like it already did for `connect-scm`, `todo`, and `cursor-edit` blocks ([#14266](https://github.com/can1357/oh-my-pi/pull/14266) by [@jchanghong023](https://github.com/jchanghong023)).
+
 ## [18.6.1] - 2026-10-04
 
 ### Fixed
 
 - Fixed compatibility with Command Code DeepSeek and other DeepSeek-family models by preserving the reasoning context required for warm OpenAI Responses sessions and correctly handling incomplete DSML tool-call wrappers in visible output.
+
+### Fixed
+
 
 ## [18.6.0] - 2026-10-03
 
