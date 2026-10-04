@@ -259,6 +259,23 @@ describe("retry fallback selector resolution", () => {
 		const modelKey = createContext({ [high]: ["openai/gpt-4o-mini"] });
 		expect(resolveRetryFallbackChainKey(modelKey, xhigh, model)).toBeUndefined();
 	});
+
+	it("never lends another role's chain to a live role without one (#14388)", () => {
+		const model = getBundledModel("xai-oauth", "grok-4.7");
+		const roles = {
+			default: "xai-oauth/grok-4.7:medium",
+			slow: "xai-oauth/grok-4.7:xhigh",
+			task: "xai-oauth/grok-4.7",
+		};
+		const taskOnly = createContext({ task: ["openai/gpt-4o-mini"] }, roles);
+		expect(resolveRetryFallbackChainKey(taskOnly, "xai-oauth/grok-4.7:medium", model, "default")).toBeUndefined();
+		expect(resolveRetryFallbackChainKey(taskOnly, "xai-oauth/grok-4.7:xhigh", model, "slow")).toBeUndefined();
+		expect(resolveRetryFallbackChainKey(taskOnly, "xai-oauth/grok-4.7", model, "task")).toBe("task");
+
+		// A configured default chain still catches the hinted role.
+		const withDefault = createContext({ task: ["openai/gpt-4o-mini"], default: ["google/gemini-2.5-flash"] }, roles);
+		expect(resolveRetryFallbackChainKey(withDefault, "xai-oauth/grok-4.7:xhigh", model, "slow")).toBe("default");
+	});
 });
 
 describe("retry fallback kind-role validation", () => {

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed a session on a role without its own `retry.fallbackChains` entry (e.g. `default`, `slow`) falling back along another role's chain (e.g. `task`) just because both roles share a model ([#14388](https://github.com/can1357/oh-my-pi/issues/14388))
+
 ## [18.6.2] - 2026-10-04
 
 ### Fixed

@@ -409,8 +409,9 @@ function selectorMatchKind(
 
 /**
  * Resolve the chain key for a concrete selector by specificity: exact model,
- * longest matching wildcard, hinted role, then matching role keys with
- * `default` preferred over other shared assignments, then default.
+ * longest matching wildcard, then the hinted role's own chain — or, with no
+ * hint, role keys matched by assigned model with `default` preferred over
+ * other shared assignments — then default.
  */
 export function resolveRetryFallbackChainKey(
 	context: RetryFallbackResolutionContext,
@@ -474,33 +475,38 @@ export function resolveRetryFallbackChainKey(
 	}
 	if (wildcardMatch) return wildcardMatch;
 
-	// 3. The hinted role, then role keys matched by their assigned model.
-	// A shared assignment (default and vision both the same model) must not
-	// let yaml insertion order steal the live role's chain. Prefer the hint,
-	// then `default` when it also matches. A role assigned the live model at a
+	// 3. The role tier. A known live role owns it outright — its own chain or
+	// none — so a chain configured for another role assigned the same model
+	// never leaks into it (#14388). Without a hint, role keys match by their
+	// assigned model, and a shared assignment (default and vision both the
+	// same model) must not let yaml insertion order pick the owner: prefer
+	// `default` when it also matches. A role assigned the live model at a
 	// different explicit effort (spawn `effort`, `/thinking`) still owns it,
 	// but only after every role whose effort matches.
-	if (roleHint && Array.isArray(context.chains[roleHint])) return roleHint;
-	let matchedRole: string | undefined;
-	let effortRole: string | undefined;
-	for (const key in context.chains) {
-		if (isRetryFallbackModelKey(key)) continue;
-		const kind = selectorMatchKind(
-			getRetryFallbackPrimarySelector(context, key),
-			parsedCurrent,
-			parsedPlainCurrent,
-			currentModel,
-		);
-		if (kind === "none") continue;
-		if (kind === "effort") {
-			if (key === "default" || effortRole === undefined) effortRole = key;
-			continue;
+	if (roleHint) {
+		if (Array.isArray(context.chains[roleHint])) return roleHint;
+	} else {
+		let matchedRole: string | undefined;
+		let effortRole: string | undefined;
+		for (const key in context.chains) {
+			if (isRetryFallbackModelKey(key)) continue;
+			const kind = selectorMatchKind(
+				getRetryFallbackPrimarySelector(context, key),
+				parsedCurrent,
+				parsedPlainCurrent,
+				currentModel,
+			);
+			if (kind === "none") continue;
+			if (kind === "effort") {
+				if (key === "default" || effortRole === undefined) effortRole = key;
+				continue;
+			}
+			if (key === "default") return "default";
+			matchedRole ??= key;
 		}
-		if (key === "default") return "default";
-		matchedRole ??= key;
+		if (matchedRole) return matchedRole;
+		if (effortRole) return effortRole;
 	}
-	if (matchedRole) return matchedRole;
-	if (effortRole) return effortRole;
 
 	// 4. The default chain. Use it even when `default` has an explicit role
 	//    primary that is a *different* model than the live one (#12421): a

@@ -1752,9 +1752,9 @@ export class TurnRecovery {
 	/**
 	 * Map the failing model selector to the chain key that owns it, by
 	 * specificity: an exact model-selector key, then a `provider/*` wildcard,
-	 * then a model role whose current assignment matches, then `default`.
-	 * Model-oriented keys win over roles so a chain follows the model across
-	 * role reassignments.
+	 * then the live role's chain (or, with no live role, a model role whose
+	 * current assignment matches), then `default`. Model-oriented keys win
+	 * over roles so a chain follows the model across role reassignments.
 	 */
 	resolveRetryFallbackRole(
 		currentSelector: string,
