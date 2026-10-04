@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -49,6 +49,197 @@ describe("applyEditsThenRename", () => {
 		// Failed move must leave source, destination, and reference files untouched.
 		expect(await Bun.file(ref).text()).toBe(refBefore);
 		expect(await Bun.file(source).exists()).toBe(true);
+		expect(await Bun.file(dest).exists()).toBe(false);
+	});
+
+	it("does not rewrite earlier references when a later reference cannot be read", async () => {
+		const dest = path.join(dir, "renamed.ts");
+		await expect(
+			applyEditsThenRename(
+				[
+					{ filePath: ref, edits: importEdit },
+					{ filePath: path.join(dir, "missing.ts"), edits: importEdit },
+				],
+				source,
+				dest,
+			),
+		).rejects.toThrow();
+
+		expect(await Bun.file(ref).text()).toBe(refBefore);
+		expect(await Bun.file(source).text()).toBe("export const x = 1;\n");
+		expect(await Bun.file(dest).exists()).toBe(false);
+	});
+
+	it("validates later edits before rewriting earlier references", async () => {
+		const second = path.join(dir, "second.ts");
+		await Bun.write(second, refBefore);
+		await expect(
+			applyEditsThenRename(
+				[
+					{ filePath: ref, edits: importEdit },
+					{ filePath: second, edits: [...importEdit, { ...importEdit[0], newText: "./conflict" }] },
+				],
+				source,
+				path.join(dir, "renamed.ts"),
+			),
+		).rejects.toThrow("overlapping LSP edits");
+
+		expect(await Bun.file(ref).text()).toBe(refBefore);
+		expect(await Bun.file(second).text()).toBe(refBefore);
+	});
+
+	it("restores earlier and partially written references when a later write fails", async () => {
+		const second = path.join(dir, "second.ts");
+		const dest = path.join(dir, "renamed.ts");
+		await Bun.write(second, refBefore);
+		const failure = new Error("disk full during reference write");
+		const realWrite = Bun.write.bind(Bun);
+		let failed = false;
+		const writeSpy = spyOn(Bun, "write").mockImplementation(async (target, content) => {
+			if (typeof content !== "string") throw new TypeError("Expected a text write");
+			if (target === second && !failed) {
+				failed = true;
+				await realWrite(second, "partial");
+				throw failure;
+			}
+			return realWrite(target, content);
+		});
+		try {
+			await expect(
+				applyEditsThenRename(
+					[
+						{ filePath: ref, edits: importEdit },
+						{ filePath: second, edits: importEdit },
+					],
+					source,
+					dest,
+				),
+			).rejects.toBe(failure);
+
+			expect(await Bun.file(ref).text()).toBe(refBefore);
+			expect(await Bun.file(second).text()).toBe(refBefore);
+			expect(await Bun.file(source).text()).toBe("export const x = 1;\n");
+			expect(await Bun.file(dest).exists()).toBe(false);
+		} finally {
+			writeSpy.mockRestore();
+		}
+	});
+
+	it("continues rollback after a restoration fails and retains both errors", async () => {
+		const second = path.join(dir, "second.ts");
+		await Bun.write(second, refBefore);
+		const failure = new Error("reference write failed");
+		const rollbackFailure = new Error("reference restoration failed");
+		const realWrite = Bun.write.bind(Bun);
+		let failed = false;
+		const writeSpy = spyOn(Bun, "write").mockImplementation(async (target, content) => {
+			if (typeof content !== "string") throw new TypeError("Expected a text write");
+			if (target === second) {
+				if (failed) throw rollbackFailure;
+				failed = true;
+				await realWrite(second, "partial");
+				throw failure;
+			}
+			return realWrite(target, content);
+		});
+		try {
+			const error: unknown = await applyEditsThenRename(
+				[
+					{ filePath: ref, edits: importEdit },
+					{ filePath: second, edits: importEdit },
+				],
+				source,
+				path.join(dir, "renamed.ts"),
+			).catch(error => error);
+
+			expect(error).toBeInstanceOf(AggregateError);
+			if (!(error instanceof AggregateError)) throw new Error("Expected rollback failure details");
+			expect(error.cause).toBe(failure);
+			expect(error.errors[0]).toBe(failure);
+			expect(error.errors[1].cause).toBe(rollbackFailure);
+			expect(error.errors[1].message).toContain(second);
+			expect(await Bun.file(ref).text()).toBe(refBefore);
+			expect(await Bun.file(second).text()).toBe("partial");
+		} finally {
+			writeSpy.mockRestore();
+		}
+	});
+
+	it("combines duplicate reference paths against the original contents", async () => {
+		const dest = path.join(dir, "renamed.ts");
+		await applyEditsThenRename(
+			[
+				{ filePath: ref, edits: importEdit },
+				{ filePath: ref, edits: importEdit },
+			],
+			source,
+			dest,
+		);
+
+		expect(await Bun.file(ref).text()).toBe('import { x } from "./renamed";\n');
+		expect(await Bun.file(dest).text()).toBe("export const x = 1;\n");
+	});
+
+	it("restores the original snapshot for duplicate paths when rename fails", async () => {
+		const dest = path.join(dir, "occupied");
+		await fs.mkdir(dest);
+		await Bun.write(path.join(dest, "keep.txt"), "keep");
+		await expect(
+			applyEditsThenRename(
+				[
+					{ filePath: ref, edits: importEdit },
+					{ filePath: ref, edits: importEdit },
+				],
+				source,
+				dest,
+			),
+		).rejects.toThrow();
+
+		expect(await Bun.file(ref).text()).toBe(refBefore);
+		expect(await Bun.file(source).text()).toBe("export const x = 1;\n");
+		expect(await Bun.file(path.join(dest, "keep.txt")).text()).toBe("keep");
+	});
+
+	it.each(["symlink", "hard link"])("preserves distinct reference edits through a %s alias", async aliasKind => {
+		const alias = path.join(dir, "alias.ts");
+		if (aliasKind === "symlink") await fs.symlink(ref, alias);
+		else await fs.link(ref, alias);
+		const dest = path.join(dir, "renamed.ts");
+		await applyEditsThenRename(
+			[
+				{ filePath: alias, edits: importEdit },
+				{
+					filePath: ref,
+					edits: [{ range: { start: { line: 0, character: 9 }, end: { line: 0, character: 10 } }, newText: "y" }],
+				},
+			],
+			source,
+			dest,
+		);
+
+		expect(await Bun.file(ref).text()).toBe('import { y } from "./renamed";\n');
+		expect(await Bun.file(alias).text()).toBe('import { y } from "./renamed";\n');
+		expect(await Bun.file(dest).text()).toBe("export const x = 1;\n");
+		expect(await Bun.file(source).exists()).toBe(false);
+	});
+
+	it("rejects conflicting edits through a symlink alias before changing files", async () => {
+		const alias = path.join(dir, "alias.ts");
+		await fs.symlink(ref, alias);
+		const dest = path.join(dir, "renamed.ts");
+		await expect(
+			applyEditsThenRename(
+				[
+					{ filePath: ref, edits: importEdit },
+					{ filePath: alias, edits: [{ ...importEdit[0], newText: "./conflict" }] },
+				],
+				source,
+				dest,
+			),
+		).rejects.toThrow("overlapping LSP edits");
+
+		expect(await Bun.file(ref).text()).toBe(refBefore);
+		expect(await Bun.file(source).text()).toBe("export const x = 1;\n");
 		expect(await Bun.file(dest).exists()).toBe(false);
 	});
 });
