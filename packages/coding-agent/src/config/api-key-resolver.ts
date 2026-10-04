@@ -3,6 +3,7 @@ import * as AIError from "@oh-my-pi/pi-ai/error";
 import { isUsageLimitOutcome } from "@oh-my-pi/pi-ai/error/rate-limit";
 import type { AuthApiKeyOptions, AuthStorage } from "@oh-my-pi/pi-ai/auth-storage";
 import type { Api, Model } from "@oh-my-pi/pi-ai/types";
+import type { UsageFunding } from "@oh-my-pi/pi-catalog/types";
 
 /** Model slice accepted by the model-form `resolver(model, sessionId)` overload. */
 export type ApiKeyResolverModel = Pick<Model<Api>, "provider" | "baseUrl" | "id" | "usageFunding">;
@@ -15,7 +16,7 @@ export interface ApiKeyResolverOptions {
 	/** Provider model id forwarded to model-scoped usage ranking/backoff. */
 	modelId?: string;
 	/** `credits` restricts OAuth selection to credit-backed accounts (a fallback chain's credits rung). */
-	usageFunding?: AuthApiKeyOptions["usageFunding"];
+	usageFunding?: UsageFunding;
 }
 
 /**

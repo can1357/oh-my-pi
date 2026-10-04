@@ -504,6 +504,7 @@ function buildPlanMeterState(
 
 export const openaiCodexUsageProvider: UsageProvider = {
 	id: "openai-codex",
+	supportsCreditOverage: true,
 	supports(params: UsageFetchParams): boolean {
 		return params.provider === "openai-codex" && params.credential.type === "oauth";
 	},

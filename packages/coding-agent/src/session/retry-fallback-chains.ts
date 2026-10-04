@@ -7,7 +7,12 @@ import {
 	parseModelString,
 	splitUpstreamRouting,
 } from "@oh-my-pi/pi-tui/overlays/model-selector";
-import { CREDITS_FUNDING_ROUTE, formatModelString, formatModelStringWithRouting } from "../config/model-resolver";
+import {
+	CREDITS_FUNDING_ROUTE,
+	formatModelString,
+	formatModelStringWithRouting,
+	parseModelPattern,
+} from "../config/model-resolver";
 import type { Settings } from "../config/settings";
 import {
 	type ConfiguredThinkingLevel,
@@ -251,14 +256,17 @@ function providerScopedPool(
 	return pool;
 }
 
-/** Whether a parsed selector names a catalog model; a `@credits` rung names its base model. */
-function fallbackSelectorModelExists(
+/** Explain missing models or unsupported funding modifiers without discarding `@credits`. */
+function fallbackSelectorModelError(
 	modelRegistry: Pick<ModelRegistry, "find">,
 	selector: RetryFallbackSelector,
-): boolean {
+): "unknown model" | "unsupported credits funding" | undefined {
+	if (modelRegistry.find(selector.provider, selector.id)) return undefined;
 	const routing = splitUpstreamRouting(selector.id);
-	const id = routing?.upstream === CREDITS_FUNDING_ROUTE ? routing.base : selector.id;
-	return modelRegistry.find(selector.provider, id) !== undefined;
+	if (routing?.upstream !== CREDITS_FUNDING_ROUTE) return "unknown model";
+	const base = modelRegistry.find(selector.provider, routing.base);
+	if (!base) return "unknown model";
+	return parseModelPattern(selector.raw, [base]).model ? undefined : "unsupported credits funding";
 }
 
 /**
@@ -301,11 +309,11 @@ export function validateRetryFallbackChains(
 				const parsedKey = parseRetryFallbackSelector(key, modelRegistry);
 				if (!parsedKey) {
 					report(`Invalid model selector key in retry.fallbackChains: ${key}`);
-				} else if (
-					!fallbackSelectorModelExists(modelRegistry, parsedKey) &&
-					!isDiscoveryPending(parsedKey.provider)
-				) {
-					report(`retry.fallbackChains key references unknown model: ${key}`);
+				} else {
+					const error = fallbackSelectorModelError(modelRegistry, parsedKey);
+					if (error && (error !== "unknown model" || !isDiscoveryPending(parsedKey.provider))) {
+						report(`retry.fallbackChains key references ${error}: ${key}`);
+					}
 				}
 			}
 		}
@@ -359,8 +367,9 @@ export function validateRetryFallbackChains(
 				report(`Invalid fallback selector format in ${keyKind} '${key}': ${selectorStr}`);
 				continue;
 			}
-			if (!fallbackSelectorModelExists(modelRegistry, parsed) && !isDiscoveryPending(parsed.provider)) {
-				report(`Fallback chain for ${keyKind} '${key}' references unknown model: ${selectorStr}`);
+			const error = fallbackSelectorModelError(modelRegistry, parsed);
+			if (error && (error !== "unknown model" || !isDiscoveryPending(parsed.provider))) {
+				report(`Fallback chain for ${keyKind} '${key}' references ${error}: ${selectorStr}`);
 			}
 		}
 	}

@@ -1,3 +1,4 @@
+import type { UsageFunding } from "@oh-my-pi/pi-catalog/types";
 import type { ApiKeyResolver, ResolvedApiKey } from "../auth-retry";
 import type {
 	OAuthAuthInfo,
@@ -463,14 +464,6 @@ export interface UsageLimitMarkResult {
  * credits). It is neither allowance (`healthy`) nor `reserve`.
  */
 export type ModelUsageHealthState = "healthy" | "credits" | "reserve" | "depleted" | "unknown";
-
-/**
- * Which funding a request may draw on. Absent: the default allowance-first
- * ranking. `credits`: the explicit credits rung of a fallback chain, which
- * serves only from accounts whose allowance is spent and whose paid credit
- * balance still funds overage.
- */
-export type UsageFunding = "credits";
 
 /** Usage health of one stored credential for a model. */
 export interface ModelUsageAccountHealth {

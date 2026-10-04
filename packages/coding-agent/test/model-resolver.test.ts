@@ -538,6 +538,28 @@ describe("pickDefaultAvailableModel", () => {
 });
 
 describe("parseModelPattern", () => {
+	test("rejects credits funding when usage cannot identify credit-funded overage", () => {
+		for (const model of mockModels) {
+			const result = parseModelPattern(`${model.provider}/${model.id}@credits`, [model]);
+			expect(result.model).toBeUndefined();
+			expect(result.warning).toContain("cannot report credit-funded overage");
+		}
+	});
+
+	test("resolves supported credits funding without changing aggregator upstream routing", () => {
+		const codex = openaiGpt55Models[1];
+		const funded = parseModelPattern(`${codex.provider}/${codex.id}@credits:auto`, [codex]);
+		expect(funded.model?.usageFunding).toBe("credits");
+		expect(formatModelStringWithRouting(funded.model!)).toBe(`${codex.provider}/${codex.id}@credits`);
+		expect(funded.thinkingLevel).toBe("auto");
+		expect(funded.warning).toBeUndefined();
+
+		const aggregator = mockOpenRouterModels[2];
+		const routed = parseModelPattern(`${aggregator.provider}/${aggregator.id}@credits`, [aggregator]);
+		expect(routed.model?.usageFunding).toBeUndefined();
+		expect(routed.upstream).toBe("credits");
+	});
+
 	describe("simple patterns without colons", () => {
 		test("exact match returns model with undefined thinking level", () => {
 			const result = parseModelPattern("claude-sonnet-4-5", allModels);

@@ -1105,7 +1105,7 @@ describe("createAgentSession deferred model pattern resolution", () => {
 	// serve; the explicit `@credits` rung spends them once those are gone.
 	test.each([
 		["a later rung is healthy", "healthy", "runtime-fallback-model", undefined],
-		["every later rung is depleted", "depleted", "runtime-model", "credits"],
+		["every later rung is depleted", "depleted", "gpt-6.1-sol", "credits"],
 	] as const)(
 		"skips a credits-only allowance rung when %s",
 		async (_case, laterState, expectedId, expectedFunding) => {
@@ -1113,16 +1113,21 @@ describe("createAgentSession deferred model pattern resolution", () => {
 				"retry.usageAwareFallback": true,
 				"retry.usageReservePolicy": "confirm",
 				"retry.fallbackChains": {
-					task: ["runtime-provider/runtime-fallback-model", "runtime-provider/runtime-model@credits"],
+					task: ["runtime-provider/runtime-fallback-model", "openai-codex/gpt-6.1-sol@credits"],
 				},
 			});
-			settings.setModelRole("task", "runtime-provider/runtime-model");
+			settings.setModelRole("task", "openai-codex/gpt-6.1-sol");
 			const options = buildSessionOptions("task");
+			const authStorage = createInMemoryAuthStorage();
+			authStoragesToClose.push(authStorage);
+			authStorage.keys.setRuntime("openai-codex", "codex-test-key");
+			options.authStorage = authStorage;
+			options.modelRegistry = new ModelRegistry(authStorage, path.join(tempDir, "credits-models.yml"));
 			vi.spyOn(options.authStorage.health, "model").mockImplementation(async (_provider, healthOptions) => {
 				const state =
 					healthOptions.usageFunding === "credits"
 						? "healthy"
-						: healthOptions.modelId === "runtime-model"
+						: healthOptions.modelId === "gpt-6.1-sol"
 							? "credits"
 							: laterState;
 				return { state, accounts: [{ credentialId: 1, credentialType: "oauth", state }] };
@@ -1134,7 +1139,7 @@ describe("createAgentSession deferred model pattern resolution", () => {
 				hasUI: false,
 			});
 			try {
-				expect(session.model?.provider).toBe("runtime-provider");
+				expect(session.model?.provider).toBe(expectedFunding ? "openai-codex" : "runtime-provider");
 				expect(session.model?.id).toBe(expectedId);
 				expect(session.model?.usageFunding).toBe(expectedFunding);
 			} finally {

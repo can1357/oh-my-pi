@@ -590,6 +590,8 @@ A prefixed wildcard such as `openrouter/google/*` can be used as a chain key or 
 
 A selector's `@credits` modifier names the same model's paid-credits rung: `openai-codex/gpt-6.1-sol@credits:auto` is served only from accounts whose plan allowance is spent while a paid credit balance still funds overage (Codex flexible credits), ordered by `auth.accountPolicies[].priority`, so a negative-priority account still pays last. Usage health reports such accounts as `credits`; without the modifier, usage-aware fallback handles that state exactly like `reserve`, so later rungs run before credits are spent. A chain such as `[xai-oauth/grok-4.7:high, zai/glm-5.3:auto, openai-codex/gpt-6.1-sol@credits:auto, anthropic/claude-opus-5-5:auto]` behind a Sol primary spends plan allowance, then Grok and GLM, then Codex credits, then Opus. On OpenRouter and Vercel AI Gateway, `@<slug>` keeps its upstream-routing meaning.
 
+The credits modifier requires a usage provider that reports credit-funded overage (currently Codex). Unsupported providers are rejected during selector resolution and reported by fallback-chain validation; `@credits` is not a generic API-key spending mode.
+
 ### Tools and approvals
 
 ```yaml

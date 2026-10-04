@@ -26,6 +26,7 @@ import {
 import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { ModelRoleLookup } from "@oh-my-pi/pi-tui/overlays/model-browser";
 import type { Api, Effort, KnownProvider, Model, ModelSpec } from "@oh-my-pi/pi-ai";
+import { defaultUsageProvider } from "@oh-my-pi/pi-ai/usage/registry";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { resolveBareVariantSelector, resolveVariantSelector } from "@oh-my-pi/pi-catalog/compat/collapse";
 import { providerEntry } from "@oh-my-pi/pi-catalog/compat/providers";
@@ -207,8 +208,8 @@ function getSingleUpstreamRoute(model: Model<Api>): string | undefined {
 /**
  * Selector modifier naming a route's credits rung: `openai-codex/gpt-6.1-sol@credits:auto`
  * serves the same model from accounts whose plan allowance is spent and whose
- * paid credit balance funds the overage. Reserved on non-aggregator providers,
- * where `@<slug>` has no upstream-routing meaning.
+ * paid credit balance funds the overage. Requires a usage provider that can
+ * identify credit-funded overage; aggregator `@<slug>` routing is unchanged.
  */
 export const CREDITS_FUNDING_ROUTE = "credits";
 
@@ -1016,7 +1017,7 @@ function matchPatternWithContext(
 	// No direct match: a trailing `@upstream` may be a provider-routing selector.
 	// Only honor it when the base resolves to an aggregator model (OpenRouter /
 	// Vercel Gateway); otherwise `@` stays part of the id and `direct` stands.
-	// On any other model, the reserved `@credits` slug selects the credits rung.
+	// Otherwise `@credits` requires credit-funded overage reporting.
 	const routing = splitUpstreamRouting(pattern);
 	if (routing) {
 		const routed = parseModelPatternWithContext(routing.base, availableModels, context, options);
@@ -1024,6 +1025,13 @@ function matchPatternWithContext(
 			return { ...routed, model: applyUpstreamRouting(routed.model, routing.upstream), upstream: routing.upstream };
 		}
 		if (routed.model && routing.upstream === CREDITS_FUNDING_ROUTE) {
+			if (!defaultUsageProvider(routed.model.provider)?.supportsCreditOverage) {
+				return {
+					...routed,
+					model: undefined,
+					warning: `Provider "${routed.model.provider}" cannot report credit-funded overage for "${pattern}".`,
+				};
+			}
 			return { ...routed, model: { ...routed.model, usageFunding: "credits" } };
 		}
 	}
