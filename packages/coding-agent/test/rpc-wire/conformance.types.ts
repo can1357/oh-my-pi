@@ -46,11 +46,16 @@ import type {
 	RpcResponse,
 	RpcSessionSettledFrame,
 	RpcSessionState,
+	RpcSkillDiagnosticsUpdateFrame,
 	RpcSubagentEventFrame,
 	RpcSubagentLifecycleFrame,
 	RpcSubagentMessagesResult,
 	RpcSubagentProgressFrame,
 	RpcSubagentSnapshot,
+	SkillDiagnosticDuplicate,
+	SkillDiagnosticEntry,
+	SkillDiagnosticsSnapshot,
+	SkillResolutionDiagnostic,
 } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-types";
 import type * as Wire from "@oh-my-pi/pi-coding-agent/modes/rpc/wire/rpc-wire.generated";
 import type { SessionStats } from "@oh-my-pi/pi-coding-agent/session/agent-session";
@@ -193,6 +198,7 @@ export type Frames = Assert<
 		promptError: Outbound<RpcPromptError, Wire.PromptError>;
 		sessionSettled: Outbound<RpcSessionSettledFrame, Wire.SessionSettledEvent>;
 		availableCommands: Outbound<RpcAvailableCommandsUpdateFrame, Wire.AvailableCommandsUpdateEvent>;
+		skillDiagnosticsUpdate: Outbound<RpcSkillDiagnosticsUpdateFrame, Wire.SkillDiagnosticsUpdateEvent>;
 		subagentLifecycle: Outbound<RpcSubagentLifecycleFrame, Wire.SubagentLifecycleEvent>;
 		subagentLifecyclePayload: Outbound<RpcSubagentLifecycleFrame["payload"], Wire.SubagentLifecyclePayload>;
 		subagentProgress: Outbound<RpcSubagentProgressFrame, Wire.SubagentProgressEvent>;
@@ -256,6 +262,10 @@ export type State = Assert<
 		slashCommand: Outbound<RpcAvailableSlashCommand, Wire.AvailableSlashCommand>;
 		slashSubcommand: Outbound<NonNullable<RpcAvailableSlashCommand["subcommands"]>[number], Wire.SlashSubcommand>;
 		subagentSnapshot: Outbound<RpcSubagentSnapshot, Wire.SubagentSnapshot>;
+		skillDiagnostics: Outbound<SkillDiagnosticsSnapshot, Wire.SkillDiagnosticsSnapshot>;
+		skillResolutionDiagnostic: Outbound<SkillResolutionDiagnostic, Wire.SkillResolutionDiagnostic>;
+		skillDiagnosticDuplicate: Outbound<SkillDiagnosticDuplicate, Wire.SkillDiagnosticDuplicate>;
+		skillDiagnosticEntry: Outbound<SkillDiagnosticEntry, Wire.SkillDiagnosticEntry>;
 		subagentMessages: Outbound<RpcSubagentMessagesResult, Wire.SubagentMessages>;
 		model: OutboundSubset<Model, Wire.ModelInfo>;
 		modelCost: OutboundSubset<Model["cost"], Wire.ModelCost>;

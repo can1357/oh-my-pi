@@ -129,6 +129,12 @@ _SUBAGENT_STATUS_VALUES: Final[frozenset[str]] = frozenset({"pending", "running"
 _decode_subagent_status = cast("Decoder[SubagentStatus]", literal(_SUBAGENT_STATUS_VALUES))
 
 
+SkillSelectionReason: TypeAlias = Literal["source-order", "custom-directory", "authored-over-installed"]
+"""Rule that ordered the active variants of one skill name."""
+_SKILL_SELECTION_REASON_VALUES: Final[frozenset[str]] = frozenset({"source-order", "custom-directory", "authored-over-installed"})
+_decode_skill_selection_reason = cast("Decoder[SkillSelectionReason]", literal(_SKILL_SELECTION_REASON_VALUES))
+
+
 AutoCompactionReason: TypeAlias = Literal["threshold", "overflow", "idle", "incomplete"]
 _AUTO_COMPACTION_REASON_VALUES: Final[frozenset[str]] = frozenset({"threshold", "overflow", "idle", "incomplete"})
 _decode_auto_compaction_reason = cast("Decoder[AutoCompactionReason]", literal(_AUTO_COMPACTION_REASON_VALUES))
@@ -602,6 +608,39 @@ class GoalResult:
 
 
 @dataclass(slots=True, frozen=True, kw_only=True)
+class SkillDiagnosticEntry:
+    """Allowlisted identity of one discovered skill file."""
+    name: str
+    file_path: str
+    source: str
+    plugin_name: str | None = None
+
+
+@dataclass(slots=True, frozen=True, kw_only=True)
+class SkillDiagnosticDuplicate:
+    """A file identical to a loaded skill and so not loaded; `retained` is the skill that stands for it."""
+    skill: SkillDiagnosticEntry
+    retained: SkillDiagnosticEntry
+
+
+@dataclass(slots=True, frozen=True, kw_only=True)
+class SkillResolutionDiagnostic:
+    """A skill name that resolved into several active variants and/or left redundant copies unloaded."""
+    name: str
+    reason: SkillSelectionReason
+    skills: tuple[SkillDiagnosticEntry, ...]
+    duplicates: tuple[SkillDiagnosticDuplicate, ...]
+
+
+@dataclass(slots=True, frozen=True, kw_only=True)
+class SkillDiagnosticsSnapshot:
+    """Current skill resolution; an empty `diagnostics` means no conflicts or redundant installations."""
+    cwd: str
+    show_startup_diagnostics: bool
+    diagnostics: tuple[SkillResolutionDiagnostic, ...]
+
+
+@dataclass(slots=True, frozen=True, kw_only=True)
 class SessionState:
     session_id: str
     model: ModelInfo | None = None
@@ -631,6 +670,8 @@ class SessionState:
     context_usage: ContextUsage | None = None
     goal: GoalModeState | None = None
     """Current goal mode; null when the session has no goal."""
+    skill_diagnostics: SkillDiagnosticsSnapshot | None = None
+    """Current skill-resolution details; absent when connected to an older server."""
 
 
 @dataclass(slots=True, frozen=True, kw_only=True)
@@ -1149,6 +1190,13 @@ class AvailableCommandsUpdateEvent:
 
 
 @dataclass(slots=True, frozen=True, kw_only=True)
+class SkillDiagnosticsUpdateEvent:
+    """Skill-resolution snapshot, pushed at startup and whenever it or the effective notice setting changes."""
+    type: Literal["skill_diagnostics_update"] = "skill_diagnostics_update"
+    data: SkillDiagnosticsSnapshot
+
+
+@dataclass(slots=True, frozen=True, kw_only=True)
 class SubagentLifecyclePayload:
     id: str
     agent: str
@@ -1478,7 +1526,7 @@ RpcAgentEvent: TypeAlias = AgentStartEvent | AgentEndEvent | TurnStartEvent | Tu
 """A session event, discriminated by `type`; `set_event_filter` selects which are sent."""
 
 
-RpcNotification: TypeAlias = ReadyEvent | PromptResultEvent | SessionSettledEvent | ExtensionError | ExtensionUiRequest | AvailableCommandsUpdateEvent | SubagentLifecycleEvent | SubagentProgressEvent | SubagentEvent | LivePhaseEvent | LiveLevelsEvent | LiveTranscriptEvent | LiveEndEvent | CommandOutputEvent | SessionInfoUpdateEvent | ConfigUpdateEvent | RpcFrameErrorEvent | RpcAgentEvent | UnknownNotification
+RpcNotification: TypeAlias = ReadyEvent | PromptResultEvent | SessionSettledEvent | ExtensionError | ExtensionUiRequest | AvailableCommandsUpdateEvent | SkillDiagnosticsUpdateEvent | SubagentLifecycleEvent | SubagentProgressEvent | SubagentEvent | LivePhaseEvent | LiveLevelsEvent | LiveTranscriptEvent | LiveEndEvent | CommandOutputEvent | SessionInfoUpdateEvent | ConfigUpdateEvent | RpcFrameErrorEvent | RpcAgentEvent | UnknownNotification
 """Unsolicited outbound frame (everything except responses and host tool/URI requests), discriminated by `type`."""
 
 
@@ -1769,6 +1817,43 @@ def parse_goal_result(value: object, path: str = "GoalResult") -> GoalResult:
     )
 
 
+def parse_skill_diagnostic_entry(value: object, path: str = "SkillDiagnosticEntry") -> SkillDiagnosticEntry:
+    payload = expect_object(value, path)
+    return SkillDiagnosticEntry(
+        name=required(payload, "name", decode_str, path),
+        file_path=required(payload, "filePath", decode_str, path),
+        source=required(payload, "source", decode_str, path),
+        plugin_name=optional(payload, "pluginName", decode_str, path),
+    )
+
+
+def parse_skill_diagnostic_duplicate(value: object, path: str = "SkillDiagnosticDuplicate") -> SkillDiagnosticDuplicate:
+    payload = expect_object(value, path)
+    return SkillDiagnosticDuplicate(
+        skill=required(payload, "skill", parse_skill_diagnostic_entry, path),
+        retained=required(payload, "retained", parse_skill_diagnostic_entry, path),
+    )
+
+
+def parse_skill_resolution_diagnostic(value: object, path: str = "SkillResolutionDiagnostic") -> SkillResolutionDiagnostic:
+    payload = expect_object(value, path)
+    return SkillResolutionDiagnostic(
+        name=required(payload, "name", decode_str, path),
+        reason=required(payload, "reason", _decode_skill_selection_reason, path),
+        skills=required(payload, "skills", array(parse_skill_diagnostic_entry), path),
+        duplicates=required(payload, "duplicates", array(parse_skill_diagnostic_duplicate), path),
+    )
+
+
+def parse_skill_diagnostics_snapshot(value: object, path: str = "SkillDiagnosticsSnapshot") -> SkillDiagnosticsSnapshot:
+    payload = expect_object(value, path)
+    return SkillDiagnosticsSnapshot(
+        cwd=required(payload, "cwd", decode_str, path),
+        show_startup_diagnostics=required(payload, "showStartupDiagnostics", decode_bool, path),
+        diagnostics=required(payload, "diagnostics", array(parse_skill_resolution_diagnostic), path),
+    )
+
+
 def parse_session_state(value: object, path: str = "SessionState") -> SessionState:
     payload = expect_object(value, path)
     return SessionState(
@@ -1796,6 +1881,7 @@ def parse_session_state(value: object, path: str = "SessionState") -> SessionSta
         dump_tools=defaulted(payload, "dumpTools", array(parse_tool_descriptor), path, ()),
         context_usage=optional(payload, "contextUsage", parse_context_usage, path),
         goal=defaulted(payload, "goal", nullable(parse_goal_mode_state), path, None),
+        skill_diagnostics=optional(payload, "skillDiagnostics", parse_skill_diagnostics_snapshot, path),
     )
 
 
@@ -2403,6 +2489,14 @@ def parse_available_commands_update_event(value: object, path: str = "AvailableC
     )
 
 
+def parse_skill_diagnostics_update_event(value: object, path: str = "SkillDiagnosticsUpdateEvent") -> SkillDiagnosticsUpdateEvent:
+    payload = expect_object(value, path)
+    required(payload, "type", cast('Decoder[Literal["skill_diagnostics_update"]]', literal(frozenset({"skill_diagnostics_update"}))), path)
+    return SkillDiagnosticsUpdateEvent(
+        data=required(payload, "data", parse_skill_diagnostics_snapshot, path),
+    )
+
+
 def parse_subagent_lifecycle_payload(value: object, path: str = "SubagentLifecyclePayload") -> SubagentLifecyclePayload:
     payload = expect_object(value, path)
     return SubagentLifecyclePayload(
@@ -2816,6 +2910,7 @@ _RPC_NOTIFICATION_CASES: Final[dict[str, Decoder[RpcNotification]]] = {
         "extension_error": parse_extension_error,
         "extension_ui_request": parse_extension_ui_request,
         "available_commands_update": parse_available_commands_update_event,
+        "skill_diagnostics_update": parse_skill_diagnostics_update_event,
         "subagent_lifecycle": parse_subagent_lifecycle_event,
         "subagent_progress": parse_subagent_progress_event,
         "subagent_event": parse_subagent_event,
@@ -2923,6 +3018,17 @@ class WireClient:
         """Snapshot the session state."""
         params: dict[str, object] = {}
         return parse_session_state(self._command("get_state", params), "get_state")
+
+    def get_skill_diagnostics(self) -> SkillDiagnosticsSnapshot:
+        """Snapshot skill resolution; available even when startup notices are disabled."""
+        params: dict[str, object] = {}
+        return parse_skill_diagnostics_snapshot(self._command("get_skill_diagnostics", params), "get_skill_diagnostics")
+
+    def set_skill_startup_diagnostics(self, enabled: bool) -> SkillDiagnosticsSnapshot:
+        """Persist the skill startup-notice preference; returns the snapshot with the effective setting."""
+        params: dict[str, object] = {}
+        params["enabled"] = enabled
+        return parse_skill_diagnostics_snapshot(self._command("set_skill_startup_diagnostics", params), "set_skill_startup_diagnostics")
 
     def set_fast_mode(self, enabled: bool) -> FastModeResult:
         """Enable or disable fast mode for the session."""
@@ -3234,6 +3340,10 @@ class WireClient:
         """Subscribe to `available_commands_update`: Slash-command catalog, pushed at startup and whenever command metadata changes."""
         return self._listen("available_commands_update", listener)
 
+    def on_skill_diagnostics_update(self, listener: Callable[[SkillDiagnosticsUpdateEvent], None]) -> Callable[[], None]:
+        """Subscribe to `skill_diagnostics_update`: Skill-resolution snapshot, pushed at startup and whenever it or the effective notice setting changes."""
+        return self._listen("skill_diagnostics_update", listener)
+
     def on_subagent_lifecycle(self, listener: Callable[[SubagentLifecycleEvent], None]) -> Callable[[], None]:
         """Subscribe to `subagent_lifecycle`: A subagent started or ended; sent at subscription level "progress" or "events"."""
         return self._listen("subagent_lifecycle", listener)
@@ -3539,6 +3649,12 @@ __all__ = [
     "SetStatusUiRequest",
     "SetTitleUiRequest",
     "SetWidgetUiRequest",
+    "SkillDiagnosticDuplicate",
+    "SkillDiagnosticEntry",
+    "SkillDiagnosticsSnapshot",
+    "SkillDiagnosticsUpdateEvent",
+    "SkillResolutionDiagnostic",
+    "SkillSelectionReason",
     "SlashCommandInput",
     "SlashCommandSource",
     "SlashSubcommand",
@@ -3697,6 +3813,11 @@ __all__ = [
     "parse_set_status_ui_request",
     "parse_set_title_ui_request",
     "parse_set_widget_ui_request",
+    "parse_skill_diagnostic_duplicate",
+    "parse_skill_diagnostic_entry",
+    "parse_skill_diagnostics_snapshot",
+    "parse_skill_diagnostics_update_event",
+    "parse_skill_resolution_diagnostic",
     "parse_slash_command_input",
     "parse_slash_subcommand",
     "parse_subagent_event",

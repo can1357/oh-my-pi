@@ -131,6 +131,28 @@
 				"clientOmit": []
 			},
 			{
+				"name": "get_skill_diagnostics",
+				"doc": "Snapshot skill resolution; available even when startup notices are disabled.",
+				"params": null,
+				"result": "SkillDiagnosticsSnapshot",
+				"nullable": false,
+				"unwrap": null,
+				"timeoutMs": null,
+				"completion": null,
+				"clientOmit": []
+			},
+			{
+				"name": "set_skill_startup_diagnostics",
+				"doc": "Persist the skill startup-notice preference; returns the snapshot with the effective setting.",
+				"params": "SetSkillStartupDiagnosticsParams",
+				"result": "SkillDiagnosticsSnapshot",
+				"nullable": false,
+				"unwrap": null,
+				"timeoutMs": null,
+				"completion": null,
+				"clientOmit": []
+			},
+			{
 				"name": "set_fast_mode",
 				"doc": "Enable or disable fast mode for the session.",
 				"params": "SetFastModeParams",
@@ -2382,6 +2404,107 @@
 			],
 			"description": "Outcome of every `goal` op; both fields are null when the session has no goal."
 		},
+		"SkillSelectionReason": {
+			"enum": [
+				"source-order",
+				"custom-directory",
+				"authored-over-installed"
+			],
+			"type": "string",
+			"description": "Rule that ordered the active variants of one skill name."
+		},
+		"SkillDiagnosticEntry": {
+			"type": "object",
+			"properties": {
+				"name": {
+					"type": "string"
+				},
+				"filePath": {
+					"type": "string"
+				},
+				"source": {
+					"type": "string"
+				},
+				"pluginName": {
+					"type": "string"
+				}
+			},
+			"required": [
+				"name",
+				"filePath",
+				"source"
+			],
+			"description": "Allowlisted identity of one discovered skill file."
+		},
+		"SkillDiagnosticDuplicate": {
+			"type": "object",
+			"properties": {
+				"skill": {
+					"$ref": "#/$defs/SkillDiagnosticEntry"
+				},
+				"retained": {
+					"$ref": "#/$defs/SkillDiagnosticEntry"
+				}
+			},
+			"required": [
+				"skill",
+				"retained"
+			],
+			"description": "A file identical to a loaded skill and so not loaded; `retained` is the skill that stands for it."
+		},
+		"SkillResolutionDiagnostic": {
+			"type": "object",
+			"properties": {
+				"name": {
+					"type": "string"
+				},
+				"reason": {
+					"$ref": "#/$defs/SkillSelectionReason"
+				},
+				"skills": {
+					"type": "array",
+					"items": {
+						"$ref": "#/$defs/SkillDiagnosticEntry"
+					}
+				},
+				"duplicates": {
+					"type": "array",
+					"items": {
+						"$ref": "#/$defs/SkillDiagnosticDuplicate"
+					}
+				}
+			},
+			"required": [
+				"name",
+				"reason",
+				"skills",
+				"duplicates"
+			],
+			"description": "A skill name that resolved into several active variants and/or left redundant copies unloaded."
+		},
+		"SkillDiagnosticsSnapshot": {
+			"type": "object",
+			"properties": {
+				"cwd": {
+					"type": "string"
+				},
+				"showStartupDiagnostics": {
+					"type": "boolean"
+				},
+				"diagnostics": {
+					"type": "array",
+					"items": {
+						"$ref": "#/$defs/SkillResolutionDiagnostic"
+					}
+				}
+			},
+			"required": [
+				"cwd",
+				"showStartupDiagnostics",
+				"diagnostics"
+			],
+			"description": "Current skill resolution; an empty `diagnostics` means no conflicts or redundant installations."
+		},
 		"SessionState": {
 			"type": "object",
 			"properties": {
@@ -2505,6 +2628,10 @@
 					],
 					"description": "Current goal mode; null when the session has no goal.",
 					"default": null
+				},
+				"skillDiagnostics": {
+					"$ref": "#/$defs/SkillDiagnosticsSnapshot",
+					"description": "Current skill-resolution details; absent when connected to an older server."
 				}
 			},
 			"required": [
@@ -4065,6 +4192,22 @@
 			],
 			"description": "Slash-command catalog, pushed at startup and whenever command metadata changes."
 		},
+		"SkillDiagnosticsUpdateEvent": {
+			"type": "object",
+			"properties": {
+				"type": {
+					"const": "skill_diagnostics_update"
+				},
+				"data": {
+					"$ref": "#/$defs/SkillDiagnosticsSnapshot"
+				}
+			},
+			"required": [
+				"type",
+				"data"
+			],
+			"description": "Skill-resolution snapshot, pushed at startup and whenever it or the effective notice setting changes."
+		},
 		"SubagentLifecycleStatus": {
 			"enum": [
 				"started",
@@ -5327,6 +5470,9 @@
 					"$ref": "#/$defs/AvailableCommandsUpdateEvent"
 				},
 				{
+					"$ref": "#/$defs/SkillDiagnosticsUpdateEvent"
+				},
+				{
 					"$ref": "#/$defs/SubagentLifecycleEvent"
 				},
 				{
@@ -5519,6 +5665,17 @@
 			},
 			"required": [
 				"sessionDir"
+			]
+		},
+		"SetSkillStartupDiagnosticsParams": {
+			"type": "object",
+			"properties": {
+				"enabled": {
+					"type": "boolean"
+				}
+			},
+			"required": [
+				"enabled"
 			]
 		},
 		"SetFastModeParams": {

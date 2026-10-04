@@ -13,7 +13,13 @@ import { CustomToolAdapter } from "../extensibility/custom-tools/wrapper";
 import type { ExtensionRunner, SourceInfo, ToolInfo } from "../extensibility/extensions";
 import { type EvalPreludeDefinition, evalPreludeSummary } from "../eval/preludes";
 import { ExtensionToolWrapper } from "../extensibility/extensions/wrapper";
-import { loadSkills, type Skill, type SkillWarning, setActiveSkills } from "../extensibility/skills";
+import {
+	loadSkills,
+	type Skill,
+	type SkillDiagnostic,
+	type SkillWarning,
+	setActiveSkills,
+} from "../extensibility/skills";
 import { type LocalProtocolOptions } from "../internal-urls";
 import { stripXdUrlPrefix, XD_URL_PREFIX } from "@oh-my-pi/pi-tui/tools/xd-url";
 import { deduplicateMCPToolsByName, resolveMCPToolAlias } from "../mcp/tool-bridge";
@@ -133,6 +139,7 @@ interface SessionToolsOptions {
 	baseSystemPrompt: string[];
 	skills?: Skill[];
 	skillWarnings?: SkillWarning[];
+	skillDiagnostics?: SkillDiagnostic[];
 	skillsSettings?: SkillsSettings;
 	skillsReloadable?: boolean;
 }
@@ -385,6 +392,7 @@ export class SessionTools {
 	#reconcileSettingsGatedTools: SessionToolsOptions["reconcileSettingsGatedTools"];
 	#skills: Skill[];
 	#skillWarnings: SkillWarning[];
+	#skillDiagnostics: SkillDiagnostic[];
 	#skillsSettings: SkillsSettings | undefined;
 	#skillsReloadable: boolean;
 	/**
@@ -436,6 +444,7 @@ export class SessionTools {
 		this.#baseSystemPrompt = options.baseSystemPrompt;
 		this.#skills = options.skills ?? [];
 		this.#skillWarnings = options.skillWarnings ?? [];
+		this.#skillDiagnostics = options.skillDiagnostics ?? [];
 		this.#skillsSettings = options.skillsSettings;
 		this.#skillsReloadable = options.skillsReloadable ?? true;
 		this.#promptSurface = this.#derivePromptSurface();
@@ -498,6 +507,11 @@ export class SessionTools {
 	/** Diagnostics produced while loading the current skills. */
 	get skillWarnings(): SkillWarning[] {
 		return this.#skillWarnings;
+	}
+
+	/** Skill resolution diagnostics for the current skills. */
+	get skillDiagnostics(): SkillDiagnostic[] {
+		return this.#skillDiagnostics;
 	}
 
 	/** Settings snapshot used for the current skill discovery. */
@@ -1720,6 +1734,7 @@ export class SessionTools {
 			});
 			this.#skills = discovered.skills;
 			this.#skillWarnings = discovered.warnings;
+			this.#skillDiagnostics = discovered.diagnostics;
 			this.#skillsSettings = skillsSettings;
 
 			if (this.#host.agentKind() === "main") {

@@ -453,6 +453,38 @@ export interface GoalResult {
 	state: GoalModeState | null;
 }
 
+/** Rule that ordered the active variants of one skill name. */
+export type SkillSelectionReason = "source-order" | "custom-directory" | "authored-over-installed";
+
+/** Allowlisted identity of one discovered skill file. */
+export interface SkillDiagnosticEntry {
+	name: string;
+	filePath: string;
+	source: string;
+	pluginName?: string;
+}
+
+/** A file identical to a loaded skill and so not loaded; `retained` is the skill that stands for it. */
+export interface SkillDiagnosticDuplicate {
+	skill: SkillDiagnosticEntry;
+	retained: SkillDiagnosticEntry;
+}
+
+/** A skill name that resolved into several active variants and/or left redundant copies unloaded. */
+export interface SkillResolutionDiagnostic {
+	name: string;
+	reason: SkillSelectionReason;
+	skills: SkillDiagnosticEntry[];
+	duplicates: SkillDiagnosticDuplicate[];
+}
+
+/** Current skill resolution; an empty `diagnostics` means no conflicts or redundant installations. */
+export interface SkillDiagnosticsSnapshot {
+	cwd: string;
+	showStartupDiagnostics: boolean;
+	diagnostics: SkillResolutionDiagnostic[];
+}
+
 export interface SessionState {
 	sessionId: string;
 	model?: ModelInfo;
@@ -482,6 +514,8 @@ export interface SessionState {
 	contextUsage?: ContextUsage;
 	/** Current goal mode; null when the session has no goal. */
 	goal?: GoalModeState | null;
+	/** Current skill-resolution details; absent when connected to an older server. */
+	skillDiagnostics?: SkillDiagnosticsSnapshot;
 }
 
 export interface BashResult {
@@ -952,6 +986,12 @@ export interface AvailableCommandsUpdateEvent {
 	commands: AvailableSlashCommand[];
 }
 
+/** Skill-resolution snapshot, pushed at startup and whenever it or the effective notice setting changes. */
+export interface SkillDiagnosticsUpdateEvent {
+	type: "skill_diagnostics_update";
+	data: SkillDiagnosticsSnapshot;
+}
+
 export type SubagentLifecycleStatus = "started" | "completed" | "failed" | "aborted";
 
 export interface SubagentLifecyclePayload {
@@ -1339,7 +1379,7 @@ export interface HostUriSchemeDefinition {
 }
 
 /** Unsolicited outbound frame (everything except responses and host tool/URI requests), discriminated by `type`. */
-export type RpcNotification = ReadyEvent | PromptResultEvent | SessionSettledEvent | ExtensionError | ExtensionUiRequest | AvailableCommandsUpdateEvent | SubagentLifecycleEvent | SubagentProgressEvent | SubagentEvent | LivePhaseEvent | LiveLevelsEvent | LiveTranscriptEvent | LiveEndEvent | CommandOutputEvent | SessionInfoUpdateEvent | ConfigUpdateEvent | RpcFrameErrorEvent | RpcAgentEvent;
+export type RpcNotification = ReadyEvent | PromptResultEvent | SessionSettledEvent | ExtensionError | ExtensionUiRequest | AvailableCommandsUpdateEvent | SkillDiagnosticsUpdateEvent | SubagentLifecycleEvent | SubagentProgressEvent | SubagentEvent | LivePhaseEvent | LiveLevelsEvent | LiveTranscriptEvent | LiveEndEvent | CommandOutputEvent | SessionInfoUpdateEvent | ConfigUpdateEvent | RpcFrameErrorEvent | RpcAgentEvent;
 
 /** Any frame the server writes to stdout (after reassembling `rpc_chunk` sequences), discriminated by `type`. */
 export type RpcServerFrame = RpcResponse | RpcHostRequest | RpcNotification;
@@ -1392,6 +1432,10 @@ export interface NewSessionParams {
 
 export interface OpenSessionParams {
 	sessionDir: string;
+}
+
+export interface SetSkillStartupDiagnosticsParams {
+	enabled: boolean;
 }
 
 export interface SetFastModeParams {
@@ -1641,6 +1685,8 @@ export interface RpcWireCommands {
 	new_session: { params: NewSessionParams; result: CancellationResult };
 	open_session: { params: OpenSessionParams; result: OpenSessionResult };
 	get_state: { params: undefined; result: SessionState };
+	get_skill_diagnostics: { params: undefined; result: SkillDiagnosticsSnapshot };
+	set_skill_startup_diagnostics: { params: SetSkillStartupDiagnosticsParams; result: SkillDiagnosticsSnapshot };
 	set_fast_mode: { params: SetFastModeParams; result: FastModeResult };
 	goal: { params: GoalParams; result: GoalResult };
 	set_ask_dialog: { params: SetAskDialogParams; result: SetAskDialogResult };

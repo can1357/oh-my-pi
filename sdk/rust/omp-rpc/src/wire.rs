@@ -2955,6 +2955,64 @@ pub struct GoalResult {
 	pub state: Option<GoalModeState>,
 }
 
+/// Rule that ordered the active variants of one skill name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum SkillSelectionReason {
+	#[serde(rename = "source-order")]
+	SourceOrder,
+	#[serde(rename = "custom-directory")]
+	CustomDirectory,
+	#[serde(rename = "authored-over-installed")]
+	AuthoredOverInstalled,
+}
+
+impl SkillSelectionReason {
+	/// Wire value.
+	pub fn as_str(self) -> &'static str {
+		match self {
+			Self::SourceOrder => "source-order",
+			Self::CustomDirectory => "custom-directory",
+			Self::AuthoredOverInstalled => "authored-over-installed",
+		}
+	}
+}
+
+/// Allowlisted identity of one discovered skill file.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SkillDiagnosticEntry {
+	pub name: String,
+	#[serde(rename = "filePath")]
+	pub file_path: String,
+	pub source: String,
+	#[serde(rename = "pluginName", default, skip_serializing_if = "Option::is_none")]
+	pub plugin_name: Option<String>,
+}
+
+/// A file identical to a loaded skill and so not loaded; `retained` is the skill that stands for it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SkillDiagnosticDuplicate {
+	pub skill: SkillDiagnosticEntry,
+	pub retained: SkillDiagnosticEntry,
+}
+
+/// A skill name that resolved into several active variants and/or left redundant copies unloaded.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SkillResolutionDiagnostic {
+	pub name: String,
+	pub reason: SkillSelectionReason,
+	pub skills: Vec<SkillDiagnosticEntry>,
+	pub duplicates: Vec<SkillDiagnosticDuplicate>,
+}
+
+/// Current skill resolution; an empty `diagnostics` means no conflicts or redundant installations.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SkillDiagnosticsSnapshot {
+	pub cwd: String,
+	#[serde(rename = "showStartupDiagnostics")]
+	pub show_startup_diagnostics: bool,
+	pub diagnostics: Vec<SkillResolutionDiagnostic>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SessionState {
 	#[serde(rename = "sessionId")]
@@ -3009,6 +3067,9 @@ pub struct SessionState {
 	/// Current goal mode; null when the session has no goal.
 	#[serde(default = "default_session_state_goal")]
 	pub goal: Option<GoalModeState>,
+	/// Current skill-resolution details; absent when connected to an older server.
+	#[serde(rename = "skillDiagnostics", default, skip_serializing_if = "Option::is_none")]
+	pub skill_diagnostics: Option<SkillDiagnosticsSnapshot>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -3865,6 +3926,12 @@ pub struct AvailableCommandsUpdateEvent {
 	pub commands: Vec<AvailableSlashCommand>,
 }
 
+/// Skill-resolution snapshot, pushed at startup and whenever it or the effective notice setting changes.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SkillDiagnosticsUpdateEvent {
+	pub data: SkillDiagnosticsSnapshot,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum SubagentLifecycleStatus {
 	#[serde(rename = "started")]
@@ -4671,6 +4738,8 @@ pub enum RpcNotification {
 	ExtensionUiRequest(ExtensionUiRequest),
 	/// Slash-command catalog, pushed at startup and whenever command metadata changes.
 	AvailableCommandsUpdate(AvailableCommandsUpdateEvent),
+	/// Skill-resolution snapshot, pushed at startup and whenever it or the effective notice setting changes.
+	SkillDiagnosticsUpdate(SkillDiagnosticsUpdateEvent),
 	/// A subagent started or ended; sent at subscription level "progress" or "events".
 	SubagentLifecycle(SubagentLifecycleEvent),
 	/// Aggregated subagent progress; sent at subscription level "progress" or "events".
@@ -4708,6 +4777,7 @@ impl RpcNotification {
 			Some("extension_error") => |value| serde_json::from_value(value).map(Self::ExtensionError),
 			Some("extension_ui_request") => |value| serde_json::from_value(value).map(Self::ExtensionUiRequest),
 			Some("available_commands_update") => |value| serde_json::from_value(value).map(Self::AvailableCommandsUpdate),
+			Some("skill_diagnostics_update") => |value| serde_json::from_value(value).map(Self::SkillDiagnosticsUpdate),
 			Some("subagent_lifecycle") => |value| serde_json::from_value(value).map(Self::SubagentLifecycle),
 			Some("subagent_progress") => |value| serde_json::from_value(value).map(Self::SubagentProgress),
 			Some("subagent_event") => |value| serde_json::from_value(value).map(Self::SubagentEvent),
@@ -4735,6 +4805,7 @@ impl Serialize for RpcNotification {
 			Self::ExtensionError(member) => serialize_tagged(member, &[("type", "extension_error")], serializer),
 			Self::ExtensionUiRequest(member) => member.serialize(serializer),
 			Self::AvailableCommandsUpdate(member) => serialize_tagged(member, &[("type", "available_commands_update")], serializer),
+			Self::SkillDiagnosticsUpdate(member) => serialize_tagged(member, &[("type", "skill_diagnostics_update")], serializer),
 			Self::SubagentLifecycle(member) => serialize_tagged(member, &[("type", "subagent_lifecycle")], serializer),
 			Self::SubagentProgress(member) => serialize_tagged(member, &[("type", "subagent_progress")], serializer),
 			Self::SubagentEvent(member) => serialize_tagged(member, &[("type", "subagent_event")], serializer),
@@ -4777,7 +4848,7 @@ impl RpcServerFrame {
 		let decode: fn(Value) -> Result<Self, serde_json::Error> = match value.get("type").and_then(Value::as_str) {
 			Some("response") => |value| serde_json::from_value(value).map(Self::Response),
 			Some("host_tool_call" | "host_tool_cancel" | "host_uri_request" | "host_uri_cancel") => |value| serde_json::from_value(value).map(Self::RpcHostRequest),
-			Some("ready" | "prompt_result" | "session_settled" | "extension_error" | "extension_ui_request" | "available_commands_update" | "subagent_lifecycle" | "subagent_progress" | "subagent_event" | "live_phase" | "live_levels" | "live_transcript" | "live_end" | "command_output" | "session_info_update" | "config_update" | "rpc_frame_error" | "agent_start" | "agent_end" | "turn_start" | "turn_end" | "message_start" | "message_update" | "message_end" | "tool_execution_start" | "tool_execution_update" | "tool_stream_update" | "tool_execution_end" | "auto_compaction_start" | "auto_compaction_end" | "auto_retry_start" | "auto_retry_end" | "cache_warming_start" | "cache_warming_end" | "retry_fallback_applied" | "retry_fallback_succeeded" | "model_changed" | "config_warnings_changed" | "advisor_cost_changed" | "advisor_yielded" | "ttsr_triggered" | "todo_reminder" | "todo_auto_clear" | "irc_message" | "notice" | "thinking_level_changed" | "goal_updated" | "queue_update") => |value| serde_json::from_value(value).map(Self::RpcNotification),
+			Some("ready" | "prompt_result" | "session_settled" | "extension_error" | "extension_ui_request" | "available_commands_update" | "skill_diagnostics_update" | "subagent_lifecycle" | "subagent_progress" | "subagent_event" | "live_phase" | "live_levels" | "live_transcript" | "live_end" | "command_output" | "session_info_update" | "config_update" | "rpc_frame_error" | "agent_start" | "agent_end" | "turn_start" | "turn_end" | "message_start" | "message_update" | "message_end" | "tool_execution_start" | "tool_execution_update" | "tool_stream_update" | "tool_execution_end" | "auto_compaction_start" | "auto_compaction_end" | "auto_retry_start" | "auto_retry_end" | "cache_warming_start" | "cache_warming_end" | "retry_fallback_applied" | "retry_fallback_succeeded" | "model_changed" | "config_warnings_changed" | "advisor_cost_changed" | "advisor_yielded" | "ttsr_triggered" | "todo_reminder" | "todo_auto_clear" | "irc_message" | "notice" | "thinking_level_changed" | "goal_updated" | "queue_update") => |value| serde_json::from_value(value).map(Self::RpcNotification),
 			_ => |value| Ok(Self::Unknown(value)),
 		};
 		decode(value)
@@ -4868,6 +4939,11 @@ pub struct NewSessionParams {
 pub struct OpenSessionParams {
 	#[serde(rename = "sessionDir")]
 	pub session_dir: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SetSkillStartupDiagnosticsParams {
+	pub enabled: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -5737,6 +5813,36 @@ impl Command for GetStateCommand {
 
 	fn decode(data: Option<Value>) -> Result<Self::Output, serde_json::Error> {
 		serde_json::from_value::<SessionState>(data.unwrap_or_else(|| Value::Object(Map::new())))
+	}
+}
+
+/// Snapshot skill resolution; available even when startup notices are disabled.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct GetSkillDiagnosticsCommand {}
+
+impl Command for GetSkillDiagnosticsCommand {
+	const NAME: &'static str = "get_skill_diagnostics";
+	const TIMEOUT_MS: Option<u64> = None;
+	type Output = SkillDiagnosticsSnapshot;
+
+	fn decode(data: Option<Value>) -> Result<Self::Output, serde_json::Error> {
+		serde_json::from_value::<SkillDiagnosticsSnapshot>(data.unwrap_or_else(|| Value::Object(Map::new())))
+	}
+}
+
+/// Persist the skill startup-notice preference; returns the snapshot with the effective setting.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SetSkillStartupDiagnosticsCommand {
+	pub enabled: bool,
+}
+
+impl Command for SetSkillStartupDiagnosticsCommand {
+	const NAME: &'static str = "set_skill_startup_diagnostics";
+	const TIMEOUT_MS: Option<u64> = None;
+	type Output = SkillDiagnosticsSnapshot;
+
+	fn decode(data: Option<Value>) -> Result<Self::Output, serde_json::Error> {
+		serde_json::from_value::<SkillDiagnosticsSnapshot>(data.unwrap_or_else(|| Value::Object(Map::new())))
 	}
 }
 

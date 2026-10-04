@@ -128,8 +128,10 @@ import {
 import { resolvePath } from "./extensibility/utils";
 import {
 	type LoadSkillsOptions,
+	type LoadSkillsResult,
 	loadSkills as loadSkillsInternal,
 	type Skill,
+	type SkillDiagnostic,
 	type SkillWarning,
 	setActiveSkills,
 } from "./extensibility/skills";
@@ -1151,7 +1153,7 @@ export async function discoverSkills(
 	cwd?: string,
 	_agentDir?: string,
 	settings?: SkillsSettings & Pick<LoadSkillsOptions, "disabledExtensions">,
-): Promise<{ skills: Skill[]; warnings: SkillWarning[] }> {
+): Promise<LoadSkillsResult> {
 	return await loadSkillsInternal({
 		...settings,
 		cwd: cwd ?? getProjectDir(),
@@ -2020,13 +2022,17 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 
 	let skills: Skill[];
 	let skillWarnings: SkillWarning[];
+	let skillDiagnostics: SkillDiagnostic[];
 	if (options.skills !== undefined) {
 		skills = options.skills;
 		skillWarnings = [];
+		skillDiagnostics = [];
 	} else {
-		const discovered = await (discoveredSkillsPromise ?? Promise.resolve({ skills: [], warnings: [] }));
+		const discovered = await (discoveredSkillsPromise ??
+			Promise.resolve<LoadSkillsResult>({ skills: [], warnings: [], diagnostics: [] }));
 		skills = discovered.skills;
 		skillWarnings = discovered.warnings;
+		skillDiagnostics = discovered.diagnostics;
 	}
 
 	// Agent identity must resolve before rule discovery: `agents` frontmatter decides
@@ -4498,6 +4504,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			skills,
 			skillDescriptions,
 			skillWarnings,
+			skillDiagnostics,
 			skillsReloadable: options.skills === undefined,
 			skillsSettings: cfgSkills.get(settings),
 			modelRegistry,

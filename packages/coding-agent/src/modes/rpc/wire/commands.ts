@@ -81,6 +81,17 @@ export const rpcCommands: readonly RpcCommandSpec[] = [
 
 	{ name: "get_state", doc: "Snapshot the session state.", result: "SessionState" },
 	{
+		name: "get_skill_diagnostics",
+		doc: "Snapshot skill resolution; available even when startup notices are disabled.",
+		result: "SkillDiagnosticsSnapshot",
+	},
+	{
+		name: "set_skill_startup_diagnostics",
+		doc: "Persist the skill startup-notice preference; returns the snapshot with the effective setting.",
+		params: { enabled: "boolean" },
+		result: "SkillDiagnosticsSnapshot",
+	},
+	{
 		name: "set_fast_mode",
 		doc: "Enable or disable fast mode for the session.",
 		params: { enabled: "boolean" },

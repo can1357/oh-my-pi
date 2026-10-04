@@ -106,6 +106,17 @@ with RpcClient(model="openrouter/anthropic/claude-sonnet-4.6", no_session=True) 
 `set_todos()` accepts either a flat list of todo strings/items or explicit
 phases, and `get_state().todo_phases` returns the typed current todo state.
 
+`get_skill_diagnostics()` and `get_state().skill_diagnostics` expose typed
+`SkillDiagnosticsSnapshot` objects with resolved variants, redundant copies,
+paths, sources, and selection reasons. `on_skill_diagnostics_update(callback)`
+subscribes to startup and changed snapshots. `set_skill_startup_diagnostics(False)`
+persists the native notification preference and returns the effective snapshot;
+manual queries still work when notices are off. Older runtimes may leave the
+state field unset or reject the commands.
+These types and helpers are generated from the canonical wire schema. As with
+other optional SDK fields, null `pluginName` decodes as absent; required fields,
+arrays, and non-null values are validated.
+
 By default the client runs:
 
 ```bash

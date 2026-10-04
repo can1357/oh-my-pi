@@ -78,6 +78,7 @@ import {
 	watchAndReportPromptResult,
 } from "./rpc-prompt-results";
 import { RpcSessionEventForwarder } from "./rpc-session-events";
+import { RpcSkillDiagnostics } from "./rpc-skill-diagnostics";
 import { isRpcSessionSettled, RpcSessionSettleWatcher, watchedScheduledTurnProbe } from "./rpc-session-settle";
 import { RpcSubagentRegistry, readRpcSubagentTranscript, resolveOwnedLiveSubagent } from "./rpc-subagents";
 import type {
@@ -1551,6 +1552,7 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 			persistenceFailure = error;
 		},
 	);
+	const skillDiagnostics = new RpcSkillDiagnostics(session, frame => output(frame));
 
 	/**
 	 * Dispose the session, then end the process. A store failure still latched
@@ -1899,8 +1901,24 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 					})),
 					contextUsage: session.getContextUsage(),
 					goal: session.getGoalModeState() ?? null,
+					skillDiagnostics: skillDiagnostics.snapshot(),
 				};
 				return success(id, "get_state", state);
+			}
+
+			case "get_skill_diagnostics": {
+				return success(id, "get_skill_diagnostics", skillDiagnostics.snapshot());
+			}
+
+			case "set_skill_startup_diagnostics": {
+				if (typeof command.enabled !== "boolean") {
+					return error(id, "set_skill_startup_diagnostics", "enabled must be a boolean");
+				}
+				return success(
+					id,
+					"set_skill_startup_diagnostics",
+					await skillDiagnostics.setStartupDiagnostics(command.enabled),
+				);
 			}
 
 			case "set_fast_mode": {

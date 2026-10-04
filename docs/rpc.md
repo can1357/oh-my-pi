@@ -94,6 +94,7 @@ Clients MUST continue reading stdout after closing stdin. Normal EOF and extensi
 12. Builtin slash-command side channels (`command_output`, `session_info_update`, `config_update`)
 13. Transport overflow notifications (`rpc_frame_error`), when an event cannot fit within the transport limits
 14. Live voice frames (`live_phase`, `live_levels`, `live_transcript`, `live_end`); see [Live Voice Sub-Protocol](#live-voice-sub-protocol)
+15. Skill diagnostics (`{ type: "skill_diagnostics_update", data }`), emitted at startup and when resolution, cwd, or the effective notification setting changes
 
 Protocol v2 may wrap oversized logical frames from these categories in `rpc_chunk` frames.
 
@@ -145,6 +146,8 @@ Important edge behavior from runtime:
 - `{ id?, type: "goal", op: "get" | "create" | "resume" | "pause" | "drop", objective?: string, token_budget?: number }`
 - `{ id?, type: "set_ask_dialog", enabled: boolean }`
 - `{ id?, type: "get_available_commands" }`
+- `{ id?, type: "get_skill_diagnostics" }`
+- `{ id?, type: "set_skill_startup_diagnostics", enabled: boolean }`
 - `{ id?, type: "get_entries", since?: string }`
 - `{ id?, type: "get_tree" }`
 - `{ id?, type: "set_todos", phases: TodoPhase[] }`
@@ -457,6 +460,10 @@ independently, and treat removal responses as confirmation rather than a second
 source of truth. `queuedMessageCount` also includes advisor cards and pending
 next-turn messages, so it is not necessarily the number of user-authored chips.
 
+`skillDiagnostics` carries the same snapshot as `get_skill_diagnostics`; see
+[Skill diagnostics](#skill-diagnostics). It is available even when automatic
+startup notices are disabled.
+
 ### `goal` payload
 
 `goal` manages goal mode with the same lifecycle as the interactive `/goal` command.
@@ -766,7 +773,7 @@ Extension runner errors are emitted separately as:
 
 `message_start`, `message_update`, and `message_end` carry a `messageId` string assigned by RPC mode. One message keeps the same id from its start through every update to its end; ids are unique within the process. Records injected mid-stream (advisor cards, IRC messages) get their own id and do not disturb the id of the reply streaming around them.
 
-`set_event_filter` restricts which session event frames are written: pass the event `type` strings to forward, or `null` to forward everything (the default). The response echoes the active selection as `{ events, messageUpdates }`. The filter applies to all events emitted through the session subscription, not just the common types listed above; every other outbound category (responses, `prompt_result`, `session_settled`, extension UI and host tool/URI requests, `extension_error`, `available_commands_update`, subagent frames, builtin slash-command side channels, and session-persistence `notice` frames) is unaffected by this filter. Hosts that fail closed on unknown event kinds can pin the set they understand here instead of breaking when OMP adds an event.
+`set_event_filter` restricts which session event frames are written: pass the event `type` strings to forward, or `null` to forward everything (the default). The response echoes the active selection as `{ events, messageUpdates }`. The filter applies to all events emitted through the session subscription, not just the common types listed above; every other outbound category (responses, `prompt_result`, `session_settled`, extension UI and host tool/URI requests, `extension_error`, `available_commands_update`, `skill_diagnostics_update`, subagent frames, builtin slash-command side channels, and session-persistence `notice` frames) is unaffected by this filter. Hosts that fail closed on unknown event kinds can pin the set they understand here instead of breaking when OMP adds an event.
 
 The optional `messageUpdates: "delta"` projects only `message_update` frames to `{ type: "message_update", messageId, message: { role }, assistantMessageEvent }`: `assistantMessageEvent.partial` is omitted, while all other event fields (including subtype, `delta`, and `contentIndex`) are preserved. `message_start`, `message_end`, and all other frames are unchanged; `message_end` still carries the full message. Block-ending events such as `text_end`, `thinking_end`, and `toolcall_end` retain their block content or tool call, so hosts must still accept chunked protocol-v2 frames for large blocks and full messages. Switching modes mid-message does not change its `messageId`. The projection applies to the session's own frames only: `subagent_event` payloads forwarded under `set_subagent_subscription` level `"events"` keep their full `message_update` snapshots.
 
@@ -854,6 +861,54 @@ Command discovery is intentionally an OMP dialect: Pi's `get_commands` (a
 not served because OMP's richer catalog (builtins/custom/MCP/file commands,
 broader `source` enum, no Pi `sourceInfo`) is not wire-compatible with it.
 
+### Skill diagnostics
+
+`get_skill_diagnostics` returns the current resolution snapshot without another
+discovery pass. `set_skill_startup_diagnostics` requires a boolean `enabled`,
+persists `skills.showStartupDiagnostics` through the normal settings API, and
+returns the same snapshot with the effective setting. Project or launch overrides
+can keep that effective value different from the saved preference; an isolated
+SDK session changes its in-memory setting instead of writing a config file.
+
+```json
+{
+  "cwd": "/project",
+  "showStartupDiagnostics": true,
+  "diagnostics": [{
+    "name": "review",
+    "reason": "source-order",
+    "skills": [
+      { "name": "review", "filePath": "/skills/review/SKILL.md", "source": "native:user" },
+      { "name": "plugin/review", "filePath": "/plugin/skills/review/SKILL.md", "source": "omp-plugins:user", "pluginName": "plugin" }
+    ],
+    "duplicates": [{
+      "skill": { "name": "review", "filePath": "/mirror/review/SKILL.md", "source": "agents:project" },
+      "retained": { "name": "review", "filePath": "/skills/review/SKILL.md", "source": "native:user" }
+    }]
+  }]
+}
+```
+
+Reasons are `source-order`, `custom-directory`, or `authored-over-installed`.
+Entries expose only resolved names, file paths, sources, and optional plugin
+names—not bodies, frontmatter, or internal discovery metadata. Shared names do
+not prove shared lineage. An empty `diagnostics` array means no current conflicts
+or redundant installations.
+
+The snapshot also appears in `get_state.skillDiagnostics` and in
+`{ type: "skill_diagnostics_update", data: snapshot }` at startup and on semantic
+changes. Identical updates are suppressed. Disabling notices does not remove
+diagnostic data; hosts apply the effective flag only to automatic presentation.
+These frames are UI metadata, not transcript messages or model input.
+Older runtimes may omit the state field or reject these commands; treat that as
+unavailable support, not a clean resolution.
+
+The diagnostics types, commands, and update frame are also defined in the
+canonical wire schema and generated into the Python, Go, and Rust SDKs by
+`bun run gen:rpc`. Generated Python decoders follow the shared SDK convention:
+null optional package identity is treated as absent; required snapshot fields,
+arrays, and non-null field types remain validated. OMP emits `pluginName` only
+as a string or omits it.
 ### Pi-compatible history/tree commands with OMP-native entry payloads
 
 The commands and reconciliation semantics below are Pi-compatible, but the
@@ -1451,6 +1506,7 @@ Current helper characteristics:
 - Drives live voice sessions with `liveStart()`, `liveStop()`, `liveMute()`, and delivers live frames through `onLive()`
 - `promptAndWait()` waits for that prompt's result (or synchronous local completion); `waitForSettled()` also waits for session quiescence. `waitForIdle()` and `collectEvents()` stop at the next `agent_end`, including a non-terminal one, and are not settle barriers.
 - Wraps common protocol commands including OAuth `getLoginProviders()` / `login(...)`; use raw protocol frames for unwrapped surfaces such as host-URI registration or delta-only message updates.
+- Exposes `getSkillDiagnostics()`, `setSkillStartupDiagnostics(enabled)`, and `onSkillDiagnosticsUpdate(listener)` for typed diagnostic snapshots.
 
 ### Python package
 
