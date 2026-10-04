@@ -39,6 +39,33 @@ describe("classifyModel", () => {
 		});
 	});
 
+	test("DeepSeek V4 revisions ignore suffixes and reviewed Flash aliases resolve to V4.1", () => {
+		expect(classifyModel("opencode-zen", "deepseek-v4-flash-free")).toMatchObject({
+			class: "deepseek",
+			family: "flash",
+			revision: "4.0.0",
+		});
+		expect(classifyModel("openrouter", "deepseek/deepseek-v4-flash-0731")).toMatchObject({
+			class: "deepseek",
+			family: "flash",
+			revision: "4.0.0",
+		});
+		expect(classifyModel("cline-pass", "deepseek-v4.1-flash")).toMatchObject({
+			class: "deepseek",
+			family: "flash",
+			revision: "4.1.0",
+		});
+		for (const provider of ["deepseek", "opencode-go"]) {
+			expect(classifyModel(provider, "deepseek-flash")).toEqual({
+				class: "deepseek",
+				family: "flash",
+				revision: "4.1.0",
+			});
+		}
+		expect(classifyModel("custom", "deepseek-flash")).toEqual({ class: "deepseek", family: "flash" });
+		expect(classifyModel("deepseek", "deepseek-r1")).toEqual({ class: "deepseek", family: "r1" });
+	});
+
 	test("bounded matchers do not fire on substrings", () => {
 		expect(classifyModel("test", "anthropicology").class).toBe("unknown");
 		expect(classifyModel("test", "deepseeker").class).toBe("unknown");

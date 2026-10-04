@@ -38,6 +38,8 @@ const TERMINAL_PROGRESS_KEEPALIVE_MS = 1000;
 const TERMINAL_PROGRESS_ACTIVE_SEQUENCE = "\x1b]9;4;3\x07";
 const TERMINAL_PROGRESS_CLEAR_SEQUENCE = "\x1b]9;4;0;\x07";
 const WINDOWS_TERMINAL_OSC11_POLL_MS = 30_000;
+/** How long a relayed ESC record waits for the rest of its sequence before acting as Escape (matches StdinBuffer). */
+const WIN32_RELAYED_ESCAPE_TIMEOUT_MS = 75;
 
 /**
  * Terminal → program TSP messages through a Windows ConPTY: its input parser
@@ -759,6 +761,8 @@ export class ProcessTerminal implements Terminal {
 	// win32-input-mode sequences and are decoded before reaching the handler.
 	#win32InputDecoder?: Win32InputModeDecoder;
 	#win32PasteNormalizer?: Win32PasteMarkerNormalizer;
+	// Releases a relayed lone ESC the decoder held for a sequence tail that never came.
+	#win32PendingFlushTimer?: Timer;
 	#stdinBuffer?: StdinBuffer;
 	#stdinDataHandler?: (data: string) => void;
 	#disconnectHandler?: () => void;
@@ -1570,9 +1574,18 @@ export class ProcessTerminal implements Terminal {
 				return;
 			}
 			if (this.#inputHandler) {
-				const win32Keys = this.#win32InputDecoder?.decode(sequence);
-				if (win32Keys !== undefined) {
+				const decoder = this.#win32InputDecoder;
+				const win32Keys = decoder?.decode(sequence);
+				if (decoder && win32Keys !== undefined) {
+					clearTimeout(this.#win32PendingFlushTimer);
+					this.#win32PendingFlushTimer = undefined;
 					for (const key of win32Keys) this.#inputHandler(key);
+					if (decoder.hasPendingSequence) {
+						this.#win32PendingFlushTimer = setTimeout(
+							() => this.#releaseWin32PendingSequence(),
+							WIN32_RELAYED_ESCAPE_TIMEOUT_MS,
+						);
+					}
 					return;
 				}
 				// Windows console hosts drop AltGr text under kitty (AltGr+F → `CSI 102;3u`);
@@ -1868,7 +1881,12 @@ export class ProcessTerminal implements Terminal {
 			// and the mode splits arrow keys into Escape plus literal text (#14034).
 			this.#safeWrite("\x1b[?9001h");
 			this.#win32InputDecoder = new Win32InputModeDecoder();
-			this.#win32PasteNormalizer = new Win32PasteMarkerNormalizer(data => this.#stdinBuffer?.process(data));
+			// The normalizer's expiry already spent the ESC wait; release the decoder's hold
+			// at once instead of starting a second window.
+			this.#win32PasteNormalizer = new Win32PasteMarkerNormalizer(
+				data => this.#stdinBuffer?.process(data),
+				() => this.#releaseWin32PendingSequence(),
+			);
 			return;
 		}
 		// A remote terminal with no identifying env may not understand the request.
@@ -1877,10 +1895,20 @@ export class ProcessTerminal implements Terminal {
 		this.#modifyOtherKeysActive = true;
 	}
 
+	/** Deliver relayed VT text the decoder is holding (a lone ESC becomes Escape). */
+	#releaseWin32PendingSequence(): void {
+		clearTimeout(this.#win32PendingFlushTimer);
+		this.#win32PendingFlushTimer = undefined;
+		const pending = this.#win32InputDecoder?.flushPendingSequence() ?? [];
+		for (const key of pending) this.#inputHandler?.(key);
+	}
+
 	#disableWin32InputMode(): void {
 		if (!this.#win32InputDecoder) return;
 		this.#win32PasteNormalizer?.flush();
 		this.#win32PasteNormalizer = undefined;
+		// Held input still belongs to the user (e.g. Escape before a late kitty reply).
+		this.#releaseWin32PendingSequence();
 		this.#safeWrite("\x1b[?9001l");
 		this.#win32InputDecoder = undefined;
 	}

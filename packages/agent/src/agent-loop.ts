@@ -53,6 +53,7 @@ import {
 	recoverHarmonyToolCall,
 	signalListLabel,
 } from "@oh-my-pi/pi-ai/utils/harmony-leak";
+import { isDsmlLeakRecoveryTarget, removeDsmlToolMarkupLeak } from "@oh-my-pi/pi-ai/utils/dsml-leak";
 import { cloneJsonTree, logger, sanitizeText, structuredCloneJSON } from "@oh-my-pi/pi-utils";
 import { INTENT_FIELD } from "@oh-my-pi/pi-wire";
 import { LiveSteeringChannel } from "./live-steering";
@@ -76,6 +77,7 @@ import {
 	startInvokeAgentSpan,
 } from "./telemetry";
 import { createAdditionalContextMessage, isNonBlankContext, joinAdditionalContext } from "./tool-context";
+import dsmlToolCallLeakPrompt from "./prompts/dsml-tool-call-leak.md" with { type: "text" };
 import type {
 	AgentContext,
 	AgentEvent,
@@ -115,6 +117,14 @@ const ABORTED: unique symbol = Symbol("agent-loop-aborted");
  * must not spin the loop forever. Resets whenever a turn carries tool calls.
  */
 const MAX_PAUSED_TURN_CONTINUATIONS = 8;
+
+/**
+ * Cap on consecutive "tool call failed" nudges for a turn that ended with raw
+ * DeepSeek DSML tool-call markup in its text and no structured call. A model
+ * that keeps leaking after this many corrections is left to yield. Resets
+ * whenever a turn carries tool calls.
+ */
+const MAX_DSML_LEAK_NUDGES = 2;
 
 /**
  * Cap on consecutive forced escalations for a single soft tool requirement.
@@ -1222,6 +1232,7 @@ async function runLoopBody(
 		let harmonyRetryAttempt = 0;
 		let harmonyTruncateResumeCount = 0;
 		let pausedTurnContinuations = 0;
+		let dsmlLeakNudges = 0;
 
 		// Soft tool requirement lifecycle (reminder then escalation; see SoftToolRequirement).
 		// The host-owned state survives only a gate stop between Agent.prompt calls.
@@ -1685,6 +1696,7 @@ async function runLoopBody(
 
 				if (toolCalls.length > 0) {
 					pausedTurnContinuations = 0;
+					dsmlLeakNudges = 0;
 				} else if (
 					!hasMoreToolCalls &&
 					message.stopReason === "stop" &&
@@ -1697,6 +1709,25 @@ async function runLoopBody(
 					// working; the next round folds steering/asides in like any other
 					// mid-work turn.
 					pausedTurnContinuations++;
+					hasMoreToolCalls = true;
+				} else if (
+					!hasMoreToolCalls &&
+					message.stopReason === "stop" &&
+					dsmlLeakMessages.has(message) &&
+					dsmlLeakNudges < MAX_DSML_LEAK_NUDGES
+				) {
+					// DeepSeek wrote its tool call as raw DSML text the healer could not
+					// recover (often missing the opening envelope). The markup was
+					// stripped before commit; without a nudge the loop would yield as if
+					// the model were done, so tell it the call failed and re-sample.
+					const nudge = injectExecutionAdditionalContext(
+						currentContext,
+						newMessages,
+						stream,
+						dsmlToolCallLeakPrompt,
+					);
+					if (nudge) additionalMessages.push(nudge);
+					dsmlLeakNudges++;
 					hasMoreToolCalls = true;
 				}
 
@@ -1967,6 +1998,7 @@ async function streamAssistantResponse(
 	// per model without touching the shared session `serviceTier`.
 	const effectiveServiceTier = config.getServiceTier ? config.getServiceTier(model) : config.serviceTier;
 	const harmonyMitigationEnabled = isHarmonyLeakMitigationTarget(model);
+	const dsmlLeakRecoveryEnabled = isDsmlLeakRecoveryTarget(model);
 	const harmonyAbortController = harmonyMitigationEnabled ? new AbortController() : undefined;
 	const requestSignal = harmonyAbortController
 		? signal
@@ -2196,6 +2228,18 @@ async function streamAssistantResponse(
 							}
 						}
 						finalMessage = snapshotAssistantMessage(finalMessage);
+						// Unhealed DSML tool-call markup must never reach history: replaying
+						// it teaches the model to keep writing calls as text (#10556). Strip
+						// it before the context, the UI, and the session see the message.
+						// Only DSML-speaking models qualify; from others it is prose.
+						if (
+							dsmlLeakRecoveryEnabled &&
+							finalMessage.stopReason === "stop" &&
+							!finalMessage.content.some(block => block.type === "toolCall") &&
+							removeDsmlToolMarkupLeak(finalMessage)
+						) {
+							dsmlLeakMessages.add(finalMessage);
+						}
 						// Expand inline macros (and any other registered rewrite) on the
 						// finalized message before it reaches the context, the UI, or tool
 						// dispatch — so a single mutation is the source of truth for all three.
@@ -2751,6 +2795,9 @@ interface PreparedToolCall {
 	blockReason?: string;
 	prepareError?: unknown;
 }
+
+/** Committed assistant messages whose unhealed DSML tool-call markup was stripped; the loop answers them with a failure nudge. */
+const dsmlLeakMessages = new WeakSet<AssistantMessage>();
 
 /**
  * Prepare results computed in the stream-done branch (before `message_start`/
