@@ -32,14 +32,17 @@ export const getGeminiCliHeaders = (modelId?: string) => ({
  * client the version and manifest are captured from, independent of the host
  * platform. Overrides: PI_AI_ANTIGRAVITY_VERSION / _CL / _OS / _ARCH.
  */
-export const DEFAULT_ANTIGRAVITY_VERSION = "2.8.0";
+export const DEFAULT_ANTIGRAVITY_VERSION = "2.19.1";
 
 const ANTIGRAVITY_VERSION_MANIFEST_URL =
 	"https://antigravity-hub-auto-updater-974169037036.us-central1.run.app/manifest/latest-arm64-mac.yml";
 const ANTIGRAVITY_VERSION_FETCH_TIMEOUT_MS = 5_000;
+/** Failed manifest lookups are not retried before this delay, so request paths never stall per call. */
+const ANTIGRAVITY_VERSION_RETRY_MS = 10 * 60_000;
 
 let discoveredAntigravityVersion: string | null = null;
 let antigravityVersionFetch: Promise<void> | null = null;
+let antigravityVersionFailedAt: number | undefined;
 
 /** Current Antigravity client version: env override → manifest-discovered → pinned fallback. */
 export function getAntigravityVersion(): string {
@@ -63,30 +66,45 @@ export function parseAntigravityManifestVersion(yamlText: string): string | null
 /**
  * Resolves the latest Antigravity release from the official update manifest.
  * Success is cached for the process lifetime; failures are silent (the pinned
- * fallback stays valid) and clear the in-flight cache so a later call retries.
- * Skipped entirely when PI_AI_ANTIGRAVITY_VERSION is set.
+ * fallback stays valid) and suppress further lookups for
+ * `ANTIGRAVITY_VERSION_RETRY_MS`. Skipped entirely when PI_AI_ANTIGRAVITY_VERSION is set.
+ *
+ * The lookup is shared by concurrent callers, so it is bounded only by its own
+ * timeout; `signal` ends this caller's wait without cancelling the lookup.
  */
 export function ensureAntigravityVersion(fetcher: FetchImpl = fetch, signal?: AbortSignal): Promise<void> {
 	if (process.env.PI_AI_ANTIGRAVITY_VERSION || discoveredAntigravityVersion) return Promise.resolve();
-	if (antigravityVersionFetch) return antigravityVersionFetch;
-
-	antigravityVersionFetch = (async () => {
-		try {
-			const timeoutSignal = AbortSignal.timeout(ANTIGRAVITY_VERSION_FETCH_TIMEOUT_MS);
-			const response = await fetcher(ANTIGRAVITY_VERSION_MANIFEST_URL, {
-				headers: { "Cache-Control": "no-cache", "User-Agent": "electron-builder" },
-				signal: signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal,
-			});
-			if (response.ok) {
-				discoveredAntigravityVersion = parseAntigravityManifestVersion(await response.text());
-			}
-		} catch {
-			// Silent: the pinned fallback remains valid when version discovery fails.
-		} finally {
-			if (!discoveredAntigravityVersion) antigravityVersionFetch = null;
+	if (!antigravityVersionFetch) {
+		if (
+			antigravityVersionFailedAt !== undefined &&
+			Date.now() - antigravityVersionFailedAt < ANTIGRAVITY_VERSION_RETRY_MS
+		) {
+			return Promise.resolve();
 		}
-	})();
-	return antigravityVersionFetch;
+		antigravityVersionFetch = (async () => {
+			try {
+				const response = await fetcher(ANTIGRAVITY_VERSION_MANIFEST_URL, {
+					headers: { "Cache-Control": "no-cache", "User-Agent": "electron-builder" },
+					signal: AbortSignal.timeout(ANTIGRAVITY_VERSION_FETCH_TIMEOUT_MS),
+				});
+				if (response.ok) {
+					discoveredAntigravityVersion = parseAntigravityManifestVersion(await response.text());
+				}
+			} catch {
+				// Silent: the pinned fallback remains valid when version discovery fails.
+			} finally {
+				antigravityVersionFetch = null;
+				if (!discoveredAntigravityVersion) antigravityVersionFailedAt = Date.now();
+			}
+		})();
+	}
+	const lookup = antigravityVersionFetch;
+	if (!signal) return lookup;
+	if (signal.aborted) return Promise.resolve();
+	const { promise: aborted, resolve } = Promise.withResolvers<void>();
+	const onAbort = () => resolve();
+	signal.addEventListener("abort", onAbort, { once: true });
+	return Promise.race([lookup, aborted]).finally(() => signal.removeEventListener("abort", onAbort));
 }
 
 /** Antigravity `User-Agent` header value; rebuilt when the discovered version changes. */
