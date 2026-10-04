@@ -5,6 +5,7 @@
 ### Added
 
 - Composer image tokens now preserve pasted image blobs when copying drafts in Tern.
+- Added `remote` to the Agent Hub record kinds: the hub lists only agents with a local session or transcript (remote cross-process peers stay reachable via `read history://` and `write agent://`), and `write agent://` receipt rows sanitize externally supplied recipient ids and error text before rendering ([#14071](https://github.com/can1357/oh-my-pi/pull/14071) by [@mccraigmccraig](https://github.com/mccraigmccraig)).
 - Press Delete at the end of the Ctrl+R search field to remove the selected prompt from history.
 - Markdown links handled by registered extension schemes now use a distinct `mdExtensionLink` theme color, with a muted fallback for themes that do not define it.
 - Approval dialogs now distinguish allowed and prompted segments in compound Bash commands, using clear colors and opening at the first segment requiring approval.
