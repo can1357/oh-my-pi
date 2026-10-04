@@ -28,6 +28,11 @@ function appendSkill(lines: string[], label: string, skill: Skill): void {
 	lines.push(`  ${label}: ${displayValue(skill.name)}`, `    File: ${displayValue(shortenPath(skill.filePath))}`);
 	const plugin = skill._source?.pluginName;
 	lines.push(`    Source: ${displayValue(skill.source)}${plugin ? `; package ${displayValue(plugin)}` : ""}`);
+	const provenance = skill._source?.provenance;
+	if (provenance) {
+		const version = provenance.version ? ` ${displayValue(provenance.version)}` : "";
+		lines.push(`    Origin: ${displayValue(provenance.repository)}${version}`);
+	}
 }
 
 /** Read-only resolution report. Never included in model instructions or session history. */
@@ -43,19 +48,28 @@ export function formatSkillDiagnostics(diagnostics: readonly SkillDiagnostic[]):
 		} else {
 			lines.push("  No bare default is included; invoke a namespaced variant explicitly.");
 		}
+		const selectedRepository = selected?._source?.provenance?.repository;
 		for (const skill of diagnostic.skills) {
-			if (skill !== selected) appendSkill(lines, "Variant", skill);
+			if (skill === selected) continue;
+			appendSkill(lines, "Variant", skill);
+			if (selectedRepository !== undefined && skill._source?.provenance?.repository === selectedRepository) {
+				lines.push("    Same origin as the default; skills.dedupeSameOrigin would hide this variant.");
+			}
 		}
 		for (const duplicate of diagnostic.duplicates) {
-			appendSkill(lines, "Redundant copy", duplicate.skill);
-			lines.push(
-				`    Identical to: ${displayValue(duplicate.retained.name)} (${displayValue(shortenPath(duplicate.retained.filePath))})`,
-			);
+			const retained = `${displayValue(duplicate.retained.name)} (${displayValue(shortenPath(duplicate.retained.filePath))})`;
+			if (duplicate.match === "origin") {
+				appendSkill(lines, "Same-origin variant", duplicate.skill);
+				lines.push(`    Hidden in favor of: ${retained}`);
+			} else {
+				appendSkill(lines, "Redundant copy", duplicate.skill);
+				lines.push(`    Identical to: ${retained}`);
+			}
 		}
 	}
 	lines.push(
 		"",
-		"Invoke a variant with /skill:<name> or skill://<name>. Same names do not imply the same skill lineage.",
+		"Invoke a variant with /skill:<name> or skill://<name>. Same names do not imply the same skill lineage; Origin is the source repository a plugin declares.",
 	);
 	return lines.join("\n");
 }

@@ -129,7 +129,7 @@ function assertAllowlistedSnapshot(value: unknown): asserts value is {
 		name: string;
 		reason: string;
 		skills: Array<Record<string, unknown>>;
-		duplicates: Array<{ skill: Record<string, unknown>; retained: Record<string, unknown> }>;
+		duplicates: Array<{ skill: Record<string, unknown>; retained: Record<string, unknown>; match: string }>;
 	}>;
 } {
 	expect(isRecord(value)).toBe(true);
@@ -140,17 +140,22 @@ function assertAllowlistedSnapshot(value: unknown): asserts value is {
 	expect(Array.isArray(value.diagnostics)).toBe(true);
 	for (const diagnostic of value.diagnostics as Array<Record<string, unknown>>) {
 		expect(Object.keys(diagnostic).sort()).toEqual(["duplicates", "name", "reason", "skills"]);
+		const duplicates = diagnostic.duplicates as Array<{
+			skill: Record<string, unknown>;
+			retained: Record<string, unknown>;
+			match: string;
+		}>;
+		for (const duplicate of duplicates) {
+			expect(Object.keys(duplicate).sort()).toEqual(["match", "retained", "skill"]);
+		}
 		const entries = [
 			...(diagnostic.skills as Array<Record<string, unknown>>),
-			...(
-				diagnostic.duplicates as Array<{ skill: Record<string, unknown>; retained: Record<string, unknown> }>
-			).flatMap(duplicate => [duplicate.skill, duplicate.retained]),
+			...duplicates.flatMap(duplicate => [duplicate.skill, duplicate.retained]),
 		];
 		for (const entry of entries) {
-			// `pluginName` is the only optional key; it is allowlisted, never required.
-			const expectedKeys =
-				"pluginName" in entry ? ["filePath", "name", "pluginName", "source"] : ["filePath", "name", "source"];
-			expect(Object.keys(entry).sort()).toEqual(expectedKeys);
+			// Optional keys are allowlisted, never required.
+			const optionalKeys = ["pluginName", "repository", "version"].filter(key => key in entry);
+			expect(Object.keys(entry).sort()).toEqual(["filePath", "name", "source", ...optionalKeys].sort());
 		}
 	}
 	const serialized = JSON.stringify(value);
@@ -235,6 +240,7 @@ describe("skill diagnostics RPC", () => {
 				{
 					skill: { name: "review", filePath: mirrorFile, source: "custom:user" },
 					retained: { name: `${path.basename(secondRoot)}/review`, filePath: secondFile, source: "custom:user" },
+					match: "content",
 				},
 			]);
 

@@ -24,6 +24,7 @@ import {
 	expandEnvVarsDeep,
 	listClaudePluginRoots,
 	loadFilesFromDir,
+	readPluginProvenance,
 	scanSkillsFromDir,
 } from "./helpers";
 
@@ -219,7 +220,10 @@ async function loadSkills(ctx: LoadContext): Promise<LoadResult<Skill>> {
 	warnings.push(...rootWarnings);
 	const results = await Promise.all(
 		roots.map(async root => {
-			const marketplaceRootManifest = await readMarketplaceRootManifest(root);
+			const [marketplaceRootManifest, provenance] = await Promise.all([
+				readMarketplaceRootManifest(root),
+				readPluginProvenance(root.path),
+			]);
 			const { dirs: skillsDirs, warnings: resolveWarnings } = await resolvePluginDir(root, {
 				manifestKeys: ["skills"],
 				fallback: "skills",
@@ -235,6 +239,7 @@ async function loadSkills(ctx: LoadContext): Promise<LoadResult<Skill>> {
 						includeSelf: true,
 						origin: root.origin,
 						pluginName: root.plugin,
+						provenance,
 					}),
 				),
 			);

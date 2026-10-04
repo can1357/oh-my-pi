@@ -21,8 +21,8 @@ it("counts conflicts separately from copies and safely explains defaults, aliase
 			reason: "source-order",
 			skills: [retained],
 			duplicates: [
-				{ skill: skill("review", "/skill-store/mirror-one/SKILL.md"), retained },
-				{ skill: skill("review", "/skill-store/mirror-two/SKILL.md"), retained },
+				{ skill: skill("review", "/skill-store/mirror-one/SKILL.md"), retained, match: "content" },
+				{ skill: skill("review", "/skill-store/mirror-two/SKILL.md"), retained, match: "content" },
 			],
 		},
 		{
@@ -47,4 +47,43 @@ it("counts conflicts separately from copies and safely explains defaults, aliase
 	expect(report.split("\n")).not.toContain("INJECTED");
 	expect(report).toContain("design INJECTED");
 	expect(report).not.toContain("spoofed title");
+});
+
+it("names a plugin's declared origin and tells same-origin variants apart from identical copies", () => {
+	const pluginSkill = (name: string, filePath: string, repository: string, version: string): Skill => ({
+		name,
+		filePath,
+		baseDir: "/plugins",
+		description: "Fixture instructions",
+		source: "omp-plugins:user",
+		_source: {
+			provider: "omp-plugins",
+			providerName: "OMP Plugins",
+			path: filePath,
+			level: "user",
+			provenance: { repository, version },
+		},
+	});
+	const upstream = pluginSkill("brainstorm", "/plugins/upstream/SKILL.md", "github.com/acme/tools", "2.0.0");
+	const fork = pluginSkill("fork/brainstorm", "/plugins/fork/SKILL.md", "github.com/acme/tools", "1.9.0");
+	const unrelated = pluginSkill("other/brainstorm", "/plugins/other/SKILL.md", "github.com/else/kit", "1.0.0");
+	const hidden = pluginSkill("review", "/plugins/old/SKILL.md", "github.com/acme/tools", "1.0.0");
+	const kept = pluginSkill("review", "/plugins/new/SKILL.md", "github.com/acme/tools", "2.0.0");
+	const report = formatSkillDiagnostics([
+		{ name: "brainstorm", reason: "source-order", skills: [upstream, fork, unrelated], duplicates: [] },
+		{
+			name: "review",
+			reason: "source-order",
+			skills: [kept],
+			duplicates: [{ skill: hidden, retained: kept, match: "origin" }],
+		},
+	]);
+	expect(report).toContain("Origin: github.com/acme/tools 2.0.0");
+	expect(report).toContain("Origin: github.com/acme/tools 1.9.0");
+	// Only the variant sharing the default's origin is flagged as hideable.
+	expect(report.match(/skills\.dedupeSameOrigin would hide/g)).toHaveLength(1);
+	expect(report).toMatch(/Variant: fork\/brainstorm[\s\S]*would hide[\s\S]*Variant: other\/brainstorm/);
+	expect(report).toContain("Same-origin variant: review");
+	expect(report).toContain("Hidden in favor of: review (/plugins/new/SKILL.md)");
+	expect(report).not.toContain("Identical to: review");
 });
