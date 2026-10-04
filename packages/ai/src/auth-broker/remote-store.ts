@@ -45,7 +45,7 @@ export interface AuthBrokerProviderPool {
 }
 
 /** Pool key whose rule applies to every provider without its own entry. */
-export const AUTH_BROKER_ACCOUNT_POOL_DEFAULT_KEY = "*";
+const AUTH_BROKER_ACCOUNT_POOL_DEFAULT_KEY = "*";
 
 /**
  * Per-provider credential visibility for this trusted broker client. A set

@@ -31,7 +31,7 @@
 
 ### Added
 
-- Broker account-pool files (`OMP_AUTH_BROKER_ACCOUNT_POOL_FILE`) can now act as an allow-list: `"*": false` hides every provider not listed, OAuth and API keys alike, and a provider entry can be `true`, `false`, or `{ "accounts": [...], "apiKeys": false }` to hide its API keys. Existing files behave as before ([#14235](https://github.com/can1357/oh-my-pi/pull/14235) by [@will-bogusz](https://github.com/will-bogusz))
+- Broker account-pool files (`OMP_AUTH_BROKER_ACCOUNT_POOL_FILE`) can hide whole providers and API keys: `"*": false` makes the file an allow-list, and an entry can be `true`, `false`, or `{ "accounts": [...], "apiKeys": false }` ([#14235](https://github.com/can1357/oh-my-pi/pull/14235) by [@will-bogusz](https://github.com/will-bogusz))
 
 ## [18.7.0] - 2026-10-06
 
