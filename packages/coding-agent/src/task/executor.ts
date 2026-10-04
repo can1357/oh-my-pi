@@ -39,11 +39,7 @@ import {
 	resolveSubagentServiceTier,
 	type ServiceTierInheritSettingValue,
 } from "../config/service-tier";
-import {
-	type CompactionThresholdPair,
-	hasAgentCompactionThreshold,
-	pinAgentCompactionThreshold,
-} from "../config/compaction-threshold";
+import type { CompactionThresholdPair } from "../config/compaction-threshold";
 import { type OverlayLayers, Settings } from "../config/settings";
 
 import type { ToolPathWithSource } from "../extensibility/custom-tools";
@@ -143,7 +139,12 @@ import {
 } from "../session/settings";
 import { cfgDisabledProviders } from "../config/model-settings";
 import { getRetryFallbackRole, installRetryFallbackRole } from "../session/retry-fallback-chains";
-import { cfgCompactionThresholdPercent, cfgCompactionThresholdTokens } from "../session/context-settings";
+import {
+	type AgentThresholdSettings,
+	cfgCompactionThresholdPercent,
+	cfgCompactionThresholdTokens,
+	kAgentCompactionThreshold,
+} from "../session/context-settings";
 
 export type { YieldItem } from "@oh-my-pi/pi-tui/tools/task";
 
@@ -1007,7 +1008,7 @@ function inheritedSubagentServiceTiers(
 const kRootCompactionThresholds = Symbol("task.rootCompactionThresholds");
 
 /** Settings from {@link createSubagentSettings}, tagged with its chain's root compaction thresholds. */
-interface SubagentChainSettings extends Settings {
+interface SubagentChainSettings extends AgentThresholdSettings {
 	[kRootCompactionThresholds]?: CompactionThresholdPair;
 }
 
@@ -1027,10 +1028,7 @@ function compactionThresholdSettings(
 export interface SubagentSettingsOptions {
 	/** The parent session's live service tiers, matched by `tier.subagent: inherit`. */
 	inheritedServiceTier?: ServiceTierByFamily | null;
-	/**
-	 * The agent's `task.agentCompactionThresholdOverrides` entry: it becomes the session's whole
-	 * trigger, so `compaction.modelThresholds` does not replace it.
-	 */
+	/** The agent's `task.agentCompactionThresholdOverrides` entry; it outranks `compaction.modelThresholds`. */
 	agentCompactionThreshold?: CompactionThresholdPair;
 }
 
@@ -1087,7 +1085,7 @@ export function createSubagentSettings(
 		...overrides,
 	});
 	subagentSettings[kRootCompactionThresholds] = rootThresholds;
-	if (agentCompactionThreshold) pinAgentCompactionThreshold(subagentSettings);
+	subagentSettings[kAgentCompactionThreshold] = agentCompactionThreshold;
 	return subagentSettings;
 }
 
@@ -3634,7 +3632,7 @@ interface SubagentSettingsRecipe {
 	parent: Settings;
 	layers: OverlayLayers;
 	rootThresholds: CompactionThresholdPair | undefined;
-	agentThresholdPinned: boolean;
+	agentThreshold: CompactionThresholdPair | undefined;
 }
 
 function captureSubagentSettings(parent: Settings, settings: SubagentChainSettings): SubagentSettingsRecipe {
@@ -3642,14 +3640,14 @@ function captureSubagentSettings(parent: Settings, settings: SubagentChainSettin
 		parent,
 		layers: settings.overlayLayers(),
 		rootThresholds: settings[kRootCompactionThresholds],
-		agentThresholdPinned: hasAgentCompactionThreshold(settings),
+		agentThreshold: settings[kAgentCompactionThreshold],
 	};
 }
 
 function restoreSubagentSettings(recipe: SubagentSettingsRecipe): Settings {
 	const settings: SubagentChainSettings = recipe.parent.restoreOverlay(recipe.layers);
 	settings[kRootCompactionThresholds] = recipe.rootThresholds;
-	if (recipe.agentThresholdPinned) pinAgentCompactionThreshold(settings);
+	settings[kAgentCompactionThreshold] = recipe.agentThreshold;
 	return settings;
 }
 

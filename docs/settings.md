@@ -811,7 +811,7 @@ compaction:
     "openai-codex/*": "40%"
 ```
 
-- A selector is `provider/id` or a bare model id, case-insensitive, with globs allowed. It matches the same way `enabledModels` globs do. Selectors are syntax-checked only, so an entry for a model that is not currently available is kept.
+- A selector is `provider/id` or a bare model id, case-insensitive, with globs allowed. It matches the same way `enabledModels` globs do. Selectors are not checked against available models, so an entry for a model that is not currently available is kept.
 - An exact `provider/id` selector wins, then an exact bare id, then the first matching glob in declaration order.
 - Values follow `task.agentCompactionThresholdOverrides`: a positive integer token count, or `"N%"` with `0 < N ≤ 100`. A matching entry replaces both `compaction.thresholdTokens` and `compaction.thresholdPercent`, so a global token limit does not override a per-model percentage. Token entries are clamped below the model's context window.
 - Models with no matching entry use the global thresholds. `null` clears an entry set by a lower-priority settings layer. Any other value fails settings load.

@@ -3,7 +3,7 @@
  * settings-panel order; `config/all-settings.ts` registers every domain.
  */
 import {
-	type CompactionThresholdOverride,
+	type AgentCompactionThresholdOverride,
 	validateAgentCompactionThresholdOverrides,
 } from "../config/compaction-threshold";
 import { effect, register } from "../config/registry";
@@ -14,7 +14,7 @@ import { setFeedModelBadgeEnabled } from "@oh-my-pi/pi-tui/render/render-utils";
 import { getThinkingLevelMetadata } from "@oh-my-pi/pi-tui/thinking";
 
 const EMPTY_AGENT_SERVICE_TIER_OVERRIDES: Record<string, ServiceTierInheritSettingValue> = {};
-const EMPTY_AGENT_COMPACTION_THRESHOLD_OVERRIDES: Record<string, CompactionThresholdOverride> = {};
+const EMPTY_AGENT_COMPACTION_THRESHOLD_OVERRIDES: Record<string, AgentCompactionThresholdOverride> = {};
 
 const DEFAULT_AGENT_MODEL_OVERRIDES: Record<string, string | string[]> = {};
 

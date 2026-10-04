@@ -5,7 +5,7 @@
 ### Added
 
 - The `/models` Roles view shows which saved model preset is in effect, and Ctrl+←/→ (or `p`/`P` on the role rows, for macOS where Ctrl+←/→ switches Spaces) switches to the next or previous one, in Tern and text mode ([#14210](https://github.com/can1357/oh-my-pi/pull/14210) by [@H4vC](https://github.com/H4vC))
-- Added `compaction.modelThresholds` so each model can compact at its own token count or percentage (e.g. Opus at 600k, Codex at 40%), re-resolved whenever the active model changes ([#14244](https://github.com/can1357/oh-my-pi/pull/14244) by [@will-bogusz](https://github.com/will-bogusz))
+- Added `compaction.modelThresholds`, a per-model compaction trigger (token count or percentage) that follows the active model in the main session, advisors and subagents ([#14244](https://github.com/can1357/oh-my-pi/pull/14244) by [@will-bogusz](https://github.com/will-bogusz))
 
 ### Changed
 

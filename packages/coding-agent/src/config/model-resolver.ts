@@ -124,18 +124,12 @@ export interface ScopedModel {
 	explicitThinkingLevel: boolean;
 }
 
-/**
- * Whether `glob` (compiled from a lowercased selector) matches `model` by full `provider/id` or bare id,
- * case-insensitively — the selector semantics of `enabledModels` globs.
- */
-export function modelMatchesGlob(glob: Bun.Glob, model: Pick<Model, "provider" | "id">): boolean {
-	const id = model.id.toLowerCase();
-	return glob.match(`${model.provider.toLowerCase()}/${id}`) || glob.match(id);
-}
-
 function matchingGlobModels(pattern: string, availableModels: readonly Model<Api>[]): Model<Api>[] {
 	const glob = new Bun.Glob(pattern.toLowerCase());
-	return availableModels.filter(model => modelMatchesGlob(glob, model));
+	return availableModels.filter(model => {
+		const fullId = `${model.provider}/${model.id}`;
+		return glob.match(fullId.toLowerCase()) || glob.match(model.id.toLowerCase());
+	});
 }
 
 function resolveGlobScopePattern(

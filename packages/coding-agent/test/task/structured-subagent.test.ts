@@ -5,7 +5,7 @@ import path from "node:path";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { normalizeModelPatternList, resolveModelOverride } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import type { CompactionThresholdOverride } from "@oh-my-pi/pi-coding-agent/config/compaction-threshold";
+import type { AgentCompactionThresholdOverride } from "@oh-my-pi/pi-coding-agent/config/compaction-threshold";
 import type { BeforeSubagentSpawnEvent } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
 import {
 	artifactsDirsFromRegistry,
@@ -66,7 +66,7 @@ function session(
 		isolationApply?: boolean;
 		modelRoles?: Record<string, string>;
 		agentServiceTierOverrides?: Record<string, string>;
-		agentCompactionThresholdOverrides?: Record<string, CompactionThresholdOverride>;
+		agentCompactionThresholdOverrides?: Record<string, AgentCompactionThresholdOverride>;
 		sessionAgents?: readonly AgentDefinition[];
 	} = {},
 ): ToolSession {
@@ -299,7 +299,7 @@ describe("structured subagent primitive", () => {
 
 	it("resolves only the exact case-sensitive compaction threshold override into the policy", async () => {
 		mockDiscovery({ ...AGENT, name: "scout" });
-		const resolve = (overrides: Record<string, CompactionThresholdOverride>) =>
+		const resolve = (overrides: Record<string, AgentCompactionThresholdOverride>) =>
 			resolveEffectiveSubagentPolicy(
 				request({ session: session({ agentCompactionThresholdOverrides: overrides }), agent: "scout" }),
 			);
