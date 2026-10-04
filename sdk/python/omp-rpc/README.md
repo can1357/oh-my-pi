@@ -113,6 +113,9 @@ subscribes to startup and changed snapshots. `set_skill_startup_diagnostics(Fals
 persists the native notification preference and returns the effective snapshot;
 manual queries still work when notices are off. Older runtimes may leave the
 state field unset or reject the commands.
+These types and helpers are generated from the canonical wire schema. As with
+other optional SDK fields, null `pluginName` decodes as absent; required fields,
+arrays, and non-null values are validated.
 
 By default the client runs:
 
