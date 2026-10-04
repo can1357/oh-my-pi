@@ -1137,53 +1137,78 @@ function pickUsageColor(percent: number): "muted" | "warning" | "error" {
 	return "muted";
 }
 
+type UsageSegmentOptions = NonNullable<SegmentContext["options"]["usage"]>;
+
+/** One styled piece of a quota window; an absent color renders unstyled. */
+type QuotaPiece = [text: string, color?: "muted" | "warning" | "error"];
+
 /**
- * One quota window (`5h`, `1d`, `7d`, `mo`). The integer policy (round vs
- * floor) and the reset unit (minutes vs hours) stay explicit at each call site:
- * monthly floors like the Cursor/OpenCode dashboards, the rest round, and
- * short windows reset in minutes while long windows reset in hours.
+ * One quota window (`5h`, `1d`, `7d`, `mo`) as styled pieces, shared by the
+ * ANSI renderer and its native twin. The integer policy (round vs floor) and
+ * the reset unit (minutes vs hours) stay explicit at each call site: monthly
+ * floors like the Cursor/OpenCode dashboards, the rest round, and short
+ * windows reset in minutes while long windows reset in hours.
+ *
+ * `segmentOptions.usage` hides the label, percent, or reset time, and
+ * `compact` joins them without spaces or parentheses (`5h2%4h47m`).
+ * Returns no pieces when every part is hidden.
  */
-function formatQuotaWindow(
-	ctx: SegmentContext,
+function quotaWindowPieces(
+	opts: UsageSegmentOptions,
 	label: string,
 	percent: number,
 	reset: number | undefined,
 	resetUnit: "m" | "h",
 	integer: "round" | "floor",
-): string {
-	const whole = integer === "floor" ? Math.floor(percent) : Math.round(percent);
-	const pctText = theme.fg(pickUsageColor(percent), `${whole}%`);
-	const resetText = reset !== undefined ? theme.fg("muted", ` (${formatUsageReset(reset, resetUnit)})`) : "";
-	return `${label} ${pctText}${resetText}`;
+): QuotaPiece[] {
+	const compact = opts.compact === true;
+	const gap = compact ? "" : " ";
+	const pieces: QuotaPiece[] = [];
+	if (opts.showLabel !== false) pieces.push([label]);
+	if (opts.showPercent !== false) {
+		const whole = integer === "floor" ? Math.floor(percent) : Math.round(percent);
+		if (pieces.length > 0) pieces[0][0] += gap;
+		pieces.push([`${whole}%`, pickUsageColor(percent)]);
+	}
+	if (opts.showReset !== false && reset !== undefined) {
+		const time = formatUsageReset(reset, resetUnit, compact);
+		const lead = pieces.length > 0 ? gap : "";
+		pieces.push([compact ? time : `${lead}(${time})`, "muted"]);
+	}
+	return pieces;
 }
 
-/** Native twin of {@link formatQuotaWindow}. */
-function describeQuotaWindow(
-	label: string,
-	percent: number,
-	reset: number | undefined,
-	resetUnit: "m" | "h",
-	integer: "round" | "floor",
-): TspSpan[] {
-	const whole = integer === "floor" ? Math.floor(percent) : Math.round(percent);
-	const spans = [span(`${label} `), span(`${whole}%`, pickUsageColor(percent))];
-	if (reset !== undefined) spans.push(span(` (${formatUsageReset(reset, resetUnit)})`, "muted"));
-	return spans;
+/**
+ * The present quota windows in display order, shared by the ANSI renderer and
+ * its native twin. Windows whose parts are all hidden drop out.
+ */
+function quotaWindows(u: NonNullable<SegmentContext["usage"]>, opts: UsageSegmentOptions): QuotaPiece[][] {
+	const windows = [
+		u.fiveHour && quotaWindowPieces(opts, "5h", u.fiveHour.percent, u.fiveHour.resetMinutes, "m", "round"),
+		u.daily && quotaWindowPieces(opts, "1d", u.daily.percent, u.daily.resetMinutes, "m", "round"),
+		u.sevenDay && quotaWindowPieces(opts, "7d", u.sevenDay.percent, u.sevenDay.resetHours, "h", "round"),
+		// Monthly-subscription providers only (the normalizer gates the class).
+		// Cursor and QwenCloud floor used percents upstream (Cursor's dashboard
+		// shows 1.88 → "1% used"; OpenCode's endpoint emits floored integers).
+		u.monthly && quotaWindowPieces(opts, "mo", u.monthly.percent, u.monthly.resetHours, "h", "floor"),
+	];
+	return windows.filter((pieces): pieces is QuotaPiece[] => !!pieces && pieces.length > 0);
 }
 
-function formatUsageReset(value: number, unit: "m" | "h"): string {
+function formatUsageReset(value: number, unit: "m" | "h", compact = false): string {
+	const gap = compact ? "" : " ";
 	if (unit === "m") {
 		// Short-window reset timers retain minute precision.
 		if (value < 60) return `${value}m`;
 		const hours = Math.floor(value / 60);
 		const mins = value % 60;
-		return mins > 0 ? `${hours}h ${mins}m` : `${hours}h`;
+		return mins > 0 ? `${hours}h${gap}${mins}m` : `${hours}h`;
 	}
 	// total hours (7d window: max 168)
 	if (value < 24) return `${value}h`;
 	const days = Math.floor(value / 24);
 	const hours = value % 24;
-	return hours > 0 ? `${days}d ${hours}h` : `${days}d`;
+	return hours > 0 ? `${days}d${gap}${hours}h` : `${days}d`;
 }
 
 const usageSegment: StatusLineSegment = {
@@ -1198,20 +1223,9 @@ const usageSegment: StatusLineSegment = {
 			const tier = truncateToWidth(sanitizeStatusText(u.tier), TRUNCATE_LENGTHS.SHORT);
 			if (tier) parts.push(accentFg(ctx, "accent", tier));
 		}
-		if (u.fiveHour) {
-			parts.push(formatQuotaWindow(ctx, "5h", u.fiveHour.percent, u.fiveHour.resetMinutes, "m", "round"));
-		}
-		if (u.daily) {
-			parts.push(formatQuotaWindow(ctx, "1d", u.daily.percent, u.daily.resetMinutes, "m", "round"));
-		}
-		if (u.sevenDay) {
-			parts.push(formatQuotaWindow(ctx, "7d", u.sevenDay.percent, u.sevenDay.resetHours, "h", "round"));
-		}
-		if (u.monthly) {
-			// Monthly-subscription providers only (the normalizer gates the class).
-			// Cursor and QwenCloud floor used percents upstream (Cursor's dashboard
-			// shows 1.88 → "1% used"; OpenCode's endpoint emits floored integers).
-			parts.push(formatQuotaWindow(ctx, "mo", u.monthly.percent, u.monthly.resetHours, "h", "floor"));
+		// Contexts built outside the status line (tests, fixtures) may omit options.
+		for (const pieces of quotaWindows(u, ctx.options?.usage ?? {})) {
+			parts.push(pieces.map(([text, color]) => (color ? theme.fg(color, text) : text)).join(""));
 		}
 		if (u.resetCredits) {
 			const resets = u.resetCredits;
@@ -1230,6 +1244,7 @@ const usageSegment: StatusLineSegment = {
 			}
 			parts.push(theme.fg(resets.redeemableCount > 0 ? "success" : "warning", resetText));
 		}
+		if (parts.length === 0) return { content: "", visible: false };
 		const content = withIcon(theme.icon.time, parts.join(theme.sep.dot));
 		return { content, visible: true };
 	},
@@ -1241,14 +1256,9 @@ const usageSegment: StatusLineSegment = {
 			const tier = sanitizeStatusText(u.tier);
 			if (tier) parts.push([span(tier, accentToken(ctx, "accent"))]);
 		}
-		if (u.fiveHour) {
-			parts.push(describeQuotaWindow("5h", u.fiveHour.percent, u.fiveHour.resetMinutes, "m", "round"));
+		for (const pieces of quotaWindows(u, ctx.options?.usage ?? {})) {
+			parts.push(pieces.map(([text, color]) => span(text, color)));
 		}
-		if (u.daily) parts.push(describeQuotaWindow("1d", u.daily.percent, u.daily.resetMinutes, "m", "round"));
-		if (u.sevenDay) {
-			parts.push(describeQuotaWindow("7d", u.sevenDay.percent, u.sevenDay.resetHours, "h", "round"));
-		}
-		if (u.monthly) parts.push(describeQuotaWindow("mo", u.monthly.percent, u.monthly.resetHours, "h", "floor"));
 		if (u.resetCredits) {
 			const resets = u.resetCredits;
 			let resetText = `✦ ${resets.bankedCount}`;
@@ -1261,6 +1271,7 @@ const usageSegment: StatusLineSegment = {
 			}
 			parts.push([span(resetText, resets.redeemableCount > 0 ? "success" : "warning")]);
 		}
+		if (parts.length === 0) return null;
 		const spans: TspSpan[] = [];
 		for (const part of parts) {
 			if (spans.length > 0) spans.push(span(theme.sep.dot, "dim"));
