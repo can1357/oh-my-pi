@@ -2294,7 +2294,13 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 								leafId: session.sessionManager.getLeafId(),
 								messageCount: messages.length,
 							},
-							{ cursor: command.cursor, limit: command.limit },
+							{
+								cursor: command.cursor,
+								limit: command.limit,
+								order: command.order,
+								before: command.before,
+								after: command.after,
+							},
 						),
 					);
 				} catch (pageError) {

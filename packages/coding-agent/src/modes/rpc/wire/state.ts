@@ -161,7 +161,10 @@ export const stateDefs = {
 	MessagesPage: {
 		messages: "AgentMessage[]",
 		totalMessages: "number.integer",
-		"nextCursor?": doc("string", "Opaque cursor for the next page; absent on the last page."),
+		"nextCursor?": doc(
+			"string",
+			"Opaque cursor for the next page in the page's own walk direction; absent on the last page of that direction.",
+		),
 	},
 	SlashCommandInput: { "hint?": "string" },
 	SlashSubcommand: { name: "string", "description?": "string", "usage?": "string" },

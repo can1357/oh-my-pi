@@ -754,7 +754,7 @@ class MessagesPage:
     messages: tuple[AgentMessage, ...]
     total_messages: int
     next_cursor: str | None = None
-    """Opaque cursor for the next page; absent on the last page."""
+    """Opaque cursor for the next page in the page's own walk direction; absent on the last page of that direction."""
 
 
 @dataclass(slots=True, frozen=True, kw_only=True)
@@ -3174,13 +3174,19 @@ class WireClient:
         data = self._command("handoff", params)
         return None if data is None else parse_handoff_result(data, "handoff")
 
-    def get_messages_page(self, *, cursor: str | None = None, limit: int | None = None) -> MessagesPage:
+    def get_messages_page(self, *, cursor: str | None = None, limit: int | None = None, order: Literal["asc", "desc"] | None = None, before: str | None = None, after: str | None = None) -> MessagesPage:
         """One stable page of messages."""
         params: dict[str, object] = {}
         if cursor is not None:
             params["cursor"] = cursor
         if limit is not None:
             params["limit"] = limit
+        if order is not None:
+            params["order"] = order
+        if before is not None:
+            params["before"] = before
+        if after is not None:
+            params["after"] = after
         return parse_messages_page(self._command("get_messages_page", params), "get_messages_page")
 
     def get_login_providers(self) -> tuple[LoginProvider, ...]:

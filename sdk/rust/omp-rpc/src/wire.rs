@@ -3169,7 +3169,7 @@ pub struct MessagesPage {
 	pub messages: Vec<AgentMessage>,
 	#[serde(rename = "totalMessages")]
 	pub total_messages: i64,
-	/// Opaque cursor for the next page; absent on the last page.
+	/// Opaque cursor for the next page in the page's own walk direction; absent on the last page of that direction.
 	#[serde(rename = "nextCursor", default, skip_serializing_if = "Option::is_none")]
 	pub next_cursor: Option<String>,
 }
@@ -5150,6 +5150,15 @@ pub struct GetMessagesPageParams {
 	pub cursor: Option<String>,
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub limit: Option<i64>,
+	/// Walk direction for a cursor-less request: newest-first (`desc`) or oldest-first (default). A provided cursor dictates its own direction.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub order: Option<GetMessagesPageParamsOrder>,
+	/// Anchor cursor: one page taken immediately before the anchor offset (exclusive), newest-first.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub before: Option<String>,
+	/// Anchor cursor: one page taken starting at the anchor offset (inclusive), oldest-first.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub after: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -5452,6 +5461,24 @@ impl HostUriResultContentType {
 			Self::TextMarkdown => "text/markdown",
 			Self::ApplicationJson => "application/json",
 			Self::TextPlain => "text/plain",
+		}
+	}
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum GetMessagesPageParamsOrder {
+	#[serde(rename = "asc")]
+	Asc,
+	#[serde(rename = "desc")]
+	Desc,
+}
+
+impl GetMessagesPageParamsOrder {
+	/// Wire value.
+	pub fn as_str(self) -> &'static str {
+		match self {
+			Self::Asc => "asc",
+			Self::Desc => "desc",
 		}
 	}
 }
@@ -6469,6 +6496,15 @@ pub struct GetMessagesPageCommand {
 	pub cursor: Option<String>,
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub limit: Option<i64>,
+	/// Walk direction for a cursor-less request: newest-first (`desc`) or oldest-first (default). A provided cursor dictates its own direction.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub order: Option<GetMessagesPageParamsOrder>,
+	/// Anchor cursor: one page taken immediately before the anchor offset (exclusive), newest-first.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub before: Option<String>,
+	/// Anchor cursor: one page taken starting at the anchor offset (inclusive), oldest-first.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub after: Option<String>,
 }
 
 impl Command for GetMessagesPageCommand {
