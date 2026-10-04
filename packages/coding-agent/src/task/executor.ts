@@ -2867,7 +2867,7 @@ async function relayWakeTurnOutput(args: {
 	const bus = IrcBus.global();
 	const sources = wakeSources(args.records, args.id);
 	if (sources.length === 0) return;
-	const failed = args.error !== undefined || args.aborted || args.finalizeError !== undefined;
+	const failed = wakeTurnFailed(args);
 	for (const source of sources) {
 		if (source.from === args.jobOwnerId) continue;
 		const alreadyMessaged = bus.sentSince(args.id, source.from, args.turnStartTime);
@@ -2891,6 +2891,11 @@ async function relayWakeTurnOutput(args: {
 			logger.warn("IRC wake-turn relay failed", { from: args.id, to: source.from, error: receipt.error });
 		}
 	}
+}
+
+/** Whether a wake turn died on an error, a cancellation, or a finalization throw instead of completing. */
+function wakeTurnFailed(outcome: { error: string | undefined; aborted: boolean; finalizeError: unknown }): boolean {
+	return outcome.error !== undefined || outcome.aborted || outcome.finalizeError !== undefined;
 }
 
 /**
@@ -2951,19 +2956,6 @@ export function buildWakeRelayBody(args: {
 	return `Wake turn produced no output. ${transcript}`;
 }
 
-/**
- * Bracket a kept-alive subagent's autonomous IRC wake turns with a task run
- * monitor so RPC/collab subscribers see the same `subagent_lifecycle` /
- * `subagent_progress` frames a first run emits. Shared by the live executor
- * reviver and the persisted cold-revive path so a resumed process's parked
- * subagents are not blind spots. The observer runs after the session has
- * flushed its post-prompt settle (see {@link AgentSession.setIrcWakeTurnObserver}).
- *
- * The turn's output is relayed to the waking peers via
- * {@link relayWakeTurnOutput}; the relay is registered as a pending reply on
- * the session up front so a `send await:true` waiter holds its "stopped
- * without replying" verdict until the relay has been delivered.
- */
 /** Extracts display text from an IRC/aside record's content, shared by the custom-role and
  *  user-role branches below (both fields share the same string | text-part-array shape). */
 function extractIrcRecordText(content: string | ReadonlyArray<{ type: string; text?: string }>): string {
@@ -2974,6 +2966,20 @@ function extractIrcRecordText(content: string | ReadonlyArray<{ type: string; te
 		.join("\n");
 }
 
+/**
+ * Bracket a kept-alive subagent's autonomous IRC wake turns with a task run
+ * monitor so RPC/collab subscribers see the same `subagent_lifecycle` /
+ * `subagent_progress` frames a first run emits. Shared by the live executor
+ * reviver and the persisted cold-revive path so a resumed process's parked
+ * subagents are not blind spots. The observer runs after the session has
+ * flushed its post-prompt settle (see {@link AgentSession.setIrcWakeTurnObserver}).
+ *
+ * The turn's output reaches the parent as an async job when the parent's
+ * message woke the turn or the turn yielded, and the other waking peers via
+ * {@link relayWakeTurnOutput}; the relay is registered as a pending reply on
+ * the session up front so a `send await:true` waiter holds its "stopped
+ * without replying" verdict until the relay has been delivered.
+ */
 export function attachIrcWakeTurnMonitor(session: AgentSession, options: IrcWakeTurnMonitorOptions): void {
 	const { id, agent } = options;
 	const index = options.index ?? 0;
@@ -3003,24 +3009,31 @@ export function attachIrcWakeTurnMonitor(session: AgentSession, options: IrcWake
 		const relay = Promise.withResolvers<void>();
 		session.trackIrcReply(relay.promise);
 		const sessionFile = AgentRegistry.global().get(id)?.sessionFile ?? options.sessionFile ?? undefined;
-		// A woken agent's yield is a completion its parent must receive exactly
-		// like the first run's. Register an owner-routed job the moment the yield
-		// is accepted — before the ref goes idle — so the parent's `wait` has a
-		// running job to block on while this turn finalizes, and the result then
-		// arrives through the ordinary async-result delivery.
+		// The parent receives this turn's outcome through an owner-routed job: the
+		// ordinary async-result delivery, and what its `wait` blocks on. A turn
+		// woken by the parent's own message is work the parent started, so the job
+		// spans the whole turn. Otherwise only a yield is a completion the parent
+		// must receive like the first run's, so the job registers the moment the
+		// yield is accepted, before the ref goes idle.
+		const ownerId = AgentRegistry.global().get(id)?.parentId;
+		// Cancelling the job cancels the turn it stands for.
+		const jobCancel = new AbortController();
 		let wakeJob: { ownerId: string; outcome: PromiseWithResolvers<AsyncJobRunResult> } | undefined;
 		const registerWakeJob = (): void => {
 			if (wakeJob) return;
-			const ownerId = AgentRegistry.global().get(id)?.parentId;
 			const manager = session.asyncJobManager;
 			if (!ownerId || !manager) return;
 			const outcome = Promise.withResolvers<AsyncJobRunResult>();
 			try {
-				manager.register("task", id, ({ signal }) => untilAborted(signal, outcome.promise), {
+				manager.register(
+					"task",
 					id,
-					agentId: id,
-					ownerId,
-				});
+					({ signal }) => {
+						signal.addEventListener("abort", () => jobCancel.abort(signal.reason), { once: true });
+						return untilAborted(signal, outcome.promise);
+					},
+					{ id, agentId: id, ownerId },
+				);
 				wakeJob = { ownerId, outcome };
 			} catch (error) {
 				logger.warn("IRC wake-turn job registration failed", {
@@ -3047,6 +3060,7 @@ export function attachIrcWakeTurnMonitor(session: AgentSession, options: IrcWake
 			maxRuntimeMs,
 			// Autonomous wake turns answer a peer message; too short to probe.
 			completionProbe: false,
+			signal: jobCancel.signal,
 			onYieldAccepted: registerWakeJob,
 		});
 
@@ -3065,6 +3079,7 @@ export function attachIrcWakeTurnMonitor(session: AgentSession, options: IrcWake
 
 		turnMonitor.setActiveSession(session);
 		const unsubscribeTurn = turnMonitor.attach(session);
+		if (wakeSources(records, id).some(source => source.from === ownerId)) registerWakeJob();
 		return async turnError => {
 			unsubscribeTurn();
 			const activeSession = turnMonitor.takeActiveSession();
@@ -3141,9 +3156,10 @@ export function attachIrcWakeTurnMonitor(session: AgentSession, options: IrcWake
 				});
 			} finally {
 				// Once registered, the wake job carries this turn's outcome to the
-				// parent whatever it is: the yield result, or the failure that
-				// superseded it.
-				if (wakeJob && result) {
+				// parent whatever it is: the yield result, the failure that
+				// superseded it, or, for a turn that never yielded, the answer a
+				// relay would have carried.
+				if (wakeJob && yielded && result) {
 					const text = formatTaskResultSummary(result, { totalDurationMs: result.durationMs });
 					const structured = result.structuredOutput;
 					if (result.aborted || result.exitCode !== 0 || result.error !== undefined) {
@@ -3151,9 +3167,22 @@ export function attachIrcWakeTurnMonitor(session: AgentSession, options: IrcWake
 					} else {
 						wakeJob.outcome.resolve(structured ? { text, structured } : { text });
 					}
-				} else if (wakeJob) {
+				} else if (wakeJob && yielded) {
 					const message = finalizeError instanceof Error ? finalizeError.message : String(finalizeError);
 					wakeJob.outcome.reject(new Error(`Wake turn of ${id} failed to finalize: ${message}`));
+				} else if (wakeJob) {
+					const outcome = { error: errorForPeer, aborted, finalizeError };
+					const text = buildWakeRelayBody({
+						...outcome,
+						id,
+						yielded,
+						result,
+						turnText,
+						abortReason,
+						alreadyMessaged: IrcBus.global().sentSince(id, wakeJob.ownerId, turnStartTime),
+					});
+					if (wakeTurnFailed(outcome)) wakeJob.outcome.reject(new Error(text));
+					else wakeJob.outcome.resolve({ text });
 				}
 				// Unconditional: a failed, cancelled, empty, or even un-finalized
 				// wake turn must still tell whoever woke it, or a `send await:true`
