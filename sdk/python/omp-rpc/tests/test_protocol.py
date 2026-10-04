@@ -57,8 +57,9 @@ def valid_skill_snapshot() -> dict[str, object]:
                 "skills": [entry],
                 "duplicates": [
                     {
-                        "skill": {**entry, "pluginName": "p"},
+                        "skill": {**entry, "pluginName": "p", "repository": "github.com/a/b"},
                         "retained": entry,
+                        "match": "origin",
                     }
                 ],
             }
@@ -101,6 +102,18 @@ class SkillDiagnosticsProtocolTests(unittest.TestCase):
         duplicate = state.skill_diagnostics.diagnostics[0].duplicates[0]
         self.assertEqual(duplicate.skill.plugin_name, "p")
         self.assertIsNone(duplicate.retained.plugin_name)
+        self.assertEqual(duplicate.skill.repository, "github.com/a/b")
+        self.assertEqual(duplicate.match, "origin")
+
+    def test_older_duplicate_without_match_defaults_to_content(self) -> None:
+        snapshot = valid_skill_snapshot()
+        _drop(_duplicate(snapshot), "match")
+
+        state = parse_session_state({"sessionId": "s", "skillDiagnostics": snapshot})
+
+        assert state.skill_diagnostics is not None
+        duplicate = state.skill_diagnostics.diagnostics[0].duplicates[0]
+        self.assertEqual(duplicate.match, "content")
 
     def test_rejects_malformed_skill_diagnostics_with_value_error(self) -> None:
         # One row per distinct boundary: bool leaf, required arrays (missing and
@@ -120,6 +133,7 @@ class SkillDiagnosticsProtocolTests(unittest.TestCase):
             "duplicates null": lambda s: _set(_diagnostic(s), "duplicates", None),
             "duplicate not object": lambda s: _set(_diagnostic(s), "duplicates", [1]),
             "duplicate retained missing": lambda s: _drop(_duplicate(s), "retained"),
+            "duplicate match unknown": lambda s: _set(_duplicate(s), "match", "newest"),
             "entry leaf not string": lambda s: _set(_duplicate_skill(s), "filePath", 7),
             "pluginName not string": lambda s: _set(
                 _duplicate_skill(s), "pluginName", 7

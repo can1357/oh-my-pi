@@ -3066,7 +3066,7 @@ impl SkillSelectionReason {
 	}
 }
 
-/// Allowlisted identity of one discovered skill file.
+/// Allowlisted identity of one discovered skill file; `repository`/`version` are what its plugin declares.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SkillDiagnosticEntry {
 	pub name: String,
@@ -3075,13 +3075,38 @@ pub struct SkillDiagnosticEntry {
 	pub source: String,
 	#[serde(rename = "pluginName", default, skip_serializing_if = "Option::is_none")]
 	pub plugin_name: Option<String>,
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub repository: Option<String>,
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub version: Option<String>,
 }
 
-/// A file identical to a loaded skill and so not loaded; `retained` is the skill that stands for it.
+/// Why a duplicate is not loaded: identical SKILL.md content, or a same-origin variant (`skills.dedupeSameOrigin`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum SkillDuplicateMatch {
+	#[serde(rename = "content")]
+	Content,
+	#[serde(rename = "origin")]
+	Origin,
+}
+
+impl SkillDuplicateMatch {
+	/// Wire value.
+	pub fn as_str(self) -> &'static str {
+		match self {
+			Self::Content => "content",
+			Self::Origin => "origin",
+		}
+	}
+}
+
+/// A file not loaded because `retained` stands for it; older snapshots imply `match: content`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SkillDiagnosticDuplicate {
 	pub skill: SkillDiagnosticEntry,
 	pub retained: SkillDiagnosticEntry,
+	#[serde(default = "default_skill_diagnostic_duplicate_match")]
+	pub r#match: SkillDuplicateMatch,
 }
 
 /// A skill name that resolved into several active variants and/or left redundant copies unloaded.
@@ -6054,6 +6079,10 @@ impl HostUriResultContentType {
 
 fn default_queued_messages_state_live_steered() -> i64 {
 	serde_json::from_str("0").expect("valid wire default")
+}
+
+fn default_skill_diagnostic_duplicate_match() -> SkillDuplicateMatch {
+	serde_json::from_str("\"content\"").expect("valid wire default")
 }
 
 fn default_session_state_is_streaming() -> bool {

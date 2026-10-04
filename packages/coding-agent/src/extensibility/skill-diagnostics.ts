@@ -1,15 +1,18 @@
-import type { Skill, SkillDiagnostic, SkillSelectionReason } from "./skills";
+import type { Skill, SkillDiagnostic, SkillDuplicateMatch, SkillSelectionReason } from "./skills";
 
 export interface SkillDiagnosticEntry {
 	name: string;
 	filePath: string;
 	source: string;
 	pluginName?: string;
+	repository?: string;
+	version?: string;
 }
 
 export interface SkillDiagnosticDuplicate {
 	skill: SkillDiagnosticEntry;
 	retained: SkillDiagnosticEntry;
+	match: SkillDuplicateMatch;
 }
 
 export interface SkillResolutionDiagnostic {
@@ -26,11 +29,14 @@ export interface SkillDiagnosticsSnapshot {
 }
 
 function serializeSkill(skill: Skill): SkillDiagnosticEntry {
+	const provenance = skill._source?.provenance;
 	return {
 		name: skill.name,
 		filePath: skill.filePath,
 		source: skill.source,
 		...(skill._source?.pluginName !== undefined && { pluginName: skill._source.pluginName }),
+		...(provenance !== undefined && { repository: provenance.repository }),
+		...(provenance?.version !== undefined && { version: provenance.version }),
 	};
 }
 
@@ -50,6 +56,7 @@ export function buildSkillDiagnosticsSnapshot(
 			duplicates: diagnostic.duplicates.map(duplicate => ({
 				skill: serializeSkill(duplicate.skill),
 				retained: serializeSkill(duplicate.retained),
+				match: duplicate.match,
 			})),
 		})),
 	};

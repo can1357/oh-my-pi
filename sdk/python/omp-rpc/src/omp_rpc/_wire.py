@@ -141,6 +141,12 @@ _SKILL_SELECTION_REASON_VALUES: Final[frozenset[str]] = frozenset({"source-order
 _decode_skill_selection_reason = cast("Decoder[SkillSelectionReason]", literal(_SKILL_SELECTION_REASON_VALUES))
 
 
+SkillDuplicateMatch: TypeAlias = Literal["content", "origin"]
+"""Why a duplicate is not loaded: identical SKILL.md content, or a same-origin variant (`skills.dedupeSameOrigin`)."""
+_SKILL_DUPLICATE_MATCH_VALUES: Final[frozenset[str]] = frozenset({"content", "origin"})
+_decode_skill_duplicate_match = cast("Decoder[SkillDuplicateMatch]", literal(_SKILL_DUPLICATE_MATCH_VALUES))
+
+
 BtwStatus: TypeAlias = Literal["running", "complete", "cancelled", "error", "interrupted"]
 """Side-question turn lifecycle; `interrupted` marks a turn whose process died while it ran."""
 _BTW_STATUS_VALUES: Final[frozenset[str]] = frozenset({"running", "complete", "cancelled", "error", "interrupted"})
@@ -645,18 +651,21 @@ class UsageLimitWrapUp:
 
 @dataclass(slots=True, frozen=True, kw_only=True)
 class SkillDiagnosticEntry:
-    """Allowlisted identity of one discovered skill file."""
+    """Allowlisted identity of one discovered skill file; `repository`/`version` are what its plugin declares."""
     name: str
     file_path: str
     source: str
     plugin_name: str | None = None
+    repository: str | None = None
+    version: str | None = None
 
 
 @dataclass(slots=True, frozen=True, kw_only=True)
 class SkillDiagnosticDuplicate:
-    """A file identical to a loaded skill and so not loaded; `retained` is the skill that stands for it."""
+    """A file not loaded because `retained` stands for it; older snapshots imply `match: content`."""
     skill: SkillDiagnosticEntry
     retained: SkillDiagnosticEntry
+    match: SkillDuplicateMatch = "content"
 
 
 @dataclass(slots=True, frozen=True, kw_only=True)
@@ -2052,6 +2061,8 @@ def parse_skill_diagnostic_entry(value: object, path: str = "SkillDiagnosticEntr
         file_path=required(payload, "filePath", decode_str, path),
         source=required(payload, "source", decode_str, path),
         plugin_name=optional(payload, "pluginName", decode_str, path),
+        repository=optional(payload, "repository", decode_str, path),
+        version=optional(payload, "version", decode_str, path),
     )
 
 
@@ -2060,6 +2071,7 @@ def parse_skill_diagnostic_duplicate(value: object, path: str = "SkillDiagnostic
     return SkillDiagnosticDuplicate(
         skill=required(payload, "skill", parse_skill_diagnostic_entry, path),
         retained=required(payload, "retained", parse_skill_diagnostic_entry, path),
+        match=defaulted(payload, "match", _decode_skill_duplicate_match, path, "content"),
     )
 
 
@@ -4215,6 +4227,7 @@ __all__ = [
     "SkillDiagnosticEntry",
     "SkillDiagnosticsSnapshot",
     "SkillDiagnosticsUpdateEvent",
+    "SkillDuplicateMatch",
     "SkillResolutionDiagnostic",
     "SkillSelectionReason",
     "SlashCommandInput",

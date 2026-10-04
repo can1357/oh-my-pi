@@ -1063,21 +1063,25 @@ SDK session changes its in-memory setting instead of writing a config file.
     "reason": "source-order",
     "skills": [
       { "name": "review", "filePath": "/skills/review/SKILL.md", "source": "native:user" },
-      { "name": "plugin/review", "filePath": "/plugin/skills/review/SKILL.md", "source": "omp-plugins:user", "pluginName": "plugin" }
+      { "name": "plugin/review", "filePath": "/plugin/skills/review/SKILL.md", "source": "omp-plugins:user", "pluginName": "plugin", "repository": "github.com/acme/plugin", "version": "2.0.0" }
     ],
     "duplicates": [{
       "skill": { "name": "review", "filePath": "/mirror/review/SKILL.md", "source": "agents:project" },
-      "retained": { "name": "review", "filePath": "/skills/review/SKILL.md", "source": "native:user" }
+      "retained": { "name": "review", "filePath": "/skills/review/SKILL.md", "source": "native:user" },
+      "match": "content"
     }]
   }]
 }
 ```
 
 Reasons are `source-order`, `custom-directory`, or `authored-over-installed`.
-Entries expose only resolved names, file paths, sources, and optional plugin
-names—not bodies, frontmatter, or internal discovery metadata. Shared names do
-not prove shared lineage. An empty `diagnostics` array means no current conflicts
-or redundant installations.
+Entries expose only resolved names, file paths, sources, optional plugin names,
+and optional manifest-declared repositories and versions—not bodies,
+frontmatter, or other internal discovery metadata. Duplicate `match` is
+`content` for identical SKILL.md content or `origin` for a differing variant
+hidden by opt-in `skills.dedupeSameOrigin`; clients read an omitted `match` from
+older snapshots as `content`. Shared names or declared repositories do not prove
+authenticity. An empty `diagnostics` array means no current conflicts or redundant installations.
 
 The snapshot also appears in `get_state.skillDiagnostics` and in
 `{ type: "skill_diagnostics_update", data: snapshot }` at startup and on semantic
@@ -1090,9 +1094,9 @@ unavailable support, not a clean resolution.
 The diagnostics types, commands, and update frame are also defined in the
 canonical wire schema and generated into the Python, Go, and Rust SDKs by
 `bun run gen:rpc`. Generated Python decoders follow the shared SDK convention:
-null optional package identity is treated as absent; required snapshot fields,
-arrays, and non-null field types remain validated. OMP emits `pluginName` only
-as a string or omits it.
+null optional package identity/provenance is treated as absent; required snapshot
+fields, arrays, and non-null field types remain validated. OMP emits
+`pluginName`, `repository`, and `version` only as strings or omits them.
 ### Pi-compatible history/tree commands with OMP-native entry payloads
 
 The commands and reconciliation semantics below are Pi-compatible, but the

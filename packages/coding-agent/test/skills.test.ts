@@ -1222,6 +1222,143 @@ describe("collision handling", () => {
 			});
 		});
 	});
+
+	describe("same-origin variants", () => {
+		const calendar = (heading: string) => `---\nname: calendar\ndescription: Calendar helpers\n---\n# ${heading}\n`;
+
+		/** Writes omp plugin packages (`package.json` + `skills/calendar/SKILL.md`) and loads only them. */
+		async function withPlugins(
+			packages: { name: string; repository?: unknown; version?: string; text: string }[],
+			run: (load: (dedupeSameOrigin?: boolean) => Promise<LoadSkillsResult>, files: string[]) => Promise<void>,
+		) {
+			const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "skills-same-origin-")));
+			try {
+				const roots = packages.map(pkg => path.join(root, pkg.name));
+				const files = roots.map(dir => path.join(dir, "skills", "calendar", "SKILL.md"));
+				await Promise.all(
+					packages.map(async (pkg, i) => {
+						await Bun.write(files[i], pkg.text);
+						await Bun.write(
+							path.join(roots[i], "package.json"),
+							JSON.stringify({ name: pkg.name, version: pkg.version, repository: pkg.repository }),
+						);
+					}),
+				);
+				const load = (dedupeSameOrigin?: boolean) =>
+					loadSkills({
+						...DISABLE_ALL_BUILTIN_SKILLS,
+						...(dedupeSameOrigin !== undefined && { dedupeSameOrigin }),
+						extensionRoots: { explicit: roots, mode: "explicit-only", configured: [], configuredLevel: "user" },
+					});
+				await run(load, files);
+			} finally {
+				await removeWithRetries(root);
+			}
+		}
+
+		const sameRepository = [
+			{
+				name: "upstream",
+				repository: "git+https://github.com:443/Acme/Tools.git",
+				version: "1.9.0",
+				text: calendar("older, admitted first"),
+			},
+			{
+				name: "fork",
+				repository: { type: "git", url: "ssh://git@github.com:22/acme/tools.git" },
+				version: "2.0.0",
+				text: calendar("newer, admitted second"),
+			},
+		];
+
+		it("keeps every differing variant by default and reports their shared origin", async () => {
+			await withPlugins(sameRepository, async (load, [upstreamFile, forkFile]) => {
+				const { skills, diagnostics } = await load();
+				expect(skills.map(skill => [skill.name, skill.filePath])).toEqual([
+					["calendar", upstreamFile],
+					["fork/calendar", forkFile],
+				]);
+				expect(diagnostics).toHaveLength(1);
+				expect(diagnostics[0].duplicates).toEqual([]);
+				expect(diagnostics[0].skills.map(skill => skill._source?.provenance)).toEqual([
+					{ repository: "github.com/acme/tools", version: "1.9.0" },
+					{ repository: "github.com/acme/tools", version: "2.0.0" },
+				]);
+			});
+		});
+
+		it("hides a later same-origin variant behind the first-admitted one when opted in", async () => {
+			await withPlugins(sameRepository, async (load, [upstreamFile, forkFile]) => {
+				const { skills, diagnostics, warnings } = await load(true);
+				expect(skills.map(skill => [skill.name, skill.filePath, skill._source?.provenance?.version])).toEqual([
+					["calendar", upstreamFile, "1.9.0"],
+				]);
+				expect(warnings.filter(warning => warning.message.includes("collision"))).toEqual([]);
+				expect(diagnostics).toHaveLength(1);
+				expect(diagnostics[0].duplicates.map(d => [d.skill.filePath, d.retained.filePath, d.match])).toEqual([
+					[forkFile, upstreamFile, "origin"],
+				]);
+			});
+		});
+
+		it.each([
+			["another repository", "github:acme/other"],
+			["another monorepo directory", { url: "https://github.com/acme/tools", directory: "packages/b" }],
+			["no repository", undefined],
+		])("keeps a variant from %s even when opted in", async (_label, repository) => {
+			const packages = [sameRepository[0], { ...sameRepository[1], repository }];
+			await withPlugins(packages, async (load, [upstreamFile, forkFile]) => {
+				const { skills } = await load(true);
+				expect(skills.map(skill => [skill.name, skill.filePath])).toEqual([
+					["calendar", upstreamFile],
+					["fork/calendar", forkFile],
+				]);
+			});
+		});
+
+		it("preserves case-sensitive repository.directory identities", async () => {
+			const packages = [
+				{ ...sameRepository[0], repository: { url: "github:acme/tools", directory: "packages/Upper" } },
+				{ ...sameRepository[1], repository: { url: "github:acme/tools", directory: "packages/upper" } },
+			];
+			await withPlugins(packages, async load => {
+				const { skills } = await load(true);
+				expect(skills.map(skill => skill.name)).toEqual(["calendar", "fork/calendar"]);
+			});
+		});
+
+		it("rejects unsafe repository.directory aliases instead of collapsing them", async () => {
+			const packages = [
+				{ ...sameRepository[0], repository: { url: "github:acme/tools", directory: "../packages/a" } },
+				{ ...sameRepository[1], repository: { url: "github:acme/tools", directory: "packages/a" } },
+			];
+			await withPlugins(packages, async load => {
+				const { skills } = await load(true);
+				expect(skills.map(skill => skill.name)).toEqual(["calendar", "fork/calendar"]);
+			});
+		});
+
+		it("preserves case-sensitive paths on private repository hosts", async () => {
+			const packages = [
+				{ ...sameRepository[0], repository: "https://git.example.com/Acme/Tools" },
+				{ ...sameRepository[1], repository: "https://git.example.com/acme/tools" },
+			];
+			await withPlugins(packages, async load => {
+				const { skills } = await load(true);
+				expect(skills.map(skill => skill.name)).toEqual(["calendar", "fork/calendar"]);
+			});
+		});
+
+		it("still labels an identical same-origin copy as a content match", async () => {
+			const packages = [sameRepository[0], { ...sameRepository[1], text: sameRepository[0].text }];
+			await withPlugins(packages, async (load, [upstreamFile, forkFile]) => {
+				const { diagnostics } = await load(true);
+				expect(diagnostics[0].duplicates.map(d => [d.skill.filePath, d.retained.filePath, d.match])).toEqual([
+					[forkFile, upstreamFile, "content"],
+				]);
+			});
+		});
+	});
 });
 
 describe("parseSkillInvocation", () => {
