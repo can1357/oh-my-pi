@@ -1,11 +1,17 @@
 import { describe, expect, it } from "bun:test";
 import type { AgentToolContext } from "@oh-my-pi/pi-agent-core";
 import { validateToolArguments } from "@oh-my-pi/pi-ai/utils/validation";
+import { AsyncJobManager } from "@oh-my-pi/pi-coding-agent/async";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { BashInterceptorRule } from "@oh-my-pi/pi-coding-agent/exec/settings";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { BashTool, type BashToolInput } from "@oh-my-pi/pi-coding-agent/tools/bash";
 import { checkBashInterception } from "@oh-my-pi/pi-coding-agent/tools/bash-interceptor";
+import {
+	cfgBashAutoBackgroundEnabled,
+	cfgBashAutoBackgroundThresholdMs,
+} from "@oh-my-pi/pi-coding-agent/exec/settings";
+import { cfgAsyncEnabled } from "@oh-my-pi/pi-coding-agent/tools/settings";
 import { DEFAULT_BASH_INTERCEPTOR_RULES } from "@oh-my-pi/pi-coding-agent/exec/settings";
 
 function createBashTool(rules: BashInterceptorRule[]): BashTool {
@@ -270,5 +276,79 @@ describe("BashTool argument validation", () => {
 		await expect(tool.execute("tool-call", args as unknown as BashToolInput)).rejects.toThrow(
 			"Async bash execution is disabled",
 		);
+	});
+});
+
+describe("BashTool live settings", () => {
+	function createLiveTool(): { tool: BashTool; settings: Settings; manager: AsyncJobManager } {
+		// Every setting is read through its registry handle on each access,
+		// so a later override is visible without a restart.
+		const settings = Settings.isolated();
+		cfgAsyncEnabled.set(settings, false);
+		cfgBashAutoBackgroundEnabled.set(settings, true);
+		cfgBashAutoBackgroundThresholdMs.set(settings, 60_000);
+		const manager = new AsyncJobManager({ retentionMs: 0 });
+		const session = {
+			cwd: "/tmp",
+			hasUI: false,
+			skills: [],
+			getSessionFile: () => null,
+			getSessionId: () => "bash-live-settings",
+			getAgentId: () => null,
+			getClientBridge: () => undefined,
+			asyncJobManager: manager,
+			settings,
+		} as unknown as ToolSession;
+		return { tool: new BashTool(session), settings, manager };
+	}
+
+	// `properties` is `unknown` on omptype's JSON-schema projection; the cast
+	// keeps every assertion reading the same shape.
+	const propertyNames = (tool: BashTool): string[] =>
+		Object.keys(tool.parameters.toJsonSchema().properties as Record<string, unknown>);
+
+	const textOf = (result: { content: Array<{ type: string; text?: string }> }): string =>
+		result.content
+			.filter(block => block.type === "text" && typeof block.text === "string")
+			.map(block => block.text as string)
+			.join("\n");
+
+	it("keeps the base schema while async stays disabled", () => {
+		const { tool } = createLiveTool();
+		expect(propertyNames(tool)).not.toContain("async");
+	});
+
+	it("advertises the async option while async stays enabled", () => {
+		const { tool, settings } = createLiveTool();
+		cfgAsyncEnabled.override(settings, true);
+		expect(propertyNames(tool)).toContain("async");
+	});
+
+	it("swaps the live schema when async.enabled flips without a restart", () => {
+		const { tool, settings } = createLiveTool();
+		expect(propertyNames(tool)).not.toContain("async");
+
+		cfgAsyncEnabled.override(settings, true);
+		expect(propertyNames(tool)).toContain("async");
+
+		cfgAsyncEnabled.override(settings, false);
+		expect(propertyNames(tool)).not.toContain("async");
+	});
+
+	it("backgrounds the next run after a live threshold override", async () => {
+		const { tool, settings, manager } = createLiveTool();
+		try {
+			const foreground = await tool.execute("autobg-foreground", { command: "printf hi" });
+			expect(foreground.details?.async).toBeUndefined();
+			expect(textOf(foreground)).toContain("hi");
+
+			// thresholdMs 0 backgrounds immediately, and the value is resolved at
+			// execute time instead of being snapshotted at construction.
+			cfgBashAutoBackgroundThresholdMs.override(settings, 0);
+			const backgrounded = await tool.execute("autobg-background", { command: "printf hi" });
+			expect(backgrounded.details?.async).toMatchObject({ state: "running", type: "bash" });
+		} finally {
+			await manager.dispose();
+		}
 	});
 });
