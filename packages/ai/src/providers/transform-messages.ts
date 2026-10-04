@@ -35,6 +35,13 @@ export function normalizeToolCallId(id: string): string {
 	return id.replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, MAX_TOOL_CALL_ID_LENGTH);
 }
 
+const TOOL_CALL_ID_PATTERN = new RegExp(`^[a-zA-Z0-9_-]{1,${MAX_TOOL_CALL_ID_LENGTH}}$`);
+
+/** Whether `id` already satisfies the strict 1–64 `[a-zA-Z0-9_-]` tool-call ID contract. */
+export function isValidToolCallId(id: string): boolean {
+	return TOOL_CALL_ID_PATTERN.test(id);
+}
+
 /**
  * OpenAI Responses-family APIs mint composite tool ids (`call_id|item_id`);
  * opaque Chat Completions ids do not (openai-completions preserves same-model
@@ -399,12 +406,6 @@ function targetReadsForeignThinking(model: Model, compat: Model["compat"]): bool
 	return model.reasoning && compat.thinkingFormat === "zai";
 }
 
-const ANTHROPIC_TOOL_CALL_ID_PATTERN = /^[a-zA-Z0-9_-]{1,64}$/;
-
-function isValidAnthropicToolCallId(id: string): boolean {
-	return ANTHROPIC_TOOL_CALL_ID_PATTERN.test(id);
-}
-
 function fallbackAnthropicToolCallId(originalId: string): string {
 	return `toolu_${Bun.hash(originalId).toString(36)}`;
 }
@@ -415,9 +416,9 @@ function normalizeAnthropicTargetToolCallId<TApi extends Api>(
 	source: AssistantMessage,
 	normalizeId?: (id: string, model: Model<TApi>, source: AssistantMessage) => string,
 ): string {
-	if (isValidAnthropicToolCallId(id)) return id;
+	if (isValidToolCallId(id)) return id;
 	const normalized = normalizeId?.(id, model, source) ?? normalizeToolCallId(id);
-	if (isValidAnthropicToolCallId(normalized)) return normalized;
+	if (isValidToolCallId(normalized)) return normalized;
 	return fallbackAnthropicToolCallId(id);
 }
 

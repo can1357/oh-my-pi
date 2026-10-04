@@ -41,6 +41,7 @@ import {
 	getOpenAIResponsesHistoryPayload,
 	normalizeResponsesToolCallId,
 	stripOpenAIResponsesOutputOnlyStatusesForReplay,
+	truncateResponseItemId,
 } from "@oh-my-pi/pi-ai/utils";
 import { captureOpenAIHttpError } from "@oh-my-pi/pi-ai/utils/openai-http";
 import { isBedrockOpenAIUrl } from "@oh-my-pi/pi-catalog/hosts";
@@ -669,8 +670,8 @@ export function buildOpenAiNativeHistory(
 					let msgId = parsedSignature?.id;
 					if (!msgId) {
 						msgId = `msg_${msgIndex}`;
-					} else if (msgId.length > 64) {
-						msgId = `msg_${Bun.hash(msgId).toString(36)}`;
+					} else {
+						msgId = truncateResponseItemId(msgId, "msg");
 					}
 					input.push({
 						type: "message",

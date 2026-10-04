@@ -4,7 +4,7 @@
 
 ### Changed
 
-- Changed Google and Anthropic-fallback tool-call ID normalization to use the shared `normalizeToolCallId`; IDs are unchanged ([#14374](https://github.com/can1357/oh-my-pi/pull/14374) by [@jaredlyon](https://github.com/jaredlyon))
+- Changed tool-call ID normalization in the Google, Anthropic-fallback and OpenAI Codex providers, Responses message-ID truncation, and tool-call ID validation to use shared helpers; IDs are unchanged ([#14374](https://github.com/can1357/oh-my-pi/pull/14374) by [@jaredlyon](https://github.com/jaredlyon))
 
 ## [18.8.7] - 2026-10-09
 
