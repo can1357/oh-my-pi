@@ -4,7 +4,13 @@
 
 ### Fixed
 
-- Preserve nested connection-failure evidence when SDK errors are flattened into provider error messages.
+- Preserve nested connection-failure evidence when SDK errors are flattened into provider error messages ([#14380](https://github.com/can1357/oh-my-pi/pull/14380) by [@jroth1111](https://github.com/jroth1111)).
+
+## [18.6.1] - 2026-10-04
+
+### Fixed
+
+- Fixed compatibility with Command Code DeepSeek and other DeepSeek-family models by preserving the reasoning context required for warm OpenAI Responses sessions and correctly handling incomplete DSML tool-call wrappers in visible output.
 
 ## [18.6.0] - 2026-10-03
 

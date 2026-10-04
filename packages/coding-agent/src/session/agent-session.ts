@@ -10593,7 +10593,8 @@ export class AgentSession implements SettingsScope {
 			content: assistantMessage.content.filter(block => block.type !== "toolCall"),
 		};
 		return {
-			replyText: args.dedupeReply === false ? replyText.trim() : dedupeEphemeralReply(replyText.trim()),
+			replyText:
+				args.dedupeReply === false ? replyText.trim() : dedupeEphemeralReply(replyText.trim(), args.replyMaxBytes),
 			assistantMessage: sanitizedMessage,
 		};
 	}
