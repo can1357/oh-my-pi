@@ -5,6 +5,7 @@ import { materializeString, stringifyJson } from "@oh-my-pi/pi-utils";
 import { LRUCache } from "@oh-my-pi/pi-utils/lru";
 import * as snapcompact from "@oh-my-pi/snapcompact";
 import { isEstimateCacheable, messageEstimateVersion } from "./compaction/message-cache";
+import { estimateImageContentTokens } from "./image-tokens";
 import type { AgentMessage } from "./types";
 
 const testEnv = Bun.env.NODE_ENV === "test";
@@ -132,12 +133,6 @@ export interface TokenBudgetCheck {
 }
 
 /**
- * Image content has no tokenizer representation; charge a fixed estimate
- * matching what providers typically bill for inline images.
- */
-const IMAGE_TOKEN_ESTIMATE = 1200;
-
-/**
  * Memoized estimates for one message under this tokenizer's encoding, split by
  * the {@link MessageCountOptions.excludeEncryptedReasoning} option so the two
  * variants never collide. `version` snapshots {@link messageEstimateVersion} at
@@ -219,7 +214,8 @@ export class Tokenizer {
 	 * Settled historical messages are counted once and reused until an owner
 	 * (prune/shake/strip-images) calls `invalidateMessageCache`; streaming
 	 * assistants bypass the memo entirely (see the message-cache settle-gate
-	 * invariant). Image blocks charge a fixed per-image estimate.
+	 * invariant). Image blocks charge {@link estimateImageContentTokens}, the
+	 * same dimension-based estimate the native remote-compaction probe applies.
 	 */
 	countMessage(message: AgentMessage, options?: MessageCountOptions): number {
 		const floored = options?.excludeEncryptedReasoning === true;
@@ -273,7 +269,7 @@ export class Tokenizer {
 						if (block.type === "text" && block.text) {
 							fragments.push(block.text);
 						} else if (block.type === "image") {
-							extra += IMAGE_TOKEN_ESTIMATE;
+							extra += estimateImageContentTokens(block);
 						}
 					}
 				}
@@ -323,7 +319,7 @@ export class Tokenizer {
 						if (block.type === "text" && block.text) {
 							fragments.push(block.text);
 						} else if (block.type === "image") {
-							extra += IMAGE_TOKEN_ESTIMATE;
+							extra += estimateImageContentTokens(block);
 						}
 					}
 				}
