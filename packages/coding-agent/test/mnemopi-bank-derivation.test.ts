@@ -104,21 +104,23 @@ function createBankFixture(bank: string, metadataRows: readonly Record<string, u
 }
 
 describe("computeMnemopiBankScope (#2412)", () => {
-	// Regression: same cwd must hash to the same bank no matter what the
-	// ambient git layout looks like. The previous derivation walked
-	// `git.repo.resolveSync(cwd)?.repoRoot ?? path.resolve(cwd)`, so a
-	// disappearing/appearing ancestor `.git` repointed the same conversation
-	// directory to a different bank and stranded its memories.
-	it("returns the same per-project bank for one cwd regardless of git state", async () => {
+	// #2412: the derivation before the raw-cwd hash walked
+	// `git.repo.resolveSync(cwd)?.repoRoot ?? path.resolve(cwd)`, so a stray
+	// ancestor `.git` that is not a repository repointed the same conversation
+	// directory to a different bank and stranded its memories. Native
+	// discovery only accepts a `.git` that resolves to a repository, so such a
+	// marker must not move the bank. A real repository created above the cwd
+	// does move it: the bank follows the enclosing repository's primary root.
+	it("ignores an ancestor .git that is not a repository", async () => {
 		const baseDir = await TempDir.create("@mnemopi-stable-bank-");
 		try {
 			const project = baseDir.join("projects", "omp-workstation");
 			await fs.mkdir(project, { recursive: true });
 			const withoutGit = computeMnemopiBankScope(undefined, project, "per-project").bank;
 
-			// Plant an ancestor `.git` marker — the old code path resolved
-			// `project` to `baseDir/projects` via this file, producing a
-			// `projects-<hash>` bank id distinct from the cwd-derived one.
+			// Plant an ancestor `.git` gitfile whose target is not a repository.
+			// The pre-#2412 lookup resolved `project` to `baseDir/projects` from
+			// this file alone, producing a `projects-<hash>` bank id.
 			await fs.mkdir(baseDir.join("projects"), { recursive: true });
 			await fs.writeFile(baseDir.join("projects", ".git"), "gitdir: /dev/null\n");
 			const withAncestorGit = computeMnemopiBankScope(undefined, project, "per-project").bank;
