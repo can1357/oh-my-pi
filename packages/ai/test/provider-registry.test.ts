@@ -140,7 +140,7 @@ describe("provider registry auth surface", () => {
 			login: async () => "fixture-key",
 		});
 
-		await storage.oauth.login("fixture-x", { onAuth: () => { }, onPrompt: async () => "" });
+		await storage.oauth.login("fixture-x", { onAuth: () => undefined, onPrompt: async () => "" });
 
 		expect(store.getApiKey("fixture-x")).toBe("fixture-key");
 	});
@@ -150,7 +150,7 @@ describe("provider registry auth surface", () => {
 		const storage = new AuthStorage(store);
 		await storage.credentials.reload();
 
-		await storage.oauth.login("llama.cpp", { onAuth: () => { }, onPrompt: async () => "" });
+		await storage.oauth.login("llama.cpp", { onAuth: () => undefined, onPrompt: async () => "" });
 
 		expect(store.getApiKey("llama.cpp")).toBe("llama-cpp-local");
 	});

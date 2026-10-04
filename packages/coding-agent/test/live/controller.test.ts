@@ -217,13 +217,13 @@ describe("LiveSessionController delegation ownership", () => {
 
 		h.outputLevel(0.2);
 		h.captureAudio(null, new Float32Array([0.05]));
-		h.captureAudio(null, new Float32Array([0.2]));
+		h.captureAudio(null, new Float32Array([0.25]));
 		h.outputLevel(0);
-		h.captureAudio(null, new Float32Array([0.01]));
+		h.captureAudio(null, new Float32Array([0.015625]));
 		controller!.toggleMute();
 		h.captureAudio(null, new Float32Array([1]));
 
-		expect(h.transport.pushedAudio.map(samples => Array.from(samples))).toEqual([[0.2], [0.01]]);
+		expect(h.transport.pushedAudio.map(samples => Array.from(samples))).toEqual([[0.25], [0.015625]]);
 		expect(h.transport.muted).toEqual([true]);
 	});
 });

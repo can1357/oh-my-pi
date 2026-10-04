@@ -1207,6 +1207,8 @@ session is connecting, active, or closing fails.
 
 Gemini uses the stored `google` API key or `GEMINI_API_KEY` and defaults to `gemini-3.8-live-extended-thinking`. Configure `live.google.model`, `live.google.voice`, and `live.google.thinkingLevel` before starting; the selected configuration is fixed for that live connection. Codex remains the default provider. This integration supports Gemini voice and delegated coding, not direct desktop functions.
 
+Gemini function calls are asynchronous: spoken turn completion does not mean delegated coding has finished. Cancelling a delegated request clears its result ownership and drains its abort before a replacement starts. Stopping Live prevents waiting requests from starting; an ordinary stop does not cancel unrelated coding work already running in the session.
+
 `live_stop` responds after the session has stopped and succeeds when none is
 active. `live_mute` sets the microphone mute, or toggles it when `muted` is
 omitted, and fails when no session is active.

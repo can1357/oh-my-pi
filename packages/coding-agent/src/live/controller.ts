@@ -191,10 +191,10 @@ export class LiveSessionController {
 				onEvent: (event: LiveServerEvent) => this.#guardEvent(() => this.#handleLiveEvent(event)),
 				onOutputLevel: (level: number) => this.#guardEvent(() => this.#handleOutputLevel(level)),
 			};
-			const transport: LiveTransport =
-				this.#dependencies.createTransport?.(callbacks, instructions) ??
-				(this.provider === "google"
-					? new GeminiLiveTransport({
+			let transport = this.#dependencies.createTransport?.(callbacks, instructions);
+			if (!transport) {
+				if (this.provider === "google") {
+					transport = new GeminiLiveTransport({
 						authStorage: this.#session.modelRegistry.authStorage,
 						sessionId: this.#session.sessionId,
 						instructions,
@@ -202,14 +202,17 @@ export class LiveSessionController {
 						model: this.model,
 						thinkingLevel: cfgLiveGoogleThinking.get(this.#session.settings),
 						callbacks,
-					})
-					: new CodexLiveTransport({
+					});
+				} else {
+					transport = new CodexLiveTransport({
 						authStorage: this.#session.modelRegistry.authStorage,
 						sessionId: this.#session.sessionId,
 						instructions,
 						voice: this.#voice,
 						callbacks,
-					}));
+					});
+				}
+			}
 			this.#transport = transport;
 			await transport.connect();
 			if (this.#stopped) {

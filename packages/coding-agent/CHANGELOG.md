@@ -2,9 +2,16 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added Google AI Studio API-key import through `/login google`, `omp login google`, and broker login with secret input.
+- Added Gemini Live Extended Thinking voice sessions in `/live` and RPC, with asynchronous coding tasks while retaining the selected coding model.
+
 ### Fixed
 
 - Fixed follow-up hashline edits being rejected as anchored on lines "never displayed" after an earlier edit shifted those lines, when the replacement carries the anchored content; genuinely stale line numbers are still rejected ([#14254](https://github.com/can1357/oh-my-pi/pull/14254) by [@abilliontokens](https://github.com/abilliontokens)).
+- Fixed Gemini Live connections failing with an unsupported websocket payload error when receiving binary messages.
+- Fixed cancelled Live coding tasks completing a replacement request before its own result was ready.
 
 ## [18.6.0] - 2026-10-03
 
@@ -21,14 +28,6 @@
 ### Fixed
 
 - Fixed an `EPIPE: broken pipe` unhandled rejection crashing the session when a debug adapter, eval kernel, IDA worker, or RPC server exits mid-write (seen on Windows) ([#14196](https://github.com/can1357/oh-my-pi/pull/14196) by [@andrebrait](https://github.com/andrebrait))
-### Added
-
-- Added Google AI Studio API-key import through `/login google`, `omp login google`, and broker login with secret input.
-- Added Gemini Live Extended Thinking voice sessions in `/live` and RPC, with asynchronous coding tasks while retaining the selected coding model.
-
-### Fixed
-
-- Fixed Gemini Live connections failing with an unsupported websocket payload error when receiving binary messages.
 
 ## [18.5.1] - 2026-10-03
 
