@@ -100,6 +100,7 @@ Literal filesystem paths take precedence over selector interpretation, so an exi
 7. Otherwise it treats the input as a local filesystem path.
    - `resolveReadPath()` expands `~`, resolves relative to session cwd, treats bare `/` as session cwd, and retries macOS screenshot/NFD/curly-quote variants.
    - If the path does not exist, `findUniqueWorkspaceSuffix()` attempts a workspace-wide unique suffix match (skipped for remote mounts). A cwd-root filename matching the active `local://` plan basename may recover that plan. As a final guarded recovery, a mistakenly delimited list of existing paths is read part by part; callers should still issue one `read` per path.
+   - A resolved target that is neither a regular file nor a directory (character or block device, FIFO, socket) is rejected with a `ToolError` naming its kind. Reads run in-process, so reading `/dev/stdin` or a FIFO would block, and `/dev/zero` would never finish, on a native thread that no timeout or abort can cancel.
 8. Directories go through `#readDirectory()`.
 9. Non-directories branch by content type:
    - image metadata / inline image
@@ -357,6 +358,7 @@ Notes: ...
    - multi-ranges on directory/archive-directory listings
 - `conflict://*` reads are rejected; unknown/stale conflict ids require re-reading `<path>:conflicts`.
 - Missing local/archive/sqlite paths first attempt unique suffix resolution; if no unique match or guarded recovery exists they error.
+- Targets that are neither regular files nor directories (character or block device, FIFO, socket) throw a `ToolError` naming the file kind; SQLite detection skips them rather than sniffing their header.
 - Out-of-bounds line reads do not throw. They return explanatory text with a suggestion such as `Use :1 ...` or `Use :<last line> ...`.
 - Probable binary local files return a notice unless `:raw` was requested or an available IDA-backed executable/database view handles them.
 - Binary archive entries do not throw; they return a text notice.

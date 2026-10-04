@@ -7,6 +7,30 @@ class "anthropic" {
 			thinking-prefix-binding #true
 		}
 	}
+	// Adaptive Claude (Opus 4.7+, Sonnet/Fable/Mythos 5+) rejects explicit
+	// sampling params (`temperature`, `top_p`, `top_k`) with a 400 on every
+	// serving host. The `<10` bound keeps whole-number revisions such as
+	// `claude-opus-45` (Opus 4.5) out of the range.
+	family "opus" {
+		revision ">=4.7 <10" {
+			supports-sampling-params #false
+		}
+	}
+	family "sonnet" {
+		revision ">=5 <10" {
+			supports-sampling-params #false
+		}
+	}
+	family "fable" {
+		revision ">=5 <10" {
+			supports-sampling-params #false
+		}
+	}
+	family "mythos" {
+		revision ">=5 <10" {
+			supports-sampling-params #false
+		}
+	}
 	// On-demand compaction (compact-2026-09-04) works on the Claude API, Vertex,
 	// and Amazon Bedrock's `/anthropic` routes, not Bedrock Converse.
 	// Foundry / Claude Platform on AWS are first-party Anthropic routes whose
@@ -59,6 +83,13 @@ class "anthropic" {
 	// to be re-verified against the API before it inherits the restriction.
 	family "opus" {
 		revision ">=5.5 <6" {
+			// Opus 5.5 binds signed thinking to the exact preceding conversation, so a
+			// replay fails once the system prompt, tools or earlier messages change.
+			// Like the Sonnet 5.5 rule, this one spans every provider, so it changes
+			// pruning, implicit prompt refreshes and thinking replay everywhere. On
+			// Bedrock Converse it also sends `block_binding` with its beta.
+			// https://platform.claude.com/docs/en/build-with-claude/preserved-thinking
+			thinking-prefix-binding #true
 			supports-forced-tool-choice #false
 		}
 	}
@@ -84,18 +115,12 @@ class "anthropic" {
 				supports-mid-conversation-tool-changes #true
 				supports-turn-scoped-system #true
 			}
-			revision ">=5.1" {
-				supports-per-message-effort #true
-			}
 		}
 		family "mythos" {
 			revision ">=5" {
 				supports-mid-conversation-system #true
 				supports-mid-conversation-tool-changes #true
 				supports-turn-scoped-system #true
-			}
-			revision ">=5.1" {
-				supports-per-message-effort #true
 			}
 		}
 		family "fable" {
@@ -108,7 +133,6 @@ class "anthropic" {
 				supports-mid-conversation-system #true
 				supports-mid-conversation-tool-changes #true
 				supports-turn-scoped-system #true
-				supports-per-message-effort #true
 			}
 		}
 		family "opus" {
@@ -117,16 +141,38 @@ class "anthropic" {
 				supports-mid-conversation-tool-changes #true
 				supports-turn-scoped-system #true
 			}
-			revision ">=5" {
-				supports-per-message-effort #true
-			}
 		}
 	}
 	// Vertex rejects `thinking.block_binding` on Sonnet 5.5 with 400
-	// `thinking.adaptive.block_binding: Extra inputs are not permitted`.
+	// `thinking.adaptive.block_binding: Extra inputs are not permitted`, and
+	// per-message `output_config` with 400 `messages.N.output_config: Extra
+	// inputs are not permitted` (it takes no `output_config.effort` at all; see
+	// `supports-output-effort` in providers/google-vertex.kdl).
 	on "anthropic" "cloudflare-ai-gateway" {
+		family "fable" {
+			revision ">=5.1" {
+				supports-per-message-effort #true
+			}
+		}
+		family "mythos" {
+			revision ">=5.1" {
+				supports-per-message-effort #true
+			}
+		}
 		family "sonnet" {
 			revision ">=5.5" {
+				supports-thinking-binding-controls #true
+				supports-per-message-effort #true
+			}
+		}
+		family "opus" {
+			revision ">=5" {
+				supports-per-message-effort #true
+			}
+			// Opus 5.5 is prefix-bound like Sonnet 5.5; without `drop_block` a
+			// changed system prompt or tool set fails the replay with a 400.
+			// Bounded for the same reason as the forced-tool-choice rule above.
+			revision ">=5.5 <6" {
 				supports-thinking-binding-controls #true
 			}
 		}

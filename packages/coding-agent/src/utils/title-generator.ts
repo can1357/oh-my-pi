@@ -13,7 +13,7 @@ import {
 	retryTransientCompletion,
 } from "@oh-my-pi/pi-ai";
 import { StreamMarkupHealing } from "@oh-my-pi/pi-ai/utils/stream-markup-healing";
-import { writeThroughActiveTerminal } from "@oh-my-pi/pi-tui";
+import { writeTerminalSequence } from "@oh-my-pi/pi-tui";
 import { isNativeRendering, onNativeRenderingChange } from "@oh-my-pi/pi-tui/native/state";
 import { SPINNER_FRAMES } from "@oh-my-pi/pi-tui/theme/symbols";
 import { $env, isTerminalHeadless, isWsl, logger, prompt } from "@oh-my-pi/pi-utils";
@@ -40,16 +40,6 @@ const DEFAULT_TERMINAL_TITLE = "π";
 /** The native tab title without a session name. */
 const NATIVE_TERMINAL_TITLE = "omp";
 const TERMINAL_TITLE_CONTROL_CHARS = /[\u0000-\u001f\u007f-\u009f]/g;
-/**
- * Emit a raw title escape sequence. While the TUI owns stdout its frames are
- * written by an off-thread pump, and a direct `process.stdout.write` can land
- * mid-frame — inside a torn escape sequence — making the terminal print the
- * title payload as text into the viewport. Route through the active terminal's
- * write path; fall back to stdout only when no TUI has the terminal.
- */
-function writeTitleSequence(seq: string): void {
-	if (!writeThroughActiveTerminal(seq)) process.stdout.write(seq);
-}
 
 interface WindowsConsoleTitleApi {
 	set(title: string): boolean;
@@ -632,12 +622,12 @@ function writeTerminalTitle(title: string, recomposeStaticOnFailure = false): vo
 						true,
 					);
 				if (latched === lastTerminalTitle) return;
-				writeTitleSequence(`\x1b]0;${latched}\x07`);
+				writeTerminalSequence(`\x1b]0;${latched}\x07`);
 				lastTerminalTitle = latched;
 				return;
 			}
 		}
-		writeTitleSequence(`\x1b]0;${next}\x07`);
+		writeTerminalSequence(`\x1b]0;${next}\x07`);
 	}
 	lastTerminalTitle = next;
 }
@@ -691,7 +681,7 @@ export function reportTernSessionFile(): void {
 	if (resolved === reportedSessionFile) return;
 	reportedSessionFile = resolved;
 	const value = resolved ? `=${Buffer.from(resolved).toString("base64")}` : "";
-	writeTitleSequence(`\x1b]1337;SetUserVar=${TERN_SESSION_FILE_VAR}${value}\x07`);
+	writeTerminalSequence(`\x1b]1337;SetUserVar=${TERN_SESSION_FILE_VAR}${value}\x07`);
 }
 
 /**
@@ -997,7 +987,7 @@ export function disposeTerminalTitleState(): void {
  */
 export function pushTerminalTitle(): void {
 	if (!process.stdout.isTTY || isTerminalHeadless()) return;
-	writeTitleSequence("\x1b[22;2t");
+	writeTerminalSequence("\x1b[22;2t");
 }
 
 /**
@@ -1005,5 +995,5 @@ export function pushTerminalTitle(): void {
  */
 export function popTerminalTitle(): void {
 	if (!process.stdout.isTTY || isTerminalHeadless()) return;
-	writeTitleSequence("\x1b[23;2t");
+	writeTerminalSequence("\x1b[23;2t");
 }

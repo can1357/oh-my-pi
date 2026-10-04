@@ -161,6 +161,74 @@ describe("RemoteAuthCredentialStore + AuthStorage integration", () => {
 		remoteStore.close();
 	});
 
+	test.each([
+		["logout", undefined],
+		["re-login", "server-access-relogin"],
+	] as const)("a refresh reply delayed past a broker %s cannot overwrite the newer state", async (_, relogin) => {
+		vi.spyOn(oauthUtils, "refreshOAuthToken").mockResolvedValue({
+			access: "server-access-rotated",
+			refresh: "server-refresh-rotated",
+			expires: Date.now() + 120_000,
+			accountId: "account-1",
+			email: "a@example.com",
+		});
+		const brokerClient = new AuthBrokerClient({ url: handle!.url, token });
+		const initial = await brokerClient.fetchSnapshot();
+		if (initial.status !== 200) throw new Error("expected snapshot");
+		const entry = initial.snapshot.credentials[0];
+		if (entry?.credential.type !== "oauth") throw new Error("expected OAuth credential");
+		const streaming = Promise.withResolvers<void>();
+		const remoteStore = new RemoteAuthCredentialStore({
+			client: brokerClient,
+			initialSnapshot: initial.snapshot,
+			onSnapshot: () => streaming.resolve(),
+		});
+		const replyParked = Promise.withResolvers<void>();
+		const releaseReply = Promise.withResolvers<void>();
+		const refresh = brokerClient.refreshCredential.bind(brokerClient);
+		vi.spyOn(brokerClient, "refreshCredential").mockImplementation(async (...args) => {
+			const reply = await refresh(...args);
+			replyParked.resolve();
+			await releaseReply.promise;
+			return reply;
+		});
+		const otherClient = new AuthBrokerClient({ url: handle!.url, token });
+		const accessTokens = () =>
+			remoteStore
+				.listAuthCredentials("anthropic")
+				.map(row => row.credential.type === "oauth" && row.credential.access);
+		const expected = relogin ? [relogin] : [];
+		try {
+			await streaming.promise;
+			const outcome = remoteStore.refreshOAuthCredential("anthropic", entry.id, entry.credential).then(
+				credential => credential.access,
+				() => "rejected",
+			);
+			await replyParked.promise;
+			if (relogin) {
+				await otherClient.uploadCredential("anthropic", {
+					type: "oauth",
+					access: relogin,
+					refresh: "server-refresh-relogin",
+					expires: Date.now() + 120_000,
+					accountId: "account-1",
+					email: "a@example.com",
+				});
+			} else {
+				await otherClient.disableCredential(entry.id, "logout");
+			}
+			await remoteStore.refreshSnapshot();
+			expect(accessTokens()).toEqual(expected);
+
+			releaseReply.resolve();
+			expect(await outcome).toBe(relogin ?? "rejected");
+			expect(accessTokens()).toEqual(expected);
+		} finally {
+			releaseReply.resolve();
+			remoteStore.close();
+		}
+	});
+
 	test("invalidated OAuth tokens disable the remote row and rotate to a sibling", async () => {
 		await serverStore!.upsertAuthCredential("anthropic", {
 			type: "oauth",

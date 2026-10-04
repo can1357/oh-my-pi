@@ -234,6 +234,16 @@ function closeSharedDb(): void {
 	sharedDbPath = null;
 }
 
+/**
+ * Closes the shared handle to the default `<agent-dir>/models.db`; the next
+ * default-path access reopens it. Call before deleting an agent directory the
+ * cache was opened under — Windows cannot remove a database that is still open.
+ */
+export function closeModelCache(): void {
+	if (sharedDbPath) invalidateReadPath(sharedDbPath);
+	closeSharedDb();
+}
+
 function runModelCacheDb<T>(resolvedPath: string, shared: boolean, useDb: (db: Database) => T): T {
 	if (shared && sharedDb && sharedDbPath !== resolvedPath) closeSharedDb();
 	if (shared && sharedDb) {

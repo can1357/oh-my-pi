@@ -7,7 +7,7 @@ import { downloadVideo, pollVideo, submitVideo } from "../../video";
 import type { VideoJob } from "../../video/types";
 import { deterministicUuid } from "../../utils/deterministic-id";
 import {
-	type AuthGatewayBootOptions,
+	type AuthGatewayRouteOptions,
 	buildGatewayApiKeyResolver,
 	mirrorRequestAbort,
 	resolveGatewayApiKey,
@@ -27,7 +27,7 @@ function aborted(): Response {
 }
 
 async function resolveVideoJob(
-	bootOpts: AuthGatewayBootOptions,
+	bootOpts: AuthGatewayRouteOptions,
 	req: Request,
 	peer: string,
 	gatewayId: string,
@@ -63,7 +63,7 @@ async function resolveVideoJob(
 	return { model, upstreamId: identity.upstreamId, sessionId, apiKey, controller };
 }
 
-function videoOptions(bootOpts: AuthGatewayBootOptions, resolved: ResolvedVideoRequest, peer: string) {
+function videoOptions(bootOpts: AuthGatewayRouteOptions, resolved: ResolvedVideoRequest, peer: string) {
 	return {
 		apiKey: buildGatewayApiKeyResolver(
 			bootOpts.storage,
@@ -97,7 +97,7 @@ function logVideoRequest(
 }
 
 function recordCompletedUsage(
-	bootOpts: AuthGatewayBootOptions,
+	bootOpts: AuthGatewayRouteOptions,
 	resolved: ResolvedVideoRequest,
 	req: Request,
 	job: VideoJob,
@@ -114,7 +114,7 @@ function recordCompletedUsage(
 
 /** OpenRouter-compatible `POST /v1/videos` asynchronous video submit handler. */
 export async function handleVideoSubmit(
-	bootOpts: AuthGatewayBootOptions,
+	bootOpts: AuthGatewayRouteOptions,
 	req: Request,
 	peer: string,
 ): Promise<Response> {
@@ -186,7 +186,7 @@ export async function handleVideoSubmit(
 
 /** OpenRouter-compatible `GET /v1/videos/:id` asynchronous video poll handler. */
 export async function handleVideoPoll(
-	bootOpts: AuthGatewayBootOptions,
+	bootOpts: AuthGatewayRouteOptions,
 	req: Request,
 	peer: string,
 	gatewayId: string,
@@ -218,7 +218,7 @@ export async function handleVideoPoll(
 
 /** OpenRouter-compatible `GET /v1/videos/:id/content` streaming video content handler. */
 export async function handleVideoContent(
-	bootOpts: AuthGatewayBootOptions,
+	bootOpts: AuthGatewayRouteOptions,
 	req: Request,
 	peer: string,
 	gatewayId: string,
