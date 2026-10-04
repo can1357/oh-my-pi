@@ -126,6 +126,9 @@
 - Fixed `readlink` in the bash tool printing a provider-backed path (e.g. `local://file`) with a `\\?\` prefix on Windows
 - Fixed the daemon broker on Windows dying with the omp process that started it, which stopped the shared browser relay (and every other broker daemon) while other omp sessions were still using it
 - Fixed the `browser` tool's Tern backend being refused by any Tern newer than the protocol omp was built against; it now speaks Tern's JSON script protocol, which no Tern build ties it to, and a Tern from before it reports as unavailable (update Tern) so the Chromium fallback takes over.
+### Added
+
+- Added `/btw` side questions for RPC hosts: `btw` asks one (or a follow-up in an earlier topic) while the main turn keeps running, the answer streams as `btw_delta` / `btw_record` frames, `btw_cancel` stops it, and `get_btw_history` lists the session's BTW history shared with the TUI ([#14110](https://github.com/can1357/oh-my-pi/pull/14110) by [@andrebrait](https://github.com/andrebrait))
 
 ## [18.4.12] - 2026-10-02
 
@@ -148,6 +151,9 @@
 - Fixed `agent://<id>` showing an agent's previous published output as current while that agent runs a follow-up or wake turn; the read now says the output is from the previous run ([#14120](https://github.com/can1357/oh-my-pi/pull/14120) by [@H4vC](https://github.com/H4vC)).
 - Fixed `proc://` listing agents as running when they have no turn in flight; their rows now say the run is stale or already finished, as the `jobs` tool does ([#14120](https://github.com/can1357/oh-my-pi/pull/14120) by [@H4vC](https://github.com/H4vC)).
 - Changed subagents to skip their own builds, tests, and smoke runs and leave verification to the main agent, avoiding CPU spikes from many subagents verifying at once.
+### Added
+
+- Added `/btw` side questions for RPC hosts: `btw` asks one (or a follow-up in an earlier topic) while the main turn keeps running, the answer streams as `btw_delta` / `btw_record` frames, `btw_cancel` stops it, and `get_btw_history` lists the session's BTW history shared with the TUI ([#14110](https://github.com/can1357/oh-my-pi/pull/14110) by [@andrebrait](https://github.com/andrebrait))
 
 ## [18.4.11] - 2026-10-02
 
@@ -158,6 +164,9 @@
 - Added periodic completion estimates for running subagents, with configurable polling through `task.completionProbeMs` and progress displayed in wait and task views.
 - Added the RPC `fork` command (`RpcClient.fork(entryId?)`, Python `fork(entry_id=None)`): it moves an RPC session onto a new session file holding the history up to and including any message entry (and the tool results answering a cut tool-call batch), together with the session's artifacts, or a copy of the whole session when `entryId` is omitted ([#14077](https://github.com/can1357/oh-my-pi/pull/14077) by [@andrebrait](https://github.com/andrebrait)).
 - Added `reason` (`"branch"`, `"fork"` or `"btw"`) to the `session_before_branch` and `session_branch` extension and hook events, so handlers can tell whether `entryId` is dropped (`branch`) or kept ([#14077](https://github.com/can1357/oh-my-pi/pull/14077) by [@andrebrait](https://github.com/andrebrait)).
+- Added periodic completion estimates for running subagents: every 2 minutes each working subagent is asked, through a cached `/btw`-style side request, how far along it is, and the `XY%` shows next to it in wait and task views. Each check sees the subagent's previous estimate and any tool call it is still writing, so long file writes no longer read as 0%. Set the interval or turn it off with `task.completionProbeMs`.
+- Added a `goal` command for RPC hosts (`--mode rpc` and `rpc-ui`) to create, read, pause, resume and drop goals, the current goal in `get_state`, and opt-in automatic goal continuation with `goal.continuationModes: ["rpc"]` ([#13952](https://github.com/can1357/oh-my-pi/pull/13952) by [@shawnkoh](https://github.com/shawnkoh))
+- Added `--goal <objective>` for interactive launches: it starts a fresh session in goal mode and begins working on the objective immediately, without typing `/goal` ([#13879](https://github.com/can1357/oh-my-pi/pull/13879) by [@shawnkoh](https://github.com/shawnkoh))
 
 ### Fixed
 

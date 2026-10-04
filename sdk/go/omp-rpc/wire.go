@@ -3009,6 +3009,96 @@ func (v *SubagentMessages) decodeFrom(raw map[string]json.RawMessage) error {
 	return nil
 }
 
+// Side-question turn lifecycle; `interrupted` marks a turn whose process died while it ran.
+type BtwStatus string
+
+const (
+	BtwStatusRunning     BtwStatus = "running"
+	BtwStatusComplete    BtwStatus = "complete"
+	BtwStatusCancelled   BtwStatus = "cancelled"
+	BtwStatusError       BtwStatus = "error"
+	BtwStatusInterrupted BtwStatus = "interrupted"
+)
+
+func (v *BtwStatus) UnmarshalJSON(data []byte) error {
+	s, err := decodeString(data, "BtwStatus")
+	if err != nil {
+		return err
+	}
+	switch value := BtwStatus(s); value {
+	case BtwStatusRunning, BtwStatusComplete, BtwStatusCancelled, BtwStatusError, BtwStatusInterrupted:
+		*v = value
+		return nil
+	}
+	return unknownValue("BtwStatus", s)
+}
+
+// One question and its answer within a side-question topic.
+type BtwHistoryTurn struct {
+	Question  string    `json:"question"`
+	Answer    string    `json:"answer"`
+	Status    BtwStatus `json:"status"`
+	CreatedAt int64     `json:"createdAt"`
+	UpdatedAt int64     `json:"updatedAt"`
+	Error     *string   `json:"error,omitempty"`
+}
+
+func (v *BtwHistoryTurn) UnmarshalJSON(data []byte) error {
+	return decodeWith(data, "BtwHistoryTurn", v.decodeFrom)
+}
+
+func (v *BtwHistoryTurn) decodeFrom(raw map[string]json.RawMessage) error {
+	var out BtwHistoryTurn
+	d := fieldDecoder{raw: raw, owner: "BtwHistoryTurn"}
+	d.required("question", &out.Question)
+	d.required("answer", &out.Answer)
+	d.required("status", &out.Status)
+	d.required("createdAt", &out.CreatedAt)
+	d.required("updatedAt", &out.UpdatedAt)
+	d.optional("error", &out.Error)
+	if d.err != nil {
+		return d.err
+	}
+	*v = out
+	return nil
+}
+
+// A side-question topic: its first turn's fields plus follow-ups; the latest turn is the last follow-up, else the record.
+type BtwHistoryRecord struct {
+	Question  string           `json:"question"`
+	Answer    string           `json:"answer"`
+	Status    BtwStatus        `json:"status"`
+	CreatedAt int64            `json:"createdAt"`
+	UpdatedAt int64            `json:"updatedAt"`
+	ID        string           `json:"id"`
+	LeafID    *string          `json:"leafId"`
+	Error     *string          `json:"error,omitempty"`
+	FollowUps []BtwHistoryTurn `json:"followUps,omitempty"`
+}
+
+func (v *BtwHistoryRecord) UnmarshalJSON(data []byte) error {
+	return decodeWith(data, "BtwHistoryRecord", v.decodeFrom)
+}
+
+func (v *BtwHistoryRecord) decodeFrom(raw map[string]json.RawMessage) error {
+	var out BtwHistoryRecord
+	d := fieldDecoder{raw: raw, owner: "BtwHistoryRecord"}
+	d.required("question", &out.Question)
+	d.required("answer", &out.Answer)
+	d.required("status", &out.Status)
+	d.required("createdAt", &out.CreatedAt)
+	d.required("updatedAt", &out.UpdatedAt)
+	d.required("id", &out.ID)
+	d.nullable("leafId", &out.LeafID)
+	d.optional("error", &out.Error)
+	d.optional("followUps", &out.FollowUps)
+	if d.err != nil {
+		return d.err
+	}
+	*v = out
+	return nil
+}
+
 type LoginProvider struct {
 	ID            string `json:"id"`
 	Name          string `json:"name"`
@@ -4741,6 +4831,60 @@ func (v LiveEndEvent) MarshalJSON() ([]byte, error) {
 	return encodeObject(plain(v), `"type":"live_end"`, nil)
 }
 
+// Text appended to the running side question's latest answer.
+type BtwDeltaEvent struct {
+	RecordID string `json:"recordId"`
+	Delta    string `json:"delta"`
+}
+
+func (v *BtwDeltaEvent) UnmarshalJSON(data []byte) error {
+	return decodeWith(data, "BtwDeltaEvent", v.decodeFrom)
+}
+
+func (v *BtwDeltaEvent) decodeFrom(raw map[string]json.RawMessage) error {
+	var out BtwDeltaEvent
+	d := fieldDecoder{raw: raw, owner: "BtwDeltaEvent"}
+	d.constant("type", "btw_delta")
+	d.required("recordId", &out.RecordID)
+	d.required("delta", &out.Delta)
+	if d.err != nil {
+		return d.err
+	}
+	*v = out
+	return nil
+}
+
+func (v BtwDeltaEvent) MarshalJSON() ([]byte, error) {
+	type plain BtwDeltaEvent
+	return encodeObject(plain(v), `"type":"btw_delta"`, nil)
+}
+
+// Full side-question record on every lifecycle change (started, complete, cancelled, error); the last one per id wins.
+type BtwRecordEvent struct {
+	Record BtwHistoryRecord `json:"record"`
+}
+
+func (v *BtwRecordEvent) UnmarshalJSON(data []byte) error {
+	return decodeWith(data, "BtwRecordEvent", v.decodeFrom)
+}
+
+func (v *BtwRecordEvent) decodeFrom(raw map[string]json.RawMessage) error {
+	var out BtwRecordEvent
+	d := fieldDecoder{raw: raw, owner: "BtwRecordEvent"}
+	d.constant("type", "btw_record")
+	d.required("record", &out.Record)
+	if d.err != nil {
+		return d.err
+	}
+	*v = out
+	return nil
+}
+
+func (v BtwRecordEvent) MarshalJSON() ([]byte, error) {
+	type plain BtwRecordEvent
+	return encodeObject(plain(v), `"type":"btw_record"`, nil)
+}
+
 // Output of a builtin slash command.
 type CommandOutputEvent struct {
 	Text string `json:"text"`
@@ -6050,6 +6194,8 @@ func (LivePhaseEvent) isRpcNotification()               {}
 func (LiveLevelsEvent) isRpcNotification()              {}
 func (LiveTranscriptEvent) isRpcNotification()          {}
 func (LiveEndEvent) isRpcNotification()                 {}
+func (BtwDeltaEvent) isRpcNotification()                {}
+func (BtwRecordEvent) isRpcNotification()               {}
 func (CommandOutputEvent) isRpcNotification()           {}
 func (SessionInfoUpdateEvent) isRpcNotification()       {}
 func (ConfigUpdateEvent) isRpcNotification()            {}
@@ -6125,6 +6271,10 @@ func (v *RpcNotification) UnmarshalJSON(data []byte) error {
 		value, err = decodeVariant[LiveTranscriptEvent](raw)
 	case "live_end":
 		value, err = decodeVariant[LiveEndEvent](raw)
+	case "btw_delta":
+		value, err = decodeVariant[BtwDeltaEvent](raw)
+	case "btw_record":
+		value, err = decodeVariant[BtwRecordEvent](raw)
 	case "command_output":
 		value, err = decodeVariant[CommandOutputEvent](raw)
 	case "session_info_update":
@@ -6234,6 +6384,8 @@ func (LivePhaseEvent) isRpcServerFrame()               {}
 func (LiveLevelsEvent) isRpcServerFrame()              {}
 func (LiveTranscriptEvent) isRpcServerFrame()          {}
 func (LiveEndEvent) isRpcServerFrame()                 {}
+func (BtwDeltaEvent) isRpcServerFrame()                {}
+func (BtwRecordEvent) isRpcServerFrame()               {}
 func (CommandOutputEvent) isRpcServerFrame()           {}
 func (SessionInfoUpdateEvent) isRpcServerFrame()       {}
 func (ConfigUpdateEvent) isRpcServerFrame()            {}
@@ -6319,6 +6471,10 @@ func (v *RpcServerFrame) UnmarshalJSON(data []byte) error {
 		value, err = decodeVariant[LiveTranscriptEvent](raw)
 	case "live_end":
 		value, err = decodeVariant[LiveEndEvent](raw)
+	case "btw_delta":
+		value, err = decodeVariant[BtwDeltaEvent](raw)
+	case "btw_record":
+		value, err = decodeVariant[BtwRecordEvent](raw)
 	case "command_output":
 		value, err = decodeVariant[CommandOutputEvent](raw)
 	case "session_info_update":
@@ -6812,6 +6968,63 @@ func (v *PredictWordResult) decodeFrom(raw map[string]json.RawMessage) error {
 	var out PredictWordResult
 	d := fieldDecoder{raw: raw, owner: "PredictWordResult"}
 	d.nullable("suffix", &out.Suffix)
+	if d.err != nil {
+		return d.err
+	}
+	*v = out
+	return nil
+}
+
+type BtwResult struct {
+	Record BtwHistoryRecord `json:"record"`
+}
+
+func (v *BtwResult) UnmarshalJSON(data []byte) error {
+	return decodeWith(data, "BtwResult", v.decodeFrom)
+}
+
+func (v *BtwResult) decodeFrom(raw map[string]json.RawMessage) error {
+	var out BtwResult
+	d := fieldDecoder{raw: raw, owner: "BtwResult"}
+	d.required("record", &out.Record)
+	if d.err != nil {
+		return d.err
+	}
+	*v = out
+	return nil
+}
+
+type BtwCancelResult struct {
+	Cancelled bool `json:"cancelled"`
+}
+
+func (v *BtwCancelResult) UnmarshalJSON(data []byte) error {
+	return decodeWith(data, "BtwCancelResult", v.decodeFrom)
+}
+
+func (v *BtwCancelResult) decodeFrom(raw map[string]json.RawMessage) error {
+	var out BtwCancelResult
+	d := fieldDecoder{raw: raw, owner: "BtwCancelResult"}
+	d.required("cancelled", &out.Cancelled)
+	if d.err != nil {
+		return d.err
+	}
+	*v = out
+	return nil
+}
+
+type GetBtwHistoryResult struct {
+	Records []BtwHistoryRecord `json:"records"`
+}
+
+func (v *GetBtwHistoryResult) UnmarshalJSON(data []byte) error {
+	return decodeWith(data, "GetBtwHistoryResult", v.decodeFrom)
+}
+
+func (v *GetBtwHistoryResult) decodeFrom(raw map[string]json.RawMessage) error {
+	var out GetBtwHistoryResult
+	d := fieldDecoder{raw: raw, owner: "GetBtwHistoryResult"}
+	d.required("records", &out.Records)
 	if d.err != nil {
 		return d.err
 	}
@@ -7444,4 +7657,36 @@ type PredictWordFeedbackCommand struct {
 // PredictWordFeedback sends "predict_word_feedback": Report a shown suggestion as accepted or typed past.
 func (c Commands) PredictWordFeedback(ctx context.Context, p PredictWordFeedbackCommand) error {
 	return c.call(ctx, "predict_word_feedback", p, 0, nil)
+}
+
+// BtwCommand holds the parameters of "btw".
+type BtwCommand struct {
+	Question string  `json:"question"`
+	RecordID *string `json:"recordId,omitempty"`
+}
+
+// Btw sends "btw": Ask a side question, or a follow-up in topic `recordId`; returns the record once it is running.
+func (c Commands) Btw(ctx context.Context, p BtwCommand) (BtwHistoryRecord, error) {
+	var out BtwResult
+	err := c.call(ctx, "btw", p, 0, &out)
+	return out.Record, err
+}
+
+// BtwCancelCommand holds the parameters of "btw_cancel".
+type BtwCancelCommand struct {
+	RecordID *string `json:"recordId,omitempty"`
+}
+
+// BtwCancel sends "btw_cancel": Cancel the running side question (only topic `recordId` when given); false when none matches.
+func (c Commands) BtwCancel(ctx context.Context, p BtwCancelCommand) (bool, error) {
+	var out BtwCancelResult
+	err := c.call(ctx, "btw_cancel", p, 0, &out)
+	return out.Cancelled, err
+}
+
+// GetBtwHistory sends "get_btw_history": List the session's side-question records, newest first.
+func (c Commands) GetBtwHistory(ctx context.Context) ([]BtwHistoryRecord, error) {
+	var out GetBtwHistoryResult
+	err := c.call(ctx, "get_btw_history", nil, 0, &out)
+	return out.Records, err
 }

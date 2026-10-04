@@ -670,6 +670,39 @@
 				"timeoutMs": null,
 				"completion": null,
 				"clientOmit": []
+			},
+			{
+				"name": "btw",
+				"doc": "Ask a side question, or a follow-up in topic `recordId`; returns the record once it is running.",
+				"params": "BtwParams",
+				"result": "BtwResult",
+				"nullable": false,
+				"unwrap": "record",
+				"timeoutMs": null,
+				"completion": null,
+				"clientOmit": []
+			},
+			{
+				"name": "btw_cancel",
+				"doc": "Cancel the running side question (only topic `recordId` when given); false when none matches.",
+				"params": "BtwCancelParams",
+				"result": "BtwCancelResult",
+				"nullable": false,
+				"unwrap": "cancelled",
+				"timeoutMs": null,
+				"completion": null,
+				"clientOmit": []
+			},
+			{
+				"name": "get_btw_history",
+				"doc": "List the session's side-question records, newest first.",
+				"params": null,
+				"result": "GetBtwHistoryResult",
+				"nullable": false,
+				"unwrap": "records",
+				"timeoutMs": null,
+				"completion": null,
+				"clientOmit": []
 			}
 		]
 	},
@@ -3069,6 +3102,100 @@
 			],
 			"description": "Incremental subagent transcript read."
 		},
+		"BtwStatus": {
+			"enum": [
+				"running",
+				"complete",
+				"cancelled",
+				"error",
+				"interrupted"
+			],
+			"type": "string",
+			"description": "Side-question turn lifecycle; `interrupted` marks a turn whose process died while it ran."
+		},
+		"BtwHistoryTurn": {
+			"type": "object",
+			"properties": {
+				"question": {
+					"type": "string"
+				},
+				"answer": {
+					"type": "string"
+				},
+				"status": {
+					"$ref": "#/$defs/BtwStatus"
+				},
+				"createdAt": {
+					"type": "integer"
+				},
+				"updatedAt": {
+					"type": "integer"
+				},
+				"error": {
+					"type": "string"
+				}
+			},
+			"required": [
+				"question",
+				"answer",
+				"status",
+				"createdAt",
+				"updatedAt"
+			],
+			"description": "One question and its answer within a side-question topic."
+		},
+		"BtwHistoryRecord": {
+			"type": "object",
+			"properties": {
+				"question": {
+					"type": "string"
+				},
+				"answer": {
+					"type": "string"
+				},
+				"status": {
+					"$ref": "#/$defs/BtwStatus"
+				},
+				"createdAt": {
+					"type": "integer"
+				},
+				"updatedAt": {
+					"type": "integer"
+				},
+				"id": {
+					"type": "string"
+				},
+				"leafId": {
+					"anyOf": [
+						{
+							"type": "string"
+						},
+						{
+							"type": "null"
+						}
+					]
+				},
+				"error": {
+					"type": "string"
+				},
+				"followUps": {
+					"type": "array",
+					"items": {
+						"$ref": "#/$defs/BtwHistoryTurn"
+					}
+				}
+			},
+			"required": [
+				"question",
+				"answer",
+				"status",
+				"createdAt",
+				"updatedAt",
+				"id",
+				"leafId"
+			],
+			"description": "A side-question topic: its first turn's fields plus follow-ups; the latest turn is the last follow-up, else the record."
+		},
 		"LoginProvider": {
 			"type": "object",
 			"properties": {
@@ -4316,6 +4443,42 @@
 			],
 			"description": "Sent exactly once when a live session ends; `error` carries the failure cause."
 		},
+		"BtwDeltaEvent": {
+			"type": "object",
+			"properties": {
+				"type": {
+					"const": "btw_delta"
+				},
+				"recordId": {
+					"type": "string"
+				},
+				"delta": {
+					"type": "string"
+				}
+			},
+			"required": [
+				"type",
+				"recordId",
+				"delta"
+			],
+			"description": "Text appended to the running side question's latest answer."
+		},
+		"BtwRecordEvent": {
+			"type": "object",
+			"properties": {
+				"type": {
+					"const": "btw_record"
+				},
+				"record": {
+					"$ref": "#/$defs/BtwHistoryRecord"
+				}
+			},
+			"required": [
+				"type",
+				"record"
+			],
+			"description": "Full side-question record on every lifecycle change (started, complete, cancelled, error); the last one per id wins."
+		},
 		"CommandOutputEvent": {
 			"type": "object",
 			"properties": {
@@ -5348,6 +5511,12 @@
 					"$ref": "#/$defs/LiveEndEvent"
 				},
 				{
+					"$ref": "#/$defs/BtwDeltaEvent"
+				},
+				{
+					"$ref": "#/$defs/BtwRecordEvent"
+				},
+				{
 					"$ref": "#/$defs/CommandOutputEvent"
 				},
 				{
@@ -6218,6 +6387,64 @@
 				"cursor",
 				"suggestion",
 				"accepted"
+			]
+		},
+		"BtwParams": {
+			"type": "object",
+			"properties": {
+				"question": {
+					"type": "string"
+				},
+				"recordId": {
+					"type": "string"
+				}
+			},
+			"required": [
+				"question"
+			]
+		},
+		"BtwResult": {
+			"type": "object",
+			"properties": {
+				"record": {
+					"$ref": "#/$defs/BtwHistoryRecord"
+				}
+			},
+			"required": [
+				"record"
+			]
+		},
+		"BtwCancelParams": {
+			"type": "object",
+			"properties": {
+				"recordId": {
+					"type": "string"
+				}
+			}
+		},
+		"BtwCancelResult": {
+			"type": "object",
+			"properties": {
+				"cancelled": {
+					"type": "boolean"
+				}
+			},
+			"required": [
+				"cancelled"
+			]
+		},
+		"GetBtwHistoryResult": {
+			"type": "object",
+			"properties": {
+				"records": {
+					"type": "array",
+					"items": {
+						"$ref": "#/$defs/BtwHistoryRecord"
+					}
+				}
+			},
+			"required": [
+				"records"
 			]
 		}
 	}

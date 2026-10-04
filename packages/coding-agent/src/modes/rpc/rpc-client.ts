@@ -12,6 +12,7 @@ import { isRecord, ptree, readJsonl } from "@oh-my-pi/pi-utils";
 import type { FileSink } from "bun";
 import type { BashResult } from "../../exec/bash-executor";
 import type { AgentSessionEvent, SessionStats } from "../../session/agent-session";
+import type { BtwHistoryRecord } from "../../session/btw-history";
 import type { CacheWarmingMode } from "../../session/cache-warmer";
 import type { SessionEntry, SessionTreeNode } from "../../session/session-entries";
 import { MAX_RPC_FRAME_BYTES, MAX_RPC_REASSEMBLED_BYTES, RpcFrameDecoder, type RpcProtocolVersion } from "./rpc-frame";
@@ -24,6 +25,8 @@ import {
 } from "./rpc-messages";
 import type {
 	RpcAvailableCommandsUpdateFrame,
+	RpcBtwDeltaFrame,
+	RpcBtwRecordFrame,
 	RpcAvailableSlashCommand,
 	RpcCommand,
 	RpcExtensionUIRequest,
@@ -247,6 +250,19 @@ function isRpcAvailableCommandsUpdateFrame(value: unknown): value is RpcAvailabl
 	return value.type === "available_commands_update" && Array.isArray(value.commands);
 }
 
+function isRpcBtwDeltaFrame(value: unknown): value is RpcBtwDeltaFrame {
+	return (
+		isRecord(value) &&
+		value.type === "btw_delta" &&
+		typeof value.recordId === "string" &&
+		typeof value.delta === "string"
+	);
+}
+
+function isRpcBtwRecordFrame(value: unknown): value is RpcBtwRecordFrame {
+	return isRecord(value) && value.type === "btw_record" && isRecord(value.record);
+}
+
 function isRpcHostToolCallRequest(value: unknown): value is RpcHostToolCallRequest {
 	if (!isRecord(value)) return false;
 	return (
@@ -310,6 +326,8 @@ export class RpcClient {
 	#subagentProgressListeners = new Set<RpcSubagentProgressListener>();
 	#subagentEventListeners = new Set<RpcSubagentEventListener>();
 	#availableCommandsUpdateListeners = new Set<RpcAvailableCommandsUpdateListener>();
+	#btwDeltaListeners = new Set<(frame: RpcBtwDeltaFrame) => void>();
+	#btwRecordListeners = new Set<(record: BtwHistoryRecord) => void>();
 	#promptResultListeners = new Set<RpcPromptResultListener>();
 	#sessionSettledListeners = new Set<RpcSessionSettledListener>();
 	#liveListeners = new Set<RpcLiveListener>();
@@ -610,6 +628,18 @@ export class RpcClient {
 	onAvailableCommandsUpdate(listener: RpcAvailableCommandsUpdateListener): () => void {
 		this.#availableCommandsUpdateListeners.add(listener);
 		return () => this.#availableCommandsUpdateListeners.delete(listener);
+	}
+
+	/** Subscribe to `btw_delta` frames: text appended to the running side question's answer. */
+	onBtwDelta(listener: (frame: RpcBtwDeltaFrame) => void): () => void {
+		this.#btwDeltaListeners.add(listener);
+		return () => this.#btwDeltaListeners.delete(listener);
+	}
+
+	/** Subscribe to `btw_record` frames: a side question's full record on every lifecycle change. */
+	onBtwRecord(listener: (record: BtwHistoryRecord) => void): () => void {
+		this.#btwRecordListeners.add(listener);
+		return () => this.#btwRecordListeners.delete(listener);
 	}
 
 	/** Subscribe to `prompt_result` frames: the terminal outcome of each prompt, correlated by request id. */
@@ -1011,6 +1041,27 @@ export class RpcClient {
 	async getSessionStats(): Promise<SessionStats> {
 		const response = await this.#send({ type: "get_session_stats" });
 		return this.#getData(response);
+	}
+
+	/**
+	 * Ask a side question (`/btw`), or a follow-up in topic `recordId`. Resolves with the
+	 * running record; the answer streams via {@link onBtwDelta} and {@link onBtwRecord}.
+	 */
+	async btw(question: string, recordId?: string): Promise<BtwHistoryRecord> {
+		const response = await this.#send({ type: "btw", question, ...(recordId === undefined ? {} : { recordId }) });
+		return this.#getData<{ record: BtwHistoryRecord }>(response).record;
+	}
+
+	/** Cancel the running side question (only if it is `recordId`, when given). */
+	async cancelBtw(recordId?: string): Promise<boolean> {
+		const response = await this.#send({ type: "btw_cancel", ...(recordId === undefined ? {} : { recordId }) });
+		return this.#getData<{ cancelled: boolean }>(response).cancelled;
+	}
+
+	/** This session's side questions, newest first. */
+	async getBtwHistory(): Promise<readonly BtwHistoryRecord[]> {
+		const response = await this.#send({ type: "get_btw_history" });
+		return this.#getData<{ records: readonly BtwHistoryRecord[] }>(response).records;
 	}
 
 	/**
@@ -1419,6 +1470,16 @@ export class RpcClient {
 			for (const listener of this.#availableCommandsUpdateListeners) {
 				listener(data.commands);
 			}
+			return;
+		}
+
+		if (isRpcBtwDeltaFrame(data)) {
+			for (const listener of this.#btwDeltaListeners) listener(data);
+			return;
+		}
+
+		if (isRpcBtwRecordFrame(data)) {
+			for (const listener of this.#btwRecordListeners) listener(data.record);
 			return;
 		}
 

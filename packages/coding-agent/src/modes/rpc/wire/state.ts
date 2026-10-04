@@ -203,6 +203,35 @@ export const stateDefs = {
 		},
 		"Incremental subagent transcript read.",
 	),
+	BtwStatus: doc(
+		"'running' | 'complete' | 'cancelled' | 'error' | 'interrupted'",
+		"Side-question turn lifecycle; `interrupted` marks a turn whose process died while it ran.",
+	),
+	BtwHistoryTurn: doc(
+		{
+			question: "string",
+			answer: "string",
+			status: "BtwStatus",
+			createdAt: "number.integer",
+			updatedAt: "number.integer",
+			"error?": "string",
+		},
+		"One question and its answer within a side-question topic.",
+	),
+	BtwHistoryRecord: doc(
+		{
+			question: "string",
+			answer: "string",
+			status: "BtwStatus",
+			createdAt: "number.integer",
+			updatedAt: "number.integer",
+			"error?": "string",
+			id: "string",
+			leafId: "string | null",
+			"followUps?": "BtwHistoryTurn[]",
+		},
+		"A side-question topic: its first turn's fields plus follow-ups; the latest turn is the last follow-up, else the record.",
+	),
 	LoginProvider: { id: "string", name: "string", available: "boolean", authenticated: "boolean" },
 	HandoffResult: { "savedPath?": "string" },
 	PromptAck: doc(

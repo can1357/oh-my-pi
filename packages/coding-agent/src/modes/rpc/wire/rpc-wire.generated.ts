@@ -652,6 +652,32 @@ export interface SubagentMessages {
 	messages: AgentMessage[];
 }
 
+/** Side-question turn lifecycle; `interrupted` marks a turn whose process died while it ran. */
+export type BtwStatus = "running" | "complete" | "cancelled" | "error" | "interrupted";
+
+/** One question and its answer within a side-question topic. */
+export interface BtwHistoryTurn {
+	question: string;
+	answer: string;
+	status: BtwStatus;
+	createdAt: number;
+	updatedAt: number;
+	error?: string;
+}
+
+/** A side-question topic: its first turn's fields plus follow-ups; the latest turn is the last follow-up, else the record. */
+export interface BtwHistoryRecord {
+	question: string;
+	answer: string;
+	status: BtwStatus;
+	createdAt: number;
+	updatedAt: number;
+	id: string;
+	leafId: string | null;
+	error?: string;
+	followUps?: BtwHistoryTurn[];
+}
+
 export interface LoginProvider {
 	id: string;
 	name: string;
@@ -1034,6 +1060,19 @@ export interface LiveEndEvent {
 	error?: string;
 }
 
+/** Text appended to the running side question's latest answer. */
+export interface BtwDeltaEvent {
+	type: "btw_delta";
+	recordId: string;
+	delta: string;
+}
+
+/** Full side-question record on every lifecycle change (started, complete, cancelled, error); the last one per id wins. */
+export interface BtwRecordEvent {
+	type: "btw_record";
+	record: BtwHistoryRecord;
+}
+
 /** Output of a builtin slash command. */
 export interface CommandOutputEvent {
 	type: "command_output";
@@ -1339,7 +1378,7 @@ export interface HostUriSchemeDefinition {
 }
 
 /** Unsolicited outbound frame (everything except responses and host tool/URI requests), discriminated by `type`. */
-export type RpcNotification = ReadyEvent | PromptResultEvent | SessionSettledEvent | ExtensionError | ExtensionUiRequest | AvailableCommandsUpdateEvent | SubagentLifecycleEvent | SubagentProgressEvent | SubagentEvent | LivePhaseEvent | LiveLevelsEvent | LiveTranscriptEvent | LiveEndEvent | CommandOutputEvent | SessionInfoUpdateEvent | ConfigUpdateEvent | RpcFrameErrorEvent | RpcAgentEvent;
+export type RpcNotification = ReadyEvent | PromptResultEvent | SessionSettledEvent | ExtensionError | ExtensionUiRequest | AvailableCommandsUpdateEvent | SubagentLifecycleEvent | SubagentProgressEvent | SubagentEvent | LivePhaseEvent | LiveLevelsEvent | LiveTranscriptEvent | LiveEndEvent | BtwDeltaEvent | BtwRecordEvent | CommandOutputEvent | SessionInfoUpdateEvent | ConfigUpdateEvent | RpcFrameErrorEvent | RpcAgentEvent;
 
 /** Any frame the server writes to stdout (after reassembling `rpc_chunk` sequences), discriminated by `type`. */
 export type RpcServerFrame = RpcResponse | RpcHostRequest | RpcNotification;
@@ -1628,6 +1667,27 @@ export interface PredictWordFeedbackParams {
 	accepted: boolean;
 }
 
+export interface BtwParams {
+	question: string;
+	recordId?: string;
+}
+
+export interface BtwResult {
+	record: BtwHistoryRecord;
+}
+
+export interface BtwCancelParams {
+	recordId?: string;
+}
+
+export interface BtwCancelResult {
+	cancelled: boolean;
+}
+
+export interface GetBtwHistoryResult {
+	records: BtwHistoryRecord[];
+}
+
 /** Every RPC command's parameters and successful response `data`. */
 export interface RpcWireCommands {
 	negotiate_protocol: { params: NegotiateProtocolParams; result: NegotiateProtocolResult };
@@ -1690,4 +1750,7 @@ export interface RpcWireCommands {
 	login: { params: LoginParams; result: LoginResult };
 	predict_word: { params: PredictWordParams; result: PredictWordResult };
 	predict_word_feedback: { params: PredictWordFeedbackParams; result: undefined };
+	btw: { params: BtwParams; result: BtwResult };
+	btw_cancel: { params: BtwCancelParams; result: BtwCancelResult };
+	get_btw_history: { params: undefined; result: GetBtwHistoryResult };
 }

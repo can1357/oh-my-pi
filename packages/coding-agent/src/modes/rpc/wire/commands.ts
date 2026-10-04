@@ -326,4 +326,24 @@ export const rpcCommands: readonly RpcCommandSpec[] = [
 		doc: "Report a shown suggestion as accepted or typed past.",
 		params: { text: "string", cursor: "number.integer", suggestion: "string", accepted: "boolean" },
 	},
+	{
+		name: "btw",
+		doc: "Ask a side question, or a follow-up in topic `recordId`; returns the record once it is running.",
+		params: { question: "string", "recordId?": "string" },
+		result: { record: "BtwHistoryRecord" },
+		unwrap: "record",
+	},
+	{
+		name: "btw_cancel",
+		doc: "Cancel the running side question (only topic `recordId` when given); false when none matches.",
+		params: { "recordId?": "string" },
+		result: { cancelled: "boolean" },
+		unwrap: "cancelled",
+	},
+	{
+		name: "get_btw_history",
+		doc: "List the session's side-question records, newest first.",
+		result: { records: "BtwHistoryRecord[]" },
+		unwrap: "records",
+	},
 ];

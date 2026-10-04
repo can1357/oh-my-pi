@@ -129,6 +129,12 @@ _SUBAGENT_STATUS_VALUES: Final[frozenset[str]] = frozenset({"pending", "running"
 _decode_subagent_status = cast("Decoder[SubagentStatus]", literal(_SUBAGENT_STATUS_VALUES))
 
 
+BtwStatus: TypeAlias = Literal["running", "complete", "cancelled", "error", "interrupted"]
+"""Side-question turn lifecycle; `interrupted` marks a turn whose process died while it ran."""
+_BTW_STATUS_VALUES: Final[frozenset[str]] = frozenset({"running", "complete", "cancelled", "error", "interrupted"})
+_decode_btw_status = cast("Decoder[BtwStatus]", literal(_BTW_STATUS_VALUES))
+
+
 AutoCompactionReason: TypeAlias = Literal["threshold", "overflow", "idle", "incomplete"]
 _AUTO_COMPACTION_REASON_VALUES: Final[frozenset[str]] = frozenset({"threshold", "overflow", "idle", "incomplete"})
 _decode_auto_compaction_reason = cast("Decoder[AutoCompactionReason]", literal(_AUTO_COMPACTION_REASON_VALUES))
@@ -824,6 +830,31 @@ class SubagentMessages:
 
 
 @dataclass(slots=True, frozen=True, kw_only=True)
+class BtwHistoryTurn:
+    """One question and its answer within a side-question topic."""
+    question: str
+    answer: str
+    status: BtwStatus
+    created_at: int
+    updated_at: int
+    error: str | None = None
+
+
+@dataclass(slots=True, frozen=True, kw_only=True)
+class BtwHistoryRecord:
+    """A side-question topic: its first turn's fields plus follow-ups; the latest turn is the last follow-up, else the record."""
+    question: str
+    answer: str
+    status: BtwStatus
+    created_at: int
+    updated_at: int
+    id: str
+    leaf_id: str | None
+    error: str | None = None
+    follow_ups: tuple[BtwHistoryTurn, ...] | None = None
+
+
+@dataclass(slots=True, frozen=True, kw_only=True)
 class LoginProvider:
     id: str
     name: str
@@ -1235,6 +1266,21 @@ class LiveEndEvent:
 
 
 @dataclass(slots=True, frozen=True, kw_only=True)
+class BtwDeltaEvent:
+    """Text appended to the running side question's latest answer."""
+    type: Literal["btw_delta"] = "btw_delta"
+    record_id: str
+    delta: str
+
+
+@dataclass(slots=True, frozen=True, kw_only=True)
+class BtwRecordEvent:
+    """Full side-question record on every lifecycle change (started, complete, cancelled, error); the last one per id wins."""
+    type: Literal["btw_record"] = "btw_record"
+    record: BtwHistoryRecord
+
+
+@dataclass(slots=True, frozen=True, kw_only=True)
 class CommandOutputEvent:
     """Output of a builtin slash command."""
     type: Literal["command_output"] = "command_output"
@@ -1478,7 +1524,7 @@ RpcAgentEvent: TypeAlias = AgentStartEvent | AgentEndEvent | TurnStartEvent | Tu
 """A session event, discriminated by `type`; `set_event_filter` selects which are sent."""
 
 
-RpcNotification: TypeAlias = ReadyEvent | PromptResultEvent | SessionSettledEvent | ExtensionError | ExtensionUiRequest | AvailableCommandsUpdateEvent | SubagentLifecycleEvent | SubagentProgressEvent | SubagentEvent | LivePhaseEvent | LiveLevelsEvent | LiveTranscriptEvent | LiveEndEvent | CommandOutputEvent | SessionInfoUpdateEvent | ConfigUpdateEvent | RpcFrameErrorEvent | RpcAgentEvent | UnknownNotification
+RpcNotification: TypeAlias = ReadyEvent | PromptResultEvent | SessionSettledEvent | ExtensionError | ExtensionUiRequest | AvailableCommandsUpdateEvent | SubagentLifecycleEvent | SubagentProgressEvent | SubagentEvent | LivePhaseEvent | LiveLevelsEvent | LiveTranscriptEvent | LiveEndEvent | BtwDeltaEvent | BtwRecordEvent | CommandOutputEvent | SessionInfoUpdateEvent | ConfigUpdateEvent | RpcFrameErrorEvent | RpcAgentEvent | UnknownNotification
 """Unsolicited outbound frame (everything except responses and host tool/URI requests), discriminated by `type`."""
 
 
@@ -2025,6 +2071,33 @@ def parse_subagent_messages(value: object, path: str = "SubagentMessages") -> Su
     )
 
 
+def parse_btw_history_turn(value: object, path: str = "BtwHistoryTurn") -> BtwHistoryTurn:
+    payload = expect_object(value, path)
+    return BtwHistoryTurn(
+        question=required(payload, "question", decode_str, path),
+        answer=required(payload, "answer", decode_str, path),
+        status=required(payload, "status", _decode_btw_status, path),
+        created_at=required(payload, "createdAt", decode_int, path),
+        updated_at=required(payload, "updatedAt", decode_int, path),
+        error=optional(payload, "error", decode_str, path),
+    )
+
+
+def parse_btw_history_record(value: object, path: str = "BtwHistoryRecord") -> BtwHistoryRecord:
+    payload = expect_object(value, path)
+    return BtwHistoryRecord(
+        question=required(payload, "question", decode_str, path),
+        answer=required(payload, "answer", decode_str, path),
+        status=required(payload, "status", _decode_btw_status, path),
+        created_at=required(payload, "createdAt", decode_int, path),
+        updated_at=required(payload, "updatedAt", decode_int, path),
+        id=required(payload, "id", decode_str, path),
+        leaf_id=required(payload, "leafId", nullable(decode_str), path),
+        error=optional(payload, "error", decode_str, path),
+        follow_ups=optional(payload, "followUps", array(parse_btw_history_turn), path),
+    )
+
+
 def parse_login_provider(value: object, path: str = "LoginProvider") -> LoginProvider:
     payload = expect_object(value, path)
     return LoginProvider(
@@ -2501,6 +2574,23 @@ def parse_live_end_event(value: object, path: str = "LiveEndEvent") -> LiveEndEv
     )
 
 
+def parse_btw_delta_event(value: object, path: str = "BtwDeltaEvent") -> BtwDeltaEvent:
+    payload = expect_object(value, path)
+    required(payload, "type", cast('Decoder[Literal["btw_delta"]]', literal(frozenset({"btw_delta"}))), path)
+    return BtwDeltaEvent(
+        record_id=required(payload, "recordId", decode_str, path),
+        delta=required(payload, "delta", decode_str, path),
+    )
+
+
+def parse_btw_record_event(value: object, path: str = "BtwRecordEvent") -> BtwRecordEvent:
+    payload = expect_object(value, path)
+    required(payload, "type", cast('Decoder[Literal["btw_record"]]', literal(frozenset({"btw_record"}))), path)
+    return BtwRecordEvent(
+        record=required(payload, "record", parse_btw_history_record, path),
+    )
+
+
 def parse_command_output_event(value: object, path: str = "CommandOutputEvent") -> CommandOutputEvent:
     payload = expect_object(value, path)
     required(payload, "type", cast('Decoder[Literal["command_output"]]', literal(frozenset({"command_output"}))), path)
@@ -2823,6 +2913,8 @@ _RPC_NOTIFICATION_CASES: Final[dict[str, Decoder[RpcNotification]]] = {
         "live_levels": parse_live_levels_event,
         "live_transcript": parse_live_transcript_event,
         "live_end": parse_live_end_event,
+        "btw_delta": parse_btw_delta_event,
+        "btw_record": parse_btw_record_event,
         "command_output": parse_command_output_event,
         "session_info_update": parse_session_info_update_event,
         "config_update": parse_config_update_event,
@@ -3210,6 +3302,26 @@ class WireClient:
         params["accepted"] = accepted
         self._command("predict_word_feedback", params)
 
+    def btw(self, question: str, *, record_id: str | None = None) -> BtwHistoryRecord:
+        """Ask a side question, or a follow-up in topic `recordId`; returns the record once it is running."""
+        params: dict[str, object] = {}
+        params["question"] = question
+        if record_id is not None:
+            params["recordId"] = record_id
+        return required(expect_object(self._command("btw", params), "btw"), "record", parse_btw_history_record, "btw")
+
+    def btw_cancel(self, record_id: str | None = None) -> bool:
+        """Cancel the running side question (only topic `recordId` when given); false when none matches."""
+        params: dict[str, object] = {}
+        if record_id is not None:
+            params["recordId"] = record_id
+        return required(expect_object(self._command("btw_cancel", params), "btw_cancel"), "cancelled", decode_bool, "btw_cancel")
+
+    def get_btw_history(self) -> tuple[BtwHistoryRecord, ...]:
+        """List the session's side-question records, newest first."""
+        params: dict[str, object] = {}
+        return required(expect_object(self._command("get_btw_history", params), "get_btw_history"), "records", array(parse_btw_history_record), "get_btw_history")
+
     def on_ready(self, listener: Callable[[ReadyEvent], None]) -> Callable[[], None]:
         """Subscribe to `ready`: First frame after startup; transport fields are absent on servers without protocol v2."""
         return self._listen("ready", listener)
@@ -3261,6 +3373,14 @@ class WireClient:
     def on_live_end(self, listener: Callable[[LiveEndEvent], None]) -> Callable[[], None]:
         """Subscribe to `live_end`: Sent exactly once when a live session ends; `error` carries the failure cause."""
         return self._listen("live_end", listener)
+
+    def on_btw_delta(self, listener: Callable[[BtwDeltaEvent], None]) -> Callable[[], None]:
+        """Subscribe to `btw_delta`: Text appended to the running side question's latest answer."""
+        return self._listen("btw_delta", listener)
+
+    def on_btw_record(self, listener: Callable[[BtwRecordEvent], None]) -> Callable[[], None]:
+        """Subscribe to `btw_record`: Full side-question record on every lifecycle change (started, complete, cancelled, error); the last one per id wins."""
+        return self._listen("btw_record", listener)
 
     def on_command_output(self, listener: Callable[[CommandOutputEvent], None]) -> Callable[[], None]:
         """Subscribe to `command_output`: Output of a builtin slash command."""
@@ -3445,6 +3565,11 @@ __all__ = [
     "BranchMessage",
     "BranchResult",
     "BranchSummaryMessage",
+    "BtwDeltaEvent",
+    "BtwHistoryRecord",
+    "BtwHistoryTurn",
+    "BtwRecordEvent",
+    "BtwStatus",
     "CacheWarmingEndEvent",
     "CacheWarmingMode",
     "CacheWarmingOutcome",
@@ -3620,6 +3745,10 @@ __all__ = [
     "parse_branch_message",
     "parse_branch_result",
     "parse_branch_summary_message",
+    "parse_btw_delta_event",
+    "parse_btw_history_record",
+    "parse_btw_history_turn",
+    "parse_btw_record_event",
     "parse_cache_warming_end_event",
     "parse_cache_warming_start_event",
     "parse_cancel_ui_request",
