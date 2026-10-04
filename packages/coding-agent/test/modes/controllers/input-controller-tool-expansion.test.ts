@@ -211,6 +211,35 @@ describe("InputController assistant detail toggle", () => {
 		expect(resetDisplay).toHaveBeenCalledTimes(2);
 	});
 
+	it("folds thinking when tool output is the half that was already folded", () => {
+		const { ctx } = createContext({ hideToolOutputDetails: true });
+		const controller = new InputController(ctx);
+
+		controller.toggleDetailVisibility();
+
+		expect(ctx.hideThinkingBlock).toBe(true);
+		expect(ctx.hideToolOutputDetails).toBe(true);
+
+		controller.toggleDetailVisibility();
+
+		expect(ctx.hideThinkingBlock).toBe(false);
+		expect(ctx.hideToolOutputDetails).toBe(false);
+	});
+
+	it("restores tool output when thinking is auto-hidden and tool output was folded", () => {
+		const { ctx } = createContext({
+			session: { agent: { hideThinkingSummary: false }, thinkingLevel: "off" },
+			hideToolOutputDetails: true,
+		});
+
+		new InputController(ctx).toggleDetailVisibility();
+
+		// Auto-hidden thinking counts as folded, so the gesture reveals tool output
+		// on the first press instead of leaving it stuck behind the other axis.
+		expect(ctx.hideThinkingBlock).toBe(false);
+		expect(ctx.hideToolOutputDetails).toBe(false);
+	});
+
 	it("refuses ctrl+o while tool output details are hidden", () => {
 		const { ctx, showStatus } = createContext({ hideToolOutputDetails: true });
 
