@@ -11,9 +11,7 @@
  *
  * The swap policy (budget, savings gate, skip rules) lives in
  * `planInlineSwaps`, shared by the transform and the `/context` savings
- * estimate (`estimateInlineSavings`) so the two can never disagree. That
- * policy keeps every item's wire form fixed once it has shipped; see
- * `planInlineSwaps` for why.
+ * estimate (`estimateInlineSavings`) so the two can never disagree.
  */
 
 import { Tokenizer } from "@oh-my-pi/pi-agent-core";
@@ -235,8 +233,9 @@ export function planInlineSwaps(input: InlinePlanInput): InlineSwapPlan {
 	// swaps first: reverting them to text keeps every real image, whereas the
 	// downstream clamp would drop the oldest ones.
 	const retracted: InlineSwapPlan["retracted"] = { toolResults: [], systemPrompt: undefined };
-	while (input.existingImages + frames > imageLimit && toolResults.length > 0) {
-		const swap = toolResults.pop()!;
+	while (input.existingImages + frames > imageLimit) {
+		const swap = toolResults.pop();
+		if (!swap) break;
 		retracted.toolResults.push({ id: swap.id, frames: swap.frames });
 		frames -= swap.frames;
 	}
@@ -259,13 +258,17 @@ export function planInlineSwaps(input: InlinePlanInput): InlineSwapPlan {
  * followed by thinking in their framed form and stay unstamped.
  */
 function stampCapRetractions(
-	original: readonly Message[],
 	messages: Message[],
-	plan: InlineSwapPlan,
-	toolResultIndex: ReadonlyMap<string, number>,
-	firstUserIndex: number,
-	imageLimit: number,
+	{
+		original,
+		plan,
+		scan,
+		imageLimit,
+	}: { original: readonly Message[]; plan: InlineSwapPlan; scan: InlineContextScan; imageLimit: number },
 ): boolean {
+	if (plan.retracted.toolResults.length === 0 && !plan.retracted.systemPrompt) return false;
+	const toolResultIndex = new Map(scan.toolResults.map(built => [built.candidate.id, built.index]));
+	const { firstUserIndex } = scan;
 	const retractedAt = new Map<number, "toolResult" | "systemPrompt">();
 	const framesAt = new Map<number, number>();
 	const place = (index: number | undefined, frames: number) => {
@@ -372,12 +375,11 @@ function buildInlineToolResultCandidate(
 }
 
 interface InlineContextScan {
-	/** Tool-result candidates in context order, with their message index and joined text. */
 	toolResults: Array<BuiltInlineToolResultCandidate & { index: number }>;
 	totalImages: number;
-	/** Index of the first user message (the system-prompt frame carrier), or -1. */
+	/** The system-prompt frame carrier, or -1. */
 	firstUserIndex: number;
-	/** Images up to and including the first user message; all of them when there is none yet. */
+	/** Images through the first user message; all of them when there is none yet. */
 	imagesThroughFirstUser: number;
 }
 
@@ -704,19 +706,7 @@ export class SnapcompactInlineTransformer {
 			changed = true;
 		}
 
-		if (
-			(plan.retracted.toolResults.length > 0 || plan.retracted.systemPrompt) &&
-			stampCapRetractions(
-				context.messages,
-				messages,
-				plan,
-				new Map(scan.toolResults.map(built => [built.candidate.id, built.index])),
-				userIndex,
-				imageLimit,
-			)
-		) {
-			changed = true;
-		}
+		if (stampCapRetractions(messages, { original: context.messages, plan, scan, imageLimit })) changed = true;
 
 		if (!changed) return context;
 		return { ...context, systemPrompt, messages };
