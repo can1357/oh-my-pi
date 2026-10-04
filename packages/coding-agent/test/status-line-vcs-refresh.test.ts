@@ -808,3 +808,76 @@ describe("StatusLineComponent git watcher survives atomic HEAD renames", () => {
 		component.dispose();
 	});
 });
+
+describe("StatusLineComponent git-status refresh backs off on sustained cost", () => {
+	it("floors a one-off slow call, widens after two sustained slow calls, and resets on HEAD invalidation", async () => {
+		let now = 10_000_000;
+		vi.spyOn(Date, "now").mockImplementation(() => now);
+
+		const component = new StatusLineComponent(makeSession(), statusLineHost);
+		component.updateSettings(gitSegment);
+
+		/** Trigger a render that must start a fresh status fetch, then resolve it after `durationMs`. */
+		const runSlowCall = async (durationMs: number) => {
+			const before = gitControls.statusSummary.mock.calls.length;
+			const deferred = Promise.withResolvers<GitStatus | null>();
+			gitControls.statusSummary.mockReturnValueOnce(deferred.promise);
+			component.getTopBorder(80);
+			expect(gitControls.statusSummary.mock.calls.length).toBe(before + 1);
+			now += durationMs;
+			deferred.resolve({ staged: 0, unstaged: 0, untracked: 0 });
+			await Promise.resolve();
+			await Promise.resolve();
+			await Promise.resolve();
+		};
+
+		/** Render without letting a new status fetch start; proves the cache is still in effect. */
+		const expectCached = () => {
+			const before = gitControls.statusSummary.mock.calls.length;
+			component.getTopBorder(80);
+			expect(gitControls.statusSummary.mock.calls.length).toBe(before);
+		};
+
+		try {
+			// Call 1: a one-off 5000ms call. The previous-elapsed sample starts at
+			// 0, so sustainedMs = min(5000, 0) = 0 and the TTL stays at its 10s
+			// floor -- a single slow call (the stat-repair pass in a fresh
+			// stat-less worktree) must not defer the next refresh.
+			await runSlowCall(5000);
+
+			// The status line also throttles whole re-renders to once per wall-clock
+			// second (`#statusLineClock`); every step below advances `now` into a new
+			// second so the render path actually re-evaluates `#getStatus()` instead
+			// of serving a memoized render.
+			now += 9_000; // new second, still under the unwidened 10s floor
+			expectCached();
+
+			now += 2_000; // new second, past the 10s floor
+			// Call 2: also slow (4000ms). Two consecutive slow calls widen the
+			// interval: sustainedMs = min(4000, 5000) = 4000, ttl = max(10000, 4000*5) = 20000.
+			await runSlowCall(4000);
+
+			now += 15_000; // new second, past the 10s floor but under the widened 20s interval
+			expectCached();
+
+			now += 6_000; // new second, past the widened 20s interval
+			// Call 3: slow again (4000ms), keeping the widened 20s interval in
+			// effect (sustainedMs = min(4000, 4000) = 4000).
+			await runSlowCall(4000);
+
+			// A HEAD move refetches on the next render, and the call after it must
+			// not inherit the pre-move cost sample: a slow first call after the
+			// move keeps the floor instead of re-widening the interval.
+			component.invalidateGitCaches();
+			// Call 4: the refetch the HEAD move triggers, slow like the calls before it.
+			await runSlowCall(4000);
+
+			now += 11_000; // past the 10s floor, under the 20s a surviving sample would give
+			const before = gitControls.statusSummary.mock.calls.length;
+			component.getTopBorder(80);
+			expect(gitControls.statusSummary.mock.calls.length).toBe(before + 1);
+		} finally {
+			component.dispose();
+		}
+	});
+});

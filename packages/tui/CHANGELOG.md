@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- The status line's git-status polling interval now widens automatically for a repository whose `git status` stays slow across consecutive calls, instead of holding a fixed 10-second refresh regardless of cost ([#13405](https://github.com/can1357/oh-my-pi/pull/13405) by [@sjawhar](https://github.com/sjawhar)).
+
 ## [18.6.0] - 2026-10-03
 
 ### Fixed

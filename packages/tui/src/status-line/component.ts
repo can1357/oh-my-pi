@@ -18,7 +18,7 @@ import {
 	truncateToWidth,
 	visibleWidth,
 } from "../index";
-import { adjustHsv, formatNumber, getProjectDir, hexToRgb, rgbToHex } from "@oh-my-pi/pi-utils";
+import { adjustHsv, formatNumber, getProjectDir, hexToRgb, logger, rgbToHex } from "@oh-my-pi/pi-utils";
 import type {
 	ActiveRepoContext,
 	StatusAccountIdentity as OAuthAccountIdentity,
@@ -142,9 +142,23 @@ function describeSeg(key: string, props: TspProps<"seg">, view: SegmentView, dim
  * Freshness window for the git segment's working-tree counts. A whole-worktree
  * `git status` costs ~1 CPU-second on large repos and every open session polls
  * it, so edits surface within this window; HEAD moves refetch immediately via
- * {@link StatusLineComponent.invalidateGitCaches}.
+ * {@link StatusLineComponent.invalidateGitCaches}. It is also the floor of the
+ * refresh interval, which widens for a repository whose status stays slow.
  */
 const GIT_STATUS_TTL_MS = 10_000;
+/**
+ * Multiple of the last status duration the next refresh must wait.
+ *
+ * A status call that takes longer than {@link GIT_STATUS_TTL_MS} would
+ * otherwise be re-issued the moment it lands, pinning a core at a ~100% duty
+ * cycle for as long as the repository stays slow. Scaling the interval with the
+ * observed cost caps the status line's share of a core at 1/N regardless of
+ * worktree pathology, and a repository that answers quickly is unaffected
+ * because the floor dominates.
+ */
+const GIT_STATUS_BACKOFF_FACTOR = 5;
+/** A status call slower than this is logged once, with its repository. */
+const GIT_STATUS_SLOW_LOG_MS = 1000;
 const JJ_REFRESH_TTL_MS = 5000;
 const JJ_COMMAND_TIMEOUT_MS = 5_000;
 const WATCHER_FAILURE_POLL_TTL_MS = 5000;
@@ -682,12 +696,18 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 	#focusedAgentId: string | undefined;
 	#activeRepoCache: ActiveRepoCache | undefined;
 
-	// Git status caching (1s TTL)
+	// Git status caching: GIT_STATUS_TTL_MS floor, widened for slow repositories.
 	#cachedGitStatus: { staged: number; unstaged: number; untracked: number } | null = null;
 	#cachedGitStatusCwd: string | undefined = undefined;
 	#gitStatusLastFetch = 0;
 	#gitStatusGeneration = 0;
 	#gitStatusInFlightCwd: string | undefined = undefined;
+	/** Refresh interval in effect, grown when a repository stays slow. */
+	#gitStatusTtlMs = GIT_STATUS_TTL_MS;
+	/** Previous call's duration; 0 before any call for the current repository. */
+	#gitStatusPrevElapsedMs = 0;
+	/** Whether a slow status call has already been logged for this repository. */
+	#gitStatusSlowLogged = false;
 	#cachedJjBranch: string | null = null;
 	#jjBranchLastFetch = 0;
 	#jjResolveSeq = 0;
@@ -1399,6 +1419,11 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 		this.#cachedJjStatus = null;
 		this.#jjStatusLastFetch = 0;
 		this.#jjCacheGeneration++;
+		// A HEAD move is the likeliest moment for the git status cost to have
+		// changed (a checkout rewrites the index), so a widened refresh interval
+		// must not survive it and hold a stale count.
+		this.#gitStatusTtlMs = GIT_STATUS_TTL_MS;
+		this.#gitStatusPrevElapsedMs = 0;
 	}
 
 	/**
@@ -1629,7 +1654,12 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 		if (this.#gitStatusInFlightCwd !== undefined) {
 			return this.#cachedGitStatusCwd === gitCwd ? this.#cachedGitStatus : null;
 		}
-		if (this.#cachedGitStatusCwd === gitCwd && Date.now() - this.#gitStatusLastFetch < GIT_STATUS_TTL_MS) {
+		if (this.#cachedGitStatusCwd !== gitCwd) {
+			// A different repository's cost says nothing about this one.
+			this.#gitStatusTtlMs = GIT_STATUS_TTL_MS;
+			this.#gitStatusPrevElapsedMs = 0;
+			this.#gitStatusSlowLogged = false;
+		} else if (Date.now() - this.#gitStatusLastFetch < this.#gitStatusTtlMs) {
 			return this.#cachedGitStatus;
 		}
 
@@ -1638,11 +1668,14 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 
 		(async () => {
 			let nextStatus: { staged: number; unstaged: number; untracked: number } | null = null;
+			const startedAt = Date.now();
+			let elapsedMs = 0;
 			try {
 				nextStatus = (await repository.statusSummary()) ?? null;
 			} catch {
 				nextStatus = null;
 			} finally {
+				elapsedMs = Date.now() - startedAt;
 				if (this.#gitStatusInFlightCwd === gitCwd) {
 					const prev = this.#cachedGitStatusCwd === gitCwd ? this.#cachedGitStatus : null;
 					this.#cachedGitStatus = nextStatus;
@@ -1652,6 +1685,29 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 					if (!this.#disposed && JSON.stringify(prev) !== JSON.stringify(nextStatus)) {
 						this.#invalidateStatusLineRenderCache();
 						this.#onBranchChange?.();
+					}
+					// Back off on sustained cost, not on one slow call. The
+					// first status in a stat-less worktree is slow precisely
+					// because it repairs the index, and the calls after it are
+					// fast; keying off that one measurement would hold a stale
+					// count for minutes after the repository became cheap.
+					// Taking the smaller of the last two durations lets a
+					// genuinely slow repository (two slow calls) widen the
+					// interval while a one-time repair collapses to the floor.
+					const sustainedMs = Math.min(elapsedMs, this.#gitStatusPrevElapsedMs);
+					this.#gitStatusPrevElapsedMs = elapsedMs;
+					this.#gitStatusTtlMs = Math.max(GIT_STATUS_TTL_MS, sustainedMs * GIT_STATUS_BACKOFF_FACTOR);
+					if (elapsedMs >= GIT_STATUS_SLOW_LOG_MS && !this.#gitStatusSlowLogged) {
+						// Names the repository whose status is expensive, so a
+						// sluggish session points at its cause instead of
+						// requiring a profiler. Once per repository: this runs
+						// on a render path.
+						this.#gitStatusSlowLogged = true;
+						logger.warn("status-line.git-status-slow", {
+							cwd: gitCwd,
+							elapsedMs,
+							nextRefreshMs: this.#gitStatusTtlMs,
+						});
 					}
 				}
 			}
