@@ -10,6 +10,7 @@ import {
 	isLikelyOpenAIResponsesId,
 	modelLimitsFor,
 } from "../compat/behavior";
+import { resolveVariantSelector } from "../compat/collapse";
 import { xaiResponsesReasoningEffortMap } from "../compat/openai";
 import { hasModelScopedEffortLadder, resolveModelPolicy } from "../compat/resolve";
 import { compareRevision, parseRevision } from "../compat/revision";
@@ -6914,14 +6915,31 @@ const GOOGLE_VERTEX_OPENAI_BASE_URL =
 const GOOGLE_VERTEX_ANTHROPIC_BASE_URL =
 	"https://{location}-aiplatform.googleapis.com/v1/projects/{project}/locations/{location}/publishers/anthropic/models/{model}:streamRawPredict";
 
+/**
+ * Correct a discovered Vertex id through the reviewed KDL provider-alias table
+ * (`taxonomy/_collapse.kdl`). Model/provider id policy is rule-owned, so this
+ * carries no literal ids: the alias both fixes the discovered spelling and keeps
+ * saved selectors resolving (see `config/model-resolver`).
+ *
+ * Live case: Google published no `@default` endpoint for Claude Sonnet 4.6 —
+ * `.../publishers/anthropic/models/claude-sonnet-4-6@default:streamRawPredict`
+ * answers HTTP 404 NOT_FOUND from the EU multi-region while the bare id answers
+ * 200 — so the discovered `claude-sonnet-4-6@default` row is corrected to the
+ * bare publisher id here and in its `:streamRawPredict` endpoint.
+ */
+function normalizeGoogleVertexModelId(modelId: string): string {
+	return resolveVariantSelector("google-vertex", modelId) ?? modelId;
+}
+
 function resolveGoogleVertexApi(modelId: string, raw: ModelsDevModel): { api: Api; baseUrl: string } {
+	const effectiveId = normalizeGoogleVertexModelId(modelId);
 	if (raw.provider?.npm === "@ai-sdk/google-vertex/anthropic") {
 		return {
 			api: "anthropic-messages",
-			baseUrl: GOOGLE_VERTEX_ANTHROPIC_BASE_URL.replace("{model}", modelId),
+			baseUrl: GOOGLE_VERTEX_ANTHROPIC_BASE_URL.replace("{model}", effectiveId),
 		};
 	}
-	if (modelId.includes("/") || raw.provider?.npm === "@ai-sdk/openai-compatible") {
+	if (effectiveId.includes("/") || raw.provider?.npm === "@ai-sdk/openai-compatible") {
 		return { api: "openai-completions", baseUrl: GOOGLE_VERTEX_OPENAI_BASE_URL };
 	}
 	return { api: "google-vertex", baseUrl: GOOGLE_VERTEX_BASE_URL };
@@ -7200,6 +7218,10 @@ const MODELS_DEV_PROVIDER_DESCRIPTORS_GOOGLE_VERTEX: readonly ModelsDevProviderD
 	simpleModelsDevDescriptor("google-vertex", "google-vertex", "google-vertex", GOOGLE_VERTEX_BASE_URL, {
 		filterModel: filterActiveToolCallModels,
 		resolveApi: resolveGoogleVertexApi,
+		transformModel: (model, rawId) => {
+			const id = normalizeGoogleVertexModelId(rawId);
+			return id === model.id ? model : { ...model, id };
+		},
 	}),
 ];
 

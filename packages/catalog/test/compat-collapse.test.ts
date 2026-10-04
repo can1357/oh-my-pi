@@ -1398,6 +1398,17 @@ describe("variant aliases", () => {
 		expect(getVariantAliasSources("devin", "claude-opus-5")).not.toContain("opus");
 	});
 
+	it("resolves the retired Vertex Sonnet 4.6 `@default` spelling to the bare publisher id", () => {
+		// Vertex published no `@default` endpoint for Sonnet 4.6 (HTTP 404), so the
+		// discovered id is corrected through this alias; the same alias keeps saved
+		// `google-vertex/claude-sonnet-4-6@default` selectors resolving.
+		expect(resolveVariantSelector("google-vertex", "claude-sonnet-4-6@default")).toBe("claude-sonnet-4-6");
+		expect(resolveVariantSelector("GOOGLE-VERTEX", "CLAUDE-SONNET-4-6@DEFAULT")).toBe("claude-sonnet-4-6");
+		// Provider-scoped: the retired spelling stays meaningless elsewhere.
+		expect(resolveVariantSelector("google", "claude-sonnet-4-6@default")).toBeUndefined();
+		expect(resolveVariantSelector("anthropic", "claude-sonnet-4-6@default")).toBeUndefined();
+	});
+
 	it("resolves the dotted native Devin spellings to hyphenated logical ids", () => {
 		expect(resolveVariantSelector("devin", "gpt-5.6-terra")).toBe("gpt-5-6-terra");
 		expect(resolveVariantSelector("devin", "gpt-5.6-sol")).toBe("gpt-5-6-sol");

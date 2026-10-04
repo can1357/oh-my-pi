@@ -636,6 +636,14 @@ collapse {
 	provider-alias "devin" "grok-4.6" "grok-4-6"
 	provider-alias "devin" "swe-1.7" "swe-1-7"
 	provider-alias "devin" "swe-1.7-lightning" "swe-1-7-lightning"
+	// Vertex never published `@default` for Sonnet 4.6: the publisher endpoint
+	// `.../models/claude-sonnet-4-6@default:streamRawPredict` answers HTTP 404
+	// NOT_FOUND from the EU multi-region while the bare id answers 200 (probed
+	// 2026-09-23 across three projects), unlike Sonnet 5 / Opus 5 whose
+	// `@default` aliases resolve. One authored spelling correction serves both
+	// the discovered id (`provider-models/openai-compat.ts`) and saved
+	// `google-vertex/claude-sonnet-4-6@default` selectors.
+	provider-alias "google-vertex" "claude-sonnet-4-6@default" "claude-sonnet-4-6"
 	// Retired id: the Codex image model was relabeled to what the backend runs
 	// (gpt-image-2-codex); keep saved `openai-codex/gpt-image-1` roles resolving.
 	provider-alias "openai-codex" "gpt-image-1" "gpt-image-2"

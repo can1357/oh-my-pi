@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed `google-vertex` Claude Sonnet 4.6 routing: the discovered `claude-sonnet-4-6@default` model id is corrected to the bare publisher id `claude-sonnet-4-6`, whose `:streamRawPredict` endpoint is the only one Vertex AI serves (the `@default` spelling answers HTTP 404). The correction is the reviewed KDL `provider-alias` in `taxonomy/_collapse.kdl`, so saved `@default` selectors keep resolving and stale offline caches drop the retired id.
+
 ## [18.6.0] - 2026-10-03
 
 ### Fixed
