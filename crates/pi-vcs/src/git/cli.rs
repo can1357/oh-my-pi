@@ -11,9 +11,9 @@
 //! The runner ports the hardened subprocess contract of the TS wrapper:
 //! non-interactive env (`GIT_TERMINAL_PROMPT=0`, askpass rejection, `LC_ALL`
 //! handling), `--no-optional-locks` for reads, fsmonitor/untracked-cache
-//! disabled, ambient `GIT_DIR`-family vars stripped, bounded output capture,
-//! and deadline + SIGTERM→SIGKILL termination on both the async and sync
-//! runners (git releases its lock files from its SIGTERM handler only).
+//! disabled for writes, ambient `GIT_DIR`-family vars stripped, bounded output
+//! capture, and deadline + SIGTERM→SIGKILL termination on both the async and
+//! sync runners (git releases its lock files from its SIGTERM handler only).
 
 use std::{path::Path, process::Stdio, time::Duration};
 
@@ -69,7 +69,8 @@ impl CliOutput {
 /// Options for one fallback invocation.
 #[derive(Debug, Default)]
 pub(crate) struct RunOptions {
-	/// Prefix `--no-optional-locks` and pin lock-free config for reads.
+	/// Prefix `--no-optional-locks` instead of pinning fsmonitor/untracked-cache
+	/// off.
 	pub read_only: bool,
 	/// Deadline; [`COMMAND_TIMEOUT`] when unset.
 	pub timeout:   Option<Duration>,
@@ -79,16 +80,24 @@ pub(crate) struct RunOptions {
 	pub cancel:    Option<CancellationToken>,
 }
 
-/// Build the hardened argv prefix: short-lived config pins that stop a
-/// transient subprocess from mutating fsmonitor/untracked-cache state.
+/// Build the hardened argv prefix.
+///
+/// Reads get `--no-optional-locks`, which already keeps them from rewriting
+/// the index, so they keep the repository's fsmonitor and untracked cache: a
+/// whole-worktree status on a large repo polled by every open session is far
+/// cheaper with both. Writes pin both off so a transient subprocess never
+/// mutates fsmonitor/untracked-cache state in the index.
 fn hardened_args(args: &[String], read_only: bool) -> Vec<String> {
-	let mut out = Vec::with_capacity(args.len() + 5);
-	for pin in ["core.fsmonitor=false", "core.untrackedCache=false"] {
-		out.push("-c".to_owned());
-		out.push(pin.to_owned());
-	}
-	if read_only && !args.iter().any(|arg| arg == "--no-optional-locks") {
-		out.push("--no-optional-locks".to_owned());
+	let mut out = Vec::with_capacity(args.len() + 4);
+	if read_only {
+		if !args.iter().any(|arg| arg == "--no-optional-locks") {
+			out.push("--no-optional-locks".to_owned());
+		}
+	} else {
+		for pin in ["core.fsmonitor=false", "core.untrackedCache=false"] {
+			out.push("-c".to_owned());
+			out.push(pin.to_owned());
+		}
 	}
 	out.extend(args.iter().cloned());
 	out

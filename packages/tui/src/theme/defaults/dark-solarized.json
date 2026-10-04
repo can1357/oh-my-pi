@@ -93,5 +93,15 @@
 		"pageBg": "base03",
 		"cardBg": "base02",
 		"infoBg": "base02"
+	},
+	"terminal": {
+		"background": "base03",
+		"foreground": "base0",
+		"chrome": "#00212b",
+		"widget": "#00212b",
+		"ansi": [
+			"base02", "red", "green", "yellow", "blue", "magenta", "cyan", "base2",
+			"#5d747b", "orange", "#5d747b", "base00", "base0", "violet", "base1", "base3"
+		]
 	}
 }

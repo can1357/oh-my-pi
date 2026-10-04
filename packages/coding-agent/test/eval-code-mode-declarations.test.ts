@@ -2,8 +2,6 @@ import { describe, expect, test } from "bun:test";
 import { type } from "@oh-my-pi/omptype";
 import { Settings } from "../src/config/settings";
 import type { ToolSession } from "../src/tools";
-import { createBrowserPrelude } from "../src/tools/browser";
-import { createComputerPrelude } from "../src/tools/computer";
 import { EvalTool } from "../src/tools/eval";
 import { generateCodeModeDeclarations } from "@oh-my-pi/pi-tui/tools/eval-format/code-mode-declarations";
 
@@ -71,54 +69,6 @@ describe("generateCodeModeDeclarations", () => {
 		const out = generateCodeModeDeclarations([{ name: "weird", parameters: { allOf: [{ type: "string" }] } }]);
 		expect(out).toContain("weird(args: unknown): Promise<unknown>;");
 	});
-});
-
-test("browser and computer preludes expose their handle and function-run declarations", () => {
-	const session: ToolSession = {
-		cwd: "/tmp",
-		hasUI: false,
-		getSessionFile: () => null,
-		getSessionSpawns: () => null,
-		settings: Settings.isolated({ "browser.enabled": true, "computer.enabled": true }),
-	};
-	const browserDeclarations = createBrowserPrelude(session).codeModeDeclarations;
-	const computerDeclarations = createComputerPrelude(session, () => ({
-		async run() {
-			return { displays: [], returnValue: undefined, screenshots: [] };
-		},
-		async capabilities() {
-			return undefined;
-		},
-		async close() {},
-	})).codeModeDeclarations;
-	if (typeof browserDeclarations !== "string" || typeof computerDeclarations !== "string") {
-		throw new Error("Expected browser and computer Code Mode declarations");
-	}
-
-	for (const declaration of [
-		"interface BrowserElement",
-		"interface BrowserTabHelpers",
-		"interface BrowserTabRealm extends BrowserTabHelpers",
-		"interface BrowserRunScope",
-		"interface BrowserTab extends BrowserTabHelpers",
-		"open(options?: BrowserOpenOptions): Promise<BrowserTab>",
-		"tab(name?: string): BrowserTab",
-		"close(options?: BrowserCloseOptions): Promise<void>",
-	]) {
-		expect(browserDeclarations).toContain(declaration);
-	}
-	for (const declaration of [
-		"interface ComputerRunScope",
-		"interface ComputerRunOptions",
-		"interface ComputerCapabilities",
-		"run<R>(",
-		"fn: (scope: ComputerRunScope, ...args: unknown[]) => R | Promise<R>",
-		"options?: ComputerRunOptions",
-		"): Promise<Awaited<R>>",
-		"run<R = unknown>(code: string, options?: ComputerRunOptions): Promise<R>",
-	]) {
-		expect(computerDeclarations).toContain(declaration);
-	}
 });
 
 test("EvalTool advertises only tools authorized for its bridge", () => {

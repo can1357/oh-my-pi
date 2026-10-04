@@ -11,6 +11,7 @@ describe("AdvisorConfigOverlayComponent", () => {
 	const deps: AdvisorConfigDeps = {
 		getAvailableModels: () => [],
 		browserSource: {
+			revision: 0,
 			defaultThinkingLevel: "high",
 			modelProviderOrder: [],
 			knownRoleIds: [],

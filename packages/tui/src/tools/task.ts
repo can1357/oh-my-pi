@@ -29,10 +29,13 @@ import {
 	formatMoreItems,
 	formatNumber,
 	isFeedModelBadgeEnabled,
+	pluralize,
 	previewLine,
 	previewWindowRows,
 	replaceTabs,
+	shortenEmbeddedPaths,
 	shortenPath,
+	shortenToolArgumentPaths,
 	type ToolUIStatus,
 	TRUNCATE_LENGTHS,
 	truncateToWidth,
@@ -42,7 +45,16 @@ import { framedToolCard } from "../render/tool-card";
 import { formatOutputInline, renderJsonTreeLines } from "./json-tree";
 import { repairDoubleEncodedJsonString } from "./task-repair-args";
 import { getSubprocessToolRenderer } from "./subprocess";
-import { assembleYieldResult } from "./task-yield-assembly";
+import { assembleYieldResult, type YieldSectionShapes } from "./task-yield-assembly";
+import type { TspAgentProps, TspTone } from "@oh-my-pi/pi-wire";
+import { compact, kv, md, node, span, text } from "../native/describe";
+import type { NativeNode } from "../native/node";
+import { OwnerMemo } from "../native/memo";
+import { plainText } from "../native/spans";
+import { errorText, noteText, resultText } from "./native-view";
+import { describeJsonTree } from "./json-tree";
+import { taskSummary } from "../overlays/agent-hub-renderer";
+import type { NativeToolView, ToolRenderResult } from "./renderer";
 
 /** Render context threaded in from `ToolExecutionComponent.#buildRenderContext`. */
 interface TaskRenderContext {
@@ -98,8 +110,13 @@ function normalizeFindings(value: unknown): FindingDetails[] {
 	return findings;
 }
 
-/** Reviewer output declares `findings` as an array, so a lone finding section still assembles as a list. */
-const REVIEWER_ARRAY_LABELS: ReadonlySet<string> = new Set(["findings"]);
+/** Reviewer output shapes: `findings` is an array (a lone finding still assembles as a list); the verdict fields are scalars. */
+const REVIEWER_SECTION_SHAPES: YieldSectionShapes = new Map([
+	["findings", "array"],
+	["overall_correctness", "scalar"],
+	["explanation", "scalar"],
+	["confidence", "scalar"],
+]);
 
 function extractIncrementalReviewResult(
 	items: RenderYieldItem[],
@@ -110,7 +127,7 @@ function extractIncrementalReviewResult(
 		status: item.status === "aborted" ? "aborted" : item.status === "success" ? "success" : undefined,
 		useLastTurn: item.useLastTurn,
 	}));
-	const assembled = assembleYieldResult(yieldItems, undefined, REVIEWER_ARRAY_LABELS);
+	const assembled = assembleYieldResult(yieldItems, undefined, REVIEWER_SECTION_SHAPES);
 	const data = assembled?.data;
 	if (!data || typeof data !== "object" || Array.isArray(data)) return undefined;
 	const record = data as Record<string, unknown>;
@@ -553,7 +570,7 @@ function createAssignmentSectionRenderer(
 }
 
 /**
- * Build the shared-context section (the `# Goal / # Constraints` background a
+ * Build the shared-context section (the `# Goal / # Contract` background a
  * batch call hands every subagent). Rendered like the assignment brief so the
  * shared background stays visible for the whole task lifecycle.
  */
@@ -648,6 +665,11 @@ function renderRouteLine(route: string | undefined, continuePrefix: string, maxW
 	];
 }
 
+/** A tool call's own intent, else its argument, with home paths shortened as the subagent HUD does. */
+function toolCallDetail(intent: string | undefined, args: string | undefined, argsKey: string | undefined): string {
+	return intent ? shortenEmbeddedPaths(intent) : shortenToolArgumentPaths(args ?? "", argsKey);
+}
+
 /**
  * Render streaming progress for a single agent.
  */
@@ -693,6 +715,7 @@ function renderAgentProgress(
 					? ` ${theme.fg("muted", previewLine(sanitizeText(progress.assignment ?? progress.task), 40))}`
 					: undefined,
 			stats: progress.status === "running" || progress.status === "completed" ? progress : undefined,
+			completionPercent: progress.completionPercent,
 		},
 		theme,
 	);
@@ -708,7 +731,11 @@ function renderAgentProgress(
 	if (progress.status === "running") {
 		if (progress.currentTool) {
 			let toolLine = `${continuePrefix}${theme.tree.hook} ${theme.fg("muted", sanitizeText(progress.currentTool))}`;
-			const toolDetail = progress.lastIntent ?? progress.currentToolArgs;
+			const toolDetail = toolCallDetail(
+				progress.currentToolIntent,
+				progress.currentToolArgs,
+				progress.currentToolArgsKey,
+			);
 			if (toolDetail) {
 				toolLine += `: ${theme.fg("dim", previewLine(sanitizeText(toolDetail), 40))}`;
 			}
@@ -723,7 +750,7 @@ function renderAgentProgress(
 			// Show most recent completed tool when idle between tools
 			const recent = progress.recentTools[0];
 			let toolLine = `${continuePrefix}${theme.tree.hook} ${theme.fg("dim", sanitizeText(recent.tool))}`;
-			const toolDetail = progress.lastIntent ?? recent.args;
+			const toolDetail = toolCallDetail(recent.intent, recent.args, recent.argsKey);
 			if (toolDetail) {
 				toolLine += `: ${theme.fg("dim", previewLine(sanitizeText(toolDetail), 40))}`;
 			}
@@ -1324,7 +1351,7 @@ export function renderResult(
 	const aborted = abortedCount > 0;
 	const failed = failCount > 0;
 	const mergeFailed = mergeFailedCount > 0;
-	const isError = aborted || failed;
+	const isError = result.isError === true || aborted || failed;
 	const agentCount = hasResults ? details.results.length : (details.progress?.length ?? 0);
 	const icon: ToolUIStatus = options.isPartial ? "running" : isError ? "error" : mergeFailed ? "warning" : "success";
 	// Header meta is the spawn count only; each row carries its own ⟨agent⟩
@@ -1676,11 +1703,407 @@ function renderNestedTaskTree(
 	return lines;
 }
 
+// =============================================================================
+// Native (TSP) description: one `agent` node per subagent (§7.6)
+// =============================================================================
+
+/** Theme token for a thinking level's model-chip dot. */
+function thinkingToken(level: ConfiguredThinkingLevel | undefined): string | undefined {
+	switch (level) {
+		case "minimal":
+			return "thinkingMinimal";
+		case "low":
+			return "thinkingLow";
+		case "medium":
+			return "thinkingMedium";
+		case "high":
+			return "thinkingHigh";
+		case "xhigh":
+		case "max":
+			return "thinkingXhigh";
+		default:
+			return undefined;
+	}
+}
+
+/** The shared batch context as one quiet line above the agents. */
+function describeContext(raw: unknown): NativeNode | undefined {
+	const source = typeof raw === "string" ? sanitizeText(repairDoubleEncodedJsonString(raw)) : "";
+	const line = source.replace(/\s+/g, " ").trim();
+	return line ? text([span(line, "muted")], { wrap: "word", lines: 2, role: "omp.tool.context" }) : undefined;
+}
+
+/** The full assignment, markdown, as the first expanded child of an agent. */
+function describeAssignment(raw: string | undefined): NativeNode | undefined {
+	const source = raw ? sanitizeText(repairDoubleEncodedJsonString(raw)).trim() : "";
+	return source ? md(source, { role: "omp.task.assignment" }) : undefined;
+}
+
+/** Context-window stats: the fill fraction and its `19K / 200K` label. */
+function contextStats(
+	tokens: number | undefined,
+	window: number | undefined,
+): { context?: number; contextLabel?: string } {
+	if (!tokens || tokens <= 0) return {};
+	if (!window || window <= 0) return { contextLabel: formatNumber(tokens) };
+	return {
+		context: Math.min(1, tokens / window),
+		contextLabel: `${formatNumber(tokens)} / ${formatNumber(window)}`,
+	};
+}
+
+/** Agent badges: `background` for async jobs, `isolated` worktrees. */
+function agentBadges(background: boolean, isolated: boolean | undefined): TspAgentProps["badges"] {
+	const badges: { text: string; tone?: TspTone }[] = [];
+	if (background) badges.push({ text: "background" });
+	if (isolated) badges.push({ text: "isolated" });
+	return badges.length > 0 ? badges : undefined;
+}
+
+interface AgentDescribeState {
+	readonly seen: WeakSet<object>;
+	readonly nowMs: number;
+	readonly expanded: boolean;
+	readonly background: boolean;
+}
+
+/** Settled and in-flight child snapshots a subagent carries, as nested agent nodes. */
+function describeNestedTasks(
+	source: { extractedToolData?: Record<string, unknown[]>; inflightTaskDetails?: TaskToolDetails },
+	state: AgentDescribeState,
+	depth: number,
+): NativeNode[] {
+	const nested: TaskToolDetails[] = [];
+	const settled = source.extractedToolData?.task;
+	if (Array.isArray(settled)) for (const entry of settled) if (isTaskToolDetails(entry)) nested.push(entry);
+	if (source.inflightTaskDetails) nested.push(source.inflightTaskDetails);
+	const out: NativeNode[] = [];
+	for (const details of nested) {
+		if (state.seen.has(details)) {
+			out.push(noteText("↻ nested task cycle", "dim"));
+			continue;
+		}
+		if (depth >= MAX_NESTED_TASK_RENDER_DEPTH) {
+			out.push(noteText("… nested task depth limit reached", "dim"));
+			continue;
+		}
+		state.seen.add(details);
+		out.push(...describeAgents(details, state, depth + 1));
+		state.seen.delete(details);
+	}
+	return out;
+}
+
+function agentNode(p: TspAgentProps, children: readonly (NativeNode | undefined)[], key: string): NativeNode {
+	return node("agent", p, compact(children), key);
+}
+
+function describeProgressAgent(progress: AgentProgress, state: AgentDescribeState, depth: number): NativeNode {
+	const { nowMs } = state;
+	const running = progress.status === "running";
+	const status: TspAgentProps["status"] =
+		progress.status === "completed" ? "done" : progress.status === "failed" ? "failed" : progress.status;
+	const tool =
+		running && progress.currentTool
+			? {
+					name: plainText(progress.currentTool),
+					intent:
+						plainText(
+							toolCallDetail(progress.currentToolIntent, progress.currentToolArgs, progress.currentToolArgsKey),
+						) || undefined,
+					age: progress.currentToolStartMs ? Math.max(0, nowMs - progress.currentToolStartMs) : undefined,
+				}
+			: null;
+	const retry =
+		running && progress.retryState
+			? {
+					attempt: progress.retryState.attempt,
+					max: progress.retryState.maxAttempts,
+					age: Math.max(0, nowMs - progress.retryState.startedAtMs),
+					delay: progress.retryState.delayMs,
+					error: plainText(progress.retryState.errorMessage),
+				}
+			: null;
+	return agentNode(
+		{
+			name: formatTaskId(progress.id),
+			agent: progress.agent || undefined,
+			task: taskSummary(progress.description || progress.assignment || progress.task) || undefined,
+			status,
+			model: progress.resolvedModelIdentity ?? progress.resolvedModel,
+			thinking: thinkingToken(progress.resolvedThinkingLevel),
+			tool,
+			stats: {
+				tools: progress.toolCount || undefined,
+				requests: progress.requests || undefined,
+				tokens: progress.tokens || undefined,
+				...contextStats(progress.contextTokens, progress.contextWindow),
+				done: running && progress.completionPercent !== undefined ? progress.completionPercent / 100 : undefined,
+				cost: progress.cost > 0 ? progress.cost : undefined,
+				...(running ? { age: progress.durationMs } : { took: progress.durationMs }),
+			},
+			retry,
+			badges: agentBadges(state.background, undefined),
+			depth: depth > 0 ? depth : undefined,
+			collapsible: true,
+			collapsed: !state.expanded,
+		},
+		[
+			describeAssignment(progress.assignment ?? progress.task),
+			progress.resolvedModelRoute ? noteText(progress.resolvedModelRoute, "dim") : undefined,
+			!running && progress.retryFailure
+				? text(
+						[
+							span(
+								`auto-retry gave up after ${progress.retryFailure.attempt} ${pluralize("attempt", progress.retryFailure.attempt)}: ${plainText(progress.retryFailure.errorMessage)}`,
+								"error",
+							),
+						],
+						{ wrap: "word", role: "omp.tool.error" },
+					)
+				: undefined,
+			...describeNestedTasks(progress, state, depth),
+		],
+		progress.id,
+	);
+}
+
+function describeResultAgent(result: SingleResult, state: AgentDescribeState, depth: number): NativeNode {
+	const { warning, rest } = extractMissingYieldWarning(result.output);
+	const aborted = result.aborted ?? false;
+	const mergeFailed = !aborted && result.exitCode === 0 && !!result.error;
+	const success = !aborted && result.exitCode === 0 && !result.error;
+	const status: TspAgentProps["status"] = aborted ? "aborted" : success || mergeFailed ? "done" : "failed";
+	const structured = result.structuredOutput?.data;
+	const output = sanitizeText(stripGeneratedOutputNotice(rest)).trim();
+	const errorLine = (message: string, token = "error"): NativeNode =>
+		text([span(plainText(message), token)], { wrap: "word", role: "omp.tool.error" });
+	const badges: { text: string; tone?: TspTone }[] = [...(agentBadges(state.background, result.isolated) ?? [])];
+	if (mergeFailed) badges.push({ text: "merge failed", tone: "warning" });
+	else if (warning && success) badges.push({ text: "warning", tone: "warning" });
+	if (result.truncated) badges.push({ text: "truncated", tone: "warning" });
+	const cost = result.usage?.cost.total ?? 0;
+	return agentNode(
+		{
+			name: formatTaskId(result.id),
+			agent: result.agent || undefined,
+			task: taskSummary(result.description || result.assignment || result.task) || undefined,
+			status,
+			model: result.resolvedModelIdentity ?? result.resolvedModel,
+			thinking: thinkingToken(result.resolvedThinkingLevel),
+			tool: null,
+			stats: {
+				requests: result.requests || undefined,
+				tokens: result.tokens || undefined,
+				...contextStats(result.contextTokens, result.contextWindow),
+				cost: cost > 0 ? cost : undefined,
+				took: result.durationMs,
+			},
+			retry: null,
+			badges: badges.length > 0 ? badges : undefined,
+			depth: depth > 0 ? depth : undefined,
+			collapsible: true,
+			collapsed: !state.expanded,
+		},
+		[
+			describeAssignment(result.assignment ?? result.task),
+			result.resolvedModelRoute ? noteText(result.resolvedModelRoute, "dim") : undefined,
+			aborted && result.abortReason ? errorLine(result.abortReason) : undefined,
+			warning ? errorLine(warning, "warning") : undefined,
+			result.error ? errorLine(result.error) : undefined,
+			result.retryFailure ? errorLine(`auto-retry gave up: ${result.retryFailure.errorMessage}`) : undefined,
+			structured !== undefined
+				? describeJsonTree(structured)
+				: output
+					? md(output, { role: "omp.task.output" })
+					: undefined,
+			result.stderr.trim() && !success ? node("ansi", { text: result.stderr, preview: { lines: 6 } }) : undefined,
+			kv([
+				[
+					"Patch",
+					result.patchPath && result.hasRootChanges !== false && success
+						? shortenPath(result.patchPath)
+						: undefined,
+				],
+				["Branch", result.branchName && success ? plainText(result.branchName) : undefined],
+			]),
+			...describeNestedTasks(result, state, depth),
+		],
+		result.id,
+	);
+}
+
+/** Agent nodes for one snapshot: settled results, then progress rows that have no result yet. */
+function describeAgents(details: TaskToolDetails, state: AgentDescribeState, depth: number): NativeNode[] {
+	const results = details.results ?? [];
+	const agents = orderResultsForDisplay(results).map(res => describeResultAgent(res, state, depth));
+	for (const progress of orderProgressForDisplay(details.progress ?? [])) {
+		if (!results.some(res => res.id === progress.id)) agents.push(describeProgressAgent(progress, state, depth));
+	}
+	return agents;
+}
+
+function agentCountLabel(count: number): string {
+	return `${count} ${pluralize("agent", count)}`;
+}
+
+/** Streaming call: the context line, then a pending agent per requested spawn. */
+function describeTaskCall(args: TaskParams | undefined): NativeToolView {
+	const agents: NativeNode[] = [];
+	const pending = (name: string, agent: unknown, brief: unknown, isolated: unknown, key: string): NativeNode =>
+		agentNode(
+			{
+				name,
+				agent: typeof agent === "string" && agent.trim() ? agent.trim() : undefined,
+				task: typeof brief === "string" ? taskSummary(brief) || undefined : undefined,
+				status: "pending",
+				badges: agentBadges(false, isolated === true),
+			},
+			[],
+			key,
+		);
+	const flatName = typeof args?.name === "string" ? args.name.trim() : "";
+	if (flatName || taskFirstLine(args?.task)) {
+		agents.push(
+			pending(
+				flatName ? formatTaskId(flatName) : "agent",
+				args?.agent,
+				args?.task,
+				args?.isolated,
+				flatName || "agent",
+			),
+		);
+	}
+	if (Array.isArray(args?.tasks)) {
+		args.tasks.forEach((entry, index) => {
+			const name = typeof entry?.name === "string" ? entry.name.trim() : "";
+			agents.push(
+				pending(
+					name ? formatTaskId(name) : `#${index + 1}`,
+					entry?.agent,
+					entry?.task,
+					entry?.isolated,
+					name || `#${index + 1}`,
+				),
+			);
+		});
+	}
+	const target = agents.length > 1 ? agentCountLabel(agents.length) : formatAgentHeaderLabel(args);
+	return {
+		tool: { title: "Task", target, targetKind: target ? "text" : undefined },
+		body: compact([describeContext(args?.context), ...agents]),
+	};
+}
+
+function describeTaskResult(
+	result: ToolRenderResult<TaskToolDetails>,
+	options: TaskRenderOptions,
+	args: TaskParams | undefined,
+): NativeToolView {
+	const details = result.details;
+	const context = describeContext(args?.context);
+	const agentLabel = formatAgentHeaderLabel(args);
+	if (!details) {
+		const fallback = resultText(result).trim();
+		if (result.isError) {
+			return {
+				tool: { title: "Task", target: agentLabel, targetKind: "text" },
+				tone: "error",
+				body: compact([context, errorText(fallback || "Task failed")]),
+			};
+		}
+		return {
+			tool: { title: "Task", target: agentLabel, targetKind: agentLabel ? "text" : undefined },
+			body: compact([context, fallback ? noteText(fallback, "dim") : undefined]),
+		};
+	}
+	// Ages are sampled once per snapshot; the terminal advances them.
+	const background = details.async !== undefined;
+	const agents = describeAgents(
+		details,
+		{
+			seen: new WeakSet<object>(),
+			nowMs: options.renderContext?.nowMs ?? Date.now(),
+			expanded: options.expanded,
+			background,
+		},
+		0,
+	);
+	const count = agents.length;
+	let failed = 0;
+	let aborted = 0;
+	let succeeded = 0;
+	let requests = 0;
+	for (const res of details.results ?? []) {
+		requests += res.requests ?? 0;
+		if (res.aborted) aborted++;
+		else if (res.exitCode !== 0) failed++;
+		else if (!res.error) succeeded++;
+	}
+	const summary: string[] = [];
+	if ((details.results ?? []).length > 0) {
+		if (succeeded) summary.push(`${succeeded} succeeded`);
+		if (failed) summary.push(`${failed} failed`);
+		if (aborted) summary.push(`${aborted} aborted`);
+		if (requests) summary.push(`${formatNumber(requests)} req`);
+		summary.push(formatDuration(details.totalDurationMs));
+	}
+	const fallback = resultText(result);
+	const lines = fallback.split("\n");
+	const notice = lines.findIndex(
+		line =>
+			line.includes("<system-notification>") ||
+			line.startsWith("Applied patches:") ||
+			line.startsWith("No changes to apply."),
+	);
+	const trailer =
+		notice >= 0
+			? lines
+					.slice(notice)
+					.filter(line => line.trim())
+					.join("\n")
+			: "";
+	const target = count > 0 ? agentCountLabel(count) : agentLabel;
+	return {
+		tool: {
+			title: "Task",
+			target,
+			targetKind: target ? "text" : undefined,
+			meta: summary.length > 0 ? [summary.join(" · ")] : undefined,
+			badges: background ? [{ text: "background" }] : undefined,
+		},
+		tone: aborted + failed > 0 ? "error" : undefined,
+		preview: "none",
+		body: compact([
+			context,
+			...agents,
+			count === 0 ? noteText(fallback.trim() || "No results", "dim") : undefined,
+			trailer ? text([span(plainText(trailer), "muted")], { wrap: "word", role: "omp.tool.stats" }) : undefined,
+		]),
+	};
+}
+
+const taskCallMemo = new OwnerMemo<NativeToolView | undefined>();
+const taskResultMemo = new OwnerMemo<NativeToolView | undefined>();
+
 /** Renders task calls and their live or settled agent results. */
-export const taskToolRenderer = { renderCall, renderResult, mergeCallAndResult: true } satisfies ToolRenderer<
-	TaskParams,
-	TaskToolDetails
->;
+export const taskToolRenderer = {
+	renderCall,
+	renderResult,
+	describeCall(args: TaskParams, options: RenderResultOptions): NativeToolView | undefined {
+		return taskCallMemo.get(args, [options.argsComplete], () => describeTaskCall(args));
+	},
+	describeResult(
+		result: ToolRenderResult<TaskToolDetails>,
+		options: TaskRenderOptions,
+		args?: TaskParams,
+	): NativeToolView | undefined {
+		return taskResultMemo.get(result, [options.renderContext?.nowMs, options.expanded], () =>
+			describeTaskResult(result, options, args),
+		);
+	},
+	mergeCallAndResult: true,
+} satisfies ToolRenderer<TaskParams, TaskToolDetails>;
 
 /** Source of an agent definition */
 export type AgentSource = "bundled" | "user" | "project";
@@ -1726,8 +2149,12 @@ export interface TaskItem {
 	agent?: string;
 	/** The work; required by the schema. */
 	task?: string;
+	/** How open-ended the work is; required by the schema and the child's sole `auto` thinking classification input. */
+	solutionSpace?: string;
 	/** Per-spawn thinking effort: lowest/middle/highest level the resolved model supports. Overrides the agent's default selector (e.g. `auto`). */
 	effort?: "lo" | "med" | "hi";
+	/** Per-spawn model selector or ordered selector array; overrides agent and settings preferences. */
+	model?: string | string[];
 	/** Caller-provided output schema; its presence overrides the selected agent's schema. */
 	outputSchema?: unknown;
 	/** Validation behavior for a caller-provided or inherited output schema. */
@@ -1751,8 +2178,12 @@ export interface TaskParams {
 	agent?: string;
 	/** The work (flat form). */
 	task?: string;
+	/** How open-ended the work is (flat form); see {@link TaskItem.solutionSpace}. */
+	solutionSpace?: string;
 	/** Per-spawn thinking effort (flat form): lowest/middle/highest level the resolved model supports. */
 	effort?: "lo" | "med" | "hi";
+	/** Per-spawn model selector or ordered selector array; overrides agent and settings preferences. */
+	model?: string | string[];
 	/** Caller-provided output schema; its presence overrides the selected agent's schema. */
 	outputSchema?: unknown;
 	/** Validation behavior for a caller-provided or inherited output schema. */
@@ -1841,8 +2272,19 @@ export interface AgentProgress {
 	lastIntent?: string;
 	currentTool?: string;
 	currentToolArgs?: string;
+	/** Argument key selected for the display preview, when known. */
+	currentToolArgsKey?: string;
+	/** Intent the model attached to the current call; undefined when that call carried none. */
+	currentToolIntent?: string;
 	currentToolStartMs?: number;
-	recentTools: Array<{ tool: string; args: string; endMs: number }>;
+	recentTools: Array<{
+		tool: string;
+		args: string;
+		argsKey?: string;
+		intent?: string;
+		isError?: boolean;
+		endMs: number;
+	}>;
 	recentOutput: string[];
 	toolCount: number;
 	/** Count of assistant requests (assistant message_end events) across the run. Drives the soft request budget guard. */
@@ -1876,6 +2318,8 @@ export interface AgentProgress {
 	resolvedModelRoute?: string;
 	/** True when a live advisor was attached to this run's session, not merely enabled in settings. */
 	advisor?: boolean;
+	/** The agent's latest self-estimate of task completion (0–100), from the periodic `task.completionProbe` side request. */
+	completionPercent?: number;
 	/** Data extracted by registered subprocess tool handlers (keyed by tool name) */
 	extractedToolData?: Record<string, unknown[]>;
 	/**

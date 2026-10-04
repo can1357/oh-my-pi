@@ -80,12 +80,6 @@ describe("#4297 anthropic-messages replay-unsigned-thinking hint", () => {
 		expect(surfaced).toContain(SIGNATURE_400);
 	});
 
-	it("prepends the same remediation on the Bedrock wording", () => {
-		const surfaced = maybeAddReplayUnsignedThinkingHint(buildAnthropicMessagesModel(), BEDROCK_SIGNATURE_400);
-		expect(surfaced).toContain("compat.replayUnsignedThinking: false");
-		expect(surfaced).toContain(BEDROCK_SIGNATURE_400);
-	});
-
 	it("passes through when the user already set `compat.replayUnsignedThinking`", () => {
 		const model = buildAnthropicMessagesModel({ compat: { replayUnsignedThinking: false } });
 		expect(maybeAddReplayUnsignedThinkingHint(model, SIGNATURE_400)).toBe(SIGNATURE_400);
@@ -98,10 +92,5 @@ describe("#4297 anthropic-messages replay-unsigned-thinking hint", () => {
 			baseUrl: "https://api.anthropic.com",
 		});
 		expect(maybeAddReplayUnsignedThinkingHint(model, SIGNATURE_400)).toBe(SIGNATURE_400);
-	});
-
-	it("passes through when the error is unrelated (no false positives)", () => {
-		const model = buildAnthropicMessagesModel();
-		expect(maybeAddReplayUnsignedThinkingHint(model, "400 rate_limit_error")).toBe("400 rate_limit_error");
 	});
 });

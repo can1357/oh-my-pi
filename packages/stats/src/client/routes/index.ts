@@ -1,6 +1,6 @@
-export * from "./BehaviorRoute";
 export * from "./CostsRoute";
 export * from "./ErrorsRoute";
+export * from "./FrustrationRoute";
 export * from "./GainRoute";
 export * from "./ModelsRoute";
 export * from "./OverviewRoute";

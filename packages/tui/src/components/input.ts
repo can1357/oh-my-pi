@@ -2,6 +2,18 @@ import { BracketedPasteHandler, decodeReencodedPasteControls } from "../brackete
 import { getKeybindings } from "../keybindings";
 import { extractPrintableText, matchesKey } from "../keys";
 import { KillRing } from "../kill-ring";
+import type { TspInputProps } from "@oh-my-pi/pi-wire";
+import { node } from "../native/describe";
+import { sameProps } from "../native/memo";
+import { plainText } from "../native/spans";
+import {
+	clampTextOffset,
+	type DescribeContext,
+	type NativeNode,
+	type NativeTextEdit,
+	type NativeUiEvent,
+	resolveTextEdit,
+} from "../native/node";
 import { SpaceHoldGesture } from "../space-hold";
 import { type Component, CURSOR_MARKER, type Focusable } from "../tui";
 import { cursorColumnWindow } from "./scroll-viewport";
@@ -58,6 +70,8 @@ export class Input implements Component, Focusable {
 	prompt = "> ";
 	/** Render the editable value as bullets while retaining the real value internally. */
 	mask = false;
+	/** Dim hint a native terminal shows while the value is empty. */
+	placeholder: string | undefined;
 	onSubmit?: (value: string) => void;
 	onEscape?: () => void;
 	/** Space-bar push-to-talk; set its `handler` to enable it. */
@@ -81,9 +95,17 @@ export class Input implements Component, Focusable {
 	/** Code units of the current volatile speech-to-text preview (see {@link setVolatileText}). */
 	#volatileTextLen = 0;
 
+	#native?: { props: TspInputProps; node: NativeNode };
+
 	getValue(): string {
 		return this.#value;
 	}
+
+	/** The caret as a UTF-16 offset into {@link getValue}. */
+	getCursor(): number {
+		return this.#cursor;
+	}
+
 	/** Return bounded input content and cursor state for debug inspection. */
 	debugState(): Record<string, unknown> {
 		return {
@@ -112,7 +134,14 @@ export class Input implements Component, Focusable {
 		return this.#useTerminalCursor;
 	}
 
-	handleInput(data: string): void {
+	/**
+	 * Apply one key: the editor's text bindings (motion, deletion, kill ring,
+	 * undo), pastes and printable text. Returns whether the key was the
+	 * field's: false for keys it has no binding for, and for cancel/submit
+	 * without an `onEscape`/`onSubmit`, so a host (a list's search field) can
+	 * route everything else on.
+	 */
+	handleInput(data: string): boolean {
 		// Handle bracketed paste mode
 		const paste = this.#pasteHandler.process(data);
 		if (paste.handled) {
@@ -122,77 +151,79 @@ export class Input implements Component, Focusable {
 					this.handleInput(paste.remaining);
 				}
 			}
-			return;
+			return true;
 		}
 
 		// Space-hold push-to-talk: a sustained space bar starts/stops STT instead of typing spaces.
 		switch (this.spaceHold.process(matchesKey(data, "space"))) {
 			case "type":
 				this.#insertCharacter(" ");
-				return;
+				return true;
 			case "swallow":
-				return;
+				return true;
 		}
 
 		const kb = getKeybindings();
 
 		// Escape/Cancel
 		if (kb.matches(data, "tui.select.cancel")) {
-			if (this.onEscape) this.onEscape();
-			return;
+			if (!this.onEscape) return false;
+			this.onEscape();
+			return true;
 		}
 
 		// Undo
 		if (kb.matches(data, "tui.editor.undo")) {
 			this.#undo();
-			return;
+			return true;
 		}
 
 		// Submit
 		if (kb.matches(data, "tui.input.submit") || data === "\n") {
-			if (this.onSubmit) this.onSubmit(this.#value);
-			return;
+			if (!this.onSubmit) return false;
+			this.onSubmit(this.#value);
+			return true;
 		}
 
 		// Deletion
 		if (kb.matches(data, "tui.editor.deleteCharBackward")) {
 			this.#handleBackspace();
-			return;
+			return true;
 		}
 
 		if (kb.matches(data, "tui.editor.deleteCharForward")) {
 			this.#handleForwardDelete();
-			return;
+			return true;
 		}
 
 		if (kb.matches(data, "tui.editor.deleteWordBackward")) {
 			this.#deleteWordBackwards();
-			return;
+			return true;
 		}
 
 		if (kb.matches(data, "tui.editor.deleteWordForward")) {
 			this.#deleteWordForward();
-			return;
+			return true;
 		}
 
 		if (kb.matches(data, "tui.editor.deleteToLineStart")) {
 			this.#deleteToLineStart();
-			return;
+			return true;
 		}
 
 		if (kb.matches(data, "tui.editor.deleteToLineEnd")) {
 			this.#deleteToLineEnd();
-			return;
+			return true;
 		}
 
 		// Kill ring actions
 		if (kb.matches(data, "tui.editor.yank")) {
 			this.#yank();
-			return;
+			return true;
 		}
 		if (kb.matches(data, "tui.editor.yankPop")) {
 			this.#yankPop();
-			return;
+			return true;
 		}
 
 		// Cursor movement
@@ -204,7 +235,7 @@ export class Input implements Component, Focusable {
 				const lastGrapheme = graphemes[graphemes.length - 1];
 				this.#cursor -= lastGrapheme ? lastGrapheme.segment.length : 1;
 			}
-			return;
+			return true;
 		}
 
 		if (kb.matches(data, "tui.editor.cursorRight")) {
@@ -215,42 +246,92 @@ export class Input implements Component, Focusable {
 				const firstGrapheme = graphemes[0];
 				this.#cursor += firstGrapheme ? firstGrapheme.segment.length : 1;
 			}
-			return;
+			return true;
 		}
 
 		if (kb.matches(data, "tui.editor.cursorLineStart")) {
 			this.#lastAction = null;
 			this.#cursor = 0;
-			return;
+			return true;
 		}
 
 		if (kb.matches(data, "tui.editor.cursorLineEnd")) {
 			this.#lastAction = null;
 			this.#cursor = this.#value.length;
-			return;
+			return true;
 		}
 
 		if (kb.matches(data, "tui.editor.cursorWordLeft")) {
 			this.#moveWordBackwards();
-			return;
+			return true;
 		}
 
 		if (kb.matches(data, "tui.editor.cursorWordRight")) {
 			this.#moveWordForwards();
-			return;
+			return true;
 		}
 
 		// Regular character input, including Kitty CSI-u text-producing sequences.
 		const printableText = extractPrintableText(data);
-		if (printableText) {
-			this.#insertCharacter(printableText);
-		}
+		if (!printableText) return false;
+		this.#insertCharacter(printableText);
+		return true;
 	}
 
 	/** Apply terminal paste semantics to text from non-bracketed paste transports
 	 *  (e.g. kitty's OSC 5522 enhanced clipboard read). Mirrors `Editor.pasteText`. */
 	pasteText(text: string): void {
 		this.#handlePaste(text);
+	}
+
+	/** Terminal-side selection edits and undo on the `input` node (see {@link applyHostEdit}). */
+	handleNativeEvent(event: NativeUiEvent): void {
+		if (event.type === "edit") this.applyHostEdit(event);
+		else if (event.type === "undo") this.#undo();
+	}
+
+	/**
+	 * Apply an edit the terminal made over its own selection (TSP `edit`):
+	 * replace `[from, to)` with `text` (newlines stripped, as a paste) and put
+	 * the caret at `cursor`, as one undo unit. Offsets are in the described
+	 * text, so a masked field's count bullets, one per grapheme. Stale edits
+	 * (`len` no longer the described length) are dropped.
+	 */
+	applyHostEdit(edit: NativeTextEdit): void {
+		let valueEdit = edit;
+		if (this.mask) {
+			// Bullet offsets → value offsets through the grapheme starts.
+			const starts = Array.from(segmenter.segment(this.#value), grapheme => grapheme.index);
+			starts.push(this.#value.length);
+			const bullets = starts.length - 1;
+			if (edit.len !== bullets) return;
+			let from = clampTextOffset(edit.from, bullets);
+			let to = clampTextOffset(edit.to, bullets);
+			if (to < from) [from, to] = [to, from];
+			const text = typeof edit.text === "string" ? edit.text : "";
+			const cursor = clampTextOffset(edit.cursor, bullets - (to - from) + text.length);
+			const after = cursor - from - text.length;
+			valueEdit = {
+				from: starts[from]!,
+				to: starts[to]!,
+				text,
+				cursor:
+					cursor <= from
+						? starts[cursor]!
+						: after >= 0
+							? starts[from]! + text.length + starts[to + after]! - starts[to]!
+							: starts[from]! + cursor - from,
+				len: this.#value.length,
+			};
+		}
+		const resolved = resolveTextEdit(this.#value, valueEdit, toSingleLine);
+		if (!resolved) return;
+		this.#lastAction = null;
+		if (resolved.changed) {
+			this.#pushUndo();
+			this.#value = resolved.text;
+		}
+		this.#cursor = resolved.cursor;
 	}
 
 	/** Programmatically trigger submission (e.g. for voice submit). */
@@ -482,6 +563,34 @@ export class Input implements Component, Focusable {
 
 	invalidate(): void {
 		// No cached state to invalidate currently
+	}
+
+	/**
+	 * An `input` with the value, the caret as a UTF-16 offset and the prompt;
+	 * the terminal draws the caret, scrolls horizontally and places the IME.
+	 * A masked input sends one bullet per grapheme, with the caret mapped onto
+	 * them, so the secret never leaves the process.
+	 */
+	describe(_cx: DescribeContext): NativeNode {
+		let value = this.#value;
+		let cursor = this.#cursor;
+		if (this.mask) {
+			const graphemes = [...segmenter.segment(this.#value)];
+			value = "•".repeat(graphemes.length);
+			cursor = graphemes.filter(grapheme => grapheme.index < this.#cursor).length;
+		}
+		const prompt = plainText(this.prompt);
+		const props: TspInputProps = {
+			text: value,
+			cursor,
+			sendable: false,
+			prompt: prompt || undefined,
+			placeholder: this.placeholder,
+		};
+		if (this.#native && sameProps(this.#native.props, props)) return this.#native.node;
+		const described = node("input", props);
+		this.#native = { props, node: described };
+		return described;
 	}
 
 	render(width: number): readonly string[] {

@@ -221,6 +221,18 @@ pub fn compose_std_command<S: AsRef<OsStr>, SE: extensions::ShellExtensions>(
 	// Pass through args.
 	cmd.args(args);
 
+	// Apply `ulimit` overrides to the child only; the host keeps its own limits.
+	#[cfg(unix)]
+	if !context.shell.resource_limits().is_empty() {
+		let limits = context.shell.resource_limits().clone();
+		// SAFETY: runs in the forked child before exec; `apply_in_child` only
+		// issues `setrlimit` calls, which are async-signal-safe, and does not
+		// allocate.
+		unsafe {
+			cmd.pre_exec(move || limits.apply_in_child());
+		}
+	}
+
 	// Use the shell's current working dir.
 	cmd.current_dir(context.shell.working_dir());
 

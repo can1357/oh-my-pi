@@ -1,0 +1,100 @@
+--- a/src/bindgen_runtime/module_register.rs
++++ b/src/bindgen_runtime/module_register.rs
+@@ -197,6 +197,70 @@
+   })
+ }
+ 
++// The env that last registered on this OS thread and has not been torn down since:
++// `live_env_cleanup`, an env-cleanup hook, clears it at teardown. The per-thread slots
++// below (`REGISTERED_CLASSES`, `CURRENT_CUSTOM_GC_HANDLE`, the `Reflect` cache in
++// `error.rs`) assume one env per OS thread and simply overwrite the previous env's
++// entry on re-registration, because under that assumption the previous env is gone and
++// its teardown reclaimed everything. Bun breaks the assumption: `bun test --isolate`
++// (implied by `--parallel`) gives every test file a fresh global object and `napi_env`
++// on the same thread and never tears the old one down. The overwritten strong references
++// then pin every earlier realm (its global object and full module graph) for the life of
++// the process. A slot that still names a different env at registration therefore proves
++// that env is alive, and its handles are released through it (see
++// `release_superseded_env`). Under Node the slot is always cleared by teardown before a
++// new env registers on the thread, so this path never runs there.
++#[cfg(all(feature = "napi3", not(feature = "noop"), not(target_family = "wasm")))]
++thread_local! {
++  static LIVE_ENV: std::cell::Cell<sys::napi_env> = const { std::cell::Cell::new(ptr::null_mut()) };
++}
++
++#[cfg(all(feature = "napi3", not(feature = "noop"), not(target_family = "wasm")))]
++unsafe extern "C" fn live_env_cleanup(arg: *mut std::ffi::c_void) {
++  LIVE_ENV.with(|slot| {
++    if slot.get().cast::<std::ffi::c_void>() == arg {
++      slot.set(ptr::null_mut());
++    }
++  });
++}
++
++/// Marks `env` as this thread's live env and, when a different env that was never torn
++/// down still holds the slot, releases the per-thread handles that pin that env's realm:
++/// its class constructor references, its custom-GC threadsafe function, and its cached
++/// `Reflect` pair. Must run before any of those slots is overwritten for `env`.
++#[cfg(all(feature = "napi3", not(feature = "noop"), not(target_family = "wasm")))]
++fn release_superseded_env(env: sys::napi_env) {
++  let previous = LIVE_ENV.with(|slot| slot.replace(env));
++  if previous == env {
++    // Same env re-registering (`delete require.cache` + re-`require`): its hook is
++    // already installed, and Node aborts on a duplicate `(fn, arg)` pair.
++    return;
++  }
++  if !previous.is_null() {
++    REGISTERED_CLASSES.with(|cell| {
++      cell.borrow_mut(|map| {
++        for (_, ctor_ref) in map.drain() {
++          unsafe { sys::napi_delete_reference(previous, ctor_ref) };
++        }
++      })
++    });
++    #[cfg(feature = "napi4")]
++    if let Some(handle) = CURRENT_CUSTOM_GC_HANDLE.with(|c| c.borrow_mut().take()) {
++      let tsfn = handle.get_raw();
++      if !tsfn.is_null() {
++        // Abort first: values still holding this handle then take the `aborted` no-op
++        // drop path instead of calling into a threadsafe function that is closing.
++        handle.set_aborted();
++        unsafe {
++          sys::napi_release_threadsafe_function(tsfn, sys::ThreadsafeFunctionReleaseMode::abort)
++        };
++      }
++    }
++    crate::error::release_reflect_intrinsics(previous);
++  }
++  unsafe { sys::napi_add_env_cleanup_hook(env, Some(live_env_cleanup), env.cast()) };
++}
++
+ type RegisteredClasses = PersistedPerInstanceHashMap<
+   /* export name */ String,
+   /* constructor */ sys::napi_ref,
+@@ -857,6 +921,9 @@
+   // use-after-free this change exists to prevent. `create_custom_gc` only needs a
+   // valid `env` (it creates a dummy function + the per-env TSFN and never reads
+   // `exports`), so running it this early is safe.
++  #[cfg(all(feature = "napi3", not(target_family = "wasm")))]
++  release_superseded_env(env);
++
+   #[cfg(feature = "napi4")]
+   create_custom_gc(env);
+ 
+--- a/src/error.rs
++++ b/src/error.rs
+@@ -1018,6 +1018,14 @@
+   });
+ }
+ 
++/// Drops the cached `Reflect` pair if it belongs to `env`, a superseded env that was never
++/// torn down (see `release_superseded_env` in `module_register.rs`); napi calls through it
++/// are still legal.
++#[cfg(all(not(feature = "noop"), feature = "napi3", not(target_family = "wasm")))]
++pub(crate) fn release_reflect_intrinsics(env: sys::napi_env) {
++  unsafe { reflect_intrinsics_env_cleanup(env.cast()) };
++}
++
+ /// Env-teardown counterpart of [`cache_reflect_intrinsics_for_env`]: drops the
+ /// cached holder reference while the env can still delete it, and clears the
+ /// slot so a later env reusing this thread (an embedder reload) can never match

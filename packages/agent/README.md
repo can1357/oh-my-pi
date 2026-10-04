@@ -251,6 +251,10 @@ agent.followUp({
 Steering messages are checked after each tool call by default. Set `interruptMode` to `"wait"` to defer
 steering until the current turn completes.
 
+Hosts can use `setQueuedMessageGrouping((previous, next) => boolean)` to keep adjacent companion
+records and their prompt together in `one-at-a-time` mode. Without a grouping predicate, records
+remain separate. `replaceQueue("steering" | "followUp", messages)` replaces only the selected queue.
+
 ## Custom Message Types
 
 Extend `AgentMessage` via declaration merging:
@@ -462,7 +466,7 @@ const runCoverage = aggregateAgentRunCoverage(coverages);
 
 ### Tool status reporting
 
-`execute_tool` spans carry `pi.gen_ai.tool.status` ∈
+`execute_tool` spans carry `omp.gen_ai.tool.status` ∈
 `"ok" | "error" | "skipped" | "blocked" | "timeout" | "aborted"`.
 `beforeToolCall` blocks throw a distinguishable `ToolCallBlockedError`
 internally; the catch path reports `status: "blocked"` instead of conflating

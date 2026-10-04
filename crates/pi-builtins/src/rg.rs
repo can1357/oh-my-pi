@@ -24,7 +24,7 @@ use grep_regex::{RegexMatcher, RegexMatcherBuilder};
 use grep_searcher::{
 	BinaryDetection, Encoding, Searcher, SearcherBuilder, Sink, SinkContext, SinkFinish, SinkMatch,
 };
-use crate::host::{Host, StreamWriter, Utility};
+use crate::host::{Host, StreamWriter, Utility, forward_slash_display};
 
 use ignore::{
 	Match,
@@ -893,7 +893,7 @@ fn build_rust_matcher(patterns: &[String], cli: &Rg) -> Result<RegexMatcher, gre
 		.crlf(crlf);
 	if cli.null_data {
 		builder.line_terminator(Some(b'\0'));
-	} else if !cli.multiline {
+	} else if !cli.multiline && !crlf {
 		builder.line_terminator(Some(b'\n'));
 	}
 	builder.build_many(patterns)
@@ -1252,16 +1252,20 @@ fn build_walk(host: &mut Host, cli: &Rg, root: &Path) -> Result<RgWalk, String> 
 	Ok(RgWalk { request, filters })
 }
 
+/// Display spelling of a walked `path` under the `operand` it was found from
+/// (resolved to `root`), with `/` separators on Windows like the shell's other
+/// path-printing utilities.
 fn display_path(operand: &OsStr, root: &Path, path: &Path) -> PathBuf {
 	let rel = path.strip_prefix(root).unwrap_or(path);
 	if rel.as_os_str().is_empty() {
 		return PathBuf::from(operand);
 	}
-	if operand == OsStr::new(".") {
+	let display = if operand == OsStr::new(".") {
 		rel.to_path_buf()
 	} else {
 		Path::new(operand).join(rel)
-	}
+	};
+	forward_slash_display(&display).unwrap_or(display)
 }
 
 fn process_reader<M: Matcher, R: Read, W: Write>(
@@ -2018,6 +2022,15 @@ mod tests {
 		let (code, out, err) = run(&["-m1", "hit", "-"], "hit\nmiss\nhit\n");
 		assert_eq!(code, 0, "{err}");
 		assert_eq!(out, "hit\n");
+	}
+
+	#[test]
+	fn crlf_anchors_end_of_line_before_carriage_return() {
+		// Defends: `--crlf` must configure the matcher and searcher with the
+		// same terminator; a mismatch fails every search with a config error.
+		let (code, out, err) = run(&["--crlf", "-c", "x$", "-"], "ax\r\nbx\nc\r\n");
+		assert_eq!(code, 0, "{err}");
+		assert_eq!(out, "2\n");
 	}
 
 	#[test]

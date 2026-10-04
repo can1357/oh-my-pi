@@ -162,6 +162,12 @@ export interface CollabHostOptions {
 	 * Defaults to always ready.
 	 */
 	guestActionsReady?: () => boolean;
+	/**
+	 * Called once when the relay ends the room for good after it opened —
+	 * a non-retryable close or fatal socket failure (e.g. send backlog), not
+	 * `stop()`. Teardown has already begun; the owner may start a successor.
+	 */
+	onEnded?: () => void;
 }
 
 /**
@@ -173,6 +179,18 @@ export class CollabHostStoppedError extends Error {
 	constructor(message: string) {
 		super(message);
 		this.name = "CollabHostStoppedError";
+	}
+}
+
+/**
+ * `start()` rejects with this when the relay never opened the room: the first
+ * connection closed or timed out. The room was never joinable or published, so
+ * an owner may retry it without guests or the registry having seen it.
+ */
+export class CollabRelayUnavailableError extends Error {
+	constructor(message: string) {
+		super(message);
+		this.name = "CollabRelayUnavailableError";
 	}
 }
 
@@ -189,6 +207,7 @@ export class CollabHost {
 	readonly #instanceId: string;
 	readonly #generation: number;
 	readonly #guestActionsReady: () => boolean;
+	readonly #onEnded: (() => void) | undefined;
 	readonly #access: CollabAccess;
 	#relayConnected = false;
 	#registryPublication: CollabHostPublication | null = null;
@@ -233,6 +252,7 @@ export class CollabHost {
 		this.#generation = options.generation ?? 1;
 		this.#access = options.access ?? "control";
 		this.#guestActionsReady = options.guestActionsReady ?? (() => true);
+		this.#onEnded = options.onEnded;
 		// The room mirrors the session that is active when it is created; the
 		// frame guard and the registry snapshot compare against this from then on.
 		this.#sessionId = ctx.sessionManager.getSessionId();
@@ -389,9 +409,11 @@ export class CollabHost {
 		};
 		socket.onClose = (reason, willReconnect) => {
 			this.#relayConnected = false;
-			if (this.#stopped) return;
+			if (this.#stopping || this.#stopped) return;
 			if (!opened) {
-				firstOpen.reject(new Error(reason));
+				// A close the socket would retry (unreachable relay, dropped handshake)
+				// means the relay is unavailable; a fatal one means it refused the room.
+				firstOpen.reject(willReconnect ? new CollabRelayUnavailableError(reason) : new Error(reason));
 				return;
 			}
 			if (willReconnect) {
@@ -399,12 +421,13 @@ export class CollabHost {
 			} else {
 				void this.#teardown();
 				this.#ctx.session.emitNotice("warning", `Collab ended: ${reason}`, "collab");
+				this.#onEnded?.();
 			}
 		};
 		socket.connect();
 
 		const timeout = setTimeout(
-			() => firstOpen.reject(new Error("timed out connecting to relay")),
+			() => firstOpen.reject(new CollabRelayUnavailableError("timed out connecting to relay")),
 			CONNECT_TIMEOUT_MS,
 		);
 		try {

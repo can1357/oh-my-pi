@@ -61,7 +61,7 @@ const UNSIGNABLE: Record<string, true> = {
  * `ArrayBuffer`, which is what `crypto.subtle.{digest,sign,importKey}` requires
  * under the strict TS DOM typings. No-op when already strict.
  */
-function asStrict(bytes: Uint8Array): Uint8Array<ArrayBuffer> {
+export function asStrict(bytes: Uint8Array): Uint8Array<ArrayBuffer> {
 	if (bytes.buffer instanceof ArrayBuffer && bytes.byteOffset === 0 && bytes.byteLength === bytes.buffer.byteLength) {
 		return bytes as Uint8Array<ArrayBuffer>;
 	}

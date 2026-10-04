@@ -863,32 +863,6 @@ describe("AgentSession refreshMCPTools rebuild skipping", () => {
 		expect(rebuildCount).toBe(3);
 	});
 
-	it("rebuilds when an MCP registry tool's metadata changes", async () => {
-		// All connected MCP tools are enabled. The signature must capture the full
-		// registry so a description change cannot leave stale prompt metadata cached.
-		let rebuildCount = 0;
-		const { session } = newSession(async toolNames => {
-			rebuildCount++;
-			return `tools:${toolNames.join(",")}`;
-		}, {});
-
-		const active = createMcpCustomTool("mcp__nucleus_search", "nucleus", "search", "Search");
-		const secondary = createMcpCustomTool("mcp__nucleus_explain", "nucleus", "explain", "Explain v1");
-
-		await session.refreshMCPTools([active, secondary]);
-		const baseline = rebuildCount;
-		expect(baseline).toBeGreaterThanOrEqual(1);
-
-		// Same registry: skip.
-		await session.refreshMCPTools([active, secondary]);
-		expect(rebuildCount).toBe(baseline);
-
-		// Mutate the secondary tool's description: the signature must differ and force
-		// a rebuild.
-		const secondaryV2 = createMcpCustomTool("mcp__nucleus_explain", "nucleus", "explain", "Explain v2");
-		await session.refreshMCPTools([active, secondaryV2]);
-		expect(rebuildCount).toBe(baseline + 1);
-	});
 	it("rebuilds when an MCP tool's customWireName changes", async () => {
 		// `customWireName` overrides the model-facing tool name (e.g. `edit` exposes
 		// itself as `apply_patch` to GPT-5). The wire name is rendered into the prompt

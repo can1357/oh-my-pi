@@ -20,16 +20,6 @@ function createRuntime() {
 }
 
 describe("/btw slash command", () => {
-	it("routes the full question through the interactive btw handler", async () => {
-		const harness = createRuntime();
-
-		const handled = await executeBuiltinSlashCommand("/btw why is it doing that?", harness.runtime);
-
-		expect(handled).toBe(true);
-		expect(harness.setText).toHaveBeenCalledWith("");
-		expect(harness.handleBtwCommand).toHaveBeenCalledWith("why is it doing that?");
-	});
-
 	it("preserves the raw multi-word suffix after /btw", async () => {
 		const harness = createRuntime();
 

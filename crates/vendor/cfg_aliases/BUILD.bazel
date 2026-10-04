@@ -57,6 +57,7 @@ rust_library(
         "@@//bazel/triples:aarch64-apple-darwin": [],
         "@@//bazel/triples:aarch64-unknown-linux-gnu": [],
         "@@//bazel/triples:aarch64-unknown-linux-musl": [],
+        "@@//bazel/triples:aarch64-pc-windows-msvc": [],
         "@@//bazel/triples:x86_64-apple-darwin": [],
         "@@//bazel/triples:x86_64-pc-windows-msvc": [],
         "@@//bazel/triples:x86_64-unknown-linux-gnu": [],

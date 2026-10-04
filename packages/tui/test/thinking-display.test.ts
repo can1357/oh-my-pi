@@ -1,5 +1,9 @@
 import { describe, expect, it } from "bun:test";
-import { canonicalizeMessage, formatThinkingForDisplay } from "@oh-my-pi/pi-tui/chat/thinking-display";
+import {
+	canonicalizeMessage,
+	formatThinkingForDisplay,
+	resetThinkingDisplayCacheForTests,
+} from "@oh-my-pi/pi-tui/chat/thinking-display";
 
 describe("canonicalizeMessage", () => {
 	it("returns empty string for undefined, empty, or whitespace-only", () => {
@@ -45,10 +49,8 @@ const STREAM_FIXTURES = [
 ];
 
 describe("formatThinkingForDisplay incremental streaming", () => {
-	// A text that cannot be a prefix of any fixture forces the next call to
-	// take the full-recompute fallback, giving a cold-cache reference value.
-	const DIRTY = "\u0000dirty\u0000\n<!--";
-
+	// Resetting the memo forces the next call to take the full-recompute
+	// path, giving a cold-cache reference value.
 	for (const proseOnly of [false, true]) {
 		for (const [idx, fixture] of STREAM_FIXTURES.entries()) {
 			it(`byte-identical to full recompute at every split point (mode=${proseOnly ? "prose" : "raw"}, fixture ${idx})`, () => {
@@ -56,13 +58,13 @@ describe("formatThinkingForDisplay incremental streaming", () => {
 				// Reference: cold-start full recompute for every prefix.
 				const expected: string[] = [];
 				for (let i = 0; i <= n; i++) {
-					formatThinkingForDisplay(DIRTY, proseOnly);
+					resetThinkingDisplayCacheForTests();
 					expected[i] = formatThinkingForDisplay(fixture.slice(0, i), proseOnly);
 				}
 				// For every split point, feed the incremental stream up to it
 				// and compare every intermediate and final output.
 				for (let i = 1; i <= n; i++) {
-					formatThinkingForDisplay(DIRTY, proseOnly);
+					resetThinkingDisplayCacheForTests();
 					for (let j = 1; j <= i; j++) {
 						expect(formatThinkingForDisplay(fixture.slice(0, j), proseOnly)).toBe(expected[j]!);
 					}
@@ -98,9 +100,6 @@ describe("formatThinkingForDisplay append streaming", () => {
 			texts.push(parts.join(""));
 		}
 	}
-	// Carries `<!--` so the post-stream verification below recomputes from
-	// scratch instead of answering from the identity memo.
-	const DIRTY_PERF = "\u0000perf-dirty\u0000\n<!--";
 
 	it(`streamed output stays byte-identical to a cold recompute (${TICKS} ticks, raw + prose)`, () => {
 		for (const proseOnly of [false, true]) {
@@ -109,9 +108,9 @@ describe("formatThinkingForDisplay append streaming", () => {
 				lastOut = formatThinkingForDisplay(texts[t]!, proseOnly);
 			}
 			// The streamed result must match one cold recompute of the full
-			// text; the poison call retires the memo slot first so the final
+			// text; the reset retires every memo slot first so the final
 			// comparison cannot answer from cache.
-			formatThinkingForDisplay(DIRTY_PERF, proseOnly);
+			resetThinkingDisplayCacheForTests();
 			expect(lastOut).toBe(formatThinkingForDisplay(texts[TICKS - 1]!, proseOnly));
 		}
 	});
@@ -128,6 +127,41 @@ describe("formatThinkingForDisplay append streaming", () => {
 		}
 	});
 });
+
+describe("formatThinkingForDisplay interleaved blocks", () => {
+	// One message streams several thinking blocks, and every tick formats each
+	// of them in turn. Streams share leading text (one stream's early state is
+	// a prefix of another's), one is comment-free (raw identity shortcut), and
+	// there are more streams than memo slots, so hits, appends, retired-slot
+	// reuse and LRU eviction all interleave.
+	const STREAMS = [
+		["Plan:\n", "check the ", "fence\n", "```ts\n", "let x = 1;\n", "```\n", "done.\n", "<!-- -->\n"],
+		["Plan:", "\n", "other ", "branch\n", "<!--", " -->\n", "~~~\n", "tilde\n"],
+		["plain ", "comment-free ", "raw text\n", "```\n", "code\n", "```\n", "more\n", "end"],
+		["<!--\n", "note\n", "**Head**\n", "\n", "<!-- -->\n", "body ", "text.\n", "tail"],
+		["x", "y", "z\n", "```\n", "a\n", "b\n", "```\n", "."],
+	];
+
+	for (const proseOnly of [false, true]) {
+		it(`every interleaved step matches a cold recompute (mode=${proseOnly ? "prose" : "raw"})`, () => {
+			const prefixes = STREAMS.map(chunks => chunks.map((_, i) => chunks.slice(0, i + 1).join("")));
+			const cold = prefixes.map(texts =>
+				texts.map(text => {
+					resetThinkingDisplayCacheForTests();
+					return formatThinkingForDisplay(text, proseOnly);
+				}),
+			);
+			resetThinkingDisplayCacheForTests();
+			for (let tick = 0; tick < 8; tick++) {
+				for (let s = 0; s < STREAMS.length; s++) {
+					// Twice per tick, like the reveal count + slice + render passes.
+					expect(formatThinkingForDisplay(prefixes[s]![tick]!, proseOnly)).toBe(cold[s]![tick]!);
+					expect(formatThinkingForDisplay(prefixes[s]![tick]!, proseOnly)).toBe(cold[s]![tick]!);
+				}
+			}
+		});
+	}
+});
 describe("formatThinkingForDisplay adversarial append detection", () => {
 	// The retired spot-check detector anchored on {first byte, midpoint,
 	// trailing 32-byte window}, leaving positions 1..seam-33 unchecked whenever
@@ -137,7 +171,6 @@ describe("formatThinkingForDisplay adversarial append detection", () => {
 	// committed prefix resumed from the unmutated seed.
 	const GAP_SEED_PROSE = `I${"B".repeat(40)}\n\`\`\`\ncode\nX`;
 	const GAP_SEED_RAW = `I${"B".repeat(40)}\n<!-- -->\nplain tail`;
-	const POISON_GAP = "\u0000gap-poison\u0000\n<!--";
 	const SEAM = 42;
 
 	for (const proseOnly of [false, true]) {
@@ -145,9 +178,9 @@ describe("formatThinkingForDisplay adversarial append detection", () => {
 		it(`mutation anywhere in [1, seam) matches cold recompute (mode=${proseOnly ? "prose" : "raw"}, incl. retired gap [1, ${SEAM - 33}])`, () => {
 			for (let p = 1; p < SEAM; p++) {
 				const mutant = `${seed.slice(0, p)}${seed.charAt(p) === "Z" ? "Q" : "Z"}${seed.slice(p + 1)} more`;
-				formatThinkingForDisplay(POISON_GAP, proseOnly);
+				resetThinkingDisplayCacheForTests();
 				const cold = formatThinkingForDisplay(mutant, proseOnly);
-				formatThinkingForDisplay(POISON_GAP, proseOnly);
+				resetThinkingDisplayCacheForTests();
 				formatThinkingForDisplay(seed, proseOnly);
 				expect(formatThinkingForDisplay(mutant, proseOnly)).toBe(cold);
 			}
@@ -156,8 +189,6 @@ describe("formatThinkingForDisplay adversarial append detection", () => {
 });
 
 describe("formatThinkingForDisplay raw identity shortcut slot hygiene", () => {
-	const POISON_SHORTCUT = "\u0000shortcut-poison\u0000\n<!--";
-
 	it("shortcut records the slot but never leaves a resumable checkpoint", () => {
 		// Open fence behind an earlier newline, no comment yet: the raw
 		// identity shortcut fires and records the slot.
@@ -167,15 +198,15 @@ describe("formatThinkingForDisplay raw identity shortcut slot hygiene", () => {
 		// "not in fence" would drop it. The cleared checkpoint forces a
 		// recompute that matches the cold reference.
 		const grown = `${base}\n<!-- -->`;
-		formatThinkingForDisplay(POISON_SHORTCUT, false);
+		resetThinkingDisplayCacheForTests();
 		const coldGrown = formatThinkingForDisplay(grown, false);
 		expect(coldGrown).toContain("<!-- -->");
-		formatThinkingForDisplay(POISON_SHORTCUT, false);
+		resetThinkingDisplayCacheForTests();
 		formatThinkingForDisplay(base, false);
 		expect(formatThinkingForDisplay(grown, false)).toBe(coldGrown);
 
 		// An exact repeat of a shortcut text is served by the recorded memo.
-		formatThinkingForDisplay(POISON_SHORTCUT, false);
+		resetThinkingDisplayCacheForTests();
 		const once = formatThinkingForDisplay(base, false);
 		expect(formatThinkingForDisplay(base, false)).toBe(once);
 	});
@@ -187,8 +218,6 @@ describe("formatThinkingForDisplay seam-transition battery", () => {
 	// the comment marker appears only in the tail, so raw mode hands off from
 	// the identity shortcut to a folding state mid-stream. EVERY split point
 	// must match the cold recompute.
-	const POISON_BATTERY = "\u0000battery-poison\u0000\n<!--";
-
 	for (const proseOnly of [false, true]) {
 		it(`byte-identical at every split point across cap/fence/marker transitions (mode=${proseOnly ? "prose" : "raw"})`, () => {
 			const fixture = `${"x".repeat(8300)}\n\`\`\`js\nstep one\nstep two\n\`\`\`\ntail prose.\n<!-- -->\nappended`;
@@ -196,10 +225,10 @@ describe("formatThinkingForDisplay seam-transition battery", () => {
 			// oxlint-disable-next-line unicorn/no-new-array -- length preallocation
 			const refs: string[] = new Array(n + 1);
 			for (let i = 0; i <= n; i++) {
-				formatThinkingForDisplay(POISON_BATTERY, proseOnly);
+				resetThinkingDisplayCacheForTests();
 				refs[i] = formatThinkingForDisplay(fixture.slice(0, i), proseOnly);
 			}
-			formatThinkingForDisplay(POISON_BATTERY, proseOnly);
+			resetThinkingDisplayCacheForTests();
 			for (let i = 1; i <= n; i++) {
 				expect(formatThinkingForDisplay(fixture.slice(0, i), proseOnly)).toBe(refs[i]);
 			}
@@ -215,7 +244,6 @@ describe("formatThinkingForDisplay no-newline scaling", () => {
 	// asymptotics for this pathological shape, bounded per call. The
 	// bounded-cost property itself is benchmarked (see PR), not asserted here.
 	const NL_FREE_CHUNKS = ["word ", "token ", "and ", "more "];
-	const POISON_NL = "\u0000nl-poison\u0000\n<!--";
 	const buildTexts = (ticks: number, chunk?: string) => {
 		const parts: string[] = [];
 		const texts: string[] = [];
@@ -235,9 +263,9 @@ describe("formatThinkingForDisplay no-newline scaling", () => {
 			const texts = buildTexts(spec.ticks, spec.chunk);
 			let lastOut = "";
 			for (const text of texts) lastOut = formatThinkingForDisplay(text, true);
-			// Byte-identical through the cap transition; the poison call
-			// retires the memo slot so the comparison recomputes from scratch.
-			formatThinkingForDisplay(POISON_NL, true);
+			// Byte-identical through the cap transition; the reset retires
+			// every memo slot so the comparison recomputes from scratch.
+			resetThinkingDisplayCacheForTests();
 			expect(lastOut).toBe(formatThinkingForDisplay(texts[texts.length - 1]!, true));
 		}
 	});
@@ -247,7 +275,7 @@ describe("formatThinkingForDisplay no-newline scaling", () => {
 		const final = texts[texts.length - 1]!;
 		let out = "";
 		for (const text of texts) out = formatThinkingForDisplay(text, true);
-		formatThinkingForDisplay(POISON_NL, true);
+		resetThinkingDisplayCacheForTests();
 		expect(out).toBe(formatThinkingForDisplay(final, true));
 	});
 });
@@ -257,8 +285,7 @@ describe("formatThinkingForDisplay adversarial differential fuzz", () => {
 	// two retired blind spots: mutations diverging inside the previously
 	// unchecked seam-gap region, and no-newline chains long enough to cross
 	// the resume cap. Every step judges the LIVE slot against a freshly
-	// poisoned cold reference.
-	const POISON_FUZZ = "\u0000fuzz-poison\u0000\n<!--";
+	// reset cold reference.
 	const FRAGMENTS = [
 		"word ",
 		"plan:\n",
@@ -318,7 +345,7 @@ describe("formatThinkingForDisplay adversarial differential fuzz", () => {
 					if (!text) continue;
 
 					const actual = formatThinkingForDisplay(text, proseOnly);
-					formatThinkingForDisplay(POISON_FUZZ, proseOnly);
+					resetThinkingDisplayCacheForTests();
 					const expected = formatThinkingForDisplay(text, proseOnly);
 					checks++;
 					if (actual !== expected && failures.length < 5) {
