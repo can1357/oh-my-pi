@@ -326,6 +326,9 @@
 ### Removed
 
 - Removed the legacy TinyTitleDownloadProgress overlay in favor of the centralized agent HUD.
+### Added
+
+- Added `tui.showLinkUrl` setting and `/link-url` command to hide the URL shown after named markdown links ([#13162](https://github.com/can1357/oh-my-pi/pull/13162) by [@pavel-kalmykov](https://github.com/pavel-kalmykov))
 
 ## [18.3.1] - 2026-09-25
 

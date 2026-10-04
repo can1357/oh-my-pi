@@ -1595,6 +1595,81 @@ bar`,
 			).toBeTruthy();
 		});
 
+		it("should keep the label hyperlinked when the URL suffix is disabled", () => {
+			const markdown = new Markdown("[click here](https://example.com)", 0, 0, defaultMarkdownTheme);
+			markdown.linkUrls = false;
+
+			const output = markdown.render(80).join("\n");
+			const plain = stripTerminalSequences(output);
+			expect(plain.includes("click here"), "Should contain link text").toBeTruthy();
+			expect(plain.includes("(https://example.com)"), "Should not show URL in parentheses").toBeFalsy();
+			expect(output.includes("\x1b]8;;https://example.com\x07"), "Label should stay hyperlinked").toBeTruthy();
+		});
+
+		it("keeps the URL suffix on terminals that cannot render OSC 8", () => {
+			const previousHyperlinks = TERMINAL.hyperlinks;
+			TERMINAL.hyperlinks = false;
+			try {
+				const markdown = new Markdown(
+					"[my internal notes](artifact://notes/xyz)",
+					0,
+					0,
+					defaultMarkdownTheme,
+				);
+				markdown.linkUrls = false;
+
+				const plain = stripTerminalSequences(markdown.render(80).join("\n"));
+				expect(plain.includes("my internal notes"), "Should contain link text").toBeTruthy();
+				expect(plain.includes("(artifact://notes/xyz)"), "Suffix keeps the target visible without OSC 8").toBeTruthy();
+			} finally {
+				TERMINAL.hyperlinks = previousHyperlinks;
+			}
+		});
+
+		it("renders two concurrently configured renderers independently", () => {
+			const showing = new Markdown("[click here](https://example.com)", 0, 0, defaultMarkdownTheme);
+			const hiding = new Markdown("[click here](https://example.com)", 0, 0, defaultMarkdownTheme);
+			hiding.linkUrls = false;
+
+			const showingText = stripTerminalSequences(showing.render(80).join("\n"));
+			const hidingText = stripTerminalSequences(hiding.render(80).join("\n"));
+
+			expect(showingText.includes("(https://example.com)"), "Default instance keeps the suffix").toBeTruthy();
+			expect(hidingText.includes("(https://example.com)"), "Hidden instance drops the suffix").toBeFalsy();
+			expect(hidingText.includes("click here"), "Hidden instance keeps the label").toBeTruthy();
+		});
+
+		it("keeps a wrapped named link hyperlinked with the URL suffix shown", () => {
+			const url = "https://example.com/really/long/path/that/wraps/at/narrow/width";
+			const markdown = new Markdown(
+				`Read [the documentation pages](${url}) before starting`,
+				0,
+				0,
+				defaultMarkdownTheme,
+			);
+
+			const lines = markdown.render(32);
+			const wrappedRows = lines.filter(line => inspectHyperlinks(line).targets.includes(url));
+			expect(wrappedRows.length, "Wrapped rows stay inside the link").toBeGreaterThan(0);
+			expect(stripTerminalSequences(lines.join(" "))).toContain("(https://example.com");
+		});
+
+		it("keeps a wrapped named link hyperlinked with the URL suffix hidden", () => {
+			const url = "https://example.com/really/long/path/that/wraps/at/narrow/width";
+			const markdown = new Markdown(
+				`Read [the documentation pages](${url}) before starting`,
+				0,
+				0,
+				defaultMarkdownTheme,
+			);
+			markdown.linkUrls = false;
+
+			const lines = markdown.render(32);
+			const wrappedRows = lines.filter(line => inspectHyperlinks(line).targets.includes(url));
+			expect(wrappedRows.length, "Wrapped rows stay inside the link without the suffix").toBeGreaterThan(0);
+			expect(stripTerminalSequences(lines.join(" "))).not.toContain("https://example.com");
+		});
+
 		it("does not autolink www. glued to a path separator (issue #5652)", () => {
 			const filePath = "~/meta/www.share/blog/A5-memory-safety-type-system/index.dj";
 			const markdown = new Markdown(filePath, 0, 0, defaultMarkdownTheme);

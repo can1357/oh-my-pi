@@ -204,7 +204,9 @@ export class CommandController {
 
 	/** A titled markdown report; see {@link showCommandReport}. */
 	#showMarkdownPanel(title: string, markdown: string): void {
-		this.showCommandReport({ title, body: new Markdown(markdown.trim(), 0, 0, getMarkdownTheme()) });
+		const md = new Markdown(markdown.trim(), 0, 0, getMarkdownTheme());
+		md.linkUrls = this.ctx.linkUrls;
+		this.showCommandReport({ title, body: md });
 	}
 
 	async #restoreAfterMoveFailure(

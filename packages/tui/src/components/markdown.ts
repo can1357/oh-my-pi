@@ -1765,6 +1765,7 @@ interface RenderSignature {
 	defaultTextStyleId: number;
 	imageProtocol: string;
 	hyperlinks: boolean;
+	linkUrls: boolean;
 	textSizing: boolean;
 	bgColorProbe: string;
 	headingProbe: string;
@@ -1917,6 +1918,9 @@ export class Markdown implements Component {
 	#cachedWidth?: number;
 	#cachedLines?: readonly string[];
 	#transientRenderCache = false;
+
+	/** Whether named links append their target URL in parentheses (`tui.showLinkUrl`). */
+	linkUrls = true;
 
 	// Streaming-lex cache: the largest blank-line-bounded prefix of #text whose
 	// block tokens are frozen, plus those tokens. marked has no resumable lexer,
@@ -2680,6 +2684,7 @@ export class Markdown implements Component {
 			defaultTextStyleId: this.#defaultTextStyle ? objectId(this.#defaultTextStyle) : -1,
 			imageProtocol: TERMINAL.imageProtocol ?? "",
 			hyperlinks: TERMINAL.hyperlinks,
+			linkUrls: this.linkUrls,
 			textSizing: TERMINAL.textSizing,
 			bgColorProbe,
 			headingProbe,
@@ -2692,7 +2697,7 @@ export class Markdown implements Component {
 	}
 
 	#renderCacheKey(normalizedText: string, signature: RenderSignature): string {
-		return `${normalizedText}\x00${signature.width}\x00${signature.paddingX}\x00${signature.paddingY}\x00${signature.codeBlockIndent}\x00${signature.themeId}\x00${signature.defaultTextStyleId}\x00${signature.imageProtocol}\x00${signature.hyperlinks ? 1 : 0}\x00${signature.textSizing ? 1 : 0}\x00${signature.bgColorProbe}\x00${signature.headingProbe}\x00${signature.symbolsProbe}`;
+		return `${normalizedText}\x00${signature.width}\x00${signature.paddingX}\x00${signature.paddingY}\x00${signature.codeBlockIndent}\x00${signature.themeId}\x00${signature.defaultTextStyleId}\x00${signature.imageProtocol}\x00${signature.hyperlinks ? 1 : 0}\x00${signature.linkUrls ? 1 : 0}\x00${signature.textSizing ? 1 : 0}\x00${signature.bgColorProbe}\x00${signature.headingProbe}\x00${signature.symbolsProbe}`;
 	}
 
 	#renderStreamingContentLines(
@@ -2767,6 +2772,7 @@ export class Markdown implements Component {
 		if (cache.defaultTextStyleId !== signature.defaultTextStyleId) return undefined;
 		if (cache.imageProtocol !== signature.imageProtocol) return undefined;
 		if (cache.hyperlinks !== signature.hyperlinks) return undefined;
+		if (cache.linkUrls !== signature.linkUrls) return undefined;
 		if (cache.textSizing !== signature.textSizing) return undefined;
 		if (cache.bgColorProbe !== signature.bgColorProbe) return undefined;
 		if (cache.headingProbe !== signature.headingProbe) return undefined;
@@ -2857,6 +2863,7 @@ export class Markdown implements Component {
 		if (cache.defaultTextStyleId !== signature.defaultTextStyleId) return start;
 		if (cache.imageProtocol !== signature.imageProtocol) return start;
 		if (cache.hyperlinks !== signature.hyperlinks) return start;
+		if (cache.linkUrls !== signature.linkUrls) return start;
 		if (cache.textSizing !== signature.textSizing) return start;
 		if (cache.bgColorProbe !== signature.bgColorProbe) return start;
 		if (cache.headingProbe !== signature.headingProbe) return start;
@@ -3125,6 +3132,7 @@ export class Markdown implements Component {
 			cache.defaultTextStyleId === signature.defaultTextStyleId &&
 			cache.imageProtocol === signature.imageProtocol &&
 			cache.hyperlinks === signature.hyperlinks &&
+			cache.linkUrls === signature.linkUrls &&
 			cache.textSizing === signature.textSizing &&
 			cache.bgColorProbe === signature.bgColorProbe &&
 			cache.headingProbe === signature.headingProbe &&
@@ -3639,11 +3647,17 @@ export class Markdown implements Component {
 					// For mailto: links, strip the prefix before comparing (autolinked emails have
 					// text="foo@bar.com" but href="mailto:foo@bar.com")
 					const hrefForComparison = href.startsWith("mailto:") ? href.slice(7) : href;
-					if (!href || token.text === href || token.text === hrefForComparison)
-						result += clickableLinkText + stylePrefix;
-					else {
+					const labelCarriesHref = token.text === href || token.text === hrefForComparison;
+					// With linkUrls off the label keeps its OSC 8 hyperlink, so the
+					// target stays reachable on hover wherever the terminal renders
+					// OSC 8. On a terminal that cannot, dropping the suffix would
+					// lose the destination entirely: keep it there.
+					const showUrlSuffix = href && (this.linkUrls ? !labelCarriesHref : !TERMINAL.hyperlinks);
+					if (showUrlSuffix) {
 						const styledLinkUrl = this.#theme.linkUrl(`(${href})`);
 						result += `${clickableLinkText} ${formatHyperlink(styledLinkUrl, target)}${stylePrefix}`;
+					} else {
+						result += clickableLinkText + stylePrefix;
 					}
 					break;
 				}

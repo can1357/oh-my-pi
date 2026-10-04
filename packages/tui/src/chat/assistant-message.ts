@@ -225,6 +225,8 @@ function lerpHex(from: string, to: string, t: number): string {
  */
 export class AssistantMessageComponent extends Container {
 	readonly transcriptBlockMode = "appendOnly" as const;
+	/** Whether named links append their target URL in parentheses (`tui.showLinkUrl`). */
+	linkUrls: boolean;
 	#contentContainer: Container;
 	#markerSlot: Container;
 	#cacheMarker?: CacheInvalidationMarkerComponent;
@@ -465,6 +467,7 @@ export class AssistantMessageComponent extends Container {
 		imageBudget?: ImageBudget,
 		proseOnlyThinking = true,
 		linkTargets?: ReadonlyMap<string, string>,
+		linkUrls = true,
 	) {
 		super();
 		this.#hideThinkingBlock = hideThinkingBlock;
@@ -472,6 +475,7 @@ export class AssistantMessageComponent extends Container {
 		this.#thinkingRenderers = thinkingRenderers;
 		this.#imageBudget = imageBudget;
 		this.#proseOnlyThinking = proseOnlyThinking;
+		this.linkUrls = linkUrls;
 
 		ensureThemeSync();
 		this.#transcriptBlockFinalized = message !== undefined;
@@ -1173,19 +1177,22 @@ export class AssistantMessageComponent extends Container {
 
 	/** Constructor args mirror the live child Markdown so stable rows prefix the block render. */
 	#createStableMarkdown(kind: StablePartKind, text: string): Markdown {
-		return kind === "text"
-			? new Markdown(
-					text,
-					1,
-					0,
-					this.#getProseTheme(),
-					this.#textColorTransform ? { color: this.#textColorTransform } : undefined,
-					0,
-				)
-			: new Markdown(text, 1, 0, getMarkdownTheme(), {
-					color: (value: string) => theme.fg("thinkingText", value),
-					italic: true,
-				});
+		const markdown =
+			kind === "text"
+				? new Markdown(
+						text,
+						1,
+						0,
+						this.#getProseTheme(),
+						this.#textColorTransform ? { color: this.#textColorTransform } : undefined,
+						0,
+					)
+				: new Markdown(text, 1, 0, getMarkdownTheme(), {
+						color: (value: string) => theme.fg("thinkingText", value),
+						italic: true,
+					});
+		markdown.linkUrls = this.linkUrls;
+		return markdown;
 	}
 
 	#stableLedger(width: number): StableRowLedger {
@@ -1602,6 +1609,7 @@ export class AssistantMessageComponent extends Container {
 				const trimmed = content.text.trim();
 				const mdOptions = this.#textColorTransform ? { color: this.#textColorTransform } : undefined;
 				const md = new Markdown(trimmed, 1, 0, this.#getProseTheme(), mdOptions, 0);
+				md.linkUrls = this.linkUrls;
 				this.#contentContainer.addChild(md);
 				this.#emergencyText = md;
 				captureItems?.push({ md, contentIndex: i, blockType: "text", lastText: trimmed });
@@ -1630,6 +1638,7 @@ export class AssistantMessageComponent extends Container {
 					color: (text: string) => theme.fg("thinkingText", text),
 					italic: true,
 				});
+				md.linkUrls = this.linkUrls;
 				md.transientRenderCache = this.#lastUpdateTransient;
 				this.#contentContainer.addChild(md);
 				captureItems?.push({ md, contentIndex: i, blockType: "thinking", lastText: thinkingText });
