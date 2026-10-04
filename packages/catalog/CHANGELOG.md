@@ -52,6 +52,8 @@
 
 - Added the Infron provider, an OpenAI-compatible gateway serving GLM, GPT, Claude, Gemini, DeepSeek, and more from `llm.onerouter.pro/v1`: `/login infron` with an API key, `INFRON_API_KEY` env fallback, live chat-model discovery with native pricing and limits, and bundled fallback rows ([#14220](https://github.com/can1357/oh-my-pi/pull/14220) by [@iamshakibali](https://github.com/iamshakibali)).
 
+## [18.6.0] - 2026-10-03
+
 ### Fixed
 
 - Fixed DeepSeek V4 model IDs and the V4.1 Flash alias lacking version information in model identity and dashboards ([#14194](https://github.com/can1357/oh-my-pi/issues/14194)).
