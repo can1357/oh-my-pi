@@ -839,37 +839,40 @@ describe("StatusLineComponent git-status refresh backs off on sustained cost", (
 		};
 
 		try {
-			// Call 1: a one-off 2500ms call. The previous-elapsed sample starts at
-			// 0, so sustainedMs = min(2500, 0) = 0 and the TTL stays at its 1s
+			// Call 1: a one-off 5000ms call. The previous-elapsed sample starts at
+			// 0, so sustainedMs = min(5000, 0) = 0 and the TTL stays at its 10s
 			// floor -- a single slow call (the stat-repair pass in a fresh
 			// stat-less worktree) must not defer the next refresh.
-			await runSlowCall(2500);
+			await runSlowCall(5000);
 
 			// The status line also throttles whole re-renders to once per wall-clock
 			// second (`#statusLineClock`); every step below advances `now` into a new
 			// second so the render path actually re-evaluates `#getStatus()` instead
 			// of serving a memoized render.
-			now += 900; // new second, still under the unwidened 1s floor
+			now += 9_000; // new second, still under the unwidened 10s floor
 			expectCached();
 
-			now += 2_000; // new second, past the 1s floor
-			// Call 2: also slow (2000ms). Two consecutive slow calls widen the
-			// interval: sustainedMs = min(2000, 2500) = 2000, ttl = max(1000, 2000*5) = 10000.
-			await runSlowCall(2000);
+			now += 2_000; // new second, past the 10s floor
+			// Call 2: also slow (4000ms). Two consecutive slow calls widen the
+			// interval: sustainedMs = min(4000, 5000) = 4000, ttl = max(10000, 4000*5) = 20000.
+			await runSlowCall(4000);
 
-			now += 5_000; // new second, well under the widened 10s interval
+			now += 15_000; // new second, past the 10s floor but under the widened 20s interval
 			expectCached();
 
-			now += 6_000; // new second, past the widened 10s interval
-			// Call 3: slow again (2000ms), keeping the widened 10s interval in
-			// effect (sustainedMs = min(2000, 2000) = 2000).
-			await runSlowCall(2000);
+			now += 6_000; // new second, past the widened 20s interval
+			// Call 3: slow again (4000ms), keeping the widened 20s interval in
+			// effect (sustainedMs = min(4000, 4000) = 4000).
+			await runSlowCall(4000);
 
-			// A HEAD move must not let a widened interval survive it and hold a
-			// stale count for the rest of its ten seconds.
+			// A HEAD move refetches on the next render, and the call after it must
+			// not inherit the pre-move cost sample: a slow first call after the
+			// move keeps the floor instead of re-widening the interval.
 			component.invalidateGitCaches();
+			// Call 4: the refetch the HEAD move triggers, slow like the calls before it.
+			await runSlowCall(4000);
 
-			now += 1_500; // past the restored 1s floor, nowhere near the pre-reset 10s interval
+			now += 11_000; // past the 10s floor, under the 20s a surviving sample would give
 			const before = gitControls.statusSummary.mock.calls.length;
 			component.getTopBorder(80);
 			expect(gitControls.statusSummary.mock.calls.length).toBe(before + 1);
