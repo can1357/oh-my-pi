@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added MiniCPM5's native XML in-band tool-call dialect ([#14450](https://github.com/can1357/oh-my-pi/pull/14450) by [@avalla](https://github.com/avalla)).
+
 ## [18.6.1] - 2026-10-04
 
 ### Fixed

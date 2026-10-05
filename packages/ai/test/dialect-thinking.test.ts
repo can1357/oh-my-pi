@@ -206,6 +206,7 @@ describe("every dialect round-trips thinking (no missing thinking element)", () 
 		"harmony",
 		"hermes",
 		"kimi",
+		"minicpm5",
 		"qwen3",
 		"xml",
 	];

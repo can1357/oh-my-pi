@@ -103,6 +103,7 @@ const DIALECTS: readonly Dialect[] = [
 	"kimi",
 	"xml",
 	"anthropic",
+	"minicpm5",
 	"minimax",
 	"deepseek",
 	"harmony",

@@ -1,0 +1,4 @@
+// MiniCPM5 emits the native <function>/<param> XML tool dialect.
+class "minicpm5" {
+	bounded "minicpm5"
+}

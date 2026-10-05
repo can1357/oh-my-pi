@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added MiniCPM5 model identity detection for dialect selection ([#14450](https://github.com/can1357/oh-my-pi/pull/14450) by [@avalla](https://github.com/avalla)).
+
 ## [18.6.2] - 2026-10-04
 
 ### Fixed

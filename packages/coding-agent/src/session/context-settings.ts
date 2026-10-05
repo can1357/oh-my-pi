@@ -384,6 +384,7 @@ export const cfgToolsFormat = register({
 		"gemini",
 		"gemma",
 		"minimax",
+		"minicpm5",
 	] as const,
 	default: "auto",
 	ui: {
@@ -410,6 +411,7 @@ export const cfgToolsFormat = register({
 			{ value: "gemini", label: "Gemini", description: "Use the Gemini owned dialect." },
 			{ value: "gemma", label: "Gemma", description: "Use the Gemma owned dialect." },
 			{ value: "minimax", label: "MiniMax", description: "Use the MiniMax owned dialect." },
+			{ value: "minicpm5", label: "MiniCPM5", description: "Use MiniCPM5 XML in-band tool calls." },
 		],
 	},
 });

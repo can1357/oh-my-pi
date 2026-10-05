@@ -873,9 +873,8 @@ export function resolveDialect(
 ): Dialect | undefined {
 	if (format === "native") return undefined;
 	if (format === "auto") {
+		const preferred = model?.id ? preferredDialect(model.id) : "glm";
 		if (model?.supportsTools !== false) return undefined;
-		if (!model.id) return "glm";
-		const preferred = preferredDialect(model.id);
 		return preferred === FALLBACK_DIALECT ? "glm" : preferred;
 	}
 	return format;

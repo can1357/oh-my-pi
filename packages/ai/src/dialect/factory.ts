@@ -6,6 +6,7 @@ import glmDefinition from "./glm";
 import harmonyDefinition from "./harmony";
 import hermesDefinition from "./hermes";
 import kimiDefinition from "./kimi";
+import minicpm5Definition from "./minicpm5";
 import minimaxDefinition from "./minimax";
 import qwen3Definition from "./qwen3";
 import type { Dialect, DialectDefinition, InbandScanner, InbandScannerOptions } from "./types";
@@ -18,6 +19,7 @@ const DIALECT_DEFINITIONS: Record<Dialect, DialectDefinition> = {
 	xml: xmlDefinition,
 	anthropic: anthropicDefinition,
 	deepseek: deepseekDefinition,
+	minicpm5: minicpm5Definition,
 	minimax: minimaxDefinition,
 	harmony: harmonyDefinition,
 	qwen3: qwen3Definition,

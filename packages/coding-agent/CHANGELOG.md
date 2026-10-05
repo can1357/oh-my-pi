@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added automatic MiniCPM5 tool-dialect selection for models without native tools ([#14450](https://github.com/can1357/oh-my-pi/pull/14450) by [@avalla](https://github.com/avalla)).
 ### Changed
 
 - Bash commands that print binary or other non-UTF-8 output no longer stall while their output is decoded ([#14454](https://github.com/can1357/oh-my-pi/pull/14454) by [@H4vC](https://github.com/H4vC))

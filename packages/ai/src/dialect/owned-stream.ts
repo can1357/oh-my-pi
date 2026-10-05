@@ -25,6 +25,7 @@ const RESPONSE_OPEN_TOKENS: Record<Dialect, readonly string[]> = {
 	xml: ["<tool_response>"],
 	anthropic: ["<function_results>", "<tool_response>"],
 	minimax: ["<function_results>", "<tool_response>"],
+	minicpm5: ["<tool_response>"],
 	deepseek: ["<｜tool▁outputs▁begin｜>", "<｜tool▁output▁begin｜>"],
 	harmony: ["<|start|>functions."],
 	qwen3: ["<tool_response>"],
