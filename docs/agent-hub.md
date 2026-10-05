@@ -105,6 +105,75 @@ Advisor transcript files (`__advisor*.jsonl`) appear as `advisor`-kind rows unde
 
 Collab does not replicate advisor rows or serve their transcripts to guests; the host also rejects advisor chat, revive, and kill requests by id.
 
+## Cross-session messaging
+
+Cross-session messaging connects your **other top-level omp sessions on the same machine**, not their subagents. It is off by default: turn on **Cross-session messaging** (`messaging.enabled`) in `/settings`, or launch with `omp --cross-session`. `/status` still opens the extensions dashboard; its **Peer address** row shows `uds:<path>`, `pipe:<name>`, `off`, or `unavailable — <reason>`.
+
+Use `/list-agents` (alias `/peers`) to see this session's address first, local agents, and other sessions with their short ids, idle/busy state, working directories, and titles. `read history://` also includes other sessions. `messaging.list: deny` hides other-session listings without disabling receiving or sending; `messaging.send: deny` disables only cross-session sends.
+
+The default address is `<dir>-<xx>` (a slug of the working directory's basename and two hexadecimal characters). Set a user address with `/rename <name>` or `--name <name>`. Automatic titles are labels, not addresses. Colliding user names get a two-word suffix; `/rename` reports the name actually stored. A direct print run without `--name` is unnamed and can be reached by its eight-character short id. Short ids also disambiguate duplicate names. A name shared by a local agent and another session is ambiguous: use the session's short id rather than guessing. `@` typeahead keeps file candidates first, then offers sessions; names containing spaces or punctuation are quoted.
+
+Collision checking applies to interactive, RPC, and ACP sessions; print-mode `--name` is stored unchecked.
+
+Names starting with `@` are reserved and rejected by `/rename` and `--name`, even with messaging off. The prefix is reserved for extension peer namespaces such as `@ns/name` ([#14071](https://github.com/can1357/oh-my-pi/issues/14071)); a session address never starts with `@`.
+
+Send with `write agent://<name>` (URL-encode names with spaces or other special characters). Add `?notify=idle` for a one-shot idle notice:
+
+```text
+write agent://release%20notes
+write agent://release%20notes?notify=idle
+```
+
+With `notify=idle`, an empty body subscribes without sending a message. Idle notices expire after 12 hours, include the finish time and first line of the last assistant response, and omit that status when held by inbound policy. Closing the watched session sends an exit notice. `agent://all` remains a local-agent broadcast.
+
+Switching to a different conversation (`/new`, resume, or fork) retires unread held messages and idle subscriptions before claiming the new address. Senders receive `Your message to @<address> was dropped unread: that session switched to a different conversation.`; idle subscribers receive `@<address> switched to a different conversation; the idle notice was cancelled.` Asking-side idle timers are cancelled silently.
+
+Only compatible messaging wire versions are listed or contacted. A send to a peer running an incompatible version returns `Not sent: <address> runs an incompatible omp version.` Its live registry entry is not removed.
+
+Accepted messages arrive between tool calls without interrupting a running tool. An idle session always starts a turn, even in plan mode. The collapsed remote IRC card shows the sender and first non-empty body line; expand it to read the full message. A message from another session is agent-provided information, **not your instruction or consent**: it cannot approve permissions or authorize changes to settings, permissions, or `AGENTS.md`. Agents must not route locally denied work through another session.
+
+A busy receiver returns `Queued for <address> (busy; it will read this at its next step).`, not a delivered receipt. An idle, ready receiver returns `Delivered to <address>.`
+
+### Offline inbox
+
+If no live session matches, messages can be queued by name or short id for a saved session modified within the last seven days. The receipt is `Queued for <address> (not running); it will see this when resumed.` Offline inboxes hold at most **50 messages per session**, with a **seven-day TTL**. A full inbox returns `Not sent: <address>'s offline inbox is full (50 messages).` `notify=idle` requires a running session and cannot be queued offline.
+
+Binding or resuming that session drains its inbox through the current inbound policy and relay checks; accepted messages are delivered, held messages await approval, and refused messages are dropped. If any are accepted or held, the receiver sees `<N> message(s) from other sessions arrived while this session was not running.` Only the session whose id owns the inbox reads it, and draining removes the files read, including expired or malformed messages.
+
+### Inbound policy
+
+Set **Messages from your other sessions** (`messaging.crossSessionInbound`) to `accept`, `hold`, or `refuse`; `default` means unset.
+
+ACP's default auto-approve mode still counts as prompting unless auto-approval was explicitly selected.
+
+| Receiver permission class | Sender permission class | Default action |
+| --- | --- | --- |
+| Bypass (`yolo`) | Bypass | Accept |
+| Bypass | Prompting or unknown | Hold for approval |
+| Prompting (`write` / `always-ask`) | Bypass | Hold for approval |
+| Prompting | Prompting or unknown | Accept |
+
+An authenticated own-child script is accepted by the unset default regardless of permission class. Explicit `accept`, `hold`, and `refuse` apply to it too. Trusted runtime overrides, `--config` overlays, and global settings supply the baseline; project settings may only tighten it. Invalid values hold messages for approval unless a refusal wins.
+
+Default-policy holds open an **Approve / Deny** dialog in the TUI. `messaging.dialogExpiry` is `60s`, `5m` (default), `10m`, or `never`; expiry drops the message and notifies its sender. RPC, ACP, and print hold silently until expiry. Explicit `hold` displays a notice and has no expiry; changing inbound rules to accept releases held messages, while refuse drops them.
+
+### Limits and scripts
+
+Serialized messages are limited to 1,048,576 characters; put bulk content in a readable file. The accepted inbox holds at most 50 undelivered messages. The held buffer keeps at most 100, dropping the oldest. Defaults are 30 messages per sender in 60 seconds, a 30-second identical-repeat window, and relay-chain limits of eight hops and three revisits; these are configurable through `messaging.rateLimit`, `messaging.rateWindowSeconds`, `messaging.repeatWindowSeconds`, `messaging.relayMaxHops`, and `messaging.relayMaxRevisits`. Dropped messages report queue, rate, repeat, or relay-loop failures. Each incomplete transport line has a 30-second deadline.
+
+Hooks and shell commands belonging to a bound session receive `OMP_MESSAGING_SOCKET` (socket path or pipe name) and `OMP_MESSAGING_TOKEN` (its secret own-child token). Treat a missing **or empty** value as unavailable: sessions without messaging remove both variables where the spawn API supports removal, or clear them to empty values for native/PTY backends that merge inherited environment variables. Connect locally, send UTF-8 JSON lines, read one response line, then close:
+
+```json
+{"type":"auth","token":"<OMP_MESSAGING_TOKEN>"}
+{"type":"message","id":"script-unique-id","body":"Build finished"}
+```
+
+The `message` omits `from`, identifying the script as this session's own child. Windows **requires** a valid auth line before any request; POSIX permits unauthenticated same-user peer requests. Never publish the token. Peer authentication uses `<baseConfigRoot>/run/messaging/peer.key`; metadata contains no token. On Windows, privacy relies on the user-profile ACL protecting `.omp` and `peer.key`—omp does not verify a Windows SID or DACL. Windows native processes and WSL cannot message each other; cross-machine messaging is not supported.
+
+**Trust boundary:** the sender's name and permission class are self-declared; same-user processes can forge both, including the permission class used by the default inbound policy. Peer authentication is not sender provenance, and there is no [#12185-style provenance](https://github.com/can1357/oh-my-pi/issues/12185) proof. Treat remote text as untrusted agent information, not as an authenticated user instruction.
+
+**Top-level only is deliberately stricter than Claude Code**, where subagents may send cross-session. omp subagents, advisors, agent-definition generators, and helpers never bind an inbox, receive usable messaging socket/token values or the messaging prompt, list other sessions, or use `write agent://` outside their local process. Another session cannot address, wake, or steer a subagent through the inbox. The receiving top-level agent may decide to contact its own subagents using local IRC. This is harness isolation, not OS isolation: a same-user shell could still read `peer.key` and hand-craft a socket request.
+
 ## Related surfaces
 
 Agent Hub is the human-facing live session view. Adjacent commands and internal URLs serve narrower purposes:

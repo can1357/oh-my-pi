@@ -2,6 +2,7 @@ import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import type { IrcMessage } from "@oh-my-pi/pi-tui/tools/irc";
 import type { CoordinationDetails } from "@oh-my-pi/pi-tui/tools/wait";
 import type { Settings } from "../config/settings";
+import type { MessagingService, SessionCandidate } from "../messaging/service";
 import { IrcBus } from "./bus";
 import { type AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-registry";
 import { ensurePersistedRoster } from "../registry/persisted-agents";
@@ -43,22 +44,81 @@ export function messageResult(senderId: string, waited: IrcMessage): AgentToolRe
 
 /** Send a direct message or broadcast; delivery never waits for a reply. */
 export async function executeSend(
-	deps: { registry: AgentRegistry; senderId: string; sessionFileHint?: string | null },
-	params: { to: string; message: string },
+	deps: { registry: AgentRegistry; senderId: string; sessionFileHint?: string | null; messaging?: MessagingService },
+	params: { to: string; message: string; notifyWhenIdle?: boolean },
 ): Promise<AgentToolResult<CoordinationDetails>> {
-	const { registry, senderId, sessionFileHint } = deps;
+	const { registry, senderId, sessionFileHint, messaging } = deps;
 	const to = params.to.trim();
 	const message = params.message;
+	const notifyWhenIdle = messaging !== undefined && params.notifyWhenIdle === true;
 	if (!to) return coordinationErrorResult("A recipient is required.", { op: "send", from: senderId });
-	if (!message.trim())
+	if (!message.trim() && !notifyWhenIdle)
 		return coordinationErrorResult("A non-empty message is required.", { op: "send", from: senderId });
-	if (to === senderId)
+	if (to === senderId && !messaging)
 		return coordinationErrorResult("Cannot send a message to yourself.", { op: "send", from: senderId, to });
 	const isBroadcast = to === "all";
 	// Restore parked recipients only when needed; never delay delivery to a live peer.
 	if (!isBroadcast && sessionFileHint) {
 		const recipient = registry.get(to);
 		if (!recipient || recipient.status === "parked") await ensurePersistedRoster(registry, sessionFileHint);
+	}
+	if (notifyWhenIdle && senderId !== MAIN_AGENT_ID) {
+		return coordinationErrorResult("Not sent: only the main conversation can ask for an idle notice.", {
+			op: "send",
+			from: senderId,
+			to,
+		});
+	}
+	if (!isBroadcast && messaging) {
+		const resolution = await messaging.resolve(to);
+		if (resolution.kind === "self") {
+			return coordinationErrorResult("That is this session's own name.", { op: "send", from: senderId, to });
+		}
+		if (resolution.kind === "incompatible") {
+			return coordinationErrorResult(`Not sent: ${resolution.name} runs an incompatible omp version.`, {
+				op: "send",
+				from: senderId,
+				to,
+			});
+		}
+		const local = registry.get(to);
+		const localCandidate = local && local.id !== senderId && local.kind !== "advisor" && local.status !== "aborted";
+		const sessions: SessionCandidate[] =
+			resolution.kind === "found" || resolution.kind === "offline"
+				? [resolution.target]
+				: resolution.kind === "ambiguous"
+					? resolution.candidates
+					: [];
+		if (sessions.length + (localCandidate ? 1 : 0) > 1) {
+			const rows = sessions.map(
+				session => `- ${session.name ?? "(unnamed)"} (session ${session.shortId}, ${session.cwd})`,
+			);
+			if (localCandidate) rows.push(`- ${to} (local agent)`);
+			return coordinationErrorResult(
+				`Not sent: "${to}" matches more than one agent:\n${rows.join("\n")}\nAddress one by its session short id.`,
+				{ op: "send", from: senderId, to },
+			);
+		}
+		if (resolution.kind === "found" || resolution.kind === "offline") {
+			const outcome = await messaging.send(resolution.target, message, {
+				notifyWhenIdle,
+			});
+			return {
+				content: [{ type: "text", text: outcome.text }],
+				details: { op: "send", from: senderId, to },
+				isError: !outcome.ok,
+			};
+		}
+	}
+	if (to === senderId) {
+		return coordinationErrorResult("Cannot send a message to yourself.", { op: "send", from: senderId, to });
+	}
+	if (notifyWhenIdle) {
+		return coordinationErrorResult("Not sent: notify=idle only works for your other sessions.", {
+			op: "send",
+			from: senderId,
+			to,
+		});
 	}
 
 	const targets = isBroadcast ? registry.listVisibleTo(senderId).map(ref => ref.id) : [to];

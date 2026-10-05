@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- The extensions dashboard shows a `Peer address` row when the host passes one, and messages from other omp sessions render as a collapsed one-line IRC card that expands to the full text ([#14263](https://github.com/can1357/oh-my-pi/pull/14263) by [@jaredlyon](https://github.com/jaredlyon)).
+
 ## [18.11.0] - 2026-10-14
 
 ### Added

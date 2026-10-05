@@ -2,8 +2,12 @@ import { afterEach, describe, expect, it, vi } from "bun:test";
 import { Agent } from "@oh-my-pi/pi-agent-core";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
+import { parseArgs } from "@oh-my-pi/pi-coding-agent/cli/args";
+import { CliUsageError } from "@oh-my-pi/pi-coding-agent/cli/usage-error";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { runRootCommand } from "@oh-my-pi/pi-coding-agent/main";
+import type { MessagingService } from "@oh-my-pi/pi-coding-agent/messaging/service";
 import { CommandController } from "@oh-my-pi/pi-coding-agent/modes/controllers/command-controller";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import type { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
@@ -127,6 +131,36 @@ it("cancels title inference without applying or announcing a late rename", async
 
 for (const mode of ["TUI", "headless"] as const) {
 	describe(`/rename (${mode})`, () => {
+		it("refuses reserved @ names without changing the stored name", async () => {
+			const { session, sessionManager, runtime, ctx, execute } = createRuntime(mode);
+			await sessionManager.setSessionName("Keep this name", "user");
+			const entries = sessionManager.getEntries();
+			const output = mode === "TUI" ? vi.spyOn(ctx, "showError") : vi.spyOn(runtime, "output");
+
+			await execute("/rename @x");
+
+			expect(output).toHaveBeenCalledWith(
+				'Session names can\'t start with "@" (reserved for extension peer namespaces).',
+			);
+			expect(session.sessionName).toBe("Keep this name");
+			expect(sessionManager.getEntries()).toEqual(entries);
+		});
+
+		it("claims a free collision variant and reports the stored address rather than the requested name", async () => {
+			const { session, sessionManager, runtime, ctx, execute } = createRuntime(mode);
+			const messaging = {
+				listSessions: async () => [{ name: "release notes" }],
+			} as unknown as MessagingService;
+			Object.defineProperty(session, "messaging", { value: messaging, configurable: true });
+			vi.spyOn(Math, "random").mockReturnValue(0);
+			const output = mode === "TUI" ? vi.spyOn(ctx, "showStatus") : vi.spyOn(runtime, "output");
+			await execute("/rename release notes");
+			const stored = sessionManager.getSessionName()!;
+			expect(stored).toMatch(/^release notes-[a-z]+-[a-z]+$/);
+			expect(output.mock.calls[0]?.[0]).toContain(stored);
+			expect(output.mock.calls[0]?.[0]).toContain(' ("release notes" is used by another session)');
+		});
+
 		it("replaces a manual title from conversation context and protects the result from automatic titles", async () => {
 			const { session, sessionManager, execute } = createRuntime(mode);
 			await sessionManager.setSessionName("Old manually chosen title", "user");
@@ -526,3 +560,12 @@ it.each(["TUI", "headless"] as const)(
 		}
 	},
 );
+
+it.each(["@x", " @x "])("rejects --name %s as a CLI usage error", async name => {
+	const args = ["--name", name];
+	const result = runRootCommand(parseArgs(args), args);
+	await expect(result).rejects.toBeInstanceOf(CliUsageError);
+	await expect(result).rejects.toThrow(
+		'Session names can\'t start with "@" (reserved for extension peer namespaces).',
+	);
+});

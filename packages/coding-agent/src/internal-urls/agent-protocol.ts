@@ -23,7 +23,7 @@ import * as path from "node:path";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import { fuzzyFilter } from "@oh-my-pi/pi-tui/fuzzy";
 import { formatDuration, isEnoent, prompt } from "@oh-my-pi/pi-utils";
-import { type AgentRef, AgentRegistry } from "../registry/agent-registry";
+import { type AgentRef, AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-registry";
 import { ensurePersistedRoster } from "../registry/persisted-agents";
 import { executeSend, isIrcEnabled } from "../irc/messaging";
 import agentPromptDoc from "../prompts/internal-urls/agent.md" with { type: "text" };
@@ -177,8 +177,8 @@ export class AgentProtocolHandler implements ProtocolHandler {
 		if (
 			!registry ||
 			!senderId ||
-			session.enableIrc === false ||
-			!isIrcEnabled(session.settings, session.taskDepth ?? 0)
+			(!session.messaging &&
+				(session.enableIrc === false || !isIrcEnabled(session.settings, session.taskDepth ?? 0)))
 		) {
 			throw new Error("Peer messaging is unavailable in this session.");
 		}
@@ -187,10 +187,25 @@ export class AgentProtocolHandler implements ProtocolHandler {
 		if (hasPathExtraction(url)) {
 			throw new Error("agent:// message target cannot have a JSON-path suffix.");
 		}
-		if (!content.trim()) throw new Error("agent:// messages require non-empty content.");
+		let notifyWhenIdle = false;
+		if (session.messaging) {
+			for (const key of url.searchParams.keys()) {
+				if (key !== "notify") throw new Error(`Unknown agent:// option "${key}".`);
+			}
+			const notify = url.searchParams.get("notify");
+			if (notify !== null && notify !== "idle") throw new Error(`Unknown agent:// option "notify".`);
+			notifyWhenIdle = notify === "idle";
+			if (notifyWhenIdle && senderId !== MAIN_AGENT_ID) {
+				return {
+					content: [{ type: "text", text: "Not sent: only the main conversation can ask for an idle notice." }],
+					isError: true,
+				};
+			}
+		}
+		if (!content.trim() && !notifyWhenIdle) throw new Error("agent:// messages require non-empty content.");
 		const result = await executeSend(
-			{ registry, senderId, sessionFileHint: session.getSessionFile?.() },
-			{ to, message: content },
+			{ registry, senderId, sessionFileHint: session.getSessionFile?.(), messaging: session.messaging },
+			{ to, message: content, notifyWhenIdle },
 		);
 		return {
 			content: [

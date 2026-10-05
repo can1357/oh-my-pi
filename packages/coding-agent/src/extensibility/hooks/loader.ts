@@ -10,6 +10,8 @@ import type { Hook } from "../../discovery";
 import { loadCapability } from "../../discovery";
 // Runtime self-reference: dereference this namespace only inside loader functions to keep the index.ts cycle safe.
 import * as PiCodingAgent from "../../index";
+import type { AgentSession } from "../../session/agent-session";
+import { messagingEnvFor } from "../../session/messaging-host";
 import type { CustomMessagePayload } from "../../session/messages";
 import * as typebox from "../legacy-typebox";
 import { resolvePath, withHostGuard } from "../utils";
@@ -75,6 +77,7 @@ export interface LoadHooksResult {
 async function createHookAPI(
 	handlers: Map<string, HandlerFn[]>,
 	cwd: string,
+	session?: AgentSession,
 ): Promise<{
 	api: HookAPI;
 	messageRenderers: Map<string, HookMessageRenderer>;
@@ -118,7 +121,14 @@ async function createHookAPI(
 			commands.set(name, { name, ...options });
 		},
 		exec(command: string, args: string[], options?: ExecOptions) {
-			return execCommand(command, args, options?.cwd ?? cwd, options);
+			const messagingEnv = session
+				? messagingEnvFor(session)
+				: { set: {}, strip: ["OMP_MESSAGING_SOCKET", "OMP_MESSAGING_TOKEN"] as const };
+			return execCommand(command, args, options?.cwd ?? cwd, {
+				...options,
+				env: { ...options?.env, ...messagingEnv.set },
+				stripEnv: [...(options?.stripEnv ?? []), ...(session?.messaging ? [] : messagingEnv.strip)],
+			});
 		},
 		logger,
 		typebox,
@@ -143,7 +153,11 @@ async function createHookAPI(
 /**
  * Load a single hook module using native Bun import.
  */
-async function loadHook(hookPath: string, cwd: string): Promise<{ hook: LoadedHook | null; error: string | null }> {
+async function loadHook(
+	hookPath: string,
+	cwd: string,
+	session?: AgentSession,
+): Promise<{ hook: LoadedHook | null; error: string | null }> {
 	const resolvedPath = resolvePath(hookPath, cwd);
 
 	try {
@@ -160,6 +174,7 @@ async function loadHook(hookPath: string, cwd: string): Promise<{ hook: LoadedHo
 		const { api, messageRenderers, commands, setSendMessageHandler, setAppendEntryHandler } = await createHookAPI(
 			handlers,
 			cwd,
+			session,
 		);
 
 		// Call factory to register handlers
@@ -188,12 +203,12 @@ async function loadHook(hookPath: string, cwd: string): Promise<{ hook: LoadedHo
  * @param paths - Array of hook file paths
  * @param cwd - Current working directory for resolving relative paths
  */
-export async function loadHooks(paths: string[], cwd: string): Promise<LoadHooksResult> {
+export async function loadHooks(paths: string[], cwd: string, session?: AgentSession): Promise<LoadHooksResult> {
 	const hooks: LoadedHook[] = [];
 	const errors: Array<{ path: string; error: string }> = [];
 
 	for (const hookPath of paths) {
-		const { hook, error } = await loadHook(hookPath, cwd);
+		const { hook, error } = await loadHook(hookPath, cwd, session);
 
 		if (error) {
 			errors.push({ path: hookPath, error });
@@ -217,7 +232,11 @@ export async function loadHooks(paths: string[], cwd: string): Promise<LoadHooks
  *
  * Plus any explicitly configured paths from settings.
  */
-export async function discoverAndLoadHooks(configuredPaths: string[], cwd: string): Promise<LoadHooksResult> {
+export async function discoverAndLoadHooks(
+	configuredPaths: string[],
+	cwd: string,
+	session?: AgentSession,
+): Promise<LoadHooksResult> {
 	const allPaths: string[] = [];
 	const seen = new Set<string>();
 
@@ -239,5 +258,5 @@ export async function discoverAndLoadHooks(configuredPaths: string[], cwd: strin
 	// 2. Explicitly configured paths (can override/add)
 	addPaths(configuredPaths.map(p => resolvePath(p, cwd)));
 
-	return loadHooks(allPaths, cwd);
+	return loadHooks(allPaths, cwd, session);
 }

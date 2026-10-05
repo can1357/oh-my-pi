@@ -69,6 +69,7 @@ export const TAB_GROUPS: Record<SettingTab, readonly string[]> = {
 	interaction: [
 		"Input",
 		"Approvals",
+		"Messages",
 		"Notifications",
 		"Speech",
 		"Collab",

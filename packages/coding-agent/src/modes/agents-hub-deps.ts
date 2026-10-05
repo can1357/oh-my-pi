@@ -19,6 +19,7 @@ import {
 import type { Settings } from "../config/settings";
 import agentCreationArchitectPrompt from "../prompts/system/agent-creation-architect.md" with { type: "text" };
 import agentCreationUserPrompt from "../prompts/system/agent-creation-user.md" with { type: "text" };
+import { AgentRegistry } from "../registry/agent-registry";
 import { createAgentSession } from "../sdk";
 import { refreshAgentDiscovery } from "../task";
 import { discoverAgents } from "../task/discovery";
@@ -156,6 +157,9 @@ export function createAgentsHubDeps(
 				model: selectedModel,
 				systemPrompt: [prompt.render(agentCreationArchitectPrompt, {})],
 				hasUI: false,
+				agentId: `AgentArchitect-${crypto.randomUUID()}`,
+				agentRegistry: new AgentRegistry(),
+				enableIrc: false,
 				enableLsp: false,
 				enableMCP: false,
 				disableExtensionDiscovery: true,

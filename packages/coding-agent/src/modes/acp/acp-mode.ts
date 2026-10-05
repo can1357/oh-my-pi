@@ -10,6 +10,7 @@ import { AcpAgent } from "./acp-agent";
 export interface AcpSessionHandle {
 	session: AgentSession;
 	setToolUIContext: (uiContext: ExtensionUIContext, hasUI: boolean) => void;
+	name?: string;
 }
 
 /**
