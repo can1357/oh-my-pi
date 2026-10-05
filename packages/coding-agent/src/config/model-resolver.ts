@@ -64,8 +64,37 @@ function isKnownProvider(provider: string): provider is KnownProvider {
 	return provider in DEFAULT_MODEL_PER_PROVIDER;
 }
 
+/** Providers with at least one discovery-tagged default in this candidate list. */
+function providersWithTaggedDefault(models: readonly Model<Api>[]): Set<string> {
+	const tagged = new Set<string>();
+	for (const model of models) {
+		if (model.providerDefault === true) tagged.add(model.provider);
+	}
+	return tagged;
+}
+
+/**
+ * Whether `model` is its provider's default, given which providers tagged one.
+ *
+ * When that provider tagged any available model, only tagged models count —
+ * the KDL `default-model` id does not, so a moved tag wins over the fallback.
+ * Several tagged models from one provider all match; the caller keeps the
+ * first of them in availability order. With nothing tagged, the KDL id is
+ * the default.
+ */
+function isProviderDefaultModel(model: Model<Api>, taggedProviders: ReadonlySet<string>): boolean {
+	if (!isKnownProvider(model.provider)) return false;
+	if (taggedProviders.has(model.provider)) return model.providerDefault === true;
+	return DEFAULT_MODEL_PER_PROVIDER[model.provider] === model.id;
+}
+
 /**
  * Pick the first provider-default model in availability order.
+ *
+ * A model tagged by its provider's discovery (`providerDefault`) wins over that
+ * provider's KDL `default-model` while any tagged model from the provider is
+ * available. The KDL id is the default otherwise (no fetch yet, offline, or a
+ * failed fetch).
  *
  * When `hasConcreteCredential` is supplied and at least one available model
  * belongs to a provider with a concrete credential, the candidate pool is
@@ -98,17 +127,13 @@ export function pickDefaultAvailableModel(
 					});
 					return concrete.length > 0 ? concrete : availableModels;
 				})();
-	const firstDefault = models.find(
-		model => isKnownProvider(model.provider) && DEFAULT_MODEL_PER_PROVIDER[model.provider] === model.id,
-	);
+	const taggedProviders = providersWithTaggedDefault(models);
+	const firstDefault = models.find(model => isProviderDefaultModel(model, taggedProviders));
 	if (!firstDefault) return models[0];
 
 	const providerPriority = buildModelProviderPriorityRank();
 	const sharedDefaultMatches = models.filter(
-		model =>
-			model.id === firstDefault.id &&
-			isKnownProvider(model.provider) &&
-			DEFAULT_MODEL_PER_PROVIDER[model.provider] === model.id,
+		model => model.id === firstDefault.id && isProviderDefaultModel(model, taggedProviders),
 	);
 	return [...sharedDefaultMatches].sort((a, b) => {
 		const aRank = providerPriority.get(a.provider.toLowerCase()) ?? Number.POSITIVE_INFINITY;

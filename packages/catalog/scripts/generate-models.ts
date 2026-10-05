@@ -782,6 +782,10 @@ export function buildGeneratedModel(model: ModelSpec<Api>): Model<Api> {
 	const spec = { ...model };
 	delete spec.promptCache;
 	delete spec.promptCacheConfig;
+	// Discovery's providerDefault is live session state. Freezing it into the
+	// bundle would go stale the same way a hardcoded default id does; the KDL
+	// default-model stays the offline fallback.
+	delete spec.providerDefault;
 	return buildModel(spec);
 }
 

@@ -372,6 +372,22 @@ function createOpusModel(provider: string, id: string, name: string): Model<"ant
 
 const allModels = [...mockModels, ...mockOpenRouterModels, ...mockProviderOverlapModels, ...mockCodexOverlapModels];
 
+function veniceModel(id: string, providerDefault?: boolean): Model<"openai-completions"> {
+	return buildModel({
+		id,
+		name: id,
+		api: "openai-completions",
+		provider: "venice",
+		baseUrl: "https://api.venice.ai/api/v1",
+		reasoning: false,
+		input: ["text"],
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: 128000,
+		maxTokens: 8192,
+		...(providerDefault === undefined ? {} : { providerDefault }),
+	});
+}
+
 function roleChainModel(provider: string, id: string): Model<Api> {
 	return buildModel({
 		id,
@@ -512,6 +528,16 @@ describe("pickDefaultAvailableModel", () => {
 
 		expect(picked?.provider).toBe("anthropic");
 		expect(checkedProviders).toEqual(["amazon-bedrock", "anthropic"]);
+	});
+
+	test("prefers a discovery-tagged model over the KDL default when both are available", () => {
+		const kdlDefault = veniceModel(DEFAULT_MODEL_PER_PROVIDER.venice);
+		const tagged = veniceModel("venice-live-default", true);
+		// The KDL id leads, so availability order would keep it if the tag were ignored.
+		const picked = pickDefaultAvailableModel([kdlDefault, tagged]);
+
+		expect(picked?.provider).toBe("venice");
+		expect(picked?.id).toBe("venice-live-default");
 	});
 });
 

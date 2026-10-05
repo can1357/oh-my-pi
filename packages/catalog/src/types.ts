@@ -1370,6 +1370,14 @@ export interface Model<TApi extends Api = Api> {
 	api: TApi;
 	provider: Provider;
 	/**
+	 * Whether this provider's own discovery reported the model as its default.
+	 * Mappers that read a provider-reported tag set this explicitly, `true` or
+	 * `false`, so a live refresh clears a stale `true` left on a bundled or
+	 * cached row. Absent on bundled catalog rows; selection falls back to the
+	 * provider's KDL `default-model` when no available model is tagged.
+	 */
+	providerDefault?: boolean;
+	/**
 	 * Discovery backend whose catalog policy applies when it differs from the
 	 * credential-bearing provider id. Persisted so cached and rebuilt custom
 	 * providers retain their transport backend's policy.
