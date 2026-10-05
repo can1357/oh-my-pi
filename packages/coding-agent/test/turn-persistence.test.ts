@@ -15,7 +15,7 @@
  *     (the earliest turn message whose later sibling is already persisted).
  */
 import { describe, expect, test } from "bun:test";
-import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
+import { type AgentMessage, inheritAssistantMessageIdentity } from "@oh-my-pi/pi-agent-core";
 import { planTurnPersistence, sessionMessagePersistenceKey } from "@oh-my-pi/pi-coding-agent/session/turn-persistence";
 
 function assistant(overrides: Partial<Extract<AgentMessage, { role: "assistant" }>> = {}) {
@@ -52,24 +52,20 @@ function toolResult(overrides: Partial<Extract<AgentMessage, { role: "toolResult
 }
 
 describe("sessionMessagePersistenceKey", () => {
-	test("assistant identity covers timestamp/provider/model/responseId/stopReason — different content keeps the same key", () => {
-		// Two assistant variants emitted for the same logical turn (one streamed,
-		// one finalized; or one obfuscated, one deobfuscated for display) must
-		// share a key so we never double-persist them on the branch.
-		const a = assistant({ content: [{ type: "text", text: "foo" }], responseId: "resp-1" });
-		const b = assistant({ content: [{ type: "text", text: "foo (deobfuscated)" }], responseId: "resp-1" });
-		expect(sessionMessagePersistenceKey(a)).toBeDefined();
-		expect(sessionMessagePersistenceKey(a)).toBe(sessionMessagePersistenceKey(b));
-	});
-
-	test("assistant identity changes with responseId / stopReason", () => {
-		const base = assistant({ responseId: "resp-1" });
-		expect(sessionMessagePersistenceKey({ ...base, responseId: "resp-2" })).not.toBe(
-			sessionMessagePersistenceKey(base),
+	test("compaction distinguishes emissions but recognizes a display snapshot", () => {
+		const first = assistant();
+		const firstKey = sessionMessagePersistenceKey(first)!;
+		const display = inheritAssistantMessageIdentity(
+			first,
+			assistant({ ...first, content: [{ type: "text", text: "display variant" }] }),
 		);
-		expect(sessionMessagePersistenceKey({ ...base, stopReason: "toolUse" })).not.toBe(
-			sessionMessagePersistenceKey(base),
-		);
+		const second = assistant();
+		expect(
+			planTurnPersistence(
+				[sessionMessagePersistenceKey(display), sessionMessagePersistenceKey(second)],
+				new Set([firstKey]),
+			),
+		).toEqual({ kind: "ok", toPersist: [1] });
 	});
 
 	test("toolResult identity covers toolCallId + toolName at the timestamp — content does not affect identity", () => {

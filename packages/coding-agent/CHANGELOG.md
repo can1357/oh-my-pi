@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed distinct assistant replies with the same timestamp and content being dropped from session history when they have no response ID ([#14401](https://github.com/can1357/oh-my-pi/pull/14401) by [@shawnkoh](https://github.com/shawnkoh))
+
 ## [18.6.2] - 2026-10-04
 
 ### Fixed

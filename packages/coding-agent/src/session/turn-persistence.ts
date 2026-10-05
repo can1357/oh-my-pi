@@ -1,34 +1,17 @@
 /**
- * Helpers that share one cheap, structural identity for messages — both during
- * incremental persistence and for the mid-run-compaction ordering check.
- *
- * Previously `AgentSession` carried two near-duplicate routines
- * (`#sessionMessagesReferToSameTurn` + `#messageValueSignature`) that
- * reconstructed the branch path on every check (O(n²) `unshift`) and
- * `JSON.stringify`-compared the full message content on every pairwise hit.
- * Long-running sessions with many subagents fired this thousands of times per
- * minute and froze the TUI loop (see issue #3629). The persistence key already
- * encodes a stable logical identity — timestamp + role-specific discriminators
- * — so the structural compare is now the rare collision tiebreaker (e.g. two
- * provider responses at the same millisecond with `undefined` responseId),
- * not the load-bearing check.
- *
- * The helpers here keep that identity in one place and expose the planner so
- * the persistence-ordering logic is unit-testable without standing up an
- * `AgentSession`.
+ * Shared message identity for incremental persistence and mid-run compaction.
+ * Assistant emission identities survive core event snapshots without relying
+ * on provider IDs, wall-clock resolution, or equal content.
  */
-import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
+import { type AgentMessage, assistantMessageIdentity } from "@oh-my-pi/pi-agent-core";
 
 /**
  * Stable identity for messages that pass through {@link AgentSession}'s
  * incremental persistence path.
  *
- * The discriminators chosen per role are precisely the fields that uniquely
- * identify a single logical message instance:
- *
- * - `assistant` — timestamp + provider + model + responseId + stopReason
- *   (responseId is the canonical provider-side id when available; the rest
- *   disambiguate when it is not, e.g. local/dev models).
+ * - `assistant` — process-local emission identity, shared by the original and
+ *   its event/display snapshots. Context materialization stamps loaded canonical
+ *   messages before any replay/display copies; direct callers are stamped here.
  * - `toolResult` — timestamp + toolCallId + toolName (toolCallId is unique
  *   per execution; toolName guards against synthetic reuse).
  * - `user` / `developer` — timestamp + attribution (attribution distinguishes
@@ -42,14 +25,7 @@ import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 export function sessionMessagePersistenceKey(message: AgentMessage): string | undefined {
 	switch (message.role) {
 		case "assistant":
-			return [
-				"assistant",
-				message.timestamp,
-				message.provider,
-				message.model,
-				message.responseId ?? "",
-				message.stopReason,
-			].join(":");
+			return assistantMessageIdentity(message);
 		case "toolResult":
 			return `toolResult:${message.timestamp}:${message.toolCallId}:${message.toolName}`;
 		case "user":
@@ -63,18 +39,7 @@ export function sessionMessagePersistenceKey(message: AgentMessage): string | un
 }
 
 /**
- * Slow-path content equality check used when two messages collide on
- * {@link sessionMessagePersistenceKey}. Only the role's content fields are
- * compared (no timestamps, no metadata) because the key already pinned all of
- * those down.
- *
- * Most calls into the persistence path never reach this — keys are unique
- * enough in production that the snapshot lookup short-circuits at the key
- * level. Restoring the structural compare here preserves the pre-#3629
- * contract that two messages with the same metadata BUT different content are
- * distinct (e.g. two assistant turns with `undefined` responseId emitted in
- * the same wall-clock millisecond, which is exactly how the in-memory test
- * harness crafts streamed responses).
+ * Slow-path content equality for roles with structural persistence keys.
  */
 export function sameMessageContent(left: AgentMessage, right: AgentMessage): boolean {
 	if (left === right) return true;

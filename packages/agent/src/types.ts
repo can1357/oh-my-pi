@@ -27,6 +27,31 @@ import type { AgentRunCoverage, AgentRunSummary } from "./run-collector";
 import type { SentToolDefinitions } from "./sent-tool-definitions";
 import type { AgentTelemetryConfig } from "./telemetry";
 
+const assistantMessageIdentities = new WeakMap<AssistantMessage, string>();
+let nextAssistantMessageIdentity = 0n;
+
+/**
+ * Process-local emission identity, deliberately outside the message value.
+ * JSON, structuredClone and deep equality must not observe persistence metadata.
+ * Same-emission copies must explicitly inherit it; independent emissions do not.
+ */
+export function assistantMessageIdentity(message: AssistantMessage): string {
+	let identity = assistantMessageIdentities.get(message);
+	if (identity === undefined) {
+		identity = `assistant:${++nextAssistantMessageIdentity}`;
+		assistantMessageIdentities.set(message, identity);
+	}
+	return identity;
+}
+
+/** Carry emission identity across a snapshot or same-message transformation. */
+export function inheritAssistantMessageIdentity<T extends AgentMessage>(source: AgentMessage, copy: T): T {
+	if (source.role === "assistant" && copy.role === "assistant") {
+		assistantMessageIdentities.set(copy, assistantMessageIdentity(source));
+	}
+	return copy;
+}
+
 /** Stream function - can return sync or Promise for async config lookup */
 export type StreamFn = (
 	...args: Parameters<typeof streamSimple>

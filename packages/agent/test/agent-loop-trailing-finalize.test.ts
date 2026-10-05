@@ -10,11 +10,13 @@
 import { describe, expect, it } from "bun:test";
 import { type } from "@oh-my-pi/omptype";
 import { agentLoop } from "@oh-my-pi/pi-agent-core/agent-loop";
+import { assistantMessageIdentity } from "@oh-my-pi/pi-agent-core/types";
 import type { AgentContext, AgentEvent, AgentLoopConfig, AgentMessage, AgentTool } from "@oh-my-pi/pi-agent-core/types";
 import type { AssistantMessage, AssistantMessageEvent, Context, Message } from "@oh-my-pi/pi-ai";
+import { wrapInbandToolStream } from "@oh-my-pi/pi-ai/dialect/owned-stream";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
-import { createAssistantMessage, createUserMessage } from "./helpers";
+import { createAssistantMessage, createHarmonyMitigationModel, createUserMessage } from "./helpers";
 
 function identityConverter(messages: AgentMessage[]): Message[] {
 	return messages.filter(m => m.role === "user" || m.role === "assistant" || m.role === "toolResult") as Message[];
@@ -241,3 +243,94 @@ describe("trailing finalization of a transient stream error after completed tool
 		]);
 	});
 });
+
+for (const trailing of [false, true]) {
+	it(`keeps detached-final identity across ${trailing ? "trailing" : "normal"} finalization but not discarded attempts`, async () => {
+		let attempts = 0;
+		const streamFn = (): AssistantMessageEventStream => {
+			const stream = new AssistantMessageEventStream();
+			const partial = createAssistantMessage([]);
+			const final = createAssistantMessage([
+				{
+					type: "text",
+					text:
+						++attempts === 1
+							? "Some prose. analysis to=functions.edit code " + "\u0e48\u0e32\u0e31\u0e49"
+							: "clean reply",
+				},
+			]);
+			stream.push({ type: "start", partial });
+			if (trailing) stream.end(final);
+			else stream.push({ type: "done", reason: "stop", message: final });
+			return stream;
+		};
+		const starts: AssistantMessage[] = [];
+		const ends: AssistantMessage[] = [];
+		const stream = agentLoop(
+			[createUserMessage("hello")],
+			{ systemPrompt: [""], messages: [], tools: [] },
+			{ model: createHarmonyMitigationModel(), convertToLlm: identityConverter },
+			undefined,
+			streamFn,
+		);
+		for await (const event of stream) {
+			if (event.type === "message_start" && event.message.role === "assistant") starts.push(event.message);
+			if (event.type === "message_end" && event.message.role === "assistant") ends.push(event.message);
+		}
+		expect(attempts).toBe(2);
+		expect(starts).toHaveLength(2);
+		expect(ends).toHaveLength(2);
+		expect(ends[0]!.stopReason).toBe("error");
+		expect(ends[1]!.content).toEqual([{ type: "text", text: "clean reply" }]);
+		expect(assistantMessageIdentity(starts[0]!)).not.toBe(assistantMessageIdentity(starts[1]!));
+		expect(assistantMessageIdentity(ends[0]!)).not.toBe(assistantMessageIdentity(ends[1]!));
+		expect(starts.map(assistantMessageIdentity)).toEqual(ends.map(assistantMessageIdentity));
+	});
+}
+
+const restartSettlements: AssistantMessage["stopReason"][] = ["stop", "error", "aborted"];
+for (const settlement of restartSettlements) {
+	it(`keeps repeated-start identity through real inband ${settlement} settlement`, async () => {
+		const controller = new AbortController();
+		const inner = new AssistantMessageEventStream();
+		const partial = createAssistantMessage([]);
+		inner.push({ type: "start", partial });
+		inner.push({ type: "start", partial });
+		if (settlement !== "aborted") {
+			const final = createAssistantMessage([{ type: "text", text: "recovered reply" }]);
+			if (settlement === "error") {
+				final.stopReason = "error";
+				final.errorMessage = "terminal failure";
+				inner.push({ type: "error", reason: "error", error: final });
+			} else {
+				inner.push({ type: "done", reason: "stop", message: final });
+			}
+		}
+		const starts: AssistantMessage[] = [];
+		const updates: AssistantMessage[] = [];
+		const ends: AssistantMessage[] = [];
+		const stream = agentLoop(
+			[createUserMessage("hello")],
+			{ systemPrompt: [""], messages: [], tools: [] },
+			{ model: createMockModel(), convertToLlm: identityConverter },
+			controller.signal,
+			() => wrapInbandToolStream(inner, [], "glm"),
+		);
+		for await (const event of stream) {
+			if (event.type === "message_start" && event.message.role === "assistant") starts.push(event.message);
+			if (event.type === "message_update" && event.message.role === "assistant") {
+				updates.push(event.message);
+				if (settlement === "aborted") controller.abort();
+			}
+			if (event.type === "message_end" && event.message.role === "assistant") ends.push(event.message);
+		}
+		inner.end(partial);
+		expect(starts).toHaveLength(1);
+		expect(ends).toHaveLength(1);
+		expect(ends[0]!.stopReason).toBe(settlement);
+		expect(starts.map(assistantMessageIdentity)).toEqual(ends.map(assistantMessageIdentity));
+		for (const update of updates) {
+			expect(assistantMessageIdentity(update)).toBe(assistantMessageIdentity(starts[0]!));
+		}
+	});
+}
