@@ -94,6 +94,40 @@ describe("GitHub Copilot long-context variant wire model id", () => {
 		expect(wireModelIds[0]).toBe("gpt-5.5");
 	});
 
+	it("does not attribute the terminal Responses model echo as an upstream route", async () => {
+		const model = makeLongContextVariant({
+			api: "openai-responses",
+			id: "gpt-5.5-1m",
+			requestModelId: "gpt-5.5",
+			name: "GPT-5.5 (1M)",
+		});
+		const result = await streamOpenAIResponses(model, testContext, {
+			apiKey: "ghu_test_copilot_token",
+			fetch: vi.fn(
+				() =>
+					new Response(
+						`data: ${JSON.stringify({
+							type: "response.completed",
+							response: {
+								status: "completed",
+								model: "gpt-5.5",
+								usage: {
+									input_tokens: 1,
+									output_tokens: 1,
+									total_tokens: 2,
+									input_tokens_details: { cached_tokens: 0 },
+								},
+							},
+						})}\n\n`,
+						{ status: 200, headers: { "content-type": "text/event-stream" } },
+					),
+			) as unknown as typeof fetch,
+		}).result();
+
+		expect(result.upstreamModel).toBeUndefined();
+		expect(result.stopReason).toBe("stop");
+	});
+
 	it("openai-completions sends requestModelId", async () => {
 		const wireModelIds: unknown[] = [];
 		const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
