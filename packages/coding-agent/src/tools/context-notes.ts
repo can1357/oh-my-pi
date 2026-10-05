@@ -6,19 +6,24 @@ import type {
 	AgentToolUpdateCallback,
 	ToolApprovalDecision,
 } from "@oh-my-pi/pi-agent-core";
+import { Tokenizer } from "@oh-my-pi/pi-agent-core/tokenizer";
+import { prompt } from "@oh-my-pi/pi-utils";
 import {
 	CONTEXT_NOTES_ENTRY_TYPE,
+	checkContextRolloverGrowth,
 	getContextNotes,
 	MAX_CONTEXT_NOTES_BYTES,
 	type ContextNotesEntry,
 } from "../session/context-notes";
 import contextNotesDescription from "../prompts/tools/context-notes.md" with { type: "text" };
 import newContextDescription from "../prompts/tools/new-context.md" with { type: "text" };
+import newContextRefusedPrompt from "../prompts/tools/new-context-refused.md" with { type: "text" };
 import type { ToolSession } from ".";
 import { throwIfAborted } from "./tool-errors";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 
-import { cfgCompactionExperimentalContextManagement } from "../session/context-settings";
+import { cfgCompactionExperimentalContextManagement, cfgCompactionKeepRecentTokens } from "../session/context-settings";
+import { resolveSpeculationLeadTokens } from "../session/speculation-lead";
 
 const contextNotesSchema = type({
 	"text?": type("string").describe("Entire replacement notebook text. Omit to read; use an empty string to clear."),
@@ -36,7 +41,10 @@ export interface ContextNotesToolDetails {
 }
 
 export interface NewContextToolDetails {
-	requested: true;
+	requested: boolean;
+	reason?: "recent-rollover";
+	freshTokens?: number;
+	minimumNewTokens?: number;
 }
 
 type ExperimentalContextSessionManager = NonNullable<ToolSession["sessionManager"]>;
@@ -170,8 +178,30 @@ export class NewContextTool implements AgentTool<typeof newContextSchema, NewCon
 		_onUpdate?: AgentToolUpdateCallback<NewContextToolDetails>,
 		_context?: AgentToolContext,
 	): Promise<AgentToolResult<NewContextToolDetails>> {
-		getExperimentalContextSession(this.session);
+		const manager = getExperimentalContextSession(this.session);
 		throwIfAborted(signal);
+		const model = this.session.getActiveModel?.();
+		const contextWindow = model?.contextWindow ?? 0;
+		const refreshBudget = Math.max(
+			cfgCompactionKeepRecentTokens.get(this.session.settings),
+			resolveSpeculationLeadTokens(contextWindow),
+		);
+		// Reuse the bounded refresh band, capped for small windows so the
+		// repeat guard can rearm before consuming the entire model window.
+		const minimumNewTokens =
+			contextWindow > 0 ? Math.max(1, Math.min(refreshBudget, Math.floor(contextWindow / 4))) : refreshBudget;
+		const growth = checkContextRolloverGrowth(manager.getBranch(), new Tokenizer(model), minimumNewTokens);
+		if (!growth.allowed)
+			return {
+				content: [{ type: "text", text: prompt.render(newContextRefusedPrompt, growth).trim() }],
+				details: {
+					requested: false,
+					reason: "recent-rollover",
+					freshTokens: growth.freshTokens,
+					minimumNewTokens: growth.minimumNewTokens,
+				},
+				isError: true,
+			};
 		return {
 			content: [{ type: "text", text: "New context window requested." }],
 			details: { requested: true },

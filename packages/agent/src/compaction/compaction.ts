@@ -149,7 +149,7 @@ function extractFileOperations(
  * Extract AgentMessage from an entry if it produces one.
  * Returns undefined for entries that don't contribute to LLM context.
  */
-function getMessageFromEntry(entry: SessionEntry): AgentMessage | undefined {
+export function getMessageFromEntry(entry: SessionEntry): AgentMessage | undefined {
 	if (entry.type === "message") {
 		return entry.message;
 	}

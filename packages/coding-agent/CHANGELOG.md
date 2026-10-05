@@ -20,6 +20,7 @@
 
 ### Fixed
 
+- Experimental context windows now reject repeated model-requested rollovers until substantial new conversation content accumulates, including after resuming a session ([#14487](https://github.com/can1357/oh-my-pi/pull/14487) by [@DarkPhilosophy](https://github.com/DarkPhilosophy)).
 - Fixed the `/usage` sheet in Tern missing the Close button the other report sheets have ([#14455](https://github.com/can1357/oh-my-pi/pull/14455) by [@H4vC](https://github.com/H4vC)).
 - Fixed cancelling a bash command on Windows sometimes terminating an unrelated program ([#14454](https://github.com/can1357/oh-my-pi/pull/14454) by [@H4vC](https://github.com/H4vC))
 - Fixed `umask` in a bash command changing the umask of omp itself ([#14454](https://github.com/can1357/oh-my-pi/pull/14454) by [@H4vC](https://github.com/H4vC))

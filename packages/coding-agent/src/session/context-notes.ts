@@ -1,4 +1,6 @@
-import { prompt } from "@oh-my-pi/pi-utils";
+import { getMessageFromEntry } from "@oh-my-pi/pi-agent-core/compaction";
+import type { Tokenizer } from "@oh-my-pi/pi-agent-core/tokenizer";
+import { isRecord, prompt } from "@oh-my-pi/pi-utils";
 import type { CustomEntry, SessionEntry } from "./session-entries";
 import contextNotesPrompt from "../prompts/system/context-notes.md" with { type: "text" };
 
@@ -56,4 +58,49 @@ export function renderContextNotes(entries: readonly SessionEntry[]): string {
 	const notes = getContextNotes(entries);
 	if (!notes || notes.text.length === 0) return "";
 	return prompt.render(contextNotesPrompt, { notes: notes.text }).trim();
+}
+
+export type ContextRolloverGrowth =
+	| { allowed: true }
+	| { allowed: false; freshTokens: number; minimumNewTokens: number };
+
+/** Published branch boundaries, rather than a process-local cooldown, survive resume and forks. */
+export function checkContextRolloverGrowth(
+	entries: readonly SessionEntry[],
+	tokenizer: Tokenizer,
+	minimumNewTokens: number,
+): ContextRolloverGrowth {
+	let boundary = -1;
+	for (let index = entries.length - 1; index >= 0; index--) {
+		const entry = entries[index]!;
+		if (entry.type === "reset_boundary") return { allowed: true };
+		if (
+			entry.type === "compaction" &&
+			isRecord(entry.details) &&
+			entry.details.kind === "experimental-context-rollover"
+		) {
+			boundary = index;
+			break;
+		}
+	}
+	if (boundary < 0) return { allowed: true };
+	let freshTokens = 0;
+	for (let index = boundary + 1; index < entries.length; index++) {
+		const entry = entries[index]!;
+		if (entry.type !== "message" && entry.type !== "custom_message" && entry.type !== "branch_summary") continue;
+		let message = getMessageFromEntry(entry);
+		if (!message) continue;
+		if (message.role === "toolResult" && (message.toolName === "new_context" || message.toolName === "context_notes"))
+			continue;
+		if (message.role === "assistant") {
+			const content = message.content.filter(
+				block => block.type !== "toolCall" || (block.name !== "new_context" && block.name !== "context_notes"),
+			);
+			if (content.length === 0) continue;
+			if (content.length !== message.content.length) message = { ...message, content };
+		}
+		freshTokens += tokenizer.countMessage(message, { excludeEncryptedReasoning: true });
+		if (freshTokens >= minimumNewTokens) return { allowed: true };
+	}
+	return { allowed: false, freshTokens, minimumNewTokens };
 }

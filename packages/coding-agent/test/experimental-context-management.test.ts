@@ -2,7 +2,7 @@ import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "bun:t
 import * as path from "node:path";
 import { Agent, CompactionCancelledError, type AgentTool } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, UserMessage } from "@oh-my-pi/pi-ai";
-import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
+import { createMockModel, type MockResponse } from "@oh-my-pi/pi-ai/providers/mock";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
@@ -19,7 +19,8 @@ import { ExtensionRuntime, loadExtensionFromFactory } from "@oh-my-pi/pi-coding-
 import { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
-import { TempDir } from "@oh-my-pi/pi-utils";
+import { MemorySessionStorage } from "@oh-my-pi/pi-coding-agent/session/session-storage";
+import { isRecord, TempDir } from "@oh-my-pi/pi-utils";
 import { computeNonMessageTokens } from "@oh-my-pi/pi-tui/status-line/context-usage";
 import { mnemopiBackend } from "@oh-my-pi/pi-coding-agent/mnemopi/backend";
 import type { Tool, ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
@@ -28,6 +29,7 @@ import { BUILTIN_TOOL_NAMES } from "@oh-my-pi/pi-coding-agent/tools/builtin-name
 import { GrepTool } from "@oh-my-pi/pi-coding-agent/tools/grep";
 import { EvalTool } from "@oh-my-pi/pi-coding-agent/tools/eval";
 import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
+import { dispatchXdevTool, resolveXdevTool, type XdevState } from "@oh-my-pi/pi-coding-agent/tools/xdev";
 import { createInMemoryAuthStorage } from "./helpers/agent-session-setup";
 
 const authStorage = createInMemoryAuthStorage();
@@ -104,9 +106,9 @@ describe("experimental context management", () => {
 		session = undefined;
 	});
 
-	async function createCodeModeSession() {
+	async function createCodeModeSession(responses?: MockResponse[], autoCompaction = true) {
 		const mock = createMockModel({
-			responses: [
+			responses: responses ?? [
 				{
 					content: ["Working on the task. ".repeat(100), { type: "toolCall", name: "new_context", arguments: {} }],
 				},
@@ -118,6 +120,7 @@ describe("experimental context management", () => {
 		for (const message of history) manager.appendMessage(message);
 		const settings = Settings.isolated({
 			"compaction.experimentalContextManagement": true,
+			"compaction.enabled": autoCompaction,
 			"compaction.keepRecentTokens": 128,
 			"compaction.midTurnEnabled": false,
 			"providers.openai-codex.codeMode": "on",
@@ -183,6 +186,242 @@ describe("experimental context management", () => {
 		expect(
 			mock.calls[1].context.messages.some(message => message.role === "user" && message.content === "old task"),
 		).toBe(false);
+	});
+	it.each([true, false])(
+		"refuses a second early rollover and continues work with automatic compaction %s",
+		async enabled => {
+			const usage = { input: 5000, cacheRead: 44288, output: 1000, totalTokens: 50288 };
+			const { session, manager, mock } = await createCodeModeSession(
+				[
+					{
+						content: ["Initial work. ".repeat(300), { type: "toolCall", name: "new_context", arguments: {} }],
+						usage,
+					},
+					{
+						content: ["A small additional step.", { type: "toolCall", name: "new_context", arguments: {} }],
+						usage: { ...usage, input: 7000, totalTokens: 52288 },
+					},
+					{ content: ["CONTINUED_WORK_AFTER_REFUSAL"], usage },
+				],
+				enabled,
+			);
+			await session.prompt("Complete the synthetic task.");
+			await session.waitForIdle();
+			const boundaries = manager
+				.getEntries()
+				.filter((entry): entry is CompactionEntry => entry.type === "compaction");
+			const results = manager
+				.getEntries()
+				.flatMap(entry =>
+					entry.type === "message" &&
+					entry.message.role === "toolResult" &&
+					entry.message.toolName === "new_context"
+						? [entry.message]
+						: [],
+				);
+			expect(boundaries).toHaveLength(1);
+			expect(boundaries[0]!.tokensBefore).toBeGreaterThan(44000);
+			expect(results.map(result => (isRecord(result.details) ? result.details.requested : undefined))).toEqual([
+				true,
+				false,
+			]);
+			expect(mock.calls).toHaveLength(3);
+			expect(session.messages.at(-1)).toMatchObject({
+				role: "assistant",
+				content: [{ type: "text", text: "CONTINUED_WORK_AFTER_REFUSAL" }],
+			});
+		},
+	);
+
+	it("rearms explicit rollover after substantial new conversation content", async () => {
+		const usage = { input: 5000, cacheRead: 44288, output: 1000, totalTokens: 50288 };
+		const { session, manager } = await createCodeModeSession(
+			[
+				{
+					content: ["Initial work. ".repeat(300), { type: "toolCall", name: "new_context", arguments: {} }],
+					usage,
+				},
+				{
+					content: [
+						"Substantial new work. ".repeat(2400),
+						{ type: "toolCall", name: "new_context", arguments: {} },
+					],
+					usage: { ...usage, input: 16000, output: 13000, totalTokens: 73288 },
+				},
+				{ content: ["done"], usage },
+			],
+			false,
+		);
+		await session.prompt("Complete the synthetic task.");
+		await session.waitForIdle();
+		expect(manager.getEntries().filter(entry => entry.type === "compaction")).toHaveLength(2);
+		expect(
+			manager
+				.getEntries()
+				.flatMap(entry =>
+					entry.type === "message" &&
+					entry.message.role === "toolResult" &&
+					entry.message.toolName === "new_context"
+						? [isRecord(entry.message.details) ? entry.message.details.requested : undefined]
+						: [],
+				),
+		).toEqual([true, true]);
+	});
+
+	it("keeps the guard after reload, rearms after growth, and does not poison a sibling branch", async () => {
+		const storage = new MemorySessionStorage();
+		const manager = SessionManager.create(process.cwd(), "/virtual/context-guard", storage);
+		let reloaded: SessionManager | undefined;
+		try {
+			const oldBranch = manager.appendMessage(user("Original task."));
+			const kept = manager.appendMessage(assistant("Recent work."));
+			manager.appendCompaction("Rollover", undefined, kept, 57000, {
+				details: { kind: "experimental-context-rollover", version: 1 },
+			});
+			await manager.flush();
+			const file = manager.getSessionFile();
+			if (!file) throw new Error("Expected persisted memory fixture");
+			const resumed = await SessionManager.open(file, "/virtual/context-guard", storage);
+			reloaded = resumed;
+			const settings = Settings.isolated({
+				"compaction.experimentalContextManagement": true,
+				"compaction.keepRecentTokens": 128,
+			});
+			const tool = new NewContextTool({
+				cwd: process.cwd(),
+				hasUI: false,
+				settings,
+				sessionManager: resumed,
+				getSessionId: () => resumed.getSessionId(),
+				getSessionFile: () => resumed.getSessionFile() ?? null,
+				getSessionSpawns: () => "*",
+			});
+			expect((await tool.execute("repeat", {})).details?.requested).toBe(false);
+			resumed.appendMessage(user("Substantial new work. ".repeat(2400)));
+			expect((await tool.execute("grown", {})).details?.requested).toBe(true);
+			resumed.branch(oldBranch);
+			expect((await tool.execute("sibling", {})).details?.requested).toBe(true);
+		} finally {
+			try {
+				await reloaded?.close();
+			} finally {
+				await manager.close();
+			}
+		}
+	});
+
+	it.each([
+		{ window: 922000, budget: 32000 },
+		{ window: 8000, budget: 2000 },
+	])(
+		"scales repeat protection for a $window-token model and rearms at its refresh budget",
+		async ({ window, budget }) => {
+			const manager = SessionManager.inMemory();
+			const kept = manager.appendMessage(assistant("Recent work."));
+			manager.appendCompaction("Rollover", undefined, kept, 57000, {
+				details: { kind: "experimental-context-rollover", version: 1 },
+			});
+			const settings = Settings.isolated({
+				"compaction.experimentalContextManagement": true,
+				"compaction.keepRecentTokens": 128,
+			});
+			const model = { ...createMockModel().model, contextWindow: window };
+			const tool = new NewContextTool({
+				cwd: process.cwd(),
+				hasUI: false,
+				settings,
+				sessionManager: manager,
+				getSessionId: () => manager.getSessionId(),
+				getSessionFile: () => null,
+				getSessionSpawns: () => "*",
+				getActiveModel: () => model,
+			});
+			expect((await tool.execute("fresh", {})).details).toMatchObject({
+				requested: false,
+				minimumNewTokens: budget,
+			});
+			manager.appendMessage(user("x".repeat((budget - 16) * 4)));
+			expect((await tool.execute("below-budget", {})).details?.requested).toBe(false);
+			manager.appendMessage(user("extra".repeat(20)));
+			expect((await tool.execute("rearmed", {})).details?.requested).toBe(true);
+		},
+	);
+
+	it("keeps the rollover guard in delegated device dispatch and preserves the refusal flag", async () => {
+		const manager = SessionManager.inMemory();
+		const kept = manager.appendMessage(assistant("Recent work."));
+		const settings = Settings.isolated({
+			"compaction.experimentalContextManagement": true,
+			"compaction.keepRecentTokens": 128,
+		});
+		const tool = new NewContextTool({
+			cwd: process.cwd(),
+			hasUI: false,
+			settings,
+			sessionManager: manager,
+			getSessionId: () => manager.getSessionId(),
+			getSessionFile: () => null,
+			getSessionSpawns: () => "*",
+		});
+		const state: XdevState = {
+			tools: new Map([[tool.name, tool]]),
+			mountedNames: new Set(),
+			builtInNames: new Set([tool.name]),
+			isActive: name => name === tool.name,
+			resolve: name => resolveXdevTool(state, name),
+		};
+		const first = await dispatchXdevTool(state, "new_context", "{}", "first");
+		expect(first.xdev.inner).toMatchObject({ requested: true });
+		manager.appendCompaction("Rollover", undefined, kept, 57000, {
+			details: { kind: "experimental-context-rollover", version: 1 },
+		});
+		const repeated = await dispatchXdevTool(state, "new_context", "{}", "repeat");
+		expect(repeated.result.isError).toBeTrue();
+		expect(repeated.xdev.inner).toMatchObject({ requested: false, reason: "recent-rollover" });
+	});
+
+	it("does not rearm from context-management bookkeeping or opaque reasoning, but counts new IRC work", async () => {
+		const manager = SessionManager.inMemory();
+		const kept = manager.appendMessage(assistant("Recent work."));
+		manager.appendCompaction("Rollover", undefined, kept, 57000, {
+			details: { kind: "experimental-context-rollover", version: 1 },
+		});
+		const settings = Settings.isolated({
+			"compaction.experimentalContextManagement": true,
+			"compaction.keepRecentTokens": 128,
+		});
+		const tool = new NewContextTool({
+			cwd: process.cwd(),
+			hasUI: false,
+			settings,
+			sessionManager: manager,
+			getSessionId: () => manager.getSessionId(),
+			getSessionFile: () => null,
+			getSessionSpawns: () => "*",
+		});
+		for (let index = 0; index < 4; index++) {
+			manager.appendMessage({
+				...assistant(""),
+				content: [{ type: "toolCall", id: "notes-" + index, name: "context_notes", arguments: {} }],
+			});
+			manager.appendMessage({
+				role: "toolResult",
+				toolCallId: "notes-" + index,
+				toolName: "context_notes",
+				content: [{ type: "text", text: "Unchanged context notes. ".repeat(1200) }],
+				isError: false,
+				timestamp: Date.now(),
+			});
+		}
+		manager.appendMessage({
+			...assistant(""),
+			content: [{ type: "thinking", thinking: "Planning.", thinkingSignature: "opaque-payload".repeat(8000) }],
+		});
+		const denied = await tool.execute("repeat", {});
+		expect(denied.details).toMatchObject({ requested: false, reason: "recent-rollover" });
+		expect(denied.isError).toBeTrue();
+		manager.appendCustomMessageEntry("irc:incoming", "New work assignment. ".repeat(2400), true, undefined, "agent");
+		expect((await tool.execute("new-work", {})).details?.requested).toBeTrue();
 	});
 
 	it("retains the latest request through successive rollovers and context reconstruction without notes", async () => {

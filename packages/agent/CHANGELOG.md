@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Exported `getMessageFromEntry()` from `@oh-my-pi/pi-agent-core/compaction` for converting session journal entries into context messages ([#14487](https://github.com/can1357/oh-my-pi/pull/14487) by [@DarkPhilosophy](https://github.com/DarkPhilosophy)).
+
 ## [18.6.1] - 2026-10-04
 
 ### Fixed
