@@ -16,6 +16,14 @@
 - Covered on Linux 6.9 and newer, where `PIDFD_SIGNAL_PROCESS_GROUP` lets a signal be scoped to the leader's retained pidfd. The mux takes ownership of the group only there, because a group whose leader has been reaped is a number the kernel may have handed to an unrelated session, and signalling it by number is worse than missing a helper.
 - Not covered on macOS, on Windows, or on Linux before 6.9, where that scope does not exist and the server is therefore not detached. A helper spawned during the handshake on those hosts is left running and the stop reports success.
 - Not covered on any host for a helper that leaves the group under its own power, by `setsid(2)` or `setpgid(2)` after it is spawned. Containment that survives a process leaving every inherited relation needs a cgroup or a subreaper, and neither is owned by this spawn.
+## [18.6.2] - 2026-10-04
+
+### Fixed
+
+- Fixed snapcompact's short final frames preventing vision-backed sessions from continuing on backends that reject 32px-or-smaller images ([#14355](https://github.com/can1357/oh-my-pi/issues/14355)).
+- Fixed the agent's `goal` calls asking for approval under `--approval-mode write`, which paused goal-mode loops at `complete`; `always-ask` still prompts for goal changes but not `get` ([#14368](https://github.com/can1357/oh-my-pi/issues/14368))
+- Fixed MCP server connection progress popping up a toast for every server that connects or fails in native terminals such as Tern; it now shows only in the classic terminal transcript
+
 ## [18.6.1] - 2026-10-04
 
 ### Fixed

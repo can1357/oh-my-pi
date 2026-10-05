@@ -2678,10 +2678,11 @@ export declare function renderMermaidAscii(text: string, options?: MermaidRender
  * Render one snapcompact frame on a libuv worker: print pre-normalized text
  * onto a `size`-wide bitmap and encode it as PNG.
  *
- * The bitmap height hugs the rows the text actually occupies
- * (`usedRows * lineRepeat * cellHeight`), so a partially filled frame never
- * pays for blank padding rows. The glyph grid holds `floor(size/cellWidth) *
- * floor(size/cellHeight/lineRepeat)` characters; input beyond that is ignored.
+ * The bitmap height hugs the rows the text occupies
+ * (`usedRows * lineRepeat * cellHeight`), with a 64px floor for vision
+ * processors that reject smaller dimensions. The glyph grid holds
+ * `floor(size/cellWidth) * floor(size/cellHeight/lineRepeat)` characters;
+ * input beyond that is ignored.
  * Native-cell bitmap-font shapes encode as indexed PNG; stretched bitmap-font
  * shapes (target cell != font cell) encode as RGB. TrueType shapes encode RGB
  * directly from grayscale coverage.
@@ -3159,8 +3160,8 @@ export declare function sliceWithWidth(line: string, startCol: number, length: n
 export interface SnapcompactRenderOptions {
   /**
    * Frame width in pixels; also bounds the grid rows
-   * (`floor(size/cellHeight/lineRepeat)`). Output height hugs the rows the
-   * text actually uses instead of padding to a square.
+   * (`floor(size/cellHeight/lineRepeat)`). Output height hugs the used rows
+   * with a 64px floor, rather than padding every frame to a square.
    */
   size: number
   /**
