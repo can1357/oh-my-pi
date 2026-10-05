@@ -36,6 +36,7 @@ import { normalizeToolNames } from "../tools/builtin-names";
 
 import { realpathIfExists, resolveContainedPath } from "./contained-path";
 import { buildPluginDirRoot } from "./plugin-dir-roots";
+import { dropExcludedPaths, globalResourceExclusions, type ResourceExclusions } from "./resource-exclusions";
 
 /**
  * Standard paths for each config source.
@@ -1435,13 +1436,19 @@ export async function isSupersededPluginPath(filePath: string, home: string, cwd
  * List all installed Claude Code plugin roots from its active plugin cache and
  * ~/.omp/plugins/installed_plugins.json, plus the nearest project registry when present.
  *
- * Results are cached per Claude and OMP config directories, project registry, and canonical active project.
+ * Roots with a still-valid reviewed-resource exclusion are omitted (`exclusions` defaults to the
+ * global settings; discovery passes its session's value). The unfiltered listing is cached per Claude
+ * and OMP config directories, project registry, and canonical active project; exclusions are
+ * re-verified against current content on every call.
  */
-export function listClaudePluginRoots(
+export async function listClaudePluginRoots(
 	home: string,
 	cwd?: string,
+	exclusions: ResourceExclusions = globalResourceExclusions(),
 ): Promise<{ roots: ClaudePluginRoot[]; warnings: string[] }> {
-	return readPluginRoots(home, cwd, false);
+	const listed = await readPluginRoots(home, cwd, false);
+	if (Object.keys(exclusions).length === 0) return listed;
+	return { roots: await dropExcludedPaths(listed.roots, root => root.path, exclusions), warnings: listed.warnings };
 }
 
 /** {@link listClaudePluginRoots}; with `revalidate`, a cached result whose registry files changed is read again. */
@@ -1684,7 +1691,9 @@ async function loadClaudePluginRoots({
 export function clearClaudePluginRootsCache(): void {
 	pluginRootsCache.clear();
 	for (const invalidate of pluginCacheInvalidators) invalidate();
+	rawPreloadedPluginRoots = [...injectedPluginDirRoots];
 	preloadedPluginRoots = [...injectedPluginDirRoots];
+	preloadViewVersion++;
 	// Re-warm preloaded roots asynchronously so sync LSP config reads stay valid
 	if (lastPreloadHome) {
 		void preloadPluginRoots(lastPreloadHome, getProjectDir());
@@ -1706,10 +1715,22 @@ export function clearPluginRootsAndCaches(extraPaths?: readonly string[]): void 
 // ── Preloaded plugin roots (for sync consumers like LSP config) ─────────────
 // Populated at startup by preloadPluginRoots(). Read synchronously by
 // getPreloadedPluginRoots(). Safe degradation: empty array if not warmed.
+// The raw list is kept apart from the exclusion-filtered view consumers read, so a later session
+// (new fingerprints, changed or restored copies) re-derives its view from every installed root.
 
+let rawPreloadedPluginRoots: ClaudePluginRoot[] = [];
 let preloadedPluginRoots: ClaudePluginRoot[] = [];
+/** Bumped whenever the raw list or the view changes, so a slower verification never overwrites a newer view. */
+let preloadViewVersion = 0;
 let injectedPluginDirRoots: ClaudePluginRoot[] = [];
 let lastPreloadHome: string | undefined;
+
+async function publishPreloadedPluginRoots(raw: ClaudePluginRoot[], exclusions: ResourceExclusions): Promise<void> {
+	rawPreloadedPluginRoots = raw;
+	const version = ++preloadViewVersion;
+	const view = await dropExcludedPaths(raw, root => root.path, exclusions);
+	if (version === preloadViewVersion) preloadedPluginRoots = view;
+}
 
 /**
  * Populate the module-level plugin roots cache for sync consumers.
@@ -1718,8 +1739,8 @@ let lastPreloadHome: string | undefined;
  */
 export async function preloadPluginRoots(home: string, cwd?: string): Promise<void> {
 	lastPreloadHome = home;
-	const { roots } = await listClaudePluginRoots(home, cwd);
-	preloadedPluginRoots = roots;
+	const { roots } = await readPluginRoots(home, cwd, false);
+	await publishPreloadedPluginRoots(roots, globalResourceExclusions());
 }
 
 /**
@@ -1728,6 +1749,16 @@ export async function preloadPluginRoots(home: string, cwd?: string): Promise<vo
  */
 export function getPreloadedPluginRoots(): readonly ClaudePluginRoot[] {
 	return preloadedPluginRoots;
+}
+
+/**
+ * Re-derive the preloaded roots read synchronously by LSP/DAP config from the raw list under the
+ * session's exclusions. The startup preload can run before the session's settings exist, so each
+ * session calls this once they do; a changed fingerprint or a different session's settings restore
+ * the copies an earlier call hid. A newer preload or call supersedes one still verifying.
+ */
+export async function applyExclusionsToPreloadedPluginRoots(exclusions: ResourceExclusions): Promise<void> {
+	await publishPreloadedPluginRoots(rawPreloadedPluginRoots, exclusions);
 }
 
 // ── --plugin-dir injection ──────────────────────────────────────────────────
@@ -1777,6 +1808,6 @@ export async function injectPluginDirRoots(home: string, dirs: string[], cwd?: s
 	pluginRootsCache.clear();
 	// Rebuild — cache miss triggers fresh load that includes both user+project registries
 	// and prepends injectedPluginDirRoots at highest precedence.
-	const { roots } = await listClaudePluginRoots(home, cwd);
-	preloadedPluginRoots = roots;
+	const { roots } = await readPluginRoots(home, cwd, false);
+	await publishPreloadedPluginRoots(roots, globalResourceExclusions());
 }
