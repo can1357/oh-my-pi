@@ -90,6 +90,8 @@ Argument handling:
 | `--from-codex` | Import a Codex session into OMP. |
 | `--export <session>` | Export a session file to HTML and exit. |
 | `--no-title` | Disable title auto-generation (equivalent to the `PI_NO_TITLE` [environment variable](./environment-variables.md)). |
+| `--name <name>` | Set this session's name. Interactive, RPC, and ACP runs choose a free name when another live session already uses it; print mode keeps the requested name. |
+| `--cross-session` | Enable same-machine cross-session messaging for this run (equivalent to the ephemeral `messaging.enabled=true` setting). Only top-level conversations participate; subagents and helper sessions do not. |
 
 `--continue`, `--resume`, `--fork`, and foreign-session imports require
 persistence and cannot use `--no-session`. `--from-claude` and `--from-codex`

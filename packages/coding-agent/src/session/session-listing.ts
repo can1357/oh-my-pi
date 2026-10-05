@@ -9,6 +9,7 @@ import { LRUCache } from "@oh-my-pi/pi-utils/lru";
 import { parseJsonlLenient } from "@oh-my-pi/pi-utils/stream";
 import { toError } from "@oh-my-pi/pi-utils/type-guards";
 import { computeDefaultSessionDir } from "./session-paths";
+import type { SessionTitleSource } from "./session-entries";
 import { FileSessionStorage, type SessionStorage, type SessionStorageStat } from "./session-storage";
 import { lookupSessionTitle, recordSessionTitle } from "./session-index";
 
@@ -34,6 +35,7 @@ export interface SessionInfo {
 	/** Working directory where the session was started. Empty string for old sessions. */
 	cwd: string;
 	title?: string;
+	titleSource?: SessionTitleSource;
 	/** Path to the parent session (if this session was forked). */
 	parentSessionPath?: string;
 	created: Date;
@@ -316,6 +318,7 @@ interface SessionListHeader {
 	id: string;
 	cwd?: string;
 	title?: string;
+	titleSource?: SessionTitleSource;
 	parentSession?: string;
 	timestamp?: string;
 }
@@ -325,9 +328,14 @@ function normalizeTitleOverride(title: string | undefined): string | null | unde
 	return title.trim() ? title : null;
 }
 
+function normalizeTitleSource(source: unknown): SessionTitleSource | undefined {
+	return source === "auto" || source === "user" ? source : undefined;
+}
+
 function sessionListHeaderFromRecord(
 	record: Record<string, unknown> | undefined,
 	titleOverride?: string | null,
+	sourceOverride?: SessionTitleSource,
 ): SessionListHeader | undefined {
 	if (record?.type !== "session" || typeof record.id !== "string") return undefined;
 	return {
@@ -338,12 +346,17 @@ function sessionListHeaderFromRecord(
 			titleOverride === null
 				? undefined
 				: (titleOverride ?? (typeof record.title === "string" ? record.title : undefined)),
+		titleSource: titleOverride !== undefined ? sourceOverride : normalizeTitleSource(record.titleSource),
 		parentSession: typeof record.parentSession === "string" ? record.parentSession : undefined,
 		timestamp: typeof record.timestamp === "string" ? record.timestamp : undefined,
 	};
 }
 
-function parseSessionListHeaderLine(line: string, titleOverride?: string | null): SessionListHeader | undefined {
+function parseSessionListHeaderLine(
+	line: string,
+	titleOverride?: string | null,
+	sourceOverride?: SessionTitleSource,
+): SessionListHeader | undefined {
 	if (extractStringProperty(line, "type") !== "session") return undefined;
 	const id = extractStringProperty(line, "id");
 	if (!id) return undefined;
@@ -352,6 +365,10 @@ function parseSessionListHeaderLine(line: string, titleOverride?: string | null)
 		id,
 		cwd: extractStringProperty(line, "cwd"),
 		title: titleOverride === null ? undefined : (titleOverride ?? extractStringProperty(line, "title")),
+		titleSource:
+			titleOverride !== undefined
+				? sourceOverride
+				: normalizeTitleSource(extractStringProperty(line, "titleSource")),
 		parentSession: extractStringProperty(line, "parentSession"),
 		timestamp: extractStringProperty(line, "timestamp"),
 	};
@@ -365,20 +382,26 @@ function parseSessionListHeader(
 	const parsedSlotTitle = normalizeTitleOverride(
 		firstEntry?.type === "title" && typeof firstEntry.title === "string" ? firstEntry.title : undefined,
 	);
-	const parsedHeader = sessionListHeaderFromRecord(entries[firstEntry?.type === "title" ? 1 : 0], parsedSlotTitle);
+	const parsedHeader = sessionListHeaderFromRecord(
+		entries[firstEntry?.type === "title" ? 1 : 0],
+		parsedSlotTitle,
+		normalizeTitleSource(firstEntry?.type === "title" ? firstEntry.source : undefined),
+	);
 	if (parsedHeader) return parsedHeader;
 
 	let slotTitle: string | null | undefined;
+	let slotSource: SessionTitleSource | undefined;
 	let firstNonEmpty = true;
 	for (const rawLine of content.split(/\r?\n/)) {
 		const line = rawLine.trim();
 		if (!line) continue;
 		if (firstNonEmpty && extractStringProperty(line, "type") === "title") {
 			slotTitle = normalizeTitleOverride(extractStringProperty(line, "title"));
+			slotSource = normalizeTitleSource(extractStringProperty(line, "source"));
 			firstNonEmpty = false;
 			continue;
 		}
-		return parseSessionListHeaderLine(line, slotTitle);
+		return parseSessionListHeaderLine(line, slotTitle, slotSource);
 	}
 	return undefined;
 }
@@ -485,6 +508,7 @@ async function scanSessionFile(
 			id: header.id,
 			cwd: header.cwd ?? "",
 			title: header.title ?? shortSummary,
+			titleSource: header.title !== undefined ? header.titleSource : undefined,
 			parentSessionPath: header.parentSession,
 			created: new Date(header.timestamp ?? ""),
 			modified: mtime,

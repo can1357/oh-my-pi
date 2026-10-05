@@ -26,6 +26,8 @@ import { LspTool } from "../lsp";
 import type { MCPManager } from "../mcp";
 import { MEMORY_BACKEND_TOOL_NAMES } from "../memory-backend/tool-names";
 import type { MnemopiSessionState } from "../mnemopi/state";
+import type { MessagingService } from "../messaging/service";
+import type { AgentSession } from "../session/agent-session";
 import type { PlanModeState } from "../plan-mode/state";
 import type { AgentLifecycleManager } from "../registry/agent-lifecycle";
 import type { AgentRegistry } from "../registry/agent-registry";
@@ -206,6 +208,9 @@ export interface DeferredDiagnosticsEntry {
 
 /** Session context for tool factories */
 export interface ToolSession {
+	/** Cross-session capabilities of this caller only; never inherited from its parent. */
+	messaging?: MessagingService;
+	messagingSession?: AgentSession;
 	/** Current working directory */
 	cwd: string;
 	/** Additional workspace directories beyond cwd (multi-root), forwarded to subagents. */

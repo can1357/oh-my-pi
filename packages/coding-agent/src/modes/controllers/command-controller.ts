@@ -38,6 +38,7 @@ import {
 	summarizeMentalModel,
 } from "../../hindsight";
 import { memoryStatsUnavailableMessage, resolveMemoryBackend } from "../../memory-backend";
+import { claimSessionName, isReservedAddress } from "../../messaging/names";
 import { BashExecutionComponent, bashPtyViewport } from "@oh-my-pi/pi-tui/chat/bash-execution";
 import { appKey } from "@oh-my-pi/pi-tui/chrome/keybinding-hints";
 import { BorderedLoader } from "@oh-my-pi/pi-tui/overlays/bordered-loader";
@@ -1567,6 +1568,10 @@ export class CommandController {
 	}
 
 	async handleRenameCommand(title: string): Promise<void> {
+		if (isReservedAddress(title)) {
+			this.ctx.showError('Session names can\'t start with "@" (reserved for extension peer namespaces).');
+			return;
+		}
 		const session = this.ctx.session;
 		const sessionManager = this.ctx.sessionManager;
 		const sessionId = sessionManager.getSessionId();
@@ -1578,7 +1583,13 @@ export class CommandController {
 			!signal.aborted &&
 			sessionManager.getSessionId() === sessionId &&
 			sessionManager.titleRevision === titleRevision;
+		const requested = title;
 		try {
+			if (session.messaging) {
+				const taken = new Set((await session.messaging.listSessions()).flatMap(s => (s.name ? [s.name] : [])));
+				if (!isCurrent()) return;
+				title = claimSessionName(requested, taken);
+			}
 			const persistence = sessionManager.setSessionName(title, "user");
 			titleRevision = sessionManager.titleRevision;
 			const stored = await persistence;
@@ -1588,7 +1599,8 @@ export class CommandController {
 				return;
 			}
 			const name = sessionManager.getSessionName()!;
-			this.ctx.showStatus(`Session renamed to "${name}".`);
+			const collision = name !== requested ? ` ("${requested}" is used by another session)` : "";
+			this.ctx.showStatus(`Session renamed to "${name}".${collision}`);
 		} catch (err) {
 			if (!isCurrent()) return;
 			this.ctx.showError(`Rename failed: ${err instanceof Error ? err.message : String(err)}`);

@@ -2,6 +2,7 @@ import type { Component, OverlayHandle, TUI } from "@oh-my-pi/pi-tui";
 import { Container, Spacer, Text } from "@oh-my-pi/pi-tui";
 import type { CollabUiRequestDraft, CollabUiSelectItem } from "@oh-my-pi/pi-wire";
 import type { CollabHost } from "../../collab/host";
+import type { HeldMessageView } from "../../messaging/service";
 import { formatKeyHint, formatKeyHints, KeybindingsManager } from "@oh-my-pi/pi-tui/app-keybindings";
 import type {
 	CompactOptions,
@@ -966,6 +967,18 @@ export class ExtensionUiController {
 		const result = await remote;
 		if (result.kind === "unavailable") return { kind: "unavailable" };
 		return typeof result.value === "string" ? { kind: "answered", value: result.value } : { kind: "cancelled" };
+	}
+
+	async askCrossSessionApproval(view: HeldMessageView, signal: AbortSignal): Promise<"approve" | "deny" | undefined> {
+		if (signal.aborted) return undefined;
+		const preview = view.body.split(/\r?\n/).slice(0, 12).join("\n");
+		const result = await this.showHookSelector(
+			`Message from another session: @${view.from.address}\n------------\n${preview}\n------------`,
+			[{ label: "Approve" }, { label: "Deny" }],
+			{ signal },
+		);
+		if (signal.aborted) return undefined;
+		return result === "Approve" ? "approve" : result === "Deny" ? "deny" : undefined;
 	}
 
 	/**

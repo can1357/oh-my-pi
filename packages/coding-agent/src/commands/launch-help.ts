@@ -103,6 +103,8 @@ export const launchHelp = {
 		"no-rules": Flags.boolean({ description: "Disable rules discovery and loading" }),
 		export: Flags.string({ description: "Export session file to HTML and exit" }),
 		"no-title": Flags.boolean({ description: "Disable title auto-generation" }),
+		name: Flags.string({ description: "Name this session for cross-session messaging" }),
+		"cross-session": Flags.boolean({ description: "Enable cross-session messaging for this run" }),
 		"no-ui": Flags.boolean({
 			description: "With --mode rpc or rpc-ui: run extensions headless (rpc-ui tool UI remains enabled)",
 		}),

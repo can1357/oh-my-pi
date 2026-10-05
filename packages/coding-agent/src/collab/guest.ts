@@ -195,6 +195,7 @@ export class CollabGuestLink {
 	#replicaActivated = false;
 	/** One owner spans cancellation, queued snapshot work, and local restoration. */
 	#restoration: Promise<boolean> | undefined;
+	#resumeReceiving: (() => void) | undefined;
 	/**
 	 * Buffer for the in-flight chunked welcome. Set by the small `welcome`
 	 * frame, accumulated by every `snapshot-chunk`, drained when the final
@@ -493,6 +494,8 @@ export class CollabGuestLink {
 			throw err;
 		}
 		if (this.#left) return;
+		// Buffer messages until the local conversation is restored.
+		this.#resumeReceiving ??= this.#ctx.session.messaging?.suspendReceiving();
 
 		// Resume through AgentSession without adopting the host's cwd. The replica
 		// keeps its model: #applyHostState mirrors the host's, which runs inference.
@@ -915,6 +918,8 @@ export class CollabGuestLink {
 		} finally {
 			this.#replicaLease?.();
 			this.#replicaLease = undefined;
+			this.#resumeReceiving?.();
+			this.#resumeReceiving = undefined;
 		}
 		if (this.#ctx.collabGuest !== this) return false;
 		this.#ctx.collabGuest = undefined;

@@ -623,6 +623,36 @@ Mounting still follows the session's explicit tool allow-list. A session that pe
 
 Individual built-in tools and Eval preludes are toggled by their own keys, e.g. `bash.enabled`, `launch.enabled`, `eval.py`, `eval.js`, `glob.enabled`, `grep.enabled`, `fetch.enabled`, `browser.enabled`, `computer.enabled`, `ratchet.enabled` (default `false`; the `ratchet(flow)` eval/hillclimb prelude, which `/ratchet` turns on for the current session only), `archive.enabled` (default `true`; the read-only `archive` eval prelude over prompt history, recent projects, past sessions, and recaps), `astEdit.enabled`, `astGrep.enabled`, `find.enabled` (`auto`/`on`/`off`; `auto` enables `find` only when the `judge` role resolves to a native TypeSafe jev model), and `web_search.enabled`. Image questions use `read <image>?q=<question>` and honor `images.questionTimeoutMs`.
 
+### Messages
+
+Cross-session messaging is opt-in for top-level sessions on the same machine. Enable it with `messaging.enabled: true` or launch with `--cross-session`. In `/settings`, its controls are under **Interaction → Messages**. Subagents and helper sessions never bind a messaging endpoint, list other sessions, or send cross-session messages.
+
+| Key | Type | Default | Notes |
+| --- | --- | --- | --- |
+| `messaging.enabled` | boolean | `false` | Enable cross-session messaging for this session. |
+| `messaging.crossSessionInbound` | enum | `default` | `default` (unset), `accept`, `hold`, or `refuse`. Explicit hold queues messages without expiry; refuse rejects them. |
+| `messaging.dialogExpiry` | enum | `5m` | Default-policy approval expiry: `60s`, `5m`, `10m`, or `never`. Does not apply to explicit hold. |
+| `messaging.send` | enum | `allow` | `allow` or `deny` sending to other sessions. |
+| `messaging.list` | enum | `allow` | `allow` or `deny` showing the other-sessions roster. Denying listing does not prevent sending by address. |
+| `messaging.rateLimit` | number | `30` | Positive integer: maximum messages per sender per rate window. |
+| `messaging.rateWindowSeconds` | number | `60` | Positive integer: rate-window length in seconds. |
+| `messaging.repeatWindowSeconds` | number | `30` | Positive integer: drop a message identical to one the same sender sent within this many seconds. |
+| `messaging.relayMaxHops` | number | `8` | Positive integer: drop a relay chain when it reaches this many hops. |
+| `messaging.relayMaxRevisits` | number | `3` | Positive integer (at least 1): drop a chain when it has revisited this session this many times. |
+
+Inbound policy has a stricter trust boundary than ordinary settings precedence. The trusted baseline is the first set valid value from **runtime override → `--config` overlay → global config**. `default` means unset, so resolution continues to the next trusted layer. Project configuration can only tighten that baseline (`refuse > hold > accept`); with no trusted baseline, a project can impose `hold` or `refuse`, but never `accept`.
+
+An invalid raw inbound value in any layer forces messages to be held for approval, even if another layer says `accept`. If any layer says `refuse` while an invalid value is present, refusal wins. The invalid value produces a warning once per process; correcting it restores normal policy resolution.
+
+With no explicit inbound policy, the permission classes determine delivery:
+
+| Receiver | Sender bypass | Sender prompting | Sender unknown |
+| --- | --- | --- | --- |
+| Bypass | Accept | Hold for approval | Hold for approval |
+| Prompting | Hold for approval | Accept | Accept |
+
+`yolo` is bypass; `always-ask` and `write` are prompting. An ACP session is bypass only when auto-approval is explicitly enabled. An authenticated own-child script message is accepted by default regardless of permission class, but still obeys explicit hold/refuse and invalid-value protection. Default-policy holds use the approval dialog when available; headless sessions retain them until policy changes or expiry.
+
 ### Window-scoped computer use
 
 The disabled-by-default `computer` Eval prelude captures and controls real host windows through native OS APIs. Window handles isolate an application without focusing it or moving the real pointer; the `desktop` object preserves selected-display composite and global input behavior. It remains separate from the `browser` Eval prelude, which manages Chromium/CDP tabs and structured page automation.

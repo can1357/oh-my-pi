@@ -1550,6 +1550,12 @@ export class Settings {
 		return this.#revision;
 	}
 
+	/** Raw runtime or CLI-config layer, cloned; overlay children include their parent's layer. */
+	getLayerRaw(layer: "runtime" | "overlay"): RawSettings {
+		const own = structuredClone(layer === "runtime" ? this.#overrides : this.#configOverlay);
+		return this.#parent ? this.#deepMerge(this.#parent.getLayerRaw(layer), own) : own;
+	}
+
 	/**
 	 * Raw global settings layer (`config.yml`/`config.yaml`), deep-cloned.
 	 *

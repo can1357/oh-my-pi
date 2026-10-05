@@ -16,6 +16,7 @@ function createHarness() {
 		isStreaming: false,
 		hasAdmittedSubmission: false,
 		queuedMessageCount: 0,
+		agent: { hasQueuedMessages: (): boolean => session.queuedMessageCount > 0 },
 		hasPendingAsyncWork: () => false,
 	};
 	const results = new RpcPromptResults(session, frame => frames.push(frame));
@@ -234,7 +235,13 @@ describe("RpcPromptResults", () => {
 	test("writes prompt_result after output queued synchronously with the settle", async () => {
 		const frames: object[] = [];
 		const results = new RpcPromptResults(
-			{ isStreaming: false, hasAdmittedSubmission: false, queuedMessageCount: 0, hasPendingAsyncWork: () => false },
+			{
+				isStreaming: false,
+				hasAdmittedSubmission: false,
+				queuedMessageCount: 0,
+				hasPendingAsyncWork: () => false,
+				agent: { hasQueuedMessages: () => false },
+			},
 			frame => frames.push(frame),
 		);
 		results.completeLocal(results.begin("req_6"));
