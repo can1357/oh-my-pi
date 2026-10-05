@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added opt-in `retry.waitForConnection` to wait through provider connection loss without exhausting the API retry budget or switching models. Waits are cancellable and preserve completed tool results; repeated visible partial-text continuations retain their existing cap. Defaults to `false`, preserving ordinary error and fallback behavior ([#14380](https://github.com/can1357/oh-my-pi/pull/14380) by [@jroth1111](https://github.com/jroth1111)).
+
 ## [18.6.2] - 2026-10-04
 
 ### Fixed

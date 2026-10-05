@@ -85,6 +85,7 @@ export const eventDefs = {
 	},
 	AutoRetryStartEvent: {
 		type: "'auto_retry_start'",
+		"connectivity?": doc("boolean", "Waiting without an attempt limit for a failed provider connection."),
 		attempt: "number.integer",
 		maxAttempts: "number.integer",
 		delayMs: "number.integer",

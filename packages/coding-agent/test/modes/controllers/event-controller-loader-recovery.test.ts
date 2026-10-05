@@ -179,6 +179,27 @@ describe("EventController loader recovery after overflow maintenance", () => {
 		ctx.retryLoader!.stop();
 	});
 
+	it("renders an unlimited connection wait as cancellable working state, then clears it on recovery", async () => {
+		const { ctx, statusContainer } = createContext();
+		const controller = new EventController(ctx);
+		await controller.handleEvent({
+			type: "auto_retry_start",
+			connectivity: true,
+			attempt: 25,
+			maxAttempts: 0,
+			delayMs: 30_000,
+			errorMessage: "fetch failed",
+		});
+		const rendered = ctx.retryLoader!.render(100).join("\n");
+		expect(rendered).not.toContain("25/0");
+		expect(rendered).toContain("to cancel");
+		expect(statusContainer.children).toContain(ctx.retryLoader!);
+		vi.advanceTimersByTime(5_000);
+		expect(ctx.retryLoader!.render(100).join("\n")).not.toEqual(rendered);
+		await controller.handleEvent({ type: "auto_retry_end", attempt: 25, success: true });
+		expect(ctx.retryLoader).toBeUndefined();
+	});
+
 	it("re-shows the Working… loader after a subagent task completes while the session keeps streaming", async () => {
 		const { ctx, streamState, statusContainer, workingLoaders } = createContext();
 		const controller = new EventController(ctx);

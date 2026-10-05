@@ -336,6 +336,25 @@ describe("GuestClient frame apply", () => {
 		expect(notices[0]).toMatchObject({ level: "error", message: "x" });
 	});
 
+	it("connection waits remain informational without an exhausted retry counter", () => {
+		const client = liveClient();
+		client.applyFrameForTest({
+			t: "event",
+			event: {
+				type: "auto_retry_start",
+				connectivity: true,
+				attempt: 25,
+				maxAttempts: 0,
+				delayMs: 30_000,
+				errorMessage: "fetch failed",
+			},
+		});
+		const notices = client.getSnapshot().notices;
+		expect(notices).toHaveLength(1);
+		expect(notices[0].level).toBe("info");
+		expect(notices[0].message).not.toContain("25/0");
+	});
+
 	it("a pre-welcome error (hello rejection, e.g. protocol mismatch) ends the session with the host's reason", () => {
 		const client = new GuestClient(LINK, "tester");
 		client.applyFrameForTest({

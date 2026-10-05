@@ -962,6 +962,8 @@ class AutoRetryStartEvent:
     max_attempts: int
     delay_ms: int
     error_message: str
+    connectivity: bool | None = None
+    """Waiting without an attempt limit for a failed provider connection."""
     error_id: int | None = None
 
 
@@ -2187,6 +2189,7 @@ def parse_auto_retry_start_event(value: object, path: str = "AutoRetryStartEvent
         max_attempts=required(payload, "maxAttempts", decode_int, path),
         delay_ms=required(payload, "delayMs", decode_int, path),
         error_message=required(payload, "errorMessage", decode_str, path),
+        connectivity=optional(payload, "connectivity", decode_bool, path),
         error_id=optional(payload, "errorId", decode_int, path),
     )
 
