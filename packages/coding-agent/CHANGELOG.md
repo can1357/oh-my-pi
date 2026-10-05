@@ -7,7 +7,7 @@
 - Added global and per-advisor review cadence, including final-yield reviews and intervals that accumulate skipped transcript updates ([#12385](https://github.com/can1357/oh-my-pi/pull/12385) by [@olegpulatov](https://github.com/olegpulatov)).
 - Added per-advisor catch-up policy and cancellable `strict` waiting, so asynchronous turn reviewers can run beside synchronous final reviewers ([#12385](https://github.com/can1357/oh-my-pi/pull/12385) by [@olegpulatov](https://github.com/olegpulatov)).
 - Added `/jobs full` to show each background bash job's full command line; plain `/jobs` still shortens it to fit the terminal ([#13980](https://github.com/can1357/oh-my-pi/pull/13980) by [@rickythefox](https://github.com/rickythefox))
-- Added `modelHub.quickPick` (Settings → Model → One-Step Model Picker): in `/model`, Enter on a model sets it as the `default` role and the hub closes after the thinking choice, instead of walking the role strip and staying open.
+- Added `modelHub.quickPick` (Settings → Model → One-Step Model Picker): in `/model`, Enter on a model sets it as the `default` role and the hub closes after the thinking choice, instead of walking the role strip and staying open ([#14479](https://github.com/can1357/oh-my-pi/pull/14479) by [@lockwo](https://github.com/lockwo)).
 
 ### Changed
 
