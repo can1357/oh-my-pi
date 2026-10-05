@@ -98,10 +98,12 @@ export type BrokerEndpointState = "live" | "dead" | "unknown";
 
 /**
  * Whether a broker is accepting connections on the scope endpoint right now.
- * `dead` only when nothing listens there (ENOENT, ECONNREFUSED); any other
- * error or the timeout is `unknown`, since a busy or unreachable listener may
- * still be alive. Unlike a recorded pid, this answers the same in every PID
- * namespace that shares the runtime directory.
+ * `dead` on ENOENT or ECONNREFUSED, which normally mean nothing listens there;
+ * Bun also reports a live listener's full accept queue as ECONNREFUSED, so
+ * that case reads as dead too. Any other error (EACCES, say) or the timeout is
+ * `unknown`, since such a listener may still be alive. Unlike a recorded pid,
+ * this answers the same in every PID namespace that shares the runtime
+ * directory.
  */
 export function probeBrokerEndpoint(endpoint: string): Promise<BrokerEndpointState> {
 	const { promise, resolve } = Promise.withResolvers<BrokerEndpointState>();

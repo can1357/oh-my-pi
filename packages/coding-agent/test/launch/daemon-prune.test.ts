@@ -206,47 +206,56 @@ describe("pruneDeadDaemonRuntimeDirs", () => {
 		expect(await fs.readdir(path.join(other, "clients"))).toHaveLength(1);
 	});
 
-	it("keeps a scope whose endpoint fails the probe for a reason other than nothing listening", async () => {
-		using tempDir = TempDir.createSync("@omp-daemon-prune-busy-");
-		const daemons = path.join(tempDir.path(), "run", "daemons");
-		const current = path.join(daemons, "aaaaaaaaaaaaaaaa");
-		await fs.mkdir(current, { recursive: true });
-		const busy = await scope(daemons, "bbbbbbbbbbbbbbbb", { pid: "dead", clients: [deadPid] });
-		const endpoint = path.join(busy, "broker.sock");
-		const server = net.createServer(socket => socket.destroy());
-		const listening = Promise.withResolvers<void>();
-		server.listen(endpoint, () => listening.resolve());
-		await listening.promise;
-		try {
-			// A live listener this process may not connect to (EACCES). Like a full
-			// backlog or EMFILE, that says nothing about whether the broker is gone.
-			await fs.chmod(endpoint, 0o000);
-			await fs.utimes(busy, STALE, STALE);
+	// Mode bits do not bind root, and on Windows the endpoint is a named pipe, not this socket.
+	it.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
+		"keeps a scope whose endpoint fails the probe for a reason other than nothing listening",
+		async () => {
+			using tempDir = TempDir.createSync("@omp-daemon-prune-busy-");
+			const daemons = path.join(tempDir.path(), "run", "daemons");
+			const current = path.join(daemons, "aaaaaaaaaaaaaaaa");
+			await fs.mkdir(current, { recursive: true });
+			const busy = await scope(daemons, "bbbbbbbbbbbbbbbb", { pid: "dead", clients: [deadPid] });
+			const endpoint = path.join(busy, "broker.sock");
+			const server = net.createServer(socket => socket.destroy());
+			const listening = Promise.withResolvers<void>();
+			server.listen(endpoint, () => listening.resolve());
+			await listening.promise;
+			try {
+				// A live listener this process may not connect to (EACCES), which says
+				// nothing about whether the broker is gone. (A full accept queue is no
+				// such case: Bun reports it as ECONNREFUSED, which reads as dead.)
+				await fs.chmod(endpoint, 0o000);
+				await fs.utimes(busy, STALE, STALE);
+
+				await pruneDeadDaemonRuntimeDirs(current);
+
+				expect(await fs.exists(busy)).toBe(true);
+			} finally {
+				server.close();
+			}
+		},
+	);
+
+	// EPERM does not bind root, and Windows never assigns pid 1.
+	it.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
+		"keeps a scope whose recorded process runs under another user",
+		async () => {
+			using tempDir = TempDir.createSync("@omp-daemon-prune-uid-");
+			const daemons = path.join(tempDir.path(), "run", "daemons");
+			const current = path.join(daemons, "aaaaaaaaaaaaaaaa");
+			await fs.mkdir(current, { recursive: true });
+			const own = await ownPresenceRecord(tempDir.path());
+			const otherUser = await scope(daemons, "bbbbbbbbbbbbbbbb", {});
+			// pid 1 runs as root: `process.kill(1, 0)` fails with EPERM, which means it exists.
+			const entry = path.join(otherUser, "clients", "1-x.json");
+			await Bun.write(entry, JSON.stringify({ ...own, pid: 1 }));
+			await fs.utimes(otherUser, STALE, STALE);
 
 			await pruneDeadDaemonRuntimeDirs(current);
 
-			expect(await fs.exists(busy)).toBe(true);
-		} finally {
-			server.close();
-		}
-	});
-
-	it("keeps a scope whose recorded process runs under another user", async () => {
-		using tempDir = TempDir.createSync("@omp-daemon-prune-uid-");
-		const daemons = path.join(tempDir.path(), "run", "daemons");
-		const current = path.join(daemons, "aaaaaaaaaaaaaaaa");
-		await fs.mkdir(current, { recursive: true });
-		const own = await ownPresenceRecord(tempDir.path());
-		const otherUser = await scope(daemons, "bbbbbbbbbbbbbbbb", {});
-		// pid 1 runs as root: `process.kill(1, 0)` fails with EPERM, which means it exists.
-		const entry = path.join(otherUser, "clients", "1-x.json");
-		await Bun.write(entry, JSON.stringify({ ...own, pid: 1 }));
-		await fs.utimes(otherUser, STALE, STALE);
-
-		await pruneDeadDaemonRuntimeDirs(current);
-
-		expect(await fs.exists(entry)).toBe(true);
-	});
+			expect(await fs.exists(entry)).toBe(true);
+		},
+	);
 
 	it("does nothing when the runtime root does not exist", async () => {
 		using tempDir = TempDir.createSync("@omp-daemon-prune-missing-");
