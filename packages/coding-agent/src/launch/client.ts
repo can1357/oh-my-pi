@@ -141,7 +141,7 @@ class SocketDaemonClient implements DaemonBrokerClient {
 	readonly projectDir: string;
 	readonly #runtimeDir: string;
 	readonly #endpoint: string;
-	readonly #token: string;
+	#token: string;
 	readonly #seenCompletionIds = new Set<string>();
 	readonly #idleGraceMs: number | undefined;
 	readonly #pending = new Map<string, PendingRequest>();
@@ -288,6 +288,10 @@ class SocketDaemonClient implements DaemonBrokerClient {
 	}
 
 	async #connectOnce(): Promise<void> {
+		// The broker authenticates against the token file it read at startup. A
+		// replacement broker may have started from a different file, or a deleted
+		// runtime dir may need a fresh one before any broker can start.
+		this.#token = await readOrCreateToken(this.#runtimeDir);
 		try {
 			this.#bindSocket(await openSocket(this.#endpoint, 250));
 			return;

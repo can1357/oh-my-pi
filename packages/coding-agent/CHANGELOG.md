@@ -19,6 +19,7 @@
 
 ### Fixed
 
+- Fixed a project's daemon broker becoming unreachable for good after its runtime directory was deleted while the broker ran: `proc://`, `wait`, shared LSP and the shared browser failed with `Failed to start daemon broker … connect ENOENT …/broker.sock` until the old broker exited. The broker now releases the scope within seconds of losing its socket, and clients re-read the broker token on every connect, so the next request starts a fresh broker ([#14466](https://github.com/can1357/oh-my-pi/pull/14466) by [@nick-maderight](https://github.com/nick-maderight)).
 - Fixed the `/usage` sheet in Tern missing the Close button the other report sheets have ([#14455](https://github.com/can1357/oh-my-pi/pull/14455) by [@H4vC](https://github.com/H4vC)).
 - Fixed cancelling a bash command on Windows sometimes terminating an unrelated program ([#14454](https://github.com/can1357/oh-my-pi/pull/14454) by [@H4vC](https://github.com/H4vC))
 - Fixed `umask` in a bash command changing the umask of omp itself ([#14454](https://github.com/can1357/oh-my-pi/pull/14454) by [@H4vC](https://github.com/H4vC))

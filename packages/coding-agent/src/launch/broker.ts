@@ -49,6 +49,12 @@ const READINESS_BUFFER_CHARS = 64 * 1024;
 const RESTART_MAX_DELAY_MS = 30_000;
 const RESTART_BACKOFF_BASE_MS = 1_000;
 /**
+ * How often a broker checks that its Unix socket still exists. Something that
+ * deletes the runtime dir leaves the broker holding the scope lease while no
+ * client can reach it, so the broker gives the scope up instead.
+ */
+const ENDPOINT_CHECK_MS = 5_000;
+/**
  * Cap on terminal (exited/failed) daemons surfaced by `list`. Active daemons
  * are always shown in full; older history is truncated so the response stays
  * bounded over a long-lived project (issue #6517).
@@ -430,6 +436,8 @@ class DaemonBroker {
 	readonly #token: string;
 	readonly #idleGraceMs: number;
 	readonly #restartBackoffBaseMs: number;
+	readonly #endpointCheckMs: number;
+	#endpointTimer: NodeJS.Timeout | undefined;
 	readonly #records = new Map<string, ManagedDaemon>();
 	/**
 	 * Names reserved by an in-flight `start` before its record lands in
@@ -456,6 +464,7 @@ class DaemonBroker {
 		token: string,
 		idleGraceMs: number,
 		restartBackoffBaseMs: number,
+		endpointCheckMs: number,
 	) {
 		this.#projectDir = projectDir;
 		this.#runtimeDir = runtimeDir;
@@ -463,6 +472,7 @@ class DaemonBroker {
 		this.#token = token;
 		this.#idleGraceMs = idleGraceMs;
 		this.#restartBackoffBaseMs = restartBackoffBaseMs;
+		this.#endpointCheckMs = endpointCheckMs;
 	}
 
 	async run(onListening?: () => void): Promise<void> {
@@ -475,7 +485,10 @@ class DaemonBroker {
 		server.once("error", reject);
 		server.listen(this.#endpoint);
 		await listening;
-		if (process.platform !== "win32") await fs.chmod(this.#endpoint, 0o600);
+		if (process.platform !== "win32") {
+			await fs.chmod(this.#endpoint, 0o600);
+			this.#watchEndpoint();
+		}
 		this.#scheduleIdleShutdown();
 		onListening?.();
 		await this.#finished.promise;
@@ -486,6 +499,8 @@ class DaemonBroker {
 		this.#shuttingDown = true;
 		clearTimeout(this.#idleTimer);
 		this.#idleTimer = undefined;
+		clearInterval(this.#endpointTimer);
+		this.#endpointTimer = undefined;
 		for (const record of this.#records.values()) {
 			const detached = record.spec.detached && !record.stopRequested && record.snapshot.pid !== undefined;
 			if (!detached && !terminalState(record.snapshot.state)) await this.#stopRecord(record, 2_000);
@@ -1535,11 +1550,41 @@ class DaemonBroker {
 			})();
 		}, this.#idleGraceMs);
 	}
+
+	/**
+	 * Give up the scope once the socket file is gone. The native lease outlives a
+	 * deleted runtime dir, so a broker that kept running would hold the scope
+	 * while every new broker exits on the held lease and every new client fails
+	 * with `connect ENOENT`. Shutting down releases the lease, and the next client
+	 * spawns a broker that rebuilds the scope.
+	 */
+	#watchEndpoint(): void {
+		this.#endpointTimer = setInterval(() => {
+			void fs
+				.stat(this.#endpoint)
+				.then(
+					() => undefined,
+					error => {
+						if (!isEnoent(error) || this.#shuttingDown) return;
+						logger.warn("Daemon broker socket was deleted; releasing the scope", { endpoint: this.#endpoint });
+						return this.shutdown();
+					},
+				)
+				.catch(error => {
+					logger.warn("Daemon broker shutdown after socket loss failed", {
+						error: error instanceof Error ? error.message : String(error),
+					});
+				});
+		}, this.#endpointCheckMs);
+		this.#endpointTimer.unref();
+	}
 }
 
 export interface DaemonBrokerStartOptions {
 	/** Base of the exponential child-restart backoff. */
 	restartBackoffBaseMs?: number;
+	/** How often the broker checks that its socket file still exists. */
+	endpointCheckMs?: number;
 	/**
 	 * Called once the broker accepts connections. An embedding host connects its
 	 * clients after this; a client that connects earlier finds no endpoint and
@@ -1587,7 +1632,14 @@ export async function startDaemonBrokerFromEnvironment(options: DaemonBrokerStar
 	});
 	const token = (await Bun.file(path.join(runtimeDir, TOKEN_FILE)).text()).trim();
 	if (!token) throw new Error("Daemon broker token is empty");
-	const broker = new DaemonBroker(projectDir, runtimeDir, token, idleGraceMs, restartBackoffBaseMs);
+	const broker = new DaemonBroker(
+		projectDir,
+		runtimeDir,
+		token,
+		idleGraceMs,
+		restartBackoffBaseMs,
+		options.endpointCheckMs ?? ENDPOINT_CHECK_MS,
+	);
 	const cancelCleanup = postmortem.register("daemon-broker", () => broker.shutdown());
 	try {
 		await broker.run(options.onListening);
