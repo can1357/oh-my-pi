@@ -48,6 +48,12 @@ function nearDuplicateLoop(paragraphs: number): string {
 const OBSERVED_KIRO_CYCLE =
 	"% shipped. 100% delivered. 100% verified. 100% validated. 100% approved. 100% accepted. 100% merged. 100% deployed. 100% live. 100% operational. 100% successful. 100% excellent. 100% perfect. 100% final. 100% absolute. 100% total. 100% whole. 100% full. 100% entire. 100% complete. 100% done. 100% finished. 100";
 
+/** The prose prefix from the first thinking-block trace in issue #13679, up to
+ *  the point where the model began repeating punctuation. Real reasoning text
+ *  ahead of the run, so the test exercises the suffix check on a live tail. */
+const PUNCTUATION_RUN_PREFIX =
+	"10s: 1684 = both directions: uplink ~?? + downlink ~?? mixed ✓✓✓ — 10s downlink+uplink: 168/s ✓ consistent with 65+10 = 75/s + BAR storm to .68??";
+
 /** Genuinely distinct reasoning paragraphs — must never trip the detector. */
 function distinctReasoning(): string {
 	return [
@@ -308,6 +314,38 @@ describe("ThinkingLoopDetector", () => {
 		// Below the repeated-char floor: a brief on-purpose repeat is not a loop.
 		const detector = new ThinkingLoopDetector();
 		expect(detector.push("🌊 ".repeat(26))).toBeNull();
+	});
+
+	test("trips on a punctuation-only runaway with no letter or emoji", () => {
+		// Issue #13679: a stuck local model emitted `?!?!?!...` in a thinking block.
+		// The unit carries neither a letter nor an emoji, so the guard's letter gate
+		// never fired and the turn ran until the provider's output limit. Replayed
+		// through the detector the way the reporter's transcript arrived, in
+		// four-character deltas, to keep the streaming path honest.
+		const payload = `${PUNCTUATION_RUN_PREFIX}${"?!".repeat(2000)}`;
+		expect(feed(payload, 4)).toContain("back-to-back");
+	});
+
+	test("trips on a long dingbat-only runaway", () => {
+		// Second trace from the same report: a run of U+2713 CHECK MARK. It is in
+		// Dingbats but not Extended_Pictographic, so it was invisible to the old
+		// gate for the same reason `?!` was.
+		expect(feed(`${PUNCTUATION_RUN_PREFIX}${"✓".repeat(2000)}`, 4)).toContain("back-to-back");
+	});
+
+	test("does not trip on a punctuation run below the repeated-char floor", () => {
+		// Short separators are ordinary output. 800 repeated characters stays under
+		// the 1024 floor, so a brief burst of `?!` is left alone.
+		const detector = new ThinkingLoopDetector();
+		expect(detector.push(`${PUNCTUATION_RUN_PREFIX}${"?!".repeat(400)}`)).toBeNull();
+	});
+
+	test("does not trip on whitespace-heavy separators", () => {
+		// Alignment padding, table gutters, and indented diffs repeat whitespace
+		// freely at length. Those units are excluded outright, so the punctuation
+		// path cannot reach them.
+		const detector = new ThinkingLoopDetector();
+		expect(detector.push(`${PUNCTUATION_RUN_PREFIX}${"  ".repeat(2000)}`)).toBeNull();
 	});
 });
 
