@@ -48,4 +48,25 @@ describe("provider connectivity evidence", () => {
 		error.cause = error;
 		expect(isConnectivityError(error)).toBe(true);
 	});
+
+	it("preserves a nested certificate rejection instead of misclassifying its fetch-failed wrapper", async () => {
+		const cause = Object.assign(new Error("certificate has expired"), { code: "CERT_HAS_EXPIRED" });
+		const error = new TypeError("fetch failed", { cause });
+		expect(isConnectivityError(error)).toBe(false);
+		const message = await formatMessage(error);
+		expect(isConnectivityError({ message })).toBe(false);
+	});
+
+	it("does not turn a real invalid-URL failure into a connection wait after wrapping and flattening", async () => {
+		let failure: unknown;
+		try {
+			await fetch("http://[");
+		} catch (error) {
+			failure = error;
+		}
+		expect(failure).toBeInstanceOf(Error);
+		const wrapped = new TypeError("fetch failed", { cause: failure });
+		expect(isConnectivityError(wrapped)).toBe(false);
+		expect(isConnectivityError({ message: await formatMessage(wrapped) })).toBe(false);
+	});
 });

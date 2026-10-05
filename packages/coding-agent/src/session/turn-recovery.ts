@@ -31,7 +31,6 @@ import { formatModelStringWithRouting, resolveModelOverride } from "../config/mo
 
 import type { Settings } from "../config/settings";
 import type { RetryErrorUpdate } from "../extensibility/shared-events";
-import connectionContinueTemplate from "../prompts/system/connection-continue.md" with { type: "text" };
 import emptyStopRetryTemplate from "../prompts/system/empty-stop-retry.md" with { type: "text" };
 import malformedFunctionCallRetryTemplate from "../prompts/system/malformed-function-call-retry.md" with { type: "text" };
 import streamStallContinueTemplate from "../prompts/system/stream-stall-continue.md" with { type: "text" };
@@ -586,11 +585,7 @@ export class TurnRecovery {
 		) {
 			return false;
 		}
-		const errorStatus =
-			message.errorStatus ??
-			(message.errorId !== undefined && message.errorId >= 300 && message.errorId <= 599
-				? message.errorId
-				: undefined);
+		const errorStatus = message.errorStatus ?? AIError.statusFromId(message.errorId);
 		if (
 			!AIError.isConnectivityError({
 				message: message.errorClassificationMessage ?? message.errorMessage,
@@ -604,11 +599,11 @@ export class TurnRecovery {
 		// results (including positive proof of non-execution) are kept in context.
 		if (message.content.some(block => block.type === "image" || block.type === "anthropicServerTool")) return false;
 		const preserveToolTurn = this.#hasResolvedToolCalls(message);
-		const resumeText =
-			this.#host.textOutputCommitted() &&
-			message.content.some(block => block.type === "text" && hasNonWhitespace(block.text)) &&
-			message.content.every(block => block.type === "text" || block.type === "thinking");
+		const resumeText = this.#hasCommittedTextOnly(message);
 		if (this.#hasReplayUnsafeOutput(message) && !preserveToolTurn && !resumeText) return false;
+		// Only the connection wait is unbounded. Partial-output resumes share
+		// the existing per-prompt cap so context cannot grow indefinitely.
+		if (resumeText && !this.#reserveCommittedTextResume(message)) return false;
 
 		const generation = this.#host.promptGeneration();
 		this.#connectionAttempt++;
@@ -682,12 +677,7 @@ export class TurnRecovery {
 		// state before reconnecting; other request-scoped transports recreate it.
 		this.#host.resetCurrentResponsesProviderSession("connection-recovery");
 		if (resumeText) {
-			this.#host.agent.appendMessage({
-				role: "developer",
-				content: [{ type: "text", text: prompt.render(connectionContinueTemplate, {}) }],
-				attribution: "agent",
-				timestamp: Date.now(),
-			});
+			this.#appendCommittedTextResume();
 		} else if (!preserveToolTurn) {
 			this.#stripFailedAssistantTail();
 		}
@@ -787,35 +777,46 @@ export class TurnRecovery {
 			!this.#host.streamingEditAbortTriggered() &&
 			isUnexpectedSocketCloseMessage(message.errorMessage ?? "");
 		if (!socketClosed && !this.#isMidStreamTransportFailure(message, id)) {
-			this.#streamStallContinueCount = 0;
 			return false;
 		}
 		if (!this.autoRetryEnabled || this.#host.abortInProgress() || this.#host.isDisposed()) return false;
-		if (!this.#host.textOutputCommitted()) return false;
-		let hasText = false;
-		for (const block of message.content) {
-			if (block.type === "toolCall" || block.type === "image" || block.type === "anthropicServerTool") return false;
-			if (block.type === "text" && hasNonWhitespace(block.text)) hasText = true;
-		}
-		if (!hasText) return false;
+		if (!this.#hasCommittedTextOnly(message) || !this.#reserveCommittedTextResume(message)) return false;
+		this.#appendCommittedTextResume();
+		this.#host.scheduleAgentContinue({
+			source: "stream-stall-continue",
+			generation: this.#host.promptGeneration(),
+		});
+		return true;
+	}
 
-		this.#streamStallContinueCount++;
-		if (this.#streamStallContinueCount > STREAM_STALL_CONTINUE_MAX_RETRIES) {
+	#hasCommittedTextOnly(message: AssistantMessage): boolean {
+		if (!this.#host.textOutputCommitted()) return false;
+		return (
+			message.content.every(block => block.type === "text" || block.type === "thinking") &&
+			message.content.some(block => block.type === "text" && hasNonWhitespace(block.text))
+		);
+	}
+
+	#reserveCommittedTextResume(message: AssistantMessage): boolean {
+		if (this.#streamStallContinueCount >= STREAM_STALL_CONTINUE_MAX_RETRIES) {
 			logger.warn("Stream kept stalling after committed text past retry cap", {
-				attempts: this.#streamStallContinueCount - 1,
+				attempts: this.#streamStallContinueCount,
 				model: message.model,
 				provider: message.provider,
 			});
-			this.#streamStallContinueCount = 0;
 			return false;
 		}
-
+		this.#streamStallContinueCount++;
 		logger.info("Stream failed after committed text; continuing with resume reminder", {
 			attempt: this.#streamStallContinueCount,
 			model: message.model,
 			provider: message.provider,
 			errorMessage: message.errorMessage,
 		});
+		return true;
+	}
+
+	#appendCommittedTextResume(): void {
 		this.#host.agent.appendMessage({
 			role: "developer",
 			content: [
@@ -830,11 +831,6 @@ export class TurnRecovery {
 			attribution: "agent",
 			timestamp: Date.now(),
 		});
-		this.#host.scheduleAgentContinue({
-			source: "stream-stall-continue",
-			generation: this.#host.promptGeneration(),
-		});
-		return true;
 	}
 
 	/** Removes a persisted failed assistant turn after its persistence slot settles; returns the dropped branch entry id. */

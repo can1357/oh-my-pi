@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added an optional `connectivity` field on retry-start events to distinguish provider-connection waits from ordinary API retries ([#14380](https://github.com/can1357/oh-my-pi/pull/14380) by [@jroth1111](https://github.com/jroth1111)).
+
 ## [18.5.1] - 2026-10-03
 
 ### Added

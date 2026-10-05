@@ -6,7 +6,7 @@ import {
 	rewriteCopilotError,
 } from "../utils/http-inspector";
 import { formatErrorMessageWithRetryAfter } from "../utils/retry-after";
-import { isConnectivityError } from "./connectivity";
+import { isConnectionConfigurationError, isConnectivityError } from "./connectivity";
 import { LLAMA_CPP_TOOL_CALL_PARSE_PATTERN } from "./flags";
 
 function rewriteOllamaToolCallJsonError(message: string): string {
@@ -39,7 +39,9 @@ export async function formatMessage(error: unknown, opts: FormatMessageOptions =
 		: formatErrorMessageWithRetryAfter(error);
 	// SDK wrappers sometimes retain the OS connection code only in `cause`.
 	// Preserve that evidence after the Error is flattened into a session message.
-	if (isConnectivityError(error) && !isConnectivityError({ message })) {
+	if (isConnectionConfigurationError(error) && !isConnectionConfigurationError({ message })) {
+		message = `Connection configuration error: ${message}`;
+	} else if (isConnectivityError(error) && !isConnectivityError({ message })) {
 		message = `Connection error: ${message}`;
 	}
 	if (opts.provider === "github-copilot") {

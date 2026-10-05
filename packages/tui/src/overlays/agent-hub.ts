@@ -1368,12 +1368,7 @@ export class AgentHubOverlayComponent<TRecord extends AgentRecordLike = AgentRec
 		if (current) {
 			const value = [span(sanitizeDisplaySingleLine(current))];
 			if (progress?.retryState) {
-				value.push(
-					span(
-						`${dot}${formatRetryStatus(progress.retryState.attempt, progress.retryState.maxAttempts)}`,
-						"warning",
-					),
-				);
+				value.push(span(`${dot}${formatRetryStatus(progress.retryState)}`, "warning"));
 			}
 			facts.push({ k: "Current", v: value });
 		}
@@ -2066,7 +2061,7 @@ export class AgentHubOverlayComponent<TRecord extends AgentRecordLike = AgentRec
 			section("Current");
 			addWrapped(current);
 			if (progress?.retryState) {
-				add(theme.fg("warning", formatRetryStatus(progress.retryState.attempt, progress.retryState.maxAttempts)));
+				add(theme.fg("warning", formatRetryStatus(progress.retryState)));
 			}
 		}
 

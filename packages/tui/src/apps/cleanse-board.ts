@@ -426,7 +426,7 @@ function describeAgentLane(agentName: string, agent: RunningAgent, now: number):
 					}
 				: null,
 			retry:
-				progress?.retryState && progress.retryState.maxAttempts !== 0
+				progress?.retryState && !progress.retryState.connectivity
 					? {
 							attempt: progress.retryState.attempt,
 							max: progress.retryState.maxAttempts,
@@ -435,8 +435,7 @@ function describeAgentLane(agentName: string, agent: RunningAgent, now: number):
 							error: progress.retryState.errorMessage,
 						}
 					: null,
-			badges:
-				progress?.retryState?.maxAttempts === 0 ? [{ text: "waiting for connection", tone: "warning" }] : undefined,
+			badges: progress?.retryState?.connectivity ? [{ text: "waiting for connection", tone: "warning" }] : undefined,
 			stats: {
 				tools: progress?.toolCount || undefined,
 				tokens: progress?.tokens || undefined,
@@ -454,12 +453,7 @@ function describeAgentLane(agentName: string, agent: RunningAgent, now: number):
 function describeActivity(progress: AgentProgress | undefined): TspSpan[] {
 	if (!progress) return [span("starting", "dim")];
 	if (progress.retryState) {
-		return [
-			span(
-				formatRetryStatus(progress.retryState.attempt, progress.retryState.maxAttempts, "rate-limited · retry"),
-				"warning",
-			),
-		];
+		return [span(formatRetryStatus(progress.retryState, "rate-limited · retry"), "warning")];
 	}
 	const intent = sanitizeDisplaySingleLine(progress.lastIntent ?? "")
 		.replace(/\s+/g, " ")
@@ -531,10 +525,7 @@ function renderOutcomeLine(
 function agentActivity(progress: AgentProgress | undefined): string {
 	if (!progress) return fgOrPlain("dim", "starting");
 	if (progress.retryState) {
-		return fgOrPlain(
-			"warning",
-			formatRetryStatus(progress.retryState.attempt, progress.retryState.maxAttempts, "rate-limited · retry"),
-		);
+		return fgOrPlain("warning", formatRetryStatus(progress.retryState, "rate-limited · retry"));
 	}
 	const intent = truncateToWidth(
 		sanitizeDisplaySingleLine(progress.lastIntent ?? "")

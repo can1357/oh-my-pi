@@ -668,13 +668,13 @@ export const cfgRetryEnabled = register({ id: "retry.enabled", type: "boolean", 
 export const cfgRetryWaitForConnection = register({
 	id: "retry.waitForConnection",
 	type: "boolean",
-	default: true,
+	default: false,
 	ui: {
 		tab: "model",
 		group: "Retry & Fallback",
 		label: "Wait for Connection",
 		description:
-			"Keep waiting for a failed provider connection until it recovers or you cancel. Connection failures do not use the API retry budget; HTTP errors retain their normal retry policy.",
+			"Opt in to waiting for a failed provider connection until it recovers or you cancel. Keeps the same model instead of using fallback chains. Connection failures do not use the API retry budget; HTTP errors retain their normal retry policy. Can hold headless and subagent runs.",
 	},
 });
 

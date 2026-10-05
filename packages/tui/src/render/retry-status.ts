@@ -1,4 +1,7 @@
-/** `maxAttempts: 0` denotes an unlimited provider-connection wait. */
-export function formatRetryStatus(attempt: number, maxAttempts: number, prefix = "retry"): string {
-	return maxAttempts === 0 ? "waiting for connection" : `${prefix} ${attempt}/${maxAttempts}`;
+/** Render connection waits from their explicit state, not a numeric retry limit. */
+export function formatRetryStatus(
+	state: { attempt: number; maxAttempts: number; connectivity?: boolean },
+	prefix = "retry",
+): string {
+	return state.connectivity ? "waiting for connection" : `${prefix} ${state.attempt}/${state.maxAttempts}`;
 }

@@ -5376,8 +5376,6 @@ describe("AgentSession retry fallback", () => {
 			"retry.fallbackChains": {
 				default: [`${smallFallback.provider}/${smallFallback.id}`, `${largeFallback.provider}/${largeFallback.id}`],
 			},
-			// This case tests finite transport fallback, not the connection-wait policy.
-			"retry.waitForConnection": false,
 		});
 		settings.setModelRole("default", `${primaryModel.provider}/${primaryModel.id}`);
 

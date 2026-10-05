@@ -385,7 +385,7 @@ function isClassified(id: number | undefined): boolean {
 	return ((id ?? 0) & Flag.Class) !== 0;
 }
 
-function statusFromId(id: number | undefined): number | undefined {
+export function statusFromId(id: number | undefined): number | undefined {
 	return id && !isClassified(id) ? id : undefined;
 }
 

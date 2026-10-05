@@ -870,25 +870,34 @@ describe("task result detail-less state", () => {
 		expect(stripped).not.toContain(theme.status.error);
 	});
 
-	it("shows an unlimited child connection wait without a zero-denominator retry counter", async () => {
-		const theme = (await getThemeByName("dark"))!;
-		setThemeInstance(theme);
-		const progress = runningProgress({
-			retryState: {
-				attempt: 25,
-				maxAttempts: 0,
-				delayMs: 30_000,
-				errorMessage: "ENETUNREACH",
-				startedAtMs: Date.now(),
-			},
-		});
-		const component = taskToolRenderer.renderResult(
-			{ content: [], details: detailsFor(progress) },
-			{ expanded: true, isPartial: true },
-			theme,
-		);
-		const text = Bun.stripANSI(component.render(180).join("\n"));
-		expect(text).not.toContain("25/0");
-		expect(text).toContain("waiting for connection");
-	});
+	it.each([true, false])(
+		"renders child retry state from the explicit connectivity flag (%s), not a zero limit",
+		async connectivity => {
+			const theme = (await getThemeByName("dark"))!;
+			setThemeInstance(theme);
+			const progress = runningProgress({
+				retryState: {
+					connectivity,
+					attempt: 25,
+					maxAttempts: 0,
+					delayMs: 30_000,
+					errorMessage: "ENETUNREACH",
+					startedAtMs: Date.now(),
+				},
+			});
+			const component = taskToolRenderer.renderResult(
+				{ content: [], details: detailsFor(progress) },
+				{ expanded: true, isPartial: true },
+				theme,
+			);
+			const text = Bun.stripANSI(component.render(180).join("\n"));
+			if (connectivity) {
+				expect(text).not.toContain("25/0");
+				expect(text).toContain("waiting for connection");
+			} else {
+				expect(text).toContain("25/0");
+				expect(text).not.toContain("waiting for connection");
+			}
+		},
+	);
 });

@@ -766,7 +766,7 @@ function renderAgentProgress(
 		const remainingMs = Math.max(0, progress.retryState.startedAtMs + progress.retryState.delayMs - nowMs);
 		const waitLabel = remainingMs > 0 ? `in ${formatDuration(remainingMs)}` : "now";
 		const summary =
-			`${formatRetryStatus(progress.retryState.attempt, progress.retryState.maxAttempts, "retrying")} ${waitLabel}: ` +
+			`${formatRetryStatus(progress.retryState, "retrying")} ${waitLabel}: ` +
 			previewLine(sanitizeText(progress.retryState.errorMessage), 60);
 		lines.push(`${continuePrefix}${theme.tree.hook} ${theme.fg("warning", summary)}`);
 	} else if (progress.retryFailure && progress.status !== "running") {
@@ -1816,7 +1816,7 @@ function describeProgressAgent(progress: AgentProgress, state: AgentDescribeStat
 				}
 			: null;
 	const retry =
-		running && progress.retryState && progress.retryState.maxAttempts !== 0
+		running && progress.retryState && !progress.retryState.connectivity
 			? {
 					attempt: progress.retryState.attempt,
 					max: progress.retryState.maxAttempts,
@@ -1845,7 +1845,7 @@ function describeProgressAgent(progress: AgentProgress, state: AgentDescribeStat
 			},
 			retry,
 			badges:
-				running && progress.retryState?.maxAttempts === 0
+				running && progress.retryState?.connectivity
 					? [
 							...(agentBadges(state.background, undefined) ?? []),
 							{ text: "waiting for connection", tone: "warning" },
@@ -2337,6 +2337,7 @@ export interface AgentProgress {
 	 * provider quota.
 	 */
 	retryState?: {
+		connectivity?: boolean;
 		attempt: number;
 		maxAttempts: number;
 		delayMs: number;

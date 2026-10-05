@@ -68,6 +68,7 @@ describe("AgentSession connection wait", () => {
 				"compaction.enabled": false,
 				"retry.modelFallback": false,
 				"retry.maxRetries": 1,
+				"retry.waitForConnection": true,
 				"retry.baseDelayMs": 500,
 			});
 		settings.setModelRole("default", `${selectedModel.provider}/${selectedModel.id}`);
@@ -140,6 +141,7 @@ describe("AgentSession connection wait", () => {
 			"compaction.enabled": false,
 			"retry.modelFallback": false,
 			"retry.maxRetries": 0,
+			"retry.waitForConnection": true,
 			[setting]: false,
 		});
 		const { active, mock } = createSession(() => ({ throw: "fetch failed" }), { settings });
@@ -266,5 +268,72 @@ describe("AgentSession connection wait", () => {
 		expect(preservedPartial).toBe(true);
 		expect(sawResumeInstruction).toBe(true);
 		expect(starts[0]?.connectivity).toBe(true);
+	});
+
+	it("a dead endpoint retains finite failure behavior without an explicit connection-wait opt-in", async () => {
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"retry.modelFallback": false,
+			"retry.maxRetries": 2,
+			"retry.baseDelayMs": 1,
+		});
+		const { active, mock } = createSession(() => ({ throw: "fetch failed" }), { settings });
+		mockSchedulerWaitWithClock();
+		await active.prompt("Fail finitely for a dead endpoint");
+		await active.waitForIdle();
+		expect(mock.calls).toHaveLength(3);
+		expect(starts.every(event => !event.connectivity)).toBe(true);
+		expect(ends).toContainEqual(expect.objectContaining({ success: false, attempt: 2 }));
+	});
+
+	it("explicit connection waiting preserves the chosen model even when a fallback chain is configured", async () => {
+		const fallback = getBundledModel("openai", "gpt-4o-mini");
+		if (!fallback) throw new Error("Expected bundled fallback model");
+		authStorage.keys.setRuntime("openai", "test-key");
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"retry.waitForConnection": true,
+			"retry.modelFallback": true,
+			"retry.maxRetries": 1,
+			"retry.baseDelayMs": 1,
+			"retry.fallbackChains": { default: [`${fallback.provider}/${fallback.id}`] },
+		});
+		let calls = 0;
+		const { active, requestedModels } = createSession(
+			() => (++calls <= 5 ? { throw: "fetch failed" } : { content: ["primary recovered"] }),
+			{ settings },
+		);
+		const fallbackEvents: string[] = [];
+		active.subscribe(event => {
+			if (event.type === "retry_fallback_applied") fallbackEvents.push(event.to);
+		});
+		mockSchedulerWaitWithClock();
+		await active.prompt("Wait for this model instead of falling back");
+		await active.waitForIdle();
+		expect(calls).toBe(6);
+		expect(new Set(requestedModels)).toEqual(new Set([`${model.provider}/${model.id}`]));
+		expect(fallbackEvents).toEqual([]);
+	});
+
+	it("repeated committed partial-text drops stop at the existing three-resume cap", async () => {
+		let calls = 0;
+		const { active } = createSession(() => {
+			calls++;
+			if (calls >= 8) return { content: ["unexpected extra continuation"] };
+			return {
+				content: [`visible prefix ${calls}`],
+				stopReason: "error",
+				errorMessage: "The socket connection was closed unexpectedly",
+			};
+		});
+		active.setTextOutputCommitted(true);
+		mockSchedulerWaitWithClock();
+		await active.prompt("Bound repeated partial-output continuation");
+		await active.waitForIdle();
+		expect(calls).toBe(4);
+		expect(starts).toHaveLength(3);
+		expect(active.agent.state.messages.filter(message => message.role === "developer")).toHaveLength(3);
+		expect(lastAssistant(active).stopReason).toBe("error");
+		expect(ends).toContainEqual(expect.objectContaining({ success: false }));
 	});
 });

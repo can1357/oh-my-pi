@@ -278,6 +278,7 @@ describe("TurnRecovery replay-unsafe output classification", () => {
 		const message = makeMessage([{ type: "toolCall", id: "unknown-call", name: "write", arguments: {} }], model);
 		message.errorMessage = "Connection error";
 		const host = createHost(model, modelRegistry, { messages: [message] });
+		host.settings = Settings.isolated({ "retry.waitForConnection": true });
 		let scheduled = false;
 		host.scheduleAgentContinue = () => {
 			scheduled = true;
@@ -292,7 +293,7 @@ describe("TurnRecovery replay-unsafe output classification", () => {
 		const message = makeMessage([], model);
 		message.errorMessage = "fetch failed";
 		const host = createHost(model, modelRegistry, { messages: [message] });
-		host.settings = Settings.isolated({ "retry.baseDelayMs": 1 });
+		host.settings = Settings.isolated({ "retry.baseDelayMs": 1, "retry.waitForConnection": true });
 		host.sessionManager = { getBranch: () => [], getSessionId: () => "generation-test" } as never;
 		let generation = 0;
 		let scheduled = false;
@@ -316,7 +317,7 @@ describe("TurnRecovery replay-unsafe output classification", () => {
 		const message = makeMessage([], model);
 		message.errorMessage = "fetch failed";
 		const host = createHost(model, modelRegistry, { messages: [message] });
-		host.settings = Settings.isolated({ "retry.baseDelayMs": 30_000 });
+		host.settings = Settings.isolated({ "retry.baseDelayMs": 30_000, "retry.waitForConnection": true });
 		host.sessionManager = { getBranch: () => [], getSessionId: () => "persistence-test" } as never;
 		const persisting = Promise.withResolvers<void>();
 		const release = Promise.withResolvers<void>();

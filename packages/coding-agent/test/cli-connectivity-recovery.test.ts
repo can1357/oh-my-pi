@@ -23,8 +23,7 @@ it("a running CLI preserves a completed side effect through real TCP disconnects
 			responded = true;
 			requests++;
 			if (requests > 1 && requests <= 7) {
-				const prefix =
-					'data: {"id":"dropped","choices":[{"index":0,"delta":{"content":"interrupted prefix"},"finish_reason":null}]}\n\n';
+				const prefix = 'data: {"id":"dropped","choices":[{"index":0,"delta":{},"finish_reason":null}]}\n\n';
 				socket.write(
 					`HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: 1048576\r\n\r\n${prefix}`,
 				);
@@ -87,7 +86,7 @@ it("a running CLI preserves a completed side effect through real TCP disconnects
 		const agentDir = tempDir.join("agent");
 		await Bun.write(
 			path.join(agentDir, "config.yml"),
-			"compaction:\n  enabled: false\nretry:\n  maxRetries: 1\n  baseDelayMs: 1\n  modelFallback: false\n",
+			"compaction:\n  enabled: false\nretry:\n  waitForConnection: true\n  maxRetries: 1\n  baseDelayMs: 1\n  modelFallback: false\n",
 		);
 		const env: Record<string, string | undefined> = { ...process.env };
 		for (const key of Object.keys(env)) {

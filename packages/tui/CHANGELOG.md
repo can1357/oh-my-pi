@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added explicit connection-wait indicators for the main agent and subagents, without treating a zero retry limit as a network outage ([#14380](https://github.com/can1357/oh-my-pi/pull/14380) by [@jroth1111](https://github.com/jroth1111)).
+
 ## [18.6.1] - 2026-10-04
 
 ### Fixed
