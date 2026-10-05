@@ -10,9 +10,10 @@ import { parseExportArgs } from "../export/html/args";
 import { shareSession } from "../export/share";
 import { theme } from "@oh-my-pi/pi-tui/theme";
 import type { InteractiveModeContext } from "../modes/types";
+import type { AgentSession } from "../session/agent-session";
 import { sanitizeDisplayLine } from "@oh-my-pi/pi-tui/overlays/extensions/display-text";
 import { extractLastCodeBlock, extractLastCommand, extractLastLink } from "@oh-my-pi/pi-tui/overlays/copy-targets";
-import { restartBrowserForModeChange } from "../tools/browser";
+import { resolveRelayKind, restartBrowserForModeChange } from "../tools/browser";
 import { shortenPath, TRUNCATE_LENGTHS, truncateToWidth } from "@oh-my-pi/pi-tui/render/render-utils";
 import { openPath } from "../utils/open";
 import { copyToClipboard } from "../utils/clipboard";
@@ -56,6 +57,25 @@ function showCollabQrCode(ctx: InteractiveModeContext, webLink: string): void {
 function showCollabLink(ctx: InteractiveModeContext, host: CollabHost, heading: string, view = false): void {
 	ctx.showStatus(collabLinkHint(host, heading, view), { dim: false });
 	showCollabQrCode(ctx, view ? host.webViewLink : host.webLink);
+}
+
+const RELAY_USAGE = "Usage: /relay [on|off|status]";
+const BROWSER_DISABLED = "Browser capability is disabled (enable in settings).";
+
+function browserRelayStatus(session: AgentSession): string {
+	const enabled = resolveRelayKind({ settingEnabled: session.isBrowserRelayEnabled() }, process.env) !== null;
+	const envOverride = process.env.PI_BROWSER_RELAY;
+	const detail = envOverride ? ` (PI_BROWSER_RELAY=${envOverride} overrides this session)` : " for this session";
+	return `Browser relay is ${enabled ? "on" : "off"}${detail}.`;
+}
+
+function runBrowserRelayCommand(arg: string, session: AgentSession): string | undefined {
+	if (arg === "status") return browserRelayStatus(session);
+	if (arg !== "" && arg !== "on" && arg !== "off") return undefined;
+
+	const enabled = arg === "on" || (arg !== "off" && !session.isBrowserRelayEnabled());
+	session.setBrowserRelayEnabled(enabled);
+	return browserRelayStatus(session);
 }
 
 export const BUILTIN_COLLABORATION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
@@ -560,6 +580,42 @@ export const BUILTIN_COLLABORATION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpe
 				return;
 			}
 			runtime.ctx.showStatus(`Browser mode: ${next ? "headless" : "visible"}`);
+			clearSubmittedText(runtime);
+		},
+	},
+	{
+		name: "relay",
+		icon: "globe",
+		description: "Toggle browser relay for this session's new opens",
+		acpDescription: "Toggle browser relay for this session's new opens",
+		acpInputHint: "[on|off|status]",
+		subcommands: [
+			{ name: "on", description: "Enable the browser relay for this session" },
+			{ name: "off", description: "Disable the browser relay for this session" },
+			{ name: "status", description: "Show effective browser relay status" },
+		],
+		allowArgs: true,
+		getTuiAutocompleteDescription: runtime =>
+			cfgBrowserEnabled.get(runtime.ctx.session.settings)
+				? browserRelayStatus(runtime.ctx.session)
+				: "Browser: disabled",
+		handle: async (command, runtime) => {
+			const session = runtime.session;
+			if (!cfgBrowserEnabled.get(session.settings)) return usage(BROWSER_DISABLED, runtime);
+			const message = runBrowserRelayCommand(command.args.trim().toLowerCase(), session);
+			if (message === undefined) return usage(RELAY_USAGE, runtime);
+			await runtime.output(message);
+			return commandConsumed();
+		},
+		handleTui: (command, runtime) => {
+			const session = runtime.ctx.session;
+			if (!cfgBrowserEnabled.get(session.settings)) {
+				runtime.ctx.showWarning(BROWSER_DISABLED);
+				clearSubmittedText(runtime);
+				return;
+			}
+			const message = runBrowserRelayCommand(command.args.trim().toLowerCase(), session);
+			runtime.ctx.showStatus(message ?? RELAY_USAGE);
 			clearSubmittedText(runtime);
 		},
 	},

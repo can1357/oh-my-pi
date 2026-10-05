@@ -431,7 +431,12 @@ import { TodoTracker, type TodoTrackerHost } from "./todo-tracker";
 import { TtsrCoordinator, type TtsrCoordinatorHost } from "./ttsr-coordinator";
 
 import { cfgAdvisorEnabled, cfgAdvisorMaxNotesPerUpdate } from "../advisor/settings";
-import { cfgBrowserEnabled, cfgBrowserFreezeOnTurnEnd, cfgBrowserIdleCloseSec } from "../tools/browser/settings";
+import {
+	cfgBrowserEnabled,
+	cfgBrowserFreezeOnTurnEnd,
+	cfgBrowserIdleCloseSec,
+	cfgBrowserRelay,
+} from "../tools/browser/settings";
 import {
 	cfgClaudeResets,
 	cfgClaudeResetsAutoRedeem,
@@ -759,6 +764,8 @@ export class AgentSession implements SettingsScope {
 	#commandMetadataChangedListeners: CommandMetadataChangedListener[] = [];
 	#sessionChangeCallbacks = new Set<() => void>();
 	#observedSessionId: string | undefined;
+	/** Isolated relay preference inherited by task descendants. */
+	readonly #subagentSettings: Settings;
 
 	/** Messages queued to be included with the next user prompt as context ("asides"). */
 	#pendingNextTurnMessages: CustomMessage[] = [];
@@ -1465,6 +1472,7 @@ export class AgentSession implements SettingsScope {
 		this.#codeModeState = config.codeModeState ?? {};
 		this.sessionManager = config.sessionManager;
 		this.settings = config.settings;
+		this.#subagentSettings = this.settings.overlay();
 		this.#skillDescriptions = config.skillDescriptions ?? new SkillDescriptionCatalog();
 		this.memoryEnabled = config.memoryEnabled ?? true;
 		this.#modelRegistry = config.modelRegistry;
@@ -5101,6 +5109,7 @@ export class AgentSession implements SettingsScope {
 	}
 
 	#notifySessionChangeCallbacks(): void {
+		cfgBrowserRelay.clearOverride(this.#subagentSettings);
 		for (const callback of Array.from(this.#sessionChangeCallbacks)) {
 			try {
 				callback();
@@ -9659,6 +9668,21 @@ export class AgentSession implements SettingsScope {
 	/** Enables or disables the OpenAI `ultrafast` tier; `false` when the active model does not offer it. */
 	setUltrafastMode(enabled: boolean): boolean {
 		return this.#models.setUltrafastMode(enabled);
+	}
+
+	/** Live settings inherited by task descendants without changing other sessions. */
+	getSubagentSettings(): Settings {
+		return this.#subagentSettings;
+	}
+
+	/** Effective browser relay selection for this conversation. */
+	isBrowserRelayEnabled(): boolean {
+		return cfgBrowserRelay.get(this.#subagentSettings);
+	}
+
+	/** Selects relay for this conversation without writing persisted settings. */
+	setBrowserRelayEnabled(enabled: boolean): void {
+		cfgBrowserRelay.override(this.#subagentSettings, enabled);
 	}
 
 	/**

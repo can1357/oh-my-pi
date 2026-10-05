@@ -7,9 +7,12 @@ The companion relay server lives in the omp CLI (`omp browser-relay`, see `packa
 ## Setup
 
 1. `omp browser-relay install` — writes the bundled extension to `~/.omp/browser-relay/extension`, then load it via `chrome://extensions` → Developer mode → *Load unpacked*. (Or grab `omp-browser-relay-extension.zip` from GitHub releases.)
-2. Opt in, one of two ways:
-   - **Per call** — pass `app: { relay: true }` to `browser.open(...)` in Eval. Works without any setting and persists nothing: the configured default for every other call and session stays whatever it already was.
-   - **As the default** — `omp config set browser.relay true` makes the relay the default for **every session using this profile, in every project** (project-level settings, `PI_BROWSER_RELAY`, and an explicit `app` choice still take precedence). Any session's ordinary `browser.open(...)` call will then drive your real browser — including background sessions you aren't watching; without `app.target` such a call adopts the currently visible tab, and if it carries a `url` it navigates that tab away from what you were reading.
+2. Choose how to opt in:
+   - **Per call** — pass `app: { relay: true }` to `browser.open(...)` in Eval. This affects only that call.
+   - **Per session** — in an OMP session, run `/relay on` (or bare `/relay` to toggle). With `browser.relay` unset/default false, relay starts off for each session. Task subagents inherit the live choice for future opens. `/relay off` does not detach tabs already adopted through the relay. The choice resets on `/new` or switching sessions. Run `/relay status` to see the effective state.
+   - **Profile-wide** — `omp config set browser.relay true` makes relay the default for every session using this profile, in every project (project settings can override it). Without `app.target`, ordinary browser opens adopt the visible tab; a supplied URL navigates that tab.
+
+`PI_BROWSER_RELAY=0|1` overrides the setting/session choice. `PI_BROWSER_RELAY=0` blocks relay even when `app.relay: true`; `app.relay: false` opts out even when `PI_BROWSER_RELAY=1`.
 
 That's it: the relay server auto-starts under omp's profile-independent global daemon broker the first time Eval's browser API needs it. Every relay consumer holds a broker lease, so one project exiting cannot interrupt another; the server stops after the last consumer across all projects exits. The extension badge turns **on** when connected. Run `omp browser-relay` manually only for `--token`, `--no-group`, or a non-default port — a relay already serving the port is adopted, never fought over.
 

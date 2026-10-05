@@ -18,7 +18,12 @@ import type { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-m
 import { executeAcpBuiltinSlashCommand } from "@oh-my-pi/pi-coding-agent/slash-commands/acp-builtins";
 import { getProjectDir, removeWithRetries, setProjectDir } from "@oh-my-pi/pi-utils";
 
-import { cfgBrowserEnabled, cfgBrowserHeadless } from "@oh-my-pi/pi-coding-agent/tools/browser/settings";
+import {
+	cfgBrowserEnabled,
+	cfgBrowserHeadless,
+	cfgBrowserRelay,
+} from "@oh-my-pi/pi-coding-agent/tools/browser/settings";
+import { resolveBrowserKind } from "@oh-my-pi/pi-coding-agent/tools/browser";
 import { cfgExtendedContext } from "@oh-my-pi/pi-coding-agent/session/context-settings";
 import { cfgMemoryBackend } from "@oh-my-pi/pi-coding-agent/memory-backend/settings";
 import { cfgWorktreeCleanSource } from "@oh-my-pi/pi-coding-agent/task/settings";
@@ -38,6 +43,9 @@ interface FakeAcpBuiltinSession {
 	setFastMode(enabled: boolean): boolean;
 	isFastModeEnabled(): boolean;
 	isUltrafastModeEnabled(): boolean;
+	_browserRelayOverride: boolean | undefined;
+	isBrowserRelayEnabled(): boolean;
+	setBrowserRelayEnabled(enabled: boolean): void;
 	setForcedToolChoice(toolName: string): void;
 	fetchUsageReports?: () => Promise<unknown>;
 	getAsyncJobSnapshot: (opts?: { recentLimit?: number }) => { running: unknown[]; recent: unknown[] } | null;
@@ -94,6 +102,13 @@ function createRuntime() {
 		_todoPhases: [],
 		_switchedTo: undefined,
 		_movedFromEmptySessionFile: undefined,
+		_browserRelayOverride: undefined as boolean | undefined,
+		isBrowserRelayEnabled() {
+			return this._browserRelayOverride ?? cfgBrowserRelay.get(this.settings);
+		},
+		setBrowserRelayEnabled(enabled: boolean) {
+			this._browserRelayOverride = enabled;
+		},
 		dispose: async () => {},
 		effectiveExtensionRoots: undefined,
 		setTitleSystemPrompt: (_prompt: string | undefined) => {},
@@ -262,6 +277,22 @@ function createRuntime() {
 			notifyConfigChanged: undefined as (() => Promise<void> | void) | undefined,
 		},
 	};
+}
+
+function browserKindForSession(session: FakeAcpBuiltinSession, app?: { relay?: boolean }) {
+	const params = app ? { action: "open" as const, app } : { action: "open" as const };
+	return resolveBrowserKind(
+		params,
+		{
+			cwd: "/tmp",
+			hasUI: false,
+			getSessionFile: () => null,
+			getSessionSpawns: () => null,
+			settings: session.settings,
+			isBrowserRelayEnabled: () => session.isBrowserRelayEnabled(),
+		},
+		{},
+	);
 }
 
 describe("ACP builtin slash commands", () => {
@@ -1257,6 +1288,78 @@ describe("wave 3 commands", () => {
 		expect(r).toEqual({ consumed: true });
 		expect(output[output.length - 1]).toContain("headless");
 		expect(cfgBrowserHeadless.get(runtime.settings)).toBe(true);
+	});
+
+	it("/browser visible leaves relay selection unchanged and updates Chromium fallback", async () => {
+		const { session, runtime } = createRuntime();
+		cfgBrowserEnabled.set(runtime.settings, true);
+		cfgBrowserHeadless.set(runtime.settings, true);
+		session.setBrowserRelayEnabled(true);
+
+		expect(browserKindForSession(session).kind).toBe("relay");
+		expect(await executeAcpBuiltinSlashCommand("/browser visible", runtime)).toEqual({ consumed: true });
+		expect(cfgBrowserHeadless.get(runtime.settings)).toBe(false);
+		expect(browserKindForSession(session).kind).toBe("relay");
+		expect(browserKindForSession(session, { relay: false })).toMatchObject({ kind: "headless", headless: false });
+	});
+
+	it("/relay toggles per-session state and reports explicit modes", async () => {
+		const previous = Bun.env.PI_BROWSER_RELAY;
+		delete Bun.env.PI_BROWSER_RELAY;
+		try {
+			const { output, runtime } = createRuntime();
+			cfgBrowserEnabled.set(runtime.settings, true);
+
+			for (const command of ["/relay status", "/relay", "/relay status", "/relay off", "/relay on"]) {
+				expect(await executeAcpBuiltinSlashCommand(command, runtime)).toEqual({ consumed: true });
+			}
+
+			expect(output).toEqual([
+				"Browser relay is off for this session.",
+				"Browser relay is on for this session.",
+				"Browser relay is on for this session.",
+				"Browser relay is off for this session.",
+				"Browser relay is on for this session.",
+			]);
+			expect(cfgBrowserRelay.get(runtime.settings)).toBe(false);
+		} finally {
+			if (previous === undefined) delete Bun.env.PI_BROWSER_RELAY;
+			else Bun.env.PI_BROWSER_RELAY = previous;
+		}
+	});
+
+	it("/relay status reports the PI_BROWSER_RELAY override", async () => {
+		const previous = Bun.env.PI_BROWSER_RELAY;
+		Bun.env.PI_BROWSER_RELAY = "0";
+		try {
+			const { output, runtime } = createRuntime();
+			cfgBrowserEnabled.set(runtime.settings, true);
+
+			expect(await executeAcpBuiltinSlashCommand("/relay on", runtime)).toEqual({ consumed: true });
+			expect(output).toEqual(["Browser relay is off (PI_BROWSER_RELAY=0 overrides this session)."]);
+			expect(runtime.session.isBrowserRelayEnabled()).toBe(true);
+		} finally {
+			if (previous === undefined) delete Bun.env.PI_BROWSER_RELAY;
+			else Bun.env.PI_BROWSER_RELAY = previous;
+		}
+	});
+
+	it("/relay rejects unknown arguments without changing session state", async () => {
+		const { output, runtime } = createRuntime();
+		cfgBrowserEnabled.set(runtime.settings, true);
+
+		expect(await executeAcpBuiltinSlashCommand("/relay maybe", runtime)).toEqual({ consumed: true });
+		expect(output[0]).toContain("Usage: /relay [on|off|status]");
+		expect(runtime.session.isBrowserRelayEnabled()).toBe(false);
+	});
+
+	it("/relay rejects browser-disabled sessions", async () => {
+		const { output, runtime } = createRuntime();
+		cfgBrowserEnabled.set(runtime.settings, false);
+
+		expect(await executeAcpBuiltinSlashCommand("/relay on", runtime)).toEqual({ consumed: true });
+		expect(output[0]).toContain("Browser capability is disabled");
+		expect(runtime.session.isBrowserRelayEnabled()).toBe(false);
 	});
 
 	// /compact

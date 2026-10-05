@@ -50,6 +50,24 @@ describe("resolveBrowserKind with Tern", () => {
 		).toBe("connected");
 	});
 
+	it("uses each session's relay choice when ToolSessions share Settings", () => {
+		const settingsOff = Settings.isolated({ "browser.relay": false });
+		const optedIn = { ...session(), settings: settingsOff, isBrowserRelayEnabled: () => true };
+		const siblingOff = { ...session(), settings: settingsOff };
+		expect(resolveBrowserKind({ action: "open" }, optedIn, {}).kind).toBe("relay");
+		expect(resolveBrowserKind({ action: "open" }, siblingOff, {}).kind).toBe("headless");
+
+		const settingsOn = Settings.isolated({ "browser.relay": true });
+		const optedOut = { ...session(), settings: settingsOn, isBrowserRelayEnabled: () => false };
+		const siblingOn = { ...session(), settings: settingsOn };
+		expect(resolveBrowserKind({ action: "open" }, optedOut, {}).kind).toBe("headless");
+		expect(resolveBrowserKind({ action: "open", app: { relay: true } }, optedOut, {}).kind).toBe("relay");
+		expect(
+			resolveBrowserKind({ action: "open", app: { relay: true } }, optedOut, { PI_BROWSER_RELAY: "0" }).kind,
+		).toBe("headless");
+		expect(resolveBrowserKind({ action: "open" }, siblingOn, {}).kind).toBe("relay");
+	});
+
 	it("skips Tern for headed:false, app.tern:false and the setting, falling through to cmux", () => {
 		expect(resolveBrowserKind({ action: "open", headed: false }, session(), cmuxEnv).kind).toBe("cmux");
 		expect(resolveBrowserKind({ action: "open", app: { tern: false } }, session(), cmuxEnv).kind).toBe("cmux");
