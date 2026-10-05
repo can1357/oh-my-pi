@@ -309,6 +309,18 @@ describe("AuthStorage model usage health", () => {
 		expect(health.accounts.map(account => account.credentialId)).toEqual([1]);
 	});
 
+	it("keeps explicit OAuth account reserves when a request uses zero reserve", async () => {
+		const storage = await createStorage([oauthRow(1)], {
+			"account-1": report("account-1", [limit("short", 0.95)]),
+		});
+		storage.setAccountPolicies({
+			accountPolicies: [{ provider: "anthropic", account: { accountId: "account-1" }, reservePct: 10 }],
+			defaultReservePct: 10,
+		});
+		const health = await storage.health.model("anthropic", { modelId: "claude", reserveFraction: 0 });
+		expect(health.state).toBe("reserve");
+	});
+
 	it("ignores ordinary configured API keys even when a usage endpoint exists", async () => {
 		const storage = await createStorage([apiKeyRow(1)], {
 			"key-1": report("key-1", [limit("short", 1)]),

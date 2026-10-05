@@ -840,6 +840,113 @@ describe("AgentSession retry fallback", () => {
 		expect(session.messages.some(message => message.role === "user")).toBe(true);
 	});
 
+	it.each([
+		["healthy", "reserve", true],
+		["reserve", "reserve", false],
+		["reserve", "depleted", true],
+		["depleted", "reserve", false],
+		["depleted", "depleted", true],
+	] as const)(
+		"spends reserve with %s primary quota and a %s selected account",
+		async (state, selectedState, reselect) => {
+			const primaryModel = getBundledModel("anthropic", "claude-sonnet-4-5");
+			const fallbackModel = getBundledModel("openai", "gpt-4o-mini");
+			if (!primaryModel || !fallbackModel) throw new Error("Expected bundled reserve fallback models");
+			const requestedModels: string[] = [];
+			const mock = createMockModel({ responses: [{ content: ["spent remaining quota"] }] });
+			const agent = new Agent({
+				getApiKey: model => `${model.provider}-test-key`,
+				initialState: { model: primaryModel, systemPrompt: ["Test"], tools: [], messages: [] },
+				streamFn: (model, context, options) => {
+					requestedModels.push(`${model.provider}/${model.id}`);
+					return mock.stream(model, context, options);
+				},
+			});
+			const settings = Settings.isolated({
+				"compaction.enabled": false,
+				"retry.usageAwareFallback": true,
+				"retry.usageReservePolicy": "spend",
+				"retry.fallbackChains": { default: [`${fallbackModel.provider}/${fallbackModel.id}`] },
+			});
+			settings.setModelRole("default", `${primaryModel.provider}/${primaryModel.id}`);
+			const usageHealth = vi.spyOn(modelRegistry.authStorage.health, "model").mockImplementation(async provider => ({
+				state: provider === primaryModel.provider ? state : "reserve",
+				accounts: [
+					{
+						credentialId: 1,
+						credentialType: "oauth",
+						selected: true,
+						state: provider === primaryModel.provider && state === "depleted" ? "depleted" : selectedState,
+					},
+					{
+						credentialId: 2,
+						credentialType: "oauth",
+						state:
+							provider === primaryModel.provider && state === "depleted"
+								? "depleted"
+								: state === "healthy" && selectedState === "reserve"
+									? "healthy"
+									: "reserve",
+					},
+				],
+			}));
+			const release = vi.spyOn(modelRegistry.authStorage.sessions, "release").mockReturnValue(true);
+			const confirmFallback = vi.fn(async () => true);
+			session = new AgentSession({
+				agent,
+				sessionManager: SessionManager.inMemory(),
+				settings,
+				modelRegistry,
+			});
+			session.setUsageFallbackConfirmer(confirmFallback);
+			await session.prompt("Use remaining quota without disabling preflight");
+			await session.waitForIdle();
+			const expectedModel = state === "depleted" ? fallbackModel : primaryModel;
+			expect(requestedModels).toEqual([`${expectedModel.provider}/${expectedModel.id}`]);
+			expect(usageHealth).toHaveBeenCalled();
+			expect(confirmFallback).not.toHaveBeenCalled();
+			if (reselect) {
+				expect(release).toHaveBeenCalledWith(expectedModel.provider, session.sessionId);
+			} else {
+				expect(release).not.toHaveBeenCalled();
+			}
+		},
+	);
+
+	it.each(["confirm", "spend"] as const)("preserves depleted dispatch without a fallback under %s", async policy => {
+		const primaryModel = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!primaryModel) throw new Error("Expected bundled preflight model");
+		const mock = createMockModel({ responses: [{ content: ["continued without an eligible fallback"] }] });
+		const agent = new Agent({
+			getApiKey: model => `${model.provider}-test-key`,
+			initialState: { model: primaryModel, systemPrompt: ["Test"], tools: [], messages: [] },
+			streamFn: mock.stream,
+		});
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"retry.usageAwareFallback": true,
+			"retry.usageReservePolicy": policy,
+			"retry.fallbackChains": { default: [] },
+		});
+		settings.setModelRole("default", `${primaryModel.provider}/${primaryModel.id}`);
+		const usageHealth = vi.spyOn(modelRegistry.authStorage.health, "model").mockResolvedValue({
+			state: "depleted",
+			accounts: [{ credentialId: 1, credentialType: "oauth", state: "depleted" }],
+		});
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+		});
+		await session.prompt("Preserve the existing no-fallback behavior");
+		await session.waitForIdle();
+		expect(usageHealth).toHaveBeenCalledTimes(1);
+		expect(mock.calls).toHaveLength(1);
+		expect(session.model?.id).toBe(primaryModel.id);
+		expect(getLastAssistantMessage(session).stopReason).toBe("stop");
+	});
+
 	it("honors a live fail-closed policy after reserve spending was approved", async () => {
 		const primaryModel = getBundledModel("anthropic", "claude-sonnet-4-5");
 		const fallbackModel = getBundledModel("openai", "gpt-4o-mini");
