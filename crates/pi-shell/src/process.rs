@@ -218,6 +218,16 @@ mod platform {
 			}
 		}
 
+		/// Resolves once the process exits: its pidfd becomes readable then.
+		pub async fn exited(&self) -> std::io::Result<()> {
+			let pidfd = tokio::io::unix::AsyncFd::with_interest(
+				self.pidfd.try_clone()?,
+				tokio::io::Interest::READABLE,
+			)?;
+			let _ready = pidfd.readable().await?;
+			Ok(())
+		}
+
 		/// Walk the descendant tree in post-order (leaves first), de-duplicating
 		/// by PID so concurrent reparenting cannot trap us in a cycle.
 		pub fn descendants(&self) -> Vec<Self> {
@@ -481,6 +491,50 @@ mod platform {
 			} else {
 				ProcessStatus::Exited
 			}
+		}
+
+		/// Resolves once the process exits, through a kqueue `NOTE_EXIT`
+		/// filter.
+		pub async fn exited(&self) -> std::io::Result<()> {
+			use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+
+			// SAFETY: `kqueue` takes no arguments; a negative result is an error.
+			let kq = unsafe { libc::kqueue() };
+			if kq < 0 {
+				return Err(std::io::Error::last_os_error());
+			}
+			// SAFETY: `kq` is a fresh descriptor nothing else owns.
+			let kq = unsafe { OwnedFd::from_raw_fd(kq) };
+			let change = libc::kevent {
+				ident:  self.pid as libc::uintptr_t,
+				filter: libc::EVFILT_PROC,
+				flags:  libc::EV_ADD | libc::EV_ONESHOT,
+				fflags: libc::NOTE_EXIT,
+				data:   0,
+				udata:  ptr::null_mut(),
+			};
+			// SAFETY: `change` is one initialized change record; with no event
+			// buffer the call only registers it and the null timeout is unused.
+			let registered = unsafe {
+				libc::kevent(kq.as_raw_fd(), &raw const change, 1, ptr::null_mut(), 0, ptr::null())
+			};
+			if registered < 0 {
+				let err = std::io::Error::last_os_error();
+				// No such process: it is already gone.
+				return if err.raw_os_error() == Some(libc::ESRCH) {
+					Ok(())
+				} else {
+					Err(err)
+				};
+			}
+			// The pid may have been reused before the filter was registered, in
+			// which case it watches another process; confirm identity after.
+			if self.status() != ProcessStatus::Running {
+				return Ok(());
+			}
+			let kq = tokio::io::unix::AsyncFd::with_interest(kq, tokio::io::Interest::READABLE)?;
+			let _ready = kq.readable().await?;
+			Ok(())
 		}
 
 		/// Returns the current `proc_bsdinfo` only if it still describes the same
@@ -871,6 +925,69 @@ mod platform {
 		}
 	}
 
+	/// A registered thread-pool wait that wakes `notify` when a process handle
+	/// is signalled. Dropping it unregisters the wait before releasing the
+	/// reference the callback holds.
+	struct ExitWait {
+		wait:   isize,
+		notify: Arc<tokio::sync::Notify>,
+	}
+
+	impl ExitWait {
+		/// Registers the wait. `process` must stay open while the `ExitWait`
+		/// lives.
+		fn register(process: Handle) -> std::io::Result<Self> {
+			use windows_sys::Win32::System::Threading::{
+				INFINITE, RegisterWaitForSingleObject, WT_EXECUTEONLYONCE,
+			};
+
+			let notify = Arc::new(tokio::sync::Notify::new());
+			let context = Arc::into_raw(Arc::clone(&notify));
+			let mut wait: Handle = std::ptr::null_mut();
+			// SAFETY: `process` is a live handle with `SYNCHRONIZE` access that
+			// outlives the wait; `context` is a counted `Notify` reference the
+			// callback borrows until `Drop` unregisters the wait.
+			let registered = unsafe {
+				RegisterWaitForSingleObject(
+					&raw mut wait,
+					process,
+					Some(Self::signalled),
+					context.cast(),
+					INFINITE,
+					WT_EXECUTEONLYONCE,
+				)
+			};
+			if registered == 0 {
+				let err = std::io::Error::last_os_error();
+				// SAFETY: registration failed, so the callback never receives
+				// `context`; this releases the reference made for it.
+				drop(unsafe { Arc::from_raw(context) });
+				return Err(err);
+			}
+			Ok(Self { wait: wait as isize, notify })
+		}
+
+		unsafe extern "system" fn signalled(context: *mut c_void, _timed_out: bool) {
+			// SAFETY: `context` is the `Notify` reference `register` handed over;
+			// it stays alive until `Drop` has unregistered this callback.
+			unsafe { &*context.cast::<tokio::sync::Notify>() }.notify_one();
+		}
+	}
+
+	impl Drop for ExitWait {
+		fn drop(&mut self) {
+			use windows_sys::Win32::System::Threading::UnregisterWaitEx;
+
+			// SAFETY: `self.wait` is the registered wait. `INVALID_HANDLE_VALUE`
+			// blocks until a running callback returns (it only stores a
+			// permit), after which no callback can start.
+			let _ = unsafe { UnregisterWaitEx(self.wait as Handle, INVALID_HANDLE_VALUE) };
+			// SAFETY: the callback can no longer run, so the reference created
+			// for it in `register` is released exactly once.
+			drop(unsafe { Arc::from_raw(Arc::as_ptr(&self.notify)) });
+		}
+	}
+
 	#[derive(Clone)]
 	/// Stable Windows process reference backed by an owned process handle plus
 	/// the kernel-reported creation time, which pins identity even if the PID is
@@ -911,7 +1028,7 @@ mod platform {
 
 		pub fn children(&self) -> Vec<Self> {
 			let tree = build_process_tree();
-			Self::children_from_tree(self.pid, &tree)
+			self.children_from_tree(&tree)
 		}
 
 		/// Walk the entire descendant tree using a single Toolhelp snapshot.
@@ -927,50 +1044,55 @@ mod platform {
 			let mut visited: HashSet<u32> = HashSet::new();
 			visited.insert(root);
 			let mut out = Vec::new();
-			Self::collect_descendants_from_tree(root, &tree, &mut visited, &mut out);
+			self.collect_descendants_from_tree(&tree, &mut visited, &mut out);
 			out
 		}
 
-		fn children_from_tree(pid: i32, tree: &HashMap<u32, SmallVec<[u32; 4]>>) -> Vec<Self> {
-			let Ok(pid_u32) = u32::try_from(pid) else {
+		/// The running process `child_pid`, when it really is a child of
+		/// `self`. Windows never rewrites the parent id recorded for a process
+		/// whose parent exited, so such an orphan is listed as a child of
+		/// whichever process reuses that pid. A real child cannot have been
+		/// created before its parent; an orphan older than `self` can.
+		fn child(&self, child_pid: u32) -> Option<Self> {
+			let child = Self::from_pid(i32::try_from(child_pid).ok()?)?;
+			(child.creation_time >= self.creation_time && child.status() == ProcessStatus::Running)
+				.then_some(child)
+		}
+
+		pub(super) fn children_from_tree(
+			&self,
+			tree: &HashMap<u32, SmallVec<[u32; 4]>>,
+		) -> Vec<Self> {
+			let Ok(pid_u32) = u32::try_from(self.pid) else {
 				return Vec::new();
 			};
 			tree
 				.get(&pid_u32)
 				.into_iter()
 				.flatten()
-				.filter_map(|&child_pid| {
-					let child = Self::from_pid(i32::try_from(child_pid).ok()?)?;
-					(child.status() == ProcessStatus::Running).then_some(child)
-				})
+				.filter_map(|&child_pid| self.child(child_pid))
 				.collect()
 		}
 
 		fn collect_descendants_from_tree(
-			parent: u32,
+			&self,
 			tree: &HashMap<u32, SmallVec<[u32; 4]>>,
 			visited: &mut HashSet<u32>,
 			out: &mut Vec<Self>,
 		) {
-			let Some(children) = tree.get(&parent) else {
+			let Some(children) = u32::try_from(self.pid).ok().and_then(|pid| tree.get(&pid)) else {
 				return;
 			};
 			for &child_pid in children {
 				if !visited.insert(child_pid) {
 					continue;
 				}
-				let Ok(child_pid_i) = i32::try_from(child_pid) else {
+				let Some(child) = self.child(child_pid) else {
 					continue;
 				};
-				let Some(child) = Self::from_pid(child_pid_i) else {
-					continue;
-				};
-				if child.status() != ProcessStatus::Running {
-					continue;
-				}
 				// Post-order: collect grandchildren first so leaves are signalled
 				// before their parents during tree termination.
-				Self::collect_descendants_from_tree(child_pid, tree, visited, out);
+				child.collect_descendants_from_tree(tree, visited, out);
 				out.push(child);
 			}
 		}
@@ -1005,6 +1127,14 @@ mod platform {
 			} else {
 				ProcessStatus::Running
 			}
+		}
+
+		/// Resolves once the process exits, through a thread-pool wait on the
+		/// process handle, so no thread is parked per waiter.
+		pub async fn exited(&self) -> std::io::Result<()> {
+			let wait = ExitWait::register(self.handle.as_raw())?;
+			wait.notify.notified().await;
+			Ok(())
 		}
 	}
 
@@ -1596,6 +1726,15 @@ async fn wait_for_exit(
 		return Ok(true);
 	}
 
+	// A lone process is awaited through the OS exit notification. Polling woke
+	// every waiter 20 times a second, and IPC workers wait on their parent for
+	// their whole life. Trees still poll: their membership changes.
+	if descendants.is_empty()
+		&& let Some(result) = wait_for_root_exit(root, timeout, &ct).await
+	{
+		return result;
+	}
+
 	let poll_interval = Duration::from_millis(50);
 	let mut elapsed = Duration::ZERO;
 	while timeout.is_none_or(|limit| elapsed < limit) {
@@ -1618,6 +1757,31 @@ async fn wait_for_exit(
 	}
 
 	Ok(false)
+}
+
+/// Waits for `root` to exit through the platform's exit notification:
+/// `Ok(true)` once it exited, `Ok(false)` when `timeout` elapsed first.
+/// `None` when no notification could be set up, so the caller polls instead.
+async fn wait_for_root_exit(
+	root: &Process,
+	timeout: Option<Duration>,
+	ct: &CancelToken,
+) -> Option<Result<bool>> {
+	let exited = root.inner.exited();
+	let bounded = async {
+		match timeout {
+			Some(limit) => tokio::time::timeout(limit, exited).await.ok(),
+			None => Some(exited.await),
+		}
+	};
+	tokio::select! {
+		outcome = bounded => match outcome {
+			None => Some(Ok(false)),
+			Some(Ok(())) => Some(Ok(true)),
+			Some(Err(_)) => None,
+		},
+		reason = ct.wait() => Some(Err(anyhow::Error::msg(format!("Aborted: {reason:?}")))),
+	}
 }
 
 /// Send `signal` to the process group `pgid`.
@@ -2048,6 +2212,55 @@ mod tests {
 		);
 	}
 
+	/// Windows keeps the parent pid an orphan recorded, so after its parent
+	/// exits the orphan is listed under whichever later process reuses that
+	/// pid. The walk must not adopt it: an older process cannot be the child of
+	/// a newer one, and a cancellation sweep would otherwise terminate an
+	/// unrelated program.
+	#[cfg(windows)]
+	#[test]
+	fn descendant_walk_skips_processes_older_than_their_listed_parent() {
+		use std::{process::Command, thread, time::Duration};
+
+		let spawn = || {
+			Command::new("ping")
+				.args(["-n", "30", "127.0.0.1"])
+				.stdout(std::process::Stdio::null())
+				.spawn()
+				.expect("spawn sleeper")
+		};
+		let mut older = spawn();
+		// Creation times have coarse granularity; keep the two apart.
+		thread::sleep(Duration::from_millis(50));
+		let mut newer = spawn();
+		let (older_pid, newer_pid) = (older.id(), newer.id());
+		let pin = |pid: u32| platform::Process::from_pid(i32::try_from(pid).unwrap()).unwrap();
+
+		// A snapshot in which the older process names the newer one as its
+		// parent, as it would after its own parent exited and the pid was reused.
+		let tree = HashMap::from([(newer_pid, smallvec::SmallVec::from_slice(&[older_pid]))]);
+		assert!(
+			pin(newer_pid).children_from_tree(&tree).is_empty(),
+			"an older process is not a child"
+		);
+
+		// The same entry is accepted when the listed child is newer.
+		let tree = HashMap::from([(older_pid, smallvec::SmallVec::from_slice(&[newer_pid]))]);
+		let children = pin(older_pid).children_from_tree(&tree);
+		assert_eq!(
+			children
+				.iter()
+				.map(platform::Process::pid)
+				.collect::<Vec<_>>(),
+			[i32::try_from(newer_pid).unwrap()]
+		);
+
+		let _ = older.kill();
+		let _ = newer.kill();
+		let _ = older.wait();
+		let _ = newer.wait();
+	}
+
 	/// `kill_process_group` is the last line of defense: even if a future
 	/// caller manages to feed the harness's own pgid into the signal path,
 	/// this wrapper must refuse to deliver the signal.
@@ -2310,5 +2523,55 @@ mod tests {
 			watermark_after_fill,
 			"watermark must not advance while the vec stays below it — otherwise a sweep ran"
 		);
+	}
+
+	/// `wait_for_exit` on a lone process resolves when it exits, reports a
+	/// timeout as `false`, and surfaces cancellation as an abort error.
+	#[tokio::test(flavor = "multi_thread")]
+	async fn wait_for_exit_resolves_times_out_and_aborts() {
+		use std::process::Command;
+
+		#[cfg(unix)]
+		let mut child = Command::new("sleep")
+			.arg("30")
+			.spawn()
+			.expect("spawn sleep");
+		#[cfg(windows)]
+		let mut child = Command::new("ping")
+			.args(["-n", "30", "127.0.0.1"])
+			.stdout(std::process::Stdio::null())
+			.spawn()
+			.expect("spawn sleeper");
+		let process = Process::from_pid(i32::try_from(child.id()).unwrap()).expect("pin child");
+
+		let waited = process
+			.wait_for_exit(Some(Duration::from_millis(100)), CancelToken::default())
+			.await
+			.expect("bounded wait");
+		assert!(!waited, "a running process times out");
+
+		let aborted = process
+			.wait_for_exit(None, CancelToken::new(Some(100)))
+			.await
+			.expect_err("an expired token aborts the wait");
+		assert_eq!(aborted.to_string(), "Aborted: Timeout");
+
+		let waiter = {
+			let process = process.clone();
+			tokio::spawn(async move {
+				process
+					.wait_for_exit(Some(Duration::from_secs(20)), CancelToken::default())
+					.await
+			})
+		};
+		tokio::time::sleep(Duration::from_millis(50)).await;
+		child.kill().expect("kill child");
+		let exited = tokio::time::timeout(Duration::from_secs(5), waiter)
+			.await
+			.expect("the wait ends promptly after exit")
+			.expect("waiter task")
+			.expect("wait result");
+		assert!(exited, "exit resolves the wait");
+		let _ = child.wait();
 	}
 }

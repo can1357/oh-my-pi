@@ -33,7 +33,7 @@ use crate::{
 	cancel::{AbortReason, AbortToken, CancelToken},
 	git::git_builtin,
 	minimizer,
-	output_decode::{OutputDecoder, decode_bytes},
+	output_decode::OutputDecoder,
 	process,
 };
 
@@ -820,11 +820,13 @@ async fn create_session_for_run(
 		.await
 		.map_err(|err| Error::msg(format!("Failed to initialize shell: {err}")))?;
 
-	if let Some(exec_builtin) = shell.builtin_mut("exec") {
-		exec_builtin.disabled = true;
-	}
-	if let Some(suspend_builtin) = shell.builtin_mut("suspend") {
-		suspend_builtin.disabled = true;
+	// `exec` would replace the host process and `suspend` would stop it.
+	// Replace them with disabled refusals rather than only disabling them, so
+	// `enable exec` cannot hand the real builtins back.
+	for name in ["exec", "suspend"] {
+		if shell.builtin_mut(name).is_some() {
+			shell.register_builtin(name, pi_builtins::withheld_builtin());
+		}
 	}
 	// Process inspection and control (see `pi_builtins::process_builtins`).
 	// `nohup` is withheld when PI_DISABLE_NOHUP_BUILTIN asks for the system one;
@@ -1981,14 +1983,14 @@ async fn read_output(
 			let _ = activity.try_send(());
 			let text = decoder.push(&buf[..n]);
 			if !text.is_empty() {
-				emit_chunk(&text, on_chunk.as_ref()).await;
+				emit_chunk(text, on_chunk.as_ref()).await;
 			}
 		}
 	}
 
 	let rest = decoder.finish();
 	if !rest.is_empty() {
-		emit_chunk(&rest, on_chunk.as_ref()).await;
+		emit_chunk(rest, on_chunk.as_ref()).await;
 	}
 }
 
@@ -2002,7 +2004,10 @@ async fn read_output_buffered(
 	const BUF: usize = 65536;
 	let mut buf = vec![0u8; BUF];
 	let mut input_bytes = 0usize;
-	let mut captured = Vec::new();
+	// The decoded capture, built from the same decoder output that streams,
+	// so the bytes are decoded once rather than again at the end.
+	let mut captured = String::new();
+	let mut captured_bytes = 0usize;
 	let mut exceeded = false;
 	let mut decoder = OutputDecoder::new();
 
@@ -2051,29 +2056,33 @@ async fn read_output_buffered(
 			input_bytes = input_bytes.saturating_add(n);
 		}
 		// Once `exceeded`, the post-process minimizer is bypassed (see the
-		// `!output.exceeded` gate at the call site), so further appends just
-		// grow `captured` without serving any purpose. Stop accumulating to
-		// bound peak memory on commands that produce very large output.
-		if !exceeded {
-			if captured.len().saturating_add(n) > max_capture_bytes {
-				exceeded = true;
-			} else {
-				captured.extend_from_slice(&buf[..n]);
-			}
+		// `!output.exceeded` gate at the call site), so the capture serves no
+		// purpose. Drop it to bound peak memory on commands that produce very
+		// large output.
+		if !exceeded && captured_bytes.saturating_add(n) > max_capture_bytes {
+			exceeded = true;
+			captured = String::new();
 		}
+		captured_bytes = captured_bytes.saturating_add(n);
 
 		let text = decoder.push(&buf[..n]);
 		if !text.is_empty() {
-			emit_chunk(&text, on_chunk.as_ref()).await;
+			if !exceeded {
+				captured.push_str(&text);
+			}
+			emit_chunk(text, on_chunk.as_ref()).await;
 		}
 	}
 
 	let rest = decoder.finish();
 	if !rest.is_empty() {
-		emit_chunk(&rest, on_chunk.as_ref()).await;
+		if !exceeded {
+			captured.push_str(&rest);
+		}
+		emit_chunk(rest, on_chunk.as_ref()).await;
 	}
 
-	BufferedOutput { text: decode_bytes(&captured), input_bytes, exceeded }
+	BufferedOutput { text: captured, input_bytes, exceeded }
 }
 
 #[cfg(unix)]
@@ -2123,9 +2132,9 @@ fn read_nonblocking<T: std::os::fd::AsRawFd>(file: &T, buf: &mut [u8]) -> io::Re
 /// can never buffer unbounded output in memory (#4078). A disconnected
 /// receiver (consumer gone) fails immediately, so the pipe keeps draining
 /// and the child never wedges on a full pipe.
-async fn emit_chunk(text: &str, callback: Option<&Sender<String>>) {
+async fn emit_chunk(text: String, callback: Option<&Sender<String>>) {
 	if let Some(callback) = callback {
-		let _ = callback.send_async(text.to_string()).await;
+		let _ = callback.send_async(text).await;
 	}
 }
 
@@ -5510,6 +5519,102 @@ mod tests {
 		assert_eq!(read("conf.txt.bak"), "x=1\n", "backup must keep the original");
 
 		let _ = std::fs::remove_dir_all(&tmp);
+	}
+
+	/// `declare -r` lists readonly variables; it must not also require the
+	/// trace attribute (`-t`).
+	#[tokio::test(flavor = "multi_thread")]
+	async fn declare_readonly_listing_does_not_require_trace() {
+		let (result, output) =
+			execute_captured("readonly OMP_DECLARE_RO=1; declare -r | grep -c OMP_DECLARE_RO".into())
+				.await;
+		assert_eq!(result.exit_code, Some(0), "{output}");
+		assert_eq!(output.trim(), "1");
+	}
+
+	/// `exec` would replace the host process. `enable exec` must not bring it
+	/// back: on regression the test process itself turns into `false` and fails.
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn enable_cannot_restore_exec_or_suspend() {
+		let (result, output) = execute_captured(
+			"enable exec suspend; exec false; echo exec-refused; suspend -f; echo suspend-refused"
+				.into(),
+		)
+		.await;
+		assert_eq!(result.exit_code, Some(0), "{output}");
+		assert!(output.contains("exec: not available in this shell"), "{output}");
+		assert!(output.contains("exec-refused"), "{output}");
+		assert!(output.contains("suspend-refused"), "{output}");
+	}
+
+	/// `sort -m -o f - g < f` truncates `f` for its output while stdin is still
+	/// reading it, so stdin must be copied first or the rest of `f` is lost.
+	/// The input is far larger than what stdin reads ahead, and the small
+	/// buffer makes the merge read it in many chunks.
+	#[tokio::test(flavor = "multi_thread")]
+	async fn sort_merge_into_the_file_on_stdin_keeps_all_input() {
+		let dir = tempfile::tempdir().expect("temp dir");
+		let odd: String = (0..20_000).map(|n| format!("{:06}\n", 2 * n + 1)).collect();
+		let even: String = (0..20_000).map(|n| format!("{:06}\n", 2 * n)).collect();
+		std::fs::write(dir.path().join("f"), odd).expect("write f");
+		std::fs::write(dir.path().join("g"), even).expect("write g");
+		let (result, output) =
+			execute_captured(format!("cd '{}' && sort -m -S 1K -o f - g < f", dir.path().display()))
+				.await;
+		assert_eq!(result.exit_code, Some(0), "{output}");
+		let merged = std::fs::read_to_string(dir.path().join("f")).expect("read f");
+		let expected: String = (0..40_000).map(|n| format!("{n:06}\n")).collect();
+		assert!(merged == expected, "merged {} of 40000 lines", merged.lines().count());
+	}
+
+	/// `umask` belongs to the shell: it masks files the shell, its builtins,
+	/// and its external commands create, subshells keep their own copy, and
+	/// the host process umask never changes.
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn umask_is_scoped_to_the_shell() {
+		use std::os::unix::fs::PermissionsExt;
+
+		let host_umask = || {
+			// SAFETY: `umask` cannot fail; the mask is restored at once. Each
+			// nextest test runs in its own process.
+			let mask = unsafe { libc::umask(0) };
+			unsafe { libc::umask(mask) };
+			mask
+		};
+		let before = host_umask();
+		let dir = tempfile::tempdir().expect("temp dir");
+		let (result, output) = execute_captured(format!(
+			"cd '{}' && umask 077 && : > redirect && touch builtin && sh -c ': > external' && mkdir \
+			 made && (umask 000) && umask",
+			dir.path().display()
+		))
+		.await;
+		assert_eq!(result.exit_code, Some(0), "{output}");
+		assert_eq!(output.trim(), "0077", "a subshell's umask must not leak out");
+		let mode = |name: &str| {
+			std::fs::metadata(dir.path().join(name))
+				.expect("created file")
+				.permissions()
+				.mode() & 0o777
+		};
+		assert_eq!(mode("redirect"), 0o600, "redirections use the shell umask");
+		assert_eq!(mode("builtin"), 0o600, "builtins use the shell umask");
+		assert_eq!(mode("external"), 0o600, "external commands inherit the shell umask");
+		assert_eq!(mode("made"), 0o700, "mkdir uses the shell umask");
+
+		// A mask looser than the host's keeps the bits the host umask clears.
+		let (result, output) = execute_captured(format!(
+			"cd '{}' && umask 000 && : > loose-redirect && touch loose-builtin && mkdir loose-dir",
+			dir.path().display()
+		))
+		.await;
+		assert_eq!(result.exit_code, Some(0), "{output}");
+		assert_eq!(mode("loose-redirect"), 0o666);
+		assert_eq!(mode("loose-builtin"), 0o666);
+		assert_eq!(mode("loose-dir"), 0o777);
+		assert_eq!(host_umask(), before, "the host process umask must not change");
 	}
 
 	/// The `xargs` builtin spawns real child processes, but their stdout must

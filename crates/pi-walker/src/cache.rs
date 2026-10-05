@@ -423,18 +423,32 @@ where
 	Ok(scan)
 }
 
+/// Entries a scan produced, shared with the scan cache rather than copied out
+/// of it.
+pub(crate) struct SharedEntries {
+	pub(crate) entries:      Arc<Vec<CollectedEntry>>,
+	/// Age of the cache entry in milliseconds; zero means freshly scanned.
+	pub(crate) cache_age_ms: u64,
+}
+
+impl From<CollectedEntries> for SharedEntries {
+	fn from(scan: CollectedEntries) -> Self {
+		Self { entries: Arc::new(scan.entries), cache_age_ms: scan.cache_age_ms }
+	}
+}
+
 fn get_or_scan<H, E>(
 	fs: &BlockingFs,
 	root: &Path,
 	options: WalkOptions,
 	heartbeat: &H,
-) -> Result<CollectedEntries, WalkError<String>>
+) -> Result<SharedEntries, WalkError<String>>
 where
 	H: Fn() -> std::result::Result<(), E> + Sync,
 	E: fmt::Display,
 {
 	if *CACHE_TTL_MS == 0 || *MAX_CACHE_ENTRIES == 0 || *MAX_CACHE_BYTES == 0 {
-		return collect_entries_uncached(fs, root, options, heartbeat);
+		return collect_entries_uncached(fs, root, options, heartbeat).map(SharedEntries::from);
 	}
 
 	heartbeat().map_err(|err| WalkError::Interrupted(err.to_string()))?;
@@ -445,10 +459,8 @@ where
 		(cache.get(&key, now), cache.generation)
 	};
 	if let Some(entry) = cached {
-		let entries = entry.entries.as_ref().clone();
-		heartbeat().map_err(|err| WalkError::Interrupted(err.to_string()))?;
-		return Ok(CollectedEntries {
-			entries,
+		return Ok(SharedEntries {
+			entries:      entry.entries,
 			cache_age_ms: now.saturating_duration_since(entry.created_at).as_millis() as u64,
 		});
 	}
@@ -456,7 +468,7 @@ where
 	let scan = collect_entries_uncached(fs, root, options, heartbeat)?;
 	let bytes = entry_bytes(&scan.entries, scan.entries.capacity());
 	if bytes > *MAX_CACHE_BYTES {
-		return Ok(scan);
+		return Ok(scan.into());
 	}
 	let entries = Arc::new(scan.entries);
 	SCAN_CACHE.lock().insert(
@@ -465,9 +477,7 @@ where
 		generation,
 		Instant::now(),
 	);
-	let entries = Arc::unwrap_or_clone(entries);
-	heartbeat().map_err(|err| WalkError::Interrupted(err.to_string()))?;
-	Ok(CollectedEntries { entries, cache_age_ms: 0 })
+	Ok(SharedEntries { entries, cache_age_ms: 0 })
 }
 
 /// Return whether a scan of `root` through `fs` may use the shared cache.
@@ -493,10 +503,32 @@ where
 	H: Fn() -> std::result::Result<(), E> + Sync,
 	E: fmt::Display,
 {
+	let shared = collect_shared_entries_in(fs, root, options, &heartbeat)?;
+	let entries = Arc::try_unwrap(shared.entries).or_else(|cached| {
+		// Copying a large cached snapshot takes a while; honor a cancellation
+		// that arrived meanwhile.
+		let entries = cached.as_ref().clone();
+		heartbeat().map_err(|err| WalkError::Interrupted(err.to_string()))?;
+		Ok(entries)
+	})?;
+	Ok(CollectedEntries { entries, cache_age_ms: shared.cache_age_ms })
+}
+
+/// [`collect_entries_in`] without copying a cached scan out of the cache.
+pub(crate) fn collect_shared_entries_in<H, E>(
+	fs: &BlockingFs,
+	root: &Path,
+	options: WalkOptions,
+	heartbeat: &H,
+) -> Result<SharedEntries, WalkError<String>>
+where
+	H: Fn() -> std::result::Result<(), E> + Sync,
+	E: fmt::Display,
+{
 	if options.cache && shares_scan_cache(fs, root) {
-		get_or_scan(fs, root, options, &heartbeat)
+		get_or_scan(fs, root, options, heartbeat)
 	} else {
-		collect_entries_uncached(fs, root, options, &heartbeat)
+		collect_entries_uncached(fs, root, options, heartbeat).map(SharedEntries::from)
 	}
 }
 
