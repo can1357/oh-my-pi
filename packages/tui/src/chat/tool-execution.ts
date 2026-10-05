@@ -355,6 +355,7 @@ export class ToolExecutionComponent extends Container {
 	// Edit preview state
 	#editMode?: EditMode;
 	#editDiffPreview?: PerFileDiffPreview[];
+	#editDiffPreviewSettled = false;
 	#previewReady?: PromiseWithResolvers<void>;
 	// Payload keys whose Kitty PNG conversion is already awaited; the converted
 	// images themselves live in the process-wide cache behind
@@ -522,8 +523,19 @@ export class ToolExecutionComponent extends Container {
 		) {
 			return;
 		}
-		if ("streaming" in update && update.streaming === false) this.#previewReady?.resolve();
-		if (update.files.length === 0) return;
+		const previewSettled = "streaming" in update && update.streaming === false;
+		if (previewSettled) {
+			this.#editDiffPreviewSettled = true;
+			this.#previewReady?.resolve();
+		}
+		if (update.files.length === 0) {
+			if (previewSettled) {
+				this.#displayInputVersion++;
+				this.#updateDisplay();
+				this.#ui.requestRender();
+			}
+			return;
+		}
 		const rawFiles: unknown[] = update.files;
 		const files = rawFiles.filter(
 			(
@@ -1702,6 +1714,7 @@ export class ToolExecutionComponent extends Container {
 			context.nowMs = this.#taskRenderNowMs;
 		} else if (isEditLikeToolName(this.#toolName)) {
 			context.editMode = this.#editMode;
+			context.editDiffPreviewSettled = this.#editDiffPreviewSettled;
 			const previews = this.#editDiffPreview;
 			if (previews && previews.length > 0) {
 				const first = previews[0];
