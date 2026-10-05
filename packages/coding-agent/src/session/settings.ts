@@ -852,7 +852,9 @@ export const cfgRetryFallbackRevertPolicies = register({
 		}
 		for (const [key, policy] of Object.entries(raw)) {
 			if (policy !== "cooldown-expiry" && policy !== "never") {
-				throw new Error(`Invalid retry.fallbackRevertPolicies entry for '${key}': expected cooldown-expiry or never`);
+				throw new Error(
+					`Invalid retry.fallbackRevertPolicies entry for '${key}': expected cooldown-expiry or never`,
+				);
 			}
 		}
 	},

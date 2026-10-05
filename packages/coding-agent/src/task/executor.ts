@@ -3838,12 +3838,7 @@ function createWarmSubagentReviver(capture: WarmReviveCapture): AgentReviver {
 		const agentAccountPools = validateAgentAccountPools(cfgTaskAgentAccountPools.get(capture.settings.parent));
 		try {
 			({ session: revived } = await createAgentSession({
-				...buildSubagentSessionOptions(
-					capture.spec,
-					settings,
-					reopened,
-					expectedAgentRef,
-				),
+				...buildSubagentSessionOptions(capture.spec, settings, reopened, expectedAgentRef),
 				oauthAccountPools: Object.hasOwn(agentAccountPools, capture.agentName)
 					? agentAccountPools[capture.agentName]
 					: undefined,
@@ -4134,11 +4129,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				modelRole ?? resolveExplicitModelRole(modelPatterns, subagentSettings) ?? "default";
 			const inheritedRetryFallbackChain =
 				configuredModelPatterns.length === 1
-					? resolveSubagentInheritedRetryFallbackChain(
-							subagentSettings,
-							modelRegistry,
-							retryFallbackPolicyKey,
-						)
+					? resolveSubagentInheritedRetryFallbackChain(subagentSettings, modelRegistry, retryFallbackPolicyKey)
 					: undefined;
 			const {
 				model,

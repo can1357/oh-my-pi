@@ -4997,16 +4997,13 @@ describe("AgentSession retry fallback", () => {
 		const stream = (model: Model, context: Context, options?: SimpleStreamOptions) =>
 			(model.provider === primary.provider ? primary : fallback).stream(model, context, options);
 		for (const model of [primary, fallback]) {
-			registry.registerProvider(
-				model.provider,
-				{
-					api: "scoped-revert-test",
-					apiKey: "test-key",
-					baseUrl: "https://local.invalid",
-					models: [{ ...model, api: "scoped-revert-test" }],
-					streamSimple: stream,
-				},
-			);
+			registry.registerProvider(model.provider, {
+				api: "scoped-revert-test",
+				apiKey: "test-key",
+				baseUrl: "https://local.invalid",
+				models: [{ ...model, api: "scoped-revert-test" }],
+				streamSimple: stream,
+			});
 		}
 		registerCustomApi("scoped-revert-test", stream, "test/scoped-revert-spawn");
 		try {
