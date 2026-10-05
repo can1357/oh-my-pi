@@ -4880,10 +4880,18 @@ export class InteractiveMode implements InteractiveModeContext {
 		// write/edit guard. The standing handler below consumes plan-approval
 		// dispatches.
 		const planAugmentations: string[] = [];
+		// A shadowing extension tool named `write` has no `xd://` transport, so plan
+		// approval would never dispatch and the turn would loop on propose writes
+		// forever (issue #14030). Drop it from the active set rather than carrying it
+		// over: keeping it active breaks both the read-only guarantee and approval.
 		if (this.session.hasBuiltInTool("write")) {
 			planAugmentations.push("write");
+		} else if (previousTools.includes("write")) {
+			this.showWarning(
+				"Plan mode: the `write` tool is provided by an extension and cannot submit plans. Disable it to use plan mode.",
+			);
 		}
-		const uniquePlanTools = [...new Set([...previousTools, ...planAugmentations])];
+		const uniquePlanTools = [...new Set([...previousTools.filter(name => name !== "write"), ...planAugmentations])];
 
 		this.#planModePreviousToolPresentation = {
 			enabled: previousTools.filter(name => !isMCPToolName(name)),

@@ -190,6 +190,30 @@ describe("InteractiveMode plan.defaultOnStartup", () => {
 		expect(session?.getActiveToolNames()).toContain("write");
 	});
 
+	it("deactivates an extension `write` on plan-mode entry so approval can dispatch (issue #14030)", async () => {
+		// An extension that registers the literal name `write` shadows the built-in
+		// tool. Plan approval is a `write` to `xd://propose`, which only the built-in
+		// tool can dispatch, so carrying the shadow into plan mode leaves the agent
+		// calling `xd://propose` forever with the overlay never opening (#14030).
+		const shadowWrite = makeTool("write");
+		const created = createHarness(Settings.isolated({ "plan.defaultOnStartup": true, "compaction.enabled": false }), {
+			extraRegistryTools: [shadowWrite],
+			initialActiveTools: [shadowWrite],
+			builtInToolNames: ["read"],
+		});
+
+		expect(session?.getActiveToolNames()).toContain("write");
+		expect(session?.hasBuiltInTool("write")).toBe(false);
+
+		await created.init({ suppressWelcomeIntro: true });
+
+		expect(created.planModeEnabled).toBe(true);
+		// The extension tool cannot carry a plan submission, so it must not stay
+		// active where plan mode promises one.
+		expect(session?.getActiveToolNames()).not.toContain("write");
+		expect(session?.getActiveToolNames()).toContain("read");
+	});
+
 	it("keeps write on the direct surface when plan mode starts under Code Mode", async () => {
 		// Plan approval is a top-level `write` to `xd://propose`. Code Mode demotes
 		// every non-direct tool behind `eval`, and the partition only keeps `write`
