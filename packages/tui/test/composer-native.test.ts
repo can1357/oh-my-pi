@@ -135,6 +135,29 @@ describe("native composer", () => {
 		expect(focused).toEqual(["AckAudit", "Main"]);
 	});
 
+	it("advertises the ←← gesture, not the interrupt key, as the exit from a running agent", () => {
+		let running = false;
+		const editor = new CustomEditor(getEditorTheme());
+		editor.composerState = () => ({ running, viewing: ["Scout"] });
+
+		// Idle: Esc on an empty draft really does return to main, so it stays a keycap.
+		const idle = byRole(editor.describe(cx), "omp.composer.exit")!;
+		expect(
+			nodes(idle)
+				.filter(n => n.k === "kbd")
+				.map(n => n.p),
+		).toEqual([{ keys: ["escape"] }]);
+
+		// Running: the interrupt key stops the turn, so it must not double as exit.
+		running = true;
+		const busy = byRole(editor.describe(cx), "omp.composer.exit")!;
+		expect(
+			nodes(busy)
+				.filter(n => n.k === "kbd")
+				.map(n => n.p),
+		).toEqual([{ keys: ["left"] }, { keys: ["left"] }]);
+	});
+
 	it("memoizes send readiness separately from editability during bootstrap", () => {
 		const editor = composer({ running: false });
 		editor.disableSubmit = true;

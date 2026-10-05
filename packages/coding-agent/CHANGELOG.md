@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Esc in a focused subagent view (including a `/tan` agent) now interrupts the agent's running turn instead of returning to the main session; with no turn running it still clears the draft, then returns to main ([#14419](https://github.com/can1357/oh-my-pi/pull/14419) by [@iacore](https://github.com/iacore)).
+
 ## [18.6.2] - 2026-10-04
 
 ### Fixed
