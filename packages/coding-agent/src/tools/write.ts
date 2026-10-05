@@ -779,8 +779,19 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 				(await targetsLocalSandbox(this.session, path, signal))
 			)
 		) {
+			// A device-only session that still has `yield` is the read-only subagent
+			// shape: `write` is present only as the xd:// transport, yet the parent's
+			// briefing names a file path. Without naming the channel that does work,
+			// the rejection reads as a dead end (#14308). Keyed on `yield` being
+			// active rather than on an `isReadOnlyAgent` flag, which never reaches
+			// this session: a caller without `yield` keeps today's message verbatim.
+			const yieldFallback =
+				this.session.isToolActive?.("yield") === true
+					? " To deliver results to the caller, return the content in `yield` instead."
+					: "";
 			throw new ToolError(
-				"This `write` tool is limited to the xd:// device transport: call it with path `xd://<tool>` and the device's JSON arguments in `content` (`read xd://` lists mounted devices). Active plan mode additionally permits local:// sandbox drafts. Filesystem writes are not available elsewhere.",
+				"This `write` tool is limited to the xd:// device transport: call it with path `xd://<tool>` and the device's JSON arguments in `content` (`read xd://` lists mounted devices). Active plan mode additionally permits local:// sandbox drafts. Filesystem writes are not available elsewhere." +
+					yieldFallback,
 			);
 		}
 		return untilAborted(signal, async () => {
