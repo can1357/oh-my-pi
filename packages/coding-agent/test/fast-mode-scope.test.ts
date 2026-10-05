@@ -5,6 +5,7 @@ import type { Api, Model, ProviderSessionState } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
+import type { ServiceTierByModel } from "@oh-my-pi/pi-coding-agent/config/service-tier";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
@@ -44,7 +45,10 @@ describe("/fast targets the current model's service-tier family", () => {
 		return createSessionForModel(model);
 	}
 
-	async function createSessionForModel(model: Model<Api>): Promise<AgentSession> {
+	async function createSessionForModel(
+		model: Model<Api>,
+		serviceTierByModel?: ServiceTierByModel,
+	): Promise<AgentSession> {
 		const agent = new Agent({
 			initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] },
 		});
@@ -53,6 +57,7 @@ describe("/fast targets the current model's service-tier family", () => {
 			agent,
 			sessionManager: SessionManager.inMemory(),
 			settings: Settings.isolated(),
+			serviceTierByModel,
 			modelRegistry,
 		});
 		session.subscribe(() => {});
@@ -85,6 +90,29 @@ describe("/fast targets the current model's service-tier family", () => {
 		session.setFastMode(true);
 		expect(session.isFastModeEnabled()).toBe(true);
 		expect(session.isFastModeActive()).toBe(true);
+		expect(state.fastModeDisabled).toBe(false);
+	});
+
+	it("re-arms Anthropic priority for a pinned model after a provider fallback", async () => {
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!model) throw new Error("Expected bundled test model anthropic/claude-sonnet-4-5 to exist");
+		const modelKey = `${model.provider}/${model.id}`;
+		const session = await createSessionForModel(model, { [modelKey]: "priority" });
+		const state = {
+			strictToolsDisabled: false,
+			fastModeDisabled: true,
+			replayUnsignedThinkingDisabled: false,
+			close: () => {},
+		} as ProviderSessionState & { fastModeDisabled: boolean };
+		session.providerSessionState.set(`anthropic-messages:${model.baseUrl}\u0000${model.id}`, state);
+		expect(session.isFastModeActive()).toBe(false);
+
+		// A rejected request turns the pin off; `/fast on` must re-arm it instead of
+		// leaving the provider fallback to reject the next request too.
+		session.setFastMode(false);
+		expect(session.serviceTierByModel).toEqual({ [modelKey]: "none" });
+		expect(session.setFastMode(true)).toBe(true);
+		expect(session.serviceTierByModel).toEqual({ [modelKey]: "priority" });
 		expect(state.fastModeDisabled).toBe(false);
 	});
 

@@ -239,11 +239,12 @@ default instead of restoring that role's temporary model.
   "id": "c1d2e3f4",
   "parentId": "b1c2d3e4",
   "timestamp": "2026-02-16T10:21:45.000Z",
-  "serviceTier": { "openai": "priority", "google": "flex" }
+  "serviceTier": { "openai": "priority", "google": "flex" },
+  "serviceTierModels": { "openai-codex/gpt-6-astra": "ultrafast" }
 }
 ```
 
-`serviceTier` is a per-family map keyed by `openai`/`anthropic`/`google` (each value `auto`/`default`/`flex`/`scale`/`priority`/`ultrafast`), or `null` when no tier is active. Legacy entries that stored a single string (`"flex"`, `"openai-only"`, `"claude-only"`, …) are coerced to this map during context reconstruction; loading alone does not rewrite their payload.
+`serviceTier` is a per-family map keyed by `openai`/`anthropic`/`google` (each value `auto`/`default`/`flex`/`scale`/`priority`/`ultrafast`), or `null` when no tier is active. Legacy entries that stored a single string (`"flex"`, `"openai-only"`, `"claude-only"`, …) are coerced to this map during context reconstruction; loading alone does not rewrite their payload. `serviceTierModels` is the session's per-model map keyed by exact `provider/model-id`, with `none` marking an explicit no-tier selection; it is absent on entries written before per-model overrides existed, and an empty mapping is an explicit "no model overrides for this session".
 
 ### `thinking_level_change`
 

@@ -37,6 +37,7 @@ import {
 	isServiceTierForFamily,
 	resolveAgentServiceTierOverride,
 	resolveSubagentServiceTier,
+	type ServiceTierByModel,
 	type ServiceTierInheritSettingValue,
 } from "../config/service-tier";
 import type { CompactionThresholdPair } from "../config/compaction-threshold";
@@ -134,6 +135,7 @@ import {
 	cfgTierGoogle,
 	cfgTierAnthropic,
 	cfgTierOpenai,
+	cfgTierModelOverrides,
 	cfgRetryFallbackChains,
 	cfgDefaultThinkingLevel,
 } from "../session/settings";
@@ -520,6 +522,12 @@ export interface ExecutorOptions {
 	 * inherit falls back to the subagent's configured `tier.*` settings.
 	 */
 	parentServiceTier?: ServiceTierByFamily | null;
+	/**
+	 * Parent session's live per-model service tiers, inherited alongside
+	 * {@link parentServiceTier} when `tier.subagent` is `"inherit"`. `null` = no
+	 * live session; an explicit subagent tier policy replaces the map with `{}`.
+	 */
+	parentServiceTierByModel?: ServiceTierByModel | null;
 	/**
 	 * Exact-name `task.agentServiceTierOverrides` entry that task/eval dispatch
 	 * resolved for this agent, applied after model resolution. Spawns that keep
@@ -3565,6 +3573,7 @@ interface SubagentSessionSpec {
 		| "expectedAgentRef"
 		| "systemPrompt"
 		| "resolveServiceTierByFamily"
+		| "serviceTierByModel"
 		| "onFirstChatDispatch"
 	>;
 	prompt: SubagentPromptInputs;
@@ -3574,6 +3583,7 @@ interface SubagentSessionSpec {
 interface SubagentLaunchInputs {
 	workPoolYieldItems: readonly WorkPoolYieldItem[];
 	resolveServiceTierByFamily?: CreateAgentSessionOptions["resolveServiceTierByFamily"];
+	serviceTierByModel?: CreateAgentSessionOptions["serviceTierByModel"];
 	onFirstChatDispatch?: () => void;
 }
 
@@ -3591,6 +3601,7 @@ function buildSubagentSessionOptions(
 		sessionManager,
 		expectedAgentRef,
 		resolveServiceTierByFamily: launch?.resolveServiceTierByFamily,
+		serviceTierByModel: launch?.serviceTierByModel,
 		onFirstChatDispatch: launch?.onFirstChatDispatch,
 		systemPrompt: defaultPrompt => {
 			const ircRoster = inputs.ircEnabled
@@ -3794,6 +3805,16 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 		settingsOverride: cfgTaskAgentAdvisor.get(settings)[agent.name],
 		agentAdvisor: agent.advisor,
 	});
+	// Per-model tier overrides follow the family map's policy: an `inherit`
+	// subagent (global `tier.subagent` or the per-agent entry) copies the
+	// parent's live map — config pins plus session `/fast` selections — while an
+	// explicit tier replaces the whole selection, so a pinned model cannot
+	// shadow it.
+	const effectiveTierPolicy = options.serviceTierOverride ?? cfgTierSubagent.get(settings);
+	const subagentModelTiers =
+		effectiveTierPolicy === "inherit"
+			? (options.parentServiceTierByModel ?? cfgTierModelOverrides.get(settings))
+			: {};
 	const subagentSettings = createSubagentSettings(
 		settings,
 		{
@@ -4262,6 +4283,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 					// tiers a provider rejected or an extension changed since spawn); only
 					// the fresh spawn resolves the per-agent override.
 					resolveServiceTierByFamily,
+					serviceTierByModel: subagentModelTiers,
 					onFirstChatDispatch: () => {
 						firstChatDispatchAt ??= performance.now();
 					},

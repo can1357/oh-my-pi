@@ -384,8 +384,9 @@ The official Python client exposes `promote_queued_message(message) -> PromoteQu
 ### `get_state` payload
 
 `tokensPerSecond` is a number when output throughput is available and `null`
-otherwise. `fastModeEnabled` reports the session's selected model-family tier
-(`priority` or `ultrafast`), while `fastModeActive` reports the actual computed
+otherwise. `fastModeEnabled` reports the active model's effective tier selection
+(`priority` or `ultrafast`), including `tier.modelOverrides` pins, while
+`fastModeActive` reports the actual computed
 active state. For Fireworks, `providers.fireworksTier: priority` is independent
 of the `/fast` family setting, so `fastModeActive` may remain `true` for a model
 that `/fast` cannot toggle. Fireworks `-fast` serving variants do not use priority.

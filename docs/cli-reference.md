@@ -109,7 +109,7 @@ or `--fork`.
 | `--api-key <key>` | API key (defaults to env vars). |
 | `--provider-session-id <id>` | Reuse a specific provider-side session id for continuity and cache scoping. |
 | `--prompt-cache-key <key>` | Override the provider prompt-cache key for this session. |
-| `--service-tier <tier>` | OpenAI service tier: `none`, `auto`, `default`, `flex`, `scale`, `priority`, or `ultrafast` (`none` omits `service_tier`). |
+| `--service-tier <tier>` | OpenAI service tier: `none`, `auto`, `default`, `flex`, `scale`, `priority`, or `ultrafast` (`none` omits `service_tier`). Replaces the session's OpenAI tier selection, `tier.modelOverrides` pins on OpenAI-family models included; pins on other families are untouched. |
 
 See [providers](./providers.md) and [models](./models.md) for model resolution.
 

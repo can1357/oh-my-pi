@@ -106,6 +106,80 @@ export function validateAgentServiceTierOverrides(value: unknown): Record<string
 	return overrides;
 }
 
+/**
+ * Session-scoped per-model service-tier selections, keyed by exact
+ * `provider/modelId`. `"none"` is a real selection (no tier): the entry shadows
+ * the model's family tier, which is what lets `/fast off` (or an explicit
+ * `none` override) disable a pinned model for one session.
+ */
+export type ServiceTierByModel = Record<string, ServiceTierModelOverrideSettingValue>;
+
+/**
+ * Values accepted for one `tier.modelOverrides` entry. `inherit` is absent: a
+ * model key has no parent scope to inherit from — omitting the entry is what
+ * falls through to the model's family tier.
+ */
+export const SERVICE_TIER_MODEL_OVERRIDE_VALUES = [
+	"none",
+	"auto",
+	"default",
+	"flex",
+	"scale",
+	"priority",
+	"ultrafast",
+] as const;
+
+export type ServiceTierModelOverrideSettingValue = (typeof SERVICE_TIER_MODEL_OVERRIDE_VALUES)[number];
+
+/** Whether a runtime value is a valid `tier.modelOverrides` entry. */
+export function isServiceTierModelOverrideSettingValue(value: unknown): value is ServiceTierModelOverrideSettingValue {
+	return typeof value === "string" && SERVICE_TIER_MODEL_OVERRIDE_VALUES.some(serviceTier => serviceTier === value);
+}
+
+/** The exact session key a model's tier selection is stored under. */
+export function serviceTierModelKey(model: Pick<Model, "provider" | "id">): string {
+	return `${model.provider}/${model.id}`;
+}
+
+/**
+ * Validate the sparse `tier.modelOverrides` record. An absent or empty (`null`)
+ * mapping means no overrides; any other non-mapping container, or an unknown
+ * value, fails settings load instead of silently disabling every override.
+ */
+export function validateModelServiceTierOverrides(value: unknown): ServiceTierByModel {
+	const overrides: ServiceTierByModel = {};
+	if (value === undefined || value === null) return overrides;
+	if (typeof value !== "object" || Array.isArray(value)) {
+		throw new Error(
+			`Invalid tier.modelOverrides: expected a map of model selector to service tier, got ${Array.isArray(value) ? "an array" : `a ${typeof value}`}.`,
+		);
+	}
+	for (const [modelKey, setting] of Object.entries(value)) {
+		if (!isServiceTierModelOverrideSettingValue(setting)) {
+			throw new Error(
+				`Invalid service tier for tier.modelOverrides.${modelKey}: ${String(setting)}. Expected one of: ${SERVICE_TIER_MODEL_OVERRIDE_VALUES.join(", ")}.`,
+			);
+		}
+		overrides[modelKey] = setting;
+	}
+	return overrides;
+}
+
+/**
+ * Coerce a persisted `serviceTierModels` payload. An empty mapping is preserved
+ * — it is an explicit "no model overrides for this session" — while a malformed
+ * container yields `undefined` so the caller falls back to settings.
+ */
+export function coerceServiceTierByModel(value: unknown): ServiceTierByModel | undefined {
+	if (value === null || value === undefined) return undefined;
+	if (typeof value !== "object" || Array.isArray(value)) return undefined;
+	const map: ServiceTierByModel = {};
+	for (const [modelKey, tier] of Object.entries(value)) {
+		if (isServiceTierModelOverrideSettingValue(tier)) map[modelKey] = tier;
+	}
+	return map;
+}
+
 export const SERVICE_TIER_OPENAI_OPTIONS: ReadonlyArray<SubmenuOption<ServiceTierOpenAISettingValue>> = [
 	{ value: "none", label: "None", description: "Omit service_tier (standard processing)" },
 	{ value: "auto", label: "Auto", description: "Provider default tier selection" },

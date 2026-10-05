@@ -7,6 +7,7 @@ import type { Rule } from "../capability/rule";
 import type { EffectiveExtensionRoots } from "../capability/types";
 import type { EvalPreludeDefinition } from "../eval/preludes";
 import type { PromptTemplate } from "../config/prompt-templates";
+import type { ServiceTierByModel } from "../config/service-tier";
 import type { Settings } from "../config/settings";
 import { EditTool } from "../edit";
 import { checkPythonKernelAvailability } from "../eval/py/kernel";
@@ -415,6 +416,8 @@ export interface ToolSession {
 	getActiveModel?: () => Model | undefined;
 	/** Get the session's live per-family service tiers (undefined = none). Source of truth for subagent `tier.subagent: inherit`. */
 	getServiceTierByFamily?: () => ServiceTierByFamily | undefined;
+	/** Get the session's live per-model service tiers (undefined = none). Inherited alongside the family map. */
+	getServiceTierByModel?: () => ServiceTierByModel | undefined;
 	/**
 	 * Fires `before_subagent_spawn` on this session's extensions before a child's
 	 * model resolves. `signal` cancels awaiting handlers. Undefined when the

@@ -398,7 +398,7 @@ describe("SessionManager JSONL software-crash durability", () => {
 
 		const priorId = manager.appendMessage(assistantMessage("prior turn"));
 		const discardedId = manager.appendMessage(assistantMessage(""));
-		const serviceTierId = manager.appendServiceTierChange(null);
+		const serviceTierId = manager.appendServiceTierChange(null, {});
 		await manager.discardEntryDurably(discardedId);
 		await manager.close();
 

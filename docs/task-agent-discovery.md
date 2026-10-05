@@ -257,6 +257,11 @@ parked agent revived after a restart keeps its per-agent tier instead of re-deri
 the same executor keep `tier.subagent`. Service tiers are configuration-only; agent frontmatter and
 the task/eval wire formats do not expose a tier field or automatic Fast policy.
 
+Per-model overrides follow the same policy: `inherit` copies the parent's live per-model map
+(`tier.modelOverrides` pins plus session `/fast` selections), while an explicit `tier.subagent` or
+`task.agentServiceTierOverrides` value replaces the whole selection — the child's model map is
+cleared, so a pinned model cannot shadow the explicit tier.
+
 Runtime output schema precedence is:
 
 1. the task item's explicit `outputSchema`

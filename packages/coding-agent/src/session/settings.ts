@@ -10,6 +10,8 @@ import {
 	SERVICE_TIER_INHERIT_SETTING_VALUES,
 	SERVICE_TIER_OPENAI_OPTIONS,
 	SERVICE_TIER_OPENAI_VALUES,
+	type ServiceTierModelOverrideSettingValue,
+	validateModelServiceTierOverrides,
 } from "../config/service-tier";
 import {
 	TINY_MODEL_DEVICE_DEFAULT,
@@ -627,6 +629,22 @@ export const cfgTierGoogle = register({
 		description:
 			"Processing tier for Gemini (Google AI Studio + Vertex) requests, and Google-family models routed via OpenRouter (none = omit). Sent as the top-level `serviceTier` field.",
 		options: SERVICE_TIER_GOOGLE_OPTIONS,
+	},
+});
+
+const EMPTY_TIER_MODEL_OVERRIDES: Record<string, ServiceTierModelOverrideSettingValue> = {};
+
+export const cfgTierModelOverrides = register({
+	id: "tier.modelOverrides",
+	type: "record",
+	default: EMPTY_TIER_MODEL_OVERRIDES,
+	validate: validateModelServiceTierOverrides,
+	ui: {
+		tab: "model",
+		group: "Sampling",
+		label: "Service Tier — Model Overrides",
+		description:
+			'Per-model service-tier overrides keyed by exact "provider/model-id" (e.g. {"openai-codex/gpt-6-astra":"ultrafast"}). Takes precedence over the family tier for that model; "none" pins it to standard processing.',
 	},
 });
 

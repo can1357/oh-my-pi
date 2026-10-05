@@ -8,6 +8,7 @@ import type {
 	Usage,
 } from "@oh-my-pi/pi-ai";
 import type { StructuredSubagentSchemaMode } from "@oh-my-pi/pi-tui/tools/task";
+import type { ServiceTierByModel } from "../config/service-tier";
 import type { CompactionMethod } from "./compaction-methods";
 import type { RetryFallbackRole } from "./retry-fallback-chains";
 
@@ -116,6 +117,12 @@ export interface ModelChangeEntry extends SessionEntryBase {
 export interface ServiceTierChangeEntry extends SessionEntryBase {
 	type: "service_tier_change";
 	serviceTier: ServiceTierByFamily | null;
+	/**
+	 * Session-scoped per-model tier selections (`"none"` = explicitly no tier).
+	 * Absent on entries written before per-model overrides existed; an empty
+	 * mapping is an explicit "no model overrides for this session".
+	 */
+	serviceTierModels?: ServiceTierByModel;
 }
 
 export interface CompactionEntry<T = unknown> extends SessionEntryBase {

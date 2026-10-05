@@ -30,6 +30,7 @@ import type { Dialect } from "@oh-my-pi/pi-ai/dialect";
 import { prewarmOpenAICodexResponses } from "@oh-my-pi/pi-ai/providers/openai-codex-responses";
 import { isOpenAICodexWebSocketPreferred } from "@oh-my-pi/pi-ai/providers/openai-codex-transport";
 import { withCredentialRedaction } from "@oh-my-pi/pi-ai/providers/transform-messages";
+import { serviceTierFamily } from "@oh-my-pi/pi-ai/types";
 import { FALLBACK_DIALECT, preferredDialect } from "@oh-my-pi/pi-catalog/identity";
 import type { Component } from "@oh-my-pi/pi-tui";
 import { $env } from "@oh-my-pi/pi-utils/env";
@@ -78,7 +79,7 @@ import {
 } from "./config/model-resolver";
 import { formatModelSelectorValue, parseModelString } from "@oh-my-pi/pi-tui/overlays/model-selector";
 import { loadPromptTemplates as loadPromptTemplatesInternal, type PromptTemplate } from "./config/prompt-templates";
-import { buildServiceTierByFamily } from "./config/service-tier";
+import { buildServiceTierByFamily, type ServiceTierByModel } from "./config/service-tier";
 import { bindEffects, combine } from "./config/registry";
 import { Settings } from "./config/settings";
 import { CursorExecHandlers, type CursorMcpResourceAdapter } from "./cursor";
@@ -334,6 +335,7 @@ import {
 	cfgThinkingBudgets,
 	cfgTierAnthropic,
 	cfgTierGoogle,
+	cfgTierModelOverrides,
 	cfgTierOpenai,
 } from "./session/settings";
 import { cfgInterruptMode } from "./modes/settings";
@@ -586,6 +588,13 @@ export interface CreateAgentSessionOptions {
 	 * of re-deriving tiers from settings.
 	 */
 	resolveServiceTierByFamily?: (model: Model | undefined) => ServiceTierByFamily;
+	/**
+	 * Per-model service tiers for this session, replacing the `tier.modelOverrides`
+	 * settings and any persisted tier history. Task dispatch hands a child its
+	 * inherited or replaced map here: the settings overlay deep-merges records, so
+	 * an empty overlay cannot clear an inherited pin.
+	 */
+	serviceTierByModel?: ServiceTierByModel;
 	/** Models available for cycling (Ctrl+P in interactive mode) */
 	scopedModels?: Array<{ model: Model; thinkingLevel?: ThinkingLevel }>;
 	/** Prewalk from the starting model to a fast/cheap target at the first edit/write once the todo list exists. */
@@ -2264,6 +2273,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			getActiveModelString,
 			getActiveModel: () => agent?.state.model ?? model,
 			getServiceTierByFamily: () => session?.serviceTierByFamily,
+			getServiceTierByModel: () => session?.serviceTierByModel,
 			getImageAttachments: () => session?.getImageAttachments() ?? [],
 			getPlanModeState: () => session?.getPlanModeState(),
 			getPlanReferencePath: () => session?.getPlanReferencePath() ?? "local://PLAN.md",
@@ -4168,6 +4178,25 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		} else if (options.openAIServiceTier !== undefined) {
 			initialServiceTierByFamily.openai = options.openAIServiceTier;
 		}
+		// `--service-tier` is an OpenAI-family launch override: it replaces the
+		// session's OpenAI tier selection, per-model pins included, so a pinned
+		// model cannot shadow it. Pins on other families are untouched, and keys
+		// the registry cannot resolve (deferred or extension-registered models)
+		// are kept because the flag cannot claim them.
+		const configuredServiceTierByModel =
+			existingSession?.serviceTierModels ?? options.serviceTierByModel ?? cfgTierModelOverrides.get(settings);
+		const initialServiceTierByModel: ServiceTierByModel = {};
+		for (const [modelKey, tier] of Object.entries(configuredServiceTierByModel)) {
+			if (options.openAIServiceTier !== undefined) {
+				const separator = modelKey.indexOf("/");
+				const model =
+					separator > 0
+						? modelRegistry.find(modelKey.slice(0, separator), modelKey.slice(separator + 1))
+						: undefined;
+				if (model && serviceTierFamily(model) === "openai") continue;
+			}
+			initialServiceTierByModel[modelKey] = tier;
+		}
 
 		// One-shot launch-latency marker: fired the first time the loop dispatches
 		// a chat request to the provider transport. See onFirstChatDispatch.
@@ -4356,6 +4385,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			if (persistInitialServiceTier) {
 				sessionManager.appendServiceTierChange(
 					Object.keys(initialServiceTierByFamily).length > 0 ? initialServiceTierByFamily : null,
+					initialServiceTierByModel,
 				);
 			}
 		} else {
@@ -4368,9 +4398,14 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				// classification persists its concrete effort once a real user turn runs.
 				sessionManager.appendThinkingLevelChange(effectiveThinkingLevel);
 			}
-			if (persistInitialServiceTier || Object.keys(initialServiceTierByFamily).length > 0) {
+			if (
+				persistInitialServiceTier ||
+				Object.keys(initialServiceTierByFamily).length > 0 ||
+				Object.keys(initialServiceTierByModel).length > 0
+			) {
 				sessionManager.appendServiceTierChange(
 					Object.keys(initialServiceTierByFamily).length > 0 ? initialServiceTierByFamily : null,
+					initialServiceTierByModel,
 				);
 			}
 		}
@@ -4471,6 +4506,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			prewalk,
 			planYolo: options.planYolo,
 			serviceTierByFamily: initialServiceTierByFamily,
+			serviceTierByModel: initialServiceTierByModel,
 			sessionManager,
 			settings,
 			additionalExtensionPaths: options.additionalExtensionPaths,

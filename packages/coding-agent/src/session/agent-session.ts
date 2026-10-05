@@ -123,7 +123,12 @@ import {
 	resolveCliModel,
 } from "../config/model-resolver";
 import { expandPromptTemplate, type PromptTemplate } from "../config/prompt-templates";
-import { buildServiceTierByFamily, isServiceTierForFamily, serviceTierSettingToTier } from "../config/service-tier";
+import {
+	buildServiceTierByFamily,
+	isServiceTierForFamily,
+	type ServiceTierByModel,
+	serviceTierSettingToTier,
+} from "../config/service-tier";
 import { combine, type SettingsScope } from "../config/registry";
 import type { Settings } from "../config/settings";
 import { RawSseDebugBuffer } from "@oh-my-pi/pi-tui/apps/debug/raw-sse-buffer";
@@ -449,6 +454,7 @@ import {
 	cfgTierAdvisor,
 	cfgTierAnthropic,
 	cfgTierGoogle,
+	cfgTierModelOverrides,
 	cfgTierOpenai,
 	cfgProvidersAnthropicSlowMode,
 } from "./settings";
@@ -1586,6 +1592,7 @@ export class AgentSession implements SettingsScope {
 			thinkingLevel: config.thinkingLevel,
 			thinkingLevelCeiling: config.thinkingLevelCeiling,
 			serviceTierByFamily: config.serviceTierByFamily,
+			serviceTierByModel: config.serviceTierByModel,
 		});
 
 		this.#promptTemplates = config.promptTemplates ?? [];
@@ -2348,6 +2355,7 @@ export class AgentSession implements SettingsScope {
 		cfgTierOpenai.listen(this, tier => this.setServiceTierFamily("openai", serviceTierSettingToTier(tier)));
 		cfgTierAnthropic.listen(this, tier => this.setServiceTierFamily("anthropic", serviceTierSettingToTier(tier)));
 		cfgTierGoogle.listen(this, tier => this.setServiceTierFamily("google", serviceTierSettingToTier(tier)));
+		cfgTierModelOverrides.listen(this, overrides => this.#models.setServiceTierModels(overrides));
 		cfgAdvisorRuntimeInputs.listen(this, (next, previous) => {
 			// A budget/tier edit rebuilds a running advisor (both are part of its
 			// runtime signature) without overriding a session-only `/advisor` toggle.
@@ -3773,9 +3781,14 @@ export class AgentSession implements SettingsScope {
 				}
 				if (
 					assistantMsg.disabledFeatures?.includes("priority") &&
-					this.serviceTierByFamily.anthropic === "priority"
+					this.model !== undefined &&
+					serviceTierFamily(this.model) === "anthropic" &&
+					this.#models.effectiveServiceTier() === "priority"
 				) {
-					this.setServiceTierFamily("anthropic", undefined);
+					// Clear the selection that requested fast mode — the model's own
+					// entry when it has one, else the family entry — so the next
+					// request does not retry a tier the provider just rejected.
+					this.setFastMode(false);
 					this.emitNotice(
 						"warning",
 						"Priority/fast mode rejected for this model; retried without it. Fast mode is now off.",
@@ -5787,6 +5800,11 @@ export class AgentSession implements SettingsScope {
 	/** Live per-family service tiers (OpenAI / Anthropic / Google). */
 	get serviceTierByFamily(): ServiceTierByFamily {
 		return this.#models.serviceTierByFamily;
+	}
+
+	/** Live per-model service tiers (`"none"` = explicitly no tier). */
+	get serviceTierByModel(): ServiceTierByModel {
+		return this.#models.serviceTierByModel;
 	}
 
 	/** Whether agent is currently streaming a response */
@@ -9287,7 +9305,7 @@ export class AgentSession implements SettingsScope {
 			this.#usagePreflightReadyForNextModelCall = false;
 
 			this.sessionManager.appendThinkingLevelChange(this.thinkingLevel, this.configuredThinkingLevel());
-			this.sessionManager.appendServiceTierChange(this.#models.serviceTierEntry());
+			this.sessionManager.appendServiceTierChange(this.#models.serviceTierEntry(), this.#models.serviceTierByModel);
 
 			this.#todo.resetCycle();
 			this.#planReferenceSent = false;
@@ -10728,6 +10746,7 @@ export class AgentSession implements SettingsScope {
 		const previousAutoThinking = this.isAutoThinking;
 		const previousAutoResolvedLevel = this.autoResolvedThinkingLevel();
 		const previousServiceTierByFamily = this.serviceTierByFamily;
+		const previousServiceTierByModel = this.serviceTierByModel;
 		const previousTools = [...this.agent.state.tools];
 		const previousBaseSystemPrompt = this.#tools.baseSystemPrompt;
 		const previousSystemPrompt = this.agent.state.systemPrompt;
@@ -10880,6 +10899,7 @@ export class AgentSession implements SettingsScope {
 				cfgTierAnthropic.get(this.settings),
 				cfgTierGoogle.get(this.settings),
 			);
+			const configuredServiceTierByModel = cfgTierModelOverrides.get(this.settings);
 			// Restore the thinking selector. Each change persists the configured
 			// selector (`auto` or a concrete level), so prefer it: an `auto` session
 			// resumes in auto mode (reclassifying the next turn) instead of freezing at
@@ -10897,6 +10917,7 @@ export class AgentSession implements SettingsScope {
 			this.#models.restoreThinkingLevel(restoredThinkingLevel);
 			this.#models.restoreServiceTiers(
 				hasServiceTierEntry ? (sessionContext.serviceTier ?? {}) : configuredServiceTierByFamily,
+				sessionContext.serviceTierModels ?? configuredServiceTierByModel,
 			);
 
 			if (switchingToDifferentSession) {
@@ -10990,7 +11011,7 @@ export class AgentSession implements SettingsScope {
 				modelRolledBack = !modelsAreEqual(rolledBackModel, previousModel);
 			}
 			this.#models.restoreThinkingSnapshot(previousThinkingLevel, previousAutoThinking, previousAutoResolvedLevel);
-			this.#models.restoreServiceTiers(previousServiceTierByFamily);
+			this.#models.restoreServiceTiers(previousServiceTierByFamily, previousServiceTierByModel);
 			if (modelRolledBack) {
 				this.#emit({ type: "model_changed" });
 			}
@@ -12559,6 +12580,7 @@ export class AgentSession implements SettingsScope {
 			model: this.agent.state.model ?? null,
 			thinkingLevel: this.thinkingLevel ?? null,
 			serviceTier: this.#models.serviceTierEntry(),
+			serviceTierModels: this.#models.serviceTierByModel,
 			systemPrompt: this.agent.state.systemPrompt,
 			tools: this.agent.state.tools.map(tool => ({
 				name: tool.name,

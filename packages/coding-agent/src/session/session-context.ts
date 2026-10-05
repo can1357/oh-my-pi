@@ -8,6 +8,7 @@ import {
 } from "@oh-my-pi/pi-ai";
 import * as snapcompact from "@oh-my-pi/snapcompact";
 import { isRecord } from "@oh-my-pi/pi-utils";
+import { coerceServiceTierByModel, type ServiceTierByModel } from "../config/service-tier";
 import {
 	createBranchSummaryMessage,
 	createCompactionSummaryMessage,
@@ -110,6 +111,8 @@ export interface SessionContext {
 	/** Configured thinking selector (`"auto"` or a concrete level) from the latest change. */
 	configuredThinkingLevel?: string;
 	serviceTier?: ServiceTierByFamily;
+	/** Session-scoped per-model tier selections from the latest `service_tier_change`. */
+	serviceTierModels?: ServiceTierByModel;
 	/** Model roles: { default: "provider/modelId", small: "provider/modelId", ... } */
 	models: Record<string, string>;
 	/** Names of TTSR rules that have been injected this session */
@@ -287,6 +290,7 @@ export function buildSessionContext(
 	let thinkingLevel: string | undefined = "off";
 	let configuredThinkingLevel: string | undefined;
 	let serviceTier: ServiceTierByFamily | undefined;
+	let serviceTierModels: ServiceTierByModel | undefined;
 	const models: Record<string, string> = {};
 	let compaction: CompactionEntry | null = null;
 	const injectedTtsrRulesSet = new Set<string>();
@@ -316,6 +320,7 @@ export function buildSessionContext(
 			}
 		} else if (entry.type === "service_tier_change") {
 			serviceTier = coerceServiceTierByFamily(entry.serviceTier);
+			serviceTierModels = coerceServiceTierByModel(entry.serviceTierModels);
 		} else if (entry.type === "message" && entry.message.role === "assistant") {
 			// Legacy fallback: infer default model from assistant messages only
 			// when no explicit `model_change` (role=default) entry has been
@@ -758,6 +763,7 @@ export function buildSessionContext(
 		thinkingLevel,
 		configuredThinkingLevel,
 		serviceTier,
+		serviceTierModels,
 		models,
 		injectedTtsrRules,
 		mode,

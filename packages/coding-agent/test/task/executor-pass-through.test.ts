@@ -711,6 +711,108 @@ describe("runSubprocess per-agent service-tier overrides", () => {
 		]).toEqual(["flex", "none", "none"]);
 	});
 
+	it("inherits the parent's per-model tier map for an inherit subagent", async () => {
+		const model = getBundledModel("openai-codex", "gpt-5.6-sol");
+		if (!model) throw new Error("Expected gpt-5.6-sol model to exist");
+		const session = yieldEmittingSession();
+		const spy = vi.spyOn(sdkModule, "createAgentSession").mockResolvedValue(createSessionResult(session));
+
+		const result = await runSubprocess({
+			...baseOptions,
+			agent: { ...baseAgent, name: "scout", model: [`${model.provider}/${model.id}`] },
+			id: "subagent-inherited-model-tiers",
+			settings: Settings.isolated({ "tier.subagent": "inherit" }),
+			parentServiceTierByModel: { "openai-codex/gpt-6-astra": "ultrafast" },
+			modelRegistry: createModelRegistry(model),
+		});
+
+		expect(result.exitCode).toBe(0);
+		expect(spy.mock.calls[0]?.[0]?.serviceTierByModel).toEqual({ "openai-codex/gpt-6-astra": "ultrafast" });
+	});
+
+	it("replaces the parent's per-model tier map for an explicit subagent tier", async () => {
+		const model = getBundledModel("openai-codex", "gpt-5.6-sol");
+		if (!model) throw new Error("Expected gpt-5.6-sol model to exist");
+		const session = yieldEmittingSession();
+		const spy = vi.spyOn(sdkModule, "createAgentSession").mockResolvedValue(createSessionResult(session));
+
+		const result = await runSubprocess({
+			...baseOptions,
+			agent: { ...baseAgent, name: "scout", model: [`${model.provider}/${model.id}`] },
+			id: "subagent-explicit-tier-model-tiers",
+			settings: Settings.isolated({ "tier.subagent": "priority" }),
+			parentServiceTierByModel: { "openai-codex/gpt-6-astra": "ultrafast" },
+			modelRegistry: createModelRegistry(model),
+		});
+
+		expect(result.exitCode).toBe(0);
+		expect(spy.mock.calls[0]?.[0]?.serviceTierByModel).toEqual({});
+	});
+
+	it("replaces pins inherited through the parent's settings for an explicit subagent tier", async () => {
+		const model = getBundledModel("openai-codex", "gpt-5.6-sol");
+		if (!model) throw new Error("Expected gpt-5.6-sol model to exist");
+		const session = yieldEmittingSession();
+		const spy = vi.spyOn(sdkModule, "createAgentSession").mockResolvedValue(createSessionResult(session));
+
+		// The child's settings deep-merge the parent's record, so the pin survives
+		// in `tier.modelOverrides`; the session option is what replaces it.
+		const result = await runSubprocess({
+			...baseOptions,
+			agent: { ...baseAgent, name: "scout", model: [`${model.provider}/${model.id}`] },
+			id: "subagent-explicit-tier-settings-pins",
+			settings: Settings.isolated({
+				"tier.subagent": "priority",
+				"tier.modelOverrides": { "openai-codex/gpt-6-astra": "ultrafast" },
+			}),
+			parentServiceTierByModel: { "openai-codex/gpt-6-astra": "ultrafast" },
+			modelRegistry: createModelRegistry(model),
+		});
+
+		expect(result.exitCode).toBe(0);
+		expect(spy.mock.calls[0]?.[0]?.serviceTierByModel).toEqual({});
+	});
+
+	it("replaces the parent's per-model tier map for a concrete per-agent override", async () => {
+		const model = getBundledModel("openai-codex", "gpt-5.6-sol");
+		if (!model) throw new Error("Expected gpt-5.6-sol model to exist");
+		const session = yieldEmittingSession();
+		const spy = vi.spyOn(sdkModule, "createAgentSession").mockResolvedValue(createSessionResult(session));
+
+		const result = await runSubprocess({
+			...baseOptions,
+			agent: { ...baseAgent, name: "scout", model: [`${model.provider}/${model.id}`] },
+			serviceTierOverride: "priority",
+			id: "subagent-agent-override-model-tiers",
+			settings: Settings.isolated({ "tier.subagent": "inherit" }),
+			parentServiceTierByModel: { "openai-codex/gpt-6-astra": "ultrafast" },
+			modelRegistry: createModelRegistry(model),
+		});
+
+		expect(result.exitCode).toBe(0);
+		expect(spy.mock.calls[0]?.[0]?.serviceTierByModel).toEqual({});
+	});
+
+	it("keeps the parent's per-model tier map for an inherit per-agent override", async () => {
+		const model = getBundledModel("openai-codex", "gpt-5.6-sol");
+		if (!model) throw new Error("Expected gpt-5.6-sol model to exist");
+		const session = yieldEmittingSession();
+		const spy = vi.spyOn(sdkModule, "createAgentSession").mockResolvedValue(createSessionResult(session));
+
+		const result = await runSubprocess({
+			...baseOptions,
+			agent: { ...baseAgent, name: "scout", model: [`${model.provider}/${model.id}`] },
+			serviceTierOverride: "inherit",
+			id: "subagent-agent-inherit-model-tiers",
+			settings: Settings.isolated({ "tier.subagent": "priority" }),
+			parentServiceTierByModel: { "openai-codex/gpt-6-astra": "ultrafast" },
+			modelRegistry: createModelRegistry(model),
+		});
+
+		expect(result.exitCode).toBe(0);
+		expect(spy.mock.calls[0]?.[0]?.serviceTierByModel).toEqual({ "openai-codex/gpt-6-astra": "ultrafast" });
+	});
+
 	it("lets an unsupported concrete override beat the global tier without crossing families", async () => {
 		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
 		if (!model) throw new Error("Expected claude-sonnet-4-5 model to exist");

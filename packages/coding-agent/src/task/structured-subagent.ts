@@ -681,6 +681,7 @@ function buildExecutorOptions(
 		parentTelemetry: session.getTelemetry?.(),
 		parentAgentId: session.getAgentId?.() ?? MAIN_AGENT_ID,
 		parentServiceTier: session.getServiceTierByFamily ? (session.getServiceTierByFamily() ?? null) : undefined,
+		parentServiceTierByModel: session.getServiceTierByModel ? (session.getServiceTierByModel() ?? null) : undefined,
 	};
 }
 

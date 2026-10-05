@@ -26,6 +26,7 @@ import {
 	toError,
 } from "@oh-my-pi/pi-utils";
 import type { StructuredSubagentSchemaMode } from "@oh-my-pi/pi-tui/tools/task";
+import type { ServiceTierByModel } from "../config/service-tier";
 import { moveFileAcrossDevices } from "../utils/atomic-file";
 import { ArtifactManager } from "./artifacts";
 import { type BlobPutOptions, type BlobPutResult, BlobStore, lazyImageDataSync } from "./blob-store";
@@ -3316,8 +3317,13 @@ export class SessionManager {
 		return entry.id;
 	}
 
-	appendServiceTierChange(serviceTier: ServiceTierByFamily | null): string {
-		const entry: ServiceTierChangeEntry = { type: "service_tier_change", ...this.#freshEntryFields(), serviceTier };
+	appendServiceTierChange(serviceTier: ServiceTierByFamily | null, serviceTierModels: ServiceTierByModel): string {
+		const entry: ServiceTierChangeEntry = {
+			type: "service_tier_change",
+			...this.#freshEntryFields(),
+			serviceTier,
+			serviceTierModels,
+		};
 		this.#recordEntry(entry);
 		return entry.id;
 	}

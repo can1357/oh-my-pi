@@ -74,7 +74,7 @@ describe("--service-tier", () => {
 		const authStorage = await AuthStorage.create(":memory:");
 		const sessionFile = path.join(tempDir.path(), "session.jsonl");
 		const seededManager = await SessionManager.open(sessionFile, tempDir.path());
-		seededManager.appendServiceTierChange({ openai: "priority", anthropic: "priority", google: "flex" });
+		seededManager.appendServiceTierChange({ openai: "priority", anthropic: "priority", google: "flex" }, {});
 		await seededManager.flush();
 		await seededManager.close();
 		try {

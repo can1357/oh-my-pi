@@ -26,6 +26,7 @@ import {
 	resolveModelRoleValue,
 } from "../config/model-resolver";
 import { getKnownRoleIds } from "../config/model-roles";
+import { type ServiceTierByModel, serviceTierModelKey } from "../config/service-tier";
 import type { Settings } from "../config/settings";
 import { containsMagicKeyword } from "@oh-my-pi/pi-tui/prompt/magic-keywords";
 import type { MagicKeywordId } from "../modes/magic-keywords";
@@ -80,6 +81,7 @@ export class ModelControls {
 	#autoThinking = false;
 	#autoResolvedLevel: Effort | undefined;
 	#serviceTierByFamily: ServiceTierByFamily;
+	#serviceTierByModel: ServiceTierByModel;
 
 	constructor(
 		host: ModelControlsHost,
@@ -88,11 +90,13 @@ export class ModelControls {
 			thinkingLevel?: ConfiguredThinkingLevel;
 			thinkingLevelCeiling?: Effort;
 			serviceTierByFamily?: ServiceTierByFamily;
+			serviceTierByModel?: ServiceTierByModel;
 		},
 	) {
 		this.#host = host;
 		this.#scopedModels = options.scopedModels ?? [];
 		this.#serviceTierByFamily = options.serviceTierByFamily ?? {};
+		this.#serviceTierByModel = options.serviceTierByModel ?? {};
 		this.#thinkingLevelCeiling = options.thinkingLevelCeiling;
 		if (options.thinkingLevel === AUTO_THINKING) {
 			// Keep auto pending until the first turn while exposing a valid wire effort.
@@ -163,6 +167,11 @@ export class ModelControls {
 		return this.#serviceTierByFamily;
 	}
 
+	/** Live per-model service-tier selections (`"none"` = explicitly no tier). */
+	get serviceTierByModel(): ServiceTierByModel {
+		return this.#serviceTierByModel;
+	}
+
 	/** Restores thinking state from a transcript without persisting a new entry. */
 	restoreThinkingLevel(level: ConfiguredThinkingLevel | undefined): void {
 		this.#autoThinking = level === AUTO_THINKING;
@@ -190,8 +199,9 @@ export class ModelControls {
 	}
 
 	/** Restores service tiers without persisting a duplicate transcript entry. */
-	restoreServiceTiers(tiers: ServiceTierByFamily): void {
+	restoreServiceTiers(tiers: ServiceTierByFamily, models: ServiceTierByModel = {}): void {
 		this.#serviceTierByFamily = tiers;
+		this.#serviceTierByModel = models;
 	}
 	resolveRoleModel(role: string): Model | undefined {
 		return resolveRoleModelFull(this.#host.settings, role, this.#host.modelRegistry.getAvailable(), this.#model)
@@ -686,28 +696,28 @@ export class ModelControls {
 	}
 
 	/**
-	 * True when the currently selected model's family is set to a fast tier —
+	 * True when the currently selected model resolves to a fast tier —
 	 * `priority`, or `ultrafast` on the OpenAI family — the `/fast` on/off state
-	 * for the active model. Returns false when no model is selected or the
-	 * model exposes no service-tier family (e.g. Fireworks, which has its own
-	 * Providers › Fireworks Tier toggle).
+	 * for the active model. Reads the effective selection, so a
+	 * `tier.modelOverrides` pin counts. Returns false when no model is selected
+	 * or the model exposes no service-tier family (e.g. Fireworks, which has its
+	 * own Providers › Fireworks Tier toggle).
 	 *
 	 * For "is a fast tier actually applied to the next request?" use
 	 * {@link isFastModeActive} instead.
 	 */
 	isFastModeEnabled(): boolean {
-		const family = this.#model ? serviceTierFamily(this.#model) : undefined;
-		const tier = family ? this.#serviceTierByFamily[family] : undefined;
+		const model = this.#model;
+		if (!model) return false;
+		const tier = this.#resolveModelTier(model);
 		return tier === "priority" || tier === "ultrafast";
 	}
 
-	/** True when the active model's OpenAI family is set to `ultrafast` (`/fast ultra`). */
+	/** True when the active model's effective OpenAI tier is `ultrafast` (`/fast ultra`). */
 	isUltrafastModeEnabled(): boolean {
 		const model = this.#model;
 		return (
-			model !== undefined &&
-			serviceTierFamily(model) === "openai" &&
-			this.#serviceTierByFamily.openai === "ultrafast"
+			model !== undefined && serviceTierFamily(model) === "openai" && this.#resolveModelTier(model) === "ultrafast"
 		);
 	}
 
@@ -734,8 +744,8 @@ export class ModelControls {
 	 * Effective wire service-tier for a request to `model`. Fireworks models take
 	 * the Priority serving path only when the Providers › Fireworks Tier setting
 	 * is `"priority"` (and never for `-fast` variants, whose Fast serving path is
-	 * mutually exclusive with Priority). Every other model resolves the live
-	 * per-family tier map down to the entry for its family.
+	 * mutually exclusive with Priority). Every other model resolves its exact
+	 * per-model selection first, then the live per-family tier map.
 	 */
 	effectiveServiceTier(model: Model | undefined = this.#model): ServiceTier | undefined {
 		if (model?.provider === "fireworks") {
@@ -744,6 +754,17 @@ export class ModelControls {
 				: undefined;
 		}
 		if (!model) return undefined;
+		return this.#resolveModelTier(model);
+	}
+
+	/**
+	 * The session's tier for `model`: an exact per-model entry wins over the
+	 * model's family entry, and a `"none"` entry is an explicit "no tier" that
+	 * stops the chain instead of falling through to the family.
+	 */
+	#resolveModelTier(model: Model): ServiceTier | undefined {
+		const entry = this.#serviceTierByModel[serviceTierModelKey(model)];
+		if (entry !== undefined) return entry === "none" ? undefined : entry;
 		return resolveModelServiceTier(this.#serviceTierByFamily, model);
 	}
 
@@ -761,6 +782,25 @@ export class ModelControls {
 		this.#applyServiceTierByFamily(next);
 	}
 
+	/** Set one model's tier (`"none"` = explicitly no tier); persists the change. */
+	setServiceTierForModel(modelKey: string, tier: ServiceTier | "none"): void {
+		if (this.#serviceTierByModel[modelKey] === tier) return;
+		this.#applyServiceTierByModel({ ...this.#serviceTierByModel, [modelKey]: tier });
+	}
+
+	/** Replace the whole per-model tier map (config reload); persists the change. */
+	setServiceTierModels(models: ServiceTierByModel): void {
+		const next: ServiceTierByModel = { ...models };
+		const currentKeys = Object.keys(this.#serviceTierByModel);
+		if (
+			currentKeys.length === Object.keys(next).length &&
+			currentKeys.every(key => this.#serviceTierByModel[key] === next[key])
+		) {
+			return;
+		}
+		this.#applyServiceTierByModel(next);
+	}
+
 	/** Replace the whole per-family tier map; persists + re-arms Anthropic fast mode. */
 	#applyServiceTierByFamily(next: ServiceTierByFamily): void {
 		// Re-arming Anthropic priority clears the per-session fast-mode auto-disable
@@ -769,16 +809,30 @@ export class ModelControls {
 			clearAnthropicFastModeFallback(this.#host.providerSessionState);
 		}
 		this.#serviceTierByFamily = next;
-		this.#host.sessionManager.appendServiceTierChange(this.serviceTierEntry());
+		this.#host.sessionManager.appendServiceTierChange(this.serviceTierEntry(), this.#serviceTierByModel);
+	}
+
+	/** Replace the whole per-model tier map; persists + re-arms Anthropic fast mode. */
+	#applyServiceTierByModel(next: ServiceTierByModel): void {
+		// Re-arming Anthropic priority clears the per-session fast-mode auto-disable
+		// so the next request actually carries `speed: "fast"` again. The map is
+		// keyed by model, so a transition into `priority` anywhere in it re-arms;
+		// clearing while no priority is selected is a no-op.
+		if (Object.values(next).includes("priority") && !Object.values(this.#serviceTierByModel).includes("priority")) {
+			clearAnthropicFastModeFallback(this.#host.providerSessionState);
+		}
+		this.#serviceTierByModel = next;
+		this.#host.sessionManager.appendServiceTierChange(this.serviceTierEntry(), this.#serviceTierByModel);
 	}
 
 	/**
-	 * `/fast on|off` targets the family of the currently selected model: it sets
-	 * (or clears) that family's `priority` tier. `off` also clears `ultrafast`.
-	 * Returns `false` when the model has no service-tier family, or when it is an
-	 * OpenAI-family model that cannot take `priority` (a Codex model whose
-	 * discovered tier list omits it), so callers can report that fast mode is
-	 * unavailable instead of claiming success.
+	 * `/fast on|off` targets the active model's most specific tier selection: a
+	 * model with a `tier.modelOverrides` pin (or an existing per-model entry)
+	 * gets a session-scoped model entry, every other model its family entry.
+	 * `off` also clears `ultrafast`. Returns `false` when the model has no
+	 * service-tier family, or when it is an OpenAI-family model that cannot take
+	 * `priority` (a Codex model whose discovered tier list omits it), so callers
+	 * can report that fast mode is unavailable instead of claiming success.
 	 */
 	setFastMode(enabled: boolean): boolean {
 		const model = this.#model;
@@ -791,9 +845,14 @@ export class ModelControls {
 			);
 			return false;
 		}
+		const modelKey = serviceTierModelKey(model);
+		const hasModelSelection = modelKey in this.#serviceTierByModel;
 		if (!enabled) {
-			const tier = this.#serviceTierByFamily[family];
-			if (tier === "priority" || tier === "ultrafast") this.setServiceTierFamily(family, undefined);
+			if (hasModelSelection) this.setServiceTierForModel(modelKey, "none");
+			else {
+				const tier = this.#serviceTierByFamily[family];
+				if (tier === "priority" || tier === "ultrafast") this.setServiceTierFamily(family, undefined);
+			}
 			return true;
 		}
 		if (family === "openai" && !shouldSendServiceTier("priority", model)) {
@@ -804,30 +863,47 @@ export class ModelControls {
 			);
 			return false;
 		}
-		if (family === "anthropic" && this.#serviceTierByFamily.anthropic === "priority") {
+		if (family === "anthropic") {
+			// Re-arming Anthropic priority clears the per-session fast-mode
+			// auto-disable so the next request carries `speed: "fast"` again.
+			// Unconditional: the transition into priority re-arms here too, and
+			// clearing while priority is not selected is a no-op.
 			clearAnthropicFastModeFallback(this.#host.providerSessionState);
 		}
-		this.setServiceTierFamily(family, "priority");
+		if (hasModelSelection) this.setServiceTierForModel(modelKey, "priority");
+		else this.setServiceTierFamily(family, "priority");
 		return true;
 	}
 
 	/**
-	 * `/fast ultra` sets the OpenAI family to `ultrafast`. Enabling requires the
-	 * active model to realize it (first-party OpenAI, or a Codex model whose
-	 * discovery advertises the tier); otherwise the tier is left unchanged and
-	 * `false` is returned. Disabling clears only an `ultrafast` selection.
+	 * `/fast ultra` sets the active model's most specific selection to
+	 * `ultrafast` — a per-model entry when one exists, else the OpenAI family.
+	 * Enabling requires the active model to realize it (first-party OpenAI, or a
+	 * Codex model whose discovery advertises the tier); otherwise the tier is
+	 * left unchanged and `false` is returned. Disabling clears an `ultrafast`
+	 * selection in the active model's most specific slot — its own entry when one
+	 * exists, else the OpenAI family.
 	 */
 	setUltrafastMode(enabled: boolean): boolean {
 		const model = this.#model;
+		const modelKey = model ? serviceTierModelKey(model) : undefined;
 		if (!enabled) {
-			if (this.#serviceTierByFamily.openai === "ultrafast") this.setServiceTierFamily("openai", undefined);
+			if (modelKey !== undefined && modelKey in this.#serviceTierByModel) {
+				if (this.#serviceTierByModel[modelKey] === "ultrafast") this.setServiceTierForModel(modelKey, "none");
+			} else if (this.#serviceTierByFamily.openai === "ultrafast") {
+				this.setServiceTierFamily("openai", undefined);
+			}
 			return true;
 		}
 		if (!model || serviceTierFamily(model) !== "openai" || !shouldSendServiceTier("ultrafast", model)) {
 			this.#host.emitNotice("info", "The current model does not offer the Ultrafast service tier.", "priority");
 			return false;
 		}
-		this.setServiceTierFamily("openai", "ultrafast");
+		if (modelKey !== undefined && modelKey in this.#serviceTierByModel) {
+			this.setServiceTierForModel(modelKey, "ultrafast");
+		} else {
+			this.setServiceTierFamily("openai", "ultrafast");
+		}
 		return true;
 	}
 

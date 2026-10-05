@@ -26,6 +26,7 @@ import type { EffectiveExtensionRoots } from "../capability/types";
 import type { AgentDefinition } from "../task/types";
 import type { ModelRegistry } from "../config/model-registry";
 import type { PromptTemplate } from "../config/prompt-templates";
+import type { ServiceTierByModel } from "../config/service-tier";
 import type { Settings } from "../config/settings";
 import type { SkillsSettings } from "../extensibility/settings";
 import type { CursorMcpResourceAdapter } from "../cursor";
@@ -203,6 +204,8 @@ export interface AgentSessionConfig {
 	planYolo?: PlanYolo;
 	/** Initial per-family service tiers for the live session. */
 	serviceTierByFamily?: ServiceTierByFamily;
+	/** Initial per-model service tiers for the live session (`"none"` = explicitly no tier). */
+	serviceTierByModel?: ServiceTierByModel;
 	/** Prompt templates for expansion. */
 	promptTemplates?: PromptTemplate[];
 	/** File-based slash commands for expansion. */
