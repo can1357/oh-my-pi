@@ -725,6 +725,19 @@ export const cfgRetryModelFallback = register({
 	},
 });
 
+export const cfgRetryCompactBeforeFallback = register({
+	id: "retry.compactBeforeFallback",
+	type: "boolean",
+	default: false,
+	ui: {
+		tab: "model",
+		group: "Retry & Fallback",
+		label: "Compact Before Smaller Fallback",
+		description:
+			"Compact once before a smaller-window fallback or a smaller primary restore, then switch to the next model the conversation fits. Off skips undersized forward fallbacks; reverts still use normal pre-prompt maintenance. Requires compaction.enabled.",
+	},
+});
+
 export const cfgRetryUsageAwareFallback = register({
 	id: "retry.usageAwareFallback",
 	type: "boolean",

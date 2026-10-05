@@ -1648,6 +1648,8 @@ export class AgentSession implements SettingsScope {
 				this.#maintenance.runAutoCompaction(reason, willRetry, options),
 			shakeForRequestBodyReadTimeout: generation => this.#maintenance.shakeForRequestBodyReadTimeout(generation),
 			withBashBranchTransition: operation => this.#bash.withBranchTransition(operation),
+			compactForTargetModel: (target, excludedMessage) =>
+				this.#maintenance.compactForTargetModel(target, excludedMessage),
 		};
 		this.#fallbackChainValidationDeferred = config.deferRetryFallbackValidation === true;
 		this.#recovery = new TurnRecovery(recoveryHost, {
@@ -4336,6 +4338,8 @@ export class AgentSession implements SettingsScope {
 			// the revert via runPrePromptCompactionIfNeeded; the auto-continue
 			// path must do the same so agent.continue() never sends a
 			// predictably oversized request to the reverted (smaller) model.
+			// Opt-in compact-before-fallback already fitted the primary before
+			// the swap; this pass still covers the default revert path.
 			if (reverted) {
 				await this.#maintenance.runPrePromptCompactionIfNeeded([]);
 				if (signal.aborted || this.#isDisposed) {
@@ -7454,6 +7458,7 @@ export class AgentSession implements SettingsScope {
 		try {
 			options?.onPromptAdmitted?.();
 			await this.#recovery.maybeRestoreRetryFallbackPrimary();
+			if (this.#promptGeneration !== generation) return false;
 			if (!(await this.#runUsageAwarePreflightForNextModelCall())) return false;
 			// Flush any pending bash messages before the new prompt
 			await this.#bash.flushPending();
