@@ -2230,6 +2230,7 @@ async function streamAssistantResponse(
 								throw new HarmonyLeakInterruption(detection, removed, recovered);
 							}
 						}
+						if (partialMessage) inheritAssistantMessageIdentity(partialMessage, finalMessage);
 						finalMessage = snapshotAssistantMessage(finalMessage);
 						// Unhealed DSML tool-call markup must never reach history: replaying
 						// it teaches the model to keep writing calls as text (#10556). Strip
@@ -2354,6 +2355,9 @@ async function streamAssistantResponse(
 
 					switch (event.type) {
 						case "start":
+							if (addedPartial && partialMessage) {
+								inheritAssistantMessageIdentity(partialMessage, event.partial);
+							}
 							partialMessage = event.partial;
 							if (addedPartial) {
 								context.messages[context.messages.length - 1] = partialMessage;
@@ -2531,6 +2535,7 @@ async function streamAssistantResponse(
 				if (config.transformAssistantMessage) {
 					await config.transformAssistantMessage(trailing, requestSignal);
 				}
+				if (partialMessage) inheritAssistantMessageIdentity(partialMessage, trailing);
 				trailing = snapshotAssistantMessage(trailing);
 				const finalToolCallsCanDispatch =
 					!requestSignal?.aborted &&

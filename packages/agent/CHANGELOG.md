@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed streamed assistant replies receiving different identities at message start and end when the provider restarts the stream or returns a separate final message ([#14401](https://github.com/can1357/oh-my-pi/pull/14401) by [@shawnkoh](https://github.com/shawnkoh)).
+
 ## [18.6.1] - 2026-10-04
 
 ### Fixed

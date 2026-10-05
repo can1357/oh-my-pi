@@ -55,10 +55,10 @@ describe("sessionMessagePersistenceKey", () => {
 	test("compaction distinguishes emissions but recognizes a display snapshot", () => {
 		const first = assistant();
 		const firstKey = sessionMessagePersistenceKey(first)!;
-		const display = inheritAssistantMessageIdentity(first, {
-			...first,
-			content: [{ type: "text" as const, text: "display variant" }],
-		});
+		const display = inheritAssistantMessageIdentity(
+			first,
+			assistant({ ...first, content: [{ type: "text", text: "display variant" }] }),
+		);
 		const second = assistant();
 		expect(
 			planTurnPersistence(

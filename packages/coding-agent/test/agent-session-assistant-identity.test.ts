@@ -15,7 +15,7 @@ import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
-import { FileSessionStorage } from "@oh-my-pi/pi-coding-agent/session/session-storage";
+import { FileSessionStorage, type WriteTextAtomicOptions } from "@oh-my-pi/pi-coding-agent/session/session-storage";
 import { planTurnPersistence, sessionMessagePersistenceKey } from "@oh-my-pi/pi-coding-agent/session/turn-persistence";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { TempDir } from "@oh-my-pi/pi-utils";
@@ -161,14 +161,14 @@ test("atomic rollback with a surviving leaf permits the removed assistant to ret
 	const release = Promise.withResolvers<void>();
 	let fail = false;
 	class GatedStorage extends FileSessionStorage {
-		override async writeTextAtomic(...args: Parameters<FileSessionStorage["writeTextAtomic"]>): Promise<void> {
+		override async writeTextAtomic(path: string, content: string, options?: WriteTextAtomicOptions): Promise<void> {
 			if (fail) {
 				fail = false;
 				started.resolve();
 				await release.promise;
 				throw new Error("injected atomic publication failure");
 			}
-			return super.writeTextAtomic(...args);
+			return super.writeTextAtomic(path, content, options);
 		}
 	}
 	const { agent, session, manager, turns } = await harness(false, undefined, new GatedStorage());
@@ -268,6 +268,20 @@ test("no-op context extensions retain history and the Anthropic assistant cache 
 		maxTokens: 8192,
 	});
 	let body: MessageCreateParams | undefined;
+	const captureFetch: typeof fetch = Object.assign(
+		async (_input: string | URL | Request, init?: RequestInit) => {
+			const captured: MessageCreateParams = JSON.parse(String(init?.body));
+			body = captured;
+			return new Response(
+				JSON.stringify({
+					type: "error",
+					error: { type: "invalid_request_error", message: "fixture capture" },
+				}),
+				{ status: 400, headers: { "Content-Type": "application/json" } },
+			);
+		},
+		{ preconnect: fetch.preconnect },
+	);
 	await streamAnthropic(
 		model,
 		{
@@ -276,16 +290,7 @@ test("no-op context extensions retain history and the Anthropic assistant cache 
 		{
 			apiKey: "sk-ant-api-test",
 			cacheRetention: "short",
-			fetch: (async (_input: string | URL | Request, init?: RequestInit) => {
-				body = JSON.parse(String(init?.body)) as MessageCreateParams;
-				return new Response(
-					JSON.stringify({
-						type: "error",
-						error: { type: "invalid_request_error", message: "fixture capture" },
-					}),
-					{ status: 400, headers: { "Content-Type": "application/json" } },
-				);
-			}) as typeof fetch,
+			fetch: captureFetch,
 		},
 	).result();
 	expect(body).toBeDefined();
