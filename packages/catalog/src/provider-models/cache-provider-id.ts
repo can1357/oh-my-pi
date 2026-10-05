@@ -49,7 +49,7 @@ export function getDefaultModelDiscoveryBaseUrl(providerId: string): string | un
 		case "opencode-zen":
 			return "https://opencode.ai/zen/v1";
 		case "vllm":
-			return "http://127.0.0.1:8000/v1";
+			return Bun.env.VLLM_BASE_URL?.trim() || "http://127.0.0.1:8000/v1";
 		default:
 			return undefined;
 	}

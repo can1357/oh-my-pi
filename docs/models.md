@@ -1047,6 +1047,8 @@ providers:
     auth: none
 ```
 
+Without a `models.yml` entry, `VLLM_BASE_URL` sets the same endpoint; an explicit `baseUrl` takes precedence.
+
 For multiple vLLM endpoints, use arbitrary provider IDs with the generic OpenAI-compatible discovery path. Set `auth: none` for local no-auth servers or `apiKey` for authenticated ones. Generic discovery reads `max_model_len` first and then `context_length` as a generic OpenAI-compatible fallback.
 
 ```yaml

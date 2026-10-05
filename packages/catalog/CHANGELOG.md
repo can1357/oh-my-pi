@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `VLLM_BASE_URL` to point the vLLM provider at a server other than `http://127.0.0.1:8000/v1`, such as a different port or a remote host ([#14383](https://github.com/can1357/oh-my-pi/pull/14383) by [@Dollarhyde](https://github.com/Dollarhyde)).
+
 ## [18.6.2] - 2026-10-04
 
 ### Fixed

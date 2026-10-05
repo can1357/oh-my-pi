@@ -1822,12 +1822,12 @@ Provider-specific overrides in `packages/catalog/src/compat/rules/providers/vllm
 
 ### Auth & usage
 - **Credential Resolution & Defaults**: Declared in `packages/catalog/src/compat/rules/auth/vllm.kdl` as a `login "api-key"` rule (`packages/ai/src/registry/engine/api-key.ts`). Reads optional API keys from the `VLLM_API_KEY` environment variable or credentials stored via `omp auth-broker login vllm`.
-- **Unauthenticated Local Mode**: Defaults to base URL `http://127.0.0.1:8000/v1` and placeholder token `"vllm-local"` (`DEFAULT_LOCAL_TOKEN`) when no key is supplied (`emptyKeyFallback: "vllm-local"`). Descriptor settings specify `catalogDiscovery: { label: "vLLM", allowUnauthenticated: true }`.
+- **Unauthenticated Local Mode**: Defaults to base URL `http://127.0.0.1:8000/v1` (override with `VLLM_BASE_URL`) and placeholder token `"vllm-local"` (`DEFAULT_LOCAL_TOKEN`) when no key is supplied (`emptyKeyFallback: "vllm-local"`). Descriptor settings specify `catalogDiscovery: { label: "vLLM", allowUnauthenticated: true }`.
 - **Documentation & Endpoint Setup**: The login helper points to `https://docs.vllm.ai/en/latest/serving/openai_compatible_server.html` for configuring local vLLM OpenAI-compatible server endpoints.
 
 ### Catalog model handling
 - **Provider entry (`vllm`)**: `packages/catalog/src/compat/rules/providers/vllm.kdl` declares default model `gpt-oss-20b`. Environment keys: `VLLM_API_KEY`.
-- **Dynamic Model Discovery**: `vllmModelManagerOptions` (`packages/catalog/src/provider-models/openai-compat.ts`) invokes `fetchOpenAICompatibleModels` with `api: "openai-completions"`, `provider: "vllm"`, base URL `config?.baseUrl ?? getDefaultModelDiscoveryBaseUrl("vllm")!` (`http://127.0.0.1:8000/v1`), and a 10-second timeout (`VLLM_DISCOVERY_TIMEOUT_MS = 10_000`).
+- **Dynamic Model Discovery**: `vllmModelManagerOptions` (`packages/catalog/src/provider-models/openai-compat.ts`) invokes `fetchOpenAICompatibleModels` with `api: "openai-completions"`, `provider: "vllm"`, base URL `config?.baseUrl ?? getDefaultModelDiscoveryBaseUrl("vllm")!` (`VLLM_BASE_URL`, else `http://127.0.0.1:8000/v1`), and a 10-second timeout (`VLLM_DISCOVERY_TIMEOUT_MS = 10_000`).
 - **Context Window Extraction**: Custom `mapModel` in `vllmModelManagerOptions` extracts `contextWindow` from vLLM's non-standard `/v1/models` response field `entry.max_model_len` using `toPositiveNumber(entry.max_model_len, model.contextWindow)`.
 - **Cache Provider ID**: Resolved by `resolveModelCacheProviderId("vllm", { baseUrl })` in `packages/catalog/src/provider-models/cache-provider-id.ts` (using `getDefaultModelDiscoveryBaseUrl("vllm")`), generating base-URL-hashed cache keys formatted as `vllm:${Bun.hash(baseUrl).toString(36)}`.
 
