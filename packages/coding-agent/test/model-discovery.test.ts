@@ -2635,6 +2635,151 @@ describe("ModelRegistry runtime discovery", () => {
 		expect(legacyReference?.maxTokens).toBe(128_000);
 	});
 
+	test("openai-models-list discovery honors a top-level max_tokens output limit", async () => {
+		// A gateway that publishes a plain `max_tokens` on its `/v1/models` rows
+		// had the value discarded, so the row fell back to the 32K discovery
+		// default even though the provider advertised a higher output ceiling
+		// (#13062). Unlike llama.cpp, where a positive `max_tokens` is a per-request
+		// default the client may raise, a `/v1/models` row is a catalog entry
+		// declaring what the endpoint accepts, so the value is a cap here.
+		const ctx = {
+			fetch: (async (input: unknown) => {
+				if (String(input) !== "http://127.0.0.1:9993/v1/models") {
+					throw new Error(`Unexpected URL: ${String(input)}`);
+				}
+				return new Response(
+					JSON.stringify({
+						data: [
+							{ id: "openai-test/advertised-output-limit", max_tokens: 65_536 },
+							{
+								id: "openai-test/advertised-output-and-context",
+								context_length: 1_048_576,
+								max_tokens: 65_536,
+							},
+							// `limits.max_output_tokens` is the explicit output
+							// field, so it outranks the flat `max_tokens` the same
+							// way `max_output_length ?? entry.max_tokens` does in the
+							// Synthetic catalog mapper.
+							{
+								id: "openai-test/nested-output-wins",
+								max_tokens: 65_536,
+								limits: { max_input_tokens: 131_072, max_output_tokens: 32_768 },
+							},
+							// Advertised above the context window: the cap keeps
+							// following the provider value, bounded by the context.
+							{ id: "openai-test/output-over-context", context_length: 8_192, max_tokens: 65_536 },
+							{ id: "openai-test/no-limits" },
+						],
+					}),
+					{ status: 200, headers: { "Content-Type": "application/json" } },
+				);
+			}) satisfies FetchImpl,
+			getBearerApiKeyResolver: async () => undefined,
+		};
+		const models = await discoverOpenAIModelsList(
+			{
+				provider: "openai-test",
+				api: "openai-completions",
+				baseUrl: "http://127.0.0.1:9993/v1",
+				discovery: { type: "openai-models-list" },
+			},
+			ctx,
+		);
+		const maxTokensById: Record<string, number | null> = {};
+		for (const model of models) maxTokensById[model.id] = model.maxTokens;
+
+		expect(maxTokensById["openai-test/advertised-output-limit"]).toBe(65_536);
+		const withContext = models.find(model => model.id === "openai-test/advertised-output-and-context");
+		expect(withContext?.contextWindow).toBe(1_048_576);
+		expect(withContext?.maxTokens).toBe(65_536);
+		expect(maxTokensById["openai-test/nested-output-wins"]).toBe(32_768);
+		expect(maxTokensById["openai-test/output-over-context"]).toBe(8_192);
+		expect(maxTokensById["openai-test/no-limits"]).toBe(32_768);
+	});
+
+	// Runs one `/v1/models` payload through the real `openai-models-list`
+	// discovery path and returns the output cap each row ended up with, so the
+	// precedence assertions below observe the boundary a user sees rather than
+	// an internal helper.
+	async function discoverOutputLimits(data: Array<Record<string, unknown>>): Promise<Record<string, number | null>> {
+		const ctx = {
+			fetch: (async (input: unknown) => {
+				if (String(input) !== "http://127.0.0.1:9993/v1/models") {
+					throw new Error(`Unexpected URL: ${String(input)}`);
+				}
+				return new Response(JSON.stringify({ data }), {
+					status: 200,
+					headers: { "Content-Type": "application/json" },
+				});
+			}) satisfies FetchImpl,
+			getBearerApiKeyResolver: async () => undefined,
+		};
+		const models = await discoverOpenAIModelsList(
+			{
+				provider: "openai-test",
+				api: "openai-completions",
+				baseUrl: "http://127.0.0.1:9993/v1",
+				discovery: { type: "openai-models-list" },
+			},
+			ctx,
+		);
+		const maxTokensById: Record<string, number | null> = {};
+		for (const model of models) maxTokensById[model.id] = model.maxTokens;
+		return maxTokensById;
+	}
+
+	test("openai-models-list falls back to a usable flat max_tokens when the nested output limit is unusable", async () => {
+		// An invalid nested output limit must not suppress a valid flat
+		// `max_tokens`. `1.5` and `1e30` pass the positive-number check and then
+		// fail the safe-integer check; when that second check ran on the merged
+		// candidate instead of on each field, the merged value collapsed to
+		// `undefined` and the row fell back to the 32K discovery default even
+		// though a valid flat `max_tokens` sat on the same row (#13062).
+		const maxTokensById = await discoverOutputLimits([
+			{ id: "openai-test/fraction-nested", max_tokens: 65_536, limits: { max_output_tokens: 1.5 } },
+			{ id: "openai-test/unsafe-integer-nested", max_tokens: 65_536, limits: { max_output_tokens: 1e30 } },
+			{ id: "openai-test/zero-nested", max_tokens: 65_536, limits: { max_output_tokens: 0 } },
+			{ id: "openai-test/negative-nested", max_tokens: 65_536, limits: { max_output_tokens: -1 } },
+			{ id: "openai-test/text-nested", max_tokens: 65_536, limits: { max_output_tokens: "not-a-number" } },
+			{ id: "openai-test/null-nested", max_tokens: 65_536, limits: { max_output_tokens: null } },
+			{ id: "openai-test/array-nested", max_tokens: 65_536, limits: { max_output_tokens: [65_536] } },
+		]);
+
+		expect(maxTokensById["openai-test/fraction-nested"]).toBe(65_536);
+		expect(maxTokensById["openai-test/unsafe-integer-nested"]).toBe(65_536);
+		expect(maxTokensById["openai-test/zero-nested"]).toBe(65_536);
+		expect(maxTokensById["openai-test/negative-nested"]).toBe(65_536);
+		expect(maxTokensById["openai-test/text-nested"]).toBe(65_536);
+		expect(maxTokensById["openai-test/null-nested"]).toBe(65_536);
+		expect(maxTokensById["openai-test/array-nested"]).toBe(65_536);
+	});
+
+	test("openai-models-list keeps a usable nested output limit when the flat max_tokens is unusable", async () => {
+		// The mirror of the case above, so the rule is stated once and reads the
+		// same in both directions: each field is reduced to a usable output limit
+		// on its own, then `limits.max_output_tokens` outranks the flat
+		// `max_tokens` among the fields that survive. Precedence follows validity,
+		// not presence and not field order, so an unusable flat field cannot
+		// promote itself over a nested one that is fine.
+		const maxTokensById = await discoverOutputLimits([
+			{ id: "openai-test/invalid-flat", max_tokens: "not-a-number", limits: { max_output_tokens: 32_768 } },
+			{ id: "openai-test/fraction-flat", max_tokens: 1.5, limits: { max_output_tokens: 32_768 } },
+			{ id: "openai-test/zero-flat", max_tokens: 0, limits: { max_output_tokens: 32_768 } },
+			{ id: "openai-test/absent-flat", limits: { max_output_tokens: 32_768 } },
+			// Both usable: the explicit nested field still outranks the flat one.
+			{ id: "openai-test/both-usable", max_tokens: 65_536, limits: { max_output_tokens: 32_768 } },
+			// Neither usable: the 32K discovery default, unchanged.
+			{ id: "openai-test/neither-usable", max_tokens: 1.5, limits: { max_output_tokens: 2.5 } },
+		]);
+
+		expect(maxTokensById["openai-test/invalid-flat"]).toBe(32_768);
+		expect(maxTokensById["openai-test/fraction-flat"]).toBe(32_768);
+		expect(maxTokensById["openai-test/zero-flat"]).toBe(32_768);
+		expect(maxTokensById["openai-test/absent-flat"]).toBe(32_768);
+		expect(maxTokensById["openai-test/both-usable"]).toBe(32_768);
+		expect(maxTokensById["openai-test/neither-usable"]).toBe(32_768);
+	});
+
 	test("openai-models-list discovery enriches thin /v1/models payloads from the bundled reference catalog", async () => {
 		writeRawModelsJson({
 			"openai-test": {

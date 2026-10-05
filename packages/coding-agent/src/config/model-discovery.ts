@@ -902,6 +902,7 @@ export async function discoverOpenAIModelsList(
 						id?: string;
 						max_model_len?: unknown;
 						context_length?: unknown;
+						max_tokens?: unknown;
 						limits?: unknown;
 						input?: unknown;
 						input_modalities?: unknown;
@@ -953,8 +954,26 @@ export async function discoverOpenAIModelsList(
 			Number.isSafeInteger(maxInputTokens + maxOutputTokens)
 				? maxInputTokens + maxOutputTokens
 				: undefined;
-		const reportedMaxTokens =
-			maxOutputTokens !== undefined && Number.isSafeInteger(maxOutputTokens) ? maxOutputTokens : undefined;
+		// Gateways advertise the per-request output cap under several names, and
+		// none of them is trustworthy in isolation: `limits.max_output_tokens` is
+		// the explicit spelling and the flat `max_tokens` is the generic one. An
+		// OpenAI-compatible `/v1/models` row is a catalog entry declaring what the
+		// endpoint will accept, so a usable flat value is worth honoring
+		// (#13062). Note this is deliberately NOT the llama.cpp rule: that
+		// protocol reads a positive `max_tokens` as a per-request default the
+		// client may raise and honors only the `-1` unlimited sentinel, whereas
+		// here the value is a cap. Reduce each field to a usable output limit on
+		// its own, then let the explicit nested field outrank the flat one among
+		// the fields that survive. A field that is present but unusable (`"nope"`,
+		// `0`, `-1`, `1.5`, `1e30`) is ignored rather than allowed to swallow a
+		// sibling field that is fine, because falling through to the 32K default
+		// there would be worse than reading the field the provider got right.
+		const asOutputLimit = (value: unknown): number | undefined => {
+			const parsed = toPositiveNumberOrUndefined(value);
+			return parsed !== undefined && Number.isSafeInteger(parsed) ? parsed : undefined;
+		};
+		const advertisedMaxTokens = asOutputLimit(item.max_tokens);
+		const reportedMaxTokens = asOutputLimit(limits?.max_output_tokens) ?? advertisedMaxTokens;
 		const reportedContextWindow =
 			toPositiveNumberOrUndefined(item.max_model_len) ??
 			toPositiveNumberOrUndefined(item.context_length) ??
