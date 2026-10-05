@@ -18,6 +18,7 @@ import { applyHyperlinkSetting } from "@oh-my-pi/pi-tui/render/hyperlink";
 import { setInlineImageMaxColumns, setInlineImageMaxRows } from "@oh-my-pi/pi-tui/render/render-utils";
 import { setShimmerMode } from "@oh-my-pi/pi-tui/theme/shimmer";
 import { setAutoThemeMapping, setColorBlindMode, setSymbolPreset } from "@oh-my-pi/pi-tui/theme/theme";
+import { setUserMessageShape } from "@oh-my-pi/pi-tui/chat/user-message";
 
 const EMPTY_UNKNOWN_RECORD: Record<string, unknown> = {};
 
@@ -577,6 +578,25 @@ export const cfgDisplaySubagentLivePreview = register({
 		description: "Show each pinned subagent's current (or most recent) tool call beneath its row",
 	},
 });
+export const cfgDisplayUserMessageShape = register({
+	id: "display.userMessageShape",
+	type: "enum",
+	values: ["block", "box", "plain"] as const,
+	default: "block",
+	ui: {
+		tab: "appearance",
+		group: "Display",
+		label: "User Message Shape",
+		description:
+			"Visual framing for user prompts in the chat transcript: block (padded background fill), box (rounded border frame), or plain (transparent text)",
+		options: [
+			{ value: "block", label: "Block", description: "Padded background fill via userMessageBg" },
+			{ value: "box", label: "Box", description: "Rounded border frame" },
+			{ value: "plain", label: "Plain", description: "Borderless transparent text" },
+		],
+	},
+});
+effect(cfgDisplayUserMessageShape, setUserMessageShape);
 
 export const cfgDisplaySmoothStreaming = register({
 	id: "display.smoothStreaming",

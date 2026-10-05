@@ -332,6 +332,7 @@ import {
 	cfgDisplayPinnedAgents,
 	cfgDisplayShowTokenUsage,
 	cfgDisplayShowTurnTime,
+	cfgDisplayUserMessageShape,
 	cfgDisplaySubagentLivePreview,
 	cfgGitEnabled,
 	cfgLoopConditionTimeoutMs,
@@ -423,6 +424,7 @@ const cfgLiveUiSettings = combine({
 	"display.collapseCompacted": cfgDisplayCollapseCompacted,
 	"display.showTokenUsage": cfgDisplayShowTokenUsage,
 	"display.showTurnTime": cfgDisplayShowTurnTime,
+	"display.userMessageShape": cfgDisplayUserMessageShape,
 	"tui.renderMermaid": cfgTuiRenderMermaid,
 	"tui.textSizing": cfgTuiTextSizing,
 	"tui.tight": cfgTuiTight,
@@ -3508,7 +3510,13 @@ export class InteractiveMode implements InteractiveModeContext {
 		// options are baked in at build time: rebuild, then retire rows already
 		// committed to native scrollback.
 		if (
-			any("display.cacheMissMarker", "display.collapseCompacted", "display.showTokenUsage", "display.showTurnTime")
+			any(
+				"display.cacheMissMarker",
+				"display.collapseCompacted",
+				"display.showTokenUsage",
+				"display.showTurnTime",
+				"display.userMessageShape",
+			)
 		) {
 			rebuildChat = true;
 		}
