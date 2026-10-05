@@ -40,17 +40,13 @@
 ### Fixed
 
 - Muse Code can now store Responses results on Meta's side (`store-responses`), so a turn whose connection drops can be recovered instead of re-run. Storage is opt-in via the omp setting `providers.muse-code.storeResponses` or `PI_MUSE_STORE_RESPONSES=1` ([#14293](https://github.com/can1357/oh-my-pi/pull/14293) and [#14534](https://github.com/can1357/oh-my-pi/pull/14534) by [@abilliontokens](https://github.com/abilliontokens)).
+- Added the Infron provider, an OpenAI-compatible gateway serving GLM, GPT, Claude, Gemini, DeepSeek, and more from `llm.onerouter.pro/v1`: `/login infron` with an API key, `INFRON_API_KEY` env fallback, live chat-model discovery with native pricing and limits, and bundled fallback rows ([#14220](https://github.com/can1357/oh-my-pi/pull/14220) by [@iamshakibali](https://github.com/iamshakibali)).
 
 ## [18.6.2] - 2026-10-04
 
 ### Fixed
 
 - Fixed Google Antigravity listing models the signed-in account cannot use, such as Claude Opus 5.5 and Sonnet 5.5 on plans without them, which failed every request with `404 Requested entity was not found`. After a successful model refresh and on subsequent restarts, only models in the account's own Antigravity model list are offered ([#14328](https://github.com/can1357/oh-my-pi/issues/14328)).
-
-## [18.6.0] - 2026-10-03
-### Added
-
-- Added the Infron provider, an OpenAI-compatible gateway serving GLM, GPT, Claude, Gemini, DeepSeek, and more from `llm.onerouter.pro/v1`: `/login infron` with an API key, `INFRON_API_KEY` env fallback, live chat-model discovery with native pricing and limits, and bundled fallback rows ([#14220](https://github.com/can1357/oh-my-pi/pull/14220) by [@iamshakibali](https://github.com/iamshakibali)).
 
 ## [18.6.0] - 2026-10-03
 
