@@ -111,6 +111,8 @@ The same print form applies to an observation returned by `tab.run(async ({ tab 
 
 On Chromium-backed tabs, a page read, a selector action, `evaluate`, or a wait for page content (`waitFor`, `waitForSelector`, `waitForText`, `waitForUrl`) issued while a navigation the page asked for is on its way (a link or submit button just clicked, a script setting `location`) first waits for the new document to commit and finish parsing, so a click and the read of, or the next step on, the page it loads can share one cell. Raw pointer input (`clickAt`, `wheel`, `mouse*`) and waits for events (`waitForNavigation`, `waitForResponse`, `waitForDownload`) run at once. A request that never starts loading holds a call at most 5 s. A built-in read that loses its document to a navigation mid-call runs once more on the new one; `evaluate` never runs your code twice.
 
+On Chromium tabs, the first `observe()` or `ariaSnapshot()` after an input helper or navigation waits for what the actions since the last look started: the main-frame document, fetch and XHR requests begun since the first of them, then 150 ms without DOM changes. The wait is bounded at 3 seconds, or half the call's own budget when that is shorter, and the page is read as it is after that. A look with no action before it does not wait, a request already open before the action is not waited for, and looks issued together share one wait. The first look after `browser.open` or `goto` counts the requests the page load started.
+
 ### `tab.run(fnOrCode, options?)`
 
 A run accepts either a serialized function or a JavaScript function-body string, plus `{ args?, timeout? }`:

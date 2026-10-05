@@ -12,6 +12,8 @@ export const RESPONSE_BODY_LIMIT_BYTES = 1024 * 1024;
 const ROUTE_INTERCEPT_PRIORITY = 10;
 const PASS_THROUGH_INTERCEPT_PRIORITY = 0;
 const REQUEST_RECORD = Symbol("omp.browser.requestRecord");
+/** Request types a look waits for after an action; long-lived streams and subresources are excluded. */
+const SETTLE_RESOURCE_TYPES: Record<string, true> = { document: true, fetch: true, xhr: true };
 
 /** URL pattern accepted by persistent tab routes and request filters. */
 export type NetworkPattern = string | RegExp;
@@ -358,6 +360,18 @@ export class BrowserNetworkManager {
 	clearRequests(): void {
 		this.#records.length = 0;
 		this.#recordsById.clear();
+	}
+
+	/** Whether a main-frame document, fetch, or XHR request started at or after `since` is still in flight. */
+	hasPendingRequests(since: number): boolean {
+		const mainFrame = this.#page.mainFrame();
+		return this.#records.some(
+			record =>
+				record.ts >= since &&
+				record.durationMs === undefined &&
+				SETTLE_RESOURCE_TYPES[record.resourceType] === true &&
+				(record.resourceType !== "document" || record.request.frame() === mainFrame),
+		);
 	}
 
 	/** Begin collecting subsequent request-log entries for a HAR file. */
