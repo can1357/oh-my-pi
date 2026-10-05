@@ -887,6 +887,19 @@ export const cfgToolsMaxTimeout = register({
 	},
 });
 
+export const cfgToolsThenRun = register({
+	id: "tools.thenRun",
+	type: "boolean",
+	default: false,
+	ui: {
+		tab: "tools",
+		group: "Execution",
+		label: "Action Fusion (then_run)",
+		description:
+			"Let write/edit carry an optional then_run shell command that runs once after the mutation, under its own bash approval",
+	},
+});
+
 // Async jobs. RPC hosts start from the neutral background-job defaults (`protocolDefault`), as do the
 // bash/eval auto-background settings.
 export const cfgAsyncEnabled = register({

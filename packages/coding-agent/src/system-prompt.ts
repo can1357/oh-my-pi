@@ -52,6 +52,7 @@ import { cfgTaskBatch, cfgTaskEager } from "./task/settings";
 import {
 	cfgAsyncEnabled,
 	cfgToolsIntentTracing,
+	cfgToolsThenRun,
 	cfgToolsXdevDocs,
 	cfgToolsXdevInlineDevices,
 	cfgVaultEnabled,
@@ -70,6 +71,8 @@ export const cfgSystemPromptInputs = combine({
 	inlineToolDescriptors: cfgInlineToolDescriptors,
 	toolsFormat: cfgToolsFormat,
 	intentTracing: cfgToolsIntentTracing,
+	// Inlined write/edit descriptors carry the then_run note only while the setting is on.
+	thenRun: cfgToolsThenRun,
 	xdevDocs: cfgToolsXdevDocs,
 	xdevInlineDevices: cfgToolsXdevInlineDevices,
 	vaultEnabled: cfgVaultEnabled,

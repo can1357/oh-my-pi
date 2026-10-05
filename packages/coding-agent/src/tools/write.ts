@@ -36,6 +36,8 @@ import type { ToolSession } from "../sdk";
 
 import { routeWriteThroughBridge, shouldRouteWriteThroughBridge } from "./acp-bridge";
 import { truncateForPrompt } from "./approval";
+import { assertNativeThenRunForbidden, thenRunFieldSchema, thenRunSchemaVariant } from "./action-fusion";
+import { cfgToolsThenRun } from "./settings";
 import { assertEditableFile } from "./auto-generated-guard";
 
 import { isReadTruncationNotice } from "@oh-my-pi/pi-tui/tools/hashline-format";
@@ -194,7 +196,9 @@ async function assertNotReadSelectorMisfire(target: string, content: string, cwd
 const writeSchema = type({
 	path: "string",
 	"content?": "string",
+	"then_run?": thenRunFieldSchema,
 });
+const writeSchemaWithoutThenRun = writeSchema.omit("then_run");
 
 /** Write arguments; `content` may be omitted only where the target scheme's write policy allows it. */
 export type WriteToolInput = typeof writeSchema.infer;
@@ -460,9 +464,13 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 	readonly label = "Write";
 	get description(): string {
 		const deviceOnly = this.session.deviceOnlyWrite === true && this.session.pendingFullWriteDescription !== true;
-		return prompt.render(deviceOnly ? writeDeviceOnlyDescription : writeDescription);
+		return prompt.render(deviceOnly ? writeDeviceOnlyDescription : writeDescription, {
+			thenRun: cfgToolsThenRun.get(this.session.settings),
+		});
 	}
-	readonly parameters = writeSchema;
+	get parameters(): typeof writeSchema {
+		return thenRunSchemaVariant(this.session.settings, writeSchema, writeSchemaWithoutThenRun);
+	}
 	readonly strict = true;
 	readonly concurrency = "exclusive";
 	readonly loadMode = "essential";
@@ -736,11 +744,13 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 
 	async execute(
 		_toolCallId: string,
-		{ path: rawPath, content: rawContent }: WriteParams,
+		params: WriteParams,
 		signal?: AbortSignal,
 		onUpdate?: AgentToolUpdateCallback<WriteToolDetails>,
 		context?: AgentToolContext,
 	): Promise<AgentToolResult<WriteToolDetails>> {
+		assertNativeThenRunForbidden(params);
+		const { path: rawPath, content: rawContent } = params;
 		// Strip a hashline `[path#TAG]` wrapper up front so every downstream
 		// decision (scheme routing, internal-URL handler dispatch, plan-mode
 		// guard, plan path resolution, ACP bridge routing) sees the same

@@ -18,7 +18,8 @@ describe("resolveEditToolDescription", () => {
 
 	test("keeps the full prompt for models without the compact policy", () => {
 		const full = resolveEditToolDescription("hashline", undefined);
-		expect(full).toBe(editDescription("hashline").trimEnd());
+		// Grammar-input modes append a note after the native prompt; the native prompt itself is unchanged.
+		expect(full.startsWith(editDescription("hashline").trimEnd())).toBe(true);
 		// Explicit "full" and an unset policy render identically.
 		expect(resolveEditToolDescription("hashline", { editPromptVariant: "full" })).toBe(full);
 	});
