@@ -1,7 +1,7 @@
 import type { Dirent } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { isEnoent, logger, postmortem } from "@oh-my-pi/pi-utils";
+import { hasFsCode, isEnoent, logger, postmortem } from "@oh-my-pi/pi-utils";
 import {
 	canonicalProjectDir,
 	daemonBrokerEndpoint,
@@ -40,33 +40,37 @@ interface PidRecord {
 	domain?: unknown;
 }
 
-let processDomain: Promise<string | undefined> | undefined;
+let processDomain: Promise<string> | undefined;
 
 /**
  * Identity of the boot and PID namespace this process's pid belongs to (the
  * inputs of the X11 pointer registry's owner domain in `mpx.rs`). A recorded
  * pid means something only inside the domain that wrote it: containers and
  * hosts sharing one state directory each see the others' pids as dead or as
- * unrelated processes. Undefined where procfs cannot say (non-Linux).
+ * unrelated processes. Off Linux, or where procfs cannot say, the platform
+ * name: processes on one such platform compare equal and keep the pid test,
+ * while every other platform reads their records as foreign.
  */
-export function daemonProcessDomain(): Promise<string | undefined> {
+export function daemonProcessDomain(): Promise<string> {
 	processDomain ??= readProcessDomain();
 	return processDomain;
 }
 
-async function readProcessDomain(): Promise<string | undefined> {
-	if (process.platform !== "linux") return undefined;
-	try {
-		// node:fs, not Bun.file(): the broker records this before it listens, and
-		// a Bun.file read holds no event-loop ref there.
-		const [boot, namespace] = await Promise.all([
-			fs.readFile("/proc/sys/kernel/random/boot_id", "utf8"),
-			fs.readlink("/proc/self/ns/pid"),
-		]);
-		return `${boot.trim()}/${namespace}`;
-	} catch {
-		return undefined;
+async function readProcessDomain(): Promise<string> {
+	if (process.platform === "linux") {
+		try {
+			// node:fs, not Bun.file(): the broker records this before it listens, and
+			// a Bun.file read holds no event-loop ref there.
+			const [boot, namespace] = await Promise.all([
+				fs.readFile("/proc/sys/kernel/random/boot_id", "utf8"),
+				fs.readlink("/proc/self/ns/pid"),
+			]);
+			return `${boot.trim()}/${namespace}`;
+		} catch {
+			// procfs cannot place this process; fall back to the platform.
+		}
 	}
+	return process.platform;
 }
 
 function isPidRecord(value: unknown): value is PidRecord {
@@ -76,15 +80,16 @@ function isPidRecord(value: unknown): value is PidRecord {
 /**
  * `foreign` when the record comes from another domain: its pid names nothing
  * here, so its process can be proven neither alive nor dead. Records without
- * a domain fall back to the pid test.
+ * a domain fall back to the pid test. EPERM means the process exists under
+ * another uid, so it reads as live.
  */
 async function recordedProcessState(record: PidRecord): Promise<"live" | "dead" | "foreign"> {
 	if (record.domain !== undefined && record.domain !== (await daemonProcessDomain())) return "foreign";
 	try {
 		process.kill(record.pid, 0);
 		return "live";
-	} catch {
-		return "dead";
+	} catch (error) {
+		return hasFsCode(error, "EPERM") ? "live" : "dead";
 	}
 }
 
@@ -200,10 +205,11 @@ export async function readLiveDaemonBrokerPid(runtimeDir: string): Promise<numbe
  * project directories leave behind (issue #8674).
  *
  * Best-effort and non-throwing: a scope is deleted only when its `broker.pid`
- * is absent/dead, no live client presence remains, no broker answers on its
- * endpoint, and it has been untouched for {@link DAEMON_RUNTIME_STALE_GRACE_MS}.
- * A record written in another domain (see {@link daemonProcessDomain}) keeps
- * the scope, and the sweep never removes presence entries. The caller's own
+ * is absent/dead, no live client presence remains, its endpoint reports that
+ * nothing listens there, and it has been untouched for
+ * {@link DAEMON_RUNTIME_STALE_GRACE_MS}. A record written in another domain
+ * (see {@link daemonProcessDomain}) keeps the scope, and the sweep never
+ * removes presence entries. The caller's own
  * `currentRuntimeDir` is always skipped, and the sweep runs only inside the
  * {@link DAEMONS_DIR} container over entries named like a {@link DAEMON_SCOPE_KEY}
  * — so a runtime dir relocated elsewhere (e.g. the smoke test under
@@ -240,7 +246,7 @@ export async function pruneDeadDaemonRuntimeDirs(currentRuntimeDir: string): Pro
 			// The project dir only names a Windows pipe; a scope without scope.json
 			// there cannot be probed, and the checks above decide alone.
 			const endpoint = daemonBrokerEndpoint((await readDaemonScopeMeta(dir)) ?? dir, dir);
-			if (await probeBrokerEndpoint(endpoint)) continue;
+			if ((await probeBrokerEndpoint(endpoint)) !== "dead") continue;
 			await fs.rm(dir, { recursive: true, force: true });
 		} catch (error) {
 			if (isEnoent(error)) continue;

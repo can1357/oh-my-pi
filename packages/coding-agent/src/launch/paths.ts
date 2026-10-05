@@ -93,23 +93,30 @@ export function daemonBrokerEndpoint(projectDir: string, runtimeDir: string): st
 	return path.join(runtimeDir, "broker.sock");
 }
 
+/** What a connect to a scope endpoint says about its broker. */
+export type BrokerEndpointState = "live" | "dead" | "unknown";
+
 /**
  * Whether a broker is accepting connections on the scope endpoint right now.
- * Unlike a recorded pid, this answers the same in every PID namespace that
- * shares the runtime directory.
+ * `dead` only when nothing listens there (ENOENT, ECONNREFUSED); any other
+ * error or the timeout is `unknown`, since a busy or unreachable listener may
+ * still be alive. Unlike a recorded pid, this answers the same in every PID
+ * namespace that shares the runtime directory.
  */
-export function probeBrokerEndpoint(endpoint: string): Promise<boolean> {
-	const { promise, resolve } = Promise.withResolvers<boolean>();
+export function probeBrokerEndpoint(endpoint: string): Promise<BrokerEndpointState> {
+	const { promise, resolve } = Promise.withResolvers<BrokerEndpointState>();
 	const socket = net.createConnection({ path: endpoint });
 	let settled = false;
-	const finish = (connected: boolean): void => {
+	const finish = (state: BrokerEndpointState): void => {
 		if (settled) return;
 		settled = true;
 		socket.destroy();
-		resolve(connected);
+		resolve(state);
 	};
-	socket.once("connect", () => finish(true));
-	socket.once("error", () => finish(false));
-	socket.setTimeout(ENDPOINT_PROBE_TIMEOUT_MS, () => finish(false));
+	socket.once("connect", () => finish("live"));
+	socket.once("error", error =>
+		finish(hasFsCode(error, "ENOENT") || hasFsCode(error, "ECONNREFUSED") ? "dead" : "unknown"),
+	);
+	socket.setTimeout(ENDPOINT_PROBE_TIMEOUT_MS, () => finish("unknown"));
 	return promise;
 }

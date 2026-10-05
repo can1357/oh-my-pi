@@ -351,9 +351,9 @@ async function holdsLiveForeignLease(pidPath: string, endpoint: string): Promise
 	} catch {
 		return false; // Dead PID: the lease outlived its broker.
 	}
-	if (await probeBrokerEndpoint(endpoint)) return true;
+	if ((await probeBrokerEndpoint(endpoint)) === "live") return true;
 	await Bun.sleep(LEASE_HANDOFF_GRACE_MS);
-	return probeBrokerEndpoint(endpoint);
+	return (await probeBrokerEndpoint(endpoint)) === "live";
 }
 
 /**

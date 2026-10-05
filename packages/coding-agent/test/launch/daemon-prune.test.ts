@@ -1,14 +1,37 @@
 import { beforeAll, describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
+import * as net from "node:net";
 import * as path from "node:path";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { createDaemonBrokerClient } from "../../src/launch/client";
-import { pruneDeadDaemonRuntimeDirs, registerDaemonProjectPresence } from "../../src/launch/presence";
+import {
+	hasLiveDaemonProjectPresence,
+	pruneDeadDaemonRuntimeDirs,
+	registerDaemonProjectPresence,
+} from "../../src/launch/presence";
 
 const STALE = new Date(Date.now() - 30 * 60_000);
 /** Namespace identity no process on this host records: a different boot and PID namespace. */
 const FOREIGN_DOMAIN = "00000000-0000-0000-0000-000000000000/pid:[1]";
+const PRESENCE_WRITER = path.join(import.meta.dir, "..", "fixtures", "daemon-presence-writer.ts");
 let deadPid = 0;
+
+beforeAll(async () => {
+	// A definitely-dead PID: spawn a process and reap it.
+	const proc = Bun.spawn(["true"]);
+	await proc.exited;
+	deadPid = proc.pid;
+});
+
+/** A presence record exactly as this process registers one. */
+async function ownPresenceRecord(tempRoot: string): Promise<Record<string, unknown>> {
+	const template = path.join(tempRoot, "template");
+	const registered = await registerDaemonProjectPresence(tempRoot, template);
+	const [entry] = await fs.readdir(path.join(template, "clients"));
+	const record = (await Bun.file(path.join(template, "clients", entry)).json()) as Record<string, unknown>;
+	await registered.close();
+	return record;
+}
 
 async function scope(
 	root: string,
@@ -32,13 +55,6 @@ async function scope(
 }
 
 describe("pruneDeadDaemonRuntimeDirs", () => {
-	beforeAll(async () => {
-		// A definitely-dead PID: spawn a process and reap it.
-		const proc = Bun.spawn(["true"]);
-		await proc.exited;
-		deadPid = proc.pid;
-	});
-
 	it("removes only scopes with a dead broker, no live clients, and past the stale grace", async () => {
 		using tempDir = TempDir.createSync("@omp-daemon-prune-");
 		const daemons = path.join(tempDir.path(), "run", "daemons");
@@ -141,12 +157,7 @@ describe("pruneDeadDaemonRuntimeDirs", () => {
 		const daemons = path.join(tempDir.path(), "run", "daemons");
 		const current = path.join(daemons, "aaaaaaaaaaaaaaaa");
 		await fs.mkdir(current, { recursive: true });
-		// A presence record exactly as this process registers one.
-		const template = path.join(tempDir.path(), "template");
-		const registered = await registerDaemonProjectPresence(tempDir.path(), template);
-		const [entry] = await fs.readdir(path.join(template, "clients"));
-		const own = (await Bun.file(path.join(template, "clients", entry)).json()) as Record<string, unknown>;
-		await registered.close();
+		const own = await ownPresenceRecord(tempDir.path());
 
 		// A session in another namespace registered before any broker started.
 		const foreignPresence = await scope(daemons, "bbbbbbbbbbbbbbbb", {});
@@ -168,9 +179,96 @@ describe("pruneDeadDaemonRuntimeDirs", () => {
 		expect(await fs.exists(ownDead)).toBe(false);
 	});
 
+	it("keeps a scope registered by a process on another platform", async () => {
+		using tempDir = TempDir.createSync("@omp-daemon-prune-platform-");
+		const daemons = path.join(tempDir.path(), "run", "daemons");
+		const current = path.join(daemons, "aaaaaaaaaaaaaaaa");
+		const other = path.join(daemons, "bbbbbbbbbbbbbbbb");
+		await fs.mkdir(current, { recursive: true });
+		// A macOS host and a Linux container sharing one home, say: a pid written
+		// on the other platform names nothing here. The writer is killed so its
+		// entry stays behind, as it would for a process this sweeper cannot see.
+		const platform = process.platform === "darwin" ? "win32" : "darwin";
+		const writer = Bun.spawn([process.execPath, PRESENCE_WRITER, platform, tempDir.path(), other], {
+			stdout: "pipe",
+			stderr: "inherit",
+		});
+		try {
+			await (writer.stdout as ReadableStream<Uint8Array>).getReader().read();
+		} finally {
+			writer.kill("SIGKILL");
+			await writer.exited;
+		}
+		await fs.utimes(other, STALE, STALE);
+
+		await pruneDeadDaemonRuntimeDirs(current);
+
+		expect(await fs.readdir(path.join(other, "clients"))).toHaveLength(1);
+	});
+
+	it("keeps a scope whose endpoint fails the probe for a reason other than nothing listening", async () => {
+		using tempDir = TempDir.createSync("@omp-daemon-prune-busy-");
+		const daemons = path.join(tempDir.path(), "run", "daemons");
+		const current = path.join(daemons, "aaaaaaaaaaaaaaaa");
+		await fs.mkdir(current, { recursive: true });
+		const busy = await scope(daemons, "bbbbbbbbbbbbbbbb", { pid: "dead", clients: [deadPid] });
+		const endpoint = path.join(busy, "broker.sock");
+		const server = net.createServer(socket => socket.destroy());
+		const listening = Promise.withResolvers<void>();
+		server.listen(endpoint, () => listening.resolve());
+		await listening.promise;
+		try {
+			// A live listener this process may not connect to (EACCES). Like a full
+			// backlog or EMFILE, that says nothing about whether the broker is gone.
+			await fs.chmod(endpoint, 0o000);
+			await fs.utimes(busy, STALE, STALE);
+
+			await pruneDeadDaemonRuntimeDirs(current);
+
+			expect(await fs.exists(busy)).toBe(true);
+		} finally {
+			server.close();
+		}
+	});
+
+	it("keeps a scope whose recorded process runs under another user", async () => {
+		using tempDir = TempDir.createSync("@omp-daemon-prune-uid-");
+		const daemons = path.join(tempDir.path(), "run", "daemons");
+		const current = path.join(daemons, "aaaaaaaaaaaaaaaa");
+		await fs.mkdir(current, { recursive: true });
+		const own = await ownPresenceRecord(tempDir.path());
+		const otherUser = await scope(daemons, "bbbbbbbbbbbbbbbb", {});
+		// pid 1 runs as root: `process.kill(1, 0)` fails with EPERM, which means it exists.
+		const entry = path.join(otherUser, "clients", "1-x.json");
+		await Bun.write(entry, JSON.stringify({ ...own, pid: 1 }));
+		await fs.utimes(otherUser, STALE, STALE);
+
+		await pruneDeadDaemonRuntimeDirs(current);
+
+		expect(await fs.exists(entry)).toBe(true);
+	});
+
 	it("does nothing when the runtime root does not exist", async () => {
 		using tempDir = TempDir.createSync("@omp-daemon-prune-missing-");
 		const current = path.join(tempDir.path(), "run", "daemons", "hash0000000000000");
 		await expect(pruneDeadDaemonRuntimeDirs(current)).resolves.toBeUndefined();
+	});
+});
+
+describe("hasLiveDaemonProjectPresence", () => {
+	it("leaves presence from another PID namespace in place without counting it, and removes its own dead entries", async () => {
+		using tempDir = TempDir.createSync("@omp-daemon-presence-idle-");
+		const own = await ownPresenceRecord(tempDir.path());
+		const runtimeDir = path.join(tempDir.path(), "scope");
+		const foreignEntry = path.join(runtimeDir, "clients", `${deadPid}-foreign.json`);
+		const ownDeadEntry = path.join(runtimeDir, "clients", `${deadPid}-own.json`);
+		await Bun.write(foreignEntry, JSON.stringify({ ...own, pid: deadPid, domain: FOREIGN_DOMAIN }));
+		await Bun.write(ownDeadEntry, JSON.stringify({ ...own, pid: deadPid }));
+
+		// The broker's idle check: an entry it cannot prove alive does not keep it up,
+		expect(await hasLiveDaemonProjectPresence(runtimeDir)).toBe(false);
+		// but one it cannot prove dead stays for later sweeps, which keep its scope.
+		expect(await fs.exists(foreignEntry)).toBe(true);
+		expect(await fs.exists(ownDeadEntry)).toBe(false);
 	});
 });

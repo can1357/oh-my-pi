@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- Fixed omp processes in one container or PID namespace deleting the live project daemon scopes of omp processes in another that shares `~/.omp`, which left those sessions' tool calls failing with `Failed to start daemon broker … connect ENOENT` or `Daemon broker authentication failed`
+- Fixed omp deleting the live project daemon scopes of omp processes sharing `~/.omp` from another Linux PID namespace, container or host, from another platform, or under another user, which left those sessions' tool calls failing with `Failed to start daemon broker … connect ENOENT` or `Daemon broker authentication failed`
 
 ## [18.6.0] - 2026-10-03
 
