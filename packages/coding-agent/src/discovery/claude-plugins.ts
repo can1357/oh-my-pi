@@ -27,6 +27,7 @@ import {
 	readPluginProvenance,
 	scanSkillsFromDir,
 } from "./helpers";
+import { activeResourceExclusions } from "./omp-extension-roots";
 
 import { resolvePluginStdioPaths, substitutePluginRoot } from "./substitute-plugin-root";
 
@@ -44,7 +45,11 @@ async function allowedRoots(
 	ctx: LoadContext,
 	surface: "skills" | "mcp" | "other",
 ): Promise<{ roots: ClaudePluginRoot[]; warnings: string[] }> {
-	const { roots, warnings } = await listClaudePluginRoots(ctx.home, ctx.cwd);
+	const { roots, warnings } = await listClaudePluginRoots(
+		ctx.home,
+		ctx.cwd,
+		activeResourceExclusions(ctx.extensionRoots),
+	);
 	const userEnabled = isUserSourceEnabled("claude-plugins", ctx) || isUserSourceEnabled("claude", ctx);
 	const scopedRoots = userEnabled ? roots : roots.filter(root => root.scope === "project" || root.origin !== "claude");
 	const flags = await Promise.all(scopedRoots.map(root => legacyProviderAllowed(root.path, surface)));

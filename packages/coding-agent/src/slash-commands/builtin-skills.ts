@@ -16,13 +16,14 @@ import {
 import { clearSubmittedText } from "./helpers/draft";
 import { errorMessage, parseSubcommand } from "./helpers/parse";
 import type { SlashCommandSpec } from "./types";
+import { runSkillDiagnosticAnalysis } from "./skill-diagnostic-analysis";
 
 const USAGE = [
 	"Skill registry (skills.omp.sh) commands:",
 	"  /skills search <query>                        Search the registry",
 	"  /skills install <@scope/name[@range]>… [-g]   Install into this project (-g: user-global)",
 	"  /skills installed                             List installed registry skills",
-	"  /skills diagnostics                           Inspect conflicts and deduplicated copies",
+	"  /skills diagnostics [analyze [name]]          Inspect copies; optionally request AI analysis",
 	"  /skills update [@scope/name…] [-g]            Update within the ranges in skills.json",
 ].join("\n");
 
@@ -73,7 +74,11 @@ export const BUILTIN_SKILLS_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 			{ name: "search", description: "Search the skill registry", usage: "<query>" },
 			{ name: "install", description: "Install registry skills", usage: "<@scope/name[@range]>… [--global]" },
 			{ name: "installed", description: "List installed registry skills" },
-			{ name: "diagnostics", description: "Inspect skill conflicts and deduplicated installations" },
+			{
+				name: "diagnostics",
+				description: "Inspect skill conflicts; optionally analyze relationships with AI",
+				usage: "[analyze [name]]",
+			},
 			{
 				name: "update",
 				description: "Update registry skills within their ranges",
@@ -89,13 +94,23 @@ export const BUILTIN_SKILLS_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 			try {
 				switch (verb) {
 					case "diagnostics": {
-						if (rest) {
-							ctx.showError("Usage: /skills diagnostics");
+						const { verb: action, rest: name } = parseSubcommand(rest);
+						if (action === "analyze") {
+							await runSkillDiagnosticAnalysis(ctx, name || undefined);
 							return;
 						}
+						if (action) {
+							ctx.showError("Usage: /skills diagnostics [analyze [name]]");
+							return;
+						}
+						const report = formatSkillDiagnostics(ctx.session.skillDiagnostics);
+						const offer =
+							ctx.session.skillDiagnostics.length > 0
+								? "\n\nNeed help comparing these copies? Run /skills diagnostics analyze [name]. AI analysis requires consent and never applies recommendations automatically."
+								: "";
 						ctx.showCommandReport({
 							title: "Skill Discovery Details",
-							body: new Text(formatSkillDiagnostics(ctx.session.skillDiagnostics), 0, 0),
+							body: new Text(report + offer, 0, 0),
 						});
 						return;
 					}

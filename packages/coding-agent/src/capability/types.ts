@@ -6,6 +6,8 @@
  * a unified array of MCP servers.
  */
 
+import type { ResourceExclusions } from "../discovery/resource-exclusions";
+
 /** Extension sub-discovery mode; `explicit-only` suppresses ambient sources. */
 export type ExtensionRootMode = "merge" | "explicit-only";
 
@@ -24,6 +26,12 @@ export interface EffectiveExtensionRoots {
 	mode: ExtensionRootMode;
 	configured: readonly string[];
 	configuredLevel: "user" | "project";
+	/**
+	 * Exclusions applied to every root of this pass, explicit and ambient alike: the owning
+	 * session's user-level `diagnostics.resourceExclusions`, or a trusted host's own value.
+	 * Unset falls back to the invocation scope, then the user's global settings.
+	 */
+	resourceExclusions?: ResourceExclusions;
 }
 
 /**
