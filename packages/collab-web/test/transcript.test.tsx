@@ -58,11 +58,13 @@ function activeTool(): ActiveTool {
 function renderTranscript(props: {
 	entries?: readonly SessionEntry[];
 	activeTools?: ReadonlyMap<string, ActiveTool>;
+	hostBadge?: string;
 	working: boolean;
 }): string {
 	return renderToStaticMarkup(
 		<Transcript
 			entries={props.entries ?? []}
+			hostBadge={props.hostBadge}
 			stream={null}
 			streamDone={true}
 			activeTools={props.activeTools ?? new Map()}
@@ -147,6 +149,47 @@ describe("Transcript message Markdown", () => {
 
 		expect(countElements(html, ".tr-row--user .tr-md code")).toBe(1);
 		expect(countElements(html, ".tr-row--user .tr-md strong")).toBe(1);
+	});
+});
+
+// #14082: a host-typed prompt used to render an unlabelled `host` gutter next
+// to guest rows that carry their author's name, so a reader could not tell
+// who wrote which turn.
+describe("Transcript collab host badge", () => {
+	const entries: SessionEntry[] = [
+		{
+			type: "message",
+			id: "host-turn",
+			parentId: null,
+			timestamp: "2026-07-15T00:00:00Z",
+			message: { role: "user", content: "run the suite", timestamp: 1 },
+		},
+		{
+			type: "custom_message",
+			id: "guest-turn",
+			parentId: "host-turn",
+			timestamp: "2026-07-15T00:00:01Z",
+			customType: "collab-prompt",
+			content: [{ type: "text", text: "guest reply" }],
+			details: { from: "guest" },
+			display: true,
+		},
+	];
+
+	it("names the host on host-typed prompts and leaves the guest badge alone", () => {
+		const html = renderTranscript({ entries, working: false, hostBadge: "Bauke · host" });
+
+		expect(html).toContain("Bauke · host");
+		// Both turns are user rows and both carry a name badge now.
+		expect(countElements(html, ".tr-row--user .tr-gutter .tr-badge")).toBe(2);
+		expect(html).toContain("guest");
+	});
+
+	it("falls back to the bare host gutter when the participant list has no host", () => {
+		const html = renderTranscript({ entries, working: false });
+
+		expect(countElements(html, ".tr-row--user .tr-gutter .tr-badge")).toBe(1);
+		expect(html).toContain(">host<");
 	});
 });
 

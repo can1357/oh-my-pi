@@ -1,6 +1,9 @@
 # Changelog
 
 ## [Unreleased]
+### Fixed
+
+- Fixed host-typed prompts showing a bare `host` gutter next to guest turns that carry their author name; the host display name now labels its own turns ([#14082](https://github.com/can1357/oh-my-pi/issues/14082))
 
 ## [18.4.10] - 2026-10-02
 

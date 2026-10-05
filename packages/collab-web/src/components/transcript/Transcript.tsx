@@ -20,6 +20,8 @@ export interface TranscriptProps {
 	host?: ToolRenderHost;
 	/** Main connection phase; absent for the agent drawer's compact transcript. */
 	phase?: ConnectionPhase;
+	/** Collab author for host-typed prompts (`Bauke · host`); absent renders the bare `host` gutter. */
+	hostBadge?: string;
 }
 
 interface ScrollGeometry {
@@ -169,11 +171,13 @@ interface EntryRowProps {
 	results: ReadonlyMap<string, ToolResultMessage>;
 	active: ReadonlyMap<string, ActiveTool>;
 	host?: ToolRenderHost;
+	hostBadge?: string;
 }
 
 /** Re-render only when the entry itself or one of its tool pairings changed. */
 function entryRowEqual(prev: EntryRowProps, next: EntryRowProps): boolean {
 	if (prev.entry !== next.entry || prev.host !== next.host) return false;
+	if (prev.hostBadge !== next.hostBadge) return false;
 	const e = next.entry;
 	if (e.type !== "message" || e.message.role !== "assistant") return true;
 	for (const block of e.message.content) {
@@ -184,14 +188,13 @@ function entryRowEqual(prev: EntryRowProps, next: EntryRowProps): boolean {
 	return true;
 }
 
-const EntryRow = memo(function EntryRow({ entry, results, active, host }: EntryRowProps): ReactNode {
-	switch (entry.type) {
+const EntryRow = memo(function EntryRow({ entry, results, active, host, hostBadge }: EntryRowProps): ReactNode {
 		case "message": {
 			const msg = entry.message;
 			switch (msg.role) {
 				case "user":
 					return (
-						<Row kind="user" gutter="host" title={entry.timestamp}>
+						<Row kind="user" gutter={hostBadge ?? "host"} title={entry.timestamp}>
 							<MsgContent content={msg.content} />
 						</Row>
 					);
@@ -271,7 +274,7 @@ const WINDOW = 100;
 const EARLIER_TRIGGER_PX = 200;
 
 export function Transcript(props: TranscriptProps): ReactNode {
-	const { entries, stream, streamDone, activeTools, working, compact, host, phase } = props;
+	const { entries, stream, streamDone, activeTools, working, compact, host, hostBadge, phase } = props;
 
 	// null follows the tail. A number pins the first mounted entry while the
 	// reader is scrolled away from the bottom, so appended entries never
@@ -393,7 +396,7 @@ export function Transcript(props: TranscriptProps): ReactNode {
 				</button>
 			)}
 			{visible.map(entry => (
-				<EntryRow key={entry.id} entry={entry} results={results} active={activeTools} host={host} />
+				<EntryRow key={entry.id} entry={entry} results={results} active={activeTools} host={host} hostBadge={hostBadge} />
 			))}
 			{stream !== null && (
 				<Row kind="assistant" gutter="agent">

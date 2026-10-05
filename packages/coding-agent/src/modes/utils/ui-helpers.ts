@@ -6,6 +6,7 @@ import { StatusNotice } from "@oh-my-pi/pi-tui/chrome/status-notice";
 import { QueuedMessagesBand } from "@oh-my-pi/pi-tui/prompt/queued-messages";
 import { logger } from "@oh-my-pi/pi-utils";
 import type { AdvisorMessageDetails } from "../../advisor";
+import { collabHostBadge } from "../../collab/display-name";
 import { COLLAB_PROMPT_MESSAGE_TYPE, type CollabPromptDetails } from "../../collab/protocol";
 import { settings } from "../../config/settings";
 import { createAdvisorMessageCard } from "@oh-my-pi/pi-tui/chat/advisor-message";
@@ -304,12 +305,18 @@ export class UiHelpers {
 								this.ctx.viewSession.sessionManager.putBlobSync.bind(this.ctx.viewSession.sessionManager),
 							);
 						userComponent = new UserMessageComponent(userText, {
-							synthetic: isSynthetic,
-							imageLinks,
-							images,
-							liveSteered: message.role === "user" && message.liveSteered === true,
-							timestamp: message.timestamp,
-						});
+						synthetic: isSynthetic,
+						imageLinks,
+						images,
+						liveSteered: message.role === "user" && message.liveSteered === true,
+						timestamp: message.timestamp,
+						// Host-typed prompts carry the host's badge only while a room is
+						// active; an agent-injected `user` turn is not the operator's.
+						authorBadge:
+							message.role === "user" && !isSynthetic && message.attribution !== "agent"
+								? collabHostBadge(this.ctx)
+								: undefined,
+					});
 						this.ctx.transcriptMessageComponents.set(message, userComponent);
 					}
 					this.ctx.chatContainer.addChild(userComponent);

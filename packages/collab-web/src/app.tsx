@@ -148,6 +148,11 @@ function Session({ client, onLeave, onRejoin }: SessionProps): ReactNode {
 	}, [subCount]);
 
 	const title = snap.header?.title ?? snap.state?.sessionName ?? "session";
+	// Host-typed prompts are the only `user` rows here (guest prompts arrive as
+	// `collab-prompt` entries), so the replicated participant list names their
+	// author the same way the TUI does.
+	const hostName = snap.state?.participants.find(p => p.role === "host")?.name.trim();
+	const hostBadge = hostName ? `${hostName} · host` : undefined;
 	useEffect(() => {
 		document.title = `${title} · omp collab`;
 	}, [title]);
@@ -175,6 +180,7 @@ function Session({ client, onLeave, onRejoin }: SessionProps): ReactNode {
 							working={snap.working}
 							host={toolHost}
 							phase={snap.phase}
+							hostBadge={hostBadge}
 						/>
 					</div>
 					<Composer client={client} snapshot={snap} />
@@ -203,6 +209,7 @@ function Session({ client, onLeave, onRejoin }: SessionProps): ReactNode {
 						client={client}
 						readOnly={snap.readOnly}
 						host={toolHost}
+						hostBadge={hostBadge}
 						onClose={() => setSelectedId(null)}
 					/>
 				</>

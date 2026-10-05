@@ -19,6 +19,7 @@
 - Large mermaid flowcharts and state diagrams render much faster while a response streams ([#14454](https://github.com/can1357/oh-my-pi/pull/14454) by [@H4vC](https://github.com/H4vC))
 
 ### Fixed
+- In a collab session a host-typed prompt rendered with no author while guest prompts carried a `«name»` badge, so guests saw named turns interleaved with anonymous ones; the host now renders the same badge while solo sessions are unchanged ([#14082](https://github.com/can1357/oh-my-pi/issues/14082)).
 
 - Fixed the `/usage` sheet in Tern missing the Close button the other report sheets have ([#14455](https://github.com/can1357/oh-my-pi/pull/14455) by [@H4vC](https://github.com/H4vC)).
 - Fixed cancelling a bash command on Windows sometimes terminating an unrelated program ([#14454](https://github.com/can1357/oh-my-pi/pull/14454) by [@H4vC](https://github.com/H4vC))

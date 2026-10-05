@@ -19,9 +19,11 @@ export function AgentDrawer(props: {
 	readOnly?: boolean;
 	/** Forwarded to tool renderers so nested task cards can drill further. */
 	host?: TranscriptProps["host"];
+	/** Collab author for host-typed prompts; forwarded to the transcript gutter. */
+	hostBadge?: string;
 	onClose(): void;
 }): ReactNode {
-	const { agent, progress, client, readOnly, host, onClose } = props;
+	const { agent, progress, client, readOnly, host, hostBadge, onClose } = props;
 	const [entries, setEntries] = useState<readonly SessionEntry[]>([]);
 	const [fetchError, setFetchError] = useState<string | null>(null);
 	const [draft, setDraft] = useState("");
@@ -177,6 +179,7 @@ export function AgentDrawer(props: {
 							activeTools={EMPTY_TOOLS}
 							working={agent.status === "running" && fetchError === null}
 							host={host}
+							hostBadge={hostBadge}
 						/>
 						{fetchError !== null ? (
 							<div className="ag-fetch-error" role="alert">

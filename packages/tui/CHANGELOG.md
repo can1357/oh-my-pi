@@ -7,6 +7,7 @@
 - `/hotkeys` shows the effective `app.stt.pushToTalk` binding, including `Disabled` when unbound ([#6592](https://github.com/can1357/oh-my-pi/pull/6592) by [@anatoli-tsinovoy](https://github.com/anatoli-tsinovoy)).
 
 ### Fixed
+- The chat user message accepts an `authorBadge` option so the collab host prompt renders a name like a guest prompt does; the badge shares one row with the steering marker and reaction ([#14082](https://github.com/can1357/oh-my-pi/issues/14082)).
 
 - Fixed hold-Space push-to-talk stopping the instant recording began (showing "No speech detected.") when opening the microphone briefly froze the UI ([#14463](https://github.com/can1357/oh-my-pi/pull/14463) by [@pgkt04](https://github.com/pgkt04))
 

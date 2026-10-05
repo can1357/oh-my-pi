@@ -65,6 +65,12 @@ export interface UserBubbleOptions {
 	synthetic?: boolean;
 	/** Delivered into the response that was streaming; marked `*` at the bubble's top-left. */
 	liveSteered?: boolean;
+	/**
+	 * Collab author for a host-typed prompt (`Bauke · host`), drawn in the
+	 * bubble's top padding row so it reads like the guest badge on a
+	 * `collab-prompt` row. Display-only; absent outside a room.
+	 */
+	authorBadge?: string;
 	/** SKILL.md path for a skill chip by name; `undefined` leaves the chip unlinked. */
 	skillPath?: (name: string) => string | undefined;
 	/** When the message was sent (ms); shown beside the native hover toolbar. */
@@ -136,6 +142,7 @@ export class UserMessageComponent extends Container implements ReactionTarget {
 	readonly #synthetic: boolean;
 	readonly #timestamp: number | undefined;
 	readonly #images: readonly ImageContent[];
+	readonly #authorBadge: string | undefined;
 	readonly #imageLinks: readonly (string | undefined)[] | undefined;
 	/** Display text: image markers collapsed to chips and model mentions to their labels. */
 	readonly #text: string;
@@ -164,6 +171,7 @@ export class UserMessageComponent extends Container implements ReactionTarget {
 		this.#bgColor = bgColor;
 		this.#liveSteered = options.liveSteered === true;
 		this.#synthetic = options.synthetic === true;
+		this.#authorBadge = options.authorBadge;
 		this.#timestamp = options.timestamp;
 		this.#images = options.images ?? [];
 		this.#imageLinks = options.imageLinks;
@@ -257,7 +265,11 @@ export class UserMessageComponent extends Container implements ReactionTarget {
 		if (badges.length > 0)
 			children.push(node("row", { gap: "xs", justify: "end", role: "omp.user.badges" }, badges, "badges"));
 		this.#native = card(
-			{ role: this.#synthetic ? "omp.user.synthetic" : "omp.user", tone: this.#synthetic ? "muted" : "user" },
+			{
+				role: this.#synthetic ? "omp.user.synthetic" : "omp.user",
+				tone: this.#synthetic ? "muted" : "user",
+				...(this.#authorBadge === undefined ? {} : { head: [span(`«${this.#authorBadge}» ›`, "accent strong")] }),
+			},
 			children,
 		);
 		return this.#native;
@@ -271,14 +283,18 @@ export class UserMessageComponent extends Container implements ReactionTarget {
 	}
 
 	/**
-	 * The top padding row: the live-steering marker left-aligned and the reaction
-	 * badge right-aligned, both inside the horizontal padding.
+	 * The top padding row: the collab author (with the live-steering marker
+	 * after it) left-aligned and the reaction badge right-aligned, all inside
+	 * the horizontal padding.
 	 */
 	#badgeRow(width: number): string {
+		const author =
+			this.#authorBadge === undefined ? "" : theme.fg("accent", `\x1b[1m«${this.#authorBadge}»\x1b[22m ›`);
 		const marker = this.#liveSteered ? theme.fg("accent", "*") : "";
 		const emoji = this.#reaction ?? "";
-		const gap = Math.max(0, width - 2 - visibleWidth(marker) - visibleWidth(emoji));
-		return applyBackgroundToLine(` ${marker}${padding(gap)}${emoji}`, width, this.#bgColor);
+		const head = author + marker;
+		const gap = Math.max(0, width - 2 - visibleWidth(head) - visibleWidth(emoji));
+		return applyBackgroundToLine(` ${head}${padding(gap)}${emoji}`, width, this.#bgColor);
 	}
 
 	override render(width: number): readonly string[] {
@@ -290,7 +306,8 @@ export class UserMessageComponent extends Container implements ReactionTarget {
 			return this.#zoneLines;
 		}
 		const wrapped = lines.slice();
-		if (this.#reaction !== undefined || this.#liveSteered) wrapped[0] = this.#badgeRow(width);
+		if (this.#reaction !== undefined || this.#liveSteered || this.#authorBadge !== undefined)
+			wrapped[0] = this.#badgeRow(width);
 		wrapped[0] = OSC133_ZONE_START + wrapped[0];
 		wrapped[wrapped.length - 1] = wrapped[wrapped.length - 1] + OSC133_ZONE_CLOSE;
 		this.#zoneSource = lines;
