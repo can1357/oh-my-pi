@@ -6928,10 +6928,12 @@ func (c Commands) NewSession(ctx context.Context, p NewSessionCommand) (Cancella
 
 // OpenSessionCommand holds the parameters of "open_session".
 type OpenSessionCommand struct {
-	SessionDir string `json:"sessionDir"`
+	SessionDir string  `json:"sessionDir"`
+	Provider   *string `json:"provider,omitempty"`
+	ModelID    *string `json:"modelId,omitempty"`
 }
 
-// OpenSession sends "open_session": Continue the newest non-empty session in a directory, or start a fresh one there.
+// OpenSession sends "open_session": Continue the newest non-empty session in a directory, or start a fresh one there. Give provider and modelId together to override the saved model; otherwise an unavailable saved model fails the request.
 func (c Commands) OpenSession(ctx context.Context, p OpenSessionCommand) (OpenSessionResult, error) {
 	var out OpenSessionResult
 	err := c.call(ctx, "open_session", p, 0, &out)
@@ -7311,10 +7313,12 @@ func (c Commands) ExportHTML(ctx context.Context, p ExportHTMLCommand) (string, 
 
 // SwitchSessionCommand holds the parameters of "switch_session".
 type SwitchSessionCommand struct {
-	SessionPath string `json:"sessionPath"`
+	SessionPath string  `json:"sessionPath"`
+	Provider    *string `json:"provider,omitempty"`
+	ModelID     *string `json:"modelId,omitempty"`
 }
 
-// SwitchSession sends "switch_session": Switch to another session file.
+// SwitchSession sends "switch_session": Switch to another session file. Give provider and modelId together to override the saved model; otherwise an unavailable saved model fails the request and keeps the current session.
 func (c Commands) SwitchSession(ctx context.Context, p SwitchSessionCommand) (CancellationResult, error) {
 	var out CancellationResult
 	err := c.call(ctx, "switch_session", p, 0, &out)

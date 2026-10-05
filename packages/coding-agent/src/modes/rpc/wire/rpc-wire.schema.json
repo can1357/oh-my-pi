@@ -110,7 +110,7 @@
 			},
 			{
 				"name": "open_session",
-				"doc": "Continue the newest non-empty session in a directory, or start a fresh one there.",
+				"doc": "Continue the newest non-empty session in a directory, or start a fresh one there. Give provider and modelId together to override the saved model; otherwise an unavailable saved model fails the request.",
 				"params": "OpenSessionParams",
 				"result": "OpenSessionResult",
 				"nullable": false,
@@ -530,7 +530,7 @@
 			},
 			{
 				"name": "switch_session",
-				"doc": "Switch to another session file.",
+				"doc": "Switch to another session file. Give provider and modelId together to override the saved model; otherwise an unavailable saved model fails the request and keeps the current session.",
 				"params": "SwitchSessionParams",
 				"result": "CancellationResult",
 				"nullable": false,
@@ -5515,6 +5515,12 @@
 			"properties": {
 				"sessionDir": {
 					"type": "string"
+				},
+				"provider": {
+					"type": "string"
+				},
+				"modelId": {
+					"type": "string"
 				}
 			},
 			"required": [
@@ -6026,6 +6032,12 @@
 			"type": "object",
 			"properties": {
 				"sessionPath": {
+					"type": "string"
+				},
+				"provider": {
+					"type": "string"
+				},
+				"modelId": {
 					"type": "string"
 				}
 			},

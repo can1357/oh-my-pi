@@ -716,10 +716,12 @@ export class RpcClient {
 
 	/**
 	 * Continue the newest session in `sessionDir`, or start a fresh one there.
-	 * Lets a pre-spawned process bind to a host-keyed conversation.
+	 * Lets a pre-spawned process bind to a host-keyed conversation. With `model`,
+	 * the session uses it instead of its saved model; otherwise a saved model that
+	 * cannot be restored rejects with `Could not restore model <provider/id>`.
 	 */
-	async openSession(sessionDir: string): Promise<RpcOpenSessionResult> {
-		const response = await this.#send({ type: "open_session", sessionDir });
+	async openSession(sessionDir: string, model?: { provider: string; modelId: string }): Promise<RpcOpenSessionResult> {
+		const response = await this.#send({ type: "open_session", sessionDir, ...model });
 		return this.#getData(response);
 	}
 
@@ -1030,11 +1032,14 @@ export class RpcClient {
 	}
 
 	/**
-	 * Switch to a different session file.
+	 * Switch to a different session file, optionally with `model` instead of its saved one.
 	 * @returns Object with `cancelled: true` if an extension cancelled the switch
 	 */
-	async switchSession(sessionPath: string): Promise<{ cancelled: boolean }> {
-		const response = await this.#send({ type: "switch_session", sessionPath });
+	async switchSession(
+		sessionPath: string,
+		model?: { provider: string; modelId: string },
+	): Promise<{ cancelled: boolean }> {
+		const response = await this.#send({ type: "switch_session", sessionPath, ...model });
 		return this.#getData(response);
 	}
 

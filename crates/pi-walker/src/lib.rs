@@ -539,6 +539,22 @@ pub struct WalkStats {
 	pub limited_entries:  usize,
 }
 
+/// The entries a [`WalkRequest::with_collected_with_heartbeat`] visitor
+/// receives: those of the scan the request's filter accepts, borrowed from it.
+pub struct AcceptedEntries<'a> {
+	entries: std::slice::Iter<'a, CollectedEntry>,
+	filter:  &'a WalkFilter,
+}
+
+impl<'a> Iterator for AcceptedEntries<'a> {
+	type Item = &'a CollectedEntry;
+
+	fn next(&mut self) -> Option<Self::Item> {
+		let filter = self.filter;
+		self.entries.find(|entry| filter.accepts_collected(entry))
+	}
+}
+
 /// Owned entries and metadata returned by [`WalkRequest::collect`].
 #[derive(Clone, Debug, PartialEq)]
 pub struct WalkOutcome {
@@ -824,6 +840,36 @@ impl WalkRequest {
 		E: fmt::Display,
 	{
 		self.collect_with_rank_and_limit(None, self.limit, heartbeat)
+	}
+
+	/// Run `visit` over the collected entries the high-level filter accepts,
+	/// borrowed in place: a cached scan is lent instead of copied out of the
+	/// cache. Entries arrive in the order [`WalkRequest::collect`] returns
+	/// them, and empty-cache rechecks apply as there. The request limit does
+	/// not; `visit` decides what to keep.
+	pub fn with_collected_with_heartbeat<E, H, R>(
+		&self,
+		heartbeat: H,
+		visit: impl FnOnce(AcceptedEntries<'_>) -> R,
+	) -> std::result::Result<R, WalkError<String>>
+	where
+		H: Fn() -> std::result::Result<(), E> + Sync,
+		E: fmt::Display,
+	{
+		let mut options = self.effective_options();
+		let mut scan =
+			cache::collect_shared_entries_in(&self.filesystem, &self.root, options, &heartbeat)?;
+		if self.should_recheck_empty(scan.cache_age_ms)
+			&& !scan
+				.entries
+				.iter()
+				.any(|entry| self.filter.accepts_collected(entry))
+		{
+			options.cache = false;
+			scan =
+				cache::collect_shared_entries_in(&self.filesystem, &self.root, options, &heartbeat)?;
+		}
+		Ok(visit(AcceptedEntries { entries: scan.entries.iter(), filter: &self.filter }))
 	}
 
 	/// Collect owned entries, apply high-level filters, rank, then truncate to
@@ -5251,6 +5297,47 @@ mod tests {
 			refreshed.entries.iter().all(CollectedEntry::is_file),
 			"glob-filtered files-only recheck should still return only files: {:?}",
 			refreshed.entries
+		);
+	}
+
+	/// The borrowing collection sees what owned collection returns: the
+	/// filter applies to a cached scan, and an empty-after-filter cached result
+	/// is rechecked just the same.
+	#[test]
+	fn borrowed_collection_filters_and_rechecks_like_owned_collection() {
+		let _cache_test_guard = cache::cache_test_guard();
+		let tree = temp_tree("request-borrowed-collection");
+		let _cache_guard = CachePathGuard::new(tree.path());
+		fs::create_dir(tree.path().join("dir")).expect("directory should be created");
+		fs::write(tree.path().join("dir/old.txt"), "old").expect("file should be written");
+		let request = WalkRequest::from_options(tree.path(), test_options())
+			.cache(true)
+			.filter(
+				WalkFilter::files_only()
+					.glob(CompiledWalkGlob::new(["**/*.rs"]).expect("test glob should compile")),
+			)
+			.empty_recheck(EmptyRecheck::AfterMillis(0));
+		let borrowed_paths = |request: &WalkRequest| {
+			request
+				.with_collected_with_heartbeat(
+					|| Ok::<(), Infallible>(()),
+					|entries| entries.map(|entry| entry.path.clone()).collect::<Vec<_>>(),
+				)
+				.expect("borrowed collection should succeed")
+		};
+
+		assert!(borrowed_paths(&request).is_empty(), "the filter rejects every scanned entry");
+		fs::write(tree.path().join("dir/new.rs"), "new").expect("file should be written");
+		wait_for_nonzero_cache_age();
+		assert_eq!(borrowed_paths(&request), ["dir/new.rs"], "an empty cached result is rechecked");
+		let owned = request.collect().expect("owned collection should succeed");
+		assert_eq!(
+			owned
+				.entries
+				.iter()
+				.map(|entry| entry.path.as_str())
+				.collect::<Vec<_>>(),
+			borrowed_paths(&request)
 		);
 	}
 
