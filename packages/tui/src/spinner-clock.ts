@@ -59,6 +59,19 @@ export function sharedSpinnerFrame(frameCount: number, now: number = performance
 }
 
 /**
+ * Milliseconds until the next multiple of `intervalMs` on the clock every spinner shares. Timers
+ * armed from this fire together whoever owns them and whenever they started, so N spinners wake the
+ * render scheduler in one turn and coalesce into one frame per period instead of N out-of-phase
+ * frames. Rounded up so a timer never fires just before its boundary.
+ */
+export function spinnerTickDelay(intervalMs: number, now: number = performance.now()): number {
+	// Count whole periods with a little slack: float residue at an exact boundary (100 ms is three
+	// periods of 1000/30, but `100 % (1000/30)` reads as a full period) must not shorten the wait to 1 ms.
+	const periods = Math.floor(now / intervalMs + 1e-6);
+	return Math.max(1, Math.ceil((periods + 1) * intervalMs - now));
+}
+
+/**
  * Coarse clock tick that changes exactly when a spinner glyph would: `floor(now / interval)`, or a
  * constant 0 when spinners are static so a cache keyed on it stays valid indefinitely.
  */

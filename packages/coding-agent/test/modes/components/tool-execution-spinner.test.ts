@@ -6,7 +6,11 @@ import { CollabGuestLink } from "@oh-my-pi/pi-coding-agent/collab/guest";
 import { COLLAB_PROTO, formatCollabLink } from "@oh-my-pi/pi-coding-agent/collab/protocol";
 import { CollabSocket } from "@oh-my-pi/pi-coding-agent/collab/relay-client";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { stopSharedSpinnerTicker, ToolExecutionComponent } from "@oh-my-pi/pi-tui/chat/tool-execution";
+import {
+	sharedSpinnerTickerArmed,
+	stopSharedSpinnerTicker,
+	ToolExecutionComponent,
+} from "@oh-my-pi/pi-tui/chat/tool-execution";
 import { TranscriptContainer } from "@oh-my-pi/pi-tui/chrome/transcript-container";
 import {
 	DEFAULT_SPINNER_INTERVAL_MS,
@@ -21,23 +25,6 @@ import type { AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-
 import type { TUI } from "@oh-my-pi/pi-tui";
 import { installInMemoryRelay, uninstallInMemoryRelay } from "../../collab/helpers/in-memory-relay";
 import { createInteractiveModeContext } from "../../helpers/interactive-mode-context";
-
-/**
- * Starts watching the shared spinner ticker; the returned probe reports whether
- * its interval is still armed. Collab relay sockets keep a heartbeat interval on
- * the same fake clock, so `vi.getTimerCount()` cannot isolate the ticker. Call
- * after `vi.useFakeTimers()` and before any live block registers.
- */
-function watchSpinnerTicker(): () => boolean {
-	const arm = spyOn(globalThis, "setInterval");
-	const clear = spyOn(globalThis, "clearInterval");
-	return () =>
-		arm.mock.calls.some(([, ms], index) => {
-			if (ms !== DEFAULT_SPINNER_INTERVAL_MS) return false;
-			const timer = arm.mock.results[index]?.value;
-			return !clear.mock.calls.some(([cleared]) => cleared === timer);
-		});
-}
 
 // Contract under test: live tool previews that render a pending/running status
 // must keep the spinner glyph tied to the shared tool-frame ticker. This covers
@@ -231,7 +218,7 @@ describe("ToolExecutionComponent live preview spinners", () => {
 	// CPU scales with block count.
 	it("drives every concurrent live block from a single shared spinner timer", () => {
 		vi.useFakeTimers();
-		const setIntervalSpy = vi.spyOn(globalThis, "setInterval");
+		const setTimeoutSpy = vi.spyOn(globalThis, "setTimeout");
 		const renders = [vi.fn(), vi.fn(), vi.fn()];
 		const components = renders.map(
 			requestComponentRender =>
@@ -246,8 +233,9 @@ describe("ToolExecutionComponent live preview spinners", () => {
 		);
 
 		try {
-			const spinnerTimers = setIntervalSpy.mock.calls.filter(([, ms]) => ms === DEFAULT_SPINNER_INTERVAL_MS).length;
-			// One shared ticker for all three live blocks, not three.
+			// One shared ticker for all three live blocks, not three: a single timer armed for the
+			// shared clock's next boundary (a full period from t=0).
+			const spinnerTimers = setTimeoutSpy.mock.calls.filter(([, ms]) => ms === DEFAULT_SPINNER_INTERVAL_MS).length;
 			expect(spinnerTimers).toBe(1);
 
 			// A single tick repaints every registered block in lockstep.
@@ -285,7 +273,7 @@ describe("ToolExecutionComponent live preview spinners", () => {
 			expect(requestComponentRender).toHaveBeenCalledTimes(2);
 			vi.advanceTimersByTime(10_000);
 			expect(requestComponentRender).toHaveBeenCalledTimes(2);
-			expect(vi.getTimerCount()).toBe(0);
+			expect(sharedSpinnerTickerArmed()).toBe(false);
 
 			// Back to the default: the shared ticker is re-armed at the default period.
 			setSpinnerInterval(DEFAULT_SPINNER_INTERVAL_MS);
@@ -435,7 +423,6 @@ describe("ToolExecutionComponent live preview spinners", () => {
 		const renameSpy = spyOn(fsp, "rename").mockResolvedValue(undefined);
 		try {
 			vi.useFakeTimers();
-			const tickerArmed = watchSpinnerTicker();
 
 			const chatContainer = new TranscriptContainer();
 			const liveBlock = new ToolExecutionComponent(
@@ -447,7 +434,7 @@ describe("ToolExecutionComponent live preview spinners", () => {
 				process.cwd(),
 			);
 			chatContainer.addChild(liveBlock);
-			expect(tickerArmed()).toBe(true);
+			expect(sharedSpinnerTickerArmed()).toBe(true);
 
 			await Settings.init({ inMemory: true });
 			const ctx = {
@@ -569,7 +556,7 @@ describe("ToolExecutionComponent live preview spinners", () => {
 				await guest.join(link);
 
 				expect(chatContainer.children).not.toContain(liveBlock);
-				expect(tickerArmed()).toBe(false);
+				expect(sharedSpinnerTickerArmed()).toBe(false);
 			} finally {
 				hostSocket.close();
 				await guest.leave("test cleanup").catch(() => {});
@@ -604,7 +591,6 @@ describe("ToolExecutionComponent live preview spinners", () => {
 		const renameSpy = spyOn(fsp, "rename").mockResolvedValue(undefined);
 		try {
 			vi.useFakeTimers();
-			const tickerArmed = watchSpinnerTicker();
 
 			const chatContainer = new TranscriptContainer();
 			await Settings.init({ inMemory: true });
@@ -643,7 +629,7 @@ describe("ToolExecutionComponent live preview spinners", () => {
 				(child): child is ToolExecutionComponent => child instanceof ToolExecutionComponent,
 			);
 			if (!displaceableBlock) throw new Error("expected the wait to render a live block");
-			expect(tickerArmed()).toBe(true);
+			expect(sharedSpinnerTickerArmed()).toBe(true);
 
 			const ctx = {
 				settings: Settings.isolated(),
@@ -781,7 +767,7 @@ describe("ToolExecutionComponent live preview spinners", () => {
 				// rendered row survives the failed resync untouched.
 				expect(chatContainer.children).toContain(displaceableBlock);
 				// ...but it no longer holds the shared ticker open.
-				expect(tickerArmed()).toBe(false);
+				expect(sharedSpinnerTickerArmed()).toBe(false);
 			} finally {
 				hostSocket.close();
 				await guest.leave("test cleanup").catch(() => {});
@@ -808,7 +794,6 @@ describe("ToolExecutionComponent live preview spinners", () => {
 		const renameSpy = spyOn(fsp, "rename").mockResolvedValue(undefined);
 		try {
 			vi.useFakeTimers();
-			const tickerArmed = watchSpinnerTicker();
 
 			const chatContainer = new TranscriptContainer();
 			const pendingBlock = new ToolExecutionComponent(
@@ -829,7 +814,7 @@ describe("ToolExecutionComponent live preview spinners", () => {
 				process.cwd(),
 			);
 			chatContainer.addChild(displaceableBlock);
-			expect(tickerArmed()).toBe(true);
+			expect(sharedSpinnerTickerArmed()).toBe(true);
 
 			const pendingDisposeSpy = spyOn(pendingBlock, "dispose");
 			const displaceableDisposeSpy = spyOn(displaceableBlock, "dispose");
@@ -958,7 +943,7 @@ describe("ToolExecutionComponent live preview spinners", () => {
 				expect(chatContainer.children).toContain(pendingBlock);
 				expect(chatContainer.children).toContain(displaceableBlock);
 				// ...but neither holds the shared ticker open any longer.
-				expect(tickerArmed()).toBe(false);
+				expect(sharedSpinnerTickerArmed()).toBe(false);
 				// seal(), not dispose(): a rollback-preserved row's own renderer
 				// children must not be torn down.
 				expect(pendingDisposeSpy).not.toHaveBeenCalled();

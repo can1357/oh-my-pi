@@ -431,7 +431,9 @@ describe("Loader component", () => {
 			expect(loader.render(20).join("\n")).toContain("1 Checking");
 			loader.stop();
 
-			// Static: frame 0, and the only timer is the 1 Hz refresh for dynamic labels.
+			// Static: frame 0, and the only timer is the 1 Hz refresh for dynamic labels — on the
+			// clock's second boundaries (this loader starts at t=500, so its first refresh is at 1000),
+			// so every static row on screen refreshes in the same frame.
 			setSpinnerInterval(SPINNER_INTERVAL_STATIC);
 			let step = 0;
 			const still = new Loader(
@@ -443,13 +445,16 @@ describe("Loader component", () => {
 			);
 			ui.requestComponentRender.mockClear();
 			step = 1;
-			vi.advanceTimersByTime(999);
+			vi.advanceTimersByTime(499);
 			expect(ui.requestComponentRender).toHaveBeenCalledTimes(0);
 			expect(still.render(20).join("\n")).toContain("0 step 0");
 			vi.advanceTimersByTime(1);
 			expect(still.render(20).join("\n")).toContain("0 step 1");
-			vi.advanceTimersByTime(5000);
+			step = 2;
+			vi.advanceTimersByTime(999);
 			expect(still.render(20).join("\n")).toContain("0 step 1");
+			vi.advanceTimersByTime(1);
+			expect(still.render(20).join("\n")).toContain("0 step 2");
 			still.stop();
 		} finally {
 			setSpinnerInterval(DEFAULT_SPINNER_INTERVAL_MS);
