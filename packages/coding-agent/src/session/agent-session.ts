@@ -6953,6 +6953,13 @@ export class AgentSession implements SettingsScope {
 		// agent-initiated turns never trigger them.
 		const keywordNotices = options?.synthetic ? [] : this.#createMagicKeywordNotices(expandedText);
 
+		// A `^` mention in a non-synthetic prompt mints a new alias. The hidden
+		// session-agent notice (which tells the model about the alias) must ride
+		// with the message via prependMessages — not as a separate steer — so the
+		// model sees both in the same turn (#14093).
+		const sessionAgentNotice = options?.synthetic ? undefined : this.#tools.takeSessionAgentNotice();
+		const prependNotices = sessionAgentNotice ? [...keywordNotices, sessionAgentNotice] : keywordNotices;
+
 		// A user-initiated prompt (typed message or the `.`/`c` continue shortcut)
 		// re-enables advisor auto-resume that a prior user interrupt suppressed.
 		// Agent-initiated synthetic prompts (auto-continue, plan, reminders) do not.
@@ -6984,7 +6991,7 @@ export class AgentSession implements SettingsScope {
 			const queued = await this.#queueUserMessage(expandedText, options?.images, streamingBehavior, {
 				timestamp: submittedAt,
 				attribution: promptAttribution,
-				prependMessages: keywordNotices,
+				prependMessages: prependNotices,
 				rawText: typedText,
 				onPromptAdmitted: options?.onPromptAdmitted,
 				promptGeneration: queueGeneration,
@@ -7059,7 +7066,7 @@ export class AgentSession implements SettingsScope {
 			await this.#queueUserMessage(expandedText, options?.images, streamingBehavior, {
 				timestamp: submittedAt,
 				attribution: promptAttribution,
-				prependMessages: keywordNotices,
+				prependMessages: prependNotices,
 				rawText: typedText,
 				preprocessed: {
 					images: normalizedImages,
@@ -7228,7 +7235,7 @@ export class AgentSession implements SettingsScope {
 
 			await this.#queueCustomMessage(message, streamingBehavior, {
 				queueChipText: options?.queueChipText,
-				prependMessages: keywordNotices,
+				prependMessages: prependNotices,
 				onPromptAdmitted: options?.onPromptAdmitted,
 			});
 			outcome.sessionClaimed = true;
@@ -7274,7 +7281,7 @@ export class AgentSession implements SettingsScope {
 			await this.#queueCustomMessage(message, streamingBehavior, {
 				queueChipText: options?.queueChipText,
 				preprocessed: { content: preparedMessage.content, descriptionNotice },
-				prependMessages: keywordNotices,
+				prependMessages: prependNotices,
 				onPromptAdmitted: options?.onPromptAdmitted,
 			});
 			outcome.sessionClaimed = true;
@@ -8010,13 +8017,9 @@ export class AgentSession implements SettingsScope {
 		}
 		this.#allowQueuedMessageDrainRetry();
 		// Publish the complete group without yielding: removal owns contiguous companions.
-		// A `^` mention in a steered or follow-up message mints a new alias mid-turn.
-		// The hidden session-agent notice (which idle prompts deliver via
-		// #promptWithMessage) must ride the queued message too, or the model never
-		// learns the alias and reads the tag as plain text (#14093).
+		// The session-agent notice rides via prependMessages (from prompt()),
+		// so it arrives alongside the user message in the same turn (#14093).
 		if (mode === "followUp") {
-			const sessionAgentNotice = this.#tools.takeSessionAgentNotice();
-			if (sessionAgentNotice) this.agent.followUp(sessionAgentNotice);
 			for (const notice of prependMessages) this.agent.followUp(notice);
 			for (const notice of attachmentSourceNotices) this.agent.followUp(notice);
 			if (imageDescriptionNotice) this.agent.followUp(imageDescriptionNotice);
@@ -8029,8 +8032,6 @@ export class AgentSession implements SettingsScope {
 			this.#queuedMessageRawText.set(userMessage, rawText);
 			this.agent.followUp(userMessage);
 		} else {
-			const sessionAgentNotice = this.#tools.takeSessionAgentNotice();
-			if (sessionAgentNotice) this.agent.steer(sessionAgentNotice);
 			for (const notice of prependMessages) this.agent.steer(notice);
 			for (const notice of attachmentSourceNotices) this.agent.steer(notice);
 			if (imageDescriptionNotice) this.agent.steer(imageDescriptionNotice);
