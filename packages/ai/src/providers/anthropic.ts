@@ -4929,6 +4929,11 @@ function buildParams(
 	disableThinkingIfToolChoiceForced(params, model);
 	ensureMaxTokensForThinking(params, maxOutputTokens);
 	applyPromptCaching(params, cacheControl);
+	if (model.compat.extraBody) {
+		// Configured last so a configured key wins over the transport's own
+		// value for that field (proxy routing hints, vendor extensions).
+		Object.assign(params, model.compat.extraBody);
+	}
 
 	return { params, requestControls };
 }

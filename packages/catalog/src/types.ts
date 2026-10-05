@@ -681,6 +681,13 @@ export interface AnthropicCompat {
 	 * predates the framing and rejects it; class rules set `false` there.
 	 */
 	injectClaudeCodeInstruction?: boolean;
+	/**
+	 * Extra top-level fields merged into the Messages request body (e.g. gateway
+	 * routing hints for Anthropic-compatible proxies). Merged last, so a
+	 * configured key wins over the transport's own value for that field.
+	 * See {@link OpenAICompat.extraBody}.
+	 */
+	extraBody?: Record<string, unknown>;
 	/** Strip image inputs before encoding (text-only serving of a multimodal id). */
 	stripImageInput?: boolean;
 	/** Thinking-loop watchdog guard family applied to streamed reasoning. */
@@ -1020,6 +1027,8 @@ export interface ResolvedOpenAIResponsesCompat extends ResolvedOpenAISharedCompa
 	harmonyLeakMitigation: boolean;
 	/** Responses-surface prompt-cache marker dialect (OpenRouter-Anthropic `cache_control`). */
 	cacheControlFormat?: OpenAICompat["cacheControlFormat"];
+	/** See {@link OpenAICompat.extraBody}. */
+	extraBody?: OpenAICompat["extraBody"];
 }
 
 /**
@@ -1040,6 +1049,7 @@ export type ResolvedAnthropicCompat = Required<
 		| "disabledThinking"
 		| "stripThinkingHistory"
 		| "fastMode"
+		| "extraBody"
 	>
 > & {
 	/** Effort-beta override; undefined keeps the transport's legacy heuristic. */
@@ -1058,6 +1068,8 @@ export type ResolvedAnthropicCompat = Required<
 	 * this field keep matching.
 	 */
 	bedrockMessagesApi?: boolean;
+	/** See {@link AnthropicCompat.extraBody}. */
+	extraBody?: AnthropicCompat["extraBody"];
 	/**
 	 * Stream-watchdog idle-timeout fallback in ms for slow reasoning hosts; 0 disables the idle watchdog.
 	 * Undefined defers to `PI_STREAM_IDLE_TIMEOUT_MS`, then the legacy

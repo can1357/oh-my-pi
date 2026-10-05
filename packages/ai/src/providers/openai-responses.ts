@@ -1361,7 +1361,12 @@ export function buildParams(
 		applyOpenAIGatewayRouting(params, model.compat);
 	}
 
-	applyOpenAIExtraBody(params, options?.extraBody);
+	// Configured `compat.extraBody` applies to every Responses request; a
+	// per-call wrapper blob wins key by key.
+	applyOpenAIExtraBody(
+		params,
+		options?.extraBody ? { ...model.compat.extraBody, ...options.extraBody } : model.compat.extraBody,
+	);
 	applyOpenAIResponsesPromptCachePolicy(params, model, options, statefulCacheBaseline);
 
 	let trailingScaffoldingItems = 0;

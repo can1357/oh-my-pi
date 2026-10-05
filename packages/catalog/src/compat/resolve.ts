@@ -796,6 +796,7 @@ function resolveOpenAIResponsesPolicy(
 		rejectRootObjectUnion: false,
 		retryWithoutStrictOnGrammarError: false,
 		cacheControlFormat: isOpenRouter && isAnthropicModel ? "anthropic" : undefined,
+		extraBody: undefined,
 		stripDeepseekSpecialTokens: facts.is("deepseek") && (provider === "nvidia" || provider === "deepseek"),
 		streamMarkupHealingPattern: detectStreamMarkupHealing(provider, facts, baseUrl),
 		reasoningDeltasMayBeCumulative: false,
@@ -913,6 +914,7 @@ function resolveAnthropicPolicy(
 		stripThinkingHistory: undefined,
 		fastMode: undefined,
 		streamIdleTimeoutMs: spec.compat?.streamIdleTimeoutMs,
+		extraBody: undefined,
 	};
 	applyWireAxes(compat, axes.wire, "anthropic-messages");
 	applyCompatOverrides(compat, spec.compat);

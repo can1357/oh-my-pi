@@ -32,6 +32,7 @@ import {
 import type { ResponseCreateParamsStreaming, ResponseStreamEvent } from "./openai-responses-wire";
 import {
 	applyCommonResponsesSamplingParams,
+	applyOpenAIExtraBody,
 	applyResponsesReasoningParams,
 	buildResponsesInput,
 	createInitialResponsesAssistantMessage,
@@ -446,6 +447,10 @@ function buildParams(
 	}
 
 	applyResponsesReasoningParams(params, model, options);
+
+	// Configured `compat.extraBody` applies to every Azure Responses request;
+	// merged last so a configured key wins over the transport's own value.
+	applyOpenAIExtraBody(params, model.compat.extraBody);
 
 	return params;
 }

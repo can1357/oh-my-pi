@@ -150,6 +150,7 @@ Types: `OpenAICompat` / `ResolvedOpenAISharedCompat` in `packages/catalog/src/ty
 | `supportsConfigurationUpdate` | `true` for `gpt-6-astra` (class rule, any host); `false` otherwise | Pins request-level `reasoning.effort` to the session baseline and carries later changes as `configuration_update` input items; set `false` in `models.yml` for custom proxies that 400 on the item type — the changed effort is then sent at the request level and no item is emitted |
 | `supportsSteering` | `true` for GPT-6+ (class rule, any host); `false` otherwise | Codex WebSocket turns send queued user steering as `response.steer` into the streaming response; the next request reads the server's automatic continuation or sends only the pending tool output |
 | `supportsObfuscationOptOut` | Official OpenAI | Allows `stream_options: { include_obfuscation: false }` |
+| `extraBody` | unset (settable per model or provider in `models.yml`; no bundled rule assigns it on this surface) | Arbitrary JSON merged into the Responses request body after the transport builds it (`applyOpenAIExtraBody`); a per-call adapter `extraBody` wins key by key |
 
 Stateful chaining precedence is the call's `statefulResponses` option, then
 `PI_OPENAI_STATEFUL`, then `compat.statefulResponses`, then

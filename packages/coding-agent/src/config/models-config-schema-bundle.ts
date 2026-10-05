@@ -15,6 +15,30 @@ function validateMaxContextWindow(
 	}
 	return true;
 }
+/**
+ * APIs whose transport merges `compat.extraBody` into the outgoing request
+ * body (issue #12087). Configuring it for any other api is a config error:
+ * the field would otherwise be accepted and silently dropped.
+ *
+ * `openai-codex-responses` is deliberately absent. That transport strips
+ * caller-supplied parameters because the Codex backend rejects the ones it
+ * does not know (`{"detail":"Unsupported parameter: ..."}`), so an arbitrary
+ * extra body would turn every Codex turn into a 400.
+ */
+const EXTRA_BODY_APIS: readonly string[] = [
+	"openai-completions",
+	"openai-responses",
+	"azure-openai-responses",
+	"anthropic-messages",
+];
+
+function validateExtraBody(value: { api?: string; compat?: { extraBody?: unknown } }, ctx: NarrowContext): boolean {
+	if (value.compat?.extraBody === undefined || value.api === undefined) return true;
+	if (EXTRA_BODY_APIS.includes(value.api)) return true;
+	return ctx.mustBe(
+		`compat.extraBody dropped for api "${value.api}" (only ${EXTRA_BODY_APIS.join(", ")} merge it into the request body)`,
+	);
+}
 
 export const getModelsConfigSchemaBundle = once(() => {
 	const OpenRouterRoutingSchema = type({
@@ -247,7 +271,7 @@ export const getModelsConfigSchemaBundle = once(() => {
 		) {
 			return ctx.mustBe("compactionModel a non-empty string");
 		}
-		return validateMaxContextWindow(value, ctx);
+		return validateMaxContextWindow(value, ctx) && validateExtraBody(value, ctx);
 	});
 
 	const ModelOverrideSchema = type({
@@ -369,7 +393,7 @@ export const getModelsConfigSchemaBundle = once(() => {
 		if (value.apiKey !== undefined && typeof value.apiKey === "string" && value.apiKey.length === 0) {
 			return ctx.mustBe("apiKey a non-empty string");
 		}
-		return true;
+		return validateExtraBody(value, ctx);
 	});
 
 	const ModelsConfigSchema = type({

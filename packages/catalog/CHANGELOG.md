@@ -9,6 +9,9 @@
 ### Changed
 
 - Changed OpenAI Responses endpoints other than OpenAI, Azure OpenAI, and Codex (custom and local servers, proxies including `azure`/`openai-codex` providers pointed at a non-Azure/non-Codex `baseUrl`, OpenRouter) to default `supportsImageDetailOriginal` to `false`, so snapcompact frames and computer screenshots go out as `detail: "auto"` instead of failing on servers that reject `original`; set `compat.supportsImageDetailOriginal: true` to opt a host in ([#13687](https://github.com/can1357/oh-my-pi/pull/13687) by [@alphastorm](https://github.com/alphastorm)).
+### Fixed
+
+- Fixed the `extra-body` compat axis and `compat.extraBody` being dropped for every API except chat completions. The axis now applies to the OpenAI Responses record and to Anthropic Messages, and both resolved compat records carry the field so a configured extra body survives `buildModel` ([#12087](https://github.com/can1357/oh-my-pi/issues/12087)).
 
 ## [18.6.2] - 2026-10-04
 
