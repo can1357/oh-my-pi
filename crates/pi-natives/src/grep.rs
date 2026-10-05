@@ -1212,6 +1212,26 @@ fn per_file_params(params: SearchParams) -> SearchParams {
 	SearchParams { max_count: file_limit, offset: 0, ..params }
 }
 
+/// `per_file_params` for a single explicit file, preserving `offset`.
+///
+/// The directory walks zero the offset because each file applies it fresh while
+/// accumulating a budget across files; a direct-file search applies it once to
+/// one stream, so it has to survive. `MatchCollector::matched` skips `offset`
+/// before counting against `max_count`, so folding the cap in here keeps both
+/// meaningful — reusing `per_file_params` verbatim would silently drop the
+/// offset and shift every result on a paginated single-file search.
+fn single_file_params(params: SearchParams) -> SearchParams {
+	let file_limit = match params.mode {
+		OutputMode::Content => match (params.max_count, params.max_count_per_file) {
+			(Some(global), Some(per_file)) => Some(global.min(per_file)),
+			(global, per_file) => global.or(per_file),
+		},
+		OutputMode::Count => None,
+		OutputMode::FilesWithMatches => Some(1),
+	};
+	SearchParams { max_count: file_limit, ..params }
+}
+
 fn streaming_stop_after(params: SearchParams) -> Option<u64> {
 	if params.mode != OutputMode::Content || params.offset != 0 {
 		return None;
@@ -2265,6 +2285,12 @@ fn grep_sync_with_matcher<M: Matcher + Sync>(
 			});
 		}
 
+		// A single explicit file is one file, so `max_count_per_file` applies to it
+		// exactly as it does inside a directory walk. It used to reach only
+		// `per_file_params`, whose three callers are all directory walks, so the
+		// option was silently dropped the moment the path was a file — the native
+		// contract documents it unconditionally.
+		let params = single_file_params(params);
 		let path_string = search_path.to_string_lossy().into_owned();
 		let search = match stream {
 			Some(sink) if output_mode == OutputMode::Content => run_streaming_search_slice(
@@ -3232,6 +3258,63 @@ mod tests {
 		assert_eq!(result.matches[0].match_count, Some(2));
 	}
 
+	/// roboomp: `single_file_params` also changed single-file Count mode.
+	///
+	/// Before this change the direct-file branch passed the caller's `max_count`
+	/// to `MatchCollector`, so `grep({ path: file, mode: Count, maxCount: 2 })` on a
+	/// file with 5 matches stopped at the third match and reported `matchCount: 3`, the
+	/// max+1 value from the early `Ok(false)`. With `Count => None` the same call now
+	/// reports 5, matching the directory path, where aggregation pushes the full
+	/// `result.match_count`.
+	///
+	/// Self-contained on purpose: the shared `write_file` and `base_grep_config`
+	/// helpers are `#[cfg(unix)]`, so this case builds its own file and config and
+	/// therefore runs on every platform.
+	#[test]
+	fn grep_single_file_count_mode_reports_every_match() {
+		let dir = std::env::temp_dir().join(format!(
+			"omp-grep-count-{}-{:?}",
+			std::process::id(),
+			std::thread::current().id()
+		));
+		std::fs::create_dir_all(&dir).expect("create temp dir");
+		let file = dir.join("only.txt");
+		std::fs::write(&file, "needle 1\nneedle 2\nneedle 3\nneedle 4\nneedle 5\n")
+			.expect("write test file");
+
+		let config = super::GrepConfig {
+			pattern:            "needle".to_string(),
+			path:               file.to_string_lossy().into_owned(),
+			glob:               None,
+			recursive:          None,
+			type_filter:        None,
+			ignore_case:        None,
+			multiline:          None,
+			hidden:             None,
+			gitignore:          Some(false),
+			max_count:          Some(2),
+			offset:             None,
+			context_before:     None,
+			context_after:      None,
+			context:            None,
+			max_columns:        None,
+			mode:               Some(super::GrepOutputMode::Count),
+			max_count_per_file: None,
+			filesystem:         super::BlockingFs::native(),
+			stream:             None,
+		};
+
+		let result = super::grep_sync(config, None, crate::task::CancelToken::default())
+			.expect("single-file grep should succeed");
+		let _ = std::fs::remove_dir_all(&dir);
+
+		assert_eq!(
+			result.matches[0].match_count,
+			Some(5),
+			"count mode must report every match in a single file, not the content cap"
+		);
+	}
+
 	#[cfg(unix)]
 	#[test]
 	fn grep_streaming_respects_pre_cancelled_token() {
@@ -3309,6 +3392,61 @@ mod tests {
 		assert_eq!(paths, ["a.txt", "a.txt", "z.txt"], "hot file must not starve later files");
 		assert_eq!(result.files_with_matches, 2);
 		assert_eq!(result.limit_reached, Some(true));
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn single_file_target_honours_max_count_per_file() {
+		// The cap used to reach only `per_file_params`, whose callers are all
+		// directory walks, so passing one explicit file silently dropped it.
+		let root = TempDirGuard::new();
+		let hot = root.path().join("hot.txt");
+		write_file(&hot, "needle 1\nneedle 2\nneedle 3\nneedle 4\nneedle 5\n");
+
+		let mut config = base_grep_config(&hot);
+		config.max_count = Some(4);
+		config.max_count_per_file = Some(2);
+
+		let result = grep_sync(config, None, task::CancelToken::default())
+			.expect("single-file grep should succeed");
+
+		assert_eq!(result.matches.len(), 2, "per-file cap must apply to a single file");
+		assert_eq!(result.files_with_matches, 1);
+		assert_eq!(result.limit_reached, Some(true));
+		assert_eq!(
+			result.total_matches, 3,
+			"the per-file cap stops the scan at the match after the last collected one",
+		);
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn single_file_target_keeps_offset_when_max_count_per_file_applies() {
+		// `per_file_params` zeroes the offset because each directory entry
+		// applies it fresh. A single file applies it once, so folding the cap in
+		// must not drop it — otherwise every paginated single-file search
+		// silently shifts its window.
+		let root = TempDirGuard::new();
+		let hot = root.path().join("hot.txt");
+		write_file(&hot, "needle 1\nneedle 2\nneedle 3\nneedle 4\nneedle 5\n");
+
+		let mut config = base_grep_config(&hot);
+		config.max_count = Some(10);
+		config.max_count_per_file = Some(2);
+		config.offset = Some(2);
+
+		let result =
+			grep_sync(config, None, task::CancelToken::default()).expect("offset grep should succeed");
+
+		assert_eq!(
+			result
+				.matches
+				.iter()
+				.map(|m| m.line_number)
+				.collect::<Vec<_>>(),
+			vec![3, 4],
+			"offset applies first, then the per-file cap bounds collection",
+		);
 	}
 
 	#[cfg(unix)]

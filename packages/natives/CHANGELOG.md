@@ -27,6 +27,8 @@
 - Fixed strings passed to native functions sometimes losing their last characters when they ended in non-ASCII text (seen as `highlightCode` dropping the end of long lines) ([#14454](https://github.com/can1357/oh-my-pi/pull/14454) by [@H4vC](https://github.com/H4vC))
 - Fixed `renderMermaidAscii` hanging and running out of memory on an `xychart` axis whose range is finer than floating-point precision ([#14454](https://github.com/can1357/oh-my-pi/pull/14454) by [@H4vC](https://github.com/H4vC))
 - Fixed `getWorkProfile()` attributing async work to the wrong region or dropping it ([#14454](https://github.com/can1357/oh-my-pi/pull/14454) by [@H4vC](https://github.com/H4vC))
+- Fixed `maxCountPerFile` being ignored when `grep` is given a single explicit file. It reached only the directory walks, so a hot file returned the whole global `maxCount` budget; the option is documented as unconditional, and the offset now survives the fold so paginated single-file searches are unaffected ([#14162](https://github.com/can1357/oh-my-pi/issues/14162)).
+- Fixed single-file `count` mode applying the `maxCount` content cap. `single_file_params` now clears `max_count` for `OutputMode::Count` the way `per_file_params` already did, so `grep({ path: file, mode: Count, maxCount: 2 })` reports every match in the file instead of the cap's `max+1` value and matches the directory path ([#14327](https://github.com/can1357/oh-my-pi/pull/14327)).
 
 ## [18.6.2] - 2026-10-04
 
