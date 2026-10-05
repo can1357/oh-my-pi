@@ -22,6 +22,10 @@ import {
 import { CombinedAutocompleteProvider } from "@oh-my-pi/pi-tui/autocomplete";
 import { __resetDirsFromEnvForTests, removeWithRetries, setAgentDir } from "@oh-my-pi/pi-utils";
 import { restoreEnvValue } from "./helpers/settings-test-state";
+import { Settings } from "../src/config/settings";
+import { snapshotResource } from "../src/extensibility/resource-snapshot";
+import { excludeReviewedResources } from "../src/extensibility/resource-decisions";
+import { cfgUserResourceExclusions } from "../src/extensibility/resource-settings";
 const fixturesDir = path.resolve(import.meta.dirname, "fixtures/skills");
 const collisionFixturesDir = path.resolve(import.meta.dirname, "fixtures/skills-collision");
 
@@ -538,6 +542,46 @@ describe("collision handling", () => {
 	const first = path.join(collisionFixturesDir, "first");
 	const second = path.join(collisionFixturesDir, "second");
 	const mirror = path.join(collisionFixturesDir, "mirror");
+
+	it("loads the confirmed preferred file and restores a hidden copy when its supporting code changes", async () => {
+		const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "skills-confirmed-choice-")));
+		try {
+			const roots = [path.join(root, "first"), path.join(root, "second")];
+			for (let index = 0; index < roots.length; index++) {
+				await Bun.write(
+					path.join(roots[index], "calendar", "SKILL.md"),
+					`---\nname: calendar\ndescription: Calendar helpers\n---\nWorkflow ${index}\n`,
+				);
+			}
+			const snapshots = await Promise.all(
+				roots.map((directory, index) =>
+					snapshotResource({
+						id: `${index}`,
+						label: "calendar",
+						kind: "skill",
+						root: path.join(directory, "calendar"),
+						entrypoint: path.join(directory, "calendar", "SKILL.md"),
+					}),
+				),
+			);
+			const settings = Settings.isolated({});
+			await excludeReviewedResources(snapshots, "1", settings);
+			const options = {
+				...DISABLE_ALL_BUILTIN_SKILLS,
+				customDirectories: roots,
+				resourceExclusions: cfgUserResourceExclusions.get(settings),
+			};
+			const selected = await loadSkills(options);
+			expect(selected.skills.map(skill => skill.filePath)).toEqual([path.join(roots[1], "calendar", "SKILL.md")]);
+			await Bun.write(path.join(roots[0], "calendar", "scripts", "check.py"), "print('new behavior')\n");
+			const reconsidered = await loadSkills(options);
+			expect(reconsidered.skills.map(skill => skill.filePath).sort()).toEqual(
+				roots.map(directory => path.join(directory, "calendar", "SKILL.md")).sort(),
+			);
+		} finally {
+			await removeWithRetries(root);
+		}
+	});
 
 	it("keeps the first-admitted skill on its bare name and namespaces the later collision", async () => {
 		const { skills, warnings } = await loadSkills({

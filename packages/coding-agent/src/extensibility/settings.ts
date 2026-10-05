@@ -4,6 +4,7 @@
  */
 import { combine, register, type SettingValueOf } from "../config/registry";
 import { DEFAULT_SKILLS_URL } from "@oh-my-pi/pi-wire/skillshare";
+import { cfgUserResourceExclusions } from "./resource-settings";
 
 const EMPTY_STRING_ARRAY: string[] = [];
 
@@ -119,6 +120,7 @@ export const cfgSkills = combine({
 	ignoredSkills: cfgSkillsIgnoredSkills,
 	includeSkills: cfgSkillsIncludeSkills,
 	dedupeSameOrigin: cfgSkillsDedupeSameOrigin,
+	resourceExclusions: cfgUserResourceExclusions,
 });
 
 /** Skill discovery options ({@link cfgSkills}); omitted fields fall back to the setting defaults. */

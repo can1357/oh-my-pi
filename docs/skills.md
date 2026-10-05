@@ -180,6 +180,103 @@ provider precedence selects one active skill, while diagnostics retain the hidde
 variant and its version. Skills without repository metadata and skills declaring
 different repositories continue to receive namespaced aliases.
 
+### Assisted diagnostics
+
+`/skills diagnostics` offers optional AI analysis of competing skill copies,
+including copies without repository metadata:
+
+```text
+/skills diagnostics analyze
+/skills diagnostics analyze review
+```
+
+The first command opens a group selector; the second selects a diagnostic group
+by its raw skill name. Before sending any resource content, OMP names the model,
+shows the selected resource paths, payload size, and incomplete coverage, then
+asks for consent. Analysis uses the configured `smol` model role and may incur
+provider charges. Normal diagnostics and startup notices do not trigger analysis.
+
+The advisory report separates an inferred relationship, cited file evidence,
+meaningful differences, and a recommendation. It can recommend keeping all
+copies or preferring one for OMP. Inferences do not establish authorship, origin,
+authenticity, or interchangeable runtime behavior. Supporting scripts and
+references are inspected as data, never executed; the main conversation and
+session system prompt are not sent.
+
+Known credential files and secret patterns are filtered, but a resource may still
+contain private information that detection cannot identify. Review the selected
+files before agreeing to send them to a model provider.
+
+Applying a preference requires a **second confirmation**. A confirmed choice
+hides the other reviewed copies in OMP only; nothing is uninstalled and other
+harnesses' files are untouched. The decision records fingerprints for every
+reviewed copy, including the preferred one. Changes to any copy invalidate the
+decision and allow it to load again. Incomplete reviews cannot authorize hiding
+copies. Only user-owned global approval records are honored: repository, launch,
+and runtime configuration layers cannot create approvals. Invalid records are
+ignored with a warning. Preferences do not override independent enable/disable
+or skill inclusion rules.
+
+Restore all globally saved choices with:
+
+```bash
+omp config reset diagnostics.resourceExclusions
+```
+
+#### Extension and plugin analysis
+
+The existing plugin health command offers the same read-only analyzer:
+
+```bash
+omp plugin doctor --analyze plugin-a plugin-b
+omp plugin doctor --analyze ./generic-extension.ts ./omp-extension.ts --model provider/model-id
+```
+
+Selecting an entrypoint inside a known extension package is refused: select its
+owning package so a confirmed exclusion covers all of its hooks, tools, skills,
+and other capabilities. Standalone extension files remain selectable.
+
+
+Select exactly two installed names or paths to extension files/package
+directories. OMP asks before sending their contents. `--yes` supplies **analysis
+consent only**, enabling non-interactive reports:
+
+```bash
+omp plugin doctor --analyze plugin-a plugin-b --yes --json
+```
+
+`--apply` requests a separate interactive confirmation after the report; it is
+refused with `--json` or without a terminal. `--fix` cannot be combined with
+`--analyze`: existing deterministic repairs never authorize AI-driven choices.
+Confirmed extension exclusions take effect on discovery/loading, including
+explicit paths. Restart existing sessions to unload extensions, hooks, tools,
+or MCP servers they already loaded.
+
+Snapshots are bounded to 40 files, 40 KiB per file, and 80 KiB of file content
+per resource. The aggregate resource-data budget is 400 KiB for two to eight
+copies, checked before consent. Symlinks, credential files, dependencies, binary
+payloads, and uninspected code are reported as omissions. Known provider tokens,
+secret-named assignments, and URL passwords are redacted. Incomplete coverage
+forces a keep-all recommendation.
+
+Code checks are deliberately bounded:
+
+- Runtime JavaScript/TypeScript imports use the transpiler's scanner; type-only
+  imports are ignored. Absolute, `file:`, `#`, `~`, nonliteral, and uninspected
+  external-package imports make coverage incomplete.
+- Node/Bun builtins, the Pi/OMP host APIs, and the host's TypeBox schema API are
+  platform assumptions; their implementations are not inspected.
+- Python imports must be known standard-library modules or actual local module
+  paths. Shell external/dynamic sourcing and unsupported code languages are
+  reported as incomplete.
+- Checks do not execute code, resolve a full module graph, simulate search paths,
+  or inspect programs merely launched by scripts. Static checks can conservatively
+  reject valid code.
+
+These are source-content comparisons, not a sandbox, a provenance attestation,
+or proof of interchangeable runtime behavior or safety.
+
+
 ## Runtime usage behavior
 
 ### System prompt exposure

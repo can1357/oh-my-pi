@@ -37,6 +37,7 @@ import userInvocationTemplate from "../prompts/skills/user-invocation.md" with {
 import { SKILLSHARE_PROVIDER_ID } from "../discovery/skillshare";
 import type { SkillPromptDetails } from "../session/messages";
 import { expandTilde } from "../tools/path-utils";
+import { excludedPathGate } from "../discovery/resource-exclusions";
 
 export { allowsSkillTokens, SKILL_TOKEN_RE };
 
@@ -449,7 +450,10 @@ export async function loadSkills(options: LoadSkillsOptions = {}): Promise<LoadS
 		disabledExtensions = [],
 		extensionRoots,
 		dedupeSameOrigin = false,
+		resourceExclusions = {},
 	} = options;
+	// One containment gate for every route a skill arrives by (providers, custom directories, managed, symlinks).
+	const isExcluded = excludedPathGate(resourceExclusions);
 
 	// Early return if skills are disabled
 	if (!enabled) {
@@ -629,6 +633,7 @@ export async function loadSkills(options: LoadSkillsOptions = {}): Promise<LoadS
 	for (let i = 0; i < filteredSkills.length; i++) {
 		const capSkill = filteredSkills[i];
 		const resolvedPath = realPaths[i];
+		if (await isExcluded(resolvedPath)) continue;
 
 		// Skip silently if we've already loaded this exact file (via symlink)
 		if (realPathSet.has(resolvedPath)) {
@@ -710,6 +715,7 @@ export async function loadSkills(options: LoadSkillsOptions = {}): Promise<LoadS
 	for (let i = 0; i < allCustomSkills.length; i++) {
 		const { skill, body, frontmatter, namespace } = allCustomSkills[i];
 		const resolvedPath = customRealPaths[i];
+		if (await isExcluded(resolvedPath)) continue;
 		if (realPathSet.has(resolvedPath)) continue;
 		if (admit(skill, body, frontmatter, namespace, resolvedPath) !== undefined) realPathSet.add(resolvedPath);
 	}
@@ -751,6 +757,7 @@ export async function loadSkills(options: LoadSkillsOptions = {}): Promise<LoadS
 	for (let i = 0; i < managedCandidates.length; i++) {
 		const capSkill = managedCandidates[i];
 		const resolvedPath = managedRealPaths[i];
+		if (await isExcluded(resolvedPath)) continue;
 		if (realPathSet.has(resolvedPath)) continue;
 		if (enabledAuthoredNames.has(capSkill.name)) continue; // an enabled authored skill owns this name
 		// Already claimed — e.g. by a custom-directory skill. LOAD-BEARING: custom
