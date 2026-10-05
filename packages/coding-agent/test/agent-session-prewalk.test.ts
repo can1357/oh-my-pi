@@ -1,7 +1,7 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
 import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
-import { Agent, type AgentTool, ThinkingLevel } from "@oh-my-pi/pi-agent-core";
+import { Agent, type AgentMessage, type AgentTool, ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import { type Api, Effort, type Model } from "@oh-my-pi/pi-ai";
 import { createMockModel, type MockResponse } from "@oh-my-pi/pi-ai/providers/mock";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
@@ -787,6 +787,156 @@ describe("AgentSession prewalk", () => {
 		).toBe(false);
 		expect(showStatus).toHaveBeenCalledTimes(3);
 		expect(showStatus).toHaveBeenCalledWith(expect.stringContaining("Prewalk reset"));
+	});
+
+	it("/prewalk off disarms the switch so later turns never hand off to @smol", async () => {
+		const primary = modelOrThrow("claude-sonnet-4-5");
+		const target = modelOrThrow("claude-sonnet-4-6");
+
+		const settings = Settings.isolated({ "compaction.enabled": false });
+		const mock = createMockModel({ responses: [toolCall("off-write", "write"), { content: ["done"] }] });
+		const requested: string[] = [];
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: {
+				model: primary,
+				systemPrompt: ["Test"],
+				tools: [writeTool as AgentTool],
+				messages: [],
+				thinkingLevel: Effort.Medium,
+			},
+			convertToLlm,
+			streamFn: (model, context, options) => {
+				requested.push(`${model.provider}/${model.id}`);
+				return mock.stream(model, context, options);
+			},
+		});
+		const sessionManager = SessionManager.inMemory();
+		session = new AgentSession({
+			agent,
+			sessionManager,
+			settings,
+			modelRegistry,
+			// `todo` is deliberately absent so the todo gate is open; the write call
+			// below is the implementation action that fires the handoff when armed.
+			toolRegistry: new Map([[writeTool.name, writeTool as AgentTool]]),
+			thinkingLevel: Effort.Medium,
+		});
+		const showStatus = vi.fn();
+		const runtime = {
+			ctx: {
+				session,
+				sessionManager,
+				settings,
+				collabGuest: false,
+				showStatus,
+				editor: { setText: vi.fn() },
+				refreshSlashCommandState: vi.fn(),
+			} as unknown as InteractiveModeContext,
+		} satisfies TuiSlashCommandRuntime;
+
+		settings.setModelRole("smol", `${target.provider}/${target.id}:medium`);
+		expect(await executeBuiltinSlashCommand("/prewalk", runtime)).toBe(true);
+		expect(session.getPrewalkState()?.target.id).toBe(target.id);
+
+		expect(await executeBuiltinSlashCommand("/prewalk off", runtime)).toBe(true);
+		expect(session.getPrewalkState()).toBeUndefined();
+		expect(showStatus).toHaveBeenLastCalledWith(
+			"Prewalk off: dropped the armed handoff; staying on the active model.",
+		);
+		// The arm steers the nudge, so on an idle session it is still queued and
+		// `agent.state.messages` cannot show it; the steering queue is where it lives.
+		expect(
+			agent.peekSteeringQueue().some(message => message.role === "custom" && message.customType === "prewalk-plan"),
+		).toBe(false);
+
+		// The write call is the implementation action that fires the handoff. With the arm
+		// still live the follow-up turn would run on @smol; disarmed, both turns stay on
+		// the planning model and the session never leaves it.
+		await session.prompt("do the task");
+
+		expect(requested).toEqual([`${primary.provider}/${primary.id}`, `${primary.provider}/${primary.id}`]);
+		expect(session.model?.id).toBe(primary.id);
+
+		// A second /prewalk off with nothing armed is reported, not silently ignored.
+		expect(await executeBuiltinSlashCommand("/prewalk off", runtime)).toBe(true);
+		expect(showStatus).toHaveBeenLastCalledWith("Prewalk off: no handoff was armed.");
+	});
+
+	it("/prewalk off drops the queued plan nudge before the next prompt dequeues it", async () => {
+		const primary = modelOrThrow("claude-sonnet-4-5");
+		const target = modelOrThrow("claude-sonnet-4-6");
+
+		const settings = Settings.isolated({ "compaction.enabled": false });
+		const mock = createMockModel({ responses: [{ content: ["done"] }] });
+		const requested: string[] = [];
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: {
+				model: primary,
+				systemPrompt: ["Test"],
+				tools: [writeTool as AgentTool],
+				messages: [],
+				thinkingLevel: Effort.Medium,
+			},
+			convertToLlm,
+			streamFn: (model, context, options) => {
+				requested.push(`${model.provider}/${model.id}`);
+				return mock.stream(model, context, options);
+			},
+		});
+		const sessionManager = SessionManager.inMemory();
+		session = new AgentSession({
+			agent,
+			sessionManager,
+			settings,
+			modelRegistry,
+			toolRegistry: new Map([[writeTool.name, writeTool as AgentTool]]),
+			thinkingLevel: Effort.Medium,
+		});
+		const showStatus = vi.fn();
+		const runtime = {
+			ctx: {
+				session,
+				sessionManager,
+				settings,
+				collabGuest: false,
+				showStatus,
+				editor: { setText: vi.fn() },
+				refreshSlashCommandState: vi.fn(),
+			} as unknown as InteractiveModeContext,
+		} satisfies TuiSlashCommandRuntime;
+
+		// `arm()` steers the nudge, so on an idle session it waits in the agent's
+		// steering queue and has not reached the transcript yet. Checking
+		// `agent.state.messages` here proves nothing.
+		const isQueuedPlanNudge = (message: AgentMessage) =>
+			message.role === "custom" && message.customType === "prewalk-plan";
+
+		settings.setModelRole("smol", `${target.provider}/${target.id}:medium`);
+		expect(await executeBuiltinSlashCommand("/prewalk", runtime)).toBe(true);
+		expect(agent.peekSteeringQueue().filter(isQueuedPlanNudge)).toHaveLength(1);
+
+		expect(await executeBuiltinSlashCommand("/prewalk off", runtime)).toBe(true);
+		expect(session.getPrewalkState()).toBeUndefined();
+		expect(agent.peekSteeringQueue().filter(isQueuedPlanNudge)).toHaveLength(0);
+
+		// The scrub rewrites the queue rather than clearing it, so steer a message
+		// behind it: this must still drain on the next prompt. A version that
+		// emptied the queue but left the session's drain blocked would fail here.
+		agent.steer({ role: "user", content: "and also check the tests", timestamp: Date.now() });
+
+		// The queued nudge would otherwise ride the next prompt's steering batch into
+		// the transcript and be sent to the model as a "write complete plan" developer message.
+		await session.prompt("do the task");
+
+		expect(requested).toEqual([`${primary.provider}/${primary.id}`]);
+		expect(
+			agent.state.messages.some(message => message.role === "custom" && message.customType === "prewalk-plan"),
+		).toBe(false);
+		expect(
+			agent.state.messages.some(message => message.role === "user" && message.content === "and also check the tests"),
+		).toBe(true);
 	});
 
 	it("/prewalk restart returns to @default and re-arms @smol", async () => {

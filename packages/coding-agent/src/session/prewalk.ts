@@ -85,6 +85,7 @@ export interface PrewalkCoordinatorHost {
 	getPlanReferencePath(): string;
 	setPlanProposalHandler(handler: PlanProposalHandler | null): void;
 	waitForSessionMessagePersistence(message: AgentMessage): Promise<void>;
+	reconcileQueuedMessageDrain(): void;
 	localProtocolOptions(): LocalProtocolOptions;
 }
 
@@ -351,6 +352,15 @@ export class PrewalkCoordinator {
 		const stateMessages = this.#host.agent.state.messages;
 		const filtered = stateMessages.filter(message => !isPlanNudge(message));
 		if (filtered.length !== stateMessages.length) this.#host.agent.replaceMessages(filtered);
+		// `arm()` steers the nudge, so while the session is idle it sits in the agent's
+		// steering queue and never reaches the transcript. `#clearPrewalkState()` resets
+		// `#planInjected`, so nothing else would drop it before the next prompt sends it.
+		const steering = this.#host.agent.peekSteeringQueue();
+		const remaining = steering.filter(message => !isPlanNudge(message));
+		if (remaining.length !== steering.length) {
+			this.#host.agent.replaceQueue("steering", remaining);
+			this.#host.reconcileQueuedMessageDrain();
+		}
 	}
 
 	async #finalizePlanYoloProposal(title: string): Promise<AgentToolResult<unknown>> {

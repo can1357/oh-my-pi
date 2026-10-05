@@ -177,6 +177,7 @@ describe("plan-yolo approval autosave", () => {
 				capturedHandler = handler ?? undefined;
 			},
 			waitForSessionMessagePersistence: async () => {},
+			reconcileQueuedMessageDrain: () => {},
 			localProtocolOptions: () => localOptions,
 		};
 		return { host, notices, modelTemporaryCalls, localOptions, getHandler: () => capturedHandler };

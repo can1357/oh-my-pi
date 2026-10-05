@@ -60,11 +60,14 @@ Run either slash command without restarting OMP:
 ```text
 /prewalk
 /prewalk restart
+/prewalk off
 ```
 
 `/prewalk` arms a one-shot handoff from the active model to the current `@smol` assignment.
 
 After a handoff, `/prewalk restart` immediately returns the session to the current `@default` assignment and re-arms the handoff to `@smol`. Both roles are resolved when the command runs, so the cycle is independent of concrete model names and does not alter either role's persisted configuration.
+
+`/prewalk off` drops an armed handoff before it fires: the pending plan nudge is removed and the session stays on its active model instead of switching at the next edit/write. It is the command-level counterpart to turning `prewalk.enabled` off, and it is a no-op when nothing is armed.
 
 If prewalk is already armed, `/prewalk` leaves the existing target in place. `/prewalk restart` also preserves a matching arm; if its existing target differs from the current `@smol` resolution, restart is rejected before changing the active model. To choose a different target at startup, use `--prewalk-into`.
 
