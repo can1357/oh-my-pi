@@ -31,9 +31,9 @@ pub struct SloppyEngine {
 }
 
 impl SloppyEngine {
-	fn sections(args: &ArgSnapshot, streaming: bool) -> Vec<SloppySection> {
+	fn sections(args: &ArgSnapshot, streaming: bool) -> Result<Vec<SloppySection>, EditError> {
 		let Some(input) = args.input.as_deref() else {
-			return Vec::new();
+			return Ok(Vec::new());
 		};
 		let input = if streaming {
 			input.rfind('\n').map_or("", |end| &input[..=end])
@@ -44,10 +44,10 @@ impl SloppyEngine {
 	}
 
 	fn missing_target(args: &ArgSnapshot) -> bool {
-		args
-			.input
-			.as_deref()
-			.is_some_and(|input| !input.trim().is_empty() && split_sloppy_sections(input).is_empty())
+		args.input.as_deref().is_some_and(|input| {
+			!input.trim().is_empty()
+				&& split_sloppy_sections(input).is_ok_and(|sections| sections.is_empty())
+		})
 	}
 }
 
@@ -64,7 +64,12 @@ impl ModeEngine for SloppyEngine {
 		store: &EditStore,
 	) -> Vec<PreviewFile> {
 		let _ = (self.allow_fuzzy, self.fuzzy_threshold);
-		let sections = Self::sections(args, streaming);
+		let sections = match Self::sections(args, streaming) {
+			Ok(sections) => sections,
+			Err(error) => {
+				return vec![PreviewFile { error: Some(error.to_string()), ..PreviewFile::default() }];
+			},
+		};
 		if sections.is_empty() {
 			if !streaming && Self::missing_target(args) {
 				return vec![PreviewFile {
@@ -134,7 +139,7 @@ impl ModeEngine for SloppyEngine {
 	) -> Result<Vec<StagedFile>, EditError> {
 		let _ = (self.allow_fuzzy, self.fuzzy_threshold);
 		let input = args.input.as_deref().unwrap_or_default();
-		let sections = split_sloppy_sections(input);
+		let sections = split_sloppy_sections(input)?;
 		if sections.is_empty() {
 			return Err(EditError::parse(
 				"Missing file target: start the payload with *** Edit File: relative/path.ts.",
@@ -195,7 +200,10 @@ impl ModeEngine for SloppyEngine {
 	}
 
 	fn inspect(&self, args: &ArgSnapshot) -> Inspection {
-		let sections = split_sloppy_sections(args.input.as_deref().unwrap_or_default());
+		// An unparseable payload targets nothing; `preview` and `stage` surface
+		// the error.
+		let sections =
+			split_sloppy_sections(args.input.as_deref().unwrap_or_default()).unwrap_or_default();
 		Inspection {
 			paths:    sections
 				.iter()

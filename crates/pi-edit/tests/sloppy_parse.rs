@@ -32,7 +32,7 @@ fn parses_delimited_multi_file_bare_and_all_sections() {
 		"logger.trace(",
 	]
 	.join("\n");
-	let sections = split_sloppy_sections(&payload);
+	let sections = split_sloppy_sections(&payload).unwrap();
 	assert_eq!(
 		sections
 			.iter()
@@ -60,7 +60,8 @@ fn accepts_begin_patch_and_trims_or_quotes_ambiguous_paths() {
 	let sections = split_sloppy_sections(
 		"*** Begin Patch\n*** Edit File: \" all \" all\n*** Find\nold\n*** Replace\nnew\n*** End \
 		 Patch",
-	);
+	)
+	.unwrap();
 	assert_eq!(sections.len(), 1);
 	assert_eq!(sections[0].path, " all ");
 	let operations = parse_operations(&sections[0].body, "old\n", " all ").unwrap();
@@ -74,7 +75,7 @@ fn headers_are_boundaries_only_when_the_whole_trimmed_line_is_recognized() {
 		"old\n*** Replace trailing text\n<Replace>\nliteral\n",
 		"*** Replace\nnew\n",
 	);
-	let sections = split_sloppy_sections(input);
+	let sections = split_sloppy_sections(input).unwrap();
 	let operations = parse_operations(
 		&sections[0].body,
 		"old\n*** Replace trailing text\n<Replace>\nliteral\n",
@@ -93,7 +94,7 @@ fn empty_put_deletes_before_next_find_edit_and_eof() {
 		 Replace\nnext",
 		"*** Edit File: a.ts\n*** Find\nold\n*** Replace",
 	] {
-		let section = &split_sloppy_sections(payload)[0];
+		let section = &split_sloppy_sections(payload).unwrap()[0];
 		let operation = &parse_operations(&section.body, "old\nkeep\n", "a.ts").unwrap()[0];
 		assert_eq!(operation.pattern_text, "old");
 		assert_eq!(operation.rewrite, OperationRewrite::Explicit { text: String::new() });
@@ -104,7 +105,7 @@ fn empty_put_deletes_before_next_find_edit_and_eof() {
 fn after_preserves_authored_blank_lines_without_a_terminal_phantom() {
 	let with_blank = "*** Edit File: a.ts\n*** Find\nanchor\n*** Insert After\n\ninserted\n\n*** \
 	                  Find\nnext\n*** Replace\nchanged";
-	let sections = split_sloppy_sections(with_blank);
+	let sections = split_sloppy_sections(with_blank).unwrap();
 	let operations = parse_operations(&sections[0].body, "anchor\nnext\n", "a.ts").unwrap();
 	assert_eq!(operations[0].rewrite, OperationRewrite::Insert {
 		text: "\ninserted\n\n".to_owned(),
@@ -115,7 +116,7 @@ fn after_preserves_authored_blank_lines_without_a_terminal_phantom() {
 		"*** Edit File: a.ts\n*** Find\nanchor\n*** Insert After\ninserted",
 		"*** Edit File: a.ts\n*** Find\nanchor\n*** Insert After\ninserted\n",
 	] {
-		let section = &split_sloppy_sections(payload)[0];
+		let section = &split_sloppy_sections(payload).unwrap()[0];
 		let operations = parse_operations(&section.body, "anchor\n", "a.ts").unwrap();
 		assert_eq!(operations[0].rewrite, OperationRewrite::Insert {
 			text: "inserted\n".to_owned(),
@@ -173,7 +174,8 @@ fn split_sections_coalesces_repeated_paths_in_order() {
 		"*** Edit File: src/a.ts\n*** Find\none\n*** Replace\n1\n",
 		"*** Edit File: src/b.ts\n*** Find\ntwo\n*** Replace\n2\n",
 		"*** Edit File: src/a.ts\n*** Find\nthree\n*** Replace\n3",
-	));
+	))
+	.unwrap();
 	assert_eq!(
 		sections
 			.iter()
@@ -191,7 +193,7 @@ fn old_xml_looking_lines_are_literal_body_content() {
 		"const marker = \"<Replace>\";\n</Find>\n",
 		"*** Replace\nconst marker = \"literal\";",
 	);
-	let sections = split_sloppy_sections(input);
+	let sections = split_sloppy_sections(input).unwrap();
 	let operations =
 		parse_operations(&sections[0].body, "const marker = \"<Replace>\";\n</Find>\n", "src/a.ts")
 			.unwrap();
@@ -202,15 +204,45 @@ fn old_xml_looking_lines_are_literal_body_content() {
 
 #[test]
 fn returns_empty_without_a_pathful_leading_edit_header() {
-	assert!(split_sloppy_sections("*** Find\nold\n*** Replace\nnew").is_empty());
-	assert!(split_sloppy_sections("*** Edit File:\n*** Find\nold").is_empty());
+	assert!(
+		split_sloppy_sections("*** Find\nold\n*** Replace\nnew")
+			.unwrap()
+			.is_empty()
+	);
+	assert!(
+		split_sloppy_sections("*** Edit File:\n*** Find\nold")
+			.unwrap()
+			.is_empty()
+	);
+}
+
+#[test]
+fn a_second_operator_on_one_find_is_rejected_instead_of_discarding_the_staged_body() {
+	let error = split_sloppy_sections(concat!(
+		"*** Edit File: src/a.ts\n*** Find\nold\n*** Insert Before\nstaged\n",
+		"*** Replace\nnew\n",
+	))
+	.unwrap_err();
+	let message = error.to_string();
+	assert!(message.contains("*** Insert Before"), "{message}");
+	assert!(message.contains("*** Replace"), "{message}");
+
+	// The mirrored order names the same two operators.
+	let reversed = split_sloppy_sections(concat!(
+		"*** Edit File: src/a.ts\n*** Find\nold\n*** Replace\nnew\n",
+		"*** Insert After\nstaged\n",
+	))
+	.unwrap_err()
+	.to_string();
+	assert!(reversed.contains("*** Replace"), "{reversed}");
+	assert!(reversed.contains("*** Insert After"), "{reversed}");
 }
 
 #[test]
 fn optional_patch_envelope_is_silent_during_normalization() {
 	let input = "\n```text\n*** Begin Patch\n*** Edit File:\n*** Find\nold\n*** Replace\nnew\n*** \
 	             End Patch\n```";
-	assert_eq!(normalize_input(input), "«\nold\n»\nnew");
+	assert_eq!(normalize_input(input).unwrap(), "«\nold\n»\nnew");
 }
 
 #[test]
@@ -221,7 +253,7 @@ fn copy_ready_correction_preserves_the_complete_atomic_payload() {
 	let error = message(input, content);
 	let start = error.find("*** Edit File:").expect("copy-ready payload");
 	let completed = error[start..].replace("{new text}", "changed();");
-	let sections = split_sloppy_sections(&completed);
+	let sections = split_sloppy_sections(&completed).unwrap();
 	assert_eq!(sections.len(), 1);
 	let operations = parse_operations(&sections[0].body, content, "a.ts").unwrap();
 	assert_eq!(operations.len(), 2);
@@ -234,7 +266,7 @@ fn truncated_register_rewrite_returns_a_parseable_all_match_skeleton() {
 	let error = message("«*\nenwlineIndex\n»1", "const first = enwlineIndex;\n");
 	let start = error.find("*** Edit File:").expect("copy-ready payload");
 	let completed = error[start..].replace("{final text}", "newlineIndex");
-	let sections = split_sloppy_sections(&completed);
+	let sections = split_sloppy_sections(&completed).unwrap();
 	let operations =
 		parse_operations(&sections[0].body, "const first = enwlineIndex;\n", "a.ts").unwrap();
 	assert_eq!(operations.len(), 1);
