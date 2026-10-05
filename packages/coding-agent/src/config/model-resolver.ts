@@ -93,8 +93,9 @@ function isProviderDefaultModel(model: Model<Api>, taggedProviders: ReadonlySet<
  *
  * A model tagged by its provider's discovery (`providerDefault`) wins over that
  * provider's KDL `default-model` while any tagged model from the provider is
- * available. The KDL id is the default otherwise (no fetch yet, offline, or a
- * failed fetch).
+ * available. An authoritative cache retains the tag for offline launches; a
+ * failed refresh makes the cache non-authoritative and strips the tag. The KDL
+ * id is the default when no trusted tagged model is available.
  *
  * When `hasConcreteCredential` is supplied and at least one available model
  * belongs to a provider with a concrete credential, the candidate pool is

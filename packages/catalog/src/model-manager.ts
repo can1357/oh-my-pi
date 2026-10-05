@@ -320,6 +320,7 @@ export async function resolveProviderModels<TApi extends Api = Api, TModelsDevPa
 	const shouldUseFreshCacheAsAuthoritative =
 		strategy === "online-if-uncached" && hasUsableFreshCache && hasAuthoritativeCache;
 	const dynamicFetchSucceeded = fetchedDynamicModels !== null;
+	const dynamicFetchFailed = shouldFetchFromNetwork && hasDynamicFetcher && !dynamicFetchSucceeded;
 	const anyRemoteFetchSucceeded = modelsDevFetchSucceeded || dynamicFetchSucceeded;
 	const allConfiguredRemoteFetchesSucceeded =
 		hasRemoteFetcher &&
@@ -327,7 +328,7 @@ export async function resolveProviderModels<TApi extends Api = Api, TModelsDevPa
 		(!hasDynamicFetcher || dynamicFetchSucceeded);
 	const authoritativeDynamicFetchSucceeded = dynamicModelsAuthoritative && dynamicFetchSucceeded;
 	const remoteResolutionComplete = authoritativeDynamicFetchSucceeded || allConfiguredRemoteFetchesSucceeded;
-	const preparedCacheModels = remoteResolutionComplete
+	const preparedCacheModelsBeforeAuthority = remoteResolutionComplete
 		? []
 		: prepareCacheModelsForStaticMismatch(
 				usableCachedModels,
@@ -335,6 +336,10 @@ export async function resolveProviderModels<TApi extends Api = Api, TModelsDevPa
 				cacheFingerprintMatches,
 				options.dropCachedModelIdsOnStaticMismatch,
 			);
+	const preparedCacheModels =
+		cache?.authoritative === true && !dynamicFetchFailed
+			? preparedCacheModelsBeforeAuthority
+			: stripProviderDefaultFlags(preparedCacheModelsBeforeAuthority);
 	// Additive shared-catalog rows may only introduce IDs. Apply that boundary
 	// to cache fallback too, including snapshots written by an older binary.
 	const cacheModels = additiveStaticModelIds
@@ -412,9 +417,12 @@ export async function resolveProviderModels<TApi extends Api = Api, TModelsDevPa
 				cacheFingerprintMatches,
 				options.dropCachedModelIdsOnStaticMismatch,
 			);
-			const latestCacheModels = additiveStaticModelIds
+			const latestCacheModelsBeforeAuthority = additiveStaticModelIds
 				? preparedLatestCacheModels.filter(model => !additiveStaticModelIds.has(model.id))
 				: preparedLatestCacheModels;
+			const latestCacheModels = dynamicFetchFailed
+				? stripProviderDefaultFlags(latestCacheModelsBeforeAuthority)
+				: latestCacheModelsBeforeAuthority;
 			const fallbackSnapshotModels = collapseBuiltVariants(
 				mergeDynamicModels(mergeDynamicModels(staticModels, latestCacheModels), modelsDevModels),
 			);
@@ -570,6 +578,16 @@ function mergeDynamicModels<TApi extends Api>(
 		merged.set(dynamicModel.id, mergeDynamicModel(existingModel, dynamicModel));
 	}
 	return Array.from(merged.values());
+}
+
+/** Remove provider-reported defaults from a cache that failed its latest refresh. */
+export function stripProviderDefaultFlags<TApi extends Api>(models: readonly Model<TApi>[]): Model<TApi>[] {
+	return models.map(model => {
+		if (model.providerDefault === undefined) return model;
+		const stripped = { ...model };
+		delete stripped.providerDefault;
+		return stripped;
+	});
 }
 
 function retainModelIds<TApi extends Api>(

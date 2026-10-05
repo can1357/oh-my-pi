@@ -82,6 +82,44 @@ describe("Venice provider catalog", () => {
 			await fs.rm(tempDir, { recursive: true, force: true });
 		}
 	});
+
+	it("keeps an authoritative tag offline but clears it after a failed refresh", async () => {
+		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "venice-default-"));
+		try {
+			let available = true;
+			const fetchImpl: FetchImpl = async () =>
+				available
+					? new Response(
+							JSON.stringify({
+								data: [veniceDiscoveryRow("venice-tagged", ["default"]), veniceDiscoveryRow("zai-org-glm-5-2")],
+							}),
+							{ status: 200, headers: { "Content-Type": "application/json" } },
+						)
+					: new Response("unavailable", { status: 503 });
+			const manager = createModelManager({
+				...veniceModelManagerOptions({ apiKey: "venice-test-key", fetch: fetchImpl }),
+				cacheDbPath: path.join(tempDir, "models.db"),
+				staticModels: [veniceStaticModel("zai-org-glm-5-2")],
+			});
+
+			await manager.refresh("online");
+			const offline = await manager.refresh("offline");
+			expect(offline.stale).toBe(false);
+			expect(offline.models.find(model => model.id === "venice-tagged")?.providerDefault).toBe(true);
+
+			available = false;
+			const failed = await manager.refresh("online");
+			expect(failed.stale).toBe(true);
+			expect(failed.models.some(model => model.providerDefault === true)).toBe(false);
+			expect(failed.models.some(model => model.id === "zai-org-glm-5-2")).toBe(true);
+
+			const failedCache = await manager.refresh("offline");
+			expect(failedCache.stale).toBe(true);
+			expect(failedCache.models.some(model => model.providerDefault === true)).toBe(false);
+		} finally {
+			await fs.rm(tempDir, { recursive: true, force: true });
+		}
+	});
 });
 
 function veniceDiscoveryRow(id: string, traits?: readonly string[]) {
@@ -94,7 +132,7 @@ function veniceDiscoveryRow(id: string, traits?: readonly string[]) {
 	};
 }
 
-function veniceStaticModel(id: string, providerDefault: boolean): Model<"openai-completions"> {
+function veniceStaticModel(id: string, providerDefault?: boolean): Model<"openai-completions"> {
 	return buildModel({
 		id,
 		name: id,
@@ -106,6 +144,6 @@ function veniceStaticModel(id: string, providerDefault: boolean): Model<"openai-
 		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 		contextWindow: 128000,
 		maxTokens: 8192,
-		providerDefault,
+		...(providerDefault === undefined ? {} : { providerDefault }),
 	});
 }
