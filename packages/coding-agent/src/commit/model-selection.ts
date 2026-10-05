@@ -48,6 +48,9 @@ export async function resolvePrimaryModel(
 	if (!model) {
 		throw new Error("No model available for commit generation");
 	}
+	if (settings.enabledModels?.length && !settings.enabledModels.includes(`${model.provider}/${model.id}`)) {
+		throw new Error(`Model ${model.provider}/${model.id} is not in the enabled models list`);
+	}
 	const apiKey = await modelRegistry.getApiKey(model);
 	if (!apiKey) {
 		throw new Error(`No API key available for model ${model.provider}/${model.id}`);
