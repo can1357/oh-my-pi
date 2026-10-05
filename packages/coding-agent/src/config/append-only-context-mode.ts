@@ -16,7 +16,7 @@ export interface AppendOnlyContextModel {
  * tool catalogue, and message log all flow through fresh allocations every
  * step (see `agent-loop.ts` `streamAssistantResponse` fallback path).
  */
-const LOCAL_INFERENCE_PROVIDERS = new Set(["ollama", "ollama-cloud", "lm-studio", "llama.cpp"]);
+const LOCAL_INFERENCE_PROVIDERS = new Set(["ollama", "ollama-cloud", "lm-studio", "llama.cpp", "exllama3"]);
 
 /** True when `baseUrl` resolves to a loopback or RFC1918 host — covers
  * llama.cpp/vLLM/sglang servers registered under a user-defined provider id

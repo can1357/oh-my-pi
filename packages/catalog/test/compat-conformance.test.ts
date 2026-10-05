@@ -17,6 +17,10 @@ const RUNTIME_ONLY_PROVIDERS = new Set([
 	"lm-studio",
 	"litellm",
 	"vllm",
+	// ExLlama3 via TabbyAPI: the roster is the operator's own `model_dir`, so no rows
+	// can be frozen. Resolved at runtime by `exLlama3ModelManagerOptions` (catalog
+	// discovery) and `discoverExLlama3Models` (the implicit `exllama3` provider).
+	"exllama3",
 	"openai-codex-device",
 	// Public gateway discovery via charmHyperModelManagerOptions: every row,
 	// including its tariff and effort ladder, comes from the live /v1/models

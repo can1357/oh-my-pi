@@ -5,6 +5,7 @@
 ### Added
 
 - Added an optional `statefulResponses` compat field for OpenAI Responses models, kept through OpenRouter's Responses dispatch ([#13686](https://github.com/can1357/oh-my-pi/pull/13686) by [@alphastorm](https://github.com/alphastorm)).
+- Added the `exllama3` provider for TabbyAPI, the official ExLlamaV3 server. Discovery takes the context window the server is actually running (`meta.n_ctx`, then `parameters.max_seq_len`, then trained context, then `/props`) rather than a per-model guess, and Qwen thinking rides `chat_template_kwargs`, the one dialect TabbyAPI guarantees reaches the chat template ([#14489](https://github.com/can1357/oh-my-pi/pull/14489) by [@tapstoop](https://github.com/tapstoop)).
 
 ### Changed
 

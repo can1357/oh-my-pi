@@ -1,0 +1,65 @@
+// Provider-wire compat for "exllama3" (TabbyAPI, the official ExLlamaV3 server).
+
+provider "exllama3" {
+	default-model "Qwama-0.5B-Instruct"
+	env "EXLLAMA3_API_KEY"
+	allow-unauthenticated #true
+	discovery label="ExLlama3 (TabbyAPI)" allow-unauthenticated=#true
+
+	// TabbyAPI forwards `role` verbatim into the model's HF chat template, which
+	// only binds `system`; the OpenAI `developer` role renders as an unrecognised
+	// turn (or is dropped) depending on the template.
+	supports-developer-role #false
+	// The TabbyAPI request schema has no OpenAI `store`/`prompt_cache_key`. Its
+	// prefix reuse is ExLlamaV3's own KV cache, driven by byte-stable history
+	// (append-only context mode) rather than by a request field.
+	supports-store #false
+	// `tool_choice` is typed `Union[Literal["none","auto","required"],
+	// NamedToolChoice]`, so a named choice deserialises, but the generation path
+	// only tests `tool_choice != "none"`: the named function is never forced.
+	// Advertising it would let OMP pin a tool the server silently ignores.
+	supports-named-tool-choice #false
+
+	// ── Self-hosted inference behind the OpenAI chat wire ──
+	// `resolve.ts` derives these from a loopback/RFC1918 host heuristic (which
+	// already covers a TabbyAPI on 127.0.0.1 or a LAN box). Declaring them as the
+	// provider's own deployment contract makes the behaviour host-independent, so a
+	// TabbyAPI reached by custom DNS name, Tailscale address, or VPS behaves like one
+	// on loopback instead of silently inheriting hosted-provider timeouts.
+	// Assistant `reasoning_content` must be replayed into history: the chat template
+	// re-renders prior turns, and dropping thinking changes the prefix and busts
+	// ExLlamaV3's KV cache.
+	replay-reasoning-content #true
+	// Output is capped by the loaded `max_seq_len`, which the operator chooses at
+	// load time and which can be far below the trained window.
+	clamp-output-to-model-max #true
+	// Tool parameter schemas are sanitised for grammar-constrained decoding (this
+	// only normalises the emitted JSON schema; it adds no wire field). TabbyAPI
+	// offers JSON-schema/regex/EBNF constrained decoding and parses tool calls out of
+	// the template render, so the bare-boolean subschemas OMP emits for open fields
+	// are the ones most likely to be rejected.
+	tool-schema-flavor "grammar"
+	// A cold EXL3 load blocks the first token while weights stream to the GPU, so the
+	// first-event watchdog must not fire; the idle budget matches the other local
+	// OpenAI-compat backends (300s).
+	stream-first-event-timeout-ms 0
+	stream-idle-timeout-ms 300000
+
+	class "qwen" {
+		// Discovery reads `/v1/models`, which never advertises reasoning, so a
+		// discovered Qwen row arrives `reasoning: false`. This opt-in lets the
+		// `exllama3` × `qwen` effort ladder materialise the row as reasoning-capable
+		// (the same repair llama.cpp's provider rule performs), instead of inferring
+		// capability from the id in TypeScript.
+		thinking-upgrade-neutral #true
+		// Qwen3.6+ templates render prior thinking only when `preserve_thinking` is
+		// set; without it a thinking turn loses its `` block on history replay.
+		qwen-preserve-thinking #true
+		// TabbyAPI binds `chat_template_kwargs` (aliased `template_vars`) onto the
+		// chat template, so thinking controls ride the kwargs dialect. Its schema
+		// also accepts the flat `enable_thinking`/`reasoning_effort` fields, but the
+		// kwargs copy is the documented, template-agnostic path and the one its own
+		// suite exercises (`chat_template_kwargs={"reasoning_effort": "high"}`).
+		thinking-format "qwen-chat-template"
+	}
+}

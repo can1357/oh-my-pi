@@ -1,0 +1,10 @@
+auth "exllama3" {
+	name "ExLlama3 (TabbyAPI)"
+	env "EXLLAMA3_API_KEY"
+	login "api-key" {
+		auth-url "https://github.com/theroyallab/tabbyAPI"
+		instructions "Paste your TabbyAPI API key if your server sets one (config.yml network.api_key). Leave empty for local no-auth mode (default base URL: http://127.0.0.1:5000/v1; set EXLLAMA3_BASE_URL to customize)."
+		prompt "Paste your TabbyAPI API key (optional for local no-auth)" placeholder="exllama3-local"
+		empty-fallback "exllama3-local"
+	}
+}
