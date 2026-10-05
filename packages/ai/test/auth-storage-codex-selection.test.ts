@@ -785,7 +785,7 @@ describe("AuthStorage codex oauth ranking", () => {
 		).toThrow("without surrounding whitespace");
 	});
 
-	test("keeps hot-window and measured-usage safety ahead of configured priority", async () => {
+	test("keeps hot-window safety ahead of configured priority but not a failed usage fetch", async () => {
 		if (!store) throw new Error("test setup failed");
 		authStorage = new AuthStorage(store, {
 			usageProviderResolver: provider => (provider === "openai-codex" ? usageProvider : undefined),
@@ -818,8 +818,8 @@ describe("AuthStorage codex oauth ranking", () => {
 		);
 
 		const counts = await countApiKeySelections(authStorage, "openai-codex", "policy-safety");
-		expectExclusivePreference(counts, "api-acct-safe", "api-acct-hot");
-		expectExclusivePreference(counts, "api-acct-safe", "api-acct-unknown");
+		expectExclusivePreference(counts, "api-acct-unknown", "api-acct-hot");
+		expectExclusivePreference(counts, "api-acct-unknown", "api-acct-safe");
 	});
 
 	test("applies deterministic priority without a usage ranking strategy", async () => {
