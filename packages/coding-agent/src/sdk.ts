@@ -30,7 +30,7 @@ import type { Dialect } from "@oh-my-pi/pi-ai/dialect";
 import { prewarmOpenAICodexResponses } from "@oh-my-pi/pi-ai/providers/openai-codex-responses";
 import { isOpenAICodexWebSocketPreferred } from "@oh-my-pi/pi-ai/providers/openai-codex-transport";
 import { withCredentialRedaction } from "@oh-my-pi/pi-ai/providers/transform-messages";
-import { serviceTierFamily } from "@oh-my-pi/pi-ai/types";
+import { serviceTierFamily, serviceTierFamilyForProvider } from "@oh-my-pi/pi-ai/types";
 import { FALLBACK_DIALECT, preferredDialect } from "@oh-my-pi/pi-catalog/identity";
 import type { Component } from "@oh-my-pi/pi-tui";
 import { $env } from "@oh-my-pi/pi-utils/env";
@@ -4180,20 +4180,24 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		}
 		// `--service-tier` is an OpenAI-family launch override: it replaces the
 		// session's OpenAI tier selection, per-model pins included, so a pinned
-		// model cannot shadow it. Pins on other families are untouched, and keys
-		// the registry cannot resolve (deferred or extension-registered models)
-		// are kept because the flag cannot claim them.
+		// model cannot shadow it. Pins on other families are untouched. A
+		// first-party provider prefix classifies without the registry — a Codex
+		// model may not be discovered yet, and the flag must still claim its pin —
+		// while relays and OpenRouter keys fall back to the registry; keys it
+		// cannot resolve are kept because the flag cannot claim them.
 		const configuredServiceTierByModel =
 			existingSession?.serviceTierModels ?? options.serviceTierByModel ?? cfgTierModelOverrides.get(settings);
 		const initialServiceTierByModel: ServiceTierByModel = {};
 		for (const [modelKey, tier] of Object.entries(configuredServiceTierByModel)) {
 			if (options.openAIServiceTier !== undefined) {
 				const separator = modelKey.indexOf("/");
-				const model =
-					separator > 0
-						? modelRegistry.find(modelKey.slice(0, separator), modelKey.slice(separator + 1))
-						: undefined;
-				if (model && serviceTierFamily(model) === "openai") continue;
+				const provider = separator > 0 ? modelKey.slice(0, separator) : undefined;
+				let family = provider ? serviceTierFamilyForProvider(provider) : undefined;
+				if (family === undefined && provider) {
+					const model = modelRegistry.find(provider, modelKey.slice(separator + 1));
+					family = model ? serviceTierFamily(model) : undefined;
+				}
+				if (family === "openai") continue;
 			}
 			initialServiceTierByModel[modelKey] = tier;
 		}

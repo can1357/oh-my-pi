@@ -26,7 +26,7 @@ import {
 	resolveModelRoleValue,
 } from "../config/model-resolver";
 import { getKnownRoleIds } from "../config/model-roles";
-import { type ServiceTierByModel, serviceTierModelKey } from "../config/service-tier";
+import { type ServiceTierByModel, isServiceTierForFamily, serviceTierModelKey } from "../config/service-tier";
 import type { Settings } from "../config/settings";
 import { containsMagicKeyword } from "@oh-my-pi/pi-tui/prompt/magic-keywords";
 import type { MagicKeywordId } from "../modes/magic-keywords";
@@ -760,11 +760,17 @@ export class ModelControls {
 	/**
 	 * The session's tier for `model`: an exact per-model entry wins over the
 	 * model's family entry, and a `"none"` entry is an explicit "no tier" that
-	 * stops the chain instead of falling through to the family.
+	 * stops the chain instead of falling through to the family. An entry the
+	 * model's family cannot realize (e.g. `ultrafast` on Anthropic) is ignored,
+	 * so it cannot hide a realizable family tier.
 	 */
 	#resolveModelTier(model: Model): ServiceTier | undefined {
 		const entry = this.#serviceTierByModel[serviceTierModelKey(model)];
-		if (entry !== undefined) return entry === "none" ? undefined : entry;
+		if (entry === "none") return undefined;
+		if (entry !== undefined) {
+			const family = serviceTierFamily(model);
+			if (family && isServiceTierForFamily(family, entry)) return entry;
+		}
 		return resolveModelServiceTier(this.#serviceTierByFamily, model);
 	}
 
@@ -816,9 +822,11 @@ export class ModelControls {
 	#applyServiceTierByModel(next: ServiceTierByModel): void {
 		// Re-arming Anthropic priority clears the per-session fast-mode auto-disable
 		// so the next request actually carries `speed: "fast"` again. The map is
-		// keyed by model, so a transition into `priority` anywhere in it re-arms;
-		// clearing while no priority is selected is a no-op.
-		if (Object.values(next).includes("priority") && !Object.values(this.#serviceTierByModel).includes("priority")) {
+		// keyed by model, so compare per key: a reload that turns any entry into
+		// `priority` re-arms, matching #applyServiceTierByFamily.
+		if (
+			Object.entries(next).some(([key, tier]) => tier === "priority" && this.#serviceTierByModel[key] !== "priority")
+		) {
 			clearAnthropicFastModeFallback(this.#host.providerSessionState);
 		}
 		this.#serviceTierByModel = next;
@@ -829,10 +837,12 @@ export class ModelControls {
 	 * `/fast on|off` targets the active model's most specific tier selection: a
 	 * model with a `tier.modelOverrides` pin (or an existing per-model entry)
 	 * gets a session-scoped model entry, every other model its family entry.
-	 * `off` also clears `ultrafast`. Returns `false` when the model has no
-	 * service-tier family, or when it is an OpenAI-family model that cannot take
-	 * `priority` (a Codex model whose discovered tier list omits it), so callers
-	 * can report that fast mode is unavailable instead of claiming success.
+	 * `off` clears a `priority`/`ultrafast` selection in that slot and leaves
+	 * other tiers (`flex`, `scale`, …) alone. Returns `false` when the model has
+	 * no service-tier family, or when it is an OpenAI-family model that cannot
+	 * take `priority` (a Codex model whose discovered tier list omits it), so
+	 * callers can report that fast mode is unavailable instead of claiming
+	 * success.
 	 */
 	setFastMode(enabled: boolean): boolean {
 		const model = this.#model;
@@ -848,8 +858,10 @@ export class ModelControls {
 		const modelKey = serviceTierModelKey(model);
 		const hasModelSelection = modelKey in this.#serviceTierByModel;
 		if (!enabled) {
-			if (hasModelSelection) this.setServiceTierForModel(modelKey, "none");
-			else {
+			if (hasModelSelection) {
+				const entry = this.#serviceTierByModel[modelKey];
+				if (entry === "priority" || entry === "ultrafast") this.setServiceTierForModel(modelKey, "none");
+			} else {
 				const tier = this.#serviceTierByFamily[family];
 				if (tier === "priority" || tier === "ultrafast") this.setServiceTierFamily(family, undefined);
 			}

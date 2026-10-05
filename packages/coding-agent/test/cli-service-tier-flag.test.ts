@@ -69,6 +69,41 @@ describe("--service-tier", () => {
 		}
 	});
 
+	it("replaces OpenAI pins with the flag and keeps other families' pins", async () => {
+		const authStorage = await AuthStorage.create(":memory:");
+		try {
+			const { session } = await createAgentSession({
+				cwd: process.cwd(),
+				agentDir: process.cwd(),
+				modelRegistry: new ModelRegistry(authStorage),
+				settings: Settings.isolated({
+					"tier.modelOverrides": {
+						"openai-codex/gpt-6-astra": "ultrafast",
+						"anthropic/claude-sonnet-4-5": "priority",
+					},
+				}),
+				sessionManager: SessionManager.inMemory(),
+				openAIServiceTier: null,
+				disableExtensionDiscovery: true,
+				skills: [],
+				contextFiles: [],
+				promptTemplates: [],
+				slashCommands: [],
+				enableMCP: false,
+				enableLsp: false,
+			});
+			try {
+				// The registry holds no discovered models here, so the Codex pin is
+				// classified by its first-party provider prefix, not a lookup.
+				expect(session.serviceTierByModel).toEqual({ "anthropic/claude-sonnet-4-5": "priority" });
+			} finally {
+				await session.dispose();
+			}
+		} finally {
+			authStorage.close();
+		}
+	});
+
 	it("persists a resumed OpenAI override without changing other families", async () => {
 		using tempDir = TempDir.createSync("@omp-service-tier-resume-");
 		const authStorage = await AuthStorage.create(":memory:");

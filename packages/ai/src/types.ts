@@ -186,6 +186,18 @@ function isOpenAIServiceTierModel(model: ServiceTierModel): boolean {
 }
 
 /**
+ * The service-tier family a provider name alone determines, or `undefined` when
+ * the provider needs the model's api/identity to classify (relays, OpenRouter).
+ * Callers that only have a `provider/model-id` key — the `--service-tier` pin
+ * filter — use this to classify first-party keys without a registry lookup.
+ */
+export function serviceTierFamilyForProvider(provider: string): ServiceTierFamily | undefined {
+	if (provider === "openai" || provider === "openai-codex") return "openai";
+	if (provider === "google" || provider === "google-vertex") return "google";
+	return undefined;
+}
+
+/**
  * Classify a model into the service-tier family whose knob governs it, or
  * `undefined` when the model exposes no serving-priority control.
  *
@@ -204,9 +216,9 @@ export function serviceTierFamily(model: ServiceTierModel): ServiceTierFamily | 
 		if (model.identity.class === "openai") return "openai";
 		return undefined;
 	}
-	if (provider === "openai" || provider === "openai-codex") return "openai";
+	const byProvider = serviceTierFamilyForProvider(provider);
+	if (byProvider) return byProvider;
 	if (model.api === "anthropic-messages") return "anthropic";
-	if (provider === "google" || provider === "google-vertex") return "google";
 	if (isOpenAIServiceTierModel(model)) return "openai";
 	return undefined;
 }

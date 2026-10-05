@@ -2355,7 +2355,12 @@ export class AgentSession implements SettingsScope {
 		cfgTierOpenai.listen(this, tier => this.setServiceTierFamily("openai", serviceTierSettingToTier(tier)));
 		cfgTierAnthropic.listen(this, tier => this.setServiceTierFamily("anthropic", serviceTierSettingToTier(tier)));
 		cfgTierGoogle.listen(this, tier => this.setServiceTierFamily("google", serviceTierSettingToTier(tier)));
-		cfgTierModelOverrides.listen(this, overrides => this.#models.setServiceTierModels(overrides));
+		// A subagent's per-model map is a spawn-time snapshot — task dispatch hands it
+		// over and `createSubagentSettings` pins the family keys the same way — so a
+		// parent config edit must not re-steer it through this listener.
+		if (this.#agentKind !== "sub") {
+			cfgTierModelOverrides.listen(this, overrides => this.#models.setServiceTierModels(overrides));
+		}
 		cfgAdvisorRuntimeInputs.listen(this, (next, previous) => {
 			// A budget/tier edit rebuilds a running advisor (both are part of its
 			// runtime signature) without overriding a session-only `/advisor` toggle.

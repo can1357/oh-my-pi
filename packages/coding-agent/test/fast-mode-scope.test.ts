@@ -10,6 +10,7 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { cfgTierModelOverrides } from "@oh-my-pi/pi-coding-agent/session/settings";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { withOfficialAnthropicEndpoint } from "./helpers/anthropic-endpoint";
 
@@ -48,6 +49,7 @@ describe("/fast targets the current model's service-tier family", () => {
 	async function createSessionForModel(
 		model: Model<Api>,
 		serviceTierByModel?: ServiceTierByModel,
+		settings: Settings = Settings.isolated(),
 	): Promise<AgentSession> {
 		const agent = new Agent({
 			initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] },
@@ -56,7 +58,7 @@ describe("/fast targets the current model's service-tier family", () => {
 		session = new AgentSession({
 			agent,
 			sessionManager: SessionManager.inMemory(),
-			settings: Settings.isolated(),
+			settings,
 			serviceTierByModel,
 			modelRegistry,
 		});
@@ -113,6 +115,30 @@ describe("/fast targets the current model's service-tier family", () => {
 		expect(session.serviceTierByModel).toEqual({ [modelKey]: "none" });
 		expect(session.setFastMode(true)).toBe(true);
 		expect(session.serviceTierByModel).toEqual({ [modelKey]: "priority" });
+		expect(state.fastModeDisabled).toBe(false);
+	});
+
+	it("re-arms Anthropic priority when a reloaded pin selects it", async () => {
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!model) throw new Error("Expected bundled test model anthropic/claude-sonnet-4-5 to exist");
+		const modelKey = `${model.provider}/${model.id}`;
+		const settings = Settings.isolated();
+		cfgTierModelOverrides.set(settings, { "openai-codex/gpt-6-astra": "priority" });
+		const session = await createSessionForModel(model, { "openai-codex/gpt-6-astra": "priority" }, settings);
+		const state = {
+			strictToolsDisabled: false,
+			fastModeDisabled: true,
+			replayUnsignedThinkingDisabled: false,
+			close: () => {},
+		} as ProviderSessionState & { fastModeDisabled: boolean };
+		session.providerSessionState.set(`anthropic-messages:${model.baseUrl}\u0000${model.id}`, state);
+		expect(session.isFastModeActive()).toBe(false);
+
+		// The map already holds a `priority` entry for another model; the reload that
+		// adds this model's pin must still re-arm the fallback.
+		cfgTierModelOverrides.set(settings, { "openai-codex/gpt-6-astra": "priority", [modelKey]: "priority" });
+		await Promise.resolve();
+		expect(session.serviceTierByModel).toEqual({ "openai-codex/gpt-6-astra": "priority", [modelKey]: "priority" });
 		expect(state.fastModeDisabled).toBe(false);
 	});
 

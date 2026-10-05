@@ -6,6 +6,7 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { createAgentSession } from "@oh-my-pi/pi-coding-agent/sdk";
 import type { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { cfgTierModelOverrides } from "@oh-my-pi/pi-coding-agent/session/settings";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { createInMemoryAuthStorage } from "./helpers/agent-session-setup";
 
@@ -24,9 +25,9 @@ describe("tier.modelOverrides", () => {
 		authStorages.length = 0;
 	});
 
-	function openAuthStorage(): AuthStorage {
+	function openAuthStorage(provider: string): AuthStorage {
 		const authStorage = createInMemoryAuthStorage();
-		authStorage.keys.setRuntime("openai-codex", "codex-oauth-token");
+		authStorage.keys.setRuntime(provider, "test-token");
 		authStorages.push(authStorage);
 		return authStorage;
 	}
@@ -36,8 +37,9 @@ describe("tier.modelOverrides", () => {
 		settings: Settings,
 		modelPattern: string,
 		sessionManager: SessionManager = SessionManager.inMemory(),
+		taskDepth = 0,
 	) {
-		const authStorage = openAuthStorage();
+		const authStorage = openAuthStorage(modelPattern.slice(0, modelPattern.indexOf("/")));
 		const { session } = await createAgentSession({
 			cwd: tempDir.path(),
 			agentDir: tempDir.path(),
@@ -45,6 +47,7 @@ describe("tier.modelOverrides", () => {
 			modelRegistry: new ModelRegistry(authStorage, path.join(tempDir.path(), "models.yml")),
 			settings,
 			sessionManager,
+			taskDepth,
 			disableExtensionDiscovery: true,
 			skills: [],
 			contextFiles: [],
@@ -223,6 +226,73 @@ describe("tier.modelOverrides", () => {
 			expect(resumed.isUltrafastModeEnabled()).toBe(true);
 		} finally {
 			await resumed.dispose();
+		}
+	});
+
+	it("leaves a non-fast pin alone on /fast off", async () => {
+		using tempDir = TempDir.createSync("@omp-tier-model-overrides-flex-");
+		const session = await openSession(
+			tempDir,
+			Settings.isolated({ "tier.openai": "priority", "tier.modelOverrides": { [ASTRA]: "flex" } }),
+			ASTRA,
+		);
+		try {
+			expect(session.setFastMode(false)).toBe(true);
+			// `off` clears a fast selection; a `flex` pin is not one, so it survives.
+			expect(session.serviceTierByModel).toEqual({ [ASTRA]: "flex" });
+			expect(session.serviceTierByFamily).toEqual({ openai: "priority" });
+		} finally {
+			await session.dispose();
+		}
+	});
+
+	it("ignores a pin the model's family cannot realize", async () => {
+		using tempDir = TempDir.createSync("@omp-tier-model-overrides-family-");
+		const claude = "anthropic/claude-sonnet-4-5";
+		const session = await openSession(
+			tempDir,
+			Settings.isolated({ "tier.anthropic": "priority", "tier.modelOverrides": { [claude]: "ultrafast" } }),
+			claude,
+		);
+		try {
+			expect(session.model?.id).toBe("claude-sonnet-4-5");
+			// Anthropic realizes only `priority`; the unrealizable pin must not hide
+			// the family tier the model actually runs.
+			expect(session.isFastModeEnabled()).toBe(true);
+			expect(session.isUltrafastModeEnabled()).toBe(false);
+		} finally {
+			await session.dispose();
+		}
+	});
+
+	it("keeps a subagent's model map frozen across config reloads", async () => {
+		using tempDir = TempDir.createSync("@omp-tier-model-overrides-sub-");
+		const settings = Settings.isolated();
+		cfgTierModelOverrides.set(settings, { [ASTRA]: "ultrafast" });
+		const subagent = await openSession(tempDir, settings, ASTRA, SessionManager.inMemory(), 1);
+		try {
+			expect(subagent.serviceTierByModel).toEqual({ [ASTRA]: "ultrafast" });
+			cfgTierModelOverrides.set(settings, { [ASTRA]: "priority" });
+			await Promise.resolve();
+			// The child's map is a spawn-time snapshot, like the family keys
+			// `createSubagentSettings` pins; a parent config edit must not re-steer it.
+			expect(subagent.serviceTierByModel).toEqual({ [ASTRA]: "ultrafast" });
+		} finally {
+			await subagent.dispose();
+		}
+	});
+
+	it("applies config pin reloads to the main session", async () => {
+		using tempDir = TempDir.createSync("@omp-tier-model-overrides-main-");
+		const settings = Settings.isolated();
+		cfgTierModelOverrides.set(settings, { [ASTRA]: "ultrafast" });
+		const main = await openSession(tempDir, settings, ASTRA);
+		try {
+			cfgTierModelOverrides.set(settings, { [ASTRA]: "priority" });
+			await Promise.resolve();
+			expect(main.serviceTierByModel).toEqual({ [ASTRA]: "priority" });
+		} finally {
+			await main.dispose();
 		}
 	});
 

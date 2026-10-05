@@ -260,7 +260,8 @@ the task/eval wire formats do not expose a tier field or automatic Fast policy.
 Per-model overrides follow the same policy: `inherit` copies the parent's live per-model map
 (`tier.modelOverrides` pins plus session `/fast` selections), while an explicit `tier.subagent` or
 `task.agentServiceTierOverrides` value replaces the whole selection — the child's model map is
-cleared, so a pinned model cannot shadow the explicit tier.
+cleared, so a pinned model cannot shadow the explicit tier. Either way the child's map is a
+spawn-time snapshot, like the family keys: a later parent config edit does not re-steer it.
 
 Runtime output schema precedence is:
 
