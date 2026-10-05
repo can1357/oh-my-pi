@@ -840,3 +840,33 @@ describe("TranscriptContainer viewport click spans", () => {
 		expect(transcript.getLastViewportSpans()).toEqual([]);
 	});
 });
+
+describe("TranscriptContainer insertChildAt", () => {
+	beforeAll(async () => {
+		await initTheme(false);
+	});
+
+	it("keeps children and the entries mirror in the same order across repeated inserts", () => {
+		// Regression for the per-frame rebuild: addChild appends to both arrays,
+		// and callers that then spliced `children` alone left the mirror stale, so
+		// #entriesMatch failed and #syncEntries rebuilt the whole list every frame.
+		// Two inserts make the divergence observable through canRemoveBlock, which
+		// resolves a block's position from the mirror.
+		const transcript = new TranscriptContainer();
+		const first = new Block(["first"], false);
+		const last = new Block(["last"], false);
+		transcript.addChild(first);
+		transcript.addChild(last);
+
+		const insertedA = new Block(["inserted-a"], false);
+		const insertedB = new Block(["inserted-b"], false);
+		transcript.insertChildAt(insertedA, 1);
+		transcript.insertChildAt(insertedB, 1);
+
+		expect(transcript.children).toEqual([first, insertedB, insertedA, last]);
+		// Both freshly inserted blocks are still addressable, which means the
+		// mirror holds them at the positions the render order implies.
+		expect(transcript.canRemoveBlock(insertedA)).toBe(true);
+		expect(transcript.canRemoveBlock(insertedB)).toBe(true);
+	});
+});

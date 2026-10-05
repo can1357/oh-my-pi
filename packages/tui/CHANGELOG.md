@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed the transcript paying a full O(n) entry rebuild on every insert-after-anchor, which runs once per tool call and so got slower as a session grew. `insertChildAt` now moves the block in both the child list and the entry mirror, keeping the live-tail fast path the container already documents ([#12178](https://github.com/can1357/oh-my-pi/issues/12178)).
+
 ## [18.6.1] - 2026-10-04
 
 ### Fixed

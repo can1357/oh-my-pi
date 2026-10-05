@@ -683,9 +683,7 @@ export class EventController {
 		if (children.slice(anchorIndex + 1).some(child => !this.ctx.chatContainer.canRemoveBlock(child))) {
 			return false;
 		}
-		this.ctx.chatContainer.addChild(component);
-		children.splice(children.length - 1, 1);
-		children.splice(anchorIndex + 1, 0, component);
+		this.ctx.chatContainer.insertChildAt(component, anchorIndex + 1);
 		return true;
 	}
 

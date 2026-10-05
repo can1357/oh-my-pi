@@ -224,6 +224,23 @@ export class TranscriptContainer extends Container {
 		this.#entriesUnverified = true;
 	}
 
+	/**
+	 * `#entries` mirrors `children`; move both together or the next `#syncEntries`
+	 * pays a full O(n) rebuild.
+	 */
+	insertChildAt(component: Component, index: number): void {
+		this.addChild(component);
+		const from = this.children.length - 1;
+		if (index >= from) return;
+		const [moved] = this.children.splice(from, 1);
+		if (moved) this.children.splice(index, 0, moved);
+		const [entry] = this.#entries.splice(this.#entries.length - 1, 1);
+		if (entry) this.#entries.splice(index, 0, entry);
+		// Both arrays moved in lockstep, so the cheap check applies again, and the
+		// row caches travelled with the entry, which a rebuild would discard.
+		this.#entriesUnverified = false;
+	}
+
 	override removeChild(component: Component): void {
 		if (this.children.indexOf(component) < 0 || !this.canRemoveBlock(component)) return;
 		super.removeChild(component);
