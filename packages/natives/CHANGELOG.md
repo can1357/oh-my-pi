@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [18.6.2] - 2026-10-04
+
+### Fixed
+
+- Fixed short snapcompact PNGs being emitted below the minimum dimensions accepted by some vision backends ([#14355](https://github.com/can1357/oh-my-pi/issues/14355)).
+
 ## [18.6.1] - 2026-10-04
 
 ### Fixed
