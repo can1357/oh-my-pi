@@ -16,6 +16,7 @@ import type { AvailableSlashCommandSource } from "../../slash-commands/available
 import type { AgentProgress } from "@oh-my-pi/pi-tui/tools/task";
 import type { SubagentEventPayload, SubagentLifecyclePayload, SubagentProgressPayload } from "../../task";
 import type { TodoPhase } from "@oh-my-pi/pi-tui/tools/todo";
+import type { LivePhase } from "@oh-my-pi/pi-tui/apps/live-visualizer";
 import type { RpcMessagesPage } from "./rpc-messages";
 import type { GoalModeState } from "../../goals/state";
 import type { RpcGoalOp, RpcGoalResult } from "./rpc-goal";
@@ -40,7 +41,7 @@ export type RpcCommand =
 	| { id?: string; type: "abort" }
 	| { id?: string; type: "abort_and_prompt"; message: string; images?: ImageContent[] }
 	| { id?: string; type: "new_session"; parentSession?: string }
-	| { id?: string; type: "open_session"; sessionDir: string }
+	| { id?: string; type: "open_session"; sessionDir: string; provider?: string; modelId?: string }
 
 	// State
 	| { id?: string; type: "get_state" }
@@ -65,6 +66,10 @@ export type RpcCommand =
 	| { id?: string; type: "get_subagent_messages"; subagentId?: string; sessionFile?: string; fromByte?: number }
 	| { id?: string; type: "cancel_subagent"; subagentId: string }
 	| { id?: string; type: "steer_subagent"; subagentId: string; message: string }
+	// Live voice (GPT live bound to this session)
+	| { id?: string; type: "live_start"; voice?: string; instructions?: string }
+	| { id?: string; type: "live_stop" }
+	| { id?: string; type: "live_mute"; muted?: boolean }
 
 	// Model
 	| { id?: string; type: "set_model"; provider: string; modelId: string }
@@ -99,7 +104,7 @@ export type RpcCommand =
 	// Session
 	| { id?: string; type: "get_session_stats" }
 	| { id?: string; type: "export_html"; outputPath?: string }
-	| { id?: string; type: "switch_session"; sessionPath: string }
+	| { id?: string; type: "switch_session"; sessionPath: string; provider?: string; modelId?: string }
 	| { id?: string; type: "branch"; entryId: string }
 	| { id?: string; type: "fork"; entryId?: string }
 	| { id?: string; type: "get_branch_messages" }
@@ -223,6 +228,40 @@ export interface RpcPromptResultFrame {
 export interface RpcSessionSettledFrame {
 	type: "session_settled";
 }
+
+// ============================================================================
+// Live Voice Frames (stdout, unsolicited; not session events, so `set_event_filter` never drops them)
+// ============================================================================
+
+/** Live session phase change. */
+export interface RpcLivePhaseFrame {
+	type: "live_phase";
+	phase: LivePhase;
+}
+
+/** Microphone/speaker RMS in [0, 1], at most one frame per 100 ms carrying the latest values. */
+export interface RpcLiveLevelsFrame {
+	type: "live_levels";
+	input: number;
+	output: number;
+}
+
+/** Incremental (`final: false`) or final transcript of one realtime turn; coalesce on `role` + `turn`. */
+export interface RpcLiveTranscriptFrame {
+	type: "live_transcript";
+	role: "user" | "assistant";
+	turn: number;
+	text: string;
+	final: boolean;
+}
+
+/** Emitted exactly once per live session when it has ended; `error` carries the failure cause. */
+export interface RpcLiveEndFrame {
+	type: "live_end";
+	error?: string;
+}
+
+export type RpcLiveFrame = RpcLivePhaseFrame | RpcLiveLevelsFrame | RpcLiveTranscriptFrame | RpcLiveEndFrame;
 
 /** `open_session` result: `resumed` is false when a fresh session was started in the directory. */
 export interface RpcOpenSessionResult {
@@ -458,6 +497,10 @@ export type RpcResponse =
 			data: { text: string | null };
 	  }
 	| { id?: string; type: "response"; command: "set_session_name"; success: true }
+	// Live voice
+	| { id?: string; type: "response"; command: "live_start"; success: true; data: { voice: string } }
+	| { id?: string; type: "response"; command: "live_stop"; success: true }
+	| { id?: string; type: "response"; command: "live_mute"; success: true; data: { muted: boolean } }
 	| { id?: string; type: "response"; command: "handoff"; success: true; data: RpcHandoffResult | null }
 
 	// Messages

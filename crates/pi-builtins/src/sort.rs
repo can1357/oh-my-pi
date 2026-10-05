@@ -1387,7 +1387,7 @@ use pi_vfs::{BlockingFs, File};
 use super::{
 	AtomicOrdering, Compressor, GlobalSettings, Output, SortError, SortResult,
 	chunks::{self, Chunk, RecycledChunk},
-	compare_by, current_open_fd_count, fd_soft_limit, open,
+	StdinOperand, compare_by, current_open_fd_count, fd_soft_limit, open_operand,
 	tmp_dir::{TmpDirWrapper, TmpFile},
 };
 
@@ -1401,7 +1401,7 @@ fn replace_output_file_in_input_files(
 ) -> SortResult<()> {
 	let mut copy: Option<PathBuf> = None;
 	if let Some(Ok(output_path)) = output.map(|path| fs.canonicalize(Path::new(path))) {
-		for file in files {
+		for file in files.iter_mut().filter(|file| *file != super::STDIN_FILE) {
 			if let Ok(file_path) = fs.canonicalize(Path::new(file.as_os_str()))
 				&& file_path == output_path
 			{
@@ -1457,6 +1457,7 @@ fn effective_merge_batch_size(settings: &GlobalSettings) -> usize {
 /// intermediate files will be compressed with it.
 pub fn merge(
 	fs: &BlockingFs,
+	stdin: &StdinOperand,
 	files: &mut [OsString],
 	settings: &GlobalSettings,
 	output: Output,
@@ -1465,7 +1466,7 @@ pub fn merge(
 	replace_output_file_in_input_files(fs, files, output.as_output_name(), tmp_dir)?;
 	let files = files
 		.iter()
-		.map(|file| open(fs, file).map(|file| PlainMergeInput { inner: file }));
+		.map(|file| open_operand(fs, stdin, file).map(|file| PlainMergeInput { inner: file }));
 	if settings.compress.is_none() {
 		merge_with_file_limit::<_, _, WriteablePlainTmpFile>(files, settings, output, tmp_dir)
 	} else {
@@ -4913,11 +4914,28 @@ fn uu_sort(host: &mut Host, matches: &ArgMatches, legacy_warnings: &[LegacyKeyWa
 		});
 	}
 
-	materialize_stdin(host, &mut files, &mut tmp_dir)?;
+	// `-c` reads its input on a detached thread, so it gets a private copy of
+	// stdin. A merge with `-o` truncates the output file before it has read
+	// all of its inputs, and stdin may be that file (`sort -m -o f - < f`), so
+	// it copies stdin first too. Every other mode reads the shell's stdin
+	// directly; spilling it to a temporary file first would cost a disk round
+	// trip on every `| sort`.
+	if settings.check || (settings.merge && matches.contains_id(options::OUTPUT)) {
+		materialize_stdin(host, &mut files, &mut tmp_dir)?;
+	}
+	let stdin_operand = if files.iter().any(|file| file == STDIN_FILE) {
+		let stdin = host
+			.stdin
+			.try_clone()
+			.map_err(|error| SortError::ReadFailed { path: PathBuf::from(STDIN_FILE), error })?;
+		StdinOperand::new(Some(stdin))
+	} else {
+		StdinOperand::new(None)
+	};
 
 	// Verify that we can open all input files. They are reopened later to avoid
 	// holding every descriptor while the output file is prepared.
-	for file in &files {
+	for file in files.iter().filter(|file| *file != STDIN_FILE) {
 		open(&fs, file)?;
 	}
 
@@ -4938,7 +4956,7 @@ fn uu_sort(host: &mut Host, matches: &ArgMatches, legacy_warnings: &[LegacyKeyWa
 
 	settings.init_precomputed(needs_locale_collation);
 
-	exec(&fs, &mut files, &settings, output, &mut tmp_dir, host.stderr_clone())
+	exec(&fs, &stdin_operand, &mut files, &settings, output, &mut tmp_dir, host.stderr_clone())
 }
 
 fn uu_app() -> Command {
@@ -5189,6 +5207,7 @@ pub(crate) fn sort_builtin<SE: ShellExtensions>() -> Registration<SE> {
 
 fn exec(
 	fs: &BlockingFs,
+	stdin: &StdinOperand,
 	files: &mut [OsString],
 	settings: &GlobalSettings,
 	output: Output,
@@ -5196,7 +5215,7 @@ fn exec(
 	stderr: OpenFile,
 ) -> SortResult<()> {
 	if settings.merge {
-		merge::merge(fs, files, settings, output, tmp_dir)
+		merge::merge(fs, stdin, files, settings, output, tmp_dir)
 	} else if settings.check {
 		if files.len() > 1 {
 			Err(SortError::message("only one file allowed with -c"))
@@ -5204,7 +5223,7 @@ fn exec(
 			check::check(fs, files.first().unwrap(), settings)
 		}
 	} else {
-		let mut lines = files.iter().map(|file| open(fs, file));
+		let mut lines = files.iter().map(|file| open_operand(fs, stdin, file));
 		ext_sort(&mut lines, settings, output, tmp_dir, stderr)
 	}
 }
@@ -5732,6 +5751,32 @@ fn print_sorted<'a, T: Iterator<Item = &'a Line<'a>>>(
 	Ok(())
 }
 
+/// The shell's stdin as the input of `-` operands. Only the first `-` reads
+/// it; later ones are empty, as stdin is already at end of file by then.
+struct StdinOperand(std::cell::Cell<Option<crate::host::Stdin>>);
+
+impl StdinOperand {
+	const fn new(stdin: Option<crate::host::Stdin>) -> Self {
+		Self(std::cell::Cell::new(stdin))
+	}
+
+	fn take(&self) -> Box<dyn Read + Send> {
+		match self.0.take() {
+			Some(stdin) => Box::new(stdin),
+			None => Box::new(std::io::empty()),
+		}
+	}
+}
+
+/// Open an input operand: `-` reads the shell's stdin, anything else a file.
+fn open_operand(
+	fs: &BlockingFs,
+	stdin: &StdinOperand,
+	path: impl AsRef<OsStr>,
+) -> SortResult<Box<dyn Read + Send>> {
+	if path.as_ref() == OsStr::new(STDIN_FILE) { Ok(stdin.take()) } else { open(fs, path) }
+}
+
 fn open(fs: &BlockingFs, path: impl AsRef<OsStr>) -> SortResult<Box<dyn Read + Send>> {
 	let path = Path::new(path.as_ref());
 	match fs.open(path) {
@@ -5896,6 +5941,22 @@ mod tests {
 		assert_eq!(code, 0);
 		assert_eq!(capture.out(), "alpha\nbeta\n");
 		assert_eq!(capture.err(), "");
+	}
+
+	#[test]
+	fn reads_standard_input_once_across_repeated_dash_operands() {
+		let (code, capture) = run_util::<Sort>(&["-", "-"], "beta\nalpha\n", "/");
+		assert_eq!(code, 0, "{}", capture.err());
+		assert_eq!(capture.out(), "alpha\nbeta\n");
+	}
+
+	#[test]
+	fn merges_standard_input_with_files() {
+		let dir = tempfile::tempdir().expect("temp dir");
+		std::fs::write(dir.path().join("evens"), "b\nd\n").expect("fixture");
+		let (code, capture) = run_util::<Sort>(&["-m", "-", "evens"], "a\nc\n", dir.path());
+		assert_eq!(code, 0, "{}", capture.err());
+		assert_eq!(capture.out(), "a\nb\nc\nd\n");
 	}
 
 	#[test]

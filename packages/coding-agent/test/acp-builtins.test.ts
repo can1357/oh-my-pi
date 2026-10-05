@@ -1110,6 +1110,9 @@ describe("wave 3 commands", () => {
 			await git("init", "-q", "-b", "main");
 			await git("config", "user.email", "t@example.com");
 			await git("config", "user.name", "t");
+			// The reset source is compared byte-for-byte; Git for Windows'
+			// system `core.autocrlf=true` would restore it as CRLF.
+			await git("config", "core.autocrlf", "false");
 			await Bun.write(path.join(repoDir, "tracked.txt"), "committed\n");
 			await Bun.write(path.join(repoDir, ".gitignore"), "build/\n");
 			await git("add", "-A");

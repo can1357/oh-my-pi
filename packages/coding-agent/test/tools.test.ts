@@ -2537,7 +2537,11 @@ function b() {
 
 			expect(result.details?.async?.state).toBe("running");
 			expect(result.details?.async?.type).toBe("bash");
+			// Auto-backgrounded after its foreground wait: the deadline counts the job's whole run, not time left.
 			expect(getTextOutput(result)).toContain("Backgrounded as job");
+			expect(getTextOutput(result)).toContain(
+				"(killed once it has run 3600s in total; `timeout: 0` disables the deadline)",
+			);
 
 			const jobId = result.details?.async?.jobId;
 			if (!jobId) {

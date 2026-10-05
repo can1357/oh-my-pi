@@ -18,6 +18,7 @@
  * Everything renders through the same components, so ctrl+o, theming, and
  * transcript behavior are native by construction.
  */
+import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import type { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { ImageContent } from "@oh-my-pi/pi-ai";
@@ -27,6 +28,8 @@ import type { InteractiveModeContext } from "../modes/types";
 import { AgentRegistry } from "../registry/agent-registry";
 import type { AgentSessionEvent } from "../session/agent-session";
 import type { SessionEntry } from "../session/session-entries";
+import { mintSessionId } from "../session/session-manager";
+import { FileSessionStorage } from "../session/session-storage";
 import { shouldDisableReasoning, toReasoningEffort } from "@oh-my-pi/pi-tui/thinking";
 import { emitSubagentFrame } from "../utils/event-bus";
 import { GuestLifecycleEmitter } from "../extensibility/extensions/lifecycle-mirror";
@@ -166,6 +169,22 @@ export class CollabGuestLink {
 	#ctx: InteractiveModeContext;
 	#socket: CollabSocket | null = null;
 	#roomId = "";
+	/**
+	 * This guest's replica: its own session id and file for the guest's
+	 * lifetime. Ownership is keyed by session id, so the replica must not reuse
+	 * the host's id (a guest on the host's machine would contend with the
+	 * host), must not change on a resync (a lease handoff would leave the file
+	 * briefly unowned), and must not share a file with another local guest of
+	 * the same room.
+	 */
+	readonly #replicaId = mintSessionId();
+	/**
+	 * The replica's ownership lease, held from the first snapshot write until
+	 * the guest has left. Opening and reloading the replica never claims it, so
+	 * without this an idle guest would leave its live replica unowned (and
+	 * collectable by `omp gc`).
+	 */
+	#replicaLease: (() => void) | undefined;
 	/** Previous session file to restore on leave; null = previous session was unsaved. */
 	#returnSessionFile: string | null = null;
 	/** Frames apply strictly in arrival order through this chain. */
@@ -452,13 +471,32 @@ export class CollabGuestLink {
 		this.#pendingSnapshot = null;
 		this.#clearSnapshotProgressTimer();
 		if (!pending || this.#left) return;
-		const replicaPath = path.join(getConfigRootDir(), "collab", `${this.#roomId}.jsonl`);
-		const lines = [pending.header, ...pending.entries].map(entry => JSON.stringify(entry)).join("\n");
-		await Bun.write(replicaPath, `${lines}\n`);
+		const replicaPath = path.join(getConfigRootDir(), "collab", `${this.#roomId}-${this.#replicaId}.jsonl`);
+		// A child of the host's session, as a sibling move is.
+		const header = {
+			...pending.header,
+			id: this.#replicaId,
+			parentSession: pending.header.id,
+			providerPromptCacheKey: pending.header.providerPromptCacheKey ?? pending.header.id,
+		};
+		const lines = [header, ...pending.entries].map(entry => JSON.stringify(entry)).join("\n");
+		const storage = new FileSessionStorage();
+		this.#replicaLease ??= storage.claimSession(this.#replicaId, replicaPath) ?? undefined;
+		// Published atomically: `omp gc` reads the replica's header to find its
+		// lease, so a resync must never expose a truncated, headerless file.
+		const tempPath = `${replicaPath}.${mintSessionId()}.tmp`;
+		try {
+			await Bun.write(tempPath, `${lines}\n`);
+			await fs.rename(tempPath, replicaPath);
+		} catch (err) {
+			await fs.unlink(tempPath).catch(() => {});
+			throw err;
+		}
 		if (this.#left) return;
 
-		// Resume through AgentSession without adopting the host's cwd.
-		const switched = await this.#ctx.session.switchSession(replicaPath, { preserveLocalCwd: true });
+		// Resume through AgentSession without adopting the host's cwd. The replica
+		// keeps its model: #applyHostState mirrors the host's, which runs inference.
+		const switched = await this.#ctx.session.switchSession(replicaPath, { preserveLocalCwd: true, keepModel: true });
 		if (switched === false) {
 			throw new Error("Collab replica activation was cancelled");
 		}
@@ -856,7 +894,12 @@ export class CollabGuestLink {
 		// An already-running switch cannot be cancelled halfway through. Drain
 		// it before rollback; no queued frame may reactivate the replica later.
 		await this.#applyChain;
-		if (this.#replicaActivated) await this.#resumeLocalSession();
+		try {
+			if (this.#replicaActivated) await this.#resumeLocalSession();
+		} finally {
+			this.#replicaLease?.();
+			this.#replicaLease = undefined;
+		}
 		if (this.#ctx.collabGuest !== this) return false;
 		this.#ctx.collabGuest = undefined;
 		this.#ctx.syncRunningSubagentBadge();

@@ -29,6 +29,8 @@ function makeSession(): ToolSession {
 		settings: Settings.isolated({
 			"browser.enabled": true,
 			"browser.cmux": true,
+			// Tern resolves before cmux; keep an ambient Tern pane from capturing the open.
+			"browser.tern": false,
 			"tools.maxTimeout": 0,
 		}),
 		getSessionId: () => "session-open-lease",

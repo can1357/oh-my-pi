@@ -103,7 +103,9 @@ export function openDb(): Database | null {
 		// Migrate any pre-existing table whose key/check constraint predates
 		// the current schema. The cache is regenerable, so we drop rows rather
 		// than running an in-place ALTER dance.
-		const userVersion = (db.prepare("PRAGMA user_version").get() as { user_version?: number } | undefined)
+		// Statements go through the query cache that close() finalizes; an unfinalized
+		// prepare() keeps the closed connection alive and the file locked on Windows.
+		const userVersion = (db.query("PRAGMA user_version").get() as { user_version?: number } | undefined)
 			?.user_version;
 		if (userVersion !== undefined && userVersion < 3) {
 			db.run("DROP TABLE IF EXISTS github_view_cache");
@@ -141,7 +143,7 @@ export function openDb(): Database | null {
 function evictExpired(db: Database, hardTtlMs: number): void {
 	try {
 		const cutoff = Date.now() - hardTtlMs;
-		db.prepare("DELETE FROM github_view_cache WHERE fetched_at < ?").run(cutoff);
+		db.query("DELETE FROM github_view_cache WHERE fetched_at < ?").run(cutoff);
 	} catch (err) {
 		logger.debug("github cache: eviction failed", { err: String(err) });
 	}
@@ -264,7 +266,7 @@ export function getCached<T = unknown>(
 	if (!db) return null;
 	try {
 		const row = db
-			.prepare(
+			.query(
 				"SELECT auth_key, repo, kind, number, include_comments, fetched_at, payload, rendered, source_url FROM github_view_cache WHERE auth_key = ? AND repo = ? AND kind = ? AND number = ? AND include_comments = ?",
 			)
 			.get(authKey, normalizeRepo(repo), kind, number, includeComments ? 1 : 0) as Row | undefined;
@@ -311,7 +313,7 @@ export function putCached<T = unknown>(input: PutCachedInput<T>): void {
 	try {
 		const fetchedAt = input.fetchedAt ?? Date.now();
 		const payloadJson = JSON.stringify(input.payload);
-		db.prepare(
+		db.query(
 			"INSERT OR REPLACE INTO github_view_cache (auth_key, repo, kind, number, include_comments, fetched_at, payload, rendered, source_url) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
 		).run(
 			input.authKey ?? DEFAULT_CACHE_AUTH_KEY,
@@ -342,14 +344,14 @@ export function invalidate(
 	if (!db) return;
 	try {
 		if (includeComments === undefined) {
-			db.prepare("DELETE FROM github_view_cache WHERE auth_key = ? AND repo = ? AND kind = ? AND number = ?").run(
+			db.query("DELETE FROM github_view_cache WHERE auth_key = ? AND repo = ? AND kind = ? AND number = ?").run(
 				authKey,
 				normalizeRepo(repo),
 				kind,
 				number,
 			);
 		} else {
-			db.prepare(
+			db.query(
 				"DELETE FROM github_view_cache WHERE auth_key = ? AND repo = ? AND kind = ? AND number = ? AND include_comments = ?",
 			).run(authKey, normalizeRepo(repo), kind, number, includeComments ? 1 : 0);
 		}
@@ -374,9 +376,9 @@ export function invalidateAllForNumber(number: number, repo?: string): void {
 	if (!db) return;
 	try {
 		if (repo === undefined) {
-			db.prepare("DELETE FROM github_view_cache WHERE number = ?").run(number);
+			db.query("DELETE FROM github_view_cache WHERE number = ?").run(number);
 		} else {
-			db.prepare("DELETE FROM github_view_cache WHERE number = ? AND repo = ?").run(number, normalizeRepo(repo));
+			db.query("DELETE FROM github_view_cache WHERE number = ? AND repo = ?").run(number, normalizeRepo(repo));
 		}
 	} catch (err) {
 		logger.debug("github cache: invalidateAllForNumber failed", { err: String(err) });
@@ -388,7 +390,7 @@ export function clearAll(): void {
 	const db = openDb();
 	if (!db) return;
 	try {
-		db.prepare("DELETE FROM github_view_cache").run();
+		db.query("DELETE FROM github_view_cache").run();
 	} catch (err) {
 		logger.debug("github cache: clear failed", { err: String(err) });
 	}
@@ -405,9 +407,9 @@ export function invalidateAllForRepo(repo?: string): void {
 	if (!db) return;
 	try {
 		if (repo === undefined) {
-			db.prepare("DELETE FROM github_view_cache").run();
+			db.query("DELETE FROM github_view_cache").run();
 		} else {
-			db.prepare("DELETE FROM github_view_cache WHERE repo = ?").run(normalizeRepo(repo));
+			db.query("DELETE FROM github_view_cache WHERE repo = ?").run(normalizeRepo(repo));
 		}
 	} catch (err) {
 		logger.debug("github cache: invalidateAllForRepo failed", { err: String(err) });

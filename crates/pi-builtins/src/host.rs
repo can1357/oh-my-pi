@@ -118,6 +118,8 @@ pub(crate) struct Host {
 	stdout_handle:         Option<OpenFile>,
 	/// Populated on the utility worker, where virtual handle queries may block.
 	stdout_metadata:       OnceLock<Option<Metadata>>,
+	/// The effective umask, read once per invocation (see [`Host::umask`]).
+	umask:                 OnceLock<u32>,
 
 	name:                  String,
 	paths:                 ShellPaths,
@@ -448,6 +450,37 @@ fn virtual_descriptor_path(fd: brush_core::ShellFd) -> PathBuf {
 	PathBuf::from(format!("omp-descriptor://{fd}"))
 }
 
+/// The host process umask, which builtins must never change: they run on
+/// threads of a process that other shells and the host share.
+///
+/// Linux reads it race-free from `/proc/self/status`. Elsewhere the only way to
+/// read it is to set it and set it back, which briefly unmasks other threads'
+/// creations, so that happens once per process.
+#[cfg(unix)]
+pub(crate) fn process_umask() -> u32 {
+	use std::sync::LazyLock;
+
+	use nix::sys::stat::{Mode, umask};
+
+	#[allow(clippy::useless_conversion, reason = "`mode_t` is u16 on some targets")]
+	static TOGGLED: LazyLock<u32> = LazyLock::new(|| {
+		let mask = umask(Mode::empty());
+		umask(mask);
+		u32::from(mask.bits())
+	});
+	cfg_if::cfg_if! {
+		if #[cfg(any(target_os = "linux", target_os = "android"))] {
+			procfs::process::Process::myself()
+				.ok()
+				.and_then(|me| me.status().ok())
+				.and_then(|status| status.umask)
+				.unwrap_or_else(|| *TOGGLED)
+		} else {
+			*TOGGLED
+		}
+	}
+}
+
 impl Host {
 	/// The name the utility was invoked as. Differs from [`Utility::NAME`] when
 	/// one implementation backs several builtins (`grep` and `rg`).
@@ -483,6 +516,22 @@ impl Host {
 	/// Filesystem for every utility path access, usable on its blocking worker.
 	pub fn fs(&self) -> &BlockingFs {
 		self.paths.fs()
+	}
+
+	/// The file mode creation mask for new files: the shell's `umask` once one
+	/// was set, else the host process's. `0` where there is no umask. Read
+	/// once per invocation.
+	pub fn umask(&self) -> u32 {
+		*self.umask.get_or_init(|| {
+			#[cfg(unix)]
+			{
+				self.fs().creation_mask().unwrap_or_else(process_umask)
+			}
+			#[cfg(not(unix))]
+			{
+				0
+			}
+		})
 	}
 
 	/// Whether `path` identifies the regular file currently backing stdout.
@@ -1247,6 +1296,58 @@ pub(crate) fn format_usage(usage: &str) -> String {
 	usage.replace('\n', "\n       ")
 }
 
+/// Renders an I/O error the way GNU utilities print `strerror(errno)`: without
+/// Rust's ` (os error N)` suffix, and with POSIX wording for OS errors whose
+/// kind maps to a single errno. Windows reports `ERROR_FILE_NOT_FOUND` as
+/// "The system cannot find the file specified.", which a GNU-emulating
+/// diagnostic must spell "No such file or directory" like everywhere else.
+pub(crate) fn strip_errno(error: &io::Error) -> String {
+	if error.raw_os_error().is_some()
+		&& let Some(text) = posix_strerror(error.kind())
+	{
+		return text.to_owned();
+	}
+	let mut message = error.to_string();
+	if let Some(position) = message.find(" (os error ") {
+		message.truncate(position);
+	}
+	message
+}
+
+/// POSIX `strerror` text for an OS error kind. Kinds that cover several errnos
+/// on unix (`PermissionDenied` is both `EPERM` and `EACCES`) keep the native
+/// text there, which is already exact.
+fn posix_strerror(kind: io::ErrorKind) -> Option<&'static str> {
+	use io::ErrorKind;
+	Some(match kind {
+		ErrorKind::NotFound => "No such file or directory",
+		ErrorKind::AlreadyExists => "File exists",
+		ErrorKind::NotADirectory => "Not a directory",
+		ErrorKind::IsADirectory => "Is a directory",
+		ErrorKind::DirectoryNotEmpty => "Directory not empty",
+		#[cfg(not(unix))]
+		ErrorKind::PermissionDenied => "Permission denied",
+		_ => return None,
+	})
+}
+
+/// Forward-slash spelling of a Windows display path, or `None` when the path
+/// already displays as-is (non-Windows, no backslashes, verbatim prefix, or
+/// non-Unicode names that must stay native).
+///
+/// Utilities that print paths they built themselves (`find`, `rg`, `diff -r`)
+/// render them the way the bash they emulate does, with `/` separators, so
+/// output does not change spelling with the host platform.
+pub(crate) fn forward_slash_display(path: &Path) -> Option<PathBuf> {
+	if !cfg!(windows) || path.to_str().is_none() {
+		return None;
+	}
+	match pi_walker::normalize_path(path) {
+		std::borrow::Cow::Owned(text) => Some(PathBuf::from(text)),
+		std::borrow::Cow::Borrowed(_) => None,
+	}
+}
+
 /// Borrows an `OsStr` as raw bytes.
 ///
 /// Unix strings are arbitrary byte sequences, so this is free there. On Windows
@@ -1599,6 +1700,7 @@ fn build_host<SE: ShellExtensions>(
 		stderr,
 		stdout_handle,
 		stdout_metadata: OnceLock::new(),
+		umask: OnceLock::new(),
 		name: invoked,
 		paths: ShellPaths::new(context),
 		env,
@@ -1750,6 +1852,7 @@ mod testing {
 				)),
 				stdout_handle:         None,
 				stdout_metadata:       Default::default(),
+				umask:                 Default::default(),
 				name:                  name.to_string(),
 				paths:                 ShellPaths::with_cwd(cwd),
 				env:                   HashMap::new(),

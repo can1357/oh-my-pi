@@ -192,13 +192,14 @@ describe("headless persistence-failure surface", () => {
 		const creator = SessionManager.create(dir.path(), dir.path());
 		await creator.ensureOnDisk();
 		const original = creator.getSessionFile() as string;
+		const originalId = creator.getSessionId();
 		await creator.close();
 
-		// Another live omp process wrote this file first and still has it open.
+		// Another live omp process wrote this session first and still has it open.
 		const storage = new FileSessionStorage();
-		const claim = storage.claimSessionFile.bind(storage);
-		spyOn(storage, "claimSessionFile").mockImplementation(sessionPath =>
-			sessionPath === original ? null : claim(sessionPath),
+		const claim = storage.claimSession.bind(storage);
+		spyOn(storage, "claimSession").mockImplementation((sessionId, sessionPath) =>
+			sessionId === originalId ? null : claim(sessionId, sessionPath),
 		);
 		const manager = await SessionManager.open(original, dir.path(), storage, { suppressBreadcrumb: true });
 		const session = {

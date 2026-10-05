@@ -402,6 +402,22 @@ describe("generated model policies", () => {
 		}
 	});
 
+	it("keeps the GLM-5.3 low/high/max ladder on Fast serving-path ids on every host", () => {
+		const models = [
+			createSpec({ id: "glm-5.3-fast", api: "openai-completions", provider: "fireworks" }),
+			createSpec({ id: "zai-org/GLM-5.3-Fast", api: "openai-completions", provider: "baseten" }),
+			createSpec({ id: "zai/glm-5.3-fast", api: "anthropic-messages", provider: "vercel-ai-gateway" }),
+		].map(model => buildGenerated(model));
+
+		// Fast serves the same weights faster, so it keeps the base model's
+		// mandatory-thinking ladder rather than the host's generic one.
+		for (const model of models) {
+			expect(model.thinking?.efforts).toEqual([Effort.Low, Effort.High, Effort.Max]);
+			expect(model.thinking?.requiresEffort).toBe(true);
+			expect(model.thinking?.defaultLevel).toBe(Effort.Max);
+		}
+	});
+
 	it("pins zai glm-5.3-flash to the 1M tier and restores its native image input", () => {
 		const models = [
 			createSpec({

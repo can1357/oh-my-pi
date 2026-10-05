@@ -1,14 +1,13 @@
 /**
- * The async background jobs of a session, twice: {@link JobsPanel} is the
- * `/jobs` transcript block (ANSI keeps the caller's text report; natively one
- * frame), {@link JobsSheet} the dismissable sheet the native jobs pill opens.
- * The panel draws task jobs as `agent` nodes and the others as a status dot,
- * the one-line label and a live `elapsed`; the sheet lists every job and
- * inspects the selected one (command, cwd, live pids, exit code, output tail).
+ * The async background jobs of a session as {@link JobsSheet}: the dismissable
+ * sheet the native jobs pill and `/jobs` open. It draws task jobs as `agent`
+ * nodes and the others as a status dot, the one-line label and a live
+ * `elapsed`, lists every job and inspects the selected one (command, cwd, live
+ * pids, exit code, output tail).
  */
 import type { TspAgentProps, TspSpan } from "@oh-my-pi/pi-wire";
 import { formatDuration } from "@oh-my-pi/pi-utils";
-import { type Component, Container } from "../tui";
+import type { Component } from "../tui";
 import { matchesSelectCancel, matchesSelectDown, matchesSelectUp } from "../keybinding-matchers";
 import { matchesKey } from "../keys";
 import { truncateToWidth } from "../utils";
@@ -91,31 +90,6 @@ const DOT: Record<JobsPanelJob["status"], TspSpan> = {
 
 /** Output tail rows the terminal fallback shows under the selected job. */
 const FALLBACK_TAIL_LINES = 8;
-
-/** The `/jobs` block: `ansi` renders in the terminal, the snapshot describes the native frame. */
-export class JobsPanel extends Container {
-	readonly #snapshot: JobsPanelSnapshot;
-	readonly #nowMs: number;
-	#native: { agent: boolean; node: NativeNode } | undefined;
-
-	constructor(snapshot: JobsPanelSnapshot, nowMs: number, ansi: readonly Component[]) {
-		super();
-		this.#snapshot = snapshot;
-		this.#nowMs = nowMs;
-		for (const child of ansi) this.addChild(child);
-	}
-
-	override describe(cx: DescribeContext): NativeNode {
-		const agent = cx.supports("agent");
-		if (this.#native?.agent === agent) return this.#native.node;
-		const head: TspSpan[] = [span("Background jobs", "strong")];
-		const running = this.#snapshot.running.length;
-		if (running > 0) head.push(span(` · ${running} running`, "muted"));
-		const described = card({ role: "omp.jobs", head }, describeJobs(this.#snapshot, this.#nowMs, agent));
-		this.#native = { agent, node: described };
-		return described;
-	}
-}
 
 /**
  * The jobs pill's sheet: a centred `lg` glass sheet titled Background jobs.
@@ -252,27 +226,6 @@ export class JobsSheet implements Component {
 /** How long a job ran, or has been running. */
 function jobAge(job: JobsPanelJob, nowMs: number): number {
 	return Math.max(0, (job.endTime ?? nowMs) - job.startTime);
-}
-
-/** The body the `/jobs` panel draws: running rows, then a Recent section; an empty note when there are none. */
-function describeJobs(snapshot: JobsPanelSnapshot, nowMs: number, agent: boolean): NativeChild[] {
-	const { running, recent } = snapshot;
-	const children: NativeChild[] = [];
-	if (running.length === 0 && recent.length === 0) {
-		children.push(node("text", { text: "No background jobs", role: "omp.jobs.empty" }, undefined, "empty"));
-	}
-	for (const job of running) children.push(describeJob(job, nowMs, agent));
-	if (recent.length > 0) {
-		children.push(
-			node(
-				"section",
-				{ head: [span("Recent", "muted")] },
-				recent.map(job => describeJob(job, nowMs, agent)),
-				"recent",
-			),
-		);
-	}
-	return children;
 }
 
 /** A task job as an `agent` node when the terminal draws them, else a one-line dot row. */

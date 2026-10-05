@@ -437,7 +437,8 @@ function handle(frame) {
 		client.onSessionEvent(event => sessionEventTypes.push(event.type));
 
 		await client.start();
-		await expect(client.setSubagentSubscription("events")).resolves.toBe("events");
+		// Plain await, not `.resolves`: on Windows Bun's in-place promise wait never services the child pipe.
+		expect(await client.setSubagentSubscription("events")).toBe("events");
 		await client.promptAndWait("Trigger subagent frames");
 		expect(await client.getSubagents()).toHaveLength(1);
 		expect(await client.getSubagentMessages({ sessionFile: "/tmp/subagent.jsonl" })).toMatchObject({

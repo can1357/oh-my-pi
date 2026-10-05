@@ -1,4 +1,18 @@
 /**
+ * Options for {@link TerminalQueryResponder}.
+ */
+export interface TerminalQueryResponderOptions {
+	/**
+	 * Reply to `CSI 6 n` (report cursor position) with the home position. Set to
+	 * `false` when the PTY host answers cursor reports itself: the only `CSI 6 n`
+	 * left on the stream is then the host's own session-start handshake, whose
+	 * reply would be delivered to the supervised program as unsolicited input
+	 * instead of being consumed by the host. Defaults to `true`.
+	 */
+	cursorPosition?: boolean;
+}
+
+/**
  * Answers terminal capability queries emitted by programs on a headless PTY.
  *
  * A PTY that advertises `TERM=xterm-256color` but has no terminal behind it
@@ -17,6 +31,11 @@
 export class TerminalQueryResponder {
 	/** Trailing bytes that may be the start of an unfinished query escape. */
 	#residual = "";
+	readonly #cursorPosition: boolean;
+
+	constructor(options: TerminalQueryResponderOptions = {}) {
+		this.#cursorPosition = options.cursorPosition ?? true;
+	}
 
 	/**
 	 * Feed one raw PTY output chunk. Returns the reply bytes to write back into
@@ -29,7 +48,7 @@ export class TerminalQueryResponder {
 		QUERY.lastIndex = 0;
 		for (let match = QUERY.exec(buffer); match !== null; match = QUERY.exec(buffer)) {
 			lastEnd = match.index + match[0].length;
-			replies += replyFor(match);
+			replies += replyFor(match, this.#cursorPosition);
 		}
 		// Keep only a short unmatched trailing escape: a query split across
 		// chunks completes on the next feed, while a long tail is ordinary output
@@ -51,7 +70,7 @@ const MAX_PARTIAL_QUERY = 32;
 const QUERY = /\x1b\[([?>=]?)([0-9;]*)([nc])|\x1b\](10|11);\?(\x07|\x1b\\)/gu;
 
 /** Reply a real xterm-class terminal would send for one matched query. */
-function replyFor(match: RegExpExecArray): string {
+function replyFor(match: RegExpExecArray, cursorPosition: boolean): string {
 	const final = match[3];
 	if (final !== undefined) {
 		const intermediate = match[1];
@@ -63,7 +82,7 @@ function replyFor(match: RegExpExecArray): string {
 		}
 		if (intermediate !== "") return ""; // private DSR forms (DECXCPR, appearance) stay unanswered
 		const selector = params.split(";", 1)[0];
-		if (selector === "6") return "\x1b[1;1R"; // cursor position: home, there is no screen
+		if (selector === "6") return cursorPosition ? "\x1b[1;1R" : ""; // cursor position: home, there is no screen
 		if (selector === "5") return "\x1b[0n"; // device status: OK
 		return "";
 	}

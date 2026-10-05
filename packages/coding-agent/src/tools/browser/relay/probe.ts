@@ -12,9 +12,11 @@
  *   nothing is coming and the open fails at once instead of burning the
  *   whole window every call.
  */
+import { VERSION } from "@oh-my-pi/pi-utils/dirs";
 import { throwIfAborted } from "../../tool-errors";
 import { probeCdpResponse } from "../attach";
 import type { RelayUnavailableInfo } from "./server";
+import { DISCARDED_TABS_PROTOCOL_VERSION } from "./protocol";
 
 /**
  * One extension keepalive alarm period (30s, `background.js`) plus the dial
@@ -26,12 +28,16 @@ const POLL_INTERVAL_MS = 150;
 
 /** Outcome of {@link waitForRelayExtension}. */
 export type RelayWaitOutcome =
-	/** `/json/version` answered 200: puppeteer can connect. */
+	/** `/json/version` has the required relay and extension capabilities. */
 	| "ready"
 	/** Nothing (or something that is not a relay) is serving the endpoint. */
 	| "unreachable"
 	/** The relay is serving but no extension connected within the dial window. */
-	| "no-extension";
+	| "no-extension"
+	/** An older relay server is still running. */
+	| "outdated-relay"
+	/** The relay extension is older than the running server. */
+	| "outdated-extension";
 
 function parseUnavailableInfo(body: string): RelayUnavailableInfo | null {
 	try {
@@ -44,12 +50,43 @@ function parseUnavailableInfo(body: string): RelayUnavailableInfo | null {
 			"uptimeMs" in parsed &&
 			typeof parsed.uptimeMs === "number"
 		) {
-			return { error: "", extensionSeen: parsed.extensionSeen, uptimeMs: parsed.uptimeMs };
+			return {
+				error: "",
+				extensionSeen: parsed.extensionSeen,
+				uptimeMs: parsed.uptimeMs,
+				ompRelayVersion:
+					"ompRelayVersion" in parsed && typeof parsed.ompRelayVersion === "string" ? parsed.ompRelayVersion : "",
+			};
 		}
 	} catch {
 		// Not a relay body (older relay or foreign server); treated as opaque 503 below.
 	}
 	return null;
+}
+
+function readyOutcome(body: string): RelayWaitOutcome {
+	try {
+		const parsed: unknown = JSON.parse(body);
+		if (
+			typeof parsed !== "object" ||
+			parsed === null ||
+			!("ompRelayDiscardedTabsProtocol" in parsed) ||
+			parsed.ompRelayDiscardedTabsProtocol !== String(DISCARDED_TABS_PROTOCOL_VERSION)
+		) {
+			return "outdated-relay";
+		}
+		if (
+			!("ompExtensionDiscardedTabsProtocol" in parsed) ||
+			parsed.ompExtensionDiscardedTabsProtocol !== String(DISCARDED_TABS_PROTOCOL_VERSION)
+		) {
+			// A relay from another OMP version is the likelier culprit than the extension.
+			if (!("ompRelayVersion" in parsed) || parsed.ompRelayVersion !== VERSION) return "outdated-relay";
+			return "outdated-extension";
+		}
+		return "ready";
+	} catch {
+		return "outdated-relay";
+	}
 }
 
 /**
@@ -61,19 +98,21 @@ function parseUnavailableInfo(body: string): RelayUnavailableInfo | null {
 export async function waitForRelayExtension(cdpUrl: string, signal?: AbortSignal): Promise<RelayWaitOutcome> {
 	const probeUrl = `${cdpUrl}/json/version`;
 	let deadline = Date.now() + EXTENSION_DIAL_WINDOW_MS;
+	let staleRelay = false;
 	for (;;) {
 		throwIfAborted(signal);
 		const response = await probeCdpResponse(probeUrl, { timeoutMs: PROBE_TIMEOUT_MS, signal });
 		throwIfAborted(signal);
 		if (response === null) return "unreachable";
-		if (response.status >= 200 && response.status < 300) return "ready";
+		if (response.status >= 200 && response.status < 300) return readyOutcome(response.body);
 		if (response.status !== 503) return "unreachable";
 		const info = parseUnavailableInfo(response.body);
+		staleRelay = info !== null && info.ompRelayVersion !== VERSION;
 		if (info && !info.extensionSeen) {
 			// Never connected: the window is measured from server start, not from now.
 			deadline = Math.min(deadline, Date.now() - info.uptimeMs + EXTENSION_DIAL_WINDOW_MS);
 		}
-		if (Date.now() >= deadline) return "no-extension";
+		if (Date.now() >= deadline) return staleRelay ? "outdated-relay" : "no-extension";
 		await Bun.sleep(POLL_INTERVAL_MS);
 	}
 }

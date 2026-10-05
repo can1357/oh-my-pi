@@ -1,3 +1,4 @@
+import { formatModelSelectorValue } from "@oh-my-pi/pi-tui/overlays/model-selector";
 /**
  * Interactive mode for the coding agent.
  * Handles TUI rendering and user interaction, delegating business logic to AgentSession.
@@ -49,7 +50,7 @@ import { describeSegmentTrack, renderSegmentTrack, type TrackSegment } from "@oh
 import type { WorkingRowSpec } from "@oh-my-pi/pi-tui/components/loader";
 import { formatDoubleTap } from "@oh-my-pi/pi-tui/key-hint-format";
 import { thinkingLevelWord } from "@oh-my-pi/pi-tui/status-line/segments";
-import type { TspChecklistItem, TspChecklistPhase, TspSpan, TspTreeNode } from "@oh-my-pi/pi-wire";
+import type { TspChecklistItem, TspChecklistPhase, TspSpan, TspText, TspTreeNode } from "@oh-my-pi/pi-wire";
 import { isInsideTerminalMultiplexer } from "@oh-my-pi/pi-tui/terminal-capabilities";
 import {
 	$env,
@@ -69,9 +70,9 @@ import { restartArgv } from "../cli/flag-tables";
 import type { CollabGuestLink } from "../collab/guest";
 import { CollabController } from "../collab/controller";
 import type { CollabHost } from "../collab/host";
-import { formatKeyHint, KeybindingsManager } from "@oh-my-pi/pi-tui/app-keybindings";
-import { appKey, editorKey } from "@oh-my-pi/pi-tui/chrome/keybinding-hints";
-import { formatModelString, type ResolvedModelRoleValue } from "../config/model-resolver";
+import { KeybindingsManager } from "@oh-my-pi/pi-tui/app-keybindings";
+import { appKey, editorKey, rawKeyHint } from "@oh-my-pi/pi-tui/chrome/keybinding-hints";
+import { formatModelStringWithRouting, type ResolvedModelRoleValue } from "../config/model-resolver";
 import { isSettingsInitialized, Settings, settings } from "../config/settings";
 import { clearClaudePluginRootsCache } from "../discovery/helpers";
 import type {
@@ -136,7 +137,6 @@ import { resolveMarkdownLinkTargets } from "../internal-urls/hyperlink-targets";
 import { modelMentionDisplayName } from "@oh-my-pi/pi-tui/prompt/model-mention-syntax";
 import { modelMentionChipLabel, shiftImageMarkers } from "@oh-my-pi/pi-tui/prompt/composer-attachments";
 import type { SessionContext } from "../session/session-context";
-import { getRecentSessions } from "../session/session-listing";
 import type { SessionManager } from "../session/session-manager";
 import type { ShakeMode } from "../session/shake-types";
 import { BUILTIN_SLASH_COMMAND_RESERVED_NAMES, buildTuiBuiltinSlashCommands } from "../slash-commands/builtin-registry";
@@ -243,7 +243,6 @@ import { StatusLineComponent } from "@oh-my-pi/pi-tui/status-line";
 import { statusLineHost } from "./status-line-host";
 import { stopSharedSpinnerTicker, type ToolExecutionHandle } from "@oh-my-pi/pi-tui/chat/tool-execution";
 import { TranscriptContainer } from "@oh-my-pi/pi-tui/chrome/transcript-container";
-import type { LspServerInfo as WelcomeLspServerInfo } from "@oh-my-pi/pi-tui/prompt/welcome";
 import {
 	Composer,
 	type ComposerPreferences,
@@ -317,6 +316,7 @@ import type {
 	InteractiveModeInitOptions,
 	InteractiveSelectorDialogOptions,
 	RenderSessionContextOptions,
+	ShowStatusOptions,
 	SubmittedUserInput,
 } from "./types";
 import type { TodoItem, TodoPhase } from "@oh-my-pi/pi-tui/tools/todo";
@@ -1210,6 +1210,8 @@ export class InteractiveMode implements InteractiveModeContext {
 	errorBannerContainer: Container;
 	modelCycleContainer: Container;
 	deferredCommandContainer: Container;
+	/** The docked `/changelog`-style command report, just above the editor; Esc clears it. */
+	reportContainer: Container;
 	editor: CustomEditor;
 	editorContainer: Container;
 	/** Composer attachment band (chip cards) rendered directly above the prompt box. */
@@ -1735,12 +1737,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			composer ??
 			new Composer({
 				preferences,
-				welcome: {
-					version,
-					modelName: session.model?.name ?? "Unknown",
-					providerName: session.model?.provider ?? "Unknown",
-					lspServers: this.#getWelcomeLspServers(lspServers),
-				},
+				welcome: { version },
 			});
 		this.composer.setPreferences(preferences);
 		this.ui = this.composer.ui;
@@ -1828,6 +1825,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.errorBannerContainer = new AnchoredLiveContainer();
 		this.modelCycleContainer = new AnchoredLiveContainer();
 		this.deferredCommandContainer = new AnchoredLiveContainer();
+		this.reportContainer = new AnchoredLiveContainer();
 		if (eventBus) {
 			this.#eventBusUnsubscribers.push(
 				eventBus.on(JUDGMENT_BATCH_PROGRESS_EVENT_CHANNEL, data => {
@@ -1862,6 +1860,9 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.historyStorage.setSessionResolver(() => this.sessionManager.getSessionId());
 			// The prediction daemon learns from history.db; nudge it once each prompt is durable.
 			this.historyStorage.setAddListener(syncTextPrediction);
+			this.historyStorage.setErrorListener(() => {
+				this.showWarning("Prompt history could not be saved; this prompt may be unavailable after restart.");
+			});
 		} catch (error) {
 			logger.warn("History storage unavailable", { error: String(error) });
 		}
@@ -2003,7 +2004,9 @@ export class InteractiveMode implements InteractiveModeContext {
 			connectedServers: this.#orderedMcpStatusServers(this.#mcpConnectedServers),
 			failedServers: this.#orderedMcpStatusFailures(),
 		});
-		if (message) this.showStatus(message);
+		// Progress of every server connecting or failing: a toast per change
+		// is noise on a native terminal (Tern), so it stays in the ANSI transcript.
+		if (message) this.showStatus(message, { toast: false });
 	}
 
 	#trackMcpStatusServer(serverName: string): void {
@@ -2091,29 +2094,9 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.session.slashCommands,
 		);
 
-		// Get current model info for welcome screen
-		const modelName = this.session.model?.name ?? "Unknown";
-		const providerName = this.session.model?.provider ?? "Unknown";
-
-		// Prepaint started this scan before the runtime module graph loaded. Only
-		// scan here when no startup composer exists (non-TTY/embedded hosts) or
-		// its best-effort load failed.
-		const recentSessions = await logger.time("InteractiveMode.init:recentSessions", async () => {
-			const preloaded = await options.recentSessions;
-			if (preloaded) return preloaded;
-			const sessions = await getRecentSessions(this.sessionManager.getSessionDir());
-			return sessions.map(s => ({ name: s.name, timeAgo: s.timeAgo, path: s.path }));
-		});
 		const startupQuiet = cfgStartupQuiet.get(settings);
 		this.composer.setPreferences({ quiet: startupQuiet });
-		this.composer.updateWelcome({
-			version: this.#version,
-			modelName,
-			providerName,
-			recentSessions,
-			lspServers: this.#getWelcomeLspServers(),
-		});
-		this.#persistComposerWelcome(modelName, providerName);
+		this.composer.updateWelcome({ version: this.#version });
 		const headerBefore = this.#buildConfigWarningComponents();
 		const headerAfter: Component[] = [];
 		if (!startupQuiet && this.#startupChangelog && cfgStartupChangelogMode.get(settings) !== "hidden") {
@@ -2145,6 +2128,7 @@ export class InteractiveMode implements InteractiveModeContext {
 				this.todoContainer,
 				this.subagentContainer,
 				this.btwContainer,
+				this.reportContainer,
 				this.omfgContainer,
 				this.cleanseContainer,
 				this.errorBannerContainer,
@@ -2165,8 +2149,11 @@ export class InteractiveMode implements InteractiveModeContext {
 			],
 			{
 				// Inline dialogs and a tall multi-line draft swap into the editor
-				// container and collapse again; everything else is turn-scoped.
-				transient: [this.editorContainer],
+				// container and collapse again, as a command report above it closes
+				// on Esc: they clip the transcript instead of retiring it to
+				// scrollback, so the editor returns to the bottom when they go.
+				// Everything else is turn-scoped.
+				transient: [this.editorContainer, this.reportContainer],
 				// Natively the HUD pills lead the dock, queued messages sit between
 				// the working row and the composer, and the attachment chips live
 				// inside the composer.
@@ -2206,7 +2193,9 @@ export class InteractiveMode implements InteractiveModeContext {
 					this.showUserMessageSelector();
 					return;
 				case "resume":
-					void this.handleResumeSession(action.path);
+					this.handleResumeSession(action.path).catch((error: unknown) =>
+						this.showError(error instanceof Error ? error.message : String(error)),
+					);
 					return;
 				case "copy":
 					copyToClipboard(action.text).then(
@@ -2405,7 +2394,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#eventBusUnsubscribers.push(
 			this.session.subscribe(event => {
 				if (event.type === "model_changed") {
-					this.#updateWelcomeModel();
+					this.#scheduleComposerStatusPersist();
 				}
 				if (event.type === "config_warnings_changed") {
 					this.#syncConfigWarningHeader();
@@ -2414,11 +2403,11 @@ export class InteractiveMode implements InteractiveModeContext {
 			}),
 			cfgLiveUiSettings.listen(this.settings, (next, previous) => this.#applyUiSettingChanges(next, previous)),
 		);
-		// Resync the welcome banner to the live model: init-time reconciliations
-		// (#reconcileModeFromSession, #enterPlanMode for plan.defaultOnStartup)
-		// can change the model before this subscription exists, so the
-		// model_changed events they emit are never observed by the handler above.
-		this.#updateWelcomeModel();
+		// Cache the live model for the next status-bar prepaint: init-time
+		// reconciliations (#reconcileModeFromSession, #enterPlanMode for
+		// plan.defaultOnStartup) can change the model before this subscription
+		// exists, so the model_changed events they emit are never observed above.
+		this.#scheduleComposerStatusPersist();
 		// Config warnings can change during the same pre-subscription window; the
 		// event is not replayed, so rebuild from the live array once here too.
 		this.#syncConfigWarningHeader();
@@ -2519,6 +2508,8 @@ export class InteractiveMode implements InteractiveModeContext {
 		// `streamingBehavior: "steer"`, so whichever lands second queues into the
 		// other's turn instead of dying.
 		this.editor.disableSubmit = false;
+		// Publish native send readiness even when no user input triggers another frame.
+		this.ui.requestRender();
 	}
 
 	/** Reload the title-generation system prompt override for the provided working
@@ -4535,7 +4526,10 @@ export class InteractiveMode implements InteractiveModeContext {
 			// (same as the spawn-path ToolSession), not the settings default. This is
 			// the primary fallback in resolveAgentModelPatterns, so the `good` worker's
 			// pi/task inheritance tracks the reopened session's model.
-			getActiveModelString: () => (this.session.model ? formatModelString(this.session.model) : undefined),
+			getActiveModelString: () =>
+				this.session.model
+					? formatModelSelectorValue(formatModelStringWithRouting(this.session.model), this.session.thinkingLevel)
+					: undefined,
 		};
 	}
 
@@ -6658,20 +6652,22 @@ export class InteractiveMode implements InteractiveModeContext {
 	];
 
 	/**
-	 * Show the report_tool_issue consent popup and return the user's decision.
+	 * Show the report_tool_issue consent popup (mirrored to writable `/collab` guests)
+	 * and return the user's decision.
 	 * Invoked by the process-global consent handler the tool dispatches to;
 	 * subagent invocations bubble up here through the shared module state.
 	 */
 	async #promptAutoQaConsent(): Promise<boolean | null> {
 		const pool = InteractiveMode.#AUTOQA_CONSENT_PROMPTS;
 		const [headline, body] = pool[Math.floor(Math.random() * pool.length)];
-		const choice = await this.showHookSelector(`${headline}\n${body}`, ["Yes", "No"]);
+		const choice = await this.#extensionUiController.showCollabAwareSelector(`${headline}\n${body}`, ["Yes", "No"]);
 		return choice === "Yes";
 	}
 
 	/**
-	 * Ask the user to approve one `cfg://` settings change. Dismissing the dialog denies it;
-	 * leaving it unanswered for {@link CFG_APPROVAL_TIMEOUT_MS} (any keypress restarts the
+	 * Ask the user to approve one `cfg://` settings change; writable `/collab` guests get the
+	 * same prompt and the first answer wins. Dismissing the dialog denies it; leaving it
+	 * unanswered for {@link CFG_APPROVAL_TIMEOUT_MS} (any host keypress restarts the
 	 * countdown) drops it as `timeout`.
 	 */
 	async #promptCfgChange(request: CfgChangeRequest): Promise<CfgApproval> {
@@ -6682,7 +6678,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			? `\n⚠️ Overridden by your ${request.shadowedBy}: the saved value won't take effect here.`
 			: "";
 		let timedOut = false;
-		const choice = await this.showHookSelector(
+		const choice = await this.#extensionUiController.showCollabAwareSelector(
 			`${headline}\n${request.previous} → ${request.value}${warning}`,
 			[CFG_APPROVE_SESSION, CFG_APPROVE_ONCE, CFG_DENY],
 			{
@@ -7202,10 +7198,10 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.transcriptMessageComponents = new WeakMap<AgentMessage, Component>();
 		this.chatContainer.dispose();
 		this.chatContainer.clear();
-		this.#commandController.resetContextView();
+		this.#commandController.clearCommandReport();
 	}
 
-	showStatus(message: string, options?: { dim?: boolean }): void {
+	showStatus(message: string, options?: ShowStatusOptions): void {
 		this.#uiHelpers.showStatus(message, options);
 	}
 
@@ -7238,8 +7234,6 @@ export class InteractiveMode implements InteractiveModeContext {
 	}
 
 	#handleLspStartupEvent(event: LspStartupEvent): void {
-		this.#updateWelcomeLspServers();
-
 		if (event.type === "failed") {
 			this.showWarning(`LSP startup failed: ${event.error}. It will retry lazily on write.`);
 			return;
@@ -7260,25 +7254,6 @@ export class InteractiveMode implements InteractiveModeContext {
 		}
 	}
 
-	/** Welcome rows for startup LSP servers; `null` (section hidden) when the session skipped LSP discovery. */
-	#getWelcomeLspServers(servers = this.lspServers): WelcomeLspServerInfo[] | null {
-		return (
-			servers?.map(server => ({
-				name: server.name,
-				status: server.status,
-				fileTypes: server.fileTypes,
-			})) ?? null
-		);
-	}
-
-	#updateWelcomeModel(): void {
-		const modelName = this.session.model?.name ?? "Unknown";
-		const providerName = this.session.model?.provider ?? "Unknown";
-		this.composer.updateWelcome({ modelName, providerName });
-		this.#persistComposerWelcome(modelName, providerName);
-		this.#scheduleComposerStatusPersist();
-	}
-
 	#syncConfigWarningHeader(): void {
 		this.composer.setHeaderExtras(this.#buildConfigWarningComponents(), this.#headerAfter);
 	}
@@ -7293,15 +7268,6 @@ export class InteractiveMode implements InteractiveModeContext {
 			);
 		}
 		return components;
-	}
-
-	#persistComposerWelcome(modelName: string, providerName: string): void {
-		if (!this.sessionManager.getSessionFile()) return;
-		sharedComposerCache()?.writeWelcome(this.sessionManager.getCwd(), { modelName, providerName });
-	}
-
-	#updateWelcomeLspServers(): void {
-		this.composer.updateWelcome({ lspServers: this.#getWelcomeLspServers() });
 	}
 
 	#clearWorkingMessageAccentCache(): void {
@@ -7526,14 +7492,15 @@ export class InteractiveMode implements InteractiveModeContext {
 		// Never contend with a live loader (working/auto-retry/compaction).
 		if (!show || this.statusContainer.children.length > 0) return;
 		const retryKey = this.keybindings.getKeys("app.retry")[0] ?? "f5";
+		// Laid out as the working row it replaces: a blank row above, then the
+		// key in the column where the working row's interrupt key stood.
+		const hint = new Container();
+		hint.addChild(new Spacer(1));
+		hint.addChild(new Text(` ${rawKeyHint(retryKey, "to retry")}`, 1, 0));
 		this.#retryHintRow = new DescribedComponent(
-			new Text(
-				`${theme.fg("muted", theme.icon.loop)} ${theme.fg("dim", `${formatKeyHint(retryKey)} to Retry`)}`,
-				1,
-				0,
-			),
-			row([node("icon", { name: "loop", tone: "muted" }), kbd(retryKey, "key"), text([span("to Retry", "dim")])], {
-				gap: "xs",
+			hint,
+			row([node("icon", { name: "loop", tone: "muted" }), kbd(retryKey, "key"), text([span("to retry", "muted")])], {
+				gap: "sm",
 				align: "center",
 				role: "omp.hint.retry",
 			}),
@@ -7892,6 +7859,10 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#selectorController.showTreeSelector();
 	}
 
+	showThinkingSelector(): void {
+		this.#selectorController.showThinkingSelector();
+	}
+
 	showSessionSelector(source?: ForeignSessionSource): void {
 		void this.#selectorController.showSessionSelector(source);
 	}
@@ -8075,6 +8046,28 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	handleCleanseEscape(): boolean {
 		return this.#cleanseController.handleEscape();
+	}
+
+	showCommandReport(options: { title: string; head?: TspText; body: Component }): void {
+		this.#commandController.showCommandReport(options);
+	}
+
+	dismissCommandReport(): boolean {
+		return this.#commandController.dismissCommandReport();
+	}
+
+	commandReportRows(): number | undefined {
+		const below = this.composer.rowsBelow(this.reportContainer);
+		return below === undefined ? undefined : this.ui.terminal.rows - below;
+	}
+
+	composerInputAtBottom(): boolean {
+		const viewport = this.ui.getMutableViewport();
+		return viewport.length > 0 && viewport.top + viewport.length >= this.ui.terminal.rows;
+	}
+
+	pinComposerToBottom(): void {
+		this.composer.pinInputToBottom();
 	}
 
 	cycleThinkingLevel(): void {

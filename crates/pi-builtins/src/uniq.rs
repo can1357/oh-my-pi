@@ -18,7 +18,7 @@ use uucore::{
 	posix::{OBSOLETE, posix_version},
 };
 
-use crate::host::{Host, StreamWriter, Utility, format_usage, matches_parser, util};
+use crate::host::{Host, StreamWriter, Utility, format_usage, matches_parser, strip_errno, util};
 
 mod options {
 	pub static ALL_REPEATED: &str = "all-repeated";
@@ -69,11 +69,7 @@ struct LineMeta {
 type PortResult<T> = Result<T, String>;
 
 fn io_error(context: &str, error: std::io::Error) -> String {
-	let mut message = error.to_string();
-	if let Some(pos) = message.find(" (os error ") {
-		message.truncate(pos);
-	}
-	format!("{context}: {message}")
+	format!("{context}: {}", strip_errno(&error))
 }
 
 macro_rules! write_line_terminator {

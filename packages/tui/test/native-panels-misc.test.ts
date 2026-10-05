@@ -100,6 +100,62 @@ describe("BtwHistoryPanel native events", () => {
 		expect(listOf(described).p?.selected).toBe("b");
 		expect(findNode(described, node => node.key === "composer")).toBeDefined();
 	});
+
+	it("with escapeHides, puts a running answer away on Esc without cancelling it; x cancels it", () => {
+		const onClose = vi.fn();
+		const onCancel = vi.fn();
+		const running: BtwHistoryRecord = { ...record("a", "still going"), status: "running" };
+		const history = new BtwHistoryPanel({
+			records: [running],
+			onClose,
+			onCopy: () => {},
+			onCancel,
+			requestRender: () => {},
+			getHeight: () => 30,
+			escapeHides: true,
+		});
+		history.handleInput("\x1b");
+		expect(onClose).toHaveBeenCalledTimes(1);
+		expect(onCancel).not.toHaveBeenCalled();
+		history.handleInput("x");
+		expect(onCancel).toHaveBeenCalledWith(running);
+	});
+
+	it("jumps the answer pane to its end on a follow-up, and a streamed update does not re-pin it", () => {
+		const records = [record("a", "first question")];
+		const history = new BtwHistoryPanel({
+			records,
+			onClose: () => {},
+			onCopy: () => {},
+			onCancel: () => {},
+			canFollowUp: () => true,
+			onFollowUp: async () => true,
+			requestRender: () => {},
+			getHeight: () => 30,
+		});
+		const details = () => findNode(history.describe(), node => node.key === "details");
+		expect(details()?.scroll).toBeUndefined();
+		history.handleInput("\r");
+		expect(details()?.scroll).toEqual({ by: "end", n: 1 });
+		// Tern reports no wheel scroll: following every delta would pull a reader back down.
+		history.update([{ ...records[0]!, answer: "answer to first question, longer now" }]);
+		expect(details()?.scroll).toEqual({ by: "end", n: 1 });
+	});
+
+	it("gives a lone record's answer the arrow keys in text mode, with no pane switch to offer", () => {
+		const history = new BtwHistoryPanel({
+			records: [record("a", "only question")],
+			onClose: () => {},
+			onCopy: () => {},
+			onCancel: () => {},
+			requestRender: () => {},
+			getHeight: () => 30,
+		});
+		history.handleInput("\t");
+		const screen = Bun.stripANSI(history.render(80).join("\n"));
+		expect(screen).toContain("answer to only question");
+		expect(screen).not.toContain("switch pane");
+	});
 });
 
 describe("CodexResetFireworks under a native surface", () => {
