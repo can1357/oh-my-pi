@@ -124,4 +124,25 @@ describe("vibe_judge", () => {
 		};
 		expect(validate(call)).not.toBeInstanceOf(OmpErrors);
 	});
+
+	it.each<[string, { id: string; labels?: string[] }[], string]>([
+		["duplicate question ids", [{ id: "q" }, { id: "q" }], 'duplicate question id "q"'],
+		["a __proto__ question id", [{ id: "__proto__" }], 'question id "__proto__" is reserved'],
+		[
+			"duplicate choice labels",
+			[{ id: "q", labels: ["a", "a", "b"] }],
+			'duplicate choice label in question "q": "a"',
+		],
+		["a __proto__ choice label", [{ id: "q", labels: ["a", "__proto__"] }], '"__proto__" is reserved'],
+	])("rejects %s instead of collapsing them", async (_case, specs, message) => {
+		const completeSimple = vi.spyOn(ai, "completeSimple");
+		const tool = new VibeJudgeTool(makeSession(vi.fn()));
+		const questions = specs.map(({ id, labels }) =>
+			labels
+				? { id, type: "choice" as const, instructions: "Which?", criteria: labels.map(label => ({ label })) }
+				: { id, type: "bool" as const, instructions: "Tests pass?" },
+		);
+		await expect(tool.execute("call-1", { state: "Worker A: done.", questions })).rejects.toThrow(message);
+		expect(completeSimple).not.toHaveBeenCalled();
+	});
 });

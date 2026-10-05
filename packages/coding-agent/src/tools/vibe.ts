@@ -28,6 +28,7 @@ import vibeWaitDescription from "../prompts/tools/vibe-wait.md" with { type: "te
 
 import { type VibeScreenSnapshot, type VibeWaitOutcome } from "@oh-my-pi/pi-tui/tools/vibe";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import { evalRequestSlots } from "../eval/completion-bridge";
 import { parseQuestions, parseState, sessionJudge, toEvalJudgmentResult } from "../eval/judgment-bridge";
 import { VibeSessionRegistry } from "../vibe/runtime";
 import type { Tool, ToolSession } from "./index";
@@ -73,7 +74,10 @@ const judgeQuestionSchema = type({
 	id: judgeQuestionId,
 	type: "'choice'",
 	instructions: "string > 0",
-	criteria: type({ label: "string > 0", "rubric?": "string" }).array().describe("labels to choose between (≥2)"),
+	criteria: type({ label: "string > 0", "rubric?": "string" })
+		.array()
+		.atLeastLength(2)
+		.describe("two or more labels to choose between"),
 })
 	.or({
 		id: judgeQuestionId,
@@ -85,25 +89,44 @@ const judgeQuestionSchema = type({
 		id: judgeQuestionId,
 		type: "'score'",
 		instructions: "string > 0",
-		criteria: type("string[]").describe("levels, lowest first (≥2)"),
+		criteria: type("string").array().atLeastLength(2).describe("two or more levels, lowest first"),
 	});
 
 const vibeJudgeSchema = type({
 	state: type("string > 0").describe("text to judge: a worker result, file excerpt, or diff"),
-	questions: judgeQuestionSchema.array().describe("each answered independently over the same state"),
+	questions: judgeQuestionSchema
+		.array()
+		.atLeastLength(1)
+		.describe("one or more questions, each answered independently over the same state"),
 });
+
+/**
+ * Reserve `key` in `seen`, rejecting repeats and `__proto__`: the shared
+ * parser copies ids and labels into plain objects, where a repeat would
+ * silently overwrite and `__proto__` would set the prototype instead.
+ */
+function claimKey(seen: Set<string>, key: string, what: string): void {
+	if (key === "__proto__") throw new ToolError(`${what} "__proto__" is reserved`);
+	if (seen.has(key)) throw new ToolError(`duplicate ${what} "${key}"`);
+	seen.add(key);
+}
 
 /** Key list-shaped questions by id in eval `judge()` form for the shared parser. */
 function keyQuestions(list: typeof vibeJudgeSchema.infer.questions): Record<string, unknown> {
 	const keyed: Record<string, unknown> = {};
+	const ids = new Set<string>();
 	for (const { id, ...question } of list) {
-		if (Object.hasOwn(keyed, id)) throw new ToolError(`duplicate question id "${id}"`);
+		claimKey(ids, id, "question id");
 		if (question.type !== "choice") {
 			keyed[id] = question;
 			continue;
 		}
 		const criteria: Record<string, string | null> = {};
-		for (const { label, rubric } of question.criteria) criteria[label] = rubric ?? null;
+		const labels = new Set<string>();
+		for (const { label, rubric } of question.criteria) {
+			claimKey(labels, label, `choice label in question "${id}":`);
+			criteria[label] = rubric ?? null;
+		}
 		keyed[id] = { ...question, criteria };
 	}
 	return keyed;
@@ -348,8 +371,14 @@ export class VibeJudgeTool implements AgentTool<typeof vibeJudgeSchema> {
 		const state = parseState(params.state);
 		const questions = parseQuestions(keyQuestions(params.questions));
 		const judge = sessionJudge({ session: this.session }, "vibe_judge");
-		const result = toEvalJudgmentResult(await judge.judge({ state, questions }, { signal }));
-		return { content: [{ type: "text", text: JSON.stringify(result) }] };
+		// Share eval's process-wide cap on in-flight judge/completion requests.
+		await evalRequestSlots.acquire(signal);
+		try {
+			const result = toEvalJudgmentResult(await judge.judge({ state, questions }, { signal }));
+			return { content: [{ type: "text", text: JSON.stringify(result) }] };
+		} finally {
+			evalRequestSlots.release();
+		}
 	}
 }
 
