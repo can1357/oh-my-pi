@@ -1716,7 +1716,7 @@ function obfuscateAssistantMessage(
 			const args = obfuscateToolArguments(obfuscator, block.arguments, sharedRegexSecretValues);
 			if (args === block.arguments) return block;
 			changed = true;
-			return { ...block, arguments: args };
+			return { ...block, arguments: args, thoughtSignature: undefined };
 		}
 		return block;
 	});

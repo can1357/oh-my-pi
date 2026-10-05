@@ -11,6 +11,7 @@ import { type } from "@oh-my-pi/omptype";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import { buildOpenAiNativeHistory } from "@oh-my-pi/pi-agent-core/compaction";
 import type { AssistantMessage, Context, Message, TextContent } from "@oh-my-pi/pi-ai";
+import { convertMessages } from "@oh-my-pi/pi-ai/providers/google-shared";
 import { buildParams } from "@oh-my-pi/pi-ai/providers/openai-responses";
 import type {
 	ResponseFileSearchToolCall,
@@ -31,6 +32,7 @@ import {
 } from "@oh-my-pi/pi-coding-agent/secrets";
 import {
 	collectNativeReplayRegexSecretValues,
+	deobfuscateAssistantContent,
 	deobfuscateAgentMessages,
 	deobfuscateToolArguments,
 	obfuscateMessages,
@@ -3664,6 +3666,87 @@ describe("SecretObfuscator cross-turn cache stability", () => {
 
 		// Fixed point: re-obfuscating the already-stripped batch changes nothing further.
 		expect(JSON.stringify(obfuscateMessages(obfuscator, result))).toEqual(serialized);
+	});
+});
+
+describe("assistant replay thought signatures", () => {
+	// Google requires a signature to ride along with a functionCall it issued, and
+	// the signature attests to the arguments it was computed over, so a rewritten
+	// payload must never keep the signature of the bytes it replaces.
+	// https://ai.google.dev/gemini-api/docs/thought-signatures
+	it("drops the functionCall signature when obfuscation rewrites the tool call arguments", () => {
+		const secret = "REPLAY_SIGNATURE_SECRET_1234";
+		const obfuscator = new SecretObfuscator([{ type: "plain", content: secret }]);
+		const model = getBundledModel<"google-generative-ai">("google", "gemini-3.5-flash");
+		const assistantMessage: Message = {
+			role: "assistant",
+			content: [
+				{
+					type: "toolCall",
+					id: "call_rewritten",
+					name: "bash",
+					arguments: { command: `deploy --token ${secret}` },
+					thoughtSignature: "c2lnbmVkLW9yaWdpbmFsLWNhbGw=",
+				},
+				{
+					type: "toolCall",
+					id: "call_untouched",
+					name: "grep",
+					arguments: { pattern: "needle" },
+					thoughtSignature: "c2lnbmVkLXVudG91Y2hlZC1jYWxs",
+				},
+			],
+			api: model.api,
+			provider: model.provider,
+			model: model.id,
+			usage: {
+				input: 1,
+				output: 1,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 2,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			stopReason: "toolUse",
+			timestamp: 1,
+		};
+
+		const [obfuscated] = obfuscateMessages(obfuscator, [assistantMessage]);
+		const blocks = obfuscated.role === "assistant" ? obfuscated.content : [];
+		const rewritten = blocks[0];
+		const untouched = blocks[1];
+		if (rewritten?.type !== "toolCall" || untouched?.type !== "toolCall") {
+			throw new Error("expected two replayed tool calls");
+		}
+
+		// The secret is gone from the replayed arguments, so the signature that
+		// was computed over the raw ones no longer describes the payload.
+		expect(JSON.stringify(rewritten.arguments)).not.toContain(secret);
+		expect(rewritten.thoughtSignature).toBeUndefined();
+		// A call whose arguments did not change keeps a signature that still
+		// matches what it rides on.
+		expect(untouched.thoughtSignature).toBe("c2lnbmVkLXVudG91Y2hlZC1jYWxs");
+
+		// On the wire the rewritten call must not carry the stale signature. It
+		// falls back to the unsigned rules the provider already handles (the
+		// bypass sentinel on the public API, a bare part elsewhere).
+		const contents = convertMessages(model, { systemPrompt: [], messages: [obfuscated] });
+		const modelParts = contents.find(entry => entry.role === "model")?.parts ?? [];
+		const [rewrittenPart, untouchedPart] = modelParts;
+		expect(rewrittenPart?.functionCall?.name).toBe("bash");
+		expect(String(rewrittenPart?.functionCall?.args?.command)).not.toContain(secret);
+		expect(rewrittenPart?.thoughtSignature).not.toBe("c2lnbmVkLW9yaWdpbmFsLWNhbGw=");
+		expect(untouchedPart?.thoughtSignature).toBe("c2lnbmVkLXVudG91Y2hlZC1jYWxs");
+
+		// Restoration still returns the raw argument value; only the signature is
+		// gone, which is exactly what the thinking branch above already does.
+		const restored = deobfuscateAssistantContent(obfuscator, blocks);
+		if (restored[0]?.type !== "toolCall") throw new Error("expected a replayed tool call");
+		expect(restored[0].arguments).toEqual({ command: `deploy --token ${secret}` });
+
+		// Fixed point: the second obfuscation pass (convertToLlm then
+		// transformProviderContext) rewrites nothing and clears nothing further.
+		expect(obfuscateMessages(obfuscator, [obfuscated])).toEqual([obfuscated]);
 	});
 });
 
