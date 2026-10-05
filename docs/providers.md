@@ -46,7 +46,7 @@ Availability is a fast configuration check, not a credential validation request:
 
 `disabledProviders` is checked _before_ credentials. If a provider ID is disabled, no stored key, OAuth session, environment variable, `.env` entry, or `models.yml` `apiKey` will make it selectable — the provider's models are dropped from availability regardless of credentials. Removing the ID from the effective list restores them.
 
-Implicit `ollama` and `lm-studio` discovery is keyless by default; implicit `llama.cpp` is keyless when no authentication is configured. Apple Foundation Models is also keyless on supported Apple Silicon systems. See [Built-in local engines](#built-in-local-engines).
+Implicit `ollama` and `lm-studio` discovery is keyless by default; implicit `llama.cpp` is keyless when no authentication is configured; implicit `exllama3` is keyless when no authentication is configured. Apple Foundation Models is also keyless on supported Apple Silicon systems. See [Built-in local engines](#built-in-local-engines).
 
 ## Credentials and precedence
 
@@ -186,6 +186,7 @@ The variables below supply credentials after runtime/config overrides and stored
 | `lm-studio`                      | `LM_STUDIO_API_KEY` (optional; keyless by default)                            |
 | `llama.cpp`                      | `LLAMA_CPP_API_KEY` (only when the server requires auth)                      |
 | `vllm`                           | `VLLM_API_KEY` (optional for an unauthenticated local server)                 |
+| `exllama3`                       | `EXLLAMA3_API_KEY` (only when TabbyAPI sets `network.api_key`)                 |
 | `yolo-auto`                      | `YOLO_AUTO_API_KEY`                                                            |
 | `charm-hyper`                    | `CHARM_HYPER_API_KEY`, then `HYPER_API_KEY`                                   |
 | `singularityapi-dev`             | `SINGULARITYAPI_DEV_API_KEY`                                                  |
@@ -235,15 +236,47 @@ OLLAMA_BASE_URL=http://127.0.0.1:11434
 
 ## Built-in local engines
 
-Ollama, llama.cpp, and LM Studio are discovered automatically without needing a `models.yml` entry. Each uses a base URL that can be overridden by an environment variable:
+Ollama, llama.cpp, LM Studio, and ExLlama3 (TabbyAPI) are discovered automatically without needing a `models.yml` entry. Each uses a base URL that can be overridden by an environment variable:
 
-| Provider ID | Base URL (env override → default)                                                 | Notes                                           |
-| ----------- | --------------------------------------------------------------------------------- | ----------------------------------------------- |
-| `ollama`    | `OLLAMA_BASE_URL`, then `OLLAMA_HOST` (normalized), else `http://127.0.0.1:11434` | Keyless by default.                             |
-| `llama.cpp` | `LLAMA_CPP_BASE_URL`, else `http://127.0.0.1:8080`                                | Keyless unless authentication is configured.    |
-| `lm-studio` | `LM_STUDIO_BASE_URL`, else `http://127.0.0.1:1234/v1`                             | Keyless by default.                             |
+| Provider ID  | Base URL (env override → default)                                                 | Notes                                           |
+| ------------ | --------------------------------------------------------------------------------- | ----------------------------------------------- |
+| `ollama`     | `OLLAMA_BASE_URL`, then `OLLAMA_HOST` (normalized), else `http://127.0.0.1:11434` | Keyless by default.                             |
+| `llama.cpp`  | `LLAMA_CPP_BASE_URL`, else `http://127.0.0.1:8080`                                | Keyless unless authentication is configured.    |
+| `lm-studio`  | `LM_STUDIO_BASE_URL`, else `http://127.0.0.1:1234/v1`                             | Keyless by default.                             |
+| `exllama3`   | `EXLLAMA3_BASE_URL`, else `http://127.0.0.1:5000/v1`                              | Keyless unless TabbyAPI is configured with an API key. |
 
-Implicit Ollama and llama.cpp models use `openai-responses`; LM Studio uses `openai-completions`. On macOS arm64, `apple` also probes the in-process Apple Foundation Models bridge (`local://apple-foundation-models`). It offers `apple/on-device` only when the bridge reports the model usable; an ineligible device, disabled Apple Intelligence, or build without the bridge yields no models.
+Implicit Ollama and llama.cpp models use `openai-responses`; LM Studio and ExLlama3 use `openai-completions`. On macOS arm64, `apple` also probes the in-process Apple Foundation Models bridge (`local://apple-foundation-models`). It offers `apple/on-device` only when the bridge reports the model usable; an ineligible device, disabled Apple Intelligence, or build without the bridge yields no models.
+
+### ExLlama3 (TabbyAPI)
+
+ExLlama3 is the EXL3 inference engine; **TabbyAPI is the HTTP server** OMP talks to, and
+is ExLlamaV3's official OpenAI-compatible backend. Point TabbyAPI's `model_dir` at your
+EXL3 checkpoints and OMP lists what it serves.
+
+Discovery reads two endpoints, both of which TabbyAPI implements in llama-server's shape
+deliberately:
+
+- `/v1/models` for the roster, taking the context window from `meta.n_ctx` (the loaded
+  length) → `parameters.max_seq_len` → `meta.n_ctx_train` (the trained length). A
+  256K-trained checkpoint booted at 32K is therefore registered at 32K.
+- `/props` for the running server's `n_ctx` and `modalities.vision`.
+
+Because a roster captured before you load a model cannot know the window, OMP re-probes
+the selected model after its first response (the same lazy-load refresh llama.cpp and LM
+Studio use) and adopts the window the server actually serves.
+
+Things TabbyAPI decides in `config.yml` that OMP cannot see or set for you:
+
+- **`max_seq_len`** — the context OMP budgets against. Reload TabbyAPI to change it.
+- **`tool_format`** — tool-call parsing is template-driven server-side. Without it
+  configured for your model, tool calls will not be parsed no matter what OMP sends.
+- **`reasoning_start_token` / `reasoning_end_token`** — how thinking text is separated
+  from the answer.
+- A **non-admin** API key lists only the *loaded* model; an **admin** key lists the whole
+  `model_dir`.
+
+Qwen 3.8+ checkpoints get their `low`/`medium`/`xhigh` effort dial, driven through
+`chat_template_kwargs` (which TabbyAPI aliases as `template_vars`).
 
 These implicit engines are **skipped** when:
 
@@ -265,7 +298,7 @@ disabledProviders:
   - groq
 ```
 
-Provider IDs are matched exactly. Disable `google` to hide the Google Gemini API provider; the OAuth-backed Google providers `google-gemini-cli` and `google-antigravity` are separate IDs and must be disabled individually. Disable `ollama`, `llama.cpp`, or `lm-studio` to stop local discovery for that engine.
+Provider IDs are matched exactly. Disable `google` to hide the Google Gemini API provider; the OAuth-backed Google providers `google-gemini-cli` and `google-antigravity` are separate IDs and must be disabled individually. Disable `ollama`, `llama.cpp`, `lm-studio`, or `exllama3` to stop local discovery for that engine.
 
 `disabledProviders` applies uniformly to:
 
@@ -443,4 +476,4 @@ disabledProviders:
 
 **A discovery provider name had no effect on models (or vice-versa).** The ID namespace is shared. `gemini`, `codex`, `claude`, `native`, and `agents` are discovery-source IDs; the Google model backend is `google`. Make sure you are disabling the right kind of provider.
 
-**A custom `models.yml` provider does not load.** A YAML or schema error makes the registry skip the custom file. Validate the file with `omp models` (use `omp models find <substr>` to scope it to one provider). A provider with custom `models` needs `baseUrl`, authentication (`apiKey`, unless `auth: none` or `auth: oauth`), and `api` at provider level or on every model. A provider with no models is also valid when it defines at least one supported override (`baseUrl`, `headers`, `apiKey`, `auth: none`, `compat`, `disableStrictTools`, `guardrailIdentifier`, `requestMetadata`, `remoteCompaction`, `modelOverrides`, or `discovery`). Discovery providers may omit `models`, but need provider-level `api` unless `discovery.type` is `proxy`. An explicit `ollama`, `lm-studio`, or `llama.cpp` entry intentionally replaces built-in discovery for that ID. See [Model and Provider Configuration](./models.md).
+**A custom `models.yml` provider does not load.** A YAML or schema error makes the registry skip the custom file. Validate the file with `omp models` (use `omp models find <substr>` to scope it to one provider). A provider with custom `models` needs `baseUrl`, authentication (`apiKey`, unless `auth: none` or `auth: oauth`), and `api` at provider level or on every model. A provider with no models is also valid when it defines at least one supported override (`baseUrl`, `headers`, `apiKey`, `auth: none`, `compat`, `disableStrictTools`, `guardrailIdentifier`, `requestMetadata`, `remoteCompaction`, `modelOverrides`, or `discovery`). Discovery providers may omit `models`, but need provider-level `api` unless `discovery.type` is `proxy`. An explicit `ollama`, `lm-studio`, `llama.cpp`, or `exllama3` entry intentionally replaces built-in discovery for that ID. See [Model and Provider Configuration](./models.md).

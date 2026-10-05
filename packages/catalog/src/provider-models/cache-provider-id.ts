@@ -50,6 +50,9 @@ export function getDefaultModelDiscoveryBaseUrl(providerId: string): string | un
 			return "https://opencode.ai/zen/v1";
 		case "vllm":
 			return "http://127.0.0.1:8000/v1";
+		case "exllama3":
+			// TabbyAPI's default `network.port` is 5000, served under `/v1`.
+			return Bun.env.EXLLAMA3_BASE_URL ?? "http://127.0.0.1:5000/v1";
 		default:
 			return undefined;
 	}
@@ -81,8 +84,8 @@ function cursorCredentialSubject(apiKey: string): string | undefined {
 	try {
 		const payload: unknown = JSON.parse(Buffer.from(parts[1], "base64url").toString("utf-8"));
 		if (typeof payload !== "object" || payload === null) return undefined;
-		const subject = Reflect.get(payload, "sub");
-		return typeof subject === "string" && subject.length > 0 ? `sub:${subject}` : undefined;
+		const { sub } = payload as { sub?: unknown };
+		return typeof sub === "string" && sub.length > 0 ? `sub:${sub}` : undefined;
 	} catch {
 		return undefined;
 	}
@@ -211,6 +214,15 @@ export function resolveModelCacheProviderId(providerId: string, options: ModelCa
 			// carry `reasoning: false` and must be refetched.
 			const baseUrl = options.baseUrl ?? getDefaultModelDiscoveryBaseUrl(providerId)!;
 			return `vllm:models-v2:${Bun.hash(baseUrl).toString(36)}`;
+		}
+		case "exllama3": {
+			// An exl3 roster is the operator's model directory behind one endpoint, and
+			// each row's `meta.n_ctx` is that box's loaded `max_seq_len`. A second
+			// server (or a port change) publishes a different directory and a different
+			// window, so the namespace follows the endpoint: switching re-runs discovery
+			// instead of serving the other box's rows for the full cache TTL.
+			const baseUrl = options.baseUrl ?? getDefaultModelDiscoveryBaseUrl(providerId)!;
+			return `exllama3:models-v1:${Bun.hash(baseUrl).toString(36)}`;
 		}
 		case "devin":
 			// v2: rows cached before Fusion pairings carried their lead uid as

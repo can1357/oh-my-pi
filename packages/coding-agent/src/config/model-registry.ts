@@ -73,6 +73,7 @@ import {
 	DISCOVERY_DEFAULT_MAX_TOKENS,
 	type DiscoveryContext,
 	type DiscoveryProviderConfig,
+	discoverExLlama3ModelRuntimeMetadata,
 	discoverLlamaCppModelRuntimeMetadata,
 	discoverLmStudioModelRuntimeMetadata,
 	discoverModelsByProviderType,
@@ -666,8 +667,9 @@ export class ModelRegistry {
 	 * True when the provider's models expose context metadata that only appears
 	 * after a lazy load — llama.cpp's `meta.n_ctx` once a cold instance spins up
 	 * (#3310/#3311), LM Studio's `loaded_context_length` once it JIT-loads the
-	 * model on the first inference (#9001). Callers use this to decide whether a
-	 * post-first-response refresh is worth a native probe.
+	 * model on the first inference (#9001), or TabbyAPI's `meta.n_ctx`/`/props`
+	 * once the operator loads an EXL3 checkpoint at a chosen `max_seq_len`. Callers
+	 * use this to decide whether a post-first-response refresh is worth a native probe.
 	 */
 	hasLazyRuntimeMetadata(provider: string): boolean {
 		return this.#findLazyRuntimeDiscovery(provider) !== undefined;
@@ -677,7 +679,9 @@ export class ModelRegistry {
 		return this.#discoverableProviders.find(
 			providerConfig =>
 				providerConfig.provider === provider &&
-				(providerConfig.discovery.type === "llama.cpp" || providerConfig.discovery.type === "lm-studio"),
+				(providerConfig.discovery.type === "llama.cpp" ||
+					providerConfig.discovery.type === "lm-studio" ||
+					providerConfig.discovery.type === "exllama3"),
 		);
 	}
 
@@ -706,11 +710,17 @@ export class ModelRegistry {
 						this.#nonResolvingDiscoveryContext(),
 						discoveryConfig.discovery.timeoutMs,
 					)
-				: await discoverLlamaCppModelRuntimeMetadata(
-						requestModel,
-						this.#nonResolvingDiscoveryContext(),
-						discoveryConfig.discovery.timeoutMs,
-					);
+				: discoveryConfig.discovery.type === "exllama3"
+					? await discoverExLlama3ModelRuntimeMetadata(
+							requestModel,
+							this.#nonResolvingDiscoveryContext(),
+							discoveryConfig.discovery.timeoutMs,
+						)
+					: await discoverLlamaCppModelRuntimeMetadata(
+							requestModel,
+							this.#nonResolvingDiscoveryContext(),
+							discoveryConfig.discovery.timeoutMs,
+						);
 		if (runtimeMetadata === undefined) {
 			return this.find(model.provider, model.id) ?? model;
 		}
@@ -1454,7 +1464,8 @@ export class ModelRegistry {
 		const withDecoderMetadata =
 			providerConfig.discovery.type === "ollama" ||
 			providerConfig.discovery.type === "llama.cpp" ||
-			providerConfig.discovery.type === "lm-studio"
+			providerConfig.discovery.type === "lm-studio" ||
+			providerConfig.discovery.type === "exllama3"
 				? models.map(model =>
 						buildModel({ ...model, imageInputDecoder: "stb", compat: model.compatConfig } as ModelSpec<Api>),
 					)
@@ -1525,6 +1536,21 @@ export class ModelRegistry {
 			// Only mark as keyless if no API key is configured
 			if (this.authStorage.keys.source("llama.cpp") === undefined) {
 				this.#keylessProviders.add("llama.cpp");
+			}
+		}
+		if (!configuredProviders.has("exllama3") && !disabledProviders.has("exllama3")) {
+			// TabbyAPI, the official ExLlamaV3 server. Optional, so an operator who is
+			// not running one loses nothing but a loopback probe that Linux refuses
+			// instantly and that discovery caps at 250 ms.
+			this.#discoverableProviders.push({
+				provider: "exllama3",
+				api: "openai-completions",
+				baseUrl: Bun.env.EXLLAMA3_BASE_URL || "http://127.0.0.1:5000/v1",
+				discovery: { type: "exllama3" },
+				optional: !Bun.env.EXLLAMA3_BASE_URL,
+			});
+			if (this.authStorage.keys.source("exllama3") === undefined) {
+				this.#keylessProviders.add("exllama3");
 			}
 		}
 		if (
