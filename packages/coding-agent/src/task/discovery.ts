@@ -26,7 +26,7 @@ import type { EffectiveExtensionRoots } from "../capability/types";
 import { findAllNearestProjectConfigDirs, getConfigDirs } from "../config";
 import { pluginUsesClaudeModelDialect } from "../discovery/agent-plugin-format";
 import { listClaudePluginRoots } from "../discovery/helpers";
-import { listOmpExtensionRoots } from "../discovery/omp-extension-roots";
+import { activeResourceExclusions, listOmpExtensionRoots } from "../discovery/omp-extension-roots";
 import { loadBundledAgents, parseAgent } from "./agents";
 import type { AgentSource } from "@oh-my-pi/pi-tui/tools/task";
 import type { AgentDefinition } from "./types";
@@ -126,7 +126,7 @@ export async function discoverAgents(
 	// omp-installed agents are dropped at user scope whenever the Claude source is disabled.
 	const claudePluginsUserEnabled = isUserSourceEnabled("claude-plugins") || isUserSourceEnabled("claude");
 	const { roots: pluginRoots } = isProviderEnabled("claude-plugins")
-		? await listClaudePluginRoots(home, resolvedCwd)
+		? await listClaudePluginRoots(home, resolvedCwd, activeResourceExclusions(extensionRoots))
 		: { roots: [] };
 	const filteredPluginRoots = pluginRoots.filter(
 		r => r.scope === "project" || claudePluginsUserEnabled || r.origin !== "claude",
