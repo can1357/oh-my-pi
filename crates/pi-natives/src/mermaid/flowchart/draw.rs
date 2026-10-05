@@ -9,7 +9,7 @@ use super::{
 };
 use crate::mermaid::{
 	ansi::CharRole,
-	canvas::{Canvas, Cell, DrawingCoord, RoleCanvas, to_cells},
+	canvas::{Canvas, Cell, CellSurface, DrawingCoord, Layer, RoleCanvas, to_cells},
 	text::{LABEL_SPACE, display_width, split_lines},
 };
 
@@ -199,7 +199,7 @@ const fn line_chars(style: EdgeStyle, use_ascii: bool) -> (char, char) {
 
 /// Draw an orthogonal line and return every coordinate written.
 pub fn draw_line(
-	canvas: &mut Canvas,
+	canvas: &mut impl CellSurface,
 	from: DrawingCoord,
 	to: DrawingCoord,
 	offset_from: i32,
@@ -212,7 +212,7 @@ pub fn draw_line(
 	let mut drawn = Vec::new();
 	let mut put = |x: i32, y: i32, c: char| {
 		drawn.push(DrawingCoord::new(x, y));
-		canvas.set(x, y, Cell::from(c));
+		canvas.put(x, y, Cell::from(c));
 	};
 
 	match dir {
@@ -277,9 +277,9 @@ pub fn draw_line(
 }
 
 /// Draw an edge into six independently composited layers.
-pub fn draw_arrow(graph: &AsciiGraph, edge: &AsciiEdge) -> [Canvas; 6] {
+pub fn draw_arrow(graph: &AsciiGraph, edge: &AsciiEdge) -> [Layer; 6] {
 	if edge.path.is_empty() {
-		return std::array::from_fn(|_| graph.canvas.blank_like());
+		return std::array::from_fn(|_| Layer::over(&graph.canvas));
 	}
 	let label_canvas = draw_arrow_label(graph, edge);
 	let (path_canvas, lines_drawn, line_dirs) = draw_path(graph, &edge.path, edge.style);
@@ -292,10 +292,10 @@ pub fn draw_arrow(graph: &AsciiGraph, edge: &AsciiEdge) -> [Canvas; 6] {
 	let arrow_end_canvas = if edge.has_arrow_end {
 		match (lines_drawn.last(), line_dirs.last()) {
 			(Some(line), Some(&dir)) => draw_arrow_head(graph, line, dir),
-			_ => graph.canvas.blank_like(),
+			_ => Layer::over(&graph.canvas),
 		}
 	} else {
-		graph.canvas.blank_like()
+		Layer::over(&graph.canvas)
 	};
 	let arrow_start_canvas = if edge.has_arrow_start {
 		match (lines_drawn.first(), line_dirs.first().copied()) {
@@ -311,10 +311,10 @@ pub fn draw_arrow(graph: &AsciiGraph, edge: &AsciiEdge) -> [Canvas; 6] {
 				}
 				draw_arrow_head(graph, &[first, arrow_position], reverse_direction(dir))
 			},
-			_ => graph.canvas.blank_like(),
+			_ => Layer::over(&graph.canvas),
 		}
 	} else {
-		graph.canvas.blank_like()
+		Layer::over(&graph.canvas)
 	};
 	let corners_canvas = draw_corners(graph, &edge.path);
 	[
@@ -345,8 +345,8 @@ fn draw_path(
 	graph: &AsciiGraph,
 	path: &[GridCoord],
 	style: EdgeStyle,
-) -> (Canvas, Vec<Vec<DrawingCoord>>, Vec<Dir>) {
-	let mut canvas = graph.canvas.blank_like();
+) -> (Layer, Vec<Vec<DrawingCoord>>, Vec<Dir>) {
+	let mut canvas = Layer::over(&graph.canvas);
 	let mut lines = Vec::new();
 	let mut directions = Vec::new();
 	let Some(&first) = path.first() else {
@@ -383,8 +383,8 @@ fn draw_path(
 /// Mark where an edge leaves its source box with a tee on the border. The
 /// path's first cell is the box's border cell, so the tee goes exactly there
 /// even when the first segment is too short to draw any line cell.
-fn draw_box_start(graph: &AsciiGraph, path: &[GridCoord], source_shape: NodeShape) -> Canvas {
-	let mut canvas = graph.canvas.blank_like();
+fn draw_box_start(graph: &AsciiGraph, path: &[GridCoord], source_shape: NodeShape) -> Layer {
+	let mut canvas = Layer::over(&graph.canvas);
 	if graph.config.use_ascii || matches!(source_shape, NodeShape::StateStart | NodeShape::StateEnd)
 	{
 		return canvas;
@@ -444,8 +444,8 @@ const fn arrowhead_char(dir: Dir, fallback: Dir, use_ascii: bool) -> char {
 	}
 }
 
-fn draw_arrow_head(graph: &AsciiGraph, line: &[DrawingCoord], fallback: Dir) -> Canvas {
-	let mut canvas = graph.canvas.blank_like();
+fn draw_arrow_head(graph: &AsciiGraph, line: &[DrawingCoord], fallback: Dir) -> Layer {
+	let mut canvas = Layer::over(&graph.canvas);
 	let (Some(&from), Some(&last)) = (line.first(), line.last()) else {
 		return canvas;
 	};
@@ -470,8 +470,8 @@ const fn corner_char(previous: Dir, next: Dir, use_ascii: bool) -> char {
 	}
 }
 
-fn draw_corners(graph: &AsciiGraph, path: &[GridCoord]) -> Canvas {
-	let mut canvas = graph.canvas.blank_like();
+fn draw_corners(graph: &AsciiGraph, path: &[GridCoord]) -> Layer {
+	let mut canvas = Layer::over(&graph.canvas);
 	for points in path.windows(3) {
 		let drawing = grid_to_drawing_coord(graph, points[1]);
 		let previous = determine_direction(points[0], points[1]);
@@ -485,8 +485,8 @@ fn draw_corners(graph: &AsciiGraph, path: &[GridCoord]) -> Canvas {
 	canvas
 }
 
-fn draw_arrow_label(graph: &AsciiGraph, edge: &AsciiEdge) -> Canvas {
-	let mut canvas = graph.canvas.blank_like();
+fn draw_arrow_label(graph: &AsciiGraph, edge: &AsciiEdge) -> Layer {
+	let mut canvas = Layer::over(&graph.canvas);
 	if edge.text.is_empty() {
 		return canvas;
 	}
@@ -500,12 +500,7 @@ fn draw_arrow_label(graph: &AsciiGraph, edge: &AsciiEdge) -> Canvas {
 	canvas
 }
 
-fn draw_text_on_line(
-	canvas: &mut Canvas,
-	line: &[DrawingCoord],
-	label: &str,
-	upward: Option<bool>,
-) {
+fn draw_text_on_line(canvas: &mut Layer, line: &[DrawingCoord], label: &str, upward: Option<bool>) {
 	let (Some(first), Some(second)) = (line.first(), line.get(1)) else {
 		return;
 	};
@@ -562,11 +557,11 @@ fn draw_bundled_edge_segment(
 	graph: &AsciiGraph,
 	edge: &AsciiEdge,
 	bundle: &EdgeBundle,
-) -> [Canvas; 6] {
+) -> [Layer; 6] {
 	if edge.path_to_junction.is_empty() {
-		return std::array::from_fn(|_| graph.canvas.blank_like());
+		return std::array::from_fn(|_| Layer::over(&graph.canvas));
 	}
-	let mut path_canvas = graph.canvas.blank_like();
+	let mut path_canvas = Layer::over(&graph.canvas);
 	let drawing_path: Vec<DrawingCoord> = edge
 		.path_to_junction
 		.iter()
@@ -589,7 +584,7 @@ fn draw_bundled_edge_segment(
 		}
 	}
 
-	let mut corners_canvas = graph.canvas.blank_like();
+	let mut corners_canvas = Layer::over(&graph.canvas);
 	for points in edge.path_to_junction.windows(3) {
 		let dc = grid_to_drawing_coord(graph, points[1]);
 		let c = corner_char(
@@ -600,7 +595,7 @@ fn draw_bundled_edge_segment(
 		corners_canvas.set(dc.x, dc.y, Cell::from(c));
 	}
 
-	let mut box_start_canvas = graph.canvas.blank_like();
+	let mut box_start_canvas = Layer::over(&graph.canvas);
 	if bundle.kind == BundleKind::FanIn
 		&& edge.path_to_junction.len() >= 2
 		&& !graph.config.use_ascii
@@ -621,16 +616,16 @@ fn draw_bundled_edge_segment(
 	[
 		path_canvas,
 		box_start_canvas,
-		graph.canvas.blank_like(),
-		graph.canvas.blank_like(),
+		Layer::over(&graph.canvas),
+		Layer::over(&graph.canvas),
 		corners_canvas,
-		graph.canvas.blank_like(),
+		Layer::over(&graph.canvas),
 	]
 }
 
-fn draw_bundle_shared_path(graph: &AsciiGraph, bundle: &EdgeBundle) -> (Canvas, Canvas) {
-	let mut path_canvas = graph.canvas.blank_like();
-	let mut corners_canvas = graph.canvas.blank_like();
+fn draw_bundle_shared_path(graph: &AsciiGraph, bundle: &EdgeBundle) -> (Layer, Layer) {
+	let mut path_canvas = Layer::over(&graph.canvas);
+	let mut corners_canvas = Layer::over(&graph.canvas);
 	if bundle.shared_path.len() < 2 {
 		return (path_canvas, corners_canvas);
 	}
@@ -683,8 +678,8 @@ fn draw_bundle_shared_path(graph: &AsciiGraph, bundle: &EdgeBundle) -> (Canvas, 
 	(path_canvas, corners_canvas)
 }
 
-fn draw_bundle_arrowhead(graph: &AsciiGraph, bundle: &EdgeBundle) -> Canvas {
-	let mut canvas = graph.canvas.blank_like();
+fn draw_bundle_arrowhead(graph: &AsciiGraph, bundle: &EdgeBundle) -> Layer {
+	let mut canvas = Layer::over(&graph.canvas);
 	let Some(pair) = bundle
 		.shared_path
 		.get(bundle.shared_path.len().saturating_sub(2)..)
@@ -749,8 +744,8 @@ fn draw_bundle_arrowhead(graph: &AsciiGraph, bundle: &EdgeBundle) -> Canvas {
 	canvas
 }
 
-fn draw_bundled_edge_arrowhead(graph: &AsciiGraph, edge: &AsciiEdge) -> Canvas {
-	let mut canvas = graph.canvas.blank_like();
+fn draw_bundled_edge_arrowhead(graph: &AsciiGraph, edge: &AsciiEdge) -> Layer {
+	let mut canvas = Layer::over(&graph.canvas);
 	let Some(pair) = edge
 		.path_to_junction
 		.get(edge.path_to_junction.len().saturating_sub(2)..)
@@ -815,8 +810,8 @@ fn draw_bundled_edge_arrowhead(graph: &AsciiGraph, edge: &AsciiEdge) -> Canvas {
 	canvas
 }
 
-fn draw_junction_character(graph: &AsciiGraph, bundle: &EdgeBundle) -> Canvas {
-	let mut canvas = graph.canvas.blank_like();
+fn draw_junction_character(graph: &AsciiGraph, bundle: &EdgeBundle) -> Layer {
+	let mut canvas = Layer::over(&graph.canvas);
 	let Some(junction) = bundle.junction_point else {
 		return canvas;
 	};
@@ -981,14 +976,13 @@ fn fill_roles_from_canvas(
 	}
 }
 
-fn fill_roles_from_canvases(
-	roles: &mut RoleCanvas,
-	canvases: &[Canvas],
-	offset: DrawingCoord,
-	role: CharRole,
-) {
-	for canvas in canvases {
-		fill_roles_from_canvas(roles, canvas, offset, role);
+fn fill_roles_from_layers(roles: &mut RoleCanvas, layers: &[Layer], role: CharRole) {
+	for layer in layers {
+		for (x, y, cell) in layer.cells() {
+			if !cell.is_space() {
+				roles.set_role(x, y, role);
+			}
+		}
 	}
 }
 
@@ -1046,16 +1040,10 @@ fn fill_roles_for_node_box(roles: &mut RoleCanvas, canvas: &Canvas, offset: Draw
 	}
 }
 
-fn merge_layers(base: &Canvas, use_ascii: bool, layers: &[Canvas]) -> Canvas {
-	let refs: Vec<&Canvas> = layers.iter().collect();
-	base.merged(DrawingCoord::new(0, 0), use_ascii, &refs)
-}
-
 /// Composite subgraphs, nodes, edges, labels, and role metadata into the graph
 /// canvases.
 pub fn draw_graph(graph: &mut AsciiGraph) {
 	let use_ascii = graph.config.use_ascii;
-	let zero = DrawingCoord::new(0, 0);
 	let mut subgraphs: Vec<SubgraphId> = (0..graph.subgraphs.len()).collect();
 	subgraphs.sort_by_key(|&sg| subgraph_depth(graph, sg));
 	for sg in subgraphs {
@@ -1124,20 +1112,19 @@ pub fn draw_graph(graph: &mut AsciiGraph) {
 		}
 	}
 
-	graph.canvas = merge_layers(&graph.canvas, use_ascii, &lines);
-	fill_roles_from_canvases(&mut graph.role_canvas, &lines, zero, CharRole::Line);
-	graph.canvas = merge_layers(&graph.canvas, use_ascii, &corners);
-	fill_roles_from_canvases(&mut graph.role_canvas, &corners, zero, CharRole::Corner);
-	graph.canvas = merge_layers(&graph.canvas, use_ascii, &junctions);
-	fill_roles_from_canvases(&mut graph.role_canvas, &junctions, zero, CharRole::Junction);
-	graph.canvas = merge_layers(&graph.canvas, use_ascii, &arrow_ends);
-	fill_roles_from_canvases(&mut graph.role_canvas, &arrow_ends, zero, CharRole::Arrow);
-	graph.canvas = merge_layers(&graph.canvas, use_ascii, &box_starts);
-	fill_roles_from_canvases(&mut graph.role_canvas, &box_starts, zero, CharRole::Junction);
-	graph.canvas = merge_layers(&graph.canvas, use_ascii, &arrow_starts);
-	fill_roles_from_canvases(&mut graph.role_canvas, &arrow_starts, zero, CharRole::Arrow);
-	graph.canvas = merge_layers(&graph.canvas, use_ascii, &labels);
-	fill_roles_from_canvases(&mut graph.role_canvas, &labels, zero, CharRole::Text);
+	// Edge layers composite by kind, each kind over every edge in order.
+	for (layers, role) in [
+		(&lines, CharRole::Line),
+		(&corners, CharRole::Corner),
+		(&junctions, CharRole::Junction),
+		(&arrow_ends, CharRole::Arrow),
+		(&box_starts, CharRole::Junction),
+		(&arrow_starts, CharRole::Arrow),
+		(&labels, CharRole::Text),
+	] {
+		graph.canvas.overlay_layers(use_ascii, layers);
+		fill_roles_from_layers(&mut graph.role_canvas, layers, role);
+	}
 
 	for sg in 0..graph.subgraphs.len() {
 		if graph.subgraphs[sg].nodes.is_empty() {
@@ -1303,8 +1290,8 @@ mod tests {
 		for (direction, end, unicode, ascii) in directions {
 			for (use_ascii, expected) in [(false, unicode), (true, ascii)] {
 				let graph = empty_graph(use_ascii);
-				let canvas = draw_arrow_head(&graph, &[DrawingCoord::new(2, 2), end], direction);
-				assert_eq!(canvas.get(end.x, end.y), Some(&Cell::from(expected)));
+				let layer = draw_arrow_head(&graph, &[DrawingCoord::new(2, 2), end], direction);
+				assert_eq!(layer.cell(end.x, end.y), Some(&Cell::from(expected)));
 			}
 		}
 	}

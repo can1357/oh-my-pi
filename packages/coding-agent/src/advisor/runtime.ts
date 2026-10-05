@@ -9,6 +9,7 @@ import {
 	obfuscateToolArguments,
 } from "../secrets/message-transform";
 import type { SecretObfuscator } from "../secrets/obfuscator";
+import { SecretValueSet } from "../secrets/placeholder";
 import {
 	formatExecutionSourcePreview,
 	formatSessionHistoryMarkdown,
@@ -281,7 +282,7 @@ export class AdvisorRuntime {
 	/** Incremented whenever the advisor loses context so queued raw deltas are re-rendered against fresh dedupe state. */
 	#renderRevision = 0;
 	/** Regex secret values observed in primary deltas and retained until advisor context resets. */
-	#advisorRegexSecretValues = new Set<string>();
+	#advisorRegexSecretValues = new SecretValueSet();
 	#pending: PendingDelta[] = [];
 	/**
 	 * Deltas captured at boundaries the review cadence skipped. Their cursor
@@ -1821,6 +1822,14 @@ function obfuscateAdvisorMessage(
 }
 
 function scrubAdvisorHistory(
+	obfuscator: SecretObfuscator,
+	messages: AgentMessage[],
+	sharedRegexSecretValues: Set<string>,
+): boolean {
+	return obfuscator.batch(() => scrubAdvisorHistoryBatch(obfuscator, messages, sharedRegexSecretValues));
+}
+
+function scrubAdvisorHistoryBatch(
 	obfuscator: SecretObfuscator,
 	messages: AgentMessage[],
 	sharedRegexSecretValues: Set<string>,

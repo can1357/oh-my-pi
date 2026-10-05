@@ -1,7 +1,7 @@
 import { logger, once } from "@oh-my-pi/pi-utils";
 import { buildModel } from "../build";
 import { apiRouteFor } from "../compat/behavior";
-import { seedModels } from "../compat/providers";
+import { providerEntry, seedModels } from "../compat/providers";
 import { type CodexModelDiscoveryResult, fetchCodexModels } from "../discovery/codex";
 import type { DevinModelDiscoveryOptions } from "../discovery/devin";
 import {
@@ -45,6 +45,12 @@ export interface OpenAICodexModelManagerConfig {
 	 * keeps the previous/bundled catalog instead.
 	 */
 	resolveAccounts?: () => Promise<readonly OpenAICodexAccount[] | null>;
+	/**
+	 * Codex backend base URL (e.g. a Codex-compatible gateway from `models.yml`).
+	 * Defaults to the official ChatGPT backend. Also scopes the discovery cache,
+	 * so a gateway roster never serves the official endpoint and vice versa.
+	 */
+	baseUrl?: string;
 	clientVersion?: string;
 	fetch?: FetchImpl;
 }
@@ -52,11 +58,11 @@ export interface OpenAICodexModelManagerConfig {
 export function openaiCodexModelManagerOptions(
 	config: OpenAICodexModelManagerConfig = {},
 ): ModelManagerOptions<"openai-codex-responses"> {
-	const { resolveAccounts, clientVersion, fetch } = config;
+	const { resolveAccounts, baseUrl, clientVersion, fetch } = config;
 	return {
 		providerId: "openai-codex",
-		cacheProviderId: resolveModelCacheProviderId("openai-codex"),
-		dynamicModelsAuthoritative: true,
+		cacheProviderId: resolveModelCacheProviderId("openai-codex", { baseUrl }),
+		dynamicModelsAuthoritative: providerEntry("openai-codex")?.dynamicModelsAuthoritative === true,
 		...(resolveAccounts
 			? {
 					fetchDynamicModels: async () => {
@@ -68,6 +74,7 @@ export function openaiCodexModelManagerOptions(
 								result: await fetchCodexModels({
 									accessToken: account.accessToken,
 									accountId: account.accountId,
+									baseUrl,
 									clientVersion,
 									fetchFn: fetch,
 								}),

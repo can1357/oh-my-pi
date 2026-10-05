@@ -464,6 +464,8 @@ export type ExtensionMode = "tui" | "rpc" | "json" | "print";
 /**
  * The agent a session runs. Extension factories are rebound to every subagent session
  * (task tool, eval `agent()`, `/tan` clones), so this tells a handler which agent it is serving.
+ * An advisor's own tool calls reach the advising session's `tool_call`/`tool_result` handlers
+ * with `{ kind: "sub", id: "advisor", name: "advisor", depth: 0, parentId: <session agent id> }`.
  */
 export interface ExtensionAgentIdentity {
 	/**

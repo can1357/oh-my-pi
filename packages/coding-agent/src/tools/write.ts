@@ -761,15 +761,19 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 			throw new ToolError(`content is required for ${path}.`);
 		}
 		const content = rawContent ?? "";
+		// Coordination writes (peer messages, background-work cancellation) touch no
+		// files, so neither gate below applies to them.
+		const coordination =
+			policy?.scope === "coordination" || (target !== undefined && policy?.cancels?.(target.url) === true);
 		// A device-only session grants `write` purely as the device transport (see
-		// createTools): device dispatches and coordination messages proceed, every
+		// createTools): device dispatches and coordination writes proceed, every
 		// other target is rejected before any handler, guard, conflict resolver, or
 		// bridge sees it. Active plan mode additionally permits its sandbox, but does
 		// not relax the restriction for working-tree or other internal URLs.
 		if (
 			this.session.deviceOnlyWrite === true &&
 			policy?.scope !== "device" &&
-			policy?.scope !== "coordination" &&
+			!coordination &&
 			!(
 				this.session.getPlanModeState?.()?.enabled === true &&
 				(await targetsLocalSandbox(this.session, path, signal))
@@ -796,11 +800,11 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 						const currentResource = await router.resolve(path, sessionResolveContext(this.session, { signal }));
 						assertNotShorterReadProjection(path, content, currentResource.content, cleanContent);
 					}
-					// Handler-owned writes mutate state outside the sandbox unless the
-					// scheme is coordination (peer messages) or a device (which keeps each
-					// dispatched tool's own tier and policy).
+					// Handler-owned writes mutate state outside the sandbox unless they
+					// coordinate (peer messages, background-work cancellation) or dispatch a
+					// device (which keeps each dispatched tool's own tier and policy).
 					if (policy?.scope !== "device") {
-						if (policy?.scope !== "coordination") {
+						if (!coordination) {
 							await enforcePlanModeWrite(this.session, path, { op: "update", signal });
 						}
 						emitWriteProgress(onUpdate, cleanContent, path);

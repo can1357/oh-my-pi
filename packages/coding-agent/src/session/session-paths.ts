@@ -205,6 +205,16 @@ export function resolveManagedSessionRoot(sessionDir: string, cwd: string): stri
 }
 
 /**
+ * Default session directory for `cwd` under `sessionsRoot`, without the legacy
+ * migrations or directory creation {@link computeDefaultSessionDir} performs.
+ * Read-only lookups (the `archive` eval prelude) use it so querying a project
+ * never creates or moves a session bucket.
+ */
+export function sessionDirForCwd(cwd: string, sessionsRoot: string = getSessionsDir()): string {
+	return path.join(sessionsRoot, getDefaultSessionDirName(cwd).encodedDirName);
+}
+
+/**
  * Compute the default session directory for a cwd.
  * Classifies cwd by canonical location so symlink/alias paths resolve to the
  * same home-relative or temp-root directory names as their real targets.

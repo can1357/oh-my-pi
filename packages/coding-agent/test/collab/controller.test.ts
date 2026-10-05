@@ -44,6 +44,10 @@ import { createTestSession, type TestSessionContext } from "../utilities";
 import { FakeWebSocket, installInMemoryRelay, uninstallInMemoryRelay } from "./helpers/in-memory-relay";
 
 import { cfgCollabAutoStart } from "@oh-my-pi/pi-coding-agent/collab/settings";
+import { cfgAdvisorEnabled } from "@oh-my-pi/pi-coding-agent/advisor/settings";
+import { CfgProtocolHandler } from "@oh-my-pi/pi-coding-agent/internal-urls/cfg-protocol";
+import { parseInternalUrl } from "@oh-my-pi/pi-coding-agent/internal-urls/parse";
+import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import {
 	cfgMarketplaceAutoUpdate,
 	cfgStartupChangelogMode,
@@ -367,6 +371,36 @@ describe("interactive collaboration startup", () => {
 			await joinAsWriter(replacement);
 		},
 	);
+
+	it("mirrors a cfg:// approval prompt to a writer guest and applies the guest's answer", async () => {
+		mode = new InteractiveMode(
+			testSession.session,
+			"test",
+			undefined,
+			undefined,
+			undefined,
+			undefined,
+			undefined,
+			new Composer({ terminal: new VirtualTerminal(200, 60) }),
+		);
+		spyOn(mode.statusLine, "watchBranch").mockImplementation(() => {});
+		await mode.init({ suppressWelcomeIntro: true });
+		const host = await mode.collabController.start({ access: "control" });
+		const asked = Promise.withResolvers<CollabFrame & { t: "ui-request" }>();
+		const guest = await joinAsWriter(host, frame => {
+			if (frame.t === "ui-request") asked.resolve(frame);
+		});
+
+		const settings = testSession.session.settings;
+		const session = { settings, hasUI: true, settingsApproval: true, taskDepth: 0 } as unknown as ToolSession;
+		const write = new CfgProtocolHandler().write(parseInternalUrl("cfg://advisor/enabled"), "true", { session });
+		const { request } = await asked.promise;
+		expect(request.title).toContain("advisor.enabled");
+		guest.send({ t: "ui-response", reqId: request.reqId, value: "Allow once" });
+
+		expect((await write).details?.cfg?.outcome).toBe("applied");
+		expect(cfgAdvisorEnabled.get(settings)).toBe(true);
+	});
 
 	it("restores the local session and saved hosting policy after dedicated CLI join activation fails", async () => {
 		const finished = new Error("finished observing failed join");
@@ -1494,6 +1528,72 @@ describe("CollabController", () => {
 		expect(await registry.listCollabHosts({ dir: tmp })).toMatchObject([{ generation: 3 }]);
 	});
 
+	describe("while the relay refuses the host's connection", () => {
+		/** Host connections fail the way Bun reports a refused TCP connect; guests are unaffected. */
+		let refusals = 0;
+		let hostAttempts = 0;
+		class Refusing extends FakeWebSocket {
+			constructor(url: string) {
+				super(url);
+				if (this.role !== "host") return;
+				hostAttempts++;
+				if (refusals <= 0) return;
+				refusals--;
+				// The base class opens on a microtask unless the socket already left CONNECTING.
+				this.readyState = FakeWebSocket.CLOSED;
+				queueMicrotask(() => this.onclose?.({ code: 1006, reason: "Failed to connect" }));
+			}
+		}
+
+		beforeEach(() => {
+			refusals = 0;
+			hostAttempts = 0;
+			globalThis.WebSocket = Refusing as unknown as typeof WebSocket;
+		});
+
+		it("retries the auto-start and publishes generation 1 once the relay answers", async () => {
+			refusals = 1;
+			const { ctx, state } = makeControllerContext({ autoStart: "control" });
+			controller = new CollabController(ctx);
+			controller.autoStart();
+
+			expect(await state.firstStatus.promise).toMatch(/auto-start failed: Failed to connect/);
+			await settled(publishSpy, 1);
+			await controller.idle();
+
+			expect(hostAttempts).toBe(2);
+			expect(controller.host).toBe(ctx.collabHost);
+			expect(await registry.listCollabHosts({ dir: tmp })).toMatchObject([
+				{ instanceId: controller.instanceId, generation: 1, sessionId: state.sessionId, access: "control" },
+			]);
+		});
+
+		it("backs off instead of reconnecting in a loop while the relay stays down", async () => {
+			vi.useFakeTimers();
+			try {
+				refusals = Number.POSITIVE_INFINITY;
+				const { ctx } = makeControllerContext({ autoStart: "control" });
+				controller = new CollabController(ctx);
+				controller.autoStart();
+				// The first failure relaunches at once; the second waits for the backoff.
+				await controller.idle();
+				await controller.idle();
+				expect(hostAttempts).toBe(2);
+				expect(ctx.collabHost).toBeUndefined();
+
+				vi.advanceTimersByTime(999);
+				await controller.idle();
+				expect(hostAttempts).toBe(2);
+				vi.advanceTimersByTime(1);
+				await controller.idle();
+				expect(hostAttempts).toBe(3);
+				expect(publishSpy).not.toHaveBeenCalled();
+			} finally {
+				vi.useRealTimers();
+			}
+		});
+	});
+
 	it("leaves a manual room ended on its own unhosted while auto-start is off", async () => {
 		const { ctx } = makeControllerContext({ autoStart: "off" });
 		controller = new CollabController(ctx);
@@ -1600,6 +1700,48 @@ describe("CollabController", () => {
 			// The successor is chained behind the aborted start's completion, so
 			// by now that start has settled — and settled quietly.
 			expect(state.showStatus.filter(message => /auto-start failed/.test(message))).toEqual([]);
+		});
+
+		it("retries an auto-start whose relay connect timed out and publishes generation 1 once a later attempt opens", async () => {
+			const stalled = Promise.withResolvers<void>();
+			let stalls = 1;
+			class StallsOnce extends FakeWebSocket {
+				constructor(url: string) {
+					super(url);
+					if (this.role !== "host" || stalls <= 0) return;
+					stalls--;
+					// Skip the base class's queued open, then sit in CONNECTING: the relay
+					// accepted the connection but never answers the handshake.
+					this.readyState = FakeWebSocket.CLOSING;
+					queueMicrotask(() => {
+						this.readyState = FakeWebSocket.CONNECTING;
+					});
+					stalled.resolve();
+				}
+			}
+			globalThis.WebSocket = StallsOnce as unknown as typeof WebSocket;
+			const { ctx, state } = makeControllerContext({ autoStart: "control" });
+			vi.useFakeTimers();
+			try {
+				controller = new CollabController(ctx);
+				controller.autoStart();
+				await stalled.promise;
+				// Only the host's 15 s connect timeout can end the stalled attempt.
+				vi.advanceTimersByTime(15_000);
+				expect(await state.firstStatus.promise).toMatch(/auto-start failed: timed out connecting to relay/);
+				// Restore before the retry publishes: Bun's fake clock stalls the
+				// real registry server's listen callback.
+				vi.useRealTimers();
+				await settled(publishSpy, 1);
+				await controller.idle();
+
+				expect(controller.host).toBe(ctx.collabHost);
+				expect(await registry.listCollabHosts({ dir: tmp })).toMatchObject([
+					{ instanceId: controller.instanceId, generation: 1, sessionId: state.sessionId, access: "control" },
+				]);
+			} finally {
+				vi.useRealTimers();
+			}
 		});
 	});
 });

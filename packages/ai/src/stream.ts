@@ -989,7 +989,10 @@ function streamDispatch<TApi extends Api>(
 	context: Context,
 	options?: OptionsForApi<TApi>,
 ): AssistantMessageEventStream {
-	const requestOptions = withTransportFetch(model, (options || {}) as StreamOptions) as OptionsForApi<TApi>;
+	const requestOptions = withSupportedSamplingParams(
+		model,
+		withTransportFetch(model, (options || {}) as StreamOptions),
+	) as OptionsForApi<TApi>;
 	assertExplicitOpenAIResponsesPromptCacheSupport(model, requestOptions);
 
 	// Check custom API registry first (extension-provided APIs like "vertex-claude-api")
@@ -1264,6 +1267,43 @@ function withInferenceSessionId(options?: SimpleStreamOptions): SimpleStreamOpti
 	return { ...options, sessionId: crypto.randomUUID() };
 }
 
+type SamplingOptions = Pick<
+	StreamOptions,
+	"temperature" | "topP" | "topK" | "minP" | "presencePenalty" | "repetitionPenalty" | "frequencyPenalty"
+>;
+
+/**
+ * Drop explicit sampling parameters before any provider builds its payload
+ * when the model's resolved `compat.supportsSamplingParams` is `false`. The
+ * catalog's class rules assign that per model lineage on every compat record,
+ * and an explicit compat override still wins, so this one check covers every
+ * provider.
+ */
+function withSupportedSamplingParams<T extends SamplingOptions>(model: Model<Api>, options: T): T {
+	if (
+		options.temperature === undefined &&
+		options.topP === undefined &&
+		options.topK === undefined &&
+		options.minP === undefined &&
+		options.presencePenalty === undefined &&
+		options.repetitionPenalty === undefined &&
+		options.frequencyPenalty === undefined
+	) {
+		return options;
+	}
+	const compat = model.compat;
+	if (!compat || !("supportsSamplingParams" in compat) || compat.supportsSamplingParams !== false) return options;
+	const supported = { ...options };
+	delete supported.temperature;
+	delete supported.topP;
+	delete supported.topK;
+	delete supported.minP;
+	delete supported.presencePenalty;
+	delete supported.repetitionPenalty;
+	delete supported.frequencyPenalty;
+	return supported;
+}
+
 export function streamSimple<TApi extends Api>(
 	model: Model<TApi>,
 	context: Context,
@@ -1312,7 +1352,10 @@ function streamSimpleRequest<TApi extends Api>(
 	context: Context,
 	options?: SimpleStreamOptions,
 ): AssistantMessageEventStream {
-	const requestOptions = withTransportFetch(model, (options || {}) as SimpleStreamOptions);
+	const requestOptions = withSupportedSamplingParams(
+		model,
+		withTransportFetch(model, (options || {}) as SimpleStreamOptions),
+	);
 
 	const apiKeyResolver = isApiKeyResolver(requestOptions?.apiKey) ? requestOptions.apiKey : undefined;
 	if (apiKeyResolver) {

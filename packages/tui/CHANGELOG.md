@@ -5,6 +5,49 @@
 ### Added
 
 - Added synchronous assistant text display projections for native Markdown nodes and classic terminal Markdown, with pending-state retirement guards and terminal failure settlement.
+## [18.6.1] - 2026-10-04
+
+### Fixed
+
+- Fixed the Space key in the Git diff pane so it stages or unstages the focused hunk instead of scrolling or acting on the wrong change.
+- Fixed the BTW history sheet in Tern: the history list no longer collapses beside a long answer, the panes lose their foldable `##` headings, and the arrow/page keys scroll the answer ([#14331](https://github.com/can1357/oh-my-pi/pull/14331) by [@H4vC](https://github.com/H4vC))
+- Fixed a single saved side question in the BTW history panel opening on its one-row list: its answer now has focus, and Enter or `f` to follow up jumps to the bottom of the conversation ([#14331](https://github.com/can1357/oh-my-pi/pull/14331) by [@H4vC](https://github.com/H4vC))
+
+## [18.6.0] - 2026-10-03
+
+### Fixed
+
+- Fixed Alt+Up (restore queued steering), arrows and other escape-sequence keys on Windows acting as Esc (interrupting the turn) and typing `[1;3A` into the editor when the console host relays them one byte at a time ([#14216](https://github.com/can1357/oh-my-pi/pull/14216) by [@H4vC](https://github.com/H4vC)).
+
+## [18.5.1] - 2026-10-03
+
+### Added
+
+- Added native terminal support for submitting explicit composer prompts atomically, preserving displaced drafts and attachments for local recall.
+- Added progress percentages to subagent entries in the agent tree, task, and wait views.
+- Added a `Rebuilding…` indicator for lengthy tmux resize redraws without flashing it for quick updates.
+- Added `writeTerminalSequence()` for sending supported terminal escape sequences through the active terminal output stream, with stdout fallback when no terminal is active.
+
+### Changed
+
+- Clipboard payloads are now represented by their length in `PI_TUI_WRITE_LOG` rather than by their contents.
+
+### Fixed
+
+- Fixed pending clipboard-image attachments being bypassed when subsequent input or native prompts were submitted before loading completed.
+- Improved narrow `/models` layouts by retaining the scope sidebar while simplifying and truncating model rows as needed.
+- Fixed Markdown rendering with themes that do not define their own symbol set; the active theme's symbols are now used as a fallback.
+- Fixed model role assignment showing models that are unavailable for the selected provider.
+- Improved tmux resize, zoom, and rebuild behavior, including smoother coalesced redraws, reduced visual artifacts and extra output, correct transcript restoration after rapid size changes, and preservation of history when panes are resized.
+- Fixed multiline paste on Windows inserting escape-code fragments instead of line breaks, and prevented bracketed-paste markers from appearing in the composer.
+- Fixed terminal notifications occasionally corrupting the screen with stray escape-code fragments during streaming output.
+- Added rendering and notification compatibility for Monstar terminals, including Kitty graphics, hyperlinks, synchronized output, styled underlines, progress keepalives, and Monstar-focused desktop notifications.
+- Fixed Agent Hub transcripts crashing when assistant messages do not include usage or cost data.
+- Fixed idle terminal activity notifications while preserving bracketed-paste recovery during input and rendering.
+- Fixed diff blocks in ask questions losing their layout; additions and removals now retain separate diff highlighting.
+- Fixed duplicate ASCII Plan, Prewalk, and Goal labels in the status line.
+- Improved Markdown rendering for long and streamed messages, including display math, fenced code, reference links, lists, whitespace, emphasis, and line breaks, so completed content no longer shows raw markup, misplaced blank lines, or broken block layout.
+
 ## [18.5.0] - 2026-10-03
 
 ### Breaking Changes
@@ -2991,14 +3034,4 @@ Initial release under @oh-my-pi scope. See previous releases at [badlogic/pi-mon
 - Crash in `visibleWidth()` and grapheme iteration when encountering undefined code points ([#372](https://github.com/badlogic/pi-mono/pull/372) by [@HACKE-RC](https://github.com/HACKE-RC))
 - ZWJ emoji sequences (rainbow flag, family, etc.) now render with correct width instead of being split into multiple characters ([#369](https://github.com/badlogic/pi-mono/pull/369) by [@nathyong](https://github.com/nathyong))
 
-## [0.29.0] - 2025-12-25
-
-### Added
-
-- **Auto-space before pasted file paths**: When pasting a file path (starting with `/`, `~`, or `.`) and the cursor is after a word character, a space is automatically prepended for better readability. Useful when dragging screenshots from macOS. ([#307](https://github.com/badlogic/pi-mono/pull/307) by [@mitsuhiko](https://github.com/mitsuhiko))
-- **Word navigation for Input component**: Added Ctrl+Left/Right and Alt+Left/Right support for word-by-word cursor movement. ([#306](https://github.com/badlogic/pi-mono/pull/306) by [@kim0](https://github.com/kim0))
-- **Full Unicode input**: Input component now accepts Unicode characters beyond ASCII. ([#306](https://github.com/badlogic/pi-mono/pull/306) by [@kim0](https://github.com/kim0))
-
-### Fixed
-
-- **Readline-style Ctrl+W**: Now skips trailing whitespace before deleting the preceding word, matching standard readline behavior. ([#306](https://github.com/badlogic/pi-mono/pull/306) by [@kim0](https://github.com/kim0))
+Older entries are archived in [packages/tui/CHANGELOG.md@bac7e83b5b0e](https://github.com/can1357/oh-my-pi/blob/bac7e83b5b0eb86c909c17830a6666efc359578b/packages/tui/CHANGELOG.md).
