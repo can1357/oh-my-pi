@@ -587,6 +587,7 @@ export class TurnRecovery {
 		}
 		const errorStatus = message.errorStatus ?? AIError.statusFromId(message.errorId);
 		if (
+			AIError.isConnectionConfigurationError({ message: message.errorMessage }) ||
 			!AIError.isConnectivityError({
 				message: message.errorClassificationMessage ?? message.errorMessage,
 				errorStatus,

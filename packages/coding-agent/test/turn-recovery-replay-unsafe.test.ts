@@ -339,6 +339,17 @@ describe("TurnRecovery replay-unsafe output classification", () => {
 		expect(recovery.retryPromise).toBeUndefined();
 	});
 
+	it("a separate network classification cannot hide a terminal configuration diagnostic", async () => {
+		const message = makeMessage([], model);
+		message.errorMessage = "Connection configuration error: fetch failed";
+		message.errorClassificationMessage = "fetch failed";
+		const host = createHost(model, modelRegistry, { messages: [message] });
+		host.settings = Settings.isolated({ "retry.waitForConnection": true });
+		const recovery = new TurnRecovery(host);
+		expect(await recovery.handleConnectivityError(message)).toBe(false);
+		expect(recovery.retryPromise).toBeUndefined();
+	});
+
 	it("treats a failed turn with partial non-whitespace text as NOT retriable", () => {
 		const recovery = new TurnRecovery(createHost(model, modelRegistry));
 		const message = makeMessage([{ type: "text", text: "Here is the first part of my answer" }], model);
