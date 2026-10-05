@@ -1,4 +1,5 @@
 import * as fs from "node:fs/promises";
+import * as net from "node:net";
 import * as path from "node:path";
 import { getDaemonRuntimeDir, hasFsCode, isEacces, isEisdir, isEnoent } from "@oh-my-pi/pi-utils";
 
@@ -20,6 +21,8 @@ export const DAEMON_META_FILE = "meta.json";
  * still accept that layout and broker recovery migrates it.
  */
 export const DAEMON_SPEC_FILE = "spec.json";
+/** Connect budget for the endpoint probe that answers "is a broker serving this scope?". */
+const ENDPOINT_PROBE_TIMEOUT_MS = 250;
 
 /**
  * Canonicalize a project directory the same way every broker client does, so
@@ -88,4 +91,25 @@ export function daemonBrokerEndpoint(projectDir: string, runtimeDir: string): st
 		return `\\\\.\\pipe\\omp-daemon-${key}`;
 	}
 	return path.join(runtimeDir, "broker.sock");
+}
+
+/**
+ * Whether a broker is accepting connections on the scope endpoint right now.
+ * Unlike a recorded pid, this answers the same in every PID namespace that
+ * shares the runtime directory.
+ */
+export function probeBrokerEndpoint(endpoint: string): Promise<boolean> {
+	const { promise, resolve } = Promise.withResolvers<boolean>();
+	const socket = net.createConnection({ path: endpoint });
+	let settled = false;
+	const finish = (connected: boolean): void => {
+		if (settled) return;
+		settled = true;
+		socket.destroy();
+		resolve(connected);
+	};
+	socket.once("connect", () => finish(true));
+	socket.once("error", () => finish(false));
+	socket.setTimeout(ENDPOINT_PROBE_TIMEOUT_MS, () => finish(false));
+	return promise;
 }

@@ -2,7 +2,13 @@ import type { Dirent } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { isEnoent, logger, postmortem } from "@oh-my-pi/pi-utils";
-import { canonicalProjectDir, daemonRuntimeDir } from "./paths";
+import {
+	canonicalProjectDir,
+	daemonBrokerEndpoint,
+	daemonRuntimeDir,
+	probeBrokerEndpoint,
+	readDaemonScopeMeta,
+} from "./paths";
 
 const CLIENTS_DIR = "clients";
 const BROKER_PID_FILE = "broker.pid";
@@ -27,6 +33,61 @@ const DAEMON_SCOPE_KEY = /^[0-9a-f]{16}$/;
  */
 const DAEMON_RUNTIME_STALE_GRACE_MS = 5 * 60_000;
 
+/** A pid recorded in a daemon scope: a broker lease or a client presence entry. */
+interface PidRecord {
+	pid: number;
+	/** {@link daemonProcessDomain} of the writer; absent in records from older builds. */
+	domain?: unknown;
+}
+
+let processDomain: Promise<string | undefined> | undefined;
+
+/**
+ * Identity of the boot and PID namespace this process's pid belongs to (the
+ * inputs of the X11 pointer registry's owner domain in `mpx.rs`). A recorded
+ * pid means something only inside the domain that wrote it: containers and
+ * hosts sharing one state directory each see the others' pids as dead or as
+ * unrelated processes. Undefined where procfs cannot say (non-Linux).
+ */
+export function daemonProcessDomain(): Promise<string | undefined> {
+	processDomain ??= readProcessDomain();
+	return processDomain;
+}
+
+async function readProcessDomain(): Promise<string | undefined> {
+	if (process.platform !== "linux") return undefined;
+	try {
+		// node:fs, not Bun.file(): the broker records this before it listens, and
+		// a Bun.file read holds no event-loop ref there.
+		const [boot, namespace] = await Promise.all([
+			fs.readFile("/proc/sys/kernel/random/boot_id", "utf8"),
+			fs.readlink("/proc/self/ns/pid"),
+		]);
+		return `${boot.trim()}/${namespace}`;
+	} catch {
+		return undefined;
+	}
+}
+
+function isPidRecord(value: unknown): value is PidRecord {
+	return typeof value === "object" && value !== null && "pid" in value && typeof value.pid === "number";
+}
+
+/**
+ * `foreign` when the record comes from another domain: its pid names nothing
+ * here, so its process can be proven neither alive nor dead. Records without
+ * a domain fall back to the pid test.
+ */
+async function recordedProcessState(record: PidRecord): Promise<"live" | "dead" | "foreign"> {
+	if (record.domain !== undefined && record.domain !== (await daemonProcessDomain())) return "foreign";
+	try {
+		process.kill(record.pid, 0);
+		return "live";
+	} catch {
+		return "dead";
+	}
+}
+
 /** Handle keeping one omp process registered in a project daemon scope. */
 export interface DaemonProjectPresence {
 	close(): Promise<void>;
@@ -43,7 +104,10 @@ export async function registerDaemonProjectPresence(
 	await fs.mkdir(clientsDir, { recursive: true, mode: 0o700 });
 	const id = `${process.pid}-${crypto.randomUUID()}`;
 	const presencePath = path.join(clientsDir, `${id}.json`);
-	await Bun.write(presencePath, JSON.stringify({ pid: process.pid, id, projectDir: canonical }));
+	await Bun.write(
+		presencePath,
+		JSON.stringify({ pid: process.pid, id, projectDir: canonical, domain: await daemonProcessDomain() }),
+	);
 	// POSIX modes are meaningless on Windows; chmod there only costs another syscall.
 	if (process.platform !== "win32") await fs.chmod(presencePath, 0o600);
 	let closed = false;
@@ -57,57 +121,74 @@ export async function registerDaemonProjectPresence(
 	return { close };
 }
 
-/** Return whether a registered omp process in this runtime directory is still alive. */
+/**
+ * Return whether a registered omp process in this runtime directory is still
+ * alive, removing entries whose process is provably gone. Entries from another
+ * domain are kept but not counted: their process can be proven neither alive
+ * nor dead, and counting them would keep the broker up for good once their
+ * domain is gone (a reboot, a removed container).
+ */
 export async function hasLiveDaemonProjectPresence(runtimeDir: string): Promise<boolean> {
+	return (await scanDaemonProjectPresence(runtimeDir, true)).live;
+}
+
+/**
+ * Classify a scope's presence entries. With `clean`, malformed entries and
+ * entries whose process is dead are removed; a sweep of sibling scopes passes
+ * false, since it must never rewrite a scope it might not own.
+ */
+async function scanDaemonProjectPresence(
+	runtimeDir: string,
+	clean: boolean,
+): Promise<{ live: boolean; foreign: boolean }> {
 	const clientsDir = path.join(runtimeDir, CLIENTS_DIR);
 	let entries: string[];
 	try {
 		entries = await fs.readdir(clientsDir);
 	} catch (error) {
-		if (isEnoent(error)) return false;
+		if (isEnoent(error)) return { live: false, foreign: false };
 		throw error;
 	}
+	const remove = async (presencePath: string): Promise<void> => {
+		if (clean) await fs.rm(presencePath, { force: true });
+	};
 	let live = false;
+	let foreign = false;
 	for (const entry of entries) {
 		const presencePath = path.join(clientsDir, entry);
 		try {
 			const decoded: unknown = await Bun.file(presencePath).json();
-			if (
-				typeof decoded !== "object" ||
-				decoded === null ||
-				!("pid" in decoded) ||
-				typeof decoded.pid !== "number"
-			) {
-				await fs.rm(presencePath, { force: true });
+			if (!isPidRecord(decoded)) {
+				await remove(presencePath);
 				continue;
 			}
-			try {
-				process.kill(decoded.pid, 0);
-				live = true;
-			} catch {
-				await fs.rm(presencePath, { force: true });
-			}
+			const state = await recordedProcessState(decoded);
+			if (state === "live") live = true;
+			else if (state === "foreign") foreign = true;
+			else await remove(presencePath);
 		} catch (error) {
-			if (!isEnoent(error)) await fs.rm(presencePath, { force: true });
+			if (!isEnoent(error)) await remove(presencePath);
 		}
 	}
-	return live;
+	return { live, foreign };
+}
+
+async function readBrokerPidRecord(runtimeDir: string): Promise<PidRecord | undefined> {
+	try {
+		const raw: unknown = await Bun.file(path.join(runtimeDir, BROKER_PID_FILE)).json();
+		return isPidRecord(raw) ? raw : undefined;
+	} catch {
+		return undefined; // Missing or malformed broker.pid => no owning broker.
+	}
 }
 
 /** PID recorded in the runtime dir's broker lease when that broker process is still alive; undefined otherwise. */
 export async function readLiveDaemonBrokerPid(runtimeDir: string): Promise<number | undefined> {
-	let raw: unknown;
+	const record = await readBrokerPidRecord(runtimeDir);
+	if (record === undefined) return undefined;
 	try {
-		raw = await Bun.file(path.join(runtimeDir, BROKER_PID_FILE)).json();
-	} catch {
-		return undefined; // Missing or malformed broker.pid => no owning broker.
-	}
-	if (typeof raw !== "object" || raw === null || !("pid" in raw) || typeof raw.pid !== "number") {
-		return undefined;
-	}
-	try {
-		process.kill(raw.pid, 0);
-		return raw.pid;
+		process.kill(record.pid, 0);
+		return record.pid;
 	} catch {
 		return undefined;
 	}
@@ -119,12 +200,14 @@ export async function readLiveDaemonBrokerPid(runtimeDir: string): Promise<numbe
  * project directories leave behind (issue #8674).
  *
  * Best-effort and non-throwing: a scope is deleted only when its `broker.pid`
- * is absent/dead, no live client presence remains, and it has been untouched
- * for {@link DAEMON_RUNTIME_STALE_GRACE_MS}. The caller's own `currentRuntimeDir`
- * is always skipped, and the sweep runs only inside the {@link DAEMONS_DIR}
- * container over entries named like a {@link DAEMON_SCOPE_KEY} — so a runtime
- * dir relocated elsewhere (e.g. the smoke test under `os.tmpdir()`) never
- * reclaims unrelated neighbours (issue #8721).
+ * is absent/dead, no live client presence remains, no broker answers on its
+ * endpoint, and it has been untouched for {@link DAEMON_RUNTIME_STALE_GRACE_MS}.
+ * A record written in another domain (see {@link daemonProcessDomain}) keeps
+ * the scope, and the sweep never removes presence entries. The caller's own
+ * `currentRuntimeDir` is always skipped, and the sweep runs only inside the
+ * {@link DAEMONS_DIR} container over entries named like a {@link DAEMON_SCOPE_KEY}
+ * — so a runtime dir relocated elsewhere (e.g. the smoke test under
+ * `os.tmpdir()`) never reclaims unrelated neighbours (issue #8721).
  */
 export async function pruneDeadDaemonRuntimeDirs(currentRuntimeDir: string): Promise<void> {
 	const root = path.dirname(currentRuntimeDir);
@@ -150,8 +233,14 @@ export async function pruneDeadDaemonRuntimeDirs(currentRuntimeDir: string): Pro
 		try {
 			const stat = await fs.stat(dir);
 			if (now - stat.mtimeMs < DAEMON_RUNTIME_STALE_GRACE_MS) continue;
-			if ((await readLiveDaemonBrokerPid(dir)) !== undefined) continue;
-			if (await hasLiveDaemonProjectPresence(dir)) continue;
+			const broker = await readBrokerPidRecord(dir);
+			if (broker !== undefined && (await recordedProcessState(broker)) !== "dead") continue;
+			const presence = await scanDaemonProjectPresence(dir, false);
+			if (presence.live || presence.foreign) continue;
+			// The project dir only names a Windows pipe; a scope without scope.json
+			// there cannot be probed, and the checks above decide alone.
+			const endpoint = daemonBrokerEndpoint((await readDaemonScopeMeta(dir)) ?? dir, dir);
+			if (await probeBrokerEndpoint(endpoint)) continue;
 			await fs.rm(dir, { recursive: true, force: true });
 		} catch (error) {
 			if (isEnoent(error)) continue;
