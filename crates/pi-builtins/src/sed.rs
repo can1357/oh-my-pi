@@ -73,8 +73,9 @@ pub struct ProcessingContext {
 	pub last_file:            bool,
 	/// Stop processing further input.
 	pub stop_processing:      bool,
-	/// Previously compiled RE, saved for reuse when specifying an empty RE
-	pub saved_regex:          Option<Regex>,
+	/// Previously compiled RE, saved for reuse when specifying an empty RE.
+	/// Shared, never cloned: a cloned `Regex` starts with an empty match cache.
+	pub saved_regex:          Option<Rc<Regex>>,
 	/// Modification of input processing action
 	// This is required to avoid doubly borrowing the reader in the 'N'
 	// command.
@@ -110,7 +111,7 @@ pub struct StringSpace {
 #[derive(Debug)]
 /// Types of address specifications that precede commands
 pub enum Address {
-	Re(Option<Regex>), // Line that matches (optional) regex
+	Re(Option<Rc<Regex>>), // Line that matches (optional) regex
 	Line(usize),       // Specific line
 	RelLine(usize),    // Relative line
 	Last,              // Last line
@@ -223,7 +224,7 @@ impl ReplacementTemplate {
 #[derive(Debug, Default)]
 /// Substitution command
 pub struct Substitution {
-	pub regex:       Option<Regex>,       // Regular expression
+	pub regex:       Option<Rc<Regex>>,   // Regular expression
 	pub replacement: ReplacementTemplate, // Specified broken-down replacement
 	pub occurrence:  usize,               // Which occurrence to substitute
 	pub print_flag:  bool,                // True if 'p' flag
@@ -1048,7 +1049,7 @@ fn compile_address(
 				line.advance();
 			}
 
-			Ok(Address::Re(compile_regex(lines, line, &re, context, icase, false)?))
+			Ok(Address::Re(compile_regex(lines, line, &re, context, icase, false)?.map(Rc::new)))
 		},
 		'$' => {
 			line.advance();
@@ -1322,7 +1323,8 @@ fn compile_subst_command(
 	}
 
 	// Compile regex with now known modifier flags.
-	subst.regex = compile_regex(lines, line, &pattern, context, subst.ignore_case, subst.multiline)?;
+	subst.regex = compile_regex(lines, line, &pattern, context, subst.ignore_case, subst.multiline)?
+		.map(Rc::new);
 
 	// Catch invalid group references at compile time, if possible.
 	if let Some(regex) = &subst.regex
@@ -3922,6 +3924,13 @@ pub fn parse_regex(
 				if line.current() == '}' {
 					result.push('\\');
 					result.push('}');
+					line.advance();
+					continue;
+				}
+				if line.current() == 'b' {
+					// In a regex `\b` is a word boundary, never a backspace; GNU sed
+					// omits the backspace escape for exactly this conflict.
+					result.push_str("\\b");
 					line.advance();
 					continue;
 				}
@@ -7938,16 +7947,19 @@ fn write_chunk(
 /// Return a reference to the current or the saved RE if the RE is None.
 /// Update the saved RE to RE.
 fn re_or_saved_re<'a>(
-	regex: Option<&Regex>,
+	regex: Option<&Rc<Regex>>,
 	context: &'a mut ProcessingContext,
 	location: &ScriptLocation,
 ) -> SedResult<&'a Regex> {
 	if let Some(re) = regex {
-		// First time we see this regex: clone it *once* into the context.
-		context.saved_regex = Some(re.clone());
+		// Share the compiled RE rather than cloning it: a cloned `Regex` gets a
+		// fresh, empty match cache, so every line would rebuild it from scratch.
+		if !context.saved_regex.as_ref().is_some_and(|saved| Rc::ptr_eq(saved, re)) {
+			context.saved_regex = Some(Rc::clone(re));
+		}
 		// Return a reference into context.saved_regex.
-		Ok(context.saved_regex.as_ref().unwrap())
-	} else if let Some(ref saved_re) = context.saved_regex {
+		Ok(context.saved_regex.as_deref().unwrap())
+	} else if let Some(saved_re) = context.saved_regex.as_deref() {
 		// We already have one: just borrow it.
 		Ok(saved_re)
 	} else {
@@ -9600,6 +9612,19 @@ mod tests {
 		let (code, capture) = crate::host::run_util::<Sed>(&["2q42"], "one\ntwo\nthree\n", "/");
 		assert_eq!(code, 42);
 		assert_eq!(capture.out(), "one\ntwo\n");
+	}
+
+	#[test]
+	fn builtin_matches_word_boundaries_in_regexes() {
+		// `\b` is a word boundary in substitutions and addresses, BRE and ERE alike.
+		let (code, capture) =
+			crate::host::run_util::<Sed>(&[r"s/\bfoo\b/bar/g"], "foo foobar barfoo foo\n", "/");
+		assert_eq!(code, 0, "{}", capture.err());
+		assert_eq!(capture.out(), "bar foobar barfoo bar\n");
+		let (code, capture) =
+			crate::host::run_util::<Sed>(&["-E", r"/\bfoo\b/d"], "foobar\nfoo\n", "/");
+		assert_eq!(code, 0, "{}", capture.err());
+		assert_eq!(capture.out(), "foobar\n");
 	}
 
 	#[test]
