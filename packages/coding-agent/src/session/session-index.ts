@@ -21,6 +21,7 @@
 import { Database, type SQLQueryBindings, type Statement } from "bun:sqlite";
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { isSqliteBusyError, sqliteFileIdentity, type SqliteFileIdentity } from "@oh-my-pi/pi-utils";
 import { getHistoryDbPath } from "@oh-my-pi/pi-utils/dirs";
 import { getDbBusyTimeoutMs } from "@oh-my-pi/pi-utils/env";
 import * as logger from "@oh-my-pi/pi-utils/logger";
@@ -43,6 +44,8 @@ CREATE INDEX IF NOT EXISTS idx_session_recaps_session ON session_recaps(session_
 
 interface SessionIndexHandle {
 	dbPath: string;
+	/** Identity of the file this handle is attached to; the path alone does not identify it after a quarantine. */
+	identity: SqliteFileIdentity;
 	db: Database;
 	upsertTitle: Statement;
 	selectTitle: Statement;
@@ -66,7 +69,16 @@ function closeHandle(): void {
 
 function openSessionIndex(): SessionIndexHandle | undefined {
 	const dbPath = getHistoryDbPath();
-	if (handle?.dbPath === dbPath) return handle;
+	// A quarantined history.db is unlinked and recreated at the same path, so
+	// the path alone still matches a handle pinned to the dead inode. Reopen
+	// unless the file behind the path is still the one this handle was opened
+	// on. An `undefined` identity means the stat itself failed: no conclusion
+	// is safe there, so treat the handle as stale.
+	if (handle?.dbPath === dbPath) {
+		const identity = sqliteFileIdentity(dbPath);
+		if (identity !== undefined && identity === handle.identity) return handle;
+	}
+
 	if (failedPath === dbPath) return undefined;
 	closeHandle();
 	try {
@@ -77,6 +89,7 @@ function openSessionIndex(): SessionIndexHandle | undefined {
 		db.run(`PRAGMA journal_mode=WAL;\nPRAGMA synchronous=NORMAL;\n${SESSION_INDEX_DDL}`);
 		handle = {
 			dbPath,
+			identity: sqliteFileIdentity(dbPath),
 			db,
 			upsertTitle: db.prepare(`
 INSERT INTO session_titles (session_id, title, updated_at)
@@ -91,6 +104,9 @@ ON CONFLICT(session_id) DO UPDATE SET
 		failedPath = undefined;
 		return handle;
 	} catch (error) {
+		// A busy store is transient (a peer process holds the lock), so it must
+		// not latch the path as unusable for the rest of the session.
+		if (isSqliteBusyError(error)) return undefined;
 		failedPath = dbPath;
 		logger.warn("Session index unavailable", { dbPath, error: String(error) });
 		return undefined;

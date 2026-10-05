@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Exported `sqliteFileIdentity()`, which reports the `dev:ino:birthtime` identity of a SQLite store so a caller holding a long-lived connection can tell that the path now names a different file after a corrupt store was quarantined and replaced ([#13929](https://github.com/can1357/oh-my-pi/issues/13929)).
+
 ## [18.5.1] - 2026-10-03
 
 ### Added
