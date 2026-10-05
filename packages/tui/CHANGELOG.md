@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed macOS editor spelling assistance hanging silently when a `NSSpellChecker` call never returned: the provider kept reporting itself available, logged nothing, and left the automatic typo queue frozen for the rest of the session. Native spelling calls now carry a 2 s deadline, so a stuck call is reported and disables the feature the same way an error already did ([#12084](https://github.com/can1357/oh-my-pi/issues/12084)).
+
 ## [18.6.1] - 2026-10-04
 
 ### Fixed
