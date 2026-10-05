@@ -186,7 +186,7 @@ describe("ToolExecutionComponent live preview spinners", () => {
 	// CPU scales with block count.
 	it("drives every concurrent live block from a single shared spinner timer", () => {
 		vi.useFakeTimers();
-		const setIntervalSpy = vi.spyOn(globalThis, "setInterval");
+		const setTimeoutSpy = vi.spyOn(globalThis, "setTimeout");
 		const renders = [vi.fn(), vi.fn(), vi.fn()];
 		const components = renders.map(
 			requestComponentRender =>
@@ -201,8 +201,9 @@ describe("ToolExecutionComponent live preview spinners", () => {
 		);
 
 		try {
-			const spinnerTimers = setIntervalSpy.mock.calls.filter(([, ms]) => ms === DEFAULT_SPINNER_INTERVAL_MS).length;
-			// One shared ticker for all three live blocks, not three.
+			// One shared ticker for all three live blocks, not three: a single timer armed for the
+			// shared clock's next boundary (a full period from t=0).
+			const spinnerTimers = setTimeoutSpy.mock.calls.filter(([, ms]) => ms === DEFAULT_SPINNER_INTERVAL_MS).length;
 			expect(spinnerTimers).toBe(1);
 
 			// A single tick repaints every registered block in lockstep.
