@@ -58,6 +58,19 @@ function truncateTitleForSlot(title: string, source: SessionTitleSource | undefi
 	return best;
 }
 
+/** Session titles are stored single-line: controls become spaces, space runs collapse, ends trimmed. */
+export function cleanSessionTitle(raw: string): string {
+	return raw
+		.replace(/[\u0000-\u001f\u007f-\u009f]/g, " ")
+		.replace(/ +/g, " ")
+		.trim();
+}
+
+/** The part of a user-set title the fixed-width slot keeps, i.e. what session listings read back. */
+export function storedUserTitle(title: string): string {
+	return truncateTitleForSlot(title, "user", new Date(0).toISOString());
+}
+
 function isSessionTitleSource(value: unknown): value is SessionTitleSource {
 	return value === "auto" || value === "user";
 }

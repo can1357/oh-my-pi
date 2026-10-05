@@ -17,6 +17,8 @@ import { peekFileEnds } from "@oh-my-pi/pi-utils/peek-file";
 import { isPidAlive } from "@oh-my-pi/pi-utils/pid";
 import { Snowflake } from "@oh-my-pi/pi-utils/snowflake";
 import { toError } from "@oh-my-pi/pi-utils/type-guards";
+import { retireOfflineMailbox } from "../messaging/mailbox";
+import { messagingRegistryDir, resolveRegistry } from "../messaging/transport";
 import {
 	overlayTitleSlotContent,
 	parseTitleSlotFromContent,
@@ -1360,25 +1362,45 @@ export class FileSessionStorage implements SessionStorage {
 	 * Conditionally delete under the same cross-process lock used by the first
 	 * durable append to a draft-only session.
 	 */
-	deleteSessionWithArtifactsIf(sessionPath: string, shouldDelete: (content: string) => boolean): Promise<boolean> {
-		const deleted = this.withSessionFileLockSync(sessionPath, () => {
-			const content = fs.readFileSync(sessionPath, "utf-8");
-			if (!shouldDelete(content)) return false;
+	async deleteSessionWithArtifactsIf(
+		sessionPath: string,
+		shouldDelete: (content: string) => boolean,
+	): Promise<boolean> {
+		let sessionId: string | undefined;
+		let unlinked = false;
+		let deleted = false;
+		let cleanupError: Error | undefined;
+		try {
+			deleted = this.withSessionFileLockSync(sessionPath, () => {
+				const content = fs.readFileSync(sessionPath, "utf-8");
+				if (!shouldDelete(content)) return false;
+				sessionId = readSessionHeaderIdSync(sessionPath);
 
-			fs.unlinkSync(sessionPath);
-			const artifactsDir = sessionPath.slice(0, -6);
-			try {
-				fs.rmSync(artifactsDir, { recursive: true, force: true });
-			} catch (err) {
-				const error = toError(err);
-				throw new Error(
-					`Session file deleted but failed to remove artifacts directory ${artifactsDir}: ${error.message}`,
-					{ cause: error },
-				);
-			}
-			return true;
-		});
-		return Promise.resolve(deleted);
+				fs.unlinkSync(sessionPath);
+				unlinked = true;
+				const artifactsDir = sessionPath.slice(0, -6);
+				try {
+					fs.rmSync(artifactsDir, { recursive: true, force: true });
+				} catch (err) {
+					const error = toError(err);
+					throw new Error(
+						`Session file deleted but failed to remove artifacts directory ${artifactsDir}: ${error.message}`,
+						{ cause: error },
+					);
+				}
+				return true;
+			});
+		} catch (error) {
+			cleanupError = toError(error);
+		}
+		try {
+			if (unlinked && sessionId)
+				await retireOfflineMailbox(sessionId, { dir: await resolveRegistry(messagingRegistryDir(), false) });
+		} catch (error) {
+			cleanupError ??= toError(error);
+		}
+		if (cleanupError) throw cleanupError;
+		return deleted;
 	}
 
 	/**
@@ -1386,8 +1408,16 @@ export class FileSessionStorage implements SessionStorage {
 	 * Artifacts are stored in a sibling directory with the same name minus .jsonl extension.
 	 */
 	async deleteSessionWithArtifacts(sessionPath: string): Promise<void> {
+		const sessionId = readSessionHeaderIdSync(sessionPath);
 		// Delete the session file itself
 		await this.unlink(sessionPath);
+		let mailCleanupError: Error | undefined;
+		try {
+			if (sessionId)
+				await retireOfflineMailbox(sessionId, { dir: await resolveRegistry(messagingRegistryDir(), false) });
+		} catch (error) {
+			mailCleanupError = toError(error);
+		}
 
 		// Compute artifacts directory: /path/to/session.jsonl -> /path/to/session
 		const artifactsDir = sessionPath.slice(0, -6);
@@ -1422,6 +1452,7 @@ export class FileSessionStorage implements SessionStorage {
 				});
 			}
 		}
+		if (mailCleanupError) throw mailCleanupError;
 	}
 }
 

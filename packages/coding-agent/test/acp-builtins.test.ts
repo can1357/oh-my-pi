@@ -202,6 +202,9 @@ function createRuntime() {
 		_flushed: false,
 		_droppedSessions: [] as string[],
 		_sessionName: undefined as string | undefined,
+		getSessionName(): string | undefined {
+			return this._sessionName;
+		},
 		getSessionId(): string {
 			return "fake-session-id";
 		},

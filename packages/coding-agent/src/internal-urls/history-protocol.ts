@@ -39,6 +39,7 @@ import { loadSessionMessagesReadOnly } from "../session/session-loader";
 import type { SessionEntry } from "../session/session-entries";
 import historyPromptDoc from "../prompts/internal-urls/history.md" with { type: "text" };
 import { artifactsDirsFromRegistry, sessionFilesFromDisk } from "./registry-helpers";
+import { renderOtherSessionsSection } from "../session/messaging-host";
 import type {
 	InternalResource,
 	InternalUrl,
@@ -400,7 +401,11 @@ export class HistoryProtocolHandler implements ProtocolHandler {
 		const agentId = url.rawHost || url.hostname;
 		if (!agentId) {
 			const { visible, preferredArtifactDir, onlyPreferred } = await this.#roster(context);
-			const content = await this.#renderIndex(visible, preferredArtifactDir, onlyPreferred);
+			const localIndex = await this.#renderIndex(visible, preferredArtifactDir, onlyPreferred);
+			const others = context?.session
+				? await renderOtherSessionsSection(context.session, context.signal)
+				: undefined;
+			const content = others ? `${localIndex}\n\n${others}` : localIndex;
 			return {
 				url: url.href,
 				content,

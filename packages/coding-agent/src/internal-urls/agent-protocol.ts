@@ -178,8 +178,8 @@ export class AgentProtocolHandler implements ProtocolHandler {
 		if (
 			!registry ||
 			!senderId ||
-			session.enableIrc === false ||
-			!isIrcEnabled(session.settings, session.taskDepth ?? 0)
+			(!session.messaging &&
+				(session.enableIrc === false || !isIrcEnabled(session.settings, session.taskDepth ?? 0)))
 		) {
 			throw new Error("Peer messaging is unavailable in this session.");
 		}
@@ -190,10 +190,19 @@ export class AgentProtocolHandler implements ProtocolHandler {
 		}
 		const progress = url.searchParams.has("progress");
 		if (progress && to === "all") throw new Error("agent://all broadcasts cannot be ?progress updates.");
-		if (!content.trim()) throw new Error("agent:// messages require non-empty content.");
+		let notifyWhenIdle = false;
+		if (session.messaging) {
+			for (const key of url.searchParams.keys()) {
+				if (key !== "notify" && key !== "progress") throw new Error(`Unknown agent:// option "${key}".`);
+			}
+			const notify = url.searchParams.get("notify");
+			if (notify !== null && notify !== "idle") throw new Error(`Unknown agent:// option "notify".`);
+			notifyWhenIdle = notify === "idle";
+		}
+		if (!content.trim() && !notifyWhenIdle) throw new Error("agent:// messages require non-empty content.");
 		const result = await executeSend(
-			{ registry, senderId, sessionFileHint: session.getSessionFile?.() },
-			{ to, message: content, progress },
+			{ registry, senderId, sessionFileHint: session.getSessionFile?.(), messaging: session.messaging },
+			{ to, message: content, progress, notifyWhenIdle },
 		);
 		return {
 			content: [

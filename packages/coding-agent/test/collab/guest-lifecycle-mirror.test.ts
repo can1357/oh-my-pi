@@ -112,6 +112,7 @@ async function makeHarness(
 			getCwd: () => "/local",
 		},
 		session: {
+			suspendMessagingReceiving: () => () => {},
 			messages: [],
 			switchSession: () => Promise.resolve(),
 			newSession: () => Promise.resolve(),

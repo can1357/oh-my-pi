@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added the optional `Peer address` dashboard row, expandable one-line cards for cross-session messages, and session-name `@` autocomplete with quoted-name escaping ([#14263](https://github.com/can1357/oh-my-pi/pull/14263) by [@jaredlyon](https://github.com/jaredlyon)).
+
 ## [18.18.8] - 2026-11-11
 
 - The live transcript reuses its per-block walk list across each frame's readers instead of rebuilding it three times per frame, so settled transcripts cost fewer short-lived allocations per frame ([#18705](https://github.com/can1357/oh-my-pi/pull/18705) by [@yuzu-octopus](https://github.com/yuzu-octopus))

@@ -892,6 +892,16 @@ export class Settings {
 			target.#applyParentChange(setting);
 		};
 		this.#childForwarders.add(forward);
+		// A parent's layer change reaches overlay observers: messaging policy reads the merged raw layers.
+		const forwardLayers = () => {
+			const target = ref.deref();
+			if (!target) this.#layerListeners.delete(forwardLayers);
+			else {
+				target.#syncParent();
+				target.#notifyLayerListeners();
+			}
+		};
+		this.#layerListeners.add(forwardLayers);
 		return child;
 	}
 
@@ -1839,6 +1849,12 @@ export class Settings {
 	get revision(): number {
 		this.#syncParent();
 		return this.#revision;
+	}
+
+	/** Raw runtime or CLI-config layer, cloned; overlay children include their parent's layer. */
+	getLayerRaw(layer: "runtime" | "overlay"): RawSettings {
+		const own = structuredClone(layer === "runtime" ? this.#overrides : this.#configOverlay);
+		return this.#parent ? this.#deepMerge(this.#parent.getLayerRaw(layer), own) : own;
 	}
 
 	/**
@@ -4257,6 +4273,10 @@ export class Settings {
 	#rebuildMerged(): void {
 		this.#remerge();
 		this.#layerGeneration++;
+		this.#notifyLayerListeners();
+	}
+
+	#notifyLayerListeners(): void {
 		if (this.#layerListeners.size === 0) return;
 		for (const listener of Array.from(this.#layerListeners)) {
 			try {

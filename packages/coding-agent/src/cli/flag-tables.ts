@@ -134,6 +134,9 @@ export const STRING_SETTERS: Record<string, StringSetter> = {
 	"--cwd": (result, value) => {
 		result.cwd = value;
 	},
+	"--name": (result, value) => {
+		result.name = value;
+	},
 	"--config": (result, value) => {
 		result.config = [...(result.config ?? []), value];
 	},
@@ -374,6 +377,7 @@ export const VALUELESS_FLAGS: ReadonlySet<string> = new Set([
 	"--no-rules",
 	"--no-context-files",
 	"--no-title",
+	"--cross-session",
 	"--no-ui",
 	"--auto-approve",
 	"--yolo",
