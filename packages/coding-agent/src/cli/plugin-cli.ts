@@ -1062,6 +1062,17 @@ async function handleDisable(
 	return handleSetEnabled(manager, plugins, flags, false);
 }
 
+/** Scope still enabling `name` after a disable, or undefined when no install leaves it on. */
+async function enabledScopeFor(mgr: MarketplaceManager, name: string): Promise<"user" | "project" | undefined> {
+	const summaries = await mgr.listInstalledPlugins();
+	for (const summary of summaries) {
+		if (summary.id !== name) continue;
+		const enabledEntry = summary.entries.find(entry => entry.enabled !== false);
+		if (enabledEntry) return enabledEntry.scope;
+	}
+	return undefined;
+}
+
 async function handleSetEnabled(
 	manager: PluginManager,
 	plugins: string[],
@@ -1079,11 +1090,23 @@ async function handleSetEnabled(
 
 	const mktMgr = await makeMarketplaceManager();
 	const installedPlugins = new Set((await mktMgr.listInstalledPlugins()).map(p => p.id));
+	const restartBound: string[] = [];
+	const stillEnabled: { name: string; by: "user" | "project" }[] = [];
 
 	for (const name of plugins) {
 		if (installedPlugins.has(name)) {
 			try {
 				await mktMgr.setPluginEnabled(name, enabled, flags.scope);
+				if (!enabled) {
+					// Only the toggled scope was written: re-read the registry so the
+					// notice names the install that still enables the plugin, if any.
+					// The disable is persisted either way, so a failed re-read falls
+					// back to the unconditional running-session notice instead of
+					// reporting the disable itself as failed.
+					const survivor = await enabledScopeFor(mktMgr, name).catch(() => undefined);
+					if (survivor) stillEnabled.push({ name, by: survivor });
+					else restartBound.push(name);
+				}
 				if (flags.json) {
 					console.log(JSON.stringify({ [jsonKey]: name }));
 				} else {
@@ -1098,6 +1121,7 @@ async function handleSetEnabled(
 
 		try {
 			await manager.setEnabled(name, enabled);
+			if (!enabled) restartBound.push(name);
 			if (flags.json) {
 				console.log(JSON.stringify({ [jsonKey]: name }));
 			} else {
@@ -1106,6 +1130,18 @@ async function handleSetEnabled(
 		} catch (err) {
 			console.error(chalk.red(`${theme.status.error} Failed to ${action} ${name}: ${err}`));
 			process.exit(1);
+		}
+	}
+
+	// A running session binds a plugin once at startup and never rechecks, so
+	// the flag above is honest for new sessions only (#9722). An install left
+	// enabled in another scope keeps loading the plugin across a restart.
+	if (!flags.json) {
+		if (restartBound.length > 0) {
+			console.log(chalk.dim(`Running sessions keep ${restartBound.join(", ")} bound until they restart.`));
+		}
+		for (const { name, by } of stillEnabled) {
+			console.log(chalk.dim(`${name} is still enabled by a ${by} install.`));
 		}
 	}
 }

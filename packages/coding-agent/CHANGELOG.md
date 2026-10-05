@@ -340,6 +340,7 @@
 
 ### Fixed
 
+- `omp plugin disable` and the Settings → Plugins toggle now say that already-running sessions keep the plugin bound until they restart, instead of reporting a clean disable while its interceptors stay live ([#9722](https://github.com/can1357/oh-my-pi/issues/9722) via [#13904](https://github.com/can1357/oh-my-pi/pull/13904) by [@STRML](https://github.com/STRML))
 - Fixed the subagent live preview blanking or mislabelling a running call when a sibling call finishes: concurrent calls are tracked by call id and keep their own intent, and the row keeps the last completed call with its success or error mark until the next one starts ([#11210](https://github.com/can1357/oh-my-pi/pull/11210) by [@DarkPhilosophy](https://github.com/DarkPhilosophy)).
 - Fixed subagent tool previews rewriting a search pattern that names a home directory: path arguments are now shortened by argument key, so the pattern still shows what was searched ([#11210](https://github.com/can1357/oh-my-pi/pull/11210) by [@DarkPhilosophy](https://github.com/DarkPhilosophy)).
 - Fixed background task job progress dropping the current tool's arguments and start time ([#11210](https://github.com/can1357/oh-my-pi/pull/11210) by [@DarkPhilosophy](https://github.com/DarkPhilosophy)).
