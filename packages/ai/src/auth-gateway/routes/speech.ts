@@ -1,5 +1,6 @@
 import { logger } from "@oh-my-pi/pi-utils";
 import { classifyGatewayError } from "../../error/gateway";
+import { ValidationError } from "../../error/validation";
 import * as speechWire from "../../providers/speech-server";
 import { isSpeechApi, synthesizeSpeech } from "../../speech";
 import { deterministicUuid } from "../../utils/deterministic-id";
@@ -94,6 +95,15 @@ export async function handleSpeech(bootOpts: AuthGatewayRouteOptions, req: Reque
 		return response;
 	} catch (error) {
 		if (controller.signal.aborted) return aborted();
+		// Adapter-level validation is a client error, not an upstream failure: the
+		// wire schema accepts `response_format` values a given speech API cannot
+		// serve (xAI serves mp3/wav only) and no length cap, so synthesizeSpeech
+		// rejects those requests with a ValidationError. classifyGatewayError has
+		// no status or keyword to match in "xai-tts does not support flac output",
+		// and would bill the client a 502 upstream_error that blames the provider.
+		if (error instanceof ValidationError) {
+			return speechWire.formatError(400, "invalid_request_error", error.message);
+		}
 		const classified = classifyGatewayError(error);
 		logger.warn("auth-gateway speech failed", { format: "speech", error: classified.message, peer });
 		return speechWire.formatError(classified.status, classified.type, classified.message);

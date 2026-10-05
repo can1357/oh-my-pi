@@ -8,6 +8,7 @@
 - `AuthStorage.health.check()` accepts `excludeProviders` to skip credentials of providers the caller does not serve ([#14234](https://github.com/can1357/oh-my-pi/pull/14234) by [@will-bogusz](https://github.com/will-bogusz))
 
 ### Fixed
+- `POST /v1/audio/speech` answered 502 `upstream_error` for client-side input errors, because the xAI adapter validation error matched none of the gateway classifier heuristics; a schema-valid codec the adapter cannot serve, or input past its character limit, is now a 400 `invalid_request_error` carrying the adapter own message ([#14391](https://github.com/can1357/oh-my-pi/issues/14391)).
 
 - Codex native-lane steering rejections (`unsupported_native_inflight_message`) now classify as retryable from their error text alone, matching the provider's own classification, and `AIError.isCodexSteerRejection()` identifies them so the agent retry can stay on the same model ([#14242](https://github.com/can1357/oh-my-pi/pull/14242) by [@alphastorm](https://github.com/alphastorm))
 - Fixed replayed Responses and Codex history, including persisted Codex user/developer and assistant items, sending `detail: "original"` images to endpoints whose `supportsImageDetailOriginal` is off ([#13687](https://github.com/can1357/oh-my-pi/pull/13687) by [@alphastorm](https://github.com/alphastorm)).
