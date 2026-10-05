@@ -145,17 +145,22 @@ export class MnemopiEmbedClient {
 	}
 
 	/**
-	 * Load the named fastembed model inside the subprocess. Resolves to a
-	 * thin wrapper whose `embed()` round-trips through the same worker, or
-	 * `null` when the worker cannot init the model (missing peer, native
-	 * load failure, etc.). Multiple calls with the same model reuse the
-	 * single in-flight worker; calling with a different model loads it on
-	 * the child without restarting the process.
+	 * Load the named fastembed model inside the subprocess. Resolves to a thin
+	 * wrapper whose `embed()` round-trips through the same worker.
+	 *
+	 * Rejects with the worker's own diagnostic when the model cannot be
+	 * initialized (missing peer, native load failure, etc.). The loader's
+	 * message is the only account of what went wrong — collapsing it to a
+	 * generic "subprocess unavailable" left a host missing its C++ runtime with
+	 * no clue why recall silently degraded to the hash fallback (#14346).
+	 * Multiple calls with the same model reuse the single in-flight worker;
+	 * calling with a different model loads it on the child without restarting
+	 * the process.
 	 */
 	async initialize(
 		model: MnemopiEmbedModelId,
 		cacheDir: string | undefined,
-	): Promise<MnemopiSubprocessEmbeddingModel | null> {
+	): Promise<MnemopiSubprocessEmbeddingModel> {
 		// fastembed exposes no byte progress; any missing model file means this
 		// init downloads it.
 		const cached = await isFastembedModelCached(model, cacheDir ?? getFastembedCacheDir());
@@ -165,24 +170,22 @@ export class MnemopiEmbedClient {
 			const id = String(++this.#nextRequestId);
 			const { promise, resolve } = Promise.withResolvers<string | undefined>();
 			this.#addPending(id, { kind: "init", model, resolve });
+			let workerError: string | undefined;
 			try {
 				worker.send({ type: "init", id, model, cacheDir });
-				const error = await promise;
-				if (error !== undefined) {
-					tracker?.fail(error);
-					return null;
-				}
-				tracker?.done();
+				workerError = await promise;
 			} finally {
 				this.#deletePending(id);
 			}
+			if (workerError !== undefined) throw new Error(workerError);
+			tracker?.done();
 		} catch (error) {
 			tracker?.fail(error);
-			logger.debug("mnemopi-embed: init failed", {
+			logger.warn("mnemopi-embed: init failed", {
 				model,
 				error: error instanceof Error ? error.message : String(error),
 			});
-			return null;
+			throw error instanceof Error ? error : new Error(String(error));
 		}
 		return { embed: (texts, batchSize) => this.#streamEmbed(model, cacheDir, texts, batchSize) };
 	}

@@ -9,6 +9,7 @@
 - Upgraded local embedding support to fastembed 3.0.0. Models now download from Hugging Face into the updated cache layout, with interrupted downloads resuming automatically; existing models are migrated on first use while producing the same vectors.
 
 ### Fixed
+- A fastembed runtime load failure on a host missing `libstdc++.so.6` or `libgcc_s.so.1` surfaced as a generic model-download error with the loader diagnostic discarded; the failure now names the missing library and `OMP_NATIVE_LIBRARY_PATH`, and `ERR_DLOPEN_FAILED` is no longer treated as recoverable ([#14346](https://github.com/can1357/oh-my-pi/issues/14346)).
 
 - Fixed enhanced recall returning cached results from an unrelated longer query when answering a shorter query.
 - Fixed local embedding setup on fresh caches and Linux ARM64, including compatibility with current model downloads and ARM64 tokenization support.

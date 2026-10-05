@@ -33,12 +33,7 @@ let localModelInitializerInstalled = false;
 function installLocalModelInitializer(setInitializer: (initializer: LocalModelInitializer) => void): void {
 	if (localModelInitializerInstalled) return;
 	localModelInitializerInstalled = true;
-	setInitializer(({ model, cacheDir }) =>
-		mnemopiEmbedClient.initialize(model, cacheDir).then(handle => {
-			if (handle) return handle;
-			throw new Error("mnemopi embed subprocess unavailable");
-		}),
-	);
+	setInitializer(({ model, cacheDir }) => mnemopiEmbedClient.initialize(model, cacheDir));
 }
 
 /**

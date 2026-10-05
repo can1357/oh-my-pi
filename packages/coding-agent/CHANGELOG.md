@@ -1,6 +1,9 @@
 # Changelog
 
 ## [Unreleased]
+- mnemopi embeddings swallowed the embed worker error and logged `mnemopi embed subprocess unavailable` at debug, so a host missing a system C++ library looked like a silent fallback to the SHA1 embeddings; init now throws the worker own message and logs it at warn ([#14346](https://github.com/can1357/oh-my-pi/issues/14346)).
+### Fixed
+
 
 ### Breaking Changes
 

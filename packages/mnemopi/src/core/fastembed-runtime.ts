@@ -130,6 +130,14 @@ export function loadFastembed(): Promise<FastembedModule> {
 
 async function loadFastembedOnce(): Promise<FastembedModule> {
 	try {
+		return await loadFastembedResolvedOrInstall();
+	} catch (error) {
+		throw describeFastembedLoadFailure(error);
+	}
+}
+
+async function loadFastembedResolvedOrInstall(): Promise<FastembedModule> {
+	try {
 		const requireDirect = createRequire(import.meta.url);
 		const manifestPath = requireDirect.resolve("fastembed/package.json");
 		const manifest: { version?: unknown } = requireDirect(manifestPath);
@@ -174,10 +182,72 @@ async function loadFromRuntimeInstall(): Promise<FastembedModule> {
 	return loadResolvedFastembed(entry, path.join(nodeModules, "fastembed"));
 }
 
-function isRecoverableFastembedLoadError(error: unknown): boolean {
+/**
+ * System libraries the prebuilt `onnxruntime-node` addon links against but
+ * never ships. Its `DT_RUNPATH` is `$ORIGIN/`, which covers the bundled ORT
+ * library and nothing else, so the C++ runtime has to come from the loader's
+ * own search path — absent on NixOS, minimal containers, and Alpine without
+ * `gnu-compat`.
+ */
+const MISSING_SYSTEM_LIBRARY_RE =
+	/\b(libstdc\+\+\.so(?:\.[0-9]+)*|libgcc_s\.so(?:\.[0-9]+)*)\b[^\n]*:\s*cannot open shared object file/iu;
+
+/**
+ * Every `message` along the `cause` chain. `dlopen` failures bury the loader's
+ * own text (`libstdc++.so.6: cannot open shared object file`) one or more
+ * levels down, so matching only the outermost message misses it.
+ */
+function loadFailureText(error: unknown): string {
+	const parts: string[] = [];
+	let current: unknown = error;
+	for (let depth = 0; current !== undefined && current !== null && depth < 8; depth++) {
+		parts.push(current instanceof Error ? current.message : String(current));
+		current = typeof current === "object" && "cause" in current ? current.cause : undefined;
+	}
+	return parts.join("\n");
+}
+
+/**
+ * Actionable remedy for a fastembed load failure, or `undefined` when the
+ * cause is not one omp can advise on. Mirrors `cudaFailureHint` for the
+ * inference worker (#14346): without it the user only sees a loader string
+ * that reads like a broken model download, and no model was ever fetched.
+ */
+export function fastembedLoadFailureHint(error: unknown): string | undefined {
+	const missing = MISSING_SYSTEM_LIBRARY_RE.exec(loadFailureText(error))?.[1];
+	if (missing === undefined) return undefined;
+	return (
+		`the host C++ runtime is not on the dynamic loader path; the prebuilt onnxruntime addon bundles only ` +
+		`its own ORT library (DT_RUNPATH $ORIGIN), so ${missing} must come from the system. Install it ` +
+		`(nixpkgs stdenv.cc / gnu-compat on Alpine) or point OMP_NATIVE_LIBRARY_PATH at a directory ` +
+		`containing ${missing}.`
+	);
+}
+
+/**
+ * Attach {@link fastembedLoadFailureHint} to a failure that has one, keeping
+ * the original loader text as the message prefix and as `cause`. Failures
+ * without a known remedy are returned untouched so their messages stay
+ * verbatim.
+ */
+export function describeFastembedLoadFailure(error: unknown): unknown {
+	const hint = fastembedLoadFailureHint(error);
+	if (hint === undefined) return error;
+	const detail = error instanceof Error ? error.message : String(error);
+	return new Error(`${detail} — ${hint}`, { cause: error });
+}
+
+/**
+ * Whether re-running `bun install` of the same prebuilt addons could plausibly
+ * fix this. A `dlopen` failure is not a missing install: the package resolved,
+ * so the runtime cache holds the same broken addon and the ~270MB install
+ * would fail identically (#14346). Only "not installed here" is recoverable.
+ * @internal exported for tests
+ */
+export function isRecoverableFastembedLoadError(error: unknown): boolean {
 	if (typeof error !== "object" || error === null) return false;
 	const { name, code, message } = error as { name?: unknown; code?: unknown; message?: unknown };
 	if (name === "ResolveMessage") return true;
-	if (code === "ERR_MODULE_NOT_FOUND" || code === "MODULE_NOT_FOUND" || code === "ERR_DLOPEN_FAILED") return true;
+	if (code === "ERR_MODULE_NOT_FOUND" || code === "MODULE_NOT_FOUND") return true;
 	return typeof message === "string" && /cannot find (module|package)/i.test(message);
 }

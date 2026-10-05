@@ -2,7 +2,13 @@ import { describe, expect, test } from "bun:test";
 import { createRequire } from "node:module";
 import * as path from "node:path";
 import packageManifest from "../package.json" with { type: "json" };
-import { fastembedRuntimeInstallPlan, prepareWindowsFastembedRuntime } from "../src/core/fastembed-runtime";
+import {
+	describeFastembedLoadFailure,
+	fastembedLoadFailureHint,
+	fastembedRuntimeInstallPlan,
+	isRecoverableFastembedLoadError,
+	prepareWindowsFastembedRuntime,
+} from "../src/core/fastembed-runtime";
 
 // The fastembed peer is pinned as an exact version (not `catalog:`) because
 // `core/fastembed-runtime.ts` reads it to `bun install` the on-demand embedding
@@ -51,5 +57,67 @@ describe("fastembed runtime version pins", () => {
 		expect(ortEntry.startsWith(`${ortPackageDir}${path.sep}`)).toBe(true);
 		expect(await Bun.file(path.join(dllDir, "onnxruntime.dll")).exists()).toBe(true);
 		expect(env.PATH).toBe(`${dllDir}${path.delimiter}${inheritedPath}`);
+	});
+});
+
+// #14346: on a host whose loader cannot resolve the C++ runtime the prebuilt
+// onnxruntime addon links against, the only signal reaching the user was the
+// raw loader string, which reads like a broken model download. These cover the
+// mapping to an actionable remedy.
+describe("fastembed native load failures", () => {
+	test("names the missing system library and the OMP_NATIVE_LIBRARY_PATH remedy", () => {
+		const libstdcxx = Object.assign(new Error("Cannot load library"), {
+			cause: new Error("libstdc++.so.6: cannot open shared object file: No such file or directory"),
+		});
+		expect(fastembedLoadFailureHint(libstdcxx)).toContain("libstdc++.so.6");
+		expect(fastembedLoadFailureHint(libstdcxx)).toContain("OMP_NATIVE_LIBRARY_PATH");
+
+		const libgcc = Object.assign(new Error("Cannot load library"), {
+			cause: "libgcc_s.so.1: cannot open shared object file",
+		});
+		expect(fastembedLoadFailureHint(libgcc)).toContain("libgcc_s.so.1");
+	});
+
+	test("finds the loader message at any depth of the cause chain", () => {
+		// The loader text can sit two `cause` links down; matching only the
+		// outermost message is what made this unreportable.
+		const nested = Object.assign(new Error("FlagEmbedding.init failed"), {
+			cause: Object.assign(new Error("require of onnxruntime_binding.node failed"), {
+				cause: new Error("libstdc++.so.6: cannot open shared object file: No such file or directory"),
+			}),
+		});
+		expect(fastembedLoadFailureHint(nested)).toContain("libstdc++.so.6");
+
+		// A dlopen failure that names no system library is not this defect.
+		const dlopen = Object.assign(new Error("Could not load the shared library libonnxruntime_binding.so"), {
+			code: "ERR_DLOPEN_FAILED",
+		});
+		expect(fastembedLoadFailureHint(dlopen)).toBeUndefined();
+	});
+
+	test("leaves failures it cannot advise on untouched", () => {
+		const plain = new Error("Protobuf parsing failed");
+		expect(fastembedLoadFailureHint(plain)).toBeUndefined();
+		expect(describeFastembedLoadFailure(plain)).toBe(plain);
+		expect(describeFastembedLoadFailure("a string")).toBe("a string");
+	});
+
+	test("wraps a loader failure with the remedy while keeping the original text", () => {
+		const original = new Error("libstdc++.so.6: cannot open shared object file: No such file or directory");
+		const described = describeFastembedLoadFailure(original);
+		if (!(described instanceof Error)) throw new Error("expected an Error");
+		expect(described.message).toContain(original.message);
+		expect(described.message).toContain("OMP_NATIVE_LIBRARY_PATH");
+		expect(described.cause).toBe(original);
+	});
+
+	test("a dlopen failure is not retried as a missing install", () => {
+		// Re-installing the same prebuilt addons cannot fix a broken dlopen, and
+		// the runtime install costs ~270MB. Only "not installed here" retries.
+		expect(isRecoverableFastembedLoadError({ code: "ERR_DLOPEN_FAILED" })).toBe(false);
+		expect(isRecoverableFastembedLoadError({ code: "MODULE_NOT_FOUND" })).toBe(true);
+		expect(isRecoverableFastembedLoadError({ code: "ERR_MODULE_NOT_FOUND" })).toBe(true);
+		expect(isRecoverableFastembedLoadError(new Error("Cannot find module 'fastembed'"))).toBe(true);
+		expect(isRecoverableFastembedLoadError(new Error("Protobuf parsing failed"))).toBe(false);
 	});
 });
