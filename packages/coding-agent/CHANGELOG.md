@@ -10,6 +10,7 @@
 
 - RPC `open_session` and `switch_session` accept an optional `provider`/`modelId` pair that binds the session to that model instead of its saved one, as `--model` does at startup; `RpcClient.openSession()`/`switchSession()` and the Python client's `open_session()`/`switch_session()` take it too ([#13689](https://github.com/can1357/oh-my-pi/pull/13689) by [@alphastorm](https://github.com/alphastorm))
 - Added `compat.statefulResponses` to `models.yml`, so a provider or model can opt into or out of stored Responses chaining without the process-wide `PI_OPENAI_STATEFUL` ([#13686](https://github.com/can1357/oh-my-pi/pull/13686) by [@alphastorm](https://github.com/alphastorm)).
+- `/vibe` directors get a `vibe_judge` tool: a list of typed `choice`/`bool`/`score` questions about a text, answered by the session's judge role in the same answer shapes as eval's `judge()`, so the director can triage worker results without being given `eval`
 
 ### Changed
 

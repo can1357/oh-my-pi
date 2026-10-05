@@ -1,6 +1,6 @@
 # Vibe mode
 
-Vibe mode turns the top-level interactive session into a **director** for persistent background worker sessions instead of letting it edit or execute commands itself. The director's active tools are reduced to `read`, optional parent-owned `todo`, and five worker-control tools. Workers do the searching, editing, running, and building; the director verifies their claims by reading touched files. The parent owns the main todo list; workers normally omit `todo`, except when their own prewalk handoff requires it.
+Vibe mode turns the top-level interactive session into a **director** for persistent background worker sessions instead of letting it edit or execute commands itself. The director's active tools are reduced to `read`, optional parent-owned `todo`, five worker-control tools, and `vibe_judge`. Workers do the searching, editing, running, and building; the director verifies their claims by reading touched files. The parent owns the main todo list; workers normally omit `todo`, except when their own prewalk handoff requires it.
 
 ## Enabling and disabling
 
@@ -47,6 +47,10 @@ The tier always selects the bundled `sonic` or `task` definition, not a same-nam
 Spawn and send return immediately. Each worker-turn result self-delivers into the director conversation through the async job manager; long response text is preview-capped there, with full output available at `agent://<id>`. Running `fast` and `good` workers on independent workstreams concurrently is the normal shape.
 
 Several messages queued while one worker turn cannot be steered are joined into one automatic next-turn directive. `vibe_list` omits explicitly killed workers from its live wall and reports their ids separately; `vibe_wait` can still watch an explicitly named settled worker.
+
+## Judging without `eval`
+
+`vibe_judge` takes `{ state, questions }`: a non-empty `state` string and a list of `choice` / `bool` / `score` questions, each with a unique `id`. Answers come back keyed by those ids in the same shapes as eval's `judge()`. Questions are a list rather than `judge()`'s id-keyed object, and choice labels are `{ label, rubric? }` entries, because a free-keyed object has no strict-mode JSON Schema form. It resolves the session's `judge` role chain (a native judge such as TypeSafe when credentialed, else the small chat model) and records its cost on the session ledger. The director gets typed triage over text it already holds, such as comparing worker results, without `eval`, whose kernels can run commands, write files, and spawn agents outside the worker tiers.
 
 ## Scope and failure behavior
 
