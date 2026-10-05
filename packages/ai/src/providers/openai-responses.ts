@@ -93,6 +93,7 @@ import {
 	isCompiledGrammarTooLargeStrictError,
 	isOpenAIResponsesProgressEvent,
 	isStrictToolsDisabledForScope,
+	readOpenRouterRawMetadata,
 	type OpenAIPromptCacheOptions,
 	type OpenAIStrictToolsScope,
 	type OpenAIStrictToolsState,
@@ -966,7 +967,7 @@ const streamOpenAIResponsesOnce = (
 				output.requestBodyReadTimeoutFullReplay = true;
 			}
 			// Some providers via OpenRouter include extra details here.
-			const rawMetadata = (error as { error?: { metadata?: { raw?: string } } })?.error?.metadata?.raw;
+			const rawMetadata = readOpenRouterRawMetadata(capturedErrorResponse);
 			if (rawMetadata) output.errorMessage += `\n${rawMetadata}`;
 			output.duration = performance.now() - startTime;
 			if (firstTokenTime) output.ttft = firstTokenTime - startTime;

@@ -10,6 +10,9 @@
 
 - Codex native-lane steering rejections (`unsupported_native_inflight_message`) now classify as retryable from their error text alone, matching the provider's own classification, and `AIError.isCodexSteerRejection()` identifies them so the agent retry can stay on the same model ([#14242](https://github.com/can1357/oh-my-pi/pull/14242) by [@alphastorm](https://github.com/alphastorm))
 - Fixed replayed Responses and Codex history, including persisted Codex user/developer and assistant items, sending `detail: "original"` images to endpoints whose `supportsImageDetailOriginal` is off ([#13687](https://github.com/can1357/oh-my-pi/pull/13687) by [@alphastorm](https://github.com/alphastorm)).
+### Fixed
+
+- Fixed OpenRouter policy denials being surfaced without the routed upstream's own explanation. A 403 like "Access denied by security policy" now also carries the provider detail OpenRouter puts in `error.metadata.raw`, which names the upstream that rejected the request and why ([#10906](https://github.com/can1357/oh-my-pi/issues/10906)).
 
 ## [18.6.1] - 2026-10-04
 
