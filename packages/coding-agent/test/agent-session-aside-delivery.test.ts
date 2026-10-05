@@ -1535,4 +1535,58 @@ describe("AgentSession aside delivery", () => {
 		expect(events.indexOf("observer-finish")).toBeGreaterThan(events.indexOf("continuation-ran"));
 		expect(JSON.stringify(mock.calls[1]!.context.messages)).toContain("build ok");
 	});
+
+	it("a mid-stream steer mention rides the hidden session-agent notice like an idle prompt (#14093)", async () => {
+		const modelRegistry = new ModelRegistry(authStorage);
+		const started = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		const mock = createMockModel({
+			provider: "openai",
+			id: "gpt-test",
+			responses: [
+				async () => {
+					started.resolve();
+					await release.promise;
+					return { content: ["done"] };
+				},
+				{ content: ["steer handled"] },
+			],
+		});
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model: mock.model, systemPrompt: ["Test"], tools: [], messages: [] },
+			convertToLlm,
+			streamFn: mock.stream,
+		});
+		const settings = Settings.isolated({ "compaction.enabled": false, "todo.enabled": false });
+		settings.setModelRole("default", `${mock.model.provider}/${mock.model.id}`);
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(tempDir.path()),
+			settings,
+			modelRegistry,
+			toolRegistry: new Map(),
+		});
+
+		const run = session.prompt("go");
+		await started.promise;
+
+		// Mid-stream steer with a `^` mention: the alias must ride the same
+		// hidden session-agent notice an idle prompt produces, so the model
+		// learns the m<N> pseudonym when the steer is delivered.
+		spyOn(modelRegistry, "getAvailable").mockReturnValue([mock.model]);
+		await session.prompt("delegate to ^openai/gpt-test", { streamingBehavior: "steer" });
+		expect(session.getSessionAgents().map(agentDef => agentDef.name)).toContain("m1");
+
+		release.resolve();
+		await run;
+		await session.waitForIdle();
+
+		const notice = agent.state.messages.find(
+			(message): message is CustomMessage =>
+				message.role === "custom" && message.customType === "session-agent-notice",
+		);
+		expect(notice).toBeDefined();
+		expect(notice && typeof notice.content === "string" ? notice.content : "").toContain("m1");
+	});
 });
