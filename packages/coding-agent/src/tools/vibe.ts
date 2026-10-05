@@ -2,9 +2,11 @@ import { type VibeToolDetails } from "@oh-my-pi/pi-tui/tools/vibe";
 /**
  * Vibe mode tools — the director's entire non-read surface.
  *
- * Five thin tools over {@link VibeSessionRegistry}: spawn/send/wait/kill/list
- * persistent worker sessions ("fast"/"good" CLIs). Spawns and sends return
- * immediately; turn results self-deliver through the async job manager.
+ * Five thin worker-control tools over {@link VibeSessionRegistry}: spawn/send/
+ * wait/kill/list persistent worker sessions ("fast"/"good" CLIs). Spawns and
+ * sends return immediately; turn results self-deliver through the async job
+ * manager. A sixth, `vibe_judge`, gives the director the session's judge role
+ * without `eval`, whose kernels would let it run code itself.
  *
  * The TUI renderers lean into the "you are driving little CLIs" fiction:
  * spawn/send draw a mini composer (a message typed into a tiny Claude-Code-like
@@ -17,6 +19,7 @@ import type { AgentTool, AgentToolResult, AgentToolUpdateCallback } from "@oh-my
 
 import { prompt } from "@oh-my-pi/pi-utils";
 
+import vibeJudgeDescription from "../prompts/tools/vibe-judge.md" with { type: "text" };
 import vibeKillDescription from "../prompts/tools/vibe-kill.md" with { type: "text" };
 import vibeListDescription from "../prompts/tools/vibe-list.md" with { type: "text" };
 import vibeSendDescription from "../prompts/tools/vibe-send.md" with { type: "text" };
@@ -24,10 +27,20 @@ import vibeSpawnDescription from "../prompts/tools/vibe-spawn.md" with { type: "
 import vibeWaitDescription from "../prompts/tools/vibe-wait.md" with { type: "text" };
 
 import { type VibeScreenSnapshot, type VibeWaitOutcome } from "@oh-my-pi/pi-tui/tools/vibe";
+import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import { evalRequestSlots } from "../eval/completion-bridge";
+import { parseQuestions, parseState, sessionJudge, toEvalJudgmentResult } from "../eval/judgment-bridge";
 import { VibeSessionRegistry } from "../vibe/runtime";
 import type { Tool, ToolSession } from "./index";
 
-export const VIBE_TOOL_NAMES = ["vibe_spawn", "vibe_send", "vibe_wait", "vibe_kill", "vibe_list"] as const;
+export const VIBE_TOOL_NAMES = [
+	"vibe_spawn",
+	"vibe_send",
+	"vibe_wait",
+	"vibe_kill",
+	"vibe_list",
+	"vibe_judge",
+] as const;
 
 const vibeSpawnSchema = type({
 	cli: type("'fast' | 'good'").describe(
@@ -52,6 +65,72 @@ const vibeKillSchema = type({
 });
 
 const vibeListSchema = type({});
+
+// Fixed-key shapes throughout: an id-keyed question map (eval `judge()`'s form)
+// is an open-ended JSON Schema record that strict mode cannot represent and
+// models misread, so questions and choice labels arrive as tagged lists.
+const judgeQuestionId = type("string > 0").describe("answer key");
+const judgeQuestionSchema = type({
+	id: judgeQuestionId,
+	type: "'choice'",
+	instructions: "string > 0",
+	criteria: type({ label: "string > 0", "rubric?": "string" })
+		.array()
+		.atLeastLength(2)
+		.describe("two or more labels to choose between"),
+})
+	.or({
+		id: judgeQuestionId,
+		type: "'bool'",
+		instructions: "string > 0",
+		"criteria?": { "true?": "string", "false?": "string" },
+	})
+	.or({
+		id: judgeQuestionId,
+		type: "'score'",
+		instructions: "string > 0",
+		criteria: type("string").array().atLeastLength(2).describe("two or more levels, lowest first"),
+	});
+
+const vibeJudgeSchema = type({
+	state: type("string > 0").describe("text to judge: a worker result, file excerpt, or diff"),
+	questions: judgeQuestionSchema
+		.array()
+		.atLeastLength(1)
+		.describe("one or more questions, each answered independently over the same state"),
+});
+
+/**
+ * Reserve `key` in `seen`, rejecting repeats and `__proto__`: the shared
+ * parser copies ids and labels into plain objects, where a repeat would
+ * silently overwrite and `__proto__` would set the prototype instead.
+ */
+function claimKey(seen: Set<string>, key: string, what: string): void {
+	if (key === "__proto__") throw new ToolError(`${what} "__proto__" is reserved`);
+	if (seen.has(key)) throw new ToolError(`duplicate ${what} "${key}"`);
+	seen.add(key);
+}
+
+/** Key list-shaped questions by id in eval `judge()` form for the shared parser. */
+function keyQuestions(list: typeof vibeJudgeSchema.infer.questions): Record<string, unknown> {
+	const keyed: Record<string, unknown> = {};
+	const ids = new Set<string>();
+	for (const { id, ...question } of list) {
+		claimKey(ids, id, "question id");
+		if (question.type !== "choice") {
+			keyed[id] = question;
+			continue;
+		}
+		const criteria: Record<string, string | null> = {};
+		const labels = new Set<string>();
+		for (const { label, rubric } of question.criteria) {
+			claimKey(labels, label, `choice label in question "${id}":`);
+			criteria[label] = rubric ?? null;
+		}
+		keyed[id] = { ...question, criteria };
+	}
+	return keyed;
+}
 
 /** Most recent killed ids named in `vibe_list`'s trailing line; older ones fold into `+N more`. */
 const KILLED_IDS_LISTED = 8;
@@ -271,6 +350,38 @@ export class VibeListTool implements AgentTool<typeof vibeListSchema, VibeToolDe
 	}
 }
 
+/** The judge role over director-supplied text; the same backend and question shapes as eval's `judge()`. */
+export class VibeJudgeTool implements AgentTool<typeof vibeJudgeSchema> {
+	readonly name = "vibe_judge";
+	readonly approval = "read" as const;
+	readonly label = "Vibe Judge";
+	readonly summary = "Ask the judge model typed questions about a text";
+	readonly description: string;
+	readonly parameters = vibeJudgeSchema;
+	readonly strict = true;
+	constructor(private readonly session: ToolSession) {
+		this.description = prompt.render(vibeJudgeDescription);
+	}
+
+	async execute(
+		_toolCallId: string,
+		params: typeof vibeJudgeSchema.infer,
+		signal?: AbortSignal,
+	): Promise<AgentToolResult> {
+		const state = parseState(params.state);
+		const questions = parseQuestions(keyQuestions(params.questions));
+		const judge = sessionJudge({ session: this.session }, "vibe_judge");
+		// Share eval's process-wide cap on in-flight judge/completion requests.
+		await evalRequestSlots.acquire(signal);
+		try {
+			const result = toEvalJudgmentResult(await judge.judge({ state, questions }, { signal }));
+			return { content: [{ type: "text", text: JSON.stringify(result) }] };
+		} finally {
+			evalRequestSlots.release();
+		}
+	}
+}
+
 /** Creates the ephemeral tools installed while `/vibe` mode is active. */
 export function createVibeTools(session: ToolSession): Tool[] {
 	return [
@@ -279,5 +390,6 @@ export function createVibeTools(session: ToolSession): Tool[] {
 		new VibeWaitTool(session),
 		new VibeKillTool(session),
 		new VibeListTool(session),
+		new VibeJudgeTool(session),
 	];
 }
