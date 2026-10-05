@@ -1,3 +1,5 @@
+mod popup;
+
 use std::{
 	collections::{HashSet, VecDeque},
 	ffi::c_void,
@@ -10,7 +12,8 @@ use std::{
 
 use objc2_application_services::{AXError, AXIsProcessTrusted, AXUIElement, AXValue, AXValueType};
 use objc2_core_foundation::{
-	CFArray, CFBoolean, CFRange, CFRetained, CFString, CFType, CGPoint, CGSize, Type,
+	CFArray, CFBoolean, CFDate, CFNumber, CFRange, CFRetained, CFString, CFTimeZone, CFType,
+	CGPoint, CGSize, Type,
 };
 
 use super::{
@@ -20,7 +23,7 @@ use super::{
 		error::{CoreResult, DesktopError},
 		types::DesktopWindow,
 	},
-	process, skylight,
+	date, process, skylight,
 };
 
 const AX_TIMEOUT_SECONDS: f32 = 2.0;
@@ -457,13 +460,7 @@ impl AxBackend for MacAx {
 				actions.join(", "),
 			)));
 		}
-		let action = CFString::from_str(&native);
-		let perform = || {
-			// SAFETY: The retained element and action CFString remain valid for the
-			// synchronous AX request.
-			let error = unsafe { element.perform_action(&action) };
-			ax_result(error, format!("AX action '{native}' failed"))
-		};
+		let perform = || perform_action(element, &native);
 		// AXRaise is an explicit request to change stacking, including the
 		// takeover preparation path. Other semantic actions must stay background.
 		if native == "AXRaise" {
@@ -475,6 +472,14 @@ impl AxBackend for MacAx {
 
 	fn set_value(&mut self, h: &AxHandle, value: &str) -> CoreResult<()> {
 		let element = mac_handle(h)?;
+		// A popup's value is chosen from its menu, not written. This runs before
+		// the text-target refusals: nothing is typed or written, and the verdict
+		// is the popup's own read-back after a real menu press.
+		if copy_string(element, "AXRole").as_deref() == Some("AXPopUpButton") {
+			return skylight::with_background_guard(element_pid(element)?, || {
+				popup::choose(element, value)
+			});
+		}
 		// Web AXValue can echo a write without the renderer accepting it. The
 		// API has no "unverified" outcome, so refuse before mutating that surface.
 		ensure_native_text_target(element)?;
@@ -482,6 +487,9 @@ impl AxBackend for MacAx {
 			return Err(DesktopError::ax_failed(
 				"AXValue is not settable; no typing fallback was attempted",
 			));
+		}
+		if let Some(current) = copy_date(element, "AXValue") {
+			return set_date_value(element, value, current);
 		}
 		skylight::with_background_guard(element_pid(element)?, || {
 			set_string_value(element, "AXValue", value)?;
@@ -635,6 +643,44 @@ fn verify_text_value(element: &AXUIElement, expected: &str) -> CoreResult<()> {
 	}
 }
 
+/// Date and time controls publish `AXValue` as a `CFDate` and refuse the same
+/// date written as a `CFString`, so an ISO-8601 value is written as a `CFDate`
+/// in the system time zone the control displays, then read back as one.
+fn set_date_value(element: &AXUIElement, text: &str, current: f64) -> CoreResult<()> {
+	// CF caches the system zone per process; the target app follows changes to it.
+	CFTimeZone::reset_system();
+	let zone = CFTimeZone::system()
+		.ok_or_else(|| DesktopError::ax_failed("the system time zone is unavailable"))?;
+	let offset_at = |at: f64| zone.seconds_from_gmt(at) as i64;
+	let Some(request) = date::parse(text) else {
+		return Err(DesktopError::ax_failed(format!(
+			"AXValue is a date and {text:?} is not ISO-8601: write {}; it reads {} now; nothing was \
+			 written",
+			date::ACCEPTED_FORMS,
+			date::format_local(current, offset_at),
+		)));
+	};
+	let target = request
+		.absolute_time(current, offset_at)
+		.map_err(|reason| DesktopError::ax_failed(format!("{reason}; nothing was written")))?;
+	let value = CFDate::new(None, target)
+		.ok_or_else(|| DesktopError::ax_failed("creating the CFDate to write failed"))?;
+	let attribute = CFString::from_str("AXValue");
+	skylight::with_background_guard(element_pid(element)?, || {
+		// SAFETY: The element, attribute and date remain retained for the setter.
+		let error = unsafe { element.set_attribute_value(&attribute, &value) };
+		ax_result(error, "setting AXValue to a date failed")?;
+		match copy_date(element, "AXValue") {
+			Some(actual) if (actual - target).abs() < 1e-3 => Ok(()),
+			actual => Err(DesktopError::ax_failed(format!(
+				"AX accepted the date write but the control reads {} instead of {}",
+				actual.map_or_else(|| "no date".to_owned(), |at| date::format_local(at, offset_at)),
+				date::format_local(target, offset_at),
+			))),
+		}
+	})
+}
+
 /// Inserts into a native field only when its focused element belongs to this
 /// exact window. `false` means no write was attempted; an attempted write never
 /// falls through to keystrokes, including timeouts or partial delivery.
@@ -712,6 +758,14 @@ fn replace_utf16_selection(
 	result.push_str(text);
 	result.push_str(&before[end_byte..]);
 	Some(result)
+}
+
+fn perform_action(element: &AXUIElement, action: &str) -> CoreResult<()> {
+	let name = CFString::from_str(action);
+	// SAFETY: The retained element and action CFString remain valid for the
+	// synchronous AX request.
+	let error = unsafe { element.perform_action(&name) };
+	ax_result(error, format!("AX action '{action}' failed"))
 }
 
 fn ensure_trusted() -> CoreResult<()> {
@@ -801,6 +855,14 @@ fn copy_attribute_result(
 
 fn copy_attribute(element: &AXUIElement, attribute: &str) -> Option<CFRetained<CFType>> {
 	copy_attribute_result(element, attribute).ok().flatten()
+}
+
+/// The attribute's value as a `CFAbsoluteTime`, when it is a `CFDate`.
+fn copy_date(element: &AXUIElement, attribute: &str) -> Option<f64> {
+	let value = copy_attribute(element, attribute)?
+		.downcast::<CFDate>()
+		.ok()?;
+	Some(value.absolute_time())
 }
 
 fn copy_string(element: &AXUIElement, attribute: &str) -> Option<String> {
@@ -969,6 +1031,13 @@ fn action_name(action: &str) -> String {
 	}
 }
 
+/// Renders an AX attribute value as stable, agent-readable text for
+/// [`AxProps::value`] and `attributes()`.
+///
+/// Numbers print as numbers (checkbox/radio state, slider position) and an
+/// element reference (a radio group's selected button) prints as that
+/// element's title or description, so snapshots never carry CF debug text
+/// whose pointer addresses change between otherwise identical reads.
 fn stringify_value(value: &CFType) -> String {
 	if let Some(string) = value.downcast_ref::<CFString>() {
 		return string.to_string();
@@ -976,7 +1045,28 @@ fn stringify_value(value: &CFType) -> String {
 	if let Some(boolean) = value.downcast_ref::<CFBoolean>() {
 		return boolean.as_bool().to_string();
 	}
+	if let Some(number) = value.downcast_ref::<CFNumber>() {
+		return stringify_number(number);
+	}
+	if let Some(element) = value.downcast_ref::<AXUIElement>() {
+		return nonempty(copy_string(element, "AXTitle"))
+			.or_else(|| nonempty(copy_string(element, "AXDescription")))
+			.unwrap_or_default();
+	}
 	format!("{value:?}")
+}
+
+/// Formats a `CFNumber` at its stored precision: `Float32` values read back
+/// as `f32` so `0.185` does not widen to `0.18500000238418579`.
+fn stringify_number(number: &CFNumber) -> String {
+	let text = if !number.is_float_type() {
+		number.as_i64().map(|value| value.to_string())
+	} else if number.byte_size() <= 4 {
+		number.as_f32().map(|value| value.to_string())
+	} else {
+		number.as_f64().map(|value| value.to_string())
+	};
+	text.unwrap_or_default()
 }
 
 fn nonempty(value: Option<String>) -> Option<String> {
@@ -1002,7 +1092,17 @@ fn ax_result(error: AXError, context: impl Into<String>) -> CoreResult<()> {
 
 #[cfg(test)]
 mod tests {
-	use super::{AttachedCandidate, replace_utf16_selection, select_attached};
+	use objc2_core_foundation::CFNumber;
+
+	use super::{AttachedCandidate, replace_utf16_selection, select_attached, stringify_value};
+
+	#[test]
+	fn numeric_values_render_as_numbers_at_stored_precision() {
+		assert_eq!(stringify_value(&CFNumber::new_i32(1)), "1");
+		assert_eq!(stringify_value(&CFNumber::new_i64(-3)), "-3");
+		assert_eq!(stringify_value(&CFNumber::new_f64(0.185)), "0.185");
+		assert_eq!(stringify_value(&CFNumber::new_f32(0.185)), "0.185");
+	}
 
 	#[test]
 	fn selected_text_replaces_utf16_selection_without_losing_surrounding_text() {

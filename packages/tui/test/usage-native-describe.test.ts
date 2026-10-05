@@ -4,7 +4,6 @@ import type { NativeChild, NativeNode } from "@oh-my-pi/pi-tui/native/node";
 import { SessionInfoOverlay } from "@oh-my-pi/pi-tui/overlays/session-info-overlay";
 import { UsageDashboardComponent } from "@oh-my-pi/pi-tui/overlays/usage-dashboard";
 import { createUsageRowBlock } from "@oh-my-pi/pi-tui/overlays/usage-row";
-import { JobsPanel } from "@oh-my-pi/pi-tui/overlays/jobs-panel";
 import { computeContextBreakdown, ContextUsageView } from "@oh-my-pi/pi-tui/status-line/context-usage";
 import { DEFAULT_COMPACTION_SETTINGS } from "@oh-my-pi/pi-agent-core/compaction";
 import { initTheme, theme } from "@oh-my-pi/pi-tui/theme";
@@ -154,7 +153,7 @@ describe("UsageDashboardComponent.describe", () => {
 });
 
 describe("SessionInfoOverlay.describe", () => {
-	it("turns the themed session report into headed key/value sections", () => {
+	it("turns the themed session report into a copyable file row and headed key/value sections", () => {
 		const info =
 			`${theme.fg("dim", "File:")} /tmp/s.jsonl\n` +
 			`\n${theme.bold("MCP Servers")}\n` +
@@ -162,8 +161,10 @@ describe("SessionInfoOverlay.describe", () => {
 		const overlay = new SessionInfoOverlay({ terminal: { rows: 20 } }, info, () => {});
 		const root = overlay.describe(cx);
 		const kvs = findAll(root, n => n.k === "kv").map(n => n.p);
+		const copies = findAll(root, n => n.p?.role === "omp.info.copy");
+		expect(copies.map(n => n.p?.title)).toEqual(["Copy file path"]);
+		expect(JSON.stringify(copies[0])).toContain("/tmp/s.jsonl");
 		expect(kvs).toEqual([
-			expect.objectContaining({ items: [{ k: "File", v: [{ t: "/tmp/s.jsonl" }] }] }),
 			expect.objectContaining({
 				items: [
 					{
@@ -226,35 +227,6 @@ describe("ContextUsageView.describe", () => {
 		const described = new ContextUsageView(breakdown, theme).describe(plainCx);
 		expect(findAll(described, n => n.k === "meter")).toEqual([]);
 		expect(findAll(described, n => n.p?.role === "omp.context.usage")).toHaveLength(1);
-	});
-});
-
-describe("JobsPanel.describe", () => {
-	const now = Date.now();
-	const snapshot = {
-		running: [
-			{
-				id: "j1",
-				type: "task",
-				status: "running" as const,
-				label: "Audit credits",
-				startTime: now - 5_000,
-				agentId: "Audit",
-			},
-			{ id: "j2", type: "bash", status: "running" as const, label: "cargo test", startTime: now - 9_000 },
-		],
-		recent: [],
-	};
-
-	it("draws task jobs as agents and other jobs as dot rows, and only rows without `agent`", () => {
-		const native = new JobsPanel(snapshot, now, []).describe(cx);
-		expect(findAll(native, n => n.k === "agent").map(n => n.p)).toEqual([
-			expect.objectContaining({ name: "Audit", status: "running", stats: { age: 5_000 } }),
-		]);
-		expect(findAll(native, n => n.p?.role === "omp.jobs.row").map(n => n.key)).toEqual(["j2"]);
-		const plain = new JobsPanel(snapshot, now, []).describe(plainCx);
-		expect(findAll(plain, n => n.k === "agent")).toEqual([]);
-		expect(findAll(plain, n => n.p?.role === "omp.jobs.row").map(n => n.key)).toEqual(["j1", "j2"]);
 	});
 });
 

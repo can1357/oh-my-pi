@@ -22,7 +22,7 @@ import {
 	USER_AGENT,
 } from "@oh-my-pi/pi-utils";
 import * as AIError from "../error";
-import { parseToolCallArguments } from "../utils/tool-call-arguments";
+import { parseToolCallArguments, replayableToolCallArguments } from "../utils/tool-call-arguments";
 import { getEnvApiKey, isOfficialCodexApiUrl } from "../stream";
 import type {
 	Api,
@@ -46,7 +46,9 @@ import type {
 	Usage,
 } from "../types";
 import {
+	clampOpenAIResponsesImageDetailForReplay,
 	createOpenAIResponsesHistoryPayload,
+	dropMalformedOpenAIResponsesToolCalls,
 	getOpenAIResponsesHistoryItems,
 	getOpenAIResponsesHistoryPayload,
 	normalizeSystemPrompts,
@@ -272,7 +274,14 @@ const CODEX_WEBSOCKET_FIRST_EVENT_TIMEOUT_MS = Number($env.PI_CODEX_WEBSOCKET_FI
 const CODEX_WEBSOCKET_RETRY_BUDGET = Number($env.PI_CODEX_WEBSOCKET_RETRY_BUDGET || CODEX_MAX_RETRIES);
 const CODEX_WEBSOCKET_RETRY_DELAY_MS = Number($env.PI_CODEX_WEBSOCKET_RETRY_DELAY_MS || CODEX_RETRY_DELAY_MS);
 const CODEX_WEBSOCKET_TRANSPORT_ERROR_PREFIX = "Codex websocket transport error";
-const CODEX_RETRYABLE_EVENT_CODES = new Set(["model_error", "server_error", "internal_error"]);
+// The native-lane steering rejection is replayable: the session stops steering
+// first, so the replay cannot trip it again.
+const CODEX_RETRYABLE_EVENT_CODES = new Set([
+	"model_error",
+	"server_error",
+	"internal_error",
+	AIError.CODEX_NATIVE_LANE_STEER_REJECTED_CODE,
+]);
 const CODEX_RETRYABLE_EVENT_MESSAGE =
 	/processing your request|retry your request|temporar(?:y|ily)|overloaded|service.?unavailable|internal error|server error/i;
 const CODEX_PROVIDER_SESSION_STATE_KEY = "openai-codex-responses";
@@ -436,6 +445,8 @@ type CodexWebSocketSessionState = {
 	 * pending tool output; see {@link planSteeredRequest}.
 	 */
 	acceptedSteering?: { connection: CodexWebSocketConnection; steers: CodexAcceptedSteer[] };
+	/** The server refused steering for this session (native turn lane); later responses are not steered. */
+	steeringUnsupported?: boolean;
 	lastTransport?: CodexTransport;
 	fallbackCount: number;
 	lastFallbackAt?: number;
@@ -2453,11 +2464,13 @@ class CodexStreamProcessor {
 	/** Start delivering caller steering into the response `response.created` announced. */
 	#startSteering(rawEvent: Record<string, unknown>): void {
 		const source = this.options?.liveSteering;
-		const connection = this.runtime.websocketState?.connection;
+		const state = this.runtime.websocketState;
+		const connection = state?.connection;
 		const responseId = asRecord(rawEvent.response)?.id;
 		if (
 			!source ||
 			!connection ||
+			state?.steeringUnsupported ||
 			this.#steerPump ||
 			typeof responseId !== "string" ||
 			this.runtime.transport !== "websocket" ||
@@ -2588,6 +2601,7 @@ class CodexStreamProcessor {
 				name: item.name,
 				arguments: parseToolCallArguments(item.arguments),
 			};
+			item.arguments = replayableToolCallArguments(item.arguments, toolCall.arguments);
 			if (block?.type === "toolCall") {
 				// Persist the authoritative final args on the stored block; the throttled
 				// delta parser may have left block.arguments stale (often `{}`).
@@ -2691,6 +2705,7 @@ class CodexStreamProcessor {
 				const nativeOutputItems = runtime.finalizeNativeOutputItems();
 				const replayableResponseItems = sanitizeOpenAIResponsesAssistantHistoryItemsForReplay(
 					structuredCloneJSON(nativeOutputItems),
+					{ supportsImageDetailOriginal: model.compat.supportsImageDetailOriginal },
 				);
 				if (responseId && replayableResponseItems && replayableResponseItems.length === nativeOutputItems.length) {
 					state.lastResponseId = responseId;
@@ -2721,7 +2736,28 @@ class CodexStreamProcessor {
 		);
 	}
 
+	/**
+	 * The native turn lane rejected our steering and dropped the response with
+	 * its socket: stop steering this session and forget the dead socket so the
+	 * provider retry replays on a fresh one.
+	 */
+	#stopSteeringOnNativeLaneRejection(error: unknown): void {
+		const state = this.runtime.websocketState;
+		if (
+			!state ||
+			!(error instanceof CodexProviderStreamError) ||
+			error.code !== AIError.CODEX_NATIVE_LANE_STEER_REJECTED_CODE
+		) {
+			return;
+		}
+		state.steeringUnsupported = true;
+		state.connection?.close("native-lane-steer-rejected");
+		state.connection = undefined;
+		resetCodexWebSocketAppendState(state);
+	}
+
 	async #recoverStreamError(error: unknown): Promise<boolean> {
+		this.#stopSteeringOnNativeLaneRejection(error);
 		if (
 			error instanceof CodexSteerCommitError &&
 			this.runtime.websocketState &&
@@ -4042,6 +4078,11 @@ class CodexWebSocketConnection {
 					this.#handleSteerEvent(parsed);
 					return;
 				}
+				// The native lane answers `response.steer` with a plain `error` that
+				// also ends the response: refuse the submission, then fail the stream.
+				if (parsed.type === "error" && parsed.code === AIError.CODEX_NATIVE_LANE_STEER_REJECTED_CODE) {
+					this.#refuseSteerWaiters(parsed.code, typeof parsed.message === "string" ? parsed.message : undefined);
+				}
 				this.#push(parsed);
 			} catch (error) {
 				notifyCodexWebSocketMalformed(this.#streamObserver, event.data, error);
@@ -4333,6 +4374,12 @@ class CodexWebSocketConnection {
 	#takeSteerWaiter(previousResponseId: string): CodexSteerWaiter | undefined {
 		const index = this.#steerWaiters.findIndex(waiter => waiter.previousResponseId === previousResponseId);
 		return index < 0 ? undefined : this.#steerWaiters.splice(index, 1)[0];
+	}
+
+	#refuseSteerWaiters(code: string, message: string | undefined): void {
+		const waiters = this.#steerWaiters;
+		this.#steerWaiters = [];
+		for (const waiter of waiters) waiter.resolve({ accepted: false, code, message });
 	}
 
 	#rejectSteerWaiters(reason: string): void {
@@ -4907,10 +4954,15 @@ function convertMessages(model: Model<"openai-codex-responses">, context: Contex
 				| undefined;
 			if (historyItems) {
 				const redactedHistoryItems = redactSensitiveInObject(historyItems).result as Array<ResponseInput[number]>;
+				const sanitizedHistoryItems = dropMalformedOpenAIResponsesToolCalls(redactedHistoryItems);
+				const clampedHistoryItems = clampOpenAIResponsesImageDetailForReplay(
+					sanitizedHistoryItems,
+					model.compat.supportsImageDetailOriginal,
+				);
 				const replayItems =
 					model.supportsComputerUse === true
-						? redactedHistoryItems
-						: unrollCodexComputerItems(redactedHistoryItems, model.compat.supportsImageDetailOriginal);
+						? clampedHistoryItems
+						: unrollCodexComputerItems(clampedHistoryItems, model.compat.supportsImageDetailOriginal);
 				for (const item of replayItems) {
 					if (item.type === "custom_tool_call") {
 						customCallIds.add(item.call_id);
@@ -4944,7 +4996,9 @@ function convertMessages(model: Model<"openai-codex-responses">, context: Contex
 			const historyItems = providerPayload?.items as Array<Record<string, unknown>> | undefined;
 			let suppressHiddenEmptyFallback = false;
 			if (historyItems) {
-				const sanitizedHistoryItems = sanitizeOpenAIResponsesAssistantHistoryItemsForReplay(historyItems);
+				const sanitizedHistoryItems = sanitizeOpenAIResponsesAssistantHistoryItemsForReplay(historyItems, {
+					supportsImageDetailOriginal: model.compat.supportsImageDetailOriginal,
+				});
 				if (sanitizedHistoryItems) {
 					const rawReplayItems =
 						model.supportsComputerUse === true

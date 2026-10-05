@@ -33,6 +33,10 @@ afterEach(async () => {
 	authStorage = undefined;
 });
 
+/** Assistant reply long enough (>= 40 words) to trigger a deferred retitle. */
+const TOKENIZER_REPLY =
+	"The screenshot shows a TypeError thrown by the tokenizer. It happens because the input stream is read after it was already closed, so the next token lookup dereferences an undefined buffer. Guarding the read and resetting the cursor when the stream closes should fix it without changing the public API.";
+
 describe("AgentSession title generation disposal", () => {
 	it("isolates the title provider session without changing credentials and aborts it during disposal", async () => {
 		const store = new SqliteAuthCredentialStore(new Database(":memory:"));
@@ -224,7 +228,7 @@ describe("AgentSession title generation disposal", () => {
 			getApiKey: () => "test-key",
 			initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] },
 			streamFn: createMockModel({
-				responses: [{ content: ["The screenshot shows a TypeError thrown by the tokenizer."] }],
+				responses: [{ content: [TOKENIZER_REPLY] }],
 			}).stream,
 		});
 		session = new AgentSession({
@@ -249,5 +253,44 @@ describe("AgentSession title generation disposal", () => {
 		expect(session.sessionName).toBe("Tokenizer TypeError");
 		expect(titleInputs).toHaveLength(2);
 		expect(titleInputs[1]).toContain("TypeError thrown by the tokenizer");
+	});
+
+	it("skips the title model for attachment-only requests and titles from the assistant reply", async () => {
+		authStorage = await AuthStorage.create(":memory:");
+		authStorage.keys.setRuntime("anthropic", "test-key");
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!model) throw new Error("Expected claude-sonnet-4-5 model to exist");
+
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			modelRoles: { tiny: `${model.provider}/${model.id}` },
+		});
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] },
+			streamFn: createMockModel({ responses: [{ content: [TOKENIZER_REPLY] }] }).stream,
+		});
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry: new ModelRegistry(authStorage),
+		});
+		const titleInputs: string[] = [];
+		vi.spyOn(ai, "completeSimple").mockImplementation(async (_model, context) => {
+			const content = context.messages[0]?.content;
+			titleInputs.push(typeof content === "string" ? content : "");
+			return createAssistantMessage("<title>Tokenizer TypeError</title>");
+		});
+		const named = Promise.withResolvers<void>();
+		session.sessionManager.onSessionNameChanged(() => named.resolve());
+
+		session.maybeStartTitleGeneration("fix [Image #1, 640x200]");
+		await session.prompt("fix [Image #1, 640x200]");
+		await named.promise;
+
+		expect(session.sessionName).toBe("Tokenizer TypeError");
+		expect(titleInputs).toHaveLength(1);
+		expect(titleInputs[0]).toContain("TypeError thrown by the tokenizer");
 	});
 });

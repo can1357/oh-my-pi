@@ -737,14 +737,74 @@ function isBatchScript(executable: string): boolean {
 	return lower.endsWith(".cmd") || lower.endsWith(".bat");
 }
 
+/** Split a `credential_process` command into argv the way botocore's
+ * `compat_shell_split` does: Windows command-line (CRT) rules on `win32`,
+ * POSIX shell rules everywhere else. */
+export function tokenizeCredentialProcessCommand(cmd: string, platform: NodeJS.Platform = process.platform): string[] {
+	return platform === "win32" ? tokenizeWindowsCommand(cmd) : tokenizePosixCommand(cmd);
+}
+
+/** Windows C-runtime argv rules (botocore `_windows_shell_split`): only space
+ * and tab delimit, only double quotes group, and backslashes are literal unless
+ * a run of them precedes a `"` — then each pair yields one backslash and an odd
+ * trailing backslash escapes the quote. Keeps `C:\path\tool.exe` intact. */
+function tokenizeWindowsCommand(cmd: string): string[] {
+	const tokens: string[] = [];
+	let current = "";
+	let hasToken = false;
+	let quoted = false;
+	let backslashes = 0;
+	for (const ch of cmd) {
+		if (ch === "\\") {
+			backslashes++;
+			continue;
+		}
+		if (ch === '"') {
+			current += "\\".repeat(backslashes >> 1);
+			hasToken = true;
+			const escaped = (backslashes & 1) === 1;
+			backslashes = 0;
+			if (escaped) current += '"';
+			else quoted = !quoted;
+			continue;
+		}
+		if (backslashes > 0) {
+			current += "\\".repeat(backslashes);
+			hasToken = true;
+			backslashes = 0;
+		}
+		if ((ch === " " || ch === "\t") && !quoted) {
+			if (hasToken) {
+				tokens.push(current);
+				current = "";
+				hasToken = false;
+			}
+			continue;
+		}
+		current += ch;
+		hasToken = true;
+	}
+	if (quoted) {
+		throw new AIError.AwsCredentialsError(
+			"AWS credential_process command has an unterminated quote.",
+			"credential-process",
+		);
+	}
+	if (backslashes > 0) {
+		current += "\\".repeat(backslashes);
+		hasToken = true;
+	}
+	if (hasToken) tokens.push(current);
+	return tokens;
+}
+
 /** POSIX-shell-style tokenizer used by the AWS CLI for `credential_process`.
  *
  * Outside quotes a backslash escapes the next character. Inside single quotes
  * everything is literal (no escapes, cannot contain `'`). Inside double quotes
  * a backslash only escapes `$`, `` ` ``, `"`, and `\` — every other backslash
- * is preserved verbatim, which is what makes Windows paths like
- * `"C:\Program Files\tool\auth.exe"` survive tokenization. */
-export function tokenizeCredentialProcessCommand(cmd: string): string[] {
+ * is preserved verbatim. */
+function tokenizePosixCommand(cmd: string): string[] {
 	const tokens: string[] = [];
 	let current = "";
 	let hasToken = false;

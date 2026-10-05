@@ -1,11 +1,13 @@
 import type { Api, Model, ModelSpec, RemoteCompactionConfig, ThinkingConfig } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { isVertexExpressOpenAIUrl } from "@oh-my-pi/pi-catalog/hosts";
+import { providerEntry } from "@oh-my-pi/pi-catalog/compat/providers";
 import { PROVIDER_DESCRIPTORS } from "@oh-my-pi/pi-catalog/provider-models";
 import { toModelSpec } from "@oh-my-pi/pi-catalog/provider-models/bundled-references";
 import { modelKind, type ModelKind } from "@oh-my-pi/pi-catalog/types";
 import { isRecord } from "@oh-my-pi/pi-utils";
 import { createConfigHeaderResolver } from "./resolve-config-value";
+import { SPECIAL_MODEL_MANAGER_PROVIDER_IDS } from "./model-provider-discovery";
 import type { ModelOverride } from "./models-config-schema";
 /** Provider override config (baseUrl, headers, apiKey, compat, transport). */
 export interface ProviderOverride {
@@ -132,9 +134,10 @@ export function mergeDiscoveredModel<TApi extends Api>(
 	return model;
 }
 
+/** Built-in providers whose KDL entry makes a successful runtime roster replace bundled chat models. */
 export const AUTHORITATIVE_RUNTIME_CATALOG_PROVIDERS = new Set<string>(
-	PROVIDER_DESCRIPTORS.filter(descriptor => descriptor.dynamicModelsAuthoritative).map(
-		descriptor => descriptor.providerId,
+	[...PROVIDER_DESCRIPTORS.map(descriptor => descriptor.providerId), ...SPECIAL_MODEL_MANAGER_PROVIDER_IDS].filter(
+		providerId => providerEntry(providerId)?.dynamicModelsAuthoritative === true,
 	),
 );
 
@@ -312,9 +315,9 @@ export function applyModelPatch(base: Model<Api>, patch: ModelPatch, transport: 
 		result.headers = patch.headers;
 		result.resolveHeaders = patch.resolveHeaders;
 		compat = patch.compat;
-		// A same-id definition replaces an earlier configured lifetime even when
-		// it omits one; the rebuild then falls back to catalog policy.
-		if (patch.promptCache === undefined && base.promptCacheConfig !== undefined) {
+		// A same-id definition that omits a lifetime must not carry the previous
+		// route's catalog policy; buildModel reapplies policy for the new route.
+		if (patch.promptCache === undefined) {
 			delete result.promptCache;
 			delete result.promptCacheConfig;
 		}

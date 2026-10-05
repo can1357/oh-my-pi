@@ -172,4 +172,17 @@ describe("native transcript redesign", () => {
 		expect(harness.find(node => node.k === "toast")?.p).toMatchObject({ text: "Thinking blocks: shown" });
 		expect(harness.find(node => node.k === "text" && node.p?.text === "Thinking blocks: hidden")).toBeUndefined();
 	});
+
+	it("keeps a toast: false notice off a native terminal until a later status reuses it", async () => {
+		const notice = new StatusNotice("MCP: 2 connected, 1 failed", { toast: false });
+		harness = await TspHarness.start();
+		harness.tui.addChild(notice);
+		await harness.render();
+		expect(harness.find(node => node.k === "toast")).toBeUndefined();
+		expect(harness.find(node => texts(node).includes("MCP"))).toBeUndefined();
+		notice.setMessage("Copied to clipboard");
+		harness.tui.requestRender();
+		await harness.render();
+		expect(harness.find(node => node.k === "toast")?.p).toMatchObject({ text: "Copied to clipboard" });
+	});
 });

@@ -125,7 +125,10 @@ describe("assertOwnerPrivateDir", () => {
 		return scratch;
 	};
 
-	it("accepts a real owner-private directory and normalizes loose perms in place", () => {
+	// POSIX mode bits and O_NOFOLLOW: Windows has neither (modes read back 0666).
+	const posixIt = it.skipIf(process.platform === "win32");
+
+	posixIt("accepts a real owner-private directory and normalizes loose perms in place", () => {
 		const dir = path.join(mkScratch(), "ctl");
 		fs.mkdirSync(dir, { mode: 0o755 });
 		fs.chmodSync(dir, 0o755);
@@ -133,7 +136,7 @@ describe("assertOwnerPrivateDir", () => {
 		expect(fs.statSync(dir).mode & 0o777).toBe(0o700);
 	});
 
-	it("refuses a symlinked final component without following it (TOCTOU swap guard)", () => {
+	posixIt("refuses a symlinked final component without following it (TOCTOU swap guard)", () => {
 		const root = mkScratch();
 		const victim = path.join(root, "victim");
 		fs.mkdirSync(victim, { mode: 0o700 });

@@ -3,6 +3,7 @@
 provider "openai-codex" {
 	default-model "gpt-5.5"
 	env "OPENAI_CODEX_OAUTH_TOKEN"
+	dynamic-models-authoritative #true
 	kind-apis {
 		image "openai-codex-responses"
 	}
