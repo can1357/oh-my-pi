@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
 import * as path from "node:path";
+import { mkdirSync } from "node:fs";
 import { AsyncJobManager } from "@oh-my-pi/pi-coding-agent/async";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import * as evalIndex from "@oh-my-pi/pi-coding-agent/eval";
@@ -103,6 +104,53 @@ describe("capture failure across background and cancellation boundaries", () => 
 		}
 	});
 
+	describe("background start notice identifies its command (issue #12607)", () => {
+		it("includes the command and cwd in the explicit-async start notice", async () => {
+			await using temp = await TempDir.create("@bash-bg-identity-");
+			const manager = new AsyncJobManager({});
+			try {
+				const session = sessionFor(temp.path(), manager);
+				const tool = new BashTool(session);
+				const subdir = path.join(temp.path(), "workdir-child");
+				mkdirSync(subdir, { recursive: true });
+				const result = await tool.execute("bg-identity-explicit", {
+					command: "echo identity-probe-12607",
+					async: true,
+					cwd: subdir,
+				});
+				const text = result.content.find(c => c.type === "text")?.text ?? "";
+				expect(result.details?.async?.state).toBe("running");
+				expect(text).toContain("Backgrounded as job");
+				expect(text).toContain("Command: echo identity-probe-12607");
+				expect(text).toContain("Working directory:");
+				expect(text).toContain("workdir-child");
+				const jobId = result.details?.async?.jobId;
+				if (!jobId) throw new Error("Expected background job");
+				manager.cancel(jobId);
+			} finally {
+				await manager.dispose();
+			}
+		});
+
+		it("omits the working-directory line when the command runs in the session cwd", async () => {
+			await using temp = await TempDir.create("@bash-bg-identity-same-cwd-");
+			const manager = new AsyncJobManager({});
+			try {
+				const session = sessionFor(temp.path(), manager);
+				const tool = new BashTool(session);
+				const result = await tool.execute("bg-identity-same-cwd", { command: "echo ok", async: true });
+				const text = result.content.find(c => c.type === "text")?.text ?? "";
+				expect(text).toContain("Backgrounded as job");
+				expect(text).toContain("Command: echo ok");
+				expect(text).not.toContain("Working directory:");
+				const jobId = result.details?.async?.jobId;
+				if (!jobId) throw new Error("Expected background job");
+				manager.cancel(jobId);
+			} finally {
+				await manager.dispose();
+			}
+		});
+	});
 	it("delivers an eval background capture failure without failing the completed cell", async () => {
 		await using temp = await TempDir.create("@capture-background-eval-");
 		const deliveries: string[] = [];

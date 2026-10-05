@@ -171,7 +171,12 @@ describe("bashToolRenderer", () => {
 		] as const) {
 			const component = bashToolRenderer.renderResult(
 				{
-					content: [{ type: "text", text: `started\n\n${notice}` }],
+					content: [
+						{
+							type: "text",
+							text: `started\n\n${notice}\nCommand: printf REPRO_RIGHT\nWorking directory: workdir-child`,
+						},
+					],
 					details: {
 						timeoutSeconds: 300,
 						async: { state: "running", jobId: "bash-42", type: "bash" },
@@ -189,6 +194,9 @@ describe("bashToolRenderer", () => {
 			expect(rendered, label).not.toContain("injected into the conversation");
 			expect(rendered, label).not.toContain("Do NOT poll");
 			expect(rendered, label).not.toContain("deadline");
+			// The command identity lines trailed on by the start notice must be stripped too.
+			expect(rendered, label).not.toContain("printf REPRO_RIGHT");
+			expect(rendered, label).not.toContain("workdir-child");
 		}
 	});
 
