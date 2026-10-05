@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `ModelHubOptions.quickPick`: Enter on a model assigns it to the `default` role without the role strip, and the hub closes once the thinking choice is confirmed or kept ([#14479](https://github.com/can1357/oh-my-pi/pull/14479) by [@lockwo](https://github.com/lockwo)).
+
 ### Fixed
 
 - Hidden thinking blocks no longer leave a faint "Thought for Ns" row in Tern's native transcript; only the live "Thinking…" indicator shows while the model reasons.

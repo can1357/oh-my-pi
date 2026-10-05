@@ -757,6 +757,51 @@ describe("ModelHub", () => {
 				hub.handleInput(ESC);
 				expect(onCancel).not.toHaveBeenCalled();
 			});
+			test("project storage: the scope chip keeps the one-pick flow and the hub closes after thinking", () => {
+				const settings = Settings.isolated({ modelRoleStorage: "project" });
+				const { hub, onAssign, onCancel } = createHub({
+					models: [reasoner()],
+					scoped: true,
+					settings,
+					hub: { quickPick: true },
+				});
+
+				hub.handleInput("\n"); // sidebar → model list
+				hub.handleInput("\n"); // pick the model: scope strip, nothing assigned yet
+				expect(onAssign).not.toHaveBeenCalled();
+				const scopes = footerLine(hub.render(220));
+				expect(scopes).toContain("project");
+				expect(scopes).toContain("global");
+
+				hub.handleInput("\n"); // project scope
+				expect(onAssign).toHaveBeenCalledTimes(1);
+				expect(onAssign.mock.calls[0]?.[1]).toBe("default");
+				expect(onAssign.mock.calls[0]?.[4]).toBe("project");
+				expect(footerLine(hub.render(220))).toContain("xhigh");
+				expect(onCancel).not.toHaveBeenCalled();
+
+				hub.handleInput("\n"); // keep the preselected level
+				expect(onCancel).toHaveBeenCalledTimes(1);
+			});
+			test("project storage: Esc on the scope strip backs out to the list without assigning or closing", () => {
+				const settings = Settings.isolated({ modelRoleStorage: "project" });
+				const { hub, onAssign, onCancel } = createHub({
+					models: [reasoner()],
+					scoped: true,
+					settings,
+					hub: { quickPick: true },
+				});
+
+				hub.handleInput("\n");
+				hub.handleInput("\n");
+				hub.handleInput(ESC);
+				expect(onAssign).not.toHaveBeenCalled();
+				expect(onCancel).not.toHaveBeenCalled();
+				expect(footerLine(hub.render(220))).not.toContain("global");
+
+				hub.handleInput("\n"); // the list is still live: picking again reopens the scope strip
+				expect(footerLine(hub.render(220))).toContain("global");
+			});
 		});
 		test("a model with no reasoning surface is assigned without a thinking strip", () => {
 			// inherit/off/auto are all no-ops for an STT/TTS/image model, so the
