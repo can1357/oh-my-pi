@@ -58,6 +58,7 @@ function createContext(): {
 	editor: FakeEditor;
 	spies: {
 		abort: Spy;
+		viewAbort: Spy;
 		abortBash: Spy;
 		abortEval: Spy;
 		abortHandoff: Spy;
@@ -87,6 +88,7 @@ function createContext(): {
 } {
 	let editorText = "";
 	const abort = vi.fn();
+	const viewAbort = vi.fn();
 	const abortBash = vi.fn();
 	const abortEval = vi.fn();
 	const abortHandoff = vi.fn();
@@ -178,9 +180,11 @@ function createContext(): {
 			}),
 		} as unknown as InteractiveModeContext["session"],
 		viewSession: {
+			isStreaming: false,
 			isCompacting: false,
 			isGeneratingHandoff: false,
 			isRetrying: false,
+			abort: viewAbort,
 			abortCompaction: vi.fn(),
 			abortHandoff,
 			abortRetry: vi.fn(),
@@ -238,6 +242,7 @@ function createContext(): {
 		editor,
 		spies: {
 			abort,
+			viewAbort,
 			abortBash,
 			abortEval,
 			abortHandoff,
@@ -268,9 +273,11 @@ function createContext(): {
 }
 
 type AbortViewSession = {
+	isStreaming: boolean;
 	isCompacting: boolean;
 	isGeneratingHandoff: boolean;
 	isRetrying: boolean;
+	abort: Spy;
 	abortCompaction: Spy;
 	abortHandoff: Spy;
 	abortRetry: Spy;
@@ -600,7 +607,23 @@ describe("InputController escape behavior", () => {
 		expect(spies.showStatus).not.toHaveBeenCalledWith("Press Esc again within 2s to cancel streaming.");
 	});
 
-	it("returns focused subagent view to main on Esc instead of aborting", () => {
+	it("interrupts the focused subagent's turn on Esc instead of returning to main", () => {
+		const { ctx, editor, spies } = createContext();
+		Object.defineProperty(ctx, "focusedAgentId", { value: "Worker", configurable: true });
+		abortViewSession(ctx).isStreaming = true;
+		const controller = new InputController(ctx);
+
+		controller.setupKeyHandlers();
+		editor.onEscape?.();
+
+		expect(spies.viewAbort).toHaveBeenCalledTimes(1);
+		expect(spies.viewAbort).toHaveBeenCalledWith({ reason: USER_INTERRUPT_LABEL });
+		expect(ctx.unfocusSession).not.toHaveBeenCalled();
+		// The main session, streaming or not, is untouched by a focused interrupt.
+		expect(spies.abort).not.toHaveBeenCalled();
+	});
+
+	it("returns an idle focused subagent view to main on Esc", () => {
 		const { ctx, editor, spies } = createContext();
 		Object.defineProperty(ctx, "focusedAgentId", { value: "Worker", configurable: true });
 		const controller = new InputController(ctx);
@@ -609,27 +632,31 @@ describe("InputController escape behavior", () => {
 		editor.onEscape?.();
 
 		expect(ctx.unfocusSession).toHaveBeenCalledTimes(1);
+		expect(spies.viewAbort).not.toHaveBeenCalled();
 		expect(spies.abort).not.toHaveBeenCalled();
 	});
 
 	it("returns focused subagent view to main on Esc without aborting its active maintenance (#2819)", () => {
 		const { ctx, editor, spies } = createContext();
 		Object.defineProperty(ctx, "focusedAgentId", { value: "Worker", configurable: true });
-		(ctx.viewSession as { isCompacting: boolean }).isCompacting = true;
-		(ctx.viewSession as { isGeneratingHandoff: boolean }).isGeneratingHandoff = true;
-		(ctx.viewSession as { isRetrying: boolean }).isRetrying = true;
-		(ctx.viewSession as unknown as { abortCompaction: Spy }).abortCompaction = vi.fn();
-		(ctx.viewSession as unknown as { abortHandoff: Spy }).abortHandoff = spies.abortHandoff;
-		(ctx.viewSession as unknown as { abortRetry: Spy }).abortRetry = vi.fn();
+		const viewSession = abortViewSession(ctx);
+		viewSession.isStreaming = true;
+		viewSession.isCompacting = true;
+		viewSession.isGeneratingHandoff = true;
+		viewSession.isRetrying = true;
+		viewSession.abortCompaction = vi.fn();
+		viewSession.abortHandoff = spies.abortHandoff;
+		viewSession.abortRetry = vi.fn();
 		const controller = new InputController(ctx);
 
 		controller.setupKeyHandlers();
 		editor.onEscape?.();
 
 		expect(ctx.unfocusSession).toHaveBeenCalledTimes(1);
-		expect(ctx.viewSession.abortCompaction as unknown as Spy).not.toHaveBeenCalled();
+		expect(spies.viewAbort).not.toHaveBeenCalled();
+		expect(viewSession.abortCompaction).not.toHaveBeenCalled();
 		expect(spies.abortHandoff).not.toHaveBeenCalled();
-		expect(ctx.viewSession.abortRetry as unknown as Spy).not.toHaveBeenCalled();
+		expect(viewSession.abortRetry).not.toHaveBeenCalled();
 	});
 
 	it("aborts main-view maintenance on Esc normally", () => {

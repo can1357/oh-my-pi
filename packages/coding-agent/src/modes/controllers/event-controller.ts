@@ -2326,10 +2326,10 @@ export class EventController {
 
 	/**
 	 * Trailing Esc hint for live maintenance loaders. While a subagent is
-	 * focused, Esc returns to main instead of cancelling its maintenance
-	 * (#2819), so the loader drops the hint entirely rather than advertise a
-	 * cancel that no longer happens. Includes the leading space so the focused
-	 * label carries no dangling whitespace.
+	 * focused, Esc never cancels its maintenance (#2819), so the loader drops
+	 * the hint entirely rather than advertise a cancel that does not happen.
+	 * Includes the leading space so the focused label carries no dangling
+	 * whitespace.
 	 */
 	#maintenanceEscHint(): string {
 		return this.ctx.focusedAgentId ? "" : ` (${appKey(this.ctx.keybindings, "app.interrupt")} to cancel)`;

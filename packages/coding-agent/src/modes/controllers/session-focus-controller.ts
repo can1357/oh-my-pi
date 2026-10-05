@@ -106,7 +106,7 @@ export class SessionFocusController {
 		if (request !== this.#focusRequestSeq) return;
 		if (attached && this.#focusedAgentId === id && this.#attachedSession === session) {
 			this.ctx.showStatus(
-				`Viewing agent ${id} — ${appKey(this.ctx.keybindings, "app.interrupt")} returns to main, ${formatDoubleTap("left")} hops to parent`,
+				`Viewing agent ${id} — ${appKey(this.ctx.keybindings, "app.interrupt")} interrupts its turn, ${formatDoubleTap("left")} returns to main`,
 			);
 		}
 	}
