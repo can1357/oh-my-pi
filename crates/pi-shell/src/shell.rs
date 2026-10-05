@@ -294,14 +294,20 @@ impl Shell {
 		if jobs.poll().is_err() {
 			return 0;
 		}
-		u32::try_from(
+		let tracked = jobs
+			.jobs
+			.iter()
+			.filter(|job| job.representative_pid().is_some())
+			.count();
+		// A child a subshell left running is in no job table, but the session
+		// still owns it — and dropping the shell would SIGKILL it.
+		let orphaned = core.shell.orphaned_jobs().with_running_jobs(|jobs| {
 			jobs
-				.jobs
 				.iter()
 				.filter(|job| job.representative_pid().is_some())
-				.count(),
-		)
-		.unwrap_or(u32::MAX)
+				.count()
+		});
+		u32::try_from(tracked + orphaned).unwrap_or(u32::MAX)
 	}
 }
 
@@ -1728,19 +1734,35 @@ fn terminate_internal_background_jobs(shell: &mut BrushShell) {
 	for job in &mut shell.jobs_mut().jobs {
 		job.abort_internal_tasks();
 	}
+	// The session owns what its subshells left running too, and that is the
+	// only handle on it: an orphaned job is in no job table.
+	shell.orphaned_jobs().with_running_jobs(|jobs| {
+		for job in jobs {
+			job.abort_internal_tasks();
+		}
+	});
 }
 
 fn terminate_background_jobs(shell: &mut BrushShell) {
 	let mut targets = process::TerminationTargets::new();
 	terminate_internal_background_jobs(shell);
-	for job in &shell.jobs().jobs {
+	let mut collect = |job: &brush_core::jobs::Job| {
 		if let Some(pgid) = job.process_group_id() {
 			targets.add_pgid(pgid);
 		}
 		if let Some(pid) = job.representative_pid() {
 			targets.add_pid(pid);
 		}
+	};
+	for job in &shell.jobs().jobs {
+		collect(job);
 	}
+	shell.orphaned_jobs().with_running_jobs(|jobs| {
+		for job in jobs.iter() {
+			collect(job);
+		}
+	});
+	drop(collect);
 	if targets.is_empty() {
 		// Shell-internal jobs were aborted above. Pure descendant cleanup is
 		// handled by `process_cancel_bridge` while the cancel was in flight;
@@ -6105,6 +6127,252 @@ replace = [{ pattern = "hello", replacement = "HI" }]
 			!marker.path().exists(),
 			"an internal background job outlived its one-shot shell session"
 		);
+	}
+
+	/// Same contract as the test above, one level of parentheses deeper: a
+	/// background job started *inside a subshell* must not outlive the session
+	/// that ran it. `( cmd & )` records the job in the subshell's own job
+	/// table, which is thrown away when the subshell exits, so before the
+	/// orphan hand-off the task ran on a host thread until the process exited
+	/// — invisible to `jobs`, to `ps`, and to session teardown.
+	#[tokio::test(flavor = "multi_thread")]
+	async fn one_shot_completion_aborts_background_jobs_started_inside_a_subshell() {
+		let marker = tempfile::NamedTempFile::new().expect("marker file");
+		let marker_path = marker.path().to_string_lossy();
+		std::fs::remove_file(marker.path()).expect("remove initial marker");
+		let command = format!("( {{ sleep 1; echo leaked > {}; }} & )", quote_arg(&marker_path));
+
+		execute_shell(
+			ShellExecuteOptions { command, ..Default::default() },
+			None,
+			CancelToken::default(),
+		)
+		.await
+		.expect("one-shot shell execution");
+		time::sleep(Duration::from_millis(2000)).await;
+
+		assert!(
+			!marker.path().exists(),
+			"a background job started inside a subshell outlived its one-shot shell session"
+		);
+	}
+
+	/// A builtin loop backgrounded inside a subshell stops running when the
+	/// session that started it is torn down. This is the shape that left 40
+	/// spinning threads at ~1450% CPU in one omp process for ~10 h: the job
+	/// lives only in the subshell's job table, which is dropped when the
+	/// subshell exits, so nothing owned the task and session teardown never
+	/// reached it.
+	///
+	/// The oracle is a file the loop appends to, sampled twice after teardown:
+	/// a task that is still running grows it, an aborted one cannot. CPU time
+	/// is the harm this was reported for, but it is a bad oracle on a shared
+	/// host, where a spinning thread's share of a core depends on everything
+	/// else running. The loop sleeps between writes so the file stays small
+	/// whatever the scheduler does. The pre-teardown growth doubles as the
+	/// precondition: a job that never ran could not prove anything about
+	/// teardown.
+	#[tokio::test(flavor = "multi_thread")]
+	async fn subshell_background_builtin_stops_running_at_session_teardown() {
+		let _guard = shell_test_lock().lock().await;
+		let growth = tempfile::NamedTempFile::new().expect("growth file");
+		let path = growth.path().to_path_buf();
+		let size = || {
+			std::fs::metadata(&path)
+				.map(|m| m.len())
+				.unwrap_or_default()
+		};
+		let shell = Shell::new(None);
+		shell
+			.run(
+				ShellRunOptions {
+					command: format!(
+						"( while :; do echo x >> {}; sleep 0.02; done & )",
+						quote_arg(&path.to_string_lossy())
+					),
+					..Default::default()
+				},
+				None,
+				CancelToken::default(),
+			)
+			.await
+			.expect("run a backgrounded builtin loop in a subshell");
+
+		let started = size();
+		time::sleep(Duration::from_millis(500)).await;
+		assert!(
+			size() > started,
+			"precondition: the backgrounded loop should be running while its session lives"
+		);
+
+		drop(shell);
+		// Teardown aborts the task synchronously, but the runtime still needs a
+		// moment to unwind the aborted frame and stop its blocking worker.
+		time::sleep(Duration::from_millis(250)).await;
+
+		let settled = size();
+		time::sleep(Duration::from_millis(500)).await;
+		assert_eq!(
+			size(),
+			settled,
+			"a builtin backgrounded inside a subshell kept running after its session was torn down"
+		);
+	}
+
+	#[cfg(unix)]
+	fn pid_is_running(pid: i32) -> bool {
+		process::Process::from_pid(pid)
+			.is_some_and(|proc| matches!(proc.status(), process::ProcessStatus::Running))
+	}
+
+	/// bash semantics plus session ownership for an external `( sleep N & )`:
+	/// the child survives the subshell it was started in (bash reparents it
+	/// rather than killing it), the session that started it still owns it —
+	/// `live_background_job_count` sees it, so the host keeps the shell
+	/// instead of dropping it mid-job — and tearing the session down kills it.
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn external_background_job_in_a_subshell_outlives_it_and_dies_with_the_session() {
+		let _guard = shell_test_lock().lock().await;
+		let sleep = test_executable("sleep");
+		let shell = Shell::new(None);
+		let (tx, rx) = flume::unbounded::<String>();
+		shell
+			.run(
+				ShellRunOptions {
+					command: format!("( {} 30 & echo $! )", quote_arg(&sleep.to_string_lossy())),
+					..Default::default()
+				},
+				Some(tx),
+				CancelToken::default(),
+			)
+			.await
+			.expect("run backgrounded sleep in a subshell");
+		let mut output = String::new();
+		while let Ok(chunk) = rx.recv_async().await {
+			output.push_str(&chunk);
+		}
+		let pid: i32 = output
+			.trim()
+			.parse()
+			.unwrap_or_else(|err| panic!("subshell should report $! ({output:?}): {err}"));
+
+		assert!(
+			pid_is_running(pid),
+			"the subshell's background child was reaped when the subshell exited"
+		);
+		assert_eq!(
+			shell.live_background_job_count().await,
+			1,
+			"the session that started the job should still count it as live"
+		);
+
+		drop(shell);
+		let died = time::timeout(Duration::from_secs(5), async {
+			while pid_is_running(pid) {
+				time::sleep(Duration::from_millis(25)).await;
+			}
+		})
+		.await;
+		assert!(died.is_ok(), "session teardown left the subshell's background child running");
+	}
+
+	/// Owning a subshell's background child for teardown must not make it a
+	/// job of the shell that ran the subshell. Bash lists nothing and waits
+	/// for nothing here — `bash -c '( sleep 3 & ); jobs; wait; echo done'`
+	/// prints `done` immediately — and a tool call that backgrounds a server
+	/// in a subshell and later calls `wait` would otherwise block until the
+	/// server exits.
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn a_subshells_background_child_is_not_a_job_of_the_parent() {
+		let _guard = shell_test_lock().lock().await;
+		let sleep = test_executable("sleep");
+		let shell = Shell::new(None);
+		let (tx, rx) = flume::unbounded::<String>();
+		let started = time::Instant::now();
+		shell
+			.run(
+				ShellRunOptions {
+					command: format!(
+						"( {} 30 & ); jobs; wait; echo done",
+						quote_arg(&sleep.to_string_lossy())
+					),
+					..Default::default()
+				},
+				Some(tx),
+				CancelToken::default(),
+			)
+			.await
+			.expect("run a subshell background job, then jobs and wait");
+		let elapsed = started.elapsed();
+		let mut output = String::new();
+		while let Ok(chunk) = rx.recv_async().await {
+			output.push_str(&chunk);
+		}
+
+		assert_eq!(output.trim(), "done", "`jobs` listed a child bash would not show");
+		assert!(
+			elapsed < Duration::from_secs(10),
+			"`wait` blocked on a subshell's background child ({elapsed:?})"
+		);
+		shell.abort().await;
+	}
+
+	/// `( cmd & ) &`: the subshell's parent is itself a throwaway copy — the
+	/// shell the outer `&` runs in, dropped as soon as that task ends. Handing
+	/// the job up one level hands it to that copy, which then kills the child
+	/// when it is dropped; bash keeps it running. The orphan store is the
+	/// session's, so the job reaches a shell that is still alive however deep
+	/// the nesting, and the session's count sees it.
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn a_background_child_nested_in_a_background_subshell_outlives_both_copies() {
+		let _guard = shell_test_lock().lock().await;
+		let sleep = test_executable("sleep");
+		let pidfile = tempfile::NamedTempFile::new().expect("pid file");
+		let shell = Shell::new(None);
+		shell
+			.run(
+				ShellRunOptions {
+					command: format!(
+						"( {} 30 & echo $! > {} ) & wait",
+						quote_arg(&sleep.to_string_lossy()),
+						quote_arg(&pidfile.path().to_string_lossy())
+					),
+					..Default::default()
+				},
+				None,
+				CancelToken::default(),
+			)
+			.await
+			.expect("run a background child nested in a background subshell");
+
+		// `wait` returned, so the outer task is done and the copy it ran in
+		// has been dropped.
+		let pid: i32 = std::fs::read_to_string(pidfile.path())
+			.expect("read the pid the subshell reported")
+			.trim()
+			.parse()
+			.expect("the subshell should report a pid");
+		assert!(
+			pid_is_running(pid),
+			"the nested background child died with the copy that outer `&` ran in"
+		);
+		assert_eq!(
+			shell.live_background_job_count().await,
+			1,
+			"the session should still count the nested child as live"
+		);
+
+		drop(shell);
+		let died = time::timeout(Duration::from_secs(5), async {
+			while pid_is_running(pid) {
+				time::sleep(Duration::from_millis(25)).await;
+			}
+		})
+		.await;
+		assert!(died.is_ok(), "session teardown left the nested background child running");
 	}
 
 	/// `live_background_job_count` reports 0 when the session has no live

@@ -589,13 +589,17 @@ fn spawn_async_ao_list_in_task<SE: extensions::ShellExtensions>(
 	cloned_shell.options_mut().interactive = false;
 
 	let join_handle = tokio::spawn(async move {
-		cloned_ao_list
+		let result = cloned_ao_list
 			.execute(&mut cloned_shell, &cloned_params)
-			.await
+			.await;
+		// This copy dies with the task, and `{ cmd & } &` leaves its inner
+		// job running in bash, so hand that job to the session first.
+		cloned_shell.orphan_running_jobs();
+		result
 	});
 
 	jobs::Job::new(
-		[jobs::JobTask::Internal(join_handle)],
+		[jobs::JobTask::Internal(tokio_util::task::AbortOnDropHandle::new(join_handle))],
 		ao_list.to_string(),
 		jobs::JobState::Running,
 	)
@@ -1065,6 +1069,11 @@ impl Execute for ast::CompoundCommand {
 						error.into_result(&subshell)
 					},
 				};
+				// The subshell's job table dies with it, so anything still
+				// running there has to change hands first. It goes to the
+				// session, not to this shell: a job bash would reparent is
+				// not one this shell's `jobs` or `wait` may see.
+				subshell.orphan_running_jobs();
 
 				// Preserve the subshell's exit code, but don't honor any of its requests to
 				// exit the shell, break out of loops, etc.
@@ -1149,7 +1158,7 @@ impl Execute for ast::CoprocessCommand {
 		});
 
 		let job = shell.jobs_mut().add_as_current(jobs::Job::new(
-			[jobs::JobTask::Internal(join_handle)],
+			[jobs::JobTask::Internal(tokio_util::task::AbortOnDropHandle::new(join_handle))],
 			format!("coproc {name}"),
 			jobs::JobState::Running,
 		));

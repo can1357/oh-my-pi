@@ -94,6 +94,11 @@ pub struct Shell<SE: extensions::ShellExtensions = extensions::DefaultShellExten
 	#[cfg_attr(feature = "serde", serde(skip))]
 	jobs: jobs::JobManager,
 
+	/// The session's jobs that no job table owns any more: what copies of
+	/// this shell left running when they ended. See [`jobs::OrphanedJobs`].
+	#[cfg_attr(feature = "serde", serde(skip))]
+	orphaned_jobs: jobs::OrphanedJobs,
+
 	/// Shell aliases.
 	aliases: HashMap<String, String>,
 
@@ -179,6 +184,7 @@ impl<SE: extensions::ShellExtensions> Clone for Shell<SE> {
 			funcs: self.funcs.clone(),
 			options: self.options.clone(),
 			jobs: jobs::JobManager::new(),
+			orphaned_jobs: self.orphaned_jobs.clone(),
 			aliases: self.aliases.clone(),
 			last_exit_status: self.last_exit_status,
 			last_exit_status_change_count: self.last_exit_status_change_count,
@@ -635,10 +641,36 @@ impl<SE: extensions::ShellExtensions> Shell<SE> {
 	pub(crate) fn settle_lease(&mut self, mut lease: Self) {
 		let started = std::mem::take(&mut lease.jobs);
 		lease.jobs = std::mem::take(&mut self.jobs);
+		// Keep the session's own handle to the orphan store on the shell that
+		// survives: the value `*self` replaces is dropped, and the owning
+		// handle's drop ends every orphaned job.
+		std::mem::swap(&mut lease.orphaned_jobs, &mut self.orphaned_jobs);
 		*self = lease;
 		for job in started.jobs {
 			self.jobs.add_as_current(job);
 		}
+	}
+
+	/// The session's orphaned jobs — the jobs copies of this shell left
+	/// running when they ended. They are not job control: `jobs`, `wait` and
+	/// `$!` never see them, exactly as a reparented `( cmd & )` child is
+	/// invisible to its original shell in bash. The session owns them for
+	/// teardown, and nothing else.
+	pub fn orphaned_jobs(&self) -> &jobs::OrphanedJobs {
+		&self.orphaned_jobs
+	}
+
+	/// Hands this shell's still-running jobs to the session's orphan store,
+	/// for a copy of the shell that is about to end.
+	///
+	/// Without this the job would die with the copy — an external child
+	/// killed, an internal task aborted — where bash leaves `( cmd & )`
+	/// running. The store is the session's rather than the immediate
+	/// parent's, because that parent may itself be a copy about to be
+	/// dropped: in `( cmd & ) &` the subshell's parent is the throwaway shell
+	/// the outer `&` runs in.
+	pub(crate) fn orphan_running_jobs(&mut self) {
+		self.orphaned_jobs.adopt(&mut self.jobs);
 	}
 }
 

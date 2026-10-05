@@ -1,6 +1,11 @@
 //! Job management
 
-use std::{collections::VecDeque, fmt::Display, time::Duration};
+use std::{
+	collections::VecDeque,
+	fmt::Display,
+	sync::{Arc, Mutex, MutexGuard, PoisonError},
+	time::Duration,
+};
 
 #[cfg(windows)]
 use std::os::windows::io::OwnedHandle;
@@ -9,7 +14,16 @@ use futures::FutureExt;
 
 use crate::{ExecutionResult, error, processes, sys, trace_categories, traps};
 
-pub(crate) type JobJoinHandle = tokio::task::JoinHandle<Result<ExecutionResult, error::Error>>;
+/// An internal job's task handle. Aborting on drop is what keeps a dropped
+/// job table from leaving a shell-internal task running: a bare
+/// [`tokio::task::JoinHandle`] detaches its task when dropped, so the task
+/// runs on with nothing owning it, invisible to `jobs` and to session
+/// teardown, until the host process exits. Every path that hands a job on
+/// rather than ending it (a subshell's [`crate::Shell::orphan_running_jobs`],
+/// a builtin lease's `settle_lease`) moves the handle instead of dropping it,
+/// so this only fires where a job really is being abandoned.
+pub(crate) type JobJoinHandle =
+	tokio_util::task::AbortOnDropHandle<Result<ExecutionResult, error::Error>>;
 pub(crate) type JobResult = (Job, Result<ExecutionResult, error::Error>);
 
 const WAIT_NEXT_POLL_INTERVAL: Duration = Duration::from_millis(10);
@@ -46,6 +60,93 @@ impl WaitedJob {
 pub struct JobManager {
 	/// The jobs that are currently managed by the shell.
 	pub jobs: Vec<Job>,
+}
+
+/// Jobs that were still running when the shell copy holding them ended.
+///
+/// A subshell runs in a copy of the shell, and [`crate::Shell::clone`] gives
+/// that copy an empty job table, so a `&` inside the subshell records its job
+/// only there. Dropping the copy would take the job with it: an external
+/// child dies with its [`processes::ChildProcess`], an internal task is
+/// aborted with its handle. Bash does neither — `( cmd & )` leaves a child
+/// running, reparented away from the shell — and bash's parent neither lists
+/// it in `jobs` nor waits for it nor reports it in `$!`.
+///
+/// This store is that reparenting. There is one per session, shared by every
+/// copy of the shell, and nothing in job control reads it: it exists so the
+/// session can still end what it started. Jobs that have finished are dropped
+/// from it whenever it is touched, so it holds only what is still running.
+pub struct OrphanedJobs {
+	store: Arc<Mutex<Vec<Job>>>,
+	/// Whether this handle is the session's own; see [`Self::drop`].
+	owner: bool,
+}
+
+impl OrphanedJobs {
+	fn lock(&self) -> MutexGuard<'_, Vec<Job>> {
+		self.store.lock().unwrap_or_else(PoisonError::into_inner)
+	}
+
+	/// Takes over the jobs `jobs` still has running, dropping finished ones.
+	pub(crate) fn adopt(&self, jobs: &mut JobManager) {
+		let ending = std::mem::take(&mut jobs.jobs);
+		let mut store = self.lock();
+		retain_running(&mut store);
+		store.extend(
+			ending
+				.into_iter()
+				.filter(|job| !matches!(job.state, JobState::Done)),
+		);
+	}
+
+	/// Calls `f` with the jobs still running, after dropping finished ones.
+	/// This is the only way in: the store is not job control, so there is no
+	/// job-id lookup, no wait, and no notification.
+	pub fn with_running_jobs<R>(&self, f: impl FnOnce(&mut Vec<Job>) -> R) -> R {
+		let mut store = self.lock();
+		retain_running(&mut store);
+		f(&mut store)
+	}
+}
+
+impl Clone for OrphanedJobs {
+	/// A copy of the shell shares the session's store and never owns it: only
+	/// the shell the session was created as ends the jobs in it.
+	fn clone(&self) -> Self {
+		Self { store: Arc::clone(&self.store), owner: false }
+	}
+}
+
+impl Default for OrphanedJobs {
+	fn default() -> Self {
+		Self { store: Arc::default(), owner: true }
+	}
+}
+
+impl Drop for OrphanedJobs {
+	/// Ends the session's orphaned jobs: dropping a job aborts its internal
+	/// task and kills its external child.
+	///
+	/// Taking them out here is what makes that happen at all. An internal
+	/// job's task owns a copy of the shell, that copy owns a handle to this
+	/// store, and this store owns the task's abort handle — so the task and
+	/// the store keep each other alive, and releasing the last handle a
+	/// session holds would free neither.
+	fn drop(&mut self) {
+		if !self.owner {
+			return;
+		}
+		let ending = std::mem::take(&mut *self.lock());
+		drop(ending);
+	}
+}
+
+/// Drops the jobs that have finished, keeping those still running.
+fn retain_running(jobs: &mut Vec<Job>) {
+	jobs.retain_mut(|job| {
+		let reaped = matches!(job.poll_done(), Ok(Some(_)));
+		!reaped && !matches!(job.state, JobState::Done)
+	});
 }
 
 /// Represents a task that is part of a job.

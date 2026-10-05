@@ -27,6 +27,7 @@
 - Fixed strings passed to native functions sometimes losing their last characters when they ended in non-ASCII text (seen as `highlightCode` dropping the end of long lines) ([#14454](https://github.com/can1357/oh-my-pi/pull/14454) by [@H4vC](https://github.com/H4vC))
 - Fixed `renderMermaidAscii` hanging and running out of memory on an `xychart` axis whose range is finer than floating-point precision ([#14454](https://github.com/can1357/oh-my-pi/pull/14454) by [@H4vC](https://github.com/H4vC))
 - Fixed `getWorkProfile()` attributing async work to the wrong region or dropping it ([#14454](https://github.com/can1357/oh-my-pi/pull/14454) by [@H4vC](https://github.com/H4vC))
+- Fixed a command backgrounded inside a subshell, such as `( yes > /dev/null & )`, running forever after the shell that started it ended ([#14394](https://github.com/can1357/oh-my-pi/pull/14394) by [@sjawhar](https://github.com/sjawhar)).
 
 ## [18.6.2] - 2026-10-04
 

@@ -125,6 +125,9 @@ version = "0.1.44"
 
 [dependencies.tokio-util]
 version = "0.7.16"
+# `rt` carries `task::AbortOnDropHandle`, which jobs.rs uses so that dropping a
+# job table cannot leave a shell-internal task running (see `JobJoinHandle`).
+features = ["rt"]
 
 [dev-dependencies.anyhow]
 version = "1.0.102"
