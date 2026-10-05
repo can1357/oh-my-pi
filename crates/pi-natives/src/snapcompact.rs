@@ -1,8 +1,8 @@
 //! Snapcompact frame rendering.
 //!
 //! Rasterizes pre-normalized conversation text onto a `size`-wide bitmap
-//! (height hugs the rows the text actually needs) using one of the bundled
-//! public-domain pixel fonts, then encodes it as PNG:
+//! (height hugs the rows the text needs, with a 64px floor) using one of the
+//! bundled public-domain pixel fonts, then encodes it as PNG:
 //!
 //! - `5x8`  — X.org BDF font (legacy shape).
 //! - `8x8`  — unscii-8 hex font (Latin-1 subset), the square cell that won the
@@ -1140,8 +1140,8 @@ fn encode_rgb_png(
 #[derive(Default)]
 pub struct SnapcompactRenderOptions {
 	/// Frame width in pixels; also bounds the grid rows
-	/// (`floor(size/cellHeight/lineRepeat)`). Output height hugs the rows the
-	/// text actually uses instead of padding to a square.
+	/// (`floor(size/cellHeight/lineRepeat)`). Output height hugs the used rows
+	/// with a 64px floor, rather than padding every frame to a square.
 	pub size:        u32,
 	/// Bundled font: `"5x8"`, `"6x12"`, `"8x13"` (X.org BDF), `"8x8"`
 	/// (unscii-8), or `"silver"` (embedded TrueType). Default `"5x8"`.
@@ -1196,10 +1196,11 @@ pub fn snapcompact_supported_chars(font: JsString, chars: JsString) -> Result<St
 /// Render one snapcompact frame on a libuv worker: print pre-normalized text
 /// onto a `size`-wide bitmap and encode it as PNG.
 ///
-/// The bitmap height hugs the rows the text actually occupies
-/// (`usedRows * lineRepeat * cellHeight`), so a partially filled frame never
-/// pays for blank padding rows. The glyph grid holds `floor(size/cellWidth) *
-/// floor(size/cellHeight/lineRepeat)` characters; input beyond that is ignored.
+/// The bitmap height hugs the rows the text occupies
+/// (`usedRows * lineRepeat * cellHeight`), with a 64px floor for vision
+/// processors that reject smaller dimensions. The glyph grid holds
+/// `floor(size/cellWidth) * floor(size/cellHeight/lineRepeat)` characters;
+/// input beyond that is ignored.
 /// Native-cell bitmap-font shapes encode as indexed PNG; stretched bitmap-font
 /// shapes (target cell != font cell) encode as RGB. TrueType shapes encode RGB
 /// directly from grayscale coverage.
@@ -1270,21 +1271,21 @@ fn render_snapcompact_png_sync(
 			"Frame size {size} cannot fit a {target_w}x{target_h} cell grid (repeat {repeat})"
 		)));
 	}
-	// Tight canvas: width stays the frame edge (the reading geometry the
-	// caller derives cols from), height hugs the rows the text needs. Bitmap
-	// shapes draw wide code points through Silver across two cells, so they
-	// count double here; the square-celled Silver shape keeps one cell each.
+	// Keep the tight layout for normal pages, but give short pages enough
+	// canvas for vision processors that reject dimensions at or below 32px.
 	let wide_cells = matches!(font, RenderFont::Bitmap(_));
 	let used = used_rows(&text, &grid, doc, wide_cells);
-	let height = used * grid.repeat * grid.cell_h;
+	let content_height = used * grid.repeat * grid.cell_h;
+	let height = content_height.max(64);
 
 	match font {
 		RenderFont::Ttf(font) => {
-			let pixels = if doc {
+			let mut pixels = if doc {
 				render_ttf_doc_rgb(&text, size, height, font, &grid, black_ink)
 			} else {
 				render_ttf_rgb(&text, size, height, font, &grid, black_ink)
 			};
+			pixels[content_height * size * 3..].fill(255);
 			Ok(STANDARD
 				.encode(encode_rgb_png(&pixels, size, height, png::Compression::High)?)
 				.into())
@@ -1296,11 +1297,12 @@ fn render_snapcompact_png_sync(
 				// Indexed path: rasterize straight onto the frame at the requested
 				// cell box (the natural cell, or natural glyphs on a padded pitch
 				// when `stretch: false`).
-				let pixels = if doc {
+				let mut pixels = if doc {
 					render_doc_bitmap(&text, size, height, font, &grid, black_ink)
 				} else {
 					render_bitmap(&text, size, height, font, &grid, black_ink)
 				};
+				pixels[content_height * size..].fill(0);
 				return Ok(STANDARD
 					.encode(encode_indexed_png(&pixels, size, height, png::Compression::High)?)
 					.into());
@@ -1328,7 +1330,7 @@ fn render_snapcompact_png_sync(
 				dst[2] = f32::from(b);
 			}
 			let resized = resize_rgb(&rgb, src_w, src_h, dst_w, dst_h);
-			let mut frame = vec![255u8; size * dst_h * 3];
+			let mut frame = vec![255u8; size * height * 3];
 			for y in 0..dst_h {
 				let src_row = &resized[y * dst_w * 3..(y + 1) * dst_w * 3];
 				let dst_row = &mut frame[y * size * 3..];
@@ -1337,7 +1339,7 @@ fn render_snapcompact_png_sync(
 				}
 			}
 			Ok(STANDARD
-				.encode(encode_rgb_png(&frame, size, dst_h, png::Compression::High)?)
+				.encode(encode_rgb_png(&frame, size, height, png::Compression::High)?)
 				.into())
 		},
 	}

@@ -5,7 +5,8 @@
  * conversation is rendered into PNG frames of pixel-font text that vision
  * models read back directly, like an archivist at a snapcompact frame
  * reader. Frames are `frameSize` wide; their height hugs the text rows
- * actually printed, so a partially filled frame never bills blank rows.
+ * actually printed, with a 64px floor for vision processors that reject
+ * smaller images.
  *
  * The frame shape is provider-aware. Original choices came from the SQuAD
  * prose evals (`packages/snapcompact`, 200k-token monolithic runs); the
