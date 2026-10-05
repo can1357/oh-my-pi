@@ -3,7 +3,9 @@ Memory root: memory://root
 Input corpus (raw memories):
 {{raw_memories}}
 Input corpus (rollout summaries):
-{{rollout_summaries}}
+{{#if rollout_summaries_unavailable}}UNAVAILABLE: {{rollout_summaries_error}}
+The rollout summaries could NOT be read. This is a read failure, NOT an empty corpus. Treat them as unknown: NEVER conclude there are none, and build memory_md from the raw memories alone.
+{{else}}{{rollout_summaries}}{{/if}}
 Produce strict JSON only with this schema — you NEVER include any other output:
 {
   "memory_md": "string",

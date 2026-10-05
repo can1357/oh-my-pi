@@ -147,6 +147,8 @@ export {
 interface TaskDescriptionOptions {
 	agents: AgentDefinition[];
 	sessionAgents: readonly AgentDefinition[];
+	/** Agent directories that existed but could not be read; the list above is incomplete. */
+	discoveryWarnings: string[];
 	isolationEnabled: boolean;
 	applyIsolatedChanges: boolean;
 	disabledAgents: string[];
@@ -192,6 +194,7 @@ function renderDescription(options: TaskDescriptionOptions): string {
 		hasBlockingAgents: renderedAgents.some(agent => agent.blocking),
 		hasModelMentions: options.sessionAgents.length > 0,
 		ircEnabled: options.ircEnabled,
+		discoveryWarnings: options.discoveryWarnings,
 	});
 }
 
@@ -511,7 +514,7 @@ class TaskJobError extends AsyncJobError {}
  * both caches automatically.
  */
 const discoveryMemo = new Map<string, Promise<DiscoveryResult>>();
-const discoverySnapshots = new Map<string, AgentDefinition[]>();
+const discoverySnapshots = new Map<string, { agents: AgentDefinition[]; warnings: string[] }>();
 let discoveryMemoFn: typeof discoverAgents | undefined;
 
 /** Stable cache identity for the filesystem root and the full effective extension-root struct. */
@@ -543,9 +546,9 @@ export async function refreshAgentDiscovery(cwd: string, extensionRoots?: Effect
 	const key = discoveryCacheKey(cwd, extensionRoots);
 	discoveryMemo.delete(key);
 	const pending = discoverAgentsForCreate(cwd, extensionRoots);
-	const { agents } = await pending;
+	const { agents, warnings } = await pending;
 	if (discoveryMemo.get(key) === pending) {
-		discoverySnapshots.set(key, agents);
+		discoverySnapshots.set(key, { agents, warnings: warnings ?? [] });
 	}
 }
 
@@ -633,6 +636,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 	// call frame stacked above the result frame. Mirrors `taskToolRenderer`.
 	readonly mergeCallAndResult = true;
 	readonly #discoveredAgents: AgentDefinition[];
+	readonly #discoveryWarnings: string[];
 	readonly #blockedAgent: string | undefined;
 	/**
 	 * One semaphore per TaskTool instance (i.e. per session): bounds concurrent
@@ -701,10 +705,12 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		const disabledAgents = cfgTaskDisabledAgents.get(this.session.settings);
 		const planMode = this.session.getPlanModeState?.()?.enabled === true;
 		const isolationEnabled = cfgTaskIsolationEnabled.get(this.session.settings);
+		const snapshot = discoverySnapshots.get(
+			discoveryCacheKey(this.session.cwd, this.session.effectiveExtensionRoots?.()),
+		);
 		return renderDescription({
-			agents:
-				discoverySnapshots.get(discoveryCacheKey(this.session.cwd, this.session.effectiveExtensionRoots?.())) ??
-				this.#discoveredAgents,
+			agents: snapshot?.agents ?? this.#discoveredAgents,
+			discoveryWarnings: snapshot?.warnings ?? this.#discoveryWarnings,
 			sessionAgents: this.session.advertisedSessionAgents?.() ?? this.session.getSessionAgents?.() ?? [],
 			isolationEnabled: !planMode && isolationEnabled,
 			applyIsolatedChanges: cfgTaskIsolationApply.get(this.session.settings),
@@ -720,9 +726,11 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 	private constructor(
 		private readonly session: ToolSession,
 		discoveredAgents: AgentDefinition[],
+		discoveryWarnings: string[],
 	) {
 		this.#blockedAgent = $env.PI_BLOCKED_AGENT;
 		this.#discoveredAgents = discoveredAgents;
+		this.#discoveryWarnings = discoveryWarnings;
 	}
 
 	#isBatchEnabled(): boolean {
@@ -837,8 +845,8 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 	 * Create a TaskTool instance with async agent discovery.
 	 */
 	static async create(session: ToolSession): Promise<TaskTool> {
-		const { agents } = await discoverAgentsForCreate(session.cwd, session.effectiveExtensionRoots?.());
-		return new TaskTool(session, agents);
+		const { agents, warnings } = await discoverAgentsForCreate(session.cwd, session.effectiveExtensionRoots?.());
+		return new TaskTool(session, agents, warnings ?? []);
 	}
 
 	async execute(

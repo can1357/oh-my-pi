@@ -10976,7 +10976,10 @@ export class AgentSession implements SettingsScope {
 			// of restarting at zero.
 			if (switchingToDifferentSession) {
 				const providersBySlug = new Map<string, Set<string>>();
-				const costs = await loadAdvisorTranscriptCosts(this.sessionFile, { providersBySlug });
+				const costs = await loadAdvisorTranscriptCosts(this.sessionFile, {
+					providersBySlug,
+					warn: message => this.emitNotice("warning", message, "Advisor"),
+				});
 				this.#advisors.restoreCost(costs, providersBySlug);
 			}
 			this.#bash.finishSessionTransition(bashTransition, true);
@@ -12857,6 +12860,13 @@ export class AgentSession implements SettingsScope {
 			onSnapshot: snapshot.release,
 			shouldContinue: () => !stale && !this.isDisposed,
 			providersBySlug,
+			// This scan starts before the UI subscribes, so a bare notice would be
+			// dropped. The sticky config-warning channel is read by the header once
+			// it renders.
+			warn: message => {
+				this.configWarnings.push(message);
+				this.#emit({ type: "config_warnings_changed" });
+			},
 		})
 			.then(costs => {
 				if (stale || this.isDisposed) return;

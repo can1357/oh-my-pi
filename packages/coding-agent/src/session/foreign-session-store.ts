@@ -16,11 +16,20 @@ export interface ForeignSessionInfo {
 	readonly firstMessage?: string;
 }
 
+/** Options for one listing pass over a foreign session store. */
+export interface ForeignSessionListOptions {
+	/**
+	 * Reports a directory that exists but could not be read. The listing still
+	 * returns everything readable, because one unreadable directory out of many
+	 * must not cost the user the rest.
+	 */
+	warn?: (message: string) => void;
+}
+
 /** Lists and converts sessions owned by another coding agent. */
 export interface ForeignSessionStore {
-	readonly source: ForeignSessionSource;
 	/** Lists source sessions without parsing complete transcripts. */
-	list(): Promise<ForeignSessionInfo[]>;
+	list(options?: ForeignSessionListOptions): Promise<ForeignSessionInfo[]>;
 	/** Converts one source session into a non-persistent OMP session. */
 	load(session: ForeignSessionInfo): Promise<SessionManager>;
 }

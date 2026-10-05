@@ -353,9 +353,14 @@ export async function resolveEffectiveSubagentPolicy(
 	if (!agent) {
 		const available = agents.map(candidate => candidate.name).join(", ") || "none";
 		const searched = discovery.searchedDirs?.map(dir => shortenPath(dir)).join(", ") || "none";
+		// A directory we could not read may well hold this agent, so say the search
+		// was incomplete instead of reporting the agent as nonexistent.
+		const unreadable = discovery.warnings?.length
+			? ` Some agent directories could not be read: ${discovery.warnings.join("; ")}.`
+			: "";
 		throw new StructuredSubagentError(
 			"preflight",
-			`Unknown agent "${agentName}". Available: ${available}. Searched: ${searched}`,
+			`Unknown agent "${agentName}". Available: ${available}. Searched: ${searched}.${unreadable}`,
 		);
 	}
 	const disabledAgents = cfgTaskDisabledAgents.get(request.session.settings);

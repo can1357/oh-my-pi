@@ -1980,7 +1980,9 @@ export async function runRootCommand(
 				const store = (deps.createForeignSessionStore ?? createForeignSessionStore)(foreignSource);
 				let foreignSessions: ForeignSessionInfo[];
 				try {
-					foreignSessions = await logger.time(`list${sourceName}Sessions`, () => store.list());
+					foreignSessions = await logger.time(`list${sourceName}Sessions`, () =>
+						store.list({ warn: message => writeStartupNotice(parsedArgs, `${chalk.yellow(message)}\n`) }),
+					);
 				} catch (error) {
 					const message = error instanceof Error ? error.message : String(error);
 					throw new SessionResolutionError(`Failed to list ${sourceName} sessions: ${message}`);

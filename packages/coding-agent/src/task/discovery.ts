@@ -27,6 +27,7 @@ import { findAllNearestProjectConfigDirs, getConfigDirs } from "../config";
 import { pluginUsesClaudeModelDialect } from "../discovery/agent-plugin-format";
 import { listClaudePluginRoots } from "../discovery/helpers";
 import { listOmpExtensionRoots } from "../discovery/omp-extension-roots";
+import { describeReadDirFailure, readDirOutcome } from "../utils/readdir";
 import { loadBundledAgents, parseAgent } from "./agents";
 import type { AgentSource } from "@oh-my-pi/pi-tui/tools/task";
 import type { AgentDefinition } from "./types";
@@ -39,6 +40,12 @@ export interface DiscoveryResult {
 	projectAgentsDir: string | null;
 	/** Agent directories searched, in precedence order (for "unknown agent" diagnostics). */
 	searchedDirs?: string[];
+	/**
+	 * Agent directories that exist but could not be read. A non-empty list means
+	 * `agents` is incomplete, so callers must not report a missing agent as
+	 * undefined.
+	 */
+	warnings?: string[];
 }
 
 interface AgentDirectory {
@@ -47,11 +54,27 @@ interface AgentDirectory {
 	ignoreModel?: boolean;
 }
 
+/** One directory's scan result, keeping failures apart from a genuinely empty directory. */
+interface AgentDirectoryScan {
+	agents: AgentDefinition[];
+	warning?: string;
+}
+
 /**
  * Load agents from a directory.
  */
-async function loadAgentsFromDir({ dir, source, ignoreModel }: AgentDirectory): Promise<AgentDefinition[]> {
-	const entries = await fs.readdir(dir, { withFileTypes: true }).catch(() => []);
+async function loadAgentsFromDir({ dir, source, ignoreModel }: AgentDirectory): Promise<AgentDirectoryScan> {
+	const scanned = await readDirOutcome(dir);
+	// An absent directory simply holds no agents. An unreadable one does not, so
+	// report it rather than letting the caller read it as an empty directory.
+	if (scanned.status !== "ok") {
+		return {
+			agents: [],
+			warning: scanned.status === "error" ? describeReadDirFailure(dir, scanned.error) : undefined,
+		};
+	}
+	const entries = scanned.entries;
+
 	const files = entries
 		.filter(entry => (entry.isFile() || entry.isSymbolicLink()) && entry.name.endsWith(".md"))
 		.sort((a, b) => a.name.localeCompare(b.name))
@@ -70,7 +93,7 @@ async function loadAgentsFromDir({ dir, source, ignoreModel }: AgentDirectory): 
 				});
 		});
 
-	return (await Promise.all(files)).filter(Boolean) as AgentDefinition[];
+	return { agents: (await Promise.all(files)).filter(Boolean) as AgentDefinition[] };
 }
 
 /**
@@ -155,11 +178,15 @@ export async function discoverAgents(
 	});
 
 	const seen = new Set<string>();
-	const loadedAgents = (await Promise.all(orderedDirs.map(loadAgentsFromDir))).flat().filter(agent => {
-		if (seen.has(agent.name)) return false;
-		seen.add(agent.name);
-		return true;
-	});
+	const scans = await Promise.all(orderedDirs.map(loadAgentsFromDir));
+	const loadedAgents = scans
+		.flatMap(scan => scan.agents)
+		.filter(agent => {
+			if (seen.has(agent.name)) return false;
+			seen.add(agent.name);
+			return true;
+		});
+	const warnings = scans.flatMap(scan => (scan.warning ? [scan.warning] : []));
 
 	const bundledAgents = loadBundledAgents().filter(agent => {
 		if (seen.has(agent.name)) return false;
@@ -173,6 +200,7 @@ export async function discoverAgents(
 		agents: [...loadedAgents, ...bundledAgents],
 		projectAgentsDir,
 		searchedDirs: orderedDirs.map(entry => entry.dir),
+		...(warnings.length > 0 ? { warnings } : {}),
 	};
 }
 

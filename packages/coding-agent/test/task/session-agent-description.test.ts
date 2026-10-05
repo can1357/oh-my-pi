@@ -74,4 +74,27 @@ describe("task description session agents", () => {
 		live.push(tagged("m1", "b/y"));
 		expect(tool.description).toContain("`m1`");
 	});
+
+	it("states that an unreadable agent directory makes the list incomplete", async () => {
+		// Discovery reports the directory it could not read; if the tool
+		// description drops that, the model reads a missing agent as nonexistent
+		// and never retries the lookup.
+		vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({
+			agents: DISCOVERED,
+			projectAgentsDir: null,
+			warnings: ["Could not read directory /tmp/omp-session-agent-description/.omp/agents: EACCES"],
+		});
+
+		const tool = await TaskTool.create(createSession(() => []));
+		expect(tool.description).toContain("Could not read directory");
+		expect(tool.description).toContain("EACCES");
+		expect(tool.description).toContain("INCOMPLETE");
+	});
+
+	it("stays quiet when no agent directory was unreadable", async () => {
+		vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({ agents: DISCOVERED, projectAgentsDir: null });
+
+		const tool = await TaskTool.create(createSession(() => []));
+		expect(tool.description).not.toContain("INCOMPLETE");
+	});
 });

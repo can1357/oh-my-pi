@@ -59,11 +59,14 @@ export function createAgentsHubDeps(
 	extensionRoots: () => EffectiveExtensionRoots,
 	activeModelPattern?: string,
 	defaultModelPattern?: string,
+	/** Surfaces agent directories that could not be read. Absent directories stay silent. */
+	warn?: (message: string) => void,
 ): AgentsHubDeps {
 	return {
 		browserSource: createModelBrowserSource(settings),
 		loadAgents: async () => {
-			const { agents } = await discoverAgents(cwd, undefined, extensionRoots());
+			const { agents, warnings } = await discoverAgents(cwd, undefined, extensionRoots());
+			for (const message of warnings ?? []) warn?.(message);
 			const disabled = new Set(cfgTaskDisabledAgents.get(settings));
 			const overrides = cfgTaskAgentModelOverrides.get(settings);
 			const prewalkOverrides = cfgTaskAgentPrewalk.get(settings);
