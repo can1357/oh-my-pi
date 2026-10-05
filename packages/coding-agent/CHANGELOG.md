@@ -4,7 +4,7 @@
 
 ### Added
 
-- Added `tier.modelOverrides`, per-model service-tier overrides keyed by exact `provider/model-id` (e.g. `openai-codex/gpt-6-astra: ultrafast`), so one model can run a different tier than the rest of its family; `/fast` edits a pinned model's own entry, subagents inherit the map with `tier.subagent: inherit`, and `--service-tier` replaces the session's OpenAI selection.
+- Added `tier.modelOverrides`, per-model service-tier overrides keyed by exact `provider/model-id` (e.g. `openai-codex/gpt-6-astra: ultrafast`), so one model can run a different tier than the rest of its family; `/fast` edits a pinned model's own entry, subagents inherit the map with `tier.subagent: inherit`, and `--service-tier` replaces the session's OpenAI selection ([#14457](https://github.com/can1357/oh-my-pi/pull/14457) by [@eggpeat](https://github.com/eggpeat)).
 
 ### Fixed
 
