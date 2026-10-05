@@ -471,9 +471,8 @@ describe("render", () => {
 
 		const decoded = decodePng(Buffer.from(frame.data, "base64"));
 		expect(decoded.width).toBe(TEST_FRAME_SIZE);
-		// 40 chars on a 64-col grid: one 8px text row; height hugs it instead
-		// of padding the frame to a 320px square.
-		expect(decoded.height).toBe(8);
+		// A short page stays compact without creating a subminimum image.
+		expect(decoded.height).toBe(64);
 		expect(decoded.colorType).toBe(3); // indexed color
 
 		// Two sentences → glyphs printed in ink 1 then ink 2; background stays 0.
@@ -481,6 +480,28 @@ describe("render", () => {
 		expect(used.has(1)).toBe(true);
 		expect(used.has(2)).toBe(true);
 		expect(used.has(3)).toBe(false);
+	});
+
+	it("pads a short final page without altering the printed rows", async () => {
+		const shape = snapcompact.resolveShape(undefined, "8on22-bw");
+		const [last] = await snapcompact.renderMany("x".repeat(83), { shape });
+		const short = decodePng(Buffer.from(last.data, "base64"));
+		const full = await snapcompact.render("x".repeat(83) + " ".repeat(113) + "y".repeat(400), shape);
+		const longer = decodePng(Buffer.from(full.data, "base64"));
+		expect(short.width).toBe(1568);
+		expect(short.height).toBe(64);
+		expect(longer.height).toBe(88);
+		expect(short.pixels.subarray(0, 22 * short.width)).toEqual(longer.pixels.subarray(0, 22 * short.width));
+		expect(short.pixels.subarray(22 * short.width).every(pixel => pixel === 0)).toBe(true);
+	});
+
+	it("leaves the repeated-row highlight out of padding", async () => {
+		const shape = snapcompact.resolveShape(undefined, "8x8r-bw");
+		const frame = await snapcompact.render("x", shape);
+		const decoded = decodePng(Buffer.from(frame.data, "base64"));
+		expect(decoded.height).toBe(64);
+		expect(decoded.pixels.subarray(8 * decoded.width, 16 * decoded.width).includes(8)).toBe(true);
+		expect(decoded.pixels.subarray(16 * decoded.width).every(pixel => pixel === 0)).toBe(true);
 	});
 
 	it("renders the repeated grid with doubled lines, black ink, and highlight bands", async () => {
@@ -533,13 +554,21 @@ describe("render", () => {
 		expect(frame.cols).toBe(Math.floor(TEST_FRAME_SIZE / 6));
 	});
 
+	it("pads stretched RGB frames as well as indexed frames", async () => {
+		const shape = snapcompact.resolveShape(undefined, "6x6u-bw");
+		const frame = await snapcompact.render("x", shape);
+		const png = Buffer.from(frame.data, "base64");
+		expect(png[25]).toBe(2);
+		expect(png.readUInt32BE(20)).toBe(64);
+	});
+
 	it("renders Silver TrueType Unicode text as truecolor RGB", async () => {
 		const silver = snapcompact.resolveShape(undefined, "silver16-bw");
 		const frame = await snapcompact.render("你好안녕", silver, 64);
 		const png = Buffer.from(frame.data, "base64");
 		expect(png[25]).toBe(2);
 		expect(png.readUInt32BE(16)).toBe(64);
-		expect(png.readUInt32BE(20)).toBe(16);
+		expect(png.readUInt32BE(20)).toBe(64);
 		expect(frame.cols).toBe(4);
 		expect(frame.chars).toBe(4);
 	});

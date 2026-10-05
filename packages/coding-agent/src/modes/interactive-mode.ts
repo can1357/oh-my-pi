@@ -316,6 +316,7 @@ import type {
 	InteractiveModeInitOptions,
 	InteractiveSelectorDialogOptions,
 	RenderSessionContextOptions,
+	ShowStatusOptions,
 	SubmittedUserInput,
 } from "./types";
 import type { TodoItem, TodoPhase } from "@oh-my-pi/pi-tui/tools/todo";
@@ -2001,7 +2002,9 @@ export class InteractiveMode implements InteractiveModeContext {
 			connectedServers: this.#orderedMcpStatusServers(this.#mcpConnectedServers),
 			failedServers: this.#orderedMcpStatusFailures(),
 		});
-		if (message) this.showStatus(message);
+		// Progress of every server connecting or failing: a toast per change
+		// is noise on a native terminal (Tern), so it stays in the ANSI transcript.
+		if (message) this.showStatus(message, { toast: false });
 	}
 
 	#trackMcpStatusServer(serverName: string): void {
@@ -6639,20 +6642,22 @@ export class InteractiveMode implements InteractiveModeContext {
 	];
 
 	/**
-	 * Show the report_tool_issue consent popup and return the user's decision.
+	 * Show the report_tool_issue consent popup (mirrored to writable `/collab` guests)
+	 * and return the user's decision.
 	 * Invoked by the process-global consent handler the tool dispatches to;
 	 * subagent invocations bubble up here through the shared module state.
 	 */
 	async #promptAutoQaConsent(): Promise<boolean | null> {
 		const pool = InteractiveMode.#AUTOQA_CONSENT_PROMPTS;
 		const [headline, body] = pool[Math.floor(Math.random() * pool.length)];
-		const choice = await this.showHookSelector(`${headline}\n${body}`, ["Yes", "No"]);
+		const choice = await this.#extensionUiController.showCollabAwareSelector(`${headline}\n${body}`, ["Yes", "No"]);
 		return choice === "Yes";
 	}
 
 	/**
-	 * Ask the user to approve one `cfg://` settings change. Dismissing the dialog denies it;
-	 * leaving it unanswered for {@link CFG_APPROVAL_TIMEOUT_MS} (any keypress restarts the
+	 * Ask the user to approve one `cfg://` settings change; writable `/collab` guests get the
+	 * same prompt and the first answer wins. Dismissing the dialog denies it; leaving it
+	 * unanswered for {@link CFG_APPROVAL_TIMEOUT_MS} (any host keypress restarts the
 	 * countdown) drops it as `timeout`.
 	 */
 	async #promptCfgChange(request: CfgChangeRequest): Promise<CfgApproval> {
@@ -6663,7 +6668,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			? `\n⚠️ Overridden by your ${request.shadowedBy}: the saved value won't take effect here.`
 			: "";
 		let timedOut = false;
-		const choice = await this.showHookSelector(
+		const choice = await this.#extensionUiController.showCollabAwareSelector(
 			`${headline}\n${request.previous} → ${request.value}${warning}`,
 			[CFG_APPROVE_SESSION, CFG_APPROVE_ONCE, CFG_DENY],
 			{
@@ -7186,7 +7191,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#commandController.clearCommandReport();
 	}
 
-	showStatus(message: string, options?: { dim?: boolean }): void {
+	showStatus(message: string, options?: ShowStatusOptions): void {
 		this.#uiHelpers.showStatus(message, options);
 	}
 
