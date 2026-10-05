@@ -8,6 +8,7 @@ export const CUSTOM_LOGIN_HOOKS: Record<string, Lazy<LoginHook>> = {
 	"github-copilot": () => import("../oauth/github-copilot").then(module => module.loginGitHubCopilotHook),
 	cursor: () => import("../oauth/cursor").then(module => module.loginCursorHook),
 	perplexity: () => import("../oauth/perplexity").then(module => module.loginPerplexity),
+	"devin-cli": () => import("../oauth/devin-cli").then(module => module.loginDevinCliHook),
 };
 export const CUSTOM_REFRESH_HOOKS: Record<string, Lazy<RefreshHook>> = {
 	"github-copilot": () => import("../oauth/github-copilot").then(module => module.refreshGitHubCopilotHook),

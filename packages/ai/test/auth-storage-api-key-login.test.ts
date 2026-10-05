@@ -5,6 +5,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 
 import { AuthStorage, SqliteAuthCredentialStore } from "@oh-my-pi/pi-ai/auth-storage";
+import * as devinCliModule from "@oh-my-pi/pi-ai/registry/oauth/devin-cli";
 import * as aiStream from "@oh-my-pi/pi-ai/stream";
 import { serializeAlibabaTokenPlanCredential } from "@oh-my-pi/pi-catalog/wire/alibaba-token-plan";
 import { removeWithRetries } from "../../utils/src/temp";
@@ -115,6 +116,39 @@ describe("AuthStorage api-key login upsert", () => {
 		expect(rotatedKeys).toEqual(["first-kagi-key", "second-kagi-key"]);
 	});
 
+	it("stores a devin-cli login under the store-as provider, not the auth id", async () => {
+		if (!store || !authStorage || !dbPath) throw new Error("test setup failed");
+		const hookSpy = vi.spyOn(devinCliModule, "loginDevinCliHook").mockResolvedValue("sk-ws-01-adopted");
+		expect(hookSpy).toBeDefined();
+
+		await authStorage.oauth.login("devin-cli", {
+			onAuth: () => {},
+			onPrompt: async () => "",
+		});
+
+		expect(countCredentialRows(dbPath, "devin")).toBe(1);
+		expect(countCredentialRows(dbPath, "devin-cli")).toBe(0);
+		const credentials = store.listAuthCredentials("devin");
+		expect(credentials).toHaveLength(1);
+		const [stored] = credentials;
+		expect(stored?.credential).toEqual({ type: "api_key", key: "sk-ws-01-adopted", source: "login" });
+	});
+
+	it("propagates a devin-cli hook error and stores nothing", async () => {
+		if (!store || !authStorage || !dbPath) throw new Error("test setup failed");
+		vi.spyOn(devinCliModule, "loginDevinCliHook").mockRejectedValue(
+			new Error("Devin CLI credentials carry no windsurf_api_key."),
+		);
+
+		await expect(
+			authStorage.oauth.login("devin-cli", {
+				onAuth: () => {},
+				onPrompt: async () => "",
+			}),
+		).rejects.toThrow(/carry no windsurf_api_key/);
+		expect(countCredentialRows(dbPath, "devin")).toBe(0);
+		expect(countCredentialRows(dbPath, "devin-cli")).toBe(0);
+	});
 	it("replaces Token Plan Cookies by API-token identity without collapsing different tokens", async () => {
 		if (!store) throw new Error("test setup failed");
 		const firstToken = "sk-sp-first";
