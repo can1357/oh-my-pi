@@ -1729,6 +1729,9 @@ describe("CollabController", () => {
 				// Only the host's 15 s connect timeout can end the stalled attempt.
 				vi.advanceTimersByTime(15_000);
 				expect(await state.firstStatus.promise).toMatch(/auto-start failed: timed out connecting to relay/);
+				// Restore before the retry publishes: Bun's fake clock stalls the
+				// real registry server's listen callback.
+				vi.useRealTimers();
 				await settled(publishSpy, 1);
 				await controller.idle();
 

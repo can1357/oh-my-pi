@@ -3340,6 +3340,24 @@ describe("ModelRegistry", () => {
 			expect(vertexAuthoritative.find("google-vertex", "gemini-1.5-pro")).toBeUndefined();
 		});
 
+		test("does not offer bundled Antigravity chat ids absent from a fresh account roster after restart", () => {
+			const served = getBundledModels("google-antigravity").find(model => model.id === "claude-sonnet-4-6");
+			if (!served) throw new Error("Missing bundled Antigravity control model");
+			writeModelCache(
+				"google-antigravity",
+				Date.now(),
+				[served],
+				true,
+				fingerprintStaticModels(getBundledModels("google-antigravity"), true),
+				path.join(tempDir, "models.db"),
+			);
+			const restarted = new ModelRegistry(authStorage, modelsJsonPath);
+
+			expect(restarted.find("google-antigravity", "claude-sonnet-4-6")).toBeDefined();
+			expect(restarted.find("google-antigravity", "claude-sonnet-5-5-low")).toBeUndefined();
+			expect(restarted.find("google-antigravity", "gemini-3-pro-image")).toBeDefined();
+		});
+
 		test("does not re-add bundled synthetic models after authoritative cache load", () => {
 			const syntheticModels = getModelsForProvider(syntheticCacheLoad, "synthetic");
 			expect(syntheticModels.map(model => model.id)).toEqual(["hf:zai-org/GLM-5.1"]);
