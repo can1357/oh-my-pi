@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Expanded edit approval previews now reveal the complete settled diff while live previews remain bounded ([#11638](https://github.com/can1357/oh-my-pi/issues/11638), [#13060](https://github.com/can1357/oh-my-pi/pull/13060) by [@kvnloo](https://github.com/kvnloo)).
+
 ### Changed
 
 - Bash commands that print binary or other non-UTF-8 output no longer stall while their output is decoded ([#14454](https://github.com/can1357/oh-my-pi/pull/14454) by [@H4vC](https://github.com/H4vC))
