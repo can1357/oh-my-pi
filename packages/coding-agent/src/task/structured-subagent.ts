@@ -789,6 +789,7 @@ function buildExecutorOptions(
 		additionalDirectories: session.additionalDirectories,
 		getApiKey: session.getApiKey,
 		credentialSourceSessionId: session.getCredentialSourceSessionId?.(),
+		applyStartupOAuthAccountPin: session.applyStartupOAuthAccountPin,
 		agent: policy.effectiveAgent,
 		task: renderSubagentUserPrompt(request.assignment),
 		assignment: request.assignment.trim(),

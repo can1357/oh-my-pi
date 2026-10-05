@@ -112,6 +112,8 @@ export interface AuthStorageBackend {
 	readonly resets: ResetsApi;
 	/** Persisted rate-limit blocks (auth-broker server seam). */
 	readonly blocks: BlocksApi;
+	/** See {@link AuthStorage.sourceLabel}. */
+	readonly sourceLabel: string | undefined;
 	/** See {@link AuthStorage.setAccountPolicies}. */
 	setAccountPolicies(config: AuthAccountPolicyConfig): void;
 	/** See {@link AuthStorage.replaceStore}. */
@@ -208,6 +210,15 @@ export class AuthStorage {
 		return this.#backend.replaceStore(store, options);
 	}
 
+	/**
+	 * Identifies the physical credential store (e.g. `local <dbPath>` or `broker <url>`).
+	 * Row ids are unique only within one store, so durable selectors fold this into
+	 * their fingerprint.
+	 */
+	get sourceLabel(): string | undefined {
+		return this.#backend.sourceLabel;
+	}
+
 	/** Open the SQLite store at `dbPath` and wrap it (standalone use, e.g. the pi-ai CLI). */
 	static async create(dbPath: string, options: AuthStorageOptions = {}): Promise<AuthStorage> {
 		const store = await SqliteAuthCredentialStore.open(dbPath);
@@ -247,11 +258,13 @@ class LocalAuthStorageBackend implements AuthStorageBackend {
 	readonly #policies: AccountPolicies;
 	readonly #restrictions: SessionRestrictions = new Map();
 	#modules: AuthStorageModules;
+	#sourceLabel: string | undefined;
 
 	constructor(store: AuthCredentialStore, options: AuthStorageOptions) {
 		this.#options = options;
 		this.#overrides = new KeyOverrides(options.configValueResolver);
 		this.#policies = new AccountPolicies(options.accountPolicies ?? [], options.defaultReservePct);
+		this.#sourceLabel = options.sourceLabel;
 		this.#modules = this.#compose(store, options.sourceLabel);
 		if (options.onCredentialDisabled) this.#modules.pool.onDisabled(options.onCredentialDisabled);
 	}
@@ -291,8 +304,18 @@ class LocalAuthStorageBackend implements AuthStorageBackend {
 		this.#policies.replace(config.accountPolicies, config.defaultReservePct, stored);
 	}
 
+	/**
+	 * Identifies the physical credential store (e.g. `local <dbPath>` or `broker <url>`).
+	 * Row ids are unique only within one store, so durable selectors fold this into
+	 * their fingerprint.
+	 */
+	get sourceLabel(): string | undefined {
+		return this.#sourceLabel;
+	}
+
 	async replaceStore(store: AuthCredentialStore, options: { sourceLabel?: string } = {}): Promise<void> {
-		const next = this.#compose(store, options.sourceLabel ?? this.#options.sourceLabel);
+		const sourceLabel = options.sourceLabel ?? this.#sourceLabel;
+		const next = this.#compose(store, sourceLabel);
 		try {
 			await next.pool.reload();
 		} catch (error) {
@@ -303,6 +326,7 @@ class LocalAuthStorageBackend implements AuthStorageBackend {
 		next.pool.adoptSubscribers(previous.pool);
 		next.usage.adoptRegistrations(previous.usage);
 		this.#modules = next;
+		this.#sourceLabel = sourceLabel;
 		retire(previous);
 		next.pool.bump("store-replaced");
 	}

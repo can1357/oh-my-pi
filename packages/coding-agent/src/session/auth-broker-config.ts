@@ -31,6 +31,7 @@ import {
 	discoverAuthStorage as discoverAuthStorageShared,
 	getAuthBrokerTokenFilePath,
 	openAuthCredentialStore,
+	reloadAfterBrokerDelivery,
 	resolveAuthBrokerConfig as resolveAuthBrokerConfigShared,
 } from "@oh-my-pi/pi-ai/auth-broker/discover";
 import { MissingApiKeyError } from "@oh-my-pi/pi-ai/error";
@@ -179,7 +180,11 @@ export function createAuthStorageSettingsSync(scope: ScopeLike, authStorage: Aut
 			cachedConfigKey = null;
 			const next = await resolveAuthBrokerConfigShared(resolveOptions);
 			if (previous?.url === next?.url && previous?.token === next?.token) return;
-			const { store, sourceLabel } = await openAuthCredentialStore({ brokerConfig: next, agentDir });
+			const { store, sourceLabel } = await openAuthCredentialStore({
+				brokerConfig: next,
+				agentDir,
+				onSnapshotDelivered: () => reloadAfterBrokerDelivery(authStorage),
+			});
 			await authStorage.replaceStore(store, { sourceLabel });
 			activeBroker = Promise.resolve(next);
 			logger.info("Auth credential store switched after broker settings change", { source: sourceLabel });

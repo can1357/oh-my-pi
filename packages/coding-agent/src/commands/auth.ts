@@ -1,5 +1,8 @@
 /**
- * Copy stored provider credentials between machines.
+ * Copy stored provider credentials between machines, or manage the default OAuth account.
+ *
+ * `omp auth accounts|pin|unpin <provider> [selector]` lists, pins, or unpins a
+ * stored OAuth account as the one new sessions start on (see `../cli/auth-cli.ts`).
  *
  * `omp auth export` prints every active credential in the local credential
  * store (`agent.db`) as JSON — API keys and OAuth logins, refresh tokens
@@ -18,10 +21,13 @@ import {
 	resolveCredentialIdentityKey,
 	SqliteAuthCredentialStore,
 } from "@oh-my-pi/pi-ai";
-import { getAgentDbPath, isEnoent, isRecord } from "@oh-my-pi/pi-utils";
+import { getAgentDbPath, getProjectDir, isEnoent, isRecord } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
 import { Args, CliUsageError, Command } from "@oh-my-pi/pi-utils/cli";
+import type { AuthAction } from "../cli/auth-cli";
+import { runAuthCommand } from "../cli/auth-cli";
 import { authHelp as commandHelp } from "../cli/command-help";
+import { Settings } from "../config/settings";
 import { resolveAuthBrokerConfig } from "../session/auth-broker-config";
 
 /** Format version of the `omp auth export` document. */
@@ -169,12 +175,17 @@ export default class Auth extends Command {
 
 	static args = {
 		action: Args.string({
-			description: "export or import",
+			description: "export, import, accounts, pin, or unpin",
 			required: true,
-			options: ["export", "import"],
+			options: ["export", "import", "accounts", "pin", "unpin"],
 		}),
-		file: Args.string({
-			description: "File written by `omp auth export`, or - for stdin (import)",
+		target: Args.string({
+			description:
+				"File written by `omp auth export`, or - for stdin (import); provider ID such as anthropic (accounts, pin, unpin)",
+			required: false,
+		}),
+		selector: Args.string({
+			description: "Account selector for `pin`: 1-based position, email, account id, org id, or org name",
 			required: false,
 		}),
 	};
@@ -183,15 +194,24 @@ export default class Auth extends Command {
 		"# Write every stored credential to a file (keep it secret)\n  omp auth export > credentials.json",
 		"# Merge them into this machine's credential store\n  omp auth import credentials.json",
 		"# Copy credentials to another machine over SSH\n  omp auth export | ssh host omp auth import -",
+		"# List stored Anthropic OAuth accounts and show which is pinned\n  omp auth accounts anthropic",
+		"# Always start anthropic sessions on this account\n  omp auth pin anthropic jkirk@example.com",
+		"# Same, by 1-based position\n  omp auth pin anthropic 1",
+		"# Clear the pinned default (falls back to automatic ranking)\n  omp auth unpin anthropic",
 	];
 
 	async run(): Promise<void> {
 		const { args, argv } = await this.parse(Auth);
 		const action = args.action;
+		if (action === "accounts" || action === "pin" || action === "unpin") {
+			await Settings.init({ cwd: getProjectDir() });
+			await runAuthCommand({ action: action as AuthAction, provider: args.target ?? "", selector: args.selector });
+			return;
+		}
 		if (action === "export" && argv.length > 1) {
 			throw new CliUsageError(`Unexpected argument "${argv[1]}". Usage: omp auth export`);
 		}
-		if (action === "import" && !args.file) {
+		if (action === "import" && !args.target) {
 			throw new CliUsageError("Missing credential file. Usage: omp auth import <file|->");
 		}
 		if (action === "import" && argv.length > 2) {
@@ -226,7 +246,7 @@ export default class Auth extends Command {
 			return;
 		}
 
-		const file = args.file ?? "";
+		const file = args.target ?? "";
 		let text: string;
 		try {
 			text = file === "-" ? await Bun.stdin.text() : await Bun.file(file).text();

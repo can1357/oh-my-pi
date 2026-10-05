@@ -196,6 +196,13 @@ function serveAuthStorage(state: PeerAuthState): RpcServe<AuthStorage, AuthStora
 				state.subscriptions,
 				storage.credentials.onGeneration(generation => settleQuietly(listener(generation))),
 			),
+		"credentials.refreshAttempts": storage => storage.credentials.refreshAttempts,
+		"credentials.onRefreshAttempted": (storage, listener) =>
+			trackWorkerSubscription(
+				state.subscriptions,
+				storage.credentials.onRefreshAttempted(refreshAttempts => settleQuietly(listener(refreshAttempts))),
+			),
+		"credentials.notifyExternalRefresh": storage => storage.credentials.notifyExternalRefresh(),
 		"credentials.onDisabled": (storage, listener) =>
 			trackWorkerSubscription(state.subscriptions, storage.credentials.onDisabled(listener)),
 		"credentials.reload": storage => storage.credentials.reload(),
@@ -324,6 +331,7 @@ function serveAuthStorage(state: PeerAuthState): RpcServe<AuthStorage, AuthStora
 		"blocks.deleteAll": (storage, credentialId) => storage.blocks.deleteAll(credentialId),
 
 		setAccountPolicies: (storage, config) => storage.setAccountPolicies(config),
+		sourceLabel: storage => storage.sourceLabel,
 	};
 }
 
