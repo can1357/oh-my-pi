@@ -42,11 +42,7 @@ import {
 	scanSkillsFromDir,
 } from "./helpers";
 
-import {
-	cfgCommandsEnableOpencodeProject,
-	cfgCommandsEnableOpencodeUser,
-	cfgSkillsEnableOpencodeUser,
-} from "../extensibility/settings";
+import { cfgCommandsEnableOpencodeProject, cfgCommandsEnableOpencodeUser } from "../extensibility/settings";
 
 const PROVIDER_ID = "opencode";
 const DISPLAY_NAME = "OpenCode";
@@ -351,20 +347,8 @@ function buildMCPServer(name: string, serverConfig: OpenCodeMCPConfig, source: O
 // Skills (skills/)
 // =============================================================================
 
-/** Legacy `skills.enableOpencodeUser` toggle; off by default and without initialized settings. */
-function readOpencodeUserSkillsToggle(): boolean {
-	try {
-		return cfgSkillsEnableOpencodeUser.get(settings) === true;
-	} catch {
-		return false;
-	}
-}
-
 async function loadSkills(ctx: LoadContext): Promise<LoadResult<Skill>> {
-	// The skills toggle is a skills-only opt-in for ~/.config/opencode/skills.
-	const userSkillsDir = readOpencodeUserSkillsToggle()
-		? resolveUserPath(ctx, "opencode", "skills")
-		: getUserPath(ctx, "opencode", "skills");
+	const userSkillsDir = getUserPath(ctx, "opencode", "skills");
 	const projectSkillsDir = getProjectPath(ctx, "opencode", "skills");
 
 	const promises: Promise<LoadResult<Skill>>[] = [];
