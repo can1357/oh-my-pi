@@ -199,7 +199,7 @@ export function resolveBrowserKind(
 	if (app?.relay !== false) {
 		const relayKind = resolveRelayKind(
 			{
-				settingEnabled: cfgBrowserRelay.get(session.settings),
+				settingEnabled: session.isBrowserRelayEnabled?.() ?? cfgBrowserRelay.get(session.settings),
 				url: relayUrl,
 			},
 			env,

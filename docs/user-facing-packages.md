@@ -74,16 +74,10 @@ Sources: [`packages/metaharness/README.md`](../packages/metaharness/README.md), 
 Sources: [`packages/browser-relay/README.md`](../packages/browser-relay/README.md), [`packages/browser-relay/package.json`](../packages/browser-relay/package.json), [`packages/coding-agent/src/tools/browser/relay/`](../packages/coding-agent/src/tools/browser/relay/).
 
 - Package: private `@oh-my-pi/browser-relay`; user command: `omp browser-relay`.
-- Setup: run `omp browser-relay install`, load the unpacked extension from
-  `~/.omp/browser-relay/extension`, then opt in per call with `app.relay: true` — or set
-  `browser.relay`, which makes the relay the profile-wide default across projects (scope
-  details in the package README).
-- Behavior: the relay auto-starts through the profile-independent global daemon broker; consumers
-  across projects hold leases, and the relay stops after the last lease is released. `app.target`
-  selects a tab by URL/title substring, otherwise the visible tab is adopted. Supplying a URL
-  navigates that adopted tab. `omp browser-relay --no-group` disables automatic tab grouping.
-- Security/limits: it binds loopback; use `--token` when local processes are untrusted. Chrome
-  internal pages, DevTools, Web Store, extension pages, and tabs with DevTools open cannot attach.
+- Setup: run `omp browser-relay install` and load the unpacked extension. Opt in per call (`app.relay: true`), per session (`/relay on` or bare `/relay` to toggle), or profile-wide (`browser.relay: true`); the unset default is off. Set `browser.relayUrl` for a custom endpoint.
+- Session behavior: `/relay off` affects future opens only; it does not detach existing relay tabs. Task subagents follow the live choice for future opens. The choice resets on `/new` or switching sessions.
+- Relay: the server auto-starts through the profile-independent global daemon broker; consumers across projects hold leases, and the server stops after the last lease is released. `PI_BROWSER_RELAY=0|1` overrides session/config selection (except `app.relay: false` still opts out). `app.target` selects a tab by URL/title substring; otherwise the visible tab is adopted. Supplying a URL navigates that tab. `omp browser-relay --no-group` disables automatic tab grouping.
+- Security/limits: it binds loopback; use `--token` when local processes are untrusted. Chrome internal pages, DevTools, Web Store, extension pages, and tabs with DevTools open cannot attach.
 
 ### `packages/collab-web` — browser client for collaborative sessions
 

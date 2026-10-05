@@ -10,6 +10,8 @@ import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent/extensibility/exten
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { createSubagentSettings } from "@oh-my-pi/pi-coding-agent/task/executor";
+import { resolveBrowserKind } from "@oh-my-pi/pi-coding-agent/tools/browser";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { assistantMsg } from "./utilities";
@@ -31,6 +33,7 @@ async function teardown(): Promise<void> {
 }
 
 async function createHarness(options?: {
+	settings?: Settings;
 	extension?: {
 		name: string;
 		register: (api: ExtensionAPI) => void;
@@ -61,7 +64,7 @@ async function createHarness(options?: {
 	const session = new AgentSession({
 		agent,
 		sessionManager,
-		settings: Settings.isolated(),
+		settings: options?.settings ?? Settings.isolated(),
 		modelRegistry,
 		extensionRunner,
 	});
@@ -103,11 +106,83 @@ describe("AgentSession.newSession boundary", () => {
 	it("tracks provider routing identity to the new local session, not the previous conversation", async () => {
 		const { session, sessionManager } = await createHarness();
 		const previousSessionId = session.sessionId;
+		session.setBrowserRelayEnabled(true);
+		expect(session.isBrowserRelayEnabled()).toBe(true);
 
 		expect(await session.newSession()).toBe(true);
 
 		expect(session.sessionId).not.toBe(previousSessionId);
 		expect(session.sessionId).toBe(sessionManager.getSessionId());
+		expect(session.isBrowserRelayEnabled()).toBe(false);
+	});
+
+	it("keeps relay on across same-session reload and failed switch, then clears on a different session", async () => {
+		const { session, sessionManager } = await createHarness();
+		await sessionManager.ensureOnDisk();
+		const currentFile = sessionManager.getSessionFile();
+		if (!currentFile) throw new Error("Expected current session file");
+
+		session.setBrowserRelayEnabled(true);
+		expect(await session.switchSession(currentFile)).toBe(true);
+		expect(session.isBrowserRelayEnabled()).toBe(true);
+
+		const rejectedFile = path.join(sessionManager.getCwd(), `rejected-${Bun.nanoseconds()}.jsonl`);
+		await Bun.write(
+			rejectedFile,
+			`${JSON.stringify({
+				type: "session",
+				version: 3,
+				id: "rejected-session",
+				timestamp: new Date().toISOString(),
+				cwd: "/tmp/browser-relay-rejected-target",
+			})}\n`,
+		);
+		expect(await session.switchSession(rejectedFile, { onCwdChange: async () => false })).toBe(false);
+		expect(session.isBrowserRelayEnabled()).toBe(true);
+
+		const targetManager = SessionManager.create(
+			sessionManager.getCwd(),
+			path.join(sessionManager.getCwd(), "sessions"),
+		);
+		await targetManager.ensureOnDisk();
+		await targetManager.flush();
+		const targetFile = targetManager.getSessionFile();
+		if (!targetFile) throw new Error("Expected target session file");
+		const previousSessionId = session.sessionId;
+
+		expect(await session.switchSession(targetFile)).toBe(true);
+		expect(session.sessionId).not.toBe(previousSessionId);
+		expect(session.isBrowserRelayEnabled()).toBe(false);
+	});
+
+	it("applies the parent's relay choice to existing task descendants without changing sibling sessions", async () => {
+		const settings = Settings.isolated({ "browser.relay": true });
+		const parent = (await createHarness({ settings })).session;
+		const sibling = (await createHarness({ settings })).session;
+		parent.setBrowserRelayEnabled(false);
+		const child = (await createHarness({ settings: createSubagentSettings(parent.getSubagentSettings()) })).session;
+		const kind = (owner: AgentSession) =>
+			resolveBrowserKind(
+				{ action: "open" },
+				{
+					cwd: "/tmp",
+					hasUI: false,
+					getSessionFile: () => null,
+					getSessionSpawns: () => null,
+					settings: owner.settings,
+					isBrowserRelayEnabled: () => owner.isBrowserRelayEnabled(),
+				},
+				{},
+			).kind;
+
+		expect(kind(parent)).toBe("headless");
+		expect(kind(child)).toBe("headless");
+		expect(kind(sibling)).toBe("relay");
+		parent.setBrowserRelayEnabled(true);
+		expect(kind(child)).toBe("relay");
+		parent.setBrowserRelayEnabled(false);
+		expect(kind(child)).toBe("headless");
+		expect(kind(sibling)).toBe("relay");
 	});
 
 	it("keeps old-session messages out of the new session when notifications finish late", async () => {

@@ -216,6 +216,10 @@ export interface ToolSession {
 	canPromptUser?: boolean;
 	/** The user approves `cfg://` writes for this session (top-level TUI session only). */
 	settingsApproval?: boolean;
+	/** Session-local browser relay selection; undefined inherits browser.relay. */
+	isBrowserRelayEnabled?: () => boolean | undefined;
+	/** Settings overlay inherited by task descendants. */
+	getSubagentSettings?: () => Settings;
 	/** Whether this session has begun disposal. */
 	isDisposed?: () => boolean;
 	/**

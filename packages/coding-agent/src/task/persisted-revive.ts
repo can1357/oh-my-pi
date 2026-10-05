@@ -123,7 +123,7 @@ export function createPersistedSubagentReviverFactory(
 			// advisor-role model, anything else = the explicit pattern stamped onto
 			// this session's `modelRoles.advisor`. Absent = unadvised (the
 			// createSubagentSettings default).
-			const subagentSettings = createSubagentSettings(ctx.settings, {
+			const subagentSettings = createSubagentSettings(ctx.session.getSubagentSettings(), {
 				...(init.readSummarize === false ? { "read.summarize.enabled": false } : undefined),
 				...(init.advisor
 					? {

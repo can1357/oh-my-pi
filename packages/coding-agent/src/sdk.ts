@@ -2189,6 +2189,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			hasUI: options.hasUI ?? false,
 			canPromptUser: options.interactivePrompts ?? options.hasUI ?? false,
 			settingsApproval: options.settingsApproval === true && !isSubagentSession,
+			isBrowserRelayEnabled: () => session?.isBrowserRelayEnabled(),
+			getSubagentSettings: () => session?.getSubagentSettings() ?? settings,
 			// Explicit resolvers retain their existing pass-through contract. Ordinary
 			// sessions inherit stored affinity into the child's own provider session.
 			getApiKey: options.getApiKey,

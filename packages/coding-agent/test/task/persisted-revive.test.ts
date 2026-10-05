@@ -32,6 +32,8 @@ import { FileSessionStorage } from "@oh-my-pi/pi-coding-agent/session/session-st
 import * as executorModule from "@oh-my-pi/pi-coding-agent/task/executor";
 import { createPersistedSubagentReviverFactory } from "@oh-my-pi/pi-coding-agent/task/persisted-revive";
 import { buildWakeRelayBody } from "@oh-my-pi/pi-coding-agent/task/executor";
+import { cfgBrowserRelay } from "@oh-my-pi/pi-coding-agent/tools/browser/settings";
+import { resolveBrowserKind } from "@oh-my-pi/pi-coding-agent/tools/browser";
 import type { SingleResult } from "@oh-my-pi/pi-tui/tools/task";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { IrcBus } from "@oh-my-pi/pi-coding-agent/irc/bus";
@@ -195,10 +197,13 @@ interface ReviveOwnerOptions {
 	authStorage?: AuthStorage;
 	modelRegistry?: ModelRegistry;
 	settings?: Settings;
+	subagentSettings?: Settings;
 }
 
 function createFactory(cwd: string, eventBus?: EventBus, owner: ReviveOwnerOptions = {}) {
+	const settings = owner.settings ?? Settings.isolated();
 	const parentSession = {
+		getSubagentSettings: () => owner.subagentSettings ?? settings,
 		sessionManager: {
 			getCwd: () => cwd,
 			getArtifactManager: () => undefined,
@@ -224,7 +229,7 @@ function createFactory(cwd: string, eventBus?: EventBus, owner: ReviveOwnerOptio
 		session: parentSession,
 		authStorage: owner.authStorage ?? ({} as never),
 		modelRegistry: owner.modelRegistry ?? ({ authStorage: {} } as ModelRegistry),
-		settings: owner.settings ?? Settings.isolated(),
+		settings,
 		enableLsp: true,
 		eventBus,
 	});
@@ -257,6 +262,37 @@ describe("persisted subagent revival", () => {
 		expect(initialize).toHaveBeenCalledTimes(1);
 		expect(onError).toHaveBeenCalledTimes(1);
 		expect(emit).toHaveBeenCalledWith({ type: "session_start" });
+	});
+
+	it("keeps a cold-revived task child off relay after its parent opts out", async () => {
+		const cwd = makeTempDir("@pi-revive-relay-");
+		const sessionFile = await createPersistedSession(cwd);
+		const settings = Settings.isolated({ "browser.relay": true });
+		const scoped = settings.overlay();
+		cfgBrowserRelay.override(scoped, false);
+		let browserKind: string | undefined;
+		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async options => {
+			const revivedSettings = options?.settings;
+			if (!revivedSettings) throw new Error("Revived child settings missing");
+			browserKind = resolveBrowserKind(
+				{ action: "open" },
+				{
+					cwd,
+					hasUI: false,
+					getSessionFile: () => null,
+					getSessionSpawns: () => null,
+					settings: revivedSettings,
+				},
+				{},
+			).kind;
+			return { session: createRevivedSession([]).session } as CreateAgentSessionResult;
+		});
+
+		const ref = createRef(sessionFile);
+		const reviver = await createFactory(cwd, undefined, { settings, subagentSettings: scoped })(ref);
+		if (!reviver) throw new Error("Expected a persisted reviver");
+		await reviver(ref);
+		expect(browserKind).toBe("headless");
 	});
 
 	it("loads only extensions allowed by the live owner's root policy", async () => {

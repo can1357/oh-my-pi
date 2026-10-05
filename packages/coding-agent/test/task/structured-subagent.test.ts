@@ -27,6 +27,8 @@ import {
 } from "@oh-my-pi/pi-coding-agent/task/structured-subagent";
 import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
 import type { SingleResult } from "@oh-my-pi/pi-tui/tools/task";
+import { cfgBrowserRelay } from "@oh-my-pi/pi-coding-agent/tools/browser/settings";
+import { resolveBrowserKind } from "@oh-my-pi/pi-coding-agent/tools/browser";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 
 import { cfgRetryModelFallback } from "@oh-my-pi/pi-coding-agent/session/settings";
@@ -352,6 +354,28 @@ describe("structured subagent primitive", () => {
 
 		expect(dispatched[0]?.inheritedSessionAgents).toEqual([inheritedAgent]);
 		await fs.rm(settled.artifactsDir, { recursive: true, force: true });
+	});
+
+	it("uses the parent's relay opt-out for task child browser opens", async () => {
+		mockDiscovery();
+		const configured = Settings.isolated({ "browser.relay": true });
+		const scoped = configured.overlay();
+		cfgBrowserRelay.override(scoped, false);
+		const parent = session({ settings: configured });
+		parent.getSubagentSettings = () => scoped;
+		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
+			if (!options.settings) throw new Error("Subagent settings were not provided");
+			const childSettings = executorModule.createSubagentSettings(options.settings);
+			const resolved = resolveBrowserKind({ action: "open" }, { ...parent, settings: childSettings }, {});
+			return { ...result(), output: resolved.kind };
+		});
+
+		const settled = await runStructuredSubagent(request({ session: parent, retainArtifacts: true }));
+		try {
+			expect(settled.result.output).toBe("headless");
+		} finally {
+			await fs.rm(settled.artifactsDir, { recursive: true, force: true });
+		}
 	});
 	it("propagates a custom thinking-suffixed role alias through policy, dispatch, and settlement", async () => {
 		const customAgent = { ...AGENT, model: ["@reviewer:high"] };
