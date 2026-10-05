@@ -45,7 +45,7 @@ afterAll(() => {
 	server.stop(true);
 });
 
-async function runOnPage(url: string, code: string): Promise<unknown> {
+async function runOnPage(url: string, code: string, timeoutMs = 20_000): Promise<unknown> {
 	const browser = await acquireBrowser({ kind: "headless", headless: true }, { cwd: process.cwd() });
 	if (!("browser" in browser)) throw new Error("Expected a Puppeteer browser");
 	const name = `observe-${process.pid}`;
@@ -57,7 +57,7 @@ async function runOnPage(url: string, code: string): Promise<unknown> {
 	} as unknown as ToolSession;
 	try {
 		await acquireTab(name, browser, { url, timeoutMs: 30_000 });
-		const result = await runInTab(name, { code, timeoutMs: 20_000, session });
+		const result = await runInTab(name, { code, timeoutMs, session });
 		return result.returnValue;
 	} finally {
 		await releaseTab(name, { kill: true });
@@ -178,6 +178,107 @@ describe("browser observe", () => {
 				`,
 			);
 			expect(result).toEqual({ role: "RootWebArea", nodeType: 9, title: "clicked 7" });
+		},
+		45_000,
+	);
+});
+
+/**
+ * Save answers at once (delay it with `page.emulateNetworkConditions`); Hang starts a request the
+ * server holds until the test ends, like a long poll or a hung API. The page's `startPoll()` opens such a
+ * request itself and, on the page's own timer, marks the body `data-late` 2.5 s later: short of the 3 s
+ * bound, so a read shows whether it waited for that request.
+ */
+function saveServer() {
+	const held = new Set<() => void>();
+	const server = Bun.serve({
+		port: 0,
+		async fetch(request) {
+			const { pathname } = new URL(request.url);
+			if (pathname === "/saved") return new Response("Saved");
+			if (pathname === "/hold") {
+				const { promise, resolve } = Promise.withResolvers<void>();
+				held.add(resolve);
+				await promise;
+				return new Response("released");
+			}
+			return new Response(
+				`<button id="save" onclick="fetch('/saved').then(r => r.text()).then(t => document.body.append(Object.assign(document.createElement('button'), { textContent: t })))">Save</button>` +
+					`<button id="hang" onclick="fetch('/hold')">Hang</button>` +
+					`<script>function startPoll() { fetch('/hold'); setTimeout(() => { document.body.dataset.late = 'late'; }, 2500); }</script>`,
+				{ headers: { "content-type": "text/html" } },
+			);
+		},
+	});
+	return {
+		url: `http://127.0.0.1:${server.port}/`,
+		stop() {
+			for (const release of held) release();
+			server.stop(true);
+		},
+	};
+}
+
+const NAMES = "(await tab.observe()).elements.map(element => element.name)";
+
+describe("browser observe after an action", () => {
+	it.skipIf(!CHROMIUM_AVAILABLE)(
+		"shows the result of a fetch the click started",
+		async () => {
+			const pages = saveServer();
+			try {
+				const result = await runOnPage(
+					pages.url,
+					`
+						// Chromium holds the response 400 ms, so it is still on its way when observe() starts.
+						await page.emulateNetworkConditions({ download: -1, upload: -1, latency: 400 });
+						await tab.click("#save");
+						return ${NAMES};
+					`,
+				);
+				expect(result).toEqual(["Save", "Hang", "Saved"]);
+			} finally {
+				pages.stop();
+			}
+		},
+		45_000,
+	);
+
+	it.skipIf(!CHROMIUM_AVAILABLE)(
+		"reads the page within a short cell when the click's request never answers",
+		async () => {
+			const pages = saveServer();
+			try {
+				const result = await runOnPage(pages.url, `await tab.click("#hang"); return ${NAMES};`, 3_000);
+				expect(result).toEqual(["Save", "Hang"]);
+			} finally {
+				pages.stop();
+			}
+		},
+		45_000,
+	);
+
+	it.skipIf(!CHROMIUM_AVAILABLE)(
+		"does not wait for a request that was already open before the action",
+		async () => {
+			const pages = saveServer();
+			try {
+				const result = await runOnPage(
+					pages.url,
+					`
+						await tab.observe();
+						const sent = page.waitForRequest(request => request.url().endsWith("/hold"));
+						await tab.evaluate(() => startPoll());
+						await sent;
+						await tab.click("#save");
+						const names = ${NAMES};
+						return [names, await page.evaluate(() => document.body.dataset.late ?? "early")];
+					`,
+				);
+				expect(result).toEqual([["Save", "Hang", "Saved"], "early"]);
+			} finally {
+				pages.stop();
+			}
 		},
 		45_000,
 	);
