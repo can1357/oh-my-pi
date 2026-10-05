@@ -2456,6 +2456,39 @@ describe("Tool argument coercion", () => {
 				}),
 			).toThrow();
 		});
+
+		it("rejects an ambiguous two-string payload identically in either key order", () => {
+			const tool: Tool = {
+				name: "delete_this_file",
+				description: "",
+				parameters: type({ path: type("string") }),
+			};
+			const orders: Record<string, unknown>[] = [
+				{ alpha: "A.txt", beta: "B.txt" },
+				{ beta: "B.txt", alpha: "A.txt" },
+			];
+			const errors = orders.map(args => {
+				try {
+					validateToolArguments(tool, {
+						type: "toolCall",
+						id: "c-amb",
+						name: "delete_this_file",
+						arguments: args,
+					});
+					return null;
+				} catch (err) {
+					return (err as Error).message;
+				}
+			});
+
+			// Both key orders must fail the same way. Only the echoed payload
+			// differs, since that is the model's own arguments verbatim.
+			expect(errors[0]).not.toBeNull();
+			expect(errors[1]).not.toBeNull();
+			expect(errors[1]!.split("Received arguments:")[0]).toEqual(errors[0]!.split("Received arguments:")[0]);
+			expect(errors[0]).toContain('Validation failed for tool "delete_this_file"');
+			expect(errors[0]).toContain("path must be a string (was missing)");
+		});
 	});
 });
 
