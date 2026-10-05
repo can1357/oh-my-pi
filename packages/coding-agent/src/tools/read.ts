@@ -2,7 +2,7 @@ import type { ReadToolDetails } from "@oh-my-pi/pi-tui/tools/read";
 import type { Stats } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { type EditStore, notebookToEditableText } from "@oh-my-pi/pi-natives";
+import { type EditStore, FileType, glob, notebookToEditableText } from "@oh-my-pi/pi-natives";
 import { type } from "@oh-my-pi/omptype";
 import type {
 	AgentTool,
@@ -83,8 +83,12 @@ import { postProcessToolResult, resolveOutputMaxColumns } from "./output-meta";
 import {
 	expandPath,
 	formatPathRelativeToCwd,
+	hasGlobPathChars,
+	parseFindPattern,
 	probeLiteralPathExists,
 	resolveReadPathAsync,
+	resolveSearchBase,
+	resolveSearchResultPath,
 	splitDelimitedPathEntry,
 	splitMixedUrlPathList,
 	splitPathAndSelPreferringLiteral,
@@ -177,6 +181,9 @@ const MAX_PROFILE_SUMMARY_BYTES = 32 * 1024 * 1024;
 const MAX_URL_RAW_INLINE_BYTES = DEFAULT_MAX_BYTES;
 /** Largest file buffered whole for the local read path and speculative snapshots. */
 export const SNAPSHOT_MAX_BYTES = 4 * 1024 * 1024;
+/** Maximum files read from one glob; sort all matches before applying this cap. */
+const MAX_READ_GLOB_FILES = 50;
+const READ_GLOB_TIMEOUT_MS = 5000;
 /** LF byte, scanned natively to find line boundaries in a buffered file. */
 const LF_BYTE = 0x0a;
 
@@ -1045,16 +1052,76 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		routedUrlPredicate?: (entry: string) => boolean,
 	): Promise<AgentToolResult<ReadToolDetails> | null> {
 		const parts = await splitDelimitedPathEntry(readPath, this.session.cwd, { routedUrlPredicate });
-		return parts ? this.#readDelimitedParts(parts, signal) : null;
+		if (parts) return this.#readDelimitedParts(parts, signal);
+		// Called only after local literal/archive/sqlite resolution has failed.
+		// Internal URL list recovery must never reinterpret a URL as a host glob.
+		if (routedUrlPredicate) return null;
+		const target = await splitPathAndSelPreferringLiteral(readPath, this.session.cwd);
+		if (
+			!hasGlobPathChars(target.path) ||
+			(await probeLiteralPathExists(target.path, this.session.cwd)) !== "missing"
+		) {
+			return null;
+		}
+		const parsed = parseFindPattern(expandPath(target.path));
+		const base = resolveSearchBase(parsed.basePath, this.session.cwd);
+		// A missing base or zero matches is not an answer yet: `[`/`{` also appear in
+		// literal route paths (`app/[slug]/page.tsx`), so fall through to suffix and
+		// approved-plan recovery and the ordinary not-found error.
+		if ((await probeLiteralPathExists(base, this.session.cwd)) === "missing") return null;
+		const timeoutSignal = AbortSignal.timeout(READ_GLOB_TIMEOUT_MS);
+		const combinedSignal = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal;
+		let result: Awaited<ReturnType<typeof glob>>;
+		try {
+			result = await glob({
+				pattern: parsed.globPattern,
+				path: base,
+				fileType: FileType.File,
+				hidden: true,
+				gitignore: true,
+				recursive: false,
+				signal: combinedSignal,
+				timeoutMs: READ_GLOB_TIMEOUT_MS,
+			});
+		} catch (error) {
+			throwIfAborted(signal);
+			const nativeAbort =
+				error instanceof Error &&
+				(error.name === "AbortError" || error.name === "TimeoutError" || error.message.includes("Aborted:"));
+			if (!nativeAbort) throw error;
+			if (!timeoutSignal.aborted && !(error instanceof Error && error.message.includes("Aborted: Timeout"))) {
+				throw new ToolAbortError();
+			}
+			throw new ToolError(
+				`Glob '${target.path}' timed out after ${READ_GLOB_TIMEOUT_MS / 1000}s: the scan is incomplete, NOT proof of absence. Scope it to a deeper directory or list exact paths with ';'.`,
+			);
+		}
+		throwIfAborted(signal);
+		const matches = result.matches
+			.map(match => formatPathRelativeToCwd(resolveSearchResultPath(base, match.path), this.session.cwd))
+			.sort();
+		if (matches.length === 0) return null;
+		const selected = matches.slice(0, MAX_READ_GLOB_FILES);
+		const notes = [`Note: expanded ${target.path} to ${selected.length} files: ${selected.join(", ")}`];
+		if (matches.length > selected.length) {
+			notes.push(
+				`Note: ${matches.length - selected.length} files omitted (limit ${MAX_READ_GLOB_FILES}); narrow the glob '${target.path}' to read them.`,
+			);
+		}
+		const selectedParts = selected.map(match => (target.sel === undefined ? match : `${match}:${target.sel}`));
+		return this.#readDelimitedParts(selectedParts, signal, notes, true);
 	}
 
-	async #readDelimitedParts(parts: string[], signal?: AbortSignal): Promise<AgentToolResult<ReadToolDetails>> {
-		const notice = `Note: interpreted as ${parts.length} paths: ${parts.join(", ")}`;
-		const notes = [notice];
+	async #readDelimitedParts(
+		parts: string[],
+		signal?: AbortSignal,
+		notes: string[] = [`Note: interpreted as ${parts.length} paths: ${parts.join(", ")}`],
+		localPaths = false,
+	): Promise<AgentToolResult<ReadToolDetails>> {
 		const content: Array<TextContent | ImageContent> = [];
 		const displayReadTargets: string[] = [];
 		const displayReadTargetLinks: Array<string | null> = [];
-		let pendingText = notice;
+		let pendingText = notes.join("\n");
 		const flushText = () => {
 			if (pendingText.length === 0) return;
 			content.push({ type: "text", text: pendingText });
@@ -1066,7 +1133,10 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 
 		for (const part of parts) {
 			try {
-				const result = await this.execute("read-delimited-part", { path: part }, signal);
+				// Glob matches are filesystem targets even when their names look like URLs.
+				const readPath = localPaths ? path.resolve(this.session.cwd, part) : part;
+				const result = await this.execute("read-delimited-part", { path: readPath }, signal);
+				if (result.details?.notes) notes.push(...result.details.notes);
 				const nestedTargets = result.details?.displayReadTargets;
 				if (nestedTargets?.length) {
 					const nestedLinks = result.details?.displayReadTargetLinks;
@@ -1758,11 +1828,9 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 				return this.#handleInternalUrl(located.url, located.spec, parsed, question, signal);
 			}
 			if (isNotFoundError(error)) {
-				// A documented semicolon list is explicit user scope, while suffix
-				// matching is only fuzzy recovery. Fan the list out before a broad
-				// workspace scan, but only after literal/archive/sqlite resolution so
-				// real resources containing semicolons retain precedence.
-				if (readPath.includes(";")) {
+				// Explicit lists/globs precede fuzzy suffix recovery, but only after
+				// literal/archive/sqlite handling so existing resources still win.
+				if (!located && (readPath.includes(";") || hasGlobPathChars(localReadPath))) {
 					const delimitedResult = await this.#tryReadDelimitedPaths(readPath, signal);
 					if (delimitedResult) return delimitedResult;
 				}
@@ -1806,7 +1874,11 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 				if (!recoveredApprovedPlan && !suffixResolution) {
 					const delimitedResult = await this.#tryReadDelimitedPaths(readPath, signal);
 					if (delimitedResult) return delimitedResult;
-					throw new ToolError(`Path '${localReadPath}' not found`);
+					throw new ToolError(
+						hasGlobPathChars(localReadPath)
+							? `Glob '${localReadPath}' matched no files`
+							: `Path '${localReadPath}' not found`,
+					);
 				}
 			} else {
 				throw error;

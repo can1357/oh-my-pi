@@ -213,6 +213,10 @@
 - Fixed project configuration from `~/.omp` being incorrectly applied to unrelated working directories under the user's home directory.
 - Fixed `omp update` failing on standalone-binary installs when npm advertised a version whose GitHub release was never published; the updater now installs the newest published release instead ([#12913](https://github.com/can1357/oh-my-pi/issues/12913)).
 
+### Changed
+
+- Changed `read` to expand local globs (`src/*.js`) into per-file snapshots, sorted and capped at 50 files, so agents batch orientation reads through `read` instead of `cat` and keep anchors for edits ([#14085](https://github.com/can1357/oh-my-pi/pull/14085) by [@NaC-L](https://github.com/NaC-L)).
+
 ## [18.4.10] - 2026-10-02
 
 ### Added

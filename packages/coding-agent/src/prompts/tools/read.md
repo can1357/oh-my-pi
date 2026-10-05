@@ -1,4 +1,5 @@
 Use `read` for static web; browser only if needed.
+Batch targets with `;`-lists or local globs; each file gets its own snapshot header. Glob selectors apply to each match; at most 50 files per glob, narrow for more.
 
 Path suffixes: :50 or :50- starts at line 50; :50-200 inclusive; :50+150 counts lines; :-60 last 60; commas join ranges (:5-16,960-973) or individual lines (:19,59). :raw verbatim without anchors/prefixes; combine :2-4:raw or :raw:2-4. :conflicts lists one line per unresolved merge block. SVG/SVGZ default text; :img PNG, :raw original. Video requires ffmpeg/ffprobe: bare preview grid+metadata, :412 frame, :1h5m42s/:90s/:01:23 time.
 
