@@ -10,6 +10,10 @@
 
 - Codex native-lane steering rejections (`unsupported_native_inflight_message`) now classify as retryable from their error text alone, matching the provider's own classification, and `AIError.isCodexSteerRejection()` identifies them so the agent retry can stay on the same model ([#14242](https://github.com/can1357/oh-my-pi/pull/14242) by [@alphastorm](https://github.com/alphastorm))
 - Fixed replayed Responses and Codex history, including persisted Codex user/developer and assistant items, sending `detail: "original"` images to endpoints whose `supportsImageDetailOriginal` is off ([#13687](https://github.com/can1357/oh-my-pi/pull/13687) by [@alphastorm](https://github.com/alphastorm)).
+### Fixed
+
+- Fixed Google quota errors delivered inside a stream chunk being classified as terminal account-quota exhaustion when the identical body over HTTP is a retryable per-minute throttle. The in-band paths dropped the `google.rpc.ErrorInfo` reason, so a throttle arriving in-band rotated a healthy sibling credential instead of retrying ([#14445](https://github.com/can1357/oh-my-pi/pull/14445) by [@F0Rextasy](https://github.com/F0Rextasy)).
+- Fixed Google quota errors delivered inside a stream chunk being classified as terminal account-quota exhaustion when the identical body over HTTP is a retryable per-minute throttle. The in-band paths dropped the `google.rpc.ErrorInfo` reason, so a throttle arriving in-band rotated a healthy sibling credential instead of retrying.
 
 ## [18.6.1] - 2026-10-04
 

@@ -36,6 +36,7 @@ import type {
 	GenerateContentConfig,
 	GenerateContentParameters,
 	GenerateContentResponse,
+	GoogleStreamError,
 	Part,
 	ThinkingConfig,
 	ThinkingLevel,
@@ -646,14 +647,12 @@ export async function consumeGoogleStream<T extends GoogleApiType>(args: {
 
 	for await (const chunk of googleStream) {
 		if (chunk.error) {
-			// Keep the RPC status alongside the message: an in-band quota failure
-			// is classified from this text, and `RESOURCE_EXHAUSTED` is the only
-			// account-exhaustion signal some of these chunks carry (#13090).
-			const detail =
-				chunk.error.message && chunk.error.status
-					? `${chunk.error.message} (${chunk.error.status})`
-					: chunk.error.message || chunk.error.status || "unknown error";
-			const message = `Google API stream error: ${detail}`;
+			// Same body as the HTTP non-2xx path, so it must be read the same way:
+			// the RPC `status`/`details` residue is the only signal separating an
+			// account billing cap (terminal) from a per-minute throttle (retryable),
+			// and joining message with status dropped it, making every in-band
+			// billing 429 rotate a healthy sibling credential (#13090).
+			const message = `Google API stream error: ${formatGoogleErrorText(chunk.error, true)}`;
 			throw typeof chunk.error.code === "number" && chunk.error.code >= 400
 				? new AIError.GoogleApiError(message, chunk.error.code)
 				: new AIError.ProviderResponseError(message, { provider: model.provider, kind: "output" });
@@ -1126,6 +1125,28 @@ function paramsToWireBody(params: GenerateContentParameters): Record<string, unk
 }
 
 /**
+ * Human-readable text for any Google error body, delivered as a non-2xx HTTP
+ * response or as an in-band `chunk.error`.
+ *
+ * With `includeResidue`, the RPC `status`/`details` fragment is appended as JSON
+ * rather than as prose, because `parseGoogleRpcRateLimitReason` recovers it with
+ * `parseJsonBody` (first `{` to last `}`) and then reads `error.details[].reason`.
+ * That reason is the only thing telling an account billing cap (terminal, rotate
+ * nothing and stop) from a per-minute throttle (retryable), so a human-readable
+ * join of `message` and `status` cannot substitute for it.
+ *
+ * Both delivery paths must agree. #13090 added the fragment to the HTTP path
+ * only, so the identical quota body classified as a retryable throttle over HTTP
+ * and as terminal account exhaustion in-band, burning a healthy sibling
+ * credential as a false quota.
+ */
+export function formatGoogleErrorText(error: GoogleStreamError, includeResidue: boolean): string {
+	const detail = error.message || error.status || "unknown error";
+	if (!includeResidue || (error.status === undefined && error.details === undefined)) return detail;
+	return `${detail} ${JSON.stringify({ error: { status: error.status, details: error.details } })}`;
+}
+
+/**
  * Human-readable message for a non-2xx Google response.
  *
  * On a usage-limit status the RPC `status`/`details` residue is kept after the
@@ -1138,16 +1159,10 @@ function paramsToWireBody(params: GenerateContentParameters): Record<string, unk
 export function extractGoogleErrorMessage(errorText: string, status: number): string {
 	if (!errorText) return "Unknown error";
 	try {
-		const parsed = JSON.parse(errorText) as {
-			error?: { message?: string; status?: string; details?: unknown[] };
-		};
+		const parsed = JSON.parse(errorText) as { error?: GoogleStreamError };
 		const error = parsed.error;
 		if (!error?.message) return errorText;
-		if (!AIError.isUsageLimitStatus(status)) return error.message;
-		const residue = { error: { status: error.status, details: error.details } };
-		return error.status === undefined && error.details === undefined
-			? error.message
-			: `${error.message} ${JSON.stringify(residue)}`;
+		return formatGoogleErrorText(error, AIError.isUsageLimitStatus(status));
 	} catch {
 		return errorText;
 	}

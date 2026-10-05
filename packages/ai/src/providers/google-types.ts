@@ -183,5 +183,22 @@ export interface GenerateContentResponse {
 	responseId?: string;
 	promptFeedback?: PromptFeedback;
 	/** In-band stream failure (quota, internal error) delivered as a final JSON event. */
-	error?: { code?: number; message?: string; status?: string };
+	error?: GoogleStreamError;
+}
+
+/**
+ * In-band stream failure (quota, internal error) delivered as a final JSON event.
+ *
+ * `details` carries the `google.rpc.*` residue (`ErrorInfo.reason`,
+ * `RetryInfo.retryDelay`) that separates an account billing cap (terminal) from
+ * a per-minute throttle (retryable). The HTTP body and the in-band chunk are the
+ * same shape, so the type must be too: dropping `details` here made the same
+ * body classify differently by delivery framing and burned a healthy sibling
+ * credential as a false quota (#13090).
+ */
+export interface GoogleStreamError {
+	code?: number;
+	message?: string;
+	status?: string;
+	details?: unknown[];
 }

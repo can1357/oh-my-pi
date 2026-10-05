@@ -138,15 +138,24 @@ function asRecord(value: unknown): Record<string, unknown> | undefined {
 }
 
 function parseJsonBody(errorMessage: string): Record<string, unknown> | undefined {
-	const start = errorMessage.indexOf("{");
 	const end = errorMessage.lastIndexOf("}");
-	if (start < 0 || end < start) return undefined;
-	try {
-		const parsed: unknown = JSON.parse(errorMessage.slice(start, end + 1));
-		return asRecord(parsed);
-	} catch {
-		return undefined;
+	if (end < 0) return undefined;
+	// Scan every `{` left to right: a Google error message can itself contain
+	// braces, which would make the first candidate unparseable and hide the
+	// `{"error":{"status","details"}}` residue appended after it.
+	for (
+		let start = errorMessage.indexOf("{");
+		start >= 0 && start < end;
+		start = errorMessage.indexOf("{", start + 1)
+	) {
+		try {
+			const parsed = asRecord(JSON.parse(errorMessage.slice(start, end + 1)));
+			if (parsed !== undefined) return parsed;
+		} catch {
+			continue;
+		}
 	}
+	return undefined;
 }
 
 /**

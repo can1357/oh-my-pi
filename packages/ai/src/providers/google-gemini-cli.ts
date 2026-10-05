@@ -43,6 +43,7 @@ import {
 	convertTools,
 	EMPTY_STREAM_BASE_DELAY_MS,
 	type GoogleThinkingLevel,
+	formatGoogleErrorText,
 	hasMeaningfulGoogleContent,
 	isThinkingPart,
 	MAX_EMPTY_STREAM_RETRIES,
@@ -55,6 +56,7 @@ import {
 	retainThoughtSignature,
 	startTextOrThinkingBlock,
 } from "./google-shared";
+import type { GoogleStreamError } from "./google-types";
 
 /**
  * Thinking level for Gemini 3 models. Re-exported from `google-shared` so existing
@@ -469,7 +471,7 @@ interface CloudCodeAssistResponseChunk {
 		promptFeedback?: { blockReason?: string; blockReasonMessage?: string };
 	};
 	/** In-band stream failure (quota, internal error) delivered as a final JSON event. */
-	error?: { code?: number; message?: string; status?: string };
+	error?: GoogleStreamError;
 	traceId?: string;
 }
 
@@ -777,8 +779,12 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 				);
 				for await (const chunk of chunks) {
 					if (chunk.error) {
-						const detail = chunk.error.message || chunk.error.status || "unknown error";
-						const message = `Cloud Code Assist stream error: ${detail}`;
+						// Same body as the HTTP non-2xx path, so it must be read the same way:
+						// the RPC `status`/`details` residue is the only signal separating an
+						// account billing cap (terminal) from a per-minute throttle (retryable),
+						// and dropping `details` here made every in-band billing 429 rotate a
+						// healthy sibling credential (#13090).
+						const message = `Cloud Code Assist stream error: ${formatGoogleErrorText(chunk.error, true)}`;
 						throw typeof chunk.error.code === "number" && chunk.error.code >= 400
 							? new AIError.GeminiCliApiError(message, chunk.error.code)
 							: new AIError.ProviderResponseError(message, { provider: model.provider, kind: "runtime" });
