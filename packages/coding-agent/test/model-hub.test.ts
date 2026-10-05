@@ -652,6 +652,112 @@ describe("ModelHub", () => {
 			expect(thinking).toContain("xhigh");
 			expect(thinking).not.toContain("max");
 		});
+		describe("quickPick", () => {
+			const reasoner = () => {
+				const model = getBundledModel("anthropic", "claude-opus-5-5");
+				if (!model) throw new Error("Expected bundled model anthropic/claude-opus-5-5");
+				return model;
+			};
+			test("Enter assigns default without a role strip; confirming thinking closes the hub", () => {
+				const model = reasoner();
+				const { hub, onAssign, onCancel } = createHub({ models: [model], scoped: true, hub: { quickPick: true } });
+
+				hub.handleInput("\n"); // sidebar → model list
+				hub.handleInput("\n"); // pick the model
+				expect(onAssign).toHaveBeenCalledTimes(1);
+				expect(onAssign.mock.calls[0]?.[1]).toBe("default");
+				expect(footerLine(hub.render(220))).toContain("xhigh"); // thinking strip, not the role strip
+				expect(onCancel).not.toHaveBeenCalled();
+
+				hub.handleInput("\n"); // keep the preselected level
+				expect(onAssign).toHaveBeenCalledTimes(1);
+				expect(onCancel).toHaveBeenCalledTimes(1);
+			});
+			test("Esc on the thinking strip keeps the assignment and closes the hub", () => {
+				const model = reasoner();
+				const { hub, onAssign, onCancel } = createHub({ models: [model], scoped: true, hub: { quickPick: true } });
+
+				hub.handleInput("\n");
+				hub.handleInput("\n");
+				hub.handleInput(ESC);
+				expect(onAssign).toHaveBeenCalledTimes(1);
+				expect(onCancel).toHaveBeenCalledTimes(1);
+			});
+			test("a changed thinking level is applied before the hub closes", async () => {
+				const model = reasoner();
+				const change = Promise.withResolvers<boolean>();
+				let calls = 0;
+				const onAssign = vi.fn(() => (++calls === 1 ? true : change.promise));
+				const { hub, onCancel } = createHub({
+					models: [model],
+					scoped: true,
+					hub: { quickPick: true },
+					callbacks: { onAssign },
+				});
+
+				hub.handleInput("\n");
+				hub.handleInput("\n");
+				hub.handleInput("\x1b[C"); // inherit → off
+				hub.handleInput("\n");
+				expect(onAssign).toHaveBeenCalledTimes(2);
+				expect(onCancel).not.toHaveBeenCalled();
+
+				change.resolve(true);
+				await change.promise;
+				await Promise.resolve();
+				expect(onCancel).toHaveBeenCalledTimes(1);
+			});
+			test("a rejected assignment keeps the hub open", async () => {
+				const model = reasoner();
+				const assignment = Promise.withResolvers<boolean>();
+				const onAssign = vi.fn(() => assignment.promise);
+				const { hub, onCancel } = createHub({
+					models: [model],
+					scoped: true,
+					hub: { quickPick: true },
+					callbacks: { onAssign },
+				});
+
+				hub.handleInput("\n");
+				hub.handleInput("\n");
+				assignment.resolve(false);
+				await assignment.promise;
+				await Promise.resolve();
+				expect(onCancel).not.toHaveBeenCalled();
+				expect(footerLine(hub.render(220))).not.toContain("xhigh");
+			});
+			test("a model without a thinking ladder closes the hub right after assignment", () => {
+				const model = makeModel("test", "plain-chat-model");
+				const { hub, onAssign, onCancel } = createHub({ models: [model], scoped: true, hub: { quickPick: true } });
+
+				hub.handleInput("\n");
+				hub.handleInput("\n");
+				expect(onAssign).toHaveBeenCalledTimes(1);
+				expect(onCancel).toHaveBeenCalledTimes(1);
+			});
+			test("a model that cannot fill default still opens the role strip", () => {
+				const model = makeModel("local", "parakeet-tdt-0.6b-v3", 128_000, undefined, "stt");
+				const { hub, onAssign, onCancel } = createHub({ models: [model], scoped: true, hub: { quickPick: true } });
+
+				hub.handleInput("\n");
+				hub.handleInput("\n");
+				expect(onAssign).not.toHaveBeenCalled();
+				expect(footerLine(hub.render(220))).toContain("dictation");
+				expect(onCancel).not.toHaveBeenCalled();
+			});
+			test("Roles-view thinking edits do not close the hub", () => {
+				const model = reasoner();
+				const settings = Settings.isolated({ modelRoles: { default: "anthropic/claude-opus-5-5" } });
+				const { hub, onCancel } = createHub({ models: [model], scoped: true, settings, hub: { quickPick: true } });
+
+				hub.handleInput(UP); // All models → Roles
+				hub.handleInput("\n"); // dive into rows
+				hub.handleInput("t");
+				expect(footerLine(hub.render(220))).toContain("xhigh");
+				hub.handleInput(ESC);
+				expect(onCancel).not.toHaveBeenCalled();
+			});
+		});
 		test("a model with no reasoning surface is assigned without a thinking strip", () => {
 			// inherit/off/auto are all no-ops for an STT/TTS/image model, so the
 			// assignment completes instead of parking on a dead strip (#13111).

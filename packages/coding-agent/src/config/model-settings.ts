@@ -106,6 +106,19 @@ export const cfgModelRoleStorage = register({
 	},
 });
 
+export const cfgModelHubQuickPick = register({
+	id: "modelHub.quickPick",
+	type: "boolean",
+	default: false,
+	ui: {
+		tab: "model",
+		group: "Prompt",
+		label: "One-Step Model Picker",
+		description:
+			"In /model, Enter on a model sets it as the default role and closes the hub once you confirm thinking. Roles and fallbacks stay reachable from the Roles view",
+	},
+});
+
 export const cfgModelRoles = register({ id: "modelRoles", type: "record", default: EMPTY_STRING_RECORD });
 
 /** Named model presets; no settings-panel UI — managed by `/modelpreset` and the model hub. */

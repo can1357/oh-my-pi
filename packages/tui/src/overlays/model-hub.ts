@@ -164,6 +164,12 @@ export interface ModelHubOptions {
 	initialProviderId?: string;
 	/** `provider/id` of the session's model, marked current in the native picker. */
 	currentSelector?: string;
+	/**
+	 * One-pick flow: Enter on a model assigns it to the `default` role directly (no role strip),
+	 * and the hub closes once the thinking choice is confirmed or kept. Models that cannot fill
+	 * `default` still open the role strip. The roles view and Assign mode are unchanged.
+	 */
+	quickPick?: boolean;
 }
 
 interface SidebarEntry extends HubSidebarEntry<"recent" | "roles" | "all" | "separator" | "provider"> {
@@ -204,6 +210,8 @@ type StripState =
 			returnToRoles: boolean;
 			/** Thinking value already committed for this strip. */
 			initialThinkingLevel?: ConfiguredThinkingLevel;
+			/** One-pick flow: close the hub when this strip finishes. */
+			closeHub?: boolean;
 	  })
 	| {
 			/** Footer text input naming a new role, or saving a model preset. */
@@ -382,6 +390,7 @@ export class ModelHubComponent implements Component {
 	#nativeVersion = 0;
 	#nativeCache: { version: number; picker: boolean; node: NativeNode } | undefined;
 	#currentSelector: string | undefined;
+	#quickPick: boolean;
 	/** The opening online catalog refresh is still in flight (an empty scope then shows as loading). */
 	#catalogRefreshing = false;
 	#kindTabsMemo: { candidates: readonly ModelBrowserItem[]; tabs: TspPickerProps["tabs"] } | undefined;
@@ -411,6 +420,7 @@ export class ModelHubComponent implements Component {
 		this.#scopedModels = scopedModels;
 		this.#callbacks = callbacks;
 		this.#currentSelector = options.currentSelector;
+		this.#quickPick = options.quickPick === true;
 
 		this.#browser = new ModelBrowser(settings, {
 			emptyText: () => this.#emptyStateMessage(),
@@ -1075,6 +1085,10 @@ export class ModelHubComponent implements Component {
 			}
 			return;
 		}
+		if (this.#quickPick && this.#settings.getRoleInfo("default").accepts(item.model)) {
+			this.#assignRole(item, "default", false, undefined, true);
+			return;
+		}
 		this.#openRoleStrip(item);
 	}
 
@@ -1123,9 +1137,15 @@ export class ModelHubComponent implements Component {
 	 * open the thinking strip — skipped for models with no reasoning surface,
 	 * where every chip would be a no-op ({@link #thinkingOptionsFor}).
 	 */
-	#assignRole(item: ModelBrowserItem, role: string, returnToRoles: boolean, scope?: ModelRoleSelectionScope): void {
+	#assignRole(
+		item: ModelBrowserItem,
+		role: string,
+		returnToRoles: boolean,
+		scope?: ModelRoleSelectionScope,
+		closeHub = false,
+	): void {
 		if (this.#settings.modelRoleStorage === "project" && scope === undefined) {
-			this.#openScopeStrip(item, role, returnToRoles);
+			this.#openScopeStrip(item, role, returnToRoles, closeHub);
 			return;
 		}
 
@@ -1142,13 +1162,15 @@ export class ModelHubComponent implements Component {
 		this.#finishAssignment(result, () => {
 			this.#refreshAfterMutation();
 			if (supported.length === 0) {
-				if (returnToRoles) {
+				if (closeHub) {
+					this.#callbacks.onCancel();
+				} else if (returnToRoles) {
 					this.#setActiveEntry("roles");
 					this.#focus = "list";
 				}
 				return;
 			}
-			this.#openThinkingStrip(item, role, returnToRoles, scope, level);
+			this.#openThinkingStrip(item, role, returnToRoles, scope, level, closeHub);
 		});
 	}
 
@@ -1248,12 +1270,12 @@ export class ModelHubComponent implements Component {
 		this.#strip = { kind: "role", item, chips, index: 0, returnToRoles: false };
 	}
 
-	#openScopeStrip(item: ModelBrowserItem, role: string, returnToRoles: boolean): void {
+	#openScopeStrip(item: ModelBrowserItem, role: string, returnToRoles: boolean, closeHub = false): void {
 		const chips: StripChip[] = [
 			{ label: "project", styled: theme.fg("accent", "project"), action: "scope", scope: "project" },
 			{ label: "global", styled: theme.fg("muted", "global"), action: "scope", scope: "global" },
 		];
-		this.#strip = { kind: "scope", item, role, chips, index: 0, returnToRoles };
+		this.#strip = { kind: "scope", item, role, chips, index: 0, returnToRoles, closeHub };
 	}
 
 	#openThinkingStrip(
@@ -1262,6 +1284,7 @@ export class ModelHubComponent implements Component {
 		returnToRoles: boolean,
 		scope?: ModelRoleSelectionScope,
 		committedLevel?: ConfiguredThinkingLevel,
+		closeHub = false,
 	): void {
 		const options = this.#thinkingOptionsFor(item.model);
 		const current =
@@ -1279,6 +1302,7 @@ export class ModelHubComponent implements Component {
 			chips,
 			index: preselect >= 0 ? preselect : 0,
 			returnToRoles,
+			closeHub,
 			initialThinkingLevel: current,
 		};
 	}
@@ -1421,10 +1445,15 @@ export class ModelHubComponent implements Component {
 		if (rowIndex >= 0) this.#roleIndex = rowIndex;
 	}
 
-	#closeStrip(): void {
+	/** Close the strip. A one-pick thinking strip also closes the hub unless `keepHubOpen` (the change is still being applied). */
+	#closeStrip(keepHubOpen = false): void {
 		const strip = this.#strip;
 		this.#strip = null;
 		this.#frame.chipRanges = [];
+		if (strip?.kind === "thinking" && strip.closeHub && !keepHubOpen) {
+			this.#callbacks.onCancel();
+			return;
+		}
 		if ((strip?.kind === "scope" || strip?.kind === "thinking") && strip.returnToRoles) {
 			this.#setActiveEntry("roles");
 			this.#focus = "list";
@@ -1469,7 +1498,7 @@ export class ModelHubComponent implements Component {
 			case "scope":
 				if (strip.role && chip.scope) {
 					this.#strip = null;
-					this.#assignRole(strip.item, strip.role, strip.returnToRoles, chip.scope);
+					this.#assignRole(strip.item, strip.role, strip.returnToRoles, chip.scope, strip.closeHub);
 				}
 				return;
 			case "thinking": {
@@ -1490,8 +1519,11 @@ export class ModelHubComponent implements Component {
 						strip.item.selector,
 						strip.scope,
 					);
-					this.#closeStrip();
-					this.#finishAssignment(result, () => this.#refreshAfterMutation());
+					this.#closeStrip(true);
+					this.#finishAssignment(result, () => {
+						this.#refreshAfterMutation();
+						if (strip.closeHub) this.#callbacks.onCancel();
+					});
 				} else {
 					this.#closeStrip();
 				}
