@@ -1,7 +1,8 @@
 /**
- * Codex Code Mode: collapse the direct tool surface for code_mode_only models
- * to a small keep-set and expose every other session tool through the eval
- * bridge, mirroring codex-rs ToolMode::CodeModeOnly.
+ * Code Mode: collapse the direct tool surface to a small keep-set and expose
+ * every other session tool through the eval bridge. The shape mirrors
+ * codex-rs ToolMode::CodeModeOnly, but OMP can apply it to any model whose
+ * eval transport supports the bridge.
  */
 
 import { logger } from "@oh-my-pi/pi-utils";
@@ -42,16 +43,16 @@ export interface CodeModeResolution {
 	directToolNames: Set<string>;
 }
 
-export function resolveCodeMode(args: {
-	provider: string;
+export interface ResolveCodeModeArgs {
 	toolMode?: string;
 	setting: "off" | "on" | "auto";
 	extraDirectTools?: readonly string[];
 	enabledToolNames: readonly string[];
 	evalTransportAvailable: boolean;
-}): CodeModeResolution {
+}
+
+export function resolveCodeMode(args: ResolveCodeModeArgs): CodeModeResolution {
 	const active =
-		args.provider === "openai-codex" &&
 		args.enabledToolNames.includes("eval") &&
 		args.evalTransportAvailable &&
 		(args.setting === "on" || (args.setting === "auto" && args.toolMode === "code_mode_only"));

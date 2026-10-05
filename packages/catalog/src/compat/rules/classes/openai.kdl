@@ -18,6 +18,9 @@ class "openai" {
 		revision "<5.2" {
 			thinking-efforts "minimal" "low" "medium" "high"
 		}
+		revision ">=5.6" {
+			tool-mode "code_mode_only"
+		}
 	}
 	family "codex" {
 		revision "<5.2" {
@@ -27,6 +30,14 @@ class "openai" {
 			models "*codex-mini*" {
 				thinking-efforts "medium" "high"
 			}
+		}
+		revision ">=5.6" {
+			tool-mode "code_mode_only"
+		}
+	}
+	family "codex-spark" {
+		revision ">=5.6" {
+			tool-mode "code_mode_only"
 		}
 	}
 	revision ">=5.2 <5.6" {

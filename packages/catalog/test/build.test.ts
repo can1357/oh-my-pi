@@ -136,6 +136,18 @@ describe("buildModel", () => {
 		});
 	});
 
+	it("materializes provider-agnostic Code Mode policy for GPT 5.6+ model identities", () => {
+		const gpt56 = buildModel(responsesSpec({ id: "gpt-5.6", provider: "custom-gateway" }));
+		const gpt6 = buildModel(responsesSpec({ id: "gpt-6-astra", provider: "custom-gateway" }));
+		const codexFamily = buildModel(responsesSpec({ id: "gpt-5.6-codex", provider: "custom-gateway" }));
+		const gpt55 = buildModel(responsesSpec({ id: "gpt-5.5", provider: "custom-gateway" }));
+
+		expect(gpt56.toolMode).toBe("code_mode_only");
+		expect(gpt6.toolMode).toBe("code_mode_only");
+		expect(codexFamily.toolMode).toBe("code_mode_only");
+		expect(gpt55.toolMode).toBeUndefined();
+	});
+
 	it("resolves a complete compat record for an openai-completions spec with no compat", () => {
 		const model = buildModel(completionsSpec());
 
