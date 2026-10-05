@@ -74,8 +74,8 @@ export const rpcCommands: readonly RpcCommandSpec[] = [
 	},
 	{
 		name: "open_session",
-		doc: "Continue the newest non-empty session in a directory, or start a fresh one there.",
-		params: { sessionDir: "string" },
+		doc: "Continue the newest non-empty session in a directory, or start a fresh one there. Give provider and modelId together to override the saved model; otherwise an unavailable saved model fails the request.",
+		params: { sessionDir: "string", "provider?": "string", "modelId?": "string" },
 		result: "OpenSessionResult",
 	},
 
@@ -246,8 +246,8 @@ export const rpcCommands: readonly RpcCommandSpec[] = [
 	},
 	{
 		name: "switch_session",
-		doc: "Switch to another session file.",
-		params: { sessionPath: "string" },
+		doc: "Switch to another session file. Give provider and modelId together to override the saved model; otherwise an unavailable saved model fails the request and keeps the current session.",
+		params: { sessionPath: "string", "provider?": "string", "modelId?": "string" },
 		result: "CancellationResult",
 	},
 	{

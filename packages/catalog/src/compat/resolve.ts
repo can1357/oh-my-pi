@@ -735,8 +735,15 @@ function resolveOpenAIResponsesPolicy(
 		supportsPromptCacheBreakpoints,
 		promptCacheBreakpointTtl: supportsPromptCacheBreakpoints ? "30m" : undefined,
 		strictResponsesPairing: isAzure || provider === "github-copilot",
-		supportsImageDetailOriginal: !isXaiHost && !modelMatchesHost(hostModel, "githubCopilot"),
+		// Azure's provider id alone only implies support while its endpoint is
+		// resolved at runtime; an explicit non-Azure baseUrl is a proxy, like Codex.
+		supportsImageDetailOriginal:
+			isOpenAIUrl ||
+			hostMatchesUrl(baseUrl, "azureOpenAI") ||
+			(isAzure && !baseUrl) ||
+			hostMatchesUrl(baseUrl, "openaiCodex"),
 		supportsReasoningSummary: !isXaiHost,
+		statefulResponses: undefined,
 		supportsAllTurnsReasoningContext: false,
 		supportsConfigurationUpdate: false,
 		supportsSteering: false,
@@ -853,6 +860,7 @@ function pickResponsesOnly(compat: ResolvedOpenAIResponsesCompat): ResponsesOnly
 		cacheControlFormat: compat.cacheControlFormat,
 		requiresReasoningOffJuiceInstruction: compat.requiresReasoningOffJuiceInstruction,
 		supportsReasoningSummary: compat.supportsReasoningSummary,
+		statefulResponses: compat.statefulResponses,
 		isVercelGatewayHost: compat.isVercelGatewayHost,
 	} satisfies ResponsesOnlyCompat;
 }

@@ -5,6 +5,11 @@
 ### Added
 
 - Added OpenZoo live model discovery from its keyless local proxy, including pricing and a single `auto` router entry.
+- Added an optional `statefulResponses` compat field for OpenAI Responses models, kept through OpenRouter's Responses dispatch ([#13686](https://github.com/can1357/oh-my-pi/pull/13686) by [@alphastorm](https://github.com/alphastorm)).
+
+### Changed
+
+- Changed OpenAI Responses endpoints other than OpenAI, Azure OpenAI, and Codex (custom and local servers, proxies including `azure`/`openai-codex` providers pointed at a non-Azure/non-Codex `baseUrl`, OpenRouter) to default `supportsImageDetailOriginal` to `false`, so snapcompact frames and computer screenshots go out as `detail: "auto"` instead of failing on servers that reject `original`; set `compat.supportsImageDetailOriginal: true` to opt a host in ([#13687](https://github.com/can1357/oh-my-pi/pull/13687) by [@alphastorm](https://github.com/alphastorm)).
 
 ## [18.6.2] - 2026-10-04
 

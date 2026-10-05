@@ -423,10 +423,10 @@ falls back to spawning the replacement with inherited terminal streams.
 2. Disconnect the agent event subscription, abort in-flight work, and run the optional pre-switch reconciler.
 3. Flush pending bash/session writes and capture rollback state: session manager state; agent messages and all queues; model/thinking/service tiers; tools and prompts; provider/cache ids; memory promotion; and checkpoint rewind state.
 4. Clear agent and next-turn queues. For a different file, drain/detach advisor recorders.
-5. `sessionManager.setSessionFile(sessionPath)`, update provider-cache/session ids and memory keys, build the display context, and rehydrate checkpoint state.
+5. `sessionManager.setSessionFile(sessionPath)`, update provider-cache/session ids and memory keys, build the display context, resolve the recorded model, and rehydrate checkpoint state. When no recorded model can be restored for a different file, the switch fails here with `Could not restore model <provider/id>` (see below).
 6. Emit `session_switch` with `reason: "resume"`.
 7. Replace agent messages, reset advisor state, and synchronize todos. Close cached provider sessions for a different file, or for a same-file reload whose replay messages changed.
-8. Restore an available persisted model. If the loaded branch ended with an interrupted turn, append its synthetic abort message and rebuild context.
+8. Apply the resolved (or explicitly requested) model. If the loaded branch ended with an interrupted turn, append its synthetic abort message and rebuild context.
 9. Restore configured/effective thinking and per-family service tiers, falling back to current settings when the target branch has no corresponding entries.
 10. For a different transcript, reset memory context; for any conversation rewrite, clear session-scoped tool state.
 11. Reconnect agent events, run the optional session-switch reconciler (interactive mode uses it to re-enter persisted modes such as plan), and best-effort refresh the workspace-root system-prompt block. Reconciler/prompt-refresh errors are logged rather than rolling back the committed switch.
@@ -438,6 +438,8 @@ If a throwing step in the guarded transition fails, `switchSession()` restores t
 Normal resume switching opens an existing transcript. Because it delegates to
 `setSessionFile()`, a missing/empty explicit target can instead materialize a
 new session at that path; malformed non-empty headers are rejected.
+
+Model restoration fails closed, like startup resume: a switch never silently moves a transcript to a model it did not record. Only a session created with `hasUI` and `allowSessionModelFallback` (the TUI), with `retry.modelFallback` on, keeps its current model instead, and warns `Could not restore model <provider/id>. Using <provider/id>`. An explicit `model` option (RPC `open_session`/`switch_session` with `provider`/`modelId`) replaces the recorded model, and a same-file reload keeps the current one.
 
 ## Event emissions and cancellation points
 

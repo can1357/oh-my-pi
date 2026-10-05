@@ -1666,8 +1666,9 @@ mod tests {
 		// IHDR width/height live at bytes 16..24, big-endian.
 		let dim = |off: usize| u32::from_be_bytes(png[off..off + 4].try_into().unwrap());
 		// "Hello there. General Kenobi!" is 28 chars on a 16-col grid: 2 rows
-		// of the 16px pitch — the height hugs them instead of padding to 128.
-		assert_eq!((dim(16), dim(20)), (128, 32), "declared geometry must match");
+		// of the 16px pitch. 32px is under the 64px floor, so the frame is 64px
+		// tall rather than padded to the 128px square.
+		assert_eq!((dim(16), dim(20)), (128, 64), "declared geometry must match");
 
 		// Glyph ink must sit in the top 13px of every 16px pitch row.
 		let grid = Grid { cols: 16, rows: 8, repeat: 1, cell_w: 8, cell_h: 16 };
@@ -1718,7 +1719,7 @@ mod tests {
 	}
 
 	#[test]
-	fn frame_height_hugs_used_rows() {
+	fn frame_height_hugs_used_rows_above_a_64px_floor() {
 		let dims = |png: &[u8]| {
 			let dim = |off: usize| u32::from_be_bytes(png[off..off + 4].try_into().unwrap());
 			(dim(16), dim(20))
@@ -1727,19 +1728,22 @@ mod tests {
 			png_bytes(render_snapcompact_png_sync(text.into(), opts).unwrap())
 		};
 		let opts_8x8 =
-			|| SnapcompactRenderOptions { size: 64, font: Some("8x8".into()), ..Default::default() };
-		// 8 cols of 8x8 cells: 10 chars span 2 rows -> 16px tall.
-		assert_eq!(dims(&render("0123456789", opts_8x8())), (64, 16));
+			|| SnapcompactRenderOptions { size: 256, font: Some("8x8".into()), ..Default::default() };
+		// 32 cols of 8x8 cells: 288 chars span 9 rows -> 72px tall.
+		let nine_rows = "x".repeat(32 * 9);
+		assert_eq!(dims(&render(&nine_rows, opts_8x8())), (256, 72));
 		// Dim toggles are zero-width and must not add a row.
-		assert_eq!(dims(&render("\u{e}01234567\u{f}", opts_8x8())), (64, 8));
+		assert_eq!(dims(&render(&format!("\u{e}{nine_rows}\u{f}"), opts_8x8())), (256, 72));
 		// Capacity-filling text keeps the full grid height.
-		assert_eq!(dims(&render(&"x".repeat(64), opts_8x8())), (64, 64));
+		assert_eq!(dims(&render(&"x".repeat(32 * 32), opts_8x8())), (256, 256));
+		// One 8px row is padded to the 64px floor vision backends accept.
+		assert_eq!(dims(&render("0123456789", opts_8x8())), (256, 64));
 		// Repeat shapes hug `usedRows * repeat` copy bands.
 		let repeated =
-			render("0123456789", SnapcompactRenderOptions { line_repeat: Some(2), ..opts_8x8() });
-		assert_eq!(dims(&repeated), (64, 32));
-		// Doc layout counts `\n` lines down the first column.
-		let doc = render("Hello there.\nSecond line", SnapcompactRenderOptions {
+			render(&nine_rows, SnapcompactRenderOptions { line_repeat: Some(2), ..opts_8x8() });
+		assert_eq!(dims(&repeated), (256, 144));
+		// Doc layout counts `\n` lines down the first column: 5 rows of 16px.
+		let doc = render("A\nB\nC\nD\nE", SnapcompactRenderOptions {
 			size: 256,
 			font: Some("8x13".into()),
 			cell_width: Some(8),
@@ -1748,16 +1752,19 @@ mod tests {
 			columns: Some(2),
 			..Default::default()
 		});
-		assert_eq!(dims(&doc), (256, 32));
-		// The stretch path hugs too (RGB output, 6x6 target cells).
-		let stretched = render("0123456789ab", SnapcompactRenderOptions {
-			size: 60,
-			font: Some("8x8".into()),
-			cell_width: Some(6),
-			cell_height: Some(6),
-			..Default::default()
-		});
-		assert_eq!(dims(&stretched), (60, 12));
+		assert_eq!(dims(&doc), (256, 80));
+		// The stretch path (RGB output, 6x6 target cells) hugs and floors too.
+		let stretched = |text: &str| {
+			render(text, SnapcompactRenderOptions {
+				size: 120,
+				font: Some("8x8".into()),
+				cell_width: Some(6),
+				cell_height: Some(6),
+				..Default::default()
+			})
+		};
+		assert_eq!(dims(&stretched(&"x".repeat(20 * 12))), (120, 72));
+		assert_eq!(dims(&stretched("0123456789ab")), (120, 64));
 	}
 
 	#[test]

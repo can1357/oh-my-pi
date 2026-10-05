@@ -2191,7 +2191,9 @@ export class InteractiveMode implements InteractiveModeContext {
 					this.showUserMessageSelector();
 					return;
 				case "resume":
-					void this.handleResumeSession(action.path);
+					this.handleResumeSession(action.path).catch((error: unknown) =>
+						this.showError(error instanceof Error ? error.message : String(error)),
+					);
 					return;
 				case "copy":
 					copyToClipboard(action.text).then(

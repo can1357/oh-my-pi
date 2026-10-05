@@ -1392,6 +1392,8 @@ export interface NewSessionParams {
 
 export interface OpenSessionParams {
 	sessionDir: string;
+	provider?: string;
+	modelId?: string;
 }
 
 export interface SetFastModeParams {
@@ -1565,6 +1567,8 @@ export interface ExportHtmlResult {
 
 export interface SwitchSessionParams {
 	sessionPath: string;
+	provider?: string;
+	modelId?: string;
 }
 
 export interface BranchParams {
