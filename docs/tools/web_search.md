@@ -144,7 +144,7 @@ Each provider search transport receives a hard timeout from `providers.webSearch
     - `num_search_results ?? limit` caps parsed sources locally; no upstream result-count field is sent.
     - Output may include `answer`, `sources`, `citations`, `searchQueries`, `usage.searchRequests`, `model`, `requestId`.
   - **Codex** — `packages/coding-agent/src/web/search/providers/codex.ts`
-    - Availability: OAuth credential for `openai-codex` in `agent.db`; refresh is lazy during search. This uses ChatGPT/Codex OAuth, not OpenAI API billing. Custom model-registry endpoints may instead use a configured API-key/command credential, but official OAuth/env credentials are refused for custom endpoints.
+    - Availability: OAuth credential for `openai-codex` in `agent.db`, or `OPENAI_CODEX_OAUTH_TOKEN` in the environment when no stored row exists; refresh is lazy during search. This uses ChatGPT/Codex OAuth, not OpenAI API billing. Custom model-registry endpoints may instead use a configured API-key/command credential, but official OAuth/env credentials are refused for custom endpoints.
     - Querying: streams the Codex Responses endpoint with hosted `web_search` and `search_context_size: "high"`. Google-style directives are re-emitted in the query.
     - Model: the selected `web` candidate. A completion without a `web_search_call` is rejected rather than presented as searched content.
     - Ignores `recency`, `max_tokens`, and `temperature`. `num_search_results ?? limit` slices parsed sources locally.
