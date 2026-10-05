@@ -107,6 +107,7 @@ The native bridge bounds in-flight delivery to eight batches and checks cancella
 - Rust `SearchResult`/`GrepResult` fields map to TS interfaces via N-API object conversion.
 - Counters are clamped before crossing N-API where needed.
 - `GrepResult.limitReached` is optional and emitted when true; `skippedOversized` counts oversized files that could not be searched even via the trailing bounded prefix pass.
+- `skippedBinary` counts files in content/count mode whose search stopped at the first NUL byte (binary detection), so matches past it were not searched. `filesWithMatches` mode does not use binary detection and is unaffected.
 - `onMatches` receives shaped batches during scanning; the positional directory `onMatch` callback receives one shaped entry after aggregation.
 
 ### Failure behavior

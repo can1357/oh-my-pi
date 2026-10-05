@@ -541,6 +541,7 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 					limitReached: false,
 				};
 				let skippedOversizedCount = 0;
+				let skippedBinaryCount = 0;
 				// Only a glob spelled without a directory prefix matches at any depth.
 				// The parsed base alone cannot distinguish `*.ts` from `./*.ts`.
 				try {
@@ -581,6 +582,7 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 								undefined,
 							);
 							skippedOversizedCount += targetResult.skippedOversized ?? 0;
+							skippedBinaryCount += targetResult.skippedBinary ?? 0;
 							limitReached = limitReached || Boolean(targetResult.limitReached);
 							totalMatches += targetResult.totalMatches;
 							filesSearched += targetResult.filesSearched;
@@ -629,6 +631,7 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 							undefined,
 						);
 						skippedOversizedCount = result.skippedOversized ?? 0;
+						skippedBinaryCount = result.skippedBinary ?? 0;
 					}
 				} catch (err) {
 					if (err instanceof Error && /^regex(?: parse)? error/i.test(err.message)) {
@@ -790,6 +793,12 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 					!oversizedNote && skippedOversizedCount > 0
 						? `Skipped ${skippedOversizedCount} unreadable large file(s); target them directly with \`read\``
 						: undefined;
+				// Native search stops at the first NUL byte, so a binary file reads as
+				// "no matches" even when its later bytes contain the pattern.
+				const binaryNote =
+					skippedBinaryCount > 0
+						? `Searched binary file(s) only up to the first NUL byte: ${skippedBinaryCount} file(s); inspect them with \`read\` using \`:raw\``
+						: undefined;
 				const archiveNote =
 					archiveUnreadable.length > 0
 						? `Skipped archive entries (search supports text members only): ${archiveUnreadable.join(", ")}`
@@ -801,7 +810,7 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 				const missingPathsNote =
 					missingPathsForNote.length > 0 ? `Skipped missing paths: ${missingPathsForNote.join(", ")}` : undefined;
 				const warningNote =
-					[missingPathsNote, archiveNote, oversizedNote, oversizedScanNote]
+					[missingPathsNote, archiveNote, oversizedNote, oversizedScanNote, binaryNote]
 						.filter((s): s is string => Boolean(s))
 						.join("\n") || undefined;
 				if (selectedMatches.length === 0) {

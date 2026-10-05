@@ -265,3 +265,35 @@ describe.skipIf(isWindows)("search with explicit walker-pruned file targets", ()
 		expect(details?.matchCount).toBe(1);
 	});
 });
+
+describe.skipIf(isWindows)("search over binary files", () => {
+	let cwd: string;
+
+	beforeEach(async () => {
+		cwd = await fs.mkdtemp(path.join(os.tmpdir(), "pi-search-binary-"));
+		await Bun.write(path.join(cwd, "blob.dll"), Buffer.from("MZ\0\u0001 binary-needle in the strings heap\n"));
+		await Bun.write(path.join(cwd, "notes.txt"), "plain text\n");
+	});
+
+	afterEach(async () => {
+		await removeWithRetries(cwd);
+	});
+
+	it("warns when a miss comes from a file searched only up to its first NUL byte", async () => {
+		const tool = new GrepTool(createTestSession(cwd));
+
+		const result = await tool.execute("search-binary", { pattern: "binary-needle" });
+
+		const text = getText(result);
+		expect(text).toContain("No matches found");
+		expect(text).toContain("first NUL byte");
+	});
+
+	it("does not warn when a miss only involves text files", async () => {
+		const tool = new GrepTool(createTestSession(cwd));
+
+		const result = await tool.execute("search-text-miss", { pattern: "absent-needle", path: "notes.txt" });
+
+		expect(getText(result)).not.toContain("NUL byte");
+	});
+});
