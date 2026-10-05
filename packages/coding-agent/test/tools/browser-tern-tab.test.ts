@@ -3,6 +3,16 @@ import { TernTab, userSourceFunction } from "@oh-my-pi/pi-coding-agent/tools/bro
 import { TernSocketClient } from "@oh-my-pi/pi-coding-agent/tools/browser/tern/wire";
 import { type FakeAnswer, type FakeDaemon, startFakeDaemon } from "./tern-fake-daemon";
 
+import * as fs from "node:fs/promises";
+import * as os from "node:os";
+import type { ScreenshotResult } from "@oh-my-pi/pi-coding-agent/tools/browser/tab-protocol";
+import * as path from "node:path";
+import { type ScreenshotChangeResult, encodePng } from "@oh-my-pi/pi-coding-agent/tools/browser/screenshot";
+import { RunOutput } from "@oh-my-pi/pi-coding-agent/tools/browser/run-output";
+
+/** Stand-in for the bytes Tern returns from a `capture` op: a solid 4x4 PNG. */
+const CAPTURE_PNG = encodePng({ width: 4, height: 4, pixels: new Uint8Array(4 * 4 * 4).fill(0x40) });
+
 interface FakePage {
 	/** Event batches the `events` op hands out, one per poll. */
 	eventBatches: Array<Array<Record<string, unknown>>>;
@@ -53,6 +63,9 @@ async function startPage(page: FakePage): Promise<FakeDaemon> {
 			}
 			case "dialog":
 				return { ok: {} };
+			// `capture` answers with base64 image bytes so a real image lands on disk.
+			case "capture":
+				return { ok: { data: CAPTURE_PNG.toString("base64") } };
 			default:
 				return { ok: {} };
 		}
@@ -88,6 +101,12 @@ async function openTab(
 		allowedDomains: ["example.test"],
 		...extra,
 	});
+}
+
+/** Narrow a screenshot result to its destination path, failing if change detection returned instead. */
+function destOf(result: string | ScreenshotChangeResult): string {
+	if (typeof result !== "string") throw new Error(`Expected a destination path, got ${JSON.stringify(result)}`);
+	return result;
 }
 
 describe("TernTab", () => {
@@ -351,5 +370,34 @@ describe("TernTab", () => {
 			/resourceType image: only the page's fetch and xhr requests can be routed/,
 		);
 		expect(fake.requests.length).toBe(before);
+	});
+	it("saves a capture to the requested path instead of the screenshot directory", async () => {
+		const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "omp-tern-shot-cwd-"));
+		const screenshotDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-tern-shot-dir-"));
+		const fake = await startPage({ eventBatches: [], kit: {} });
+		const tab = await openTab(fake);
+		const screenshots: ScreenshotResult[] = [];
+		tab.setRunContext({
+			session: { cwd, browserScreenshotDir: screenshotDir },
+			output: new RunOutput(),
+			screenshots,
+			signal: new AbortController().signal,
+			timeoutMs: 5_000,
+		});
+		try {
+			const requested = destOf(await tab.screenshot({ path: "shots/requested.png", silent: true }));
+			expect(requested).toBe(path.join(cwd, "shots", "requested.png"));
+			expect((await fs.readFile(requested)).subarray(0, 8)).toEqual(
+				Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+			);
+			expect(screenshots.map(entry => entry.dest)).toEqual([requested]);
+			expect(await fs.readdir(screenshotDir)).toEqual([]);
+
+			const fallback = destOf(await tab.screenshot({ silent: true }));
+			expect(path.dirname(fallback)).toBe(screenshotDir);
+		} finally {
+			await fs.rm(cwd, { recursive: true, force: true });
+			await fs.rm(screenshotDir, { recursive: true, force: true });
+		}
 	});
 });

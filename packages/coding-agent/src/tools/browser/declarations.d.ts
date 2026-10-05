@@ -333,6 +333,8 @@ interface BrowserExtractOptions {
 
 /** Options for capturing a browser screenshot. */
 interface BrowserScreenshotOptions {
+	/** Absolute or cwd-relative file to save the capture to, overriding the screenshot directory. */
+	path?: string;
 	/** Capture one matching element instead of the page. */
 	selector?: string;
 	/** Capture the complete scrollable page. */

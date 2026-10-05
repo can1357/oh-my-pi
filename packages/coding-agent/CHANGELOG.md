@@ -25,6 +25,10 @@
 - Fixed a mermaid `xychart` whose axis range is finer than floating-point precision freezing the terminal ([#14454](https://github.com/can1357/oh-my-pi/pull/14454) by [@H4vC](https://github.com/H4vC))
 - Fixed resuming a session whose saved model cannot be restored silently sending its transcript to another model. At startup, `--continue`/`--resume` in print, JSON, RPC, and `rpc-ui` modes (and in the TUI with `retry.modelFallback: false`) now exits with an error naming the model instead of using the settings-default or first available model. At runtime, RPC `open_session` and `switch_session`, ACP session load and fork, and extension session switches fail with `Could not restore model <provider/id>` and keep the current session instead of continuing on the current model; TUI `/resume` warns `Could not restore model <provider/id>. Using <provider/id>`, or fails with the error when `retry.modelFallback` is off. `/resume` also restores models from discovery-backed providers the way startup does ([#12274](https://github.com/can1357/oh-my-pi/issues/12274), [#13689](https://github.com/can1357/oh-my-pi/pull/13689) by [@alphastorm](https://github.com/alphastorm)).
 - Auto-retry no longer switches to the fallback chain when Codex's native turn lane rejects live steering after the response streamed reasoning; the turn retries on the same model with the steering message as ordinary input, and the chain is consulted only once no same-model retry is left ([#14242](https://github.com/can1357/oh-my-pi/pull/14242) by [@alphastorm](https://github.com/alphastorm))
+### Fixed
+
+- Fixed `tab.screenshot({ path })` being silently ignored: the capture now lands at the requested absolute or cwd-relative file instead of the browser screenshot directory ([#6576](https://github.com/can1357/oh-my-pi/issues/6576))
+- Fixed `tab.screenshot({ path })` writing re-encoded JPEG or WebP bytes under the caller's `.png` name, which made `tab.diffScreenshot()` fail to decode its own baseline: an explicit `path` now always saves the original capture ([#6576](https://github.com/can1357/oh-my-pi/issues/6576))
 
 ## [18.6.2] - 2026-10-04
 

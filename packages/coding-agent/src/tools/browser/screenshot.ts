@@ -7,6 +7,8 @@ import { encodeRawPng } from "../../utils/png-encode";
 
 /** Options accepted by tab.screenshot(). */
 export interface ScreenshotOptions {
+	/** Absolute or cwd-relative destination file, overriding the screenshot directory. */
+	path?: string;
 	selector?: string;
 	fullPage?: boolean;
 	silent?: boolean;

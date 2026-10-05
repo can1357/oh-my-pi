@@ -10,7 +10,7 @@ Drive real Chromium tabs from JavaScript or Python Eval with the global `browser
   - Navigation: `url`, `title`, `goto`, `back`, `forward`, `reload`, `pushState`.
   - Inspection: `observe`, `ariaSnapshot`, `a11y`, `screenshot`, `diffScreenshot`, `pdf`, `extract`, `text`, `html`, `value`, `attr`, `count`, `box`, `styles`, `isVisible`, `isEnabled`, `isChecked`.
   - Snapshot options: `observe({selector?, compact?})`; `ariaSnapshot(selector?, {interactive?, compact?, urls?, diff?})`.
-  - Screenshot options: `screenshot({selector?, fullPage?, silent?, annotate?, format?, quality?, ifChanged?, threshold?})`; `diffScreenshot(baselinePath, {threshold?, output?})`; `pdf({path?, format?, landscape?, scale?, printBackground?, margin?, pageRanges?})`.
+  - Screenshot options: `screenshot({selector?, fullPage?, silent?, annotate?, format?, quality?, ifChanged?, threshold?, path?})`; `path` saves the capture to that absolute or cwd-relative file instead of the screenshot directory, and the file always holds the original capture, so a `.png` baseline stays readable by `diffScreenshot`; `diffScreenshot(baselinePath, {threshold?, output?})`; `pdf({path?, format?, landscape?, scale?, printBackground?, margin?, pageRanges?})`.
   - Extraction options: `extract(format?, {selector?, outline?, filter?})`.
   - Interaction: `click`, `dblclick`, `hover`, `focus`, `check`, `uncheck`, `type`, `fill`, `press`, `keyDown`, `keyUp`, `mouseMove`, `mouseDown`, `mouseUp`, `clickAt`, `wheel`, `scroll`, `drag`, `highlight`, `scrollIntoView`, `select`, `uploadFile`.
   - Waiting: `waitFor`, `waitForSelector`, `waitForUrl`, `waitForText`.
