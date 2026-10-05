@@ -70,6 +70,18 @@ describe("buildOutputValidator", () => {
 		]);
 	});
 
+	it("honors explicit JTD nullable properties and still rejects null for required non-nullable fields", () => {
+		const { validator } = buildOutputValidator({
+			properties: {
+				name: { type: "string" },
+				receipt: { properties: { id: { type: "string" } }, nullable: true },
+			},
+			optionalProperties: { blocker: { type: "string", nullable: true } },
+		});
+		expect(validator?.validate({ name: "done", receipt: null, blocker: null }).success).toBe(true);
+		expect(validator?.validate({ name: null, receipt: null }).success).toBe(false);
+	});
+
 	it("exposes per-label sub-validators that accept items (not whole arrays) for elements properties", () => {
 		const { validator } = buildOutputValidator({
 			properties: {

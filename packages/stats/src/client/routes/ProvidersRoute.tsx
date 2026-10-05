@@ -6,6 +6,7 @@ import { buildColorLookup, OTHER_COLOR, SERIES_COLORS } from "../data/colors";
 import {
 	formatCompact,
 	formatCost,
+	formatErrorRate,
 	formatEstimatedCost,
 	formatInteger,
 	formatPercent,
@@ -178,7 +179,7 @@ export function ProvidersRoute({ active, range }: ProvidersRouteProps) {
 							/>
 							<Stat
 								label="Error rate"
-								value={formatPercent(t.requests > 0 ? t.failed / t.requests : 0)}
+								value={formatErrorRate(t.requests > 0 ? t.failed / t.requests : 0)}
 								hint={`${formatInteger(t.requests - t.failed)} succeeded`}
 							/>
 						</StatGrid>
@@ -338,7 +339,7 @@ function ProviderTotalsTable({
 						<span className="row" style={{ gap: 8, justifyContent: "flex-end" }}>
 							<span className="num dim">{formatInteger(p.failedRequests)}</span>
 							<Badge tone={p.failedRequests > 0 ? errorRateTone(rate) : "neutral"} mono>
-								{formatPercent(rate)}
+								{formatErrorRate(rate)}
 							</Badge>
 						</span>
 					);

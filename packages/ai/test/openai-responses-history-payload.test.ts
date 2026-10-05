@@ -6,10 +6,11 @@ import {
 } from "@oh-my-pi/pi-ai/providers/openai-codex-responses";
 import { type OpenAIResponsesOptions, streamOpenAIResponses } from "@oh-my-pi/pi-ai/providers/openai-responses";
 import { buildResponsesInput } from "@oh-my-pi/pi-ai/providers/openai-shared";
-import type { Context, Model, ModelSpec, ProviderSessionState, Tool } from "@oh-my-pi/pi-ai/types";
+import type { AssistantMessage, Context, Model, ModelSpec, ProviderSessionState, Tool } from "@oh-my-pi/pi-ai/types";
 import { createOpenAIResponsesHistoryPayload } from "@oh-my-pi/pi-ai/utils";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { type GeneratedProvider, getBundledModel } from "@oh-my-pi/pi-catalog/models";
+import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import * as piUtils from "@oh-my-pi/pi-utils";
 
 const TEST_INSTALLATION_ID = "00000000-0000-4000-8000-000000000001";
@@ -206,6 +207,52 @@ const resumedSameProviderWithStaleThinkingContext: Context = {
 	],
 };
 
+// A self-hosted Responses server that returns reasoning as plaintext
+// `reasoning_text` (no opaque `encrypted_content`) and caches the prompt it
+// rendered, prior-turn thinking included.
+const plaintextReasoningModel = buildModel({
+	id: "local-reasoner",
+	name: "Local Reasoner",
+	api: "openai-responses",
+	provider: "self-hosted",
+	baseUrl: "http://127.0.0.1:8000/v1",
+	reasoning: true,
+	input: ["text"],
+	cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+	contextWindow: 131_072,
+	maxTokens: 4_096,
+} satisfies ModelSpec<"openai-responses">);
+
+function plaintextReasoningItem(id: string, text: string): Record<string, unknown> {
+	return { type: "reasoning", id, summary: [], content: [{ type: "reasoning_text", text }] };
+}
+
+function selfHostedAssistantTurn(
+	content: AssistantMessage["content"],
+	nativeItems: Record<string, unknown>[],
+	stopReason: AssistantMessage["stopReason"],
+): AssistantMessage {
+	return {
+		role: "assistant",
+		content,
+		api: plaintextReasoningModel.api,
+		provider: plaintextReasoningModel.provider,
+		model: plaintextReasoningModel.id,
+		usage: issue5002ZeroUsage,
+		stopReason,
+		providerPayload: createOpenAIResponsesHistoryPayload(plaintextReasoningModel.provider, nativeItems),
+		timestamp: Date.now(),
+	};
+}
+
+function replayedReasoningTexts(input: unknown[] | undefined): string[] {
+	return (input ?? []).flatMap(item => {
+		const candidate = item as { type?: unknown; content?: unknown };
+		if (candidate.type !== "reasoning" || !Array.isArray(candidate.content)) return [];
+		return candidate.content.flatMap(part => (typeof part?.text === "string" ? [part.text] : []));
+	});
+}
+
 function markResponsesProviderSessionStateWarmed(providerSessionState: Map<string, ProviderSessionState>): void {
 	const state = providerSessionState.values().next().value as
 		| (ProviderSessionState & { nativeHistoryReplayWarmed: boolean })
@@ -343,6 +390,17 @@ function findResponsesInputItemByCallId(
 		if (item.type === type && item.call_id === callId) return item;
 	}
 	return undefined;
+}
+
+function listResponsesToolItems(input: unknown[] | undefined): Array<[unknown, unknown, unknown]> {
+	const tools: Array<[unknown, unknown, unknown]> = [];
+	for (const item of input ?? []) {
+		if (!isIssue5002Record(item)) continue;
+		if (item.type === "function_call" || item.type === "function_call_output") {
+			tools.push([item.type, item.call_id, item.name]);
+		}
+	}
+	return tools;
 }
 
 function collectResponsesInputImageDetails(input: unknown): string[] {
@@ -835,6 +893,316 @@ describe("OpenAI responses history payload", () => {
 		expect(containsUserInputText(payload.input, "summary that should be preserved")).toBe(true);
 		expect(containsAssistantOutputText(payload.input, "generic assistant that should be rebuilt")).toBe(true);
 		expect(containsAssistantOutputText(payload.input, "Canonical assistant")).toBe(false);
+	});
+
+	it("replays plaintext reasoning turns on a cold resumed session exactly as a warm session does", async () => {
+		// A new process resumes a session whose server returned plaintext reasoning.
+		// Rebuilding those turns dropped the reasoning and re-serialized tool
+		// arguments, so the first resumed request no longer extended the prefix the
+		// server cached and it prefilled the whole context again.
+		const context: Context = {
+			messages: [
+				{ role: "user", content: "Read note.txt, then reply.", timestamp: Date.now() },
+				selfHostedAssistantTurn(
+					[
+						{ type: "thinking", thinking: "Read the note first." },
+						{ type: "toolCall", id: "call_1|fc_1", name: "read", arguments: { path: "note.txt" } },
+					],
+					[
+						// An explicit `encrypted_content: null` carries no blob; the turn is still plaintext.
+						{ ...plaintextReasoningItem("rs_1", "Read the note first."), encrypted_content: null },
+						{
+							type: "function_call",
+							id: "fc_1",
+							call_id: "call_1",
+							name: "read",
+							arguments: '{"path": "note.txt"}',
+							status: "completed",
+						},
+					],
+					"toolUse",
+				),
+				{
+					role: "toolResult",
+					toolCallId: "call_1|fc_1",
+					toolName: "read",
+					content: [{ type: "text", text: "hello" }],
+					isError: false,
+					timestamp: Date.now(),
+				},
+				selfHostedAssistantTurn(
+					[
+						{ type: "thinking", thinking: "The note says hello." },
+						{ type: "text", text: "It says hello." },
+					],
+					[
+						plaintextReasoningItem("rs_2", "The note says hello."),
+						{
+							type: "message",
+							id: "msg_2",
+							role: "assistant",
+							status: "completed",
+							content: [{ type: "output_text", text: "It says hello.", annotations: [] }],
+						},
+					],
+					"stop",
+				),
+				{ role: "user", content: "Read it again.", timestamp: Date.now() },
+			],
+		};
+
+		const cold = (await captureResponsesPayload(plaintextReasoningModel, context, new Map())) as {
+			input?: unknown[];
+		};
+		const warm = (await captureResponsesPayload(plaintextReasoningModel, context)) as { input?: unknown[] };
+
+		expect(replayedReasoningTexts(cold.input)).toEqual(["Read the note first.", "The note says hello."]);
+		expect(findResponsesInputItemByCallId(cold.input ?? [], "function_call", "call_1")?.arguments).toBe(
+			'{"path": "note.txt"}',
+		);
+		expect(cold.input).toEqual(warm.input);
+	});
+
+	it("replays only plaintext reasoning turns without server-issued state on a cold session", async () => {
+		// Reasoning alone does not make a turn safe to replay across processes: an
+		// `encrypted_content` blob or a surviving item id is exactly what #488's
+		// backends bind to one connection, and summary-only reasoning is no evidence
+		// of a plaintext-reasoning server. Those turns stay rebuilt even when an
+		// earlier turn of the same request replays natively.
+		const context: Context = {
+			messages: [
+				{ role: "user", content: "Read a.txt and b.txt, then draw them.", timestamp: Date.now() },
+				selfHostedAssistantTurn(
+					[{ type: "toolCall", id: "call_a|fc_a", name: "read", arguments: { path: "a.txt" } }],
+					[
+						plaintextReasoningItem("rs_a", "Start with a.txt."),
+						{
+							type: "function_call",
+							id: "fc_a",
+							call_id: "call_a",
+							name: "read",
+							arguments: '{"path": "a.txt"}',
+						},
+					],
+					"toolUse",
+				),
+				{
+					role: "toolResult",
+					toolCallId: "call_a|fc_a",
+					toolName: "read",
+					content: [{ type: "text", text: "alpha" }],
+					isError: false,
+					timestamp: Date.now(),
+				},
+				selfHostedAssistantTurn(
+					[{ type: "toolCall", id: "call_b|fc_b", name: "read", arguments: { path: "b.txt" } }],
+					[
+						{ ...plaintextReasoningItem("rs_b", "Now b.txt."), encrypted_content: "enc_b" },
+						{
+							type: "function_call",
+							id: "fc_b",
+							call_id: "call_b",
+							name: "read",
+							arguments: '{"path": "b.txt"}',
+						},
+					],
+					"toolUse",
+				),
+				{
+					role: "toolResult",
+					toolCallId: "call_b|fc_b",
+					toolName: "read",
+					content: [{ type: "text", text: "beta" }],
+					isError: false,
+					timestamp: Date.now(),
+				},
+				selfHostedAssistantTurn(
+					[{ type: "text", text: "Drawn." }],
+					[
+						plaintextReasoningItem("rs_c", "Draw both."),
+						{ type: "image_generation_call", id: "ig_c", status: "completed", result: "aW1hZ2U=" },
+						{
+							type: "message",
+							role: "assistant",
+							status: "completed",
+							content: [{ type: "output_text", text: "Drawn.", annotations: [] }],
+						},
+					],
+					"stop",
+				),
+				{ role: "user", content: "Summarize.", timestamp: Date.now() },
+				selfHostedAssistantTurn(
+					[{ type: "text", text: "Summary." }],
+					[
+						{ type: "reasoning", id: "rs_d", summary: [{ type: "summary_text", text: "Summarize both." }] },
+						{
+							type: "message",
+							role: "assistant",
+							status: "completed",
+							content: [{ type: "output_text", text: "Summary.", annotations: [] }],
+						},
+					],
+					"stop",
+				),
+				{ role: "user", content: "Thanks.", timestamp: Date.now() },
+			],
+		};
+
+		const payload = (await captureResponsesPayload(plaintextReasoningModel, context, new Map())) as {
+			input?: unknown[];
+		};
+		const input = payload.input ?? [];
+
+		expect(
+			input.map(item => {
+				const candidate = item as { type?: unknown; role?: unknown; call_id?: unknown };
+				return candidate.call_id ? `${candidate.type}:${candidate.call_id}` : (candidate.type ?? candidate.role);
+			}),
+		).toEqual([
+			"user",
+			"reasoning",
+			"function_call:call_a",
+			"function_call_output:call_a",
+			"function_call:call_b",
+			"function_call_output:call_b",
+			"message",
+			"user",
+			"message",
+			"user",
+		]);
+		expect(replayedReasoningTexts(input)).toEqual(["Start with a.txt."]);
+		expect(findResponsesInputItemByCallId(input, "function_call", "call_a")?.arguments).toBe('{"path": "a.txt"}');
+		expect(containsEncryptedReasoning(input)).toBe(false);
+		expect(JSON.stringify(input)).not.toContain("ig_c");
+	});
+
+	describe("summary-only reasoning on a warm session (#14288)", () => {
+		// Servers that stream reasoning as summary text return reasoning items
+		// without `reasoning_text`. A warm session replays them natively, so the
+		// targets that require `reasoning_text` on every turn (DeepSeek family)
+		// need it filled in, as the cold rebuild already does.
+		function summaryOnlyReasoningContext(model: Model<"openai-responses">): Context {
+			const turn = {
+				api: model.api,
+				provider: model.provider,
+				model: model.id,
+				usage: issue5002ZeroUsage,
+			} as const;
+			return {
+				messages: [
+					{ role: "user", content: "Read a.txt.", timestamp: Date.now() },
+					{
+						...turn,
+						role: "assistant",
+						content: [
+							{ type: "thinking", thinking: "Open a.txt." },
+							{ type: "toolCall", id: "call_a", name: "read", arguments: { path: "a.txt" } },
+						],
+						stopReason: "toolUse",
+						providerPayload: createOpenAIResponsesHistoryPayload(model.provider, [
+							{ type: "reasoning", id: "rs_a", summary: [{ type: "summary_text", text: "Open a.txt." }] },
+							{ type: "function_call", call_id: "call_a", name: "read", arguments: '{"path":"a.txt"}' },
+						]),
+						timestamp: Date.now(),
+					},
+					{
+						role: "toolResult",
+						toolCallId: "call_a",
+						toolName: "read",
+						content: [{ type: "text", text: "A" }],
+						isError: false,
+						timestamp: Date.now(),
+					},
+					{
+						// No native payload: the warm path replays the thinking signature.
+						...turn,
+						role: "assistant",
+						content: [
+							{
+								type: "thinking",
+								thinking: "It says A.",
+								thinkingSignature: JSON.stringify({
+									type: "reasoning",
+									id: "rs_b",
+									summary: [{ type: "summary_text", text: "It says A." }],
+								}),
+							},
+							{ type: "text", text: "A." },
+						],
+						stopReason: "stop",
+						timestamp: Date.now(),
+					},
+					{ role: "user", content: "Thanks.", timestamp: Date.now() },
+				],
+			};
+		}
+
+		it("carries the cold rebuild's reasoning_text for targets that require it", async () => {
+			const model = getOpenAIReasoningModel("commandcode", "deepseek/deepseek-v4.1-flash");
+			const context = summaryOnlyReasoningContext(model);
+			const options = { reasoning: Effort.Medium };
+			const cold = (await captureResponsesPayload(model, context, new Map(), options)) as { input?: unknown[] };
+			const warm = (await captureResponsesPayload(model, context, undefined, options)) as { input?: unknown[] };
+
+			expect(replayedReasoningTexts(cold.input)).toEqual(["Open a.txt.", "It says A."]);
+			expect(replayedReasoningTexts(warm.input)).toEqual(["Open a.txt.", "It says A."]);
+		});
+
+		it("replays summary-only items verbatim for targets that do not require reasoning_text", async () => {
+			const context = summaryOnlyReasoningContext(plaintextReasoningModel);
+			const warm = (await captureResponsesPayload(plaintextReasoningModel, context, undefined, {
+				reasoning: Effort.Medium,
+			})) as { input?: unknown[] };
+
+			expect(replayedReasoningTexts(warm.input)).toEqual([]);
+		});
+
+		it("replays encrypted summary items verbatim on OpenRouter tool-call turns", async () => {
+			// OpenRouter requires reasoning on tool-call turns for every reasoning
+			// model; an OpenAI-family item's opaque `encrypted_content` is its
+			// reasoning, so the summary must not be injected as `reasoning_text`.
+			const model = getOpenAIReasoningModel("openrouter", "openai/gpt-5");
+			const reasoningItem = {
+				type: "reasoning",
+				encrypted_content: "enc_blob",
+				summary: [{ type: "summary_text", text: "Open a.txt." }],
+			};
+			const context: Context = {
+				messages: [
+					{ role: "user", content: "Read a.txt.", timestamp: Date.now() },
+					{
+						api: model.api,
+						provider: model.provider,
+						model: model.id,
+						usage: issue5002ZeroUsage,
+						role: "assistant",
+						content: [
+							{ type: "thinking", thinking: "Open a.txt." },
+							{ type: "toolCall", id: "call_a", name: "read", arguments: { path: "a.txt" } },
+						],
+						stopReason: "toolUse",
+						providerPayload: createOpenAIResponsesHistoryPayload(model.provider, [
+							reasoningItem,
+							{ type: "function_call", call_id: "call_a", name: "read", arguments: '{"path":"a.txt"}' },
+						]),
+						timestamp: Date.now(),
+					},
+					{
+						role: "toolResult",
+						toolCallId: "call_a",
+						toolName: "read",
+						content: [{ type: "text", text: "A" }],
+						isError: false,
+						timestamp: Date.now(),
+					},
+				],
+			};
+			const warm = (await captureResponsesPayload(model, context, undefined, { reasoning: Effort.Medium })) as {
+				input?: Array<{ type?: string }>;
+			};
+
+			expect(warm.input?.filter(item => item.type === "reasoning")).toEqual([reasoningItem]);
+		});
 	});
 
 	it("prefers assistant native history snapshots for openai-codex-responses", async () => {
@@ -1759,6 +2127,212 @@ describe("OpenAI responses history payload", () => {
 			call_id: callId,
 			output: "Tool execution was aborted.",
 		});
+	});
+
+	it("keeps an invocation-text tool name from another API out of the Responses request", async () => {
+		// Shape of a GLM-5.3 (openai-completions) turn whose gateway returned the
+		// whole tool invocation as the name; OpenAI rejected the replay with
+		// `Invalid 'input[401].name': string too long ... length 9654`.
+		const invocationName = "eval>\n<code>\n".padEnd(9654, "print('step')\n");
+		const usage = {
+			input: 0,
+			output: 0,
+			cacheRead: 0,
+			cacheWrite: 0,
+			totalTokens: 0,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+		};
+		const context: Context = {
+			messages: [
+				{ role: "user", content: "Run the script", timestamp: 1 },
+				{
+					role: "assistant",
+					content: [
+						{ type: "text", text: "Running the script." },
+						{ type: "toolCall", id: "chatcmpl-tool-invocation", name: invocationName, arguments: {} },
+						{ type: "toolCall", id: "chatcmpl-tool-read", name: "read", arguments: { path: "README.md" } },
+					],
+					api: "openai-completions",
+					provider: "zai",
+					model: "glm-5.3",
+					usage,
+					stopReason: "toolUse",
+					timestamp: 2,
+				},
+				{
+					role: "toolResult",
+					toolCallId: "chatcmpl-tool-invocation",
+					toolName: invocationName,
+					content: [{ type: "text", text: "Tool not found" }],
+					isError: true,
+					timestamp: 3,
+				},
+				{
+					role: "toolResult",
+					toolCallId: "chatcmpl-tool-read",
+					toolName: "read",
+					content: [{ type: "text", text: "file contents" }],
+					isError: false,
+					timestamp: 4,
+				},
+				{ role: "user", content: "continue", timestamp: 5 },
+			],
+		};
+		const model = getOpenAIReasoningModel("openai", "gpt-5-mini");
+		const payload = (await captureResponsesPayload(model, context)) as { input?: unknown[] };
+		expect(listResponsesToolItems(payload.input)).toEqual([
+			["function_call", "chatcmpl-tool-read", "read"],
+			["function_call_output", "chatcmpl-tool-read", undefined],
+		]);
+		expect(containsAssistantOutputText(payload.input, "Running the script.")).toBe(true);
+	});
+
+	it("drops malformed tool names from same-model native history replay", async () => {
+		const malformedName = 'bash\0arg_key="command"\0arg_value="ls -la"';
+		const assistantMessage = {
+			...makeAssistantMessage(
+				[
+					{ type: "reasoning", id: "rs_1", summary: [], encrypted_content: "enc_tools" },
+					{ type: "function_call", id: "fc_bad", call_id: "call_bad", name: malformedName, arguments: "{}" },
+					{
+						type: "function_call",
+						id: "fc_read",
+						call_id: "call_read",
+						name: "read",
+						arguments: '{"path":"README.md"}',
+					},
+				],
+				true,
+			),
+			content: [
+				{ type: "toolCall" as const, id: "call_bad|fc_bad", name: malformedName, arguments: {} },
+				{ type: "toolCall" as const, id: "call_read|fc_read", name: "read", arguments: { path: "README.md" } },
+			],
+			stopReason: "toolUse" as const,
+		};
+		const context: Context = {
+			messages: [
+				{ role: "user", content: "List the repo", timestamp: Date.now() },
+				assistantMessage,
+				{
+					role: "toolResult",
+					toolCallId: "call_bad|fc_bad",
+					toolName: malformedName,
+					content: [{ type: "text", text: "Tool not found" }],
+					isError: true,
+					timestamp: Date.now(),
+				},
+				{
+					role: "toolResult",
+					toolCallId: "call_read|fc_read",
+					toolName: "read",
+					content: [{ type: "text", text: "file contents" }],
+					isError: false,
+					timestamp: Date.now(),
+				},
+				{ role: "user", content: "continue", timestamp: Date.now() },
+			],
+		};
+		const model = getOpenAIReasoningModel("openai", "gpt-5-mini");
+		const providerSessionState = new Map<string, ProviderSessionState>();
+		await captureResponsesPayload(model, context, providerSessionState);
+		markResponsesProviderSessionStateWarmed(providerSessionState);
+		const payload = (await captureResponsesPayload(model, context, providerSessionState)) as { input?: unknown[] };
+		expect(containsEncryptedReasoning(payload.input)).toBe(true);
+		expect(listResponsesToolItems(payload.input)).toEqual([
+			["function_call", "call_read", "read"],
+			["function_call_output", "call_read", undefined],
+		]);
+	});
+
+	it("drops a same-model snapshot's paired malformed output and still notes a genuine orphan", () => {
+		const malformedName = "bad invocation text";
+		const assistantMessage = {
+			...makeAssistantMessage(
+				[
+					{ type: "reasoning", id: "rs_keep", summary: [], encrypted_content: "enc_keep" },
+					{ type: "function_call", call_id: "call_shared", name: malformedName, arguments: "{}" },
+					{ type: "function_call_output", call_id: "call_shared", output: "Tool not found" },
+					{
+						type: "function_call",
+						call_id: "call_shared",
+						name: "read",
+						arguments: '{"path":"README.md"}',
+					},
+					{ type: "function_call_output", call_id: "call_shared", output: "file contents" },
+					{ type: "function_call_output", call_id: "call_genuine_orphan", output: "unrelated orphan" },
+				],
+				true,
+			),
+			stopReason: "toolUse" as const,
+		};
+		const input = buildResponsesInput({
+			model: getOpenAIReasoningModel("openai", "gpt-5-mini"),
+			context: {
+				messages: [
+					{ role: "user", content: "List the repo", timestamp: 1 },
+					assistantMessage,
+					{ role: "user", content: "continue", timestamp: 2 },
+				],
+			},
+			strictResponsesPairing: true,
+			supportsImageDetailOriginal: true,
+			nativeHistory: { replay: true, filterReasoning: false },
+			repairOrphanOutputs: true,
+		});
+		const wire = JSON.stringify(input);
+		expect(wire).not.toContain(malformedName);
+		expect(wire).not.toContain("Tool not found");
+		expect(wire).not.toContain("[Orphan tool result; call_id=call_shared]");
+		expect(wire).toContain("[Orphan tool result; call_id=call_genuine_orphan]: unrelated orphan");
+		expect(containsEncryptedReasoning(input)).toBe(true);
+		expect(listResponsesToolItems(input)).toEqual([
+			["function_call", "call_shared", "read"],
+			["function_call_output", "call_shared", undefined],
+		]);
+		expect(findResponsesInputItemByCallId(input, "function_call_output", "call_shared")?.output).toBe(
+			"file contents",
+		);
+	});
+
+	it("drops malformed names from Codex user and developer providerPayload replay", () => {
+		const malformedName = "bad invocation text";
+		const items = [
+			{ type: "reasoning", id: "rs_user", summary: [], encrypted_content: "enc_user" },
+			{ type: "function_call", call_id: "call_bad", name: malformedName, arguments: "{}" },
+			{ type: "function_call_output", call_id: "call_bad", output: "Tool not found" },
+			{ type: "function_call", call_id: "call_ok", name: "read", arguments: "{}" },
+			{ type: "function_call_output", call_id: "call_ok", output: "ok" },
+		];
+		const codexModel = getBundledModel<"openai-codex-responses">("openai-codex", "gpt-5.5");
+		if (!codexModel) throw new Error("expected bundled Codex model");
+		for (const role of ["user", "developer"] as const) {
+			const replay = convertCodexResponsesMessages(codexModel, {
+				messages: [
+					{
+						role,
+						content: "continue",
+						timestamp: 1,
+						providerPayload: createOpenAIResponsesHistoryPayload("openai-codex", items, false),
+					},
+				],
+			});
+			const wire = JSON.stringify(replay);
+			expect(wire).not.toContain(malformedName);
+			expect(wire).not.toContain("Tool not found");
+			expect(replay).toContainEqual(
+				expect.objectContaining({ type: "function_call", call_id: "call_ok", name: "read" }),
+			);
+			expect(replay).toContainEqual(
+				expect.objectContaining({ type: "function_call_output", call_id: "call_ok", output: "ok" }),
+			);
+			expect(
+				replay.some(
+					item =>
+						item.type === "reasoning" && "encrypted_content" in item && item.encrypted_content === "enc_user",
+				),
+			).toBe(true);
+		}
 	});
 
 	it("converts orphan function_call_output replayed from providerPayload into an assistant note (issue #1351)", async () => {

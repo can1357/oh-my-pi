@@ -98,8 +98,8 @@ function shimSpecifier(file: string): string {
 
 /**
  * Derive the bundled legacy Pi module surface from current package exports.
- * Named wildcard exports are expanded from source; root catch-alls stay out to
- * avoid importing CLI entrypoints and other non-extension surfaces.
+ * Named wildcard exports are expanded from source. Only catalog's root catch-all
+ * is safe to expand: other packages expose CLI entrypoints at that level.
  */
 export async function collectBundledPiEntries(): Promise<BundledPiEntry[]> {
 	const entries: BundledPiEntry[] = [];
@@ -139,7 +139,8 @@ export async function collectBundledPiEntries(): Promise<BundledPiEntry[]> {
 			if (!sourcePattern) continue;
 			const pattern = parseWildcardPattern(exportKey, sourcePattern);
 			if (!pattern || !/\.(ts|tsx|mts|cts|js|mjs|cjs|jsx)$/.test(pattern.sourceSuffix)) continue;
-			if (pattern.exportPrefix === "" || pattern.exportPrefix === "/") continue;
+			const catalogRootWildcard = pkg.dir === "catalog" && exportKey === "./*";
+			if ((pattern.exportPrefix === "" || pattern.exportPrefix === "/") && !catalogRootWildcard) continue;
 
 			const sourceDir = path.join(packageRoot, pattern.sourcePrefix);
 			try {
@@ -160,6 +161,7 @@ export async function collectBundledPiEntries(): Promise<BundledPiEntry[]> {
 				matches.sort();
 				for (const match of matches) {
 					if (!match.endsWith(pattern.sourceSuffix)) continue;
+					if (catalogRootWildcard && match.includes("/")) continue;
 					const basename = match.slice(0, match.length - pattern.sourceSuffix.length);
 					const segments = basename.split("/");
 					// Every directory on the way has to be importable too: a private or

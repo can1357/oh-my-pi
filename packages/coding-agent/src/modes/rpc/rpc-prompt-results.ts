@@ -13,7 +13,7 @@ import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { stripRawHttpRequestDiagnostics } from "@oh-my-pi/pi-ai/utils/http-inspector";
 import type { AgentSessionEvent } from "../../session/agent-session";
-import { isRpcSessionSettled, type RpcSettleSession } from "./rpc-session-settle";
+import { isRpcSessionSettled, type RpcScheduledTurnProbe, type RpcSettleSession } from "./rpc-session-settle";
 import type { RpcPromptError, RpcPromptResultFrame, RpcPromptStatus } from "./rpc-types";
 
 /** A prompt accepted by RPC mode whose `prompt_result` is still owed; see {@link RpcPromptResults.begin}. */
@@ -54,11 +54,20 @@ export class RpcPromptResults {
 	#open = new Map<RpcPromptTicket, OpenPrompt>();
 	readonly #session: RpcSettleSession;
 	readonly #output: (frame: RpcPromptResultFrame) => void;
+	readonly #scheduledTurn: RpcScheduledTurnProbe | undefined;
 
-	/** @param session read for queue state and, at report time, the `sessionSettled` predicate. */
-	constructor(session: RpcSettleSession, output: (frame: RpcPromptResultFrame) => void) {
+	/**
+	 * @param session read for queue state and, at report time, the `sessionSettled` predicate.
+	 * @param scheduledTurn reports a host-scheduled turn not yet admitted (not settled).
+	 */
+	constructor(
+		session: RpcSettleSession,
+		output: (frame: RpcPromptResultFrame) => void,
+		scheduledTurn?: RpcScheduledTurnProbe,
+	) {
 		this.#session = session;
 		this.#output = output;
+		this.#scheduledTurn = scheduledTurn;
 	}
 
 	/** Open a ticket before the prompt starts any work. Close it with exactly one report or {@link discard}. */
@@ -102,14 +111,17 @@ export class RpcPromptResults {
 	}
 
 	/**
-	 * Mark every open prompt aborted after a session transition. Transitions
-	 * detach the agent before aborting it, so the interrupted run never
-	 * publishes a terminal `agent_end` for them.
+	 * Mark every open prompt aborted after a session transition (host command or
+	 * extension). Transitions detach the agent before aborting it, so the
+	 * interrupted run never publishes a terminal `agent_end` for them.
 	 */
 	abortOpen(): void {
 		for (const [ticket, open] of this.#open) {
 			if (open.waiting) this.#report(ticket, true, { status: "aborted" });
-			else open.ownOutcome ??= { status: "aborted" };
+			// A prompt with no run started since it was accepted was not detached: a
+			// command still running (for example the extension command that made the
+			// change) keeps its ticket for the run it starts in the new session.
+			else if (this.#agentStarts > open.startsAtBegin) open.ownOutcome ??= { status: "aborted" };
 		}
 	}
 
@@ -146,7 +158,7 @@ export class RpcPromptResults {
 				id: ticket.id,
 				agentInvoked,
 				status: outcome.status,
-				sessionSettled: isRpcSessionSettled(this.#session),
+				sessionSettled: isRpcSessionSettled(this.#session, this.#scheduledTurn),
 			};
 			if (outcome.error) frame.error = outcome.error;
 			this.#output(frame);
