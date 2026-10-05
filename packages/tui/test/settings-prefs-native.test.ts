@@ -275,6 +275,34 @@ describe("settings as a native prefs page", () => {
 		});
 	});
 
+	it("refreshes the chip row and its tab badge when a chip is toggled while the submenu is open", () => {
+		const { selector, values } = harness();
+		send(selector, { type: "action", key: "", act: "page", value: "providers", mods: [] });
+		send(selector, { type: "activate", key: "", item: "providers.order" });
+		expect(prefs(selector).props.editing?.row).toBe("providers.order");
+
+		send(selector, { type: "change", key: "", item: "providers.order", value: ["a", "c"] });
+		expect(values.get("providers.order")).toEqual(["a", "c"]);
+		const after = prefs(selector).props;
+		expect(row(after, "providers.order")).toMatchObject({
+			changed: true,
+			control: { values: ["a", "c"] },
+		});
+		expect(after.pages.find(p => p.id === "providers")?.changed).toBe(1);
+		// The user keeps working in the submenu the toggle came from.
+		expect(after.editing?.row).toBe("providers.order");
+		// The submenu itself took the new order, so the refresh did not come
+		// from silently dropping the toggle and letting the row catch up.
+		const openRows = selector
+			.render(100)
+			.map(line => Bun.stripANSI(line))
+			.filter(line => /[0-9]\. [AC]|·  B/.test(line));
+		expect(openRows.length).toBe(3);
+		expect(openRows.some(line => line.includes("1. A"))).toBe(true);
+		expect(openRows.some(line => line.includes("2. C"))).toBe(true);
+		expect(openRows.some(line => line.includes("·  B"))).toBe(true);
+	});
+
 	it("searches across pages, grouping results by page and section, and a page click leaves the search", () => {
 		const { selector } = harness();
 		selector.handleInput("t");

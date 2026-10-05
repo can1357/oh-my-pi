@@ -1095,6 +1095,9 @@ export class SettingsSelectorComponent implements Component {
 				const open = list.openSubmenu;
 				if (open?.id === id && open.component instanceof MultiSelectSubmenu) {
 					open.component.setValues(value);
+					// The native page applies a chip toggle without closing its
+					// editor, so the row and its tab badge only update here.
+					this.#refreshItems();
 					return;
 				}
 				const next = [...value];
