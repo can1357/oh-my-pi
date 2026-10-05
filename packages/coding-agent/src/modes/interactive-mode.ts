@@ -1556,6 +1556,8 @@ export class InteractiveMode implements InteractiveModeContext {
 	#planReviewOwner: object | undefined;
 	#planReviewCancel: (() => void) | undefined;
 	#planReviewPick: ((choice: string) => void) | undefined;
+	/** Runs once when the open review's overlay is hidden; set by `showPlanReview`'s `onClose`. */
+	#planReviewOnHide: (() => void) | undefined;
 	#pendingPlanReview:
 		| {
 				reviewId: string;
@@ -5224,6 +5226,8 @@ export class InteractiveMode implements InteractiveModeContext {
 			annotationState?: PlanReviewAnnotationState;
 			onAnnotationStateChange?: (state: PlanReviewAnnotationState) => void;
 			initialIndex?: number;
+			/** Called once, with the settled choice, when the review overlay is hidden. */
+			onClose?: (choice: string | undefined) => void;
 		},
 		extra?: { slider?: HookSelectorSlider },
 	): Promise<string | undefined> {
@@ -5232,9 +5236,11 @@ export class InteractiveMode implements InteractiveModeContext {
 		const owner = pending ?? {};
 		const { promise, resolve } = Promise.withResolvers<string | undefined>();
 		let settled = false;
+		let picked: string | undefined;
 		const finish = (choice: string | undefined): void => {
 			if (settled) return;
 			settled = true;
+			picked = choice;
 			if (this.#planReviewOwner === owner) {
 				this.#planReviewCancel = undefined;
 				this.#planReviewPick = undefined;
@@ -5245,6 +5251,8 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#planReviewOwner = owner;
 		this.#planReviewCancel = () => finish(undefined);
 		this.#planReviewPick = choice => finish(choice);
+		const onClose = dialogOptions?.onClose;
+		this.#planReviewOnHide = onClose ? () => onClose(picked) : undefined;
 		const overlay = new PlanReviewOverlay(
 			planContent,
 			{
@@ -5284,26 +5292,33 @@ export class InteractiveMode implements InteractiveModeContext {
 	#hidePlanReview(owner?: object): void {
 		if (owner !== undefined && this.#planReviewOwner !== owner) return;
 		this.#planReviewCancel?.();
+		const onHide = this.#planReviewOnHide;
 		this.#planReviewCancel = undefined;
 		this.#planReviewPick = undefined;
+		this.#planReviewOnHide = undefined;
 		this.#planReviewOverlayHandle?.hide();
 		this.#planReviewOverlayHandle = undefined;
 		this.#planReviewOverlay = undefined;
 		this.#planReviewOwner = undefined;
+		onHide?.();
 	}
 
 	#dismissPlanReview(): void {
 		this.#hidePlanReview();
 	}
 
+	/**
+	 * Answers the open plan review as if the operator picked `choice`: backs `ctx.resolvePlanReview`.
+	 * Refine feedback is sent verbatim; it only has to be non-blank.
+	 */
 	resolvePlanReview(reviewId: string, choice: PlanReviewChoice, input?: { feedback?: string }): boolean {
 		const pending = this.#pendingPlanReview;
 		const pick = this.#planReviewPick;
 		if (!pending || pending.reviewId !== reviewId || !pick) return false;
 		const option = pending.options.find(item => item.id === choice);
 		if (!option || option.disabled) return false;
-		const feedback = input?.feedback?.trim();
-		if (choice === "refine" && !feedback) return false;
+		const feedback = input?.feedback;
+		if (choice === "refine" && !feedback?.trim()) return false;
 		pending.remote = { choice, feedback };
 		pick(option.label);
 		return true;
@@ -6512,6 +6527,11 @@ export class InteractiveMode implements InteractiveModeContext {
 		const reviewSessionId = this.sessionManager.getSessionId();
 		this.#pendingPlanReview = { reviewId, options: reviewOptions };
 		const pending = this.#pendingPlanReview;
+		const extensionRunner = this.session.extensionRunner;
+		// `plan_review_resolved` reports the overlay closing, not the pick: a pick can
+		// leave it up (compaction runs behind it), and it only fires once every
+		// extension has been handed `plan_review_requested`.
+		const requestDelivered = Promise.withResolvers<void>();
 		const choicePromise = this.showPlanReview(
 			planContent,
 			"Plan mode - next step",
@@ -6532,10 +6552,20 @@ export class InteractiveMode implements InteractiveModeContext {
 					else this.#planReviewAnnotationState.delete(annotationStateKey);
 				},
 				disabledIndices: keepContextDisabled ? [PLAN_KEEP_CONTEXT_OPTION_INDEX] : undefined,
+				onClose: closedWith => {
+					if (!extensionRunner) return;
+					const resolved = {
+						type: "plan_review_resolved",
+						reviewId,
+						sessionId: reviewSessionId,
+						choice: reviewOptions.find(option => option.label === closedWith)?.id,
+						by: pending.remote ? "extension" : "local",
+					} as const;
+					void requestDelivered.promise.then(() => extensionRunner.emit(resolved));
+				},
 			},
 			{ slider },
 		);
-		const extensionRunner = this.session.extensionRunner;
 		const requestedDelivery = extensionRunner?.emit({
 			type: "plan_review_requested",
 			reviewId,
@@ -6545,20 +6575,13 @@ export class InteractiveMode implements InteractiveModeContext {
 			planContent,
 			options: reviewOptions,
 		});
+		void requestedDelivery?.then(
+			() => requestDelivered.resolve(),
+			() => requestDelivered.resolve(),
+		);
 		const choice = await choicePromise;
 		if (this.#pendingPlanReview === pending) this.#pendingPlanReview = undefined;
 		const remote = pending.remote;
-		if (requestedDelivery) {
-			void requestedDelivery.then(() =>
-				extensionRunner?.emit({
-					type: "plan_review_resolved",
-					reviewId,
-					sessionId: reviewSessionId,
-					choice: reviewOptions.find(option => option.label === choice)?.id,
-					by: remote ? "extension" : "local",
-				}),
-			);
-		}
 		const closePlanReview = (): void => {
 			this.#hidePlanReview(pending);
 			this.ui.requestRender();

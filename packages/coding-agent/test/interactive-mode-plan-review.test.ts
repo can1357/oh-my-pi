@@ -16,6 +16,7 @@ import { type PlanReviewAnnotationState, PlanReviewOverlay } from "@oh-my-pi/pi-
 import { InteractiveMode } from "@oh-my-pi/pi-coding-agent/modes/interactive-mode";
 import type {
 	Extension,
+	ExtensionContext,
 	ExtensionEvent,
 	PlanReviewRequestedEvent,
 	PlanReviewResolvedEvent,
@@ -89,9 +90,12 @@ function observeExtensionEvents(session: AgentSession, onEvent?: (event: Extensi
 	return events;
 }
 
-function planReviewExtension(name: string, onEvent: (event: ExtensionEvent) => void | Promise<void>): Extension {
+function planReviewExtension(
+	name: string,
+	onEvent: (event: ExtensionEvent, ctx: ExtensionContext) => void | Promise<void>,
+): Extension {
 	const handle = async (...args: unknown[]): Promise<void> => {
-		await onEvent(args[0] as ExtensionEvent);
+		await onEvent(args[0] as ExtensionEvent, args[1] as ExtensionContext);
 	};
 	const handlers: Extension["handlers"] = new Map();
 	handlers.set("plan_review_requested", [handle]);
@@ -111,6 +115,32 @@ function planReviewExtension(name: string, onEvent: (event: ExtensionEvent) => v
 		flags: new Map(),
 		shortcuts: new Map(),
 	};
+}
+
+/**
+ * An extension that records plan-review events and may answer each request
+ * through the `ctx` the runner hands its handler.
+ */
+function planReviewRecorder(
+	name: string,
+	answer?: (event: PlanReviewRequestedEvent, ctx: ExtensionContext) => void,
+): {
+	extension: Extension;
+	events: Array<PlanReviewRequestedEvent | PlanReviewResolvedEvent>;
+	resolved: Promise<PlanReviewResolvedEvent>;
+} {
+	const events: Array<PlanReviewRequestedEvent | PlanReviewResolvedEvent> = [];
+	const resolved = Promise.withResolvers<PlanReviewResolvedEvent>();
+	const extension = planReviewExtension(name, (event, ctx) => {
+		if (event.type === "plan_review_requested") {
+			events.push(event);
+			answer?.(event, ctx);
+		} else if (event.type === "plan_review_resolved") {
+			events.push(event);
+			resolved.resolve(event);
+		}
+	});
+	return { extension, events, resolved: resolved.promise };
 }
 
 describe("InteractiveMode plan review rendering", () => {
@@ -177,6 +207,23 @@ describe("InteractiveMode plan review rendering", () => {
 		currentTempDir?.removeSync();
 		setKeybindings(KeybindingsManager.inMemory());
 	});
+
+	/** Installs a real extension runner, initialized through the interactive mode's own context actions. */
+	async function loadExtensions(...extensions: Extension[]): Promise<ExtensionRunner> {
+		const runner = new ExtensionRunner(
+			extensions,
+			new ExtensionRuntime(),
+			tempDir.path(),
+			session.sessionManager,
+			modelRegistry,
+		);
+		Object.defineProperty(session, "extensionRunner", {
+			configurable: true,
+			get: () => runner,
+		});
+		await mode.initHooksAndCustomTools();
+		return runner;
+	}
 
 	it("exits empty plan mode without confirmation", async () => {
 		const planFilePath = "local://PLAN.md";
@@ -287,18 +334,17 @@ describe("InteractiveMode plan review rendering", () => {
 		const clear = vi.spyOn(mode, "handleClearCommand").mockResolvedValue();
 		const prompt = vi.spyOn(session, "prompt").mockResolvedValue(undefined as never);
 		let answered: boolean | undefined;
-		const events = observeExtensionEvents(session, event => {
-			if (event.type === "plan_review_requested") {
-				answered = mode.resolvePlanReview(event.reviewId, "execute");
-			}
+		const recorder = planReviewRecorder("remote", (event, ctx) => {
+			answered = ctx.resolvePlanReview(event.reviewId, "execute");
 		});
+		await loadExtensions(recorder.extension);
 
 		await mode.handlePlanApproval({ planFilePath, planExists: true, title: "PLAN" });
+		const resolved = await recorder.resolved;
 
-		const requested = events.find(
+		const requested = recorder.events.find(
 			(event): event is PlanReviewRequestedEvent => event.type === "plan_review_requested",
 		);
-		const resolved = events.find((event): event is PlanReviewResolvedEvent => event.type === "plan_review_resolved");
 		expect(answered).toBe(true);
 		expect(requested).toMatchObject({
 			sessionId: session.sessionManager.getSessionId(),
@@ -338,21 +384,22 @@ describe("InteractiveMode plan review rendering", () => {
 		const refused: boolean[] = [];
 		let stayedOpen = false;
 		let accepted: boolean | undefined;
-		const events = observeExtensionEvents(session, event => {
-			if (event.type !== "plan_review_requested") return;
+		const recorder = planReviewRecorder("remote", (event, ctx) => {
 			refused.push(
-				mode.resolvePlanReview("wrong-review", "execute"),
-				mode.resolvePlanReview(event.reviewId, "keep"),
-				mode.resolvePlanReview(event.reviewId, "refine"),
-				mode.resolvePlanReview(event.reviewId, "refine", { feedback: "   " }),
+				ctx.resolvePlanReview("wrong-review", "execute"),
+				ctx.resolvePlanReview(event.reviewId, "keep"),
+				ctx.resolvePlanReview(event.reviewId, "refine"),
+				ctx.resolvePlanReview(event.reviewId, "refine", { feedback: "   " }),
 			);
 			stayedOpen = mode.ui.hasOverlay();
-			accepted = mode.resolvePlanReview(event.reviewId, "execute");
+			accepted = ctx.resolvePlanReview(event.reviewId, "execute");
 		});
+		await loadExtensions(recorder.extension);
 
 		await mode.handlePlanApproval({ planFilePath, planExists: true, title: "PLAN" });
+		await recorder.resolved;
 
-		const requested = events.find(
+		const requested = recorder.events.find(
 			(event): event is PlanReviewRequestedEvent => event.type === "plan_review_requested",
 		);
 		expect(refused).toEqual([false, false, false, false]);
@@ -361,7 +408,7 @@ describe("InteractiveMode plan review rendering", () => {
 		expect(requested?.options.find(option => option.id === "keep")?.disabled).toBe(true);
 	});
 
-	it("uses remote refinement feedback as the next planning prompt", async () => {
+	it("sends remote refinement feedback verbatim as the next planning prompt", async () => {
 		const planFilePath = "local://PLAN.md";
 		const resolvedPlanPath = resolveLocalUrlToPath(planFilePath, {
 			getArtifactsDir: () => session.sessionManager.getArtifactsDir(),
@@ -373,18 +420,66 @@ describe("InteractiveMode plan review rendering", () => {
 		mode.planModePlanFilePath = planFilePath;
 		const prompt = vi.spyOn(session, "prompt").mockResolvedValue(undefined as never);
 		let answered: boolean | undefined;
-		const events = observeExtensionEvents(session, event => {
-			if (event.type === "plan_review_requested") {
-				answered = mode.resolvePlanReview(event.reviewId, "refine", { feedback: "split step 2" });
-			}
+		const recorder = planReviewRecorder("remote", (event, ctx) => {
+			answered = ctx.resolvePlanReview(event.reviewId, "refine", { feedback: "  keep indentation\n" });
 		});
+		await loadExtensions(recorder.extension);
 
 		await mode.handlePlanApproval({ planFilePath, planExists: true, title: "PLAN" });
+		const resolved = await recorder.resolved;
 
-		const resolved = events.find((event): event is PlanReviewResolvedEvent => event.type === "plan_review_resolved");
 		expect(answered).toBe(true);
-		expect(prompt).toHaveBeenCalledWith("split step 2");
+		expect(prompt).toHaveBeenCalledWith("  keep indentation\n");
 		expect(resolved).toMatchObject({ choice: "refine", by: "extension" });
+	});
+
+	it("reports a remote compact approval closed only once its overlay hides", async () => {
+		const planFilePath = "local://PLAN.md";
+		const resolvedPlanPath = resolveLocalUrlToPath(planFilePath, {
+			getArtifactsDir: () => session.sessionManager.getArtifactsDir(),
+			getSessionId: () => session.sessionManager.getSessionId(),
+		});
+		await Bun.write(resolvedPlanPath, "# Plan\n\nDo the thing.");
+
+		mode.planModeEnabled = true;
+		mode.planModePlanFilePath = planFilePath;
+		vi.spyOn(session, "prompt").mockResolvedValue(undefined as never);
+		const compactStarted = Promise.withResolvers<void>();
+		const compactDone = Promise.withResolvers<"ok">();
+		vi.spyOn(mode, "handleCompactCommand").mockImplementation(() => {
+			compactStarted.resolve();
+			return compactDone.promise;
+		});
+		const resolved = Promise.withResolvers<PlanReviewResolvedEvent>();
+		const seen: string[] = [];
+		let overlayOpenWhenResolved: boolean | undefined;
+		await loadExtensions(
+			planReviewExtension("remote", (event, ctx) => {
+				if (event.type === "plan_review_requested") {
+					seen.push(event.type);
+					ctx.resolvePlanReview(event.reviewId, "compact");
+				} else if (event.type === "plan_review_resolved") {
+					seen.push(event.type);
+					overlayOpenWhenResolved = mode.ui.hasOverlay();
+					resolved.resolve(event);
+				}
+			}),
+		);
+
+		const approval = mode.handlePlanApproval({ planFilePath, planExists: true, title: "PLAN" });
+		await compactStarted.promise;
+		// One macrotask turn drains every queued microtask, so a resolution emitted at the
+		// pick (rather than at the hide) would already have reached the handler.
+		await new Promise<void>(resolve => setImmediate(resolve));
+		expect(mode.ui.hasOverlay()).toBe(true);
+		expect(seen).toEqual(["plan_review_requested"]);
+
+		compactDone.resolve("ok");
+		await approval;
+
+		expect(await resolved.promise).toMatchObject({ choice: "compact", by: "extension" });
+		expect(overlayOpenWhenResolved).toBe(false);
+		expect(seen).toEqual(["plan_review_requested", "plan_review_resolved"]);
 	});
 
 	it("accepts only the first synchronous remote refinement", async () => {
@@ -574,9 +669,9 @@ describe("InteractiveMode plan review rendering", () => {
 		let accepted: boolean | undefined;
 		const delivered = Promise.withResolvers<void>();
 		const secondExtensionEvents: string[] = [];
-		const firstExtension = planReviewExtension("first", event => {
+		const firstExtension = planReviewExtension("first", (event, ctx) => {
 			if (event.type === "plan_review_requested") {
-				accepted = mode.resolvePlanReview(event.reviewId, "refine", { feedback: "split step 2" });
+				accepted = ctx.resolvePlanReview(event.reviewId, "refine", { feedback: "split step 2" });
 			}
 		});
 		const secondExtension = planReviewExtension("second", event => {
@@ -584,17 +679,7 @@ describe("InteractiveMode plan review rendering", () => {
 			secondExtensionEvents.push(event.type);
 			if (event.type === "plan_review_resolved") delivered.resolve();
 		});
-		const runner = new ExtensionRunner(
-			[firstExtension, secondExtension],
-			new ExtensionRuntime(),
-			tempDir.path(),
-			session.sessionManager,
-			modelRegistry,
-		);
-		Object.defineProperty(session, "extensionRunner", {
-			configurable: true,
-			get: () => runner,
-		});
+		await loadExtensions(firstExtension, secondExtension);
 
 		await mode.handlePlanApproval({ planFilePath, planExists: true, title: "PLAN" });
 		await delivered.promise;
@@ -619,16 +704,15 @@ describe("InteractiveMode plan review rendering", () => {
 		const pathPrompt = vi.spyOn(mode, "showHookCustom");
 		const clear = vi.spyOn(mode, "handleClearCommand").mockResolvedValue();
 		let answered: boolean | undefined;
-		const events = observeExtensionEvents(session, event => {
-			if (event.type === "plan_review_requested") {
-				answered = mode.resolvePlanReview(event.reviewId, "save");
-			}
+		const recorder = planReviewRecorder("remote", (event, ctx) => {
+			answered = ctx.resolvePlanReview(event.reviewId, "save");
 		});
+		await loadExtensions(recorder.extension);
 
 		await mode.handlePlanApproval({ planFilePath, planExists: true, title });
+		const resolved = await recorder.resolved;
 
 		const destination = path.join(tempDir.path(), planSaveFileName(title));
-		const resolved = events.find((event): event is PlanReviewResolvedEvent => event.type === "plan_review_resolved");
 		expect(answered).toBe(true);
 		expect(pathPrompt).not.toHaveBeenCalled();
 		expect(await Bun.file(destination).text()).toBe(planContent);

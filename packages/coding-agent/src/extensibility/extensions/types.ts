@@ -1073,6 +1073,7 @@ export interface ToolApprovalResolvedEvent {
 
 /** Stable ids for the interactive plan review's choices; labels may change (keep's label carries a token count). */
 export type PlanReviewChoice = "execute" | "compact" | "keep" | "refine" | "save";
+/** A choice as displayed in the interactive plan review, delivered in display order by `plan_review_requested`. */
 export interface PlanReviewOption {
 	id: PlanReviewChoice;
 	label: string;
