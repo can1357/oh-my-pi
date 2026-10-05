@@ -193,6 +193,13 @@ export interface ContextEvent {
 	type: "context";
 	/** Messages about to be sent to the LLM (deep copy, safe to modify) */
 	messages: AgentMessage[];
+	/**
+	 * Names of the tools active for this LLM call, so handlers can gate
+	 * tool-specific advice to sessions that actually expose the tool (e.g. a
+	 * subagent with a restricted roster). Undefined when the host does not
+	 * provide a roster.
+	 */
+	tools?: readonly string[];
 }
 
 /**

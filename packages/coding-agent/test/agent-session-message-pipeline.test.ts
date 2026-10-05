@@ -2135,6 +2135,91 @@ describe("AgentSession message pipeline", () => {
 			authStorage.close();
 		}
 	});
+
+	it("includes xd://-mounted devices in the context event roster and keeps restricted rosters reduced", async () => {
+		// The context event's roster must mirror what the session can actually
+		// call: top-level active names plus devices mounted under xd:// (callable
+		// via `write xd://<tool>`, never top-level). A handler gating advice on
+		// the roster would otherwise suppress hints for an available tool.
+		// Restricted sessions (vibe directors: read/todo only) grant no transport
+		// and no mounts, so their roster stays reduced.
+		using tempDir = TempDir.createSync("@pi-context-xdev-roster-");
+		const api = "test-context-xdev-roster";
+		registerCustomApi(api, () => {
+			const stream = new AssistantMessageEventStream();
+			queueMicrotask(() => {
+				const message = createAssistantMessage("ok");
+				stream.push({ type: "text_delta", contentIndex: 0, delta: "ok", partial: message });
+				stream.push({ type: "done", reason: "stop", message });
+			});
+			return stream;
+		});
+		const model = buildModel({
+			id: "context-xdev-roster-model",
+			name: "Context Xdev Roster Model",
+			api,
+			provider: "llama.cpp",
+			baseUrl: "http://127.0.0.1:8080/v1",
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 4096,
+			maxTokens: 1024,
+		} as ModelSpec<Api>) as Model<Api>;
+		const rosters: Array<readonly string[] | undefined> = [];
+		const recordRoster: ExtensionFactory = pi => {
+			pi.on("context", async event => {
+				rosters.push(event.tools);
+				return undefined;
+			});
+		};
+		const authStorage = await AuthStorage.create(tempDir.join("auth.db"));
+		const modelRegistry = new ModelRegistry(authStorage, tempDir.join("models.yml"));
+		const sessionOptions = {
+			cwd: tempDir.path(),
+			agentDir: tempDir.path(),
+			sessionManager: SessionManager.inMemory(tempDir.path()),
+			authStorage,
+			modelRegistry,
+			settings: Settings.isolated({ "compaction.enabled": false }),
+			model,
+			disableExtensionDiscovery: true,
+			skills: [],
+			contextFiles: [],
+			promptTemplates: [],
+			slashCommands: [],
+			enableMCP: false,
+			enableLsp: false,
+			skipPythonPreflight: true,
+		};
+		const { session } = await createAgentSession({ ...sessionOptions, extensions: [recordRoster] });
+		const { session: restricted } = await createAgentSession({
+			...sessionOptions,
+			toolNames: ["read", "todo"],
+			extensions: [recordRoster],
+		});
+		try {
+			const mounted = session.getXdevToolEntries().map(entry => entry.name);
+			expect(mounted).toContain("ast_edit");
+			expect(session.getActiveToolNames()).not.toContain("ast_edit");
+
+			await session.sendUserMessage("roster probe");
+			const roster = rosters.at(-1) ?? [];
+			for (const name of mounted) expect(roster).toContain(name);
+			expect(roster).toContain("read");
+
+			expect(restricted.getXdevToolEntries()).toEqual([]);
+			await restricted.sendUserMessage("restricted probe");
+			const restrictedRoster = rosters.at(-1) ?? [];
+			expect(restrictedRoster).toContain("read");
+			expect(restrictedRoster).not.toContain("ast_edit");
+			expect(restrictedRoster).not.toContain("write");
+		} finally {
+			await session.dispose();
+			await restricted.dispose();
+			authStorage.close();
+		}
+	});
 	it("retains completed assistant text in history when aborted during a pending rewrite", async () => {
 		using tempDir = TempDir.createSync("@pi-assistant-message-abort-");
 		const api = "test-assistant-message-abort";

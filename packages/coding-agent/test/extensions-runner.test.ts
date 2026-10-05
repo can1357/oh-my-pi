@@ -4653,4 +4653,48 @@ describe("ExtensionRunner", () => {
 			expect(cachedTexts).toEqual(["persisted user", "persisted assistant"]);
 		});
 	});
+
+	describe("context event tool roster", () => {
+		it("exposes the session's active tool names so handlers can gate tool-specific notes", async () => {
+			const extensionCode = `
+				export default function(pi) {
+					pi.on("context", event => {
+						if (event.tools !== undefined && !event.tools.includes("ffjfind")) return undefined;
+						return { messages: [...event.messages, { role: "user", content: "<ff-note>", timestamp: 1 }] };
+					});
+				}
+			`;
+			await Bun.write(path.join(extensionsDir, "gate.ts"), extensionCode);
+			const result = await loadTestExtensions();
+			const runner = new ExtensionRunner(
+				result.extensions,
+				result.runtime,
+				tempDir.path(),
+				sessionManager,
+				modelRegistry,
+			);
+			const notePresent = (messages: AgentMessage[]) =>
+				messages.some(message => message.role === "user" && message.content === "<ff-note>");
+
+			// Restricted roster (vibe director: read/todo/vibe_*): the note is gated out.
+			const restricted = await runner.emitContext(
+				[{ role: "user", content: "director turn", timestamp: 1 }],
+				undefined,
+				["read", "todo", "vibe_spawn"],
+			);
+			expect(notePresent(restricted)).toBe(false);
+
+			// Full roster including the tool: the note flows through.
+			const full = await runner.emitContext([{ role: "user", content: "worker turn", timestamp: 1 }], undefined, [
+				"read",
+				"ffjfind",
+				"ffgrep",
+			]);
+			expect(notePresent(full)).toBe(true);
+
+			// Legacy call without a roster: handlers still see undefined and keep injecting.
+			const legacy = await runner.emitContext([{ role: "user", content: "legacy turn", timestamp: 1 }]);
+			expect(notePresent(legacy)).toBe(true);
+		});
+	});
 });
