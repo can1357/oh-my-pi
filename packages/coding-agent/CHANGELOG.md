@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+
+### Added
+
+- Added failed-CI-run triage to the GitHub tool prompt: when `run_watch` saves failed-run logs, one `judge_batch()` over the log tails classifies each run (compile, test failure, flake, infra, unrelated) so only flagged or unclassifiable logs get read
+
 ## [18.6.2] - 2026-10-04
 
 ### Fixed

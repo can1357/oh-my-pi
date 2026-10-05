@@ -12,7 +12,7 @@ Select via `op`.
 - `search_*`: `repo` defaults current checkout's `owner/repo`; search elsewhere with `repo:`/`org:`/`user:` in `query`. `search_repos`: ignores `repo`; scope via `org:`/`language:` in `query`.
 - Boolean `AND`/`OR`/`NOT` combine text terms, not qualifiers; never place them between qualifiers.
 - `since`/`until`: relative `<n>` + `m`/`h`/`d`/`w`/`mo`/`y` (e.g. `3d`, `2w`), ISO date `YYYY-MM-DD`, or ISO datetime. `dateField: "updated"`: update time (issues/PRs), push time (repos), never creation.
-- `run_watch`: omit `run` → every run for current HEAD; `branch` defaults current. Fast-fails first job failure.
+- `run_watch`: omit `run` → every run for current HEAD; `branch` defaults current. Fast-fails first job failure. Failed runs: when the eval kernel is active in this session, classify before reading the saved logs — one `judge_batch()` (`judgeBatch()` in JS) over each failed run's log-tail lines → compile | test-failure | flake | infra/timeout | unrelated; read only the logs the judge flags or cannot place.
 </instruction>
 
 <output>
