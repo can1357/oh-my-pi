@@ -5,7 +5,7 @@ import { generateImage } from "../../images";
 import * as imagesServer from "../../providers/images-server";
 import { deterministicUuid } from "../../utils/deterministic-id";
 import {
-	type AuthGatewayBootOptions,
+	type AuthGatewayRouteOptions,
 	buildGatewayApiKeyResolver,
 	mirrorRequestAbort,
 	recordGatewayUsage,
@@ -23,7 +23,7 @@ function isGatewayImageApi(api: string): boolean {
 }
 
 async function handleImages(
-	bootOpts: AuthGatewayBootOptions,
+	bootOpts: AuthGatewayRouteOptions,
 	req: Request,
 	peer: string,
 	kind: imagesServer.ImageRequestKind,
@@ -119,13 +119,13 @@ async function handleImages(
 }
 
 export function handleImageGenerations(
-	bootOpts: AuthGatewayBootOptions,
+	bootOpts: AuthGatewayRouteOptions,
 	req: Request,
 	peer: string,
 ): Promise<Response> {
 	return handleImages(bootOpts, req, peer, "generations");
 }
 
-export function handleImageEdits(bootOpts: AuthGatewayBootOptions, req: Request, peer: string): Promise<Response> {
+export function handleImageEdits(bootOpts: AuthGatewayRouteOptions, req: Request, peer: string): Promise<Response> {
 	return handleImages(bootOpts, req, peer, "edits");
 }

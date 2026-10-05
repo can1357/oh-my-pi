@@ -520,6 +520,63 @@ describe("Cursor request action encoding", () => {
 });
 
 describe("Cursor history encoding", () => {
+	it("replays a multi-step Cursor turn as alternating steps, keeping parallel calls together", () => {
+		// One Cursor server turn persists as a single assistant message whose
+		// calls interleave with the text and reasoning that followed each result.
+		// Replayed as one message it tells the model every call was issued at
+		// once; the native client replays one assistant step per model round.
+		// Within a round, results replay in the order they arrived, not call order.
+		const result = (id: string, text: string): ToolResultMessage => ({
+			role: "toolResult",
+			toolCallId: id,
+			toolName: "read",
+			content: [{ type: "text", text }],
+			isError: false,
+			timestamp: 3,
+		});
+		const call = (id: string, path: string) => ({ type: "toolCall", id, name: "read", arguments: { path } }) as const;
+		const messages: Context["messages"] = [
+			{ role: "user", content: "Read a.txt, then b.txt and c.txt together, then d.txt.", timestamp: 1 },
+			cursorAssistant(
+				"cursor-composer-2.5",
+				[
+					{ type: "text", text: "Reading a.txt first." },
+					call("call-a", "a.txt"),
+					{ type: "thinking", thinking: "a is 7; now b and c." },
+					call("call-b", "b.txt"),
+					call("call-c", "c.txt"),
+					{ type: "thinking", thinking: "c came back first; now d." },
+					call("call-d", "d.txt"),
+					{ type: "text", text: "The sum is 48." },
+				],
+				2,
+			),
+			result("call-a", "alpha=7"),
+			result("call-c", "gamma=13"),
+			result("call-b", "beta=11"),
+			result("call-d", "delta=17"),
+			{ role: "user", content: "What was in b.txt?", timestamp: 4 },
+		];
+
+		const shape = buildCursorHistoryForTest(messages, undefined, "cursor-composer-2.5").rootPromptMessagesJson.map(
+			entry => {
+				const { role, content } = entry as { role: string; content: { type: string; toolCallId?: string }[] };
+				return `${role}:${content.map(part => part.toolCallId ?? part.type).join(",")}`;
+			},
+		);
+		expect(shape).toEqual([
+			"user:text",
+			"assistant:text,call-a",
+			"tool:call-a",
+			"assistant:call-b,call-c",
+			"tool:call-c",
+			"tool:call-b",
+			"assistant:call-d",
+			"tool:call-d",
+			"assistant:text",
+		]);
+	});
+
 	it("keeps an empty tool result paired with its structured call", () => {
 		const messages: Context["messages"] = [
 			{ role: "user", content: "Read the empty window.", timestamp: 1 },

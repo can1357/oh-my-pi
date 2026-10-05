@@ -116,7 +116,7 @@ On LLM conversion, `method: "handoff"` selects `packages/agent/src/compaction/pr
 
 ### Automatic handoff
 
-Manual `/handoff` works regardless of the context-maintenance method order. To use this pipeline automatically, include `handoff` in `compaction.methodOrder` (the default order is `remote`, `snapcompact`, `handoff`, `shake`, `soft`). Normal threshold-triggered handoffs defer document generation to a post-prompt task; pre-prompt, mid-turn, and `incomplete` recovery run inline. Input `overflow` skips handoff generation because the request would carry the same oversized input — but an already-armed speculative handoff result can still be applied during overflow recovery.
+Manual `/handoff` works regardless of the context-maintenance method order. To use this pipeline automatically, include `handoff` in `compaction.methodOrder` (the default order is `remote`, `snapcompact`, `handoff`, `shake`, `soft`). Threshold-triggered handoffs (post-turn, pre-prompt, mid-turn) and `incomplete` recovery generate and commit the document inline; a post-turn handoff completes before the run's `agent_end` settles. Input `overflow` skips handoff generation because the request would carry the same oversized input — but an already-armed speculative handoff result can still be applied during overflow recovery.
 
 Async compaction (`compaction.asyncEnabled`) may also generate the handoff document speculatively in the pre-threshold band and commit it instantly when the threshold is crossed; see `docs/compaction.md`.
 

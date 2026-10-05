@@ -1,8 +1,8 @@
 //! Snapcompact frame rendering.
 //!
 //! Rasterizes pre-normalized conversation text onto a `size`-wide bitmap
-//! (height hugs the rows the text actually needs) using one of the bundled
-//! public-domain pixel fonts, then encodes it as PNG:
+//! (height hugs the rows the text needs, with a 64px floor) using one of the
+//! bundled public-domain pixel fonts, then encodes it as PNG:
 //!
 //! - `5x8`  — X.org BDF font (legacy shape).
 //! - `8x8`  — unscii-8 hex font (Latin-1 subset), the square cell that won the
@@ -1140,8 +1140,8 @@ fn encode_rgb_png(
 #[derive(Default)]
 pub struct SnapcompactRenderOptions {
 	/// Frame width in pixels; also bounds the grid rows
-	/// (`floor(size/cellHeight/lineRepeat)`). Output height hugs the rows the
-	/// text actually uses instead of padding to a square.
+	/// (`floor(size/cellHeight/lineRepeat)`). Output height hugs the used rows
+	/// with a 64px floor, rather than padding every frame to a square.
 	pub size:        u32,
 	/// Bundled font: `"5x8"`, `"6x12"`, `"8x13"` (X.org BDF), `"8x8"`
 	/// (unscii-8), or `"silver"` (embedded TrueType). Default `"5x8"`.
@@ -1196,10 +1196,11 @@ pub fn snapcompact_supported_chars(font: JsString, chars: JsString) -> Result<St
 /// Render one snapcompact frame on a libuv worker: print pre-normalized text
 /// onto a `size`-wide bitmap and encode it as PNG.
 ///
-/// The bitmap height hugs the rows the text actually occupies
-/// (`usedRows * lineRepeat * cellHeight`), so a partially filled frame never
-/// pays for blank padding rows. The glyph grid holds `floor(size/cellWidth) *
-/// floor(size/cellHeight/lineRepeat)` characters; input beyond that is ignored.
+/// The bitmap height hugs the rows the text occupies
+/// (`usedRows * lineRepeat * cellHeight`), with a 64px floor for vision
+/// processors that reject smaller dimensions. The glyph grid holds
+/// `floor(size/cellWidth) * floor(size/cellHeight/lineRepeat)` characters;
+/// input beyond that is ignored.
 /// Native-cell bitmap-font shapes encode as indexed PNG; stretched bitmap-font
 /// shapes (target cell != font cell) encode as RGB. TrueType shapes encode RGB
 /// directly from grayscale coverage.
@@ -1270,21 +1271,21 @@ fn render_snapcompact_png_sync(
 			"Frame size {size} cannot fit a {target_w}x{target_h} cell grid (repeat {repeat})"
 		)));
 	}
-	// Tight canvas: width stays the frame edge (the reading geometry the
-	// caller derives cols from), height hugs the rows the text needs. Bitmap
-	// shapes draw wide code points through Silver across two cells, so they
-	// count double here; the square-celled Silver shape keeps one cell each.
+	// Keep the tight layout for normal pages, but give short pages enough
+	// canvas for vision processors that reject dimensions at or below 32px.
 	let wide_cells = matches!(font, RenderFont::Bitmap(_));
 	let used = used_rows(&text, &grid, doc, wide_cells);
-	let height = used * grid.repeat * grid.cell_h;
+	let content_height = used * grid.repeat * grid.cell_h;
+	let height = content_height.max(64);
 
 	match font {
 		RenderFont::Ttf(font) => {
-			let pixels = if doc {
+			let mut pixels = if doc {
 				render_ttf_doc_rgb(&text, size, height, font, &grid, black_ink)
 			} else {
 				render_ttf_rgb(&text, size, height, font, &grid, black_ink)
 			};
+			pixels[content_height * size * 3..].fill(255);
 			Ok(STANDARD
 				.encode(encode_rgb_png(&pixels, size, height, png::Compression::High)?)
 				.into())
@@ -1296,11 +1297,12 @@ fn render_snapcompact_png_sync(
 				// Indexed path: rasterize straight onto the frame at the requested
 				// cell box (the natural cell, or natural glyphs on a padded pitch
 				// when `stretch: false`).
-				let pixels = if doc {
+				let mut pixels = if doc {
 					render_doc_bitmap(&text, size, height, font, &grid, black_ink)
 				} else {
 					render_bitmap(&text, size, height, font, &grid, black_ink)
 				};
+				pixels[content_height * size..].fill(0);
 				return Ok(STANDARD
 					.encode(encode_indexed_png(&pixels, size, height, png::Compression::High)?)
 					.into());
@@ -1328,7 +1330,7 @@ fn render_snapcompact_png_sync(
 				dst[2] = f32::from(b);
 			}
 			let resized = resize_rgb(&rgb, src_w, src_h, dst_w, dst_h);
-			let mut frame = vec![255u8; size * dst_h * 3];
+			let mut frame = vec![255u8; size * height * 3];
 			for y in 0..dst_h {
 				let src_row = &resized[y * dst_w * 3..(y + 1) * dst_w * 3];
 				let dst_row = &mut frame[y * size * 3..];
@@ -1337,7 +1339,7 @@ fn render_snapcompact_png_sync(
 				}
 			}
 			Ok(STANDARD
-				.encode(encode_rgb_png(&frame, size, dst_h, png::Compression::High)?)
+				.encode(encode_rgb_png(&frame, size, height, png::Compression::High)?)
 				.into())
 		},
 	}
@@ -1664,8 +1666,9 @@ mod tests {
 		// IHDR width/height live at bytes 16..24, big-endian.
 		let dim = |off: usize| u32::from_be_bytes(png[off..off + 4].try_into().unwrap());
 		// "Hello there. General Kenobi!" is 28 chars on a 16-col grid: 2 rows
-		// of the 16px pitch — the height hugs them instead of padding to 128.
-		assert_eq!((dim(16), dim(20)), (128, 32), "declared geometry must match");
+		// of the 16px pitch. 32px is under the 64px floor, so the frame is 64px
+		// tall rather than padded to the 128px square.
+		assert_eq!((dim(16), dim(20)), (128, 64), "declared geometry must match");
 
 		// Glyph ink must sit in the top 13px of every 16px pitch row.
 		let grid = Grid { cols: 16, rows: 8, repeat: 1, cell_w: 8, cell_h: 16 };
@@ -1716,7 +1719,7 @@ mod tests {
 	}
 
 	#[test]
-	fn frame_height_hugs_used_rows() {
+	fn frame_height_hugs_used_rows_above_a_64px_floor() {
 		let dims = |png: &[u8]| {
 			let dim = |off: usize| u32::from_be_bytes(png[off..off + 4].try_into().unwrap());
 			(dim(16), dim(20))
@@ -1725,19 +1728,22 @@ mod tests {
 			png_bytes(render_snapcompact_png_sync(text.into(), opts).unwrap())
 		};
 		let opts_8x8 =
-			|| SnapcompactRenderOptions { size: 64, font: Some("8x8".into()), ..Default::default() };
-		// 8 cols of 8x8 cells: 10 chars span 2 rows -> 16px tall.
-		assert_eq!(dims(&render("0123456789", opts_8x8())), (64, 16));
+			|| SnapcompactRenderOptions { size: 256, font: Some("8x8".into()), ..Default::default() };
+		// 32 cols of 8x8 cells: 288 chars span 9 rows -> 72px tall.
+		let nine_rows = "x".repeat(32 * 9);
+		assert_eq!(dims(&render(&nine_rows, opts_8x8())), (256, 72));
 		// Dim toggles are zero-width and must not add a row.
-		assert_eq!(dims(&render("\u{e}01234567\u{f}", opts_8x8())), (64, 8));
+		assert_eq!(dims(&render(&format!("\u{e}{nine_rows}\u{f}"), opts_8x8())), (256, 72));
 		// Capacity-filling text keeps the full grid height.
-		assert_eq!(dims(&render(&"x".repeat(64), opts_8x8())), (64, 64));
+		assert_eq!(dims(&render(&"x".repeat(32 * 32), opts_8x8())), (256, 256));
+		// One 8px row is padded to the 64px floor vision backends accept.
+		assert_eq!(dims(&render("0123456789", opts_8x8())), (256, 64));
 		// Repeat shapes hug `usedRows * repeat` copy bands.
 		let repeated =
-			render("0123456789", SnapcompactRenderOptions { line_repeat: Some(2), ..opts_8x8() });
-		assert_eq!(dims(&repeated), (64, 32));
-		// Doc layout counts `\n` lines down the first column.
-		let doc = render("Hello there.\nSecond line", SnapcompactRenderOptions {
+			render(&nine_rows, SnapcompactRenderOptions { line_repeat: Some(2), ..opts_8x8() });
+		assert_eq!(dims(&repeated), (256, 144));
+		// Doc layout counts `\n` lines down the first column: 5 rows of 16px.
+		let doc = render("A\nB\nC\nD\nE", SnapcompactRenderOptions {
 			size: 256,
 			font: Some("8x13".into()),
 			cell_width: Some(8),
@@ -1746,16 +1752,19 @@ mod tests {
 			columns: Some(2),
 			..Default::default()
 		});
-		assert_eq!(dims(&doc), (256, 32));
-		// The stretch path hugs too (RGB output, 6x6 target cells).
-		let stretched = render("0123456789ab", SnapcompactRenderOptions {
-			size: 60,
-			font: Some("8x8".into()),
-			cell_width: Some(6),
-			cell_height: Some(6),
-			..Default::default()
-		});
-		assert_eq!(dims(&stretched), (60, 12));
+		assert_eq!(dims(&doc), (256, 80));
+		// The stretch path (RGB output, 6x6 target cells) hugs and floors too.
+		let stretched = |text: &str| {
+			render(text, SnapcompactRenderOptions {
+				size: 120,
+				font: Some("8x8".into()),
+				cell_width: Some(6),
+				cell_height: Some(6),
+				..Default::default()
+			})
+		};
+		assert_eq!(dims(&stretched(&"x".repeat(20 * 12))), (120, 72));
+		assert_eq!(dims(&stretched("0123456789ab")), (120, 64));
 	}
 
 	#[test]

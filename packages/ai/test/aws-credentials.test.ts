@@ -13,8 +13,8 @@ import { waitForDelayOrAbort } from "./helpers";
 
 // `credential_process` integration coverage. Drives a real `Bun.spawn`
 // against a fixture script so the JSON envelope contract, exit-code
-// handling, abort propagation, cache behavior, and the POSIX-style
-// tokenizer are all exercised end-to-end.
+// handling, abort propagation, cache behavior, and the platform-specific
+// (POSIX shell / Windows CRT) tokenizers are all exercised end-to-end.
 
 const ENV_KEYS = [
 	"AWS_ACCESS_KEY_ID",
@@ -40,50 +40,95 @@ const ENV_KEYS = [
 
 function quoteForConfig(p: string): string {
 	if (!/[\s"]/.test(p)) return p;
-	// Wrap in double quotes; our tokenizer preserves backslashes so Windows
-	// paths survive without further escaping.
+	// Wrap in double quotes; both tokenizers keep backslashes that do not
+	// precede a quote, so Windows paths survive without further escaping.
 	return `"${p.replace(/(["])/g, "\\$1")}"`;
 }
 
-describe("tokenizeCredentialProcessCommand", () => {
+describe("tokenizeCredentialProcessCommand (POSIX)", () => {
+	const tokenize = (cmd: string) => tokenizeCredentialProcessCommand(cmd, "linux");
+
 	test("splits on whitespace", () => {
-		expect(tokenizeCredentialProcessCommand("/bin/auth --json")).toEqual(["/bin/auth", "--json"]);
+		expect(tokenize("/bin/auth --json")).toEqual(["/bin/auth", "--json"]);
 	});
 
 	test("collapses runs of whitespace", () => {
-		expect(tokenizeCredentialProcessCommand("  a\tb \n c")).toEqual(["a", "b", "c"]);
+		expect(tokenize("  a\tb \n c")).toEqual(["a", "b", "c"]);
 	});
 
 	test("double quotes preserve Windows backslashes", () => {
-		expect(tokenizeCredentialProcessCommand(`"C:\\Program Files\\auth\\tool.exe" --json`)).toEqual([
+		expect(tokenize(`"C:\\Program Files\\auth\\tool.exe" --json`)).toEqual([
 			"C:\\Program Files\\auth\\tool.exe",
 			"--json",
 		]);
 	});
 
 	test('double quotes still escape $ ` " and \\', () => {
-		expect(tokenizeCredentialProcessCommand(`"a\\"b" "\\$x" "\\\\n"`)).toEqual([`a"b`, "$x", "\\n"]);
+		expect(tokenize(`"a\\"b" "\\$x" "\\\\n"`)).toEqual([`a"b`, "$x", "\\n"]);
 	});
 
 	test("single quotes are fully literal", () => {
-		expect(tokenizeCredentialProcessCommand(`'C:\\path with spaces\\bin' --x`)).toEqual([
-			"C:\\path with spaces\\bin",
-			"--x",
-		]);
+		expect(tokenize(`'C:\\path with spaces\\bin' --x`)).toEqual(["C:\\path with spaces\\bin", "--x"]);
 	});
 
 	test("backslash outside quotes escapes the next character", () => {
-		expect(tokenizeCredentialProcessCommand(`a\\ b c`)).toEqual(["a b", "c"]);
+		expect(tokenize(`a\\ b c`)).toEqual(["a b", "c"]);
 	});
 
 	test("rejects unterminated quotes", () => {
-		expect(() => tokenizeCredentialProcessCommand(`"unterminated`)).toThrow(/unterminated/);
-		expect(() => tokenizeCredentialProcessCommand(`'half`)).toThrow(/unterminated/);
+		expect(() => tokenize(`"unterminated`)).toThrow(/unterminated/);
+		expect(() => tokenize(`'half`)).toThrow(/unterminated/);
 	});
 
 	test("empty input yields no tokens", () => {
-		expect(tokenizeCredentialProcessCommand("")).toEqual([]);
-		expect(tokenizeCredentialProcessCommand("   \t  ")).toEqual([]);
+		expect(tokenize("")).toEqual([]);
+		expect(tokenize("   \t  ")).toEqual([]);
+	});
+});
+
+describe("tokenizeCredentialProcessCommand (Windows)", () => {
+	const tokenize = (cmd: string) => tokenizeCredentialProcessCommand(cmd, "win32");
+
+	test("unquoted Windows paths keep their backslashes", () => {
+		expect(tokenize(`C:\\Users\\me\\bun.exe C:\\tmp\\auth.js --json`)).toEqual([
+			"C:\\Users\\me\\bun.exe",
+			"C:\\tmp\\auth.js",
+			"--json",
+		]);
+	});
+
+	test("double quotes group paths with spaces", () => {
+		expect(tokenize(`"C:\\Program Files\\auth\\tool.exe" --json`)).toEqual([
+			"C:\\Program Files\\auth\\tool.exe",
+			"--json",
+		]);
+	});
+
+	test("backslashes before a quote follow CRT escaping rules", () => {
+		// 1 backslash + quote -> literal quote; 2 -> one backslash, quote toggles;
+		// 3 -> one backslash + literal quote.
+		expect(tokenize(`a\\"b "c\\\\" d\\\\\\"e`)).toEqual([`a"b`, "c\\", `d\\"e`]);
+	});
+
+	test("single quotes are ordinary characters", () => {
+		expect(tokenize(`'a b'`)).toEqual(["'a", "b'"]);
+	});
+
+	test("empty quoted argument is preserved", () => {
+		expect(tokenize(`tool "" x`)).toEqual(["tool", "", "x"]);
+	});
+
+	test("trailing backslashes are kept", () => {
+		expect(tokenize(`C:\\dir\\ x`)).toEqual(["C:\\dir\\", "x"]);
+	});
+
+	test("rejects unterminated quotes", () => {
+		expect(() => tokenize(`"unterminated`)).toThrow(/unterminated/);
+	});
+
+	test("empty input yields no tokens", () => {
+		expect(tokenize("")).toEqual([]);
+		expect(tokenize("   \t  ")).toEqual([]);
 	});
 });
 

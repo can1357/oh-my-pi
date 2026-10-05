@@ -185,8 +185,8 @@ class PredictCompareComponent implements Component, Focusable {
 	 * the input.
 	 */
 	handleNativeEvent(event: NativeUiEvent): void {
-		if (event.type === "edit") {
-			this.#input.applyHostEdit(event);
+		if (event.type === "edit" || event.type === "undo") {
+			this.#input.handleNativeEvent(event);
 			return;
 		}
 		if (event.type !== "action") return;

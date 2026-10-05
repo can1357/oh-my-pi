@@ -4,7 +4,8 @@ import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
 
-import { formatBytes } from "@oh-my-pi/pi-utils";
+import { formatBytes, procmgr } from "@oh-my-pi/pi-utils";
+import { Settings } from "../../config/settings";
 import { executeBash } from "../../exec/bash-executor";
 import type { ToolDefinition } from "../../extensibility/extensions";
 
@@ -30,7 +31,7 @@ import { buildExperimentState } from "../state";
 import { openAutoresearchStorageIfExists } from "../storage";
 import type { AutoresearchToolFactoryOptions } from "../types";
 import type { RunDetails, RunExperimentProgressDetails } from "@oh-my-pi/pi-tui/tools/autoresearch";
-import { DEFAULT_HARNESS_COMMAND } from "@oh-my-pi/pi-tui/tools/autoresearch";
+import { DEFAULT_HARNESS_COMMAND, HARNESS_FILENAME } from "@oh-my-pi/pi-tui/tools/autoresearch";
 
 const runExperimentSchema = type({
 	"timeout_seconds?": type("number").describe("timeout in seconds (default 600)"),
@@ -124,7 +125,7 @@ export function createRunExperimentTool(
 			let execution: ProcessExecutionResult;
 			try {
 				execution = await executeProcess({
-					command: resolvedCommand,
+					command: await resolveHarnessExecLine(),
 					cwd: ctx.cwd,
 					logPath: benchmarkLogPath,
 					timeoutMs,
@@ -244,6 +245,22 @@ export function createRunExperimentTool(
 		},
 	};
 }
+
+/**
+ * Shell line that actually runs the harness; the recorded command stays
+ * {@link DEFAULT_HARNESS_COMMAND}. On Windows a bare `bash` resolves through
+ * PATH to the WSL launcher (`WindowsApps\bash.exe` / `System32\bash.exe`),
+ * which runs the harness inside a Linux VM with a different toolchain and env,
+ * or fails outright when WSL is unavailable. Use the resolved host shell (Git
+ * Bash, or the configured `shellPath`) when it is POSIX.
+ */
+async function resolveHarnessExecLine(): Promise<string> {
+	if (process.platform !== "win32") return DEFAULT_HARNESS_COMMAND;
+	const { shell } = (await Settings.init()).getShellConfig();
+	if (!procmgr.isPosixShell(shell)) return DEFAULT_HARNESS_COMMAND;
+	return `'${shell.replaceAll("'", "'\\''")}' ${HARNESS_FILENAME}`;
+}
+
 async function executeProcess(opts: {
 	command: string;
 	cwd: string;

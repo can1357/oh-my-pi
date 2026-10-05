@@ -104,6 +104,44 @@ describe("Cursor turn usage (issue #13082)", () => {
 		});
 	});
 
+	it("excludes cache hits and writes from fresh input", () => {
+		// Cursor's `inputTokens` counts the whole prompt, cache hits and writes
+		// included. Recording it as-is next to `cacheRead` bills and counts every
+		// cached token twice.
+		const output = cursorAssistantMessage();
+		const stream = new AssistantMessageEventStream();
+		const state = newBlockState();
+		const usageState = { sawTokenDelta: true };
+
+		processInteractionUpdate(
+			{
+				message: {
+					case: "turnEnded",
+					value: {
+						inputTokens: 100n,
+						outputTokens: 7n,
+						cacheReadTokens: 60n,
+						cacheWriteTokens: 15n,
+						reasoningTokens: 2n,
+					},
+				},
+			},
+			output,
+			stream,
+			state,
+			usageState,
+		);
+
+		expect(output.usage).toMatchObject({
+			input: 25,
+			output: 7,
+			cacheRead: 60,
+			cacheWrite: 15,
+			reasoningTokens: 2,
+			totalTokens: 107,
+		});
+	});
+
 	it("keeps the streamed output when the final frame reports no counters", () => {
 		// Older Cursor builds end the turn with a bare `TurnEndedUpdate`. Reading
 		// its unset counters as zeros would erase the turn's only usage signal.

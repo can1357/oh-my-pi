@@ -21,7 +21,8 @@
 
 use std::{
 	borrow::Cow,
-	collections::HashMap,
+	cmp::Reverse,
+	collections::{BinaryHeap, HashMap},
 	hash::{BuildHasherDefault, Hasher},
 };
 
@@ -116,6 +117,11 @@ pub struct RankTable {
 }
 
 impl RankTable {
+	/// Pieces longer than this merge through
+	/// [`merge_long`](Self::merge_long): [`merge`](Self::merge) rescans every
+	/// pair after each merge, quadratic in the piece length.
+	const LONG_PIECE: usize = 128;
+
 	/// Parse a zstd-compressed UTOK1 blob. Panics on malformed data — the
 	/// blobs are compile-time embedded, so corruption is a build error.
 	///
@@ -225,6 +231,9 @@ impl RankTable {
 	/// merge the adjacent pair with the lowest rank, then emit each final
 	/// span via `emit(start, end)`.
 	fn merge(&self, piece: &[u8], mut emit: impl FnMut(usize, usize)) {
+		if piece.len() > Self::LONG_PIECE {
+			return self.merge_long(piece, emit);
+		}
 		// parts[k] = (start offset, rank of merging part k with part k+1).
 		// Two sentinels keep `parts[i + 3].0` in-bounds when recomputing
 		// the rank of the pair formed after a merge at the end.
@@ -270,6 +279,65 @@ impl RankTable {
 		}
 		for w in parts.windows(2) {
 			emit(w[0].0, w[1].0);
+		}
+	}
+
+	/// [`merge`](Self::merge) in O(n log n) for long pieces. Pending pairs sit
+	/// in a min-heap keyed by (rank, start): the lowest rank still merges
+	/// first, and among equal ranks the leftmost pair, exactly as the linear
+	/// rescan picks. A merge leaves the heap entries of the pairs it changed
+	/// stale; they are skipped when popped.
+	fn merge_long(&self, piece: &[u8], mut emit: impl FnMut(usize, usize)) {
+		const NONE: usize = usize::MAX;
+		let len = piece.len();
+		// Parts are named by their start offset. `next[s]` is the start of
+		// the part after `s` (`len` past the last), `prev[s]` the start of the
+		// part before it, and `rank[s]` the rank of merging `s` with its
+		// successor (`u32::MAX` when impossible or once `s` was merged away).
+		let mut next: Vec<usize> = (1..=len).collect();
+		let mut prev: Vec<usize> = (0..len).map(|s| s.checked_sub(1).unwrap_or(NONE)).collect();
+		let mut rank = vec![u32::MAX; len];
+		let mut heap = BinaryHeap::with_capacity(len);
+		for s in 0..len - 1 {
+			rank[s] = self.rank(&piece[s..s + 2]).unwrap_or(u32::MAX);
+			if rank[s] != u32::MAX {
+				heap.push(Reverse((rank[s], s)));
+			}
+		}
+		let pair_rank = |next: &[usize], s: usize| -> u32 {
+			let successor = next[s];
+			if successor >= len {
+				return u32::MAX;
+			}
+			self.rank(&piece[s..next[successor]]).unwrap_or(u32::MAX)
+		};
+
+		while let Some(Reverse((pair, s))) = heap.pop() {
+			if rank[s] != pair {
+				continue;
+			}
+			let absorbed = next[s];
+			next[s] = next[absorbed];
+			if next[s] < len {
+				prev[next[s]] = s;
+			}
+			rank[absorbed] = u32::MAX;
+			rank[s] = pair_rank(&next, s);
+			if rank[s] != u32::MAX {
+				heap.push(Reverse((rank[s], s)));
+			}
+			let before = prev[s];
+			if before != NONE {
+				rank[before] = pair_rank(&next, before);
+				if rank[before] != u32::MAX {
+					heap.push(Reverse((rank[before], before)));
+				}
+			}
+		}
+		let mut s = 0;
+		while s < len {
+			emit(s, next[s]);
+			s = next[s];
 		}
 	}
 }

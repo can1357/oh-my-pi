@@ -40,7 +40,7 @@ use uucore::{
 
 use crate::{
 	file_backup::{backup_display, backup_path, determine_backup_mode, determine_backup_suffix},
-	host::{Host, Utility, format_usage, matches_parser, util},
+	host::{Host, Utility, format_usage, matches_parser, strip_errno, util},
 	progress::stderr_draw_target,
 };
 
@@ -74,15 +74,6 @@ enum CpError {
 }
 
 type CopyResult<T> = Result<T, CpError>;
-
-/// Renders an I/O error like `strerror`, without Rust's ` (os error N)`.
-fn strip_errno(error: &io::Error) -> String {
-	let mut message = error.to_string();
-	if let Some(position) = message.find(" (os error ") {
-		message.truncate(position);
-	}
-	message
-}
 
 /// `ENOTSUP`-style failure for operations a filesystem cannot perform.
 fn operation_not_supported() -> io::Error {
@@ -1652,8 +1643,9 @@ fn copy_attributes(
 	// A directory is created with a restrictive mode (see `build_dir`); when
 	// its mode is not preserved it ends up with the default one.
 	if dest_is_freshly_created_dir && mode_explicitly_disabled {
+		let umask = host.umask();
 		handle_preserve(host, Preserve::Yes { required: false }, || {
-			set_mode(&filesystem, &dest_fs, dest, Permissions::from_mode(0o777 & !umask()))
+			set_mode(&filesystem, &dest_fs, dest, Permissions::from_mode(0o777 & !umask))
 		})?;
 	}
 
@@ -2134,30 +2126,19 @@ enum DestFate {
 	Recreated,
 }
 
-/// The process umask; `0` where there is none.
-fn umask() -> u32 {
-	#[cfg(unix)]
-	{
-		uucore::mode::get_umask()
-	}
-	#[cfg(not(unix))]
-	{
-		0
-	}
-}
-
 /// Permissions for the destination: an existing destination keeps its own;
 /// a new one gets the source's, less `--no-preserve=mode` and the umask.
 fn calculate_dest_permissions(
 	dest_metadata: Option<&Metadata>,
 	source_metadata: &Metadata,
 	options: &Options,
+	umask: u32,
 ) -> Permissions {
 	match dest_metadata {
 		Some(metadata) => metadata.permissions(),
 		None => {
 			let mode = handle_no_preserve_mode(options, source_metadata.permissions().mode());
-			Permissions::from_mode(mode & !umask())
+			Permissions::from_mode(mode & !umask)
 		},
 	}
 }
@@ -2387,7 +2368,7 @@ fn copy_file(
 		let kept = dest_metadata
 			.as_ref()
 			.filter(|_| fate == DestFate::Kept);
-		let dest_permissions = calculate_dest_permissions(kept, &source_metadata, options);
+		let dest_permissions = calculate_dest_permissions(kept, &source_metadata, options, host.umask());
 		// Here, to match GNU semantics, we quietly ignore an error
 		// if a user does not have the correct ownership to modify
 		// the permissions of a file.
@@ -3087,7 +3068,7 @@ fn build_dir(
 				.permissions()
 				.mode()
 		},
-		_ => umask(),
+		_ => host.umask(),
 	};
 
 	let mode = (!excluded_perms & 0o777) | 0o200;

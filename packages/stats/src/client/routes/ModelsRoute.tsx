@@ -7,6 +7,7 @@ import { buildModelColorLookup, modelKey, OTHER_COLOR } from "../data/colors";
 import {
 	formatCompact,
 	formatDurationMs,
+	formatErrorRate,
 	formatEstimatedCost,
 	formatInteger,
 	formatPercent,
@@ -388,7 +389,7 @@ function buildModelColumns(view: ModelsView, expandedKey: string | null, bucketW
 				) : (
 					<span title={`${formatInteger(row.failedRequests)} failed`}>
 						<Badge tone={errorRateTone(row.errorRate)} mono>
-							{formatPercent(row.errorRate)}
+							{formatErrorRate(row.errorRate)}
 						</Badge>
 					</span>
 				),
@@ -477,7 +478,7 @@ function ModelDetail({
 								label: "Error rate",
 								value: (
 									<span className={`tone-${errorRateTone(model.errorRate)}`}>
-										{formatPercent(model.errorRate)}{" "}
+										{formatErrorRate(model.errorRate)}{" "}
 										<span className="dim">({formatInteger(model.failedRequests)} failed)</span>
 									</span>
 								),
