@@ -1,0 +1,11 @@
+// Snowflake Cortex REST API. Login runs Snowflake OAuth for local applications
+// (built-in SNOWFLAKE$LOCAL_APPLICATION client, PKCE, loopback); the account
+// host is prompted first, so the flow is a custom hook.
+auth "snowflake" {
+	name "Snowflake Cortex"
+	login "custom" hook="snowflake"
+	refresh hook="snowflake"
+	api-key-format "structured"
+	callback-port 54551
+	paste-code #true
+}

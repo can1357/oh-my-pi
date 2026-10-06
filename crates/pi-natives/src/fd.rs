@@ -51,12 +51,30 @@ pub struct FuzzyFindResult {
 	pub total_matches: u32,
 }
 
-fn normalize_fuzzy_text(value: &str) -> String {
-	value
-		.chars()
-		.filter(|ch| !ch.is_whitespace() && !matches!(ch, '/' | '\\' | '.' | '_' | '-'))
-		.flat_map(|ch| ch.to_lowercase())
-		.collect()
+/// Write the subsequence-matching form of `value` (lowercase, without
+/// whitespace and path punctuation) into `out`.
+fn normalize_fuzzy_into<'a>(out: &'a mut String, value: &str) -> &'a str {
+	out.clear();
+	out.extend(
+		value
+			.chars()
+			.filter(|ch| !ch.is_whitespace() && !matches!(ch, '/' | '\\' | '.' | '_' | '-'))
+			.flat_map(char::to_lowercase),
+	);
+	out
+}
+
+/// Write `value.to_lowercase()` into `out`, allocating only for non-ASCII
+/// text, whose context-dependent lowering (final sigma) `str` owns.
+fn lowercase_into<'a>(out: &'a mut String, value: &str) -> &'a str {
+	out.clear();
+	if value.is_ascii() {
+		out.push_str(value);
+		out.make_ascii_lowercase();
+	} else {
+		out.push_str(&value.to_lowercase());
+	}
+	out
 }
 
 fn fuzzy_subsequence_score(query_chars: &[char], target: &str) -> u32 {
@@ -87,61 +105,81 @@ fn fuzzy_subsequence_score(query_chars: &[char], target: &str) -> u32 {
 	40u32.saturating_sub(gap_penalty).max(1)
 }
 
+/// The query in the forms every path is scored against.
+struct FuzzyQuery {
+	lower:      String,
+	normalized: String,
+	chars:      Vec<char>,
+	/// A path-style query (contains '/') matches against the full relative
+	/// path. Plain queries match by basename only, otherwise '@plan' surfaces
+	/// every file whose ancestor directories contain 'plan'.
+	has_slash:  bool,
+}
+
+impl FuzzyQuery {
+	fn new(query: &str) -> Self {
+		let lower = query.trim().to_lowercase();
+		let mut normalized = String::new();
+		normalize_fuzzy_into(&mut normalized, &lower);
+		let chars = normalized.chars().collect();
+		let has_slash = lower.contains('/');
+		Self { lower, normalized, chars, has_slash }
+	}
+}
+
+/// Buffers reused across scored paths, so scoring allocates only while they
+/// grow to the longest path.
+#[derive(Default)]
+struct ScoreScratch {
+	lower:      String,
+	normalized: String,
+}
+
 fn score_fuzzy_path(
 	path: &str,
 	is_directory: bool,
-	query_lower: &str,
-	normalized_query: &str,
-	query_chars: &[char],
+	query: &FuzzyQuery,
+	scratch: &mut ScoreScratch,
 ) -> u32 {
-	if query_lower.is_empty() {
+	if query.lower.is_empty() {
 		return if is_directory { 11 } else { 1 };
 	}
-
-	// Match against the full relative path only when the user typed a path-style
-	// query (contains '/'). Plain queries should match by basename only,
-	// otherwise '@plan' surfaces every file whose ancestor directories contain
-	// 'plan'.
-	let query_has_slash = query_lower.contains('/');
 
 	let file_name = Path::new(path)
 		.file_name()
 		.and_then(|name| name.to_str())
 		.unwrap_or(path);
-	let lower_file_name = file_name.to_lowercase();
+	let lower_file_name = lowercase_into(&mut scratch.lower, file_name);
 
-	let mut score = if lower_file_name == query_lower {
+	let mut score = if lower_file_name == query.lower {
 		120
-	} else if lower_file_name.starts_with(query_lower) {
+	} else if lower_file_name.starts_with(&query.lower) {
 		100
-	} else if lower_file_name.contains(query_lower) {
+	} else if lower_file_name.contains(&query.lower) {
 		80
-	} else if !query_has_slash {
-		let normalized_file_name = normalize_fuzzy_text(file_name);
-		let file_name_fuzzy = fuzzy_subsequence_score(query_chars, &normalized_file_name);
+	} else if !query.has_slash {
+		let normalized_file_name = normalize_fuzzy_into(&mut scratch.normalized, file_name);
+		let file_name_fuzzy = fuzzy_subsequence_score(&query.chars, normalized_file_name);
 		if file_name_fuzzy > 0 {
 			50 + file_name_fuzzy
 		} else {
 			0
 		}
+	} else if lowercase_into(&mut scratch.lower, path).contains(&query.lower) {
+		60
 	} else {
-		let lower_path = path.to_lowercase();
-		if lower_path.contains(query_lower) {
-			60
+		let normalized_file_name = normalize_fuzzy_into(&mut scratch.normalized, file_name);
+		let file_name_fuzzy = fuzzy_subsequence_score(&query.chars, normalized_file_name);
+		if file_name_fuzzy > 0 {
+			50 + file_name_fuzzy
 		} else {
-			let normalized_file_name = normalize_fuzzy_text(file_name);
-			let file_name_fuzzy = fuzzy_subsequence_score(query_chars, &normalized_file_name);
-			if file_name_fuzzy > 0 {
-				50 + file_name_fuzzy
+			let normalized_path = normalize_fuzzy_into(&mut scratch.normalized, path);
+			let path_fuzzy = if normalized_path == query.normalized {
+				40
 			} else {
-				let normalized_path = normalize_fuzzy_text(path);
-				let path_fuzzy = if normalized_path == normalized_query {
-					40
-				} else {
-					fuzzy_subsequence_score(query_chars, &normalized_path)
-				};
-				if path_fuzzy > 0 { 30 + path_fuzzy } else { 0 }
-			}
+				fuzzy_subsequence_score(&query.chars, normalized_path)
+			};
+			if path_fuzzy > 0 { 30 + path_fuzzy } else { 0 }
 		}
 	};
 
@@ -172,9 +210,21 @@ struct RankedMatch {
 }
 
 impl RankedMatch {
-	fn new(entry: FuzzyFindMatch) -> Self {
-		let depth = path_depth(&entry.path);
-		Self { depth, entry }
+	/// How a scored `path` (a directory's without its trailing '/') ranks
+	/// against this retained match, under the same ordering as [`Ord`], without
+	/// building its result path.
+	fn cmp_candidate(&self, path: &str, is_directory: bool, depth: usize, score: u32) -> Ordering {
+		self
+			.entry
+			.score
+			.cmp(&score)
+			.then_with(|| depth.cmp(&self.depth))
+			.then_with(|| {
+				path
+					.bytes()
+					.chain(is_directory.then_some(b'/'))
+					.cmp(self.entry.path.bytes())
+			})
 	}
 }
 
@@ -216,22 +266,32 @@ impl TopMatches {
 		Self { capacity, total: 0, heap: BinaryHeap::with_capacity(capacity.min(256)) }
 	}
 
-	fn push(&mut self, entry: FuzzyFindMatch) {
+	/// Count a hit on `path` (a directory's without its trailing '/'),
+	/// building its result only when it is retained.
+	fn push(&mut self, path: &str, is_directory: bool, score: u32) {
 		self.total = self.total.saturating_add(1);
 		if self.capacity == 0 {
 			return;
 		}
-		let candidate = RankedMatch::new(entry);
-		if self.heap.len() < self.capacity {
-			self.heap.push(candidate);
-			return;
-		}
-		// The root is the worst retained candidate; replace it only when the new
-		// candidate outranks it under the final comparator.
-		if self.heap.peek().is_some_and(|worst| candidate < *worst) {
+		let depth = path_depth(path);
+		if self.heap.len() == self.capacity {
+			// The root is the worst retained candidate; replace it only when the
+			// new candidate outranks it under the final comparator.
+			if self.heap.peek().is_none_or(|worst| {
+				worst.cmp_candidate(path, is_directory, depth, score) != Ordering::Less
+			}) {
+				return;
+			}
 			self.heap.pop();
-			self.heap.push(candidate);
 		}
+		let mut result = String::with_capacity(path.len() + usize::from(is_directory));
+		result.push_str(path);
+		if is_directory {
+			result.push('/');
+		}
+		self
+			.heap
+			.push(RankedMatch { depth, entry: FuzzyFindMatch { path: result, is_directory, score } });
 	}
 
 	/// Exact number of scoring hits, clamped to the `u32` wire type.
@@ -260,36 +320,25 @@ struct FuzzyFindConfig {
 	cache:       Option<bool>,
 }
 
-fn score_entries<I>(
-	entries: I,
-	query_lower: &str,
-	normalized_query: &str,
-	query_chars: &[char],
+fn score_entries<'a>(
+	entries: impl IntoIterator<Item = &'a pi_walker::CollectedEntry>,
+	query: &FuzzyQuery,
 	max_results: usize,
 	ct: &task::CancelToken,
-) -> Result<TopMatches>
-where
-	I: IntoIterator<Item = iofs::GlobMatch>,
-{
+) -> Result<TopMatches> {
 	let mut scored = TopMatches::new(max_results);
+	let mut scratch = ScoreScratch::default();
 	for entry in entries {
 		ct.heartbeat()?;
-		if entry.file_type == iofs::FileType::Symlink {
+		if entry.file_type == pi_walker::FileType::Symlink {
 			continue;
 		}
 
-		let is_directory = entry.file_type == iofs::FileType::Dir;
-		let score =
-			score_fuzzy_path(&entry.path, is_directory, query_lower, normalized_query, query_chars);
-		if score == 0 {
-			continue;
+		let is_directory = entry.file_type == pi_walker::FileType::Dir;
+		let score = score_fuzzy_path(&entry.path, is_directory, query, &mut scratch);
+		if score > 0 {
+			scored.push(&entry.path, is_directory, score);
 		}
-
-		let mut path = entry.path;
-		if is_directory {
-			path.push('/');
-		}
-		scored.push(FuzzyFindMatch { path, is_directory, score });
 	}
 	Ok(scored)
 }
@@ -303,14 +352,14 @@ fn fuzzy_find_sync(config: FuzzyFindConfig, ct: task::CancelToken) -> Result<Fuz
 		return Ok(FuzzyFindResult { matches: Vec::new(), total_matches: 0 });
 	}
 
-	let query_lower = config.query.trim().to_lowercase();
-	let normalized_query = normalize_fuzzy_text(&query_lower);
-	let query_chars: Vec<char> = normalized_query.chars().collect();
-	if !query_lower.is_empty() && normalized_query.is_empty() {
+	let query = FuzzyQuery::new(&config.query);
+	if !query.lower.is_empty() && query.normalized.is_empty() {
 		return Ok(FuzzyFindResult { matches: Vec::new(), total_matches: 0 });
 	}
 
-	let outcome = pi_walker::WalkRequest::new(root)
+	// Scored in place: a cached scan is borrowed, not copied, and only the
+	// retained matches allocate their paths.
+	let scored = pi_walker::WalkRequest::new(root)
 		.hidden(include_hidden)
 		.gitignore(respect_gitignore)
 		.skip_git(true)
@@ -323,16 +372,11 @@ fn fuzzy_find_sync(config: FuzzyFindConfig, ct: task::CancelToken) -> Result<Fuz
 		.directory_errors(pi_walker::DirectoryErrorMode::SkipSkippable)
 		.cache(config.cache.unwrap_or(false))
 		.empty_recheck(pi_walker::EmptyRecheck::Configured)
-		.collect_with_heartbeat(|| ct.heartbeat())
-		.map_err(iofs::map_walker_error)?;
-	let scored = score_entries(
-		outcome.entries.into_iter().map(iofs::GlobMatch::from),
-		&query_lower,
-		&normalized_query,
-		&query_chars,
-		max_results,
-		&ct,
-	)?;
+		.with_collected_with_heartbeat(
+			|| ct.heartbeat(),
+			|entries| score_entries(entries, &query, max_results, &ct),
+		)
+		.map_err(iofs::map_walker_error)??;
 
 	let total_matches = scored.total_matches();
 	let matches = scored.into_sorted_matches();
@@ -512,16 +556,19 @@ mod tests {
 
 	#[test]
 	fn bounded_retention_matches_reference_ordering_and_total() {
-		use super::{FuzzyFindMatch, TopMatches, path_depth};
+		use super::{TopMatches, path_depth};
 
 		// Score ties across depths and directories are the cases where a bounded
-		// heap can diverge from the full sort, so cover them explicitly.
+		// heap can diverge from the full sort, so cover them explicitly. A
+		// directory compares by its path with the trailing '/', which the heap
+		// checks before building it: `a/scripts/` sorts after `a/scripts.ts`.
 		let candidates = [
 			("packages/ai/scripts/", true, 130u32),
 			("scripts/", true, 130),
 			(".omp/skills/opt/scripts/", true, 130),
 			("src/scripts.ts", false, 120),
 			("src/deep/nested/scripts.ts", false, 120),
+			("a/scripts/", true, 120),
 			("a/scripts.ts", false, 120),
 			("notes/script-notes.md", false, 80),
 			("z.txt", false, 51),
@@ -540,7 +587,7 @@ mod tests {
 		for max_results in 1..=candidates.len() + 2 {
 			let mut bounded = TopMatches::new(max_results);
 			for (path, is_directory, score) in candidates {
-				bounded.push(FuzzyFindMatch { path: path.to_string(), is_directory, score });
+				bounded.push(path.trim_end_matches('/'), is_directory, score);
 			}
 			let total = bounded.total_matches();
 			let bounded_paths: Vec<String> = bounded
@@ -564,7 +611,7 @@ mod tests {
 
 	#[test]
 	fn bounded_retention_matches_full_sort_on_large_corpus() {
-		use super::{FuzzyFindMatch, TopMatches, path_depth};
+		use super::{TopMatches, path_depth};
 
 		const CANDIDATE_COUNT: usize = 100_000;
 		const MAX_RESULTS: usize = 128;
@@ -576,7 +623,7 @@ mod tests {
 			let path = format!("{}{index:06}-item.txt", "nested/".repeat(depth));
 			let score = 50 + (index % 83) as u32;
 			reference.push((score, path_depth(&path), path.clone()));
-			bounded.push(FuzzyFindMatch { path, is_directory: false, score });
+			bounded.push(&path, false, score);
 			assert!(
 				bounded.heap.len() <= MAX_RESULTS,
 				"retention exceeded maxResults after candidate {index}"
@@ -607,15 +654,11 @@ mod tests {
 
 	#[test]
 	fn bounded_retention_counts_hits_with_zero_capacity() {
-		use super::{FuzzyFindMatch, TopMatches};
+		use super::TopMatches;
 
 		let mut bounded = TopMatches::new(0);
 		for index in 0..5 {
-			bounded.push(FuzzyFindMatch {
-				path:         format!("file-{index}.txt"),
-				is_directory: false,
-				score:        10,
-			});
+			bounded.push(&format!("file-{index}.txt"), false, 10);
 		}
 
 		assert_eq!(bounded.total_matches(), 5);

@@ -307,11 +307,11 @@ function scoreTokenDirect(token: string, index: SearchIndex): FuzzyMatch {
 	return best ?? { matches: false, score: 0 };
 }
 
-function scoreToken(token: string, index: SearchIndex): FuzzyMatch {
+function scoreToken(token: string, swapVariants: readonly string[], index: SearchIndex): FuzzyMatch {
 	let best = scoreTokenDirect(token, index);
 	if (best.matches) return best;
 
-	for (const variant of buildAlphanumericSwapQueries(token)) {
+	for (const variant of swapVariants) {
 		const match = scoreTokenDirect(variant, index);
 		if (!match.matches) continue;
 		const score = match.score + ALPHANUMERIC_SWAP_PENALTY;
@@ -323,18 +323,26 @@ function scoreToken(token: string, index: SearchIndex): FuzzyMatch {
 	return best;
 }
 
-/** A query normalized and split once, so `fuzzyRank` doesn't re-normalize the
- * same query for every candidate in the list. */
+/** A query normalized and split once, so ranking doesn't re-normalize the
+ * same query (or rebuild its alphanumeric-swap variants) for every candidate. */
 interface PreparedQuery {
 	normalized: string;
 	tokens: string[];
+	/** `buildAlphanumericSwapQueries` of each token, index-aligned with `tokens`. */
+	tokenSwaps: string[][];
 	compact: string;
 }
 
 function prepareQuery(query: string): PreparedQuery | null {
 	const normalized = normalizeForSearch(query);
 	if (normalized.length === 0) return null;
-	return { normalized, tokens: normalized.split(" "), compact: normalized.replaceAll(" ", "") };
+	const tokens = normalized.split(" ");
+	return {
+		normalized,
+		tokens,
+		tokenSwaps: tokens.map(buildAlphanumericSwapQueries),
+		compact: normalized.replaceAll(" ", ""),
+	};
 }
 
 function fuzzyMatchCore(pq: PreparedQuery | null, index: SearchIndex): FuzzyMatch {
@@ -359,8 +367,8 @@ function fuzzyMatchCore(pq: PreparedQuery | null, index: SearchIndex): FuzzyMatc
 		totalScore += compactPhraseIndex * 0.01;
 	}
 
-	for (const token of pq.tokens) {
-		const match = scoreToken(token, index);
+	for (let i = 0; i < pq.tokens.length; i++) {
+		const match = scoreToken(pq.tokens[i]!, pq.tokenSwaps[i]!, index);
 		if (!match.matches) {
 			return { matches: false, score: 0 };
 		}
@@ -400,6 +408,49 @@ export class FuzzyText {
 }
 
 /**
+ * Items prepared once for repeated {@link fuzzyRank}-equivalent ranking.
+ *
+ * `fuzzyRank` resolves each candidate's search index through the module cache,
+ * which stops admitting entries at {@link INDEX_CACHE_MAX}; larger candidate
+ * lists (the full model catalog) rebuild the overflow on every query. Hold one
+ * corpus per stable candidate list and call {@link rank} per keystroke instead.
+ */
+export class FuzzyCorpus<T> {
+	readonly #items: readonly T[];
+	readonly #indexes: SearchIndex[];
+
+	constructor(items: readonly T[], getText: (item: T) => string) {
+		this.#items = items;
+		this.#indexes = items.map(item => buildUncachedSearchIndex(getText(item)));
+	}
+
+	/** Same results as `fuzzyRank(items, query, getText)` for the prepared items. */
+	rank(query: string): FuzzyFilterResult<T>[] {
+		if (!query.trim()) return this.#items.map(item => ({ item, score: 0 }));
+		const indexes = this.#indexes;
+		return rankIndexed(this.#items, prepareQuery(query), i => indexes[i]!);
+	}
+}
+
+function rankIndexed<T>(
+	items: readonly T[],
+	pq: PreparedQuery | null,
+	indexAt: (i: number) => SearchIndex,
+): FuzzyFilterResult<T>[] {
+	const results: FuzzyFilterResult<T>[] = [];
+	for (let i = 0; i < items.length; i++) {
+		const index = indexAt(i);
+		const match = pq === null ? { matches: true, score: 0 } : fuzzyMatchCore(pq, index);
+		if (match.matches) {
+			results.push({ item: items[i]!, score: match.score });
+		}
+	}
+
+	results.sort((a, b) => a.score - b.score);
+	return results;
+}
+
+/**
  * Filter and sort items by fuzzy match quality (best matches first).
  * Supports space-separated tokens: all tokens must match.
  */
@@ -411,18 +462,7 @@ export function fuzzyRank<T>(items: readonly T[], query: string, getText: (item:
 	// A non-blank query that normalizes to empty (pure punctuation) matches
 	// everything with score 0, but still calls getText per item — consumers rely
 	// on its side effects (see fuzzy-cache.test.ts).
-	const pq = prepareQuery(query);
-	const results: FuzzyFilterResult<T>[] = [];
-	for (const item of items) {
-		const text = getText(item);
-		const match = pq === null ? { matches: true, score: 0 } : fuzzyMatchCore(pq, buildSearchIndex(text));
-		if (match.matches) {
-			results.push({ item, score: match.score });
-		}
-	}
-
-	results.sort((a, b) => a.score - b.score);
-	return results;
+	return rankIndexed(items, prepareQuery(query), i => buildSearchIndex(getText(items[i]!)));
 }
 
 export function fuzzyFilter<T>(items: T[], query: string, getText: (item: T) => string): T[] {

@@ -14,7 +14,10 @@ use std::{
 };
 
 use windows_sys::Win32::{
-	Foundation::{CloseHandle, GetLastError, HANDLE, MAX_PATH, NO_ERROR},
+	Foundation::{
+		CloseHandle, ERROR_ACCESS_DENIED, ERROR_CANT_ACCESS_FILE, ERROR_SHARING_VIOLATION,
+		GetLastError, HANDLE, MAX_PATH, NO_ERROR,
+	},
 	Storage::FileSystem::{
 		BY_HANDLE_FILE_INFORMATION, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
 		FILE_NAME_NORMALIZED, FILE_WRITE_ATTRIBUTES, GetCompressedFileSizeW, GetDiskFreeSpaceExW,
@@ -251,13 +254,30 @@ pub(crate) fn file_metadata(file: &fs::File) -> io::Result<Metadata> {
 /// combine two different objects. Objects that cannot be opened for identity
 /// queries keep path metadata with unknown identity.
 pub(crate) fn path_metadata(path: &Path, follow: bool) -> io::Result<Metadata> {
-	if let Ok(file) = open_for_info(path, follow, 0)
-		&& let Ok(meta) = file.metadata()
-	{
-		return Ok(match handle_info(&file) {
-			Ok(info) => Metadata::native_with_handle(meta, info),
-			Err(_) => Metadata::from(meta),
-		});
+	match open_for_info(path, follow, 0) {
+		Ok(file) => {
+			if let Ok(meta) = file.metadata() {
+				return Ok(match handle_info(&file) {
+					Ok(info) => Metadata::native_with_handle(meta, info),
+					Err(_) => Metadata::from(meta),
+				});
+			}
+		},
+		// std's stat opens the path exactly like `open_for_info` and only
+		// recovers from these (by reading the parent's directory listing);
+		// any other failure, a plain miss above all, would just repeat the
+		// same CreateFileW.
+		Err(error)
+			if !error.raw_os_error().is_some_and(|code| {
+				matches!(
+					code as u32,
+					ERROR_SHARING_VIOLATION | ERROR_ACCESS_DENIED | ERROR_CANT_ACCESS_FILE
+				)
+			}) =>
+		{
+			return Err(error);
+		},
+		Err(_) => {},
 	}
 	if follow {
 		fs::metadata(path).map(Metadata::from)

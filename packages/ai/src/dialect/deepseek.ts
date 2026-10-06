@@ -128,6 +128,8 @@ export class DeepSeekInbandScanner implements InbandScanner {
 	#dsmlParamName = "";
 	#dsmlParamIsString = true;
 	#dsmlParamRaw = "";
+	/** Unclassified wrapper text is kept until an invoke proves it is a tool call. */
+	#pendingDsmlSection: string | undefined;
 	#rawBlock = "";
 	#stripLeadingWhitespace = false;
 	/**
@@ -194,6 +196,12 @@ export class DeepSeekInbandScanner implements InbandScanner {
 			if (!this.#consumeDsmlParam(final, events)) break;
 		}
 		if (final && this.#state === "thinking") this.#endThinking(events);
+		if (final && this.#pendingDsmlSection !== undefined) {
+			this.#emitText(this.#pendingDsmlSection + this.#buffer, events);
+			this.#pendingDsmlSection = undefined;
+			this.#buffer = "";
+			this.#state = "outside";
+		}
 		if (final && this.#buffer.length === 0 && this.#rawBlock.length > 0) this.#rawBlock = "";
 		return events;
 	}
@@ -249,6 +257,7 @@ export class DeepSeekInbandScanner implements InbandScanner {
 					? DSML_TOOL_CALLS_OPEN_FULLWIDTH
 					: DSML_TOOL_CALLS_OPEN_ASCII;
 				this.#buffer = this.#buffer.slice(openToken.length);
+				this.#pendingDsmlSection = openToken;
 				this.#state = "dsmlSection";
 				return;
 			}
@@ -381,16 +390,25 @@ export class DeepSeekInbandScanner implements InbandScanner {
 	}
 
 	#consumeDsmlSection(final: boolean, events: InbandScanEvent[]): boolean {
+		const initial = this.#buffer;
 		while (this.#buffer.length > 0) {
 			this.#skipWhitespace();
 			const close = this.#matchingDsmlClose(DSML_TOOL_CALLS_CLOSE_FULLWIDTH, DSML_TOOL_CALLS_CLOSE_ASCII);
 			if (close) {
+				if (this.#pendingDsmlSection !== undefined) {
+					this.#emitText(
+						this.#pendingDsmlSection + initial.slice(0, initial.length - this.#buffer.length) + close,
+						events,
+					);
+					this.#pendingDsmlSection = undefined;
+				}
 				this.#buffer = this.#buffer.slice(close.length);
 				this.#state = "outside";
 				return true;
 			}
 			const invoke = this.#matchDsmlOpen("invoke");
 			if (invoke) {
+				this.#pendingDsmlSection = undefined;
 				this.#rawBlock = invoke.raw;
 				this.#name = invoke.name;
 				this.#id = mintToolCallId();
@@ -404,11 +422,14 @@ export class DeepSeekInbandScanner implements InbandScanner {
 					(this.#buffer.startsWith("<｜DSML｜invoke") || this.#buffer.startsWith("<|DSML|invoke")) &&
 					!this.#buffer.includes(">")
 				)
-					return false;
-				if (partialSuffixOverlapAny(this.#buffer, DSML_SECTION_TOKENS) === this.#buffer.length) return false;
+					break;
+				if (partialSuffixOverlapAny(this.#buffer, DSML_SECTION_TOKENS) === this.#buffer.length) break;
 			}
-			if (this.#buffer.length === 0) return false;
+			if (this.#buffer.length === 0) break;
 			this.#buffer = this.#buffer.slice(1);
+		}
+		if (this.#pendingDsmlSection !== undefined) {
+			this.#pendingDsmlSection += initial.slice(0, initial.length - this.#buffer.length);
 		}
 		return final;
 	}

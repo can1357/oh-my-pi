@@ -5,7 +5,8 @@
  * conversation is rendered into PNG frames of pixel-font text that vision
  * models read back directly, like an archivist at a snapcompact frame
  * reader. Frames are `frameSize` wide; their height hugs the text rows
- * actually printed, so a partially filled frame never bills blank rows.
+ * actually printed, with a 64px floor for vision processors that reject
+ * smaller images.
  *
  * The frame shape is provider-aware. Original choices came from the SQuAD
  * prose evals (`packages/snapcompact`, 200k-token monolithic runs); the
@@ -31,12 +32,17 @@
  *   billing (32px × 1.2, 10k-patch budget at `detail: "original"`) is
  *   area-proportional, so resolution cannot improve chars/$ — 1568 stays.
  *   `detail: "high"` would downgrade (2,500-patch cap); `original` is sent.
- * - **Unknown providers** default to `8on22-bw` with Anthropic-style
- *   visual-token area billing. `providerImageBudget` still caps per-request
- *   images per provider so inline imaging cannot flood a request with
- *   attachments, but the old OpenRouter-specific 8-image cap is gone; routers
- *   now use the same permissive budget as direct Anthropic/Claude lines unless
- *   configured otherwise upstream.
+ * - **Unknown providers** default to `8on22-bw`. `providerImageBudget` still
+ *   caps per-request images per provider so inline imaging cannot flood a
+ *   request with attachments, but the old OpenRouter-specific 8-image cap is
+ *   gone; routers now use the same permissive budget as direct
+ *   Anthropic/Claude lines unless configured otherwise upstream.
+ *
+ * The per-frame token estimate follows the reading model's catalog
+ * `image-tokenization` rule (its lineage, not the gateway), so Claude behind
+ * OpenRouter is billed as Claude and Opus 4.6 under its 1,568-token cap.
+ * Models without a lineage rule fall back to the catalog rule for their wire
+ * API; a reader with neither costs {@link FRAME_TOKEN_ESTIMATE} per frame.
  *
  * The whole pass is local and deterministic — no LLM call, no API key, no
  * latency beyond rendering. Rasterization and PNG encoding happen in native
@@ -46,6 +52,13 @@
  */
 
 import type { Api, ImageContent, Message, TextContent } from "@oh-my-pi/pi-ai";
+import {
+	type ImageSize,
+	type ImageTokenization,
+	type ImageTokenizationTarget,
+	imageTokens,
+	resolveImageTokenization,
+} from "@oh-my-pi/pi-catalog/compat/image-tokenization";
 import { classifyModel, compareRevision, parseRevision } from "@oh-my-pi/pi-catalog/identity";
 import { renderSnapcompactPng, snapcompactSupportedChars } from "@oh-my-pi/pi-natives";
 import { formatGroupedPaths, prompt } from "@oh-my-pi/pi-utils";
@@ -202,10 +215,10 @@ export function isShapeVariantName(value: unknown): value is ShapeVariantName {
 	return typeof value === "string" && value in SHAPE_VARIANTS;
 }
 
-/** Provider families with distinct image billing. */
-type BillingFamily = "anthropic" | "google" | "openai" | "unknown";
+/** Wire API families with distinct default shapes and request hints. */
+type ApiFamily = "anthropic" | "google" | "openai" | "unknown";
 
-function billingFamily(api?: Api): BillingFamily {
+function apiFamily(api?: Api): ApiFamily {
 	switch (api) {
 		case "anthropic-messages":
 		case "bedrock-converse-stream":
@@ -220,39 +233,47 @@ function billingFamily(api?: Api): BillingFamily {
 		case "google-vertex":
 			return "google";
 		default:
-			// Unknown APIs share Anthropic's pixel-area pricing as the safe ceiling.
 			return "unknown";
 	}
 }
 
 /**
- * Per-frame billing for a square frame of edge `frameSize`, by family.
- * Formulas verified against live bills in the resolution benchmarks:
- * - Anthropic: 28px patches, capped at 4,784 visual tokens (the API
- *   downscales past the cap; 1568 → 3,136 measured) + 5% margin.
- * - Google: Gemini 3.x bills a fixed `media_resolution` budget per image —
- *   default HIGH = 1,120 tokens — regardless of pixel size.
- * - OpenAI: 32px patches × 1.2 flagship multiplier, 10,000-patch budget at
- *   `detail: "original"` (1568 → 2,881 measured).
+ * How a reader is billed per frame: its catalog `image-tokenization` rule
+ * (the model's lineage, else its wire API's fallback) and the `detail` hint
+ * snapcompact sends. OpenAI-family wires send `detail: "original"` (`high`
+ * caps the frame at 2,500 patches). Without a rule, every frame costs
+ * {@link FRAME_TOKEN_ESTIMATE}.
  */
-function familyBilling(family: BillingFamily, frameSize: number): Pick<Shape, "frameTokenEstimate" | "imageDetail"> {
-	switch (family) {
-		case "google":
-			return { frameTokenEstimate: 1120 };
-		case "openai": {
-			const patches = Math.min(Math.ceil(frameSize / 32) ** 2, 10_000);
-			return { frameTokenEstimate: Math.ceil(patches * 1.2), imageDetail: "original" };
-		}
-		default: {
-			const patches = Math.min(Math.ceil(frameSize / 28) ** 2, 4784);
-			return { frameTokenEstimate: Math.ceil(patches * 1.05) };
-		}
-	}
+export interface FrameBilling {
+	rule?: ImageTokenization;
+	imageDetail?: ImageContent["detail"];
 }
 
-/** Attach a provider family's billing to a variant geometry. */
-function priceShape(base: ShapeGeometry, family: BillingFamily): Shape {
-	return { ...base, ...familyBilling(family, base.frameSize) };
+/** Resolve the frame billing of `target`. */
+export function frameBilling(target: ShapeTarget | undefined): FrameBilling {
+	const rule = target ? resolveImageTokenization(target) : undefined;
+	const imageDetail = apiFamily(target?.api) === "openai" ? "original" : undefined;
+	return { ...(rule && { rule }), ...(imageDetail && { imageDetail }) };
+}
+
+/** Identity of a frame price list: equal keys price every frame alike. */
+export function frameBillingKey(billing: FrameBilling): string {
+	return `${billing.imageDetail ?? "auto"}:${billing.rule ? JSON.stringify(billing.rule) : "ceiling"}`;
+}
+
+/** Billed-token estimate for one rendered frame of `size` under `billing`. */
+export function frameTokens(billing: FrameBilling, size: ImageSize): number {
+	return billing.rule ? imageTokens(billing.rule, size, billing.imageDetail) : FRAME_TOKEN_ESTIMATE;
+}
+
+/**
+ * Attach the reader's billing to a variant geometry. The square price is a
+ * planning bound: shorter frames can bill differently.
+ */
+function priceShape(base: ShapeGeometry, target: ShapeTarget | undefined): Shape {
+	const billing = frameBilling(target);
+	const frameTokenEstimate = frameTokens(billing, { width: base.frameSize, height: base.frameSize });
+	return { ...base, frameTokenEstimate, ...(billing.imageDetail && { imageDetail: billing.imageDetail }) };
 }
 
 /** Eval-validated shapes, keyed by the provider family they won on. */
@@ -262,18 +283,18 @@ export const SHAPES = {
 	 *  on opus-4.8: f1 .806 vs .755 for plain `8on16-bw` and .351 for the prior
 	 *  `6x12-dim` default — letter-spacing the readable cell wins; the dense
 	 *  6x12 was below the OCR ~16px/char floor and abstained. */
-	anthropic: priceShape(SHAPE_VARIANTS["11on16-bw"], "anthropic"),
+	anthropic: priceShape(SHAPE_VARIANTS["11on16-bw"], { api: "anthropic-messages" }),
 	/** `8on22-bw`: 8x13 glyphs on a 22px pitch (extra leading), black ink.
 	 *  Tool-result legibility bench on gemini-3.5-flash: f1 .934 vs .807 for
 	 *  plain `8on16-bw` and .287 for the prior `doc-8on16-sent-dim`; the
 	 *  line-spacing reduces row crowding so line numbers stay legible. */
-	google: priceShape(SHAPE_VARIANTS["8on22-bw"], "google"),
+	google: priceShape(SHAPE_VARIANTS["8on22-bw"], { api: "google-generative-ai" }),
 	/** `8on22-bw`: 8x13 glyphs on a 22px pitch (extra leading), black ink.
 	 *  Same line-spacing win for OpenAI; bench on gpt-5.5/gpt-5.4-mini showed
 	 *  leading lifts recall on the readable cell over plain `8on16-bw`. */
-	openai: priceShape(SHAPE_VARIANTS["8on22-bw"], "openai"),
+	openai: priceShape(SHAPE_VARIANTS["8on22-bw"], { api: "openai-responses" }),
 	/** Original 5x8 X.org shape (pre-shape-table sessions rendered this). */
-	legacy: priceShape(SHAPE_VARIANTS["5x8-sent"], "anthropic"),
+	legacy: priceShape(SHAPE_VARIANTS["5x8-sent"], { api: "anthropic-messages" }),
 } satisfies Record<string, Shape>;
 
 /** Runtime guard for shape overrides loaded from config or preserve data. */
@@ -303,9 +324,9 @@ export function isShape(value: unknown): value is Shape {
 	);
 }
 
-/** Eval-winning variant per provider family (billing fallback when the
- *  model id matches no known reader line). */
-const FAMILY_VARIANT: Record<BillingFamily, ShapeVariantName> = {
+/** Eval-winning variant per wire family (fallback when the model id matches
+ *  no known reader line). */
+const FAMILY_VARIANT: Record<ApiFamily, ShapeVariantName> = {
 	anthropic: "11on16-bw",
 	google: "8on22-bw",
 	openai: "8on22-bw",
@@ -316,18 +337,11 @@ const FAMILY_VARIANT: Record<BillingFamily, ShapeVariantName> = {
  *  pixels (identical per-frame bill) but a tighter 8px cell, trading some
  *  legibility for ~40% more chars per frame so the least-important middle of a
  *  long archive compresses into fewer frames. */
-const FAMILY_VARIANT_LOW: Record<BillingFamily, ShapeVariantName> = {
+const FAMILY_VARIANT_LOW: Record<ApiFamily, ShapeVariantName> = {
 	anthropic: "8on16-bw",
 	google: "8on16-bw",
 	openai: "8on16-bw",
 	unknown: "8on16-bw",
-};
-
-const FAMILY_SHAPE: Record<BillingFamily, Shape> = {
-	anthropic: SHAPES.anthropic,
-	google: SHAPES.google,
-	openai: SHAPES.openai,
-	unknown: priceShape(SHAPE_VARIANTS["8on22-bw"], "unknown"),
 };
 
 /** One model line's ideal format: variant plus an optional frame-size
@@ -386,10 +400,14 @@ export function idealShapeVariant(modelId: string): IdealShape | undefined {
 	return MODEL_VARIANTS.find(([pattern]) => pattern.test(modelId))?.[1];
 }
 
-/** What will read the frames: the wire API (billing) and model id (shape). */
+/** What will read the frames: the model id (shape and billing), the wire API
+ *  (request hints, fallback billing), and optionally the host and parsed
+ *  identity of a built model. */
 export interface ShapeTarget {
 	api?: Api;
 	id?: string;
+	provider?: string;
+	identity?: ImageTokenizationTarget["identity"];
 }
 
 /**
@@ -397,18 +415,15 @@ export interface ShapeTarget {
  * `"auto"`) forces that geometry; otherwise the model id selects the
  * eval-winning shape — and frame size — for its model line, falling back to
  * the API family's winner when the model is unmeasured. Billing (token
- * estimate, detail hint) always follows the API family actually carrying
- * the request, computed for the resolved frame size. Accepts a full pi-ai
- * `Model` or any `{ api, id }` subset.
+ * estimate, detail hint) is computed for the resolved frame size from the
+ * model's catalog image rule. Accepts a full pi-ai `Model` or any
+ * `{ api, id }` subset.
  */
 export function resolveShape(model?: ShapeTarget, variant?: ShapeVariantName | "auto"): Shape {
-	const family = billingFamily(model?.api);
-	if (variant && variant !== "auto") return priceShape(SHAPE_VARIANTS[variant], family);
+	if (variant && variant !== "auto") return priceShape(SHAPE_VARIANTS[variant], model);
 	const ideal = model?.id ? idealShapeVariant(model.id) : undefined;
-	const name = ideal?.variant ?? FAMILY_VARIANT[family];
-	if (name === FAMILY_VARIANT[family] && ideal?.frameSize === undefined) return FAMILY_SHAPE[family];
-	const base = SHAPE_VARIANTS[name];
-	return priceShape(ideal?.frameSize ? { ...base, frameSize: ideal.frameSize } : base, family);
+	const base = SHAPE_VARIANTS[ideal?.variant ?? FAMILY_VARIANT[apiFamily(model?.api)]];
+	return priceShape(ideal?.frameSize ? { ...base, frameSize: ideal.frameSize } : base, model);
 }
 
 const CJK_HEAVY_MIN_WIDE_CHARS = 8;
@@ -468,10 +483,11 @@ export const MAX_FRAMES_DEFAULT = 80;
  *  text region (newest) — with the denser low-quality tier filling the middle. */
 export const HQ_EDGE_FRAMES = 3;
 
-/** Conservative per-frame token estimate used for context budgeting — the
- *  upper bound across shapes: high-res Claude frames hit the 4,784 visual-token
- *  cap, billed at +5% margin (ceil(4784 * 1.05)). Keeps the overflow guard from
- *  undercounting a high-res archive at the raised {@link MAX_FRAMES_DEFAULT}. */
+/** Conservative per-frame token estimate for archive sizing and for frames of
+ *  unknown size — the upper bound across shapes: high-res Claude frames hit the
+ *  4,784 visual-token cap, billed at +5% margin (ceil(4784 * 1.05)). Keeps the
+ *  overflow guard from undercounting a high-res archive at the raised
+ *  {@link MAX_FRAMES_DEFAULT}. */
 export const FRAME_TOKEN_ESTIMATE = 5024;
 
 /** Conservative upper bound for one persisted frame's base64 payload. The
@@ -487,9 +503,29 @@ export const FRAME_DATA_BYTES_ESTIMATE = 170_000;
  *  ~11 MB JSON payload on every turn. */
 export const FRAME_DATA_BYTES_BUDGET = 3_000_000;
 
-/** Frame-count cap implied by {@link FRAME_DATA_BYTES_BUDGET}. */
-export function maxFramesForDataBudget(maxFrameDataBytes: number = FRAME_DATA_BYTES_BUDGET): number {
-	return Math.max(1, Math.floor(maxFrameDataBytes / FRAME_DATA_BYTES_ESTIMATE));
+/** Default edge variants whose frames shrink with pixel area. Inkier variants
+ *  keep the full {@link FRAME_DATA_BYTES_ESTIMATE} at any frame size. */
+const AREA_PRICED_VARIANTS: readonly ShapeGeometry[] = [SHAPE_VARIANTS["8on22-bw"], SHAPE_VARIANTS["11on16-bw"]];
+
+/** Frame-count cap implied by {@link FRAME_DATA_BYTES_BUDGET} for frames
+ *  rendered by `shape`. {@link AREA_PRICED_VARIANTS} below 1932px are charged
+ *  {@link FRAME_DATA_BYTES_ESTIMATE} scaled by pixel area; every other shape
+ *  pays the full estimate. */
+export function maxFramesForDataBudget(shape: ShapeGeometry): number {
+	const areaPriced = AREA_PRICED_VARIANTS.some(
+		variant =>
+			variant.font === shape.font &&
+			variant.cellWidth === shape.cellWidth &&
+			variant.cellHeight === shape.cellHeight &&
+			variant.stretch === shape.stretch &&
+			variant.variant === shape.variant &&
+			variant.stopwordDim === shape.stopwordDim &&
+			variant.columns === shape.columns &&
+			variant.lineRepeat === shape.lineRepeat,
+	);
+	const areaRatio = areaPriced ? (shape.frameSize / HIGH_RES_ANTHROPIC_VARIANT.frameSize) ** 2 : 1;
+	const frameBytes = Math.min(FRAME_DATA_BYTES_ESTIMATE, Math.ceil(FRAME_DATA_BYTES_ESTIMATE * areaRatio));
+	return Math.max(1, Math.floor(FRAME_DATA_BYTES_BUDGET / frameBytes));
 }
 
 /** Base64 byte length for persisted snapcompact frames. */
@@ -1945,8 +1981,12 @@ export function historyBlocks(archive: Archive, options: HistoryBlockOptions = {
  *  variant exists (foveation off). */
 function denseCompanion(high: Shape, api: Api | undefined): Shape {
 	if (high.columns === 2 || high.font === "silver") return high;
-	const family = billingFamily(api);
-	const low = priceShape({ ...SHAPE_VARIANTS[FAMILY_VARIANT_LOW[family]], frameSize: high.frameSize }, family);
+	const low: Shape = {
+		...SHAPE_VARIANTS[FAMILY_VARIANT_LOW[apiFamily(api)]],
+		frameSize: high.frameSize,
+		frameTokenEstimate: high.frameTokenEstimate,
+		...(high.imageDetail && { imageDetail: high.imageDetail }),
+	};
 	return geometry(low).capacity > geometry(high).capacity ? low : high;
 }
 
