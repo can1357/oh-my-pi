@@ -109,7 +109,31 @@ export class SessionProviderBoundary {
 
 	/** Builds the current deobfuscated context for agent display and replay. */
 	buildDisplaySessionContext(): SessionContext {
-		return deobfuscateSessionContext(this.#host.sessionManager.buildSessionContext(), this.#host.obfuscator());
+		return deobfuscateSessionContext(
+			this.#host.sessionManager.buildSessionContext({ inFlightToolCallIds: this.#inFlightToolCallIds() }),
+			this.#host.obfuscator(),
+		);
+	}
+
+	/**
+	 * Tool call ids of the assistant turn the running agent loop is still executing.
+	 * Only tool results can follow that turn; a later user message means the last
+	 * assistant belongs to an earlier, finished turn and its unpaired calls are dead.
+	 */
+	#inFlightToolCallIds(): Set<string> | undefined {
+		const { isStreaming, messages } = this.#host.agent.state;
+		if (!isStreaming) return undefined;
+		for (let i = messages.length - 1; i >= 0; i--) {
+			const message = messages[i];
+			if (message.role === "user") return undefined;
+			if (message.role !== "assistant") continue;
+			const ids = new Set<string>();
+			for (const block of message.content) {
+				if (block.type === "toolCall") ids.add(block.id);
+			}
+			return ids.size > 0 ? ids : undefined;
+		}
+		return undefined;
 	}
 
 	/** Builds the full display-only transcript context. */

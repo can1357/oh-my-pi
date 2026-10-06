@@ -22,10 +22,10 @@ use std::{
 
 use brush_core::{ShellExtensions, builtins::Registration};
 use clap::{Arg, ArgAction, ArgMatches, Command, builder::ValueParser, value_parser};
-use indicatif::{ProgressBar, ProgressStyle};
+use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use pi_vfs::{
 	BlockingFs, CanonicalizeOptions, DirOptions, File, FileId, FileTime, Metadata, MissingHandling,
-	NodeKind, OpenOptions, Permissions, ResolveMode, child_path, decode_segment, file_name,
+	NodeKind, OpenOptions, Permissions, ResolveMode, SymlinkKind, child_path, decode_segment, file_name,
 	is_virtual_path, join_path, normalize_lexically, parent_path, url_scheme,
 };
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -46,7 +46,7 @@ use crate::{
 
 /// Failure of one copy step.
 #[derive(Debug, Error)]
-enum CpError {
+pub(crate) enum CpError {
 	/// A bare I/O failure.
 	#[error("{}", strip_errno(.0))]
 	IoErr(#[from] io::Error),
@@ -235,6 +235,10 @@ struct Options {
 	progress_bar:           bool,
 	/// `-Z`, `--context`: never copy the source's SELinux label.
 	set_selinux_context:    bool,
+	/// `mv` copying between filesystems: entries below a moved directory are
+	/// reported as renamed, and the operands are left for `mv` to report once
+	/// their sources are gone.
+	move_mode:              bool,
 }
 
 /// Debug states of the offload and reflink actions.
@@ -278,6 +282,12 @@ impl CopyDebug {
 	const STREAMED: Self = Self {
 		offload:          OffloadReflinkDebug::Unsupported,
 		reflink:          OffloadReflinkDebug::Unsupported,
+		sparse_detection: SparseDebug::Unsupported,
+	};
+	/// A copy-on-write clone: the files share their storage.
+	const CLONED: Self = Self {
+		offload:          OffloadReflinkDebug::Unknown,
+		reflink:          OffloadReflinkDebug::Yes,
 		sparse_detection: SparseDebug::Unsupported,
 	};
 }
@@ -365,6 +375,9 @@ const PRESERVE_DEFAULT_VALUES: &str =
 /// Chunk size of streamed copies.
 const COPY_BUFFER: usize = 128 * 1024;
 
+/// Progress bar over the bytes of the copied tree.
+const PROGRESS_TEMPLATE: &str = "{msg}: [{elapsed_precise}] {wide_bar} {bytes:>7}/{total_bytes:7}";
+
 /// Parsed `cp` invocation.
 pub(crate) struct Cp {
 	matches: ArgMatches,
@@ -392,9 +405,11 @@ pub(crate) fn cp_builtin<SE: ShellExtensions>() -> Registration<SE> {
 	util::<Cp, SE>()
 }
 
-/// Writes `cp: <message>` to stderr. Exit status is decided by the caller.
+/// Writes `<utility>: <message>` to stderr, named after the running utility
+/// because `mv` copies between filesystems through this engine too. Exit
+/// status is decided by the caller: status 0 records nothing.
 fn show_error(host: &mut Host, message: impl fmt::Display) {
-	let _ = writeln!(host.stderr, "{}: {message}", Cp::NAME);
+	host.error(message, 0);
 }
 
 /// Writes `cp: warning: <message>` to stderr.
@@ -822,6 +837,16 @@ impl Attributes {
 	};
 	/// `-d`.
 	const LINKS: Self = Self { links: Preserve::Yes { required: true }, ..Self::NONE };
+	/// What GNU mv carries over when it copies between filesystems: all of
+	/// `-a`, but failing to preserve an attribute does not fail the move.
+	const MOVE: Self = Self {
+		ownership:  Preserve::Yes { required: false },
+		mode:       Preserve::Yes { required: false },
+		timestamps: Preserve::Yes { required: false },
+		context:    Preserve::No { explicit: false },
+		links:      Preserve::Yes { required: false },
+		xattr:      Preserve::Yes { required: false },
+	};
 	/// Nothing preserved.
 	const NONE: Self = Self {
 		ownership:  Preserve::No { explicit: false },
@@ -1068,6 +1093,7 @@ impl Options {
 			target_dir,
 			progress_bar: matches.get_flag(options::PROGRESS_BAR),
 			set_selinux_context: set_selinux_context || context.is_some(),
+			move_mode: false,
 		})
 	}
 
@@ -1107,8 +1133,9 @@ impl Options {
 	}
 }
 
-/// Bookkeeping shared by every copy of one `cp` invocation. Paths are kept
-/// in their operand spelling.
+/// Bookkeeping shared by every copy of one `cp` invocation, or of one `mv`
+/// invocation's moves between filesystems. Paths are kept in their operand
+/// spelling.
 #[derive(Default)]
 struct CopyState {
 	/// Identities of the symlinks this invocation created.
@@ -1119,6 +1146,9 @@ struct CopyState {
 	copied_files:        FxHashMap<FileId, PathBuf>,
 	/// `-g` progress over the total source size.
 	progress_bar:        Option<ProgressBar>,
+	/// Source devices whose filesystem refused to clone: later files from
+	/// them skip straight to copying the data.
+	clone_unsupported:   FxHashSet<u64>,
 }
 
 impl CopyState {
@@ -1132,6 +1162,82 @@ impl CopyState {
 				let _ = writeln!(host.stdout, "{line}");
 			},
 		}
+	}
+}
+
+/// The copying half of `mv`'s moves between filesystems, which GNU builds on
+/// cp's `copy()` too: `cp -a` on one entry whose destination is already
+/// gone, without failing the move over an attribute it cannot preserve.
+/// Hard links are remembered across every operand of one `mv`, so the later
+/// names of a moved file become links to its copy.
+pub(crate) struct MoveCopier {
+	options: Options,
+	state:   CopyState,
+}
+
+impl MoveCopier {
+	/// `verbose` reports each entry below a moved directory as renamed.
+	pub(crate) fn new(verbose: bool) -> Self {
+		Self {
+			options: Options {
+				attributes_only: false,
+				backup: BackupMode::None,
+				copy_contents: false,
+				cli_dereference: false,
+				copy_mode: CopyMode::Copy,
+				dereference: false,
+				no_target_dir: true,
+				one_file_system: false,
+				overwrite: OverwriteMode::Clobber(ClobberMode::Standard),
+				parents: false,
+				sparse_mode: SparseMode::Auto,
+				strip_trailing_slashes: false,
+				reflink_mode: ReflinkMode::Auto,
+				attributes: Attributes::MOVE,
+				recursive: true,
+				backup_suffix: String::new(),
+				target_dir: None,
+				update: UpdateMode::All,
+				debug: false,
+				verbose,
+				progress_bar: false,
+				set_selinux_context: false,
+				move_mode: true,
+			},
+			state:   CopyState::default(),
+		}
+	}
+
+	/// Copies `source`, whose lstat is `metadata`, to the vacant `dest`. The
+	/// failures of entries below a directory are reported as they happen and
+	/// the copy goes on, as GNU's does; the result is then
+	/// [`CpError::NotAllFilesCopied`]. Under `display_manager` a directory's
+	/// copy shows its progress.
+	pub(crate) fn copy(
+		&mut self,
+		host: &mut Host,
+		source: &Path,
+		dest: &Path,
+		metadata: Metadata,
+		display_manager: Option<&MultiProgress>,
+	) -> Result<(), CpError> {
+		if !metadata.is_dir() {
+			return copy_file(host, &mut self.state, source, dest, &self.options, true, Some(metadata));
+		}
+
+		self.state.progress_bar = display_manager.map(|display_manager| {
+			let total = disk_usage_directory(host, &host.resolve(source));
+			let style = ProgressStyle::with_template(PROGRESS_TEMPLATE).expect("valid progress template");
+			display_manager
+				.add(ProgressBar::new(total).with_style(style))
+				.with_message(source.to_string_lossy().into_owned())
+		});
+		let mut walk =
+			Walk { options: &self.options, root_dev: None, ancestors: Vec::new(), failed: false };
+		let copied = copy_entry(host, &mut self.state, &mut walk, source, dest, true);
+		self.state.progress_bar = None;
+		copied?;
+		if walk.failed { Err(CpError::NotAllFilesCopied) } else { Ok(()) }
 	}
 }
 
@@ -1255,12 +1361,7 @@ fn copy(host: &mut Host, sources: &[PathBuf], target: &Path, options: &Options) 
 	{
 		let total = disk_usage(host, sources, options.recursive);
 		let bar = ProgressBar::with_draw_target(Some(total), draw_target)
-			.with_style(
-				ProgressStyle::with_template(
-					"{msg}: [{elapsed_precise}] {wide_bar} {bytes:>7}/{total_bytes:7}",
-				)
-				.expect("valid progress template"),
-			)
+			.with_style(ProgressStyle::with_template(PROGRESS_TEMPLATE).expect("valid progress template"))
 			.with_message("cp");
 		bar.tick();
 		state.progress_bar = Some(bar);
@@ -1414,14 +1515,24 @@ fn copy_source(
 	if options.parents {
 		make_parent_dirs(host, state, source, &dest, options)?;
 	}
-	let result = copy_file(host, state, source, &dest, options, true);
+	let result = copy_file(host, state, source, &dest, options, true, None);
 	if options.parents {
 		for (x, y) in aligned_ancestors(source, &dest) {
 			if let Ok(src) = filesystem.canonicalize_with(
 				host.resolve(&x),
 				&CanonicalizeOptions::new(MissingHandling::Normal, ResolveMode::Physical),
 			) {
-				copy_attributes(host, &src, &y, &options.attributes, false, true, options.set_selinux_context)?;
+				copy_attributes(
+					host,
+					&src,
+					&y,
+					&options.attributes,
+					false,
+					true,
+					options.set_selinux_context,
+					None,
+					DestFacts::default(),
+				)?;
 			}
 		}
 	}
@@ -1546,6 +1657,7 @@ fn preserve_via(
 
 /// Copies extended attributes (xattrs) from `source` to `dest`, making a
 /// read-only `dest` temporarily user-writable so the attributes can be set.
+/// A source without any leaves `dest` untouched.
 fn copy_extended_attrs(
 	filesystem: &BlockingFs,
 	source: &Path,
@@ -1553,6 +1665,15 @@ fn copy_extended_attrs(
 	follow_source: bool,
 	skip_selinux: bool,
 ) -> io::Result<()> {
+	let mut names = filesystem.list_xattr(source, follow_source)?;
+	// With -Z the destination gets the default context instead.
+	if skip_selinux {
+		names.retain(|name| name != "security.selinux");
+	}
+	if names.is_empty() {
+		return Ok(());
+	}
+
 	let metadata = filesystem.symlink_metadata(dest)?;
 
 	let mut permissions = metadata.permissions();
@@ -1562,18 +1683,12 @@ fn copy_extended_attrs(
 		filesystem.set_permissions(dest, permissions)?;
 	}
 
-	let copied = (|| -> io::Result<()> {
-		for name in filesystem.list_xattr(source, follow_source)? {
-			// With -Z the destination gets the default context instead.
-			if skip_selinux && name == "security.selinux" {
-				continue;
-			}
-			if let Some(value) = filesystem.get_xattr(source, &name, follow_source)? {
-				filesystem.set_xattr(dest, &name, &value, false)?;
-			}
+	let copied = names.iter().try_for_each(|name| {
+		match filesystem.get_xattr(source, name, follow_source)? {
+			Some(value) => filesystem.set_xattr(dest, name, &value, false),
+			None => Ok(()),
 		}
-		Ok(())
-	})();
+	});
 
 	if was_readonly {
 		let mut permissions = filesystem.symlink_metadata(dest)?.permissions();
@@ -1585,7 +1700,11 @@ fn copy_extended_attrs(
 }
 
 /// Copy the specified attributes from one path to another. `follow_source`
-/// reads the attributes of the file a symlinked `source` points to.
+/// reads the attributes of the file a symlinked `source` points to;
+/// `source_metadata`, when the caller already holds it, must have been read
+/// the same way. `dest_facts` is what the caller knows of `dest`: no need to
+/// look again, or to change what already matches.
+#[allow(clippy::too_many_arguments, reason = "mirrors the call sites' copy state")]
 fn copy_attributes(
 	host: &mut Host,
 	source: &Path,
@@ -1594,18 +1713,43 @@ fn copy_attributes(
 	dest_is_freshly_created_dir: bool,
 	follow_source: bool,
 	skip_selinux_xattr: bool,
+	source_metadata: Option<&Metadata>,
+	dest_facts: DestFacts,
 ) -> CopyResult<()> {
+	// Plain `cp`/`cp -r` preserves nothing: skip the stats below. A freshly
+	// created directory always gets its mode set, one way or the other.
+	let preserves_nothing = [attributes.ownership, attributes.mode, attributes.timestamps, attributes.xattr]
+		.iter()
+		.all(|preserve| matches!(preserve, Preserve::No { .. }));
+	if preserves_nothing && !dest_is_freshly_created_dir {
+		return Ok(());
+	}
 	let filesystem = host.fs().clone();
 	let source_fs = host.resolve(source);
 	let dest_fs = host.resolve(dest);
-	let context = context_for(source, dest);
-	let source_metadata = if follow_source {
-		filesystem.metadata(&source_fs)
-	} else {
-		filesystem.symlink_metadata(&source_fs)
-	}
-	.map_err(|e| CpError::IoErrContext(e, context))?;
-	let dest_is_symlink = filesystem.is_symlink(&dest_fs);
+	let fetched;
+	let source_metadata = match source_metadata {
+		Some(metadata) => metadata,
+		None => {
+			fetched = if follow_source {
+				filesystem.metadata(&source_fs)
+			} else {
+				filesystem.symlink_metadata(&source_fs)
+			}
+			.map_err(|e| CpError::IoErrContext(e, context_for(source, dest)))?;
+			&fetched
+		},
+	};
+	let dest_is_symlink = dest_facts
+		.symlink
+		.unwrap_or_else(|| filesystem.is_symlink(&dest_fs));
+	// As in GNU, an owner or mode `dest` already has is not set again.
+	let source_owner = source_metadata.uid().zip(source_metadata.gid());
+	let chowns = matches!(attributes.ownership, Preserve::Yes { .. })
+		&& source_owner.is_some()
+		&& dest_facts.owner != source_owner;
+	let mode_in_place =
+		!chowns && dest_facts.mode == Some(source_metadata.permissions().mode() & 0o7777);
 
 	let mode_explicitly_disabled = matches!(attributes.mode, Preserve::No { explicit: true });
 
@@ -1620,7 +1764,7 @@ fn copy_attributes(
 	// Ownership must be changed first to avoid interfering with mode change.
 	handle_preserve(host, attributes.ownership, || {
 		// A provider without owners has nothing to carry over.
-		let (Some(uid), Some(gid)) = (source_metadata.uid(), source_metadata.gid()) else {
+		let Some((uid, gid)) = source_owner.filter(|_| chowns) else {
 			return Ok(());
 		};
 		// GNU cp doesn't report a failure to set the ownership, and falls back
@@ -1634,7 +1778,7 @@ fn copy_attributes(
 	handle_preserve(host, mode, || {
 		// chmod cannot change a symbolic link, and every link has the same
 		// permissions anyway.
-		if !dest_is_symlink {
+		if !dest_is_symlink && !mode_in_place {
 			set_mode(&filesystem, &dest_fs, dest, source_metadata.permissions())?;
 		}
 		Ok(())
@@ -1643,8 +1787,9 @@ fn copy_attributes(
 	// A directory is created with a restrictive mode (see `build_dir`); when
 	// its mode is not preserved it ends up with the default one.
 	if dest_is_freshly_created_dir && mode_explicitly_disabled {
+		let umask = host.umask();
 		handle_preserve(host, Preserve::Yes { required: false }, || {
-			set_mode(&filesystem, &dest_fs, dest, Permissions::from_mode(0o777 & !umask()))
+			set_mode(&filesystem, &dest_fs, dest, Permissions::from_mode(0o777 & !umask))
 		})?;
 	}
 
@@ -1692,10 +1837,16 @@ fn set_mode(
 }
 
 /// Creates the symlink `dest` pointing at the literal `target`.
-fn symlink_file(host: &mut Host, state: &mut CopyState, target: &Path, dest: &Path) -> CopyResult<()> {
+fn symlink_file(
+	host: &mut Host,
+	state: &mut CopyState,
+	target: &Path,
+	dest: &Path,
+	kind: SymlinkKind,
+) -> CopyResult<()> {
 	let filesystem = host.fs().clone();
 	let dest_fs = host.resolve(dest);
-	filesystem.symlink(target, &dest_fs).map_err(|e| {
+	filesystem.symlink_with(target, &dest_fs, kind).map_err(|e| {
 		CpError::IoErrContext(
 			e,
 			format!("cannot create symbolic link {} to {}", dest.quote(), target.quote()),
@@ -2010,23 +2161,27 @@ fn make_parent_dirs(
 	Ok(())
 }
 
+/// Reports one copy for `-v`: `'source' -> 'dest'`, or `renamed 'source'
+/// -> 'dest'` for an entry below a directory `mv` moves.
 fn print_verbose_output(
 	host: &mut Host,
 	state: &CopyState,
+	options: &Options,
 	source: &Path,
 	dest: &Path,
 	backup: Option<&Path>,
 ) {
+	let action = if options.move_mode { "renamed " } else { "" };
 	match backup {
 		Some(backup) => state.say(
 			host,
 			format_args!(
-				"{} (backup: {})",
+				"{action}{} (backup: {})",
 				context_for(source, dest),
 				backup_display(dest, backup).quote()
 			),
 		),
-		None => state.say(host, context_for(source, dest)),
+		None => state.say(host, format_args!("{action}{}", context_for(source, dest))),
 	}
 }
 
@@ -2052,6 +2207,8 @@ fn handle_copy_mode(
 	dest: &Path,
 	options: &Options,
 	source_metadata: &Metadata,
+	// The lstat of `dest` just before the copy; `None` when there is none.
+	dest_metadata: Option<&Metadata>,
 	source_in_command_line: bool,
 	backed_up: bool,
 ) -> CopyResult<DestFate> {
@@ -2083,7 +2240,7 @@ fn handle_copy_mode(
 			})?;
 		},
 		CopyMode::Copy | CopyMode::Update => {
-			return copy_helper(host, state, source, dest, options, source_metadata);
+			return copy_helper(host, state, source, dest, options, source_metadata, dest_metadata);
 		},
 		CopyMode::SymLink => {
 			if !source.is_absolute()
@@ -2098,7 +2255,7 @@ fn handle_copy_mode(
 			if filesystem.exists(&dest_fs) && options.force() {
 				filesystem.remove_file(&dest_fs)?;
 			}
-			symlink_file(host, state, source, dest)?;
+			symlink_file(host, state, source, dest, SymlinkKind::Auto)?;
 		},
 		CopyMode::AttrOnly => {
 			filesystem
@@ -2123,18 +2280,21 @@ enum DestFate {
 	/// Removed and created anew (`-f`, special files); the destination takes
 	/// the source's permissions.
 	Recreated,
+	/// Created by the copy where there was none, with `mode` (permission
+	/// bits) in place when known, and owned by `owner` (uid, gid) when the
+	/// copy looked: only ownership preservation needs it.
+	Created { mode: Option<u32>, owner: Option<(u32, u32)> },
 }
 
-/// The process umask; `0` where there is none.
-fn umask() -> u32 {
-	#[cfg(unix)]
-	{
-		uucore::mode::get_umask()
-	}
-	#[cfg(not(unix))]
-	{
-		0
-	}
+/// What a caller knows of a destination without looking at it again.
+#[derive(Debug, Clone, Copy, Default)]
+struct DestFacts {
+	/// Whether it is a symlink; `None` looks.
+	symlink: Option<bool>,
+	/// Its permission bits, when this copy created it.
+	mode:    Option<u32>,
+	/// Its owner and group, when this copy created it and looked.
+	owner:   Option<(u32, u32)>,
 }
 
 /// Permissions for the destination: an existing destination keeps its own;
@@ -2143,12 +2303,13 @@ fn calculate_dest_permissions(
 	dest_metadata: Option<&Metadata>,
 	source_metadata: &Metadata,
 	options: &Options,
+	umask: u32,
 ) -> Permissions {
 	match dest_metadata {
 		Some(metadata) => metadata.permissions(),
 		None => {
 			let mode = handle_no_preserve_mode(options, source_metadata.permissions().mode());
-			Permissions::from_mode(mode & !umask())
+			Permissions::from_mode(mode & !umask)
 		},
 	}
 }
@@ -2170,21 +2331,31 @@ fn copy_file(
 	dest: &Path,
 	options: &Options,
 	source_in_command_line: bool,
+	// An lstat of `source` the caller already holds.
+	source_lstat: Option<Metadata>,
 ) -> CopyResult<()> {
 	let filesystem = host.fs().clone();
 	let source_fs = host.resolve(source);
 	let dest_fs = host.resolve(dest);
 	let dereference = options.dereference(source_in_command_line);
+	// `mv` reports a moved operand itself, once its source is gone.
+	let report = options.verbose && !(options.move_mode && source_in_command_line);
 
-	// GNU stats the source before touching the destination.
-	let source_metadata = if dereference {
-		filesystem.metadata(&source_fs)
-	} else {
-		filesystem.symlink_metadata(&source_fs)
+	// GNU stats the source before touching the destination. The caller's
+	// lstat answers unless dereferencing must look through a symlink.
+	let lstat_is_symlink = source_lstat.as_ref().map(Metadata::is_symlink);
+	let source_metadata = match source_lstat {
+		Some(lstat) if !dereference || !lstat.is_symlink() => Ok(lstat),
+		_ if dereference => filesystem.metadata(&source_fs),
+		_ => filesystem.symlink_metadata(&source_fs),
 	}
 	.map_err(|e| CpError::IoErrContext(e, format!("cannot stat {}", source.quote())))?;
 
-	let source_is_symlink = filesystem.is_symlink(&source_fs);
+	let source_is_symlink = if dereference {
+		lstat_is_symlink.unwrap_or_else(|| filesystem.is_symlink(&source_fs))
+	} else {
+		source_metadata.is_symlink()
+	};
 	let initial_dest_metadata = match filesystem.symlink_metadata(&dest_fs) {
 		Ok(metadata) => Some(metadata),
 		Err(error) if error.kind() == io::ErrorKind::NotFound => None,
@@ -2195,7 +2366,9 @@ fn copy_file(
 	let dest_is_symlink = initial_dest_metadata
 		.as_ref()
 		.is_some_and(Metadata::is_symlink);
-	let dest_target_exists = filesystem.try_exists(&dest_fs).unwrap_or(false);
+	// Set when a branch below removes or renames the destination, so its
+	// first stat no longer describes it.
+	let mut dest_replaced = false;
 	// Fail if dest is a dangling symlink or a symlink this program created
 	// previously
 	if dest_is_symlink {
@@ -2212,7 +2385,7 @@ fn copy_file(
 
 		let copy_contents = dereference || !source_is_symlink;
 		if copy_contents
-			&& !dest_target_exists
+			&& !filesystem.try_exists(&dest_fs).unwrap_or(false)
 			&& !options.remove_destination()
 			&& !is_symlink_loop(&filesystem, &dest_fs)
 			&& host.var("POSIXLY_CORRECT").is_none()
@@ -2227,6 +2400,7 @@ fn copy_file(
 			&& options.backup == BackupMode::None
 		{
 			filesystem.remove_file(&dest_fs)?;
+			dest_replaced = true;
 		}
 	}
 
@@ -2235,6 +2409,7 @@ fn copy_file(
 		&& are_hardlinks_to_same_file(&filesystem, &source_fs, &dest_fs)
 	{
 		filesystem.remove_file(&dest_fs)?;
+		dest_replaced = true;
 	}
 
 	let check_existing_dest = initial_dest_metadata.is_some()
@@ -2298,6 +2473,7 @@ fn copy_file(
 	let mut backup = None;
 	if check_existing_dest {
 		backup = handle_existing_dest(host, state, source, dest, options, source_in_command_line)?;
+		dest_replaced = true;
 		if are_hardlinks_to_same_file(&filesystem, &source_fs, &dest_fs) {
 			if options.copy_mode == CopyMode::Copy {
 				return Ok(());
@@ -2316,7 +2492,9 @@ fn copy_file(
 	}
 
 	// When using --link mode, hard link structure is automatically preserved
-	// because we link to source files (which share inodes).
+	// because we link to source files (which share inodes). The lookup ignores
+	// the link count: `mv` removed the other names of an earlier operand, so
+	// its later names may be down to one.
 	if options.preserve_hard_links()
 		&& options.copy_mode != CopyMode::Link
 		&& let Some(new_source) = source_metadata
@@ -2335,29 +2513,36 @@ fn copy_file(
 				)
 			})?;
 
-		if options.verbose {
-			print_verbose_output(host, state, source, dest, backup.as_deref());
+		if report {
+			print_verbose_output(host, state, options, source, dest, backup.as_deref());
 		}
 
 		return Ok(());
 	}
 
+	let mut dest_metadata = if dest_replaced {
+		filesystem.symlink_metadata(&dest_fs).ok()
+	} else {
+		initial_dest_metadata
+	};
+
 	// A copied symlink replaces the destination, which GNU removes before
 	// reporting the copy.
 	if source_metadata.is_symlink()
 		&& matches!(options.copy_mode, CopyMode::Copy | CopyMode::Update)
-		&& (filesystem.is_symlink(&dest_fs) || filesystem.is_file(&dest_fs))
+		&& dest_metadata
+			.as_ref()
+			.is_some_and(|metadata| metadata.is_symlink() || metadata.is_file())
 	{
 		delete_path(host, state, dest, options)?;
+		dest_metadata = None;
 	}
-
-	let dest_metadata = filesystem.symlink_metadata(&dest_fs).ok();
 
 	let source_is_stream = is_stream(&source_metadata);
 
 	// GNU reports each copy as it starts it.
-	if options.verbose {
-		print_verbose_output(host, state, source, dest, backup.as_deref());
+	if report {
+		print_verbose_output(host, state, options, source, dest, backup.as_deref());
 	}
 
 	let fate = handle_copy_mode(
@@ -2367,26 +2552,54 @@ fn copy_file(
 		dest,
 		options,
 		&source_metadata,
+		dest_metadata.as_ref(),
 		source_in_command_line,
 		backup.is_some(),
 	)?;
 
+	// A file this copy created has a known mode and maybe owner.
+	let (mut created_mode, owner) = match fate {
+		DestFate::Created { mode, owner } => (mode, owner),
+		DestFate::Kept | DestFate::Recreated => (None, None),
+	};
+
 	// Links share their target's permissions; only a copy gets its own.
 	let copied_data = !source_metadata.is_symlink()
 		&& !matches!(options.copy_mode, CopyMode::Link | CopyMode::SymLink);
-	if !dest_is_symlink && copied_data {
+	// A preserved mode is set by `copy_attributes` below.
+	let mode_set_later = matches!(options.attributes.mode, Preserve::Yes { .. }) && !source_is_stream;
+	if !dest_is_symlink && copied_data && !mode_set_later {
 		let kept = dest_metadata
 			.as_ref()
 			.filter(|_| fate == DestFate::Kept);
-		let dest_permissions = calculate_dest_permissions(kept, &source_metadata, options);
+		let dest_permissions = calculate_dest_permissions(kept, &source_metadata, options, host.umask());
 		// Here, to match GNU semantics, we quietly ignore an error
 		// if a user does not have the correct ownership to modify
 		// the permissions of a file.
 		//
 		// FWIW, the OS will throw an error later, on the write op, if
 		// the user does not have permission to write to the file.
-		let _ = filesystem.set_permissions(&dest_fs, dest_permissions);
+		if created_mode != Some(dest_permissions.mode()) {
+			let _ = filesystem.set_permissions(&dest_fs, dest_permissions);
+			created_mode = None;
+		}
 	}
+
+	// What the copy left at `dest`: a recreated symlink, or a file wherever no
+	// symlink was written through.
+	let dest_facts = DestFacts {
+		symlink: match options.copy_mode {
+			CopyMode::Copy | CopyMode::Update if source_metadata.is_symlink() => Some(true),
+			CopyMode::Copy | CopyMode::Update
+				if !dest_metadata.as_ref().is_some_and(Metadata::is_symlink) =>
+			{
+				Some(false)
+			},
+			_ => None,
+		},
+		mode: created_mode,
+		owner,
+	};
 
 	// Some stream files may not exist after we have copied them, like
 	// anonymous pipes; there are no attributes left to copy.
@@ -2399,12 +2612,17 @@ fn copy_file(
 			false,
 			dereference,
 			options.set_selinux_context,
+			Some(&source_metadata),
+			dest_facts,
 		)?;
 	}
 
-	// Skip tracking copied files when using --link mode since hard link
-	// structure is automatically preserved
-	if options.copy_mode != CopyMode::Link
+	// Only `--preserve=links` looks copies up, and only a file with other
+	// names, or reached through a followed symlink, can be met again; GNU's
+	// `remember_copied` keeps the same ones.
+	if options.preserve_hard_links()
+		&& options.copy_mode != CopyMode::Link
+		&& (dereference || source_metadata.nlink().is_none_or(|links| links > 1))
 		&& let Some(id) = source_metadata.file_id()
 	{
 		state.copied_files.insert(id, dest.to_path_buf());
@@ -2445,6 +2663,7 @@ fn copy_helper(
 	dest: &Path,
 	options: &Options,
 	source_metadata: &Metadata,
+	dest_metadata: Option<&Metadata>,
 ) -> CopyResult<DestFate> {
 	let filesystem = host.fs().clone();
 	let dest_fs = host.resolve(dest);
@@ -2485,10 +2704,10 @@ fn copy_helper(
 	}
 
 	if source_metadata.is_symlink() {
-		copy_link(host, state, source, dest, options)?;
+		copy_link(host, state, source, dest, options, source_metadata)?;
 		return Ok(DestFate::Kept);
 	}
-	let (copy_debug, fate) = copy_data(host, state, source, dest, options, source_metadata)?;
+	let (copy_debug, fate) = copy_data(host, state, source, dest, options, source_metadata, dest_metadata)?;
 	if !options.attributes_only && options.debug {
 		state.say(host, copy_debug);
 	}
@@ -2529,20 +2748,46 @@ fn copy_special(
 	created.map(|()| DestFate::Recreated)
 }
 
+/// Recreates the symlink `source`, whose lstat is `source_metadata`, at
+/// `dest`; any existing destination was removed by `copy_file`.
 fn copy_link(
 	host: &mut Host,
 	state: &mut CopyState,
 	source: &Path,
 	dest: &Path,
 	options: &Options,
+	source_metadata: &Metadata,
 ) -> CopyResult<()> {
-	// Here, we will copy the symlink itself (actually, just recreate it); any
-	// existing destination was removed by `copy_file`.
 	let link = host.fs().read_link(host.resolve(source)).map_err(|e| {
 		CpError::IoErrContext(e, format!("cannot read symbolic link {}", source.quote()))
 	})?;
-	symlink_file(host, state, &link, dest)?;
-	copy_attributes(host, source, dest, &options.attributes, false, false, options.set_selinux_context)
+	// Windows tells file from directory symlinks, even dangling ones; keep the
+	// kind the source link has.
+	#[cfg(windows)]
+	let kind = {
+		let file_type = source_metadata.file_type();
+		if file_type.is_symlink_dir() {
+			SymlinkKind::Dir
+		} else if file_type.is_symlink_file() {
+			SymlinkKind::File
+		} else {
+			SymlinkKind::Auto
+		}
+	};
+	#[cfg(not(windows))]
+	let kind = SymlinkKind::Auto;
+	symlink_file(host, state, &link, dest, kind)?;
+	copy_attributes(
+		host,
+		source,
+		dest,
+		&options.attributes,
+		false,
+		false,
+		options.set_selinux_context,
+		Some(source_metadata),
+		DestFacts { symlink: Some(true), ..DestFacts::default() },
+	)
 }
 
 /// Streams `source` into `dest` through their handles, polling cancellation
@@ -2593,7 +2838,8 @@ fn check_streamed_modes(options: &Options, source: &Path, dest: &Path) -> CopyRe
 	Ok(())
 }
 
-/// Copies the data of the regular file (or stream) `source` to `dest`.
+/// Copies the data of the regular file (or stream) `source` to `dest`, whose
+/// lstat just before the copy is `dest_metadata` (`None`: absent).
 ///
 /// Opens the source, then creates or truncates the destination, reporting
 /// either failure as GNU does. Two native host files take the platform's
@@ -2601,11 +2847,12 @@ fn check_streamed_modes(options: &Options, source: &Path, dest: &Path) -> CopyRe
 /// and refuses reflink/sparse requests it cannot honor.
 fn copy_data(
 	host: &mut Host,
-	state: &CopyState,
+	state: &mut CopyState,
 	source: &Path,
 	dest: &Path,
 	options: &Options,
 	source_metadata: &Metadata,
+	dest_metadata: Option<&Metadata>,
 ) -> CopyResult<(CopyDebug, DestFate)> {
 	let filesystem = host.fs().clone();
 	let source_fs = host.resolve(source);
@@ -2622,24 +2869,26 @@ fn copy_data(
 		return Err(CpError::Error("--sparse is only supported on linux".to_string()));
 	}
 
-	// Clone before opening anything; `auto` copies the data wherever the
-	// files cannot share extents (another filesystem, ext4, NTFS, ...).
 	let mut reflink_debug = OffloadReflinkDebug::No;
-	if native && !source_is_stream && options.reflink_mode != ReflinkMode::Never {
+	// `always`, and every clone on macOS, goes by path before opening
+	// anything: a failed clone then leaves no empty `dest` behind, and an
+	// APFS clone carries the source's timestamps, which a copy does not.
+	let clone_by_path = native
+		&& !source_is_stream
+		&& match options.reflink_mode {
+			ReflinkMode::Always => true,
+			ReflinkMode::Auto => cfg!(target_os = "macos"),
+			ReflinkMode::Never => false,
+		};
+	if clone_by_path {
 		match pi_iso::cow::clone_file(&source_fs, &dest_fs) {
 			Ok(()) => {
-				// An APFS clone carries the source's timestamps; a copy is new.
 				if !matches!(options.attributes.timestamps, Preserve::Yes { .. }) {
 					filesystem
 						.set_times(&dest_fs, FileTime::Now, FileTime::Now, true)
 						.map_err(|e| CpError::IoErrContext(e, context_for(source, dest)))?;
 				}
-				let copy_debug = CopyDebug {
-					offload:          OffloadReflinkDebug::Unknown,
-					reflink:          OffloadReflinkDebug::Yes,
-					sparse_detection: SparseDebug::Unsupported,
-				};
-				return Ok((copy_debug, DestFate::Kept));
+				return Ok((CopyDebug::CLONED, DestFate::Kept));
 			},
 			Err(_) if options.reflink_mode == ReflinkMode::Auto => {
 				reflink_debug = OffloadReflinkDebug::Unsupported;
@@ -2670,6 +2919,12 @@ fn copy_data(
 	let cannot_create =
 		|e| CpError::IoErrContext(e, format!("cannot create regular file {}", dest.quote()));
 	let (dest_file, fate) = match filesystem.open_with(&dest_fs, &dest_options) {
+		// A host file this open created has its creation mode less the umask
+		// (see `Fs::with_creation_mask`), unless the parent directory has a
+		// default ACL; see the fstat below for when that matters.
+		Ok(file) if dest_metadata.is_none() && native => {
+			(file, DestFate::Created { mode: Some(create_mode & !host.umask()), owner: None })
+		},
 		Ok(file) => (file, DestFate::Kept),
 		// `-f`: remove a destination that cannot be opened, and try again.
 		Err(_) if options.unlink_after_failed_open() && filesystem.symlink_metadata(&dest_fs).is_ok() => {
@@ -2682,7 +2937,40 @@ fn copy_data(
 		Err(error) => return Err(cannot_create(error)),
 	};
 
-	let copy_debug = if source_is_stream {
+	// Elsewhere `auto` clones on the open handles, as GNU cp issues FICLONE
+	// on its descriptors, and copies the data wherever the files cannot
+	// share extents (another filesystem, ext4, NTFS, ...). A source
+	// filesystem that refused once is not asked again.
+	#[cfg(any(target_os = "linux", target_os = "android", windows))]
+	let cloned = match (source_file.native(), dest_file.native()) {
+		(Some(source_native), Some(dest_native))
+			if native && !source_is_stream && options.reflink_mode == ReflinkMode::Auto =>
+		{
+			let device = source_metadata.dev();
+			if device.is_some_and(|device| state.clone_unsupported.contains(&device)) {
+				reflink_debug = OffloadReflinkDebug::Unsupported;
+				false
+			} else if let Err(error) = pi_iso::cow::clone_open(source_native, dest_native) {
+				if pi_iso::cow::is_unsupported(&error)
+					&& !pi_iso::cow::is_cross_device(&error)
+					&& let Some(device) = device
+				{
+					state.clone_unsupported.insert(device);
+				}
+				reflink_debug = OffloadReflinkDebug::Unsupported;
+				false
+			} else {
+				true
+			}
+		},
+		_ => false,
+	};
+	#[cfg(not(any(target_os = "linux", target_os = "android", windows)))]
+	let cloned = false;
+
+	let copy_debug = if cloned {
+		CopyDebug::CLONED
+	} else if source_is_stream {
 		let dest_is_stream = dest_file.metadata().is_ok_and(|metadata| is_stream(&metadata));
 		if !dest_is_stream {
 			dest_file.set_len(0).map_err(|e| {
@@ -2693,16 +2981,24 @@ fn copy_data(
 		CopyDebug { offload: OffloadReflinkDebug::Avoided, ..CopyDebug::STREAMED }
 	} else {
 		#[cfg(any(target_os = "linux", target_os = "android"))]
-		let fast = match (native, source_file.native(), dest_file.native()) {
-			(true, Some(source_native), Some(dest_native)) => {
-				let dest_is_fifo = dest_native
-					.metadata()
-					.is_ok_and(|metadata| std::os::unix::fs::FileTypeExt::is_fifo(&metadata.file_type()));
+		let fast = match (native, source_file.native(), dest_file.native(), source_metadata.native()) {
+			(true, Some(source_native), Some(dest_native), Some(source_stat)) => {
+				// Only a FIFO the open found, possibly through a symlink, is one.
+				let dest_is_fifo = match dest_metadata {
+					_ if fate != DestFate::Kept => false,
+					Some(metadata) if metadata.is_symlink() => dest_native
+						.metadata()
+						.is_ok_and(|metadata| std::os::unix::fs::FileTypeExt::is_fifo(&metadata.file_type())),
+					Some(metadata) => metadata.file_type().is_fifo(),
+					None => false,
+				};
 				let copy_debug = linux::copy(
 					source_native,
 					dest_native,
+					source_stat,
 					dest_is_fifo,
 					options.sparse_mode,
+					options.debug && !options.attributes_only,
 					source,
 					dest,
 				)?;
@@ -2722,6 +3018,27 @@ fn copy_data(
 		}
 	};
 
+	// Preserving ownership changes it only where it differs; the open handle
+	// tells a created file's owner cheaper than a chown that changes nothing,
+	// and its actual mode with it. A default ACL on the parent replaces the
+	// umask, so without that fstat the computed mode only stands where no
+	// preserved mode relies on it to skip the chmod: a plain copy, like GNU
+	// cp's, keeps whatever mode the open gave it.
+	let fate = match fate {
+		DestFate::Created { .. } if matches!(options.attributes.ownership, Preserve::Yes { .. }) => {
+			match dest_file.metadata() {
+				Ok(metadata) => DestFate::Created {
+					mode:  Some(metadata.permissions().mode() & 0o7777),
+					owner: metadata.uid().zip(metadata.gid()),
+				},
+				Err(_) => DestFate::Created { mode: None, owner: None },
+			}
+		},
+		DestFate::Created { owner, .. } if matches!(options.attributes.mode, Preserve::Yes { .. }) => {
+			DestFate::Created { mode: None, owner }
+		},
+		fate => fate,
+	};
 	drop(source_file);
 	dest_file
 		.close()
@@ -2933,7 +3250,17 @@ fn copy_directory(
 				host.resolve(&x),
 				&CanonicalizeOptions::new(MissingHandling::Normal, ResolveMode::Physical),
 			) {
-				copy_attributes(host, &src, &y, &options.attributes, false, true, options.set_selinux_context)?;
+				copy_attributes(
+					host,
+					&src,
+					&y,
+					&options.attributes,
+					false,
+					true,
+					options.set_selinux_context,
+					None,
+					DestFacts::default(),
+				)?;
 			}
 		}
 	}
@@ -2968,9 +3295,11 @@ fn copy_entry(
 	};
 
 	if !source_is_dir {
-		return match copy_file(host, state, source, dest, options, false) {
+		return match copy_file(host, state, source, dest, options, false, Some(metadata)) {
 			// With --archive a symlink may be copied before the file it names.
-			Err(_) if options.preserve_hard_links() && entry_is_symlink => Ok(()),
+			// A move always copies into a fresh tree, so its failure is real:
+			// `mv` must report it and keep the source.
+			Err(_) if options.preserve_hard_links() && entry_is_symlink && !options.move_mode => Ok(()),
 			result => result,
 		};
 	}
@@ -2978,8 +3307,9 @@ fn copy_entry(
 	let created = match filesystem.metadata(host.resolve(dest)) {
 		Err(_) => {
 			build_dir(host, dest, false, options, Some(source))?;
-			if options.verbose {
-				state.say(host, context_for(source, dest));
+			// `mv` reports a moved operand itself, once its source is gone.
+			if options.verbose && !(is_root && options.move_mode) {
+				print_verbose_output(host, state, options, source, dest, None);
 			}
 			true
 		},
@@ -3036,6 +3366,7 @@ fn copy_entry(
 	// Directories are created without some permissions so nobody can use
 	// them before they are ready; now that the contents are in place, give
 	// the directory its final attributes.
+	// The entry's lstat is its followed stat unless it is a symlink.
 	copy_attributes(
 		host,
 		source,
@@ -3044,6 +3375,8 @@ fn copy_entry(
 		created && options.copy_mode != CopyMode::Link,
 		true,
 		options.set_selinux_context,
+		(!entry_is_symlink).then_some(&metadata),
+		DestFacts { symlink: created.then_some(false), ..DestFacts::default() },
 	)
 }
 
@@ -3078,7 +3411,7 @@ fn build_dir(
 				.permissions()
 				.mode()
 		},
-		_ => umask(),
+		_ => host.umask(),
 	};
 
 	let mode = (!excluded_perms & 0o777) | 0o200;
@@ -3093,7 +3426,7 @@ fn build_dir(
 #[cfg(any(target_os = "linux", target_os = "android"))]
 mod linux {
 	use std::{
-		fs::File,
+		fs::{File, Metadata},
 		io::{self, Read as _, Seek as _, SeekFrom},
 		os::{
 			fd::AsRawFd as _,
@@ -3133,13 +3466,10 @@ mod linux {
 		io::copy(&mut &*source, &mut &*dest).map(drop)
 	}
 
-	/// Checks whether a file contains any non null bytes i.e. any byte != 0x0
-	/// This function returns a tuple of (bool, u64, u64) signifying a tuple of
-	/// (whether a file has data, its size, no of blocks it has allocated in
-	/// disk). The file offset is left at the start.
-	fn check_for_data(source: &File) -> io::Result<(bool, u64, u64)> {
-		let metadata = source.metadata()?;
-
+	/// Whether `source`, described by `metadata`, holds any data: `(has data,
+	/// size, allocated blocks)`, blocks counted as none for an empty file. The
+	/// file offset is left at the start.
+	fn check_for_data(source: &File, metadata: &Metadata) -> io::Result<(bool, u64, u64)> {
 		let size = metadata.size();
 		let blocks = metadata.blocks();
 		// checks edge case of virtual files in /proc which have a size of zero
@@ -3160,14 +3490,6 @@ mod linux {
 			_ if result >= 0 => Ok((true, size, blocks)), // Data found
 			_ => Err(error),
 		}
-	}
-
-	/// Checks whether a file is sparse i.e. it contains holes, uses the crude
-	/// heuristic blocks < size / 512
-	/// Reference:`<https://doc.rust-lang.org/std/os/unix/fs/trait.MetadataExt.html#tymethod.blocks>`
-	fn check_sparse_detection(source: &File) -> io::Result<bool> {
-		let metadata = source.metadata()?;
-		Ok(metadata.blocks() < metadata.size() / 512)
 	}
 
 	/// Converts a byte offset for `lseek`/`pread`.
@@ -3238,20 +3560,23 @@ mod linux {
 		Ok(())
 	}
 
-	/// Copies the native file `source` into the freshly truncated `dest`,
-	/// making holes per `sparse_mode`. The report's `reflink` is `No`; the
-	/// caller accounts for its own clone attempt.
+	/// Copies the native file `source`, whose stat is `metadata`, into the
+	/// freshly truncated `dest`, making holes per `sparse_mode`. The report's
+	/// `reflink` is `No`; the caller accounts for its own clone attempt.
+	/// Without `report`, the data is only looked for where the copy needs it.
 	pub(super) fn copy(
 		source: &File,
 		dest: &File,
+		metadata: &Metadata,
 		dest_is_fifo: bool,
 		sparse_mode: SparseMode,
+		report: bool,
 		source_path: &Path,
 		dest_path: &Path,
 	) -> CopyResult<CopyDebug> {
 		let (copy_debug, result) = match sparse_mode {
 			SparseMode::Always => {
-				let (debug, method) = detect_sparse_always(source, dest_is_fifo).unwrap_or((
+				let (debug, method) = detect_sparse_always(source, metadata, dest_is_fifo).unwrap_or((
 					CopyDebug { sparse_detection: SparseDebug::Zeros, ..UNDETECTED },
 					CopyMethod::Default,
 				));
@@ -3262,10 +3587,15 @@ mod linux {
 				(debug, result)
 			},
 			SparseMode::Never => {
-				(detect_sparse_never(source).unwrap_or(UNDETECTED), fs_copy(source, dest))
+				let debug = if report {
+					detect_sparse_never(source, metadata).unwrap_or(UNDETECTED)
+				} else {
+					UNDETECTED
+				};
+				(debug, fs_copy(source, dest))
 			},
 			SparseMode::Auto => {
-				let (debug, method) = detect_sparse_auto(source, dest_is_fifo)
+				let (debug, method) = detect_sparse_auto(source, metadata, dest_is_fifo, report)
 					.unwrap_or((UNDETECTED, CopyMethod::Default));
 				let result = match method {
 					CopyMethod::SparseCopyWithoutHole => sparse_copy_without_hole(source, dest),
@@ -3279,12 +3609,11 @@ mod linux {
 	}
 
 	/// Debug report for `--sparse=never`.
-	fn detect_sparse_never(source: &File) -> io::Result<CopyDebug> {
+	fn detect_sparse_never(source: &File, metadata: &Metadata) -> io::Result<CopyDebug> {
 		let mut copy_debug = UNDETECTED;
-		let (data_flag, size, _blocks) = check_for_data(source)?;
-		let sparse_flag = check_sparse_detection(source)?;
+		let (data_flag, size, _blocks) = check_for_data(source, metadata)?;
 
-		if sparse_flag {
+		if metadata.blocks() < metadata.size() / 512 {
 			copy_debug.sparse_detection = SparseDebug::SeekHole;
 		}
 
@@ -3297,13 +3626,19 @@ mod linux {
 	/// Debug report and copy method for `--sparse=auto`.
 	fn detect_sparse_auto(
 		source: &File,
+		metadata: &Metadata,
 		dest_is_fifo: bool,
+		report: bool,
 	) -> io::Result<(CopyDebug, CopyMethod)> {
-		let mut copy_debug = UNDETECTED;
+		let sparse_flag = metadata.blocks() < metadata.size() / 512;
+		// Only a sparse file is copied by where its data is.
+		if !sparse_flag && !report {
+			return Ok((UNDETECTED, CopyMethod::Default));
+		}
 
+		let mut copy_debug = UNDETECTED;
 		let mut copy_method = CopyMethod::Default;
-		let (data_flag, size, blocks) = check_for_data(source)?;
-		let sparse_flag = check_sparse_detection(source)?;
+		let (data_flag, size, blocks) = check_for_data(source, metadata)?;
 
 		if (data_flag && size != 0) || (size > 0 && size < 512) {
 			copy_debug.offload = OffloadReflinkDebug::Yes;
@@ -3335,13 +3670,14 @@ mod linux {
 	/// Debug report and copy method for `--sparse=always`.
 	fn detect_sparse_always(
 		source: &File,
+		metadata: &Metadata,
 		dest_is_fifo: bool,
 	) -> io::Result<(CopyDebug, CopyMethod)> {
 		let mut copy_debug = CopyDebug { sparse_detection: SparseDebug::Zeros, ..UNDETECTED };
 		let mut copy_method = CopyMethod::SparseCopy;
 
-		let (data_flag, size, blocks) = check_for_data(source)?;
-		let sparse_flag = check_sparse_detection(source)?;
+		let (data_flag, size, blocks) = check_for_data(source, metadata)?;
+		let sparse_flag = metadata.blocks() < metadata.size() / 512;
 
 		if data_flag || size < 512 {
 			copy_debug.offload = OffloadReflinkDebug::Avoided;
@@ -3509,5 +3845,42 @@ mod tests {
 		let modified = |name: &str| fs::metadata(fixture.path().join(name)).unwrap().modified().unwrap();
 		assert_eq!(modified("kept"), past);
 		assert_ne!(modified("fresh"), past);
+	}
+
+	/// Under a default ACL the parent's ACL, not the umask, shapes a new
+	/// file's mode, so a preserved mode must not be assumed in place.
+	#[test]
+	#[cfg(target_os = "linux")]
+	fn preserved_mode_is_set_under_a_default_acl() {
+		use std::os::unix::fs::PermissionsExt as _;
+
+		let fixture = tempdir().unwrap();
+		let path = |name: &str| fixture.path().join(name);
+		fs::write(path("source"), b"x").unwrap();
+		fs::set_permissions(path("source"), fs::Permissions::from_mode(0o644)).unwrap();
+		fs::create_dir(path("shared")).unwrap();
+		// `default:user::rwx,group::rwx,other::---` in the kernel's xattr form:
+		// version 2, then (tag, permissions, unused id) per entry.
+		let mut acl = 2u32.to_le_bytes().to_vec();
+		for (tag, permissions) in [(0x01u16, 7u16), (0x04, 7), (0x20, 0)] {
+			acl.extend(tag.to_le_bytes());
+			acl.extend(permissions.to_le_bytes());
+			acl.extend(u32::MAX.to_le_bytes());
+		}
+		if let Err(error) = pi_vfs::BlockingFs::native().set_xattr(
+			path("shared"),
+			"system.posix_acl_default",
+			&acl,
+			true,
+		) {
+			eprintln!("skipped: no POSIX ACLs on the temporary filesystem: {error}");
+			return;
+		}
+
+		for (flag, dest) in [("-p", "shared/all"), ("--preserve=mode", "shared/mode")] {
+			let (code, capture) = run_util::<Cp>(&[flag, "source", dest], "", fixture.path());
+			assert_eq!(code, 0, "{}", capture.err());
+			assert_eq!(fs::metadata(path(dest)).unwrap().permissions().mode() & 0o7777, 0o644, "{flag}");
+		}
 	}
 }

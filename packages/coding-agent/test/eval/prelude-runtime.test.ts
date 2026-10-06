@@ -1,14 +1,22 @@
 import { afterAll, describe, expect, it } from "bun:test";
+import type { ImageContent, Message } from "@oh-my-pi/pi-ai";
+import { getBundledModels } from "@oh-my-pi/pi-catalog/models";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { EvalPreludeDefinition } from "@oh-my-pi/pi-coding-agent/eval/preludes";
 import { executeJs } from "@oh-my-pi/pi-coding-agent/eval/js/executor";
 import { disposeAllVmContexts } from "@oh-my-pi/pi-coding-agent/eval/js/context-manager";
 import { disposeAllKernelSessions, executePython } from "@oh-my-pi/pi-coding-agent/eval/py/executor";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
+import { EvalTool } from "@oh-my-pi/pi-coding-agent/tools/eval";
+import { normalizeModelContextMessages } from "@oh-my-pi/pi-coding-agent/utils/image-loading";
 
 const IMAGE_DATA = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]).toString("base64");
 
-function definition(version: string, calls: unknown[]): EvalPreludeDefinition {
+function definition(
+	version: string,
+	calls: unknown[],
+	images: ImageContent[] = [{ type: "image", mimeType: "image/png", data: IMAGE_DATA }],
+): EvalPreludeDefinition {
 	return {
 		name: "fixture",
 		documentation: `fixture ${version}`,
@@ -31,10 +39,7 @@ del _FixturePrelude`,
 		async invoke(parameters, context) {
 			calls.push({ parameters, session: context.session, toolCallId: context.toolCallId });
 			return {
-				content: [
-					{ type: "text", text: `host-${version}` },
-					{ type: "image", mimeType: "image/png", data: IMAGE_DATA },
-				],
+				content: [{ type: "text", text: `host-${version}` }, ...images],
 				details: { version },
 			};
 		},
@@ -56,6 +61,75 @@ describe("eval prelude runtime", () => {
 	afterAll(async () => {
 		await Promise.all([disposeAllVmContexts(), disposeAllKernelSessions()]);
 	});
+
+	for (const language of ["js", "py"] satisfies ("js" | "py")[]) {
+		it(`preserves native frame pixels through ${language} bridge, display, Eval and provider normalization`, async () => {
+			const seed = Buffer.from(
+				"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC",
+				"base64",
+			);
+			const pixels = await new Bun.Image(seed).resize(3840, 2160, { filter: "nearest" }).png().bytes();
+			const original: ImageContent = {
+				type: "image",
+				mimeType: "image/png",
+				data: Buffer.from(pixels).toBase64(),
+				detail: "original",
+				url: "https://images.example/frame.png",
+				providerFile: { provider: "google", uri: "gs://frames/native.png" },
+			};
+			const ordinary: ImageContent = { ...original, detail: "high" };
+			const calls: unknown[] = [];
+			const prelude = definition("frames", calls, [original, ordinary]);
+			const toolSession = session(() => [prelude]);
+			toolSession.getEvalSessionId = () => `frame-fidelity-${language}`;
+			const tool = new EvalTool(toolSession);
+			const displayImages = [original, ordinary].map(image =>
+				language === "js"
+					? `display(${JSON.stringify(image)});`
+					: `display(json.loads(${JSON.stringify(JSON.stringify(image))}))`,
+			);
+			const code =
+				language === "js"
+					? `await fixture.invoke({});\n${displayImages.join("\n")}`
+					: `import json\nawait fixture.invoke()\n${displayImages.join("\n")}`;
+			const result = await tool.execute(`frame-fidelity-${language}`, { language, code, timeout: 30 });
+			expect(result.details?.cells?.[0]?.status).toBe("complete");
+			expect(calls).toHaveLength(1);
+			const model = getBundledModels("openai")[0];
+			if (!model) throw new Error("Missing bundled OpenAI model");
+			const messages: Message[] = [
+				{
+					role: "toolResult",
+					toolCallId: `frame-fidelity-${language}`,
+					toolName: "eval",
+					content: result.content,
+					isError: false,
+					timestamp: 1,
+				},
+			];
+			const normalized = await normalizeModelContextMessages(messages, model);
+			const message = normalized[0];
+			if (!message || message.role !== "toolResult") throw new Error("Missing provider-bound Eval result");
+			const images = message.content.filter((part): part is ImageContent => part.type === "image");
+			expect(images).toHaveLength(4);
+			for (const [index, image] of images.entries()) {
+				const metadata = await new Bun.Image(Buffer.from(image.data, "base64")).metadata();
+				if (index % 2 === 0) {
+					expect([metadata.width, metadata.height]).toEqual([3840, 2160]);
+					expect(image.detail).toBe("original");
+					expect(image.url).toBe(original.url);
+					expect(image.providerFile).toEqual(original.providerFile);
+					expect(Buffer.from(image.data, "base64")).toEqual(Buffer.from(pixels));
+				} else {
+					expect([metadata.width, metadata.height]).toEqual([1568, 882]);
+					expect(image.detail).toBe("high");
+					expect(image.data).not.toBe(original.data);
+					expect(image.url).toBeUndefined();
+					expect(image.providerFile).toBeUndefined();
+				}
+			}
+		}, 60_000);
+	}
 
 	it("synchronizes JavaScript definitions, preserves cell state, and gates captured handles", async () => {
 		const calls: unknown[] = [];

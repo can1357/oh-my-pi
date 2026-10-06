@@ -290,21 +290,8 @@ impl Layout {
 }
 
 fn validate_identity(context: &Context) -> Result<()> {
-	let mut scheme = context.scheme.bytes();
-	if !matches!(scheme.next(), Some(b'a'..=b'z'))
-		|| !scheme
-			.all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || b"+.-".contains(&byte))
-	{
-		bail!("invalid OAuth callback scheme {:?}", context.scheme);
-	}
-	if context.id.len() != 32
-		|| !context
-			.id
-			.bytes()
-			.all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
-	{
-		bail!("invalid OAuth callback transaction nonce");
-	}
+	super::validate_scheme(&context.scheme)?;
+	super::validate_transaction_id(&context.id)?;
 	if !context.directory.is_absolute()
 		|| context
 			.directory

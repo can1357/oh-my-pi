@@ -34,6 +34,7 @@ use std::{
 
 use napi::{Env, Error, Result, Status, Task, bindgen_prelude::*};
 use pi_shell::cancel as core_cancel;
+pub use pi_shell::cancel::{AbortReason, AbortToken};
 use pi_vfs::BlockingFs;
 use tokio_util::sync::CancellationToken;
 
@@ -42,37 +43,6 @@ use crate::prof::profile_region;
 // ─────────────────────────────────────────────────────────────────────────────
 // Cancellation
 // ─────────────────────────────────────────────────────────────────────────────
-
-/// Reason for task abortion.
-#[derive(Debug, Clone, Copy)]
-pub enum AbortReason {
-	Unknown,
-	Timeout,
-	Signal,
-	User,
-}
-
-impl From<core_cancel::AbortReason> for AbortReason {
-	fn from(value: core_cancel::AbortReason) -> Self {
-		match value {
-			core_cancel::AbortReason::Unknown => Self::Unknown,
-			core_cancel::AbortReason::Timeout => Self::Timeout,
-			core_cancel::AbortReason::Signal => Self::Signal,
-			core_cancel::AbortReason::User => Self::User,
-		}
-	}
-}
-
-impl From<AbortReason> for core_cancel::AbortReason {
-	fn from(value: AbortReason) -> Self {
-		match value {
-			AbortReason::Unknown => Self::Unknown,
-			AbortReason::Timeout => Self::Timeout,
-			AbortReason::Signal => Self::Signal,
-			AbortReason::User => Self::User,
-		}
-	}
-}
 
 /// Token for cooperative cancellation of blocking work.
 ///
@@ -130,17 +100,17 @@ impl CancelToken {
 
 	/// Wait for the cancel token to be aborted.
 	pub async fn wait(&self) -> AbortReason {
-		self.core.wait().await.into()
+		self.core.wait().await
 	}
 
 	/// Get an abort token for external cancellation.
 	pub fn abort_token(&self) -> AbortToken {
-		AbortToken(self.core.abort_token())
+		self.core.abort_token()
 	}
 
 	/// Emplaces a cancel token if there is none, returns the abort token.
 	pub fn emplace_abort_token(&mut self) -> AbortToken {
-		AbortToken(self.core.emplace_abort_token())
+		self.core.emplace_abort_token()
 	}
 
 	/// Check if already aborted (non-blocking).
@@ -152,22 +122,11 @@ impl CancelToken {
 	/// as an abort. Result settlement can be delayed by a busy JS thread after
 	/// work already completed within its time budget.
 	pub fn abort_reason(&self) -> Option<AbortReason> {
-		self.core.abort_reason().map(Into::into)
+		self.core.abort_reason()
 	}
 
 	pub fn into_core(self) -> core_cancel::CancelToken {
 		self.core
-	}
-}
-
-/// Token for requesting cancellation from outside the task.
-#[derive(Clone, Default)]
-pub struct AbortToken(core_cancel::AbortToken);
-
-impl AbortToken {
-	/// Request cancellation of the associated task.
-	pub fn abort(&self, reason: AbortReason) {
-		self.0.abort(reason.into());
 	}
 }
 

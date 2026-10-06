@@ -840,7 +840,7 @@ fn looks_like_path_listing(input: &str) -> bool {
 fn compact_ps_output(input: &str) -> String {
 	let mut out = String::new();
 	for line in input.lines() {
-		out.push_str(&truncate_chars(line, 120));
+		out.push_str(&primitives::truncate_line(line, 120));
 		out.push('\n');
 	}
 	if out.lines().count() > 30 {
@@ -848,15 +848,6 @@ fn compact_ps_output(input: &str) -> String {
 	} else {
 		out
 	}
-}
-
-fn truncate_chars(line: &str, max: usize) -> String {
-	if line.chars().count() <= max {
-		return line.to_string();
-	}
-	let mut out: String = line.chars().take(max.saturating_sub(1)).collect();
-	out.push('…');
-	out
 }
 
 fn compact_ping_output(input: &str) -> String {
@@ -892,7 +883,7 @@ fn compact_ssh_output(input: &str) -> String {
 		if is_ssh_noise(line) {
 			continue;
 		}
-		out.push_str(&truncate_chars(line, 120));
+		out.push_str(&primitives::truncate_line(line, 120));
 		out.push('\n');
 	}
 	if out.lines().count() > 200 {

@@ -2,6 +2,31 @@
 
 ## [Unreleased]
 
+## [18.6.3] - 2026-10-06
+
+### Added
+
+- Added per-model `compat.statefulResponses` to enable or disable stored Responses chaining (`previous_response_id` with `store: true`) for one endpoint without the official-only request fields that `compat.officialEndpoint` implies ([#13686](https://github.com/can1357/oh-my-pi/pull/13686) by [@alphastorm](https://github.com/alphastorm)).
+- Added Snowflake Cortex with browser OAuth, token refresh, PAT environment authentication, and streaming Claude/OpenAI models with local tool execution ([#14507](https://github.com/can1357/oh-my-pi/pull/14507) by [@jorgoose](https://github.com/jorgoose)).
+- `AuthStorage.health.check()` accepts `excludeProviders` to skip credentials of providers the caller does not serve ([#14234](https://github.com/can1357/oh-my-pi/pull/14234) by [@will-bogusz](https://github.com/will-bogusz))
+
+### Changed
+
+- Reduced CPU spent on thinking-loop detection while streaming long reasoning ([#14284](https://github.com/can1357/oh-my-pi/pull/14284) by [@abilliontokens](https://github.com/abilliontokens)).
+- Added `recordAffinity: false` to credential resolution options, selecting as the session would without pinning the choice to that session ([#14512](https://github.com/can1357/oh-my-pi/pull/14512) by [@will-bogusz](https://github.com/will-bogusz))
+
+### Fixed
+
+- Codex native-lane steering rejections (`unsupported_native_inflight_message`) now classify as retryable from their error text alone, matching the provider's own classification, and `AIError.isCodexSteerRejection()` identifies them so the agent retry can stay on the same model ([#14242](https://github.com/can1357/oh-my-pi/pull/14242) by [@alphastorm](https://github.com/alphastorm))
+- Fixed replayed Responses and Codex history, including persisted Codex user/developer and assistant items, sending `detail: "original"` images to endpoints whose `supportsImageDetailOriginal` is off ([#13687](https://github.com/can1357/oh-my-pi/pull/13687) by [@alphastorm](https://github.com/alphastorm)).
+- Fixed thinking in turns kept after Anthropic native compaction being rejected or dropped on the next request ([#14251](https://github.com/can1357/oh-my-pi/pull/14251) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed Claude usage being re-polled every 10 seconds while Anthropic rate-limits the account; a failed refresh now waits a minute before trying again ([#14515](https://github.com/can1357/oh-my-pi/pull/14515) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed Devin requests skipping the `onPayload` hook, so payload capture now sees each Devin chat request and a returned replacement is what gets sent ([#14506](https://github.com/can1357/oh-my-pi/pull/14506) by [@will-bogusz](https://github.com/will-bogusz))
+- An OpenAI Responses turn whose connection drops mid-stream can now recover the finished answer from the provider (on hosts that store results, such as Muse Code) instead of re-running the whole turn and discarding the reasoning already done. Storage is opt-in: pass `storeResponses: true`, set `PI_MUSE_STORE_RESPONSES=1`, or set a process-wide default with `configureProviderStoreResponses` ([#14293](https://github.com/can1357/oh-my-pi/pull/14293) and [#14534](https://github.com/can1357/oh-my-pi/pull/14534) by [@abilliontokens](https://github.com/abilliontokens)).
+- Fixed the auth broker exiting when a background OAuth refresh sweep cannot read the credential store; the failure is now logged and the next sweep retries ([#14538](https://github.com/can1357/oh-my-pi/issues/14538))
+- Fixed Anthropic OAuth billing headers changing during developer-first sessions and side turns, preserving the prompt-cache prefix ([#14495](https://github.com/can1357/oh-my-pi/issues/14495)).
+- Fixed OpenAI-compatible chat-completions gateways recording completed turns as client-cancelled because the connection closed before their `[DONE]` sentinel arrived ([#14481](https://github.com/can1357/oh-my-pi/issues/14481)).
+
 ## [18.6.1] - 2026-10-04
 
 ### Fixed
@@ -2290,41 +2315,4 @@
 - Fixed truncated Gemini and Gemma tool blocks from being emitted as plain text during streaming
 - Fixed Gemini/Gemma in-band tool-call parsing around Python comments, raw/unicode string literals, and Gemma close-token text inside string values.
 
-## [15.13.2] - 2026-06-15
-
-### Added
-
-- Added `jsonSchemaToTypeScript` to `@oh-my-pi/pi-ai/utils/schema` to render JSON Schema argument shapes as compact, human-readable TypeScript-style signatures
-- Added the generic `ToolExample` type (`ToolCallExample`/`ToolCompareExample`/`ToolNoteExample`, parameterized over a tool's argument shape) and an `examples` property on the `Tool` interface for defining tool-call examples once as data.
-- Added `renderToolExamples` (via `@oh-my-pi/pi-ai/grammar`) to render a tool's examples into an `<examples>` block in the model's native tool-call syntax, with an optional `_i` intent-field placeholder injected when intent tracing is active.
-- Added per-grammar `renderToolCall` rendering of a single tool-call invocation (the inner element only, without the parallel-call block envelope), distinct from `renderAssistantToolCalls` which renders a complete block of one or more parallel calls.
-- Added a `GrammarRenderOptions.example` flag to `renderToolCall`: when set, the invocation renders as the bare payload — Harmony emits just the JSON arguments, dropping the verbose `<|start|>…<|message|>…<|call|>` envelope — so `renderToolExamples` keeps `<examples>` blocks legible.
-- Added an `abortOnFabrication` parameter to `wrapInbandToolStream` (default `true`): when `false`, a fabricated in-band tool-result continuation is discarded without aborting the provider request instead of cutting the turn short.
-- Added `@oh-my-pi/pi-ai/utils/harmony-leak` export with helpers to detect, audit, and recover GPT-5 Harmony tool-call header leaks
-- Added the `@oh-my-pi/pi-ai/grammar` public entrypoint for grammar factories, prompt/call rendering, in-band scanning, history encoding, and related typed utilities
-- Added a unified in-band tool-call grammar engine with syntax-owned scanners, prompts, history rendering, tool-result rendering, and stream adaptation for GLM, Hermes/Qwen, Kimi, XML/Anthropic, DeepSeek, Harmony, and pi-native formats.
-
-### Changed
-
-- Changed Harmony in-band tool-call rendering to omit the `<|constrain|>json` marker before the payload in `commentary` channel calls
-- Changed tool inventory rendering to present each tool’s `Parameters` section as a simplified TypeScript-style signature derived from its wire schema
-- Added raw in-band tool-call block capture to parsed owned tool calls so debugging can inspect the exact model-emitted call syntax.
-- Moved the canonical `ToolCallSyntax` union to `@oh-my-pi/pi-catalog/identity` and re-exported it from `@oh-my-pi/pi-ai/grammar` so the catalog can own the syntax vocabulary without an `@oh-my-pi/pi-ai` runtime import; all existing import paths are unchanged.
-- Made tool-call argument validation more lenient for schema-directed scalar coercions, including object/array stringification and 0/1 boolean coercion.
-- Changed `renderToolInventory` (the verbose system-prompt inventory and `/dump`) to render each tool as a `# Tool: <name>` markdown section instead of a `<tool name="…">…</tool>` wrapper.
-
-### Fixed
-
-- Fixed Harmony leak handling support by adding `recoverHarmonyToolCall` plus leak-detection workflows for contaminated assistant messages so recoverable tool-call arguments can be safely truncated and retried
-- Fixed false-positive gating in Harmony leak heuristics using signal-based checks so unrelated text containing `to=functions...` is not treated as leaked tool-call markup
-- Routed Kimi, DeepSeek DSML, and plain thinking markup healing through the shared in-band scanners so provider leak repair and owned tool calling parse the same wire formats.
-- Fixed Cursor provider (`cursor-agent` API) streaming dropping large MCP tool-call arguments — most visibly the built-in `task` tool's `tasks` array on multi-subagent dispatches, which failed downstream schema validation with `tasks: Invalid input: expected array, received undefined`. Two upstream behaviors were fighting the stream handler in `packages/ai/src/providers/cursor.ts`: (1) `args_text_delta` carries the _cumulative_ args text so far per `agent.proto`, but the handler concatenated each snapshot onto the buffer, garbling the JSON; (2) `tool_call_completed` carries an `McpArgs` map that omits oversized parameters entirely and downgrades unparsable values to their raw string fallback, but the handler unconditionally overwrote the streamed args with that map. The handler now strips the already-buffered prefix from each `args_text_delta` snapshot (falling back to append when the snapshot doesn't extend the buffer) and merges the decoded `McpArgs` map into the streamed args — preserving streamed keys the completion frame omits and the structured value when the completion frame downgrades to a string. ([#2615](https://github.com/can1357/oh-my-pi/issues/2615))
-- Fixed Codex Responses stream mis-routing interleaved `function_call_arguments.delta` events when more than one tool call was open concurrently. The runtime tracked a singleton `currentItem`/`currentBlock`, so every delta — regardless of `item_id` — was appended to whichever item was most recently added, and `output_item.done` for the earlier call then overwrote a sibling's stored arguments (visible as `tasks: Invalid input: expected array, received undefined` on the `task` tool). Open items are now keyed by `item_id` with `output_index` fallback; deltas/done events route to the matching block, late deltas whose item already closed are dropped instead of corrupting a sibling, and `toolcall_*` stream events emit the right `contentIndex` per call ([#2619](https://github.com/can1357/oh-my-pi/issues/2619)).
-
-## [15.13.1] - 2026-06-15
-
-### Fixed
-
-- Fixed the auth-broker (`OMP_AUTH_BROKER_URL`) rejecting OAuth credentials that carry provider-specific extension fields (e.g. an MCP server's `tokenUrl`/`clientId`/`clientSecret`/`resource` embedded for self-contained token refresh): the OAuth credential wire schema was `.strict()`, so `POST /v1/credential` failed with `400 unrecognized_keys` and a broker-backed MCP reauth reported success while the reloaded credential lacked its refresh material and could no longer refresh. The OAuth wire schema now uses `.loose()` to preserve unknown fields — matching the field-preserving local SQLite store — so extra OAuth fields round-trip through broker set->get (envelope and API-key schemas stay strict).
-
-Older entries are archived in [packages/ai/CHANGELOG.md@bac7e83b5b0e](https://github.com/can1357/oh-my-pi/blob/bac7e83b5b0eb86c909c17830a6666efc359578b/packages/ai/CHANGELOG.md).
+Older entries are archived in [packages/ai/CHANGELOG.md@a20cc0d04b64](https://github.com/can1357/oh-my-pi/blob/a20cc0d04b64f4a68fcc559cbd258743d984c50e/packages/ai/CHANGELOG.md).

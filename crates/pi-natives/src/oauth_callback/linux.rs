@@ -87,21 +87,8 @@ fn has_only_normal_absolute_components(path: &Path) -> bool {
 }
 
 fn validate_context(context: &Context) -> anyhow::Result<()> {
-	if context.id.len() != 32
-		|| !context
-			.id
-			.bytes()
-			.all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-	{
-		bail!("invalid Linux OAuth callback transaction identifier");
-	}
-	let mut scheme = context.scheme.bytes();
-	if !scheme.next().is_some_and(|byte| byte.is_ascii_lowercase())
-		|| !scheme.all(|byte| {
-			byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'+' | b'.' | b'-')
-		}) {
-		bail!("invalid Linux OAuth callback scheme");
-	}
+	super::validate_transaction_id(&context.id)?;
+	super::validate_scheme(&context.scheme)?;
 	if !has_only_normal_absolute_components(&context.home) || context.home.parent().is_none() {
 		bail!("Linux OAuth callback HOME must be an absolute user directory");
 	}
