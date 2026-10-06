@@ -102,6 +102,7 @@ function makeRenderCtx(transcript: SessionContext): { ctx: InteractiveModeContex
 			renderChunk?: () => void,
 		) => helpers.renderSessionContextIncrementally(context, options, renderChunk),
 		showStatus: vi.fn(),
+		proseGithubRepo: () => () => undefined,
 	} as unknown as InteractiveModeContext;
 	const helpers = new UiHelpers(ctx);
 	return { ctx, chatContainer };
