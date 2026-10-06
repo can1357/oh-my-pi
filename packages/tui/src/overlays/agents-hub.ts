@@ -141,6 +141,11 @@ export interface AgentsHubCallbacks {
 const IDENTIFIER_PATTERN = /^[a-z0-9]+(?:-[a-z0-9]+){1,5}$/;
 
 function extractJsonObject(raw: string): string {
+	// A bare JSON object may legitimately contain code fences inside string values; keep it intact.
+	try {
+		JSON.parse(raw);
+		return raw;
+	} catch {}
 	const fenceMatch = raw.match(/```(?:json)?\s*([\s\S]*?)```/i);
 	if (fenceMatch?.[1]) return fenceMatch[1].trim();
 	const start = raw.indexOf("{");
@@ -149,7 +154,15 @@ function extractJsonObject(raw: string): string {
 	return raw.trim();
 }
 
-function parseGeneratedAgentSpec(raw: string): GeneratedAgentSpec {
+/**
+ * Parse model output into a {@link GeneratedAgentSpec}. Accepts a bare JSON object
+ * (tried first) or one wrapped in a code fence. Returns the spec with trimmed fields.
+ * Throws if the output is not valid JSON or not an object, if `identifier`, `whenToUse`
+ * or `systemPrompt` is missing or not a string, if the identifier is not lowercase
+ * kebab-case with 2+ words, if `whenToUse` does not start with "Use this agent when",
+ * or if `systemPrompt` is empty.
+ */
+export function parseGeneratedAgentSpec(raw: string): GeneratedAgentSpec {
 	const parsed = JSON.parse(extractJsonObject(raw)) as Partial<GeneratedAgentSpec>;
 	if (!parsed || typeof parsed !== "object") {
 		throw new Error("Model output is not a JSON object");

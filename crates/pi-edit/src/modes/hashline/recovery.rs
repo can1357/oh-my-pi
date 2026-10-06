@@ -307,7 +307,7 @@ fn remap_edits(previous: &str, current: &str, edits: &[Edit]) -> Option<(Vec<Edi
 /// Positions are useless here — the point is to tell "the list under key `a`"
 /// apart from an identically shaped list under key `b`, so the opening row's
 /// content carries the identity.
-fn enclosing_context(lines: &[String], path: &str, line: u32) -> Vec<(String, String)> {
+fn enclosing_context(lines: &[&str], path: &str, line: u32) -> Vec<(String, String)> {
 	node_chain(lines, path, line)
 		.into_iter()
 		.filter_map(|span| {
@@ -337,8 +337,8 @@ fn context_preserved(
 	let Some(path) = path.to_str() else {
 		return true;
 	};
-	let previous_lines = previous.split('\n').map(str::to_owned).collect::<Vec<_>>();
-	let current_lines = current.split('\n').map(str::to_owned).collect::<Vec<_>>();
+	let previous_lines = previous.split('\n').collect::<Vec<_>>();
+	let current_lines = current.split('\n').collect::<Vec<_>>();
 	let mut checked = HashSet::new();
 	for (authored, remapped) in authored.iter().zip(remapped) {
 		// The offset is uniform across a remapped patch, so the endpoints of a

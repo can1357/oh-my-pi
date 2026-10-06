@@ -45,15 +45,14 @@ import {
 	TERMINAL,
 } from "./terminal-capabilities";
 import { classifyTerminalMultiplexer } from "./terminal-multiplexer";
+import { compositeLineAt } from "./render/composite";
 import {
 	Ellipsis,
-	extractSegments,
 	getWidthConfigEpoch,
 	isOsc66Line,
 	normalizeTerminalOutput,
 	osc66MaxScale,
 	sliceByColumn,
-	sliceWithWidth,
 	truncateToWidth,
 	visibleWidth,
 } from "./utils";
@@ -292,6 +291,12 @@ export interface Component {
 
 	/** User actions on nodes this component described (toggle, select, activate, custom). */
 	handleNativeEvent?(event: NativeUiEvent): void;
+
+	/**
+	 * Pure preflight for focused input that must precede TUI-wide input listeners
+	 * and debug shortcuts. A true result routes the event to this component first.
+	 */
+	capturesInput?(data: string): boolean;
 
 	/**
 	 * Optional handler for keyboard input when component has focus
@@ -936,8 +941,8 @@ export class TUI extends Container {
 	// settle window, leaving only Unicode placeholder cells. Hold the first image
 	// paint until that window has passed; later images render normally.
 	static readonly #GHOSTTY_INITIAL_IMAGE_DELAY_MS = 100;
-	#hardwareCursorRow = 0; // Actual terminal cursor row (may differ due to IME positioning)
-	#hardwareCursorState: HardwareCursorState | null = null;
+	#hardwareCursorRow = 0; // Normal-buffer cursor row, retained while the alternate buffer is active.
+	#hardwareCursorState: HardwareCursorState | null = null; // Current buffer's cursor paint/dedupe state.
 	#sixelProbePendingGraphics = false;
 	#sixelProbeBuffer = "";
 	#sixelProbeTimeout?: NodeJS.Timeout;
@@ -2725,12 +2730,42 @@ export class TUI extends Container {
 			data = data.slice(0, searchFrom + match.index) + data.slice(searchFrom + match.index + match[0].length);
 		}
 		if (data.length === 0) return;
+
+		// If focused component is an overlay, verify it's still visible (visibility can change due to
+		// terminal resize or visible() callback). Runs before the capture preflight below, which must
+		// target the effective focus owner, not a hidden overlay.
+		const focusedOverlay = this.overlayStack.find(o => o.component === this.#focusedComponent);
+		if (focusedOverlay && !this.#isOverlayVisible(focusedOverlay)) {
+			// Focused overlay is no longer visible, redirect to topmost visible overlay
+			const topVisible = this.#getTopmostVisibleOverlay();
+			if (topVisible) {
+				this.setFocus(topVisible.component);
+			} else {
+				// No visible overlays, restore to preFocus
+				this.setFocus(focusedOverlay.preFocus);
+			}
+		}
+
 		// Ctrl+C/Esc use app-level double-press windows. Give those gestures one
 		// frame to drain queued input before an ordinary repaint; delaying every
 		// key would make idle navigation pay a full frame of latency.
 		if (matchesKey(data, "ctrl+c") || matchesKey(data, "escape")) {
 			this.#inputRenderGraceUntilMs = this.#renderScheduler.now() + TUI.#INPUT_RENDER_GRACE_MS;
 		}
+
+		// A focused input owner can reserve its gesture before TUI-wide listeners
+		// and debug shortcuts see the key, then handle the raw event exactly once.
+		const focusedForCapture = this.#focusedComponent;
+		if (
+			focusedForCapture?.handleInput &&
+			(!isKeyRelease(data) || focusedForCapture.wantsKeyRelease) &&
+			focusedForCapture.capturesInput?.(data)
+		) {
+			focusedForCapture.handleInput(data);
+			this.requestRender();
+			return;
+		}
+
 		if (this.#inputListeners.size > 0) {
 			let current = data;
 			for (const listener of this.#inputListeners) {
@@ -2757,20 +2792,6 @@ export class TUI extends Container {
 		if (matchesKey(data, "shift+ctrl+d") && this.onDebug) {
 			this.onDebug();
 			return;
-		}
-
-		// If focused component is an overlay, verify it's still visible
-		// (visibility can change due to terminal resize or visible() callback)
-		const focusedOverlay = this.overlayStack.find(o => o.component === this.#focusedComponent);
-		if (focusedOverlay && !this.#isOverlayVisible(focusedOverlay)) {
-			// Focused overlay is no longer visible, redirect to topmost visible overlay
-			const topVisible = this.#getTopmostVisibleOverlay();
-			if (topVisible) {
-				this.setFocus(topVisible.component);
-			} else {
-				// No visible overlays, restore to preFocus
-				this.setFocus(focusedOverlay.preFocus);
-			}
 		}
 
 		// Pass input to focused component (including Ctrl+C).
@@ -2987,68 +3008,10 @@ export class TUI extends Container {
 				if (idx < 0 || idx >= result.length) continue;
 				const truncatedOverlayLine =
 					visibleWidth(overlayLines[i]) > width ? sliceByColumn(overlayLines[i], 0, width, true) : overlayLines[i];
-				result[idx] = this.#compositeLineAt(result[idx], truncatedOverlayLine, col, width, termWidth);
+				result[idx] = compositeLineAt(result[idx], truncatedOverlayLine, col, width, termWidth);
 			}
 		}
 		return result;
-	}
-
-	/** Splice overlay content into a base line at a specific column. Single-pass optimized. */
-	#compositeLineAt(
-		baseLine: string,
-		overlayLine: string,
-		startCol: number,
-		overlayWidth: number,
-		totalWidth: number,
-	): string {
-		if (TERMINAL.isImageLine(baseLine)) {
-			// Full-width overlays such as /switch are opaque: replace the
-			// Unicode placeholder cells so the image cannot cover the modal.
-			// Partial overlays cannot safely splice placement control sequences.
-			if (startCol !== 0 || overlayWidth < totalWidth) return baseLine;
-			const overlay = sliceWithWidth(overlayLine, 0, totalWidth, true);
-			return SEGMENT_RESET + overlay.text + " ".repeat(Math.max(0, totalWidth - overlay.width));
-		}
-
-		// Single pass through baseLine extracts both before and after segments
-		const afterStart = startCol + overlayWidth;
-		const base = extractSegments(baseLine, startCol, afterStart, totalWidth - afterStart, true);
-
-		// Extract overlay with width tracking (strict=true to exclude wide chars at boundary)
-		const overlay = sliceWithWidth(overlayLine, 0, overlayWidth, true);
-
-		// Pad segments to target widths
-		const beforePad = Math.max(0, startCol - base.beforeWidth);
-		const overlayPad = Math.max(0, overlayWidth - overlay.width);
-		const actualBeforeWidth = Math.max(startCol, base.beforeWidth);
-		const actualOverlayWidth = Math.max(overlayWidth, overlay.width);
-		const afterTarget = Math.max(0, totalWidth - actualBeforeWidth - actualOverlayWidth);
-		const afterPad = Math.max(0, afterTarget - base.afterWidth);
-
-		// Compose result
-		const r = SEGMENT_RESET;
-		const result =
-			base.before +
-			" ".repeat(beforePad) +
-			r +
-			overlay.text +
-			" ".repeat(overlayPad) +
-			r +
-			base.after +
-			" ".repeat(afterPad);
-
-		// CRITICAL: Always verify and truncate to terminal width.
-		// This is the final safeguard against width overflow which would crash the TUI.
-		// Width tracking can drift from actual visible width due to:
-		// - Complex ANSI/OSC sequences (hyperlinks, colors)
-		// - Wide characters at segment boundaries
-		// - Edge cases in segment extraction
-		const resultWidth = visibleWidth(result);
-		if (resultWidth <= totalWidth) {
-			return result;
-		}
-		// Truncate with strict=true to ensure we don't exceed totalWidth
-		return sliceByColumn(result, 0, totalWidth, true);
 	}
 
 	/**
@@ -4162,9 +4125,9 @@ export class TUI extends Container {
 
 	/**
 	 * Compose and paint a single fullscreen overlay frame on the alt buffer.
-	 * Cursor markers are stripped (the modal draws its own in-band caret and
-	 * keeps the hardware cursor hidden), and only the modal is composited over a
-	 * blank base — the transcript is never touched while the alt buffer is up.
+	 * Cursor markers are stripped from the frame, but only a focused cursor-mode
+	 * component owned by the fullscreen overlay may position the hardware cursor.
+	 * The normal transcript is never composited into the alternate buffer.
 	 */
 	#renderAltFrame(width: number, height: number): void {
 		// oxlint-disable-next-line unicorn/no-new-array -- alt-frame length preallocation
@@ -4174,8 +4137,18 @@ export class TUI extends Container {
 			this.#imageBudget.beginPass(false, true);
 			lines = this.#compositeOverlaysIntoWindow(base, width, height);
 		} while (this.#imageBudget.endPass());
-		const prepared = this.#prepareLinesArray(lines, width, this.#altPreparedRows, height, []);
-		this.#emitAltFrame(prepared, width, height, true);
+		const markers: { row: number; col: number }[] = [];
+		const prepared = this.#prepareLinesArray(lines, width, this.#altPreparedRows, height, markers);
+		const topOverlay = this.#getTopmostVisibleOverlay();
+		const focused = this.#focusedComponent;
+		const acceptsTerminalCursor =
+			topOverlay !== undefined &&
+			focused !== null &&
+			isFocusable(focused) &&
+			focused.focused &&
+			typeof focused.setUseTerminalCursor === "function" &&
+			isOverlayFocusTarget(topOverlay.component, focused);
+		this.#emitAltFrame(prepared, width, height, true, acceptsTerminalCursor ? (markers[0] ?? null) : null);
 	}
 
 	/**
@@ -4183,9 +4156,15 @@ export class TUI extends Container {
 	 * previous frame, or every row when the height changed, a repaint is forced,
 	 * or a changed frame holds OSC 66 text before or after. Emits only
 	 * sync-output brackets, cursor moves, and per-row rewrites — never ED3 or
-	 * any native-scrollback byte. The hardware cursor stays hidden here.
+	 * any native-scrollback byte.
 	 */
-	#emitAltFrame(prepared: PreparedLines, width: number, height: number, notifyPaint: boolean): void {
+	#emitAltFrame(
+		prepared: PreparedLines,
+		width: number,
+		height: number,
+		notifyPaint: boolean,
+		cursorPosition: { row: number; col: number } | null = null,
+	): void {
 		// The pass that composed this frame ran with `altScreen`, so the normal
 		// screen's own placements behind it are not treated as retired.
 		this.#imageBudget.limitResidentImages();
@@ -4243,10 +4222,35 @@ export class TUI extends Container {
 		}
 		this.#altPreviousLines = prepared.lines;
 		this.#altPreparedRows = prepared.rows;
-		if (rowsBuffer === "") return;
-		this.terminal.write(`${this.#paintBeginSequence}${full ? "\x1b[H" : ""}${rowsBuffer}${this.#paintEndSequence}`);
-		this.#debugPaint = { lines: prepared.lines, windowTop: 0, altScreen: true };
-		if (notifyPaint) {
+		const target = this.#targetHardwareCursorState(cursorPosition, height);
+		const previousCursor = this.#hardwareCursorState;
+		const cursorChanged =
+			target === null
+				? previousCursor?.visible === true
+				: previousCursor === null ||
+					previousCursor.row !== target.row ||
+					previousCursor.col !== target.col ||
+					previousCursor.visible !== target.visible;
+		const placeCursor = target !== null && (rowsBuffer !== "" || cursorChanged);
+		const hideCursor = target === null && previousCursor?.visible === true;
+		if (rowsBuffer === "" && !placeCursor && !hideCursor) return;
+
+		let cursorBuffer = "";
+		if (placeCursor && target !== null) {
+			cursorBuffer = `\x1b[${target.row + 1};${target.col + 1}H${target.visible ? "\x1b[?25h" : "\x1b[?25l"}`;
+		} else if (hideCursor) {
+			cursorBuffer = "\x1b[?25l";
+		}
+		this.terminal.write(
+			`${this.#paintBeginSequence}${full ? "\x1b[H" : ""}${rowsBuffer}${cursorBuffer}${this.#paintEndSequence}`,
+		);
+		this.#debugPaint = {
+			lines: prepared.lines,
+			windowTop: 0,
+			altScreen: true,
+			...(target === null ? {} : { cursor: { x: target.col, y: target.row, visible: target.visible } }),
+		};
+		if (notifyPaint && rowsBuffer !== "") {
 			this.#notifyPaint({
 				history: [],
 				viewport: prepared.lines,
@@ -4256,6 +4260,11 @@ export class TUI extends Container {
 				rows: height,
 			});
 		}
-		if (full) this.#fullRedrawCount += 1;
+		if (full && rowsBuffer !== "") this.#fullRedrawCount += 1;
+		// DEC 1049 restores the normal-buffer cursor on exit. Track this buffer's
+		// visibility and marker position without replacing that saved normal row,
+		// which stop() and a late native-surface handshake use after the restore.
+		if (target) this.#hardwareCursorState = target;
+		else this.#recordHardwareCursorHidden();
 	}
 }

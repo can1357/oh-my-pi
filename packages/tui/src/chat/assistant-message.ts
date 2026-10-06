@@ -506,6 +506,7 @@ export class AssistantMessageComponent extends Container {
 	readonly #textDisplayRenderers: readonly AssistantTextDisplayRenderer[];
 	readonly #imageBudget?: ImageBudget;
 	#proseOnlyThinking: boolean;
+	#expandThinkingBlocks: boolean;
 
 	constructor(
 		message?: AssistantMessage,
@@ -516,6 +517,7 @@ export class AssistantMessageComponent extends Container {
 		proseOnlyThinking = true,
 		linkTargets?: ReadonlyMap<string, string>,
 		textDisplayRenderers: readonly AssistantTextDisplayRenderer[] = [],
+		expandThinkingBlocks = false,
 	) {
 		super();
 		this.#hideThinkingBlock = hideThinkingBlock;
@@ -524,6 +526,7 @@ export class AssistantMessageComponent extends Container {
 		this.#textDisplayRenderers = textDisplayRenderers;
 		this.#imageBudget = imageBudget;
 		this.#proseOnlyThinking = proseOnlyThinking;
+		this.#expandThinkingBlocks = expandThinkingBlocks;
 
 		ensureThemeSync();
 		this.#transcriptBlockFinalized = message !== undefined;
@@ -610,6 +613,16 @@ export class AssistantMessageComponent extends Container {
 
 	setProseOnlyThinking(proseOnly: boolean): void {
 		this.#proseOnlyThinking = proseOnly;
+	}
+
+	/**
+	 * Keep finished thinking sections expanded instead of folding them to "Thought for 12s".
+	 * Sections the user folded or unfolded by hand keep that choice.
+	 */
+	setExpandThinkingBlocks(expand: boolean): void {
+		if (this.#expandThinkingBlocks === expand) return;
+		this.#expandThinkingBlocks = expand;
+		this.#nativeViewVersion++;
 	}
 
 	override dispose(): void {
@@ -883,8 +896,10 @@ export class AssistantMessageComponent extends Container {
 								// `.live` while streaming: the body clamps to its tail under a fade.
 								role: thinkingLive ? "omp.thinking.live" : "omp.thinking",
 								collapsible: true,
-								// Open while it streams; a finished thought folds to its "Thought for 12s" line.
-								collapsed: this.#thinkingCollapsed.get(index) ?? (this.#hideThinkingBlock || !thinkingLive),
+								// Open while it streams; a finished thought folds to its "Thought for 12s" line unless the user keeps thinking expanded.
+								collapsed:
+									this.#thinkingCollapsed.get(index) ??
+									(this.#hideThinkingBlock || (!thinkingLive && !this.#expandThinkingBlocks)),
 								// Tern's fold head sums it into "Worked for 12s".
 								took: clock?.end === undefined ? undefined : Math.max(0, Math.round(clock.end - clock.start)),
 							},
@@ -1432,7 +1447,12 @@ export class AssistantMessageComponent extends Container {
 						displayImage.data,
 						displayImage.mimeType,
 						{ fallbackColor: (text: string) => theme.fg("toolOutput", text) },
-						{ ...resolveImageOptions(), budget: this.#imageBudget, imageKey: key },
+						{
+							...resolveImageOptions(),
+							budget: this.#imageBudget,
+							imageKey: key,
+							requestRender: this.#onImageUpdate,
+						},
 					),
 				);
 				continue;
@@ -1474,7 +1494,9 @@ export class AssistantMessageComponent extends Container {
 	}
 
 	#computeShapeKey(message: AssistantMessage): string {
-		const parts: string[] = [`htb:${this.#hideThinkingBlock ? 1 : 0}|pot:${this.#proseOnlyThinking ? 1 : 0}`];
+		const parts: string[] = [
+			`htb:${this.#hideThinkingBlock ? 1 : 0}|pot:${this.#proseOnlyThinking ? 1 : 0}|etb:${this.#expandThinkingBlocks ? 1 : 0}`,
+		];
 		for (const content of message.content) {
 			if (content.type === "text") {
 				parts.push(canonicalizeMessage(content.text) ? "T1" : "T0");

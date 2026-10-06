@@ -413,6 +413,8 @@ provider "muse-code" {
 
 Only `discovery` enrolls a provider in `generate-models.ts`; providers without it are never fetched at generation time (see the `charm-hyper` entry for why a live gateway deliberately omits it).
 
+`kind-apis { <kind> "<api>" }` maps each non-chat kind (`image`, `tts`, `stt`, `embedding`, `rerank`, `video`) to the API discovery assigns rows of that kind. A runner API must sit under the kind it serves (`RUNNER_API_KINDS` in `src/types.ts`); chat APIs, which serve hosted image generation, and multi-kind `local-inference` may back any kind.
+
 ### Seed rows
 
 A `seed` _defines_ bundled rows for providers whose catalog cannot be discovered at generation time — credential-scoped rosters, unauthenticated regens, or models ahead of upstream catalogs. Every other stratum patches rows; this one authors them. Runtime model managers hand the rows to `staticModels` through `seedModels(provider)`; the generator bundles them per the seed's `bundle` policy. Values are literal — a seed never derives from another provider's row, and pricing is never borrowed.

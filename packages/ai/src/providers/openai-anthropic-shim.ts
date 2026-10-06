@@ -147,6 +147,7 @@ export function streamOpenAIAnthropicShim(
 					toolChoice: options?.toolChoice,
 					serviceTier: options?.serviceTier,
 					disableReasoning: options?.disableReasoning,
+					waitForTerminalDrain: options?.waitForTerminalDrain,
 				});
 
 				for await (const event of innerStream) {

@@ -212,6 +212,12 @@ impl<T: Clone + Default> Grid<T> {
 		if width == self.width && height == self.height {
 			return;
 		}
+		if height == self.height {
+			// Column-major: new columns append after the existing ones.
+			self.cells.resize((width * height) as usize, T::default());
+			self.width = width;
+			return;
+		}
 		let mut grown = Self::new(width, height);
 		for x in 0..self.width {
 			for y in 0..self.height {
@@ -238,18 +244,15 @@ impl<T: Clone + Default> Grid<T> {
 		}
 	}
 
-	/// Copy of `self` grown to fit every overlay at `offset`; cells of `self`
-	/// are preserved and overlays are not yet applied.
-	fn grown_for_overlays(&self, offset: DrawingCoord, overlays: &[&Self]) -> Self {
+	/// Grow to fit every overlay at `offset`; overlays are not yet applied.
+	fn grow_for_overlays(&mut self, offset: DrawingCoord, overlays: &[&Self]) {
 		let mut width = self.width;
 		let mut height = self.height;
 		for overlay in overlays {
 			width = width.max(overlay.width + offset.x);
 			height = height.max(overlay.height + offset.y);
 		}
-		let mut merged = self.clone();
-		merged.ensure_size(width, height);
-		merged
+		self.ensure_size(width, height);
 	}
 }
 
@@ -260,18 +263,17 @@ impl RoleCanvas {
 	}
 
 	/// Overlay role canvases at `offset`; `Some` roles overwrite the base.
-	pub fn merged(&self, offset: DrawingCoord, overlays: &[&Self]) -> Self {
-		let mut merged = self.grown_for_overlays(offset, overlays);
+	pub fn merge(&mut self, offset: DrawingCoord, overlays: &[&Self]) {
+		self.grow_for_overlays(offset, overlays);
 		for overlay in overlays {
 			for x in 0..overlay.width {
 				for y in 0..overlay.height {
 					if let Some(role) = overlay.get(x, y).copied().flatten() {
-						merged.set(x + offset.x, y + offset.y, Some(role));
+						self.set(x + offset.x, y + offset.y, Some(role));
 					}
 				}
 			}
 		}
-		merged
 	}
 }
 
@@ -280,12 +282,18 @@ pub const fn is_junction_char(c: char) -> bool {
 	matches!(
 		c,
 		'─' | '│'
-			| '┌' | '┐'
-			| '└' | '┘'
-			| '├' | '┤'
-			| '┬' | '┴'
-			| '┼' | '╴'
-			| '╵' | '╶'
+			| '┌'
+			| '┐'
+			| '└'
+			| '┘'
+			| '├'
+			| '┤'
+			| '┬'
+			| '┴'
+			| '┼'
+			| '╴'
+			| '╵'
+			| '╶'
 			| '╷'
 	)
 }
@@ -389,14 +397,14 @@ fn draw_text_on(surface: &mut impl CellSurface, start: DrawingCoord, text: &str,
 /// Reads and writes follow [`Canvas`] semantics over the logical
 /// `width × height` extent, absent cells reading as spaces, so
 /// [`Canvas::overlay_layers`] composites a layer exactly as
-/// [`Canvas::merged`] composites the full canvas it stands in for, without
+/// [`Canvas::merge`] composites the full canvas it stands in for, without
 /// allocating and scanning a canvas per edge and layer kind.
 #[derive(Debug)]
 pub struct Layer {
 	width:  i32,
 	height: i32,
 	/// Keyed `(x, y)`: iteration is column-major, the order
-	/// [`Canvas::merged`] visits cells in.
+	/// [`Canvas::merge`] visits cells in.
 	cells:  BTreeMap<(i32, i32), Cell>,
 	/// What absent cells read as.
 	blank:  Cell,
@@ -462,12 +470,12 @@ impl Canvas {
 		is_space_on(self, x, y)
 	}
 
-	/// Overlay canvases at `offset`. Spaces are transparent; overlapping
-	/// Unicode junction characters merge (unless `use_ascii`); label content
-	/// never overwrites existing label content (first label wins); wide
-	/// glyphs land or yield as a whole pair.
-	pub fn merged(&self, offset: DrawingCoord, use_ascii: bool, overlays: &[&Self]) -> Self {
-		let mut merged = self.grown_for_overlays(offset, overlays);
+	/// Overlay canvases at `offset`, growing to fit them. Spaces are
+	/// transparent; overlapping Unicode junction characters merge (unless
+	/// `use_ascii`); label content never overwrites existing label content
+	/// (first label wins); wide glyphs land or yield as a whole pair.
+	pub fn merge(&mut self, offset: DrawingCoord, use_ascii: bool, overlays: &[&Self]) {
+		self.grow_for_overlays(offset, overlays);
 		for overlay in overlays {
 			for x in 0..overlay.width {
 				for y in 0..overlay.height {
@@ -476,15 +484,14 @@ impl Canvas {
 						continue;
 					}
 					let is_wide = overlay.get(x + 1, y).is_some_and(Cell::is_wide_pad);
-					merged.overlay_cell(x + offset.x, y + offset.y, cell, is_wide, use_ascii);
+					self.overlay_cell(x + offset.x, y + offset.y, cell, is_wide, use_ascii);
 				}
 			}
 		}
-		merged
 	}
 
 	/// Overlay `layers` in order at the origin, under the rules of
-	/// [`Canvas::merged`].
+	/// [`Canvas::merge`].
 	pub fn overlay_layers(&mut self, use_ascii: bool, layers: &[Layer]) {
 		let width = layers
 			.iter()
@@ -648,11 +655,12 @@ mod tests {
 		base.draw_text(DrawingCoord::new(0, 0), "─A─", true);
 		let mut overlay = Canvas::new(3, 1);
 		overlay.draw_text(DrawingCoord::new(0, 0), "│B ", true);
-		let merged = base.merged(DrawingCoord::new(0, 0), false, &[&overlay]);
+		let mut merged = base.clone();
+		merged.merge(DrawingCoord::new(0, 0), false, &[&overlay]);
 		// draw_text grows one column past the text, as the reference does.
 		assert_eq!(merged.to_plain_string(), "┼A─ ");
-		let ascii = base.merged(DrawingCoord::new(0, 0), true, &[&overlay]);
-		assert_eq!(ascii.to_plain_string(), "│A─ ");
+		base.merge(DrawingCoord::new(0, 0), true, &[&overlay]);
+		assert_eq!(base.to_plain_string(), "│A─ ");
 	}
 
 	#[test]

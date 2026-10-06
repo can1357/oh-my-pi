@@ -1769,6 +1769,11 @@ export interface ProviderModelConfig {
 	name: string;
 	/** API type override for this model. */
 	api?: Api;
+	/**
+	 * Catalog kind; omitted means the api's kind (`image` for `openai-images`, …) or `chat`.
+	 * Must be a kind the api serves, as in `models.yml`.
+	 */
+	kind?: Model["kind"];
 	/** Whether the model supports extended thinking at all. */
 	reasoning: boolean;
 	/** Optional canonical thinking capability metadata for per-model effort support. */

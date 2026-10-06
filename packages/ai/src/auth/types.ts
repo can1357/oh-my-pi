@@ -257,6 +257,8 @@ export interface CheckCredentialsOptions {
 	completionProbe?: CompletionProbe;
 	/** Per-credential completion probe timeout (ms). Defaults to `timeoutMs`. */
 	completionTimeoutMs?: number;
+	/** Providers whose credentials are skipped entirely (not probed, not reported). */
+	excludeProviders?: ReadonlySet<string>;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -487,6 +489,8 @@ export type AuthApiKeyOptions = {
 	forceRefresh?: boolean;
 	/** Explicit provider-401 recovery; generic force refreshes leave this unset. */
 	refreshReason?: OAuthRefreshReason;
+	/** When false, select as `sessionId` would without recording the choice as that session's sticky credential. */
+	recordAffinity?: boolean;
 };
 
 /** Non-secret identity bound to the OAuth credential selected for one request attempt. */
