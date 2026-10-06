@@ -12,6 +12,7 @@ import type { AgentSession } from "../src/session/agent-session";
 import { AuthStorage } from "../src/session/auth-storage";
 import { SessionManager } from "../src/session/session-manager";
 import { TempDir } from "@oh-my-pi/pi-utils";
+import { createAssistantMessage } from "./helpers/agent-session-setup";
 
 let temp: TempDir;
 let auth: AuthStorage;
@@ -72,46 +73,27 @@ afterEach(async () => {
 });
 
 function responseFor(candidates: { id: string; root: string }[]): ai.AssistantMessage {
-	return {
-		role: "assistant",
-		api: "anthropic-messages",
-		provider: "anthropic",
-		model: "claude-sonnet-4-5",
-		content: [
-			{
-				type: "text",
-				text: JSON.stringify({
-					relationship: "adaptation",
-					evidence: candidates.map(candidate => ({
-						candidateId: candidate.id,
-						file: "SKILL.md",
-						quote:
-							candidate.root === preferredRoot
-								? "Use OMP bash to verify changes."
-								: "Use Claude Bash to verify changes.",
-						explanation: "Tool-specific instructions",
-					})),
-					differences: ["The adapted copy names OMP bash rather than Claude Bash."],
-					recommendation: {
-						action: "prefer",
-						preferredId: candidates.find(candidate => candidate.root === preferredRoot)?.id,
-						reason: "Retain the OMP-specific verification workflow.",
-					},
-					limitations: [],
-				}),
+	return createAssistantMessage(
+		JSON.stringify({
+			relationship: "adaptation",
+			evidence: candidates.map(candidate => ({
+				candidateId: candidate.id,
+				file: "SKILL.md",
+				quote:
+					candidate.root === preferredRoot
+						? "Use OMP bash to verify changes."
+						: "Use Claude Bash to verify changes.",
+				explanation: "Tool-specific instructions",
+			})),
+			differences: ["The adapted copy names OMP bash rather than Claude Bash."],
+			recommendation: {
+				action: "prefer",
+				preferredId: candidates.find(candidate => candidate.root === preferredRoot)?.id,
+				reason: "Retain the OMP-specific verification workflow.",
 			},
-		],
-		usage: {
-			input: 1,
-			output: 1,
-			cacheRead: 0,
-			cacheWrite: 0,
-			totalTokens: 2,
-			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-		},
-		stopReason: "stop",
-		timestamp: Date.now(),
-	};
+			limitations: [],
+		}),
+	);
 }
 
 test("preparing a selected diagnostic discloses the plan without billing or changing selection", async () => {

@@ -12,6 +12,9 @@ import {
 	resourceDecisionProblem,
 } from "./resource-settings";
 
+/** A reviewed copy changed; callers must invalidate its recommendation rather than retry a save. */
+export class StaleResourceReviewError extends Error {}
+
 /** A user-approved exclusion only applies while all reviewed resource files remain unchanged. */
 export async function isRootExcluded(
 	root: string,
@@ -71,8 +74,8 @@ export async function excludeReviewedResources(
 	}
 	const current = await Promise.all(snapshots.map(snapshot => snapshotResource(snapshot.candidate)));
 	if (current.some((snapshot, index) => !snapshot.complete || snapshot.fingerprint !== snapshots[index].fingerprint)) {
-		throw new Error(
-			"Resource contents changed after analysis; analyze the changed copies before applying a decision",
+		throw new StaleResourceReviewError(
+			"Resource contents changed after analysis; nothing was saved. Prepare and analyze the changed copies again.",
 		);
 	}
 	const roots = await Promise.all(snapshots.map(snapshot => fs.realpath(snapshot.candidate.root)));
