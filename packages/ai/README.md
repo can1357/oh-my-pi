@@ -565,6 +565,8 @@ if (message.stopReason === "error" || message.stopReason === "aborted") {
 }
 ```
 
+If the provider discards partial output by returning an error message with empty `content`, the final result remains empty. Leaked-thinking healing does not reconstruct discarded blocks from earlier streaming deltas.
+
 ### Aborting Requests
 
 The abort signal allows you to cancel in-progress requests. Aborted requests have `stopReason === 'aborted'`:

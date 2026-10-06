@@ -137,6 +137,16 @@ export function wrapLeakedThinkingStream(inner: AssistantMessageEventStream): As
 						return;
 					}
 					case "error": {
+						// An error message with empty content means the provider
+						// discarded the partial turn; forward it as-is rather than
+						// rebuild it from #partial, which would resurrect exactly what
+						// was discarded. Non-empty error content is still healed: a
+						// provider that reports partial output alongside the error did
+						// send that output.
+						if (projector !== undefined && event.error.content.length === 0) {
+							out.push({ type: "error", reason: event.reason, error: event.error });
+							return;
+						}
 						projector ??= new LeakedThinkingProjector(out, event.error);
 						const content = projector.finish(event.error);
 						out.push({ type: "error", reason: event.reason, error: { ...event.error, content } });

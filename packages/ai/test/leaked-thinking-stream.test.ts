@@ -776,6 +776,32 @@ describe("wrapLeakedThinkingStream", () => {
 		expect(texts(result)).toEqual(["Partial.", "Recovered."]);
 		expect(result.stopReason).toBe("error");
 	});
+
+	it("honours a provider's discarded content on an error event", async () => {
+		const { events, result } = await runWrapper(inner => {
+			inner.push({ type: "start", partial: msg() });
+			inner.push({
+				type: "thinking_delta",
+				contentIndex: 0,
+				delta: "looping reasoning that the provider discarded",
+				partial: msg({
+					content: [{ type: "thinking", thinking: "looping reasoning that the provider discarded" }],
+				}),
+			});
+			inner.push({
+				type: "error",
+				reason: "error",
+				error: msg({ content: [], stopReason: "error" }),
+			});
+		});
+
+		const terminal = events.at(-1);
+		expect(terminal?.type).toBe("error");
+		if (terminal?.type === "error") {
+			expect(terminal.error.content).toEqual([]);
+		}
+		expect(result.content).toEqual([]);
+	});
 });
 
 describe("leaked thinking healing through stream()", () => {
