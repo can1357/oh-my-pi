@@ -7,6 +7,9 @@
 ### Changed
 
 - Improved performance when pruning tool output and capturing telemetry messages during long-running sessions.
+### Added
+
+- Added the optional `supersedeShown` prune hook: a result whose shown lines a newer result of the same target shows again, each unchanged, is superseded whatever their keys, so a range re-read inside a wider one stops riding along in context.
 
 ## [18.7.0] - 2026-10-06
 ### Added

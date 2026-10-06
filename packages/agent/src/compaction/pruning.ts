@@ -32,6 +32,8 @@ export interface PruneConfig {
 	supersedeKey?: SupersedeKeyFn;
 	/** Whether a keyed result shows its whole target (see {@link SupersedePruneConfig.supersedeComplete}). */
 	supersedeComplete?: SupersedeCompleteFn;
+	/** The lines a keyed result showed (see {@link SupersedePruneConfig.supersedeShown}). */
+	supersedeShown?: SupersedeShownFn;
 	/** Useless-flagged results bypass the protect window (see {@link USELESS_NOTICE}). Default true. */
 	pruneUseless?: boolean;
 	/**
@@ -117,6 +119,19 @@ export type SupersedeKeyFn = (toolName: string, args: Record<string, unknown>) =
  */
 export type SupersedeCompleteFn = (message: ToolResultMessage) => boolean;
 
+/**
+ * The lines a successful keyed result showed, by line number, and the target
+ * they came from. A result is superseded by a newer one of the same target that
+ * showed each of its lines with the same text. Undefined exempts a result.
+ */
+export type SupersedeShownFn = (message: ToolResultMessage) => ShownLines | undefined;
+
+/** What {@link SupersedeShownFn} returns. */
+export interface ShownLines {
+	target: string;
+	lines: ReadonlyMap<number, string>;
+}
+
 export interface SupersedePruneConfig {
 	/** Supersede key function; a newer successful result with the same key supersedes older ones (see {@link SupersedeKeyFn}). */
 	supersedeKey?: SupersedeKeyFn;
@@ -133,6 +148,13 @@ export interface SupersedePruneConfig {
 	 * detail is preferred over losing detail the summary does not show.
 	 */
 	supersedeComplete?: SupersedeCompleteFn;
+	/**
+	 * The lines a successful keyed result showed. Absent, coverage plays no part.
+	 * A result whose shown lines a newer result of the same target shows again,
+	 * each with the same text, is superseded whatever their keys: a narrow range
+	 * re-read inside a wider one, unchanged. A changed line keeps the older one.
+	 */
+	supersedeShown?: SupersedeShownFn;
 	/** Also prune results flagged useless by their tool. Default false. */
 	pruneUseless?: boolean;
 	/** Prune a candidate now when all messages after it total at most this many estimated tokens. Default 8 000. */
@@ -240,13 +262,24 @@ interface NewerResults {
 	complete: boolean;
 }
 
+/** Whether `newer` shows every line `older` showed, each with the same text. */
+function showsAgain(newer: ShownLines, older: ShownLines): boolean {
+	if (newer.target !== older.target || newer.lines.size < older.lines.size) return false;
+	for (const [line, text] of older.lines) {
+		if (newer.lines.get(line) !== text) return false;
+	}
+	return true;
+}
+
 /**
  * Collect superseded tool results: for every unpruned, unprotected tool result
  * whose paired call resolves a supersede key, a LATER successful result of the
  * same key supersedes it, as does its `"\u0000"`-prefix parent key when that
  * key's newest successful result is complete. A failed result supersedes only
  * older failed results; an older failed result is superseded by any later
- * result of its key or a later successful result of its parent key.
+ * result of its key or a later successful result of its parent key. With
+ * `supersedeShown`, a successful result is also superseded by a later one of the
+ * same target that showed all of its lines unchanged.
  */
 function collectSupersededResults(
 	entries: readonly SessionEntry[],
@@ -255,12 +288,14 @@ function collectSupersededResults(
 	toolCalls: SentToolCalls,
 	supersedeKey: SupersedeKeyFn,
 	supersedeComplete: SupersedeCompleteFn | undefined,
+	supersedeShown: SupersedeShownFn | undefined,
 	protectedTools: readonly ProtectedToolMatcher[],
 ): SupersedeCandidate[] {
 	// Walk newest → oldest: supersession only depends on NEWER results, so
 	// stopping at `start` yields exactly the full scan's candidates at/after it.
 	const candidates: SupersedeCandidate[] = [];
 	const newerByKey = new Map<string, NewerResults>();
+	const newerShown: ShownLines[] = [];
 	for (let i = entries.length - 1; i >= start; i--) {
 		const entry = entries[i];
 		const message = getToolResultMessage(entry);
@@ -273,15 +308,19 @@ function collectSupersededResults(
 		const separator = key.indexOf("\u0000");
 		const sameKey = newerByKey.get(key);
 		const parent = separator >= 0 ? newerByKey.get(key.slice(0, separator)) : undefined;
+		const shown = message.isError ? undefined : supersedeShown?.(message);
 		const superseded = message.isError
 			? sameKey !== undefined || parent?.success === true
-			: sameKey?.success === true || parent?.complete === true;
+			: sameKey?.success === true ||
+				parent?.complete === true ||
+				(shown !== undefined && newerShown.some(newer => showsAgain(newer, shown)));
 		const newer = sameKey ?? { success: false, complete: false };
 		if (!message.isError && !newer.success) {
 			newer.success = true;
 			newer.complete = supersedeComplete?.(message) ?? true;
 		}
 		newerByKey.set(key, newer);
+		if (shown) newerShown.push(shown);
 		if (!superseded) continue;
 		candidates.push({
 			entry: entry as SessionMessageEntry,
@@ -347,6 +386,7 @@ export function pruneSupersededToolResults(
 				toolCalls,
 				config.supersedeKey,
 				config.supersedeComplete,
+				config.supersedeShown,
 				config.protectedTools,
 			)
 		: [];
@@ -432,6 +472,7 @@ export function pruneToolOutputs(
 					toolCalls,
 					config.supersedeKey,
 					config.supersedeComplete,
+					config.supersedeShown,
 					config.protectedTools,
 				).map(candidate => candidate.message),
 			)
