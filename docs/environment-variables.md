@@ -562,6 +562,8 @@ These affect where coding-agent stores data and which process-local settings ove
 | `CLAUDE_CODE_SHELL_PREFIX` | Legacy alias fallback for `PI_SHELL_PREFIX`                                    |
 | `VISUAL`                   | Preferred external editor command                                              |
 | `EDITOR`                   | Fallback external editor command                                               |
+| `OMP_MESSAGING_SOCKET`     | Output only: set by a session with cross-session messaging bound, for its own shells and hooks; socket path or pipe name of its inbox. Missing or empty means unavailable. See [Agent Hub](./agent-hub.md#limits-and-scripts) |
+| `OMP_MESSAGING_TOKEN`      | Output only: secret own-child token paired with `OMP_MESSAGING_SOCKET`; never publish it. ACP hooks get both through the session-bound exec, not ambient `process.env` |
 
 `PI_BASH_NO_CI`, `PI_BASH_NO_LOGIN`, and `PI_SHELL_PREFIX` use their `CLAUDE_*` aliases when the canonical variable is unset or empty. These controls use non-empty string checks, not boolean parsing: even `0` or `false` activates the corresponding no-CI/no-login control.
 

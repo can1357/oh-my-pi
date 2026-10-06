@@ -141,14 +141,15 @@ export async function enqueueOffline(
 export async function drainOffline(
 	sessionId: string,
 	options?: { dir?: string; now?: number },
-): Promise<StoredMessage[]> {
+): Promise<{ message: StoredMessage; ack(): Promise<void> }[]> {
 	const dir = mailboxDir(sessionId, options);
 	const cutoff = (options?.now ?? Date.now()) - OFFLINE_INBOX_TTL_MS;
-	const messages: StoredMessage[] = [];
+	const messages: { message: StoredMessage; ack(): Promise<void> }[] = [];
 	for (const file of await mailboxFiles(dir, false)) {
 		const message = await readStoredMessage(file);
-		await fs.promises.rm(file, { force: true });
-		if (message && message.sentAt >= cutoff) messages.push(message);
+		if (message && message.sentAt >= cutoff)
+			messages.push({ message, ack: () => fs.promises.rm(file, { force: true }) });
+		else await fs.promises.rm(file, { force: true });
 	}
-	return messages.sort((a, b) => a.sentAt - b.sentAt);
+	return messages.sort((a, b) => a.message.sentAt - b.message.sentAt);
 }

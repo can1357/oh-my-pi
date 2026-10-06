@@ -18,10 +18,7 @@ export function droppedMessageText(address: string, reason: DropReason): string 
 }
 
 export class IdleSubscriptions {
-	readonly #watched = new Map<
-		string,
-		{ sender: SenderInfo; receiver: SenderInfo | undefined; held: boolean; id: string }
-	>();
+	readonly #watched = new Map<string, { sender: SenderInfo; receiver: SenderInfo | undefined; id: string }>();
 	readonly #asking = new Map<string, { timer: Timer; target: RemoteSender; id: string }>();
 	readonly #timers = new ManagedTimers((_event, error) => logger.warn("Messaging timer failed", { error }));
 
@@ -38,7 +35,6 @@ export class IdleSubscriptions {
 		this.#watched.set(sender.entryId, {
 			sender,
 			receiver: this.ownSender?.(),
-			held: decision !== "accept",
 			id,
 		});
 		this.host.showNotice(`@${sender.name ?? sender.shortId} asked to be told when this session is next idle.`);
@@ -49,10 +45,11 @@ export class IdleSubscriptions {
 		this.cancel(entryId);
 		const timer = this.#timers.setTimeout(() => {
 			this.#asking.delete(entryId);
-			this.host.deliverNotice(
-				target,
-				`No idle notice from @${target.address} within 12 hours; the subscription was dropped.`,
-			);
+			const own = this.ownSender?.();
+			const decision = own ? this.decision(own) : "accept";
+			const text = `No idle notice from @${target.address} within 12 hours; the subscription was dropped.`;
+			if (decision === "accept") this.host.deliverNotice(target, text);
+			else if (decision !== "refuse") this.host.showNotice(text);
 		}, IDLE_SUBSCRIPTION_TTL_MS);
 		this.#asking.set(entryId, { timer, target, id });
 	}
@@ -106,8 +103,10 @@ export class IdleSubscriptions {
 		this.#watched.clear();
 		const finished = this.host.lastFinished();
 		await Promise.all(
-			subscribers.map(({ sender, receiver, held, id }) =>
-				this.reply(
+			subscribers.map(({ sender, receiver, id }) => {
+				const decision = this.decision(sender);
+				if (decision === "refuse") return;
+				return this.reply(
 					sender,
 					{
 						type: "notice",
@@ -117,15 +116,15 @@ export class IdleSubscriptions {
 						...(kind === "idle"
 							? {
 									finishedAt: finished?.finishedAt ?? Date.now(),
-									...(!held && finished?.status !== null && finished?.status !== undefined
+									...(decision === "accept" && finished?.status !== null && finished?.status !== undefined
 										? { status: finished.status }
 										: {}),
 								}
 							: {}),
 					},
 					kind === "retired" ? receiver : undefined,
-				),
-			),
+				);
+			}),
 		);
 	}
 

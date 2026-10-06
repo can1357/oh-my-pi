@@ -1,5 +1,5 @@
 import type { Agent, AgentMessage } from "@oh-my-pi/pi-agent-core";
-import { prompt } from "@oh-my-pi/pi-utils";
+import { escapeXmlAttribute, prompt } from "@oh-my-pi/pi-utils";
 import { type IrcMessage } from "@oh-my-pi/pi-tui/tools/irc";
 import type { RemoteDelivery } from "../messaging/service";
 import { formatAddressForUrl } from "../messaging/names";
@@ -212,8 +212,8 @@ export class IrcBridge {
 			customType: "irc:incoming",
 			content: prompt.render(ircIncomingTemplate, {
 				remote: true,
-				from: escapePeerText(d.from.address),
-				fromUrl: formatAddressForUrl(d.from.address),
+				from: escapeXmlAttribute(d.from.address),
+				fromUrl: formatAddressForUrl(d.from.shortId),
 				shortId: d.from.shortId,
 				cwd: escapePeerText(d.from.cwd),
 				message: escapePeerText(d.body),

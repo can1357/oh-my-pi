@@ -971,9 +971,9 @@ export class ExtensionUiController {
 
 	async askCrossSessionApproval(view: HeldMessageView, signal: AbortSignal): Promise<"approve" | "deny" | undefined> {
 		if (signal.aborted) return undefined;
-		const preview = view.body.split(/\r?\n/).slice(0, 12).join("\n");
+		const preview = sanitizeCarriageReturns(view.body).split("\n").slice(0, 12).join("\n");
 		const result = await this.showHookSelector(
-			`Message from another session: @${view.from.address}\n------------\n${preview}\n------------`,
+			`Message from another session: @${sanitizeCarriageReturns(view.from.address)}\n------------\n${preview}\n------------`,
 			[{ label: "Approve" }, { label: "Deny" }],
 			{ signal },
 		);

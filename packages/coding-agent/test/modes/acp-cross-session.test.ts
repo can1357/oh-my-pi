@@ -217,6 +217,25 @@ describe("ACP cross-session messaging", () => {
 		expect(h.updates.every(item => item.sessionId === created.sessionId)).toBe(true);
 	});
 
+	it("does not abort an idle session when messaging is off, including a late cancel after an autonomous turn", async () => {
+		using dir = TempDir.createSync("@acp-cross-session-");
+		vi.useFakeTimers();
+		const h = harness(dir.path());
+		const created = await h.agent.newSession({ cwd: dir.path(), mcpServers: [] });
+		await bootstrap();
+		expect(h.session.messaging).toBeUndefined();
+
+		await h.agent.cancel({ sessionId: created.sessionId });
+		expect(h.session.abort).not.toHaveBeenCalled();
+
+		h.session.isStreaming = true;
+		h.emit({ type: "agent_start" });
+		h.session.isStreaming = false;
+		h.emit({ type: "agent_end", messages: [assistant("Finished")] });
+		await h.agent.cancel({ sessionId: created.sessionId });
+		expect(h.session.abort).not.toHaveBeenCalled();
+	});
+
 	it("cancels an autonomous turn without an owning session/prompt and shares concurrent cleanup", async () => {
 		using dir = TempDir.createSync("@acp-cross-session-");
 		vi.useFakeTimers();
@@ -227,12 +246,18 @@ describe("ACP cross-session messaging", () => {
 		h.emit({ type: "agent_start" } as AgentSessionEvent);
 		const aborted = Promise.withResolvers<void>();
 		h.session.abort.mockImplementation(async () => {
-			await aborted.promise;
 			h.session.isStreaming = false;
+			await aborted.promise;
 		});
 		const first = h.agent.cancel({ sessionId: created.sessionId });
 		const second = h.agent.cancel({ sessionId: created.sessionId });
 		expect(h.session.abort).toHaveBeenCalledTimes(1);
+		let secondSettled = false;
+		void second.then(() => {
+			secondSettled = true;
+		});
+		await Promise.resolve();
+		expect(secondSettled).toBe(false);
 		aborted.resolve();
 		await Promise.all([first, second]);
 		expect(h.session.isStreaming).toBe(false);

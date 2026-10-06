@@ -66,7 +66,7 @@ function isSender(raw: unknown): raw is SenderInfo {
 	const value = raw as Record<string, unknown>;
 	return (
 		Object.keys(value).every(key => ["name", "shortId", "cwd", "entryId", "class"].includes(key)) &&
-		(value.name === null || (typeof value.name === "string" && value.name.length <= 200)) &&
+		(value.name === null || typeof value.name === "string") &&
 		typeof value.shortId === "string" &&
 		/^[0-9a-f]{8}$/.test(value.shortId) &&
 		typeof value.cwd === "string" &&

@@ -15,7 +15,7 @@ afterEach(() => {
 	vi.restoreAllMocks();
 });
 
-it("buffers messages across collab adoption and resumes only after local restoration, including teardown failure", async () => {
+it("keeps messages buffered after failed collab restoration, including repeated leave attempts", async () => {
 	const temp = TempDir.createSync("@messaging-env-collab-");
 	vi.spyOn(utils, "getConfigRootDir").mockReturnValue(temp.path());
 	installInMemoryRelay();
@@ -114,8 +114,14 @@ it("buffers messages across collab adoption and resumes only after local restora
 		expect(resume).not.toHaveBeenCalled();
 		restoreGate.resolve();
 		await expect(leaving).rejects.toThrow("restoration failed");
-		expect(resume).toHaveBeenCalledTimes(1);
-		expect(deliveries).toEqual(["during adoption", "during restoration"]);
+		expect(resume).not.toHaveBeenCalled();
+		expect(deliveries).toEqual([]);
+		expect(ctx.collabGuest).toBe(guest);
+		vi.spyOn(ctx.session, "newSession").mockResolvedValue(true);
+		await expect(guest.leave("retry restoration")).rejects.toThrow("restoration failed");
+		expect(resume).not.toHaveBeenCalled();
+		expect(ctx.collabGuest).toBe(guest);
+		expect(deliveries).toEqual([]);
 	} finally {
 		restoreGate.resolve();
 		await guest.leave("cleanup").catch(() => {});

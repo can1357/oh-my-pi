@@ -14,7 +14,7 @@ import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { stripRawHttpRequestDiagnostics } from "@oh-my-pi/pi-ai/utils/http-inspector";
-import type { AgentSession, AgentSessionEvent } from "../../session/agent-session";
+import type { AgentSessionEvent } from "../../session/agent-session";
 import { isRpcSessionSettled, type RpcScheduledTurnProbe, type RpcSettleSession } from "./rpc-session-settle";
 import type { RpcPromptError, RpcPromptResultFrame, RpcPromptStatus } from "./rpc-types";
 
@@ -22,10 +22,6 @@ import type { RpcPromptError, RpcPromptResultFrame, RpcPromptStatus } from "./rp
 export interface RpcPromptTicket {
 	readonly id: string | undefined;
 }
-
-type PromptResultSession = RpcSettleSession & {
-	agent: Pick<AgentSession["agent"], "hasQueuedMessages">;
-};
 
 interface RunOutcome {
 	status: RpcPromptStatus;
@@ -60,22 +56,26 @@ interface OpenPrompt {
 export class RpcPromptResults {
 	#agentStarts = 0;
 	#open = new Map<RpcPromptTicket, OpenPrompt>();
-	readonly #session: PromptResultSession;
+	readonly #session: RpcSettleSession;
 	readonly #output: ((frame: RpcPromptResultFrame) => void) | undefined;
 	readonly #scheduledTurn: RpcScheduledTurnProbe | undefined;
+	readonly #queueDrained: (() => boolean) | undefined;
 
 	/**
 	 * @param session read for queue state and, at report time, the `sessionSettled` predicate.
 	 * @param scheduledTurn reports a host-scheduled turn not yet admitted (not settled).
+	 * @param queueDrained overrides RPC's displayable queue count for print's raw-queue attribution.
 	 */
 	constructor(
-		session: PromptResultSession,
+		session: RpcSettleSession,
 		output?: (frame: RpcPromptResultFrame) => void,
 		scheduledTurn?: RpcScheduledTurnProbe,
+		queueDrained?: () => boolean,
 	) {
 		this.#session = session;
 		this.#output = output;
 		this.#scheduledTurn = scheduledTurn;
+		this.#queueDrained = queueDrained;
 	}
 
 	/** Open a ticket before prompt preparation; completion captures its attributed assistant synchronously. */
@@ -151,9 +151,10 @@ export class RpcPromptResults {
 		// Older sessions omit `yielded`; only their terminal ends were yields.
 		if (!(event.yielded ?? event.isTerminal !== false)) return;
 		const outcome = runOutcome(event.messages);
+		const queueDrained = this.#queueDrained?.() ?? this.#session.queuedMessageCount === 0;
 		for (const [ticket, open] of this.#open) {
 			if (open.waiting) {
-				if (!this.#session.agent.hasQueuedMessages()) this.#report(ticket, true, outcome);
+				if (queueDrained) this.#report(ticket, true, outcome);
 			} else if (!open.ownOutcome && this.#agentStarts > open.startsAtBegin) {
 				open.ownOutcome = outcome;
 			}

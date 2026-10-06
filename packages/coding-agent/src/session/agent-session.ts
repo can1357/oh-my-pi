@@ -5433,6 +5433,7 @@ export class AgentSession implements SettingsScope {
 	}
 
 	#notifySessionChangeCallbacks(): void {
+		this.#lastMessagingFinished = undefined;
 		for (const callback of Array.from(this.#sessionChangeCallbacks)) {
 			try {
 				callback();
@@ -5671,8 +5672,8 @@ export class AgentSession implements SettingsScope {
 	async #doDispose(options: AgentSessionDisposeOptions = {}): Promise<void> {
 		this.#isDisposed = true;
 		this.#recordSessionExit(options.reason ?? "dispose");
-		await this.#messaging?.close();
 		this.beginDispose();
+		await this.#messaging?.close();
 		// Stop cache warming before the drain windows below: an armed tick firing
 		// mid-dispose would issue a paid warm request and persist usage into the
 		// closing session writer.

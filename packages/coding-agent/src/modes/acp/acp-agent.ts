@@ -1092,6 +1092,7 @@ export class AcpAgent implements Agent {
 	async cancel(params: { sessionId: string }): Promise<void> {
 		const record = this.#getSessionRecord(params.sessionId);
 		const promptTurn = record.promptTurn;
+		if (!isPromptTurnInFlight(promptTurn) && !record.session.isStreaming && !record.autonomousCancelCleanup) return;
 		const cleanup = isPromptTurnInFlight(promptTurn)
 			? (promptTurn.cleanup ?? this.#beginCancelCleanup(record, promptTurn))
 			: (record.autonomousCancelCleanup ??= this.#runCancelCleanup(record));

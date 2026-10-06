@@ -1,11 +1,12 @@
 import { logger } from "@oh-my-pi/pi-utils";
 import type { Settings } from "../config/settings";
+import { escapePeerText } from "../session/harness-tags";
 import type { SessionTitleSource } from "../session/session-entries";
 import { droppedMessageText, IdleSubscriptions } from "./idle";
 import { InboundGate, type OutgoingNotice } from "./inbound";
 import { drainOffline, enqueueOffline, listOfflineSessions, type OfflineSession } from "./mailbox";
 import { isReservedAddress, sessionAddress, sessionShortId } from "./names";
-import type { PermissionClass } from "./policy";
+import { type PermissionClass, resolveInbound } from "./policy";
 import {
 	type InboxRequest,
 	type InboxResponse,
@@ -268,6 +269,16 @@ export class MessagingService {
 	): Promise<SendOutcome> {
 		if (cfgMessagingSend.get(this.settings) === "deny")
 			return { ok: false, text: "Not sent: sending to other sessions is turned off (messaging.send)." };
+		const notifyWhenIdle = opts.notifyWhenIdle && resolveInbound(this.settings).value !== "refuse";
+		const idleNoticeSkipped =
+			opts.notifyWhenIdle && !notifyWhenIdle
+				? " No idle notification was requested because this session refuses inbound messages."
+				: "";
+		if (!body.trim() && idleNoticeSkipped)
+			return {
+				ok: false,
+				text: "Not sent: cannot subscribe to idle notices while this session refuses inbound messages.",
+			};
 		if (!("entry" in target)) {
 			const sessions = await this.#sessions(opts.signal);
 			const shortId = target.shortId;
@@ -290,7 +301,7 @@ export class MessagingService {
 					from: this.#sender(),
 					body,
 					chain: [...this.host.currentRelayChain(), this.ownShortId()],
-					notifyWhenIdle: opts.notifyWhenIdle,
+					notifyWhenIdle,
 				};
 		const size = JSON.stringify(request).length;
 		if (size > MAX_SERIALIZED_CHARS)
@@ -310,7 +321,7 @@ export class MessagingService {
 				text: `Failed to send to ${address}: Too many messages to this session just now: ${sent.length} were sent recently and more would be dropped by its rate limit, so this one was not sent. Batch what remains into one message, or wait a little before sending more.`,
 			};
 		if (!("entry" in target)) {
-			if (opts.notifyWhenIdle)
+			if (notifyWhenIdle)
 				return {
 					ok: false,
 					text: `Not sent: notify=idle needs a running session; ${address} is not running.`,
@@ -332,13 +343,16 @@ export class MessagingService {
 				if (index >= 0) recent!.splice(index, 1);
 				return { ok: false, text: `Not sent: ${address}'s offline inbox is full (50 messages).` };
 			}
-			return { ok: true, text: `Queued for ${address} (not running); it will see this when resumed.` };
+			return {
+				ok: true,
+				text: `Queued for ${address} (not running); it will see this when resumed.${idleNoticeSkipped}`,
+			};
 		}
 		if (target.entry.version !== MESSAGING_WIRE_VERSION)
 			return { ok: false, text: `Not sent: ${address} runs an incompatible omp version.` };
 		const remote: RemoteSender = { name: target.name, shortId: target.shortId, address, cwd: target.cwd };
 		this.#outgoing.set(id, { entryId: target.entry.entryId, shortId: target.shortId });
-		if (opts.notifyWhenIdle) this.#idle.arm(target.entry.entryId, remote, id);
+		if (notifyWhenIdle) this.#idle.arm(target.entry.entryId, remote, id);
 		sent.push(now);
 		const result = await requestInbox(target.entry, request, { signal: opts.signal });
 		if (!result.ok || "snapshot" in result) {
@@ -357,11 +371,14 @@ export class MessagingService {
 		if (result.outcome === "refused" || result.outcome === "dropped") this.#idle.cancel(target.entry.entryId, id);
 		switch (result.outcome) {
 			case "delivered":
-				return { ok: true, text: `Delivered to ${address}.` };
+				return { ok: true, text: `Delivered to ${address}.${idleNoticeSkipped}` };
 			case "queued":
-				return { ok: true, text: `Queued for ${address} (busy; it will read this at its next step).` };
+				return {
+					ok: true,
+					text: `Queued for ${address} (busy; it will read this at its next step).${idleNoticeSkipped}`,
+				};
 			case "held":
-				return { ok: true, text: `Held by ${address} for its user's approval.` };
+				return { ok: true, text: `Held by ${address} for its user's approval.${idleNoticeSkipped}` };
 			case "refused":
 				return { ok: false, text: `Not sent: ${address} refused the message.` };
 			case "subscribed":
@@ -468,14 +485,29 @@ export class MessagingService {
 
 	async #deliverOfflineMail(): Promise<void> {
 		let admitted = 0;
-		for (const message of await drainOffline(this.host.sessionId())) {
+		for (const { message, ack } of await drainOffline(this.host.sessionId())) {
 			const result = this.#gate.receiveOffline(message);
 			if (
 				result.ok &&
 				"outcome" in result &&
 				(result.outcome === "delivered" || result.outcome === "queued" || result.outcome === "held")
-			)
+			) {
+				await ack();
 				admitted++;
+			} else if (
+				result.ok &&
+				"outcome" in result &&
+				(result.outcome === "refused" || (result.outcome === "dropped" && result.reason !== "queue_full"))
+			) {
+				if (result.outcome === "dropped")
+					await this.#reply(message.from, {
+						type: "notice",
+						kind: "dropped",
+						reason: result.reason,
+						aboutId: message.id,
+					});
+				await ack();
+			}
 		}
 		if (admitted > 0)
 			this.host.showNotice(`${admitted} message(s) from other sessions arrived while this session was not running.`);
@@ -501,17 +533,13 @@ export class MessagingService {
 	}
 }
 
-export function formatSessionListing(
-	own: { name: string | null; shortId: string },
-	sessions: SessionListing[],
-): string {
+export function formatSessionListing(sessions: SessionListing[]): string {
+	const field = (text: string) => escapePeerText(text).replace(/[\r\n]/g, " ");
 	return [
-		`This session: ${own.name ?? "(unnamed)"} [${own.shortId}]`,
-		"",
 		"## Other sessions",
 		...sessions.map(
 			session =>
-				`- ${session.name ?? "(unnamed)"} [${session.shortId}] ${session.busy ? "busy" : "idle"} — ${session.cwd}${session.title === null ? "" : ` — "${session.title}"`}`,
+				`- ${field(session.name ?? "(unnamed)")} [${session.shortId}] ${session.busy ? "busy" : "idle"} — ${field(session.cwd)}${session.title === null ? "" : ` — "${field(session.title)}"`}`,
 		),
 	].join("\n");
 }

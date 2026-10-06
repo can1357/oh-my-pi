@@ -22,6 +22,7 @@ import {
 } from "./persistence-failure";
 import { initializeExtensions } from "./runtime-init";
 import { RpcPromptResults } from "./rpc/rpc-prompt-results";
+import type { RpcSettleSession } from "./rpc/rpc-session-settle";
 
 import { cfgPlanDefaultOnStartup, cfgPlanEnabled } from "../plan-mode/settings";
 
@@ -105,6 +106,13 @@ export function printableEvent(event: AgentSessionEvent): unknown {
 		default:
 			return event;
 	}
+}
+
+/** Print attribution waits for hidden follow-ups, but not passive next-turn reminders. */
+export function createPrintPromptResults(
+	session: RpcSettleSession & { agent: Pick<AgentSession["agent"], "hasQueuedMessages"> },
+): RpcPromptResults {
+	return new RpcPromptResults(session, undefined, undefined, () => !session.agent.hasQueuedMessages());
 }
 
 /**
@@ -261,7 +269,7 @@ async function runPrintModeCore(
 	let dispatched = false;
 	// Single-shot print fixes receive/attribution mode after SessionStart; mid-run toggles are unsupported.
 	const receivingEnabled = session.messaging !== undefined;
-	const promptResults = new RpcPromptResults(session);
+	const promptResults = createPrintPromptResults(session);
 	// Always subscribe to enable session persistence via _handleAgentEvent
 	session.subscribe(event => {
 		// In JSON mode, output all events

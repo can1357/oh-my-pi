@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import { parseArgs } from "../../src/cli/args";
-import { RpcPromptResults } from "../../src/modes/rpc/rpc-prompt-results";
+import { createPrintPromptResults } from "../../src/modes/print-mode";
 
 function assistant(text: string): AssistantMessage {
 	return {
@@ -43,7 +43,7 @@ describe("cross-session print admission", () => {
 	});
 
 	test("a message turn during preparation cannot replace the CLI prompt's own answer", () => {
-		const results = new RpcPromptResults(session());
+		const results = createPrintPromptResults(session());
 		const answers: Array<AssistantMessage | undefined> = [];
 		const ticket = results.begin(undefined, message => answers.push(message));
 		results.observe({ type: "agent_start" });
@@ -63,7 +63,7 @@ describe("cross-session print admission", () => {
 		const state = session();
 		state.isStreaming = true;
 		state.queuedMessageCount = 1;
-		const results = new RpcPromptResults(state);
+		const results = createPrintPromptResults(state);
 		let cutoff = false;
 		const answer = assistant("owned queued answer");
 		const ticket = results.begin(undefined, message => {

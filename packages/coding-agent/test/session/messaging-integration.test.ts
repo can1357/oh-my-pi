@@ -185,7 +185,7 @@ describe("top-level cross-session delivery", () => {
 			await b.session.waitForIdle();
 			const text = JSON.stringify(b.contexts[0]!.messages);
 			expect(text).toContain('kind=\\"other-session\\"');
-			expect(text).toContain("&lt;alice>");
+			expect(text).toContain("&lt;alice&gt;");
 			expect(text).toContain("&lt;arbitrary>");
 			expect(text).toContain("&lt;/irc>");
 			expect(text).not.toContain("wait stopped early");
@@ -195,6 +195,52 @@ describe("top-level cross-session delivery", () => {
 		} finally {
 			unlisten();
 		}
+	});
+
+	it("routes the advertised short-id reply past a local agent with the same name", async () => {
+		const a = await makeSession("alice");
+		const b = await makeSession("bob");
+		AgentRegistry.global().register({
+			id: "alice",
+			displayName: "alice",
+			kind: "sub",
+			parentId: MAIN_AGENT_ID,
+			session: null,
+			status: "idle",
+		});
+		const handler = new AgentProtocolHandler();
+		const sent = await handler.write(parseInternalUrl("agent://bob"), "SHORT_ID_REQUEST_MARKER", {
+			session: caller(a.session),
+		});
+		expect(sent.isError).toBe(false);
+		await b.firstTurn;
+		await b.session.waitForIdle();
+		const text = JSON.stringify(b.contexts[0]!.messages);
+		const replyUrl = text.match(/Reply with write (agent:\/\/\S+) if a reply is useful/)?.[1];
+		expect(replyUrl).toBe(`agent://${a.session.messaging!.ownShortId()}`);
+		const reply = await handler.write(parseInternalUrl(replyUrl!), "SHORT_ID_REPLY_MARKER", {
+			session: caller(b.session),
+		});
+		expect(reply.isError).toBe(false);
+		await a.firstTurn;
+		await a.session.waitForIdle();
+		expect(JSON.stringify(a.contexts[0]!.messages)).toContain("SHORT_ID_REPLY_MARKER");
+	});
+
+	it("keeps a quoted sender name inside the remote from attribute", async () => {
+		const a = await makeSession('x"><y&z');
+		const b = await makeSession("bob");
+		const result = await new AgentProtocolHandler().write(parseInternalUrl("agent://bob"), "<peer-body>", {
+			session: caller(a.session),
+		});
+		expect(result.isError).toBe(false);
+		await b.firstTurn;
+		await b.session.waitForIdle();
+		const text = JSON.stringify(b.contexts[0]!.messages);
+		expect(text).toContain(
+			`<irc from=\\"x&quot;&gt;&lt;y&amp;z\\" session=\\"${a.session.messaging!.ownShortId()}\\" kind=\\"other-session\\">`,
+		);
+		expect(text).toContain("&lt;peer-body>");
 	});
 
 	it("busy peer messages bypass bus waiters and never abort an interruptible wait", async () => {
