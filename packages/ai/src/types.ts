@@ -299,23 +299,40 @@ export function realizesPriorityServiceTier(
 }
 
 /**
- * Premium-request weight contributed by a priority request to a provider that
- * realizes it and bills extra. Mirrors GitHub Copilot's `premiumRequests`
- * accounting so the "premium requests" stat aggregates priority traffic across
- * the OpenAI family, direct Anthropic fast mode, and Google priority.
+ * Premium-request weight contributed by a request a provider bills above
+ * standard. Priority (Fast mode) counts 1 on every provider that realizes it;
+ * `ultrafast` counts 1 on the OpenAI family, where it is a premium serving tier
+ * (its cost premium is recorded separately in `usage.cost`). Mirrors GitHub
+ * Copilot's `premiumRequests` accounting so the "premium requests" stat
+ * aggregates premium traffic across the OpenAI family, direct Anthropic fast
+ * mode, and Google priority.
  *
- * Returns 1 only when priority is actually realized on the wire for `model`
- * (see {@link realizesPriorityServiceTier}) and the provider bills it as a
- * premium request. OpenRouter is excluded — it bills per its own pricing, not
- * Copilot-premium semantics — as are Bedrock/Vertex Claude, where priority is
- * silently dropped.
+ * Returns 1 only when the tier is actually realized on the wire for `model`
+ * (see {@link realizesPriorityServiceTier} and {@link shouldSendServiceTier})
+ * and the provider bills it as a premium request. OpenRouter is excluded — it
+ * bills per its own pricing, not Copilot-premium semantics — as are
+ * Bedrock/Vertex Claude, where priority is silently dropped.
+ *
+ * Pass `served: true` when the tier is the one the provider reported serving
+ * (an assistant message's {@link AssistantMessage.serviceTier}) rather than a
+ * requested setting: realization is then already proven, so the wire gate is
+ * skipped and a model without discovery metadata (a stats-backfill row) still
+ * counts.
  */
-export function getPriorityPremiumRequests(
+export function getPremiumServiceTierRequests(
 	serviceTier: ServiceTier | null | undefined,
 	model: ServiceTierModel,
+	options?: { served?: boolean },
 ): number {
-	if (!realizesPriorityServiceTier(serviceTier, model)) return 0;
 	const provider = model.provider;
+	if (serviceTier === "ultrafast") {
+		if (provider !== "openai" && provider !== "openai-codex") return 0;
+		return options?.served === true || shouldSendServiceTier("ultrafast", model) ? 1 : 0;
+	}
+	if (serviceTier !== "priority") return 0;
+	// A served tier is proof it reached the wire, so the realization gate only
+	// applies to requested-tier inference.
+	if (!options?.served && !realizesPriorityServiceTier(serviceTier, model)) return 0;
 	return provider === "openai" ||
 		provider === "openai-codex" ||
 		provider === "anthropic" ||
@@ -323,6 +340,21 @@ export function getPriorityPremiumRequests(
 		provider === "google-vertex"
 		? 1
 		: 0;
+}
+
+/** Parse a provider-reported `service_tier` echo into a known tier, or `undefined` for anything else. */
+export function parseServiceTier(value: unknown): ServiceTier | undefined {
+	switch (value) {
+		case "auto":
+		case "default":
+		case "flex":
+		case "scale":
+		case "priority":
+		case "ultrafast":
+			return value;
+		default:
+			return undefined;
+	}
 }
 
 /**
@@ -416,6 +448,11 @@ export interface CodexCompactionRequestContext extends CodexCompactionMetadata {
 export interface AnthropicCompactionRequest {
 	/** Custom summarization prompt; replaces the API default entirely when set. */
 	instructions?: string;
+	/**
+	 * Replayed summaries' file metadata due before this time (ms) ends the request;
+	 * later metadata replays with the retained tail, which the new summary carries.
+	 */
+	filesDueBefore?: number;
 }
 
 /** OpenAI's GPT-5.6+ explicit prompt-cache controls. */
@@ -545,6 +582,16 @@ export interface StreamOptions {
 	 */
 	statefulResponses?: boolean;
 	/**
+	 * Store this request's result server-side on hosts that support it
+	 * (`compat.storeResponses`, e.g. Muse Code), so a stream that drops
+	 * mid-turn resumes from `GET /responses/{id}` instead of re-running the
+	 * turn. Privacy: stored runs retain prompts and outputs on the provider.
+	 * Unset falls back to `PI_MUSE_STORE_RESPONSES`, then the host's
+	 * `configureProviderStoreResponses` default, else off. Ignored on hosts
+	 * without the capability.
+	 */
+	storeResponses?: boolean;
+	/**
 	 * Disable native reasoning when the caller supplies an external scratchpad.
 	 * OpenAI Responses emits `reasoning: { effort: "none" }`; Anthropic and
 	 * Google transports use their native thinking-off controls.
@@ -574,6 +621,8 @@ export interface StreamOptions {
 	 * are not covered.
 	 */
 	maxInFlightRequests?: Record<string, number>;
+	/** @internal Keep the in-flight permit until a provider's bounded terminal drain finishes. */
+	waitForTerminalDrain?: boolean;
 	/**
 	 * Optional callback for inspecting or replacing provider payloads before sending.
 	 * Return undefined to keep the payload unchanged.
@@ -1033,11 +1082,32 @@ export interface AnthropicCompactionPayload {
 	encryptedContent?: string;
 	/**
 	 * Harness-appended file metadata (`<files>` section) kept out of the
-	 * byte-identical block. Replayed as a user message after the native block:
-	 * the converter replaces the summary message with the block and skips its
-	 * text, so without this the metadata would be invisible to this provider.
+	 * byte-identical block. The converter replaces the summary message with the
+	 * block and skips its text, so it replays this as a user message after the
+	 * block's retained tail: before the first message created after the summary.
 	 */
 	filesText?: string;
+	/**
+	 * File metadata of earlier summaries whose replay position lies inside this
+	 * summary's retained tail. Retained messages must reach the API unchanged,
+	 * so each keeps replaying where it did: before the first message created
+	 * after `after` (the earlier summary's commit time).
+	 */
+	retainedFiles?: AnthropicCompactionFiles[];
+	/**
+	 * Set on summaries whose retained tail replays unchanged: file metadata
+	 * after the tail, earlier metadata at `retainedFiles`. Summaries persisted
+	 * without it keep their original layout (metadata after the first retained
+	 * turn), since later thinking was signed against those bytes.
+	 */
+	exactTail?: true;
+}
+
+/** File metadata replayed at a fixed point of a natively compacted conversation. */
+export interface AnthropicCompactionFiles {
+	text: string;
+	/** Replays before the first message created after this time (ms). */
+	after: number;
 }
 
 export type ProviderPayload = OpenAIResponsesHistoryPayload | AnthropicMessagePayload | AnthropicCompactionPayload;
@@ -1161,6 +1231,15 @@ export interface AssistantMessage {
 	 * other than what was requested.
 	 */
 	upstreamModel?: string;
+	/**
+	 * Service tier the provider reported serving this turn, when the API echoes
+	 * one (`response.service_tier`), falling back to the tier the request carried
+	 * when the response omits the echo. Absent when the provider reports no tier
+	 * or the echo cannot be trusted (proxies). This is the tier the turn actually
+	 * ran on, which is what cost, premium-request, and speed accounting key on —
+	 * the session's live setting may already have changed.
+	 */
+	serviceTier?: ServiceTier;
 	usage: Usage;
 	stopReason: StopReason;
 	stopDetails?: StopDetails | null;

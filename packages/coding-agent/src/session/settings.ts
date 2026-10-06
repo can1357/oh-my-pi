@@ -23,6 +23,7 @@ import {
 } from "../tiny/dtype";
 import { DEFAULT_WEB_SEARCH_TIMEOUT_SECONDS, MAX_WEB_SEARCH_TIMEOUT_SECONDS } from "../web/search/types";
 import { DEFAULT_USAGE_RESERVE_PCT } from "@oh-my-pi/pi-ai/auth-storage";
+import { configureProviderStoreResponses } from "@oh-my-pi/pi-ai/providers/openai-responses";
 import { configureProviderMaxInFlightRequests } from "@oh-my-pi/pi-ai/stream";
 import { THINKING_EFFORTS } from "@oh-my-pi/pi-catalog/effort";
 import { formatKeyHint } from "@oh-my-pi/pi-tui/app-keybindings";
@@ -216,6 +217,19 @@ export const cfgHideThinkingBlock = register({
 		group: "Thinking",
 		label: "Hide Thinking Blocks",
 		description: "Hide thinking blocks in assistant responses",
+	},
+});
+
+export const cfgExpandThinkingBlocks = register({
+	id: "expandThinkingBlocks",
+	type: "boolean",
+	default: false,
+	ui: {
+		tab: "model",
+		group: "Thinking",
+		label: "Expand Thinking Blocks",
+		description: "Keep finished thinking blocks expanded instead of collapsing them when the turn ends",
+		condition: "nativeRendering",
 	},
 });
 
@@ -1083,6 +1097,23 @@ export const cfgProvidersOpenaiLiveSteering = register({
 			"Deliver messages typed while a GPT-6 response streams into that response over the Codex WebSocket, instead of waiting for the next tool boundary",
 	},
 });
+
+export const cfgProvidersMuseCodeStoreResponses = register({
+	id: "providers.muse-code.storeResponses",
+	type: "boolean",
+	default: false,
+	env: "PI_MUSE_STORE_RESPONSES",
+	ui: {
+		tab: "providers",
+		group: "Protocol",
+		label: "Muse Code Stored Responses",
+		description:
+			"Store Muse Code results on Meta's servers so a turn whose connection drops is recovered instead of re-run. Stored runs keep prompts and outputs on Meta's side.",
+	},
+});
+// Process-wide too, so side requests that call `completeSimple`/`streamSimple`
+// directly (titles, commit messages, memories) follow the setting.
+effect(cfgProvidersMuseCodeStoreResponses, enabled => configureProviderStoreResponses({ "muse-code": enabled }));
 
 export const cfgProvidersCacheRetention = register({
 	id: "providers.cacheRetention",

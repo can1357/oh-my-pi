@@ -44,7 +44,7 @@ fn insert_fifo<T>(map: &mut HashMap<Key, T>, order: &mut VecDeque<Key>, key: Key
 }
 
 /// Named-node chain containing a 1-indexed line, innermost first.
-pub fn node_chain(lines: &[String], path: &str, line: u32) -> Vec<NodeSpan> {
+pub fn node_chain(lines: &[&str], path: &str, line: u32) -> Vec<NodeSpan> {
 	let text = lines.join("\n");
 	let cache_key = key(&text, path, line, line);
 	if let Ok(cache) = CACHE.lock()
@@ -69,7 +69,7 @@ pub fn node_chain(lines: &[String], path: &str, line: u32) -> Vec<NodeSpan> {
 }
 
 /// Syntax block boundaries enclosing a line range.
-pub fn enclosing_boundaries(lines: &[String], path: &str, start: u32, end: u32) -> Vec<u32> {
+pub fn enclosing_boundaries(lines: &[&str], path: &str, start: u32, end: u32) -> Vec<u32> {
 	let text = lines.join("\n");
 	let cache_key = key(&text, path, start, end);
 	if let Ok(cache) = CACHE.lock()

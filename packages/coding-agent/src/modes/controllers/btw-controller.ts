@@ -1,15 +1,14 @@
-import type { AssistantMessage, Message } from "@oh-my-pi/pi-ai";
+import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import { type OverlayHandle, replaceTabs } from "@oh-my-pi/pi-tui";
-import { logger, prompt, Snowflake, toError, withTimeout } from "@oh-my-pi/pi-utils";
-import btwUserPrompt from "../../prompts/system/btw-user.md" with { type: "text" };
+import { logger, toError, withTimeout } from "@oh-my-pi/pi-utils";
 import {
 	type BtwHistoryRecord,
 	type BtwHistoryTurn,
 	BtwHistoryStore,
 	getBtwCopyText,
 	getBtwLatestTurn,
-	getBtwTurns,
 } from "../../session/btw-history";
+import { beginBtwTurn, patchLatestBtwTurn, runBtwTurn } from "../../session/btw-turn";
 import { TRUNCATE_LENGTHS } from "@oh-my-pi/pi-tui/render/render-utils";
 import { copyToClipboard } from "../../utils/clipboard";
 import { BtwHistoryPanel } from "@oh-my-pi/pi-tui/overlays/btw-history-panel";
@@ -388,7 +387,12 @@ export class BtwController {
 			const sessionId = this.#sessionManager.getSessionId();
 			if (signal?.aborted || store !== this.#store || sessionId !== originalSessionId) return false;
 			if (!trimmedQuestion) {
-				this.#showHistory(store);
+				const panel = this.#showHistory(store);
+				// Tern: reopening lands on the side question put away while it answered.
+				const active = this.#activeRequest;
+				if (this.ctx.ui.nativeRendering && active?.store === store && this.#isActiveRequest(active)) {
+					panel.showRecord(active.record.id);
+				}
 				return true;
 			}
 			// A just-cancelled/completed turn may still be publishing its checkpoint.
@@ -415,22 +419,8 @@ export class BtwController {
 			if (!previous) this.#closeHistory();
 			this.#activeRequest?.component.close();
 			this.#clearCompletedState();
-			const now = Date.now();
 			const leafId = this.#sessionManager.getLeafId();
-			const turn: BtwHistoryTurn = {
-				question: trimmedQuestion,
-				answer: "",
-				status: "running",
-				createdAt: now,
-				updatedAt: now,
-			};
-			const record: BtwHistoryRecord = previous
-				? { ...previous, followUps: [...(previous.followUps ?? []), turn] }
-				: { ...turn, id: Snowflake.next(), leafId };
-			const history = previous ? getBtwTurns(previous) : undefined;
-			// A cancelled/failed transport may still be unwinding. Start a fresh
-			// lineage after that boundary, while successful follow-ups share one.
-			const transportEpoch = (history?.findLastIndex(item => item.status !== "complete") ?? -1) + 1;
+			const { record, history, conversationKey } = beginBtwTurn(trimmedQuestion, leafId, previous);
 			const request: BtwRequest = {
 				component: new BtwPanelComponent({
 					question: trimmedQuestion,
@@ -447,11 +437,14 @@ export class BtwController {
 				store,
 				record,
 				history,
-				conversationKey: `btw:${record.id}:${transportEpoch}`,
+				conversationKey,
 				persisted: false,
 			};
 			this.#activeRequest = request;
-			this.#visible = !previous || !this.#historyOverlay;
+			// Tern shows the answer in the BTW history sheet (its body scrolls, its
+			// markdown is native); the text renderer keeps the inline panel.
+			const sheet = this.ctx.ui.nativeRendering;
+			this.#visible = !sheet && (!previous || !this.#historyOverlay);
 			this.ctx.btwContainer.clear();
 			if (this.#visible) this.ctx.btwContainer.addChild(request.component);
 			this.ctx.ui.requestRender();
@@ -480,6 +473,7 @@ export class BtwController {
 				return false;
 			}
 			this.#refreshHistory();
+			if (sheet && !previous) this.#showHistory(store).showRecord(record.id);
 			void this.#runRequest(request);
 			return true;
 		} catch (error) {
@@ -519,9 +513,12 @@ export class BtwController {
 				}
 				return this.startFollowUp(record.id, question, signal);
 			},
+			spaceHoldKeys: this.ctx.keybindings.getKeys("app.stt.pushToTalk"),
 			spaceHold: input => this.ctx.dictationSpaceHold(input),
 			requestRender: () => this.ctx.ui.requestRender(),
 			getHeight: () => this.ctx.ui.terminal.rows,
+			// Tern has no inline panel: Esc puts the sheet away, `x` cancels.
+			escapeHides: this.ctx.ui.nativeRendering,
 		});
 		this.#historyPanel = panel;
 		this.#historyOverlay = this.ctx.ui.showOverlay(panel, {
@@ -553,14 +550,18 @@ export class BtwController {
 		this.#historyPanel = undefined;
 		if (!overlay) return;
 		overlay.hide();
-		// Closing a different history entry returns to the active BTW instead of
-		// leaving a request running without a visible panel.
+		// Closing while a BTW still answers keeps it running: text mode returns
+		// to its inline panel; Tern has none, so it says how to get back.
 		const request = this.#activeRequest;
 		if (request && this.#isActiveRequest(request) && getBtwLatestTurn(request.record).status === "running") {
-			request.component.setAnswer(getBtwLatestTurn(request.record).answer);
-			this.#visible = true;
-			this.ctx.btwContainer.clear();
-			this.ctx.btwContainer.addChild(request.component);
+			if (this.ctx.ui.nativeRendering) {
+				this.ctx.showStatus("/btw is still answering in the background · /btw to reopen it", { dim: true });
+			} else {
+				request.component.setAnswer(getBtwLatestTurn(request.record).answer);
+				this.#visible = true;
+				this.ctx.btwContainer.clear();
+				this.ctx.btwContainer.addChild(request.component);
+			}
 		}
 		this.ctx.ui.requestRender();
 	}
@@ -593,54 +594,14 @@ export class BtwController {
 	}
 
 	#updateRequest(request: BtwRequest, patch: Partial<BtwHistoryTurn>): void {
-		const followUps = request.record.followUps;
-		if (followUps?.length) {
-			request.record = {
-				...request.record,
-				followUps: [...followUps.slice(0, -1), { ...followUps[followUps.length - 1]!, ...patch }],
-			};
-		} else {
-			request.record = { ...request.record, ...patch };
-		}
+		request.record = patchLatestBtwTurn(request.record, patch);
 	}
 
 	async #runRequest(request: BtwRequest): Promise<void> {
 		try {
-			const promptText = prompt.render(btwUserPrompt, { question: request.question });
-			const model = request.session.model;
-			if (!model) throw new Error("No active model available for /btw.");
-			const history: Message[] = [];
-			for (const turn of request.history ?? []) {
-				history.push({
-					role: "user",
-					content: [{ type: "text", text: prompt.render(btwUserPrompt, { question: turn.question }) }],
-					attribution: "agent",
-					timestamp: turn.createdAt,
-				});
-				if (!turn.answer) continue;
-				// Saved BTW history contains visible text, not provider-native reasoning
-				// or replay signatures. These are context messages, not new billed turns.
-				history.push({
-					role: "assistant",
-					content: [{ type: "text", text: turn.answer }],
-					api: model.api,
-					provider: model.provider,
-					model: model.id,
-					usage: {
-						input: 0,
-						output: 0,
-						cacheRead: 0,
-						cacheWrite: 0,
-						totalTokens: 0,
-						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-					},
-					stopReason: "stop",
-					timestamp: turn.updatedAt,
-				});
-			}
-			const { replyText, assistantMessage } = await request.session.runEphemeralTurn({
-				promptText,
-				history,
+			const { replyText, assistantMessage } = await runBtwTurn(request.session, {
+				question: request.question,
+				history: request.history,
 				conversationKey: request.conversationKey,
 				onTextDelta: delta => {
 					const latest = getBtwLatestTurn(request.record);
@@ -658,6 +619,10 @@ export class BtwController {
 			if (this.#isActiveRequest(request)) {
 				request.component.setAnswer(replyText);
 				request.component.markComplete();
+				// Tern: the sheet was put away while answering; say where the answer is.
+				if (this.ctx.ui.nativeRendering && !this.#historyOverlay) {
+					this.ctx.showStatus("/btw answer ready · /btw to read it");
+				}
 				const copyText = request.component.getCopyText();
 				if (copyText !== undefined) {
 					this.#lastQuestion = request.question;

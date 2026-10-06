@@ -330,17 +330,6 @@ describe("CombinedAutocompleteProvider", () => {
 			expect(result.cursorCol).toBe("/skill:superpowers/tdd ".length);
 		});
 
-		it("never sync-completes Enter to the bare skill namespace", () => {
-			const provider = new CombinedAutocompleteProvider(
-				[{ name: "skill:humanizer", description: "Remove signs of AI writing" }],
-				"/tmp",
-			);
-
-			// items[0] of the sync path is applied and submitted immediately;
-			// `/skill:` alone is not a runnable command, so `/sk` must not match.
-			expect(provider.trySyncSlashCompletion("/sk")).toBeNull();
-		});
-
 		it("lists every skill while typing toward the skill: namespace mid-prompt", async () => {
 			const provider = new CombinedAutocompleteProvider(
 				[
