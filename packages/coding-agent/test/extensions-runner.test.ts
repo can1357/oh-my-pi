@@ -34,6 +34,7 @@ import { ExtensionToolWrapper } from "@oh-my-pi/pi-coding-agent/extensibility/ex
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { getProjectAgentDir, logger, TempDir } from "@oh-my-pi/pi-utils";
+import { isNativeRendering, setNativeRendering } from "@oh-my-pi/pi-tui/native/state";
 import { createAssistantMessage } from "./helpers/agent-session-setup";
 
 describe("ExtensionRunner", () => {
@@ -69,6 +70,9 @@ describe("ExtensionRunner", () => {
 	afterEach(() => {
 		testSetExtensionHandlerTimeoutMs(EXTENSION_HANDLER_TIMEOUT_MS);
 		testSetSessionShutdownHandlerTimeoutMs(SESSION_SHUTDOWN_HANDLER_TIMEOUT_MS);
+		// The native flag is process-wide; a leaked `true` would send every later
+		// test down the TSP path.
+		setNativeRendering(false);
 		tempDir.removeSync();
 	});
 
@@ -4544,6 +4548,7 @@ describe("ExtensionRunner", () => {
 				fileDeleteFallbackHandlers: [],
 				messageRenderers: new Map(),
 				composerShapes: new Map(),
+				statusLineRenderers: new Map(),
 				commands: new Map(),
 				flags: new Map(),
 				shortcuts: new Map(),
@@ -4651,6 +4656,117 @@ describe("ExtensionRunner", () => {
 				);
 			});
 			expect(cachedTexts).toEqual(["persisted user", "persisted assistant"]);
+		});
+	});
+
+	describe("status line renderer registration", () => {
+		const minimalActions = {
+			sendMessage: () => {},
+			sendUserMessage: () => {},
+			appendEntry: () => {},
+			setLabel: () => {},
+			getActiveTools: () => [],
+			getAllTools: () => [],
+			setActiveTools: async () => {},
+			getCommands: () => [],
+			setModel: async () => false,
+			getThinkingLevel: () => undefined,
+			setThinkingLevel: () => {},
+			getSessionName: () => undefined,
+			setSessionName: async () => {},
+		};
+		const minimalContextActions = {
+			getModel: () => undefined,
+			isIdle: () => true,
+			abort: () => {},
+			hasPendingMessages: () => false,
+			shutdown: () => {},
+			getContextUsage: () => undefined,
+			compact: async () => {},
+			getSystemPrompt: () => [],
+		};
+
+		it("announces a renderer registered from a session_start handler, which lands after initialize", async () => {
+			// Registering at load time is the easy case: the TUI's first sync sees
+			// it. Registering from session_start is the common one, and it lands
+			// after initialize() returned, so only the post-initialize
+			// notification can hand it over. That seam was silently dead once —
+			// the runtime kept its pre-init no-op — while every test still passed.
+			await Bun.write(
+				path.join(extensionsDir, "late-renderer.ts"),
+				`export default function(pi) {
+					pi.on("session_start", async () => {
+						pi.registerStatusLineRenderer({ id: "late", label: "Late", render: () => ["late row"] });
+					});
+				}`,
+			);
+			const result = await loadTestExtensions();
+			const runner = new ExtensionRunner(
+				result.extensions,
+				result.runtime,
+				tempDir.path(),
+				sessionManager,
+				modelRegistry,
+			);
+
+			const seen: { id: string | undefined; registered: boolean }[] = [];
+			runner.initialize(minimalActions, minimalContextActions, undefined, undefined, "tui");
+			runner.onStatusLineRendererChanged((renderer, registered) => {
+				seen.push({ id: renderer?.id, registered });
+			});
+
+			// Nothing has registered after initialize yet.
+			expect(seen).toEqual([]);
+
+			await runner.emit({ type: "session_start" });
+
+			expect(seen).toEqual([{ id: "late", registered: true }]);
+			expect(runner.getStatusLineRenderer()?.id).toBe("late");
+			// A failing renderer has to be attributable to the extension that
+			// registered it, or the author only sees an anonymous status line.
+			expect(runner.getStatusLineRendererExtensionPath("late")).toBe(path.join(extensionsDir, "late-renderer.ts"));
+			expect(runner.getStatusLineRendererExtensionPath("never-registered")).toBeUndefined();
+		});
+
+		it("hands the renderer over and attributes it while a native surface owns the bar", async () => {
+			// A Tern (TSP) terminal builds its own bar and never reads `render()`.
+			// The status line describes a dock block there, so the override does
+			// reach that surface -- but only if the runner still announces it
+			// there. Gating the announcement on the surface is what would leave
+			// the block with nothing to paint and no error to show for it.
+			setNativeRendering(true);
+			try {
+				await Bun.write(
+					path.join(extensionsDir, "tsp-renderer.ts"),
+					`export default function(pi) {
+						pi.on("session_start", async () => {
+							pi.registerStatusLineRenderer({ id: "tsp", label: "TSP", render: () => ["tsp row"] });
+						});
+					}`,
+				);
+				const result = await loadTestExtensions();
+				const runner = new ExtensionRunner(
+					result.extensions,
+					result.runtime,
+					tempDir.path(),
+					sessionManager,
+					modelRegistry,
+				);
+
+				const seen: { id: string | undefined; registered: boolean }[] = [];
+				runner.initialize(minimalActions, minimalContextActions, undefined, undefined, "tui");
+				runner.onStatusLineRendererChanged((renderer, registered) => {
+					seen.push({ id: renderer?.id, registered });
+				});
+				await runner.emit({ type: "session_start" });
+
+				expect(isNativeRendering()).toBe(true);
+				expect(seen).toEqual([{ id: "tsp", registered: true }]);
+				expect(runner.getStatusLineRenderer()?.id).toBe("tsp");
+				expect(runner.getStatusLineRendererExtensionPath("tsp")).toBe(path.join(extensionsDir, "tsp-renderer.ts"));
+			} finally {
+				setNativeRendering(false);
+			}
 		});
 	});
 });

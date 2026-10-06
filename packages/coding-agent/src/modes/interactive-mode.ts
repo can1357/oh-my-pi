@@ -6703,6 +6703,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#extensionUiController.clearExtensionTerminalInputListeners();
 		this.#extensionUiController.clearHookWidgets();
 		this.#extensionUiController.disposeComposerShapes();
+		this.#extensionUiController.disposeStatusLineRenderer();
 		for (const unsubscribe of this.#eventBusUnsubscribers) {
 			unsubscribe();
 		}

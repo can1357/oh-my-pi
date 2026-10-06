@@ -39,6 +39,9 @@
 
 ### Added
 
+- Added `StatusLineRenderer`, a whole-surface status-line renderer: while one is installed, `render()` returns the rows it paints and every built-in placement stands down, so the rows are drawn once in the place the bar they replaced sat. A renderer that throws is reported through the host, dropped, and kept out until it is registered again, so the built-in bar takes the surface back instead of the status line going blank ([#13582](https://github.com/can1357/oh-my-pi/pull/13582) by [@Zireael](https://github.com/Zireael))
+- Added `StatusLineRenderer.describeNative`, so a renderer can paint a Tern (TSP) terminal too: the node it describes takes the composer's bar from the configured segments, competing for width and dropping by priority like any other fact, while the model chip, the context hairline and the usage text stay the composer's. A `render()`-only renderer is unaffected, and a description that throws is reported and dropped exactly as one from `render()` is — so the built-in facts take the bar back ([#13582](https://github.com/can1357/oh-my-pi/pull/13582) by [@Zireael](https://github.com/Zireael))
+- A status-line renderer now paints on a Tern (TSP) terminal too: the status line describes a dock block there, carrying the renderer's rows (or the node its `describeNative` returns, mounted in the bar or the dock as it declares), so an extension keeps its status surface on either composer instead of losing it where omp composes the bar itself ([#13582](https://github.com/can1357/oh-my-pi/pull/13582) by [@Zireael](https://github.com/Zireael))
 - Added native terminal support for submitting explicit composer prompts atomically, preserving displaced drafts and attachments for local recall.
 - Added progress percentages to subagent entries in the agent tree, task, and wait views.
 - Added a `Rebuilding…` indicator for lengthy tmux resize redraws without flashing it for quick updates.

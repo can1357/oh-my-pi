@@ -1058,7 +1058,7 @@ export class CustomEditor extends Editor {
 		const effortGlyph = cx.supports("effort");
 		const state = this.composerState();
 		const shell = state.shell;
-		const facts = this.composerFacts?.describeComposerFacts();
+		const facts = this.composerFacts?.describeComposerFacts(cx);
 		const thinkingKey = this.#actionKeys.get("app.thinking.cycle")?.[0];
 		const modelKey = this.#actionKeys.get("app.model.selectTemporary")?.[0];
 		const interruptKey = this.#actionKeys.get("app.interrupt")?.[0] ?? "escape";

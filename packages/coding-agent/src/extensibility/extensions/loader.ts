@@ -17,6 +17,7 @@ import type {
 	TSchema,
 } from "@oh-my-pi/pi-ai";
 import { isBuiltinComposerStyle, type KeyId } from "@oh-my-pi/pi-tui";
+import type { StatusLineRenderer } from "@oh-my-pi/pi-tui/status-line/types";
 import { hasFsCode, isEacces, isEnoent, logger } from "@oh-my-pi/pi-utils";
 import { type ExtensionModule, extensionModuleCapability } from "../../capability/extension-module";
 import { type Hook, hookCapability } from "../../capability/hook";
@@ -169,6 +170,13 @@ export class ExtensionRuntime implements IExtensionRuntime {
 	setSessionName(): Promise<void> {
 		throw new ExtensionRuntimeNotInitializedError();
 	}
+
+	/**
+	 * No-op before initialization: there is no listener to notify, and
+	 * `ExtensionRunner.initialize` replaces this with the real one before any
+	 * extension can register, so the registration is never lost.
+	 */
+	notifyStatusLineRendererRegistered(): void {}
 }
 
 /**
@@ -288,6 +296,24 @@ class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
 		this.extension.composerShapes.set(id, definition);
 	}
 
+	registerStatusLineRenderer(definition: StatusLineRenderer): void {
+		const id = definition.id;
+		if (typeof id !== "string" || id.length === 0 || id !== id.trim()) {
+			throw new TypeError("Status line renderer id must be a non-empty trimmed string");
+		}
+		if (typeof definition.label !== "string" || definition.label.trim().length === 0) {
+			throw new TypeError(`Status line renderer "${id}" must have a label`);
+		}
+		if (typeof definition.render !== "function") {
+			throw new TypeError(`Status line renderer "${id}" must have a render function`);
+		}
+		this.extension.statusLineRenderers.set(id, definition);
+		// Announced rather than polled: a renderer registered from a lifecycle
+		// handler lands after the TUI's initial sync, and the status line only
+		// changes hands when it is told.
+		this.runtime.notifyStatusLineRendererRegistered();
+	}
+
 	getFlag(name: string): boolean | string | undefined {
 		if (!this.extension.flags.has(name)) return undefined;
 		return this.runtime.flagValues.get(name);
@@ -359,6 +385,10 @@ class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
 		return this.runtime.setSessionName(name);
 	}
 
+	notifyStatusLineRendererRegistered(): void {
+		this.runtime.notifyStatusLineRendererRegistered();
+	}
+
 	registerProvider(name: string, config: ProviderConfig): void {
 		this.runtime.registerProvider(name, config, this.extension.path);
 	}
@@ -383,6 +413,7 @@ function createExtension(extensionPath: string, resolvedPath: string): Extension
 		fileDeleteFallbackHandlers: [],
 		messageRenderers: new Map(),
 		composerShapes: new Map(),
+		statusLineRenderers: new Map(),
 		commands: new Map(),
 		flags: new Map(),
 		shortcuts: new Map(),

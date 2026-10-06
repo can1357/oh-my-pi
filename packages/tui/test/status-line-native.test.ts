@@ -1,6 +1,6 @@
 import { afterEach, beforeAll, describe, expect, it } from "bun:test";
 import type { TspProps } from "@oh-my-pi/pi-wire";
-import type { NativeChild, NativeNode } from "../src/native/node";
+import type { DescribeContext, NativeChild, NativeNode } from "../src/native/node";
 import { setNativeRendering } from "../src/native/state";
 import type { StatusLineComponent } from "../src/status-line/component";
 import { createStartupStatusLine } from "../src/status-line/startup";
@@ -31,9 +31,18 @@ function isNode(child: NativeChild | undefined): child is NativeNode {
 	return child !== undefined && "k" in child;
 }
 
+/** The describe context a frame hands the composer; facts are described from it. */
+const cx: DescribeContext = {
+	cols: 80,
+	reduceMotion: false,
+	dark: true,
+	supports: () => true,
+	feature: () => true,
+};
+
 /** The `seg` facts of the composer's extras, in order. */
 function facts(line: StatusLineComponent): { key: string; props: TspProps<"seg"> }[] {
-	const extras = line.describeComposerFacts().extras;
+	const extras = line.describeComposerFacts(cx).extras;
 	expect(extras.k).toBe("status");
 	return (extras.c ?? [])
 		.filter(isNode)
@@ -70,7 +79,7 @@ describe("native composer facts", () => {
 	it("describes spans without ANSI escapes or separator glyphs", () => {
 		setNativeRendering(true);
 		const line = statusLine({ preset: "full", separator: "powerline" });
-		const json = JSON.stringify(line.describeComposerFacts());
+		const json = JSON.stringify(line.describeComposerFacts(cx));
 		expect(json).not.toContain("\\u001b");
 		for (const glyph of ["\ue0b0", "\ue0b2", "\ue0b1", "\ue0b3", "─", "│"]) expect(json).not.toContain(glyph);
 		expect(facts(line).length).toBeGreaterThan(0);
@@ -79,11 +88,11 @@ describe("native composer facts", () => {
 	it("returns the same facts while nothing changed and new ones after a change", () => {
 		setNativeRendering(true);
 		const line = statusLine({ preset: "custom", leftSegments: ["path", "mode"], rightSegments: [] });
-		const first = line.describeComposerFacts();
-		expect(line.describeComposerFacts()).toBe(first);
+		const first = line.describeComposerFacts(cx);
+		expect(line.describeComposerFacts(cx)).toBe(first);
 
 		line.setPlanModeStatus({ enabled: true, paused: false });
-		expect(line.describeComposerFacts()).not.toBe(first);
+		expect(line.describeComposerFacts(cx)).not.toBe(first);
 		expect(facts(line).map(seg => seg.key)).toEqual(["mode"]);
 	});
 });

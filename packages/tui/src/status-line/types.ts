@@ -1,6 +1,6 @@
 import type { Model } from "@oh-my-pi/pi-ai";
 import type { SessionState, TspSpan, TspTone } from "@oh-my-pi/pi-wire";
-import type { NativeNode, NativeUiEvent } from "../native/node";
+import type { DescribeContext, NativeNode, NativeUiEvent } from "../native/node";
 import type { ContextLineMode, StatusLinePreset, StatusLineSegmentId, StatusLineSeparatorStyle } from "./schema";
 import type { ActiveRepoContext, StatusLineSession } from "./host";
 import type { LoopConditionConfig, LoopLimitRuntime } from "./loop";
@@ -66,6 +66,80 @@ export type EffectiveStatusLineSettings = Required<
 	Pick<StatusLineSettings, "leftSegments" | "rightSegments" | "separator" | "segmentOptions">
 > &
 	StatusLineSettings;
+
+/**
+ * Extension-registered status-line renderer. When one is installed, it replaces
+ * every built-in status placement (embedded top border, band, standalone bar):
+ * the component's `render()` delegates to it with a live segment context and
+ * the extension-status map, and the single-line border surfaces yield empty
+ * content so the multi-row output is not duplicated.
+ */
+export interface StatusLineRenderer {
+	/** Stable id; a later registration with the same id replaces the earlier one. */
+	id: string;
+	/** Human-readable label for selector/registry copy. */
+	label: string;
+	/** Render the full status surface. Rows render top-to-bottom. */
+	render(ctx: SegmentContext, hookStatuses: ReadonlyMap<string, string>, width: number): readonly string[];
+
+	/**
+	 * Describe the composer's bar on a Tern (TSP) terminal, where no code reads
+	 * `render()` and the bar is built from described nodes instead of rows.
+	 *
+	 * The returned node takes the place of the bar's flexible space — the slot
+	 * the configured segments and any hook statuses would otherwise occupy — so
+	 * it is laid out against the composer's own model chip, usage text and send
+	 * key, competing for width and dropping by `priority` like any other fact.
+	 * The composer's own chrome (the context hairline, the model chip, the usage
+	 * text) stays: a renderer describes the *segments*, not the composer.
+	 *
+	 * Omit it, or return null, and nothing changes on that terminal — the
+	 * built-in facts are described as before and the host declines the override,
+	 * so a `render()`-only renderer keeps behaving exactly as it does today.
+	 *
+	 * `segments` is the same context the built-in facts were built from, so a
+	 * described node can be derived from the same values. `cols` is the
+	 * *surface* width, not a bar width: the bar is a flex row that reflows, so
+	 * lay out against it and not against `cols`.
+	 *
+	 * Returning a tree that differs on every call repaints the bar on every
+	 * frame. One that is merely a fresh object with the same content is free —
+	 * the host fingerprints the description and reuses the previous node.
+	 *
+	 * Throwing drops the renderer exactly as a throw from `render()` does: the
+	 * id is blocked, the built-in facts take the bar back, and the failure is
+	 * reported to the host.
+	 */
+	describeNative?(cx: StatusLineNativeContext): NativeNode | null;
+
+	/**
+	 * Where {@link StatusLineRenderer.describeNative}'s node is mounted on a TSP
+	 * terminal. Declared once, because a node has exactly one home: mounting it
+	 * in both places would paint the same content twice.
+	 *
+	 * - `"bar"` (default) — the composer's bar, competing for width with the
+	 *   model chip and the usage text. One line, dropping by `priority`.
+	 * - `"dock"` — a block of its own below the composer, where multi-row content
+	 *   fits and nothing competes for the width.
+	 *
+	 * A renderer with no `describeNative` needs neither: its `render()` rows are
+	 * mounted in the dock as a `rows` node, so every renderer paints on a TSP
+	 * terminal either way.
+	 */
+	readonly nativePlacement?: "bar" | "dock";
+}
+
+/**
+ * What a renderer may consult while describing the composer's bar: the describe
+ * context (never a clock — motion is terminal-clocked) plus the facts
+ * `render()` reads.
+ */
+export interface StatusLineNativeContext extends DescribeContext {
+	/** The segment context the built-in facts were built from, at the same revision. */
+	readonly segments: SegmentContext;
+	/** Key-sorted extension/hook status values, as `render()` receives them. */
+	readonly hookStatuses: ReadonlyMap<string, string>;
+}
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Segment Rendering
@@ -250,7 +324,7 @@ export interface ComposerFacts {
 
 /** Supplies {@link ComposerFacts} and takes the clicks on them (`status.*` actions). */
 export interface ComposerFactsSource {
-	describeComposerFacts(): ComposerFacts;
+	describeComposerFacts(cx: DescribeContext): ComposerFacts;
 	handleNativeEvent(event: NativeUiEvent): void;
 }
 

@@ -1,4 +1,5 @@
 import { afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
+import type { Component } from "@oh-my-pi/pi-tui";
 import type { TspKind } from "@oh-my-pi/pi-wire";
 import { describeWorkingRow } from "@oh-my-pi/pi-tui/components/loader";
 import { SelectList } from "@oh-my-pi/pi-tui/components/select-list";
@@ -22,6 +23,11 @@ const cx = context("all");
 
 function isNode(child: NativeChild): child is NativeNode {
 	return "k" in child;
+}
+
+/** A dock child that is a component rather than a described node. */
+function isComponent(child: NativeChild): child is Component {
+	return typeof (child as Component).render === "function";
 }
 
 /** Every described node under `root` (component children are not expanded). */
@@ -377,7 +383,7 @@ describe("native autocomplete list", () => {
 });
 
 describe("native composer without a status strip", () => {
-	it("docks no status bar; the composer carries model, effort, context and usage", () => {
+	it("docks an empty status block; the composer carries model, effort, context and usage", () => {
 		setNativeRendering(true);
 		const composer = new Composer({
 			terminal: new VirtualTerminal(80, 24),
@@ -402,7 +408,14 @@ describe("native composer without a status strip", () => {
 		try {
 			composer.editor.composerState = () => ({ running: false, thinking: "high" });
 			const { dock } = composer.describeSurface();
-			expect(dock).toEqual([composer.editor]);
+			// The status host trails the dock, as it trails the ANSI roots, so a
+			// renderer has somewhere to paint on this surface too.
+			expect(dock[0]).toBe(composer.editor);
+			expect(dock).toHaveLength(2);
+			// With no renderer installed it describes nothing, so the dock still
+			// shows no status bar — which is the point of the arrangement.
+			const host = dock[1]!;
+			expect(isComponent(host) ? host.describe?.(cx) : undefined).toEqual({ k: "col", c: [] });
 			const described = composer.editor.describe(cx);
 			expect(nodes(described).some(n => n.p !== undefined && "role" in n.p && n.p.role === "omp.status")).toBe(
 				false,

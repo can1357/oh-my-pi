@@ -1,9 +1,9 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
-import { postmortem } from "@oh-my-pi/pi-utils";
 import {
 	createProcessTerminalRenderHarness,
 	type ProcessTerminalRenderHarness,
 } from "./process-terminal-render-harness";
+import { expectExitRequested } from "./terminal-exit-capture";
 
 const PLATFORM_DESCRIPTOR = Object.getOwnPropertyDescriptor(process, "platform");
 
@@ -94,45 +94,48 @@ describe("ProcessTerminal geometry reflow through the renderer", () => {
 		expect(harness.terminal.columns).toBe(100);
 	});
 
-	it("stops rendering and raises SIGHUP when terminal input ends", async () => {
-		// SIGHUP is the POSIX exit path; Windows quits directly (covered below).
-		Object.defineProperty(process, "platform", { value: "linux", configurable: true });
+	it("stops rendering and asks the process to exit when terminal input ends", async () => {
 		harness = createProcessTerminalRenderHarness(100, 30);
 		await harness.settle();
 		const rendersBeforeDisconnect = harness.probe.widths.length;
-		const signalsBeforeDisconnect = harness.signals.length;
 
 		await harness.endInput();
 		harness.tui.requestRender(true);
 		await harness.settle();
 
+		// Both halves are the contract: the terminal stops painting, and it asks
+		// to go away. Asserting only the second would pass on a terminal that
+		// exits with a frame still queued.
 		expect(harness.probe.widths).toHaveLength(rendersBeforeDisconnect);
-		expect(harness.signals.slice(signalsBeforeDisconnect)).toContainEqual({ pid: process.pid, signal: "SIGHUP" });
+		expectExitRequested(harness.exits.requests);
 	});
 
 	it("does not wait for terminal output to drain after input ends on Windows", async () => {
 		Object.defineProperty(process, "platform", { value: "win32", configurable: true });
-		const quit = vi.spyOn(postmortem, "quit").mockResolvedValue(undefined);
 		harness = createProcessTerminalRenderHarness(100, 30);
 
 		await harness.endInput();
 
-		expect(quit).toHaveBeenCalledWith(129, { drainStdout: false });
-		expect(harness.signals).toHaveLength(0);
+		// The win32 route, exactly: exit 129 and skip the stdout drain, because
+		// the descriptor being torn down is the one being written to, so draining
+		// it can block forever on a revoked pane.
+		expect(harness.exits.requests.at(-1)).toEqual({ kind: "quit", code: 129, drainStdout: false });
+		// No hangup alongside it. Not "kill was never called": teardown probes
+		// liveness with signal 0 about a thousand times, so the call count says
+		// nothing about whether the terminal hung up.
+		expect(harness.exits.hangups).toBe(0);
 	});
 
-	it("stops rendering and raises SIGHUP when terminal output fails", async () => {
-		Object.defineProperty(process, "platform", { value: "linux", configurable: true });
+	it("stops rendering and asks the process to exit when terminal output fails", async () => {
 		harness = createProcessTerminalRenderHarness(100, 30);
 		await harness.settle();
 		const rendersBeforeDisconnect = harness.probe.widths.length;
-		const signalsBeforeDisconnect = harness.signals.length;
 
 		await harness.failOutput();
 		harness.tui.requestRender(true);
 		await harness.settle();
 
 		expect(harness.probe.widths).toHaveLength(rendersBeforeDisconnect);
-		expect(harness.signals.slice(signalsBeforeDisconnect)).toContainEqual({ pid: process.pid, signal: "SIGHUP" });
+		expectExitRequested(harness.exits.requests);
 	});
 });

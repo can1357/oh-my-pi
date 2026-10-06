@@ -5,6 +5,7 @@ import type { ExtensionAskDialogQuestion, ExtensionUIContext } from "../../../sr
 import { AskDialogComponent } from "@oh-my-pi/pi-tui/overlays/ask-dialog";
 import { CustomEditor } from "@oh-my-pi/pi-tui/prompt/custom-editor";
 import { HookEditorComponent } from "@oh-my-pi/pi-tui/overlays/hook-editor";
+import { setNativeRendering } from "@oh-my-pi/pi-tui/native/state";
 import { ExtensionUiController } from "../../../src/modes/controllers/extension-ui-controller";
 import { InputController } from "../../../src/modes/controllers/input-controller";
 import { getEditorTheme, getThemeByName, setThemeInstance } from "@oh-my-pi/pi-tui/theme";
@@ -20,7 +21,43 @@ beforeAll(async () => {
 	setThemeInstance(dark);
 });
 
+/**
+ * A renderer registry the controller can drive.
+ *
+ * `notify` stands in for `onStatusLineRendererChanged`: the tests below need to
+ * make the runner announce a registration and then observe what the controller
+ * did with it, which is the whole contract being defended.
+ */
+function makeFakeRunner() {
+	let renderer: { id: string; label: string; render: () => readonly string[] } | undefined;
+	const listeners: ((renderer: unknown, registered: boolean) => void)[] = [];
+	return {
+		runner: {
+			onStatusLineRendererChanged(listener: (renderer: unknown, registered: boolean) => void) {
+				listeners.push(listener);
+				return () => {
+					const index = listeners.indexOf(listener);
+					if (index >= 0) listeners.splice(index, 1);
+				};
+			},
+			getStatusLineRenderer: () => renderer,
+			getStatusLineRendererExtensionPath: () => "ext://fake",
+			getComposerShapes: () => [],
+			onError: () => () => {},
+			emitError: () => {},
+			initialize: () => {},
+			emit: async () => {},
+		},
+		announce(next: { id: string; label: string; render: () => readonly string[] }, registered = true) {
+			renderer = next;
+			for (const listener of listeners) listener(next, registered);
+		},
+	};
+}
+
 function makeHarness() {
+	const fakeRunner = makeFakeRunner();
+	const setRendererOverride = vi.fn();
 	const editor = new CustomEditor(getEditorTheme());
 	const editorContainer = new Container();
 	editorContainer.addChild(editor);
@@ -52,8 +89,12 @@ function makeHarness() {
 		},
 		editorContainer,
 		session: {
-			extensionRunner: undefined,
+			extensionRunner: fakeRunner.runner,
 			setUsageFallbackConfirmer: vi.fn(),
+		},
+		statusLine: {
+			setRendererOverride: setRendererOverride,
+			setRendererErrorSink: vi.fn(),
 		},
 		setToolUIContext(context: ExtensionUIContext, hasUI: boolean): void {
 			expect(hasUI).toBe(true);
@@ -76,6 +117,8 @@ function makeHarness() {
 		showOverlay,
 		fakeHandle,
 		controller,
+		setRendererOverride,
+		announceRenderer: fakeRunner.announce,
 		inputController: (readText: () => Promise<string>) =>
 			new InputController(ctx, { readImage: async () => null, readText }),
 		handleInput(data: string): void {
@@ -505,5 +548,57 @@ describe("ExtensionUiController custom overlay", () => {
 		expect(component.dispose).toHaveBeenCalledTimes(1);
 		expect(harness.editorContainer.children).toEqual([harness.editor]);
 		expect(harness.editor.getText()).toBe("draft typed while factory is pending");
+	});
+});
+
+/**
+ * A Tern Surface Protocol terminal is not a reason to decline a renderer: the
+ * status line describes a dock block there — the renderer's rows, or the node its
+ * `describeNative` returns — so the override reaches whichever surface is live.
+ * These tests pin that the controller installs it unconditionally, which is what
+ * lets a session gain and lose a surface without a re-sync.
+ */
+describe("ExtensionUiController status-line renderer on a native surface", () => {
+	const renderer = { id: "rows", label: "Rows", render: () => ["ROW-A"] };
+
+	afterEach(() => {
+		setNativeRendering(false);
+	});
+
+	it("hands a registered renderer to the status line in the box composer", async () => {
+		const harness = makeHarness();
+		await harness.init();
+		harness.announceRenderer(renderer);
+
+		const installed = harness.setRendererOverride.mock.calls.filter(([value]) => value !== undefined);
+		expect(installed.length).toBeGreaterThan(0);
+		expect(installed.at(-1)?.[0]).toMatchObject({ id: "rows" });
+	});
+
+	it("installs the renderer while a Tern surface is live, where the status line paints it in the dock", async () => {
+		setNativeRendering(true);
+		const harness = makeHarness();
+		await harness.init();
+		harness.setRendererOverride.mockClear();
+		harness.announceRenderer(renderer);
+
+		// Declining here is what used to leave a Tern user with no rows at all.
+		const installed = harness.setRendererOverride.mock.calls.filter(([value]) => value !== undefined);
+		expect(installed.at(-1)?.[0]).toMatchObject({ id: "rows" });
+	});
+
+	it("needs no re-sync when the surface closes, because it was never withheld", async () => {
+		setNativeRendering(true);
+		const harness = makeHarness();
+		await harness.init();
+		harness.setRendererOverride.mockClear();
+		harness.announceRenderer(renderer);
+		harness.setRendererOverride.mockClear();
+
+		// Closing the surface used to need a native-rendering subscription to
+		// reinstall the override. With no gate there is nothing to reinstall: the
+		// override is still installed, and the box surface picks it up.
+		setNativeRendering(false);
+		expect(harness.setRendererOverride.mock.calls).toEqual([]);
 	});
 });

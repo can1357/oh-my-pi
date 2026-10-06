@@ -43,6 +43,7 @@ import { accumulateToolCallResult, buildAggregatedToolCallResult } from "../shar
 import { ManagedTimers } from "./managed-timers";
 import { createExtensionModelQuery } from "./model-api";
 import type { ComposerShapeDefinition } from "@oh-my-pi/pi-tui/overlays/composer-shape-registry";
+import type { StatusLineRenderer } from "@oh-my-pi/pi-tui/status-line/types";
 import type {
 	AfterProviderResponseEvent,
 	AssistantMessageRewriteEvent,
@@ -518,6 +519,7 @@ export class ExtensionRunner {
 	#getMemoryFn?: () => MemoryRuntimeContext | undefined;
 	#commandDiagnostics: Array<{ type: string; message: string; path: string }> = [];
 	#toolRegistrationScope = new AsyncLocalStorage<ToolRegistrationScope>();
+	#statusLineRendererListeners = new Set<(renderer: StatusLineRenderer | undefined, registered: boolean) => void>();
 	#toolRegistrationBarrier: Promise<void> | undefined;
 	#initialized = false;
 	/** Full load order, captured on the first {@link setSuspendedExtensions} call. */
@@ -797,6 +799,10 @@ export class ExtensionRunner {
 		this.runtime.unregisterProvider = name => {
 			this.modelRegistry.unregisterProvider(name);
 		};
+		// Until this is wired the runtime keeps its pre-initialization no-op, so
+		// a renderer registered from a lifecycle handler is stored on the
+		// extension and never announced: the status line keeps the built-in bar.
+		this.runtime.notifyStatusLineRendererRegistered = () => this.notifyStatusLineRendererRegistered();
 
 		// Context actions (required)
 		this.#getModel = contextActions.getModel;
@@ -1178,6 +1184,55 @@ export class ExtensionRunner {
 			for (const [id, shape] of extension.composerShapes) shapes.set(id, shape);
 		}
 		return [...shapes.values()];
+	}
+
+	/**
+	 * The active extension status-line renderer, if any. Later registrations
+	 * win; the last extension to register during load takes the surface.
+	 */
+	getStatusLineRenderer(): StatusLineRenderer | undefined {
+		let active: StatusLineRenderer | undefined;
+		for (const extension of this.extensions) {
+			for (const renderer of extension.statusLineRenderers.values()) active = renderer;
+		}
+		return active;
+	}
+
+	/**
+	 * The extension that registered a renderer by id, so a failure can be
+	 * attributed to its author instead of surfacing anonymously.
+	 */
+	getStatusLineRendererExtensionPath(rendererId: string): string | undefined {
+		for (const extension of this.extensions) {
+			if (extension.statusLineRenderers.has(rendererId)) return extension.path;
+		}
+		return undefined;
+	}
+
+	/**
+	 * Observe status-line renderer registrations, including ones that land after
+	 * {@link initialize} — registering from a `session_start` handler is the
+	 * common case, and the TUI controller has to push the active renderer into
+	 * the status line for the surface to change hands.
+	 *
+	 * `registered` is true only for an actual registration, which is how a
+	 * listener distinguishes "an extension just registered" from a shape re-sync
+	 * replaying the same set.
+	 */
+	onStatusLineRendererChanged(
+		listener: (renderer: StatusLineRenderer | undefined, registered: boolean) => void,
+	): () => void {
+		this.#statusLineRendererListeners.add(listener);
+		return () => {
+			this.#statusLineRendererListeners.delete(listener);
+		};
+	}
+
+	/** Called by the extension API on registration; see {@link onStatusLineRendererChanged}. */
+	notifyStatusLineRendererRegistered(): void {
+		if (this.#statusLineRendererListeners.size === 0) return;
+		const active = this.getStatusLineRenderer();
+		for (const listener of this.#statusLineRendererListeners) listener(active, true);
 	}
 
 	/**
