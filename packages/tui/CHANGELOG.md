@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- `CustomMessage` and custom message transcript entries have an optional `tag`, a caller correlation id that stays with the message when a transcript is rebuilt ([#14323](https://github.com/can1357/oh-my-pi/pull/14323) by [@sjawhar](https://github.com/sjawhar))
+
 ### Changed
 
 - Model mentions (`^`), `/switch` completions, and model picker search stay responsive on every keystroke with large model catalogs ([#14595](https://github.com/can1357/oh-my-pi/pull/14595) by [@H4vC](https://github.com/H4vC))

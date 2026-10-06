@@ -5,6 +5,7 @@
 ### Added
 
 - Added `getOAuthCredentialProvider()` to resolve a login alias (such as `openai-codex-device`) to the provider its credentials are stored under ([#14588](https://github.com/can1357/oh-my-pi/pull/14588) by [@andrebrait](https://github.com/andrebrait))
+- `UserMessage` has an optional `tag`, a caller correlation id that stays with the message and is never sent to providers ([#14323](https://github.com/can1357/oh-my-pi/pull/14323) by [@sjawhar](https://github.com/sjawhar))
 
 ### Fixed
 
