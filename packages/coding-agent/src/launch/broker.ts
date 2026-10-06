@@ -806,13 +806,18 @@ class DaemonBroker {
 		// cursor position or device attributes would block on the reply. Answer
 		// the queries from the output stream and write the replies to its stdin.
 		//
-		// Cursor reports are the exception on Windows: ConPTY is itself a
-		// terminal, answering a program's own probes from the console, so the
-		// only `CSI 6 n` on this stream is ConPTY's INHERIT_CURSOR handshake at
-		// session start — answered by the PTY layer before the child owns stdin
-		// (crates/pi-natives/src/pty.rs). Replying here would put a second report
-		// on the program's stdin, where the console decodes it as a keypress.
-		const responder = new TerminalQueryResponder({ cursorPosition: process.platform !== "win32" });
+		// On Windows ConPTY sits in between and forwards a program's probes
+		// rather than answering them (current conhost leaves replies to the
+		// terminal; older builds answer from the console buffer and never put
+		// the probe on this stream). ConPTY also sends queries of its own and
+		// consumes their replies: device attributes at session start and cursor
+		// resyncs later, all answered here. The one exception is its
+		// INHERIT_CURSOR handshake, the first `CSI 6 n` on the stream, which the
+		// PTY layer answers before the child owns stdin
+		// (crates/pi-natives/src/pty.rs). ConPTY consumes one report for it;
+		// replying again would put a second report on the program's stdin,
+		// where the console decodes it as a keypress.
+		const responder = new TerminalQueryResponder({ hostCursorHandshake: process.platform === "win32" });
 		const onChunk = (error: Error | null, chunk: string): void => {
 			if (generation !== record.generation) return;
 			if (error) record.log?.append(`PTY output error: ${error.message}\n`);

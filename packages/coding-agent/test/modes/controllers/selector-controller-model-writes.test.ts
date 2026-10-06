@@ -93,4 +93,21 @@ describe("SelectorController model hub writes", () => {
 		const saved = YAML.parse(await Bun.file(path.join(agentDir, "config.yml")).text()) as RawSettings;
 		expect(saved).toEqual({ retry: { fallbackChains: { slow: ["user/slow-fallback"] } } });
 	});
+
+	it("switches the session to the project default when its already-assigned chip is picked", async () => {
+		const agentDir = tempDir.join("agent");
+		await Bun.write(
+			tempDir.join(".omp", "config.yml"),
+			YAML.stringify({ modelRoles: { default: "anthropic/claude-opus-4-5" } }),
+		);
+		const settings = await Settings.init({ agentDir, cwd: tempDir.path() });
+		// The session moved off the configured default earlier (an in-session pick).
+		const { controller, showError } = start(settings, model("claude-sonnet-4-5"));
+
+		// The hub shows the project default as assigned, so picking it sends unassign.
+		await openModelHub(controller).onUnassign("default");
+
+		expect(showError).not.toHaveBeenCalled();
+		expect(session?.model?.id).toBe("claude-opus-4-5");
+	});
 });

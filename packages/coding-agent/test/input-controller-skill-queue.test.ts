@@ -785,7 +785,10 @@ describe("AgentSession derived queued custom display", () => {
 	});
 });
 
-function createStubInteractiveModeContextForUiHelpers(session: AgentSession) {
+function createStubInteractiveModeContextForUiHelpers(
+	session: AgentSession,
+	options?: { focusedAgentId?: string; compactionQueuedMessages?: CompactionQueuedMessage[] },
+) {
 	let editorText = "";
 	const editor: StubEditor = {
 		setText(text) {
@@ -823,7 +826,8 @@ function createStubInteractiveModeContextForUiHelpers(session: AgentSession) {
 		pendingMessagesContainer,
 		session,
 		viewSession: session,
-		compactionQueuedMessages: [],
+		focusedAgentId: options?.focusedAgentId,
+		compactionQueuedMessages: options?.compactionQueuedMessages ?? [],
 		keybindings: {
 			getKeys: (_action: string) => ["alt+up"],
 		},
@@ -886,6 +890,21 @@ describe("UiHelpers / InputController against derived queued custom display", ()
 
 		expect(pendingMessagesContainer.children).toHaveLength(0);
 		expect(requestComponentRender).toHaveBeenNthCalledWith(2, pendingMessagesContainer);
+	});
+
+	it("does not advertise main compaction messages in a focused subagent view", async () => {
+		fixture = await createRealSession();
+		const compactionQueuedMessages: CompactionQueuedMessage[] = [{ text: "main compaction", mode: "steer" }];
+		const focused = createStubInteractiveModeContextForUiHelpers(fixture.session, {
+			focusedAgentId: "Worker",
+			compactionQueuedMessages,
+		});
+		new UiHelpers(focused.ctx).updatePendingMessagesDisplay();
+		expect(focused.pendingMessagesContainer.children).toHaveLength(0);
+
+		const main = createStubInteractiveModeContextForUiHelpers(fixture.session, { compactionQueuedMessages });
+		new UiHelpers(main.ctx).updatePendingMessagesDisplay();
+		expect(Bun.stripANSI(main.pendingMessagesContainer.render(120).join("\n"))).toContain("main compaction");
 	});
 
 	it("groups yield follow-ups under one heading", async () => {

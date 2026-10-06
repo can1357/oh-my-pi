@@ -70,6 +70,7 @@ export const getModelsConfigSchemaBundle = once(() => {
 		"supportsLongPromptCacheRetention?": "boolean",
 		"supportsReasoningParams?": "boolean",
 		"supportsReasoningSummary?": "boolean",
+		"statefulResponses?": "boolean",
 		"alwaysSendMaxTokens?": "boolean",
 		"strictResponsesPairing?": "boolean",
 		"supportsImageDetailOriginal?": "boolean",
