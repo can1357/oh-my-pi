@@ -4,20 +4,24 @@
  * Runs text the way the RPC mode runs a `prompt` command, so the four wiring
  * sites (interactive UI twice, ACP, and `initializeExtensions`, which print,
  * RPC and subagent sessions use) cannot drift, in this order:
- *   1. `/skill:<name>` through the RPC skill invocation (`resolveRpcSkillInvocation`
+ *   1. extension `input` handlers, with `source: "extension"`: one can consume
+ *      the text (answered `command`) or rewrite it and add images, as for typed
+ *      input;
+ *   2. `/skill:<name>` through the RPC skill invocation (`resolveRpcSkillInvocation`
  *      and `runRpcSkillCommand`);
- *   2. built-in slash commands: those with a text-mode `handle` (the ones RPC and
+ *   3. built-in slash commands: those with a text-mode `handle` (the ones RPC and
  *      ACP run through `executeAcpBuiltinSlashCommand`) run it with the host's
  *      {@link SlashCommandHost}, the hooks its own typed input gives them; the
  *      TUI-only rest answer `terminal-only`;
- *   3. a leading `/` that names no extension, custom or MCP prompt command,
+ *   4. a leading `/` that names no extension, custom or MCP prompt command,
  *      file slash command or prompt template answers `unknown` and is not sent;
- *   4. everything else goes through `session.prompt()`, which runs extension and
+ *   5. everything else goes through `session.prompt()`, which runs extension and
  *      custom commands and expands file slash commands and templates.
  *
  * Unlike typed input, the answer says what happened, so a bridge that forwards
  * a person's text can report a refusal instead of guessing.
  */
+import type { ImageContent } from "@oh-my-pi/pi-ai";
 import { clearPluginRootsAndCaches, resolveActiveProjectRegistryPath } from "../../discovery/helpers";
 import { resolveRpcSkillInvocation, runRpcSkillCommand } from "../../modes/rpc/rpc-skill-invocation";
 import type { AgentSession } from "../../session/agent-session";
@@ -78,10 +82,22 @@ export async function sendSessionUserInput(
 ): Promise<SendUserInputResult> {
 	const streamingBehavior = options?.deliverAs ?? "steer";
 	const tag = options?.tag;
+	let images: ImageContent[] | undefined;
+
+	// The ingress hook RPC's `prompt` and interactive Enter run before anything else; a handler that
+	// forwards input through `sendUserInput` tells its own calls apart by `source`.
+	const runner = session.extensionRunner;
+	if (runner?.hasHandlers("input")) {
+		const input = await runner.emitInput(text, undefined, "extension");
+		if (input.handled) return { handled: "command" };
+		if (input.text !== undefined) text = input.text;
+		images = input.images;
+	}
+	if (!text.trim() && !images?.length) return { handled: "command" };
 
 	const skill = resolveRpcSkillInvocation(session, text);
 	if (skill) {
-		await runRpcSkillCommand(session, skill, streamingBehavior, undefined, undefined, undefined, tag);
+		await runRpcSkillCommand(session, skill, streamingBehavior, undefined, undefined, images, tag);
 		return { handled: "skill" };
 	}
 
@@ -106,14 +122,14 @@ export async function sendSessionUserInput(
 		});
 		const output = printed.length > 0 ? { output: printed.join("\n") } : undefined;
 		if (result && "prompt" in result) {
-			await session.prompt(result.prompt, { streamingBehavior, tag });
+			await session.prompt(result.prompt, { streamingBehavior, images, tag });
 			return { handled: "prompt", ...output };
 		}
 		return { handled: "command", ...output };
 	}
 
 	if (text.startsWith("/") && !session.namesPromptCommand(text)) return { handled: "unknown" };
-	const submitted = await session.prompt(text, { streamingBehavior, tag });
+	const submitted = await session.prompt(text, { streamingBehavior, images, tag });
 	// `prompt()` answers false only when an extension or custom command handled the text locally.
 	return { handled: submitted ? "prompt" : "command" };
 }

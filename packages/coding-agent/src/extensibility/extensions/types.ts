@@ -1033,7 +1033,10 @@ export interface UserPythonEvent {
 // Input Events
 // ============================================================================
 
-/** Fired when the user submits input (interactive mode only). */
+/**
+ * Fired when input is submitted: typed into the interactive TUI (`interactive`), sent as an RPC prompt
+ * (`rpc`), or run by an extension through `sendUserInput` (`extension`).
+ */
 export interface InputEvent {
 	type: "input";
 	text: string;
@@ -1600,11 +1603,12 @@ export interface ExtensionAPI {
 	sendUserMessage(content: string | (TextContent | ImageContent)[], options?: SendUserMessageOptions): void;
 
 	/**
-	 * Run text as typed input, the way the RPC and ACP modes run a prompt: `/skill:<name>`, built-in slash
-	 * commands that run headless, extension and custom commands, file slash commands and prompt templates are
-	 * handled as commands; anything else is sent as a user prompt. Resolves once the input is handled or
-	 * submitted, with how it was handled. `tag` is recorded on the message the input submits, so a bridge can
-	 * match it on `message_start`/`message_end`. See {@link SendUserInputResult}.
+	 * Run text as typed input, the way the RPC and ACP modes run a prompt: extension `input` handlers see it
+	 * first (with `source: "extension"`), then `/skill:<name>`, built-in slash commands that run headless,
+	 * extension and custom commands, file slash commands and prompt templates are handled as commands; anything
+	 * else is sent as a user prompt. Resolves once the input is handled or submitted, with how it was handled.
+	 * `tag` is recorded on the message the input submits, so a bridge can match it on
+	 * `message_start`/`message_end`. See {@link SendUserInputResult}.
 	 */
 	sendUserInput(text: string, options?: SendUserInputOptions): Promise<SendUserInputResult>;
 
@@ -1855,7 +1859,8 @@ export interface SendUserInputOptions {
  * How {@link ExtensionAPI.sendUserInput} handled text:
  * - `prompt`: submitted as a user message (plain text, or a template, file slash command, custom command or
  *   built-in that produced prompt text); the message carries the caller's `tag`.
- * - `command`: a command ran locally and submitted nothing itself; `output` is what a built-in printed.
+ * - `command`: handled locally and submitted nothing itself: a command ran (`output` is what a built-in
+ *   printed), an extension `input` handler consumed the text, or no text was left to send.
  * - `skill`: `/skill:<name>` was submitted as the user's skill prompt message, carrying the caller's `tag`.
  * - `terminal-only`: a built-in only the interactive terminal runs (e.g. `/new`, `/resume`); nothing was sent.
  * - `unknown`: a leading `/` names no command; nothing was sent.

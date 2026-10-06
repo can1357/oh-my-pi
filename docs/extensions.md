@@ -264,6 +264,7 @@ from another agent.
 
 `pi.sendUserInput(text, { deliverAs, tag })` runs text as if the user typed it, the way RPC mode runs a `prompt` command, and resolves with how it was handled:
 
+- Extension `input` handlers run first, as for typed input (see "External input interception"), with `source: "extension"`; one that consumes the text, or leaves no text and no images, sends nothing → `{ handled: "command" }`, and text or images it substitutes are what the steps below dispatch.
 - `/skill:<name>` is submitted as the user's skill prompt → `{ handled: "skill" }`.
 - A built-in slash command with a headless handler (the set RPC and ACP run, e.g. `/jobs`, `/compact`, `/retry`) runs → `{ handled: "command", output? }`, where `output` is what it printed; one that returns prompt text submits it → `{ handled: "prompt" }`. It reports through the host's own output and notification hooks, so what it prints also shows where typed output does (the TUI status line, an RPC `command_output` frame, an ACP message), and a rename or model change reaches an RPC or ACP client. It finishes before the call resolves, including a provider-backed one such as `/compact` that RPC runs in the background for a typed `prompt`. A built-in only the interactive terminal runs (e.g. `/new`, `/resume`, `/quit`) sends nothing → `{ handled: "terminal-only" }`.
 - A leading `/` that names no extension, custom or MCP prompt command, file slash command or prompt template sends nothing → `{ handled: "unknown" }`.
@@ -455,6 +456,7 @@ prompt-template expansion, and queue insertion:
 |---|---|
 | Main-session Enter or Ctrl+Enter | `"interactive"` |
 | `prompt`, `steer`, `follow_up`, or `abort_and_prompt` in RPC or RPC UI mode | `"rpc"` |
+| An extension's `pi.sendUserInput(text)`, in any mode | `"extension"` |
 
 Handlers run in extension/registration order. Returned `text` and `images`
 replacements feed subsequent handlers; omitted fields preserve the current value,
@@ -465,7 +467,9 @@ handler through `sendUserMessage` or `sendMessage` is not discarded.
 
 This is an ingress event, not a user-role message event. Queue delivery and replay
 do not emit it again. Programmatic `sendUserMessage`/`sendMessage` calls and
-synthetic continuations do not automatically emit `input`. Main-session Enter's
+synthetic continuations do not automatically emit `input`; `sendUserInput` does, so
+a handler that forwards input through it sees that call again with
+`source: "extension"`. Main-session Enter's
 `.`/`c` continuation shortcuts retain their synthetic path. Focused-subagent
 input retains its chat-only routing and does not invoke main-session input hooks.
 Print and ACP input are outside this interception contract.

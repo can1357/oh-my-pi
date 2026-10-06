@@ -17,7 +17,11 @@ import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { ExtensionRuntime, loadExtensionFromFactory } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
 import { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
-import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
+import type {
+	ExtensionAPI,
+	InputEvent,
+	InputEventResult,
+} from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
 import type { Skill } from "@oh-my-pi/pi-coding-agent/extensibility/skills";
 import { initializeExtensions } from "@oh-my-pi/pi-coding-agent/modes/runtime-init";
 import { ExtensionUiController } from "@oh-my-pi/pi-coding-agent/modes/controllers/extension-ui-controller";
@@ -80,6 +84,8 @@ describe("pi.sendUserInput", () => {
 		 * the interactive TUI's controller, or a host that leaves `sendUserInput` out.
 		 */
 		host?: "runtime-init" | "interactive" | "unwired";
+		/** An `input` handler the bridge extension registers. */
+		onInput?: (event: InputEvent) => InputEventResult | undefined;
 	}): Promise<Harness> {
 		const manager = SessionManager.inMemory();
 		const runtime = new ExtensionRuntime();
@@ -98,6 +104,8 @@ describe("pi.sendUserInput", () => {
 				pi.on("message_start", event => {
 					started.push(event.message);
 				});
+				const onInput = options?.onInput;
+				if (onInput) pi.on("input", event => onInput(event));
 			},
 			manager.getCwd(),
 			new EventBus(),
@@ -207,6 +215,35 @@ describe("pi.sendUserInput", () => {
 		expect(deployRuns).toEqual(["staging"]);
 		expect(userTurns(started)).toHaveLength(0);
 		expect(session.messages.some(message => message.role === "assistant")).toBe(false);
+	});
+
+	it("runs extension input handlers first, with source extension, and answers command when one consumes the text", async () => {
+		const sources: string[] = [];
+		const { api, session, started } = await start({
+			onInput: event => {
+				sources.push(event.source);
+				return event.text.startsWith("secret:") ? { handled: true } : undefined;
+			},
+		});
+
+		expect(await api.sendUserInput("secret: keep this local")).toEqual({ handled: "command" });
+		await session.waitForIdle();
+
+		expect(sources).toEqual(["extension"]);
+		expect(userTurns(started)).toHaveLength(0);
+		expect(session.messages.some(message => message.role === "assistant")).toBe(false);
+	});
+
+	it("dispatches the text an input handler rewrites it to", async () => {
+		const { api, session, started, deployRuns } = await start({
+			onInput: event => (event.text.startsWith("ship ") ? { text: `/deploy ${event.text.slice(5)}` } : undefined),
+		});
+
+		expect(await api.sendUserInput("ship staging")).toEqual({ handled: "command" });
+		await session.waitForIdle();
+
+		expect(deployRuns).toEqual(["staging"]);
+		expect(userTurns(started)).toHaveLength(0);
 	});
 
 	it("expands a prompt template into the tagged user turn it submits", async () => {
