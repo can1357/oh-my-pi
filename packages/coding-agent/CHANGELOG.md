@@ -98,7 +98,7 @@
 - Fixed collaboration guests rebuilding the transcript excessively during streaming.
 ### Added
 
-- Copy the latest assistant response to the clipboard with `/copy last` or the `Alt+C` keybinding (`app.clipboard.copyLastAssistant`) ([#14309](https://github.com/can1357/oh-my-pi/issues/14309)).
+- Copy the latest assistant response to the clipboard with `/copy last` or the `Alt+C` keybinding (`app.clipboard.copyLastAssistant`) ([#14652](https://github.com/can1357/oh-my-pi/pull/14652) by [@danzaio](https://github.com/danzaio)).
 
 ## [18.7.0] - 2026-10-06
 
