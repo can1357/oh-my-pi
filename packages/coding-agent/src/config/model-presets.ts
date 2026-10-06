@@ -16,7 +16,7 @@ import { THINKING_EFFORTS } from "@oh-my-pi/pi-catalog/effort";
 import { AUTO_THINKING, type ConfiguredThinkingLevel, parseConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
 import { isRecord } from "@oh-my-pi/pi-utils";
 import type { AgentSession } from "../session/agent-session";
-import { cfgDefaultThinkingLevel } from "../session/settings";
+import { cfgDefaultThinkingLevel, cfgRetryFallbackChains } from "../session/settings";
 import { pickDefaultAvailableModel, resolveModelRoleValue } from "./model-resolver";
 import { cfgModelPresets, cfgModelRoleStorage, type ModelPreset } from "./model-settings";
 import type { Settings, SettingProvenance } from "./settings";
@@ -30,6 +30,11 @@ export function isValidModelPresetName(name: string): boolean {
 
 type PresetLookup = { kind: "found"; preset: ModelPreset } | { kind: "missing" } | { kind: "invalid"; reason: string };
 
+/** Type guard for one `retry.fallbackChains` value: an ordered array of model selectors. */
+function isSelectorList(value: unknown): value is string[] {
+	return Array.isArray(value) && value.every(entry => typeof entry === "string");
+}
+
 /** Validate one raw `modelPresets` entry; hand-edited config can hold anything. */
 function parseModelPreset(raw: unknown): ModelPreset | string {
 	if (!isRecord(raw)) return "it is not a mapping";
@@ -41,13 +46,28 @@ function parseModelPreset(raw: unknown): ModelPreset | string {
 		if (typeof value !== "string" || value.trim() === "") return `role \`${role}\` is not a model selector`;
 		modelRoles[role] = value;
 	}
+	const rawChains = raw.fallbackChains;
+	let fallbackChains: Record<string, string[]> | undefined;
+	if (rawChains !== undefined) {
+		if (!isRecord(rawChains)) return "`fallbackChains` is not a mapping";
+		fallbackChains = {};
+		for (const key of Object.keys(rawChains)) {
+			const chain = rawChains[key];
+			if (!isSelectorList(chain)) return `fallback chain \`${key}\` is not an array of model selectors`;
+			fallbackChains[key] = [...chain];
+		}
+	}
 	const level = raw.defaultThinkingLevel;
-	if (level === undefined) return { modelRoles };
+	if (level === undefined) {
+		return fallbackChains === undefined ? { modelRoles } : { modelRoles, fallbackChains };
+	}
 	const thinking = typeof level === "string" ? parseConfiguredThinkingLevel(level) : undefined;
 	if (thinking === undefined || !isDefaultThinkingLevel(thinking)) {
 		return "`defaultThinkingLevel` is not a thinking level";
 	}
-	return { modelRoles, defaultThinkingLevel: thinking };
+	return fallbackChains === undefined
+		? { modelRoles, defaultThinkingLevel: thinking }
+		: { modelRoles, defaultThinkingLevel: thinking, fallbackChains };
 }
 
 function isDefaultThinkingLevel(
@@ -72,20 +92,60 @@ export function getModelPresetNames(settings: Settings): string[] {
 }
 
 /**
- * First saved preset (by name) the current setup matches: identical effective
- * role assignments and, when the preset records one, the same default thinking
- * level. Undefined when the roles were edited past every preset.
+ * Well-formed `retry.fallbackChains` entries from the live settings record, as fresh
+ * arrays. The setting validates only the outer object — hand-edited YAML can hold `null`
+ * or a bare string per key — and a preset that snapshotted such an entry would fail
+ * `parseModelPreset` and become unappliable. Malformed entries are dropped instead.
+ * Arrays are copied so a preset and the live record never share an instance.
+ */
+function sanitizeFallbackChains(raw: Record<string, unknown>): Record<string, string[]> {
+	const chains: Record<string, string[]> = {};
+	for (const [key, value] of Object.entries(raw)) {
+		if (isSelectorList(value)) chains[key] = [...value];
+	}
+	return chains;
+}
+
+/** Order-sensitive equality for two selector lists; `undefined` matches only `undefined`. */
+function sameSelectorList(a: readonly string[] | undefined, b: readonly string[] | undefined): boolean {
+	if (a === undefined || b === undefined) return a === b;
+	return a.length === b.length && a.every((sel, i) => sel === b[i]);
+}
+
+/** Reported as a shadowed chain when only the record's key order differs from the preset's. */
+const KEY_ORDER_LABEL = "(key order)";
+
+/**
+ * Equality for two `retry.fallbackChains` records, key order included:
+ * `resolveRetryFallbackChainKey` takes the first matching key at equal precedence, so a record
+ * whose keys are merely reordered is a different configuration, not the same one.
+ */
+function sameFallbackChains(a: Record<string, string[]>, b: Record<string, string[]>): boolean {
+	const aKeys = Object.keys(a);
+	const bKeys = Object.keys(b);
+	if (aKeys.length !== bKeys.length) return false;
+	return aKeys.every((key, i) => key === bKeys[i] && sameSelectorList(a[key], b[key]));
+}
+
+/**
+ * First saved preset (by name) the current setup matches: identical effective role
+ * assignments, the same default thinking level when the preset records one, and the
+ * same `retry.fallbackChains` — key order included — when it records those too.
+ * Undefined when the setup was edited past every preset.
  */
 export function findActiveModelPreset(settings: Settings): string | undefined {
 	const roles = settings.getModelRoles();
 	// Same filter as `saveModelPreset`: empty selectors are never stored.
 	const roleIds = Object.keys(roles).filter(role => roles[role]);
 	const thinking = cfgDefaultThinkingLevel.get(settings);
+	const liveChains = sanitizeFallbackChains(cfgRetryFallbackChains.get(settings));
 	return getModelPresetNames(settings).find(name => {
 		const lookup = getModelPreset(settings, name);
 		if (lookup.kind !== "found") return false;
 		const { modelRoles, defaultThinkingLevel } = lookup.preset;
 		if (defaultThinkingLevel !== undefined && defaultThinkingLevel !== thinking) return false;
+		const presetChains = lookup.preset.fallbackChains;
+		if (presetChains !== undefined && !sameFallbackChains(presetChains, liveChains)) return false;
 		const presetIds = Object.keys(modelRoles);
 		return (
 			presetIds.length === roleIds.length &&
@@ -95,9 +155,9 @@ export function findActiveModelPreset(settings: Settings): string | undefined {
 }
 
 /**
- * Save the effective role assignments and `defaultThinkingLevel` as `name` in the
- * global config, overwriting a preset of the same name. Only this entry is
- * written, so presets defined by a project config are never copied globally.
+ * Save the effective role assignments, `defaultThinkingLevel` and `retry.fallbackChains`
+ * as `name` in the global config, overwriting a preset of the same name. Only this entry
+ * is written, so presets defined by a project config are never copied globally.
  *
  * @throws Error when `name` is not a valid preset name.
  */
@@ -109,7 +169,11 @@ export function saveModelPreset(settings: Settings, name: string): ModelPreset {
 	for (const [role, selector] of Object.entries(settings.getModelRoles())) {
 		if (selector) modelRoles[role] = selector;
 	}
-	const preset: ModelPreset = { modelRoles, defaultThinkingLevel: cfgDefaultThinkingLevel.get(settings) };
+	const preset: ModelPreset = {
+		modelRoles,
+		defaultThinkingLevel: cfgDefaultThinkingLevel.get(settings),
+		fallbackChains: sanitizeFallbackChains(cfgRetryFallbackChains.get(settings)),
+	};
 	cfgModelPresets.setEntry(settings, name, preset);
 	return preset;
 }
@@ -188,6 +252,20 @@ export interface ModelPresetShadowedThinking {
 	source: SettingProvenance;
 }
 
+/**
+ * A `retry.fallbackChains` entry — or the record's key order — that another layer still decides
+ * after the preset was written, so the effective chains differ from the preset's.
+ */
+export interface ModelPresetShadowedChain {
+	/** The chain key, or `"(key order)"` when only the record's key order differs. */
+	key: string;
+	/** The preset's chain for `key`, or its key sequence for the `"(key order)"` entry. */
+	expected: readonly string[] | undefined;
+	/** The chain — or key sequence — effectively in force instead. */
+	actual: readonly string[] | undefined;
+	source: SettingProvenance;
+}
+
 export type ModelPresetSwitchResult =
 	| {
 			kind: "switched";
@@ -197,13 +275,20 @@ export type ModelPresetSwitchResult =
 			shadowed: ModelPresetShadowedRole[];
 			/** Set when another layer still decides `defaultThinkingLevel`, so it returns on reload. */
 			shadowedThinking: ModelPresetShadowedThinking | undefined;
+			/** Chain keys (or key order) another layer still decides; empty on a clean switch. */
+			shadowedChains: ModelPresetShadowedChain[];
 	  }
 	| { kind: "missing" }
 	| { kind: "invalid"; reason: string }
 	/** Nothing was written: the preset's default model cannot be used right now. */
 	| { kind: "unavailable"; reason: string }
 	/** Roles were written but the live model could not be switched. */
-	| { kind: "failed"; reason: string; shadowed: ModelPresetShadowedRole[] };
+	| {
+			kind: "failed";
+			reason: string;
+			shadowed: ModelPresetShadowedRole[];
+			shadowedChains: ModelPresetShadowedChain[];
+	  };
 
 export type ModelPresetSession = Pick<
 	AgentSession,
@@ -257,7 +342,7 @@ function resolveLiveDefault(
 	};
 }
 
-/** Write the preset's roles into the model hub's storage scope, clearing roles it leaves out. */
+/** Write the preset's roles, thinking level and fallback chains, clearing what it leaves out. */
 function writePresetRoles(settings: Settings, preset: ModelPreset): void {
 	const project = cfgModelRoleStorage.get(settings) === "project";
 	const roles = new Set([...Object.keys(settings.getModelRoles()), ...Object.keys(preset.modelRoles)]);
@@ -286,6 +371,16 @@ function writePresetRoles(settings: Settings, preset: ModelPreset): void {
 	if (preset.defaultThinkingLevel !== undefined) {
 		cfgDefaultThinkingLevel.set(settings, preset.defaultThinkingLevel);
 	}
+	if (preset.fallbackChains !== undefined) {
+		// One whole-record write, not one `setEntry` per key: entry writes are staged and
+		// re-applied by path (`Settings.#saveNow` → `setByPath`), so each key keeps its existing
+		// position in config.yml and a reordered record would not survive a restart. Key order is
+		// retry precedence here, so the preset's order has to land in the file. Copying the arrays
+		// keeps the preset and the live record from ever sharing an instance.
+		const chains: Record<string, string[]> = {};
+		for (const [key, chain] of Object.entries(preset.fallbackChains)) chains[key] = [...chain];
+		cfgRetryFallbackChains.set(settings, chains);
+	}
 }
 
 function shadowedRoles(settings: Settings, preset: ModelPreset): ModelPresetShadowedRole[] {
@@ -298,6 +393,32 @@ function shadowedRoles(settings: Settings, preset: ModelPreset): ModelPresetShad
 		if (expected !== actual) {
 			shadowed.push({ role, expected, actual, source: settings.getModelRoleProvenance(role) });
 		}
+	}
+	return shadowed;
+}
+
+/**
+ * Chain entries — or the key order — the preset could not put in force, because a layer above
+ * global config still decides them. A whole-record global write cannot remove those keys, and
+ * `Settings.#deepMerge` puts the higher layer's keys first, so the effective record can differ
+ * from the preset's in values, in membership, or in order alone.
+ */
+function shadowedChains(settings: Settings, preset: ModelPreset): ModelPresetShadowedChain[] {
+	const expected = preset.fallbackChains;
+	if (expected === undefined) return [];
+	const effective = sanitizeFallbackChains(cfgRetryFallbackChains.get(settings));
+	if (sameFallbackChains(effective, expected)) return [];
+	const source = cfgRetryFallbackChains.provenance(settings);
+	const shadowed: ModelPresetShadowedChain[] = [];
+	for (const key of new Set([...Object.keys(effective), ...Object.keys(expected)])) {
+		const want = Object.hasOwn(expected, key) ? expected[key] : undefined;
+		const got = Object.hasOwn(effective, key) ? effective[key] : undefined;
+		if (!sameSelectorList(want, got)) shadowed.push({ key, expected: want, actual: got, source });
+	}
+	// Same keys and values in a different order: still not the preset's configuration, because
+	// chain resolution takes the first matching key.
+	if (shadowed.length === 0) {
+		shadowed.push({ key: KEY_ORDER_LABEL, expected: Object.keys(expected), actual: Object.keys(effective), source });
 	}
 	return shadowed;
 }
@@ -367,13 +488,14 @@ async function applyModelPresetLocked(
 	writePresetRoles(settings, preset);
 	const shadowed = shadowedRoles(settings, preset);
 	const thinkingShadow = shadowedThinking(settings, preset);
+	const chainShadow = shadowedChains(settings, preset);
 
 	const live = resolveLiveDefault(settings, session, candidates, preset);
-	if (typeof live === "string") return { kind: "failed", reason: live, shadowed };
+	if (typeof live === "string") return { kind: "failed", reason: live, shadowed, shadowedChains: chainShadow };
 	try {
 		await session.setModel(live.model, "default", { persist: false });
 	} catch (error) {
-		return { kind: "failed", reason: errorMessage(error), shadowed };
+		return { kind: "failed", reason: errorMessage(error), shadowed, shadowedChains: chainShadow };
 	}
 	// setModel re-applies the model's default or keeps the current level; the preset decides instead.
 	// `:inherit` means "no explicit level": leave what setModel applied rather than clearing the session level.
@@ -385,6 +507,7 @@ async function applyModelPresetLocked(
 		model: live.model,
 		thinkingLevel: live.thinkingLevel,
 		shadowed,
+		shadowedChains: chainShadow,
 		shadowedThinking: thinkingShadow,
 	};
 }
@@ -393,15 +516,26 @@ function describeRoleValue(value: string | undefined): string {
 	return value ?? "(unset)";
 }
 
-/** One line per role (and the thinking level) the preset could not set, for status output. */
+function describeChainValue(value: readonly string[] | undefined): string {
+	if (value === undefined) return "(unset)";
+	return value.length > 0 ? value.join(", ") : "(empty)";
+}
+
+/** One line per role, chain entry and the thinking level the preset could not set, for status output. */
 export function describeShadowedRoles(
 	shadowed: readonly ModelPresetShadowedRole[],
 	thinking?: ModelPresetShadowedThinking,
+	chains?: readonly ModelPresetShadowedChain[],
 ): string[] {
 	const lines = shadowed.map(
 		entry =>
 			`${entry.role}: ${describeRoleValue(entry.actual)} from ${SOURCE_LABELS[entry.source]} (preset: ${describeRoleValue(entry.expected)})`,
 	);
+	for (const entry of chains ?? []) {
+		lines.push(
+			`fallback chain ${entry.key}: ${describeChainValue(entry.actual)} from ${SOURCE_LABELS[entry.source]} (preset: ${describeChainValue(entry.expected)})`,
+		);
+	}
 	if (thinking) {
 		lines.push(
 			`defaultThinkingLevel: ${describeRoleValue(thinking.actual)} from ${SOURCE_LABELS[thinking.source]} (preset: ${thinking.expected})`,
@@ -410,9 +544,14 @@ export function describeShadowedRoles(
 	return lines;
 }
 
-/** True when the switch applied the whole preset: switched, with no role or thinking level still decided elsewhere. */
+/** True when the switch applied the whole preset: switched, with no role, chain entry or thinking level still decided elsewhere. */
 export function isCleanModelPresetSwitch(result: ModelPresetSwitchResult): boolean {
-	return result.kind === "switched" && result.shadowed.length === 0 && result.shadowedThinking === undefined;
+	return (
+		result.kind === "switched" &&
+		result.shadowed.length === 0 &&
+		result.shadowedChains.length === 0 &&
+		result.shadowedThinking === undefined
+	);
 }
 
 /** Short summary of a switch outcome for status lines and command output. */
@@ -429,7 +568,7 @@ export function formatModelPresetSwitch(name: string, result: ModelPresetSwitchR
 		case "switched": {
 			const thinking = result.thinkingLevel ? ` · ${result.thinkingLevel}` : "";
 			const model = `${result.model.provider}/${result.model.id}${thinking}`;
-			const elsewhere = describeShadowedRoles(result.shadowed, result.shadowedThinking);
+			const elsewhere = describeShadowedRoles(result.shadowed, result.shadowedThinking, result.shadowedChains);
 			if (elsewhere.length === 0) return `Switched to preset "${name}" (${model})`;
 			return `Switched to preset "${name}" (${model}); still set elsewhere: ${elsewhere.join("; ")}`;
 		}
