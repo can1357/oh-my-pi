@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `/reload-config` to reread persisted configuration in a running session and report changed settings or a reload error ([#7749](https://github.com/can1357/oh-my-pi/pull/7749) by [@mvid](https://github.com/mvid))
+
 ### Changed
 
 - Agent Hub keeps existing agents in place while open; new agents appear first in the flat roster or within their tree sibling group ([#13066](https://github.com/can1357/oh-my-pi/pull/13066) by [@kmccleary3301](https://github.com/kmccleary3301))
