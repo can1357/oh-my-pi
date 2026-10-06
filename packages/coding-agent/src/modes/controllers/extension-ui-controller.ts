@@ -20,10 +20,12 @@ import type {
 	ExtensionWidgetContent,
 	ExtensionWidgetOptions,
 	SendMessageHandler,
+	SendUserInputHandler,
 	SendUserMessageHandler,
 	TerminalInputHandler,
 } from "../../extensibility/extensions";
 import { getSessionSlashCommands } from "../../extensibility/extensions/get-commands-handler";
+import { sendSessionUserInput } from "../../extensibility/extensions/send-user-input-handler";
 import {
 	type AskDialogPrompt,
 	type AskDialogPromptValue,
@@ -38,6 +40,7 @@ import { HookSelectorComponent, type HookSelectorSlider } from "@oh-my-pi/pi-tui
 import { getAvailableThemesWithPaths, getThemeByName, setTheme, type Theme, theme } from "@oh-my-pi/pi-tui/theme";
 import type { InteractiveModeContext, InteractiveSelectorDialogOptions } from "../../modes/types";
 import { normalizeCustomMessagePayload, USER_INTERRUPT_LABEL } from "../../session/messages";
+import { tuiSlashCommandHost } from "../../slash-commands/builtin-registry";
 import { disambiguateDisplayLabels, sanitizeCarriageReturns } from "@oh-my-pi/pi-tui/render/render-utils";
 import { setExtensionTerminalTitle, setSessionTerminalTitle } from "../../utils/title-generator";
 import { getEditorCommand, openInEditor } from "../../utils/external-editor";
@@ -189,6 +192,7 @@ export class ExtensionUiController {
 		const actions: ExtensionActions = {
 			sendMessage: this.#sendExtensionMessage,
 			sendUserMessage: this.#sendExtensionUserMessage,
+			sendUserInput: this.#sendExtensionUserInput,
 			appendEntry: (customType, data) => {
 				this.ctx.sessionManager.appendCustomEntry(customType, data);
 			},
@@ -417,6 +421,7 @@ export class ExtensionUiController {
 		const actions: ExtensionActions = {
 			sendMessage: this.#sendExtensionMessage,
 			sendUserMessage: this.#sendExtensionUserMessage,
+			sendUserInput: this.#sendExtensionUserInput,
 			appendEntry: (customType, data) => {
 				this.ctx.sessionManager.appendCustomEntry(customType, data);
 			},
@@ -1305,6 +1310,15 @@ export class ExtensionUiController {
 		this.ctx.session.sendUserMessage(content, options).catch((err: unknown) => {
 			this.ctx.showError(`Extension sendUserMessage failed: ${err instanceof Error ? err.message : String(err)}`);
 		});
+	};
+
+	/**
+	 * A collab guest's typed prompts go to the host and its other commands, apart from a few read-only local ones
+	 * (`COLLAB_GUEST_ALLOWED_COMMANDS`), are host-only, so a guest runs none of an extension's input on the replica.
+	 */
+	#sendExtensionUserInput: SendUserInputHandler = async (text, options) => {
+		if (this.#rejectGuestExtensionTurn()) return { handled: "unavailable" };
+		return sendSessionUserInput(this.ctx.session, text, options, tuiSlashCommandHost(this.ctx));
 	};
 
 	#applyCustomMessageDisplay(wasStreaming: boolean, shouldDisplay: boolean | undefined): void {

@@ -55,6 +55,7 @@ import {
 } from "../../extensibility/extensions";
 import { runExtensionCompact } from "../../extensibility/extensions/compact-handler";
 import { getSessionSlashCommands } from "../../extensibility/extensions/get-commands-handler";
+import { sendSessionUserInput } from "../../extensibility/extensions/send-user-input-handler";
 import { buildSkillPromptMessage, parseSkillInvocation } from "../../extensibility/skills";
 import { MCPManager } from "../../mcp/manager";
 import type { MCPServerConfig } from "../../mcp/types";
@@ -70,6 +71,7 @@ import type { SessionInfo as StoredSessionInfo } from "../../session/session-lis
 import { SessionManager } from "../../session/session-manager";
 import { executeAcpBuiltinSlashCommand } from "../../slash-commands/acp-builtins";
 import { buildAvailableSlashCommands, toAcpAvailableCommands } from "../../slash-commands/available-commands";
+import type { SlashCommandHost } from "../../slash-commands/types";
 import { DEFAULT_STT_MODEL_KEY, STT_MODELS } from "../../stt/models";
 import { refreshAgentDiscovery } from "../../task";
 import { AUTO_THINKING, parseConfiguredThinkingLevel } from "@oh-my-pi/pi-tui/thinking";
@@ -944,32 +946,15 @@ export class AcpAgent implements Agent {
 		}
 	}
 
-	async #runPromptOrCommand(record: ManagedSessionRecord, text: string, images: AgentImageContent[]): Promise<void> {
-		const promptTurn = record.promptTurn;
-		const skillResult = await this.#tryRunSkillCommand(record, text);
-		if (skillResult || promptTurn?.cancelRequested) {
-			return;
-		}
-
-		const builtinResult = await executeAcpBuiltinSlashCommand(text, {
-			session: record.session,
-			sessionManager: record.session.sessionManager,
-			settings: record.session.settings,
-			cwd: record.session.sessionManager.getCwd(),
-			signal: promptTurn?.abortController.signal,
+	/**
+	 * What a built-in reports to the ACP client, for a prompted command and for an extension's
+	 * `sendUserInput` alike; the prompt turn adds its own `signal` and `keepTurnOpenUntilIdle`.
+	 */
+	#slashCommandHost(record: ManagedSessionRecord): SlashCommandHost {
+		return {
 			output: output => this.#emitCommandOutput(record, output),
 			refreshCommands: () => this.#emitAvailableCommandsUpdate(record),
 			reloadPlugins: () => this.#reloadPluginState(record),
-			keepTurnOpenUntilIdle: async () => {
-				await record.session.waitForIdle();
-				// `AgentSession.#emit()` does not await listeners, so the retried
-				// turn's `agent_end` handler — which emits the trailing chunks and
-				// end-of-turn updates — can still be in flight once the session is
-				// idle. Drain the tracked handlers too, or the prompt response can
-				// overtake its own updates. Same pairing as the `!agentInvoked`
-				// path below.
-				await this.#waitForPromptEventHandlers(record);
-			},
 			notifyTitleChanged: async () => {
 				await this.#connection.sessionUpdate({
 					sessionId: record.session.sessionId,
@@ -991,6 +976,33 @@ export class AcpAgent implements Agent {
 					return;
 				}
 				await this.#pushConfigOptionUpdate(record);
+			},
+		};
+	}
+
+	async #runPromptOrCommand(record: ManagedSessionRecord, text: string, images: AgentImageContent[]): Promise<void> {
+		const promptTurn = record.promptTurn;
+		const skillResult = await this.#tryRunSkillCommand(record, text);
+		if (skillResult || promptTurn?.cancelRequested) {
+			return;
+		}
+
+		const builtinResult = await executeAcpBuiltinSlashCommand(text, {
+			session: record.session,
+			sessionManager: record.session.sessionManager,
+			settings: record.session.settings,
+			cwd: record.session.sessionManager.getCwd(),
+			signal: promptTurn?.abortController.signal,
+			...this.#slashCommandHost(record),
+			keepTurnOpenUntilIdle: async () => {
+				await record.session.waitForIdle();
+				// `AgentSession.#emit()` does not await listeners, so the retried
+				// turn's `agent_end` handler — which emits the trailing chunks and
+				// end-of-turn updates — can still be in flight once the session is
+				// idle. Drain the tracked handlers too, or the prompt response can
+				// overtake its own updates. Same pairing as the `!agentInvoked`
+				// path below.
+				await this.#waitForPromptEventHandlers(record);
 			},
 		});
 		if (promptTurn?.cancelRequested) return;
@@ -2570,6 +2582,14 @@ export class AcpAgent implements Agent {
 				},
 				sendUserMessage: (content, options) => {
 					this.#trackExtensionUserMessage(record, record.session.sendUserMessage(content, options));
+				},
+				sendUserInput: (text, options) => {
+					const inputTask = sendSessionUserInput(record.session, text, options, this.#slashCommandHost(record));
+					this.#trackExtensionUserMessage(
+						record,
+						inputTask.then(() => {}),
+					);
+					return inputTask;
 				},
 				appendEntry: (customType, data) => {
 					record.session.sessionManager.appendCustomEntry(customType, data);

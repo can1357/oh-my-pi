@@ -6,7 +6,7 @@ import { AgentBusyError } from "@oh-my-pi/pi-agent-core";
 import type { Model } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import type { ExtensionUIContext } from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
+import type { ExtensionActions, ExtensionUIContext } from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
 import { resolveLocalUrlToPath } from "@oh-my-pi/pi-coding-agent/internal-urls";
 import {
 	ACP_BOOTSTRAP_RACE_GUARD_MS,
@@ -492,6 +492,8 @@ async function createHarness(
 		clientCapabilities?: ClientCapabilities;
 		/** Runs before a notification is recorded, so a test can delay one delivery. */
 		sessionUpdateHook?: (notification: SessionNotification) => Promise<void> | void;
+		/** Runs on each session the agent's factory creates, before the agent configures it. */
+		decorateSession?: (session: FakeAgentSession) => void;
 	} = {},
 ): Promise<AgentHarness> {
 	const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), "omp-acp-test-"));
@@ -528,6 +530,7 @@ async function createHarness(
 	sessions.push(initialSession);
 	const factory = async (cwd: string, factoryOptions?: { interactivePrompts?: boolean }) => {
 		const session = new FakeAgentSession(cwd);
+		options.decorateSession?.(session);
 		const setToolUIContext = vi.fn();
 		sessions.push(session);
 		setToolUIContextSpies.push(setToolUIContext);
@@ -2085,6 +2088,43 @@ describe("ACP agent", () => {
 
 		harness.abortController.abort();
 		await Bun.sleep(0);
+	});
+
+	it("runs a built-in an extension sends through sendUserInput with the hooks ACP gives typed input", async () => {
+		let actions: ExtensionActions | undefined;
+		const harness = await createHarness({
+			decorateSession: session => {
+				Object.assign(session, {
+					titleGenerationSignal: new AbortController().signal,
+					extensionRunner: {
+						initialize: (extensionActions: ExtensionActions) => {
+							actions = extensionActions;
+						},
+						emit: async () => undefined,
+						hasHandlers: () => false,
+						getRegisteredCommands: () => [],
+					},
+				});
+			},
+		});
+		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+		if (!actions?.sendUserInput) throw new Error("expected ACP to wire the extension sendUserInput action");
+
+		const result = await actions.sendUserInput("/rename Bridge title");
+
+		expect(result).toEqual({ handled: "command", output: "Session renamed to Bridge title." });
+		const updates = harness.updates.filter(n => n.sessionId === created.sessionId).map(n => n.update);
+		expect(updates).toContainEqual(
+			expect.objectContaining({ sessionUpdate: "session_info_update", title: "Bridge title" }),
+		);
+		expect(updates).toContainEqual(
+			expect.objectContaining({
+				sessionUpdate: "agent_message_chunk",
+				content: { type: "text", text: "Session renamed to Bridge title." },
+			}),
+		);
+
+		harness.abortController.abort();
 	});
 
 	it("auto-cancels an in-progress turn and queues a new prompt when called mid-flight", async () => {

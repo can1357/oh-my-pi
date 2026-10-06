@@ -24,6 +24,8 @@ export interface CustomMessage<T = unknown> {
 	details?: T;
 	/** Who initiated this message for billing/attribution semantics. */
 	attribution?: MessageAttribution;
+	/** Caller correlation id for the input this message came from (an extension's `sendUserInput` `tag`). */
+	tag?: string;
 	timestamp: number;
 }
 

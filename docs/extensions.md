@@ -33,7 +33,7 @@ Extensions can combine all of the following in one module:
 - slash commands (`pi.registerCommand(...)`)
 - keyboard shortcuts and flags
 - custom message rendering
-- session/message injection APIs (`sendMessage`, `sendUserMessage`, `appendEntry`)
+- session/message injection APIs (`sendMessage`, `sendUserMessage`, `sendUserInput`, `appendEntry`)
 
 ## Runtime model
 
@@ -120,7 +120,7 @@ Core methods:
 - `registerMessageRenderer`, `registerAssistantThinkingRenderer`
 - `registerComposerShape`
 - `setLabel`, `getFlag`
-- `sendMessage`, `sendUserMessage`, `appendEntry`, `exec`
+- `sendMessage`, `sendUserMessage`, `sendUserInput`, `appendEntry`, `exec`
 - `getActiveTools`, `getAllTools`, `setActiveTools`
 - `getCommands`
 - `getSessionName`, `setSessionName`
@@ -280,6 +280,16 @@ injects at the next step boundary while a run is live and starts a turn when
 idle. The message is recorded with `attribution: "user"` unless you pass
 `attribution: "agent"`; use `"agent"` for text the extension generated or relayed
 from another agent.
+
+`pi.sendUserInput(text, { deliverAs, tag })` runs text as if the user typed it, the way RPC mode runs a `prompt` command, and resolves with how it was handled:
+
+- Extension `input` handlers run first, as for typed input (see "External input interception"), with `source: "extension"`; one that consumes the text, or leaves no text and no images, sends nothing → `{ handled: "command" }`, and text or images it substitutes are what the steps below dispatch.
+- `/skill:<name>` is submitted as the user's skill prompt → `{ handled: "skill" }`.
+- A built-in slash command with a headless handler (the set RPC and ACP run, e.g. `/jobs`, `/compact`, `/retry`) runs → `{ handled: "command", output?, agentInvoked? }`, where `output` is what it printed and `agentInvoked` is `true` when it started a turn without submitting a message, as `/retry` does; one that returns prompt text submits it → `{ handled: "prompt" }`. It reports through the host's own output and notification hooks, so what it prints also shows where typed output does (the TUI status line, an RPC `command_output` frame, an ACP message), and a rename or model change reaches an RPC or ACP client. It finishes before the call resolves, including a provider-backed one such as `/compact` that RPC runs in the background for a typed `prompt`. A built-in only the interactive terminal runs (e.g. `/new`, `/resume`, `/quit`) sends nothing → `{ handled: "terminal-only" }`.
+- Otherwise the text goes through the prompt flow: extension and custom commands run locally → `{ handled: "command" }`; plain text, templates, file slash commands and slash text that names no command (such as `/nosuch` or a path like `/var/log/app.log`) submit a user message, as typing them does → `{ handled: "prompt" }`.
+- A host that does not wire the action answers `{ handled: "unavailable" }`, and so does the interactive TUI while the session is joined to a collab session as a guest, where extension-initiated turns are host-only; nothing is sent or run.
+
+`deliverAs` picks how a submitted message queues while the agent is streaming (default steer, like Enter); an idle session starts a turn either way. `tag` is recorded on the message the input submits (the user message, or the skill prompt message) and so appears on its `message_start`/`message_end` events and in the session file, letting a bridge match the message to the input it forwarded. `listUserInputBuiltinCommands()` (exported from `extensibility/extensions/send-user-input-handler`) lists the built-ins with a `terminalOnly` flag, for completion. SDK embedders that build their own `ExtensionActions` can wire the optional `sendUserInput` action with `sendSessionUserInput(session, text, options, host)` from the same module, where `host` is the `SlashCommandHost` (`slash-commands/types`) their own built-in dispatch uses; without one, a built-in's output only returns to the extension.
 
 Payloads passed to `pi.sendMessage` are normalized before delivery
 (`normalizeCustomMessagePayload` in `packages/tui/src/chat/messages.ts`,
@@ -464,6 +474,7 @@ prompt-template expansion, and queue insertion:
 |---|---|
 | Main-session Enter or Ctrl+Enter | `"interactive"` |
 | `prompt`, `steer`, `follow_up`, or `abort_and_prompt` in RPC or RPC UI mode | `"rpc"` |
+| An extension's `pi.sendUserInput(text)`, in any mode | `"extension"` |
 
 Handlers run in extension/registration order. Returned `text` and `images`
 replacements feed subsequent handlers; omitted fields preserve the current value,
@@ -474,7 +485,9 @@ handler through `sendUserMessage` or `sendMessage` is not discarded.
 
 This is an ingress event, not a user-role message event. Queue delivery and replay
 do not emit it again. Programmatic `sendUserMessage`/`sendMessage` calls and
-synthetic continuations do not automatically emit `input`. Main-session Enter's
+synthetic continuations do not automatically emit `input`; `sendUserInput` does, so
+a handler that forwards input through it sees that call again with
+`source: "extension"`. Main-session Enter's
 `.`/`c` continuation shortcuts retain their synthetic path. Focused-subagent
 input retains its chat-only routing and does not invoke main-session input hooks.
 Print and ACP input are outside this interception contract.

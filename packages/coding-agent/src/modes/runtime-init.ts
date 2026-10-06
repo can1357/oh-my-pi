@@ -8,8 +8,10 @@
  */
 import { runExtensionCompact, runExtensionSetModel } from "../extensibility/extensions/compact-handler";
 import { getSessionSlashCommands } from "../extensibility/extensions/get-commands-handler";
+import { sendSessionUserInput } from "../extensibility/extensions/send-user-input-handler";
 import type { ExtensionError, ExtensionMode, ExtensionUIContext } from "../extensibility/extensions/types";
 import type { AgentSession } from "../session/agent-session";
+import type { SlashCommandHost } from "../slash-commands/types";
 import { USER_INTERRUPT_LABEL } from "../session/messages";
 
 /** Action name for an extension-originated send failure. */
@@ -45,6 +47,12 @@ export interface InitializeExtensionsOptions {
 		change: () => Promise<T>,
 		options: { detachesRun: boolean },
 	) => Promise<T>;
+	/**
+	 * How the built-ins an extension runs through `sendUserInput` reach the host's client: the
+	 * {@link SlashCommandHost} the host's own typed input passes them (RPC). Omitted (print mode,
+	 * subagents), a built-in's output only returns to the extension.
+	 */
+	slashCommandHost?: SlashCommandHost;
 }
 
 /**
@@ -68,6 +76,7 @@ export async function initializeExtensions(session: AgentSession, options: Initi
 		trackExtensionSend,
 		filterActiveTools,
 		wrapSessionChange = change => change(),
+		slashCommandHost,
 	} = options;
 	const shutdown = onShutdown ?? (() => {});
 
@@ -115,6 +124,27 @@ export async function initializeExtensions(session: AgentSession, options: Initi
 				sendTask.catch(e => {
 					reportSendError("extension_send_user", e instanceof Error ? e : new Error(String(e)));
 				});
+			},
+			sendUserInput: (text, inputOptions) => {
+				const inputTask = sendSessionUserInput(session, text, inputOptions, slashCommandHost);
+				trackExtensionSend?.(inputTask);
+				// A submitted prompt or skill starts a turn, and so does a built-in that reports one (`/retry`);
+				// the rest handle the text locally.
+				const invokingTask = inputTask.then(result => {
+					if (result.handled !== "prompt" && result.handled !== "skill" && !result.agentInvoked) {
+						throw new Error("input did not invoke the agent");
+					}
+				});
+				invokingTask.catch(() => {});
+				if (trackAgentInvokingMessage) {
+					trackAgentInvokingMessage(invokingTask);
+				} else {
+					invokingTask.then(
+						() => markAgentInvokingMessage?.(),
+						() => {},
+					);
+				}
+				return inputTask;
 			},
 			appendEntry: (customType, data) => {
 				session.sessionManager.appendCustomEntry(customType, data);

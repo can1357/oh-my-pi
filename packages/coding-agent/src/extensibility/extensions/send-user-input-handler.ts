@@ -1,0 +1,135 @@
+/**
+ * Helper for wiring the `sendUserInput` action of {@link ExtensionAPI}.
+ *
+ * Runs text the way the RPC mode runs a `prompt` command, so the four wiring
+ * sites (interactive UI twice, ACP, and `initializeExtensions`, which print,
+ * RPC and subagent sessions use) cannot drift, in this order:
+ *   1. extension `input` handlers, with `source: "extension"`: one can consume
+ *      the text (answered `command`) or rewrite it and add images, as for typed
+ *      input;
+ *   2. `/skill:<name>` through the RPC skill invocation (`resolveRpcSkillInvocation`
+ *      and `runRpcSkillCommand`);
+ *   3. built-in slash commands: those with a text-mode `handle` (the ones RPC and
+ *      ACP run through `executeAcpBuiltinSlashCommand`) run it with the host's
+ *      {@link SlashCommandHost}, the hooks its own typed input gives them; the
+ *      TUI-only rest answer `terminal-only`;
+ *   4. everything else goes through `session.prompt()`, which runs extension and
+ *      custom commands, expands file slash commands and templates, and sends any
+ *      other text, a slash text no command names included, to the model.
+ *
+ * Unlike typed input, the answer says what happened, so a bridge that forwards
+ * a person's text can report a refusal instead of guessing.
+ */
+import type { ImageContent } from "@oh-my-pi/pi-ai";
+import { clearPluginRootsAndCaches, resolveActiveProjectRegistryPath } from "../../discovery/helpers";
+import { resolveRpcSkillInvocation, runRpcSkillCommand } from "../../modes/rpc/rpc-skill-invocation";
+import type { AgentSession } from "../../session/agent-session";
+import { BUILTIN_SLASH_COMMANDS_INTERNAL, lookupBuiltinSlashCommand } from "../../slash-commands/builtin-registry";
+import { parseSlashCommand } from "../../slash-commands/helpers/parse";
+import type { SlashCommandHost } from "../../slash-commands/types";
+import type { SendUserInputOptions, SendUserInputResult } from "./types";
+
+/** A built-in slash command, marked with how `sendUserInput` answers it. */
+export interface UserInputBuiltinCommand {
+	name: string;
+	aliases: readonly string[];
+	description: string;
+	/** True when only the interactive terminal runs it, so `sendUserInput` answers `terminal-only`. */
+	terminalOnly: boolean;
+}
+
+/**
+ * Every built-in slash command, for a bridge that offers completion or explains a `terminal-only` answer.
+ * A function, not a constant, so importing this module never reads the registry while modules still load.
+ */
+export function listUserInputBuiltinCommands(): UserInputBuiltinCommand[] {
+	return BUILTIN_SLASH_COMMANDS_INTERNAL.map(command => ({
+		name: command.name,
+		aliases: command.aliases ?? [],
+		description: command.acpDescription ?? command.description,
+		terminalOnly: command.handle === undefined,
+	}));
+}
+
+/**
+ * Hooks for a host with no client to report to (print mode, subagents, an SDK embedder that passes none):
+ * a built-in's output only returns to the extension, and plugin reload refreshes the session alone.
+ */
+function headlessSlashCommandHost(session: AgentSession): SlashCommandHost {
+	return {
+		output: () => {},
+		// Nothing to re-advertise to; `refreshSkillsAndCommands()` still fires `subscribeCommandMetadataChanged`.
+		refreshCommands: () => {},
+		reloadPlugins: async () => {
+			const projectPath = await resolveActiveProjectRegistryPath(session.sessionManager.getCwd());
+			clearPluginRootsAndCaches(projectPath ? [projectPath] : undefined);
+			await session.refreshSkillsAndCommands();
+		},
+	};
+}
+
+/**
+ * Run `text` in `session` as typed input; see {@link ExtensionAPI.sendUserInput}. `host` is the
+ * {@link SlashCommandHost} the host's own typed input passes to built-ins, so a built-in's output, title
+ * and config changes reach the host's client as they do when typed there.
+ */
+export async function sendSessionUserInput(
+	session: AgentSession,
+	text: string,
+	options?: SendUserInputOptions,
+	host?: SlashCommandHost,
+): Promise<SendUserInputResult> {
+	const streamingBehavior = options?.deliverAs ?? "steer";
+	const tag = options?.tag;
+	let images: ImageContent[] | undefined;
+
+	// The ingress hook RPC's `prompt` and interactive Enter run before anything else; a handler that
+	// forwards input through `sendUserInput` tells its own calls apart by `source`.
+	const runner = session.extensionRunner;
+	if (runner?.hasHandlers("input")) {
+		const input = await runner.emitInput(text, undefined, "extension");
+		if (input.handled) return { handled: "command" };
+		if (input.text !== undefined) text = input.text;
+		images = input.images;
+	}
+	if (!text.trim() && !images?.length) return { handled: "command" };
+
+	const skill = resolveRpcSkillInvocation(session, text);
+	if (skill) {
+		await runRpcSkillCommand(session, skill, { streamingBehavior, images, tag });
+		return { handled: "skill" };
+	}
+
+	const parsed = parseSlashCommand(text);
+	const builtin = parsed ? lookupBuiltinSlashCommand(parsed.name) : undefined;
+	if (parsed && builtin) {
+		// The same text-mode `handle` `executeAcpBuiltinSlashCommand` runs for RPC and ACP; that module is
+		// not imported here because the action builders load this one while the registry initializes.
+		if (!builtin.handle) return { handled: "terminal-only" };
+		const commandHost = host ?? headlessSlashCommandHost(session);
+		const printed: string[] = [];
+		const result = await builtin.handle(parsed, {
+			session,
+			sessionManager: session.sessionManager,
+			settings: session.settings,
+			cwd: session.sessionManager.getCwd(),
+			...commandHost,
+			output: line => {
+				printed.push(line);
+				return commandHost.output(line);
+			},
+		});
+		const output = printed.length > 0 ? { output: printed.join("\n") } : undefined;
+		if (result && "prompt" in result) {
+			await session.prompt(result.prompt, { streamingBehavior, images, tag });
+			return { handled: "prompt", ...output };
+		}
+		// `/retry` and the like start a turn without submitting a message; hosts must not treat it as local.
+		const agentInvoked = result?.agentInvoked === true ? { agentInvoked: true } : undefined;
+		return { handled: "command", ...agentInvoked, ...output };
+	}
+
+	const submitted = await session.prompt(text, { streamingBehavior, images, tag });
+	// `prompt()` answers false only when an extension or custom command handled the text locally.
+	return { handled: submitted ? "prompt" : "command" };
+}
