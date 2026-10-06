@@ -43,7 +43,7 @@ This document describes operator-visible behavior for session export, sharing, c
 Flow:
 
 1. The collaboration command spec (`src/slash-commands/builtin-collaboration.ts`) parses headless arguments with `parseExportArgs`; the TUI delegates to `CommandController.handleExportCommand`, which uses the same parser.
-2. `--themes` selects the configured dark/light TUI themes instead of the standalone web palette. After removing that flag, at most one whitespace-delimited path is accepted; extra tokens produce `Usage: /export [--themes] [path]`.
+2. `--themes` selects the configured dark/light TUI themes instead of the standalone web palette. After removing that flag, at most one path is accepted; wrap paths containing spaces in single or double quotes. Extra path tokens produce `Usage: /export [--themes] [path]`, and unterminated quotes are rejected.
 3. `AgentSession.exportToHtml()` calls `exportSessionToHtml(sessionManager, state, { outputPath, palette, themeNames })`.
 4. The TUI shows the path and opens the file in a browser. Headless command execution prints the path without opening it.
 
@@ -54,15 +54,12 @@ target the main session.
 Behavior details:
 
 - `--copy`, `clipboard`, and `copy` arguments are explicitly rejected with a warning to use `/dump`.
+- Paths preserve Windows backslashes; a backslash before the active quote escapes that quote. Unquoted whitespace, including newlines, separates arguments, while quoted whitespace is retained.
 - Export embeds session header/entries/leaf plus current `systemPrompt` and tool descriptions from agent state. `previousSessionFiles` is omitted from exported headers.
 - Subagent transcripts stored next to the session file (`<session>/<AgentId>.jsonl`, recursively for nested spawns) are embedded as `subSessions` (`collectSubSessions` in `src/session/sub-sessions.ts`; disable with `includeSubSessions: false` in `ExportOptions`). Discovery skips advisor transcripts (`__advisor*.jsonl`), descends only into real child directories, and flags tombstoned (killed) agents as `aborted`. In the page, agent ids in task tool cards open a breadcrumbed sub-session overlay.
 - Tool calls render through the `<omp-tool-view>` web component — the React per-tool renderers shared with collab-web (`packages/collab-web/src/tool-render/`), prebuilt into `src/export/html/tool-views.generated.js` by `bun run gen:tool-views`.
 - No session entries are appended during export.
 - The default filename is `omp-session-<session-file-stem>.html` in the current directory. HTML export is not secret-redacted or encrypted; it can contain raw context, image data, and extension payloads.
-
-Caveat:
-
-- Parsing is whitespace-based, so quoted paths with spaces are not preserved. Use a path without spaces.
 
 ### `--export <inputSessionFile> [outputPath]` (CLI)
 
@@ -489,7 +486,6 @@ When session manager is created with `SessionManager.inMemory()` (`--no-session`
 ## Known implementation caveats (as of current code)
 
 - `/share` custom-share failures do not degrade to the default encrypted share flow; they terminate the TUI command with an error.
-- `/export` argument tokenization does not preserve quoted paths with spaces.
 - `/delete` treats deletion as best-effort: it attempts to delete the current
   session JSONL and artifact directory, logs any deletion failure, and still
   creates and switches to a new session. A failed or partial deletion can leave
