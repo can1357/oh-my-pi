@@ -1,10 +1,11 @@
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as path from "node:path";
 import { Agent } from "@oh-my-pi/pi-agent-core";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import * as skillsModule from "@oh-my-pi/pi-coding-agent/extensibility/skills";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
@@ -79,6 +80,7 @@ describe("AgentSession.sendUserMessage expandPromptTemplates", () => {
 	});
 
 	afterEach(async () => {
+		vi.restoreAllMocks();
 		await session?.dispose();
 		authStorage?.close();
 		authStorage = undefined;
@@ -117,6 +119,22 @@ describe("AgentSession.sendUserMessage expandPromptTemplates", () => {
 		expect(session.getQueuedMessages().steering).toEqual(["TPL BODY x"]);
 		expect(session.removeQueuedMessage("/tpl x", "steering")).toBe(true);
 		expect(session.queuedMessageCount).toBe(0);
+	});
+
+	it("drops a skill send when abort lands while SKILL.md is read", async () => {
+		const read = Promise.withResolvers<void>();
+		const build = skillsModule.buildSkillPromptMessage;
+		vi.spyOn(skillsModule, "buildSkillPromptMessage").mockImplementation(async (...args) => {
+			await read.promise;
+			return build(...args);
+		});
+		const send = session.sendUserMessage("/skill:demo late", { expandPromptTemplates: true });
+		await session.abort();
+		read.resolve();
+		await send;
+		await session.waitForIdle();
+
+		expect(observedTurns).toHaveLength(0);
 	});
 
 	it("expands a /skill: command queued as a follow-up while the agent is streaming", async () => {

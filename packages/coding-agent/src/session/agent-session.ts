@@ -10351,7 +10351,18 @@ export class AgentSession implements SettingsScope {
 			// Admit before reading SKILL.md so shutdown and settle checks see this send,
 			// as they see an option-off send admitted synchronously by prompt().
 			await this.#admitSubmission(async () => {
+				// abort() or a session change during the read must drop the send, like prompt()'s
+				// image preprocessing does, instead of starting a turn the user just stopped.
+				const promptGeneration = this.#promptGeneration;
+				const sessionGeneration = this.#sessionGeneration;
 				const built = await buildSkillPromptMessage(skill, invocation, "user");
+				if (
+					this.#promptGeneration !== promptGeneration ||
+					this.#sessionGeneration !== sessionGeneration ||
+					this.#isDisposed
+				) {
+					return;
+				}
 				await this.promptCustomMessage(
 					{
 						customType: SKILL_PROMPT_MESSAGE_TYPE,
