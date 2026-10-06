@@ -147,6 +147,7 @@ fn seed_dirty_state(lower: &Path, merged: &Path) -> IsoResult<()> {
 		git_apply(merged, &unstaged, &[])?;
 	}
 
+	let nested = tree::nested_worktrees(lower);
 	let untracked = git_capture(lower, &["ls-files", "--others", "--exclude-standard", "-z"])?;
 	for path_bytes in untracked.split(|b| *b == 0) {
 		if path_bytes.is_empty() {
@@ -154,6 +155,10 @@ fn seed_dirty_state(lower: &Path, merged: &Path) -> IsoResult<()> {
 		}
 		let rel = std::str::from_utf8(path_bytes)
 			.map_err(|err| IsoError::other(format!("untracked path is not valid UTF-8: {err}")))?;
+		let rel_path = Path::new(rel);
+		if nested.iter().any(|wt| rel_path.starts_with(wt)) {
+			continue;
+		}
 		let src = lower.join(rel);
 		let dst = merged.join(rel);
 		if let Some(parent) = dst.parent() {
@@ -491,5 +496,42 @@ mod tests {
 			.expect_err("fake git apply should fail after consuming stdin");
 		let message = err.to_string();
 		assert!(message.starts_with("git apply (exit 42): simulated apply failure"));
+	}
+
+	#[test]
+	fn rcopy_skips_nested_linked_worktree_untracked_files() {
+		let root = TempDirGuard::new();
+		let lower = root.path().join("lower");
+		fs::create_dir_all(&lower).expect("create lower");
+
+		let run = |dir: &Path, args: &[&str]| {
+			let status = std::process::Command::new("git")
+				.arg("-C")
+				.arg(dir)
+				.args(args)
+				.status()
+				.expect("git command");
+			assert!(status.success());
+		};
+
+		run(&lower, &["init", "-q"]);
+		run(&lower, &["config", "user.email", "test@example.com"]);
+		run(&lower, &["config", "user.name", "Test"]);
+		run(&lower, &["config", "commit.gpgsign", "false"]);
+		fs::write(lower.join("root.txt"), b"root content\n").expect("write root.txt");
+		run(&lower, &["add", "root.txt"]);
+		run(&lower, &["commit", "-q", "-m", "init"]);
+
+		let nested = lower.join(".worktrees/nested-wt");
+		run(&lower, &["worktree", "add", "-q", nested.to_str().unwrap(), "HEAD"]);
+		fs::write(nested.join("untracked.txt"), b"untracked nested\n")
+			.expect("write nested untracked");
+
+		let merged = root.path().join("merged");
+		RcopyBackend.start(&lower, &merged).expect("rcopy start");
+
+		assert!(merged.join("root.txt").exists());
+		assert!(!merged.join(".worktrees/nested-wt").exists());
+		assert!(!merged.join(".worktrees/nested-wt/untracked.txt").exists());
 	}
 }

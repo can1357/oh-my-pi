@@ -6,6 +6,7 @@
  * it. `omp worktree clear` consults the marker so it can distinguish a live
  * subagent's sandbox from a crashed run's leftover instead of deleting both.
  */
+import type { Dirent } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import * as natives from "@oh-my-pi/pi-natives";
@@ -16,6 +17,33 @@ const { IsoBackendKind } = natives;
 
 /** Marker file written into a task-isolation base dir identifying its owner. */
 export const ISOLATION_OWNER_FILE = ".omp-isolation-owner.json";
+
+/** Marker file written into a task-isolation base dir recording materialization completion. */
+export const ISOLATION_MATERIALIZED_FILE = ".omp-isolation-materialized";
+
+/**
+ * Write a materialization completion marker in `baseDir` (outside `m/`).
+ *
+ * Its filesystem `ctimeMs` serves as the reference timestamp for ignored-path
+ * change detection. Because userspace cannot alter `ctime`, any file created or
+ * modified by the task has `ctimeMs` strictly greater than this marker.
+ */
+export async function writeMaterializationMarker(baseDir: string): Promise<void> {
+	await Bun.write(path.join(baseDir, ISOLATION_MATERIALIZED_FILE), "");
+}
+
+/**
+ * Read the filesystem `ctimeMs` of the materialization marker in `baseDir`, or
+ * `null` if missing or unreadable.
+ */
+export async function readMaterializationCtime(baseDir: string): Promise<number | null> {
+	try {
+		const stat = await fs.stat(path.join(baseDir, ISOLATION_MATERIALIZED_FILE));
+		return stat.ctimeMs;
+	} catch {
+		return null;
+	}
+}
 
 /** Recorded owner of a task-isolation sandbox. */
 export interface IsolationOwner {
@@ -31,6 +59,8 @@ export interface IsolationOwner {
 	startToken?: string;
 	/** Parent repository root, so dead sandboxes can be compared against the parent checkout. */
 	parentRepo?: string;
+	/** Backend kind used to materialise the sandbox, when known. */
+	backend?: number;
 }
 
 /**
@@ -70,13 +100,19 @@ async function processStartToken(pid: number): Promise<string | null> {
  * Written before the isolation backend materialises `m` so a concurrent
  * `omp worktree clear` never sees an owner-less sandbox mid-creation.
  */
-export async function writeIsolationOwner(baseDir: string, id: string, parentRepo?: string): Promise<void> {
+export async function writeIsolationOwner(
+	baseDir: string,
+	id: string,
+	parentRepo?: string,
+	backend?: number,
+): Promise<void> {
 	const startToken = await processStartToken(process.pid);
 	const owner: IsolationOwner = {
 		pid: process.pid,
 		id,
 		...(startToken ? { startToken } : {}),
 		...(parentRepo ? { parentRepo } : {}),
+		...(backend !== undefined ? { backend } : {}),
 	};
 	await Bun.write(path.join(baseDir, ISOLATION_OWNER_FILE), JSON.stringify(owner));
 }
@@ -162,17 +198,33 @@ export async function writeRetainedBackend(baseDir: string, backend: number): Pr
  */
 export async function readRetainedMountBackend(dir: string): Promise<number | undefined> {
 	const sidecar = path.join(dir, RETAINED_BACKEND_FILE);
-	if (!(await Bun.file(sidecar).exists())) return undefined;
-	const decoded: unknown = await Bun.file(sidecar).json();
-	if (typeof decoded !== "object" || decoded === null || !("backend" in decoded)) {
-		throw new Error(`retained-mount metadata at ${sidecar} is malformed`);
+	if (await Bun.file(sidecar).exists()) {
+		const decoded: unknown = await Bun.file(sidecar).json();
+		if (typeof decoded !== "object" || decoded === null || !("backend" in decoded)) {
+			throw new Error(`retained-mount metadata at ${sidecar} is malformed`);
+		}
+		const backend = decoded.backend;
+		if (typeof backend !== "number" || !Number.isInteger(backend)) {
+			throw new Error(`retained-mount metadata at ${sidecar} is malformed`);
+		}
+		if (!needsNativeTeardown(backend)) return undefined;
+		return backend;
 	}
-	const backend = decoded.backend;
-	if (typeof backend !== "number" || !Number.isInteger(backend)) {
-		throw new Error(`retained-mount metadata at ${sidecar} is malformed`);
+
+	const ownerFile = path.join(dir, ISOLATION_OWNER_FILE);
+	if (await Bun.file(ownerFile).exists()) {
+		try {
+			const decoded: unknown = await Bun.file(ownerFile).json();
+			if (typeof decoded === "object" && decoded !== null && "backend" in decoded) {
+				const backend = decoded.backend;
+				if (typeof backend === "number" && Number.isInteger(backend) && needsNativeTeardown(backend)) {
+					return backend;
+				}
+			}
+		} catch {}
 	}
-	if (!needsNativeTeardown(backend)) return undefined;
-	return backend;
+
+	return undefined;
 }
 
 const TASK_ISOLATION_MOUNT_DIRS = ["m", "merged"] as const;
@@ -187,14 +239,11 @@ export interface UniqueWorkCheckResult {
  * Return relative paths of linked worktrees registered in `repoRoot` that lie inside `repoRoot`.
  */
 export async function getNestedLinkedWorktrees(repoRoot: string): Promise<string[]> {
-	const res = await $`git -C ${repoRoot} worktree list --porcelain`.quiet().nothrow();
-	if (res.exitCode !== 0) return [];
-	const lines = res.text().split("\n");
+	const worktrees = await vcs.listWorktrees(repoRoot);
 	const nested: string[] = [];
 	const realRoot = await fs.realpath(repoRoot).catch(() => path.resolve(repoRoot));
-	for (const line of lines) {
-		if (!line.startsWith("worktree ")) continue;
-		const rawPath = line.slice("worktree ".length).trim();
+	for (const wt of worktrees) {
+		const rawPath = wt.path;
 		const realWt = await fs.realpath(rawPath).catch(() => path.resolve(rawPath));
 		const rel = path.relative(realRoot, realWt);
 		if (rel && !rel.startsWith("..") && !path.isAbsolute(rel)) {
@@ -218,6 +267,8 @@ export function isUnderNestedWorktree(relPath: string, nestedWorktrees: string[]
 	return false;
 }
 
+const COMPARISON_CHUNK_SIZE = 64 * 1024;
+
 async function filesDiffer(pathA: string, pathB: string): Promise<boolean> {
 	const [statA, statB] = await Promise.all([fs.lstat(pathA).catch(() => null), fs.lstat(pathB).catch(() => null)]);
 
@@ -228,7 +279,10 @@ async function filesDiffer(pathA: string, pathB: string): Promise<boolean> {
 	if (statA.isDirectory() !== statB.isDirectory()) return true;
 
 	if (statA.isSymbolicLink()) {
-		const [linkA, linkB] = await Promise.all([fs.readlink(pathA), fs.readlink(pathB)]);
+		const [linkA, linkB] = await Promise.all([
+			fs.readlink(pathA).catch(() => null),
+			fs.readlink(pathB).catch(() => null),
+		]);
 		return linkA !== linkB;
 	}
 
@@ -236,12 +290,108 @@ async function filesDiffer(pathA: string, pathB: string): Promise<boolean> {
 
 	if (statA.size !== statB.size) return true;
 
+	// Incremental streaming comparison in fixed 64KB chunks to avoid large allocations
+	let fdA: fs.FileHandle | undefined;
+	let fdB: fs.FileHandle | undefined;
 	try {
-		const [bufA, bufB] = await Promise.all([Bun.file(pathA).arrayBuffer(), Bun.file(pathB).arrayBuffer()]);
-		return !Buffer.from(bufA).equals(Buffer.from(bufB));
+		fdA = await fs.open(pathA, "r");
+		fdB = await fs.open(pathB, "r");
+		const bufA = Buffer.alloc(COMPARISON_CHUNK_SIZE);
+		const bufB = Buffer.alloc(COMPARISON_CHUNK_SIZE);
+		let position = 0;
+		while (position < statA.size) {
+			const toRead = Math.min(COMPARISON_CHUNK_SIZE, statA.size - position);
+			const [resA, resB] = await Promise.all([
+				fdA.read(bufA, 0, toRead, position),
+				fdB.read(bufB, 0, toRead, position),
+			]);
+			if (resA.bytesRead !== resB.bytesRead) return true;
+			if (resA.bytesRead === 0) break;
+			if (!bufA.subarray(0, resA.bytesRead).equals(bufB.subarray(0, resB.bytesRead))) {
+				return true;
+			}
+			position += resA.bytesRead;
+		}
+		return false;
 	} catch {
+		// Read/stat error -> cannot prove identical -> conservatively keep
 		return true;
+	} finally {
+		await Promise.all([fdA?.close().catch(() => {}), fdB?.close().catch(() => {})]);
 	}
+}
+
+// Ignored path change detection:
+// Userspace cannot forge or backdate filesystem ctime. Files produced during
+// materialization (APFS clonefile, reflink, rcopy) have ctimeMs at or before the
+// materialization reference marker written outside m/ immediately after clone.
+// Any file or directory created, modified, renamed, or attribute-changed after
+// materialization has ctimeMs > markerCtimeMs, identifying unique work without
+// expensive parent lookups or full-tree content comparisons. The marker resides
+// in the sandbox base dir (outside m/) so it never appears in git status.
+const MAX_IGNORED_ENTRIES_CHECKED = 1_000_000;
+
+interface IgnoredInspectionState {
+	entriesChecked: number;
+}
+
+async function checkIgnoredTreeModified(
+	entryPath: string,
+	relPath: string,
+	markerCtimeMs: number,
+	nestedWorktrees: string[],
+	state: IgnoredInspectionState,
+): Promise<{ hasUniqueWork: boolean; reason?: string }> {
+	const stat = await fs.lstat(entryPath).catch(() => null);
+	if (!stat) {
+		return { hasUniqueWork: true, reason: `cannot stat ignored path ${relPath}` };
+	}
+
+	state.entriesChecked += 1;
+	if (state.entriesChecked > MAX_IGNORED_ENTRIES_CHECKED) {
+		return {
+			hasUniqueWork: true,
+			reason: `ignored entries exceed safety limit (${MAX_IGNORED_ENTRIES_CHECKED} entries)`,
+		};
+	}
+
+	// Yield to event loop periodically so large walks stay async and non-blocking
+	if (state.entriesChecked % 1024 === 0) {
+		const { promise, resolve } = Promise.withResolvers<void>();
+		setImmediate(resolve);
+		await promise;
+	}
+
+	if (stat.ctimeMs > markerCtimeMs) {
+		return {
+			hasUniqueWork: true,
+			reason: `ignored path ${relPath} modified after materialization`,
+		};
+	}
+
+	if (stat.isDirectory()) {
+		let entries: Dirent[];
+		try {
+			entries = await fs.readdir(entryPath, { withFileTypes: true });
+		} catch (err) {
+			return {
+				hasUniqueWork: true,
+				reason: `cannot read ignored directory ${relPath}: ${err instanceof Error ? err.message : String(err)}`,
+			};
+		}
+
+		for (const entry of entries) {
+			const childRel = path.join(relPath, entry.name);
+			if (isUnderNestedWorktree(childRel, nestedWorktrees)) {
+				continue;
+			}
+			const childPath = path.join(entryPath, entry.name);
+			const childResult = await checkIgnoredTreeModified(childPath, childRel, markerCtimeMs, nestedWorktrees, state);
+			if (childResult.hasUniqueWork) return childResult;
+		}
+	}
+
+	return { hasUniqueWork: false };
 }
 
 /**
@@ -249,8 +399,14 @@ async function filesDiffer(pathA: string, pathB: string): Promise<boolean> {
  *
  * Contract: A dead sandbox holds unique work if its `m/` copy has:
  * (a) any commit reachable from its local refs/HEAD/stash that the parent repo does not have, or
- * (b) any changed/untracked file (git status, untracked=all, ignoring paths under nested
- *     linked-worktree dirs) whose content differs from the same path in the parent checkout.
+ * (b) any changed or untracked file (git status, untracked=all, ignoring paths under nested
+ *     linked-worktree dirs) whose content differs from the same path in the parent checkout or
+ *     represents an unmerged addition, or
+ * (c) any ignored path (git status, ignored=matching) created, modified, renamed, or
+ *     attribute-changed after materialization, judged by ctime against the reference marker.
+ *
+ * Inability to inspect repository metadata, read files, or classify sandbox state is treated
+ * conservatively as unknown work (preserve).
  */
 export async function inspectIsolationUniqueWork(baseDir: string): Promise<UniqueWorkCheckResult> {
 	let mountDir: string | undefined;
@@ -312,81 +468,115 @@ export async function inspectIsolationUniqueWork(baseDir: string): Promise<Uniqu
 		return { hasUniqueWork: true, reason: "parent repository unknown" };
 	}
 
+	// With a known parent repo but missing or unreadable sandbox `.git`, commits and status
+	// cannot be inspected. Inability to inspect means unknown work, so keep the sandbox.
+	if (!hasGitDir) {
+		return {
+			hasUniqueWork: true,
+			reason: "sandbox git repository missing or unreadable",
+			parentRepo,
+		};
+	}
+
 	const parentStat = await fs.stat(parentRepo).catch(() => null);
 	if (!parentStat?.isDirectory()) {
 		return { hasUniqueWork: true, reason: `parent repository missing (${parentRepo})`, parentRepo };
 	}
 
 	// (a) Check for unique commits reachable from local refs/HEAD/stash
-	if (hasGitDir) {
-		const commitTips = new Set<string>();
+	const commitTips = new Set<string>();
 
-		const headRes = await $`git -C ${mountDir} rev-parse --verify HEAD`.quiet().nothrow();
-		if (headRes.exitCode === 0) {
-			const sha = headRes.text().trim();
-			if (sha) commitTips.add(sha);
-		}
+	const headSha = await vcs.getHeadSha(mountDir);
+	if (headSha) commitTips.add(headSha);
 
-		const refsRes = await $`git -C ${mountDir} for-each-ref --format="%(objectname)" refs/heads/ refs/tags/`
-			.quiet()
-			.nothrow();
-		if (refsRes.exitCode === 0) {
-			for (const line of refsRes.text().split("\n")) {
-				const sha = line.trim();
-				if (sha) commitTips.add(sha);
-			}
-		}
+	const refShas = await vcs.listRefShas(mountDir, ["refs/heads/", "refs/tags/"]);
+	for (const sha of refShas) {
+		commitTips.add(sha);
+	}
 
-		const stashRes = await $`git -C ${mountDir} rev-list -g refs/stash --format="%H"`.quiet().nothrow();
-		if (stashRes.exitCode === 0) {
-			for (const line of stashRes.text().split("\n")) {
-				const sha = line.trim();
-				if (sha && sha.length === 40) commitTips.add(sha);
-			}
-		}
+	const stashShas = await vcs.listStashShas(mountDir);
+	for (const sha of stashShas) {
+		commitTips.add(sha);
+	}
 
-		for (const sha of commitTips) {
-			const catRes = await $`git -C ${parentRepo} cat-file -e ${sha}^{commit}`.quiet().nothrow();
-			if (catRes.exitCode !== 0) {
-				return {
-					hasUniqueWork: true,
-					reason: `unique commit ${sha.slice(0, 8)} not in parent repo`,
-					parentRepo,
-				};
-			}
+	for (const sha of commitTips) {
+		const present = await vcs.hasCommit(parentRepo, sha);
+		if (!present) {
+			return {
+				hasUniqueWork: true,
+				reason: `unique commit ${sha.slice(0, 8)} not in parent repo`,
+				parentRepo,
+			};
 		}
 	}
 
-	// (b) Check for changed/untracked files whose content differs from parent checkout
-	if (hasGitDir) {
-		const nestedWorktrees = await getNestedLinkedWorktrees(parentRepo);
-		const statusRes = await $`git -C ${mountDir} status --porcelain=v1 -uall`.quiet().nothrow();
-		if (statusRes.exitCode !== 0) {
-			return { hasUniqueWork: true, reason: "git status failed in sandbox", parentRepo };
-		}
+	// (b) Check for changed, untracked, and ignored files
+	const nestedWorktrees = await getNestedLinkedWorktrees(parentRepo);
+	let statusOutput: string;
+	try {
+		statusOutput = await vcs.statusPorcelain(mountDir, { untracked: "all", ignored: "matching" });
+	} catch (err) {
+		return {
+			hasUniqueWork: true,
+			reason: `git status failed in sandbox: ${err instanceof Error ? err.message : String(err)}`,
+			parentRepo,
+		};
+	}
 
-		const statusOutput = statusRes.text();
-		if (statusOutput.trim().length > 0) {
-			const lines = statusOutput.split("\n");
-			for (const line of lines) {
-				if (!line.trim()) continue;
-				let filePath = line.slice(3).trim();
-				if (filePath.includes(" -> ")) {
-					filePath = filePath.split(" -> ").pop()!.trim();
+	if (statusOutput.trim().length > 0) {
+		const lines = statusOutput.split("\n");
+		let markerCtimeMs: number | null | undefined;
+		const ignoredInspectionState: IgnoredInspectionState = { entriesChecked: 0 };
+		for (const line of lines) {
+			if (!line.trim()) continue;
+			const statusCode = line.slice(0, 2);
+			let filePath = line.slice(3).trim();
+			if (filePath.includes(" -> ")) {
+				filePath = filePath.split(" -> ").pop()!.trim();
+			}
+			if (filePath.startsWith('"') && filePath.endsWith('"')) {
+				try {
+					filePath = JSON.parse(filePath);
+				} catch {}
+			}
+
+			if (isUnderNestedWorktree(filePath, nestedWorktrees)) {
+				continue;
+			}
+
+			const sandboxFile = path.join(mountDir, filePath);
+			const parentFile = path.join(parentRepo, filePath);
+
+			if (statusCode === "!!") {
+				// Lazy-read materialization marker when ignored entries exist.
+				// A missing or unreadable marker when ignored files exist means unknown -> keep.
+				if (markerCtimeMs === undefined) {
+					markerCtimeMs = await readMaterializationCtime(baseDir);
 				}
-				if (filePath.startsWith('"') && filePath.endsWith('"')) {
-					try {
-						filePath = JSON.parse(filePath);
-					} catch {}
+				if (markerCtimeMs === null) {
+					return {
+						hasUniqueWork: true,
+						reason: "missing or unreadable materialization reference marker",
+						parentRepo,
+					};
 				}
 
-				if (isUnderNestedWorktree(filePath, nestedWorktrees)) {
-					continue;
+				const result = await checkIgnoredTreeModified(
+					sandboxFile,
+					filePath,
+					markerCtimeMs,
+					nestedWorktrees,
+					ignoredInspectionState,
+				);
+				if (result.hasUniqueWork) {
+					return {
+						hasUniqueWork: true,
+						reason: result.reason,
+						parentRepo,
+					};
 				}
-
-				const sandboxFile = path.join(mountDir, filePath);
-				const parentFile = path.join(parentRepo, filePath);
-
+			} else {
+				// Tracked modified/staged or untracked file
 				if (await filesDiffer(sandboxFile, parentFile)) {
 					return {
 						hasUniqueWork: true,

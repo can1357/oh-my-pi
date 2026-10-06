@@ -7,10 +7,18 @@ import type { VcsCommitAuthor, VcsGitRepo } from "@oh-my-pi/pi-natives";
 import * as natives from "@oh-my-pi/pi-natives";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { formatBytes, getWorktreeDir, logger, postmortem, Snowflake } from "@oh-my-pi/pi-utils";
+import { Reason } from "@oh-my-pi/pi-utils/postmortem";
 import type { SettingValueOf } from "../config/registry";
 
 import { withRepoLock } from "../utils/repo-lock";
-import { getNestedLinkedWorktrees, inspectIsolationUniqueWork, writeIsolationOwner } from "./isolation-ownership";
+import {
+	getNestedLinkedWorktrees,
+	inspectIsolationUniqueWork,
+	needsNativeTeardown,
+	writeIsolationOwner,
+	writeMaterializationMarker,
+	writeRetainedBackend,
+} from "./isolation-ownership";
 import { mapWithConcurrencyLimit } from "./parallel";
 import type { cfgIsolationBackend } from "./settings";
 
@@ -602,7 +610,10 @@ export async function ensureIsolation(
 		// `omp worktree clear` never sees this sandbox without a live owner,
 		// even while a large clone is still in progress.
 		await fs.mkdir(baseDir, { recursive: true });
-		await writeIsolationOwner(baseDir, id, repoRoot);
+		await writeIsolationOwner(baseDir, id, repoRoot, candidate);
+		if (needsNativeTeardown(candidate)) {
+			await writeRetainedBackend(baseDir, candidate);
+		}
 		try {
 			await natives.isoStart(candidate, repoRoot, mergedDir);
 			await removeNestedLinkedWorktrees(repoRoot, mergedDir);
@@ -614,7 +625,11 @@ export async function ensureIsolation(
 			// parallel task branches. Detaching gives each isolation a private,
 			// frozen repo that still borrows the source object DB via alternates.
 			await vcs.detachGitDir(mergedDir, sourceCommonDir);
-			const cancelCleanup = postmortem.register(`task-isolation:${baseDir}`, async () => {
+			await writeMaterializationMarker(baseDir);
+			const cancelCleanup = postmortem.register(`task-isolation:${baseDir}`, async (reason: Reason) => {
+				// Normal process exit (Reason.EXIT) does not await async callbacks.
+				// Next-start reaping handles any clean sandboxes left after normal exit.
+				if (reason === Reason.EXIT) return;
 				try {
 					const stat = await fs.stat(baseDir).catch(() => null);
 					if (!stat?.isDirectory()) return;
@@ -622,7 +637,15 @@ export async function ensureIsolation(
 					if (!check.hasUniqueWork) {
 						try {
 							await natives.isoStop(candidate, mergedDir);
-						} catch {}
+						} catch (err) {
+							// A mount or subvolume that failed to stop may still be live;
+							// removing through it is unsafe, so leave it for next-start reaping.
+							logger.warn("Preserving interrupted isolation sandbox: backend stop failed", {
+								baseDir,
+								error: err instanceof Error ? err.message : String(err),
+							});
+							return;
+						}
 						await fs.rm(baseDir, { recursive: true, force: true });
 					} else {
 						logger.warn("Preserving interrupted isolation sandbox with unique work", {

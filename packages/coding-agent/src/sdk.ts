@@ -50,6 +50,7 @@ import { AsyncJobManager } from "./async";
 import { AutoLearnController, buildAutoLearnInstructions } from "./autolearn/controller";
 import { createAutoresearchExtension } from "./autoresearch";
 import { loadCapability, reset as resetCapabilities } from "./capability";
+import { triggerIsolationReap } from "./cli/worktree-cli";
 import {
 	MAIN_AGENT_RULE_NAME,
 	type Rule,
@@ -1679,7 +1680,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 	// so a parent's live edits keep reaching discovery and effects.
 	const bindsProcessState = options.bindProcessState !== false && !options.parentTaskPrefix && !options.taskDepth;
 	if (bindsProcessState) {
-		void import("./cli/worktree-cli").then(m => m.triggerIsolationReap()).catch(() => {});
+		triggerIsolationReap();
 	}
 	const restoreProviderToggles = bindsProcessState
 		? logger.time("initializeWithSettings", initializeWithSettings, settings)

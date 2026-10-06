@@ -6,6 +6,7 @@ import type {
 	VcsHunkSelectionError,
 	VcsJjWorkspace,
 	VcsRepo,
+	VcsWorktreeEntry,
 } from "./index.js";
 /** Portable capabilities that differ between Git and Jujutsu. */
 export type VcsFeature = "stagedDiff" | "revDiff";
@@ -101,3 +102,27 @@ export declare const HEAD_WATCH_INTERVAL_MS: number;
 
 /** Watch a repository for head changes; returns a disposer. */
 export declare function watch(repo: VcsRepo, onChange: () => void, intervalMs?: number): () => void;
+
+/** Options for {@link statusPorcelain}. */
+export interface VcsStatusPorcelainOptions {
+	untracked?: "all" | "normal" | "no";
+	ignored?: "traditional" | "matching" | "no";
+}
+
+/** List linked worktrees registered in a git repository. */
+export declare function listWorktrees(repoDir: string): Promise<Array<VcsWorktreeEntry>>;
+
+/** Resolve the current HEAD commit SHA of a git repository. */
+export declare function getHeadSha(repoDir: string): Promise<string | null>;
+
+/** List commit SHAs reachable from local refs matching prefix patterns. */
+export declare function listRefShas(repoDir: string, patterns?: string[]): Promise<string[]>;
+
+/** List commit SHAs recorded in refs/stash reflog. */
+export declare function listStashShas(repoDir: string): Promise<string[]>;
+
+/** Check whether a commit object exists in the repository object database. */
+export declare function hasCommit(repoDir: string, sha: string): Promise<boolean>;
+
+/** Run git status in porcelain v1 mode with untracked and ignored options. */
+export declare function statusPorcelain(repoDir: string, options?: VcsStatusPorcelainOptions): Promise<string>;

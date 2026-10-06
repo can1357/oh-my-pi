@@ -1,13 +1,23 @@
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { $ } from "bun";
+import * as natives from "@oh-my-pi/pi-natives";
 import { clearWorktrees, reapDeadIsolationSandboxes } from "@oh-my-pi/pi-coding-agent/cli/worktree-cli";
-import { inspectIsolationUniqueWork, ISOLATION_OWNER_FILE } from "@oh-my-pi/pi-coding-agent/task/isolation-ownership";
-import { removeNestedLinkedWorktrees } from "@oh-my-pi/pi-coding-agent/task/worktree";
+import {
+	inspectIsolationUniqueWork,
+	ISOLATION_MATERIALIZED_FILE,
+	ISOLATION_OWNER_FILE,
+	writeMaterializationMarker,
+} from "@oh-my-pi/pi-coding-agent/task/isolation-ownership";
+import {
+	cleanupIsolation,
+	ensureIsolation,
+	removeNestedLinkedWorktrees,
+} from "@oh-my-pi/pi-coding-agent/task/worktree";
 import { setWorktreesDir } from "@oh-my-pi/pi-utils";
-
+import { cleanup as postmortemCleanup } from "@oh-my-pi/pi-utils/postmortem";
 describe("task-isolation sandbox reaper and protection", () => {
 	let wtBase: string;
 	let parentRepo: string;
@@ -59,6 +69,7 @@ describe("task-isolation sandbox reaper and protection", () => {
 			parentRepo,
 		};
 		await fs.writeFile(path.join(sandboxDir, ISOLATION_OWNER_FILE), JSON.stringify(owner));
+		await writeMaterializationMarker(sandboxDir);
 		return { sandboxDir, mountDir };
 	}
 
@@ -239,51 +250,314 @@ describe("task-isolation sandbox reaper and protection", () => {
 	});
 
 	it("cleans up clean sandbox on postmortem termination and preserves unique work", async () => {
-		const { register, cleanup } = await import("@oh-my-pi/pi-utils/postmortem");
-		const clean = await createSandbox("tpostmortem-clean", true);
-		const dirty = await createSandbox("tpostmortem-dirty", true);
-		await fs.writeFile(path.join(dirty.mountDir, "dirty.txt"), "unique work\n");
+		const clean = await ensureIsolation(parentRepo, "tpostmortem-clean");
+		const dirty = await ensureIsolation(parentRepo, "tpostmortem-dirty");
+		await fs.writeFile(path.join(dirty.mergedDir, "dirty.txt"), "unique work\n");
 
-		// Register both sandboxes as ensureIsolation does
-		const cancelClean = register(`task-isolation:${clean.sandboxDir}`, async () => {
-			const stat = await fs.stat(clean.sandboxDir).catch(() => null);
-			if (!stat?.isDirectory()) return;
-			const check = await inspectIsolationUniqueWork(clean.sandboxDir);
-			if (!check.hasUniqueWork) {
-				await fs.rm(clean.sandboxDir, { recursive: true, force: true });
-			}
-		});
-
-		const cancelDirty = register(`task-isolation:${dirty.sandboxDir}`, async () => {
-			const stat = await fs.stat(dirty.sandboxDir).catch(() => null);
-			if (!stat?.isDirectory()) return;
-			const check = await inspectIsolationUniqueWork(dirty.sandboxDir);
-			if (!check.hasUniqueWork) {
-				await fs.rm(dirty.sandboxDir, { recursive: true, force: true });
-			}
-		});
+		expect(typeof clean.cancelCleanup).toBe("function");
+		expect(typeof dirty.cancelCleanup).toBe("function");
 
 		try {
 			// Simulate postmortem cleanup run (keepAlive=true so test process keeps running)
-			await cleanup();
+			await postmortemCleanup();
 
 			// Clean sandbox should have been reaped
 			expect(
 				await fs
-					.stat(clean.sandboxDir)
+					.stat(clean.mergedDir)
 					.then(() => true)
 					.catch(() => false),
 			).toBe(false);
 			// Dirty sandbox should have been preserved
 			expect(
 				await fs
-					.stat(dirty.sandboxDir)
+					.stat(dirty.mergedDir)
 					.then(() => true)
 					.catch(() => false),
 			).toBe(true);
 		} finally {
-			cancelClean();
-			cancelDirty();
+			clean.cancelCleanup?.();
+			dirty.cancelCleanup?.();
+			await cleanupIsolation(dirty).catch(() => {});
 		}
+	});
+
+	it("preserves clean sandbox on postmortem termination when the backend fails to stop", async () => {
+		const handle = await ensureIsolation(parentRepo, "tpostmortem-stuck");
+		const isoStopSpy = vi.spyOn(natives, "isoStop").mockRejectedValue(new Error("umount busy"));
+
+		try {
+			await postmortemCleanup();
+			expect(isoStopSpy).toHaveBeenCalledWith(handle.backend, handle.mergedDir);
+			expect(
+				await fs
+					.stat(handle.mergedDir)
+					.then(() => true)
+					.catch(() => false),
+			).toBe(true);
+		} finally {
+			isoStopSpy.mockRestore();
+			handle.cancelCleanup?.();
+			await cleanupIsolation(handle).catch(() => {});
+		}
+	});
+
+	it("preserves dead sandbox with unique gitignored file", async () => {
+		await fs.writeFile(path.join(parentRepo, ".gitignore"), "*.env\nbuild/\n");
+		await $`git -C ${parentRepo} add .gitignore`.quiet();
+		await $`git -C ${parentRepo} commit -q -m "add gitignore"`.quiet();
+
+		const { sandboxDir, mountDir } = await createSandbox("tignored-env", false);
+		// Real filesystem delay: userspace cannot set ctime; advancing ctime past the marker requires advancing the OS clock.
+		await Bun.sleep(10);
+		await fs.writeFile(path.join(mountDir, "secret.env"), "SECRET_TOKEN=xyz\n");
+
+		const check = await inspectIsolationUniqueWork(sandboxDir);
+		expect(check.hasUniqueWork).toBe(true);
+		expect(check.reason).toContain("modified after materialization");
+
+		const outcome = await reapDeadIsolationSandboxes();
+		expect(outcome.kept).toBe(1);
+		expect(outcome.reaped).toBe(0);
+		expect(
+			await fs
+				.stat(sandboxDir)
+				.then(() => true)
+				.catch(() => false),
+		).toBe(true);
+	});
+
+	it("preserves dead sandbox with unique file in gitignored directory", async () => {
+		await fs.writeFile(path.join(parentRepo, ".gitignore"), "build/\n");
+		await $`git -C ${parentRepo} add .gitignore`.quiet();
+		await $`git -C ${parentRepo} commit -q -m "add gitignore"`.quiet();
+
+		const { sandboxDir, mountDir } = await createSandbox("tignored-dir", false);
+		// Real filesystem delay: userspace cannot set ctime; advancing ctime past the marker requires advancing the OS clock.
+		await Bun.sleep(10);
+		await fs.mkdir(path.join(mountDir, "build"), { recursive: true });
+		await fs.writeFile(path.join(mountDir, "build", "app.js"), "console.log(1);\n");
+
+		const check = await inspectIsolationUniqueWork(sandboxDir);
+		expect(check.hasUniqueWork).toBe(true);
+		expect(check.reason).toContain("modified after materialization");
+
+		const outcome = await reapDeadIsolationSandboxes();
+		expect(outcome.kept).toBe(1);
+		expect(outcome.reaped).toBe(0);
+		expect(
+			await fs
+				.stat(sandboxDir)
+				.then(() => true)
+				.catch(() => false),
+		).toBe(true);
+	});
+
+	it("does not treat parent-copied gitignored files as unique work when contents match", async () => {
+		await fs.writeFile(path.join(parentRepo, ".gitignore"), "node_modules/\n");
+		await fs.mkdir(path.join(parentRepo, "node_modules"), { recursive: true });
+		await fs.writeFile(path.join(parentRepo, "node_modules", "dep.json"), '{"name":"dep"}\n');
+		await $`git -C ${parentRepo} add .gitignore`.quiet();
+		await $`git -C ${parentRepo} commit -q -m "add gitignore"`.quiet();
+
+		const { sandboxDir, mountDir } = await createSandbox("tignored-clean", false);
+		await fs.mkdir(path.join(mountDir, "node_modules"), { recursive: true });
+		await fs.writeFile(path.join(mountDir, "node_modules", "dep.json"), '{"name":"dep"}\n');
+		await writeMaterializationMarker(sandboxDir);
+
+		const check = await inspectIsolationUniqueWork(sandboxDir);
+		expect(check.hasUniqueWork).toBe(false);
+
+		const outcome = await reapDeadIsolationSandboxes();
+		expect(outcome.reaped).toBe(1);
+		expect(
+			await fs
+				.stat(sandboxDir)
+				.then(() => true)
+				.catch(() => false),
+		).toBe(false);
+	});
+
+	it("reaps clean dead sandbox whose ignored directory holds well over 2000 entries", async () => {
+		await fs.writeFile(path.join(parentRepo, ".gitignore"), "node_modules/\n");
+		await $`git -C ${parentRepo} add .gitignore`.quiet();
+		await $`git -C ${parentRepo} commit -q -m "add gitignore"`.quiet();
+
+		const { sandboxDir, mountDir } = await createSandbox("tignored-2500", false);
+		const nmDir = path.join(mountDir, "node_modules");
+		await fs.mkdir(nmDir, { recursive: true });
+		// Create 2500 files inside node_modules
+		const count = 2500;
+		for (let i = 0; i < count; i++) {
+			await fs.writeFile(path.join(nmDir, `pkg_${i}.json`), "{}");
+		}
+		// Reset the materialization marker to now, simulating that node_modules was populated
+		// during materialization (e.g. CoW clone)
+		await writeMaterializationMarker(sandboxDir);
+
+		const check = await inspectIsolationUniqueWork(sandboxDir);
+		expect(check.hasUniqueWork).toBe(false);
+
+		const outcome = await reapDeadIsolationSandboxes();
+		expect(outcome.reaped).toBe(1);
+		expect(
+			await fs
+				.stat(sandboxDir)
+				.then(() => true)
+				.catch(() => false),
+		).toBe(false);
+	});
+
+	it("preserves dead sandbox when a deep ignored file is modified after materialization", async () => {
+		await fs.writeFile(path.join(parentRepo, ".gitignore"), "node_modules/\n");
+		await $`git -C ${parentRepo} add .gitignore`.quiet();
+		await $`git -C ${parentRepo} commit -q -m "add gitignore"`.quiet();
+
+		const { sandboxDir, mountDir } = await createSandbox("tignored-mod", false);
+		const deepDir = path.join(mountDir, "node_modules", "pkg", "deep");
+		await fs.mkdir(deepDir, { recursive: true });
+		await fs.writeFile(path.join(deepDir, "index.js"), "original\n");
+		await writeMaterializationMarker(sandboxDir);
+
+		// Real filesystem delay: userspace cannot set ctime; advancing ctime past the marker requires advancing the OS clock.
+		await Bun.sleep(10);
+		await fs.writeFile(path.join(deepDir, "index.js"), "modified by subagent\n");
+
+		const check = await inspectIsolationUniqueWork(sandboxDir);
+		expect(check.hasUniqueWork).toBe(true);
+		expect(check.reason).toContain("modified after materialization");
+
+		const outcome = await reapDeadIsolationSandboxes();
+		expect(outcome.kept).toBe(1);
+		expect(outcome.reaped).toBe(0);
+		expect(
+			await fs
+				.stat(sandboxDir)
+				.then(() => true)
+				.catch(() => false),
+		).toBe(true);
+	});
+
+	it("preserves dead sandbox when materialization marker is missing and ignored entries exist", async () => {
+		await fs.writeFile(path.join(parentRepo, ".gitignore"), "*.env\n");
+		await fs.writeFile(path.join(parentRepo, "test.env"), "FOO=1\n");
+		await $`git -C ${parentRepo} add .gitignore`.quiet();
+		await $`git -C ${parentRepo} commit -q -m "add gitignore"`.quiet();
+
+		const { sandboxDir, mountDir } = await createSandbox("tmissing-marker", false);
+		await fs.writeFile(path.join(mountDir, "test.env"), "FOO=1\n");
+		// Remove marker to simulate damaged or missing materialization marker
+		await fs.rm(path.join(sandboxDir, ISOLATION_MATERIALIZED_FILE), { force: true });
+
+		const check = await inspectIsolationUniqueWork(sandboxDir);
+		expect(check.hasUniqueWork).toBe(true);
+		expect(check.reason).toBe("missing or unreadable materialization reference marker");
+
+		const outcome = await reapDeadIsolationSandboxes();
+		expect(outcome.kept).toBe(1);
+		expect(outcome.reaped).toBe(0);
+		expect(
+			await fs
+				.stat(sandboxDir)
+				.then(() => true)
+				.catch(() => false),
+		).toBe(true);
+	});
+
+	it("records teardown backend for ordinary sandbox and stops mount before reaping", async () => {
+		const { sandboxDir, mountDir } = await createSandbox("tordinary-teardown", false);
+		await Bun.write(
+			path.join(sandboxDir, ISOLATION_OWNER_FILE),
+			JSON.stringify({
+				pid: await deadPid(),
+				id: "tordinary-teardown",
+				parentRepo,
+				backend: natives.IsoBackendKind.Overlayfs,
+			}),
+		);
+		const isoStopSpy = vi.spyOn(natives, "isoStop").mockResolvedValue(undefined);
+
+		try {
+			const outcome = await reapDeadIsolationSandboxes();
+			expect(outcome.reaped).toBe(1);
+			expect(isoStopSpy).toHaveBeenCalledWith(natives.IsoBackendKind.Overlayfs, mountDir);
+			expect(
+				await fs
+					.stat(sandboxDir)
+					.then(() => true)
+					.catch(() => false),
+			).toBe(false);
+		} finally {
+			isoStopSpy.mockRestore();
+		}
+	});
+
+	it("preserves ordinary sandbox when native teardown fails during reaping", async () => {
+		const { sandboxDir, mountDir } = await createSandbox("tordinary-busy", false);
+		await Bun.write(
+			path.join(sandboxDir, ISOLATION_OWNER_FILE),
+			JSON.stringify({
+				pid: await deadPid(),
+				id: "tordinary-busy",
+				parentRepo,
+				backend: natives.IsoBackendKind.Overlayfs,
+			}),
+		);
+		const isoStopSpy = vi.spyOn(natives, "isoStop").mockRejectedValue(new Error("umount busy"));
+
+		try {
+			const outcome = await reapDeadIsolationSandboxes();
+			expect(outcome.reaped).toBe(0);
+			expect(isoStopSpy).toHaveBeenCalledWith(natives.IsoBackendKind.Overlayfs, mountDir);
+			expect(
+				await fs
+					.stat(sandboxDir)
+					.then(() => true)
+					.catch(() => false),
+			).toBe(true);
+		} finally {
+			isoStopSpy.mockRestore();
+		}
+	});
+
+	it("preserves dead sandbox when sandbox git metadata (.git) is missing or unreadable", async () => {
+		const { sandboxDir, mountDir } = await createSandbox("tcorrupt-git", false);
+		await fs.rm(path.join(mountDir, ".git"), { recursive: true, force: true });
+
+		const check = await inspectIsolationUniqueWork(sandboxDir);
+		expect(check.hasUniqueWork).toBe(true);
+		expect(check.reason).toBe("sandbox git repository missing or unreadable");
+
+		const outcome = await reapDeadIsolationSandboxes();
+		expect(outcome.kept).toBe(1);
+		expect(outcome.reaped).toBe(0);
+		expect(
+			await fs
+				.stat(sandboxDir)
+				.then(() => true)
+				.catch(() => false),
+		).toBe(true);
+	});
+
+	it("filesDiffer accurately compares files exceeding chunk size without full file reads", async () => {
+		const { sandboxDir, mountDir } = await createSandbox("tlarge-chunks", false);
+		// 130KB file (exceeds 64KB COMPARISON_CHUNK_SIZE)
+		const chunkSize = 64 * 1024;
+		const largeBufA = Buffer.alloc(chunkSize * 2 + 1024, 0x61); // all 'a'
+		const largeBufB = Buffer.from(largeBufA);
+		// Mutate a byte in the second chunk (offset 70,000)
+		largeBufB[chunkSize + 5000] = 0x62; // 'b'
+
+		await fs.writeFile(path.join(parentRepo, "large.bin"), largeBufA);
+		await fs.writeFile(path.join(mountDir, "large.bin"), largeBufB);
+
+		const checkDiffer = await inspectIsolationUniqueWork(sandboxDir);
+		expect(checkDiffer.hasUniqueWork).toBe(true);
+		expect(checkDiffer.reason).toContain("file large.bin differs from parent checkout");
+
+		// When files match completely across chunks
+		await fs.writeFile(path.join(mountDir, "large.bin"), largeBufA);
+		const checkMatch = await inspectIsolationUniqueWork(sandboxDir);
+		expect(checkMatch.hasUniqueWork).toBe(false);
 	});
 });

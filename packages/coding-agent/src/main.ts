@@ -36,6 +36,7 @@ import {
 } from "./cli/args";
 import { applyExtensionFlags, type ExtensionFlagSink } from "./cli/extension-flags";
 import { processFileArguments } from "./cli/file-processor";
+import { triggerIsolationReap } from "./cli/worktree-cli";
 import { buildInitialMessage } from "./cli/initial-message";
 import { formatKeyHint } from "@oh-my-pi/pi-tui/app-keybindings";
 import type { SessionPickerOptions } from "@oh-my-pi/pi-tui/apps/session-picker";
@@ -2237,7 +2238,7 @@ export async function runRootCommand(
 			// frame (see `startDeferredStartupWork`), for the same reason.
 			if (!isInteractive) {
 				modelRegistry.refreshInBackground();
-				void import("./cli/worktree-cli").then(m => m.triggerIsolationReap()).catch(() => {});
+				triggerIsolationReap();
 			}
 			return result;
 		};
@@ -2474,7 +2475,7 @@ export async function runRootCommand(
 					);
 				}
 				void startBackgroundModelDiscovery?.();
-				void import("./cli/worktree-cli").then(m => m.triggerIsolationReap()).catch(() => {});
+				triggerIsolationReap();
 			};
 			watchScopedModelSettings(session, parsedArgs, modelRegistry, settingsInstance);
 
