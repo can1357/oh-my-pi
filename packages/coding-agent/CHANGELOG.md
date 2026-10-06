@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed headless containers without a system D-Bus logging a `Failed to acquire power assertion` warning on every turn; the missing backend is now noted once at debug level ([#12155](https://github.com/can1357/oh-my-pi/issues/12155))
+
 ## [18.8.0] - 2026-10-07
 
 ### Added

@@ -701,6 +701,45 @@ export function powerAssertionOptions(mode: "off" | "idle" | "display" | "system
 	};
 }
 
+/**
+ * Message prefix `PowerAssertion.start` fails with on Linux when no system D-Bus
+ * is reachable (crates/pi-natives/src/power.rs, `start_login1`). The native
+ * error carries no code, so this prefix is the only signal for the
+ * "platform backend not present" case, which headless containers hit by design.
+ */
+const POWER_BACKEND_UNAVAILABLE_PREFIX = "Unable to connect to the system bus";
+
+let powerBackendUnavailableLogged = false;
+
+/**
+ * Start a power assertion. A missing platform backend (headless container with
+ * no D-Bus) is logged at debug once per process; any other failure still warns.
+ */
+export function startPowerAssertion(
+	options: PowerAssertionOptions,
+	start: (options: PowerAssertionOptions) => PowerAssertion = PowerAssertion.start,
+): PowerAssertion | undefined {
+	try {
+		return start(options);
+	} catch (error) {
+		const message = error instanceof Error ? error.message : String(error);
+		if (message.includes(POWER_BACKEND_UNAVAILABLE_PREFIX)) {
+			if (!powerBackendUnavailableLogged) {
+				powerBackendUnavailableLogged = true;
+				logger.debug("Power assertion backend unavailable; sleep prevention disabled", { error: message });
+			}
+			return undefined;
+		}
+		logger.warn("Failed to acquire power assertion", { error: String(error) });
+		return undefined;
+	}
+}
+
+/** Test hook: forget that the unavailable-backend notice was already logged. */
+export function resetPowerBackendUnavailableLogForTests(): void {
+	powerBackendUnavailableLogged = false;
+}
+
 export class AgentSession implements SettingsScope {
 	readonly agent: Agent;
 	readonly sessionManager: SessionManager;
@@ -1085,11 +1124,7 @@ export class AgentSession implements SettingsScope {
 		if (this.#powerAssertion) return;
 		const options = powerAssertionOptions(cfgPowerSleepPrevention.get(this.settings));
 		if (!options) return;
-		try {
-			this.#powerAssertion = PowerAssertion.start(options);
-		} catch (error) {
-			logger.warn("Failed to acquire power assertion", { error: String(error) });
-		}
+		this.#powerAssertion = startPowerAssertion(options);
 	}
 
 	#releasePowerAssertion(): void {
