@@ -105,6 +105,20 @@ describe("OpenAI-compatible image response_format", () => {
 		expect(bodies[1]?.response_format).toBe("b64_json");
 	});
 
+	test("xAI image generation retains response_format", async () => {
+		const model = imageModel("xai", "grok-imagine-image");
+		let body: Record<string, unknown> | undefined;
+		const fetch: FetchImpl = async (_input, init) => {
+			body = JSON.parse(String(init?.body));
+			return imageResponse();
+		};
+
+		await generateOpenAIImage(model, { prompt: "a cat" }, { apiKey: "test", fetch });
+
+		expect(body?.response_format).toBe("b64_json");
+		expect(body?.resolution).toBe("1k");
+	});
+
 	test("DALL-E multipart edits retain response_format", async () => {
 		const model = imageModel("openai", "dall-e-2");
 		let form: FormData | undefined;
