@@ -89,6 +89,8 @@ export interface ChatTranscriptBuilderDeps {
 	tableCharts?: boolean;
 	/** Extension assistant text renderers the replayed replies draw with, as the live transcript does. */
 	textRenderers?: readonly AssistantTextRenderer[];
+	/** Reader for the session's GitHub repo as of a message timestamp, for bare `#N` prose refs. */
+	proseGithubRepo?: (at?: number) => () => string | undefined;
 	requestRender: () => void;
 }
 
@@ -439,6 +441,7 @@ export class ChatTranscriptBuilder {
 			this.#deps.linkTargets,
 			expandThinkingBlocks,
 			{ renderers: this.#deps.textRenderers ?? [], contentOffset: 0 },
+			this.#deps.proseGithubRepo?.(message.timestamp),
 		);
 		assistantComponent.pickReactionTarget(this.container.children);
 		this.#mountProse(assistantComponent);
@@ -478,6 +481,7 @@ export class ChatTranscriptBuilder {
 				this.#deps.linkTargets,
 				expandThinkingBlocks,
 				{ renderers: this.#deps.textRenderers ?? [], contentOffset: timeline.contentOffsets.get(toolCallId) ?? 0 },
+				this.#deps.proseGithubRepo?.(segment.timestamp),
 			);
 			this.#mountProse(component);
 			lastAssistantComponent = component;
