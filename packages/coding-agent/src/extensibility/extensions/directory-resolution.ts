@@ -24,22 +24,51 @@ export interface ExtensionDirectoryResolutionOptions {
 	onReadError?: (filePath: string, error: unknown) => void;
 }
 
+/** The subset of resolution options that a bare index lookup honours. */
+export type ExtensionDirectoryStatPolicy = Pick<
+	ExtensionDirectoryResolutionOptions,
+	"throwUnexpectedStatErrors" | "onReadError"
+>;
+
 function isUnavailable(error: unknown): boolean {
 	return isEnoent(error) || isEacces(error) || hasFsCode(error, "EPERM") || hasFsCode(error, "ENOTDIR");
 }
 
-/** Select the first loadable index file using the caller's suffix and error policy. */
+/**
+ * Report a path the process was not allowed to inspect. Returns whether it
+ * reported, so a caller looping over candidates can stay quiet after the first.
+ *
+ * ENOENT is excluded on purpose: a missing `index.ts` is the ordinary "not here"
+ * answer, and readdir→stat races and broken symlinks land there too, so
+ * reporting it would bury the EACCES and EPERM denials that leave a caller short
+ * of what it declared.
+ */
+function reportDeniedPath(pathname: string, error: unknown, options: ExtensionDirectoryStatPolicy): boolean {
+	if (isEnoent(error)) return false;
+	options.onReadError?.(pathname, error);
+	return true;
+}
+
+/**
+ * Select the first loadable index file using the caller's suffix and error policy.
+ *
+ * A denial is reported against `dir`, once, not against each candidate that
+ * could not be statted: the candidate is a guess the caller made up front, and
+ * naming it points the reader at a file that may not exist at all.
+ */
 export function findExtensionDirectoryIndex(
 	dir: string,
 	indexNames: readonly string[],
-	options: { throwUnexpectedStatErrors?: boolean } = {},
+	options: ExtensionDirectoryStatPolicy = {},
 ): string | null {
+	let reported = false;
 	for (const name of indexNames) {
 		const candidate = path.join(dir, name);
 		try {
 			if (fs.statSync(candidate).isFile()) return candidate;
 		} catch (error) {
 			if (options.throwUnexpectedStatErrors && !isUnavailable(error)) throw error;
+			if (!reported) reported = reportDeniedPath(dir, error, options);
 		}
 	}
 	return null;
@@ -54,7 +83,7 @@ function readDeclaredManifestEntries(
 	try {
 		raw = fs.readFileSync(packageJsonPath, "utf8");
 	} catch (error) {
-		if (!isUnavailable(error)) options.onReadError?.(packageJsonPath, error);
+		reportDeniedPath(packageJsonPath, error, options);
 		return { declared: false, files: [] };
 	}
 
@@ -81,6 +110,7 @@ function readDeclaredManifestEntries(
 			stats = fs.statSync(candidate);
 		} catch (error) {
 			if (options.throwUnexpectedStatErrors && !isUnavailable(error)) throw error;
+			reportDeniedPath(candidate, error, options);
 			continue;
 		}
 		if (stats.isDirectory()) {
@@ -113,11 +143,14 @@ export function resolveExtensionDirectory(
 	try {
 		children = fs.readdirSync(dir);
 	} catch (error) {
-		if (!isUnavailable(error)) options.onReadError?.(dir, error);
+		reportDeniedPath(dir, error, options);
 		return { declared: false, files: [] };
 	}
 	if (options.sortChildren) children.sort();
 
+	// A directory that cannot be searched denies every child at once, so the
+	// scan reports it against `dir` once rather than one line per entry.
+	let reportedScanDenial = false;
 	const files: string[] = [];
 	for (const child of children) {
 		const childPath = path.join(dir, child);
@@ -127,6 +160,7 @@ export function resolveExtensionDirectory(
 			stats = fs.statSync(childPath);
 		} catch (error) {
 			if (options.throwUnexpectedStatErrors && !isUnavailable(error)) throw error;
+			if (!reportedScanDenial) reportedScanDenial = reportDeniedPath(dir, error, options);
 			continue;
 		}
 		if (stats.isDirectory()) {

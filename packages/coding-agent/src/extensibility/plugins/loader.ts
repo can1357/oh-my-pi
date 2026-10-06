@@ -64,6 +64,12 @@ async function loadRuntimeConfig(home?: string): Promise<PluginRuntimeConfig> {
 }
 
 /**
+ * Overrides already reported this process. `getPluginSettings` reads them once
+ * per plugin, so one broken file would otherwise log the same line per plugin.
+ */
+const warnedOverridePaths = new Set<string>();
+
+/**
  * Load project-local plugin overrides (checks .omp and .pi directories).
  */
 async function loadProjectOverrides(cwd: string): Promise<ProjectPluginOverrides> {
@@ -72,7 +78,16 @@ async function loadProjectOverrides(cwd: string): Promise<ProjectPluginOverrides
 			return await Bun.file(overridesPath).json();
 		} catch (err) {
 			if (isEnoent(err)) continue;
-			// JSON parse error - continue to next path
+			// Malformed or unreadable. `disabled` is how a project pins a plugin
+			// off, so dropping this hands the project back the plugins it turned
+			// off. Fall back rather than abort, but name the path that failed.
+			if (!warnedOverridePaths.has(overridesPath)) {
+				warnedOverridePaths.add(overridesPath);
+				logger.warn("plugins: ignoring unreadable project plugin overrides", {
+					path: overridesPath,
+					error: String(err),
+				});
+			}
 		}
 	}
 	return {};
@@ -292,10 +307,19 @@ function isModuleFile(name: string): boolean {
 	return MANIFEST_ENTRY_MODULE_EXTENSIONS.includes(path.extname(name)) && !DECLARATION_FILE_RE.test(name);
 }
 
+/** One diagnostic surface for a path the process could not inspect. */
+function reportPluginReadFailure(filePath: string, error: unknown): void {
+	logger.warn("plugins: could not read declared plugin path", { path: filePath, error: String(error) });
+}
+
 const PLUGIN_EXTENSION_DIRECTORY_OPTIONS = {
 	indexNames: MANIFEST_ENTRY_INDEX_NAMES,
 	isScanFile: isModuleFile,
 	sortChildren: true,
+	// Same diagnostic surface as CONFIGURED_EXTENSION_DIRECTORY_OPTIONS, minus its
+	// `throwUnexpectedStatErrors`: a denied sub-extension must not abort plugin
+	// discovery, which is the difference between a warning and no plugins at all.
+	onReadError: reportPluginReadFailure,
 };
 
 /**
@@ -319,7 +343,11 @@ function resolveManifestEntryFiles(joined: string, expandDirectory: boolean): st
 	let stats: fs.Stats;
 	try {
 		stats = fs.statSync(joined);
-	} catch {
+	} catch (err) {
+		// A missing entry is the manifest's problem, not a diagnostic. Anything
+		// else is a path this process could not inspect, and a plugin whose
+		// declared entry vanishes reports nothing at all without this.
+		if (!isEnoent(err)) reportPluginReadFailure(joined, err);
 		return [];
 	}
 	if (!stats.isDirectory()) {

@@ -27,6 +27,8 @@
 
 ### Fixed
 
+- Fixed a project `plugin-overrides.json` that fails to parse being dropped without a diagnostic, so plugins the project had switched off came back enabled ([#14548](https://github.com/can1357/oh-my-pi/pull/14548) by [@danzaio](https://github.com/danzaio), fixes [#14518](https://github.com/can1357/oh-my-pi/issues/14518))
+- Fixed a plugin whose declared extension paths cannot be read reporting nothing, leaving it enabled with no modules loaded ([#14548](https://github.com/can1357/oh-my-pi/pull/14548) by [@danzaio](https://github.com/danzaio), fixes [#14509](https://github.com/can1357/oh-my-pi/issues/14509))
 - Fixed browser `tab.goto`, `back`, `forward` and `reload` timing out on pages whose ad, chat or other iframe never finishes loading, although the page itself had loaded ([#14421](https://github.com/can1357/oh-my-pi/pull/14421) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed the token count after a snapcompact compaction (divider and RPC result) disagreeing with the context count right after it ([#14291](https://github.com/can1357/oh-my-pi/pull/14291) by [@will-bogusz](https://github.com/will-bogusz))
 - Fixed snapcompact archives stopping at 17 frames on models that read 1568px frames (OpenAI, Codex, and Claude before Opus 4.7); they now keep 26 under the same 3 MB image payload cap, and an archive whose frames run heavier than estimated is re-rendered with fewer frames instead of being rejected ([#14277](https://github.com/can1357/oh-my-pi/pull/14277) by [@will-bogusz](https://github.com/will-bogusz)).
