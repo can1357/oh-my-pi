@@ -97,7 +97,7 @@ Clients MUST continue reading stdout after closing stdin. Normal EOF and extensi
 14.   Transport overflow notifications (`rpc_frame_error`), when an event cannot fit within the transport limits
 15.   Live voice frames (`live_phase`, `live_levels`, `live_transcript`, `live_end`); see [Live Voice Sub-Protocol](#live-voice-sub-protocol)
 16.   Draft-only dictation frames (`dictation_state`, `dictation_transcript`, `dictation_end`); see [Dictation Sub-Protocol](#dictation-sub-protocol)
-17.   Skill diagnostics (`{ type: "skill_diagnostics_update", data }`), emitted at startup and when resolution, cwd, or the effective notification setting changes
+17.   Skill diagnostics (`{ type: "skill_diagnostics_update", data }`), emitted at startup and when resolution, cwd, the effective notification setting, or any skill analysis state or result changes
 
 Protocol v2 may wrap oversized logical frames from these categories in `rpc_chunk` frames.
 
@@ -153,6 +153,10 @@ Important edge behavior from runtime:
 - `{ id?, type: "get_available_commands" }`
 - `{ id?, type: "get_skill_diagnostics" }`
 - `{ id?, type: "set_skill_startup_diagnostics", enabled: boolean }`
+- `{ id?, type: "prepare_skill_diagnostic_analysis", name: string, model?: string }`
+- `{ id?, type: "analyze_skill_diagnostics", analysisId: string, consent: boolean }`
+- `{ id?, type: "cancel_skill_diagnostic_analysis", analysisId: string }`
+- `{ id?, type: "apply_skill_diagnostic_analysis", analysisId: string, confirmed: boolean }`
 - `{ id?, type: "get_entries", since?: string }`
 - `{ id?, type: "get_tree" }`
 - `{ id?, type: "set_todos", phases: TodoPhase[] }`
@@ -1070,7 +1074,25 @@ SDK session changes its in-memory setting instead of writing a config file.
       "retained": { "name": "review", "filePath": "/skills/review/SKILL.md", "source": "native:user" },
       "match": "content"
     }]
-  }]
+  }],
+  "items": [
+    {
+      "name": "review",
+      "issues": ["conflict", "redundancy", "missing-provenance"],
+      "skills": [ "…the entries above…" ],
+      "duplicates": [ "…the duplicates above…" ],
+      "reason": "source-order",
+      "canAnalyze": true
+    },
+    {
+      "name": "solo",
+      "issues": ["missing-provenance"],
+      "skills": [{ "name": "solo", "filePath": "/skills/solo/SKILL.md", "source": "native:user" }],
+      "duplicates": [],
+      "canAnalyze": false,
+      "unavailableReason": "Only one loaded copy is available; relationship analysis needs comparable variants."
+    }
+  ]
 }
 ```
 
@@ -1083,13 +1105,128 @@ hidden by opt-in `skills.dedupeSameOrigin`; clients read an omitted `match` from
 older snapshots as `content`. Shared names or declared repositories do not prove
 authenticity. An empty `diagnostics` array means no current conflicts or redundant installations.
 
+`items` is one row per loaded skill name: the combined variants and duplicates
+of a diagnosed name, or the single loaded copy of a clean one. `issues` lists
+`conflict` (several active variants), `redundancy` (redundant unloaded copies),
+and `missing-provenance` (a copy declares no repository). `canAnalyze` is true
+only when comparable copies exist; otherwise `unavailableReason` says why. A
+row carries `analysis` (the current plan record for that name, in any status:
+`prepared`, `running`, `complete`, `failed`, `cancelled`, `stale`, or `applied`)
+and `lastAnalysis` (the previous finished record, kept while another is
+prepared). Rows are sorted by name. Servers that predate the per-skill
+workflow omit `items`; read that as "no analysis support", not as "no skills".
+Building a snapshot never reads skill bodies and never calls a model; a
+finished record's `result.evidence` may quote bounded excerpts of skill files.
+
 The snapshot also appears in `get_state.skillDiagnostics` and in
 `{ type: "skill_diagnostics_update", data: snapshot }` at startup and on semantic
-changes. Identical updates are suppressed. Disabling notices does not remove
+changes: resolution, cwd, the effective notice setting, and every analysis state
+or result change (prepared, running, finished, failed, cancelled, applied).
+Identical updates are suppressed. Disabling notices does not remove
 diagnostic data; hosts apply the effective flag only to automatic presentation.
 These frames are UI metadata, not transcript messages or model input.
 Older runtimes may omit the state field or reject these commands; treat that as
 unavailable support, not a clean resolution.
+
+#### Skill analysis workflow
+
+The interactive `/skills diagnostics` panel and RPC drive one session-owned
+controller, so the same ids, consent, status, and results apply on every
+interface. A host such as a web UI or an RPC TUI calls four commands and
+renders `items`; it never reads skill files, supplies paths, or sends a model
+result back.
+
+1. `{ id?, type: "prepare_skill_diagnostic_analysis", name: string, model?: string }`
+   snapshots the comparable variants of one raw skill name and returns a
+   `SkillDiagnosticAnalysisRecord` with `status: "prepared"`. Nothing is sent to
+   a model. `model` must name exactly one authenticated model (`provider/id`,
+   optionally `:thinking`); omitted uses the default analysis model, and there is
+   no fuzzy match or fallback. A name with no comparable variants, an unknown
+   model, a request over the size cap, or a name that is already running is an
+   error response. The new id is opaque and server-held; only the latest
+   prepared or current record per name is kept, so preparing again supersedes an
+   older unstarted id.
+2. Show the user what would leave the machine: the record's `model`,
+   `candidates` (`filePath`, `root`, `files`, `complete`, `omissions`), `bytes`,
+   and `disclosure` (files are data, known secret patterns are filtered but that
+   is best-effort, the conversation is excluded, charges may apply). Incomplete
+   coverage (`complete: false`) makes the result advisory and unusable for
+   hiding a copy.
+3. `{ id?, type: "analyze_skill_diagnostics", analysisId: string, consent: boolean }`
+   starts the model work. `consent` must be the boolean `true`; `false`, a
+   missing value, or any other type is an error response and nothing is sent.
+   The response returns at once with `status: "running"`; completion, failure,
+   cancellation, or staleness arrive as `skill_diagnostics_update` frames and are
+   visible through `get_skill_diagnostics` and `get_state`. Because the update
+   frame for `running` is emitted before the response, a client that correlates
+   by id can see it first. Repeating the call for a running, complete, or
+   applied id replays the stored record and never starts a second model request;
+   a cancelled, failed, or stale id must be prepared again. Before sending, the
+   server re-reads the files; if their contents changed since preparation the
+   record becomes `stale` and nothing is sent.
+4. `{ id?, type: "cancel_skill_diagnostic_analysis", analysisId: string }`
+   aborts a prepared or running analysis and returns its record (`cancelled`).
+   Cancelling a finished record returns it unchanged. A reply that arrives after
+   cancellation is discarded.
+5. `{ id?, type: "apply_skill_diagnostic_analysis", analysisId: string, confirmed: boolean }`
+   applies a `complete` result whose recommendation is `prefer` over complete
+   coverage. `confirmed` must be the boolean `true` and is separate from
+   analysis consent. Applying re-checks that the reviewed files are unchanged,
+   saves a content-bound exclusion of the other variants in the user's global
+   settings, reloads skills, and returns the record with `status: "applied"` and
+   `applied: true`; installed files are unchanged. Repeating a successfully
+   applied id replays the record without another change. If the choice was saved
+   but reloading failed, the record has `applied: true` and `error`; copies may
+   remain active, and another separately confirmed call retries the application.
+   Any other status, a `keep-all` recommendation, or changed files is an error.
+
+All four return the same record, and all fail with the established error
+response (`{ type: "response", success: false, error }`) for a non-string id or
+name, a non-boolean `consent`/`confirmed`, an unknown, superseded, or
+other-session id, or a refused state. Startup, opening a panel, `get_state`, and
+the getters never start analysis or application.
+
+```json
+{
+  "id": "0d7c…",
+  "name": "review",
+  "status": "complete",
+  "model": "provider/model",
+  "bytes": 2048,
+  "candidates": [
+    { "id": "skill-1", "name": "review", "filePath": "/skills/review/SKILL.md", "root": "/skills/review", "fingerprint": "ab12…", "complete": true, "files": 1, "omissions": [] },
+    { "id": "skill-2", "name": "review", "filePath": "/other/review/SKILL.md", "root": "/other/review", "fingerprint": "cd34…", "complete": true, "files": 1, "omissions": [] }
+  ],
+  "disclosure": "Files are treated as data and never executed. …",
+  "createdAt": 1767225600000,
+  "applied": false,
+  "result": {
+    "relationship": "adaptation",
+    "evidence": [{ "candidateId": "skill-1", "file": "SKILL.md", "quote": "Review changes carefully.", "explanation": "Both variants carry the same checklist line." }],
+    "differences": ["One variant runs the linter first."],
+    "recommendation": { "action": "prefer", "preferredId": "skill-1", "reason": "The first variant loses nothing." },
+    "limitations": []
+  }
+}
+```
+
+`status` is `prepared`, `running`, `complete`, `failed`, `cancelled`, `applied`,
+or `stale`. `stale` means the reviewed files changed after preparation (nothing
+was sent), after the analysis finished, or an applied preference was restored.
+A completed `result` may remain for inspection, but cannot be applied. `error`
+explains a failure or stale record, and `result` is present once the analysis
+has completed, including later `applied` or `stale` records. `relationship` is
+`copies`, `adaptation`, `overlap`, `complementary`, `unrelated`, or `uncertain`,
+and `recommendation.action` is `keep-all` or `prefer` (`preferredId` only with
+`prefer`). Evidence quotes are validated against the files the model was shown,
+and a `prefer` the evidence does not support is downgraded to `keep-all` before
+it is reported. Records omit full resource snapshots, credentials, and
+conversation text, but `result.evidence[].quote` carries bounded verbatim
+excerpts of skill files, and these appear in every update frame and in
+`get_state`. A session change, new session, or disposal aborts running work and
+drops records; a late reply never reaches the new session, and the old id is
+refused. Closing a UI never starts or applies anything, and already-approved
+work keeps running and stays visible to the next `get_skill_diagnostics`.
 
 The diagnostics types, commands, and update frame are also defined in the
 canonical wire schema and generated into the Python, Go, and Rust SDKs by
@@ -1097,6 +1234,7 @@ canonical wire schema and generated into the Python, Go, and Rust SDKs by
 null optional package identity/provenance is treated as absent; required snapshot
 fields, arrays, and non-null field types remain validated. OMP emits
 `pluginName`, `repository`, and `version` only as strings or omits them.
+
 ### Pi-compatible history/tree commands with OMP-native entry payloads
 
 The commands and reconciliation semantics below are Pi-compatible, but the
@@ -1837,7 +1975,7 @@ Current helper characteristics:
 - Drives draft-only speech input with `dictationStart(captureId)`, `dictationStop()`, and `onDictation()`
 - `promptAndWait()` waits for that prompt's result (or synchronous local completion); `waitForSettled()` also waits for session quiescence. `waitForIdle()` and `collectEvents()` stop at the next `agent_end`, including a non-terminal one, and are not settle barriers.
 - Wraps common protocol commands including OAuth `getLoginProviders()` / `login(...)` and `getLogoutAccounts(...)` / `logout(...)`; use raw protocol frames for unwrapped surfaces such as host-URI registration or delta-only message updates.
-- Exposes `getSkillDiagnostics()`, `setSkillStartupDiagnostics(enabled)`, and `onSkillDiagnosticsUpdate(listener)` for typed diagnostic snapshots.
+- Exposes `getSkillDiagnostics()`, `setSkillStartupDiagnostics(enabled)`, and `onSkillDiagnosticsUpdate(listener)` for typed diagnostic snapshots, plus `prepareSkillDiagnosticAnalysis(name, model?)`, `analyzeSkillDiagnostics(analysisId, consent)`, `cancelSkillDiagnosticAnalysis(analysisId)`, and `applySkillDiagnosticAnalysis(analysisId, confirmed)` for the per-skill analysis workflow. Snapshots, records, and the structured `ResourceAnalysis` result are validated field by field; a malformed enum, id, boolean, or number rejects instead of decoding partially, and a snapshot from an older server decodes with `items` absent.
 
 ### Python package
 

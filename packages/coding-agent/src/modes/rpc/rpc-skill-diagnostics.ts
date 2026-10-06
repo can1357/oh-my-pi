@@ -3,7 +3,13 @@ import { cfgSkillsShowStartupDiagnostics } from "../../extensibility/settings";
 import type { AgentSession } from "../../session/agent-session";
 import type { RpcSkillDiagnosticsUpdateFrame } from "./rpc-types";
 
-/** Projects the resolver state onto RPC and emits only effective changes. */
+/**
+ * Projects the session's shared skill-diagnostic workflow onto RPC and emits only effective changes.
+ *
+ * The analysis commands call the same `session.skillDiagnosticController` the interactive panel uses; this
+ * class keeps no workflow state of its own, so ids, consent, progress and results mean the same thing on
+ * every interface.
+ */
 export class RpcSkillDiagnostics {
 	readonly #session: AgentSession;
 	readonly #output: (frame: RpcSkillDiagnosticsUpdateFrame) => void;
@@ -14,6 +20,8 @@ export class RpcSkillDiagnostics {
 		this.#output = output;
 		const unsubscribeMetadata = session.subscribeCommandMetadataChanged(() => this.#emitIfChanged());
 		session.addDisposer(unsubscribeMetadata);
+		// Status, progress, results and application are semantic changes of the same snapshot.
+		session.addDisposer(session.skillDiagnosticController.subscribe(() => this.#emitIfChanged()));
 		cfgSkillsShowStartupDiagnostics.listen(session, () => this.#emitIfChanged());
 		this.#emitIfChanged();
 	}
@@ -23,6 +31,7 @@ export class RpcSkillDiagnostics {
 			this.#session.sessionManager.getCwd(),
 			this.#session.skillDiagnostics,
 			cfgSkillsShowStartupDiagnostics.get(this.#session.settings),
+			this.#session.skillDiagnosticController.items(),
 		);
 	}
 
@@ -36,7 +45,8 @@ export class RpcSkillDiagnostics {
 	#emitIfChanged(): void {
 		const snapshot = this.snapshot();
 		if (this.#lastEmitted !== undefined && Bun.deepEquals(snapshot, this.#lastEmitted)) return;
-		this.#lastEmitted = snapshot;
+		// Detached copy: records the controller later mutates in place must not make the next comparison a no-op.
+		this.#lastEmitted = structuredClone(snapshot);
 		this.#output({ type: "skill_diagnostics_update", data: snapshot });
 	}
 }

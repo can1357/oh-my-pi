@@ -18,6 +18,7 @@ import type {
 } from "@oh-my-pi/pi-ai";
 import type { BashResult } from "../../exec/bash-executor";
 import type { ContextUsage } from "../../extensibility/extensions/types";
+import type { SkillDiagnosticAnalysisRecord } from "../../extensibility/skill-diagnostic-controller";
 import type { SkillDiagnosticsSnapshot } from "../../extensibility/skill-diagnostics";
 import type { AgentSessionEvent, SessionStats } from "../../session/agent-session";
 import type { SessionLeaseReport } from "../../session/session-storage";
@@ -36,6 +37,14 @@ import type { GoalModeState } from "../../goals/state";
 import type { RpcGoalOp, RpcGoalResult } from "./rpc-goal";
 import type { BtwHistoryRecord } from "../../session/btw-history";
 
+export type {
+	SkillAnalysisCandidate,
+	SkillAnalysisStatus,
+	SkillDiagnosticAnalysisRecord,
+	SkillDiagnosticIssue,
+	SkillDiagnosticItem,
+} from "../../extensibility/skill-diagnostic-controller";
+export type { ResourceAnalysis } from "../../extensibility/resource-analysis";
 export type {
 	SkillDiagnosticDuplicate,
 	SkillDiagnosticEntry,
@@ -73,6 +82,10 @@ export type RpcCommand =
 	| { id?: string; type: "get_state" }
 	| { id?: string; type: "get_skill_diagnostics" }
 	| { id?: string; type: "set_skill_startup_diagnostics"; enabled: boolean }
+	| { id?: string; type: "prepare_skill_diagnostic_analysis"; name: string; model?: string }
+	| { id?: string; type: "analyze_skill_diagnostics"; analysisId: string; consent: boolean }
+	| { id?: string; type: "cancel_skill_diagnostic_analysis"; analysisId: string }
+	| { id?: string; type: "apply_skill_diagnostic_analysis"; analysisId: string; confirmed: boolean }
 	| { id?: string; type: "set_fast_mode"; enabled: boolean }
 	| { id?: string; type: "set_slow_mode"; enabled: boolean }
 	| {
@@ -485,6 +498,34 @@ export type RpcResponse =
 			command: "set_skill_startup_diagnostics";
 			success: true;
 			data: SkillDiagnosticsSnapshot;
+	  }
+	| {
+			id?: string;
+			type: "response";
+			command: "prepare_skill_diagnostic_analysis";
+			success: true;
+			data: SkillDiagnosticAnalysisRecord;
+	  }
+	| {
+			id?: string;
+			type: "response";
+			command: "analyze_skill_diagnostics";
+			success: true;
+			data: SkillDiagnosticAnalysisRecord;
+	  }
+	| {
+			id?: string;
+			type: "response";
+			command: "cancel_skill_diagnostic_analysis";
+			success: true;
+			data: SkillDiagnosticAnalysisRecord;
+	  }
+	| {
+			id?: string;
+			type: "response";
+			command: "apply_skill_diagnostic_analysis";
+			success: true;
+			data: SkillDiagnosticAnalysisRecord;
 	  }
 	| {
 			id?: string;

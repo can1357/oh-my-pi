@@ -1,6 +1,4 @@
 import type { InteractiveModeContext } from "../modes/types";
-import { Text } from "@oh-my-pi/pi-tui";
-import { formatSkillDiagnostics } from "../modes/utils/skill-diagnostics";
 import { SkillshareClient } from "../skillshare/client";
 import {
 	formatInstalledSkills,
@@ -15,15 +13,15 @@ import {
 } from "../skillshare/installer";
 import { clearSubmittedText } from "./helpers/draft";
 import { errorMessage, parseSubcommand } from "./helpers/parse";
+import { runSkillDiagnosticsPanel } from "./skill-diagnostics-panel";
 import type { SlashCommandSpec } from "./types";
-import { runSkillDiagnosticAnalysis } from "./skill-diagnostic-analysis";
 
 const USAGE = [
 	"Skill registry (skills.omp.sh) commands:",
 	"  /skills search <query>                        Search the registry",
 	"  /skills install <@scope/name[@range]>… [-g]   Install into this project (-g: user-global)",
 	"  /skills installed                             List installed registry skills",
-	"  /skills diagnostics [analyze [name]]          Inspect copies; optionally request AI analysis",
+	"  /skills diagnostics                           Browse skill issues; Enter on a skill requests AI analysis",
 	"  /skills update [@scope/name…] [-g]            Update within the ranges in skills.json",
 ].join("\n");
 
@@ -76,8 +74,7 @@ export const BUILTIN_SKILLS_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 			{ name: "installed", description: "List installed registry skills" },
 			{
 				name: "diagnostics",
-				description: "Inspect skill conflicts; optionally analyze relationships with AI",
-				usage: "[analyze [name]]",
+				description: "Browse skill issues and request AI analysis of a selected skill",
 			},
 			{
 				name: "update",
@@ -94,24 +91,13 @@ export const BUILTIN_SKILLS_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 			try {
 				switch (verb) {
 					case "diagnostics": {
-						const { verb: action, rest: name } = parseSubcommand(rest);
-						if (action === "analyze") {
-							await runSkillDiagnosticAnalysis(ctx, name || undefined);
+						if (rest) {
+							ctx.showError(
+								"Usage: /skills diagnostics (no arguments; select a skill in the panel and press Enter)",
+							);
 							return;
 						}
-						if (action) {
-							ctx.showError("Usage: /skills diagnostics [analyze [name]]");
-							return;
-						}
-						const report = formatSkillDiagnostics(ctx.session.skillDiagnostics);
-						const offer =
-							ctx.session.skillDiagnostics.length > 0
-								? "\n\nNeed help comparing these copies? Run /skills diagnostics analyze [name]. AI analysis requires consent and never applies recommendations automatically."
-								: "";
-						ctx.showCommandReport({
-							title: "Skill Discovery Details",
-							body: new Text(report + offer, 0, 0),
-						});
+						await runSkillDiagnosticsPanel(ctx);
 						return;
 					}
 					case "search": {
