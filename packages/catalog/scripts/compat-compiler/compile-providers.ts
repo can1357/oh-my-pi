@@ -79,6 +79,7 @@ export const PROVIDER_CATALOG_NODES: ReadonlySet<string> = new Set([
 	"default-model",
 	"env",
 	"allow-unauthenticated",
+	"automatic-default",
 	"dynamic-models-authoritative",
 	"skip-cross-provider-reference-fills",
 	"discovery",
@@ -366,6 +367,10 @@ function parseProvider(node: KdlNodeView): ParsedProvider | undefined {
 			case "allow-unauthenticated":
 				if (provider.allowUnauthenticated !== undefined) malformed(child);
 				provider.allowUnauthenticated = singleBoolean(child);
+				break;
+			case "automatic-default":
+				if (provider.automaticDefault !== undefined) malformed(child);
+				provider.automaticDefault = singleBoolean(child);
 				break;
 			case "dynamic-models-authoritative":
 				if (provider.dynamicModelsAuthoritative !== undefined) malformed(child);

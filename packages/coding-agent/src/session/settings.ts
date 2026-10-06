@@ -1326,7 +1326,7 @@ export const cfgCodexResetsSalvageHorizonHours = register({
 		group: "Services",
 		label: "Codex Reset Salvage Horizon",
 		description:
-			"Spend a saved Codex reset automatically when it would otherwise expire within this many hours and either chat window (5h or weekly) has meaningful usage to restore (0 disables expiry salvage).",
+			"With auto-redeem enabled, spend a saved Codex reset within this many hours of expiry when either chat window has meaningful usage. 0 disables early salvage; credits expiring within 5 minutes are still attempted regardless of usage.",
 	},
 });
 
@@ -1387,7 +1387,7 @@ export const cfgClaudeResetsKeepCredits = register({
 		group: "Services",
 		label: "Claude Auto-Redeem Reserve",
 		description:
-			"Keep at least this many Claude resets banked (0 allows the last eligible reset to be spent automatically). The reserve also applies to expiry salvage.",
+			"Keep at least this many Claude resets banked (0 allows the last eligible reset to be spent automatically). The reserve applies to early salvage, but not to eligible resets expiring within 5 minutes.",
 	},
 });
 
@@ -1400,7 +1400,7 @@ export const cfgClaudeResetsSalvageHorizonHours = register({
 		group: "Services",
 		label: "Claude Reset Salvage Horizon",
 		description:
-			"Use a server-selected Cedar reset within this many hours of expiry only when its covered windows have meaningful usage to restore and the grant permits early use or a covered window is exhausted (0 disables salvage).",
+			"With auto-redeem enabled, use a server-selected Cedar reset within this many hours of expiry when its covered windows have meaningful usage. 0 disables early salvage; eligible Cedar or Juniper resets expiring within 5 minutes are still attempted regardless of usage or reserve. Provider limit requirements still apply.",
 	},
 });
 

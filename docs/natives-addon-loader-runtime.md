@@ -83,7 +83,7 @@ A successfully selected embedded candidate is prepended. Windows staging is disa
 
 ## Embedded manifest and extraction
 
-`embedded-addon.js` is reset to `embeddedAddon = null` in normal source/published-core state. `scripts/embed-native.ts` can generate a matching manifest containing:
+`embedded-addon.js` is always `embeddedAddon = null` on disk, including the published core. Standalone binary builds replace it in memory with a manifest from `scripts/embed-native.ts` containing:
 
 - `platformTag` and package `version`;
 - a gzip-compressed tar archive reference;

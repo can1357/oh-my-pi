@@ -2,22 +2,22 @@
 
 ## [Unreleased]
 
+## [18.7.0] - 2026-10-06
+
 ### Added
 
-- Added Mistral Large 4 with reasoning, image input, a 1M-token context window, and preview pricing ([#14602](https://github.com/can1357/oh-my-pi/pull/14602) by [@PierrunoYT](https://github.com/PierrunoYT)).
-- MiniMax-M3.1-Flash-Preview now offers thinking levels low through max on MiniMax hosts. Like MiniMax M2, it is marked as requiring reasoning effort because the model always thinks: thinking-off and forced-off requests run at the low level ([#13696](https://github.com/can1357/oh-my-pi/pull/13696) by [@eggpeat](https://github.com/eggpeat))
-- Added `RUNNER_API_KINDS` and `runnerApiKind()`, the model kind each single-purpose runner API serves, plus `IMAGE_GENERATION_APIS`, `servedKinds()`, and `apiServesKind()` for the kinds any API can serve; the compat compiler now rejects a provider `kind-apis` entry that lists a runner API under a different kind ([#14483](https://github.com/can1357/oh-my-pi/pull/14483) by [@oshinop](https://github.com/oshinop))
-- Added `Model.kindConfig`, a configured kind that `buildModel` applies over catalog `kind` rules on every rebuild ([#14483](https://github.com/can1357/oh-my-pi/pull/14483) by [@jimhester](https://github.com/jimhester))
-- Added Google Cloud partner-model pricing for Claude Opus 5.5 and Sonnet 5.5 on Google Antigravity ([#14195](https://github.com/can1357/oh-my-pi/pull/14195) by [@eggpeat](https://github.com/eggpeat)).
+- Added Mistral Large 4 with reasoning support, image input, a 1M-token context window, and preview pricing.
+- Added configurable thinking levels from low through maximum for MiniMax-M3.1-Flash-Preview; because the model always reasons, requests that disable thinking use the low level.
+- Added Google Antigravity pricing and model support for Claude Opus 5.5 and Sonnet 5.5.
 
 ### Changed
 
-- MiniMax Token Plan (`minimax-code`, `minimax-code-cn`) now uses MiniMax's recommended Anthropic-compatible API, and `/login` checks keys against the same endpoint ([#13696](https://github.com/can1357/oh-my-pi/pull/13696) by [@eggpeat](https://github.com/eggpeat))
-- Google Antigravity now lists Claude Opus 5.5 and Sonnet 5.5 once each, with selectable low, medium, and high thinking levels ([#14195](https://github.com/can1357/oh-my-pi/pull/14195) by [@eggpeat](https://github.com/eggpeat)).
+- MiniMax Token Plan providers (`minimax-code` and `minimax-code-cn`) now use MiniMax's recommended Anthropic-compatible API for model requests and login key validation.
+- Google Antigravity now exposes Claude Opus 5.5 and Sonnet 5.5 once each, with selectable low, medium, and high thinking levels.
 
 ### Fixed
 
-- Fixed GPT-6 Astra's Ultrafast service tier being unpriced: the catalog now carries OpenAI's published multiplier, 6x on the first-party API and 8x (the included-usage rate, matching Fast's 2.5x) on the Codex card ([#14471](https://github.com/can1357/oh-my-pi/pull/14471) by [@eggpeat](https://github.com/eggpeat)).
+- Added the correct published pricing for GPT-6 Astra's Ultrafast service tier: a 6× multiplier on the OpenAI API and an 8× multiplier on the Codex card.
 
 ## [18.6.3] - 2026-10-06
 

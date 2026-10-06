@@ -407,8 +407,11 @@ This path also works for local OpenAI-compatible servers that are not LM Studio.
 On Apple Silicon macOS, an unconfigured, non-disabled `apple` provider is probed through the
 in-process Foundation Models bridge. When the bridge reports it usable, `apple/on-device` is
 available without credentials, with context size, reasoning, image input, and tool support derived
-from bridge metadata. Ineligible devices, disabled Apple Intelligence, and builds without the
-bridge yield no models. Its internal API is `apple-foundation-models`; no HTTP endpoint is used.
+from bridge metadata. It is not selected automatically: its on-device context window may be
+smaller than the default coding-agent prompt and project instructions. Select it deliberately with
+`--model apple/on-device` or `/model`; otherwise use `/login` or configure another local model.
+Ineligible devices, disabled Apple Intelligence, and builds without the bridge yield no models.
+Its internal API is `apple-foundation-models`; no HTTP endpoint is used.
 
 ### LiteLLM provider discovery
 

@@ -12,17 +12,19 @@
  *   the exhausted windows.
  *   Candidates span ALL accounts, active first.
  * - `expiring-credit` (any trigger): use-it-or-lose-it salvage of credits
- *   whose `expiresAt` falls inside the horizon, gated only by the window
- *   having meaningful usage to restore — never by the reserve. A
- *   `nothing_to_reset` no-op defers the episode instead of burying it
- *   ({@link isTerminalRedeemOutcome}).
+ *   whose `expiresAt` falls inside the horizon, gated by meaningful usage
+ *   outside the last five minutes — never by the reserve. Imminent expiry
+ *   bypasses the horizon, usage gate, and non-terminal deferrals, but retains
+ *   consent, live credit eligibility, terminal dedupe, and account cooldown.
  */
 import { describe, expect, it } from "bun:test";
 import type { UsageReport } from "@oh-my-pi/pi-ai";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import {
+	ATTEMPT_COOLDOWN_MS,
 	blockedAttemptKey,
 	type CodexResetPlanInput,
+	IMMINENT_RESET_EXPIRY_MS,
 	isTerminalRedeemOutcome,
 	planCodexResetRedemptions,
 	SALVAGE_MIN_USED_FRACTION,
@@ -592,14 +594,14 @@ describe("planCodexResetRedemptions: expiring-credit", () => {
 		});
 	});
 
-	it("ignores already-expired and non-available credits", () => {
+	it("ignores expired, exactly-expiring, and non-available imminent credits", () => {
 		const plan = planCodexResetRedemptions(
 			input(
 				[
 					report({
 						weeklyUsed: 0.8,
-						creditExpiries: [-HOUR, 2 * HOUR],
-						creditStatuses: ["available", "redeemed"],
+						creditExpiries: [-1, 0, IMMINENT_RESET_EXPIRY_MS],
+						creditStatuses: ["available", "available", "redeemed"],
 					}),
 				],
 				{ trigger: "sweep" },
@@ -608,10 +610,11 @@ describe("planCodexResetRedemptions: expiring-credit", () => {
 		expect(plan.actions).toEqual([]);
 	});
 
-	it("ignores credits without an expiry date", () => {
-		const plan = planCodexResetRedemptions(
-			input([report({ weeklyUsed: 0.8, creditExpiries: [undefined] })], { trigger: "sweep" }),
-		);
+	it.each([undefined, "not-a-date"])("ignores missing or invalid credit expiry %s", expiresAt => {
+		const candidate = report({ weeklyUsed: 0.8, creditExpiries: [undefined] });
+		candidate.resetCredits!.credits![0]!.expiresAt = expiresAt;
+		const plan = planCodexResetRedemptions(input([candidate], { trigger: "sweep" }));
+		expect(plan.actions).toEqual([]);
 		expect(plan.skipped).toContainEqual({
 			accountKey: ACCOUNT_KEY,
 			rule: "expiring-credit",
@@ -674,11 +677,11 @@ describe("planCodexResetRedemptions: expiring-credit", () => {
 		expect(plan.actions).toHaveLength(1);
 	});
 
-	it("skips a salvage episode that was already attempted", () => {
+	it.each([2 * HOUR, IMMINENT_RESET_EXPIRY_MS])("retains terminal salvage dedupe with %i ms left", expiresInMs => {
 		const plan = planCodexResetRedemptions(
-			input([report({ weeklyUsed: 0.8, creditExpiries: [2 * HOUR] })], {
+			input([report({ weeklyUsed: 0.8, creditExpiries: [expiresInMs] })], {
 				trigger: "sweep",
-				attemptedKeys: new Set([salvageAttemptKey(ACCOUNT_KEY, NOW + 2 * HOUR)]),
+				attemptedKeys: new Set([salvageAttemptKey(ACCOUNT_KEY, NOW + expiresInMs)]),
 			}),
 		);
 		expect(plan.actions).toEqual([]);
@@ -703,7 +706,7 @@ describe("planCodexResetRedemptions: expiring-credit", () => {
 		expect(resumed.actions).toHaveLength(1);
 	});
 
-	it("is disabled by a zero horizon", () => {
+	it("disables only broader salvage with a zero horizon", () => {
 		const plan = planCodexResetRedemptions(
 			input([report({ weeklyUsed: 0.8, creditExpiries: [2 * HOUR] })], {
 				trigger: "sweep",
@@ -711,6 +714,123 @@ describe("planCodexResetRedemptions: expiring-credit", () => {
 			}),
 		);
 		expect(plan.actions).toEqual([]);
+	});
+
+	it("salvages at five minutes inclusively despite a zero horizon", () => {
+		const base = input([], {
+			trigger: "sweep",
+			settings: { enabled: true, minBlockedMinutes: 60, keepCredits: 5, salvageHorizonMs: 0 },
+		});
+		for (const expiresInMs of [1, 5 * 60_000, 5 * 60_000 + 1]) {
+			const plan = planCodexResetRedemptions({
+				...base,
+				reports: [report({ weeklyUsed: 0.1, primaryUsed: 0.1, creditExpiries: [expiresInMs] })],
+			});
+			if (expiresInMs <= 5 * 60_000) {
+				expect(plan.actions).toMatchObject([{ reason: "expiring-credit", expiresInMs }]);
+				expect(plan.actions).toHaveLength(1);
+			} else {
+				expect(plan.actions).toEqual([]);
+			}
+		}
+	});
+
+	it("keeps the wider-horizon usage threshold just outside five minutes", () => {
+		const plan = planCodexResetRedemptions(
+			input([report({ weeklyUsed: 0.1, primaryUsed: 0.1, creditExpiries: [IMMINENT_RESET_EXPIRY_MS + 1] })], {
+				trigger: "sweep",
+			}),
+		);
+		expect(plan.actions).toEqual([]);
+		expect(plan.skipped).toContainEqual({
+			accountKey: ACCOUNT_KEY,
+			rule: "expiring-credit",
+			reason: "window-mostly-free",
+		});
+	});
+
+	it("salvages zero or unknown usage on every eligible account, soonest first", () => {
+		const zero = report({
+			accountId: "acct-a",
+			primaryUsed: 0,
+			weeklyUsed: 0,
+			creditExpiries: [IMMINENT_RESET_EXPIRY_MS],
+		});
+		const unknown = report({ accountId: "acct-b", creditExpiries: [60_000] });
+		unknown.limits = [];
+		const plan = planCodexResetRedemptions(
+			input([zero, unknown], {
+				trigger: "sweep",
+				settings: { enabled: true, minBlockedMinutes: 60, keepCredits: 5, salvageHorizonMs: 0 },
+			}),
+		);
+		expect(plan.actions).toMatchObject([
+			{
+				reason: "expiring-credit",
+				accountKey: "openai-codex|-|4",
+				salvageWindow: undefined,
+				salvageUsedFraction: undefined,
+			},
+			{
+				reason: "expiring-credit",
+				accountKey: "openai-codex|-|3",
+				salvageWindow: "5h",
+				salvageUsedFraction: 0,
+			},
+		]);
+		expect(plan.actions).toHaveLength(2);
+	});
+
+	it("never salvages imminent credits without consent", () => {
+		const plan = planCodexResetRedemptions(
+			input([report({ creditExpiries: [IMMINENT_RESET_EXPIRY_MS] })], {
+				trigger: "sweep",
+				settings: { enabled: false, minBlockedMinutes: 60, keepCredits: 0, salvageHorizonMs: 12 * HOUR },
+			}),
+		);
+		expect(plan).toEqual({ actions: [], skipped: [{ accountKey: "*", rule: "account", reason: "disabled" }] });
+	});
+
+	it.each([undefined, 0])("requires live available credits for imminent salvage (count %s)", credits => {
+		const plan = planCodexResetRedemptions(
+			input([report({ credits, creditExpiries: [IMMINENT_RESET_EXPIRY_MS] })], { trigger: "sweep" }),
+		);
+		expect(plan.actions).toEqual([]);
+		expect(plan.skipped).toContainEqual({
+			accountKey: ACCOUNT_KEY,
+			rule: "account",
+			reason: credits === undefined ? "credits-unknown" : "no-credits",
+		});
+	});
+
+	it("requires a live credential target even for imminent salvage", () => {
+		const candidate = report({ creditExpiries: [IMMINENT_RESET_EXPIRY_MS] });
+		delete candidate.metadata!.resetCreditCredentialId;
+		const plan = planCodexResetRedemptions(input([candidate], { trigger: "sweep" }));
+		expect(plan.actions).toEqual([]);
+		expect(plan.skipped).toContainEqual({ accountKey: "*", rule: "account", reason: "credits-unknown" });
+	});
+
+	it("ignores long deferrals at imminent expiry but retains the full account cooldown", () => {
+		const expiresInMs = IMMINENT_RESET_EXPIRY_MS;
+		const key = salvageAttemptKey(ACCOUNT_KEY, NOW + expiresInMs);
+		const base = input([report({ weeklyUsed: 0, primaryUsed: 0, creditExpiries: [expiresInMs] })], {
+			trigger: "sweep",
+			deferredUntilByKey: new Map([[key, NOW + HOUR]]),
+			lastAttemptAtByAccount: new Map([[ACCOUNT_KEY, NOW - ATTEMPT_COOLDOWN_MS + 1]]),
+		});
+		const cooling = planCodexResetRedemptions(base);
+		expect(cooling.actions).toEqual([]);
+		expect(cooling.skipped).toContainEqual({
+			accountKey: ACCOUNT_KEY,
+			rule: "expiring-credit",
+			reason: "cooldown",
+		});
+		const resumed = planCodexResetRedemptions({
+			...base,
+			lastAttemptAtByAccount: new Map([[ACCOUNT_KEY, NOW - ATTEMPT_COOLDOWN_MS]]),
+		});
+		expect(resumed.actions).toMatchObject([{ reason: "expiring-credit", attemptKey: key }]);
 	});
 
 	it("salvages several accounts in one sweep, soonest expiry first", () => {

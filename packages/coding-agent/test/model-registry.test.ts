@@ -2637,7 +2637,8 @@ describe("ModelRegistry", () => {
 			cfgExtendedContext.set(testSettings, true);
 			await registry.reapplyModelPolicies();
 			expect(registry.find("openai-codex", "gpt-6-astra")?.contextWindow).toBe(922_000);
-			expect(registry.find("openai-codex", "gpt-5.5")?.contextWindow).toBe(272_000);
+			// Astra's curated 922K stays Astra's: a sibling without one widens only to its reported maximum.
+			expect(registry.find("openai-codex", "gpt-6-sol")?.contextWindow).toBe(872_000);
 
 			cfgExtendedContext.set(testSettings, false);
 			await registry.reapplyModelPolicies();

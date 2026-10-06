@@ -434,6 +434,7 @@ describe("provider catalog grammar", () => {
 				provider("p", [
 					'\tdefault-model "m"',
 					'\tenv "P_KEY" "P_ALT"',
+					"\tautomatic-default #false",
 					"\tdynamic-models-authoritative #true",
 					'\tdiscovery label="P" oauth-provider="p" allow-unauthenticated=#true { env "P_GEN" }',
 					"\tsupports-store #false",
@@ -445,11 +446,19 @@ describe("provider catalog grammar", () => {
 			defaultModel: "m",
 			envVars: ["P_KEY", "P_ALT"],
 			dynamicModelsAuthoritative: true,
+			automaticDefault: false,
 			discovery: { label: "P", oauthProvider: "p", allowUnauthenticated: true, envVars: ["P_GEN"] },
 		});
 		// The cascade sees only the axis; catalog nodes are not directives.
 		const cascade = compileCascade(
-			src(provider("p", ['\tdefault-model "m"', '\tenv "P_KEY"', "\tsupports-store #false"])),
+			src(
+				provider("p", [
+					'\tdefault-model "m"',
+					'\tenv "P_KEY"',
+					"\tautomatic-default #false",
+					"\tsupports-store #false",
+				]),
+			),
 		);
 		expect(cascade.rules).toEqual([
 			{ source: "providers/p.kdl:1", providers: ["p"], wire: { supportsStore: false } },

@@ -413,6 +413,8 @@ provider "muse-code" {
 
 Only `discovery` enrolls a provider in `generate-models.ts`; providers without it are never fetched at generation time (see the `charm-hyper` entry for why a live gateway deliberately omits it).
 
+`automatic-default #false` keeps a provider available for explicit selection but excludes it from startup fallback and automatic model presets. The default is `#true`; `apple` opts out because its on-device context cannot accommodate the standard coding-agent prompt in many projects.
+
 `kind-apis { <kind> "<api>" }` maps each non-chat kind (`image`, `tts`, `stt`, `embedding`, `rerank`, `video`) to the API discovery assigns rows of that kind. A runner API must sit under the kind it serves (`RUNNER_API_KINDS` in `src/types.ts`); chat APIs, which serve hosted image generation, and multi-kind `local-inference` may back any kind.
 
 ### Seed rows

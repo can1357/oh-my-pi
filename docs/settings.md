@@ -843,6 +843,7 @@ tui:
 | `images.autoResize`           | boolean | `true`           | Resize large images for model compatibility.                              |
 | `images.blockImages`          | boolean | `false`          | Never send images to providers.                                           |
 | `tui.hyperlinks`              | enum    | `auto`           | `off`, `auto`, `always`.                                                  |
+| `tui.autoGraph`               | enum    | `always`         | Chart numeric tables in the agent's answers, in the theme's colors, on terminals that show graphics: `always` uses the built-in best guess, `smart` lets the judge model pick the chart kind and columns for tables with several numeric columns, `off` leaves tables alone. Tern receives the chart as SVG. Applies to the main session in the TUI only: subagent transcripts, print, RPC, and ACP output stay plain, and their system prompts omit the diagram and chart guidance. |
 | `tui.mouse`                   | boolean | `false`          | Capture mouse clicks in the main session so live subagent cards and HUD rows focus on click, with a hover highlight on the target. Native text selection becomes Shift+drag and wheel scroll becomes Shift+wheel while on. |
 | `display.pinnedAgents`        | enum    | `collapsed`      | Pinned live-agent jump list above the editor: `off` hides it, `collapsed` shows a few rows with an expander, `full` lists all. |
 | `display.subagentLivePreview` | boolean | `false`          | Show each pinned subagent's current (or most recent) tool call beneath its jump-list row. |
@@ -948,6 +949,14 @@ searxng:
 | `secrets.enabled`                   | boolean | `false`   | Enable configured secret obfuscation and built-in credential-shaped token redaction before provider requests. See [Secret obfuscation](./secrets.md).                                                                                                                                                                                                                                                                                  |
 
 Provider credentials and custom model definitions are configured separately — see [Providers](./providers.md) and [Models](./models.md).
+
+#### Saved reset auto-consumption
+
+`codexResets.autoRedeem` and `claudeResets.autoRedeem` independently control saved-reset consumption: `yes` enables automatic spending, `no` disables it, and `unset` requires consent before the first spend. Headless sessions never spend while consent is unset.
+
+When a usage refresh detects an eligible banked reset expiring within the next **5 minutes**, auto-consumption attempts it even with little or no usage, a credit reserve, or `salvageHorizonHours: 0`. Provider eligibility, covered-limit requirements, cooldowns, and duplicate-spend protections still apply.
+
+`salvageHorizonHours` controls earlier, usage-based salvage; setting it to `0` leaves the five-minute last-chance rule active. Set the provider's `autoRedeem` to `no` to disable all automatic spending.
 
 ### Other groups
 

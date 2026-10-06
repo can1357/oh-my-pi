@@ -18,6 +18,8 @@ export interface AssistantMessageHost {
 	readonly proseOnlyThinking: boolean;
 	readonly expandThinkingBlocks: boolean;
 	readonly assistantImagesVisible: boolean;
+	/** Whether the viewed session's tables get charts: the main session's do, a focused subagent's do not. */
+	readonly tableChartsVisible: boolean;
 	readonly hideToolActivity: boolean;
 	readonly toolOutputExpanded: boolean;
 	readonly ui: { requestRender(): void; readonly imageBudget: ImageBudget };
@@ -116,6 +118,7 @@ export function createAssistantMessageComponent(
 		ctx.expandThinkingBlocks,
 	);
 	component.setImagesVisible(ctx.assistantImagesVisible);
+	component.setTableChartsVisible(ctx.tableChartsVisible);
 	component.setToolResultImagesVisible(!ctx.hideToolActivity);
 	component.setExpanded(ctx.toolOutputExpanded);
 	// A wire the `stream-revision` axis marks `possible` can rewrite text it has
