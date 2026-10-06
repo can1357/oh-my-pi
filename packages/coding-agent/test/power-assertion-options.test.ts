@@ -22,7 +22,7 @@ describe("startPowerAssertion", () => {
 	const options = powerAssertionOptions("idle")!;
 	const unavailable = () => {
 		throw new Error(
-			"Unable to connect to the system bus: Failed to connect to address unix:path=/var/run/dbus/system_bus_socket: No such file or directory",
+			"PowerBackendUnavailable: Unable to connect to the system bus: I/O error: No such file or directory (os error 2)",
 		);
 	};
 
@@ -39,6 +39,17 @@ describe("startPowerAssertion", () => {
 		expect(startPowerAssertion(options, unavailable)).toBeUndefined();
 		expect(warn).toHaveBeenCalledTimes(0);
 		expect(debug).toHaveBeenCalledTimes(1);
+	});
+
+	it("still warns when the system bus exists but refuses the connection", () => {
+		const warn = vi.spyOn(logger, "warn").mockImplementation(() => {});
+		const debug = vi.spyOn(logger, "debug").mockImplementation(() => {});
+		const refused = () => {
+			throw new Error("Unable to connect to the system bus: I/O error: Connection refused (os error 111)");
+		};
+		expect(startPowerAssertion(options, refused)).toBeUndefined();
+		expect(warn).toHaveBeenCalledTimes(1);
+		expect(debug).toHaveBeenCalledTimes(0);
 	});
 
 	it("still warns on other failures", () => {

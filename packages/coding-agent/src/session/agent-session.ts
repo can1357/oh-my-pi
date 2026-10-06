@@ -702,12 +702,12 @@ export function powerAssertionOptions(mode: "off" | "idle" | "display" | "system
 }
 
 /**
- * Message prefix `PowerAssertion.start` fails with on Linux when no system D-Bus
- * is reachable (crates/pi-natives/src/power.rs, `start_login1`). The native
- * error carries no code, so this prefix is the only signal for the
- * "platform backend not present" case, which headless containers hit by design.
+ * Code prefix `PowerAssertion.start` puts on its error message on Linux when the
+ * system D-Bus socket does not exist (crates/pi-natives/src/power.rs,
+ * `start_login1`), the "platform backend not present" case headless containers
+ * hit by design. Refused or rejected connections do not carry it.
  */
-const POWER_BACKEND_UNAVAILABLE_PREFIX = "Unable to connect to the system bus";
+const POWER_BACKEND_UNAVAILABLE_CODE = "PowerBackendUnavailable:";
 
 let powerBackendUnavailableLogged = false;
 
@@ -723,7 +723,7 @@ export function startPowerAssertion(
 		return start(options);
 	} catch (error) {
 		const message = error instanceof Error ? error.message : String(error);
-		if (message.includes(POWER_BACKEND_UNAVAILABLE_PREFIX)) {
+		if (message.startsWith(POWER_BACKEND_UNAVAILABLE_CODE)) {
 			if (!powerBackendUnavailableLogged) {
 				powerBackendUnavailableLogged = true;
 				logger.debug("Power assertion backend unavailable; sleep prevention disabled", { error: message });

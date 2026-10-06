@@ -194,6 +194,9 @@ mod platform {
 	use parking_lot::Mutex;
 	use zbus::{blocking::Connection, zvariant::OwnedFd};
 
+	/// Message prefix marking "no platform backend present". Mirrored by
+	/// `POWER_BACKEND_UNAVAILABLE_CODE` in `packages/coding-agent`.
+	const POWER_BACKEND_UNAVAILABLE_CODE: &str = "PowerBackendUnavailable";
 	const LOGIN1_DESTINATION: &str = "org.freedesktop.login1";
 	const LOGIN1_PATH: &str = "/org/freedesktop/login1";
 	const LOGIN1_MANAGER: &str = "org.freedesktop.login1.Manager";
@@ -254,7 +257,21 @@ mod platform {
 			let connection = match &mut *system_bus {
 				Some(connection) => connection,
 				slot => slot.insert(Connection::system().map_err(|error| {
-					Error::from_reason(format!("Unable to connect to the system bus: {error}"))
+					// An absent bus socket means this host has no D-Bus at all
+					// (headless container). Tag it with a stable code so callers
+					// can tell "no backend" apart from a bus that exists but
+					// refuses or rejects us, which stays a plain failure.
+					let absent = matches!(
+						&error,
+						zbus::Error::Connection(source, _) | zbus::Error::InputOutput(source)
+							if source.kind() == std::io::ErrorKind::NotFound
+					);
+					let code = if absent {
+						format!("{POWER_BACKEND_UNAVAILABLE_CODE}: ")
+					} else {
+						String::new()
+					};
+					Error::from_reason(format!("{code}Unable to connect to the system bus: {error}"))
 				})?),
 			};
 			let reply = match connection.call_method(
