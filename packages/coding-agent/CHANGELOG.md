@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- `@path` mentions inside HTML comments (`<!-- @protected: name -->`) in AGENTS.md and other context files are no longer treated as file imports ([#12953](https://github.com/can1357/oh-my-pi/issues/12953))
+
 ## [18.8.0] - 2026-10-07
 
 ### Added

@@ -126,6 +126,46 @@ describe("expandAtImports", () => {
 		expect(expanded).toContain("Also see INLINED");
 	});
 
+	test("does not expand inside single-line HTML comments", async () => {
+		await writeFile("guide.md", "INLINED");
+		const source = path.join(tmp, "AGENTS.md");
+		const input = "<!-- @./guide.md -->\nOutside <!-- @./guide.md --> then @./guide.md.\n";
+
+		const expanded = await expandAtImports(input, source);
+
+		expect(expanded).toBe("<!-- @./guide.md -->\nOutside <!-- @./guide.md --> then INLINED.\n");
+	});
+
+	test("does not expand inside multi-line HTML comments", async () => {
+		await writeFile("guide.md", "INLINED");
+		const source = path.join(tmp, "AGENTS.md");
+		const input = ["<!--", "@./guide.md", "```", "@./guide.md", "-->", "@./guide.md"].join("\n");
+
+		const expanded = await expandAtImports(input, source);
+
+		expect(expanded).toBe(["<!--", "@./guide.md", "```", "@./guide.md", "-->", "INLINED"].join("\n"));
+	});
+
+	test("treats an unterminated HTML comment as running to end of file", async () => {
+		await writeFile("guide.md", "INLINED");
+		const source = path.join(tmp, "AGENTS.md");
+		const input = "@./guide.md\n<!-- never closed\n@./guide.md\n";
+
+		const expanded = await expandAtImports(input, source);
+
+		expect(expanded).toBe("INLINED\n<!-- never closed\n@./guide.md\n");
+	});
+
+	test("ignores <!-- inside fences and inline code when tracking comments", async () => {
+		await writeFile("guide.md", "INLINED");
+		const source = path.join(tmp, "AGENTS.md");
+		const input = ["```", "<!--", "```", "see `<!--` then @./guide.md"].join("\n");
+
+		const expanded = await expandAtImports(input, source);
+
+		expect(expanded).toBe(["```", "<!--", "```", "see `<!--` then INLINED"].join("\n"));
+	});
+
 	test("does not expand inside inline code spans", async () => {
 		await writeFile("guide.md", "INLINED");
 		const source = path.join(tmp, "AGENTS.md");
