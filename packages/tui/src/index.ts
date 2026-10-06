@@ -57,6 +57,18 @@ export * from "./latex-block";
 export * from "./latex-to-unicode";
 // SGR mouse report parsing
 export * from "./mouse";
+// Pi extension compatibility surface (HStack, capabilities, compositing)
+export {
+	allocateImageId,
+	getCapabilities,
+	HStack,
+	type HStackChild,
+	type HStackChildOptions,
+	type HStackEntry,
+	type HStackOptions,
+	type LayoutViewport,
+	type TerminalCapabilities,
+} from "./legacy-pi-compat";
 // Tern Surface Protocol: describe contract, builders, blobs, settling, render state
 export * from "./native/blobs";
 export * from "./native/describe";

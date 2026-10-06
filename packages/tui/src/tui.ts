@@ -776,8 +776,78 @@ export function coalesceAdjacentSgr(line: string): string {
 /**
  * TUI - Main class for managing terminal UI with differential rendering
  */
+/**
+ * Brand a Pi viewport TUI carries so an extension can recognise one across
+ * duplicate copies of this package. A registered symbol rather than a class
+ * identity check: extensions load their own copy of pi-tui, so `instanceof`
+ * would be false for every TUI they are handed.
+ */
+export const VIEWPORT_TUI = Symbol.for("@earendil-works/pi-tui/viewport");
+
+/** A TUI that renders a replaceable layout root into the terminal viewport. */
+export interface ViewportTUI {
+	readonly [VIEWPORT_TUI]: true;
+	/** The override root, or undefined while the child list is rendering. */
+	readonly layoutRoot: Component | undefined;
+	setLayoutRoot(component: Component | undefined): void;
+}
+
+/** Whether `tui` is a viewport TUI rather than an inline renderer. */
+export function isViewportTUI(tui: unknown): tui is ViewportTUI {
+	return typeof tui === "object" && tui !== null && (tui as Record<symbol, unknown>)[VIEWPORT_TUI] === true;
+}
+
+/**
+ * Composite `overlayLine` into `baseLine` at `startCol`, keeping the result
+ * exactly `totalWidth` visible cells wide.
+ *
+ * ANSI/OSC sequences travel with the cells they style instead of being copied
+ * verbatim, so a splice never leaks styling across the seam. The final
+ * `sliceByColumn` is the hard guarantee: width tracking can drift from the
+ * rendered width on exotic sequences and wide characters at a boundary, and
+ * an over-wide row crashes the terminal.
+ */
+export function compositeTuiLine(
+	baseLine: string,
+	overlayLine: string,
+	startCol: number,
+	overlayWidth: number,
+	totalWidth: number,
+): string {
+	// An image row carries Kitty/Sixel/iTerm2 placement sequences that cannot be
+	// split at an arbitrary column, so the base survives untouched.
+	if (TERMINAL.isImageLine(baseLine)) return baseLine;
+
+	const afterStart = startCol + overlayWidth;
+	const base = extractSegments(baseLine, startCol, afterStart, totalWidth - afterStart, true);
+	const overlay = sliceWithWidth(overlayLine, 0, overlayWidth, true);
+
+	const beforePad = Math.max(0, startCol - base.beforeWidth);
+	const overlayPad = Math.max(0, overlayWidth - overlay.width);
+	const actualBeforeWidth = Math.max(startCol, base.beforeWidth);
+	const actualOverlayWidth = Math.max(overlayWidth, overlay.width);
+	const afterTarget = Math.max(0, totalWidth - actualBeforeWidth - actualOverlayWidth);
+	const afterPad = Math.max(0, afterTarget - base.afterWidth);
+
+	const result =
+		base.before +
+		" ".repeat(beforePad) +
+		SEGMENT_RESET +
+		overlay.text +
+		" ".repeat(overlayPad) +
+		SEGMENT_RESET +
+		base.after +
+		" ".repeat(afterPad);
+
+	return visibleWidth(result) <= totalWidth ? result : sliceByColumn(result, 0, totalWidth, true);
+}
+
 export class TUI extends Container {
 	terminal: Terminal;
+	// Pi extensions ask whether the renderer they were handed owns the viewport
+	// and hand it a replacement layout root; see isViewportTUI.
+	readonly [VIEWPORT_TUI] = true as const;
+	#layoutRoot: Component | undefined;
 	#frameProvider: TerminalFrameProvider | undefined;
 	#acceptedHistoryBatchId = 0;
 	// Screen row where the provider's mutable viewport begins (0-based); rows
@@ -3015,6 +3085,38 @@ export class TUI extends Container {
 		return result;
 	}
 
+	/**
+	 * The single root rendered in place of the child list, or undefined while
+	 * there is none. Pi keeps this field in step with its viewport document; the
+	 * child list is this TUI's equivalent, so the field stays undefined until an
+	 * extension installs a root of its own.
+	 */
+	get layoutRoot(): Component | undefined {
+		return this.#layoutRoot;
+	}
+
+	/**
+	 * Replace the single layout root rendered into the viewport. `undefined`
+	 * restores the child list. Distinct from replacing the child list wholesale:
+	 * a viewport TUI has exactly one root, and swapping it must not orphan the
+	 * previous one's lifecycle.
+	 */
+	setLayoutRoot(component: Component | undefined): void {
+		if (this.#layoutRoot === component) return;
+		this.#layoutRoot = component;
+		this.invalidate();
+	}
+
+	// The override root replaces the child list rather than joining it, matching
+	// Pi: an extension that installs a split root owns the whole viewport.
+	override render(width: number): readonly string[] {
+		return this.#layoutRoot ? this.#layoutRoot.render(width) : super.render(width);
+	}
+
+	override describe(cx: DescribeContext): NativeNode | null {
+		return this.#layoutRoot ? (this.#layoutRoot.describe?.(cx) ?? null) : super.describe(cx);
+	}
+
 	/** Splice overlay content into a base line at a specific column. Single-pass optimized. */
 	#compositeLineAt(
 		baseLine: string,
@@ -3032,45 +3134,9 @@ export class TUI extends Container {
 			return SEGMENT_RESET + overlay.text + " ".repeat(Math.max(0, totalWidth - overlay.width));
 		}
 
-		// Single pass through baseLine extracts both before and after segments
-		const afterStart = startCol + overlayWidth;
-		const base = extractSegments(baseLine, startCol, afterStart, totalWidth - afterStart, true);
-
-		// Extract overlay with width tracking (strict=true to exclude wide chars at boundary)
-		const overlay = sliceWithWidth(overlayLine, 0, overlayWidth, true);
-
-		// Pad segments to target widths
-		const beforePad = Math.max(0, startCol - base.beforeWidth);
-		const overlayPad = Math.max(0, overlayWidth - overlay.width);
-		const actualBeforeWidth = Math.max(startCol, base.beforeWidth);
-		const actualOverlayWidth = Math.max(overlayWidth, overlay.width);
-		const afterTarget = Math.max(0, totalWidth - actualBeforeWidth - actualOverlayWidth);
-		const afterPad = Math.max(0, afterTarget - base.afterWidth);
-
-		// Compose result
-		const r = SEGMENT_RESET;
-		const result =
-			base.before +
-			" ".repeat(beforePad) +
-			r +
-			overlay.text +
-			" ".repeat(overlayPad) +
-			r +
-			base.after +
-			" ".repeat(afterPad);
-
-		// CRITICAL: Always verify and truncate to terminal width.
-		// This is the final safeguard against width overflow which would crash the TUI.
-		// Width tracking can drift from actual visible width due to:
-		// - Complex ANSI/OSC sequences (hyperlinks, colors)
-		// - Wide characters at segment boundaries
-		// - Edge cases in segment extraction
-		const resultWidth = visibleWidth(result);
-		if (resultWidth <= totalWidth) {
-			return result;
-		}
-		// Truncate with strict=true to ensure we don't exceed totalWidth
-		return sliceByColumn(result, 0, totalWidth, true);
+		// The text path is Pi's own algorithm, shared with extensions that
+		// composite their own lines; only the image case above is ours.
+		return compositeTuiLine(baseLine, overlayLine, startCol, overlayWidth, totalWidth);
 	}
 
 	/**
