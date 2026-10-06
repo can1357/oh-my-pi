@@ -10040,11 +10040,12 @@ export class AgentSession implements SettingsScope {
 		const descriptionNotice = preprocessed
 			? preprocessed.descriptionNotice
 			: await this.#buildSkillImageDescriptionNotice(normalizedAppMessage);
-		// abort() clears the steer/follow-up queues; a message still being normalized when it
-		// lands must not be queued afterwards and restart the stopped run (as in #queueUserMessage).
+		// abort() clears the steer/follow-up queues and disposal flushes every queue; a message
+		// still being prepared when either lands must not be queued afterwards (as in #queueUserMessage).
 		if (
-			deliverAs !== "aside" &&
-			(this.#promptGeneration !== promptGeneration || this.#sessionGeneration !== sessionGeneration)
+			this.#isDisposed ||
+			(deliverAs !== "aside" &&
+				(this.#promptGeneration !== promptGeneration || this.#sessionGeneration !== sessionGeneration))
 		) {
 			return false;
 		}

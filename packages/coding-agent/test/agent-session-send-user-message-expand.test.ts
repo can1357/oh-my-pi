@@ -141,35 +141,39 @@ describe("AgentSession.sendUserMessage expandPromptTemplates", () => {
 		expect(observedTurns).toHaveLength(0);
 	});
 
-	it("reports a queued custom message dropped by abort during image normalization", async () => {
-		const normalizing = Promise.withResolvers<void>();
-		const normalized = Promise.withResolvers<void>();
-		vi.spyOn(imageLoading, "normalizeModelContextImages").mockImplementation(async images => {
-			normalizing.resolve();
-			await normalized.promise;
-			return images;
-		});
-		const send = session.promptCustomMessage(
-			{
-				customType: SKILL_PROMPT_MESSAGE_TYPE,
-				content: [
-					{ type: "text", text: "skill body" },
-					{ type: "image", data: "aW1n", mimeType: "image/png" },
-				],
-				display: true,
-				attribution: "user",
-			},
-			{ streamingBehavior: "followUp", queueOnly: true },
-		);
-		await normalizing.promise;
-		await session.abort();
-		normalized.resolve();
+	for (const [label, interrupt] of [
+		["abort", (target: AgentSession) => target.abort()],
+		["disposal", (target: AgentSession) => target.beginDispose()],
+	] as const) {
+		it(`reports a queued custom message dropped by ${label} during image normalization`, async () => {
+			const normalizing = Promise.withResolvers<void>();
+			const normalized = Promise.withResolvers<void>();
+			vi.spyOn(imageLoading, "normalizeModelContextImages").mockImplementation(async images => {
+				normalizing.resolve();
+				await normalized.promise;
+				return images;
+			});
+			const send = session.promptCustomMessage(
+				{
+					customType: SKILL_PROMPT_MESSAGE_TYPE,
+					content: [
+						{ type: "text", text: "skill body" },
+						{ type: "image", data: "aW1n", mimeType: "image/png" },
+					],
+					display: true,
+					attribution: "user",
+				},
+				{ streamingBehavior: "followUp", queueOnly: true },
+			);
+			await normalizing.promise;
+			await interrupt(session);
+			normalized.resolve();
 
-		expect(await send).toBe(false);
-		await session.waitForIdle();
-		expect(session.queuedMessageCount).toBe(0);
-		expect(observedTurns).toHaveLength(0);
-	});
+			expect(await send).toBe(false);
+			expect(session.queuedMessageCount).toBe(0);
+			expect(observedTurns).toHaveLength(0);
+		});
+	}
 
 	it("delivers an agent-attributed expanded skill as a user-role message", async () => {
 		await session.sendUserMessage("/skill:demo relay", { expandPromptTemplates: true, attribution: "agent" });
