@@ -279,14 +279,12 @@ export async function dispatchRpcSkillPrompt(input: {
 	await watchAndReportPromptResult({
 		ticket: input.ticket,
 		startPrompt: onPromptAdmitted =>
-			runRpcSkillCommand(
-				input.session,
-				invocation,
-				input.streamingBehavior ?? "steer",
-				built,
+			runRpcSkillCommand(input.session, invocation, {
+				streamingBehavior: input.streamingBehavior,
+				prebuilt: built,
 				onPromptAdmitted,
-				input.images,
-			),
+				images: input.images,
+			}),
 		results: input.results,
 		onError: input.onError,
 		extensionUserMessageTracker: input.extensionUserMessageTracker,
@@ -302,7 +300,7 @@ export async function tryRunRpcSkillCommand(
 ): Promise<RpcSkillCommandResult | false> {
 	const invocation = resolveRpcSkillInvocation(session, text);
 	if (!invocation) return false;
-	await runRpcSkillCommand(session, invocation, streamingBehavior, undefined, undefined, images);
+	await runRpcSkillCommand(session, invocation, { streamingBehavior, images });
 	return { agentInvoked: true };
 }
 

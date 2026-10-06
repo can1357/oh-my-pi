@@ -36,6 +36,20 @@ export function resolveRpcSkillInvocation(session: RpcSkillCommandSession, text:
 	return { skill, args: parsed.args, prompt: parsed.prompt, queueChipText: text };
 }
 
+/** Options for {@link runRpcSkillCommand}. */
+export interface RpcSkillCommandOptions {
+	/** How the skill prompt queues while the agent is streaming (default: steer). */
+	streamingBehavior?: "steer" | "followUp" | "aside";
+	/** The skill prompt message, when the caller has already built it. */
+	prebuilt?: BuiltSkillPromptMessage;
+	/** Called once the session admits the prompt. */
+	onPromptAdmitted?: () => void;
+	/** Images sent after the skill prompt text. */
+	images?: ImageContent[];
+	/** Caller correlation id recorded as `tag` on the skill prompt message. */
+	tag?: string;
+}
+
 /**
  * Slow half of a skill invocation: builds the skill prompt message (file I/O)
  * and dispatches it through the full prompt pipeline (usage preflight,
@@ -46,12 +60,9 @@ export function resolveRpcSkillInvocation(session: RpcSkillCommandSession, text:
 export async function runRpcSkillCommand(
 	session: RpcSkillCommandSession,
 	invocation: RpcSkillInvocation,
-	streamingBehavior: "steer" | "followUp" | "aside" = "steer",
-	prebuilt?: BuiltSkillPromptMessage,
-	onPromptAdmitted?: () => void,
-	images?: ImageContent[],
-	tag?: string,
+	options: RpcSkillCommandOptions = {},
 ): Promise<boolean> {
+	const { streamingBehavior = "steer", prebuilt, onPromptAdmitted, images, tag } = options;
 	const built = prebuilt ?? (await buildSkillPromptMessage(invocation.skill, invocation, "user"));
 	return session.promptCustomMessage(
 		{

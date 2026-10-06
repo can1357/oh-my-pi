@@ -96,7 +96,7 @@ export async function sendSessionUserInput(
 
 	const skill = resolveRpcSkillInvocation(session, text);
 	if (skill) {
-		await runRpcSkillCommand(session, skill, streamingBehavior, undefined, undefined, images, tag);
+		await runRpcSkillCommand(session, skill, { streamingBehavior, images, tag });
 		return { handled: "skill" };
 	}
 
