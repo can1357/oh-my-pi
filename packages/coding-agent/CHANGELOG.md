@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added extension-facing collab hosting methods (`pi.startCollab()`, `pi.getCollabLinks()`, and `pi.stopCollab()`) to start, inspect, and stop live session sharing programmatically without routing through terminal commands ([#9525](https://github.com/can1357/oh-my-pi/pull/9525) by [@jwaldrip](https://github.com/jwaldrip)).
+
 ### Changed
 
 - Inside a Tern pane, browser opens with `headed: false` now show as a Tern picture-in-picture too; only `app.tern: false` (or `browser.tern` / `PI_BROWSER_TERN=0`) opens Chromium instead
