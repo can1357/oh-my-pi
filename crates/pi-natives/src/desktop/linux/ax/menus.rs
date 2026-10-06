@@ -11,7 +11,7 @@ fn failure(message: impl std::fmt::Display) -> DesktopError {
 	DesktopError::ax_failed(format!("AT-SPI menu: {message}"))
 }
 
-fn menu_role(role: Role) -> bool {
+const fn menu_role(role: Role) -> bool {
 	matches!(role, Role::Menu | Role::MenuItem | Role::CheckMenuItem | Role::RadioMenuItem)
 }
 

@@ -2004,6 +2004,11 @@ export interface GrepResult {
   limitReached?: boolean
   /** Number of files skipped because they exceed the size limit. */
   skippedOversized?: number
+  /**
+   * Number of files whose search stopped at a NUL byte, so content past it
+   * was not searched (binary files).
+   */
+  skippedBinary?: number
 }
 
 /**

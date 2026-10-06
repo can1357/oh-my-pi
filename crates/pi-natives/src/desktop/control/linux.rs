@@ -37,7 +37,7 @@ impl EscapeMonitor {
 			.spawn(move || {
 				let result = X11::new().map(|monitor| {
 					let _ = ready.send(Ok(()));
-					monitor.run(&stopped, &emergency)
+					monitor.run(&stopped, &emergency);
 				});
 				if let Err(error) = result {
 					let _ = ready.send(Err(error));

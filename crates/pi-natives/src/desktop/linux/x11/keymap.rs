@@ -266,8 +266,9 @@ pub(super) fn run_steps_with_hold(
 	})
 }
 
-/// Unlike run_steps, this owns the complete bounded hold: no pressed state can
-/// escape to a subsequent operation, even when the body or one release fails.
+/// Unlike `run_steps`, this owns the complete bounded hold: no pressed state
+/// can escape to a subsequent operation, even when the body or one release
+/// fails.
 pub(super) fn with_held_codes(
 	codes: &[u8],
 	mut emit: impl FnMut(KeyStep) -> CoreResult<()>,

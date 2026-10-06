@@ -448,7 +448,7 @@ impl Mpx {
 	}
 
 	/// Cancellation retires the devices after cleanup, so never wait for raw
-	/// events for keys that run_steps may already have released.
+	/// events for keys that `run_steps` may already have released.
 	fn release_keys_unconfirmed(&mut self, keycodes: &[u8]) -> bool {
 		let Some(keyboard) = self.keyboard.as_mut() else {
 			return keycodes.is_empty();

@@ -336,7 +336,7 @@ impl X11Input {
 		let pointer = self.core_pointer();
 		if let Err(error) = self.activate_confirmed(window, ewmh, previous_active, budget) {
 			control::cleanup(|| {
-				self.restore_activation(window, ewmh, previous_active, previous_focus)
+				self.restore_activation(window, ewmh, previous_active, previous_focus);
 			});
 			return Err(error);
 		}

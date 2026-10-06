@@ -23,7 +23,8 @@ use grep_matcher::Matcher;
 use grep_pcre2::{RegexMatcher as PcreMatcher, RegexMatcherBuilder as PcreMatcherBuilder};
 use grep_regex::{RegexMatcher, RegexMatcherBuilder};
 use grep_searcher::{
-	BinaryDetection, Searcher, SearcherBuilder, Sink, SinkContext, SinkContextKind, SinkMatch,
+	BinaryDetection, Searcher, SearcherBuilder, Sink, SinkContext, SinkContextKind, SinkFinish,
+	SinkMatch,
 };
 use napi::{
 	JsString,
@@ -239,6 +240,9 @@ pub struct GrepResult {
 	pub limit_reached:      Option<bool>,
 	/// Number of files skipped because they exceed the size limit.
 	pub skipped_oversized:  Option<u32>,
+	/// Number of files whose search stopped at a NUL byte, so content past it
+	/// was not searched (binary files).
+	pub skipped_binary:     Option<u32>,
 }
 
 enum TypeFilter {
@@ -283,6 +287,7 @@ struct MatchCollector {
 	max_columns:     Option<usize>,
 	collect_matches: bool,
 	context_before:  SmallVec<[ContextLine; 8]>,
+	binary:          bool,
 }
 
 #[derive(Debug)]
@@ -299,6 +304,7 @@ struct SearchResultInternal {
 	match_count:   u64,
 	collected:     u64,
 	limit_reached: bool,
+	binary:        bool,
 }
 
 #[derive(Debug)]
@@ -349,6 +355,7 @@ impl MatchCollector {
 			max_columns,
 			collect_matches,
 			context_before: SmallVec::new(),
+			binary: false,
 		}
 	}
 
@@ -367,6 +374,7 @@ impl MatchCollector {
 			match_count:   self.match_count,
 			collected:     self.collected_count,
 			limit_reached: self.limit_reached,
+			binary:        self.binary,
 		}
 	}
 }
@@ -421,6 +429,14 @@ impl Sink for StreamingCollector<'_> {
 		ctx: &SinkContext<'_>,
 	) -> std::result::Result<bool, Self::Error> {
 		self.collector.context(searcher, ctx)
+	}
+
+	fn finish(
+		&mut self,
+		searcher: &Searcher,
+		finish: &SinkFinish,
+	) -> std::result::Result<(), Self::Error> {
+		self.collector.finish(searcher, finish)
 	}
 }
 
@@ -527,6 +543,15 @@ impl Sink for MatchCollector {
 		}
 
 		Ok(true)
+	}
+
+	fn finish(
+		&mut self,
+		_searcher: &Searcher,
+		finish: &SinkFinish,
+	) -> std::result::Result<(), Self::Error> {
+		self.binary = finish.binary_byte_offset().is_some();
+		Ok(())
 	}
 }
 
@@ -1185,6 +1210,7 @@ fn search_file_bytes<M: Matcher + Sync>(
 			match_count:   u64::from(matched),
 			collected:     u64::from(matched),
 			limit_reached: false,
+			binary:        false,
 		});
 	}
 	run_search_slice(searcher, matcher, bytes, params).ok()
@@ -1294,6 +1320,7 @@ struct PassState<'a> {
 	deferred:               Mutex<Vec<pi_walker::FileCandidate>>,
 	files_searched:         AtomicU64,
 	skipped_oversized:      AtomicU64,
+	skipped_binary:         AtomicU64,
 	emitted:                AtomicU64,
 	sink:                   Option<&'a dyn MatchSink>,
 	streamed_matches:       AtomicU64,
@@ -1313,6 +1340,7 @@ impl<'a> PassState<'a> {
 			deferred: Mutex::default(),
 			files_searched: AtomicU64::default(),
 			skipped_oversized: AtomicU64::default(),
+			skipped_binary: AtomicU64::default(),
 			emitted: AtomicU64::default(),
 			sink,
 			streamed_matches: AtomicU64::default(),
@@ -1325,6 +1353,7 @@ impl<'a> PassState<'a> {
 	/// delivered to the sink.
 	fn streamed_result(&self) -> GrepResult {
 		let skipped_oversized = self.skipped_oversized.load(Ordering::Relaxed);
+		let skipped_binary = self.skipped_binary.load(Ordering::Relaxed);
 		GrepResult {
 			matches:            Vec::new(),
 			total_matches:      crate::utils::clamp_u32(self.streamed_matches.load(Ordering::Relaxed)),
@@ -1336,6 +1365,7 @@ impl<'a> PassState<'a> {
 				.then_some(true),
 			skipped_oversized:  (skipped_oversized > 0)
 				.then(|| crate::utils::clamp_u32(skipped_oversized)),
+			skipped_binary:     (skipped_binary > 0).then(|| crate::utils::clamp_u32(skipped_binary)),
 		}
 	}
 }
@@ -1435,6 +1465,7 @@ fn search_one_file<M: Matcher + Sync>(
 		match_count:   0,
 		collected:     0,
 		limit_reached: false,
+		binary:        false,
 	})))
 }
 
@@ -1465,6 +1496,9 @@ fn handle_file<M: Matcher + Sync>(
 		FileOutcome::Skipped => {},
 		FileOutcome::Searched(search) => {
 			state.files_searched.fetch_add(1, Ordering::Relaxed);
+			if search.binary {
+				state.skipped_binary.fetch_add(1, Ordering::Relaxed);
+			}
 			if search.match_count > 0
 				&& let Some(sink) = state.sink
 			{
@@ -1555,7 +1589,7 @@ fn process_candidates<M: Matcher + Sync>(
 	parallel_allowed: bool,
 	stop_after_matches: Option<u64>,
 	ct: &task::CancelToken,
-) -> Result<(Vec<FileSearchResult>, u64, u64)> {
+) -> Result<(Vec<FileSearchResult>, u64, u64, u64)> {
 	let file_params = per_file_params(params);
 	let state = PassState::new(fs);
 
@@ -1606,6 +1640,7 @@ fn process_candidates<M: Matcher + Sync>(
 		results,
 		state.skipped_oversized.load(Ordering::Relaxed),
 		state.files_searched.load(Ordering::Relaxed),
+		state.skipped_binary.load(Ordering::Relaxed),
 	))
 }
 
@@ -1621,7 +1656,7 @@ fn run_sequential_grep<M: Matcher + Sync>(
 	skip_node_modules: bool,
 	ct: &task::CancelToken,
 	stop_after_matches: Option<u64>,
-) -> Result<(Vec<FileSearchResult>, u64, u64)> {
+) -> Result<(Vec<FileSearchResult>, u64, u64, u64)> {
 	let Some(candidates) = collect_grep_candidates(
 		fs,
 		search_path,
@@ -1634,7 +1669,7 @@ fn run_sequential_grep<M: Matcher + Sync>(
 		ct,
 	)?
 	else {
-		return Ok((Vec::new(), 0, 0));
+		return Ok((Vec::new(), 0, 0, 0));
 	};
 	process_candidates(fs, candidates, matcher, params, false, stop_after_matches, ct)
 }
@@ -1742,7 +1777,7 @@ fn run_windowed_streaming_grep<M: Matcher + Sync>(
 	skip_node_modules: bool,
 	ct: &task::CancelToken,
 	stop_after_matches: u64,
-) -> Result<(Vec<FileSearchResult>, u64, u64)> {
+) -> Result<(Vec<FileSearchResult>, u64, u64, u64)> {
 	let request = build_grep_walk_request(
 		fs,
 		search_path,
@@ -1824,6 +1859,7 @@ fn run_windowed_streaming_grep<M: Matcher + Sync>(
 		results,
 		state.skipped_oversized.load(Ordering::Relaxed),
 		state.files_searched.load(Ordering::Relaxed),
+		state.skipped_binary.load(Ordering::Relaxed),
 	))
 }
 
@@ -1838,7 +1874,7 @@ fn run_streaming_grep<M: Matcher + Sync>(
 	use_gitignore: bool,
 	skip_node_modules: bool,
 	ct: &task::CancelToken,
-) -> Result<(Vec<FileSearchResult>, u64, u64)> {
+) -> Result<(Vec<FileSearchResult>, u64, u64, u64)> {
 	let stop_after_matches = streaming_stop_after(params);
 	match stop_after_matches {
 		None => {
@@ -1859,6 +1895,7 @@ fn run_streaming_grep<M: Matcher + Sync>(
 				results,
 				state.skipped_oversized.load(Ordering::Relaxed),
 				state.files_searched.load(Ordering::Relaxed),
+				state.skipped_binary.load(Ordering::Relaxed),
 			))
 		},
 		Some(stop) if stop <= ORDERED_STREAMING_STOP_MAX_COUNT || pi_walker::walk_workers() <= 1 => {
@@ -2139,6 +2176,7 @@ fn grep_sync_with_matcher<M: Matcher + Sync>(
 			files_searched:     0,
 			limit_reached:      None,
 			skipped_oversized:  None,
+			skipped_binary:     None,
 		});
 	}
 
@@ -2153,6 +2191,7 @@ fn grep_sync_with_matcher<M: Matcher + Sync>(
 				files_searched:     0,
 				limit_reached:      None,
 				skipped_oversized:  None,
+				skipped_binary:     None,
 			});
 		}
 
@@ -2169,6 +2208,7 @@ fn grep_sync_with_matcher<M: Matcher + Sync>(
 						files_searched:     0,
 						limit_reached:      None,
 						skipped_oversized:  Some(1),
+						skipped_binary:     None,
 					});
 				},
 			},
@@ -2180,6 +2220,7 @@ fn grep_sync_with_matcher<M: Matcher + Sync>(
 					files_searched:     0,
 					limit_reached:      None,
 					skipped_oversized:  None,
+					skipped_binary:     None,
 				});
 			},
 		};
@@ -2196,6 +2237,7 @@ fn grep_sync_with_matcher<M: Matcher + Sync>(
 					files_searched:     1,
 					limit_reached:      None,
 					skipped_oversized:  None,
+					skipped_binary:     None,
 				});
 			}
 
@@ -2215,6 +2257,7 @@ fn grep_sync_with_matcher<M: Matcher + Sync>(
 				files_searched:     1,
 				limit_reached:      None,
 				skipped_oversized:  None,
+				skipped_binary:     None,
 			});
 		}
 
@@ -2240,6 +2283,7 @@ fn grep_sync_with_matcher<M: Matcher + Sync>(
 				files_searched:     1,
 				limit_reached:      None,
 				skipped_oversized:  None,
+				skipped_binary:     search.binary.then_some(1),
 			});
 		}
 
@@ -2282,6 +2326,7 @@ fn grep_sync_with_matcher<M: Matcher + Sync>(
 			files_searched: 1,
 			limit_reached: if limit_reached { Some(true) } else { None },
 			skipped_oversized: None,
+			skipped_binary: search.binary.then_some(1),
 		});
 	}
 
@@ -2314,7 +2359,7 @@ fn grep_sync_with_matcher<M: Matcher + Sync>(
 		!mentions_node_modules,
 		&ct,
 	)?;
-	let (results, skipped_oversized, files_searched) = results;
+	let (results, skipped_oversized, files_searched, skipped_binary) = results;
 	let (matches, total_matches, files_with_matches, files_searched, limit_reached) =
 		aggregate_parallel_results(results, params, files_searched);
 
@@ -2334,6 +2379,11 @@ fn grep_sync_with_matcher<M: Matcher + Sync>(
 		limit_reached: if limit_reached { Some(true) } else { None },
 		skipped_oversized: if skipped_oversized > 0 {
 			Some(crate::utils::clamp_u32(skipped_oversized))
+		} else {
+			None
+		},
+		skipped_binary: if skipped_binary > 0 {
+			Some(crate::utils::clamp_u32(skipped_binary))
 		} else {
 			None
 		},
@@ -3389,20 +3439,21 @@ mod tests {
 	#[cfg(unix)]
 	fn sequential_reference_result(root: &Path, params: super::SearchParams) -> super::GrepResult {
 		let matcher = super::build_matcher("needle", false, false).expect("build test matcher");
-		let (results, skipped_oversized, files_searched) = super::run_sequential_grep(
-			&BlockingFs::native(),
-			root,
-			&matcher,
-			None,
-			None,
-			params,
-			true,
-			true,
-			true,
-			&task::CancelToken::default(),
-			super::streaming_stop_after(params),
-		)
-		.expect("sequential grep should succeed");
+		let (results, skipped_oversized, files_searched, skipped_binary) =
+			super::run_sequential_grep(
+				&BlockingFs::native(),
+				root,
+				&matcher,
+				None,
+				None,
+				params,
+				true,
+				true,
+				true,
+				&task::CancelToken::default(),
+				super::streaming_stop_after(params),
+			)
+			.expect("sequential grep should succeed");
 		let (matches, total_matches, files_with_matches, files_searched, limit_reached) =
 			super::aggregate_parallel_results(results, params, files_searched);
 
@@ -3414,6 +3465,7 @@ mod tests {
 			limit_reached: limit_reached.then_some(true),
 			skipped_oversized: (skipped_oversized > 0)
 				.then(|| crate::utils::clamp_u32(skipped_oversized)),
+			skipped_binary: (skipped_binary > 0).then(|| crate::utils::clamp_u32(skipped_binary)),
 		}
 	}
 
@@ -3604,7 +3656,7 @@ mod tests {
 		let matcher = super::build_matcher("needle", false, false).expect("build test matcher");
 		let params = content_search_params(1, None);
 
-		let (results, skipped_oversized, files_searched) = super::run_streaming_grep(
+		let (results, skipped_oversized, files_searched, _) = super::run_streaming_grep(
 			&BlockingFs::native(),
 			root.path(),
 			&matcher,
@@ -3635,7 +3687,7 @@ mod tests {
 		let matcher = super::build_matcher("needle", false, false).expect("build test matcher");
 		let params = content_search_params(3, Some(1));
 
-		let (results, skipped_oversized, files_searched) = super::run_streaming_grep(
+		let (results, skipped_oversized, files_searched, _) = super::run_streaming_grep(
 			&BlockingFs::native(),
 			root.path(),
 			&matcher,
@@ -3676,7 +3728,7 @@ mod tests {
 		let matcher = super::build_matcher("needle", false, false).expect("build test matcher");
 		let params = content_search_params(budget, None);
 
-		let (results, skipped_oversized, files_searched) = super::run_streaming_grep(
+		let (results, skipped_oversized, files_searched, _) = super::run_streaming_grep(
 			&BlockingFs::native(),
 			root.path(),
 			&matcher,
@@ -3805,6 +3857,34 @@ mod tests {
 		assert_eq!(result.files_searched, 1);
 		assert_eq!(result.skipped_oversized, None);
 		assert_eq!(result.matches[0].path, "big.txt");
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn binary_file_is_reported_instead_of_silently_yielding_no_matches() {
+		let root = TempDirGuard::new();
+		let binary = root.path().join("blob.dll");
+		fs::write(&binary, b"MZ\x00\x01 needle in the strings heap\n").expect("write binary file");
+		write_file(&root.path().join("notes.txt"), "no hit here\n");
+
+		let dir = grep_sync(base_grep_config(root.path()), None, task::CancelToken::default())
+			.expect("directory grep should succeed");
+		assert_eq!(dir.total_matches, 0);
+		assert_eq!(dir.files_searched, 2);
+		assert_eq!(dir.skipped_binary, Some(1));
+
+		let file = grep_sync(base_grep_config(&binary), None, task::CancelToken::default())
+			.expect("single-file grep should succeed");
+		assert_eq!(file.total_matches, 0);
+		assert_eq!(file.skipped_binary, Some(1));
+
+		let text = grep_sync(
+			base_grep_config(&root.path().join("notes.txt")),
+			None,
+			task::CancelToken::default(),
+		)
+		.expect("text grep should succeed");
+		assert_eq!(text.skipped_binary, None);
 	}
 
 	#[cfg(unix)]
