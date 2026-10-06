@@ -6,6 +6,10 @@
 
 - Inside a Tern pane, browser opens with `headed: false` now show as a Tern picture-in-picture too; only `app.tern: false` (or `browser.tern` / `PI_BROWSER_TERN=0`) opens Chromium instead
 
+### Fixed
+
+- Fixed image attachment for lowercase macOS screenshot filenames by resolving the narrow no-break space before `am`/`pm`.
+
 ## [18.7.0] - 2026-10-06
 
 ### Added
