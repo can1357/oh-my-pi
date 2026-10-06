@@ -81,6 +81,39 @@ describe("local endpoint registry", () => {
 		expect(await Bun.file(file).exists()).toBe(false);
 	});
 
+	it.each([1, 2])("filters dead owner PIDs before probing version %s and prunes only when allowed", async version => {
+		const reg = registry();
+		const pub = await publish({ ...reg, version });
+		const file = path.join(reg.dir, `${pub.entryId}.json`);
+		const meta = { ...(await Bun.file(file).json()), pid: 2147483647 };
+		await pub.close();
+		await fs.writeFile(file, JSON.stringify(meta), { mode: 0o600 });
+		const kill = process.kill.bind(process);
+		vi.spyOn(process, "kill").mockImplementation((pid, signal) => {
+			if (pid === meta.pid) throw Object.assign(new Error("dead owner"), { code: "ESRCH" });
+			return kill(pid, signal);
+		});
+		expect(await readLocalEndpointEntries(reg, { includeAllVersions: true })).toEqual([]);
+		expect(await Bun.file(file).exists()).toBe(true);
+
+		const probe = vi.fn(async () => ({ status: "ok" as const, value: "must not probe" }));
+		expect(await listLocalEndpoints(reg, probe, { includeAllVersions: true })).toEqual([]);
+		expect(probe).not.toHaveBeenCalled();
+		expect(await Bun.file(file).exists()).toBe(false);
+	});
+
+	it("preserves a live owner when the OS denies its PID liveness probe", async () => {
+		const reg = registry();
+		const pub = await publish(reg);
+		const kill = process.kill.bind(process);
+		vi.spyOn(process, "kill").mockImplementation((pid, signal) => {
+			if (pid === process.pid) throw Object.assign(new Error("permission denied"), { code: "EPERM" });
+			return kill(pid, signal);
+		});
+		expect((await readLocalEndpointEntries(reg)).map(entry => entry.entryId)).toEqual([pub.entryId]);
+		expect(await Bun.file(path.join(reg.dir, `${pub.entryId}.json`)).exists()).toBe(true);
+	});
+
 	it("includes all versions only when requested and never prunes a live foreign-version owner", async () => {
 		const reg = registry();
 		const pub = await publish({ ...reg, version: 2 });

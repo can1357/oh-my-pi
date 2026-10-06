@@ -198,6 +198,7 @@ async function makeHarness(opts?: { readOnly?: boolean }): Promise<GuestUiHarnes
 			getCwd: () => "/local",
 		},
 		session: {
+			suspendMessagingReceiving: () => () => {},
 			messages: [],
 			switchSession: () => Promise.resolve(),
 			newSession: () => Promise.resolve(),

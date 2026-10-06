@@ -376,8 +376,8 @@ function pidAlive(pid: number): boolean {
 	try {
 		process.kill(pid, 0);
 		return true;
-	} catch {
-		return false;
+	} catch (err) {
+		return (err as NodeJS.ErrnoException).code === "EPERM";
 	}
 }
 
@@ -444,13 +444,11 @@ async function readEntries(
 			if (prune && !signal?.aborted) await pruneEntry(registry, name, null);
 			continue;
 		}
-		if (meta.version !== registry.version) {
-			if (!pidAlive(meta.pid)) {
-				if (prune && !signal?.aborted) await pruneEntry(registry, name, meta);
-				continue;
-			}
-			if (!includeAllVersions) continue;
+		if (!pidAlive(meta.pid)) {
+			if (prune && !signal?.aborted) await pruneEntry(registry, name, meta);
+			continue;
 		}
+		if (meta.version !== registry.version && !includeAllVersions) continue;
 		entries.push({ entryId: name.slice(0, -".json".length), meta });
 	}
 	return entries;

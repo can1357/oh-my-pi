@@ -385,6 +385,7 @@ describe("ToolExecutionComponent live preview spinners", () => {
 				settings: Settings.isolated(),
 				sessionManager: { getSessionFile: () => null, getSessionName: () => "local", getCwd: () => "/local" },
 				session: {
+					suspendMessagingReceiving: () => () => {},
 					messages: [],
 					switchSession: () => Promise.resolve(),
 					newSession: () => Promise.resolve(),
@@ -579,6 +580,7 @@ describe("ToolExecutionComponent live preview spinners", () => {
 				settings: Settings.isolated(),
 				sessionManager: { getSessionFile: () => null, getSessionName: () => "local", getCwd: () => "/local" },
 				session: {
+					suspendMessagingReceiving: () => () => {},
 					messages: [],
 					switchSession: () => Promise.resolve(),
 					newSession: () => Promise.resolve(),
@@ -768,6 +770,7 @@ describe("ToolExecutionComponent live preview spinners", () => {
 				settings: Settings.isolated(),
 				sessionManager: { getSessionFile: () => null, getSessionName: () => "local", getCwd: () => "/local" },
 				session: {
+					suspendMessagingReceiving: () => () => {},
 					messages: [],
 					switchSession: () => Promise.resolve(),
 					newSession: () => Promise.resolve(),

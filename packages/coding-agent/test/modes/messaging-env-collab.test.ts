@@ -61,7 +61,7 @@ it("keeps messages buffered after failed collab restoration, including repeated 
 		sessionManager: { getSessionFile: () => null, getSessionName: () => "local", getCwd: () => temp.path() },
 		session: {
 			messages: [],
-			messaging: { suspendReceiving: suspend },
+			suspendMessagingReceiving: suspend,
 			switchSession: async () => {
 				deliver("during adoption");
 			},

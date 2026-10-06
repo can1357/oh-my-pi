@@ -13,6 +13,14 @@ export interface AuthLine {
 	type: "auth";
 	token: string;
 }
+export interface ServerChallengeLine {
+	type: "challenge";
+	nonce: string;
+}
+export interface ServerProofLine {
+	type: "proof";
+	proof: string;
+}
 export interface SenderInfo {
 	sessionId: string;
 	name: string | null;
@@ -59,7 +67,8 @@ export type InboxRequest =
 	  };
 export type InboxResponse =
 	| { ok: true; snapshot: SessionSnapshot }
-	| { ok: true; outcome: "delivered" | "queued" | "held" | "refused" | "subscribed" }
+	| { ok: true; outcome: "delivered" | "held" | "refused" | "subscribed" }
+	| { ok: true; outcome: "queued"; receivingSuspended?: true }
 	| { ok: true; outcome: "dropped"; reason: DropReason }
 	| { ok: false; error: string };
 

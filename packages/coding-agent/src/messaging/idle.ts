@@ -48,7 +48,7 @@ export class IdleSubscriptions {
 			const own = this.ownSender?.();
 			const decision = own ? this.decision(own) : "accept";
 			const text = `No idle notice from @${target.address} within 12 hours; the subscription was dropped.`;
-			if (decision === "accept") this.host.deliverNotice(target, text);
+			if (decision === "accept") void this.host.deliverNotice(target, text, this.host.sessionId());
 			else if (decision !== "refuse") this.host.showNotice(text);
 		}, IDLE_SUBSCRIPTION_TTL_MS);
 		this.#asking.set(entryId, { timer, target, id });
@@ -74,7 +74,7 @@ export class IdleSubscriptions {
 			this.cancel(notice.from.entryId, notice.aboutId);
 			const decision = this.decision(notice.from);
 			const text = `@${from.address} switched to a different conversation; the idle notice was cancelled.`;
-			if (decision === "accept") this.host.deliverNotice(from, text);
+			if (decision === "accept") void this.host.deliverNotice(from, text, this.host.sessionId());
 			else if (decision !== "refuse") this.host.showNotice(text);
 			return;
 		}
@@ -89,7 +89,7 @@ export class IdleSubscriptions {
 					? `@${from.address} exited.`
 					: `@${from.address} is idle (turn finished ${time})${notice.status ? `: ${notice.status}` : "."}`;
 			const decision = this.decision(notice.from);
-			if (decision === "accept") this.host.deliverNotice(from, text);
+			if (decision === "accept") void this.host.deliverNotice(from, text, this.host.sessionId());
 			else if (decision !== "refuse") this.host.showNotice(text);
 		}
 	}
