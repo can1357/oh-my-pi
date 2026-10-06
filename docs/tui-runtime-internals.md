@@ -82,6 +82,7 @@ interface TerminalFramePlan {
 		readonly kind?: "append" | "replay";
 	};
 	readonly viewport: readonly string[];
+	readonly pinBottom?: boolean;
 }
 ```
 
@@ -90,7 +91,7 @@ The writer:
 1. Normalizes and width-fits every row with autowrap disabled.
 2. Appends only an unacknowledged history id.
 3. Repaints the anchored mutable viewport in place.
-4. Clears stale rows below the viewport.
+4. Clears stale rows below the viewport, or, for a `pinBottom` frame, pads blank rows above it down to the bottom row without scrolling on-screen history away.
 5. Restores autowrap, synchronized-output state, and cursor state.
 6. Acknowledges the exact history id only after the write is accepted in-process.
 
