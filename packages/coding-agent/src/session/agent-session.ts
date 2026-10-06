@@ -170,7 +170,9 @@ import type { CustomCommandContext } from "../extensibility/custom-commands/type
 import { SkillDescriptionCatalog } from "../extensibility/skill-descriptions";
 import {
 	type BuiltSkillPromptMessage,
+	buildSkillPromptMessage,
 	loadSkillPrompt,
+	parseSkillInvocation,
 	renderSkillPromptMessage,
 	type Skill,
 	type SkillPromptInput,
@@ -10312,6 +10314,11 @@ export class AgentSession implements SettingsScope {
 	 * Omitted `deliverAs` starts a turn when idle and queues as a steer while streaming.
 	 * Explicit `deliverAs` queues without starting a turn in either state; `aside` at
 	 * an idle session instead starts a turn, since there is no live run to inject into.
+	 *
+	 * `expandPromptTemplates` (default false) expands a registered `/skill:<name>` and
+	 * prompt templates on every delivery path. Extension, custom and file slash commands
+	 * run only through prompt() (omitted `deliverAs`, or `aside` at idle); explicit
+	 * steer/follow-up queueing never runs commands, matching steer()/followUp().
 	 */
 	async sendUserMessage(
 		content: string | (TextContent | ImageContent)[],
@@ -10337,25 +10344,49 @@ export class AgentSession implements SettingsScope {
 			if (images.length === 0) images = undefined;
 		}
 
+		const expand = options?.expandPromptTemplates === true;
+		const invocation = expand && this.skillsSettings?.enableSkillCommands ? parseSkillInvocation(text) : undefined;
+		const skill = invocation && this.skills.find(candidate => candidate.name === invocation.name);
+		if (invocation && skill) {
+			const built = await buildSkillPromptMessage(skill, invocation, "user");
+			await this.promptCustomMessage(
+				{
+					customType: SKILL_PROMPT_MESSAGE_TYPE,
+					content: images ? [{ type: "text", text: built.message }, ...images] : built.message,
+					display: true,
+					details: built.details,
+					attribution: options?.attribution ?? "user",
+				},
+				{
+					streamingBehavior: options?.deliverAs ?? "steer",
+					queueOnly: options?.deliverAs === "steer" || options?.deliverAs === "followUp",
+					queueChipText: text,
+				},
+			);
+			return;
+		}
+		const queuedText = expand ? expandPromptTemplate(text, [...this.#promptTemplates]) : text;
+		const queueOptions = { attribution: options?.attribution, rawText: text };
+
 		let deliveredAsAside = false;
 		if (options?.deliverAs === "aside") {
 			if (this.isStreaming) {
-				await this.#queueUserMessage(text, images, "aside", { attribution: options.attribution });
+				await this.#queueUserMessage(queuedText, images, "aside", queueOptions);
 				return;
 			}
 			// Idle: fall through to the prompt flow below (starts a turn, like an omitted
 			// deliverAs) — there is no live run to inject an aside into.
 			deliveredAsAside = true;
 		} else if (options?.deliverAs === "followUp") {
-			await this.#queueUserMessage(text, images, "followUp", { attribution: options.attribution });
+			await this.#queueUserMessage(queuedText, images, "followUp", queueOptions);
 			return;
 		} else if (options?.deliverAs === "steer") {
-			await this.#queueUserMessage(text, images, "steer", { attribution: options.attribution });
+			await this.#queueUserMessage(queuedText, images, "steer", queueOptions);
 			return;
 		}
 
-		// Use prompt() with expandPromptTemplates: false to skip command handling and template
-		// expansion. prompt() awaits manual-compaction cleanup and (on the non-streaming path)
+		// prompt() handles commands and templates only when expandPromptTemplates is set.
+		// It awaits manual-compaction cleanup and (on the non-streaming path)
 		// image normalization/vision description before dispatching, so a stream can start in
 		// that gap; prompt() re-checks isStreaming at each await boundary and queues via
 		// `streamingBehavior` when it does. Passing "aside" through (instead of hard-coding
@@ -10363,7 +10394,7 @@ export class AgentSession implements SettingsScope {
 		// tool-batch-aborting steer.
 		await this.prompt(text, {
 			attribution: options?.attribution,
-			expandPromptTemplates: false,
+			expandPromptTemplates: expand,
 			images,
 			streamingBehavior: deliveredAsAside ? "aside" : "steer",
 		});
