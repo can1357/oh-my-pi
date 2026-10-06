@@ -45,6 +45,7 @@ interface AppKeybindings {
 	"app.clipboard.pasteTextRaw": true;
 	"app.clipboard.copyLine": true;
 	"app.clipboard.copyPrompt": true;
+	"app.clipboard.copyLastAssistant": true;
 	"app.agents.hub": true;
 	"app.session.new": true;
 	"app.session.tree": true;
@@ -178,6 +179,10 @@ export const KEYBINDINGS = {
 		defaultKeys: "alt+shift+c",
 		description: "Copy prompt",
 	},
+	"app.clipboard.copyLastAssistant": {
+		defaultKeys: "alt+c",
+		description: "Copy last assistant response",
+	},
 	"app.session.new": {
 		defaultKeys: [],
 		description: "Create new session",
@@ -279,6 +284,7 @@ const KEYBINDING_NAME_MIGRATIONS = {
 	pasteTextRaw: "app.clipboard.pasteTextRaw",
 	copyLine: "app.clipboard.copyLine",
 	copyPrompt: "app.clipboard.copyPrompt",
+	copyLastAssistant: "app.clipboard.copyLastAssistant",
 	newSession: "app.session.new",
 	tree: "app.session.tree",
 	fork: "app.session.fork",

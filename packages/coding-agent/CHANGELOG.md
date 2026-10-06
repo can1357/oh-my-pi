@@ -96,6 +96,9 @@
 - Fixed slowdowns when processing long evaluation output, large Python kernel results, compiler/linter output, and ephemeral side-channel replies.
 - Fixed documents served as `application/octet-stream` being downloaded twice.
 - Fixed collaboration guests rebuilding the transcript excessively during streaming.
+### Added
+
+- Copy the latest assistant response to the clipboard with `/copy last` or the `Alt+C` keybinding (`app.clipboard.copyLastAssistant`) ([#14309](https://github.com/can1357/oh-my-pi/issues/14309)).
 
 ## [18.7.0] - 2026-10-06
 

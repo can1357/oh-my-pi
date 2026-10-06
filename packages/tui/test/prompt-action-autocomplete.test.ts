@@ -89,6 +89,35 @@ describe("prompt action autocomplete", () => {
 		}
 	});
 
+	it("includes Copy last assistant response when copyLastAssistant callback is provided", async () => {
+		let copyAssistantCalls = 0;
+		const provider = createPromptActionAutocompleteProvider({
+			commands: [],
+			basePath: "/tmp",
+			keybindings: AppKeybindingsManager.inMemory(),
+			copyCurrentLine: () => {},
+			copyPrompt: () => {},
+			copyLastAssistant: () => {
+				copyAssistantCalls += 1;
+			},
+			undo: () => {},
+			moveCursorToMessageEnd: () => {},
+			moveCursorToMessageStart: () => {},
+			moveCursorToLineStart: () => {},
+			moveCursorToLineEnd: () => {},
+		});
+
+		const suggestions = await provider.getSuggestions(["#"], 0, 1);
+		expect(suggestions?.items.map(item => item.label)).toContain("Copy last assistant response");
+
+		const item = suggestions?.items.find(entry => entry.label === "Copy last assistant response");
+		expect(item).toBeDefined();
+		if ("execute" in item! && typeof item!.execute === "function") {
+			item!.execute();
+		}
+		expect(copyAssistantCalls).toBe(1);
+	});
+
 	it("passes the typed trigger to undo and leaves text removal to the editor", async () => {
 		let undoCalls = 0;
 		let undoPrefix = "";

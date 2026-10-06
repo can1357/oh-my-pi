@@ -24,6 +24,7 @@ import { HookEditorComponent } from "@oh-my-pi/pi-tui/overlays/hook-editor";
 import { ReadToolGroupComponent } from "@oh-my-pi/pi-tui/chat/read-tool-group";
 import { ToolExecutionComponent } from "@oh-my-pi/pi-tui/chat/tool-execution";
 import { TreeSelectorComponent } from "@oh-my-pi/pi-tui/overlays/tree-selector";
+import { extractLastAssistantText } from "@oh-my-pi/pi-tui/overlays/copy-targets";
 import {
 	chipLabel,
 	compactImageMarkers,
@@ -692,6 +693,9 @@ export class InputController {
 		this.ctx.editor.spaceHold.handler = this.ctx.dictationSpaceHold(this.ctx.editor);
 		for (const key of this.ctx.keybindings.getKeys("app.clipboard.copyLine")) {
 			this.ctx.editor.setCustomKeyHandler(key, () => this.handleCopyCurrentLine());
+		}
+		for (const key of this.ctx.keybindings.getKeys("app.clipboard.copyLastAssistant")) {
+			this.ctx.editor.setCustomKeyHandler(key, () => void this.handleCopyLastAssistant());
 		}
 		const hubKeys = new Set([
 			...this.ctx.keybindings.getKeys("app.agents.hub"),
@@ -2631,6 +2635,7 @@ export class InputController {
 			keybindings: this.ctx.keybindings,
 			copyCurrentLine: () => this.handleCopyCurrentLine(),
 			copyPrompt: () => this.handleCopyPrompt(),
+			copyLastAssistant: () => void this.handleCopyLastAssistant(),
 			undo: prefix => this.ctx.editor.undoPastTransientText(prefix),
 			moveCursorToMessageEnd: () => this.ctx.editor.moveToMessageEnd(),
 			moveCursorToMessageStart: () => this.ctx.editor.moveToMessageStart(),
@@ -2669,6 +2674,21 @@ export class InputController {
 			const sanitized = sanitizeText(text);
 			const preview = sanitized.length > 30 ? `${sanitized.slice(0, 30)}...` : sanitized;
 			this.ctx.showStatus(`Copied: ${preview}`);
+		} catch {
+			this.ctx.showWarning("Failed to copy to clipboard");
+		}
+	}
+
+	/** Copy the last assistant response to the system clipboard. */
+	async handleCopyLastAssistant(): Promise<void> {
+		const text = extractLastAssistantText(this.ctx.viewSession.messages);
+		if (!text) {
+			this.ctx.showStatus("No assistant response to copy");
+			return;
+		}
+		try {
+			await copyToClipboard(text);
+			this.ctx.showStatus("Copied assistant response to clipboard");
 		} catch {
 			this.ctx.showWarning("Failed to copy to clipboard");
 		}

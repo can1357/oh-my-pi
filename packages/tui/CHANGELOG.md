@@ -41,6 +41,9 @@
 - Fixed slow Markdown processing for certain LaTeX environments and incomplete delimiters.
 - Fixed excessive slowdown when formatting long semicolon-free JavaScript evaluations.
 - Fixed prompt-editor lag in large drafts containing magic keywords.
+### Added
+
+- Added `app.clipboard.copyLastAssistant` keybinding action and `extractLastAssistantText` helper to copy the latest assistant response ([#14309](https://github.com/can1357/oh-my-pi/issues/14309)).
 
 ## [18.7.0] - 2026-10-06
 

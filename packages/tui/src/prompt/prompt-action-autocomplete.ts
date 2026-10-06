@@ -55,6 +55,7 @@ interface PromptActionAutocompleteOptions {
 	keybindings: KeybindingsManager;
 	copyCurrentLine: () => void;
 	copyPrompt: () => void;
+	copyLastAssistant?: () => void;
 	undo: (prefix: string) => void;
 	moveCursorToMessageEnd: () => void;
 	moveCursorToMessageStart: () => void;
@@ -296,6 +297,17 @@ export function createPromptActionAutocompleteProvider(
 			keywords: ["copy", "prompt", "clipboard", "message"],
 			execute: options.copyPrompt,
 		},
+		...(options.copyLastAssistant
+			? [
+					{
+						id: "copy-last-assistant",
+						label: "Copy last assistant response",
+						description: formatKeyHints(options.keybindings.getKeys("app.clipboard.copyLastAssistant")),
+						keywords: ["copy", "assistant", "response", "last", "clipboard"],
+						execute: options.copyLastAssistant,
+					},
+				]
+			: []),
 		{
 			id: "undo",
 			label: "Undo",

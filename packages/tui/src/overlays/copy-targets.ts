@@ -208,3 +208,12 @@ export function assistantText(msg: AgentMessage): string | undefined {
 	}
 	return text.trim() ? text : undefined;
 }
+
+/** Walk the transcript backwards for the most recent assistant message text. */
+export function extractLastAssistantText(messages: readonly AgentMessage[]): string | undefined {
+	for (let i = messages.length - 1; i >= 0; i--) {
+		const text = assistantText(messages[i]);
+		if (text !== undefined) return text;
+	}
+	return undefined;
+}

@@ -16,7 +16,7 @@ function assistantCalls(toolCalls: Array<{ name: string; arguments: Record<strin
 	} as unknown as AgentMessage;
 }
 
-function createRuntimeHarness(messages: AgentMessage[]) {
+function createRuntimeHarness(messages: AgentMessage[], viewMessages = messages) {
 	const setText = vi.fn();
 	const showStatus = vi.fn();
 	const showWarning = vi.fn();
@@ -29,6 +29,7 @@ function createRuntimeHarness(messages: AgentMessage[]) {
 		runtime: {
 			ctx: {
 				session: { messages },
+				viewSession: { messages: viewMessages },
 				editor: { setText },
 				showStatus,
 				showWarning,
@@ -95,6 +96,56 @@ describe("/copy slash command", () => {
 
 		expect(copySpy).not.toHaveBeenCalled();
 		expect(harness.showStatus).toHaveBeenCalledWith("No link to copy.");
+	});
+
+	it("copies the last assistant response with /copy last", async () => {
+		const copySpy = spyOn(clipboard, "copyToClipboard").mockResolvedValue(undefined);
+		const harness = createRuntimeHarness([
+			assistantText("old response"),
+			assistantText("latest assistant message text"),
+		]);
+
+		expect(await executeBuiltinSlashCommand("/copy last", harness.runtime)).toBe(true);
+
+		expect(copySpy).toHaveBeenCalledWith("latest assistant message text");
+		expect(harness.showStatus).toHaveBeenCalledWith("Copied assistant response to clipboard");
+		expect(harness.showCopySelector).not.toHaveBeenCalled();
+		expect(harness.setText).toHaveBeenCalledWith("");
+	});
+
+	it("copies the response from the viewed session with /copy last", async () => {
+		const copySpy = spyOn(clipboard, "copyToClipboard").mockResolvedValue(undefined);
+		const harness = createRuntimeHarness([assistantText("main response")], [assistantText("focused response")]);
+
+		expect(await executeBuiltinSlashCommand("/copy last", harness.runtime)).toBe(true);
+
+		expect(copySpy).toHaveBeenCalledWith("focused response");
+		expect(harness.showStatus).toHaveBeenCalledWith("Copied assistant response to clipboard");
+		expect(harness.showCopySelector).not.toHaveBeenCalled();
+		expect(harness.setText).toHaveBeenCalledWith("");
+	});
+
+	it("reports when there is no assistant response to copy", async () => {
+		const copySpy = spyOn(clipboard, "copyToClipboard").mockResolvedValue(undefined);
+		const harness = createRuntimeHarness([]);
+
+		expect(await executeBuiltinSlashCommand("/copy last", harness.runtime)).toBe(true);
+
+		expect(copySpy).not.toHaveBeenCalled();
+		expect(harness.showStatus).toHaveBeenCalledWith("No assistant response to copy.");
+		expect(harness.showCopySelector).not.toHaveBeenCalled();
+		expect(harness.setText).toHaveBeenCalledWith("");
+	});
+
+	it("shows usage for unrecognized copy target including last", async () => {
+		const copySpy = spyOn(clipboard, "copyToClipboard").mockResolvedValue(undefined);
+		const harness = createRuntimeHarness([assistantText("hello")]);
+
+		expect(await executeBuiltinSlashCommand("/copy unknown", harness.runtime)).toBe(true);
+
+		expect(copySpy).not.toHaveBeenCalled();
+		expect(harness.showStatus).toHaveBeenCalledWith("Usage: /copy [code|cmd|link|last]");
+		expect(harness.setText).toHaveBeenCalledWith("");
 	});
 
 	it("keeps bare /copy on the picker", async () => {
