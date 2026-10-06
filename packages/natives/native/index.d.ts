@@ -2207,9 +2207,11 @@ export interface IsoProbeResult {
 }
 
 /**
- * Pick the best backend available right now. `preferred` is treated as
- * a hint — see [`pi_iso::resolve`] for the exact priority rules. Backend
- * probes may spawn CLIs, so they run on the native blocking pool.
+ * Pick the best backend available right now.
+ *
+ * `preferred` is treated as a hint — see [`pi_iso::resolve`] for the exact
+ * priority rules. Backend probes may spawn CLIs, so they run on the native
+ * blocking pool.
  */
 export declare function isoResolve(preferred?: IsoBackendKind | undefined | null): Promise<IsoResolveResult>
 

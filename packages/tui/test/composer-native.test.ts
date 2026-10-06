@@ -1,6 +1,6 @@
 import { afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
 import type { TspKind } from "@oh-my-pi/pi-wire";
-import { describeWorkingRow } from "@oh-my-pi/pi-tui/components/loader";
+import { describeWorkingRow, type WorkingRowSpec } from "@oh-my-pi/pi-tui/components/loader";
 import { SelectList } from "@oh-my-pi/pi-tui/components/select-list";
 import type { DescribeContext, NativeChild, NativeNode } from "@oh-my-pi/pi-tui/native/node";
 import { setNativeRendering } from "@oh-my-pi/pi-tui/native/state";
@@ -279,7 +279,7 @@ describe("native composer thinking level in the model chip", () => {
 
 describe("native working row", () => {
 	it("counts a retry down in a ring and offers Cancel; without meter support it spins", () => {
-		const spec = {
+		const spec: WorkingRowSpec = {
 			label: "Retrying · attempt 1 of 3",
 			startedAt: 1_000,
 			variant: { kind: "retry", attempt: 1, max: 3, delayMs: 4_000 } as const,

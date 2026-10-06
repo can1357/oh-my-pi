@@ -13,7 +13,7 @@ import { type KeyId, parseKey, parseKittySequence } from "../keys";
 import { getSpaceHoldText, SpaceHoldGesture } from "../space-hold";
 import { type Component, TUI } from "../tui";
 import type { AppKeybinding } from "../app-keybindings";
-import { formatKeyHint } from "../key-hint-format";
+import { formatTooltipKey } from "../key-hint-format";
 import { MAIN_AGENT_ID } from "../overlays/agent-hub-types";
 import { compact, keyed, node, row, span } from "../native/describe";
 import type { DescribeContext, NativeNode, NativeUiEvent } from "../native/node";
@@ -1139,7 +1139,7 @@ export class CustomEditor extends Editor {
 	#describeViewing(viewing: readonly string[], interruptKey: KeyId): NativeNode | undefined {
 		const agent = viewing.at(-1);
 		if (agent === undefined) return undefined;
-		const back = interruptKey === "escape" ? "esc" : formatKeyHint(interruptKey);
+		const back = formatTooltipKey(interruptKey);
 		const crumbs = viewing.slice(0, -1).map(id =>
 			node(
 				"text",
@@ -1200,7 +1200,7 @@ export class CustomEditor extends Editor {
 		const shell = state.shell;
 		const focus = state.viewing && this.#describeViewing(state.viewing, interruptKey);
 		const thinking = state.thinking;
-		const thinkingHint = thinkingKey ? `  ${formatKeyHint(thinkingKey)}` : "";
+		const thinkingHint = thinkingKey ? `  ${formatTooltipKey(thinkingKey)}` : "";
 		// The level collapses into the model chip's icon; its own tooltip and click stay.
 		const modelIcon =
 			facts && thinking !== undefined && effortGlyph && state.thinkingInModel
@@ -1225,7 +1225,7 @@ export class CustomEditor extends Editor {
 					gap: "xs",
 					align: "center",
 					tone: facts.model.tone,
-					title: modelKey ? `Switch model  ${formatKeyHint(modelKey)}` : "Switch model",
+					title: modelKey ? `Switch model  ${formatTooltipKey(modelKey)}` : "Switch model",
 					actions: { click: "status.model" },
 				},
 				[
@@ -1268,7 +1268,7 @@ export class CustomEditor extends Editor {
 						role: "omp.composer.stop",
 						text: "Stop",
 						tone: "error",
-						title: `Stop  ${interruptKey === "escape" ? "esc" : formatKeyHint(interruptKey)}`,
+						title: `Stop  ${formatTooltipKey(interruptKey)}`,
 						actions: { click: "interrupt" },
 					},
 					undefined,
@@ -1279,7 +1279,7 @@ export class CustomEditor extends Editor {
 					{
 						role: "omp.composer.send",
 						keys: ["enter"],
-						title: `Send  ${formatKeyHint("enter")}`,
+						title: `Send  ${formatTooltipKey("enter")}`,
 						actions: { click: "submit" },
 					},
 					undefined,

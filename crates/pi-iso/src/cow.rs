@@ -108,8 +108,9 @@ pub fn clone_open(src: &File, dst: &File) -> io::Result<()> {
 	cloned
 }
 
-/// Whether an [`is_unsupported`] error from [`clone_open`] says the files
-/// are on different devices, rather than that the source's filesystem
+/// Whether an [`is_unsupported`] [`clone_open`] error is cross-device.
+///
+/// Distinguishes files on different devices from a source filesystem that
 /// cannot clone: only the latter holds for every later copy from it.
 pub fn is_cross_device(err: &io::Error) -> bool {
 	#[cfg(unix)]

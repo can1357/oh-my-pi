@@ -112,9 +112,11 @@ pub fn iso_probe(kind: Option<IsoBackendKind>) -> IsoProbeResult {
 	}
 }
 
-/// Pick the best backend available right now. `preferred` is treated as
-/// a hint — see [`pi_iso::resolve`] for the exact priority rules. Backend
-/// probes may spawn CLIs, so they run on the native blocking pool.
+/// Pick the best backend available right now.
+///
+/// `preferred` is treated as a hint — see [`pi_iso::resolve`] for the exact
+/// priority rules. Backend probes may spawn CLIs, so they run on the native
+/// blocking pool.
 #[napi]
 pub fn iso_resolve(preferred: Option<IsoBackendKind>) -> task::Promise<IsoResolveResult> {
 	task::blocking("iso.resolve", (), move |_| {

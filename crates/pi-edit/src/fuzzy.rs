@@ -256,9 +256,10 @@ pub fn levenshtein_distance(a: &str, b: &str) -> usize {
 	levenshtein_chars(&a_chars, &b_chars)
 }
 
-/// [`levenshtein_distance`] over pre-collected chars when it is at most
-/// `max`, else `None`. Only the `2·max + 1` diagonals that can stay within
-/// `max` are computed, so the cost is O(len·max) instead of O(len²).
+/// [`levenshtein_distance`] over pre-collected chars, or `None` above `max`.
+///
+/// Only the `2·max + 1` diagonals that can stay within `max` are computed,
+/// so the cost is O(len·max) instead of O(len²).
 pub fn levenshtein_within(a: &[char], b: &[char], max: usize) -> Option<usize> {
 	if a == b {
 		return Some(0);

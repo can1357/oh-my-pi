@@ -147,19 +147,6 @@ export const cfgComposerTokenRate = register({
 	},
 });
 
-export const cfgComposerThinkingInModel = register({
-	id: "composer.thinkingInModel",
-	type: "boolean",
-	default: false,
-	ui: {
-		tab: "appearance",
-		group: "Composer",
-		label: "Thinking Level in Model Chip",
-		description:
-			"The native composer shows the thinking level as the model chip's icon instead of a separate chip; click the icon to cycle it",
-	},
-});
-
 // Status line
 export const cfgStatusLinePreset = register({
 	id: "statusLine.preset",
@@ -270,7 +257,7 @@ export const cfgStatusLineCompactThinkingLevel = register({
 		group: "Status Line",
 		label: "Compact Thinking Level",
 		description:
-			"Show the thinking level as a single icon on the model name instead of a separate ` · <level>` suffix.",
+			"Show the thinking level as a single icon on the model name instead of a separate ` · <level>` suffix; in Tern's composer, as the model chip's icon instead of a separate chip (click the icon to cycle it).",
 	},
 });
 

@@ -1,4 +1,6 @@
 import type { TspProps } from "@oh-my-pi/pi-wire";
+import { formatTooltipKey } from "../key-hint-format";
+import type { KeyId } from "../keys";
 import { elapsed, kbd, keyed, node, row, span, text } from "../native/describe";
 import { plainText } from "../native/spans";
 import type { DescribeContext, NativeChild, NativeNode, NativeUiEvent } from "../native/node";
@@ -39,12 +41,7 @@ export interface WorkingRowSpec {
 	/** Shimmer palette of the label (a session-accented intent). */
 	readonly palette?: ShimmerPalette;
 	/** Key id that interrupts (`escape`); undefined hides the stop control (Esc would not cancel). */
-	readonly interruptKey?: string;
-}
-
-/** A key id as tooltip keys: `escape` reads `esc`, the rest as bound. */
-function titleKey(key: string): string {
-	return key === "escape" ? "esc" : key;
+	readonly interruptKey?: KeyId;
 }
 
 /**
@@ -80,10 +77,10 @@ export function describeWorkingRow(spec: WorkingRowSpec, cx: DescribeContext, no
 					role: "omp.working.stop",
 					gap: "xs",
 					align: "center",
-					title: `${verb}  ${titleKey(spec.interruptKey)}`,
+					title: `${verb}  ${formatTooltipKey(spec.interruptKey)}`,
 					actions: { click: "interrupt" },
 				},
-				[kbd(titleKey(spec.interruptKey)), text(verb)],
+				[kbd(spec.interruptKey), text(verb)],
 				"stop",
 			),
 		);
