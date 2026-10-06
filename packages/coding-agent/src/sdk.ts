@@ -1678,6 +1678,9 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 	// then hands them back to the previous holder. Subagents and helper sessions never take them,
 	// so a parent's live edits keep reaching discovery and effects.
 	const bindsProcessState = options.bindProcessState !== false && !options.parentTaskPrefix && !options.taskDepth;
+	if (bindsProcessState) {
+		void import("./cli/worktree-cli").then(m => m.triggerIsolationReap()).catch(() => {});
+	}
 	const restoreProviderToggles = bindsProcessState
 		? logger.time("initializeWithSettings", initializeWithSettings, settings)
 		: undefined;

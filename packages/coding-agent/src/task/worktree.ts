@@ -6,11 +6,11 @@ import * as path from "node:path";
 import type { VcsCommitAuthor, VcsGitRepo } from "@oh-my-pi/pi-natives";
 import * as natives from "@oh-my-pi/pi-natives";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
-import { formatBytes, getWorktreeDir, logger, Snowflake } from "@oh-my-pi/pi-utils";
+import { formatBytes, getWorktreeDir, logger, postmortem, Snowflake } from "@oh-my-pi/pi-utils";
 import type { SettingValueOf } from "../config/registry";
 
 import { withRepoLock } from "../utils/repo-lock";
-import { writeIsolationOwner } from "./isolation-ownership";
+import { getNestedLinkedWorktrees, inspectIsolationUniqueWork, writeIsolationOwner } from "./isolation-ownership";
 import { mapWithConcurrencyLimit } from "./parallel";
 import type { cfgIsolationBackend } from "./settings";
 
@@ -532,6 +532,36 @@ export interface IsolationHandle {
 	fellBack: boolean;
 	/** Optional reason associated with `fellBack`. */
 	fallbackReason: string | null;
+	/** Cancel function for postmortem termination cleanup registration. */
+	cancelCleanup?: () => void;
+}
+
+/**
+ * Remove from the cloned mergedDir any directory that is a linked worktree
+ * registered to repoRoot that lies inside repoRoot.
+ *
+ * Never touches the parent checkout's copies.
+ */
+export async function removeNestedLinkedWorktrees(repoRoot: string, mergedDir: string): Promise<string[]> {
+	const nested = await getNestedLinkedWorktrees(repoRoot);
+	const removed: string[] = [];
+	for (const rel of nested) {
+		const copyDir = path.join(mergedDir, rel);
+		try {
+			const stat = await fs.lstat(copyDir).catch(() => null);
+			if (stat) {
+				await fs.rm(copyDir, { recursive: true, force: true });
+				removed.push(rel);
+			}
+		} catch (err) {
+			logger.warn("failed to remove cloned nested worktree from sandbox", {
+				rel,
+				copyDir,
+				error: err instanceof Error ? err.message : String(err),
+			});
+		}
+	}
+	return removed;
 }
 
 /**
@@ -572,9 +602,10 @@ export async function ensureIsolation(
 		// `omp worktree clear` never sees this sandbox without a live owner,
 		// even while a large clone is still in progress.
 		await fs.mkdir(baseDir, { recursive: true });
-		await writeIsolationOwner(baseDir, id);
+		await writeIsolationOwner(baseDir, id, repoRoot);
 		try {
 			await natives.isoStart(candidate, repoRoot, mergedDir);
+			await removeNestedLinkedWorktrees(repoRoot, mergedDir);
 			// Sever the isolation's git metadata from the source checkout. Copy
 			// backends duplicate `repoRoot`'s `.git` verbatim — a linked-worktree
 			// pointer file (or the rcopy `git worktree add` registration) leaves
@@ -583,11 +614,35 @@ export async function ensureIsolation(
 			// parallel task branches. Detaching gives each isolation a private,
 			// frozen repo that still borrows the source object DB via alternates.
 			await vcs.detachGitDir(mergedDir, sourceCommonDir);
+			const cancelCleanup = postmortem.register(`task-isolation:${baseDir}`, async () => {
+				try {
+					const stat = await fs.stat(baseDir).catch(() => null);
+					if (!stat?.isDirectory()) return;
+					const check = await inspectIsolationUniqueWork(baseDir);
+					if (!check.hasUniqueWork) {
+						try {
+							await natives.isoStop(candidate, mergedDir);
+						} catch {}
+						await fs.rm(baseDir, { recursive: true, force: true });
+					} else {
+						logger.warn("Preserving interrupted isolation sandbox with unique work", {
+							baseDir,
+							reason: check.reason,
+						});
+					}
+				} catch (err) {
+					logger.warn("postmortem task-isolation cleanup failed", {
+						baseDir,
+						error: err instanceof Error ? err.message : String(err),
+					});
+				}
+			});
 			return {
 				mergedDir,
 				backend: candidate,
 				fellBack: candidate !== resolution.kind || resolution.fellBack,
 				fallbackReason,
+				cancelCleanup,
 			};
 		} catch (err) {
 			await fs.rm(baseDir, { recursive: true, force: true });
@@ -604,6 +659,7 @@ export async function ensureIsolation(
 
 /** Tear down a handle returned by {@link ensureIsolation}. */
 export async function cleanupIsolation(handle: IsolationHandle): Promise<void> {
+	handle.cancelCleanup?.();
 	try {
 		try {
 			await natives.isoStop(handle.backend, handle.mergedDir);
