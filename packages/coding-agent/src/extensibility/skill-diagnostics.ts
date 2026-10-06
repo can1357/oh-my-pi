@@ -1,3 +1,4 @@
+import type { SkillDiagnosticItem } from "./skill-diagnostic-controller";
 import type { Skill, SkillDiagnostic, SkillDuplicateMatch, SkillSelectionReason } from "./skills";
 
 export interface SkillDiagnosticEntry {
@@ -26,9 +27,11 @@ export interface SkillDiagnosticsSnapshot {
 	cwd: string;
 	showStartupDiagnostics: boolean;
 	diagnostics: SkillResolutionDiagnostic[];
+	/** Every loaded skill's per-name analysis state; absent from snapshots older servers produced. */
+	items?: SkillDiagnosticItem[];
 }
 
-function serializeSkill(skill: Skill): SkillDiagnosticEntry {
+export function serializeSkillDiagnosticEntry(skill: Skill): SkillDiagnosticEntry {
 	const provenance = skill._source?.provenance;
 	return {
 		name: skill.name,
@@ -45,6 +48,7 @@ export function buildSkillDiagnosticsSnapshot(
 	cwd: string,
 	diagnostics: readonly SkillDiagnostic[],
 	showStartupDiagnostics: boolean,
+	items?: readonly SkillDiagnosticItem[],
 ): SkillDiagnosticsSnapshot {
 	return {
 		cwd,
@@ -52,12 +56,13 @@ export function buildSkillDiagnosticsSnapshot(
 		diagnostics: diagnostics.map(diagnostic => ({
 			name: diagnostic.name,
 			reason: diagnostic.reason,
-			skills: diagnostic.skills.map(serializeSkill),
+			skills: diagnostic.skills.map(serializeSkillDiagnosticEntry),
 			duplicates: diagnostic.duplicates.map(duplicate => ({
-				skill: serializeSkill(duplicate.skill),
-				retained: serializeSkill(duplicate.retained),
+				skill: serializeSkillDiagnosticEntry(duplicate.skill),
+				retained: serializeSkillDiagnosticEntry(duplicate.retained),
 				match: duplicate.match,
 			})),
 		})),
+		...(items !== undefined && { items: [...items] }),
 	};
 }
