@@ -70,6 +70,74 @@ async function cycleWidget(h: Harness): Promise<void> {
 	await h.scheduler.settle(h.terminal);
 }
 
+/** Every transcript row of {@link pinnedAskScenario}, in order, exactly once. */
+const PINNED_ASK_ROWS = [
+	...Array.from({ length: 40 }, (_, i) => `Response ${i}`),
+	...Array.from({ length: 5 }, (_, i) => `Follow-up ${i}`),
+];
+
+/**
+ * #14570 geometry (112x54): a 40-row response, an ask opened and cancelled,
+ * then a 5-row follow-up. The next ask retires the response, which leaves the
+ * composer pinned to the bottom with the response still on screen above it.
+ */
+async function pinnedAskScenario() {
+	const h = makeHarness(112, 54, 0);
+	const block = (tag: string, rows: number): Component => ({
+		render: () => Array.from({ length: rows }, (_, i) => `${tag} ${i}`),
+	});
+	const openAsk = (): AskDialogComponent => {
+		const dialog = new AskDialogComponent(
+			[
+				{
+					id: "q1",
+					question: "Is the recurring defect the duplicate rendering?",
+					options: [
+						{ label: "Duplicate", description: "Matches the earlier issue." },
+						{ label: "Clipped head", description: "Covered elsewhere." },
+						{ label: "New issue", description: "File it anyway." },
+					],
+				},
+			],
+			{ onSubmit: () => {}, onCancel: () => {}, onPrompt: () => Promise.resolve(undefined) },
+		);
+		h.editor.clear();
+		h.editor.addChild(dialog);
+		h.composer.ui.requestRender();
+		return dialog;
+	};
+	const closeAsk = (dialog: AskDialogComponent): void => {
+		dialog.dispose();
+		h.editor.clear();
+		h.editor.addChild(new Text("EDITOR", 0, 0));
+		h.composer.ui.requestRender();
+	};
+	const settle = (): Promise<void> => h.scheduler.settle(h.terminal);
+	const viewport = (): string[] => h.terminal.getViewport().map(row => Bun.stripANSI(row).trimEnd());
+	h.transcript.addChild(block("Response", 40));
+	closeAsk(openAsk());
+	await settle();
+	h.transcript.addChild(block("Follow-up", 5));
+	h.composer.ui.requestRender();
+	await settle();
+	return {
+		h,
+		openAsk,
+		closeAsk,
+		settle,
+		viewport,
+		/** Rows from the last follow-up row down to the ask question. */
+		questionGap: (rows: string[]): number =>
+			rows.findIndex(row => row.includes("Is the recurring defect")) - rows.indexOf("Follow-up 4"),
+		/** Transcript rows across native scrollback and the screen. */
+		transcriptRows: (): string[] =>
+			h.terminal
+				.getScrollBuffer()
+				.map(row => Bun.stripANSI(row).trimEnd())
+				.filter(row => /^(Response|Follow-up) \d+$/.test(row)),
+	};
+}
+
 beforeAll(async () => {
 	await initTheme();
 });
@@ -138,70 +206,80 @@ describe("composer inline shrink (#11007)", () => {
 	});
 
 	it("keeps rows an ask panel retires on screen above it instead of a blank band (#14570)", async () => {
-		const h = makeHarness(112, 54, 0);
-		const block = (tag: string, rows: number): Component => ({
-			render: () => Array.from({ length: rows }, (_, i) => `${tag} ${i}`),
-		});
-		const openAsk = (): AskDialogComponent => {
-			const dialog = new AskDialogComponent(
-				[
-					{
-						id: "q1",
-						question: "Is the recurring defect the duplicate rendering?",
-						options: [
-							{ label: "Duplicate", description: "Matches the earlier issue." },
-							{ label: "Clipped head", description: "Covered elsewhere." },
-							{ label: "New issue", description: "File it anyway." },
-						],
-					},
-				],
-				{ onSubmit: () => {}, onCancel: () => {}, onPrompt: () => Promise.resolve(undefined) },
-			);
-			h.editor.clear();
-			h.editor.addChild(dialog);
-			h.composer.ui.requestRender();
-			return dialog;
-		};
-		const closeAsk = (dialog: AskDialogComponent): void => {
-			dialog.dispose();
-			h.editor.clear();
-			h.editor.addChild(new Text("EDITOR", 0, 0));
-			h.composer.ui.requestRender();
-		};
-		const viewport = (): string[] => h.terminal.getViewport().map(row => Bun.stripANSI(row).trimEnd());
-		h.transcript.addChild(block("Response", 40));
-		closeAsk(openAsk());
-		await h.scheduler.settle(h.terminal);
-		h.transcript.addChild(block("Follow-up", 5));
-		h.composer.ui.requestRender();
-		await h.scheduler.settle(h.terminal);
+		const s = await pinnedAskScenario();
 
 		// This ask retires the 40-row response. Those rows were on screen: they
 		// must stay there above the panel, not scroll away behind blank padding.
-		const dialog = openAsk();
-		await h.scheduler.settle(h.terminal);
-		const open = viewport();
+		const dialog = s.openAsk();
+		await s.settle();
+		const open = s.viewport();
 		expect(open[0]).toMatch(/^Response \d+$/);
 		expect(open).toContain("Response 39");
-		const question = open.findIndex(row => row.includes("Is the recurring defect"));
-		expect(question - open.indexOf("Follow-up 4")).toBe(2);
+		expect(s.questionGap(open)).toBe(2);
 
 		// Closing still pins the editor to the bottom row, and every row lands
 		// exactly once across native scrollback and the screen.
-		closeAsk(dialog);
-		await h.scheduler.settle(h.terminal);
-		const closed = viewport();
+		s.closeAsk(dialog);
+		await s.settle();
+		const closed = s.viewport();
 		expect(closed.indexOf("EDITOR")).toBe(53);
 		expect(closed).toContain("Response 39");
-		const rows = h.terminal
-			.getScrollBuffer()
-			.map(row => Bun.stripANSI(row).trimEnd())
-			.filter(row => /^(Response|Follow-up) \d+$/.test(row));
-		expect(rows).toEqual([
-			...Array.from({ length: 40 }, (_, i) => `Response ${i}`),
-			...Array.from({ length: 5 }, (_, i) => `Follow-up ${i}`),
-		]);
-		h.composer.stop();
+		expect(s.transcriptRows()).toEqual(PINNED_ASK_ROWS);
+		s.h.composer.stop();
+	});
+
+	it("keeps a pinned frame's retained rows when a normal overlay fits below them (#14570)", async () => {
+		const s = await pinnedAskScenario();
+		const dialog = s.openAsk();
+		await s.settle();
+
+		// A bottom-anchored overlay lands inside the pinned viewport: compositing
+		// it must not stretch the frame over the retained rows above.
+		s.h.composer.ui.showOverlay({ render: () => ["OVERLAY"] }, { anchor: "bottom-left", width: 20 });
+		await s.settle();
+		const covered = s.viewport();
+		expect(covered[0]).toMatch(/^Response \d+$/);
+		expect(covered).toContain("Response 39");
+		expect(s.questionGap(covered)).toBe(2);
+		expect(covered[53]).toStartWith("OVERLAY");
+
+		s.h.composer.ui.hideOverlay();
+		await s.settle();
+		const uncovered = s.viewport();
+		expect(uncovered[0]).toMatch(/^Response \d+$/);
+		expect(s.questionGap(uncovered)).toBe(2);
+
+		s.closeAsk(dialog);
+		await s.settle();
+		expect(s.viewport().indexOf("EDITOR")).toBe(53);
+		expect(s.transcriptRows()).toEqual(PINNED_ASK_ROWS);
+		s.h.composer.stop();
+	});
+
+	it("keeps a pinned frame on the bottom row under an overlay that covers retained rows (#14570)", async () => {
+		const s = await pinnedAskScenario();
+		const dialog = s.openAsk();
+		await s.settle();
+		const question = s.viewport().findIndex(row => row.includes("Is the recurring defect"));
+
+		// A centered overlay reaches above the pinned viewport, so the frame has
+		// to cover the screen; the composer must still sit on the bottom rows
+		// instead of jumping to the top behind the overlay.
+		s.h.composer.ui.showOverlay({ render: () => ["OVERLAY"] }, { width: 20 });
+		await s.settle();
+		const covered = s.viewport();
+		expect(covered.some(row => row.includes("OVERLAY"))).toBe(true);
+		expect(covered.findIndex(row => row.includes("Is the recurring defect"))).toBe(question);
+
+		s.h.composer.ui.hideOverlay();
+		await s.settle();
+		expect(s.viewport().findIndex(row => row.includes("Is the recurring defect"))).toBe(question);
+
+		s.closeAsk(dialog);
+		await s.settle();
+		expect(s.viewport().indexOf("EDITOR")).toBe(53);
+		expect(s.transcriptRows()).toEqual(PINNED_ASK_ROWS);
+		s.h.composer.stop();
 	});
 
 	it("keeps settled transcript rows reachable while an inline ask panel is expanded (#12398)", async () => {

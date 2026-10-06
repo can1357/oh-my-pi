@@ -2429,6 +2429,7 @@ export class TUI extends Container {
 				plan = provider.renderFrame({ columns: width, rows: height });
 				viewport = Array.from(plan.viewport);
 				if (viewport.length > height) viewport = viewport.slice(0, height);
+				if (this.#pinsBottom(plan)) viewport = this.#padPinnedViewport(viewport, plan, height);
 			} while (this.#imageBudget.endPass());
 			if (plan.history === undefined) return;
 			const acceptedBefore = this.#acceptedHistoryBatchId;
@@ -3007,16 +3008,30 @@ export class TUI extends Container {
 	 * native scrollback.
 	 */
 	/**
-	 * Composite the visible overlays onto a full-height copy of `viewport`, or
+	 * Composite the visible overlays onto a full-height copy of `viewport` (a
+	 * pinned one keeps its own height when no overlay reaches above it), or
 	 * hand it back untouched when nothing is stacked. Callers run this inside
 	 * their image-budget pass so the frame's whole image set — transcript plus
 	 * modal — reaches one reconcile, instead of leaving the overlay's graphics
 	 * outside the cap for as long as it stays up.
 	 */
-	#compositeVisibleOverlays(viewport: string[], width: number, height: number): string[] {
+	#compositeVisibleOverlays(viewport: string[], width: number, height: number, pinBottom = false): string[] {
 		if (this.#getTopmostVisibleOverlay() === undefined) return viewport;
-		while (viewport.length < height) viewport.push("");
-		return this.#compositeOverlaysIntoWindow(viewport, width, height);
+		if (!pinBottom) {
+			while (viewport.length < height) viewport.push("");
+			return this.#compositeOverlaysIntoWindow(viewport, width, height);
+		}
+		// A pinned frame sits on the screen's bottom rows below history still on
+		// screen, so composite it there. Overlays position in screen rows; when
+		// none reaches above the frame, keep the frame its own height so the
+		// retained history stays visible. Otherwise the frame has to cover the
+		// screen, still bottom-aligned so the composer does not jump to the top.
+		const above = Math.max(0, height - viewport.length);
+		const window = this.#compositeOverlaysIntoWindow([...Array<string>(above).fill(""), ...viewport], width, height);
+		for (let row = 0; row < above; row++) {
+			if (window[row] !== "") return window;
+		}
+		return window.slice(above);
 	}
 
 	#compositeOverlaysIntoWindow(window: string[], termWidth: number, termHeight: number): string[] {
@@ -3135,7 +3150,9 @@ export class TUI extends Container {
 				logger.error("TUI layout contract violated", { rows: viewport.length, height });
 				viewport = viewport.slice(0, height);
 			}
-			viewport = this.#compositeVisibleOverlays(viewport, width, height);
+			const pinned = this.#pinsBottom(plan);
+			if (pinned) viewport = this.#padPinnedViewport(viewport, plan, height);
+			viewport = this.#compositeVisibleOverlays(viewport, width, height, pinned);
 		} while (this.#imageBudget.endPass());
 		if (this.#maybeDeferGhosttyInitialImagePaint()) return;
 		this.#emitPlanFrame(width, height, viewport, plan, provider);
@@ -3259,6 +3276,41 @@ export class TUI extends Container {
 	}
 
 	/**
+	 * Whether `plan` keeps its viewport on the screen's bottom rows. A replay
+	 * rebuilds the screen from row zero and fills its own short viewport, so
+	 * it never pins.
+	 */
+	#pinsBottom(plan: TerminalFramePlan): boolean {
+		return plan.pinBottom === true && this.#pendingHistory(plan)?.kind !== "replay";
+	}
+
+	/** The offered history batch this frame writes, if not yet accepted. */
+	#pendingHistory(plan: TerminalFramePlan | undefined): HistoryBatch | undefined {
+		const offered = plan?.history;
+		return offered !== undefined && offered.id > this.#acceptedHistoryBatchId ? offered : undefined;
+	}
+
+	/** Screen row the next frame's history and viewport start writing at. */
+	#frameStartTop(height: number): number {
+		// Destructive reset (session replace, /tree, explicit clear, or a settled
+		// resize in rebuild mode): erase native history and the viewport,
+		// then repaint from row zero.
+		if (this.#clearScrollbackOnNextRender) return 0;
+		return Math.min(this.#providerViewportTop, Math.max(0, height - 1));
+	}
+
+	/**
+	 * Pad a pinned viewport down to the screen's last row. Only the gap below
+	 * history that stays on screen is filled: a full-height pad would scroll
+	 * that history away and paint blanks in its place.
+	 */
+	#padPinnedViewport(viewport: string[], plan: TerminalFramePlan, height: number): string[] {
+		const historyRows = this.#pendingHistory(plan)?.rows.length ?? 0;
+		const pad = height - this.#frameStartTop(height) - historyRows - viewport.length;
+		return pad > 0 ? [...Array<string>(pad).fill(""), ...viewport] : viewport;
+	}
+
+	/**
 	 * Physical write transaction: append an ordinary batch, or bottom-split one
 	 * complete replay into a history remainder and final viewport, then serialize
 	 * the whole result in one terminal write before acknowledgement.
@@ -3277,13 +3329,10 @@ export class TUI extends Container {
 		let viewport = viewportRows;
 		this.#imageBudget.limitResidentImages();
 		const offered = plan?.history;
-		const history = offered !== undefined && offered.id > this.#acceptedHistoryBatchId ? offered : undefined;
-		if (offered !== undefined && offered.id <= this.#acceptedHistoryBatchId) provider?.acknowledgeHistory(offered.id);
-		// Destructive reset (session replace, /tree, explicit clear, or a settled
-		// resize in rebuild mode): erase native history and the viewport,
-		// then repaint from row zero.
+		const history = this.#pendingHistory(plan);
+		if (offered !== undefined && history === undefined) provider?.acknowledgeHistory(offered.id);
 		const destructiveReset = this.#clearScrollbackOnNextRender;
-		const startTop = destructiveReset ? 0 : Math.min(this.#providerViewportTop, Math.max(0, height - 1));
+		const startTop = this.#frameStartTop(height);
 
 		let historyRows = history?.rows ?? [];
 		let replayViewportRows = 0;
@@ -3303,11 +3352,10 @@ export class TUI extends Container {
 				historyRows = historyRows.slice(0, historyRows.length - moved);
 				replayViewportRows = moved;
 			}
-		} else if (plan?.pinBottom) {
-			// Pad only the gap below history that stays on screen: a full-height
-			// pad would scroll that history away and paint blanks in its place.
-			prependedBlanks = Math.max(0, height - startTop - historyRows.length - viewport.length);
-			if (prependedBlanks > 0) viewport = [...Array<string>(prependedBlanks).fill(""), ...viewport];
+		} else if (plan !== undefined && this.#pinsBottom(plan)) {
+			// Callers pad a pinned viewport down to the screen's last row before
+			// compositing overlays; those blanks sit above the composer's rows.
+			prependedBlanks = Math.max(0, viewport.length - plan.viewport.length);
 		}
 		// History first: it reuses the previous viewport's rows by content, and
 		// the viewport pass replaces that memo with its own rows.

@@ -121,7 +121,7 @@ Theme or visibility changes that affect only current/future output repaint the m
 
 ## Overlays and images
 
-Fullscreen overlays use the alternate buffer and never append history. Normal overlays composite over the mutable viewport only.
+Fullscreen overlays use the alternate buffer and never append history. Normal overlays composite over the mutable viewport only. They position in screen rows, so the frame under them normally covers the screen; a `pinBottom` frame keeps its own height and the history above it when no overlay reaches above it, and otherwise covers the screen still aligned to the bottom row.
 
 Inline image data and purge commands are emitted before row placements. Active images may remain graphical in the viewport; finalized history uses textual fallback unless the protocol can account for stable physical rows.
 
