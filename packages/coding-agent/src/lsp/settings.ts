@@ -39,7 +39,7 @@ export const cfgLspShared = register({
 		group: "LSP",
 		label: "Shared Language Servers",
 		description:
-			"Share one language server per project across omp instances via the daemon broker (falls back to private servers when unavailable)",
+			"Start language servers through the per-project daemon broker. Each running omp instance gets its own server, and a server left idle by one instance is reused by the next instead of cold-starting (falls back to private servers when unavailable)",
 	},
 });
 
