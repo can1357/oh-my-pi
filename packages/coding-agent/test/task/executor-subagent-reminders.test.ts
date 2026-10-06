@@ -218,6 +218,8 @@ describe("runSubprocess yield reminders", () => {
 				extensionSendUserInput = actions.sendUserInput;
 			},
 			onError: () => {},
+			// sendUserInput asks the runner for `input` handlers before it dispatches the text.
+			hasHandlers: () => false,
 			emit: async (event: { type: string }) => {
 				if (event.type === "session_start") {
 					void extensionSendUserInput?.("hello from session_start", { deliverAs: "followUp" });
