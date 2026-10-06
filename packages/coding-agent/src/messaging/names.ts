@@ -2,8 +2,11 @@ import * as path from "node:path";
 import type { SessionTitleSource } from "../session/session-entries";
 import { generateNameSuffix } from "../task/name-generator";
 
+export const RESERVED_SESSION_NAME_ERROR =
+	'Session names cannot be "all" or start with "@" (reserved for broadcast and extension peer namespaces).';
+
 export function isReservedAddress(name: string): boolean {
-	return name.startsWith("@");
+	return name === "all" || name.startsWith("@");
 }
 
 export function sessionShortId(sessionId: string): string {
@@ -34,8 +37,7 @@ export function sessionAddress(s: {
 }
 
 export function claimSessionName(requested: string, taken: ReadonlySet<string>): string {
-	if (isReservedAddress(requested))
-		throw new Error('Session names can\'t start with "@" (reserved for extension peer namespaces).');
+	if (isReservedAddress(requested)) throw new Error(RESERVED_SESSION_NAME_ERROR);
 	let name = requested;
 	while (taken.has(name)) name = `${requested}-${generateNameSuffix()}`;
 	return name;

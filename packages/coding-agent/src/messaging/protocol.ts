@@ -14,6 +14,7 @@ export interface AuthLine {
 	token: string;
 }
 export interface SenderInfo {
+	sessionId: string;
 	name: string | null;
 	shortId: string;
 	cwd: string;
@@ -22,6 +23,7 @@ export interface SenderInfo {
 }
 export interface SessionSnapshot {
 	v: number;
+	sessionId: string;
 	name: string | null;
 	shortId: string;
 	title: string | null;
@@ -35,6 +37,15 @@ export type InboxRequest =
 	| { type: "snapshot" }
 	| { type: "message"; id: string; from?: SenderInfo; body: string; chain?: string[]; notifyWhenIdle?: boolean }
 	| { type: "subscribe"; id: string; from: SenderInfo }
+	| {
+			type: "notice";
+			id: string;
+			from: SenderInfo;
+			kind: "refused";
+			subject: "message";
+			aboutId: string;
+			toSessionId: string;
+	  }
 	| {
 			type: "notice";
 			id: string;
@@ -61,11 +72,16 @@ export class MessagingUnavailableError extends Error {
 	}
 }
 
+export function isMailboxSessionId(value: unknown): value is string {
+	return typeof value === "string" && /^[A-Za-z0-9_.-]{1,128}$/.test(value) && value !== "." && value !== "..";
+}
+
 function isSender(raw: unknown): raw is SenderInfo {
 	if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return false;
 	const value = raw as Record<string, unknown>;
 	return (
-		Object.keys(value).every(key => ["name", "shortId", "cwd", "entryId", "class"].includes(key)) &&
+		Object.keys(value).every(key => ["sessionId", "name", "shortId", "cwd", "entryId", "class"].includes(key)) &&
+		isMailboxSessionId(value.sessionId) &&
 		(value.name === null || typeof value.name === "string") &&
 		typeof value.shortId === "string" &&
 		/^[0-9a-f]{8}$/.test(value.shortId) &&
@@ -105,11 +121,28 @@ export function parseInboxRequest(raw: unknown): InboxRequest | undefined {
 		case "notice":
 			if (
 				!Object.keys(value).every(key =>
-					["type", "id", "from", "kind", "subject", "finishedAt", "status", "reason", "aboutId"].includes(key),
+					[
+						"type",
+						"id",
+						"from",
+						"kind",
+						"subject",
+						"finishedAt",
+						"status",
+						"reason",
+						"aboutId",
+						"toSessionId",
+					].includes(key),
 				) ||
 				!isSender(value.from) ||
 				typeof value.kind !== "string" ||
-				!["idle", "exited", "expired", "dropped", "subscribed", "retired"].includes(value.kind) ||
+				!["idle", "exited", "expired", "dropped", "subscribed", "retired", "refused"].includes(value.kind) ||
+				(value.kind === "refused"
+					? value.subject !== "message" ||
+						typeof value.aboutId !== "string" ||
+						!value.aboutId ||
+						!isMailboxSessionId(value.toSessionId)
+					: value.toSessionId !== undefined) ||
 				(value.subject !== undefined && value.subject !== "message" && value.subject !== "subscription") ||
 				(value.finishedAt !== undefined &&
 					(typeof value.finishedAt !== "number" || !Number.isFinite(value.finishedAt))) ||

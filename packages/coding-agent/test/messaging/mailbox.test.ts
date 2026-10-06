@@ -1,15 +1,18 @@
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import {
 	drainOffline,
 	enqueueOffline,
+	enqueueOfflineNotice,
 	listOfflineSessions,
 	mailboxDir,
 	OFFLINE_INBOX_CAP,
 	OFFLINE_INBOX_TTL_MS,
 	type StoredMessage,
+	withOfflineMailboxLock,
+	type StoredRefusalNotice,
 } from "../../src/messaging/mailbox";
 import { defaultSessionName, sessionShortId } from "../../src/messaging/names";
 import { listSessions, type SessionInfo } from "../../src/session/session-listing";
@@ -26,13 +29,21 @@ function tempDir(): string {
 }
 
 afterEach(() => {
+	vi.restoreAllMocks();
 	for (const dir of directories.splice(0)) dir[Symbol.dispose]();
 });
 
 function message(id: string, sentAt = now): StoredMessage {
 	return {
 		id,
-		from: { name: "sender", shortId: "12345678", cwd: "/sender", entryId: "sender-entry", class: "bypass" },
+		from: {
+			sessionId: "sender-session",
+			name: "sender",
+			shortId: "12345678",
+			cwd: "/sender",
+			entryId: "sender-entry",
+			class: "bypass",
+		},
 		body: `message ${id}`,
 		chain: ["12345678"],
 		sentAt,
@@ -61,7 +72,11 @@ describe("offline mailbox", () => {
 		for (const item of messages) expect(await enqueueOffline(sessionId, item, { dir, now })).toBe("queued");
 		const inbox = mailboxDir(sessionId, { dir });
 		expect((await fs.readdir(inbox)).sort()).toEqual(messages.map(item => `${item.sentAt}-${item.id}.json`).sort());
-		expect((await fs.readdir(path.dirname(inbox))).sort()).toEqual([sessionId]);
+		expect(
+			(await fs.readdir(path.dirname(inbox), { withFileTypes: true }))
+				.filter(entry => entry.isDirectory())
+				.map(entry => entry.name),
+		).toEqual([sessionId]);
 		const drained = await drainOffline(sessionId, { dir, now });
 		expect(drained.map(item => item.message)).toEqual([messages[1], messages[2], messages[0]]);
 		expect(await fs.readdir(inbox)).toHaveLength(3);
@@ -138,7 +153,7 @@ describe("offline mailbox", () => {
 	it("returns an empty drain for a missing mailbox without creating it", async () => {
 		const dir = tempDir();
 		expect(await drainOffline(sessionId, { dir, now })).toEqual([]);
-		expect(await fs.readdir(dir)).toEqual([]);
+		expect(await fs.readdir(dir)).toEqual(["mail"]);
 	});
 
 	it("rejects traversal and invalid session ids on every mailbox entry point", async () => {
@@ -159,7 +174,7 @@ describe("offline mailbox", () => {
 		await expect(enqueueOffline(sessionId, message("../../escape"), { dir, now })).rejects.toThrow(
 			"Invalid offline message",
 		);
-		expect(await fs.readdir(dir)).toEqual([]);
+		expect((await fs.readdir(path.join(dir, "mail"))).filter(name => !name.endsWith(".lock"))).toEqual([]);
 	});
 
 	it.skipIf(process.platform === "win32")("creates private directories and 0600 message files", async () => {
@@ -185,6 +200,7 @@ describe("offline mailbox", () => {
 		expect(listed).toEqual(
 			source.slice(0, 4).map(item => ({
 				sessionId: item.id,
+				path: item.path,
 				shortId: sessionShortId(item.id),
 				name: item.titleSource === "user" ? item.title! : defaultSessionName(item.cwd, item.id),
 				cwd: item.cwd,
@@ -223,5 +239,62 @@ describe("offline mailbox", () => {
 			expect(info.title).toBe(slotSource ? "slot title" : "header title");
 			expect(info.titleSource).toBe(slotSource ?? "user");
 		}
+	});
+});
+
+describe("locked offline receipt storage", () => {
+	it("enforces the cap for competing writers and releases a failed transaction", async () => {
+		const dir = tempDir();
+		for (let i = 0; i < OFFLINE_INBOX_CAP - 1; i++)
+			await enqueueOffline(sessionId, message(`filled-${i}`), { dir, now });
+		const outcomes = await Promise.all([
+			enqueueOffline(sessionId, message("racer-one"), { dir, now }),
+			enqueueOffline(sessionId, message("racer-two"), { dir, now }),
+		]);
+		expect(outcomes.sort()).toEqual(["full", "queued"]);
+		expect(await drainOffline(sessionId, { dir, now })).toHaveLength(OFFLINE_INBOX_CAP);
+		await expect(
+			withOfflineMailboxLock(
+				sessionId,
+				async () => {
+					throw new Error("transaction failure");
+				},
+				{ dir },
+			),
+		).rejects.toThrow("transaction failure");
+		await withOfflineMailboxLock(
+			sessionId,
+			async () => {
+				expect(await fs.readdir(mailboxDir(sessionId, { dir }))).toHaveLength(OFFLINE_INBOX_CAP);
+			},
+			{ dir },
+		);
+		const abort = new AbortController();
+		abort.abort();
+		await expect(
+			enqueueOffline(sessionId, message("cancelled"), { dir, now, signal: abort.signal }),
+		).rejects.toThrow();
+		expect((await drainOffline(sessionId, { dir, now })).some(item => item.message.id === "cancelled")).toBe(false);
+	});
+
+	it("stores one deterministic refusal notice despite retry at capacity and applies the ordinary TTL", async () => {
+		const dir = tempDir();
+		const notice: StoredRefusalNotice = {
+			type: "notice",
+			id: "refused-original",
+			from: message("original").from,
+			kind: "refused",
+			subject: "message",
+			aboutId: "original",
+			toSessionId: sessionId,
+			sentAt: now,
+		};
+		expect(await enqueueOfflineNotice(sessionId, notice, { dir, now })).toBe("queued");
+		for (let i = 1; i < OFFLINE_INBOX_CAP; i++) await enqueueOffline(sessionId, message(`filled-${i}`), { dir, now });
+		expect(await enqueueOfflineNotice(sessionId, { ...notice, sentAt: now + 1 }, { dir, now })).toBe("queued");
+		const drained = await drainOffline(sessionId, { dir, now });
+		expect(drained.filter(item => item.message.id === notice.id).map(item => item.message)).toEqual([notice]);
+		expect(drained).toHaveLength(OFFLINE_INBOX_CAP);
+		expect(await drainOffline(sessionId, { dir, now: now + OFFLINE_INBOX_TTL_MS + 1 })).toEqual([]);
 	});
 });

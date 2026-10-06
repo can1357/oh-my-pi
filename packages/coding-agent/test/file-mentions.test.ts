@@ -4,6 +4,8 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { extractFileMentions, generateFileMentionMessages } from "@oh-my-pi/pi-coding-agent/utils/file-mentions";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
+import { KeybindingsManager } from "@oh-my-pi/pi-tui/app-keybindings";
+import { createPromptActionAutocompleteProvider } from "@oh-my-pi/pi-tui/prompt/prompt-action-autocomplete";
 
 const tempDirs: string[] = [];
 
@@ -18,6 +20,41 @@ async function createTempDir(): Promise<string> {
 	tempDirs.push(dir);
 	return dir;
 }
+
+describe("quoted session mention identity", () => {
+	test.each(['release "draft"', "release \\draft", 'release \\"draft"', "release notes"])(
+		"round-trips autocomplete through the shared extractor for %s",
+		async name => {
+			const provider = createPromptActionAutocompleteProvider({
+				commands: [],
+				basePath: "/project",
+				sessionMentions: async () => [{ name, cwd: "/other" }],
+				keybindings: KeybindingsManager.inMemory(),
+				copyCurrentLine: () => {},
+				copyPrompt: () => {},
+				undo: () => {},
+				moveCursorToMessageEnd: () => {},
+				moveCursorToMessageStart: () => {},
+				moveCursorToLineStart: () => {},
+				moveCursorToLineEnd: () => {},
+			});
+			const suggestions = await provider.getSuggestions(["@"], 0, 1);
+			const item = suggestions?.items.find(item => item.label === `@${name}`);
+			if (!suggestions || !item) throw new Error("expected session mention suggestion");
+			const completion = provider.applyCompletion(["@"], 0, 1, item, suggestions.prefix);
+			expect(extractFileMentions(completion.lines.join("\n"))).toEqual([name]);
+		},
+	);
+
+	test("preserves unknown escapes, single quotes, punctuation, boundaries and deduplication", () => {
+		expect(extractFileMentions(String.raw`@"C:\tmp\file.txt" @'C:\tmp\file.txt'`)).toEqual([
+			String.raw`C:\tmp\file.txt`,
+		]);
+		expect(
+			extractFileMentions(String.raw`@"release \"draft\"!" @"release \"draft\"!" user@example.com (@plain).`),
+		).toEqual(['release "draft"!', "plain"]);
+	});
+});
 
 describe("generateFileMentionMessages path resolution", () => {
 	test("auto-reads an exact file path", async () => {

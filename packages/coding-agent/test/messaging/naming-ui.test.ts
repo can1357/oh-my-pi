@@ -12,6 +12,14 @@ import { cfgMessagingList } from "../../src/messaging/settings";
 import { AgentRegistry } from "../../src/registry/agent-registry";
 import { executeAcpBuiltinSlashCommand } from "../../src/slash-commands/acp-builtins";
 import type { SlashCommandRuntime } from "../../src/slash-commands/types";
+import {
+	claimSessionName,
+	isReservedAddress,
+	RESERVED_SESSION_NAME_ERROR,
+	sessionAddress,
+} from "../../src/messaging/names";
+import { CommandController } from "../../src/modes/controllers/command-controller";
+import { executeSend } from "../../src/irc/messaging";
 
 afterEach(() => {
 	vi.restoreAllMocks();
@@ -19,6 +27,86 @@ afterEach(() => {
 });
 
 describe("cross-session naming UI", () => {
+	it("rejects normalized reserved user names before mutating the session", async () => {
+		const manager = SessionManager.inMemory();
+		await manager.setSessionName("previous", "user");
+		const header = structuredClone(manager.getHeader());
+		const entries = manager.getEntries();
+		const revision = manager.titleRevision;
+		const renamed = vi.fn();
+		manager.onSessionNameChanged(renamed);
+		for (const name of [" all ", "\u0000all\u0007", " @extension "]) {
+			await expect(manager.setSessionName(name, "user")).rejects.toThrow(RESERVED_SESSION_NAME_ERROR);
+			expect(manager.getSessionName()).toBe("previous");
+			expect(manager.titleRevision).toBe(revision);
+			expect(manager.getHeader()).toEqual(header);
+			expect(manager.getEntries()).toEqual(entries);
+		}
+		expect(renamed).not.toHaveBeenCalled();
+		const autoManager = SessionManager.inMemory();
+		await autoManager.setSessionName("all", "auto");
+		expect(autoManager.getSessionName()).toBe("all");
+	});
+
+	it("keeps reserved persisted titles readable but advertises only safe addresses", () => {
+		const title = {
+			cwd: "/project",
+			sessionId: "legacy-session",
+			sessionName: "all",
+			titleSource: "user" as const,
+			directPrint: false,
+		};
+		expect(isReservedAddress("all")).toBe(true);
+		expect(() => claimSessionName("all", new Set())).toThrow(RESERVED_SESSION_NAME_ERROR);
+		expect(() => claimSessionName("@extension", new Set())).toThrow(RESERVED_SESSION_NAME_ERROR);
+		expect(sessionAddress(title)).not.toBe("all");
+		expect(sessionAddress(title)).toMatch(/^project-[a-f0-9]{2}$/);
+		expect(sessionAddress({ ...title, directPrint: true })).toBeNull();
+		for (const name of ["All", "ALL", "all-foo", "release@draft"]) {
+			expect(claimSessionName(name, new Set())).toBe(name);
+			expect(sessionAddress({ ...title, sessionName: name })).toBe(name);
+		}
+	});
+
+	it("reports the reserved-name error in interactive and headless rename without changing the title", async () => {
+		const manager = SessionManager.inMemory();
+		await manager.setSessionName("previous", "user");
+		const settings = Settings.isolated();
+		const session = { titleGenerationSignal: new AbortController().signal } as unknown as AgentSession;
+		const showError = vi.fn();
+		const controller = new CommandController({
+			session,
+			sessionManager: manager,
+			showError,
+		} as unknown as InteractiveModeContext);
+		await controller.handleRenameCommand(" all ");
+		expect(showError).toHaveBeenCalledWith(RESERVED_SESSION_NAME_ERROR);
+		const output: string[] = [];
+		await executeAcpBuiltinSlashCommand("/rename all", {
+			session,
+			sessionManager: manager,
+			settings,
+			cwd: "/project",
+			output: text => {
+				output.push(text);
+			},
+			refreshCommands: () => {},
+			reloadPlugins: async () => {},
+		});
+		expect(output).toEqual([RESERVED_SESSION_NAME_ERROR]);
+		expect(manager.getSessionName()).toBe("previous");
+	});
+
+	it("retains local broadcast routing for all instead of resolving a session name", async () => {
+		const resolve = vi.fn();
+		const result = await executeSend(
+			{ registry: new AgentRegistry(), senderId: "Main", messaging: { resolve } as unknown as MessagingService },
+			{ to: "all", message: "broadcast" },
+		);
+		expect(result.content).toEqual([{ type: "text", text: "No live peers to broadcast to." }]);
+		expect(resolve).not.toHaveBeenCalled();
+	});
+
 	it("makes lowercase two-word suffixes without reserving task or session names", () => {
 		vi.spyOn(Math, "random").mockReturnValue(0);
 		generateTaskName();
@@ -41,6 +129,7 @@ describe("cross-session naming UI", () => {
 				listSessions: async () => [
 					{
 						name: "release notes",
+						sessionId: "release-notes-session",
 						shortId: "87654321",
 						busy: false,
 						cwd: "/other",

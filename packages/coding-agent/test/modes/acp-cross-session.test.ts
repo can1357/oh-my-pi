@@ -147,6 +147,7 @@ function harness(cwd: string) {
 		lifecycle,
 		binding,
 		bind,
+		connection,
 		emit: (event: AgentSessionEvent) => {
 			for (const listener of listeners) listener(event);
 		},
@@ -215,6 +216,188 @@ describe("ACP cross-session messaging", () => {
 		await h.agent.setSessionConfigOption({ sessionId: created.sessionId, configId: "thinking", value: "off" });
 		expect(h.bind).toHaveBeenCalledTimes(1);
 		expect(h.updates.every(item => item.sessionId === created.sessionId)).toBe(true);
+	});
+
+	it("keeps successor chunks on one message id when an old agent_end is backpressured", async () => {
+		using dir = TempDir.createSync("@acp-cross-session-");
+		vi.useFakeTimers();
+		const h = harness(dir.path());
+		await h.agent.newSession({ cwd: dir.path(), mcpServers: [] });
+		await bootstrap();
+		h.updates.length = 0;
+		const blocked = Promise.withResolvers<void>();
+		const reached = Promise.withResolvers<void>();
+		vi.spyOn(h.connection, "sessionUpdate").mockImplementation(async notification => {
+			h.updates.push(notification);
+			if (notification.update.sessionUpdate === "session_info_update") {
+				reached.resolve();
+				await blocked.promise;
+			}
+		});
+		const old = assistant("Old reply");
+		h.emit({ type: "agent_start" });
+		h.emit({
+			type: "message_update",
+			message: old,
+			assistantMessageEvent: { type: "text_delta", delta: "Old reply" },
+		} as AgentSessionEvent);
+		h.emit({ type: "agent_end", messages: [old] });
+		await reached.promise;
+
+		h.emit(remoteEvent());
+		h.emit({ type: "agent_start" });
+		const successor = assistant("Successor reply");
+		h.emit({ type: "message_start", message: successor });
+		h.emit({
+			type: "message_update",
+			message: successor,
+			assistantMessageEvent: { type: "text_delta", delta: "Successor " },
+		} as AgentSessionEvent);
+		blocked.resolve();
+		await bootstrap();
+		h.emit({
+			type: "message_update",
+			message: successor,
+			assistantMessageEvent: { type: "text_delta", delta: "reply" },
+		} as AgentSessionEvent);
+		h.emit({ type: "message_end", message: successor });
+		await bootstrap();
+
+		const chunks = h.updates.flatMap(({ update }) =>
+			update.sessionUpdate === "agent_message_chunk" &&
+			update.content.type === "text" &&
+			["Successor ", "reply", "Successor reply"].includes(update.content.text)
+				? [update]
+				: [],
+		);
+		expect(chunks.map(chunk => chunk.content)).toEqual([
+			{ type: "text", text: "Successor " },
+			{ type: "text", text: "reply" },
+		]);
+		expect(chunks[0].messageId).toBeDefined();
+		expect(chunks[1].messageId).toBe(chunks[0].messageId);
+	});
+
+	it("does not repeat successor text after an old message_end finishes delivering", async () => {
+		using dir = TempDir.createSync("@acp-cross-session-");
+		vi.useFakeTimers();
+		const h = harness(dir.path());
+		await h.agent.newSession({ cwd: dir.path(), mcpServers: [] });
+		await bootstrap();
+		h.updates.length = 0;
+		const blocked = Promise.withResolvers<void>();
+		const reached = Promise.withResolvers<void>();
+		vi.spyOn(h.connection, "sessionUpdate").mockImplementation(async notification => {
+			h.updates.push(notification);
+			const update = notification.update;
+			if (
+				update.sessionUpdate === "agent_message_chunk" &&
+				update.content.type === "text" &&
+				update.content.text === "Old reply"
+			) {
+				reached.resolve();
+				await blocked.promise;
+			}
+		});
+		const old = assistant("Old reply");
+		h.emit({ type: "agent_start" });
+		h.emit({ type: "message_start", message: old });
+		h.emit({ type: "message_end", message: old });
+		await reached.promise;
+
+		h.emit({ type: "agent_start" });
+		const successor = assistant("Successor reply");
+		h.emit({ type: "message_start", message: successor });
+		h.emit({
+			type: "message_update",
+			message: successor,
+			assistantMessageEvent: { type: "text_delta", delta: "Successor reply" },
+		} as AgentSessionEvent);
+		blocked.resolve();
+		await bootstrap();
+		h.emit({ type: "message_end", message: successor });
+		await bootstrap();
+
+		const chunks = h.updates.filter(
+			({ update }) =>
+				update.sessionUpdate === "agent_message_chunk" &&
+				update.content.type === "text" &&
+				update.content.text === "Successor reply",
+		);
+		expect(chunks).toHaveLength(1);
+	});
+
+	it("uses the old message id for a failed error delivery fallback after a successor starts", async () => {
+		using dir = TempDir.createSync("@acp-cross-session-");
+		vi.useFakeTimers();
+		const h = harness(dir.path());
+		await h.agent.newSession({ cwd: dir.path(), mcpServers: [] });
+		await bootstrap();
+		h.updates.length = 0;
+		const blocked = Promise.withResolvers<void>();
+		const reached = Promise.withResolvers<void>();
+		let attempted = false;
+		vi.spyOn(h.connection, "sessionUpdate").mockImplementation(async notification => {
+			h.updates.push(notification);
+			const update = notification.update;
+			if (
+				!attempted &&
+				update.sessionUpdate === "agent_message_chunk" &&
+				update.content.type === "text" &&
+				update.content.text === "Old provider failure"
+			) {
+				attempted = true;
+				reached.resolve();
+				await blocked.promise;
+				throw new Error("Delivery failed");
+			}
+		});
+		const old = assistant("");
+		old.stopReason = "error";
+		old.errorMessage = "Old provider failure";
+		h.emit({ type: "agent_start" });
+		h.emit({ type: "message_start", message: old });
+		h.emit({
+			type: "message_update",
+			message: old,
+			assistantMessageEvent: { type: "error", error: old },
+		} as AgentSessionEvent);
+		await reached.promise;
+		h.emit({ type: "agent_end", messages: [old] });
+		h.emit({ type: "agent_start" });
+		const successor = assistant("Successor reply");
+		h.emit({ type: "message_start", message: successor });
+		h.emit({
+			type: "message_update",
+			message: successor,
+			assistantMessageEvent: { type: "text_delta", delta: "Successor reply" },
+		} as AgentSessionEvent);
+		blocked.resolve();
+		await eventually(() =>
+			expect(h.updates.filter(({ update }) => update.sessionUpdate === "session_info_update")).toHaveLength(1),
+		);
+		await bootstrap();
+		h.emit({ type: "message_end", message: successor });
+		await bootstrap();
+
+		const errors = h.updates.flatMap(({ update }) =>
+			update.sessionUpdate === "agent_message_chunk" &&
+			update.content.type === "text" &&
+			update.content.text === old.errorMessage
+				? [update]
+				: [],
+		);
+		expect(errors).toHaveLength(2);
+		expect(errors[0].messageId).toBeDefined();
+		expect(errors[1].messageId).toBe(errors[0].messageId);
+		expect(
+			h.updates.filter(
+				({ update }) =>
+					update.sessionUpdate === "agent_message_chunk" &&
+					update.content.type === "text" &&
+					update.content.text === "Successor reply",
+			),
+		).toHaveLength(1);
 	});
 
 	it("does not abort an idle session when messaging is off, including a late cancel after an autonomous turn", async () => {

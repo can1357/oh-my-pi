@@ -9,6 +9,7 @@ import {
 	getTerminalSessionsDir,
 	getWorktreesDir,
 	hashPath,
+	normalizePathForComparison,
 	pathIsWithin,
 	resolveEquivalentPath,
 } from "@oh-my-pi/pi-utils/dirs";
@@ -407,6 +408,47 @@ function writeIfChangedSync(file: string, content: string): void {
 	}
 	fs.mkdirSync(path.dirname(file), { recursive: true });
 	fs.writeFileSync(file, content);
+}
+
+/**
+ * Paths recorded in the persistent registry (`<agentDir>/custom-session-files/*`).
+ * A first save may leave only its staging temp, so the target need not exist.
+ */
+export async function collectRegisteredSessionPaths(registryDir: string): Promise<string[]> {
+	let entries: string[];
+	try {
+		entries = await fs.promises.readdir(registryDir);
+	} catch (error) {
+		if (isEnoent(error)) return [];
+		throw error;
+	}
+	const files = new Map<string, string>();
+	for (const entry of entries) {
+		let recorded: string;
+		try {
+			recorded = (await fs.promises.readFile(path.join(registryDir, entry), "utf8")).trim();
+		} catch (error) {
+			if (isEnoent(error)) continue;
+			throw error;
+		}
+		if (!recorded) continue;
+		const file = path.resolve(recorded);
+		files.set(normalizePathForComparison(file), file);
+	}
+	return [...files.values()];
+}
+
+/** Registered custom-session paths whose transcript exists. */
+export async function collectRegisteredSessionFiles(registryDir: string): Promise<string[]> {
+	const files: string[] = [];
+	for (const file of await collectRegisteredSessionPaths(registryDir)) {
+		try {
+			if ((await fs.promises.stat(file)).isFile()) files.push(file);
+		} catch (error) {
+			if (!isEnoent(error)) throw error;
+		}
+	}
+	return files;
 }
 
 /**

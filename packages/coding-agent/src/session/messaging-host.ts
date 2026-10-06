@@ -103,17 +103,19 @@ export async function bindSessionMessaging(
 					],
 					callback,
 				),
-			deliverRemote: delivery => session.deliverRemoteMessage(delivery),
+			deliverRemote: deliveries => session.deliverRemoteMessages(deliveries),
 			pendingRemoteCount: () => session.pendingRemoteCount(),
 			showNotice: text => session.emitNotice("info", text, "messaging"),
 			deliverNotice: (from, body) =>
-				session.deliverRemoteMessage({
-					id: crypto.randomUUID(),
-					from,
-					body,
-					chain: [],
-					receivedAt: Date.now(),
-				}),
+				session.deliverRemoteMessages([
+					{
+						id: crypto.randomUUID(),
+						from,
+						body,
+						chain: [],
+						receivedAt: Date.now(),
+					},
+				]),
 			askApproval: opts.askApproval,
 			currentRelayChain: () => session.currentRelayChain(),
 			lastFinished: () => session.lastFinished(),

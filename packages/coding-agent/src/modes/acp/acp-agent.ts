@@ -172,6 +172,11 @@ function isPromptTurnInFlight(turn: PromptTurnState | undefined): turn is Prompt
 	return turn !== undefined && (!turn.settled || turn.cleanup !== undefined);
 }
 
+interface LiveAssistantMessageState {
+	id: string;
+	progress: { textEmitted: boolean; thoughtEmitted: boolean };
+}
+
 type ManagedSessionRecord = {
 	session: AgentSession;
 	readonly wireSessionId: string;
@@ -185,8 +190,7 @@ type ManagedSessionRecord = {
 	autonomousTurnError: Pick<PromptTurnState, "errorTextDelivery">;
 	autonomousCancelCleanup: Promise<void> | undefined;
 	promptQueue: PromptQueueState;
-	liveMessageId: string | undefined;
-	liveMessageProgress: { textEmitted: boolean; thoughtEmitted: boolean } | undefined;
+	liveMessage: LiveAssistantMessageState | undefined;
 	toolArgsById: Map<string, unknown>;
 	extensionsConfigured: boolean;
 	// Installed inside `#scheduleBootstrapUpdates` (post-race-guard); released
@@ -1387,8 +1391,7 @@ export class AcpAgent implements Agent {
 			autonomousTurnError: { errorTextDelivery: undefined },
 			autonomousCancelCleanup: undefined,
 			promptQueue: { promise: Promise.resolve(), release: undefined },
-			liveMessageId: undefined,
-			liveMessageProgress: undefined,
+			liveMessage: undefined,
 			toolArgsById: new Map(),
 			extensionsConfigured: false,
 			closedError: undefined,
@@ -1470,15 +1473,15 @@ export class AcpAgent implements Agent {
 			return;
 		}
 		if (autonomous && event.type === "agent_start") record.autonomousTurnError = { errorTextDelivery: undefined };
-		await this.#emitLiveSessionEvent(record, event, promptTurn ?? record.autonomousTurnError);
+		const liveMessage = this.#prepareLiveAssistantMessage(record, event);
+		await this.#emitLiveSessionEvent(record, event, promptTurn ?? record.autonomousTurnError, liveMessage);
 		if (record.closedError) return;
 		if (event.type === "agent_end") {
 			if (promptTurn) {
 				await this.#waitForAcpPromptIdle(record);
 				if (record.closedError) return;
 			}
-			record.liveMessageId = undefined;
-			record.liveMessageProgress = undefined;
+			if (record.liveMessage === liveMessage) record.liveMessage = undefined;
 			if (promptTurn) {
 				this.#finishPrompt(record, {
 					stopReason: this.#resolveStopReason(event, promptTurn.cancelRequested),
@@ -1495,6 +1498,7 @@ export class AcpAgent implements Agent {
 		record: ManagedSessionRecord,
 		event: AgentSessionEvent,
 		turnError: Pick<PromptTurnState, "errorTextDelivery">,
+		liveMessage: LiveAssistantMessageState | undefined,
 	): Promise<void> {
 		if (record.closedError) return;
 
@@ -1502,7 +1506,6 @@ export class AcpAgent implements Agent {
 			record.toolArgsById.set(event.toolCallId, event.args);
 		}
 
-		this.#prepareLiveAssistantMessage(record, event);
 		const imageDataCache = new Map<string, string>();
 		const resolveImageDataForAcp = (data: string, mimeType: string | undefined): string => {
 			const key = `${mimeType ?? ""}\u0000${data}`;
@@ -1517,8 +1520,9 @@ export class AcpAgent implements Agent {
 			event.message.role === "assistant" &&
 			event.assistantMessageEvent.type === "error";
 		for (const notification of mapAgentSessionEventToAcpSessionUpdates(event, record.wireSessionId, {
-			getMessageId: message => this.#getLiveMessageId(record, message),
-			getMessageProgress: message => this.#getLiveMessageProgress(record, message),
+			getMessageId: message => (typeof message === "object" && message !== null ? liveMessage?.id : undefined),
+			getMessageProgress: message =>
+				typeof message === "object" && message !== null ? liveMessage?.progress : undefined,
 			getToolArgs: toolCallId => record.toolArgsById.get(toolCallId),
 			cwd: record.session.sessionManager.getCwd(),
 			resolveImageData: resolveImageDataForAcp,
@@ -1540,13 +1544,13 @@ export class AcpAgent implements Agent {
 		if (event.type === "tool_execution_end") {
 			record.toolArgsById.delete(event.toolCallId);
 		}
-		this.#clearLiveAssistantMessageAfterEvent(record, event);
+		this.#clearLiveAssistantMessageAfterEvent(record, event, liveMessage);
 
 		if (event.type === "agent_end") {
 			if (record.closedError) return;
-			await this.#flushMissedFinalAssistantText(record, event);
+			await this.#flushMissedFinalAssistantText(record, event, liveMessage);
 			if (record.closedError) return;
-			await this.#flushUnreportedTurnError(record, event, turnError);
+			await this.#flushUnreportedTurnError(record, event, turnError, liveMessage);
 			if (record.closedError) return;
 			await this.#emitEndOfTurnUpdates(record);
 		}
@@ -1571,8 +1575,9 @@ export class AcpAgent implements Agent {
 	async #flushMissedFinalAssistantText(
 		record: ManagedSessionRecord,
 		event: Extract<AgentSessionEvent, { type: "agent_end" }>,
+		liveMessage: LiveAssistantMessageState | undefined,
 	): Promise<void> {
-		const progress = record.liveMessageProgress;
+		const progress = liveMessage?.progress;
 		if (!progress || progress.textEmitted) {
 			return;
 		}
@@ -1592,7 +1597,7 @@ export class AcpAgent implements Agent {
 			update: {
 				sessionUpdate: "agent_message_chunk",
 				content: { type: "text", text },
-				messageId: record.liveMessageId,
+				messageId: liveMessage?.id,
 			},
 		});
 	}
@@ -1611,6 +1616,7 @@ export class AcpAgent implements Agent {
 		record: ManagedSessionRecord,
 		event: Extract<AgentSessionEvent, { type: "agent_end" }>,
 		turnError: Pick<PromptTurnState, "errorTextDelivery">,
+		liveMessage: LiveAssistantMessageState | undefined,
 	): Promise<void> {
 		let streamedDelivery = turnError.errorTextDelivery;
 		while (streamedDelivery) {
@@ -1635,7 +1641,7 @@ export class AcpAgent implements Agent {
 			update: {
 				sessionUpdate: "agent_message_chunk",
 				content: { type: "text", text: errorMessage },
-				messageId: record.liveMessageId ?? crypto.randomUUID(),
+				messageId: liveMessage?.id ?? crypto.randomUUID(),
 			},
 		});
 		turnError.errorTextDelivery = delivery.then(
@@ -1659,15 +1665,21 @@ export class AcpAgent implements Agent {
 		await record.session.waitForIdle();
 	}
 
-	#prepareLiveAssistantMessage(record: ManagedSessionRecord, event: AgentSessionEvent): void {
+	#prepareLiveAssistantMessage(
+		record: ManagedSessionRecord,
+		event: AgentSessionEvent,
+	): LiveAssistantMessageState | undefined {
 		if (
 			(event.type === "message_start" || event.type === "message_update" || event.type === "message_end") &&
 			event.message.role === "assistant" &&
-			(event.type === "message_start" || !record.liveMessageId || !record.liveMessageProgress)
+			(event.type === "message_start" || !record.liveMessage)
 		) {
-			record.liveMessageId = crypto.randomUUID();
-			record.liveMessageProgress = { textEmitted: false, thoughtEmitted: false };
+			record.liveMessage = {
+				id: crypto.randomUUID(),
+				progress: { textEmitted: false, thoughtEmitted: false },
+			};
 		}
+		return record.liveMessage;
 	}
 
 	/**
@@ -1678,30 +1690,14 @@ export class AcpAgent implements Agent {
 	 * real progress instead of resurrecting a fresh one (which would double-emit
 	 * the final answer).
 	 */
-	#clearLiveAssistantMessageAfterEvent(record: ManagedSessionRecord, event: AgentSessionEvent): void {
-		if (event.type === "message_end" && event.message.role === "assistant") {
-			record.liveMessageId = undefined;
-			record.liveMessageProgress = undefined;
-		}
-	}
-
-	#getLiveMessageId(record: ManagedSessionRecord, message: unknown): string | undefined {
-		if (typeof message !== "object" || message === null) {
-			return undefined;
-		}
-		record.liveMessageId ??= crypto.randomUUID();
-		return record.liveMessageId;
-	}
-
-	#getLiveMessageProgress(
+	#clearLiveAssistantMessageAfterEvent(
 		record: ManagedSessionRecord,
-		message: unknown,
-	): { textEmitted: boolean; thoughtEmitted: boolean } | undefined {
-		if (typeof message !== "object" || message === null) {
-			return undefined;
+		event: AgentSessionEvent,
+		liveMessage: LiveAssistantMessageState | undefined,
+	): void {
+		if (event.type === "message_end" && event.message.role === "assistant" && record.liveMessage === liveMessage) {
+			record.liveMessage = undefined;
 		}
-		record.liveMessageProgress ??= { textEmitted: false, thoughtEmitted: false };
-		return record.liveMessageProgress;
 	}
 
 	#finishPrompt(record: ManagedSessionRecord, response?: PromptResponse, error?: unknown): void {

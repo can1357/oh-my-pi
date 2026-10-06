@@ -303,6 +303,26 @@ describe("prompt action autocomplete", () => {
 		expect(provider.trySyncSlashCompletion("hello")).toBeNull();
 	});
 
+	it("finds the same session while editing its escaped backslash mention", async () => {
+		const name = "release \\draft";
+		const provider = createPromptActionAutocompleteProvider({
+			commands: [],
+			basePath: "/project",
+			sessionMentions: async () => [{ name, cwd: "/other" }],
+			keybindings: AppKeybindingsManager.inMemory(),
+			copyCurrentLine: () => {},
+			copyPrompt: () => {},
+			undo: () => {},
+			moveCursorToMessageEnd: () => {},
+			moveCursorToMessageStart: () => {},
+			moveCursorToLineStart: () => {},
+			moveCursorToLineEnd: () => {},
+		});
+		const line = String.raw`@"release \\draft"`;
+		const suggestions = await provider.getSuggestions([line], 0, line.length);
+		expect(suggestions?.items.map(item => item.label)).toContain(`@${name}`);
+	});
+
 	it("suggests model mentions and reanchors completion to the live token", async () => {
 		const candidate = modelMentionItem("a", "x", "X One");
 		const provider = createPromptActionAutocompleteProvider({

@@ -52,7 +52,7 @@ describe("top-level cross-session delivery", () => {
 			originalRequest(entry, request, { ...options, dir }),
 		);
 		const registrySpy = spyOn(transport, "messagingRegistryDir").mockReturnValue(dir);
-		const sessionsSpy = spyOn(sessionListing, "listAllSessions").mockImplementation(() =>
+		const sessionsSpy = spyOn(sessionListing, "listLocalSessionsWithRegisteredFiles").mockImplementation(() =>
 			originalListAllSessions(undefined, path.join(temp.path(), "sessions")),
 		);
 		restore.push(
@@ -303,7 +303,7 @@ describe("top-level cross-session delivery", () => {
 		expect(b.session.pendingRemoteCount()).toBe(0);
 	});
 
-	it("queues a stopped session's message by name and delivers it with the resume batch notice", async () => {
+	it("resumes multiple offline messages in one first provider context", async () => {
 		const a = await makeSession("alice");
 		const manager = SessionManager.create(temp.path(), path.join(temp.path(), "sessions", "project"));
 		const b = await makeSession("bob", { manager });
@@ -322,6 +322,11 @@ describe("top-level cross-session delivery", () => {
 			type: "text",
 			text: "Queued for bob (not running); it will see this when resumed.",
 		});
+		const second = await executeSend(
+			{ registry: AgentRegistry.global(), senderId: MAIN_AGENT_ID, messaging: a.session.messaging },
+			{ to: "bob", message: "SECOND_OFFLINE_REMOTE_MARKER" },
+		);
+		expect(second.isError).toBe(false);
 
 		const resumed = await makeSession("bob", {
 			manager: await SessionManager.open(file, undefined, undefined, { suppressBreadcrumb: true }),
@@ -329,8 +334,10 @@ describe("top-level cross-session delivery", () => {
 		expect(resumed.session.sessionManager.getSessionId()).toBe(id);
 		await resumed.firstTurn;
 		await resumed.session.waitForIdle();
-		expect(resumed.notices).toContain("1 message(s) from other sessions arrived while this session was not running.");
+		expect(resumed.notices).toContain("2 message(s) from other sessions arrived while this session was not running.");
 		expect(JSON.stringify(resumed.contexts[0]!.messages)).toContain("OFFLINE_REMOTE_MARKER");
+		expect(JSON.stringify(resumed.contexts[0]!.messages)).toContain("SECOND_OFFLINE_REMOTE_MARKER");
+		expect(resumed.contexts).toHaveLength(1);
 		expect(resumed.session.pendingRemoteCount()).toBe(0);
 	});
 

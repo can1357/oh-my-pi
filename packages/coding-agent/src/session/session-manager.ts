@@ -26,6 +26,7 @@ import {
 } from "@oh-my-pi/pi-utils";
 import { isTaskToolDetails, type StructuredSubagentSchemaMode } from "@oh-my-pi/pi-tui/tools/task";
 import * as snapcompact from "@oh-my-pi/snapcompact";
+import { isReservedAddress, RESERVED_SESSION_NAME_ERROR } from "../messaging/names";
 import { moveFileAcrossDevices } from "../utils/atomic-file";
 import { ArtifactManager } from "./artifacts";
 import { type BlobPutOptions, type BlobPutResult, BlobStore, lazyImageDataSync } from "./blob-store";
@@ -3322,6 +3323,7 @@ export class SessionManager {
 
 		const title = SessionManager.#cleanTitle(name);
 		if (!title) return false;
+		if (source === "user" && isReservedAddress(title)) throw new Error(RESERVED_SESSION_NAME_ERROR);
 
 		const previousTitle = this.#sessionName;
 		const timestamp = nowIso();

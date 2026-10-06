@@ -26,9 +26,20 @@ import {
 import { Settings } from "../config/settings";
 import type { Setting } from "../config/registry";
 
+import {
+	collectOfflineMailGcCandidates,
+	removeOfflineMailGcCandidate,
+	retireOfflineMailbox,
+	type OfflineMailGcCandidate,
+} from "../messaging/mailbox";
+import { messagingRegistryDir, resolveRegistry } from "../messaging/transport";
 import { BLOB_HASH_RE, BLOB_STAGING_RE, blobStagingPath } from "../session/blob-store";
 import { listSessionsReadOnly, type SessionInfo, type SessionStatus } from "../session/session-listing";
-import { parseTerminalBreadcrumb } from "../session/session-paths";
+import {
+	collectRegisteredSessionFiles,
+	collectRegisteredSessionPaths,
+	parseTerminalBreadcrumb,
+} from "../session/session-paths";
 import { readSessionHeaderId } from "../session/session-loader";
 import { FileSessionStorage, SESSION_STAGING_RE, tryAcquireSessionLease } from "../session/session-storage";
 import {
@@ -149,6 +160,8 @@ export interface StaleGcResult {
 	expiredReports: number;
 	/** Collab guest replicas beyond the retention window. */
 	expiredReplicas: number;
+	expiredMail: number;
+	orphanedMail: number;
 	wouldDelete: number;
 	deleted: number;
 	bytes: number;
@@ -465,29 +478,6 @@ async function collectReferencedBlobHashes(sessionRoots: string[], exactSessionF
 }
 
 /**
- * Paths recorded in the persistent registry (`<agentDir>/custom-session-files/*`).
- * A first save may leave only its staging temp, so the target need not exist
- * when reclaiming crash leftovers.
- */
-async function collectRegisteredSessionPaths(registryDir: string): Promise<string[]> {
-	let entries: string[];
-	try {
-		entries = await fs.readdir(registryDir);
-	} catch (error) {
-		if (codeOf(error) === "ENOENT") return [];
-		throw error;
-	}
-	const files = new Map<string, string>();
-	for (const entry of entries) {
-		const recorded = (await readTextIfPresent(path.join(registryDir, entry))).trim();
-		if (!recorded) continue;
-		const sessionFile = path.resolve(recorded);
-		files.set(normalizePathForComparison(sessionFile), sessionFile);
-	}
-	return [...files.values()];
-}
-
-/**
  * Exact session files recorded in terminal breadcrumbs. Supplements
  * {@link collectRegisteredSessionFiles}: a breadcrumb holds only that
  * terminal's last session, but catches the current transcript even if its
@@ -616,8 +606,7 @@ async function runBlobGc(options: ResolvedGcOptions, archiveSessionsRoot: string
 	const sessionsRoot = getSessionsDir(options.agentDir);
 	const defaultRoots = [sessionsRoot, archiveSessionsRoot];
 	const exactSessionFiles = new Map<string, string>();
-	for (const file of await collectRegisteredSessionPaths(getCustomSessionFilesDir(options.agentDir))) {
-		if (!(await statIfPresent(file))?.isFile()) continue;
+	for (const file of await collectRegisteredSessionFiles(getCustomSessionFilesDir(options.agentDir))) {
 		exactSessionFiles.set(normalizePathForComparison(file), file);
 	}
 	for (const file of await collectBreadcrumbSessionFiles(getTerminalSessionsDir(options.agentDir))) {
@@ -654,12 +643,13 @@ async function runBlobGc(options: ResolvedGcOptions, archiveSessionsRoot: string
 }
 
 interface StaleCandidate {
-	kind: "danglingMarkers" | "staleBreadcrumbs" | "expiredReports" | "expiredReplicas";
+	kind: "danglingMarkers" | "staleBreadcrumbs" | "expiredReports" | "expiredReplicas" | "expiredMail" | "orphanedMail";
 	/** Removed together; the first path is the entry itself. */
 	paths: string[];
 	bytes: number;
 	/** Session file whose ownership lease must be free (no running writer) to remove it. */
 	ownedSession?: string;
+	mail?: OfflineMailGcCandidate;
 }
 
 /**
@@ -743,7 +733,14 @@ async function collectExpiredFiles(
 async function runStaleGc(options: ResolvedGcOptions): Promise<StaleGcResult> {
 	const markersDir = getCustomSessionFilesDir(options.agentDir);
 	const breadcrumbDir = getTerminalSessionsDir(options.agentDir);
+	const mailDir = (await resolveRegistry(messagingRegistryDir(), false)).dir;
 	const candidates: StaleCandidate[] = [
+		...(await collectOfflineMailGcCandidates({ dir: mailDir, graceMs: GC_WRITE_GRACE_MS })).map(mail => ({
+			kind: mail.kind,
+			paths: [mail.file],
+			bytes: mail.bytes,
+			mail,
+		})),
 		...(await collectDanglingPointers(markersDir, "danglingMarkers", text => {
 			const recorded = text.trim();
 			return recorded ? path.resolve(recorded) : undefined;
@@ -786,6 +783,8 @@ async function runStaleGc(options: ResolvedGcOptions): Promise<StaleGcResult> {
 		staleBreadcrumbs: 0,
 		expiredReports: 0,
 		expiredReplicas: 0,
+		expiredMail: 0,
+		orphanedMail: 0,
 		wouldDelete: 0,
 		deleted: 0,
 		bytes: 0,
@@ -800,8 +799,15 @@ async function runStaleGc(options: ResolvedGcOptions): Promise<StaleGcResult> {
 			result.bytes += candidate.bytes;
 			if (!options.apply) continue;
 			try {
-				for (const target of candidate.paths) await fs.rm(target, { recursive: true, force: true });
-				result.deleted += 1;
+				if (candidate.mail) {
+					if (await removeOfflineMailGcCandidate(candidate.mail, { dir: mailDir, graceMs: GC_WRITE_GRACE_MS }))
+						result.deleted += 1;
+				} else {
+					const sessionId = candidate.ownedSession ? await readSessionHeaderId(candidate.ownedSession) : undefined;
+					for (const target of candidate.paths) await fs.rm(target, { recursive: true, force: true });
+					result.deleted += 1;
+					if (sessionId) await retireOfflineMailbox(sessionId, { dir: mailDir });
+				}
 			} catch (error) {
 				result.errors.push(`${candidate.paths[0]}: ${errorMessage(error)}`);
 			}
@@ -1863,6 +1869,9 @@ async function runArchiveGc(
 			result.archived += 1;
 			archivedSessionIds.push(candidate.session.id);
 			archivedSessions.push(candidate.session);
+			await retireOfflineMailbox(candidate.session.id, {
+				dir: (await resolveRegistry(messagingRegistryDir(), false)).dir,
+			});
 		} catch (error) {
 			result.errors.push(`${candidate.session.path}: ${errorMessage(error)}`);
 		}
@@ -2265,7 +2274,7 @@ function renderText(result: GcResult): string {
 	if (result.stale) {
 		const stale = result.stale;
 		lines.push(
-			`stale: ${stale.deleted}/${stale.wouldDelete} entries, ${formatBytes(stale.bytes)} (${stale.danglingMarkers} session markers, ${stale.staleBreadcrumbs} breadcrumbs, ${stale.expiredReports} reports, ${stale.expiredReplicas} collab replicas)`,
+			`stale: ${stale.deleted}/${stale.wouldDelete} entries, ${formatBytes(stale.bytes)} (${stale.danglingMarkers} session markers, ${stale.staleBreadcrumbs} breadcrumbs, ${stale.expiredReports} reports, ${stale.expiredReplicas} collab replicas, ${stale.expiredMail} expired mail, ${stale.orphanedMail} orphaned mail)`,
 		);
 		if (stale.errors.length > 0) lines.push(`stale errors: ${stale.errors.length}`);
 	}

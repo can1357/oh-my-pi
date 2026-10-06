@@ -21,7 +21,10 @@ import {
 } from "./settings";
 
 type MessageRequest = Extract<InboxRequest, { type: "message" }>;
-export type OutgoingNotice = Omit<Extract<InboxRequest, { type: "notice" }>, "id" | "from">;
+export type OutgoingNotice = Omit<
+	Exclude<Extract<InboxRequest, { type: "notice" }>, { kind: "refused" }>,
+	"id" | "from"
+>;
 interface HeldMessage {
 	request: MessageRequest;
 	sender: SenderInfo;
@@ -105,7 +108,7 @@ export class InboundGate {
 			if (this.host.pendingRemoteCount() >= ACCEPTED_QUEUE_CAP)
 				return { ok: true, outcome: "dropped", reason: "queue_full" };
 			const queued = this.host.isBusy() || !this.isReady();
-			this.host.deliverRemote(delivery);
+			this.host.deliverRemote([delivery]);
 			return { ok: true, outcome: queued ? "queued" : "delivered" };
 		}
 		const held: HeldMessage = {
@@ -180,7 +183,7 @@ export class InboundGate {
 			});
 			return false;
 		}
-		this.host.deliverRemote(held.delivery);
+		this.host.deliverRemote([held.delivery]);
 		return true;
 	}
 

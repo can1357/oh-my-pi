@@ -167,7 +167,7 @@ export class PromptActionAutocompleteProvider implements AutocompleteProvider {
 			const query = sessionPrefix
 				.slice(sessionPrefix.startsWith('@"') ? 2 : 1)
 				.replace(/"$/, "")
-				.replace(/\\"/g, '"')
+				.replace(/\\(["\\])/g, "$1")
 				.toLowerCase();
 			const items: SessionMentionItem[] = sessions
 				.filter(session => subsequenceMatch(query, session.name.toLowerCase()))
