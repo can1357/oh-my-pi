@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed running RPC sessions missing models after another omp process adds a provider login; `get_available_models` and `set_model` now reflect external credential changes ([#14596](https://github.com/can1357/oh-my-pi/issues/14596)).
+
 ## [18.6.3] - 2026-10-06
 
 ### Breaking Changes

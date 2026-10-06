@@ -945,6 +945,11 @@ export async function openRpcSession(
 
 type RpcModelLookupSession = Pick<AgentSession, "getAvailableModels" | "modelRegistry">;
 
+async function availableRpcModels(session: RpcModelLookupSession): Promise<Model[]> {
+	await session.modelRegistry.authStorage.credentials.poll();
+	return session.getAvailableModels();
+}
+
 /**
  * The available model with exactly this provider and id. Models missing from
  * the current catalog wait for in-flight background discovery first: on cold
@@ -953,11 +958,11 @@ type RpcModelLookupSession = Pick<AgentSession, "getAvailableModels" | "modelReg
  * stalled behind unrelated discovery.
  */
 async function findRpcModel(session: RpcModelLookupSession, provider: string, modelId: string) {
-	const find = () => session.getAvailableModels().find(m => m.provider === provider && m.id === modelId);
-	const model = find();
+	const find = (models: Model[]) => models.find(m => m.provider === provider && m.id === modelId);
+	const model = find(await availableRpcModels(session));
 	if (model) return model;
 	await session.modelRegistry.awaitBackgroundRefresh();
-	return find();
+	return find(session.getAvailableModels());
 }
 
 /** The optional `provider`/`modelId` pair of `open_session` or `switch_session`, validated like `set_model`. */
@@ -2276,7 +2281,7 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 
 			case "get_available_models": {
 				await session.modelRegistry.awaitBackgroundRefresh();
-				const models = session.getAvailableModels();
+				const models = await availableRpcModels(session);
 				return success(id, "get_available_models", { models });
 			}
 
