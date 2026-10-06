@@ -63,7 +63,7 @@ import {
 	AdvisorTranscriptRecorder,
 	advisorTranscriptFilename,
 	buildAdvisorQuarantineSourceText,
-	compareAdvisorNotes,
+	coalesceAdvisorBatchNotes,
 	formatAdvisorBatchContent,
 	getOrCreateAdvisorProviderSessionId,
 	isAdvisorInterruptImmuneTurnActive,
@@ -1644,8 +1644,9 @@ export class SessionAdvisors {
 		// carries its own `advisor` name).
 		if (this.#advisors.length > 0 && !this.#advisorYieldQueueUnsubscribe) {
 			this.#advisorYieldQueueUnsubscribe = this.#host.yieldQueue.register<AdvisorNote>("advisor", {
-				build: entries =>
-					entries.length === 0
+				build: entries => {
+					const notes = coalesceAdvisorBatchNotes(entries);
+					return notes.length === 0
 						? null
 						: ({
 								role: "custom",
@@ -1653,9 +1654,10 @@ export class SessionAdvisors {
 								display: true,
 								attribution: "agent",
 								timestamp: Date.now(),
-								content: formatAdvisorBatchContent(entries),
-								details: { notes: entries } satisfies AdvisorMessageDetails,
-							} satisfies CustomMessage),
+								content: formatAdvisorBatchContent(notes),
+								details: { notes } satisfies AdvisorMessageDetails,
+							} satisfies CustomMessage);
+				},
 				skipIdleFlush: true,
 			});
 		}
@@ -1735,7 +1737,12 @@ export class SessionAdvisors {
 		});
 		const notes: AdvisorNote[] = [{ note, severity, advisor: source }];
 		if (channel === "aside") {
-			this.#host.yieldQueue.enqueue("advisor", { note, severity, advisor: source });
+			this.#host.yieldQueue.enqueue("advisor", {
+				note,
+				severity,
+				advisor: source,
+				turn: turn ?? this.#advisorPrimaryTurnsCompleted,
+			});
 			return;
 		}
 		this.#deliverAdvisorBatch(notes, formatAdvisorBatchContent(notes), channel === "steer");
@@ -1762,7 +1769,8 @@ export class SessionAdvisors {
 		if (this.#advisorBoundaryNotes.length === 0) return;
 		// Newest turn first, then severity: the latest notes describe the current
 		// state of the work; older ones may already be resolved by it.
-		const notes = [...this.#advisorBoundaryNotes].sort(compareAdvisorNotes);
+		const boundaryNotes = this.#advisorBoundaryNotes;
+		const notes = coalesceAdvisorBatchNotes(boundaryNotes);
 		this.#advisorBoundaryNotes = [];
 		for (const n of notes) {
 			if (n.turn !== undefined && this.#advisorPrimaryTurnsCompleted > n.turn) {
@@ -1784,7 +1792,9 @@ export class SessionAdvisors {
 		const aborting = this.#host.abortInProgress();
 		const terminalAnswerNoQueuedWork = this.#hasTerminalTextAnswerWithoutQueuedWork();
 		const interruptImmuneTurnActive = this.#isAdvisorInterruptImmuneTurnActive();
-		const shouldSteer = notes.some(n => {
+		// Display coalescing must not discard a final reviewer's eligibility
+		// when an identical turn-mode concern arrived first.
+		const shouldSteer = boundaryNotes.some(n => {
 			// Steering eligibility: a blocker, or a concern from an agent-end
 			// reviewer. A turn-mode concern at a terminal boundary still
 			// preserves: the work was already reviewed per-turn.

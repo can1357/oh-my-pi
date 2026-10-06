@@ -192,6 +192,32 @@ export function compareAdvisorNotes(a: AdvisorNote, b: AdvisorNote): number {
 	return advisorSeverityRank(b.severity) - advisorSeverityRank(a.severity);
 }
 
+/**
+ * Coalesce identical notes from different named advisors reviewing the same
+ * primary turn. Only trim surrounding whitespace. Preserve punctuation, case and internal
+ * whitespace: identifiers, operators and quoted strings may
+ * carry distinct safety findings. No semantic similarity or staleness inference
+ * is involved. Keep the strongest source, with stable ordering for equal ranks.
+ * Same-advisor repeats and the unnamed legacy advisor retain their own policy.
+ */
+export function coalesceAdvisorBatchNotes(notes: readonly AdvisorNote[]): AdvisorNote[] {
+	const result: AdvisorNote[] = [];
+	const seen = new Map<string, string>();
+	for (const note of [...notes].sort(compareAdvisorNotes)) {
+		if (!note.advisor || note.turn === undefined) {
+			result.push(note);
+			continue;
+		}
+		const text = note.note.trim();
+		const key = JSON.stringify([note.turn, text]);
+		const source = seen.get(key);
+		if (source !== undefined && source !== note.advisor) continue;
+		if (source === undefined) seen.set(key, note.advisor);
+		result.push(note);
+	}
+	return result;
+}
+
 /** Admission acks: one line each — the advisor needs the verdict, not a policy essay. */
 const ADVISOR_ACK_SENT = "Delivered.";
 /** Held behind the in-progress primary turn; flushed when it completes. */

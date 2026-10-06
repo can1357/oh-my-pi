@@ -27,6 +27,7 @@ import {
 	advisorTranscriptFilename,
 	buildAdvisorQuarantineSourceText,
 	compareAdvisorNotes,
+	coalesceAdvisorBatchNotes,
 	deriveAdvisorTelemetry,
 	formatAdvisorBatchContent,
 	formatAdvisorContextPrompt,
@@ -1386,6 +1387,34 @@ describe("advisor", () => {
 					immuneTurns: 2,
 				}),
 			).toBe(false);
+		});
+
+		it("coalesces matching same-turn roster advice while retaining the strongest finding", () => {
+			const notes = coalesceAdvisorBatchNotes([
+				{ note: "Run the test.", advisor: "Product", severity: "nit", turn: 3 },
+				{ note: " Run the test. ", advisor: "Security", severity: "blocker", turn: 3 },
+				{ note: "Run the test.", advisor: "QA", severity: "concern", turn: 3 },
+				{ note: "Check the deployment.", advisor: "DevOps", severity: "concern", turn: 3 },
+			]);
+			expect(notes).toEqual([
+				{ note: " Run the test. ", advisor: "Security", severity: "blocker", turn: 3 },
+				{ note: "Check the deployment.", advisor: "DevOps", severity: "concern", turn: 3 },
+			]);
+			expect(formatAdvisorBatchContent(notes).match(/<advisory /g)?.length).toBe(2);
+		});
+
+		it("does not collapse different turns, operators, identifiers, or unknown sources", () => {
+			const notes = [
+				{ note: "Check x != y", advisor: "Security", turn: 3 },
+				{ note: "Check x == y", advisor: "QA", turn: 3 },
+				{ note: 'Check "x  y"', advisor: "Security", turn: 3 },
+				{ note: 'Check "x y"', advisor: "QA", turn: 3 },
+				{ note: "Check X != y", advisor: "Backend", turn: 3 },
+				{ note: "Check x != y", advisor: "QA", turn: 4 },
+				{ note: "Check x != y", turn: 3 },
+				{ note: "Check x != y", advisor: "QA" },
+			];
+			expect(coalesceAdvisorBatchNotes(notes)).toHaveLength(notes.length);
 		});
 
 		it("wraps each note in an advisory tag with severity as an attribute and escapes the body", () => {

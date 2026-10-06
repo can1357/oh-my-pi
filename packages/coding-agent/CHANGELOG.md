@@ -4,6 +4,7 @@
 
 ### Changed
 
+- Coalesced matching notes from different advisors reviewing the same turn in queued and terminal-boundary batches, retaining the strongest severity ([#14439](https://github.com/can1357/oh-my-pi/pull/14439) by [@Dante-dan](https://github.com/Dante-dan); [#9698](https://github.com/can1357/oh-my-pi/issues/9698)).
 - Inside a Tern pane, browser opens with `headed: false` now show as a Tern picture-in-picture too; only `app.tern: false` (or `browser.tern` / `PI_BROWSER_TERN=0`) opens Chromium instead
 
 ## [18.7.0] - 2026-10-06

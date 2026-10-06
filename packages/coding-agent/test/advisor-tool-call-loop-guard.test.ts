@@ -575,6 +575,43 @@ describe("advisor tool-call loop guard", () => {
 		}
 	});
 
+	it.each(["turn", "agent-end"] as const)(
+		"preserves terminal concern steering for an identical second %s reviewer",
+		async secondReviewMode => {
+			const note = "finished work drops the audit row";
+			createAdvisor(
+				{ "advisor.syncBacklog": "strict" },
+				0,
+				[
+					{ name: "Step reviewer", reviewMode: "turn" },
+					{ name: "Second reviewer", reviewMode: secondReviewMode },
+				],
+				0,
+				undefined,
+				"concern",
+				[
+					{ note, severity: "concern" },
+					{ note, severity: "concern" },
+				],
+			);
+			if (!session) throw new Error("Expected live session");
+
+			await session.prompt("only update");
+			expect(await session.waitForAdvisorCatchup(2_000)).toBe(true);
+			const completions = session.agent.state.messages.filter(
+				message => message.role === "assistant" && JSON.stringify(message.content).includes("primary complete"),
+			);
+			expect(completions).toHaveLength(secondReviewMode === "agent-end" ? 2 : 1);
+			const cards = session.agent.state.messages.filter(
+				message => message.role === "custom" && JSON.stringify(message.content).includes(note),
+			);
+			expect(cards).toHaveLength(1);
+			const card = cards[0];
+			if (!card || card.role !== "custom") throw new Error("Expected advisor card");
+			expect(JSON.stringify(card.content).split(note)).toHaveLength(2);
+		},
+	);
+
 	it("holds a final-review continuation during the post-interrupt cooldown", async () => {
 		// The boundary flush decides steering through the same delivery policy as
 		// live routing: inside the post-interrupt immune window a final-review
