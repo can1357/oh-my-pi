@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Inside a Tern pane, browser opens with `headed: false` now show as a Tern picture-in-picture too; only `app.tern: false` (or `browser.tern` / `PI_BROWSER_TERN=0`) opens Chromium instead
+
 ### Fixed
 
 - Fixed quitting a long session leaving the resume hint in the middle of output: it is now the last line, and nothing keeps painting after omp exits. When the terminal stops reading during the quit, omp waits for it to take the terminal restore and the hint before exiting ([#13794](https://github.com/can1357/oh-my-pi/pull/13794) by [@sjawhar](https://github.com/sjawhar)).
