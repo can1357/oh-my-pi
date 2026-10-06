@@ -4,7 +4,7 @@ import type { AgentTool } from "@oh-my-pi/pi-agent-core";
 import { ToolExecutionComponent } from "@oh-my-pi/pi-tui/chat/tool-execution";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import { Text, type TUI } from "@oh-my-pi/pi-tui";
-import type { DescribeContext } from "@oh-my-pi/pi-tui/native/node";
+import type { DescribeContext, NativeNode } from "@oh-my-pi/pi-tui/native/node";
 
 /**
  * Contract under test (tool-result render memoization):
@@ -177,10 +177,21 @@ describe("ToolExecutionComponent tool-result render memoization", () => {
 
 		component.setAdditionalContext("native\tguidance\u001b[31m");
 
+		const contextOf = (described: NativeNode): string[] => {
+			// The context sits beside the card, so the card's collapse clamp never hides it.
+			expect(described.k).toBe("col");
+			const [card, ...rest] = (described.c ?? []) as NativeNode[];
+			expect(JSON.stringify(card)).not.toContain("Context:");
+			expect(rest.map(n => n.p?.role)).toEqual(["omp.tool.context"]);
+			return rest.map(n => (n.k === "text" ? (n.p?.spans ?? []).map(s => s.t).join("") : ""));
+		};
 		for (const described of [component.describe(toolCx), component.describe()]) {
-			const json = JSON.stringify(described);
-			expect(json).toContain("↳ Context: native guidance");
-			expect(json).not.toContain("\\u001b");
+			expect(contextOf(described)).toEqual(["↳ Context: native guidance"]);
+		}
+
+		component.setAdditionalContext("updated guidance");
+		for (const described of [component.describe(toolCx), component.describe()]) {
+			expect(contextOf(described)).toEqual(["↳ Context: updated guidance"]);
 		}
 	});
 	// Regression: freezing a backgrounded task (seal()) flips #backgroundTaskFrozen,
