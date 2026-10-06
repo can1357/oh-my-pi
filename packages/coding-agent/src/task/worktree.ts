@@ -30,14 +30,6 @@ async function diffTreeOrEmpty(repo: VcsGitRepo, base: string, head: string): Pr
 	}
 }
 
-async function tryRemoveWorktree(repo: VcsGitRepo, worktreePath: string): Promise<boolean> {
-	try {
-		return await repo.worktreeRemove(worktreePath, true);
-	} catch {
-		return false;
-	}
-}
-
 /** Baseline state for a single git repository. */
 export interface RepoBaseline {
 	repoRoot: string;
@@ -287,6 +279,30 @@ export async function captureBaseline(
 		})),
 	);
 	return { root, nested };
+}
+
+/**
+ * Capture the baseline of a freshly materialised isolation and rebind it to
+ * the parent checkout at `repoRoot`.
+ *
+ * The isolation is a point-in-time copy of the parent's working tree, so its
+ * own state is the only exact baseline: a baseline read from the live parent
+ * before or after the copy also absorbs whatever other agents or merges wrote
+ * in between, and that drift would surface as this task's changes.
+ */
+export async function captureIsolationBaseline(
+	isolationDir: string,
+	repoRoot: string,
+	budgetBytes: number = ISOLATION_BASELINE_MAX_CONTENT_BYTES,
+): Promise<WorktreeBaseline> {
+	const { root, nested } = await captureBaseline(isolationDir, budgetBytes);
+	return {
+		root: { ...root, repoRoot },
+		nested: nested.map(({ relativePath, baseline }) => ({
+			relativePath,
+			baseline: { ...baseline, repoRoot: path.join(repoRoot, relativePath) },
+		})),
+	};
 }
 
 async function captureRepoDeltaPatch(repoDir: string, rb: RepoBaseline, objectRepoDir = repoDir): Promise<string> {
@@ -544,7 +560,7 @@ export async function ensureIsolation(
 	const sourceCommonDir = vcs.requireGit(repoRoot).info().commonDir;
 	const baseDir = getWorktreeDir(getTaskIsolationSegment(repoRoot, id));
 	const mergedDir = path.join(baseDir, TASK_ISOLATION_MOUNT_DIR);
-	const resolution = natives.isoResolve(preferred ?? null);
+	const resolution = await natives.isoResolve(preferred ?? null);
 	const candidates = resolution.candidates.length > 0 ? resolution.candidates : [resolution.kind];
 	let fallbackReason = resolution.reason ?? null;
 
@@ -611,6 +627,8 @@ export async function cleanupIsolation(handle: IsolationHandle): Promise<void> {
 
 export interface CommitToBranchResult {
 	branchName?: string;
+	/** Root delta the branch was built from; lets callers detect whether a later capture changed anything. */
+	rootPatch: string;
 	nestedPatches: NestedRepoPatch[];
 	/**
 	 * SHA of the parent-repo commit the task branch was created on top of, so
@@ -627,16 +645,13 @@ function baselineHasRootWip(baseline: RepoBaseline): boolean {
 /**
  * Baseline WIP context needed to safely apply a delta patch whose hunks were
  * captured against `HEAD + WIP` (see {@link captureRepoDeltaPatch}). Passed
- * whenever {@link baselineHasRootWip} is true so
- * {@link commitPatchToBranchWorktree} can replay the WIP into the temp
- * worktree first, then rewind WIP-only files after applying the delta.
+ * whenever {@link baselineHasRootWip} is true so {@link patchTree} can replay
+ * the WIP first, then rewind WIP-only files after applying the delta.
  */
 interface BaselineWipContext {
 	readonly staged: string;
 	readonly unstaged: string;
 	readonly untrackedPatch: string;
-	/** Untracked file paths present in the baseline (never in HEAD). */
-	readonly untracked: readonly string[];
 }
 
 function collectWipPatches(wip: BaselineWipContext | undefined): string[] {
@@ -644,133 +659,96 @@ function collectWipPatches(wip: BaselineWipContext | undefined): string[] {
 	return [wip.staged, wip.unstaged, wip.untrackedPatch].filter(p => p.trim());
 }
 
-async function commitPatchToBranchWorktree(
-	tmpDir: string,
+/** Keep only the `diff --git` sections of `patch` that touch one of `files`. */
+function filterPatchFiles(patch: string, files: ReadonlySet<string>): string {
+	const sections = patch.split(/^(?=diff --git )/m);
+	return sections.filter(section => parseDiffGitLinePaths(section.split("\n", 1)[0]).some(f => files.has(f))).join("");
+}
+
+/**
+ * Resolve the tree `parentSha + patchText` in `repoDir` through a temporary
+ * index — no checkout, so nothing lingers on disk if the process dies.
+ *
+ * Tries the two clean paths first; both yield an agent-only tree:
+ *   1. Plain apply — works when the WIP context matches the parent.
+ *   2. `--3way` — works when the WIP-side blob is tracked and in the ODB
+ *      (captureDeltaPatch seeded it while writing the synthetic baseline
+ *      tree); the 3-way merge subtracts the WIP.
+ *
+ * If both fail (untracked WIP files, staged-new WIP files, or overlap that
+ * --3way can't resolve — see #4136), replay the WIP first so the delta's
+ * context lines match, then rewind WIP-only files to the parent. Files touched
+ * by BOTH WIP and delta keep their combined state; merge-back reconciles the
+ * WIP side because the cherry-pick refuses to overwrite dirty paths.
+ */
+async function patchTree(
+	repoDir: string,
+	parentSha: string,
+	taskId: string,
+	patchText: string,
+	baselineWip?: BaselineWipContext,
+): Promise<string> {
+	let plainErr: vcs.VcsError;
+	try {
+		return await writeSyntheticTree(repoDir, parentSha, [patchText]);
+	} catch (err) {
+		if (!vcs.isVcsError(err)) throw err;
+		plainErr = err;
+	}
+	let threeWayErr: vcs.VcsError;
+	try {
+		return await writeSyntheticTree(repoDir, parentSha, [patchText], { threeWay: true });
+	} catch (err) {
+		if (!vcs.isVcsError(err)) throw err;
+		threeWayErr = err;
+	}
+	const wipPatches = collectWipPatches(baselineWip);
+	const logContext = {
+		taskId,
+		threeWayStderr: threeWayErr.stderr.slice(0, 2000),
+		initialStderr: plainErr.stderr.slice(0, 2000),
+		patchSize: patchText.length,
+		patchHead: patchText.slice(0, 500),
+	};
+	if (wipPatches.length === 0) {
+		logger.error("commitToBranch: git apply --3way failed", logContext);
+		throw new Error(`git apply --3way failed for task ${taskId}: ${logContext.threeWayStderr}`);
+	}
+	try {
+		const withWip = await writeSyntheticTree(repoDir, parentSha, wipPatches);
+		const deltaFiles = new Set(patchTouchedFiles(patchText));
+		const wipOnly = new Set(wipPatches.flatMap(patchTouchedFiles).filter(f => !deltaFiles.has(f)));
+		// WIP-only files are untouched by the delta, so their post-delta state
+		// is the WIP state; diffing it back to the parent rewinds them.
+		const rewind =
+			wipOnly.size > 0
+				? filterPatchFiles(await diffTreeOrEmpty(vcs.requireGit(repoDir), withWip, parentSha), wipOnly)
+				: "";
+		return await writeSyntheticTree(repoDir, parentSha, [...wipPatches, patchText, rewind]);
+	} catch (wipErr) {
+		if (!vcs.isVcsError(wipErr)) throw wipErr;
+		const stderr = wipErr.stderr.slice(0, 2000);
+		logger.error("commitToBranch: git apply with baseline WIP failed", { ...logContext, stderr });
+		throw new Error(`git apply with baseline WIP failed for task ${taskId}: ${stderr}`);
+	}
+}
+
+/** Commit `parentSha + patchText` as a detached commit object; returns its sha. */
+async function commitPatch(
+	repoDir: string,
+	parentSha: string,
 	taskId: string,
 	patchText: string,
 	message: string,
 	author?: VcsCommitAuthor,
 	baselineWip?: BaselineWipContext,
-): Promise<void> {
-	const repo = vcs.requireGit(tmpDir);
-	// Try the two clean paths first — they yield an agent-only commit and are
-	// the happy case when the temp worktree can resolve the patch against
-	// HEAD directly:
-	//
-	//   1. Plain apply — works when WIP context happens to match HEAD (e.g.
-	//      WIP-touched files that the delta patch doesn't reference).
-	//   2. `--3way`   — works when the WIP-side blob is tracked in HEAD and
-	//      lives in the shared ODB (captureDeltaPatch seeded it while writing
-	//      the synthetic baseline tree). The 3-way merge subtracts WIP,
-	//      producing an agent-only commit even when WIP and agent modify the
-	//      same tracked file at unrelated lines.
-	//
-	// If both fail (untracked WIP files, staged-new WIP files, or overlap that
-	// --3way can't resolve — see #4136), replay the WIP into the worktree
-	// first so the delta's context lines match, then rewind WIP-only files so
-	// they don't leak into the commit. Files touched by BOTH WIP and delta
-	// keep their combined state; the parent's stash-pop reconciles the WIP
-	// side via 3-way merge on merge-back.
-	let plainErr: vcs.VcsError | undefined;
-	try {
-		await repo.applyPatch(patchText, {});
-	} catch (err) {
-		if (!vcs.isVcsError(err)) throw err;
-		plainErr = err;
-	}
-	if (plainErr) {
-		let threeWayErr: vcs.VcsError | undefined;
-		try {
-			await repo.applyPatch(patchText, { threeWay: true });
-		} catch (err) {
-			if (!vcs.isVcsError(err)) throw err;
-			threeWayErr = err;
-		}
-		if (threeWayErr) {
-			const wipPatches = collectWipPatches(baselineWip);
-			if (wipPatches.length === 0 || !baselineWip) {
-				const stderr = threeWayErr.stderr.slice(0, 2000);
-				logger.error("commitToBranch: git apply --3way failed", {
-					taskId,
-					exitCode: threeWayErr.exitCode,
-					stderr,
-					initialStderr: plainErr.stderr.slice(0, 2000),
-					patchSize: patchText.length,
-					patchHead: patchText.slice(0, 500),
-				});
-				throw new Error(`git apply --3way failed for task ${taskId}: ${stderr}`);
-			}
-			try {
-				// `git apply --3way` leaves conflict markers in `U` files when
-				// it can't resolve; reset the worktree so the WIP-seeded retry
-				// starts from a clean HEAD tree.
-				await repo.reset("hard", "HEAD");
-				await applyDeltaOverBaselineWip(tmpDir, taskId, patchText, wipPatches, baselineWip);
-			} catch (wipErr) {
-				if (!vcs.isVcsError(wipErr)) throw wipErr;
-				const stderr = wipErr.stderr.slice(0, 2000);
-				logger.error("commitToBranch: git apply with baseline WIP failed", {
-					taskId,
-					exitCode: wipErr.exitCode,
-					stderr,
-					threeWayStderr: threeWayErr.stderr.slice(0, 2000),
-					initialStderr: plainErr.stderr.slice(0, 2000),
-					patchSize: patchText.length,
-					patchHead: patchText.slice(0, 500),
-				});
-				throw new Error(`git apply with baseline WIP failed for task ${taskId}: ${stderr}`);
-			}
-		}
-	}
-
-	await repo.stageFiles([]);
-	await repo.commitCreate(message, author ? { author } : {});
-}
-
-/**
- * Replay baseline WIP into the temp worktree so the delta patch's HEAD+WIP
- * context matches, apply the delta, then rewind files WIP touched but the
- * delta didn't — HEAD-tracked files are restored via `git restore`, untracked
- * or staged-new WIP files are removed from the worktree. The commit that
- * follows reflects agent's delta plus any overlap with WIP; parent's
- * stash-pop reconciles the WIP side on merge-back.
- */
-async function applyDeltaOverBaselineWip(
-	tmpDir: string,
-	_taskId: string,
-	patchText: string,
-	wipPatches: readonly string[],
-	baselineWip: BaselineWipContext,
-): Promise<void> {
-	const repo = vcs.requireGit(tmpDir);
-	for (const wip of wipPatches) {
-		await repo.applyPatch(wip, {});
-	}
-	await repo.applyPatch(patchText, {});
-
-	const wipFiles = new Set(wipPatches.flatMap(patchTouchedFiles));
-	const deltaFiles = new Set(patchTouchedFiles(patchText));
-	const wipOnly = [...wipFiles].filter(f => !deltaFiles.has(f));
-	if (wipOnly.length === 0) return;
-
-	// Any wipOnly file baselined as untracked cannot be in HEAD.
-	// Everything else may or may not — verify against HEAD's tree.
-	const untrackedSet = new Set(baselineWip.untracked);
-	const candidates = wipOnly.filter(f => !untrackedSet.has(f));
-	const inHead = candidates.length > 0 ? new Set(await repo.lsTree("HEAD", candidates)) : new Set<string>();
-	const toRestore = candidates.filter(f => inHead.has(f));
-	const toRemove = wipOnly.filter(f => !toRestore.includes(f));
-	if (toRestore.length > 0) {
-		await repo.restore({ source: "HEAD", staged: true, worktree: true, files: toRestore });
-	}
-	for (const rel of toRemove) {
-		await fs.rm(path.join(tmpDir, rel), { force: true });
-	}
+): Promise<string> {
+	const tree = await patchTree(repoDir, parentSha, taskId, patchText, baselineWip);
+	return vcs.requireGit(repoDir).commitTree(tree, [parentSha], message, author);
 }
 
 interface FilteredAgentReplayOptions {
 	baseline: WorktreeBaseline;
-	branchName: string;
 	commitMessage?: (diff: string) => Promise<string | null>;
 	fallbackMessage: string;
 	isolationDir: string;
@@ -780,74 +758,64 @@ interface FilteredAgentReplayOptions {
 	taskId: string;
 }
 
-async function replayFilteredAgentCommits(opts: FilteredAgentReplayOptions): Promise<void> {
+/**
+ * Rewrite each agent commit against the captured baseline WIP so user
+ * staged/unstaged/untracked changes never enter the task history. Returns the
+ * tip commit (the baseline sha when nothing survived filtering).
+ */
+async function replayFilteredAgentCommits(opts: FilteredAgentReplayOptions): Promise<string> {
 	const baselineSha = opts.baseline.root.headCommit;
 	const repo = vcs.requireGit(opts.repoRoot);
 	const isolationRepo = vcs.requireGit(opts.isolationDir);
-	await repo.createBranch(opts.branchName, baselineSha, false);
+	const agentCommits = await isolationRepo.revListRange(baselineSha, opts.isolationHead);
+	const baselineWip = [opts.baseline.root.staged, opts.baseline.root.unstaged, opts.baseline.root.untrackedPatch];
+	// Seed the parent ODB with the dirty-side blobs needed by `git apply
+	// --3way`. Isolation repositories can read parent objects, but the parent
+	// cannot read objects created only inside isolation.
+	await writeSyntheticTree(opts.repoRoot, baselineSha, baselineWip);
+	const dirtyBaselineTree = await writeSyntheticTree(opts.isolationDir, baselineSha, baselineWip);
+	let tip = baselineSha;
+	let previousFilteredTree = baselineSha;
 
-	const tmpDir = path.join(os.tmpdir(), `omp-branch-${Snowflake.next()}`);
-	try {
-		await repo.worktreeAdd(tmpDir, opts.branchName, { detach: false, clone: false });
-		const agentCommits = await isolationRepo.revListRange(baselineSha, opts.isolationHead);
-		const baselineWip = [opts.baseline.root.staged, opts.baseline.root.unstaged, opts.baseline.root.untrackedPatch];
-		// Seed the parent ODB with the dirty-side blobs needed by `git apply
-		// --3way`. Isolation repositories can read parent objects, but the parent
-		// cannot read objects created only inside isolation.
-		await writeSyntheticTree(opts.repoRoot, baselineSha, baselineWip);
-		const dirtyBaselineTree = await writeSyntheticTree(opts.isolationDir, baselineSha, baselineWip);
-		let previousFilteredTree = baselineSha;
-		let filteredCommitsApplied = 0;
-
-		for (const commitSha of agentCommits) {
-			const taskStatePatch = await diffTreeOrEmpty(isolationRepo, dirtyBaselineTree, `${commitSha}^{tree}`);
-			const currentFilteredTree = await writeSyntheticTree(opts.repoRoot, baselineSha, [taskStatePatch], {
-				threeWay: true,
-			});
-			const commitPatch = await diffTreeOrEmpty(repo, previousFilteredTree, currentFilteredTree);
-			if (commitPatch.trim()) {
-				const details = await isolationRepo.commitDetails(commitSha);
-				await commitPatchToBranchWorktree(
-					tmpDir,
-					opts.taskId,
-					commitPatch,
-					details.message || commitSha,
-					details.author,
-				);
-				filteredCommitsApplied++;
-			}
-			previousFilteredTree = currentFilteredTree;
+	for (const commitSha of agentCommits) {
+		const taskStatePatch = await diffTreeOrEmpty(isolationRepo, dirtyBaselineTree, `${commitSha}^{tree}`);
+		const currentFilteredTree = await writeSyntheticTree(opts.repoRoot, baselineSha, [taskStatePatch], {
+			threeWay: true,
+		});
+		const commitPatchText = await diffTreeOrEmpty(repo, previousFilteredTree, currentFilteredTree);
+		if (commitPatchText.trim()) {
+			const details = await isolationRepo.commitDetails(commitSha);
+			tip = await commitPatch(
+				opts.repoRoot,
+				tip,
+				opts.taskId,
+				commitPatchText,
+				details.message || commitSha,
+				details.author,
+			);
 		}
-		if (filteredCommitsApplied === 0) {
-			// No filtered commit landed — tmpDir is still pinned at baselineSha.
-			// The `finalFilteredTree = writeSyntheticTree(HEAD, [rootPatch])`
-			// path here fails hard whenever rootPatch's WIP-context can't be
-			// applied to a HEAD-only index (untracked WIP + agent modifies,
-			// staged-new WIP + agent modifies — see #4136). Bypass the synthesis
-			// entirely and collapse the isolation output onto a single commit
-			// with WIP seed, matching the no-agent-commit path in commitToBranch.
-			// This also handles the "agent committed only baseline WIP" corner
-			// case where every filtered patch collapsed to empty.
-			if (opts.rootPatch.trim()) {
-				const msg = (opts.commitMessage && (await opts.commitMessage(opts.rootPatch))) || opts.fallbackMessage;
-				await commitPatchToBranchWorktree(tmpDir, opts.taskId, opts.rootPatch, msg, undefined, opts.baseline.root);
-			}
-		} else {
-			// A filtered commit landed; reconstruct the final HEAD-derived tree
-			// with the same dirty-side blobs and 3-way synthesis used above.
-			const finalFilteredTree = await writeSyntheticTree(opts.repoRoot, baselineSha, [opts.rootPatch], {
-				threeWay: true,
-			});
-			const leftoverPatch = await diffTreeOrEmpty(repo, previousFilteredTree, finalFilteredTree);
-			if (leftoverPatch.trim()) {
-				const msg = (opts.commitMessage && (await opts.commitMessage(leftoverPatch))) || opts.fallbackMessage;
-				await commitPatchToBranchWorktree(tmpDir, opts.taskId, leftoverPatch, msg);
-			}
-		}
-	} finally {
-		await tryRemoveWorktree(repo, tmpDir);
-		await fs.rm(tmpDir, { recursive: true, force: true });
+		previousFilteredTree = currentFilteredTree;
 	}
+	if (tip === baselineSha) {
+		// No filtered commit landed. Synthesising `HEAD + rootPatch` fails
+		// whenever rootPatch's WIP context can't be applied to a HEAD-only
+		// index (untracked WIP + agent modifies, staged-new WIP + agent
+		// modifies — see #4136), so collapse the isolation output onto a
+		// single WIP-seeded commit, matching the no-agent-commit path. This
+		// also covers an agent that committed only baseline WIP.
+		if (!opts.rootPatch.trim()) return tip;
+		const msg = (opts.commitMessage && (await opts.commitMessage(opts.rootPatch))) || opts.fallbackMessage;
+		return commitPatch(opts.repoRoot, tip, opts.taskId, opts.rootPatch, msg, undefined, opts.baseline.root);
+	}
+	// Reconstruct the final HEAD-derived tree with the same dirty-side blobs
+	// and 3-way synthesis used above; anything left is uncommitted work.
+	const finalFilteredTree = await writeSyntheticTree(opts.repoRoot, baselineSha, [opts.rootPatch], {
+		threeWay: true,
+	});
+	const leftoverPatch = await diffTreeOrEmpty(repo, previousFilteredTree, finalFilteredTree);
+	if (!leftoverPatch.trim()) return tip;
+	const msg = (opts.commitMessage && (await opts.commitMessage(leftoverPatch))) || opts.fallbackMessage;
+	return commitPatch(opts.repoRoot, tip, opts.taskId, leftoverPatch, msg);
 }
 
 /**
@@ -855,6 +823,10 @@ async function replayFilteredAgentCommits(opts: FilteredAgentReplayOptions): Pro
  * branch named `omp/task/${taskId}`. Only root-repo changes go on the branch;
  * nested-repo patches are returned separately because the parent git can't
  * track files inside gitlinks.
+ *
+ * Commits are built as detached objects through temporary indexes and the
+ * branch ref is written once the whole chain exists, so no checkout is ever
+ * materialised and a crash mid-capture leaves no branch or worktree behind.
  *
  * If the agent committed inside isolation (HEAD moved past
  * `baseline.root.headCommit`), clean-baseline runs fetch the raw commit range
@@ -865,8 +837,7 @@ async function replayFilteredAgentCommits(opts: FilteredAgentReplayOptions): Pro
  * start are not replayed into the parent commit history.
  *
  * If the agent did not commit, the captured delta is collapsed onto a single
- * branch commit with an AI-generated (or fallback) message — the legacy
- * behaviour.
+ * branch commit with an AI-generated (or fallback) message.
  *
  * Returns `null` when no root or nested changes exist.
  */
@@ -884,88 +855,62 @@ export async function commitToBranch(
 
 	const { rootPatch, nestedPatches } = await captureDeltaPatch(isolationDir, baseline);
 	if (!rootPatch.trim() && nestedPatches.length === 0) return null;
-	if (!rootPatch.trim()) return { nestedPatches };
+	if (!rootPatch.trim()) return { rootPatch, nestedPatches };
 
 	const repoRoot = baseline.root.repoRoot;
 	const repo = vcs.requireGit(repoRoot);
 	const branchName = `omp/task/${taskId}`;
 	const fallbackMessage = description || taskId;
 
-	let branchCreated = false;
-
-	if (agentCommitted) {
-		if (baselineHasRootWip(baseline.root)) {
-			await replayFilteredAgentCommits({
-				baseline,
-				branchName,
-				commitMessage,
-				fallbackMessage,
-				isolationDir,
-				isolationHead,
-				repoRoot,
-				rootPatch,
-				taskId,
-			});
-		} else {
-			// Transfer the agent's commit objects (which live in isolation's `.git`,
-			// stranded once `cleanupIsolation` tears the overlay down) into the parent
-			// repo's object DB and create the branch at the agent's HEAD. `+HEAD:…`
-			// force-overwrites a stale branch from a prior run.
-			await repo.fetch(isolationDir, "HEAD", `refs/heads/${branchName}`, GIT_NETWORK_TIMEOUT_MS);
-
-			// Leftover = anything still uncommitted in isolation on top of the
-			// agent's last commit (staged, unstaged, untracked). The agent didn't
-			// commit it, so it goes in as one AI-summarized trailing commit.
-			const leftoverPatch = await captureRepoDeltaPatch(isolationDir, {
-				repoRoot: isolationDir,
-				headCommit: isolationHead,
-				staged: "",
-				unstaged: "",
-				untracked: [],
-				untrackedPatch: "",
-			});
-			if (leftoverPatch.trim()) {
-				const tmpDir = path.join(os.tmpdir(), `omp-branch-${Snowflake.next()}`);
-				try {
-					await repo.worktreeAdd(tmpDir, branchName, { detach: false, clone: false });
-					const msg = (commitMessage && (await commitMessage(leftoverPatch))) || fallbackMessage;
-					await commitPatchToBranchWorktree(tmpDir, taskId, leftoverPatch, msg);
-				} finally {
-					await tryRemoveWorktree(repo, tmpDir);
-					await fs.rm(tmpDir, { recursive: true, force: true });
-				}
-			}
+	let tip: string;
+	if (agentCommitted && baselineHasRootWip(baseline.root)) {
+		tip = await replayFilteredAgentCommits({
+			baseline,
+			commitMessage,
+			fallbackMessage,
+			isolationDir,
+			isolationHead,
+			repoRoot,
+			rootPatch,
+			taskId,
+		});
+	} else if (agentCommitted) {
+		// Transfer the agent's commit objects (which live in isolation's `.git`,
+		// stranded once `cleanupIsolation` tears the workspace down) into the
+		// parent repo's object DB and create the branch at the agent's HEAD.
+		// `+HEAD:…` force-overwrites a stale branch from a prior run.
+		await repo.fetch(isolationDir, "HEAD", `refs/heads/${branchName}`, GIT_NETWORK_TIMEOUT_MS);
+		tip = isolationHead;
+		// Leftover = anything still uncommitted in isolation on top of the
+		// agent's last commit (staged, unstaged, untracked). The agent didn't
+		// commit it, so it goes in as one AI-summarized trailing commit.
+		const leftoverPatch = await captureRepoDeltaPatch(isolationDir, {
+			repoRoot: isolationDir,
+			headCommit: isolationHead,
+			staged: "",
+			unstaged: "",
+			untracked: [],
+			untrackedPatch: "",
+		});
+		if (leftoverPatch.trim()) {
+			const msg = (commitMessage && (await commitMessage(leftoverPatch))) || fallbackMessage;
+			tip = await commitPatch(repoRoot, tip, taskId, leftoverPatch, msg);
 		}
-		branchCreated = true;
-	} else if (rootPatch.trim()) {
-		await repo.createBranch(branchName, baselineSha, false);
-		branchCreated = true;
-		const tmpDir = path.join(os.tmpdir(), `omp-branch-${Snowflake.next()}`);
-		try {
-			await repo.worktreeAdd(tmpDir, branchName, { detach: false, clone: false });
-
-			const msg = (commitMessage && (await commitMessage(rootPatch))) || fallbackMessage;
-			const wip = baselineHasRootWip(baseline.root) ? baseline.root : undefined;
-			await commitPatchToBranchWorktree(tmpDir, taskId, rootPatch, msg, undefined, wip);
-		} finally {
-			await tryRemoveWorktree(repo, tmpDir);
-			await fs.rm(tmpDir, { recursive: true, force: true });
-		}
+	} else {
+		const msg = (commitMessage && (await commitMessage(rootPatch))) || fallbackMessage;
+		const wip = baselineHasRootWip(baseline.root) ? baseline.root : undefined;
+		tip = await commitPatch(repoRoot, baselineSha, taskId, rootPatch, msg, undefined, wip);
 	}
 
-	return {
-		branchName: branchCreated ? branchName : undefined,
-		baseSha: baselineSha,
-		nestedPatches,
-	};
+	if (tip === baselineSha) return { rootPatch, baseSha: baselineSha, nestedPatches };
+	await repo.createBranch(branchName, tip, true);
+	return { branchName, baseSha: baselineSha, rootPatch, nestedPatches };
 }
 
 export interface MergeBranchResult {
 	merged: string[];
 	failed: string[];
 	conflict?: string;
-	/** Set when cherry-picks landed on HEAD but restoring the stashed working tree failed. */
-	stashConflict?: string;
 }
 
 /**
@@ -975,6 +920,10 @@ export interface MergeBranchResult {
  * and author. When omitted, the branch is cherry-picked as a single commit
  * (legacy callers).
  *
+ * The working tree is never stashed: each pick rewrites only the paths it
+ * changes and is refused when one of them carries uncommitted edits, so
+ * unrelated dirty files (and LFS checkouts) are left untouched.
+ *
  * Stops on the first conflict and reports which branches succeeded.
  */
 export async function mergeTaskBranches(
@@ -982,77 +931,35 @@ export async function mergeTaskBranches(
 	branches: Array<{ branchName: string; taskId: string; description?: string; baseSha?: string }>,
 ): Promise<MergeBranchResult> {
 	// Serialize against other in-process git mutations on this repo: concurrent
-	// background merges interleaving stash push/pop + cherry-pick would corrupt
-	// the working tree (lost uncommitted changes, mixed-up stash entries).
+	// background merges would race on HEAD and the index.
 	return withRepoLock(repoRoot, async () => {
 		const repo = vcs.requireGit(repoRoot);
 		const merged: string[] = [];
-		const failed: string[] = [];
-
-		// Stash dirty working tree so cherry-pick can operate on a clean HEAD.
-		// Without this, cherry-pick refuses to run when uncommitted changes exist.
-		const didStash = await repo.stashPush("omp-task-merge");
-
-		let conflictResult: MergeBranchResult | undefined;
-
-		try {
-			for (const { branchName, baseSha } of branches) {
-				try {
-					const revisions = baseSha ? await repo.revListRange(baseSha, branchName) : [branchName];
-					for (const revision of revisions) {
-						try {
-							await repo.cherryPick(revision);
-						} catch (error) {
-							if (!vcs.isEmptyCherryPick(error)) throw error;
-							await repo.cherryPickSkip();
-						}
-					}
-				} catch (error) {
+		for (const { branchName, baseSha } of branches) {
+			try {
+				const revisions = baseSha ? await repo.revListRange(baseSha, branchName) : [branchName];
+				for (const revision of revisions) {
 					try {
-						await repo.cherryPickAbort();
-					} catch {
-						/* no state to abort */
-					}
-					const stderr = vcs.isVcsError(error)
-						? error.stderr.trim()
-						: error instanceof Error
-							? error.message
-							: String(error);
-					failed.push(branchName);
-					conflictResult = {
-						merged,
-						failed: [...failed, ...branches.slice(merged.length + failed.length).map(b => b.branchName)],
-						conflict: `${branchName}: ${stderr}`,
-					};
-					break;
-				}
-
-				merged.push(branchName);
-			}
-		} finally {
-			if (didStash) {
-				const restored = await repo.stashTryPop(true).catch(() => false);
-				if (!restored) {
-					// Stash pop would leave stage 1/2/3 unmerged entries in `.git/index`
-					// that overlay-isolated subsequent tasks inherit through the lower
-					// layer, corrupting every downstream `captureRepoDeltaPatch`. `tryPop`
-					// short-circuits the pop when the WIP would conflict with the
-					// cherry-picked HEAD (and reset-cleans up if a rarer conflict slips
-					// past). The merged branches DID land — surface a stash-restore
-					// warning without claiming the merge failed.
-					logger.warn("Failed to restore stashed changes after task merge; stash entry preserved");
-					const stashConflict =
-						"stash pop: cherry-picked changes conflict with uncommitted edits. The merged commits are on HEAD; run `git stash pop` and resolve manually.";
-					if (conflictResult) {
-						conflictResult.stashConflict = stashConflict;
-					} else {
-						conflictResult = { merged, failed: [], stashConflict };
+						await repo.cherryPick(revision);
+					} catch (error) {
+						if (!vcs.isEmptyCherryPick(error)) throw error;
 					}
 				}
+			} catch (error) {
+				const stderr = vcs.isVcsError(error)
+					? error.stderr.trim()
+					: error instanceof Error
+						? error.message
+						: String(error);
+				return {
+					merged,
+					failed: branches.slice(merged.length).map(b => b.branchName),
+					conflict: `${branchName}: ${stderr}`,
+				};
 			}
+			merged.push(branchName);
 		}
-
-		return conflictResult ?? { merged, failed };
+		return { merged, failed: [] };
 	});
 }
 

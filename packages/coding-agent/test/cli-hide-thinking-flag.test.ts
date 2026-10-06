@@ -41,8 +41,12 @@ describe("parseArgs — --thinking flag", () => {
 		expect(parseArgs(["--thinking", "max"]).thinking).toBe(ThinkingLevel.Max);
 	});
 
-	it("ignores invalid levels and the internal inherit selector", () => {
-		expect(parseArgs(["--thinking", "bogus"]).thinking).toBeUndefined();
-		expect(parseArgs(["--thinking", "inherit"]).thinking).toBeUndefined();
+	it("records invalid levels and the internal inherit selector as usage errors", () => {
+		const bogus = parseArgs(["--thinking", "bogus"]);
+		expect(bogus.thinking).toBeUndefined();
+		expect(bogus.invalidFlagValues).toEqual([expect.stringContaining('Invalid --thinking value: "bogus"')]);
+		expect(parseArgs(["--thinking", "inherit"]).invalidFlagValues).toEqual([
+			expect.stringContaining('Invalid --thinking value: "inherit"'),
+		]);
 	});
 });

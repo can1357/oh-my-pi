@@ -161,6 +161,16 @@ export interface SourceMeta {
 	 * tree — see `isSourceEnabled` in `extensibility/skills.ts` (#10743).
 	 */
 	origin?: string;
+	/**
+	 * Plugin or package name supplying this item, for registry-backed providers
+	 * (`claude-plugins` and `agent-plugins` use the plugin name, `omp-plugins`
+	 * the extension package directory name, `skillshare` the package name).
+	 * Preferred by `skillNamespace` in `extensibility/skills.ts` over parsing
+	 * the item's path, since installed plugin caches
+	 * (`~/.claude/plugins/cache/<marketplace>/<plugin>/<version>/skills/...`)
+	 * put the version, not the plugin name, in the path segment owning `skills/`.
+	 */
+	pluginName?: string;
 }
 
 /**

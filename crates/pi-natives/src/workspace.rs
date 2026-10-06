@@ -2,9 +2,9 @@
 //!
 //! Walks a project tree once and returns the bounded entries needed to render
 //! the workspace tree plus directory-scoped AGENTS.md files. AGENTS.md files
-//! are checked directly in every traversed directory so a file-level gitignore
-//! rule cannot hide them, while ignored directories are still pruned by the
-//! walker.
+//! are read from each traversed directory's listing with ignore rules waived
+//! for that name, so a file-level gitignore rule cannot hide them, while
+//! ignored directories are still pruned by the walker.
 
 use std::{
 	collections::{BTreeMap, BTreeSet, HashSet},
@@ -121,25 +121,16 @@ fn build_workspace_walk_request(config: &WorkspaceConfig) -> pi_walker::WalkRequ
 		.skip_node_modules(true)
 		.follow_links(pi_walker::FollowLinks::Never)
 		.detail(pi_walker::WalkDetail::Full)
+		// Entries past `max_depth` are walked only to find AGENTS.md, so they need
+		// names, not per-entry metadata syscalls.
+		.detail_max_depth(config.max_depth)
+		// File-level ignore rules must not hide AGENTS.md.
+		.unignored_file_name(config.collect_agents_md.then_some(AGENTS_MD_FILENAME))
 		.order(pi_walker::WalkOrder::Path)
 		.emit_root(false)
 		.depth(1, config.walk_max_depth)
 		.directory_errors(pi_walker::DirectoryErrorMode::SkipSkippable)
 		.cache(false)
-}
-
-fn glob_match_from_path(root: &Path, path: &Path) -> Option<GlobMatch> {
-	let relative = pi_walker::normalize_relative_path(root, path);
-	if relative.is_empty() {
-		return None;
-	}
-	let (file_type, mtime, size) = pi_walker::classify_file_type(path)?;
-	Some(GlobMatch {
-		path: relative.into_owned(),
-		file_type: crate::iofs::from_walker_file_type(file_type),
-		mtime,
-		size: size.map(|value| value as f64),
-	})
 }
 
 fn is_file_or_file_symlink(path: &Path, file_type: FileType) -> bool {
@@ -168,30 +159,23 @@ fn is_excluded_workspace_entry(relative: &str, file_type: FileType) -> bool {
 	false
 }
 
-fn collect_agents_md_in_directory(
+/// Probe `<directory>/AGENTS.md` for a directory at the walk depth limit, whose
+/// listing the walker never reads. Such directories sit at or below
+/// `max_depth`, so the file is only an AGENTS.md candidate, never a tree entry.
+fn probe_agents_md_at_walk_limit(
 	config: &WorkspaceConfig,
 	directory: &Path,
 	directory_depth: usize,
 	results: &mut WorkspaceResults,
 ) {
-	if !config.collect_agents_md {
+	if !(AGENTS_MD_MIN_DEPTH..=AGENTS_MD_MAX_DEPTH).contains(&directory_depth) {
 		return;
 	}
 	let candidate = directory.join(AGENTS_MD_FILENAME);
-	let Some(entry) = glob_match_from_path(&config.root, &candidate) else {
-		return;
-	};
-	if !is_file_or_file_symlink(&candidate, entry.file_type) {
-		return;
-	}
-	let tree_depth = directory_depth + 1;
-	if tree_depth <= config.max_depth {
-		results.insert_entry(entry.clone());
-	}
-	// AGENTS.md directory depth: root AGENTS.md is depth 0, child dir AGENTS.md
-	// is depth 1, and so on. We only surface files in depth 1..=4.
-	if (AGENTS_MD_MIN_DEPTH..=AGENTS_MD_MAX_DEPTH).contains(&directory_depth) {
-		results.insert_agents_md(entry.path);
+	if std::fs::metadata(&candidate).is_ok_and(|metadata| metadata.is_file()) {
+		results.insert_agents_md(
+			pi_walker::normalize_relative_path(&config.root, &candidate).into_owned(),
+		);
 	}
 }
 
@@ -200,7 +184,6 @@ fn run_list_workspace(
 	ct: task::CancelToken,
 ) -> Result<ListWorkspaceResult> {
 	let mut results = WorkspaceResults::default();
-	collect_agents_md_in_directory(&config, &config.root, 0, &mut results);
 	build_workspace_walk_request(&config)
 		.for_each_entry_with_heartbeat(
 			|| ct.heartbeat(),
@@ -210,12 +193,22 @@ fn run_list_workspace(
 					return Ok(pi_walker::WalkDecision::SkipDescend);
 				}
 				if file_type == FileType::Dir {
-					collect_agents_md_in_directory(
-						&config,
-						&entry.absolute_path,
-						entry.depth,
-						&mut results,
-					);
+					if config.collect_agents_md && entry.depth == config.walk_max_depth {
+						probe_agents_md_at_walk_limit(
+							&config,
+							&entry.absolute_path,
+							entry.depth,
+							&mut results,
+						);
+					}
+				} else if config.collect_agents_md
+					&& entry.relative_path.rsplit('/').next() == Some(AGENTS_MD_FILENAME)
+					// AGENTS.md directory depth: root AGENTS.md is depth 0, child dir
+					// AGENTS.md is depth 1, and so on. Only depths 1..=4 are surfaced.
+					&& (AGENTS_MD_MIN_DEPTH..=AGENTS_MD_MAX_DEPTH).contains(&(entry.depth - 1))
+					&& is_file_or_file_symlink(&entry.absolute_path, file_type)
+				{
+					results.insert_agents_md(entry.relative_path.to_owned());
 				}
 				if entry.depth <= config.max_depth {
 					results.insert_entry(GlobMatch {

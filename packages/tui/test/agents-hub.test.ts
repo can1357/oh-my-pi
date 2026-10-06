@@ -7,9 +7,11 @@
 import { beforeAll, describe, expect, test } from "bun:test";
 import { Effort } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
-import { AgentsHubComponent, type HubAgent } from "../src/overlays/agents-hub";
+import type { TspPickerProps } from "@oh-my-pi/pi-wire";
+import { AgentsHubComponent, type HubAgent, parseGeneratedAgentSpec } from "../src/overlays/agents-hub";
 import { initTheme } from "../src/theme";
 import type { TUI } from "../src/index";
+import type { DescribeContext, NativeChild, NativeNode } from "../src/native/node";
 
 const ANSI_PATTERN = /\x1b\[[0-?]*[ -/]*[@-~]/g;
 const OVERRIDE_KEYS = {
@@ -67,6 +69,7 @@ async function createHub(settings: TestSettings): Promise<{
 		tuiStub,
 		{
 			browserSource: {
+				revision: 0,
 				defaultThinkingLevel: "high",
 				modelProviderOrder: [],
 				knownRoleIds: [],
@@ -259,5 +262,165 @@ describe("AgentsHub configuration strips", () => {
 		hub.handleInput("\x1b"); // close strip
 		expect(strip()).not.toContain("dev →");
 		expect(cancelled()).toBe(false);
+	});
+});
+
+/** The generic composition: a terminal without the `picker` kind. */
+const cx: DescribeContext = {
+	cols: 120,
+	reduceMotion: false,
+	dark: true,
+	supports: kind => kind !== "picker",
+	feature: () => true,
+};
+const pickerCx: DescribeContext = { ...cx, supports: () => true };
+
+function pickerProps(hub: AgentsHubComponent): TspPickerProps {
+	const root = hub.describe(pickerCx);
+	if (root.k !== "picker" || !root.p) throw new Error(`expected a picker root, got ${root.k}`);
+	return root.p;
+}
+
+/** The described node keyed `key` and its key path (the `key` its native events carry). */
+function findKeyed(root: NativeNode, key: string): { node: NativeNode; path: string } | undefined {
+	const walk = (node: NativeNode, path: string[]): { node: NativeNode; path: string } | undefined => {
+		const children: readonly NativeChild[] = node.c ?? [];
+		for (let i = 0; i < children.length; i++) {
+			const child = children[i];
+			if (!child || !("k" in child)) continue;
+			const childPath = [...path, child.key ?? String(i)];
+			if (child.key === key) return { node: child, path: childPath.join("/") };
+			const found = walk(child, childPath);
+			if (found) return found;
+		}
+		return undefined;
+	};
+	return walk(root, []);
+}
+
+function mustFind(hub: AgentsHubComponent, key: string): { node: NativeNode; path: string } {
+	const found = findKeyed(hub.describe(cx), key);
+	if (!found) throw new Error(`no described node keyed ${key}`);
+	return found;
+}
+
+describe("AgentsHub picker", () => {
+	test("select then Configure opens the agent strip; a strip chip persists like Enter on it", async () => {
+		const settings = new TestSettings();
+		const { hub } = await createHub(settings);
+		expect(hub.nativeSheet(pickerCx)).toBe(true);
+		expect(hub.nativeSheet(cx)).toBe(false);
+
+		hub.handleNativeEvent({ type: "select", key: "", item: "agent:bundled:scout" });
+		expect(pickerProps(hub).selected).toBe("agent:bundled:scout");
+		hub.handleNativeEvent({ type: "action", key: "", act: "configure", mods: [] });
+		const strip = pickerProps(hub).strip;
+		expect(strip?.items.map(item => item.label)).toEqual(["Disable", "model: auto", "prewalk: off", "advisor: off"]);
+		expect(pickerProps(hub).focus).toBe("strip");
+
+		hub.handleNativeEvent({ type: "action", key: "", act: "strip", value: "0", mods: [] });
+		expect(settings.writes).toEqual(["task.disabledAgents[scout]"]);
+		expect(pickerProps(hub).strip).toBeNull();
+		expect(pickerProps(hub).items?.find(item => item.id === "agent:bundled:scout")?.disabled).toBeTruthy();
+	});
+
+	test("the Toggle action flips the selected agent even while a search query is typed", async () => {
+		const settings = new TestSettings();
+		const { hub, type } = await createHub(settings);
+		type("dev");
+		hub.handleNativeEvent({ type: "action", key: "", act: "toggle", mods: [] });
+		expect(settings.lists.get("task.disabledAgents")).toEqual(["dev"]);
+		expect(pickerProps(hub).query).toBe("dev");
+	});
+
+	test("the pattern input leaves the picker for the generic overlay", async () => {
+		const { hub } = await createHub(new TestSettings());
+		hub.handleNativeEvent({ type: "action", key: "", act: "model", mods: [] });
+		expect(pickerProps(hub).strip?.label).toBe("dev · model");
+		// pattern… is the second chip of the model strip
+		hub.handleNativeEvent({ type: "action", key: "", act: "strip", value: "1", mods: [] });
+		expect(hub.nativeSheet(pickerCx)).toBe(false);
+		expect(hub.describe(pickerCx).k).not.toBe("picker");
+	});
+
+	test("scope action narrows items to that source and disables empty sources", async () => {
+		const { hub } = await createHub(new TestSettings());
+		expect(pickerProps(hub).scopes?.find(scope => scope.id === "source:user")?.disabled).toBeTruthy();
+		hub.handleNativeEvent({ type: "action", key: "", act: "scope", value: "source:bundled", mods: [] });
+		const props = pickerProps(hub);
+		expect(props.scope).toBe("source:bundled");
+		expect(props.items?.map(item => item.id)).toEqual(["agent:bundled:scout", "agent:bundled:task", "new"]);
+	});
+});
+
+describe("AgentsHub native events", () => {
+	test("list select mirrors the selection; activate opens the agent strip whose chips persist", async () => {
+		const settings = new TestSettings();
+		const { hub } = await createHub(settings);
+		const agents = mustFind(hub, "agents");
+		expect(agents.node.k === "list" && agents.node.p?.selected).toBe("agent:project:dev");
+
+		hub.handleNativeEvent({ type: "select", key: agents.path, item: "agent:bundled:scout" });
+		const selected = mustFind(hub, "agents").node;
+		expect(selected.k === "list" && selected.p?.selected).toBe("agent:bundled:scout");
+		expect(findKeyed(hub.describe(cx), "strip")).toBeUndefined();
+
+		hub.handleNativeEvent({ type: "activate", key: agents.path, item: "agent:bundled:scout" });
+		const strip = mustFind(hub, "strip");
+		expect(strip.node.k === "tabs" && strip.node.p?.items.length).toBe(4);
+
+		// Chip 0 is the enable/disable toggle; activating it persists only scout.
+		hub.handleNativeEvent({ type: "activate", key: strip.path, item: "0" });
+		expect(settings.lists.get("task.disabledAgents")).toEqual(["scout"]);
+		expect(settings.writes).toEqual(["task.disabledAgents[scout]"]);
+		expect(findKeyed(hub.describe(cx), "strip")).toBeUndefined();
+	});
+
+	test("scope select filters the described agent list to that source", async () => {
+		const { hub } = await createHub(new TestSettings());
+		const scopes = mustFind(hub, "scopes");
+		hub.handleNativeEvent({ type: "select", key: scopes.path, item: "source:bundled" });
+		const agents = mustFind(hub, "agents").node;
+		expect(agents.c?.map(child => ("k" in child ? child.key : undefined))).toEqual([
+			"agent:bundled:scout",
+			"agent:bundled:task",
+			"new",
+		]);
+		const sidebar = mustFind(hub, "scopes").node;
+		expect(sidebar.k === "list" && sidebar.p?.selected).toBe("source:bundled");
+	});
+
+	test("the agent list ignores select while a strip is open", async () => {
+		const { hub } = await createHub(new TestSettings());
+		const agents = mustFind(hub, "agents");
+		hub.handleInput("\r"); // agent strip for dev
+		hub.handleNativeEvent({ type: "activate", key: agents.path, item: "agent:bundled:scout" });
+		hub.handleInput("\x1b"); // close the strip
+		const list = mustFind(hub, "agents").node;
+		expect(list.k === "list" && list.p?.selected).toBe("agent:project:dev");
+	});
+});
+
+describe("parseGeneratedAgentSpec", () => {
+	const spec = {
+		identifier: "code-reviewer",
+		whenToUse: "Use this agent when reviewing code.",
+		systemPrompt: "Review the diff.",
+	};
+
+	test("parses plain JSON", () => {
+		expect(parseGeneratedAgentSpec(JSON.stringify(spec))).toEqual(spec);
+	});
+
+	test("parses JSON wrapped in a json code fence", () => {
+		const fence = "```";
+		const raw = `Here you go:\n${fence}json\n${JSON.stringify(spec)}\n${fence}\n`;
+		expect(parseGeneratedAgentSpec(raw)).toEqual(spec);
+	});
+
+	test("keeps a code fence inside a JSON string value", () => {
+		const systemPrompt = "Emit this report:\n```\n# Report\n```\nThen stop.";
+		const raw = JSON.stringify({ ...spec, systemPrompt });
+		expect(parseGeneratedAgentSpec(raw).systemPrompt).toBe(systemPrompt);
 	});
 });

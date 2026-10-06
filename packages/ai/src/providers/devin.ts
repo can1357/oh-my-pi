@@ -31,8 +31,9 @@ import { create, fromBinary, toBinary } from "@oh-my-pi/pi-catalog/discovery/pro
 import { calculateCost } from "@oh-my-pi/pi-catalog/models";
 import { DEVIN_DEFAULT_BASE_URL, devinCliMetadata, devinWireMetadata } from "@oh-my-pi/pi-catalog/wire/devin";
 import { decodeDevinUnaryMessage } from "@oh-my-pi/pi-catalog/wire/devin-proto";
-import { isRecord, logger, parseStreamingJson, parseStreamingJsonThrottled, sanitizeText } from "@oh-my-pi/pi-utils";
+import { isRecord, logger, parseStreamingJsonThrottled, sanitizeText } from "@oh-my-pi/pi-utils";
 import * as AIError from "../error";
+import { parseToolCallArguments } from "../utils/tool-call-arguments";
 
 import type {
 	Api,
@@ -235,7 +236,9 @@ export const streamDevin: StreamFunction<"devin-agent"> = (
 				assignment = await assignDevinModel(model, turn, chatBaseUrl, fetchImpl, options?.signal);
 				output.upstreamModel = assignment.modelUid;
 			}
-			const request = buildDevinChatRequest(model, context, options, turn, assignment);
+			let request = buildDevinChatRequest(model, context, options, turn, assignment);
+			const replacementRequest = await options?.onPayload?.(request, model);
+			if (replacementRequest !== undefined) request = replacementRequest as typeof request;
 			const reqBytes = toBinary(GetChatMessageRequestSchema, request);
 			const gz = gzipSync(reqBytes);
 			logger.debug("devin: sending chat request", {
@@ -489,7 +492,7 @@ export const streamDevin: StreamFunction<"devin-agent"> = (
 			endTextBlock();
 			endThinkingBlock();
 			for (const [id, block] of toolBlocks) {
-				block.arguments = parseStreamingJson(toolPartialJson.get(id));
+				block.arguments = parseToolCallArguments(toolPartialJson.get(id));
 				stream.push({
 					type: "toolcall_end",
 					contentIndex: output.content.indexOf(block),

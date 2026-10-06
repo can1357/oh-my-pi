@@ -3,12 +3,6 @@
 provider "openai" {
 	default-model "gpt-5.5"
 	env "OPENAI_API_KEY"
-	// Responses web search is documented for GPT-5.5 and GPT-6 Astra, and has
-	// been live-verified for GPT-6 Luna and GPT-5.6 Luna. Keep this capability
-	// model-scoped so realtime and other unverified OpenAI models stay excluded.
-	models "gpt-5.5" "gpt-6-astra" "gpt-6-luna" "gpt-5.6-luna" {
-		web-search "openai"
-	}
 	kind-apis {
 		embedding "openai-embeddings"
 		image "openai-responses"
@@ -181,6 +175,11 @@ provider "openai" {
 			output 75.0
 			cache-read 2.0
 			cache-write 25.0
+		}
+		// Ultrafast is Astra-only: $60/$6/$75/$300 per 1M short-context
+		// (6x the standard card), and the same 6x holds on the long-context tier.
+		service-tier-cost {
+			ultrafast 6
 		}
 	}
 	// residue: the bare Daybreak rolling aliases pin the documented 5.6-gen

@@ -18,6 +18,7 @@ import {
 	CanvasDiagnosticsArgsSchema,
 	ComputerUseArgsSchema,
 	ConnectScmArgsSchema,
+	DeleteArgsSchema,
 	ConnectScmErrorSchema,
 	ConnectScmGithubRepositorySchema,
 	ConnectScmGithubSchema,
@@ -312,10 +313,11 @@ describe("Cursor stream teardown", () => {
 		expect(state.currentToolCall).toBeNull();
 	});
 
-	it("salvages a truncated streamed argument buffer into partial arguments", async () => {
+	it("reparses a truncated streamed argument buffer on teardown into a parse error", async () => {
 		// The other half of the same contract: blocks that *do* stream their args
-		// must still be reparsed on teardown, or a cut-short call renders with no
-		// arguments at all.
+		// must still be reparsed on teardown. A cut-short buffer keeps its raw text in
+		// the parse-error arguments, so the call shows what streamed but never runs
+		// from an auto-closed preview.
 		const output = cursorAssistantMessage();
 		const stream = new AssistantMessageEventStream();
 		const state = newBlockState();
@@ -342,7 +344,7 @@ describe("Cursor stream teardown", () => {
 
 		flushOpenToolCalls(output, stream, state);
 
-		expect(block.arguments).toEqual({ path: "/repo/a.ts" });
+		expect(block.arguments).toEqual({ __parseError: expect.any(String), __rawJson: '{"path":"/repo/a.ts"' });
 	});
 
 	it("pairs a server-owned call the transport cut short", async () => {
@@ -1757,7 +1759,7 @@ describe("Cursor legacy grep frame: offset reporting", () => {
 		// track the frame's request rather than being left unset.
 		const handlers: CursorExecHandlers = {
 			async grep() {
-				return toolResult("a.ts:1:needle");
+				return toolResult("*1:needle", { details: { files: ["a.ts"] } });
 			},
 		};
 
@@ -1803,13 +1805,179 @@ describe("Cursor legacy grep frame: offset reporting", () => {
 			{
 				execHandlers: {
 					async grep() {
-						return toolResult("a.ts:1:needle");
+						return toolResult("*1:needle", { details: { files: ["a.ts"] } });
 					},
 				},
 			},
 		);
 		const call = output.content.find(block => block.type === "toolCall");
 		expect(call?.arguments).toMatchObject({ pattern: "needle", path: "src", skip: 20 });
+	});
+});
+
+describe("Cursor native exec results from local tools", () => {
+	const grepText = "# project/\n## calc.ts#31B3\n 2:  before\n*3:  return a + b;\n## greet.py#5EB7\n*4:    return msg";
+	const grepDetails = {
+		files: ["project/calc.ts", "project/greet.py"],
+		fileMatches: [
+			{ path: "project/calc.ts", count: 1 },
+			{ path: "project/greet.py", count: 1 },
+		],
+	};
+
+	it("returns match lines and context under their grouped file paths", async () => {
+		const { frames } = await dispatchExec(
+			buildExecMessage({
+				case: "grepArgs",
+				value: create(GrepArgsSchema, { pattern: "return", path: "project", toolCallId: "grep-content" }),
+			}),
+			{
+				execHandlers: {
+					async grep() {
+						return toolResult(grepText, { details: grepDetails });
+					},
+				},
+			},
+		);
+		const answer = soleResult(frames);
+		if (answer.case !== "grepResult" || answer.value.result.case !== "success")
+			throw new Error("expected grep success");
+		const result = answer.value.result.value.workspaceResults.project?.result;
+		if (result?.case !== "content") throw new Error("expected grep content");
+		expect(result.value.totalMatchedLines).toBe(2);
+		expect(
+			result.value.matches.map(match => [
+				match.file,
+				match.matches.map(line => [line.lineNumber, line.isContextLine, line.content]),
+			]),
+		).toEqual([
+			[
+				"project/calc.ts",
+				[
+					[2, true, "  before"],
+					[3, false, "  return a + b;"],
+				],
+			],
+			["project/greet.py", [[4, false, "    return msg"]]],
+		]);
+	});
+
+	it("locates single-file matches beneath a hashline header", async () => {
+		const { frames } = await dispatchExec(
+			buildExecMessage({
+				case: "grepArgs",
+				value: create(GrepArgsSchema, { pattern: "return", path: "src/calc.ts", toolCallId: "grep-file" }),
+			}),
+			{
+				execHandlers: {
+					async grep() {
+						return toolResult("[src/calc.ts#31B3]\n*42:  return a + b;", {
+							details: { files: ["src/calc.ts"], fileMatches: [{ path: "src/calc.ts", count: 1 }] },
+						});
+					},
+				},
+			},
+		);
+		const answer = soleResult(frames);
+		if (answer.case !== "grepResult" || answer.value.result.case !== "success")
+			throw new Error("expected grep success");
+		const result = answer.value.result.value.workspaceResults["src/calc.ts"]?.result;
+		if (result?.case !== "content") throw new Error("expected grep content");
+		expect(result.value.matches.map(({ file, matches }) => [file, matches[0]?.lineNumber])).toEqual([
+			["src/calc.ts", 42],
+		]);
+	});
+
+	it("reports only files and counts recorded by the local grep result", async () => {
+		for (const mode of ["files_with_matches", "count"]) {
+			const { frames } = await dispatchExec(
+				buildExecMessage({
+					case: "grepArgs",
+					value: create(GrepArgsSchema, {
+						pattern: "return",
+						path: "project",
+						toolCallId: mode,
+						outputMode: mode,
+					}),
+				}),
+				{
+					execHandlers: {
+						async grep() {
+							return toolResult(grepText, { details: grepDetails });
+						},
+					},
+				},
+			);
+			const answer = soleResult(frames);
+			if (answer.case !== "grepResult" || answer.value.result.case !== "success")
+				throw new Error(JSON.stringify(answer));
+			const result = answer.value.result.value.workspaceResults.project?.result;
+			if (mode === "count") {
+				if (result?.case !== "count") throw new Error("expected grep counts");
+				expect(result.value.counts.map(({ file, count }) => [file, count])).toEqual([
+					["project/calc.ts", 1],
+					["project/greet.py", 1],
+				]);
+			} else {
+				if (result?.case !== "files") throw new Error("expected grep files");
+				expect(result.value.files).toEqual(["project/calc.ts", "project/greet.py"]);
+			}
+		}
+	});
+
+	it("reports a missing read path as fileNotFound so Write can create it", async () => {
+		const path = "/repo/new.txt";
+		const { frames } = await dispatchExec(
+			buildExecMessage({ case: "readArgs", value: create(ReadArgsSchema, { path, toolCallId: "write-probe" }) }),
+			{
+				execHandlers: {
+					async read() {
+						return toolResult(`Path '${path}' not found`, { isError: true });
+					},
+				},
+			},
+		);
+		const answer = soleResult(frames);
+		if (answer.case !== "readResult") throw new Error("expected read result");
+		expect(answer.value.result.case).toBe("fileNotFound");
+	});
+
+	it("preserves the bash exit code and deleted file size on the wire", async () => {
+		const shell = await dispatchExec(
+			buildExecMessage({
+				case: "shellArgs",
+				value: create(ShellArgsSchema, { command: "exit 3", workingDirectory: "/repo", toolCallId: "shell-3" }),
+			}),
+			{
+				execHandlers: {
+					async shell() {
+						return toolResult("exit 3", { isError: true, details: { exitCode: 3 } });
+					},
+				},
+			},
+		);
+		const shellAnswer = soleResult(shell.frames);
+		if (shellAnswer.case !== "shellResult" || shellAnswer.value.result.case !== "failure")
+			throw new Error("expected shell failure");
+		expect(shellAnswer.value.result.value.exitCode).toBe(3);
+
+		const deleted = await dispatchExec(
+			buildExecMessage({
+				case: "deleteArgs",
+				value: create(DeleteArgsSchema, { path: "/repo/calc.ts", toolCallId: "delete-file" }),
+			}),
+			{
+				execHandlers: {
+					async delete() {
+						return toolResult("Deleted calc.ts", { details: { fileSize: 123 } });
+					},
+				},
+			},
+		);
+		const deleteAnswer = soleResult(deleted.frames);
+		if (deleteAnswer.case !== "deleteResult" || deleteAnswer.value.result.case !== "success")
+			throw new Error("expected delete success");
+		expect(deleteAnswer.value.result.value.fileSize).toBe(123n);
 	});
 });
 

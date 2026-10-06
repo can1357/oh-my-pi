@@ -18,7 +18,13 @@ import {
 	truncateHead,
 	truncateHeadBytes,
 } from "@oh-my-pi/pi-tui/tools/streaming-output";
-import { buildLineEntriesWithBlockContext, type LineEntry, lineEntriesToPlainText } from "../utils/block-context";
+import {
+	buildLineEntriesWithBlockContext,
+	type LineEntry,
+	lineEntriesToPlainText,
+	spansCoverEveryLine,
+	warmBlockContext,
+} from "../utils/block-context";
 import { resolveFileDisplayMode } from "../utils/file-display-mode";
 import { formatPathRelativeToCwd } from "./path-utils";
 import { type LineRange } from "@oh-my-pi/pi-tui/tools/line-ranges";
@@ -142,6 +148,22 @@ export function countTextLines(text: string): number {
 	return text.length === 0 ? 0 : countNewlines(text) + 1;
 }
 
+/** `(raw ? text.split("\n") : splitAddressableFileLines(text)).length` without splitting. */
+function countSplitLines(text: string, raw: boolean): number {
+	if (raw) return countNewlines(text) + 1;
+	if (text.length === 0) return 0;
+	return countNewlines(text) + (text.endsWith("\n") ? 0 : 1);
+}
+
+/** `lines.slice(start, end).join("\n")` as a substring of the `text` that `lines` was split from. */
+function sliceLineRange(text: string, lines: readonly string[], start: number, end: number): string {
+	let from = 0;
+	for (let i = 0; i < start; i++) from += lines[i].length + 1;
+	let to = from;
+	for (let i = start; i < end; i++) to += lines[i].length + 1;
+	return text.slice(from, Math.max(from, to - 1));
+}
+
 export function contiguousLineNumbers(startLine: number, count: number): number[] {
 	const lines: number[] = [];
 	for (let offset = 0; offset < count; offset++) lines.push(startLine + offset);
@@ -255,14 +277,14 @@ export interface InMemoryTextOptions {
  * {@link buildInMemoryMultiRangeResult} and everything else to
  * {@link buildInMemoryTextResult}. Raw mode is derived from the selector.
  */
-export function buildInMemorySelectorResult(
+export async function buildInMemorySelectorResult(
 	session: ToolSession,
 	text: string,
 	parsed: ParsedSelector,
 	options: Omit<InMemoryTextOptions, "raw">,
-): AgentToolResult<ReadToolDetails> {
+): Promise<AgentToolResult<ReadToolDetails>> {
 	const raw = isRawSelector(parsed);
-	const totalLines = raw ? text.split("\n").length : splitAddressableFileLines(text).length;
+	const totalLines = countSplitLines(text, raw);
 	const sel = resolveTailSelector(parsed, totalLines);
 	if (sel.kind === "lines" && sel.ranges.length > 1) {
 		return buildInMemoryMultiRangeResult(session, text, sel.ranges, { ...options, raw });
@@ -271,13 +293,13 @@ export function buildInMemorySelectorResult(
 	return buildInMemoryTextResult(session, text, offset, limit, { ...options, raw });
 }
 
-export function buildInMemoryTextResult(
+export async function buildInMemoryTextResult(
 	session: ToolSession,
 	text: string,
 	offset: number | undefined,
 	limit: number | undefined,
 	options: InMemoryTextOptions,
-): AgentToolResult<ReadToolDetails> {
+): Promise<AgentToolResult<ReadToolDetails>> {
 	const displayMode = resolveFileDisplayMode(session, { raw: options.raw, immutable: options.immutable });
 	const details = options.details ?? {};
 	const allLines = options.raw === true ? text.split("\n") : splitAddressableFileLines(text);
@@ -329,9 +351,22 @@ export function buildInMemoryTextResult(
 	}
 
 	const endLine = endLineExpanded;
-	const selectedContent = allLines.slice(startLine, endLine).join("\n");
+	// Measure the range as a substring of `text` (equal to joining it) so a large range isn't
+	// copied only for `truncateHead` to keep its head. Branches that emit the whole range
+	// re-join it so the result never pins `text` through a substring.
+	const selectedRange = sliceLineRange(text, allLines, startLine, endLine);
+	const joinSelectedLines = (): string => allLines.slice(startLine, endLine).join("\n");
 	const userLimitedLines = limit !== undefined ? endLine - startLine : undefined;
-	const truncation = ignoreResultLimits ? noTruncResult(selectedContent) : truncateHead(selectedContent);
+	const truncation = ignoreResultLimits ? noTruncResult(selectedRange) : truncateHead(selectedRange);
+	// Any display short of the whole text shows block context around it.
+	if (
+		!rawDisplay &&
+		options.sourcePath &&
+		!truncation.firstLineExceedsLimit &&
+		(startLine > 0 || endLine < totalLines || truncation.truncated)
+	) {
+		await warmBlockContext({ path: options.sourcePath, text });
+	}
 
 	const shouldAddHashLines = displayMode.hashLines;
 	const shouldAddLineNumbers = shouldAddHashLines ? false : displayMode.lineNumbers;
@@ -428,7 +463,7 @@ export function buildInMemoryTextResult(
 
 		if (options.raw === true) {
 			rawSeenLines = contiguousLineNumbers(startLineDisplay, userLimitedLines);
-			outputText = formatText(selectedContent, startLineDisplay);
+			outputText = formatText(joinSelectedLines(), startLineDisplay);
 		} else {
 			outputText = formatLineEntries(buildLineEntries(endLine), startLineDisplay);
 		}
@@ -436,7 +471,7 @@ export function buildInMemoryTextResult(
 	} else {
 		if (options.raw === true) {
 			rawSeenLines = contiguousLineNumbers(startLineDisplay, endLine - startLine);
-			outputText = formatText(truncation.content, startLineDisplay);
+			outputText = formatText(joinSelectedLines(), startLineDisplay);
 		} else {
 			outputText = formatLineEntries(buildLineEntries(endLine), startLineDisplay);
 		}
@@ -462,12 +497,12 @@ export function buildInMemoryTextResult(
  * so the model can correct the next call. No leading/trailing context is
  * added — multi-range callers always specify exact bounds.
  */
-export function buildInMemoryMultiRangeResult(
+export async function buildInMemoryMultiRangeResult(
 	session: ToolSession,
 	text: string,
 	ranges: readonly LineRange[],
 	options: Omit<InMemoryTextOptions, "ignoreResultLimits">,
-): AgentToolResult<ReadToolDetails> {
+): Promise<AgentToolResult<ReadToolDetails>> {
 	const displayMode = resolveFileDisplayMode(session, { raw: options.raw, immutable: options.immutable });
 	const details = options.details ?? {};
 	const allLines = options.raw === true ? text.split("\n") : splitAddressableFileLines(text);
@@ -511,6 +546,9 @@ export function buildInMemoryMultiRangeResult(
 	if (options.raw === true) {
 		outputText = rawParts.length > 0 ? rawParts.join("\n\n…\n\n") : "";
 	} else if (visibleSpans.length > 0) {
+		if (options.sourcePath && !spansCoverEveryLine(visibleSpans, totalLines)) {
+			await warmBlockContext({ path: options.sourcePath, text });
+		}
 		const entries = buildLineEntriesWithBlockContext(allLines, visibleSpans, { path: options.sourcePath, text });
 		if (shouldAddHashLines) seenLines = lineNumbersFromEntries(entries);
 		const firstLine = entries.find(entry => entry.kind === "line");

@@ -18,9 +18,9 @@ import type { AskToolDetails, QuestionResult } from "@oh-my-pi/pi-tui/tools/ask"
 
 import { type as arkType } from "@oh-my-pi/omptype";
 import type { AgentTool, AgentToolContext, AgentToolResult, AgentToolUpdateCallback } from "@oh-my-pi/pi-agent-core";
-import { type ToolExample, validateToolArguments } from "@oh-my-pi/pi-ai";
+import { type ImageContent, type TextContent, type ToolExample, validateToolArguments } from "@oh-my-pi/pi-ai";
 import { replaceTabs, TERMINAL, truncateToWidth } from "@oh-my-pi/pi-tui";
-import { isRecord, prompt, untilAborted } from "@oh-my-pi/pi-utils";
+import { isRecord, logger, prompt, untilAborted } from "@oh-my-pi/pi-utils";
 
 import type { ExtensionUISelectItem } from "../extensibility/extensions";
 import { formatKeyHint, formatKeyHints } from "@oh-my-pi/pi-tui/app-keybindings";
@@ -35,10 +35,14 @@ import {
 	sanitizeCarriageReturns,
 	TRUNCATE_LENGTHS,
 } from "@oh-my-pi/pi-tui/render/render-utils";
+import { shiftImageMarkers } from "@oh-my-pi/pi-tui/prompt/composer-attachments";
 import { ToolAbortError } from "./tool-errors";
 
+import { sessionLocalProtocolOptions } from "../internal-urls/context";
 import { cfgAskNotify, cfgAskTimeout } from "../modes/settings";
+import { renderAttachmentSourceNotice } from "../session/attachment-source-notice";
 import { cfgSpeechEnabled } from "../tts/settings";
+import { describeAttachedImagesForTextModel, shouldDescribeImagesForTextModel } from "../utils/image-vision-fallback";
 
 // =============================================================================
 // Types
@@ -331,7 +335,8 @@ async function askSingleQuestion(
 		while (true) {
 			const opts: ExtensionUISelectItem[] = questionOptions.map(opt => toSelectOption(opt));
 
-			if (!navigation?.allowForward && selected.size > 0) {
+			// Arrow-key forward navigation is TUI-only; RPC clients need the Done row to advance.
+			if (selected.size > 0) {
 				opts.push(doneLabel);
 			}
 			opts.push(OTHER_OPTION);
@@ -475,16 +480,15 @@ async function askSingleQuestion(
 
 function formatQuestionResult(result: QuestionResult): string {
 	const noteSuffix = result.note ? ` (note: ${result.note})` : "";
-	if (result.customInput !== undefined) {
-		return `${result.id}: "${result.customInput}"${noteSuffix}`;
+	const custom = result.customInput === undefined ? undefined : `"${result.customInput}"`;
+	if (result.selectedOptions.length === 0) {
+		if (custom !== undefined) return `${result.id}: ${custom}${noteSuffix}`;
+		return result.multi ? `${result.id}: []${noteSuffix}` : `${result.id}: (cancelled)${noteSuffix}`;
 	}
-	if (result.selectedOptions.length > 0) {
-		const suffix = `${result.timedOut ? " (auto-selected after timeout)" : ""}${noteSuffix}`;
-		return result.multi
-			? `${result.id}: [${result.selectedOptions.join(", ")}]${suffix}`
-			: `${result.id}: ${result.selectedOptions[0]}${suffix}`;
-	}
-	return result.multi ? `${result.id}: []${noteSuffix}` : `${result.id}: (cancelled)${noteSuffix}`;
+	const picked = result.multi ? `[${result.selectedOptions.join(", ")}]` : result.selectedOptions[0];
+	const answer = custom === undefined ? picked : `${picked} + ${custom}`;
+	const timeoutSuffix = result.timedOut ? " (auto-selected after timeout)" : "";
+	return `${result.id}: ${answer}${timeoutSuffix}${noteSuffix}`;
 }
 
 function formatSingleQuestionResponse(result: {
@@ -589,6 +593,51 @@ export class AskTool implements AgentTool<typeof askSchema, AskToolDetails> {
 			urgency: "normal",
 			actions: "focus",
 		});
+	}
+
+	/**
+	 * Blocks for answer images: each image with its source-path notice and, for a text-only model,
+	 * the vision description a pasted prompt image gets (best effort).
+	 */
+	async #answerImageBlocks(
+		images: ImageContent[],
+		signal: AbortSignal | undefined,
+	): Promise<Array<TextContent | ImageContent>> {
+		if (images.length === 0) return [];
+		let descriptions: TextContent[] | undefined;
+		const model = this.session.getActiveModel?.();
+		const modelRegistry = this.session.modelRegistry;
+		if (modelRegistry && shouldDescribeImagesForTextModel(model, this.session.settings)) {
+			try {
+				descriptions = await describeAttachedImagesForTextModel(
+					images,
+					{
+						activeModel: model,
+						modelRegistry,
+						settings: this.session.settings,
+						localProtocolOptions: sessionLocalProtocolOptions(this.session),
+						activeModelString: this.session.getActiveModelString?.(),
+						telemetryConfig: this.session.getTelemetry?.(),
+						sessionId: this.session.getSessionId?.() ?? undefined,
+					},
+					signal,
+				);
+			} catch (error) {
+				logger.warn("ask answer image description failed; image left undescribed", {
+					error: error instanceof Error ? error.message : String(error),
+				});
+			}
+		}
+		const blocks: Array<TextContent | ImageContent> = [];
+		for (const [index, image] of images.entries()) {
+			const notice = renderAttachmentSourceNotice(image, index + 1, { askAnswer: true });
+			if (notice) blocks.push({ type: "text", text: notice.content });
+			// Keep the source tag: `attachment://N` resolves this result's images to their files.
+			blocks.push(image);
+			const description = descriptions?.[index];
+			if (description) blocks.push(description);
+		}
+		return blocks;
 	}
 
 	async execute(
@@ -731,7 +780,7 @@ export class AskTool implements AgentTool<typeof askSchema, AskToolDetails> {
 							...(q.multi !== undefined ? { multi: q.multi } : {}),
 							...(q.recommended !== undefined ? { recommended: q.recommended } : {}),
 						})),
-						{ timeout: timeout ?? undefined, signal },
+						{ timeout: timeout ?? undefined, signal, acceptImages: true },
 					);
 				const richResult = signal ? await untilAborted(signal, showRichDialog) : await showRichDialog();
 				if (!richResult) {
@@ -754,20 +803,32 @@ export class AskTool implements AgentTool<typeof askSchema, AskToolDetails> {
 					throw new Error("Ask dialog returned a result count that does not match the requested questions");
 				}
 				const results: QuestionResult[] = [];
+				// Each prompt numbers markers from 1; shift them so `[Image #N]` indexes all result images.
+				const answerImages: ImageContent[] = [];
 				for (let index = 0; index < params.questions.length; index++) {
 					const question = params.questions[index];
 					const result = richResult.results[index];
 					if (!question || !result || result.id !== question.id) {
 						throw new Error("Ask dialog returned results that do not match the requested question order");
 					}
+					const customOffset = answerImages.length;
+					if (result.customInputImages) answerImages.push(...result.customInputImages);
+					const noteOffset = answerImages.length;
+					if (result.noteImages) answerImages.push(...result.noteImages);
 					results.push({
 						id: question.id,
 						question: question.question,
 						options: question.options.map(option => option.label),
 						multi: question.multi ?? false,
 						selectedOptions: result.selectedOptions,
-						customInput: result.customInput,
-						note: result.note,
+						customInput:
+							result.customInput === undefined
+								? undefined
+								: shiftImageMarkers(result.customInput, customOffset, result.customInputImages?.length ?? 0),
+						note:
+							result.note === undefined
+								? undefined
+								: shiftImageMarkers(result.note, noteOffset, result.noteImages?.length ?? 0),
 						timedOut: result.timedOut,
 					});
 				}
@@ -796,11 +857,13 @@ export class AskTool implements AgentTool<typeof askSchema, AskToolDetails> {
 						timedOut: result.timedOut,
 					};
 					const responseText = formatSingleQuestionResponse(result);
-					return { content: [{ type: "text" as const, text: responseText }], details };
+					const imageBlocks = await this.#answerImageBlocks(answerImages, signal);
+					return { content: [{ type: "text" as const, text: responseText }, ...imageBlocks], details };
 				}
 				const details: AskToolDetails = { results };
 				const responseText = `User answers:\n${results.map(formatQuestionResult).join("\n")}`;
-				return { content: [{ type: "text" as const, text: responseText }], details };
+				const imageBlocks = await this.#answerImageBlocks(answerImages, signal);
+				return { content: [{ type: "text" as const, text: responseText }, ...imageBlocks], details };
 			} catch (error) {
 				if (error instanceof Error && error.name === "AbortError") {
 					throw new ToolAbortError("Ask input was cancelled");

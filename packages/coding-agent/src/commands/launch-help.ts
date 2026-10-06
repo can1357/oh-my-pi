@@ -21,6 +21,10 @@ export const launchHelp = {
 		smol: Flags.string({ description: "Smol/fast model for lightweight tasks (or PI_SMOL_MODEL env)" }),
 		slow: Flags.string({ description: "Slow/reasoning model for thorough analysis (or PI_SLOW_MODEL env)" }),
 		plan: Flags.string({ description: "Plan model for architectural planning (or PI_PLAN_MODEL env)" }),
+		goal: Flags.string({
+			description:
+				"Start fresh in goal mode (interactive only; bypasses autoResume; no positional prompt, startup plan mode, or explicit resume)",
+		}),
 		prewalk: Flags.boolean({
 			description:
 				"Switch from the active model to a fast/cheap model at the first edit/write after the plan's todo list exists (default off; see prewalk.enabled)",
@@ -100,7 +104,7 @@ export const launchHelp = {
 		export: Flags.string({ description: "Export session file to HTML and exit" }),
 		"no-title": Flags.boolean({ description: "Disable title auto-generation" }),
 		"no-ui": Flags.boolean({
-			description: "With --mode rpc: run extensions headless (no extension_ui_request dialogs for the host)",
+			description: "With --mode rpc or rpc-ui: run extensions headless (rpc-ui tool UI remains enabled)",
 		}),
 		"print-thoughts": Flags.boolean({ description: "Include thinking blocks in print mode text output" }),
 		"max-time": Flags.string({ description: "Stop the session after this duration (e.g., 600, 10m, 1h)" }),
@@ -116,6 +120,7 @@ export const launchHelp = {
 	examples: [
 		`# Interactive mode\n  ${APP_NAME}`,
 		`# Interactive mode with initial prompt\n  ${APP_NAME} "List all .ts files in src/"`,
+		`# Start working on a goal immediately\n  ${APP_NAME} --goal "Investigate the importer"`,
 		`# Include files in initial message\n  ${APP_NAME} @prompt.md @image.png "What color is the sky?"`,
 		`# Non-interactive mode (process and exit)\n  ${APP_NAME} -p "List all .ts files in src/"`,
 		`# Continue previous session\n  ${APP_NAME} --continue "What did we discuss?"`,

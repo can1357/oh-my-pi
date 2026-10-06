@@ -31,10 +31,42 @@ export declare class AudioPlayback {
 /** Persistent, serialized native desktop capture/input/accessibility session. */
 export declare class DesktopSession {
   constructor(options?: DesktopSessionOptions | undefined | null)
+  /**
+   * Asks the worker when it is idle, so permissions are read live. While
+   * another operation holds the worker, answers from the snapshot of the
+   * latest capabilities read or capture instead of blocking the JS thread
+   * behind it.
+   */
   get capabilities(): DesktopCapabilities
   listDisplays(): Promise<Array<DesktopDisplay>>
   listWindows(): Promise<Array<DesktopWindow>>
+  listApplications(options?: ApplicationQuery | undefined | null): Promise<Array<Application>>
+  openApplication(id: string, options?: ApplicationOpenOptions | undefined | null): Promise<Application>
+  /**
+   * Capture and accessibility share one serialized request. Neither a failed
+   * snapshot nor an abandoned reply replaces the last delivered input frame.
+   */
+  observe(target: string, caps?: CaptureCaps | undefined | null, axOptions?: AxSnapshotOptions | undefined | null): Promise<DesktopObservation>
+  menuItems(target: string, path?: Array<string> | undefined | null): Promise<Array<DesktopMenuItem>>
+  menuSelect(target: string, path: Array<string>): Promise<undefined>
+  bringToCurrentSpace(windowId: string): Promise<undefined>
+  holdKeys(target: string, keys: Array<string>, options: HoldOptions): Promise<undefined>
+  holdMouse(target: string, x: number, y: number, options: HoldOptions): Promise<undefined>
+  /**
+   * Native ownership only. Human approval is required by the host before
+   * calling this method.
+   */
+  acquireControl(): Promise<DesktopControlState>
+  releaseControl(): void
+  controlState(): DesktopControlState
+  /** Retire queued work from a completed helper without revoking task control. */
+  retire(): void
   capture(target: string, caps?: CaptureCaps | undefined | null): Promise<DesktopCapture>
+  /**
+   * Capture a fresh native-detail region without replacing the full input
+   * coordinate frame.
+   */
+  captureRegion(target: string, region: CaptureRegion, caps?: CaptureCaps | undefined | null): Promise<DesktopCapture>
   click(target: string, x: number, y: number, opts?: PointerOptions | undefined | null): Promise<undefined>
   moveMouse(target: string, x: number, y: number, opts?: PointerOptions | undefined | null): Promise<undefined>
   drag(target: string, path: Array<DesktopPoint>, opts?: PointerOptions | undefined | null): Promise<undefined>
@@ -58,6 +90,11 @@ export declare class DesktopSession {
   axSetValue(reference: string, value: string): Promise<undefined>
   axFocus(reference: string): Promise<undefined>
   axClick(reference: string, opts?: PointerOptions | undefined | null): Promise<undefined>
+  /**
+   * Immediately cancel operations submitted before this call. Later
+   * operations may proceed.
+   */
+  cancel(): void
   close(): Promise<undefined>
 }
 
@@ -364,6 +401,15 @@ export declare class Shell {
    * dropping it (which would SIGKILL them via kill-on-drop).
    */
   liveBackgroundJobCount(): Promise<number>
+  /**
+   * Pids of the still-alive processes spawned by this session's in-flight
+   * `run`, in spawn order: foreground commands, pipeline stages, and `&`
+   * jobs started by that run. Builtins run in-process and never appear.
+   * Empty when no run is executing; children that outlive their run are no
+   * longer reported once it returns. Synchronous and never waits on the
+   * running command.
+   */
+  pids(): Array<number>
 }
 
 /** One word-completion engine running on its own thread. */
@@ -554,6 +600,11 @@ export declare class VcsGitRepo {
   stageHunks(selections: Array<VcsHunkSelection>, rawDiff?: string | undefined | null, signal?: unknown | undefined | null): Promise<undefined>
   /** Create commit. */
   commitCreate(message: string, options: VcsCommitOptions, signal?: unknown | undefined | null): Promise<string>
+  /**
+   * Write a commit object for `tree` on `parents` without moving any ref or
+   * touching the index/worktree (`git commit-tree`).
+   */
+  commitTree(tree: string, parents: Array<string>, message: string, author?: VcsCommitAuthor | undefined | null, signal?: unknown | undefined | null): Promise<string>
   /** Checkout revision. */
   checkout(rev: string, signal?: unknown | undefined | null): Promise<undefined>
   /** Create branch. */
@@ -707,6 +758,29 @@ export declare function appleFmCancel(handle: number): void
  * [`apple_fm_cancel`].
  */
 export declare function appleFmGenerate(request: string, onEvent: (err: null | Error, event: string) => void): number
+
+/**
+ * Installed application identity with currently observable process
+ * information.
+ */
+export interface Application {
+  id: string
+  name: string
+  path: string
+  running: boolean
+  pid?: number
+}
+
+/** Controls whether launching an application deliberately activates it. */
+export interface ApplicationOpenOptions {
+  activate?: boolean
+}
+
+/** Filters the native application inventory without requiring screen access. */
+export interface ApplicationQuery {
+  query?: string
+  runningOnly?: boolean
+}
 
 /**
  * Apply ast-grep rewrite rules to matching files; honors `dryRun` and returns
@@ -999,6 +1073,15 @@ export interface AxSnapshotOptions {
   all?: boolean
 }
 
+export interface BlockParseOptions {
+  /** Source code to parse. */
+  code: string
+  /** Language alias (e.g. "rust", "typescript") used before path inference. */
+  lang?: string
+  /** File path used to infer language by extension when `lang` is omitted. */
+  path?: string
+}
+
 export interface BlockRange {
   /** 1-indexed inclusive first line of the resolved block. */
   startLine: number
@@ -1029,6 +1112,14 @@ export interface BlockRangeOptions {
 export interface CaptureCaps {
   maxWidth?: number
   maxHeight?: number
+}
+
+/** Rectangle in pixels of the most recent full screenshot of the same target. */
+export interface CaptureRegion {
+  x: number
+  y: number
+  width: number
+  height: number
 }
 
 /** Clipboard image payload encoded as PNG bytes. */
@@ -1086,7 +1177,7 @@ export declare function cosineSimilarityPairs(vectors: Float64Array, count: numb
 export declare function countTokens(input: string | string[], encoding?: Encoding | undefined | null): number
 
 /**
- * Decode one complete SIXEL control string into a PNG.
+ * Decode one complete SIXEL control string into a PNG on the calling thread.
  *
  * The decoder is deliberately bounded before handing the stream to
  * `icy_sixel`: raster declarations, repeats, and row advances are scanned
@@ -1094,6 +1185,12 @@ export declare function countTokens(input: string | string[], encoding?: Encodin
  * larger internal maximum.
  */
 export declare function decodeSixelToPng(bytes: Uint8Array): Uint8Array
+
+/**
+ * Same result as [`decode_sixel_to_png`], but the decode runs on the native
+ * blocking pool instead of the JS thread.
+ */
+export declare function decodeSixelToPngAsync(bytes: Uint8Array): Promise<Uint8Array>
 
 export interface DesktopCapabilities {
   backend: string
@@ -1107,6 +1204,15 @@ export interface DesktopCapabilities {
    * target and post real input).
    */
   takeover: boolean
+  applications: boolean
+  menus: boolean
+  heldInput: boolean
+  spaces: boolean
+  /**
+   * Native global Escape cancellation while input/control ownership is held.
+   * Wayland requires the host interrupt action instead.
+   */
+  globalEscape: boolean
   capturePermission: string
   inputPermission: string
   axPermission: string
@@ -1124,10 +1230,22 @@ export interface DesktopCapture {
    * unscaled.
    */
   sourceHeight: number
+  /** Dimensions of the full screenshot coordinate frame used by pointer input. */
+  coordinateWidth: number
+  coordinateHeight: number
+  /**
+   * Region in the full screenshot's coordinates; zoom pixels are not input
+   * coordinates.
+   */
+  region?: CaptureRegion
   target: string
   displays: Array<DesktopDisplay>
   backend: string
   displayServer?: string
+}
+
+export interface DesktopControlState {
+  active: boolean
 }
 
 /**
@@ -1147,6 +1265,24 @@ export interface DesktopDisplay {
   pixelWidth: number
   pixelHeight: number
   isPrimary: boolean
+}
+
+/**
+ * One immediate child of a native application menu. Paths contain the actual
+ * native labels, including ellipses; selection accepts normalized labels.
+ */
+export interface DesktopMenuItem {
+  title: string
+  path: Array<string>
+  enabled: boolean
+  checked: boolean
+  hasSubmenu: boolean
+  shortcut?: string
+}
+
+export interface DesktopObservation {
+  capture: DesktopCapture
+  accessibility: AxSnapshot
 }
 
 export interface DesktopPoint {
@@ -1506,15 +1642,26 @@ export interface EnclosingBoundaryOptions {
 }
 
 /**
- * Encode image bytes into a SIXEL escape sequence for terminal rendering.
+ * Encode image bytes into a SIXEL escape sequence for terminal rendering, on
+ * the calling thread.
  *
  * The input image is decoded and resized to the requested pixel dimensions
- * before encoding.
+ * before encoding. Prefer [`encode_sixel_async`] unless the caller cannot
+ * wait: the decode, resize and dither block the JS thread.
  *
  * # Errors
  * Returns an error if decoding, resizing, or SIXEL encoding fails.
  */
 export declare function encodeSixel(bytes: Uint8Array, targetWidthPx: number, targetHeightPx: number): string
+
+/**
+ * Same result as [`encode_sixel`], but the decode, resize and dither run on
+ * the native blocking pool, so they never stall the JavaScript event loop.
+ *
+ * # Errors
+ * Rejects if decoding, resizing, or SIXEL encoding fails.
+ */
+export declare function encodeSixelAsync(bytes: Uint8Array, targetWidthPx: number, targetHeightPx: number): Promise<string>
 
 /** Tokenizer encoding to use. */
 export declare enum Encoding {
@@ -1821,8 +1968,9 @@ export interface GrepOptions {
    * Stream results instead of returning them: called on the JS thread with
    * batches (at most 1024 entries, files in no particular order) of what
    * `matches` would hold, while the search runs. A slow callback pauses the
-   * search instead of buffering, every call returns before the promise
-   * settles, and the result then carries counts with empty `matches`.
+   * search instead of buffering. Successful completion waits for every
+   * callback and carries counts with empty `matches`; cancellation also
+   * interrupts delivery waits, though already queued callbacks may still run.
    * A throw rejects the search with it. Incompatible with `maxCount` and
    * `offset`.
    */
@@ -1942,6 +2090,14 @@ export interface HighlightColors {
   deleted?: string
 }
 
+export interface HoldOptions {
+  /** Duration in seconds, from zero through 100. */
+  duration: number
+  button?: string
+  keys?: Array<string>
+  takeover?: boolean
+}
+
 /**
  * Convert HTML source to Markdown with optional preprocessing.
  *
@@ -2051,10 +2207,13 @@ export interface IsoProbeResult {
 }
 
 /**
- * Pick the best backend available right now. `preferred` is treated as
- * a hint — see [`pi_iso::resolve`] for the exact priority rules.
+ * Pick the best backend available right now.
+ *
+ * `preferred` is treated as a hint — see [`pi_iso::resolve`] for the exact
+ * priority rules. Backend probes may spawn CLIs, so they run on the native
+ * blocking pool.
  */
-export declare function isoResolve(preferred?: IsoBackendKind | undefined | null): IsoResolveResult
+export declare function isoResolve(preferred?: IsoBackendKind | undefined | null): Promise<IsoResolveResult>
 
 /** Outcome of [`iso_resolve`]. */
 export interface IsoResolveResult {
@@ -2442,6 +2601,8 @@ export interface PointerOptions {
   button?: string
   count?: number
   modifiers?: Array<string>
+  /** Arbitrary keys held for the duration of a drag. */
+  keys?: Array<string>
   /**
    * Briefly activate the target window and post real input instead of the
    * default background delivery.
@@ -2568,14 +2729,23 @@ export interface PtyStartOptions {
 /**
  * Rasterize SVG/SVGZ bytes into a bounded PNG without resolving local files.
  *
- * Conversion runs on the native blocking pool so parsing and rendering do not
- * stall the JavaScript event loop.
+ * The image is drawn at `scale` times the SVG's intrinsic size (default 1;
+ * above 1 renders vector content crisply at display resolution), then shrunk
+ * as needed to fit `max_width_px` x `max_height_px` with its aspect ratio
+ * kept. Conversion runs on the native blocking pool so parsing and rendering
+ * do not stall the JavaScript event loop.
+ *
+ * With `cell`, the limits round down to whole cells and the canvas pads with
+ * transparency, right and bottom, to whole cells: a terminal placing the PNG
+ * over `width / cell.width_px` columns and `height / cell.height_px` rows
+ * shows it 1:1 instead of resampling it.
  *
  * # Errors
- * Returns an error for invalid SVG data, zero/oversized limits, allocation
- * failure, or PNG encoding failure.
+ * Returns an error for invalid SVG data, zero/oversized limits, a zero cell
+ * size, a scale that is not finite and positive, allocation failure, or PNG
+ * encoding failure.
  */
-export declare function rasterizeSvg(input: Uint8Array, maxWidthPx: number, maxHeightPx: number): Promise<Uint8Array>
+export declare function rasterizeSvg(input: Uint8Array, maxWidthPx: number, maxHeightPx: number, scale?: number | undefined | null, cell?: SvgCell | undefined | null): Promise<Uint8Array>
 
 /**
  * Read an image from the system clipboard.
@@ -2586,6 +2756,17 @@ export declare function rasterizeSvg(input: Uint8Array, maxWidthPx: number, maxH
  * Returns an error if clipboard access fails or image encoding fails.
  */
 export declare function readImageFromClipboard(): Promise<ClipboardImage | undefined | null>
+
+/**
+ * Read plain text from the system clipboard.
+ *
+ * Returns `Ok(None)` when the clipboard holds no text, so callers can tell
+ * "empty" from "unreadable" without spawning a shell bridge.
+ *
+ * # Errors
+ * Returns an error if clipboard access fails.
+ */
+export declare function readTextFromClipboard(): Promise<string | undefined | null>
 
 /**
  * Render Mermaid diagram text (flowchart, state, sequence, class, ER, or
@@ -2601,10 +2782,11 @@ export declare function renderMermaidAscii(text: string, options?: MermaidRender
  * Render one snapcompact frame on a libuv worker: print pre-normalized text
  * onto a `size`-wide bitmap and encode it as PNG.
  *
- * The bitmap height hugs the rows the text actually occupies
- * (`usedRows * lineRepeat * cellHeight`), so a partially filled frame never
- * pays for blank padding rows. The glyph grid holds `floor(size/cellWidth) *
- * floor(size/cellHeight/lineRepeat)` characters; input beyond that is ignored.
+ * The bitmap height hugs the rows the text occupies
+ * (`usedRows * lineRepeat * cellHeight`), with a 64px floor for vision
+ * processors that reject smaller dimensions. The glyph grid holds
+ * `floor(size/cellWidth) * floor(size/cellHeight/lineRepeat)` characters;
+ * input beyond that is ignored.
  * Native-cell bitmap-font shapes encode as indexed PNG; stretched bitmap-font
  * shapes (target cell != font cell) encode as RGB. TrueType shapes encode RGB
  * directly from grayscale coverage.
@@ -3082,8 +3264,8 @@ export declare function sliceWithWidth(line: string, startCol: number, length: n
 export interface SnapcompactRenderOptions {
   /**
    * Frame width in pixels; also bounds the grid rows
-   * (`floor(size/cellHeight/lineRepeat)`). Output height hugs the rows the
-   * text actually uses instead of padding to a square.
+   * (`floor(size/cellHeight/lineRepeat)`). Output height hugs the used rows
+   * with a 64px floor, rather than padding every frame to a square.
    */
   size: number
   /**
@@ -3147,7 +3329,21 @@ export interface SpellingRange {
  */
 export declare function structuredPatchHunks(oldText: string, newText: string, context?: number | undefined | null): Array<PatchHunk>
 
+/**
+ * Summarize source structure synchronously on the calling thread.
+ *
+ * Prefer [`summarize_code_async`] on hot paths: the tree-sitter parse blocks
+ * the JS thread for the whole call.
+ */
 export declare function summarizeCode(options: SummaryOptions): SummaryResult
+
+/**
+ * Summarize source structure on libuv's thread pool.
+ *
+ * Same result as [`summarize_code`], but the parse and summary run off the
+ * JS thread; only argument and result marshalling happen on it.
+ */
+export declare function summarizeCodeAsync(options: SummaryOptions): Promise<SummaryResult>
 
 export interface SummaryOptions {
   /** Source code to summarize. */
@@ -3202,6 +3398,15 @@ export interface SummarySegment {
  * mapping.
  */
 export declare function supportsLanguage(lang: string): boolean
+
+/**
+ * Terminal cell size in device pixels, for [`rasterize_svg`] canvases a
+ * terminal shows over whole cells.
+ */
+export interface SvgCell {
+  widthPx: number
+  heightPx: number
+}
 
 /** Options for [`TextPredictor::new`]. */
 export interface TextPredictorOptions {
@@ -3455,6 +3660,18 @@ export interface VectorTopK {
  * Tabs count as a fixed-width cell.
  */
 export declare function visibleWidth(text: string, tabWidth: number): number
+
+/**
+ * Parse `options.code` into the shared tree cache on the native blocking
+ * pool.
+ *
+ * [`enclosing_block_boundaries`], [`block_range_at`] and [`node_chain_at`]
+ * are synchronous and parse on the JS thread when their source is not
+ * cached; awaiting this first makes that parse a cache hit. Resolves without
+ * parsing when the language is unrecognized or the source is too large for
+ * the cache to keep.
+ */
+export declare function warmBlockParse(options: BlockParseOptions): Promise<undefined>
 
 /**
  * Warm syntax grammars, scope matchers, and the regexes of commonly

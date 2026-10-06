@@ -1,6 +1,11 @@
 import { type Component, Container, type HistoryBatch } from "../tui";
 import * as logger from "@oh-my-pi/pi-utils/logger";
 import { popLoopPhase, pushLoopPhase } from "@oh-my-pi/pi-utils";
+import { renderForScrollback } from "../components/image";
+import { col } from "../native/describe";
+import type { NativeNode } from "../native/node";
+import { isNativeSettled, settleNative } from "../native/settle";
+import { isUsageRowBlock } from "../overlays/usage-row";
 import { isToolActivityComponent } from "./tool-activity";
 
 /** Shared animation time supplied by the constrained transcript root. */
@@ -52,6 +57,12 @@ export interface AppendOnlyTranscriptBlock {
 
 interface FinalizableBlock {
 	isTranscriptBlockFinalized?(): boolean;
+	/**
+	 * A finalized block whose rows still wait on async work (an SVG figure's
+	 * raster). Retirement holds until it lands: committed rows can never be
+	 * repainted, so retiring early would freeze a placeholder into scrollback.
+	 */
+	isTranscriptBlockPending?(): boolean;
 	/** Render the row that must remain represented under emergency viewport pressure. */
 	renderTranscriptBlockEmergencyRow?(width: number): string | undefined;
 }
@@ -93,6 +104,12 @@ type Offered =
 	| { batch: HistoryBatch; kind: "commit"; end: number }
 	| { batch: HistoryBatch; kind: "replay" };
 
+/** Rows a progressive-append retirement offers, and the stable count they bring the head to. */
+interface AppendBatch {
+	rows: readonly string[];
+	emittedEnd: number;
+}
+
 const MAX_LIVE_BLOCKS = 256;
 /** Grace before a pressure-blocked frontier is reported; a streaming block may legitimately hold it briefly. */
 const PINNED_FRONTIER_WARN_MS = 30_000;
@@ -110,7 +127,7 @@ const EMPTY_STABLE_ROWS: readonly TranscriptStableRow[] = [];
 
 function isFinalized(component: Component): boolean {
 	const block = component as Component & FinalizableBlock;
-	return block.isTranscriptBlockFinalized?.() ?? true;
+	return (block.isTranscriptBlockFinalized?.() ?? true) && block.isTranscriptBlockPending?.() !== true;
 }
 
 function blockMode(component: Component): TranscriptBlockMode {
@@ -174,6 +191,28 @@ export class TranscriptContainer extends Container {
 	#pinnedFrontier: { index: number; since: number; logged: boolean } | undefined;
 	/** Block spans of the last `renderViewport` output, for click hit-testing. */
 	#lastViewportSpans: TranscriptViewportSpan[] = [];
+	/**
+	 * The composed frame {@link beginFrame} opened; `undefined` outside one.
+	 * {@link renderViewport} closes it, so it never outlives the synchronous
+	 * composition that opened it.
+	 */
+	#openFrame: AnimationFrame | undefined;
+	/**
+	 * Full-allocation blank-trimmed renders of the blocks measured during the
+	 * open frame, keyed by entry at {@link #frameRowsWidth}. A retirement peek
+	 * and the viewport measure the same live blocks back to back inside one
+	 * composition, with no block mutation possible in between; replaying the
+	 * first measurement spares every block its second render per frame.
+	 */
+	#frameRows = new Map<TranscriptEntry, readonly string[]>();
+	#frameRowsWidth = 0;
+	/** The `children` array `#entries` last mirrored; see {@link #syncEntries}. */
+	#syncedChildren: Component[] | undefined;
+	/** Forces the next {@link #syncEntries} to compare every entry, not just the live tail. */
+	#entriesUnverified = false;
+	/** Block list handed to the native frame provider, reused while the children are unchanged. */
+	#nativeBlocks: readonly Component[] = [];
+	#nativeNode: NativeNode | undefined;
 	override addChild(component: Component): void {
 		if (isToolActivityComponent(component)) component.setToolActivityVisible(this.#toolActivityVisible);
 		super.addChild(component);
@@ -187,6 +226,9 @@ export class TranscriptContainer extends Container {
 			emitted: 0,
 			stableFrozen: false,
 		});
+		// Callers may splice a just-added block into place (insert after an
+		// anchor); re-check the whole list once instead of trusting positions.
+		this.#entriesUnverified = true;
 	}
 
 	override removeChild(component: Component): void {
@@ -257,6 +299,18 @@ export class TranscriptContainer extends Container {
 		return true;
 	}
 
+	/**
+	 * Whether a superseded snapshot block (a repeated `wait` poll) may be
+	 * replaced by its successor. Beyond {@link canRemoveBlock}, a block directly
+	 * above a usage row stays: that row describes the turn the block belongs to,
+	 * and removing the block would leave a usage-only turn (#12248).
+	 */
+	canDisplaceBlock(component: Component): boolean {
+		if (!this.canRemoveBlock(component)) return false;
+		const next = this.children[this.children.indexOf(component) + 1];
+		return next === undefined || !isUsageRowBlock(next);
+	}
+
 	/** Lifecycle state per block in transcript order (diagnostics and tests). */
 	blockStates(): readonly BlockState[] {
 		this.#syncEntries();
@@ -301,6 +355,21 @@ export class TranscriptContainer extends Container {
 	}
 
 	/**
+	 * Open one composed frame: every live-block measurement until this frame's
+	 * {@link renderViewport} returns renders against `frame` and is taken once,
+	 * so the retirement peek and the viewport share each block's render.
+	 *
+	 * Callers MUST call {@link renderViewport} with the same `frame` in the same
+	 * synchronous composition, without mutating any transcript block in
+	 * between: the shared rows are only as fresh as that first measurement.
+	 */
+	beginFrame(frame: AnimationFrame): void {
+		this.#lastFrame = frame;
+		this.#frameRows.clear();
+		this.#openFrame = frame;
+	}
+
+	/**
 	 * Total rows the live, un-emitted tail occupies at `width`.
 	 *
 	 * `limit` stops the walk once the total passes it: measuring a resumed
@@ -322,8 +391,33 @@ export class TranscriptContainer extends Container {
 
 	/** One live block's un-emitted rows at `width`, rendered against its full-height allocation. */
 	#liveBlockRows(entry: TranscriptEntry, index: number, width: number): readonly string[] {
+		const rows = this.#measuredRows(entry, width);
+		const emitted = this.#projectedEmittedRowCount(entry, index, width);
+		return emitted === 0 ? rows : rows.slice(emitted);
+	}
+
+	/**
+	 * One block's blank-trimmed render at its full-height allocation. Inside an
+	 * open frame the first measurement of each block is replayed to later ones.
+	 */
+	#measuredRows(entry: TranscriptEntry, width: number): readonly string[] {
 		this.#setAllocation(entry.component, Number.MAX_SAFE_INTEGER, this.#lastFrame);
-		return this.#renderEntry(entry, width).slice(this.#projectedEmittedRowCount(entry, index, width));
+		if (this.#openFrame === undefined) return this.#renderEntry(entry, width);
+		if (this.#frameRowsWidth !== width) {
+			this.#frameRows.clear();
+			this.#frameRowsWidth = width;
+		}
+		let rows = this.#frameRows.get(entry);
+		if (rows === undefined) {
+			rows = this.#renderEntry(entry, width);
+			this.#frameRows.set(entry, rows);
+		}
+		return rows;
+	}
+
+	#closeFrame(): void {
+		this.#openFrame = undefined;
+		this.#frameRows.clear();
 	}
 
 	/** Block spans of the last `renderViewport` output, in output coordinates. Empty when the tail is empty. */
@@ -349,9 +443,22 @@ export class TranscriptContainer extends Container {
 		this.#lastViewportSpans = spans;
 	}
 
-	/** Render the live tail, constrained to the supplied transcript height. */
+	/**
+	 * Render the live tail, constrained to the supplied transcript height.
+	 * Closes the frame {@link beginFrame} opened; a different `frame` discards
+	 * its measurements first.
+	 */
 	renderViewport(width: number, rows: number, frame: AnimationFrame): readonly string[] {
+		if (frame !== this.#openFrame) this.#closeFrame();
 		this.#lastFrame = frame;
+		try {
+			return this.#composeViewport(width, rows, frame);
+		} finally {
+			this.#closeFrame();
+		}
+	}
+
+	#composeViewport(width: number, rows: number, frame: AnimationFrame): readonly string[] {
 		this.#syncEntries();
 		this.#settleFinalized();
 		const live = this.#liveEntries();
@@ -522,7 +629,7 @@ export class TranscriptContainer extends Container {
 		// Only a render publishes a block's stable rows, so the head renders
 		// before its progressive-append eligibility is read.
 		const head = this.#entries[this.#frontier];
-		if (head !== undefined) this.#liveBlockRows(head, this.#frontier, width);
+		if (head !== undefined) this.#measuredRows(head, width);
 		const appendHead =
 			policy === "pressure" &&
 			head?.mode === "appendOnly" &&
@@ -571,20 +678,9 @@ export class TranscriptContainer extends Container {
 			// rows left behind here are rows dropped from the top of the viewport.
 			// `liveRows` is exact here: the append path measured every live block.
 			const overflow = liveRows - room;
-			const before = this.#renderStablePrefix(appendHead, appendHead.emitted, width);
-			let emittedEnd = appendHead.emitted;
-			let rows: readonly string[] = EMPTY_ROWS;
-			while (emittedEnd < appendHead.stableRows.length && rows.length < overflow) {
-				const after = this.#renderStablePrefix(appendHead, emittedEnd + 1, width);
-				if (!isRowPrefix(before, after) || after.length === before.length) {
-					if (emittedEnd === appendHead.emitted) {
-						this.#freezeStableRows(appendHead, EMPTY_ROWS, "semantic row render added no suffix");
-					}
-					break;
-				}
-				rows = after.slice(before.length);
-				emittedEnd += 1;
-			}
+			const { rows, emittedEnd } =
+				this.#measuredAppendBatch(appendHead, width, overflow) ??
+				this.#renderedAppendBatch(appendHead, width, overflow);
 			if (emittedEnd > appendHead.emitted) {
 				const batch: HistoryBatch = {
 					id: this.#nextBatchId++,
@@ -678,6 +774,37 @@ export class TranscriptContainer extends Container {
 		return rows.length > cap ? rows.slice(rows.length - cap) : rows;
 	}
 
+	/**
+	 * The transcript's blocks for a native (TSP) surface, one component per
+	 * `main` child in transcript order; ids follow component identity, so
+	 * inserts, removals (rewind, displacement) and reorders become targeted ops.
+	 * Finalized blocks are settled as a hint; they stay editable, so a later
+	 * expansion, late result or reaction still reaches them wherever they sit.
+	 * No retirement happens on this path: the whole transcript is one document.
+	 * Returns the same array while the block list is unchanged.
+	 */
+	nativeBlocks(): readonly Component[] {
+		this.#syncEntries();
+		const children = this.children;
+		for (const child of children) {
+			if (!isNativeSettled(child) && isFinalized(child)) settleNative(child);
+		}
+		const previous = this.#nativeBlocks;
+		if (previous.length === children.length && previous.every((child, index) => child === children[index])) {
+			return previous;
+		}
+		this.#nativeBlocks = children.slice();
+		this.#nativeNode = undefined;
+		return this.#nativeBlocks;
+	}
+
+	/** Embedded as a child (transcript viewers): a stack of the {@link nativeBlocks}. */
+	override describe(): NativeNode {
+		const blocks = this.nativeBlocks();
+		this.#nativeNode ??= col(blocks, { role: "omp.transcript" });
+		return this.#nativeNode;
+	}
+
 	/** Full semantic render used by exports and non-terminal commands. */
 	override render(width: number): readonly string[] {
 		this.#syncEntries();
@@ -723,15 +850,10 @@ export class TranscriptContainer extends Container {
 			return this.#freezeStableRows(entry, rendered, "stable rows changed within a width epoch");
 		}
 		entry.stableRows = published;
-		// Slice only when the rendered rows actually changed: same length
-		// plus prefix-equality in both directions means byte-identical, so
-		// the stored array can be reused (callers only slice/read it).
-		const priorRows = entry.renderedStableByWidth.get(width);
-		if (
-			priorRows === undefined ||
-			priorRows.length !== stableRendered.length ||
-			!isRowPrefix(priorRows, stableRendered)
-		) {
+		// The prefix check above proves equal-length rows are byte-identical.
+		// Reuse our snapshot then; copy new rows so mutable renderer buffers
+		// cannot change the bytes checked on the next frame.
+		if (priorRender === undefined || priorRender.length !== stableRendered.length) {
 			entry.renderedStableByWidth.set(width, stableRendered.slice());
 		}
 		let perCount = entry.stableRowCountByWidth.get(width);
@@ -777,6 +899,64 @@ export class TranscriptContainer extends Container {
 		if (memo !== undefined) return memo;
 		return this.#renderStablePrefix(entry, count, width).length;
 	}
+
+	/**
+	 * Size a progressive-append batch from the stable renders `#renderEntry`
+	 * recorded at this width, without rendering any prefix. Each recorded count
+	 * was checked to render as a byte prefix of every later one, and
+	 * `renderedStableByWidth` holds the newest, so each count's rows are a
+	 * prefix of it and the batch is one slice. Undefined when a count the walk
+	 * needs was never recorded here (published between renders, or before a
+	 * resize); the rendered walk then decides.
+	 */
+	#measuredAppendBatch(entry: TranscriptEntry, width: number, overflow: number): AppendBatch | undefined {
+		const counts = entry.stableRowCountByWidth.get(width);
+		const newest = entry.renderedStableByWidth.get(width);
+		const target = entry.stableRows.length;
+		if (counts === undefined || newest === undefined || counts.get(target) !== newest.length) return undefined;
+		const start = entry.emitted === 0 ? 0 : counts.get(entry.emitted);
+		if (start === undefined) return undefined;
+		let emittedEnd = entry.emitted;
+		let end = start;
+		while (emittedEnd < target && end - start < overflow) {
+			const next = counts.get(emittedEnd + 1);
+			if (next === undefined) return undefined;
+			if (next <= start) {
+				if (emittedEnd === entry.emitted) {
+					this.#freezeStableRows(entry, EMPTY_ROWS, "semantic row render added no suffix");
+				}
+				break;
+			}
+			end = next;
+			emittedEnd += 1;
+		}
+		return { rows: emittedEnd > entry.emitted ? newest.slice(start, end) : EMPTY_ROWS, emittedEnd };
+	}
+
+	/**
+	 * Size a progressive-append batch by rendering each further stable prefix:
+	 * extend the emitted prefix until its new rows cover `overflow`, stopping
+	 * at the first prefix that adds no row or stops extending the emitted one
+	 * (freezing the block when that is the very next prefix).
+	 */
+	#renderedAppendBatch(entry: TranscriptEntry, width: number, overflow: number): AppendBatch {
+		const before = this.#renderStablePrefix(entry, entry.emitted, width);
+		let emittedEnd = entry.emitted;
+		let after = before;
+		while (emittedEnd < entry.stableRows.length && after.length - before.length < overflow) {
+			const next = this.#renderStablePrefix(entry, emittedEnd + 1, width);
+			if (!isRowPrefix(before, next) || next.length === before.length) {
+				if (emittedEnd === entry.emitted) {
+					this.#freezeStableRows(entry, EMPTY_ROWS, "semantic row render added no suffix");
+				}
+				break;
+			}
+			after = next;
+			emittedEnd += 1;
+		}
+		return { rows: emittedEnd > entry.emitted ? after.slice(before.length) : EMPTY_ROWS, emittedEnd };
+	}
+
 	/**
 	 * Record that pressure retirement is blocked behind a not-yet-settled
 	 * frontier block, and log its identity once the episode outlives the grace
@@ -827,9 +1007,11 @@ export class TranscriptContainer extends Container {
 			// Only the range head is sliced by its emitted stable prefix; every other
 			// entry renders whole, so the append-only verification pass (a second
 			// full render of the block's stable prefix) is skipped for them. This
-			// keeps a complete-ledger replay at one render per block.
-			const rendered =
-				index === start ? this.#renderEntry(entry, width) : trimBlankEdges(entry.component.render(width));
+			// keeps a complete-ledger replay at one render per block. These rows go
+			// to native scrollback, where nothing can repaint them.
+			const rendered = renderForScrollback(() =>
+				index === start ? this.#renderEntry(entry, width) : trimBlankEdges(entry.component.render(width)),
+			);
 			const emittedRows = index === start ? this.#renderStablePrefix(entry, entry.emitted, width).length : 0;
 			const block = rendered.slice(emittedRows);
 			reached = index + 1;
@@ -858,8 +1040,7 @@ export class TranscriptContainer extends Container {
 		while (this.#frontier < this.#entries.length) {
 			const entry = this.#entries[this.#frontier]!;
 			if (entry.mode !== "appendOnly" || entry.state !== "settled") return;
-			this.#setAllocation(entry.component, Number.MAX_SAFE_INTEGER, this.#lastFrame);
-			const rendered = this.#renderEntry(entry, width);
+			const rendered = this.#measuredRows(entry, width);
 			if (entry.emitted !== entry.stableRows.length) return;
 			if (this.#renderStablePrefix(entry, entry.emitted, width).length !== rendered.length) return;
 			this.#retireEntry(entry);
@@ -1007,12 +1188,27 @@ export class TranscriptContainer extends Container {
 		return this.#entries.length - this.#frontier;
 	}
 
+	/**
+	 * Mirror `children` into `#entries`. The container's own add/remove/clear
+	 * keep the two aligned, so the per-frame check stays off the committed
+	 * ledger: external edits to the public `children` array are caught by array
+	 * identity (replacement), length (push, removing splices), and an identity
+	 * scan of the live tail (in-place reorders and index writes). Committed
+	 * blocks are immutable history nothing reorders, and the scan skipping
+	 * them keeps this proportional to the live tail rather than the session.
+	 */
 	#syncEntries(): void {
+		const children = this.children;
 		if (
-			this.#entries.length === this.children.length &&
-			this.#entries.every((entry, index) => entry.component === this.children[index])
-		)
+			!this.#entriesUnverified &&
+			children === this.#syncedChildren &&
+			this.#entriesMatch(children, this.#frontier)
+		) {
 			return;
+		}
+		this.#entriesUnverified = false;
+		this.#syncedChildren = children;
+		if (this.#entriesMatch(children, 0)) return;
 		const existing = new Map(this.#entries.map(entry => [entry.component, entry]));
 		this.#entries = this.children.map(
 			component =>
@@ -1029,6 +1225,16 @@ export class TranscriptContainer extends Container {
 		);
 		this.#frontier = this.#entries.findIndex(entry => entry.state !== "committed");
 		if (this.#frontier < 0) this.#frontier = this.#entries.length;
+	}
+
+	/** Whether `#entries` has `children`'s length and components from `start` on. */
+	#entriesMatch(children: readonly Component[], start: number): boolean {
+		const entries = this.#entries;
+		if (entries.length !== children.length) return false;
+		for (let index = start; index < entries.length; index++) {
+			if (entries[index]!.component !== children[index]) return false;
+		}
+		return true;
 	}
 }
 

@@ -1387,7 +1387,7 @@ use pi_vfs::{BlockingFs, File};
 use super::{
 	AtomicOrdering, Compressor, GlobalSettings, Output, SortError, SortResult,
 	chunks::{self, Chunk, RecycledChunk},
-	compare_by, current_open_fd_count, fd_soft_limit, open,
+	StdinOperand, compare_by, current_open_fd_count, fd_soft_limit, open_operand,
 	tmp_dir::{TmpDirWrapper, TmpFile},
 };
 
@@ -1401,7 +1401,7 @@ fn replace_output_file_in_input_files(
 ) -> SortResult<()> {
 	let mut copy: Option<PathBuf> = None;
 	if let Some(Ok(output_path)) = output.map(|path| fs.canonicalize(Path::new(path))) {
-		for file in files {
+		for file in files.iter_mut().filter(|file| *file != super::STDIN_FILE) {
 			if let Ok(file_path) = fs.canonicalize(Path::new(file.as_os_str()))
 				&& file_path == output_path
 			{
@@ -1457,6 +1457,7 @@ fn effective_merge_batch_size(settings: &GlobalSettings) -> usize {
 /// intermediate files will be compressed with it.
 pub fn merge(
 	fs: &BlockingFs,
+	stdin: &StdinOperand,
 	files: &mut [OsString],
 	settings: &GlobalSettings,
 	output: Output,
@@ -1465,7 +1466,7 @@ pub fn merge(
 	replace_output_file_in_input_files(fs, files, output.as_output_name(), tmp_dir)?;
 	let files = files
 		.iter()
-		.map(|file| open(fs, file).map(|file| PlainMergeInput { inner: file }));
+		.map(|file| open_operand(fs, stdin, file).map(|file| PlainMergeInput { inner: file }));
 	if settings.compress.is_none() {
 		merge_with_file_limit::<_, _, WriteablePlainTmpFile>(files, settings, output, tmp_dir)
 	} else {
@@ -2543,10 +2544,10 @@ impl Drop for TmpDirWrapper {
 
 }
 
-#[cfg(not(target_os = "wasi"))]
-use std::num::NonZero;
 #[cfg(unix)]
 use std::os::unix::ffi::OsStrExt;
+#[cfg(not(target_os = "wasi"))]
+use std::num::NonZero;
 use std::{
 	cmp::Ordering,
 	ffi::{OsStr, OsString},
@@ -2555,7 +2556,7 @@ use std::{
 	num::IntErrorKind,
 	ops::Range,
 	path::{Path, PathBuf},
-	sync::{Arc, OnceLock, atomic::{AtomicBool, Ordering as AtomicOrdering}},
+	sync::{Arc, LazyLock, OnceLock, atomic::{AtomicBool, Ordering as AtomicOrdering}},
 };
 
 use bigdecimal::BigDecimal;
@@ -2565,18 +2566,24 @@ use clap::{Arg, ArgAction, ArgMatches, Command, CommandFactory, FromArgMatches, 
 use custom_str_cmp::custom_str_cmp;
 use ext_sort::ext_sort;
 use foldhash::{HashMap, SharedSeed, fast::FoldHasher};
+use icu_collator::{
+	CollatorBorrowed,
+	options::{AlternateHandling, CollatorOptions, Strength},
+};
+use icu_decimal::provider::{Baked, DecimalSymbolsV1};
+use icu_locale_core::Locale;
+use icu_provider::{DataIdentifierBorrowed, DataLocale, DataProvider, DataRequest};
 use numeric_str_cmp::{NumInfo, NumInfoParseSettings, human_numeric_str_cmp, numeric_str_cmp};
+use parking_lot::Mutex;
 use pi_vfs::{BlockingFs, File, OpenOptions};
 use rand::{RngExt as _, rng};
 #[cfg(not(target_os = "wasi"))]
 use rayon::slice::ParallelSliceMut;
 use thiserror::Error;
-use uucore::i18n::collator::{compute_sort_key_utf8, locale_cmp};
 use uucore::{
 	display::Quotable,
 	extendedbigdecimal::ExtendedBigDecimal,
-	i18n,
-	i18n::{datetime::get_locale_months, decimal::locale_decimal_separator},
+	i18n::datetime::get_locale_months,
 	line_ending::LineEnding,
 	parser::{
 		num_parser::{ExtendedParser, ExtendedParserError},
@@ -2706,14 +2713,6 @@ mod options {
 }
 
 const DECIMAL_PT: u8 = b'.';
-
-fn locale_decimal_pt() -> u8 {
-	match locale_decimal_separator().as_bytes().first().copied() {
-		Some(b'.') => b'.',
-		Some(b',') => b',',
-		_ => DECIMAL_PT,
-	}
-}
 
 const NEGATIVE: &u8 = &b'-';
 const POSITIVE: &u8 = &b'+';
@@ -2916,7 +2915,6 @@ pub struct GlobalSettings {
 	random_source:           Option<PathBuf>,
 	selectors:               Vec<FieldSelector>,
 	separator:               Option<u8>,
-	threads:                 String,
 	line_ending:             LineEnding,
 	buffer_size:             usize,
 	buffer_size_is_explicit: bool,
@@ -2925,8 +2923,25 @@ pub struct GlobalSettings {
 	compress:                Option<Compressor>,
 	merge_batch_size:        usize,
 	numeric_locale:          NumericLocaleSettings,
+	/// ICU collator for the shell's LC_COLLATE; `None` compares text by bytes.
+	collator:                Option<Arc<CollatorBorrowed<'static>>>,
+	parallelism:             Parallelism,
 	precomputed:             Precomputed,
 	cancel:                  Arc<AtomicBool>,
+}
+
+/// The pool `sort_by` runs on.
+#[derive(Clone)]
+enum Parallelism {
+	/// No `--parallel`: Rayon's process-global pool, when the embedder made it
+	/// available.
+	Global,
+	/// `--parallel=1`, or a requested pool whose workers could not be spawned.
+	Sequential,
+	/// `--parallel=N`: a pool owned by this call, so the limit never leaks into
+	/// the shared global pool other commands use.
+	#[cfg(not(target_os = "wasi"))]
+	Pool(Arc<rayon::ThreadPool>),
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -2991,10 +3006,9 @@ impl GlobalSettings {
 	/// This function **must** be called before starting to sort, and
 	/// `GlobalSettings` may not be altered afterwards.
 	///
-	/// When i18n-collator is enabled, `disable_fast_lexicographic` should be set
-	/// to true if we're in a UTF-8 locale (to force locale-aware collation
-	/// instead of byte comparison).
-	fn init_precomputed(&mut self, disable_fast_lexicographic: bool) {
+	/// `collator` must already hold the shell's collation choice: text keys
+	/// compare with it when set, and by bytes otherwise.
+	fn init_precomputed(&mut self) {
 		self.precomputed.needs_tokens = self.selectors.iter().any(|s| s.needs_tokens);
 		self.precomputed.selections_per_line =
 			self.selectors.iter().filter(|s| s.needs_selection).count();
@@ -3023,18 +3037,16 @@ impl GlobalSettings {
 		self.precomputed.tokenize_allow_unit_after_blank =
 			self.precomputed.tokenize_blank_thousands_sep && uses_human_numeric;
 
-		self.precomputed.fast_lexicographic =
-			!disable_fast_lexicographic && self.can_use_fast_lexicographic();
+		let locale_collation = self.collator.is_some();
+		self.precomputed.fast_lexicographic = !locale_collation && self.can_use_fast_lexicographic();
 		self.precomputed.fast_locale_collation =
-			disable_fast_lexicographic && self.can_use_fast_lexicographic();
+			locale_collation && self.can_use_fast_lexicographic();
 		self.precomputed.fast_ascii_insensitive = self.can_use_fast_ascii_insensitive();
 	}
 
 	/// Returns true when the fast lexicographic path can be used safely.
-	/// Note: When i18n-collator is enabled, the caller must have already
-	/// determined whether locale-aware collation is needed (via checking if
-	/// we're in a UTF-8 locale). This check is performed in uumain() before
-	/// init_precomputed() is called.
+	/// Whether that path compares bytes or collation keys depends on
+	/// `collator`, chosen before `init_precomputed` runs.
 	fn can_use_fast_lexicographic(&self) -> bool {
 		self.mode == SortMode::Default
 			&& !self.ignore_case
@@ -3092,13 +3104,14 @@ impl Default for GlobalSettings {
 			random_source:           None,
 			selectors:               vec![],
 			separator:               None,
-			threads:                 String::new(),
 			line_ending:             LineEnding::Newline,
 			buffer_size:             FALLBACK_AUTOMATIC_BUF_SIZE,
 			buffer_size_is_explicit: false,
 			compress:                None,
 			merge_batch_size:        default_merge_batch_size(),
 			numeric_locale:          NumericLocaleSettings::default(),
+			collator:                None,
+			parallelism:             Parallelism::Global,
 			cancel:                  Arc::new(AtomicBool::new(false)),
 			precomputed:             Precomputed::default(),
 		}
@@ -3268,8 +3281,10 @@ impl<'a> Line<'a> {
 		token_buffer: &mut Vec<Field>,
 		settings: &GlobalSettings,
 	) -> Self {
-				if settings.precomputed.fast_locale_collation {
-			compute_sort_key_utf8(line, &mut line_data.collation_key_buffer);
+		if settings.precomputed.fast_locale_collation
+			&& let Some(collator) = &settings.collator
+		{
+			let Ok(()) = collator.write_sort_key_utf8_to(line, &mut line_data.collation_key_buffer);
 			line_data
 				.collation_key_ends
 				.push(line_data.collation_key_buffer.len());
@@ -3394,7 +3409,7 @@ impl<'a> Line<'a> {
 				},
 				SortMode::GeneralNumeric => {
 					let initial_selection = &self.line[selection.clone()];
-					let decimal_pt = locale_decimal_pt();
+					let decimal_pt = settings.numeric_locale.decimal_pt.unwrap_or(DECIMAL_PT);
 					let leading = get_leading_gen(initial_selection, decimal_pt);
 
 					// Shorten selection to leading.
@@ -3812,7 +3827,7 @@ impl FieldSelector {
 		} else if self.settings.mode == SortMode::GeneralNumeric {
 			// Parse this number as BigDecimal, as this is the requirement for general
 			// numeric sorting.
-			let decimal_pt = locale_decimal_pt();
+			let decimal_pt = numeric_locale.decimal_pt.unwrap_or(DECIMAL_PT);
 			Selection::AsBigDecimal(general_bd_parse(
 				&range_str[get_leading_gen(range_str, decimal_pt)],
 				decimal_pt,
@@ -3919,30 +3934,106 @@ impl FieldSelector {
 	}
 }
 
-fn detect_numeric_locale() -> NumericLocaleSettings {
-	let numeric_locale = i18n::get_numeric_locale();
-	let locale = &numeric_locale.0;
-	let encoding = numeric_locale.1;
-	let is_c_locale = encoding == i18n::UEncoding::Ascii && locale.to_string() == "und";
+/// The shell's value for locale category `category`: LC_ALL, then the
+/// category, then LANG, with empty values treated as unset (POSIX). Read per
+/// invocation from the shell environment because uucore's getters read the
+/// process environment once and cache it, ignoring `LC_ALL=C sort`.
+fn shell_locale<'h>(host: &'h Host, category: &str) -> Option<&'h str> {
+	["LC_ALL", category, "LANG"]
+		.into_iter()
+		.find_map(|key| host.var(key).filter(|value| !value.is_empty()))
+}
 
-	if is_c_locale {
-		return NumericLocaleSettings { decimal_pt: Some(DECIMAL_PT), thousands_sep: None };
+/// Parses a shell locale name the way uucore parses the process one:
+/// `language_TERRITORY[.codeset][@modifier]` becomes a BCP 47 locale plus
+/// whether the codeset is UTF-8. `None` means the C locale: C/POSIX, or a name
+/// ICU cannot read.
+fn parse_locale_name(name: &str) -> Option<(Locale, bool)> {
+	let mut parts = name.split(['.', '@']);
+	let language = parts
+		.next()
+		.filter(|language| !matches!(*language, "C" | "POSIX"))?;
+	let locale = Locale::try_from_str(&language.replace('_', "-"))
+		.ok()
+		.filter(|locale| *locale != Locale::UNKNOWN)?;
+	let utf8 = parts.next().is_some_and(|codeset| {
+		codeset.eq_ignore_ascii_case("utf-8") || codeset.eq_ignore_ascii_case("utf8")
+	});
+	Some((locale, utf8))
+}
+
+/// Collators built so far, by locale. Building one resolves the locale's
+/// tailoring through ICU's fallback chain, which repeated calls skip. `None`
+/// records a locale ICU could not build a collator for.
+static COLLATORS: LazyLock<Mutex<HashMap<Locale, Option<Arc<CollatorBorrowed<'static>>>>>> =
+	LazyLock::new(Default::default);
+
+/// The collator for the shell's LC_COLLATE, or `None` to compare text by
+/// bytes: the locale must be UTF-8 (uucore's rule) and loadable by the system
+/// (GNU falls back to byte order otherwise).
+fn shell_collator(host: &Host) -> Option<Arc<CollatorBorrowed<'static>>> {
+	let (locale, utf8) = parse_locale_name(shell_locale(host, "LC_COLLATE")?)?;
+	if !utf8 || locale_failed_to_set(host) {
+		return None;
 	}
+	COLLATORS
+		.lock()
+		.entry(locale)
+		.or_insert_with_key(|locale| {
+			// Shift punctuation behind letters, but retain its quaternary
+			// distinctions for `-u` and `-c` instead of treating paths as equal.
+			let mut options = CollatorOptions::default();
+			options.alternate_handling = Some(AlternateHandling::Shifted);
+			options.strength = Some(Strength::Quaternary);
+			CollatorBorrowed::try_new(locale.into(), options)
+				.ok()
+				.map(Arc::new)
+		})
+		.clone()
+}
 
-	let grouping = i18n::decimal::locale_grouping_separator();
+/// Decimal point and thousands separator for the shell's LC_NUMERIC, from
+/// ICU's CLDR data for that locale (the data uucore reads for the process
+/// locale). C rules apply when it names C, or on Unix a locale the system
+/// cannot load (GNU's fallback); Windows has no system locale to probe, so any
+/// locale ICU parses uses its CLDR rules.
+fn detect_numeric_locale(host: &Host) -> NumericLocaleSettings {
+	let Some(name) = shell_locale(host, "LC_NUMERIC") else {
+		return NumericLocaleSettings::default();
+	};
+	let Some((locale, utf8)) = parse_locale_name(name) else {
+		return NumericLocaleSettings::default();
+	};
+	#[cfg(unix)]
+	if !locale_loadable(name, nix::libc::LC_NUMERIC_MASK) {
+		return NumericLocaleSettings::default();
+	}
+	let data_locale = DataLocale::from(&locale);
+	let request = DataRequest {
+		id:       DataIdentifierBorrowed::for_locale(&data_locale),
+		metadata: Default::default(),
+	};
+	let Ok(response) = DataProvider::<DecimalSymbolsV1>::load(&Baked, request) else {
+		return NumericLocaleSettings::default();
+	};
+	let symbols = response.payload.get();
 	NumericLocaleSettings {
-		decimal_pt:    Some(locale_decimal_pt()),
+		decimal_pt:    match symbols.decimal_separator().as_bytes().first() {
+			Some(b',') => Some(b','),
+			_ => Some(DECIMAL_PT),
+		},
 		// Upstream GNU coreutils ignore multibyte thousands separators
 		// (FIXME in C source). We keep the same single-byte behavior.
-		thousands_sep: match grouping.as_bytes() {
+		thousands_sep: match symbols.grouping_separator().as_bytes() {
 			[b] => Some(*b),
 			// ICU returns NBSP as UTF-8 (0xC2 0xA0). In non-UTF8 locales like ISO-8859-1,
 			// the input byte is 0xA0, so map it to a single-byte separator.
-			[0xc2, 0xa0] if encoding != i18n::UEncoding::Utf8 => Some(0xa0),
+			[0xc2, 0xa0] if !utf8 => Some(0xa0),
 			_ => None,
 		},
 	}
 }
+
 /// Creates an `Arg` for a sort mode flag.
 fn make_sort_mode_arg(mode: &'static str, short: char, help: String) -> Arg {
 	Arg::new(mode)
@@ -4351,15 +4442,35 @@ fn default_merge_batch_size() -> usize {
 }
 
 #[cfg(not(unix))]
-fn locale_failed_to_set() -> bool {
-	use std::env;
-	env::var_os("LC_ALL").as_deref() == Some(OsStr::new("missing"))
+fn locale_failed_to_set(host: &Host) -> bool {
+	host.var("LC_ALL") == Some("missing")
 }
 
 #[cfg(unix)]
-fn locale_failed_to_set() -> bool {
+fn locale_failed_to_set(host: &Host) -> bool {
+	shell_locale(host, "LC_COLLATE")
+		.is_some_and(|locale| !locale_loadable(locale, nix::libc::LC_COLLATE_MASK))
+}
+
+/// Whether the system can load `locale` for the categories in `mask`, probed
+/// with `newlocale` rather than `setlocale`, which would change the C locale
+/// of the whole host process.
+#[cfg(unix)]
+fn locale_loadable(locale: &str, mask: nix::libc::c_int) -> bool {
 	use nix::libc;
-	unsafe { libc::setlocale(libc::LC_COLLATE, c"".as_ptr()).is_null() }
+	let Ok(locale) = std::ffi::CString::new(locale) else {
+		return false;
+	};
+	// SAFETY: `locale` is a valid NUL-terminated string; a non-null result is
+	// a fresh locale object owned here and freed immediately.
+	unsafe {
+		let handle = libc::newlocale(mask, locale.as_ptr(), std::ptr::null_mut());
+		if handle.is_null() {
+			return false;
+		}
+		libc::freelocale(handle);
+	}
+	true
 }
 
 fn key_zero_width(selector: &FieldSelector) -> bool {
@@ -4400,15 +4511,17 @@ fn emit_debug_warnings(
 	flags: &GlobalOptionFlags,
 	legacy_warnings: &[LegacyKeyWarning],
 ) {
-	if locale_failed_to_set() {
+	if locale_failed_to_set(host) {
 		show_error!(&mut host.stderr, "{}", "failed to set locale");
 	}
 
-	let (locale, encoding) = i18n::get_collating_locale();
-
-	if matches!(encoding, i18n::UEncoding::Utf8) {
-		let locale_as_posix = format!("{}.UTF-8", locale.to_string().replace('-', "_"));
-		show_error!(&mut host.stderr, "{}", format!("text ordering performed using ‘{locale_as_posix}’ sorting rules"));
+	// GNU names the locale as selected (`setlocale(LC_COLLATE, NULL)`), so this
+	// is the shell's value, not ICU's spelling of it.
+	let collation_message = shell_locale(host, "LC_COLLATE")
+		.filter(|_| settings.collator.is_some())
+		.map(|locale| format!("text ordering performed using ‘{locale}’ sorting rules"));
+	if let Some(message) = collation_message {
+		show_error!(&mut host.stderr, "{}", message);
 	} else {
 		show_error!(&mut host.stderr, "{}", "text ordering performed using simple byte comparison");
 	}
@@ -4622,7 +4735,7 @@ impl Utility for Sort {
 fn uu_sort(host: &mut Host, matches: &ArgMatches, legacy_warnings: &[LegacyKeyWarning]) -> SortResult<()> {
 	let fs = host.fs().clone();
 	let mut settings = GlobalSettings {
-		numeric_locale: detect_numeric_locale(),
+		numeric_locale: detect_numeric_locale(host),
 		cancel: host.cancel_flag(),
 		..Default::default()
 	};
@@ -4747,25 +4860,10 @@ fn uu_sort(host: &mut Host, matches: &ArgMatches, legacy_warnings: &[LegacyKeyWa
 	settings.dictionary_order = dictionary_order;
 	settings.ignore_non_printing = ignore_non_printing;
 	settings.ignore_case = ignore_case;
-	if matches.contains_id(options::PARALLEL) {
-		// "0" is default - threads = num of cores
-		settings.threads = matches
-			.get_one::<String>(options::PARALLEL)
-			.map_or_else(|| "0".to_string(), String::from);
-		#[cfg(not(target_os = "wasi"))]
-		{
-			if rayon_global_pool_available() {
-				let num_threads = match settings.threads.parse::<usize>() {
-					Ok(0) | Err(_) => std::thread::available_parallelism().map_or(1, NonZero::get),
-					Ok(n) => n,
-				};
-				let _ = rayon::ThreadPoolBuilder::new()
-					.num_threads(num_threads)
-					.build_global();
-			}
-		}
-	}
-
+	let parallel = matches
+		.get_one::<String>(options::PARALLEL)
+		.map(|threads| parse_parallel(threads))
+		.transpose()?;
 	if let Some(size_str) = matches.get_one::<String>(options::BUF_SIZE) {
 		settings.buffer_size = GlobalSettings::parse_byte_count(size_str).map_err(|e| {
 			SortError::message(format_error_message(&e, size_str, options::BUF_SIZE))
@@ -4913,11 +5011,28 @@ fn uu_sort(host: &mut Host, matches: &ArgMatches, legacy_warnings: &[LegacyKeyWa
 		});
 	}
 
-	materialize_stdin(host, &mut files, &mut tmp_dir)?;
+	// `-c` reads its input on a detached thread, so it gets a private copy of
+	// stdin. A merge with `-o` truncates the output file before it has read
+	// all of its inputs, and stdin may be that file (`sort -m -o f - < f`), so
+	// it copies stdin first too. Every other mode reads the shell's stdin
+	// directly; spilling it to a temporary file first would cost a disk round
+	// trip on every `| sort`.
+	if settings.check || (settings.merge && matches.contains_id(options::OUTPUT)) {
+		materialize_stdin(host, &mut files, &mut tmp_dir)?;
+	}
+	let stdin_operand = if files.iter().any(|file| file == STDIN_FILE) {
+		let stdin = host
+			.stdin
+			.try_clone()
+			.map_err(|error| SortError::ReadFailed { path: PathBuf::from(STDIN_FILE), error })?;
+		StdinOperand::new(Some(stdin))
+	} else {
+		StdinOperand::new(None)
+	};
 
 	// Verify that we can open all input files. They are reopened later to avoid
 	// holding every descriptor while the output file is prepared.
-	for file in &files {
+	for file in files.iter().filter(|file| *file != STDIN_FILE) {
 		open(&fs, file)?;
 	}
 
@@ -4926,19 +5041,23 @@ fn uu_sort(host: &mut Host, matches: &ArgMatches, legacy_warnings: &[LegacyKeyWa
 		.map(|path| host.resolve(path).into_os_string());
 	let output = Output::new(&fs, output_path.as_ref(), Some(host.stdout_clone()))?;
 
+	// Only a sort runs `sort_by`; `-c` and `-m` never need the pool's workers.
+	if let Some(requested) = parallel
+		&& !settings.check
+		&& !settings.merge
+	{
+		settings.parallelism = invocation_parallelism(requested);
+	}
+
+	settings.collator = shell_collator(host);
 	if settings.debug {
 		let global_flags = GlobalOptionFlags::from_matches(matches);
 		emit_debug_warnings(host, &settings, &global_flags, legacy_warnings);
 	}
 
-	// Initialize locale collation if needed (UTF-8 locales)
-	// This MUST happen before init_precomputed() to avoid the performance
-	// regression
-	let needs_locale_collation = i18n::collator::init_locale_collation();
+	settings.init_precomputed();
 
-	settings.init_precomputed(needs_locale_collation);
-
-	exec(&fs, &mut files, &settings, output, &mut tmp_dir, host.stderr_clone())
+	exec(&fs, &stdin_operand, &mut files, &settings, output, &mut tmp_dir, host.stderr_clone())
 }
 
 fn uu_app() -> Command {
@@ -5189,6 +5308,7 @@ pub(crate) fn sort_builtin<SE: ShellExtensions>() -> Registration<SE> {
 
 fn exec(
 	fs: &BlockingFs,
+	stdin: &StdinOperand,
 	files: &mut [OsString],
 	settings: &GlobalSettings,
 	output: Output,
@@ -5196,7 +5316,7 @@ fn exec(
 	stderr: OpenFile,
 ) -> SortResult<()> {
 	if settings.merge {
-		merge::merge(fs, files, settings, output, tmp_dir)
+		merge::merge(fs, stdin, files, settings, output, tmp_dir)
 	} else if settings.check {
 		if files.len() > 1 {
 			Err(SortError::message("only one file allowed with -c"))
@@ -5204,36 +5324,78 @@ fn exec(
 			check::check(fs, files.first().unwrap(), settings)
 		}
 	} else {
-		let mut lines = files.iter().map(|file| open(fs, file));
+		let mut lines = files.iter().map(|file| open_operand(fs, stdin, file));
 		ext_sort(&mut lines, settings, output, tmp_dir, stderr)
 	}
 }
 
 fn sort_by<'a>(unsorted: &mut Vec<Line<'a>>, settings: &GlobalSettings, line_data: &LineData<'a>) {
 	let cmp = |a: &Line<'a>, b: &Line<'a>| compare_by(a, b, settings, line_data, line_data);
-	// WASI does not support threads, so use non-parallel sort to avoid
-	// rayon's thread pool which triggers an unreachable trap. Windows can also
-	// force sequential sort when pi-natives could not safely configure Rayon's
-	// process-global worker pool under commit pressure.
-	if settings.stable || settings.unique {
-		#[cfg(not(target_os = "wasi"))]
-		if rayon_global_pool_available() {
+	let stable = settings.stable || settings.unique;
+	// WASI has no threads (rayon's pool hits an unreachable trap there), and
+	// Windows leaves the global pool unavailable when pi-natives could not
+	// safely configure it under commit pressure; both sort sequentially.
+	#[cfg(not(target_os = "wasi"))]
+	let sort_parallel = |unsorted: &mut Vec<Line<'a>>| {
+		if stable {
 			unsorted.par_sort_by(cmp);
 		} else {
-			unsorted.sort_by(cmp);
-		}
-		#[cfg(target_os = "wasi")]
-		unsorted.sort_by(cmp);
-	} else {
-		#[cfg(not(target_os = "wasi"))]
-		if rayon_global_pool_available() {
 			unsorted.par_sort_unstable_by(cmp);
-		} else {
-			unsorted.sort_unstable_by(cmp);
 		}
-		#[cfg(target_os = "wasi")]
-		unsorted.sort_unstable_by(cmp);
+	};
+	match &settings.parallelism {
+		#[cfg(not(target_os = "wasi"))]
+		Parallelism::Pool(pool) => pool.install(|| sort_parallel(unsorted)),
+		#[cfg(not(target_os = "wasi"))]
+		Parallelism::Global if rayon_global_pool_available() => sort_parallel(unsorted),
+		_ if stable => unsorted.sort_by(cmp),
+		_ => unsorted.sort_unstable_by(cmp),
 	}
+}
+
+/// Parses `--parallel`'s NUM_THREADS like GNU's `xstrtoumax`: optional
+/// leading whitespace and `+`, then decimal digits and nothing else. Values
+/// past `usize` saturate, as GNU's do; zero is rejected.
+fn parse_parallel(arg: &str) -> SortResult<usize> {
+	let number = arg.trim_start_matches([' ', '\t', '\n', '\x0b', '\x0c', '\r']);
+	let digits = number.strip_prefix('+').unwrap_or(number);
+	let digit_count = digits.bytes().take_while(u8::is_ascii_digit).count();
+	if digit_count == 0 {
+		return Err(SortError::message(format!("invalid --parallel argument {}", arg.quote())));
+	}
+	if digit_count != digits.len() {
+		return Err(SortError::message(format!(
+			"invalid suffix in --parallel argument {}",
+			arg.quote()
+		)));
+	}
+	match digits.parse::<usize>() {
+		Ok(0) => Err(SortError::message("number in parallel must be nonzero")),
+		Ok(threads) => Ok(threads),
+		Err(_) => Ok(usize::MAX),
+	}
+}
+
+/// How a sort with `--parallel=N` runs: on a pool of its own, so the limit
+/// stays local to this call instead of resizing the process-global pool.
+#[cfg(not(target_os = "wasi"))]
+fn invocation_parallelism(requested: usize) -> Parallelism {
+	// Rayon spawns every worker up front, and more workers than cores cannot
+	// speed up the sort, so the request is capped at the core count.
+	let threads = requested.min(std::thread::available_parallelism().map_or(1, NonZero::get));
+	if threads == 1 {
+		return Parallelism::Sequential;
+	}
+	// Spawning fails under memory pressure; the sort then runs on its own thread.
+	rayon::ThreadPoolBuilder::new()
+		.num_threads(threads)
+		.build()
+		.map_or(Parallelism::Sequential, |pool| Parallelism::Pool(Arc::new(pool)))
+}
+
+#[cfg(target_os = "wasi")]
+fn invocation_parallelism(_requested: usize) -> Parallelism {
+	Parallelism::Sequential
 }
 
 fn compare_by<'a>(
@@ -5365,8 +5527,10 @@ fn compare_by<'a>(
 						settings.dictionary_order,
 						settings.ignore_case,
 					)
+				} else if let Some(collator) = &global_settings.collator {
+					collator.compare_utf8(a_str, b_str)
 				} else {
-					locale_cmp(a_str, b_str)
+					a_str.cmp(b_str)
 				}
 			},
 		};
@@ -5732,6 +5896,32 @@ fn print_sorted<'a, T: Iterator<Item = &'a Line<'a>>>(
 	Ok(())
 }
 
+/// The shell's stdin as the input of `-` operands. Only the first `-` reads
+/// it; later ones are empty, as stdin is already at end of file by then.
+struct StdinOperand(std::cell::Cell<Option<crate::host::Stdin>>);
+
+impl StdinOperand {
+	const fn new(stdin: Option<crate::host::Stdin>) -> Self {
+		Self(std::cell::Cell::new(stdin))
+	}
+
+	fn take(&self) -> Box<dyn Read + Send> {
+		match self.0.take() {
+			Some(stdin) => Box::new(stdin),
+			None => Box::new(std::io::empty()),
+		}
+	}
+}
+
+/// Open an input operand: `-` reads the shell's stdin, anything else a file.
+fn open_operand(
+	fs: &BlockingFs,
+	stdin: &StdinOperand,
+	path: impl AsRef<OsStr>,
+) -> SortResult<Box<dyn Read + Send>> {
+	if path.as_ref() == OsStr::new(STDIN_FILE) { Ok(stdin.take()) } else { open(fs, path) }
+}
+
 fn open(fs: &BlockingFs, path: impl AsRef<OsStr>) -> SortResult<Box<dyn Read + Send>> {
 	let path = Path::new(path.as_ref());
 	match fs.open(path) {
@@ -5899,6 +6089,22 @@ mod tests {
 	}
 
 	#[test]
+	fn reads_standard_input_once_across_repeated_dash_operands() {
+		let (code, capture) = run_util::<Sort>(&["-", "-"], "beta\nalpha\n", "/");
+		assert_eq!(code, 0, "{}", capture.err());
+		assert_eq!(capture.out(), "alpha\nbeta\n");
+	}
+
+	#[test]
+	fn merges_standard_input_with_files() {
+		let dir = tempfile::tempdir().expect("temp dir");
+		std::fs::write(dir.path().join("evens"), "b\nd\n").expect("fixture");
+		let (code, capture) = run_util::<Sort>(&["-m", "-", "evens"], "a\nc\n", dir.path());
+		assert_eq!(code, 0, "{}", capture.err());
+		assert_eq!(capture.out(), "a\nb\nc\nd\n");
+	}
+
+	#[test]
 	fn check_mode_preserves_disorder_statuses() {
 		let (code, capture) = run_util::<Sort>(&["-c"], "beta\nalpha\n", "/");
 		assert_eq!(code, 1);
@@ -5920,4 +6126,142 @@ mod tests {
 		assert_eq!(std::fs::read_to_string(path).expect("output"), "alpha\nbeta\n");
 	}
 
+	#[test]
+	fn shell_lc_all_c_selects_byte_order_on_every_call() {
+		// The process environment may carry a UTF-8 locale; the shell's
+		// `LC_ALL=C` must still win, for whole-line and keyed sorts alike.
+		for args in [&["sort"][..], &["sort", "-k1,1"], &["sort"]] {
+			let (mut host, capture) = Host::for_test("sort", b"b\nA\na\n".to_vec(), "/");
+			host.set_test_var("LC_ALL", "C");
+			let parsed = <Sort as clap::Parser>::try_parse_from(args).expect("parse");
+			assert_eq!(parsed.run(&mut host), 0, "{}", capture.err());
+			assert_eq!(capture.out(), "A\na\nb\n", "{args:?}");
+		}
+	}
+
+	/// Runs `args` (after `sort`) with the shell variable `var=locale`.
+	fn sort_in_locale(var: &str, locale: &str, args: &[&str], input: &str) -> (i32, String, String) {
+		let (mut host, capture) = Host::for_test("sort", input, "/");
+		host.set_test_var(var, locale);
+		let parsed = <Sort as clap::Parser>::try_parse_from(std::iter::once("sort").chain(args.iter().copied()))
+			.expect("parse");
+		(parsed.run(&mut host), capture.out(), capture.err())
+	}
+
+	/// Whether the system can load `locale`; Unix sort falls back to the C
+	/// locale (as GNU does) for one that is not installed.
+	#[cfg(unix)]
+	fn locale_installed(locale: &str) -> bool {
+		locale_loadable(locale, nix::libc::LC_ALL_MASK)
+	}
+
+	/// Windows sort reads ICU's data for any locale name: nothing to install.
+	#[cfg(not(unix))]
+	fn locale_installed(_locale: &str) -> bool {
+		true
+	}
+
+	// Failure mode: collation used uucore's single collator, built from the
+	// omp process's locale, so `LC_ALL=sv_SE.UTF-8 sort` ordered text by the
+	// process locale (or by bytes) and `--debug` named the process locale.
+	#[test]
+	fn collation_follows_the_shell_locale() {
+		// Swedish puts å and ä after z, å first; English keeps them beside a;
+		// byte order would put ä (C3 A4) before å (C3 A5).
+		let input = "z\nä\nå\na\n";
+		for (locale, expected) in [("sv_SE.UTF-8", "a\nz\nå\nä\n"), ("en_US.UTF-8", "a\nå\nä\nz\n")] {
+			if !locale_installed(locale) {
+				eprintln!("skipping {locale}: not installed");
+				continue;
+			}
+			for args in [&[][..], &["-k1,1"]] {
+				let (code, out, err) = sort_in_locale("LC_ALL", locale, args, input);
+				assert_eq!(code, 0, "{err}");
+				assert_eq!(out, expected, "{locale} {args:?}");
+			}
+			let (_, _, err) = sort_in_locale("LC_ALL", locale, &["--debug"], input);
+			let rules = format!("text ordering performed using ‘{locale}’ sorting rules");
+			assert!(err.contains(&rules), "{err}");
+		}
+	}
+
+	// Failure mode: shifted collation at tertiary strength treated distinct
+	// punctuation-bearing paths as equal, so `sort -u` discarded records.
+	#[test]
+	fn locale_unique_preserves_punctuation_unless_the_key_ignores_it() {
+		if !locale_installed("en_US.UTF-8") {
+			eprintln!("skipping: en_US.UTF-8 not installed");
+			return;
+		}
+		let input = "src/a-b.ts\nsrc/ab.ts\nsrc/a_b.ts\nsrc/a.b.ts\n";
+		for args in [&["-u"][..], &["-u", "-k1,1"]] {
+			for _ in 0..2 {
+				let (code, out, err) = sort_in_locale("LANG", "en_US.UTF-8", args, input);
+				assert_eq!(code, 0, "{err}");
+				let mut lines: Vec<_> = out.lines().collect();
+				lines.sort_unstable();
+				assert_eq!(lines, ["src/a-b.ts", "src/a.b.ts", "src/a_b.ts", "src/ab.ts"], "{args:?}");
+			}
+		}
+		let (code, out, err) = sort_in_locale(
+			"LANG",
+			"en_US.UTF-8",
+			&["-u", "-k1,1"],
+			"group src/a-b.ts\ngroup src/ab.ts\n",
+		);
+		assert_eq!(code, 0, "{err}");
+		assert_eq!(out, "group src/a-b.ts\n");
+		let (code, out, err) = sort_in_locale("LANG", "en_US.UTF-8", &["-d", "-u"], input);
+		assert_eq!(code, 0, "{err}");
+		assert_eq!(out, "src/a-b.ts\n");
+	}
+
+	// Failure mode: the decimal point and grouping came from the process
+	// locale, so `LC_NUMERIC=de_DE.UTF-8 sort -n` read `2,5` as 2 (C process)
+	// or 25 (en_US process, `,` grouping) instead of 2.5.
+	#[test]
+	fn numeric_sorts_read_the_shell_numeric_locale() {
+		if !locale_installed("de_DE.UTF-8") {
+			eprintln!("skipping: de_DE.UTF-8 not installed");
+			return;
+		}
+		for mode in ["-n", "-g"] {
+			let (code, out, err) = sort_in_locale("LC_NUMERIC", "de_DE.UTF-8", &["-s", mode], "2,5\n3\n2,1\n");
+			assert_eq!(code, 0, "{err}");
+			assert_eq!(out, "2,1\n2,5\n3\n", "{mode}");
+		}
+	}
+
+	// Failure mode: `--parallel` was accepted and ignored, so invalid thread
+	// counts sorted silently instead of failing as GNU sort does.
+	#[test]
+	fn parallel_validates_the_thread_count_like_gnu() {
+		for (value, message) in [
+			("0", "number in parallel must be nonzero"),
+			("abc", "invalid --parallel argument 'abc'"),
+			("", "invalid --parallel argument ''"),
+			("-1", "invalid --parallel argument '-1'"),
+			("4x", "invalid suffix in --parallel argument '4x'"),
+		] {
+			let (code, capture) = run_util::<Sort>(&[&format!("--parallel={value}")], "b\na\n", "/");
+			assert_eq!(code, 2, "{value:?}");
+			assert_eq!(capture.err(), format!("sort: {message}\n"), "{value:?}");
+			assert_eq!(capture.out(), "", "{value:?}");
+		}
+	}
+
+	#[test]
+	fn parallel_sorts_on_its_own_pool() {
+		let input: String = (0..5000).rev().map(|n| format!("{n:05}\n")).collect();
+		let expected: String = (0..5000).map(|n| format!("{n:05}\n")).collect();
+		for value in ["1", "2", " 4", "+4", "99999999999999999999999"] {
+			for stable in [&[][..], &["-s"]] {
+				let parallel = format!("--parallel={value}");
+				let args: Vec<&str> = stable.iter().copied().chain([parallel.as_str()]).collect();
+				let (code, capture) = run_util::<Sort>(&args, &input, "/");
+				assert_eq!(code, 0, "{value:?}: {}", capture.err());
+				assert!(capture.out() == expected, "{value:?} {stable:?}");
+			}
+		}
+	}
 }

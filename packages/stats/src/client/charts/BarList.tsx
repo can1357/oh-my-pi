@@ -1,10 +1,11 @@
 import type { ReactNode } from "react";
+import { formatInteger } from "../data/formatters";
 
 export interface BarListItem {
 	key: string;
 	label: ReactNode;
 	value: number;
-	/** Formatted figure; defaults to `value.toLocaleString()`. */
+	/** Formatted figure; defaults to `formatInteger(value)`. */
 	display?: string;
 	color?: string;
 }
@@ -30,7 +31,7 @@ export function BarList({ items, max, onSelect }: BarListProps) {
 							style={{ width: `${pct}%`, background: item.color ?? "var(--chart-primary)" }}
 						/>
 						<span className="bar-list-label">{item.label}</span>
-						<span className="bar-list-value">{item.display ?? item.value.toLocaleString()}</span>
+						<span className="bar-list-value">{item.display ?? formatInteger(item.value)}</span>
 					</>
 				);
 				return onSelect ? (

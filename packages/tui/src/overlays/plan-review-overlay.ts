@@ -13,8 +13,9 @@
  * Focus regions (`toc`/`body`/`actions`) cycle with Tab/Shift+Tab; arrows move
  * within the focused region and step left into the sidebar. The default focus is
  * `actions`, so the muscle memory of the old single-target overlay carries over:
- * ↑/↓ select options, Enter confirms, ←/→ drives the slider when there is no
- * sidebar, g/G + PgUp/PgDn scroll, and the external-editor key opens the plan.
+ * ↑/↓ select options, Enter confirms, ←/→ drives the slider, g/G + PgUp/PgDn
+ * scroll, and the external-editor key opens the plan. Under Tern the options
+ * are a horizontal bar, so ←/→ select options and Shift+←/→ drive the slider.
  */
 import {
 	type Component,
@@ -54,9 +55,17 @@ import { padToWidth } from "../render/utils";
 import { renderSegmentTrack } from "../chrome/segment-track";
 import { formatKeyHint, formatKeyHints } from "../app-keybindings";
 import { editorKey, editorKeys } from "../chrome/keybinding-hints";
+import type { KeyName } from "../key-hint-format";
+import { col, item, keyed, md, node, row as rowNode, span, text } from "../native/describe";
+import { leafKey, type NativeChild, type NativeNode, type NativeUiEvent } from "../native/node";
+import { actionButton, actionHint, hintsRow, itemIndex, type NativeHint, selectList } from "../native/overlay";
+import { isNativeRendering } from "../native/state";
+import { getKeybindings } from "../keybindings";
 
 /** Title shown in the overlay's top border. */
 const OVERLAY_TITLE = "Plan Review";
+/** Native sheet title when the plan has no title heading of its own. */
+const NATIVE_TITLE = "Plan review";
 /** Minimum plan-body rows kept visible even on short terminals. */
 const MIN_BODY_ROWS = 3;
 /** Visible rows for the in-overlay annotation editor before it scrolls. */
@@ -105,6 +114,14 @@ interface AnnotationSelection {
 interface AnnotationChooser {
 	entries: AnnotationSelection[];
 	selected: number;
+}
+
+/** Described plan body and Contents entries, rebuilt when sections or annotations change. */
+interface NativePlanContent {
+	sections: OverlaySection[];
+	rev: number;
+	body: NativeNode[];
+	toc: NativeNode[];
 }
 
 /** Serializable annotations retained by the plan-review owner between overlays. */
@@ -173,6 +190,10 @@ export class PlanReviewOverlay implements Component {
 	#scrollView: ScrollView;
 	#sections: OverlaySection[] = [];
 	#toc: number[] = [];
+	/** Section holding the plan's title heading (dropped from the ToC; the native sheet title), or -1. */
+	#titleIndex = -1;
+	/** Memoized {@link nativeOverlay} for the current title. */
+	#nativeOverlay: { title: string; props: NonNullable<Component["nativeOverlay"]> } | undefined;
 	/** Shallowest level among ToC entries, used to flatten indentation. */
 	#tocBaseLevel = 1;
 	#sectionOffsets: number[] = [];
@@ -222,6 +243,19 @@ export class PlanReviewOverlay implements Component {
 	#annotationTarget: BodyRowAnchor | { sectionIndex: number; row: null; context: null } | undefined;
 	#editingAnnotation: AnnotationSelection | undefined;
 	#annotationChooser: AnnotationChooser | undefined;
+
+	/** Bumped on every section/annotation change (all of them funnel through {@link #recomputeFeedback}). */
+	#annotationRev = 0;
+	#nativeContent: NativePlanContent | undefined;
+	#nativeSig = "";
+	#nativeRoot: NativeNode | undefined;
+	/** Content the memoized root was built from. */
+	#nativeRootContent: NativePlanContent | undefined;
+	/**
+	 * The section the last Contents jump targets under a native surface, which
+	 * scrolls the body itself: `n` counts the jumps, so each one reveals it again.
+	 */
+	#jump: { section: number; n: number } | undefined;
 
 	constructor(
 		planContent: string,
@@ -443,6 +477,7 @@ export class PlanReviewOverlay implements Component {
 		for (const i of headings) minLevel = Math.min(minLevel, this.#sections[i]!.level);
 		const topLevel = headings.filter(i => this.#sections[i]!.level === minLevel);
 		const titleIndex = topLevel.length === 1 && headings[0] === topLevel[0] ? topLevel[0] : -1;
+		this.#titleIndex = titleIndex ?? -1;
 		this.#toc = headings.filter(i => i !== titleIndex);
 		this.#tocBaseLevel = this.#toc.length > 0 ? Math.min(...this.#toc.map(i => this.#sections[i]!.level)) : 1;
 	}
@@ -633,6 +668,10 @@ export class PlanReviewOverlay implements Component {
 	}
 
 	#handleActions(data: string): void {
+		if (isNativeRendering()) {
+			this.#handleNativeActions(data);
+			return;
+		}
 		// Left/right always drive the slider. The sidebar sits beside the body
 		// (above this row), not the slider, so stealing left for it would strand
 		// the operator unable to step the model tier back — reach the ToC via Tab.
@@ -655,6 +694,37 @@ export class PlanReviewOverlay implements Component {
 			this.#moveSelection(1);
 			return;
 		}
+		if (matchesKey(data, "enter") || matchesKey(data, "return") || data === "\n") {
+			this.#confirmSelection();
+			return;
+		}
+		this.#handleBodyScroll(data);
+	}
+
+	/** Tern lays the options out as a horizontal decision bar: ←/→ step through
+	 *  it, ↑ returns to the body above, and the model slider moves to Shift+←/→. */
+	#handleNativeActions(data: string): void {
+		if (matchesKey(data, "shift+left")) {
+			this.#moveSlider(-1);
+			return;
+		}
+		if (matchesKey(data, "shift+right")) {
+			this.#moveSlider(1);
+			return;
+		}
+		if (matchesKey(data, "left") || matchesKey(data, "h")) {
+			this.#moveSelection(-1);
+			return;
+		}
+		if (matchesKey(data, "right") || matchesKey(data, "l")) {
+			this.#moveSelection(1);
+			return;
+		}
+		if (matchesSelectUp(data) || matchesKey(data, "k")) {
+			this.#setFocus("body");
+			return;
+		}
+		if (matchesSelectDown(data) || matchesKey(data, "j")) return;
 		if (matchesKey(data, "enter") || matchesKey(data, "return") || data === "\n") {
 			this.#confirmSelection();
 			return;
@@ -770,6 +840,7 @@ export class PlanReviewOverlay implements Component {
 	#scrubBodyToToc(): void {
 		const sectionIndex = this.#toc[this.#tocCursor];
 		if (sectionIndex === undefined) return;
+		this.#jump = { section: sectionIndex, n: (this.#jump?.n ?? 0) + 1 };
 		const offset = this.#sectionOffsets[sectionIndex];
 		if (offset !== undefined) {
 			this.#scrollView.setScrollOffset(offset);
@@ -996,6 +1067,7 @@ export class PlanReviewOverlay implements Component {
 	}
 
 	#recomputeFeedback(): void {
+		this.#annotationRev++;
 		this.callbacks.onAnnotationStateChange?.(this.#annotationState());
 		const annotated = this.#sections.filter(section => section.annotations.length > 0);
 		if (annotated.length === 0 && this.#deleted.length === 0) {
@@ -1349,6 +1421,337 @@ export class PlanReviewOverlay implements Component {
 			return [caption, ...this.#editor.render(innerWidth), theme.fg("dim", hintParts.join(" · "))];
 		}
 		return [theme.fg("dim", this.#buildHelp())];
+	}
+
+	/** The native sheet: large glass, titled by the plan's own title heading (the body never repeats it). */
+	get nativeOverlay(): NonNullable<Component["nativeOverlay"]> {
+		const heading = this.#sections[this.#titleIndex]?.title;
+		const title = heading ? sanitizeStatusText(heading) : NATIVE_TITLE;
+		if (this.#nativeOverlay?.title !== title) {
+			this.#nativeOverlay = {
+				title,
+				props: { role: "omp.overlay.planReview", size: "lg", anchor: "center", head: title },
+			};
+		}
+		return this.#nativeOverlay.props;
+	}
+
+	describe(): NativeNode {
+		// The terminal lays out the sidebar; it is shown whenever the Contents has
+		// enough entries, which is also what Tab cycling consults.
+		this.#sidebarShown = this.#toc.length >= SIDEBAR_MIN_HEADINGS;
+		if (this.#annotating) this.#editor.focused = true;
+		const content = this.#describeContent();
+		const chooser = this.#annotationChooser;
+		const target = this.#annotationTarget;
+		const sig = [
+			this.#focus,
+			this.#tocCursor,
+			this.#jump?.n ?? 0,
+			this.#selectedIndex,
+			this.#sliderIndex,
+			this.#committed ? `committed:${this.#committedLabel ?? ""}` : "",
+			this.#annotating
+				? `annotating:${target?.sectionIndex}:${target?.row}:${target?.context}:${this.#editingAnnotation !== undefined}`
+				: "",
+			chooser
+				? `chooser:${chooser.selected}:${chooser.entries.map(e => `${e.sectionIndex}.${e.annotationIndex}`).join()}`
+				: "",
+		].join("|");
+		if (this.#nativeRoot && sig === this.#nativeSig && content === this.#nativeRootContent) return this.#nativeRoot;
+
+		const children: NativeChild[] = [];
+		const tools = this.#describeTools();
+		if (tools) children.push(tools);
+		// The section a Contents jump targets scrolls to the body's top.
+		const jump = this.#jump;
+		const body = jump
+			? content.body.map((section): NativeNode =>
+					section.key === `s${jump.section}` ? { ...section, reveal: { at: "start", n: jump.n } } : section,
+				)
+			: content.body;
+		const bodyCol = node(
+			"col",
+			{ role: "omp.plan.body", grow: 1, gap: "md", tone: this.#focus === "body" ? "accent" : undefined },
+			body,
+			"body",
+		);
+		if (this.#sidebarShown) {
+			const tocSection = this.#toc[this.#tocCursor];
+			const toc = selectList("toc", content.toc, {
+				selected: tocSection === undefined ? null : `h${tocSection}`,
+				role: "omp.plan.toc",
+				tone: this.#focus === "toc" ? "accent" : undefined,
+			});
+			const sidebar = node("col", { max: { w: "32ch" }, shrink: 0 }, [toc], "sidebar");
+			children.push(keyed(rowNode([sidebar, bodyCol], { gap: "lg", align: "start" }), "split"));
+		} else {
+			children.push(bodyCol);
+		}
+		if (this.#promptTitle) {
+			children.push(keyed(text([span(this.#promptTitle, "muted")], { role: "omp.plan.prompt" }), "prompt"));
+		}
+		if (this.#committed) {
+			const label = this.#committedLabel ? `${this.#committedLabel} — submitting…` : "Submitting…";
+			children.push(node("spinner", { label: [span(label, "accent strong")] }, undefined, "options"));
+			children.push(
+				keyed(
+					text([span("Applying your selection — this can take a moment while context is prepared.", "dim")], {
+						wrap: "word",
+					}),
+					"footer",
+				),
+			);
+		} else {
+			children.push(...this.#describeSlider());
+			// The decision bar: Tern lays the list out as buttons, the first one the hero.
+			const optionItems = this.#options.map((label, i) =>
+				item(`o${i}`, {
+					label,
+					disabled: this.#disabled.has(i) || undefined,
+					hint: i === this.#selectedIndex ? ["enter"] : undefined,
+				}),
+			);
+			children.push(
+				selectList("options", optionItems, {
+					selected: this.#selectedIndex >= 0 ? `o${this.#selectedIndex}` : null,
+					role: "omp.plan.options",
+					tone: this.#focus === "actions" ? "accent" : undefined,
+				}),
+			);
+			children.push(...this.#describeFooter());
+		}
+
+		this.#nativeSig = sig;
+		this.#nativeRootContent = content;
+		// The sheet is the frame: a borderless column, titled by `nativeOverlay`.
+		this.#nativeRoot = col(children, { gap: "md" });
+		return this.#nativeRoot;
+	}
+
+	/** Head tools: Copy `c` and the external editor, mirroring their keys. */
+	#describeTools(): NativeNode | undefined {
+		if (this.#committed) return undefined;
+		const buttons: NativeNode[] = [];
+		if (this.callbacks.onCopyPlan)
+			buttons.push(actionButton("Copy", "copyPlan", { keys: "c", title: "Copy plan  c" }));
+		// Unbound: the button still mirrors the callback, without a keycap.
+		const editorKeyId = getKeybindings().getKeys("app.editor.external")[0];
+		if (this.callbacks.onExternalEditor) {
+			buttons.push(actionButton("Edit in $EDITOR", "externalEditor", editorKeyId ? { keys: editorKeyId } : {}));
+		}
+		if (buttons.length === 0) return undefined;
+		return node("row", { role: "omp.plan.tools", gap: "sm", align: "center", justify: "end" }, buttons, "tools");
+	}
+
+	handleNativeEvent(event: NativeUiEvent): void {
+		if (this.#committed) return;
+		if (event.type === "action") {
+			// Head tools run exactly what `c` and the external-editor key run.
+			if (this.#annotating || this.#annotationChooser) return;
+			if (event.act === "copyPlan" && this.callbacks.onCopyPlan) {
+				void this.callbacks.onCopyPlan(joinPlanSections(this.#sections));
+			} else if (event.act === "externalEditor") {
+				this.callbacks.onExternalEditor?.();
+			}
+			return;
+		}
+		if (event.type !== "select" && event.type !== "activate") return;
+		const activate = event.type === "activate";
+		switch (leafKey(event.key)) {
+			case "toc": {
+				const pos = this.#toc.indexOf(itemIndex(event.item, "h"));
+				if (pos < 0) return;
+				this.#focus = "toc";
+				this.#tocCursor = pos;
+				this.#scrubBodyToToc();
+				if (activate) this.#setFocus("body");
+				return;
+			}
+			case "options": {
+				const index = itemIndex(event.item, "o");
+				if (index < 0 || index >= this.#options.length || this.#disabled.has(index)) return;
+				this.#focus = "actions";
+				this.#selectedIndex = index;
+				if (activate) this.#confirmSelection();
+				return;
+			}
+			case "tabs": {
+				const index = itemIndex(event.item, "t");
+				if (index >= 0) this.#moveSlider(index - this.#sliderIndex);
+				return;
+			}
+			case "chooser": {
+				const chooser = this.#annotationChooser;
+				const index = itemIndex(event.item, "c");
+				if (!chooser || index < 0 || index >= chooser.entries.length) return;
+				chooser.selected = index;
+				if (activate) {
+					this.#annotationChooser = undefined;
+					this.#startExistingAnnotation(chooser.entries[index]!);
+				}
+				return;
+			}
+		}
+	}
+
+	/** Plan body (one `md` per section, annotation callouts after it) and Contents items. */
+	#describeContent(): NativePlanContent {
+		const cached = this.#nativeContent;
+		if (cached && cached.sections === this.#sections && cached.rev === this.#annotationRev) return cached;
+		const body: NativeNode[] = [];
+		for (const [sectionIndex, section] of this.#sections.entries()) {
+			const key = `s${sectionIndex}`;
+			// The title heading is the sheet's title; the body keeps only what follows it.
+			const newline = section.raw.indexOf("\n");
+			const source =
+				sectionIndex !== this.#titleIndex ? section.raw : newline < 0 ? "" : section.raw.slice(newline + 1);
+			const hasText = sectionIndex !== this.#titleIndex || source.trim() !== "";
+			if (section.annotations.length === 0) {
+				if (hasText) body.push(keyed(md(source), key));
+				continue;
+			}
+			const children: NativeNode[] = hasText ? [keyed(md(source), "md")] : [];
+			for (const [n, annotation] of section.annotations.entries()) {
+				// A margin note: the anchored line quoted, then the note, on one ink-pen bar.
+				const note: NativeNode[] = [];
+				if (annotation.target.kind === "line") {
+					note.push(text([span(annotation.target.context, "muted")], { truncate: "end", lines: 1 }));
+				}
+				note.push(text(sanitizeText(annotation.note), { wrap: "word" }));
+				children.push(node("col", { role: "omp.plan.note", gap: "xs" }, note, `n${n}`));
+			}
+			body.push(keyed(col(children, { gap: "sm" }), key));
+		}
+		const toc = this.#toc.map(sectionIndex => {
+			const section = this.#sections[sectionIndex]!;
+			const count = section.annotations.length;
+			return item(`h${sectionIndex}`, {
+				label: section.title || "(untitled)",
+				value: count > 0 ? [span(`✎${count}`, "warning")] : undefined,
+				role: `omp.plan.toc.depth${section.level - this.#tocBaseLevel}`,
+			});
+		});
+		this.#nativeContent = { sections: this.#sections, rev: this.#annotationRev, body, toc };
+		return this.#nativeContent;
+	}
+
+	#describeSlider(): NativeNode[] {
+		const slider = this.#slider;
+		if (!slider) return [];
+		const tabs = node(
+			"tabs",
+			{
+				items: slider.segments.map((segment, i) => ({ id: `t${i}`, label: segment.label })),
+				active: `t${this.#sliderIndex}`,
+				actions: { click: "select" },
+				role: "omp.plan.strategy",
+			},
+			undefined,
+			"tabs",
+		);
+		const track: NativeChild[] = slider.caption ? [text([span(slider.caption, "dim")]), tabs] : [tabs];
+		const out = [keyed(rowNode(track, { gap: "sm", align: "center" }), "slider")];
+		const detail = slider.segments[this.#sliderIndex]?.detail;
+		if (detail) out.push(keyed(text([span("↳ ", "dim"), span(detail, "muted")], { wrap: "word" }), "sliderDetail"));
+		return out;
+	}
+
+	#describeFooter(): NativeChild[] {
+		const chooser = this.#annotationChooser;
+		if (chooser) {
+			const entries = chooser.entries.map((selection, i) => {
+				const section = this.#sections[selection.sectionIndex];
+				const annotation = section?.annotations[selection.annotationIndex];
+				const where = annotation?.target.kind === "line" ? `line ${annotation.target.context}` : "section";
+				return item(`c${i}`, {
+					label: sanitizeStatusText(annotation?.note ?? ""),
+					detail: `${sanitizeStatusText(section?.title || "Plan preamble")} · ${where}`,
+				});
+			});
+			return [
+				keyed(text([span("Edit annotation", "accent strong")]), "chooserHead"),
+				selectList("chooser", entries, { selected: `c${chooser.selected}` }),
+				hintsRow(
+					[
+						actionHint(["tui.select.up", "tui.select.down"], "choose"),
+						{ keys: ["enter"], label: "edit" },
+						actionHint("tui.select.cancel", "cancel"),
+					],
+					"chooserHints",
+				),
+			];
+		}
+		if (this.#annotating) {
+			const target = this.#annotationTarget;
+			const title = sanitizeStatusText(this.#sections[target?.sectionIndex ?? -1]?.title || "Plan preamble");
+			const location = target?.row === null ? `‹${title}›` : `‹${title}› · ${target?.context ?? ""}`;
+			const hints: (NativeHint | undefined)[] = [
+				actionHint("tui.input.submit", "save"),
+				actionHint("tui.input.newLine", "newline"),
+				actionHint("tui.select.cancel", "cancel"),
+			];
+			if (this.#editingAnnotation) hints.push({ keys: [], label: "empty deletes" });
+			if (this.#externalEditorLabel) hints.push({ keys: [], label: `${this.#externalEditorLabel} editor` });
+			// The feedback field, inline under the plan: its caption names the anchor, omp's editor holds the text.
+			return [
+				node(
+					"col",
+					{ role: "omp.plan.feedback", gap: "xs" },
+					[
+						keyed(
+							text([span("Note on ", "muted"), span(location, "accent")], { truncate: "end" }),
+							"annotateHead",
+						),
+						this.#editor,
+						hintsRow(hints, "annotateHints"),
+					],
+					"feedback",
+				),
+			];
+		}
+		return [hintsRow(this.#nativeHelpHints())];
+	}
+
+	/** {@link #buildHelp} as keycap hints. */
+	#nativeHelpHints(): (NativeHint | undefined)[] {
+		const upDown = (label: string) => actionHint(["tui.select.up", "tui.select.down"], label);
+		const key = (keys: KeyName | readonly KeyName[], label: string): NativeHint => ({
+			keys: typeof keys === "string" ? [keys] : keys,
+			label,
+		});
+		const hints: (NativeHint | undefined)[] = [];
+		switch (this.#focus) {
+			case "actions":
+				hints.push(key(["left", "right"], "select"), key("enter", "confirm"));
+				if (this.#slider) hints.push(key(["shift+left", "shift+right"], "model"));
+				break;
+			case "toc":
+				hints.push(
+					upDown("section"),
+					key("enter", "open"),
+					key("a", "annotate"),
+					key("e", "edit"),
+					key("d", "delete"),
+					key("u", "undo"),
+				);
+				break;
+			case "body":
+				hints.push(
+					upDown("scroll"),
+					key("shift", "faster"),
+					key(["pageUp", "pageDown"], "page"),
+					key(["g", "shift+g"], "ends"),
+					key("a", "annotate"),
+					key("e", "edit"),
+					key("u", "undo"),
+				);
+				break;
+		}
+		// Copy and the external editor are head buttons with their keycaps; the hints skip them.
+		hints.push(key("tab", "regions"));
+		hints.push(this.#helpSuffix ? { keys: [], label: this.#helpSuffix } : actionHint("tui.select.cancel", "cancel"));
+		return hints;
 	}
 
 	render(width: number): readonly string[] {

@@ -6572,7 +6572,7 @@ dependencies = [
 
 [[package]]
 name = "pi-ast"
-version = "18.4.1"
+version = "18.7.0"
 dependencies = [
  "anyhow",
  "ast-grep-core",
@@ -6642,7 +6642,7 @@ dependencies = [
 
 [[package]]
 name = "pi-builtins"
-version = "18.4.1"
+version = "18.7.0"
 dependencies = [
  "ansi-width",
  "anyhow",
@@ -6675,6 +6675,10 @@ dependencies = [
  "hex",
  "hifijson",
  "hostname",
+ "icu_collator",
+ "icu_decimal",
+ "icu_locale_core",
+ "icu_provider",
  "ignore",
  "indicatif",
  "itertools 0.14.0",
@@ -6685,7 +6689,6 @@ dependencies = [
  "libc",
  "lscolors",
  "memchr",
- "memmap2",
  "nix 0.31.3",
  "nom 8.0.0",
  "notify",
@@ -6695,6 +6698,7 @@ dependencies = [
  "os_display",
  "parking_lot",
  "parse_datetime",
+ "pi-iso",
  "pi-vfs",
  "pi-walker",
  "platform-info",
@@ -6726,11 +6730,11 @@ dependencies = [
 
 [[package]]
 name = "pi-diff"
-version = "18.4.1"
+version = "18.7.0"
 
 [[package]]
 name = "pi-edit"
-version = "18.4.1"
+version = "18.7.0"
 dependencies = [
  "async-trait",
  "parking_lot",
@@ -6749,7 +6753,7 @@ dependencies = [
 
 [[package]]
 name = "pi-iso"
-version = "18.4.1"
+version = "18.7.0"
 dependencies = [
  "async-trait",
  "libc",
@@ -6761,7 +6765,7 @@ dependencies = [
 
 [[package]]
 name = "pi-natives"
-version = "18.4.1"
+version = "18.7.0"
 dependencies = [
  "anyhow",
  "arboard",
@@ -6770,6 +6774,7 @@ dependencies = [
  "async-trait",
  "atspi",
  "base64 0.23.1",
+ "block2",
  "clap",
  "clipboard-win",
  "core-graphics",
@@ -6796,6 +6801,7 @@ dependencies = [
  "napi",
  "napi-build",
  "napi-derive",
+ "notify",
  "objc2",
  "objc2-app-kit",
  "objc2-application-services",
@@ -6806,6 +6812,7 @@ dependencies = [
  "pdf-inspector",
  "phf 0.14.0",
  "pi-ast",
+ "pi-builtins",
  "pi-diff",
  "pi-edit",
  "pi-iso",
@@ -6827,13 +6834,13 @@ dependencies = [
  "shlex 2.0.1",
  "smallvec",
  "syntect",
- "tempfile",
  "tiktoken-rs",
  "tinyvec",
  "tokio",
  "tokio-util",
  "toml",
  "uiautomation",
+ "windows 0.62.2",
  "windows-sys 0.61.2",
  "winreg 0.56.0",
  "x11rb",
@@ -6848,7 +6855,7 @@ dependencies = [
 
 [[package]]
 name = "pi-predict"
-version = "18.4.1"
+version = "18.7.0"
 dependencies = [
  "anyhow",
  "candle-core",
@@ -6866,7 +6873,7 @@ dependencies = [
 
 [[package]]
 name = "pi-shell"
-version = "18.4.1"
+version = "18.7.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -6880,6 +6887,7 @@ dependencies = [
  "os_pipe",
  "parking_lot",
  "pi-builtins",
+ "pi-vcs",
  "pi-vfs",
  "regex",
  "serde",
@@ -6896,7 +6904,7 @@ dependencies = [
 
 [[package]]
 name = "pi-vcs"
-version = "18.4.1"
+version = "18.7.0"
 dependencies = [
  "futures",
  "gix",
@@ -6912,7 +6920,7 @@ dependencies = [
 
 [[package]]
 name = "pi-vfs"
-version = "18.4.1"
+version = "18.7.0"
 dependencies = [
  "async-trait",
  "libc",
@@ -6925,7 +6933,7 @@ dependencies = [
 
 [[package]]
 name = "pi-voice"
-version = "18.4.1"
+version = "18.7.0"
 dependencies = [
  "bytes",
  "flume",
@@ -6939,7 +6947,7 @@ dependencies = [
 
 [[package]]
 name = "pi-walker"
-version = "18.4.1"
+version = "18.7.0"
 dependencies = [
  "globset",
  "ignore",

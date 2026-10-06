@@ -107,3 +107,26 @@ class "gemini" {
 
 	thinking-loop-guard "gemini"
 }
+
+// Google Search grounding is a Gemini 2+ lineage capability on every Gemini transport.
+class "gemini" {
+	on-api "google-generative-ai" "google-gemini-cli" {
+		revision ">=2" {
+			web-search "gemini"
+			web-search-model "gemini-2.5-flash"
+			image-model "gemini-3-pro-image"
+		}
+	}
+}
+
+// Gemini 3+ bills a fixed `media_resolution` budget per image regardless of
+// pixels; the default for images is HIGH, 1,120 tokens.
+// https://ai.google.dev/gemini-api/docs/media-resolution
+class "gemini" {
+	revision ">=3" {
+		image-tokenization {
+			regime "fixed"
+			tokens 1120
+		}
+	}
+}

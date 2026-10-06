@@ -169,7 +169,7 @@ export function wrapShellLineForClientTerminal(
 }
 
 /**
- * Mirrors pi-shell's `uutils_env_disabled` gate for `PI_DISABLE_UUTILS_BUILTINS`:
+ * Mirrors pi-shell's `env_flag` gate for `PI_DISABLE_UUTILS_BUILTINS`:
  * session shell env first, then process env; truthy = present and not "", "0",
  * or "false". Controls whether the prompt advertises the in-process builtins.
  */
@@ -356,7 +356,6 @@ const bashSchemaWithService = type({
 		"host?": "string",
 		"timeout?": "number",
 	}),
-	"env?": type.record("string", "string"),
 });
 
 const bashSchemaWithAsyncAndService = type({
@@ -372,7 +371,6 @@ const bashSchemaWithAsyncAndService = type({
 		"host?": "string",
 		"timeout?": "number",
 	}),
-	"env?": type.record("string", "string"),
 });
 
 type BashToolSchema =
@@ -387,7 +385,6 @@ export interface BashToolInput {
 	cwd?: string;
 	name?: string;
 	ready?: ServiceReady;
-	env?: Record<string, string>;
 	async?: boolean;
 	pty?: boolean;
 }
@@ -419,13 +416,6 @@ function normalizeReady(ready: ServiceReady | undefined): ServiceReady | undefin
 	return { log, host, port, timeout };
 }
 
-/** Drops a record with no keys: `env: {}` sets nothing, so it requests nothing. */
-function nonEmptyRecord(record: Record<string, string> | undefined): Record<string, string> | undefined {
-	if (!record) return undefined;
-	for (const _key in record) return record;
-	return undefined;
-}
-
 export interface BashToolOptions {}
 
 type ManagedBashJobCompletion =
@@ -448,6 +438,9 @@ interface ManagedBashJobHandle {
 interface BashProgressDetails extends BashToolDetails {
 	images?: ImageContent[];
 }
+
+/** Pid probe of a background job with no command in flight. */
+const NO_PIDS = (): readonly number[] => [];
 
 function normalizeResultOutput(result: BashResult | BashInteractiveResult): string {
 	return result.output || "";
@@ -605,7 +598,10 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 		const isToolActive = (name: string, fallback: boolean): boolean => this.session.isToolActive?.(name) ?? fallback;
 		return prompt.render(bashDescription, {
 			asyncEnabled: cfgAsyncEnabled.get(this.session.settings),
+			// The deadline an omitted `timeout` resolves to, after the `tools.maxTimeout` cap.
+			defaultTimeoutSec: clampTimeout("bash", undefined, cfgToolsMaxTimeout.get(this.session.settings)),
 			autoBackgroundEnabled: cfgBashAutoBackgroundEnabled.get(this.session.settings),
+			autoBackgroundSeconds: cfgBashAutoBackgroundThresholdMs.get(this.session.settings) / 1000,
 			hasAstGrep: isToolActive("ast_grep", cfgAstGrepEnabled.get(this.session.settings)),
 			hasAstEdit: isToolActive("ast_edit", cfgAstEditEnabled.get(this.session.settings)),
 			hasGrep: isToolActive("grep", cfgGrepEnabled.get(this.session.settings)),
@@ -808,7 +804,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 		if (options.notices?.length) {
 			lines.push(...options.notices, "");
 		}
-		lines.push(formatBackgroundNotice(jobId));
+		lines.push(formatBackgroundNotice(jobId, timeoutSec));
 		return {
 			content: [{ type: "text", text: lines.join("\n") }],
 			details,
@@ -839,6 +835,9 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 		}
 
 		const label = options.command.length > 120 ? `${options.command.slice(0, 117)}...` : options.command;
+		// Holds the run's Shell only while it runs: a retained reference would
+		// keep a finished `:async:` Shell (and its background children) alive.
+		let pids: () => readonly number[] = NO_PIDS;
 		let latestText = "";
 		let latestProgressDetails: BashProgressDetails | undefined;
 		let forwardUpdates = options.foreground;
@@ -870,6 +869,11 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 							});
 						},
 						onMinimizedSave: originalText => saveBashOriginalArtifact(this.session, originalText),
+						onStart: probe => {
+							pids = probe;
+						},
+					}).finally(() => {
+						pids = NO_PIDS;
 					});
 					if (result.artifactError) latestProgressDetails = { meta: { artifactError: result.artifactError } };
 					const wallTimeMs = performance.now() - wallTimeStart;
@@ -914,6 +918,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 			{
 				ownerId: this.session.getAgentId?.() ?? undefined,
 				foreground: options.foreground,
+				process: { command: options.command, cwd: options.commandCwd, pids: () => pids() },
 				onProgress: async text => {
 					latestText = text;
 					if (!forwardUpdates) return;
@@ -943,7 +948,6 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 			cwd,
 			name: rawName,
 			ready: rawReady,
-			env: rawEnv,
 			async: rawAsync,
 			pty,
 		}: BashToolInput,
@@ -972,18 +976,16 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 		// them are not a service request.
 		const name = blankToUndefined(rawName);
 		const ready = normalizeReady(rawReady);
-		const env = nonEmptyRecord(rawEnv);
 		const asyncRequested = rawAsync === true;
 		const pendingNotices: string[] = [];
 		if (name !== undefined) {
 			if (!this.#launchEnabled) throw new ToolError("Service launch is disabled in this session.");
 			if (asyncRequested || rawTimeout !== undefined)
 				throw new ToolError("Service mode does not accept async or timeout; use ready.timeout for readiness.");
-		} else if (ready !== undefined || env !== undefined) {
-			// Nothing can honour ready/env without a service to attach them to;
+		} else if (ready !== undefined) {
+			// Nothing can honour ready without a service to attach it to;
 			// running the command the caller did ask for beats failing the call.
-			const ignored = [ready && "ready", env && "env"].filter(Boolean).join(" and ");
-			pendingNotices.push(`Ignored ${ignored}: service-only, and no service name was given.`);
+			pendingNotices.push("Ignored ready: service-only, and no service name was given.");
 		}
 		if (asyncRequested && !cfgAsyncEnabled.get(this.session.settings)) {
 			throw new ToolError("Async bash execution is disabled. Enable async.enabled to use async mode.");
@@ -1066,7 +1068,6 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 					command,
 					cwd: commandCwd,
 					pty: pty ?? true,
-					env,
 					ready,
 				},
 				signal,

@@ -12,28 +12,43 @@ import { formatPathRelativeToCwd } from "./path-utils";
 const LOOSE_HASHLINE_HEADER_RE = /^\s*\[[^#\r\n]+#[^ \t\r\n]*\]\s*$/;
 
 /**
+ * `stripHashlinePrefixes(lines).join("\n")`, or `undefined` when that equals `text`
+ * (`lines.join("\n")`, joined only if the rows differ). Rows are compared first so
+ * unprefixed content is never re-joined.
+ */
+function joinStrippedLines(lines: string[], text?: string): string | undefined {
+	const cleaned = stripHashlinePrefixes(lines);
+	if (cleaned.length === lines.length) {
+		let index = 0;
+		while (index < lines.length && cleaned[index] === lines[index]) index++;
+		if (index === lines.length) return undefined;
+	}
+	const cleanedText = cleaned.join("\n");
+	return cleanedText === (text ?? lines.join("\n")) ? undefined : cleanedText;
+}
+
+/**
  * Strip hashline display prefixes from write content.
  *
  * Includes a fallback for loosely-formed section headers that still carry
  * line-number prefixes (for example legacy or malformed hashline echoes).
  */
-function stripWriteContentWithPotentialLooseHeader(lines: string[]): { text: string; stripped: boolean } {
-	const originalText = lines.join("\n");
-	const cleanedText = stripHashlinePrefixes(lines).join("\n");
-	if (cleanedText !== originalText) {
+function stripWriteContentWithPotentialLooseHeader(content: string): { text: string; stripped: boolean } {
+	const lines = content.split("\n");
+	const cleanedText = joinStrippedLines(lines, content);
+	if (cleanedText !== undefined) {
 		return { text: cleanedText, stripped: true };
 	}
 
 	const headerIndex = lines.findIndex(line => line.trim().length > 0);
 	if (headerIndex === -1 || !LOOSE_HASHLINE_HEADER_RE.test(lines[headerIndex])) {
-		return { text: lines.join("\n"), stripped: false };
+		return { text: content, stripped: false };
 	}
 
 	const linesWithoutHeader = lines.slice(0, headerIndex).concat(lines.slice(headerIndex + 1));
-	const textWithoutHeader = linesWithoutHeader.join("\n");
-	const cleanedWithoutHeader = stripHashlinePrefixes(linesWithoutHeader).join("\n");
-	if (cleanedWithoutHeader === textWithoutHeader) {
-		return { text: originalText, stripped: false };
+	const cleanedWithoutHeader = joinStrippedLines(linesWithoutHeader);
+	if (cleanedWithoutHeader === undefined) {
+		return { text: content, stripped: false };
 	}
 	return { text: cleanedWithoutHeader, stripped: true };
 }
@@ -48,7 +63,7 @@ export function stripWriteContent(session: ToolSession, content: string): { text
 	if (!resolveFileDisplayMode(session).hashLines) {
 		return { text: content, stripped: false };
 	}
-	return stripWriteContentWithPotentialLooseHeader(content.split("\n"));
+	return stripWriteContentWithPotentialLooseHeader(content);
 }
 
 /**

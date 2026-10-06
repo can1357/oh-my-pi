@@ -38,12 +38,12 @@ import { routeWriteThroughBridge, shouldRouteWriteThroughBridge } from "./acp-br
 import { truncateForPrompt } from "./approval";
 import { assertEditableFile } from "./auto-generated-guard";
 
-import { isReadTruncationNotice, splitAddressableFileLines } from "@oh-my-pi/pi-tui/tools/hashline-format";
+import { isReadTruncationNotice } from "@oh-my-pi/pi-tui/tools/hashline-format";
 import { recoverConflictUriPrefix } from "./conflict-detect";
 import { invalidateFsScanAfterWrite } from "./fs-cache-invalidation";
 
 import { outputMeta } from "./output-meta";
-import { formatPathRelativeToCwd, probeLiteralPathExists } from "./path-utils";
+import { formatPathRelativeToCwd, probeLiteralPathExists, specialFileKind } from "./path-utils";
 import { splitPathAndSel } from "@oh-my-pi/pi-tui/tools/read";
 import {
 	enforcePlanModeWrite,
@@ -199,11 +199,30 @@ const writeSchema = type({
 /** Write arguments; `content` may be omitted only where the target scheme's write policy allows it. */
 export type WriteToolInput = typeof writeSchema.infer;
 
+/**
+ * Offset of the last non-blank line of LF-only `text` when that line is a `read`
+ * truncation notice, else -1. Walks lines backward from the end instead of splitting.
+ */
+function readTruncationNoticeStart(text: string): number {
+	let end = text.length;
+	while (end > 0) {
+		const start = text.lastIndexOf("\n", end - 1) + 1;
+		const line = text.slice(start, end);
+		if (line.trim().length > 0) return isReadTruncationNotice(line) ? start : -1;
+		end = start - 1;
+	}
+	return -1;
+}
+
+/** `normalizeToLF(text).length` without the copy: each CRLF collapses to one LF; a lone CR stays one char. */
+function lfNormalizedLength(text: string): number {
+	let length = text.length;
+	for (let at = text.indexOf("\r\n"); at !== -1; at = text.indexOf("\r\n", at + 2)) length--;
+	return length;
+}
+
 function endsWithReadTruncationNotice(content: string): boolean {
-	const lines = splitAddressableFileLines(normalizeToLF(content));
-	const noticeIndex = lines.findLastIndex(line => line.trim().length > 0);
-	if (noticeIndex === -1) return false;
-	return isReadTruncationNotice(lines[noticeIndex]!);
+	return readTruncationNoticeStart(normalizeToLF(content)) !== -1;
 }
 
 async function readCurrentWriteSource(
@@ -242,12 +261,18 @@ async function readCurrentWriteSource(
  * the truncation marker, not character count, establishes as incomplete.
  */
 function readProjectionPayloadLength(content: string): number | undefined {
-	const lines = splitAddressableFileLines(normalizeToLF(content));
-	const noticeIndex = lines.findLastIndex(line => line.trim().length > 0);
-	if (noticeIndex === -1 || !isReadTruncationNotice(lines[noticeIndex]!)) return undefined;
-	let end = noticeIndex;
-	while (end > 0 && lines[end - 1]!.trim().length === 0) end--;
-	return lines.slice(0, end).join("\n").length;
+	const text = normalizeToLF(content);
+	let payloadEnd = readTruncationNoticeStart(text);
+	if (payloadEnd === -1) return undefined;
+	// Back over the blank lines separating the payload from the notice. `lastIndexOf` clamps a
+	// negative start to 0, so the first line (ending at the LF at 0) needs the explicit guard.
+	while (payloadEnd > 0) {
+		const previousStart = payloadEnd > 1 ? text.lastIndexOf("\n", payloadEnd - 2) + 1 : 0;
+		if (text.slice(previousStart, payloadEnd - 1).trim().length > 0) break;
+		payloadEnd = previousStart;
+	}
+	// `payloadEnd` starts the first dropped line; the payload excludes the LF before it.
+	return Math.max(0, payloadEnd - 1);
 }
 
 function assertNotShorterReadProjection(
@@ -258,8 +283,8 @@ function assertNotShorterReadProjection(
 ): void {
 	const rawPayloadLength = readProjectionPayloadLength(rawContent);
 	if (rawPayloadLength === undefined || currentContent === undefined) return;
-	const payloadLength = writeContent === rawContent ? rawPayloadLength : normalizeToLF(writeContent).length;
-	if (payloadLength >= normalizeToLF(currentContent).length) return;
+	const payloadLength = writeContent === rawContent ? rawPayloadLength : lfNormalizedLength(writeContent);
+	if (payloadLength >= lfNormalizedLength(currentContent)) return;
 	throw new ToolError(
 		`Refusing to overwrite '${displayPath}' with an incomplete read projection: the content ends with an omp read truncation notice and covers less than the current source, so it would discard unseen content. Re-read the omitted ranges and write the complete file, or use edit for a partial change.`,
 	);
@@ -316,7 +341,8 @@ function emitWriteProgress(
  * Mirrors `chmod a+x` (adds user/group/other execute bits to existing mode).
  * Errors are swallowed: chmod failure (e.g. Windows ACL, read-only mount)
  * MUST NOT fail an otherwise successful write. Returns whether the mode
- * actually changed so the caller can surface a note.
+ * actually changed so the caller can surface a note — re-read after the chmod,
+ * since Windows (and some mounts) accept it while keeping no execute bits.
  */
 async function maybeMarkExecutableForShebang(absolutePath: string, content: string): Promise<boolean> {
 	if (!content.startsWith("#!")) return false;
@@ -326,7 +352,7 @@ async function maybeMarkExecutableForShebang(absolutePath: string, content: stri
 		const newMode = currentMode | 0o111;
 		if (newMode === currentMode) return false;
 		await fs.chmod(absolutePath, newMode);
-		return true;
+		return ((await fs.stat(absolutePath)).mode & 0o111) === 0o111;
 	} catch {
 		return false;
 	}
@@ -604,6 +630,12 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 				if (stat.isDirectory()) {
 					continue;
 				}
+				const kind = specialFileKind(stat);
+				if (kind) {
+					throw new ToolError(
+						`Cannot write '${candidate.sqlitePath}': it is a ${kind}, not a regular file or directory.`,
+					);
+				}
 				if (!(await isSqliteFile(absolutePath))) {
 					sawExistingNonSqlite = true;
 					continue;
@@ -735,15 +767,19 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 			throw new ToolError(`content is required for ${path}.`);
 		}
 		const content = rawContent ?? "";
+		// Coordination writes (peer messages, background-work cancellation) touch no
+		// files, so neither gate below applies to them.
+		const coordination =
+			policy?.scope === "coordination" || (target !== undefined && policy?.cancels?.(target.url) === true);
 		// A device-only session grants `write` purely as the device transport (see
-		// createTools): device dispatches and coordination messages proceed, every
+		// createTools): device dispatches and coordination writes proceed, every
 		// other target is rejected before any handler, guard, conflict resolver, or
 		// bridge sees it. Active plan mode additionally permits its sandbox, but does
 		// not relax the restriction for working-tree or other internal URLs.
 		if (
 			this.session.deviceOnlyWrite === true &&
 			policy?.scope !== "device" &&
-			policy?.scope !== "coordination" &&
+			!coordination &&
 			!(
 				this.session.getPlanModeState?.()?.enabled === true &&
 				(await targetsLocalSandbox(this.session, path, signal))
@@ -770,11 +806,11 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 						const currentResource = await router.resolve(path, sessionResolveContext(this.session, { signal }));
 						assertNotShorterReadProjection(path, content, currentResource.content, cleanContent);
 					}
-					// Handler-owned writes mutate state outside the sandbox unless the
-					// scheme is coordination (peer messages) or a device (which keeps each
-					// dispatched tool's own tier and policy).
+					// Handler-owned writes mutate state outside the sandbox unless they
+					// coordinate (peer messages, background-work cancellation) or dispatch a
+					// device (which keeps each dispatched tool's own tier and policy).
 					if (policy?.scope !== "device") {
-						if (policy?.scope !== "coordination") {
+						if (!coordination) {
 							await enforcePlanModeWrite(this.session, path, { op: "update", signal });
 						}
 						emitWriteProgress(onUpdate, cleanContent, path);
@@ -865,6 +901,10 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 			const existing = await fs.stat(absolutePath).catch(() => undefined);
 			if (target && existing?.isDirectory()) {
 				throw new ToolError(`${target.url.protocol}// URL must resolve to a file: ${path}`);
+			}
+			const kind = existing && specialFileKind(existing);
+			if (kind) {
+				throw new ToolError(`Cannot write '${path}': it is a ${kind}, not a regular file or directory.`);
 			}
 			// Check if file exists and is auto-generated before overwriting.
 			if (existing) {

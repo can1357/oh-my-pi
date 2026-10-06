@@ -143,7 +143,7 @@ export const cfgComposerTokenRate = register({
 		group: "Composer",
 		label: "Generation Rate",
 		description:
-			"Show a live generation tok/s readout on the working row, docked right next to the session title. Estimated from streamed deltas and corrected by the provider's billed output count as each message completes.",
+			"Show a live generation tok/s readout: on the working row next to the session title, or in the native composer bar right after the thinking level, where the last reading stays between turns. Estimated from streamed deltas and corrected by the provider's billed output count as each message completes.",
 	},
 });
 
@@ -257,7 +257,7 @@ export const cfgStatusLineCompactThinkingLevel = register({
 		group: "Status Line",
 		label: "Compact Thinking Level",
 		description:
-			"Show the thinking level as a single icon on the model name instead of a separate ` · <level>` suffix.",
+			"Show the thinking level as a single icon on the model name instead of a separate ` · <level>` suffix; in Tern's composer, as the model chip's icon instead of a separate chip (click the icon to cycle it).",
 	},
 });
 
@@ -395,7 +395,8 @@ export const cfgTerminalShowProgress = register({
 		tab: "appearance",
 		group: "Display",
 		label: "Native Terminal Progress",
-		description: "Emit OSC 9;4 indeterminate progress while the agent or context maintenance is running",
+		description:
+			"Emit OSC 9;4 indeterminate progress while the agent or context maintenance is running (always on in Tern)",
 	},
 });
 
@@ -421,6 +422,46 @@ export const cfgTuiRenderMermaid = register({
 		group: "Display",
 		label: "Render Mermaid Diagrams",
 		description: "Render Mermaid fenced code blocks as ASCII diagrams",
+	},
+});
+
+export const cfgTuiRenderSvg = register({
+	id: "tui.renderSvg",
+	type: "boolean",
+	default: true,
+	ui: {
+		tab: "appearance",
+		group: "Display",
+		label: "Render SVG Figures",
+		description:
+			"Invite the agent to draw diagrams and charts as SVG, rendered inline as images on terminals that show graphics",
+	},
+});
+
+export const cfgTuiAutoGraph = register({
+	id: "tui.autoGraph",
+	type: "enum",
+	values: ["smart", "always", "off"] as const,
+	default: "always",
+	ui: {
+		tab: "appearance",
+		group: "Display",
+		label: "Auto-Graph Tables",
+		description:
+			"Draw a chart under numeric tables in the agent's answers, in your theme's colors, on terminals that show graphics",
+		options: [
+			{
+				value: "smart",
+				label: "Smart",
+				description: "The judge model picks the chart kind and columns for tables with several numeric columns",
+			},
+			{
+				value: "always",
+				label: "Always",
+				description: "Chart every table that reads as numeric, using the built-in best guess",
+			},
+			{ value: "off", label: "Off", description: "Leave tables as tables" },
+		],
 	},
 });
 
@@ -562,6 +603,18 @@ export const cfgDisplayPinnedAgents = register({
 			{ value: "collapsed", label: "Collapsed", description: "Show a few rows with an expander" },
 			{ value: "full", label: "Full", description: "Always list every live agent" },
 		],
+	},
+});
+
+export const cfgDisplaySubagentLivePreview = register({
+	id: "display.subagentLivePreview",
+	type: "boolean",
+	default: false,
+	ui: {
+		tab: "appearance",
+		group: "Display",
+		label: "Subagent Live Preview",
+		description: "Show each pinned subagent's current (or most recent) tool call beneath its row",
 	},
 });
 
@@ -822,6 +875,32 @@ export const cfgDoubleEscapeAction = register({
 		get description() {
 			return `What pressing ${formatKeyHint("escape")} twice with an empty editor does: open the transcript rewind selector, open the session tree, or nothing`;
 		},
+	},
+});
+
+export const cfgBareExitOnEmptySession = register({
+	id: "input.bareExitOnEmptySession",
+	type: "boolean",
+	default: true,
+	ui: {
+		tab: "interaction",
+		group: "Input",
+		label: "Bare Exit on Empty Session",
+		description:
+			"Submitting exactly `exit`, `quit`, or `q` (any case) before the first message quits instead of prompting the model",
+	},
+});
+
+export const cfgBareSlashCommands = register({
+	id: "input.bareSlashCommands",
+	type: "boolean",
+	default: false,
+	ui: {
+		tab: "interaction",
+		group: "Input",
+		label: "Bare Slash Commands",
+		description:
+			"Submitting exactly a command name without the leading `/` (e.g. `model`, `compact`) runs that slash command; once the session has messages, press Enter twice to confirm",
 	},
 });
 

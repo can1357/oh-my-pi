@@ -8,6 +8,7 @@ import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { executeBuiltinSlashCommand } from "@oh-my-pi/pi-coding-agent/slash-commands/builtin-registry";
 import { createTools, type Tool } from "@oh-my-pi/pi-coding-agent/tools";
 import { TempDir } from "@oh-my-pi/pi-utils";
 
@@ -64,6 +65,7 @@ async function createMode(opts: { flushFails?: boolean } = {}): Promise<{
 		session,
 		cleanup: async () => {
 			resetSettingsForTest();
+			authStorage.close();
 			await tempDir.remove();
 		},
 	};
@@ -83,6 +85,48 @@ describe("InteractiveMode.handleResumeSession outer preflight flush", () => {
 			expect(showErrorSpy).toHaveBeenCalledWith(expect.stringContaining("disk full"));
 			expect(resetSpy).not.toHaveBeenCalled();
 			expect(switchSpy).not.toHaveBeenCalled();
+		} finally {
+			await cleanup();
+		}
+	});
+});
+
+describe("/resume <id> switch failures", () => {
+	it("reports a session whose saved model cannot be restored and keeps the current one", async () => {
+		const { mode, session, cleanup } = await createMode();
+		try {
+			const previousFile = session.sessionFile;
+			const cwd = session.sessionManager.getCwd();
+			const timestamp = "2026-06-01T00:00:00.000Z";
+			await Bun.write(
+				path.join(session.sessionManager.getSessionDir(), "unrestorable.jsonl"),
+				`${[
+					{ type: "session", version: 3, id: "unrestorable", timestamp, cwd },
+					{
+						type: "model_change",
+						id: "model",
+						parentId: null,
+						timestamp,
+						model: "missing-provider/missing-model",
+						role: "default",
+					},
+					{
+						type: "message",
+						id: "user",
+						parentId: "model",
+						timestamp,
+						message: { role: "user", content: "Hello", timestamp: Date.parse(timestamp) },
+					},
+				]
+					.map(entry => JSON.stringify(entry))
+					.join("\n")}\n`,
+			);
+			const showErrorSpy = vi.spyOn(mode, "showError");
+
+			expect(await executeBuiltinSlashCommand("/resume unrestorable", { ctx: mode })).toBe(true);
+
+			expect(showErrorSpy).toHaveBeenCalledWith("Could not restore model missing-provider/missing-model");
+			expect(session.sessionFile).toBe(previousFile);
 		} finally {
 			await cleanup();
 		}

@@ -3,7 +3,10 @@ use std::{
 	mem,
 	os::raw::{c_char, c_int, c_uint},
 	ptr,
-	sync::{LazyLock, mpsc},
+	sync::{
+		LazyLock,
+		atomic::{AtomicBool, Ordering},
+	},
 	thread,
 	time::{Duration, Instant},
 };
@@ -13,7 +16,10 @@ use foreign_types::ForeignType;
 use libc::pid_t;
 
 use super::{
-	super::error::{CoreResult, DesktopError},
+	super::{
+		control,
+		error::{CoreResult, DesktopError},
+	},
 	ax,
 };
 
@@ -41,7 +47,6 @@ const ACTIVATION_POLL: Duration = Duration::from_millis(10);
 const FOREGROUND_SETTLE: Duration = Duration::from_millis(40);
 
 unsafe extern "C" {
-	fn CGEventPostToPid(pid: pid_t, event: core_graphics::sys::CGEventRef);
 	fn CGEventSourceCounterForEventType(state: i32, event_type: u32) -> u32;
 }
 
@@ -91,6 +96,10 @@ impl PsnLookup {
 #[derive(Clone, Copy)]
 struct RequiredSpi {
 	post_to_pid:         SLEventPostToPidFn,
+	/// `CGEventPostToPid` when it is a separate implementation; `None` where
+	/// it re-exports `SLEventPostToPid` (as on macOS 26), since posting
+	/// through both would then deliver every event twice.
+	public_post_to_pid:  Option<SLEventPostToPidFn>,
 	set_integer:         SLEventSetIntegerValueFieldFn,
 	post_record:         SLPSPostEventRecordToFn,
 	get_front:           SLPSGetFrontProcessFn,
@@ -157,8 +166,11 @@ fn resolve_required() -> Option<RequiredSpi> {
 	if !psn.can_resolve() {
 		return None;
 	}
+	let post_to_pid: SLEventPostToPidFn = symbol(c"SLEventPostToPid")?;
 	Some(RequiredSpi {
-		post_to_pid: symbol(c"SLEventPostToPid")?,
+		post_to_pid,
+		public_post_to_pid: symbol::<SLEventPostToPidFn>(c"CGEventPostToPid")
+			.filter(|public| *public as usize != post_to_pid as usize),
 		set_integer: symbol(c"SLEventSetIntegerValueField")?,
 		post_record: symbol(c"SLPSPostEventRecordTo")?,
 		get_front: symbol(c"_SLPSGetFrontProcess")?,
@@ -186,7 +198,7 @@ fn resolve_foreground() -> Option<ForegroundSpi> {
 	})
 }
 
-fn ensure_skylight_loaded() -> Option<()> {
+pub(super) fn ensure_skylight_loaded() -> Option<()> {
 	static LOADED: LazyLock<bool> = LazyLock::new(|| {
 		let path = c"/System/Library/PrivateFrameworks/SkyLight.framework/SkyLight";
 		// SAFETY: `path` is a static NUL-terminated framework path; the handle is
@@ -196,7 +208,7 @@ fn ensure_skylight_loaded() -> Option<()> {
 	if *LOADED { Some(()) } else { None }
 }
 
-fn symbol<T: Copy>(name: &CStr) -> Option<T> {
+pub(super) fn symbol<T: Copy>(name: &CStr) -> Option<T> {
 	// SAFETY: `name` is NUL-terminated and RTLD_DEFAULT is valid for
 	// process-wide lookup.
 	let raw = unsafe { libc::dlsym(libc::RTLD_DEFAULT, name.as_ptr()) };
@@ -238,6 +250,11 @@ pub(super) fn set_window_location(event: &CGEvent, location: CGPoint) -> CoreRes
 /// authentication envelope, which would route it past the session event tap
 /// Chromium's window handler listens on.
 pub(super) fn post_routed(pid: pid_t, event: &CGEvent) -> CoreResult<()> {
+	control::check()?;
+	event.set_integer_value_field(
+		core_graphics::event::EventField::EVENT_SOURCE_USER_DATA,
+		control::SYNTHETIC_EVENT_TAG,
+	);
 	let spi = required()?;
 	// SAFETY: `event` remains retained for the synchronous post and
 	// `post_to_pid` was atomically resolved with its exact ABI.
@@ -245,16 +262,28 @@ pub(super) fn post_routed(pid: pid_t, event: &CGEvent) -> CoreResult<()> {
 	Ok(())
 }
 
+/// Posts a background pointer event through `SkyLight`, then through the
+/// public per-pid queue only where `CGEventPostToPid` is a separate function.
+/// Where it is not, a second post would deliver the event twice. The separate
+/// public post is kept as it was; its benefit there is unmeasured.
 pub(super) fn post_dual(pid: pid_t, event: &CGEvent) -> CoreResult<()> {
+	let spi = required()?;
 	post_routed(pid, event)?;
-	// The public post supplements a successful SkyLight post for plain AppKit;
-	// it is never a fallback. SAFETY: `event` remains retained for the
-	// synchronous public CoreGraphics post.
-	unsafe { CGEventPostToPid(pid, event.as_ptr()) };
+	if let Some(public_post_to_pid) = spi.public_post_to_pid {
+		control::check()?;
+		// SAFETY: `event` remains retained for the synchronous post and the
+		// symbol was resolved with the `SLEventPostToPid` ABI it shares.
+		unsafe { public_post_to_pid(pid, event_ptr(event)) };
+	}
 	Ok(())
 }
 
 pub(super) fn post_keyboard(pid: pid_t, event: &CGEvent) -> CoreResult<()> {
+	control::check()?;
+	event.set_integer_value_field(
+		core_graphics::event::EventField::EVENT_SOURCE_USER_DATA,
+		control::SYNTHETIC_EVENT_TAG,
+	);
 	let spi = required()?;
 	attach_keyboard_authentication(pid, event);
 	// The authenticated SkyLight route reaches Chromium and AppKit. Posting the
@@ -394,6 +423,7 @@ pub(super) fn with_background_guard<T>(
 	pid: pid_t,
 	action: impl FnOnce() -> CoreResult<T>,
 ) -> CoreResult<T> {
+	control::check()?;
 	let spi = FOREGROUND.as_ref().ok_or_else(|| {
 		DesktopError::background_unavailable(
 			"focus-restoration SPI is unavailable; use ax actions that do not activate the app or \
@@ -427,8 +457,9 @@ pub(super) fn with_background_guard<T>(
 		activity: activation_activity(),
 		disarmed: false,
 	};
+	let stopped = AtomicBool::new(false);
 	thread::scope(|scope| {
-		let (stop, wake) = mpsc::channel();
+		let stop = &stopped;
 		let observer = thread::Builder::new()
 			.name("desktop-focus-lease".to_string())
 			.spawn_scoped(scope, move || -> CoreResult<()> {
@@ -467,21 +498,19 @@ pub(super) fn with_background_guard<T>(
 							}
 						},
 					}
-					match wake.recv_timeout(ACTIVATION_POLL) {
-						Ok(()) | Err(mpsc::RecvTimeoutError::Disconnected) => {
-							if restored
-								&& front_process(spi.get_front).is_some_and(|front| front.psn == target)
-							{
-								return Err(DesktopError::input_failed(
-									"the background target reactivated after focus restoration; input may \
-									 already have landed; inspect the desktop and use takeover:true or ax \
-									 actions",
-								));
-							}
-							return Ok(());
-						},
-						Err(mpsc::RecvTimeoutError::Timeout) => {},
+					if stop.load(Ordering::Acquire) {
+						if restored
+							&& front_process(spi.get_front).is_some_and(|front| front.psn == target)
+						{
+							return Err(DesktopError::input_failed(
+								"the background target reactivated after focus restoration; input may \
+								 already have landed; inspect the desktop and use takeover:true or ax \
+								 actions",
+							));
+						}
+						return Ok(());
 					}
+					thread::park_timeout(ACTIVATION_POLL);
 				}
 			})
 			.map_err(|error| {
@@ -490,9 +519,18 @@ pub(super) fn with_background_guard<T>(
 					 use ax actions"
 				))
 			})?;
-		let result = action();
-		thread::sleep(BACKGROUND_SETTLE);
-		// Dropping the sender also wakes the observer if it has already disarmed.
+		struct StopObserver<'a> {
+			stopped: &'a AtomicBool,
+			thread:  thread::Thread,
+		}
+		impl Drop for StopObserver<'_> {
+			fn drop(&mut self) {
+				self.stopped.store(true, Ordering::Release);
+				self.thread.unpark();
+			}
+		}
+		let stop = StopObserver { stopped: &stopped, thread: observer.thread().clone() };
+		let result = action().and_then(|value| control::wait(BACKGROUND_SETTLE).map(|()| value));
 		drop(stop);
 		let cleanup = observer.join().unwrap_or_else(|_| {
 			Err(DesktopError::input_failed("background focus guard terminated unexpectedly"))
@@ -502,6 +540,7 @@ pub(super) fn with_background_guard<T>(
 }
 
 fn set_front(spi: &ForegroundSpi, psn: ProcessSerialNumber, wid: u32) -> CoreResult<()> {
+	control::check()?;
 	// SAFETY: The PSN was resolved from WindowServer. kCPSNoWindows changes
 	// only the front process; no activate-all-windows fallback is permitted.
 	if unsafe { (spi.set_front)(&psn, wid, CPS_NO_WINDOWS) } != 0 {
@@ -526,6 +565,8 @@ pub(super) fn with_focus_without_raise<T>(
 	wid: u32,
 	action: impl FnOnce() -> CoreResult<T>,
 ) -> CoreResult<T> {
+	control::check()?;
+	let activity = control::user_activity();
 	let spi = required()?;
 	let previous = front_process(spi.get_front).ok_or_else(|| {
 		DesktopError::background_unavailable(format!(
@@ -550,6 +591,7 @@ pub(super) fn with_focus_without_raise<T>(
 	}
 	// The defocus record names the window losing key status; within one process
 	// that distinguishes it from the target.
+	control::check()?;
 	let defocus = focus_record(previous_key, DEFOCUS_MARKER);
 	let defocused = post_record(spi.post_record, previous.psn, &defocus);
 	let focused = post_record(spi.post_record, target, &focus_record(wid, FOCUS_MARKER));
@@ -559,15 +601,19 @@ pub(super) fn with_focus_without_raise<T>(
 				"window {wid} rejected the 248-byte SkyLight focus-without-raise record; retry with \
 				 takeover:true or use ax actions",
 			))),
-			restore_focus_after_without_raise(spi, previous, previous_key, target, wid),
+			control::cleanup(|| {
+				restore_focus_after_without_raise(spi, previous, previous_key, target, wid, activity)
+			}),
 		);
 	}
-	thread::sleep(FOCUS_SETTLE);
-	let result = action();
-	thread::sleep(FOCUS_SETTLE);
+	let result = control::wait(FOCUS_SETTLE)
+		.and_then(|()| action())
+		.and_then(|value| control::wait(FOCUS_SETTLE).map(|()| value));
 	after_cleanup(
 		result,
-		restore_focus_after_without_raise(spi, previous, previous_key, target, wid),
+		control::cleanup(|| {
+			restore_focus_after_without_raise(spi, previous, previous_key, target, wid, activity)
+		}),
 	)
 }
 
@@ -582,7 +628,11 @@ fn restore_focus_after_without_raise(
 	previous_key: u32,
 	target: ProcessSerialNumber,
 	wid: u32,
+	activity: u64,
 ) -> CoreResult<()> {
+	if control::user_activity() != activity {
+		return Ok(());
+	}
 	let front = front_process(spi.get_front).ok_or_else(|| {
 		DesktopError::input_failed("cannot establish current focus for background restoration")
 	})?;
@@ -595,6 +645,11 @@ fn restore_focus_after_without_raise(
 		.pid
 		.and_then(ax::key_window_id)
 		.is_some_and(|key| key != previous_key && !(previous.psn == target && key == wid))
+	{
+		return Ok(());
+	}
+	if control::user_activity() != activity
+		|| !front_process(spi.get_front).is_some_and(|front| front.psn == previous.psn)
 	{
 		return Ok(());
 	}
@@ -620,6 +675,8 @@ pub(super) fn with_foreground<T>(
 	wid: u32,
 	action: impl FnOnce(bool) -> CoreResult<T>,
 ) -> CoreResult<T> {
+	control::check()?;
+	let activity = control::user_activity();
 	let spi = FOREGROUND.as_ref().ok_or_else(|| {
 		DesktopError::input_failed("exact-window takeover SPI is unavailable; no input was sent")
 	})?;
@@ -633,9 +690,7 @@ pub(super) fn with_foreground<T>(
 	})?;
 	let focused = ax::focused_window_id(pid);
 	if preserves_exact_existing_focus(Some(previous.psn), target, focused, wid) {
-		let result = action(false);
-		thread::sleep(FOREGROUND_SETTLE);
-		return result;
+		return action(false).and_then(|value| control::wait(FOREGROUND_SETTLE).map(|()| value));
 	}
 	let previous_pid = previous.pid.ok_or_else(|| {
 		DesktopError::input_failed(
@@ -648,6 +703,9 @@ pub(super) fn with_foreground<T>(
 		)
 	})?;
 	let restore = |preparation_failed: bool| {
+		if control::user_activity() != activity {
+			return Ok(());
+		}
 		let front = front_process(spi.get_front).ok_or_else(|| {
 			DesktopError::input_failed("cannot establish current focus for takeover restoration")
 		})?;
@@ -657,6 +715,11 @@ pub(super) fn with_foreground<T>(
 		}
 		if ax::focused_window_id(pid)
 			.is_some_and(|key| key != wid && (!preparation_failed || Some(key) != focused))
+		{
+			return Ok(());
+		}
+		if control::user_activity() != activity
+			|| !front_process(spi.get_front).is_some_and(|front| front.psn == target)
 		{
 			return Ok(());
 		}
@@ -673,14 +736,14 @@ pub(super) fn with_foreground<T>(
 		.and_then(|()| make_exact_window_key(spi, target, wid))
 		.and_then(|()| await_window_focused(spi, pid, wid, target));
 	if let Err(error) = prepare {
-		return after_cleanup(Err(error), restore(true));
+		return after_cleanup(Err(error), control::cleanup(|| restore(true)));
 	}
-	let result = action(true);
-	thread::sleep(FOREGROUND_SETTLE);
-	after_cleanup(result, restore(false))
+	let result = action(true).and_then(|value| control::wait(FOREGROUND_SETTLE).map(|()| value));
+	after_cleanup(result, control::cleanup(|| restore(false)))
 }
 
 pub(super) fn require_front_window(pid: pid_t, wid: u32) -> CoreResult<()> {
+	control::check()?;
 	if is_front_window(pid, wid) {
 		Ok(())
 	} else {
@@ -696,6 +759,13 @@ pub(super) fn is_front_window(pid: pid_t, wid: u32) -> bool {
 		front_process(spi.get_front).is_some_and(|front| front.pid == Some(pid))
 			&& ax::focused_window_id(pid) == Some(wid)
 	})
+}
+
+/// Read-only focus identity used to verify non-activating Space operations.
+pub(super) fn front_window_context() -> Option<(pid_t, u32)> {
+	let spi = FOREGROUND.as_ref()?;
+	let pid = front_process(spi.get_front)?.pid?;
+	Some((pid, ax::key_window_id(pid)?))
 }
 
 /// Whether the target already is the key window of the front process.
@@ -720,6 +790,7 @@ fn make_exact_window_key(
 	target: ProcessSerialNumber,
 	wid: u32,
 ) -> CoreResult<()> {
+	control::check()?;
 	// SAFETY: Target PSN is valid and kCPSUserGenerated only changes how the
 	// request is attributed.
 	if unsafe { (spi.set_front)(&target, wid, CPS_USER_GENERATED) } != 0 {
@@ -760,7 +831,7 @@ fn await_window_focused(
 				"window {wid} could not be confirmed as the exact frontmost key window",
 			)));
 		}
-		thread::sleep(ACTIVATION_POLL);
+		control::wait(ACTIVATION_POLL)?;
 	}
 }
 

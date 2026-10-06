@@ -35,7 +35,7 @@ This result acknowledges a request. The tool itself does not commit a compaction
 3. The owning agent consumes successful tool results, including write-device results, and processes the request through its maintenance lifecycle before the next provider request.
 4. The experimental lifecycle commits a normal compaction boundary without generating another recursive summary. It rebuilds active context with the latest notebook and retained recent messages, leaving original journal entries available through `history://current/full`.
 
-An explicit `new_context` request bypasses the automatic mid-turn threshold toggle. Rollover still depends on the experimental capability and maintenance guards; session, branch, model, cancellation, and active-tool changes are revalidated before commit.
+An explicit `new_context` request bypasses the Auto-Compact toggle. Rollover still depends on the experimental capability and maintenance guards; session, branch, model, cancellation, and active-tool changes are revalidated before commit. If the capability disappears after acknowledgement, the stale request is dropped rather than falling back to summary-provider compaction.
 
 ## Limits and Errors
 

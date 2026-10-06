@@ -1,6 +1,11 @@
 import { quotaTierFor } from "@oh-my-pi/pi-catalog/compat/behavior";
+import { CURSOR_DEFAULT_BASE_URL } from "@oh-my-pi/pi-catalog/wire/cursor";
 import { toNumber } from "@oh-my-pi/pi-catalog/utils";
-import { extractCursorAccessTokenUserId } from "../registry/oauth/cursor";
+import {
+	cursorSessionHeaders,
+	extractCursorAccessTokenUserId,
+	fetchCursorAccountEmail,
+} from "../registry/oauth/cursor";
 import type {
 	CredentialRankingContext,
 	CredentialRankingStrategy,
@@ -21,14 +26,12 @@ function parseTimestamp(value: unknown): number | undefined {
 	return parseIsoTimestamp(value);
 }
 
-const DEFAULT_CURSOR_BASE_URL = "https://api2.cursor.sh";
-
 function normalizeCursorBaseUrl(baseUrl?: string): string {
-	if (!baseUrl) return DEFAULT_CURSOR_BASE_URL;
+	if (!baseUrl) return CURSOR_DEFAULT_BASE_URL;
 	return baseUrl.replace(/\/+$/, "");
 }
 
-type CursorUsageSource = "auth-usage" | "usage-summary" | "auth-me";
+type CursorUsageSource = "auth-usage" | "usage-summary";
 
 async function fetchCursorJson(
 	ctx: UsageFetchContext,
@@ -433,40 +436,25 @@ export const cursorUsageProvider: UsageProvider = {
 
 		let summaryReportPromise = Promise.resolve<UsageReport | null>(null);
 		let profileEmailPromise = Promise.resolve<string | undefined>(undefined);
-		if (credential.type === "oauth" && baseUrl === DEFAULT_CURSOR_BASE_URL) {
+		if (credential.type === "oauth" && baseUrl === CURSOR_DEFAULT_BASE_URL) {
 			const userId = extractCursorAccessTokenUserId(token);
 			if (userId) {
-				const sessionHeaders: Record<string, string> = {
-					Accept: "application/json",
-					Cookie: `WorkosCursorSessionToken=${encodeURIComponent(`${userId}::${token}`)}`,
-				};
 				summaryReportPromise = fetchCursorJson(
 					ctx,
 					"https://cursor.com/api/usage-summary",
 					{
-						headers: sessionHeaders,
+						headers: cursorSessionHeaders(userId, token),
 						signal: params.signal,
 					},
 					"usage-summary",
 				).then(payload => parseCursorIndividualUsage(payload, fetchedAt));
-				profileEmailPromise = fetchCursorJson(
-					ctx,
-					"https://cursor.com/api/auth/me",
-					{
-						headers: sessionHeaders,
-						signal: params.signal,
-					},
-					"auth-me",
-				).then(payload => {
-					if (
-						!isRecord(payload) ||
-						payload.sub !== userId ||
-						typeof payload.email !== "string" ||
-						!payload.email.trim()
-					) {
-						return undefined;
-					}
-					return payload.email.trim();
+				profileEmailPromise = fetchCursorAccountEmail(token, ctx.fetch, params.signal).catch(error => {
+					ctx.logger?.warn("Cursor usage request error", {
+						provider: "cursor",
+						source: "auth-me",
+						error: String(error),
+					});
+					return undefined;
 				});
 			}
 		}
@@ -478,10 +466,18 @@ export const cursorUsageProvider: UsageProvider = {
 		]);
 		let report: UsageReport | null;
 		if (legacyReport && summaryReport) {
+			// `/auth/usage` is Cursor's request-count API from before usage-based
+			// plans. Current plans answer it with an uncapped, always-zero `gpt-4`
+			// bucket; beside the summary's dollar rails an uncapped, unused bucket
+			// carries nothing, so it is dropped. Capped buckets and uncapped buckets
+			// with recorded requests stay. Without a summary it stays the fallback.
+			const legacyLimits = legacyReport.limits.filter(
+				limit => limit.amount.limit !== undefined || (limit.amount.used ?? 0) > 0,
+			);
 			report = {
 				provider: "cursor",
 				fetchedAt,
-				limits: [...legacyReport.limits, ...summaryReport.limits],
+				limits: [...legacyLimits, ...summaryReport.limits],
 				raw: {
 					authUsage: legacyReport.raw,
 					usageSummary: summaryReport.raw,

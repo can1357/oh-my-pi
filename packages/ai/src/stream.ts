@@ -18,6 +18,7 @@ import { CODEX_BASE_URL } from "@oh-my-pi/pi-catalog/wire/codex";
 import { $env, $pickenv, getProviderInFlightRoot, isEnoent, logger, untilAborted } from "@oh-my-pi/pi-utils";
 import { getCustomApi } from "./api-registry";
 import { createAuthRetryKeyState, isApiKeyResolver, resolvedApiKeyBearer, resolveNextAuthRetryKey } from "./auth-retry";
+import type { OAuthRequestIdentity } from "./auth/types";
 import * as AIError from "./error";
 import { ProviderHttpError } from "./error";
 import { isConcurrencyCapExclusion, isUsageLimitOutcome } from "./error/rate-limit";
@@ -26,6 +27,7 @@ import type { AnthropicOptions } from "./providers/anthropic";
 import type { AppleFoundationModelsOptions } from "./providers/apple-foundation-models";
 import type { CursorOptions } from "./providers/cursor";
 import type { DevinOptions } from "./providers/devin";
+import { type FactoryDroidOptions, streamFactoryDroid } from "./providers/factory-droid";
 import { streamGitLabDuo } from "./providers/gitlab-duo";
 import { type GitLabDuoWorkflowOptions, streamGitLabDuoWorkflow } from "./providers/gitlab-duo-workflow";
 import type { GoogleOptions } from "./providers/google";
@@ -709,14 +711,14 @@ export const __providerInFlightForTesting = {
 function withProviderInFlightLimit<TOptions extends Pick<StreamOptions, "signal" | "maxInFlightRequests">>(
 	model: Model<Api>,
 	options: TOptions | undefined,
-	dispatch: () => AssistantMessageEventStream,
+	dispatch: (limited: boolean) => AssistantMessageEventStream,
 ): AssistantMessageEventStream {
 	// Leaked-thinking healing folds in here — the one shared provider-dispatch
 	// chokepoint — so the loop guard (which wraps this) sees healed events and all
 	// provider exits are covered by one wrap. Official first-party providers are
 	// exempt (see `healLeakedThinking`); healing is otherwise idempotent.
 	const limit = resolveProviderInFlightLimit(model.provider, options);
-	if (limit === undefined) return healLeakedThinking(model, dispatch());
+	if (limit === undefined) return healLeakedThinking(model, dispatch(false));
 
 	const outer = new AssistantMessageEventStream();
 	void (async () => {
@@ -751,7 +753,7 @@ function withProviderInFlightLimit<TOptions extends Pick<StreamOptions, "signal"
 			if (options?.signal?.aborted) {
 				throw options.signal.reason ?? new AIError.AbortError("Provider request aborted before dispatch");
 			}
-			const inner = healLeakedThinking(model, dispatch());
+			const inner = healLeakedThinking(model, dispatch(true));
 			let terminalEvent: AssistantMessageEvent | undefined;
 			for await (const event of inner) {
 				if (event.type === "done" || event.type === "error") {
@@ -968,7 +970,7 @@ export function stream<TApi extends Api>(
 	}
 	if (!model.requiresGlyphTokenization) {
 		return withThinkingLoopGuard(model, options, opts =>
-			withProviderInFlightLimit(model, opts, () => streamDispatch(model, context, opts)),
+			withProviderInFlightLimit(model, opts, limited => streamDispatch(model, context, opts, limited)),
 		);
 	}
 	const codec = applyGlyphCodec(context);
@@ -977,7 +979,7 @@ export function stream<TApi extends Api>(
 		execHandlers === undefined ? options : { ...options, execHandlers: codec.wrapCursorExecHandlers(execHandlers) };
 	return codec.wrap(
 		withThinkingLoopGuard(model, wireOptions, opts =>
-			withProviderInFlightLimit(model, opts, () => streamDispatch(model, codec.context, opts)),
+			withProviderInFlightLimit(model, opts, limited => streamDispatch(model, codec.context, opts, limited)),
 		),
 	);
 }
@@ -985,15 +987,19 @@ export function stream<TApi extends Api>(
 function streamDispatch<TApi extends Api>(
 	model: Model<TApi>,
 	context: Context,
-	options?: OptionsForApi<TApi>,
+	options: OptionsForApi<TApi> | undefined,
+	limited: boolean,
 ): AssistantMessageEventStream {
-	const requestOptions = withTransportFetch(model, (options || {}) as StreamOptions) as OptionsForApi<TApi>;
+	const requestOptions = withSupportedSamplingParams(
+		model,
+		withTransportFetch(model, (options || {}) as StreamOptions),
+	) as OptionsForApi<TApi>;
 	assertExplicitOpenAIResponsesPromptCacheSupport(model, requestOptions);
 
 	// Check custom API registry first (extension-provided APIs like "vertex-claude-api")
 	const customApiProvider = getCustomApi(model.api);
 	if (customApiProvider) {
-		return customApiProvider.stream(model, context, requestOptions as StreamOptions);
+		return customApiProvider.stream(model, context, { ...requestOptions, waitForTerminalDrain: limited });
 	}
 
 	if (model.provider === "gitlab-duo") {
@@ -1004,6 +1010,7 @@ function streamDispatch<TApi extends Api>(
 		return streamGitLabDuo(model, context, {
 			...(requestOptions as SimpleStreamOptions),
 			apiKey,
+			waitForTerminalDrain: limited,
 		});
 	}
 
@@ -1025,6 +1032,12 @@ function streamDispatch<TApi extends Api>(
 	if (model.api === "bedrock-converse-stream") {
 		return streamBedrock(model as Model<"bedrock-converse-stream">, context, requestOptions as BedrockOptions);
 	}
+	if (model.api === "factory-droid-agent") {
+		return streamFactoryDroid(model as Model<"factory-droid-agent">, context, {
+			...(requestOptions as FactoryDroidOptions),
+			waitForTerminalDrain: limited,
+		});
+	}
 
 	const providerDefinition = getProviderDefinition(model.provider);
 	const requestModel = providerDefinition?.prepareModel?.(model) ?? model;
@@ -1044,6 +1057,13 @@ function streamDispatch<TApi extends Api>(
 		: { ...preparedOptions, apiKey };
 
 	const api: Api = providerModel.api;
+	if (api === "openrouter" && $env.PI_OPENROUTER_RESPONSES !== "0") {
+		return streamOpenAIResponses(
+			providerModel as Model<"openai-responses">,
+			context,
+			providerOptions as OptionsForApi<"openai-responses">,
+		);
+	}
 	switch (api) {
 		case "anthropic-messages": {
 			const anthropicOptions = providerOptions as AnthropicOptions;
@@ -1053,28 +1073,12 @@ function streamDispatch<TApi extends Api>(
 			});
 		}
 
-		case "openrouter": {
-			const useResponses = $env.PI_OPENROUTER_RESPONSES !== "0";
-			if (useResponses) {
-				return streamOpenAIResponses(
-					providerModel as Model<"openai-responses">,
-					context,
-					providerOptions as OptionsForApi<"openai-responses">,
-				);
-			}
-			return streamOpenAICompletions(
-				providerModel as Model<"openai-completions">,
-				context,
-				providerOptions as OptionsForApi<"openai-completions">,
-			);
-		}
-
+		case "openrouter":
 		case "openai-completions":
-			return streamOpenAICompletions(
-				providerModel as Model<"openai-completions">,
-				context,
-				providerOptions as OptionsForApi<"openai-completions">,
-			);
+			return streamOpenAICompletions(providerModel as Model<"openai-completions">, context, {
+				...(providerOptions as OpenAICompletionsOptions),
+				waitForTerminalDrain: limited,
+			});
 
 		case "openai-responses":
 			return streamOpenAIResponses(
@@ -1259,6 +1263,43 @@ function withInferenceSessionId(options?: SimpleStreamOptions): SimpleStreamOpti
 	return { ...options, sessionId: crypto.randomUUID() };
 }
 
+type SamplingOptions = Pick<
+	StreamOptions,
+	"temperature" | "topP" | "topK" | "minP" | "presencePenalty" | "repetitionPenalty" | "frequencyPenalty"
+>;
+
+/**
+ * Drop explicit sampling parameters before any provider builds its payload
+ * when the model's resolved `compat.supportsSamplingParams` is `false`. The
+ * catalog's class rules assign that per model lineage on every compat record,
+ * and an explicit compat override still wins, so this one check covers every
+ * provider.
+ */
+function withSupportedSamplingParams<T extends SamplingOptions>(model: Model<Api>, options: T): T {
+	if (
+		options.temperature === undefined &&
+		options.topP === undefined &&
+		options.topK === undefined &&
+		options.minP === undefined &&
+		options.presencePenalty === undefined &&
+		options.repetitionPenalty === undefined &&
+		options.frequencyPenalty === undefined
+	) {
+		return options;
+	}
+	const compat = model.compat;
+	if (!compat || !("supportsSamplingParams" in compat) || compat.supportsSamplingParams !== false) return options;
+	const supported = { ...options };
+	delete supported.temperature;
+	delete supported.topP;
+	delete supported.topK;
+	delete supported.minP;
+	delete supported.presencePenalty;
+	delete supported.repetitionPenalty;
+	delete supported.frequencyPenalty;
+	return supported;
+}
+
 export function streamSimple<TApi extends Api>(
 	model: Model<TApi>,
 	context: Context,
@@ -1307,7 +1348,10 @@ function streamSimpleRequest<TApi extends Api>(
 	context: Context,
 	options?: SimpleStreamOptions,
 ): AssistantMessageEventStream {
-	const requestOptions = withTransportFetch(model, (options || {}) as SimpleStreamOptions);
+	const requestOptions = withSupportedSamplingParams(
+		model,
+		withTransportFetch(model, (options || {}) as SimpleStreamOptions),
+	);
 
 	const apiKeyResolver = isApiKeyResolver(requestOptions?.apiKey) ? requestOptions.apiKey : undefined;
 	if (apiKeyResolver) {
@@ -1316,7 +1360,11 @@ function streamSimpleRequest<TApi extends Api>(
 		// One inner attempt against a resolved key, or against the Bedrock AWS
 		// credential chain when its optional resolver has no stored bearer key.
 		// Retryable auth failures are buffered until replay is safe.
-		const runAttempt = async (apiKey?: string, credentialId?: number): Promise<AuthRetryFailure | undefined> => {
+		const runAttempt = async (
+			apiKey?: string,
+			credentialId?: number,
+			oauthIdentity?: OAuthRequestIdentity,
+		): Promise<AuthRetryFailure | undefined> => {
 			const bufferedEvents: AssistantMessageEvent[] = [];
 			let emittedReplayUnsafeEvent = false;
 			const flushBuffered = (): void => {
@@ -1325,7 +1373,7 @@ function streamSimpleRequest<TApi extends Api>(
 			};
 
 			try {
-				const attemptOptions = { ...requestOptions, apiKey, credentialId };
+				const attemptOptions = { ...requestOptions, apiKey, credentialId, oauthIdentity };
 				const inner = streamSimpleRequest(model, context, attemptOptions);
 				for await (const event of inner) {
 					if (credentialId !== undefined) {
@@ -1393,10 +1441,12 @@ function streamSimpleRequest<TApi extends Api>(
 		void (async () => {
 			let lastKey: string | undefined;
 			let credentialId: number | undefined;
+			let oauthIdentity: OAuthRequestIdentity | undefined;
 			try {
 				const resolved = await apiKeyResolver({ lastChance: false, error: undefined, signal });
 				lastKey = resolvedApiKeyBearer(resolved);
 				credentialId = typeof resolved === "string" ? undefined : resolved?.credentialId;
+				oauthIdentity = typeof resolved === "string" ? undefined : resolved?.oauthIdentity;
 			} catch (error) {
 				// A thrown resolver is a broker/OAuth/network failure, not a missing
 				// key — surface the cause instead of masking it as "No API key".
@@ -1418,13 +1468,14 @@ function streamSimpleRequest<TApi extends Api>(
 				return;
 			}
 			const retryState = createAuthRetryKeyState(lastKey);
-			let failure = await runAttempt(lastKey, credentialId);
+			let failure = await runAttempt(lastKey, credentialId, oauthIdentity);
 			if (!failure) return;
 			while (true) {
 				// Caller aborted between attempts: don't mint a fresh token or fire
 				// another doomed request — emit the captured failure instead.
 				if (signal?.aborted) break;
 				let nextCredentialId: number | undefined;
+				let nextOAuthIdentity: OAuthRequestIdentity | undefined;
 				const nextKey = await resolveNextAuthRetryKey(
 					retryState,
 					apiKeyResolver,
@@ -1432,10 +1483,11 @@ function streamSimpleRequest<TApi extends Api>(
 					signal,
 					resolved => {
 						nextCredentialId = typeof resolved === "string" ? undefined : resolved?.credentialId;
+						nextOAuthIdentity = typeof resolved === "string" ? undefined : resolved?.oauthIdentity;
 					},
 				);
 				if (nextKey === undefined) break;
-				const next = await runAttempt(nextKey, nextCredentialId);
+				const next = await runAttempt(nextKey, nextCredentialId, nextOAuthIdentity);
 				if (!next) return;
 				failure = next;
 			}
@@ -1487,7 +1539,9 @@ function streamSimpleRequest<TApi extends Api>(
 	const customApiProvider = getCustomApi(model.api);
 	if (customApiProvider) {
 		return withThinkingLoopGuard(model, requestOptions, opts =>
-			withProviderInFlightLimit(model, opts, () => customApiProvider.streamSimple(model, context, opts)),
+			withProviderInFlightLimit(model, opts, limited =>
+				customApiProvider.streamSimple(model, context, { ...opts, waitForTerminalDrain: limited }),
+			),
 		);
 	}
 
@@ -1519,10 +1573,11 @@ function streamSimpleRequest<TApi extends Api>(
 	// GitLab Duo - wraps Anthropic/OpenAI behind GitLab AI Gateway direct access tokens
 	if (model.provider === "gitlab-duo") {
 		return withThinkingLoopGuard(model, requestOptions, opts =>
-			withProviderInFlightLimit(model, opts, () =>
+			withProviderInFlightLimit(model, opts, limited =>
 				streamGitLabDuo(model, context, {
 					...opts,
 					apiKey,
+					waitForTerminalDrain: limited,
 				}),
 			),
 		);
@@ -1551,11 +1606,12 @@ function streamSimpleRequest<TApi extends Api>(
 		// (mirrors the mapOptionsForApi path every other provider takes).
 		const kimiOptions = normalizeMandatoryReasoningOptions(model, requestOptions);
 		return withThinkingLoopGuard(model, kimiOptions, opts =>
-			withProviderInFlightLimit(model, opts, () =>
+			withProviderInFlightLimit(model, opts, limited =>
 				streamKimi(model as Model<"openai-completions">, context, {
 					...opts,
 					apiKey,
 					format: opts?.kimiApiFormat,
+					waitForTerminalDrain: limited,
 				}),
 			),
 		);
@@ -1565,11 +1621,12 @@ function streamSimpleRequest<TApi extends Api>(
 	if (model.provider === "synthetic") {
 		// Pass raw SimpleStreamOptions - streamSynthetic handles mapping internally.
 		return withThinkingLoopGuard(model, requestOptions, opts =>
-			withProviderInFlightLimit(model, opts, () =>
+			withProviderInFlightLimit(model, opts, limited =>
 				streamSynthetic(model as Model<"openai-completions">, context, {
 					...opts,
 					apiKey,
 					format: opts?.syntheticApiFormat ?? "openai",
+					waitForTerminalDrain: limited,
 				}),
 			),
 		);
@@ -1841,6 +1898,7 @@ function mapOptionsForApi<TApi extends Api>(
 		signal: options?.signal,
 		apiKey: apiKey ?? (typeof options?.apiKey === "string" ? options.apiKey : undefined),
 		credentialId: options?.credentialId,
+		oauthIdentity: options?.oauthIdentity,
 		cacheRetention: options?.cacheRetention,
 		headers: options?.headers,
 		initiatorOverride: options?.initiatorOverride,
@@ -1932,29 +1990,39 @@ function mapOptionsForApi<TApi extends Api>(
 			}
 
 			if (ANTHROPIC_USE_INTERLEAVED_THINKING) {
-				return castApi<"anthropic-messages">({
-					...base,
-					maxTokens: maxTokensWithThinking,
-					requestModelId: resolveWireModelId(model, reasoning),
-					thinkingEnabled: true,
-					thinkingBudgetTokens: thinkingBudget,
-					effort,
-					toolChoice: mapAnthropicToolChoice(options?.toolChoice),
-					thinkingDisplay: options?.hideThinkingSummary ? "omitted" : undefined,
-					serviceTier: options?.serviceTier,
-				});
+				if (
+					model.maxTokens !== null &&
+					model.maxTokens !== undefined &&
+					model.maxTokens < thinkingBudget + OUTPUT_FALLBACK_BUFFER
+				) {
+					thinkingBudget = model.maxTokens - OUTPUT_FALLBACK_BUFFER;
+				}
+				if (thinkingBudget >= ANTHROPIC_THINKING.minimal) {
+					return castApi<"anthropic-messages">({
+						...base,
+						maxTokens: maxTokensWithThinking,
+						requestModelId: resolveWireModelId(model, reasoning),
+						thinkingEnabled: true,
+						thinkingBudgetTokens: thinkingBudget,
+						effort,
+						toolChoice: mapAnthropicToolChoice(options?.toolChoice),
+						thinkingDisplay: options?.hideThinkingSummary ? "omitted" : undefined,
+						serviceTier: options?.serviceTier,
+					});
+				}
 			}
 
 			// Caller's maxTokens is desired output, so add thinking budget on top. With no caller/model cap, use a finite total fallback.
 			const maxTokens = maxTokensWithThinkingBudget(base.maxTokens, model.maxTokens, thinkingBudget);
 
-			// If not enough room for thinking + output, reduce thinking budget
-			if (maxTokens <= thinkingBudget) {
-				thinkingBudget = maxTokens - MIN_OUTPUT_TOKENS;
+			// Keep the provider's output buffer after thinking, reducing the
+			// budget before its wire-level clamp could fall below the API minimum.
+			if (maxTokens < thinkingBudget + OUTPUT_FALLBACK_BUFFER) {
+				thinkingBudget = maxTokens - OUTPUT_FALLBACK_BUFFER;
 			}
 
 			// If thinking budget is too low, disable thinking
-			if (thinkingBudget <= 0) {
+			if (thinkingBudget < ANTHROPIC_THINKING.minimal) {
 				return castApi<"anthropic-messages">({
 					...base,
 					requestModelId: resolveWireModelId(model, undefined),
@@ -2095,6 +2163,7 @@ function mapOptionsForApi<TApi extends Api>(
 				textVerbosity: options?.textVerbosity,
 				promptCache: options?.promptCache,
 				statefulResponses: options?.statefulResponses,
+				storeResponses: options?.storeResponses,
 			});
 
 		case "azure-openai-responses":
@@ -2296,6 +2365,26 @@ function mapOptionsForApi<TApi extends Api>(
 				onToolResult,
 				externalToolExecutor: options?.cursorExternalToolExecutor,
 				wireModelId: resolveWireModelId(cursorModel, effort),
+			});
+		}
+
+		case "factory-droid-agent": {
+			const factoryModel = model as Model<"factory-droid-agent">;
+			const reasoning =
+				options?.reasoning && !options.disableReasoning && !options.forceReasoningOff
+					? requireSupportedEffort(factoryModel, options.reasoning)
+					: undefined;
+			return castApi<"factory-droid-agent">({
+				...base,
+				// The wrapper resolves native defaults for the selected OAuth
+				// account; do not turn the discovery scope's cap into a caller cap.
+				maxTokens: options?.maxTokens,
+				reasoning,
+				disableReasoning: options?.disableReasoning || options?.forceReasoningOff,
+				hideThinkingSummary: options?.hideThinkingSummary,
+				textVerbosity: options?.textVerbosity,
+				serviceTier: options?.serviceTier,
+				toolChoice: options?.toolChoice,
 			});
 		}
 

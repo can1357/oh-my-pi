@@ -18,9 +18,9 @@ const baseModel: Model<"anthropic-messages"> = buildModel({
 	maxTokens: 8_192,
 });
 
-const bashTool: Tool = {
-	name: "bash",
-	description: "run a bash command",
+const editTool: Tool = {
+	name: "edit",
+	description: "edit a file",
 	parameters: {
 		type: "object",
 		properties: { command: { type: "string" } },
@@ -31,7 +31,7 @@ const bashTool: Tool = {
 const baseContext: Context = {
 	systemPrompt: ["Stay concise."],
 	messages: [{ role: "user", content: "Hi", timestamp: Date.now() }],
-	tools: [bashTool],
+	tools: [editTool],
 };
 
 function abortedSignal(): AbortSignal {
@@ -59,9 +59,9 @@ function captureParams(
 describe("issue #826: Anthropic strict-tools opt-out for Vertex-style proxies", () => {
 	it("preserves strict:true on allowlisted tools by default (api.anthropic.com baseline)", async () => {
 		const params = await captureParams(baseModel);
-		const bash = params.tools?.find(t => t.name === "bash");
-		expect(bash).toBeDefined();
-		expect(bash?.strict).toBe(true);
+		const edit = params.tools?.find(t => t.name === "edit");
+		expect(edit).toBeDefined();
+		expect(edit?.strict).toBe(true);
 	});
 
 	it("omits strict on tool defs when compat.disableStrictTools is set", async () => {
@@ -71,9 +71,9 @@ describe("issue #826: Anthropic strict-tools opt-out for Vertex-style proxies", 
 				compat: { ...baseModel.compatConfig, disableStrictTools: true },
 			} as ModelSpec<"anthropic-messages">),
 		);
-		const bash = params.tools?.find(t => t.name === "bash");
-		expect(bash).toBeDefined();
-		expect(bash?.strict).toBeUndefined();
+		const edit = params.tools?.find(t => t.name === "edit");
+		expect(edit).toBeDefined();
+		expect(edit?.strict).toBeUndefined();
 	});
 
 	it("preserves adaptive thinking by default", async () => {

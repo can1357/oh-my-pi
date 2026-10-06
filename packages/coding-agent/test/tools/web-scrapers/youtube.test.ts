@@ -89,7 +89,13 @@ describe.skipIf(SKIP)("handleYouTube", () => {
 		if (result?.method === "youtube") {
 			expect(result.content).toContain("Video ID");
 			expect(result.content).toContain("Channel");
-			// May have duration, views, upload date, etc.
+			// Duration renders as M:SS or H:MM:SS, upload date as YYYY-MM-DD.
+			if (result.content.includes("Duration")) {
+				expect(result.content).toMatch(/Duration.*\d+:\d{2}/);
+			}
+			if (result.content.includes("Uploaded")) {
+				expect(result.content).toMatch(/Uploaded.*\d{4}-\d{2}-\d{2}/);
+			}
 		}
 
 		// If yt-dlp is not available, should indicate that
@@ -144,24 +150,6 @@ describe.skipIf(SKIP)("handleYouTube", () => {
 			// Should have exactly one of these
 			const noteCount = [hasManualNote, hasAutoNote, hasNoSubsNote].filter(Boolean).length;
 			expect(noteCount).toBeGreaterThanOrEqual(1);
-		}
-	}, 30000);
-
-	it("formats duration in human readable format", async () => {
-		const result = await handleYouTube("https://www.youtube.com/watch?v=dQw4w9WgXcQ", 30);
-
-		if (result?.method === "youtube" && result.content.includes("Duration")) {
-			// Should have duration in M:SS or H:MM:SS format
-			expect(result.content).toMatch(/Duration.*\d+:\d{2}/);
-		}
-	}, 30000);
-
-	it("includes upload date when available", async () => {
-		const result = await handleYouTube("https://www.youtube.com/watch?v=dQw4w9WgXcQ", 30);
-
-		if (result?.method === "youtube" && result.content.includes("Uploaded")) {
-			// Should have date in YYYY-MM-DD format
-			expect(result.content).toMatch(/Uploaded.*\d{4}-\d{2}-\d{2}/);
 		}
 	}, 30000);
 

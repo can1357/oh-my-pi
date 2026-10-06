@@ -1,13 +1,14 @@
 # Auth Broker and Auth Gateway
 
-The auth broker and auth gateway are two cooperating HTTP services that move OAuth refresh tokens and provider access tokens off developer laptops and into a single broker host.
+The auth broker centralizes credential storage and OAuth refreshes. The auth gateway lets clients make provider requests without receiving provider credentials. Direct broker clients are trusted: snapshots expose OAuth access tokens and stored API keys, but never the real OAuth refresh token.
 
 - **`omp auth-broker serve`** holds the canonical SQLite credential vault, performs OAuth refreshes, and exposes snapshot, credential, block, usage, and health APIs under `/v1`.
 - **`omp auth-gateway serve`** is a forward-proxy. It accepts OpenAI Chat Completions, Anthropic Messages, OpenAI Responses, pi-native stream, TypeSafe System One judgment, and OpenAI/OpenRouter-style image, speech, transcription, embedding, rerank, and video requests, resolves the broker-backed credential, and dispatches through `pi-ai` provider logic. Clients (containerised omp, llm-git, the macOS usage widget, …) never see the access token.
+- **`omp auth-gateway stdio`** serves the same routes to its parent process as JSON lines on stdin/stdout, on the CLI's own credentials and model roles; see [stdio](#stdio).
 
-Transport security between operator, broker, and gateway is delegated to the operator (Tailscale / Wireguard / reverse proxy + TLS). Every endpoint except `/v1/healthz` (broker) and `/healthz` (gateway) requires a bearer token.
+Transport security between operator, broker, and gateway is delegated to the operator (Tailscale / Wireguard / reverse proxy + TLS). Every endpoint except `/v1/healthz` (broker) and `/healthz` (gateway) requires a bearer token by default. The gateway also answers CORS `OPTIONS` preflights without authentication; `--no-auth` disables inbound gateway authentication.
 
-Source: `packages/ai/src/auth-broker/`, `packages/ai/src/auth-gateway/`, `packages/coding-agent/src/cli/auth-broker-cli.ts`, `packages/coding-agent/src/cli/auth-gateway-cli.ts`, `packages/coding-agent/src/session/auth-broker-config.ts`.
+Source: `packages/ai/src/auth-broker/`, `packages/ai/src/auth-gateway/`, `packages/ai/src/auth/`, `packages/coding-agent/src/cli/auth-broker-cli.ts`, `packages/coding-agent/src/cli/auth-gateway-cli.ts`, `packages/coding-agent/src/cli/auth-gateway-stdio.ts`, `packages/coding-agent/src/session/auth-broker-config.ts`.
 
 ## Data flow
 
@@ -56,11 +57,11 @@ omp auth-broker migrate   --from-local [--include-oauth] [--include-env] [--dry-
 omp auth-broker status    [--json]
 ```
 
-- `serve` opens the local SQLite store at `getAgentDbPath()` and binds an HTTP listener (default `127.0.0.1:8765`). On startup a token is ensured at `<config-dir>/auth-broker.token` (mode `0600`, `0700` parent dir). The background refresher refreshes any OAuth credential whose `expires - Date.now() < refreshSkewMs` (default 5 min) every `refreshIntervalMs` (default 60 s).
-- `token` prints the cached bearer or generates a new one. `--regenerate` rotates it.
-- `login [<provider>]` runs the per-provider OAuth flow locally — when no provider is supplied, it falls back to an interactive numbered picker. With `--via=user@host` it shells out `ssh -L <callback-port>:127.0.0.1:<callback-port> user@host omp auth-broker login <provider>` so the OAuth callback hits the local browser but the credential is written on the broker host (`--via` requires `<provider>`). Built-in callback ports: `anthropic:54545`, `openai-codex:1455`, `google-gemini-cli:8085`, `google-antigravity:51121`, `gitlab-duo:8080`, `devin:59653`, `gitlab-duo-agent:8080`, `zai-coding-plan:9999`. The OAuth dance is driven in-process via `AuthStorage.oauth.login()` — there is no longer a `pi-ai` bin to spawn.
-- `logout [<provider>]` deletes every credential row for `<provider>`. With no argument it shows an interactive numbered picker of currently-stored providers.
-- `list` enumerates every registered OAuth provider id/name (the union of built-ins + `registerOAuthProvider` custom providers). `--json` emits a machine-readable array.
+- `serve` opens the local SQLite store at `getAgentDbPath()` and binds an HTTP listener (default `127.0.0.1:8765`). On startup a token is ensured at `<config-dir>/auth-broker.token` (mode `0600`, newly created parent directory `0700`). The background refresher runs immediately and then every `refreshIntervalMs` (default 60 s), targeting OAuth credentials whose expiry is within `refreshSkewMs` (default 5 min).
+- `token` prints the stored bearer or generates a new one. `--regenerate` replaces the token file; restart a running broker to load the replacement into its in-memory allow-list.
+- `login [<provider>]` runs the registered sign-in flow locally (OAuth or a provider's API-key login). With no provider it shows an interactive numbered picker. With `--via=user@host` it runs `ssh -L <callback-port>:127.0.0.1:<callback-port> -o ExitOnForwardFailure=yes user@host omp auth-broker login <provider>`; the credential is written on the remote host (`--via` requires `<provider>`, and `--dry-run` applies only to this remote path). Ports are derived from the auth registry: `anthropic:54545`, `openai-codex:1455`, `google-gemini-cli:8085`, `google-antigravity:51121`, `gitlab-duo:8080`, `devin:59653`, `openrouter:54549`, `stencil:54547`. `gitlab-duo-agent` and `zai-coding-plan` use non-loopback/manual callbacks rather than the old `8080`/`9999` listeners; run those flows on the host directly. Login is driven in-process through `AuthStorage.oauth.login()`.
+- `logout [<provider>]` disables the provider's active rows with cause `logged out by user`; disabled tombstones remain available through the broker API. With no argument it shows an interactive numbered picker of stored providers.
+- `list` enumerates the sign-in providers returned by `getOAuthProviders()` (visible built-ins plus `registerOAuthProvider` custom providers), not the stored accounts. `--json` emits an array of `{ id, name }`.
 - `import <file|dir>` imports CLIProxyAPI-style JSON credentials into the local SQLite store. Maps `type` field → omp provider (`claude → anthropic`, `codex → openai-codex`, `gemini → google-gemini-cli`, `antigravity → google-antigravity`, `gemini-cli → google-gemini-cli`).
 - `migrate --from-local` uploads local SQLite credentials to the configured broker (`POST /v1/credential`). Local API keys are included by default; local OAuth rows are skipped unless `--include-oauth` is set; environment-derived API keys are skipped unless `--include-env` is set. Re-runs are idempotent against the broker snapshot.
 - `status` health-pings the configured remote broker.
@@ -77,6 +78,7 @@ omp auth-broker status    [--json]
 | `POST`   | `/v1/credential/:id/disable` | bearer | Disable one credential with a recorded cause                       |
 | `GET`    | `/v1/credentials/disabled`   | bearer | List disabled credentials; optional `provider` query filter        |
 | `POST`   | `/v1/credential/:id/block`   | bearer | Upsert a provider/scope rate-limit block                           |
+| `DELETE` | `/v1/credential/:id/block`   | bearer | Delete one block named by body `providerKey` and `blockScope`       |
 | `DELETE` | `/v1/credential/:id/blocks`  | bearer | Delete all rate-limit blocks for a credential                      |
 | `GET`    | `/v1/usage`                  | bearer | Aggregate current `UsageReport[]` across credentials               |
 | `GET`    | `/v1/usage/history`          | bearer | Persisted usage history; optional `sinceMs` and `provider` filters |
@@ -85,6 +87,21 @@ omp auth-broker status    [--json]
 | `POST`   | `/v1/usage/stale`            | bearer | Invalidate the broker's current usage cache                        |
 
 Requests use `Authorization: Bearer <token>`. The server compares against an in-memory token allow-list; the gateway’s implementation uses a timing-safe comparison.
+
+A snapshot contains `generation`, `generatedAt`, `serverNowMs`, `refresher`
+(`enabled`, `intervalMs`, `skewMs`, `nextSweepInMs`), and `credentials`.
+Each credential carries its id/provider/redacted credential/`identityKey`,
+`rotatesInMs`, and optional rate-limit `blocks`.
+
+The SSE stream starts with a full `snapshot` event, followed by changed `entry`
+and deleted/disabled `removed` events. The SSE event name also appears as JSON
+`kind`; deltas carry `generation`, `serverNowMs`, and `refresher`, plus `entry`
+or the removed `id`. Keepalives are SSE comments, not JSON events.
+
+Direct `POST /v1/credential/:id/refresh` forces a refresh. The
+`?reason=auth-recovery` form may reuse a still-usable token that the broker
+minted within the preceding five minutes, preventing repeated remints during
+an upstream outage.
 
 #### Conditional snapshot long polling
 
@@ -103,15 +120,16 @@ response state machine is:
   the new snapshot with `200` when it changes, an empty `304` when the wait
   expires unchanged, or an empty `499` when the caller disconnects.
 
-Every `200`, `304`, and `499` snapshot response carries the current generation
-as a quoted `ETag`, plus `Cache-Control: no-store` and
-`Vary: OMP-Auth-Broker-Capabilities`.
+Every `200`, `304`, and `499` snapshot response carries a quoted generation
+`ETag`, plus `Cache-Control: no-store` and
+`Vary: OMP-Auth-Broker-Capabilities`. A disconnect response uses the generation
+captured before waiting.
 
 ### Codex block-scope compatibility
 
 Clients that understand per-meter Codex blocks send `OMP-Auth-Broker-Capabilities: codex-meter-block-scopes`. Snapshot responses then carry the canonical `chat` and `spark` scopes. Without that capability, the broker projects those rows to the legacy `shared` scope on the wire.
 
-Local SQLite schema 7 keeps `chat` and `spark` as the canonical scopes exposed by current store APIs. It also maintains a physical `shared` compatibility mirror for pre-meter binaries that read `agent.db` directly. SQLite triggers derive that mirror's deadline and update time independently from the meter rows, and copy a legacy process's `shared` writes back to both meters. Current store APIs omit the physical mirror, so broker snapshots and model selection do not double-count it.
+Local SQLite schema 8 keeps `chat` and `spark` as the canonical scopes exposed by current store APIs. It also maintains a physical `shared` compatibility mirror for pre-meter binaries that read `agent.db` directly. SQLite triggers derive that mirror's deadline and update time independently from the meter rows, and copy a legacy process's `shared` writes back to both meters. Current store APIs omit the physical mirror, so broker snapshots and model selection do not double-count it.
 
 Clients released before this capability, including 17.1.4, receive the conservative `shared` projection until they are upgraded. Those clients are indistinguishable on the existing wire, so mixed-version deployments favor keeping a rate-limited credential blocked over allowing repeated provider requests and 429 responses.
 
@@ -119,25 +137,45 @@ Capability-dependent responses include `Vary: OMP-Auth-Broker-Capabilities` so i
 
 ### Background refresher
 
-`AuthBrokerRefresher` iterates active OAuth credentials at `refreshIntervalMs` cadence and refreshes any within `refreshSkewMs` of expiry. Refreshes are single-flighted per credential id so a slow refresh cannot be retriggered. The refresher distinguishes:
+`AuthBrokerRefresher` reloads active credentials before each sweep and does not overlap sweeps. Manual and background refreshes share the per-credential single-flight in `OAuthRefresher`; SQLite refresh leases also coordinate writers across processes.
 
-- **definitive failures** (`invalid_grant`, `invalid_token`, `revoked`, unauthorized refresh-token, 401/403 not from a network blip) — credentials are passed to `AuthStorage.credentials.disable(id, cause)` so the next snapshot pull surfaces a clean delete on the client;
-- **transient failures** (timeout / ECONNREFUSED / fetch failed) — left in place for the next sweep.
+- **Definitive failures**, as classified by `isDefinitiveOAuthFailure()`, disable only the credential version that failed. Compare-and-set persistence protects a credential rotated by a concurrent login/refresh; the refresher logs the result rather than disabling the row again.
+- **Transient failures** (for example network timeouts) leave the credential in place for the next sweep.
+
+The CLI broker refresh hook also handles managed `mcp_oauth:*` credentials using their stored MCP token endpoint/client metadata; it does not need to load the MCP manager.
 
 ## auth-gateway
 
 ### CLI
 
 ```
-omp auth-gateway serve   [--bind=host:port] [--no-auth]
+omp auth-gateway serve   [--bind=host:port] [--no-auth] [--trust-proxy-headers]
+omp auth-gateway stdio
 omp auth-gateway token   [--regenerate] [--json]
 omp auth-gateway status  [--json]
 omp auth-gateway check   [--strict] [--json]
 ```
 
-- `serve` requires `OMP_AUTH_BROKER_URL` (or `auth.broker.url` in `config.yml`) — the gateway is itself a broker client. It calls `AuthBrokerClient.fetchSnapshot()`, wraps it in `RemoteAuthCredentialStore`, and constructs an `AuthStorage` that resolves access tokens through the broker. Default bind is `127.0.0.1:4000`. The gateway token is stored at `<config-dir>/auth-gateway.token` (`0600`); `--no-auth` disables the bearer check entirely (loopback-only use).
-- `token` / `status` manage and inspect the gateway bearer token and upstream broker readiness.
-- `check` probes broker-backed credentials through the gateway store. Without `--strict` it uses provider usage probes; `--strict` also exercises each credential against its chat-completion endpoint and can consume a small amount of quota.
+- `serve` requires `OMP_AUTH_BROKER_URL` (or `auth.broker.url` in `config.yml`) — the gateway is itself a broker client. It fetches a live snapshot, wraps it in `RemoteAuthCredentialStore`, and constructs `AuthStorage` with the configured account pool and account policies. Unlike normal client discovery, gateway startup does not use the encrypted snapshot cache. Default bind is `127.0.0.1:4000`. The gateway token is stored at `<config-dir>/auth-gateway.token` (`0600`); `--no-auth` disables the bearer check entirely. Use that flag only on trusted loopback listeners; it does not enforce a loopback bind.
+- Logs attribute requests to the socket peer address. Behind a trusted reverse proxy, pass `--trust-proxy-headers` to use `X-Forwarded-For` / `X-Real-IP` for authenticated requests; unauthorized requests are always logged with the socket peer. An authenticated request that also carries the gateway token in its URL or in a forwarded, logged, or identity header is rejected with `400` before any credential lookup.
+- `token` manages the token file; `--regenerate` requires a running gateway to restart before accepting the replacement. `status` checks the local token file and an authenticated broker snapshot; it does not probe the gateway listener.
+- `check` constructs its own broker-backed store and probes the credentials the gateway would use, without calling a running gateway. Without `--strict` it uses provider usage probes. `--strict` additionally tries suitable bundled chat models and can consume quota; providers with no suitable candidate (including pi-native forwarding, Bedrock, Vertex, and Cursor transports) cannot be completion-probed.
+
+### stdio
+
+`omp auth-gateway stdio` is the gateway for one trusted parent process (an editor, a terminal's git UI, a script): no listener, no token, no broker requirement. It uses the credentials, models (`models.yml` and extension providers included) and settings any other `omp` command would: the broker when one is configured, else the local store. Requests and responses are JSON lines:
+
+```
+→ {"id": 1, "path": "/v1/chat/completions", "body": {"model": "@commit,@smol", "messages": [...]}}
+← {"ready": true, "version": "18.4.11"}
+← {"id": 1, "status": 200, "body": {"object": "chat.completion", "choices": [...]}}
+```
+
+- The first output line is `{"ready": true, "version": …}`. `method` defaults to `POST` when the request has a `body`, else `GET`; every route in [Endpoints](#endpoints-1) except `/healthz` is served.
+- Requests run concurrently and answer in completion order; `id` (string or number) matches them up. A line that is not a request answers `400` with its `id` when it had one.
+- A JSON response body is embedded as JSON; a text body (the SSE of a `stream: true` request) as one string once the stream ends; anything else (audio, video) as base64 with `"encoding": "base64"`.
+- `model` takes any `--model` selector: `provider/id`, a fuzzy name, a role (`@smol`), or a comma list whose first entry that resolves wins. An attempt that fails with a status above `400` (other than `499`) moves on along that model's `retry.fallbackChains`, the role's chain when the entry named a role; the response's `model` names the model that answered.
+- The process serves until stdin ends, answers what is in flight, and exits.
 
 ### Endpoints
 
@@ -145,7 +183,7 @@ omp auth-gateway check   [--strict] [--json]
 | ------ | ----------------------- | ------ | ------------------------------------------------------------ |
 | `GET`  | `/healthz`              | none   | Liveness + version                                           |
 | `GET`  | `/v1/usage`             | bearer | Aggregate `UsageReport[]` (proxied through `AuthStorage`)    |
-| `GET`  | `/v1/models`            | bearer | Bundled-model catalog filtered to providers with credentials |
+| `GET`  | `/v1/models`            | bearer | Registry catalog filtered to providers with credentials |
 | `GET`  | `/v1/credentials/check` | bearer | Per-credential auth health probe                             |
 | `POST` | `/v1/chat/completions`  | bearer | OpenAI Chat Completions wire format                          |
 | `POST` | `/v1/messages`          | bearer | Anthropic Messages wire format                               |
@@ -166,11 +204,13 @@ The model id is read from the top-level `model` field for foreign wire formats a
 
 Chat routes reject non-chat models with a `400` that names the route to use instead (`Model typesafe/jev-latest is a judge model; use POST /v1/systemone`). `GET /v1/models` marks such rows with `kind` (`judge` | `image` | `tts` | `stt` | `embedding` | `rerank` | `video`); absent means chat.
 
-Non-chat OpenRouter rosters are discovered live (`/embeddings/models`, `/videos/models`, rerank-flagged `/models` rows, TTS/STT via models.dev kinds) with small `bundle="always"` fallbacks in `providers/openrouter.kdl`; a provider maps each kind to its runner API through `kind-apis` in KDL. Per-search, per-second, and per-character billing have no catalog cost axis, so those rows carry zero token cost and the provider-reported `cost` in the response is authoritative.
+The served catalog includes bundled, cached, and broker-discovered models. The gateway ignores the host's `models.yml` overrides/custom models so local base URLs, headers, and keys cannot redirect broker-backed traffic. Providers listed in `disabledProviders` of the gateway's effective settings (the same `config.yml` that supplies `auth.accountPolicies`) are neither discovered, advertised, nor routable, and `check` skips their credentials. The gateway rebuilds the catalog every 15 minutes and checks credential changes every 10 seconds; credential changes force online discovery. Provider-qualified IDs are unambiguous; bare IDs use the first matching registry entry. Model-list rows also include `api`, `display_name`, `input_modalities`, available `context_length`/`max_output_tokens`, and `supports_tools: false` when explicitly unsupported.
 
-Cost attribution is uniform: every route records observed usage against the caller's `x-omp-*` identity and carries the computed cost in `x-litellm-response-cost`. Upstreams that report tokens only (TypeSafe) are priced from the catalog model; the response body's own `cost` field (OpenRouter shape) is only present when the upstream billed one.
+Live OpenRouter discovery covers image and Decisions rosters, `/embeddings/models`, `/videos/models`, and rerank-flagged `/models` rows. Speech/transcription models use catalog kinds and seeds. Bundled fallbacks and `kind-apis` runner mappings are authored in `packages/catalog/src/compat/rules/providers/openrouter.kdl`. Per-search, per-second, and per-character billing have no catalog cost axis, so those rows carry zero token cost and the provider-reported `cost` in the response is authoritative.
 
-Pointing a TypeSafe SDK or omp's own `judge` role at the gateway means `TYPESAFE_BASE_URL=http://gateway:4000` with `TYPESAFE_API_KEY=<gateway token>`; OpenAI-SDK-style clients set their base URL to `http://gateway:4000/v1`.
+Inference routes record observed usage against `x-omp-install-id`, `x-omp-hostname`, and `x-omp-app`; unlabeled requests fall back to the gateway host's identity. These attribution headers are not forwarded upstream. Completed non-streaming responses carry computed cost in `x-litellm-response-cost` when known; streaming chat responses send headers before usage arrives and do not include that cost header. Video cost may become available only while polling. Upstreams that report tokens only (TypeSafe) are priced from the catalog model; the response body's own `cost` field (OpenRouter shape) is only present when the upstream billed one.
+
+TypeSafe clients using the default base-URL resolver can set `TYPESAFE_BASE_URL=http://gateway:4000` with `TYPESAFE_API_KEY=<gateway token>`. omp's catalog-backed `judge` role passes the model's explicit `baseUrl`, which takes precedence over that environment fallback; configure the TypeSafe provider's `baseUrl` and `apiKey` in `models.yml` to use the gateway. OpenAI-SDK-style clients use `http://gateway:4000/v1`.
 
 There is no raw provider passthrough path. All supported routes go through `pi-ai` provider logic so credential-specific request shaping, OAuth refresh-on-auth-error, and provider quirks stay centralized.
 
@@ -182,9 +222,9 @@ Two layers cache the aggregate provider-usage report. Both are intentional and s
 
 ### Server-side cache (broker `AuthStorage`)
 
-`AuthStorage` caches each credential’s `UsageReport` in the broker’s SQLite store at a **5-minute per-credential TTL with ±25 % jitter**. Anthropic and OpenAI rate-limit `/usage` aggressively per source IP, and a synchronized 5-credential fan-out trips 429s every cycle; the jitter decorrelates refresh times within a few cycles. On fetch failure the store keeps the **last-good** report for up to 24 h with a short jittered re-poll window — so a transient upstream blip never blanks out the widget.
+`AuthStorage` caches successful per-credential `UsageReport`s in the broker's SQLite store with a **5-minute TTL and ±25 % jitter** to stagger upstream probes. Cached good values receive a 24-hour durable retention window. On fetch failure, providers normally retain the last-good report and apply a short jittered cooldown (default 10 s); a provider can override this policy. Definitive auth failures purge stale usage, and explicit invalidation does not replay invalidated last-good data.
 
-Constants: `USAGE_REPORT_TTL_MS = 5 * 60_000`, `USAGE_LAST_GOOD_RETENTION_MS = 24 * 60 * 60_000` (`packages/ai/src/auth-storage.ts`).
+Constants: `USAGE_REPORT_TTL_MS = 5 * 60_000` in `packages/ai/src/auth/sqlite-credential-store.ts`; `USAGE_LAST_GOOD_RETENTION_MS = 24 * 60 * 60_000` and `USAGE_FAILURE_BACKOFF_MS = 10_000` in `packages/ai/src/auth/usage-cache.ts`. Fetch policy is in `packages/ai/src/auth/usage.ts`.
 
 ### Client-side single-flight (`RemoteAuthCredentialStore`)
 
@@ -192,17 +232,18 @@ When the gateway (or any other broker client) calls `fetchUsageReports()` / `get
 
 - `USAGE_CACHE_TTL_MS = 15_000` (`packages/ai/src/auth-broker/remote-store.ts`).
 - A single `#usageInflight` promise is shared across all callers; a per-caller `AbortSignal` is **raced** against the shared promise, not threaded into it, so one caller’s abort never cascades into a peer’s in-flight request.
-- On fetch failure the rejected promise is logged and the awaited value is `null` — callers (`AuthStorage.usage.reports`, `#getUsageReport`) treat a `null` report as "no usage signal for this cycle" and proceed without it. **This is the 15 s TTL fallback**: the client absorbs transient broker outages by suppressing the error, returning `null` to ranking, and re-attempting after the 15 s window.
+- On fetch failure the error is logged and `null` is cached for 15 s, so sequential callers do not immediately retry a failed broker. Aggregate usage returns `null`; a per-credential lookup may still use a fresh client-observed header overlay.
+- Fresh provider response-header hints are overlaid on matching reports for up to 15 s.
 
-The 15 s client window deliberately sits below the broker’s 5 min server cache, so almost every client poll is served from the broker’s already-cached value; the client cache exists to absorb the parallel fan-out generated by `AuthStorage.#rankOAuthSelections` into a single broker round-trip.
+The client window is shorter than the broker's per-credential cache and coalesces the usage lookups used by `CredentialSelector` (`packages/ai/src/auth/select.ts`) into a single broker round-trip.
 
 ## Client snapshot cache
 
-`discoverAuthStorage()` persists the broker snapshot to `~/.omp/cache/auth-broker-snapshot.enc` after the initial `/v1/snapshot` fetch and after later broker-sourced full snapshots. The file is AES-256-GCM encrypted with `SHA-256(OMP_AUTH_BROKER_TOKEN)` and authenticated with the broker URL as additional data, so changing either the token or URL makes the cache unreadable. The file is written atomically with mode `0600`.
+`discoverAuthStorage()` delegates to `packages/ai/src/auth-broker/discover.ts`, which persists the initial live snapshot and later broker-sourced full snapshots to `~/.omp/cache/auth-broker-snapshot.enc` by default. The file is AES-256-GCM encrypted with SHA-256 of the resolved broker bearer token (whether from env, config, or file) and authenticated with the broker URL and cache format metadata. Changing the token or URL makes the cache unreadable. Writes are atomic with mode `0600`.
 
-Freshness is anchored to the broker-stamped `snapshot.generatedAt`, not local write time. Default TTL is 1 h (`OMP_AUTH_BROKER_SNAPSHOT_TTL_MS`); `0` disables cache reads and writes. A fresh cache is revalidated against a reachable broker with a 500 ms startup budget, so an imported, revoked, or rotated credential is visible to one-shot commands immediately. If revalidation fails because the broker is unavailable or slow, `omp` starts from the cache and `RemoteAuthCredentialStore` continues normal SSE / long-poll synchronization in the background. Expired OAuth access tokens still refresh through `POST /v1/credential/:id/refresh`.
+Freshness is anchored to `snapshot.generatedAt`, not local write time. Default TTL is 1 h (`OMP_AUTH_BROKER_SNAPSHOT_TTL_MS`); `0` disables cache reads and writes. A fresh cache is used immediately without a blocking revalidation or startup request budget. `RemoteAuthCredentialStore` then synchronizes through SSE/long polling in the background, so one-shot commands are not guaranteed to observe changes made after the cache was written. Revocation of the broker token surfaces through that background path rather than necessarily failing cached startup. Expired OAuth access tokens still require the broker refresh endpoint.
 
-If the broker is down at boot and a fresh cache exists, startup succeeds from the cached snapshot. Authentication failures (401/403) are not masked by the cache; transient server errors fall back to it. If the cache is missing, expired, corrupt, written for a different URL, or encrypted with a different token, startup falls back to the live fetch and fails if the broker is unreachable.
+If the broker is down at boot and a fresh cache exists, startup succeeds from the cache. If the cache is missing, expired, corrupt, incompatible, written for another URL, or encrypted with another token, startup requires a live snapshot and fails when that fetch fails; it never silently opens the local credential store instead.
 
 ## Client account pools (routing, not authorization)
 
@@ -230,7 +271,7 @@ This is a **trusted-client routing policy, not an authorization boundary**. The 
 
 ## Operator opt-in
 
-The broker is **off** unless `OMP_AUTH_BROKER_URL` (or `auth.broker.url` in `config.yml`) is set. When set, `discoverAuthStorage` in `packages/coding-agent/src/sdk.ts` swaps the local SQLite credential store for `RemoteAuthCredentialStore` and every API call resolves credentials through the broker.
+Broker-backed credential storage is **off** unless `OMP_AUTH_BROKER_URL` (or `auth.broker.url` in the agent's `config.yml`/`config.yaml`) is set. SDK discovery delegates through `packages/coding-agent/src/session/auth-broker-config.ts` to the shared `pi-ai` resolver and selects `RemoteAuthCredentialStore` instead of local SQLite. Runtime/config/env key overrides still participate in the normal credential ladder; selecting broker storage does not make those keys remote.
 
 ### Environment variables
 
@@ -248,7 +289,7 @@ Resolution order in `resolveAuthBrokerConfig()`:
 2. `OMP_AUTH_BROKER_TOKEN` env (else `auth.broker.token` from `config.yml`, else `<config-dir>/auth-broker.token`);
 3. URL set but no token resolvable → hard error pointing at the token file path.
 
-The gateway has no dedicated env vars — it inherits `OMP_AUTH_BROKER_*` because it is itself a broker client.
+The gateway uses the same broker URL/token resolution and account-pool environment file. Its `serve`/`check` commands fetch a live snapshot directly, so the client snapshot-cache path/TTL variables do not affect those commands.
 
 ### `config.yml` keys
 
@@ -256,21 +297,37 @@ The gateway has no dedicated env vars — it inherits `OMP_AUTH_BROKER_*` becaus
 | ------------------- | ------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `auth.broker.url`   | unset   | Same as `OMP_AUTH_BROKER_URL`; env wins. Hidden from the settings UI. Values are resolved as a literal, an environment variable name, or `!<shell command>` to use trimmed stdout. |
 | `auth.broker.token` | unset   | Same as `OMP_AUTH_BROKER_TOKEN`; env wins. Values are resolved the same way.                                                                                                       |
+| `auth.accountPolicies` | `[]` | Per-account OAuth routing rules: `provider`, identity selector `account` (`email`, `accountId`, `projectId`, optional `orgId`), optional `priority` and `reservePct` (0–100). |
+| `retry.usageReservePct` | `10` | Default protected remaining-quota percentage when an account has no `reservePct` override. |
+
+Broker connection values come from the agent's main config file, not project settings. Account policies/reserve use effective settings (including project/explicit config layers). Long-lived SDK sessions follow policy changes and can replace the credential store in place when effective broker settings change; failed changes leave the current store active.
+
+#### How sessions choose and keep an account
+
+When a provider has account policies, OMP ranks its accounts whenever it selects or reconsiders one (not on every request: a warm explicit pin, or a sole account, skips ranking). In order, an account loses when it is blocked (hit a limit), outside a required plan, past its renewable allowance, or inside its reserve; then Codex accounts with an untouched 5-hour window are preferred, accounts whose 5-hour window is at least 85% used fall back, accounts with a usage report beat accounts whose report could not be fetched, and only then does higher `priority` win. Ties go to the account whose quota would otherwise expire unused soonest. So `priority` orders healthy, measured accounts; it does not override reserve or the safety checks before it.
+
+That ranking picks the account for a **new** session. A running session remembers the account it used last (its pin) and keeps it while the pin is warm, so the provider's prompt cache and signed reasoning stay valid:
+
+- Anthropic pins go cold after an hour without a request; other providers' pins stay warm indefinitely. A cold or blocked pin re-ranks.
+- A warm pin moves only away from a bad account: when the pinned account enters its reserve and another account is measured outside its own reserve, or when its allowance is spent and an unblocked sibling still has allowance.
+- A warm pin does not move back when a higher-priority account recovers. New sessions use the recovered account; running ones stay where they are until one of the cases above applies.
+- An account the user chose explicitly for a session is never moved by ranking or reserve. It is still skipped while blocked, after a failed token refresh, or when it fails a required plan check; the session then falls through to a sibling.
+- Pins are saved with the session. A resumed session restores its pin with its original last-use time, and subagents start on their parent's pins.
 
 ### Token files
 
 | Path                              | Owner                                                | Mode                          |
 | --------------------------------- | ---------------------------------------------------- | ----------------------------- |
-| `<config-dir>/auth-broker.token`  | `omp auth-broker serve` (created at first start)     | `0600` in a `0700` parent dir |
-| `<config-dir>/auth-gateway.token` | `omp auth-gateway serve` (skipped under `--no-auth`) | `0600` in a `0700` parent dir |
+| `<config-dir>/auth-broker.token`  | `omp auth-broker token` or `serve` | `0600`; new parent directory `0700` |
+| `<config-dir>/auth-gateway.token` | `omp auth-gateway token` or `serve` (serve skips it under `--no-auth`) | `0600`; new parent directory `0700` |
 
-`<config-dir>` resolves to `~/.omp/` (respecting `PI_CONFIG_DIR`).
+`<config-dir>` is `getConfigRootDir()`: `~/.omp/` by default, respecting `PI_CONFIG_DIR` and the active profile (`~/.omp/profiles/<name>/` for the default profile layout). Creating a token does not tighten permissions on an already-existing parent directory.
 
 ## Interaction with the local API-key resolution order
 
-The broker only owns OAuth credentials and provider-API-key credentials that were uploaded to it. The standard credential ladder in `models.md` (`Auth and API key resolution order`) is preserved, with one addition committed alongside the gateway:
+The broker owns credentials written on its host or uploaded through its API. The standard credential ladder in [models.md](./models.md) is preserved:
 
-- `AuthStorage.keys.setConfig / removeConfigApiKey / clearConfigApiKeys` let a `models.yml` `apiKey` beat a stored OAuth token **without** overriding an explicit `--api-key`. This is what allows a broker-resolved OAuth credential to be reliably shadowed by a per-environment `models.yml` config key when both are present.
+- `AuthStorage.keys.setConfig()` / `.removeConfig()` / `.clearConfig()` manage config keys. An explicit `models.yml` `apiKey` beats stored OAuth **without** overriding `--api-key`; `setConfig(..., { fallback: true })` instead ranks a default key reference below stored OAuth and `/login` keys. The gateway deliberately ignores local model-config overrides.
 
 ## See also
 

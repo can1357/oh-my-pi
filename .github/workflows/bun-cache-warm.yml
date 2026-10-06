@@ -1,0 +1,34 @@
+name: Warm bun store cache
+
+# Produces the shared `bun-<os>-<lockhash>` store entry PR jobs restore. PR jobs
+# restore it but never save (per-PR-ref copies of the ~500 MB store once ate
+# ~9.4 GB of the 10 GB repo cache quota), bun-install's save half only runs on
+# non-PR events, and main CI jobs run on omp-kata (PVC store, no GitHub
+# cache), so this is the sole GitHub-hosted producer. Triggers only on pushes
+# that can change the entry.
+
+on:
+   push:
+      branches: [main]
+      paths:
+         - "bun.lock"
+         - ".github/actions/bun-install/**"
+         - ".github/workflows/bun-cache-warm.yml"
+   workflow_dispatch:
+
+permissions:
+   contents: read
+
+# No cancel-in-progress: a cancelled warm saves nothing. Superseded queued runs
+# still collapse to the newest one.
+concurrency:
+   group: bun-cache-warm
+   cancel-in-progress: false
+
+jobs:
+   warm_bun:
+      name: Seed bun store cache
+      runs-on: ubuntu-22.04
+      steps:
+         - uses: actions/checkout@v4
+         - uses: ./.github/actions/bun-install

@@ -1,7 +1,18 @@
 import type { Component } from "../index";
 import { Markdown, Text } from "../index";
 import { sanitizeText } from "@oh-my-pi/pi-utils";
-import type { RenderResultOptions, ToolRenderer } from "./renderer";
+import type {
+	NativeToolHead,
+	NativeToolView,
+	RenderResultContextOptions,
+	RenderResultOptions,
+	ToolRenderer,
+} from "./renderer";
+import type { TspSpan } from "@oh-my-pi/pi-wire";
+import { ansi, code as codeNode, compact, keyed, md, node, span, text } from "../native/describe";
+import type { NativeChild, NativeNode } from "../native/node";
+import { plainText } from "../native/spans";
+import { footnoteText, resultText } from "./native-view";
 import { renderAgentTreeRow } from "./agent-tree";
 import { truncateToVisualLines } from "../chrome/visual-truncate";
 import { getMarkdownTheme, type Theme } from "../theme/theme";
@@ -15,6 +26,7 @@ import {
 	JSON_TREE_MAX_LINES_EXPANDED,
 	JSON_TREE_SCALAR_LEN_COLLAPSED,
 	JSON_TREE_SCALAR_LEN_EXPANDED,
+	describeJsonTree,
 	renderJsonTreeLines,
 } from "./json-tree";
 import { formatStyledTruncationWarning, stripOutputNotice } from "./output-meta";
@@ -546,6 +558,192 @@ function formatCellOutputLines(
 	return { lines: formatted.lines, hiddenCount: formatted.hiddenCount };
 }
 
+/** Plain one-line summary of a status event: op plus its scalar fields. */
+function describeStatusEvent(event: EvalStatusEvent): NativeNode {
+	const spans: TspSpan[] = [span(event.op, "accent")];
+	for (const key in event) {
+		if (key === "op" || key === "resolvedThinkingLevel") continue;
+		const value = event[key];
+		if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
+			spans.push(span(` ${key}=`, "muted"), span(sanitizeText(String(value))));
+		}
+	}
+	return text(spans, { truncate: "end", role: "omp.tool.eval.status" });
+}
+
+/**
+ * The eval head (§7.3): a single cell's title as the verb (else "Eval"; with
+ * several cells each section carries its own title), a badge per language in
+ * first-use order, a `background` badge for a backgrounded job, and the cell
+ * count when there are several.
+ */
+function evalToolHead(
+	title: string | undefined,
+	languages: readonly EvalLanguage[],
+	cellCount: number,
+	details?: EvalToolDetails,
+): NativeToolHead {
+	const badges: { text: string; title?: string }[] = [...new Set(languages)].map(language => ({ text: language }));
+	if (details?.async?.state === "running") {
+		badges.push({ text: "background", title: `Backgrounded as job ${details.async.jobId}` });
+	}
+	return {
+		title: (cellCount > 1 ? "" : plainText(title ?? "").trim()) || "Eval",
+		badges: badges.length > 0 ? badges : undefined,
+		meta: cellCount > 1 ? [`${cellCount} cells`] : undefined,
+	};
+}
+
+/** Box-drawing `console.table` output split out of plain text: `text` runs and parsed tables, in order. */
+type EvalOutputPart =
+	| { readonly kind: "text"; readonly text: string }
+	| { readonly kind: "table"; readonly head: readonly string[]; readonly rows: readonly string[][] };
+
+/** The cells of a `│ a │ b │` row, trimmed; undefined when the line is not a table row. */
+function tableRowCells(line: string): string[] | undefined {
+	const plain = plainText(line).trim();
+	if (plain.length < 2 || !plain.startsWith("│") || !plain.endsWith("│")) return undefined;
+	return plain
+		.slice(1, -1)
+		.split("│")
+		.map(cell => cell.trim());
+}
+
+/**
+ * Split `console.table` blocks (`┌…┐` header `├…┤` rows `└…┘`, as Node/Bun
+ * print them) out of cell output so they render as a `table`; anything that
+ * does not parse as one stays text.
+ */
+function splitConsoleTables(output: string): EvalOutputPart[] {
+	const lines = output.split("\n");
+	const parts: EvalOutputPart[] = [];
+	let textStart = 0;
+	const flushText = (end: number): void => {
+		const chunk = lines
+			.slice(textStart, end)
+			.join("\n")
+			.replace(/^\n+|\s+$/g, "");
+		if (chunk.length > 0) parts.push({ kind: "text", text: chunk });
+	};
+	for (let i = 0; i < lines.length; i++) {
+		if (!plainText(lines[i]!).trimStart().startsWith("┌")) continue;
+		const head = tableRowCells(lines[i + 1] ?? "");
+		if (
+			!head ||
+			!plainText(lines[i + 2] ?? "")
+				.trimStart()
+				.startsWith("├")
+		)
+			continue;
+		const rows: string[][] = [];
+		let end = i + 3;
+		for (; end < lines.length; end++) {
+			const cells = tableRowCells(lines[end]!);
+			if (!cells) break;
+			rows.push(cells);
+		}
+		if (
+			!plainText(lines[end] ?? "")
+				.trimStart()
+				.startsWith("└")
+		)
+			continue;
+		if (rows.some(row => row.length !== head.length)) continue;
+		flushText(i);
+		parts.push({ kind: "table", head, rows });
+		i = end;
+		textStart = end + 1;
+	}
+	flushText(lines.length);
+	return parts;
+}
+
+/** One cell's output: markdown, else terminal text with any `console.table` blocks as tables. */
+function evalOutputNodes(output: string, markdown: boolean, running: boolean, error: boolean): NativeNode[] {
+	if (output.trim().length === 0) return [];
+	if (markdown && !error) return [md(output)];
+	const tone = error ? "error" : undefined;
+	return splitConsoleTables(output).map(part =>
+		part.kind === "text"
+			? ansi(part.text, { follow: running, tone, role: "omp.tool.eval.output" })
+			: node("table", {
+					// Node's index column header is noise in a real table.
+					cols: part.head.map((head, i) => ({ id: `c${i}`, head: head === "(index)" ? "" : head })),
+					rows: part.rows.map((cells, r) => ({
+						id: `r${r}`,
+						cells: Object.fromEntries(cells.map((cell, i) => [`c${i}`, cell])),
+					})),
+					role: "omp.tool.eval.table",
+				}),
+	);
+}
+
+/** Inputs of one eval cell section. */
+interface EvalCellSection {
+	readonly language: EvalLanguage;
+	readonly code: string;
+	readonly title?: string;
+	readonly status?: EvalCellResult["status"];
+	readonly durationMs?: number;
+	readonly output?: readonly NativeChild[];
+}
+
+/**
+ * A notebook cell: a gutter mark beside the input (←, muted until the cell
+ * runs, omp's thinking starburst while it does) and beside its output (→).
+ * Only multi-cell calls repeat titles; marks never invent execution counts.
+ */
+function evalCellSection(cell: EvalCellSection, index: number, total: number): NativeNode {
+	let head: TspSpan[] | undefined;
+	if (total > 1) {
+		head = [span(`${index + 1}/${total}`, "muted")];
+		const title = plainText(cell.title ?? "").trim();
+		if (title) head.push(span(` ${title}`, "toolTitle"));
+		if (cell.status === "error") head.push(span(" · failed", "error"));
+		if (cell.durationMs !== undefined) head.push(span(` · ${(cell.durationMs / 1000).toFixed(2)}s`, "muted"));
+	}
+	const inputMark =
+		cell.status === "running"
+			? node("spinner", { style: "starburst", role: "omp.tool.eval.prompt", aria: "Running" })
+			: node("icon", {
+					name: "arrow-left",
+					role: "omp.tool.eval.prompt",
+					aria: "Input",
+					tone: !cell.status || cell.status === "pending" ? "muted" : undefined,
+				});
+	return node(
+		"col",
+		{
+			role: "omp.tool.eval.cell",
+			tone: cell.status === "error" ? "error" : cell.status === "running" ? "pending" : undefined,
+		},
+		compact<NativeChild>([
+			head ? text(head, { role: "omp.tool.eval.caption" }) : undefined,
+			node(
+				"row",
+				{ role: "omp.tool.eval.input", align: "start" },
+				[
+					inputMark,
+					keyed(codeNode(cell.code, { lang: languageForHighlighter(cell.language), numbers: false }), "code"),
+				],
+				"input",
+			),
+			cell.output?.length
+				? node(
+						"row",
+						{ role: "omp.tool.eval.result", align: "start" },
+						[
+							node("icon", { name: "arrow-right", role: "omp.tool.eval.prompt", aria: "Output" }),
+							node("col", { role: "omp.tool.eval.outputs" }, cell.output),
+						],
+						"output",
+					)
+				: undefined,
+		]),
+		`cell-${index}`,
+	);
+}
+
 /** Render eval code cells, structured display output, and progress events. */
 export const evalToolRenderer = {
 	animatedPendingPreview: true,
@@ -842,6 +1040,105 @@ export const evalToolRenderer = {
 				cachedSkipped = undefined;
 				cachedPreviewLines = undefined;
 			},
+		};
+	},
+
+	describeCall(args: EvalRenderArgs, _options: RenderResultOptions): NativeToolView {
+		const cells = getRenderCells(args);
+		return {
+			tool: evalToolHead(
+				cells[0]?.title,
+				cells.map(cell => cell.language),
+				cells.length,
+			),
+			body: cells.map((cell, i) => evalCellSection(cell, i, cells.length)),
+			preview: { lines: EVAL_DEFAULT_PREVIEW_LINES },
+		};
+	},
+
+	describeResult(
+		result: { content: Array<{ type: string; text?: string }>; details?: EvalToolDetails; isError?: boolean },
+		options: RenderResultContextOptions & { renderContext?: EvalRenderContext },
+		args?: EvalRenderArgs,
+	): NativeToolView {
+		const details = result.details;
+		const isPartial = options.isPartial === true;
+		const previewLines = options.renderContext?.previewLines ?? EVAL_DEFAULT_PREVIEW_LINES;
+		const jsonNodes = (details?.jsonOutputs ?? []).map((value, index) =>
+			keyed(describeJsonTree(value, { hiddenRootKeys: [] }), `display-${index}`),
+		);
+		// A notice and truncation go to one quiet final line (a background job is a head badge).
+		const footer = footnoteText(compact([details?.notice]), details?.meta);
+		const cellResults = details?.cells;
+		let cells: NativeNode[];
+		let head: NativeToolHead;
+		if (cellResults && cellResults.length > 0) {
+			const languages = cellResults.map(cell => cell.language ?? details?.language ?? "python");
+			head = evalToolHead(cellResults[0]!.title, languages, cellResults.length, details);
+			cells = cellResults.map((cell, i) => {
+				const language = languages[i]!;
+				return evalCellSection(
+					{
+						language,
+						code: formatEvalCodeForDisplay(cell.code, language),
+						title: cell.title,
+						status: cell.status,
+						durationMs: cell.durationMs,
+						output: [
+							...evalOutputNodes(
+								cell.output,
+								cell.hasMarkdown === true,
+								cell.status === "running",
+								cell.status === "error",
+							),
+							...(cell.statusEvents ?? []).map(describeStatusEvent),
+							...(i === cellResults.length - 1 ? jsonNodes : []),
+						],
+					},
+					i,
+					cellResults.length,
+				);
+			});
+		} else {
+			// No per-cell results (older details): the call's cells, with the whole output under the last.
+			const argCells = getRenderCells(args);
+			const languages = details?.languages ?? (details?.language ? [details.language] : []);
+			head = evalToolHead(
+				argCells[0]?.title,
+				argCells.length > 0 ? argCells.map(cell => cell.language) : languages,
+				argCells.length,
+				details,
+			);
+			const rawOutput = options.renderContext?.output ?? resultText(result).trimEnd();
+			const output = [
+				...evalOutputNodes(
+					stripOutputNotice(rawOutput, details?.meta).trimEnd(),
+					false,
+					isPartial,
+					result.isError === true,
+				),
+				...(details?.statusEvents ?? []).map(describeStatusEvent),
+				...jsonNodes,
+			];
+			cells =
+				argCells.length > 0
+					? argCells.map((cell, i) =>
+							evalCellSection(
+								{
+									...cell,
+									status: isPartial ? "running" : result.isError ? "error" : "complete",
+									output: i === argCells.length - 1 ? output : undefined,
+								},
+								i,
+								argCells.length,
+							),
+						)
+					: output;
+		}
+		return {
+			tool: head,
+			body: compact<NativeChild>([...cells, footer]),
+			preview: { lines: previewLines },
 		};
 	},
 

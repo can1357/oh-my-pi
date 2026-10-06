@@ -15,6 +15,7 @@
  */
 import type * as fs from "node:fs";
 import type { AgentTool } from "@oh-my-pi/pi-agent-core";
+import type { TspSpan, TspTone } from "@oh-my-pi/pi-wire";
 import type { Component, TUI } from "../tui";
 import { Editor } from "../components/editor";
 import { matchesKey } from "../keys";
@@ -39,6 +40,9 @@ import {
 import { sanitizeErrorLine } from "../chrome/error-block";
 import type { ScrollRangeAnchor } from "../components/scroll-view";
 import { formatContextUsage } from "../chrome/context-thresholds";
+import { node, span, text } from "../native/describe";
+import type { DescribeContext, NativeChild, NativeNode } from "../native/node";
+import { actionHint, hintsRow, overlayCard } from "../native/overlay";
 
 /** Parsed message and model metadata relevant to a transcript viewer. */
 export type AgentTranscriptEntry = SessionMessageEntryLike | { type: "model_change"; model: string };
@@ -69,6 +73,7 @@ export interface AgentTranscriptViewerDeps {
 	cwd: string;
 	hideThinkingBlock?: () => boolean;
 	proseOnlyThinking?: () => boolean;
+	expandThinkingBlocks?: () => boolean;
 	expandKeys: KeyId[];
 	/** Keys that toggle the whole hub closed (app.agents.hub + app.session.observe). */
 	hubKeys: KeyId[];
@@ -132,6 +137,19 @@ function sentinelsFromFile(fs: AgentTranscriptSource["fs"], file: string, size: 
 	return sentinelOffsets(size).map(offset => ({ offset, bytes: readFileRangeSync(fs, file, offset, length) }));
 }
 
+/**
+ * `sanitizeErrorLine` width for described text, which the terminal truncates
+ * itself: effectively unbounded, but within the native truncate's i32 range.
+ */
+const NATIVE_LINE_WIDTH = 0x7fff_ffff;
+
+const STATUS_TONE: Record<AgentStatus, TspTone> = {
+	running: "success",
+	idle: "accent",
+	parked: "muted",
+	aborted: "error",
+};
+
 function statusBadge(status: AgentStatus): string {
 	switch (status) {
 		case "running":
@@ -166,6 +184,8 @@ export class AgentTranscriptViewer implements Component {
 	#pollTimer: NodeJS.Timeout | undefined;
 	#disposed = false;
 	#initialEntryId: string | undefined;
+	/** Last described node and the visible inputs it was built from. */
+	#nativeCache: { signature: string; node: NativeNode } | undefined;
 
 	readonly #deps: AgentTranscriptViewerDeps;
 
@@ -180,6 +200,9 @@ export class AgentTranscriptViewer implements Component {
 			cwd: deps.cwd,
 			hideThinkingBlock: deps.hideThinkingBlock,
 			proseOnlyThinking: deps.proseOnlyThinking,
+			expandThinkingBlocks: deps.expandThinkingBlocks,
+			// Charts are for the main session's answers, not parked subagent, advisor, or guest transcripts.
+			tableCharts: false,
 			requestRender: deps.requestRender,
 		});
 		this.#browser = new TranscriptBrowser({
@@ -571,6 +594,116 @@ export class AgentTranscriptViewer implements Component {
 			this.#initialEntryId = undefined;
 		}
 		return lines;
+	}
+
+	/**
+	 * Header, transcript body (the builder's container, which describes its own
+	 * blocks), notice, message editor, stats and key hints. Scrolling is the
+	 * terminal's, so the j/k/g/G scroll hints are omitted.
+	 */
+	describe(_cx: DescribeContext): NativeNode {
+		const ref = this.#deps.registry.get(this.#deps.agentId);
+		const notice = this.#notice ?? (this.#remoteError && !this.#builder.isEmpty ? this.#remoteError : undefined);
+		const placeholder = this.#builder.isEmpty ? this.#placeholder(NATIVE_LINE_WIDTH) : undefined;
+		const progress = this.#deps.observers?.getSession(this.#deps.agentId)?.progress;
+		const stats = progress
+			? [progress.contextTokens, progress.contextWindow, progress.durationMs, progress.toolCount, progress.cost]
+			: undefined;
+		const signature = JSON.stringify([
+			ref?.status,
+			ref?.kind,
+			ref?.parentId,
+			this.#model,
+			notice,
+			placeholder,
+			stats,
+			this.#deps.expandKeys[0],
+		]);
+		const cached = this.#nativeCache;
+		if (cached?.signature === signature) return cached.node;
+
+		const id = this.#deps.agentId;
+		const children: NativeChild[] = [];
+		if (ref) {
+			const kindTag = ref.parentId ? `${ref.kind} ${theme.sep.dot} of ${ref.parentId}` : ref.kind;
+			const meta: NativeChild[] = [
+				text([span(id, "strong")]),
+				node("badge", { text: ref.status, tone: STATUS_TONE[ref.status] }),
+				text([span(kindTag, "dim")], { truncate: "end" }),
+			];
+			if (this.#model) meta.push(text([span(this.#model, "muted")], { truncate: "end" }));
+			children.push(node("row", { gap: "sm", align: "center" }, meta, "meta"));
+		}
+		children.push(
+			placeholder === undefined
+				? node("col", { grow: 1 }, [this.#builder.container], "transcript")
+				: node("text", { spans: [span(placeholder, "dim")], wrap: "word" }, undefined, "placeholder"),
+		);
+		if (notice) {
+			children.push(
+				node(
+					"text",
+					{ text: sanitizeErrorLine(notice, NATIVE_LINE_WIDTH), tone: "error", truncate: "end" },
+					undefined,
+					"notice",
+				),
+			);
+		}
+		if (this.#editor) children.push(this.#editor);
+		if (progress) {
+			const statSpans: TspSpan[] = [];
+			const sep = (): void => {
+				if (statSpans.length > 0) statSpans.push(span(theme.sep.dot, "dim"));
+			};
+			if (progress.toolCount > 0) {
+				statSpans.push(span(`${formatNumber(progress.toolCount)} ${theme.icon.extensionTool}`, "dim"));
+			}
+			if (
+				progress.contextTokens &&
+				progress.contextTokens > 0 &&
+				!(progress.contextWindow && progress.contextWindow > 0)
+			) {
+				sep();
+				statSpans.push(span(formatNumber(progress.contextTokens), "dim"));
+			}
+			if (progress.durationMs > 0) {
+				sep();
+				statSpans.push(span(formatDuration(progress.durationMs), "dim"));
+			}
+			if (progress.cost > 0) {
+				sep();
+				statSpans.push(span(`$${progress.cost.toFixed(2)}`, "statusLineCost"));
+			}
+			const statsRow: NativeChild[] = [];
+			if (
+				progress.contextTokens &&
+				progress.contextTokens > 0 &&
+				progress.contextWindow &&
+				progress.contextWindow > 0
+			) {
+				const fraction = progress.contextTokens / progress.contextWindow;
+				statsRow.push(
+					node("progress", {
+						value: Math.min(1, fraction),
+						label: formatContextUsage(fraction * 100, progress.contextWindow),
+						max: { w: "24ch" },
+					}),
+				);
+			}
+			if (statSpans.length > 0) statsRow.push(text(statSpans, { truncate: "end" }));
+			if (statsRow.length > 0) children.push(node("row", { gap: "md", align: "center" }, statsRow, "stats"));
+		}
+		children.push(
+			hintsRow([
+				this.#editor ? actionHint("tui.input.submit", "send") : undefined,
+				{ keys: ["escape"], label: "close" },
+				{ keys: [this.#deps.expandKeys[0] ?? "ctrl+o"], label: "expand" },
+			]),
+		);
+		const head = [span("Agent Hub", "accent"), span(` ${theme.sep.dot} `, "dim"), span(id, "accent")];
+		const described = overlayCard("omp.hub.transcript", head, children);
+		this.#nativeCache = { signature, node: described };
+		return described;
 	}
 
 	#frame(context: TranscriptBrowserRenderContext): TranscriptBrowserFrame {

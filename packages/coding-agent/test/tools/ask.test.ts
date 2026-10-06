@@ -1,4 +1,4 @@
-import { beforeAll, describe, expect, it, spyOn, vi } from "bun:test";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, spyOn, vi } from "bun:test";
 import { stripVTControlCharacters } from "node:util";
 import { type } from "@oh-my-pi/omptype";
 import type { AgentToolContext } from "@oh-my-pi/pi-agent-core";
@@ -14,6 +14,15 @@ import { AskTool } from "@oh-my-pi/pi-coding-agent/tools/ask";
 import { askToolRenderer } from "@oh-my-pi/pi-tui/tools/ask";
 import { ToolAbortError } from "@oh-my-pi/pi-coding-agent/tools/tool-errors";
 import { TERMINAL } from "@oh-my-pi/pi-tui";
+import { tagImageAttachmentSource } from "@oh-my-pi/pi-tui/prompt/image-source";
+import * as ai from "@oh-my-pi/pi-ai";
+import type { Api, AssistantMessage, Model } from "@oh-my-pi/pi-ai";
+import { TempDir } from "@oh-my-pi/pi-utils";
+import { buildModel } from "@oh-my-pi/pi-catalog/build";
+
+// 1x1 transparent PNG.
+const TINY_PNG_BASE64 =
+	"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFBQIAX8jx0gAAAABJRU5ErkJggg==";
 
 function createSession(overrides: Partial<ToolSession> = {}): ToolSession {
 	return {
@@ -1189,6 +1198,62 @@ describe("AskTool multi-question navigation", () => {
 		expect(result.details?.results?.[1]?.selectedOptions).toEqual(["two"]);
 		expect(editor).toHaveBeenCalledTimes(1);
 	});
+
+	it("offers Done selecting for multi-select inside a multi-question ask without arrow navigation", async () => {
+		const tool = new AskTool(createSession());
+		const context = createContext({
+			select: async (prompt, options) => {
+				const labels = options.map(selectItemLabel);
+				if (prompt.includes("Pick one")) return labels.find(label => label?.endsWith("gamma"));
+				if (!prompt.includes("selected")) return labels.find(label => label?.endsWith("alpha"));
+				return labels.find(label => label?.includes("Done selecting"));
+			},
+		});
+
+		const result = await tool.execute(
+			"call-multi-in-many-done",
+			{
+				questions: [
+					{ id: "many", question: "Pick many", options: [{ label: "alpha" }, { label: "beta" }], multi: true },
+					{ id: "one", question: "Pick one", options: [{ label: "gamma" }, { label: "delta" }] },
+				],
+			},
+			undefined,
+			undefined,
+			context,
+		);
+
+		expect(result.details?.results?.map(r => r.selectedOptions)).toEqual([["alpha"], ["gamma"]]);
+	});
+
+	it("reports ticked options together with Other text for a multi-select question", async () => {
+		const tool = new AskTool(createSession());
+		const featureChoices = ["alpha", "beta", "Other (type your own)"];
+		const questions = [
+			{
+				id: "features",
+				question: "Features?",
+				options: [{ label: "alpha" }, { label: "beta" }, { label: "gamma" }],
+				multi: true,
+			},
+			{
+				id: "summary",
+				question: "Summary?",
+				options: [{ label: "one" }, { label: "two" }],
+			},
+		];
+		const context = createContext({
+			select: async prompt => (prompt.includes("Features?") ? featureChoices.shift() : "two"),
+			editor: async () => "also X",
+		});
+
+		const result = await tool.execute("call-multi-other", { questions }, undefined, undefined, context);
+
+		expect(result.content[0]).toEqual({
+			type: "text",
+			text: 'User answers:\nfeatures: [alpha, beta] + "also X"\nsummary: two',
+		});
+	});
 });
 
 describe("AskTool option markers", () => {
@@ -1441,6 +1506,234 @@ describe("AskTool rich ask dialog", () => {
 			customInput: undefined,
 			note: "My Custom Note",
 			timedOut: undefined,
+		});
+	});
+
+	it("returns custom-answer and note images after text, numbering markers across answers in text and details", async () => {
+		// A clipboard paste committed to the session carries its file; the model gets the same
+		// source notice a main-editor attachment gets, right before the image.
+		const customImage = tagImageAttachmentSource(
+			{ type: "image", data: "custom-image", mimeType: "image/webp" },
+			"local://pasted-image-abc.webp",
+			"image",
+		);
+		const firstImage = { type: "image" as const, data: "first-image", mimeType: "image/png" };
+		const secondImage = { type: "image" as const, data: "second-image", mimeType: "image/jpeg" };
+		const askDialog = vi.fn().mockResolvedValue({
+			kind: "submit",
+			results: [
+				{
+					id: "q1",
+					selectedOptions: [],
+					customInput: "Like [Image #1]",
+					customInputImages: [customImage],
+					note: "Evidence [Image #1]",
+					noteImages: [firstImage],
+				},
+				{
+					id: "q2",
+					selectedOptions: ["B"],
+					note: "Evidence [Image #1]",
+					noteImages: [secondImage],
+				},
+			],
+		});
+		const tool = new AskTool(createSession());
+		const result = await tool.execute(
+			"call-images",
+			{
+				questions: [
+					{ id: "q1", question: "Q1?", options: [{ label: "A" }] },
+					{ id: "q2", question: "Q2?", options: [{ label: "B" }] },
+				],
+			},
+			undefined,
+			undefined,
+			createContext({ askDialog }),
+		);
+
+		expect(result.content).toEqual([
+			{
+				type: "text",
+				text: 'User answers:\nq1: "Like [Image #1]" (note: Evidence [Image #2])\nq2: B (note: Evidence [Image #3])',
+			},
+			{ type: "text", text: expect.stringContaining("local://pasted-image-abc.webp") },
+			// The source tag stays on the block so `attachment://1` resolves to the pasted file.
+			customImage,
+			{ type: "image", data: "first-image", mimeType: "image/png" },
+			{ type: "image", data: "second-image", mimeType: "image/jpeg" },
+		]);
+		expect(result.details).toMatchObject({
+			results: [{ customInput: "Like [Image #1]", note: "Evidence [Image #2]" }, { note: "Evidence [Image #3]" }],
+		});
+		for (const data of ["custom-image", "first-image", "second-image"]) {
+			expect(JSON.stringify(result.details)).not.toContain(data);
+		}
+	});
+
+	it("renumbers only markers that refer to the answer's own images", async () => {
+		const image = { type: "image" as const, data: "image", mimeType: "image/png" };
+		const askDialog = vi.fn().mockResolvedValue({
+			kind: "submit",
+			results: [
+				{ id: "q1", selectedOptions: [], customInput: "Like [Image #1]", customInputImages: [image] },
+				{
+					id: "q2",
+					selectedOptions: [],
+					customInput: "Match the mock in [Image #1]",
+					note: "[Image #1] beside [Image #5]",
+					noteImages: [image],
+				},
+			],
+		});
+		const result = await new AskTool(createSession()).execute(
+			"call-typed-markers",
+			{
+				questions: [
+					{ id: "q1", question: "Q1?", options: [{ label: "A" }] },
+					{ id: "q2", question: "Q2?", options: [{ label: "B" }] },
+				],
+			},
+			undefined,
+			undefined,
+			createContext({ askDialog }),
+		);
+
+		expect(result.details).toMatchObject({
+			results: [
+				{ customInput: "Like [Image #1]" },
+				{ customInput: "Match the mock in [Image #1]", note: "[Image #2] beside [Image #5]" },
+			],
+		});
+	});
+
+	describe("answer images for a text-only model", () => {
+		const visionModel = buildModel({
+			id: "gpt-4o",
+			name: "GPT-4o",
+			api: "openai-responses",
+			provider: "openai",
+			baseUrl: "https://api.openai.com/v1",
+			reasoning: false,
+			input: ["text", "image"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 128000,
+			maxTokens: 4096,
+		});
+		const textModel: Model<Api> = { ...visionModel, id: "gpt-4.1-mini", input: ["text"] };
+		const image = { type: "image" as const, data: TINY_PNG_BASE64, mimeType: "image/png" };
+		const answerText = { type: "text" as const, text: "User selected: A\nUser added note: see [Image #1]" };
+		let tempDir: TempDir;
+		let describeCalls: unknown[][];
+
+		beforeEach(async () => {
+			tempDir = await TempDir.create("@omp-ask-describe-");
+			describeCalls = [];
+			vi.spyOn(ai, "completeSimple").mockImplementation(completeImpl);
+		});
+
+		afterEach(async () => {
+			vi.restoreAllMocks();
+			await tempDir.remove();
+		});
+
+		/** Vision-model stand-in, shaped like `makeCompleteStub` in image-vision-fallback.test.ts. */
+		const completeImpl = async (...args: unknown[]) => {
+			describeCalls.push(args);
+			return {
+				role: "assistant",
+				api: visionModel.api,
+				provider: visionModel.provider,
+				model: visionModel.id,
+				usage: {
+					input: 1,
+					output: 1,
+					cacheRead: 0,
+					cacheWrite: 0,
+					totalTokens: 2,
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+				},
+				stopReason: "stop",
+				timestamp: Date.now(),
+				content: [{ type: "text", text: "A red banner reading ZEBRA 42." }],
+			} satisfies AssistantMessage;
+		};
+
+		function runAsk(options: {
+			model: Model<Api>;
+			settings?: Settings;
+			getApiKey?: () => Promise<string | undefined>;
+			selectedOptions?: string[];
+		}) {
+			const askDialog = vi.fn().mockResolvedValue({
+				kind: "submit",
+				results: [
+					{
+						id: "q1",
+						selectedOptions: options.selectedOptions ?? ["A"],
+						note: "see [Image #1]",
+						noteImages: [image],
+					},
+				],
+			});
+			return new AskTool(
+				createSession({
+					settings: options.settings ?? Settings.isolated(),
+					getActiveModel: () => options.model,
+					getArtifactsDir: () => tempDir.path(),
+					getSessionId: () => "session",
+					modelRegistry: {
+						getAvailable: () => [visionModel],
+						getApiKey: options.getApiKey ?? (async () => "test-key"),
+						resolver: () => async () => "test-key",
+					} as unknown as ToolSession["modelRegistry"],
+				}),
+			).execute(
+				"call-describe",
+				{ questions: [{ id: "q1", question: "Q?", options: [{ label: "A" }] }] },
+				undefined,
+				undefined,
+				createContext({ askDialog }),
+			);
+		}
+
+		it("follows each answer image with a vision-model description", async () => {
+			const result = await runAsk({ model: textModel });
+
+			expect(result.content).toEqual([
+				answerText,
+				image,
+				{ type: "text", text: expect.stringContaining("A red banner reading ZEBRA 42.") },
+			]);
+		});
+
+		it("keeps the answer and its images when describing them fails", async () => {
+			const result = await runAsk({
+				model: textModel,
+				getApiKey: async () => {
+					throw new Error("credential lookup failed");
+				},
+			});
+
+			expect(result.content).toEqual([answerText, image]);
+		});
+
+		it("makes no vision call for a cancelled ask", async () => {
+			await expect(runAsk({ model: textModel, selectedOptions: [] })).rejects.toBeInstanceOf(ToolAbortError);
+			expect(describeCalls).toHaveLength(0);
+		});
+
+		it("sends the image alone to a vision model, or with the setting off", async () => {
+			expect((await runAsk({ model: visionModel })).content).toEqual([answerText, image]);
+			expect(
+				(
+					await runAsk({
+						model: textModel,
+						settings: Settings.isolated({ "images.describeForTextModels": false }),
+					})
+				).content,
+			).toEqual([answerText, image]);
+			expect(describeCalls).toHaveLength(0);
 		});
 	});
 

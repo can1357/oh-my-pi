@@ -1,5 +1,8 @@
+pub(crate) mod menus;
+mod popup;
+
 use std::{
-	collections::HashSet,
+	collections::{HashSet, VecDeque},
 	ffi::c_void,
 	mem,
 	ptr::{self, NonNull},
@@ -10,7 +13,8 @@ use std::{
 
 use objc2_application_services::{AXError, AXIsProcessTrusted, AXUIElement, AXValue, AXValueType};
 use objc2_core_foundation::{
-	CFArray, CFBoolean, CFRange, CFRetained, CFString, CFType, CGPoint, CGSize, Type,
+	CFArray, CFBoolean, CFDate, CFNumber, CFRange, CFRetained, CFString, CFTimeZone, CFType,
+	CGPoint, CGSize, Type,
 };
 
 use super::{
@@ -20,7 +24,7 @@ use super::{
 		error::{CoreResult, DesktopError},
 		types::DesktopWindow,
 	},
-	process, skylight,
+	date, process, skylight,
 };
 
 const AX_TIMEOUT_SECONDS: f32 = 2.0;
@@ -29,6 +33,10 @@ const AX_TIMEOUT_SECONDS: f32 = 2.0;
 const PROBE_TIMEOUT_SECONDS: f32 = 0.5;
 /// Bounded `AXParent` ascent when an element does not expose `AXWindow`.
 const MAX_ANCESTRY_DEPTH: usize = 40;
+/// Bounds the search for a sheet, popover, or open menu that `AXWindows` does
+/// not list, matching the snapshot walk's own node and depth budget.
+const MAX_ATTACHED_SEARCH_NODES: usize = 5_000;
+const MAX_ATTACHED_SEARCH_DEPTH: usize = 24;
 
 type GetWindowIdFn = unsafe extern "C" fn(&AXUIElement, *mut u32) -> AXError;
 
@@ -206,6 +214,121 @@ fn element_window(element: &AXUIElement) -> Option<CFRetained<AXUIElement>> {
 	None
 }
 
+/// An element that stands for its own `WindowServer` window but is absent
+/// from `AXWindows`, with what can identify that window.
+#[derive(Clone, Copy, Debug)]
+enum AttachedCandidate {
+	/// An `AXSheet` or `AXPopover`: `_AXUIElementGetWindow` reports its own
+	/// window id.
+	OwnWindow(Option<u32>),
+	/// An open `AXMenu`: it reports no window id, or the id of the window it
+	/// was opened from, so only its frame can identify it.
+	Menu { frame_matches: bool },
+}
+
+/// Picks the candidate that represents native window `expected`: the sheet
+/// or popover reporting that exact id, else the one menu whose frame matches.
+///
+/// A sheet or popover reporting another id is a different window and never
+/// inherits the target by frame. Ambiguity refuses rather than guessing.
+fn select_attached(candidates: &[AttachedCandidate], expected: u32) -> CoreResult<Option<usize>> {
+	let unique = |is_match: &dyn Fn(&AttachedCandidate) -> bool, what: &str| {
+		let mut matches = (0..candidates.len()).filter(|&index| is_match(&candidates[index]));
+		match (matches.next(), matches.next()) {
+			(None, _) => Ok(None),
+			(Some(index), None) => Ok(Some(index)),
+			(Some(_), Some(_)) => Err(DesktopError::ax_failed(format!(
+				"native window {expected} matches more than one accessibility {what}"
+			))),
+		}
+	};
+	let exact = unique(
+		&|candidate| matches!(candidate, AttachedCandidate::OwnWindow(Some(id)) if *id == expected),
+		"sheet or popover",
+	)?;
+	if exact.is_some() {
+		return Ok(exact);
+	}
+	unique(
+		&|candidate| matches!(candidate, AttachedCandidate::Menu { frame_matches: true }),
+		"menu frame",
+	)
+}
+
+/// Outcome of the bounded search for an attached window.
+enum AttachedSearch {
+	Found(CFRetained<AXUIElement>),
+	/// Nothing matched; `truncated` is set when the node or depth budget cut
+	/// the walk short, so the window may still exist deeper in the tree.
+	Missing {
+		truncated: bool,
+	},
+}
+
+/// Finds the sheet, popover, or open menu of `app` that represents `win`,
+/// by a bounded breadth-first walk of the application's accessibility tree.
+/// `AppKit` gives each its own `WindowServer` window but lists only standard
+/// windows in `AXWindows`.
+///
+/// A sheet or popover reporting `expected` ends the walk at once: a window id
+/// names one window, so no later candidate can compete with it. Only menus,
+/// which match by frame, need the whole walk to prove uniqueness.
+fn attached_window(
+	app: &AXUIElement,
+	expected: u32,
+	win: &DesktopWindow,
+) -> CoreResult<AttachedSearch> {
+	let mut queue: VecDeque<_> = copy_elements_optional(app, "AXChildren")
+		.unwrap_or_default()
+		.into_iter()
+		.map(|element| (element, 1usize))
+		.collect();
+	let mut elements = Vec::new();
+	let mut candidates = Vec::new();
+	let mut visited = 0usize;
+	let mut truncated = false;
+	while let Some((element, depth)) = queue.pop_front() {
+		visited += 1;
+		if visited > MAX_ATTACHED_SEARCH_NODES {
+			truncated = true;
+			break;
+		}
+		let (candidate, descend) = match copy_string(&element, "AXRole").as_deref() {
+			Some("AXSheet" | "AXPopover") => {
+				let id = window_id(&element);
+				if id == Some(expected) {
+					return Ok(AttachedSearch::Found(element));
+				}
+				(Some(AttachedCandidate::OwnWindow(id)), true)
+			},
+			Some("AXMenu") => {
+				// A closed menu keeps its items in the tree at zero size; only
+				// an open menu can hold an open submenu.
+				let frame = bounds(&element).filter(|b| b.width > 0.0 && b.height > 0.0);
+				let frame_matches = frame.is_some_and(|b| bounds_matches_window(b, win));
+				(Some(AttachedCandidate::Menu { frame_matches }), frame.is_some())
+			},
+			_ => (None, true),
+		};
+		if descend {
+			let children = copy_elements_optional(&element, "AXChildren").unwrap_or_default();
+			if depth < MAX_ATTACHED_SEARCH_DEPTH {
+				queue.extend(children.into_iter().map(|child| (child, depth + 1)));
+			} else if !children.is_empty() {
+				truncated = true;
+			}
+		}
+		if let Some(candidate) = candidate {
+			candidates.push(candidate);
+			elements.push(element);
+		}
+	}
+	Ok(match select_attached(&candidates, expected)? {
+		Some(index) => AttachedSearch::Found(elements.swap_remove(index)),
+		None => AttachedSearch::Missing { truncated },
+	})
+}
+
 impl AxBackend for MacAx {
 	fn window_root(&mut self, win: &DesktopWindow) -> CoreResult<AxHandle> {
 		ensure_trusted()?;
@@ -232,8 +355,26 @@ impl AxBackend for MacAx {
 					return Ok(AxHandle::Mac(element.clone()));
 				}
 			}
+			// Sheets, popovers, and open menus are separate native windows that
+			// `AXWindows` omits.
+			let truncated = match attached_window(&app, expected_id, win)? {
+				AttachedSearch::Found(element) => {
+					set_timeout(&element)?;
+					return Ok(AxHandle::Mac(element));
+				},
+				AttachedSearch::Missing { truncated } => truncated,
+			};
+			let scope = if truncated {
+				format!(
+					"; the search stopped at its limit of {MAX_ATTACHED_SEARCH_NODES} nodes or depth \
+					 {MAX_ATTACHED_SEARCH_DEPTH}, so the window may be nested deeper"
+				)
+			} else {
+				String::new()
+			};
 			return Err(DesktopError::ax_failed(format!(
-				"native window {expected_id} was not found in the application's accessibility windows"
+				"native window {expected_id} was not found in the application's accessibility \
+				 windows, sheets, popovers, or open menus{scope}"
 			)));
 		}
 		// Without the native id SPI, require a unique title AND frame match.
@@ -320,13 +461,7 @@ impl AxBackend for MacAx {
 				actions.join(", "),
 			)));
 		}
-		let action = CFString::from_str(&native);
-		let perform = || {
-			// SAFETY: The retained element and action CFString remain valid for the
-			// synchronous AX request.
-			let error = unsafe { element.perform_action(&action) };
-			ax_result(error, format!("AX action '{native}' failed"))
-		};
+		let perform = || perform_action(element, &native);
 		// AXRaise is an explicit request to change stacking, including the
 		// takeover preparation path. Other semantic actions must stay background.
 		if native == "AXRaise" {
@@ -338,13 +473,25 @@ impl AxBackend for MacAx {
 
 	fn set_value(&mut self, h: &AxHandle, value: &str) -> CoreResult<()> {
 		let element = mac_handle(h)?;
+		// A popup's value is chosen from its menu, not written. This runs before
+		// the text-target refusals: nothing is typed or written, and the verdict
+		// is the popup's own read-back after a real menu press.
+		if copy_string(element, "AXRole").as_deref() == Some("AXPopUpButton") {
+			return skylight::with_background_guard(element_pid(element)?, || {
+				popup::choose(element, value)
+			});
+		}
 		// Web AXValue can echo a write without the renderer accepting it. The
-		// API has no "unverified" outcome, so refuse before mutating that surface.
+		// API has no "unverified" outcome, so refuse before mutating that
+		// surface.
 		ensure_native_text_target(element)?;
 		if !attribute_settable(element, "AXValue") {
 			return Err(DesktopError::ax_failed(
 				"AXValue is not settable; no typing fallback was attempted",
 			));
+		}
+		if let Some(current) = copy_date(element, "AXValue") {
+			return set_date_value(element, value, current);
 		}
 		skylight::with_background_guard(element_pid(element)?, || {
 			set_string_value(element, "AXValue", value)?;
@@ -356,8 +503,8 @@ impl AxBackend for MacAx {
 		let element = mac_handle(h)?;
 		let attribute = CFString::from_str("AXFocused");
 		skylight::with_background_guard(element_pid(element)?, || {
-			// SAFETY: The singleton CFBoolean and retained element remain valid for
-			// the synchronous setter call.
+			// SAFETY: The singleton CFBoolean and retained element remain valid
+			// for the synchronous setter call.
 			let error = unsafe { element.set_attribute_value(&attribute, CFBoolean::new(true)) };
 			ax_result(error, "setting AXFocused=true failed")
 		})
@@ -498,6 +645,45 @@ fn verify_text_value(element: &AXUIElement, expected: &str) -> CoreResult<()> {
 	}
 }
 
+/// Date and time controls publish `AXValue` as a `CFDate` and refuse the same
+/// date written as a `CFString`, so an ISO-8601 value is written as a `CFDate`
+/// in the system time zone the control displays, then read back as one.
+fn set_date_value(element: &AXUIElement, text: &str, current: f64) -> CoreResult<()> {
+	// CF caches the system zone per process; the target app follows changes to
+	// it.
+	CFTimeZone::reset_system();
+	let zone = CFTimeZone::system()
+		.ok_or_else(|| DesktopError::ax_failed("the system time zone is unavailable"))?;
+	let offset_at = |at: f64| zone.seconds_from_gmt(at) as i64;
+	let Some(request) = date::parse(text) else {
+		return Err(DesktopError::ax_failed(format!(
+			"AXValue is a date and {text:?} is not ISO-8601: write {}; it reads {} now; nothing was \
+			 written",
+			date::ACCEPTED_FORMS,
+			date::format_local(current, offset_at),
+		)));
+	};
+	let target = request
+		.absolute_time(current, offset_at)
+		.map_err(|reason| DesktopError::ax_failed(format!("{reason}; nothing was written")))?;
+	let value = CFDate::new(None, target)
+		.ok_or_else(|| DesktopError::ax_failed("creating the CFDate to write failed"))?;
+	let attribute = CFString::from_str("AXValue");
+	skylight::with_background_guard(element_pid(element)?, || {
+		// SAFETY: The element, attribute and date remain retained for the setter.
+		let error = unsafe { element.set_attribute_value(&attribute, &value) };
+		ax_result(error, "setting AXValue to a date failed")?;
+		match copy_date(element, "AXValue") {
+			Some(actual) if (actual - target).abs() < 1e-3 => Ok(()),
+			actual => Err(DesktopError::ax_failed(format!(
+				"AX accepted the date write but the control reads {} instead of {}",
+				actual.map_or_else(|| "no date".to_owned(), |at| date::format_local(at, offset_at)),
+				date::format_local(target, offset_at),
+			))),
+		}
+	})
+}
+
 /// Inserts into a native field only when its focused element belongs to this
 /// exact window. `false` means no write was attempted; an attempted write never
 /// falls through to keystrokes, including timeouts or partial delivery.
@@ -513,7 +699,8 @@ pub(super) fn insert_native_text(pid: libc::pid_t, wid: u32, text: &str) -> Core
 		|| !matches!(
 			copy_string(&element, "AXRole").as_deref(),
 			Some("AXTextField" | "AXTextArea" | "AXComboBox")
-		) || !attribute_settable(&element, "AXSelectedText")
+		)
+		|| !attribute_settable(&element, "AXSelectedText")
 	{
 		return Ok(false);
 	}
@@ -575,6 +762,14 @@ fn replace_utf16_selection(
 	result.push_str(text);
 	result.push_str(&before[end_byte..]);
 	Some(result)
+}
+
+fn perform_action(element: &AXUIElement, action: &str) -> CoreResult<()> {
+	let name = CFString::from_str(action);
+	// SAFETY: The retained element and action CFString remain valid for the
+	// synchronous AX request.
+	let error = unsafe { element.perform_action(&name) };
+	ax_result(error, format!("AX action '{action}' failed"))
 }
 
 fn ensure_trusted() -> CoreResult<()> {
@@ -664,6 +859,14 @@ fn copy_attribute_result(
 
 fn copy_attribute(element: &AXUIElement, attribute: &str) -> Option<CFRetained<CFType>> {
 	copy_attribute_result(element, attribute).ok().flatten()
+}
+
+/// The attribute's value as a `CFAbsoluteTime`, when it is a `CFDate`.
+fn copy_date(element: &AXUIElement, attribute: &str) -> Option<f64> {
+	let value = copy_attribute(element, attribute)?
+		.downcast::<CFDate>()
+		.ok()?;
+	Some(value.absolute_time())
 }
 
 fn copy_string(element: &AXUIElement, attribute: &str) -> Option<String> {
@@ -801,17 +1004,17 @@ fn retained_element(pointer: *const AXUIElement) -> CoreResult<CFRetained<AXUIEl
 	Ok(unsafe { CFRetained::from_raw(pointer) })
 }
 
-// The test-only handle variant makes this fallible under `cfg(test)`; keep one
+// The test-only handle variants make this fallible under `cfg(test)`; keep one
 // call contract.
 #[cfg_attr(
 	not(test),
-	allow(clippy::unnecessary_wraps, reason = "the test-only handle variant is fallible")
+	allow(clippy::unnecessary_wraps, reason = "the test-only handle variants are fallible")
 )]
 fn mac_handle(handle: &AxHandle) -> CoreResult<&AXUIElement> {
 	match handle {
 		AxHandle::Mac(element) => Ok(element),
 		#[cfg(test)]
-		AxHandle::Test(_) => Err(DesktopError::ax_failed("non-macOS AX handle passed to MacAx")),
+		_ => Err(DesktopError::ax_failed("non-macOS AX handle passed to MacAx")),
 	}
 }
 
@@ -832,6 +1035,13 @@ fn action_name(action: &str) -> String {
 	}
 }
 
+/// Renders an AX attribute value as stable, agent-readable text for
+/// [`AxProps::value`] and `attributes()`.
+///
+/// Numbers print as numbers (checkbox/radio state, slider position) and an
+/// element reference (a radio group's selected button) prints as that
+/// element's title or description, so snapshots never carry CF debug text
+/// whose pointer addresses change between otherwise identical reads.
 fn stringify_value(value: &CFType) -> String {
 	if let Some(string) = value.downcast_ref::<CFString>() {
 		return string.to_string();
@@ -839,7 +1049,28 @@ fn stringify_value(value: &CFType) -> String {
 	if let Some(boolean) = value.downcast_ref::<CFBoolean>() {
 		return boolean.as_bool().to_string();
 	}
+	if let Some(number) = value.downcast_ref::<CFNumber>() {
+		return stringify_number(number);
+	}
+	if let Some(element) = value.downcast_ref::<AXUIElement>() {
+		return nonempty(copy_string(element, "AXTitle"))
+			.or_else(|| nonempty(copy_string(element, "AXDescription")))
+			.unwrap_or_default();
+	}
 	format!("{value:?}")
+}
+
+/// Formats a `CFNumber` at its stored precision: `Float32` values read back
+/// as `f32` so `0.185` does not widen to `0.18500000238418579`.
+fn stringify_number(number: &CFNumber) -> String {
+	let text = if !number.is_float_type() {
+		number.as_i64().map(|value| value.to_string())
+	} else if number.byte_size() <= 4 {
+		number.as_f32().map(|value| value.to_string())
+	} else {
+		number.as_f64().map(|value| value.to_string())
+	};
+	text.unwrap_or_default()
 }
 
 fn nonempty(value: Option<String>) -> Option<String> {
@@ -865,7 +1096,17 @@ fn ax_result(error: AXError, context: impl Into<String>) -> CoreResult<()> {
 
 #[cfg(test)]
 mod tests {
-	use super::replace_utf16_selection;
+	use objc2_core_foundation::CFNumber;
+
+	use super::{AttachedCandidate, replace_utf16_selection, select_attached, stringify_value};
+
+	#[test]
+	fn numeric_values_render_as_numbers_at_stored_precision() {
+		assert_eq!(stringify_value(&CFNumber::new_i32(1)), "1");
+		assert_eq!(stringify_value(&CFNumber::new_i64(-3)), "-3");
+		assert_eq!(stringify_value(&CFNumber::new_f64(0.185)), "0.185");
+		assert_eq!(stringify_value(&CFNumber::new_f32(0.185)), "0.185");
+	}
 
 	#[test]
 	fn selected_text_replaces_utf16_selection_without_losing_surrounding_text() {
@@ -880,5 +1121,36 @@ mod tests {
 		for (start, length) in [(-1, 0), (0, -1), (2, 0), (1, 1), (4, 9), (6, 0)] {
 			assert_eq!(replace_utf16_selection("a😀bc", start, length, "X"), None);
 		}
+	}
+
+	#[test]
+	fn sheet_or_popover_window_id_beats_a_menu_at_the_same_frame() {
+		let candidates =
+			[AttachedCandidate::Menu { frame_matches: true }, AttachedCandidate::OwnWindow(Some(51))];
+		assert_eq!(select_attached(&candidates, 51).unwrap(), Some(1));
+	}
+
+	#[test]
+	fn open_menu_resolves_by_its_unique_matching_frame() {
+		let candidates = [
+			AttachedCandidate::OwnWindow(Some(69)),
+			AttachedCandidate::Menu { frame_matches: false },
+			AttachedCandidate::Menu { frame_matches: true },
+		];
+		assert_eq!(select_attached(&candidates, 57).unwrap(), Some(2));
+	}
+
+	#[test]
+	fn sheet_reporting_another_window_id_never_inherits_the_target() {
+		let candidates = [AttachedCandidate::OwnWindow(Some(60)), AttachedCandidate::OwnWindow(None)];
+		assert_eq!(select_attached(&candidates, 51).unwrap(), None);
+	}
+
+	#[test]
+	fn ambiguous_menu_frames_are_refused() {
+		let candidates = [AttachedCandidate::Menu { frame_matches: true }, AttachedCandidate::Menu {
+			frame_matches: true,
+		}];
+		assert!(select_attached(&candidates, 57).is_err());
 	}
 }

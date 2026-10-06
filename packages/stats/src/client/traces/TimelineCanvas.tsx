@@ -8,7 +8,7 @@
 import { ChevronDown, ChevronRight } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { formatDurationMs } from "../data/formatters";
+import { formatDurationMs, formatInteger } from "../data/formatters";
 import type { TraceMarker, TraceSpan, TraceSpanKind, TraceTrack } from "../types";
 import { buildTicks, formatOffset, type TraceScale } from "./time-scale";
 import { type TraceTheme, useTraceTheme } from "./trace-colors";
@@ -738,7 +738,7 @@ function renderTooltip(hover: HoverState, traceStart: number) {
 			</div>
 			{span.kind === "model" && (
 				<div className="muted num">
-					{span.tokens !== undefined && <>{span.tokens.toLocaleString()} tok</>}
+					{span.tokens !== undefined && <>{formatInteger(span.tokens)} tok</>}
 					{span.cost !== undefined && <> · ${span.cost.toFixed(4)}</>}
 					{span.ttft !== undefined && <> · TTFT {formatDurationMs(span.ttft)}</>}
 					{span.isError && <> · error</>}

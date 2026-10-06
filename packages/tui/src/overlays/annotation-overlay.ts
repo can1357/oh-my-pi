@@ -1,5 +1,5 @@
 import {
-	type Component,
+	type Focusable,
 	Editor,
 	Ellipsis,
 	matchesKey,
@@ -11,6 +11,8 @@ import {
 	visibleWidth,
 	wrapTextWithAnsi,
 } from "../index";
+import { compositeLineAt } from "../render/composite";
+import { wrapLiteralLine } from "../utils";
 import { appKey, editorKey } from "../chrome/keybinding-hints";
 import { formatKeyHint, formatKeyHints, type KeybindingsManager } from "../app-keybindings";
 import type { Keybinding } from "../keybindings";
@@ -37,6 +39,10 @@ import {
 	topBorderSplit,
 } from "../chrome/overlay-box";
 import { matchesAppExternalEditor } from "../keybinding-matchers";
+import type { KeyName } from "../key-hint-format";
+import { item, keyed, node, row as rowNode, span, text } from "../native/describe";
+import { leafKey, type NativeChild, type NativeNode, type NativeUiEvent } from "../native/node";
+import { hintsRow, itemIndex, type NativeHint, noteSpans, overlayCard, selectList } from "../native/overlay";
 
 function fit(text: string, width: number): string {
 	if (width <= 0) return "";
@@ -90,7 +96,8 @@ interface CommittedTextAnnotation {
 interface RenderedDiffBody {
 	lines: string[];
 	renderedRowBySource: number[];
-	selectedSourceLines: string[];
+	sourceIndexByRenderedRow: Array<number | undefined>;
+	selectedSourceLines: Array<string | undefined>;
 }
 
 interface RenderedBody {
@@ -99,6 +106,13 @@ interface RenderedBody {
 }
 
 type FocusRegion = "files" | "diff" | "actions";
+
+/** Described body rows of the current file (or text), rebuilt when the file or annotations change. */
+interface NativeBody {
+	fileIndex: number;
+	rev: number;
+	items: NativeNode[];
+}
 
 const SOURCE_SELECTION_GUTTER_WIDTH = 2;
 
@@ -134,7 +148,8 @@ function isTextSource(value: readonly ReviewDiffFile[] | TextReviewSource): valu
 }
 
 /** A fullscreen, annotated diff picker that only relies on public OMP APIs. */
-export class AnnotationOverlay implements Component {
+export class AnnotationOverlay implements Focusable {
+	focused = false;
 	#scrollView: ScrollView;
 	#editor: Editor;
 	#focus: FocusRegion = "files";
@@ -156,9 +171,18 @@ export class AnnotationOverlay implements Component {
 	#actions: readonly string[] = CODE_REVIEW_ACTIONS;
 	#textSource: TextReviewSource | undefined;
 	#textLines: readonly string[] = [];
-	#textViewportDriven = false;
-	#textRenderedRowBySource: readonly number[] = [];
-	#staticRenderedDiffBodies = new WeakMap<ReviewDiffFile, RenderedDiffBody>();
+	#viewportDriven = false;
+	/** Last viewport move went toward the end, so a viewport resting at its maximum offset selects the last visible row. */
+	#viewportTowardEnd = false;
+	#renderedRowBySource: readonly number[] = [];
+	#staticRenderedDiffBodies = new WeakMap<ReviewDiffFile, { width: number; body: RenderedDiffBody }>();
+	/** Bumped on every annotation change (each one pushes an undo snapshot) and on undo. */
+	#annotationRev = 0;
+	#nativeBody: NativeBody | undefined;
+	#nativeSig = "";
+	#nativeRoot: NativeNode | undefined;
+	/** Body the memoized root was built from. */
+	#nativeRootBody: NativeBody | undefined;
 
 	readonly #tui: TUI;
 	readonly #theme: Theme;
@@ -248,13 +272,14 @@ export class AnnotationOverlay implements Component {
 		});
 		this.#editor.setBorderVisible(false);
 		this.#editor.setPromptGutter("> ");
-		this.#editor.setUseTerminalCursor(false);
-		// Keep the editor's CURSOR_MARKER for terminal cursor placement, but
-		// replace its visible end-of-input caret with a stable blank cell.
-		this.#editor.cursorOverride = " ";
 		this.#editor.setScrollbarVisible(true);
 		this.#editor.onSubmit = value => this.#commitAnnotation(value);
 		this.#resetSourceCursor();
+	}
+
+	/** Keep the nested editor's cursor mode aligned with the overlay focus target. */
+	setUseTerminalCursor(useTerminalCursor: boolean): void {
+		this.#editor.setUseTerminalCursor(useTerminalCursor);
 	}
 
 	invalidate(): void {
@@ -399,34 +424,48 @@ export class AnnotationOverlay implements Component {
 			return;
 		}
 		if (this.#keybindings.matches(data, "tui.select.pageUp")) {
-			if (this.#textSource) {
-				this.#scrollView.page(-1);
-				this.#textViewportDriven = true;
-				this.#syncTextCursorToViewport();
-			} else {
+			if (this.#tui.nativeRendering && !this.#textSource) {
 				this.#moveSourceCursor(-Math.max(1, this.#bodyHeight - 1));
+			} else {
+				this.#scrollView.page(-1);
+				this.#viewportDriven = true;
+				this.#viewportTowardEnd = false;
+				this.#syncCursorToViewport();
 			}
 			return;
 		}
 		if (this.#keybindings.matches(data, "tui.select.pageDown")) {
-			if (this.#textSource) {
-				this.#scrollView.page(1);
-				this.#textViewportDriven = true;
-				this.#syncTextCursorToViewport();
-			} else {
+			if (this.#tui.nativeRendering && !this.#textSource) {
 				this.#moveSourceCursor(Math.max(1, this.#bodyHeight - 1));
+			} else {
+				this.#scrollView.page(1);
+				this.#viewportDriven = true;
+				this.#viewportTowardEnd = true;
+				this.#syncCursorToViewport();
 			}
 			return;
 		}
 		if (data === "g" || matchesKey(data, "home")) {
 			this.#sourceIndex = 0;
-			this.#textViewportDriven = false;
+			if (this.#textSource || this.#tui.nativeRendering) {
+				this.#viewportDriven = false;
+			} else {
+				this.#scrollView.scrollToTop();
+				this.#viewportDriven = true;
+				this.#viewportTowardEnd = false;
+			}
 		} else if (data === "G" || matchesKey(data, "end")) {
 			this.#sourceIndex = Math.max(
 				0,
 				(this.#textSource ? this.#textLines.length : this.#currentSourceRows().length) - 1,
 			);
-			this.#textViewportDriven = false;
+			if (this.#textSource || this.#tui.nativeRendering) {
+				this.#viewportDriven = false;
+			} else {
+				this.#scrollView.scrollToBottom();
+				this.#viewportDriven = true;
+				this.#viewportTowardEnd = true;
+			}
 		}
 	}
 
@@ -446,20 +485,26 @@ export class AnnotationOverlay implements Component {
 			}
 			return;
 		}
-		if (this.#keybindings.matches(data, "tui.select.confirm")) {
-			const disabled = this.#textSource ? !hasAnnotations : this.#actionIndex === 1 && !hasAnnotations;
-			if (disabled) return;
-			if (this.#textSource) {
-				this.#finish({
-					action: "paste",
-					annotations: this.getTextAnnotations(),
-				});
-			} else {
-				this.#finish({
-					action: this.#actionIndex === 0 ? "review" : "paste",
-					annotations: this.getAnnotations(),
-				});
-			}
+		if (this.#keybindings.matches(data, "tui.select.confirm")) this.#confirmAction();
+	}
+
+	#actionDisabled(index: number): boolean {
+		const hasAnnotations = this.#textSource ? this.#textAnnotations.length > 0 : this.#annotations.length > 0;
+		return this.#textSource ? !hasAnnotations : index === 1 && !hasAnnotations;
+	}
+
+	#confirmAction(): void {
+		if (this.#actionDisabled(this.#actionIndex)) return;
+		if (this.#textSource) {
+			this.#finish({
+				action: "paste",
+				annotations: this.getTextAnnotations(),
+			});
+		} else {
+			this.#finish({
+				action: this.#actionIndex === 0 ? "review" : "paste",
+				annotations: this.getAnnotations(),
+			});
 		}
 	}
 
@@ -477,6 +522,7 @@ export class AnnotationOverlay implements Component {
 
 	#resetSourceCursor(): void {
 		this.#sourceIndex = 0;
+		this.#viewportDriven = false;
 	}
 
 	#currentFile(): ReviewDiffFile | undefined {
@@ -487,20 +533,20 @@ export class AnnotationOverlay implements Component {
 		const file = this.#currentFile();
 		return file ? file.rows.filter(isSourceRow) : [];
 	}
-	#syncTextCursorToViewport(): void {
-		if (!this.#textSource || this.#textRenderedRowBySource.length === 0) return;
+	#syncCursorToViewport(): void {
+		if (this.#renderedRowBySource.length === 0) return;
 		const viewportTop = this.#scrollView.getScrollOffset();
 		const viewportBottom = viewportTop + Math.max(0, this.#bodyHeight - 1);
 		let topSourceIndex = 0;
 		let lastVisibleSourceIndex = 0;
-		for (let index = 1; index < this.#textRenderedRowBySource.length; index++) {
-			const renderedRow = this.#textRenderedRowBySource[index];
+		for (let index = 1; index < this.#renderedRowBySource.length; index++) {
+			const renderedRow = this.#renderedRowBySource[index];
 			if (renderedRow === undefined || renderedRow > viewportBottom) break;
 			lastVisibleSourceIndex = index;
 			if (renderedRow <= viewportTop) topSourceIndex = index;
 		}
-		const atBottom =
-			this.#scrollView.getMaxScrollOffset() > 0 && viewportTop === this.#scrollView.getMaxScrollOffset();
+		// A short pane has no scroll range, so paging toward the end must still reach the last row.
+		const atBottom = this.#viewportTowardEnd && viewportTop >= this.#scrollView.getMaxScrollOffset();
 		this.#sourceIndex = atBottom ? lastVisibleSourceIndex : topSourceIndex;
 	}
 
@@ -508,7 +554,7 @@ export class AnnotationOverlay implements Component {
 		const rowCount = this.#textSource ? this.#textLines.length : this.#currentSourceRows().length;
 		if (rowCount === 0) return;
 		this.#sourceIndex = Math.max(0, Math.min(rowCount - 1, this.#sourceIndex + delta));
-		if (this.#textSource) this.#textViewportDriven = false;
+		this.#viewportDriven = false;
 	}
 
 	#startAnnotation(scope: AnnotationScope, existingIndex?: number): void {
@@ -708,7 +754,10 @@ export class AnnotationOverlay implements Component {
 			chooser.selected = (chooser.selected + 1) % chooser.entries.length;
 			return;
 		}
-		if (!this.#keybindings.matches(data, "tui.select.confirm")) return;
+		if (this.#keybindings.matches(data, "tui.select.confirm")) this.#openChosenAnnotation(chooser);
+	}
+
+	#openChosenAnnotation(chooser: AnnotationChooser): void {
 		const index = chooser.entries[chooser.selected];
 		this.#annotationChooser = undefined;
 		if (index === undefined) return;
@@ -733,11 +782,13 @@ export class AnnotationOverlay implements Component {
 
 	#pushUndo(): void {
 		this.#undoStack.push({ annotations: [...this.#annotations], textAnnotations: [...this.#textAnnotations] });
+		this.#annotationRev++;
 	}
 
 	#undoAnnotation(): void {
 		const snapshot = this.#undoStack.pop();
 		if (!snapshot) return;
+		this.#annotationRev++;
 		this.#annotations = snapshot.annotations;
 		this.#textAnnotations = snapshot.textAnnotations;
 		if (this.#annotations.length === 0 && this.#actionIndex === 1) this.#actionIndex = 0;
@@ -780,7 +831,7 @@ export class AnnotationOverlay implements Component {
 				lines: [this.#theme.fg("dim", "No reviewable files")],
 				renderedRowBySource: [],
 			};
-		const staticBody = this.#getStaticRenderedBody(file);
+		const staticBody = this.#getStaticRenderedBody(file, contentWidth);
 		const lines: string[] = [];
 		const renderedRowBySource: number[] = [];
 
@@ -792,12 +843,10 @@ export class AnnotationOverlay implements Component {
 			}
 		}
 
-		let sourceIndex = 0;
 		for (let staticRow = 0; staticRow < staticBody.lines.length; staticRow++) {
-			const currentSourceIndex =
-				staticBody.renderedRowBySource[sourceIndex] === staticRow ? sourceIndex++ : undefined;
+			const currentSourceIndex = staticBody.sourceIndexByRenderedRow[staticRow];
 			let renderedLine = staticBody.lines[staticRow] ?? "";
-			if (currentSourceIndex !== undefined) {
+			if (currentSourceIndex !== undefined && staticBody.renderedRowBySource[currentSourceIndex] === staticRow) {
 				// Line notes belong immediately before their source row. This keeps
 				// the selected row and all notes in a stable, readable order.
 				for (const entry of this.#annotations) {
@@ -810,12 +859,10 @@ export class AnnotationOverlay implements Component {
 					}
 				}
 				renderedRowBySource[currentSourceIndex] = lines.length;
-				if (this.#focus === "diff" && currentSourceIndex === this.#sourceIndex) {
-					renderedLine = this.#theme.bg(
-						"selectedBg",
-						fit(staticBody.selectedSourceLines[currentSourceIndex] ?? "", contentWidth),
-					);
-				}
+			}
+			if (this.#focus === "diff" && currentSourceIndex === this.#sourceIndex) {
+				renderedLine = staticBody.selectedSourceLines[staticRow] ?? renderedLine;
+				renderedLine = this.#theme.bg("selectedBg", fit(renderedLine, contentWidth));
 			}
 			lines.push(truncateToWidth(renderedLine, contentWidth));
 		}
@@ -841,8 +888,7 @@ export class AnnotationOverlay implements Component {
 			}
 			renderedRowBySource[sourceIndex] = lines.length;
 			const displayLine = replaceTabs(sanitizeText(sourceLine));
-			const wrapped = wrapTextWithAnsi(displayLine, textWidth);
-			const visualRows = wrapped.length > 0 ? wrapped : [""];
+			const visualRows = wrapLiteralLine(displayLine, textWidth);
 			for (const [rowIndex, visualRow] of visualRows.entries()) {
 				const selected = this.#focus === "diff" && sourceIndex === this.#sourceIndex;
 				const gutter =
@@ -856,47 +902,63 @@ export class AnnotationOverlay implements Component {
 		return { lines, renderedRowBySource };
 	}
 
-	#getStaticRenderedBody(file: ReviewDiffFile): RenderedDiffBody {
+	#getStaticRenderedBody(file: ReviewDiffFile, contentWidth: number): RenderedDiffBody {
+		const normalizedWidth = Math.max(1, Math.floor(contentWidth));
 		const cached = this.#staticRenderedDiffBodies.get(file);
-		if (cached) return cached;
+		if (cached?.width === normalizedWidth) return cached.body;
 		const lines: string[] = [];
 		const renderedRowBySource: number[] = [];
-		const selectedSourceLines: string[] = [];
+		const sourceIndexByRenderedRow: Array<number | undefined> = [];
+		const selectedSourceLines: Array<string | undefined> = [];
+		const pushStaticLine = (line: string) => {
+			lines.push(line);
+			sourceIndexByRenderedRow.push(undefined);
+			selectedSourceLines.push(undefined);
+		};
 		if (file.isBinary) {
-			lines.push(this.#theme.fg("dim", "Binary diff; no annotatable source rows"));
+			pushStaticLine(this.#theme.fg("dim", "Binary diff; no annotatable source rows"));
 		} else if (file.rows.length === 0) {
-			lines.push(this.#theme.fg("dim", "No diff hunks; this may be a rename-only change"));
+			pushStaticLine(this.#theme.fg("dim", "No diff hunks; this may be a rename-only change"));
 		} else {
 			let sourceIndex = 0;
 			for (const diffRow of file.rows) {
 				if (!isSourceRow(diffRow)) {
-					lines.push(
+					pushStaticLine(
 						this.#theme.fg(diffRow.kind === "hunk" ? "accent" : "dim", replaceTabs(sanitizeText(diffRow.raw))),
 					);
 					continue;
 				}
-				renderedRowBySource[sourceIndex] = lines.length;
 				const marker = diffRow.kind === "added" ? "+" : diffRow.kind === "removed" ? "-" : " ";
 				const lineNumber = diffRow.kind === "removed" ? diffRow.oldLine : (diffRow.newLine ?? diffRow.oldLine);
-				const suffix = `${marker}${String(lineNumber ?? "").padStart(4)} ${replaceTabs(sanitizeText(diffRow.content))}`;
-				const color: DiffColor =
+				const prefix = `${marker}${String(lineNumber ?? "").padStart(4)} `;
+				const prefixWidth = visibleWidth(prefix);
+				const contentColor: DiffColor =
 					diffRow.kind === "added"
 						? "toolDiffAdded"
 						: diffRow.kind === "removed"
 							? "toolDiffRemoved"
 							: "toolDiffContext";
-				const coloredSuffix = this.#theme.fg(color, suffix);
-				const gutter = " ".repeat(SOURCE_SELECTION_GUTTER_WIDTH);
-				selectedSourceLines[sourceIndex] = `${fit(
-					`${this.#theme.nav.cursor} `,
-					SOURCE_SELECTION_GUTTER_WIDTH,
-				)}${coloredSuffix}`;
-				lines.push(`${gutter}${coloredSuffix}`);
+				const sourceContent = replaceTabs(sanitizeText(diffRow.content));
+				const contentWidthForRow = Math.max(1, normalizedWidth - SOURCE_SELECTION_GUTTER_WIDTH - prefixWidth);
+				const visualRows = wrapLiteralLine(sourceContent, contentWidthForRow);
+				const firstRenderedRow = lines.length;
+				renderedRowBySource[sourceIndex] = firstRenderedRow;
+				for (const [rowIndex, visualRow] of visualRows.entries()) {
+					const first = rowIndex === 0;
+					const gutter = " ".repeat(SOURCE_SELECTION_GUTTER_WIDTH);
+					const continuationPrefix = " ".repeat(prefixWidth);
+					const prefixForRow = first ? this.#theme.fg(contentColor, prefix) : continuationPrefix;
+					const selectedGutter = first ? fit(`${this.#theme.nav.cursor} `, SOURCE_SELECTION_GUTTER_WIDTH) : gutter;
+					const styledRow = this.#theme.fg(contentColor, visualRow);
+					lines.push(`${gutter}${prefixForRow}${styledRow}`);
+					sourceIndexByRenderedRow.push(sourceIndex);
+					selectedSourceLines.push(`${selectedGutter}${prefixForRow}${styledRow}`);
+				}
 				sourceIndex++;
 			}
 		}
-		const body = { lines, renderedRowBySource, selectedSourceLines };
-		this.#staticRenderedDiffBodies.set(file, body);
+		const body = { lines, renderedRowBySource, sourceIndexByRenderedRow, selectedSourceLines };
+		this.#staticRenderedDiffBodies.set(file, { width: normalizedWidth, body });
 		return body;
 	}
 
@@ -998,42 +1060,14 @@ export class AnnotationOverlay implements Component {
 	}
 
 	#renderFooter(width: number, maxChooserRows = Number.POSITIVE_INFINITY): string[] {
+		this.#editor.focused = this.focused && this.#annotating;
 		if (this.#annotationChooser) {
 			return this.#renderAnnotationChooser(width, maxChooserRows);
 		}
 		if (this.#annotating) {
-			let location: string;
-			let action: string;
-			if (this.#textSource) {
-				const label = sanitizeStatusText(this.#textSource.label);
-				location =
-					this.#annotationScope === "text" ? `${label} · text` : `${label} · line ${this.#sourceIndex + 1}`;
-				action =
-					this.#editingAnnotationIndex === undefined
-						? this.#annotationScope === "text"
-							? "Annotate text"
-							: "Annotate line"
-						: "Edit annotation";
-			} else {
-				const file = this.#currentFile();
-				const source = this.#currentSourceRows()[this.#sourceIndex];
-				location =
-					this.#annotationScope === "file"
-						? file
-							? `${displayFileLabel(file)} · file`
-							: "file"
-						: source && file
-							? `${displayFileLabel(file)} · ${source.oldLine ?? "-"}/${source.newLine ?? "-"}`
-							: "diff row";
-				action =
-					this.#editingAnnotationIndex === undefined
-						? this.#annotationScope === "file"
-							? "Annotate file"
-							: "Annotate line"
-						: "Edit annotation";
-			}
+			const { action, location } = this.#annotationCaption();
 			const caption = truncateToWidth(
-				`${this.#theme.fg("dim", action)} ${this.#theme.fg("accent", sanitizeStatusText(location))}`,
+				`${this.#theme.fg("dim", action)} ${this.#theme.fg("accent", location)}`,
 				width,
 				Ellipsis.Unicode,
 			);
@@ -1044,9 +1078,47 @@ export class AnnotationOverlay implements Component {
 			];
 			const externalEditorKey = appKey(this.#keybindings, "app.editor.external");
 			if (externalEditorKey) hints.push(`${externalEditorKey} editor`);
-			this.#editor.focused = true;
 			return [caption, ...this.#editor.render(width), this.#theme.fg("dim", hints.join(" · "))];
 		}
+		return [this.#theme.fg("dim", this.#helpText())];
+	}
+
+	/** What the active annotation draft does and where it lands. */
+	#annotationCaption(): { action: string; location: string } {
+		let location: string;
+		let action: string;
+		if (this.#textSource) {
+			const label = sanitizeStatusText(this.#textSource.label);
+			location = this.#annotationScope === "text" ? `${label} · text` : `${label} · line ${this.#sourceIndex + 1}`;
+			action =
+				this.#editingAnnotationIndex === undefined
+					? this.#annotationScope === "text"
+						? "Annotate text"
+						: "Annotate line"
+					: "Edit annotation";
+		} else {
+			const file = this.#currentFile();
+			const source = this.#currentSourceRows()[this.#sourceIndex];
+			location =
+				this.#annotationScope === "file"
+					? file
+						? `${displayFileLabel(file)} · file`
+						: "file"
+					: source && file
+						? `${displayFileLabel(file)} · ${source.oldLine ?? "-"}/${source.newLine ?? "-"}`
+						: "diff row";
+			action =
+				this.#editingAnnotationIndex === undefined
+					? this.#annotationScope === "file"
+						? "Annotate file"
+						: "Annotate line"
+					: "Edit annotation";
+		}
+		return { action, location: sanitizeStatusText(location) };
+	}
+
+	/** Footer help for the focused region. */
+	#helpText(): string {
 		const upDown = `${this.#key("tui.select.up")}/${this.#key("tui.select.down")}`;
 		const confirm = this.#key("tui.select.confirm");
 		const editNote = `${formatKeyHint("e")} edit note`;
@@ -1056,21 +1128,22 @@ export class AnnotationOverlay implements Component {
 				: this.#focus === "diff"
 					? `${upDown} line · ${formatKeyHint("shift")} faster · ${this.#key("tui.select.pageUp")}/${this.#key("tui.select.pageDown")} · ${formatKeyHints(["g", "shift+g"])} ends · ${formatKeyHint("a")} line note · ${formatKeyHint("shift+a")} ${this.#textSource ? "text" : "file"} note · ${editNote}`
 					: `${upDown} select · ${confirm} confirm`;
-		return [
-			this.#theme.fg(
-				"dim",
-				`${focusHelp} · ${formatKeyHint("u")} undo · ${formatKeyHint("tab")} regions · ${this.#key("tui.select.cancel")} cancel`,
-			),
-		];
+		return `${focusHelp} · ${formatKeyHint("u")} undo · ${formatKeyHint("tab")} regions · ${this.#key("tui.select.cancel")} cancel`;
 	}
 
-	#ensureCursorVisible(renderedRowBySource: readonly number[]): void {
-		if (this.#textSource && this.#textViewportDriven) return;
+	#ensureCursorVisible(renderedRowBySource: readonly number[]): boolean {
+		this.#renderedRowBySource = renderedRowBySource;
+		if (this.#viewportDriven) {
+			const sourceIndex = this.#sourceIndex;
+			if (!this.#annotating && !this.#annotationChooser) this.#syncCursorToViewport();
+			return this.#sourceIndex !== sourceIndex;
+		}
 		const rowIndex = renderedRowBySource[this.#sourceIndex];
-		if (rowIndex === undefined) return;
+		if (rowIndex === undefined) return false;
 		const offset = this.#scrollView.getScrollOffset();
 		if (rowIndex < offset) this.#scrollView.setScrollOffset(rowIndex);
 		else if (rowIndex >= offset + this.#bodyHeight) this.#scrollView.setScrollOffset(rowIndex - this.#bodyHeight + 1);
+		return false;
 	}
 
 	#sidebarWidth(width: number): number {
@@ -1083,19 +1156,31 @@ export class AnnotationOverlay implements Component {
 		);
 	}
 
+	#sidebarStart(rows: number): number {
+		return Math.max(0, Math.min(this.#fileIndex - Math.floor(rows / 2), Math.max(0, this.#files.length - rows)));
+	}
+
+	#renderSidebarBadge(file: ReviewDiffFile, count: number): string {
+		const changes = ` +${file.linesAdded}/-${file.linesRemoved}`;
+		const annotations = count ? ` ✎${count}` : "";
+		return this.#theme.fg("dim", changes) + (annotations ? this.#theme.fg("warning", annotations) : "");
+	}
+
+	#sidebarLabelWidth(file: ReviewDiffFile, count: number, width: number): number {
+		const badge = this.#renderSidebarBadge(file, count);
+		return Math.max(0, width - visibleWidth(badge) - 2);
+	}
+
 	#renderSidebar(rows: number, width: number): string[] {
-		const start = Math.max(
-			0,
-			Math.min(this.#fileIndex - Math.floor(rows / 2), Math.max(0, this.#files.length - rows)),
-		);
+		const start = this.#sidebarStart(rows);
 		return Array.from({ length: rows }, (_, rowIndex) => {
 			const index = start + rowIndex;
 			const file = this.#files[index];
 			if (!file) return "";
 			const selected = index === this.#fileIndex;
 			const count = this.#annotationCount(index);
-			const badge = `${this.#theme.fg("dim", ` +${file.linesAdded}/-${file.linesRemoved}`)}${count ? this.#theme.fg("warning", ` ✎${count}`) : ""}`;
-			const available = Math.max(0, width - visibleWidth(badge) - 2);
+			const badge = this.#renderSidebarBadge(file, count);
+			const available = this.#sidebarLabelWidth(file, count, width);
 			const label = truncateToWidth(sanitizeStatusText(displayFileLabel(file)), available, Ellipsis.Unicode);
 			const cursor = selected ? (this.#focus === "files" ? "› " : "▎ ") : "  ";
 			const line = fit(`${cursor}${label}${badge}`, width);
@@ -1105,15 +1190,366 @@ export class AnnotationOverlay implements Component {
 		});
 	}
 
+	#revealSelectedFile(output: string[], width: number): void {
+		const file = this.#currentFile();
+		if (
+			!file ||
+			!this.#sidebarShown ||
+			this.#textSource ||
+			this.#focus !== "files" ||
+			this.#annotating ||
+			this.#annotationChooser
+		) {
+			return;
+		}
+
+		const pathColumn = 4;
+		const lineWidth = Math.max(0, width - pathColumn - 1);
+		if (lineWidth === 0) return;
+
+		const selectedRow = 1 + this.#fileIndex - this.#sidebarStart(this.#bodyHeight + 1);
+		const interiorTop = 1;
+		const lastBodyRow = this.#bodyHeight + 1;
+		const interiorRows = lastBodyRow - interiorTop + 1;
+		if (selectedRow < interiorTop || selectedRow > lastBodyRow || interiorRows <= 0) return;
+
+		const label = replaceTabs(sanitizeStatusText(displayFileLabel(file)));
+		if (!label) return;
+		const count = this.#annotationCount(this.#fileIndex);
+		if (visibleWidth(label) <= this.#sidebarLabelWidth(file, count, this.#sidebarWidth(width))) return;
+
+		let wrapped = wrapTextWithAnsi(label, lineWidth);
+		if (wrapped.length > interiorRows) {
+			wrapped = wrapped.slice(-interiorRows);
+			wrapped[0] = truncateToWidth(`…${wrapped[0] ?? ""}`, lineWidth, Ellipsis.Omit);
+		}
+		const overlayTop = Math.max(interiorTop, Math.min(selectedRow, lastBodyRow - wrapped.length + 1));
+		const overlayWidth = Math.min(lineWidth, Math.max(0, ...wrapped.map(visibleWidth)) + 1);
+		for (const [index, line] of wrapped.entries()) {
+			const highlighted = this.#theme.bg("selectedBg", this.#theme.bold(fit(line, overlayWidth)));
+			const targetRow = overlayTop + index;
+			const baseLine = output[targetRow];
+			if (overlayWidth > 0 && baseLine !== undefined) {
+				output[targetRow] = compositeLineAt(baseLine, highlighted, pathColumn, overlayWidth, width);
+			}
+		}
+	}
+
+	describe(): NativeNode {
+		// The terminal lays out the file sidebar; diffs always have one, text never does.
+		this.#sidebarShown = !this.#textSource;
+		if (!this.#sidebarShown && this.#focus === "files") this.#focus = "diff";
+		// Page size for PgUp/PgDn, matching the rendered body height.
+		const terminalHeight = this.#tui.terminal.rows;
+		this.#bodyHeight = Math.max(MIN_BODY_ROWS, terminalHeight - (this.#actions.length + 8));
+		this.#editor.focused = this.focused && this.#annotating;
+		const body = this.#describeBodyItems();
+		const chooser = this.#annotationChooser;
+		const sig = [
+			this.#focus,
+			this.#fileIndex,
+			this.#sourceIndex,
+			this.#actionIndex,
+			this.#annotating ? `annotating:${this.#annotationScope}:${this.#editingAnnotationIndex}` : "",
+			chooser ? `chooser:${chooser.selected}:${chooser.entries.join()}` : "",
+		].join("|");
+		if (this.#nativeRoot && sig === this.#nativeSig && body === this.#nativeRootBody) return this.#nativeRoot;
+
+		const children: NativeChild[] = [];
+		const lines = selectList("lines", body.items, {
+			selected: this.#focus === "diff" ? `l${this.#sourceIndex}` : null,
+			virtual: true,
+			empty: [span(this.#textSource ? "No text" : "No reviewable files", "dim")],
+			role: this.#textSource ? "omp.overlay.annotateText.lines" : "omp.overlay.codeReview.diff",
+			tone: this.#focus === "diff" ? "accent" : undefined,
+		});
+		const main = node("col", { grow: 1 }, [this.#describeHeader(), lines], "main");
+		if (this.#sidebarShown) {
+			const files = selectList(
+				"files",
+				this.#files.map((file, index) => {
+					const count = this.#annotationCount(index);
+					const value = [
+						span(`+${file.linesAdded}`, "ins"),
+						span("/", "dim"),
+						span(`-${file.linesRemoved}`, "del"),
+					];
+					if (count) value.push(span(` ✎${count}`, "warning"));
+					return item(`f${index}`, { label: [span(displayFileLabel(file), "path")], value });
+				}),
+				{
+					selected: this.#files.length > 0 ? `f${this.#fileIndex}` : null,
+					role: "omp.overlay.codeReview.files",
+					tone: this.#focus === "files" ? "accent" : undefined,
+				},
+			);
+			const sidebar = node("col", { max: { w: "34ch" }, shrink: 0 }, [files], "sidebar");
+			children.push(keyed(rowNode([sidebar, main], { gap: "md", align: "start" }), "split"));
+		} else {
+			children.push(main);
+		}
+		children.push(keyed(text([span(sanitizeStatusText(this.#mode), "accent strong")]), "mode"));
+		children.push(
+			selectList(
+				"actions",
+				this.#actions.map((label, index) =>
+					item(`a${index}`, { label, disabled: this.#actionDisabled(index) || undefined }),
+				),
+				{ selected: `a${this.#actionIndex}`, tone: this.#focus === "actions" ? "accent" : undefined },
+			),
+		);
+		children.push(...this.#describeFooter());
+
+		this.#nativeSig = sig;
+		this.#nativeRootBody = body;
+		this.#nativeRoot = overlayCard(
+			this.#textSource ? "omp.overlay.annotateText" : "omp.overlay.codeReview",
+			this.#textSource ? TEXT_OVERLAY_TITLE : OVERLAY_TITLE,
+			children,
+		);
+		return this.#nativeRoot;
+	}
+
+	handleNativeEvent(event: NativeUiEvent): void {
+		if (this.#finished || this.#externalOperation) return;
+		if (event.type !== "select" && event.type !== "activate") return;
+		const activate = event.type === "activate";
+		const leaf = leafKey(event.key);
+		const chooser = this.#annotationChooser;
+		if (leaf === "chooser") {
+			const index = itemIndex(event.item, "c");
+			if (!chooser || index < 0 || index >= chooser.entries.length) return;
+			chooser.selected = index;
+			if (activate) this.#openChosenAnnotation(chooser);
+			return;
+		}
+		// A draft commits against the current file/row, so the target stays put
+		// while the editor or the chooser is open.
+		if (chooser || this.#annotating) return;
+		switch (leaf) {
+			case "files": {
+				const index = itemIndex(event.item, "f");
+				if (index < 0 || index >= this.#files.length) return;
+				this.#focus = "files";
+				if (index !== this.#fileIndex) this.#selectFile(index);
+				if (activate) this.#focus = "diff";
+				return;
+			}
+			case "lines": {
+				const index = itemIndex(event.item, "l");
+				const rowCount = this.#textSource ? this.#textLines.length : this.#currentSourceRows().length;
+				if (index < 0 || index >= rowCount) return;
+				this.#focus = "diff";
+				this.#sourceIndex = index;
+				this.#viewportDriven = false;
+				if (activate) this.#focus = "actions";
+				return;
+			}
+			case "actions": {
+				const index = itemIndex(event.item, "a");
+				if (index < 0 || index >= this.#actions.length || this.#actionDisabled(index)) return;
+				this.#focus = "actions";
+				this.#actionIndex = index;
+				if (activate) this.#confirmAction();
+				return;
+			}
+		}
+	}
+
+	/** One item per diff/text row; annotation callouts are disabled items before their row. */
+	#describeBodyItems(): NativeBody {
+		const cached = this.#nativeBody;
+		if (cached && cached.fileIndex === this.#fileIndex && cached.rev === this.#annotationRev) return cached;
+		const items: NativeNode[] = [];
+		const note = (key: string, label: string, body: string) =>
+			items.push(
+				item(key, {
+					label: noteSpans(label, sanitizeText(body)),
+					disabled: true,
+					tone: "warning",
+					role: "omp.overlay.codeReview.note",
+				}),
+			);
+		if (this.#textSource) {
+			for (const [index, entry] of this.#textAnnotations.entries()) {
+				if (entry.annotation.scope === "text") note(`n${index}`, "text note", entry.annotation.note);
+			}
+			for (const [sourceIndex, sourceLine] of this.#textLines.entries()) {
+				for (const [index, entry] of this.#textAnnotations.entries()) {
+					if (entry.annotation.scope === "line" && entry.sourceIndex === sourceIndex) {
+						note(`n${index}`, "note", entry.annotation.note);
+					}
+				}
+				items.push(item(`l${sourceIndex}`, { label: sanitizeText(sourceLine) }));
+			}
+		} else {
+			const file = this.#currentFile();
+			if (file) {
+				for (const [index, entry] of this.#annotations.entries()) {
+					if (entry.fileIndex === this.#fileIndex && entry.annotation.scope === "file") {
+						note(`n${index}`, "file note", entry.annotation.note);
+					}
+				}
+				if (file.isBinary) {
+					items.push(
+						item("binary", { label: [span("Binary diff; no annotatable source rows", "dim")], disabled: true }),
+					);
+				} else if (file.rows.length === 0) {
+					items.push(
+						item("empty", {
+							label: [span("No diff hunks; this may be a rename-only change", "dim")],
+							disabled: true,
+						}),
+					);
+				}
+				let sourceIndex = 0;
+				for (const [rowIndex, diffRow] of file.isBinary ? [] : file.rows.entries()) {
+					if (!isSourceRow(diffRow)) {
+						const s = diffRow.kind === "hunk" ? "accent" : "dim";
+						items.push(item(`r${rowIndex}`, { label: [span(sanitizeText(diffRow.raw), s)], disabled: true }));
+						continue;
+					}
+					for (const [index, entry] of this.#annotations.entries()) {
+						if (
+							entry.fileIndex === this.#fileIndex &&
+							entry.sourceIndex === sourceIndex &&
+							entry.annotation.scope === "line"
+						) {
+							note(`n${index}`, "note", entry.annotation.note);
+						}
+					}
+					const marker = diffRow.kind === "added" ? "+" : diffRow.kind === "removed" ? "-" : " ";
+					const lineNumber = diffRow.kind === "removed" ? diffRow.oldLine : (diffRow.newLine ?? diffRow.oldLine);
+					const color: DiffColor =
+						diffRow.kind === "added"
+							? "toolDiffAdded"
+							: diffRow.kind === "removed"
+								? "toolDiffRemoved"
+								: "toolDiffContext";
+					items.push(
+						item(`l${sourceIndex}`, {
+							label: [
+								span(marker, `${color} mono`),
+								span(`${lineNumber ?? ""} `, "num dim mono"),
+								span(sanitizeText(diffRow.content), `${color} mono`),
+							],
+						}),
+					);
+					sourceIndex++;
+				}
+			}
+		}
+		this.#nativeBody = { fileIndex: this.#fileIndex, rev: this.#annotationRev, items };
+		return this.#nativeBody;
+	}
+
+	#describeHeader(): NativeNode {
+		if (this.#textSource) {
+			const count = this.#textAnnotations.length;
+			const spans = [span(sanitizeStatusText(this.#textSource.label), "strong")];
+			if (count) spans.push(span(` ✎${count}`, "dim"));
+			return keyed(text(spans, { truncate: "end" }), "header");
+		}
+		const file = this.#currentFile();
+		if (!file) return keyed(text([span("No reviewable files", "dim")]), "header");
+		const count = this.#annotationCount(this.#fileIndex);
+		const spans = [
+			span(sanitizeStatusText(displayFileLabel(file)), "strong path"),
+			span(` +${file.linesAdded}`, "ins"),
+			span("/", "dim"),
+			span(`-${file.linesRemoved}`, "del"),
+		];
+		if (count) spans.push(span(` ✎${count}`, "dim"));
+		return keyed(text(spans, { truncate: "middle" }), "header");
+	}
+
+	#describeFooter(): NativeChild[] {
+		const chooser = this.#annotationChooser;
+		if (chooser) {
+			const entries = chooser.entries.map((index, i) => {
+				const entry = chooser.kind === "text" ? this.#textAnnotations[index] : this.#annotations[index];
+				const location = !entry
+					? ""
+					: "fileIndex" in entry
+						? this.#annotationLocation(entry)
+						: this.#textAnnotationLocation(entry);
+				return item(`c${i}`, {
+					label: sanitizeStatusText(entry?.annotation.note.split(/\r?\n/, 1)[0] ?? ""),
+					detail: location,
+				});
+			});
+			return [
+				keyed(text([span("Edit annotation", "accent strong")]), "chooserHead"),
+				selectList("chooser", entries, { selected: `c${chooser.selected}` }),
+				hintsRow(
+					[
+						this.#hint(["tui.select.up", "tui.select.down"], "choose"),
+						this.#hint("tui.select.confirm", "edit"),
+						this.#hint("tui.select.cancel", "cancel"),
+					],
+					"chooserHints",
+				),
+			];
+		}
+		if (this.#annotating) {
+			const { action, location } = this.#annotationCaption();
+			return [
+				keyed(text([span(`${action} `, "dim"), span(location, "accent")], { truncate: "end" }), "annotateHead"),
+				this.#editor,
+				hintsRow(
+					[
+						this.#hint("tui.input.submit", "save"),
+						this.#hint("tui.input.newLine", "newline"),
+						this.#hint("tui.select.cancel", "cancel"),
+						this.#hint("app.editor.external", "editor"),
+					],
+					"annotateHints",
+				),
+			];
+		}
+		const key = (keys: KeyName | readonly KeyName[], label: string): NativeHint => ({
+			keys: typeof keys === "string" ? [keys] : keys,
+			label,
+		});
+		const upDown = (label: string) => this.#hint(["tui.select.up", "tui.select.down"], label);
+		const editNote = key("e", "edit note");
+		const hints: (NativeHint | undefined)[] =
+			this.#focus === "files"
+				? [upDown("file"), this.#hint("tui.select.confirm", "diff"), key(["a", "shift+a"], "file note"), editNote]
+				: this.#focus === "diff"
+					? [
+							upDown("line"),
+							key("shift", "faster"),
+							this.#hint(["tui.select.pageUp", "tui.select.pageDown"], "page"),
+							key(["g", "shift+g"], "ends"),
+							key("a", "line note"),
+							key("shift+a", this.#textSource ? "text note" : "file note"),
+							editNote,
+						]
+					: [upDown("select"), this.#hint("tui.select.confirm", "confirm")];
+		hints.push(key("u", "undo"), key("tab", "regions"), this.#hint("tui.select.cancel", "cancel"));
+		return [hintsRow(hints)];
+	}
+
+	/** Keycap hint for the primary keys this overlay's keybindings bind to `actions`. */
+	#hint(actions: Keybinding | readonly Keybinding[], label: string): NativeHint | undefined {
+		const keys: KeyName[] = [];
+		for (const action of typeof actions === "string" ? [actions] : actions) {
+			const [key] = this.#keybindings.getKeys(action);
+			if (key) keys.push(key);
+		}
+		return keys.length > 0 ? { keys, label } : undefined;
+	}
+
 	render(width: number): readonly string[] {
-		const terminalHeight = process.stdout.rows || 40;
+		const terminalHeight = this.#tui.terminal.rows;
 		this.#sidebarShown = this.#textSource ? false : this.#canShowSidebar(width);
 		if (!this.#sidebarShown && this.#focus === "files") this.#focus = "diff";
 		const sidebarWidth = this.#sidebarShown ? this.#sidebarWidth(width) : 0;
 		const innerWidth = Math.max(1, width - 4);
 		const bodyWidth = this.#sidebarShown ? splitBodyWidth(width, sidebarWidth) : innerWidth;
 		this.#editor.setMaxHeight(Math.max(1, Math.min(MAX_ANNOTATION_EDITOR_ROWS, terminalHeight - 12)));
-		this.#editor.focused = this.#annotating;
+		this.#editor.focused = this.focused && this.#annotating;
 		const chooserBaseRows = terminalHeight - (this.#actions.length + 7);
 		const chooserFooterRows = this.#annotationChooser
 			? Math.max(0, Math.min(chooserBaseRows, Math.max(3, chooserBaseRows - MIN_BODY_ROWS)))
@@ -1124,14 +1560,15 @@ export class AnnotationOverlay implements Component {
 		this.#bodyHeight = this.#annotationChooser
 			? Math.max(0, availableBodyRows)
 			: Math.max(MIN_BODY_ROWS, availableBodyRows);
-		const renderedBody = this.#renderBody(this.#textSource ? Math.max(1, bodyWidth - 1) : bodyWidth);
+		const bodyContentWidth = Math.max(1, bodyWidth - 1);
+		let renderedBody = this.#renderBody(bodyContentWidth);
 		this.#scrollView.setLines(renderedBody.lines);
 		this.#scrollView.setHeight(this.#bodyHeight);
-		if (this.#textSource) {
-			this.#textRenderedRowBySource = renderedBody.renderedRowBySource;
-			if (this.#textViewportDriven) this.#syncTextCursorToViewport();
+		if (this.#ensureCursorVisible(renderedBody.renderedRowBySource)) {
+			renderedBody = this.#renderBody(bodyContentWidth);
+			this.#scrollView.setLines(renderedBody.lines);
+			this.#renderedRowBySource = renderedBody.renderedRowBySource;
 		}
-		this.#ensureCursorVisible(renderedBody.renderedRowBySource);
 		const body = this.#scrollView.render(bodyWidth);
 		const output: string[] = [];
 		if (this.#sidebarShown) {
@@ -1153,6 +1590,7 @@ export class AnnotationOverlay implements Component {
 		output.push(divider(width));
 		for (const footerLine of footer) output.push(row(footerLine, width));
 		output.push(bottomBorder(width));
+		this.#revealSelectedFile(output, width);
 		return output;
 	}
 }

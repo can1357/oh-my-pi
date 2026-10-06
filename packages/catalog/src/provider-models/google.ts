@@ -1,5 +1,6 @@
 import { reviewedCollapseTable } from "../compat/collapse";
 import { classifyModel } from "../compat/taxonomy";
+import { providerEntry } from "../compat/providers";
 import { fetchAntigravityDiscoveryModels } from "../discovery/antigravity";
 import { fetchGeminiModels } from "../discovery/gemini";
 import { fetchGeminiCliQuotaModels } from "../discovery/gemini-cli";
@@ -73,6 +74,7 @@ export function googleAntigravityModelManagerOptions(
 	const token = config?.oauthToken;
 	return {
 		providerId: "google-antigravity",
+		dynamicModelsAuthoritative: providerEntry("google-antigravity")?.dynamicModelsAuthoritative === true,
 		...(token
 			? {
 					fetchDynamicModels: () =>

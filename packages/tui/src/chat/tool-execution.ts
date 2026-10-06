@@ -13,18 +13,38 @@ import type { Theme } from "../theme/theme";
 import { ensureThemeSync, getThemeEpoch, theme } from "../theme/theme";
 import {
 	type FirstResultViewportRepaint,
+	type NativeToolView,
+	type RenderResultContextOptions,
 	type ToolActivitySummary,
 	type ToolRenderer,
 	toolRenderers,
 } from "../tools/index";
-import { BASH_DEFAULT_PREVIEW_LINES } from "../tools/bash";
-import { formatDefaultToolExecution } from "../tools/default-renderer";
+import { describeDefaultToolExecution, formatDefaultToolExecution } from "../tools/default-renderer";
+import { INTENT_FIELD, type TspCardStatus, type TspPreview, type TspText, type TspTone } from "@oh-my-pi/pi-wire";
+import { card, col, EMPTY_NODE, node, span, text, withHidden } from "../native/describe";
+import {
+	type DescribeContext,
+	type NativeChild,
+	type NativeNode,
+	type NativeUiEvent,
+	rootToggleExpanded,
+} from "../native/node";
+import { plainText } from "../native/spans";
+import { diagnosticsSection, displayPath, toolHead } from "../tools/native-view";
+import type { FileDiagnosticsResult } from "../tools/lsp";
+import { NativeImageCache } from "../native/blobs";
+import { Memo } from "../native/memo";
 import { type EditMode, type PerFileDiffPreview, renderStreamingFallback } from "../tools/edit";
-import { EVAL_DEFAULT_PREVIEW_LINES } from "../tools/eval";
 import { taskCardAgentIds } from "../tools/task";
 import { TODO_STRIKE_TOTAL_FRAMES, type TodoToolDetails } from "../tools/todo";
+import { isNativeRendering } from "../native/state";
 import { isWaitingPollDetails } from "../tools/wait";
-import { formatStatusIcon, replaceTabs, resolveImageOptions } from "../render/render-utils";
+import {
+	DEFAULT_TERMINAL_PREVIEW_LINES,
+	formatStatusIcon,
+	replaceTabs,
+	resolveImageOptions,
+} from "../render/render-utils";
 import type { XdevMountedState } from "../tools/xdev";
 import { isFramedBlockComponent, markFramedBlockComponent, renderStatusLine, WidthAwareText } from "../render/index";
 import { cachedPngConversion, convertImageToPngShared, imagePayloadKey } from "./image-loading";
@@ -77,6 +97,11 @@ function isEditLikeToolName(toolName: string): boolean {
 	return toolName === "edit" || toolName === "apply_patch";
 }
 
+/** Tools whose arguments stream a growing file body or diff into the card (edit, apply_patch, write). */
+function streamsBody(toolName: string): boolean {
+	return isEditLikeToolName(toolName) || toolName === "write";
+}
+
 function resolveEditModeForTool(toolName: string, tool: AgentTool | undefined): EditMode | undefined {
 	if (toolName === "apply_patch") return "apply_patch";
 	if (toolName !== "edit") return undefined;
@@ -84,6 +109,17 @@ function resolveEditModeForTool(toolName: string, tool: AgentTool | undefined): 
 }
 
 type ToolRendererStage = "call" | "result";
+
+/** A renderer's preview as the fallback card's clamp (`tail` becomes a head clamp of the same size). */
+function cardPreview(preview: NativeToolView["preview"]): TspPreview | undefined {
+	if (preview === undefined) return { lines: DEFAULT_TERMINAL_PREVIEW_LINES };
+	if (preview === "none") return undefined;
+	if (preview !== "auto" && "tail" in preview) return { lines: preview.tail };
+	return preview;
+}
+
+/** The describe hooks of a registry renderer or of a custom tool object. */
+type ToolDescriber = Pick<ToolRenderer, "describeCall" | "describeResult" | "mergeCallAndResult">;
 
 class SafeToolRendererComponent implements Component {
 	#toolName: string;
@@ -182,6 +218,15 @@ export interface ToolExecutionHandle extends Component {
 	seal(): void;
 }
 
+/** Card tone per status when the renderer doesn't choose one; settled cards stay neutral. */
+const NATIVE_STATUS_TONE: Record<TspCardStatus, TspTone | undefined> = {
+	pending: "pending",
+	running: "pending",
+	done: undefined,
+	error: "error",
+	cancelled: "info",
+};
+
 /** Phase-locked spinner glyph index shared by every live tool block so parallel
  * spinners advance in lockstep instead of each tracking its own start time. */
 export function sharedSpinnerFrame(frameCount: number, now: number = performance.now()): number {
@@ -198,8 +243,14 @@ let sharedSpinnerTimer: NodeJS.Timeout | undefined;
 
 /** Arm the shared spinner ticker if it is not already running. */
 function ensureSharedSpinnerTicker(): void {
-	if (sharedSpinnerTimer) return;
+	if (sharedSpinnerTimer || isNativeRendering()) return;
 	sharedSpinnerTimer = setInterval(() => {
+		// A native surface opened while blocks were live: the terminal clocks
+		// their spinners, so the repaint ticker has nothing left to do.
+		if (isNativeRendering()) {
+			stopSharedSpinnerTicker();
+			return;
+		}
 		const frame = sharedSpinnerFrame(theme.spinnerFrames.length);
 		// Removing the current block mid-iteration is safe on a Set.
 		for (const block of liveSpinnerBlocks) block.tickSpinner(frame);
@@ -285,6 +336,14 @@ export class ToolExecutionComponent extends Container {
 	// so a terminal resize re-shapes image-bearing results to rescale them without
 	// forcing the common image-free result to re-shape on every resize tick.
 	#renderedImageCount = 0;
+	// `stateBgKey|themeEpoch` of the tint last handed to #contentText. Re-tinting
+	// drops its wrap cache, so a rebuild whose tint is unchanged skips it and the
+	// inner Text re-wraps only when the reformatted card text actually differs.
+	#contentTextBgKey: string | undefined;
+	// Memoized #getTextOutput(), keyed by every input it reads: the result
+	// (versioned by #resultVersion), #showImages, and the image protocol.
+	#textOutput = "";
+	#textOutputKey: string | undefined;
 	#tool?: AgentTool;
 	#renderer?: ToolRenderer;
 	#ui: ToolExecutionUi;
@@ -323,6 +382,13 @@ export class ToolExecutionComponent extends Container {
 	// Execution start on the presentation clock (performance.now domain, the
 	// same domain as AnimationFrame.now supplied by the transcript allocator).
 	#executionStartedAtNow: number | undefined;
+	// When the call settled (final result or seal), same clock; freezes the native elapsed timer.
+	#executionEndedAtNow: number | undefined;
+	readonly #toolCallId: string | undefined;
+	readonly #native = new Memo();
+	// LSP diagnostics that arrived after the result (native only), shown in the frame.
+	#lateDiagnostics: readonly FileDiagnosticsResult[] | undefined;
+	readonly #nativeImages = new NativeImageCache();
 	// Wall clock captured whenever a task card is rebuilt.
 	#taskRenderNowMs = Date.now();
 	// Set on each `render()` when the last painted pending shape must be
@@ -352,10 +418,11 @@ export class ToolExecutionComponent extends Container {
 		tool: AgentTool | undefined,
 		ui: ToolExecutionUi,
 		_cwd: string = getProjectDir(),
-		_toolCallId?: string,
+		toolCallId?: string,
 	) {
 		super();
 		ensureThemeSync();
+		this.#toolCallId = toolCallId;
 		this.#toolName = toolName;
 		this.#toolLabel = tool?.label ?? toolName;
 		this.#renderer = options.useBuiltInRenderer === false ? undefined : toolRenderers[toolName];
@@ -514,6 +581,7 @@ export class ToolExecutionComponent extends Container {
 		if (!isPartial) {
 			this.#argsComplete = true;
 			this.#previewReady?.resolve();
+			this.#executionEndedAtNow ??= performance.now();
 		}
 		this.#updateSpinnerAnimation();
 		this.#updateTodoStrikeAnimation();
@@ -589,7 +657,7 @@ export class ToolExecutionComponent extends Container {
 		// them. Todo snapshots and detached background tool progress are deliberate
 		// static exceptions because their rows can be superseded or committed to
 		// scrollback while later updates continue elsewhere.
-		const isStreamingArgs = !this.#argsComplete && (isEditLikeToolName(this.#toolName) || this.#toolName === "write");
+		const isStreamingArgs = !this.#argsComplete && streamsBody(this.#toolName);
 		const isBackgroundAsyncRunning =
 			(this.#result?.details as { async?: { state?: string } } | undefined)?.async?.state === "running";
 		const renderer = this.#renderer;
@@ -617,7 +685,9 @@ export class ToolExecutionComponent extends Container {
 			this.#toolName !== "todo" &&
 			!isBackgroundAsyncRunning &&
 			(pendingCallConsumesSpinner || partialResultConsumesSpinner);
-		const needsSpinner = isStreamingArgs || isLivePartialTool || this.#displaceableByToolName === "wait";
+		// TSP terminals clock spinners themselves; the frame counter is ANSI-only.
+		const needsSpinner =
+			!isNativeRendering() && (isStreamingArgs || isLivePartialTool || this.#displaceableByToolName === "wait");
 		if (needsSpinner && !this.#spinnerActive) {
 			const frameCount = theme.spinnerFrames.length;
 			const frame = sharedSpinnerFrame(frameCount);
@@ -650,7 +720,8 @@ export class ToolExecutionComponent extends Container {
 	}
 
 	#updateTodoStrikeAnimation(): void {
-		if (this.#toolName !== "todo" || this.#isPartial || this.#result?.isError) {
+		// TSP terminals draw the completion strike from the `del` token; no repaint ticks.
+		if (this.#toolName !== "todo" || this.#isPartial || this.#result?.isError || isNativeRendering()) {
 			this.#stopTodoStrikeAnimation();
 			return;
 		}
@@ -730,6 +801,7 @@ export class ToolExecutionComponent extends Container {
 		this.#sealed = true;
 		this.#blockVersion++;
 		this.#displaceableByToolName = undefined;
+		this.#executionEndedAtNow ??= performance.now();
 		this.stopAnimation();
 		this.#updateDisplay();
 		this.#ui.requestRender();
@@ -781,6 +853,333 @@ export class ToolExecutionComponent extends Container {
 		if (this.#expanded !== expanded) this.#blockVersion++;
 		this.#expanded = expanded;
 		this.#updateDisplay();
+	}
+
+	/** Mirrors the card collapsed or expanded in the terminal, so `Ctrl+O` and native toggles share one state. */
+	handleNativeEvent(event: NativeUiEvent): void {
+		const expanded = rootToggleExpanded(event);
+		if (expanded !== undefined) this.setExpanded(expanded);
+	}
+
+	/** The file paths this call targets (edit/write/apply_patch args), display-relative. */
+	#targetPaths(): string[] {
+		const args = this.#args;
+		if (!isRecord(args)) return [];
+		const out: string[] = [];
+		const add = (value: unknown) => {
+			if (typeof value === "string" && value) out.push(displayPath(value));
+		};
+		add(args.path);
+		add(args.file_path);
+		for (const key of ["edits", "files"] as const) {
+			const list = args[key];
+			if (Array.isArray(list)) for (const entry of list) if (isRecord(entry)) add(entry.path);
+		}
+		return out;
+	}
+
+	/** Whether this call targets `filePath` (the late-diagnostics router matches with it). */
+	matchesPath(filePath: string): boolean {
+		const wanted = displayPath(filePath);
+		return this.#targetPaths().includes(wanted);
+	}
+
+	/**
+	 * Attaches LSP diagnostics that arrived after the result into this call's
+	 * frame (§7.3: a diagnostics section plus a count chip in the head). Native
+	 * rendering only; returns false when nothing matched, so the caller shows
+	 * its standalone notice instead.
+	 */
+	attachLateDiagnostics(files: readonly (FileDiagnosticsResult & { readonly path: string })[]): boolean {
+		if (!isNativeRendering()) return false;
+		const mine = files.filter(file => this.matchesPath(file.path));
+		if (mine.length === 0) return false;
+		this.#lateDiagnostics = mine;
+		this.#blockVersion++;
+		this.#displayInputVersion++;
+		this.invalidate();
+		return true;
+	}
+
+	/**
+	 * The tool card: `card` role `omp.tool.<name>` with the renderer's
+	 * {@link NativeToolView} (head spans, body nodes), a status chip, an
+	 * `elapsed` timer in the head and terminal-local collapse clamped to the
+	 * view's preview. Renderers without describe hooks (and extension tools
+	 * with only render hooks) get the generic card. Hidden tool activity stays
+	 * mounted so toggling it is one prop change.
+	 */
+	override describe(cx?: DescribeContext): NativeNode {
+		if (this.#toolName === "wait" && this.#isBenignSkip()) return EMPTY_NODE;
+		const dataFirst = cx?.supports("tool") === true;
+		const key = [
+			dataFirst,
+			this.#resultVersion,
+			this.#expanded,
+			this.#isPartial,
+			this.#argsComplete,
+			this.#executionStarted,
+			this.#sealed,
+			this.#parkedBackground,
+			this.#showImages,
+			this.#displayInputVersion,
+			this.#toolActivityVisible,
+			getThemeEpoch(),
+		];
+		return this.#native.get(key, () =>
+			withHidden(dataFirst ? this.#describeTool() : this.#describeCard(), !this.#toolActivityVisible),
+		);
+	}
+
+	/** Milliseconds since execution started (running) or its total (settled); undefined before it starts. */
+	#elapsedMs(status: TspCardStatus): number | undefined {
+		const started = this.#executionStartedAtNow;
+		if (started === undefined) return undefined;
+		const ended = status === "running" ? undefined : this.#executionEndedAtNow;
+		return Math.max(0, Math.round((ended ?? performance.now()) - started));
+	}
+
+	/**
+	 * The native `collapsed` prop: the transcript's expand state, except that a
+	 * call streaming its body (edit, write) stays open until it settles, then
+	 * folds like a finished thought. The user's own toggle still wins meanwhile:
+	 * the terminal keeps local collapse state until this prop changes.
+	 */
+	#nativeCollapsed(status: TspCardStatus): boolean {
+		const live = status === "pending" || status === "running";
+		return !this.#expanded && !(live && streamsBody(this.#toolName));
+	}
+
+	/** The late diagnostics section and head chip, when LSP reported after the result. */
+	#lateDiagnosticsParts(): { section?: NativeNode; chip?: { text: string; tone: TspTone } } {
+		const files = this.#lateDiagnostics;
+		if (!files || files.length === 0) return {};
+		const sections = files.map(file => diagnosticsSection(file)).filter((n): n is NativeNode => n !== undefined);
+		const count = files.reduce((sum, file) => sum + file.messages.length, 0);
+		const errored = files.some(file => file.errored);
+		const section =
+			sections.length === 1
+				? sections[0]
+				: node("col", { gap: "sm", role: "omp.tool.diagnostics" }, sections, "late");
+		return {
+			section,
+			chip: { text: count === 1 ? "1 diagnostic" : `${count} diagnostics`, tone: errored ? "error" : "warning" },
+		};
+	}
+
+	/**
+	 * The data-first `tool` node (§7.2): the renderer's head data, status,
+	 * timer, exit and intent as props; its body as borderless children.
+	 */
+	#describeTool(): NativeNode {
+		const view = this.#nativeView();
+		const status = this.#nativeStatus();
+		const head = view.tool;
+		const late = this.#lateDiagnosticsParts();
+		const body: NativeChild[] = [...(view.body ?? []), ...this.#nativeResultImages()];
+		if (late.section) body.push(late.section);
+		const inline = view.inline === true;
+		const hasBody = body.length > 0;
+		const ms = this.#elapsedMs(status);
+		const live = status === "running" || status === "pending";
+		const intent = isRecord(this.#args) ? this.#args[INTENT_FIELD] : undefined;
+		const badges = [...(head?.badges ?? []), ...(late.chip ? [late.chip] : [])];
+		const title: TspText = head?.title ?? (head ? this.#toolLabel : (view.head ?? this.#toolLabel));
+		const preview = view.preview ?? (inline ? "none" : { lines: DEFAULT_TERMINAL_PREVIEW_LINES });
+		return node(
+			"tool",
+			{
+				role: `omp.tool.${this.#toolName}`,
+				key: this.#toolCallId,
+				name: this.#toolName,
+				// `title` here is the head verb (TspToolProps), not the common tooltip.
+				title: title as string,
+				target: head?.target,
+				targetKind: head?.targetKind,
+				lang: head?.lang,
+				href: head?.href,
+				meta: head?.meta,
+				badges: badges.length > 0 ? badges : undefined,
+				note: head?.note ?? (status === "cancelled" && !this.#isBenignSkip() ? "cancelled" : undefined),
+				exit: head?.exit ?? undefined,
+				status,
+				age: live ? ms : undefined,
+				took: live ? undefined : ms,
+				intent: typeof intent === "string" && intent ? plainText(intent) : undefined,
+				frame: inline ? "inline" : "card",
+				collapsible: hasBody,
+				collapsed: hasBody ? this.#nativeCollapsed(status) : undefined,
+				preview: hasBody ? (preview === "auto" ? { lines: DEFAULT_TERMINAL_PREVIEW_LINES } : preview) : undefined,
+				tools: view.tools,
+				tone: view.tone,
+			},
+			body,
+		);
+	}
+
+	/** The fallback card head: the renderer's spans, else spans from its data head. */
+	#fallbackHead(view: NativeToolView): NativeToolView["head"] {
+		if (view.head !== undefined) return view.head;
+		const head = view.tool;
+		if (!head) return undefined;
+		const title =
+			typeof head.title === "string"
+				? head.title
+				: head.title
+					? plainText(head.title.map(s => s.t).join(""))
+					: this.#toolLabel;
+		const target = typeof head.target === "string" ? span(head.target, "muted") : head.target?.map(s => ({ ...s }));
+		const meta = (head.meta ?? []).map(m => (typeof m === "string" ? m : m.map(s => s.t).join("")));
+		const spans = toolHead(title, ...(Array.isArray(target) ? target : [target]), ...meta);
+		if (head.exit) spans.push(span(" "), span(`exit ${head.exit}`, "error"));
+		if (head.note)
+			spans.push(
+				span(" "),
+				span(typeof head.note === "string" ? head.note : head.note.map(s => s.t).join(""), "muted"),
+			);
+		return spans;
+	}
+
+	#describeCard(): NativeNode {
+		const view = this.#nativeView();
+		const status = this.#nativeStatus();
+		const late = this.#lateDiagnosticsParts();
+		const fallbackHead = this.#fallbackHead(view);
+		const headChildren: NativeChild[] = [
+			// One line; paths drop whole directories first (path-aware middle cut), the full head in the tooltip.
+			text(fallbackHead ?? [span(this.#toolLabel, "toolTitle")], {
+				lines: 1,
+				truncate: "middle",
+				grow: 1,
+				title: typeof fallbackHead === "string" ? fallbackHead : fallbackHead?.map(s => s.t).join(""),
+			}),
+		];
+		const started = this.#executionStartedAtNow;
+		if (started !== undefined) {
+			const ended = status === "running" ? undefined : this.#executionEndedAtNow;
+			const took = Math.max(0, Math.round((ended ?? performance.now()) - started));
+			headChildren.push(node("elapsed", ended === undefined ? { age: took } : { age: took, stopped: took }));
+		}
+		const children: NativeChild[] = [
+			node("row", { gap: "sm", align: "baseline" }, headChildren, "head"),
+			...(view.body ?? []),
+			...this.#nativeResultImages(),
+			...(late.section ? [late.section] : []),
+		];
+		const role = `omp.tool.${this.#toolName}`;
+		if (view.inline) return col(children, { role });
+		const hasBody = children.length > 1;
+		return card(
+			{
+				role,
+				key: this.#toolCallId,
+				tone: view.tone ?? NATIVE_STATUS_TONE[status],
+				status,
+				collapsible: hasBody,
+				collapsed: hasBody ? this.#nativeCollapsed(status) : undefined,
+				preview: hasBody ? cardPreview(view.preview) : undefined,
+			},
+			children,
+		);
+	}
+
+	#nativeStatus(): TspCardStatus {
+		if (this.#isBenignSkip()) return "cancelled";
+		if (this.#result !== undefined && !this.#isPartial) return this.#result.isError ? "error" : "done";
+		if (this.#sealed) return "cancelled";
+		return this.#result !== undefined || this.#executionStarted ? "running" : "pending";
+	}
+
+	/**
+	 * The renderer's semantic view: the call view until a result exists, then
+	 * the result view (merged renderers) or the call head over both bodies.
+	 * A renderer that throws falls back to the generic card.
+	 */
+	#nativeView(): NativeToolView {
+		const options: RenderResultContextOptions = {
+			expanded: this.#expanded,
+			isPartial: this.#isPartial,
+			argsComplete: this.#argsComplete,
+			executionStarted: this.#executionStarted,
+			renderContext: this.#buildRenderContext(),
+		};
+		// Custom tools (MCP, extensions) carry their own describe hooks, mirroring
+		// the ANSI path's preference for the tool's renderCall/renderResult.
+		const toolDescriber = this.#tool as ToolDescriber | undefined;
+		const renderer: ToolDescriber | undefined =
+			toolDescriber?.describeCall || toolDescriber?.describeResult ? toolDescriber : this.#renderer;
+		if (this.#isBenignSkip() || !renderer || (!renderer.describeCall && !renderer.describeResult)) {
+			return this.#defaultNativeView(options);
+		}
+		try {
+			const args = this.#getCallArgsForRender();
+			const result = this.#result;
+			const merged = renderer.mergeCallAndResult === true;
+			const resultView = result
+				? renderer.describeResult?.(
+						{ content: result.content, details: result.details, isError: result.isError },
+						options,
+						args,
+					)
+				: undefined;
+			const callView = !result || !merged || !resultView ? renderer.describeCall?.(args, options) : undefined;
+			if (merged || !callView || !resultView) {
+				return resultView ?? callView ?? { head: [span(this.#toolLabel, "toolTitle")] };
+			}
+			return {
+				tool: callView.tool || resultView.tool ? { ...callView.tool, ...resultView.tool } : undefined,
+				head: callView.head ?? resultView.head,
+				body: [...(callView.body ?? []), ...(resultView.body ?? [])],
+				tone: resultView.tone ?? callView.tone,
+				preview: resultView.preview ?? callView.preview,
+				inline: resultView.inline ?? callView.inline,
+				tools: resultView.tools ?? callView.tools,
+			};
+		} catch (err) {
+			logger.warn("Tool describe failed", { tool: this.#toolName, error: String(err) });
+			return this.#defaultNativeView(options);
+		}
+	}
+
+	#defaultNativeView(options: RenderResultContextOptions): NativeToolView {
+		const result = this.#result;
+		return describeDefaultToolExecution({
+			label: this.#toolLabel,
+			args: this.#args,
+			result: result
+				? { output: this.#nativeTextOutput(), isError: result.isError, skipped: this.#isBenignSkip() }
+				: undefined,
+			options,
+		});
+	}
+
+	/** Result text for the generic card; images are native nodes unless images are hidden. */
+	#nativeTextOutput(): string {
+		const result = this.#result;
+		if (!result) return "";
+		const output = result.content
+			.filter(block => block.type === "text")
+			.map(block => sanitizeText(block.text || ""))
+			.join("\n");
+		if (this.#showImages) return output;
+		const indicators = this.#getAllImageBlocks()
+			.map(image => {
+				const mimeType = String(image.mimeType);
+				const dims = image.data ? (getImageDimensions(image.data, mimeType) ?? undefined) : undefined;
+				return imageFallback(mimeType, dims);
+			})
+			.join("\n");
+		return indicators ? (output ? `${output}\n${indicators}` : indicators) : output;
+	}
+
+	#nativeResultImages(): NativeNode[] {
+		if (!this.#result || !this.#showImages) return [];
+		const images: NativeNode[] = [];
+		this.#getAllImageBlocks().forEach((image, index) => {
+			if (image.data && image.mimeType)
+				images.push(this.#nativeImages.get(`img${index}`, image.data, image.mimeType));
+		});
+		return images;
 	}
 
 	/** Apply the transcript allocator's current viewport reservation. */
@@ -1200,8 +1599,7 @@ export class ToolExecutionComponent extends Container {
 			// Generic fallback (no custom/built-in renderer). WidthAwareText
 			// reformats at render time so output fills the actual terminal width
 			// instead of a fixed column cap.
-			this.#contentText.setCustomBgFn(stateBgFn);
-			this.#contentText.invalidate();
+			this.#refreshContentText(stateBgKey, stateBgFn);
 		}
 
 		// Handle images (same for both custom and built-in)
@@ -1241,7 +1639,12 @@ export class ToolExecutionComponent extends Container {
 						imageData,
 						imageMimeType,
 						{ fallbackColor: (s: string) => theme.fg("toolOutput", s) },
-						{ ...resolveImageOptions(), budget: this.#ui.imageBudget, imageKey: `te${this.#instanceId}:${i}` },
+						{
+							...resolveImageOptions(),
+							budget: this.#ui.imageBudget,
+							imageKey: `te${this.#instanceId}:${i}`,
+							requestRender: () => this.#ui.requestRender(),
+						},
 					);
 					this.#imageComponents.push(imageComponent);
 					this.addChild(imageComponent);
@@ -1288,13 +1691,13 @@ export class ToolExecutionComponent extends Container {
 				context.output = output;
 			}
 			context.expanded = this.#expanded;
-			context.previewLines = BASH_DEFAULT_PREVIEW_LINES;
+			context.previewLines = DEFAULT_TERMINAL_PREVIEW_LINES;
 			context.timeout = normalizeTimeoutSeconds(isRecord(this.#args) ? this.#args.timeout : undefined, 3600);
 		} else if (this.#toolName === "eval" && this.#result) {
 			const output = this.#getTextOutput().trimEnd();
 			context.output = output;
 			context.expanded = this.#expanded;
-			context.previewLines = EVAL_DEFAULT_PREVIEW_LINES;
+			context.previewLines = DEFAULT_TERMINAL_PREVIEW_LINES;
 		} else if (this.#toolName === "task") {
 			// Once a result snapshot exists the task renderer's `renderResult`
 			// draws every dispatched agent as a progress/result line, so tell
@@ -1339,6 +1742,8 @@ export class ToolExecutionComponent extends Container {
 
 	#getTextOutput(): string {
 		if (!this.#result) return "";
+		const key = `${this.#resultVersion}|${this.#showImages}|${TERMINAL.imageProtocol ?? "-"}`;
+		if (key === this.#textOutputKey) return this.#textOutput;
 
 		const textBlocks = this.#result.content.filter(c => c.type === "text");
 		const imageBlocks = this.#getAllImageBlocks();
@@ -1360,7 +1765,19 @@ export class ToolExecutionComponent extends Container {
 			output = output ? `${output}\n${imageIndicators}` : imageIndicators;
 		}
 
+		this.#textOutputKey = key;
+		this.#textOutput = output;
 		return output;
+	}
+
+	/** Re-tint (only when the tint changed) and reformat the generic #contentText card. */
+	#refreshContentText(stateBgKey: string, stateBgFn: (text: string) => string): void {
+		const bgKey = `${stateBgKey}|${getThemeEpoch()}`;
+		if (bgKey !== this.#contentTextBgKey) {
+			this.#contentTextBgKey = bgKey;
+			this.#contentText.setCustomBgFn(stateBgFn);
+		}
+		this.#contentText.reformat();
 	}
 
 	/**
@@ -1406,8 +1823,7 @@ export class ToolExecutionComponent extends Container {
 	 */
 	#renderBenignSkipCard(stateBgFn: (text: string) => string): void {
 		if (!this.#usesContentBox) {
-			this.#contentText.setCustomBgFn(stateBgFn);
-			this.#contentText.invalidate();
+			this.#refreshContentText("toolPendingBg", stateBgFn);
 			return;
 		}
 		for (const box of this.#multiFileBoxes) {

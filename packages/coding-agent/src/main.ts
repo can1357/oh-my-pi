@@ -9,7 +9,10 @@ import * as os from "node:os";
 import type { ThinkingLevel } from "@oh-my-pi/pi-agent-core/thinking";
 import { EventLoopKeepalive } from "@oh-my-pi/pi-agent-core/utils/yield";
 import type { ImageContent, Model } from "@oh-my-pi/pi-ai";
+import { getModelPricingStatus } from "@oh-my-pi/pi-catalog/models";
+import { isEnoent, isEnotdir } from "@oh-my-pi/pi-utils";
 import {
+	APP_NAME,
 	directoryIsMissing,
 	getLogPath,
 	getProjectDir,
@@ -20,9 +23,17 @@ import {
 import { $env, isBunTestRuntime, setInteractiveHost } from "@oh-my-pi/pi-utils/env";
 import * as logger from "@oh-my-pi/pi-utils/logger";
 import * as postmortem from "@oh-my-pi/pi-utils/postmortem";
+import { fuzzyFilter } from "@oh-my-pi/pi-tui/fuzzy";
 import chalk from "@oh-my-pi/pi-utils/chalk";
 import { reset as resetCapabilities } from "./capability";
-import { type Args, reportUnrecognizedFlags, validateToolNames } from "./cli/args";
+import {
+	type Args,
+	reportInvalidFlagValues,
+	reportUnrecognizedFlags,
+	validateGoalLaunch,
+	validateGoalStartup,
+	validateToolNames,
+} from "./cli/args";
 import { applyExtensionFlags, type ExtensionFlagSink } from "./cli/extension-flags";
 import { processFileArguments } from "./cli/file-processor";
 import { buildInitialMessage } from "./cli/initial-message";
@@ -62,7 +73,6 @@ import { ExtensionRunner } from "./extensibility/extensions/runner";
 import type { ExtensionUIContext } from "./extensibility/extensions/types";
 import { scheduleMarketplaceAutoUpdate } from "./extensibility/plugins/marketplace-auto-update";
 import { registerDaemonProjectPresence } from "./launch/presence";
-import { discoverStartupLspServers } from "./lsp/servers";
 import type { MCPManager } from "./mcp";
 import type { InteractiveMode } from "./modes/interactive-mode";
 import type { PrintModeOptions } from "./modes/print-mode";
@@ -75,7 +85,6 @@ import { invokeSkillCommandFromText, isKnownSkillCommand } from "./modes/skill-c
 import {
 	applyStartupComposerPreferences,
 	type ComposerLease,
-	setStartupComposerLspServers,
 	stopPendingStartupComposer,
 	takeStartupComposerLease,
 } from "./modes/startup-composer";
@@ -103,7 +112,7 @@ import {
 } from "./session/foreign-session-import";
 import type { ForeignSessionInfo, ForeignSessionSource, ForeignSessionStore } from "./session/foreign-session-store";
 import { resolveResumableSession, type SessionInfo } from "./session/session-listing";
-import { ForkSourceNotFoundError, SessionManager } from "./session/session-manager";
+import { ForkSourceNotFoundError, SessionManager, SessionMoveRefusedError } from "./session/session-manager";
 import { shouldShowStartupSplash } from "./startup-splash";
 import {
 	discoverSystemPromptOverride,
@@ -127,6 +136,8 @@ import {
 import { EventBus } from "./utils/event-bus";
 import { resolveFirstLaunchPythonEvalWarning } from "./eval/startup-warning";
 import { CliUsageError } from "./cli/usage-error";
+import { cfgGoalEnabled } from "./goals/settings";
+import { cfgPlanDefaultOnStartup, cfgPlanEnabled } from "./plan-mode/settings";
 
 import { cfgAdvisorEnabled } from "./advisor/settings";
 import { cfgToolsApprovalMode } from "./tools/settings";
@@ -164,7 +175,6 @@ import {
 } from "./session/settings";
 import { cfgDisabledProviders, cfgEnabledModels } from "./config/model-settings";
 import { cfgTaskAgentIdleTtlMs } from "./task/settings";
-import { cfgLspEnabled } from "./lsp/settings";
 import { cfgSkillsIncludeSkills } from "./extensibility/settings";
 import { cfgWorkspaceAdditionalDirectories } from "./session/context-settings";
 
@@ -243,6 +253,22 @@ function applyProtocolDefaults(host: ProtocolHost, targetSettings: Settings = se
 	for (const setting of all()) {
 		if (setting.definition.protocolDefault?.includes(host)) setting.pinDefault(targetSettings);
 	}
+}
+
+/** `--no-ui` only applies to RPC modes; reject it elsewhere (exit 1). */
+function rejectNoUiWithoutRpc(args: Pick<Args, "noUi" | "mode">): void {
+	if (!args.noUi || args.mode === "rpc" || args.mode === "rpc-ui") return;
+	process.stderr.write(`${chalk.red("Error: --no-ui requires --mode rpc or --mode rpc-ui")}\n`);
+	process.exit(1);
+}
+
+/** Fail an interactive launch whose stdin is not a terminal: the TUI cannot run there. */
+function exitWithoutTerminal(): never {
+	process.stderr.write(
+		`${chalk.red("Error: interactive mode requires a terminal, but stdin is not a TTY.")}\n` +
+			`Pass a prompt (\`${APP_NAME} -p "…"\`), pipe one on stdin, or use \`--mode rpc\`.\n`,
+	);
+	process.exit(2);
 }
 
 /** Reads a non-TTY stdin stream as prompt text. */
@@ -464,7 +490,7 @@ export interface AcpSessionFactoryOptions {
 	sessionDir?: string;
 	authStorage: AuthStorage;
 	modelRegistry: ModelRegistry;
-	parsedArgs: Pick<Args, "apiKey" | "trustedExtensions" | "tools">;
+	parsedArgs: Pick<Args, "apiKey" | "trustedExtensions" | "tools" | "invalidFlagValues">;
 	rawArgs: string[];
 	createSession: (options: CreateAgentSessionOptions) => Promise<CreateAgentSessionResult>;
 }
@@ -556,6 +582,11 @@ export function createAcpSessionFactory(args: AcpSessionFactoryOptions): AcpSess
 				: undefined,
 			args.rawArgs,
 		);
+		const effectiveArgs = reparsedArgs ?? args.parsedArgs;
+		if (effectiveArgs.invalidFlagValues.length > 0) {
+			await nextSession.dispose();
+			throw new CliUsageError(effectiveArgs.invalidFlagValues.join("\n"));
+		}
 		const requestedTools = reparsedArgs?.tools ?? args.parsedArgs.tools;
 		if (requestedTools) {
 			try {
@@ -589,6 +620,7 @@ async function runInteractiveMode(
 	joinLink?: string,
 	startDeferredStartupWork?: () => void,
 	startupLease?: ComposerLease,
+	startupGoal?: string,
 ): Promise<void> {
 	const InteractiveModeConstructor = await loadInteractiveModeConstructor();
 	let mode: InteractiveMode;
@@ -639,7 +671,6 @@ async function runInteractiveMode(
 				suppressWelcomeIntro: resuming || setupScenes.length > 0 || playStartupSplash,
 				clearInitialTerminalHistory: true,
 				autoStartCollab: joinLink === undefined,
-				recentSessions: startupLease?.recentSessions,
 			}),
 		);
 		startDeferredStartupWork?.();
@@ -715,6 +746,15 @@ async function runInteractiveMode(
 			mode.stop();
 		}
 		throw error;
+	}
+
+	if (startupGoal !== undefined) {
+		session.maybeStartTitleGeneration(startupGoal);
+		try {
+			await mode.startGoalAtStartup(startupGoal);
+		} catch (error: unknown) {
+			mode.showError(error instanceof Error ? error.message : "Unknown error occurred");
+		}
 	}
 
 	if (initialMessage !== undefined) {
@@ -847,7 +887,17 @@ async function moveMissingCwdSessionIfNeeded(
 	// move target equals the current project dir. moveTo never chdirs, so the
 	// stale cwd is only a relocation source, not a directory we enter.
 	const manager = await SessionManager.open(session.path, sessionDir, undefined, { initialCwd: sourceCwd });
-	await manager.moveTo(cwd, sessionDir);
+	try {
+		await manager.moveTo(cwd, sessionDir);
+	} catch (err) {
+		if (!(err instanceof SessionMoveRefusedError)) throw err;
+		await manager.close();
+		// Its directory is gone, so it cannot be resumed in place either.
+		throw new SessionResolutionError(
+			err.message,
+			"Close the session in the other omp process, then resume it again.",
+		);
+	}
 	return { status: "moved", manager };
 }
 
@@ -1095,7 +1145,7 @@ export function normalizeContinueSessionArgs(parsed: Args, rawArgs?: readonly st
 	parsed.continue = false;
 	parsed.messages.splice(messageIndex, 1);
 }
-const FORK_NOT_FOUND_HINT =
+const SESSION_NOT_FOUND_HINT =
 	"Run `omp --resume` without an argument to pick from recent sessions, or `omp` to start a new one.";
 
 function validateSessionPersistenceArgs(parsed: Pick<Args, "continue" | "noSession" | "resume">): void {
@@ -1130,20 +1180,20 @@ export async function createSessionManager(
 				return await SessionManager.forkFrom(forkSource, cwd, parsed.sessionDir);
 			} catch (err) {
 				if (err instanceof ForkSourceNotFoundError) {
-					throw new SessionResolutionError(err.message, FORK_NOT_FOUND_HINT);
+					throw new SessionResolutionError(err.message, SESSION_NOT_FOUND_HINT);
 				}
 				throw err;
 			}
 		}
 		const match = await resolveResumableSession(forkSource, cwd, parsed.sessionDir);
 		if (!match) {
-			throw new SessionResolutionError(`Session "${forkSource}" not found.`, FORK_NOT_FOUND_HINT);
+			throw new SessionResolutionError(`Session "${forkSource}" not found.`, SESSION_NOT_FOUND_HINT);
 		}
 		try {
 			return await SessionManager.forkFrom(match.session.path, cwd, parsed.sessionDir);
 		} catch (err) {
 			if (err instanceof ForkSourceNotFoundError) {
-				throw new SessionResolutionError(`Session "${forkSource}" not found.`, FORK_NOT_FOUND_HINT);
+				throw new SessionResolutionError(`Session "${forkSource}" not found.`, SESSION_NOT_FOUND_HINT);
 			}
 			throw err;
 		}
@@ -1161,14 +1211,18 @@ export async function createSessionManager(
 	if (typeof parsed.resume === "string") {
 		const sessionArg = parsed.resume;
 		if (sessionArg.includes("/") || sessionArg.includes("\\") || sessionArg.endsWith(".jsonl")) {
-			return await SessionManager.open(sessionArg, parsed.sessionDir);
+			try {
+				return await SessionManager.open(sessionArg, parsed.sessionDir, undefined, { throwIfMissing: true });
+			} catch (err) {
+				if (isEnoent(err) || isEnotdir(err)) {
+					throw new SessionResolutionError(`Session "${sessionArg}" not found.`, SESSION_NOT_FOUND_HINT);
+				}
+				throw err;
+			}
 		}
 		const match = await resolveResumableSession(sessionArg, cwd, parsed.sessionDir);
 		if (!match) {
-			throw new SessionResolutionError(
-				`Session "${sessionArg}" not found.`,
-				"Run `omp --resume` without an argument to pick from recent sessions, or `omp` to start a new one.",
-			);
+			throw new SessionResolutionError(`Session "${sessionArg}" not found.`, SESSION_NOT_FOUND_HINT);
 		}
 		if (match.scope === "local") {
 			const moveResult = await moveMissingCwdSessionIfNeeded(
@@ -1214,7 +1268,8 @@ export async function createSessionManager(
 	// session exists. When a prior session is resumed, mark parsed.continue so
 	// buildSessionOptions restores the session's model/thinking instead of
 	// overriding them with CLI defaults.
-	if (cfgAutoResume.get(activeSettings)) {
+	// An explicit startup goal starts fresh even when implicit auto-resume is configured.
+	if (parsed.goal === undefined && cfgAutoResume.get(activeSettings)) {
 		const manager = await SessionManager.continueRecent(cwd, parsed.sessionDir);
 		if (manager.getEntries().length > 0) {
 			parsed.continue = true;
@@ -1673,6 +1728,11 @@ export async function runRootCommand(
 		}
 
 		if (parsedArgs.export) {
+			// Export loads no extensions, so none can own a value the bootstrap parse
+			// rejected: report it as the usage error it is instead of exporting.
+			if (reportInvalidFlagValues(parsedArgs)) {
+				process.exit(2);
+			}
 			let result: string;
 			try {
 				const outputPath = parsedArgs.messages.length > 0 ? parsedArgs.messages[0] : undefined;
@@ -1691,9 +1751,10 @@ export async function runRootCommand(
 			process.stderr.write(`${chalk.red("Error: @file arguments are not supported in RPC mode")}\n`);
 			process.exit(1);
 		}
-		if (parsedArgs.noUi && parsedArgs.mode !== "rpc") {
-			process.stderr.write(`${chalk.red("Error: --no-ui requires --mode rpc")}\n`);
-			process.exit(1);
+		// A pending invalid `--mode` leaves `mode` unset; report it (exit 2) at the
+		// post-extension recheck before judging `--no-ui` against the mode.
+		if (parsedArgs.invalidFlagValues.length === 0) {
+			rejectNoUiWithoutRpc(parsedArgs);
 		}
 		const mode = parsedArgs.mode || "text";
 		// RPC owns stdin. Claim its singleton stream before plugin/extension discovery can load an in-process consumer.
@@ -1732,8 +1793,33 @@ export async function runRootCommand(
 		const isProtocolMode = mode === "rpc" || mode === "rpc-ui" || mode === "acp";
 		// Protocol modes own stdin; treating it as prompt text would consume JSON-RPC frames before their transports start.
 		const pipedInput = isProtocolMode ? undefined : await logger.time("readPipedInput", readPipedInput);
-		const autoPrint = pipedInput !== undefined && !parsedArgs.print && parsedArgs.mode === undefined;
+		// Without a terminal on stdin the TUI cannot run, so such a launch is always
+		// headless: a piped or argv prompt runs like `-p`, and one with no prompt
+		// fails with a usage error instead of booting the interactive stack and
+		// exiting silently.
+		const stdinIsTerminal = process.stdin.isTTY === true;
+		const autoPrint =
+			(pipedInput !== undefined || !stdinIsTerminal) && !parsedArgs.print && parsedArgs.mode === undefined;
 		const isInteractive = !parsedArgs.print && !autoPrint && parsedArgs.mode === undefined;
+		// Before session resolution: resume, fork, and import act on these same
+		// startup-parse flags, so rejecting later would leave forked or imported
+		// transcripts (or an opened picker) behind a usage error.
+		validateGoalLaunch(parsedArgs, isInteractive);
+		// Without piped text the prompt must come from argv, which only the
+		// post-extension reparse can settle: an extension string flag's value
+		// (`--spawn-peer reviewer`) looks like a prompt here, and a boolean flag
+		// shadowing a built-in (`--mode compact`) hides one. Fail early only for
+		// an unambiguous argv; otherwise the recheck there decides.
+		const autoPrintNeedsArgPrompt = autoPrint && pipedInput === undefined;
+		if (
+			autoPrintNeedsArgPrompt &&
+			parsedArgs.messages.length === 0 &&
+			parsedArgs.fileArgs.length === 0 &&
+			parsedArgs.unrecognizedFlags.length === 0 &&
+			parsedArgs.invalidFlagValues.length === 0
+		) {
+			exitWithoutTerminal();
+		}
 		// Only the interactive host renders a focusable Agent Hub / subagent session
 		// tree; declare it so headless subagent optimizations (e.g. skipping replan
 		// title refresh) can tell a focusable process from a print/RPC/eval one.
@@ -1785,6 +1871,15 @@ export async function runRootCommand(
 		const modelRegistry = logger.time(
 			"modelRegistry:init",
 			() => new ModelRegistry(authStorage, undefined, { settings: settingsInstance }),
+		);
+		// Credential-scoped catalogs (e.g. GitHub Copilot) load from their cache
+		// rows only after credentials resolve. `--model` and `enabledModels` below
+		// resolve against the registry before `createAgentSession` hydrates it, so
+		// without this a cached-only model is absent and its selector fuzzy-matches
+		// a bundled sibling (issue #14075). Local-only and never rejects; awaited
+		// right before the first catalog read so its I/O overlaps theme setup.
+		const credentialScopedCacheHydration = logger.time("hydrateCredentialScopedModelCaches", () =>
+			modelRegistry.hydrateCredentialScopedModelCaches(),
 		);
 		if (parsedArgs.noPty || parsedArgs.mode === "rpc-ui") {
 			Bun.env.PI_NO_PTY = "1";
@@ -1861,10 +1956,8 @@ export async function runRootCommand(
 				lightTheme: cfgThemeLight.get(settingsInstance),
 			},
 		});
-		setStartupComposerLspServers(
-			!parsedArgs.noLsp && cfgLspEnabled.get(settingsInstance) ? discoverStartupLspServers(cwd, "connecting") : null,
-		);
 
+		await credentialScopedCacheHydration;
 		let scopedModels = await logger.time(
 			"resolveModelScope",
 			resolveScopedModels,
@@ -2093,7 +2186,9 @@ export async function runRootCommand(
 		sessionOptions.authStorage = authStorage;
 		sessionOptions.modelRegistry = modelRegistry;
 		sessionOptions.hasUI = isInteractive || mode === "rpc-ui";
+		sessionOptions.allowSessionModelFallback = isInteractive;
 		sessionOptions.settingsApproval = isInteractive;
+		sessionOptions.tuiTranscript = isInteractive;
 		sessionOptions.settings = settingsInstance;
 		sessionOptions.onPrewalkWarning = warning => {
 			if (isInteractive) notifs.push({ kind: "warn", message: warning });
@@ -2111,7 +2206,12 @@ export async function runRootCommand(
 			cfgTelemetryOtlpExportEnabled.get(settingsInstance),
 		);
 		if (isTelemetryExportEnabled()) {
-			sessionOptions.telemetry = createTelemetryExportConfig(sessionOptions.telemetry);
+			// Chat telemetry reports each request's provider-computed cost. A model
+			// without a known rate card reports an unavailable reason instead of $0.
+			sessionOptions.telemetry = createTelemetryExportConfig(sessionOptions.telemetry, (providerId, modelId) => {
+				const model = modelRegistry.find(providerId, modelId);
+				return model !== undefined && getModelPricingStatus(model) !== "unknown";
+			});
 		}
 		await daemonPresencePromise;
 
@@ -2140,6 +2240,19 @@ export async function runRootCommand(
 		};
 
 		if (mode === "acp") {
+			// ACP binds extensions per `session/new`, and any of them may own a flag
+			// the bootstrap parse rejected, so pending invalid enum values are
+			// normally settled by the per-session factory. With discovery off and no
+			// explicit extension (`-e`, `--hook`, trusted) no session can load one,
+			// so fail the launch now instead of every `session/new` — without
+			// binding anything, since extension factories have side effects.
+			if (
+				sessionOptions.disableExtensionDiscovery &&
+				(sessionOptions.additionalExtensionPaths?.length ?? 0) === 0 &&
+				reportInvalidFlagValues(parsedArgs)
+			) {
+				process.exit(2);
+			}
 			const createAcpSession = createAcpSessionFactory({
 				baseOptions: sessionOptions,
 				settings: settingsInstance,
@@ -2153,6 +2266,9 @@ export async function runRootCommand(
 			// Branch-only protocol runner: keep ACP server code out of normal interactive startup.
 			const runAcpMode = deps.runAcpMode ?? (await import("./modes/acp/acp-mode")).runAcpMode;
 			stopStartupWatchdog();
+			// Startup is over: stop recording spans, or every later session and subagent
+			// appends to the timing tree for the life of the server.
+			logger.endTiming();
 			await runAcpMode(createAcpSession);
 		} else {
 			// Resolve extension-registered CLI flags before creating the session so a
@@ -2199,14 +2315,30 @@ export async function runRootCommand(
 					process.stderr.write(`${chalk.yellow(`${message}\n`)}`);
 				}
 			}
-			// Fail fast on stale/typo flags (e.g. `omp --list-models`) now that we
-			// know the real extension flag set. Without this check the unrecognized
-			// token gets silently consumed and any following positional leaks as the
-			// initial prompt — kicking off a real LLM session, MCP connection, and
-			// tool calls (issue #2459). Exit code 2 matches the conventional
-			// "command line usage error" convention.
-			if (reportUnrecognizedFlags(initialArgs)) {
+			// Fail fast on stale/typo flags (e.g. `omp --list-models`) and invalid
+			// built-in enum values now that we know the real extension flag set —
+			// an extension may shadow `--mode`/`--thinking`/`--approval-mode`, so
+			// neither can be judged by the pre-extension parse. Without this check
+			// the unrecognized token gets silently consumed and any following
+			// positional leaks as the initial prompt — kicking off a real LLM
+			// session, MCP connection, and tool calls (issue #2459). Exit code 2
+			// matches the conventional "command line usage error" convention.
+			const invalidValues = reportInvalidFlagValues(initialArgs);
+			const unknownFlags = reportUnrecognizedFlags(initialArgs);
+			if (invalidValues || unknownFlags) {
 				process.exit(2);
+			}
+			rejectNoUiWithoutRpc(parsedArgs);
+			if (initialArgs.goal !== undefined) {
+				validateGoalStartup(
+					initialArgs,
+					cfgGoalEnabled.get(settingsInstance),
+					pipedInput,
+					cfgPlanDefaultOnStartup.get(settingsInstance) && cfgPlanEnabled.get(settingsInstance),
+				);
+			}
+			if (autoPrintNeedsArgPrompt && initialArgs.messages.length === 0 && initialArgs.fileArgs.length === 0) {
+				exitWithoutTerminal();
 			}
 			const processedFiles =
 				initialArgs.fileArgs.length > 0
@@ -2360,6 +2492,24 @@ export async function runRootCommand(
 				} else {
 					process.stderr.write(`${chalk.red("No models available.")}\n`);
 				}
+				const availableModels = modelRegistry.getAvailable();
+				if (parsedArgs.model && availableModels.length > 0) {
+					// Credentials work; the requested selector is what failed. Point at
+					// the nearest usable models instead of an API-key checklist.
+					const suggestions = fuzzyFilter(
+						availableModels.map(model => `${model.provider}/${model.id}`),
+						parsedArgs.model,
+						selector => selector,
+					).slice(0, 5);
+					if (suggestions.length > 0) {
+						process.stderr.write(`${chalk.yellow("\nDid you mean:")}\n`);
+						for (const selector of suggestions) process.stderr.write(`  ${selector}\n`);
+					}
+					process.stderr.write(
+						`\nRun \`${APP_NAME} models find <pattern>\` to search, or \`${APP_NAME} models\` to list all.\n`,
+					);
+					process.exit(1);
+				}
 				process.stderr.write(`${chalk.yellow("\nSet an API key environment variable:")}\n`);
 				process.stderr.write("  ANTHROPIC_API_KEY, OPENAI_API_KEY, GEMINI_API_KEY, etc.\n");
 				process.stderr.write(`${chalk.yellow(`\nOr create ${ModelsConfigFile.path()}`)}\n`);
@@ -2378,6 +2528,7 @@ export async function runRootCommand(
 				// Branch-only protocol runner: keep RPC host code out of normal interactive startup.
 				const runRpcMode: RunRpcMode = (await import("./modes/rpc/rpc-mode")).runRpcMode;
 				stopStartupWatchdog();
+				logger.endTiming();
 				await runRpcMode(session, {
 					setToolUIContext: mode === "rpc-ui" ? setToolUIContext : undefined,
 					headless: parsedArgs.noUi === true,
@@ -2434,6 +2585,7 @@ export async function runRootCommand(
 						parsedArgs.join,
 						startDeferredStartupWork,
 						startupLease,
+						initialArgs.goal,
 					);
 				} finally {
 					startupLease?.dispose();
@@ -2441,6 +2593,9 @@ export async function runRootCommand(
 			} else {
 				// Branch-only single-shot runner: keep print-mode code out of normal interactive startup.
 				stopStartupWatchdog();
+				// PI_TIMING prints the tree after the run; otherwise stop recording now so a
+				// long `-p` run's subagents do not keep growing it.
+				if (!$env.PI_TIMING) logger.endTiming();
 				const runPrintMode: RunPrintMode = (await import("./modes/print-mode")).runPrintMode;
 				const exitCode = await runPrintMode(session, {
 					mode,

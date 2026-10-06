@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, spyOn, vi } from "bun:test";
 import * as natives from "@oh-my-pi/pi-natives";
 import { TUI } from "@oh-my-pi/pi-tui";
+import { TranscriptContainer } from "@oh-my-pi/pi-tui/chrome/transcript-container";
 import { Image, ImageBudget } from "@oh-my-pi/pi-tui/components/image";
 import { Text } from "@oh-my-pi/pi-tui/components/text";
 import {
@@ -268,6 +269,75 @@ describe("ImageBudget", () => {
 		expect(result.suppressed).toEqual([false, false, false]);
 	});
 
+	it("replaces suppression snapshots independently across surfaces and empty passes", () => {
+		const budget = new ImageBudget(1);
+		const observePass = (ids: number[], altScreen = false): boolean => {
+			budget.beginPass(false, altScreen);
+			for (const id of ids) budget.observe(id);
+			return budget.endPass();
+		};
+
+		expect(observePass([1, 2, 3])).toBe(true);
+		expect(observePass([1, 2, 3])).toBe(false);
+		budget.beginAltScreenLifecycle();
+		expect(observePass([4, 5], true)).toBe(true);
+		expect(observePass([4, 5], true)).toBe(false);
+
+		// Replacing and shrinking the screen prefix must neither retain old ids
+		// nor mutate the independently committed alternate-buffer prefix.
+		expect(observePass([6, 7])).toBe(false);
+		budget.beginPass(true);
+		expect([1, 2, 6, 7].map(id => budget.observe(id))).toEqual([false, false, true, false]);
+		budget.beginPass(true, true);
+		expect([4, 5, 6].map(id => budget.observe(id))).toEqual([true, false, false]);
+
+		budget.beginAltScreenLifecycle();
+		budget.beginPass(true, true);
+		expect(budget.observe(4)).toBe(false);
+		budget.beginPass(true);
+		expect(budget.observe(6)).toBe(true);
+
+		expect(observePass([])).toBe(false);
+		budget.beginPass(true);
+		expect(budget.observe(6)).toBe(false);
+	});
+
+	it("replaces live snapshots without losing the other surface's retirement protection", () => {
+		const budget = new ImageBudget(1);
+		const observePass = (ids: number[], altScreen = false): boolean => {
+			budget.beginPass(false, altScreen);
+			for (const id of ids) {
+				if (!budget.observe(id)) budget.enqueueTransmit(id, `TX${id}`);
+			}
+			const retry = budget.endPass();
+			if (!retry) budget.limitResidentImages();
+			return retry;
+		};
+
+		expect(observePass([1])).toBe(false);
+		expect(budget.takeTransmits()).toEqual(["TX1"]);
+		budget.beginAltScreenLifecycle();
+		expect(observePass([1, 2], true)).toBe(true);
+		expect(observePass([1, 2], true)).toBe(false);
+		expect(budget.takePurgeIds()).toEqual([]);
+		expect(budget.takeTransmits()).toEqual(["TX1", "TX2"]);
+
+		// The first pass relaxes the old threshold; the next transmits id 3.
+		expect(observePass([3], true)).toBe(false);
+		expect(observePass([3], true)).toBe(false);
+		expect(budget.takePurgeIds()).toEqual([2]);
+		expect(budget.takeTransmits()).toEqual(["TX3"]);
+		expect(budget.shouldTransmit(1)).toBe(false);
+
+		// Removing the screen frame releases its protection. The next alternate
+		// pass may retire id 1, but must keep its own current graphic, id 3.
+		expect(observePass([])).toBe(false);
+		expect(observePass([3], true)).toBe(false);
+		expect(budget.takePurgeIds()).toEqual([1]);
+		expect(budget.shouldTransmit(1)).toBe(true);
+		expect(budget.shouldTransmit(3)).toBe(false);
+	});
+
 	it("replays the committed live/text split by id during a stable (partial) pass", () => {
 		const budget = new ImageBudget(2, () => {});
 		// Settle to the steady split for 4 images at cap 2: oldest two (ids 1,2)
@@ -389,30 +459,97 @@ describe("Image budget integration", () => {
 		expect([...budget.takeTransmits()]).toEqual([]);
 	});
 
-	it("encodes a budgeted SIXEL image once across render passes", () => {
+	it("encodes a budgeted SIXEL image once, off the render pass, and repaints when it lands", async () => {
 		terminal.imageProtocol = ImageProtocol.Sixel;
-		const encodeSixel = spyOn(natives, "encodeSixel");
+		const encodeSixel = spyOn(natives, "encodeSixelAsync");
 		try {
-			const budget = new ImageBudget(3, () => {});
+			let repaints = 0;
+			const budget = new ImageBudget(3, () => {
+				repaints++;
+			});
 			const image = new Image(
 				BASE64_ONE_PIXEL_PNG,
 				"image/png",
 				{ fallbackColor: t => t },
 				{ maxWidthCells: 4, maxHeightCells: 4, budget, imageKey: "k" },
 			);
-
-			const frames: (readonly string[])[] = [];
-			for (let pass = 0; pass < 3; pass++) {
+			const render = (): readonly string[] => {
 				budget.beginPass();
-				frames.push(image.render(20));
+				const lines = image.render(20);
 				budget.endPass();
-			}
+				return lines;
+			};
 
+			// The first pass reserves the image's rows while the encode runs.
+			const pending = render();
+			expect(pending.join("")).not.toContain("\x1bP");
+			const repaintsBefore = repaints;
+			await encodeSixel.mock.results[0]?.value;
+			expect(repaints).toBe(repaintsBefore + 1);
+
+			const frames = [render(), render()];
 			// SIXEL carries the image inside the line and never registers a
-			// transmit; each extra encode is a full synchronous re-encode per frame.
+			// transmit; each extra encode would be a full re-encode per frame.
 			expect(encodeSixel).toHaveBeenCalledTimes(1);
 			expect(frames[0]?.at(-1)).toContain("\x1bP");
-			expect(frames[2]).toEqual(frames[0]!);
+			expect(frames[0]).toHaveLength(pending.length);
+			expect(frames[1]).toEqual(frames[0]!);
+		} finally {
+			encodeSixel.mockRestore();
+		}
+	});
+
+	it("repaints a budget-less SIXEL image through its requestRender once the encode lands", async () => {
+		terminal.imageProtocol = ImageProtocol.Sixel;
+		const encodeSixel = spyOn(natives, "encodeSixelAsync");
+		try {
+			let repaints = 0;
+			const image = new Image(
+				BASE64_ONE_PIXEL_PNG,
+				"image/png",
+				{ fallbackColor: t => t },
+				{
+					maxWidthCells: 4,
+					maxHeightCells: 4,
+					requestRender: () => {
+						repaints++;
+					},
+				},
+			);
+
+			expect(image.render(20).join("")).not.toContain("\x1bP");
+			await encodeSixel.mock.results[0]?.value;
+			expect(repaints).toBe(1);
+			expect(image.render(20).at(-1)).toContain("\x1bP");
+		} finally {
+			encodeSixel.mockRestore();
+		}
+	});
+
+	it("commits a SIXEL image to scrollback with its sequence while the off-thread encode is pending", async () => {
+		terminal.imageProtocol = ImageProtocol.Sixel;
+		const encodeSixel = spyOn(natives, "encodeSixelAsync");
+		try {
+			const transcript = new TranscriptContainer();
+			transcript.addChild(
+				new Image(
+					BASE64_ONE_PIXEL_PNG,
+					"image/png",
+					{ fallbackColor: t => t },
+					{ maxWidthCells: 4, maxHeightCells: 4, requestRender: () => {} },
+					// Several rows, so the pending block is reserved rows rather than one empty line.
+					{ widthPx: 40, heightPx: 40 },
+				),
+			);
+
+			// The live frame starts the encode and reserves the image's rows.
+			expect(transcript.renderViewport(80, 10, { tick: 0, now: 0 }).join("")).not.toContain("\x1bP");
+			expect(encodeSixel).toHaveBeenCalledTimes(1);
+			// Pressure retires the block before the encode lands; nothing can
+			// repaint those rows once they reach native scrollback.
+			const retired = transcript.peekFinalizedBatch(80, 0);
+			expect(retired?.rows.join("")).toContain("\x1bP");
+			await encodeSixel.mock.results[0]?.value;
 		} finally {
 			encodeSixel.mockRestore();
 		}

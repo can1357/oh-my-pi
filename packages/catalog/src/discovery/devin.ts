@@ -329,9 +329,7 @@ export async function fetchDevinModels(
 	const fetchCatalog = async (metadata: Metadata): Promise<ModelSpec<"devin-agent">[] | null> => {
 		try {
 			const request = create(GetCliModelConfigsRequestSchema, { metadata });
-			// `toBinary` always allocates a fresh ArrayBuffer-backed view; the DOM
-			// `BodyInit` typing just cannot see that through its ArrayBufferLike signature.
-			const body = toBinary(GetCliModelConfigsRequestSchema, request) as Uint8Array<ArrayBuffer>;
+			const body = toBinary(GetCliModelConfigsRequestSchema, request);
 			const response = await fetchImpl(requestUrl, {
 				method: "POST",
 				headers: {

@@ -85,6 +85,8 @@ const CONTEXT_OVERFLOW_EVIDENCE_PATTERNS = [
 	/reduce the length of the messages/i, // Groq
 	/maximum context length is \d+ tokens/i, // OpenRouter (all backends)
 	/exceeds the available context size/i, // llama.cpp server
+	/\bprompt\s*\(\s*\d+\s+tokens\s*\)\s*\+\s*max\s+tokens\s*\(\s*\d+\s*\)\s+exceeds\s+the\s+context\s*\(\s*\d+\s*\)/i, // Strata server
+	/\bprompt\s*\(\s*\d+\s+tokens\s*\)\s+leaves\s+no\s+room\s+to\s+answer\s+in\s+the\s+context\s*\(\s*\d+\s*\)/i, // Strata server
 	/requested tokens?.*exceed.*context (window|length|size)/i, // llama.cpp / OpenAI-compatible local servers
 	/context (window|length|size).*(exceeded|overflow|too small)/i, // Generic local server variants
 	/(prompt|input).*(too long|too large).*(context|n_ctx)/i, // llama.cpp phrasing variants
@@ -182,6 +184,25 @@ export function isResponsesRequestBodyReadTimeout(message: {
 		message.api === "openai-responses" &&
 		message.requestBodyReadTimeoutFullReplay === true &&
 		isRequestBodyReadTimeout(message.errorStatus, message.errorMessage)
+	);
+}
+
+/**
+ * Codex code for the experimental native turn lane refusing a mid-response
+ * `response.steer`; the server then drops the in-flight response and closes
+ * the socket.
+ */
+export const CODEX_NATIVE_LANE_STEER_REJECTED_CODE = "unsupported_native_inflight_message";
+
+/**
+ * A Codex turn the native turn lane dropped because omp steered it. The
+ * rejection answers our own `response.steer`, not the model's health: the
+ * provider stops steering the session, so the same model replays cleanly.
+ */
+export function isCodexSteerRejection(message: { api?: Api; errorMessage?: string }): boolean {
+	return (
+		message.api === "openai-codex-responses" &&
+		message.errorMessage?.includes(`code=${CODEX_NATIVE_LANE_STEER_REJECTED_CODE}`) === true
 	);
 }
 
@@ -550,28 +571,31 @@ function classifyText(
 		) {
 			kinds |= Flag.UsageLimit;
 		}
-		if (isTimeoutText(errorMessage)) kinds |= Flag.Transient | Flag.Timeout;
-		else if (isTransientErrorText(errorMessage)) kinds |= Flag.Transient;
-		// A stream truncation, transport-level stream drop, or forwarded Codex HTTP
-		// body-read failure may not match TRANSIENT_TRANSPORT_PATTERN. Flag it
-		// explicitly so AIError.retriable and the turn-recovery layer treat it as
-		// retryable, matching the provider retry path (isProviderRetryableError).
-		// Separate `if` (not chained onto the else-if) so a timeout whose text also
-		// reads as a truncation keeps Flag.Timeout alongside Flag.Transient. The
-		// string arm applies the strict STREAM_PARSE_DIAGNOSTIC_PATTERN, per the
-		// rationale on isTransientStreamParseError. Skip a phrase that rides on a
-		// terminal 4xx (e.g. a malformed request rejected as "400 unexpected EOF"):
-		// that is a deterministic client error that replays identically, so keep it
-		// terminal. classify() carries the outer terminal status down the cause
-		// chain so a wrapped truncation (ProviderHttpError 400 → cause "unexpected
-		// EOF") is caught here too.
-		if (
-			!isTerminalClientErrorStatus(statusClean) &&
-			(isTransientStreamParseError(errorMessage) ||
+		// Transport/timeout/truncation wording that rides on a terminal 4xx (e.g. a
+		// "400 unexpected EOF" malformed request, or a region/entitlement denial
+		// whose body carries `type=server_error`) describes a deterministic client
+		// error that replays identically, so keep it terminal — the same 4xx policy
+		// as isProviderRetryableError. classify() carries the outer terminal status
+		// down the cause chain so a wrapped phrase (ProviderHttpError 400 → cause
+		// "unexpected EOF") is caught here too.
+		if (!isTerminalClientErrorStatus(statusClean)) {
+			if (isTimeoutText(errorMessage)) kinds |= Flag.Transient | Flag.Timeout;
+			else if (isTransientErrorText(errorMessage)) kinds |= Flag.Transient;
+			// A stream truncation, transport-level stream drop, or forwarded Codex
+			// HTTP body-read failure may not match TRANSIENT_TRANSPORT_PATTERN. Flag
+			// it explicitly so AIError.retriable and the turn-recovery layer treat it
+			// as retryable, matching the provider retry path. Separate `if` (not
+			// chained onto the else-if) so a timeout whose text also reads as a
+			// truncation keeps Flag.Timeout alongside Flag.Transient. The string arm
+			// applies the strict STREAM_PARSE_DIAGNOSTIC_PATTERN, per the rationale
+			// on isTransientStreamParseError.
+			if (
+				isTransientStreamParseError(errorMessage) ||
 				isTransientStreamDropError(errorMessage) ||
-				CODEX_HTTP_BODY_READ_ERROR_PATTERN.test(errorMessage))
-		) {
-			kinds |= Flag.Transient;
+				CODEX_HTTP_BODY_READ_ERROR_PATTERN.test(errorMessage)
+			) {
+				kinds |= Flag.Transient;
+			}
 		}
 		// A concurrency cap (e.g. Vertex "Online prediction concurrent requests
 		// quota exceeded") is transient — shed-and-backoff. The bare wording need
@@ -581,6 +605,9 @@ function classifyText(
 		if ((api === "openai-responses" || api === "openai-codex-responses") && isStaleResponsesText(errorMessage)) {
 			kinds |= Flag.StaleResponsesItem;
 		}
+		// Retryable like the provider's own classification of the code, so a
+		// message reclassified from its text alone still retries.
+		if (isCodexSteerRejection({ api, errorMessage })) kinds |= Flag.Transient;
 
 		// Fireworks mid-generation NaN 400 is a model-side decode fault, not a bad
 		// request; a byte-identical replay succeeds, so treat it as transient.
@@ -612,9 +639,10 @@ export function classify(error: unknown, api?: Api): number {
 	const causeTokenEvidence = hasCauseTokenContextOverflowEvidence(error);
 	let link: unknown = error;
 	// A terminal 4xx on an outer link governs its own cause diagnostics: a
-	// wrapped truncation is describing why the deterministic request failed,
-	// not an independently retryable transport fault. Carry it down so the
-	// stream-parse guard in classifyText sees it on the status-less cause.
+	// wrapped truncation or transport phrase is describing why the deterministic
+	// request failed, not an independently retryable transport fault. Carry it
+	// down so the terminal-4xx guard in classifyText sees it on the status-less
+	// cause.
 	let governingTerminalStatus: number | undefined;
 	while (link !== undefined && link !== null) {
 		if (typeof link === "object") {
@@ -875,14 +903,21 @@ export function attach<E extends object>(error: E, id: number): E {
 
 /** Overflow-classification evidence, including errors received before token usage is available. */
 export interface ContextOverflowMessage extends Pick<AssistantMessage, "errorId" | "stopReason" | "errorMessage"> {
-	readonly usage?: Pick<Usage, "input" | "cacheRead" | "cacheWrite">;
+	readonly usage?: Pick<Usage, "input" | "cacheRead" | "cacheWrite" | "contextTokens">;
 }
 
-/** Provider-reported usage proves context-window excess — authoritative, compaction-owned (#9235). */
+/**
+ * Provider-reported usage proves context-window excess — authoritative, compaction-owned (#9235).
+ *
+ * Prefers `contextTokens` when the provider reports it: providers that run
+ * several model calls per turn (Cursor's server-side tool loop) report
+ * `input`/`cacheRead` summed across those calls, which can exceed the window
+ * many times over while the conversation itself stays small.
+ */
 export function isUsageBackedContextOverflow(message: ContextOverflowMessage, contextWindow?: number): boolean {
 	const usage = message.usage;
 	if (!contextWindow || !usage) return false;
-	const inputTokens = usage.input + usage.cacheRead + usage.cacheWrite;
+	const inputTokens = usage.contextTokens ?? usage.input + usage.cacheRead + usage.cacheWrite;
 	return inputTokens > contextWindow;
 }
 

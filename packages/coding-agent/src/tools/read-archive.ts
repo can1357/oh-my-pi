@@ -181,7 +181,7 @@ export async function readArchive(
 	// Archive members are immutable: there is no edit path for bytes inside
 	// an archive, and a hashline tag keyed to the archive file would invite
 	// (and fail) edits while clobbering sibling members' snapshots.
-	const result = buildInMemorySelectorResult(session, text, sel, {
+	const result = await buildInMemorySelectorResult(session, text, sel, {
 		details,
 		sourcePath: resolvedArchivePath.absolutePath,
 		entityLabel: "archive entry",
