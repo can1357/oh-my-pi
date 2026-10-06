@@ -205,38 +205,42 @@ export class IrcBridge {
 	}
 
 	/** Remote messages bypass local bus waiters, steering and interrupt queues. */
-	async deliverRemote(d: RemoteDelivery): Promise<"injected" | "woken"> {
+	async deliverRemote(deliveries: readonly RemoteDelivery[]): Promise<"injected" | "woken"> {
 		if (this.#host.isDisposed()) throw new Error("Recipient session is disposed.");
-		const record: CustomMessage = {
-			role: "custom",
-			customType: "irc:incoming",
-			content: prompt.render(ircIncomingTemplate, {
-				remote: true,
-				from: escapeXmlAttribute(d.from.address),
-				fromUrl: formatAddressForUrl(d.from.shortId),
-				shortId: d.from.shortId,
-				cwd: escapePeerText(d.from.cwd),
-				message: escapePeerText(d.body),
-			}),
-			display: true,
-			details: {
-				id: d.id,
-				from: d.from.address,
-				message: d.body,
-				remote: true,
-				shortId: d.from.shortId,
-				cwd: d.from.cwd,
-			},
-			attribution: "agent",
-			timestamp: d.receivedAt,
-		};
-		this.#pendingRemote.set(d.id, (this.#pendingRemote.get(d.id) ?? 0) + 1);
-		void this.#host.emitSessionEvent({ type: "irc_message", message: record });
+		const records = deliveries.map(d => {
+			const record: CustomMessage = {
+				role: "custom",
+				customType: "irc:incoming",
+				content: prompt.render(ircIncomingTemplate, {
+					remote: true,
+					from: escapeXmlAttribute(d.from.address),
+					fromUrl: formatAddressForUrl(d.from.shortId),
+					shortId: d.from.shortId,
+					cwd: escapePeerText(d.from.cwd),
+					message: escapePeerText(d.body),
+				}),
+				display: true,
+				details: {
+					id: d.id,
+					from: d.from.address,
+					message: d.body,
+					remote: true,
+					shortId: d.from.shortId,
+					cwd: d.from.cwd,
+				},
+				attribution: "agent",
+				timestamp: d.receivedAt,
+			};
+			this.#pendingRemote.set(d.id, (this.#pendingRemote.get(d.id) ?? 0) + 1);
+			void this.#host.emitSessionEvent({ type: "irc_message", message: record });
+			return record;
+		});
+		if (records.length === 0) return "injected";
 		if (this.#host.isStreaming()) {
-			this.#asides.push(record);
+			this.#asides.push(...records);
 			return "injected";
 		}
-		this.#host.wakeForIrc([record]);
+		this.#host.wakeForIrc(records);
 		return "woken";
 	}
 

@@ -1,5 +1,11 @@
 import { afterEach, describe, expect, it, setSystemTime, vi } from "bun:test";
+import * as fs from "node:fs/promises";
+import * as nodeFs from "node:fs";
+import * as path from "node:path";
 import { TempDir } from "@oh-my-pi/pi-utils";
+import * as dirs from "@oh-my-pi/pi-utils/dirs";
+import { FileSessionStorage } from "../../src/session/session-storage";
+import { SessionManager } from "../../src/session/session-manager";
 import { Settings } from "../../src/config/settings";
 import { IdleSubscriptions } from "../../src/messaging/idle";
 import { InboundGate } from "../../src/messaging/inbound";
@@ -10,6 +16,7 @@ import {
 	encodeAddressForUrl,
 	formatAddressForUrl,
 	isReservedAddress,
+	RESERVED_SESSION_NAME_ERROR,
 	sessionAddress,
 	sessionShortId,
 } from "../../src/messaging/names";
@@ -92,10 +99,10 @@ class FakeHost implements MessagingHost {
 	pendingRemoteCount(): number {
 		return this.pending;
 	}
-	deliverRemote(delivery: RemoteDelivery): void {
-		this.deliveries.push(delivery);
-		this.events.push(delivery.body);
-		this.pending++;
+	deliverRemote(deliveries: readonly RemoteDelivery[]): void {
+		this.deliveries.push(...deliveries);
+		this.events.push(...deliveries.map(delivery => delivery.body));
+		this.pending += deliveries.length;
 	}
 	showNotice(text: string): void {
 		this.display.push(text);
@@ -122,7 +129,9 @@ class FakeHost implements MessagingHost {
 }
 
 const realRequestInbox = transport.requestInbox;
+const realPublishInbox = transport.publishInbox;
 const realListInboxEntries = transport.listInboxEntries;
+const realListOfflineSessions = mailbox.listOfflineSessions;
 const services: MessagingService[] = [];
 const gates: InboundGate[] = [];
 const subscriptions: IdleSubscriptions[] = [];
@@ -150,6 +159,8 @@ async function pair(ready = true): Promise<{
 }> {
 	temp = TempDir.createSync("@omp-messaging-service-");
 	const dir = temp.path();
+	await fs.writeFile(path.join(dir, "a.jsonl"), '{"type":"session","id":"a"}\n');
+	await fs.writeFile(path.join(dir, "b.jsonl"), '{"type":"session","id":"b"}\n');
 	const publish = transport.publishInbox;
 	const list = transport.listInboxEntries;
 	const request = transport.requestInbox;
@@ -158,6 +169,7 @@ async function pair(ready = true): Promise<{
 	vi.spyOn(transport, "requestInbox").mockImplementation((entry, payload, options) =>
 		request(entry, payload, { ...options, dir }),
 	);
+	vi.spyOn(transport, "messagingRegistryDir").mockReturnValue(dir);
 	const enqueue = mailbox.enqueueOffline;
 	const drain = mailbox.drainOffline;
 	vi.spyOn(mailbox, "enqueueOffline").mockImplementation((id, message, options) =>
@@ -182,6 +194,7 @@ async function pair(ready = true): Promise<{
 }
 
 const sender: SenderInfo = {
+	sessionId: "a",
 	name: "alpha",
 	shortId: "aaaaaaaa",
 	cwd: "/project",
@@ -236,9 +249,7 @@ describe("session names", () => {
 		expect(encodeAddressForUrl("release notes")).toBe("release%20notes");
 		expect(isReservedAddress("@ns/name")).toBe(true);
 		expect(isReservedAddress("name@host")).toBe(false);
-		expect(claimSessionName.bind(null, "@reserved", new Set<string>())).toThrow(
-			'Session names can\'t start with "@" (reserved for extension peer namespaces).',
-		);
+		expect(claimSessionName.bind(null, "@reserved", new Set<string>())).toThrow(RESERVED_SESSION_NAME_ERROR);
 		expect(sessionAddress({ ...identity, sessionName: "@reserved", titleSource: "user" })).toBe("project-ba");
 		expect(
 			sessionAddress({ ...identity, sessionName: "@reserved", titleSource: "user", directPrint: true }),
@@ -792,6 +803,7 @@ describe("messaging service with real inboxes", () => {
 		const { a, b, target } = await pair();
 		const stopped: mailbox.OfflineSession = {
 			sessionId: "stopped",
+			path: path.join(temp!.path(), "stopped.jsonl"),
 			shortId: sessionShortId("stopped"),
 			name: "stopped",
 			cwd: "/elsewhere",
@@ -819,6 +831,7 @@ describe("messaging service with real inboxes", () => {
 		await b.close();
 		const stopped: mailbox.OfflineSession = {
 			sessionId: "b",
+			path: path.join(temp!.path(), "b.jsonl"),
 			shortId: target.shortId,
 			name: "beta",
 			cwd: target.cwd,
@@ -962,7 +975,7 @@ describe("messaging service with real inboxes", () => {
 		resumed.markReady();
 		expect(bh.deliveries).toHaveLength(mailbox.OFFLINE_INBOX_CAP - 1);
 		const retained = await mailbox.drainOffline("b");
-		expect(retained.map(item => item.message.body)).toEqual(["saved-49"]);
+		expect(retained.map(item => ("body" in item.message ? item.message.body : undefined))).toEqual(["saved-49"]);
 		bh.pending = 0;
 		await resumed.retireConversation();
 		expect(bh.deliveries.map(delivery => delivery.body)).toEqual(
@@ -976,6 +989,7 @@ describe("messaging service with real inboxes", () => {
 		await b.close();
 		const stopped: mailbox.OfflineSession = {
 			sessionId: "b",
+			path: path.join(temp!.path(), "b.jsonl"),
 			shortId: target.shortId,
 			name: "beta",
 			cwd: target.cwd,
@@ -989,7 +1003,7 @@ describe("messaging service with real inboxes", () => {
 		services.push(resumed);
 		resumed.markReady();
 		cfgMessagingList.override(as, "deny");
-		const enqueue = vi.spyOn(mailbox, "enqueueOffline").mockClear();
+		expect(await mailbox.drainOffline("b")).toEqual([]);
 		expect(await a.send(stopped, "send to current inbox", { notifyWhenIdle: false })).toEqual({
 			ok: true,
 			text: "Delivered to resumed-beta.",
@@ -1005,7 +1019,7 @@ describe("messaging service with real inboxes", () => {
 			ok: false,
 			text: "Not sent: beta runs an incompatible omp version.",
 		});
-		expect(enqueue).not.toHaveBeenCalled();
+		expect(await mailbox.drainOffline("b")).toEqual([]);
 	});
 
 	it("reserves offline burst slots while enqueueing and does not count full-inbox failures", async () => {
@@ -1013,35 +1027,42 @@ describe("messaging service with real inboxes", () => {
 		cfgMessagingRateLimit.override(as, 1);
 		const stopped: mailbox.OfflineSession = {
 			sessionId: "stopped",
+			path: path.join(temp!.path(), "stopped.jsonl"),
 			shortId: sessionShortId("stopped"),
 			name: "stopped",
 			cwd: "/elsewhere",
 			title: null,
 			modified: Date.now(),
 		};
-		const queued = Promise.withResolvers<"queued">();
-		const entered = Promise.withResolvers<void>();
-		vi.spyOn(mailbox, "enqueueOffline")
-			.mockResolvedValueOnce("full")
-			.mockImplementationOnce(() => {
-				entered.resolve();
-				return queued.promise;
+		await fs.writeFile(stopped.path, '{"type":"session","id":"stopped"}\n');
+		for (let i = 0; i < mailbox.OFFLINE_INBOX_CAP; i++)
+			await mailbox.enqueueOffline(stopped.sessionId, {
+				id: `fill-${i}`,
+				from: sender,
+				body: `full-${i}`,
+				chain: [],
+				sentAt: Date.now(),
 			});
 		expect(await a.send(stopped, "full first", { notifyWhenIdle: false })).toEqual({
 			ok: false,
 			text: "Not sent: stopped's offline inbox is full (50 messages).",
 		});
-		const sending = a.send(stopped, "queued", { notifyWhenIdle: false });
-		await entered.promise;
-		const burst = await a.send(stopped, "burst", { notifyWhenIdle: false });
-		queued.resolve("queued");
-		expect(await sending).toEqual({
+		const drained = await mailbox.drainOffline(stopped.sessionId);
+		await Promise.all(drained.map(item => item.ack()));
+		const results = await Promise.all([
+			a.send(stopped, "queued", { notifyWhenIdle: false }),
+			a.send(stopped, "burst", { notifyWhenIdle: false }),
+		]);
+		expect(results[0]).toEqual({
 			ok: true,
 			text: "Queued for stopped (not running); it will see this when resumed.",
 		});
-		expect(burst.text).toBe(
-			"Failed to send to stopped: Too many messages to this session just now: 1 were sent recently and more would be dropped by its rate limit, so this one was not sent. Batch what remains into one message, or wait a little before sending more.",
-		);
+		expect(results[1].text).toContain("Too many messages to this session just now");
+		expect(
+			(await mailbox.drainOffline(stopped.sessionId)).map(item =>
+				"body" in item.message ? item.message.body : undefined,
+			),
+		).toEqual(["queued"]);
 	});
 
 	it("delivers offline send receipts through resume and retains correlation for held-message expiry", async () => {
@@ -1051,6 +1072,7 @@ describe("messaging service with real inboxes", () => {
 		cfgMessagingDialogExpiry.override(bs, "60s");
 		const stopped: mailbox.OfflineSession = {
 			sessionId: "b",
+			path: path.join(temp!.path(), "b.jsonl"),
 			shortId: target.shortId,
 			name: "beta",
 			cwd: target.cwd,
@@ -1224,3 +1246,298 @@ it.each(["accept", "hold-explicit", "refuse"] as const)(
 		expect(host.display).toEqual(policy === "hold-explicit" ? [text] : []);
 	},
 );
+
+describe("offline handoff regressions", () => {
+	async function stoppedBeta() {
+		const fixture = await pair();
+		await fixture.b.close();
+		const stopped: mailbox.OfflineSession = {
+			sessionId: "b",
+			path: path.join(temp!.path(), "b.jsonl"),
+			shortId: fixture.target.shortId,
+			name: "beta",
+			cwd: "/project",
+			title: "beta",
+			modified: Date.now(),
+		};
+		return { ...fixture, stopped };
+	}
+
+	it("does not suppress or promote a saved session whose display hash collides with another live session", async () => {
+		const { a } = await pair();
+		const id = "collision-session-101974";
+		const otherId = "collision-session-119643";
+		const file = path.join(temp!.path(), "collision.jsonl");
+		await fs.writeFile(file, JSON.stringify({ type: "session", id }) + "\n");
+		const saved: mailbox.OfflineSession = {
+			sessionId: id,
+			path: file,
+			shortId: sessionShortId(id),
+			name: "saved-collision",
+			cwd: "/project",
+			title: null,
+			modified: Date.now(),
+		};
+		vi.spyOn(mailbox, "listOfflineSessions").mockResolvedValue([saved]);
+		const otherHost = new FakeHost(otherId, "other-collision");
+		const other = await MessagingService.start(otherHost, Settings.isolated({}));
+		services.push(other);
+		other.markReady();
+		expect(sessionShortId(otherId)).toBe(saved.shortId);
+		expect(await a.resolve(saved.name)).toEqual({ kind: "offline", target: saved });
+		expect((await a.send(saved, "COLLISION_MARKER", { notifyWhenIdle: false })).ok).toBe(true);
+		expect(otherHost.deliveries).toEqual([]);
+		expect(
+			(await mailbox.drainOffline(id)).map(item => ("body" in item.message ? item.message.body : undefined)),
+		).toEqual(["COLLISION_MARKER"]);
+	});
+
+	it("rejects duplicate live full identities with the existing ambiguity receipt", async () => {
+		const { a, stopped, bh, bs } = await stoppedBeta();
+		for (const host of [bh, new FakeHost("b", "beta-copy")]) {
+			const live = await MessagingService.start(host, bs);
+			services.push(live);
+			live.markReady();
+		}
+		const result = await a.send(stopped, "DO_NOT_ROUTE", { notifyWhenIdle: false });
+		expect(result.ok).toBe(false);
+		expect(result.text).toContain('Not sent: "beta" matches more than one agent:');
+		expect(result.text).toEndWith("Address one by its session short id.");
+		expect(bh.deliveries).toEqual([]);
+		expect(await mailbox.drainOffline("b")).toEqual([]);
+	});
+
+	it("drains a successful send whose atomic mailbox write overlaps receiver startup", async () => {
+		const { a, stopped, bh, bs } = await stoppedBeta();
+		const writing = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		const published = Promise.withResolvers<void>();
+		const rename = nodeFs.promises.rename;
+		vi.spyOn(nodeFs.promises, "rename").mockImplementation(async (from, to) => {
+			if (String(from).includes(".message-")) {
+				writing.resolve();
+				await release.promise;
+			}
+			return rename(from, to);
+		});
+		const publish = realPublishInbox;
+		vi.spyOn(transport, "publishInbox").mockImplementation(async (handler, options) => {
+			const result = await publish(handler, { ...options, dir: temp!.path() });
+			published.resolve();
+			return result;
+		});
+		const send = a.send(stopped, "STARTUP_RACE_MARKER", { notifyWhenIdle: false });
+		await writing.promise;
+		const starting = MessagingService.start(bh, bs);
+		await published.promise;
+		release.resolve();
+		expect((await send).ok).toBe(true);
+		const resumed = await starting;
+		services.push(resumed);
+		resumed.markReady();
+		expect(bh.deliveries.map(item => item.body)).toEqual(["STARTUP_RACE_MARKER"]);
+		expect(await mailbox.drainOffline("b")).toEqual([]);
+	});
+
+	it("routes a send live when startup owns the drain lock first", async () => {
+		const { a, stopped, bh, bs } = await stoppedBeta();
+		const draining = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		const drain = mailbox.drainOfflineUnlocked;
+		vi.spyOn(mailbox, "drainOfflineUnlocked").mockImplementation(async (id, options) => {
+			draining.resolve();
+			await release.promise;
+			return drain(id, options);
+		});
+		const starting = MessagingService.start(bh, bs);
+		await draining.promise;
+		const sending = a.send(stopped, "STARTUP_FIRST_MARKER", { notifyWhenIdle: false });
+		release.resolve();
+		const resumed = await starting;
+		services.push(resumed);
+		resumed.markReady();
+		expect((await sending).ok).toBe(true);
+		expect(bh.deliveries.map(item => item.body)).toEqual(["STARTUP_FIRST_MARKER"]);
+		expect(await mailbox.drainOffline("b")).toEqual([]);
+	});
+
+	it("rechecks a replacement receiver after the selected live endpoint fails instead of stranding mail", async () => {
+		const { a, stopped, bh, bs } = await stoppedBeta();
+		const old = await MessagingService.start(bh, bs);
+		services.push(old);
+		old.markReady();
+		let replaced = false;
+		vi.spyOn(transport, "requestInbox").mockImplementation(async (entry, request, options) => {
+			if (request.type === "message" && !replaced) {
+				replaced = true;
+				await old.close();
+				const replacement = await MessagingService.start(bh, bs);
+				services.push(replacement);
+				replacement.markReady();
+				return { ok: false, error: "unreachable" };
+			}
+			return realRequestInbox(entry, request, options);
+		});
+		expect((await a.send(stopped, "REPLACEMENT_MARKER", { notifyWhenIdle: false })).ok).toBe(true);
+		expect(bh.deliveries.map(item => item.body)).toEqual(["REPLACEMENT_MARKER"]);
+		expect(await mailbox.drainOffline("b")).toEqual([]);
+	});
+
+	it("addresses registered custom-session-dir transcripts offline by name and short id", async () => {
+		const { a } = await pair();
+		vi.spyOn(dirs, "getSessionsDir").mockReturnValue(path.join(temp!.path(), "managed"));
+		vi.spyOn(dirs, "getCustomSessionFilesDir").mockReturnValue(path.join(temp!.path(), "custom-markers"));
+		vi.spyOn(mailbox, "listOfflineSessions").mockImplementation(realListOfflineSessions);
+		const manager = SessionManager.create(temp!.path(), path.join(temp!.path(), "custom-session-dir"));
+		try {
+			await manager.setSessionName("custom-stopped", "user");
+			await manager.ensureOnDisk();
+			const named = await a.resolve("custom-stopped");
+			expect(named.kind).toBe("offline");
+			if (named.kind !== "offline") throw new Error("Custom session absent offline");
+			expect(named.target.sessionId).toBe(manager.getSessionId());
+			expect(await a.resolve(named.target.shortId)).toEqual(named);
+			expect((await a.send(named.target, "CUSTOM_MARKER", { notifyWhenIdle: false })).ok).toBe(true);
+			expect(
+				(await mailbox.drainOffline(named.target.sessionId)).map(item =>
+					"body" in item.message ? item.message.body : undefined,
+				),
+			).toEqual(["CUSTOM_MARKER"]);
+		} finally {
+			await manager.close();
+		}
+	});
+
+	it.each([true, false])("notifies a refused offline message's %s-live sender without waking it", async liveSender => {
+		const { a, ah, stopped, bh, bs, as } = await stoppedBeta();
+		expect((await a.send(stopped, "REFUSE_MARKER", { notifyWhenIdle: false })).ok).toBe(true);
+		if (!liveSender) await a.close();
+		cfgMessagingInbound.override(bs, "refuse");
+		const receiver = await MessagingService.start(bh, bs);
+		services.push(receiver);
+		receiver.markReady();
+		if (!liveSender) {
+			const pending = await mailbox.drainOffline("a");
+			expect(pending).toHaveLength(1);
+			expect(pending[0].message.id).toStartWith("refused-");
+			cfgMessagingInbound.override(as, "refuse");
+			const resumed = await MessagingService.start(ah, as);
+			services.push(resumed);
+			resumed.markReady();
+		}
+		expect(ah.display).toContain("Your offline message to beta was refused.");
+		expect(ah.deliveries).toEqual([]);
+		expect(ah.notices).toEqual([]);
+		expect(bh.deliveries).toEqual([]);
+		expect(await mailbox.drainOffline("b")).toEqual([]);
+		expect(await mailbox.drainOffline("a")).toEqual([]);
+	});
+
+	it("acknowledges a refused original even when its stopped sender's mailbox is full", async () => {
+		const { a, stopped, bh, bs } = await stoppedBeta();
+		await a.send(stopped, "REFUSE_FULL_MARKER", { notifyWhenIdle: false });
+		await a.close();
+		for (let i = 0; i < mailbox.OFFLINE_INBOX_CAP; i++)
+			await mailbox.enqueueOffline("a", {
+				id: `full-${i}`,
+				from: sender,
+				body: `full-${i}`,
+				chain: [],
+				sentAt: Date.now(),
+			});
+		cfgMessagingInbound.override(bs, "refuse");
+		const receiver = await MessagingService.start(bh, bs);
+		services.push(receiver);
+		receiver.markReady();
+		expect(await mailbox.drainOffline("b")).toEqual([]);
+		expect(await mailbox.drainOffline("a")).toHaveLength(mailbox.OFFLINE_INBOX_CAP);
+	});
+
+	it("does not show a refusal notice addressed to another persistent conversation", async () => {
+		const { ah } = await pair();
+		const own = (await transport.listInboxEntries()).find(entry => entry.sessionId === "a")!;
+		await transport.requestInbox(own, {
+			type: "notice",
+			id: "refused-wrong",
+			from: sender,
+			kind: "refused",
+			subject: "message",
+			aboutId: "original",
+			toSessionId: "wrong-conversation",
+		});
+		expect(ah.display).toEqual([]);
+		expect(ah.deliveries).toEqual([]);
+	});
+
+	it("does not recreate an inbox after the saved transcript was deleted", async () => {
+		const { a, stopped } = await stoppedBeta();
+		await fs.unlink(stopped.path);
+		expect(await a.send(stopped, "DO_NOT_RECREATE", { notifyWhenIdle: false })).toEqual({
+			ok: false,
+			text: "Not sent: beta is no longer available.",
+		});
+		expect(await mailbox.drainOffline("b")).toEqual([]);
+	});
+
+	it.skipIf(process.platform === "win32")(
+		"starts and resumes using the publication's fallback root, not an unsafe canonical root",
+		async () => {
+			temp = TempDir.createSync("@omp-messaging-fallback-");
+			const canonical = path.join(temp.path(), "unsafe");
+			await fs.symlink(temp.path(), canonical, "dir");
+			const publish = transport.publishInbox;
+			vi.spyOn(transport, "publishInbox").mockImplementation((handler, options) =>
+				publish(handler, { ...options, dir: canonical }),
+			);
+			const ah = new FakeHost(`fallback-sender-${crypto.randomUUID()}`, "fallback-sender");
+			const bh = new FakeHost(`fallback-receiver-${crypto.randomUUID()}`, "fallback-receiver");
+			const settings = Settings.isolated({});
+			const a = await MessagingService.start(ah, settings);
+			services.push(a);
+			a.markReady();
+			const file = path.join(temp.path(), "receiver.jsonl");
+			await fs.writeFile(file, JSON.stringify({ type: "session", id: bh.id }) + "\n");
+			const saved: mailbox.OfflineSession = {
+				sessionId: bh.id,
+				path: file,
+				shortId: sessionShortId(bh.id),
+				name: bh.name!,
+				cwd: "/project",
+				title: bh.name!,
+				modified: Date.now(),
+			};
+			expect((await a.send(saved, "FALLBACK_MARKER", { notifyWhenIdle: false })).ok).toBe(true);
+			const b = await MessagingService.start(bh, settings);
+			services.push(b);
+			b.markReady();
+			expect(bh.deliveries.map(item => item.body)).toEqual(["FALLBACK_MARKER"]);
+			expect(await mailbox.drainOffline(bh.id, { dir: `/tmp/omp-socks-${process.getuid!()}` })).toEqual([]);
+			await b.close();
+			expect((await a.send(saved, "FALLBACK_DELETE_MARKER", { notifyWhenIdle: false })).ok).toBe(true);
+			vi.spyOn(transport, "messagingRegistryDir").mockReturnValue(canonical);
+			await new FileSessionStorage().deleteSessionWithArtifacts(file);
+			expect(await mailbox.drainOffline(bh.id, { dir: `/tmp/omp-socks-${process.getuid!()}` })).toEqual([]);
+		},
+	);
+});
+
+it("keeps the original local identity published while a suspended receiver temporarily adopts a replica", async () => {
+	const { a, b, bh, target } = await pair();
+	const originalEnv = { ...b.env };
+	const resume = b.suspendReceiving();
+	bh.id = "temporary-collab-replica";
+	bh.name = "remote-host-name";
+	await b.retireConversation();
+	const listed = (await a.listSessions()).find(peer => peer.sessionId === target.sessionId);
+	expect(listed).toMatchObject({ sessionId: "b", name: "beta", shortId: target.shortId, title: "beta" });
+	expect(b.ownAddress()).toBe("beta");
+	expect(b.ownShortId()).toBe(target.shortId);
+	expect(b.env).toEqual(originalEnv);
+	expect((await a.send(listed!, "MAIL_FOR_LOCAL_CONVERSATION", { notifyWhenIdle: false })).ok).toBe(true);
+	expect(bh.deliveries).toEqual([]);
+	bh.id = "b";
+	bh.name = "beta";
+	resume();
+	expect(bh.deliveries.map(delivery => delivery.body)).toEqual(["MAIL_FOR_LOCAL_CONVERSATION"]);
+	expect(b.env).toEqual(originalEnv);
+});

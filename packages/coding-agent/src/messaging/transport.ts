@@ -10,11 +10,13 @@ import {
 	type LocalEndpointRegistry,
 	listLocalEndpoints,
 	publishLocalEndpoint,
+	readLocalEndpointEntries,
 	tokenMatches,
 } from "../ipc/local-endpoint-registry";
 import {
 	type AuthLine,
 	type InboxRequest,
+	isMailboxSessionId,
 	type InboxResponse,
 	LINE_DEADLINE_MS,
 	MAX_SERIALIZED_CHARS,
@@ -27,12 +29,14 @@ import {
 
 export type InboxAuth = "own-child" | "peer";
 export interface InboxPublication {
+	readonly registryDir: string;
 	readonly entryId: string;
 	readonly endpoint: string;
 	readonly token: string;
 	close(): Promise<void>;
 }
 export interface InboxEntry {
+	readonly sessionId: string;
 	readonly version: number;
 	readonly entryId: string;
 	readonly pid: number;
@@ -55,7 +59,7 @@ function registryFor(dir: string): LocalEndpointRegistry {
 	};
 }
 
-async function resolveRegistry(dir: string, create: boolean): Promise<LocalEndpointRegistry> {
+export async function resolveRegistry(dir: string, create: boolean): Promise<LocalEndpointRegistry> {
 	const registry = registryFor(dir);
 	try {
 		if (create) await ensurePrivateDir(registry, dir);
@@ -224,7 +228,7 @@ export function handleInboxConnection(
 
 export async function publishInbox(
 	handle: (req: InboxRequest, auth: InboxAuth) => Promise<InboxResponse>,
-	options?: { dir?: string },
+	options: { dir?: string; sessionId: string },
 ): Promise<InboxPublication> {
 	try {
 		const registry = await resolveRegistry(options?.dir ?? messagingRegistryDir(), true);
@@ -239,13 +243,44 @@ export async function publishInbox(
 					peerKey,
 					requireAuth: process.platform === "win32",
 				}),
-			{ instanceId: entryId, entryId, extra: { entryId, version: MESSAGING_WIRE_VERSION }, maxConnections: 64 },
+			{
+				instanceId: entryId,
+				entryId,
+				extra: { entryId, sessionId: options.sessionId, version: MESSAGING_WIRE_VERSION },
+				maxConnections: 64,
+			},
 		);
-		return { entryId, endpoint: publication.endpoint, token, close: () => publication.close() };
+		return {
+			registryDir: registry.dir,
+			entryId,
+			endpoint: publication.endpoint,
+			token,
+			close: () => publication.close(),
+		};
 	} catch (err) {
 		if (err instanceof MessagingUnavailableError) throw err;
 		throw new MessagingUnavailableError(err instanceof Error ? err.message : "Cannot publish messaging inbox");
 	}
+}
+
+/** Metadata-only discovery for the mailbox handoff; never opens a socket. */
+export async function readInboxEntries(options: { dir: string; signal?: AbortSignal }): Promise<InboxEntry[]> {
+	const registry = registryFor(options.dir);
+	const entries = await readLocalEndpointEntries(registry, { signal: options.signal, includeAllVersions: true });
+	return entries.flatMap(({ entryId, meta }) =>
+		isMailboxSessionId(meta.sessionId)
+			? [
+					{
+						entryId,
+						sessionId: meta.sessionId,
+						endpoint: meta.endpoint,
+						pid: meta.pid,
+						version: meta.version,
+						createdAt: meta.createdAt,
+					},
+				]
+			: [],
+	);
 }
 
 export async function listInboxEntries(options?: { dir?: string; signal?: AbortSignal }): Promise<InboxEntry[]> {
@@ -254,6 +289,9 @@ export async function listInboxEntries(options?: { dir?: string; signal?: AbortS
 	const live = await listLocalEndpoints(
 		registry,
 		entry => {
+			const sessionId = entry.meta.sessionId;
+			if (!isMailboxSessionId(sessionId))
+				return Promise.resolve<LocalEndpointQueryResult<InboxEntry>>({ status: "skip" });
 			const { promise, resolve } = Promise.withResolvers<LocalEndpointQueryResult<InboxEntry>>();
 			const socket = net.createConnection({ path: entry.meta.endpoint });
 			let finished = false;
@@ -275,6 +313,7 @@ export async function listInboxEntries(options?: { dir?: string; signal?: AbortS
 				finish({
 					status: "ok",
 					value: {
+						sessionId,
 						version: entry.meta.version,
 						entryId: entry.entryId,
 						pid: entry.meta.pid,
@@ -337,6 +376,7 @@ function parseResponse(raw: unknown): InboxResponse | undefined {
 	if (
 		typeof s.v !== "number" ||
 		!Number.isFinite(s.v) ||
+		!isMailboxSessionId(s.sessionId) ||
 		(s.name !== null && typeof s.name !== "string") ||
 		typeof s.shortId !== "string" ||
 		!/^[0-9a-f]{8}$/.test(s.shortId) ||

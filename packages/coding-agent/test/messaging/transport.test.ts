@@ -47,13 +47,14 @@ async function publish(
 	dir: string,
 	handle: (request: InboxRequest, auth: InboxAuth) => Promise<InboxResponse>,
 ): Promise<InboxPublication> {
-	const pub = await publishInbox(handle, { dir });
+	const pub = await publishInbox(handle, { dir, sessionId: "receiver-session" });
 	publications.push(pub);
 	return pub;
 }
 
 const snapshot: SessionSnapshot = {
 	v: MESSAGING_WIRE_VERSION,
+	sessionId: "receiver-session",
 	name: "receiver",
 	shortId: "12345678",
 	title: "Working session",
@@ -108,17 +109,17 @@ describe("inbox transport", () => {
 			return { ok: true, snapshot };
 		};
 		const [a, b] = await Promise.all([publish(dir, handler), publish(dir, handler)]);
-		const entries = await listInboxEntries({ dir });
+		const entries = await listInboxEntries({ dir: a.registryDir });
 		expect(entries.map(entry => entry.entryId).sort()).toEqual([a.entryId, b.entryId].sort());
 		for (const entry of entries) {
-			expect(Object.keys(entry).sort()).toEqual(["createdAt", "endpoint", "entryId", "pid", "version"]);
+			expect(Object.keys(entry).sort()).toEqual(["createdAt", "endpoint", "entryId", "pid", "sessionId", "version"]);
 			expect(entry.version).toBe(MESSAGING_WIRE_VERSION);
 		}
 		expect(
 			await requestInbox(
 				entries.find(entry => entry.entryId === b.entryId)!,
 				{ type: "snapshot" },
-				{ dir },
+				{ dir: b.registryDir },
 			),
 		).toEqual({ ok: true, snapshot });
 		expect(authSeen).toEqual(["peer"]);
@@ -143,6 +144,7 @@ describe("inbox transport", () => {
 		const [entry] = await listInboxEntries({ dir });
 		expect(entry).toEqual({
 			version: 2,
+			sessionId: "receiver-session",
 			entryId: pub.entryId,
 			pid: process.pid,
 			endpoint: pub.endpoint,
@@ -174,7 +176,14 @@ describe("inbox transport", () => {
 		const request: InboxRequest = {
 			type: "message",
 			id: "long-name",
-			from: { name, shortId: "abcdef12", cwd: "/workspace", entryId: pub.entryId, class: "bypass" },
+			from: {
+				sessionId: "sender-session",
+				name,
+				shortId: "abcdef12",
+				cwd: "/workspace",
+				entryId: pub.entryId,
+				class: "bypass",
+			},
 			body: "hello",
 		};
 		expect(await requestInbox(entry!, request, { dir })).toEqual({ ok: true, outcome: "delivered" });
@@ -404,7 +413,9 @@ describe("inbox transport", () => {
 		async () => {
 			const dir = tempDir();
 			const stat = vi.spyOn(nodeFs.promises, "lstat").mockRejectedValue(new Error("foreign directory owner"));
-			await expect(publishInbox(async () => ({ ok: true, snapshot }), { dir })).rejects.toMatchObject({
+			await expect(
+				publishInbox(async () => ({ ok: true, snapshot }), { dir, sessionId: "receiver-session" }),
+			).rejects.toMatchObject({
 				name: "MessagingUnavailableError",
 				reason: "foreign directory owner",
 			});
@@ -435,9 +446,9 @@ describe("inbox transport", () => {
 	it("surfaces a corrupt peer key as unavailable instead of replacing its identity", async () => {
 		const dir = tempDir();
 		await fs.writeFile(path.join(dir, "peer.key"), "corrupt", { mode: 0o600 });
-		await expect(publishInbox(async () => ({ ok: true, snapshot }), { dir })).rejects.toBeInstanceOf(
-			MessagingUnavailableError,
-		);
+		await expect(
+			publishInbox(async () => ({ ok: true, snapshot }), { dir, sessionId: "receiver-session" }),
+		).rejects.toBeInstanceOf(MessagingUnavailableError);
 		expect(await Bun.file(path.join(dir, "peer.key")).text()).toBe("corrupt");
 		expect((await fs.readdir(dir)).filter(name => name.endsWith(".json"))).toEqual([]);
 	});
@@ -445,6 +456,7 @@ describe("inbox transport", () => {
 
 describe("inbox request boundary", () => {
 	const sender = {
+		sessionId: "sender-session",
 		name: "sender",
 		shortId: "abcdef12",
 		cwd: "/workspace",
@@ -461,6 +473,32 @@ describe("inbox request boundary", () => {
 			...(subject === undefined ? {} : { subject }),
 		};
 		expect(parseInboxRequest(notice)).toEqual(notice);
+	});
+
+	it("requires full safe sender identity and a message-targeted refusal notice", () => {
+		const notice: Extract<InboxRequest, { kind: "refused" }> = {
+			type: "notice",
+			id: "refused-original",
+			from: sender,
+			kind: "refused",
+			subject: "message",
+			aboutId: "original",
+			toSessionId: "receiver-session",
+		};
+		expect(parseInboxRequest(notice)).toEqual(notice);
+		for (const change of [
+			{ toSessionId: undefined },
+			{ toSessionId: "../escape" },
+			{ subject: "subscription" },
+			{ aboutId: undefined },
+			{ from: { ...sender, sessionId: undefined } },
+			{ from: { ...sender, sessionId: ".." } },
+		])
+			expect(parseInboxRequest({ ...notice, ...change })).toBeUndefined();
+		const { sessionId: _id, ...withoutFullId } = sender;
+		expect(
+			parseInboxRequest({ type: "message", id: "original", body: "hello", from: withoutFullId }),
+		).toBeUndefined();
 	});
 
 	it.each([
@@ -483,3 +521,28 @@ describe("inbox request boundary", () => {
 		expect(parseInboxRequest(value)).toBeUndefined();
 	});
 });
+
+it("rejects snapshots lacking safe persistent identities instead of promoting their short id", async () => {
+	const dir = tempDir();
+	const pub = await publish(dir, async () => ({ ok: true, snapshot: { ...snapshot, sessionId: "../other" } }));
+	const [entry] = await listInboxEntries({ dir });
+	expect(entry?.entryId).toBe(pub.entryId);
+	expect(await requestInbox(entry!, { type: "snapshot" }, { dir })).toEqual({ ok: false, error: "invalid_response" });
+});
+
+it.skipIf(process.platform === "win32")(
+	"keeps metadata at the selected registry root when only the socket path must be shortened",
+	async () => {
+		const dir = path.join(tempDir(), "long-" + "x".repeat(150));
+		const pub = await publish(dir, async () => ({ ok: true, snapshot }));
+		expect(path.dirname(pub.endpoint)).not.toBe(dir);
+		const entries = await listInboxEntries({ dir: pub.registryDir });
+		const entry = entries.find(item => item.entryId === pub.entryId);
+		expect(entry).toBeDefined();
+		expect(await requestInbox(entry!, { type: "snapshot" }, { dir: pub.registryDir })).toEqual({
+			ok: true,
+			snapshot,
+		});
+		expect(await Bun.file(path.join(dir, `${pub.entryId}.json`)).exists()).toBe(true);
+	},
+);

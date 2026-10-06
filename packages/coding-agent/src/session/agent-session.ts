@@ -2667,11 +2667,13 @@ export class AgentSession implements SettingsScope {
 		);
 	}
 
-	deliverRemoteMessage(delivery: RemoteDelivery): void {
+	deliverRemoteMessages(deliveries: readonly RemoteDelivery[]): void {
 		if (this.isSubagent) throw new Error("Cross-session messaging cannot deliver to a subagent.");
+		if (deliveries.length === 0) return;
 		if (!this.isStreaming) this.#relayChain = [];
-		if (delivery.chain.length > this.#relayChain.length) this.#relayChain = delivery.chain;
-		void this.#irc.deliverRemote(delivery).catch(error => {
+		for (const delivery of deliveries)
+			if (delivery.chain.length > this.#relayChain.length) this.#relayChain = delivery.chain;
+		void this.#irc.deliverRemote(deliveries).catch(error => {
 			logger.warn("Failed to deliver cross-session message", { error: String(error) });
 		});
 	}

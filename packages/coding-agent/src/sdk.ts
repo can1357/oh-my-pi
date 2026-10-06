@@ -84,6 +84,7 @@ import { loadPromptTemplates as loadPromptTemplatesInternal, type PromptTemplate
 import { buildServiceTierByFamily } from "./config/service-tier";
 import { bindEffects, combine } from "./config/registry";
 import { Settings } from "./config/settings";
+import { cfgMessagingList, cfgMessagingSend } from "./messaging/settings";
 import { CursorExecHandlers, type CursorMcpResourceAdapter } from "./cursor";
 import { createBridgeEditTool, createBridgeGrepFactory } from "./cursor-bridge-tools";
 import "./discovery";
@@ -1289,6 +1290,8 @@ export interface BuildSystemPromptOptions {
 	/** Include the read-only security:// resource inventory entry. Default: false. */
 	securityEnabled?: boolean;
 	messagingEnabled?: boolean;
+	messagingSendAllowed?: boolean;
+	messagingListAllowed?: boolean;
 	/** Eval preludes to advertise; each contributes its `guidance` block. Default: none. */
 	evalPreludes?: readonly Pick<EvalPreludeDefinition, "name" | "guidance">[];
 }
@@ -1319,6 +1322,8 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		includeWorkspaceTree: options.includeWorkspaceTree,
 		securityEnabled: options.securityEnabled,
 		messagingEnabled: options.messagingEnabled,
+		messagingSendAllowed: options.messagingSendAllowed,
+		messagingListAllowed: options.messagingListAllowed,
 		evalPreludes: options.evalPreludes,
 		toolNames,
 		tools: promptTools,
@@ -3919,6 +3924,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			const defaultPrompt = await buildSystemPromptInternal({
 				cwd: promptCwd,
 				messagingEnabled: session?.messaging !== undefined,
+				messagingSendAllowed: cfgMessagingSend.get(settings) !== "deny",
+				messagingListAllowed: cfgMessagingList.get(settings) !== "deny",
 				additionalWorkspaceRoots: sessionManager.getAdditionalDirectories(),
 				xdevTools: toolSession.xdev ? xdevEntries(toolSession.xdev) : [],
 				xdevDocs: xdevPromptDocs ? renderXdevPromptDocs(xdevPromptDocs, routedCatalogNames) : "",

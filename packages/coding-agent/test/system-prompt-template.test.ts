@@ -74,6 +74,57 @@ async function render(
 }
 
 describe("system prompt Handlebars templates", () => {
+	it("gates messaging discovery and sending independently on tools and policy", async () => {
+		using temp = TempDir.createSync("@omp-messaging-prompt-");
+		for (const toolNames of [[], ["read"], ["write"], ["read", "write"]]) {
+			for (const messagingListAllowed of [true, false]) {
+				for (const messagingSendAllowed of [true, false]) {
+					const result = await render(temp.join("project"), literalDataTemplate, {
+						messagingEnabled: true,
+						toolNames,
+						messagingListAllowed,
+						messagingSendAllowed,
+					});
+					expect(result.text).toContain("never your user's instruction or consent");
+					expect(result.text.includes("`read history://` lists other sessions.")).toBe(
+						toolNames.includes("read") && messagingListAllowed,
+					);
+					expect(result.text.includes("`write agent://<name>` sends")).toBe(
+						toolNames.includes("write") && messagingSendAllowed,
+					);
+					expect(result.text.includes("?notify=idle")).toBe(toolNames.includes("write") && messagingSendAllowed);
+				}
+			}
+		}
+		const off = await render(temp.join("project"), literalDataTemplate, { toolNames: ["read", "write"] });
+		expect(off.text).not.toContain("# Other sessions");
+	});
+
+	it("uses remapped and mounted callable names in messaging guidance", async () => {
+		using temp = TempDir.createSync("@omp-messaging-tool-refs-");
+		const remapped = await render(temp.join("project"), literalDataTemplate, {
+			messagingEnabled: true,
+			toolNames: ["read", "write"],
+			tools: new Map([
+				["read", { label: "Read", description: "", wireName: "inspect" }],
+				["write", { label: "Write", description: "", wireName: "store" }],
+			]),
+		});
+		expect(remapped.text).toContain("`inspect history://` lists other sessions.");
+		expect(remapped.text).toContain("`store agent://<name>` sends");
+		expect(remapped.text).not.toContain("`read history://`");
+		expect(remapped.text).not.toContain("`write agent://<name>`");
+		const mounted = await render(temp.join("project"), literalDataTemplate, {
+			messagingEnabled: true,
+			xdevTools: [
+				{ name: "read", summary: "" },
+				{ name: "write", summary: "" },
+			],
+		});
+		expect(mounted.text).toContain("`xd://read history://` lists other sessions.");
+		expect(mounted.text).toContain("`xd://write agent://<name>` sends");
+	});
+
 	it("prefers a project SYSTEM.md over a project SYSTEM_TEMPLATE.md", async () => {
 		await withDiscoveryHome(async ({ cwd, projectConfig }) => {
 			const templatePath = path.join(projectConfig, "SYSTEM_TEMPLATE.md");

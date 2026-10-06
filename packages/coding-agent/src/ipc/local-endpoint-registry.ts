@@ -457,8 +457,11 @@ async function readEntries(
 }
 
 /** Valid metadata entries (malformed/version-mismatched skipped), without probing. */
-export function readLocalEndpointEntries(registry: LocalEndpointRegistry): Promise<LocalEndpointEntry[]> {
-	return readEntries(registry, false);
+export function readLocalEndpointEntries(
+	registry: LocalEndpointRegistry,
+	options?: { signal?: AbortSignal; includeAllVersions?: boolean },
+): Promise<LocalEndpointEntry[]> {
+	return readEntries(registry, false, options?.signal, options?.includeAllVersions);
 }
 
 /**

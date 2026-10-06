@@ -3,12 +3,12 @@ import * as os from "node:os";
 import * as path from "node:path";
 import type { Message } from "@oh-my-pi/pi-ai";
 import { textContent } from "@oh-my-pi/pi-tui/chat/transcript-entry";
-import { getSessionsDir } from "@oh-my-pi/pi-utils/dirs";
+import { getCustomSessionFilesDir, getSessionsDir, normalizePathForComparison } from "@oh-my-pi/pi-utils";
 import * as logger from "@oh-my-pi/pi-utils/logger";
 import { LRUCache } from "@oh-my-pi/pi-utils/lru";
 import { parseJsonlLenient } from "@oh-my-pi/pi-utils/stream";
 import { toError } from "@oh-my-pi/pi-utils/type-guards";
-import { computeDefaultSessionDir } from "./session-paths";
+import { collectRegisteredSessionFiles, computeDefaultSessionDir } from "./session-paths";
 import type { SessionTitleSource } from "./session-entries";
 import { FileSessionStorage, type SessionStorage, type SessionStorageStat } from "./session-storage";
 import { lookupSessionTitle, recordSessionTitle } from "./session-index";
@@ -693,6 +693,24 @@ export async function listAllSessions(
 	} catch {
 		return [];
 	}
+}
+
+/** Local file-backed sessions, including exact files registered outside managed roots. */
+export async function listLocalSessionsWithRegisteredFiles(options?: { agentDir?: string }): Promise<SessionInfo[]> {
+	const sessions = await listAllSessions(new FileSessionStorage(), getSessionsDir(options?.agentDir));
+	const paths = new Set(sessions.map(session => normalizePathForComparison(session.path)));
+	for (const file of await collectRegisteredSessionFiles(getCustomSessionFilesDir(options?.agentDir))) {
+		if (paths.has(normalizePathForComparison(file))) continue;
+		paths.add(normalizePathForComparison(file));
+		const session = await readSessionInfo(file);
+		if (session) sessions.push(session);
+	}
+	const ids = new Map<string, SessionInfo>();
+	for (const session of sessions) {
+		const previous = ids.get(session.id);
+		if (!previous || session.modified > previous.modified) ids.set(session.id, session);
+	}
+	return [...ids.values()].sort((a, b) => b.modified.getTime() - a.modified.getTime());
 }
 /**
  * True when a scanned session is a 0-turn stub with no display name: the tail

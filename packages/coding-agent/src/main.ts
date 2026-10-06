@@ -137,7 +137,7 @@ import {
 import { EventBus } from "./utils/event-bus";
 import { resolveFirstLaunchPythonEvalWarning } from "./eval/startup-warning";
 import { CliUsageError } from "./cli/usage-error";
-import { isReservedAddress } from "./messaging/names";
+import { isReservedAddress, RESERVED_SESSION_NAME_ERROR } from "./messaging/names";
 import { cfgGoalEnabled } from "./goals/settings";
 import { cfgPlanDefaultOnStartup, cfgPlanEnabled } from "./plan-mode/settings";
 
@@ -1719,7 +1719,7 @@ export async function runRootCommand(
 	deps: RunRootCommandDependencies = DEFAULT_RUN_ROOT_DEPENDENCIES,
 ): Promise<void> {
 	if (parsed.name !== undefined && isReservedAddress(parsed.name.trim())) {
-		throw new CliUsageError('Session names can\'t start with "@" (reserved for extension peer namespaces).');
+		throw new CliUsageError(RESERVED_SESSION_NAME_ERROR);
 	}
 	// A child omp process must never inherit another session's script credentials.
 	delete process.env.OMP_MESSAGING_SOCKET;

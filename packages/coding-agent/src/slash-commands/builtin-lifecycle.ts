@@ -6,8 +6,8 @@ import { logger, setProjectDir } from "@oh-my-pi/pi-utils";
 import { clearClaudePluginRootsCache } from "../discovery/helpers";
 import { rebindMemoryBackendForCwd } from "../hindsight/backend";
 import { memoryStatsUnavailableMessage, resolveMemoryBackend } from "../memory-backend";
+import { claimSessionName, isReservedAddress, RESERVED_SESSION_NAME_ERROR } from "../messaging/names";
 import type { FreshSessionResult, HandoffResult } from "../session/agent-session";
-import { claimSessionName, isReservedAddress } from "../messaging/names";
 import { COMPACT_MODES, parseCompactArgs } from "../session/compact-modes";
 import { USER_INTERRUPT_LABEL } from "../session/messages";
 import { resolveResumableSession } from "../session/session-listing";
@@ -647,8 +647,8 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 						await runtime.output("Could not generate a session title. Use /rename <title> to set one.");
 						return;
 					}
-					if (isReservedAddress(title)) {
-						await runtime.output('Session names can\'t start with "@" (reserved for extension peer namespaces).');
+					if (isReservedAddress(title.trim())) {
+						await runtime.output(RESERVED_SESSION_NAME_ERROR);
 						return;
 					}
 					const taken = session.messaging

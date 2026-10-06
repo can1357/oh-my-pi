@@ -38,7 +38,7 @@ import {
 	summarizeMentalModel,
 } from "../../hindsight";
 import { memoryStatsUnavailableMessage, resolveMemoryBackend } from "../../memory-backend";
-import { claimSessionName, isReservedAddress } from "../../messaging/names";
+import { claimSessionName, isReservedAddress, RESERVED_SESSION_NAME_ERROR } from "../../messaging/names";
 import { BashExecutionComponent, bashPtyViewport } from "@oh-my-pi/pi-tui/chat/bash-execution";
 import { appKey } from "@oh-my-pi/pi-tui/chrome/keybinding-hints";
 import { BorderedLoader } from "@oh-my-pi/pi-tui/overlays/bordered-loader";
@@ -1568,8 +1568,8 @@ export class CommandController {
 	}
 
 	async handleRenameCommand(title: string): Promise<void> {
-		if (isReservedAddress(title)) {
-			this.ctx.showError('Session names can\'t start with "@" (reserved for extension peer namespaces).');
+		if (isReservedAddress(title.trim())) {
+			this.ctx.showError(RESERVED_SESSION_NAME_ERROR);
 			return;
 		}
 		const session = this.ctx.session;

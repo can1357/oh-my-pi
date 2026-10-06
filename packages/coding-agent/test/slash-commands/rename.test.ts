@@ -8,6 +8,7 @@ import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { runRootCommand } from "@oh-my-pi/pi-coding-agent/main";
 import type { MessagingService } from "@oh-my-pi/pi-coding-agent/messaging/service";
+import { RESERVED_SESSION_NAME_ERROR } from "@oh-my-pi/pi-coding-agent/messaging/names";
 import { CommandController } from "@oh-my-pi/pi-coding-agent/modes/controllers/command-controller";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import type { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
@@ -139,9 +140,7 @@ for (const mode of ["TUI", "headless"] as const) {
 
 			await execute("/rename @x");
 
-			expect(output).toHaveBeenCalledWith(
-				'Session names can\'t start with "@" (reserved for extension peer namespaces).',
-			);
+			expect(output).toHaveBeenCalledWith(RESERVED_SESSION_NAME_ERROR);
 			expect(session.sessionName).toBe("Keep this name");
 			expect(sessionManager.getEntries()).toEqual(entries);
 		});
@@ -561,11 +560,9 @@ it.each(["TUI", "headless"] as const)(
 	},
 );
 
-it.each(["@x", " @x "])("rejects --name %s as a CLI usage error", async name => {
+it.each(["@x", " @x ", "all", " all "])("rejects --name %s as a CLI usage error", async name => {
 	const args = ["--name", name];
 	const result = runRootCommand(parseArgs(args), args);
 	await expect(result).rejects.toBeInstanceOf(CliUsageError);
-	await expect(result).rejects.toThrow(
-		'Session names can\'t start with "@" (reserved for extension peer namespaces).',
-	);
+	await expect(result).rejects.toThrow(RESERVED_SESSION_NAME_ERROR);
 });
