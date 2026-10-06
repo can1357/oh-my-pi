@@ -257,7 +257,7 @@ import {
 	type VibeParentSession,
 	VibeSessionRegistry,
 } from "../vibe/runtime";
-import { AssistantMessageComponent, setProseGithubRepo } from "@oh-my-pi/pi-tui/chat/assistant-message";
+import { AssistantMessageComponent } from "@oh-my-pi/pi-tui/chat/assistant-message";
 import { setSvgFigureRendering } from "@oh-my-pi/pi-tui/chat/svg-figure";
 import { setTableCharts } from "@oh-my-pi/pi-tui/chat/table-chart";
 import { setTranscriptActionHandler } from "@oh-my-pi/pi-tui/chat/transcript-actions";
@@ -1887,25 +1887,31 @@ export class InteractiveMode implements InteractiveModeContext {
 		};
 	}
 	approvalOwnsComposer = false;
+	/** Each session's cwd and its resolved github.com repo; a cwd change starts a new entry. */
+	readonly #proseGithubRepos = new WeakMap<AgentSession, { cwd: string; repo?: string }>();
 	/**
-	 * Resolve the cwd's github.com repo (gh's default-repo pick, memoized per
-	 * cwd) off the render path so bare `#N` refs in assistant prose link to it.
+	 * Reader for the view session's github.com repo (gh's default-repo pick,
+	 * memoized per cwd), resolved off the render path. Each reply keeps the reader
+	 * of the session and cwd it was rendered under, so invalidation never retargets it.
 	 */
-	#refreshProseGithubRepo(): void {
-		const cwd = this.sessionManager.getCwd();
-		// Drop the previous cwd's repo so nothing links against it while this lookup is pending.
-		if (setProseGithubRepo(undefined)) {
-			this.ui.invalidate();
-			this.ui.requestRender();
+	proseGithubRepo(): () => string | undefined {
+		const session = this.viewSession;
+		const cwd = session.sessionManager.getCwd();
+		let entry = this.#proseGithubRepos.get(session);
+		if (entry?.cwd !== cwd) {
+			const fresh: { cwd: string; repo?: string } = { cwd };
+			entry = fresh;
+			this.#proseGithubRepos.set(session, fresh);
+			void tryResolveCurrentRepo(cwd, undefined).then(repo => {
+				const ref = repo === undefined ? undefined : parseRepoRef(repo);
+				if (!ref || (ref.host?.toLowerCase() ?? defaultGhHost()) !== GITHUB_HOST) return;
+				fresh.repo = ref.slug;
+				this.ui.invalidate();
+				this.ui.requestRender();
+			});
 		}
-		void tryResolveCurrentRepo(cwd, undefined).then(repo => {
-			if (this.sessionManager.getCwd() !== cwd) return;
-			const ref = repo === undefined ? undefined : parseRepoRef(repo);
-			const slug = ref && (ref.host?.toLowerCase() ?? defaultGhHost()) === GITHUB_HOST ? ref.slug : undefined;
-			if (!setProseGithubRepo(slug)) return;
-			this.ui.invalidate();
-			this.ui.requestRender();
-		});
+		const resolved = entry;
+		return () => resolved.repo;
 	}
 	get focusedAgentId(): string | undefined {
 		return this.#focusController.focusedAgentId;
@@ -3214,7 +3220,6 @@ export class InteractiveMode implements InteractiveModeContext {
 		}
 		setSessionTerminalTitle(this.sessionManager.getSessionName(), this.sessionManager.getCwd());
 		this.statusLine.applyCwdChange();
-		this.#refreshProseGithubRepo();
 		return true;
 	}
 
