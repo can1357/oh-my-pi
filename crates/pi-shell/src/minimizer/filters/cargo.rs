@@ -30,7 +30,10 @@ pub fn supports(subcommand: Option<&str>) -> bool {
 #[must_use]
 pub fn filter(ctx: &MinimizerCtx<'_>, input: &str, exit_code: i32) -> MinimizerOutput {
 	let cleaned = primitives::strip_ansi(input);
-	let text = match ctx.subcommand {
+	// Owned because the passthrough arm below moves `cleaned`; allocates only
+	// when cargo waited.
+	let lock_line = first_lock_wait_line(&cleaned).map(str::to_owned);
+	let mut text = match ctx.subcommand {
 		Some("metadata") => input.to_string(),
 		Some("test" | "bench") => failures_only(&cleaned, exit_code),
 		Some("nextest") => filter_nextest(&cleaned),
@@ -41,6 +44,16 @@ pub fn filter(ctx: &MinimizerCtx<'_>, input: &str, exit_code: i32) -> MinimizerO
 		Some("tree" | "update" | "publish") => compact_general(&cleaned),
 		_ => cleaned,
 	};
+	// The condensing paths drop `Blocking waiting for file lock on …` as
+	// progress noise, but it is the only sign that another cargo (a parallel
+	// agent, rust-analyzer) held the lock. Put the first one back, once.
+	if !matches!(ctx.subcommand, Some("metadata"))
+		&& let Some(lock_line) = lock_line
+		&& !text.contains(&lock_line)
+	{
+		text.insert(0, '\n');
+		text.insert_str(0, &lock_line);
+	}
 	if text == input {
 		MinimizerOutput::passthrough(input)
 	} else {
@@ -67,10 +80,18 @@ fn is_compiling_noise(line: &str) -> bool {
 		|| trimmed.starts_with("Downloaded ")
 		|| trimmed.starts_with("Locking ")
 		|| trimmed.starts_with("Updating ")
-		// `Blocking waiting for file lock on ...` is pure progress noise when a
-		// concurrent cargo holds the lock (snip strips it in cargo-build/clippy).
+		// Dropped here as progress noise; `filter` puts the first one back (first_lock_wait_line).
 		|| trimmed.starts_with("Blocking ")
 		|| is_generated_warnings_rollup(trimmed)
+}
+
+/// First `Blocking waiting for file lock on <what>` line, trimmed of cargo's
+/// right alignment. Repeats and later lock waits collapse into this one line.
+fn first_lock_wait_line(input: &str) -> Option<&str> {
+	input
+		.lines()
+		.map(str::trim)
+		.find(|line| line.starts_with("Blocking waiting for file lock"))
 }
 
 /// The per-crate rollup line warning: `crate` (lib) generated N warnings.
@@ -542,10 +563,10 @@ mod tests {
 	}
 
 	#[test]
-	fn build_strips_blocking_lock_and_warning_rollup() {
-		// `Blocking waiting for file lock` is concurrent-cargo progress noise;
-		// the `warning: \`crate\` (lib) generated N warnings` rollup is a
-		// redundant tally of the per-warning blocks, which are kept.
+	fn build_keeps_one_blocking_lock_line_and_strips_warning_rollup() {
+		// The first `Blocking waiting for file lock` line is kept once, at the
+		// top; the `warning: \`crate\` (lib) generated N warnings` rollup
+		// is a redundant tally of the per-warning blocks, which are kept.
 		let cfg = MinimizerConfig { enabled: true, ..Default::default() };
 		let ctx = MinimizerCtx {
 			program:    "cargo",
@@ -563,10 +584,12 @@ mod tests {
 		);
 		let out = filter(&ctx, input, 0);
 		assert!(
-			!out.text.contains("Blocking"),
-			"blocking lock noise must be stripped: {:?}",
+			out.text
+				.starts_with("Blocking waiting for file lock on build directory\n"),
+			"{:?}",
 			out.text
 		);
+		assert_eq!(out.text.matches("Blocking waiting for file lock").count(), 1);
 		assert!(
 			!out.text.contains("generated 1 warning"),
 			"warning rollup must be stripped: {:?}",
@@ -579,6 +602,51 @@ mod tests {
 			out.text
 		);
 		assert!(out.text.contains("src/lib.rs:2:9"), "warning location must survive: {:?}", out.text);
+	}
+
+	#[test]
+	fn test_success_summary_keeps_blocking_lock_line() {
+		let cfg = MinimizerConfig { enabled: true, ..Default::default() };
+		let ctx = MinimizerCtx {
+			program:    "cargo",
+			subcommand: Some("test"),
+			command:    "cargo test",
+			config:     &cfg,
+		};
+		let input = concat!(
+			"    Blocking waiting for file lock on build directory\n",
+			"   Compiling foo v0.1.0\n",
+			"running 2 tests\n",
+			"test a ... ok\n",
+			"test b ... ok\n",
+			"test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured\n",
+		);
+		let out = filter(&ctx, input, 0);
+		assert_eq!(
+			out.text,
+			"Blocking waiting for file lock on build directory\ncargo test: 2 passed (1 suite)\n"
+		);
+	}
+
+	#[test]
+	fn clippy_keeps_single_blocking_line_for_repeats() {
+		let cfg = MinimizerConfig { enabled: true, ..Default::default() };
+		let ctx = MinimizerCtx {
+			program:    "cargo",
+			subcommand: Some("clippy"),
+			command:    "cargo clippy",
+			config:     &cfg,
+		};
+		let input = concat!(
+			"    Blocking waiting for file lock on build directory\n",
+			"    Blocking waiting for file lock on build directory\n",
+			"    Checking foo v0.1.0\n",
+			"warning: unused variable: `x`\n",
+			" --> src/lib.rs:1:5\n",
+			"  = note: `#[warn(unused_variables)]` on by default\n",
+		);
+		let out = filter(&ctx, input, 0);
+		assert_eq!(out.text.matches("Blocking waiting for file lock").count(), 1, "{:?}", out.text);
 	}
 
 	#[test]
