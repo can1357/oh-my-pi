@@ -138,7 +138,7 @@ A busy receiver returns `Queued for <address> (busy; it will read this at its ne
 
 If no live session matches, messages can be queued by name or short id for a saved session modified within the last seven days. The receipt is `Queued for <address> (not running); it will see this when resumed.` Offline inboxes hold at most **50 messages per session**, with a **seven-day TTL**. A full inbox returns `Not sent: <address>'s offline inbox is full (50 messages).` `notify=idle` requires a running session and cannot be queued offline.
 
-Binding or resuming that session drains its inbox through the current inbound policy and relay checks; accepted messages are delivered, held messages await approval, and refused messages are dropped. A message that doesn't fit the accepted inbox stays in the offline inbox until the next drain (the next bind, resume, or conversation switch). If any are accepted or held, the receiver sees `<N> message(s) from other sessions arrived while this session was not running.` Only the session whose id owns the inbox reads it; expired and malformed messages are removed when read.
+Binding or resuming that session drains its inbox through the current inbound policy and relay checks; accepted messages are delivered, held messages await approval, and refused messages are dropped. A message that doesn't fit the accepted inbox stays in the offline inbox until that session's inbox is drained again (the next time it is bound or resumed). If any are accepted or held, the receiver sees `<N> message(s) from other sessions arrived while this session was not running.` Only the session whose id owns the inbox reads it; expired and malformed messages are removed when read.
 
 ### Inbound policy
 

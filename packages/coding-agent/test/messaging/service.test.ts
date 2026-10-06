@@ -893,12 +893,16 @@ describe("messaging service with real inboxes", () => {
 		expect(ah.notices).toContain(
 			"Your message to @beta was dropped unread: that session switched to a different conversation.",
 		);
-		expect(ah.notices).toContain("@beta switched to a different conversation; the idle notice was cancelled.");
+		const cancellation = "@beta switched to a different conversation; the idle notice was cancelled.";
+		// Alpha is bypass while the saved beta sender is prompting, so default inbound holds the notice.
+		expect(ah.display).toContain(cancellation);
+		expect(ah.notices).not.toContain(cancellation);
 		cfgMessagingInbound.override(bs, "accept");
 		bh.reapply();
 		expect(bh.deliveries).toEqual([]);
 		vi.advanceTimersByTime(IDLE_SUBSCRIPTION_TTL_MS);
-		expect(ah.notices).toHaveLength(2);
+		expect(ah.notices).toHaveLength(1);
+		expect(ah.display.filter(text => text === cancellation)).toHaveLength(1);
 		expect(bh.notices).toEqual([]);
 		expect(await a.resolve(target.shortId)).toEqual({ kind: "none" });
 	});
@@ -1187,3 +1191,36 @@ it("redacts idle status after watched policy tightens to hold and restores it af
 		status: "Finished the change.",
 	});
 });
+
+it.each(["accept", "hold-explicit", "refuse"] as const)(
+	"applies current %s policy to cancellation notices and still clears the subscription",
+	policy => {
+		vi.useFakeTimers();
+		const host = new FakeHost("requester");
+		let decision: "accept" | "hold-explicit" | "refuse" = "accept";
+		const idle = new IdleSubscriptions(
+			host,
+			() => decision,
+			vi.fn(async () => {}),
+			() => sender,
+		);
+		subscriptions.push(idle);
+		idle.arm(sender.entryId, { ...sender, address: sender.name! }, "watch");
+		decision = policy;
+		idle.receive({
+			type: "notice",
+			id: "cancelled",
+			from: sender,
+			kind: "retired",
+			subject: "subscription",
+			aboutId: "watch",
+		});
+		const text = "@alpha switched to a different conversation; the idle notice was cancelled.";
+		expect(host.notices).toEqual(policy === "accept" ? [text] : []);
+		expect(host.display).toEqual(policy === "hold-explicit" ? [text] : []);
+		decision = "accept";
+		vi.advanceTimersByTime(IDLE_SUBSCRIPTION_TTL_MS);
+		expect(host.notices).toEqual(policy === "accept" ? [text] : []);
+		expect(host.display).toEqual(policy === "hold-explicit" ? [text] : []);
+	},
+);

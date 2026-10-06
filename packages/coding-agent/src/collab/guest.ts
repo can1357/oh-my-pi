@@ -913,21 +913,32 @@ export class CollabGuestLink {
 		// An already-running switch cannot be cancelled halfway through. Drain
 		// it before rollback; no queued frame may reactivate the replica later.
 		await this.#applyChain;
+		let restored = !this.#replicaActivated;
 		try {
-			if (this.#replicaActivated) await this.#resumeLocalSession();
+			if (this.#replicaActivated) {
+				await this.#resumeLocalSession(() => {
+					restored = true;
+				});
+			}
 		} finally {
 			this.#replicaLease?.();
 			this.#replicaLease = undefined;
+			// Rendering can fail after the local conversation has already committed.
+			// Only a veto/rollback that still selects the replica must keep receiving suspended.
+			const localCommitted =
+				this.#returnSessionFile && this.#ctx.sessionManager.getSessionFile() === this.#returnSessionFile;
+			if (restored || localCommitted) {
+				this.#resumeReceiving?.();
+				this.#resumeReceiving = undefined;
+			}
 		}
-		this.#resumeReceiving?.();
-		this.#resumeReceiving = undefined;
 		if (this.#ctx.collabGuest !== this) return false;
 		this.#ctx.collabGuest = undefined;
 		this.#ctx.syncRunningSubagentBadge();
 		return this.#replicaActivated;
 	}
 
-	async #resumeLocalSession(): Promise<void> {
+	async #resumeLocalSession(onRestored: () => void): Promise<void> {
 		this.#ctx.statusLine.setCollabStatus(null);
 		this.#flushPendingTranscripts();
 		// A pending coalesced mirror message_update must not flush after leave.
@@ -945,11 +956,13 @@ export class CollabGuestLink {
 			if (this.#ctx.sessionManager.getSessionFile() !== this.#returnSessionFile) {
 				throw new Error("Local session restoration was cancelled");
 			}
+			onRestored();
 			return;
 		}
 		if ((await this.#ctx.session.newSession()) === false) {
 			throw new Error("Local session restoration was cancelled");
 		}
+		onRestored();
 		setSessionTerminalTitle(this.#ctx.sessionManager.getSessionName(), this.#ctx.sessionManager.getCwd());
 		this.#ctx.statusLine.invalidate();
 		this.#ctx.statusLine.resetActiveTime();

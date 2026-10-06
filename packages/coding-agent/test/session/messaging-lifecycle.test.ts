@@ -258,4 +258,28 @@ describe("cross-session messaging lifecycle", () => {
 		expect(promptSpy).not.toHaveBeenCalled();
 		expect(contexts).toEqual([]);
 	});
+
+	it("releases buffered mail to the committed local conversation when post-restoration rendering fails", async () => {
+		const sender = await makeSession("sender");
+		const { session, manager, contexts } = await makeSession("local");
+		const { guest, ctx } = await join(session);
+		const replicaId = manager.getSessionId();
+		const target = (await sender.session.messaging!.listSessions()).find(
+			peer => peer.shortId === session.messaging!.ownShortId(),
+		);
+		expect(target).toBeDefined();
+		const receipt = await sender.session.messaging!.send(target!, "MAIL_AFTER_LOCAL_COMMIT", {
+			notifyWhenIdle: false,
+		});
+		expect(receipt.ok).toBe(true);
+		expect(contexts).toEqual([]);
+		vi.spyOn(ctx, "renderInitialMessages").mockRejectedValueOnce(new Error("post-commit render failed"));
+
+		await expect(guest.leave("restore local session")).rejects.toThrow("post-commit render failed");
+		await session.whenWorkPoolYieldSettled();
+		await session.waitForIdle();
+		expect(manager.getSessionId()).not.toBe(replicaId);
+		expect(contexts).toHaveLength(1);
+		expect(contexts[0]).toContain("MAIL_AFTER_LOCAL_COMMIT");
+	});
 });
