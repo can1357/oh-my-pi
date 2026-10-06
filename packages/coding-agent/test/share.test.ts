@@ -132,6 +132,33 @@ describe("buildShareSnapshot", () => {
 		expect(JSON.stringify(plain)).toContain("hunter2-XYZZY");
 	});
 
+	test("drops revival-only work-pool yield items from a subagent's session_init", () => {
+		const secret = "poolleak-QWERTY";
+		const entries: SessionEntry[] = [
+			{
+				type: "session_init",
+				id: "si",
+				parentId: null,
+				timestamp: "2026-10-04T00:00:00.000Z",
+				systemPrompt: ["base"],
+				task: "work",
+				tools: ["yield"],
+				workPoolYieldItems: [{ id: `pool-${secret}`, index: 0 }],
+			},
+		];
+		const sm = {
+			getHeader: () => sessionData([], "x").header,
+			getEntries: () => entries,
+			getLeafId: () => "si",
+		} as unknown as SessionManager;
+		const obfuscator = new SecretObfuscator([{ type: "plain", content: secret }]);
+
+		const snapshot = buildShareSnapshot(sm, { obfuscator });
+
+		expect(JSON.stringify(snapshot)).not.toContain(secret);
+		expect(JSON.stringify(entries)).toContain(secret);
+	});
+
 	test("redacts header cwd, bookmark labels, and file-mention paths", () => {
 		const secret = "shareleak-ABCDE";
 		const ts = "2026-06-12T00:00:00.000Z";

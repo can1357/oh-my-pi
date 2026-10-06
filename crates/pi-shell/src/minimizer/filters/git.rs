@@ -10,10 +10,13 @@ pub fn supports(subcommand: Option<&str>) -> bool {
 		subcommand,
 		Some(
 			"status"
-				| "diff" | "show"
-				| "log" | "add"
+				| "diff"
+				| "show"
+				| "log"
+				| "add"
 				| "commit"
-				| "push" | "pull"
+				| "push"
+				| "pull"
 				| "branch"
 				| "fetch"
 				| "stash"
@@ -110,21 +113,8 @@ fn is_show_path_content(command: &str) -> bool {
 }
 
 fn is_stash_patch(command: &str) -> bool {
-	has_ordered_tokens(command, "stash", "show")
+	primitives::command_has_ordered_tokens(command, "stash", "show")
 		&& (has_token(command, "-p") || has_token(command, "--patch"))
-}
-
-fn has_ordered_tokens(command: &str, first: &str, second: &str) -> bool {
-	let mut saw_first = false;
-	for part in command.split_whitespace() {
-		if saw_first && part == second {
-			return true;
-		}
-		if part == first {
-			saw_first = true;
-		}
-	}
-	false
 }
 
 fn has_token(command: &str, token: &str) -> bool {
@@ -738,15 +728,19 @@ fn is_branch_non_listing(command: &str) -> bool {
 			tok,
 			// Listing flags — skip to allow `condense_branch` to handle them
 			"--list"
-				| "-l" | "--merged"
+				| "-l"
+				| "--merged"
 				| "--no-merged"
 				| "--contains"
 				| "--no-contains"
 				| "--points-at"
 				| "--verbose"
-				| "-v" | "--all"
-				| "-a" | "--remotes"
-				| "-r" | "--sort"
+				| "-v"
+				| "--all"
+				| "-a"
+				| "--remotes"
+				| "-r"
+				| "--sort"
 				| "--column"
 				| "--no-column"
 				| "--ignore-case"
@@ -772,7 +766,8 @@ fn is_tag_non_listing(command: &str) -> bool {
 		!matches!(
 			tok,
 			"--list"
-				| "-l" | "--contains"
+				| "-l"
+				| "--contains"
 				| "--no-contains"
 				| "--merged"
 				| "--no-merged"

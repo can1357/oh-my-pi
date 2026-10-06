@@ -13,12 +13,14 @@ use image::{DynamicImage, ImageFormat, ImageReader, RgbaImage, imageops::FilterT
 use napi::bindgen_prelude::*;
 use napi_derive::napi;
 
+use crate::task;
+
 const MAX_DECODED_PIXELS: usize = 4 * 1024 * 1024;
 const MAX_IMAGE_EDGE: usize = 8192;
 const MAX_SIXEL_BYTES: usize = 20 * 1024 * 1024;
 const MAX_PNG_BYTES: usize = 20 * 1024 * 1024;
 
-/// Decode one complete SIXEL control string into a PNG.
+/// Decode one complete SIXEL control string into a PNG on the calling thread.
 ///
 /// The decoder is deliberately bounded before handing the stream to
 /// `icy_sixel`: raster declarations, repeats, and row advances are scanned
@@ -29,9 +31,26 @@ pub fn decode_sixel_to_png(bytes: Uint8Array) -> Result<Uint8Array> {
 	if bytes.len() > MAX_SIXEL_BYTES {
 		return Err(Error::from_reason("SIXEL payload exceeds the 20 MiB limit"));
 	}
-	preflight_sixel_dimensions(bytes.as_ref())?;
+	decode_sixel(bytes.as_ref()).map(Uint8Array::from)
+}
 
-	let decoded = SixelImage::decode(bytes.as_ref())
+/// Same result as [`decode_sixel_to_png`], but the decode runs on the native
+/// blocking pool instead of the JS thread.
+#[napi]
+pub fn decode_sixel_to_png_async(bytes: Uint8Array) -> task::Promise<Uint8Array> {
+	// An oversized payload rejects without being copied off the JS heap.
+	let bytes = (bytes.len() <= MAX_SIXEL_BYTES).then(|| bytes.to_vec());
+	task::blocking("sixel.decode", (), move |_| {
+		let bytes =
+			bytes.ok_or_else(|| Error::from_reason("SIXEL payload exceeds the 20 MiB limit"))?;
+		decode_sixel(&bytes).map(Uint8Array::from)
+	})
+}
+
+fn decode_sixel(bytes: &[u8]) -> Result<Vec<u8>> {
+	preflight_sixel_dimensions(bytes)?;
+
+	let decoded = SixelImage::decode(bytes)
 		.map_err(|err| Error::from_reason(format!("Failed to decode SIXEL: {err}")))?;
 	guard_dimensions(decoded.width, decoded.height)?;
 
@@ -48,7 +67,7 @@ pub fn decode_sixel_to_png(bytes: Uint8Array) -> Result<Uint8Array> {
 	if png.len() > MAX_PNG_BYTES {
 		return Err(Error::from_reason("Decoded SIXEL PNG exceeds the 20 MiB limit"));
 	}
-	Ok(png.into())
+	Ok(png)
 }
 
 fn guard_dimensions(width: usize, height: usize) -> Result<()> {
@@ -151,10 +170,12 @@ fn decimal(bytes: &[u8], mut index: usize) -> (usize, usize) {
 	(value, index)
 }
 
-/// Encode image bytes into a SIXEL escape sequence for terminal rendering.
+/// Encode image bytes into a SIXEL escape sequence for terminal rendering, on
+/// the calling thread.
 ///
 /// The input image is decoded and resized to the requested pixel dimensions
-/// before encoding.
+/// before encoding. Prefer [`encode_sixel_async`] unless the caller cannot
+/// wait: the decode, resize and dither block the JS thread.
 ///
 /// # Errors
 /// Returns an error if decoding, resizing, or SIXEL encoding fails.
@@ -164,17 +185,39 @@ pub fn encode_sixel(
 	target_width_px: u32,
 	target_height_px: u32,
 ) -> Result<String> {
+	encode_image(bytes.as_ref(), target_width_px, target_height_px)
+}
+
+/// Same result as [`encode_sixel`], but the decode, resize and dither run on
+/// the native blocking pool, so they never stall the JavaScript event loop.
+///
+/// # Errors
+/// Rejects if decoding, resizing, or SIXEL encoding fails.
+#[napi]
+pub fn encode_sixel_async(
+	bytes: Uint8Array,
+	target_width_px: u32,
+	target_height_px: u32,
+) -> task::Promise<String> {
+	let bytes = bytes.to_vec();
+	task::blocking("sixel.encode", (), move |_| {
+		encode_image(&bytes, target_width_px, target_height_px)
+	})
+}
+
+fn encode_image(bytes: &[u8], target_width_px: u32, target_height_px: u32) -> Result<String> {
 	if target_width_px == 0 || target_height_px == 0 {
 		return Err(Error::from_reason("Target SIXEL dimensions must be greater than zero"));
 	}
 
-	let source = decode_image_from_bytes(bytes.as_ref())?;
+	let source = decode_image_from_bytes(bytes)?;
 	let resized = if source.width() == target_width_px && source.height() == target_height_px {
 		source
 	} else {
 		source.resize_exact(target_width_px, target_height_px, FilterType::Lanczos3)
 	};
-	let rgba = resized.to_rgba8();
+	// Reuses the pixel buffer when the image is already RGBA8.
+	let rgba = resized.into_rgba8();
 	let options = EncodeOptions::default();
 	sixel_encode(rgba.as_raw(), target_width_px as usize, target_height_px as usize, &options)
 		.map_err(|err| Error::from_reason(format!("Failed to encode SIXEL: {err}")))

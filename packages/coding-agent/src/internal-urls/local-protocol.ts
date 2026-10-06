@@ -34,7 +34,7 @@ const WINDOWS_LOCAL_ROOT_MAX_CHARS = 180;
 function safeSessionId(options: LocalProtocolOptions): string {
 	const raw = options.getSessionId?.() ?? "session";
 	const safe = raw.replace(/[^a-zA-Z0-9_.-]/g, "_");
-	return safe.length > 0 ? safe : "session";
+	return safe && safe !== "." && safe !== ".." ? safe : "session";
 }
 
 function shortLocalRoot(options: LocalProtocolOptions): string {

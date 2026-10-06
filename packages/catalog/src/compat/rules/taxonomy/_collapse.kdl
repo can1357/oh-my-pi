@@ -88,6 +88,24 @@ collapse {
 		mode "budget"
 		efforts "minimal" "low" "medium" "high"
 	}
+	variant-family "google-antigravity" "claude-opus-5-5" name="Claude Opus 5.5" {
+		members "claude-opus-5-5-low" "claude-opus-5-5-medium" "claude-opus-5-5-high"
+		route "low" "claude-opus-5-5-low"
+		route "medium" "claude-opus-5-5-medium"
+		route "high" "claude-opus-5-5-high"
+		mode "budget"
+		efforts "low" "medium" "high"
+		requires-effort #true
+	}
+	variant-family "google-antigravity" "claude-sonnet-5-5" name="Claude Sonnet 5.5" {
+		members "claude-sonnet-5-5-low" "claude-sonnet-5-5-medium" "claude-sonnet-5-5-high"
+		route "low" "claude-sonnet-5-5-low"
+		route "medium" "claude-sonnet-5-5-medium"
+		route "high" "claude-sonnet-5-5-high"
+		mode "budget"
+		efforts "low" "medium" "high"
+		requires-effort #true
+	}
 	variant-family "google-antigravity" "claude-sonnet-4-6" name="Claude Sonnet 4.6" {
 		members "claude-sonnet-4-6" "claude-sonnet-4-6-thinking"
 		mode "budget"

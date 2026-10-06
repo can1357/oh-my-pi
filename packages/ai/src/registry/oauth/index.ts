@@ -166,3 +166,8 @@ export function getOAuthProviders(): OAuthProviderInfo[] {
 	}));
 	return [...builtInOAuthProviders, ...customProviders];
 }
+
+/** Provider id that stores `providerId`'s credentials: login aliases (`openai-codex-device`) map to their target (`openai-codex`). */
+export function getOAuthCredentialProvider(providerId: string): string {
+	return getOAuthProviders().find(provider => provider.id === providerId)?.storeCredentialsAs ?? providerId;
+}
