@@ -142,4 +142,16 @@ describe("TaskTool.create discovery memo", () => {
 		expect(future.description).toContain("Refreshed task agent");
 		expect(spy).toHaveBeenCalledTimes(2);
 	});
+
+	it("surfaces discovery warnings in the tool description until a clean rescan", async () => {
+		vi.spyOn(discoveryModule, "discoverAgents")
+			.mockResolvedValueOnce({ agents: TEST_AGENTS, projectAgentsDir: null, warnings: ["could not read /agents"] })
+			.mockResolvedValueOnce({ agents: TEST_AGENTS, projectAgentsDir: null });
+		const session = createSession("/tmp/omp-memo-warnings");
+		const tool = await TaskTool.create(session);
+
+		expect(tool.description).toContain("Some agent directories could not be read: could not read /agents.");
+		await refreshAgentDiscovery(session.cwd, session.effectiveExtensionRoots?.());
+		expect(tool.description).not.toContain("could not read /agents");
+	});
 });

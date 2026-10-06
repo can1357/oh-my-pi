@@ -26,6 +26,7 @@ import readPathTemplate from "../prompts/memories/read-path.md" with { type: "te
 import stageOneInputTemplate from "../prompts/memories/stage_one_input.md" with { type: "text" };
 import stageOneSystemTemplate from "../prompts/memories/stage_one_system.md" with { type: "text" };
 import type { AgentSession } from "../session/agent-session";
+import { describeReadDirFailure, readDirOutcome } from "../utils/readdir";
 import {
 	claimStage1Jobs,
 	clearMemoryData as clearMemoryDataInDb,
@@ -592,7 +593,13 @@ async function runPhase2(options: MemoryStartupOptions): Promise<void> {
 				metadata: session.agent?.metadataForProvider(phase2Model.provider),
 			});
 			if (!isMemoryStartupActive(options)) return;
-			await applyConsolidation(memoryRoot, consolidated);
+			await applyConsolidation(memoryRoot, consolidated, message => {
+				// A consolidation scan that could not read its own tree must reach
+				// the user, not the log file: otherwise an unreadable memories root
+				// silently reports zero skills.
+				logger.warn("Memory consolidation directory scan failed", { message });
+				session.emitNotice?.("warning", message, "Memory");
+			});
 			if (!isMemoryStartupActive(options)) return;
 			if (heartbeatLostOwnership) {
 				throw new Error("Phase2 lease ownership lost before completion");
@@ -1010,6 +1017,7 @@ async function applyConsolidation(
 			examples: ConsolidationSkillFileSchema[];
 		}>;
 	},
+	warn: (message: string) => void,
 ): Promise<void> {
 	await Bun.write(path.join(memoryRoot, "MEMORY.md"), `${consolidated.memoryMd.trim()}\n`);
 	await Bun.write(path.join(memoryRoot, "memory_summary.md"), `${consolidated.memorySummary.trim()}\n`);
@@ -1037,28 +1045,41 @@ async function applyConsolidation(
 		}
 
 		const keepFiles = new Set(files.keys());
-		const existingFiles = await listRelativeFiles(dir);
+		const existingFiles = await listRelativeFiles(dir, "", warn);
 		for (const relativePath of existingFiles) {
 			if (keepFiles.has(relativePath)) continue;
 			await fs.rm(path.join(dir, ...relativePath.split("/")), { force: true });
 		}
-		await pruneEmptyDirectories(dir);
+		await pruneEmptyDirectories(dir, warn);
 	}
-	const dirs = await fs.readdir(skillsDir, { withFileTypes: true }).catch(() => []);
-	for (const dirent of dirs) {
+	const scanned = await readDirOutcome(skillsDir);
+	if (scanned.status === "error") {
+		// Refuse to prune: the skill directories we could not enumerate are
+		// exactly the ones the recursive delete below would destroy.
+		warn(describeReadDirFailure(skillsDir, scanned.error));
+		return;
+	}
+	if (scanned.status === "missing") return;
+	for (const dirent of scanned.entries) {
 		if (!dirent.isDirectory()) continue;
 		if (keep.has(dirent.name)) continue;
 		await fs.rm(path.join(skillsDir, dirent.name), { recursive: true, force: true });
 	}
 }
 
-async function listRelativeFiles(rootDir: string, prefix = ""): Promise<string[]> {
-	const entries = await fs.readdir(rootDir, { withFileTypes: true }).catch(() => []);
+async function listRelativeFiles(rootDir: string, prefix: string, warn: (message: string) => void): Promise<string[]> {
+	const scanned = await readDirOutcome(rootDir);
+	if (scanned.status !== "ok") {
+		// The caller deletes files it believes are gone, so a subtree that could
+		// not be enumerated is reported rather than passed off as empty.
+		if (scanned.status === "error") warn(describeReadDirFailure(rootDir, scanned.error));
+		return [];
+	}
 	const files: string[] = [];
-	for (const entry of entries) {
+	for (const entry of scanned.entries) {
 		const relative = prefix ? `${prefix}/${entry.name}` : entry.name;
 		if (entry.isDirectory()) {
-			files.push(...(await listRelativeFiles(path.join(rootDir, entry.name), relative)));
+			files.push(...(await listRelativeFiles(path.join(rootDir, entry.name), relative, warn)));
 			continue;
 		}
 		if (entry.isFile()) files.push(relative);
@@ -1066,15 +1087,24 @@ async function listRelativeFiles(rootDir: string, prefix = ""): Promise<string[]
 	return files;
 }
 
-async function pruneEmptyDirectories(rootDir: string): Promise<void> {
-	const entries = await fs.readdir(rootDir, { withFileTypes: true }).catch(() => []);
-	for (const entry of entries) {
+async function pruneEmptyDirectories(rootDir: string, warn: (message: string) => void): Promise<void> {
+	const scanned = await readDirOutcome(rootDir);
+	if (scanned.status !== "ok") {
+		if (scanned.status === "error") warn(describeReadDirFailure(rootDir, scanned.error));
+		return;
+	}
+	for (const entry of scanned.entries) {
 		if (!entry.isDirectory()) continue;
 		const child = path.join(rootDir, entry.name);
-		await pruneEmptyDirectories(child);
-		const childEntries = await fs.readdir(child).catch(() => []);
-		if (childEntries.length === 0) {
+		await pruneEmptyDirectories(child, warn);
+		const childScan = await readDirOutcome(child);
+		// Only a directory positively read as empty may be removed. A failed
+		// read must never authorise `fs.rm({ recursive: true })`, which on a
+		// transient EMFILE or EACCES would delete a populated subtree.
+		if (childScan.status === "ok" && childScan.entries.length === 0) {
 			await fs.rm(child, { recursive: true, force: true });
+		} else if (childScan.status === "error") {
+			warn(describeReadDirFailure(child, childScan.error));
 		}
 	}
 }

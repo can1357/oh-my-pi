@@ -3,7 +3,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import * as ai from "@oh-my-pi/pi-ai";
-import { Effort, type Model } from "@oh-my-pi/pi-ai";
+import { Effort, type AssistantMessage, type Model } from "@oh-my-pi/pi-ai";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import {
 	buildMemoryToolDeveloperInstructions,
@@ -48,6 +48,27 @@ function createModel(id = "test-model"): Model {
 		name: id,
 		contextWindow: 32_000,
 	} as Model;
+}
+
+/** A complete `completeSimple` result carrying one text part; stays type-checked with the AI shape. */
+function assistantTextResponse(text: string): AssistantMessage {
+	return {
+		role: "assistant",
+		content: [{ type: "text", text }],
+		api: "mock",
+		provider: "mock",
+		model: "mock",
+		stopReason: "stop",
+		usage: {
+			input: 0,
+			output: 0,
+			cacheRead: 0,
+			cacheWrite: 0,
+			totalTokens: 0,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+		},
+		timestamp: 0,
+	};
 }
 
 function createModelRegistry(model: Model): any {
@@ -427,6 +448,75 @@ describe("memories runtime", () => {
 		expect((await fs.readFile(path.join(memoryRoot, "raw_memories.md"), "utf8")).trim()).toBe(
 			"# Raw Memories\n\nNo raw memories yet.",
 		);
+	});
+
+	test("phase2 pruning does not delete a skill subtree it could not read", async () => {
+		const fx = await createFixture();
+		vi.spyOn(ai, "completeSimple").mockResolvedValue(
+			assistantTextResponse(
+				JSON.stringify({
+					memory_md: "# Memory\n\nMerged",
+					memory_summary: "Merged summary",
+					// A skill the model no longer emits, so pruning would remove it.
+					skills: [{ name: "kept", content: "# Kept" }],
+				}),
+			),
+		);
+
+		const memoryRoot = getMemoryRoot(fx.agentDir, fx.session.sessionManager.getCwd());
+		// A populated subtree inside a skill consolidation KEEPS, so the top-level
+		// prune leaves it alone and only pruneEmptyDirectories could remove it.
+		const kept = path.join(memoryRoot, "skills", "kept");
+		await fs.mkdir(path.join(kept, "templates"), { recursive: true });
+		await fs.writeFile(path.join(kept, "templates", "old.md"), "stale template");
+		const doomed = path.join(kept, "templates");
+
+		// Enforce phase2 with a stage1 output already present.
+		const db = memoryStorage.openMemoryDb(getAgentDbPath(fx.agentDir));
+		memoryStorage.upsertThreads(db, [
+			{
+				id: "thread-a",
+				updatedAt: 100,
+				rolloutPath: "/tmp/a.jsonl",
+				cwd: fx.session.sessionManager.getCwd(),
+				sourceKind: "cli",
+			},
+		]);
+		db.prepare(
+			"INSERT INTO stage1_outputs (thread_id, source_updated_at, raw_memory, rollout_summary, rollout_slug, generated_at) VALUES (?, ?, ?, ?, ?, ?)",
+		).run("thread-a", 100, "raw-a", "summary-a", "alpha", 100);
+		memoryStorage.enqueueGlobalWatermark(db, 100, fx.session.sessionManager.getCwd(), {
+			forceDirtyWhenNotAdvanced: true,
+		});
+		memoryStorage.closeMemoryDb(db);
+
+		// Fail every readdir under the stale skill, as a transient EMFILE would.
+		const realReaddir = fs.readdir;
+		const notice = vi.fn();
+		fx.session.emitNotice = notice;
+		vi.spyOn(fs, "readdir").mockImplementation(((target: string, options?: unknown) => {
+			if (typeof target === "string" && path.resolve(target).startsWith(path.resolve(doomed))) {
+				const error: NodeJS.ErrnoException = new Error("EMFILE: too many open files");
+				error.code = "EMFILE";
+				return Promise.reject(error);
+			}
+			return (realReaddir as (...args: unknown[]) => Promise<unknown>)(target, options as never);
+		}) as never);
+
+		startMemoryStartupTask({
+			session: fx.session,
+			settings: fx.settings,
+			modelRegistry: fx.modelRegistry,
+			agentDir: fx.agentDir,
+			taskDepth: 0,
+		});
+
+		await settle(fx.whenSettled, "phase2 prune after failed read");
+
+		// A failed read must never authorise a recursive delete.
+		expect(await Bun.file(path.join(doomed, "old.md")).exists()).toBe(true);
+		// And the failure must reach the user, not just the log file.
+		expect(notice.mock.calls.some(call => String(call[1]).includes("Could not read directory"))).toBe(true);
 	});
 });
 

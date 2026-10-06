@@ -602,6 +602,7 @@ export class SelectorController {
 				() => this.ctx.session.effectiveExtensionRoots,
 				activeModelPattern,
 				defaultModelPattern,
+				message => this.ctx.session.emitNotice("warning", message, "Agents"),
 			),
 			{ onCancel: () => done() },
 		);

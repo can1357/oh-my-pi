@@ -11,7 +11,8 @@ import type {
 	ToolResultMessage,
 	UserMessage,
 } from "@oh-my-pi/pi-ai";
-import { isRecord } from "@oh-my-pi/pi-utils";
+import { isEnoent, isRecord } from "@oh-my-pi/pi-utils";
+import { describeReadDirFailure } from "../utils/readdir";
 import { readForeignJsonRecords } from "./foreign-session-jsonl";
 import type { ForeignSessionInfo, ForeignSessionStore } from "./foreign-session-store";
 import type { CompactionEntry, ModelChangeEntry, SessionEntry, SessionMessageEntry } from "./session-entries";
@@ -188,8 +189,11 @@ async function rolloutFiles(directory: string): Promise<string[]> {
 	let entries: fs.Dirent[];
 	try {
 		entries = await fs.promises.readdir(directory, { withFileTypes: true });
-	} catch {
-		return [];
+	} catch (error) {
+		// An absent rollout tree is an ordinary empty result; an unreadable one
+		// is not, and must not read as "this Codex install has no sessions".
+		if (isEnoent(error)) return [];
+		throw new Error(describeReadDirFailure(directory, error as NodeJS.ErrnoException));
 	}
 	const files: string[] = [];
 	for (const entry of entries) {
@@ -206,7 +210,16 @@ function rolloutId(filePath: string): string {
 }
 
 async function stateDatabasePath(root: string): Promise<string | undefined> {
-	const names = await fs.promises.readdir(root).catch(() => []);
+	let names: string[];
+	try {
+		names = await fs.promises.readdir(root);
+	} catch (error) {
+		// An absent Codex root is an ordinary "no sessions" result. Anything else
+		// means the state index could not be consulted, so say so rather than
+		// falling through the caller as an empty store.
+		if (isEnoent(error)) return undefined;
+		throw new Error(describeReadDirFailure(root, error as NodeJS.ErrnoException));
+	}
 	return names
 		.map(name => ({ name, version: /^state_(\d+)\.sqlite$/.exec(name) }))
 		.filter(item => item.version !== null)

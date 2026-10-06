@@ -5,6 +5,7 @@ import type { Message, UserMessage } from "@oh-my-pi/pi-ai";
 import { logger } from "@oh-my-pi/pi-utils";
 import { visitEntriesFromFileStream } from "../session/session-loader";
 import { SessionManager } from "../session/session-manager";
+import { describeReadDirFailure, readDirOutcome } from "../utils/readdir";
 import { fingerprintMessage } from "./message-fingerprint";
 
 /**
@@ -53,6 +54,12 @@ export interface LoadAdvisorTranscriptCostsOptions {
 	 * scan (#10129).
 	 */
 	providersBySlug?: Map<string, Set<string>>;
+	/**
+	 * When provided, receives a message describing a directory that could not be
+	 * read, so callers can surface the failure instead of reporting no advisor
+	 * transcripts. Absent directories stay silent.
+	 */
+	warn?: (message: string) => void;
 }
 
 interface AdvisorTranscriptCostFileSnapshot {
@@ -82,7 +89,13 @@ export async function loadAdvisorTranscriptCosts(
 	const snapshots: AdvisorTranscriptCostFileSnapshot[] = [];
 	if (sessionFile?.endsWith(JSONL_SUFFIX)) {
 		const directory = sessionFile.slice(0, -JSONL_SUFFIX.length);
-		const dirents = await fs.readdir(directory, { withFileTypes: true }).catch(() => []);
+		const scanned = await readDirOutcome(directory);
+		if (scanned.status === "error") {
+			options.warn?.(describeReadDirFailure(directory, scanned.error));
+			options.onSnapshot?.();
+			return new Map<string, number>();
+		}
+		const dirents = scanned.status === "ok" ? scanned.entries : [];
 		for (const dirent of dirents) {
 			if (options.shouldContinue?.() === false) break;
 			if (!dirent.isFile() || !isAdvisorTranscriptName(dirent.name)) continue;

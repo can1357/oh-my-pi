@@ -13,6 +13,7 @@ import type {
 } from "@oh-my-pi/pi-ai";
 import { isRecord, parseJsonlLenient } from "@oh-my-pi/pi-utils";
 import { resolveClaudePaths } from "../config/claude-paths";
+import { describeReadDirFailure, readDirOutcome } from "../utils/readdir";
 import { collectForeignJsonRecords, type ForeignJsonRecord, readForeignJsonRecords } from "./foreign-session-jsonl";
 import type { ForeignSessionInfo, ForeignSessionStore } from "./foreign-session-store";
 import type { ModelChangeEntry, SessionMessageEntry } from "./session-entries";
@@ -151,21 +152,39 @@ async function recordedCwd(file: string): Promise<string | undefined> {
 async function projectFiles(root: string): Promise<Array<{ file: string; cwd: string }>> {
 	const registered = await readRegisteredProjects(root);
 	const found: Array<{ file: string; cwd: string }> = [];
+	const unreadable: string[] = [];
 	for (const containerName of ["projects", ".projects"]) {
 		const container = path.join(root, containerName);
-		const projects = await fs.readdir(container, { withFileTypes: true }).catch(() => []);
-		for (const project of projects) {
+		const scanned = await readDirOutcome(container);
+		// An absent container is normal (only one of the two spellings exists on
+		// any given install); an unreadable one is not, and listing it as empty
+		// would report the user's Claude history as gone.
+		if (scanned.status === "missing") continue;
+		if (scanned.status === "error") {
+			unreadable.push(describeReadDirFailure(container, scanned.error));
+			continue;
+		}
+		for (const project of scanned.entries) {
 			if (!project.isDirectory()) continue;
 			const directory = path.join(container, project.name);
-			const entries = await fs.readdir(directory, { withFileTypes: true }).catch(() => []);
+			const projectScan = await readDirOutcome(directory);
+			if (projectScan.status !== "ok") {
+				if (projectScan.status === "error") {
+					unreadable.push(describeReadDirFailure(directory, projectScan.error));
+				}
+				continue;
+			}
 			const cwd = projectCwd(project.name, registered);
-			for (const entry of entries) {
+			for (const entry of projectScan.entries) {
 				if (entry.isFile() && entry.name.endsWith(".jsonl")) {
 					found.push({ file: path.join(directory, entry.name), cwd });
 				}
 			}
 		}
 	}
+	// A partial listing must not read as a complete one, so refuse rather than
+	// quietly drop sessions the caller cannot see are missing.
+	if (unreadable.length > 0) throw new Error(unreadable.join("; "));
 	return found;
 }
 

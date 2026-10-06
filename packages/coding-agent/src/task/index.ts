@@ -512,6 +512,7 @@ class TaskJobError extends AsyncJobError {}
  */
 const discoveryMemo = new Map<string, Promise<DiscoveryResult>>();
 const discoverySnapshots = new Map<string, AgentDefinition[]>();
+const discoveryWarningSnapshots = new Map<string, string[]>();
 let discoveryMemoFn: typeof discoverAgents | undefined;
 
 /** Stable cache identity for the filesystem root and the full effective extension-root struct. */
@@ -525,6 +526,7 @@ function discoverAgentsForCreate(cwd: string, extensionRoots?: EffectiveExtensio
 		discoveryMemoFn = fn;
 		discoveryMemo.clear();
 		discoverySnapshots.clear();
+		discoveryWarningSnapshots.clear();
 	}
 	const key = discoveryCacheKey(cwd, extensionRoots);
 	let pending = discoveryMemo.get(key);
@@ -543,9 +545,11 @@ export async function refreshAgentDiscovery(cwd: string, extensionRoots?: Effect
 	const key = discoveryCacheKey(cwd, extensionRoots);
 	discoveryMemo.delete(key);
 	const pending = discoverAgentsForCreate(cwd, extensionRoots);
-	const { agents } = await pending;
+	const { agents, warnings } = await pending;
 	if (discoveryMemo.get(key) === pending) {
 		discoverySnapshots.set(key, agents);
+		if (warnings !== undefined && warnings.length > 0) discoveryWarningSnapshots.set(key, warnings);
+		else discoveryWarningSnapshots.delete(key);
 	}
 }
 
@@ -701,10 +705,9 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		const disabledAgents = cfgTaskDisabledAgents.get(this.session.settings);
 		const planMode = this.session.getPlanModeState?.()?.enabled === true;
 		const isolationEnabled = cfgTaskIsolationEnabled.get(this.session.settings);
-		return renderDescription({
-			agents:
-				discoverySnapshots.get(discoveryCacheKey(this.session.cwd, this.session.effectiveExtensionRoots?.())) ??
-				this.#discoveredAgents,
+		const key = discoveryCacheKey(this.session.cwd, this.session.effectiveExtensionRoots?.());
+		const rendered = renderDescription({
+			agents: discoverySnapshots.get(key) ?? this.#discoveredAgents,
 			sessionAgents: this.session.advertisedSessionAgents?.() ?? this.session.getSessionAgents?.() ?? [],
 			isolationEnabled: !planMode && isolationEnabled,
 			applyIsolatedChanges: cfgTaskIsolationApply.get(this.session.settings),
@@ -716,6 +719,11 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			ircEnabled: isIrcEnabled(this.session.settings, this.session.taskDepth ?? 0),
 			parentSpawns: this.session.getSessionSpawns() ?? "*",
 		});
+		// An unreadable agent directory must not read as "no such agent" on the
+		// task path either: say so where every spawn decision is made.
+		const warnings = discoveryWarningSnapshots.get(key);
+		if (warnings === undefined || warnings.length === 0) return rendered;
+		return `${rendered}\nSome agent directories could not be read: ${warnings.join("; ")}.`;
 	}
 	private constructor(
 		private readonly session: ToolSession,
@@ -837,7 +845,12 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 	 * Create a TaskTool instance with async agent discovery.
 	 */
 	static async create(session: ToolSession): Promise<TaskTool> {
-		const { agents } = await discoverAgentsForCreate(session.cwd, session.effectiveExtensionRoots?.());
+		const key = discoveryCacheKey(session.cwd, session.effectiveExtensionRoots?.());
+		const { agents, warnings } = await discoverAgentsForCreate(session.cwd, session.effectiveExtensionRoots?.());
+		if (warnings !== undefined && warnings.length > 0) {
+			discoveryWarningSnapshots.set(key, warnings);
+			for (const warning of warnings) logger.warn(`task: agent discovery issue: ${warning}`);
+		}
 		return new TaskTool(session, agents);
 	}
 
