@@ -1312,7 +1312,10 @@ export class ExtensionUiController {
 		});
 	};
 
-	/** A collab guest's typed input goes to the host or is host-only, so none of it runs on the replica. */
+	/**
+	 * A collab guest's typed prompts go to the host and its other commands, apart from a few read-only local ones
+	 * (`COLLAB_GUEST_ALLOWED_COMMANDS`), are host-only, so a guest runs none of an extension's input on the replica.
+	 */
 	#sendExtensionUserInput: SendUserInputHandler = async (text, options) => {
 		if (this.#rejectGuestExtensionTurn()) return { handled: "unavailable" };
 		return sendSessionUserInput(this.ctx.session, text, options, tuiSlashCommandHost(this.ctx));
