@@ -14,7 +14,6 @@
 use std::{
 	cell::Cell,
 	sync::Arc,
-	thread,
 	time::{Duration, Instant},
 };
 
@@ -41,6 +40,7 @@ use super::{
 };
 use crate::desktop::{
 	backend::{DeliveryMode, Modifiers, MouseButton, PointerEvent},
+	control,
 	error::{CoreResult, DesktopError},
 	keys::KeyName,
 	types::Target,
@@ -85,20 +85,29 @@ pub struct X11Input {
 enum Keys<'a> {
 	Text(&'a str),
 	Chord(&'a [KeyName]),
+	Hold(&'a [KeyName], Duration),
 }
 
 impl Keys<'_> {
+	const fn duration(self) -> Duration {
+		if let Self::Hold(_, duration) = self {
+			duration
+		} else {
+			Duration::ZERO
+		}
+	}
+
 	const fn kind(self) -> &'static str {
 		match self {
 			Self::Text(_) => "text",
-			Self::Chord(_) => "key",
+			Self::Chord(_) | Self::Hold(..) => "key",
 		}
 	}
 
 	fn plan(self, keymap: &Keymap) -> CoreResult<Vec<KeyStep>> {
 		match self {
 			Self::Text(text) => keymap.plan_text(text),
-			Self::Chord(keys) => keymap.plan_chord(keys),
+			Self::Chord(keys) | Self::Hold(keys, _) => keymap.plan_chord(keys),
 		}
 	}
 }
@@ -133,11 +142,12 @@ impl X11Input {
 		event: PointerEvent,
 		mode: DeliveryMode,
 	) -> CoreResult<()> {
-		if matches!(target, Target::Desktop) || mode == DeliveryMode::Foreground {
+		if matches!(target, Target::Desktop | Target::Display(_)) || mode == DeliveryMode::Foreground
+		{
 			self.keymap = Keymap::core(&self.conn)?;
 		}
 		match (target, mode) {
-			(Target::Desktop, _) => self.pointer_xtest(&event),
+			(Target::Desktop | Target::Display(_), _) => self.pointer_xtest(&event),
 			(Target::Window(id), DeliveryMode::Foreground) => {
 				let window = parse_window(id)?;
 				pointer_endpoint(&event)?;
@@ -160,9 +170,18 @@ impl X11Input {
 				let reason = match ensure_mpx(&mut self.mpx, &mut self.mpx_unavailable) {
 					Ok(mpx) => {
 						let wm = Wm { conn: &self.conn, root: self.root, atoms: &self.atoms };
-						return pointer_mpx(wm, mpx, window, &event);
+						let result = pointer_mpx(wm, mpx, window, &event);
+						if control::check().is_err() {
+							// Retire cancelled devices, never replay uncertain queued input.
+							// A later explicit operation may create a fresh isolated pair.
+							self.mpx = None;
+						}
+						return result;
 					},
-					Err(reason) => reason,
+					Err(reason) => {
+						control::check()?;
+						reason
+					},
 				};
 				if self.drops_synthetic_input(window) {
 					return Err(background_unavailable(
@@ -197,6 +216,16 @@ impl X11Input {
 		self.keys(target, Keys::Chord(keys), mode)
 	}
 
+	pub(crate) fn hold_keys(
+		&mut self,
+		target: &Target,
+		keys: &[KeyName],
+		duration: Duration,
+		mode: DeliveryMode,
+	) -> CoreResult<()> {
+		self.keys(target, Keys::Hold(keys, duration), mode)
+	}
+
 	/// Persistent activation: the target stays active afterwards.
 	pub(crate) fn raise_window(&self, window: Window) -> CoreResult<()> {
 		let wm = self.wm();
@@ -210,15 +239,16 @@ impl X11Input {
 	fn keys(&mut self, target: &Target, keys: Keys<'_>, mode: DeliveryMode) -> CoreResult<()> {
 		self.keymap = Keymap::core(&self.conn)?;
 		match (target, mode) {
-			(Target::Desktop, _) => {
+			(Target::Desktop | Target::Display(_), _) => {
 				let steps = keys.plan(&self.keymap)?;
-				self.xtest_steps(&steps)
+				self.xtest_steps(&steps, keys.duration())
 			},
 			(Target::Window(id), DeliveryMode::Foreground) => {
 				let window = parse_window(id)?;
 				let steps = keys.plan(&self.keymap)?;
-				self
-					.with_foreground(window, FOREGROUND_KEYBOARD_SETTLE, |this| this.xtest_steps(&steps))
+				self.with_foreground(window, FOREGROUND_KEYBOARD_SETTLE, |this| {
+					this.xtest_steps(&steps, keys.duration())
+				})
 			},
 			(Target::Window(id), DeliveryMode::Background) => {
 				let window = parse_window(id)?;
@@ -237,7 +267,7 @@ impl X11Input {
 				));
 			}
 			let steps = keys.plan(&self.keymap)?;
-			return self.send_key_steps(window, &steps);
+			return self.send_key_steps(window, &steps, keys.duration());
 		}
 		let reason = match ensure_mpx(&mut self.mpx, &mut self.mpx_unavailable) {
 			Ok(mpx) => {
@@ -259,14 +289,21 @@ impl X11Input {
 				let result = match keys {
 					Keys::Text(text) => mpx.type_text(window, text),
 					Keys::Chord(chord) => mpx.key_chord(window, chord),
+					Keys::Hold(keys, duration) => mpx.hold_keys(window, keys, duration),
 				};
 				let isolation = snapshot.check(wm, window);
 				if isolation.is_err() {
 					mpx.inhibit();
 				}
+				if control::check().is_err() {
+					self.mpx = None;
+				}
 				return result.and(isolation);
 			},
-			Err(reason) => reason,
+			Err(reason) => {
+				control::check()?;
+				reason
+			},
 		};
 		if self.drops_synthetic_input(window) {
 			return Err(background_unavailable(
@@ -279,7 +316,7 @@ impl X11Input {
 			));
 		}
 		let steps = keys.plan(&self.keymap)?;
-		self.send_key_steps(window, &steps)
+		self.send_key_steps(window, &steps, keys.duration())
 	}
 
 	/// Activates `window`, confirms the WM made it the active window holding
@@ -298,7 +335,9 @@ impl X11Input {
 		let previous_focus = wm.input_focus();
 		let pointer = self.core_pointer();
 		if let Err(error) = self.activate_confirmed(window, ewmh, previous_active, budget) {
-			self.restore_activation(window, ewmh, previous_active, previous_focus);
+			control::cleanup(|| {
+				self.restore_activation(window, ewmh, previous_active, previous_focus)
+			});
 			return Err(error);
 		}
 		self.takeover_target = Some(window);
@@ -306,17 +345,19 @@ impl X11Input {
 		let result = body(self);
 		self.takeover_target = None;
 		let pointer_after = self.takeover_pointer.take();
-		thread::sleep(FOREGROUND_RESTORE_SETTLE);
-		// A physical motion during the action is the user's new position.
-		// Keyboard-only actions never warp the pointer, even during restore.
-		if let Some(pointer) = pointer
-			&& pointer_after.is_some()
-			&& self.core_pointer() == pointer_after
-		{
-			self.restore_core_pointer(pointer);
-		}
-		self.restore_activation(window, ewmh, previous_active, previous_focus);
-		result
+		let settled = control::wait(FOREGROUND_RESTORE_SETTLE);
+		control::cleanup(|| {
+			// A physical motion during the action is the user's new position.
+			// Keyboard-only actions never warp the pointer, even during restore.
+			if let Some(pointer) = pointer
+				&& pointer_after.is_some()
+				&& self.core_pointer() == pointer_after
+			{
+				self.restore_core_pointer(pointer);
+			}
+			self.restore_activation(window, ewmh, previous_active, previous_focus);
+		});
+		result.and_then(|value| settled.map(|()| value))
 	}
 
 	fn activate_confirmed(
@@ -326,6 +367,7 @@ impl X11Input {
 		previous_active: Option<Window>,
 		budget: Duration,
 	) -> CoreResult<()> {
+		control::check()?;
 		let wm = self.wm();
 		// Already active and focused: re-activating pops open menus down.
 		if wm.is_focused(window, ewmh) {
@@ -336,6 +378,7 @@ impl X11Input {
 		let retry_at = start + budget.mul_f32(0.4);
 		let mut retried = false;
 		loop {
+			control::check()?;
 			if wm.is_focused(window, ewmh) {
 				return Ok(());
 			}
@@ -347,7 +390,7 @@ impl X11Input {
 				retried = true;
 				let _ = wm.request_activation(window, wm.active_window());
 			}
-			thread::sleep(FOREGROUND_POLL);
+			control::wait(FOREGROUND_POLL)?;
 		}
 		Err(DesktopError::input_failed(format!(
 			"window {window} did not become the active, focused window within {}ms (it may be \
@@ -378,10 +421,10 @@ impl X11Input {
 			{
 				return;
 			}
-			let _ = wm.request_activation(previous, Some(window));
+			let _ = wm.restore_activation(previous, window);
 			let deadline = Instant::now() + FOREGROUND_RESTORE_BUDGET;
 			while Instant::now() < deadline && wm.active_window() == Some(window) {
-				thread::sleep(FOREGROUND_POLL);
+				let _ = control::wait(FOREGROUND_POLL);
 			}
 			return;
 		}
@@ -417,49 +460,93 @@ impl X11Input {
 	}
 
 	fn pointer_send_event(&self, window: Window, event: &PointerEvent) -> CoreResult<()> {
-		// Validate every drag waypoint before a synthetic press can be sent.
 		pointer_endpoint(event)?;
+		let keys = match event {
+			PointerEvent::Hold { keys, .. } | PointerEvent::Drag { keys, .. } => keys.as_slice(),
+			_ => &[],
+		};
+		let codes = self.keymap.held_keycodes(keys)?;
+		let mut state = 0u16;
+		keymap::with_held_codes(
+			&codes,
+			|step| {
+				self.send_key(window, step.keycode, step.press, KeyButMask::from(state))?;
+				let mask = self.keymap.modifier_mask(step.keycode);
+				if step.press {
+					state |= mask;
+				} else {
+					state &= !mask;
+				}
+				Ok(())
+			},
+			|| self.pointer_send_event_body(window, event),
+		)
+	}
+
+	fn pointer_send_event_body(&self, window: Window, event: &PointerEvent) -> CoreResult<()> {
 		match event {
 			PointerEvent::Click { x, y, button, count, modifiers } => {
 				let (root_x, root_y, event_x, event_y) = self.coordinates(window, *x, *y)?;
 				let detail = button_detail(*button);
 				let mut state = modifier_mask(*modifiers);
 				for _ in 0..(*count).max(1) {
-					self.send_button(window, detail, true, root_x, root_y, event_x, event_y, state)?;
+					control::check()?;
+					let pressed =
+						self.send_button(window, detail, true, root_x, root_y, event_x, event_y, state);
 					if let Some(mask) = button_mask(detail) {
 						state |= mask;
 					}
-					thread::sleep(CLICK_DELAY);
-					self.send_button(window, detail, false, root_x, root_y, event_x, event_y, state)?;
+					let held = pressed.and_then(|()| control::wait(CLICK_DELAY));
+					let released = control::cleanup(|| {
+						self.send_button(window, detail, false, root_x, root_y, event_x, event_y, state)
+					});
+					held.and(released)?;
 					if let Some(mask) = button_mask(detail) {
 						state = KeyButMask::from(u16::from(state) & !u16::from(mask));
 					}
-					thread::sleep(CLICK_DELAY);
+					control::wait(CLICK_DELAY)?;
 				}
+			},
+			PointerEvent::Hold { x, y, button, keys, duration } => {
+				let (rx, ry, ex, ey) = self.coordinates(window, *x, *y)?;
+				let detail = button_detail(*button);
+				let state = modifier_mask(control::key_modifiers(keys));
+				control::bounded_hold(*duration, |down| {
+					self.send_button(window, detail, down, rx, ry, ex, ey, state)
+				})?;
 			},
 			PointerEvent::Move { x, y } => {
 				let (root_x, root_y, event_x, event_y) = self.coordinates(window, *x, *y)?;
 				self.send_motion(window, root_x, root_y, event_x, event_y, KeyButMask::default())?;
 			},
-			PointerEvent::Drag { path, button, modifiers } => {
+			PointerEvent::Drag { path, button, modifiers, keys } => {
 				let Some(&(first_x, first_y)) = path.first() else {
 					return Err(DesktopError::input_failed("drag path is empty"));
 				};
 				let detail = button_detail(*button);
 				let (root_x, root_y, event_x, event_y) = self.coordinates(window, first_x, first_y)?;
-				let mut state = modifier_mask(*modifiers);
-				self.send_button(window, detail, true, root_x, root_y, event_x, event_y, state)?;
+				let mut state = modifier_mask(*modifiers) | modifier_mask(control::key_modifiers(keys));
+				control::check()?;
+				let pressed =
+					self.send_button(window, detail, true, root_x, root_y, event_x, event_y, state);
 				if let Some(mask) = button_mask(detail) {
 					state |= mask;
 				}
-				for &(x, y) in path.iter().skip(1) {
-					let (root_x, root_y, event_x, event_y) = self.coordinates(window, x, y)?;
-					self.send_motion(window, root_x, root_y, event_x, event_y, state)?;
-					thread::sleep(DRAG_STEP_DELAY);
-				}
-				let &(last_x, last_y) = path.last().unwrap_or(&(first_x, first_y));
-				let (root_x, root_y, event_x, event_y) = self.coordinates(window, last_x, last_y)?;
-				self.send_button(window, detail, false, root_x, root_y, event_x, event_y, state)?;
+				let mut last = (root_x, root_y, event_x, event_y);
+				let moved = (|| {
+					pressed?;
+					for &(x, y) in path.iter().skip(1) {
+						control::check()?;
+						last = self.coordinates(window, x, y)?;
+						self.send_motion(window, last.0, last.1, last.2, last.3, state)?;
+						control::wait(DRAG_STEP_DELAY)?;
+					}
+					Ok(())
+				})();
+				let released = control::cleanup(|| {
+					self.send_button(window, detail, false, last.0, last.1, last.2, last.3, state)
+				});
+				moved.and(released)?;
 			},
 			PointerEvent::Scroll { x, y, dx, dy } => {
 				let (root_x, root_y, event_x, event_y) = self.coordinates(window, *x, *y)?;
@@ -472,16 +559,28 @@ impl X11Input {
 	/// Real `XTest` pointer input, with the gesture's modifiers held on the core
 	/// keyboard and every modifier and button released on all exit paths.
 	fn pointer_xtest(&self, event: &PointerEvent) -> CoreResult<()> {
-		let (modifiers, button) = match event {
-			PointerEvent::Click { modifiers, button, .. }
-			| PointerEvent::Drag { modifiers, button, .. } => (*modifiers, Some(button_detail(*button))),
-			PointerEvent::Move { .. } | PointerEvent::Scroll { .. } => (Modifiers::default(), None),
+		let modifiers = match event {
+			PointerEvent::Click { modifiers, .. } | PointerEvent::Drag { modifiers, .. } => *modifiers,
+			PointerEvent::Move { .. } | PointerEvent::Scroll { .. } | PointerEvent::Hold { .. } => {
+				Modifiers::default()
+			},
 		};
-		let modifier_keycodes = self.keymap.modifier_keycodes(modifiers)?;
+		let mut modifier_keycodes = self.keymap.modifier_keycodes(modifiers)?;
+		if let PointerEvent::Hold { keys, .. } | PointerEvent::Drag { keys, .. } = event {
+			for code in self.keymap.held_keycodes(keys)? {
+				if !modifier_keycodes.contains(&code) {
+					modifier_keycodes.push(code);
+				}
+			}
+		}
 		self.check_released_keys(modifier_keycodes.iter().copied())?;
 		let mut pressed = Vec::with_capacity(modifier_keycodes.len());
 		let mut result = Ok(());
 		for &keycode in &modifier_keycodes {
+			if let Err(error) = control::check() {
+				result = Err(error);
+				break;
+			}
 			pressed.push(keycode);
 			if let Err(error) = self.xtest_key(keycode, true) {
 				result = Err(error);
@@ -490,14 +589,9 @@ impl X11Input {
 		}
 		if result.is_ok() {
 			result = self.xtest_gesture(event);
-			if result.is_err()
-				&& let Some(detail) = button
-			{
-				let _ = self.xtest_button(detail, false);
-			}
 		}
 		for &keycode in pressed.iter().rev() {
-			let released = self.xtest_key(keycode, false);
+			let released = control::cleanup(|| self.xtest_key(keycode, false));
 			if result.is_ok() {
 				result = released;
 			}
@@ -514,13 +608,22 @@ impl X11Input {
 				let detail = button_detail(*button);
 				for index in 0..(*count).max(1) {
 					if index > 0 {
-						thread::sleep(MULTI_CLICK_GAP);
+						control::wait(MULTI_CLICK_GAP)?;
 					}
-					self.xtest_button(detail, true)?;
-					thread::sleep(CLICK_DELAY);
-					self.xtest_button(detail, false)?;
+					control::check()?;
+					let pressed = self
+						.xtest_button(detail, true)
+						.and_then(|()| control::wait(CLICK_DELAY));
+					let released = control::cleanup(|| self.xtest_button(detail, false));
+					pressed.and(released)?;
 				}
 				Ok(())
+			},
+			PointerEvent::Hold { x, y, button, duration, .. } => {
+				let (x, y) = validate_xtest_point(*x, *y)?;
+				self.xtest_motion(x, y)?;
+				let detail = button_detail(*button);
+				control::bounded_hold(*duration, |down| self.xtest_button(detail, down))
 			},
 			PointerEvent::Move { x, y } => {
 				let (x, y) = validate_xtest_point(*x, *y)?;
@@ -533,13 +636,18 @@ impl X11Input {
 				let (x, y) = validate_xtest_point(first_x, first_y)?;
 				self.xtest_motion(x, y)?;
 				let detail = button_detail(*button);
-				self.xtest_button(detail, true)?;
-				for &(x, y) in path.iter().skip(1) {
-					let (x, y) = validate_xtest_point(x, y)?;
-					self.xtest_motion(x, y)?;
-					thread::sleep(DRAG_STEP_DELAY);
-				}
-				self.xtest_button(detail, false)
+				control::check()?;
+				let dragged = (|| {
+					self.xtest_button(detail, true)?;
+					for &(x, y) in path.iter().skip(1) {
+						let (x, y) = validate_xtest_point(x, y)?;
+						self.xtest_motion(x, y)?;
+						control::wait(DRAG_STEP_DELAY)?;
+					}
+					Ok(())
+				})();
+				let released = control::cleanup(|| self.xtest_button(detail, false));
+				dragged.and(released)
 			},
 			PointerEvent::Scroll { x, y, dx, dy } => {
 				let (x, y) = validate_xtest_point(*x, *y)?;
@@ -549,22 +657,29 @@ impl X11Input {
 		}
 	}
 
-	fn xtest_steps(&self, steps: &[KeyStep]) -> CoreResult<()> {
+	fn xtest_steps(&self, steps: &[KeyStep], duration: Duration) -> CoreResult<()> {
 		self.check_released_keys(
 			steps
 				.iter()
 				.filter(|step| step.press)
 				.map(|step| step.keycode),
 		)?;
-		keymap::run_steps(steps, |step| self.xtest_key(step.keycode, step.press))?;
+		keymap::run_steps_with_hold(steps, duration, |step| {
+			self.xtest_key(step.keycode, step.press)
+		})?;
 		self.conn.flush().map_err(input_failed)
 	}
 
 	/// Synthetic key events carrying the core modifier state each transition
 	/// would have produced, so `ctrl+a` arrives as Control-qualified `a`.
-	fn send_key_steps(&self, window: Window, steps: &[KeyStep]) -> CoreResult<()> {
+	fn send_key_steps(
+		&self,
+		window: Window,
+		steps: &[KeyStep],
+		duration: Duration,
+	) -> CoreResult<()> {
 		let mut state = 0u16;
-		keymap::run_steps(steps, |step| {
+		keymap::run_steps_with_hold(steps, duration, |step| {
 			self.send_key(window, step.keycode, step.press, KeyButMask::from(state))?;
 			let mask = self.keymap.modifier_mask(step.keycode);
 			if step.press {
@@ -578,6 +693,7 @@ impl X11Input {
 	}
 
 	fn xtest_key(&self, keycode: u8, press: bool) -> CoreResult<()> {
+		control::check()?;
 		if press {
 			self.check_takeover_focus()?;
 		}
@@ -608,6 +724,7 @@ impl X11Input {
 		press: bool,
 		state: KeyButMask,
 	) -> CoreResult<()> {
+		control::check()?;
 		let event = KeyPressEvent {
 			response_type: if press {
 				KEY_PRESS_EVENT
@@ -667,6 +784,7 @@ impl X11Input {
 		event_y: i16,
 		state: KeyButMask,
 	) -> CoreResult<()> {
+		control::check()?;
 		let event = ButtonPressEvent {
 			response_type: if press {
 				BUTTON_PRESS_EVENT
@@ -712,6 +830,7 @@ impl X11Input {
 		event_y: i16,
 		state: KeyButMask,
 	) -> CoreResult<()> {
+		control::check()?;
 		let event = MotionNotifyEvent {
 			response_type: MOTION_NOTIFY_EVENT,
 			detail: Motion::NORMAL,
@@ -747,7 +866,8 @@ impl X11Input {
 	) -> CoreResult<()> {
 		for (detail, count) in scroll_buttons(dx, dy) {
 			for _ in 0..count {
-				self.send_button(
+				control::check()?;
+				let pressed = self.send_button(
 					window,
 					detail,
 					true,
@@ -756,17 +876,20 @@ impl X11Input {
 					event_x,
 					event_y,
 					KeyButMask::default(),
-				)?;
-				self.send_button(
-					window,
-					detail,
-					false,
-					root_x,
-					root_y,
-					event_x,
-					event_y,
-					KeyButMask::default(),
-				)?;
+				);
+				let released = control::cleanup(|| {
+					self.send_button(
+						window,
+						detail,
+						false,
+						root_x,
+						root_y,
+						event_x,
+						event_y,
+						KeyButMask::default(),
+					)
+				});
+				pressed.and(released)?;
 			}
 		}
 		Ok(())
@@ -775,14 +898,17 @@ impl X11Input {
 	fn scroll_xtest(&self, dx: f64, dy: f64) -> CoreResult<()> {
 		for (detail, count) in scroll_buttons(dx, dy) {
 			for _ in 0..count {
-				self.xtest_button(detail, true)?;
-				self.xtest_button(detail, false)?;
+				control::check()?;
+				let pressed = self.xtest_button(detail, true);
+				let released = control::cleanup(|| self.xtest_button(detail, false));
+				pressed.and(released)?;
 			}
 		}
 		Ok(())
 	}
 
 	fn xtest_motion(&self, x: i16, y: i16) -> CoreResult<()> {
+		control::check()?;
 		self.check_takeover_focus()?;
 		if self.takeover_target.is_some() {
 			self.takeover_pointer.set(Some((x, y)));
@@ -796,6 +922,7 @@ impl X11Input {
 	}
 
 	fn xtest_button(&self, detail: u8, press: bool) -> CoreResult<()> {
+		control::check()?;
 		if press {
 			self.check_takeover_focus()?;
 			if let Some(window) = self.takeover_target {
@@ -895,7 +1022,13 @@ fn ensure_mpx<'a>(
 	}
 	let mpx = match slot.take() {
 		Some(mpx) => mpx,
-		None => Mpx::create().map_err(|error| unavailable.insert(error.message).clone())?,
+		None => Mpx::create().map_err(|error| {
+			if control::check().is_err() {
+				error.message
+			} else {
+				unavailable.insert(error.message).clone()
+			}
+		})?,
 	};
 	Ok(slot.insert(mpx))
 }
@@ -906,6 +1039,7 @@ fn ensure_mpx<'a>(
 fn pointer_mpx(wm: Wm<'_>, mpx: &mut Mpx, window: Window, event: &PointerEvent) -> CoreResult<()> {
 	let path = match event {
 		PointerEvent::Click { x, y, .. }
+		| PointerEvent::Hold { x, y, .. }
 		| PointerEvent::Move { x, y }
 		| PointerEvent::Scroll { x, y, .. } => vec![validate_xtest_point(*x, *y)?],
 		PointerEvent::Drag { path, .. } => path
@@ -923,7 +1057,12 @@ fn pointer_mpx(wm: Wm<'_>, mpx: &mut Mpx, window: Window, event: &PointerEvent) 
 			mpx.click(window, (x, y), *button, *count, *modifiers)
 		},
 		PointerEvent::Move { .. } => mpx.hover(window, (x, y)),
-		PointerEvent::Drag { button, modifiers, .. } => mpx.drag(window, &path, *button, *modifiers),
+		PointerEvent::Drag { button, modifiers, keys, .. } => {
+			mpx.drag(window, &path, *button, *modifiers, keys)
+		},
+		PointerEvent::Hold { button, keys, duration, .. } => {
+			mpx.hold_mouse(window, (x, y), *button, keys, *duration)
+		},
 		PointerEvent::Scroll { dx, dy, .. } => mpx.scroll(window, (x, y), *dx, *dy),
 	};
 	let isolation = snapshot.check(wm, window);
@@ -971,6 +1110,7 @@ fn mpx_probe(conn: &RustConnection) -> Result<(), String> {
 fn pointer_endpoint(event: &PointerEvent) -> CoreResult<(i16, i16)> {
 	match event {
 		PointerEvent::Click { x, y, .. }
+		| PointerEvent::Hold { x, y, .. }
 		| PointerEvent::Move { x, y }
 		| PointerEvent::Scroll { x, y, .. } => validate_xtest_point(*x, *y),
 		PointerEvent::Drag { path, .. } => {
@@ -1067,6 +1207,7 @@ const fn event_kind(event: &PointerEvent) -> &'static str {
 		PointerEvent::Click { .. } => "click",
 		PointerEvent::Move { .. } => "move",
 		PointerEvent::Drag { .. } => "drag",
+		PointerEvent::Hold { .. } => "mouse hold",
 		PointerEvent::Scroll { .. } => "scroll",
 	}
 }

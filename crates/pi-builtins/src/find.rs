@@ -336,6 +336,9 @@ pub mod matchers {
 			follow:  Follow,
 			/// Cached metadata.
 			meta:    OnceCell<Result<Metadata, WalkError>>,
+			/// The type the walker already reported, when it needs no stat to
+			/// trust: a regular file or directory seen without following links.
+			known_type: Option<FileType>,
 			/// Operand-relative path used for display and path-based matching, when it
 			/// differs from the real filesystem path. The shell host roots the walk at
 			/// a working-directory-resolved (often absolute) path so stat/exec/delete
@@ -350,7 +353,23 @@ pub mod matchers {
 			pub fn new(fs: BlockingFs, path: impl Into<PathBuf>, depth: usize, follow: Follow) -> Self {
 				let path = path.into();
 				let display = forward_slash_display(&path);
-				Self { fs, path, depth, follow, meta: OnceCell::new(), display }
+				Self { fs, path, depth, follow, meta: OnceCell::new(), known_type: None, display }
+			}
+
+			/// Record the type the walker reported, so `-type`, `-prune` and the
+			/// like answer without a stat. Only regular files and directories
+			/// seen without following links qualify: the Windows walker reports
+			/// every reparse point as a symlink, which needs the stat to tell.
+			#[must_use]
+			pub fn with_walker_type(mut self, file_type: pi_walker::FileType) -> Self {
+				if !self.follow() {
+					self.known_type = match file_type {
+						pi_walker::FileType::File => Some(FileType::Regular),
+						pi_walker::FileType::Dir => Some(FileType::Directory),
+						pi_walker::FileType::Symlink => None,
+					};
+				}
+				self
 			}
 
 			/// Get the filesystem this entry lives on.
@@ -426,6 +445,9 @@ pub mod matchers {
 
 			/// Get the file type of this entry.
 			pub fn file_type(&self) -> FileType {
+				if let Some(file_type) = self.known_type {
+					return file_type;
+				}
 				self
 					.metadata()
 					.map(|m| m.file_type().into())
@@ -541,6 +563,9 @@ pub mod matchers {
 				{
 					command = command.current_dir(dir);
 				}
+				// The child writes to the shared fd directly: flush what find
+				// printed so far so its output stays in order.
+				let _ = matcher_io.deps.get_output().borrow_mut().flush();
 				match matcher_io.host().run_command(command) {
 					Ok(status) => status.success(),
 					Err(e) => {
@@ -598,6 +623,9 @@ pub mod matchers {
 				if let Some(dir) = command.get_current_dir() {
 					shell_command = shell_command.current_dir(dir);
 				}
+				// The child writes to the shared fd directly: flush what find
+				// printed so far so its output stays in order.
+				let _ = matcher_io.deps.get_output().borrow_mut().flush();
 				match matcher_io.host().run_command(shell_command) {
 					Ok(status) => {
 						if !status.success() {
@@ -1901,7 +1929,6 @@ pub mod matchers {
 				print_error_message: bool,
 			) {
 				match write!(out, "{}{}", file_info.display_path().to_string_lossy(), self.delimiter)
-					.and_then(|()| out.flush())
 				{
 					Ok(()) => {},
 					Err(e) => {
@@ -2505,7 +2532,9 @@ pub mod matchers {
 				Ok(Self { format: FormatString::parse(format)?, output_file, fs_cache: fs::Cache::default() })
 			}
 
-			fn print(&self, file_info: &WalkEntry, mut out: impl Write, mut err: impl Write) {
+			/// Prints the format for `file_info`; a directive that cannot be
+			/// rendered stops the line and is returned for the caller to report.
+			fn print(&self, file_info: &WalkEntry, mut out: impl Write) -> Result<(), Box<dyn Error>> {
 				for component in &self.format.components {
 					match component {
 						FormatComponent::Literal(literal) => write!(out, "{literal}").unwrap(),
@@ -2526,29 +2555,29 @@ pub mod matchers {
 										write!(out, "{content}").unwrap();
 									}
 								},
-								Err(e) => {
-									let _ = writeln!(
-										err,
-										"Error processing '{}': {}",
-										file_info.path().to_string_lossy(),
-										e
-									);
-									break;
-								},
+								Err(e) => return Err(e),
 							}
 						},
 					}
 				}
+				Ok(())
 			}
 		}
 
 		impl Matcher for Printf {
 			fn matches(&self, file_info: &WalkEntry, matcher_io: &mut MatcherIO) -> bool {
-				let err = matcher_io.host().stderr_clone();
-				if let Some(file) = &self.output_file {
-					self.print(file_info, file, err);
+				let printed = if let Some(file) = &self.output_file {
+					self.print(file_info, file)
 				} else {
-					self.print(file_info, &mut *matcher_io.deps.get_output().borrow_mut(), err);
+					self.print(file_info, &mut *matcher_io.deps.get_output().borrow_mut())
+				};
+				if let Err(e) = printed {
+					let _ = writeln!(
+						matcher_io.host().stderr,
+						"Error processing '{}': {}",
+						file_info.path().to_string_lossy(),
+						e
+					);
 				}
 
 				true
@@ -4468,7 +4497,7 @@ pub mod matchers {
 use std::{
 	cell::{Cell, RefCell},
 	error::Error,
-	io::{self, Write},
+	io::Write,
 	path::{Path, PathBuf},
 	rc::Rc,
 	time::SystemTime,
@@ -4536,7 +4565,10 @@ struct StandardDependencies {
 impl StandardDependencies {
 	#[must_use]
 	fn new(host: &Host) -> Self {
-		Self { output: Rc::new(RefCell::new(host.stdout_clone())), now: SystemTime::now() }
+		// Line-buffered on pipes (one write per printed path), block-buffered
+		// for files, and shared with stderr under 2>&1 so diagnostics stay in
+		// order.
+		Self { output: Rc::new(RefCell::new(host.stdout_writer())), now: SystemTime::now() }
 	}
 }
 
@@ -4639,12 +4671,13 @@ fn apply_find_entry(
 	entry.set_display_root(operand, resolved_root);
 	let mut matcher_io = matchers::MatcherIO::new(deps, host);
 
-	let new_dir = pi_vfs::parent_path(entry.path()).map(Path::to_path_buf);
-	if new_dir != *current_dir {
+	// Allocated only when the directory changes, not for every entry.
+	let new_dir = pi_vfs::parent_path(entry.path());
+	if new_dir != current_dir.as_deref() {
 		if let Some(dir) = current_dir.take() {
 			matcher.finished_dir(dir.as_path(), &mut matcher_io);
 		}
-		*current_dir = new_dir;
+		*current_dir = new_dir.map(Path::to_path_buf);
 	}
 
 	matcher.matches(&entry, &mut matcher_io);
@@ -4725,23 +4758,17 @@ fn process_dir_walk_request(
 	let current_dir = RefCell::new(None);
 	let ret = Cell::new(0);
 	let local_quit = Cell::new(false);
-	let cancel = host.cancel_flag();
 	let mut walk_stderr = host.stderr_clone();
 	let status = request.for_each_entry_with_heartbeat(
-		move || {
-			if cancel.load(std::sync::atomic::Ordering::Relaxed) {
-				Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled"))
-			} else {
-				Ok(())
-			}
-		},
+		host.cancel_heartbeat(),
 		|entry: pi_walker::EntryMeta<'_>| {
 			let walk_entry = WalkEntry::new(
 				fs.clone(),
 				entry.absolute_path.as_ref().to_path_buf(),
 				entry.depth,
 				config.follow,
-			);
+			)
+			.with_walker_type(entry.file_type);
 			let mut current_dir = current_dir.borrow_mut();
 			let mut ret_value = ret.get();
 			let (should_quit, should_skip_current_dir) = apply_find_entry(
@@ -4999,13 +5026,18 @@ impl Utility for Find {
 			None => raw,
 		};
 		let deps = StandardDependencies::new(host);
-		match do_find(&args, &deps, host) {
+		let code = match do_find(&args, &deps, host) {
 			Ok(code) => code,
 			Err(error) => {
+				let _ = deps.get_output().borrow_mut().flush();
 				let _ = writeln!(host.stderr, "Error: {error}");
 				1
 			},
-		}
+		};
+		// Like the per-entry writes before it, a failed stdout flush is not
+		// reported.
+		let _ = deps.get_output().borrow_mut().flush();
+		code
 	}
 }
 

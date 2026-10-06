@@ -2,6 +2,26 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `Agent.setOnModelCallSystemPrompt`, called with the exact system prompt each model call is built from ([#14338](https://github.com/can1357/oh-my-pi/pull/14338) by [@will-bogusz](https://github.com/will-bogusz))
+
+### Changed
+
+- `SessionInitEntry.systemPrompt` holds the system prompt blocks as sent; session files written earlier keep one joined string ([#14338](https://github.com/can1357/oh-my-pi/pull/14338) by [@will-bogusz](https://github.com/will-bogusz))
+- Image token estimates now use the catalog's `imageTokens()` formula with its OpenAI Responses wire rule; values are unchanged ([#14286](https://github.com/can1357/oh-my-pi/pull/14286) by [@will-bogusz](https://github.com/will-bogusz)).
+
+### Fixed
+
+- Fixed the context count and auto-compaction trigger pricing every snapcompact archive frame at Opus's high-res rate, which overcounted Codex and Gemini sessions and could re-trigger compaction right after compacting ([#14291](https://github.com/can1357/oh-my-pi/pull/14291) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed native (OpenAI) compaction being refused as over the context window in sessions with many screenshots. Images were counted as about 1,200 tokens when deciding to compact but 12,000 when checking whether the compaction request fits; both checks now estimate images from their actual dimensions, and a request is no longer refused when only the image estimate pushes it over the window ([#14260](https://github.com/can1357/oh-my-pi/pull/14260) by [@H4vC](https://github.com/H4vC)).
+- Fixed OpenAI and Codex Remote Compaction V2 dropping your recent messages instead of keeping them next to the compaction summary ([#14247](https://github.com/can1357/oh-my-pi/pull/14247) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed the failed V2 remote compaction warning claiming a V1 fallback on Codex, where V1 does not run ([#14245](https://github.com/can1357/oh-my-pi/pull/14245) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed Anthropic native compaction being rejected with `Invalid signature in thinking block` (or silently dropping the summarized thinking) on models with preserved thinking ([#14251](https://github.com/can1357/oh-my-pi/pull/14251) by [@will-bogusz](https://github.com/will-bogusz))
+### Breaking Changes
+
+- `Agent.withdrawUndeliveredQueuedMessages()` replaces `withdrawLiveSteering()` and returns `{ steering, followUp }`: it also takes back queued input already dequeued for the next model call, which the aborted run then neither records nor reports in `agent_end` ([#14179](https://github.com/can1357/oh-my-pi/pull/14179) by [@andrebrait](https://github.com/andrebrait))
+
 ## [18.6.1] - 2026-10-04
 
 ### Fixed

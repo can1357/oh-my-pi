@@ -175,6 +175,11 @@ export interface BuildSessionContextOptions {
 	 * hides the call the agent is still waiting on.
 	 */
 	keepDanglingToolCalls?: boolean;
+	/**
+	 * Tool calls the live agent loop is still executing. They count as paired, so a
+	 * mid-turn rebuild keeps the in-flight assistant turn; the loop appends their results.
+	 */
+	inFlightToolCallIds?: ReadonlySet<string>;
 	/** Price and resolve persisted snapcompact frame payloads on demand. */
 	resolveFrameData?: (data: string) => snapcompact.LazyFrameData | undefined;
 }
@@ -501,8 +506,17 @@ export function buildSessionContext(
 				(firstKeptIdx >= 0 && firstKeptIdx < compactionIdx ? path[firstKeptIdx] : undefined) ??
 				(snapshotIdx >= 0 && snapshotIdx < compactionIdx - 1 ? path[snapshotIdx + 1] : undefined) ??
 				path[compactionIdx + 1];
-			const retainedAt = firstRetained ? new Date(firstRetained.timestamp).getTime() : NaN;
-			if (Number.isFinite(retainedAt)) historyRewriteAt = retainedAt - 1;
+			// The message's own time, not the entry's: an assistant message is
+			// stamped when its stream starts and saved after it ends, so a marker
+			// derived from the entry would postdate that turn and strip its thinking.
+			// Summaries without `exactTail` keep the entry time: thinking created
+			// after them was signed against requests that stripped that turn's.
+			if (firstRetained?.type === "message" && anthropicPayload.exactTail) {
+				historyRewriteAt = firstRetained.message.timestamp - 1;
+			} else if (firstRetained) {
+				const retainedAt = new Date(firstRetained.timestamp).getTime();
+				if (Number.isFinite(retainedAt)) historyRewriteAt = retainedAt - 1;
+			}
 		}
 
 		// Re-attach any archived snapcompact frames so the model can keep
@@ -679,7 +693,7 @@ export function buildSessionContext(
 	// a pending block instead of vanishing from the chat.)
 	const keepDangling = options?.transcript === true && options.keepDanglingToolCalls === true;
 	if (!keepDangling) {
-		const pairedToolResultIds = new Set<string>();
+		const pairedToolResultIds = new Set<string>(options?.inFlightToolCallIds);
 		for (const message of messages) {
 			if (message.role === "toolResult") pairedToolResultIds.add(message.toolCallId);
 		}

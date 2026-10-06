@@ -8,9 +8,11 @@ use x11rb::{
 	rust_connection::RustConnection,
 };
 use xkeysym::Keysym;
+use xutf::graphemes_str;
 
 use crate::desktop::{
 	backend::Modifiers,
+	control,
 	error::{CoreResult, DesktopError},
 	keys::KeyName,
 };
@@ -135,7 +137,8 @@ impl Keymap {
 	/// Fails before planning anything when a character has no keycode.
 	pub(super) fn plan_text(&self, text: &str) -> CoreResult<Vec<KeyStep>> {
 		let mut steps = Vec::with_capacity(text.len() * 2);
-		for ch in text.chars() {
+		for ch in graphemes_str(text).flat_map(str::chars) {
+			control::check()?;
 			let (keycode, needs_shift) = self.resolve(KeyName::Char(ch))?;
 			let shift = if needs_shift {
 				Some(self.shift_keycode()?)
@@ -156,10 +159,11 @@ impl Keymap {
 
 	/// Keys pressed in order and released in reverse, with Shift added once
 	/// ahead of the first shifted glyph unless the chord already holds it.
-	pub(super) fn plan_chord(&self, keys: &[KeyName]) -> CoreResult<Vec<KeyStep>> {
+	pub(super) fn held_keycodes(&self, keys: &[KeyName]) -> CoreResult<Vec<u8>> {
 		let shift_requested = keys.contains(&KeyName::Shift);
 		let mut held: Vec<u8> = Vec::with_capacity(keys.len() + 1);
 		for &key in keys {
+			control::check()?;
 			let (keycode, needs_shift) = self.resolve(key)?;
 			if needs_shift && !shift_requested {
 				let shift = self.shift_keycode()?;
@@ -171,6 +175,11 @@ impl Keymap {
 				held.push(keycode);
 			}
 		}
+		Ok(held)
+	}
+
+	pub(super) fn plan_chord(&self, keys: &[KeyName]) -> CoreResult<Vec<KeyStep>> {
+		let held = self.held_keycodes(keys)?;
 		Ok(held
 			.iter()
 			.map(|&keycode| KeyStep { keycode, press: true })
@@ -217,13 +226,18 @@ pub(super) fn run_steps(
 	for &step in steps {
 		// An emitter can fail after the press was queued (e.g. SYN_REPORT
 		// failed after EV_KEY). Include the attempted press in cleanup.
-		if step.press && !held.contains(&step.keycode) {
-			held.push(step.keycode);
-		}
-		if let Err(error) = emit(step) {
-			for &keycode in held.iter().rev() {
-				let _ = emit(KeyStep { keycode, press: false });
+		let result = control::check().and_then(|()| {
+			if step.press && !held.contains(&step.keycode) {
+				held.push(step.keycode);
 			}
+			emit(step)
+		});
+		if let Err(error) = result {
+			control::cleanup(|| {
+				for &keycode in held.iter().rev() {
+					let _ = emit(KeyStep { keycode, press: false });
+				}
+			});
 			return Err(error);
 		}
 		if !step.press {
@@ -231,6 +245,56 @@ pub(super) fn run_steps(
 		}
 	}
 	Ok(())
+}
+
+pub(super) fn run_steps_with_hold(
+	steps: &[KeyStep],
+	duration: std::time::Duration,
+	mut emit: impl FnMut(KeyStep) -> CoreResult<()>,
+) -> CoreResult<()> {
+	let mut waiting = !duration.is_zero();
+	run_steps(steps, |step| {
+		if !step.press && waiting {
+			waiting = false;
+			// run_steps may call this emitter directly during cancellation
+			// cleanup, before the first ordinary release reached us.
+			if !control::is_cleaning_up() {
+				control::wait(duration)?;
+			}
+		}
+		emit(step)
+	})
+}
+
+/// Unlike run_steps, this owns the complete bounded hold: no pressed state can
+/// escape to a subsequent operation, even when the body or one release fails.
+pub(super) fn with_held_codes(
+	codes: &[u8],
+	mut emit: impl FnMut(KeyStep) -> CoreResult<()>,
+	body: impl FnOnce() -> CoreResult<()>,
+) -> CoreResult<()> {
+	let mut held = 0;
+	let mut result = (|| {
+		for &keycode in codes {
+			control::check()?;
+			held += 1;
+			emit(KeyStep { keycode, press: true })?;
+		}
+		body()
+	})();
+	control::cleanup(|| {
+		for &keycode in codes[..held].iter().rev() {
+			if let Err(release) = emit(KeyStep { keycode, press: false }) {
+				if let Err(error) = &mut result {
+					error.message.push_str("; key release also failed: ");
+					error.message.push_str(&release.message);
+				} else {
+					result = Err(release);
+				}
+			}
+		}
+	});
+	result
 }
 
 fn keymap_failed(error: impl std::fmt::Display) -> DesktopError {
@@ -330,6 +394,90 @@ mod tests {
 	}
 
 	#[test]
+	fn cancellation_before_first_release_never_waits_out_the_hold_in_cleanup() {
+		let source = control::CancellationSource::default();
+		let token = source.token();
+		let mut events = Vec::new();
+		let result = control::with_token_for_test(&token, || {
+			run_steps_with_hold(
+				&[press(CTRL), press(A), release(A), release(CTRL)],
+				std::time::Duration::from_secs(100),
+				|step| {
+					events.push(step);
+					if step == press(A) {
+						source.cancel();
+					}
+					Ok(())
+				},
+			)
+		});
+		assert!(result.is_err());
+		assert_eq!(events, vec![press(CTRL), press(A), release(A), release(CTRL)]);
+	}
+
+	#[test]
+	fn cancelled_hold_releases_all_pressed_keys_in_reverse() {
+		let source = control::CancellationSource::default();
+		let token = source.token();
+		let mut events = Vec::new();
+		let result = control::with_token_for_test(&token, || {
+			with_held_codes(
+				&[CTRL, A],
+				|step| {
+					events.push(step);
+					Ok(())
+				},
+				|| {
+					source.cancel();
+					control::wait(std::time::Duration::from_secs(100))
+				},
+			)
+		});
+		assert!(result.is_err());
+		assert_eq!(events, vec![press(CTRL), press(A), release(A), release(CTRL)]);
+		assert!(token.check().is_err());
+	}
+
+	#[test]
+	fn partially_delivered_press_and_failed_release_do_not_strand_earlier_keys() {
+		let mut events = Vec::new();
+		let result = with_held_codes(
+			&[CTRL, A, ONE],
+			|step| {
+				events.push(step);
+				if step.keycode == A {
+					Err(DesktopError::input_failed("partial transport failure"))
+				} else {
+					Ok(())
+				}
+			},
+			|| panic!("failed press cannot execute the hold body"),
+		);
+		assert!(
+			result
+				.unwrap_err()
+				.message
+				.contains("key release also failed")
+		);
+		assert_eq!(events, vec![press(CTRL), press(A), release(A), release(CTRL)]);
+	}
+
+	#[test]
+	fn successful_hold_releases_before_returning() {
+		let mut events = Vec::new();
+		with_held_codes(
+			&[CTRL, A],
+			|step| {
+				events.push(step);
+				Ok(())
+			},
+			|| Ok(()),
+		)
+		.unwrap();
+		assert_eq!(events, vec![press(CTRL), press(A), release(A), release(CTRL)]);
+	}
+
+	#[test]
 	fn text_wraps_shifted_glyphs_in_shift() {
 		let steps = keymap().plan_text("aA!\n").unwrap();
 		assert_eq!(steps, vec![
@@ -384,6 +532,51 @@ mod tests {
 		});
 		assert!(result.is_err());
 		assert_eq!(emitted, vec![press(CTRL), press(A), release(A), release(CTRL)]);
+	}
+
+	#[test]
+	fn cancellation_releases_held_keys_and_does_not_poison_later_input() {
+		let source = control::CancellationSource::default();
+		let token = source.token();
+		let mut emitted = Vec::new();
+		let result = control::with_token_for_test(&token, || {
+			run_steps(&[press(CTRL), press(A), release(A), release(CTRL)], |step| {
+				control::check()?;
+				emitted.push(step);
+				if step == press(A) {
+					source.cancel();
+				}
+				Ok(())
+			})
+		});
+		assert!(result.is_err());
+		assert_eq!(emitted, vec![press(CTRL), press(A), release(A), release(CTRL)]);
+		let later = control::CancellationSource::default().token();
+		control::with_token_for_test(&later, || {
+			run_steps(&[press(A), release(A)], |step| {
+				control::check()?;
+				emitted.push(step);
+				Ok(())
+			})
+		})
+		.unwrap();
+		assert_eq!(&emitted[4..], &[press(A), release(A)]);
+	}
+
+	#[test]
+	fn already_cancelled_delivery_does_not_release_unpressed_keys() {
+		let source = control::CancellationSource::default();
+		let token = source.token();
+		source.cancel();
+		let mut emitted = Vec::new();
+		let result = control::with_token_for_test(&token, || {
+			run_steps(&[press(CTRL)], |step| {
+				emitted.push(step);
+				Ok(())
+			})
+		});
+		assert!(result.is_err());
+		assert!(emitted.is_empty());
 	}
 
 	#[test]

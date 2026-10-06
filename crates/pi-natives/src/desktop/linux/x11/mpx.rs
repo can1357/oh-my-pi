@@ -18,7 +18,6 @@
 use std::{
 	fs, io,
 	sync::atomic::{AtomicU16, Ordering},
-	thread,
 	time::{Duration, Instant},
 };
 
@@ -46,6 +45,7 @@ use super::{
 };
 use crate::desktop::{
 	backend::{Modifiers, MouseButton},
+	control,
 	error::{CoreResult, DesktopError},
 	keys::KeyName,
 };
@@ -201,19 +201,19 @@ impl Mpx {
 	) -> CoreResult<()> {
 		let detail = button_detail(button);
 		let count = count.max(1);
-		self.gesture(target, modifiers, Some(detail), true, |this| {
+		self.gesture(target, modifiers, &[], Some(detail), true, |this| {
 			this.warp(x, y)?;
 			this.drain();
 			let mut confirmed = true;
 			for index in 0..count {
 				this.check_target(target, x, y)?;
 				this.pointer.button(detail, true)?;
-				confirmed &= this.wait_raw(this.pointer_slave, Raw::ButtonPress(detail), 1);
-				thread::sleep(PRESS_HOLD);
+				confirmed &= this.wait_raw(this.pointer_slave, Raw::ButtonPress(detail), 1)?;
+				control::wait(PRESS_HOLD)?;
 				this.pointer.button(detail, false)?;
-				confirmed &= this.wait_raw(this.pointer_slave, Raw::ButtonRelease(detail), 1);
+				confirmed &= this.wait_raw(this.pointer_slave, Raw::ButtonRelease(detail), 1)?;
 				if index + 1 < count {
-					thread::sleep(CLICK_GAP);
+					control::wait(CLICK_GAP)?;
 				}
 			}
 			Ok(confirmed)
@@ -229,31 +229,32 @@ impl Mpx {
 		path: &[(i16, i16)],
 		button: MouseButton,
 		modifiers: Modifiers,
+		keys: &[KeyName],
 	) -> CoreResult<()> {
 		let (Some(&start), Some(&end)) = (path.first(), path.last()) else {
 			return Err(DesktopError::input_failed("drag path is empty"));
 		};
 		let steps = relative_steps(path);
 		let detail = button_detail(button);
-		self.gesture(target, modifiers, Some(detail), true, |this| {
+		self.gesture(target, modifiers, keys, Some(detail), true, |this| {
 			this.warp(start.0, start.1)?;
 			this.drain();
 			this.check_target(target, start.0, start.1)?;
 			this.pointer.button(detail, true)?;
-			let mut confirmed = this.wait_raw(this.pointer_slave, Raw::ButtonPress(detail), 1);
-			thread::sleep(DRAG_ARM);
+			let mut confirmed = this.wait_raw(this.pointer_slave, Raw::ButtonPress(detail), 1)?;
+			control::wait(DRAG_ARM)?;
 			this.drain();
 			for &(dx, dy) in &steps {
 				this.pointer.motion(dx, dy)?;
-				thread::sleep(DRAG_STEP_DELAY);
+				control::wait(DRAG_STEP_DELAY)?;
 			}
 			// The end warp must not overtake a relative step still in flight.
-			confirmed &= this.wait_raw(this.pointer_slave, Raw::Motion, steps.len());
+			confirmed &= this.wait_raw(this.pointer_slave, Raw::Motion, steps.len())?;
 			this.warp(end.0, end.1)?;
-			thread::sleep(DRAG_RELEASE_SETTLE);
+			control::wait(DRAG_RELEASE_SETTLE)?;
 			this.drain();
 			this.pointer.button(detail, false)?;
-			confirmed &= this.wait_raw(this.pointer_slave, Raw::ButtonRelease(detail), 1);
+			confirmed &= this.wait_raw(this.pointer_slave, Raw::ButtonRelease(detail), 1)?;
 			Ok(confirmed)
 		})
 	}
@@ -269,7 +270,7 @@ impl Mpx {
 		dy: f64,
 	) -> CoreResult<()> {
 		let detents = wheel_detents(dx, dy);
-		self.gesture(target, Modifiers::default(), None, true, |this| {
+		self.gesture(target, Modifiers::default(), &[], None, true, |this| {
 			this.warp(x, y)?;
 			let Some((&(horizontal, value), earlier)) = detents.split_last() else {
 				return Ok(true);
@@ -277,12 +278,12 @@ impl Mpx {
 			for &(horizontal, value) in earlier {
 				this.check_target(target, x, y)?;
 				this.pointer.wheel(horizontal, value)?;
-				thread::sleep(SCROLL_DETENT_DELAY);
+				control::wait(SCROLL_DETENT_DELAY)?;
 			}
 			this.drain();
 			this.check_target(target, x, y)?;
 			this.pointer.wheel(horizontal, value)?;
-			Ok(this.wait_raw(this.pointer_slave, Raw::Wheel, 1))
+			this.wait_raw(this.pointer_slave, Raw::Wheel, 1)
 		})
 	}
 
@@ -292,13 +293,48 @@ impl Mpx {
 	/// the point.
 	pub(super) fn hover(&mut self, target: Window, (x, y): (i16, i16)) -> CoreResult<()> {
 		let step: i16 = if x > 0 { 1 } else { -1 };
-		self.gesture(target, Modifiers::default(), None, false, |this| {
+		self.gesture(target, Modifiers::default(), &[], None, false, |this| {
 			this.check_target(target, x - step, y)?;
 			this.warp(x - step, y)?;
 			this.drain();
 			this.pointer.motion(i32::from(step), 0)?;
-			let confirmed = this.wait_raw(this.pointer_slave, Raw::Motion, 1);
+			let confirmed = this.wait_raw(this.pointer_slave, Raw::Motion, 1)?;
 			this.warp(x, y)?;
+			Ok(confirmed)
+		})
+	}
+
+	pub(super) fn hold_keys(
+		&mut self,
+		target: Window,
+		keys: &[KeyName],
+		duration: Duration,
+	) -> CoreResult<()> {
+		self.gesture(target, Modifiers::default(), keys, None, false, |_| {
+			control::wait(duration)?;
+			Ok(true)
+		})
+	}
+
+	pub(super) fn hold_mouse(
+		&mut self,
+		target: Window,
+		(x, y): (i16, i16),
+		button: MouseButton,
+		keys: &[KeyName],
+		duration: Duration,
+	) -> CoreResult<()> {
+		let detail = button_detail(button);
+		self.gesture(target, Modifiers::default(), keys, Some(detail), true, |this| {
+			this.warp(x, y)?;
+			this.drain();
+			this.check_target(target, x, y)?;
+			this.pointer.button(detail, true)?;
+			let mut confirmed = this.wait_raw(this.pointer_slave, Raw::ButtonPress(detail), 1)?;
+			control::wait(duration)?;
+			this.drain();
+			this.pointer.button(detail, false)?;
+			confirmed &= this.wait_raw(this.pointer_slave, Raw::ButtonRelease(detail), 1)?;
 			Ok(confirmed)
 		})
 	}
@@ -321,7 +357,7 @@ impl Mpx {
 			self.uncertain = true;
 			return Err(error);
 		}
-		thread::sleep(KEY_SETTLE);
+		control::wait(KEY_SETTLE)?;
 		Ok(())
 	}
 
@@ -335,16 +371,25 @@ impl Mpx {
 		&mut self,
 		target: Window,
 		modifiers: Modifiers,
+		keys: &[KeyName],
 		button: Option<u8>,
 		park_after: bool,
 		body: impl FnOnce(&mut Self) -> CoreResult<bool>,
 	) -> CoreResult<()> {
 		self.check_ready()?;
 		self.thaw();
-		let held = self.hold_modifiers(target, modifiers)?;
+		let held = self.press_keys(target, modifiers, keys)?;
 		let result = body(self);
-		let released_button = button.map_or(Ok(()), |button| self.pointer.button(button, false));
-		let released_keys = self.release_keys(&held);
+		let cancelled = control::check().is_err();
+		let (released_button, released_keys) = control::cleanup(|| {
+			let released_button = button.map_or(Ok(()), |button| self.pointer.button(button, false));
+			let released_keys = if cancelled {
+				self.release_keys_unconfirmed(&held)
+			} else {
+				self.release_keys(&held)
+			};
+			(released_button, released_keys)
+		});
 		let result =
 			result.and_then(|confirmed| released_button.map(|()| confirmed && released_keys));
 		self.uncertain = !matches!(result, Ok(true));
@@ -363,11 +408,23 @@ impl Mpx {
 		}
 	}
 
-	fn hold_modifiers(&mut self, target: Window, modifiers: Modifiers) -> CoreResult<Vec<u8>> {
-		if !(modifiers.ctrl || modifiers.alt || modifiers.shift || modifiers.meta) {
+	fn press_keys(
+		&mut self,
+		target: Window,
+		modifiers: Modifiers,
+		keys: &[KeyName],
+	) -> CoreResult<Vec<u8>> {
+		if keys.is_empty() && !(modifiers.ctrl || modifiers.alt || modifiers.shift || modifiers.meta)
+		{
 			return Ok(Vec::new());
 		}
-		let keycodes = self.keyboard_keymap()?.modifier_keycodes(modifiers)?;
+		let keymap = self.keyboard_keymap()?;
+		let mut keycodes = keymap.held_keycodes(keys)?;
+		for code in keymap.modifier_keycodes(modifiers)? {
+			if !keycodes.contains(&code) {
+				keycodes.push(code);
+			}
+		}
 		self.focus(target)?;
 		let presses: Vec<KeyStep> = keycodes
 			.iter()
@@ -377,10 +434,30 @@ impl Mpx {
 		// press is only sent once the server has the modifiers down.
 		if let Err(error) = self.emit_keys(&presses) {
 			self.uncertain = true;
-			self.release_keys(&keycodes);
+			let cancelled = control::check().is_err();
+			control::cleanup(|| {
+				if cancelled {
+					self.release_keys_unconfirmed(&keycodes)
+				} else {
+					self.release_keys(&keycodes)
+				}
+			});
 			return Err(error);
 		}
 		Ok(keycodes)
+	}
+
+	/// Cancellation retires the devices after cleanup, so never wait for raw
+	/// events for keys that run_steps may already have released.
+	fn release_keys_unconfirmed(&mut self, keycodes: &[u8]) -> bool {
+		let Some(keyboard) = self.keyboard.as_mut() else {
+			return keycodes.is_empty();
+		};
+		let mut released = true;
+		for &keycode in keycodes.iter().rev() {
+			released &= keyboard.device.key(keycode, false).is_ok();
+		}
+		released
 	}
 
 	fn release_keys(&mut self, keycodes: &[u8]) -> bool {
@@ -406,7 +483,7 @@ impl Mpx {
 		let slave = keyboard.slave;
 		keymap::run_steps(steps, |step| {
 			keyboard.device.key(step.keycode, step.press)?;
-			thread::sleep(KEY_DELAY);
+			control::wait(KEY_DELAY)?;
 			Ok(())
 		})?;
 		let Some(last) = steps.last() else {
@@ -417,7 +494,7 @@ impl Mpx {
 		} else {
 			Raw::KeyRelease(last.keycode)
 		};
-		if self.wait_raw(slave, raw, 1) {
+		if self.wait_raw(slave, raw, 1)? {
 			Ok(())
 		} else {
 			Err(DesktopError::input_failed(format!(
@@ -432,6 +509,7 @@ impl Mpx {
 	/// untouched. Retried once: a freshly mapped toplevel can miss the first.
 	fn focus(&self, window: Window) -> CoreResult<()> {
 		for attempt in 0..2 {
+			control::check()?;
 			if let Ok(cookie) =
 				self
 					.conn
@@ -449,7 +527,7 @@ impl Mpx {
 				return Ok(());
 			}
 			if attempt == 0 {
-				thread::sleep(Duration::from_millis(30));
+				control::wait(Duration::from_millis(30))?;
 			}
 		}
 		Err(DesktopError::background_unavailable(format!(
@@ -463,6 +541,7 @@ impl Mpx {
 	}
 
 	fn check_ready(&self) -> CoreResult<()> {
+		control::check()?;
 		if self.uncertain {
 			return Err(DesktopError::background_unavailable(
 				"the virtual input device could not confirm isolated delivery of a prior action and \
@@ -473,6 +552,7 @@ impl Mpx {
 	}
 
 	fn check_target(&self, target: Window, x: i16, y: i16) -> CoreResult<()> {
+		control::check()?;
 		Wm { conn: &self.conn, root: self.root, atoms: &self.atoms }
 			.check_pointer_target(target, x, y)
 	}
@@ -506,22 +586,22 @@ impl Mpx {
 		// the master switches to the slave's keymap; push a symbol-less key
 		// through the whole pipeline before real text.
 		self.drain();
-		if let Err(error) = device.key(WARM_UP_KEYCODE, true) {
-			let _ = device.key(WARM_UP_KEYCODE, false);
-			return Err(error);
-		}
-		thread::sleep(KEY_DELAY);
-		device.key(WARM_UP_KEYCODE, false)?;
-		if !self.wait_raw(slave, Raw::KeyRelease(WARM_UP_KEYCODE), 1) {
+		let pressed = device
+			.key(WARM_UP_KEYCODE, true)
+			.and_then(|()| control::wait(KEY_DELAY));
+		let released = control::cleanup(|| device.key(WARM_UP_KEYCODE, false));
+		pressed.and(released)?;
+		if !self.wait_raw(slave, Raw::KeyRelease(WARM_UP_KEYCODE), 1)? {
 			return Err(DesktopError::input_failed("virtual keyboard warm-up was not confirmed"));
 		}
-		thread::sleep(WARM_UP_SETTLE);
+		control::wait(WARM_UP_SETTLE)?;
 		Ok(VirtualKeyboard { device, slave })
 	}
 
 	/// Moves only the virtual master; synced so a following uinput event
 	/// (a separate kernel pipeline) cannot overtake it.
 	fn warp(&self, x: i16, y: i16) -> CoreResult<()> {
+		control::check()?;
 		self
 			.conn
 			.xinput_xi_warp_pointer(
@@ -565,7 +645,7 @@ impl Mpx {
 
 	/// Waits until the server has reported `count` raw events of `kind` from
 	/// `device`, i.e. processed the matching uinput events.
-	fn wait_raw(&self, device: u16, kind: Raw, count: usize) -> bool {
+	fn wait_raw(&self, device: u16, kind: Raw, count: usize) -> CoreResult<bool> {
 		let timeout = match kind {
 			Raw::KeyPress(_) | Raw::KeyRelease(_) => KEY_CONFIRM_TIMEOUT,
 			_ => POINTER_CONFIRM_TIMEOUT,
@@ -573,8 +653,9 @@ impl Mpx {
 		let deadline = Instant::now() + timeout;
 		let mut seen = 0;
 		while seen < count {
+			control::check()?;
 			if Instant::now() >= deadline {
-				return false;
+				return Ok(false);
 			}
 			match self.conn.poll_for_event() {
 				Ok(Some(event)) => {
@@ -584,14 +665,14 @@ impl Mpx {
 				},
 				Ok(None) => {
 					if Instant::now() >= deadline {
-						return false;
+						return Ok(false);
 					}
-					thread::sleep(Duration::from_millis(2));
+					control::wait(Duration::from_millis(2))?;
 				},
-				Err(_) => return false,
+				Err(_) => return Ok(false),
 			}
 		}
-		true
+		Ok(true)
 	}
 }
 
@@ -728,6 +809,7 @@ fn find_masters(conn: &RustConnection, name: &str) -> CoreResult<(u16, u16)> {
 fn wait_for_slave(conn: &RustConnection, name: &str, type_: DeviceType) -> CoreResult<u16> {
 	let deadline = Instant::now() + SLAVE_BIND_TIMEOUT;
 	loop {
+		control::check()?;
 		if let Some(id) = query_devices(conn)?
 			.iter()
 			.find(|info| {
@@ -744,7 +826,7 @@ fn wait_for_slave(conn: &RustConnection, name: &str, type_: DeviceType) -> CoreR
 				 this server)"
 			)));
 		}
-		thread::sleep(Duration::from_millis(50));
+		control::wait(Duration::from_millis(50))?;
 	}
 }
 

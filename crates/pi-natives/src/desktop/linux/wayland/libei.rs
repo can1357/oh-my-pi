@@ -1,6 +1,5 @@
 use std::{
 	os::{fd::AsFd, unix::net::UnixStream},
-	thread,
 	time::Duration,
 };
 
@@ -14,10 +13,12 @@ use reis::{
 	event::{Device, DeviceCapability, EiEvent, Keymap},
 	tokio::EiConvertEventStream,
 };
+use xutf::graphemes_str;
 
 use super::xkb::{KeyStroke, KeyboardLayout};
 use crate::desktop::{
 	backend::{Modifiers, MouseButton, PointerEvent},
+	control,
 	error::{CoreResult, DesktopError},
 	keys::KeyName,
 };
@@ -96,16 +97,34 @@ fn close_session(runtime: &tokio::runtime::Runtime, session: &RemoteDesktopSessi
 	});
 }
 
+/// Waits for the original request or a generation-revocation wake. Cancellation
+/// drops that request, never polls on a timer or starts it again.
+pub(super) async fn cancellable<T>(future: impl Future<Output = T>) -> CoreResult<T> {
+	control::check()?;
+	let Some(token) = control::current_token() else {
+		return Ok(future.await);
+	};
+	let future = std::pin::pin!(future);
+	let cancelled = std::pin::pin!(token.cancelled());
+	match futures::future::select(cancelled, future).await {
+		futures::future::Either::Left((error, _)) => Err(error),
+		futures::future::Either::Right((result, _)) => {
+			token.check()?;
+			Ok(result)
+		},
+	}
+}
+
 fn pace_drag(
 	path: &[(f64, f64)],
 	mut send_motion: impl FnMut(f64, f64) -> CoreResult<()>,
 ) -> CoreResult<()> {
 	for &(x, y) in path.iter().skip(1) {
-		thread::sleep(DRAG_STEP_DELAY);
+		control::wait(DRAG_STEP_DELAY)?;
 		send_motion(x, y)?;
 	}
 	// Keep the final motion observable before the button release.
-	thread::sleep(DRAG_STEP_DELAY);
+	control::wait(DRAG_STEP_DELAY)?;
 	Ok(())
 }
 
@@ -115,6 +134,7 @@ impl Libei {
 	}
 
 	pub(super) fn new() -> CoreResult<Self> {
+		control::check()?;
 		let runtime = super::portal::portal_runtime()?;
 		let (context, portal_session, targets) = match ei::Context::connect_to_env() {
 			Ok(Some(context)) => (context, None, DiscoveryTargets::ALL),
@@ -135,7 +155,7 @@ impl Libei {
 			portal_session,
 		};
 		let (connection, mut events) = runtime
-			.block_on(async {
+			.block_on(cancellable(async {
 				tokio::time::timeout(
 					Duration::from_secs(5),
 					backend
@@ -143,7 +163,7 @@ impl Libei {
 						.handshake_tokio("omp-computer", ei::handshake::ContextType::Sender),
 				)
 				.await
-			})
+			}))?
 			.map_err(|_| DesktopError::input_failed("libei handshake timed out"))?
 			.map_err(|err| DesktopError::input_failed(format!("libei handshake: {err}")))?;
 		backend.connection = Some(connection);
@@ -162,57 +182,54 @@ impl Libei {
 	fn portal_context(
 		runtime: &'static tokio::runtime::Runtime,
 	) -> CoreResult<(ei::Context, PortalSession, DiscoveryTargets)> {
-		let (fd, session, targets) = runtime
-			.block_on(async {
-				let portal = RemoteDesktop::new()
+		let (fd, session, targets) = runtime.block_on(async {
+			let portal = cancellable(RemoteDesktop::new()).await?.map_err(|err| {
+				DesktopError::permission_denied(format!("RemoteDesktop portal unavailable: {err}"))
+			})?;
+			let session = cancellable(portal.create_session()).await?.map_err(|err| {
+				DesktopError::permission_denied(format!("RemoteDesktop CreateSession: {err}"))
+			})?;
+			let fd = cancellable(async {
+				portal
+					.select_devices(
+						&session,
+						DeviceType::Keyboard | DeviceType::Pointer,
+						None,
+						PersistMode::DoNot,
+					)
 					.await
-					.map_err(|err| format!("RemoteDesktop portal unavailable: {err}"))?;
-				let session = portal
-					.create_session()
+					.map_err(|err| format!("RemoteDesktop SelectDevices: {err}"))?;
+				let response = portal
+					.start(&session, None)
 					.await
-					.map_err(|err| format!("RemoteDesktop CreateSession: {err}"))?;
-				let fd = async {
-					portal
-						.select_devices(
-							&session,
-							DeviceType::Keyboard | DeviceType::Pointer,
-							None,
-							PersistMode::DoNot,
-						)
-						.await
-						.map_err(|err| format!("RemoteDesktop SelectDevices: {err}"))?;
-					let response = portal
-						.start(&session, None)
-						.await
-						.map_err(|err| format!("RemoteDesktop Start: {err}"))?
-						.response()
-						.map_err(|err| format!("RemoteDesktop permission: {err}"))?;
-					let devices = response.devices();
-					let targets = DiscoveryTargets {
-						pointer:  devices.contains(DeviceType::Pointer),
-						keyboard: devices.contains(DeviceType::Keyboard),
-					};
-					portal
-						.connect_to_eis(&session)
-						.await
-						.map(|fd| (fd, targets))
-						.map_err(|err| format!("RemoteDesktop ConnectToEIS: {err}"))
-				}
-				.await;
-				match fd {
-					Ok((fd, targets)) => Ok((fd, session, targets)),
-					Err(err) => {
-						// Already inside `runtime.block_on`, so the `close_session`
-						// helper (itself a `block_on`) would abort with a
-						// nested-runtime panic; bound this consent-denied close
-						// inline instead.
-						let _ =
-							tokio::time::timeout(crate::desktop::CLOSE_TIMEOUT, session.close()).await;
-						Err(err)
-					},
-				}
+					.map_err(|err| format!("RemoteDesktop Start: {err}"))?
+					.response()
+					.map_err(|err| format!("RemoteDesktop permission: {err}"))?;
+				let devices = response.devices();
+				let targets = DiscoveryTargets {
+					pointer:  devices.contains(DeviceType::Pointer),
+					keyboard: devices.contains(DeviceType::Keyboard),
+				};
+				portal
+					.connect_to_eis(&session)
+					.await
+					.map(|fd| (fd, targets))
+					.map_err(|err| format!("RemoteDesktop ConnectToEIS: {err}"))
 			})
-			.map_err(DesktopError::permission_denied)?;
+			.await
+			.and_then(|result| result.map_err(DesktopError::permission_denied));
+			match fd {
+				Ok((fd, targets)) => Ok((fd, session, targets)),
+				Err(err) => {
+					// Already inside `runtime.block_on`, so the `close_session`
+					// helper (itself a `block_on`) would abort with a
+					// nested-runtime panic; bound this consent-denied close
+					// inline instead.
+					let _ = tokio::time::timeout(crate::desktop::CLOSE_TIMEOUT, session.close()).await;
+					Err(err)
+				},
+			}
+		})?;
 		let context = match ei::Context::new(UnixStream::from(fd)) {
 			Ok(context) => context,
 			Err(err) => {
@@ -236,14 +253,17 @@ impl Libei {
 			let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
 			let mut drain_deadline = None;
 			loop {
+				control::check()?;
 				let until = drain_deadline.unwrap_or(deadline).min(deadline);
-				let event = match tokio::time::timeout_at(until, events.next()).await {
+				let tick = (tokio::time::Instant::now() + Duration::from_millis(10)).min(until);
+				let event = match tokio::time::timeout_at(tick, events.next()).await {
 					Ok(Some(event)) => event.map_err(|err| {
 						DesktopError::input_failed(format!("libei device discovery: {err}"))
 					})?,
 					Ok(None) => {
 						return Err(DesktopError::input_failed("libei disconnected during discovery"));
 					},
+					Err(_) if tokio::time::Instant::now() < until => continue,
 					Err(_) => break,
 				};
 				self.handle_event(event)?;
@@ -356,6 +376,7 @@ impl Libei {
 		let runtime = self.runtime;
 		let result = runtime.block_on(async {
 			for _ in 0..256 {
+				control::check()?;
 				match tokio::time::timeout(Duration::from_millis(1), events.next()).await {
 					Ok(Some(Ok(event))) => self.handle_event(event)?,
 					Ok(Some(Err(err))) => {
@@ -376,11 +397,7 @@ impl Libei {
 	}
 
 	fn flush(&self) -> CoreResult<()> {
-		self.context.flush().map_err(|err| {
-			DesktopError::input_failed(format!(
-				"libei transport failed: {err}; delivery may be partial, do not retry blindly"
-			))
-		})
+		flush_context(&self.context)
 	}
 
 	fn timestamp() -> CoreResult<u64> {
@@ -405,7 +422,8 @@ impl Libei {
 		pressed: bool,
 		serial: u32,
 		time: &mut u64,
-	) {
+	) -> CoreResult<()> {
+		control::check()?;
 		keyboard.key(
 			keycode,
 			if pressed {
@@ -416,6 +434,7 @@ impl Libei {
 		);
 		device.device.device().frame(serial, *time);
 		*time = time.saturating_add(1);
+		Ok(())
 	}
 
 	pub(super) fn pointer(&mut self, event: PointerEvent) -> CoreResult<()> {
@@ -433,6 +452,14 @@ impl Libei {
 					MouseButton::Middle => 0x112,
 				}),
 			),
+			PointerEvent::Hold { button, .. } => (
+				Modifiers::default(),
+				Some(match button {
+					MouseButton::Left => 0x110,
+					MouseButton::Right => 0x111,
+					MouseButton::Middle => 0x112,
+				}),
+			),
 			_ => (Modifiers::default(), None),
 		};
 		let scroll_units = match &event {
@@ -444,10 +471,10 @@ impl Libei {
 		if matches!(&event, PointerEvent::Drag { path, .. } if path.is_empty()) {
 			return Err(DesktopError::input_failed("libei drag path is empty"));
 		}
-		let device = self
+		let device_index = self
 			.devices
 			.iter()
-			.find(|device| {
+			.position(|device| {
 				device.resumed
 					&& device
 						.device
@@ -456,6 +483,7 @@ impl Libei {
 					&& (scroll_units.is_none() || device.device.has_capability(DeviceCapability::Scroll))
 					&& match &event {
 						PointerEvent::Click { x, y, .. }
+						| PointerEvent::Hold { x, y, .. }
 						| PointerEvent::Move { x, y }
 						| PointerEvent::Scroll { x, y, .. } => device_contains(&device.device, *x, *y),
 						PointerEvent::Drag { path, .. } => path
@@ -469,6 +497,35 @@ impl Libei {
 					 gesture point; no input was sent",
 				)
 			})?;
+		let extra_keys = match &event {
+			PointerEvent::Hold { keys, .. } | PointerEvent::Drag { keys, .. } => keys.as_slice(),
+			_ => &[],
+		};
+		let mut key_codes: Vec<u32> = modifier_keys(modifiers)
+			.into_iter()
+			.filter_map(|(enabled, code)| enabled.then_some(code))
+			.collect();
+		if !extra_keys.is_empty() {
+			let keyboard_index = self
+				.devices
+				.iter()
+				.position(|keyboard| {
+					keyboard.resumed
+						&& keyboard.device.seat() == self.devices[device_index].device.seat()
+						&& keyboard.device.has_capability(DeviceCapability::Keyboard)
+				})
+				.ok_or_else(|| {
+					DesktopError::permission_denied(
+						"no resumed libei keyboard on the pointer's seat can hold the gesture's keys",
+					)
+				})?;
+			for code in plan_keys(&mut self.devices[keyboard_index], extra_keys)? {
+				if !key_codes.contains(&code) {
+					key_codes.push(code);
+				}
+			}
+		}
+		let device = &self.devices[device_index];
 		let pointer = device
 			.device
 			.interface::<ei::PointerAbsolute>()
@@ -491,7 +548,7 @@ impl Libei {
 			} else {
 				None
 			};
-		let keyboard = if modifiers.ctrl || modifiers.alt || modifiers.shift || modifiers.meta {
+		let keyboard = if !key_codes.is_empty() {
 			let keyboard = self
 				.devices
 				.iter()
@@ -517,74 +574,105 @@ impl Libei {
 		};
 		let serial = self.serial();
 		let mut time = Self::timestamp()?;
-		if let Some((keyboard, interface)) = &keyboard {
-			for (enabled, code) in modifier_keys(modifiers) {
-				if enabled {
-					Self::send_key(keyboard, interface, code, true, serial, &mut time);
-				}
-			}
-		}
-		let move_to = |x: f64, y: f64, time: &mut u64| {
+		let mut held_modifiers = 0usize;
+		let mut button_held = false;
+		let move_to = |x: f64, y: f64, time: &mut u64| -> CoreResult<()> {
+			control::check()?;
 			pointer.motion_absolute(x as f32, y as f32);
 			device.device.device().frame(serial, *time);
 			*time = time.saturating_add(1);
+			self.flush()
 		};
-		let mut gesture_result = Ok(());
-		match event {
-			PointerEvent::Move { x, y } | PointerEvent::Scroll { x, y, .. } => {
-				move_to(x, y, &mut time);
-			},
-			PointerEvent::Click { x, y, count, .. } => {
-				move_to(x, y, &mut time);
-				if let (Some(code), Some(interface)) = (button, &button_interface) {
-					for _ in 0..count.max(1) {
+		let gesture_result = (|| {
+			if let Some((keyboard, interface)) = &keyboard {
+				for (index, &code) in key_codes.iter().enumerate() {
+					control::check()?;
+					held_modifiers = index + 1;
+					Self::send_key(keyboard, interface, code, true, serial, &mut time)?;
+				}
+				self.flush()?;
+			}
+			match event {
+				PointerEvent::Move { x, y } | PointerEvent::Scroll { x, y, .. } => {
+					move_to(x, y, &mut time)?;
+				},
+				PointerEvent::Click { x, y, count, .. } => {
+					move_to(x, y, &mut time)?;
+					if let (Some(code), Some(interface)) = (button, &button_interface) {
+						for _ in 0..count.max(1) {
+							control::check()?;
+							button_held = true;
+							interface.button(code, ei::button::ButtonState::Press);
+							device.device.device().frame(serial, time);
+							time = time.saturating_add(1);
+							self.flush()?;
+							control::check()?;
+							interface.button(code, ei::button::ButtonState::Released);
+							device.device.device().frame(serial, time);
+							time = time.saturating_add(1);
+							self.flush()?;
+							button_held = false;
+						}
+					}
+				},
+				PointerEvent::Hold { x, y, duration, .. } => {
+					move_to(x, y, &mut time)?;
+					if let (Some(code), Some(interface)) = (button, &button_interface) {
+						control::check()?;
+						button_held = true;
 						interface.button(code, ei::button::ButtonState::Press);
 						device.device.device().frame(serial, time);
 						time = time.saturating_add(1);
-						interface.button(code, ei::button::ButtonState::Released);
+						self.flush()?;
+						control::wait(duration)?;
+						time = Self::timestamp()?.max(time);
+					}
+				},
+				PointerEvent::Drag { path, .. } => {
+					move_to(path[0].0, path[0].1, &mut time)?;
+					if let (Some(code), Some(interface)) = (button, &button_interface) {
+						control::check()?;
+						button_held = true;
+						interface.button(code, ei::button::ButtonState::Press);
 						device.device.device().frame(serial, time);
 						time = time.saturating_add(1);
-					}
-				}
-			},
-			PointerEvent::Drag { path, .. } => {
-				move_to(path[0].0, path[0].1, &mut time);
-				if let (Some(code), Some(interface)) = (button, &button_interface) {
-					interface.button(code, ei::button::ButtonState::Press);
-					device.device.device().frame(serial, time);
-					time = time.saturating_add(1);
-					gesture_result = self.flush().and_then(|()| {
+						self.flush()?;
 						pace_drag(&path, |x, y| {
 							time = Self::timestamp()?.max(time);
-							move_to(x, y, &mut time);
-							self.flush()
-						})
-					});
-					// Release even when a motion or transport flush failed.
-					interface.button(code, ei::button::ButtonState::Released);
-					time = Self::timestamp().unwrap_or(time).max(time);
-					device.device.device().frame(serial, time);
-					time = time.saturating_add(1);
-				}
-			},
-		}
-		if let (Some((dx, dy)), Some(interface)) = (scroll_units, scroll_interface) {
-			interface.scroll_discrete(dx, dy);
-			device.device.device().frame(serial, time);
-			time = time.saturating_add(1);
-		}
-		if let Some((keyboard, interface)) = &keyboard {
-			for (enabled, code) in modifier_keys(modifiers).into_iter().rev() {
-				if enabled {
-					Self::send_key(keyboard, interface, code, false, serial, &mut time);
+							move_to(x, y, &mut time)
+						})?;
+					}
+				},
+			}
+			if let (Some((dx, dy)), Some(interface)) = (scroll_units, scroll_interface) {
+				control::check()?;
+				interface.scroll_discrete(dx, dy);
+				device.device.device().frame(serial, time);
+				time = time.saturating_add(1);
+			}
+			Ok(())
+		})();
+		let released = control::cleanup(|| {
+			if button_held && let (Some(code), Some(interface)) = (button, &button_interface) {
+				interface.button(code, ei::button::ButtonState::Released);
+				device.device.device().frame(serial, time);
+				time = time.saturating_add(1);
+			}
+			if let Some((keyboard, interface)) = &keyboard {
+				for &code in key_codes[..held_modifiers].iter().rev() {
+					let _ = Self::send_key(keyboard, interface, code, false, serial, &mut time);
 				}
 			}
-		}
-		let flush_result = self.flush();
-		gesture_result.and(flush_result)
+			self.flush()
+		});
+		gesture_result.and(released)
 	}
 
 	pub(super) fn key_chord(&mut self, keys: &[KeyName]) -> CoreResult<()> {
+		self.hold_keys(keys, Duration::ZERO)
+	}
+
+	pub(super) fn hold_keys(&mut self, keys: &[KeyName], duration: Duration) -> CoreResult<()> {
 		self.refresh_devices()?;
 		let device = self
 			.devices
@@ -593,22 +681,7 @@ impl Libei {
 			.ok_or_else(|| {
 				DesktopError::permission_denied("no resumed libei keyboard is available")
 			})?;
-		let mut codes = Vec::with_capacity(keys.len());
-		for &key in keys {
-			let stroke = match key {
-				KeyName::Char(character) => char_stroke(device.layout.as_mut(), character)?,
-				_ => KeyStroke { keycode: evdev_keycode(key)?, modifiers: Vec::new() },
-			};
-			for code in stroke
-				.modifiers
-				.into_iter()
-				.chain(std::iter::once(stroke.keycode))
-			{
-				if !codes.contains(&code) {
-					codes.push(code);
-				}
-			}
-		}
+		let codes = plan_keys(device, keys)?;
 		let interface = device
 			.device
 			.interface::<ei::Keyboard>()
@@ -618,13 +691,25 @@ impl Libei {
 			.as_ref()
 			.map_or(0, reis::event::Connection::serial);
 		let mut time = Self::timestamp()?;
-		for &code in &codes {
-			Self::send_key(device, &interface, code, true, serial, &mut time);
-		}
-		for &code in codes.iter().rev() {
-			Self::send_key(device, &interface, code, false, serial, &mut time);
-		}
-		self.flush()
+		let mut held = 0;
+		let result = (|| {
+			for &code in &codes {
+				control::check()?;
+				held += 1;
+				Self::send_key(device, &interface, code, true, serial, &mut time)?;
+			}
+			flush_context(&self.context)?;
+			control::wait(duration)?;
+			time = Self::timestamp()?.max(time);
+			Ok(())
+		})();
+		control::cleanup(|| {
+			for &code in codes[..held].iter().rev() {
+				let _ = Self::send_key(device, &interface, code, false, serial, &mut time);
+			}
+		});
+		let flushed = self.flush();
+		result.and(flushed)
 	}
 
 	pub(super) fn type_text(&mut self, text: &str) -> CoreResult<()> {
@@ -636,9 +721,12 @@ impl Libei {
 			.ok_or_else(|| {
 				DesktopError::permission_denied("no resumed libei keyboard is available")
 			})?;
-		let strokes = text
-			.chars()
-			.map(|character| char_stroke(device.layout.as_mut(), character))
+		let strokes = graphemes_str(text)
+			.flat_map(str::chars)
+			.map(|character| {
+				control::check()?;
+				char_stroke(device.layout.as_mut(), character)
+			})
 			.collect::<CoreResult<Vec<_>>>()?;
 		let interface = device
 			.device
@@ -650,17 +738,64 @@ impl Libei {
 			.map_or(0, reis::event::Connection::serial);
 		let mut time = Self::timestamp()?;
 		for stroke in strokes {
-			for &modifier in &stroke.modifiers {
-				Self::send_key(device, &interface, modifier, true, serial, &mut time);
-			}
-			Self::send_key(device, &interface, stroke.keycode, true, serial, &mut time);
-			Self::send_key(device, &interface, stroke.keycode, false, serial, &mut time);
-			for &modifier in stroke.modifiers.iter().rev() {
-				Self::send_key(device, &interface, modifier, false, serial, &mut time);
+			let mut held = 0;
+			let mut key_held = false;
+			let result = (|| {
+				for &modifier in &stroke.modifiers {
+					control::check()?;
+					held += 1;
+					Self::send_key(device, &interface, modifier, true, serial, &mut time)?;
+				}
+				control::check()?;
+				key_held = true;
+				Self::send_key(device, &interface, stroke.keycode, true, serial, &mut time)
+			})();
+			control::cleanup(|| {
+				if key_held {
+					let _ = Self::send_key(device, &interface, stroke.keycode, false, serial, &mut time);
+				}
+				for &modifier in stroke.modifiers[..held].iter().rev() {
+					let _ = Self::send_key(device, &interface, modifier, false, serial, &mut time);
+				}
+			});
+			let flushed = self.context.flush().map_err(|err| {
+				DesktopError::input_failed(format!(
+					"libei transport failed: {err}; delivery may be partial, do not retry blindly"
+				))
+			});
+			result.and(flushed)?;
+		}
+		Ok(())
+	}
+}
+
+fn flush_context(context: &ei::Context) -> CoreResult<()> {
+	context.flush().map_err(|err| {
+		DesktopError::input_failed(format!(
+			"libei transport failed: {err}; delivery may be partial, do not retry blindly"
+		))
+	})
+}
+
+fn plan_keys(device: &mut EiDevice, keys: &[KeyName]) -> CoreResult<Vec<u32>> {
+	let mut codes = Vec::with_capacity(keys.len());
+	for &key in keys {
+		control::check()?;
+		let stroke = match key {
+			KeyName::Char(character) => char_stroke(device.layout.as_mut(), character)?,
+			_ => KeyStroke { keycode: evdev_keycode(key)?, modifiers: Vec::new() },
+		};
+		for code in stroke
+			.modifiers
+			.into_iter()
+			.chain(std::iter::once(stroke.keycode))
+		{
+			if !codes.contains(&code) {
+				codes.push(code);
 			}
 		}
-		self.flush()
 	}
+	Ok(codes)
 }
 
 const fn modifier_keys(modifiers: Modifiers) -> [(bool, u32); 4] {
@@ -861,6 +996,51 @@ mod tests {
 		.unwrap();
 		assert_eq!(received, [(600.0, 411.0), (750.0, 422.0)]);
 		assert!(previous.elapsed() >= DRAG_STEP_DELAY, "release must not overtake the final motion");
+	}
+
+	#[test]
+	fn cancellation_drops_an_in_flight_request_without_restarting_it() {
+		let runtime = tokio::runtime::Builder::new_current_thread()
+			.enable_time()
+			.build()
+			.unwrap();
+		let source = control::CancellationSource::default();
+		let token = source.token();
+		let mut starts = 0;
+		let result = control::with_token_for_test(&token, || {
+			runtime.block_on(cancellable(async {
+				starts += 1;
+				source.cancel();
+				std::future::pending::<()>().await;
+			}))
+		});
+		assert!(result.is_err());
+		assert_eq!(starts, 1);
+	}
+
+	#[test]
+	fn cancellation_stops_drag_before_the_next_motion() {
+		let source = control::CancellationSource::default();
+		let token = source.token();
+		let mut received = Vec::new();
+		let result = control::with_token_for_test(&token, || {
+			pace_drag(&[(0.0, 0.0), (1.0, 1.0), (2.0, 2.0)], |x, y| {
+				received.push((x, y));
+				source.cancel();
+				Ok(())
+			})
+		});
+		assert!(result.is_err());
+		assert_eq!(received, [(1.0, 1.0)]);
+		let later = control::CancellationSource::default().token();
+		control::with_token_for_test(&later, || {
+			pace_drag(&[(0.0, 0.0), (3.0, 3.0)], |x, y| {
+				received.push((x, y));
+				Ok(())
+			})
+		})
+		.unwrap();
+		assert_eq!(received, [(1.0, 1.0), (3.0, 3.0)]);
 	}
 
 	#[test]

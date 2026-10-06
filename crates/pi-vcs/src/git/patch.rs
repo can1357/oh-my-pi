@@ -879,7 +879,13 @@ fn apply_file_bytes(
 	if patch.hunks.is_empty() {
 		return Ok(source.to_vec());
 	}
-	let mut lines = split_lines(source);
+	let source_lines = split_lines(source);
+	// The image each hunk applies to is always `head` (rewritten so far)
+	// followed by the untouched `source_lines[tail..]`. Ascending hunks land in
+	// the tail and copy forward; one reaching back into rewritten lines
+	// (overlapping hunks) materializes the image and splices into it.
+	let mut head: Vec<Line<'_>> = Vec::with_capacity(source_lines.len());
+	let mut tail = 0;
 	let mut offset: isize = 0;
 	for hunk in &patch.hunks {
 		let (start, count, replacement, expected) = hunk_sides(hunk, reverse);
@@ -892,27 +898,57 @@ fn apply_file_bytes(
 			return Err(ApplyFailure::Context("hunk position precedes file".into()));
 		}
 		let position = position as usize;
-		if position.saturating_add(expected.len()) > lines.len()
-			|| lines[position..position + expected.len()] != expected
-		{
+		let applies = if position >= head.len() {
+			let from = tail + (position - head.len());
+			let end = from.saturating_add(expected.len());
+			let applies = source_lines.get(from..end) == Some(&expected[..]);
+			if applies {
+				head.extend_from_slice(&source_lines[tail..from]);
+				head.extend_from_slice(&replacement);
+				tail = end;
+			}
+			applies
+		} else {
+			head.extend_from_slice(&source_lines[tail..]);
+			tail = source_lines.len();
+			let range = position..position + expected.len();
+			let applies = head.get(range.clone()) == Some(&expected[..]);
+			if applies {
+				head.splice(range, replacement.iter().copied());
+			}
+			applies
+		};
+		if !applies {
 			return Err(ApplyFailure::Context(format!("hunk at line {start} does not apply")));
 		}
-		lines.splice(position..position + expected.len(), replacement.clone());
 		offset += replacement.len() as isize - expected.len() as isize;
 	}
-	Ok(lines.concat())
+	head.extend_from_slice(&source_lines[tail..]);
+	let mut out = Vec::with_capacity(source.len());
+	for line in head {
+		out.extend_from_slice(line.data);
+		if line.newline {
+			out.push(b'\n');
+		}
+	}
+	Ok(out)
 }
 
-fn hunk_sides(hunk: &Hunk, reverse: bool) -> (usize, usize, Vec<Vec<u8>>, Vec<Vec<u8>>) {
+/// One source or hunk line, borrowed: its bytes without the terminator and
+/// whether a `\n` follows.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct Line<'a> {
+	data:    &'a [u8],
+	newline: bool,
+}
+
+fn hunk_sides(hunk: &Hunk, reverse: bool) -> (usize, usize, Vec<Line<'_>>, Vec<Line<'_>>) {
 	let mut old = Vec::new();
 	let mut new = Vec::new();
 	for line in &hunk.lines {
-		let mut content = line.data.clone();
-		if !line.no_newline {
-			content.push(b'\n');
-		}
+		let content = Line { data: &line.data, newline: !line.no_newline };
 		if line.kind != b'+' {
-			old.push(content.clone());
+			old.push(content);
 		}
 		if line.kind != b'-' {
 			new.push(content);
@@ -925,17 +961,17 @@ fn hunk_sides(hunk: &Hunk, reverse: bool) -> (usize, usize, Vec<Vec<u8>>, Vec<Ve
 	}
 }
 
-fn split_lines(bytes: &[u8]) -> Vec<Vec<u8>> {
+fn split_lines(bytes: &[u8]) -> Vec<Line<'_>> {
 	let mut lines = Vec::new();
-	let mut start = 0;
-	for (index, byte) in bytes.iter().enumerate() {
-		if *byte == b'\n' {
-			lines.push(bytes[start..=index].to_vec());
-			start = index + 1;
+	let mut rest = bytes;
+	while !rest.is_empty() {
+		if let Some(end) = rest.iter().position(|&byte| byte == b'\n') {
+			lines.push(Line { data: &rest[..end], newline: true });
+			rest = &rest[end + 1..];
+		} else {
+			lines.push(Line { data: rest, newline: false });
+			break;
 		}
-	}
-	if start < bytes.len() {
-		lines.push(bytes[start..].to_vec());
 	}
 	lines
 }
@@ -2088,6 +2124,31 @@ mod tests {
 		]);
 		assert_eq!(errors.len(), 1);
 		assert_eq!(errors[0].path, "a.bin");
+	}
+
+	#[test]
+	fn patch_apply_second_hunk_rewrites_lines_of_the_first() {
+		// The second hunk targets `ONE`, a line only the first hunk produced, so
+		// it lands behind the forward cursor and takes the materialize-and-splice
+		// path instead of the ascending copy-forward one.
+		let temp = init(&[("a.txt", b"one\ntwo\nthree\nfour\n")]);
+		let patch = "diff --git a/a.txt b/a.txt\n--- a/a.txt\n+++ b/a.txt\n@@ -1,2 +1,2 \
+		             @@\n-one\n+ONE\n two\n@@ -1 +1 @@\n-ONE\n+uno\n";
+		let options =
+			ApplyOptions { cached: false, index_path: None, reverse: false, three_way: false };
+		let repository = repo(temp.path());
+		assert!(
+			repository
+				.can_apply_patch(patch, &options)
+				.expect("check overlapping patch")
+		);
+		repository
+			.apply_patch(patch, &options)
+			.expect("apply overlapping patch");
+		assert_eq!(
+			fs::read(temp.path().join("a.txt")).expect("read patched"),
+			b"uno\ntwo\nthree\nfour\n"
+		);
 	}
 
 	#[test]

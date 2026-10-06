@@ -3219,6 +3219,109 @@ mod tests {
 		}));
 	}
 
+	/// Contract: `read` from a file consumes exactly one line of the shared
+	/// offset — the next `read`, and any later reader of the same descriptor,
+	/// resumes right after it.
+	#[tokio::test(flavor = "multi_thread")]
+	async fn read_from_a_file_leaves_the_rest_for_the_next_reader() {
+		let dir = tempfile::tempdir().expect("temporary directory");
+		let path = dir.path().join("lines.txt");
+		std::fs::write(&path, "one\ntwo\nthree\nfour\n").expect("write fixture");
+		let path = path.to_string_lossy().replace('\\', "/");
+		let (result, output) = execute_captured(format!(
+			"{{ read -r a; read -r b; echo \"[$a][$b]\"; cat; }} < '{path}'"
+		))
+		.await;
+		assert_eq!(result.exit_code, Some(0), "{output:?}");
+		assert_eq!(output, "[one][two]\nthree\nfour\n");
+	}
+
+	/// Contract: `read` assigns UTF-8 input as text, not one Latin-1
+	/// character per byte.
+	#[tokio::test(flavor = "multi_thread")]
+	async fn read_decodes_utf8_input() {
+		let (result, output) = execute_captured(
+			"printf 'é ü\\n' | { read -r first rest; echo \"$first|$rest\"; }".to_owned(),
+		)
+		.await;
+		assert_eq!(result.exit_code, Some(0), "{output:?}");
+		assert_eq!(output, "é|ü\n");
+	}
+
+	/// Contract: `read -n` counts characters, not bytes, as bash does in a
+	/// UTF-8 locale; a multibyte character is never split.
+	#[tokio::test(flavor = "multi_thread")]
+	async fn read_count_takes_whole_utf8_characters() {
+		let (result, output) = execute_captured(
+			"printf 'éa\\n' | { read -r -n 1 first; read -r rest; echo \"$first|$rest\"; }".to_owned(),
+		)
+		.await;
+		assert_eq!(result.exit_code, Some(0), "{output:?}");
+		assert_eq!(output, "é|a\n");
+	}
+
+	/// Contract: `mapfile -n` from a file consumes exactly the lines it
+	/// stores; a later reader of the descriptor gets the rest.
+	#[tokio::test(flavor = "multi_thread")]
+	async fn mapfile_count_from_a_file_leaves_the_rest_for_the_next_reader() {
+		let dir = tempfile::tempdir().expect("temporary directory");
+		let path = dir.path().join("lines.txt");
+		std::fs::write(&path, "one\ntwo\nthree\nfour\n").expect("write fixture");
+		let path = path.to_string_lossy().replace('\\', "/");
+		let (result, output) = execute_captured(format!(
+			"{{ mapfile -t -n 2 lines; echo \"${{lines[*]}}\"; cat; }} < '{path}'"
+		))
+		.await;
+		assert_eq!(result.exit_code, Some(0), "{output:?}");
+		assert_eq!(output, "one two\nthree\nfour\n");
+	}
+
+	/// Contract: a `mapfile -C` callback that reads the same piped stdin gets
+	/// the lines after the one mapfile stored, as in bash; mapfile must not
+	/// have read them ahead.
+	#[tokio::test(flavor = "multi_thread")]
+	async fn mapfile_callback_reads_the_next_line_of_a_pipe() {
+		let (result, output) = execute_captured(
+			"cb() { read -r x; echo \"cb:$1:$2:$x\"; }; seq 1 4 | { mapfile -t -C cb -c 1 arr; echo \
+			 \"arr=${arr[*]}\"; }"
+				.to_owned(),
+		)
+		.await;
+		assert_eq!(result.exit_code, Some(0), "{output:?}");
+		assert_eq!(output, "cb:0:1:2\ncb:1:3:4\narr=1 3\n");
+	}
+
+	/// Contract: the same holds for a regular file, whose read-ahead mapfile
+	/// gives back to the shared offset before each callback.
+	#[tokio::test(flavor = "multi_thread")]
+	async fn mapfile_callback_reads_the_next_line_of_a_file() {
+		let dir = tempfile::tempdir().expect("temporary directory");
+		let path = dir.path().join("lines.txt");
+		std::fs::write(&path, "1\n2\n3\n4\n").expect("write fixture");
+		let path = path.to_string_lossy().replace('\\', "/");
+		let (result, output) = execute_captured(format!(
+			"cb() {{ read -r x; echo \"cb:$1:$2:$x\"; }}; {{ mapfile -t -C cb -c 1 arr; echo \
+			 \"arr=${{arr[*]}}\"; }} < '{path}'"
+		))
+		.await;
+		assert_eq!(result.exit_code, Some(0), "{output:?}");
+		assert_eq!(output, "cb:0:1:2\ncb:1:3:4\narr=1 3\n");
+	}
+
+	/// Contract: `mapfile` into a readonly array fails before reading, as in
+	/// bash: the array is unchanged and the piped input stays for the next
+	/// reader.
+	#[tokio::test(flavor = "multi_thread")]
+	async fn mapfile_into_a_readonly_array_leaves_the_input_unread() {
+		let (_, output) = execute_captured(
+			"printf 'a\\nb\\n' | { arr=(x); readonly arr; mapfile -t -O 1 arr; echo \"rc=$? \
+			 ${arr[*]}\"; cat; }"
+				.to_owned(),
+		)
+		.await;
+		assert!(output.ends_with("rc=1 x\na\nb\n"), "{output:?}");
+	}
+
 	#[tokio::test(flavor = "multi_thread")]
 	async fn ps_builtin_lists_one_line_per_thread_with_m() {
 		// Field report: `ps -M -p <pid>` failed with "unsupported option '-M'".

@@ -221,6 +221,7 @@ export interface InteractiveModeContext {
 	/** Record a message whose thinking content makes Ctrl+T meaningful even at thinking level "off"; returns true on first observation. */
 	noteDisplayableThinkingContent(message: AgentMessage): boolean;
 	proseOnlyThinking: boolean;
+	expandThinkingBlocks: boolean;
 	compactionQueuedMessages: CompactionQueuedMessage[];
 	/** Settled user/assistant components reusable across post-compaction transcript rebuilds. */
 	transcriptMessageComponents: WeakMap<AgentMessage, Component>;

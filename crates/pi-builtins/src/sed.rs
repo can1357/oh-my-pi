@@ -7260,13 +7260,10 @@ use pi_vfs::{BlockingFs, File, TempOptions};
 use uucore::display::Quotable;
 
 use brush_core::openfiles::OpenFile;
-use crate::{
-	host::is_regular_file,
-	sed::{
-		command::ProcessingContext,
-		error_handling::{IoContext, SedError, SedResult},
-		fast_io::OutputBuffer,
-	},
+use crate::sed::{
+	command::ProcessingContext,
+	error_handling::{IoContext, SedError, SedResult},
+	fast_io::OutputBuffer,
 };
 
 /// Sibling file receiving in-place output, created through the injected
@@ -7319,6 +7316,9 @@ impl Drop for TempFile {
 // before an unpersisted temporary file is removed.
 pub struct InPlace {
 	stdout:              OpenFile,
+	/// Whether stdout is a regular file (block-buffered) rather than a pipe
+	/// or stream (line-buffered); classified once by the host.
+	stdout_is_file:      bool,
 	fs:                  BlockingFs,
 	pub output:          OutputBuffer,
 	pub in_place:        bool,
@@ -7332,16 +7332,17 @@ impl InPlace {
 	/// Create an in-place editing engine based on ProcessingContext.
 	/// Depending on its settings it may or may not perform in-place
 	/// editing, backup the original file, or follow symlinks.
-	pub fn new_with_stdout(context: ProcessingContext, stdout: OpenFile) -> Self {
+	pub fn new_with_stdout(context: ProcessingContext, stdout: OpenFile, stdout_is_file: bool) -> Self {
 		Self {
-			output:          stdout_output(&stdout),
+			output: stdout_output(&stdout, stdout_is_file),
 			stdout,
-			fs:              context.paths.fs().clone(),
-			in_place:        context.in_place,
+			stdout_is_file,
+			fs: context.paths.fs().clone(),
+			in_place: context.in_place,
 			in_place_suffix: context.in_place_suffix,
 			follow_symlinks: context.follow_symlinks,
-			temp_file:       None,
-			original_path:   None,
+			temp_file: None,
+			original_path: None,
 		}
 	}
 
@@ -7349,7 +7350,7 @@ impl InPlace {
 	#[cfg(test)]
 	pub fn new(context: ProcessingContext) -> Self {
 		let (host, _) = crate::host::Host::for_test("sed", "", ".");
-		Self::new_with_stdout(context, host.stdout_clone())
+		Self::new_with_stdout(context, host.stdout_clone(), host.stdout_is_regular_file())
 	}
 
 	/// Return an OutputBuffer for outputting the edits to the specified file.
@@ -7371,7 +7372,7 @@ impl InPlace {
 	/// to the context settings.
 	fn begin_resolved(&mut self, file_name: &Path) -> SedResult<&mut OutputBuffer> {
 		if !self.in_place {
-			self.output = stdout_output(&self.stdout);
+			self.output = stdout_output(&self.stdout, self.stdout_is_file);
 			return Ok(&mut self.output);
 		}
 
@@ -7422,7 +7423,7 @@ impl InPlace {
 
 		// Release the output's handle, then close the last one to surface
 		// deferred write errors before the file replaces the original.
-		self.output = stdout_output(&self.stdout);
+		self.output = stdout_output(&self.stdout, self.stdout_is_file);
 		temp.close()
 			.map_err_context(|| format!("error writing temporary file {}", temp.path.quote()))?;
 
@@ -7458,8 +7459,8 @@ impl InPlace {
 }
 
 /// Sed's standard output, line-buffered unless it is a regular file.
-fn stdout_output(stdout: &OpenFile) -> OutputBuffer {
-	OutputBuffer::new(Box::new(stdout.clone()), !is_regular_file(stdout))
+fn stdout_output(stdout: &OpenFile, stdout_is_file: bool) -> OutputBuffer {
+	OutputBuffer::new(Box::new(stdout.clone()), !stdout_is_file)
 }
 
 #[cfg(test)]
@@ -8377,8 +8378,11 @@ fn process_file(
 					*pat_has_newline = context.hold.has_newline;
 				},
 				'h' => {
-					// Replace hold with the contents of the pattern space.
-					context.hold.content = pattern.as_str()?.to_string();
+					// Replace hold with the contents of the pattern space, reusing
+					// the hold buffer.
+					let content = pattern.as_str()?;
+					context.hold.content.clear();
+					context.hold.content.push_str(content);
 					context.hold.has_newline = pattern.is_newline_terminated();
 				},
 				'H' => {
@@ -8404,10 +8408,12 @@ fn process_file(
 					// Append to pattern `\n` and the next line
 					// Rather than reading input here, which would result
 					// in a double borrow on reader, modify the action
-					// to perform when the next line is read.
+					// to perform when the next line is read. This cycle's
+					// `pattern` is discarded, so move its buffer instead of
+					// copying the accumulated pattern space each time.
 					context.input_action = Some(InputAction {
 						next_command: command.next.clone(),
-						prepend:      pattern.as_str()?.to_string(),
+						prepend:      std::mem::take(pattern.fields_mut()?.0),
 					});
 					continue 'lines;
 				},
@@ -8552,7 +8558,8 @@ pub fn process_all_files(
 	// terminal, so upstream's stdout-tty check for auto-unbuffered output is
 	// dropped; `-u` alone controls flushing.
 
-	let mut in_place = InPlace::new_with_stdout(context.clone(), host.stdout_clone());
+	let mut in_place =
+		InPlace::new_with_stdout(context.clone(), host.stdout_clone(), host.stdout_is_regular_file());
 	let last_file_index = files.len() - 1;
 
 	for (index, path) in files.iter().enumerate() {
@@ -9612,6 +9619,29 @@ mod tests {
 		let (code, capture) = crate::host::run_util::<Sed>(&["2q42"], "one\ntwo\nthree\n", "/");
 		assert_eq!(code, 42);
 		assert_eq!(capture.out(), "one\ntwo\n");
+	}
+
+	#[test]
+	fn builtin_carries_pattern_and_hold_space_across_cycles() {
+		// `:a;N;$!ba` grows the pattern space by one line per cycle; each `N`
+		// must carry everything accumulated so far, for stdin and for file
+		// input (mmapped on unix).
+		let dir = tempfile::tempdir().unwrap();
+		std::fs::write(dir.path().join("in.txt"), "one\ntwo\nthree\n").unwrap();
+		let join = r":a;N;$!ba;s/\n/,/g";
+		for (args, stdin) in [(&[join][..], "one\ntwo\nthree\n"), (&[join, "in.txt"][..], "")] {
+			let (code, capture) = crate::host::run_util::<Sed>(args, stdin, dir.path());
+			assert_eq!(code, 0, "{}", capture.err());
+			assert_eq!(capture.out(), "one,two,three\n", "{args:?}");
+		}
+		// `N` with no next line prints the pending pattern space (GNU).
+		let (code, capture) = crate::host::run_util::<Sed>(&[r"N;s/\n/+/"], "a\nb\nc\n", "/");
+		assert_eq!(code, 0, "{}", capture.err());
+		assert_eq!(capture.out(), "a+b\nc\n");
+		// `1!G;h;$!d` reverses the input through the hold space.
+		let (code, capture) = crate::host::run_util::<Sed>(&["1!G;h;$!d"], "a\nb\nc\n", "/");
+		assert_eq!(code, 0, "{}", capture.err());
+		assert_eq!(capture.out(), "c\nb\na\n");
 	}
 
 	#[test]

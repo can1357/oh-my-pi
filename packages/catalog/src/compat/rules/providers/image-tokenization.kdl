@@ -1,0 +1,42 @@
+// Image billing for readers whose lineage has no `image-tokenization` rule in
+// classes/*.kdl, by the wire API carrying the request. priority=-1: these are
+// fallbacks, so a class-wide lineage rule (same specificity) always wins.
+
+// OpenAI-compatible wires bill like GPT-5.5: 32px patches × 1.2, `auto` sized
+// like `original`.
+on-api "openai-completions" "openai-responses" "openai-codex-responses" "azure-openai-responses" priority=-1 {
+	image-tokenization {
+		regime "openai-patch"
+		multiplier 1.2
+		auto "original"
+		low {
+			max-edge 512
+		}
+		high {
+			max-edge 2048
+			patch-budget 2500
+		}
+		original {
+			max-edge 6000
+			patch-budget 10000
+		}
+	}
+}
+
+// Google wires bill Gemini 3's fixed `media_resolution` budget per image.
+on-api "google-generative-ai" "google-gemini-cli" "google-vertex" priority=-1 {
+	image-tokenization {
+		regime "fixed"
+		tokens 1120
+	}
+}
+
+// Anthropic wires and every other adapter bill Claude's high-res tier, the
+// largest per-image bill, so an unpriced reader is never undercounted.
+on-api "anthropic-messages" "bedrock-converse-stream" "openrouter" "ollama-chat" "cursor-agent" "factory-droid-agent" "gitlab-duo-agent" "devin-agent" "apple-foundation-models" priority=-1 {
+	image-tokenization {
+		regime "anthropic-patch"
+		max-edge 2576
+		max-tokens 4784
+	}
+}

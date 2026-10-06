@@ -6,8 +6,10 @@ import * as path from "node:path";
 import { Writable } from "node:stream";
 import * as util from "node:util";
 
+import { isRecord } from "@oh-my-pi/pi-utils";
 import * as logger from "@oh-my-pi/pi-utils/logger";
 
+import { evalImageMetadata } from "../../types";
 import type { EvalPreludeSource } from "../worker-protocol";
 import { createHelpers, type HelperBundle } from "./helpers";
 import { awaitMaybePromise, indirectEval } from "./indirect-eval";
@@ -39,15 +41,15 @@ export interface RuntimeHooks {
  * with base64.
  */
 function surfaceBridgedToolImages(value: unknown, hooks: RuntimeHooks): unknown {
-	if (!value || typeof value !== "object" || Array.isArray(value)) return value;
-	const { images, ...rest } = value as { images?: unknown } & Record<string, unknown>;
+	if (!isRecord(value)) return value;
+	const { images, ...rest } = value;
 	if (!Array.isArray(images) || images.length === 0) return value;
 	let displayed = 0;
 	for (const image of images) {
-		if (!image || typeof image !== "object") continue;
-		const { data, mimeType } = image as { data?: unknown; mimeType?: unknown };
+		if (!isRecord(image)) continue;
+		const { data, mimeType } = image;
 		if (typeof data !== "string" || typeof mimeType !== "string") continue;
-		hooks.onDisplay({ type: "image", data, mimeType });
+		hooks.onDisplay({ type: "image", data, mimeType, ...evalImageMetadata(image) });
 		displayed++;
 	}
 	if (displayed === 0) return value;
@@ -555,11 +557,11 @@ export class JsRuntime {
 			return;
 		}
 		if (value && typeof value === "object") {
-			const record = value as Record<string, unknown>;
+			const record = isRecord(value) ? value : {};
 			if (record.type === "image" && typeof record.mimeType === "string") {
 				const data = coerceImageBase64(record.data);
 				if (data !== null) {
-					hooks.onDisplay({ type: "image", data, mimeType: record.mimeType });
+					hooks.onDisplay({ type: "image", data, mimeType: record.mimeType, ...evalImageMetadata(record) });
 					return;
 				}
 				logger.warn("js displayValue: dropping image with unrecognized data shape", {

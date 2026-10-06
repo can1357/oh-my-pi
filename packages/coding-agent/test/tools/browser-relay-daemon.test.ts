@@ -219,4 +219,68 @@ try {
 		// a cold `bun` process importing the daemon module graph, so the spawns are slow
 		// exactly when the machine is busy.
 	}, 60_000);
+
+	it("keeps one port's relay running when another relay starts on a different port", async () => {
+		const home = await fs.mkdtemp(path.join(os.tmpdir(), "omp-relay-ports-"));
+		const globalRuntimeDir = path.join(home, ".omp", "run", "daemons", "global", "browser-relay");
+		const firstPort = await findFreeCdpPort();
+		let secondPort = await findFreeCdpPort();
+		// The finder releases its probe listener, so it can hand back the same port twice.
+		while (secondPort === firstPort) secondPort = await findFreeCdpPort();
+		const firstUrl = `http://127.0.0.1:${firstPort}`;
+		const secondUrl = `http://127.0.0.1:${secondPort}`;
+		const child = Bun.spawn(
+			[
+				process.execPath,
+				"-e",
+				`import { closeDaemonClients } from ${JSON.stringify(path.resolve(import.meta.dir, "../../src/launch/client.ts"))};
+import { ensureRelayDaemon, probeRelayServer } from ${JSON.stringify(path.resolve(import.meta.dir, "../../src/tools/browser/relay/daemon.ts"))};
+const [first, second] = [Bun.env.OMP_TEST_FIRST_RELAY_URL!, Bun.env.OMP_TEST_SECOND_RELAY_URL!];
+try {
+	const started = [await ensureRelayDaemon({ cdpUrl: first }), await ensureRelayDaemon({ cdpUrl: second })];
+	const serving = [await probeRelayServer(first), await probeRelayServer(second)];
+	process.stdout.write(JSON.stringify({ started, serving }));
+} finally {
+	await closeDaemonClients();
+}`,
+			],
+			{
+				cwd: home,
+				env: {
+					...process.env,
+					HOME: home,
+					USERPROFILE: home,
+					PI_CONFIG_DIR: ".omp",
+					OMP_DAEMON_IDLE_GRACE_MS: "200",
+					OMP_TEST_FIRST_RELAY_URL: firstUrl,
+					OMP_TEST_SECOND_RELAY_URL: secondUrl,
+				},
+				stdout: "pipe",
+				stderr: "pipe",
+			},
+		);
+		try {
+			const [exitCode, stdout, stderr] = await Promise.all([
+				child.exited,
+				new Response(child.stdout).text(),
+				new Response(child.stderr).text(),
+			]);
+			expect(exitCode, stderr).toBe(0);
+			expect(JSON.parse(stdout)).toEqual({ started: [true, true], serving: [true, true] });
+		} finally {
+			if (child.exitCode === null) child.kill();
+			await child.exited;
+			const rescue = await createDaemonBrokerClient(globalRuntimeDir, {
+				runtimeDir: globalRuntimeDir,
+				idleGraceMs: 200,
+			});
+			try {
+				await rescue.request({ op: "shutdown" });
+			} catch {
+				// The last-client grace may already have stopped the broker.
+			}
+			rescue.close();
+			await fs.rm(home, { recursive: true, force: true });
+		}
+	}, 60_000);
 });

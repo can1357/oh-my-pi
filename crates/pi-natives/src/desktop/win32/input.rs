@@ -5,8 +5,9 @@ use enigo::{Axis, Button, Direction, Enigo, Keyboard, Mouse, Settings};
 use super::{
 	super::{
 		backend::{DeliveryMode, Modifiers, MouseButton, PointerEvent},
+		control,
 		error::{CoreResult, DesktopError},
-		keys::KeyName,
+		keys::{KeyDirection, KeyName, hold_keys as with_held_keys},
 		types::Target,
 	},
 	ax::Win32Ax,
@@ -68,32 +69,78 @@ fn modifier_keys(modifiers: Modifiers) -> impl Iterator<Item = KeyName> {
 	.flatten()
 }
 
+fn emit_global_key(input: &mut Enigo, key: KeyName, direction: KeyDirection) -> CoreResult<()> {
+	match direction {
+		KeyDirection::Press => {
+			control::check()?;
+			let result = input
+				.key(key.to_enigo(), Direction::Press)
+				.map_err(enigo_error);
+			if result.is_err() {
+				// Enigo can partially deliver a press. The shared hold helper
+				// releases successful presses, so unwind this attempted key here.
+				completed(
+					result,
+					control::cleanup(|| {
+						input
+							.key(key.to_enigo(), Direction::Release)
+							.map_err(enigo_error)
+					}),
+				)
+			} else {
+				result
+			}
+		},
+		KeyDirection::Release => control::cleanup(|| {
+			input
+				.key(key.to_enigo(), Direction::Release)
+				.map_err(enigo_error)
+		}),
+	}
+}
+
+fn global_button(input: &mut Enigo, button: MouseButton, direction: Direction) -> CoreResult<()> {
+	control::check()?;
+	input
+		.button(button_to_enigo(button), direction)
+		.map_err(enigo_error)
+}
+
+fn with_global_keys(
+	input: &mut Enigo,
+	keys: &[KeyName],
+	operation: impl FnOnce(&mut Enigo) -> CoreResult<()>,
+) -> CoreResult<()> {
+	for &key in keys {
+		background::virtual_key(key)?;
+	}
+	with_held_keys(
+		input,
+		keys.iter().copied(),
+		emit_global_key,
+		|input| {
+			control::check()?;
+			operation(input)
+		},
+		completed,
+	)
+}
+
 fn with_global_modifiers(
 	input: &mut Enigo,
 	modifiers: Modifiers,
 	operation: impl FnOnce(&mut Enigo) -> CoreResult<()>,
 ) -> CoreResult<()> {
-	let keys = modifier_keys(modifiers).collect::<Vec<_>>();
-	let mut held: Vec<KeyName> = Vec::with_capacity(keys.len());
-	for key in keys {
-		if let Err(error) = input.key(key.to_enigo(), Direction::Press) {
-			for held_key in held.into_iter().rev() {
-				let _ = input.key(held_key.to_enigo(), Direction::Release);
-			}
-			return Err(enigo_error(error));
-		}
-		held.push(key);
-	}
-	let operation_result = operation(input);
-	let mut release_result = Ok(());
-	for key in held.into_iter().rev() {
-		if let Err(error) = input.key(key.to_enigo(), Direction::Release)
-			&& release_result.is_ok()
-		{
-			release_result = Err(enigo_error(error));
-		}
-	}
-	operation_result.and(release_result)
+	with_held_keys(
+		input,
+		modifier_keys(modifiers),
+		emit_global_key,
+		|input| {
+			control::check()?;
+			operation(input)
+		},
+		completed,
+	)
 }
 
 fn scroll_steps(delta: f64) -> i32 {
@@ -111,31 +158,54 @@ fn global_pointer(input: &mut Enigo, event: PointerEvent) -> CoreResult<()> {
 			with_global_modifiers(input, modifiers, |input| {
 				foreground::move_pointer(x, y)?;
 				for _ in 0..count {
-					input
-						.button(button_to_enigo(button), Direction::Click)
-						.map_err(enigo_error)?;
+					control::bounded_hold(Duration::ZERO, |down| {
+						global_button(
+							input,
+							button,
+							if down {
+								Direction::Press
+							} else {
+								Direction::Release
+							},
+						)
+					})?;
 				}
 				Ok(())
 			})
 		},
+		PointerEvent::Hold { x, y, button, keys, duration } => {
+			with_global_keys(input, &keys, |input| {
+				foreground::move_pointer(x, y)?;
+				control::bounded_hold(duration, |down| {
+					global_button(
+						input,
+						button,
+						if down {
+							Direction::Press
+						} else {
+							Direction::Release
+						},
+					)
+				})
+			})
+		},
 		PointerEvent::Move { x, y } => foreground::move_pointer(x, y),
-		PointerEvent::Drag { path, button, modifiers } => {
+		PointerEvent::Drag { path, button, modifiers, mut keys } => {
+			control::add_modifiers(&mut keys, modifiers);
 			let Some(&(start_x, start_y)) = path.first() else {
 				return Err(DesktopError::input_failed("drag path is empty"));
 			};
-			with_global_modifiers(input, modifiers, |input| {
+			with_global_keys(input, &keys, |input| {
 				foreground::move_pointer(start_x, start_y)?;
-				input
-					.button(button_to_enigo(button), Direction::Press)
-					.map_err(enigo_error)?;
-				let movement = path
-					.iter()
-					.skip(1)
-					.try_for_each(|&(x, y)| foreground::move_pointer(x, y));
-				let release = input
-					.button(button_to_enigo(button), Direction::Release)
-					.map_err(enigo_error);
-				movement.and(release)
+				control::check()?;
+				let movement = global_button(input, button, Direction::Press).and_then(|()| {
+					path.iter().skip(1).try_for_each(|&(x, y)| {
+						control::wait(Duration::from_millis(16))?;
+						foreground::move_pointer(x, y)
+					})
+				});
+				let release = control::cleanup(|| global_button(input, button, Direction::Release));
+				completed(movement, release)
 			})
 		},
 		PointerEvent::Scroll { x, y, dx, dy } => {
@@ -143,11 +213,13 @@ fn global_pointer(input: &mut Enigo, event: PointerEvent) -> CoreResult<()> {
 			let horizontal = scroll_steps(dx);
 			let vertical = scroll_steps(dy);
 			if horizontal != 0 {
+				control::check()?;
 				input
 					.scroll(horizontal, Axis::Horizontal)
 					.map_err(enigo_error)?;
 			}
 			if vertical != 0 {
+				control::check()?;
 				input
 					.scroll(vertical, Axis::Vertical)
 					.map_err(enigo_error)?;
@@ -158,34 +230,11 @@ fn global_pointer(input: &mut Enigo, event: PointerEvent) -> CoreResult<()> {
 }
 
 fn global_key_chord(input: &mut Enigo, keys: &[KeyName]) -> CoreResult<()> {
-	if keys.len() == 1 {
-		return input
-			.key(keys[0].to_enigo(), Direction::Click)
-			.map_err(enigo_error);
-	}
-	let mut held: Vec<KeyName> = Vec::with_capacity(keys.len());
-	for &key in keys {
-		if let Err(error) = input.key(key.to_enigo(), Direction::Press) {
-			for held_key in held.into_iter().rev() {
-				let _ = input.key(held_key.to_enigo(), Direction::Release);
-			}
-			return Err(enigo_error(error));
-		}
-		held.push(key);
-	}
-	let mut result = Ok(());
-	for key in held.into_iter().rev() {
-		if let Err(error) = input.key(key.to_enigo(), Direction::Release)
-			&& result.is_ok()
-		{
-			result = Err(enigo_error(error));
-		}
-	}
-	result
+	with_global_keys(input, keys, |_| control::check())
 }
 
 mod background {
-	use std::{ffi::c_void, thread, time::Duration};
+	use std::{ffi::c_void, time::Duration};
 
 	use windows_sys::Win32::{
 		Foundation::{ERROR_ACCESS_DENIED, GetLastError, HWND, LPARAM, POINT, WPARAM},
@@ -207,8 +256,12 @@ mod background {
 			},
 		},
 	};
+	use xutf::graphemes_str;
 
-	use super::{CoreResult, DesktopError, KeyName, Modifiers, MouseButton, PointerEvent};
+	use super::{
+		CoreResult, DesktopError, KeyDirection, KeyName, Modifiers, MouseButton, PointerEvent,
+		control, with_held_keys,
+	};
 	use crate::desktop::win32::{
 		ax::Win32Ax,
 		delivery::{
@@ -304,6 +357,7 @@ mod background {
 	}
 
 	fn post(hwnd: HWND, message: u32, wparam: WPARAM, lparam: LPARAM) -> CoreResult<()> {
+		control::check()?;
 		// SAFETY: Win32 copies these scalar message parameters into the validated
 		// target's queue and retains no borrowed memory.
 		if unsafe { PostMessageW(hwnd, message, wparam, lparam) } != 0 {
@@ -399,10 +453,11 @@ mod background {
 	/// click when UI Automation can invoke the control under the point, except
 	/// Chromium, whose Invoke reports success without acting.
 	pub(super) fn pointer(ax: &mut Win32Ax, id: &str, event: PointerEvent) -> CoreResult<()> {
+		control::check()?;
 		let root = hwnd(id)?;
 		ensure_integrity(id, root)?;
 		let kind = match event {
-			PointerEvent::Click { .. } => EventKind::MouseClick,
+			PointerEvent::Click { .. } | PointerEvent::Hold { .. } => EventKind::MouseClick,
 			PointerEvent::Move { .. } | PointerEvent::Drag { .. } => EventKind::MouseMove,
 			PointerEvent::Scroll { .. } => EventKind::MouseScroll,
 		};
@@ -411,8 +466,10 @@ mod background {
 			if let PointerEvent::Click { x, y, button: MouseButton::Left, count: 1, modifiers } = event
 				&& modifiers == Modifiers::default()
 				&& !is_chromium_class(&class)
-				&& ax.invoke_at_point(root, screen_point(x, y))?
-			{
+				&& {
+					control::check()?;
+					ax.invoke_at_point(root, screen_point(x, y))?
+				} {
 				return Ok(());
 			}
 			return Err(refusal(id, &class, kind, reason));
@@ -428,7 +485,7 @@ mod background {
 				with_modifiers(target, modifiers, || {
 					for index in 0..count {
 						if index > 0 {
-							thread::sleep(CLICK_GAP);
+							control::wait(CLICK_GAP)?;
 						}
 						let press = if posts_double_click(index, wants_double) {
 							double
@@ -437,10 +494,28 @@ mod background {
 						};
 						post(target, WM_MOUSEMOVE, flags, point)?;
 						post(target, press, flags | button_flag, point)?;
-						thread::sleep(CLICK_HOLD);
-						post(target, up, flags, point)?;
+						let result = control::wait(CLICK_HOLD);
+						let release = control::cleanup(|| post(target, up, flags, point));
+						super::completed(result, release)?;
 					}
 					Ok(())
+				})
+			},
+			PointerEvent::Hold { x, y, button, keys, duration } => {
+				let (target, point) = child_at(root, x, y)?;
+				ensure_delivery(id, target, kind)?;
+				let (down, up, _, button_flag) = mouse_messages(button);
+				let flags = mouse_flags(control::key_modifiers(&keys));
+				with_keys(target, &keys, || {
+					post(target, WM_MOUSEMOVE, flags, point)?;
+					control::bounded_hold(duration, |pressed| {
+						post(
+							target,
+							if pressed { down } else { up },
+							if pressed { flags | button_flag } else { flags },
+							point,
+						)
+					})
 				})
 			},
 			PointerEvent::Move { x, y } => {
@@ -448,7 +523,8 @@ mod background {
 				ensure_delivery(id, target, kind)?;
 				post(target, WM_MOUSEMOVE, 0, point)
 			},
-			PointerEvent::Drag { path, button, modifiers } => {
+			PointerEvent::Drag { path, button, modifiers, mut keys } => {
+				control::add_modifiers(&mut keys, modifiers);
 				let Some(&(x, y)) = path.first() else {
 					return Err(DesktopError::input_failed("drag path is empty"));
 				};
@@ -468,20 +544,22 @@ mod background {
 				ensure_delivery(id, target, kind)?;
 				let start = packed_point(client.x, client.y)?;
 				let (down, up, _, button_flag) = mouse_messages(button);
-				let flags = mouse_flags(modifiers);
-				with_modifiers(target, modifiers, || {
+				let flags = mouse_flags(control::key_modifiers(&keys));
+				with_keys(target, &keys, || {
 					post(target, WM_MOUSEMOVE, flags, start)?;
 					post(target, down, flags | button_flag, start)?;
-					thread::sleep(CLICK_HOLD);
 					let mut end = start;
-					let movement = path.iter().skip(1).try_for_each(|&(x, y)| {
-						let next = client_point(target, x, y)?;
-						post(target, WM_MOUSEMOVE, flags | button_flag, next)?;
-						end = next;
-						thread::sleep(DRAG_STEP);
-						Ok(())
-					});
-					let release = post(target, up, flags, end);
+					let movement = (|| {
+						control::wait(CLICK_HOLD)?;
+						path.iter().skip(1).try_for_each(|&(x, y)| {
+							control::check()?;
+							let next = client_point(target, x, y)?;
+							post(target, WM_MOUSEMOVE, flags | button_flag, next)?;
+							end = next;
+							control::wait(DRAG_STEP)
+						})
+					})();
+					let release = control::cleanup(|| post(target, up, flags, end));
 					super::completed(movement, release)
 				})
 			},
@@ -649,6 +727,13 @@ mod background {
 			Ok(())
 		}
 
+		fn emit(&mut self, key: KeyName, direction: KeyDirection) -> CoreResult<()> {
+			match direction {
+				KeyDirection::Press => self.key(key, true),
+				KeyDirection::Release => control::cleanup(|| self.key(key, false)),
+			}
+		}
+
 		fn key(&mut self, key: KeyName, down: bool) -> CoreResult<()> {
 			let (vk, implicit) = virtual_key(key)?;
 			let modifiers = [
@@ -661,20 +746,26 @@ mod background {
 					if let Some(modifier) = modifier
 						&& let Err(error) = self.transition(*modifier, true)
 					{
-						let mut cleanup = Ok(());
-						for &held in modifiers[..index].iter().flatten().rev() {
-							cleanup = super::completed(cleanup, self.transition(held, false));
-						}
+						let cleanup = control::cleanup(|| {
+							let mut cleanup = Ok(());
+							for &held in modifiers[..index].iter().flatten().rev() {
+								cleanup = super::completed(cleanup, self.transition(held, false));
+							}
+							cleanup
+						});
 						return super::completed(Err(error), cleanup);
 					}
 				}
 			}
 			let result = self.transition(vk, down);
 			if !down || result.is_err() {
-				let mut cleanup = Ok(());
-				for modifier in modifiers.into_iter().flatten().rev() {
-					cleanup = super::completed(cleanup, self.transition(modifier, false));
-				}
+				let cleanup = control::cleanup(|| {
+					let mut cleanup = Ok(());
+					for modifier in modifiers.into_iter().flatten().rev() {
+						cleanup = super::completed(cleanup, self.transition(modifier, false));
+					}
+					cleanup
+				});
 				return super::completed(result, cleanup);
 			}
 			result
@@ -687,26 +778,62 @@ mod background {
 		operation: impl FnOnce() -> CoreResult<()>,
 	) -> CoreResult<()> {
 		let mut emitter = KeyEmitter { hwnd, alt_depth: 0 };
-		let mut held = Vec::with_capacity(4);
-		for key in super::modifier_keys(modifiers) {
-			if let Err(error) = emitter.key(key, true) {
-				let mut cleanup = Ok(());
-				for held_key in held.into_iter().rev() {
-					cleanup = super::completed(cleanup, emitter.key(held_key, false));
-				}
-				return super::completed(Err(error), cleanup);
+		with_held_keys(
+			&mut emitter,
+			super::modifier_keys(modifiers),
+			KeyEmitter::emit,
+			|_| {
+				control::check()?;
+				operation()
+			},
+			super::completed,
+		)
+	}
+
+	fn with_keys(
+		hwnd: HWND,
+		keys: &[KeyName],
+		operation: impl FnOnce() -> CoreResult<()>,
+	) -> CoreResult<()> {
+		for &key in keys {
+			virtual_key(key)?;
+		}
+		if !keys.is_empty() {
+			let class = window::class_name(hwnd);
+			let kind = if keys.len() > 1 || keys.iter().any(|key| key.is_modifier()) {
+				EventKind::KeyCombo
+			} else {
+				EventKind::Keystroke
+			};
+			if let Some(reason) = drop_reason(hwnd, &class, kind) {
+				return Err(DesktopError::background_unavailable(format!(
+					"window {} ({class}) drops held background keys: {reason}; retry with takeover:true",
+					hwnd as usize,
+				)));
 			}
-			held.push(key);
 		}
-		let operation_result = operation();
-		let mut release_result = Ok(());
-		for key in held.into_iter().rev() {
-			release_result = super::completed(release_result, emitter.key(key, false));
-		}
-		super::completed(operation_result, release_result)
+		let mut emitter = KeyEmitter { hwnd, alt_depth: 0 };
+		with_held_keys(
+			&mut emitter,
+			keys.iter().copied(),
+			KeyEmitter::emit,
+			|_| {
+				control::check()?;
+				operation()
+			},
+			super::completed,
+		)
 	}
 
 	pub(super) fn key_chord(id: &str, keys: &[KeyName]) -> CoreResult<()> {
+		hold_keys(id, keys, KEY_GAP)
+	}
+
+	pub(super) fn hold_keys(id: &str, keys: &[KeyName], duration: Duration) -> CoreResult<()> {
+		control::check()?;
+		for &key in keys {
+			virtual_key(key)?;
+		}
 		let root = hwnd(id)?;
 		let kind = if keys.len() > 1 || keys.iter().any(|key| key.is_modifier()) {
 			EventKind::KeyCombo
@@ -716,46 +843,41 @@ mod background {
 		ensure_delivery(id, root, kind)?;
 		let mut emitter = KeyEmitter::focused(root)?;
 		ensure_delivery(id, emitter.hwnd, kind)?;
-		let mut held = Vec::with_capacity(keys.len());
-		for &key in keys {
-			if let Err(error) = emitter.key(key, true) {
-				let mut cleanup = Ok(());
-				for held_key in held.into_iter().rev() {
-					cleanup = super::completed(cleanup, emitter.key(held_key, false));
-				}
-				return super::completed(Err(error), cleanup);
-			}
-			held.push(key);
-		}
-		thread::sleep(KEY_GAP);
-		let mut result = Ok(());
-		for key in held.into_iter().rev() {
-			result = super::completed(result, emitter.key(key, false));
-		}
-		result
+		with_held_keys(
+			&mut emitter,
+			keys.iter().copied(),
+			KeyEmitter::emit,
+			|_| control::wait(duration),
+			super::completed,
+		)
 	}
 
 	pub(super) fn type_text(id: &str, text: &str) -> CoreResult<()> {
+		control::check()?;
 		let root = hwnd(id)?;
 		ensure_text_supported(id, root)?;
 		ensure_delivery(id, root, EventKind::TextInput)?;
 		let mut emitter = KeyEmitter::focused(root)?;
 		ensure_delivery(id, emitter.hwnd, EventKind::TextInput)?;
-		for unit in text_units(text) {
-			match unit {
-				TextUnit::Enter => {
-					emitter.transition(VK_RETURN, true)?;
-					thread::sleep(KEY_GAP);
-					emitter.transition(VK_RETURN, false)?;
-					thread::sleep(KEY_GAP + ENTER_SETTLE);
-				},
-				TextUnit::Char(character) => {
-					let mut units = [0; 2];
-					for &unit in character.encode_utf16(&mut units).iter() {
-						post(emitter.hwnd, WM_CHAR, usize::from(unit), 1)?;
-					}
-					thread::sleep(KEY_GAP);
-				},
+		for grapheme in graphemes_str(text) {
+			control::check()?;
+			for unit in text_units(grapheme) {
+				match unit {
+					TextUnit::Enter => {
+						emitter.transition(VK_RETURN, true)?;
+						let result = control::wait(KEY_GAP);
+						let release = control::cleanup(|| emitter.transition(VK_RETURN, false));
+						super::completed(result, release)?;
+						control::wait(KEY_GAP + ENTER_SETTLE)?;
+					},
+					TextUnit::Char(character) => {
+						let mut units = [0; 2];
+						for &unit in character.encode_utf16(&mut units).iter() {
+							post(emitter.hwnd, WM_CHAR, usize::from(unit), 1)?;
+						}
+						control::wait(KEY_GAP)?;
+					},
+				}
 			}
 		}
 		Ok(())
@@ -763,7 +885,7 @@ mod background {
 }
 
 mod foreground {
-	use std::{mem::size_of, thread, time::Duration};
+	use std::{mem::size_of, time::Duration};
 
 	use windows_sys::Win32::{
 		Foundation::{HWND, POINT},
@@ -783,9 +905,10 @@ mod foreground {
 			},
 		},
 	};
+	use xutf::graphemes_str;
 
 	use super::{
-		CoreResult, DesktopError, KeyName, Modifiers, MouseButton, PointerEvent, background,
+		CoreResult, DesktopError, KeyName, Modifiers, MouseButton, PointerEvent, background, control,
 	};
 	use crate::desktop::win32::{
 		delivery::{TextUnit, text_units},
@@ -814,6 +937,7 @@ mod foreground {
 
 	impl ForegroundGuard {
 		fn activate(id: &str, settle: Duration) -> CoreResult<Self> {
+			control::check()?;
 			let target = background::hwnd(id)?;
 			background::ensure_integrity(id, target)?;
 			// SAFETY: GetForegroundWindow has no preconditions.
@@ -825,53 +949,61 @@ mod foreground {
 			}
 			let mut guard = Self { previous, target, settle, armed: true };
 			if previous != target {
-				window::activate(target);
-				if !window::wait_for_foreground(target, ACTIVATION_TIMEOUT) {
-					let error = DesktopError::input_failed(format!(
-						"Windows refused to activate the exact target window {id}; no input was sent"
-					));
+				let activation = (|| {
+					let _ = window::activate(target)?;
+					if !window::wait_for_foreground(target, ACTIVATION_TIMEOUT)? {
+						return Err(DesktopError::input_failed(format!(
+							"Windows refused to activate the exact target window {id}; no input was sent"
+						)));
+					}
+					control::wait(Duration::from_millis(20))
+				})();
+				if let Err(error) = activation {
 					return super::completed(Err(error), guard.restore()).map(|()| guard);
 				}
-				thread::sleep(Duration::from_millis(20));
 			}
 			Ok(guard)
 		}
 
 		fn run(mut self, operation: impl FnOnce(HWND) -> CoreResult<()>) -> CoreResult<()> {
-			let result = operation(self.target);
-			thread::sleep(self.settle);
+			let result = control::check().and_then(|()| operation(self.target));
+			// Preserve the target's consumption window after partial delivery,
+			// but stop waiting immediately when the operation is cancelled.
+			let result = super::completed(result, control::wait(self.settle));
 			super::completed(result, self.restore())
 		}
 
 		fn restore(&mut self) -> CoreResult<()> {
 			self.armed = false;
-			// SAFETY: these functions validate scalar handles. Owned modal
-			// windows qualify for restoration, never for input targeting.
-			let current = unsafe { GetForegroundWindow() };
-			if current == self.previous {
-				return Ok(());
-			}
-			// SAFETY: GetAncestor validates the observed handle, including null.
-			let owner = unsafe { GetAncestor(current, GA_ROOTOWNER) };
-			if current != self.target && owner != self.target {
-				return Err(DesktopError::input_failed(
-					"foreground changed during takeover; left the newly active window untouched",
-				));
-			}
-			// SAFETY: IsWindow validates the previously observed handle.
-			if unsafe { IsWindow(self.previous) } == 0 {
-				return Err(DesktopError::input_failed(
-					"the previous foreground window no longer exists",
-				));
-			}
-			window::activate(self.previous);
-			if window::wait_for_foreground(self.previous, ACTIVATION_TIMEOUT) {
-				Ok(())
-			} else {
-				Err(DesktopError::input_failed(
-					"Windows refused to restore the previous foreground window",
-				))
-			}
+			control::cleanup(|| {
+				// SAFETY: these functions validate scalar handles. Owned modal
+				// windows qualify for restoration, never for input targeting.
+				let current = unsafe { GetForegroundWindow() };
+				if current == self.previous {
+					return Ok(());
+				}
+				// SAFETY: GetAncestor validates the observed handle, including null.
+				let owner = unsafe { GetAncestor(current, GA_ROOTOWNER) };
+				if current != self.target && owner != self.target {
+					return Err(DesktopError::input_failed(
+						"foreground changed during takeover; left the newly active window untouched",
+					));
+				}
+				// SAFETY: IsWindow validates the previously observed handle.
+				if unsafe { IsWindow(self.previous) } == 0 {
+					return Err(DesktopError::input_failed(
+						"the previous foreground window no longer exists",
+					));
+				}
+				let _ = window::activate(self.previous)?;
+				if window::wait_for_foreground(self.previous, ACTIVATION_TIMEOUT)? {
+					Ok(())
+				} else {
+					Err(DesktopError::input_failed(
+						"Windows refused to restore the previous foreground window",
+					))
+				}
+			})
 		}
 	}
 
@@ -927,6 +1059,7 @@ mod foreground {
 	/// Every delivery batch rechecks the exact HWND so user focus changes or
 	/// newly opened sibling/modal windows never become silent input targets.
 	fn send_to(target: HWND, events: &[INPUT]) -> CoreResult<()> {
+		control::check()?;
 		// SAFETY: GetForegroundWindow has no preconditions.
 		if unsafe { GetForegroundWindow() } != target {
 			return Err(DesktopError::input_failed(
@@ -937,6 +1070,7 @@ mod foreground {
 	}
 
 	fn send(events: &[INPUT]) -> CoreResult<()> {
+		control::check()?;
 		if events.is_empty() {
 			return Ok(());
 		}
@@ -950,14 +1084,17 @@ mod foreground {
 			// Only release transitions actually inserted by this call. Never
 			// release uninserted modifiers or replay clicks/text after a short send.
 			let releases = pending_releases(&events[..(sent as usize).min(events.len())]);
-			let mut cleanup = Ok(());
-			for release in releases.iter().rev() {
-				// SAFETY: release is one initialized INPUT copied synchronously.
-				if unsafe { SendInput(1, release, size_of::<INPUT>() as i32) } != 1 {
-					cleanup =
-						Err(DesktopError::input_failed("SendInput could not release inserted input"));
+			let cleanup = control::cleanup(|| {
+				let mut cleanup = Ok(());
+				for release in releases.iter().rev() {
+					// SAFETY: release is one initialized INPUT copied synchronously.
+					if unsafe { SendInput(1, release, size_of::<INPUT>() as i32) } != 1 {
+						cleanup =
+							Err(DesktopError::input_failed("SendInput could not release inserted input"));
+					}
 				}
-			}
+				cleanup
+			});
 			super::completed(
 				Err(DesktopError::input_failed(format!(
 					"Win32 SendInput inserted {sent} of {} events; the action may be partially applied",
@@ -1114,6 +1251,7 @@ mod foreground {
 	fn pointer_active(target: HWND, event: PointerEvent) -> CoreResult<()> {
 		let (x, y) = match &event {
 			PointerEvent::Click { x, y, .. }
+			| PointerEvent::Hold { x, y, .. }
 			| PointerEvent::Move { x, y }
 			| PointerEvent::Scroll { x, y, .. } => (*x, *y),
 			PointerEvent::Drag { path, .. } => *path
@@ -1138,22 +1276,33 @@ mod foreground {
 					})
 				})
 			},
+			PointerEvent::Hold { x, y, button, keys, duration } => {
+				let at = move_event(x, y)?;
+				let (down, up) = button_flags(button);
+				with_keys(target, &keys, || {
+					send_to(target, &[at, mouse_event(down, 0)])?;
+					let held = control::wait(duration);
+					let released = control::cleanup(|| send(&[mouse_event(up, 0)]));
+					super::completed(held, released)
+				})
+			},
 			PointerEvent::Move { x, y } => send_to(target, &[move_event(x, y)?]),
-			PointerEvent::Drag { path, button, modifiers } => {
+			PointerEvent::Drag { path, button, modifiers, mut keys } => {
+				control::add_modifiers(&mut keys, modifiers);
 				let Some(&(x, y)) = path.first() else {
 					return Err(DesktopError::input_failed("drag path is empty"));
 				};
 				let start = move_event(x, y)?;
 				let (down, up) = button_flags(button);
-				with_modifiers(target, modifiers, || {
+				with_keys(target, &keys, || {
 					send_to(target, &[start, mouse_event(down, 0)])?;
 					let movement = path.iter().skip(1).try_for_each(|&(x, y)| {
-						thread::sleep(DRAG_STEP);
+						control::wait(DRAG_STEP)?;
 						send_to(target, &[move_event(x, y)?])
 					});
 					// Releases must still reach the system input state when
-					// focus changed during a drag.
-					let release = send(&[mouse_event(up, 0)]);
+					// focus changed or the operation was cancelled during a drag.
+					let release = control::cleanup(|| send(&[mouse_event(up, 0)]));
 					super::completed(movement, release)
 				})
 			},
@@ -1212,21 +1361,31 @@ mod foreground {
 		)
 	}
 
-	/// Sends `presses`, runs `operation`, and releases the inserted transitions.
-	/// A short press batch cleans up its accepted prefix inside send.
+	/// Sends each press separately so cancellation can interrupt a long chord,
+	/// then releases only transitions successfully inserted before it stopped.
 	fn holding(
 		target: HWND,
 		presses: &[INPUT],
 		releases: &[INPUT],
 		operation: impl FnOnce() -> CoreResult<()>,
 	) -> CoreResult<()> {
-		// send cleans up only the accepted prefix if presses is short.
-		send_to(target, presses)?;
-		let result = operation();
-		let mut released = Ok(());
-		for release in releases {
-			released = super::completed(released, send(std::slice::from_ref(release)));
-		}
+		let mut held = 0;
+		let result = (|| {
+			for press in presses {
+				send_to(target, std::slice::from_ref(press))?;
+				held += 1;
+			}
+			control::check()?;
+			operation()
+		})();
+		let released = control::cleanup(|| {
+			let mut released = Ok(());
+			// Releases are the reverse of presses; skip the uninserted suffix.
+			for release in &releases[releases.len() - held..] {
+				released = super::completed(released, send(std::slice::from_ref(release)));
+			}
+			released
+		});
 		super::completed(result, released)
 	}
 
@@ -1252,8 +1411,27 @@ mod foreground {
 	}
 
 	pub(super) fn key_chord(id: &str, keys: &[KeyName]) -> CoreResult<()> {
+		hold_keys(id, keys, Duration::ZERO)
+	}
+
+	pub(super) fn hold_keys(id: &str, keys: &[KeyName], duration: Duration) -> CoreResult<()> {
+		// Resolve all key names before activation or input.
+		for &key in keys {
+			background::virtual_key(key)?;
+		}
+		ForegroundGuard::activate(id, KEY_SETTLE)?
+			.run(|target| with_keys(target, keys, || control::wait(duration)))
+	}
+
+	fn with_keys(
+		target: HWND,
+		keys: &[KeyName],
+		operation: impl FnOnce() -> CoreResult<()>,
+	) -> CoreResult<()> {
+		control::check()?;
 		let mut virtual_keys = Vec::with_capacity(keys.len().saturating_mul(2));
 		for &key in keys {
+			control::check()?;
 			let (vk, implicit) = background::virtual_key(key)?;
 			if implicit & 1 != 0 {
 				virtual_keys.push(background::virtual_key(KeyName::Shift)?.0);
@@ -1275,35 +1453,94 @@ mod foreground {
 			.rev()
 			.map(|&vk| key_event(vk, true))
 			.collect::<Vec<_>>();
-		ForegroundGuard::activate(id, KEY_SETTLE)?
-			.run(|target| holding(target, &presses, &releases, || Ok(())))
+		holding(target, &presses, &releases, operation)
+	}
+
+	fn text_events(unit: TextUnit, events: &mut [INPUT; 4]) -> &[INPUT] {
+		match unit {
+			TextUnit::Enter => {
+				events[0] = key_event(VK_RETURN, false);
+				events[1] = key_event(VK_RETURN, true);
+				&events[..2]
+			},
+			TextUnit::Char(character) => {
+				let mut units = [0; 2];
+				let units = character.encode_utf16(&mut units);
+				for (index, &unit) in units.iter().enumerate() {
+					events[index * 2] = unicode_event(unit, false);
+					events[index * 2 + 1] = unicode_event(unit, true);
+				}
+				&events[..units.len() * 2]
+			},
+		}
+	}
+
+	/// Bounded packets preserve short-send accounting without constructing an
+	/// uninterruptible SendInput batch proportional to the entire text.
+	pub(super) fn type_desktop(text: &str) -> CoreResult<()> {
+		send_text(None, text)
+	}
+
+	fn send_text(target: Option<HWND>, text: &str) -> CoreResult<()> {
+		let mut events = [unicode_event(0, false); 4];
+		for grapheme in graphemes_str(text) {
+			control::check()?;
+			for unit in text_units(grapheme) {
+				let events = text_events(unit, &mut events);
+				match target {
+					Some(target) => send_to(target, events)?,
+					None => send(events)?,
+				}
+			}
+		}
+		control::check()
 	}
 
 	pub(super) fn type_text(id: &str, text: &str) -> CoreResult<()> {
-		let mut events = Vec::with_capacity(text.len().saturating_mul(2));
-		for unit in text_units(text) {
-			match unit {
-				TextUnit::Enter => {
-					events.extend([key_event(VK_RETURN, false), key_event(VK_RETURN, true)]);
-				},
-				TextUnit::Char(character) => {
-					let mut units = [0; 2];
-					for &unit in character.encode_utf16(&mut units).iter() {
-						events.extend([unicode_event(unit, false), unicode_event(unit, true)]);
-					}
-				},
-			}
-		}
+		control::check()?;
 		background::ensure_text_supported(id, background::hwnd(id)?)?;
-		if events.is_empty() {
+		if text.is_empty() {
 			return Ok(());
 		}
-		ForegroundGuard::activate(id, KEY_SETTLE)?.run(|target| send_to(target, &events))
+		ForegroundGuard::activate(id, KEY_SETTLE)?.run(|target| send_text(Some(target), text))
 	}
 
 	#[cfg(test)]
 	mod tests {
 		use super::*;
+
+		#[test]
+		fn cancellation_stops_packets_but_allows_cleanup_and_a_later_operation() {
+			let source = control::CancellationSource::default();
+			let token = source.token();
+			source.cancel();
+			control::with_token_for_test(&token, || {
+				let cancelled = token.check().unwrap_err().message;
+				assert_eq!(send(&[]).unwrap_err().message, cancelled);
+				assert_eq!(send_to(std::ptr::null_mut(), &[]).unwrap_err().message, cancelled);
+				control::cleanup(|| assert!(send(&[]).is_ok()));
+				assert_eq!(send(&[]).unwrap_err().message, cancelled);
+			});
+			control::with_token_for_test(&source.token(), || assert!(send(&[]).is_ok()));
+		}
+
+		#[test]
+		fn text_packets_keep_surrogates_and_return_transitions_together() {
+			let mut storage = [unicode_event(0, false); 4];
+			let emoji = text_events(TextUnit::Char('\u{1f600}'), &mut storage);
+			assert_eq!(emoji.len(), 4);
+			let pending = pending_releases(&emoji[..3]);
+			assert_eq!(pending.len(), 1);
+			assert!(same_release(&pending[0], &unicode_event(0xde00, true)));
+			assert!(pending_releases(emoji).is_empty());
+
+			let enter = text_events(TextUnit::Enter, &mut storage);
+			assert_eq!(enter.len(), 2);
+			let pending = pending_releases(&enter[..1]);
+			assert_eq!(pending.len(), 1);
+			assert!(same_release(&pending[0], &key_event(VK_RETURN, true)));
+			assert!(pending_releases(enter).is_empty());
+		}
 
 		#[test]
 		fn short_click_releases_only_an_inserted_button_down() {
@@ -1361,21 +1598,18 @@ pub(super) fn pointer(
 	event: PointerEvent,
 	mode: DeliveryMode,
 ) -> CoreResult<()> {
+	control::check()?;
 	match target {
-		Target::Desktop => global_pointer(global, event),
+		Target::Desktop | Target::Display(_) => global_pointer(global, event),
 		Target::Window(id) if mode == DeliveryMode::Background => background::pointer(ax, id, event),
 		Target::Window(id) => foreground::pointer(id, event),
 	}
 }
 
-pub(super) fn type_text(
-	global: &mut Enigo,
-	target: &Target,
-	text: &str,
-	mode: DeliveryMode,
-) -> CoreResult<()> {
+pub(super) fn type_text(target: &Target, text: &str, mode: DeliveryMode) -> CoreResult<()> {
+	control::check()?;
 	match target {
-		Target::Desktop => global.text(text).map_err(enigo_error),
+		Target::Desktop | Target::Display(_) => foreground::type_desktop(text),
 		Target::Window(id) if mode == DeliveryMode::Background => background::type_text(id, text),
 		Target::Window(id) => foreground::type_text(id, text),
 	}
@@ -1387,28 +1621,53 @@ pub(super) fn key_chord(
 	keys: &[KeyName],
 	mode: DeliveryMode,
 ) -> CoreResult<()> {
+	control::check()?;
 	if keys.is_empty() {
 		return Err(DesktopError::input_failed("key chord is empty"));
 	}
 	match target {
-		Target::Desktop => global_key_chord(global, keys),
+		Target::Desktop | Target::Display(_) => global_key_chord(global, keys),
 		Target::Window(id) if mode == DeliveryMode::Background => background::key_chord(id, keys),
 		Target::Window(id) => foreground::key_chord(id, keys),
+	}
+}
+
+pub(super) fn hold_keys(
+	global: &mut Enigo,
+	target: &Target,
+	keys: &[KeyName],
+	duration: Duration,
+	mode: DeliveryMode,
+) -> CoreResult<()> {
+	control::check()?;
+	for &key in keys {
+		background::virtual_key(key)?;
+	}
+	match target {
+		Target::Desktop | Target::Display(_) => {
+			with_global_keys(global, keys, |_| control::wait(duration))
+		},
+		Target::Window(id) if mode == DeliveryMode::Background => {
+			background::hold_keys(id, keys, duration)
+		},
+		Target::Window(id) => foreground::hold_keys(id, keys, duration),
 	}
 }
 
 /// Restores a minimized window and makes it the foreground window.
 pub(super) fn raise_window(id: &str) -> CoreResult<()> {
 	use windows_sys::Win32::UI::WindowsAndMessaging::{IsIconic, SW_RESTORE, ShowWindow};
+	control::check()?;
 	let hwnd = background::hwnd(id)?;
+	control::check()?;
 	// SAFETY: hwnd was validated; these functions do not retain borrowed state.
 	unsafe {
 		if IsIconic(hwnd) != 0 {
 			ShowWindow(hwnd, SW_RESTORE);
 		}
 	}
-	window::activate(hwnd);
-	if window::wait_for_foreground(hwnd, Duration::from_millis(500)) {
+	let _ = window::activate(hwnd)?;
+	if window::wait_for_foreground(hwnd, Duration::from_millis(500))? {
 		Ok(())
 	} else {
 		Err(DesktopError::input_failed(format!(
