@@ -4262,7 +4262,7 @@ export class TUI extends Container {
 		if (full && rowsBuffer !== "") this.#fullRedrawCount += 1;
 		// DEC 1049 restores the normal-buffer cursor on exit. Track this buffer's
 		// visibility and marker position without replacing that saved normal row,
-		// which stop() and a late native-surface handshake use after the restore.
+		// which a late native-surface handshake uses after the restore.
 		if (target) this.#hardwareCursorState = target;
 		else this.#recordHardwareCursorHidden();
 	}
