@@ -54,16 +54,27 @@ describe("reviewed package exclusions in discovery", () => {
 		await Bun.write(path.join(root, "tool.ts"), "export default function () {}\n");
 	}
 
-	/** Review both copies and keep `keepRoot`; returns the live settings record. */
-	async function reviewPair(settings = Settings.isolated({})) {
+	/** Give each package one skill named after it. */
+	async function writePackageSkills(): Promise<void> {
+		for (const root of [keepRoot, hideRoot]) {
+			const name = path.basename(root);
+			await Bun.write(
+				path.join(root, "skills", name, "SKILL.md"),
+				`---\nname: ${name}\ndescription: Skill of ${name}\n---\nBody\n`,
+			);
+		}
+	}
+
+	/** Review two copies and keep the first (default: the extension packages); returns the live settings record. */
+	async function reviewPair(
+		settings = Settings.isolated({}),
+		keep = keepRoot,
+		hide = hideRoot,
+		kind: "extension" | "skill" = "extension",
+	) {
 		const snapshots = await Promise.all(
-			[keepRoot, hideRoot].map(async root =>
-				snapshotResource({
-					id: root,
-					label: path.basename(root),
-					kind: "extension",
-					root: await fs.realpath(root),
-				}),
+			[keep, hide].map(async root =>
+				snapshotResource({ id: root, label: path.basename(root), kind, root: await fs.realpath(root) }),
 			),
 		);
 		await excludeReviewedResources(snapshots, snapshots[0].candidate.id, settings);
@@ -114,19 +125,7 @@ describe("reviewed package exclusions in discovery", () => {
 		const hideFile = path.join(extensionsDir, "hide.ts");
 		await Bun.write(keepFile, extensionCode);
 		await Bun.write(hideFile, "export default function (pi) { /* hide */ }\n");
-		const snapshots = await Promise.all(
-			[keepFile, hideFile].map(async file =>
-				snapshotResource({
-					id: file,
-					label: path.basename(file),
-					kind: "extension",
-					root: await fs.realpath(file),
-				}),
-			),
-		);
-		const settings = Settings.isolated({});
-		await excludeReviewedResources(snapshots, snapshots[0].candidate.id, settings);
-		const exclusions = cfgUserResourceExclusions.get(settings);
+		const { exclusions } = await reviewPair(undefined, keepFile, hideFile);
 		expect(Object.keys(exclusions)).toEqual([await fs.realpath(hideFile)]);
 		const paths = await discoverNative(exclusions);
 		expect(paths).toContain(keepFile);
@@ -217,13 +216,9 @@ describe("reviewed package exclusions in discovery", () => {
 	});
 
 	it("keeps a hidden package's skills out of skill discovery until the package changes", async () => {
+		await writePackageSkills();
 		for (const root of [keepRoot, hideRoot]) {
-			const name = path.basename(root);
-			await Bun.write(path.join(root, "package.json"), JSON.stringify({ name }));
-			await Bun.write(
-				path.join(root, "skills", name, "SKILL.md"),
-				`---\nname: ${name}\ndescription: Skill of ${name}\n---\nBody\n`,
-			);
+			await Bun.write(path.join(root, "package.json"), JSON.stringify({ name: path.basename(root) }));
 		}
 		const { exclusions } = await reviewPair();
 		const packageSkills = async () => {
@@ -251,26 +246,8 @@ describe("reviewed package exclusions in discovery", () => {
 		expect(await packageSkills()).toEqual(["hide-pkg", "keep-pkg"]);
 	});
 
-	/** Review two skill directories and hide `hide` in favor of `keep`. */
-	async function reviewSkillDirs(keep: string, hide: string): Promise<ResourceExclusions> {
-		const snapshots = await Promise.all(
-			[keep, hide].map(async root =>
-				snapshotResource({ id: root, label: path.basename(root), kind: "skill", root: await fs.realpath(root) }),
-			),
-		);
-		const settings = Settings.isolated({});
-		await excludeReviewedResources(snapshots, snapshots[0].candidate.id, settings);
-		return cfgUserResourceExclusions.get(settings);
-	}
-
 	it("hides skills inside an excluded package however they are reached", async () => {
-		for (const root of [keepRoot, hideRoot]) {
-			const name = path.basename(root);
-			await Bun.write(
-				path.join(root, "skills", name, "SKILL.md"),
-				`---\nname: ${name}\ndescription: Skill of ${name}\n---\nBody\n`,
-			);
-		}
+		await writePackageSkills();
 		const { exclusions } = await reviewPair();
 		const nativeSkills = path.join(getProjectAgentDir(cwd), "skills");
 		await fs.mkdir(nativeSkills, { recursive: true });
@@ -305,7 +282,7 @@ describe("reviewed package exclusions in discovery", () => {
 		const claudeDir = path.join(cwd, ".claude", "skills", "gate-dup");
 		await Bun.write(path.join(nativeDir, "SKILL.md"), "---\nname: gate-dup\ndescription: Native copy\n---\nNative\n");
 		await Bun.write(path.join(claudeDir, "SKILL.md"), "---\nname: gate-dup\ndescription: Claude copy\n---\nClaude\n");
-		const exclusions = await reviewSkillDirs(claudeDir, nativeDir);
+		const { exclusions } = await reviewPair(undefined, claudeDir, nativeDir, "skill");
 		const loaded = async (resourceExclusions: ResourceExclusions) =>
 			(
 				await loadSkills({
@@ -331,7 +308,7 @@ describe("reviewed package exclusions in discovery", () => {
 			const otherDir = path.join(cwd, "other-skills", "gate-other");
 			await Bun.write(path.join(managedDir, "SKILL.md"), "---\nname: gate-solo\ndescription: Managed\n---\nBody\n");
 			await Bun.write(path.join(otherDir, "SKILL.md"), "---\nname: gate-other\ndescription: Other\n---\nBody\n");
-			const exclusions = await reviewSkillDirs(otherDir, managedDir);
+			const { exclusions } = await reviewPair(undefined, otherDir, managedDir, "skill");
 			const names = async (resourceExclusions: ResourceExclusions) =>
 				(
 					await loadSkills({

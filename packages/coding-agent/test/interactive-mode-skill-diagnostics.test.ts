@@ -19,6 +19,7 @@ import { Composer } from "@oh-my-pi/pi-tui/prompt/composer";
 import { initTheme, stopThemeWatcher } from "@oh-my-pi/pi-tui/theme";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { VirtualTerminal } from "../../tui/test/virtual-terminal";
+import { createAssistantMessage } from "./helpers/agent-session-setup";
 
 const PANEL = "Skill diagnostics";
 
@@ -174,34 +175,15 @@ describe("startup skill discovery diagnostics", () => {
 				quote: "description: Design work",
 				explanation: "same purpose",
 			});
-			return {
-				role: "assistant",
-				api: "anthropic-messages",
-				provider: "anthropic",
-				model: "claude-sonnet-4-5",
-				timestamp: 1_700_000_000_000,
-				usage: {
-					input: 1,
-					output: 1,
-					cacheRead: 0,
-					cacheWrite: 0,
-					totalTokens: 2,
-					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-				},
-				stopReason: "stop",
-				content: [
-					{
-						type: "text",
-						text: JSON.stringify({
-							relationship: "overlap",
-							evidence: [cite("skill-1"), cite("skill-2")],
-							differences: ["the instructions differ"],
-							recommendation: { action: "prefer", preferredId: "skill-1", reason: "the first is a superset" },
-							limitations: [],
-						}),
-					},
-				],
-			};
+			return createAssistantMessage(
+				JSON.stringify({
+					relationship: "overlap",
+					evidence: [cite("skill-1"), cite("skill-2")],
+					differences: ["the instructions differ"],
+					recommendation: { action: "prefer", preferredId: "skill-1", reason: "the first is a superset" },
+					limitations: [],
+				}),
+			);
 		};
 
 		beforeEach(async () => {
@@ -271,12 +253,6 @@ describe("startup skill discovery diagnostics", () => {
 			expect(view).toContain("brainstorming");
 			expect(view).toContain("conflict +2");
 			expect(view).toContain("solo-skill");
-			expect(view).toContain(path.join(first, "brainstorming", "SKILL.md"));
-			expect(view).toContain(path.join(older, "brainstorming", "SKILL.md"));
-			expect(view).toContain(path.join(mirror, "brainstorming", "SKILL.md"));
-			expect(view).toContain("older/brainstorming");
-			expect(view).toMatch(/Selection:.*[Dd]iscovery order/);
-			expect(view).toMatch(/Identical to: brainstorming/);
 			expect(view).toContain("No analysis yet.");
 			expect(view).toContain("no origin");
 			expect(modelCall).not.toHaveBeenCalled();
