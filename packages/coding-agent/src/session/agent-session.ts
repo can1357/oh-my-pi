@@ -10318,7 +10318,7 @@ export class AgentSession implements SettingsScope {
 	 * `expandPromptTemplates` (default false) expands a registered `/skill:<name>` and
 	 * prompt templates on every delivery path. Extension, custom and file slash commands
 	 * run only through prompt() (omitted `deliverAs`, or `aside` at idle); explicit
-	 * steer/follow-up queueing never runs commands, matching steer()/followUp().
+	 * steer/follow-up queueing sends any other `/` text to the model as written.
 	 */
 	async sendUserMessage(
 		content: string | (TextContent | ImageContent)[],
@@ -10348,21 +10348,25 @@ export class AgentSession implements SettingsScope {
 		const invocation = expand && this.skillsSettings?.enableSkillCommands ? parseSkillInvocation(text) : undefined;
 		const skill = invocation && this.skills.find(candidate => candidate.name === invocation.name);
 		if (invocation && skill) {
-			const built = await buildSkillPromptMessage(skill, invocation, "user");
-			await this.promptCustomMessage(
-				{
-					customType: SKILL_PROMPT_MESSAGE_TYPE,
-					content: images ? [{ type: "text", text: built.message }, ...images] : built.message,
-					display: true,
-					details: built.details,
-					attribution: options?.attribution ?? "user",
-				},
-				{
-					streamingBehavior: options?.deliverAs ?? "steer",
-					queueOnly: options?.deliverAs === "steer" || options?.deliverAs === "followUp",
-					queueChipText: text,
-				},
-			);
+			// Admit before reading SKILL.md so shutdown and settle checks see this send,
+			// as they see an option-off send admitted synchronously by prompt().
+			await this.#admitSubmission(async () => {
+				const built = await buildSkillPromptMessage(skill, invocation, "user");
+				await this.promptCustomMessage(
+					{
+						customType: SKILL_PROMPT_MESSAGE_TYPE,
+						content: images ? [{ type: "text", text: built.message }, ...images] : built.message,
+						display: true,
+						details: built.details,
+						attribution: options?.attribution ?? "user",
+					},
+					{
+						streamingBehavior: options?.deliverAs ?? "steer",
+						queueOnly: options?.deliverAs === "steer" || options?.deliverAs === "followUp",
+						queueChipText: text,
+					},
+				);
+			});
 			return;
 		}
 		const queuedText = expand ? expandPromptTemplate(text, [...this.#promptTemplates]) : text;
