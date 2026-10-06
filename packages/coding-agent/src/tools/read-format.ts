@@ -438,6 +438,11 @@ export async function buildInMemoryTextResult(
 			)}, exceeds ${formatBytes(DEFAULT_MAX_BYTES)} limit. Unable to display a valid UTF-8 snippet.]`;
 		}
 
+		// truncateHead omits partial lines; account only for a valid preview actually emitted.
+		const previewBytes = !shouldAddHashLines && snippet.text.length > 0 ? snippet.bytes : 0;
+		truncation.outputLines = previewBytes > 0 ? 1 : 0;
+		truncation.outputBytes = previewBytes;
+		truncation.lastLinePartial = previewBytes > 0;
 		details.truncation = toReadTruncationStats(truncation);
 		truncationInfo = {
 			result: truncation,

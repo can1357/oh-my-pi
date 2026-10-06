@@ -2279,12 +2279,12 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 						leadingContext,
 						collectedLines.length,
 					);
-					// A first line larger than the byte budget collects no complete
-					// line, yet the window still renders a byte-capped preview.
-					// Account for that preview so the notice/meta describe the
-					// delivered partial line rather than reporting zero over the
-					// ~50 KB shown on screen.
-					const previewBytes = firstLineExceedsLimit ? (firstLinePreview?.bytes ?? 0) : 0;
+					const shouldAddHashLines = !rawSelector && displayMode.hashLines;
+					// Hashline mode emits only a diagnostic; invalid UTF-8 previews emit no source bytes.
+					const previewBytes =
+						firstLineExceedsLimit && !shouldAddHashLines && (firstLinePreview?.text.length ?? 0) > 0
+							? (firstLinePreview?.bytes ?? 0)
+							: 0;
 
 					const truncation: TruncationResult | undefined = reachedEof
 						? {
@@ -2295,12 +2295,11 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 								totalBytes: firstLineExceedsLimit ? (firstLineByteLength ?? previewBytes) : selectedBytes,
 								outputLines: firstLineExceedsLimit ? (previewBytes > 0 ? 1 : 0) : collectedLines.length,
 								outputBytes: firstLineExceedsLimit ? previewBytes : collectedBytes,
-								lastLinePartial: false,
+								lastLinePartial: firstLineExceedsLimit && previewBytes > 0,
 								firstLineExceedsLimit,
 							}
 						: undefined;
 
-					const shouldAddHashLines = !rawSelector && displayMode.hashLines;
 					const shouldAddLineNumbers = rawSelector ? false : shouldAddHashLines ? false : displayMode.lineNumbers;
 					let hashContext: HashlineHeaderContext | undefined;
 					if (shouldAddHashLines && collectedLines.length > 0 && !firstLineExceedsLimit) {
