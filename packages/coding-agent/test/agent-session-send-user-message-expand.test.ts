@@ -21,11 +21,13 @@ describe("AgentSession.sendUserMessage expandPromptTemplates", () => {
 	/** Set by a test to hold the next model turn open until it resolves `release`. */
 	let heldTurn: { started: PromiseWithResolvers<void>; release: PromiseWithResolvers<void> } | undefined;
 	const observedTurns: string[] = [];
+	let skillsSettings: { enableSkillCommands: boolean };
 
 	beforeEach(async () => {
 		tempDir = TempDir.createSync("@pi-send-user-message-expand-");
 		observedTurns.length = 0;
 		heldTurn = undefined;
+		skillsSettings = { enableSkillCommands: true };
 		const skillDir = path.join(tempDir.path(), "demo");
 		const skillPath = path.join(skillDir, "SKILL.md");
 		await Bun.write(skillPath, `---\nname: demo\ndescription: Demo skill\n---\n\n${SKILL_BODY}\n`);
@@ -71,7 +73,8 @@ describe("AgentSession.sendUserMessage expandPromptTemplates", () => {
 			settings: Settings.isolated({ "compaction.enabled": false }),
 			modelRegistry: new ModelRegistry(authStorage),
 			skills: [{ name: "demo", description: "Demo skill", filePath: skillPath, baseDir: skillDir, source: "test" }],
-			skillsSettings: { enableSkillCommands: true },
+			skillsSettings,
+			promptTemplates: [{ name: "tpl", description: "Demo template", content: "TPL BODY $1", source: "(test)" }],
 		});
 	});
 
@@ -91,6 +94,29 @@ describe("AgentSession.sendUserMessage expandPromptTemplates", () => {
 		expect(observedTurns[0]).toBe("/skill:demo first");
 		expect(observedTurns[1]).toContain(SKILL_BODY);
 		expect(observedTurns[1]).toContain("second");
+	});
+
+	it("keeps /skill: text literal when skill commands are disabled", async () => {
+		skillsSettings.enableSkillCommands = false;
+		await session.sendUserMessage("/skill:demo off", { expandPromptTemplates: true });
+		await session.waitForIdle();
+
+		expect(observedTurns).toEqual(["/skill:demo off"]);
+	});
+
+	it("queues an idle explicit follow-up skill without starting a turn", async () => {
+		await session.sendUserMessage("/skill:demo later", { expandPromptTemplates: true, deliverAs: "followUp" });
+
+		expect(observedTurns).toHaveLength(0);
+		expect(session.queuedMessageCount).toBe(1);
+	});
+
+	it("queues an expanded prompt template that the submitted text can still remove", async () => {
+		await session.sendUserMessage("/tpl x", { expandPromptTemplates: true, deliverAs: "steer" });
+
+		expect(session.getQueuedMessages().steering).toEqual(["TPL BODY x"]);
+		expect(session.removeQueuedMessage("/tpl x", "steering")).toBe(true);
+		expect(session.queuedMessageCount).toBe(0);
 	});
 
 	it("expands a /skill: command queued as a follow-up while the agent is streaming", async () => {
