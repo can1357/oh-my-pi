@@ -1,6 +1,6 @@
 /**
- * What a person is shown before resource files leave the machine. Shared by `/skills diagnostics
- * analyze` and `plugin doctor --analyze` so both disclose the same boundary and both settle caps
+ * What a person is shown before resource files leave the machine. Shared by the `/skills
+ * diagnostics` panel and `plugin doctor --analyze` so both disclose the same boundary and both settle caps
  * before the first prompt.
  */
 import { sanitizeDisplaySingleLine } from "@oh-my-pi/pi-tui/overlays/extensions/display-text";

@@ -70,6 +70,20 @@ test("a stale review refuses every mutation, including still-current sibling cop
 	expect(cfgUserResourceExclusions.get(settings)).toEqual({});
 });
 
+test("revoked session authorization prevents all global preference writes", async () => {
+	const keep = await skillCandidate("keep");
+	const hide = await skillCandidate("hide");
+	const snapshots = await Promise.all([snapshotResource(keep), snapshotResource(hide)]);
+	const settings = Settings.isolated({});
+	await expect(
+		excludeReviewedResources(snapshots, "keep", settings, () => {
+			throw new Error("Session changed");
+		}),
+	).rejects.toThrow("Session changed");
+	expect(cfgUserResourceExclusions.get(settings)).toEqual({});
+	expect(await isRootExcluded(hide.root, cfgUserResourceExclusions.get(settings))).toBe(false);
+});
+
 test("unknown preferred IDs and incomplete reviews cannot authorize exclusions", async () => {
 	const keep = await skillCandidate("keep");
 	const hide = await skillCandidate("hide");

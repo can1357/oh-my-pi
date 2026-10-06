@@ -20,6 +20,7 @@ import type { RpcGoalResult } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-goal
 import type { RpcMessagesPage } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-messages";
 import type {
 	RpcAbortAndRestoreQueueResult,
+	ResourceAnalysis,
 	RpcAgentSessionEventFrame,
 	RpcAskDialogQuestion,
 	RpcAvailableCommandsUpdateFrame,
@@ -59,8 +60,11 @@ import type {
 	RpcSubagentMessagesResult,
 	RpcSubagentProgressFrame,
 	RpcSubagentSnapshot,
+	SkillAnalysisCandidate,
+	SkillDiagnosticAnalysisRecord,
 	SkillDiagnosticDuplicate,
 	SkillDiagnosticEntry,
+	SkillDiagnosticItem,
 	SkillDiagnosticsSnapshot,
 	SkillResolutionDiagnostic,
 } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-types";
@@ -287,6 +291,12 @@ export type State = Assert<
 		skillResolutionDiagnostic: Outbound<SkillResolutionDiagnostic, Wire.SkillResolutionDiagnostic>;
 		skillDiagnosticDuplicate: Outbound<SkillDiagnosticDuplicate, Wire.SkillDiagnosticDuplicate>;
 		skillDiagnosticEntry: Outbound<SkillDiagnosticEntry, Wire.SkillDiagnosticEntry>;
+		skillDiagnosticItem: Outbound<SkillDiagnosticItem, Wire.SkillDiagnosticItem>;
+		skillAnalysisRecord: Outbound<SkillDiagnosticAnalysisRecord, Wire.SkillDiagnosticAnalysisRecord>;
+		skillAnalysisCandidate: Outbound<SkillAnalysisCandidate, Wire.SkillAnalysisCandidate>;
+		resourceAnalysis: Outbound<ResourceAnalysis, Wire.ResourceAnalysis>;
+		resourceAnalysisEvidence: Outbound<ResourceAnalysis["evidence"][number], Wire.ResourceAnalysisEvidence>;
+		resourceRecommendation: Outbound<ResourceAnalysis["recommendation"], Wire.ResourceRecommendation>;
 		subagentMessages: Outbound<RpcSubagentMessagesResult, Wire.SubagentMessages>;
 		btwHistoryRecord: Outbound<RpcBtwHistoryRecord, Wire.BtwHistoryRecord>;
 		btwHistoryTurn: Outbound<BtwHistoryTurn, Wire.BtwHistoryTurn>;

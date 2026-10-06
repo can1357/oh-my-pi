@@ -54,6 +54,7 @@ export async function excludeReviewedResources(
 	snapshots: readonly ResourceSnapshot[],
 	preferredId: string,
 	settings: Settings,
+	assertAuthorized?: () => void,
 ): Promise<void> {
 	if (
 		snapshots.length < 2 ||
@@ -94,6 +95,8 @@ export async function excludeReviewedResources(
 		if (problem) throw new Error(`Reviewed resources cannot be hidden together: ${problem}`);
 	}
 
+	// Recheck session ownership after the filesystem awaits, before any global setting changes.
+	assertAuthorized?.();
 	const before = cfgUserResourceExclusions.get(settings);
 	for (const [root, entry] of entries) cfgResourceExclusions.setEntry(settings, root, entry);
 	let failure: unknown;

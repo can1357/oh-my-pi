@@ -122,40 +122,93 @@ async function writeSkill(root: string, body: string): Promise<string> {
 	return filePath;
 }
 
+type DiagnosticEntry = Record<string, unknown>;
+interface DiagnosticDuplicate {
+	skill: DiagnosticEntry;
+	retained: DiagnosticEntry;
+	match: string;
+}
+
+function assertAllowlistedEntries(entries: DiagnosticEntry[], duplicates: DiagnosticDuplicate[]): void {
+	for (const duplicate of duplicates) {
+		expect(Object.keys(duplicate).sort()).toEqual(["match", "retained", "skill"]);
+	}
+	for (const entry of [...entries, ...duplicates.flatMap(duplicate => [duplicate.skill, duplicate.retained])]) {
+		// Optional keys are allowlisted, never required.
+		const optionalKeys = ["pluginName", "repository", "version"].filter(key => key in entry);
+		expect(Object.keys(entry).sort()).toEqual(["filePath", "name", "source", ...optionalKeys].sort());
+	}
+}
+
+const ITEM_KEYS = [
+	"analysis",
+	"canAnalyze",
+	"duplicates",
+	"issues",
+	"lastAnalysis",
+	"name",
+	"reason",
+	"skills",
+	"unavailableReason",
+];
+const RECORD_KEYS = [
+	"applied",
+	"bytes",
+	"candidates",
+	"createdAt",
+	"disclosure",
+	"error",
+	"id",
+	"model",
+	"name",
+	"result",
+	"status",
+];
+const CANDIDATE_KEYS = ["complete", "filePath", "files", "fingerprint", "id", "name", "omissions", "root"];
+
+function assertAllowlistedRecord(record: Record<string, unknown>): void {
+	for (const key of Object.keys(record)) expect(RECORD_KEYS).toContain(key);
+	for (const candidate of record.candidates as Array<Record<string, unknown>>) {
+		expect(Object.keys(candidate).sort()).toEqual(CANDIDATE_KEYS);
+	}
+}
+
 function assertAllowlistedSnapshot(value: unknown): asserts value is {
 	cwd: string;
 	showStartupDiagnostics: boolean;
 	diagnostics: Array<{
 		name: string;
 		reason: string;
-		skills: Array<Record<string, unknown>>;
-		duplicates: Array<{ skill: Record<string, unknown>; retained: Record<string, unknown>; match: string }>;
+		skills: DiagnosticEntry[];
+		duplicates: DiagnosticDuplicate[];
+	}>;
+	items: Array<{
+		name: string;
+		issues: string[];
+		skills: DiagnosticEntry[];
+		duplicates: DiagnosticDuplicate[];
+		canAnalyze: boolean;
+		unavailableReason?: string;
+		analysis?: Record<string, unknown>;
+		lastAnalysis?: Record<string, unknown>;
 	}>;
 } {
 	expect(isRecord(value)).toBe(true);
 	if (!isRecord(value)) throw new Error("snapshot must be an object");
-	expect(Object.keys(value).sort()).toEqual(["cwd", "diagnostics", "showStartupDiagnostics"]);
+	expect(Object.keys(value).sort()).toEqual(["cwd", "diagnostics", "items", "showStartupDiagnostics"]);
 	expect(typeof value.cwd).toBe("string");
 	expect(typeof value.showStartupDiagnostics).toBe("boolean");
 	expect(Array.isArray(value.diagnostics)).toBe(true);
 	for (const diagnostic of value.diagnostics as Array<Record<string, unknown>>) {
 		expect(Object.keys(diagnostic).sort()).toEqual(["duplicates", "name", "reason", "skills"]);
-		const duplicates = diagnostic.duplicates as Array<{
-			skill: Record<string, unknown>;
-			retained: Record<string, unknown>;
-			match: string;
-		}>;
-		for (const duplicate of duplicates) {
-			expect(Object.keys(duplicate).sort()).toEqual(["match", "retained", "skill"]);
-		}
-		const entries = [
-			...(diagnostic.skills as Array<Record<string, unknown>>),
-			...duplicates.flatMap(duplicate => [duplicate.skill, duplicate.retained]),
-		];
-		for (const entry of entries) {
-			// Optional keys are allowlisted, never required.
-			const optionalKeys = ["pluginName", "repository", "version"].filter(key => key in entry);
-			expect(Object.keys(entry).sort()).toEqual(["filePath", "name", "source", ...optionalKeys].sort());
+		assertAllowlistedEntries(diagnostic.skills as DiagnosticEntry[], diagnostic.duplicates as DiagnosticDuplicate[]);
+	}
+	expect(Array.isArray(value.items)).toBe(true);
+	for (const item of value.items as Array<Record<string, unknown>>) {
+		for (const key of Object.keys(item)) expect(ITEM_KEYS).toContain(key);
+		assertAllowlistedEntries(item.skills as DiagnosticEntry[], item.duplicates as DiagnosticDuplicate[]);
+		for (const record of [item.analysis, item.lastAnalysis]) {
+			if (record !== undefined) assertAllowlistedRecord(record as Record<string, unknown>);
 		}
 	}
 	const serialized = JSON.stringify(value);
@@ -244,6 +297,14 @@ describe("skill diagnostics RPC", () => {
 				},
 			]);
 
+			// The per-skill rows carry the same resolution; no analysis exists until one is requested.
+			const review = startup.items.find(item => item.name === "review");
+			expect(review).toMatchObject({ canAnalyze: true });
+			expect(review?.issues).toEqual(expect.arrayContaining(["conflict", "redundancy"]));
+			expect(review?.skills.map(entry => entry.filePath)).toContain(firstFile);
+			expect(review?.analysis).toBeUndefined();
+			expect(review?.lastAnalysis).toBeUndefined();
+
 			expect(JSON.stringify(state.systemPrompt ?? [])).not.toContain(mirrorFile);
 			const messages = responseData(await rpc.request("messages-initial", { type: "get_messages" }));
 			expect(JSON.stringify(messages)).not.toContain("skill_diagnostics");
@@ -281,7 +342,9 @@ describe("skill diagnostics RPC", () => {
 			const cleanEvents = await rpc.waitForDiagnosticEvents(3);
 			const clean = cleanEvents[2]!.data;
 			assertAllowlistedSnapshot(clean);
-			expect(clean).toEqual({ cwd: project, showStartupDiagnostics: false, diagnostics: [] });
+			expect(clean).toMatchObject({ cwd: project, showStartupDiagnostics: false, diagnostics: [] });
+			// Clean single-copy skills stay listed, with nothing to compare.
+			expect(clean.items.map(item => [item.name, item.canAnalyze])).toEqual([["review", false]]);
 			expect(responseData(await rpc.request("state-clean", { type: "get_state" }))).toMatchObject({
 				skillDiagnostics: clean,
 			});
@@ -295,7 +358,8 @@ describe("skill diagnostics RPC", () => {
 			const movedEvents = await rpc.waitForDiagnosticEvents(beforeUnchangedReload + 1);
 			const moved = movedEvents.at(-1)!.data;
 			assertAllowlistedSnapshot(moved);
-			expect(moved).toEqual({ cwd: movedProject, showStartupDiagnostics: false, diagnostics: [] });
+			expect(moved).toMatchObject({ cwd: movedProject, showStartupDiagnostics: false, diagnostics: [] });
+			expect(moved.items.map(item => item.name)).toEqual(["review"]);
 			expect(responseData(await rpc.request("get-moved", { type: "get_skill_diagnostics" }))).toEqual(moved);
 			expect(rpc.diagnosticEvents()).toHaveLength(beforeUnchangedReload + 1);
 		} finally {
