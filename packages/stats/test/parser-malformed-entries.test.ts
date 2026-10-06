@@ -398,12 +398,12 @@ describe("legacy entries without a recorded price", () => {
 		raw.exec("DELETE FROM messages");
 		raw.exec("DELETE FROM file_offsets");
 		// A database from the previous release has never seen this key at all.
-		raw.exec("DELETE FROM meta WHERE key = 'messages_cost_unpriced_v1'");
+		raw.exec("DELETE FROM meta WHERE key = 'messages_cost_unpriced_v2'");
 		// Every sentinel that also wipes `file_offsets` is spent, so only the
 		// unpriced marker's sentinel can trigger the re-parse below.
 		const spent = [
 			"user_messages_v9",
-			"tool_calls_v1",
+			"tool_calls_v2",
 			"user_message_links_v1",
 			"premium_requests_priority_v1",
 			"messages_cost_reingest_v1",
@@ -466,7 +466,7 @@ describe("legacy entries without a recorded price", () => {
 		expect(offsets).not.toBeNull();
 		closeDb();
 		const meta = new Database(getStatsDbPath());
-		expect(meta.prepare("SELECT value FROM meta WHERE key = ?").get("messages_cost_unpriced_v1")).toEqual({
+		expect(meta.prepare("SELECT value FROM meta WHERE key = ?").get("messages_cost_unpriced_v2")).toEqual({
 			value: "complete",
 		});
 		meta.close();

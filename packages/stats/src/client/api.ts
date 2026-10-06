@@ -81,8 +81,8 @@ export async function getCostDashboardStats(
 	return fetchJson<CostDashboardStats>(`${API_BASE}/stats/costs?range=${encodeURIComponent(range)}`, { signal });
 }
 
-export async function getRecentRequests(limit = 50, signal?: AbortSignal): Promise<MessageStats[]> {
-	return fetchJson<MessageStats[]>(`${API_BASE}/stats/recent?limit=${limit}`, { signal });
+export async function getRecentRequests(limit = 50, range: TimeRange = "all", signal?: AbortSignal): Promise<MessageStats[]> {
+	return fetchJson<MessageStats[]>(`${API_BASE}/stats/recent?range=${encodeURIComponent(range)}&limit=${limit}`, { signal });
 }
 
 export async function getRecentErrors(

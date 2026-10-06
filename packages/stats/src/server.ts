@@ -230,7 +230,7 @@ export async function handleApi(req: Request): Promise<Response> {
 
 	if (path === "/api/stats/recent") {
 		const limit = url.searchParams.get("limit");
-		const stats = await getRecentRequests(limit ? parseInt(limit, 10) : undefined);
+		const stats = await getRecentRequests(limit ? parseInt(limit, 10) : undefined, url.searchParams.get("range"));
 		return Response.json(stats);
 	}
 

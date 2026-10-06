@@ -1,6 +1,7 @@
 import { Database } from "bun:sqlite";
 import { describe, expect, it } from "bun:test";
 import { closeDb, getRecentRequests, initDb, insertMessageStats } from "@oh-my-pi/omp-stats/db";
+import type { MessageStatsInput } from "@oh-my-pi/omp-stats/types";
 import {
 	getCostTimeSeries,
 	getOverallStats,
@@ -106,7 +107,7 @@ function expectedXaiGrokCost() {
 	};
 }
 
-function createAnthropicCacheStats(entryId: string, cacheRead: number, cacheWrite: number): MessageStats {
+function createAnthropicCacheStats(entryId: string, cacheRead: number, cacheWrite: number): MessageStatsInput {
 	const input = 1_000 - cacheRead - cacheWrite;
 	return {
 		sessionFile: "/tmp/anthropic-session.jsonl",
@@ -126,7 +127,6 @@ function createAnthropicCacheStats(entryId: string, cacheRead: number, cacheWrit
 			cacheRead,
 			cacheWrite,
 			totalTokens: 1_000,
-			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 		},
 		agentType: "main",
 	};
