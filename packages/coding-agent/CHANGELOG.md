@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- MCP tool results with embedded binary resources (`resource.blob`) now reach the model: supported images arrive as image blocks, and other payloads (audio, PDFs, …) are saved under `local://` with their MIME type and size instead of only `[Resource: <uri>]` ([#14598](https://github.com/can1357/oh-my-pi/issues/14598))
+
 ## [18.6.3] - 2026-10-06
 
 ### Breaking Changes
