@@ -1,4 +1,3 @@
-import { classifyModel } from "@oh-my-pi/pi-catalog/identity";
 import type { Model } from "@oh-my-pi/pi-catalog/types";
 import * as AIError from "../error";
 import { resolveXaiBaseUrl } from "../providers/xai-base-url";
@@ -27,9 +26,7 @@ export async function generateOpenAIImage(
 	const size = resolveOpenAIImageSize(request.aspectRatio, request.imageSize);
 	const count = request.count ?? 1;
 	const wireModelId = model.requestModelId ?? model.id;
-	const isGptImage =
-		(model.requestModelId === undefined ? model.identity : classifyModel(model.provider, wireModelId)).family ===
-		"gpt-image";
+	const isGptImage = model.identity.family === "gpt-image";
 	const isXAI = model.provider === "xai" || model.provider === "xai-oauth";
 	const generationBody = isXAI
 		? {

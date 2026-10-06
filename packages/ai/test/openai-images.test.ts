@@ -7,10 +7,9 @@ import type { FetchImpl } from "../src/types";
 const IMAGE_DATA = Buffer.from("image bytes").toString("base64");
 const INPUT_IMAGE = { data: IMAGE_DATA, mimeType: "image/png" };
 
-function imageModel(provider: string, id: string, requestModelId?: string) {
+function imageModel(provider: string, id: string) {
 	return buildModel({
 		id,
-		requestModelId,
 		name: id,
 		api: "openai-images",
 		provider,
@@ -33,8 +32,8 @@ function imageResponse(status = 200): Response {
 }
 
 describe("OpenAI-compatible image response_format", () => {
-	test("GPT Image generation uses the wire model ID and succeeds through a strict gateway", async () => {
-		const model = imageModel("gateway", "local-alias", "tenant/gpt-image-2.5-2026-08-01");
+	test("GPT Image generation of a dated snapshot succeeds through a strict gateway", async () => {
+		const model = imageModel("gateway", "gpt-image-2.5-2026-08-01");
 		let body: Record<string, unknown> | undefined;
 		const fetch: FetchImpl = async (_input, init) => {
 			const requestBody: Record<string, unknown> = JSON.parse(String(init?.body));
@@ -44,7 +43,7 @@ describe("OpenAI-compatible image response_format", () => {
 
 		const result = await generateOpenAIImage(model, { prompt: "a cat" }, { apiKey: "test", fetch });
 
-		expect(body?.model).toBe("tenant/gpt-image-2.5-2026-08-01");
+		expect(body?.model).toBe("gpt-image-2.5-2026-08-01");
 		expect(body).not.toHaveProperty("response_format");
 		expect(result.images[0]?.data).toBe(IMAGE_DATA);
 	});
