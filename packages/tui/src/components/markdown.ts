@@ -1343,10 +1343,13 @@ function probeBoundary(text: string, offset: number, size: number, mathBlocks: M
 }
 
 /**
- * Lex a whole document, windowing anything large enough for the quadratic scan
- * to bite. `links` holds every reference definition, at any nesting depth.
+ * Lex a whole document with the renderer's rules (math, custom rules,
+ * strikethrough), windowing anything large enough for the quadratic scan to
+ * bite. `links` holds every reference definition, at any nesting depth. Callers
+ * that split a document along its blocks (table charts) lex through this so
+ * they see the blocks Markdown renders.
  */
-function lexDocument(text: string): TokensList {
+export function lexDocument(text: string): TokensList {
 	// A CR shifts every `raw` span (marked normalizes CRLF before tokenizing), so
 	// window offsets would address the wrong characters — lex those in one pass.
 	if (text.length < WINDOWED_LEX_MIN_BYTES || text.includes("\r")) return markdownParser.lexer(text);

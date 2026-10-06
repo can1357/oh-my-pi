@@ -5,6 +5,9 @@
 ### Added
 
 - Added synchronous assistant text display projections for native Markdown nodes and classic terminal Markdown, with pending-state retirement guards and terminal failure settlement.
+- Assistant ` ```svg ` blocks render as inline images on terminals with graphics: drawn live while the reply streams, sized to the drawing (up to the full width) instead of a thumbnail, rendered pixel-for-pixel on the terminal's cell grid so text stays sharp (redrawn to fit when the terminal narrows), and colored from your theme; an SVG that does not render shows as code
+- Numeric tables in assistant answers can get a themed chart under them, chosen from the table's shape and units; Tern receives it as SVG (recolored on theme switches), other graphics terminals as an image
+
 ### Changed
 
 - Expanded status-line project directory detection to include the user's `repos` folder
@@ -12,6 +15,7 @@
 
 ### Fixed
 
+- Fixed resizing the terminal flashing an empty frame before the resized screen appears
 - Fixed `/annotate` truncating long source lines and selected filenames, losing indentation when wrapping, and hiding typed note characters ([#14609](https://github.com/can1357/oh-my-pi/pull/14609) by [@anatoli-tsinovoy](https://github.com/anatoli-tsinovoy)).
 - Fixed fullscreen inputs such as setup sign-in showing no cursor when the hardware-cursor setting is on ([#14609](https://github.com/can1357/oh-my-pi/pull/14609) by [@anatoli-tsinovoy](https://github.com/anatoli-tsinovoy)).
 - Fixed autocomplete popups (slash commands, arguments, `@` files, `#` actions, `^` model mentions, emoji, internal URLs) lagging 100 ms behind typing; they now update on every keystroke, so typing `/mod` and pressing Enter quickly runs `/model` instead of the top row shown for `/` (e.g. `/login`) ([#14595](https://github.com/can1357/oh-my-pi/pull/14595) by [@H4vC](https://github.com/H4vC))

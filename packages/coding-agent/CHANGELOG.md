@@ -4,6 +4,8 @@
 
 ### Added
 
+- The agent can draw diagrams, charts, and mockups as ` ```svg ` blocks that render inline in your theme's colors; turn it off with the `tui.renderSvg` setting (Render SVG Figures)
+- Numeric tables in the agent's answers get a chart drawn under them in your theme's colors (bars, before/after dumbbells, lines, heatmaps, shares, deltas, small multiples); the `tui.autoGraph` setting (Auto-Graph Tables) picks `always` (built-in best guess, default), `smart` (the judge model picks the chart kind and columns for tables with several numeric columns), or `off`
 - Added page-aware streaming for JSON/JSONL queries to support efficient reading of large files
 - Added persistent continuation hints to paginated JSON queries for simpler retrieval of subsequent result pages
 - Added first-class JSON and JSONL querying to the `read` tool via `?q=<jq-filter>`, supporting in-process jaq evaluation, raw/compact formatting, and offset/limit pagination ([#14141](https://github.com/can1357/oh-my-pi/pull/14141) by [@asuffield](https://github.com/asuffield)).

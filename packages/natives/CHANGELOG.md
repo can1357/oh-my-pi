@@ -8,6 +8,7 @@
 
 ### Added
 
+- `rasterizeSvg` takes an optional `scale` to draw an SVG above its intrinsic size (still bounded by the max box), and an optional `cell` that pads the PNG to whole terminal cells so a terminal shows it 1:1 instead of resampling it
 - Added `OMP_NATIVE_FEATURES`, which passes extra cargo features to the local cargo/napi-rs build of the native addon (e.g. `OMP_NATIVE_FEATURES=wayland-pipewire`); Bazel builds ignore it ([#14058](https://github.com/can1357/oh-my-pi/pull/14058) by [@justdoGIT](https://github.com/justdoGIT))
 - Added macOS addon builds from Linux hosts: `bazel build //:natives-darwin-*` now cross-compiles with a hermetic clang + ld64.lld toolchain against the macOS SDK from Apple's Command Line Tools package, and builds the Apple Foundation Models bridge with the swift.org Linux Swift toolchain; mac hosts keep building with Xcode
 
