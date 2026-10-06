@@ -299,23 +299,40 @@ export function realizesPriorityServiceTier(
 }
 
 /**
- * Premium-request weight contributed by a priority request to a provider that
- * realizes it and bills extra. Mirrors GitHub Copilot's `premiumRequests`
- * accounting so the "premium requests" stat aggregates priority traffic across
- * the OpenAI family, direct Anthropic fast mode, and Google priority.
+ * Premium-request weight contributed by a request a provider bills above
+ * standard. Priority (Fast mode) counts 1 on every provider that realizes it;
+ * `ultrafast` counts 1 on the OpenAI family, where it is a premium serving tier
+ * (its cost premium is recorded separately in `usage.cost`). Mirrors GitHub
+ * Copilot's `premiumRequests` accounting so the "premium requests" stat
+ * aggregates premium traffic across the OpenAI family, direct Anthropic fast
+ * mode, and Google priority.
  *
- * Returns 1 only when priority is actually realized on the wire for `model`
- * (see {@link realizesPriorityServiceTier}) and the provider bills it as a
- * premium request. OpenRouter is excluded — it bills per its own pricing, not
- * Copilot-premium semantics — as are Bedrock/Vertex Claude, where priority is
- * silently dropped.
+ * Returns 1 only when the tier is actually realized on the wire for `model`
+ * (see {@link realizesPriorityServiceTier} and {@link shouldSendServiceTier})
+ * and the provider bills it as a premium request. OpenRouter is excluded — it
+ * bills per its own pricing, not Copilot-premium semantics — as are
+ * Bedrock/Vertex Claude, where priority is silently dropped.
+ *
+ * Pass `served: true` when the tier is the one the provider reported serving
+ * (an assistant message's {@link AssistantMessage.serviceTier}) rather than a
+ * requested setting: realization is then already proven, so the wire gate is
+ * skipped and a model without discovery metadata (a stats-backfill row) still
+ * counts.
  */
-export function getPriorityPremiumRequests(
+export function getPremiumServiceTierRequests(
 	serviceTier: ServiceTier | null | undefined,
 	model: ServiceTierModel,
+	options?: { served?: boolean },
 ): number {
-	if (!realizesPriorityServiceTier(serviceTier, model)) return 0;
 	const provider = model.provider;
+	if (serviceTier === "ultrafast") {
+		if (provider !== "openai" && provider !== "openai-codex") return 0;
+		return options?.served === true || shouldSendServiceTier("ultrafast", model) ? 1 : 0;
+	}
+	if (serviceTier !== "priority") return 0;
+	// A served tier is proof it reached the wire, so the realization gate only
+	// applies to requested-tier inference.
+	if (!options?.served && !realizesPriorityServiceTier(serviceTier, model)) return 0;
 	return provider === "openai" ||
 		provider === "openai-codex" ||
 		provider === "anthropic" ||
@@ -323,6 +340,21 @@ export function getPriorityPremiumRequests(
 		provider === "google-vertex"
 		? 1
 		: 0;
+}
+
+/** Parse a provider-reported `service_tier` echo into a known tier, or `undefined` for anything else. */
+export function parseServiceTier(value: unknown): ServiceTier | undefined {
+	switch (value) {
+		case "auto":
+		case "default":
+		case "flex":
+		case "scale":
+		case "priority":
+		case "ultrafast":
+			return value;
+		default:
+			return undefined;
+	}
 }
 
 /**
@@ -1197,6 +1229,15 @@ export interface AssistantMessage {
 	 * other than what was requested.
 	 */
 	upstreamModel?: string;
+	/**
+	 * Service tier the provider reported serving this turn, when the API echoes
+	 * one (`response.service_tier`), falling back to the tier the request carried
+	 * when the response omits the echo. Absent when the provider reports no tier
+	 * or the echo cannot be trusted (proxies). This is the tier the turn actually
+	 * ran on, which is what cost, premium-request, and speed accounting key on —
+	 * the session's live setting may already have changed.
+	 */
+	serviceTier?: ServiceTier;
 	usage: Usage;
 	stopReason: StopReason;
 	stopDetails?: StopDetails | null;

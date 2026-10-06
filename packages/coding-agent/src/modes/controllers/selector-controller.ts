@@ -180,7 +180,21 @@ function loadProviderAuthUi(): ProviderAuthUiModules {
 	};
 }
 
+/** The open `/settings` menu: set when the command runs, filled once theme discovery resolves. */
+interface SettingsMenu {
+	component?: Component;
+	handle?: OverlayHandle;
+}
+
 export class SelectorController {
+	/**
+	 * The `/settings` menu from the moment the command runs until it closes, so a
+	 * second `/settings` (typed while theme discovery is still pending, or from a
+	 * composer that stays reachable, as in Tern's native view) focuses it instead
+	 * of stacking another menu on top.
+	 */
+	#settingsMenu: SettingsMenu | undefined;
+
 	constructor(private ctx: InteractiveModeContext) {}
 	/**
 	 * Mount a primary fullscreen menu through the one polished modal path shared
@@ -258,93 +272,109 @@ export class SelectorController {
 	}
 
 	showSettingsSelector(): void {
-		getAvailableThemes().then(availableThemes => {
-			// Fullscreen settings editor on the alternate screen: the overlay
-			// enables mouse tracking (click/hover/wheel) for its lifetime and
-			// the transcript stays untouched underneath.
-			const done = () => {
-				overlayHandle?.hide();
-				this.focusActiveEditorArea();
-				this.ctx.ui.requestRender();
-			};
-			const selector = new SettingsSelectorComponent(
-				{
-					availableThinkingLevels: [...this.ctx.session.getAvailableThinkingLevels()],
-					thinkingLevel: this.ctx.session.thinkingLevel,
-					availableThemes,
-					providers: [...new Set(this.ctx.session.getAvailableModels().map(model => model.provider))].sort(
-						(a, b) => a.localeCompare(b),
-					),
-					settings: createSettingsHost(),
-					plugins: createPluginSettingsHost(getProjectDir()),
-					model: this.ctx.session.model,
-					imageBudget: this.ctx.ui.imageBudget,
-					requestRender: () => this.ctx.ui.requestRender(),
-					composerPreviewStatus: this.ctx.statusLine,
-				},
-				{
-					onChange: (id, value) => this.handleSettingChange(id, value),
-					onThemePreview: async themeName => {
-						const result = await previewTheme(themeName);
-						if (result.success) {
-							this.ctx.statusLine.invalidate();
-							this.ctx.ui.invalidate();
+		const open = this.#settingsMenu;
+		if (open) {
+			if (open.component) this.ctx.ui.setFocus(open.component);
+			this.ctx.ui.requestRender();
+			return;
+		}
+		const menu: SettingsMenu = {};
+		this.#settingsMenu = menu;
+		getAvailableThemes()
+			.then(availableThemes => {
+				// Fullscreen settings editor on the alternate screen: the overlay
+				// enables mouse tracking (click/hover/wheel) for its lifetime and
+				// the transcript stays untouched underneath.
+				const done = () => {
+					menu.handle?.hide();
+					if (this.#settingsMenu === menu) this.#settingsMenu = undefined;
+					this.focusActiveEditorArea();
+					this.ctx.ui.requestRender();
+				};
+				const selector = new SettingsSelectorComponent(
+					{
+						availableThinkingLevels: [...this.ctx.session.getAvailableThinkingLevels()],
+						thinkingLevel: this.ctx.session.thinkingLevel,
+						availableThemes,
+						providers: [...new Set(this.ctx.session.getAvailableModels().map(model => model.provider))].sort(
+							(a, b) => a.localeCompare(b),
+						),
+						settings: createSettingsHost(),
+						plugins: createPluginSettingsHost(getProjectDir()),
+						model: this.ctx.session.model,
+						imageBudget: this.ctx.ui.imageBudget,
+						requestRender: () => this.ctx.ui.requestRender(),
+						composerPreviewStatus: this.ctx.statusLine,
+					},
+					{
+						onChange: (id, value) => this.handleSettingChange(id, value),
+						onThemePreview: async themeName => {
+							const result = await previewTheme(themeName);
+							if (result.success) {
+								this.ctx.statusLine.invalidate();
+								this.ctx.ui.invalidate();
+								this.ctx.ui.requestRender();
+							}
+						},
+						onStatusLinePreview: previewSettings => {
+							// Update status line with preview settings
+							this.ctx.statusLine.updateSettings({
+								preset: cfgStatusLinePreset.get(settings),
+								leftSegments: cfgStatusLineLeftSegments.get(settings),
+								rightSegments: cfgStatusLineRightSegments.get(settings),
+								separator: cfgStatusLineSeparator.get(settings),
+								showHookStatus: cfgStatusLineShowHookStatus.get(settings),
+								sessionAccent: cfgStatusLineSessionAccent.get(settings),
+								transparent: cfgStatusLineTransparent.get(settings),
+								compactThinkingLevel: cfgStatusLineCompactThinkingLevel.get(settings),
+								contextLine: cfgStatusLineContextLine.get(settings),
+								segmentOptions: cfgStatusLineSegmentOptions.get(settings),
+								...previewSettings,
+							});
 							this.ctx.ui.requestRender();
-						}
+						},
+						getStatusLinePreview: () => {
+							// The bar exactly as the active composer shape renders it (box top
+							// border, claude rule + chip, or the plain standalone bottom bar).
+							const availableWidth = this.ctx.editor.getTopBorderAvailableWidth(this.ctx.ui.terminal.columns);
+							return this.ctx.statusLine.getPreviewLines(availableWidth).join("\n");
+						},
+						describeStatusLinePreview: () => this.ctx.statusLine.describePreview(),
+						onPluginsChanged: async () => {
+							const projectPath = await resolveActiveProjectRegistryPath(this.ctx.sessionManager.getCwd());
+							clearPluginRootsAndCaches(projectPath ? [projectPath] : undefined);
+							await this.ctx.refreshSkillState();
+							await this.ctx.refreshSlashCommandState();
+							resetCapabilities();
+							this.ctx.ui.requestRender();
+						},
+						onCancel: () => {
+							done();
+							// Restore status line to saved settings
+							this.ctx.statusLine.updateSettings({
+								preset: cfgStatusLinePreset.get(settings),
+								leftSegments: cfgStatusLineLeftSegments.get(settings),
+								rightSegments: cfgStatusLineRightSegments.get(settings),
+								separator: cfgStatusLineSeparator.get(settings),
+								showHookStatus: cfgStatusLineShowHookStatus.get(settings),
+								sessionAccent: cfgStatusLineSessionAccent.get(settings),
+								transparent: cfgStatusLineTransparent.get(settings),
+								compactThinkingLevel: cfgStatusLineCompactThinkingLevel.get(settings),
+								contextLine: cfgStatusLineContextLine.get(settings),
+								segmentOptions: cfgStatusLineSegmentOptions.get(settings),
+							});
+							this.ctx.ui.requestRender();
+						},
 					},
-					onStatusLinePreview: previewSettings => {
-						// Update status line with preview settings
-						this.ctx.statusLine.updateSettings({
-							preset: cfgStatusLinePreset.get(settings),
-							leftSegments: cfgStatusLineLeftSegments.get(settings),
-							rightSegments: cfgStatusLineRightSegments.get(settings),
-							separator: cfgStatusLineSeparator.get(settings),
-							showHookStatus: cfgStatusLineShowHookStatus.get(settings),
-							sessionAccent: cfgStatusLineSessionAccent.get(settings),
-							transparent: cfgStatusLineTransparent.get(settings),
-							compactThinkingLevel: cfgStatusLineCompactThinkingLevel.get(settings),
-							contextLine: cfgStatusLineContextLine.get(settings),
-							segmentOptions: cfgStatusLineSegmentOptions.get(settings),
-							...previewSettings,
-						});
-						this.ctx.ui.requestRender();
-					},
-					getStatusLinePreview: () => {
-						// The bar exactly as the active composer shape renders it (box top
-						// border, claude rule + chip, or the plain standalone bottom bar).
-						const availableWidth = this.ctx.editor.getTopBorderAvailableWidth(this.ctx.ui.terminal.columns);
-						return this.ctx.statusLine.getPreviewLines(availableWidth).join("\n");
-					},
-					describeStatusLinePreview: () => this.ctx.statusLine.describePreview(),
-					onPluginsChanged: async () => {
-						const projectPath = await resolveActiveProjectRegistryPath(this.ctx.sessionManager.getCwd());
-						clearPluginRootsAndCaches(projectPath ? [projectPath] : undefined);
-						await this.ctx.refreshSkillState();
-						await this.ctx.refreshSlashCommandState();
-						resetCapabilities();
-						this.ctx.ui.requestRender();
-					},
-					onCancel: () => {
-						done();
-						// Restore status line to saved settings
-						this.ctx.statusLine.updateSettings({
-							preset: cfgStatusLinePreset.get(settings),
-							leftSegments: cfgStatusLineLeftSegments.get(settings),
-							rightSegments: cfgStatusLineRightSegments.get(settings),
-							separator: cfgStatusLineSeparator.get(settings),
-							showHookStatus: cfgStatusLineShowHookStatus.get(settings),
-							sessionAccent: cfgStatusLineSessionAccent.get(settings),
-							transparent: cfgStatusLineTransparent.get(settings),
-							compactThinkingLevel: cfgStatusLineCompactThinkingLevel.get(settings),
-							contextLine: cfgStatusLineContextLine.get(settings),
-							segmentOptions: cfgStatusLineSegmentOptions.get(settings),
-						});
-						this.ctx.ui.requestRender();
-					},
-				},
-			);
-			const overlayHandle = this.#showFullscreenMenu(selector);
-		});
+				);
+				menu.component = selector;
+				menu.handle = this.#showFullscreenMenu(selector);
+			})
+			.catch((error: unknown) => {
+				// A menu that never opened must not block the next `/settings`.
+				if (this.#settingsMenu === menu) this.#settingsMenu = undefined;
+				throw error;
+			});
 	}
 
 	/**
@@ -431,7 +461,9 @@ export class SelectorController {
 			const defaultAdvisorModel = advisorRoleSel?.model;
 			const deps: AdvisorConfigDeps = {
 				getAvailableModels: () => this.ctx.session.modelRegistry.getAvailable(),
-				browserSource: createModelBrowserSource(this.ctx.settings),
+				browserSource: createModelBrowserSource(this.ctx.settings, model =>
+					this.ctx.session.effectiveServiceTier(model),
+				),
 				defaultToolNames: ADVISOR_DEFAULT_TOOL_NAMES,
 				externalEditor: text => {
 					const command = getEditorCommand();
@@ -602,6 +634,7 @@ export class SelectorController {
 				() => this.ctx.session.effectiveExtensionRoots,
 				activeModelPattern,
 				defaultModelPattern,
+				model => this.ctx.session.effectiveServiceTier(model),
 			),
 			{ onCancel: () => done() },
 		);
@@ -710,7 +743,7 @@ export class SelectorController {
 		};
 		const picker = new ModelPickerComponent(
 			this.ctx.ui,
-			createModelBrowserSource(this.ctx.settings),
+			createModelBrowserSource(this.ctx.settings, model => this.ctx.session.effectiveServiceTier(model)),
 			this.ctx.session.modelRegistry,
 			this.ctx.session.scopedModels,
 			{
@@ -792,7 +825,7 @@ export class SelectorController {
 		};
 		const hub = new ModelHubComponent(
 			this.ctx.ui,
-			createModelBrowserSource(this.ctx.settings),
+			createModelBrowserSource(this.ctx.settings, model => this.ctx.session.effectiveServiceTier(model)),
 			this.ctx.session.modelRegistry,
 			this.ctx.session.scopedModels,
 			{

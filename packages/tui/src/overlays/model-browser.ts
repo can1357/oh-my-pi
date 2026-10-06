@@ -13,7 +13,7 @@ import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { getModelPricingStatus, modelsAreEqual } from "@oh-my-pi/pi-catalog/models";
 import type { ModelKind, ModelPricingStatus } from "@oh-my-pi/pi-catalog/types";
 import type { Component } from "../tui";
-import { fuzzyRank } from "../fuzzy";
+import { FuzzyCorpus, fuzzyRank } from "../fuzzy";
 import { Input } from "../components/input";
 import { ScrollView } from "../components/scroll-view";
 import { matchesKey } from "../keys";
@@ -134,6 +134,12 @@ export interface ModelBrowserSource extends ModelRoleLookup {
 	readonly knownRoleIds: readonly string[];
 	readonly mruOrder: readonly string[];
 	readonly modelPerf: ReadonlyMap<string, ModelBrowserPerf>;
+	/**
+	 * Service tier the host would send for `model`, when it runs one. Rows with a
+	 * measured tier aggregate (`selector@tier`) then display that tier's numbers
+	 * instead of the standard aggregate.
+	 */
+	serviceTierFor?(model: Model): string | undefined;
 	getRoleInfo(role: string): ModelBrowserRoleInfo;
 	defaultRoleChain(role: string): string[];
 	resolveRoleValue(value: string | undefined, models: Model[], roleLookup?: ModelRoleLookup): ResolvedModelRoleValue;
@@ -297,13 +303,17 @@ export interface SortModelItemsOptions {
  * then per provider by priority, version, and recency.
  */
 export function sortModelItems(items: ModelBrowserItem[], options: SortModelItemsOptions = {}): void {
+	items.sort(modelItemComparator(options));
+}
+
+function modelItemComparator(options: SortModelItemsOptions): (a: ModelBrowserItem, b: ModelBrowserItem) => number {
 	const { roles = {}, mruOrder = [], skipRoleRank = false } = options;
 	const mruIndex = new Map(mruOrder.map((key, i) => [key, i]));
 
 	const dateRe = /-(\d{8})$/;
 	const latestRe = /-latest$/;
 
-	items.sort((a, b) => {
+	return (a, b) => {
 		if (!skipRoleRank) {
 			const aRank = computeModelRank(a.model, roles);
 			const bRank = computeModelRank(b.model, roles);
@@ -348,9 +358,9 @@ export function sortModelItems(items: ModelBrowserItem[], options: SortModelItem
 		// Both have dates — descending (newest first)
 		if (aDate && bDate) return bDate.localeCompare(aDate);
 
-		// One has date, other is latest — latest first
-		return aIsLatest ? -1 : bIsLatest ? 1 : a.id.localeCompare(b.id);
-	});
+		// Both -latest — alphabetical (a fixed -1 here made the order depend on input order)
+		return a.id.localeCompare(b.id);
+	};
 }
 
 /** Picker candidates and ordering inputs shared with composer model mentions. */
@@ -530,58 +540,100 @@ function compactModelSearchText(value: string): string {
 	return value.toLowerCase().replace(/[^\p{Letter}\p{Mark}\p{Number}]+/gu, "");
 }
 
-/** Exact id/selector → contiguous literal → fuzzy-only. */
-function modelSearchTier(query: string, item: ModelBrowserItem): number {
+/** Exact id/selector → contiguous literal → fuzzy-only, against precomputed compact forms. */
+function modelSearchTier(query: string, id: string, selector: string): number {
 	if (!query) return 2;
-	const id = compactModelSearchText(item.id);
-	const selector = compactModelSearchText(item.selector);
 	if (query === id || query === selector) return 0;
 	if (id.includes(query) || selector.includes(query)) return 1;
 	return 2;
+}
+
+/** Inputs to {@link rankModelItems} / {@link ModelItemRanker}. */
+export interface ModelRankOptions {
+	roles: RoleAssignments;
+	mruOrder: ReadonlyArray<string>;
+	affinity: SearchAffinity;
+}
+
+/** Query-independent sort keys of one candidate, computed once per ranker. */
+interface ModelRankKeys {
+	compactId: string;
+	compactSelector: string;
+	modelAffinity: number;
+	providerAffinity: number;
+	/** Position class in the MRU/version order; comparator-equal items share it. */
+	orderGroup: number;
+}
+
+/**
+ * {@link rankModelItems} prepared for one candidate list: the fuzzy index, the
+ * MRU/version order, and the affinity ranks depend only on the items and options,
+ * so per-keystroke callers (composer mentions, `/switch` arguments, the picker)
+ * hold one ranker and pay only the per-query fuzzy scan.
+ */
+export class ModelItemRanker {
+	readonly items: ReadonlyArray<ModelBrowserItem>;
+	readonly options: ModelRankOptions;
+	readonly #corpus: FuzzyCorpus<ModelBrowserItem>;
+	readonly #keys = new Map<ModelBrowserItem, ModelRankKeys>();
+
+	constructor(items: ReadonlyArray<ModelBrowserItem>, options: ModelRankOptions) {
+		this.items = items;
+		this.options = options;
+		this.#corpus = new FuzzyCorpus(items, modelSearchText);
+		const compare = modelItemComparator({ roles: options.roles, mruOrder: options.mruOrder, skipRoleRank: true });
+		const ordered = [...items].sort(compare);
+		let group = 0;
+		for (let i = 0; i < ordered.length; i++) {
+			const item = ordered[i]!;
+			if (i > 0 && compare(ordered[i - 1]!, item) !== 0) group++;
+			this.#keys.set(item, {
+				compactId: compactModelSearchText(item.id),
+				compactSelector: compactModelSearchText(item.selector),
+				modelAffinity: options.affinity.models.get(item.selector.toLowerCase()) ?? Number.MAX_SAFE_INTEGER,
+				providerAffinity: options.affinity.providers.get(item.provider.toLowerCase()) ?? Number.MAX_SAFE_INTEGER,
+				orderGroup: group,
+			});
+		}
+	}
+
+	/** Rank by text relevance, user affinity, and MRU/version order. */
+	rank(query: string): ModelBrowserItem[] {
+		if (!query.trim()) return [...this.items];
+		const queryKey = compactModelSearchText(query);
+		// Exact and contiguous matches stay ahead of fuzzy-only candidates; affinity
+		// breaks ties before fuzzy quality and the normal MRU/version ordering, and
+		// fuzzy order settles items that ordering cannot tell apart.
+		const rows = this.#corpus.rank(query).map((result, fuzzyIndex) => {
+			const keys = this.#keys.get(result.item)!;
+			return {
+				item: result.item,
+				keys,
+				tier: modelSearchTier(queryKey, keys.compactId, keys.compactSelector),
+				bucket: Math.round(result.score / 10),
+				fuzzyIndex,
+			};
+		});
+		rows.sort(
+			(a, b) =>
+				a.tier - b.tier ||
+				a.keys.modelAffinity - b.keys.modelAffinity ||
+				a.keys.providerAffinity - b.keys.providerAffinity ||
+				a.bucket - b.bucket ||
+				a.keys.orderGroup - b.keys.orderGroup ||
+				a.fuzzyIndex - b.fuzzyIndex,
+		);
+		return rows.map(row => row.item);
+	}
 }
 
 /** Rank picker and mention candidates by text relevance, user affinity, and MRU/version order. */
 export function rankModelItems(
 	query: string,
 	items: ReadonlyArray<ModelBrowserItem>,
-	options: { roles: RoleAssignments; mruOrder: ReadonlyArray<string>; affinity: SearchAffinity },
+	options: ModelRankOptions,
 ): ModelBrowserItem[] {
-	if (!query.trim()) return [...items];
-	const ranked = fuzzyRank(items, query, modelSearchText);
-	const matches = ranked.map(result => result.item);
-	// Exact and contiguous matches stay ahead of fuzzy-only candidates; affinity
-	// breaks ties before fuzzy quality and the normal MRU/version ordering.
-	sortModelItems(matches, { roles: options.roles, mruOrder: options.mruOrder, skipRoleRank: true });
-	const fallbackRanks = new Map(matches.map((item, index) => [item, index]));
-	const queryKey = compactModelSearchText(query);
-	const searchRanks = new Map<ModelBrowserItem, { tier: number; bucket: number }>();
-	for (const result of ranked) {
-		searchRanks.set(result.item, {
-			tier: modelSearchTier(queryKey, result.item),
-			bucket: Math.round(result.score / 10),
-		});
-	}
-	matches.sort((a, b) => {
-		const aSearch = searchRanks.get(a);
-		const bSearch = searchRanks.get(b);
-		const tierCmp = (aSearch?.tier ?? Number.MAX_SAFE_INTEGER) - (bSearch?.tier ?? Number.MAX_SAFE_INTEGER);
-		if (tierCmp !== 0) return tierCmp;
-
-		const modelCmp =
-			(options.affinity.models.get(a.selector.toLowerCase()) ?? Number.MAX_SAFE_INTEGER) -
-			(options.affinity.models.get(b.selector.toLowerCase()) ?? Number.MAX_SAFE_INTEGER);
-		if (modelCmp !== 0) return modelCmp;
-
-		const providerCmp =
-			(options.affinity.providers.get(a.provider.toLowerCase()) ?? Number.MAX_SAFE_INTEGER) -
-			(options.affinity.providers.get(b.provider.toLowerCase()) ?? Number.MAX_SAFE_INTEGER);
-		if (providerCmp !== 0) return providerCmp;
-
-		const bucketCmp = (aSearch?.bucket ?? Number.MAX_SAFE_INTEGER) - (bSearch?.bucket ?? Number.MAX_SAFE_INTEGER);
-		if (bucketCmp !== 0) return bucketCmp;
-		return (fallbackRanks.get(a) ?? Number.MAX_SAFE_INTEGER) - (fallbackRanks.get(b) ?? Number.MAX_SAFE_INTEGER);
-	});
-	return matches;
+	return new ModelItemRanker(items, options).rank(query);
 }
 
 /**
@@ -852,6 +904,8 @@ export class ModelBrowser implements Component {
 	#roles: RoleAssignments = {};
 	#mruOrder: ReadonlyArray<string> = [];
 	#affinity: SearchAffinity = { models: new Map(), providers: new Map() };
+	/** Ranker for the menu's current item array; rebuilt when items or affinity change. */
+	#ranker?: { source: readonly ModelBrowserItem[]; ranker: ModelItemRanker };
 	#perf: ReadonlyMap<string, ModelBrowserPerf> = new Map();
 	#hoveredIndex: number | null = null;
 	#maxVisible = 10;
@@ -1039,17 +1093,26 @@ export class ModelBrowser implements Component {
 	 * unfiltered when the query is blank.
 	 */
 	#filterItems(items: readonly ModelBrowserItem[], query: string): readonly ModelBrowserItem[] {
-		const base = items.filter(item => !this.#isDisabled(item));
-		const ranked = this.#preserveQueryOrder
-			? query.trim()
-				? fuzzyRank(base, query, modelSearchText).map(result => result.item)
-				: base
-			: rankModelItems(query, base, {
-					roles: this.#roles,
-					mruOrder: this.#mruOrder,
-					affinity: this.#affinity,
-				});
-		return this.#insertSeparator(ranked);
+		if (this.#preserveQueryOrder) {
+			const base = items.filter(item => !this.#isDisabled(item));
+			return this.#insertSeparator(
+				query.trim() ? fuzzyRank(base, query, modelSearchText).map(result => result.item) : base,
+			);
+		}
+		// The menu hands back the same array until `setItems`, and roles/MRU replace the
+		// affinity object, so one ranker serves every keystroke of a search.
+		let cached = this.#ranker;
+		if (cached?.source !== items || cached.ranker.options.affinity !== this.#affinity) {
+			cached = {
+				source: items,
+				ranker: new ModelItemRanker(
+					items.filter(item => !this.#isDisabled(item)),
+					{ roles: this.#roles, mruOrder: this.#mruOrder, affinity: this.#affinity },
+				),
+			};
+			this.#ranker = cached;
+		}
+		return this.#insertSeparator(cached.ranker.rank(query));
 	}
 
 	/** True when `item`'s context window is smaller than the live session token count (grayed row; hosts compact before switching). */
@@ -1270,14 +1333,40 @@ export class ModelBrowser implements Component {
 		return index;
 	}
 
+	/**
+	 * Measured perf for a row: the tier the host would send, else the standard
+	 * aggregate, else any measured tier (fastest first) so a model only ever run
+	 * on a non-default tier still shows its real speed. `tier` is set whenever
+	 * the numbers come from a tier aggregate, for the caller to label.
+	 */
+	#perfFor(item: ModelBrowserItem): { perf: ModelBrowserPerf; tier?: string } | undefined {
+		const tier = this.#settings.serviceTierFor?.(item.model);
+		if (tier) {
+			const tiered = this.#perf.get(`${item.selector}@${tier}`);
+			if (tiered) return { perf: tiered, tier };
+		}
+		const standard = this.#perf.get(item.selector);
+		if (standard) return { perf: standard };
+		const prefix = `${item.selector}@`;
+		let best: { perf: ModelBrowserPerf; tier: string } | undefined;
+		for (const [key, perf] of this.#perf) {
+			if (!key.startsWith(prefix)) continue;
+			if (!best || perf.tps > best.perf.tps) best = { perf, tier: key.slice(prefix.length) };
+		}
+		return best;
+	}
+
 	/** Measured TPS/TTFT, falling back to the catalog TPS as an estimated `~118t/s`. */
 	#perfCell(item: ModelBrowserItem, mode: PerfMode): string {
 		if (mode === "off") return "";
-		const perf = this.#perf.get(item.selector);
-		if (perf) {
-			const tps = formatTps(perf.tps);
-			if (mode === "full" && perf.ttftMs !== null) return `${formatTtft(perf.ttftMs)} ${tps}`;
-			return tps;
+		const measured = this.#perfFor(item);
+		if (measured) {
+			const tps = formatTps(measured.perf.tps);
+			const tier = measured.tier ? ` ${measured.tier}` : "";
+			if (mode === "full" && measured.perf.ttftMs !== null) {
+				return `${formatTtft(measured.perf.ttftMs)} ${tps}${tier}`;
+			}
+			return `${tps}${tier}`;
 		}
 		const tps = item.model.tps;
 		return tps != null && Number.isFinite(tps) && tps > 0 ? `~${formatTps(tps)}` : "";
@@ -1359,10 +1448,10 @@ export class ModelBrowser implements Component {
 		if (model.input.includes("image")) facts.push("vision");
 		const intelligence = formatIntelligence(model);
 		if (intelligence) facts.push(intelligence);
-		const perf = this.#perf.get(selected.selector);
-		if (perf) {
-			facts.push(`~${formatTps(perf.tps)}`);
-			if (perf.ttftMs !== null) facts.push(`${formatTtft(perf.ttftMs)} ttft`);
+		const measured = this.#perfFor(selected);
+		if (measured) {
+			facts.push(`~${formatTps(measured.perf.tps)}${measured.tier ? ` ${measured.tier}` : ""}`);
+			if (measured.perf.ttftMs !== null) facts.push(`${formatTtft(measured.perf.ttftMs)} ttft`);
 		} else if (model.tps != null && Number.isFinite(model.tps) && model.tps > 0) {
 			facts.push(`~${formatTps(model.tps)}`);
 		}
@@ -1627,10 +1716,10 @@ export class ModelBrowser implements Component {
 			if (model.input.includes("image")) facts.push("vision");
 			const intelligence = formatIntelligence(model);
 			if (intelligence) facts.push(intelligence);
-			const perf = this.#perf.get(selected.selector);
-			if (perf) {
-				facts.push(`~${formatTps(perf.tps)}`);
-				if (perf.ttftMs !== null) facts.push(`${formatTtft(perf.ttftMs)} ttft`);
+			const measured = this.#perfFor(selected);
+			if (measured) {
+				facts.push(`~${formatTps(measured.perf.tps)}${measured.tier ? ` ${measured.tier}` : ""}`);
+				if (measured.perf.ttftMs !== null) facts.push(`${formatTtft(measured.perf.ttftMs)} ttft`);
 			} else if (model.tps != null && Number.isFinite(model.tps) && model.tps > 0) {
 				facts.push(`~${formatTps(model.tps)}`);
 			}
@@ -1742,7 +1831,9 @@ export class ModelBrowser implements Component {
 		const facts: Record<string, TspText | number> = {};
 		const int = model.int != null && Number.isFinite(model.int) ? model.int : undefined;
 		if (int !== undefined) facts.int = String(Math.round(int));
-		const speed = this.#perfCell(item, "tps").replace(/t\/s$/, "");
+		const speed = this.#perfCell(item, "tps")
+			.replace(/\s*t\/s\s*/, " ")
+			.trim();
 		if (speed) facts.speed = speed;
 		if (model.contextWindow) facts.ctx = model.contextWindow;
 		facts.price = pickerPrice(model);
@@ -1904,7 +1995,7 @@ export class ModelBrowser implements Component {
 	modelPreview(item: ModelBrowserItem, mode: "full" | "compact", current: string | undefined): NativeChild[] {
 		const model = item.model;
 		const selector = `${model.provider}/${model.id}`;
-		const perf = this.#perf.get(selector);
+		const measured = this.#perfFor(item);
 		const ctx = model.contextWindow ?? 0;
 		const out = model.maxTokens ?? 0;
 		const overContext = this.isOverContext(item);
@@ -1964,10 +2055,12 @@ export class ModelBrowser implements Component {
 		if (badges.length > 0) children.push(row(badges, { gap: "xs", wrap: true }));
 
 		const speed: string[] = [];
-		if (perf) {
-			speed.push(`${formatTps(perf.tps).replace("t/s", " t/s")}`);
-			if (perf.ttftMs !== null) speed.push(`${formatTtft(perf.ttftMs).replace("s", " s")} TTFT`);
-			speed.push(`${perf.samples} ${perf.samples === 1 ? "sample" : "samples"}`);
+		if (measured) {
+			speed.push(
+				`${formatTps(measured.perf.tps).replace("t/s", " t/s")}${measured.tier ? ` ${measured.tier}` : ""}`,
+			);
+			if (measured.perf.ttftMs !== null) speed.push(`${formatTtft(measured.perf.ttftMs).replace("s", " s")} TTFT`);
+			speed.push(`${measured.perf.samples} ${measured.perf.samples === 1 ? "sample" : "samples"}`);
 		} else if (model.tps != null && Number.isFinite(model.tps) && model.tps > 0) {
 			speed.push(`~${formatTps(model.tps).replace("t/s", " t/s")} (catalog)`);
 		}

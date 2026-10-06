@@ -739,8 +739,8 @@ mod tests {
 			p.resolve("[sbx:/../src/main.rs#AB12]", &urls),
 			Err(EditError::UnresolvedUrl(url)) if url == "sbx://../src/main.rs"
 		));
-		// Registered scheme without the alias, and an unregistered scheme: refused
-		// like `write` refuses them.
+		// Registered scheme without the alias, and an unregistered scheme:
+		// refused like `write` refuses them.
 		for (authored, suggestion) in [("ro:/a.md", Some("'ro://a.md'")), ("bogus://a.md", None)] {
 			let Err(EditError::Apply(message)) = p.resolve(authored, &urls) else {
 				panic!("{authored} must be refused");
@@ -760,8 +760,8 @@ mod tests {
 		assert_eq!(strip_windows_verbatim(r"\\?\unc\server\share"), r"\\server\share");
 		assert_eq!(strip_windows_verbatim(r"\\server\share"), r"\\server\share");
 		assert_eq!(expand_path(r"\\?\UNC\server\share\a.rs", Path::new("")), r"\\server\share\a.rs");
-		// Verbatim forms without a plain spelling keep their prefix: stripped, they
-		// would become relative paths naming a different file.
+		// Verbatim forms without a plain spelling keep their prefix: stripped,
+		// they would become relative paths naming a different file.
 		for kept in [
 			r"\\?\GLOBALROOT\Device\HarddiskVolume1\a.rs",
 			r"\\?\Volume{0b1c2d3e-0000-0000-0000-100000000000}\a.rs",

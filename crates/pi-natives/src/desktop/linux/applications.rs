@@ -308,10 +308,18 @@ fn exec_argv(raw: &str, name: &str, icon: Option<&str>, path: &Path) -> CoreResu
 					&& matches!(
 						character,
 						'\''
-							| '>' | '<' | '~'
-							| '|' | '&' | ';'
-							| '$' | '*' | '?'
-							| '#' | '(' | ')'
+							| '>'
+							| '<'
+							| '~'
+							| '|'
+							| '&'
+							| ';'
+							| '$'
+							| '*'
+							| '?'
+							| '#'
+							| '('
+							| ')'
 							| '`'
 					) =>
 			{
@@ -869,7 +877,8 @@ impl Activation {
 		loop {
 			if self
 				.property(self.root, self.active, AtomEnum::WINDOW)?
-				.first() == Some(&window)
+				.first()
+				== Some(&window)
 			{
 				return Ok(());
 			}

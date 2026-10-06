@@ -525,11 +525,14 @@ fn generic_columns(rows: &[Map<String, Value>]) -> Vec<String> {
 			if (matches!(
 				lower.as_str(),
 				"id"
-					| "name" | "arn"
-					| "status" | "state"
+					| "name"
+					| "arn"
+					| "status"
+					| "state"
 					| "created"
 					| "modified"
-					| "type" | "engine"
+					| "type"
+					| "engine"
 					| "version"
 			) || lower.ends_with("id")
 				|| lower.ends_with("name")

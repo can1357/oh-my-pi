@@ -267,15 +267,22 @@ fn looks_like_file(line: &str) -> bool {
 		path.rsplit('.').next(),
 		Some(
 			"js"
-				| "jsx" | "ts"
-				| "tsx" | "json"
+				| "jsx"
+				| "ts"
+				| "tsx"
+				| "json"
 				| "jsonc"
-				| "md" | "mdx"
-				| "css" | "scss"
-				| "sass" | "html"
-				| "yaml" | "yml"
+				| "md"
+				| "mdx"
+				| "css"
+				| "scss"
+				| "sass"
+				| "html"
+				| "yaml"
+				| "yml"
 				| "graphql"
-				| "vue" | "svelte"
+				| "vue"
+				| "svelte"
 		)
 	)
 }
