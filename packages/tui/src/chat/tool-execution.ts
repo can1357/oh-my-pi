@@ -1351,6 +1351,7 @@ export class ToolExecutionComponent extends Container {
 	 * view's preview. Renderers without describe hooks (and extension tools
 	 * with only render hooks) get the generic card. Hidden tool activity stays
 	 * mounted so toggling it is one prop change; a presenter's answer applies on top.
+	 * Passive context sits below the card, outside its collapse clamp, as in the terminal.
 	 */
 	override describe(cx?: DescribeContext): NativeNode {
 		if (this.#toolName === "wait" && this.#isBenignSkip()) return EMPTY_NODE;
@@ -1389,7 +1390,8 @@ export class ToolExecutionComponent extends Container {
 				title: this.#toolLabel,
 				target: this.#activitySummary().detail,
 			});
-			return withHidden(shown, !this.#toolActivityVisible);
+			const context = describeToolAdditionalContext(this.#additionalContext);
+			return withHidden(context.length > 0 ? col([shown, ...context]) : shown, !this.#toolActivityVisible);
 		});
 	}
 
@@ -1442,7 +1444,6 @@ export class ToolExecutionComponent extends Container {
 		const late = this.#lateDiagnosticsParts();
 		const body: NativeChild[] = [...(view.body ?? []), ...this.#nativeResultImages(view.body)];
 		if (late.section) body.push(late.section);
-		body.push(...describeToolAdditionalContext(this.#additionalContext));
 		const inline = view.inline === true;
 		const hasBody = body.length > 0;
 		const ms = this.#elapsedMs(status);
@@ -1531,7 +1532,6 @@ export class ToolExecutionComponent extends Container {
 			...(view.body ?? []),
 			...this.#nativeResultImages(view.body),
 			...(late.section ? [late.section] : []),
-			...describeToolAdditionalContext(this.#additionalContext),
 		];
 		const role = `omp.tool.${this.#toolName}`;
 		if (view.inline) return col(children, { role });
