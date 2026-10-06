@@ -13,7 +13,7 @@ import type { CustomTool, CustomToolContext } from "../extensibility/custom-tool
 import { CustomToolAdapter } from "../extensibility/custom-tools/wrapper";
 import type { ExtensionRunner, SourceInfo, ToolInfo } from "../extensibility/extensions";
 import { type EvalPreludeDefinition, evalPreludeSummary } from "../eval/preludes";
-import { ExtensionToolWrapper } from "../extensibility/extensions/wrapper";
+import { authorizeToolWithoutExecution, ExtensionToolWrapper } from "../extensibility/extensions/wrapper";
 import { loadSkills, type Skill, type SkillWarning, setActiveSkills } from "../extensibility/skills";
 import { type LocalProtocolOptions } from "../internal-urls";
 import { stripXdUrlPrefix, XD_URL_PREFIX } from "@oh-my-pi/pi-tui/tools/xd-url";
@@ -33,6 +33,7 @@ import { isFilesystemSourcePath } from "../tools/path-utils";
 import { supportsExternalThinking } from "../tools/think";
 import { ToolAbortError } from "../tools/tool-errors";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import { denyError, formatApprovalPrompt, resolveApproval, resolveApprovalFromContext } from "../tools/approval";
 import { isMountableUnderXdev, listXdevTools, type XdevState, xdevDocsFor, xdevEntries } from "../tools/xdev";
 import { type EditMode } from "@oh-my-pi/pi-tui/tools/edit";
 import { resolveEditMode } from "../utils/edit-mode";
@@ -624,6 +625,28 @@ export class SessionTools {
 		return tool ? this.#wrapToolForAcpPermission(tool) : undefined;
 	}
 
+	/** Authorize provider-owned execution through the original policy and ACP gate. */
+	async authorizeNativeTool(
+		name: string,
+		toolCallId: string,
+		args: unknown,
+		signal: AbortSignal,
+		context: AgentToolContext,
+	): Promise<void> {
+		if (this.#host.isDisposed() || !this.getEnabledToolNames().includes(name)) {
+			throw new ToolError(`Tool is not enabled for provider-owned authorization: ${name}`);
+		}
+		const tool = this.#toolRegistry.get(name);
+		if (!tool) throw new ToolError(`Tool is unavailable for provider-owned authorization: ${name}`);
+		await authorizeToolWithoutExecution(
+			this.#wrapToolForAcpPermission(tool, true),
+			toolCallId,
+			args,
+			signal,
+			context,
+		);
+	}
+
 	/** Canonical allowlist advertised by and enforced for the eval bridge. */
 	getEvalBridgeToolNames(): string[] {
 		return this.getEnabledToolNames();
@@ -918,14 +941,14 @@ export class SessionTools {
 	 * explicit session flag is required: default-config ACP sessions keep the
 	 * client-side permission gate.
 	 */
-	#wrapToolForAcpPermission<T extends AgentTool>(tool: T): T {
+	#wrapToolForAcpPermission<T extends AgentTool>(tool: T, authorizationOnly = false): T {
 		const bridge = this.#host.clientBridge();
 		// Match the capability+method gating pattern used by read/write/bash.
 		if (!bridge?.capabilities.requestPermission || !bridge.requestPermission) return tool;
-		if (PERMISSION_REQUIRED_TOOLS[tool.name] !== true) return tool;
+		if (!authorizationOnly && PERMISSION_REQUIRED_TOOLS[tool.name] !== true) return tool;
 		// Skip the gate only on explicit yolo opt-in; honour per-tool policies
 		// that require a prompt or deny (matching the normal approval wrapper).
-		if (this.#isExplicitAutoApproveMode()) {
+		if (!authorizationOnly && this.#isExplicitAutoApproveMode()) {
 			const userPolicies: Record<string, unknown> = cfgToolsApproval.get(this.#host.settings);
 			const toolPolicy = userPolicies[tool.name];
 			if (!toolPolicy || toolPolicy === "allow") return tool;
@@ -940,7 +963,25 @@ export class SessionTools {
 					onUpdate: never,
 					ctx: AgentToolContext | undefined,
 				) => {
-					const permissionIntent = getPermissionIntent(target.name, args);
+					let permissionIntent = getPermissionIntent(target.name, args);
+					if (authorizationOnly) {
+						const { approvalMode, userPolicies } = resolveApprovalFromContext(ctx);
+						const resolved = resolveApproval(target, args, approvalMode, userPolicies);
+						if (resolved.policy === "deny") throw denyError(resolved, target.name);
+						const clientGateRequired = !this.#isExplicitAutoApproveMode() && resolved.tier !== "read";
+						if (resolved.policy !== "prompt" && !clientGateRequired) {
+							return await target.execute(toolCallId, args as never, signal, onUpdate, ctx as never);
+						}
+						if (!permissionIntent) {
+							const path = isRecord(args) ? stringProperty(args, "path") : undefined;
+							permissionIntent = {
+								toolName: target.name,
+								title: formatApprovalPrompt(target, args, resolved.reason),
+								...(path ? { paths: [path] } : {}),
+								cacheKey: `native:${target.name}:${path ?? toolCallId}`,
+							};
+						}
+					}
 					if (!permissionIntent) {
 						return await target.execute(toolCallId, args as never, signal, onUpdate, ctx as never);
 					}

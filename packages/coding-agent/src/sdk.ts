@@ -3634,6 +3634,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			// this session did not start on Cursor.
 			getEditReplaceTool: getCursorBridgeEditTool,
 			getToolContext: () => toolContextStore.getContext(),
+			authorizeTool: (name, toolCallId, args, signal, context) =>
+				session.authorizeNativeTool(name, toolCallId, args, signal, context),
 			mcpResources: cursorMcpResources,
 			emitEvent: event => cursorEventEmitter?.(event),
 			getTodoPhases: () => session.getTodoPhases(),

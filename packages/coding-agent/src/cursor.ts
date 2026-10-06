@@ -87,6 +87,14 @@ interface CursorExecBridgeOptions {
 	 */
 	getEditReplaceTool?: () => CursorBridgeTool | undefined;
 	getToolContext?: () => AgentToolContext | undefined;
+	/** Authorize a provider-owned tool without running its registry implementation. */
+	authorizeTool?: (
+		name: string,
+		toolCallId: string,
+		args: unknown,
+		signal: AbortSignal,
+		context: AgentToolContext,
+	) => Promise<void>;
 	emitEvent?: (event: AgentEvent) => void;
 	/**
 	 * Whether frames that mutate the filesystem WITHOUT running a registry tool
@@ -515,6 +523,16 @@ function buildTodoSyncResult(
 
 export class CursorExecHandlers implements ICursorExecHandlers {
 	constructor(private options: CursorExecBridgeOptions) {}
+
+	async authorizeTool(name: string, toolCallId: string, args: unknown, signal: AbortSignal): Promise<void> {
+		const context = this.options.getToolContext?.();
+		if (!context || !this.options.authorizeTool) {
+			throw new Error("Provider-owned tool approval context is unavailable");
+		}
+		signal.throwIfAborted();
+		await this.options.authorizeTool(name, toolCallId, args, signal, context);
+		signal.throwIfAborted();
+	}
 
 	/**
 	 * Modern Cursor builds paginate the legacy `read` frame with

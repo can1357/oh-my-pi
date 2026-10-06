@@ -1401,6 +1401,8 @@ export interface CursorMcpResourceContent {
 }
 
 export interface CursorExecHandlers {
+	/** Await the host's approval gate while leaving native execution to the provider. */
+	authorizeTool?: (name: string, toolCallId: string, args: unknown, signal: AbortSignal) => Promise<void>;
 	read?: (args: ReadArgs) => Promise<CursorExecHandlerResult<ReadResult>>;
 	ls?: (args: LsArgs) => Promise<CursorExecHandlerResult<LsResult>>;
 	grep?: (args: GrepArgs) => Promise<CursorExecHandlerResult<GrepResult>>;

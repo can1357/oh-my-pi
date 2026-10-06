@@ -26,6 +26,29 @@ import { applyToolProxy } from "../tool-proxy";
 import type { ExtensionRunner } from "./runner";
 import type { ExtensionAgentIdentity, RegisteredTool, ToolCallEventResult } from "./types";
 
+const NATIVE_AUTHORIZATION_ONLY = Symbol("native-authorization-only");
+type NativeAuthorizationContext = AgentToolContext & {
+	[NATIVE_AUTHORIZATION_ONLY]?: { args: unknown };
+};
+
+/** Run the ordinary approval gate without invoking the tool implementation. */
+export async function authorizeToolWithoutExecution(
+	tool: AgentTool,
+	toolCallId: string,
+	args: unknown,
+	signal: AbortSignal,
+	context: AgentToolContext,
+): Promise<void> {
+	if (!(tool instanceof ExtensionToolWrapper)) {
+		throw new Error("Authorization-only calls require the session approval wrapper");
+	}
+	const authorizationContext: NativeAuthorizationContext = {
+		...context,
+		[NATIVE_AUTHORIZATION_ONLY]: { args: structuredClone(args) },
+	};
+	await tool.execute(toolCallId, args as never, signal, undefined, authorizationContext);
+}
+
 /**
  * Second `renderCall` argument that satisfies both the omp and the upstream-pi
  * renderer contracts.
@@ -233,6 +256,7 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 		// unconditionally so it cannot go stale; emit here only for dispatches
 		// the loop never saw — nested xd:// device dispatches and direct
 		// (non-loop) execution such as Cursor exec handlers.
+		const authorization = (context as NativeAuthorizationContext | undefined)?.[NATIVE_AUTHORIZATION_ONLY];
 		const inheritedLoopDispatch = (context as LoopAwareToolContext | undefined)?.[LOOP_DISPATCH_CONTEXT] === true;
 		const loopDispatchedToolCall =
 			(this.runner.consumeLoopToolCall?.(toolCallId, this.tool.name) ?? false) || inheritedLoopDispatch;
@@ -407,7 +431,8 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 					: basePrompt;
 			let choice: string | undefined;
 			try {
-				choice = await uiContext.select(safetyPrompt, ["Approve", "Deny"]);
+				choice = await uiContext.select(safetyPrompt, ["Approve", "Deny"], authorization ? { signal } : undefined);
+				if (authorization) signal?.throwIfAborted();
 			} catch (err) {
 				await emitApprovalResolved(false, err instanceof Error ? err.message : "approval aborted");
 				cancelPreflight();
@@ -426,6 +451,17 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 				}
 				context.providerSafetyApproved = true;
 			}
+		}
+		if (authorization) {
+			signal?.throwIfAborted();
+			if (!Bun.deepEquals(effectiveParams, authorization.args)) {
+				cancelPreflight();
+				throw new Error("Tool input changed during authorization; execution refused");
+			}
+			cancelPreflight();
+			// Authorization is complete. The provider retains execution ownership;
+			// do not run execute, postflight, or fabricate a tool-result event.
+			return { content: [], details: undefined as TDetails };
 		}
 
 		// Execute the actual tool
