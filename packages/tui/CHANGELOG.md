@@ -654,6 +654,9 @@
 
 - Assistant SVG code blocks now render as inline, theme-colored images on terminals with graphics support, updating as responses stream and adapting to terminal width; SVG that cannot be rendered remains available as code.
 - Numeric tables in assistant responses can now include automatically selected, themed charts based on the table’s structure and units.
+### Added
+
+- Markdown now renders GitHub issue/PR references (`owner/repo#123`, and bare `#123` when `MarkdownTheme.githubRepo` is set) as OSC 8 hyperlinks without changing their visible text ([#13078](https://github.com/can1357/oh-my-pi/pull/13078) by [@andrebrait](https://github.com/andrebrait))
 
 ### Changed
 
@@ -961,9 +964,6 @@
 - Fixed the composer attachment band showing chip `#1` (and other prefix IDs) as still present when only `#10` remained in the prompt ([#13605](https://github.com/can1357/oh-my-pi/issues/13605))
 
 ## [18.4.1] - 2026-09-28
-### Added
-
-- Markdown now renders GitHub issue/PR references (`owner/repo#123`, and bare `#123` when `MarkdownTheme.githubRepo` is set) as OSC 8 hyperlinks without changing their visible text ([#13078](https://github.com/can1357/oh-my-pi/pull/13078) by [@andrebrait](https://github.com/andrebrait))
 
 ### Breaking Changes
 

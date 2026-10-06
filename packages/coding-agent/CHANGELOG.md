@@ -1554,6 +1554,13 @@ Older entries are archived in [packages/coding-agent/CHANGELOG.md@3cc89b92a410](
 - Fixed `--resume <path>` silently creating a new session when the specified path did not exist; it now reports the missing path.
 - Fixed `/settings` opening duplicate menus when invoked while the settings menu was already open.
 - Fixed native Git operations resolving repositories incorrectly when run through symbolic links.
+### Added
+
+- GitHub issue/PR references in assistant replies (`#123`, `owner/repo#123`) are now clickable terminal hyperlinks; bare `#123` links to the current directory's GitHub repository and the visible text is unchanged ([#13078](https://github.com/can1357/oh-my-pi/pull/13078) by [@andrebrait](https://github.com/andrebrait))
+
+### Changed
+
+- Issue and PR references to other repositories are now written as `owner/repo#N` or full URLs, so bare `#N` only ever means the current repository ([#13078](https://github.com/can1357/oh-my-pi/pull/13078) by [@andrebrait](https://github.com/andrebrait))
 
 Older entries are archived in [packages/coding-agent/CHANGELOG.md@d94ea97cb492](https://github.com/can1357/oh-my-pi/blob/d94ea97cb492de52e2a49a0401eb48a6beaa60f2/packages/coding-agent/CHANGELOG.md).
 ## [18.6.3] - 2026-10-06
@@ -2075,9 +2082,6 @@ Older entries are archived in [packages/coding-agent/CHANGELOG.md@5041889e64d3](
 ### Added
 
 - The shell's `cp` builtin accepts macOS's `-c` (clone where possible, else copy; same as `--reflink=auto`).
-### Added
-
-- GitHub issue/PR references in assistant replies (`#123`, `owner/repo#123`) are now clickable terminal hyperlinks; bare `#123` links to the current directory's GitHub repository and the visible text is unchanged ([#13078](https://github.com/can1357/oh-my-pi/pull/13078) by [@andrebrait](https://github.com/andrebrait))
 
 ### Changed
 
@@ -2112,7 +2116,6 @@ Older entries are archived in [packages/coding-agent/CHANGELOG.md@5041889e64d3](
 - Clarified which provider transports honor `thinkingBudgets` and that local OpenAI-compatible models use effort controls instead ([#13503](https://github.com/can1357/oh-my-pi/issues/13503)).
 - `/fork` now prints how to resume the session it leaves behind (`omp --resume <id>` or `/resume <id>`) instead of the new transcript's filename ([#13338](https://github.com/can1357/oh-my-pi/pull/13338) by [@LlemonDuck](https://github.com/LlemonDuck))
 - `/vibe` status checks no longer redraw every worker the director killed: `vibe_wait` and `vibe_list` leave killed sessions off the wall with a `N killed hidden` count, and `vibe_list` collapses them to one trailing line naming the most recent (transcripts stay at `history://<id>`) ([#13073](https://github.com/can1357/oh-my-pi/pull/13073) by [@igasmi](https://github.com/igasmi)).
-- Issue and PR references to other repositories are now written as `owner/repo#N` or full URLs, so bare `#N` only ever means the current repository ([#13078](https://github.com/can1357/oh-my-pi/pull/13078) by [@andrebrait](https://github.com/andrebrait))
 
 ### Fixed
 
