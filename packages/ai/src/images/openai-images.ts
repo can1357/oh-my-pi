@@ -1,3 +1,4 @@
+import { classifyModel } from "@oh-my-pi/pi-catalog/identity";
 import type { Model } from "@oh-my-pi/pi-catalog/types";
 import * as AIError from "../error";
 import { resolveXaiBaseUrl } from "../providers/xai-base-url";
@@ -25,21 +26,25 @@ export async function generateOpenAIImage(
 	const fetchImpl = options.fetch ?? fetch;
 	const size = resolveOpenAIImageSize(request.aspectRatio, request.imageSize);
 	const count = request.count ?? 1;
+	const wireModelId = model.requestModelId ?? model.id;
+	const isGptImage =
+		(model.requestModelId === undefined ? model.identity : classifyModel(model.provider, wireModelId)).family ===
+		"gpt-image";
 	const isXAI = model.provider === "xai" || model.provider === "xai-oauth";
 	const generationBody = isXAI
 		? {
-				model: model.requestModelId ?? model.id,
+				model: wireModelId,
 				prompt: request.prompt,
 				aspect_ratio: request.aspectRatio ?? "1:1",
 				resolution: resolveXAIResolution(request.imageSize),
 				n: count,
-				response_format: "b64_json",
+				...(isGptImage ? {} : { response_format: "b64_json" }),
 			}
 		: {
-				model: model.requestModelId ?? model.id,
+				model: wireModelId,
 				prompt: request.prompt,
 				n: count,
-				response_format: "b64_json",
+				...(isGptImage ? {} : { response_format: "b64_json" }),
 				...(size ? { size } : {}),
 			};
 	const inputImages = request.inputImages ?? [];
@@ -79,10 +84,10 @@ export async function generateOpenAIImage(
 		try {
 			if (model.provider === "openai") {
 				const form = new FormData();
-				form.set("model", model.requestModelId ?? model.id);
+				form.set("model", wireModelId);
 				form.set("prompt", request.prompt);
 				form.set("n", String(count));
-				form.set("response_format", "b64_json");
+				if (!isGptImage) form.set("response_format", "b64_json");
 				if (size) form.set("size", size);
 				for (const image of inputImages) {
 					form.append("image", new File([Buffer.from(image.data, "base64")], "image", { type: image.mimeType }));
