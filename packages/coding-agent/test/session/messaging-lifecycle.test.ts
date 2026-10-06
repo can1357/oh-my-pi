@@ -186,6 +186,62 @@ describe("cross-session messaging lifecycle", () => {
 		expect(owner.contexts).toEqual([]);
 	});
 
+	it("closes a switch publication paused across disable before re-enable publishes another inbox", async () => {
+		const owner = await makeSession("owner", true, true);
+		const successor = await makeSession("successor", false, true);
+		const oldService = owner.session.messaging!;
+		const published = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		const closing = Promise.withResolvers<void>();
+		const stopped = Promise.withResolvers<void>();
+		const installed = Promise.withResolvers<void>();
+		const publications: transport.InboxPublication[] = [];
+		const close = oldService.close.bind(oldService);
+		vi.spyOn(oldService, "close").mockImplementation(() => {
+			const pending = close();
+			closing.resolve();
+			return pending;
+		});
+		const setMessaging = owner.session.setMessaging.bind(owner.session);
+		vi.spyOn(owner.session, "setMessaging").mockImplementation(service => {
+			setMessaging(service);
+			if (service) installed.resolve();
+			else stopped.resolve();
+		});
+		vi.spyOn(transport, "publishInbox").mockImplementation(async (handler, options) => {
+			const publication = await originalPublish(handler, {
+				...options,
+				dir: path.join(temp.path(), "inboxes"),
+			});
+			publications.push(publication);
+			published.resolve();
+			await release.promise;
+			return publication;
+		});
+		try {
+			expect(await owner.session.switchSession(successor.manager.getSessionFile()!)).toBe(true);
+			await published.promise;
+			cfgMessagingEnabled.override(owner.settings, false);
+			await closing.promise;
+			release.resolve();
+			await stopped.promise;
+			cfgMessagingEnabled.override(owner.settings, true);
+			await installed.promise;
+			const entries = (await transport.listInboxEntries()).filter(
+				entry => entry.sessionId === successor.manager.getSessionId(),
+			);
+			expect(entries).toHaveLength(1);
+			expect(entries[0]!.endpoint).toBe(owner.session.messaging!.env.OMP_MESSAGING_SOCKET);
+			expect(await transport.requestInbox(entries[0]!, { type: "snapshot" })).toMatchObject({
+				ok: true,
+				snapshot: { sessionId: successor.manager.getSessionId() },
+			});
+		} finally {
+			release.resolve();
+			await Promise.all(publications.map(publication => publication.close()));
+		}
+	});
+
 	it.each(["all", "@extension"])("keeps messaging bound for a persisted reserved title %s", async title => {
 		const { session, manager } = await makeSession(title, true, false, true);
 		expect(manager.titleSource).toBe("user");
@@ -573,7 +629,7 @@ describe("cross-session messaging lifecycle", () => {
 		}
 	});
 
-	it("does not acquire in-flight ownership while a remote wake waits for the work-pool barrier", async () => {
+	it("retires a pool-barrier wake across /new and releases capacity for the successor", async () => {
 		const sender = await makeSession("sender");
 		const { session, manager, contexts } = await makeSession("local");
 		const target = (await sender.session.messaging!.listSessions()).find(
@@ -585,6 +641,18 @@ describe("cross-session messaging lifecycle", () => {
 			reached.resolve();
 			return release.promise;
 		});
+		const republished = Promise.withResolvers<void>();
+		const service = session.messaging!;
+		const retireConversation = service.retireConversation.bind(service);
+		vi.spyOn(service, "retireConversation").mockImplementation(async () => {
+			await retireConversation();
+			republished.resolve();
+		});
+		const retired = Promise.withResolvers<string>();
+		sender.session.subscribe(event => {
+			if (event.type === "irc_message" && JSON.stringify(event.message).includes("dropped unread"))
+				retired.resolve(JSON.stringify(event.message));
+		});
 		await sender.session.messaging!.send(target, "POOL_WAIT_MAIL", { notifyWhenIdle: false });
 		await reached.promise;
 		const transitioned = session.newSession();
@@ -594,8 +662,27 @@ describe("cross-session messaging lifecycle", () => {
 			release.resolve();
 			await session.waitForSessionTransition();
 			await session.waitForIdle();
+			for (let i = 0; i < 8; i++) await Promise.resolve();
 			expect(contexts).toEqual([]);
 			expect(JSON.stringify(session.messages)).not.toContain("POOL_WAIT_MAIL");
+			expect(session.pendingRemoteCount()).toBe(0);
+			expect(await retired.promise).toContain("Your message to @local was dropped unread");
+			await republished.promise;
+			const successor = (await sender.session.messaging!.listSessions()).find(
+				peer => peer.sessionId === manager.getSessionId(),
+			)!;
+			const woken = Promise.withResolvers<void>();
+			session.subscribe(event => {
+				if (event.type === "agent_start") woken.resolve();
+			});
+			expect((await sender.session.messaging!.send(successor, "SUCCESSOR_MAIL", { notifyWhenIdle: false })).ok).toBe(
+				true,
+			);
+			await woken.promise;
+			await session.waitForIdle();
+			expect(contexts).toHaveLength(1);
+			expect(contexts[0]).toContain("SUCCESSOR_MAIL");
+			expect(session.pendingRemoteCount()).toBe(0);
 		} finally {
 			release.resolve();
 			await transitioned;

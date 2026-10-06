@@ -1401,7 +1401,7 @@ export class ExtensionUiController {
 	}
 
 	async #updateSessionName(name: string): Promise<void> {
-		await this.ctx.sessionManager.setSessionName(name, "user");
+		await this.ctx.session.setSessionName(name, "user");
 	}
 
 	/**

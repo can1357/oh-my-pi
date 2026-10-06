@@ -445,7 +445,7 @@ export async function collectRegisteredSessionFiles(registryDir: string): Promis
 		try {
 			if ((await fs.promises.stat(file)).isFile()) files.push(file);
 		} catch (error) {
-			if (!isEnoent(error)) throw error;
+			if (!isEnoent(error) && (error as NodeJS.ErrnoException).code !== "ENOTDIR") throw error;
 		}
 	}
 	return files;

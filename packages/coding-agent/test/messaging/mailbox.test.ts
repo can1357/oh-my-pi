@@ -5,7 +5,6 @@ import { TempDir } from "@oh-my-pi/pi-utils";
 import {
 	drainOffline,
 	enqueueOffline,
-	enqueueOfflineNotice,
 	listOfflineSessions,
 	mailboxDir,
 	OFFLINE_INBOX_CAP,
@@ -289,9 +288,9 @@ describe("locked offline receipt storage", () => {
 			toSessionId: sessionId,
 			sentAt: now,
 		};
-		expect(await enqueueOfflineNotice(sessionId, notice, { dir, now })).toBe("queued");
+		expect(await enqueueOffline(sessionId, notice, { dir, now })).toBe("queued");
 		for (let i = 1; i < OFFLINE_INBOX_CAP; i++) await enqueueOffline(sessionId, message(`filled-${i}`), { dir, now });
-		expect(await enqueueOfflineNotice(sessionId, { ...notice, sentAt: now + 1 }, { dir, now })).toBe("queued");
+		expect(await enqueueOffline(sessionId, { ...notice, sentAt: now + 1 }, { dir, now })).toBe("queued");
 		const drained = await drainOffline(sessionId, { dir, now });
 		expect(drained.filter(item => item.message.id === notice.id).map(item => item.message)).toEqual([notice]);
 		expect(drained).toHaveLength(OFFLINE_INBOX_CAP);

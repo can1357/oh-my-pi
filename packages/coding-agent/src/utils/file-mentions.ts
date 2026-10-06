@@ -30,7 +30,8 @@ import { VideoError, buildVideoContactSheetPng, formatVideoDetails, probeVideo, 
 import { createVideoPreviewImage, isVideoPath } from "@oh-my-pi/pi-tui/prompt/video";
 
 /** Regex to match @filepath patterns in text */
-const FILE_MENTION_REGEX = /@(?:"((?:\\.|[^"\\])+)"|'([^']+)'|([^\s@]+))/g;
+// ponytail: a name ending in a backslash cannot be expressed in double quotes; use single quotes.
+const FILE_MENTION_REGEX = /@(?:"((?:\\"|[^"\\]|\\(?!"))+)"|'([^']+)'|([^\s@]+))/g;
 const LEADING_PUNCTUATION_REGEX = /^[`"'([{<]+/;
 const TRAILING_PUNCTUATION_REGEX = /[)\]}>.,;:!?"'`]+$/;
 const MENTION_BOUNDARY_REGEX = /[\s([{<"'`]/;
@@ -173,7 +174,7 @@ export function extractFileMentions(text: string): string[] {
 		const index = match.index ?? 0;
 		if (!isMentionBoundary(text, index)) continue;
 
-		const rawPath = match[1]?.replace(/\\(["\\])/g, "$1") ?? match[2] ?? match[3];
+		const rawPath = match[1]?.replace(/\\"/g, '"') ?? match[2] ?? match[3];
 		if (!rawPath) continue;
 
 		const cleaned = match[1] !== undefined || match[2] !== undefined ? rawPath.trim() : sanitizeMentionPath(rawPath);

@@ -19,7 +19,7 @@ export interface IrcBridgeHost {
 	isStreaming(): boolean;
 	planModeEnabled(): boolean;
 	emitSessionEvent(event: AgentSessionEvent): Promise<void>;
-	wakeForIrc(records: AgentMessage[]): void;
+	wakeForIrc(records: AgentMessage[], onDisposition?: (accepted: boolean) => void): void;
 }
 
 /** Owns incoming IRC queues and the session's non-interrupting aside queue. */
@@ -205,7 +205,7 @@ export class IrcBridge {
 	}
 
 	/** Remote messages bypass local bus waiters, steering and interrupt queues. */
-	async deliverRemote(deliveries: readonly RemoteDelivery[]): Promise<"injected" | "woken"> {
+	async deliverRemote(deliveries: readonly RemoteDelivery[]): Promise<"injected" | "woken" | "retired"> {
 		if (this.#host.isDisposed()) throw new Error("Recipient session is disposed.");
 		const records = deliveries.map(d => {
 			const record: CustomMessage = {
@@ -240,8 +240,9 @@ export class IrcBridge {
 			this.#asides.push(...records);
 			return "injected";
 		}
-		this.#host.wakeForIrc(records);
-		return "woken";
+		const disposition = Promise.withResolvers<boolean>();
+		this.#host.wakeForIrc(records, disposition.resolve);
+		return (await disposition.promise) ? "woken" : "retired";
 	}
 
 	/** Delivers an IRC message into the recipient session without awaiting any wake turn. */

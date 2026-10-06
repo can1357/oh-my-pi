@@ -37,7 +37,7 @@ export interface OfflineMailGcCandidate {
 	sessionId: string;
 	file: string;
 	bytes: number;
-	kind: "expiredMail" | "orphanedMail";
+	kind: "expiredMail";
 }
 
 export interface OfflineSession {
@@ -209,18 +209,10 @@ export async function enqueueOfflineUnlocked(
 
 export function enqueueOffline(
 	sessionId: string,
-	message: StoredMessage,
+	message: StoredMail,
 	options?: { dir?: string; now?: number; signal?: AbortSignal },
 ): Promise<"queued" | "full"> {
 	return withOfflineMailboxLock(sessionId, () => enqueueOfflineUnlocked(sessionId, message, options), options);
-}
-
-export function enqueueOfflineNotice(
-	sessionId: string,
-	notice: StoredRefusalNotice,
-	options?: { dir?: string; now?: number },
-): Promise<"queued" | "full"> {
-	return withOfflineMailboxLock(sessionId, () => enqueueOfflineUnlocked(sessionId, notice, options), options);
 }
 
 /** Internal transaction primitive: caller must hold the recipient's handoff lock. */
@@ -264,27 +256,16 @@ export async function retireOfflineMailbox(sessionId: string, options?: { dir?: 
 	});
 }
 
-async function mailGcKind(
-	file: string,
-	now: number,
-	graceMs: number,
-): Promise<OfflineMailGcCandidate["kind"] | undefined> {
+async function mailGcKind(file: string, now: number): Promise<OfflineMailGcCandidate["kind"] | undefined> {
 	const message = await readStoredMessage(file);
-	if (!message) return undefined;
-	if (message.sentAt < now - OFFLINE_INBOX_TTL_MS) return "expiredMail";
-	if (!message.sessionFile || (await fs.promises.stat(file)).mtimeMs > now - graceMs) return undefined;
-	try {
-		await fs.promises.stat(message.sessionFile);
-	} catch (error) {
-		if (isEnoent(error) || (error as NodeJS.ErrnoException).code === "ENOTDIR") return "orphanedMail";
-	}
-	return undefined;
+	// A missing historical transcript path cannot prove deletion: sessions move
+	// without changing their full identity, and inventory scans can be incomplete.
+	return message && message.sentAt < now - OFFLINE_INBOX_TTL_MS ? "expiredMail" : undefined;
 }
 
 export async function collectOfflineMailGcCandidates(options?: {
 	dir?: string;
 	now?: number;
-	graceMs?: number;
 }): Promise<OfflineMailGcCandidate[]> {
 	const root = options?.dir ?? messagingRegistryDir();
 	const parent = path.join(root, "mail");
@@ -304,7 +285,7 @@ export async function collectOfflineMailGcCandidates(options?: {
 			entry.name,
 			async () => {
 				for (const file of await mailboxFiles(mailboxDir(entry.name, { dir: root }), false)) {
-					const kind = await mailGcKind(file, options?.now ?? Date.now(), options?.graceMs ?? 300_000);
+					const kind = await mailGcKind(file, options?.now ?? Date.now());
 					if (kind)
 						candidates.push({ sessionId: entry.name, file, kind, bytes: (await fs.promises.stat(file)).size });
 				}
@@ -317,17 +298,14 @@ export async function collectOfflineMailGcCandidates(options?: {
 
 export function removeOfflineMailGcCandidate(
 	candidate: OfflineMailGcCandidate,
-	options?: { dir?: string; now?: number; graceMs?: number },
+	options?: { dir?: string; now?: number },
 ): Promise<boolean> {
 	return withOfflineMailboxLock(
 		candidate.sessionId,
 		async () => {
 			const dir = mailboxDir(candidate.sessionId, options);
 			const files = await mailboxFiles(dir, false);
-			if (
-				!files.includes(candidate.file) ||
-				!(await mailGcKind(candidate.file, options?.now ?? Date.now(), options?.graceMs ?? 300_000))
-			)
+			if (!files.includes(candidate.file) || !(await mailGcKind(candidate.file, options?.now ?? Date.now())))
 				return false;
 			await fs.promises.rm(candidate.file, { force: true });
 			if ((await fs.promises.readdir(dir)).length === 0) await fs.promises.rmdir(dir);

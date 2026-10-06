@@ -1418,6 +1418,40 @@ describe("offline handoff regressions", () => {
 		expect(await mailbox.drainOffline("b")).toEqual([]);
 	});
 
+	it("answers a snapshot issued while visible publication metadata is still awaiting initialization", async () => {
+		await pair();
+		const visible = Promise.withResolvers<void>();
+		const requested = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		vi.spyOn(transport, "publishInbox").mockImplementation(async (handler, options) => {
+			const publication = await realPublishInbox(
+				(request, auth) => {
+					requested.resolve();
+					return handler(request, auth);
+				},
+				{ ...options, dir: temp!.path() },
+			);
+			visible.resolve();
+			await release.promise;
+			return publication;
+		});
+		const started = MessagingService.start(new FakeHost("visible", "visible"), Settings.isolated({}));
+		try {
+			await visible.promise;
+			const entry = (await transport.listInboxEntries()).find(item => item.sessionId === "visible")!;
+			const snapshot = transport.requestInbox(entry, { type: "snapshot" });
+			await requested.promise;
+			release.resolve();
+			services.push(await started);
+			expect(await snapshot).toMatchObject({
+				ok: true,
+				snapshot: { sessionId: "visible", name: "visible", shortId: sessionShortId("visible") },
+			});
+		} finally {
+			release.resolve();
+		}
+	});
+
 	it("addresses registered custom-session-dir transcripts offline by name and short id", async () => {
 		const { a } = await pair();
 		vi.spyOn(dirs, "getSessionsDir").mockReturnValue(path.join(temp!.path(), "managed"));
@@ -1885,3 +1919,56 @@ it("cutoff during an offline acknowledgement preserves the remaining mail and ac
 	expect(bh.deliveries.map(item => item.body)).toEqual(["already admitted"]);
 	expect(untouched).not.toHaveBeenCalled();
 });
+
+it("bounds accepted-send receipt correlation while preserving recent retirement authentication", async () => {
+	const { a, b, ah, target, as } = await pair();
+	cfgMessagingRateLimit.override(as, 2000);
+	const senderTarget = (await b.listSessions())[0]!;
+	const sentIds: string[] = [];
+	vi.spyOn(transport, "requestInbox").mockImplementation(async (entry, request, options) => {
+		if (request.type === "message") {
+			sentIds.push(request.id);
+			return { ok: true, outcome: "delivered" };
+		}
+		return realRequestInbox(entry, request, { ...options, dir: temp!.path() });
+	});
+	for (let i = 0; i < 1025; i++)
+		expect((await a.send(target, `RECEIPT_CACHE_${i}`, { notifyWhenIdle: false })).ok).toBe(true);
+	const from: SenderInfo = {
+		sessionId: target.sessionId,
+		name: target.name,
+		shortId: target.shortId,
+		cwd: target.cwd,
+		entryId: target.entry.entryId,
+		class: "bypass",
+	};
+	await transport.requestInbox(senderTarget.entry, {
+		type: "notice",
+		id: "evicted-receipt",
+		kind: "retired",
+		subject: "message",
+		aboutId: sentIds[0],
+		from,
+	});
+	expect(ah.notices).toEqual([]);
+	await transport.requestInbox(senderTarget.entry, {
+		type: "notice",
+		id: "wrong-receiver-receipt",
+		kind: "retired",
+		subject: "message",
+		aboutId: sentIds.at(-1),
+		from: { ...from, entryId: "unrelated-entry" },
+	});
+	expect(ah.notices).toEqual([]);
+	await transport.requestInbox(senderTarget.entry, {
+		type: "notice",
+		id: "recent-receipt",
+		kind: "retired",
+		subject: "message",
+		aboutId: sentIds.at(-1),
+		from,
+	});
+	expect(ah.notices).toEqual([
+		"Your message to @beta was dropped unread: that session switched to a different conversation.",
+	]);
+}, 20_000);
