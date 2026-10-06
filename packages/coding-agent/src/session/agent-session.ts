@@ -10009,6 +10009,7 @@ export class AgentSession implements SettingsScope {
 	): Promise<void> {
 		// Captured before the normalization await below — see #sessionGeneration's doc comment.
 		const sessionGeneration = this.#sessionGeneration;
+		const promptGeneration = this.#promptGeneration;
 		const details =
 			options?.queueChipText !== undefined
 				? ({
@@ -10038,6 +10039,14 @@ export class AgentSession implements SettingsScope {
 		const descriptionNotice = preprocessed
 			? preprocessed.descriptionNotice
 			: await this.#buildSkillImageDescriptionNotice(normalizedAppMessage);
+		// abort() clears the steer/follow-up queues; a message still being normalized when it
+		// lands must not be queued afterwards and restart the stopped run (as in #queueUserMessage).
+		if (
+			deliverAs !== "aside" &&
+			(this.#promptGeneration !== promptGeneration || this.#sessionGeneration !== sessionGeneration)
+		) {
+			return;
+		}
 		if (deliverAs === "aside") {
 			if (await this.#sessionGenerationChanged(sessionGeneration)) return;
 			// Non-interrupting: rides the same step-boundary aside poll as
