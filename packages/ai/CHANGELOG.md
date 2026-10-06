@@ -4,6 +4,7 @@
 
 ### Fixed
 
+- Fixed Ultrafast service-tier turns being billed at standard rates; GPT-6 Astra now carries its published Ultrafast premium (6x on the OpenAI API, 8x included usage on Codex), and the premium-request counter counts them ([#14471](https://github.com/can1357/oh-my-pi/pull/14471) by [@eggpeat](https://github.com/eggpeat)).
 - Fixed generic Google Antigravity 429 responses imposing a 30-minute quota cooldown; they now use a 45–75-second capacity backoff while preserving explicit quota errors and credential rotation ([#11713](https://github.com/can1357/oh-my-pi/pull/11713) by [@iliaal](https://github.com/iliaal)).
 
 ## [18.6.3] - 2026-10-06

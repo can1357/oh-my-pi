@@ -7147,23 +7147,12 @@ const MODELS_DEV_PROVIDER_DESCRIPTORS_CODING_PLANS: readonly ModelsDevProviderDe
 			allowsSyntheticReasoningContentForToolCalls: false,
 		},
 	}),
-	// --- MiniMax Coding Plan ---
-	openAiCompletionsDescriptor("minimax-coding-plan", "minimax-code", "https://api.minimax.io/v1", {
-		compat: {
-			supportsStore: false,
-			supportsDeveloperRole: false,
-			supportsReasoningEffort: false,
-			reasoningContentField: "reasoning_content",
-		},
-	}),
-	openAiCompletionsDescriptor("minimax-cn-coding-plan", "minimax-code-cn", "https://api.minimaxi.com/v1", {
-		compat: {
-			supportsStore: false,
-			supportsDeveloperRole: false,
-			supportsReasoningEffort: false,
-			reasoningContentField: "reasoning_content",
-		},
-	}),
+	// --- MiniMax Token Plan ---
+	// MiniMax documents its Anthropic-compatible API as the recommended
+	// protocol: signed thinking blocks, `output_config.effort` depth control,
+	// and prompt-cache usage reporting.
+	anthropicMessagesDescriptor("minimax-coding-plan", "minimax-code", "https://api.minimax.io/anthropic"),
+	anthropicMessagesDescriptor("minimax-cn-coding-plan", "minimax-code-cn", "https://api.minimaxi.com/anthropic"),
 	// --- Alibaba Coding Plan ---
 	openAiCompletionsDescriptor(
 		"alibaba-coding-plan",

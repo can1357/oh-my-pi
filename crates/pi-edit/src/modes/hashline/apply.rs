@@ -503,11 +503,12 @@ fn group_variants(
 						Some(path),
 						&materialize(lines, &[inserts.clone(), deletes.clone()].concat()).0,
 					) {
-					// Only a replacement that breaks the file on its own leaves the row's
-					// position in question (e.g. a closer swapped for a statement).
-					// Swapping an `if` opener, `case` label, or signature for another of
-					// the same shape parses fine alone, so a parse failure elsewhere in
-					// the batch must not reject it.
+					// Only a replacement that breaks the file on its own leaves the
+					// row's position in question (e.g. a closer
+					// swapped for a statement). Swapping an `if`
+					// opener, `case` label, or signature for another of
+					// the same shape parses fine alone, so a parse failure elsewhere
+					// in the batch must not reject it.
 					ambiguous = true;
 				}
 			} else {

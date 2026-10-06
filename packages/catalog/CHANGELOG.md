@@ -2,8 +2,19 @@
 
 ## [Unreleased]
 
+### Added
+
+- MiniMax-M3.1-Flash-Preview now offers thinking levels low through max on MiniMax hosts. Like MiniMax M2, it is marked as requiring reasoning effort because the model always thinks: thinking-off and forced-off requests run at the low level ([#13696](https://github.com/can1357/oh-my-pi/pull/13696) by [@eggpeat](https://github.com/eggpeat))
+- Added Google Cloud partner-model pricing for Claude Opus 5.5 and Sonnet 5.5 on Google Antigravity ([#14195](https://github.com/can1357/oh-my-pi/pull/14195) by [@eggpeat](https://github.com/eggpeat)).
+
+### Changed
+
+- MiniMax Token Plan (`minimax-code`, `minimax-code-cn`) now uses MiniMax's recommended Anthropic-compatible API, and `/login` checks keys against the same endpoint ([#13696](https://github.com/can1357/oh-my-pi/pull/13696) by [@eggpeat](https://github.com/eggpeat))
+- Google Antigravity now lists Claude Opus 5.5 and Sonnet 5.5 once each, with selectable low, medium, and high thinking levels ([#14195](https://github.com/can1357/oh-my-pi/pull/14195) by [@eggpeat](https://github.com/eggpeat)).
+
 ### Fixed
 
+- Fixed GPT-6 Astra's Ultrafast service tier being unpriced: the catalog now carries OpenAI's published multiplier, 6x on the first-party API and 8x (the included-usage rate, matching Fast's 2.5x) on the Codex card ([#14471](https://github.com/can1357/oh-my-pi/pull/14471) by [@eggpeat](https://github.com/eggpeat)).
 - Scoped generic resource-exhaustion capacity backoff to Google Antigravity, preserving quota handling on other Google deployments ([#11713](https://github.com/can1357/oh-my-pi/pull/11713) by [@iliaal](https://github.com/iliaal)).
 
 ## [18.6.3] - 2026-10-06

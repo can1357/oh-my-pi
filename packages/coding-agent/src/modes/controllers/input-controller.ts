@@ -2615,7 +2615,7 @@ export class InputController {
 			basePath,
 			commandUsage: name => commandUsage.get(name),
 			modelMentions: createModelMentionSource({
-				source: createModelBrowserSource(this.ctx.settings),
+				source: createModelBrowserSource(this.ctx.settings, model => this.ctx.session.effectiveServiceTier(model)),
 				registry: this.ctx.session.modelRegistry,
 				scopedModels: () => this.ctx.session.scopedModels.map(s => s.model),
 			}),
