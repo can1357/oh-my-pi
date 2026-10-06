@@ -283,7 +283,7 @@ export class OAuthRefresher {
 							leasedCredentialId !== undefined ? { owner, nowMs: Date.now() } : undefined,
 						);
 						if (disabled) {
-							this.#deps.pool.replace(
+							this.#deps.pool.replaceAndReset(
 								provider,
 								rows
 									.filter(entry => entry.id !== row.id)
@@ -292,7 +292,6 @@ export class OAuthRefresher {
 										credential: entry.credential,
 									})),
 							);
-							this.#deps.pool.reset(provider);
 							this.#deps.pool.emitDisabled(credentialDisabledEvent(provider, row, disabledCause));
 							return { credential: undefined, refreshed: false, removed: true };
 						}

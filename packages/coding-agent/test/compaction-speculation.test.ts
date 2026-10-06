@@ -122,6 +122,7 @@ describe("async speculative compaction", () => {
 				events.push(event.type);
 			},
 			emitNotice: () => {},
+			applyStartupOAuthAccountPin: () => {},
 			scheduleAgentContinue: () => {},
 			scheduleCompactionContinuation: () => false,
 			persistTurnMessagesForMidRunCompaction: async () => false,

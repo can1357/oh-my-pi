@@ -81,6 +81,7 @@ async function createFixture(overrides?: Partial<Record<string, unknown>>): Prom
 		settled.resolve();
 	});
 	const session = {
+		sessionId: "memory-startup-session",
 		sessionManager: {
 			getSessionFile: () => sessionFile,
 			getSessionDir: () => sessionDir,
@@ -91,6 +92,7 @@ async function createFixture(overrides?: Partial<Record<string, unknown>>): Prom
 		model,
 		modelRegistry,
 		refreshBaseSystemPrompt,
+		applyStartupOAuthAccountPin: vi.fn(),
 	};
 
 	return { agentDir, sessionDir, sessionFile, settings, session, modelRegistry, model, whenSettled: settled.promise };
@@ -199,6 +201,14 @@ describe("memories runtime", () => {
 
 	test("runs phase1 to phase2 and writes consolidated outputs", async () => {
 		const fx = await createFixture();
+		const credentialOrder: string[] = [];
+		fx.session.applyStartupOAuthAccountPin = (provider: string, sessionId: string) => {
+			credentialOrder.push(`pin:${provider}:${sessionId}`);
+		};
+		fx.modelRegistry.getApiKey = async (model: Model, sessionId: string) => {
+			credentialOrder.push(`key:${model.provider}:${sessionId}`);
+			return "test-api-key";
+		};
 		const rolloutPath = path.join(fx.sessionDir, "thread-a.jsonl");
 		const rolloutRows = [
 			{ type: "session", id: "thread-a", cwd: fx.agentDir },
@@ -258,6 +268,12 @@ describe("memories runtime", () => {
 		expect(fx.session.refreshBaseSystemPrompt).toHaveBeenCalledTimes(1);
 		expect(ai.completeSimple).toHaveBeenCalled();
 		expect(ai.completeSimple).toHaveBeenCalledTimes(2);
+		expect(credentialOrder).toEqual([
+			"pin:openai:memory-startup-session",
+			"key:openai:memory-startup-session",
+			"pin:openai:memory-startup-session",
+			"key:openai:memory-startup-session",
+		]);
 		const phase2Prompt = completeSpy.mock.calls[1]?.[1];
 		expect(phase2Prompt?.systemPrompt?.[0]).toContain("memory-stage-two consolidator");
 	});

@@ -62,6 +62,7 @@ const host: SessionToolsHost = {
 	localProtocolOptions: () => ({}),
 	evalPreludes: () => [],
 	sessionAgents: () => [],
+	applyStartupOAuthAccountPin: () => {},
 };
 const sessionTools = new SessionTools(host, {
 	baseSystemPrompt: [],

@@ -776,6 +776,12 @@ export interface CredentialsApi {
 	readonly generation: number;
 	/** Subscribe to credential snapshot generation changes. */
 	onGeneration(listener: (generation: number) => void): () => void;
+	/** Count of completed credential-view refreshes (generation bumps plus external refresh signals). */
+	readonly refreshAttempts: number;
+	/** Subscribe to every completed credential-view refresh, including confirmed-unchanged ones. */
+	onRefreshAttempted(listener: (refreshAttempts: number) => void): () => void;
+	/** Signal an external refresh (e.g. broker snapshot delivery) that left the view unchanged. */
+	notifyExternalRefresh(): void;
 	/**
 	 * Subscribe to {@link CredentialDisabledEvent}s. Multiple subscribers are supported and
 	 * each fires for every disable event; subscribers are invoked in registration order with

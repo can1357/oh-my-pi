@@ -60,6 +60,26 @@ export const cfgAuthAccountPolicies = register({
 	default: EMPTY_AUTH_ACCOUNT_POLICIES,
 });
 
+/**
+ * Per-provider default OAuth account a new session starts on (for example always resolve
+ * `anthropic` to one org first thing in the day), selected like `/session pin`: 1-based
+ * stored-account position, email, account id, org id, org name, or `OAuth credential #<id>`.
+ * Usage-based failover to a sibling on a rate limit still applies; this only sets the starting
+ * account. Unset, unmatched, or ambiguous selectors fall back to the normal ranked pick.
+ */
+export const cfgAuthStartupOAuthAccount = register({
+	id: "auth.startupOAuthAccount",
+	type: "record",
+	default: EMPTY_STRING_RECORD,
+	ui: {
+		tab: "providers",
+		group: "Services",
+		label: "Startup OAuth Account",
+		description:
+			'Per-provider default OAuth account to pin at session start, keyed by provider id (e.g. "anthropic"). Value is a stored account selector: 1-based position, email, account id, org id, or org name, same as `/session pin`. A rate limit on the pinned account still fails over to a sibling automatically.',
+	},
+});
+
 export const cfgEnabledModels = register({
 	id: "enabledModels",
 	type: "array",

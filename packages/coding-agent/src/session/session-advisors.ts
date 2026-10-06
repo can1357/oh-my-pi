@@ -510,6 +510,17 @@ export interface SessionAdvisorsHost {
 		phase: CodexCompactionContext["phase"];
 	}): CodexCompactionContext;
 	sessionId(): string;
+	/**
+	 * Retry `AgentSession#applyStartupOAuthAccountPin` for an explicit
+	 * (provider, sessionId) pair — advisor provider-session ids are separate
+	 * random UUIDs credential stickiness is keyed on, so the primary
+	 * session's pin never covers them on its own.
+	 */
+	applyStartupOAuthAccountPin(
+		provider: string,
+		sessionId: string,
+		options?: { allowOverrideAutoSticky?: boolean },
+	): void;
 }
 
 /**
@@ -898,6 +909,29 @@ export class SessionAdvisors {
 		for (const advisor of this.#advisors) this.#refreshAdvisorProviderIdentity(advisor);
 	}
 
+	/**
+	 * Retry the configured `auth.startupOAuthAccount` default for every live
+	 * advisor's own provider-session id, without touching prompt-cache keys,
+	 * metadata resolvers, or telemetry (unlike {@link refreshProviderIdentity}).
+	 * Called from `AgentSession`'s `AuthStorage.credentials.onRefreshAttempted` listener:
+	 * a selector that matched nothing when an advisor's identity was first
+	 * primed (stale broker snapshot cache, a sibling process's `/login` not
+	 * yet visible) can become resolvable once new credentials appear. Passes
+	 * `allowOverrideAutoSticky` so this can also correct a sticky ordinary
+	 * ranking created for the advisor in that same window — safe because the
+	 * host only honors it while the pair is still `#pendingStartupOAuthPins`,
+	 * i.e. nothing has settled it (successfully applied, or otherwise made
+	 * active) since.
+	 */
+	reapplyStartupOAuthAccountPins(): void {
+		for (const advisor of this.#advisors) {
+			if (advisor.providerSessionId)
+				this.#host.applyStartupOAuthAccountPin(advisor.model.provider, advisor.providerSessionId, {
+					allowOverrideAutoSticky: true,
+				});
+		}
+	}
+
 	/** Re-primes advisor transcript views after an in-conversation history rewrite. */
 	resetAllRuntimes(reason?: string): void {
 		this.#resetAllAdvisorRuntimes(reason);
@@ -980,7 +1014,12 @@ export class SessionAdvisors {
 		this.#advisorInterruptImmuneTurnStart = this.#advisorPrimaryTurnsCompleted + 1;
 	}
 
-	/** Rebind one advisor to the active primary conversation's provider identity. */
+	/**
+	 * Rebind one advisor to the active primary conversation's provider
+	 * identity, then retry the `auth.startupOAuthAccount` default for the
+	 * advisor's own provider — a separate credential-stickiness key from the
+	 * primary session id, so the primary's pin never covers it on its own.
+	 */
 	#refreshAdvisorProviderIdentity(advisor: ActiveAdvisor): void {
 		const primaryProviderSessionId = this.#host.sessionId();
 		const providerSessionId = getOrCreateAdvisorProviderSessionId(
@@ -990,6 +1029,7 @@ export class SessionAdvisors {
 		);
 		advisor.providerSessionId = providerSessionId;
 		advisor.agent.sessionId = providerSessionId;
+		if (providerSessionId) this.#host.applyStartupOAuthAccountPin(advisor.model.provider, providerSessionId);
 		advisor.agent.promptCacheKey = this.#host.agent.promptCacheKey ?? providerSessionId;
 		advisor.agent.getApiKey = requestModel => this.#host.modelRegistry.resolver(requestModel, providerSessionId);
 		advisor.agent.setMetadataResolver(
@@ -1920,8 +1960,19 @@ export class SessionAdvisors {
 		});
 	}
 
-	/** Switch one advisor model while preserving its context and effort invariants. */
+	/**
+	 * Switch one advisor model while preserving its context and effort
+	 * invariants. Every in-flight advisor model change funnels through here
+	 * (retry-fallback primary restore, cross-provider failure fallback, context
+	 * promotion), so this is also where a PROVIDER change re-applies the
+	 * `auth.startupOAuthAccount` default for the advisor's own provider-session
+	 * id — mirroring the primary's `#setModelWithProviderSessionReset`. The id
+	 * itself is stable across the switch, so without this an advisor landing on
+	 * provider Q starts on automatic ranking for Q and can consume the account
+	 * the setting reserved there.
+	 */
 	#setAdvisorModel(advisor: ActiveAdvisor, model: Model, requestedThinkingLevel: ThinkingLevel): ThinkingLevel {
+		const providerChanged = advisor.model.provider !== model.provider;
 		const resolvedThinkingLevel = resolveThinkingLevelForModel(model, requestedThinkingLevel);
 		const nextThinkingLevel = resolvedThinkingLevel ?? ThinkingLevel.Inherit;
 		advisor.agent.setModel(model);
@@ -1930,6 +1981,9 @@ export class SessionAdvisors {
 		advisor.agent.appendOnlyContext?.invalidateForModelChange();
 		advisor.model = model;
 		advisor.thinkingLevel = nextThinkingLevel;
+		if (providerChanged && advisor.providerSessionId) {
+			this.#host.applyStartupOAuthAccountPin(model.provider, advisor.providerSessionId);
+		}
 		return nextThinkingLevel;
 	}
 
@@ -2005,6 +2059,8 @@ export class SessionAdvisors {
 		const primaryModel =
 			resolvedPrimary.model ?? this.#host.modelRegistry.find(originalSelector.provider, originalSelector.id);
 		if (!primaryModel || !this.#canReplayAdvisorHistory(advisor, primaryModel)) return;
+		if (advisor.providerSessionId)
+			this.#host.applyStartupOAuthAccountPin(primaryModel.provider, advisor.providerSessionId);
 		const apiKey = await this.#host.modelRegistry.getApiKey(primaryModel, advisor.providerSessionId, { signal });
 		if (!apiKey) return;
 		signal.throwIfAborted();
@@ -2150,6 +2206,8 @@ export class SessionAdvisors {
 				const candidate = resolved.model ?? this.#host.modelRegistry.find(selector.provider, selector.id);
 				if (!candidate || modelsAreEqual(candidate, currentModel)) continue;
 				if (!this.#canReplayAdvisorHistory(advisor, candidate)) continue;
+				if (advisor.providerSessionId)
+					this.#host.applyStartupOAuthAccountPin(candidate.provider, advisor.providerSessionId);
 				const apiKey = await this.#host.modelRegistry.getApiKey(candidate, advisor.providerSessionId, { signal });
 				if (!apiKey) continue;
 				signal.throwIfAborted();
@@ -2443,6 +2501,8 @@ export class SessionAdvisors {
 		});
 
 		for (const candidate of candidates) {
+			if (advisorProviderSessionId)
+				this.#host.applyStartupOAuthAccountPin(candidate.provider, advisorProviderSessionId);
 			const apiKey = await this.#host.modelRegistry.getApiKey(candidate, advisorProviderSessionId, { signal });
 			if (!apiKey) continue;
 			if (

@@ -373,6 +373,11 @@ export interface OpenAuthCredentialStoreOptions {
 	sourceLabel?: string;
 	/** Programmatic pool for SDK hosts. Takes precedence over the environment file. */
 	accountPool?: AuthBrokerAccountPool;
+	/**
+	 * Called after every snapshot delivery the broker store reports, so hosts can
+	 * reload their credential view. May fire before the host has a storage handle.
+	 */
+	onSnapshotDelivered?: () => void;
 }
 
 /** Credential store opened by {@link openAuthCredentialStore} plus its diagnostics label. */
@@ -396,17 +401,25 @@ export async function openAuthCredentialStore(
 		const client = new AuthBrokerClient({ url: brokerConfig.url, token: brokerConfig.token });
 		const cachePath = options.cachePath ?? getAuthBrokerSnapshotCachePath();
 		const ttlMs = resolveSnapshotTtlMs();
+		// Chained so concurrent onSnapshot deliveries persist in call order rather
+		// than completion order: each write's encrypt/open/write/rename is async,
+		// so an older snapshot's write could otherwise rename after a newer one and
+		// leave a stale cache on disk. The store already drops out-of-order events
+		// before invoking the callback, so serializing is sufficient.
+		let writeQueue: Promise<void> = Promise.resolve();
 		const persist =
 			ttlMs > 0
 				? (snapshot: SnapshotResponse): void => {
-						void writeAuthBrokerSnapshotCache({
-							path: cachePath,
-							token: brokerConfig.token,
-							url: brokerConfig.url,
-							snapshot,
-						}).catch(error => {
-							logger.debug("auth-broker snapshot cache write failed", { error: String(error) });
-						});
+						writeQueue = writeQueue.then(() =>
+							writeAuthBrokerSnapshotCache({
+								path: cachePath,
+								token: brokerConfig.token,
+								url: brokerConfig.url,
+								snapshot,
+							}).catch(error => {
+								logger.debug("auth-broker snapshot cache write failed", { error: String(error) });
+							}),
+						);
 					}
 				: undefined;
 
@@ -442,10 +455,14 @@ export async function openAuthCredentialStore(
 		// the current generation within one RTT without blocking startup on a
 		// broker round trip. A token revoked since the cache was written surfaces
 		// through that background path exactly like a mid-session revocation.
+		const onSnapshotDelivered = options.onSnapshotDelivered;
 		const store = new RemoteAuthCredentialStore({
 			client,
 			initialSnapshot,
-			onSnapshot: persist,
+			onSnapshot: snapshot => {
+				persist?.(snapshot);
+				onSnapshotDelivered?.();
+			},
 			accountPool,
 		});
 		return { store, sourceLabel: options.sourceLabel ?? `broker ${brokerConfig.url}` };
@@ -454,6 +471,21 @@ export async function openAuthCredentialStore(
 	const dbPath = getAgentDbPath(options.agentDir ?? getAgentDir());
 	const store = await SqliteAuthCredentialStore.open(dbPath);
 	return { store, sourceLabel: options.sourceLabel ?? `local ${dbPath}` };
+}
+
+/**
+ * Reload `storage` after a broker snapshot delivery, then signal the delivery as
+ * external refresh evidence even when the reload found the view unchanged (e.g.
+ * confirming a resumed-but-deleted account is still gone). The rejection is
+ * observed here: this runs from a background delivery for the life of the process.
+ */
+export function reloadAfterBrokerDelivery(storage: AuthStorage | undefined): void {
+	void storage?.credentials
+		.reload()
+		.then(() => storage.credentials.notifyExternalRefresh())
+		.catch(error => {
+			logger.debug("auth-broker background snapshot reload failed", { error: String(error) });
+		});
 }
 
 /**
@@ -472,14 +504,20 @@ export async function discoverAuthStorage(options: DiscoverAuthStorageOptions = 
 		accountPolicies: options.accountPolicies,
 		usageReservePct: options.authStorageOptions?.defaultReservePct,
 	});
+	// Assigned right after construction and read back from the delivery hook. The
+	// store's constructor may deliver before `storage` exists; the `reload()`
+	// below already covers that first snapshot.
+	// oxlint-disable-next-line prefer-const -- captured by the delivery hook before assignment
+	let storage: AuthStorage | undefined;
 	const { store, sourceLabel } = await openAuthCredentialStore({
 		brokerConfig,
 		agentDir,
 		cachePath: options.cachePath,
 		sourceLabel: options.sourceLabel,
 		accountPool: options.accountPool,
+		onSnapshotDelivered: () => reloadAfterBrokerDelivery(storage),
 	});
-	const storage = new AuthStorage(store, {
+	storage = new AuthStorage(store, {
 		...options.authStorageOptions,
 		configValueResolver: options.configValueResolver,
 		sourceLabel,

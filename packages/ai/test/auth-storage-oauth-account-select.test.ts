@@ -204,4 +204,106 @@ describe("AuthStorage OAuth account selection", () => {
 		// Target-only: no sibling credential was refreshed/rotated on the failure path.
 		expect(seen).toEqual(["access-b"]);
 	});
+
+	test("keeps the correct account active after reload() reorders credentials mid-process", async () => {
+		const storage = authStorage;
+		const credentialStore = store;
+		if (!storage || !credentialStore) throw new Error("test setup failed");
+		await storage.credentials.set(PROVIDER, [oauthCredential("a"), oauthCredential("b"), oauthCredential("c")]);
+		const sessionId = "reload-reorder-session";
+		const target = storage.oauth.accounts(PROVIDER, sessionId).find(account => account.email === "b@example.com");
+		if (!target) throw new Error("expected account b");
+		expect(storage.sessions.pin(PROVIDER, sessionId, target.credentialId)).toBe(true);
+
+		// Remove "a" through the underlying store, bypassing every AuthStorage-level
+		// mutation (which reset assignments): the shape of an external process's write
+		// or a broker snapshot delivery, seen only through reload(). "b" moves from
+		// index 1 to 0 and "c" slides into index 1, so an index-only sticky would
+		// silently repoint at "c".
+		const rowA = credentialStore
+			.listAuthCredentials(PROVIDER)
+			.find(row => row.credential.type === "oauth" && row.credential.email === "a@example.com");
+		if (!rowA) throw new Error("expected row a");
+		await credentialStore.deleteAuthCredential(rowA.id, "test: simulate external removal");
+		await storage.credentials.reload();
+
+		const accountsAfter = storage.oauth.accounts(PROVIDER, sessionId);
+		expect(accountsAfter.map(account => account.email)).toEqual(["b@example.com", "c@example.com"]);
+		expect(accountsAfter.find(account => account.active)?.email).toBe("b@example.com");
+		expect(storage.oauth.identity(PROVIDER, sessionId)?.email).toBe("b@example.com");
+	});
+
+	test("reload batches multiple provider changes into one generation notification", async () => {
+		const storage = authStorage;
+		if (!storage) throw new Error("test setup failed");
+
+		// A second SQLite connection stands in for another omp process. Its updates
+		// arrive together in the one listAuthCredentials() snapshot reload reads.
+		const writer = await SqliteAuthCredentialStore.open(path.join(tempDir, "agent.db"));
+		try {
+			await writer.saveOAuth(PROVIDER, oauthCredential("reload-a"));
+			await writer.saveOAuth("unit-oauth-reload-other", oauthCredential("reload-b"));
+		} finally {
+			writer.close();
+		}
+
+		const initialGeneration = storage.credentials.generation;
+		const observedGenerations: number[] = [];
+		const unsubscribe = storage.credentials.onGeneration(generation => observedGenerations.push(generation));
+		try {
+			await storage.credentials.reload();
+		} finally {
+			unsubscribe();
+		}
+
+		// One logical external snapshot is one generation transition, so subscribers
+		// retry startup pinning only after the full view is ready.
+		expect(storage.credentials.generation).toBe(initialGeneration + 1);
+		expect(observedGenerations).toEqual([initialGeneration + 1]);
+		expect(storage.oauth.accounts(PROVIDER)).toHaveLength(1);
+		expect(storage.oauth.accounts("unit-oauth-reload-other")).toHaveLength(1);
+	});
+
+	test("notifies after resetting assignments so a listener pin survives an upsert", async () => {
+		const storage = authStorage;
+		if (!storage) throw new Error("test setup failed");
+		await storage.credentials.set(PROVIDER, oauthCredential("a"));
+
+		const sessionId = "generation-listener-pin";
+		let listenerPins = 0;
+		const unsubscribe = storage.credentials.onGeneration(() => {
+			const newlyAdded = storage.oauth.accounts(PROVIDER, sessionId).find(account => account.accountId === "acc-b");
+			if (!newlyAdded) return;
+			listenerPins++;
+			expect(storage.sessions.pin(PROVIDER, sessionId, newlyAdded.credentialId)).toBe(true);
+		});
+		try {
+			// Models the live /login upsert: the listener stands in for AgentSession's
+			// pending startup-pin retry.
+			await storage.credentials.upsert(PROVIDER, oauthCredential("b"));
+		} finally {
+			unsubscribe();
+		}
+
+		expect(listenerPins).toBe(1);
+		expect(storage.oauth.accounts(PROVIDER, sessionId).find(account => account.active)?.accountId).toBe("acc-b");
+	});
+
+	test("refresh attempts advance on generation bumps and external refresh signals only", async () => {
+		const storage = authStorage;
+		if (!storage) throw new Error("test setup failed");
+		await storage.credentials.set(PROVIDER, oauthCredential("a"));
+		const seen: number[] = [];
+		const unsubscribe = storage.credentials.onRefreshAttempted(attempts => seen.push(attempts));
+		try {
+			const before = storage.credentials.refreshAttempts;
+			await storage.credentials.reload();
+			expect(storage.credentials.refreshAttempts).toBe(before);
+			storage.credentials.notifyExternalRefresh();
+			expect(storage.credentials.refreshAttempts).toBe(before + 1);
+			expect(seen).toEqual([before + 1]);
+		} finally {
+			unsubscribe();
+		}
+	});
 });

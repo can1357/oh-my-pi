@@ -1770,6 +1770,10 @@ export function sessionModelDiscoveryProviders(
  * providers with multiple OAuth accounts may return `undefined` even though
  * the credential is usable once the subagent session starts — see #5325.
  *
+ * `applyStartupOAuthAccountPin`, when present, runs before each credential
+ * probe so a child session cannot acquire an automatic sticky for a provider
+ * before its own `AgentSession` exists to apply the configured startup pin.
+ *
  * Keyless-by-design providers (llama.cpp, ollama, lm-studio) advertise the
  * `kNoAuth` sentinel from `getApiKey` to signal that they do not require
  * credentials. Those are treated as authenticated here so an explicitly
@@ -1786,6 +1790,7 @@ export async function resolveModelOverrideWithAuthFallback(
 	modelRegistry: ModelLookupRegistry & Pick<ModelRegistry, "getApiKey">,
 	settings?: Settings,
 	sessionId?: string,
+	applyStartupOAuthAccountPin?: (provider: string, sessionId: string) => void,
 ): Promise<{
 	model?: Model<Api>;
 	thinkingLevel?: ConfiguredThinkingLevel;
@@ -1812,6 +1817,7 @@ export async function resolveModelOverrideWithAuthFallback(
 	for (const pattern of patterns) {
 		const candidate = resolveModelOverride([pattern], lookupRegistry, settings);
 		if (!candidate.model) continue;
+		if (sessionId) applyStartupOAuthAccountPin?.(candidate.model.provider, sessionId);
 		const key = await modelRegistry.getApiKey(candidate.model, sessionId);
 		if (key === kNoAuth || isAuthenticated(key)) {
 			return { ...candidate, authFallbackUsed: false };
@@ -1826,6 +1832,7 @@ export async function resolveModelOverrideWithAuthFallback(
 	if (modelsAreEqual(fallback.model, primary.model)) {
 		return { ...primary, authFallbackUsed: false };
 	}
+	if (sessionId) applyStartupOAuthAccountPin?.(fallback.model.provider, sessionId);
 	const fallbackKey = await modelRegistry.getApiKey(fallback.model, sessionId);
 	if (fallbackKey !== kNoAuth && !isAuthenticated(fallbackKey)) {
 		return { ...primary, authFallbackUsed: false };

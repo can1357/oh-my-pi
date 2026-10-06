@@ -82,11 +82,13 @@ export class AuthStorage {
 	readonly #overrides: KeyOverrides;
 	readonly #policies: AccountPolicies;
 	#modules: AuthStorageModules;
+	#sourceLabel: string | undefined;
 
 	constructor(store: AuthCredentialStore, options: AuthStorageOptions = {}) {
 		this.#options = options;
 		this.#overrides = new KeyOverrides(options.configValueResolver);
 		this.#policies = new AccountPolicies(options.accountPolicies ?? [], options.defaultReservePct);
+		this.#sourceLabel = options.sourceLabel;
 		this.#modules = this.#compose(store, options.sourceLabel);
 		if (options.onCredentialDisabled) this.#modules.pool.onDisabled(options.onCredentialDisabled);
 	}
@@ -142,6 +144,15 @@ export class AuthStorage {
 	}
 
 	/**
+	 * Identifies the physical credential store (e.g. `local <dbPath>` or `broker <url>`).
+	 * Row ids are unique only within one store, so durable selectors fold this into
+	 * their fingerprint.
+	 */
+	get sourceLabel(): string | undefined {
+		return this.#sourceLabel;
+	}
+
+	/**
 	 * Swap the backing credential store in place (live `auth.broker.url` change).
 	 * Loads `store` into fresh store-bound state — pins, blocks, and usage caches are
 	 * keyed by the old store's row ids — then closes the previous store. Runtime key
@@ -150,7 +161,8 @@ export class AuthStorage {
 	 * store stays active.
 	 */
 	async replaceStore(store: AuthCredentialStore, options: { sourceLabel?: string } = {}): Promise<void> {
-		const next = this.#compose(store, options.sourceLabel ?? this.#options.sourceLabel);
+		const sourceLabel = options.sourceLabel ?? this.#sourceLabel;
+		const next = this.#compose(store, sourceLabel);
 		try {
 			await next.pool.reload();
 		} catch (error) {
@@ -161,6 +173,7 @@ export class AuthStorage {
 		next.pool.adoptSubscribers(previous.pool);
 		next.usage.adoptRuntimeProviders(previous.usage);
 		this.#modules = next;
+		this.#sourceLabel = sourceLabel;
 		previous.pool.close();
 		next.pool.bump("store-replaced");
 	}

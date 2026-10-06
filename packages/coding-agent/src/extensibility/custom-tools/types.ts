@@ -106,6 +106,13 @@ export interface CustomToolContext {
 	localProtocolOptions?: LocalProtocolOptions;
 	/** Whether to auto-approve all destructive tool operations (--auto-approve CLI flag) */
 	autoApprove?: boolean;
+	/**
+	 * Apply the session's configured `auth.startupOAuthAccount` pin for `provider`/`sessionId`
+	 * before a tool resolves that provider's credential (e.g. an image-generation subscription
+	 * fallback on a different provider than the foreground model). Mirrors every other
+	 * candidate-preflight call site in the session layer.
+	 */
+	applyStartupOAuthAccountPin?: (provider: string, sessionId: string) => void;
 }
 
 /** Session event passed to onSession callback */

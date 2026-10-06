@@ -6,6 +6,8 @@
 
 ### Added
 
+- Added `AuthStorage.credentials.refreshAttempts`, `onRefreshAttempted`, and `notifyExternalRefresh` so hosts can tell a confirmed-unchanged credential refresh (for example a broker snapshot that confirms an account is still absent) from no refresh at all, plus `AuthStorage.sourceLabel` to identify the physical credential store.
+- Added a snapshot-delivery hook to `openAuthCredentialStore` and `reloadAfterBrokerDelivery`, so broker deltas reload the host's credential view; the broker store now notifies on single-credential delta frames and the on-disk snapshot cache is written in delivery order.
 - Added per-model `compat.statefulResponses` to enable or disable stored Responses chaining (`previous_response_id` with `store: true`) for one endpoint without the official-only request fields that `compat.officialEndpoint` implies ([#13686](https://github.com/can1357/oh-my-pi/pull/13686) by [@alphastorm](https://github.com/alphastorm)).
 - Added Snowflake Cortex with browser OAuth, token refresh, PAT environment authentication, and streaming Claude/OpenAI models with local tool execution ([#14507](https://github.com/can1357/oh-my-pi/pull/14507) by [@jorgoose](https://github.com/jorgoose)).
 - `AuthStorage.health.check()` accepts `excludeProviders` to skip credentials of providers the caller does not serve ([#14234](https://github.com/can1357/oh-my-pi/pull/14234) by [@will-bogusz](https://github.com/will-bogusz))
@@ -17,6 +19,7 @@
 
 ### Fixed
 
+- Fixed credential-generation subscribers observing a partial mutation: `credentials.reload()` now publishes one generation for all providers, and mutations notify only after assignments are reset so a listener's fresh pin is not erased.
 - Codex native-lane steering rejections (`unsupported_native_inflight_message`) now classify as retryable from their error text alone, matching the provider's own classification, and `AIError.isCodexSteerRejection()` identifies them so the agent retry can stay on the same model ([#14242](https://github.com/can1357/oh-my-pi/pull/14242) by [@alphastorm](https://github.com/alphastorm))
 - Fixed replayed Responses and Codex history, including persisted Codex user/developer and assistant items, sending `detail: "original"` images to endpoints whose `supportsImageDetailOriginal` is off ([#13687](https://github.com/can1357/oh-my-pi/pull/13687) by [@alphastorm](https://github.com/alphastorm)).
 - Fixed thinking in turns kept after Anthropic native compaction being rejected or dropped on the next request ([#14251](https://github.com/can1357/oh-my-pi/pull/14251) by [@will-bogusz](https://github.com/will-bogusz))

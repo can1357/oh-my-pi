@@ -84,6 +84,7 @@ export async function generateCommitMessage(
 	registry: ModelRegistry,
 	settings: Settings,
 	sessionId?: string,
+	applyStartupOAuthAccountPin?: (provider: string, sessionId: string) => void,
 ): Promise<string | null> {
 	const candidates = getSmolModelCandidates(registry, settings);
 	if (candidates.length === 0) {
@@ -101,6 +102,7 @@ export async function generateCommitMessage(
 	const userMessage = `<diff>\n${truncatedDiff}\n</diff>`;
 
 	for (const candidate of candidates) {
+		if (sessionId) applyStartupOAuthAccountPin?.(candidate.model.provider, sessionId);
 		const apiKey = await registry.getApiKey(candidate.model, sessionId);
 		if (!apiKey) continue;
 

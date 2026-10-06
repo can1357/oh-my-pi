@@ -225,6 +225,7 @@ describe("memories/storage", () => {
 			settings,
 			model,
 			refreshBaseSystemPrompt: async () => settled.resolve(),
+			applyStartupOAuthAccountPin: () => {},
 		} as unknown as Parameters<typeof startMemoryStartupTask>[0]["session"];
 		const modelRegistry = {
 			find: () => model,
