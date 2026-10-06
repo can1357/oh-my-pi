@@ -127,6 +127,180 @@ describe("Tool argument coercion", () => {
 		expect(result.payload).toBe('{"a":1}');
 	});
 
+	it("drops an unrecognized key for an ordinary tool, but restores it for a lenient one", () => {
+		// An ordinary tool gets the LLM-quirk repair: the unknown key is dropped
+		// and the call proceeds. A tool with lenientArgValidation owns its own
+		// refusal, so it must still see the key the model wrote.
+		const parameters = {
+			type: "object",
+			additionalProperties: false,
+			properties: { op: { type: "string" } },
+			required: ["op"],
+		} as never;
+		const call = (id: string): ToolCall => ({
+			type: "toolCall",
+			id,
+			name: "t-heal",
+			arguments: { op: "done", extra: "typo" },
+		});
+
+		const ordinary: Tool = { name: "t-heal", description: "", parameters };
+		expect(validateToolArguments(ordinary, call("call-heal-1"))).toEqual({ op: "done" });
+
+		const lenient: Tool = { name: "t-heal", description: "", parameters, lenientArgValidation: true };
+		expect(validateToolArguments(lenient, call("call-heal-2"))).toEqual({ op: "done", extra: "typo" });
+	});
+
+	it("keeps every other repair when it restores a lenient tool's unknown keys", () => {
+		// Restoring the key must not cost the rest of the call's repairs: the
+		// numeric string is still coerced, a nested unknown key is restored at
+		// its own path, and the caller's arguments object is never mutated.
+		const tool: Tool = {
+			name: "t-restore",
+			description: "",
+			lenientArgValidation: true,
+			parameters: {
+				type: "object",
+				additionalProperties: false,
+				properties: {
+					timeout: { type: "number" },
+					opts: {
+						type: "object",
+						additionalProperties: false,
+						properties: { mode: { type: "string" } },
+					},
+				},
+				required: ["timeout"],
+			} as never,
+		};
+		const args = { timeout: "300", extra: 1, opts: { mode: "fast", stray: true } };
+		const result = validateToolArguments(tool, {
+			type: "toolCall",
+			id: "call-restore",
+			name: "t-restore",
+			arguments: args,
+		});
+
+		expect(result).toEqual({ timeout: 300, extra: 1, opts: { mode: "fast", stray: true } });
+		expect(args).toEqual({ timeout: "300", extra: 1, opts: { mode: "fast", stray: true } });
+	});
+
+	it("restores a lenient tool's keys newest-first, so a deleted parent keeps its deleted child", () => {
+		// The validator reports /opts/extra and then /opts: the parent's recorded
+		// value already lacks the child, so undoing oldest-first loses it.
+		const closed = (properties: Record<string, unknown>) => ({
+			type: "object",
+			properties,
+			additionalProperties: false,
+		});
+		const tool: Tool = {
+			name: "t-overlap",
+			description: "",
+			lenientArgValidation: true,
+			parameters: { allOf: [closed({ opts: closed({ mode: { type: "string" } }) }), closed({})] } as never,
+		};
+		const result = validateToolArguments(tool, {
+			type: "toolCall",
+			id: "call-overlap",
+			name: "t-overlap",
+			arguments: { opts: { mode: "fast", extra: 1 } },
+		});
+		expect(result).toEqual({ opts: { mode: "fast", extra: 1 } });
+	});
+
+	it("restores the value the model wrote when a later repair reintroduced the same key", () => {
+		// The spill heal pulls a second `extra` out of `op`'s in-band syntax after
+		// the first pass already deleted the written one; the tool must see the
+		// written value, not the spill artifact.
+		const tool: Tool = {
+			name: "t-spill",
+			description: "",
+			lenientArgValidation: true,
+			parameters: {
+				type: "object",
+				additionalProperties: false,
+				properties: { op: { enum: ["done"] } },
+				required: ["op"],
+			} as never,
+		};
+		const result = validateToolArguments(tool, {
+			type: "toolCall",
+			id: "call-spill",
+			name: "t-spill",
+			arguments: { op: "done</arg_key>\n<arg_key>extra</arg_key>\n<arg_value>spilled", extra: "original" },
+		});
+		expect(result).toEqual({ op: "done", extra: "original" });
+	});
+
+	it("restores a key deleted by a nested union-branch repair at its own path", () => {
+		// A union branch repaired during normalization deletes the unknown key
+		// relative to the nested value; it must come back at /v/extra, not /extra.
+		const closed = (properties: Record<string, unknown>) => ({
+			type: "object",
+			properties,
+			additionalProperties: false,
+		});
+		// The `kind` tag selects the first branch as authoritative; only an
+		// authoritative branch's unknown keys are deleted (speculative ones never).
+		const parameters = closed({
+			v: {
+				anyOf: [
+					closed({ kind: { const: "a" }, a: { type: "number" } }),
+					closed({ kind: { const: "b" }, b: { type: "string" } }),
+				],
+			},
+		}) as never;
+		const call = (id: string): ToolCall => ({
+			type: "toolCall",
+			id,
+			name: "t-nested",
+			arguments: { v: { kind: "a", a: "1", extra: true } },
+		});
+
+		const ordinary: Tool = { name: "t-nested", description: "", parameters };
+		expect(validateToolArguments(ordinary, call("call-nested-1"))).toEqual({ v: { kind: "a", a: 1 } });
+
+		const lenient: Tool = { name: "t-nested", description: "", parameters, lenientArgValidation: true };
+		expect(validateToolArguments(lenient, call("call-nested-2"))).toEqual({ v: { kind: "a", a: 1, extra: true } });
+	});
+
+	it("never restores a key a rejected union candidate deleted over the adopted branch's repair", () => {
+		// The tag-selected (authoritative) first candidate treats `x` as unknown
+		// and deletes it, then still fails on `a`; the second declares `x` a number,
+		// coerces "1" to 1, and is adopted. Restoring the rejected candidate's
+		// record would put the raw "1" back over that repair.
+		const closed = (properties: Record<string, unknown>) => ({
+			type: "object",
+			properties,
+			additionalProperties: false,
+		});
+		const tool: Tool = {
+			name: "t-phantom",
+			description: "",
+			lenientArgValidation: true,
+			parameters: closed({
+				v: {
+					anyOf: [
+						closed({ kind: { const: "a" }, k: { type: "string" }, a: { type: "number" } }),
+						closed({
+							kind: { type: "string" },
+							k: { type: "string" },
+							a: { type: "string" },
+							x: { type: "number" },
+						}),
+					],
+				},
+			}) as never,
+		};
+		const result = validateToolArguments(tool, {
+			type: "toolCall",
+			id: "call-phantom",
+			name: "t-phantom",
+			arguments: { v: { kind: "a", k: null, a: "s", x: "1" } },
+		});
+		expect(result).toEqual({ v: { kind: "a", a: "s", x: 1 } });
+	});
+
 	it.each([1, "1"])("does not delete unrecognized keys diagnosed inside a failed union branch (value=%s)", value => {
 		const tool: Tool = {
 			name: "union-closed",
