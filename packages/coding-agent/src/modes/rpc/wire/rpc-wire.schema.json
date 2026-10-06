@@ -672,6 +672,28 @@
 				"clientOmit": []
 			},
 			{
+				"name": "get_logout_accounts",
+				"doc": "List the stored credentials `logout` can remove for a provider, active first.",
+				"params": "GetLogoutAccountsParams",
+				"result": "GetLogoutAccountsResult",
+				"nullable": false,
+				"unwrap": "accounts",
+				"timeoutMs": null,
+				"completion": null,
+				"clientOmit": []
+			},
+			{
+				"name": "logout",
+				"doc": "Remove one stored credential; fails when it is no longer stored. `remainingSource` names auth that still applies.",
+				"params": "LogoutParams",
+				"result": "LogoutResult",
+				"nullable": false,
+				"unwrap": null,
+				"timeoutMs": null,
+				"completion": null,
+				"clientOmit": []
+			},
+			{
 				"name": "predict_word",
 				"doc": "Ghost-text suffix for the prose word ending at `cursor` (a UTF-16 offset); null when none applies.",
 				"params": "PredictWordParams",
@@ -3378,6 +3400,42 @@
 				"available",
 				"authenticated"
 			]
+		},
+		"LogoutAccount": {
+			"type": "object",
+			"properties": {
+				"credentialId": {
+					"type": "integer"
+				},
+				"provider": {
+					"type": "string"
+				},
+				"label": {
+					"type": "string"
+				},
+				"detail": {
+					"type": "string"
+				},
+				"type": {
+					"enum": [
+						"api_key",
+						"oauth"
+					],
+					"type": "string"
+				},
+				"active": {
+					"type": "boolean"
+				}
+			},
+			"required": [
+				"credentialId",
+				"provider",
+				"label",
+				"detail",
+				"type",
+				"active"
+			],
+			"description": "A stored credential `logout` can remove; `active` marks credentials the session may be using."
 		},
 		"HandoffResult": {
 			"type": "object",
@@ -6526,6 +6584,54 @@
 			"required": [
 				"providerId"
 			]
+		},
+		"GetLogoutAccountsParams": {
+			"type": "object",
+			"properties": {
+				"providerId": {
+					"type": "string"
+				}
+			},
+			"required": [
+				"providerId"
+			]
+		},
+		"GetLogoutAccountsResult": {
+			"type": "object",
+			"properties": {
+				"accounts": {
+					"type": "array",
+					"items": {
+						"$ref": "#/$defs/LogoutAccount"
+					}
+				}
+			},
+			"required": [
+				"accounts"
+			]
+		},
+		"LogoutParams": {
+			"type": "object",
+			"properties": {
+				"providerId": {
+					"type": "string"
+				},
+				"credentialId": {
+					"type": "integer"
+				}
+			},
+			"required": [
+				"providerId",
+				"credentialId"
+			]
+		},
+		"LogoutResult": {
+			"type": "object",
+			"properties": {
+				"remainingSource": {
+					"type": "string"
+				}
+			}
 		},
 		"PredictWordParams": {
 			"type": "object",

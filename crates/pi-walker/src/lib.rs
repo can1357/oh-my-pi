@@ -1296,7 +1296,8 @@ impl WalkRequest {
 			SizeHintPolicy::FromDetail => {},
 			SizeHintPolicy::Never => options.detail = WalkDetail::Minimal,
 			SizeHintPolicy::WhenCheap => {
-				// Provider-backed listings pay one metadata call per entry for sizes.
+				// Provider-backed listings pay one metadata call per entry for
+				// sizes.
 				options.detail =
 					if supports_cheap_size_hints() && self.filesystem.is_native_local(&self.root) {
 						WalkDetail::Full

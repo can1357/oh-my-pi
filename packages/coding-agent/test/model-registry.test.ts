@@ -3383,7 +3383,7 @@ describe("ModelRegistry", () => {
 			const restarted = new ModelRegistry(authStorage, modelsJsonPath);
 
 			expect(restarted.find("google-antigravity", "claude-sonnet-4-6")).toBeDefined();
-			expect(restarted.find("google-antigravity", "claude-sonnet-5-5-low")).toBeUndefined();
+			expect(restarted.find("google-antigravity", "claude-sonnet-5-5")).toBeUndefined();
 			expect(restarted.find("google-antigravity", "gemini-3-pro-image")).toBeDefined();
 		});
 

@@ -322,6 +322,19 @@ export const rpcCommands: readonly RpcCommandSpec[] = [
 		unwrap: "providerId",
 		timeoutMs: 600_000,
 	},
+	{
+		name: "get_logout_accounts",
+		doc: "List the stored credentials `logout` can remove for a provider, active first.",
+		params: { providerId: "string" },
+		result: { accounts: "LogoutAccount[]" },
+		unwrap: "accounts",
+	},
+	{
+		name: "logout",
+		doc: "Remove one stored credential; fails when it is no longer stored. `remainingSource` names auth that still applies.",
+		params: { providerId: "string", credentialId: "number.integer" },
+		result: { "remainingSource?": "string" },
+	},
 
 	{
 		name: "predict_word",
