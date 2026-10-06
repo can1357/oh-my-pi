@@ -158,6 +158,9 @@
 ### Fixed
 
 - Fixed an `EPIPE: broken pipe` unhandled rejection crashing the session when a debug adapter, eval kernel, IDA worker, or RPC server exits mid-write (seen on Windows) ([#14196](https://github.com/can1357/oh-my-pi/pull/14196) by [@andrebrait](https://github.com/andrebrait))
+- User append instructions (`APPEND_SYSTEM.md`, `--append-system-prompt`) now render under a `§ User Instructions` heading wrapped in a `<user-instructions>` block when generated blocks precede them, keeping them visibly separate from server-supplied MCP sections.
+
+### Breaking Changes
 
 ## [18.5.1] - 2026-10-03
 
