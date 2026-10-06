@@ -44,15 +44,23 @@ pub fn filter(ctx: &MinimizerCtx<'_>, input: &str, exit_code: i32) -> MinimizerO
 		Some("tree" | "update" | "publish") => compact_general(&cleaned),
 		_ => cleaned,
 	};
-	// The condensing paths drop `Blocking waiting for file lock on …` as
-	// progress noise, but it is the only sign that another cargo (a parallel
-	// agent, rust-analyzer) held the lock. Put the first one back, once.
+	// The condensing paths drop lock waits as progress noise and the
+	// failed-test, fmt and tree bodies may keep some, but the first one is
+	// the only sign that another cargo (a parallel agent, rust-analyzer) held
+	// the lock. Drop every wait from the body and put the first one back at
+	// the top, once.
 	if !matches!(ctx.subcommand, Some("metadata"))
 		&& let Some(lock_line) = lock_line
-		&& !text.contains(&lock_line)
 	{
-		text.insert(0, '\n');
-		text.insert_str(0, &lock_line);
+		let mut body = String::with_capacity(lock_line.len() + 1 + text.len());
+		body.push_str(&lock_line);
+		body.push('\n');
+		for line in text.split_inclusive('\n') {
+			if !line.trim_start().starts_with(LOCK_WAIT_PREFIX) {
+				body.push_str(line);
+			}
+		}
+		text = body;
 	}
 	if text == input {
 		MinimizerOutput::passthrough(input)
@@ -85,13 +93,15 @@ fn is_compiling_noise(line: &str) -> bool {
 		|| is_generated_warnings_rollup(trimmed)
 }
 
+const LOCK_WAIT_PREFIX: &str = "Blocking waiting for file lock";
+
 /// First `Blocking waiting for file lock on <what>` line, trimmed of cargo's
 /// right alignment. Repeats and later lock waits collapse into this one line.
 fn first_lock_wait_line(input: &str) -> Option<&str> {
 	input
 		.lines()
 		.map(str::trim)
-		.find(|line| line.starts_with("Blocking waiting for file lock"))
+		.find(|line| line.starts_with(LOCK_WAIT_PREFIX))
 }
 
 /// The per-crate rollup line warning: `crate` (lib) generated N warnings.
@@ -626,6 +636,39 @@ mod tests {
 			out.text,
 			"Blocking waiting for file lock on build directory\ncargo test: 2 passed (1 suite)\n"
 		);
+	}
+
+	#[test]
+	fn test_failure_keeps_only_first_blocking_lock_line() {
+		let cfg = MinimizerConfig { enabled: true, ..Default::default() };
+		let ctx = MinimizerCtx {
+			program:    "cargo",
+			subcommand: Some("test"),
+			command:    "cargo test",
+			config:     &cfg,
+		};
+		let input = concat!(
+			"    Blocking waiting for file lock on build directory\n",
+			"   Compiling foo v0.1.0\n",
+			"running 1 test\n",
+			"test a ... FAILED\n",
+			"\n",
+			"failures:\n",
+			"    Blocking waiting for file lock on build directory\n",
+			"    Blocking waiting for file lock on package cache\n",
+			"---- a stdout ----\n",
+			"thread 'a' panicked at src/lib.rs:1:1:\n",
+			"test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured\n",
+		);
+		let out = filter(&ctx, input, 101);
+		assert!(
+			out.text
+				.starts_with("Blocking waiting for file lock on build directory\n"),
+			"{:?}",
+			out.text
+		);
+		assert_eq!(out.text.matches("Blocking waiting for file lock").count(), 1, "{:?}", out.text);
+		assert!(out.text.contains("test result: FAILED"), "{:?}", out.text);
 	}
 
 	#[test]
