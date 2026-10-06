@@ -26,6 +26,12 @@
 
 **A command deadline that fires after a detached root, or a Windows root with a retained handle, has already exited records a `TimeoutError` even when nothing was left behind.** The deadline sweeps the group or the retained-handle tree in that state, which it must — a detached group outlives its leader, and an earlier round on this branch fixed the opposite defect of skipping that sweep. What it cannot do is tell "swept a survivor" from "swept nothing": the native sweep reports only whether it completed, so an empty tree and one whose survivor it killed both come back `true` (it does reject when it cannot account for a live member, but that is a different question from whether one was there). Reporting no timeout in both cases is worse, because a real survivor past the deadline is exactly what the timeout is for — `ptree-timeout.test.ts` pins that case with a root that exits immediately while its `sleep 30` holds the group. Closing this needs the sweep to report what it found, which is a native API change and is deferred with the platform work.
 
+## [18.6.3] - 2026-10-06
+
+### Breaking Changes
+
+- Replaced the `cursorPosition` option of `TerminalQueryResponder` with `hostCursorHandshake`, which leaves only the PTY host's own session-start cursor query unanswered instead of every cursor-position query
+
 ## [18.5.1] - 2026-10-03
 
 ### Added

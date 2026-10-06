@@ -22,9 +22,14 @@ use napi::{
 use napi_derive::napi;
 use parking_lot::Mutex;
 use pi_shell::output_decode::OutputDecoder;
-use portable_pty::{Child, CommandBuilder, PtySize, native_pty_system};
+use portable_pty::{CommandBuilder, ExitStatus, PtySize, native_pty_system};
 
-use crate::{js::into_string, ps, task};
+use crate::{
+	js::into_string,
+	ps,
+	shell::{BRIDGE_QUEUE_CHUNKS, BridgeItem, FORWARD_STALL_TIMEOUT, pump_chunks},
+	task,
+};
 
 /// Options for running a command in a PTY session.
 #[napi(object)]
@@ -100,32 +105,55 @@ enum ReaderEvent {
 	Done,
 }
 
-enum ControlMessage {
-	Input(String),
-	Resize { cols: u16, rows: u16 },
-	Kill,
+impl BridgeItem for ReaderEvent {
+	fn into_text(self) -> Option<String> {
+		match self {
+			Self::Chunk(text) => Some(text),
+			Self::Done => None,
+		}
+	}
 }
 
-const CONTROL_MESSAGES_PER_TICK: usize = 64;
-/// Capacity of the reader→JS queue. One queued chunk is at most one PTY read
-/// (≤64 KiB), so the Rust side holds ~4 MiB before the reader thread's `send`
-/// parks — which fills the OS PTY buffer and backpressures the child instead of
-/// buffering the surplus in process memory. Same bound as the non-PTY bash
-/// bridge (#4078). A separate `pump_pty_chunks` task `call_async`s so the
-/// control loop never waits on JS (input/resize/kill/`try_wait` stay live).
-const READER_QUEUE_CHUNKS: usize = 64;
+enum ControlMessage {
+	Input(String),
+	Resize {
+		cols: u16,
+		rows: u16,
+	},
+	Kill,
+	/// The run's cancel token fired (abort signal or timeout).
+	Cancelled {
+		timed_out: bool,
+	},
+	/// `on_chunk` failed: nothing is left to deliver output to.
+	JsGone,
+	/// The waiter thread reaped the child.
+	Exited(std::io::Result<ExitStatus>),
+}
+
 const POST_CANCEL_DRAIN_TIMEOUT: Duration = Duration::from_millis(300);
 /// Idle window used only when the child has already exited, the reader has
 /// *not* hit EOF, the bridge queue is empty, and no `on_chunk` is in flight.
 /// That is a permanently open slave (daemon / extra holder), not slow JS.
 /// A reader parked on a full bridge is backpressure and must not use this.
 const STUCK_SLAVE_IDLE: Duration = Duration::from_secs(2);
-/// How long a cancelled run polls for its SIGKILL'd child before handing the
-/// reap off to a detached thread rather than blocking the PTY promise.
+/// Gap between the polite termination wave (TERM to the group/tree, HUP to the
+/// child) and SIGKILL, so a child with a TERM/HUP handler can clean up. Same
+/// grace portable-pty's `Child::kill` used to spend blocking the control loop.
+/// Windows has no polite signal: `TerminateProcess` is immediate.
 #[cfg(not(windows))]
-const CANCEL_REAP_TIMEOUT: Duration = Duration::from_millis(500);
+const KILL_GRACE: Duration = Duration::from_millis(200);
+#[cfg(windows)]
+const KILL_GRACE: Duration = Duration::ZERO;
+/// How long a terminated run keeps waiting for the child's exit status after
+/// SIGKILL before resolving without one. SIGKILL does not guarantee a prompt
+/// exit — a child wedged in uninterruptible I/O never dies, and a failed kill
+/// leaves it running — so the promise must not wait on it indefinitely. The
+/// waiter thread still reaps it whenever it does exit.
 #[cfg(not(windows))]
-const CANCEL_REAP_POLL_INTERVAL: Duration = Duration::from_millis(5);
+const CANCEL_EXIT_WAIT: Duration = Duration::from_millis(800);
+#[cfg(windows)]
+const CANCEL_EXIT_WAIT: Duration = POST_CANCEL_DRAIN_TIMEOUT;
 
 struct PtySessionCore {
 	control_tx: flume::Sender<ControlMessage>,
@@ -237,11 +265,11 @@ impl PtySession {
 			if guard.is_some() {
 				return Err(Error::from_reason("PTY session already running"));
 			}
-			*guard = Some(PtySessionCore { control_tx });
+			*guard = Some(PtySessionCore { control_tx: control_tx.clone() });
 		}
 		task::future(env, "pty.start", async move {
 			let run_result = tokio::task::spawn_blocking(move || {
-				run_pty_sync(run_config, on_chunk, on_start, control_rx, ct)
+				run_pty_sync(run_config, on_chunk, on_start, control_tx, control_rx, ct)
 			})
 			.await;
 
@@ -268,30 +296,11 @@ impl PtySession {
 	}
 }
 
-fn terminate_pty_processes(
-	child: &mut Box<dyn Child + Send + Sync>,
-	child_process: Option<&ps::CoreProcess>,
-	process_group_id: Option<i32>,
-) {
-	let mut targets = ps::TerminationTargets::new();
-	if let Some(pgid) = process_group_id {
-		targets.add_pgid(pgid);
-	}
-	// The handle pinned at spawn, not the number it had then: this runs at
-	// cancellation, by which point re-opening a bare pid can hand the wave
-	// whichever process holds it now.
-	if let Some(process) = child_process {
-		targets.add_process(process.clone());
-	}
-
-	targets.signal(ps::TERM_SIGNAL);
-	let _ = child.kill();
-	targets.signal(ps::KILL_SIGNAL);
-}
 fn run_pty_sync(
 	config: PtyRunConfig,
 	on_chunk: Option<ThreadsafeFunction<String, UnknownReturnValue>>,
 	on_start: Option<ThreadsafeFunction<u32>>,
+	control_tx: flume::Sender<ControlMessage>,
 	control_rx: flume::Receiver<ControlMessage>,
 	ct: task::CancelToken,
 ) -> Result<PtyRunResult> {
@@ -382,17 +391,8 @@ fn run_pty_sync(
 	drop(pair.slave);
 	let child_process_id = child.process_id();
 	let child_pid = child_process_id.and_then(|value| i32::try_from(value).ok());
-	// Pinned here, immediately after the pid becomes visible and long before
-	// anything can recycle it, which is the whole reason the registry prefers a
-	// handle to a number.
-	//
-	// It can still fail — `pidfd_open` and `OpenProcess` are both refusable for
-	// a live child — and then this call has no handle on the subtree at all.
-	// The child itself is still reached, through the `Child` the PTY owns; what
-	// is lost is anything it went on to spawn. On Unix the process group below
-	// covers that; on Windows there is no group and nothing does.
-	let child_process = child_pid.and_then(ps::CoreProcess::from_pid);
-	if child_pid.is_some() && child_process.is_none() {
+	let pinned_child = child_pid.and_then(pi_shell::process::Process::from_pid);
+	if child_pid.is_some() && pinned_child.is_none() {
 		log::warn!("PTY child {child_pid:?} could not be pinned; its descendants are unreachable");
 	}
 	if let Some(callback) = on_start.as_ref() {
@@ -403,9 +403,10 @@ fn run_pty_sync(
 	// (closing the pty master) without ever killing or reaping it — the
 	// master hangup delivers SIGHUP to the child (it's the pty's session
 	// leader), which kills it almost immediately, but nothing calls
-	// wait()/try_wait() afterward, so it leaks as a permanent zombie. A
-	// cancellation here is instead picked up on the main loop's first
-	// iteration below, which already kills and reaps correctly.
+	// wait() afterward, so it leaks as a permanent zombie. A cancellation
+	// here is instead delivered by the cancel forwarder below (immediately,
+	// for an already-aborted token) and handled by the control loop, which
+	// kills, and whose waiter thread reaps, correctly.
 
 	let master = pair.master;
 	let mut writer = master
@@ -423,23 +424,32 @@ fn run_pty_sync(
 		.try_clone_reader()
 		.map_err(|err| Error::from_reason(format!("Failed to create PTY reader: {err}")))?;
 
-	let (reader_tx, reader_rx) = flume::bounded::<ReaderEvent>(READER_QUEUE_CHUNKS);
+	// The reader→JS queue is bounded like the bash bridge (#4078): a full queue
+	// parks the reader's `send`, filling the OS PTY buffer and backpressuring
+	// the child. A separate pump task `call_async`s so the control loop never
+	// waits on JS (input/resize/kill/exit stay live).
+	let (reader_tx, reader_rx) = flume::bounded::<ReaderEvent>(BRIDGE_QUEUE_CHUNKS);
 	let queued = reader_tx.clone();
 	let reader_thread = std::thread::spawn(move || {
 		const BUF: usize = 65536;
 		let mut buf = vec![0u8; BUF];
 		let mut decoder = OutputDecoder::new();
+		// Once the pump is gone (JS failed, or a wedged `on_chunk` hit the
+		// stall timeout) keep reading and discard: the child must not block on
+		// a full PTY buffer that nothing drains (#12657).
+		let mut forwarding = true;
 		loop {
 			match reader.read(&mut buf) {
-				Ok(0) => break,
-				Ok(n) => {
+				Ok(0) | Err(_) => break,
+				Ok(n) if forwarding => {
 					let text = decoder.push(&buf[..n]);
-					if !text.is_empty() && reader_tx.send(ReaderEvent::Chunk(text)).is_err() {
-						return;
-					}
+					forwarding = text.is_empty() || reader_tx.send(ReaderEvent::Chunk(text)).is_ok();
 				},
-				Err(_) => break,
+				Ok(_) => {},
 			}
+		}
+		if !forwarding {
+			return;
 		}
 		let rest = decoder.finish();
 		if !rest.is_empty() && reader_tx.send(ReaderEvent::Chunk(rest)).is_err() {
@@ -448,30 +458,52 @@ fn run_pty_sync(
 		let _ = reader_tx.send(ReaderEvent::Done);
 	});
 
+	// Pin the kill targets before the waiter thread can reap the child: after
+	// the reap its pid may be recycled, and a pid-only signal (a lookup at
+	// cancellation time, or portable-pty's `clone_killer`) would hit whatever
+	// process took it (#4605). The child is only ever signalled through
+	// `pinned_child`.
+	let mut targets = ps::TerminationTargets::new();
 	#[cfg(unix)]
-	let process_group_id = master.process_group_leader().filter(|pgid| *pgid > 0);
-	#[cfg(not(unix))]
-	let process_group_id: Option<i32> = None;
-	let js_gone = Arc::new(AtomicBool::new(false));
+	if let Some(pgid) = master.process_group_leader().filter(|pgid| *pgid > 0) {
+		targets.add_pgid(pgid);
+	}
+	if let Some(process) = &pinned_child {
+		targets.add_process(process.clone());
+	}
+	// Exit, cancellation and JS failure all arrive as control messages, so the
+	// loop below parks in `recv` instead of polling `try_wait`/`heartbeat` on a
+	// timer: an idle session costs no wakeups, and exit is seen immediately.
+	// `wait` also guarantees the reap even after the run stops waiting for a
+	// SIGKILL'd child (`std::process::Child` never waits on `Drop`).
+	let exit_tx = control_tx.clone();
+	std::thread::spawn(move || {
+		let _ = exit_tx.send(ControlMessage::Exited(child.wait()));
+	});
+	let cancel_tx = control_tx.clone();
+	let cancel_task = napi::tokio::spawn(async move {
+		let timed_out = matches!(ct.wait().await, task::AbortReason::Timeout);
+		let _ = cancel_tx.send(ControlMessage::Cancelled { timed_out });
+	});
 	let in_js = Arc::new(AtomicBool::new(false));
 	let (pump_done_tx, pump_done_rx) = flume::bounded::<()>(1);
 	let pump_task = {
-		let js_gone = Arc::clone(&js_gone);
 		let in_js = Arc::clone(&in_js);
 		napi::tokio::spawn(async move {
-			pump_pty_chunks(
+			pump_chunks(
 				reader_rx,
+				FORWARD_STALL_TIMEOUT,
+				Some(in_js.as_ref()),
 				async move |payload| {
 					let Some(callback) = on_chunk.as_ref() else {
 						return true;
 					};
 					let ok = callback.call_async(Ok(payload)).await.is_ok();
 					if !ok {
-						js_gone.store(true, Ordering::Release);
+						let _ = control_tx.send(ControlMessage::JsGone);
 					}
 					ok
 				},
-				Some(in_js.as_ref()),
 			)
 			.await;
 			let _ = pump_done_tx.send(());
@@ -481,136 +513,75 @@ fn run_pty_sync(
 
 	let mut timed_out = false;
 	let mut cancelled = false;
-	let mut exit_code: Option<i32> = None;
-	let mut terminate_requested = false;
-	let mut reader_drain_deadline: Option<Instant> = None;
-	while exit_code.is_none() {
-		if js_gone.load(Ordering::Acquire) && !terminate_requested {
-			cancelled = true;
-			terminate_pty_processes(&mut child, child_process.as_ref(), process_group_id);
-			terminate_requested = true;
-			reader_drain_deadline = Some(Instant::now() + POST_CANCEL_DRAIN_TIMEOUT);
-		}
-		if !terminate_requested && let Err(err) = ct.heartbeat() {
-			let message = err.to_string();
-			timed_out = message.contains("Timeout");
-			cancelled = !timed_out;
-			terminate_pty_processes(&mut child, child_process.as_ref(), process_group_id);
-			terminate_requested = true;
-			reader_drain_deadline = Some(Instant::now() + POST_CANCEL_DRAIN_TIMEOUT);
-		}
-
-		for _ in 0..CONTROL_MESSAGES_PER_TICK {
-			match control_rx.try_recv() {
-				Ok(ControlMessage::Input(data)) => {
-					let _ = writer.write_all(data.as_bytes());
-					let _ = writer.flush();
-				},
-				Ok(ControlMessage::Resize { cols, rows }) => {
-					let _ = master.resize(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 });
-				},
-				Ok(ControlMessage::Kill) => {
-					cancelled = true;
-					if !terminate_requested {
-						terminate_pty_processes(&mut child, child_process.as_ref(), process_group_id);
-						terminate_requested = true;
-						reader_drain_deadline = Some(Instant::now() + POST_CANCEL_DRAIN_TIMEOUT);
-					}
-				},
-				Err(flume::TryRecvError::Empty | flume::TryRecvError::Disconnected) => break,
-			}
-		}
-		if exit_code.is_none()
-			&& let Some(status) = child
-				.try_wait()
-				.map_err(|err| Error::from_reason(format!("Failed checking PTY status: {err}")))?
-		{
-			exit_code = Some(i32::try_from(status.exit_code()).unwrap_or(i32::MAX));
-			break;
-		}
-
-		if let Some(deadline) = reader_drain_deadline
-			&& Instant::now() >= deadline
-		{
-			break;
-		}
-		let wait_duration = reader_drain_deadline.map_or(Duration::from_millis(16), |deadline| {
-			deadline
-				.saturating_duration_since(Instant::now())
-				.min(Duration::from_millis(16))
-		});
-		match control_rx.recv_timeout(wait_duration) {
+	// Set when termination starts: SIGKILL is due at `kill_at` (or as soon as
+	// the child exits, for the rest of its group), and the run stops waiting
+	// for an exit status at `give_up_at`.
+	let mut kill_at: Option<Instant> = None;
+	let mut give_up_at: Option<Instant> = None;
+	let status = loop {
+		let next = match kill_at.or(give_up_at) {
+			Some(deadline) => control_rx.recv_deadline(deadline),
+			None => control_rx
+				.recv()
+				.map_err(|_| flume::RecvTimeoutError::Disconnected),
+		};
+		let terminate = match next {
 			Ok(ControlMessage::Input(data)) => {
 				let _ = writer.write_all(data.as_bytes());
 				let _ = writer.flush();
+				false
 			},
 			Ok(ControlMessage::Resize { cols, rows }) => {
 				let _ = master.resize(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 });
+				false
 			},
 			Ok(ControlMessage::Kill) => {
 				cancelled = true;
-				if !terminate_requested {
-					terminate_pty_processes(&mut child, child_process.as_ref(), process_group_id);
-					terminate_requested = true;
-					reader_drain_deadline = Some(Instant::now() + POST_CANCEL_DRAIN_TIMEOUT);
-				}
+				true
 			},
-			Err(flume::RecvTimeoutError::Timeout | flume::RecvTimeoutError::Disconnected) => {},
-		}
-	}
-	if exit_code.is_none() {
-		// `std::process::Child` (what `portable-pty` wraps on Unix) never waits
-		// on `Drop`, so a child left unwaited here leaks as a permanent zombie.
-		//
-		// On Windows, child.wait() can hang indefinitely in ConPTY.
-		// Poll try_wait() with a short timeout instead.
-		#[cfg(windows)]
-		if !terminate_requested {
-			let wait_start = Instant::now();
-			while exit_code.is_none() && wait_start.elapsed() < Duration::from_secs(5) {
-				if let Some(status) = child
-					.try_wait()
-					.map_err(|err| Error::from_reason(format!("Failed checking PTY status: {err}")))?
-				{
-					exit_code = Some(i32::try_from(status.exit_code()).unwrap_or(i32::MAX));
-					break;
+			// The first termination cause decides `cancelled`/`timed_out`.
+			Ok(ControlMessage::JsGone) if give_up_at.is_none() => {
+				cancelled = true;
+				true
+			},
+			Ok(ControlMessage::Cancelled { timed_out: by_timeout }) if give_up_at.is_none() => {
+				timed_out = by_timeout;
+				cancelled = !by_timeout;
+				true
+			},
+			Ok(ControlMessage::JsGone | ControlMessage::Cancelled { .. }) => false,
+			Ok(ControlMessage::Exited(status)) => {
+				if kill_at.is_some() {
+					targets.signal(ps::KILL_SIGNAL);
 				}
-				std::thread::sleep(Duration::from_millis(50));
+				break Some(status);
+			},
+			Err(flume::RecvTimeoutError::Timeout) if kill_at.take().is_some() => {
+				targets.signal(ps::KILL_SIGNAL);
+				false
+			},
+			// `give_up_at` passed; disconnect cannot happen while the waiter
+			// thread still holds its sender.
+			Err(_) => break None,
+		};
+		if terminate && give_up_at.is_none() {
+			targets.signal(ps::TERM_SIGNAL);
+			// The hangup a closing terminal delivers: interactive shells ignore
+			// SIGTERM but exit on SIGHUP. On Windows TERM already terminated it.
+			#[cfg(unix)]
+			if let Some(process) = &pinned_child {
+				let _ = process.signal(libc::SIGHUP);
 			}
+			let now = Instant::now();
+			kill_at = Some(now + KILL_GRACE);
+			give_up_at = Some(now + KILL_GRACE + CANCEL_EXIT_WAIT);
 		}
-		#[cfg(not(windows))]
-		if terminate_requested {
-			// SIGKILL does not guarantee a prompt exit — a child wedged in
-			// uninterruptible I/O never reaps, and a kill that failed leaves it
-			// running — so blocking here would pin this `spawn_blocking` worker
-			// and the promise well past the caller's deadline. Poll briefly, then
-			// hand the reap to a detached thread so cancellation still returns.
-			let deadline = Instant::now() + CANCEL_REAP_TIMEOUT;
-			while exit_code.is_none() {
-				if let Some(status) = child
-					.try_wait()
-					.map_err(|err| Error::from_reason(format!("Failed checking PTY status: {err}")))?
-				{
-					exit_code = Some(i32::try_from(status.exit_code()).unwrap_or(i32::MAX));
-					break;
-				}
-				if Instant::now() >= deadline {
-					break;
-				}
-				std::thread::sleep(CANCEL_REAP_POLL_INTERVAL);
-			}
-			if exit_code.is_none() {
-				std::thread::spawn(move || {
-					let _ = child.wait();
-				});
-			}
-		} else {
-			let status = child
-				.wait()
-				.map_err(|err| Error::from_reason(format!("Failed waiting PTY process: {err}")))?;
-			exit_code = Some(i32::try_from(status.exit_code()).unwrap_or(i32::MAX));
-		}
-	}
+	};
+	cancel_task.abort();
+	let exit_code = status
+		.transpose()
+		.map_err(|err| Error::from_reason(format!("Failed waiting PTY process: {err}")))?
+		.map(|status| i32::try_from(status.exit_code()).unwrap_or(i32::MAX));
 	// --- Teardown ---
 
 	// Step 1: Close the ConPTY input pipe first.
@@ -648,57 +619,6 @@ fn run_pty_sync(
 	);
 	drop(pump_task);
 	Ok(PtyRunResult { exit_code, cancelled, timed_out })
-}
-
-/// Drain `rx`, greedily coalescing queued chunks into ≤64 KiB batches, and
-/// feed each batch to `forward`, awaiting its completion before pulling more.
-/// Mirrors `shell.rs` `pump_chunks` (#4078): JS consumption backpressures the
-/// bounded reader queue; the PTY control loop never calls into napi.
-async fn pump_pty_chunks(
-	rx: flume::Receiver<ReaderEvent>,
-	mut forward: impl AsyncFnMut(String) -> bool,
-	busy: Option<&AtomicBool>,
-) {
-	const MAX_BATCH_BYTES: usize = 64 * 1024;
-	const INITIAL_BATCH_CAP: usize = 8 * 1024;
-	let mut batch = String::with_capacity(INITIAL_BATCH_CAP);
-	let set_busy = |value: bool| {
-		if let Some(busy) = busy {
-			busy.store(value, Ordering::Release);
-		}
-	};
-	loop {
-		let first = match rx.recv_async().await {
-			Ok(ReaderEvent::Chunk(text)) => {
-				// Hold the idle-check flag before coalesce/forward so a drained
-				// queue is not mistaken for a stuck-open slave.
-				set_busy(true);
-				text
-			},
-			Ok(ReaderEvent::Done) | Err(_) => break,
-		};
-		batch.push_str(&first);
-		let mut done = false;
-		while batch.len() < MAX_BATCH_BYTES {
-			match rx.try_recv() {
-				Ok(ReaderEvent::Chunk(more)) => batch.push_str(&more),
-				Ok(ReaderEvent::Done) => {
-					done = true;
-					break;
-				},
-				Err(_) => break,
-			}
-		}
-		let payload = std::mem::replace(&mut batch, String::with_capacity(INITIAL_BATCH_CAP));
-		let keep_going = payload.is_empty() || forward(payload).await;
-		set_busy(false);
-		if !keep_going {
-			return;
-		}
-		if done {
-			return;
-		}
-	}
 }
 
 /// Wait for the JS pump after the child has exited and the master is dropped.
@@ -782,100 +702,16 @@ mod reader_queue_tests {
 		time::{Duration, Instant},
 	};
 
-	use tokio::time;
-
 	use super::{
-		POST_CANCEL_DRAIN_TIMEOUT, READER_QUEUE_CHUNKS, ReaderEvent, STUCK_SLAVE_IDLE,
-		await_pty_output_drain, pump_pty_chunks,
+		BRIDGE_QUEUE_CHUNKS, POST_CANCEL_DRAIN_TIMEOUT, ReaderEvent, STUCK_SLAVE_IDLE,
+		await_pty_output_drain,
 	};
 
-	/// Regression for the PTY sibling of #4078: a stalled JS consumer
-	/// (`forward`) must not let the reader queue grow without bound, and chunks
-	/// must arrive losslessly and in order. Copied from
-	/// `bridge_pump_bounds_queue_and_delivers_all_bytes`.
-	#[tokio::test(flavor = "multi_thread")]
-	async fn pty_pump_bounds_queue_and_delivers_all_bytes() {
-		const CHUNKS: usize = 512;
-		const CHUNK_BYTES: usize = 4096;
-		let (tx, rx) = flume::bounded::<ReaderEvent>(READER_QUEUE_CHUNKS);
-		let producer = tokio::spawn(async move {
-			let mut expected = String::with_capacity(CHUNKS * CHUNK_BYTES);
-			let mut max_queued = 0usize;
-			for i in 0..CHUNKS {
-				let chunk = format!("[{i:06}]{}", "x".repeat(CHUNK_BYTES - 8));
-				expected.push_str(&chunk);
-				tx.send_async(ReaderEvent::Chunk(chunk))
-					.await
-					.expect("pump should outlive the producer");
-				max_queued = max_queued.max(tx.len());
-			}
-			tx.send_async(ReaderEvent::Done)
-				.await
-				.expect("pump should accept Done");
-			(expected, max_queued)
-		});
-
-		let mut received = String::with_capacity(CHUNKS * CHUNK_BYTES);
-		time::timeout(
-			Duration::from_secs(30),
-			pump_pty_chunks(
-				rx,
-				async |payload: String| {
-					received.push_str(&payload);
-					time::sleep(Duration::from_micros(500)).await;
-					true
-				},
-				None,
-			),
-		)
-		.await
-		.expect("pump should finish once the producer hangs up");
-
-		let (expected, max_queued) = producer.await.expect("producer task");
-		assert!(
-			max_queued <= READER_QUEUE_CHUNKS,
-			"PTY reader queue grew past its bound: {max_queued} chunks",
-		);
-		assert_eq!(received.len(), expected.len(), "bytes were dropped or duplicated");
-		assert_eq!(received, expected, "chunks must arrive losslessly and in order");
-	}
-
-	/// When JS dies (`forward` fails), the pump must drop its receiver so parked
-	/// sends fail fast — the PTY reader keeps draining the child instead of
-	/// wedging it on a full bridge queue.
-	#[tokio::test(flavor = "multi_thread")]
-	async fn pty_pump_death_disconnects_channel_without_blocking_senders() {
-		let (tx, rx) = flume::bounded::<ReaderEvent>(4);
-		let pump = tokio::spawn(pump_pty_chunks(rx, async |_payload: String| false, None));
-		let producer = tokio::spawn(async move {
-			let mut disconnected = 0usize;
-			for _ in 0..64 {
-				if tx
-					.send_async(ReaderEvent::Chunk("x".repeat(1024)))
-					.await
-					.is_err()
-				{
-					disconnected += 1;
-				}
-			}
-
-			disconnected
-		});
-		let disconnected = time::timeout(Duration::from_secs(5), producer)
-			.await
-			.expect("sends must not park once the consumer died")
-			.expect("producer task");
-		assert!(disconnected > 0, "channel should disconnect after the pump stops");
-		time::timeout(Duration::from_secs(5), pump)
-			.await
-			.expect("pump should exit after forward fails")
-			.expect("pump task");
-	}
 	#[test]
 	fn drain_waits_for_slow_js_after_reader_eof() {
 		let (pump_tx, pump_rx) = flume::bounded(1);
 		let reader = std::thread::spawn(|| {});
-		let (queued, _) = flume::bounded::<ReaderEvent>(READER_QUEUE_CHUNKS);
+		let (queued, _) = flume::bounded::<ReaderEvent>(BRIDGE_QUEUE_CHUNKS);
 		let in_js = AtomicBool::new(false);
 		std::thread::spawn(move || {
 			std::thread::sleep(Duration::from_millis(2500));
@@ -891,7 +727,7 @@ mod reader_queue_tests {
 
 	#[test]
 	fn drain_drops_sender_clone_after_reader_eof_so_pump_unblocks() {
-		let (reader_tx, reader_rx) = flume::bounded::<ReaderEvent>(READER_QUEUE_CHUNKS);
+		let (reader_tx, reader_rx) = flume::bounded::<ReaderEvent>(BRIDGE_QUEUE_CHUNKS);
 		let queued = reader_tx.clone();
 		drop(reader_tx);
 		let (pump_tx, pump_rx) = flume::bounded(1);
@@ -920,7 +756,7 @@ mod reader_queue_tests {
 		let reader = std::thread::spawn(|| {
 			std::thread::park();
 		});
-		let (queued, _) = flume::bounded::<ReaderEvent>(READER_QUEUE_CHUNKS);
+		let (queued, _) = flume::bounded::<ReaderEvent>(BRIDGE_QUEUE_CHUNKS);
 		let in_js = AtomicBool::new(false);
 		let stopped = AtomicBool::new(false);
 		let start = Instant::now();
@@ -937,7 +773,7 @@ mod reader_queue_tests {
 	fn drain_does_not_treat_queued_backpressure_as_stuck_slave() {
 		let (pump_tx, pump_rx) = flume::bounded(1);
 		let reader = std::thread::spawn(std::thread::park);
-		let (queued, _rx) = flume::bounded::<ReaderEvent>(READER_QUEUE_CHUNKS);
+		let (queued, _rx) = flume::bounded::<ReaderEvent>(BRIDGE_QUEUE_CHUNKS);
 		queued
 			.send(ReaderEvent::Chunk("x".into()))
 			.expect("queue accepts a chunk");
@@ -958,7 +794,7 @@ mod reader_queue_tests {
 	fn drain_does_not_treat_in_flight_callback_as_stuck_slave() {
 		let (pump_tx, pump_rx) = flume::bounded(1);
 		let reader = std::thread::spawn(std::thread::park);
-		let (queued, _) = flume::bounded::<ReaderEvent>(READER_QUEUE_CHUNKS);
+		let (queued, _) = flume::bounded::<ReaderEvent>(BRIDGE_QUEUE_CHUNKS);
 		let in_js = Arc::new(AtomicBool::new(true));
 		let in_js_flag = Arc::clone(&in_js);
 		std::thread::spawn(move || {
@@ -978,7 +814,7 @@ mod reader_queue_tests {
 	fn drain_cancel_does_not_wait_for_slow_js() {
 		let (_pump_tx, pump_rx) = flume::bounded::<()>(1);
 		let reader = std::thread::spawn(std::thread::park);
-		let (queued, _) = flume::bounded::<ReaderEvent>(READER_QUEUE_CHUNKS);
+		let (queued, _) = flume::bounded::<ReaderEvent>(BRIDGE_QUEUE_CHUNKS);
 		let in_js = AtomicBool::new(true);
 		let stopped = AtomicBool::new(false);
 		let start = Instant::now();
@@ -997,7 +833,7 @@ mod reader_queue_tests {
 	fn drain_cancel_returns_once_pump_observes_stop() {
 		let (pump_tx, pump_rx) = flume::bounded::<()>(1);
 		let reader = std::thread::spawn(std::thread::park);
-		let (queued, _) = flume::bounded::<ReaderEvent>(READER_QUEUE_CHUNKS);
+		let (queued, _) = flume::bounded::<ReaderEvent>(BRIDGE_QUEUE_CHUNKS);
 		let in_js = AtomicBool::new(true);
 		let start = Instant::now();
 		await_pty_output_drain(pump_rx, reader, queued, &in_js, true, move || {
@@ -1082,6 +918,10 @@ mod zombie_repro_tests {
 	/// is kept contended.
 	fn run_cancel_storm(iterations: usize) -> StormOutcome {
 		let before = zombie_child_pids();
+		// `run_pty_sync` spawns its pump and cancel forwarder on the ambient
+		// Tokio runtime (in production, the napi one it runs under).
+		let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
+		let _runtime = runtime.enter();
 
 		let stop = Arc::new(AtomicBool::new(false));
 		let busy: Vec<_> = (0..thread::available_parallelism().map_or(8, |n| n.get()))
@@ -1097,7 +937,7 @@ mod zombie_repro_tests {
 
 		let mut spawned = 0;
 		for _ in 0..iterations {
-			let (_tx, rx) = flume::unbounded();
+			let (tx, rx) = flume::unbounded();
 			let ct = task::CancelToken::new(Some(1), None);
 			let config = PtyRunConfig {
 				command: PtyCommand::Argv {
@@ -1111,7 +951,7 @@ mod zombie_repro_tests {
 			};
 			// Pre-spawn heartbeats bail with `Err`, so `Ok` means this iteration
 			// reached the post-spawn cancellation path.
-			if run_pty_sync(config, None, None, rx, ct).is_ok() {
+			if run_pty_sync(config, None, None, tx, rx, ct).is_ok() {
 				spawned += 1;
 			}
 		}

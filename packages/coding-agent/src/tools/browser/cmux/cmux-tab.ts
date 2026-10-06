@@ -1940,14 +1940,24 @@ export class CmuxTab implements InProcessRunTab {
 				case "select": {
 					const values = Array.isArray(args.values) ? args.values.map(String) : [String(args.value || "")];
 					if (element.tagName !== "SELECT") throw new Error("tab.select() requires a <select> element");
-					const wanted = new Set(values);
-					const selected = [];
-					for (const option of Array.from(element.options)) {
-						option.selected = wanted.has(option.value);
-						if (option.selected) selected.push(option.value);
+					// An exact value wins over a visible label.
+					const options = Array.from(element.options);
+					const wanted = [];
+					const missing = [];
+					for (const value of values) {
+						const option =
+							options.find(candidate => candidate.value === value) ||
+							options.find(candidate => candidate.label === value || candidate.text.replace(/\\s+/g, " ").trim() === value);
+						if (option) wanted.push(option);
+						else missing.push(value);
 					}
+					// A value that matches nothing leaves the select untouched rather than committing its default option.
+					if (missing.length > 0) throw new Error("No <select> option matches " + missing.map(value => JSON.stringify(value)).join(", "));
+					if (wanted.length === 0) for (const option of options) option.selected = false;
+					else if (element.multiple) for (const option of options) option.selected = wanted.includes(option);
+					else element.selectedIndex = wanted[0].index;
 					inputEvent(element);
-					return selected;
+					return options.filter(option => option.selected).map(option => option.value);
 				}
 				case "uploadFile": {
 					const transfer = new DataTransfer();
@@ -2200,7 +2210,18 @@ class CmuxElementHandle {
 		this.#selector = selector;
 	}
 
-	async click(): Promise<void> {
+	async click(options?: { button?: string; count?: number }): Promise<void> {
+		// Every cmux element-click path presses the left button once; refuse rather than mis-deliver.
+		if (options?.button !== undefined && options.button !== "left") {
+			throw new ToolError(
+				`handle.click({ button: ${JSON.stringify(options.button)} }) is not supported in a cmux browser, which only left-clicks elements`,
+			);
+		}
+		if (options?.count !== undefined && options.count !== 1) {
+			throw new ToolError(
+				`handle.click({ count: ${options.count} }) is not supported in a cmux browser; use handle.dblclick() for a double click`,
+			);
+		}
 		await this.#tab.click(this.#selector);
 	}
 

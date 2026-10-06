@@ -3,6 +3,8 @@
 use napi::bindgen_prelude::*;
 use napi_derive::napi;
 
+use crate::task;
+
 #[napi(object)]
 pub struct BlockRangeOptions {
 	/// Source code to inspect.
@@ -79,6 +81,32 @@ pub fn node_chain_at(options: BlockRangeOptions) -> Result<Option<Vec<NodeSpan>>
 	})
 	.map(|chain| chain.map(|spans| spans.into_iter().map(Into::into).collect()))
 	.map_err(|error| Error::from_reason(error.to_string()))
+}
+
+#[napi(object)]
+pub struct BlockParseOptions {
+	/// Source code to parse.
+	pub code: String,
+	/// Language alias (e.g. "rust", "typescript") used before path inference.
+	pub lang: Option<String>,
+	/// File path used to infer language by extension when `lang` is omitted.
+	pub path: Option<String>,
+}
+
+/// Parse `options.code` into the shared tree cache on the native blocking
+/// pool.
+///
+/// [`enclosing_block_boundaries`], [`block_range_at`] and [`node_chain_at`]
+/// are synchronous and parse on the JS thread when their source is not
+/// cached; awaiting this first makes that parse a cache hit. Resolves without
+/// parsing when the language is unrecognized or the source is too large for
+/// the cache to keep.
+#[napi]
+pub fn warm_block_parse(options: BlockParseOptions) -> task::Promise<()> {
+	task::blocking("block.warm_parse", (), move |_| {
+		pi_ast::block::warm_parse(&options.code, options.lang.as_deref(), options.path.as_deref())
+			.map_err(|error| Error::from_reason(error.to_string()))
+	})
 }
 
 #[napi(object)]

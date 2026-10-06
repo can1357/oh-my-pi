@@ -263,11 +263,11 @@ describe("normalize", () => {
 
 describe("shape resolution", () => {
 	it("maps provider APIs to their eval-winning shapes", () => {
-		expect(snapcompact.resolveShape({ api: "anthropic-messages" })).toBe(snapcompact.SHAPES.anthropic);
-		expect(snapcompact.resolveShape({ api: "openai-responses" })).toBe(snapcompact.SHAPES.openai);
-		expect(snapcompact.resolveShape({ api: "azure-openai-responses" })).toBe(snapcompact.SHAPES.openai);
-		expect(snapcompact.resolveShape({ api: "google-generative-ai" })).toBe(snapcompact.SHAPES.google);
-		// Unknown and absent APIs fall back to the unknown family default (8on22-bw with Anthropic token billing).
+		expect(snapcompact.resolveShape({ api: "anthropic-messages" })).toEqual(snapcompact.SHAPES.anthropic);
+		expect(snapcompact.resolveShape({ api: "openai-responses" })).toEqual(snapcompact.SHAPES.openai);
+		expect(snapcompact.resolveShape({ api: "azure-openai-responses" })).toEqual(snapcompact.SHAPES.openai);
+		expect(snapcompact.resolveShape({ api: "google-generative-ai" })).toEqual(snapcompact.SHAPES.google);
+		// Unknown and absent APIs fall back to the unknown family default (8on22-bw, billed at the ceiling).
 		const unknownFallback = snapcompact.resolveShape({ api: "some-future-api" });
 		expect(unknownFallback.cellHeight).toBe(22);
 		expect(unknownFallback.variant).toBe("bw");
@@ -276,8 +276,8 @@ describe("shape resolution", () => {
 
 	it("detects the ideal shape from the model id across gateways", () => {
 		// A high-res Claude served through an OpenAI-compatible gateway keeps
-		// its own geometry (tracked 8x13) AND its 1932px frame; billing follows
-		// the gateway family, computed for that frame size (32px patches × 1.2).
+		// its own geometry (tracked 8x13), its 1932px frame, and Anthropic's
+		// billing (69² 28px patches); the gateway only adds its detail hint.
 		const claudeViaOpenRouter = snapcompact.resolveShape({
 			api: "openai-completions",
 			id: "anthropic/claude-fable-5",
@@ -285,16 +285,16 @@ describe("shape resolution", () => {
 		expect(claudeViaOpenRouter.font).toBe("8x13");
 		expect(claudeViaOpenRouter.cellWidth).toBe(11); // extra tracking
 		expect(claudeViaOpenRouter.frameSize).toBe(1932);
-		expect(claudeViaOpenRouter.frameTokenEstimate).toBe(Math.ceil(Math.ceil(1932 / 32) ** 2 * 1.2));
+		expect(claudeViaOpenRouter.frameTokenEstimate).toBe(4761);
 		expect(claudeViaOpenRouter.imageDetail).toBe("original");
 
-		// Claude on Vertex must not inherit the Gemini shape; Gemini billing is
-		// a fixed per-image budget at any size.
+		// Claude on Vertex must not inherit the Gemini shape or Gemini's fixed
+		// per-image price.
 		const claudeOnVertex = snapcompact.resolveShape({ api: "google-vertex", id: "claude-fable-5@20250929" });
 		expect(claudeOnVertex.font).toBe("8x13");
 		expect(claudeOnVertex.cellWidth).toBe(11);
 		expect(claudeOnVertex.frameSize).toBe(1932);
-		expect(claudeOnVertex.frameTokenEstimate).toBe(snapcompact.SHAPES.google.frameTokenEstimate);
+		expect(claudeOnVertex.frameTokenEstimate).toBe(4761);
 
 		// High-res frames are reserved for the lines that read them natively;
 		// older Claude lines keep the safe 1568px family default.
@@ -321,13 +321,14 @@ describe("shape resolution", () => {
 		// Minor versions past the old 9.10 semver-table bound must not fall
 		// back to the 1568px default (same staleness class as #8256).
 		expect(snapcompact.resolveShape({ api: "anthropic-messages", id: "claude-opus-5-11" }).frameSize).toBe(1932);
-		// Opus lines below 4.7 downscale, so they keep the safe family default.
-		expect(snapcompact.resolveShape({ api: "anthropic-messages", id: "claude-opus-4-6" })).toBe(
-			snapcompact.SHAPES.anthropic,
-		);
-		expect(snapcompact.resolveShape({ api: "anthropic-messages", id: "claude-3-5-sonnet" })).toBe(
-			snapcompact.SHAPES.anthropic,
-		);
+		// Opus lines below 4.7 downscale, so they keep the 1568px family
+		// geometry, billed under the standard tier's 1,568-token cap (39²).
+		const opus46 = snapcompact.resolveShape({ api: "anthropic-messages", id: "claude-opus-4-6" });
+		expect(opus46).toEqual({ ...snapcompact.SHAPES.anthropic, frameTokenEstimate: 1521 });
+		expect(snapcompact.resolveShape({ api: "anthropic-messages", id: "claude-3-5-sonnet" })).toEqual({
+			...snapcompact.SHAPES.anthropic,
+			frameTokenEstimate: 1521,
+		});
 
 		// Gemini reads 2048px frames at the same fixed bill, single-column with
 		// extra leading (22px pitch).
@@ -343,8 +344,9 @@ describe("shape resolution", () => {
 		expect(snapcompact.resolveShape({ api: "openai-completions", id: "moonshotai/kimi-k2.6" })).toEqual(kimiShape);
 		expect(snapcompact.resolveShape({ api: "openai-completions", id: "z-ai/glm-4.6v" })).toEqual(glmShape);
 
-		// Unmeasured model ids fall back to the API family default object.
-		expect(snapcompact.resolveShape({ api: "openai-completions", id: "qwen/qwen3-vl" })).toBe(
+		// Unmeasured model ids fall back to the API family default shape and,
+		// without a catalog image rule, to the wire family's billing.
+		expect(snapcompact.resolveShape({ api: "openai-completions", id: "qwen/qwen3-vl" })).toEqual(
 			snapcompact.SHAPES.openai,
 		);
 		expect(snapcompact.idealShapeVariant("qwen/qwen3-vl")).toBeUndefined();
@@ -358,7 +360,7 @@ describe("shape resolution", () => {
 
 	it("forces a named variant and re-prices it for the provider's billing", () => {
 		// "auto" behaves exactly like no override.
-		expect(snapcompact.resolveShape({ api: "anthropic-messages" }, "auto")).toBe(snapcompact.SHAPES.anthropic);
+		expect(snapcompact.resolveShape({ api: "anthropic-messages" }, "auto")).toEqual(snapcompact.SHAPES.anthropic);
 
 		// Forced geometry survives; billing follows the provider, not the variant.
 		const denseOnAnthropic = snapcompact.resolveShape({ api: "anthropic-messages" }, "6x6u-sent");
@@ -379,7 +381,56 @@ describe("shape resolution", () => {
 		expect(legacyOnGoogle.frameSize).toBe(2576);
 		expect(legacyOnGoogle.frameTokenEstimate).toBe(snapcompact.SHAPES.google.frameTokenEstimate);
 		const legacyOnAnthropic = snapcompact.resolveShape({ api: "anthropic-messages" }, "5x8-bw");
-		expect(legacyOnAnthropic.frameTokenEstimate).toBe(Math.ceil(4784 * 1.05));
+		expect(legacyOnAnthropic.frameTokenEstimate).toBe(69 * 69);
+	});
+
+	it("prices frames by the reading model's lineage, not the wire API", () => {
+		const codex = snapcompact.resolveShape({ api: "openai-codex-responses", id: "gpt-6-astra" });
+		expect(codex.frameSize).toBe(1568);
+		expect(codex.frameTokenEstimate).toBe(2882);
+		expect(codex.imageDetail).toBe("original");
+		expect(snapcompact.resolveShape({ api: "anthropic-messages", id: "claude-opus-5-5" }).frameTokenEstimate).toBe(
+			4761,
+		);
+		// The standard tier bills under its 1,568-token cap on every host.
+		for (const target of [
+			{ api: "anthropic-messages", id: "claude-opus-4-6" },
+			{ api: "openai-completions", id: "anthropic/claude-sonnet-4.6" },
+			{ api: "bedrock-converse-stream", provider: "amazon-bedrock", id: "us.anthropic.claude-haiku-4-5-v1:0" },
+		] as const) {
+			expect(snapcompact.resolveShape(target).frameTokenEstimate).toBe(1521);
+		}
+		// A forced 2576px variant is priced at its own size: 81² patches × 1.2
+		// on GPT, while the standard Claude tier still fits its cap.
+		const forcedOnCodex = snapcompact.resolveShape({ api: "openai-codex-responses", id: "gpt-6-astra" }, "5x8-bw");
+		expect(forcedOnCodex.frameTokenEstimate).toBe(Math.ceil(81 * 81 * 1.2));
+		expect(
+			snapcompact.resolveShape({ api: "anthropic-messages", id: "claude-opus-4-6" }, "5x8-bw").frameTokenEstimate,
+		).toBe(1521);
+		// Gemini 3 keeps its fixed budget behind an OpenAI-compatible gateway.
+		expect(
+			snapcompact.resolveShape({ api: "openai-completions", id: "google/gemini-3.5-flash" }).frameTokenEstimate,
+		).toBe(1120);
+		// A built model's identity wins over re-parsing its id.
+		expect(
+			snapcompact.resolveShape({
+				api: "openai-completions",
+				id: "house-vision-model",
+				identity: { class: "anthropic", family: "opus", revision: "4.6.0" },
+			}).frameTokenEstimate,
+		).toBe(1521);
+		// Unversioned Claude aliases price at the high-res tier: 56² for a 1568px frame.
+		expect(
+			snapcompact.resolveShape({ api: "openrouter", provider: "openrouter", id: "~anthropic/claude-opus-latest" })
+				.frameTokenEstimate,
+		).toBe(56 * 56);
+		// An unclassified model bills at its wire API's rule; with no rule at all it costs the ceiling.
+		expect(snapcompact.resolveShape({ api: "openai-completions", id: "qwen/qwen3-vl" }).frameTokenEstimate).toBe(
+			2882,
+		);
+		expect(snapcompact.resolveShape({ api: "some-future-api", id: "qwen/qwen3-vl" }).frameTokenEstimate).toBe(
+			snapcompact.FRAME_TOKEN_ESTIMATE,
+		);
 	});
 
 	it("every catalog variant resolves to a complete, renderable shape", () => {
@@ -1178,6 +1229,26 @@ describe("compact", () => {
 			{ frameSize: TEST_FRAME_SIZE },
 		);
 		expect(snapcompact.getPreservedArchive(second.preserveData)?.text ?? "").toContain("¶think:");
+	});
+});
+
+describe("frame data budget", () => {
+	const codex = { api: "openai-codex-responses", id: "gpt-6-astra" } as const;
+	const highResFrames = Math.floor(snapcompact.FRAME_DATA_BYTES_BUDGET / snapcompact.FRAME_DATA_BYTES_ESTIMATE);
+
+	it("gives the default 1568px shapes more of the same byte budget", () => {
+		const opus = snapcompact.resolveShape({ api: "anthropic-messages", id: "claude-opus-4-8" });
+		const sonnet = snapcompact.resolveShape({ api: "anthropic-messages", id: "claude-sonnet-4-5" });
+		expect(snapcompact.maxFramesForDataBudget(opus)).toBe(highResFrames);
+		expect(snapcompact.maxFramesForDataBudget(snapcompact.resolveShape(codex))).toBe(26);
+		expect(snapcompact.maxFramesForDataBudget(sonnet)).toBe(26);
+		// Frames larger than 1932px keep the 1932px charge rather than losing frames.
+		const gemini = snapcompact.resolveShape({ api: "google-generative-ai", id: "gemini-3.5-flash" });
+		expect(snapcompact.maxFramesForDataBudget(gemini)).toBe(highResFrames);
+		// Inkier 1568px variants keep the 1932px charge.
+		for (const variant of ["8x13-bw", "6x12-dim", "doc-8on16-sent-dim", "8on16-bw", "silver16-bw"] as const) {
+			expect(snapcompact.maxFramesForDataBudget(snapcompact.resolveShape(codex, variant))).toBe(highResFrames);
+		}
 	});
 });
 
