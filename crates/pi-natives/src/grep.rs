@@ -10,7 +10,6 @@
 use std::{
 	borrow::Cow,
 	cell::RefCell,
-	fmt,
 	io::{self, Read},
 	path::Path,
 	sync::{
@@ -33,19 +32,17 @@ use napi::{
 };
 use napi_derive::napi;
 use parking_lot::{Condvar, Mutex};
+use pi_builtins::CompiledMatcher;
 use pi_vfs::{BlockingFs, File};
 use smallvec::SmallVec;
 
 use crate::{glob_util, iofs, shell::vfs::ShellFilesystem, task};
 
 const MAX_FILE_BYTES: u64 = 4 * 1024 * 1024;
-/// PCRE2 JIT toggle: `OMP_PCRE2_JIT=1` forces JIT on, `0`/`false` forces it
-/// off. Unset, JIT stays on everywhere except macOS, where PCRE2's SLJIT
-/// executable allocator can fault while compiling patterns (issue #7399).
-static PCRE2_JIT_ENABLED: LazyLock<bool> = LazyLock::new(|| match std::env::var("OMP_PCRE2_JIT") {
-	Ok(v) if !v.is_empty() => v != "0" && !v.eq_ignore_ascii_case("false"),
-	_ => !cfg!(target_os = "macos"),
-});
+/// PCRE2 JIT toggle read once from the process environment; see
+/// [`pi_builtins::pcre2_jit_enabled`] for the `OMP_PCRE2_JIT` values.
+static PCRE2_JIT_ENABLED: LazyLock<bool> =
+	LazyLock::new(|| pi_builtins::pcre2_jit_enabled(std::env::var("OMP_PCRE2_JIT").ok().as_deref()));
 
 /// Upper bound on entries per streamed `onMatches` batch; a file with more
 /// content matches streams several batches while it is still being searched.
@@ -643,50 +640,6 @@ struct SearchParams {
 	max_count_per_file: Option<u64>,
 	offset:             u64,
 	multiline:          bool,
-}
-
-enum CompiledMatcher {
-	Rust(RegexMatcher),
-	Pcre(PcreMatcher),
-}
-
-#[derive(Debug)]
-enum CompiledMatcherError {
-	Rust(grep_matcher::NoError),
-	Pcre(grep_pcre2::Error),
-}
-
-impl fmt::Display for CompiledMatcherError {
-	fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-		match self {
-			Self::Rust(err) => err.fmt(formatter),
-			Self::Pcre(err) => err.fmt(formatter),
-		}
-	}
-}
-
-impl Matcher for CompiledMatcher {
-	type Captures = grep_matcher::NoCaptures;
-	type Error = CompiledMatcherError;
-
-	fn find_at(
-		&self,
-		haystack: &[u8],
-		at: usize,
-	) -> std::result::Result<Option<grep_matcher::Match>, Self::Error> {
-		match self {
-			Self::Rust(matcher) => matcher
-				.find_at(haystack, at)
-				.map_err(CompiledMatcherError::Rust),
-			Self::Pcre(matcher) => matcher
-				.find_at(haystack, at)
-				.map_err(CompiledMatcherError::Pcre),
-		}
-	}
-
-	fn new_captures(&self) -> std::result::Result<Self::Captures, Self::Error> {
-		Ok(grep_matcher::NoCaptures::new())
-	}
 }
 
 fn run_search<M: Matcher + Sync>(

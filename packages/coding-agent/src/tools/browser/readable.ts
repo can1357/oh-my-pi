@@ -47,6 +47,115 @@ async function loadDom(): Promise<typeof DomNs> {
 }
 
 /**
+ * Elements that end a line of rendered text, which `textContent` runs together. As in `innerText`,
+ * `<p>` also leaves a blank line, `<br>` is one line break, and table cells are tab-separated.
+ */
+const BLOCK_TAGS: Readonly<Record<string, true>> = {
+	ADDRESS: true,
+	ARTICLE: true,
+	ASIDE: true,
+	BLOCKQUOTE: true,
+	CAPTION: true,
+	DD: true,
+	DETAILS: true,
+	DIALOG: true,
+	DIV: true,
+	DL: true,
+	DT: true,
+	FIELDSET: true,
+	FIGCAPTION: true,
+	FIGURE: true,
+	FOOTER: true,
+	FORM: true,
+	H1: true,
+	H2: true,
+	H3: true,
+	H4: true,
+	H5: true,
+	H6: true,
+	HEADER: true,
+	HR: true,
+	LI: true,
+	MAIN: true,
+	NAV: true,
+	OL: true,
+	P: true,
+	PRE: true,
+	SECTION: true,
+	SUMMARY: true,
+	TABLE: true,
+	TR: true,
+	UL: true,
+};
+/** Never rendered as text; skipped below the extraction root. */
+const SKIP_TAGS: Readonly<Record<string, true>> = { SCRIPT: true, STYLE: true, NOSCRIPT: true, TEMPLATE: true };
+const ELEMENT_NODE = 1;
+const TEXT_NODE = 3;
+
+/**
+ * Text of a subtree with line breaks where the document has block boundaries.
+ * Whitespace outside `<pre>` is collapsed the way a renderer collapses it;
+ * `<pre>` keeps its indentation and blank lines. A raw-text root (`<script>`,
+ * `<template>`, …) returns its text as is. Only trailing whitespace is trimmed,
+ * so a leading empty-cell tab keeps the first row's columns aligned.
+ */
+function blockText(root: DomNs.Element): string {
+	if (SKIP_TAGS[root.tagName.toUpperCase()]) return (root.textContent ?? "").trimEnd();
+	// Parts are never empty, so the last part's last character is the output's.
+	// Only the last parts are ever rewritten, which keeps the walk linear.
+	const parts: string[] = [];
+	let pendingBreaks = 0;
+	let cellsInRow = 0;
+	const append = (text: string): void => {
+		if (pendingBreaks > 0) {
+			while (parts.length > 0) {
+				const last = parts[parts.length - 1]!.replace(/[ \t]+$/, "");
+				if (last) {
+					parts[parts.length - 1] = last;
+					parts.push("\n".repeat(pendingBreaks));
+					break;
+				}
+				parts.pop();
+			}
+			pendingBreaks = 0;
+		}
+		parts.push(text);
+	};
+	const walk = (node: DomNs.Node, pre: boolean): void => {
+		if (node.nodeType === TEXT_NODE) {
+			let text = node.textContent ?? "";
+			if (!pre) {
+				// ASCII whitespace only: `&nbsp;` is not collapsed by renderers either.
+				text = text.replace(/[ \t\n\r\f]+/g, " ");
+				const last = parts[parts.length - 1];
+				if (pendingBreaks > 0 || !last || " \n\t".includes(last.at(-1)!)) text = text.replace(/^ /, "");
+			}
+			if (text) append(text);
+			return;
+		}
+		if (node.nodeType !== ELEMENT_NODE) return;
+		const tag = (node as DomNs.Element).tagName.toUpperCase();
+		if (node !== root && SKIP_TAGS[tag]) return;
+		if (tag === "BR") {
+			if (parts.length > 0) pendingBreaks++;
+			return;
+		}
+		if (tag === "TR") cellsInRow = 0;
+		if (tag === "TD" || tag === "TH") {
+			// One tab per cell boundary, so empty cells keep later values in their column.
+			if (cellsInRow > 0) append("\t");
+			cellsInRow++;
+		}
+		const breaks = tag === "P" ? 2 : BLOCK_TAGS[tag] ? 1 : 0;
+		pendingBreaks = Math.max(pendingBreaks, breaks);
+		for (const child of node.childNodes) walk(child, pre || tag === "PRE");
+		pendingBreaks = Math.max(pendingBreaks, breaks);
+	};
+	walk(root, root.parentElement?.closest("pre") != null);
+	return parts.join("").trimEnd();
+}
+
+/**
  * Extract readable content from raw HTML.
  * Tries Readability (article-isolation scoring) first, then falls back to a
  * CSS selector chain over the same pre-parsed DOM. Returns null if neither
@@ -67,10 +176,14 @@ export async function extractReadableFromHtml(
 	if (!selected) {
 		const article = new Readability(document).parse();
 		if (article) {
+			// Readability's `textContent` has no block boundaries at all, so re-read
+			// its own markup for them. The markup is a fragment and needs a body.
+			const body =
+				format === "text" && article.content ? parseHTML(`<body>${article.content}</body>`).document.body : null;
 			const result = await toReadableResult(
 				url,
 				format,
-				article.textContent,
+				body ? blockText(body) : article.textContent?.trim(),
 				article.content,
 				{
 					title: article.title,
@@ -98,7 +211,7 @@ export async function extractReadableFromHtml(
 	for (const el of candidates) {
 		if (!el) continue;
 		const innerHTML = el.innerHTML?.trim();
-		const textContent = el.textContent?.trim();
+		const textContent = format === "text" ? blockText(el) : el.textContent?.trim();
 		if (!innerHTML || !textContent) continue;
 		const result = await toReadableResult(
 			url,
@@ -173,7 +286,9 @@ async function toReadableResult(
 	meta: { title?: string | null; byline?: string | null; excerpt?: string | null; length?: number | null },
 	options: ReadableExtractOptions,
 ): Promise<ReadableResult | null> {
-	const text = normalize(textContent);
+	// Text-format content is `blockText` output, already free of leading whitespace except a
+	// first-cell tab or `<pre>` indentation, both of which are content.
+	const text = format === "text" ? textContent?.trimEnd() || undefined : normalize(textContent);
 	let processedMarkdown = normalize(await htmlToBasicMarkdown(htmlContent ?? "")) ?? text;
 	if (!processedMarkdown) return null;
 	if (options.filter) processedMarkdown = normalize(filterMarkdownSections(processedMarkdown, options.filter));

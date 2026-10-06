@@ -781,12 +781,16 @@ Request shaping:
 - `disableReasoningWithTools` — suppress reasoning when tools are present even without forced tool choice. Default: `false` unless catalog policy overrides it.
 - `alwaysSendMaxTokens` — always send a max-token field when the caller did not provide one. Default: auto (Kimi-family models derive TPM limits from `max_tokens`).
 - `strictResponsesPairing` — Responses-API tool-call/result history must be strictly paired. Default: auto (Azure OpenAI, GitHub Copilot).
+- `statefulResponses` — enable or disable stored `previous_response_id` chaining for `openai-responses`. Enabling it sends `store: true` and delta input on later turns; disabling it replays full context with `store: false`. Precedence: call option > `PI_OPENAI_STATEFUL` > `compat.statefulResponses` > `compat.officialEndpoint` (on for official OpenAI, off elsewhere). This key does not enable `officialEndpoint` or official-only fields such as `text.verbosity`; it does not change Codex or Azure Responses behavior.
 - `streamIdleTimeoutMs` — stream-watchdog idle-timeout floor in ms for slow reasoning hosts. Default: auto (GLM coding-plan hosts, direct DeepSeek reasoning).
 - `streamMarkupHealingPattern` — recover leaked stream control markup with the `kimi`, `dsml`, `qwen`, or `thinking` grammar. Default: endpoint/model policy.
 - `cacheControlFormat` — `"anthropic"` to include Anthropic-style prompt-cache markers in chat-completions payloads. Default: auto (OpenRouter `anthropic/*` models).
 - `supportsLongPromptCacheRetention` — host honors `prompt_cache_retention: "24h"` on the Responses API. Default: auto (api.openai.com).
 - `supportsImageDetailOriginal` — allow the Responses API's nonstandard `detail: "original"` image
-  mode where the endpoint supports it.
+  mode where the endpoint supports it. Default: `true` for OpenAI, Azure OpenAI, and Codex;
+  `false` for other hosts, including custom/local endpoints, xAI, and Copilot. Custom hosts receive
+  `auto` for snapcompact frames and computer screenshots unless they opt in with
+  `compat.supportsImageDetailOriginal: true`. An explicit `false` also overrides the known-host default.
 - `supportsConfigurationUpdate` — let the Responses API change `reasoning.effort` mid-session through a `configuration_update` input item while the request-level effort stays pinned for prompt caching (GPT-6 Astra). Default: auto (`true` for `gpt-6-astra` on every host, `false` otherwise). Set `false` for custom `openai-responses` / `openai-codex-responses` endpoints that reject the item type with HTTP 400; effort changes are then sent as the top-level `reasoning.effort` and no update items are emitted.
 - `supportsSteering` — let the Codex WebSocket transport send `response.steer`, so a message typed while the model responds joins that response instead of waiting for the next request. Default: auto (`true` for the GPT-6 family). Set `false` for proxies that reject the event.
 - `extraBody` — extra top-level fields merged into every request body (gateway hints, controller selectors, etc.).

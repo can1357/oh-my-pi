@@ -2,7 +2,7 @@
 
 use std::{
 	cmp::Ordering,
-	collections::{BTreeMap, BTreeSet, BinaryHeap, HashMap},
+	collections::{BTreeMap, BTreeSet, BinaryHeap, HashMap, HashSet},
 	path::{Path, PathBuf},
 };
 
@@ -494,7 +494,10 @@ fn compile_pattern(
 		.map_err(|err| Error::from_reason(err.to_string()))
 }
 
-fn apply_edits(content: &str, edits: &[Edit<String>]) -> Result<String> {
+fn apply_edits<'e>(
+	content: &str,
+	edits: impl IntoIterator<Item = &'e Edit<String>>,
+) -> Result<String> {
 	shared_ops::apply_edits(content, edits).map_err(|err| Error::from_reason(err.to_string()))
 }
 
@@ -1111,6 +1114,8 @@ fn ast_edit_blocking(
 		}
 
 		let mut file_changes = Vec::new();
+		// Spans already staged for this file, to drop repeats in O(1).
+		let mut staged = HashSet::new();
 		let mut reached_max_replacements = false;
 		'patterns: for &(rewrite, compiled) in &runnable_rules {
 			for matched in ast.root().find_all(compiled.clone()) {
@@ -1119,12 +1124,7 @@ fn ast_edit_blocking(
 				// Multiple rules matching the same node with the same output are
 				// one deterministic edit; list and count it once instead of
 				// staging a duplicate that trips the apply-time overlap check.
-				let duplicate = file_changes.iter().any(|entry: &PendingFileChange| {
-					entry.edit.position == edit.position
-						&& entry.edit.deleted_length == edit.deleted_length
-						&& entry.edit.inserted_text == edit.inserted_text
-				});
-				if duplicate {
+				if !staged.insert((edit.position, edit.deleted_length, edit.inserted_text.clone())) {
 					continue;
 				}
 				if changes.len() + file_changes.len() >= max_replacements as usize {
@@ -1173,15 +1173,7 @@ fn ast_edit_blocking(
 		file_counts.insert(candidate.display_path.clone(), to_u32(file_changes.len()));
 
 		if !dry_run {
-			let edits: Vec<Edit<String>> = file_changes
-				.iter()
-				.map(|entry| Edit {
-					position:       entry.edit.position,
-					deleted_length: entry.edit.deleted_length,
-					inserted_text:  entry.edit.inserted_text.clone(),
-				})
-				.collect();
-			let output = apply_edits(&source, &edits)?;
+			let output = apply_edits(&source, file_changes.iter().map(|entry| &entry.edit))?;
 			if output != source {
 				pending_writes
 					.push(PendingWrite { absolute_path: candidate.absolute_path.clone(), output });

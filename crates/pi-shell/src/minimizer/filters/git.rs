@@ -110,21 +110,8 @@ fn is_show_path_content(command: &str) -> bool {
 }
 
 fn is_stash_patch(command: &str) -> bool {
-	has_ordered_tokens(command, "stash", "show")
+	primitives::command_has_ordered_tokens(command, "stash", "show")
 		&& (has_token(command, "-p") || has_token(command, "--patch"))
-}
-
-fn has_ordered_tokens(command: &str, first: &str, second: &str) -> bool {
-	let mut saw_first = false;
-	for part in command.split_whitespace() {
-		if saw_first && part == second {
-			return true;
-		}
-		if part == first {
-			saw_first = true;
-		}
-	}
-	false
 }
 
 fn has_token(command: &str, token: &str) -> bool {

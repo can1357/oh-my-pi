@@ -44,7 +44,7 @@ pub fn filter(ctx: &MinimizerCtx<'_>, input: &str, exit_code: i32) -> MinimizerO
 		"docker" => filter_docker(ctx, &cleaned, exit_code),
 		"kubectl" => filter_kubectl(ctx, &cleaned, exit_code),
 		"helm" => filter_helm(ctx, &cleaned, exit_code),
-		_ => head_tail_dedup(&cleaned),
+		_ => primitives::head_tail_dedup(&cleaned),
 	};
 
 	if text == input {
@@ -72,7 +72,7 @@ fn filter_docker(ctx: &MinimizerCtx<'_>, input: &str, exit_code: i32) -> String 
 	// compact_build_or_progress would strip legitimate lines that happen to
 	// contain progress substrings (e.g. a container named "my-Downloading-app").
 	if is_docker_lifecycle_command(ctx) {
-		return head_tail_dedup(input);
+		return primitives::head_tail_dedup(input);
 	}
 	// docker-compose up / docker compose up (attached mode) streams container
 	// logs, not build progress.  Lines like "Downloading", "Waiting",
@@ -117,11 +117,9 @@ fn filter_kubectl(ctx: &MinimizerCtx<'_>, input: &str, exit_code: i32) -> String
 			}
 			compact_table(input, 20)
 		},
-		Some("describe") => {
-			primitives::head_tail_lines(&primitives::dedup_consecutive_lines(input), 120, 80)
-		},
+		Some("describe") => primitives::head_tail_dedup(input),
 		Some("apply" | "delete" | "rollout" | "scale" | "create" | "wait" | "label" | "annotate") => {
-			head_tail_dedup(input)
+			primitives::head_tail_dedup(input)
 		},
 		_ => compact_build_or_progress(input),
 	}
@@ -139,65 +137,57 @@ fn is_structured_kubectl_output(input: &str) -> bool {
 	t.starts_with('{') || t.starts_with("apiVersion:") || t.starts_with("kind:")
 }
 
-/// Whether `kubectl get` was invoked with explicit `-o json` or `-o yaml`.
+/// Walk a `kubectl` command line and yield the base name of every `-o`
+/// format (the part before any `=`, so `jsonpath={..}` yields `jsonpath`).
 ///
 /// Handles all three kubectl `-o` forms:
 ///   `-o json`      (space-separated)
 ///   `-o=json`      (attached with `=`)
 ///   `-ojson`       (fully attached, no separator — common CLI shorthand)
-fn is_explicit_kubectl_json_yaml(command: &str) -> bool {
+fn kubectl_output_formats(command: &str) -> impl Iterator<Item = &str> {
 	let mut tokens = command.split_whitespace();
-	while let Some(tok) = tokens.next() {
-		if (tok == "-o" || tok == "--output")
-			&& let Some(fmt) = tokens.next()
-		{
-			let base = fmt.split('=').next().unwrap_or(fmt);
-			if matches!(base, "json" | "yaml") {
-				return true;
-			}
+	std::iter::from_fn(move || {
+		loop {
+			let tok = tokens.next()?;
+			let val = if tok == "-o" || tok == "--output" {
+				// The value token is consumed here so it is never re-read as a flag.
+				let Some(fmt) = tokens.next() else {
+					continue;
+				};
+				fmt
+			} else if let Some(val) = tok
+				.strip_prefix("-o=")
+				.or_else(|| tok.strip_prefix("--output="))
+			{
+				val
+			} else if let Some(val) = tok
+				.strip_prefix("-o")
+				.filter(|v| !v.is_empty() && !v.starts_with('='))
+			{
+				val
+			} else {
+				continue;
+			};
+			return Some(val.split('=').next().unwrap_or(val));
 		}
-		if let Some(val) = tok
-			.strip_prefix("-o=")
-			.or_else(|| tok.strip_prefix("--output="))
-		{
-			let base = val.split('=').next().unwrap_or(val);
-			if matches!(base, "json" | "yaml") {
-				return true;
-			}
-		}
-		// Fully-attached form: `-ojson`, `-oyaml`, `-ojsonpath=...`, etc.
-		if let Some(val) = tok
-			.strip_prefix("-o")
-			.filter(|v| !v.is_empty() && !v.starts_with('='))
-		{
-			let base = val.split('=').next().unwrap_or(val);
-			if matches!(base, "json" | "yaml") {
-				return true;
-			}
-		}
-	}
-	false
+	})
+}
+
+/// Whether `kubectl get` was invoked with explicit `-o json` or `-o yaml`.
+fn is_explicit_kubectl_json_yaml(command: &str) -> bool {
+	kubectl_output_formats(command).any(|fmt| matches!(fmt, "json" | "yaml"))
 }
 
 /// Whether `kubectl get` was invoked with a non-table output format.
 /// These formats (`-o name`, `-o jsonpath/...`, `-o go-template/...`,
-/// `-o template/...`, `-o custom-columns/...`, `--no-headers`) produce
+/// `-o template/...`, `-o custom-columns/...`) and `--no-headers` produce
 /// listings or single values, not tables — `compact_table` would treat
 /// the first entry as a header and corrupt the requested format.
-///
-/// Handles all three kubectl `-o` forms:
-///   `-o name`      (space-separated)
-///   `-o=name`      (attached with `=`)
-///   `-oname`       (fully attached, no separator — common CLI shorthand)
 fn is_kubectl_non_table_format(command: &str) -> bool {
-	let mut tokens = command.split_whitespace();
-	while let Some(tok) = tokens.next() {
-		if (tok == "-o" || tok == "--output")
-			&& let Some(fmt) = tokens.next()
-		{
-			let base = fmt.split('=').next().unwrap_or(fmt);
-			if matches!(
-				base,
+	command.split_whitespace().any(|tok| tok == "--no-headers")
+		|| kubectl_output_formats(command).any(|fmt| {
+			matches!(
+				fmt,
 				"name"
 					| "jsonpath"
 					| "go-template"
@@ -206,55 +196,8 @@ fn is_kubectl_non_table_format(command: &str) -> bool {
 					| "templatefile"
 					| "custom-columns"
 					| "custom-columns-file"
-			) {
-				return true;
-			}
-		}
-		if let Some(val) = tok
-			.strip_prefix("-o=")
-			.or_else(|| tok.strip_prefix("--output="))
-		{
-			let base = val.split('=').next().unwrap_or(val);
-			if matches!(
-				base,
-				"name"
-					| "jsonpath"
-					| "go-template"
-					| "go-template-file"
-					| "template"
-					| "templatefile"
-					| "custom-columns"
-					| "custom-columns-file"
-			) {
-				return true;
-			}
-		}
-		// Fully-attached form: `-oname`, `-ojsonpath=...`, `-ogo-template=...`,
-		// etc.
-		if let Some(val) = tok
-			.strip_prefix("-o")
-			.filter(|v| !v.is_empty() && !v.starts_with('='))
-		{
-			let base = val.split('=').next().unwrap_or(val);
-			if matches!(
-				base,
-				"name"
-					| "jsonpath"
-					| "go-template"
-					| "go-template-file"
-					| "template"
-					| "templatefile"
-					| "custom-columns"
-					| "custom-columns-file"
-			) {
-				return true;
-			}
-		}
-		if tok == "--no-headers" {
-			return true;
-		}
-	}
-	false
+			)
+		})
 }
 
 /// Try to parse kubectl `get -o json` output and produce a compact table.
@@ -451,7 +394,7 @@ fn filter_helm(ctx: &MinimizerCtx<'_>, input: &str, exit_code: i32) -> String {
 		Some("list" | "ls" | "status") => compact_table(&cleaned, 20),
 		Some("install" | "upgrade" | "lint") => compact_build_or_progress(&cleaned),
 		Some("template") => input.to_string(),
-		_ => head_tail_dedup(&cleaned),
+		_ => primitives::head_tail_dedup(&cleaned),
 	}
 }
 
@@ -523,38 +466,32 @@ fn compose_option_consumes_next(tok: &str) -> bool {
 	)
 }
 
-fn is_log_command(ctx: &MinimizerCtx<'_>) -> bool {
-	if ctx.subcommand == Some("logs") {
-		return true;
-	}
-	// `docker compose logs <service>` — the action is `logs` but subcommand
-	// resolves to `compose`.  Find the first non-option token after `compose`
-	// (the action) and check only that.  Scanning further tokens would
-	// misclassify service names or command args: for example,
-	// `docker compose exec logs cat file` has action `exec` and service name
-	// `logs`, and must NOT be routed through log dedup/truncation.
-	if ctx.subcommand == Some("compose") {
-		let mut tokens = ctx.command.split_whitespace();
-		while let Some(tok) = tokens.next() {
-			if tok == "compose" {
-				loop {
-					match tokens.next() {
-						None => return false,
-						Some(tok)
-							if tok.starts_with('-')
-								&& !tok.contains('=')
-								&& compose_option_consumes_next(tok) =>
-						{
-							tokens.next(); // skip value
-						},
-						Some(tok) if tok.starts_with('-') => {}, // skip boolean flag
-						Some(tok) => return tok == "logs",
-					}
-				}
-			}
+/// The compose action: the first non-option token after `compose`, skipping
+/// global options and the values of those that take one. Only this token
+/// decides routing; scanning further would misclassify service names or
+/// command args (`docker compose exec logs cat file` has action `exec`,
+/// `docker compose up ps` has action `up`).
+fn compose_action(command: &str) -> Option<&str> {
+	let mut tokens = command
+		.split_whitespace()
+		.skip_while(|token| *token != "compose");
+	tokens.next()?;
+	loop {
+		let tok = tokens.next()?;
+		if !tok.starts_with('-') {
+			return Some(tok);
+		}
+		if !tok.contains('=') && compose_option_consumes_next(tok) {
+			tokens.next(); // skip value
 		}
 	}
-	false
+}
+
+fn is_log_command(ctx: &MinimizerCtx<'_>) -> bool {
+	// `docker compose logs <service>` — the action is `logs` but subcommand
+	// resolves to `compose`.
+	ctx.subcommand == Some("logs")
+		|| ctx.subcommand == Some("compose") && compose_action(ctx.command) == Some("logs")
 }
 
 fn is_table_command(ctx: &MinimizerCtx<'_>) -> bool {
@@ -571,59 +508,14 @@ fn is_table_command(ctx: &MinimizerCtx<'_>) -> bool {
 }
 fn is_docker_listing_command(ctx: &MinimizerCtx<'_>) -> bool {
 	matches!(ctx.subcommand, Some("ps" | "images"))
-		|| ctx.subcommand == Some("compose") && is_compose_listing_action(ctx.command)
-}
-
-fn is_compose_listing_action(command: &str) -> bool {
-	// Advance past the `compose` token, then find the first non-option token
-	// (the action).  Only that token decides whether this is a listing command.
-	// Scanning further tokens would misclassify service names: for example,
-	// `docker compose up ps` has action `up` and service name `ps`, and must
-	// NOT be routed through compact_table.
-	let mut tokens = command
-		.split_whitespace()
-		.skip_while(|token| *token != "compose");
-	if tokens.next() != Some("compose") {
-		return false;
-	}
-	loop {
-		match tokens.next() {
-			None => return false,
-			Some(tok)
-				if tok.starts_with('-') && !tok.contains('=') && compose_option_consumes_next(tok) =>
-			{
-				tokens.next(); // skip value
-			},
-			Some(tok) if tok.starts_with('-') => {}, // skip boolean flag
-			Some(tok) => return matches!(tok, "ps" | "images"),
-		}
-	}
+		|| ctx.subcommand == Some("compose")
+			&& matches!(compose_action(ctx.command), Some("ps" | "images"))
 }
 
 fn is_docker_lifecycle_command(ctx: &MinimizerCtx<'_>) -> bool {
 	matches!(ctx.subcommand, Some("start" | "stop" | "restart" | "rm"))
-		|| ctx.subcommand == Some("compose") && is_compose_lifecycle_action(ctx.command)
-}
-
-fn is_compose_lifecycle_action(command: &str) -> bool {
-	let mut tokens = command
-		.split_whitespace()
-		.skip_while(|token| *token != "compose");
-	if tokens.next() != Some("compose") {
-		return false;
-	}
-	loop {
-		match tokens.next() {
-			None => return false,
-			Some(tok)
-				if tok.starts_with('-') && !tok.contains('=') && compose_option_consumes_next(tok) =>
-			{
-				tokens.next(); // skip value
-			},
-			Some(tok) if tok.starts_with('-') => {}, // skip boolean flag
-			Some(tok) => return matches!(tok, "start" | "stop" | "restart" | "rm"),
-		}
-	}
+		|| ctx.subcommand == Some("compose")
+			&& matches!(compose_action(ctx.command), Some("start" | "stop" | "restart" | "rm"))
 }
 
 /// Returns `true` when the command is an attached `docker compose up` or
@@ -643,30 +535,9 @@ fn is_compose_up_command(ctx: &MinimizerCtx<'_>) -> bool {
 	}
 	// Compose v2: subcommand is "compose", scan for first non-option action.
 	if ctx.subcommand == Some("compose") {
-		return is_compose_up_action(ctx.command);
+		return compose_action(ctx.command) == Some("up");
 	}
 	false
-}
-
-fn is_compose_up_action(command: &str) -> bool {
-	let mut tokens = command
-		.split_whitespace()
-		.skip_while(|token| *token != "compose");
-	if tokens.next() != Some("compose") {
-		return false;
-	}
-	loop {
-		match tokens.next() {
-			None => return false,
-			Some(tok)
-				if tok.starts_with('-') && !tok.contains('=') && compose_option_consumes_next(tok) =>
-			{
-				tokens.next(); // skip value
-			},
-			Some(tok) if tok.starts_with('-') => {}, // skip boolean flag
-			Some(tok) => return tok == "up",
-		}
-	}
 }
 
 fn docker_listing_requests_table(command: &str) -> bool {
@@ -762,7 +633,7 @@ fn compact_build_or_progress(input: &str) -> String {
 		out.push_str(line.trim_end());
 		out.push('\n');
 	}
-	head_tail_dedup(&out)
+	primitives::head_tail_dedup(&out)
 }
 
 fn is_progress_line(line: &str) -> bool {
@@ -807,10 +678,6 @@ fn drop_repeated_blank_lines(input: &str) -> String {
 		out.push('\n');
 	}
 	out
-}
-
-fn head_tail_dedup(input: &str) -> String {
-	primitives::head_tail_lines(&primitives::dedup_consecutive_lines(input), 120, 80)
 }
 
 #[cfg(test)]

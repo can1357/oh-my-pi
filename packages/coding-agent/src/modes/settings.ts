@@ -143,7 +143,7 @@ export const cfgComposerTokenRate = register({
 		group: "Composer",
 		label: "Generation Rate",
 		description:
-			"Show a live generation tok/s readout on the working row, docked right next to the session title. Estimated from streamed deltas and corrected by the provider's billed output count as each message completes.",
+			"Show a live generation tok/s readout: on the working row next to the session title, or in the native composer bar right after the thinking level, where the last reading stays between turns. Estimated from streamed deltas and corrected by the provider's billed output count as each message completes.",
 	},
 });
 
@@ -257,7 +257,7 @@ export const cfgStatusLineCompactThinkingLevel = register({
 		group: "Status Line",
 		label: "Compact Thinking Level",
 		description:
-			"Show the thinking level as a single icon on the model name instead of a separate ` · <level>` suffix.",
+			"Show the thinking level as a single icon on the model name instead of a separate ` · <level>` suffix; in Tern's composer, as the model chip's icon instead of a separate chip (click the icon to cycle it).",
 	},
 });
 
