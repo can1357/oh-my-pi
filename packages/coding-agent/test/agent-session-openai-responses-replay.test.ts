@@ -671,6 +671,8 @@ describe("AgentSession OpenAI Responses replay boundaries", () => {
 		sessions.push(session);
 
 		const { sessionFile } = await createPersistedSession(tempDir, sessionManager => {
+			// Copilot has no credentials here; record the model the switch restores.
+			sessionManager.appendModelChange("openai/gpt-5-mini");
 			appendStaleAssistantTurn(sessionManager, "Unreadable assistant snapshot");
 		});
 		const sessionDir = path.dirname(sessionFile);
@@ -704,6 +706,8 @@ describe("AgentSession OpenAI Responses replay boundaries", () => {
 		sessions.push(session);
 
 		const { sessionFile } = await createPersistedSession(tempDir, sessionManager => {
+			// Copilot has no credentials here; record the model the switch restores.
+			sessionManager.appendModelChange("openai/gpt-5-mini");
 			sessionManager.appendMessage({
 				role: "user",
 				content: "Older summary",

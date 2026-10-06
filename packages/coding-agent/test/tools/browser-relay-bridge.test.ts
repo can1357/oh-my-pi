@@ -366,6 +366,114 @@ describe("RelayBridge tab grouping", () => {
 	});
 });
 
+describe("RelayBridge child targets", () => {
+	async function armAutoAttach(
+		bridge: RelayBridge,
+		ext: FakeExtSocket,
+		connId: number,
+		sessionId: string,
+		outcome: "ok" | "fail" = "ok",
+	): Promise<void> {
+		bridge.cdpMessage(
+			connId,
+			JSON.stringify({
+				id: ++msgSeq,
+				sessionId,
+				method: "Target.setAutoAttach",
+				params: { autoAttach: true, waitForDebuggerOnStart: false, flatten: true },
+			}),
+		);
+		if (outcome === "ok") ack(bridge, ext, "send");
+		else nack(bridge, ext, "send", "Target.setAutoAttach failed");
+		await flush();
+	}
+
+	const ATTACH = {
+		method: "Target.attachedToTarget",
+		params: { sessionId: "CHILD1", targetInfo: { targetId: "FRAME1", type: "iframe" } },
+	};
+	const NAVIGATE = { sessionId: "CHILD1", method: "Page.frameNavigated", params: {} };
+	const DETACH = { method: "Target.detachedFromTarget", params: { sessionId: "CHILD1" } };
+
+	function emit(bridge: RelayBridge, ext: FakeExtSocket, ...events: object[]): void {
+		for (const event of events) bridge.extMessage(ext, JSON.stringify({ t: "cdpEvent", tabId: 1, ...event }));
+	}
+
+	function childTraffic(socket: FakeCdpSocket): Array<[unknown, unknown]> {
+		return socket.messages
+			.filter(
+				m => m.sessionId === "CHILD1" || (m.params as { sessionId?: string } | undefined)?.sessionId === "CHILD1",
+			)
+			.map(m => [m.method, m.sessionId]);
+	}
+
+	const lifecycleOn = (sessionId: string): Array<[string, string]> => [
+		["Target.attachedToTarget", sessionId],
+		["Page.frameNavigated", "CHILD1"],
+		["Target.detachedFromTarget", sessionId],
+	];
+
+	it("announces a real child target only to the page session that armed auto-attach", async () => {
+		const bridge = new RelayBridge({});
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, [tab({ tabId: 1 })]);
+		const cdp = new FakeCdpSocket();
+		const conn = bridge.cdpConnected(cdp);
+		const armed = await attachPage(bridge, ext, cdp, conn, 1);
+		await armAutoAttach(bridge, ext, conn, armed);
+		await attachPage(bridge, ext, cdp, conn, 1);
+		const otherCdp = new FakeCdpSocket();
+		await attachPage(bridge, ext, otherCdp, bridge.cdpConnected(otherCdp), 1);
+
+		emit(bridge, ext, ATTACH, NAVIGATE, DETACH);
+
+		expect(childTraffic(cdp)).toEqual(lifecycleOn(armed));
+		expect(childTraffic(otherCdp)).toEqual([]);
+	});
+
+	it("keeps a child on the first armed session of its connection, even after that session is released", async () => {
+		const bridge = new RelayBridge({});
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, [tab({ tabId: 1 })]);
+		const cdp = new FakeCdpSocket();
+		const conn = bridge.cdpConnected(cdp);
+		const first = await attachPage(bridge, ext, cdp, conn, 1);
+		await armAutoAttach(bridge, ext, conn, first);
+		const second = await attachPage(bridge, ext, cdp, conn, 1);
+		await armAutoAttach(bridge, ext, conn, second);
+
+		emit(bridge, ext, ATTACH);
+		bridge.cdpMessage(
+			conn,
+			JSON.stringify({ id: ++msgSeq, method: "Target.detachFromTarget", params: { sessionId: first } }),
+		);
+		await flush();
+		emit(bridge, ext, NAVIGATE, DETACH);
+
+		expect(childTraffic(cdp)).toEqual(lifecycleOn(first));
+	});
+
+	it("does not report children to a session whose Target.setAutoAttach failed", async () => {
+		const bridge = new RelayBridge({});
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, [tab({ tabId: 1 })]);
+		// Another connection already armed the tab, so Chrome will report children.
+		const otherCdp = new FakeCdpSocket();
+		const other = bridge.cdpConnected(otherCdp);
+		const otherSession = await attachPage(bridge, ext, otherCdp, other, 1);
+		await armAutoAttach(bridge, ext, other, otherSession);
+		const cdp = new FakeCdpSocket();
+		const conn = bridge.cdpConnected(cdp);
+		const failed = await attachPage(bridge, ext, cdp, conn, 1);
+		await armAutoAttach(bridge, ext, conn, failed, "fail");
+
+		emit(bridge, ext, ATTACH, NAVIGATE, DETACH);
+
+		expect(childTraffic(cdp)).toEqual([]);
+		expect(childTraffic(otherCdp)).toEqual(lifecycleOn(otherSession));
+	});
+});
+
 describe("RelayBridge Runtime sessions", () => {
 	it("virtualizes Runtime enable state for each pseudo-session", async () => {
 		const bridge = new RelayBridge({});

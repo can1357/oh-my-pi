@@ -21,6 +21,8 @@ import { HOUR_MS, parseIsoTimestamp, usageStatus, WEEK_MS } from "./shared";
 
 const MAX_ATTEMPTS = 3;
 const BASE_RETRY_DELAY_MS = 500;
+/** `/usage` stays rate-limited for minutes after a 429, so a failed refresh waits instead of re-polling. */
+const FAILURE_BACKOFF_MS = 60_000;
 /** Shared windows that gate every Claude request, whatever the model. */
 const CLAUDE_SHARED_GATE_WINDOW_IDS = ["5h", "7d"] as const;
 
@@ -797,6 +799,7 @@ export const claudeUsageProvider: UsageProvider = {
 	// Anthropic extra-usage rows existed; header ingestion can otherwise keep
 	// renewing those incomplete reports throughout the 24h last-good retention.
 	cacheVersion: 3,
+	failureBackoffMs: FAILURE_BACKOFF_MS,
 	fetchUsage: fetchClaudeUsage,
 	parseRateLimitHeaders: parseClaudeRateLimitHeaders,
 	supports: params => params.provider === "anthropic" && params.credential.type === "oauth",

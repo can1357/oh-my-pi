@@ -1,7 +1,7 @@
 //! Edit application with boundary repair (`packages/hashline/src/apply.ts`).
 
 use std::{
-	collections::{BTreeMap, HashMap, HashSet},
+	collections::{HashMap, HashSet},
 	sync::LazyLock,
 };
 
@@ -55,31 +55,24 @@ fn anchors(edit: &Edit) -> Vec<Anchor> {
 	}
 }
 
-fn with_index(edit: &Edit, index: u32) -> Edit {
-	match edit {
-		Edit::Insert { cursor, text, line_num, replacement, block_start, .. } => Edit::Insert {
-			cursor: *cursor,
-			text: text.clone(),
-			line_num: *line_num,
-			index,
-			replacement: *replacement,
-			block_start: *block_start,
-		},
-		Edit::Delete { anchor, line_num, old_assertion, .. } => Edit::Delete {
-			anchor: *anchor,
-			line_num: *line_num,
-			index,
-			old_assertion: old_assertion.clone(),
-		},
-		_ => edit.clone(),
+const fn set_index(edit: &mut Edit, value: u32) {
+	if let Edit::Insert { index, .. } | Edit::Delete { index, .. } = edit {
+		*index = value;
 	}
 }
 
-fn phantom_line(lines: &[String]) -> Option<u32> {
-	(lines.len() > 1 && lines.last().is_some_and(String::is_empty)).then_some(lines.len() as u32)
+fn with_index(edit: &Edit, index: u32) -> Edit {
+	let mut edit = edit.clone();
+	set_index(&mut edit, index);
+	edit
 }
 
-fn validate_bounds(edits: &[Edit], lines: &[String]) -> Result<(), EditError> {
+fn phantom_line(lines: &[&str]) -> Option<u32> {
+	(lines.len() > 1 && lines.last().is_some_and(|line| line.is_empty()))
+		.then_some(lines.len() as u32)
+}
+
+fn validate_bounds(edits: &[Edit], lines: &[&str]) -> Result<(), EditError> {
 	for edit in edits {
 		for anchor in anchors(edit) {
 			if anchor.line < 1 || anchor.line as usize > lines.len() {
@@ -165,7 +158,7 @@ fn has_content(text: &str) -> bool {
 	text.bytes().any(|byte| !matches!(byte, 9..=13 | 32))
 }
 
-fn repair_indentation(edits: &mut [Edit], lines: &[String]) -> Vec<String> {
+fn repair_indentation(edits: &mut [Edit], lines: &[&str]) -> Vec<String> {
 	let mut repaired = false;
 	let mut start = 0;
 	while start < edits.len() {
@@ -179,10 +172,9 @@ fn repair_indentation(edits: &mut [Edit], lines: &[String]) -> Vec<String> {
 		}
 		let preceding = lines
 			.get(group.start.saturating_sub(2) as usize)
-			.map_or("", String::as_str);
-		let source_first = lines
-			.get((group.start - 1) as usize)
-			.map_or("", String::as_str);
+			.copied()
+			.unwrap_or("");
+		let source_first = lines.get((group.start - 1) as usize).copied().unwrap_or("");
 		let payload_first = group.payload.first().map_or("", String::as_str);
 		if !preceding.trim_end().ends_with('{')
 			|| !indent_deeper(leading_indent(source_first), leading_indent(preceding))
@@ -196,7 +188,8 @@ fn repair_indentation(edits: &mut [Edit], lines: &[String]) -> Vec<String> {
 		for (offset, payload) in group.payload.iter().enumerate() {
 			let source = lines
 				.get((group.start - 1) as usize + offset)
-				.map_or("", String::as_str);
+				.copied()
+				.unwrap_or("");
 			if source.trim().is_empty() || source.trim_start() != payload.trim_start() {
 				continue;
 			}
@@ -234,7 +227,7 @@ fn repair_indentation(edits: &mut [Edit], lines: &[String]) -> Vec<String> {
 	}
 }
 
-fn duplicate_leading(group: &ReplacementGroup, lines: &[String]) -> usize {
+fn duplicate_leading(group: &ReplacementGroup, lines: &[&str]) -> usize {
 	let max = group
 		.payload
 		.len()
@@ -253,7 +246,7 @@ fn duplicate_leading(group: &ReplacementGroup, lines: &[String]) -> usize {
 	}
 	0
 }
-fn duplicate_trailing(group: &ReplacementGroup, lines: &[String]) -> usize {
+fn duplicate_trailing(group: &ReplacementGroup, lines: &[&str]) -> usize {
 	let max = group
 		.payload
 		.len()
@@ -284,7 +277,7 @@ fn group_deletes(group: &ReplacementGroup, edits: &[Edit]) -> Vec<Edit> {
 		.collect()
 }
 
-fn annotation_echo(lines: &[String], path: Option<&str>, first: u32, last: u32) -> bool {
+fn annotation_echo(lines: &[&str], path: Option<&str>, first: u32, last: u32) -> bool {
 	let Some(path) = path else { return false };
 	(first..=last).all(|line| {
 		node_chain(lines, path, line).iter().any(|node| {
@@ -313,7 +306,7 @@ struct Ambiguity {
 
 fn normalize_echoes(
 	edits: &[Edit],
-	lines: &[String],
+	lines: &[&str],
 	path: Option<&str>,
 ) -> (Vec<Edit>, Vec<String>, Vec<Ambiguity>) {
 	let mut out = Vec::new();
@@ -394,11 +387,11 @@ fn indent_columns(line: &str) -> usize {
 	}
 	column
 }
-fn nearest_content(lines: &[String], start: isize, step: isize) -> Option<&str> {
+fn nearest_content<'a>(lines: &[&'a str], start: isize, step: isize) -> Option<&'a str> {
 	let mut index = start;
 	while index >= 0 && (index as usize) < lines.len() {
-		if has_content(&lines[index as usize]) {
-			return Some(&lines[index as usize]);
+		if has_content(lines[index as usize]) {
+			return Some(lines[index as usize]);
 		}
 		index += step;
 	}
@@ -423,7 +416,7 @@ fn source_deleted(edits: &[Edit], line: u32) -> bool {
 		.iter()
 		.any(|edit| matches!(edit, Edit::Delete { anchor, .. } if anchor.line == line))
 }
-fn effective_trailing(group: &ReplacementGroup, edits: &[Edit], lines: &[String]) -> u32 {
+fn effective_trailing(group: &ReplacementGroup, edits: &[Edit], lines: &[&str]) -> u32 {
 	let mut line = group.end;
 	let mut survivor = group.end + 1;
 	while line > group.start
@@ -436,14 +429,14 @@ fn effective_trailing(group: &ReplacementGroup, edits: &[Edit], lines: &[String]
 	}
 	line
 }
-fn essential(lines: &[String], path: &str, line: u32, baseline: bool) -> bool {
+fn essential(lines: &[&str], path: &str, line: u32, baseline: bool) -> bool {
 	if !baseline {
 		return true;
 	}
 	let without = lines[..(line - 1) as usize]
 		.iter()
 		.chain(&lines[line as usize..])
-		.cloned()
+		.copied()
 		.collect::<Vec<_>>()
 		.join("\n");
 	!parses_cleanly(Some(path), &without)
@@ -459,7 +452,7 @@ struct Variant {
 fn group_variants(
 	group: &ReplacementGroup,
 	edits: &[Edit],
-	lines: &[String],
+	lines: &[&str],
 	path: &str,
 	baseline: bool,
 ) -> (Vec<Variant>, bool) {
@@ -495,12 +488,8 @@ fn group_variants(
 			let Some(trail) = payload_edge(payload, false) else {
 				continue;
 			};
-			let first = lines
-				.get((group.start - 1) as usize)
-				.map_or("", String::as_str);
-			let last = lines
-				.get((trailing - 1) as usize)
-				.map_or("", String::as_str);
+			let first = lines.get((group.start - 1) as usize).copied().unwrap_or("");
+			let last = lines.get((trailing - 1) as usize).copied().unwrap_or("");
 			let mut plans: Vec<(Option<u32>, Option<u32>, usize)> = vec![(None, None, 0)];
 			if group.start == trailing {
 				let previous = nearest_content(lines, group.start as isize - 2, -1);
@@ -530,11 +519,7 @@ fn group_variants(
 				let structural_edge = STRUCTURAL_CLOSER_RE.is_match(first.trim())
 					&& indent_columns(first) == indent_columns(lead)
 					&& indent_columns(first)
-						== indent_columns(
-							lines
-								.get((group.end - 1) as usize)
-								.map_or("", String::as_str),
-						);
+						== indent_columns(lines.get((group.end - 1) as usize).copied().unwrap_or(""));
 				let underfilled =
 					trailing < group.end && payload.len() < (group.end - group.start + 1) as usize;
 				let keeps_leading = first_essential
@@ -637,7 +622,7 @@ type RepairedEdits = (Vec<Edit>, Vec<String>);
 
 fn repair_boundaries(
 	edits: &[Edit],
-	lines: &[String],
+	lines: &[&str],
 	path: Option<&str>,
 	baseline: bool,
 ) -> Result<Option<RepairedEdits>, EditError> {
@@ -780,14 +765,13 @@ fn body_relocatable(rows: &[&str], path: &str) -> bool {
 	else {
 		return false;
 	};
-	let owned: Vec<_> = rows.iter().map(|row| (*row).to_owned()).collect();
 	let mut line = 1_usize;
 	while line <= last {
 		if !has_content(rows[line - 1]) {
 			line += 1;
 			continue;
 		}
-		let end = node_chain(&owned, path, line as u32)
+		let end = node_chain(rows, path, line as u32)
 			.into_iter()
 			.filter(|span| span.start_line == line as u32)
 			.map(|span| span.end_line)
@@ -804,11 +788,7 @@ fn body_relocatable(rows: &[&str], path: &str) -> bool {
 	false
 }
 
-fn repair_landings(
-	edits: &[Edit],
-	lines: &[String],
-	path: Option<&str>,
-) -> (Vec<Edit>, Vec<String>) {
+fn repair_landings(edits: &[Edit], lines: &[&str], path: Option<&str>) -> (Vec<Edit>, Vec<String>) {
 	let mut groups: Vec<((u32, u32), InsertGroup)> = Vec::new();
 	for (index, edit) in edits.iter().enumerate() {
 		if let Edit::Insert {
@@ -855,7 +835,8 @@ fn repair_landings(
 		};
 		let anchor_text = lines
 			.get((group.anchor - 1) as usize)
-			.map_or("", String::as_str);
+			.copied()
+			.unwrap_or("");
 		let mut outward = None;
 		if has_content(anchor_text) && indent_deeper(leading_indent(anchor_text), &target) {
 			let mut landing = group.anchor;
@@ -958,7 +939,7 @@ fn repair_landings(
 						.into_iter()
 						.filter(|node| {
 							node.end_line > group.anchor
-								&& indent_columns(&lines[(node.start_line - 1) as usize]) <= target_cols
+								&& indent_columns(lines[(node.start_line - 1) as usize]) <= target_cols
 						})
 						.map(|node| node.end_line)
 						.collect();
@@ -990,58 +971,76 @@ fn repair_landings(
 	(out, warnings)
 }
 
-fn materialize(original: &[String], edits: &[Edit]) -> (String, Option<u32>) {
-	let mut lines = original.to_vec();
+/// Where an anchored edit lands relative to its anchor line.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Slot {
+	Before,
+	Replacement,
+	After,
+	Delete,
+}
+
+fn materialize(original: &[&str], edits: &[Edit]) -> (String, Option<u32>) {
 	let mut first = None;
 	let mut bof = Vec::new();
 	let mut eof = Vec::new();
-	let mut buckets: BTreeMap<u32, Vec<(usize, Edit)>> = BTreeMap::new();
-	for (index, edit) in edits.iter().enumerate() {
-		match edit {
-			Edit::Insert { cursor: Cursor::Bof, text, .. } => bof.push(text.clone()),
-			Edit::Insert { cursor: Cursor::Eof, text, .. } => eof.push(text.clone()),
-			Edit::Insert {
-				cursor: Cursor::BeforeAnchor(anchor) | Cursor::AfterAnchor(anchor),
-				..
-			} => buckets
-				.entry(anchor.line)
-				.or_default()
-				.push((index, edit.clone())),
-			Edit::Delete { anchor, .. } => buckets
-				.entry(anchor.line)
-				.or_default()
-				.push((index, edit.clone())),
-			_ => {},
-		}
+	let mut anchored: Vec<(u32, Slot, &str)> = Vec::new();
+	for edit in edits {
+		let entry = match edit {
+			Edit::Insert { cursor: Cursor::Bof, text, .. } => {
+				bof.push(text.as_str());
+				continue;
+			},
+			Edit::Insert { cursor: Cursor::Eof, text, .. } => {
+				eof.push(text.as_str());
+				continue;
+			},
+			Edit::Insert { cursor: Cursor::AfterAnchor(anchor), text, .. } => {
+				(anchor.line, Slot::After, text.as_str())
+			},
+			Edit::Insert { cursor: Cursor::BeforeAnchor(anchor), text, replacement, .. } => {
+				let slot = if *replacement {
+					Slot::Replacement
+				} else {
+					Slot::Before
+				};
+				(anchor.line, slot, text.as_str())
+			},
+			Edit::Delete { anchor, .. } => (anchor.line, Slot::Delete, ""),
+			_ => continue,
+		};
+		anchored.push(entry);
 	}
-	for (line, mut bucket) in buckets.into_iter().rev() {
-		bucket.sort_by_key(|(index, _)| *index);
+	// Stable: edits on one line keep their op order.
+	anchored.sort_by_key(|&(line, ..)| line);
+
+	// One ascending pass over borrowed lines; every anchored line becomes
+	// before + replacements + itself (unless deleted) + after.
+	let mut lines: Vec<&str> =
+		Vec::with_capacity(original.len() + anchored.len() + bof.len() + eof.len());
+	let mut copied = 0;
+	for group in anchored.chunk_by(|left, right| left.0 == right.0) {
+		let line = group[0].0;
 		let index = (line - 1) as usize;
-		let current = lines.get(index).cloned().unwrap_or_default();
-		let mut before = Vec::new();
-		let mut replacements = Vec::new();
-		let mut after = Vec::new();
-		let mut delete = false;
-		for (_, edit) in bucket {
-			match edit {
-				Edit::Insert { cursor: Cursor::AfterAnchor(_), text, .. } => after.push(text),
-				Edit::Insert { text, replacement: true, .. } => replacements.push(text),
-				Edit::Insert { text, .. } => before.push(text),
-				Edit::Delete { .. } => delete = true,
-				_ => {},
-			}
+		let end = index.min(original.len());
+		lines.extend_from_slice(&original[copied.min(end)..end]);
+		let texts = |slot: Slot| {
+			group
+				.iter()
+				.filter(move |entry| entry.1 == slot)
+				.map(|entry| entry.2)
+		};
+		lines.extend(texts(Slot::Before));
+		lines.extend(texts(Slot::Replacement));
+		if !group.iter().any(|entry| entry.1 == Slot::Delete) {
+			lines.push(original.get(index).copied().unwrap_or(""));
 		}
-		if before.is_empty() && replacements.is_empty() && after.is_empty() && !delete {
-			continue;
-		}
-		let mut replacement = before;
-		replacement.extend(replacements);
-		if !delete {
-			replacement.push(current);
-		}
-		replacement.extend(after);
-		lines.splice(index..=index, replacement);
-		first = Some(first.map_or(line, |old: u32| old.min(line)));
+		lines.extend(texts(Slot::After));
+		copied = index + 1;
+		first.get_or_insert(line);
+	}
+	if let Some(rest) = original.get(copied..) {
+		lines.extend_from_slice(rest);
 	}
 	if !bof.is_empty() {
 		if lines.len() == 1 && lines[0].is_empty() {
@@ -1056,7 +1055,7 @@ fn materialize(original: &[String], edits: &[Edit]) -> (String, Option<u32>) {
 			lines = eof;
 			1
 		} else {
-			let index = if lines.last().is_some_and(String::is_empty) {
+			let index = if lines.last().is_some_and(|line| line.is_empty()) {
 				lines.len() - 1
 			} else {
 				lines.len()
@@ -1078,7 +1077,7 @@ pub fn apply_edits(
 	if edits.is_empty() {
 		return Ok(ApplyResult { text: text.to_owned(), ..ApplyResult::default() });
 	}
-	let lines: Vec<String> = text.split('\n').map(str::to_owned).collect();
+	let lines: Vec<&str> = text.split('\n').collect();
 	let mut local_clipboard = Clipboard::default();
 	let clipboard = options
 		.clipboard
@@ -1090,7 +1089,7 @@ pub fn apply_edits(
 			clipboard_warnings.push(warning);
 		})?;
 	let mut target = Vec::new();
-	for edit in concrete {
+	for edit in concrete.into_owned() {
 		match edit {
 			Edit::Block { .. } => return Err(EditError::apply(UNRESOLVED_BLOCK_INTERNAL)),
 			Edit::Cut { .. } | Edit::Paste { .. } => {
@@ -1102,8 +1101,8 @@ pub fn apply_edits(
 	if let Some(phantom) = phantom_line(&lines) {
 		target.retain(|edit| !matches!(edit, Edit::Delete { anchor, .. } if anchor.line == phantom));
 	}
-	for (index, edit) in target.clone().iter().enumerate() {
-		target[index] = with_index(edit, index as u32);
+	for (index, edit) in target.iter_mut().enumerate() {
+		set_index(edit, index as u32);
 	}
 	validate_bounds(&target, &lines)?;
 	let indentation_warnings = repair_indentation(&mut target, &lines);
