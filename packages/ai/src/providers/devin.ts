@@ -236,7 +236,9 @@ export const streamDevin: StreamFunction<"devin-agent"> = (
 				assignment = await assignDevinModel(model, turn, chatBaseUrl, fetchImpl, options?.signal);
 				output.upstreamModel = assignment.modelUid;
 			}
-			const request = buildDevinChatRequest(model, context, options, turn, assignment);
+			let request = buildDevinChatRequest(model, context, options, turn, assignment);
+			const replacementRequest = await options?.onPayload?.(request, model);
+			if (replacementRequest !== undefined) request = replacementRequest as typeof request;
 			const reqBytes = toBinary(GetChatMessageRequestSchema, request);
 			const gz = gzipSync(reqBytes);
 			logger.debug("devin: sending chat request", {

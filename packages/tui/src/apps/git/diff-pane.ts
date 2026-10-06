@@ -601,6 +601,12 @@ export class DiffPane {
 	#layoutCache: { key: string; visuals: Visual[] } | undefined;
 	/** Per visible row: clickable hunk-button ranges recorded during render. */
 	#hits: ({ hunk: number; primary?: [number, number]; discard?: [number, number] } | undefined)[] = [];
+	/**
+	 * Asset images from the last render, by placement and size. Reusing them
+	 * lets a SIXEL image show the sequence its off-thread encode delivers on a
+	 * later render; a fresh `Image` per render would restart the encode forever.
+	 */
+	#assetImages = new Map<string, Image>();
 	constructor(imageBudget?: ImageBudget) {
 		this.#imageBudget = imageBudget;
 	}
@@ -1103,8 +1109,16 @@ export class DiffPane {
 		const leftWidth = Math.max(1, Math.floor((width - 1) / 2));
 		const rightWidth = Math.max(1, width - leftWidth - 1);
 		const bodyHeight = Math.max(0, height - 1);
-		const oldLines = this.#renderAssetSide(asset.old, leftWidth, bodyHeight, `old:${asset.filePath}`);
-		const newLines = this.#renderAssetSide(asset.new, rightWidth, bodyHeight, `new:${asset.filePath}`);
+		const previousImages = this.#assetImages;
+		this.#assetImages = new Map();
+		const oldLines = this.#renderAssetSide(asset.old, leftWidth, bodyHeight, `old:${asset.filePath}`, previousImages);
+		const newLines = this.#renderAssetSide(
+			asset.new,
+			rightWidth,
+			bodyHeight,
+			`new:${asset.filePath}`,
+			previousImages,
+		);
 		const border = theme.fg("borderMuted", "│");
 		const lines: string[] = [];
 		for (let index = 0; index < height; index++) {
@@ -1125,24 +1139,36 @@ export class DiffPane {
 		return lines;
 	}
 
-	#renderAssetSide(side: FileAssetSide, width: number, height: number, placementKey: string): readonly string[] {
+	#renderAssetSide(
+		side: FileAssetSide,
+		width: number,
+		height: number,
+		placementKey: string,
+		previousImages: ReadonlyMap<string, Image>,
+	): readonly string[] {
 		if (height <= 0) return [];
 		let content: readonly string[];
 		if (side.kind === "image") {
 			const image = side.image;
-			content = new Image(
-				image.data,
-				image.mimeType,
-				{ fallbackColor: text => theme.fg("dim", text) },
-				{
-					maxWidthCells: Math.max(1, width - 2),
-					maxHeightCells: height,
-					filename: this.#asset?.filePath,
-					budget: this.#imageBudget,
-					imageKey: `git-review:${placementKey}:${image.key}`,
-				},
-				{ widthPx: image.widthPx, heightPx: image.heightPx },
-			).render(width);
+			const imageKey = `git-review:${placementKey}:${image.key}`;
+			const cacheKey = `${imageKey}:${width}x${height}`;
+			const component =
+				previousImages.get(cacheKey) ??
+				new Image(
+					image.data,
+					image.mimeType,
+					{ fallbackColor: text => theme.fg("dim", text) },
+					{
+						maxWidthCells: Math.max(1, width - 2),
+						maxHeightCells: height,
+						filename: this.#asset?.filePath,
+						budget: this.#imageBudget,
+						imageKey,
+					},
+					{ widthPx: image.widthPx, heightPx: image.heightPx },
+				);
+			this.#assetImages.set(cacheKey, component);
+			content = component.render(width);
 		} else {
 			let details: string[];
 			switch (side.kind) {

@@ -233,6 +233,21 @@ pub fn compose_std_command<S: AsRef<OsStr>, SE: extensions::ShellExtensions>(
 		}
 	}
 
+	// Likewise `umask`: the child gets the shell's mask, the host keeps its own.
+	#[cfg(unix)]
+	if let Some(mask) = context.shell.umask() {
+		// SAFETY: runs in the forked child before exec; `umask` is
+		// async-signal-safe and cannot fail.
+		unsafe {
+			cmd.pre_exec(move || {
+				nix::sys::stat::umask(nix::sys::stat::Mode::from_bits_truncate(
+					mask as nix::libc::mode_t,
+				));
+				Ok(())
+			});
+		}
+	}
+
 	// Use the shell's current working dir.
 	cmd.current_dir(context.shell.working_dir());
 

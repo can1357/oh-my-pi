@@ -560,7 +560,7 @@ export async function ensureIsolation(
 	const sourceCommonDir = vcs.requireGit(repoRoot).info().commonDir;
 	const baseDir = getWorktreeDir(getTaskIsolationSegment(repoRoot, id));
 	const mergedDir = path.join(baseDir, TASK_ISOLATION_MOUNT_DIR);
-	const resolution = natives.isoResolve(preferred ?? null);
+	const resolution = await natives.isoResolve(preferred ?? null);
 	const candidates = resolution.candidates.length > 0 ? resolution.candidates : [resolution.kind];
 	let fallbackReason = resolution.reason ?? null;
 

@@ -457,6 +457,8 @@ export interface OpenAICompat {
 	supportsReasoningParams?: boolean;
 	/** Whether Responses requests may include `reasoning.summary`. Default: true except on known incompatible hosts. */
 	supportsReasoningSummary?: boolean;
+	/** Whether to chain OpenAI Responses turns using stored response ids. Unset uses the official-endpoint default; env and call options take precedence. */
+	statefulResponses?: boolean;
 	/**
 	 * Whether the endpoint accepts explicit sampling parameters (`temperature`,
 	 * `top_p`, `top_k`, `min_p`, penalties). OpenAI proprietary reasoning models
@@ -477,7 +479,7 @@ export interface OpenAICompat {
 	alwaysSendMaxTokens?: boolean;
 	/** Whether Responses-API tool-call/result history must be strictly paired. Default: auto-detected (Azure OpenAI, GitHub Copilot). */
 	strictResponsesPairing?: boolean;
-	/** Whether the Responses API accepts the `detail: "original"` image hint. Default: auto-detected (false for GitHub Copilot, which rejects it with a 400). */
+	/** Whether the Responses API accepts the `detail: "original"` image hint. Default: true for OpenAI, Azure OpenAI, and Codex; false for other hosts. Explicit overrides win. */
 	supportsImageDetailOriginal?: boolean;
 	/**
 	 * Whether the Responses endpoint accepts `configuration_update` input items
@@ -892,6 +894,7 @@ export type ResolvedOpenAICompat = ResolvedOpenAISharedCompat &
 			| "reasoningEffortMap"
 			| "supportsReasoningParams"
 			| "supportsReasoningSummary"
+			| "statefulResponses"
 			| "supportsSamplingParams"
 			| "supportsPenaltyAndStopParams"
 			| "thinkingFormat"
@@ -1000,6 +1003,16 @@ export interface ResolvedOpenAIResponsesCompat extends ResolvedOpenAISharedCompa
 	 * filling `"auto"`.
 	 */
 	supportsReasoningSummary: boolean;
+	/** Optional chaining override; unset falls back to officialEndpoint at request time. */
+	statefulResponses?: boolean;
+	/**
+	 * Whether the host can store Responses results server-side (`store: true`).
+	 * Rule-owned: hosts that keep generating after a client disconnect so a
+	 * dropped stream can resume via `GET /responses/{id}`. Storage is opt-in
+	 * per request (`storeResponses` stream option, else
+	 * `PI_MUSE_STORE_RESPONSES`); stored runs retain prompts and outputs on the provider.
+	 */
+	storeResponses: boolean;
 	streamIdleTimeoutMs?: number;
 	vercelGatewayRouting?: OpenAICompat["vercelGatewayRouting"];
 	/** The model sits behind Vercel AI Gateway's Responses endpoint. */

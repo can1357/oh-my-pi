@@ -2394,6 +2394,7 @@ export class TurnRecovery {
 		},
 	): Promise<boolean> {
 		const retrySettings = cfgRetry.get(this.#host.settings);
+		if (this.#host.abortInProgress() || this.#host.isDisposed()) return false;
 		// The Fireworks Fast→base degrade is an intrinsic model-selection safety net,
 		// not a retry loop, so it runs even when the user disabled retries: it switches
 		// the model once and lets the base turn proceed.
@@ -2610,6 +2611,12 @@ export class TurnRecovery {
 		// contents, not model health (issue #8760). Keep it on the same model; the
 		// retry budget still bounds a genuinely stuck stream.
 		const thinkingLoop = AIError.is(id, AIError.Flag.ThinkingLoop);
+		// A Codex steering rejection answers our own `response.steer`, not the
+		// model's health, and the provider already stopped steering the session:
+		// replay on the same model while same-model retries remain. Once the
+		// budget is spent, the chain keeps its last-resort consult.
+		const sameModelSteerReplay =
+			!retryBudgetExhausted && AIError.isCodexSteerRejection({ api: currentModel?.api, errorMessage });
 		const effectiveUsageLimitWaitMs =
 			usageLimitWaitMs ??
 			(siblingAvailabilityWaitMs === undefined
@@ -2638,6 +2645,7 @@ export class TurnRecovery {
 				allowModelFallback &&
 				retrySettings.modelFallback &&
 				!thinkingLoop &&
+				!sameModelSteerReplay &&
 				!waitForSiblingCredential &&
 				!(retryBudgetExhausted && classifierRefusal) &&
 				!this.#isFirstAttemptMidStreamSocketDrop(message, id, retryBudgetExhausted)
@@ -2787,6 +2795,9 @@ export class TurnRecovery {
 			errorMessage,
 			errorId: message.errorId,
 		});
+		if (this.#host.abortInProgress() || this.#host.promptGeneration() !== generation) {
+			return this.#endCancelledRetry();
+		}
 
 		// Resolved stream-stall tools and proven-unexecuted malformed/refused
 		// calls keep their assistant/result pair. Continuation then sees explicit

@@ -1046,7 +1046,7 @@ fn encode_literal_markers(text: &str) -> String {
 		.replace(SELECT_DIVIDER, LITERAL_DIVIDER)
 }
 
-fn decode_literal_markers(text: &str) -> String {
+pub(super) fn decode_literal_markers(text: &str) -> String {
 	text
 		.replace(LITERAL_OPEN, SELECT_OPEN)
 		.replace(LITERAL_CLOSE, SELECT_CLOSE)
@@ -1543,6 +1543,7 @@ fn finish_pattern(
 	path: &str,
 	pattern_lines: &[String],
 	all: bool,
+	streaming: bool,
 	operations: &mut Vec<Operation>,
 	pending: &mut Vec<(usize, String)>,
 ) -> Result<(), EditError> {
@@ -1550,6 +1551,11 @@ fn finish_pattern(
 	let number = operations.len() + 1;
 	if has_inline_selection(&source) || has_marker_lines(&source) || has_bare_desired(&source) {
 		operations.push(create_operation_text(&source, "", all, number, false)?);
+		return Ok(());
+	}
+	// A Find whose Replace has not streamed in yet: the recovery ladder below
+	// scans the whole file, and its answer would be discarded anyway.
+	if streaming {
 		return Ok(());
 	}
 	if let Some((pattern, rewrite)) = recover_missing_separator(pattern_lines, content) {
@@ -1698,12 +1704,54 @@ fn finish_pattern(
 	Ok(())
 }
 
+/// Rows collected for one side of an operation, with running `⟪`/`⟫` counts
+/// and a non-blank flag so each new row costs O(row) instead of re-scanning
+/// the block.
+#[derive(Default)]
+struct Rows {
+	lines:       Vec<String>,
+	opens:       usize,
+	closes:      usize,
+	has_content: bool,
+}
+
+impl Rows {
+	fn push(&mut self, line: &str) {
+		self.opens += line.matches(SELECT_OPEN).count();
+		self.closes += line.matches(SELECT_CLOSE).count();
+		self.has_content |= !line.trim().is_empty();
+		self.lines.push(line.to_owned());
+	}
+
+	fn clear(&mut self) {
+		self.lines.clear();
+		self.opens = 0;
+		self.closes = 0;
+		self.has_content = false;
+	}
+
+	const fn balanced(&self) -> bool {
+		self.opens == self.closes
+	}
+}
+
 /// Parse a canonical or taught sloppy payload into operations. `path` is the
 /// authored target, echoed in copy-ready payloads inside parse errors.
 pub fn parse_operations(
 	input: &str,
 	content: &str,
 	path: &str,
+) -> Result<Vec<Operation>, EditError> {
+	parse_section(input, content, path, false)
+}
+
+/// [`parse_operations`] for one section; while `streaming`, a trailing
+/// `*** Find` without its `*** Replace` is dropped instead of recovered.
+pub(super) fn parse_section(
+	input: &str,
+	content: &str,
+	path: &str,
+	streaming: bool,
 ) -> Result<Vec<Operation>, EditError> {
 	let payload = normalize_input(input);
 	let mut lines: Vec<String> = payload.split('\n').map(str::to_owned).collect();
@@ -1728,8 +1776,8 @@ pub fn parse_operations(
 	let mut operations = Vec::new();
 	let mut state = State::Outside;
 	let mut all = false;
-	let mut pattern_lines: Vec<String> = Vec::new();
-	let mut rewrite_lines = Vec::new();
+	let mut pattern = Rows::default();
+	let mut rewrite = Rows::default();
 	let mut reference_separator: Option<String> = None;
 	let mut pending = Vec::new();
 
@@ -1741,7 +1789,7 @@ pub fn parse_operations(
 		if let Some((at, encoded)) = strip_insert_header(line) {
 			let number = operations.len() + 1;
 			let header = at.header();
-			if state != State::Pattern || pattern_lines.iter().all(|line| line.trim().is_empty()) {
+			if state != State::Pattern || !pattern.has_content {
 				return Err(parse_error(format!(
 					"Operation {number} needs a non-empty *** Find before {header}."
 				)));
@@ -1749,7 +1797,7 @@ pub fn parse_operations(
 			let text = serde_json::from_str(encoded)
 				.map_err(|error| parse_error(format!("Invalid {header} body: {error}")))?;
 			operations.push(create_operation(
-				&normalize_block(&pattern_lines, false),
+				&normalize_block(&pattern.lines, false),
 				OperationRewrite::Insert { text, at },
 				all,
 				content,
@@ -1765,11 +1813,7 @@ pub fn parse_operations(
 			)));
 		}
 		if trimmed == format!("{OPENER}{REWRITE_HEADER}") {
-			if state == State::Pattern
-				&& pattern_lines
-					.iter()
-					.any(|line: &String| !line.trim().is_empty())
-			{
+			if state == State::Pattern && pattern.has_content {
 				state = State::Rewrite;
 			}
 			continue;
@@ -1789,8 +1833,8 @@ pub fn parse_operations(
 		if state == State::Outside {
 			if let Some(opener) = parsed_opener {
 				all = opener == OpenerKind::All;
-				pattern_lines.clear();
-				rewrite_lines.clear();
+				pattern.clear();
+				rewrite.clear();
 				reference_separator = None;
 				state = State::Pattern;
 			} else if !trimmed.is_empty() {
@@ -1802,20 +1846,14 @@ pub fn parse_operations(
 			continue;
 		}
 		if state == State::Pattern {
-			let accumulated = pattern_lines.join("\n");
-			let balanced =
-				accumulated.matches(SELECT_OPEN).count() == accumulated.matches(SELECT_CLOSE).count();
+			let balanced = pattern.balanced();
 			if trimmed == REWRITE_HEADER
-				|| (trimmed == "***"
-					&& balanced
-					&& pattern_lines.iter().any(|line| !line.trim().is_empty()))
-				|| (trimmed == SELECT_CLOSE
-					&& balanced
-					&& pattern_lines.iter().any(|line| !line.trim().is_empty()))
+				|| (trimmed == "***" && balanced && pattern.has_content)
+				|| (trimmed == SELECT_CLOSE && balanced && pattern.has_content)
 			{
 				state = State::Rewrite;
 			} else if register_reference.is_some() && balanced {
-				if !pattern_lines.iter().any(|line| !line.trim().is_empty()) {
+				if !pattern.has_content {
 					return Err(parse_error(format!(
 						"{trimmed} is valid only in REWRITE, never MATCH."
 					)));
@@ -1823,24 +1861,25 @@ pub fn parse_operations(
 				state = State::Rewrite;
 				reference_separator = Some(trimmed.to_owned());
 			} else if let Some(opener) = parsed_opener {
-				if pattern_lines.iter().any(|line| !line.trim().is_empty()) {
+				if pattern.has_content {
 					finish_pattern(
 						&lines,
 						index,
 						content,
 						path,
-						&pattern_lines,
+						&pattern.lines,
 						all,
+						false,
 						&mut operations,
 						&mut pending,
 					)?;
 				}
 				all = opener == OpenerKind::All;
-				pattern_lines.clear();
-				rewrite_lines.clear();
+				pattern.clear();
+				rewrite.clear();
 				reference_separator = None;
 			} else {
-				pattern_lines.push(line.clone());
+				pattern.push(line);
 			}
 			continue;
 		}
@@ -1849,15 +1888,15 @@ pub fn parse_operations(
 				&lines,
 				index,
 				path,
-				&pattern_lines,
-				&rewrite_lines,
+				&pattern.lines,
+				&rewrite.lines,
 				reference_separator.as_deref(),
 				all,
 				&mut operations,
 			)?;
 			all = opener == OpenerKind::All;
-			pattern_lines.clear();
-			rewrite_lines.clear();
+			pattern.clear();
+			rewrite.clear();
 			reference_separator = None;
 			state = State::Pattern;
 		} else if trimmed == "***" {
@@ -1871,12 +1910,9 @@ pub fn parse_operations(
 					operations.len() + 1
 				)));
 			}
-		} else if trimmed == SELECT_CLOSE
-			&& rewrite_lines.join("\n").matches(SELECT_OPEN).count()
-				== rewrite_lines.join("\n").matches(SELECT_CLOSE).count()
-		{
+		} else if trimmed == SELECT_CLOSE && rewrite.balanced() {
 		} else {
-			rewrite_lines.push(line.clone());
+			rewrite.push(line);
 		}
 	}
 	match state {
@@ -1884,8 +1920,8 @@ pub fn parse_operations(
 			&lines,
 			lines.len(),
 			path,
-			&pattern_lines,
-			&rewrite_lines,
+			&pattern.lines,
+			&rewrite.lines,
 			reference_separator.as_deref(),
 			all,
 			&mut operations,
@@ -1895,8 +1931,9 @@ pub fn parse_operations(
 			lines.len(),
 			content,
 			path,
-			&pattern_lines,
+			&pattern.lines,
 			all,
+			streaming,
 			&mut operations,
 			&mut pending,
 		)?,

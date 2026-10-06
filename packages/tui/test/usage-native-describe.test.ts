@@ -246,4 +246,32 @@ describe("createUsageRowBlock describe", () => {
 		expect(findAll(fast, n => n.k === "rate")).toEqual([]);
 		expect(findAll(slow, n => n.k === "rate").map(n => n.p)).toEqual([{ value: 250, unit: "tok/s" }]);
 	});
+
+	it("shows the turn's time on the terminal's clock, re-describing when it changes", () => {
+		const usage = {
+			input: 100,
+			output: 500,
+			cacheRead: 0,
+			cacheWrite: 0,
+			totalTokens: 600,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+		};
+		const block = createUsageRowBlock(usage, 2000, undefined, new Date(2026, 0, 1, 18, 5, 9).getTime());
+		const shown = (hour12: boolean | undefined) => {
+			const described = block.describe?.({ ...cx, hour12 });
+			if (!described) throw new Error("usage row did not describe");
+			const [line] = findAll(described, n => n.k === "text");
+			return { line: JSON.stringify(line), title: String(described.p?.title) };
+		};
+		// No clock from the terminal keeps the log-style stamp.
+		expect(shown(undefined).line).toContain('"18:05 · ');
+		expect(shown(undefined).title).toBe("2026-01-01 18:05:09");
+		const twelve = shown(true);
+		expect(twelve.line).toMatch(/"0?6:05\s?pm · /i);
+		expect(twelve.title).toMatch(/^2026-01-01 0?6:05:09\s?pm$/i);
+		const twentyFour = shown(false);
+		expect(twentyFour.line).toContain('"18:05 · ');
+		expect(twentyFour.title).toBe("2026-01-01 18:05:09");
+		expect(shown(undefined).title).toBe("2026-01-01 18:05:09");
+	});
 });

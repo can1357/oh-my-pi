@@ -1,5 +1,70 @@
 // Model-lineage compat for "anthropic"; regenerated from the frozen census using class taxonomy selectors.
 
+// Images bill ⌈w/28⌉·⌈h/28⌉ visual tokens on every host. Claude 4.7+ and
+// Fable/Mythos read up to 2576px and 4,784 tokens; older lines fit 1568px and
+// cap at 1,568 tokens, downscaling past it.
+// https://platform.claude.com/docs/en/build-with-claude/vision#evaluate-image-size
+// The class default is the high-res tier, so ids without a revision
+// (`claude-opus-latest`, `~anthropic/claude-sonnet-latest`) and future lines
+// are never undercounted; only Opus/Sonnet/Haiku revisions known to predate
+// 4.7 take the standard tier. Separator-collapsed revisions parse as two
+// digits (`claude-opus-45` is Opus 4.5 → 45), so 10–46 is standard too.
+class "anthropic" {
+	image-tokenization {
+		regime "anthropic-patch"
+		max-edge 2576
+		max-tokens 4784
+	}
+	family "opus" {
+		revision "<4.7" {
+			image-tokenization {
+				regime "anthropic-patch"
+				max-edge 1568
+				max-tokens 1568
+			}
+		}
+		revision ">=10 <47" {
+			image-tokenization {
+				regime "anthropic-patch"
+				max-edge 1568
+				max-tokens 1568
+			}
+		}
+	}
+	family "sonnet" {
+		revision "<4.7" {
+			image-tokenization {
+				regime "anthropic-patch"
+				max-edge 1568
+				max-tokens 1568
+			}
+		}
+		revision ">=10 <47" {
+			image-tokenization {
+				regime "anthropic-patch"
+				max-edge 1568
+				max-tokens 1568
+			}
+		}
+	}
+	family "haiku" {
+		revision "<4.7" {
+			image-tokenization {
+				regime "anthropic-patch"
+				max-edge 1568
+				max-tokens 1568
+			}
+		}
+		revision ">=10 <47" {
+			image-tokenization {
+				regime "anthropic-patch"
+				max-edge 1568
+				max-tokens 1568
+			}
+		}
+	}
+}
+
 class "anthropic" {
 	family "fable" {
 		revision ">=5.1" {
@@ -181,7 +246,7 @@ class "anthropic" {
 		thinking-efforts "minimal" "low" "medium" "high" "xhigh"
 	}
 	on "amazon-bedrock" "anthropic" "cloudflare-ai-gateway" "github-copilot" "gitlab-duo" \
-		"google-antigravity" "google-vertex" "opencode-zen" "vercel-ai-gateway" "zenmux" {
+		"google-antigravity" "google-vertex" "opencode-zen" "snowflake" "vercel-ai-gateway" "zenmux" {
 		family "sonnet" {
 			revision ">=3.7 <4.6" {
 				thinking-mode "budget"
@@ -189,13 +254,13 @@ class "anthropic" {
 		}
 	}
 	on "amazon-bedrock" "anthropic" "cloudflare-ai-gateway" "github-copilot" "gitlab-duo" \
-		"google-vertex" "opencode-zen" "vercel-ai-gateway" {
+		"google-vertex" "opencode-zen" "snowflake" "vercel-ai-gateway" {
 		family "haiku" {
 			thinking-mode "budget"
 		}
 	}
 	on "amazon-bedrock" "anthropic" "cloudflare-ai-gateway" "github-copilot" "gitlab-duo" \
-		"google-vertex" "opencode-zen" "vercel-ai-gateway" "zenmux" {
+		"google-vertex" "opencode-zen" "snowflake" "vercel-ai-gateway" "zenmux" {
 		family "opus" {
 			revision ">=4.5 <4.6" {
 				thinking-mode "anthropic-budget-effort"
@@ -203,7 +268,7 @@ class "anthropic" {
 		}
 	}
 	on "amazon-bedrock" "anthropic" "cloudflare-ai-gateway" "github-copilot" "google-vertex" \
-		"opencode-zen" "openrouter" "vercel-ai-gateway" "zenmux" {
+		"opencode-zen" "openrouter" "snowflake" "vercel-ai-gateway" "zenmux" {
 		family "opus" {
 			revision ">=4.6 <4.7" {
 				thinking-efforts "low" "medium" "high" "max"
@@ -211,7 +276,7 @@ class "anthropic" {
 		}
 	}
 	on "amazon-bedrock" "anthropic" "cloudflare-ai-gateway" "github-copilot" "google-vertex" \
-		"opencode-zen" "vercel-ai-gateway" "zenmux" {
+		"opencode-zen" "snowflake" "vercel-ai-gateway" "zenmux" {
 		revision ">=4.7 <45.1" {
 			thinking-mode "anthropic-adaptive"
 		}
@@ -242,13 +307,13 @@ class "anthropic" {
 		}
 	}
 	on "anthropic" "cloudflare-ai-gateway" "github-copilot" "google-vertex" "opencode-zen" \
-		"openrouter" "vercel-ai-gateway" "zenmux" {
+		"openrouter" "snowflake" "vercel-ai-gateway" "zenmux" {
 		revision ">=4.7 <45.1" {
 			thinking-efforts "low" "medium" "high" "xhigh" "max"
 		}
 	}
 	on "anthropic" "cloudflare-ai-gateway" "github-copilot" "google-vertex" "opencode-zen" \
-		"vercel-ai-gateway" "zenmux" {
+		"snowflake" "vercel-ai-gateway" "zenmux" {
 		family "sonnet" {
 			revision ">=4.6 <5" {
 				thinking-efforts "low" "medium" "high"
