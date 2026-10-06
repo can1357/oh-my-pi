@@ -22,10 +22,11 @@ describe("TerminalQueryResponder", () => {
 		expect(responder.feed("\x1b]10;?\x1b\\")).toBe("\x1b]10;rgb:ffff/ffff/ffff\x1b\\");
 	});
 
-	test("stays silent on cursor reports when the PTY host owns them", () => {
-		const responder = new TerminalQueryResponder({ cursorPosition: false });
-		expect(responder.feed("\x1b[6n")).toBe("");
-		expect(responder.feed("\x1b[5n\x1b[c\x1b]11;?\x07")).toBe("\x1b[0n\x1b[?1;2c\x1b]11;rgb:0000/0000/0000\x07");
+	test("leaves only the host's session-start cursor query unanswered", () => {
+		const responder = new TerminalQueryResponder({ hostCursorHandshake: true });
+		expect(responder.feed("\x1b[6n\x1b[c")).toBe("\x1b[?1;2c");
+		expect(responder.feed("READY\x1b[6n")).toBe("\x1b[1;1R");
+		expect(responder.feed("\x1b[6n")).toBe("\x1b[1;1R");
 	});
 
 	test("reassembles a query split across output chunks", () => {

@@ -1156,9 +1156,11 @@ export class TernTab implements InProcessRunTab {
 		selector: string | TernSelector,
 		frame: FramePath,
 		count: number,
+		button: MouseButtonName = "left",
 	): Promise<void> {
+		const pressed = this.#button(button);
 		const box = await this.#target(label, selector, count === 2 ? "dblclick" : "click", frame);
-		await this.#clickAt(box, "left", count);
+		await this.#clickAt(box, pressed, count);
 	}
 
 	// ─── Interaction ──────────────────────────────────────────────────────
@@ -1168,9 +1170,14 @@ export class TernTab implements InProcessRunTab {
 		await this.clickIn(selector, null);
 	}
 
-	/** {@link click} inside `frame`. */
-	async clickIn(selector: string | TernSelector, frame: FramePath): Promise<void> {
-		await this.#clickSelector(`tab.click(${describe(selector)})`, selector, frame, 1);
+	/** {@link click} inside `frame`, optionally with another button or click count. */
+	async clickIn(
+		selector: string | TernSelector,
+		frame: FramePath,
+		options?: { button?: MouseButtonName; count?: number },
+	): Promise<void> {
+		const count = Math.max(1, Math.floor(options?.count ?? 1));
+		await this.#clickSelector(`tab.click(${describe(selector)})`, selector, frame, count, options?.button);
 	}
 
 	/** Double-click the element's centre. */
@@ -2819,8 +2826,8 @@ export class TernElementHandle {
 	}
 
 	/** Trusted click at the element's centre. */
-	async click(): Promise<void> {
-		await this.#tab.clickIn(this.#spec, this.#frame);
+	async click(options?: { button?: MouseButtonName; count?: number }): Promise<void> {
+		await this.#tab.clickIn(this.#spec, this.#frame, options);
 	}
 
 	/** Trusted double click. */

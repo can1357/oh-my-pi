@@ -432,7 +432,10 @@ describe("buildSessionContext", () => {
 			// A rewrite marker newer than the tail strips the tail's bound
 			// thinking on the next request; native replay must not do that. The
 			// commit timestamp still retires the tail's pre-compaction usage.
+			// An assistant entry is saved when its stream ends, after the
+			// message's own (stream start) time; the marker precedes the latter.
 			const mayDay = new Date("2025-05-01T00:00:00Z").getTime();
+			const streamStart = mayDay - 6_000;
 			const retainedAssistant: SessionMessageEntry = {
 				type: "message",
 				id: "2",
@@ -456,7 +459,7 @@ describe("buildSessionContext", () => {
 						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 					},
 					stopReason: "stop",
-					timestamp: mayDay + 1_000,
+					timestamp: streamStart,
 				},
 			};
 			const tailUser = msg("4", "3", "user", "after compact");
@@ -469,6 +472,7 @@ describe("buildSessionContext", () => {
 						content: "Native summary",
 						signature: "sig_state",
 						model: "claude-fable-5",
+						exactTail: true,
 					},
 				},
 			};
@@ -485,8 +489,27 @@ describe("buildSessionContext", () => {
 			expect(summary.timestamp).toBe(new Date("2025-06-01T00:00:00Z").getTime());
 			const [llmSummary] = defaultConvertToLlm([summary]);
 			if (llmSummary?.role !== "user") throw new Error("Expected user LLM message");
-			expect(llmSummary.historyRewriteAt).toBe(mayDay - 1);
+			expect(llmSummary.historyRewriteAt).toBe(streamStart - 1);
 			expect(llmSummary.timestamp).toBe(summary.timestamp);
+
+			// A summary persisted before `exactTail` keeps its entry-time marker:
+			// thinking created after it was signed against that request.
+			const persisted: CompactionEntry = {
+				...nativeCompaction,
+				preserveData: {
+					anthropicCompaction: {
+						provider: "anthropic",
+						content: "Native summary",
+						signature: "sig_state",
+						model: "claude-fable-5",
+					},
+				},
+			};
+			const [legacySummary] = defaultConvertToLlm([
+				buildSessionContext([entries[0], retainedAssistant, persisted, tailUser]).messages[0],
+			]);
+			if (legacySummary?.role !== "user") throw new Error("Expected user LLM message");
+			expect(legacySummary.historyRewriteAt).toBe(mayDay - 1);
 
 			// A local compaction keeps the entry commit timestamp.
 			const localCtx = buildSessionContext(

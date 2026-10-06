@@ -16,6 +16,7 @@ export interface AssistantMessageHost {
 	readonly viewSession: AssistantMessageSession;
 	readonly effectiveHideThinkingBlock: boolean;
 	readonly proseOnlyThinking: boolean;
+	readonly expandThinkingBlocks: boolean;
 	readonly assistantImagesVisible: boolean;
 	readonly hideToolActivity: boolean;
 	readonly toolOutputExpanded: boolean;
@@ -112,6 +113,7 @@ export function createAssistantMessageComponent(
 		ctx.ui.imageBudget,
 		ctx.proseOnlyThinking,
 		linkTargets,
+		ctx.expandThinkingBlocks,
 	);
 	component.setImagesVisible(ctx.assistantImagesVisible);
 	component.setToolResultImagesVisible(!ctx.hideToolActivity);

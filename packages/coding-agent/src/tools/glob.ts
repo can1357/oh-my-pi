@@ -56,7 +56,38 @@ export interface GlobOperations {
 		absolutePath: string,
 	) => Promise<{ isFile(): boolean; isDirectory(): boolean }> | { isFile(): boolean; isDirectory(): boolean };
 	/** Find files matching glob pattern. Returns relative paths. */
-	glob: (pattern: string, cwd: string, options: { ignore: string[]; limit: number }) => Promise<string[]> | string[];
+	glob: (pattern: string, cwd: string, options: GlobOperationsOptions) => Promise<string[]> | string[];
+}
+
+/** Search policy the tool resolved for this call, plus the cancellation signal. */
+export interface GlobOperationsOptions {
+	/** Globs the tool always excludes. */
+	ignore: string[];
+	/** Effective result cap for this call, already clamped to the tool maximum. */
+	limit: number;
+	/** Include dotfiles. Resolved from the caller's `hidden`, defaulting to true. */
+	hidden: boolean;
+	/** Honour gitignore files. Resolved from the caller's `gitignore`, defaulting to true. */
+	gitignore: boolean;
+	/** Aborts when the caller cancels or when the tool's scan deadline expires.
+	 * Backends are expected to stop on it; the tool does not wait for one that
+	 * does not, but it still stops reporting at the deadline. */
+	signal?: AbortSignal;
+}
+
+/**
+ * Model-facing text for a scan that hit the tool deadline. Shared by the native
+ * and custom backends so both describe the same failure the same way.
+ */
+function globTimeoutNotice(partialCount: number, timeoutMs: number): string {
+	const seconds = timeoutMs % 1000 === 0 ? `${timeoutMs / 1000}` : (timeoutMs / 1000).toFixed(1);
+	// Walk cost tracks directory-tree size, not pattern specificity: a
+	// mtime-ranked scan cannot early-exit, so a "narrow" pattern over a
+	// huge tree still times out. Say so instead of implying the pattern
+	// was too broad.
+	return partialCount > 0
+		? `glob timed out after ${seconds}s; returning ${partialCount} partial matches — results are incomplete, scope to a deeper directory instead of retrying blindly`
+		: `Glob timed out after ${seconds}s before finding any matches — the scan is incomplete, NOT proof of absence. The walk is bounded by directory size, not pattern width; scope the search to a deeper directory (e.g. \`sub/dir/*.ext\` instead of \`*.ext\` at a huge root).`;
 }
 
 export interface GlobToolOptions {
@@ -135,8 +166,8 @@ export class GlobTool implements AgentTool<typeof findSchema, GlobToolDetails> {
 		// Preparation still rejects immediately on caller abort. Once every
 		// filesystem stat has settled, detach this proxy before launching native
 		// scans so execute can drain each worker through the real caller signal.
-		// Custom operations have no signal API and keep immediate abort coverage
-		// for their entire execution.
+		// Custom operations receive the combined signal via GlobOperationsOptions,
+		// but keep immediate caller-abort coverage for their entire execution.
 		const preparationController = !this.#customOps?.glob && signal ? new AbortController() : undefined;
 		const abortPreparation = (): void => preparationController?.abort();
 		if (preparationController && signal) {
@@ -252,6 +283,7 @@ export class GlobTool implements AgentTool<typeof findSchema, GlobToolDetails> {
 						fileCount: 0,
 						files: [],
 						truncated: forceTruncated,
+						timedOut: opts?.timedOut || undefined,
 						cwd: this.session.cwd,
 						missingPaths: missingPaths.length > 0 ? missingPaths : undefined,
 					};
@@ -282,6 +314,7 @@ export class GlobTool implements AgentTool<typeof findSchema, GlobToolDetails> {
 					fileCount: limited.length,
 					files: limited,
 					truncated: Boolean(forceTruncated || limitMeta.resultLimit || truncation.truncated),
+					timedOut: opts?.timedOut || undefined,
 					resultLimitReached: limitMeta.resultLimit?.reached,
 					truncation: truncation.truncated ? truncation : undefined,
 					cwd: this.session.cwd,
@@ -316,21 +349,70 @@ export class GlobTool implements AgentTool<typeof findSchema, GlobToolDetails> {
 			// roots keep each scan bounded to exactly what the user asked for.
 			if (this.#customOps?.glob) {
 				const customOps = this.#customOps;
+				let customTimedOut = false;
+				// A custom backend is third-party code that may never settle and is
+				// under no obligation to honour the signal, so never await one
+				// outright: race every call against the tool deadline instead. The
+				// detached operation keeps a settlement handler attached, so a late
+				// rejection lands there instead of becoming an unhandled rejection
+				// after we returned.
+				//
+				// An unanswered call resolves to `{ timedOut: true }` rather than to a
+				// stand-in value. A stand-in is a lie the caller cannot see: reading
+				// "the deadline fired" as "the path is absent" turned a slow `exists()`
+				// into `Path not found: <root>`, telling the model a directory is gone
+				// when the scan merely ran out of time. Absence and timeout are
+				// different user-facing outcomes, so each call site decides.
+				type CustomCall<T> = { timedOut: false; value: T } | { timedOut: true; value?: never };
+				const runCustom = async <T>(operation: Promise<T>): Promise<CustomCall<T>> => {
+					const settled = operation.then(
+						value => ({ kind: "settled" as const, value }),
+						(error: unknown) => ({ kind: "failed" as const, error }),
+					);
+					const ABORTED = Symbol("custom-glob-aborted");
+					const { promise: aborted, resolve: resolveAborted } = Promise.withResolvers<typeof ABORTED>();
+					const onAbort = (): void => resolveAborted(ABORTED);
+					if (combinedSignal.aborted) resolveAborted(ABORTED);
+					else combinedSignal.addEventListener("abort", onAbort, { once: true });
+					try {
+						const outcome = await Promise.race([settled, aborted]);
+						if (outcome === ABORTED) {
+							if (signal?.aborted) throw new ToolAbortError();
+							customTimedOut = true;
+							return { timedOut: true };
+						}
+						if (outcome.kind === "failed") throw outcome.error;
+						return { timedOut: false, value: outcome.value };
+					} finally {
+						combinedSignal.removeEventListener("abort", onAbort);
+					}
+				};
 				const perTarget = await Promise.all(
 					targets.map(async target => {
-						if (!(await customOps.exists(target.searchPath))) {
+						const exists = await runCustom(Promise.resolve(customOps.exists(target.searchPath)));
+						if (exists.timedOut) return [] as string[];
+						if (!exists.value) {
 							if (isSingle) throw new ToolError(`Path not found: ${scopePath}`);
 							return [] as string[];
 						}
 						if (!target.hasGlob && customOps.stat) {
-							const stat = await customOps.stat(target.searchPath);
-							if (stat.isFile()) return [formatScopePath(target.searchPath)];
+							const stat = await runCustom(Promise.resolve(customOps.stat(target.searchPath)));
+							if (stat.timedOut) return [] as string[];
+							if (stat.value.isFile()) return [formatScopePath(target.searchPath)];
 						}
-						const results = await customOps.glob(target.globPattern, target.searchPath, {
-							ignore: ["**/node_modules/**", "**/.git/**"],
-							limit: effectiveLimit,
-						});
-						return results.map(matchPath => formatMatchPath(matchPath, target.searchPath));
+						const results = await runCustom(
+							Promise.resolve(
+								customOps.glob(target.globPattern, target.searchPath, {
+									ignore: ["**/node_modules/**", "**/.git/**"],
+									limit: effectiveLimit,
+									hidden: includeHidden,
+									gitignore: useGitignore,
+									signal: combinedSignal,
+								}),
+							),
+						);
+						if (results.timedOut) return [] as string[];
+						return results.value.map(matchPath => formatMatchPath(matchPath, target.searchPath));
 					}),
 				);
 				const seen = new Set<string>();
@@ -341,6 +423,15 @@ export class GlobTool implements AgentTool<typeof findSchema, GlobToolDetails> {
 						seen.add(entry);
 						merged.push(entry);
 					}
+				}
+				if (customTimedOut) {
+					// Roots that finished before the deadline still count: report them
+					// as incomplete rather than throwing the partial work away.
+					return buildResult(merged, {
+						notice: globTimeoutNotice(merged.length, timeoutMs),
+						forceTruncated: true,
+						timedOut: true,
+					});
 				}
 				return buildResult(merged);
 			}
@@ -493,16 +584,11 @@ export class GlobTool implements AgentTool<typeof findSchema, GlobToolDetails> {
 				const partial = onUpdateMatches.map((entry, index) => ({ p: entry, m: onUpdateMtimes[index] ?? 0 }));
 				partial.sort((a, b) => b.m - a.m);
 				const sortedPaths = partial.map(entry => entry.p);
-				const seconds = timeoutMs % 1000 === 0 ? `${timeoutMs / 1000}` : (timeoutMs / 1000).toFixed(1);
-				// Walk cost tracks directory-tree size, not pattern specificity: a
-				// mtime-ranked scan cannot early-exit, so a "narrow" pattern over a
-				// huge tree still times out. Say so instead of implying the pattern
-				// was too broad.
-				const notice =
-					sortedPaths.length > 0
-						? `glob timed out after ${seconds}s; returning ${sortedPaths.length} partial matches — results are incomplete, scope to a deeper directory instead of retrying blindly`
-						: `Glob timed out after ${seconds}s before finding any matches — the scan is incomplete, NOT proof of absence. The walk is bounded by directory size, not pattern width; scope the search to a deeper directory (e.g. \`sub/dir/*.ext\` instead of \`*.ext\` at a huge root).`;
-				return buildResult(sortedPaths, { notice, forceTruncated: true, timedOut: true });
+				return buildResult(sortedPaths, {
+					notice: globTimeoutNotice(sortedPaths.length, timeoutMs),
+					forceTruncated: true,
+					timedOut: true,
+				});
 			}
 
 			// Merge per-target results: native glob already ranks each target's own

@@ -23,12 +23,12 @@ import { processResponsesStream } from "@oh-my-pi/pi-ai/providers/openai-shared"
 import { streamOpenAICompletions } from "@oh-my-pi/pi-ai/providers/openai-completions";
 import type { AssistantMessage, Context, FetchImpl, Model } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
-import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { isAuthRetryableError } from "@oh-my-pi/pi-ai/error/auth-classify";
 import { classify, Flag, is, retriable } from "@oh-my-pi/pi-ai/error/flags";
 import { isUsageLimitOutcome } from "@oh-my-pi/pi-ai/error/rate-limit";
 import { ProviderHttpError } from "@oh-my-pi/pi-ai/error/classes";
 import { createInBandProviderError, createInBandProviderErrorFromText } from "@oh-my-pi/pi-ai/error/body-error";
+import { minimaxTokenPlanOpenAIModel } from "./helpers";
 
 function createSseResponse(events: unknown[]): Response {
 	const payload = `${events
@@ -56,7 +56,7 @@ function baseContext(): Context {
 
 /** Stream one in-band frame through the real provider and return the finalized message. */
 async function streamFrame(frame: unknown) {
-	const model = getBundledModel<"openai-completions">("minimax-code-cn", "MiniMax-M3");
+	const model = minimaxTokenPlanOpenAIModel("minimax-code-cn", "MiniMax-M3");
 	return streamOpenAICompletions(model, baseContext(), {
 		apiKey: "test-key",
 		fetch: createMockFetch([frame, "[DONE]"]),

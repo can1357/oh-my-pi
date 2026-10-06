@@ -101,9 +101,11 @@ function applyCatalogAssignments<TApi extends Api>(model: Model<TApi>, catalog: 
 	if (serviceTierCost !== undefined) {
 		const flex = numberField(serviceTierCost, "flex");
 		const priorityTier = numberField(serviceTierCost, "priority");
+		const ultrafast = numberField(serviceTierCost, "ultrafast");
 		model.serviceTierCost = {
 			...(flex !== undefined && { flex }),
 			...(priorityTier !== undefined && { priority: priorityTier }),
+			...(ultrafast !== undefined && { ultrafast }),
 		};
 	}
 	const priority = catalog.priority;
