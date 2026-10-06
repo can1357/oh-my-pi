@@ -4,6 +4,7 @@
 
 ### Added
 
+- Added Mistral Large 4 with reasoning, image input, a 1M-token context window, and preview pricing ([#14602](https://github.com/can1357/oh-my-pi/pull/14602) by [@PierrunoYT](https://github.com/PierrunoYT)).
 - MiniMax-M3.1-Flash-Preview now offers thinking levels low through max on MiniMax hosts. Like MiniMax M2, it is marked as requiring reasoning effort because the model always thinks: thinking-off and forced-off requests run at the low level ([#13696](https://github.com/can1357/oh-my-pi/pull/13696) by [@eggpeat](https://github.com/eggpeat))
 - Added Google Cloud partner-model pricing for Claude Opus 5.5 and Sonnet 5.5 on Google Antigravity ([#14195](https://github.com/can1357/oh-my-pi/pull/14195) by [@eggpeat](https://github.com/eggpeat)).
 

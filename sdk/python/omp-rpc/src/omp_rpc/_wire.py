@@ -919,6 +919,17 @@ class LoginProvider:
 
 
 @dataclass(slots=True, frozen=True, kw_only=True)
+class LogoutAccount:
+    """A stored credential `logout` can remove; `active` marks credentials the session may be using."""
+    credential_id: int
+    provider: str
+    label: str
+    detail: str
+    type: Literal["api_key", "oauth"]
+    active: bool
+
+
+@dataclass(slots=True, frozen=True, kw_only=True)
 class HandoffResult:
     saved_path: str | None = None
 
@@ -1560,6 +1571,11 @@ class HostUriSchemeDefinition:
 @dataclass(slots=True, frozen=True, kw_only=True)
 class NegotiateProtocolResult:
     protocol_version: int
+
+
+@dataclass(slots=True, frozen=True, kw_only=True)
+class LogoutResult:
+    remaining_source: str | None = None
 
 
 UserContent: TypeAlias = TextContent | ImageContent
@@ -2207,6 +2223,18 @@ def parse_login_provider(value: object, path: str = "LoginProvider") -> LoginPro
         name=required(payload, "name", decode_str, path),
         available=required(payload, "available", decode_bool, path),
         authenticated=required(payload, "authenticated", decode_bool, path),
+    )
+
+
+def parse_logout_account(value: object, path: str = "LogoutAccount") -> LogoutAccount:
+    payload = expect_object(value, path)
+    return LogoutAccount(
+        credential_id=required(payload, "credentialId", decode_int, path),
+        provider=required(payload, "provider", decode_str, path),
+        label=required(payload, "label", decode_str, path),
+        detail=required(payload, "detail", decode_str, path),
+        type=required(payload, "type", cast('Decoder[Literal["api_key", "oauth"]]', literal(frozenset({"api_key", "oauth"}))), path),
+        active=required(payload, "active", decode_bool, path),
     )
 
 
@@ -2953,6 +2981,13 @@ def parse_negotiate_protocol_result(value: object, path: str = "NegotiateProtoco
     )
 
 
+def parse_logout_result(value: object, path: str = "LogoutResult") -> LogoutResult:
+    payload = expect_object(value, path)
+    return LogoutResult(
+        remaining_source=optional(payload, "remainingSource", decode_str, path),
+    )
+
+
 def parse_usage_limit_state(value: object, path: str = "UsageLimitState") -> UsageLimitState:
     return dispatch("stage", _USAGE_LIMIT_STATE_CASES)(value, path)
 
@@ -3417,6 +3452,19 @@ class WireClient:
         params["providerId"] = provider_id
         return required(expect_object(self._command("login", params, timeout=600), "login"), "providerId", decode_str, "login")
 
+    def get_logout_accounts(self, provider_id: str) -> tuple[LogoutAccount, ...]:
+        """List the stored credentials `logout` can remove for a provider, active first."""
+        params: dict[str, object] = {}
+        params["providerId"] = provider_id
+        return required(expect_object(self._command("get_logout_accounts", params), "get_logout_accounts"), "accounts", array(parse_logout_account), "get_logout_accounts")
+
+    def logout(self, provider_id: str, credential_id: int) -> LogoutResult:
+        """Remove one stored credential; fails when it is no longer stored. `remainingSource` names auth that still applies."""
+        params: dict[str, object] = {}
+        params["providerId"] = provider_id
+        params["credentialId"] = credential_id
+        return parse_logout_result(self._command("logout", params), "logout")
+
     def predict_word(self, text: str, cursor: int) -> str | None:
         """Ghost-text suffix for the prose word ending at `cursor` (a UTF-16 offset); null when none applies."""
         params: dict[str, object] = {}
@@ -3749,6 +3797,8 @@ __all__ = [
     "LiveRole",
     "LiveTranscriptEvent",
     "LoginProvider",
+    "LogoutAccount",
+    "LogoutResult",
     "MessageContent",
     "MessageEndEvent",
     "MessageStartEvent",
@@ -3923,6 +3973,8 @@ __all__ = [
     "parse_live_phase_event",
     "parse_live_transcript_event",
     "parse_login_provider",
+    "parse_logout_account",
+    "parse_logout_result",
     "parse_message_end_event",
     "parse_message_start_event",
     "parse_message_update_event",

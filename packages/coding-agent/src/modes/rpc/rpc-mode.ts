@@ -55,6 +55,7 @@ import { findMostRecentNonEmptySession } from "../../session/session-listing";
 import { SKILL_PROMPT_MESSAGE_TYPE, USER_INTERRUPT_LABEL } from "../../session/messages";
 import { executeAcpBuiltinSlashCommand } from "../../slash-commands/acp-builtins";
 import { buildAvailableSlashCommands } from "../../slash-commands/available-commands";
+import { listLogoutAccounts, logoutCredential } from "../../slash-commands/helpers/logout";
 import { defaultLoadModeForToolName } from "../../tools/essential-tools";
 import type { EventBus } from "../../utils/event-bus";
 import { selectRpcEntries } from "./rpc-compat";
@@ -2472,7 +2473,9 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 					id: provider.id,
 					name: provider.name,
 					available: provider.available,
-					authenticated: session.modelRegistry.authStorage.keys.source(provider.id) !== undefined,
+					authenticated:
+						session.modelRegistry.authStorage.keys.source(provider.storeCredentialsAs ?? provider.id) !==
+						undefined,
 				}));
 				return success(id, "get_login_providers", { providers });
 			}
@@ -2526,11 +2529,43 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 					// Provider-scoped online refresh so the just-persisted credential
 					// re-runs discovery instead of reusing a fresh authoritative cache
 					// row (#5780).
-					await session.modelRegistry.refreshProvider(command.providerId, "online");
+					await session.modelRegistry.refreshProvider(
+						knownProvider.storeCredentialsAs ?? knownProvider.id,
+						"online",
+					);
 					return success(id, "login", { providerId: command.providerId });
 				} catch (err: unknown) {
 					return error(id, "login", err instanceof Error ? err.message : String(err));
 				}
+			}
+
+			case "get_logout_accounts": {
+				// An absent provider would list every provider's credentials.
+				if (typeof command.providerId !== "string") {
+					return error(id, "get_logout_accounts", "providerId must be a string");
+				}
+				const accounts = await listLogoutAccounts(
+					session.modelRegistry.authStorage,
+					command.providerId,
+					session.sessionId,
+				);
+				return success(id, "get_logout_accounts", { accounts });
+			}
+
+			case "logout": {
+				if (typeof command.providerId !== "string" || !Number.isInteger(command.credentialId)) {
+					return error(id, "logout", "providerId must be a string and credentialId an integer");
+				}
+				const { removed, remainingSource } = await logoutCredential(
+					session.modelRegistry,
+					command.providerId,
+					command.credentialId,
+					session.sessionId,
+				);
+				if (!removed) {
+					return error(id, "logout", `Credential ${command.credentialId} is not stored for ${command.providerId}`);
+				}
+				return success(id, "logout", { remainingSource });
 			}
 
 			// =================================================================
