@@ -26,6 +26,7 @@ import type { Dialect } from "@oh-my-pi/pi-ai/dialect";
 import type { HarmonyAuditEvent } from "@oh-my-pi/pi-ai/utils/harmony-leak";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { logger } from "@oh-my-pi/pi-utils";
+import * as snapcompact from "@oh-my-pi/snapcompact";
 import {
 	abortReasonText,
 	agentLoop,
@@ -386,6 +387,13 @@ interface CursorToolResultEntry {
 
 type QueuedMessageQueue = "steering" | "followUp";
 
+interface LiveSteeredEntry {
+	message: AgentMessage;
+	controller: AbortController | undefined;
+	/** Context preparation committed for the batch, carried by its last adopted entry. Never requeued. */
+	additional?: readonly AgentMessage[];
+}
+
 interface QueuedMessageClaim {
 	messages: AgentMessage[];
 	controller: AbortController;
@@ -420,16 +428,20 @@ export class Agent {
 	 * transcript has not recorded yet, whether or not the provider accepted it. Kept apart from
 	 * {@link #queuedMessageDeliveries}: the loop drops it on abort instead of recording it, so queue
 	 * replacement must not drop it too; the run's end requeues whatever it did not record, and
-	 * {@link withdrawLiveSteering} takes it back ahead of an abort.
+	 * {@link withdrawUndeliveredQueuedMessages} takes it back ahead of an abort.
 	 */
-	#liveSteered: { message: AgentMessage; controller: AbortController | undefined }[] = [];
-	/** Dequeued originals remain recoverable until their transcript events arrive. */
+	#liveSteered: LiveSteeredEntry[] = [];
+	/** Dequeued originals remain recoverable until their transcript events arrive. `additional` is
+	 *  the context preparation appended after them, which the transcript records with them. */
 	#queuedMessageDeliveries = new Set<{
 		queue: QueuedMessageQueue;
 		controller: AbortController | undefined;
 		messages: AgentMessage[];
 		next: number;
+		additional: readonly AgentMessage[];
 	}>();
+	/** Messages {@link withdrawUndeliveredQueuedMessages} took back, keyed to the run that must not record them. */
+	#withdrawnMessages = new WeakMap<AgentMessage, AbortController>();
 	#steeringWaiters = new Set<() => void>();
 	#queuedMessageGrouping?: (previous: AgentMessage, next: AgentMessage) => boolean;
 
@@ -484,6 +496,7 @@ export class Agent {
 	#onHarmonyLeak?: (event: HarmonyAuditEvent) => void | Promise<void>;
 	#onBeforeYield?: () => Promise<void> | void;
 	#onTurnEnd?: (messages: AgentMessage[], signal?: AbortSignal, context?: AgentTurnEndContext) => Promise<void> | void;
+	#onModelCallSystemPrompt?: (systemPrompt: string[]) => void;
 	#beforeModelCall?: AgentBeforeModelCall;
 	#additionalBeforeModelCalls = new Set<AgentBeforeModelCall>();
 	#asideMessageProvider?: () => AsideMessage[] | Promise<AsideMessage[]>;
@@ -831,19 +844,22 @@ export class Agent {
 
 	/**
 	 * Tokenizer for the active model. The instance is replaced whenever the
-	 * active model's encoding changes (see {@link setModel}), so callers must
-	 * not cache it across model switches.
+	 * active model's encoding or snapcompact frame pricing changes (see
+	 * {@link setModel}), so callers must not cache it across model switches.
 	 */
 	get tokenizer(): Tokenizer {
 		return this.#tokenizer;
 	}
 
 	/**
-	 * Swap the tokenizer only when the encoding actually changes, so the warm
-	 * per-message memo survives same-encoding model switches.
+	 * Swap the tokenizer only when the encoding or frame pricing actually
+	 * changes, so the warm per-message memo survives same-pricing model switches.
 	 */
 	#syncTokenizer(model: Model | null | undefined): void {
-		if (tokenizerEncodingForModel(model) !== this.#tokenizer.encoding) {
+		if (
+			tokenizerEncodingForModel(model) !== this.#tokenizer.encoding ||
+			snapcompact.frameBillingKey(snapcompact.frameBilling(model ?? undefined)) !== this.#tokenizer.frameBillingKey
+		) {
 			this.#tokenizer = new Tokenizer(model);
 		}
 	}
@@ -967,7 +983,7 @@ export class Agent {
 		if (messages.length === 0) return messages;
 		const runController = this.#abortController;
 		if (!prepare) {
-			this.#queuedMessageDeliveries.add({ queue, controller: runController, messages, next: 0 });
+			this.#queuedMessageDeliveries.add({ queue, controller: runController, messages, next: 0, additional: [] });
 			return messages;
 		}
 
@@ -986,7 +1002,13 @@ export class Agent {
 				throw new DOMException("Queued message preparation cancelled", "AbortError");
 			}
 			delete this.#queuedMessageClaims[queue];
-			this.#queuedMessageDeliveries.add({ queue, controller: runController, messages, next: 0 });
+			this.#queuedMessageDeliveries.add({
+				queue,
+				controller: runController,
+				messages,
+				next: 0,
+				additional: additional ?? [],
+			});
 			return additional?.length ? [...messages, ...additional] : messages;
 		} catch (error) {
 			if (signal.aborted) throw error;
@@ -1048,10 +1070,15 @@ export class Agent {
 			const pending = delivery.messages.slice(delivery.next);
 			const kept = pending.filter(message => !taken.includes(message));
 			if (kept.length === pending.length) continue;
+			let last: LiveSteeredEntry | undefined;
 			for (const message of pending) {
-				if (taken.includes(message)) this.#liveSteered.push({ message, controller: delivery.controller });
+				if (!taken.includes(message)) continue;
+				last = { message, controller: delivery.controller };
+				this.#liveSteered.push(last);
 			}
 			if (kept.length === 0) {
+				// The delivery record goes away; keep its context withdrawable with the adopted batch.
+				if (last && delivery.additional.length > 0) last.additional = delivery.additional;
 				this.#queuedMessageDeliveries.delete(delivery);
 			} else {
 				delivery.messages = kept;
@@ -1061,13 +1088,29 @@ export class Agent {
 	}
 
 	/**
-	 * Take back live-steered messages ahead of an abort (Esc restores them to the editor):
-	 * the aborted run then neither records nor requeues them.
+	 * Take back dequeued input the transcript has not recorded yet, ahead of an abort (Esc restores
+	 * it to the editor): steering live steering took for the in-flight response, then each batch
+	 * dequeued for the next model call, oldest first. The aborted run then neither records it (or
+	 * the context prepared for it) nor requeues it.
 	 */
-	withdrawLiveSteering(): AgentMessage[] {
-		const messages = this.peekLiveSteeredMessages();
+	withdrawUndeliveredQueuedMessages(): { steering: AgentMessage[]; followUp: AgentMessage[] } {
+		const withdrawn: Record<QueuedMessageQueue, AgentMessage[]> = { steering: [], followUp: [] };
+		const suppress = (message: AgentMessage, controller: AbortController | undefined) => {
+			if (controller) this.#withdrawnMessages.set(message, controller);
+		};
+		for (const { message, controller, additional } of this.#liveSteered) {
+			withdrawn.steering.push(message);
+			suppress(message, controller);
+			for (const context of additional ?? []) suppress(context, controller);
+		}
 		this.#liveSteered = [];
-		return messages;
+		for (const delivery of this.#queuedMessageDeliveries) {
+			const pending = delivery.messages.slice(delivery.next);
+			withdrawn[delivery.queue].push(...pending);
+			for (const message of [...pending, ...delivery.additional]) suppress(message, delivery.controller);
+		}
+		this.#queuedMessageDeliveries.clear();
+		return withdrawn;
 	}
 
 	/** Steering live steering took for the streaming response; the transcript records it once
@@ -1099,6 +1142,11 @@ export class Agent {
 			| undefined,
 	): void {
 		this.#onTurnEnd = fn;
+	}
+
+	/** Called with the exact system prompt each model call is built from, after before-model-call hooks. */
+	setOnModelCallSystemPrompt(fn: ((systemPrompt: string[]) => void) | undefined): void {
+		this.#onModelCallSystemPrompt = fn;
 	}
 
 	/**
@@ -1800,6 +1848,7 @@ export class Agent {
 					await Bun.sleep(0);
 				}
 				context.systemPrompt = this.#state.systemPrompt;
+				this.#onModelCallSystemPrompt?.(context.systemPrompt);
 				context.tools = this.#toolsForModel(this.#state.model ?? model);
 			},
 			beforeModelCall:
@@ -1879,8 +1928,19 @@ export class Agent {
 				? agentLoop(messages, context, config, loopSignal, this.streamFn)
 				: agentLoopContinue(context, config, loopSignal, this.streamFn);
 
-			for await (const event of stream) {
+			for await (let event of stream) {
 				if (this.#abortController !== loopAbortController) return;
+				// Withdrawn input the loop already holds for this run never reaches the transcript.
+				if (
+					(event.type === "message_start" || event.type === "message_end") &&
+					this.#withdrawnMessages.get(event.message) === loopAbortController
+				) {
+					continue;
+				}
+				if (event.type === "agent_end") {
+					const messages = event.messages.filter(m => this.#withdrawnMessages.get(m) !== loopAbortController);
+					if (messages.length < event.messages.length) event = { ...event, messages };
+				}
 				if (event.type === "turn_start") turnOpen = true;
 				if (event.type === "turn_end") turnOpen = false;
 				// Update internal state based on events

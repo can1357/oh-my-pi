@@ -87,7 +87,7 @@ fn filter_cmake(input: &str, exit_code: i32) -> String {
 		if trimmed.is_empty() || is_cmake_noise(trimmed, exit_code) {
 			continue;
 		}
-		push_line(&mut out, line.trim_end());
+		primitives::push_line(&mut out, line.trim_end());
 	}
 	finish_filtered(input, out, exit_code, "cmake: ok")
 }
@@ -117,7 +117,7 @@ fn filter_ctest(input: &str, exit_code: i32) -> String {
 		if trimmed.is_empty() || is_ctest_noise(trimmed, exit_code) {
 			continue;
 		}
-		push_line(&mut out, line.trim_end());
+		primitives::push_line(&mut out, line.trim_end());
 	}
 	finish_filtered(input, out, exit_code, "ctest: ok")
 }
@@ -140,7 +140,7 @@ fn filter_ninja(input: &str, exit_code: i32) -> String {
 		if trimmed.is_empty() || is_ninja_noise(trimmed, exit_code) {
 			continue;
 		}
-		push_line(&mut out, line.trim_end());
+		primitives::push_line(&mut out, line.trim_end());
 	}
 	finish_filtered(input, out, exit_code, "ninja: ok")
 }
@@ -168,7 +168,7 @@ fn filter_gtest(input: &str, exit_code: i32) -> String {
 		let trimmed = line.trim_start();
 		if trimmed.trim().is_empty() {
 			if keeping_failure {
-				push_line(&mut out, "");
+				primitives::push_line(&mut out, "");
 			}
 			continue;
 		}
@@ -178,16 +178,16 @@ fn filter_gtest(input: &str, exit_code: i32) -> String {
 		}
 		if is_gtest_summary(trimmed) {
 			keeping_failure = false;
-			push_line(&mut out, line.trim_end());
+			primitives::push_line(&mut out, line.trim_end());
 			continue;
 		}
 		if is_gtest_failure_start(trimmed) || is_important(trimmed) {
 			keeping_failure = true;
-			push_line(&mut out, line.trim_end());
+			primitives::push_line(&mut out, line.trim_end());
 			continue;
 		}
 		if keeping_failure || (exit_code != 0 && looks_like_source_location(trimmed)) {
-			push_line(&mut out, line.trim_end());
+			primitives::push_line(&mut out, line.trim_end());
 		}
 	}
 
@@ -243,11 +243,6 @@ fn is_important(line: &str) -> bool {
 		|| lower.contains("undefined reference")
 		|| lower.contains("build stopped")
 		|| lower.contains("fatal")
-}
-
-fn push_line(out: &mut String, line: &str) {
-	out.push_str(line);
-	out.push('\n');
 }
 
 #[cfg(test)]

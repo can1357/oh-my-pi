@@ -8,6 +8,8 @@ use crate::desktop::{
 	types::DesktopWindow,
 };
 
+mod menus;
+
 pub struct AtSpiAx {
 	rt:         Runtime,
 	connection: atspi::AccessibilityConnection,
@@ -24,10 +26,6 @@ pub struct AtSpiWindow {
 	/// Screen and window-relative origins differ, so `window.x`/`window.y` are
 	/// global compositor coordinates. False also covers a window genuinely at
 	/// the global origin, which is indistinguishable over AT-SPI.
-	#[cfg_attr(
-		not(any(feature = "wayland-pipewire", test)),
-		expect(dead_code, reason = "only read by the pipewire capture crop")
-	)]
 	pub position_known: bool,
 }
 

@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "bun:test";
-import { TernTab, userSourceFunction } from "@oh-my-pi/pi-coding-agent/tools/browser/tern/tern-tab";
+import { TernElementHandle, TernTab, userSourceFunction } from "@oh-my-pi/pi-coding-agent/tools/browser/tern/tern-tab";
 import { TernSocketClient } from "@oh-my-pi/pi-coding-agent/tools/browser/tern/wire";
 import { type FakeAnswer, type FakeDaemon, startFakeDaemon } from "./tern-fake-daemon";
 
@@ -158,6 +158,23 @@ describe("TernTab", () => {
 			{ type: "mouse", action: "move", x: 40, y: 20, button: "left", clicks: 0, mods: [] },
 			{ type: "mouse", action: "down", x: 40, y: 20, button: "left", clicks: 1, mods: [] },
 			{ type: "mouse", action: "up", x: 40, y: 20, button: "left", clicks: 1, mods: [] },
+		]);
+	});
+
+	it("presses the requested button and click count for an element click", async () => {
+		const fake = await startPage({
+			eventBatches: [],
+			kit: { target: () => ({ ok: true, x: 40, y: 20, width: 30, height: 12, count: 1 }) },
+		});
+		const tab = await openTab(fake);
+		await new TernElementHandle(tab, { engine: "css", query: "#menu" }, null).click({ button: "right", count: 2 });
+		const input = fake.requests.find(request => request.op.op === "input")!.op;
+		expect(input.events).toEqual([
+			{ type: "mouse", action: "move", x: 40, y: 20, button: "right", clicks: 0, mods: [] },
+			{ type: "mouse", action: "down", x: 40, y: 20, button: "right", clicks: 1, mods: [] },
+			{ type: "mouse", action: "up", x: 40, y: 20, button: "right", clicks: 1, mods: [] },
+			{ type: "mouse", action: "down", x: 40, y: 20, button: "right", clicks: 2, mods: [] },
+			{ type: "mouse", action: "up", x: 40, y: 20, button: "right", clicks: 2, mods: [] },
 		]);
 	});
 
