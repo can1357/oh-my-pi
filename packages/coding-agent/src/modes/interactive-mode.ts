@@ -1894,18 +1894,23 @@ export class InteractiveMode implements InteractiveModeContext {
 		};
 	}
 	approvalOwnsComposer = false;
-	/** Each session's cwds in the order it held them; the first covers all earlier history. */
-	readonly #proseGithubRepos = new WeakMap<AgentSession, ProseGithubRepoEntry[]>();
+	/**
+	 * Each session's cwds in the order it held them, by session id; the first covers
+	 * all earlier history. Keyed by id, not `AgentSession`: `/resume` loads another
+	 * session into the same object, while `/move` keeps the id across cwds.
+	 */
+	readonly #proseGithubRepos = new Map<string, ProseGithubRepoEntry[]>();
 	/**
 	 * Record `session`'s cwd when it differs from the last one seen, and resolve its
 	 * github.com repo (gh's default-repo pick, memoized per cwd) off the render path.
 	 */
 	#trackProseGithubRepo(session: AgentSession): ProseGithubRepoEntry[] {
 		const cwd = session.sessionManager.getCwd();
-		let history = this.#proseGithubRepos.get(session);
+		const sessionId = session.sessionManager.getSessionId();
+		let history = this.#proseGithubRepos.get(sessionId);
 		if (!history) {
 			history = [];
-			this.#proseGithubRepos.set(session, history);
+			this.#proseGithubRepos.set(sessionId, history);
 		}
 		if (history.at(-1)?.cwd === cwd) return history;
 		const entry: ProseGithubRepoEntry = { cwd, since: history.length === 0 ? Number.NEGATIVE_INFINITY : Date.now() };
