@@ -128,69 +128,74 @@ export async function registerDaemonProjectPresence(
 
 /**
  * Return whether a registered omp process in this runtime directory is still
- * alive, removing entries whose process is provably gone. Entries from another
- * domain are kept but not counted: their process can be proven neither alive
- * nor dead, and counting them would keep the broker up for good once their
- * domain is gone (a reboot, a removed container).
+ * alive, removing unreadable or malformed entries and entries whose process is
+ * provably gone. Entries from another domain are kept but not counted: their
+ * process can be proven neither alive nor dead, and counting them would keep
+ * the broker up for good once their domain is gone (a reboot, a removed
+ * container).
  */
 export async function hasLiveDaemonProjectPresence(runtimeDir: string): Promise<boolean> {
 	return (await scanDaemonProjectPresence(runtimeDir, true)).live;
 }
 
 /**
- * Classify a scope's presence entries. With `clean`, malformed entries and
- * entries whose process is dead are removed; a sweep of sibling scopes passes
- * false, since it must never rewrite a scope it might not own.
+ * Classify a scope's presence entries: `live` when one names a live process,
+ * `unknown` when one names a process that can be proven neither alive nor
+ * dead. With `clean` (the broker's own idle check), unreadable or malformed
+ * entries and entries whose process is dead are removed. A sweep of sibling
+ * scopes passes false: it must never rewrite a scope it might not own, and an
+ * entry it cannot read is `unknown` to it.
  */
 async function scanDaemonProjectPresence(
 	runtimeDir: string,
 	clean: boolean,
-): Promise<{ live: boolean; foreign: boolean }> {
+): Promise<{ live: boolean; unknown: boolean }> {
 	const clientsDir = path.join(runtimeDir, CLIENTS_DIR);
 	let entries: string[];
 	try {
 		entries = await fs.readdir(clientsDir);
 	} catch (error) {
-		if (isEnoent(error)) return { live: false, foreign: false };
+		if (isEnoent(error)) return { live: false, unknown: false };
 		throw error;
 	}
-	const remove = async (presencePath: string): Promise<void> => {
-		if (clean) await fs.rm(presencePath, { force: true });
-	};
 	let live = false;
-	let foreign = false;
+	let unknown = false;
 	for (const entry of entries) {
 		const presencePath = path.join(clientsDir, entry);
+		let state: "live" | "dead" | "foreign" | "unreadable";
 		try {
 			const decoded: unknown = await Bun.file(presencePath).json();
-			if (!isPidRecord(decoded)) {
-				await remove(presencePath);
-				continue;
-			}
-			const state = await recordedProcessState(decoded);
-			if (state === "live") live = true;
-			else if (state === "foreign") foreign = true;
-			else await remove(presencePath);
+			state = isPidRecord(decoded) ? await recordedProcessState(decoded) : "unreadable";
 		} catch (error) {
-			if (!isEnoent(error)) await remove(presencePath);
+			if (isEnoent(error)) continue; // Removed since the listing.
+			state = "unreadable";
 		}
+		if (state === "live") live = true;
+		else if (state === "foreign") unknown = true;
+		else if (clean) await fs.rm(presencePath, { force: true });
+		else if (state === "unreadable") unknown = true;
 	}
-	return { live, foreign };
+	return { live, unknown };
 }
 
-async function readBrokerPidRecord(runtimeDir: string): Promise<PidRecord | undefined> {
+/**
+ * The scope's `broker.pid`: `absent` when there is none, `unreadable` when it
+ * exists but cannot be read or decoded (a torn write, a mode this process may
+ * not read), otherwise its record.
+ */
+async function readBrokerPidRecord(runtimeDir: string): Promise<PidRecord | "absent" | "unreadable"> {
 	try {
 		const raw: unknown = await Bun.file(path.join(runtimeDir, BROKER_PID_FILE)).json();
-		return isPidRecord(raw) ? raw : undefined;
-	} catch {
-		return undefined; // Missing or malformed broker.pid => no owning broker.
+		return isPidRecord(raw) ? raw : "unreadable";
+	} catch (error) {
+		return isEnoent(error) ? "absent" : "unreadable";
 	}
 }
 
 /** PID recorded in the runtime dir's broker lease when that broker process is still alive; undefined otherwise. */
 export async function readLiveDaemonBrokerPid(runtimeDir: string): Promise<number | undefined> {
 	const record = await readBrokerPidRecord(runtimeDir);
-	if (record === undefined) return undefined;
+	if (typeof record === "string") return undefined; // Missing or malformed broker.pid => no owning broker.
 	try {
 		process.kill(record.pid, 0);
 		return record.pid;
@@ -208,8 +213,8 @@ export async function readLiveDaemonBrokerPid(runtimeDir: string): Promise<numbe
  * is absent/dead, no live client presence remains, its endpoint reports that
  * nothing listens there, and it has been untouched for
  * {@link DAEMON_RUNTIME_STALE_GRACE_MS}. A record written in another domain
- * (see {@link daemonProcessDomain}) keeps the scope, and the sweep never
- * removes presence entries. The caller's own
+ * (see {@link daemonProcessDomain}) or one this process cannot read keeps the
+ * scope, and the sweep never removes presence entries. The caller's own
  * `currentRuntimeDir` is always skipped, and the sweep runs only inside the
  * {@link DAEMONS_DIR} container over entries named like a {@link DAEMON_SCOPE_KEY}
  * — so a runtime dir relocated elsewhere (e.g. the smoke test under
@@ -240,9 +245,10 @@ export async function pruneDeadDaemonRuntimeDirs(currentRuntimeDir: string): Pro
 			const stat = await fs.stat(dir);
 			if (now - stat.mtimeMs < DAEMON_RUNTIME_STALE_GRACE_MS) continue;
 			const broker = await readBrokerPidRecord(dir);
-			if (broker !== undefined && (await recordedProcessState(broker)) !== "dead") continue;
+			if (broker === "unreadable") continue;
+			if (broker !== "absent" && (await recordedProcessState(broker)) !== "dead") continue;
 			const presence = await scanDaemonProjectPresence(dir, false);
-			if (presence.live || presence.foreign) continue;
+			if (presence.live || presence.unknown) continue;
 			// The project dir only names a Windows pipe; a scope without scope.json
 			// there cannot be probed, and the checks above decide alone.
 			const endpoint = daemonBrokerEndpoint((await readDaemonScopeMeta(dir)) ?? dir, dir);

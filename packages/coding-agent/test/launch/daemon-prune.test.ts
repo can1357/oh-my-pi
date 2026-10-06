@@ -257,6 +257,34 @@ describe("pruneDeadDaemonRuntimeDirs", () => {
 		},
 	);
 
+	// Mode bits do not bind root, and Windows has no POSIX modes.
+	it.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
+		"keeps scopes whose broker lease or presence entry this process cannot read",
+		async () => {
+			using tempDir = TempDir.createSync("@omp-daemon-prune-unreadable-");
+			const daemons = path.join(tempDir.path(), "run", "daemons");
+			const current = path.join(daemons, "aaaaaaaaaaaaaaaa");
+			await fs.mkdir(current, { recursive: true });
+			// Records of this live process that the sweeper may not read, as when a
+			// read fails for any reason but a missing file: their process can be
+			// proven neither alive nor dead.
+			const own = await ownPresenceRecord(tempDir.path());
+			const presenceScope = await scope(daemons, "bbbbbbbbbbbbbbbb", {});
+			const entry = path.join(presenceScope, "clients", `${process.pid}-x.json`);
+			await Bun.write(entry, JSON.stringify(own));
+			await fs.chmod(entry, 0o000);
+			const leaseScope = await scope(daemons, "cccccccccccccccc", {});
+			const lease = path.join(leaseScope, "broker.pid");
+			await Bun.write(lease, JSON.stringify({ pid: process.pid, domain: own.domain }));
+			await fs.chmod(lease, 0o000);
+			for (const dir of [presenceScope, leaseScope]) await fs.utimes(dir, STALE, STALE);
+
+			await pruneDeadDaemonRuntimeDirs(current);
+
+			expect({ entry: await fs.exists(entry), lease: await fs.exists(lease) }).toEqual({ entry: true, lease: true });
+		},
+	);
+
 	it("does nothing when the runtime root does not exist", async () => {
 		using tempDir = TempDir.createSync("@omp-daemon-prune-missing-");
 		const current = path.join(tempDir.path(), "run", "daemons", "hash0000000000000");
