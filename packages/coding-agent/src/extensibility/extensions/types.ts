@@ -1864,7 +1864,8 @@ export interface SendUserInputOptions {
  *   printed), an extension `input` handler consumed the text, or no text was left to send.
  * - `skill`: `/skill:<name>` was submitted as the user's skill prompt message, carrying the caller's `tag`.
  * - `terminal-only`: a built-in only the interactive terminal runs (e.g. `/new`, `/resume`); nothing was sent.
- * - `unavailable`: the host mode does not wire `sendUserInput`; nothing was sent.
+ * - `unavailable`: the host mode does not wire `sendUserInput`, or the interactive session is joined to a collab
+ *   session as a guest, where extension-initiated turns are host-only; nothing was sent or run.
  */
 export interface SendUserInputResult {
 	handled: "prompt" | "command" | "skill" | "terminal-only" | "unavailable";

@@ -1312,8 +1312,11 @@ export class ExtensionUiController {
 		});
 	};
 
-	#sendExtensionUserInput: SendUserInputHandler = (text, options) =>
-		sendSessionUserInput(this.ctx.session, text, options, tuiSlashCommandHost(this.ctx));
+	/** A collab guest's typed input goes to the host or is host-only, so none of it runs on the replica. */
+	#sendExtensionUserInput: SendUserInputHandler = async (text, options) => {
+		if (this.#rejectGuestExtensionTurn()) return { handled: "unavailable" };
+		return sendSessionUserInput(this.ctx.session, text, options, tuiSlashCommandHost(this.ctx));
+	};
 
 	#applyCustomMessageDisplay(wasStreaming: boolean, shouldDisplay: boolean | undefined): void {
 		// For non-streaming cases with display=true, update UI
