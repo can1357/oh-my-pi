@@ -8,6 +8,7 @@ import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import * as ghCommon from "@oh-my-pi/pi-coding-agent/tools/gh-common";
+import { createAssistantMessage } from "./helpers/agent-session-setup";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import { TempDir } from "@oh-my-pi/pi-utils";
 
@@ -16,6 +17,7 @@ describe("InteractiveMode prose GitHub repo", () => {
 	let authStorage: AuthStorage;
 	let session: AgentSession;
 	let mode: InteractiveMode;
+	let modelRegistry: ModelRegistry;
 
 	beforeAll(async () => {
 		await initTheme();
@@ -26,7 +28,7 @@ describe("InteractiveMode prose GitHub repo", () => {
 		tempDir = TempDir.createSync("@pi-prose-github-repo-");
 		await Settings.init({ inMemory: true, cwd: tempDir.path() });
 		authStorage = await AuthStorage.create(path.join(tempDir.path(), "testauth.db"));
-		const modelRegistry = new ModelRegistry(authStorage);
+		modelRegistry = new ModelRegistry(authStorage);
 		const model = modelRegistry.find("anthropic", "claude-sonnet-4-5");
 		if (!model) throw new Error("Expected claude-sonnet-4-5 to exist in registry");
 		session = new AgentSession({
@@ -87,5 +89,39 @@ describe("InteractiveMode prose GitHub repo", () => {
 		await Promise.all(lookups);
 
 		expect(mode.proseGithubRepo(writtenBeforeResume)()).toBe("owner/beta");
+	});
+
+	it("binds replies from earlier cwds to their repos after a restart and resume", async () => {
+		const { lookups } = stubSession("/work/alpha");
+		const manager = session.sessionManager;
+		manager.setCwdWithoutRelocation("/work/alpha");
+		const inAlpha = { ...createAssistantMessage("see #1"), timestamp: 1_000 };
+		manager.appendMessage(inAlpha);
+		manager.setCwdWithoutRelocation("/work/beta");
+		const inBeta = { ...createAssistantMessage("see #2"), timestamp: 2_000 };
+		manager.appendMessage(inBeta);
+		await manager.flush();
+
+		// A new process: fresh InteractiveMode and AgentSession over the reopened file.
+		const reopened = await SessionManager.open(manager.getSessionFile()!, tempDir.path());
+		const resumed = new AgentSession({
+			agent: new Agent({
+				initialState: { model: session.model!, systemPrompt: ["Test"], tools: [], messages: [] },
+			}),
+			sessionManager: reopened,
+			settings: Settings.isolated({}),
+			modelRegistry,
+		});
+		const resumedMode = new InteractiveMode(resumed, "test");
+		try {
+			resumedMode.proseGithubRepo();
+			await Promise.all(lookups);
+
+			expect(resumedMode.proseGithubRepo(inAlpha.timestamp)()).toBe("owner/alpha");
+			expect(resumedMode.proseGithubRepo(inBeta.timestamp)()).toBe("owner/beta");
+		} finally {
+			resumedMode.stop();
+			await resumed.dispose();
+		}
 	});
 });
