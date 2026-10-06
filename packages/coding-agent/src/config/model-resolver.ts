@@ -1705,6 +1705,33 @@ export function disabledProviderIds(settings?: Settings): ReadonlySet<string> {
 	return new Set(settings ? cfgDisabledProviders.get(settings) : undefined);
 }
 
+/**
+ * Constrain a model lookup registry to models permitted by the active
+ * `disabledProviders` and `enabledModels` settings.
+ *
+ * Subagent preflight and auth-fallback resolution share this filtering so
+ * explicit per-call selectors and fallback chains cannot bypass configured
+ * model restrictions.
+ */
+export function scopedModelLookupRegistry(
+	modelRegistry: ModelLookupRegistry,
+	settings?: Settings,
+): ModelLookupRegistry {
+	const disabledProviders = disabledProviderIds(settings);
+	const enabledPatterns = settings ? cfgEnabledModels.get(settings) : undefined;
+	if (disabledProviders.size === 0 && (!enabledPatterns || enabledPatterns.length === 0)) {
+		return modelRegistry;
+	}
+	let models = modelRegistry.getAvailable();
+	if (disabledProviders.size > 0) {
+		models = models.filter(model => !disabledProviders.has(model.provider));
+	}
+	if (enabledPatterns && enabledPatterns.length > 0) {
+		models = filterAvailableModelsByEnabledPatterns(models, enabledPatterns, settings);
+	}
+	return { getAvailable: () => models };
+}
+
 function parseSessionModelSelector(modelRegistry: ModelRegistry, selector: string) {
 	return parseModelString(selector, {
 		...MAX_THINKING_SUFFIX_OPTIONS,
@@ -1793,12 +1820,7 @@ export async function resolveModelOverrideWithAuthFallback(
 	authFallbackUsed: boolean;
 	warning?: string;
 }> {
-	const disabledProviders = disabledProviderIds(settings);
-	let lookupRegistry: ModelLookupRegistry = modelRegistry;
-	if (disabledProviders.size > 0) {
-		const enabledModels = modelRegistry.getAvailable().filter(model => !disabledProviders.has(model.provider));
-		lookupRegistry = { getAvailable: () => enabledModels };
-	}
+	const lookupRegistry = scopedModelLookupRegistry(modelRegistry, settings);
 	// Expand first: a role (or comma-separated item) may contain several
 	// requested alternatives that must be tried before the parent model.
 	const patterns = resolveConfiguredModelPatterns(modelPatterns, settings);

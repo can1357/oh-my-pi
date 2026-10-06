@@ -1121,4 +1121,61 @@ describe("per-call selector syntax", () => {
 			);
 		});
 	}
+
+	it("rejects an explicit model selector outside enabledModels (issue #14381)", async () => {
+		mockDiscovery();
+		const allowedModel = buildModel({
+			id: "allowed-model",
+			name: "Allowed Model",
+			api: "anthropic-messages",
+			provider: "anthropic",
+			reasoning: false,
+			baseUrl: "https://api.anthropic.com",
+			input: ["text"],
+			cost: { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3.75 },
+			contextWindow: 200000,
+			maxTokens: 8192,
+		});
+		const restrictedSession = {
+			...session({
+				settings: Settings.isolated({
+					enabledModels: ["anthropic/allowed-model"],
+				}),
+			}),
+			modelRegistry: { getAvailable: () => [allowedModel, MODEL] },
+		} as ToolSession;
+
+		await expect(
+			resolveEffectiveSubagentPolicy(request({ session: restrictedSession, model: "anthropic/claude-sonnet-4-5" })),
+		).rejects.toThrow(/No available model matches `model`/);
+	});
+
+	it("accepts an explicit model selector allowed by enabledModels", async () => {
+		mockDiscovery();
+		const allowedModel = buildModel({
+			id: "allowed-model",
+			name: "Allowed Model",
+			api: "anthropic-messages",
+			provider: "anthropic",
+			reasoning: false,
+			baseUrl: "https://api.anthropic.com",
+			input: ["text"],
+			cost: { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3.75 },
+			contextWindow: 200000,
+			maxTokens: 8192,
+		});
+		const allowedSession = {
+			...session({
+				settings: Settings.isolated({
+					enabledModels: ["anthropic/allowed-model"],
+				}),
+			}),
+			modelRegistry: { getAvailable: () => [allowedModel, MODEL] },
+		} as ToolSession;
+
+		const policy = await resolveEffectiveSubagentPolicy(
+			request({ session: allowedSession, model: "anthropic/allowed-model" }),
+		);
+		expect(policy.modelOverride).toEqual(["anthropic/allowed-model"]);
+	});
 });

@@ -15,6 +15,7 @@ import {
 	resolveAgentModelSelection,
 	resolveConfiguredModelPatterns,
 	resolveModelOverride,
+	scopedModelLookupRegistry,
 	splitRoleAliasThinkingSuffix,
 } from "../config/model-resolver";
 import {
@@ -422,7 +423,10 @@ export async function resolveEffectiveSubagentPolicy(
 		const { settings, modelRegistry } = request.session;
 		// A cold registry (discovery races startup) must never reject a valid
 		// selector; only syntax and empty expansions are judged without one.
-		const warmRegistry = modelRegistry && modelRegistry.getAvailable().length > 0 ? modelRegistry : undefined;
+		const warmRegistry =
+			modelRegistry && modelRegistry.getAvailable().length > 0
+				? scopedModelLookupRegistry(modelRegistry, settings)
+				: undefined;
 		for (const pattern of requestPatterns) {
 			const selectorProblem = invalidModelSelectorReason(pattern, "The call");
 			if (selectorProblem) throw new StructuredSubagentError("preflight", selectorProblem);
