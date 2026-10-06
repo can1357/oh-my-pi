@@ -918,9 +918,9 @@ export class CollabGuestLink {
 		} finally {
 			this.#replicaLease?.();
 			this.#replicaLease = undefined;
-			this.#resumeReceiving?.();
-			this.#resumeReceiving = undefined;
 		}
+		this.#resumeReceiving?.();
+		this.#resumeReceiving = undefined;
 		if (this.#ctx.collabGuest !== this) return false;
 		this.#ctx.collabGuest = undefined;
 		this.#ctx.syncRunningSubagentBadge();

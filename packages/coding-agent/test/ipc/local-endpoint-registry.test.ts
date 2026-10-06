@@ -166,6 +166,35 @@ describe("local endpoint registry", () => {
 		expect(maximum).toBe(8);
 	});
 
+	it("accepts 65 concurrent connections when no connection cap is requested", async () => {
+		const reg = registry();
+		const pub = await publishLocalEndpoint(reg, socket => socket.write("accepted\n"));
+		publications.push(pub);
+		const clients: net.Socket[] = [];
+		try {
+			const replies = await Promise.all(
+				Array.from({ length: 65 }, () => {
+					const accepted = Promise.withResolvers<string>();
+					const socket = net.createConnection({ path: pub.endpoint });
+					clients.push(socket);
+					let reply = "";
+					socket.setEncoding("utf8");
+					socket.on("data", chunk => {
+						reply += chunk;
+						if (reply.includes("\n")) accepted.resolve(reply);
+					});
+					socket.once("error", accepted.reject);
+					socket.once("close", () => accepted.reject(new Error("Connection closed before acceptance")));
+					return accepted.promise;
+				}),
+			);
+			expect(replies).toEqual(Array(65).fill("accepted\n"));
+			expect(clients.every(socket => !socket.destroyed)).toBe(true);
+		} finally {
+			for (const socket of clients) socket.destroy();
+		}
+	});
+
 	it.skipIf(process.platform === "win32")("refuses a symlink registry before it can publish or prune", async () => {
 		const reg = registry();
 		const link = `${reg.dir}-link`;

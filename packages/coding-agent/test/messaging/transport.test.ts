@@ -157,6 +157,30 @@ describe("inbox transport", () => {
 		expect(await Bun.file(file).exists()).toBe(true);
 	});
 
+	it("lists and exchanges messages with a 201-character session name", async () => {
+		const dir = tempDir();
+		const name = "x".repeat(201);
+		const namedSnapshot: SessionSnapshot = { ...snapshot, name };
+		const handler = vi.fn(async (request: InboxRequest): Promise<InboxResponse> =>
+			request.type === "snapshot" ? { ok: true, snapshot: namedSnapshot } : { ok: true, outcome: "delivered" },
+		);
+		const pub = await publish(dir, handler);
+		const [entry] = await listInboxEntries({ dir });
+		expect(entry?.entryId).toBe(pub.entryId);
+		expect(await requestInbox(entry!, { type: "snapshot" }, { dir })).toEqual({
+			ok: true,
+			snapshot: namedSnapshot,
+		});
+		const request: InboxRequest = {
+			type: "message",
+			id: "long-name",
+			from: { name, shortId: "abcdef12", cwd: "/workspace", entryId: pub.entryId, class: "bypass" },
+			body: "hello",
+		};
+		expect(await requestInbox(entry!, request, { dir })).toEqual({ ok: true, outcome: "delivered" });
+		expect(handler).toHaveBeenCalledWith(request, "peer");
+	});
+
 	it("round-trips the queued outcome", async () => {
 		const dir = tempDir();
 		await publish(dir, async () => ({ ok: true, outcome: "queued" }));
@@ -362,6 +386,20 @@ describe("inbox transport", () => {
 	);
 
 	it.skipIf(process.platform === "win32")(
+		"discovers and sends to a fallback-only inbox when the canonical directory is absent",
+		async () => {
+			const dir = path.join(tempDir(), "missing");
+			const fallback = `/tmp/omp-socks-${process.getuid!()}`;
+			const pub = await publish(fallback, async () => ({ ok: true, snapshot }));
+			const entries = await listInboxEntries({ dir });
+			const entry = entries.find(candidate => candidate.entryId === pub.entryId);
+			expect(entry).toBeDefined();
+			expect(await requestInbox(entry!, { type: "snapshot" }, { dir })).toEqual({ ok: true, snapshot });
+			await expect(fs.lstat(dir)).rejects.toMatchObject({ code: "ENOENT" });
+		},
+	);
+
+	it.skipIf(process.platform === "win32")(
 		"reports unavailable when neither canonical nor uid fallback directory is acceptable",
 		async () => {
 			const dir = tempDir();
@@ -430,7 +468,7 @@ describe("inbox request boundary", () => {
 		["extra recipient", { type: "snapshot", recipient: "subagent" }],
 		["missing id", { type: "message", body: "hello" }],
 		["non-string body", { type: "message", id: "one", body: 4 }],
-		["oversized name", { type: "subscribe", id: "one", from: { ...sender, name: "x".repeat(201) } }],
+		["non-string name", { type: "subscribe", id: "one", from: { ...sender, name: 201 } }],
 		["oversized cwd", { type: "subscribe", id: "one", from: { ...sender, cwd: "x".repeat(4097) } }],
 		["invalid short id", { type: "subscribe", id: "one", from: { ...sender, shortId: "ABCDEF12" } }],
 		["unknown permission class", { type: "subscribe", id: "one", from: { ...sender, class: "unknown" } }],

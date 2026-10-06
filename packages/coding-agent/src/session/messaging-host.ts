@@ -209,9 +209,5 @@ export async function renderOtherSessionsSection(
 ): Promise<string | undefined> {
 	const service = session.messaging;
 	if (!service || cfgMessagingList.get(session.settings) === "deny") return undefined;
-	const listing = formatSessionListing(
-		{ name: service.ownAddress(), shortId: service.ownShortId() },
-		await service.listSessions(signal),
-	);
-	return listing.slice(listing.indexOf("## Other sessions"));
+	return formatSessionListing(await service.listSessions(signal));
 }

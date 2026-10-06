@@ -204,7 +204,6 @@ function promptResultsFor(id: string, frames: object[] = []) {
 			hasAdmittedSubmission: false,
 			queuedMessageCount: 0,
 			hasPendingAsyncWork: () => false,
-			agent: { hasQueuedMessages: () => false },
 		},
 		frame => frames.push(frame),
 	);

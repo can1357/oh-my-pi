@@ -62,7 +62,18 @@ async function resolveRegistry(dir: string, create: boolean): Promise<LocalEndpo
 		else await assertPrivateDir(registry, dir);
 		return registry;
 	} catch (err) {
-		if (!create && isEnoent(err)) return registry;
+		if (!create && isEnoent(err)) {
+			if (process.platform !== "win32") {
+				const fallback = registryFor(registry.socketFallbackDir!);
+				try {
+					await assertPrivateDir(fallback, fallback.dir);
+					return fallback;
+				} catch {
+					// Missing or unsafe fallback directories are not discoverable.
+				}
+			}
+			return registry;
+		}
 		if (process.platform === "win32") {
 			throw new MessagingUnavailableError(err instanceof Error ? err.message : "Cannot open messaging registry");
 		}
@@ -326,7 +337,7 @@ function parseResponse(raw: unknown): InboxResponse | undefined {
 	if (
 		typeof s.v !== "number" ||
 		!Number.isFinite(s.v) ||
-		(s.name !== null && (typeof s.name !== "string" || s.name.length > 200)) ||
+		(s.name !== null && typeof s.name !== "string") ||
 		typeof s.shortId !== "string" ||
 		!/^[0-9a-f]{8}$/.test(s.shortId) ||
 		(s.title !== null && typeof s.title !== "string") ||

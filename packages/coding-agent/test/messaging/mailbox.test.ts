@@ -55,14 +55,23 @@ function session(id: string, modified: number, fields: Partial<SessionInfo> = {}
 }
 
 describe("offline mailbox", () => {
-	it("round-trips messages sorted by sentAt and drains them exactly once", async () => {
+	it("keeps sorted messages durable until individually acknowledged", async () => {
 		const dir = tempDir();
 		const messages = [message("latest", now + 10), message("earliest", now - 10), message("middle")];
 		for (const item of messages) expect(await enqueueOffline(sessionId, item, { dir, now })).toBe("queued");
 		const inbox = mailboxDir(sessionId, { dir });
 		expect((await fs.readdir(inbox)).sort()).toEqual(messages.map(item => `${item.sentAt}-${item.id}.json`).sort());
 		expect((await fs.readdir(path.dirname(inbox))).sort()).toEqual([sessionId]);
-		expect(await drainOffline(sessionId, { dir, now })).toEqual([messages[1], messages[2], messages[0]]);
+		const drained = await drainOffline(sessionId, { dir, now });
+		expect(drained.map(item => item.message)).toEqual([messages[1], messages[2], messages[0]]);
+		expect(await fs.readdir(inbox)).toHaveLength(3);
+		await drained[0].ack();
+		expect((await drainOffline(sessionId, { dir, now })).map(item => item.message)).toEqual([
+			messages[2],
+			messages[0],
+		]);
+		await drained[1].ack();
+		await drained[2].ack();
 		expect(await fs.readdir(inbox)).toEqual([]);
 		expect(await drainOffline(sessionId, { dir, now })).toEqual([]);
 	});
@@ -74,7 +83,7 @@ describe("offline mailbox", () => {
 		}
 		expect(await enqueueOffline(sessionId, message("overflow"), { dir, now })).toBe("full");
 		expect(await fs.readdir(mailboxDir(sessionId, { dir }))).toHaveLength(OFFLINE_INBOX_CAP);
-		expect((await drainOffline(sessionId, { dir, now })).some(item => item.id === "overflow")).toBe(false);
+		expect((await drainOffline(sessionId, { dir, now })).some(item => item.message.id === "overflow")).toBe(false);
 	});
 
 	it("purges expired files before applying the cap", async () => {
@@ -86,7 +95,7 @@ describe("offline mailbox", () => {
 		const fresh = message("fresh", later);
 		expect(await enqueueOffline(sessionId, fresh, { dir, now: later })).toBe("queued");
 		expect(await fs.readdir(mailboxDir(sessionId, { dir }))).toEqual([`${later}-fresh.json`]);
-		expect(await drainOffline(sessionId, { dir, now: later })).toEqual([fresh]);
+		expect((await drainOffline(sessionId, { dir, now: later })).map(item => item.message)).toEqual([fresh]);
 	});
 
 	it("drops and deletes expired messages but retains the exact TTL boundary", async () => {
@@ -95,7 +104,10 @@ describe("offline mailbox", () => {
 		const expired = message("expired", boundary.sentAt - 1);
 		await enqueueOffline(sessionId, expired, { dir, now: expired.sentAt });
 		await enqueueOffline(sessionId, boundary, { dir, now: boundary.sentAt });
-		expect(await drainOffline(sessionId, { dir, now })).toEqual([boundary]);
+		const drained = await drainOffline(sessionId, { dir, now });
+		expect(drained.map(item => item.message)).toEqual([boundary]);
+		expect(await fs.readdir(mailboxDir(sessionId, { dir }))).toEqual([`${boundary.sentAt}-boundary.json`]);
+		await drained[0].ack();
 		expect(await fs.readdir(mailboxDir(sessionId, { dir }))).toEqual([]);
 	});
 
@@ -116,7 +128,10 @@ describe("offline mailbox", () => {
 		for (let i = 0; i < malformed.length; i++) {
 			await fs.writeFile(path.join(inbox, `malformed-${i}.txt`), malformed[i]);
 		}
-		expect(await drainOffline(sessionId, { dir, now })).toEqual([valid]);
+		const drained = await drainOffline(sessionId, { dir, now });
+		expect(drained.map(item => item.message)).toEqual([valid]);
+		expect(await fs.readdir(inbox)).toEqual([`${valid.sentAt}-valid.json`]);
+		await drained[0].ack();
 		expect(await fs.readdir(inbox)).toEqual([]);
 	});
 

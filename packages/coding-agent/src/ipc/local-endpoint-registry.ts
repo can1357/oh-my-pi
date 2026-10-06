@@ -229,7 +229,7 @@ export async function publishLocalEndpoint(
 	const metaPath = path.join(registry.dir, `${entryId}.json`);
 	const liveSockets = new Set<net.Socket>();
 	const server = net.createServer(socket => {
-		if (liveSockets.size >= (options?.maxConnections ?? 64)) {
+		if (options?.maxConnections !== undefined && liveSockets.size >= options.maxConnections) {
 			socket.destroy();
 			return;
 		}
@@ -238,7 +238,7 @@ export async function publishLocalEndpoint(
 		if (options?.idleTimeoutMs) socket.setTimeout(options.idleTimeoutMs, () => socket.destroy());
 		onConnection(socket);
 	});
-	server.maxConnections = options?.maxConnections ?? 64;
+	if (options?.maxConnections !== undefined) server.maxConnections = options.maxConnections;
 	const listening = Promise.withResolvers<void>();
 	server.once("error", err => listening.reject(err));
 	server.listen(endpoint, () => listening.resolve());

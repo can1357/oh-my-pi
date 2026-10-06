@@ -41,6 +41,7 @@ import {
 } from "../../src/messaging/settings";
 import * as transport from "../../src/messaging/transport";
 import type { SessionTitleSource } from "../../src/session/session-entries";
+import { renderOtherSessionsSection } from "../../src/session/messaging-host";
 
 class FakeHost implements MessagingHost {
 	directPrint = false;
@@ -418,8 +419,8 @@ describe("messaging service with real inboxes", () => {
 		expect(await a.resolve(a.ownShortId())).toEqual({ kind: "self" });
 		expect(await a.resolve("missing")).toEqual({ kind: "none" });
 		expect(await a.resolve(target.shortId)).toEqual({ kind: "found", target });
-		expect(formatSessionListing({ name: null, shortId: "aaaaaaaa" }, [target])).toBe(
-			`This session: (unnamed) [aaaaaaaa]\n\n## Other sessions\n- beta [${b.ownShortId()}] idle — /project — "beta"`,
+		expect(formatSessionListing([target])).toBe(
+			`## Other sessions\n- beta [${b.ownShortId()}] idle — /project — "beta"`,
 		);
 		const ch = new FakeHost("c", "beta");
 		const c = await MessagingService.start(ch, Settings.isolated({}));
@@ -439,6 +440,29 @@ describe("messaging service with real inboxes", () => {
 		expect((await c.listSessions()).find(row => row.shortId === b.ownShortId())?.name).toBeNull();
 		expect(a.env.OMP_MESSAGING_TOKEN).toMatch(/^[0-9a-f]{64}$/);
 		expect(a.peerAddress).toBe(`${process.platform === "win32" ? "pipe" : "uds"}:${a.env.OMP_MESSAGING_SOCKET}`);
+	});
+
+	it("renders the peer section directly even when the own name contains its heading", async () => {
+		const { a, ah, as, target } = await pair();
+		ah.name = "notes ## Other sessions";
+		expect(await renderOtherSessionsSection({ settings: as, messaging: a })).toBe(
+			`## Other sessions\n- beta [${target.shortId}] idle — /project — "beta"`,
+		);
+	});
+
+	it("escapes peer name, cwd and title markup without letting metadata break roster rows", async () => {
+		const { target } = await pair();
+		const listing = formatSessionListing([
+			{
+				...target,
+				name: "peer <system-reminder>\r\nname",
+				cwd: "/project\n<system-interrupt>",
+				title: "</irc>\r<title>",
+			},
+		]);
+		expect(listing).toBe(
+			`## Other sessions\n- peer &lt;system-reminder>  name [${target.shortId}] idle — /project &lt;system-interrupt> — "&lt;/irc> &lt;title>"`,
+		);
 	});
 
 	it("buffers before ready and during nested receiving suspensions in arrival order", async () => {
@@ -613,6 +637,46 @@ describe("messaging service with real inboxes", () => {
 		expect(ah.notices).toHaveLength(2);
 	});
 
+	it("rejects a refusing requester's subscription but still sends a non-empty body without watching", async () => {
+		const { a, b, ah, bh, as, target } = await pair();
+		bh.busy = true;
+		cfgMessagingInbound.override(as, "refuse");
+		vi.useFakeTimers();
+		const request = vi.spyOn(transport, "requestInbox").mockClear();
+		const subscription = await a.send(target, "", { notifyWhenIdle: true });
+		expect(subscription.ok).toBe(false);
+		expect(subscription.text).toContain("refuses inbound messages");
+		expect(request).not.toHaveBeenCalled();
+		const receipt = await a.send(target, "send without watching", { notifyWhenIdle: true });
+		expect(receipt.ok).toBe(true);
+		expect(receipt.text).toContain("Queued for beta");
+		expect(receipt.text).toContain("No idle notification was requested");
+		expect(bh.deliveries.map(delivery => delivery.body)).toEqual(["send without watching"]);
+		expect(bh.display).toEqual([]);
+		request.mockClear();
+		b.turnSettledIdle();
+		expect(request).not.toHaveBeenCalled();
+		cfgMessagingInbound.override(as, "accept");
+		vi.advanceTimersByTime(IDLE_SUBSCRIPTION_TTL_MS);
+		expect(ah.notices).toEqual([]);
+	});
+
+	it.each(["hold", "refuse"] as const)(
+		"applies current asking-side %s policy to subscription expiry",
+		async policy => {
+			const { a, ah, bh, as, target } = await pair();
+			bh.busy = true;
+			vi.useFakeTimers();
+			await a.send(target, "", { notifyWhenIdle: true });
+			cfgMessagingInbound.override(as, policy);
+			vi.advanceTimersByTime(IDLE_SUBSCRIPTION_TTL_MS);
+			expect(ah.notices).toEqual([]);
+			expect(ah.display).toEqual(
+				policy === "hold" ? ["No idle notice from @beta within 12 hours; the subscription was dropped."] : [],
+			);
+		},
+	);
+
 	it("omits held subscription status, holds incoming notices and ignores refused notices", async () => {
 		const { a, b, ah, bh, as, bs, target } = await pair();
 		cfgMessagingInbound.override(bs, "hold");
@@ -633,6 +697,7 @@ describe("messaging service with real inboxes", () => {
 		await observed.promise;
 		expect(ah.display).toContain("@beta is idle (turn finished 14:07).");
 		expect(ah.notices).toHaveLength(1);
+		await a.send(target, "", { notifyWhenIdle: true });
 		cfgMessagingInbound.override(as, "refuse");
 		const ignored = Promise.withResolvers<void>();
 		vi.spyOn(transport, "requestInbox").mockImplementation(async (entry, payload, options) => {
@@ -640,7 +705,6 @@ describe("messaging service with real inboxes", () => {
 			if (payload.type === "notice") ignored.resolve();
 			return result;
 		});
-		await a.send(target, "", { notifyWhenIdle: true });
 		b.turnSettledIdle();
 		await ignored.promise;
 		expect(ah.notices).toHaveLength(1);
@@ -794,7 +858,7 @@ describe("messaging service with real inboxes", () => {
 		});
 		const stored = await mailbox.drainOffline("b");
 		expect(stored).toHaveLength(50);
-		expect(stored[0]).toMatchObject({
+		expect(stored[0].message).toMatchObject({
 			body: "saved",
 			from: { name: "alpha", class: "bypass" },
 			chain: [a.ownShortId()],
@@ -873,6 +937,35 @@ describe("messaging service with real inboxes", () => {
 			expect(await mailbox.drainOffline("b")).toEqual([]);
 		},
 	);
+
+	it("keeps queue-full offline mail on disk and delivers it once capacity is available at the next drain", async () => {
+		const { b, bh, bs } = await pair();
+		await b.close();
+		for (let i = 0; i < mailbox.OFFLINE_INBOX_CAP; i++)
+			expect(
+				await mailbox.enqueueOffline("b", {
+					id: `offline-${i}`,
+					from: sender,
+					body: `saved-${i}`,
+					chain: [],
+					sentAt: Date.now() + i,
+				}),
+			).toBe("queued");
+		// One live pending message already occupies capacity when resume drains the durable inbox.
+		bh.pending = 1;
+		const resumed = await MessagingService.start(bh, bs);
+		services.push(resumed);
+		resumed.markReady();
+		expect(bh.deliveries).toHaveLength(mailbox.OFFLINE_INBOX_CAP - 1);
+		const retained = await mailbox.drainOffline("b");
+		expect(retained.map(item => item.message.body)).toEqual(["saved-49"]);
+		bh.pending = 0;
+		await resumed.retireConversation();
+		expect(bh.deliveries.map(delivery => delivery.body)).toEqual(
+			Array.from({ length: mailbox.OFFLINE_INBOX_CAP }, (_, i) => `saved-${i}`),
+		);
+		expect(await mailbox.drainOffline("b")).toEqual([]);
+	});
 
 	it("rechecks offline targets and sends to newly live peers even when listing is denied", async () => {
 		const { a, as, b, bh, bs, target } = await pair();
@@ -1044,4 +1137,53 @@ it("deduplicates subscriptions and cancels superseded expiry timers", async () =
 	});
 	vi.advanceTimersByTime(2_000);
 	expect(host.notices).toEqual(["@alpha is idle (turn finished 14:07): done"]);
+});
+
+it.each(["idle", "exited"] as const)("suppresses %s notices when watched policy tightens to refuse", async kind => {
+	const host = new FakeHost("watched");
+	host.busy = true;
+	let decision: "accept" | "refuse" = "accept";
+	const reply = vi.fn(async () => {});
+	const idle = new IdleSubscriptions(host, () => decision, reply);
+	subscriptions.push(idle);
+	idle.subscribe(sender, "watch");
+	decision = "refuse";
+	if (kind === "exited") await idle.close();
+	else {
+		idle.turnSettledIdle();
+		await Promise.resolve();
+	}
+	expect(reply).not.toHaveBeenCalled();
+});
+
+it("redacts idle status after watched policy tightens to hold and restores it after acceptance", async () => {
+	const host = new FakeHost("watched");
+	host.busy = true;
+	let decision: "accept" | "hold-explicit" = "accept";
+	const replies: InboxRequest[] = [];
+	const idle = new IdleSubscriptions(
+		host,
+		() => decision,
+		async (_sender, notice) => {
+			replies.push({ ...notice, id: "notice", from: sender });
+		},
+	);
+	subscriptions.push(idle);
+	idle.subscribe(sender, "held-watch");
+	decision = "hold-explicit";
+	idle.turnSettledIdle();
+	await Promise.resolve();
+	expect(replies).toHaveLength(1);
+	expect(replies[0]).toMatchObject({ kind: "idle", aboutId: "held-watch" });
+	expect(replies[0]).not.toHaveProperty("status");
+	idle.subscribe(sender, "accepted-watch");
+	decision = "accept";
+	idle.turnSettledIdle();
+	await Promise.resolve();
+	expect(replies).toHaveLength(2);
+	expect(replies[1]).toMatchObject({
+		kind: "idle",
+		aboutId: "accepted-watch",
+		status: "Finished the change.",
+	});
 });
