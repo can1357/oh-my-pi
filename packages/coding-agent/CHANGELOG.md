@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Shake in a `--no-session` run no longer leaves placeholders pointing at an `artifact://` link that cannot be read; they now carry only the token count ([#12466](https://github.com/can1357/oh-my-pi/issues/12466))
+
 ## [18.8.0] - 2026-10-07
 
 ### Added
