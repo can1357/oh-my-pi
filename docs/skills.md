@@ -143,11 +143,12 @@ are warnings; successfully deduplicated copies are informational. Symlinks to th
 same real file do not count as redundant installations, and filtered-out variants
 do not produce conflict notices.
 
-Run `/skills diagnostics` to inspect the current resolution in a read-only report
-outside the transcript. It lists the bare default (when included), namespaced
-variants, redundant copies, their backing paths and sources, declared source
-repositories and versions when available, and the selection rule. A shared name
-or self-declared repository does not establish authenticity.
+Run `/skills diagnostics` to open the diagnostics panel, a navigable list of
+every loaded skill with its issues and analysis state. Selecting a skill shows
+the bare default (when included), namespaced variants, redundant copies, their
+backing paths and sources, declared source repositories and versions when
+available, and the selection rule. A shared name or self-declared repository
+does not establish authenticity. See [Assisted diagnostics](#assisted-diagnostics).
 
 RPC hosts can inspect the same resolution through `get_skill_diagnostics`,
 `get_state.skillDiagnostics`, and `skill_diagnostics_update` frames, including
@@ -182,26 +183,37 @@ different repositories continue to receive namespaced aliases.
 
 ### Assisted diagnostics
 
-`/skills diagnostics` offers optional AI analysis of competing skill copies,
-including copies without repository metadata:
+`/skills diagnostics` opens a navigable list of loaded skills, their conflicts,
+redundant installations, and missing provenance. Use **Up/Down** to select a skill
+and inspect its variants and retained analysis. Press **Enter** to analyze the
+selected competing copies, **C** to cancel an active analysis, **A** to apply an
+eligible recommendation, or **Esc** to close. Single-copy skills explain why
+relationship analysis is unavailable.
 
-```text
-/skills diagnostics analyze
-/skills diagnostics analyze review
-```
+Before sending any resource content, OMP names the model, shows the selected
+resource paths, payload size, and incomplete coverage, then asks for consent.
+Analysis uses the configured `smol` model role and may incur provider charges.
+Opening the panel, navigating it, querying RPC diagnostics, and startup notices
+do not trigger analysis. Consented work can finish after the panel closes;
+reopening it shows the results. Changing sessions discards that session's plans
+and results.
 
-The first command opens a group selector; the second selects a diagnostic group
-by its raw skill name. Before sending any resource content, OMP names the model,
-shows the selected resource paths, payload size, and incomplete coverage, then
-asks for consent. Analysis uses the configured `smol` model role and may incur
-provider charges. Normal diagnostics and startup notices do not trigger analysis.
+RPC hosts use the same session-owned plans and results: prepare a selected skill
+with `prepare_skill_diagnostic_analysis`, explicitly consent with
+`analyze_skill_diagnostics`, and separately confirm an application with
+`apply_skill_diagnostic_analysis`. `cancel_skill_diagnostic_analysis` cancels a
+prepared or running plan. Snapshots and `skill_diagnostics_update` events carry
+per-skill status and results, including bounded verbatim evidence excerpts from
+the analyzed skill files; clients never submit resource contents or paths.
+See [RPC documentation](rpc.md) for the wire contract.
 
-The advisory report separates an inferred relationship, cited file evidence,
+The advisory result separates an inferred relationship, cited file evidence,
 meaningful differences, and a recommendation. It can recommend keeping all
 copies or preferring one for OMP. Inferences do not establish authorship, origin,
 authenticity, or interchangeable runtime behavior. Supporting scripts and
 references are inspected as data, never executed; the main conversation and
-session system prompt are not sent.
+session system prompt are not sent. If the reviewed files change after an
+analysis finishes, the result is marked stale: it stays visible but cannot be applied.
 
 Known credential files and secret patterns are filtered, but a resource may still
 contain private information that detection cannot identify. Review the selected

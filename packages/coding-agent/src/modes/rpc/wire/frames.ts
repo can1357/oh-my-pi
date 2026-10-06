@@ -58,7 +58,7 @@ export const frameDefs = {
 	),
 	SkillDiagnosticsUpdateEvent: doc(
 		{ type: "'skill_diagnostics_update'", data: "SkillDiagnosticsSnapshot" },
-		"Skill-resolution snapshot, pushed at startup and whenever it or the effective notice setting changes.",
+		"Skill-resolution snapshot, pushed at startup and whenever it, the effective notice setting, or any skill analysis state or result changes.",
 	),
 	SubagentLifecycleStatus: "'started' | 'completed' | 'failed' | 'aborted'",
 	SubagentLifecyclePayload: {

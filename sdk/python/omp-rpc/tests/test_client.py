@@ -113,6 +113,7 @@ FAKE_SERVER = textwrap.dedent(
     message_counter = 0
     pending_async_work = False
     show_skill_startup_diagnostics = True
+    skill_analysis = None
     skill_diagnostics = [
         {
             "name": "review",
@@ -149,12 +150,113 @@ FAKE_SERVER = textwrap.dedent(
         }
     ]
 
+    def skill_items():
+        group = skill_diagnostics[0]
+        review = {
+            "name": "review",
+            "issues": ["conflict", "redundancy"],
+            "skills": group["skills"],
+            "duplicates": group["duplicates"],
+            "reason": group["reason"],
+            "canAnalyze": True,
+        }
+        if skill_analysis is not None:
+            review["analysis"] = skill_analysis
+        solo = {
+            "name": "solo",
+            "issues": [],
+            "skills": [group["skills"][0]],
+            "duplicates": [],
+            "canAnalyze": False,
+            "unavailableReason": "Only one copy is loaded.",
+        }
+        return [review, solo]
+
     def skill_snapshot():
         return {
             "cwd": "/workspace",
             "showStartupDiagnostics": show_skill_startup_diagnostics,
             "diagnostics": skill_diagnostics,
+            "items": skill_items(),
         }
+
+    def update_skill_analysis(**changes):
+        global skill_analysis
+        skill_analysis = {**skill_analysis, **changes}
+        print(json.dumps({"type": "skill_diagnostics_update", "data": skill_snapshot()}), flush=True)
+
+    def complete_skill_analysis():
+        if skill_analysis is None or skill_analysis["status"] != "running":
+            return
+        evidence = {"file": "SKILL.md", "quote": "Review changes carefully.", "explanation": "Both carry it."}
+        update_skill_analysis(
+            status="complete",
+            result={
+                "relationship": "adaptation",
+                "evidence": [{**evidence, "candidateId": "skill-1"}, {**evidence, "candidateId": "skill-2"}],
+                "differences": ["One skips the linter."],
+                "recommendation": {"action": "prefer", "preferredId": "skill-1", "reason": "The first loses nothing."},
+                "limitations": [],
+            },
+        )
+
+    def handle_skill_analysis(command_type, command, request_id):
+        # Mirrors the server contract: server-issued ids, separate consent and confirmation,
+        # replay instead of a second run or application.
+        global skill_analysis
+        if command_type == "prepare_skill_diagnostic_analysis":
+            if command.get("name") != "review":
+                respond(request_id, command_type, success=False, error="No comparable diagnostic variants exist for the selected skill.")
+                return
+            skill_analysis = {
+                "id": "analysis-1",
+                "name": "review",
+                "status": "prepared",
+                "model": command.get("model", "fake/default"),
+                "bytes": 120,
+                "candidates": [
+                    {
+                        "id": f"skill-{index}",
+                        "name": "review",
+                        "filePath": f"/skills/{index}/review/SKILL.md",
+                        "root": f"/skills/{index}/review",
+                        "fingerprint": "f" * 64,
+                        "complete": True,
+                        "files": 1,
+                        "omissions": [],
+                    }
+                    for index in (1, 2)
+                ],
+                "disclosure": "Files are treated as data.",
+                "createdAt": 1700000000000,
+                "applied": False,
+            }
+            update_skill_analysis()
+            respond(request_id, command_type, skill_analysis)
+            return
+        if skill_analysis is None or command.get("analysisId") != skill_analysis["id"]:
+            respond(request_id, command_type, success=False, error="Unknown or superseded analysis id; prepare a new consent plan in this session.")
+            return
+        if command_type == "analyze_skill_diagnostics":
+            if command.get("consent") is not True:
+                respond(request_id, command_type, success=False, error="consent must be true to send the disclosed files to the model")
+                return
+            if skill_analysis["status"] == "prepared":
+                update_skill_analysis(status="running")
+                threading.Timer(0.1, complete_skill_analysis).start()
+        elif command_type == "cancel_skill_diagnostic_analysis":
+            if skill_analysis["status"] in ("prepared", "running"):
+                update_skill_analysis(status="cancelled")
+        else:
+            if command.get("confirmed") is not True:
+                respond(request_id, command_type, success=False, error="confirmed must be true to apply the recommendation")
+                return
+            if skill_analysis["status"] == "complete":
+                update_skill_analysis(status="applied", applied=True)
+            elif skill_analysis["status"] != "applied":
+                respond(request_id, command_type, success=False, error="Only a complete, reviewed preference recommendation can be applied.")
+                return
+        respond(request_id, command_type, skill_analysis)
 
 
     def emit_event(payload):
@@ -417,6 +519,13 @@ FAKE_SERVER = textwrap.dedent(
                 snapshot = skill_snapshot()
                 respond(request_id, "set_skill_startup_diagnostics", snapshot)
                 emit_event({"type": "skill_diagnostics_update", "data": snapshot})
+        elif command_type in (
+            "prepare_skill_diagnostic_analysis",
+            "analyze_skill_diagnostics",
+            "cancel_skill_diagnostic_analysis",
+            "apply_skill_diagnostic_analysis",
+        ):
+            handle_skill_analysis(command_type, command, request_id)
         elif command_type == "set_host_tools":
             registered_host_tools = command.get("tools", [])
             respond(
@@ -1522,6 +1631,79 @@ class RpcClientTests(unittest.TestCase):
         )
         self.assertFalse(disabled.show_startup_diagnostics)
         self.assertEqual([event.data for event in updates], [disabled])
+
+    def test_skill_analysis_prepares_starts_once_and_applies_separately(self) -> None:
+        updates = []
+        completed = threading.Event()
+
+        def on_update(event) -> None:
+            updates.append(event.data)
+            items = event.data.items or ()
+            if any(item.analysis and item.analysis.status == "complete" for item in items):
+                completed.set()
+
+        with self.make_client() as client:
+            client.on_skill_diagnostics_update(on_update)
+            baseline = client.get_skill_diagnostics()
+            assert baseline.items is not None
+            self.assertEqual(
+                [(item.name, item.can_analyze) for item in baseline.items],
+                [("review", True), ("solo", False)],
+            )
+            self.assertEqual(baseline.items[1].unavailable_reason, "Only one copy is loaded.")
+
+            with self.assertRaisesRegex(RpcCommandError, "No comparable"):
+                client.prepare_skill_diagnostic_analysis("solo")
+            prepared = client.prepare_skill_diagnostic_analysis("review", model="fake/fake-model")
+            self.assertEqual(
+                (prepared.id, prepared.status, prepared.model, prepared.applied),
+                ("analysis-1", "prepared", "fake/fake-model", False),
+            )
+            self.assertEqual([candidate.id for candidate in prepared.candidates], ["skill-1", "skill-2"])
+
+            # Starting needs consent=True; the refusal is the server's error response.
+            with self.assertRaisesRegex(RpcCommandError, "consent"):
+                client.analyze_skill_diagnostics(prepared.id, consent=False)
+            with self.assertRaisesRegex(RpcCommandError, "Unknown or superseded"):
+                client.analyze_skill_diagnostics("analysis-9", consent=True)
+            running = client.analyze_skill_diagnostics(prepared.id, consent=True)
+            self.assertEqual(running.status, "running")
+            # A repeat replays the state instead of starting another run.
+            replay = client.analyze_skill_diagnostics(prepared.id, consent=True)
+            self.assertEqual(replay.id, prepared.id)
+            self.assertIn(replay.status, ("running", "complete"))
+            self.assertTrue(completed.wait(timeout=3.0))
+
+            # Applying is a separate confirmation and mutates once.
+            with self.assertRaisesRegex(RpcCommandError, "confirmed"):
+                client.apply_skill_diagnostic_analysis(prepared.id, confirmed=False)
+            applied = client.apply_skill_diagnostic_analysis(prepared.id, confirmed=True)
+            self.assertEqual((applied.status, applied.applied), ("applied", True))
+            assert applied.result is not None
+            self.assertEqual(applied.result.recommendation.preferred_id, "skill-1")
+            self.assertEqual(client.apply_skill_diagnostic_analysis(prepared.id, confirmed=True), applied)
+
+            current = client.get_skill_diagnostics()
+            assert current.items is not None
+            self.assertEqual(current.items[0].analysis, applied)
+            client.get_state()
+
+        statuses = [
+            item.analysis.status
+            for snapshot in updates
+            for item in snapshot.items or ()
+            if item.name == "review" and item.analysis
+        ]
+        self.assertEqual(statuses, ["prepared", "running", "complete", "applied"])
+
+    def test_skill_analysis_cancel_replays_and_refuses_apply(self) -> None:
+        with self.make_client() as client:
+            prepared = client.prepare_skill_diagnostic_analysis("review")
+            cancelled = client.cancel_skill_diagnostic_analysis(prepared.id)
+            self.assertEqual(cancelled.status, "cancelled")
+            self.assertEqual(client.cancel_skill_diagnostic_analysis(prepared.id), cancelled)
+            with self.assertRaisesRegex(RpcCommandError, "Only a complete"):
+                client.apply_skill_diagnostic_analysis(prepared.id, confirmed=True)
 
     def test_prompt_and_wait_returns_assistant_text(self) -> None:
         with self.make_client() as client:

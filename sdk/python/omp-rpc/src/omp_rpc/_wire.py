@@ -147,6 +147,29 @@ _SKILL_DUPLICATE_MATCH_VALUES: Final[frozenset[str]] = frozenset({"content", "or
 _decode_skill_duplicate_match = cast("Decoder[SkillDuplicateMatch]", literal(_SKILL_DUPLICATE_MATCH_VALUES))
 
 
+ResourceRelationship: TypeAlias = Literal["copies", "adaptation", "overlap", "complementary", "unrelated", "uncertain"]
+"""How the model judged the compared resources to relate."""
+_RESOURCE_RELATIONSHIP_VALUES: Final[frozenset[str]] = frozenset({"copies", "adaptation", "overlap", "complementary", "unrelated", "uncertain"})
+_decode_resource_relationship = cast("Decoder[ResourceRelationship]", literal(_RESOURCE_RELATIONSHIP_VALUES))
+
+
+ResourceRecommendationAction: TypeAlias = Literal["keep-all", "prefer"]
+_RESOURCE_RECOMMENDATION_ACTION_VALUES: Final[frozenset[str]] = frozenset({"keep-all", "prefer"})
+_decode_resource_recommendation_action = cast("Decoder[ResourceRecommendationAction]", literal(_RESOURCE_RECOMMENDATION_ACTION_VALUES))
+
+
+SkillAnalysisStatus: TypeAlias = Literal["prepared", "running", "complete", "failed", "cancelled", "applied", "stale"]
+"""Lifecycle of one analysis: `prepared` has sent nothing; `stale` means the reviewed files changed after preparation or analysis, or an applied preference was restored. A completed `result` may remain for inspection but cannot be applied."""
+_SKILL_ANALYSIS_STATUS_VALUES: Final[frozenset[str]] = frozenset({"prepared", "running", "complete", "failed", "cancelled", "applied", "stale"})
+_decode_skill_analysis_status = cast("Decoder[SkillAnalysisStatus]", literal(_SKILL_ANALYSIS_STATUS_VALUES))
+
+
+SkillDiagnosticIssue: TypeAlias = Literal["conflict", "redundancy", "missing-provenance"]
+"""What is wrong with a skill name: several active variants, redundant unloaded copies, or a copy that declares no repository."""
+_SKILL_DIAGNOSTIC_ISSUE_VALUES: Final[frozenset[str]] = frozenset({"conflict", "redundancy", "missing-provenance"})
+_decode_skill_diagnostic_issue = cast("Decoder[SkillDiagnosticIssue]", literal(_SKILL_DIAGNOSTIC_ISSUE_VALUES))
+
+
 BtwStatus: TypeAlias = Literal["running", "complete", "cancelled", "error", "interrupted"]
 """Side-question turn lifecycle; `interrupted` marks a turn whose process died while it ran."""
 _BTW_STATUS_VALUES: Final[frozenset[str]] = frozenset({"running", "complete", "cancelled", "error", "interrupted"})
@@ -678,11 +701,99 @@ class SkillResolutionDiagnostic:
 
 
 @dataclass(slots=True, frozen=True, kw_only=True)
+class ResourceAnalysisEvidence:
+    """A quote from one candidate's file that supports a finding; the server validated it against the snapshot the model read."""
+    candidate_id: str
+    file: str
+    quote: str
+    explanation: str
+
+
+@dataclass(slots=True, frozen=True, kw_only=True)
+class ResourceRecommendation:
+    """What to do with the compared resources; `prefer` only follows a preferable relationship over complete coverage."""
+    action: ResourceRecommendationAction
+    reason: str
+    preferred_id: str | None = None
+    """Candidate id to keep; present only when `action` is `prefer`."""
+
+
+@dataclass(slots=True, frozen=True, kw_only=True)
+class ResourceAnalysis:
+    """The model's comparison of the prepared snapshots, validated against them before it is reported."""
+    relationship: ResourceRelationship
+    evidence: tuple[ResourceAnalysisEvidence, ...]
+    differences: tuple[str, ...]
+    recommendation: ResourceRecommendation
+    limitations: tuple[str, ...]
+
+
+@dataclass(slots=True, frozen=True, kw_only=True)
+class SkillAnalysisCandidate:
+    """One skill variant an analysis would send: where it lives and how completely it is covered."""
+    id: str
+    name: str
+    file_path: str
+    root: str
+    fingerprint: str
+    complete: bool
+    """False when part of the skill directory was left out of the snapshot."""
+    files: int
+    """Files included in the snapshot."""
+    omissions: tuple[str, ...]
+    """What was left out and why."""
+
+
+@dataclass(slots=True, frozen=True, kw_only=True)
+class SkillDiagnosticAnalysisRecord:
+    """Server-held analysis of one skill name: what would be sent, then its status and result. Holds no full resource snapshots, credentials, or conversation; `result.evidence[].quote` carries bounded verbatim excerpts of skill files."""
+    id: str
+    """Opaque server-issued id; the only handle `analyze`, `cancel` and `apply` accept."""
+    name: str
+    status: SkillAnalysisStatus
+    model: str
+    """Exact model selector the analysis uses."""
+    bytes: int
+    """Resource bytes the request carries."""
+    candidates: tuple[SkillAnalysisCandidate, ...]
+    disclosure: str
+    """What leaving the machine means (files are data, known secrets are filtered best-effort, the conversation is excluded, charges may apply); show it with `model`, `candidates` and `bytes` before asking for consent."""
+    created_at: int
+    """Epoch milliseconds when the record was prepared."""
+    applied: bool
+    """The preference was saved. With `error`, the session reload failed and copies may still be active; a separately confirmed application can retry it. Restoring the copies invalidates this status."""
+    result: ResourceAnalysis | None = None
+    """Present once the analysis has completed, including `applied` and `stale` records."""
+    error: str | None = None
+    """Why the last run or application did not finish."""
+
+
+@dataclass(slots=True, frozen=True, kw_only=True)
+class SkillDiagnosticItem:
+    """One loaded skill name with its issues and analysis state; clean single-copy names are listed with `canAnalyze: false`."""
+    name: str
+    issues: tuple[SkillDiagnosticIssue, ...]
+    skills: tuple[SkillDiagnosticEntry, ...]
+    duplicates: tuple[SkillDiagnosticDuplicate, ...]
+    can_analyze: bool
+    """A comparable group exists, so `prepare_skill_diagnostic_analysis` can run for this name."""
+    reason: SkillSelectionReason | None = None
+    unavailable_reason: str | None = None
+    """Why `canAnalyze` is false, e.g. a single copy with nothing to compare."""
+    analysis: SkillDiagnosticAnalysisRecord | None = None
+    """Current plan record for this name, in any status."""
+    last_analysis: SkillDiagnosticAnalysisRecord | None = None
+    """Most recent finished analysis, kept while another is prepared."""
+
+
+@dataclass(slots=True, frozen=True, kw_only=True)
 class SkillDiagnosticsSnapshot:
     """Current skill resolution; an empty `diagnostics` means no conflicts or redundant installations."""
     cwd: str
     show_startup_diagnostics: bool
     diagnostics: tuple[SkillResolutionDiagnostic, ...]
+    items: tuple[SkillDiagnosticItem, ...] | None = None
+    """Every loaded skill name with its analysis state; absent when connected to an older server."""
 
 
 @dataclass(slots=True, frozen=True, kw_only=True)
@@ -1346,7 +1457,7 @@ class AvailableCommandsUpdateEvent:
 
 @dataclass(slots=True, frozen=True, kw_only=True)
 class SkillDiagnosticsUpdateEvent:
-    """Skill-resolution snapshot, pushed at startup and whenever it or the effective notice setting changes."""
+    """Skill-resolution snapshot, pushed at startup and whenever it, the effective notice setting, or any skill analysis state or result changes."""
     type: Literal["skill_diagnostics_update"] = "skill_diagnostics_update"
     data: SkillDiagnosticsSnapshot
 
@@ -2085,12 +2196,89 @@ def parse_skill_resolution_diagnostic(value: object, path: str = "SkillResolutio
     )
 
 
+def parse_resource_analysis_evidence(value: object, path: str = "ResourceAnalysisEvidence") -> ResourceAnalysisEvidence:
+    payload = expect_object(value, path)
+    return ResourceAnalysisEvidence(
+        candidate_id=required(payload, "candidateId", decode_str, path),
+        file=required(payload, "file", decode_str, path),
+        quote=required(payload, "quote", decode_str, path),
+        explanation=required(payload, "explanation", decode_str, path),
+    )
+
+
+def parse_resource_recommendation(value: object, path: str = "ResourceRecommendation") -> ResourceRecommendation:
+    payload = expect_object(value, path)
+    return ResourceRecommendation(
+        action=required(payload, "action", _decode_resource_recommendation_action, path),
+        reason=required(payload, "reason", decode_str, path),
+        preferred_id=optional(payload, "preferredId", decode_str, path),
+    )
+
+
+def parse_resource_analysis(value: object, path: str = "ResourceAnalysis") -> ResourceAnalysis:
+    payload = expect_object(value, path)
+    return ResourceAnalysis(
+        relationship=required(payload, "relationship", _decode_resource_relationship, path),
+        evidence=required(payload, "evidence", array(parse_resource_analysis_evidence), path),
+        differences=required(payload, "differences", array(decode_str), path),
+        recommendation=required(payload, "recommendation", parse_resource_recommendation, path),
+        limitations=required(payload, "limitations", array(decode_str), path),
+    )
+
+
+def parse_skill_analysis_candidate(value: object, path: str = "SkillAnalysisCandidate") -> SkillAnalysisCandidate:
+    payload = expect_object(value, path)
+    return SkillAnalysisCandidate(
+        id=required(payload, "id", decode_str, path),
+        name=required(payload, "name", decode_str, path),
+        file_path=required(payload, "filePath", decode_str, path),
+        root=required(payload, "root", decode_str, path),
+        fingerprint=required(payload, "fingerprint", decode_str, path),
+        complete=required(payload, "complete", decode_bool, path),
+        files=required(payload, "files", decode_int, path),
+        omissions=required(payload, "omissions", array(decode_str), path),
+    )
+
+
+def parse_skill_diagnostic_analysis_record(value: object, path: str = "SkillDiagnosticAnalysisRecord") -> SkillDiagnosticAnalysisRecord:
+    payload = expect_object(value, path)
+    return SkillDiagnosticAnalysisRecord(
+        id=required(payload, "id", decode_str, path),
+        name=required(payload, "name", decode_str, path),
+        status=required(payload, "status", _decode_skill_analysis_status, path),
+        model=required(payload, "model", decode_str, path),
+        bytes=required(payload, "bytes", decode_int, path),
+        candidates=required(payload, "candidates", array(parse_skill_analysis_candidate), path),
+        disclosure=required(payload, "disclosure", decode_str, path),
+        created_at=required(payload, "createdAt", decode_int, path),
+        applied=required(payload, "applied", decode_bool, path),
+        result=optional(payload, "result", parse_resource_analysis, path),
+        error=optional(payload, "error", decode_str, path),
+    )
+
+
+def parse_skill_diagnostic_item(value: object, path: str = "SkillDiagnosticItem") -> SkillDiagnosticItem:
+    payload = expect_object(value, path)
+    return SkillDiagnosticItem(
+        name=required(payload, "name", decode_str, path),
+        issues=required(payload, "issues", array(_decode_skill_diagnostic_issue), path),
+        skills=required(payload, "skills", array(parse_skill_diagnostic_entry), path),
+        duplicates=required(payload, "duplicates", array(parse_skill_diagnostic_duplicate), path),
+        can_analyze=required(payload, "canAnalyze", decode_bool, path),
+        reason=optional(payload, "reason", _decode_skill_selection_reason, path),
+        unavailable_reason=optional(payload, "unavailableReason", decode_str, path),
+        analysis=optional(payload, "analysis", parse_skill_diagnostic_analysis_record, path),
+        last_analysis=optional(payload, "lastAnalysis", parse_skill_diagnostic_analysis_record, path),
+    )
+
+
 def parse_skill_diagnostics_snapshot(value: object, path: str = "SkillDiagnosticsSnapshot") -> SkillDiagnosticsSnapshot:
     payload = expect_object(value, path)
     return SkillDiagnosticsSnapshot(
         cwd=required(payload, "cwd", decode_str, path),
         show_startup_diagnostics=required(payload, "showStartupDiagnostics", decode_bool, path),
         diagnostics=required(payload, "diagnostics", array(parse_skill_resolution_diagnostic), path),
+        items=optional(payload, "items", array(parse_skill_diagnostic_item), path),
     )
 
 
@@ -3466,6 +3654,34 @@ class WireClient:
         params["enabled"] = enabled
         return parse_skill_diagnostics_snapshot(self._command("set_skill_startup_diagnostics", params), "set_skill_startup_diagnostics")
 
+    def prepare_skill_diagnostic_analysis(self, name: str, *, model: str | None = None) -> SkillDiagnosticAnalysisRecord:
+        """Snapshot the comparable variants of one skill name and return the server-held record with its consent disclosure; sends nothing to a model. `model` must name one authenticated model exactly; omitted uses the default analysis model."""
+        params: dict[str, object] = {}
+        params["name"] = name
+        if model is not None:
+            params["model"] = model
+        return parse_skill_diagnostic_analysis_record(self._command("prepare_skill_diagnostic_analysis", params), "prepare_skill_diagnostic_analysis")
+
+    def analyze_skill_diagnostics(self, analysis_id: str, *, consent: bool) -> SkillDiagnosticAnalysisRecord:
+        """Start a prepared analysis once the user consented (`consent` must be true); returns the running record immediately. Progress and the result arrive as `skill_diagnostics_update` frames. Repeating the call for a running, complete or applied id replays its state without another model call; a cancelled, failed or stale analysis must be prepared again."""
+        params: dict[str, object] = {}
+        params["analysisId"] = analysis_id
+        params["consent"] = consent
+        return parse_skill_diagnostic_analysis_record(self._command("analyze_skill_diagnostics", params), "analyze_skill_diagnostics")
+
+    def cancel_skill_diagnostic_analysis(self, analysis_id: str) -> SkillDiagnosticAnalysisRecord:
+        """Abort one analysis by id; returns its record."""
+        params: dict[str, object] = {}
+        params["analysisId"] = analysis_id
+        return parse_skill_diagnostic_analysis_record(self._command("cancel_skill_diagnostic_analysis", params), "cancel_skill_diagnostic_analysis")
+
+    def apply_skill_diagnostic_analysis(self, analysis_id: str, *, confirmed: bool) -> SkillDiagnosticAnalysisRecord:
+        """Apply a complete `prefer` recommendation after a separate confirmation (`confirmed` must be true): saves a content-bound exclusion in the user's global settings and reloads skills; installed files are unchanged. A successfully applied id replays without another change. If its record has `applied: true` and `error`, saving succeeded but the session reload failed; another separately confirmed call retries the application."""
+        params: dict[str, object] = {}
+        params["analysisId"] = analysis_id
+        params["confirmed"] = confirmed
+        return parse_skill_diagnostic_analysis_record(self._command("apply_skill_diagnostic_analysis", params), "apply_skill_diagnostic_analysis")
+
     def set_fast_mode(self, enabled: bool) -> FastModeResult:
         """Enable or disable fast mode for the session."""
         params: dict[str, object] = {}
@@ -3870,7 +4086,7 @@ class WireClient:
         return self._listen("available_commands_update", listener)
 
     def on_skill_diagnostics_update(self, listener: Callable[[SkillDiagnosticsUpdateEvent], None]) -> Callable[[], None]:
-        """Subscribe to `skill_diagnostics_update`: Skill-resolution snapshot, pushed at startup and whenever it or the effective notice setting changes."""
+        """Subscribe to `skill_diagnostics_update`: Skill-resolution snapshot, pushed at startup and whenever it, the effective notice setting, or any skill analysis state or result changes."""
         return self._listen("skill_diagnostics_update", listener)
 
     def on_subagent_lifecycle(self, listener: Callable[[SubagentLifecycleEvent], None]) -> Callable[[], None]:
@@ -4204,6 +4420,11 @@ __all__ = [
     "ReadyEvent",
     "RedactedThinkingContent",
     "RemoveQueuedMessageResult",
+    "ResourceAnalysis",
+    "ResourceAnalysisEvidence",
+    "ResourceRecommendation",
+    "ResourceRecommendationAction",
+    "ResourceRelationship",
     "RestoredQueuedMessage",
     "RetryFallbackAppliedEvent",
     "RetryFallbackSucceededEvent",
@@ -4223,8 +4444,13 @@ __all__ = [
     "SetStatusUiRequest",
     "SetTitleUiRequest",
     "SetWidgetUiRequest",
+    "SkillAnalysisCandidate",
+    "SkillAnalysisStatus",
+    "SkillDiagnosticAnalysisRecord",
     "SkillDiagnosticDuplicate",
     "SkillDiagnosticEntry",
+    "SkillDiagnosticIssue",
+    "SkillDiagnosticItem",
     "SkillDiagnosticsSnapshot",
     "SkillDiagnosticsUpdateEvent",
     "SkillDuplicateMatch",
@@ -4390,6 +4616,9 @@ __all__ = [
     "parse_ready_event",
     "parse_redacted_thinking_content",
     "parse_remove_queued_message_result",
+    "parse_resource_analysis",
+    "parse_resource_analysis_evidence",
+    "parse_resource_recommendation",
     "parse_restored_queued_message",
     "parse_retry_fallback_applied_event",
     "parse_retry_fallback_succeeded_event",
@@ -4408,8 +4637,11 @@ __all__ = [
     "parse_set_status_ui_request",
     "parse_set_title_ui_request",
     "parse_set_widget_ui_request",
+    "parse_skill_analysis_candidate",
+    "parse_skill_diagnostic_analysis_record",
     "parse_skill_diagnostic_duplicate",
     "parse_skill_diagnostic_entry",
+    "parse_skill_diagnostic_item",
     "parse_skill_diagnostics_snapshot",
     "parse_skill_diagnostics_update_event",
     "parse_skill_resolution_diagnostic",

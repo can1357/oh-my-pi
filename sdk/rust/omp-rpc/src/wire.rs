@@ -3118,6 +3118,208 @@ pub struct SkillResolutionDiagnostic {
 	pub duplicates: Vec<SkillDiagnosticDuplicate>,
 }
 
+/// How the model judged the compared resources to relate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum ResourceRelationship {
+	#[serde(rename = "copies")]
+	Copies,
+	#[serde(rename = "adaptation")]
+	Adaptation,
+	#[serde(rename = "overlap")]
+	Overlap,
+	#[serde(rename = "complementary")]
+	Complementary,
+	#[serde(rename = "unrelated")]
+	Unrelated,
+	#[serde(rename = "uncertain")]
+	Uncertain,
+}
+
+impl ResourceRelationship {
+	/// Wire value.
+	pub fn as_str(self) -> &'static str {
+		match self {
+			Self::Copies => "copies",
+			Self::Adaptation => "adaptation",
+			Self::Overlap => "overlap",
+			Self::Complementary => "complementary",
+			Self::Unrelated => "unrelated",
+			Self::Uncertain => "uncertain",
+		}
+	}
+}
+
+/// A quote from one candidate's file that supports a finding; the server validated it against the snapshot the model read.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ResourceAnalysisEvidence {
+	#[serde(rename = "candidateId")]
+	pub candidate_id: String,
+	pub file: String,
+	pub quote: String,
+	pub explanation: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum ResourceRecommendationAction {
+	#[serde(rename = "keep-all")]
+	KeepAll,
+	#[serde(rename = "prefer")]
+	Prefer,
+}
+
+impl ResourceRecommendationAction {
+	/// Wire value.
+	pub fn as_str(self) -> &'static str {
+		match self {
+			Self::KeepAll => "keep-all",
+			Self::Prefer => "prefer",
+		}
+	}
+}
+
+/// What to do with the compared resources; `prefer` only follows a preferable relationship over complete coverage.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ResourceRecommendation {
+	pub action: ResourceRecommendationAction,
+	pub reason: String,
+	/// Candidate id to keep; present only when `action` is `prefer`.
+	#[serde(rename = "preferredId", default, skip_serializing_if = "Option::is_none")]
+	pub preferred_id: Option<String>,
+}
+
+/// The model's comparison of the prepared snapshots, validated against them before it is reported.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ResourceAnalysis {
+	pub relationship: ResourceRelationship,
+	pub evidence: Vec<ResourceAnalysisEvidence>,
+	pub differences: Vec<String>,
+	pub recommendation: ResourceRecommendation,
+	pub limitations: Vec<String>,
+}
+
+/// Lifecycle of one analysis: `prepared` has sent nothing; `stale` means the reviewed files changed after preparation or analysis, or an applied preference was restored. A completed `result` may remain for inspection but cannot be applied.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum SkillAnalysisStatus {
+	#[serde(rename = "prepared")]
+	Prepared,
+	#[serde(rename = "running")]
+	Running,
+	#[serde(rename = "complete")]
+	Complete,
+	#[serde(rename = "failed")]
+	Failed,
+	#[serde(rename = "cancelled")]
+	Cancelled,
+	#[serde(rename = "applied")]
+	Applied,
+	#[serde(rename = "stale")]
+	Stale,
+}
+
+impl SkillAnalysisStatus {
+	/// Wire value.
+	pub fn as_str(self) -> &'static str {
+		match self {
+			Self::Prepared => "prepared",
+			Self::Running => "running",
+			Self::Complete => "complete",
+			Self::Failed => "failed",
+			Self::Cancelled => "cancelled",
+			Self::Applied => "applied",
+			Self::Stale => "stale",
+		}
+	}
+}
+
+/// One skill variant an analysis would send: where it lives and how completely it is covered.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SkillAnalysisCandidate {
+	pub id: String,
+	pub name: String,
+	#[serde(rename = "filePath")]
+	pub file_path: String,
+	pub root: String,
+	pub fingerprint: String,
+	/// False when part of the skill directory was left out of the snapshot.
+	pub complete: bool,
+	/// Files included in the snapshot.
+	pub files: i64,
+	/// What was left out and why.
+	pub omissions: Vec<String>,
+}
+
+/// Server-held analysis of one skill name: what would be sent, then its status and result. Holds no full resource snapshots, credentials, or conversation; `result.evidence[].quote` carries bounded verbatim excerpts of skill files.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SkillDiagnosticAnalysisRecord {
+	/// Opaque server-issued id; the only handle `analyze`, `cancel` and `apply` accept.
+	pub id: String,
+	pub name: String,
+	pub status: SkillAnalysisStatus,
+	/// Exact model selector the analysis uses.
+	pub model: String,
+	/// Resource bytes the request carries.
+	pub bytes: i64,
+	pub candidates: Vec<SkillAnalysisCandidate>,
+	/// What leaving the machine means (files are data, known secrets are filtered best-effort, the conversation is excluded, charges may apply); show it with `model`, `candidates` and `bytes` before asking for consent.
+	pub disclosure: String,
+	/// Epoch milliseconds when the record was prepared.
+	#[serde(rename = "createdAt")]
+	pub created_at: i64,
+	/// The preference was saved. With `error`, the session reload failed and copies may still be active; a separately confirmed application can retry it. Restoring the copies invalidates this status.
+	pub applied: bool,
+	/// Present once the analysis has completed, including `applied` and `stale` records.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub result: Option<ResourceAnalysis>,
+	/// Why the last run or application did not finish.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub error: Option<String>,
+}
+
+/// What is wrong with a skill name: several active variants, redundant unloaded copies, or a copy that declares no repository.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum SkillDiagnosticIssue {
+	#[serde(rename = "conflict")]
+	Conflict,
+	#[serde(rename = "redundancy")]
+	Redundancy,
+	#[serde(rename = "missing-provenance")]
+	MissingProvenance,
+}
+
+impl SkillDiagnosticIssue {
+	/// Wire value.
+	pub fn as_str(self) -> &'static str {
+		match self {
+			Self::Conflict => "conflict",
+			Self::Redundancy => "redundancy",
+			Self::MissingProvenance => "missing-provenance",
+		}
+	}
+}
+
+/// One loaded skill name with its issues and analysis state; clean single-copy names are listed with `canAnalyze: false`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SkillDiagnosticItem {
+	pub name: String,
+	pub issues: Vec<SkillDiagnosticIssue>,
+	pub skills: Vec<SkillDiagnosticEntry>,
+	pub duplicates: Vec<SkillDiagnosticDuplicate>,
+	/// A comparable group exists, so `prepare_skill_diagnostic_analysis` can run for this name.
+	#[serde(rename = "canAnalyze")]
+	pub can_analyze: bool,
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub reason: Option<SkillSelectionReason>,
+	/// Why `canAnalyze` is false, e.g. a single copy with nothing to compare.
+	#[serde(rename = "unavailableReason", default, skip_serializing_if = "Option::is_none")]
+	pub unavailable_reason: Option<String>,
+	/// Current plan record for this name, in any status.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub analysis: Option<SkillDiagnosticAnalysisRecord>,
+	/// Most recent finished analysis, kept while another is prepared.
+	#[serde(rename = "lastAnalysis", default, skip_serializing_if = "Option::is_none")]
+	pub last_analysis: Option<SkillDiagnosticAnalysisRecord>,
+}
+
 /// Current skill resolution; an empty `diagnostics` means no conflicts or redundant installations.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SkillDiagnosticsSnapshot {
@@ -3125,6 +3327,9 @@ pub struct SkillDiagnosticsSnapshot {
 	#[serde(rename = "showStartupDiagnostics")]
 	pub show_startup_diagnostics: bool,
 	pub diagnostics: Vec<SkillResolutionDiagnostic>,
+	/// Every loaded skill name with its analysis state; absent when connected to an older server.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub items: Option<Vec<SkillDiagnosticItem>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -4218,7 +4423,7 @@ pub struct AvailableCommandsUpdateEvent {
 	pub commands: Vec<AvailableSlashCommand>,
 }
 
-/// Skill-resolution snapshot, pushed at startup and whenever it or the effective notice setting changes.
+/// Skill-resolution snapshot, pushed at startup and whenever it, the effective notice setting, or any skill analysis state or result changes.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SkillDiagnosticsUpdateEvent {
 	pub data: SkillDiagnosticsSnapshot,
@@ -5072,7 +5277,7 @@ pub enum RpcNotification {
 	ExtensionUiRequest(ExtensionUiRequest),
 	/// Slash-command catalog, pushed at startup and whenever command metadata changes.
 	AvailableCommandsUpdate(AvailableCommandsUpdateEvent),
-	/// Skill-resolution snapshot, pushed at startup and whenever it or the effective notice setting changes.
+	/// Skill-resolution snapshot, pushed at startup and whenever it, the effective notice setting, or any skill analysis state or result changes.
 	SkillDiagnosticsUpdate(SkillDiagnosticsUpdateEvent),
 	/// A subagent started or ended; sent at subscription level "progress" or "events".
 	SubagentLifecycle(SubagentLifecycleEvent),
@@ -5302,6 +5507,33 @@ pub struct OpenSessionParams {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SetSkillStartupDiagnosticsParams {
 	pub enabled: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PrepareSkillDiagnosticAnalysisParams {
+	pub name: String,
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub model: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AnalyzeSkillDiagnosticsParams {
+	#[serde(rename = "analysisId")]
+	pub analysis_id: String,
+	pub consent: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CancelSkillDiagnosticAnalysisParams {
+	#[serde(rename = "analysisId")]
+	pub analysis_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ApplySkillDiagnosticAnalysisParams {
+	#[serde(rename = "analysisId")]
+	pub analysis_id: String,
+	pub confirmed: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -6426,6 +6658,77 @@ impl Command for SetSkillStartupDiagnosticsCommand {
 
 	fn decode(data: Option<Value>) -> Result<Self::Output, serde_json::Error> {
 		serde_json::from_value::<SkillDiagnosticsSnapshot>(data.unwrap_or_else(|| Value::Object(Map::new())))
+	}
+}
+
+/// Snapshot the comparable variants of one skill name and return the server-held record with its consent disclosure; sends nothing to a model. `model` must name one authenticated model exactly; omitted uses the default analysis model.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PrepareSkillDiagnosticAnalysisCommand {
+	pub name: String,
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub model: Option<String>,
+}
+
+impl Command for PrepareSkillDiagnosticAnalysisCommand {
+	const NAME: &'static str = "prepare_skill_diagnostic_analysis";
+	const TIMEOUT_MS: Option<u64> = None;
+	type Output = SkillDiagnosticAnalysisRecord;
+
+	fn decode(data: Option<Value>) -> Result<Self::Output, serde_json::Error> {
+		serde_json::from_value::<SkillDiagnosticAnalysisRecord>(data.unwrap_or_else(|| Value::Object(Map::new())))
+	}
+}
+
+/// Start a prepared analysis once the user consented (`consent` must be true); returns the running record immediately. Progress and the result arrive as `skill_diagnostics_update` frames. Repeating the call for a running, complete or applied id replays its state without another model call; a cancelled, failed or stale analysis must be prepared again.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AnalyzeSkillDiagnosticsCommand {
+	#[serde(rename = "analysisId")]
+	pub analysis_id: String,
+	pub consent: bool,
+}
+
+impl Command for AnalyzeSkillDiagnosticsCommand {
+	const NAME: &'static str = "analyze_skill_diagnostics";
+	const TIMEOUT_MS: Option<u64> = None;
+	type Output = SkillDiagnosticAnalysisRecord;
+
+	fn decode(data: Option<Value>) -> Result<Self::Output, serde_json::Error> {
+		serde_json::from_value::<SkillDiagnosticAnalysisRecord>(data.unwrap_or_else(|| Value::Object(Map::new())))
+	}
+}
+
+/// Abort one analysis by id; returns its record.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CancelSkillDiagnosticAnalysisCommand {
+	#[serde(rename = "analysisId")]
+	pub analysis_id: String,
+}
+
+impl Command for CancelSkillDiagnosticAnalysisCommand {
+	const NAME: &'static str = "cancel_skill_diagnostic_analysis";
+	const TIMEOUT_MS: Option<u64> = None;
+	type Output = SkillDiagnosticAnalysisRecord;
+
+	fn decode(data: Option<Value>) -> Result<Self::Output, serde_json::Error> {
+		serde_json::from_value::<SkillDiagnosticAnalysisRecord>(data.unwrap_or_else(|| Value::Object(Map::new())))
+	}
+}
+
+/// Apply a complete `prefer` recommendation after a separate confirmation (`confirmed` must be true): saves a content-bound exclusion in the user's global settings and reloads skills; installed files are unchanged. A successfully applied id replays without another change. If its record has `applied: true` and `error`, saving succeeded but the session reload failed; another separately confirmed call retries the application.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ApplySkillDiagnosticAnalysisCommand {
+	#[serde(rename = "analysisId")]
+	pub analysis_id: String,
+	pub confirmed: bool,
+}
+
+impl Command for ApplySkillDiagnosticAnalysisCommand {
+	const NAME: &'static str = "apply_skill_diagnostic_analysis";
+	const TIMEOUT_MS: Option<u64> = None;
+	type Output = SkillDiagnosticAnalysisRecord;
+
+	fn decode(data: Option<Value>) -> Result<Self::Output, serde_json::Error> {
+		serde_json::from_value::<SkillDiagnosticAnalysisRecord>(data.unwrap_or_else(|| Value::Object(Map::new())))
 	}
 }
 

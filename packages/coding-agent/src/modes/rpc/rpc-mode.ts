@@ -2313,6 +2313,60 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 				);
 			}
 
+			// The same session-owned workflow the interactive panel drives. Ids are server-issued by `prepare`;
+			// the controller refuses unknown, superseded or cross-session ones, so no path, snapshot, or model
+			// output ever comes from the client.
+			case "prepare_skill_diagnostic_analysis":
+			case "analyze_skill_diagnostics":
+			case "cancel_skill_diagnostic_analysis":
+			case "apply_skill_diagnostic_analysis": {
+				const controller = session.skillDiagnosticController;
+				try {
+					switch (command.type) {
+						case "prepare_skill_diagnostic_analysis": {
+							if (typeof command.name !== "string") return error(id, command.type, "name must be a string");
+							if (command.model !== undefined && typeof command.model !== "string") {
+								return error(id, command.type, "model must be a string");
+							}
+							return success(id, command.type, await controller.prepare(command.name, command.model));
+						}
+						case "analyze_skill_diagnostics": {
+							if (typeof command.analysisId !== "string") {
+								return error(id, command.type, "analysisId must be a string");
+							}
+							// Consent is its own boolean: sending the disclosed files to a model is never implied.
+							if (command.consent !== true) {
+								return error(id, command.type, "consent must be true to send the disclosed files to the model");
+							}
+							// Starts the model work and returns the running record; the result arrives as update frames.
+							return success(id, command.type, controller.start(command.analysisId, true));
+						}
+						case "cancel_skill_diagnostic_analysis": {
+							if (typeof command.analysisId !== "string") {
+								return error(id, command.type, "analysisId must be a string");
+							}
+							return success(id, command.type, controller.cancel(command.analysisId));
+						}
+						case "apply_skill_diagnostic_analysis": {
+							if (typeof command.analysisId !== "string") {
+								return error(id, command.type, "analysisId must be a string");
+							}
+							// Separate from analysis consent: applying saves a global setting.
+							if (command.confirmed !== true) {
+								return error(id, command.type, "confirmed must be true to apply the recommendation");
+							}
+							return success(id, command.type, await controller.apply(command.analysisId, true));
+						}
+					}
+				} catch (analysisError) {
+					return error(
+						id,
+						command.type,
+						analysisError instanceof Error ? analysisError.message : String(analysisError),
+					);
+				}
+			}
+
 			case "set_fast_mode": {
 				const supported = session.setFastMode(command.enabled);
 				if (command.enabled && !supported) {
