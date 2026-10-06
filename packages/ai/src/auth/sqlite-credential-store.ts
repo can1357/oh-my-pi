@@ -1542,11 +1542,7 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 		return result.changes > 0;
 	}
 	async deleteAuthCredentials(provider: string, disabledCause: string): Promise<void> {
-		try {
-			this.#deleteByProviderStmt.run(normalizeDisabledCause(disabledCause), provider);
-		} catch {
-			// Ignore delete failures
-		}
+		this.#deleteByProviderStmt.run(normalizeDisabledCause(disabledCause), provider);
 	}
 
 	getCache(key: string, options?: { includeExpired?: boolean }): string | null {

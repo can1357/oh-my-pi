@@ -61,6 +61,10 @@ app.stt.toggle: Ctrl+Shift+S
 
 While speech-to-text is enabled, non-printable keys and chords assigned to `app.stt.pushToTalk` are reserved: a tap is swallowed instead of running its normal editing or application action. A plain printable key tap still types normally. Text-assistance transformations from initial taps are preserved; only unchanged literal repeat text is removed when a hold is recognized. Each configured alternative is independent; alternating between alternatives does not combine them into one hold. Hold detection requires a terminal that delivers key auto-repeat.
 
+## Contextual shortcuts
+
+In `/providers`, `Ctrl+D` opens a confirmation to remove all saved credentials for the highlighted provider. The shortcut and native action appear only when that provider has saved credentials. This selector-specific chord does not change the global `app.history.search` binding (`Ctrl+R`).
+
 ## Recover a cleared prompt
 
 Press `Ctrl+C` to clear an unsent composer draft, then `Up` to recall it. Older drafts and submitted prompts share the existing Up/Down navigation. Recalled drafts remain editable and are never sent until you submit them.

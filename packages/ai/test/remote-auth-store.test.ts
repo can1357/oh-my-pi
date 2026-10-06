@@ -1212,14 +1212,25 @@ describe("RemoteAuthCredentialStore + AuthStorage integration", () => {
 	});
 
 	test("client credentials.remove disables every broker-side credential for the provider (logout)", async () => {
-		await serverStore!.saveApiKey("kagi", "k1");
-		await serverStore!.saveOAuth("kagi", {
-			access: "oauth-access",
-			refresh: "oauth-refresh",
-			expires: Date.now() + 120_000,
-			accountId: "acct-kagi",
-			email: "user@example.com",
-		});
+		await serverStore!.replaceAuthCredentials("kagi", [
+			{ type: "api_key", key: "k1" },
+			{
+				type: "oauth",
+				access: "oauth-access-one",
+				refresh: "oauth-refresh-one",
+				expires: Date.now() + 120_000,
+				accountId: "acct-kagi-one",
+				email: "one@example.com",
+			},
+			{
+				type: "oauth",
+				access: "oauth-access-two",
+				refresh: "oauth-refresh-two",
+				expires: Date.now() + 120_000,
+				accountId: "acct-kagi-two",
+				email: "two@example.com",
+			},
+		]);
 		await serverStorage!.credentials.reload();
 
 		const brokerClient = new AuthBrokerClient({ url: handle!.url, token });
@@ -1235,8 +1246,207 @@ describe("RemoteAuthCredentialStore + AuthStorage integration", () => {
 		await clientStorage.credentials.remove("kagi");
 
 		expect(serverStore!.listAuthCredentials("kagi")).toEqual([]);
+		expect(serverStore!.listAuthCredentials("anthropic")).toHaveLength(1);
 		expect(clientStorage.credentials.get("kagi")).toBeUndefined();
+		const tombstones = await serverStorage!.credentials.listDisabled("kagi");
+		expect(tombstones).toHaveLength(3);
+		expect(tombstones.map(entry => entry.cause)).toEqual(["deleted by user", "deleted by user", "deleted by user"]);
 		clientStorage.close();
+	});
+
+	test("bulk removal rejects total broker failure without hiding active credentials", async () => {
+		await serverStore!.upsertAuthCredential("kagi", {
+			type: "oauth",
+			access: "kagi-access-one",
+			refresh: "kagi-refresh-one",
+			expires: Date.now() + 120_000,
+			accountId: "kagi-account-one",
+			email: "one@example.com",
+		});
+		await serverStorage!.credentials.reload();
+
+		const brokerClient = new AuthBrokerClient({ url: handle!.url, token });
+		const initialResult = await brokerClient.fetchSnapshot();
+		if (initialResult.status !== 200) throw new Error("expected snapshot");
+		const remoteStore = new RemoteAuthCredentialStore({
+			client: brokerClient,
+			initialSnapshot: initialResult.snapshot,
+			streamSnapshots: false,
+		});
+		const activeIds = serverStore!.listAuthCredentials("kagi").map(entry => entry.id);
+		vi.spyOn(brokerClient, "disableCredential").mockRejectedValue(new Error("simulated broker outage"));
+
+		try {
+			await expect(remoteStore.deleteAuthCredentials("kagi", "deleted by user")).rejects.toBeInstanceOf(
+				AggregateError,
+			);
+			expect(remoteStore.listAuthCredentials("kagi").map(entry => entry.id)).toEqual(activeIds);
+			expect(serverStore!.listAuthCredentials("kagi").map(entry => entry.id)).toEqual(activeIds);
+		} finally {
+			remoteStore.close();
+		}
+	});
+
+	test("bulk removal keeps failed rows retryable after partial broker failure", async () => {
+		for (const suffix of ["one", "two"]) {
+			await serverStore!.upsertAuthCredential("kagi", {
+				type: "oauth",
+				access: `kagi-access-${suffix}`,
+				refresh: `kagi-refresh-${suffix}`,
+				expires: Date.now() + 120_000,
+				accountId: `kagi-account-${suffix}`,
+				email: `${suffix}@example.com`,
+			});
+		}
+		await serverStorage!.credentials.reload();
+
+		const brokerClient = new AuthBrokerClient({ url: handle!.url, token });
+		const initialResult = await brokerClient.fetchSnapshot();
+		if (initialResult.status !== 200) throw new Error("expected snapshot");
+		const remoteStore = new RemoteAuthCredentialStore({
+			client: brokerClient,
+			initialSnapshot: initialResult.snapshot,
+			streamSnapshots: false,
+		});
+		const initialIds = remoteStore.listAuthCredentials("kagi").map(entry => entry.id);
+		const failedId = initialIds[1];
+		if (failedId === undefined) throw new Error("expected two broker credentials");
+		const disableCredential = brokerClient.disableCredential.bind(brokerClient);
+		const disableSpy = vi.spyOn(brokerClient, "disableCredential").mockImplementation(async (id, cause, signal) => {
+			if (id === failedId) throw new Error("simulated one-row broker failure");
+			return disableCredential(id, cause, signal);
+		});
+
+		try {
+			await expect(remoteStore.deleteAuthCredentials("kagi", "deleted by user")).rejects.toBeInstanceOf(
+				AggregateError,
+			);
+			expect(remoteStore.listAuthCredentials("kagi").map(entry => entry.id)).toEqual([failedId]);
+			expect(serverStore!.listAuthCredentials("kagi").map(entry => entry.id)).toEqual([failedId]);
+
+			disableSpy.mockRestore();
+			await remoteStore.deleteAuthCredentials("kagi", "deleted by user");
+			expect(remoteStore.listAuthCredentials("kagi")).toEqual([]);
+			expect(serverStore!.listAuthCredentials("kagi")).toEqual([]);
+			expect(serverStore!.listAuthCredentials("anthropic")).toHaveLength(1);
+		} finally {
+			remoteStore.close();
+		}
+	});
+
+	test("AuthStorage reconciles its pool after partial broker removal", async () => {
+		for (const suffix of ["one", "two"]) {
+			await serverStore!.upsertAuthCredential("kagi", {
+				type: "oauth",
+				access: `kagi-access-${suffix}`,
+				refresh: `kagi-refresh-${suffix}`,
+				expires: Date.now() + 120_000,
+				accountId: `kagi-account-${suffix}`,
+				email: `${suffix}@example.com`,
+			});
+		}
+		await serverStorage!.credentials.reload();
+
+		const brokerClient = new AuthBrokerClient({ url: handle!.url, token });
+		const initialResult = await brokerClient.fetchSnapshot();
+		if (initialResult.status !== 200) throw new Error("expected snapshot");
+		const remoteStore = new RemoteAuthCredentialStore({
+			client: brokerClient,
+			initialSnapshot: initialResult.snapshot,
+			streamSnapshots: false,
+		});
+		const clientStorage = new AuthStorage(remoteStore);
+		await clientStorage.credentials.reload();
+		const initialIds = clientStorage.credentials.list("kagi").map(entry => entry.id);
+		const failedId = initialIds[1];
+		if (failedId === undefined) throw new Error("expected two broker credentials");
+		const disableCredential = brokerClient.disableCredential.bind(brokerClient);
+		const disableSpy = vi.spyOn(brokerClient, "disableCredential").mockImplementation(async (id, cause, signal) => {
+			if (id === failedId) throw new Error("simulated one-row broker failure");
+			return disableCredential(id, cause, signal);
+		});
+
+		try {
+			await expect(clientStorage.credentials.remove("kagi")).rejects.toBeInstanceOf(AggregateError);
+			expect(clientStorage.credentials.list("kagi").map(entry => entry.id)).toEqual([failedId]);
+			expect(serverStore!.listAuthCredentials("kagi").map(entry => entry.id)).toEqual([failedId]);
+
+			disableSpy.mockRestore();
+			await clientStorage.credentials.remove("kagi");
+			expect(clientStorage.credentials.list("kagi")).toEqual([]);
+			expect(serverStore!.listAuthCredentials("kagi")).toEqual([]);
+			expect(serverStore!.listAuthCredentials("anthropic")).toHaveLength(1);
+		} finally {
+			clientStorage.close();
+		}
+	});
+
+	test("does not resurrect a disabled broker credential from a delayed snapshot after partial removal", async () => {
+		for (const suffix of ["one", "two"]) {
+			await serverStore!.upsertAuthCredential("kagi", {
+				type: "oauth",
+				access: `kagi-access-${suffix}`,
+				refresh: `kagi-refresh-${suffix}`,
+				expires: Date.now() + 120_000,
+				accountId: `kagi-account-${suffix}`,
+				email: `${suffix}@example.com`,
+			});
+		}
+		await serverStorage!.credentials.reload();
+
+		const brokerClient = new AuthBrokerClient({ url: handle!.url, token });
+		const initialResult = await brokerClient.fetchSnapshot();
+		if (initialResult.status !== 200) throw new Error("expected snapshot");
+		const delayedSnapshot = Promise.withResolvers<FetchSnapshotResult>();
+		const backgroundFetchStarted = Promise.withResolvers<void>();
+		const deliveredSnapshots: SnapshotResponse[] = [];
+		let backgroundFetches = 0;
+		vi.spyOn(brokerClient, "fetchSnapshot").mockImplementation(async options => {
+			if (options?.waitMs !== undefined) {
+				if (backgroundFetches++ === 0) {
+					backgroundFetchStarted.resolve();
+					return delayedSnapshot.promise;
+				}
+				throw new Error("later background fetch unavailable");
+			}
+			throw new Error("follow-up snapshot refresh unavailable");
+		});
+		const remoteStore = new RemoteAuthCredentialStore({
+			client: brokerClient,
+			initialSnapshot: initialResult.snapshot,
+			streamSnapshots: false,
+			onSnapshot: snapshot => deliveredSnapshots.push(snapshot),
+		});
+		const clientStorage = new AuthStorage(remoteStore);
+		await clientStorage.credentials.reload();
+		await backgroundFetchStarted.promise;
+		expect(backgroundFetches).toBe(1);
+		const initialIds = clientStorage.credentials.list("kagi").map(entry => entry.id);
+		const successfulId = initialIds[0];
+		const failedId = initialIds[1];
+		if (successfulId === undefined || failedId === undefined) throw new Error("expected two broker credentials");
+		const disableCredential = brokerClient.disableCredential.bind(brokerClient);
+		vi.spyOn(brokerClient, "disableCredential").mockImplementation(async (id, cause, signal) => {
+			if (id === failedId) throw new Error("simulated one-row broker failure");
+			return disableCredential(id, cause, signal);
+		});
+
+		try {
+			await expect(clientStorage.credentials.remove("kagi")).rejects.toBeInstanceOf(AggregateError);
+			expect(clientStorage.credentials.list("kagi").map(entry => entry.id)).toEqual([failedId]);
+
+			delayedSnapshot.resolve(initialResult);
+			await delayedSnapshot.promise;
+			await Bun.sleep(0);
+			expect(remoteStore.listAuthCredentials("kagi").map(entry => entry.id)).toEqual([failedId]);
+			expect(clientStorage.credentials.list("kagi").map(entry => entry.id)).toEqual([failedId]);
+			const persistedIds = deliveredSnapshots.at(-1)?.credentials.map(entry => entry.id) ?? [];
+			expect(persistedIds).toContain(failedId);
+			expect(persistedIds).not.toContain(successfulId);
+			expect(deliveredSnapshots.at(-1)?.credentials.some(entry => entry.provider === "anthropic")).toBe(true);
+		} finally {
+			clientStorage.close();
+		}
 	});
 
 	test.each(["", "tier:fable"])("scoped block deletion removes only the exact broker row (%s)", async blockScope => {

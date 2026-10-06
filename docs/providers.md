@@ -70,6 +70,7 @@ Use the interactive slash commands inside a session:
 
 - `/login` — opens the OAuth/key selector. `/login <provider>` jumps straight to one provider (e.g. `/login anthropic`); for an OAuth flow that needs a pasted callback, run `/login <redirect-url>` to complete it.
 - `/logout` — opens the provider selector to remove stored credentials.
+- `/providers` — opens provider setup. When the highlighted provider has saved credentials, press `Ctrl+D` and confirm with `Enter` to remove all saved accounts and API keys for that provider; `Escape` cancels. The provider stays in the catalog, and environment variables or `models.yml` credentials are not changed. If another source still authenticates the provider, OMP reports that source. Removal uses the active credential store (local or broker-backed); it does not revoke tokens upstream or guarantee physical erasure of database bytes.
 
 Outside a session, `omp login [<provider>]` runs the same login from the terminal, including extension-registered providers: it prints the auth URL (and opens it in your browser), reads any prompts from stdin, and saves to the same store sessions use — local `agent.db`, or the configured auth broker. Without a provider it shows a numbered picker. Successful login refreshes that provider's model catalog online so newly unlocked models are visible.
 

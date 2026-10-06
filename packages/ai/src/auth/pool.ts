@@ -629,7 +629,25 @@ export class CredentialPool implements CredentialsApi {
 	 * Remove credential for a provider.
 	 */
 	async remove(provider: string): Promise<void> {
-		await this.#store.deleteAuthCredentials(provider, "deleted by user");
+		const previous = this.entries(provider);
+		try {
+			await this.#store.deleteAuthCredentials(provider, "deleted by user");
+		} catch (error) {
+			try {
+				const remaining = this.#store
+					.listAuthCredentials(provider)
+					.map(({ id, credential }) => ({ id, credential }));
+				const changed = !storedCredentialArraysEqual(previous, remaining);
+				this.replace(provider, remaining);
+				if (changed) this.reset(provider);
+			} catch (reconcileError) {
+				throw new AggregateError(
+					[error, reconcileError],
+					`Credential removal failed and the remaining ${provider} credentials could not be reloaded`,
+				);
+			}
+			throw error;
+		}
 		this.replace(provider, []);
 		this.reset(provider);
 	}

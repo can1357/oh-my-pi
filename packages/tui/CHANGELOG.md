@@ -11,6 +11,7 @@
 - `ComposerNativeState.rate` shows a tok/s readout in the native composer bar after the effort chip, and `ComposerNativeState.thinkingInModel` draws the thinking level as the model chip's icon instead of a separate chip
 - `ImageOptions.requestRender` repaints an image without an image budget once its SIXEL encode lands ([#14529](https://github.com/can1357/oh-my-pi/pull/14529) by [@H4vC](https://github.com/H4vC))
 - `AssistantMessageComponent` can keep finished thinking sections expanded via `setExpandThinkingBlocks()`; sections folded by hand stay folded ([#14519](https://github.com/can1357/oh-my-pi/pull/14519) by [@H4vC](https://github.com/H4vC))
+- Added `Ctrl+D` in provider setup to remove all saved credentials for the highlighted provider ([#14184](https://github.com/can1357/oh-my-pi/pull/14184) by [@fskaeh](https://github.com/fskaeh)).
 
 ### Changed
 
