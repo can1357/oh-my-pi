@@ -303,8 +303,8 @@ describe("prompt action autocomplete", () => {
 		expect(provider.trySyncSlashCompletion("hello")).toBeNull();
 	});
 
-	it("finds the same session while editing its escaped backslash mention", async () => {
-		const name = "release \\draft";
+	it("preserves raw double backslashes and escaped quotes while completing a session mention", async () => {
+		const name = String.raw`\\server\share "draft"`;
 		const provider = createPromptActionAutocompleteProvider({
 			commands: [],
 			basePath: "/project",
@@ -318,9 +318,13 @@ describe("prompt action autocomplete", () => {
 			moveCursorToLineStart: () => {},
 			moveCursorToLineEnd: () => {},
 		});
-		const line = String.raw`@"release \\draft"`;
+		const line = String.raw`@"\\server\share \"draft\""`;
 		const suggestions = await provider.getSuggestions([line], 0, line.length);
-		expect(suggestions?.items.map(item => item.label)).toContain(`@${name}`);
+		const item = suggestions?.items.find(item => item.label === `@${name}`);
+		expect(item?.value).toBe(line);
+		if (!suggestions || !item) throw new Error("expected session mention suggestion");
+		const completed = provider.applyCompletion([line], 0, line.length, item, suggestions.prefix);
+		expect(completed.lines[0]).toBe(`${line} `);
 	});
 
 	it("suggests model mentions and reanchors completion to the live token", async () => {

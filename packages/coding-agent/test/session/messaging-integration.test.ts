@@ -12,6 +12,7 @@ import { HistoryProtocolHandler } from "@oh-my-pi/pi-coding-agent/internal-urls/
 import { parseInternalUrl } from "@oh-my-pi/pi-coding-agent/internal-urls/parse";
 import { IrcBus } from "@oh-my-pi/pi-coding-agent/irc/bus";
 import { executeSend } from "@oh-my-pi/pi-coding-agent/irc/messaging";
+import { enqueueOffline, drainOffline } from "@oh-my-pi/pi-coding-agent/messaging/mailbox";
 import type { MessagingService } from "@oh-my-pi/pi-coding-agent/messaging/service";
 import { cfgMessagingInbound } from "@oh-my-pi/pi-coding-agent/messaging/settings";
 import * as transport from "@oh-my-pi/pi-coding-agent/messaging/transport";
@@ -339,6 +340,72 @@ describe("top-level cross-session delivery", () => {
 		expect(JSON.stringify(resumed.contexts[0]!.messages)).toContain("SECOND_OFFLINE_REMOTE_MARKER");
 		expect(resumed.contexts).toHaveLength(1);
 		expect(resumed.session.pendingRemoteCount()).toBe(0);
+	});
+
+	it("puts ordinary mail separated by a refusal receipt in the same first provider context", async () => {
+		const a = await makeSession("alice");
+		const manager = SessionManager.create(temp.path(), path.join(temp.path(), "sessions", "project"));
+		await manager.setSessionName("bob", "user");
+		await manager.ensureOnDisk();
+		const id = manager.getSessionId();
+		const entry = (await transport.listInboxEntries()).find(item => item.sessionId === a.session.sessionId)!;
+		const from = {
+			sessionId: a.session.sessionId,
+			name: a.session.messaging!.ownAddress(),
+			shortId: a.session.messaging!.ownShortId(),
+			cwd: temp.path(),
+			entryId: entry.entryId,
+			class: "bypass" as const,
+		};
+		const dir = path.join(temp.path(), "inboxes");
+		const sentAt = Date.now() - 3;
+		await enqueueOffline(
+			id,
+			{
+				id: "mixed-a",
+				from,
+				body: "MIXED_MAIL_A",
+				chain: [],
+				sentAt,
+			},
+			{ dir },
+		);
+		await enqueueOffline(
+			id,
+			{
+				type: "notice",
+				id: "refused-mixed",
+				from,
+				kind: "refused",
+				subject: "message",
+				aboutId: "earlier-outgoing",
+				toSessionId: id,
+				sentAt: sentAt + 1,
+			},
+			{ dir },
+		);
+		await enqueueOffline(
+			id,
+			{
+				id: "mixed-b",
+				from,
+				body: "MIXED_MAIL_B",
+				chain: [],
+				sentAt: sentAt + 2,
+			},
+			{ dir },
+		);
+		const resumed = await makeSession("bob", { manager });
+		await resumed.firstTurn;
+		await resumed.session.waitForIdle();
+		const firstContext = JSON.stringify(resumed.contexts[0]!.messages);
+		expect(firstContext).toContain("MIXED_MAIL_A");
+		expect(firstContext).toContain("MIXED_MAIL_B");
+		expect(firstContext).not.toContain("Your offline message");
+		expect(resumed.contexts).toHaveLength(1);
+		expect(resumed.notices).toContain("Your offline message to alice was refused.");
+		expect(resumed.session.pendingRemoteCount()).toBe(0);
+		expect(await drainOffline(id, { dir })).toEqual([]);
 	});
 
 	it("retires a held message on receiver identity change and notifies the sender using the old address", async () => {

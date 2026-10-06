@@ -52,7 +52,7 @@ interface SessionMentionItem extends AutocompleteItem {
 }
 
 function sessionMentionPrefix(text: string): string | undefined {
-	return /(?:^|[\s='"])@("(?:\\.|[^"\\])*"?|[^\s"@]*)$/.exec(text)?.[0].replace(/^[\s='"]/, "");
+	return /(?:^|[\s='"])@("(?:\\"|[^"\\]|\\(?!"))*"?|[^\s"@]*)$/.exec(text)?.[0].replace(/^[\s='"]/, "");
 }
 
 interface PromptActionAutocompleteOptions {
@@ -167,12 +167,12 @@ export class PromptActionAutocompleteProvider implements AutocompleteProvider {
 			const query = sessionPrefix
 				.slice(sessionPrefix.startsWith('@"') ? 2 : 1)
 				.replace(/"$/, "")
-				.replace(/\\(["\\])/g, "$1")
+				.replace(/\\"/g, '"')
 				.toLowerCase();
 			const items: SessionMentionItem[] = sessions
 				.filter(session => subsequenceMatch(query, session.name.toLowerCase()))
 				.map(session => ({
-					value: `@${/^[A-Za-z0-9_-]+$/.test(session.name) ? session.name : `"${session.name.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`}`,
+					value: `@${/^[A-Za-z0-9_-]+$/.test(session.name) ? session.name : `"${session.name.replace(/"/g, '\\"')}"`}`,
 					label: `@${session.name}`,
 					description: `session · ${session.cwd}`,
 					sessionName: session.name,

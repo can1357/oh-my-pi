@@ -250,7 +250,12 @@ import { parseCommandArgs } from "../utils/command-args";
 import type { EditMode } from "@oh-my-pi/pi-tui/tools/edit";
 import { resolveFileDisplayMode } from "../utils/file-display-mode";
 import { extractFileMentions, generateFileMentionMessages } from "../utils/file-mentions";
-import { formatAddressForUrl, sessionAddress } from "../messaging/names";
+import {
+	formatAddressForUrl,
+	isReservedAddress,
+	RESERVED_SESSION_NAME_ERROR,
+	sessionAddress,
+} from "../messaging/names";
 import { permissionClassFromApproval, type PermissionClass } from "../messaging/policy";
 import type { SessionSnapshot } from "../messaging/protocol";
 import type { MessagingService, RemoteDelivery, SessionListing } from "../messaging/service";
@@ -428,7 +433,7 @@ import {
 	copySessionArtifacts,
 	extractSessionInit,
 	type PersistedSessionInit,
-	type SessionManager,
+	SessionManager,
 } from "./session-manager";
 import { SessionMemory, type SessionMemoryHost } from "./session-memory";
 import { buildSessionMetadata } from "./session-metadata";
@@ -1278,9 +1283,10 @@ export class AgentSession implements SettingsScope {
 	 *  it, so park the follow-up queue across the wake and restore it after. It stays queued post-wake
 	 *  because #canAutoContinueForFollowUp suppresses follow-up auto-resume while a user interrupt is
 	 *  in effect, even though the wake left a provider-valid tail. */
-	#wakeForIrc(records: AgentMessage[]): void {
+	#wakeForIrc(records: AgentMessage[], onDisposition?: (accepted: boolean) => void): void {
 		if (this.#modeExitDrainSuppressionDepth > 0) {
 			this.#irc.queueAside(records);
+			onDisposition?.(true);
 			return;
 		}
 		const sessionGeneration = this.#sessionGeneration;
@@ -1291,13 +1297,22 @@ export class AgentSession implements SettingsScope {
 		let generation = this.#promptGeneration;
 		let observation: TurnObservation | undefined;
 		let turnError: unknown;
+		let accepted = false;
+		const accept = () => {
+			accepted = true;
+			onDisposition?.(true);
+		};
 		// Acquire in-flight ownership only after both barriers; transitions drain
 		// in-flight turns and must not wait for their own blocked wake.
-		void Promise.all([this.whenWorkPoolYieldSettled(), this.waitForSessionTransition()])
+		void this.whenWorkPoolYieldSettled()
 			.then(async () => {
 				do {
-					await this.waitForSessionTransition();
-					if (await this.#sessionGenerationChanged(sessionGeneration)) return;
+					while (this.isSessionTransitioning) await this.waitForSessionTransition();
+					if (
+						this.#sessionGeneration !== sessionGeneration &&
+						(await this.#sessionGenerationChanged(sessionGeneration))
+					)
+						return;
 				} while (this.isSessionTransitioning);
 				if (this.#isDisposed || this.#unsubscribeAgent === undefined || this.sessionId !== sessionId) return;
 				// Synchronous ownership check, atomic with the dispatch below:
@@ -1311,11 +1326,13 @@ export class AgentSession implements SettingsScope {
 					// Flushing them as ordinary asides would feed them to the batch
 					// with no observer to reply to the sender.
 					this.#irc.queueDeferredWake(records);
+					accept();
 					logger.debug("IRC wake turn parked while pooled");
 					return;
 				}
 				if (this.agent.state.isStreaming) {
 					this.#irc.queueAside(records);
+					accept();
 					logger.debug("IRC wake turn deferred behind the running turn");
 					return;
 				}
@@ -1344,6 +1361,7 @@ export class AgentSession implements SettingsScope {
 				) {
 					this.#relayChain = [];
 				}
+				accept();
 				return this.agent.prompt(records);
 			})
 			.catch(error => {
@@ -1364,6 +1382,10 @@ export class AgentSession implements SettingsScope {
 				logger.warn("IRC wake turn failed", { error: String(error) });
 			})
 			.finally(async () => {
+				if (!accepted) {
+					for (const record of records) this.#irc.remoteEnteredContext(record);
+					onDisposition?.(false);
+				}
 				if (!acquired) return;
 				try {
 					await this.#waitForPostPromptRecovery(generation);
@@ -1674,7 +1696,7 @@ export class AgentSession implements SettingsScope {
 			isStreaming: () => this.isStreaming,
 			planModeEnabled: () => this.#planModeState?.enabled === true,
 			emitSessionEvent: event => this.#emitSessionEvent(event),
-			wakeForIrc: records => this.#wakeForIrc(records),
+			wakeForIrc: (records, onDisposition) => this.#wakeForIrc(records, onDisposition),
 		};
 		this.#irc = new IrcBridge(ircHost);
 		const prewalkHost: PrewalkCoordinatorHost = {
@@ -2734,8 +2756,7 @@ export class AgentSession implements SettingsScope {
 		if (!this.isStreaming) this.#relayChain = [];
 		for (const delivery of deliveries)
 			if (delivery.chain.length > this.#relayChain.length) this.#relayChain = delivery.chain;
-		await this.#irc.deliverRemote(deliveries);
-		return true;
+		return (await this.#irc.deliverRemote(deliveries)) !== "retired";
 	}
 
 	pendingRemoteCount(): number {
@@ -9993,7 +10014,14 @@ export class AgentSession implements SettingsScope {
 	/**
 	 * Set a display name for the current session.
 	 */
-	setSessionName(name: string, source: "auto" | "user" = "auto", trigger?: SessionNameTrigger): Promise<boolean> {
+	async setSessionName(
+		name: string,
+		source: "auto" | "user" = "auto",
+		trigger?: SessionNameTrigger,
+	): Promise<boolean> {
+		if (source === "user" && isReservedAddress(SessionManager.cleanTitle(name))) {
+			throw new Error(RESERVED_SESSION_NAME_ERROR);
+		}
 		const setSessionName = this.sessionManager.setSessionName as SetSessionNameWithTrigger;
 		return setSessionName.call(this.sessionManager, name, source, trigger);
 	}

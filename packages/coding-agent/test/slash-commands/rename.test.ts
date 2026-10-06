@@ -6,10 +6,13 @@ import { parseArgs } from "@oh-my-pi/pi-coding-agent/cli/args";
 import { CliUsageError } from "@oh-my-pi/pi-coding-agent/cli/usage-error";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import type { ExtensionActions, ExtensionUIContext } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
+import { initializeExtensions } from "@oh-my-pi/pi-coding-agent/modes/runtime-init";
 import { runRootCommand } from "@oh-my-pi/pi-coding-agent/main";
 import type { MessagingService } from "@oh-my-pi/pi-coding-agent/messaging/service";
 import { RESERVED_SESSION_NAME_ERROR } from "@oh-my-pi/pi-coding-agent/messaging/names";
 import { CommandController } from "@oh-my-pi/pi-coding-agent/modes/controllers/command-controller";
+import { ExtensionUiController } from "@oh-my-pi/pi-coding-agent/modes/controllers/extension-ui-controller";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import type { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
@@ -106,6 +109,69 @@ afterEach(async () => {
 		session = undefined;
 		authStorage = undefined;
 	}
+});
+
+it("rejects normalized reserved explicit names without mutating the session", async () => {
+	const { session, sessionManager } = createRuntime("headless");
+	await sessionManager.setSessionName("previous", "user");
+	const header = structuredClone(sessionManager.getHeader());
+	const entries = sessionManager.getEntries();
+	const revision = sessionManager.titleRevision;
+	const renamed = vi.fn();
+	sessionManager.onSessionNameChanged(renamed);
+	for (const name of [" all ", "\u0000all\u0007", " @extension "]) {
+		await expect(session.setSessionName(name, "user")).rejects.toThrow(RESERVED_SESSION_NAME_ERROR);
+		expect(session.sessionName).toBe("previous");
+		expect(sessionManager.titleRevision).toBe(revision);
+		expect(sessionManager.getHeader()).toEqual(header);
+		expect(sessionManager.getEntries()).toEqual(entries);
+	}
+	expect(renamed).not.toHaveBeenCalled();
+});
+
+it("rejects reserved renames through headless and interactive extension actions", async () => {
+	const { session, sessionManager, ctx } = createRuntime("headless");
+	await sessionManager.setSessionName("previous", "user");
+	let actions: ExtensionActions | undefined;
+	Object.defineProperty(session, "extensionRunner", {
+		configurable: true,
+		value: {
+			initialize: (bound: ExtensionActions) => {
+				actions = bound;
+			},
+			onError: () => {},
+			emit: async () => {},
+			getComposerShapes: () => [],
+		},
+	});
+	await initializeExtensions(session, { reportSendError: () => {}, reportRuntimeError: () => {} });
+	if (!actions) throw new Error("expected initialized extension actions");
+	await expect(actions.setSessionName("all")).rejects.toThrow(RESERVED_SESSION_NAME_ERROR);
+	ctx.syncComposerShape = () => {};
+	new ExtensionUiController(ctx).initializeHookRunner({} as ExtensionUIContext, true);
+	await expect(actions.setSessionName("all")).rejects.toThrow(RESERVED_SESSION_NAME_ERROR);
+	expect(sessionManager.getSessionName()).toBe("previous");
+});
+
+it("preserves a legacy reserved user title when branching before the root message with messaging off", async () => {
+	const manager = SessionManager.inMemory();
+	const rootId = manager.appendMessage({ role: "user", content: "Edit this root prompt", timestamp: 1 });
+	const legacy = manager.captureState();
+	manager.restoreState({
+		...legacy,
+		sessionName: "all",
+		titleSource: "user",
+		header: { ...legacy.header, title: "all", titleSource: "user" },
+	});
+	const { session } = createRuntime("headless", null, manager);
+	const previousId = session.sessionId;
+	expect(session.messaging).toBeUndefined();
+	const result = await session.branch(rootId);
+	expect(result).toMatchObject({ cancelled: false, selectedText: "Edit this root prompt" });
+	expect(session.sessionId).not.toBe(previousId);
+	expect(session.sessionName).toBe("all");
+	expect(manager.titleSource).toBe("user");
+	expect(session.messages).toEqual([]);
 });
 
 it("cancels title inference without applying or announcing a late rename", async () => {

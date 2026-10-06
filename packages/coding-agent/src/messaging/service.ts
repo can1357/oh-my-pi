@@ -1,4 +1,5 @@
 import { logger } from "@oh-my-pi/pi-utils";
+import { LRUCache } from "@oh-my-pi/pi-utils/lru";
 import * as fs from "node:fs/promises";
 import type { Settings } from "../config/settings";
 import { escapePeerText } from "../session/harness-tags";
@@ -104,7 +105,7 @@ export interface MessagingHost {
 }
 
 type BufferedDelivery =
-	| { type: "message"; delivery: RemoteDelivery; receiver: SenderInfo }
+	| { type: "message"; delivery: RemoteDelivery }
 	| { type: "notice"; from: RemoteSender; text: string; recipientSessionId: string }
 	| { type: "receipt"; text: string; recipientSessionId: string };
 
@@ -118,9 +119,11 @@ export class MessagingService {
 	#batching = 0;
 	#pendingHandoffs = 0;
 	#closing: Promise<void> | undefined;
+	#retiring: Promise<void> = Promise.resolve();
 	readonly #buffer: BufferedDelivery[] = [];
 	readonly #sent = new Map<string, number[]>();
-	readonly #outgoing = new Map<string, { entryId?: string; sessionId: string }>();
+	// ponytail: retirement notices older than the 1024 most recent sends cannot be correlated.
+	readonly #outgoing = new LRUCache<string, { entryId?: string; sessionId: string }>({ max: 1024 });
 	readonly #gate: InboundGate;
 	readonly #idle: IdleSubscriptions;
 	readonly #unsubscribe: () => void;
@@ -141,8 +144,10 @@ export class MessagingService {
 			onPolicyInputsChange: cb => host.onPolicyInputsChange(cb),
 			pendingRemoteCount: () => host.pendingRemoteCount() + this.#pendingHandoffs + this.#buffer.length,
 			deliverRemote: async deliveries => {
-				for (const delivery of deliveries)
-					this.#deliver({ type: "message", delivery, receiver: delivery.receiver ?? this.#sender() });
+				for (const delivery of deliveries) {
+					delivery.receiver ??= this.#sender();
+					this.#deliver({ type: "message", delivery });
+				}
 				return true;
 			},
 			deliverNotice: async (from, text, recipientSessionId) => {
@@ -189,12 +194,13 @@ export class MessagingService {
 	): Promise<MessagingService> {
 		const service = new MessagingService(host, settings);
 		service.#suspendedIdentity = suspendedIdentity;
-		let receiver: SenderInfo;
+		const initialized = Promise.withResolvers<SenderInfo>();
 		try {
-			service.#publication = await publishInbox((request, auth) => service.#receive(request, auth, receiver), {
-				sessionId: service.#ownSessionId(),
-			});
-			receiver = service.#sender();
+			service.#publication = await publishInbox(
+				async (request, auth) => service.#receive(request, auth, await initialized.promise),
+				{ sessionId: service.#ownSessionId() },
+			);
+			initialized.resolve(service.#sender());
 			const mail = await withOfflineMailboxLock(
 				service.#ownSessionId(),
 				() => drainOfflineUnlocked(service.#ownSessionId(), { dir: service.#publication.registryDir }),
@@ -262,7 +268,7 @@ export class MessagingService {
 		void this.#reply(
 			item.delivery.sender,
 			{ type: "notice", kind: "retired", subject: "message", aboutId: item.delivery.id },
-			item.receiver,
+			item.delivery.receiver,
 		);
 	}
 
@@ -277,7 +283,7 @@ export class MessagingService {
 		void this.host
 			.deliverRemote(owned.map(item => item.delivery))
 			.then(delivered => {
-				if (!delivered && !this.#closed) for (const item of owned) this.#retireDelivery(item);
+				if (!delivered) for (const item of owned) this.#retireDelivery(item);
 			})
 			.catch(error => logger.warn("Failed to deliver cross-session messages", { error: String(error) }))
 			.finally(() => {
@@ -303,17 +309,13 @@ export class MessagingService {
 
 	#flush(): void {
 		if (!this.#ready || this.#suspended > 0 || this.#batching > 0 || this.#closed) return;
+		const messages: Extract<BufferedDelivery, { type: "message" }>[] = [];
 		while (this.#buffer.length > 0 && this.#suspended === 0) {
 			const item = this.#buffer.shift()!;
-			if (item.type !== "message") {
-				this.#deliver(item);
-				continue;
-			}
-			const items = [item];
-			while (this.#buffer[0]?.type === "message")
-				items.push(this.#buffer.shift()! as Extract<BufferedDelivery, { type: "message" }>);
-			this.#forwardMessages(items);
+			if (item.type === "message") messages.push(item);
+			else this.#deliver(item);
 		}
+		this.#forwardMessages(messages);
 	}
 
 	ownAddress(): string | null {
@@ -718,21 +720,37 @@ export class MessagingService {
 			logger.warn("Messaging notice failed", { error: String(error) });
 		}
 	}
-	async retireConversation(): Promise<void> {
+	retireConversation(): Promise<void> {
+		const retirement = this.#retiring.then(() => this.#retireConversation());
+		this.#retiring = retirement.catch(() => {});
+		return retirement;
+	}
+
+	async #retireConversation(): Promise<void> {
 		if (this.#closed || this.#suspended > 0) return;
 		this.#outgoing.clear();
 		this.#flush();
 		await Promise.all([this.#gate.retire(), this.#idle.retire()]);
+		if (this.#closed || this.#suspended > 0) return;
 		const previous = this.#publication;
 		const receiver = this.#sender();
+		const initialized = Promise.withResolvers<void>();
 		const publication: InboxPublication = await publishInbox(
-			(request, auth) => this.#receive(request, auth, receiver),
+			async (request, auth) => {
+				await initialized.promise;
+				return this.#receive(request, auth, receiver);
+			},
 			{ dir: previous.registryDir, sessionId: receiver.sessionId },
 		);
 		receiver.entryId = publication.entryId;
+		initialized.resolve();
+		if (this.#closed || this.#suspended > 0 || receiver.sessionId !== this.#ownSessionId()) {
+			await publication.close();
+			return;
+		}
 		this.#publication = publication;
 		await previous.close();
-		await this.#deliverOfflineMail(await drainOffline(this.host.sessionId(), { dir: this.#publication.registryDir }));
+		await this.#deliverOfflineMail(await drainOffline(receiver.sessionId, { dir: publication.registryDir }));
 	}
 
 	async #notifyOfflineRefusal(message: StoredMessage): Promise<void> {
@@ -852,6 +870,7 @@ export class MessagingService {
 		this.#buffer.length = 0;
 		this.#outgoing.clear();
 		this.#sent.clear();
+		await this.#retiring;
 		await this.#publication.close();
 	}
 }

@@ -27,27 +27,6 @@ afterEach(() => {
 });
 
 describe("cross-session naming UI", () => {
-	it("rejects normalized reserved user names before mutating the session", async () => {
-		const manager = SessionManager.inMemory();
-		await manager.setSessionName("previous", "user");
-		const header = structuredClone(manager.getHeader());
-		const entries = manager.getEntries();
-		const revision = manager.titleRevision;
-		const renamed = vi.fn();
-		manager.onSessionNameChanged(renamed);
-		for (const name of [" all ", "\u0000all\u0007", " @extension "]) {
-			await expect(manager.setSessionName(name, "user")).rejects.toThrow(RESERVED_SESSION_NAME_ERROR);
-			expect(manager.getSessionName()).toBe("previous");
-			expect(manager.titleRevision).toBe(revision);
-			expect(manager.getHeader()).toEqual(header);
-			expect(manager.getEntries()).toEqual(entries);
-		}
-		expect(renamed).not.toHaveBeenCalled();
-		const autoManager = SessionManager.inMemory();
-		await autoManager.setSessionName("all", "auto");
-		expect(autoManager.getSessionName()).toBe("all");
-	});
-
 	it("keeps reserved persisted titles readable but advertises only safe addresses", () => {
 		const title = {
 			cwd: "/project",

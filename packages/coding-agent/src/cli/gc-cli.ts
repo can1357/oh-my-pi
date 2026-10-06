@@ -136,7 +136,6 @@ export interface StaleGcResult {
 	/** Collab guest replicas beyond the retention window. */
 	expiredReplicas: number;
 	expiredMail: number;
-	orphanedMail: number;
 	wouldDelete: number;
 	deleted: number;
 	bytes: number;
@@ -578,7 +577,7 @@ async function runBlobGc(options: ResolvedGcOptions, archiveSessionsRoot: string
 }
 
 interface StaleCandidate {
-	kind: "danglingMarkers" | "staleBreadcrumbs" | "expiredReports" | "expiredReplicas" | "expiredMail" | "orphanedMail";
+	kind: "danglingMarkers" | "staleBreadcrumbs" | "expiredReports" | "expiredReplicas" | "expiredMail";
 	/** Removed together; the first path is the entry itself. */
 	paths: string[];
 	bytes: number;
@@ -670,7 +669,7 @@ async function runStaleGc(options: ResolvedGcOptions): Promise<StaleGcResult> {
 	const breadcrumbDir = getTerminalSessionsDir(options.agentDir);
 	const mailDir = (await resolveRegistry(messagingRegistryDir(), false)).dir;
 	const candidates: StaleCandidate[] = [
-		...(await collectOfflineMailGcCandidates({ dir: mailDir, graceMs: GC_WRITE_GRACE_MS })).map(mail => ({
+		...(await collectOfflineMailGcCandidates({ dir: mailDir })).map(mail => ({
 			kind: mail.kind,
 			paths: [mail.file],
 			bytes: mail.bytes,
@@ -719,7 +718,6 @@ async function runStaleGc(options: ResolvedGcOptions): Promise<StaleGcResult> {
 		expiredReports: 0,
 		expiredReplicas: 0,
 		expiredMail: 0,
-		orphanedMail: 0,
 		wouldDelete: 0,
 		deleted: 0,
 		bytes: 0,
@@ -735,8 +733,7 @@ async function runStaleGc(options: ResolvedGcOptions): Promise<StaleGcResult> {
 			if (!options.apply) continue;
 			try {
 				if (candidate.mail) {
-					if (await removeOfflineMailGcCandidate(candidate.mail, { dir: mailDir, graceMs: GC_WRITE_GRACE_MS }))
-						result.deleted += 1;
+					if (await removeOfflineMailGcCandidate(candidate.mail, { dir: mailDir })) result.deleted += 1;
 				} else {
 					const sessionId = candidate.ownedSession ? await readSessionHeaderId(candidate.ownedSession) : undefined;
 					for (const target of candidate.paths) await fs.rm(target, { recursive: true, force: true });
@@ -1988,7 +1985,7 @@ function renderText(result: GcResult): string {
 	if (result.stale) {
 		const stale = result.stale;
 		lines.push(
-			`stale: ${stale.deleted}/${stale.wouldDelete} entries, ${formatBytes(stale.bytes)} (${stale.danglingMarkers} session markers, ${stale.staleBreadcrumbs} breadcrumbs, ${stale.expiredReports} reports, ${stale.expiredReplicas} collab replicas, ${stale.expiredMail} expired mail, ${stale.orphanedMail} orphaned mail)`,
+			`stale: ${stale.deleted}/${stale.wouldDelete} entries, ${formatBytes(stale.bytes)} (${stale.danglingMarkers} session markers, ${stale.staleBreadcrumbs} breadcrumbs, ${stale.expiredReports} reports, ${stale.expiredReplicas} collab replicas, ${stale.expiredMail} expired mail)`,
 		);
 		if (stale.errors.length > 0) lines.push(`stale errors: ${stale.errors.length}`);
 	}

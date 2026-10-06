@@ -631,18 +631,18 @@ Cross-session messaging is opt-in for top-level sessions on the same machine. En
 | --- | --- | --- | --- |
 | `messaging.enabled` | boolean | `false` | Enable cross-session messaging for this session. |
 | `messaging.crossSessionInbound` | enum | `default` | `default` (unset), `accept`, `hold`, or `refuse`. Explicit hold queues messages without expiry; refuse rejects them. |
-| `messaging.dialogExpiry` | enum | `5m` | Default-policy approval expiry: `60s`, `5m`, `10m`, or `never`. Does not apply to explicit hold. |
+| `messaging.dialogExpiry` | enum | `5m` | Default-policy approval expiry: `60s`, `5m`, `10m`, or `never`. Starts when the TUI dialog is presented, or when a headless hold is created. Does not apply to explicit or invalid-policy holds. |
 | `messaging.send` | enum | `allow` | `allow` or `deny` sending to other sessions. |
 | `messaging.list` | enum | `allow` | `allow` or `deny` showing the other-sessions roster. Denying listing does not prevent sending by address. |
 | `messaging.rateLimit` | number | `30` | Positive integer: maximum messages per sender per rate window. |
 | `messaging.rateWindowSeconds` | number | `60` | Positive integer: rate-window length in seconds. |
-| `messaging.repeatWindowSeconds` | number | `30` | Positive integer: drop a message identical to one the same sender sent within this many seconds. |
+| `messaging.repeatWindowSeconds` | number | `30` | Positive integer: drop an identical message from the same sender while it remains in the bounded repeat history and within this window. |
 | `messaging.relayMaxHops` | number | `8` | Positive integer: drop a relay chain when it reaches this many hops. |
 | `messaging.relayMaxRevisits` | number | `3` | Positive integer (at least 1): drop a chain when it has revisited this session this many times. |
 
 Inbound policy has a stricter trust boundary than ordinary settings precedence. The trusted baseline is the first set valid value from **runtime override → `--config` overlay → global config**. `default` means unset, so resolution continues to the next trusted layer. Project configuration can only tighten that baseline (`refuse > hold > accept`); with no trusted baseline, a project can impose `hold` or `refuse`, but never `accept`.
 
-An invalid raw inbound value in any layer forces messages to be held for approval, even if another layer says `accept`. If any layer says `refuse` while an invalid value is present, refusal wins. The invalid value produces a warning once per process; correcting it restores normal policy resolution.
+An invalid raw inbound value in any layer forces an explicit-style hold, even if another layer says `accept`. If any layer says `refuse` while an invalid value is present, refusal wins. Invalid-policy holds display a notice and have no approval-dialog expiry. The invalid value produces a warning once per process; correcting it restores normal policy resolution. Observed raw-layer changes, including project policy changes masked by a trusted effective value, re-evaluate held messages: accept releases them and refuse drops them.
 
 With no explicit inbound policy, the permission classes determine delivery:
 
@@ -651,7 +651,9 @@ With no explicit inbound policy, the permission classes determine delivery:
 | Bypass | Accept | Hold for approval | Hold for approval |
 | Prompting | Hold for approval | Accept | Accept |
 
-`yolo` is bypass; `always-ask` and `write` are prompting. An ACP session is bypass only when auto-approval is explicitly enabled. An authenticated own-child script message is accepted by default regardless of permission class, but still obeys explicit hold/refuse and invalid-value protection. Default-policy holds use the approval dialog when available; headless sessions retain them until policy changes or expiry.
+`yolo` is bypass; `always-ask` and `write` are prompting. An ACP session is bypass only when auto-approval is explicitly enabled. An own-child script authenticated with that session's `OMP_MESSAGING_TOKEN` is accepted by default regardless of permission class, but still obeys explicit hold/refuse and invalid-value protection. Omitting `from` without the token does not obtain this exemption; omp does not use Linux/macOS process evidence to recognize own children. Default-policy holds use the approval dialog when available, with expiry starting at presentation; headless holds expire from creation. Explicit and invalid-policy holds emit a notice and do not expire.
+
+The receiver's per-sender rate limit and sender-side burst guard use each session's own settings independently. Repeat history is bounded to 4,096 entries and an estimated 8 MiB, so eviction can allow an otherwise identical message within the configured window. Ordinary messages are remembered only after successful admission. Idle notices require a matching outstanding subscription and share rate/repeat and accepted-queue limits. See [Cross-session messaging](./agent-hub.md#cross-session-messaging) for receipts, offline mail, and lifecycle details.
 
 ### Window-scoped computer use
 

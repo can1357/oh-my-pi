@@ -2518,7 +2518,7 @@ describe("runGcCommand stale state", () => {
 });
 
 describe("offline mail GC", () => {
-	test("dry-run reports TTL-expired and proven-orphaned mail, then apply deletes only those records", async () => {
+	test("dry-run reports only TTL-expired mail, then apply preserves unexpired mail with missing owners", async () => {
 		const now = Date.now();
 		setSystemTime(now);
 		const owned = await writeSession(root, "project", "owned", "complete");
@@ -2572,44 +2572,67 @@ describe("offline mail GC", () => {
 		});
 		const flags = { agentDir: root, stale: true, staleRetainNewest: 100, staleRetainDays: 365 };
 		const dry = await runGcCommand({ flags });
-		expect(dry.stale).toMatchObject({ expiredMail: 1, orphanedMail: 1, wouldDelete: 2, deleted: 0, errors: [] });
-		const bytes = (await stat(files[0])).size + (await stat(files[1])).size;
+		expect(dry.stale).toMatchObject({ expiredMail: 1, wouldDelete: 1, deleted: 0, errors: [] });
+		const bytes = (await stat(files[0])).size;
 		expect(dry.stale?.bytes).toBe(bytes);
 		for (const file of files) expect(await Bun.file(file).exists()).toBe(true);
 		const applied = await runGcCommand({ flags: { ...flags, apply: true } });
-		expect(applied.stale).toMatchObject({ expiredMail: 1, orphanedMail: 1, deleted: 2, bytes, errors: [] });
-		for (const file of files.slice(0, 2)) expect(await Bun.file(file).exists()).toBe(false);
-		for (const file of files.slice(2)) expect(await Bun.file(file).exists()).toBe(true);
+		expect(applied.stale).toMatchObject({ expiredMail: 1, deleted: 1, bytes, errors: [] });
+		expect(await Bun.file(files[0]).exists()).toBe(false);
+		for (const file of files.slice(1)) expect(await Bun.file(file).exists()).toBe(true);
 	});
 
-	test("rechecks orphan proof at apply so a restored transcript keeps its mail", async () => {
-		const missing = path.join(root, "restored.jsonl");
-		await mailbox.enqueueOffline("restored", {
-			id: "retained",
-			from: {
-				sessionId: "sender",
-				name: "sender",
-				shortId: "12345678",
-				cwd: root,
-				entryId: "sender-entry",
-				class: "bypass",
-			},
-			body: "retain",
-			chain: [],
-			sentAt: Date.now(),
-			sessionFile: missing,
-		});
-		const file = path.join(mailbox.mailboxDir("restored"), (await fs.readdir(mailbox.mailboxDir("restored")))[0]);
-		await agePath(file);
-		const collect = mailbox.collectOfflineMailGcCandidates;
-		spyOn(mailbox, "collectOfflineMailGcCandidates").mockImplementation(async options => {
-			const candidates = await collect(options);
-			await Bun.write(missing, '{"type":"session","id":"restored"}\n');
-			return candidates;
-		});
-		const result = await runGcCommand({ flags: { agentDir: root, stale: true, apply: true } });
-		expect(result.stale).toMatchObject({ orphanedMail: 1, deleted: 0, errors: [] });
-		expect(await Bun.file(file).exists()).toBe(true);
+	test("a stopped session moved to another cwd keeps unexpired mail through stale apply", async () => {
+		const originalAgentDir = getAgentDir();
+		setAgentDir(root);
+		try {
+			const before = path.join(root, "before");
+			const after = path.join(root, "after");
+			await fs.mkdir(before);
+			await fs.mkdir(after);
+			const original = SessionManager.create(before);
+			const sessionId = original.getSessionId();
+			const oldFile = original.getSessionFile()!;
+			try {
+				await original.ensureOnDisk();
+			} finally {
+				await original.close();
+			}
+			await mailbox.enqueueOffline(sessionId, {
+				id: "retained",
+				from: {
+					sessionId: "sender",
+					name: "sender",
+					shortId: "12345678",
+					cwd: root,
+					entryId: "sender-entry",
+					class: "bypass",
+				},
+				body: "mail queued before relocation",
+				chain: [],
+				sentAt: Date.now(),
+				sessionFile: oldFile,
+			});
+			const inbox = mailbox.mailboxDir(sessionId);
+			const file = path.join(inbox, (await fs.readdir(inbox))[0]);
+			await agePath(file);
+			// No messaging service is running during resume/move.
+			const resumed = await SessionManager.open(oldFile, undefined, undefined, { suppressBreadcrumb: true });
+			try {
+				await resumed.moveTo(after);
+				expect(resumed.getSessionId()).toBe(sessionId);
+				expect(resumed.getSessionFile()).not.toBe(oldFile);
+				expect(await Bun.file(resumed.getSessionFile()!).exists()).toBe(true);
+				expect(await Bun.file(oldFile).exists()).toBe(false);
+			} finally {
+				await resumed.close();
+			}
+			const result = await runGcCommand({ flags: { agentDir: root, stale: true, apply: true } });
+			expect(result.stale).toMatchObject({ expiredMail: 0, wouldDelete: 0, deleted: 0, errors: [] });
+			expect((await mailbox.drainOffline(sessionId)).map(item => item.message.id)).toEqual(["retained"]);
+		} finally {
+			setAgentDir(originalAgentDir);
+		}
 	});
 });
 

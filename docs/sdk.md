@@ -367,6 +367,8 @@ Use these when you want partial control without recreating internal discovery lo
 - `discoverMCPServers(cwd?)`
 - `buildSystemPrompt(options?)`
 
+`BuildSystemPromptOptions` includes `messagingEnabled?: boolean`, `messagingSendAllowed?: boolean`, and `messagingListAllowed?: boolean`. `buildSystemPrompt({ messagingEnabled: true })` renders messaging guidance only: it does not enable the setting, publish an inbox, discover peers, or provide credentials. Listing guidance additionally requires the read tool and `messagingListAllowed !== false`; sending guidance requires the write tool and `messagingSendAllowed !== false`. Tool references use the exposed tool names. The normal session prompt rebuild derives these flags from the binding and current policy; a custom host must supply them honestly.
+
 ## Host integration options
 
 - `hasUI` defaults to `false`; enable it only for hosts with interactive UI.
@@ -382,6 +384,16 @@ Use these when you want partial control without recreating internal discovery lo
   `systemPrompt` control different prompt layers. See
   [System prompt customization](./system-prompt-customization.md) for their
   replacement and discovery contracts.
+
+### Cross-session messaging lifecycle
+
+`createAgentSession()` does not bind a cross-session inbox by itself, even when its settings enable messaging. Binding belongs to the interactive, RPC, print, and ACP mode wrappers, which bind before extension startup and release buffered deliveries after their consumers are ready. Subagent sessions do not bind an inbox. In every mode, messaging credentials are supplied only to session-bound shell and extension/hook exec calls, never exported to ambient `process.env`; direct extension or hook spawns do not get that overlay automatically.
+
+The concrete RPC runner accepts `RpcModeOptions.name?: string`, and the concrete print runner accepts `PrintModeOptions.name?: string`, to set a user address. An unnamed direct print run is addressable only by short id; print names are stored without collision checking. These options belong to the concrete mode modules, not `CreateAgentSessionOptions`; the server runners are not exported by the package's modes barrel. There is no new `messagingEnabled`, `messaging`, or `name` option on `CreateAgentSessionOptions`.
+
+Messaging-enabled print runs close receive admission synchronously when the final CLI prompt's attributed work completes, then drain already accepted turns with outbound messaging still usable before disposing the inbox. New messages and subscriptions are rejected after this cutoff; unadmitted offline mail remains on disk. A nested assistant turn started by an extension command supplies that command's selected answer and terminal failure status rather than being mistaken for a local-only command; JSON mode still emits the nested events. An unrelated peer wake does not replace the CLI answer.
+
+Use the mode-owned lifecycle rather than treating prompt rendering or `AgentSession.setMessaging()` as automatic inbox setup. Policy and limits use the existing `messaging.*` settings; see [Messages](./settings.md#messages).
 
 ## Subagent-oriented options
 

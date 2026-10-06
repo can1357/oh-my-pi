@@ -427,7 +427,7 @@ export async function collectRegisteredSessionFiles(registryDir: string): Promis
 			const file = path.resolve(recorded);
 			if ((await fs.promises.stat(file)).isFile()) files.set(normalizePathForComparison(file), file);
 		} catch (error) {
-			if (!isEnoent(error)) throw error;
+			if (!isEnoent(error) && (error as NodeJS.ErrnoException).code !== "ENOTDIR") throw error;
 		}
 	}
 	return [...files.values()];

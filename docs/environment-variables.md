@@ -562,8 +562,8 @@ These affect where coding-agent stores data and which process-local settings ove
 | `CLAUDE_CODE_SHELL_PREFIX` | Legacy alias fallback for `PI_SHELL_PREFIX`                                    |
 | `VISUAL`                   | Preferred external editor command                                              |
 | `EDITOR`                   | Fallback external editor command                                               |
-| `OMP_MESSAGING_SOCKET`     | Output only: set by a session with cross-session messaging bound, for its own shells and hooks; socket path or pipe name of its inbox. Missing or empty means unavailable. See [Agent Hub](./agent-hub.md#limits-and-scripts) |
-| `OMP_MESSAGING_TOKEN`      | Output only: secret own-child token paired with `OMP_MESSAGING_SOCKET`; never publish it. ACP hooks get both through the session-bound exec, not ambient `process.env` |
+| `OMP_MESSAGING_SOCKET` | Output only: injected into a bound session's shell commands and session-bound extension/hook exec calls in every mode; socket path or pipe name of that session's inbox. Not exported to omp's ambient `process.env`. Missing or empty means unavailable. See [Agent Hub](./agent-hub.md#limits-and-scripts). |
+| `OMP_MESSAGING_TOKEN` | Output only: secret own-child token paired with `OMP_MESSAGING_SOCKET`, scoped to the same session-bound execution calls. Required to recognize an own child on every platform; never publish it. Direct hook/extension spawns do not receive the session overlay automatically. |
 
 `PI_BASH_NO_CI`, `PI_BASH_NO_LOGIN`, and `PI_SHELL_PREFIX` use their `CLAUDE_*` aliases when the canonical variable is unset or empty. These controls use non-empty string checks, not boolean parsing: even `0` or `false` activates the corresponding no-CI/no-login control.
 

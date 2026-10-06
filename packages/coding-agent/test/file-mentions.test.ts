@@ -1,8 +1,9 @@
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, test, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { extractFileMentions, generateFileMentionMessages } from "@oh-my-pi/pi-coding-agent/utils/file-mentions";
+import * as pathUtils from "@oh-my-pi/pi-coding-agent/tools/path-utils";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
 import { KeybindingsManager } from "@oh-my-pi/pi-tui/app-keybindings";
 import { createPromptActionAutocompleteProvider } from "@oh-my-pi/pi-tui/prompt/prompt-action-autocomplete";
@@ -10,6 +11,7 @@ import { createPromptActionAutocompleteProvider } from "@oh-my-pi/pi-tui/prompt/
 const tempDirs: string[] = [];
 
 afterEach(async () => {
+	vi.restoreAllMocks();
 	for (const dir of tempDirs.splice(0, tempDirs.length)) {
 		await removeWithRetries(dir);
 	}
@@ -46,6 +48,16 @@ describe("quoted session mention identity", () => {
 		},
 	);
 
+	test("preserves both leading backslashes in a raw quoted UNC path", () => {
+		expect(extractFileMentions(String.raw`@"\\server\share\my file.txt"`)).toEqual([
+			String.raw`\\server\share\my file.txt`,
+		]);
+	});
+
+	test("allows a trailing backslash in a single-quoted name", () => {
+		expect(extractFileMentions(String.raw`@'release notes\'`)).toEqual([String.raw`release notes` + "\\"]);
+	});
+
 	test("preserves unknown escapes, single quotes, punctuation, boundaries and deduplication", () => {
 		expect(extractFileMentions(String.raw`@"C:\tmp\file.txt" @'C:\tmp\file.txt'`)).toEqual([
 			String.raw`C:\tmp\file.txt`,
@@ -57,6 +69,27 @@ describe("quoted session mention identity", () => {
 });
 
 describe("generateFileMentionMessages path resolution", () => {
+	test("passes a raw quoted UNC path intact to file resolution and reads its attachment", async () => {
+		const cwd = await createTempDir();
+		const fixture = path.join(cwd, "my file.txt");
+		await Bun.write(fixture, "network attachment contents");
+		const unc = String.raw`\\server\share\my file.txt`;
+		const resolveReadPath = pathUtils.resolveReadPath;
+		// Use a real local file for the share so this test needs no external SMB server.
+		vi.spyOn(pathUtils, "resolveReadPath").mockImplementation((filePath, base) =>
+			filePath === unc ? fixture : resolveReadPath(filePath, base),
+		);
+		const mentions = extractFileMentions(String.raw`@"\\server\share\my file.txt"`);
+		const messages = await generateFileMentionMessages(mentions, cwd);
+		expect(messages).toHaveLength(1);
+		const message = messages[0];
+		if (message?.role !== "fileMention") throw new Error("expected UNC file mention attachment");
+		expect(message.files[0]).toMatchObject({
+			path: unc,
+			content: expect.stringContaining("network attachment contents"),
+		});
+	});
+
 	test("auto-reads an exact file path", async () => {
 		const cwd = await createTempDir();
 		await fs.mkdir(path.join(cwd, "src"), { recursive: true });
