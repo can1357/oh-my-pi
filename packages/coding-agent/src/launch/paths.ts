@@ -93,17 +93,20 @@ export function daemonBrokerEndpoint(projectDir: string, runtimeDir: string): st
 	return path.join(runtimeDir, "broker.sock");
 }
 
-/** What a connect to a scope endpoint says about its broker. */
-export type BrokerEndpointState = "live" | "dead" | "unknown";
+/**
+ * What a connect to a scope endpoint says about its broker. `absent` (ENOENT):
+ * no socket exists there, so nothing can serve the scope. `refused`
+ * (ECONNREFUSED): normally nothing listens on the socket, but Bun reports a
+ * live listener whose accept queue is full the same way. `unknown`: any other
+ * error (EACCES, say) or the timeout, after which the listener may still be
+ * alive.
+ */
+export type BrokerEndpointState = "live" | "absent" | "refused" | "unknown";
 
 /**
- * Whether a broker is accepting connections on the scope endpoint right now.
- * `dead` on ENOENT or ECONNREFUSED, which normally mean nothing listens there;
- * Bun also reports a live listener's full accept queue as ECONNREFUSED, so
- * that case reads as dead too. Any other error (EACCES, say) or the timeout is
- * `unknown`, since such a listener may still be alive. Unlike a recorded pid,
- * this answers the same in every PID namespace that shares the runtime
- * directory.
+ * Whether a broker is accepting connections on the scope endpoint right now
+ * (see {@link BrokerEndpointState}). Unlike a recorded pid, this answers the
+ * same in every PID namespace that shares the runtime directory.
  */
 export function probeBrokerEndpoint(endpoint: string): Promise<BrokerEndpointState> {
 	const { promise, resolve } = Promise.withResolvers<BrokerEndpointState>();
@@ -116,9 +119,11 @@ export function probeBrokerEndpoint(endpoint: string): Promise<BrokerEndpointSta
 		resolve(state);
 	};
 	socket.once("connect", () => finish("live"));
-	socket.once("error", error =>
-		finish(hasFsCode(error, "ENOENT") || hasFsCode(error, "ECONNREFUSED") ? "dead" : "unknown"),
-	);
+	socket.once("error", error => {
+		if (hasFsCode(error, "ENOENT")) finish("absent");
+		else if (hasFsCode(error, "ECONNREFUSED")) finish("refused");
+		else finish("unknown");
+	});
 	socket.setTimeout(ENDPOINT_PROBE_TIMEOUT_MS, () => finish("unknown"));
 	return promise;
 }

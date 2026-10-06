@@ -14,6 +14,7 @@ const STALE = new Date(Date.now() - 30 * 60_000);
 /** Namespace identity no process on this host records: a different boot and PID namespace. */
 const FOREIGN_DOMAIN = "00000000-0000-0000-0000-000000000000/pid:[1]";
 const PRESENCE_WRITER = path.join(import.meta.dir, "..", "fixtures", "daemon-presence-writer.ts");
+const STALLED_LISTENER = path.join(import.meta.dir, "..", "fixtures", "stalled-unix-listener.ts");
 let deadPid = 0;
 
 beforeAll(async () => {
@@ -52,6 +53,33 @@ async function scope(
 	}
 	if (init.stale) await fs.utimes(dir, STALE, STALE);
 	return dir;
+}
+
+/** Start the stalled listener fixture on `socketPath` once it listens there. */
+async function startStalledListener(socketPath: string): Promise<Bun.Subprocess> {
+	const listener = Bun.spawn([process.execPath, STALLED_LISTENER, socketPath], { stdout: "pipe", stderr: "inherit" });
+	const { value } = await (listener.stdout as ReadableStream<Uint8Array>).getReader().read();
+	if (!value) throw new Error("stalled listener exited before listening");
+	return listener;
+}
+
+/**
+ * Connect to a listener that never accepts until its accept queue is full.
+ * Returns the sockets holding the queue full and the error code of the first
+ * connect it refused.
+ */
+async function fillAcceptQueue(endpoint: string): Promise<{ held: net.Socket[]; refusal: string | undefined }> {
+	const held: net.Socket[] = [];
+	for (let attempt = 0; attempt < 10_000; attempt++) {
+		const socket = net.createConnection({ path: endpoint });
+		const { promise, resolve } = Promise.withResolvers<string | undefined>();
+		socket.once("connect", () => resolve(undefined));
+		socket.once("error", (error: NodeJS.ErrnoException) => resolve(error.code ?? error.message));
+		const refusal = await promise;
+		if (refusal !== undefined) return { held, refusal };
+		held.push(socket);
+	}
+	return { held, refusal: undefined };
 }
 
 describe("pruneDeadDaemonRuntimeDirs", () => {
@@ -222,8 +250,8 @@ describe("pruneDeadDaemonRuntimeDirs", () => {
 			await listening.promise;
 			try {
 				// A live listener this process may not connect to (EACCES), which says
-				// nothing about whether the broker is gone. (A full accept queue is no
-				// such case: Bun reports it as ECONNREFUSED, which reads as dead.)
+				// nothing about whether the broker is gone. (Bun reports a full accept
+				// queue as ECONNREFUSED instead; a test below covers that.)
 				await fs.chmod(endpoint, 0o000);
 				await fs.utimes(busy, STALE, STALE);
 
@@ -283,6 +311,50 @@ describe("pruneDeadDaemonRuntimeDirs", () => {
 
 			expect({ entry: await fs.exists(entry), lease: await fs.exists(lease) }).toEqual({ entry: true, lease: true });
 		},
+	);
+
+	// On Windows the endpoint is a named pipe, not this socket.
+	it.skipIf(process.platform === "win32")(
+		"keeps a scope whose live broker refuses connections behind a lease without a domain, and still reclaims a dead one",
+		async () => {
+			using tempDir = TempDir.createSync("@omp-daemon-prune-backlog-");
+			const daemons = path.join(tempDir.path(), "run", "daemons");
+			const current = path.join(daemons, "aaaaaaaaaaaaaaaa");
+			await fs.mkdir(current, { recursive: true });
+			const own = await ownPresenceRecord(tempDir.path());
+			// A live broker from an older build in another PID namespace: its lease
+			// records no domain, and its pid names no process here.
+			const busy = await scope(daemons, "bbbbbbbbbbbbbbbb", { pid: "dead" });
+			// A broker of this namespace that died without cleaning up, leaving its
+			// socket file behind.
+			const crashed = await scope(daemons, "cccccccccccccccc", {});
+			await Bun.write(path.join(crashed, "broker.pid"), JSON.stringify({ pid: deadPid, domain: own.domain }));
+			const crashedListener = await startStalledListener(path.join(crashed, "broker.sock"));
+			crashedListener.kill("SIGKILL");
+			await crashedListener.exited;
+			const busyListener = await startStalledListener(path.join(busy, "broker.sock"));
+			let held: net.Socket[] = [];
+			try {
+				// Once the busy broker's accept queue is full, a connect to it is
+				// refused exactly as one to the dead broker's socket is.
+				const queue = await fillAcceptQueue(path.join(busy, "broker.sock"));
+				held = queue.held;
+				expect(queue.refusal).toBe("ECONNREFUSED");
+				for (const dir of [busy, crashed]) await fs.utimes(dir, STALE, STALE);
+
+				await pruneDeadDaemonRuntimeDirs(current);
+
+				expect({ busy: await fs.exists(busy), crashed: await fs.exists(crashed) }).toEqual({
+					busy: true,
+					crashed: false,
+				});
+			} finally {
+				for (const socket of held) socket.destroy();
+				busyListener.kill("SIGKILL");
+				await busyListener.exited;
+			}
+		},
+		30_000,
 	);
 
 	it("does nothing when the runtime root does not exist", async () => {

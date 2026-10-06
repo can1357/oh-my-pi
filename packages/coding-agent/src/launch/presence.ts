@@ -210,11 +210,12 @@ export async function readLiveDaemonBrokerPid(runtimeDir: string): Promise<numbe
  * project directories leave behind (issue #8674).
  *
  * Best-effort and non-throwing: a scope is deleted only when its `broker.pid`
- * is absent/dead, no live client presence remains, its endpoint reports that
+ * is absent/dead, no live client presence remains, its endpoint shows that
  * nothing listens there, and it has been untouched for
  * {@link DAEMON_RUNTIME_STALE_GRACE_MS}. A record written in another domain
  * (see {@link daemonProcessDomain}) or one this process cannot read keeps the
- * scope, and the sweep never removes presence entries. The caller's own
+ * scope, as does a refused connect behind a `broker.pid` without a domain, and
+ * the sweep never removes presence entries. The caller's own
  * `currentRuntimeDir` is always skipped, and the sweep runs only inside the
  * {@link DAEMONS_DIR} container over entries named like a {@link DAEMON_SCOPE_KEY}
  * — so a runtime dir relocated elsewhere (e.g. the smoke test under
@@ -252,7 +253,15 @@ export async function pruneDeadDaemonRuntimeDirs(currentRuntimeDir: string): Pro
 			// The project dir only names a Windows pipe; a scope without scope.json
 			// there cannot be probed, and the checks above decide alone.
 			const endpoint = daemonBrokerEndpoint((await readDaemonScopeMeta(dir)) ?? dir, dir);
-			if ((await probeBrokerEndpoint(endpoint)) !== "dead") continue;
+			const endpointState = await probeBrokerEndpoint(endpoint);
+			if (endpointState === "live" || endpointState === "unknown") continue;
+			// Bun reports a live broker's full accept queue as ECONNREFUSED too, so a
+			// refused connect proves the broker gone only when broker.pid already
+			// does: absent (every broker writes it before listening) or naming a dead
+			// process of this domain. A pid written without a domain, by an older
+			// build, may belong to another PID namespace; only a missing socket rules
+			// that broker out.
+			if (endpointState === "refused" && broker !== "absent" && broker.domain === undefined) continue;
 			await fs.rm(dir, { recursive: true, force: true });
 		} catch (error) {
 			if (isEnoent(error)) continue;
