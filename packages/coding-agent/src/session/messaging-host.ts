@@ -1,20 +1,7 @@
 import { logger } from "@oh-my-pi/pi-utils";
-import { refreshShellConfigCache } from "@oh-my-pi/pi-utils/procmgr";
-import { claimSessionName } from "../messaging/names";
+import { claimSessionName, isReservedAddress } from "../messaging/names";
 import { MessagingService, formatSessionListing, type MessagingHost } from "../messaging/service";
-import {
-	cfgMessagingEnabled,
-	cfgMessagingInbound,
-	cfgMessagingDialogExpiry,
-	cfgMessagingSend,
-	cfgMessagingList,
-	cfgMessagingRateLimit,
-	cfgMessagingRateWindowSeconds,
-	cfgMessagingRepeatWindowSeconds,
-	cfgMessagingRelayMaxHops,
-	cfgMessagingRelayMaxRevisits,
-} from "../messaging/settings";
-import { cfgToolsApprovalMode } from "../tools/settings";
+import { cfgMessagingEnabled, cfgMessagingList } from "../messaging/settings";
 import type { AgentSession } from "./agent-session";
 
 const unavailableReasons = new WeakMap<AgentSession, string>();
@@ -25,14 +12,14 @@ export async function bindSessionMessaging(
 	session: AgentSession,
 	opts: {
 		directPrint: boolean;
-		exportProcessEnv: boolean;
 		claimNames?: boolean;
 		askApproval?: MessagingHost["askApproval"];
 	},
-): Promise<{ ready(): void; dispose(): Promise<void> }> {
-	if (session.isSubagent) return { ready() {}, async dispose() {} };
+): Promise<{ ready(): void; stopReceiving(): void; dispose(): Promise<void> }> {
+	if (session.isSubagent) return { ready() {}, stopReceiving() {}, async dispose() {} };
 	let ready = false;
 	let disposed = false;
+	let receivingStopped = false;
 	let service: MessagingService | undefined;
 	let stopIdentity: (() => void) | undefined;
 	let transition = Promise.resolve();
@@ -42,7 +29,7 @@ export async function bindSessionMessaging(
 		if (!current || opts.claimNames === false || opts.directPrint || session.sessionManager.titleSource !== "user")
 			return;
 		const requested = session.sessionManager.getSessionName();
-		if (!requested) return;
+		if (!requested || isReservedAddress(requested)) return;
 		const sessions = await current.listSessions();
 		if (current !== service || disposed || session.sessionManager.getSessionName() !== requested) return;
 		const taken = new Set(sessions.flatMap(peer => (peer.name === null ? [] : [peer.name])));
@@ -64,12 +51,6 @@ export async function bindSessionMessaging(
 		if (!previous) return;
 		await previous.close();
 		session.setMessaging(undefined);
-		if (opts.exportProcessEnv) {
-			for (const key of messagingEnvKeys) {
-				if (process.env[key] === previous.env[key]) delete process.env[key];
-			}
-			refreshShellConfigCache();
-		}
 	};
 
 	const reconcile = async () => {
@@ -88,23 +69,7 @@ export async function bindSessionMessaging(
 			isReceivingSuspended: () => session.isMessagingReceivingSuspended,
 			isSessionTransitioning: () => session.isSessionTransitioning,
 			permissionClass: () => session.permissionClass(),
-			onPolicyInputsChange: callback =>
-				session.settings.onEffectiveChange(
-					[
-						cfgToolsApprovalMode,
-						cfgMessagingEnabled,
-						cfgMessagingInbound,
-						cfgMessagingDialogExpiry,
-						cfgMessagingSend,
-						cfgMessagingList,
-						cfgMessagingRateLimit,
-						cfgMessagingRateWindowSeconds,
-						cfgMessagingRepeatWindowSeconds,
-						cfgMessagingRelayMaxHops,
-						cfgMessagingRelayMaxRevisits,
-					],
-					callback,
-				),
+			onPolicyInputsChange: callback => session.settings.onLayersChange(callback),
 			deliverRemote: deliveries => session.deliverRemoteMessages(deliveries),
 			pendingRemoteCount: () => session.pendingRemoteCount(),
 			showNotice: text => session.emitNotice("info", text, "messaging"),
@@ -129,13 +94,10 @@ export async function bindSessionMessaging(
 				await started.close();
 				return;
 			}
+			if (receivingStopped) started.stopReceiving();
 			service = started;
 			unavailableReasons.delete(session);
 			session.setMessaging(started);
-			if (opts.exportProcessEnv) {
-				Object.assign(process.env, started.env);
-				refreshShellConfigCache();
-			}
 			await session.refreshBaseSystemPrompt();
 			const onNameChange = () => {
 				void claimIdentity().catch(error =>
@@ -177,6 +139,10 @@ export async function bindSessionMessaging(
 		ready() {
 			ready = true;
 			service?.markReady();
+		},
+		stopReceiving() {
+			receivingStopped = true;
+			service?.stopReceiving();
 		},
 		async dispose() {
 			disposed = true;

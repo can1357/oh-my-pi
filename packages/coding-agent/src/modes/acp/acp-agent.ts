@@ -1360,7 +1360,7 @@ export class AcpAgent implements Agent {
 		// `record.lifetimeUnsubscribe` is installed in `#scheduleBootstrapUpdates`
 		// so it shares the bootstrap race guard — see that comment for why.
 		try {
-			record.messagingBinding = await bindSessionMessaging(session, { directPrint: false, exportProcessEnv: false });
+			record.messagingBinding = await bindSessionMessaging(session, { directPrint: false });
 			if (name !== undefined) {
 				const sessions = (await session.messaging?.listSessions()) ?? [];
 				const taken = new Set(sessions.flatMap(other => (other.name === null ? [] : [other.name])));

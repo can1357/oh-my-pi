@@ -2353,8 +2353,8 @@ export class InteractiveMode implements InteractiveModeContext {
 
 		this.#messagingBinding = await bindSessionMessaging(this.session, {
 			directPrint: false,
-			exportProcessEnv: true,
-			askApproval: (view, signal) => this.#extensionUiController.askCrossSessionApproval(view, signal),
+			askApproval: (view, signal, onPresented) =>
+				this.#extensionUiController.askCrossSessionApproval(view, signal, onPresented),
 		});
 		if (options.name !== undefined) {
 			const taken = new Set(

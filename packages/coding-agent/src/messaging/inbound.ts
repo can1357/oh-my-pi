@@ -1,4 +1,5 @@
 import { logger } from "@oh-my-pi/pi-utils";
+import { LRUCache } from "@oh-my-pi/pi-utils/lru";
 import type { Settings } from "../config/settings";
 import { ManagedTimers } from "../extensibility/extensions/managed-timers";
 import { decideInbound, dialogExpiryMs, type InboundDecision, resolveInbound } from "./policy";
@@ -38,7 +39,11 @@ interface HeldMessage {
 
 export class InboundGate {
 	readonly #rates = new Map<string, number[]>();
-	readonly #repeats = new Map<string, Map<string, number>>();
+	readonly #repeats = new LRUCache<string, number>({
+		max: 4096,
+		maxSize: 8 * 1024 * 1024,
+		sizeCalculation: (_at, key) => key.length * 2 + 64,
+	});
 	readonly #held: HeldMessage[] = [];
 	readonly #timers = new ManagedTimers((_event, error) => logger.warn("Messaging timer failed", { error }));
 
@@ -63,23 +68,47 @@ export class InboundGate {
 	receive(request: MessageRequest, sender: SenderInfo, ownChild: boolean, receiver?: SenderInfo): InboxResponse {
 		if (JSON.stringify(request).length > MAX_SERIALIZED_CHARS) return { ok: false, error: "too_large" };
 		if (this.#relayLoops(request.chain ?? [])) return { ok: true, outcome: "dropped", reason: "relay_loop" };
+		const decision = this.decision(ownChild ? undefined : request.from, ownChild);
+		if (decision === "refuse") return { ok: true, outcome: "refused" };
+		const dropped = this.#checkTraffic(sender, ownChild, "message", request.body, false);
+		if (dropped) return dropped;
+		const result = this.#admit(request, sender, ownChild, receiver);
+		if (result.ok && "outcome" in result && result.outcome !== "dropped" && result.outcome !== "refused")
+			this.#repeats.set(
+				JSON.stringify([ownChild ? "own-child" : sender.shortId, "message", request.body]),
+				Date.now(),
+			);
+		return result;
+	}
+
+	checkTraffic(sender: SenderInfo, ownChild: boolean, repeatKey: string): InboxResponse | undefined {
+		return this.#checkTraffic(sender, ownChild, "control", repeatKey);
+	}
+
+	#checkTraffic(
+		sender: SenderInfo,
+		ownChild: boolean,
+		category: "message" | "control",
+		repeatKey: string,
+		remember = true,
+	): InboxResponse | undefined {
 		const now = Date.now();
-		const key = ownChild ? "own-child" : sender.shortId;
-		const repeatWindowStart = now - cfgMessagingRepeatWindowSeconds.get(this.settings) * 1000;
-		const repeats = this.#repeats.get(key) ?? new Map<string, number>();
-		for (const [body, at] of repeats) {
-			if (at <= repeatWindowStart) repeats.delete(body);
+		const senderKey = ownChild ? "own-child" : sender.shortId;
+		const key = JSON.stringify([senderKey, category, repeatKey]);
+		const at = this.#repeats.get(key);
+		if (at !== undefined) {
+			if (at > now - cfgMessagingRepeatWindowSeconds.get(this.settings) * 1000)
+				return { ok: true, outcome: "dropped", reason: "repeat" };
+			this.#repeats.delete(key);
 		}
-		if (repeats.has(request.body)) return { ok: true, outcome: "dropped", reason: "repeat" };
-		repeats.set(request.body, now);
-		this.#repeats.set(key, repeats);
 		const windowStart = now - cfgMessagingRateWindowSeconds.get(this.settings) * 1000;
-		const rates = (this.#rates.get(key) ?? []).filter(at => at > windowStart);
-		this.#rates.set(key, rates);
+		const rates = (this.#rates.get(senderKey) ?? []).filter(at => at > windowStart);
+		this.#rates.set(senderKey, rates);
 		if (rates.length >= cfgMessagingRateLimit.get(this.settings))
 			return { ok: true, outcome: "dropped", reason: "rate" };
 		rates.push(now);
-		return this.#admit(request, sender, ownChild, receiver);
+		if (remember) this.#repeats.set(key, now);
+		return undefined;
 	}
 
 	receiveOffline(message: StoredMessage): InboxResponse {
@@ -150,16 +179,22 @@ export class InboundGate {
 			);
 			return;
 		}
-		const expiry = dialogExpiryMs(this.settings);
-		if (expiry !== null)
-			held.timer = this.#timers.setTimeout(() => {
-				this.#remove(held);
-				return this.reply(held.sender, { type: "notice", kind: "expired", aboutId: held.request.id });
-			}, expiry);
 		const controller = held.controller;
+		let presented = false;
+		const startExpiry = () => {
+			if (presented || controller !== held.controller || controller.signal.aborted || !this.#held.includes(held))
+				return;
+			presented = true;
+			const expiry = dialogExpiryMs(this.settings);
+			if (expiry !== null)
+				held.timer = this.#timers.setTimeout(() => {
+					this.#remove(held);
+					return this.reply(held.sender, { type: "notice", kind: "expired", aboutId: held.request.id });
+				}, expiry);
+		};
 		if (this.host.askApproval) {
 			void this.host
-				.askApproval({ from: held.delivery.from, body: held.request.body }, controller.signal)
+				.askApproval({ from: held.delivery.from, body: held.request.body }, controller.signal, startExpiry)
 				.then(answer => {
 					if (!this.#held.includes(held) || controller.signal.aborted) return;
 					this.#remove(held);
@@ -170,7 +205,7 @@ export class InboundGate {
 					this.#remove(held);
 					logger.warn("Messaging approval failed", { error: String(error) });
 				});
-		}
+		} else startExpiry();
 	}
 
 	#remove(held: HeldMessage): void {
