@@ -137,6 +137,10 @@ type OpenAICompletionsChoiceUsage = ChatCompletionChunk.Choice & {
 	usage?: unknown;
 };
 
+type OpenAICompletionsRepetitionChoice = ChatCompletionChunk.Choice & {
+	stop_reason?: unknown;
+};
+
 type OpenAICompletionsDeltaWithReasoningDetails = ChatCompletionChunk.Choice["delta"] & {
 	reasoning_details?: unknown;
 };
@@ -1307,6 +1311,8 @@ const streamOpenAICompletionsOnce = (
 			let streamFinishedAt: number | undefined;
 			let sawUsagePayload = false;
 			let awaitTrailingUsageDetails = false;
+			/** Server-declared repetition stop; classified after the finalization sweep. */
+			let repetitionStop: string | undefined;
 			const applyUsagePayload = (rawUsage: object): void => {
 				output.usage = parseChunkUsage(
 					rawUsage,
@@ -1390,6 +1396,13 @@ const streamOpenAICompletionsOnce = (
 						applyUsagePayload(choiceUsage);
 					}
 				}
+
+				// A server-declared repetition stop completes the response, so it takes
+				// the same terminal bookkeeping a `finish_reason` chunk would. The
+				// classification itself is deferred to just before the error checks
+				// below: `output.content` is not final until the block sweep has run.
+				repetitionStop = detectRepetitionStop(choice);
+				if (repetitionStop) streamFinishedAt ??= Date.now();
 
 				if (choice.finish_reason) {
 					const finishReasonResult = mapStopReason(choice.finish_reason);
@@ -1736,6 +1749,27 @@ const streamOpenAICompletionsOnce = (
 
 			if (output.stopReason === "aborted") {
 				throw new AIError.AbortError();
+			}
+
+			// Checked before the generic `stopReason === "error"` throw so the flagged
+			// error is the one that reaches `AIError.finalize` — that call rebuilds
+			// `errorId` from the thrown error, so assigning the flag to `output` here
+			// would be overwritten. The partial output is dropped rather than
+			// committed or replayed into the retry; the guard's own loop error does
+			// the same, because degenerate reasoning is replay garbage (#12525).
+			if (repetitionStop) {
+				output.content = [];
+				// The sweep above already closed every block. Clear the handle so the
+				// catch's `finishOpenBlocksOnError` does not re-emit a `thinking_end`
+				// against an index that no longer exists in the emptied content array.
+				currentBlock = undefined;
+				throw AIError.attach(
+					new AIError.ProviderResponseError(`Provider reported a repetition stop: ${repetitionStop}`, {
+						provider: model.provider,
+						kind: "runtime",
+					}),
+					AIError.create(AIError.Flag.ThinkingLoop),
+				);
 			}
 			if (output.stopReason === "error") {
 				throw new AIError.ProviderResponseError(output.errorMessage || "Provider returned an error stop reason", {
@@ -2869,6 +2903,33 @@ function convertTools(
 
 const EMPTY_OLLAMA_LENGTH_COMPLETION_MESSAGE =
 	"Model returned no content: prompt filled the context window; raise Ollama num_ctx or shorten the prompt.";
+
+/**
+ * Detect a server-declared repetition stop on a streamed choice.
+ *
+ * vLLM and other OpenAI-compatible servers report a generation that degenerated
+ * into repetition as a terminal signal rather than a content pattern OMP can
+ * see: `finish_reason: "repetition"`, and/or `stop_reason: "repetition_detected"`.
+ * The `stop_reason` form arrives alongside an ordinary `finish_reason: "stop"`,
+ * or with no `finish_reason` at all, so it has to be read independently of it —
+ * otherwise the signal is either masked by the clean finish or never seen.
+ *
+ * Returns the raw values for the diagnostic message, or `undefined` when the
+ * choice carries no repetition signal.
+ */
+function detectRepetitionStop(choice: ChatCompletionChunk.Choice): string | undefined {
+	const finishReason: string | null | undefined = choice.finish_reason;
+	const stopReason = (choice as OpenAICompletionsRepetitionChoice).stop_reason;
+	const namesRepetition = (value: string): boolean => value.toLowerCase().includes("repetition");
+	const flagged =
+		(typeof finishReason === "string" && namesRepetition(finishReason)) ||
+		(typeof stopReason === "string" && namesRepetition(stopReason));
+	if (!flagged) return undefined;
+	const parts: string[] = [];
+	if (typeof finishReason === "string" && finishReason.length > 0) parts.push(`finish_reason=${finishReason}`);
+	if (typeof stopReason === "string" && stopReason.length > 0) parts.push(`stop_reason=${stopReason}`);
+	return parts.join(" ") || "repetition";
+}
 
 function mapStopReason(reason: ChatCompletionChunk.Choice["finish_reason"] | string): {
 	stopReason: StopReason;
