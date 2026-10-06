@@ -113,6 +113,8 @@ Disable instructions when a server's guidance conflicts with your tool policy or
 
 `OMP_MCP_TIMEOUT_MS` has process-wide precedence over every per-server `timeout`. Set it to `0` to disable client-side timeouts, or to a positive millisecond value such as `120000`. If it is unset or invalid, OMP uses the server value and then the 30-second default; invalid values are logged and ignored.
 
+Claude marketplace plugins follow [Claude Code's per-server timeout rule](https://code.claude.com/docs/en/mcp): their `.mcp.json` values are milliseconds, and values below `1000` are ignored with a discovery warning so OMP's normal timeout fallback applies. This restriction does not change OMP-native configurations, where `0` still disables timeouts.
+
 These request deadlines also govern subagent MCP calls over borrowed parent connections. The proxy adds no independent timeout; caller cancellation still stops the subagent's wait.
 
 Initial MCP discovery returns after a 250 ms window while slower connections continue in the background. Set `mcp.startupTimeoutMs` or override it with `OMP_MCP_STARTUP_TIMEOUT_MS` to change the window; `0` waits for the initial connection attempts to settle. In print mode (`-p`, `--mode text|json`), OMP additionally waits for all configured servers to load tools or fail before the first turn, up to `OMP_MCP_TIMEOUT_MS` (default 30 seconds). `OMP_MCP_TIMEOUT_MS=0` disables this barrier deadline too, so an unresponsive server can block print mode indefinitely. Servers still unavailable at the deadline are named on stderr; `OMP_MCP_REQUIRE_READY=1` instead exits with code 1 before the turn. These print-mode waits do not affect interactive, RPC, or ACP startup.

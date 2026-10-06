@@ -657,11 +657,25 @@ async function loadMCPServers(ctx: LoadContext): Promise<LoadResult<MCPServer>> 
 				warnings.push(`[claude-plugins] Skipping MCP server "${serverName}" in ${sourcePath}: malformed env`);
 				continue;
 			}
+			// Claude Code reads `timeout` as milliseconds and treats values below
+			// 1000 as invalid, falling back to defaults. Marketplace manifests
+			// (e.g. SAP's official plugins) nonetheless ship sub-second values like
+			// `timeout: 600`; taking those verbatim would give the server a 600ms
+			// connect budget and its tools would never load (#12485). Drop them so
+			// the default timeout applies, and warn so the mismatch is visible.
+			const timeout =
+				raw.timeout !== undefined &&
+				(typeof raw.timeout !== "number" || !Number.isFinite(raw.timeout) || raw.timeout < 1000)
+					? (warnings.push(
+							`[claude-plugins] Ignoring invalid timeout ${JSON.stringify(raw.timeout)} for MCP server "${serverName}" in ${sourcePath}: expected a finite number >= 1000ms (Claude Code's minimum)`,
+						),
+						undefined)
+					: raw.timeout;
 			const resolvedEnv = raw.env !== undefined ? await resolveMarketplaceEnv(raw.env, root.path) : undefined;
 			const server: MCPServer = {
 				name: namespacedName,
 				...(raw.enabled !== undefined && { enabled: raw.enabled }),
-				...(raw.timeout !== undefined && { timeout: raw.timeout }),
+				...(timeout !== undefined && { timeout }),
 				...(rooted.command !== undefined && { command: rooted.command }),
 				...(raw.args !== undefined && { args: substitutePluginRoot(raw.args, root.path) }),
 				...(resolvedEnv !== undefined && { env: resolvedEnv.env }),
