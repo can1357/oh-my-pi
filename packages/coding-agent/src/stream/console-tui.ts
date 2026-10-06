@@ -273,7 +273,11 @@ class StreamConsoleComponent implements Component, Focusable {
 		this.#revision++;
 		this.#quitting = true;
 		this.#ui.requestRender();
-		void this.#host.close("stream stopped").finally(() => this.#done.resolve());
+		// A failed close() is reported through wait(); this caller only starts the shutdown.
+		void this.#host
+			.close("stream stopped")
+			.catch(() => {})
+			.finally(() => this.#done.resolve());
 	}
 
 	#acceptEvent(event: StreamConsoleEvent): void {
