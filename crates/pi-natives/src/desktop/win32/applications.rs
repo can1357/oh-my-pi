@@ -339,7 +339,8 @@ fn shortcuts(
 					));
 				},
 			};
-			// Junctions/reparse directories can lead out of the menu or form cycles.
+			// Junctions/reparse directories can lead out of the menu or form
+			// cycles.
 			if metadata.is_dir() && metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT == 0 {
 				pending.push(path);
 			} else if metadata.is_file()
@@ -562,9 +563,9 @@ fn open_packaged(mut app: Application, activate: bool) -> CoreResult<Application
 					hresult_error("create packaged application activation manager", error.code().0)
 				})?;
 		// ActivateApplication explicitly activates; its output is the actual
-		// contract-handling application's PID, not Explorer's or a shell broker's.
-		// SAFETY: identity is a NUL-terminated UTF-16 string outliving the call;
-		// null arguments are permitted.
+		// contract-handling application's PID, not Explorer's or a shell
+		// broker's. SAFETY: identity is a NUL-terminated UTF-16 string
+		// outliving the call; null arguments are permitted.
 		let pid = unsafe {
 			manager.ActivateApplication(PCWSTR(identity.as_ptr()), PCWSTR::null(), AO_NOERRORUI)
 		}
@@ -597,7 +598,8 @@ fn open_packaged(mut app: Application, activate: bool) -> CoreResult<Application
 		..Default::default()
 	};
 	// SAFETY: the PIDL remains alive throughout the shell call. NOASYNC is
-	// advisory/ignored for namespace items, so process appearance can lag return.
+	// advisory/ignored for namespace items, so process appearance can lag
+	// return.
 	let success = unsafe { ShellExecuteExW(&mut execute) } != 0;
 	let error = (!success).then(io::Error::last_os_error);
 	// SAFETY: item_id was CoTaskMem-allocated by SHGetIDListFromObject and the
@@ -641,7 +643,8 @@ fn running_processes() -> HashMap<String, u32> {
 			// writable. Unpackaged/protected processes simply have no AUMID.
 			if unsafe {
 				GetApplicationUserModelId(process.0, &mut identity_length, identity.as_mut_ptr())
-			} == 0 && identity_length > 1
+			} == 0
+				&& identity_length > 1
 				&& identity_length as usize <= identity.len()
 				&& let Ok(id) = String::from_utf16(&identity[..identity_length as usize - 1])
 			{
@@ -653,7 +656,8 @@ fn running_processes() -> HashMap<String, u32> {
 			let mut length = image.len() as u32;
 			// SAFETY: the process handle and writable output buffer are valid.
 			if unsafe { QueryFullProcessImageNameW(process.0, 0, image.as_mut_ptr(), &mut length) }
-				!= 0 && let Ok(path) = String::from_utf16(&image[..length as usize])
+				!= 0
+				&& let Ok(path) = String::from_utf16(&image[..length as usize])
 				&& let Ok(path) = path_string(Path::new(&path))
 			{
 				running
@@ -749,9 +753,11 @@ pub(super) fn open(mut app: Application, activate: bool) -> CoreResult<Applicati
 			let mut length = image.len() as u32;
 			// A shell process handle can describe a broker. Only expose its PID
 			// when its image is the actual registered executable/link target.
-			// SAFETY: the owned process handle and writable output buffer are valid.
+			// SAFETY: the owned process handle and writable output buffer are
+			// valid.
 			if unsafe { QueryFullProcessImageNameW(process.0, 0, image.as_mut_ptr(), &mut length) }
-				!= 0 && let Ok(image) = String::from_utf16(&image[..length as usize])
+				!= 0
+				&& let Ok(image) = String::from_utf16(&image[..length as usize])
 				&& path_string(Path::new(&image))
 					.is_ok_and(|image| path_key(&image) == path_key(&target))
 			{

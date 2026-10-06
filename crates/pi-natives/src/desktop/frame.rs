@@ -262,11 +262,13 @@ impl FrameGeometry {
 						&& base
 							.pixel_width
 							.mul_add(ratio_x, -current.pixel_width)
-							.abs() < 0.5
+							.abs()
+							< 0.5
 						&& base
 							.pixel_height
 							.mul_add(ratio_y, -current.pixel_height)
-							.abs() < 0.5
+							.abs()
+							< 0.5
 				});
 		if !compatible
 			|| image.dimensions() != fresh.dimensions()
@@ -301,7 +303,8 @@ impl FrameGeometry {
 		let image = if (width, height) == (source_width, source_height) {
 			view.to_image()
 		} else {
-			// Resize the view directly; never allocate an intermediate native-size crop.
+			// Resize the view directly; never allocate an intermediate native-size
+			// crop.
 			image::imageops::resize(&*view, width, height, FilterType::Triangle)
 		};
 		Ok((image, source_width, source_height))

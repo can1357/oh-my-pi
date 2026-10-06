@@ -596,9 +596,10 @@ mod tests {
 				.expect("system time is after UNIX_EPOCH")
 				.as_nanos();
 			let counter = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
-			// nextest runs each test in its own process, so the counter restarts at 0
-			// and macOS clocks tick in microseconds: without the pid, two tests
-			// starting together share a directory and one's Drop deletes the other's.
+			// nextest runs each test in its own process, so the counter restarts
+			// at 0 and macOS clocks tick in microseconds: without the
+			// pid, two tests starting together share a directory and
+			// one's Drop deletes the other's.
 			let pid = std::process::id();
 			let path =
 				std::env::temp_dir().join(format!("pi-fs-cache-test-{pid}-{timestamp}-{counter}"));

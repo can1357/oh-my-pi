@@ -491,7 +491,8 @@ fn find_exact_match_outcome(
 			let line_number = content[..index]
 				.bytes()
 				.filter(|byte| *byte == b'\n')
-				.count() + 1;
+				.count()
+				+ 1;
 			occurrence_lines.push(line_number as u32);
 			occurrence_previews.push(format_preview_window(&content_lines, line_number - 1));
 		}

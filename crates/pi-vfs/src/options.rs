@@ -123,7 +123,8 @@ impl OpenOptions {
 		{
 			use std::os::windows::fs::OpenOptionsExt;
 			options.custom_flags(self.custom_flags as u32);
-			// POSIX creation mode without any write bit: the new file is read-only.
+			// POSIX creation mode without any write bit: the new file is
+			// read-only.
 			if self.mode.is_some_and(|mode| mode & 0o222 == 0) {
 				options.attributes(windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_READONLY);
 			}

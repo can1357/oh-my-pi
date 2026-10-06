@@ -361,7 +361,8 @@ fn legacy_capture(request: CaptureRequest) -> CoreResult<RgbaImage> {
 	let image = match request.target {
 		CaptureTarget::Display(id) => CGDisplayCreateImage(id),
 		CaptureTarget::Window(id) => {
-			// SAFETY: CGRectNull is process-lived; capture the named window's full bounds.
+			// SAFETY: CGRectNull is process-lived; capture the named window's full
+			// bounds.
 			CGWindowListCreateImage(
 				unsafe { CGRectNull },
 				CGWindowListOption::OptionIncludingWindow,

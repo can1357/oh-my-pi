@@ -102,10 +102,11 @@ pub(super) fn list() -> CoreResult<Vec<Application>> {
 			}
 		}
 		// Running apps outside standard installation roots (including development
-		// fixtures) are part of the inventory too. Preserve real process identity.
-		// NSWorkspace's runningApplications cache depends on its main run loop.
-		// Desktop requests run on a native worker, so query current process IDs
-		// instead of returning a stale pre-launch inventory.
+		// fixtures) are part of the inventory too. Preserve real process
+		// identity. NSWorkspace's runningApplications cache depends on its
+		// main run loop. Desktop requests run on a native worker, so query
+		// current process IDs instead of returning a stale pre-launch
+		// inventory.
 		for pid in running_pids()? {
 			control::check()?;
 			let Some(running) = NSRunningApplication::runningApplicationWithProcessIdentifier(pid)
@@ -225,8 +226,9 @@ pub(super) fn from_path(path: &Path) -> CoreResult<Application> {
 
 pub(super) fn open(app: Application, activate: bool) -> CoreResult<Application> {
 	autoreleasepool(|_| {
-		// Validate explicit paths as bundles, never as shell commands or arbitrary
-		// document URLs. NSWorkspace applies Launch Services policy/Gatekeeper.
+		// Validate explicit paths as bundles, never as shell commands or
+		// arbitrary document URLs. NSWorkspace applies Launch Services
+		// policy/Gatekeeper.
 		let app = read_bundle(Path::new(&app.path))?;
 		let url = NSURL::fileURLWithPath_isDirectory(&NSString::from_str(&app.path), true);
 		let configuration = NSWorkspaceOpenConfiguration::configuration();
@@ -237,8 +239,9 @@ pub(super) fn open(app: Application, activate: bool) -> CoreResult<Application> 
 		let (sender, receiver) = flume::bounded(1);
 		let completion =
 			RcBlock::new(move |running: *mut NSRunningApplication, error: *mut NSError| {
-				// SAFETY: AppKit supplies borrowed live objects for this callback. Only
-				// owned Rust values leave the callback; pointers are never retained.
+				// SAFETY: AppKit supplies borrowed live objects for this callback.
+				// Only owned Rust values leave the callback; pointers
+				// are never retained.
 				let result = unsafe {
 					if let Some(error) = error.as_ref() {
 						let domain = error.domain().to_string();

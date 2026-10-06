@@ -13,25 +13,33 @@ pub fn supports(subcommand: Option<&str>) -> bool {
 		Some(
 			"ps"
 				| "images"
-				| "logs" | "compose"
+				| "logs"
+				| "compose"
 				| "build"
-				| "pull" | "push"
-				| "get" | "describe"
+				| "pull"
+				| "push"
+				| "get"
+				| "describe"
 				| "status"
-				| "list" | "ls"
+				| "list"
+				| "ls"
 				| "install"
 				| "upgrade"
 				| "template"
-				| "lint" | "apply"
+				| "lint"
+				| "apply"
 				| "delete"
 				| "rollout"
 				| "scale"
 				| "create"
-				| "wait" | "label"
+				| "wait"
+				| "label"
 				| "annotate"
-				| "up" | "down"
+				| "up"
+				| "down"
 				| "start"
-				| "stop" | "restart"
+				| "stop"
+				| "restart"
 				| "rm"
 		)
 	)
@@ -150,7 +158,8 @@ fn kubectl_output_formats(command: &str) -> impl Iterator<Item = &str> {
 		loop {
 			let tok = tokens.next()?;
 			let val = if tok == "-o" || tok == "--output" {
-				// The value token is consumed here so it is never re-read as a flag.
+				// The value token is consumed here so it is never re-read as a
+				// flag.
 				let Some(fmt) = tokens.next() else {
 					continue;
 				};
@@ -456,12 +465,14 @@ fn compose_option_consumes_next(tok: &str) -> bool {
 		"--ansi"
 			| "--env-file"
 			| "--file"
-			| "-f" | "--parallel"
+			| "-f"
+			| "--parallel"
 			| "--profile"
 			| "--progress"
 			| "--project-directory"
 			| "--project-name"
-			| "-p" | "--workdir"
+			| "-p"
+			| "--workdir"
 			| "-w"
 	)
 }
