@@ -1903,17 +1903,26 @@ export class InteractiveMode implements InteractiveModeContext {
 	/**
 	 * Record `session`'s cwd when it differs from the last one seen, and resolve its
 	 * github.com repo (gh's default-repo pick, memoized per cwd) off the render path.
+	 * A session seen for the first time is seeded from the cwds its replies were
+	 * persisted with, so a resumed session keeps cwd changes from earlier runs.
 	 */
 	#trackProseGithubRepo(session: AgentSession): ProseGithubRepoEntry[] {
-		const cwd = session.sessionManager.getCwd();
 		const sessionId = session.sessionManager.getSessionId();
 		let history = this.#proseGithubRepos.get(sessionId);
 		if (!history) {
 			history = [];
 			this.#proseGithubRepos.set(sessionId, history);
+			for (const entry of session.sessionManager.getEntries()) {
+				if (entry.type !== "message" || !entry.cwd || history.at(-1)?.cwd === entry.cwd) continue;
+				this.#pushProseGithubRepo(history, entry.cwd, entry.message.timestamp);
+			}
 		}
-		if (history.at(-1)?.cwd === cwd) return history;
-		const entry: ProseGithubRepoEntry = { cwd, since: history.length === 0 ? Number.NEGATIVE_INFINITY : Date.now() };
+		const cwd = session.sessionManager.getCwd();
+		if (history.at(-1)?.cwd !== cwd) this.#pushProseGithubRepo(history, cwd, Date.now());
+		return history;
+	}
+	#pushProseGithubRepo(history: ProseGithubRepoEntry[], cwd: string, since: number): void {
+		const entry: ProseGithubRepoEntry = { cwd, since: history.length === 0 ? Number.NEGATIVE_INFINITY : since };
 		history.push(entry);
 		void tryResolveCurrentRepo(cwd, undefined).then(repo => {
 			const ref = repo === undefined ? undefined : parseRepoRef(repo);
@@ -1922,7 +1931,6 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.ui.invalidate();
 			this.ui.requestRender();
 		});
-		return history;
 	}
 	/**
 	 * Reader for the github.com repo of the view session's cwd at `at` (a message
