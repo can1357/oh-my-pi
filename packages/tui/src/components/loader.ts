@@ -38,8 +38,6 @@ export interface WorkingRowSpec {
 	readonly variant?: WorkingRowVariant;
 	/** Shimmer palette of the label (a session-accented intent). */
 	readonly palette?: ShimmerPalette;
-	/** Live tok/s, docked before the stop control. */
-	readonly rate?: number;
 	/** Key id that interrupts (`escape`); undefined hides the stop control (Esc would not cancel). */
 	readonly interruptKey?: string;
 }
@@ -51,9 +49,9 @@ function titleKey(key: string): string {
 
 /**
  * The dock's working row: `starburst` spinner (or a retry countdown ring),
- * the intent shimmering, `·`, the elapsed time, a grow spacer, then the stop
- * control whose click sends `interrupt`. Compaction adds an indeterminate
- * `progress` before the stop control; a retry says "Cancel".
+ * the elapsed time, the `·` divider, the intent shimmering, a grow spacer,
+ * then the stop control whose click sends `interrupt`. Compaction adds an
+ * indeterminate `progress` before the stop control; a retry says "Cancel".
  */
 export function describeWorkingRow(spec: WorkingRowSpec, cx: DescribeContext, now = Date.now()): NativeNode {
 	const variant = spec.variant;
@@ -67,13 +65,12 @@ export function describeWorkingRow(spec: WorkingRowSpec, cx: DescribeContext, no
 	}
 	const label = describeShimmer([{ text: spec.label, palette: spec.palette }], "label");
 	children.push(
-		node(label.k, { ...label.p, role: "omp.working.label" } as TspProps, label.c, label.key),
-		node("text", { text: "·", role: "omp.working.sep" }, undefined, "sep"),
 		keyed(elapsed(now - spec.startedAt), "elapsed"),
+		node("text", { text: "·", role: "omp.working.sep" }, undefined, "sep"),
+		node(label.k, { ...label.p, role: "omp.working.label" } as TspProps, label.c, label.key),
 		node("row", { grow: 1 }, undefined, "fill"),
 	);
 	if (variant?.kind === "compaction") children.push(node("progress", { value: null }, undefined, "progress"));
-	if (spec.rate !== undefined) children.push(node("rate", { value: spec.rate, unit: "tok/s" }, undefined, "rate"));
 	if (spec.interruptKey !== undefined) {
 		const verb = variant?.kind === "retry" ? "Cancel" : "Stop";
 		children.push(
@@ -285,7 +282,6 @@ export class Loader extends Text {
 			variant?.kind,
 			variant?.kind === "retry" ? `${variant.attempt}/${variant.max}` : "",
 			countdown,
-			spec.rate,
 			spec.interruptKey,
 			spec.palette?.mid,
 			shimmerEnabled(),

@@ -925,6 +925,8 @@ export type TspReply =
 			cell?: { w: number; h: number };
 			dark?: boolean;
 			reduceMotion?: boolean;
+			/** The user's system reads a 12-hour clock (`false`: 24-hour); absent from older terminals. */
+			hour12?: boolean;
 	  }
 	| { r: "blobs"; have: readonly string[] };
 

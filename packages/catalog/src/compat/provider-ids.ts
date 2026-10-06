@@ -67,6 +67,7 @@ export type KnownProvider =
 	| "siliconflow-cn"
 	| "singularityapi-dev"
 	| "singularityapi-tech"
+	| "snowflake"
 	| "stepfun"
 	| "synthetic"
 	| "together"

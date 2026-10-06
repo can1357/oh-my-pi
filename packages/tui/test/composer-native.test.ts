@@ -211,6 +211,70 @@ describe("native composer", () => {
 	it("omits the effort chip when the model has no thinking", () => {
 		expect(byRole(composer({ running: false }).describe(cx), "omp.composer.effort")).toBeUndefined();
 	});
+
+	it("docks the tok/s readout right after the effort chip, only while there is a reading", () => {
+		let rate: number | undefined = 31.8;
+		const editor = new CustomEditor(getEditorTheme());
+		editor.composerState = () => ({ running: false, thinking: "xhigh", rate });
+		const bar = () => byRole(editor.describe(cx), "omp.composer.bar")!;
+		const slots = (root: NativeNode) =>
+			(root.c ?? []).filter(isNode).map(n => (n.p !== undefined && "role" in n.p ? n.p.role : n.key));
+
+		const reading = bar();
+		expect(slots(reading)).toEqual(["omp.composer.effort", "omp.composer.rate", "gap", "omp.composer.send"]);
+		expect(byRole(reading, "omp.composer.rate")?.p).toEqual({
+			value: 31.8,
+			unit: "tok/s",
+			role: "omp.composer.rate",
+			title: "Generation rate",
+		});
+
+		// A rate tick re-describes the readout alone: the chips beside it keep their nodes.
+		rate = 32.4;
+		const ticked = bar();
+		expect(byRole(ticked, "omp.composer.rate")?.p).toMatchObject({ value: 32.4 });
+		expect(byRole(ticked, "omp.composer.effort")).toBe(byRole(reading, "omp.composer.effort"));
+
+		rate = undefined;
+		expect(slots(bar())).toEqual(["omp.composer.effort", "gap", "omp.composer.send"]);
+	});
+});
+
+describe("native composer thinking level in the model chip", () => {
+	function withFacts(state: ComposerNativeState): CustomEditor {
+		const editor = composer(state);
+		editor.composerFacts = createStartupStatusLine({
+			settings: { preset: "custom", leftSegments: [], rightSegments: [] },
+			gitEnabled: false,
+			autoThinking: false,
+			fastMode: false,
+			usingSubscription: false,
+			autoCompactEnabled: false,
+			compactionBoundaries: null,
+		});
+		return editor;
+	}
+
+	it("draws the level as the model chip's icon, cycling on click, and drops the effort chip", () => {
+		const root = withFacts({ running: false, thinking: "xhigh", thinkingInModel: true }).describe(cx);
+		expect(byRole(root, "omp.composer.effort")).toBeUndefined();
+		const model = byRole(root, "omp.composer.model")!;
+		expect((model.c ?? []).filter(isNode).map(n => n.k)).toEqual(["effort", "text", "icon"]);
+		expect(byRole(model, "omp.composer.model.effort")?.p).toMatchObject({
+			level: "xhigh",
+			// The level, then the cycle key as the effort chip's tooltip names it.
+			title: expect.stringMatching(/^Thinking effort: xhigh {2}\S/),
+			actions: { click: "thinking.cycle" },
+		});
+	});
+
+	it("keeps the model icon and the effort chip where the terminal lacks the effort kind", () => {
+		const legacy = context(["row", "text", "icon", "meter", "editor", "kbd"]);
+		const root = withFacts({ running: false, thinking: "xhigh", thinkingInModel: true }).describe(legacy);
+		expect(byRole(root, "omp.composer.model.effort")).toBeUndefined();
+		expect((byRole(root, "omp.composer.model")!.c ?? []).filter(isNode)[0]?.p).toMatchObject({ name: "model" });
+		expect(byRole(root, "omp.composer.effort")).toBeDefined();
+	});
 });
 
 describe("native working row", () => {
@@ -230,6 +294,18 @@ describe("native working row", () => {
 
 		const plain = describeWorkingRow(spec, context([]), 2_000);
 		expect((plain.c![0] as NativeNode).k).toBe("spinner");
+	});
+
+	it("leads with the spinner and the elapsed time, then the divider and the intent, without a tok/s readout", () => {
+		const row = describeWorkingRow({ label: "Diagnosing", startedAt: 0, interruptKey: "escape" }, cx, 10);
+		expect((row.c ?? []).filter(isNode).map(n => n.key)).toEqual([
+			"spinner",
+			"elapsed",
+			"sep",
+			"label",
+			"fill",
+			"stop",
+		]);
 	});
 
 	it("shows indeterminate progress while compacting and no stop control when Esc would not cancel", () => {

@@ -11,11 +11,14 @@
 //! file-system magic; the caller pays full filesystem-copy cost up front
 //! and an `rm -rf` on teardown.
 
-use std::path::{Path, PathBuf};
+use std::{fs::FileType, path::Path};
 
 use async_trait::async_trait;
 
-use crate::{BackendKind, IsoError, IsoResult, IsolationBackend, ProbeResult, command_failed};
+use crate::{
+	BackendKind, IsoError, IsoResult, IsolationBackend, ProbeResult, command_failed,
+	tree::{self, TreeCopy},
+};
 
 pub struct RcopyBackend;
 
@@ -34,9 +37,9 @@ impl IsolationBackend for RcopyBackend {
 	}
 
 	fn start(&self, lower: &Path, merged: &Path) -> IsoResult<()> {
-		let lower = canonical_existing_dir(lower)?;
-		let merged = absolutize(merged);
-		prepare_destination(&merged)?;
+		let lower = tree::canonical_existing_dir(lower, "rcopy source", IsoError::other)?;
+		let merged = std::path::absolute(merged).unwrap_or_else(|_| merged.to_path_buf());
+		tree::prepare_destination(&merged, "rcopy", tree::remove_existing)?;
 		if is_git_worktree(&lower) {
 			git_worktree_add(&lower, &merged)?;
 			// `worktree add --detach HEAD` lands on a clean checkout. omp
@@ -64,50 +67,6 @@ impl IsolationBackend for RcopyBackend {
 			Err(err) => Err(IsoError::other(format!("unable to remove {}: {err}", merged.display()))),
 		}
 	}
-}
-
-fn canonical_existing_dir(path: &Path) -> IsoResult<PathBuf> {
-	let resolved = if path.is_absolute() {
-		path.to_path_buf()
-	} else {
-		std::env::current_dir().map_or_else(|_| path.to_path_buf(), |cwd| cwd.join(path))
-	};
-	let meta = std::fs::metadata(&resolved).map_err(|err| {
-		IsoError::other(format!("invalid rcopy source {}: {err}", resolved.display()))
-	})?;
-	if !meta.is_dir() {
-		return Err(IsoError::other(format!(
-			"rcopy source {} is not a directory",
-			resolved.display()
-		)));
-	}
-	Ok(std::fs::canonicalize(&resolved).unwrap_or(resolved))
-}
-
-fn absolutize(path: &Path) -> PathBuf {
-	if path.is_absolute() {
-		path.to_path_buf()
-	} else {
-		std::env::current_dir().map_or_else(|_| path.to_path_buf(), |cwd| cwd.join(path))
-	}
-}
-
-fn prepare_destination(merged: &Path) -> IsoResult<()> {
-	if let Some(parent) = merged.parent() {
-		std::fs::create_dir_all(parent)
-			.map_err(|err| IsoError::other(format!("create parent of {}: {err}", merged.display())))?;
-	}
-	match std::fs::remove_dir_all(merged) {
-		Ok(()) => {},
-		Err(err) if err.kind() == std::io::ErrorKind::NotFound => {},
-		Err(err) => {
-			return Err(IsoError::other(format!(
-				"unable to clear {} before rcopy: {err}",
-				merged.display()
-			)));
-		},
-	}
-	Ok(())
 }
 
 fn is_git_worktree(path: &Path) -> bool {
@@ -299,128 +258,85 @@ fn git_apply_with_program(
 }
 
 /// Copy a single path (regular file, symlink, or directory) from `src`
-/// to `dst`, preserving mode and mtime on supported platforms. Used by
-/// the untracked-files pass; directories are recursed via the existing
-/// [`copy_dir_contents`] helper.
+/// to `dst`, preserving mtime. Used by the untracked-files pass;
+/// directories are recursed via [`tree::copy_dir_contents`].
 fn copy_path(src: &Path, dst: &Path) -> IsoResult<()> {
 	let meta = std::fs::symlink_metadata(src)
 		.map_err(|err| IsoError::other(format!("stat {}: {err}", src.display())))?;
 	if meta.file_type().is_symlink() {
-		copy_symlink(src, dst)
+		tree::copy_symlink(src, dst, meta.file_type())
 	} else if meta.file_type().is_dir() {
 		std::fs::create_dir_all(dst)
 			.map_err(|err| IsoError::other(format!("create {}: {err}", dst.display())))?;
-		copy_dir_contents(src, dst)?;
-		copy_dir_mtime(src, dst);
-		Ok(())
+		tree::copy_dir_contents(src, dst, &[], &Rcopy)?;
+		Rcopy.finish_dir(src, dst)
 	} else {
-		std::fs::copy(src, dst).map_err(|err| {
-			IsoError::other(format!("copy {} -> {}: {err}", src.display(), dst.display()))
-		})?;
-		copy_file_mtime(src, dst);
-		Ok(())
+		Rcopy.file(src, dst, meta.file_type())
 	}
 }
 
-/// Recursive copy preserving file modes (unix) and mtimes on both unix
-/// and windows. We don't use `std::fs::copy` for the final mtime fix-up
-/// because `copy` already preserves mtime on the macOS/Linux platforms we
-/// care about — but we still set it explicitly to keep behaviour
-/// consistent across hosts where the stdlib promise is weaker.
+/// Recursive copy preserving file modes (via `std::fs::copy`) and mtimes.
+/// `copy` already preserves mtime on the macOS/Linux platforms we care
+/// about, but we still set it explicitly to keep behaviour consistent
+/// across hosts where the stdlib promise is weaker.
 fn recursive_copy(lower: &Path, merged: &Path) -> IsoResult<()> {
 	std::fs::create_dir_all(merged)
 		.map_err(|err| IsoError::other(format!("create {}: {err}", merged.display())))?;
-	copy_dir_contents(lower, merged)
+	tree::copy_dir_contents(lower, merged, &[], &Rcopy)
 }
 
-fn copy_dir_contents(src: &Path, dst: &Path) -> IsoResult<()> {
-	let entries = std::fs::read_dir(src)
-		.map_err(|err| IsoError::other(format!("read_dir {}: {err}", src.display())))?;
-	for entry in entries {
-		let entry =
-			entry.map_err(|err| IsoError::other(format!("dir entry in {}: {err}", src.display())))?;
-		let file_type = entry
-			.file_type()
-			.map_err(|err| IsoError::other(format!("file_type {}: {err}", entry.path().display())))?;
-		let src_path = entry.path();
-		let dst_path = dst.join(entry.file_name());
-		if file_type.is_symlink() {
-			copy_symlink(&src_path, &dst_path)?;
-		} else if file_type.is_dir() {
-			std::fs::create_dir_all(&dst_path)
-				.map_err(|err| IsoError::other(format!("create {}: {err}", dst_path.display())))?;
-			copy_dir_contents(&src_path, &dst_path)?;
-			copy_dir_mtime(&src_path, &dst_path);
-		} else {
-			std::fs::copy(&src_path, &dst_path).map_err(|err| {
-				IsoError::other(format!("copy {} -> {}: {err}", src_path.display(), dst_path.display()))
-			})?;
-			copy_file_mtime(&src_path, &dst_path);
-		}
+struct Rcopy;
+
+impl TreeCopy for Rcopy {
+	fn symlink(&self, src: &Path, dst: &Path, file_type: FileType) -> IsoResult<()> {
+		tree::copy_symlink(src, dst, file_type)
 	}
-	Ok(())
+
+	fn file(&self, src: &Path, dst: &Path, _file_type: FileType) -> IsoResult<()> {
+		std::fs::copy(src, dst).map_err(|err| {
+			IsoError::other(format!("copy {} -> {}: {err}", src.display(), dst.display()))
+		})?;
+		copy_mtime(src, dst);
+		Ok(())
+	}
+
+	fn finish_dir(&self, src: &Path, dst: &Path) -> IsoResult<()> {
+		copy_mtime(src, dst);
+		Ok(())
+	}
 }
 
-#[cfg(unix)]
-fn copy_symlink(src: &Path, dst: &Path) -> IsoResult<()> {
-	let target = std::fs::read_link(src)
-		.map_err(|err| IsoError::other(format!("read_link {}: {err}", src.display())))?;
-	std::os::unix::fs::symlink(target, dst)
-		.map_err(|err| IsoError::other(format!("symlink {}: {err}", dst.display())))
-}
-
-#[cfg(windows)]
-fn copy_symlink(src: &Path, dst: &Path) -> IsoResult<()> {
-	let target = std::fs::read_link(src)
-		.map_err(|err| IsoError::other(format!("read_link {}: {err}", src.display())))?;
-	let meta = std::fs::symlink_metadata(src)
-		.map_err(|err| IsoError::other(format!("symlink_metadata {}: {err}", src.display())))?;
-	let res = if meta.file_type().is_dir() {
-		std::os::windows::fs::symlink_dir(target, dst)
-	} else {
-		std::os::windows::fs::symlink_file(target, dst)
-	};
-	res.map_err(|err| IsoError::other(format!("symlink {}: {err}", dst.display())))
-}
-
-#[cfg(not(any(unix, windows)))]
-fn copy_symlink(_src: &Path, _dst: &Path) -> IsoResult<()> {
-	Err(IsoError::other("symlink copy unsupported on this platform"))
-}
-
-/// Mirror `src`'s mtime onto `dst`. Failures are silently ignored — the
-/// mtime hint is an optimisation for [`crate::diff`], not a correctness
-/// requirement.
-fn copy_file_mtime(src: &Path, dst: &Path) {
-	let Ok(meta) = std::fs::metadata(src) else {
+/// Mirror `src`'s mtime onto the file or directory `dst`. Failures are
+/// silently ignored — the mtime hint is an optimisation for [`crate::diff`],
+/// not a correctness requirement.
+fn copy_mtime(src: &Path, dst: &Path) {
+	let Ok(mtime) = std::fs::metadata(src).and_then(|meta| meta.modified()) else {
 		return;
 	};
-	let Ok(mtime) = meta.modified() else { return };
-	let _ = filetime_set(dst, mtime);
+	let _ = set_mtime(dst, mtime);
 }
 
-fn copy_dir_mtime(src: &Path, dst: &Path) {
-	let Ok(meta) = std::fs::metadata(src) else {
-		return;
-	};
-	let Ok(mtime) = meta.modified() else { return };
-	let _ = filetime_set(dst, mtime);
-}
-
+/// One path-based `utimensat`: rcopy holds no handle to `dst`
+/// (`std::fs::copy` closes it), so opening one for `futimens` would add an
+/// open and a close per copied entry. `dst` is never a symlink here, but
+/// `AT_SYMLINK_NOFOLLOW` keeps a swapped-in link from redirecting the write.
 #[cfg(unix)]
-fn filetime_set(path: &Path, mtime: std::time::SystemTime) -> std::io::Result<()> {
+fn set_mtime(path: &Path, mtime: std::time::SystemTime) -> std::io::Result<()> {
 	use std::os::unix::ffi::OsStrExt;
+
 	let dur = mtime
 		.duration_since(std::time::UNIX_EPOCH)
 		.map_err(std::io::Error::other)?;
-	let times = [libc::timespec { tv_sec: dur.as_secs() as _, tv_nsec: 0 }, libc::timespec {
+	let times = [libc::timespec { tv_sec: 0, tv_nsec: libc::UTIME_OMIT }, libc::timespec {
 		tv_sec:  dur.as_secs() as _,
 		tv_nsec: dur.subsec_nanos() as libc::c_long,
 	}];
 	let c_path = std::ffi::CString::new(path.as_os_str().as_bytes())?;
 	// SAFETY: `c_path` and `times` outlive the syscall; the kernel does
 	// not retain the pointers.
-	let rc = unsafe { libc::utimensat(libc::AT_FDCWD, c_path.as_ptr(), times.as_ptr(), 0) };
+	let rc = unsafe {
+		libc::utimensat(libc::AT_FDCWD, c_path.as_ptr(), times.as_ptr(), libc::AT_SYMLINK_NOFOLLOW)
+	};
 	if rc == 0 {
 		Ok(())
 	} else {
@@ -428,47 +344,27 @@ fn filetime_set(path: &Path, mtime: std::time::SystemTime) -> std::io::Result<()
 	}
 }
 
+/// Windows has no path-based time setter, so open `path` with just enough
+/// access: backup semantics to open a directory, and write-attributes access,
+/// which works on readonly files.
 #[cfg(windows)]
-fn filetime_set(path: &Path, mtime: std::time::SystemTime) -> std::io::Result<()> {
-	use std::{
-		fs::OpenOptions,
-		os::windows::{fs::OpenOptionsExt, io::AsRawHandle},
+fn set_mtime(path: &Path, mtime: std::time::SystemTime) -> std::io::Result<()> {
+	use std::os::windows::fs::OpenOptionsExt;
+
+	use windows_sys::Win32::Storage::FileSystem::{
+		FILE_FLAG_BACKUP_SEMANTICS, FILE_WRITE_ATTRIBUTES,
 	};
 
-	use windows_sys::Win32::{
-		Foundation::FILETIME,
-		Storage::FileSystem::{FILE_FLAG_BACKUP_SEMANTICS, SetFileTime},
-	};
-
-	let dur = mtime
-		.duration_since(std::time::UNIX_EPOCH)
-		.map_err(|err| std::io::Error::other(err.to_string()))?;
-	// Windows FILETIME = 100-ns ticks since 1601-01-01.
-	const EPOCH_DIFF_100NS: u64 = 116_444_736_000_000_000;
-	let ticks = EPOCH_DIFF_100NS + dur.as_secs() * 10_000_000 + u64::from(dur.subsec_nanos() / 100);
-	let ft = FILETIME {
-		dwLowDateTime:  (ticks & 0xffff_ffff) as u32,
-		dwHighDateTime: (ticks >> 32) as u32,
-	};
-
-	let mut opts = OpenOptions::new();
-	opts.write(true);
-	opts.custom_flags(FILE_FLAG_BACKUP_SEMANTICS);
-	let file = opts.open(path)?;
-	// SAFETY: file owns the HANDLE for the duration of the call.
-	let ok = unsafe {
-		SetFileTime(file.as_raw_handle() as _, std::ptr::null(), std::ptr::null(), &raw const ft)
-	};
-	if ok != 0 {
-		Ok(())
-	} else {
-		Err(std::io::Error::last_os_error())
-	}
+	std::fs::OpenOptions::new()
+		.access_mode(FILE_WRITE_ATTRIBUTES)
+		.custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+		.open(path)?
+		.set_modified(mtime)
 }
 
 #[cfg(not(any(unix, windows)))]
-fn filetime_set(_path: &Path, _mtime: std::time::SystemTime) -> std::io::Result<()> {
-	Ok(())
+fn set_mtime(path: &Path, mtime: std::time::SystemTime) -> std::io::Result<()> {
+	std::fs::File::open(path)?.set_modified(mtime)
 }
 
 #[cfg(test)]
@@ -481,6 +377,69 @@ mod tests {
 	};
 
 	use super::*;
+
+	/// The non-git `start` path mirrors file and directory mtimes, including
+	/// on readonly files, so the mtime-skipping diff stays fast.
+	#[cfg(unix)]
+	#[test]
+	fn rcopy_preserves_file_and_dir_mtimes() {
+		use std::os::unix::fs::PermissionsExt as _;
+
+		let root = TempDirGuard::new();
+		let lower = root.path().join("lower");
+		let sub = lower.join("sub");
+		fs::create_dir_all(&sub).expect("create lower/sub");
+		let file = sub.join("file.txt");
+		fs::write(&file, b"hello").expect("write lower file");
+		let file_mtime = UNIX_EPOCH + std::time::Duration::new(1_000_000_000, 123_456_789);
+		let dir_mtime = UNIX_EPOCH + std::time::Duration::new(1_100_000_000, 0);
+		fs::File::open(&file)
+			.and_then(|f| f.set_modified(file_mtime))
+			.expect("set file mtime");
+		fs::set_permissions(&file, fs::Permissions::from_mode(0o444)).expect("make file readonly");
+		fs::File::open(&sub)
+			.and_then(|d| d.set_modified(dir_mtime))
+			.expect("set dir mtime");
+
+		let merged = root.path().join("merged");
+		RcopyBackend.start(&lower, &merged).expect("rcopy start");
+
+		let mtime = |path: &Path| {
+			fs::metadata(path)
+				.and_then(|m| m.modified())
+				.expect("mtime")
+		};
+		assert_eq!(mtime(&merged.join("sub/file.txt")), file_mtime);
+		assert_eq!(mtime(&merged.join("sub")), dir_mtime);
+	}
+
+	/// A directory symlink must be recreated as a directory link; Windows
+	/// cannot traverse a file link that points at a directory.
+	#[cfg(windows)]
+	#[test]
+	fn rcopy_recreates_directory_symlink_as_directory_link() {
+		use std::os::windows::fs::FileTypeExt as _;
+
+		let root = TempDirGuard::new();
+		let lower = root.path().join("lower");
+		fs::create_dir_all(lower.join("target")).expect("create lower/target");
+		fs::write(lower.join("target/inner.txt"), b"inner").expect("write inner file");
+		if let Err(err) = std::os::windows::fs::symlink_dir("target", lower.join("link")) {
+			// Creating symlinks needs Developer Mode or the symlink privilege.
+			eprintln!("skipping: cannot create directory symlink: {err}");
+			return;
+		}
+
+		let merged = root.path().join("merged");
+		RcopyBackend.start(&lower, &merged).expect("rcopy start");
+
+		let link = merged.join("link");
+		let file_type = fs::symlink_metadata(&link)
+			.expect("link metadata")
+			.file_type();
+		assert!(file_type.is_symlink_dir(), "expected a directory link, got {file_type:?}");
+		assert_eq!(fs::read(link.join("inner.txt")).expect("read through link"), b"inner");
+	}
 
 	struct TempDirGuard(PathBuf);
 

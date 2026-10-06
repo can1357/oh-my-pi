@@ -46,7 +46,7 @@ pub fn filter(ctx: &MinimizerCtx<'_>, input: &str, exit_code: i32) -> MinimizerO
 				filter_psql(&cleaned, exit_code)
 			}
 		},
-		_ => head_tail_dedup(&cleaned, 80, 40),
+		_ => primitives::head_tail_lines(&primitives::dedup_consecutive_lines(&cleaned), 80, 40),
 	};
 
 	if text == input {
@@ -902,7 +902,11 @@ fn filter_psql(input: &str, exit_code: i32) -> String {
 	if exit_code == 0 {
 		preserve_important_lines(input, &compacted, structured)
 	} else {
-		preserve_important_lines(input, &head_tail_dedup(&compacted, 80, 40), structured)
+		preserve_important_lines(
+			input,
+			&primitives::head_tail_lines(&primitives::dedup_consecutive_lines(&compacted), 80, 40),
+			structured,
+		)
 	}
 }
 
@@ -1006,14 +1010,24 @@ fn compact_long_lines(input: &str) -> String {
 }
 
 fn compact_line(line: &str, max_chars: usize) -> String {
-	let chars: Vec<char> = line.chars().collect();
-	if chars.len() <= max_chars {
+	// Byte length bounds char count, so short lines skip the char walk.
+	if line.len() <= max_chars {
+		return line.to_string();
+	}
+	let char_count = line.chars().count();
+	if char_count <= max_chars {
 		return line.to_string();
 	}
 	let edge = max_chars / 2;
-	let start: String = chars.iter().take(edge).collect();
-	let end: String = chars.iter().skip(chars.len() - edge).collect();
-	format!("{start}[…{}ch elided…]{end}", chars.len() - edge * 2)
+	let start_end = line
+		.char_indices()
+		.nth(edge)
+		.map_or(line.len(), |(idx, _)| idx);
+	let end_start = line
+		.char_indices()
+		.nth(char_count - edge)
+		.map_or(line.len(), |(idx, _)| idx);
+	format!("{}[…{}ch elided…]{}", &line[..start_end], char_count - edge * 2, &line[end_start..])
 }
 
 fn looks_like_table(input: &str) -> bool {
@@ -1078,7 +1092,7 @@ fn compact_delimited_table(input: &str, max_rows: usize) -> String {
 	if data_rows > max_rows {
 		out.push(format!("[…{} rows elided…]", data_rows - max_rows));
 	}
-	join_lines(out)
+	primitives::join_lines(&out)
 }
 
 fn compact_psql_table(input: &str) -> String {
@@ -1124,7 +1138,7 @@ fn compact_psql_table(input: &str) -> String {
 		out.push(format!("[…{} rows elided…]", data_rows - MAX_PSQL_ROWS));
 	}
 	out.extend(row_count_lines);
-	join_lines(out)
+	primitives::join_lines(&out)
 }
 
 fn compact_psql_expanded(input: &str) -> String {
@@ -1169,7 +1183,7 @@ fn compact_psql_expanded(input: &str) -> String {
 		out.push(format!("[…{} records elided…]", records - MAX_PSQL_ROWS));
 	}
 	out.extend(row_count_lines);
-	join_lines(out)
+	primitives::join_lines(&out)
 }
 
 fn flush_record(out: &mut Vec<String>, current: &mut Vec<String>, records: usize) {
@@ -1272,20 +1286,6 @@ fn is_important_line(line: &str) -> bool {
 		.as_bytes()
 		.windows(b"EXCEPTION".len())
 		.any(|window| window.eq_ignore_ascii_case(b"EXCEPTION"))
-}
-
-fn head_tail_dedup(input: &str, head: usize, tail: usize) -> String {
-	primitives::head_tail_lines(&primitives::dedup_consecutive_lines(input), head, tail)
-}
-
-fn join_lines(lines: Vec<String>) -> String {
-	if lines.is_empty() {
-		String::new()
-	} else {
-		let mut out = lines.join("\n");
-		out.push('\n');
-		out
-	}
 }
 
 #[cfg(test)]

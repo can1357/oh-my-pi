@@ -9,8 +9,7 @@
 use std::{
 	collections::{HashMap, HashSet},
 	fs::File,
-	io::Read,
-	os::fd::OwnedFd,
+	os::{fd::OwnedFd, unix::fs::FileExt},
 	sync::Arc,
 };
 
@@ -63,17 +62,17 @@ pub(super) struct KeyboardLayout {
 }
 
 impl KeyboardLayout {
+	/// Compiles the keymap behind a libei keymap fd. The fd shares its file
+	/// offset with the compositor's copy, which may sit at EOF, so the keymap is
+	/// read positionally from offset 0.
 	pub(super) fn from_fd(fd: OwnedFd, size: usize) -> Option<Self> {
-		let mut bytes = Vec::with_capacity(size);
-		File::from(fd)
-			.take(size as u64)
-			.read_to_end(&mut bytes)
-			.ok()?;
+		let mut bytes = vec![0; size];
+		File::from(fd).read_exact_at(&mut bytes, 0).ok()?;
 		let text = bytes.split(|&byte| byte == 0).next().unwrap_or(&bytes);
 		Self::compile(std::str::from_utf8(text).ok()?)
 	}
 
-	fn compile(source: &str) -> Option<Self> {
+	pub(super) fn compile(source: &str) -> Option<Self> {
 		let keycodes = parse_keycodes(extract_section(source, "xkb_keycodes")?);
 		let symbols_section = extract_section(source, "xkb_symbols")?;
 		let keys = parse_keys(symbols_section, &keycodes);
@@ -276,28 +275,33 @@ fn parse_keys(section: &str, keycodes: &HashMap<String, u32>) -> Vec<ParsedKey> 
 	keys
 }
 
+/// Finds the next `label` (e.g. `symbols[`) group index at or after `from`,
+/// returning the zero-based group and the byte offset past its `]`. xkbcomp
+/// writes `symbols[Group1]`; libxkbcommon 1.13 writes `symbols[1]`.
+fn next_group_label(body: &str, label: &str, from: usize) -> Option<(usize, usize)> {
+	let start = from + body[from..].find(label)? + label.len();
+	let end = start + body[start..].find(']')?;
+	let index = body[start..end].trim();
+	let group = index
+		.strip_prefix("Group")
+		.unwrap_or(index)
+		.parse::<usize>()
+		.ok()?
+		.checked_sub(1)?;
+	Some((group, end + 1))
+}
+
 fn parse_group_types(body: &str) -> HashMap<usize, String> {
 	let mut types = HashMap::new();
 	let mut offset = 0;
-	while let Some(relative) = body[offset..].find("type[Group") {
-		let start = offset + relative + "type[Group".len();
-		let Some(end) = body[start..].find(']') else {
-			break;
-		};
-		let Some(group) = body[start..start + end]
-			.parse::<usize>()
-			.ok()
-			.and_then(|n| n.checked_sub(1))
-		else {
-			break;
-		};
-		let remainder = &body[start + end + 1..];
+	while let Some((group, end)) = next_group_label(body, "type[", offset) {
+		let remainder = &body[end..];
 		if let Some(first_quote) = remainder.find('"')
 			&& let Some(second_quote) = remainder[first_quote + 1..].find('"')
 		{
 			types.insert(group, remainder[first_quote + 1..first_quote + 1 + second_quote].to_owned());
 		}
-		offset = start + end + 1;
+		offset = end;
 	}
 	if types.is_empty()
 		&& let Some(start) = body.find("type=")
@@ -313,23 +317,11 @@ fn parse_group_types(body: &str) -> HashMap<usize, String> {
 fn parse_group_symbols(body: &str) -> HashMap<usize, Vec<String>> {
 	let mut symbols = HashMap::new();
 	let mut offset = 0;
-	while let Some(relative) = body[offset..].find("symbols[Group") {
-		let start = offset + relative + "symbols[Group".len();
-		let Some(group_end) = body[start..].find(']') else {
+	while let Some((group, end)) = next_group_label(body, "symbols[", offset) {
+		let Some(open_relative) = body[end..].find('[') else {
 			break;
 		};
-		let Some(group) = body[start..start + group_end]
-			.parse::<usize>()
-			.ok()
-			.and_then(|n| n.checked_sub(1))
-		else {
-			break;
-		};
-		let remainder_start = start + group_end + 1;
-		let Some(open_relative) = body[remainder_start..].find('[') else {
-			break;
-		};
-		let open = remainder_start + open_relative;
+		let open = end + open_relative;
 		let Some(close_relative) = body[open + 1..].find(']') else {
 			break;
 		};
@@ -567,6 +559,12 @@ fn has_candidate(
 
 #[cfg(test)]
 mod tests {
+	use std::{
+		fs::File,
+		io::Write,
+		os::fd::{FromRawFd, OwnedFd},
+	};
+
 	use super::{KeyStroke, KeyboardLayout};
 
 	const FR: &str = include_str!("testdata/fr.xkb");
@@ -574,6 +572,45 @@ mod tests {
 
 	fn stroke(keycode: u32, modifiers: &[u32]) -> KeyStroke {
 		KeyStroke { keycode, modifiers: modifiers.to_vec() }
+	}
+
+	/// Newer libxkbcommon (e.g. 1.13) serializes group labels as `symbols[1]`.
+	fn numeric_group_labels(keymap: &str) -> String {
+		keymap
+			.replace("symbols[Group", "symbols[")
+			.replace("type[Group", "type[")
+	}
+
+	#[test]
+	fn reads_the_keymap_from_the_start_of_a_shared_fd() {
+		// SAFETY: `memfd_create` returns a fresh descriptor or -1; ownership moves
+		// into the `File` exactly once.
+		let mut file = unsafe {
+			let fd = libc::memfd_create(c"xkb".as_ptr(), 0);
+			assert!(fd >= 0, "memfd_create failed");
+			File::from_raw_fd(fd)
+		};
+		// The compositor writes the keymap and leaves the shared offset at EOF.
+		file.write_all(FR.as_bytes()).unwrap();
+		let fd = OwnedFd::from(file.try_clone().unwrap());
+
+		let layout = KeyboardLayout::from_fd(fd, FR.len()).expect("keymap at offset 0 must compile");
+		assert_eq!(layout.resolve_char('a'), Some(stroke(16, &[])));
+	}
+
+	#[test]
+	fn resolves_numeric_group_labels() {
+		let mut layout = KeyboardLayout::compile(&numeric_group_labels(US_FR))
+			.expect("US/French fixture must compile");
+		assert_eq!(layout.resolve_char('a'), Some(stroke(30, &[])));
+		assert_eq!(layout.resolve_char('@'), Some(stroke(3, &[42])));
+		layout.update_modifiers(0, 0, 0, 1);
+		assert_eq!(layout.resolve_char('a'), Some(stroke(16, &[])));
+		assert_eq!(layout.resolve_char('é'), Some(stroke(3, &[])));
+
+		let layout =
+			KeyboardLayout::compile(&numeric_group_labels(FR)).expect("French fixture must compile");
+		assert_eq!(layout.resolve_char('#'), Some(stroke(4, &[100])));
 	}
 
 	#[test]

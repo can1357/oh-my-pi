@@ -1005,6 +1005,14 @@ export interface ResolvedOpenAIResponsesCompat extends ResolvedOpenAISharedCompa
 	supportsReasoningSummary: boolean;
 	/** Optional chaining override; unset falls back to officialEndpoint at request time. */
 	statefulResponses?: boolean;
+	/**
+	 * Whether the host can store Responses results server-side (`store: true`).
+	 * Rule-owned: hosts that keep generating after a client disconnect so a
+	 * dropped stream can resume via `GET /responses/{id}`. Storage is opt-in
+	 * per request (`storeResponses` stream option, else
+	 * `PI_MUSE_STORE_RESPONSES`); stored runs retain prompts and outputs on the provider.
+	 */
+	storeResponses: boolean;
 	streamIdleTimeoutMs?: number;
 	vercelGatewayRouting?: OpenAICompat["vercelGatewayRouting"];
 	/** The model sits behind Vercel AI Gateway's Responses endpoint. */
