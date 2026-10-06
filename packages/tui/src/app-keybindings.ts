@@ -284,7 +284,6 @@ const KEYBINDING_NAME_MIGRATIONS = {
 	pasteTextRaw: "app.clipboard.pasteTextRaw",
 	copyLine: "app.clipboard.copyLine",
 	copyPrompt: "app.clipboard.copyPrompt",
-	copyLastAssistant: "app.clipboard.copyLastAssistant",
 	newSession: "app.session.new",
 	tree: "app.session.tree",
 	fork: "app.session.fork",

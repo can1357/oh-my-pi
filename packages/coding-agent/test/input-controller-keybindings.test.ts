@@ -418,10 +418,10 @@ describe("InputController keybinding setup", () => {
 		const { InputController, ctx, customHandlers, setKeybinding } = await createContext();
 		setKeybinding("app.clipboard.copyLastAssistant", ["alt+c"]);
 		(ctx.session as { messages: unknown[] }).messages = [
-			{ role: "assistant", content: [{ type: "text", text: "main response" }] },
+			{ role: "assistant", content: [{ type: "text", text: "main response" }], stopReason: "stop" },
 		];
 		const focusedViewSession = {
-			messages: [{ role: "assistant", content: [{ type: "text", text: "last response" }] }],
+			messages: [{ role: "assistant", content: [{ type: "text", text: "last response" }], stopReason: "stop" }],
 		} as unknown as InteractiveModeContext["viewSession"];
 		Object.assign(ctx, { focusedAgentId: "worker", viewSession: focusedViewSession });
 		const controller = new InputController(ctx);

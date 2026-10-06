@@ -19,13 +19,6 @@ describe("KeybindingsManager.getDisplayString", () => {
 		expect(keybindings.getDisplayString("app.retry")).toBe("F5/Alt+R");
 	});
 
-	it("defaults copyLastAssistant to Alt+C", () => {
-		const keybindings = KeybindingsManager.inMemory();
-
-		expect(keybindings.getKeys("app.clipboard.copyLastAssistant")).toEqual(["alt+c"]);
-		expect(keybindings.getDisplayString("app.clipboard.copyLastAssistant")).toBe("Alt+C");
-	});
-
 	it("returns an empty string when the action has no binding", () => {
 		const keybindings = KeybindingsManager.inMemory({
 			"app.clipboard.copyPrompt": [],

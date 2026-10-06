@@ -209,10 +209,12 @@ export function assistantText(msg: AgentMessage): string | undefined {
 	return text.trim() ? text : undefined;
 }
 
-/** Walk the transcript backwards for the most recent assistant message text. */
+/** Walk the transcript backwards for the most recent completed assistant message text. */
 export function extractLastAssistantText(messages: readonly AgentMessage[]): string | undefined {
 	for (let i = messages.length - 1; i >= 0; i--) {
-		const text = assistantText(messages[i]);
+		const message = messages[i];
+		if (message.role !== "assistant" || message.stopReason !== "stop") continue;
+		const text = assistantText(message);
 		if (text !== undefined) return text;
 	}
 	return undefined;

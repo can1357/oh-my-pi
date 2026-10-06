@@ -6,7 +6,7 @@ import * as clipboard from "@oh-my-pi/pi-coding-agent/utils/clipboard";
 import * as opener from "@oh-my-pi/pi-coding-agent/utils/open";
 
 function assistantText(text: string): AgentMessage {
-	return { role: "assistant", content: [{ type: "text", text }] } as unknown as AgentMessage;
+	return { role: "assistant", content: [{ type: "text", text }], stopReason: "stop" } as unknown as AgentMessage;
 }
 
 function assistantCalls(toolCalls: Array<{ name: string; arguments: Record<string, unknown> }>): AgentMessage {
