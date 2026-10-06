@@ -651,9 +651,9 @@ async fn wait_for_callback_async(
 	let changed = Arc::new(tokio::sync::Notify::new());
 	let watcher = path.parent().and_then(|directory| {
 		let changed = Arc::clone(&changed);
-		// A failed watch (e.g. exhausted inotify instances) only costs latency, so
-		// the wait falls back to polling; logged because that fallback is otherwise
-		// invisible.
+		// A failed watch (e.g. exhausted inotify instances) only costs latency,
+		// so the wait falls back to polling; logged because that fallback
+		// is otherwise invisible.
 		let mut watcher =
 			match notify::recommended_watcher(move |_: notify::Result<notify::Event>| {
 				changed.notify_one();
@@ -677,8 +677,9 @@ async fn wait_for_callback_async(
 		cancel
 			.heartbeat()
 			.map_err(|error| anyhow!(error.to_string()))?;
-		// A plain rename is one syscall that fails fast with ENOENT; routing it through
-		// tokio::fs would add a blocking-pool round trip to every attempt.
+		// A plain rename is one syscall that fails fast with ENOENT; routing it
+		// through tokio::fs would add a blocking-pool round trip to every
+		// attempt.
 		match fs::rename(path, &claim) {
 			Ok(()) => break,
 			Err(error) if error.kind() == io::ErrorKind::NotFound => {
@@ -728,7 +729,8 @@ pub(super) fn validate_scheme(scheme: &str) -> AnyResult<()> {
 			character.is_ascii_lowercase()
 				|| character.is_ascii_digit()
 				|| matches!(character, '+' | '-' | '.')
-		}) || scheme.len() > 128
+		})
+		|| scheme.len() > 128
 	{
 		bail!("invalid native OAuth URL scheme");
 	}

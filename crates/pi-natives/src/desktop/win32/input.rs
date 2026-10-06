@@ -663,11 +663,13 @@ mod background {
 			VK_INSERT
 				| VK_DELETE
 				| VK_HOME
-				| VK_END | VK_PRIOR
+				| VK_END
+				| VK_PRIOR
 				| VK_NEXT
 				| VK_LEFT
 				| VK_RIGHT
-				| VK_UP | VK_DOWN
+				| VK_UP
+				| VK_DOWN
 				| VK_LWIN
 				| VK_NUMLOCK
 				| VK_SNAPSHOT
@@ -982,7 +984,8 @@ mod foreground {
 				if current == self.previous {
 					return Ok(());
 				}
-				// SAFETY: GetAncestor validates the observed handle, including null.
+				// SAFETY: GetAncestor validates the observed handle, including
+				// null.
 				let owner = unsafe { GetAncestor(current, GA_ROOTOWNER) };
 				if current != self.target && owner != self.target {
 					return Err(DesktopError::input_failed(
@@ -1082,7 +1085,8 @@ mod foreground {
 			Ok(())
 		} else {
 			// Only release transitions actually inserted by this call. Never
-			// release uninserted modifiers or replay clicks/text after a short send.
+			// release uninserted modifiers or replay clicks/text after a short
+			// send.
 			let releases = pending_releases(&events[..(sent as usize).min(events.len())]);
 			let cleanup = control::cleanup(|| {
 				let mut cleanup = Ok(());

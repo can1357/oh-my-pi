@@ -35,10 +35,12 @@ fn find_outputs_paths_only(command: &str) -> bool {
 			"-print0"
 				| "-printf"
 				| "-fprintf"
-				| "-ls" | "-fls"
+				| "-ls"
+				| "-fls"
 				| "-exec"
 				| "-execdir"
-				| "-ok" | "-okdir"
+				| "-ok"
+				| "-okdir"
 		)
 	})
 }
@@ -235,10 +237,11 @@ fn center_truncate_match(text: &str, max_chars: usize) -> String {
 	}
 
 	// Heuristic:
-	// - If the line has significant leading whitespace, bias toward the code region
-	//   shortly after indentation (common for grep hits inside indented code).
-	// - If the line is effectively one long token, bias earlier so identifiers that
-	//   appear before a long suffix still remain visible.
+	// - If the line has significant leading whitespace, bias toward the code
+	//   region shortly after indentation (common for grep hits inside indented
+	//   code).
+	// - If the line is effectively one long token, bias earlier so identifiers
+	//   that appear before a long suffix still remain visible.
 	// - Otherwise center in the middle of the full line.
 	// Count leading whitespace in CHARS, not bytes: this value is compared and
 	// combined with char-based quantities (`char_count`, `max_chars`) and used
@@ -790,15 +793,21 @@ fn is_source_path(path: &str) -> bool {
 	matches!(
 		ext,
 		"rs"
-			| "ts" | "tsx"
-			| "js" | "jsx"
-			| "py" | "go"
+			| "ts"
+			| "tsx"
+			| "js"
+			| "jsx"
+			| "py"
+			| "go"
 			| "java"
-			| "c" | "cc"
+			| "c"
+			| "cc"
 			| "cpp"
-			| "h" | "hpp"
+			| "h"
+			| "hpp"
 			| "swift"
-			| "kt" | "rb"
+			| "kt"
+			| "rb"
 	)
 }
 

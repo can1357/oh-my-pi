@@ -368,7 +368,8 @@ struct ComApartment;
 
 impl ComApartment {
 	fn new() -> CoreResult<Self> {
-		// SAFETY: this initializes only the calling thread, with no reserved data.
+		// SAFETY: this initializes only the calling thread, with no reserved
+		// data.
 		let result = unsafe { CoInitializeEx(std::ptr::null(), COINIT_MULTITHREADED as u32) };
 		if result < 0 {
 			return Err(failed(format!(

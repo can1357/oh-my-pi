@@ -426,8 +426,8 @@ struct KernelLease(std::fs::File);
 impl KernelLease {
 	fn acquire() -> CoreResult<Self> {
 		// A fixed per-login-user inode coordinates independently launched hosts.
-		// Never unlink it: unlinking a locked inode would create two lock domains.
-		// SAFETY: geteuid has no preconditions.
+		// Never unlink it: unlinking a locked inode would create two lock
+		// domains. SAFETY: geteuid has no preconditions.
 		let uid = unsafe { libc::geteuid() };
 		Self::at(&std::path::PathBuf::from(format!("/tmp/pi-desktop-input-{uid}.lock")))
 	}
