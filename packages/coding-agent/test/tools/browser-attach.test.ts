@@ -112,6 +112,27 @@ const RELAY_ENTRIES = [
 	},
 ];
 
+/** /json entries where the user granted the second tab by dragging it into the omp group. */
+const RELAY_GRANTED_ENTRIES = [
+	{
+		id: "PAGE_ACTIVE",
+		type: "page",
+		title: "Active",
+		url: "https://active.example.com",
+		active: "true",
+		discarded: "false",
+	},
+	{
+		id: "PAGE_GRANTED",
+		type: "page",
+		title: "Granted",
+		url: "https://granted.example.com",
+		active: "false",
+		discarded: "false",
+		ompGroupGranted: "true",
+	},
+];
+
 interface FakePageOptions {
 	url: string;
 	title: string;
@@ -821,6 +842,19 @@ describe("pickElectronTarget relay path", () => {
 			t => (t as unknown as { page: { mock: { calls: unknown[] } } }).page.mock.calls.length,
 		);
 		expect(attachCalls).toEqual([0, 1, 0]);
+	});
+
+	it("prefers a granted tab over the merely active one", async () => {
+		relayEntries = RELAY_GRANTED_ENTRIES;
+		const activePage = makePage([() => {}], RELAY_GRANTED_ENTRIES[0]!.url).page;
+		const grantedPage = makePage([() => {}], RELAY_GRANTED_ENTRIES[1]!.url).page;
+		const active = makeTarget("PAGE_ACTIVE", activePage);
+		const granted = makeTarget("PAGE_GRANTED", grantedPage);
+
+		const picked = await pickElectronTarget(makeBrowser([active.target, granted.target]), { relayJson });
+
+		expect(picked).toBe(grantedPage);
+		expect(active.pageSpy).not.toHaveBeenCalled();
 	});
 
 	it("matcher skips a discarded matching tab", async () => {

@@ -188,6 +188,8 @@ class TabState {
 	ompGroupId: number | undefined;
 	/** User pulled the tab out of the omp group — never re-group it. */
 	groupOptOut = false;
+	/** User dragged this external tab into the omp group — claimable like a tab the bridge created. */
+	groupGranted = false;
 	/**
 	 * Real Chrome sessions (OOPIF/worker children) under this tab's attachment: the child session
 	 * that reported each (none for the root) and its `Target.attachedToTarget` params.
@@ -368,6 +370,9 @@ export class RelayBridge {
 				url: tab.url,
 				active: String(tab.active),
 				discarded: String(tab.discarded),
+				// Marks tabs the user granted by dragging them into the omp
+				// group, so target pickers can prefer them over the rest.
+				...(tab.groupGranted ? { ompGroupGranted: "true" } : {}),
 			});
 		}
 		return out;
@@ -1207,11 +1212,26 @@ export class RelayBridge {
 		} else {
 			if (tab.url !== snap.url) tab.banned = false;
 			// The user dragging a tab out of the omp group is an opt-out; the
-			// relay never fights the user over grouping.
+			// relay never fights the user over grouping. Dragging one IN is the
+			// mirror-image grant: the tab becomes claimable like a created tab.
 			if (tab.grouped && tab.ompGroupId !== undefined && snap.groupId !== tab.ompGroupId) {
 				tab.grouped = false;
 				tab.groupOptOut = true;
+				tab.groupGranted = false;
 				this.#log("tab left omp group", { tabKey: key, from: tab.ompGroupId, to: snap.groupId });
+			} else if (
+				snap.groupId !== tab.groupId &&
+				snap.groupId !== -1 &&
+				!tab.grouped &&
+				!this.#claimed(key) &&
+				(!snap.url || !INELIGIBLE_URL.test(snap.url)) &&
+				this.#ompGroupKnown(instanceId, snap.windowId, snap.groupId)
+			) {
+				tab.groupGranted = true;
+				tab.groupOptOut = false;
+				tab.grouped = true;
+				tab.ompGroupId = snap.groupId;
+				this.#log("tab granted via omp group", { tabKey: key, groupId: snap.groupId });
 			} else if (snap.groupId !== tab.groupId) {
 				this.#log("tab group changed", { tabKey: key, from: tab.groupId, to: snap.groupId });
 			}
@@ -1293,6 +1313,21 @@ export class RelayBridge {
 	#groupWorthy(tab: TabState): boolean {
 		if (!this.#claimed(tab.tabKey) || !this.#eligible(tab) || tab.pinned || tab.groupOptOut) return false;
 		return tab.grouped || tab.groupId === -1;
+	}
+
+	/**
+	 * True when `groupId` is the omp group of that window. Snapshots carry only
+	 * the numeric id, so the bridge recognizes its own groups by the ids its
+	 * grouping recorded — created tabs, claim-triggered group RPCs, and earlier
+	 * drag-in grants (which keep their `ompGroupId` across a drag-out) — for any
+	 * tab of that instance and window.
+	 */
+	#ompGroupKnown(instanceId: string, windowId: number, groupId: number): boolean {
+		for (const other of this.#tabs.values()) {
+			if (other.instanceId !== instanceId || other.windowId !== windowId) continue;
+			if (other.ompGroupId === groupId) return true;
+		}
+		return false;
 	}
 
 	/** Re-group every claimed tab (extension hello / reconnect). */

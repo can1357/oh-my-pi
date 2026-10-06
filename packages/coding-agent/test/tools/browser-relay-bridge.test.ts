@@ -384,6 +384,144 @@ describe("RelayBridge tab grouping", () => {
 	});
 });
 
+describe("RelayBridge omp group drag-in grants", () => {
+	/**
+	 * Create one bridge tab already inside the omp group (groupId 42) through
+	 * Target.createTarget — the snapshot carries the group, so no attach or
+	 * group RPC ever runs — giving drag-in detection a known omp group.
+	 */
+	async function createGroupedTab(
+		bridge: RelayBridge,
+		ext: FakeExtSocket,
+		connId: number,
+		tabId: number,
+		groupId = 42,
+	): Promise<void> {
+		bridge.cdpMessage(
+			connId,
+			JSON.stringify({ id: ++msgSeq, method: "Target.createTarget", params: { url: "https://example.com/created" } }),
+		);
+		ack(bridge, ext, "createTab", { tab: tab({ tabId, url: "https://example.com/created", groupId }) });
+		await flush();
+	}
+
+	function grantedEntry(bridge: RelayBridge, tabId: number): Record<string, string> | undefined {
+		return bridge.listTargets().find(e => e.id === `PAGE${ANON}.${tabId}`);
+	}
+
+	it("lists a dragged-in external tab as granted and lets a client claim it", async () => {
+		const bridge = new RelayBridge({ group: { title: "omp", color: "cyan" } });
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, [tab({ tabId: 1 })]);
+		const cdp = new FakeCdpSocket();
+		const connId = bridge.cdpConnected(cdp);
+		await createGroupedTab(bridge, ext, connId, 9);
+		// The user drags the unclaimed external tab into the omp group.
+		bridge.extMessage(ext, JSON.stringify({ t: "tabUpdated", tab: tab({ tabId: 1, groupId: 42 }) }));
+		expect(grantedEntry(bridge, 1)?.ompGroupGranted).toBe("true");
+		// The omp tab worker adopts and claims it exactly like a created tab.
+		const sessionId = await attachPage(bridge, ext, cdp, connId, 1);
+		const claimId = ++msgSeq;
+		bridge.cdpMessage(connId, JSON.stringify({ id: claimId, sessionId, method: "OMP.claimTarget" }));
+		await flush();
+		expect(cdp.messages.find(message => message.id === claimId)?.result).toEqual({});
+		// The tab is already in the omp group: the claim sync must not re-group it.
+		expect(ext.rpcs("group")).toHaveLength(0);
+	});
+
+	it("revokes the grant on drag-out and never re-groups the opted-out tab", async () => {
+		const bridge = new RelayBridge({ group: { title: "omp", color: "cyan" } });
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, [tab({ tabId: 1 })]);
+		const cdp = new FakeCdpSocket();
+		const connId = bridge.cdpConnected(cdp);
+		await createGroupedTab(bridge, ext, connId, 9);
+		bridge.extMessage(ext, JSON.stringify({ t: "tabUpdated", tab: tab({ tabId: 1, groupId: 42 }) }));
+		// The user drags the granted tab back out of the group.
+		bridge.extMessage(ext, JSON.stringify({ t: "tabUpdated", tab: tab({ tabId: 1, groupId: -1 }) }));
+		expect(grantedEntry(bridge, 1)?.ompGroupGranted).toBeUndefined();
+		expect(bridge.listTargets().some(e => e.ompGroupGranted === "true")).toBe(false);
+		// The opt-out sticks: a later claim must not re-group the tab.
+		await claimTab(bridge, ext, cdp, connId, 1);
+		expect(ext.rpcs("group")).toHaveLength(0);
+	});
+
+	it("re-grants a tab dragged back in, clearing the drag-out opt-out", async () => {
+		const bridge = new RelayBridge({ group: { title: "omp", color: "cyan" } });
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, [tab({ tabId: 1 })]);
+		const cdp = new FakeCdpSocket();
+		const connId = bridge.cdpConnected(cdp);
+		await createGroupedTab(bridge, ext, connId, 9);
+		bridge.extMessage(ext, JSON.stringify({ t: "tabUpdated", tab: tab({ tabId: 1, groupId: 42 }) }));
+		bridge.extMessage(ext, JSON.stringify({ t: "tabUpdated", tab: tab({ tabId: 1, groupId: -1 }) }));
+		// The user drags it back in: the grant returns.
+		bridge.extMessage(ext, JSON.stringify({ t: "tabUpdated", tab: tab({ tabId: 1, groupId: 42 }) }));
+		expect(grantedEntry(bridge, 1)?.ompGroupGranted).toBe("true");
+		// The re-grant cleared the opt-out: after the extension dissolves the
+		// group on reconnect, the claimed tab is group-worthy again.
+		await claimTab(bridge, ext, cdp, connId, 1);
+		bridge.extClosed(ext);
+		const ext2 = new FakeExtSocket();
+		connect(bridge, ext2, [tab({ tabId: 1, groupId: -1 }), tab({ tabId: 9, groupId: -1 })]);
+		const groups = ext2.rpcs("group");
+		expect(groups).toHaveLength(1);
+		expect(groups[0]!.tabIds).toContain(1);
+	});
+
+	it("ignores ineligible URLs dragged into the group", async () => {
+		const bridge = new RelayBridge({ group: { title: "omp", color: "cyan" } });
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, [tab({ tabId: 1, url: "chrome://extensions/" })]);
+		const cdp = new FakeCdpSocket();
+		const connId = bridge.cdpConnected(cdp);
+		await createGroupedTab(bridge, ext, connId, 9);
+		bridge.extMessage(
+			ext,
+			JSON.stringify({ t: "tabUpdated", tab: tab({ tabId: 1, url: "chrome://extensions/", groupId: 42 }) }),
+		);
+		expect(grantedEntry(bridge, 1)).toBeUndefined();
+	});
+
+	it("ignores drags into groups the bridge did not create", async () => {
+		const bridge = new RelayBridge({ group: { title: "omp", color: "cyan" } });
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, [tab({ tabId: 1 }), tab({ tabId: 5, windowId: 2 })]);
+		const cdp = new FakeCdpSocket();
+		const connId = bridge.cdpConnected(cdp);
+		await createGroupedTab(bridge, ext, connId, 9);
+		// A user group in the same window, and the omp group's id in another window.
+		bridge.extMessage(ext, JSON.stringify({ t: "tabUpdated", tab: tab({ tabId: 1, groupId: 77 }) }));
+		bridge.extMessage(ext, JSON.stringify({ t: "tabUpdated", tab: tab({ tabId: 5, windowId: 2, groupId: 42 }) }));
+		expect(grantedEntry(bridge, 1)?.ompGroupGranted).toBeUndefined();
+		expect(grantedEntry(bridge, 5)?.ompGroupGranted).toBeUndefined();
+	});
+
+	it("sends no extension RPC for the grant itself — attachment stays lazy", async () => {
+		const bridge = new RelayBridge({ group: { title: "omp", color: "cyan" } });
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, [tab({ tabId: 1 })]);
+		const cdp = new FakeCdpSocket();
+		const connId = bridge.cdpConnected(cdp);
+		await createGroupedTab(bridge, ext, connId, 9);
+		// A downstream client is already discovering targets when the grant lands.
+		bridge.cdpMessage(connId, JSON.stringify({ id: ++msgSeq, method: "Target.setDiscoverTargets", params: { discover: true } }));
+		await flush();
+		const sentBefore = ext.messages.length;
+		bridge.extMessage(ext, JSON.stringify({ t: "tabUpdated", tab: tab({ tabId: 1, groupId: 42 }) }));
+		// The grant reaches discovering clients as a targetInfoChanged, without
+		// attach/group/setBusy/activate RPCs to the extension.
+		expect(ext.messages.length).toBe(sentBefore);
+		const changed = cdp.messages.filter(
+			message =>
+				message.method === "Target.targetInfoChanged" &&
+				(message.params as { targetInfo?: { targetId?: string } } | undefined)?.targetInfo?.targetId ===
+					`PAGE${ANON}.1`,
+		);
+		expect(changed.length).toBeGreaterThan(0);
+	});
+});
+
 describe("RelayBridge child targets", () => {
 	async function armAutoAttach(
 		bridge: RelayBridge,
@@ -401,6 +539,11 @@ describe("RelayBridge child targets", () => {
 				params: { autoAttach: true, waitForDebuggerOnStart: false, flatten: true },
 			}),
 		);
+		// Lazy attach made #forwardToTab await #ensureAttached first, so the
+		// forwarded send RPC lands one microtask after the command: drain before
+		// answering it, or the ack/nack below sweeps nothing and the optimistically
+		// armed session keeps its auto-attach flag.
+		await flush();
 		if (outcome === "ok") ack(bridge, ext, "send");
 		else nack(bridge, ext, "send", "Target.setAutoAttach failed");
 		await flush();

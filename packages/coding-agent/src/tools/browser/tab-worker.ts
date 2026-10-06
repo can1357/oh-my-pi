@@ -353,6 +353,13 @@ export async function dispatchScroll(
 	}
 }
 
+/** Result of `tab.userGate()`: the page's URL/title as re-read after the user confirmed. */
+export interface UserGateResult {
+	url: string;
+	title: string;
+	resumedAt: string;
+}
+
 interface TabApi {
 	readonly name: string;
 	readonly page: Page;
@@ -412,6 +419,7 @@ interface TabApi {
 	recordStop(): Promise<RecordingStopResult>;
 	recordRestart(path: string, opts?: RecordingOptions): Promise<RecordingStartResult>;
 	recording(): Promise<RecordingStatus>;
+	userGate(reason?: string): Promise<UserGateResult>;
 	webmcpList(opts?: WebMcpListOptions): Promise<WebMcpListResult>;
 	webmcpInvoke(name: string, params: Record<string, unknown>, opts?: WebMcpInvokeOptions): Promise<WebMcpInvokeResult>;
 	webmcpEvents(opts?: WebMcpEventsOptions): Promise<WebMcpEventsResult>;
@@ -2112,6 +2120,67 @@ export class WorkerCore {
 	}
 
 	/**
+	 * Pause for a human login/CAPTCHA on a user-driven tab: ask (via the session's
+	 * `ask` tool, over the worker→supervisor tool-call channel) the user to switch to
+	 * the tab themselves and confirm when done. The tab is never raised and focus
+	 * emulation stays off — raising a relay tab drops the chrome.debugger attachment.
+	 * Resolves with the page's post-resume URL/title so the agent can detect
+	 * navigation across the gate.
+	 */
+	async #userGate(active: ActiveRun, tabName: string, reason?: string): Promise<UserGateResult> {
+		const page = this.#requirePage();
+		const before = {
+			url: redactUrlCredentials(page.url()),
+			title: await page.title().catch(() => ""),
+		};
+		let answer: string;
+		try {
+			const value = await this.#callTool(active, "ask", {
+				questions: [
+					{
+						id: "gate",
+						header: tabName,
+						question:
+							`Switch to the tab "${before.title}" (${before.url}) yourself` +
+							(reason ? ` and ${reason}` : "") +
+							", then continue. (The tab is not raised for you.)",
+						options: [
+							{ label: "Continue", description: "Done — resume automation" },
+							{ label: "Cancel", description: "Abort this gated tab action" },
+						],
+						recommended: 0,
+					},
+				],
+			});
+			answer =
+				typeof value === "string"
+					? value
+					: value !== null && typeof value === "object" && "text" in value && typeof value.text === "string"
+						? value.text
+						: "";
+		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error);
+			if (/No active run for tool call|Unknown tool from js runtime|requires interactive mode/i.test(message)) {
+				throw new ToolError(
+					`tab.userGate() cannot reach the user from here (${message}); ` +
+						"ask the user with the ask tool yourself, then retry once they confirm",
+				);
+			}
+			throw error;
+		}
+		if (!answer.includes("Continue")) {
+			throw new ToolError(
+				`User cancelled tab.userGate() on tab "${tabName}"${reason ? ` (${reason})` : ""}`,
+			);
+		}
+		return {
+			url: redactUrlCredentials(page.url()),
+			title: await page.title().catch(() => ""),
+			resumedAt: new Date().toISOString(),
+		};
+	}
+
+	/**
 	 * Wrap a tab helper so it (a) registers in the active run's in-flight map for
 	 * timeout diagnostics and (b) honors an optional per-op deadline that fails fast
 	 * with a named error instead of silently consuming the whole cell budget. Pass
@@ -2615,6 +2684,8 @@ export class WorkerCore {
 					}),
 				),
 			recording: () => op("tab.recording()", quickOpMs, () => Promise.resolve(this.#recording.status())),
+			userGate: reason =>
+				op("tab.userGate()", INF, sig => untilAborted(sig, () => this.#userGate(active, name, reason))),
 			webmcpList: opts => op("tab.webmcpList()", quickOpMs, sig => untilAborted(sig, () => webmcp.list(opts))),
 			webmcpInvoke: (toolName, params, opts) => {
 				const w = waitMs(opts?.timeout);

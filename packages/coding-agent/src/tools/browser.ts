@@ -1,11 +1,11 @@
 import { type } from "@oh-my-pi/omptype";
-import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
+import type { AgentToolContext, AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import { isRecord, logger, untilAborted } from "@oh-my-pi/pi-utils";
 import type { EvalPreludeContext, EvalPreludeDefinition } from "../eval/preludes";
 import type { ToolSession } from "../sdk";
 import { enforceInlineByteCap } from "@oh-my-pi/pi-tui/tools/streaming-output";
 import { resolveCmuxKind } from "./browser/cmux/rpc";
-import { resolveSpawnArgs } from "./browser/attach";
+import { relayTargetUrl, resolveSpawnArgs } from "./browser/attach";
 import {
 	acquireBrowser,
 	browserKey,
@@ -17,6 +17,7 @@ import {
 } from "./browser/registry";
 import { ensureChromiumExecutable } from "./browser/launch";
 import { resolveInitScriptSources } from "./browser/open-options";
+import { diffSite, siteHost } from "./browser/relay-sites";
 import { resolveRelayKind } from "./browser/relay/kind";
 import { resolveTernKind } from "./browser/tern/kind";
 import { isTernUnavailable } from "./browser/tern/wire";
@@ -49,6 +50,7 @@ import {
 	cfgBrowserHeadless,
 	cfgBrowserIdleCloseSec,
 	cfgBrowserRelay,
+	cfgBrowserRelayAllowedSites,
 	cfgBrowserRelayUrl,
 	cfgBrowserTern,
 } from "./browser/settings";
@@ -314,7 +316,7 @@ async function invokeBrowser(
 
 		switch (parsed.action) {
 			case "open":
-				return await openBrowser(session, name, parsed, details, timeoutMs, context.signal);
+			return await openBrowser(session, name, parsed, details, timeoutMs, context.signal, context.context);
 			case "close":
 				return await closeBrowser(name, parsed, details, timeoutMs, context.signal);
 			case "tabs":
@@ -346,11 +348,25 @@ async function openBrowser(
 	details: BrowserPreludeDetails,
 	timeoutMs: number,
 	signal?: AbortSignal,
+	agentContext?: AgentToolContext,
 ): Promise<AgentToolResult<unknown>> {
 	const resolved = resolveBrowserKind(params, session);
 	const autoTern = resolved.kind === "tern" && params.app?.tern !== true;
 	const existing = getTab(name);
 	const kind = autoTern && existing && existing.kindTag !== "tern" ? existing.browser.kind : resolved;
+	// Relay tabs drive the user's real Chrome: an origin outside
+	// browser.relayAllowedSites needs consent before the tab opens at or
+	// navigates to it. A target adoption (no `url`) gates on the adopted
+	// tab's origin from the relay's own /json metadata; a fresh about:blank
+	// tab stays ungated until a navigated URL passes through here. Kept
+	// inside the relay branch so every other kind keeps its synchronous
+	// path into `openOnKind` (the open deadline is scheduled there).
+	if (kind.kind === "relay") {
+		const gateUrl =
+			params.url ??
+			(params.app?.target !== undefined ? await relayTargetUrl(kind.cdpUrl, params.app.target, signal) : undefined);
+		await gateRelaySite(session, kind, gateUrl, { agentContext, signal });
+	}
 	const startedAt = performance.now();
 	try {
 		return await openOnKind(session, name, params, details, kind, timeoutMs, [], signal);
@@ -373,6 +389,87 @@ async function openBrowser(
 			signal,
 		);
 	}
+}
+
+/** How the relay-site consent gate can reach the user and respect cancellation. */
+export interface RelaySiteGateOptions {
+	/** Agent tool context carrying the interactive UI the ask tool prompts through. */
+	agentContext?: AgentToolContext;
+	signal?: AbortSignal;
+}
+
+const RELAY_SITE_ALLOW_ONCE = "Allow once";
+const RELAY_SITE_DENY = "Deny";
+
+/**
+ * Consent gate for relay-driven browsing: a relay tab drives the user's real,
+ * logged-in Chrome, so before one opens at (or an open navigates an adopted
+ * tab to) an origin outside `browser.relayAllowedSites` the user must approve
+ * it through the session's ask tool — Allow once / Always allow <host> /
+ * Deny. Always persists the host to the setting; Deny, a timed-out prompt, or
+ * an unanswered custom input fails closed with a ToolError naming what the
+ * agent should do instead. Non-relay kinds and URLs without an http(s)
+ * origin (about:blank) pass through ungated; a user cancel propagates as a
+ * ToolAbortError.
+ */
+export async function gateRelaySite(
+	session: ToolSession,
+	kind: BrowserKind,
+	url: string | undefined,
+	options: RelaySiteGateOptions = {},
+): Promise<void> {
+	if (kind.kind !== "relay" || url === undefined) return;
+	const origin = diffSite(url, cfgBrowserRelayAllowedSites.get(session.settings));
+	if (origin === null) return;
+
+	const host = siteHost(origin);
+	const ask =
+		options.agentContext?.ui && options.agentContext.hasUI !== false ? session.getToolByName?.("ask") : undefined;
+	if (!ask) {
+		throw new ToolError(
+			`Driving ${origin} through the browser relay needs permission and this session cannot ask. ` +
+				`Have the user add ${JSON.stringify(host)} to the browser.relayAllowedSites setting (or run where the ask tool can prompt) and retry.`,
+		);
+	}
+	const alwaysLabel = `Always allow ${host}`;
+	const result = await ask.execute(
+		`relay-site-${crypto.randomUUID()}`,
+		{
+			questions: [
+				{
+					id: "relay-site-consent",
+					question: `Allow the agent to drive ${origin} in your Chrome through the browser relay?`,
+					header: "Browser relay",
+					options: [
+						{ label: RELAY_SITE_ALLOW_ONCE, description: "Proceed this once; ask again next time" },
+						{ label: alwaysLabel, description: `Add ${host} to browser.relayAllowedSites` },
+						{ label: RELAY_SITE_DENY },
+					],
+					recommended: 0,
+				},
+			],
+		},
+		options.signal,
+		undefined,
+		options.agentContext,
+	);
+	const details = (result.details ?? {}) as { selectedOptions?: unknown; timedOut?: boolean };
+	const selected = Array.isArray(details.selectedOptions) ? String(details.selectedOptions[0] ?? "") : "";
+	if (details.timedOut === true) {
+		throw new ToolError(
+			`The user did not answer the permission prompt for ${origin} (timed out), so the relay open was refused. ` +
+				`Ask them to approve the site — via the ask tool, or by adding ${JSON.stringify(host)} to browser.relayAllowedSites — and retry.`,
+		);
+	}
+	if (selected === alwaysLabel) {
+		cfgBrowserRelayAllowedSites.setMember(session, host, { member: true });
+		return;
+	}
+	if (selected === RELAY_SITE_ALLOW_ONCE) return;
+	throw new ToolError(
+		`The user declined to allow ${origin} through the browser relay. ` +
+			`Ask them to approve the site — via the ask tool, or by adding ${JSON.stringify(host)} to browser.relayAllowedSites — and retry.`,
+	);
 }
 
 async function openOnKind(

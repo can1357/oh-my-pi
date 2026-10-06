@@ -111,6 +111,7 @@ export const TAB_VALUE_METHODS: readonly string[] = [
 	"recordStop",
 	"recordRestart",
 	"recording",
+	"userGate",
 ];
 
 /** Tab helpers whose handle-or-null result is returned as a boolean. */
