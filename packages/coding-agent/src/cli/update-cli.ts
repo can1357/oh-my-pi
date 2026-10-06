@@ -1596,17 +1596,25 @@ function buildVersionedPackageInstallArgs(
  * ({@link SUPPORTED_NATIVE_TAGS}) so unsupported platforms still fail with
  * the original "no matching version" message instead of `EBADPLATFORM`.
  * See #1824.
+ *
+ * `--minimum-release-age=0` overrides an ambient bunfig `minimumReleaseAge`
+ * for this invocation: self-update installs the exact pinned manifests the
+ * version check just advertised, so a supply-chain cooldown must not reject
+ * them (same check-vs-installer divergence class as #1686). Older bun
+ * releases predate the flag and reject unknown options, so callers pass
+ * `supportsReleaseAgeOverride` from a help-text probe.
  */
 export function buildBunInstallArgs(
 	expectedVersion: string,
 	nativeTag: string = currentNativeTag(),
 	packages: ReleasePackages = CURRENT_PACKAGES,
-	options: { registry?: string } = {},
+	options: { registry?: string; supportsReleaseAgeOverride?: boolean } = {},
 ): string[] {
 	return [
 		"install",
 		"-g",
 		"--no-cache",
+		...(options.supportsReleaseAgeOverride !== false ? ["--minimum-release-age=0"] : []),
 		`--registry=${options.registry ?? DEFAULT_NPM_REGISTRY}`,
 		...buildVersionedPackageInstallArgs(expectedVersion, nativeTag, packages),
 	];
@@ -1635,6 +1643,26 @@ export function buildNpmInstallArgs(
 		`--registry=${flags.registry ?? DEFAULT_NPM_REGISTRY}`,
 		...buildVersionedPackageInstallArgs(expectedVersion, nativeTag, packages),
 	];
+}
+
+/**
+ * Env overlay for npm self-update installs. Setting the same key,
+ * `npm_config_min_release_age: "0"`, outranks any ambient `min-release-age`
+ * or `before` from npmrc files on every npm that supports release-age gates
+ * (env beats file sources; age 0 flattens to no cutoff). Do NOT use
+ * `npm_config_before` here: npm 11.10.0-11.14.x declared `before` and
+ * `min-release-age` mutually exclusive across sources and abort config
+ * loading with a TypeError when one comes from env and the other from an
+ * npmrc file, turning the targeted scenario into a hard npm failure.
+ * npm predating the feature warns "Unknown env config" for the key, so
+ * callers pass `supportsReleaseAgeOverride` from a probe.
+ */
+export function buildNpmUpdateEnv(
+	base: Record<string, string | undefined> = process.env,
+	supportsReleaseAgeOverride = true,
+): Record<string, string | undefined> {
+	if (!supportsReleaseAgeOverride) return base;
+	return { ...base, npm_config_min_release_age: "0" };
 }
 
 export function buildHomebrewUpdateArgs(force: boolean): string[] {
@@ -1704,6 +1732,7 @@ function packageManagerMigrationSteps(manager: "bun" | "npm", release: ReleaseIn
 			if (manager === "bun") {
 				const args = buildBunInstallArgs(release.version, nativeTag, release.packages, {
 					registry: release.registry,
+					supportsReleaseAgeOverride: await bunSupportsReleaseAgeOverride(),
 				});
 				return (await $`bun ${args}`.nothrow()).exitCode;
 			}
@@ -1711,7 +1740,9 @@ function packageManagerMigrationSteps(manager: "bun" | "npm", release: ReleaseIn
 				force: true,
 				registry: release.registry,
 			});
-			return (await $`npm ${args}`.nothrow()).exitCode;
+			return (
+				await $`npm ${args}`.env(buildNpmUpdateEnv(process.env, await npmSupportsReleaseAgeOverride())).nothrow()
+			).exitCode;
 		},
 		async removeOld() {
 			// One invocation per package: a single batched remove fails wholesale
@@ -1773,6 +1804,23 @@ export async function migrateRenamedInstall(release: ReleaseInfo, steps: RenameM
 	printVerifiedVersion(release.version);
 }
 
+/** Older bun releases predate `--minimum-release-age` and reject unknown flags, so probe the installed help output before passing it. */
+async function bunSupportsReleaseAgeOverride(): Promise<boolean> {
+	const help = await $`bun install --help`.quiet().nothrow();
+	return help.exitCode === 0 && /--minimum-release-age\b/.test(help.text());
+}
+
+/**
+ * npm predating `min-release-age` (11.10.0, npm/cli#8965) warns "Unknown env
+ * config" for the overlay key and gains nothing from it. Probed from a neutral
+ * directory: inside an npm workspaces checkout the config query exits with
+ * ENOWORKSPACES before it ever reads the key.
+ */
+async function npmSupportsReleaseAgeOverride(): Promise<boolean> {
+	const probe = await $`npm config get min-release-age`.cwd(os.tmpdir()).quiet().nothrow();
+	return probe.exitCode === 0 && probe.text().trim() !== "undefined";
+}
+
 /**
  * Update via package manager.
  *
@@ -1788,6 +1836,7 @@ async function updateViaBun(release: ReleaseInfo): Promise<InstalledVersionVerif
 	} else {
 		const args = buildBunInstallArgs(release.version, currentNativeTag(), release.packages, {
 			registry: release.registry,
+			supportsReleaseAgeOverride: await bunSupportsReleaseAgeOverride(),
 		});
 		const result = await $`bun ${args}`.nothrow();
 		if (result.exitCode !== 0) {
@@ -1815,7 +1864,9 @@ async function updateViaNpm(release: ReleaseInfo): Promise<InstalledVersionVerif
 	const args = buildNpmInstallArgs(release.version, currentNativeTag(), release.packages, {
 		registry: release.registry,
 	});
-	const result = await $`npm ${args}`.nothrow();
+	const result = await $`npm ${args}`
+		.env(buildNpmUpdateEnv(process.env, await npmSupportsReleaseAgeOverride()))
+		.nothrow();
 	if (result.exitCode !== 0) {
 		throw new Error(`npm install failed with exit code ${result.exitCode}`);
 	}
