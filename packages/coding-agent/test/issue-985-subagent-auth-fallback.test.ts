@@ -282,6 +282,59 @@ describe("issue #11709: disabled provider subagent model resolution", () => {
 	});
 });
 
+describe("issue #14381: enabledModels subagent model resolution and auth fallback", () => {
+	afterEach(() => {
+		resetSettingsForTest();
+	});
+
+	test("skips an authenticated candidate outside enabledModels in favor of an allowed candidate", async () => {
+		const settings = await Settings.init({
+			inMemory: true,
+			overrides: { enabledModels: ["deepseek/shared-id"] },
+		});
+		// Both deepseek-v4-pro and shared-id have valid auth, but only shared-id is in enabledModels.
+		// Parent model is deepseek-v4-pro (authenticated, but disallowed).
+		const registry = createMockRegistry({
+			models: [parentModel, unauthedTaskModel, sharedModel],
+			authedProviders: new Set(["deepseek"]),
+		});
+
+		const result = await resolveModelOverrideWithAuthFallback(
+			["deepseek/deepseek-v4-pro", "deepseek/shared-id"],
+			"deepseek/deepseek-v4-pro",
+			registry,
+			settings,
+		);
+
+		expect(result.model?.id).toBe("shared-id");
+		expect(result.model?.provider).toBe("deepseek");
+		expect(result.authFallbackUsed).toBe(false);
+	});
+
+	test("does not fall back to parent active model if parent model is outside enabledModels", async () => {
+		const settings = await Settings.init({
+			inMemory: true,
+			overrides: { enabledModels: ["opencode-zen/qwen3.6-plus-free"] },
+		});
+		// Parent is authenticated deepseek-v4-pro, but excluded by enabledModels.
+		// Subagent requested model has no auth.
+		const registry = createMockRegistry({
+			models: [parentModel, unauthedTaskModel],
+			authedProviders: new Set(["deepseek"]),
+		});
+
+		const result = await resolveModelOverrideWithAuthFallback(
+			["opencode-zen/qwen3.6-plus-free"],
+			"deepseek/deepseek-v4-pro",
+			registry,
+			settings,
+		);
+
+		expect(result.authFallbackUsed).toBe(false);
+		expect(result.model?.id).not.toBe("deepseek-v4-pro");
+	});
+});
+
 describe("requested candidate authentication order", () => {
 	for (const parent of ["deepseek/deepseek-v4-pro", undefined]) {
 		test(`uses a later authenticated candidate with parent ${parent ?? "omitted"}`, async () => {

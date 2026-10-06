@@ -3,7 +3,13 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import path from "node:path";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
-import { normalizeModelPatternList, resolveModelOverride } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
+import {
+	type ModelLookupRegistry,
+	normalizeModelPatternList,
+	resolveModelOverride,
+	resolveModelOverrideWithAuthFallback,
+} from "@oh-my-pi/pi-coding-agent/config/model-resolver";
+import type { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { AgentCompactionThresholdOverride } from "@oh-my-pi/pi-coding-agent/config/compaction-threshold";
 import type { BeforeSubagentSpawnEvent } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
@@ -1170,12 +1176,24 @@ describe("per-call selector syntax", () => {
 					enabledModels: ["anthropic/allowed-model"],
 				}),
 			}),
-			modelRegistry: { getAvailable: () => [allowedModel, MODEL] },
-		} as ToolSession;
+			modelRegistry: {
+				getAvailable: () => [allowedModel, MODEL],
+				getApiKey: async () => "test-token",
+			},
+		} as unknown as ToolSession;
 
 		const policy = await resolveEffectiveSubagentPolicy(
 			request({ session: allowedSession, model: "anthropic/allowed-model" }),
 		);
-		expect(policy.modelOverride).toEqual(["anthropic/allowed-model"]);
+		const registry = allowedSession.modelRegistry as unknown as ModelLookupRegistry &
+			Pick<ModelRegistry, "getApiKey">;
+		const resolved = await resolveModelOverrideWithAuthFallback(
+			policy.modelOverride ?? [],
+			undefined,
+			registry,
+			allowedSession.settings,
+		);
+		expect(resolved.model?.provider).toBe("anthropic");
+		expect(resolved.model?.id).toBe("allowed-model");
 	});
 });
