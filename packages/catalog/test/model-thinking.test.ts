@@ -1101,7 +1101,7 @@ describe("model thinking derivation", () => {
 	});
 
 	it("upgrades neutral Copilot GPT-6 Luna and Sol discovery to their effort ladder (#12895)", () => {
-		const models = ["gpt-6-luna", "gpt-6-sol"].map(id =>
+		const models = ["gpt-6-luna", "gpt-6-sol", "gpt-6.2-luna"].map(id =>
 			createModel({
 				id,
 				api: "openai-responses",

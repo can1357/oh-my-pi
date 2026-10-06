@@ -30,13 +30,10 @@ provider "github-copilot" {
 		revision ">=5 <5.7" {
 			thinking-mode "effort"
 		}
-	}
-	// Copilot omits reasoning capability metadata for GPT-6 Luna and Sol; this
-	// exact ladder upgrades only their neutral discovery rows.
-	models "gpt-6-luna" "gpt-6-sol" {
-		thinking-upgrade-neutral #true
-		thinking-mode "effort"
-		thinking-efforts "low" "medium" "high" "xhigh" "max"
+		revision ">=6" {
+			thinking-upgrade-neutral #true
+			thinking-mode "effort"
+		}
 	}
 	class "unknown" {
 		thinking-mode "effort"
