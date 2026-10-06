@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added the Infron provider, an OpenAI-compatible gateway serving GLM, GPT, Claude, Gemini, DeepSeek, and more from `llm.onerouter.pro/v1`: `/login infron` with an API key, `INFRON_API_KEY` env fallback, live chat-model discovery with native pricing and limits, and bundled fallback rows ([#14220](https://github.com/can1357/oh-my-pi/pull/14220) by [@iamshakibali](https://github.com/iamshakibali)).
+
 ## [18.8.0] - 2026-10-07
 
 ### Changed
@@ -40,7 +44,6 @@
 ### Fixed
 
 - Muse Code can now store Responses results on Meta's side (`store-responses`), so a turn whose connection drops can be recovered instead of re-run. Storage is opt-in via the omp setting `providers.muse-code.storeResponses` or `PI_MUSE_STORE_RESPONSES=1` ([#14293](https://github.com/can1357/oh-my-pi/pull/14293) and [#14534](https://github.com/can1357/oh-my-pi/pull/14534) by [@abilliontokens](https://github.com/abilliontokens)).
-- Added the Infron provider, an OpenAI-compatible gateway serving GLM, GPT, Claude, Gemini, DeepSeek, and more from `llm.onerouter.pro/v1`: `/login infron` with an API key, `INFRON_API_KEY` env fallback, live chat-model discovery with native pricing and limits, and bundled fallback rows ([#14220](https://github.com/can1357/oh-my-pi/pull/14220) by [@iamshakibali](https://github.com/iamshakibali)).
 
 ## [18.6.2] - 2026-10-04
 
