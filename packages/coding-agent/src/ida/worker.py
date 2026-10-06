@@ -4,13 +4,17 @@ Request:  {"id": int, "method": str, "params": dict}
 Response: {"id", "ok": true, "result"} | {"id", "ok": false, "error": {"type", "message"}}
 """
 
+import _thread
 import ast
 import io
 import json
 import os
+import queue
 import re
 import signal
 import sys
+import threading
+import time
 import traceback
 from contextlib import redirect_stderr, redirect_stdout
 
@@ -658,6 +662,10 @@ def _error(e):
 
 def _send(frame):
     data = json.dumps(frame, ensure_ascii=False, default=str) + "\n"
+    if _WINDOWS:
+        _proto.write(data)
+        _proto.flush()
+        return
     # Defer SIGINT while writing so a late interrupt cannot truncate a frame; it is
     # delivered after unblocking and swallowed by the idle loop.
     signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGINT})
@@ -666,6 +674,74 @@ def _send(frame):
         _proto.flush()
     finally:
         signal.pthread_sigmask(signal.SIG_UNBLOCK, {signal.SIGINT})
+
+
+# Windows cannot deliver SIGINT to one child process (the supervisor's kill terminates it), so
+# the supervisor writes `{"interrupt": <id>}` to stdin instead. A reader thread consumes stdin
+# and schedules KeyboardInterrupt in the main thread (at most once) while that request runs.
+# Scheduling is asynchronous, so `_run` absorbs a pending interrupt before the response is
+# written: it can never truncate a frame or hit the next request.
+_WINDOWS = sys.platform == "win32"
+# How long `_run` spins for a scheduled interrupt the request's own code already swallowed.
+_INTERRUPT_ABSORB_S = 0.5
+_requests = queue.Queue()
+_running_lock = threading.Lock()
+_running_id = None
+_interrupt_pending = False
+
+
+def _read_requests():
+    global _interrupt_pending
+    for line in sys.stdin:
+        try:
+            frame = json.loads(line)
+        except ValueError:
+            frame = None
+        if isinstance(frame, dict) and "interrupt" in frame:
+            with _running_lock:
+                if not _interrupt_pending and _running_id is not None and _running_id == frame["interrupt"]:
+                    _interrupt_pending = True
+                    _thread.interrupt_main()
+            continue
+        _requests.put(line)
+    _requests.put("")
+
+
+def _run(req_id, handler, params):
+    """Run `handler` as request `req_id`; returns (ok, result or exception) with no interrupt left pending.
+
+    A KeyboardInterrupt can surface at any bytecode boundary from the moment `req_id` is
+    running until the pending interrupt is absorbed, so every step sits inside one retry loop.
+    """
+    global _running_id, _interrupt_pending
+    ok, value, started, finished, delivered = False, None, False, False, False
+    while True:
+        try:
+            if not started:
+                started = True
+                with _running_lock:
+                    _running_id = req_id
+            if not finished:
+                finished = True
+                try:
+                    value, ok = handler(params), True
+                except (KeyboardInterrupt, SystemExit):
+                    raise
+                except Exception as e:
+                    value = e
+            with _running_lock:
+                _running_id = None
+                pending = _interrupt_pending and not delivered
+                _interrupt_pending = False
+            # A scheduled interrupt fires at the next bytecode boundary; let it fire here.
+            deadline = time.monotonic() + _INTERRUPT_ABSORB_S if pending else 0
+            while time.monotonic() < deadline:
+                pass
+            return ok, value
+        except KeyboardInterrupt as e:
+            delivered = True
+            if not ok:
+                value = e
 
 
 def _close_and_exit(save):
@@ -706,19 +782,24 @@ def _handle(line):
         handler = _METHODS.get(method)
         if handler is None:
             raise ValueError(f"unknown method: {method}")
-        result = handler(params)
     except SystemExit:
         raise
     except BaseException as e:
         _send({"id": req_id, "ok": False, "error": _error(e)})
         return
-    _send({"id": req_id, "ok": True, "result": result, "dirty": _DIRTY})
+    ok, result = _run(req_id, handler, params)
+    if ok:
+        _send({"id": req_id, "ok": True, "result": result, "dirty": _DIRTY})
+    else:
+        _send({"id": req_id, "ok": False, "error": _error(result)})
 
 
 def main():
+    if _WINDOWS:
+        threading.Thread(target=_read_requests, name="omp-ida-stdin", daemon=True).start()
     while True:
         try:
-            line = sys.stdin.readline()
+            line = _requests.get() if _WINDOWS else sys.stdin.readline()
             if not line:
                 break
             if line.strip():

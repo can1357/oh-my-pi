@@ -1,29 +1,19 @@
 /**
  * Client for the Tern session daemon's browser relay: a Unix socket speaking
- * Tern's wire frames (`u32` LE length + payload; payload = tag byte, LE
- * integers, `u32`-length UTF-8 strings). omp greets as a script client, then
- * sends `Request::Browser { id, json }` and receives `Reply::Browser { id, json }`
- * answers, correlated by `id`. The JSON is Tern's browser op protocol: a
- * request `{"op": …}` answers `{"ok": result}` or `{"error": {"kind", "message"}}`.
+ * Tern's JSON script protocol (`crates/tern/src/daemon/json.rs` in the stencil
+ * repository), frames of a `u32` LE length then one UTF-8 JSON object. omp
+ * greets with `{"hello":{}}` and waits for `{"welcome":{}}`, then sends
+ * `{"id":N,"browser":OP}` and receives `{"id":N,"browser":ANSWER}`, correlated
+ * by `id`. OP is Tern's browser op protocol: a request `{"op": …}` answers
+ * `{"ok": result}` or `{"error": {"kind", "message"}}`.
+ *
+ * Members and message kinds either side does not know are skipped, so the
+ * protocol does not tie omp to a Tern build. A Tern from before it cannot read
+ * the hello and hangs up.
  */
 import * as net from "node:net";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 
-/** Tern wire protocol version omp speaks. */
-export const TERN_WIRE_VERSION = 9;
-
-/** Tag of the daemon's `Welcome` reply. */
-const TAG_WELCOME = 0;
-/** Tag of the daemon's `Refused` reply. */
-const TAG_REFUSED = 1;
-/** Tag of the daemon's `Browser` reply. */
-const TAG_BROWSER_REPLY = 30;
-/** Tag of the script's `Browser` request. */
-const TAG_BROWSER_REQUEST = 40;
-/** Tag of the script's `Hello` request. */
-const TAG_HELLO = 0;
-/** `ClientKind::Cli` on the wire. */
-const CLIENT_KIND_CLI = 1;
 /** Frames larger than this are a protocol error (the daemon's own cap). */
 const MAX_FRAME_BYTES = 256 << 20;
 const CONNECT_TIMEOUT_MS = 10_000;
@@ -38,7 +28,6 @@ export type TernErrorKind =
 	| "unsupported"
 	| "js"
 	| "failed"
-	| "refused"
 	| "connect"
 	| "closed"
 	| "timeout"
@@ -60,7 +49,6 @@ export class TernBrowserError extends ToolError {
 const UNAVAILABLE_KINDS: Partial<Record<TernErrorKind, true>> = {
 	no_window: true,
 	unsupported: true,
-	refused: true,
 	connect: true,
 };
 
@@ -69,76 +57,42 @@ export function isTernUnavailable(error: unknown): error is TernBrowserError {
 	return error instanceof TernBrowserError && UNAVAILABLE_KINDS[error.kind] === true;
 }
 
-/** Frame `payload` for the wire: `u32` LE length then the payload. */
-export function encodeTernFrame(payload: Uint8Array): Uint8Array {
-	const frame = new Uint8Array(4 + payload.length);
-	new DataView(frame.buffer).setUint32(0, payload.length, true);
-	frame.set(payload, 4);
-	return frame;
-}
-
-/** The script hello payload: `Hello { version, identity: None, kind: Cli }`. */
-export function ternHelloPayload(): Uint8Array {
-	const payload = new Uint8Array(7);
-	const view = new DataView(payload.buffer);
-	payload[0] = TAG_HELLO;
-	view.setUint32(1, TERN_WIRE_VERSION, true);
-	payload[5] = 0;
-	payload[6] = CLIENT_KIND_CLI;
-	return payload;
-}
-
 const UTF8_ENCODER = new TextEncoder();
 const UTF8_DECODER = new TextDecoder("utf-8", { fatal: true });
 
-/** `Request::Browser { id, json }` as a payload. */
-export function ternBrowserRequestPayload(id: bigint, json: string): Uint8Array {
-	const text = UTF8_ENCODER.encode(json);
-	const payload = new Uint8Array(1 + 8 + 4 + text.length);
-	const view = new DataView(payload.buffer);
-	payload[0] = TAG_BROWSER_REQUEST;
-	view.setBigUint64(1, id, true);
-	view.setUint32(9, text.length, true);
-	payload.set(text, 13);
-	return payload;
+/** `message` as a frame: `u32` LE length then its JSON. Throws what `JSON.stringify` throws (cycles, bigints). */
+export function encodeTernFrame(message: object): Uint8Array {
+	const text = JSON.stringify(message);
+	const frame = new Uint8Array(4 + Buffer.byteLength(text, "utf8"));
+	const { written } = UTF8_ENCODER.encodeInto(text, frame.subarray(4));
+	new DataView(frame.buffer).setUint32(0, written, true);
+	return frame;
 }
 
-/** A reply payload the client understands; anything else is `other`. */
-export type TernReply =
-	| { type: "welcome" }
-	| { type: "refused"; reason: string }
-	| { type: "browser"; id: bigint; json: string }
-	| { type: "other"; tag: number };
+/** A reply the client understands; a kind it does not know (a newer Tern's) is `other`. */
+export type TernReply = { type: "welcome" } | { type: "browser"; id: number; answer: unknown } | { type: "other" };
 
-/** Decode one reply payload. Throws a `protocol` error on a truncated or malformed known reply. */
+/** Decode one reply payload. Throws a `protocol` error when it is not a JSON object or its browser answer has no id. */
 export function decodeTernReply(payload: Uint8Array): TernReply {
-	if (payload.length === 0) throw new TernBrowserError("protocol", "Tern sent an empty frame");
-	const view = new DataView(payload.buffer, payload.byteOffset, payload.byteLength);
-	const tag = payload[0]!;
-	const readString = (offset: number): string => {
-		if (offset + 4 > payload.length) throw new TernBrowserError("protocol", `Tern reply ${tag} is truncated`);
-		const length = view.getUint32(offset, true);
-		if (offset + 4 + length > payload.length) {
-			throw new TernBrowserError("protocol", `Tern reply ${tag} is truncated`);
-		}
-		try {
-			return UTF8_DECODER.decode(payload.subarray(offset + 4, offset + 4 + length));
-		} catch {
-			throw new TernBrowserError("protocol", `Tern reply ${tag} carries invalid UTF-8`);
-		}
-	};
-	switch (tag) {
-		case TAG_WELCOME:
-			return { type: "welcome" };
-		case TAG_REFUSED:
-			return { type: "refused", reason: readString(1) };
-		case TAG_BROWSER_REPLY: {
-			if (payload.length < 9) throw new TernBrowserError("protocol", "Tern browser reply is truncated");
-			return { type: "browser", id: view.getBigUint64(1, true), json: readString(9) };
-		}
-		default:
-			return { type: "other", tag };
+	let reply: unknown;
+	try {
+		reply = JSON.parse(UTF8_DECODER.decode(payload));
+	} catch (error) {
+		throw new TernBrowserError(
+			"protocol",
+			`Tern sent a frame that is not JSON: ${error instanceof Error ? error.message : String(error)}`,
+		);
 	}
+	if (!reply || typeof reply !== "object" || Array.isArray(reply)) {
+		throw new TernBrowserError("protocol", "Tern sent a frame that is not a JSON object");
+	}
+	if ("welcome" in reply) return { type: "welcome" };
+	if ("browser" in reply) {
+		const id = "id" in reply ? reply.id : undefined;
+		if (typeof id !== "number") throw new TernBrowserError("protocol", "Tern sent a browser answer without an id");
+		return { type: "browser", id, answer: reply.browser };
+	}
+	return { type: "other" };
 }
 
 /**
@@ -247,13 +201,7 @@ interface PendingOp {
 const ABANDONED_LIMIT = 256;
 
 /** The browser op's `ok` result; its `error` (or a malformed answer) throws a {@link TernBrowserError}. */
-function answerOf(op: string, json: string): unknown {
-	let answer: unknown;
-	try {
-		answer = JSON.parse(json);
-	} catch {
-		throw new TernBrowserError("protocol", `Tern answered ${op} with invalid JSON`);
-	}
+function answerOf(op: string, answer: unknown): unknown {
 	if (answer && typeof answer === "object") {
 		if ("ok" in answer) return answer.ok;
 		if ("error" in answer && answer.error && typeof answer.error === "object") {
@@ -293,9 +241,9 @@ export class TernSocketClient {
 	#welcomed = false;
 	#closed = false;
 	#closeError: TernBrowserError | undefined;
-	#nextId = 1n;
-	readonly #pending = new Map<bigint, PendingOp>();
-	readonly #abandoned = new Map<bigint, { op: string; onLateAnswer: (value: unknown) => void }>();
+	#nextId = 1;
+	readonly #pending = new Map<number, PendingOp>();
+	readonly #abandoned = new Map<number, { op: string; onLateAnswer: (value: unknown) => void }>();
 	readonly #reader = new TernFrameReader();
 	#greeting: { resolve(): void; reject(error: unknown): void } | undefined;
 
@@ -334,16 +282,15 @@ export class TernSocketClient {
 		const socket = this.#socket;
 		if (!socket || this.#closed) throw this.#closeError ?? new TernBrowserError("closed", "Tern connection closed");
 		const id = this.#nextId++;
-		let json: string;
+		let frameBytes: Uint8Array;
 		try {
-			json = JSON.stringify(op);
+			frameBytes = encodeTernFrame({ id, browser: op });
 		} catch (error) {
 			throw new TernBrowserError(
 				"invalid",
 				`Tern browser ${name} has arguments that are not JSON: ${error instanceof Error ? error.message : String(error)}`,
 			);
 		}
-		const frameBytes = encodeTernFrame(ternBrowserRequestPayload(id, json));
 		const timeoutMs = opts.timeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
 		const { promise, resolve, reject } = Promise.withResolvers<unknown>();
 		const onAbort = (): void => {
@@ -392,7 +339,7 @@ export class TernSocketClient {
 			);
 		}, CONNECT_TIMEOUT_MS);
 		timer.unref();
-		socket.on("connect", () => socket.write(encodeTernFrame(ternHelloPayload())));
+		socket.on("connect", () => socket.write(encodeTernFrame({ hello: {} })));
 		socket.on("data", chunk => this.#onData(typeof chunk === "string" ? Buffer.from(chunk) : chunk));
 		socket.on("error", error => {
 			this.#fail(
@@ -410,7 +357,7 @@ export class TernSocketClient {
 					? new TernBrowserError("closed", "Tern daemon closed the connection")
 					: new TernBrowserError(
 							"connect",
-							`Tern daemon at ${this.#socketPath} closed the connection before greeting`,
+							`Tern daemon at ${this.#socketPath} closed the connection before greeting: a Tern without omp's JSON protocol cannot read its hello (update Tern)`,
 						),
 			);
 		});
@@ -443,23 +390,15 @@ export class TernSocketClient {
 					this.#welcomed = true;
 					this.#greeting?.resolve();
 					break;
-				case "refused":
-					this.#fail(
-						new TernBrowserError(
-							"refused",
-							`Tern refused omp's browser connection: ${reply.reason} (omp speaks Tern protocol ${TERN_WIRE_VERSION})`,
-						),
-					);
-					return;
 				case "browser": {
 					const pending = this.#pending.get(reply.id);
 					if (!pending) {
-						this.#lateAnswer(reply.id, reply.json);
+						this.#lateAnswer(reply.id, reply.answer);
 						break;
 					}
 					let value: unknown;
 					try {
-						value = answerOf(pending.op, reply.json);
+						value = answerOf(pending.op, reply.answer);
 					} catch (error) {
 						this.#settle(reply.id, error);
 						break;
@@ -473,7 +412,7 @@ export class TernSocketClient {
 		}
 	}
 
-	#take(id: bigint): PendingOp | undefined {
+	#take(id: number): PendingOp | undefined {
 		const pending = this.#pending.get(id);
 		if (!pending) return undefined;
 		this.#pending.delete(id);
@@ -482,12 +421,12 @@ export class TernSocketClient {
 		return pending;
 	}
 
-	#settle(id: bigint, error: unknown): void {
+	#settle(id: number, error: unknown): void {
 		this.#take(id)?.reject(error);
 	}
 
 	/** Reject an op nobody waits for any more, remembering it when its late answer matters. */
-	#abandon(id: bigint, error: unknown): void {
+	#abandon(id: number, error: unknown): void {
 		const pending = this.#take(id);
 		if (!pending) return;
 		if (pending.onLateAnswer) {
@@ -497,13 +436,13 @@ export class TernSocketClient {
 		pending.reject(error);
 	}
 
-	#lateAnswer(id: bigint, json: string): void {
+	#lateAnswer(id: number, answer: unknown): void {
 		const abandoned = this.#abandoned.get(id);
 		if (!abandoned) return;
 		this.#abandoned.delete(id);
 		let value: unknown;
 		try {
-			value = answerOf(abandoned.op, json);
+			value = answerOf(abandoned.op, answer);
 		} catch {
 			return;
 		}

@@ -11,7 +11,8 @@
  * `rows` fallback node rendered through `render(cx.cols)`.
  *
  * See `packages/wire/src/tsp.ts` for the wire vocabulary and
- * `crates/tern/SURFACE_PROTOCOL.md` (Stencil repository) for the spec.
+ * the Tern SDK's Surface Protocol reference (`docs/sdk/src/protocol` in the
+ * Stencil repository, https://docs.stencil.so/tern/protocol/) for the spec.
  */
 import type { TspEvent, TspKind, TspProps, TspScrollBy, TspSpan } from "@oh-my-pi/pi-wire";
 import type { Component } from "../tui";
@@ -29,10 +30,12 @@ export type NativeNode = {
 		 */
 		readonly key?: string;
 		/**
-		 * Scroll the node into view, placed like the `reveal` op, when it is
-		 * added. Key a node by what it points at to reveal it again on a move.
+		 * Scroll the node into view, placed like the `reveal` op. A placement
+		 * reveals it when it is added: key a node by what it points at to
+		 * reveal it again on a move. A {@link NativeReveal} reveals it whenever
+		 * its `n` differs from the previous description of the same node.
 		 */
-		readonly reveal?: "start" | "end" | "nearest";
+		readonly reveal?: NativeRevealAt | NativeReveal;
 		/**
 		 * Keyboard scrolling forwarded to the terminal (PgUp/PgDn/End reach the
 		 * program): moves the scroller at or above the node by `by` whenever
@@ -43,6 +46,19 @@ export type NativeNode = {
 		readonly scroll?: NativeScroll;
 	};
 }[TspKind];
+
+/** Where a revealed node lands in its scroller. */
+export type NativeRevealAt = "start" | "end" | "nearest";
+
+/**
+ * A repeatable {@link NativeNode.reveal}: bump `n` to bring an existing node
+ * into view again (a Contents entry jumping to its section). A freshly added
+ * node is not revealed.
+ */
+export interface NativeReveal {
+	readonly at: NativeRevealAt;
+	readonly n: number;
+}
 
 /** A {@link NativeNode.scroll} request. */
 export interface NativeScroll {
@@ -61,6 +77,12 @@ export interface DescribeContext {
 	readonly reduceMotion: boolean;
 	/** The terminal's appearance is dark. */
 	readonly dark: boolean;
+	/**
+	 * The user's system reads a 12-hour clock (`false`: 24-hour); `undefined`
+	 * when the terminal doesn't say. Pass it as `hour12` when formatting times:
+	 * the process's own default locale may not know.
+	 */
+	readonly hour12?: boolean;
 	/** Whether the terminal renders `kind` natively (else describe something simpler or let it fall back). */
 	supports(kind: TspKind): boolean;
 	/**
@@ -113,7 +135,11 @@ export type NativeUiEvent =
 			readonly value: boolean | number | string | readonly string[] | null;
 	  }
 	/** An edit over the terminal's own selection in an `editor`/`input` node (see {@link NativeTextEdit}). */
-	| ({ readonly type: "edit"; readonly key: string } & NativeTextEdit);
+	| ({ readonly type: "edit"; readonly key: string } & NativeTextEdit)
+	/** Undo the last change to an `editor`/`input` node's text (the terminal's ⌃Z); a no-op with no history. */
+	| { readonly type: "undo"; readonly key: string }
+	/** Submit an explicit prompt through the composer's normal path, preserving the previous draft for recall. */
+	| { readonly type: "send"; readonly key: string; readonly text: string };
 
 /**
  * A primitive edit the terminal made over its own text selection (cut,

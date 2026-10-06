@@ -11,6 +11,7 @@
 
 mod cli;
 mod diff;
+mod filter;
 mod mutate;
 mod open;
 mod patch;
@@ -462,5 +463,37 @@ mod tests {
 				.unwrap()
 				.is_linked_worktree()
 		);
+	}
+
+	#[test]
+	fn gix_opens_checkouts_whose_directory_name_ends_in_dot_git() {
+		let temp = tempfile::tempdir().unwrap();
+		let main = temp.path().join("repo.git");
+		fs::create_dir_all(&main).unwrap();
+		run_git(&main, &["init", "-q", "-b", "main"]);
+		run_git(&main, &["config", "user.name", "VCS Test"]);
+		run_git(&main, &["config", "user.email", "vcs@example.com"]);
+		run_git(&main, &["commit", "-q", "--allow-empty", "-m", "init"]);
+		let linked = temp.path().join("linked.git");
+		run_git(&main, &["worktree", "add", "-q", linked.to_str().unwrap(), "-b", "wt"]);
+
+		// gix treats a `*.git` path as the metadata directory itself, so the
+		// checkout root must never be handed to it in place of the `.git` entry.
+		for (root, git_dir) in
+			[(&main, main.join(".git")), (&linked, main.join(".git/worktrees/linked.git"))]
+		{
+			let repo = GitRepo::discover(root).unwrap().expect("checkout");
+			for opened in [repo.gix().unwrap(), repo.gix_fresh().unwrap()] {
+				assert_eq!(
+					fs::canonicalize(opened.git_dir()).unwrap(),
+					fs::canonicalize(&git_dir).unwrap()
+				);
+				assert_eq!(
+					fs::canonicalize(opened.workdir().expect("non-bare checkout")).unwrap(),
+					fs::canonicalize(root).unwrap()
+				);
+				opened.head_id().expect("HEAD resolves");
+			}
+		}
 	}
 }

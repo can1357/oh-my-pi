@@ -184,6 +184,10 @@ export interface DiffBuildOptions {
 	streamResult?: DiffStreamResult;
 }
 
+function filePatchHeader(filePath: string): string {
+	return `diff --git a/${filePath} b/${filePath}\n--- a/${filePath}\n+++ b/${filePath}\n`;
+}
+
 /** Build the aligned document for one file from its raw old/new texts. */
 export function buildDiffDocument(
 	oldRaw: string,
@@ -376,10 +380,11 @@ export function buildDiffDocument(
 	// cannot use the raw streamed result because its equality basis differs.
 	const canPatch = !ignoreWs;
 	const tightHunks = streamed?.hunks ?? structuredPatchHunks(oldBasis, newBasis, DIFF_CONTEXT_LINES);
+	const patchHeader = canPatch && tightHunks.length > 0 ? filePatchHeader(filePath) : "";
 	const allHunks: HunkBlock[] = tightHunks.map(hunk => ({
 		header: `@@ -${hunk.oldStart},${hunk.oldLines} +${hunk.newStart},${hunk.newLines} @@`,
 		patch: canPatch
-			? `--- a/${filePath}\n+++ b/${filePath}\n@@ -${hunk.oldStart},${hunk.oldLines} +${hunk.newStart},${hunk.newLines} @@\n${hunk.lines.join("\n")}\n`
+			? `${patchHeader}@@ -${hunk.oldStart},${hunk.oldLines} +${hunk.newStart},${hunk.newLines} @@\n${hunk.lines.join("\n")}\n`
 			: "",
 		rows: walkHunk(hunk, false),
 	}));
@@ -476,7 +481,7 @@ export function buildLineSelectionPatch(
 				`@@ -${hunk.oldStart},${hunk.oldLines} +${hunk.newStart},${hunk.newLines} @@\n${hunk.lines.join("\n")}`,
 		)
 		.join("\n");
-	return `--- a/${doc.filePath}\n+++ b/${doc.filePath}\n${body}\n`;
+	return `${filePatchHeader(doc.filePath)}${body}\n`;
 }
 
 // ── palette ──────────────────────────────────────────────────────────────────
@@ -596,6 +601,12 @@ export class DiffPane {
 	#layoutCache: { key: string; visuals: Visual[] } | undefined;
 	/** Per visible row: clickable hunk-button ranges recorded during render. */
 	#hits: ({ hunk: number; primary?: [number, number]; discard?: [number, number] } | undefined)[] = [];
+	/**
+	 * Asset images from the last render, by placement and size. Reusing them
+	 * lets a SIXEL image show the sequence its off-thread encode delivers on a
+	 * later render; a fresh `Image` per render would restart the encode forever.
+	 */
+	#assetImages = new Map<string, Image>();
 	constructor(imageBudget?: ImageBudget) {
 		this.#imageBudget = imageBudget;
 	}
@@ -721,6 +732,7 @@ export class DiffPane {
 		this.scrollLeft = 0;
 		this.cursor = 0;
 		this.anchor = null;
+		if (mode === "hunk") this.selectedHunk = 0;
 	}
 
 	cycleMode(): void {
@@ -771,6 +783,7 @@ export class DiffPane {
 			this.anchor = null;
 		}
 		this.cursor = Math.max(0, Math.min(total - 1, this.cursor + delta));
+		this.#syncHunkToCursor();
 		this.scrollTop = scrollOffsetForRow(this.scrollTop, this.cursor, total, this.#lastHeight);
 		this.#clampScroll();
 	}
@@ -854,6 +867,7 @@ export class DiffPane {
 		if (total === 0) return;
 		this.anchor = null;
 		this.cursor = edge === "start" ? 0 : total - 1;
+		this.#syncHunkToCursor();
 		this.scrollTop = scrollOffsetForRow(this.scrollTop, this.cursor, total, this.#lastHeight);
 		this.#clampScroll();
 	}
@@ -867,6 +881,19 @@ export class DiffPane {
 			this.anchor = null;
 			this.scrollTop = clampScrollOffset(header - 1, visuals.length, this.#lastHeight);
 			this.#clampScroll();
+		}
+	}
+
+	/** Keep the hunk action and highlighted header on the cursor's hunk, including blank separators. */
+	#syncHunkToCursor(): void {
+		if (this.mode !== "hunk") return;
+		const visuals = this.#layout(this.#lastWidth || 80);
+		for (let row = this.cursor; row >= 0; row--) {
+			const visual = visuals[row];
+			if (visual?.t === "header") {
+				this.selectedHunk = visual.hunk;
+				return;
+			}
 		}
 	}
 
@@ -917,6 +944,10 @@ export class DiffPane {
 		const hit = this.#hits[row];
 		if (hit && this.#doc) {
 			this.selectedHunk = hit.hunk;
+			if (this.mode === "hunk") {
+				this.cursor = this.scrollTop + row;
+				this.anchor = null;
+			}
 			if (hit.primary && col >= hit.primary[0] && col < hit.primary[1] && this.patchTarget) {
 				return { type: "hunk-action", hunk: this.#doc.hunks[hit.hunk], action: this.patchTarget };
 			}
@@ -933,6 +964,7 @@ export class DiffPane {
 				this.anchor = null;
 			}
 			this.cursor = visual;
+			this.#syncHunkToCursor();
 			return { type: "handled" };
 		}
 		return null;
@@ -1077,8 +1109,16 @@ export class DiffPane {
 		const leftWidth = Math.max(1, Math.floor((width - 1) / 2));
 		const rightWidth = Math.max(1, width - leftWidth - 1);
 		const bodyHeight = Math.max(0, height - 1);
-		const oldLines = this.#renderAssetSide(asset.old, leftWidth, bodyHeight, `old:${asset.filePath}`);
-		const newLines = this.#renderAssetSide(asset.new, rightWidth, bodyHeight, `new:${asset.filePath}`);
+		const previousImages = this.#assetImages;
+		this.#assetImages = new Map();
+		const oldLines = this.#renderAssetSide(asset.old, leftWidth, bodyHeight, `old:${asset.filePath}`, previousImages);
+		const newLines = this.#renderAssetSide(
+			asset.new,
+			rightWidth,
+			bodyHeight,
+			`new:${asset.filePath}`,
+			previousImages,
+		);
 		const border = theme.fg("borderMuted", "│");
 		const lines: string[] = [];
 		for (let index = 0; index < height; index++) {
@@ -1099,24 +1139,36 @@ export class DiffPane {
 		return lines;
 	}
 
-	#renderAssetSide(side: FileAssetSide, width: number, height: number, placementKey: string): readonly string[] {
+	#renderAssetSide(
+		side: FileAssetSide,
+		width: number,
+		height: number,
+		placementKey: string,
+		previousImages: ReadonlyMap<string, Image>,
+	): readonly string[] {
 		if (height <= 0) return [];
 		let content: readonly string[];
 		if (side.kind === "image") {
 			const image = side.image;
-			content = new Image(
-				image.data,
-				image.mimeType,
-				{ fallbackColor: text => theme.fg("dim", text) },
-				{
-					maxWidthCells: Math.max(1, width - 2),
-					maxHeightCells: height,
-					filename: this.#asset?.filePath,
-					budget: this.#imageBudget,
-					imageKey: `git-review:${placementKey}:${image.key}`,
-				},
-				{ widthPx: image.widthPx, heightPx: image.heightPx },
-			).render(width);
+			const imageKey = `git-review:${placementKey}:${image.key}`;
+			const cacheKey = `${imageKey}:${width}x${height}`;
+			const component =
+				previousImages.get(cacheKey) ??
+				new Image(
+					image.data,
+					image.mimeType,
+					{ fallbackColor: text => theme.fg("dim", text) },
+					{
+						maxWidthCells: Math.max(1, width - 2),
+						maxHeightCells: height,
+						filename: this.#asset?.filePath,
+						budget: this.#imageBudget,
+						imageKey,
+					},
+					{ widthPx: image.widthPx, heightPx: image.heightPx },
+				);
+			this.#assetImages.set(cacheKey, component);
+			content = component.render(width);
 		} else {
 			let details: string[];
 			switch (side.kind) {

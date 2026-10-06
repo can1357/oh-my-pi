@@ -31,6 +31,8 @@ export interface TspHarnessOptions {
 	/** Acknowledge every frame automatically (default true). */
 	autoAck?: boolean;
 	reduceMotion?: boolean;
+	/** The clock the terminal reports (`hour12`; default: none). */
+	hour12?: boolean;
 	/** The environment names Tern (`TERM_PROGRAM=tern`): the terminal reports `tspExpected`. */
 	expected?: boolean;
 	/** Never answer the probe on flush; the test calls {@link TspTestTerminal.answerProbe}. */
@@ -203,6 +205,7 @@ export class TspTestTerminal implements Terminal {
 						cols: this.#cols,
 						dark: true,
 						reduceMotion: this.#options.reduceMotion === true,
+						hour12: this.#options.hour12,
 						...reply,
 					};
 		this.#helloResult = hello;

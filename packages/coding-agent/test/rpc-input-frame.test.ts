@@ -301,6 +301,8 @@ describe("RpcInputDispatcher", () => {
 						autoCompactionEnabled: false,
 						fastModeEnabled: false,
 						fastModeActive: false,
+						slowModeSupported: false,
+						slowModeEnabled: false,
 						tokensPerSecond: null,
 						messageCount: 0,
 						queuedMessageCount: 0,
@@ -308,6 +310,7 @@ describe("RpcInputDispatcher", () => {
 						isSettled: true,
 						queuedMessages: { steering: [], followUp: [] },
 						todoPhases: [],
+						goal: null,
 					},
 				};
 			}

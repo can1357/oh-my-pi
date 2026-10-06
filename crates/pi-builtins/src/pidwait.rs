@@ -73,4 +73,51 @@ mod tests {
 		assert!(result.is_success() || u8::from(&result.exit_code) == 1);
 		Ok(())
 	}
+
+	/// A waiting `pidwait` must not hold a blocking-pool thread: hosts cap that
+	/// pool (eight threads in pi-natives on Windows) and run every utility
+	/// builtin on it, so a few long waits would stall unrelated commands.
+	#[test]
+	fn waiting_holds_no_blocking_pool_thread() -> anyhow::Result<()> {
+		let runtime = tokio::runtime::Builder::new_multi_thread()
+			.max_blocking_threads(1)
+			.enable_all()
+			.build()?;
+		runtime.block_on(async {
+			#[cfg(unix)]
+			let mut child = ProcessCommand::new("sleep").arg("30").spawn()?;
+			#[cfg(windows)]
+			let mut child = ProcessCommand::new("ping")
+				.args(["-n", "30", "127.0.0.1"])
+				.stdout(std::process::Stdio::null())
+				.spawn()?;
+			let mut shell = brush_core::Shell::builder().build().await?;
+			let params = shell.default_exec_params();
+			let command = PidwaitCommand { argv: vec!["-p".to_string(), child.id().to_string()] };
+			let context = brush_core::ExecutionContext {
+				shell: &mut shell,
+				command_name: "pidwait".to_string(),
+				params,
+			};
+			let probe = async {
+				// Give pidwait time to select the process and start waiting.
+				tokio::time::sleep(Duration::from_millis(200)).await;
+				tokio::time::timeout(Duration::from_secs(5), tokio::task::spawn_blocking(|| {})).await
+			};
+			// `None`: pidwait returned while its process was still running.
+			let probed = tokio::select! {
+				_ = command.execute(context) => None,
+				probed = probe => Some(probed),
+			};
+			let _ = child.kill();
+			let _ = child.wait();
+
+			let probed = probed.expect("pidwait returned while its process was running");
+			assert!(
+				matches!(probed, Ok(Ok(()))),
+				"a blocking task could not run while pidwait was waiting"
+			);
+			Ok(())
+		})
+	}
 }

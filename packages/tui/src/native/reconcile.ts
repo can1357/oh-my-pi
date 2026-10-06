@@ -31,7 +31,7 @@ import * as logger from "@oh-my-pi/pi-utils/logger";
 import { TSP_TEXT_KINDS, type TspKind, type TspNode, type TspOp, type TspScrollBy } from "@oh-my-pi/pi-wire";
 import { type Component, Container, CURSOR_MARKER } from "../tui";
 import { normalizeIconProps } from "./icons";
-import type { DescribeContext, NativeChild, NativeNode } from "./node";
+import type { DescribeContext, NativeChild, NativeNode, NativeRevealAt } from "./node";
 import { isNativeSettled } from "./settle";
 
 /** The regions a frame fills. */
@@ -213,8 +213,11 @@ export class Reconciler {
 	#ops: TspOp[] = [];
 	#dels: Entry[] = [];
 	#settles: string[] = [];
-	/** Selected list items and added `reveal` nodes sent this frame, revealed once the frame's adds have landed. */
-	#reveals: [id: string, at: "start" | "end" | "nearest"][] = [];
+	/**
+	 * Selected list items, added `reveal` nodes and nodes whose reveal `n` moved this frame,
+	 * revealed once the frame's adds have landed.
+	 */
+	#reveals: [id: string, at: NativeRevealAt][] = [];
 	/** `scroll` requests whose `n` moved this frame, sent after the reveals. */
 	#scrolls: [id: string, by: TspScrollBy][] = [];
 	/** Wire ids `list.selected` keys resolved to (an unresolved key names no node to reveal). */
@@ -595,6 +598,11 @@ export class Reconciler {
 			this.#revisitNode(next, inner);
 			return;
 		}
+		const reveal = next.node.reveal;
+		if (typeof reveal === "object") {
+			const was = old.node.reveal;
+			if (reveal.n !== (typeof was === "object" ? was.n : undefined)) this.#reveals.push([next.id, reveal.at]);
+		}
 		if (old.node.k !== next.node.k) {
 			this.#dropSubtree(old);
 			this.#ops.push(["del", next.id]);
@@ -743,7 +751,7 @@ export class Reconciler {
 
 	/** A full wire subtree for an entry; nested components get states (or pending moves when mounted elsewhere). */
 	#materialize(entry: NodeEntry, walk: Walk): TspNode {
-		if (entry.node.reveal) this.#reveals.push([entry.id, entry.node.reveal]);
+		if (typeof entry.node.reveal === "string") this.#reveals.push([entry.id, entry.node.reveal]);
 		const entries = this.#entries(entry.node.c, entry.keypath, entry.owner, entry.hoist, walk);
 		const children: TspNode[] = [];
 		for (let i = 0; i < entries.length; i++) {

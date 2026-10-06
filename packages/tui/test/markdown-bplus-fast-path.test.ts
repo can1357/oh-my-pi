@@ -331,6 +331,24 @@ describe("B+ fast-tail paragraph re-wrap", () => {
 		);
 		assertSpliceParts(["paragraph\n\n| one |\n|", "paragraph\n\n| one |\n|-"], "paragraph\n\n| one |\n|-");
 	});
+
+	it("inert delta completing a bare math environment's \\end disarms", () => {
+		// Until `ign}` completes `\end{align}` the lines are paragraph text; then
+		// the cold render draws them as one display block.
+		const open = "Text.\n\n\\begin{align}\na &= b\n\\end{al";
+		assertSpliceParts([open, `${open}ign}`], `${open}ign}`);
+	});
+
+	it("row ending in a no-break space disarms (the cold render trims it)", () => {
+		const open = "   $$\n\u00a0\n   \n\u00a0";
+		assertSpliceParts([open, `${open}\u00a0`], `${open}\u00a0`);
+	});
+
+	it("underscore in the row that the delta's underscore pairs with disarms", () => {
+		// Joined, `a_{3} + b_{` renders `{3} + b` emphasized; neither the row
+		// nor the delta lexed alone holds a pair, so a splice kept both literal.
+		assertSpliceParts(["a_{3", "a_{3} + b_{"], "a_{3} + b_{");
+	});
 });
 
 it("line-start hazard does not fire on prose (char-class range regression)", () => {

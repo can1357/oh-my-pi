@@ -12,6 +12,7 @@ import {
 	parseZrokUrl,
 	startExposure,
 } from "../src/blob-broker/exposure";
+import { writeFakeExecutable } from "./helpers/fake-executable";
 
 const PORT = 43127;
 const originalPath = process.env.PATH;
@@ -23,7 +24,6 @@ interface FakeInvocation {
 	argsFile: string;
 	runsFile: string;
 	signalsFile: string;
-	restartMarker?: string;
 }
 
 function exposure(kind: ExposureConfig["kind"], overrides: Partial<ExposureConfig> = {}): ExposureConfig {
@@ -36,90 +36,69 @@ function exposure(kind: ExposureConfig["kind"], overrides: Partial<ExposureConfi
 	} as ExposureConfig;
 }
 
-function shellLiteral(value: string): string {
-	return `'${value.replaceAll("'", `'\\''`)}'`;
-}
-
-function prepareFake(output: string, options: { exitCode?: number; restartOnce?: boolean } = {}): FakeInvocation {
+/**
+ * Install fake tunnel binaries that record argv, runs, and caught signals. With
+ * `restartPort`, the first run exits so the adapter restarts it, and the
+ * restarted run connects to that loopback port to announce itself.
+ */
+function prepareFake(output: string, options: { exitCode?: number; restartPort?: number } = {}): FakeInvocation {
 	const suffix = String(invocationSequence++);
 	const invocationDir = path.join(fakeBinDir, suffix);
 	fs.mkdirSync(invocationDir);
 	const argsFile = path.join(invocationDir, "args.txt");
 	const runsFile = path.join(invocationDir, "runs.txt");
 	const signalsFile = path.join(invocationDir, "signals.txt");
-	const restartMarker = options.restartOnce ? path.join(invocationDir, "restart.txt") : undefined;
-	const target = path.join(invocationDir, "fake-tunnel");
-	fs.writeFileSync(
-		target,
-		`#!/bin/sh\n` +
-			// Publish argv atomically: adapters with a configured publicBaseUrl
-			// resolve before the tunnel prints anything, so tests may read the
-			// file while a (re)started process is still writing it.
-			`tmp=${shellLiteral(argsFile)}.$$\n` +
-			`: > "$tmp"\n` +
-			`for arg do printf '%s\\n' "$arg" >> "$tmp"; done\n` +
-			`/bin/mv "$tmp" ${shellLiteral(argsFile)}\n` +
-			`printf 'run\\n' >> ${shellLiteral(runsFile)}\n` +
-			`trap 'printf "SIGINT\\n" >> ${shellLiteral(signalsFile)}; exit 0' INT\n` +
-			`trap 'printf "SIGTERM\\n" >> ${shellLiteral(signalsFile)}; exit 0' TERM\n` +
-			`printf '%s\\n' ${shellLiteral(output)}\n` +
-			(restartMarker
-				? `if [ ! -e ${shellLiteral(restartMarker)} ]; then\n` +
-					`  printf 'first\\n' > ${shellLiteral(restartMarker)}\n` +
-					`  exit 23\n` +
-					`fi\n` +
-					`printf 'restarted\\n' >> ${shellLiteral(restartMarker)}\n`
-				: "") +
-			(options.exitCode === undefined ? `while :; do /bin/sleep 1; done\n` : `exit ${options.exitCode}\n`),
-	);
-	fs.chmodSync(target, 0o755);
+	const restartMarker = path.join(invocationDir, "restart.txt");
+	// Publish argv before printing anything, and atomically: every adapter
+	// settles only after reading the fake's output or exit, so the file is
+	// complete by then, and a restarted process replacing it mid-read never
+	// exposes a partial file.
+	const source = `import * as fs from "node:fs";
+const config = ${JSON.stringify({ argsFile, runsFile, signalsFile, restartMarker, output, exitCode: options.exitCode, restartPort: options.restartPort })};
+const tmp = \`\${config.argsFile}.\${process.pid}\`;
+fs.writeFileSync(tmp, process.argv.slice(2).map(arg => \`\${arg}\\n\`).join(""));
+fs.renameSync(tmp, config.argsFile);
+fs.appendFileSync(config.runsFile, "run\\n");
+for (const signal of ["SIGINT", "SIGTERM"]) {
+	process.on(signal, () => {
+		fs.appendFileSync(config.signalsFile, \`\${signal}\\n\`);
+		process.exit(0);
+	});
+}
+fs.writeSync(1, \`\${config.output}\\n\`);
+if (config.restartPort !== undefined) {
+	if (!fs.existsSync(config.restartMarker)) {
+		fs.writeFileSync(config.restartMarker, "first\\n");
+		process.exit(23);
+	}
+	(await Bun.connect({ hostname: "127.0.0.1", port: config.restartPort, socket: { data() {} } })).end();
+}
+if (config.exitCode !== undefined) process.exit(config.exitCode);
+// A live tunnel never exits on its own; the timer only keeps the stub alive
+// until the adapter kills it (nothing here waits on wall-clock time).
+setInterval(() => {}, 60_000);
+`;
 	for (const name of ["ssh", "devtunnel", "zrok", "bore", "cloudflared"]) {
-		fs.symlinkSync(target, path.join(invocationDir, name));
+		writeFakeExecutable(invocationDir, name, source);
 	}
 	process.env.PATH = invocationDir;
-	return { argsFile, runsFile, signalsFile, restartMarker };
+	return { argsFile, runsFile, signalsFile };
 }
 
-async function waitForFileContent(filePath: string, matches: (text: string) => boolean): Promise<void> {
-	const matchesCurrentContent = (): boolean => {
-		try {
-			return matches(fs.readFileSync(filePath, "utf8"));
-		} catch {
-			return false;
-		}
-	};
-	if (matchesCurrentContent()) return;
-	const { promise, resolve } = Promise.withResolvers<void>();
-	const listener = (): void => {
-		if (matchesCurrentContent()) resolve();
-	};
-	fs.watchFile(filePath, { interval: 25, persistent: false }, listener);
-	listener();
-	try {
-		await promise;
-	} finally {
-		fs.unwatchFile(filePath, listener);
-	}
-}
-
-async function waitForRestart(marker: string): Promise<void> {
-	await waitForFileContent(marker, text => text.includes("restarted"));
-}
-
-async function recordedArgs(invocation: FakeInvocation): Promise<string[]> {
-	await waitForFileContent(invocation.argsFile, () => true);
+function recordedArgs(invocation: FakeInvocation): string[] {
 	const text = fs.readFileSync(invocation.argsFile, "utf8");
 	return text === "" ? [] : text.replace(/\n$/, "").split("\n");
 }
 
-async function waitForSignal(invocation: FakeInvocation): Promise<void> {
-	await waitForFileContent(invocation.signalsFile, text => text.includes("SIGTERM"));
-}
-
 async function stopAndObserve(exposure: ActiveExposure, invocation: FakeInvocation): Promise<void> {
-	const signalObserved = waitForSignal(invocation);
 	exposure.stop();
-	await Promise.all([exposure.exited, signalObserved]);
+	// stop() escalates to SIGKILL, so the tunnel always ends.
+	await exposure.exited;
+	// Windows kill() is TerminateProcess: there is no catchable SIGTERM for
+	// the fake to record, so only observe that the tunnel process ended.
+	if (process.platform === "win32") return;
+	// The fake records SIGTERM before it exits, so the record is complete now;
+	// a missing file means the tunnel died without handling SIGTERM.
 	expect(fs.readFileSync(invocation.signalsFile, "utf8")).toContain("SIGTERM");
 }
 
@@ -180,7 +159,7 @@ describe("startExposure tunnel adapters", () => {
 		const active = await startExposure(exposure("localhost-run"), PORT);
 		activeExposures.push(active);
 		expect(active.baseUrl).toBe("https://quiet-owl.lhr.life");
-		expect(await recordedArgs(invocation)).toEqual([
+		expect(recordedArgs(invocation)).toEqual([
 			"-o",
 			"BatchMode=yes",
 			"-o",
@@ -206,7 +185,7 @@ describe("startExposure tunnel adapters", () => {
 		const active = await startExposure(exposure("pinggy"), PORT);
 		activeExposures.push(active);
 		expect(active.baseUrl).toBe("https://random-one.a.pinggy.link");
-		expect(await recordedArgs(invocation)).toEqual([
+		expect(recordedArgs(invocation)).toEqual([
 			"-p",
 			"443",
 			"-o",
@@ -228,23 +207,39 @@ describe("startExposure tunnel adapters", () => {
 	});
 
 	it("uses a configured stable Pinggy base with authenticated SSH", async () => {
-		const invocation = prepareFake("Tunnel established at https://different-random.a.pinggy.link", {
-			restartOnce: true,
+		// The adapter exposes no restart event, so the restarted fake reports in.
+		const restarted = Promise.withResolvers<void>();
+		const restartListener = Bun.listen({
+			hostname: "127.0.0.1",
+			port: 0,
+			socket: { open: () => restarted.resolve(), data() {} },
 		});
-		const active = await startExposure(
-			exposure("pinggy", {
-				publicBaseUrl: "https://stable.example.test/",
-				credentials: { token: "fake-pinggy-token" },
-			}),
-			PORT,
-		);
-		activeExposures.push(active);
-		expect(active.baseUrl).toBe("https://stable.example.test");
-		expect(await recordedArgs(invocation)).toContain("fake-pinggy-token@pro.pinggy.io");
-		await waitForRestart(invocation.restartMarker!);
-		expect(fs.readFileSync(invocation.runsFile, "utf8")).toBe("run\nrun\n");
-		expect(active.baseUrl).toBe("https://stable.example.test");
-		await stopAndObserve(active, invocation);
+		try {
+			const invocation = prepareFake("Tunnel established at https://different-random.a.pinggy.link", {
+				restartPort: restartListener.port,
+			});
+			const active = await startExposure(
+				exposure("pinggy", {
+					publicBaseUrl: "https://stable.example.test/",
+					credentials: { token: "fake-pinggy-token" },
+				}),
+				PORT,
+			);
+			activeExposures.push(active);
+			expect(active.baseUrl).toBe("https://stable.example.test");
+			expect(recordedArgs(invocation)).toContain("fake-pinggy-token@pro.pinggy.io");
+			// A restart that fails ends the exposure, so this wait is bounded.
+			const outcome = await Promise.race([
+				restarted.promise.then(() => "restarted"),
+				active.exited!.then(() => "ended"),
+			]);
+			expect(outcome).toBe("restarted");
+			expect(fs.readFileSync(invocation.runsFile, "utf8")).toBe("run\nrun\n");
+			expect(active.baseUrl).toBe("https://stable.example.test");
+			await stopAndObserve(active, invocation);
+		} finally {
+			restartListener.stop(true);
+		}
 	});
 
 	it("starts devtunnel and zrok with public HTTP argv", async () => {
@@ -252,7 +247,7 @@ describe("startExposure tunnel adapters", () => {
 		const dev = await startExposure(exposure("devtunnel"), PORT);
 		activeExposures.push(dev);
 		expect(dev.baseUrl).toBe(`https://blue-${PORT}.use2.devtunnels.ms`);
-		expect(await recordedArgs(devInvocation)).toEqual([
+		expect(recordedArgs(devInvocation)).toEqual([
 			"host",
 			"-p",
 			String(PORT),
@@ -266,7 +261,7 @@ describe("startExposure tunnel adapters", () => {
 		const zrok = await startExposure(exposure("zrok"), PORT);
 		activeExposures.push(zrok);
 		expect(zrok.baseUrl).toBe("https://violet.share.zrok.io");
-		expect(await recordedArgs(zrokInvocation)).toEqual([
+		expect(recordedArgs(zrokInvocation)).toEqual([
 			"share",
 			"public",
 			`http://127.0.0.1:${PORT}`,
@@ -288,7 +283,7 @@ describe("startExposure tunnel adapters", () => {
 		);
 		activeExposures.push(active);
 		expect(active.baseUrl).toBe("http://tunnel.example.test:38912");
-		expect(await recordedArgs(invocation)).toEqual([
+		expect(recordedArgs(invocation)).toEqual([
 			"local",
 			String(PORT),
 			"--to",
@@ -310,7 +305,7 @@ describe("startExposure tunnel adapters", () => {
 		);
 		activeExposures.push(token);
 		expect(token.baseUrl).toBe("https://blobs.example.test");
-		expect(await recordedArgs(tokenInvocation)).toEqual([
+		expect(recordedArgs(tokenInvocation)).toEqual([
 			"tunnel",
 			"--no-autoupdate",
 			"run",
@@ -329,7 +324,7 @@ describe("startExposure tunnel adapters", () => {
 		);
 		activeExposures.push(configured);
 		expect(configured.baseUrl).toBe("https://config.example.test");
-		expect(await recordedArgs(configInvocation)).toEqual([
+		expect(recordedArgs(configInvocation)).toEqual([
 			"tunnel",
 			"--no-autoupdate",
 			"--config",
@@ -374,7 +369,7 @@ describe("startExposure tunnel adapters", () => {
 		}
 		expect(failure).toContain("exited with code 19");
 		expect(failure).not.toContain(secret);
-		expect(await recordedArgs(invocation)).toContain(secret);
+		expect(recordedArgs(invocation)).toContain(secret);
 	});
 
 	it("reports absent adapter binaries without invoking the network", async () => {

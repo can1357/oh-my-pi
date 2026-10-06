@@ -9,7 +9,9 @@
 	const serializeFunction = (label, fn) => {
 		const source = String(fn);
 		if (source.includes("[native code]")) {
-			throw new TypeError(`${label} cannot serialize a native or bound function; pass an arrow or function expression`);
+			throw new TypeError(
+				`${label} cannot serialize a native or bound function; pass an arrow or function expression`,
+			);
 		}
 		return source;
 	};
@@ -46,6 +48,7 @@
 	const windowFields = ["id", "app", "title", "pid", "bounds", "focused"];
 	const windowValueMethods = [
 		"screenshot",
+		"zoom",
 		"click",
 		"doubleClick",
 		"move",
@@ -55,6 +58,10 @@
 		"press",
 		"raise",
 		"ax",
+		"observe",
+		"holdKeys",
+		"holdMouse",
+		"bringToCurrentSpace",
 	];
 	const elementFields = ["ref", "role", "nativeRole", "title", "description", "enabled", "focused", "childCount"];
 	const elementValueMethods = [
@@ -69,9 +76,12 @@
 		"focus",
 	];
 	const desktopValueMethods = [
+		"holdKeys",
+		"holdMouse",
 		"displays",
 		"windows",
 		"screenshot",
+		"zoom",
 		"click",
 		"doubleClick",
 		"move",
@@ -83,7 +93,8 @@
 
 	const copyFields = (target, fields, snapshot) => {
 		for (const field of fields) {
-			if (snapshot[field] !== undefined) Object.defineProperty(target, field, { value: snapshot[field], enumerable: true });
+			if (snapshot[field] !== undefined)
+				Object.defineProperty(target, field, { value: snapshot[field], enumerable: true });
 		}
 	};
 	const makeElement = snapshot => {
@@ -109,6 +120,12 @@
 		defineMethod(win, "toString", () => `<window ${snapshot.id} ${snapshot.app}>`);
 		const via = next => [step("window", [snapshot.id]), next];
 		defineValueMethods(win, windowValueMethods, via);
+		for (const [namespace, methods] of [["menu", ["items", "select"]]]) {
+			const nested = {};
+			for (const method of methods)
+				defineMethod(nested, method, (...args) => callValue(via(step(`${namespace}.${method}`, args))));
+			defineMethod(win, namespace, Object.freeze(nested));
+		}
 		defineMethod(win, "find", async query => (await callValue(via(step("find", [query])))).map(makeElement));
 		defineMethod(win, "ref", ref => resolveElement([step("ref", [ref])]));
 		return Object.freeze(win);
@@ -118,8 +135,30 @@
 		return snapshot ? makeWindow(snapshot) : null;
 	};
 
+	const makeDisplay = snapshot => {
+		const target = {};
+		copyFields(target, ["id"], snapshot);
+		const via = next => [step("display", [snapshot.id]), next];
+		defineValueMethods(
+			target,
+			desktopValueMethods.filter(method => method !== "displays" && method !== "windows"),
+			via,
+		);
+		return Object.freeze(target);
+	};
+
 	const computer = {};
 	defineValueMethods(computer, desktopValueMethods, next => [next]);
+	computer.display = async selector => makeDisplay(await callValue([step("display", [selector])]));
+	for (const [namespace, methods] of [
+		["apps", ["list", "open"]],
+		["control", ["acquire", "release", "state"]],
+	]) {
+		const nested = {};
+		for (const method of methods)
+			defineMethod(nested, method, (...args) => callValue([step(`${namespace}.${method}`, args)]));
+		computer[namespace] = Object.freeze(nested);
+	}
 	computer.window = selector => resolveWindow([step("window", [selector])]);
 	computer.focusedWindow = () => resolveWindow([step("focusedWindow", [])]);
 	computer.elementAt = (x, y) => resolveElement([step("elementAt", [x, y])]);

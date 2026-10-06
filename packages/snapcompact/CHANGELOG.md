@@ -2,6 +2,24 @@
 
 ## [Unreleased]
 
+### Breaking Changes
+
+- `maxFramesForDataBudget()` now takes the frame shape instead of a byte budget, so the default 1568px shapes get 26 frames instead of 17 ([#14277](https://github.com/can1357/oh-my-pi/pull/14277) by [@will-bogusz](https://github.com/will-bogusz)).
+
+### Added
+
+- Added `frameBilling`, `frameTokens` and `frameBillingKey`, which price a rendered frame at what the model reading it is billed ([#14291](https://github.com/can1357/oh-my-pi/pull/14291) by [@will-bogusz](https://github.com/will-bogusz))
+
+### Fixed
+
+- Fixed snapcompact frame token estimates following the gateway instead of the model reading the frames, which mispriced Claude behind OpenRouter or Vertex and Claude 4.6 and older ([#14286](https://github.com/can1357/oh-my-pi/pull/14286) by [@will-bogusz](https://github.com/will-bogusz)).
+
+## [18.6.2] - 2026-10-04
+
+### Fixed
+
+- Fixed short snapcompact frames being rejected by vision backends that require image dimensions above 32px ([#14355](https://github.com/can1357/oh-my-pi/issues/14355)).
+
 ## [18.2.9] - 2026-09-22
 
 ### Fixed

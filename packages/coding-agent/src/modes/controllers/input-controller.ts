@@ -491,6 +491,9 @@ export class InputController {
 			if (this.ctx.hasActiveCleanse() && this.ctx.handleCleanseEscape()) {
 				return;
 			}
+			if (this.ctx.dismissCommandReport()) {
+				return;
+			}
 
 			if (!this.ctx.focusedAgentId) {
 				const viewSession = this.ctx.viewSession;
@@ -684,8 +687,8 @@ export class InputController {
 		for (const key of this.ctx.keybindings.getKeys("app.live.toggle")) {
 			this.ctx.editor.setCustomKeyHandler(key, () => void this.ctx.handleLiveCommand());
 		}
-		// Hold the space bar to push-to-talk: the editor recognizes the auto-repeat burst, tracks
-		// the spam back out, and starts STT on hold start / stops it on release.
+		// Push-to-talk uses its own binding, separate from the STT toggle.
+		this.ctx.editor.spaceHold.keys = this.ctx.keybindings.getKeys("app.stt.pushToTalk");
 		this.ctx.editor.spaceHold.handler = this.ctx.dictationSpaceHold(this.ctx.editor);
 		for (const key of this.ctx.keybindings.getKeys("app.clipboard.copyLine")) {
 			this.ctx.editor.setCustomKeyHandler(key, () => this.handleCopyCurrentLine());
@@ -947,7 +950,7 @@ export class InputController {
 			if ((!isSettingsInitialized() || cfgEmojiAutocomplete.get(settings)) && text) text = expandEmoticons(text);
 
 			// Focused subagent session: the editor is a plain chat box for it.
-			// Everything below (continue shortcuts, slash/bash/python, loop,
+			// Everything below (slash/bash/python, loop,
 			// compaction queueing) is main-session-only.
 			if (this.ctx.focusedAgentId) {
 				await this.#submitToFocusedSession(text, "steer");
@@ -1424,7 +1427,7 @@ export class InputController {
 		this.ctx.session.maybeStartTitleGeneration(text);
 	}
 
-	/** Submit editor text to the focused subagent session (chat-only focus policy). */
+	/** Submit editor text to the focused subagent session (chat and continue shortcuts only). */
 	async #submitToFocusedSession(text: string, streamingBehavior: "steer" | "followUp"): Promise<void> {
 		const target = this.ctx.viewSession;
 		const images = this.ctx.editor.pendingImages.length > 0 ? [...this.ctx.editor.pendingImages] : undefined;
@@ -1457,12 +1460,18 @@ export class InputController {
 			);
 			return; // editor text not cleared: Editor does not auto-clear on submit
 		}
+		const isContinueShortcut = streamingBehavior === "steer" && !images && (text === "." || text === "c");
 		this.ctx.editor.clearDraft(text);
 		try {
-			// prompt() handles idle (new turn) and streaming (queues per streamingBehavior).
-			await this.ctx.withLocalSubmission(text, () => target.prompt(text, { streamingBehavior, images }), {
-				imageCount: images?.length ?? 0,
-			});
+			// Synthetic directives must not use streamingBehavior: AgentSession would
+			// otherwise queue them as visible user messages while the target is busy.
+			if (isContinueShortcut) {
+				await target.prompt(manualContinuePrompt, { synthetic: true, userInitiated: true });
+			} else {
+				await this.ctx.withLocalSubmission(text, () => target.prompt(text, { streamingBehavior, images }), {
+					imageCount: images?.length ?? 0,
+				});
+			}
 		} catch (error) {
 			// Hand the message back, mirroring the main submit error path: restore
 			// pasted images so the user can retry an image-only or text+image draft.
@@ -1624,14 +1633,14 @@ export class InputController {
 	}
 
 	/**
-	 * Pop the single most-recently-queued restorable message for the Alt+Up
-	 * dequeue key. Prefers the agent queues (steering, then follow-up) via the
-	 * session API that steps over hidden companions; falls back to the compaction
-	 * queue for messages typed while compacting, which live outside those queues.
+	 * Pop the last restorable message from the viewed session's agent queues.
+	 * Only the main session owns the separate compaction queue; focused views
+	 * must not restore its messages into a subagent's composer.
 	 */
 	#popLastQueuedMessage(): RestoredQueuedMessage | undefined {
-		const fromQueue = this.ctx.session.popLastQueuedMessage();
+		const fromQueue = this.ctx.viewSession.popLastQueuedMessage();
 		if (fromQueue) return fromQueue;
+		if (this.ctx.focusedAgentId) return undefined;
 		const compaction = this.ctx.compactionQueuedMessages;
 		if (compaction.length === 0) return undefined;
 		const last = compaction[compaction.length - 1];
@@ -1738,6 +1747,14 @@ export class InputController {
 			detachedText?: string;
 		},
 	): Promise<void> {
+		// Queue shorthand reaches this helper before the normal guest input gate.
+		// Like /queue, it must not submit to the guest's local session.
+		if (this.ctx.collabGuest) {
+			this.ctx.showStatus("/queue is host-only during a collab session");
+			this.ctx.editor.setText(options.detachedText ?? options.historyText ?? text);
+			return;
+		}
+
 		const splitMessages = splitQueuedMessages(text);
 		if (splitMessages.length === 0 && !options.images?.length) {
 			if (options.detachedText === undefined) this.ctx.editor.clearDraft();

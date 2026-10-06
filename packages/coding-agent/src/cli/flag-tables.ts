@@ -150,6 +150,10 @@ export const STRING_SETTERS: Record<string, StringSetter> = {
 	"--slow": (result, value) => {
 		result.slow = value;
 	},
+	"--goal": (result, value) => {
+		if (!value.trim()) throw new CliUsageError("--goal requires a non-empty objective.");
+		result.goal = value.trim();
+	},
 	"--plan": (result, value) => {
 		result.plan = value;
 	},
