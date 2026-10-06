@@ -1,5 +1,4 @@
 import type { ReadToolDetails } from "@oh-my-pi/pi-tui/tools/read";
-import type { Stats } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { type EditStore, notebookToEditableText } from "@oh-my-pi/pi-natives";
@@ -56,7 +55,12 @@ import {
 	truncateHeadBytes,
 	truncateLine,
 } from "@oh-my-pi/pi-tui/tools/streaming-output";
-import { buildLineEntriesWithBlockContext, lineEntriesToPlainText } from "../utils/block-context";
+import {
+	buildLineEntriesWithBlockContext,
+	lineEntriesToPlainText,
+	spansCoverEveryLine,
+	warmBlockContext,
+} from "../utils/block-context";
 import { isCpuProfilePath, renderCpuProfile } from "../utils/cpuprofile";
 import { resolveFileDisplayMode } from "../utils/file-display-mode";
 import { loadImageInput, loadSvgImageInput } from "../utils/image-loading";
@@ -85,6 +89,7 @@ import {
 	formatPathRelativeToCwd,
 	probeLiteralPathExists,
 	resolveReadPathAsync,
+	specialFileKind,
 	splitDelimitedPathEntry,
 	splitMixedUrlPathList,
 	splitPathAndSelPreferringLiteral,
@@ -649,19 +654,6 @@ function formatLocatedFileNotice(url: string, backingPath: string, size: number,
 	return rawBlocked
 		? `Unbounded raw read blocked for ${url} (${formatBytes(size)}). Reading the whole file verbatim can exhaust memory. ${workflows}: ${shortenPath(backingPath)}`
 		: `Backing file: ${shortenPath(backingPath)} (${formatBytes(size)}). ${workflows}.`;
-}
-
-/**
- * Kind of a non-regular, non-directory file, or undefined. Reading one in-process can block
- * forever (a FIFO, `/dev/stdin` on the TUI's terminal) or never end (`/dev/zero`).
- */
-function specialFileKind(stat: Stats): string | undefined {
-	if (stat.isFile() || stat.isDirectory()) return undefined;
-	if (stat.isCharacterDevice()) return "character device";
-	if (stat.isBlockDevice()) return "block device";
-	if (stat.isFIFO()) return "FIFO";
-	if (stat.isSocket()) return "socket";
-	return "special file";
 }
 
 /**
@@ -1383,7 +1375,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		if (bridgePromise !== undefined) {
 			try {
 				const bridgeText = await bridgePromise;
-				const bridgeResult = buildInMemoryMultiRangeResult(this.session, bridgeText, ranges, {
+				const bridgeResult = await buildInMemoryMultiRangeResult(this.session, bridgeText, ranges, {
 					details: markMarkdownContentType(
 						this.session,
 						{ resolvedPath: absolutePath, suffixResolution },
@@ -1478,6 +1470,9 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 
 		let outputText: string;
 		if (!rawSelector && fullLines && visibleSpans.length > 0) {
+			if (buffered && !spansCoverEveryLine(visibleSpans, fullLines.length)) {
+				await warmBlockContext({ path: absolutePath, text: buffered.normalizedText });
+			}
 			const entries = buildLineEntriesWithBlockContext(
 				fullLines,
 				visibleSpans,
@@ -2128,7 +2123,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 					if (bridgePromise !== undefined) {
 						try {
 							const bridgeText = await bridgePromise;
-							const bridgeResult = buildInMemoryTextResult(this.session, bridgeText, offset, limit, {
+							const bridgeResult = await buildInMemoryTextResult(this.session, bridgeText, offset, limit, {
 								details: markMarkdownContentType(
 									this.session,
 									{ resolvedPath: absolutePath, suffixResolution },
@@ -2253,6 +2248,17 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 					const totalSelectedLines = totalFileLines - startLine;
 					const wasTruncated = reachedEof && (collectedLines.length < totalSelectedLines || stoppedByByteLimit);
 					const firstLineExceedsLimit = firstLineByteLength !== undefined && firstLineByteLength > maxBytesForRead;
+					if (
+						bracketContextFullLines &&
+						buffered &&
+						!firstLineExceedsLimit &&
+						!spansCoverEveryLine(
+							[{ startLine: startLineDisplay, endLine: displayedEndLine }],
+							bracketContextFullLines.length,
+						)
+					) {
+						await warmBlockContext({ path: absolutePath, text: buffered.normalizedText });
+					}
 					const omittedSelectedLine = omittedRequestedLine(
 						byteLimitLine,
 						requestedStart,

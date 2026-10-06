@@ -45,7 +45,9 @@ import type {
 	ToolResultMessage,
 	Usage,
 } from "../types";
+import { getPremiumServiceTierRequests, parseServiceTier } from "../types";
 import {
+	clampOpenAIResponsesImageDetailForReplay,
 	createOpenAIResponsesHistoryPayload,
 	dropMalformedOpenAIResponsesToolCalls,
 	getOpenAIResponsesHistoryItems,
@@ -273,18 +275,13 @@ const CODEX_WEBSOCKET_FIRST_EVENT_TIMEOUT_MS = Number($env.PI_CODEX_WEBSOCKET_FI
 const CODEX_WEBSOCKET_RETRY_BUDGET = Number($env.PI_CODEX_WEBSOCKET_RETRY_BUDGET || CODEX_MAX_RETRIES);
 const CODEX_WEBSOCKET_RETRY_DELAY_MS = Number($env.PI_CODEX_WEBSOCKET_RETRY_DELAY_MS || CODEX_RETRY_DELAY_MS);
 const CODEX_WEBSOCKET_TRANSPORT_ERROR_PREFIX = "Codex websocket transport error";
-/**
- * The server's experimental native turn lane refuses `response.steer` with
- * this code, then drops the in-flight response and closes the socket.
- */
-const CODEX_NATIVE_LANE_STEER_REJECTED_CODE = "unsupported_native_inflight_message";
 // The native-lane steering rejection is replayable: the session stops steering
 // first, so the replay cannot trip it again.
 const CODEX_RETRYABLE_EVENT_CODES = new Set([
 	"model_error",
 	"server_error",
 	"internal_error",
-	CODEX_NATIVE_LANE_STEER_REJECTED_CODE,
+	AIError.CODEX_NATIVE_LANE_STEER_REJECTED_CODE,
 ]);
 const CODEX_RETRYABLE_EVENT_MESSAGE =
 	/processing your request|retry your request|temporar(?:y|ily)|overloaded|service.?unavailable|internal error|server error/i;
@@ -1340,9 +1337,11 @@ function getCodexServiceTierCostMultiplier(
 	model: Pick<Model<"openai-codex-responses">, "serviceTierCost">,
 	serviceTier: ServiceTier | "default" | undefined,
 ): number {
-	// `ultrafast` has no published price (API preview, Codex credits), so it is
-	// shown at 1x rather than an invented multiplier.
-	if (serviceTier !== "flex" && serviceTier !== "priority") return 1;
+	// The subscription route draws on included plan usage, so its cost is the
+	// usage-equivalent: each tier's multiplier comes from the catalog table, which
+	// uses OpenAI's included-usage rates (Astra: Fast 2.5x, Ultrafast 8x). A tier
+	// with no entry stays at 1x rather than an invented multiplier.
+	if (serviceTier !== "flex" && serviceTier !== "priority" && serviceTier !== "ultrafast") return 1;
 	return model.serviceTierCost?.[serviceTier] ?? 1;
 }
 
@@ -1350,26 +1349,29 @@ function getCodexServiceTierCostMultiplier(
  * The tier a Codex response was billed at. The response echo is authoritative
  * whenever it reports a tier (the backend may serve a requested priority/flex
  * turn as `default`); the requested tier is used only when the echo is absent.
+ * The tier's identity is preserved even when it has no pricing entry (`scale`),
+ * because the recorded tier also drives premium-request and speed accounting.
  */
-function resolveCodexCostServiceTier(res: ServiceTier | undefined, req?: unknown): ServiceTier | "default" | undefined {
-	const served = res ?? req;
-	return served === "flex" || served === "priority" ? served : "default";
+function resolveCodexCostServiceTier(res: ServiceTier | undefined, req?: unknown): ServiceTier {
+	return res ?? parseServiceTier(req) ?? "default";
 }
 
 function applyCodexServiceTierPricing(
-	model: Pick<Model<"openai-codex-responses">, "serviceTierCost">,
+	model: Pick<Model<"openai-codex-responses">, "provider" | "api" | "identity" | "serviceTierCost">,
 	usage: AssistantMessage["usage"],
 	resTier: ServiceTier | undefined,
 	reqTier: unknown,
-): void {
-	const resolvedTier = resolveCodexCostServiceTier(resTier, reqTier);
+): ServiceTier {
+	const resolvedTier = resolveCodexCostServiceTier(resTier, reqTier) ?? "default";
+	usage.premiumRequests ??= getPremiumServiceTierRequests(resolvedTier, model, { served: true });
 	const multiplier = getCodexServiceTierCostMultiplier(model, resolvedTier);
-	if (multiplier === 1) return;
+	if (multiplier === 1) return resolvedTier;
 	usage.cost.input *= multiplier;
 	usage.cost.output *= multiplier;
 	usage.cost.cacheRead *= multiplier;
 	usage.cost.cacheWrite *= multiplier;
 	usage.cost.total = usage.cost.input + usage.cost.output + usage.cost.cacheRead + usage.cost.cacheWrite;
+	return resolvedTier;
 }
 
 function resetOutputState(output: AssistantMessage): void {
@@ -2671,8 +2673,7 @@ class CodexStreamProcessor {
 		const response = rawResponse && typeof rawResponse === "object" ? rawResponse : undefined;
 		const responseId = response && "id" in response && typeof response.id === "string" ? response.id : undefined;
 		const usage = response && "usage" in response ? parseCodexResponseUsage(response.usage) : undefined;
-		const serviceTier =
-			response && "service_tier" in response ? parseCodexServiceTier(response.service_tier) : undefined;
+		const serviceTier = response && "service_tier" in response ? parseServiceTier(response.service_tier) : undefined;
 		const status = response && "status" in response ? parseCodexResponseStatus(response.status) : undefined;
 		const endTurn = response && "end_turn" in response ? response.end_turn : undefined;
 
@@ -2709,6 +2710,7 @@ class CodexStreamProcessor {
 				const nativeOutputItems = runtime.finalizeNativeOutputItems();
 				const replayableResponseItems = sanitizeOpenAIResponsesAssistantHistoryItemsForReplay(
 					structuredCloneJSON(nativeOutputItems),
+					{ supportsImageDetailOriginal: model.compat.supportsImageDetailOriginal },
 				);
 				if (responseId && replayableResponseItems && replayableResponseItems.length === nativeOutputItems.length) {
 					state.lastResponseId = responseId;
@@ -2730,7 +2732,12 @@ class CodexStreamProcessor {
 		finalizePendingResponsesToolCalls(output);
 
 		calculateCost(model, output.usage, output.timestamp);
-		applyCodexServiceTierPricing(model, output.usage, serviceTier, runtime.requestBodyForState.service_tier);
+		output.serviceTier = applyCodexServiceTierPricing(
+			model,
+			output.usage,
+			serviceTier,
+			runtime.requestBodyForState.service_tier,
+		);
 		output.stopReason = mapOpenAIResponsesStopReason(steered ? "completed" : status);
 		promoteResponsesToolUseStopReason(
 			output,
@@ -2749,7 +2756,7 @@ class CodexStreamProcessor {
 		if (
 			!state ||
 			!(error instanceof CodexProviderStreamError) ||
-			error.code !== CODEX_NATIVE_LANE_STEER_REJECTED_CODE
+			error.code !== AIError.CODEX_NATIVE_LANE_STEER_REJECTED_CODE
 		) {
 			return;
 		}
@@ -3560,20 +3567,6 @@ function hashJson(value: unknown): string {
 	return String(Bun.hash(json === undefined ? "undefined" : json));
 }
 
-function parseCodexServiceTier(value: unknown): ServiceTier | undefined {
-	switch (value) {
-		case "auto":
-		case "default":
-		case "flex":
-		case "scale":
-		case "priority":
-		case "ultrafast":
-			return value;
-		default:
-			return undefined;
-	}
-}
-
 function parseCodexResponseStatus(value: unknown): ResponseStatus | undefined {
 	switch (value) {
 		case "completed":
@@ -4083,7 +4076,7 @@ class CodexWebSocketConnection {
 				}
 				// The native lane answers `response.steer` with a plain `error` that
 				// also ends the response: refuse the submission, then fail the stream.
-				if (parsed.type === "error" && parsed.code === CODEX_NATIVE_LANE_STEER_REJECTED_CODE) {
+				if (parsed.type === "error" && parsed.code === AIError.CODEX_NATIVE_LANE_STEER_REJECTED_CODE) {
 					this.#refuseSteerWaiters(parsed.code, typeof parsed.message === "string" ? parsed.message : undefined);
 				}
 				this.#push(parsed);
@@ -4958,10 +4951,14 @@ function convertMessages(model: Model<"openai-codex-responses">, context: Contex
 			if (historyItems) {
 				const redactedHistoryItems = redactSensitiveInObject(historyItems).result as Array<ResponseInput[number]>;
 				const sanitizedHistoryItems = dropMalformedOpenAIResponsesToolCalls(redactedHistoryItems);
+				const clampedHistoryItems = clampOpenAIResponsesImageDetailForReplay(
+					sanitizedHistoryItems,
+					model.compat.supportsImageDetailOriginal,
+				);
 				const replayItems =
 					model.supportsComputerUse === true
-						? sanitizedHistoryItems
-						: unrollCodexComputerItems(sanitizedHistoryItems, model.compat.supportsImageDetailOriginal);
+						? clampedHistoryItems
+						: unrollCodexComputerItems(clampedHistoryItems, model.compat.supportsImageDetailOriginal);
 				for (const item of replayItems) {
 					if (item.type === "custom_tool_call") {
 						customCallIds.add(item.call_id);
@@ -4995,7 +4992,9 @@ function convertMessages(model: Model<"openai-codex-responses">, context: Contex
 			const historyItems = providerPayload?.items as Array<Record<string, unknown>> | undefined;
 			let suppressHiddenEmptyFallback = false;
 			if (historyItems) {
-				const sanitizedHistoryItems = sanitizeOpenAIResponsesAssistantHistoryItemsForReplay(historyItems);
+				const sanitizedHistoryItems = sanitizeOpenAIResponsesAssistantHistoryItemsForReplay(historyItems, {
+					supportsImageDetailOriginal: model.compat.supportsImageDetailOriginal,
+				});
 				if (sanitizedHistoryItems) {
 					const rawReplayItems =
 						model.supportsComputerUse === true
