@@ -862,6 +862,7 @@
 
 ## [18.8.4] - 2026-10-08
 - Added `/reload-config` to reread persisted configuration in a running session and report changed settings or a reload error ([#7749](https://github.com/can1357/oh-my-pi/pull/7749) by [@mvid](https://github.com/mvid))
+- Sessions following the default model role now adopt watched role changes while preserving explicit, restored, and manually selected models ([#7749](https://github.com/can1357/oh-my-pi/pull/7749) by [@mvid](https://github.com/mvid))
 
 ### Changed
 

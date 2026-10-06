@@ -152,6 +152,16 @@ export interface UsageFallbackConfirmation {
  */
 export type UsageFallbackConfirmer = (confirmation: UsageFallbackConfirmation, signal: AbortSignal) => Promise<boolean>;
 
+/** Outcome of applying a changed default role without replacing a deliberate model choice. */
+export type RoleModelRebindOutcome =
+	| "switched"
+	| "thinking-applied"
+	| "unchanged"
+	| "deferred-turn"
+	| "deferred-plan-mode"
+	| "fallback-retargeted"
+	| "declined";
+
 /** Identifies a retry fallback chain already entered during startup model resolution. */
 export interface InitialRetryFallbackState {
 	/** Role whose configured primary was unavailable. */
@@ -214,6 +224,8 @@ export interface AgentSessionConfig {
 	 * slow-verdict boundary runs in milliseconds; production never sets it.
 	 */
 	unexpectedStopJudgeTimeoutMs?: number;
+	/** Startup selection came from the default role, not an explicit or restored model. Defaults to false. */
+	modelFromDefaultRole?: boolean;
 	/** Prewalk from the starting model to a fast/cheap target after implementation begins. */
 	prewalk?: Prewalk;
 	/** Keep `prewalk.auto` away from this session until `/new` (`--no-prewalk`). */
