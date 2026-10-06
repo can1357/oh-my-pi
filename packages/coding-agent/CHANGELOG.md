@@ -1525,6 +1525,10 @@ Older entries are archived in [packages/coding-agent/CHANGELOG.md@3cc89b92a410](
 - Improved JSON and JSONL query streaming and pagination to reduce resource usage, support partial results, and provide clearer continuation between result pages.
 - Clarified the `read` tool documentation with complete examples for requesting line ranges.
 
+### Changed
+
+- Passive context emitted after a tool batch now appears as one dim line on the batch's final tool card instead of remaining invisible or creating a separate transcript row ([#13269](https://github.com/can1357/oh-my-pi/pull/13269) by [@andrebrait](https://github.com/andrebrait)).
+
 ### Fixed
 
 - Fixed model-preset tests failing when provider credentials are configured in the environment.
@@ -2253,9 +2257,6 @@ Older entries are archived in [packages/coding-agent/CHANGELOG.md@3faa7ce5154a](
 - Preserved MCP `structuredContent` in live tool-result details so evaluation callers can consume server data without reparsing model-facing JSON; spilled results continue to retain an artifact reference without duplicating the payload in session history.
 - Fixed Collab hosts becoming unable to reclaim a room after a brief network interruption; hosts now retry room recovery without losing guests or queued updates.
 - Fixed one-shot commands that stopped before completing, such as `omp config set` on a fresh Windows profile, incorrectly exiting successfully without output; they now report failure with diagnostic guidance.
-### Changed
-
-- Passive context emitted after a tool batch now appears as one dim line on the batch's final tool card instead of remaining invisible or creating a separate transcript row ([#13269](https://github.com/can1357/oh-my-pi/pull/13269) by [@andrebrait](https://github.com/andrebrait)).
 
 ## [18.3.2] - 2026-09-25
 

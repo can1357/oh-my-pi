@@ -634,6 +634,7 @@
 
 - SVG and Mermaid files now render as images or diagrams beneath their file cards, with SVG previews updating while the file streams and Mermaid previews appearing when the file is complete.
 - Native tool cards can open expanded regardless of the transcript’s expansion state; the todo checklist uses this behavior.
+- Tool cards can now show passive model context as one sanitized, dim line, in both the terminal and native transcripts, without exposing it as a separate transcript message ([#13269](https://github.com/can1357/oh-my-pi/pull/13269) by [@andrebrait](https://github.com/andrebrait)).
 
 ### Changed
 
@@ -1021,9 +1022,6 @@
 ### Removed
 
 - Removed the legacy TinyTitleDownloadProgress overlay in favor of the centralized agent HUD.
-### Added
-
-- Tool cards can now show passive model context as one sanitized, dim line without exposing it as a separate transcript message ([#13269](https://github.com/can1357/oh-my-pi/pull/13269) by [@andrebrait](https://github.com/andrebrait)).
 
 ## [18.3.1] - 2026-09-25
 

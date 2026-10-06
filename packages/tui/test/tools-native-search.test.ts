@@ -222,6 +222,18 @@ describe("read group tool node", () => {
 		group.updateArgs({ path: "src/a.ts" }, "a");
 		expect(group.describe().k).toBe("card");
 	});
+
+	it("shows passive context in both native serializers", () => {
+		const group = new ReadToolGroupComponent();
+		group.updateArgs({ path: "src/a.ts" }, "a");
+		group.describe(toolCx);
+		group.describe();
+		group.setAdditionalContext("read guidance");
+		for (const described of [group.describe(toolCx), group.describe()]) {
+			expect(collect([described], n => role(n) === "omp.tool.context")).toHaveLength(1);
+			expect(JSON.stringify(described)).toContain("↳ Context: read guidance");
+		}
+	});
 });
 
 describe("glob native view", () => {

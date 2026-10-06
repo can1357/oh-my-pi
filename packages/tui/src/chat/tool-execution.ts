@@ -59,12 +59,25 @@ export function toolRenderName(wireName: string, tool: AgentTool | undefined): s
 	return tool?.name ?? wireName;
 }
 
+function passiveContextLine(context: string): string | undefined {
+	const oneLine = replaceTabs(sanitizeText(context)).replace(/\s+/g, " ").trim();
+	return oneLine ? `↳ Context: ${oneLine}` : undefined;
+}
+
 /** Render passive tool context as one sanitized, dim transcript line. */
 export function renderToolAdditionalContext(context: string, width: number): string {
-	const oneLine = replaceTabs(sanitizeText(context)).replace(/\s+/g, " ").trim();
-	if (!oneLine) return "";
-	return truncateToWidth(theme.fg("dim", `↳ Context: ${oneLine}`), width);
+	const line = passiveContextLine(context);
+	return line ? truncateToWidth(theme.fg("dim", line), width) : "";
 }
+
+/** The native counterpart of {@link renderToolAdditionalContext}: a one-line body child, or nothing. */
+export function describeToolAdditionalContext(context: string | undefined): NativeChild[] {
+	const line = context === undefined ? undefined : passiveContextLine(context);
+	return line
+		? [text([span(line, "dim")], { lines: 1, truncate: "end", key: "context", role: "omp.tool.context" })]
+		: [];
+}
+
 type DisplaceableToolName = "wait" | "todo";
 
 function isTodoToolDetails(details: unknown): details is TodoToolDetails {
@@ -372,6 +385,7 @@ export class ToolExecutionComponent extends Container {
 	#contentBox: Box; // Used for custom tools and bash visual truncation
 	#contentText: WidthAwareText; // Generic fallback (no custom/built-in renderer)
 	#additionalContextText: WidthAwareText;
+	// Which container the constructor mounted: bespoke/built-in renderers use
 	// #contentBox, everything else the generic #contentText fallback.
 	#usesContentBox = false;
 	#multiFileBoxes: (Box | Spacer)[] = []; // Extra boxes for multi-file edit results
@@ -1065,6 +1079,7 @@ export class ToolExecutionComponent extends Container {
 			this.#toolActivityVisible,
 			host.media,
 			host.json,
+			this.#additionalContext,
 			getThemeEpoch(),
 		];
 		return this.#native.get(key, () =>
@@ -1121,6 +1136,7 @@ export class ToolExecutionComponent extends Container {
 		const late = this.#lateDiagnosticsParts();
 		const body: NativeChild[] = [...(view.body ?? []), ...this.#nativeResultImages(view.body)];
 		if (late.section) body.push(late.section);
+		body.push(...describeToolAdditionalContext(this.#additionalContext));
 		const inline = view.inline === true;
 		const hasBody = body.length > 0;
 		const ms = this.#elapsedMs(status);
@@ -1209,6 +1225,7 @@ export class ToolExecutionComponent extends Container {
 			...(view.body ?? []),
 			...this.#nativeResultImages(view.body),
 			...(late.section ? [late.section] : []),
+			...describeToolAdditionalContext(this.#additionalContext),
 		];
 		const role = `omp.tool.${this.#toolName}`;
 		if (view.inline) return col(children, { role });
