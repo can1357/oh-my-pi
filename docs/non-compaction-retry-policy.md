@@ -110,8 +110,17 @@ Settings:
 - `retry.enabled` (default `true`)
 - `retry.maxRetries` (default `10`)
 - `retry.baseDelayMs` (default `500`)
+- `retry.provider.maxRetries` (default `5`; attempts = retries + 1, shared across every provider-layer retry)
+- `retry.provider.timeoutMs` (default `0`; leaves the request deadline to the stream watchdogs)
 - `retry.maxDelayMs` (default `300000`, 5 minutes; `<= 0` disables the fail-fast cap)
 - `retry.waitForUsageReset` (default `false`; allows provider-timed usage resets to exceed the delay cap)
+
+Layers and attempt budgets:
+
+- the **session layer** (`retry.maxRetries`) re-runs a failed turn, optionally switching credentials or models;
+- the **provider layer** retries one provider request before the session layer ever sees the failure, and it has two stacked retry mechanisms: the transport's own retry loop (`fetchWithRetry`, or the Anthropic stream loop) and the replay-safe wrapper that re-issues a request whose stream stopped empty or failed before any output committed;
+- `retry.provider.maxRetries` is the **single allowance for that whole provider layer**. The wrapper creates one shared budget per provider call, the transport charges one attempt per physical request, and neither layer retries once the budget is spent. Without it, 6 transport attempts and 1 replay retry multiplied into 12 requests against one rate limit.
+- `retry.baseDelayMs` schedules the transport backoff; a provider `Retry-After` hint still wins when present, and `retry.maxDelayMs` caps every sleep.
 
 Attempt numbering:
 
@@ -190,6 +199,8 @@ Defined in `packages/coding-agent/src/session/settings.ts`:
 - `retry.enabled`
 - `retry.maxRetries`
 - `retry.baseDelayMs`
+- `retry.provider.maxRetries` (default `5`; total provider-layer attempts, initial request included)
+- `retry.provider.timeoutMs` (default `0`; disabled)
 - `retry.maxDelayMs`
 - `retry.waitForUsageReset` (default `false`)
 - `retry.modelFallback` (default `true`; gates configured retry model-fallback switching)

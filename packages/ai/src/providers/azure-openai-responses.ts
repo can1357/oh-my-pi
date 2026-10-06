@@ -171,6 +171,12 @@ const streamAzureOpenAIResponsesOnce = (
 						body: params,
 						signal: requestSignal,
 						fetch: options?.fetch,
+						// Provider retry knobs (`retry.provider.*`, `retry.baseDelayMs`).
+						maxAttempts: options?.providerAttemptBudget?.remaining,
+						baseDelayMs: options?.providerBaseDelayMs,
+						maxDelayMs: options?.maxRetryDelayMs,
+						timeoutMs: options?.providerTimeoutMs,
+						attemptBudget: options?.providerAttemptBudget,
 						// Transient 408/429/5xx get Retry-After-aware transport retries;
 						// the first-event watchdog aborts `requestSignal`, so retries
 						// cannot extend the caller's deadline.
@@ -273,6 +279,7 @@ export const streamAzureOpenAIResponses: StreamFunction<"azure-openai-responses"
 	return withReplaySafeStreamRetry(model, context, options, streamAzureOpenAIResponsesOnce, {
 		retryProviderErrors: true,
 		maxProviderErrorRetries: 1,
+		maxProviderAttempts: options?.providerMaxAttempts,
 	});
 };
 

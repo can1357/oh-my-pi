@@ -37,7 +37,10 @@ import {
 	cfgProvidersOpenrouterVariant,
 	cfgProvidersStreamFirstEventTimeoutSeconds,
 	cfgProvidersStreamIdleTimeoutSeconds,
+	cfgRetryBaseDelayMs,
 	cfgRetryMaxDelayMs,
+	cfgRetryProviderMaxRetries,
+	cfgRetryProviderTimeoutMs,
 	cfgTextVerbosity,
 	validateProviderMaxInFlightRequests,
 } from "./settings";
@@ -153,6 +156,14 @@ export function createSettingsAwareStreamFn(
 			streamFirstEventTimeoutMs: streamOptions?.streamFirstEventTimeoutMs ?? streamFirstEventTimeoutMs,
 			streamIdleTimeoutMs: streamOptions?.streamIdleTimeoutMs ?? streamIdleTimeoutMs,
 			maxRetryDelayMs: streamOptions?.maxRetryDelayMs ?? cfgRetryMaxDelayMs.get(settings),
+			// Provider-layer retry policy: one shared attempt budget for every
+			// stacked retry layer, so transport retries and replay retries cannot
+			// multiply each other. `retry.maxRetries` stays the session-layer
+			// turn-recovery budget.
+			providerMaxAttempts:
+				streamOptions?.providerMaxAttempts ?? Math.max(1, cfgRetryProviderMaxRetries.get(settings) + 1),
+			providerBaseDelayMs: streamOptions?.providerBaseDelayMs ?? cfgRetryBaseDelayMs.get(settings),
+			providerTimeoutMs: streamOptions?.providerTimeoutMs ?? cfgRetryProviderTimeoutMs.get(settings),
 			maxInFlightRequests: validateProviderMaxInFlightRequests(
 				streamOptions?.maxInFlightRequests ?? cfgProvidersMaxInFlightRequests.get(settings),
 			),

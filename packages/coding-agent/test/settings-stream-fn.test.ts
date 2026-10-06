@@ -122,6 +122,56 @@ describe("createSettingsAwareStreamFn", () => {
 		expect(calls[1]?.options?.maxRetryDelayMs).toBe(5_000);
 	});
 
+	it("forwards the provider retry policy as one shared attempt budget", () => {
+		const settings = Settings.isolated({
+			"retry.provider.maxRetries": 2,
+			"retry.baseDelayMs": 750,
+			"retry.provider.timeoutMs": 42_000,
+		});
+		const { fn: base, calls } = captureBase();
+		const wrapped = createSettingsAwareStreamFn(settings, base);
+
+		wrapped(stubModel, stubContext, undefined);
+
+		const options = calls[0]?.options;
+		// `retries` are retries: the initial request is part of the allowance.
+		expect(options?.providerMaxAttempts).toBe(3);
+		expect(options?.providerBaseDelayMs).toBe(750);
+		expect(options?.providerTimeoutMs).toBe(42_000);
+	});
+
+	it("lets caller options override the provider retry policy", () => {
+		const settings = Settings.isolated({
+			"retry.provider.maxRetries": 5,
+			"retry.baseDelayMs": 750,
+			"retry.provider.timeoutMs": 42_000,
+		});
+		const { fn: base, calls } = captureBase();
+		const wrapped = createSettingsAwareStreamFn(settings, base);
+
+		wrapped(stubModel, stubContext, {
+			providerMaxAttempts: 1,
+			providerBaseDelayMs: 5,
+			providerTimeoutMs: 0,
+		});
+
+		const options = calls[0]?.options;
+		expect(options?.providerMaxAttempts).toBe(1);
+		expect(options?.providerBaseDelayMs).toBe(5);
+		expect(options?.providerTimeoutMs).toBe(0);
+	});
+
+	it("never maps a zero-retry policy to zero attempts", () => {
+		const settings = Settings.isolated({ "retry.provider.maxRetries": 0 });
+		const { fn: base, calls } = captureBase();
+		const wrapped = createSettingsAwareStreamFn(settings, base);
+
+		wrapped(stubModel, stubContext, undefined);
+
+		// One retry-free request is still a request.
+		expect(calls[0]?.options?.providerMaxAttempts).toBe(1);
+	});
+
 	it("treats the default openrouterVariant as absent so the base call carries no variant", () => {
 		const settings = Settings.isolated({ "providers.openrouterVariant": "default" });
 		const { fn: base, calls } = captureBase();

@@ -121,6 +121,45 @@ describe("fetchWithRetry", () => {
 			message: "Request was aborted",
 		});
 	});
+
+	it("charges a shared attempt budget once per physical request", async () => {
+		let attempts = 0;
+		const attemptBudget = { remaining: 3 };
+
+		const response = await fetchWithRetry("https://example.invalid/budget", {
+			fetch: async () => {
+				attempts += 1;
+				return new Response("", { status: 503 });
+			},
+			defaultDelayMs: 1,
+			maxAttempts: attemptBudget.remaining,
+			attemptBudget,
+		});
+
+		expect(response.status).toBe(503);
+		expect(attempts).toBe(3);
+		expect(attemptBudget.remaining).toBe(0);
+	});
+
+	it("charges the budget when an attempt throws before any response", async () => {
+		let attempts = 0;
+		const attemptBudget = { remaining: 2 };
+
+		await expect(
+			fetchWithRetry("https://example.invalid/budget-throw", {
+				fetch: async () => {
+					attempts += 1;
+					throw new TypeError("connection reset");
+				},
+				defaultDelayMs: 1,
+				maxAttempts: 2,
+				attemptBudget,
+			}),
+		).rejects.toThrow();
+
+		expect(attempts).toBe(2);
+		expect(attemptBudget.remaining).toBe(0);
+	});
 });
 
 describe("extractRetryHint", () => {

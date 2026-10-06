@@ -7,6 +7,9 @@
 ### Breaking Changes
 
 - Replaced the `cursorPosition` option of `TerminalQueryResponder` with `hostCursorHandshake`, which leaves only the PTY host's own session-start cursor query unanswered instead of every cursor-position query
+### Added
+
+- Added an `attemptBudget` option to `fetchWithRetry` so stacked retry layers share one physical-request allowance and can observe how many attempts remain.
 
 ## [18.5.1] - 2026-10-03
 

@@ -61,6 +61,13 @@ interface StreamRetryOptions {
 	signal?: AbortSignal;
 	providerRetryWait?: (delayMs: number, signal?: AbortSignal) => Promise<void>;
 	acceptEmptyResponse?: boolean;
+	/**
+	 * Shared provider-attempt budget for the current provider request, created by
+	 * {@link withReplaySafeStreamRetry} and decremented by the transport
+	 * (`fetchWithRetry`). Bounds every stacked retry layer together, so a replay
+	 * retry cannot multiply the transport's own budget.
+	 */
+	providerAttemptBudget?: { remaining: number };
 }
 
 /** Controls which replay-safe provider results may issue a fresh request. */
@@ -71,6 +78,15 @@ export interface ReplaySafeStreamRetryPolicy {
 	retryProviderErrors?: boolean;
 	/** Maximum transient provider-error retries; empty completions keep their shared fixed budget. */
 	maxProviderErrorRetries?: number;
+	/**
+	 * Total provider request budget for this stream call (initial request plus
+	 * every transport/replay retry). When set, it supersedes
+	 * {@link maxProviderErrorRetries}: a shared budget is created, handed to the
+	 * transport, and replay retries are allowed only while it has attempts left.
+	 * This is what keeps stacked retry layers from multiplying each other
+	 * (e.g. 6 transport attempts × 1 replay retry = 12 requests).
+	 */
+	maxProviderAttempts?: number;
 }
 
 class FinalizedProviderStreamError extends Error {
@@ -97,6 +113,14 @@ export function withReplaySafeStreamRetry<M, O extends StreamRetryOptions>(
 ): AssistantMessageEventStream {
 	const outer = new AssistantMessageEventStream();
 	const signal = options?.signal;
+	// One budget per public stream call when the caller declared a total provider
+	// attempt allowance: the transport charges it per physical request, and the
+	// replay layer below only retries while attempts remain.
+	const budget =
+		policy.maxProviderAttempts === undefined
+			? undefined
+			: { remaining: Math.max(1, Math.floor(policy.maxProviderAttempts)) };
+	const attemptOptions = budget === undefined ? options : ({ ...options, providerAttemptBudget: budget } as O);
 	void (async () => {
 		let emptyRetries = 0;
 		let providerErrorRetries = 0;
@@ -113,7 +137,7 @@ export function withReplaySafeStreamRetry<M, O extends StreamRetryOptions>(
 				// The attempt factory can throw synchronously (e.g. a config error
 				// raised before it creates its stream); surface it on the outer stream
 				// rather than leaking an unhandled rejection that never settles.
-				inner = attempt(model, context, options);
+				inner = attempt(model, context, attemptOptions);
 				for await (const event of inner) {
 					if (event.type === "done" || event.type === "error") {
 						terminal = event;
@@ -137,6 +161,9 @@ export function withReplaySafeStreamRetry<M, O extends StreamRetryOptions>(
 			const completedMessage = terminal?.type === "done" ? terminal.message : undefined;
 			const retryEmpty =
 				policy.retryEmptyCompletion === true &&
+				// A replay retry issues a fresh physical request, so it must fit the
+				// shared provider budget (see `maxProviderAttempts`).
+				(budget === undefined || budget.remaining > 0) &&
 				options?.acceptEmptyResponse !== true &&
 				!committed &&
 				completedMessage !== undefined &&
@@ -148,12 +175,23 @@ export function withReplaySafeStreamRetry<M, O extends StreamRetryOptions>(
 				!hasVisibleAssistantContent(completedMessage) &&
 				emptyRetries < MAX_EMPTY_COMPLETION_RETRIES;
 			const failedMessage = terminal?.type === "error" ? terminal.error : undefined;
+			// A declared total budget supersedes the fixed replay-retry count: the
+			// transport has already spent attempts for this provider request, so the
+			// replay layer retries only while the shared budget still has room. The
+			// cap below is a safety net for a transport that never charges the
+			// budget, and it keeps the total at the declared allowance (`N` attempts
+			// = 1 initial request + at most `N - 1` replay retries).
+			const providerRetryLimit =
+				policy.maxProviderAttempts === undefined
+					? (policy.maxProviderErrorRetries ?? 0)
+					: Math.max(0, Math.floor(policy.maxProviderAttempts) - 1);
 			const retryProviderError =
 				policy.retryProviderErrors === true &&
 				!committed &&
+				(budget === undefined || budget.remaining > 0) &&
 				failedMessage?.stopReason === "error" &&
 				failedMessage.errorMessage !== undefined &&
-				providerErrorRetries < (policy.maxProviderErrorRetries ?? 0) &&
+				providerErrorRetries < providerRetryLimit &&
 				AIError.isProviderRetryableError(
 					new FinalizedProviderStreamError(failedMessage.errorMessage, failedMessage.errorStatus),
 				);

@@ -2470,7 +2470,14 @@ const streamAnthropicOnce = (
 			let slowWaitSinceMs: number | undefined;
 			let slowWaitAttempts = 0;
 			let sentSlow = false;
+			// Total provider attempts for this call. A caller-declared shared budget
+			// (`retry.provider.maxRetries`) supersedes the transport's own allowance, so
+			// this loop and the replay wrapper share one count instead of stacking;
+			// every wire attempt charges it, slow-lane retries included.
+			const sharedBudget = options?.providerAttemptBudget;
+			const providerRetryLimit = sharedBudget === undefined ? PROVIDER_MAX_RETRIES : Number.POSITIVE_INFINITY;
 			while (true) {
+				if (sharedBudget) sharedBudget.remaining -= 1;
 				activeAbortTracker = createAbortSourceTracker(options?.signal);
 				const { requestSignal } = activeAbortTracker;
 				// The provider loop owns retries: pin the client's internal retry loop
@@ -3403,13 +3410,24 @@ const streamAnthropicOnce = (
 						AIError.isProviderRetryableError(streamFailure);
 					if (
 						activeAbortTracker.wasCallerAbort() ||
-						providerRetryAttempt >= PROVIDER_MAX_RETRIES ||
+						(sharedBudget !== undefined && sharedBudget.remaining <= 0) ||
+						providerRetryAttempt >= providerRetryLimit ||
 						(!canRetryTransientEnvelopeFailure && !canRetryProviderFailure)
 					) {
 						throw streamFailure;
 					}
 					providerRetryAttempt++;
-					const backoffDelayMs = calculateAnthropicRetryDelayMs(providerRetryAttempt - 1);
+					// `retry.baseDelayMs` replaces the built-in schedule; the
+					// `retry.maxDelayMs` cap (non-positive disables it) still bounds
+					// each backoff sleep.
+					const backoffCapMs = options?.maxRetryDelayMs ?? 60_000;
+					const backoffDelayMs =
+						options?.providerBaseDelayMs === undefined
+							? calculateAnthropicRetryDelayMs(providerRetryAttempt - 1)
+							: Math.min(
+									options.providerBaseDelayMs * 2 ** (providerRetryAttempt - 1),
+									backoffCapMs > 0 ? backoffCapMs : Number.POSITIVE_INFINITY,
+								);
 					// Honor the server's retry hint (`retry-after-ms`/`retry-after`) on
 					// 429/529-style failures: retrying sooner than the server asked is a
 					// guaranteed failure that just burns the retry budget.
@@ -3491,6 +3509,9 @@ const streamAnthropicOnce = (
 export const streamAnthropic: StreamFunction<"anthropic-messages"> = (model, context, options) =>
 	withReplaySafeStreamRetry(model, context, options, streamAnthropicOnce, {
 		retryEmptyCompletion: true,
+		// One shared attempt budget for the anthropic transport loop and this
+		// replay layer; omission (both undefined) keeps the transport default.
+		maxProviderAttempts: options?.providerMaxAttempts,
 	});
 
 export type AnthropicSystemBlock = {

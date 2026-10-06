@@ -315,6 +315,14 @@ export interface FetchWithRetryOptions extends RequestInit {
 	 * number sets a custom ceiling in ms. Bare browser/Node fetch ignores it.
 	 */
 	timeout?: number | false;
+	/**
+	 * Shared provider-attempt budget for stacked retry layers. Decremented once
+	 * per physical request so an outer replay layer (e.g.
+	 * `withReplaySafeStreamRetry`) can see how much of the total provider retry
+	 * budget is left instead of multiplying its own budget on top of this one.
+	 * Omitted = unbudgeted (previous behavior).
+	 */
+	attemptBudget?: { remaining: number };
 }
 
 const DEFAULT_MAX_DELAY_MS = 60_000;
@@ -341,6 +349,7 @@ export async function fetchWithRetry(
 		shouldRetryResponse,
 		fetch: fetchImpl = fetch,
 		timeout = false,
+		attemptBudget,
 		...baseInit
 	} = options;
 	const signal = baseInit.signal as AbortSignal | undefined;
@@ -360,6 +369,10 @@ export async function fetchWithRetry(
 			: "timeout" in options
 				? ({ ...baseInit, timeout } as unknown as RequestInit)
 				: baseInit;
+
+		// Charge the shared budget before the physical request, so an outer retry
+		// layer observes the attempt even when this one throws.
+		if (attemptBudget) attemptBudget.remaining -= 1;
 
 		let response: Response;
 		try {

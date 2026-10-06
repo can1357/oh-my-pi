@@ -938,6 +938,14 @@ const streamOpenAICompletionsOnce = (
 						// The first-event watchdog above aborts `requestSignal`, which
 						// bounds every attempt and backoff sleep — retries cannot
 						// extend the deadline.
+						// Provider retry knobs (`retry.provider.*`, `retry.baseDelayMs`)
+						// ride in on the stream options; the shared attempt budget keeps
+						// this layer and the replay layer under one allowance.
+						maxAttempts: options?.providerAttemptBudget?.remaining,
+						baseDelayMs: options?.providerBaseDelayMs,
+						maxDelayMs: options?.maxRetryDelayMs,
+						timeoutMs: options?.providerTimeoutMs,
+						attemptBudget: options?.providerAttemptBudget,
 						onSseEvent: rawSseObserver,
 						onDoneSentinel: () => {
 							sawDoneSentinel = true;
@@ -1808,6 +1816,11 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions"> = (mo
 	return withReplaySafeStreamRetry(resolvedModel, context, options, streamOpenAICompletionsOnce, {
 		retryEmptyCompletion: true,
 		retryProviderErrors: true,
+		// A caller-declared total provider budget (`retry.provider.maxRetries`)
+		// supersedes the fixed single replay retry, so the transport and replay
+		// layers share one allowance instead of multiplying (6 transport attempts
+		// × 1 replay retry = 12 requests).
+		maxProviderAttempts: options?.providerMaxAttempts,
 		maxProviderErrorRetries: 1,
 	});
 };

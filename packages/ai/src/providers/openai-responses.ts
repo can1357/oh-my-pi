@@ -836,6 +836,12 @@ const streamOpenAIResponsesOnce = (
 						shouldRetryResponse: (response, bodyText) =>
 							!AIError.isRequestBodyReadTimeout(response.status, bodyText) ||
 							lastSubmittedRequestWasFullReplay !== true,
+						// Provider retry knobs (`retry.provider.*`, `retry.baseDelayMs`).
+						maxAttempts: options?.providerAttemptBudget?.remaining,
+						baseDelayMs: options?.providerBaseDelayMs,
+						maxDelayMs: options?.maxRetryDelayMs,
+						timeoutMs: options?.providerTimeoutMs,
+						attemptBudget: options?.providerAttemptBudget,
 						// Transient 408/429/5xx get Retry-After-aware transport
 						// retries; the first-event watchdog aborts `requestSignal`,
 						// so retries cannot extend the caller's deadline.
@@ -1328,6 +1334,7 @@ const streamOpenAIResponsesOnce = (
 export const streamOpenAIResponses: StreamFunction<"openai-responses"> = (model, context, options) =>
 	withReplaySafeStreamRetry(model, context, options, streamOpenAIResponsesOnce, {
 		retryEmptyCompletion: true,
+		maxProviderAttempts: options?.providerMaxAttempts,
 	});
 
 function isResponsesPromptCacheableContentBlock(block: unknown): block is ResponseInputContent {
