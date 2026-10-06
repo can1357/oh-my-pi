@@ -35,7 +35,7 @@ const CONTEXT_MODE_MCP_TOOL_NAME = "mcp__context_mode_ctx_execute";
 /** Sentinel proving the user's append prompt stays a block of its own. */
 const USER_APPEND_MARKER = "USER_APPEND_SENTINEL_7d13f2: prefer Bun APIs over Node APIs.";
 /** Heading that opens the user's append section, asserted literally rather than imported. */
-const USER_APPEND_SECTION_HEADING = "## User Instructions";
+const USER_APPEND_SECTION_HEADING = "§ User Instructions";
 /** The route section's instruction to read an `xd://` path before first use. */
 const READ_FIRST_CLAUSE = "for docs + JSON schema before first use";
 

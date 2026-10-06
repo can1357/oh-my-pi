@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- User append instructions (`APPEND_SYSTEM.md`, `--append-system-prompt`) now render under a `§ User Instructions` heading wrapped in a `<user-instructions>` block when generated blocks precede them, keeping them visibly separate from server-supplied MCP sections ([#14603](https://github.com/can1357/oh-my-pi/pull/14603) by [@iacore](https://github.com/iacore)).
+
 ## [18.6.2] - 2026-10-04
 
 ### Fixed

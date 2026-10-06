@@ -76,9 +76,10 @@ With `SYSTEM_TEMPLATE.md` (or `--system-prompt-template`), append text remains g
 OMP-generated append content (for enabled memory/auto-learn features and MCP guidance) is combined before the user-supplied append text.
 Those generated blocks can end with `## MCP Server Instructions`, whose text declares
 itself server-controlled and unverified. Whenever a generated block precedes the
-user-supplied text, the text is rendered under its own `## User Instructions` heading
-so it cannot read as a trailing paragraph of a server-owned section. On its own — no
-generated block — the append text is emitted unchanged, without a heading.
+user-supplied text, the text is placed under its own `§ User Instructions` heading and
+wrapped in a `<user-instructions>` block so it cannot read as a trailing paragraph of a
+server-owned section. On its own — no generated block — the append text is emitted
+unchanged, without a heading or tag.
 
 ## Inputs by session type
 
