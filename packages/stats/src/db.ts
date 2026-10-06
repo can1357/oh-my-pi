@@ -35,21 +35,11 @@ const ZERO_USAGE_COST: UsageCost = {
 };
 
 /**
- * Predicate counting one stored request as "unpriced" — the public rate card
- * has no charge for it, so its zero is unknown spend rather than free usage.
- * Two shapes store that zero:
- *   - `xai-oauth` bills through the SuperGrok subscription, so ingestion
- *     deliberately records no per-request price;
- *   - `cost_unpriced = 1`, set by `insertMessageStats` when `resolveStoredCost`
- *     refuses to price a scheduled (time-based) card whose entry carried no
- *     recoverable request timestamp — the epoch would silently become the
- *     tariff. Such a row keeps its real tokens and its zero until a re-parse
- *     recovers the time.
- *
- * Nothing else sets the marker: an explicit recorded zero, a free flat card,
- * and a model with no catalog card at all keep `cost_unpriced = 0` even at the
- * parser's timestamp sentinel, because their zero is a real price.
- * `prefix` qualifies the columns for queries that alias `messages`.
+ * Count consumed-token requests whose stored zero represents unknown spend.
+ * Ingest marks absent prices without a usable card or scheduled timestamp.
+ * SuperGrok's zero-without-reference-price rule remains subscription-specific.
+ * Explicit recorded zero and explicit free cards are not unknown prices.
+ * `prefix` qualifies columns for queries that alias `messages`.
  */
 export function unpricedRequestSql(prefix = ""): string {
 	return `CASE WHEN ${prefix}total_tokens > 0 AND ${prefix}cost_total = 0
@@ -101,11 +91,10 @@ const TOOL_CALLS_BACKFILL_KEY = "tool_calls_v2";
 // reach the inclusive 200K tier. A one-time full re-parse repairs them through
 // the cost-refreshing UPSERT in `insertMessageStats`.
 const COST_REINGEST_BACKFILL_KEY = "messages_cost_reingest_v1";
-// The absence-aware `resolveStoredCost` and the `cost_unpriced` marker only
-// reach already-ingested rows through a re-parse, and the reingest sentinel
-// above is already spent for them — without this one, every historical row
-// keeps `cost_unpriced = 0` and unknown scheduled spend reports as free.
-const COST_UNPRICED_BACKFILL_KEY = "messages_cost_unpriced_v1";
+// v2 also distinguishes an absent catalog price from explicit free usage.
+// Historic zero rows lack source-price provenance; only replaying their session
+// entries can distinguish absent costs from recorded zeros without guessing.
+const COST_UNPRICED_BACKFILL_KEY = "messages_cost_unpriced_v2";
 function shouldResetBackfill(value: string | undefined): boolean {
 	return value !== BACKFILL_COMPLETE && value !== BACKFILL_PENDING;
 }
@@ -365,20 +354,19 @@ function getBundledModelCost(provider: string, modelId: string): ModelCost | nul
 }
 
 function getCatalogCost(provider: string, modelId: string): ModelCost | null {
-	const primaryCost = getBundledModelCost(provider, modelId);
-	if (primaryCost && hasBillableCost(primaryCost)) {
+	const model = getBundledModel(provider as GeneratedProvider, modelId);
+	const primaryCost = model?.cost;
+	if (primaryCost && (hasBillableCost(primaryCost) || primaryCost.timeBased || model.pricingStatus === "free")) {
 		return primaryCost;
 	}
 
+	// Only established subscription aliases borrow API-equivalent reference
+	// prices; matching a model id under any other provider is not a price card.
 	const fallbackProvider = provider === "openai-codex" ? "openai" : provider === "xai-oauth" ? "xai" : null;
-	if (fallbackProvider) {
-		const fallbackCost = getBundledModelCost(fallbackProvider, modelId);
-		if (fallbackCost && hasBillableCost(fallbackCost)) {
-			return fallbackCost;
-		}
-	}
-
-	return null;
+	const fallbackCost = fallbackProvider ? getBundledModelCost(fallbackProvider, modelId) : null;
+	if (fallbackCost && hasBillableCost(fallbackCost)) return fallbackCost;
+	// Older catalogs express free cards as explicit zero rates without a status.
+	return primaryCost && model.pricingStatus !== "unknown" ? primaryCost : null;
 }
 
 /** Whether the catalog prices this model on a time-based (scheduled) card. */
@@ -431,11 +419,7 @@ function hasRequestTimestamp(timestamp: number): boolean {
 
 interface ResolvedCost {
 	cost: UsageCost;
-	/**
-	 * The stored zero is unknown spend rather than a price: a scheduled card
-	 * with no recoverable request timestamp to select a tariff from. Persisted
-	 * as `cost_unpriced` so the aggregates do not have to infer it.
-	 */
+	/** Unknown spend, persisted once so every aggregate uses the same decision. */
 	unpriced: boolean;
 }
 
@@ -448,9 +432,11 @@ function resolveStoredCost(stats: MessageStatsInput): ResolvedCost {
 	const storedCost = raw ? normalizeUsageCost(raw) : undefined;
 	const catalogCost = getCatalogCost(stats.provider, stats.model);
 
-	// Scheduled prices are frozen per request, including explicitly free usage.
-	// Preserve legacy zero-cost subscription correction for unscheduled models.
-	if (storedCost && Number.isFinite(storedCost.total) && (storedCost.total !== 0 || catalogCost?.timeBased)) {
+	// Preserve recorded prices, including explicit zero. Subscription providers
+	// historically journal zero instead of their API-equivalent reference price;
+	// retain that correction for flat cards, but scheduled charges stay frozen.
+	const subscription = stats.provider === "openai-codex" || stats.provider === "xai-oauth";
+	if (storedCost && Number.isFinite(storedCost.total) && (!subscription || storedCost.total !== 0 || catalogCost?.timeBased)) {
 		return { cost: storedCost, unpriced: false };
 	}
 
@@ -466,7 +452,7 @@ function resolveStoredCost(stats: MessageStatsInput): ResolvedCost {
 			calculateCatalogCost(stats.provider, stats.model, stats.usage, stats.timestamp) ??
 			storedCost ??
 			ZERO_USAGE_COST,
-		unpriced: false,
+		unpriced: catalogCost === null && storedCost === undefined,
 	};
 }
 
@@ -496,6 +482,7 @@ function backfillMissingCatalogCosts(database: Database): void {
 			SELECT id, provider, model, timestamp, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens
 			FROM messages
 			WHERE cost_total = 0 AND total_tokens > 0
+				AND provider IN ('openai-codex', 'xai-oauth')
 		`)
 		.all() as CostBackfillRow[];
 
@@ -836,6 +823,7 @@ export function insertMessageStats(stats: Iterable<MessageStatsInput>): number {
 			WHERE entry_id = ? AND timestamp = ? AND session_file <> ?
 		)
 		ON CONFLICT(session_file, entry_id) DO UPDATE SET
+			timestamp = excluded.timestamp,
 			premium_requests = MAX(messages.premium_requests, excluded.premium_requests),
 			cost_input = excluded.cost_input,
 			cost_output = excluded.cost_output,
@@ -945,14 +933,17 @@ function rowToMessageStats(row: any): MessageStats {
 	};
 }
 
-export function getRecentRequests(limit = 100): MessageStats[] {
+export function getRecentRequests(limit = 100, cutoff?: number | null): MessageStats[] {
 	if (!db) return [];
+	const hasCutoff = cutoff !== undefined && cutoff !== null;
 	const stmt = db.prepare(`
-		SELECT * FROM messages 
-		ORDER BY timestamp DESC 
+		SELECT * FROM messages
+		${hasCutoff ? "WHERE timestamp >= ?" : ""}
+		ORDER BY timestamp DESC
 		LIMIT ?
 	`);
-	return (stmt.all(limit) as any[]).map(rowToMessageStats);
+	const rows = hasCutoff ? stmt.all(cutoff, limit) : stmt.all(limit);
+	return rows.map(rowToMessageStats);
 }
 
 export function getRecentErrors(limit = 100, cutoff?: number | null): MessageStats[] {
@@ -1110,13 +1101,10 @@ function backfillReingestCosts(database: Database): void {
 }
 
 /**
- * One-shot `file_offsets` wipe so the next sync re-parses every session and
- * re-derives `cost_unpriced` from `resolveStoredCost`. Rows ingested before the
- * marker existed defaulted to 0, and `INSERT ... ON CONFLICT DO UPDATE` only
- * refreshes them when the session is re-parsed — which the spent reingest
- * sentinel above will never do again. The re-parse also re-prices the
- * previously absent legacy `cost` charges, since `resolveStoredCost` now reads
- * absence as absence. Same sentinel protocol as {@link backfillReingestCosts}.
+ * One-shot replay of historic sessions to derive absent-card and scheduled
+ * unpriced markers from the original entry, not ambiguous stored zeros.
+ * The pending sentinel and offset reset commit together, preventing repeated
+ * wipes on reopen; successful sync settles it alongside other backfills.
  */
 function backfillUnpricedCosts(database: Database): void {
 	const row = database.prepare("SELECT value FROM meta WHERE key = ?").get(COST_UNPRICED_BACKFILL_KEY) as
@@ -1124,10 +1112,12 @@ function backfillUnpricedCosts(database: Database): void {
 		| undefined;
 	if (!shouldResetBackfill(row?.value)) return;
 
-	database.run("DELETE FROM file_offsets");
-	database
-		.prepare("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)")
-		.run(COST_UNPRICED_BACKFILL_KEY, BACKFILL_PENDING);
+	database.transaction(() => {
+		database.run("DELETE FROM file_offsets");
+		database
+			.prepare("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)")
+			.run(COST_UNPRICED_BACKFILL_KEY, BACKFILL_PENDING);
+	}).immediate();
 }
 
 /**

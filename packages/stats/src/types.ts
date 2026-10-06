@@ -36,11 +36,10 @@ export interface MessageStats {
 	/** Which agent produced this message (main agent, task subagent, advisor) */
 	agentType: AgentType;
 	/**
-	 * Ingest refused to price this request: a scheduled (time-based) card with no
-	 * recoverable request timestamp, so `usage.cost.total` of 0 is unknown spend
-	 * rather than a free request. Always written by `rowToMessageStats`; optional
-	 * only because session fixtures that stand in for ingest input are typed as
-	 * `MessageStats` too.
+	 * The stored zero is unknown spend: no price was recorded and the catalog
+	 * has no provider/model card, or its scheduled card has no usable request
+	 * timestamp. Always written by `rowToMessageStats`; optional only because
+	 * session fixtures that stand in for ingest input use `MessageStats` too.
 	 */
 	costUnpriced?: boolean;
 }
@@ -49,9 +48,9 @@ export interface MessageStats {
  * Session-recorded token usage before pricing: counters are coerced to numbers
  * because their columns are NOT NULL, but `cost` is only present when the
  * session entry actually recorded one. Absence is meaningful — `resolveStoredCost`
- * estimates a request with no recorded price, whereas a recorded zero is a real
- * charge that scheduled cards freeze. `costUnpriced` is omitted because it is a
- * decision of the ingest path, not something the parser or a caller supplies.
+ * estimates a request with no recorded price, whereas a recorded zero is a
+ * real charge (except flat subscription reference-price correction).
+ * `costUnpriced` is an ingest decision, not supplied by the parser or caller.
  */
 export interface MessageStatsInput extends Omit<MessageStats, "usage" | "costUnpriced"> {
 	usage: Omit<Usage, "cost"> & { cost?: Partial<Usage["cost"]> };

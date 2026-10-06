@@ -47,23 +47,20 @@ type StatusFilter = "all" | RequestStatus;
 export function RequestsRoute({ active, range, onRequestClick }: RequestsRouteProps) {
 	const [step, setStep] = useState(0);
 	const limit = LOAD_STEPS[step];
-	const log = useQuery(["requests-log", limit], () => getRecentRequests(limit), { enabled: active });
+	const log = useQuery(["requests-log", range, limit], () => getRecentRequests(limit, range), { enabled: active });
 	const [search, setSearch] = useState("");
 	const [status, setStatus] = useState<StatusFilter>("all");
 	const meta = rangeMeta(range);
 
 	const view = useMemo(() => {
 		const rows = log.data ?? [];
-		const cutoff = meta.spanMs === null ? null : Date.now() - meta.spanMs;
-		const inRange = cutoff === null ? rows : rows.filter(row => row.timestamp >= cutoff);
-		// The loaded window covers the whole range when the server ran out of rows
-		// or the oldest loaded row is already older than the range start. Stale
-		// rows belong to a smaller limit that is being replaced.
-		const complete = !log.stale && (rows.length < limit || (cutoff !== null && inRange.length < rows.length));
-		const counts: Record<StatusFilter, number> = { all: inRange.length, ok: 0, aborted: 0, failed: 0 };
-		for (const row of inRange) counts[requestStatus(row)]++;
-		return { loaded: rows.length, inRange, complete, counts, summary: summarizeRequests(inRange) };
-	}, [log.data, log.stale, limit, meta.spanMs]);
+		// The server applies the range before its limit, so every loaded row is
+		// in range. Stale rows still belong to a request being replaced.
+		const complete = !log.stale && rows.length < limit;
+		const counts: Record<StatusFilter, number> = { all: rows.length, ok: 0, aborted: 0, failed: 0 };
+		for (const row of rows) counts[requestStatus(row)]++;
+		return { loaded: rows.length, inRange: rows, complete, counts, summary: summarizeRequests(rows) };
+	}, [log.data, log.stale, limit]);
 
 	const filtered = useMemo(() => {
 		const needle = search.trim().toLowerCase();

@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+### Added
+
+- Allow `StatsLive({ workers })` to configure parser concurrency; omitting the option preserves the dashboard's automatic worker pool.
+
+### Fixed
+
+- Report absent provider/model price cards as unknown spend rather than free usage, preserve recorded zero charges and explicit free cards, and replay historic sessions once to repair unpriced markers and invalidate cached rollups.
+- Apply the selected range to recent requests before sorting and limiting, while preserving all-range requests when no range is supplied.
+- Expose actual output-token totals in provider time-series points for output burn charts.
+
 ## [18.6.0] - 2026-10-03
 
 ### Fixed

@@ -549,9 +549,10 @@ export async function getFolderStats(range?: string | null): Promise<FolderStats
 	return getStatsByFolder(getTimeRangeConfig(range).cutoff, FOLDER_LIMIT);
 }
 
-export async function getRecentRequests(limit?: number): Promise<MessageStats[]> {
+export async function getRecentRequests(limit?: number, range?: string | null): Promise<MessageStats[]> {
 	await initDb();
-	return dbGetRecentRequests(limit);
+	// Omitted range retains the historic all-range recent-request API.
+	return dbGetRecentRequests(limit, range == null ? null : getTimeRangeConfig(range).cutoff);
 }
 
 export async function getRecentErrors(range?: string | null, limit?: number): Promise<MessageStats[]> {

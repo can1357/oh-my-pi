@@ -52,7 +52,7 @@ const DAY_MS = 24 * HOUR_MS;
  * Bump when the rollup schema or fact definitions change: the tables are then
  * dropped and every hour is rebuilt from the raw tables.
  */
-const ROLLUP_VERSION = "2";
+const ROLLUP_VERSION = "3";
 const ROLLUP_VERSION_KEY = "rollup_version";
 /** Bump when the dirty-marking triggers change; they are then recreated in place. */
 const TRIGGER_VERSION = "3";
@@ -810,6 +810,7 @@ export function getProviderTimeSeries({ cutoff, bucketMs }: RangeWindow): Provid
 		bucket: number;
 		provider: string;
 		total_tokens: number;
+		output_tokens: number;
 		cost: number;
 		unpriced: number;
 		requests: number;
@@ -817,12 +818,14 @@ export function getProviderTimeSeries({ cutoff, bucketMs }: RangeWindow): Provid
 		{ cutoff, bucketMs },
 		`${seriesBucket(bucketMs)} AS bucket, f.provider AS provider,
 		 SUM(f.input_tokens + f.output_tokens + f.cache_read_tokens + f.cache_write_tokens) AS total_tokens,
+		 SUM(f.output_tokens) AS output_tokens,
 		 TOTAL(f.cost_total) AS cost, SUM(f.unpriced) AS unpriced, SUM(f.requests) AS requests`,
 		"GROUP BY 1, f.provider ORDER BY 1",
 	).map(row => ({
 		timestamp: row.bucket,
 		provider: row.provider,
 		totalTokens: row.total_tokens,
+		outputTokens: row.output_tokens,
 		cost: row.cost,
 		unpricedRequests: row.unpriced,
 		requests: row.requests,

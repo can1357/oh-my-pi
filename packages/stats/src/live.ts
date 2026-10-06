@@ -36,6 +36,7 @@ export class StatsLive {
 	#sync: LiveSyncStatus = { phase: "idle", current: 0, total: 0, processed: 0, lastSyncedAt: null, error: null };
 	#indexingHours = 0;
 	#listeners = new Set<Listener>();
+	readonly #workers: number | undefined;
 
 	#started = false;
 	#watcher: fs.FSWatcher | null = null;
@@ -51,6 +52,11 @@ export class StatsLive {
 	#syncing = false;
 	#refreshing = false;
 	#refreshAgain = false;
+
+	/** Choose parser concurrency; omit to retain the dashboard's automatic pool. */
+	constructor(options: { workers?: number } = {}) {
+		this.#workers = options.workers;
+	}
 
 	status(): LiveStatus {
 		return { version: this.#version, sync: { ...this.#sync }, indexingHours: this.#indexingHours };
@@ -123,6 +129,7 @@ export class StatsLive {
 			await initDb();
 			const result = await syncAllSessions({
 				files,
+				workers: this.#workers,
 				onProgress: event => {
 					if (visible) {
 						this.#sync = {

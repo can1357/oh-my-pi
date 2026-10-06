@@ -415,6 +415,7 @@ export interface ProviderTimeSeriesPoint {
 	timestamp: number;
 	provider: string;
 	totalTokens: number;
+	outputTokens: number;
 	cost: number;
 	/** Requests excluded because no public-equivalent subscription price exists. */
 	unpricedRequests: number;
