@@ -344,14 +344,18 @@ describe("pi.sendUserInput", () => {
 		expect(session.sessionId).toBe(sessionId);
 	});
 
-	it("answers unknown for a slash command nothing defines and does not send it to the model", async () => {
+	it("sends slash text that names no command to the model, as typed input does", async () => {
 		const { api, session, started } = await start();
+		// Both shapes: a bare `/name` word, and prose that starts with an absolute path.
+		const inputs = ["/nosuch argument", "/var/log/app.log shows a crash, why?"];
 
-		expect(await api.sendUserInput("/nosuch argument")).toEqual({ handled: "unknown" });
-		await session.waitForIdle();
+		for (const text of inputs) {
+			expect(await api.sendUserInput(text)).toEqual({ handled: "prompt" });
+			await session.waitForIdle();
+		}
 
-		expect(userTurns(started)).toHaveLength(0);
-		expect(session.messages.some(message => message.role === "assistant")).toBe(false);
+		expect(userTurns(started).map(messageText)).toEqual(inputs);
+		expect(session.messages.filter(message => message.role === "assistant")).toHaveLength(2);
 	});
 
 	it("answers unavailable when the host mode does not wire sendUserInput", async () => {

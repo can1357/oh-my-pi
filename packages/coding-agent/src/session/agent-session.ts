@@ -7891,24 +7891,6 @@ export class AgentSession implements SettingsScope {
 	}
 
 	/**
-	 * Whether `prompt()` treats the leading `/name` of `text` as a command or template: an extension command,
-	 * a custom or MCP prompt command, a file slash command, or a prompt template. `sendUserInput` uses it to
-	 * refuse a slash command nothing defines instead of sending it to the model.
-	 */
-	namesPromptCommand(text: string): boolean {
-		if (!text.startsWith("/")) return false;
-		const spaceIndex = text.indexOf(" ");
-		const name = spaceIndex === -1 ? text.slice(1) : text.slice(1, spaceIndex);
-		return (
-			this.#extensionRunner?.getCommand(name) !== undefined ||
-			this.#customCommands.some(loaded => loaded.command.name === name) ||
-			this.#mcpPromptCommands.some(loaded => loaded.command.name === name) ||
-			this.#slashCommands.some(command => command.name === name) ||
-			this.#promptTemplates.some(template => template.name === name)
-		);
-	}
-
-	/**
 	 * Try to execute an extension command. Returns true if command was found and executed.
 	 * `onRouted` fires once the command is found, before its handler runs.
 	 */

@@ -13,10 +13,9 @@
  *      ACP run through `executeAcpBuiltinSlashCommand`) run it with the host's
  *      {@link SlashCommandHost}, the hooks its own typed input gives them; the
  *      TUI-only rest answer `terminal-only`;
- *   4. a leading `/` that names no extension, custom or MCP prompt command,
- *      file slash command or prompt template answers `unknown` and is not sent;
- *   5. everything else goes through `session.prompt()`, which runs extension and
- *      custom commands and expands file slash commands and templates.
+ *   4. everything else goes through `session.prompt()`, which runs extension and
+ *      custom commands, expands file slash commands and templates, and sends any
+ *      other text, a slash text no command names included, to the model.
  *
  * Unlike typed input, the answer says what happened, so a bridge that forwards
  * a person's text can report a refusal instead of guessing.
@@ -130,7 +129,6 @@ export async function sendSessionUserInput(
 		return { handled: "command", ...agentInvoked, ...output };
 	}
 
-	if (text.startsWith("/") && !session.namesPromptCommand(text)) return { handled: "unknown" };
 	const submitted = await session.prompt(text, { streamingBehavior, images, tag });
 	// `prompt()` answers false only when an extension or custom command handled the text locally.
 	return { handled: submitted ? "prompt" : "command" };

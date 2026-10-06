@@ -1857,17 +1857,17 @@ export interface SendUserInputOptions {
 
 /**
  * How {@link ExtensionAPI.sendUserInput} handled text:
- * - `prompt`: submitted as a user message (plain text, or a template, file slash command, custom command or
- *   built-in that produced prompt text); the message carries the caller's `tag`.
+ * - `prompt`: submitted as a user message (plain text, including slash text that names no command, or a
+ *   template, file slash command, custom command or built-in that produced prompt text); the message carries
+ *   the caller's `tag`.
  * - `command`: handled locally and submitted nothing itself: a command ran (`output` is what a built-in
  *   printed), an extension `input` handler consumed the text, or no text was left to send.
  * - `skill`: `/skill:<name>` was submitted as the user's skill prompt message, carrying the caller's `tag`.
  * - `terminal-only`: a built-in only the interactive terminal runs (e.g. `/new`, `/resume`); nothing was sent.
- * - `unknown`: a leading `/` names no command; nothing was sent.
  * - `unavailable`: the host mode does not wire `sendUserInput`; nothing was sent.
  */
 export interface SendUserInputResult {
-	handled: "prompt" | "command" | "skill" | "terminal-only" | "unknown" | "unavailable";
+	handled: "prompt" | "command" | "skill" | "terminal-only" | "unavailable";
 	/** Text a built-in command printed, when it printed any. */
 	output?: string;
 	/** True when a `command` started an agent turn without submitting a message, as `/retry` does. */

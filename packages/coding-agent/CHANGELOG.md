@@ -6,7 +6,7 @@
 
 - Cancel a pending model handoff with `/prewalk off` without changing the active model, saved prewalk setting, or delivered continuation history ([#14587](https://github.com/can1357/oh-my-pi/pull/14587) by [@NaC-L](https://github.com/NaC-L)).
 - RPC clients can log out like `/logout`: `get_logout_accounts` lists a provider's stored credentials and `logout` removes one; the TypeScript client and the generated Python, Go, and Rust SDKs gain matching methods ([#14588](https://github.com/can1357/oh-my-pi/pull/14588) by [@andrebrait](https://github.com/andrebrait))
-- Extensions can run text as if the user typed it with `pi.sendUserInput(text, { deliverAs?, tag? })`: `/skill:<name>`, headless built-in slash commands, extension and custom commands, file slash commands and prompt templates run as they do in RPC mode, and the call reports how the text was handled (`prompt`, `command` with any output, `skill`, `terminal-only`, `unknown`, or `unavailable`). `tag` is recorded on the message the input submits, so a bridge can match it on `message_start` ([#14323](https://github.com/can1357/oh-my-pi/pull/14323) by [@sjawhar](https://github.com/sjawhar)).
+- Extensions can run text as if the user typed it with `pi.sendUserInput(text, { deliverAs?, tag? })`: `/skill:<name>`, headless built-in slash commands, extension and custom commands, file slash commands and prompt templates run as they do in RPC mode, and the call reports how the text was handled (`prompt`, `command` with any output, `skill`, `terminal-only`, or `unavailable`). `tag` is recorded on the message the input submits, so a bridge can match it on `message_start` ([#14323](https://github.com/can1357/oh-my-pi/pull/14323) by [@sjawhar](https://github.com/sjawhar)).
 
 ### Changed
 
