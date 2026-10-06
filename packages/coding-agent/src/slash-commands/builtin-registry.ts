@@ -1,6 +1,7 @@
 import { clearSubmittedText } from "./helpers/draft";
 import type { AutocompleteItem } from "@oh-my-pi/pi-tui";
 import { COLLAB_GUEST_ALLOWED_COMMANDS } from "../collab/guest";
+import type { InteractiveModeContext } from "../modes/types";
 import { BUILTIN_COLLABORATION_SLASH_COMMANDS } from "./builtin-collaboration";
 import {
 	buildArgumentCompletions,
@@ -22,6 +23,7 @@ import { parseSlashCommand } from "./helpers/parse";
 import type {
 	BuiltinSlashCommand,
 	ParsedSlashCommand,
+	SlashCommandHost,
 	SlashCommandResult,
 	SlashCommandRuntime,
 	SlashCommandSpec,
@@ -130,6 +132,20 @@ export function buildTuiBuiltinSlashCommands(runtime: TuiSlashCommandRuntime): R
 export const BUILTIN_SLASH_COMMANDS_INTERNAL: ReadonlyArray<SlashCommandSpec> = BUILTIN_SLASH_COMMAND_REGISTRY;
 
 /**
+ * The interactive TUI's {@link SlashCommandHost}: output as a status line, the TUI's own command
+ * refresh and plugin reload. Used when a typed built-in has no `handleTui` and by extension `sendUserInput`.
+ */
+export function tuiSlashCommandHost(ctx: InteractiveModeContext): SlashCommandHost {
+	return {
+		output: (text: string) => {
+			ctx.showStatus(text);
+		},
+		refreshCommands: () => ctx.refreshSlashCommandState(),
+		reloadPlugins: () => reloadTuiPluginState(ctx),
+	};
+}
+
+/**
  * Execute a builtin slash command in the interactive TUI.
  *
  * Returns `false` when no builtin matched. Returns `true` when a command
@@ -173,11 +189,7 @@ export async function executeBuiltinSlashCommand(
 			sessionManager: ctx.sessionManager,
 			settings: ctx.settings,
 			cwd: ctx.sessionManager.getCwd(),
-			output: (text: string) => {
-				ctx.showStatus(text);
-			},
-			refreshCommands: () => ctx.refreshSlashCommandState(),
-			reloadPlugins: () => reloadTuiPluginState(ctx),
+			...tuiSlashCommandHost(ctx),
 		};
 		const result = await command.handle(parsed, adapted);
 		clearSubmittedText(runtime);

@@ -7,8 +7,9 @@
  *   1. `/skill:<name>` through the RPC skill invocation (`resolveRpcSkillInvocation`
  *      and `runRpcSkillCommand`);
  *   2. built-in slash commands: those with a text-mode `handle` (the ones RPC and
- *      ACP run through `executeAcpBuiltinSlashCommand`) run it; the TUI-only
- *      rest answer `terminal-only`;
+ *      ACP run through `executeAcpBuiltinSlashCommand`) run it with the host's
+ *      {@link SlashCommandHost}, the hooks its own typed input gives them; the
+ *      TUI-only rest answer `terminal-only`;
  *   3. a leading `/` that names no extension, custom or MCP prompt command,
  *      file slash command or prompt template answers `unknown` and is not sent;
  *   4. everything else goes through `session.prompt()`, which runs extension and
@@ -22,6 +23,7 @@ import { resolveRpcSkillInvocation, runRpcSkillCommand } from "../../modes/rpc/r
 import type { AgentSession } from "../../session/agent-session";
 import { BUILTIN_SLASH_COMMANDS_INTERNAL, lookupBuiltinSlashCommand } from "../../slash-commands/builtin-registry";
 import { parseSlashCommand } from "../../slash-commands/helpers/parse";
+import type { SlashCommandHost } from "../../slash-commands/types";
 import type { SendUserInputOptions, SendUserInputResult } from "./types";
 
 /** A built-in slash command, marked with how `sendUserInput` answers it. */
@@ -46,11 +48,33 @@ export function listUserInputBuiltinCommands(): UserInputBuiltinCommand[] {
 	}));
 }
 
-/** Run `text` in `session` as typed input; see {@link ExtensionAPI.sendUserInput}. */
+/**
+ * Hooks for a host with no client to report to (print mode, subagents, an SDK embedder that passes none):
+ * a built-in's output only returns to the extension, and plugin reload refreshes the session alone.
+ */
+function headlessSlashCommandHost(session: AgentSession): SlashCommandHost {
+	return {
+		output: () => {},
+		// Nothing to re-advertise to; `refreshSkillsAndCommands()` still fires `subscribeCommandMetadataChanged`.
+		refreshCommands: () => {},
+		reloadPlugins: async () => {
+			const projectPath = await resolveActiveProjectRegistryPath(session.sessionManager.getCwd());
+			clearPluginRootsAndCaches(projectPath ? [projectPath] : undefined);
+			await session.refreshSkillsAndCommands();
+		},
+	};
+}
+
+/**
+ * Run `text` in `session` as typed input; see {@link ExtensionAPI.sendUserInput}. `host` is the
+ * {@link SlashCommandHost} the host's own typed input passes to built-ins, so a built-in's output, title
+ * and config changes reach the host's client as they do when typed there.
+ */
 export async function sendSessionUserInput(
 	session: AgentSession,
 	text: string,
 	options?: SendUserInputOptions,
+	host?: SlashCommandHost,
 ): Promise<SendUserInputResult> {
 	const streamingBehavior = options?.deliverAs ?? "steer";
 	const tag = options?.tag;
@@ -67,22 +91,17 @@ export async function sendSessionUserInput(
 		// The same text-mode `handle` `executeAcpBuiltinSlashCommand` runs for RPC and ACP; that module is
 		// not imported here because the action builders load this one while the registry initializes.
 		if (!builtin.handle) return { handled: "terminal-only" };
+		const commandHost = host ?? headlessSlashCommandHost(session);
 		const printed: string[] = [];
 		const result = await builtin.handle(parsed, {
 			session,
 			sessionManager: session.sessionManager,
 			settings: session.settings,
 			cwd: session.sessionManager.getCwd(),
+			...commandHost,
 			output: line => {
 				printed.push(line);
-			},
-			// Every host re-advertises commands from `subscribeCommandMetadataChanged`,
-			// which `refreshSkillsAndCommands()` fires.
-			refreshCommands: () => {},
-			reloadPlugins: async () => {
-				const projectPath = await resolveActiveProjectRegistryPath(session.sessionManager.getCwd());
-				clearPluginRootsAndCaches(projectPath ? [projectPath] : undefined);
-				await session.refreshSkillsAndCommands();
+				return commandHost.output(line);
 			},
 		});
 		const output = printed.length > 0 ? { output: printed.join("\n") } : undefined;

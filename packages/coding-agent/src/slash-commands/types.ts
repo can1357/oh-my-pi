@@ -112,6 +112,18 @@ export interface SlashCommandRuntime {
 }
 
 /**
+ * The host side of {@link SlashCommandRuntime}: where a built-in's output goes and how the host's
+ * client hears about command-list, plugin, title and config changes. A host builds it once and
+ * passes the same hooks to its own typed-input dispatch and to extension `sendUserInput`, so a
+ * built-in reaches the client the same way from either. Hooks scoped to one host request
+ * (`signal`, `keepTurnOpenUntilIdle`, `runCommandInBackground`) stay with that request.
+ */
+export type SlashCommandHost = Pick<
+	SlashCommandRuntime,
+	"output" | "refreshCommands" | "reloadPlugins" | "notifyTitleChanged" | "notifyConfigChanged"
+>;
+
+/**
  * Runtime visible to TUI-only handlers (`handleTui`). Carries the interactive
  * mode context. Intentionally narrower than `SlashCommandRuntime` so existing
  * callers can keep building it from just `{ ctx }`; when the TUI dispatcher

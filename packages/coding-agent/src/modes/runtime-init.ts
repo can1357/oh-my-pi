@@ -11,6 +11,7 @@ import { getSessionSlashCommands } from "../extensibility/extensions/get-command
 import { sendSessionUserInput } from "../extensibility/extensions/send-user-input-handler";
 import type { ExtensionError, ExtensionMode, ExtensionUIContext } from "../extensibility/extensions/types";
 import type { AgentSession } from "../session/agent-session";
+import type { SlashCommandHost } from "../slash-commands/types";
 import { USER_INTERRUPT_LABEL } from "../session/messages";
 
 /** Action name for an extension-originated send failure. */
@@ -46,6 +47,12 @@ export interface InitializeExtensionsOptions {
 		change: () => Promise<T>,
 		options: { detachesRun: boolean },
 	) => Promise<T>;
+	/**
+	 * How the built-ins an extension runs through `sendUserInput` reach the host's client: the
+	 * {@link SlashCommandHost} the host's own typed input passes them (RPC). Omitted (print mode,
+	 * subagents), a built-in's output only returns to the extension.
+	 */
+	slashCommandHost?: SlashCommandHost;
 }
 
 /**
@@ -69,6 +76,7 @@ export async function initializeExtensions(session: AgentSession, options: Initi
 		trackExtensionSend,
 		filterActiveTools,
 		wrapSessionChange = change => change(),
+		slashCommandHost,
 	} = options;
 	const shutdown = onShutdown ?? (() => {});
 
@@ -118,7 +126,7 @@ export async function initializeExtensions(session: AgentSession, options: Initi
 				});
 			},
 			sendUserInput: (text, inputOptions) => {
-				const inputTask = sendSessionUserInput(session, text, inputOptions);
+				const inputTask = sendSessionUserInput(session, text, inputOptions, slashCommandHost);
 				trackExtensionSend?.(inputTask);
 				// Only a submitted prompt or skill starts a turn; the rest handle the text locally.
 				const invokingTask = inputTask.then(result => {

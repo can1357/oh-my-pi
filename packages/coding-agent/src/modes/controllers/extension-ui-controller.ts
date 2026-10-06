@@ -40,6 +40,7 @@ import { HookSelectorComponent, type HookSelectorSlider } from "@oh-my-pi/pi-tui
 import { getAvailableThemesWithPaths, getThemeByName, setTheme, type Theme, theme } from "@oh-my-pi/pi-tui/theme";
 import type { InteractiveModeContext, InteractiveSelectorDialogOptions } from "../../modes/types";
 import { normalizeCustomMessagePayload, USER_INTERRUPT_LABEL } from "../../session/messages";
+import { tuiSlashCommandHost } from "../../slash-commands/builtin-registry";
 import { disambiguateDisplayLabels, sanitizeCarriageReturns } from "@oh-my-pi/pi-tui/render/render-utils";
 import { setExtensionTerminalTitle, setSessionTerminalTitle } from "../../utils/title-generator";
 import { getEditorCommand, openInEditor } from "../../utils/external-editor";
@@ -1312,7 +1313,7 @@ export class ExtensionUiController {
 	};
 
 	#sendExtensionUserInput: SendUserInputHandler = (text, options) =>
-		sendSessionUserInput(this.ctx.session, text, options);
+		sendSessionUserInput(this.ctx.session, text, options, tuiSlashCommandHost(this.ctx));
 
 	#applyCustomMessageDisplay(wasStreaming: boolean, shouldDisplay: boolean | undefined): void {
 		// For non-streaming cases with display=true, update UI

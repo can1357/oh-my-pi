@@ -51,6 +51,7 @@ import { USER_INTERRUPT_LABEL } from "../../session/messages";
 import { executeAcpBuiltinSlashCommand } from "../../slash-commands/acp-builtins";
 import { buildAvailableSlashCommands } from "../../slash-commands/available-commands";
 import { listLogoutAccounts, logoutCredential } from "../../slash-commands/helpers/logout";
+import type { SlashCommandHost } from "../../slash-commands/types";
 import { defaultLoadModeForToolName } from "../../tools/essential-tools";
 import type { EventBus } from "../../utils/event-bus";
 import { selectRpcEntries } from "./rpc-compat";
@@ -1563,6 +1564,31 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 	const onPromptError = (id: string | undefined, command: string) => (promptError: Error) =>
 		output(error(id, command, promptError.message));
 
+	const getAvailableCommands = async () => buildAvailableSlashCommands(session);
+	const reloadPluginState = async () => {
+		const cwd = session.sessionManager.getCwd();
+		const projectPath = await resolveActiveProjectRegistryPath(cwd);
+		clearPluginRootsAndCaches(projectPath ? [projectPath] : undefined);
+		await session.refreshSkillsAndCommands();
+		await emitAvailableCommandsUpdate();
+	};
+	const emitAvailableCommandsUpdate = async () => {
+		output({ type: "available_commands_update", commands: await getAvailableCommands() });
+	};
+	// What a built-in reports to the client, for a typed `prompt` and for an extension's `sendUserInput`
+	// alike; defined before `initializeExtensions` because `session_start` handlers can already send input.
+	const slashCommandHost: SlashCommandHost = {
+		output: commandOutput => output({ type: "command_output", text: commandOutput }),
+		refreshCommands: emitAvailableCommandsUpdate,
+		reloadPlugins: reloadPluginState,
+		notifyTitleChanged: async () => {
+			output({ type: "session_info_update", title: session.sessionName, sessionId: session.sessionId });
+		},
+		notifyConfigChanged: async () => {
+			output({ type: "config_update", model: session.model, thinkingLevel: session.thinkingLevel });
+		},
+	};
+
 	// Set up extensions with RPC-based UI context
 	await initializeExtensions(session, {
 		mode: "rpc",
@@ -1604,6 +1630,7 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 		},
 		// Headless hosts get the extension runner's no-op UI: hasUI=false, dialogs resolve to defaults.
 		uiContext: headless ? undefined : rpcUiContext,
+		slashCommandHost,
 	});
 
 	// Output all agent events as JSON; prompt results follow the frame that settled them.
@@ -1679,17 +1706,6 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 		process.exit(0);
 	};
 
-	const getAvailableCommands = async () => buildAvailableSlashCommands(session);
-	const reloadPluginState = async () => {
-		const cwd = session.sessionManager.getCwd();
-		const projectPath = await resolveActiveProjectRegistryPath(cwd);
-		clearPluginRootsAndCaches(projectPath ? [projectPath] : undefined);
-		await session.refreshSkillsAndCommands();
-		await emitAvailableCommandsUpdate();
-	};
-	const emitAvailableCommandsUpdate = async () => {
-		output({ type: "available_commands_update", commands: await getAvailableCommands() });
-	};
 	session.subscribeCommandMetadataChanged(() => {
 		void emitAvailableCommandsUpdate();
 	});
@@ -1747,16 +1763,8 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 					sessionManager: session.sessionManager,
 					settings: session.settings,
 					cwd: session.sessionManager.getCwd(),
-					output: commandOutput => output({ type: "command_output", text: commandOutput }),
-					refreshCommands: emitAvailableCommandsUpdate,
-					reloadPlugins: reloadPluginState,
+					...slashCommandHost,
 					runCommandInBackground: task => shutdownCoordinator.track(task()),
-					notifyTitleChanged: async () => {
-						output({ type: "session_info_update", title: session.sessionName, sessionId: session.sessionId });
-					},
-					notifyConfigChanged: async () => {
-						output({ type: "config_update", model: session.model, thinkingLevel: session.thinkingLevel });
-					},
 				});
 				if (!isCurrent()) return "cancelled";
 				if (builtinResult !== false) {

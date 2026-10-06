@@ -20,12 +20,14 @@ import { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensi
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
 import type { Skill } from "@oh-my-pi/pi-coding-agent/extensibility/skills";
 import { initializeExtensions } from "@oh-my-pi/pi-coding-agent/modes/runtime-init";
+import { ExtensionUiController } from "@oh-my-pi/pi-coding-agent/modes/controllers/extension-ui-controller";
+import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SKILL_PROMPT_MESSAGE_TYPE } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
-import { removeWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
+import { isRecord, readJsonl, removeWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
 
 interface Harness {
 	api: ExtensionAPI;
@@ -35,6 +37,8 @@ interface Harness {
 	started: AgentMessage[];
 	/** Arguments each `/deploy` extension-command run received. */
 	deployRuns: string[];
+	/** Status lines the interactive host showed (only with `host: "interactive"`). */
+	statuses: string[];
 }
 
 function messageText(message: AgentMessage): string {
@@ -71,13 +75,17 @@ describe("pi.sendUserInput", () => {
 	async function start(options?: {
 		skills?: Skill[];
 		promptTemplates?: PromptTemplate[];
-		/** Wire the host's actions the way RPC and print modes do (default), or leave `sendUserInput` out. */
-		wired?: boolean;
+		/**
+		 * Which host wires the actions: `initializeExtensions`, as print, RPC and subagent sessions use (default),
+		 * the interactive TUI's controller, or a host that leaves `sendUserInput` out.
+		 */
+		host?: "runtime-init" | "interactive" | "unwired";
 	}): Promise<Harness> {
 		const manager = SessionManager.inMemory();
 		const runtime = new ExtensionRuntime();
 		const started: AgentMessage[] = [];
 		const deployRuns: string[] = [];
+		const statuses: string[] = [];
 		let api: ExtensionAPI | undefined;
 		const extension = await loadExtensionFromFactory(
 			pi => {
@@ -118,7 +126,7 @@ describe("pi.sendUserInput", () => {
 		});
 		session = created;
 
-		if (options?.wired === false) {
+		if (options?.host === "unwired") {
 			runner.initialize(
 				{
 					sendMessage: () => {},
@@ -146,6 +154,18 @@ describe("pi.sendUserInput", () => {
 					getSystemPrompt: () => [],
 				},
 			);
+		} else if (options?.host === "interactive") {
+			const ctx = {
+				session: created,
+				sessionManager: manager,
+				settings: created.settings,
+				showStatus: (text: string) => {
+					statuses.push(text);
+				},
+				setToolUIContext: () => {},
+				syncComposerShape: () => {},
+			} as unknown as InteractiveModeContext;
+			await new ExtensionUiController(ctx).initHooksAndCustomTools();
 		} else {
 			await initializeExtensions(created, {
 				reportSendError: (_action, error) => {
@@ -156,7 +176,7 @@ describe("pi.sendUserInput", () => {
 				},
 			});
 		}
-		return { api, session: created, manager, started, deployRuns };
+		return { api, session: created, manager, started, deployRuns, statuses };
 	}
 
 	it("submits plain text as a user turn whose message carries the caller's tag", async () => {
@@ -240,6 +260,15 @@ describe("pi.sendUserInput", () => {
 		expect(userTurns(started)).toHaveLength(0);
 	});
 
+	it("shows a built-in's output in the interactive TUI's status line, as typing it there does", async () => {
+		const { api, statuses } = await start({ host: "interactive" });
+
+		const result = await api.sendUserInput("/rename Bridge title");
+
+		expect(result).toEqual({ handled: "command", output: "Session renamed to Bridge title." });
+		expect(statuses).toEqual(["Session renamed to Bridge title."]);
+	});
+
 	it.each(["/new", "/resume"])("answers terminal-only for %s and sends nothing", async text => {
 		const { api, session, started } = await start();
 		const sessionId = session.sessionId;
@@ -262,9 +291,60 @@ describe("pi.sendUserInput", () => {
 	});
 
 	it("answers unavailable when the host mode does not wire sendUserInput", async () => {
-		const { api, started } = await start({ wired: false });
+		const { api, started } = await start({ host: "unwired" });
 
 		expect(await api.sendUserInput("hello there")).toEqual({ handled: "unavailable" });
 		expect(userTurns(started)).toHaveLength(0);
 	});
+});
+
+/** Frames a real RPC-mode process writes while a bridge extension forwards each input through `sendUserInput`. */
+async function runRpcBridge(inputs: string[]): Promise<{ frames: Record<string, unknown>[]; results: unknown[] }> {
+	const directory = await fs.mkdtemp(path.join(os.tmpdir(), `omp-send-user-input-rpc-${Snowflake.next()}-`));
+	const child = Bun.spawn([process.execPath, path.join(import.meta.dir, "fixtures", "send-user-input-rpc-agent.ts")], {
+		cwd: directory,
+		env: { PATH: Bun.env.PATH, HOME: directory, PI_CODING_AGENT_DIR: directory, PI_NO_TITLE: "1" },
+		stdin: "pipe",
+		stdout: "pipe",
+		stderr: "pipe",
+		timeout: 20_000,
+	});
+	const stderr = new Response(child.stderr).text();
+	const frames: Record<string, unknown>[] = [];
+	const results: unknown[] = [];
+	const send = async (index: number): Promise<void> => {
+		child.stdin.write(
+			`${JSON.stringify({ type: "prompt", id: `p${index}`, message: `/bridge ${inputs[index]}` })}\n`,
+		);
+		await child.stdin.flush();
+	};
+	try {
+		await send(0);
+		for await (const frame of readJsonl<unknown>(child.stdout)) {
+			if (!isRecord(frame)) continue;
+			frames.push(frame);
+			if (frame.type !== "extension_ui_request" || frame.method !== "notify") continue;
+			results.push(JSON.parse(String(frame.message)));
+			if (results.length === inputs.length) break;
+			await send(results.length);
+		}
+	} finally {
+		child.stdin.end();
+		await child.exited;
+		await removeWithRetries(directory);
+	}
+	if (results.length !== inputs.length) throw new Error(`RPC bridge ended early: ${await stderr}`);
+	return { frames, results };
+}
+
+describe("pi.sendUserInput in RPC mode", () => {
+	it("runs a built-in with the hooks RPC gives typed input, so the client sees its output and the new title", async () => {
+		const { frames, results } = await runRpcBridge(["/rename Bridge title"]);
+
+		expect(results).toEqual([{ handled: "command", output: "Session renamed to Bridge title." }]);
+		expect(frames).toContainEqual(
+			expect.objectContaining({ type: "command_output", text: "Session renamed to Bridge title." }),
+		);
+		expect(frames).toContainEqual(expect.objectContaining({ type: "session_info_update", title: "Bridge title" }));
+	}, 30_000);
 });
