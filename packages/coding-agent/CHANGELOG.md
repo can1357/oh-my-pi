@@ -5,6 +5,7 @@
 ### Added
 
 - Files the write tool creates now preview the way the matching code blocks in replies do, building up while the write streams: `.svg` as an image and Mermaid (`.mmd`, `.mermaid`) as a diagram under the write card, and in Tern also 3D models (`.obj`, `.ply`, `.wrl`, `.x3dv`, `.stl`, `.gltf`, `.usda`); in Tern an SVG write now draws like an SVG figure in a reply
+- Interactive startup warns when omp runs on Bun older than 1.4, which still works but uses noticeably more memory and CPU; turning off `startup.checkUpdate` silences it too ([#14635](https://github.com/can1357/oh-my-pi/pull/14635) by [@jorgoose](https://github.com/jorgoose))
 
 ### Changed
 

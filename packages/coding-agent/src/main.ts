@@ -13,6 +13,7 @@ import { getModelPricingStatus } from "@oh-my-pi/pi-catalog/models";
 import { isEnoent, isEnotdir } from "@oh-my-pi/pi-utils";
 import {
 	APP_NAME,
+	bunUpgradeNotice,
 	directoryIsMissing,
 	getLogPath,
 	getProjectDir,
@@ -1801,6 +1802,9 @@ export async function runRootCommand(
 		const autoPrint =
 			(pipedInput !== undefined || !stdinIsTerminal) && !parsedArgs.print && parsedArgs.mode === undefined;
 		const isInteractive = !parsedArgs.print && !autoPrint && parsedArgs.mode === undefined;
+		// Interactive only, so print/RPC/ACP output stays clean for scripts and protocol clients.
+		const bunNotice = isInteractive ? bunUpgradeNotice(Bun.version) : undefined;
+		if (bunNotice) notifs.push({ kind: "warn", message: bunNotice });
 		// Before session resolution: resume, fork, and import act on these same
 		// startup-parse flags, so rejecting later would leave forked or imported
 		// transcripts (or an opened picker) behind a usage error.
