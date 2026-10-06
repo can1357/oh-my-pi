@@ -18,6 +18,7 @@ function buildContext(): InteractiveModeContext {
 		settings: { get: vi.fn(() => false) },
 		effectiveHideThinkingBlock: false,
 		proseOnlyThinking: true,
+		proseGithubRepo: () => () => undefined,
 		editor: { addToHistory: vi.fn() },
 	} as unknown as InteractiveModeContext;
 }
