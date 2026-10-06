@@ -154,6 +154,25 @@ export function sliceWithWidth(line: string, startCol: number, length: number, s
 	return nativeSliceWithWidth(line, startCol, length, strict ?? null, DEFAULT_TAB_WIDTH);
 }
 
+/**
+ * Hard-wrap one literal terminal row without trimming spaces or splitting graphemes.
+ * An oversized grapheme is emitted intact even when it exceeds the requested width.
+ * Zero-cell rows remain one empty row, matching restored-terminal reflow.
+ */
+export function wrapLiteralLine(line: string, width: number): string[] {
+	const columns = Math.max(1, width);
+	const lineWidth = visibleWidth(line);
+	if (lineWidth === 0) return [""];
+	const rows: string[] = [];
+	for (let column = 0; column < lineWidth;) {
+		let slice = sliceWithWidth(line, column, columns, true);
+		if (slice.width === 0) slice = sliceWithWidth(line, column, columns);
+		rows.push(slice.text);
+		column += Math.max(1, slice.width);
+	}
+	return rows;
+}
+
 export function truncateToWidth(
 	text: string,
 	maxWidth: number,

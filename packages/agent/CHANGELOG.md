@@ -6,9 +6,11 @@
 
 - `CustomMessage` has an optional `tag`, a caller correlation id that stays with the message ([#14323](https://github.com/can1357/oh-my-pi/pull/14323) by [@sjawhar](https://github.com/sjawhar))
 
+## [18.7.0] - 2026-10-06
+
 ### Fixed
 
-- Fixed aborted context transformations ending the run without emitting the assistant message boundary that subscribers need to persist and recover the interrupted turn ([#14188](https://github.com/can1357/oh-my-pi/pull/14188) by [@schickling-assistant](https://github.com/schickling-assistant)).
+- Fixed interrupted runs so assistant message boundaries are emitted reliably, allowing subscribers to persist and recover the interrupted turn.
 
 ## [18.6.3] - 2026-10-06
 

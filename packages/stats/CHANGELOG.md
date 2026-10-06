@@ -2,10 +2,12 @@
 
 ## [Unreleased]
 
+## [18.7.0] - 2026-10-06
+
 ### Fixed
 
-- Fixed Ultrafast turns not counting toward the Premium Reqs stat: each message now records the service tier its provider reported serving, and the backfill counts it without needing discovery metadata ([#14471](https://github.com/can1357/oh-my-pi/pull/14471) by [@eggpeat](https://github.com/eggpeat)).
-- Fixed the stats dashboard menu button showing on desktop, where clicking it dimmed the page without opening navigation ([#14406](https://github.com/can1357/oh-my-pi/pull/14406) by [@lin-snow](https://github.com/lin-snow)).
+- Fixed Ultrafast turns not being counted toward the Premium Requests statistic.
+- Fixed the desktop stats dashboard menu button so it no longer appears unnecessarily or dims the page without opening navigation.
 
 ## [18.6.0] - 2026-10-03
 
