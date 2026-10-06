@@ -11,6 +11,7 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { IrcBus } from "@oh-my-pi/pi-coding-agent/irc/bus";
 import * as transport from "@oh-my-pi/pi-coding-agent/messaging/transport";
 import { ACCEPTED_QUEUE_CAP } from "@oh-my-pi/pi-coding-agent/messaging/protocol";
+import { MessagingService } from "@oh-my-pi/pi-coding-agent/messaging/service";
 import { cfgMessagingEnabled, cfgMessagingRateLimit } from "@oh-my-pi/pi-coding-agent/messaging/settings";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
@@ -78,7 +79,7 @@ describe("cross-session messaging lifecycle", () => {
 		}
 	});
 
-	async function makeSession(name: string, messaging = true, persisted = false) {
+	async function makeSession(name: string, messaging = true, persisted = false, legacyTitle = false) {
 		const contexts: string[] = [];
 		const mock = createMockModel({
 			provider: "openai",
@@ -94,10 +95,26 @@ describe("cross-session messaging lifecycle", () => {
 			convertToLlm,
 			streamFn: mock.stream,
 		});
-		const manager = persisted
-			? SessionManager.create(temp.path(), path.join(temp.path(), "sessions"))
-			: SessionManager.inMemory(temp.path());
-		await manager.setSessionName(name, "user");
+		const legacyFile = temp.join(`legacy-${crypto.randomUUID()}.jsonl`);
+		if (legacyTitle)
+			await Bun.write(
+				legacyFile,
+				`${JSON.stringify({
+					type: "session",
+					version: 3,
+					id: crypto.randomUUID(),
+					timestamp: new Date().toISOString(),
+					cwd: temp.path(),
+					title: name,
+					titleSource: "user",
+				})}\n`,
+			);
+		const manager = legacyTitle
+			? await SessionManager.open(legacyFile)
+			: persisted
+				? SessionManager.create(temp.path(), path.join(temp.path(), "sessions"))
+				: SessionManager.inMemory(temp.path());
+		if (!legacyTitle) await manager.setSessionName(name, "user");
 		if (persisted) {
 			await manager.ensureOnDisk();
 			await manager.flush();
@@ -120,13 +137,127 @@ describe("cross-session messaging lifecycle", () => {
 		sessions.push(session);
 		const binding = await bindSessionMessaging(session, {
 			directPrint: false,
-			exportProcessEnv: false,
-			claimNames: false,
+			claimNames: legacyTitle ? undefined : false,
 		});
 		bindings.push(binding);
 		binding.ready();
-		return { session, manager, settings, contexts };
+		return { session, manager, settings, contexts, binding };
 	}
+
+	it("keeps cutoff permanent when an in-flight settings reconcile recreates the service", async () => {
+		const owner = await makeSession("cutoff-owner");
+		const peer = await makeSession("cutoff-peer");
+		const stopped = Promise.withResolvers<void>();
+		const setMessaging = owner.session.setMessaging.bind(owner.session);
+		const installed = Promise.withResolvers<void>();
+		vi.spyOn(owner.session, "setMessaging").mockImplementation(service => {
+			setMessaging(service);
+			if (service) installed.resolve();
+			else stopped.resolve();
+		});
+		cfgMessagingEnabled.override(owner.settings, false);
+		await stopped.promise;
+		const start = MessagingService.start;
+		const started = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		vi.spyOn(MessagingService, "start").mockImplementation(async (...args) => {
+			const service = await start(...args);
+			started.resolve();
+			await release.promise;
+			return service;
+		});
+		cfgMessagingEnabled.override(owner.settings, true);
+		await started.promise;
+		owner.binding.stopReceiving();
+		release.resolve();
+		await installed.promise;
+		expect(owner.session.messaging).toBeDefined();
+		const target = (await peer.session.messaging!.listSessions())[0];
+		expect(await peer.session.messaging!.send(target, "late inbound", { notifyWhenIdle: false })).toEqual({
+			ok: false,
+			text: "Failed to send to cutoff-owner: the session is no longer running.",
+		});
+		const remote = (await owner.session.messaging!.listSessions())[0];
+		expect((await owner.session.messaging!.send(remote, "outbound remains", { notifyWhenIdle: false })).ok).toBe(
+			true,
+		);
+		await peer.session.waitForIdle();
+		expect(peer.contexts.some(context => context.includes("outbound remains"))).toBe(true);
+		expect(owner.contexts).toEqual([]);
+	});
+
+	it.each(["all", "@extension"])("keeps messaging bound for a persisted reserved title %s", async title => {
+		const { session, manager } = await makeSession(title, true, false, true);
+		expect(manager.titleSource).toBe("user");
+		expect(manager.getSessionName()).toBe(title);
+		expect(session.messaging).toBeDefined();
+		expect(session.messaging!.ownAddress()).not.toBe(title);
+		const own = (await transport.listInboxEntries()).find(
+			entry => entry.endpoint === session.messaging!.env.OMP_MESSAGING_SOCKET,
+		)!;
+		const snapshot = await transport.requestInbox(own, { type: "snapshot" });
+		expect(snapshot).toMatchObject({ ok: true, snapshot: { title, name: session.messaging!.ownAddress() } });
+	});
+
+	it("keeps real binding credentials session-scoped through bash, toggles and disposal", async () => {
+		const keys = ["OMP_MESSAGING_SOCKET", "OMP_MESSAGING_TOKEN"] as const;
+		const previous = keys.map(key => process.env[key]);
+		for (const key of keys) delete process.env[key];
+		vi.spyOn(Settings.prototype, "getShellConfig").mockReturnValue({
+			shell: process.platform === "win32" ? (Bun.env.ComSpec ?? "cmd.exe") : "/bin/sh",
+			args: process.platform === "win32" ? ["/c"] : ["-c"],
+			env: { PATH: Bun.env.PATH ?? "", HOME: temp.path() },
+			prefix: undefined,
+		});
+		try {
+			const a = await makeSession("env-a");
+			const b = await makeSession("env-b");
+			const aEnv = a.session.messaging!.env;
+			const bEnv = b.session.messaging!.env;
+			expect(aEnv.OMP_MESSAGING_TOKEN).not.toBe(bEnv.OMP_MESSAGING_TOKEN);
+			for (const key of keys) {
+				expect(process.env[key]).toBeUndefined();
+				expect(Bun.env[key]).toBeUndefined();
+			}
+			const child = Bun.spawn(
+				[
+					process.execPath,
+					"-e",
+					"process.stdout.write(JSON.stringify(Object.fromEntries(Object.entries(process.env).filter(([key]) => key.startsWith('OMP_MESSAGING_')))))",
+				],
+				{ stdout: "pipe", stderr: "pipe" },
+			);
+			expect(await new Response(child.stdout).json()).toEqual({});
+			expect(await child.exited).toBe(0);
+			const probe = 'printf "%s|%s" "$OMP_MESSAGING_SOCKET" "$OMP_MESSAGING_TOKEN"';
+			expect((await a.session.executeBash(probe)).output).toBe(
+				`${aEnv.OMP_MESSAGING_SOCKET}|${aEnv.OMP_MESSAGING_TOKEN}`,
+			);
+			expect((await b.session.executeBash(probe)).output).toBe(
+				`${bEnv.OMP_MESSAGING_SOCKET}|${bEnv.OMP_MESSAGING_TOKEN}`,
+			);
+			const stopped = Promise.withResolvers<void>();
+			const setMessaging = a.session.setMessaging.bind(a.session);
+			vi.spyOn(a.session, "setMessaging").mockImplementation(service => {
+				setMessaging(service);
+				if (!service) stopped.resolve();
+			});
+			cfgMessagingEnabled.override(a.settings, false);
+			await stopped.promise;
+			expect(a.session.messaging).toBeUndefined();
+			expect((await a.session.executeBash(probe)).output).toBe("|");
+			expect((await b.session.executeBash(probe)).output).toBe(
+				`${bEnv.OMP_MESSAGING_SOCKET}|${bEnv.OMP_MESSAGING_TOKEN}`,
+			);
+			for (const binding of bindings.splice(0)) await binding.dispose();
+			for (const key of keys) expect(process.env[key]).toBeUndefined();
+		} finally {
+			for (const [index, key] of keys.entries()) {
+				if (previous[index] === undefined) delete process.env[key];
+				else process.env[key] = previous[index];
+			}
+		}
+	});
 
 	async function join(session: AgentSession) {
 		installInMemoryRelay();

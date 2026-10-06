@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, setSystemTime, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as nodeFs from "node:fs";
 import * as path from "node:path";
+import * as net from "node:net";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import * as dirs from "@oh-my-pi/pi-utils/dirs";
 import { FileSessionStorage } from "../../src/session/session-storage";
@@ -32,7 +33,6 @@ import {
 } from "../../src/messaging/protocol";
 import {
 	formatSessionListing,
-	type HeldMessageView,
 	type MessagingHost,
 	MessagingService,
 	type RemoteDelivery,
@@ -65,7 +65,7 @@ class FakeHost implements MessagingHost {
 	readonly events: string[] = [];
 	readonly listeners = new Set<() => void>();
 	readonly noticeWaiters: Array<(text: string) => void> = [];
-	askApproval: ((view: HeldMessageView, signal: AbortSignal) => Promise<"approve" | "deny" | undefined>) | undefined;
+	askApproval: MessagingHost["askApproval"];
 	constructor(
 		public id: string,
 		name = id,
@@ -117,6 +117,7 @@ class FakeHost implements MessagingHost {
 	async deliverNotice(_from: RemoteSender, text: string, _recipientSessionId: string): Promise<boolean> {
 		this.notices.push(text);
 		this.events.push(text);
+		this.pending++;
 		this.noticeWaiters.shift()?.(text);
 		return true;
 	}
@@ -406,18 +407,28 @@ describe("inbound gate", () => {
 		host.permission = "prompting";
 		cfgMessagingDialogExpiry.override(settings, "60s");
 		for (const answer of ["approve", "deny", undefined] as const) {
-			host.askApproval = async () => answer;
+			host.askApproval = async (_view, _signal, onPresented) => {
+				onPresented();
+				return answer;
+			};
 			gate.receive(message(`answer-${answer}`), sender, false);
 			await Promise.resolve();
 		}
 		expect(host.deliveries).toHaveLength(1);
 		let signal: AbortSignal | undefined;
-		host.askApproval = async (_view, abort) => {
+		let present: (() => void) | undefined;
+		host.askApproval = async (_view, abort, onPresented) => {
 			signal = abort;
+			present = onPresented;
 			return Promise.withResolvers<"approve">().promise;
 		};
 		const expiring = message("expires");
 		gate.receive(expiring, sender, false);
+		vi.advanceTimersByTime(120_000);
+		expect(signal?.aborted).toBe(false);
+		expect(replies).toEqual([]);
+		present!();
+		present!();
 		vi.advanceTimersByTime(60_000);
 		expect(signal?.aborted).toBe(true);
 		expect(replies[0]).toMatchObject({ kind: "expired", aboutId: expiring.id });
@@ -900,8 +911,9 @@ describe("messaging service with real inboxes", () => {
 		bh.permission = "prompting";
 		cfgMessagingDialogExpiry.override(bs, "60s");
 		let signal: AbortSignal | undefined;
-		bh.askApproval = (_view, abort) => {
+		bh.askApproval = (_view, abort, onPresented) => {
 			signal = abort;
+			onPresented();
 			return Promise.withResolvers<"approve">().promise;
 		};
 		// The service captures askApproval at startup; create a receiver with the dialog already wired.
@@ -1153,6 +1165,7 @@ it("deduplicates subscriptions and cancels superseded expiry timers", async () =
 		async (_sender, notice) => {
 			replies.push({ ...notice, id: "notice", from: sender });
 		},
+		() => undefined,
 	);
 	subscriptions.push(idle);
 	idle.subscribe(sender, "old");
@@ -1185,7 +1198,12 @@ it.each(["idle", "exited"] as const)("suppresses %s notices when watched policy 
 	host.busy = true;
 	let decision: "accept" | "refuse" = "accept";
 	const reply = vi.fn(async () => {});
-	const idle = new IdleSubscriptions(host, () => decision, reply);
+	const idle = new IdleSubscriptions(
+		host,
+		() => decision,
+		reply,
+		() => undefined,
+	);
 	subscriptions.push(idle);
 	idle.subscribe(sender, "watch");
 	decision = "refuse";
@@ -1208,6 +1226,7 @@ it("redacts idle status after watched policy tightens to hold and restores it af
 		async (_sender, notice) => {
 			replies.push({ ...notice, id: "notice", from: sender });
 		},
+		() => undefined,
 	);
 	subscriptions.push(idle);
 	idle.subscribe(sender, "held-watch");
@@ -1239,6 +1258,7 @@ it.each(["accept", "hold-explicit", "refuse"] as const)(
 			host,
 			() => decision,
 			vi.fn(async () => {}),
+			() => undefined,
 			() => sender,
 		);
 		subscriptions.push(idle);
@@ -1614,4 +1634,254 @@ it("retires a batch rejected after asynchronous host handoff with the captured o
 		"Your message to @beta was dropped unread: that session switched to a different conversation.",
 	);
 	expect(bh.deliveries).toEqual([]);
+});
+
+it.each(["count", "size"] as const)("globally bounds repeat history by %s without retaining rejected bodies", bound => {
+	const { gate, host, settings } = gateFixture();
+	cfgMessagingRateLimit.override(settings, 10_000);
+	const count = bound === "count" ? 4097 : 10;
+	const body = (index: number) => `${index}:${bound === "size" ? "x".repeat(500_000) : "small"}`;
+	for (let index = 0; index < count; index++) {
+		host.pending = 0;
+		const from = { ...sender, shortId: index.toString(16).padStart(8, "0") };
+		expect(gate.receive({ ...message(body(index)), from }, from, false)).toEqual({ ok: true, outcome: "delivered" });
+	}
+	host.pending = 0;
+	const first = { ...sender, shortId: "00000000" };
+	expect(gate.receive({ ...message(body(0)), from: first }, first, false)).toEqual({ ok: true, outcome: "delivered" });
+});
+
+it("does not remember refused, rate-rejected or queue-full bodies", () => {
+	const { gate, host, settings } = gateFixture();
+	cfgMessagingInbound.override(settings, "refuse");
+	expect(gate.receive(message("refused"), sender, false)).toEqual({ ok: true, outcome: "refused" });
+	cfgMessagingInbound.override(settings, "accept");
+	expect(gate.receive(message("refused"), sender, false)).toEqual({ ok: true, outcome: "delivered" });
+	cfgMessagingRateLimit.override(settings, 1);
+	expect(gate.receive(message("rate"), sender, false)).toEqual({ ok: true, outcome: "dropped", reason: "rate" });
+	cfgMessagingRateLimit.override(settings, 100);
+	expect(gate.receive(message("rate"), sender, false)).toEqual({ ok: true, outcome: "delivered" });
+	host.pending = ACCEPTED_QUEUE_CAP;
+	expect(gate.receive(message("full"), sender, false)).toEqual({ ok: true, outcome: "dropped", reason: "queue_full" });
+	host.pending = 0;
+	expect(gate.receive(message("full"), sender, false)).toEqual({ ok: true, outcome: "delivered" });
+});
+
+it("ignores unsolicited idle and exited notices at the real inbox", async () => {
+	const { a, ah } = await pair();
+	const own = (await transport.listInboxEntries()).find(entry => entry.endpoint === a.env.OMP_MESSAGING_SOCKET)!;
+	for (let index = 0; index < 55; index++)
+		expect(
+			await transport.requestInbox(own, {
+				type: "notice",
+				id: `unsolicited-${index}`,
+				from: sender,
+				kind: index % 2 ? "idle" : "exited",
+				...(index % 3 ? { aboutId: "stale" } : {}),
+			}),
+		).toEqual({ ok: true, outcome: "delivered" });
+	expect(ah.notices).toEqual([]);
+	expect(ah.deliveries).toEqual([]);
+	expect(ah.display).toEqual([]);
+});
+
+it("consumes only matching idle subscriptions once and enforces notice queue capacity", () => {
+	const { gate, host, settings } = gateFixture();
+	cfgMessagingRateLimit.override(settings, 100);
+	const idle = new IdleSubscriptions(
+		host,
+		() => "accept",
+		async () => {},
+		(from, key) => gate.checkTraffic(from, false, key),
+	);
+	subscriptions.push(idle);
+	const from = { name: sender.name, shortId: sender.shortId, address: "alpha", cwd: sender.cwd };
+	const notice: Extract<InboxRequest, { type: "notice" }> = {
+		type: "notice",
+		id: "reply",
+		from: sender,
+		kind: "idle",
+		aboutId: "current",
+	};
+	idle.arm(sender.entryId, from, "current");
+	idle.receive({ ...notice, aboutId: "old" });
+	idle.receive({ ...notice, from: { ...sender, entryId: "wrong" } });
+	expect(host.notices).toEqual([]);
+	expect(idle.receive(notice)).toEqual({ ok: true, outcome: "delivered" });
+	idle.receive(notice);
+	expect(host.notices).toHaveLength(1);
+	idle.arm(sender.entryId, from, "full");
+	host.pending = ACCEPTED_QUEUE_CAP;
+	expect(idle.receive({ ...notice, aboutId: "full" })).toEqual({ ok: true, outcome: "dropped", reason: "queue_full" });
+	host.pending = 0;
+	idle.receive({ ...notice, aboutId: "full" });
+	expect(host.notices).toHaveLength(1);
+});
+
+it("shares message and subscription rate accounting and bounds watched senders", () => {
+	const { gate, host, settings } = gateFixture();
+	host.busy = true;
+	const idle = new IdleSubscriptions(
+		host,
+		() => "accept",
+		async () => {},
+		(from, key) => gate.checkTraffic(from, false, key),
+	);
+	subscriptions.push(idle);
+	cfgMessagingRateLimit.override(settings, 1);
+	gate.receive(message("body"), sender, false);
+	expect(idle.subscribe(sender, "rate-limited")).toEqual({ ok: true, outcome: "dropped", reason: "rate" });
+	cfgMessagingRateLimit.override(settings, 100);
+	for (let index = 0; index < ACCEPTED_QUEUE_CAP; index++) {
+		const from = { ...sender, entryId: `entry-${index}`, shortId: index.toString(16).padStart(8, "0") };
+		expect(idle.subscribe(from, `watch-${index}`)).toEqual({ ok: true, outcome: "subscribed" });
+	}
+	expect(idle.subscribe({ ...sender, entryId: "overflow" }, "overflow")).toEqual({
+		ok: true,
+		outcome: "dropped",
+		reason: "queue_full",
+	});
+	expect(idle.subscribe({ ...sender, entryId: "entry-0" }, "replacement")).toEqual({
+		ok: true,
+		outcome: "subscribed",
+	});
+	expect(host.display).toHaveLength(ACCEPTED_QUEUE_CAP + 1);
+});
+
+it("counts suspended idle notice buffers toward the accepted queue cap", async () => {
+	const { a, b, ah, bh, as, bs, target } = await pair();
+	cfgMessagingRateLimit.override(as, 200);
+	cfgMessagingRateLimit.override(bs, 200);
+	ah.busy = true;
+	const resume = b.suspendReceiving();
+	const reverse = (await b.listSessions())[0];
+	let subscription: Extract<InboxRequest, { type: "subscribe" }> | undefined;
+	vi.spyOn(transport, "requestInbox").mockImplementation((entry, payload, options) => {
+		if (payload.type === "subscribe") subscription = payload;
+		return realRequestInbox(entry, payload, { ...options, dir: temp!.path() });
+	});
+	for (let index = 0; index <= ACCEPTED_QUEUE_CAP; index++) {
+		expect((await b.send(reverse, "", { notifyWhenIdle: true })).ok).toBe(true);
+		expect(
+			await transport.requestInbox(target.entry, {
+				type: "notice",
+				id: `notice-${index}`,
+				from: { ...sender, entryId: reverse.entry.entryId, shortId: a.ownShortId() },
+				kind: "idle",
+				aboutId: subscription!.id,
+			}),
+		).toEqual(
+			index < ACCEPTED_QUEUE_CAP
+				? { ok: true, outcome: "delivered" }
+				: { ok: true, outcome: "dropped", reason: "queue_full" },
+		);
+	}
+	expect(bh.notices).toEqual([]);
+	resume();
+	expect(bh.notices).toHaveLength(ACCEPTED_QUEUE_CAP);
+});
+
+it("permanently cuts off new inbound while snapshots, outbound and accepted buffered work survive", async () => {
+	const { a, b, ah, bh, bs, target } = await pair(false);
+	a.markReady();
+	expect((await a.send(target, "accepted", { notifyWhenIdle: false })).ok).toBe(true);
+	b.stopReceiving();
+	b.stopReceiving();
+	expect((await transport.requestInbox(target.entry, { type: "snapshot" })).ok).toBe(true);
+	for (const request of [
+		message("too late"),
+		{ type: "subscribe", id: "late", from: sender },
+		{ type: "notice", id: "late", from: sender, kind: "idle" },
+		{ type: "message", id: "child", body: "late child" },
+	] as InboxRequest[])
+		expect(await transport.requestInbox(target.entry, request)).toEqual({ ok: false, error: "unreachable" });
+	const reverse = (await b.listSessions())[0];
+	expect((await b.send(reverse, "outbound during drain", { notifyWhenIdle: false })).ok).toBe(true);
+	expect(ah.deliveries.map(item => item.body)).toEqual(["outbound during drain"]);
+	cfgMessagingInbound.override(bs, "accept");
+	bh.reapply();
+	b.markReady();
+	expect(bh.deliveries.map(item => item.body)).toEqual(["accepted"]);
+	expect(bh.notices).toEqual([]);
+});
+
+it("cutoff aborts unapproved holds and ignores late approval and presentation", async () => {
+	const { a, b, bh, bs, target } = await pair();
+	await b.close();
+	bh.permission = "prompting";
+	cfgMessagingDialogExpiry.override(bs, "60s");
+	const answer = Promise.withResolvers<"approve">();
+	let signal: AbortSignal | undefined;
+	let present: (() => void) | undefined;
+	bh.askApproval = (_view, abort, onPresented) => {
+		signal = abort;
+		present = onPresented;
+		return answer.promise;
+	};
+	const receiver = await MessagingService.start(bh, bs);
+	services.push(receiver);
+	receiver.markReady();
+	const updated = (await a.listSessions()).find(session => session.sessionId === target.sessionId)!;
+	expect((await a.send(updated, "held before cutoff", { notifyWhenIdle: false })).ok).toBe(true);
+	receiver.stopReceiving();
+	expect(signal?.aborted).toBe(true);
+	vi.useFakeTimers();
+	present!();
+	answer.resolve("approve");
+	await answer.promise;
+	cfgMessagingInbound.override(bs, "accept");
+	bh.reapply();
+	vi.advanceTimersByTime(IDLE_SUBSCRIPTION_TTL_MS);
+	expect(bh.deliveries).toEqual([]);
+	expect(bh.notices).toEqual([]);
+});
+
+it("rejects authenticated own-child sends after cutoff", async () => {
+	const { b } = await pair();
+	b.stopReceiving();
+	const received = Promise.withResolvers<unknown>();
+	const socket = net.createConnection(b.env.OMP_MESSAGING_SOCKET);
+	socket.on("error", received.reject);
+	socket.once("data", data => {
+		socket.destroy();
+		received.resolve(JSON.parse(data.toString()));
+	});
+	socket.once("connect", () => {
+		socket.write(
+			`${JSON.stringify({ type: "auth", token: b.env.OMP_MESSAGING_TOKEN })}\n${JSON.stringify({
+				type: "message",
+				id: "own-child-after-cutoff",
+				body: "late",
+			})}\n`,
+		);
+	});
+	try {
+		expect(await received.promise).toEqual({ ok: false, error: "unreachable" });
+	} finally {
+		socket.destroy();
+	}
+});
+
+it("cutoff during an offline acknowledgement preserves the remaining mail and accepted work", async () => {
+	const { b, bh } = await pair();
+	const first: mailbox.StoredMessage = {
+		id: "first-offline",
+		from: sender,
+		body: "already admitted",
+		chain: [],
+		sentAt: Date.now(),
+	};
+	const untouched = vi.fn(async () => {});
+	vi.spyOn(mailbox, "drainOffline").mockResolvedValueOnce([
+		{
+			message: first,
+			ack: async () => {
+				b.stopReceiving();
+			},
+		},
+		{ message: { ...first, id: "second-offline", body: "not yet admitted" }, ack: untouched },
+	]);
+	await b.retireConversation();
+	expect(bh.deliveries.map(item => item.body)).toEqual(["already admitted"]);
+	expect(untouched).not.toHaveBeenCalled();
 });

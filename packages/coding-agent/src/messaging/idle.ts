@@ -2,7 +2,14 @@ import { logger } from "@oh-my-pi/pi-utils";
 import { ManagedTimers } from "../extensibility/extensions/managed-timers";
 import type { OutgoingNotice } from "./inbound";
 import type { InboundDecision } from "./policy";
-import { type DropReason, IDLE_SUBSCRIPTION_TTL_MS, type InboxRequest, type SenderInfo } from "./protocol";
+import {
+	ACCEPTED_QUEUE_CAP,
+	type DropReason,
+	IDLE_SUBSCRIPTION_TTL_MS,
+	type InboxRequest,
+	type InboxResponse,
+	type SenderInfo,
+} from "./protocol";
 import type { MessagingHost, RemoteSender } from "./service";
 
 type NoticeRequest = Extract<InboxRequest, { type: "notice" }>;
@@ -26,12 +33,19 @@ export class IdleSubscriptions {
 		private readonly host: MessagingHost,
 		private readonly decision: (sender: SenderInfo) => InboundDecision,
 		private readonly reply: (sender: SenderInfo, notice: OutgoingNotice, from?: SenderInfo) => Promise<void>,
+		private readonly checkTraffic: (sender: SenderInfo, repeatKey: string) => InboxResponse | undefined,
 		private readonly ownSender?: () => SenderInfo,
 	) {}
 
-	subscribe(sender: SenderInfo, id: string): void {
+	subscribe(sender: SenderInfo, id: string, alreadyAccounted = false): InboxResponse {
 		const decision = this.decision(sender);
-		if (decision === "refuse") return;
+		if (decision === "refuse") return { ok: true, outcome: "subscribed" };
+		if (!this.#watched.has(sender.entryId) && this.#watched.size >= ACCEPTED_QUEUE_CAP)
+			return { ok: true, outcome: "dropped", reason: "queue_full" };
+		if (!alreadyAccounted) {
+			const dropped = this.checkTraffic(sender, JSON.stringify(["subscribe", id]));
+			if (dropped) return dropped;
+		}
 		this.#watched.set(sender.entryId, {
 			sender,
 			receiver: this.ownSender?.(),
@@ -39,6 +53,7 @@ export class IdleSubscriptions {
 		});
 		this.host.showNotice(`@${sender.name ?? sender.shortId} asked to be told when this session is next idle.`);
 		if (!this.host.isBusy()) void this.#flush("idle");
+		return { ok: true, outcome: "subscribed" };
 	}
 
 	arm(entryId: string, target: RemoteSender, id: string): void {
@@ -48,7 +63,8 @@ export class IdleSubscriptions {
 			const own = this.ownSender?.();
 			const decision = own ? this.decision(own) : "accept";
 			const text = `No idle notice from @${target.address} within 12 hours; the subscription was dropped.`;
-			if (decision === "accept") void this.host.deliverNotice(target, text, this.host.sessionId());
+			if (decision === "accept" && this.host.pendingRemoteCount() < ACCEPTED_QUEUE_CAP)
+				void this.host.deliverNotice(target, text, this.host.sessionId());
 			else if (decision !== "refuse") this.host.showNotice(text);
 		}, IDLE_SUBSCRIPTION_TTL_MS);
 		this.#asking.set(entryId, { timer, target, id });
@@ -61,37 +77,39 @@ export class IdleSubscriptions {
 		this.#asking.delete(entryId);
 	}
 
-	receive(notice: NoticeRequest): void {
+	receive(notice: NoticeRequest): InboxResponse {
+		const ignored: InboxResponse = { ok: true, outcome: "delivered" };
+		if (
+			notice.kind !== "idle" &&
+			notice.kind !== "exited" &&
+			!(notice.kind === "retired" && notice.subject === "subscription")
+		)
+			return ignored;
+		const asking = this.#asking.get(notice.from.entryId);
+		if (notice.aboutId === undefined || asking?.id !== notice.aboutId) return ignored;
+		this.cancel(notice.from.entryId, notice.aboutId);
+		const decision = this.decision(notice.from);
+		if (decision === "accept" && this.host.pendingRemoteCount() >= ACCEPTED_QUEUE_CAP)
+			return { ok: true, outcome: "dropped", reason: "queue_full" };
+		const dropped = this.checkTraffic(notice.from, JSON.stringify(["notice", notice.kind, notice.aboutId]));
+		if (dropped) return dropped;
 		const from: RemoteSender = {
 			name: notice.from.name,
 			shortId: notice.from.shortId,
 			address: notice.from.name ?? notice.from.shortId,
 			cwd: notice.from.cwd,
 		};
-		if (notice.kind === "retired" && notice.subject === "subscription") {
-			const asking = this.#asking.get(notice.from.entryId);
-			if (notice.aboutId === undefined || asking?.id !== notice.aboutId) return;
-			this.cancel(notice.from.entryId, notice.aboutId);
-			const decision = this.decision(notice.from);
-			const text = `@${from.address} switched to a different conversation; the idle notice was cancelled.`;
-			if (decision === "accept") void this.host.deliverNotice(from, text, this.host.sessionId());
-			else if (decision !== "refuse") this.host.showNotice(text);
-			return;
-		}
-		if (notice.kind === "idle" || notice.kind === "exited") {
-			const asking = this.#asking.get(notice.from.entryId);
-			if (notice.aboutId !== undefined && asking?.id !== notice.aboutId) return;
-			this.cancel(notice.from.entryId, notice.aboutId);
-			const finished = new Date(notice.finishedAt ?? Date.now());
-			const time = `${String(finished.getHours()).padStart(2, "0")}:${String(finished.getMinutes()).padStart(2, "0")}`;
-			const text =
-				notice.kind === "exited"
+		const finished = new Date(notice.finishedAt ?? Date.now());
+		const time = `${String(finished.getHours()).padStart(2, "0")}:${String(finished.getMinutes()).padStart(2, "0")}`;
+		const text =
+			notice.kind === "retired"
+				? `@${from.address} switched to a different conversation; the idle notice was cancelled.`
+				: notice.kind === "exited"
 					? `@${from.address} exited.`
 					: `@${from.address} is idle (turn finished ${time})${notice.status ? `: ${notice.status}` : "."}`;
-			const decision = this.decision(notice.from);
-			if (decision === "accept") void this.host.deliverNotice(from, text, this.host.sessionId());
-			else if (decision !== "refuse") this.host.showNotice(text);
-		}
+		if (decision === "accept") void this.host.deliverNotice(from, text, this.host.sessionId());
+		else if (decision !== "refuse") this.host.showNotice(text);
+		return ignored;
 	}
 
 	turnSettledIdle(): void {

@@ -174,7 +174,7 @@ describe("cross-session naming UI", () => {
 			body: Array.from({ length: 14 }, (_, i) => `line ${i + 1}`).join("\n"),
 		};
 		const select = vi.spyOn(controller, "showHookSelector").mockResolvedValue("Approve");
-		expect(await controller.askCrossSessionApproval(view, signal.signal)).toBe("approve");
+		expect(await controller.askCrossSessionApproval(view, signal.signal, () => {})).toBe("approve");
 		const [title, options, dialog] = select.mock.calls[0]!;
 		expect(title).toBe(
 			`Message from another session: @release notes\n------------\n${view.body.split("\n").slice(0, 12).join("\n")}\n------------`,
@@ -182,12 +182,12 @@ describe("cross-session naming UI", () => {
 		expect(options).toEqual([{ label: "Approve" }, { label: "Deny" }]);
 		expect(dialog).toEqual({ signal: signal.signal });
 		select.mockResolvedValue("Deny");
-		expect(await controller.askCrossSessionApproval(view, signal.signal)).toBe("deny");
+		expect(await controller.askCrossSessionApproval(view, signal.signal, () => {})).toBe("deny");
 		select.mockImplementation(async () => {
 			signal.abort();
 			return "Approve";
 		});
-		expect(await controller.askCrossSessionApproval(view, signal.signal)).toBeUndefined();
+		expect(await controller.askCrossSessionApproval(view, signal.signal, () => {})).toBeUndefined();
 	});
 
 	it("keeps /status opening the extensions dashboard", async () => {

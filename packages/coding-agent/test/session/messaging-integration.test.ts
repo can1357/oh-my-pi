@@ -147,7 +147,7 @@ describe("top-level cross-session delivery", () => {
 			if (event.type === "notice") notices.push(event.message);
 			if (event.type === "agent_start") firstTurn.resolve();
 		});
-		const binding = await bindSessionMessaging(session, { directPrint: false, exportProcessEnv: false });
+		const binding = await bindSessionMessaging(session, { directPrint: false });
 		bindings.push(binding);
 		binding.ready();
 		await session.refreshBaseSystemPrompt();

@@ -1343,7 +1343,7 @@ export interface RpcModeOptions {
  * Listens for JSON commands on stdin, outputs events and responses on stdout.
  */
 export async function runRpcMode(session: AgentSession, options: RpcModeOptions = {}): Promise<never> {
-	const messaging = await bindSessionMessaging(session, { directPrint: false, exportProcessEnv: true });
+	const messaging = await bindSessionMessaging(session, { directPrint: false });
 	const cancelMessagingTeardown = postmortem.register("rpc-mode-messaging", () => messaging.dispose());
 	try {
 		if (options.name !== undefined) {

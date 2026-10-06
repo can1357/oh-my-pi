@@ -130,6 +130,7 @@ function harness(cwd: string) {
 		ready: vi.fn(() => {
 			lifecycle.push("ready");
 		}),
+		stopReceiving: vi.fn(),
 		dispose: vi.fn(async () => {
 			lifecycle.push("binding_dispose");
 		}),
@@ -175,7 +176,7 @@ describe("ACP cross-session messaging", () => {
 		expect(h.lifecycle).not.toContain("session_start");
 		start.resolve();
 		const created = await pending;
-		expect(h.bind).toHaveBeenCalledWith(h.session, { directPrint: false, exportProcessEnv: false });
+		expect(h.bind).toHaveBeenCalledWith(h.session, { directPrint: false });
 		expect(h.lifecycle).toEqual(["bound", "session_start"]);
 		await bootstrap();
 		expect(h.binding.ready).toHaveBeenCalledTimes(1);

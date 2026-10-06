@@ -1,5 +1,9 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
 import { type RawSettings, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { InboundGate } from "../../src/messaging/inbound";
+import type { SenderInfo } from "../../src/messaging/protocol";
+import type { MessagingHost, RemoteDelivery } from "../../src/messaging/service";
+import { AgentStorage } from "../../src/session/agent-storage";
 import {
 	decideInbound,
 	dialogExpiryMs,
@@ -189,5 +193,105 @@ describe("cross-session inbound policy", () => {
 		} finally {
 			await dir.remove();
 		}
+	});
+
+	it.each([false, true])("drains masked project hold edits through raw layers (overlay=%s)", async overlay => {
+		const dir = TempDir.createSync("@messaging-layer-reload-");
+		const projectFile = dir.join("project", ".omp", "config.yml");
+		await Bun.write(projectFile, "messaging:\n  crossSessionInbound: hold\n");
+		const parent = await Settings.loadIsolated({
+			cwd: dir.join("project"),
+			agentDir: dir.join("agent"),
+			overrides: { "messaging.crossSessionInbound": "accept" },
+		});
+		const settings = overlay ? parent.overlay({ "messaging.crossSessionInbound": "accept" }) : parent;
+		const deliveries: RemoteDelivery[] = [];
+		const from: SenderInfo = {
+			sessionId: "sender",
+			shortId: "aaaaaaaa",
+			entryId: "sender-entry",
+			name: "sender",
+			cwd: dir.path(),
+			class: "bypass",
+		};
+		const host: MessagingHost = {
+			sessionId: () => "receiver",
+			cwd: () => dir.path(),
+			directPrint: false,
+			sessionName: () => "receiver",
+			titleSource: () => "user",
+			isBusy: () => false,
+			isReceivingSuspended: () => false,
+			isSessionTransitioning: () => false,
+			permissionClass: () => "bypass",
+			onPolicyInputsChange: cb => settings.onLayersChange(cb),
+			deliverRemote: async batch => {
+				deliveries.push(...batch);
+				return true;
+			},
+			pendingRemoteCount: () => deliveries.length,
+			showNotice: () => {},
+			deliverNotice: async () => true,
+			askApproval: undefined,
+			currentRelayChain: () => [],
+			lastFinished: () => undefined,
+		};
+		const gate = new InboundGate(
+			host,
+			settings,
+			() => "bbbbbbbb",
+			async () => {},
+		);
+		const unlisten = host.onPolicyInputsChange(() => gate.reapplyPolicy());
+		const effective = vi.fn();
+		const stopEffective = cfgMessagingInbound.listen(settings, effective);
+		try {
+			expect(cfgMessagingInbound.get(settings)).toBe("accept");
+			expect(gate.receive({ type: "message", id: "held", from, body: "held body" }, from, false)).toEqual({
+				ok: true,
+				outcome: "held",
+			});
+			await Bun.write(projectFile, "messaging:\n  crossSessionInbound: accept\n");
+			await parent.reloadFromDisk();
+			expect(cfgMessagingInbound.get(settings)).toBe("accept");
+			expect(effective).not.toHaveBeenCalled();
+			expect(deliveries.map(item => item.body)).toEqual(["held body"]);
+			await parent.reloadFromDisk();
+			expect(deliveries).toHaveLength(1);
+			await Bun.write(projectFile, "messaging:\n  crossSessionInbound: hold\n");
+			await parent.reloadFromDisk();
+			expect(gate.receive({ type: "message", id: "tightened", from, body: "new held body" }, from, false)).toEqual({
+				ok: true,
+				outcome: "held",
+			});
+			expect(deliveries).toHaveLength(1);
+		} finally {
+			unlisten();
+			stopEffective();
+			gate.close();
+			parent.cancelPendingSaves();
+			AgentStorage.close();
+			await dir.remove();
+		}
+	});
+
+	it("snapshot-dispatches raw-layer listeners and isolates their errors", () => {
+		const settings = Settings.isolated();
+		const warning = vi.spyOn(logger, "warn").mockImplementation(() => {});
+		const events: string[] = [];
+		let stopSecond = () => {};
+		settings.onLayersChange(() => {
+			events.push("first");
+			stopSecond();
+			throw new Error("listener failed");
+		});
+		stopSecond = settings.onLayersChange(() => {
+			events.push("second");
+		});
+		cfgMessagingInbound.override(settings, "hold");
+		expect(events).toEqual(["first", "second"]);
+		expect(warning).toHaveBeenCalled();
+		cfgMessagingInbound.override(settings, "accept");
+		expect(events).toEqual(["first", "second", "first"]);
 	});
 });

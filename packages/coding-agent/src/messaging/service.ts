@@ -96,7 +96,9 @@ export interface MessagingHost {
 	pendingRemoteCount(): number;
 	showNotice(text: string): void;
 	deliverNotice(from: RemoteSender, text: string, recipientSessionId: string): Promise<boolean>;
-	askApproval: ((v: HeldMessageView, signal: AbortSignal) => Promise<"approve" | "deny" | undefined>) | undefined;
+	askApproval:
+		| ((v: HeldMessageView, signal: AbortSignal, onPresented: () => void) => Promise<"approve" | "deny" | undefined>)
+		| undefined;
 	currentRelayChain(): readonly string[];
 	lastFinished(): { finishedAt: number; status: string | null } | undefined;
 }
@@ -112,6 +114,7 @@ export class MessagingService {
 	#suspended = 0;
 	#suspendedIdentity: Pick<SessionSnapshot, "sessionId" | "name" | "title" | "cwd"> | undefined;
 	#closed = false;
+	#receivingStopped = false;
 	#batching = 0;
 	#pendingHandoffs = 0;
 	#closing: Promise<void> | undefined;
@@ -136,10 +139,7 @@ export class MessagingService {
 			isBusy: () => host.isBusy(),
 			permissionClass: () => host.permissionClass(),
 			onPolicyInputsChange: cb => host.onPolicyInputsChange(cb),
-			pendingRemoteCount: () =>
-				host.pendingRemoteCount() +
-				this.#pendingHandoffs +
-				this.#buffer.filter(item => item.type === "message").length,
+			pendingRemoteCount: () => host.pendingRemoteCount() + this.#pendingHandoffs + this.#buffer.length,
 			deliverRemote: async deliveries => {
 				for (const delivery of deliveries)
 					this.#deliver({ type: "message", delivery, receiver: delivery.receiver ?? this.#sender() });
@@ -150,7 +150,9 @@ export class MessagingService {
 				return true;
 			},
 			showNotice: text => host.showNotice(text),
-			askApproval: host.askApproval ? (view, signal) => host.askApproval!(view, signal) : undefined,
+			askApproval: host.askApproval
+				? (view, signal, onPresented) => host.askApproval!(view, signal, onPresented)
+				: undefined,
 			currentRelayChain: () => host.currentRelayChain(),
 			lastFinished: () => host.lastFinished(),
 		};
@@ -166,6 +168,7 @@ export class MessagingService {
 			receivingHost,
 			sender => this.#gate.decision(sender),
 			(sender, notice, from) => this.#reply(sender, notice, from),
+			(sender, repeatKey) => this.#gate.checkTraffic(sender, false, repeatKey),
 			() => this.#sender(),
 		);
 		this.#unsubscribe = host.onPolicyInputsChange(() => {
@@ -219,6 +222,12 @@ export class MessagingService {
 	markReady(): void {
 		this.#ready = true;
 		this.#flush();
+	}
+
+	stopReceiving(): void {
+		if (this.#receivingStopped) return;
+		this.#receivingStopped = true;
+		this.#gate.close();
 	}
 
 	suspendReceiving(identity?: Pick<SessionSnapshot, "sessionId" | "name" | "title" | "cwd">): () => void {
@@ -613,11 +622,11 @@ export class MessagingService {
 					startedAt: this.#startedAt,
 				},
 			};
+		if (this.#receivingStopped) return { ok: false, error: "unreachable" };
 		if (request.type === "message") {
 			if (!request.body.trim()) {
 				if (!request.notifyWhenIdle) return { ok: false, error: "empty" };
-				if (request.from) this.#idle.subscribe(request.from, request.id);
-				return { ok: true, outcome: "subscribed" };
+				return request.from ? this.#idle.subscribe(request.from, request.id) : { ok: true, outcome: "subscribed" };
 			}
 			const sender = request.from ?? { ...receiver, name: "own-child" };
 			const receivingSuspended =
@@ -633,15 +642,12 @@ export class MessagingService {
 					result.outcome === "queued" ||
 					result.outcome === "refused")
 			)
-				this.#idle.subscribe(request.from, request.id);
+				this.#idle.subscribe(request.from, request.id, true);
 			return receivingSuspended && result.ok && "outcome" in result && result.outcome === "queued"
 				? { ...result, receivingSuspended: true }
 				: result;
 		}
-		if (request.type === "subscribe") {
-			this.#idle.subscribe(request.from, request.id);
-			return { ok: true, outcome: "subscribed" };
-		}
+		if (request.type === "subscribe") return this.#idle.subscribe(request.from, request.id);
 		if (receiver.sessionId !== this.#ownSessionId()) return { ok: true, outcome: "delivered" };
 		if (request.kind === "refused") {
 			if (request.toSessionId === this.#ownSessionId()) {
@@ -694,7 +700,7 @@ export class MessagingService {
 						recipientSessionId: this.#ownSessionId(),
 					});
 			}
-		} else this.#idle.receive(request);
+		} else return this.#idle.receive(request);
 		return { ok: true, outcome: "delivered" };
 	}
 
@@ -782,10 +788,12 @@ export class MessagingService {
 	}
 
 	async #deliverOfflineMail(mail: DrainedMail[]): Promise<void> {
+		if (this.#receivingStopped || this.#closed) return;
 		let admitted = 0;
 		this.#batching++;
 		try {
 			for (const { message, ack } of mail) {
+				if (this.#receivingStopped || this.#closed) break;
 				if (!("body" in message)) {
 					if (message.toSessionId === this.#ownSessionId())
 						this.#deliver({
