@@ -168,7 +168,6 @@ export interface SettingsOptions {
 	/** Extra config.yml-style overlays loaded after global/project settings */
 	configFiles?: string[];
 }
-
 // ═══════════════════════════════════════════════════════════════════════════
 // Path Utilities
 // ═══════════════════════════════════════════════════════════════════════════
@@ -638,6 +637,8 @@ export class Settings {
 	#modifiedGlobalModelRoleMutations = new Map<string, PendingYamlMutation>();
 	/** Changes whenever a live API mutates a persisted layer. */
 	#persistedMutationGeneration = 0;
+	/** Config-source stat stamp at the last disk load, used by approval preflight. */
+	#approvalSourceStamp: string | undefined;
 	/**
 	 * Original process-wide model-role overrides captured before a project edit
 	 * temporarily replaced them via `#updateRuntimeModelRoleOverride`. Restored
@@ -1125,6 +1126,20 @@ export class Settings {
 		this.#fileWatchers.clear();
 	}
 
+	/** Files backing the settings, shared by watching and approval preflight. */
+	#configSourceFiles(): Set<string> {
+		const projectCwd = path.resolve(this.#cwd);
+		const projectConfigDir = getProjectAgentDir(projectCwd);
+		return new Set([
+			...MAIN_CONFIG_FILENAMES.map(filename => path.join(this.#agentDir, filename)),
+			path.join(projectConfigDir, "config.yml"),
+			path.join(projectConfigDir, "settings.json"),
+			path.join(projectCwd, ".claude", "settings.json"),
+			...this.#projectSourcePaths,
+			...this.#configFiles,
+		]);
+	}
+
 	/** Directory → basenames whose events should trigger a reload, for every current config source. */
 	#configWatchTargets(): Map<string, Set<string>> {
 		const targets = new Map<string, Set<string>>();
@@ -1168,14 +1183,7 @@ export class Settings {
 				}
 			}
 		};
-		for (const filename of MAIN_CONFIG_FILENAMES) addFile(path.join(this.#agentDir, filename));
-		const projectCwd = path.resolve(this.#cwd);
-		const projectConfigDir = getProjectAgentDir(projectCwd);
-		addFile(path.join(projectConfigDir, "config.yml"));
-		addFile(path.join(projectConfigDir, "settings.json"));
-		addFile(path.join(projectCwd, ".claude", "settings.json"));
-		for (const file of this.#projectSourcePaths) addFile(file);
-		for (const file of this.#configFiles) addFile(file);
+		for (const file of this.#configSourceFiles()) addFile(file);
 		return targets;
 	}
 
@@ -1267,12 +1275,36 @@ export class Settings {
 		}
 	}
 
+	/** Close the watcher's debounce window before resolving a tool's approval policy. */
+	refreshForToolApproval(): Promise<void> | undefined {
+		if (this.#parent) return this.#parent.refreshForToolApproval();
+		if (!this.#persist) return;
+		return this.#exclusive("keep-last-good", async () => {
+			if ((await this.#readApprovalSourceStamp()) === this.#approvalSourceStamp) return;
+			await this.#reloadPersistedLayers("keep-last-good");
+		});
+	}
+
+	async #readApprovalSourceStamp(): Promise<string> {
+		const parts: string[] = [];
+		for (const file of this.#configSourceFiles()) {
+			try {
+				// stat follows symlinks, so target edits and atomic replacements both count.
+				const stat = await fs.promises.stat(file, { bigint: true });
+				parts.push(`${file}:${stat.dev}:${stat.ino}:${stat.size}:${stat.mtimeNs}:${stat.ctimeNs}`);
+			} catch (error) {
+				if (!isEnoent(error)) throw error;
+				parts.push(`${file}:absent`);
+			}
+		}
+		return parts.join("\n");
+	}
+
 	/**
-	 * Independent instance scoped to `cwd`: same global, `--config` overlay, and runtime layers, the
-	 * project layer re-read for `cwd` (persisted instances). An {@link overlay} clones its parent for
-	 * `cwd` and re-applies its own layers on top, so inherited values carry over.
+	 * Independent instance scoped to `cwd`: copy global, overlay, and runtime layers,
+	 * then read the project layer for the new directory.
 	 *
-	 * @throws Error when a configured value fails its definition's `validate` check.
+	 * @throws Error when a configured value fails its definition's validate check.
 	 */
 	async cloneForCwd(cwd: string): Promise<Settings> {
 		let cloned: Settings;
@@ -1354,6 +1386,7 @@ export class Settings {
 				logger.warn("Settings: reloading over unsaved changes", { error: String(error) });
 			}
 			const mutationGeneration = this.#persistedMutationGeneration;
+			const sourceStamp = await this.#readApprovalSourceStamp();
 
 			const [globalResult, projectResult, overlayResult] = await Promise.allSettled([
 				this.#readExistingMainYaml(false),
@@ -1430,6 +1463,7 @@ export class Settings {
 			this.#overrides = layers.overrides;
 			for (const setting of settled) this.#softPins.delete(setting);
 			this.#rebuildMerged();
+			this.#approvalSourceStamp = sourceStamp;
 			this.#fireChangesSince(previous);
 			return;
 		}
@@ -1902,6 +1936,7 @@ export class Settings {
 	// ─────────────────────────────────────────────────────────────────────────
 
 	async #load(): Promise<Settings> {
+		const sourceStamp = this.#persist ? await this.#readApprovalSourceStamp() : undefined;
 		// Project settings discovery is independent of the persist chain, while
 		// the persist steps themselves remain sequential. Wait for both branches
 		// to settle so simultaneous failures produce one catchable error without
@@ -1919,6 +1954,7 @@ export class Settings {
 		// Build merged view (global → project → overrides; project wins over global)
 		this.#rebuildMerged();
 		this.#validateAll();
+		this.#approvalSourceStamp = sourceStamp;
 		return this;
 	}
 	async #loadGlobalSettings(): Promise<void> {
