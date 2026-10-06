@@ -1934,11 +1934,12 @@ function linkifyCodeUrls(line: string): string {
 	return copied === 0 ? line : result + line.slice(copied);
 }
 
-// GitHub issue/PR refs: `owner/repo#N` or bare `#N`, not
-// glued to a word, path, entity, or longer run (`C#3`, `file.ts#4`,
-// `a/b/c#5`, `#6x`, `#0`). A `.`/`..` repo would resolve outside the owner.
+// GitHub issue/PR refs: `owner/repo#N` or bare `#N`, not glued to a word (in
+// any script), path, entity, or longer run (`C#3`, `café#3`, `file.ts#4`,
+// `a/b/c#5`, `#6x`, `#6é`, `a/b#7/c`, `#0`). A `.`/`..` repo would resolve
+// outside the owner.
 const GITHUB_REF_REGEX =
-	/(?<![\w./#&-])(?:([A-Za-z0-9][A-Za-z0-9-]*\/(?!\.\.?#)[A-Za-z0-9._-]+))?#([1-9]\d{0,9})(?![\w-])/g;
+	/(?<![\p{L}\p{M}\p{N}_./#&-])(?:([A-Za-z0-9][A-Za-z0-9-]*\/(?!\.\.?#)[A-Za-z0-9._-]+))?#([1-9]\d{0,9})(?![\p{L}\p{M}\p{N}_/-])/gu;
 
 /**
  * Wrap GitHub refs in a plain-text run in OSC 8 links without changing their

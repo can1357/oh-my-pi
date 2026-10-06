@@ -2009,7 +2009,7 @@ bar`,
 
 			it("never links refs in code, inside links, or glued to other text", () => {
 				const { links } = linkedRuns(
-					"`#1` [see #2](https://x.test) C#3 file.ts#4 a/b/c#5 #6x #0 #7-8 a/..#9 a/.#10",
+					"`#1` [see #2](https://x.test) C#3 file.ts#4 a/b/c#5 #6x #0 #7-8 a/..#9 a/.#10 café#11 #12é a/b#13/c",
 				);
 				expect(links).toEqual([
 					["see #2", "https://x.test"],
