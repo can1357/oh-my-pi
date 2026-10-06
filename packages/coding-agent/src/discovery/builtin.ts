@@ -719,7 +719,10 @@ async function loadHooks(ctx: LoadContext): Promise<LoadResult<Hook>> {
 
 		for (const entry of typeEntries) {
 			if (entry.name.startsWith(".")) continue;
-			if (!entry.isFile()) continue;
+			// `readDirEntries` is a plain `readdir(withFileTypes)` and reports a symlink as
+			// a link, not a file, so linking a shared hook into the hooks dir would drop it
+			// silently. Match the extension loader and accept links here.
+			if (!entry.isFile() && !entry.isSymbolicLink()) continue;
 
 			const hookPath = path.join(typeDir, entry.name);
 			const baseName = entry.name.includes(".") ? entry.name.slice(0, entry.name.lastIndexOf(".")) : entry.name;
