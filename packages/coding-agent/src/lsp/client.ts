@@ -56,7 +56,7 @@ let idleCheckInterval: NodeJS.Timeout | null = null;
 const IDLE_CHECK_INTERVAL_MS = 60 * 1000;
 
 // Broker-shared server mode: language servers hosted by the per-project LSP mux
-// daemon, one per connected omp instance, with idle ones reused by later instances.
+// daemon, one per connection; a released server lingers for reuse while the mux runs.
 // Off by default so embedders and tests that drive getOrCreateClient directly
 // never touch the daemon broker; the SDK sets it from the `lsp.shared` setting at
 // session creation and on every later change. Only consulted at cold-start, so
