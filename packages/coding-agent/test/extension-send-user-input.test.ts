@@ -302,9 +302,8 @@ describe("pi.sendUserInput", () => {
 		const result = await api.sendUserInput("/jobs");
 		await session.waitForIdle();
 
-		expect(result.handled).toBe("command");
-		expect(result.output).toBeString();
-		expect(result.output?.length).toBeGreaterThan(0);
+		// What `/jobs` prints in a session with no background jobs, so the result proves the handler ran.
+		expect(result).toEqual({ handled: "command", output: expect.stringContaining("No background jobs running.") });
 		expect(userTurns(started)).toHaveLength(0);
 	});
 
