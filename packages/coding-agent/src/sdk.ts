@@ -355,7 +355,14 @@ import { cfgTtsr } from "./export/ttsr-settings";
 import { cfgDisabledProviders, cfgEnabledModels, cfgEnabledProviders, cfgModelRoles } from "./config/model-settings";
 import { cfgEditRecoverInlineEdits } from "./edit/settings";
 import { cfgGoalEnabled } from "./goals/settings";
-import { cfgImagesBlockImages, cfgStartupQuiet, cfgTuiReactions, cfgTuiRenderMermaid } from "./modes/settings";
+import {
+	cfgImagesBlockImages,
+	cfgStartupQuiet,
+	cfgTuiReactions,
+	cfgTuiAutoGraph,
+	cfgTuiRenderMermaid,
+	cfgTuiRenderSvg,
+} from "./modes/settings";
 import { cfgLspEnabled, cfgLspLazy, cfgLspShared } from "./lsp/settings";
 import {
 	cfgMcpEnableProjectConfig,
@@ -834,6 +841,12 @@ export interface CreateAgentSessionOptions {
 	 * other session gets no `cfg://` in its prompt and has writes refused. Default: false.
 	 */
 	settingsApproval?: boolean;
+	/**
+	 * Replies render in omp's own TUI transcript, which draws Mermaid, ```svg
+	 * figures and table charts; only then does the system prompt mention them.
+	 * Print, RPC, ACP and subagent sessions read replies as text. Default: false.
+	 */
+	tuiTranscript?: boolean;
 	/**
 	 * Defer `confirm` reserve-policy fallback until AgentSession prompt-time UI is configured.
 	 * ACP uses this while capabilities are negotiated without enabling UI-only tools.
@@ -2046,6 +2059,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 	// which rules are bucketed into this session at all.
 	const isSubagentSession = (options.taskDepth ?? 0) > 0 || Boolean(options.parentTaskPrefix);
 	const agentKind: AgentKind = isSubagentSession ? SUB_AGENT_RULE_NAME : MAIN_AGENT_RULE_NAME;
+	// Visuals (Mermaid, SVG figures, table charts) are drawn only in the top-level TUI transcript.
+	const tuiTranscript = options.tuiTranscript === true && !isSubagentSession;
 	const resolvedAgentName = (options.agentName ?? agentKind).trim().toLowerCase();
 
 	// Discover rules and bucket them in one pass to avoid repeated scans over large rule sets.
@@ -3161,7 +3176,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				modelFallbackMessage =
 					patterns && patterns.length > 0
 						? `No model available matching enabledModels (${patterns.join(", ")}) with usable credentials. Configure auth for an allowed provider or adjust enabledModels.`
-						: "No models available. Use /login or set an API key environment variable. Then use /model to select a model.";
+						: "No default model selected. Use /login, set an API key environment variable, or select a local model with /model or --model.";
 			}
 		}
 
@@ -3893,7 +3908,9 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				includeModelInPrompt: cfgIncludeModelInPrompt.get(settings),
 				personality: agentKind === "sub" ? "none" : cfgPersonality.get(settings),
 				subagent: agentKind === "sub",
-				renderMermaid: cfgTuiRenderMermaid.get(settings),
+				renderMermaid: tuiTranscript && cfgTuiRenderMermaid.get(settings),
+				renderSvg: tuiTranscript && cfgTuiRenderSvg.get(settings),
+				autoGraph: tuiTranscript && cfgTuiAutoGraph.get(settings) !== "off",
 				reactions: agentKind === "main" && options.hasUI === true && cfgTuiReactions.get(settings),
 				activeRepoContext,
 			});

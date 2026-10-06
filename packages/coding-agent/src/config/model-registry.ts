@@ -45,7 +45,7 @@ import {
 	resolveOllamaModelCacheProviderId,
 } from "@oh-my-pi/pi-catalog/provider-models";
 import { toModelSpec } from "@oh-my-pi/pi-catalog/provider-models/bundled-references";
-import { modelKind, type ModelKind } from "@oh-my-pi/pi-catalog/types";
+import { apiServesKind, modelKind, type ModelKind } from "@oh-my-pi/pi-catalog/types";
 import { getAgentDir, isBunTestRuntime, logger, wrapFetchForExtraCa } from "@oh-my-pi/pi-utils";
 import { resolveProviderModelReference } from "../config/model-resolver";
 import { generateCodexAttestation } from "../live/attestation";
@@ -98,6 +98,7 @@ import {
 	resolveProviderBaseUrl,
 	type ProviderOverride,
 	providersWithAuthoritativeProjectCatalog,
+	unservedOverrideKind,
 } from "./model-patch";
 import {
 	BUILT_IN_DISCOVERY_CACHE_TTL_MS,
@@ -280,6 +281,9 @@ export class ModelRegistry {
 	#customModelOverlays: CustomModelOverlay[] = [];
 	#providerOverrides: Map<string, ProviderOverride> = new Map();
 	#modelOverrides: Map<string, Map<string, ModelOverride>> = new Map();
+	// `provider/id:kind` of modelOverrides kinds already reported as unserved, so
+	// every rebuild does not log the same ignored override again.
+	#warnedUnservedOverrideKinds: Set<string> = new Set();
 	#configError: ConfigError | undefined = undefined;
 	#modelsConfigFile: ConfigFile<ModelsConfig>;
 	#lastStaticLoadMtime: number | null = null;
@@ -2542,6 +2546,7 @@ export class ModelRegistry {
 	 * both, so the clamp must hold on both.
 	 */
 	#applyModelOverrideWithClamp(model: Model<Api>, override: ModelOverride): Model<Api> {
+		this.#warnUnservedOverrideKind(model, override);
 		const overridden = applyModelOverride(model, override);
 		if (
 			override.contextWindow === undefined ||
@@ -2553,6 +2558,21 @@ export class ModelRegistry {
 		const clamped = clampCodexContextWindow(model, overridden.contextWindow);
 		if (clamped === overridden.contextWindow) return overridden;
 		return applyModelOverride(overridden, { contextWindow: clamped });
+	}
+
+	/** Logs, once per model and kind, a `modelOverrides` kind that `applyModelOverride` ignores. */
+	#warnUnservedOverrideKind(model: Model<Api>, override: ModelOverride): void {
+		const unservedKind = unservedOverrideKind(model, override);
+		if (unservedKind === undefined) return;
+		const warningKey = `${model.provider}/${model.id}:${unservedKind}`;
+		if (this.#warnedUnservedOverrideKinds.has(warningKey)) return;
+		this.#warnedUnservedOverrideKinds.add(warningKey);
+		logger.warn("modelOverrides kind ignored: the model's api does not serve it", {
+			provider: model.provider,
+			model: model.id,
+			kind: unservedKind,
+			api: override.api ?? model.api,
+		});
 	}
 
 	#applyHardcodedModelPolicies(models: Model<Api>[]): Model<Api>[] {
@@ -2607,6 +2627,7 @@ export class ModelRegistry {
 		if (!overrides) {
 			return applyModelOverride(model, { contextWindow: 1_000_000 });
 		}
+		this.#warnUnservedOverrideKind(model, overrides);
 		return applyModelOverride(model, {
 			contextWindow: overrides.contextWindow ?? 1_000_000,
 			...overrides,
@@ -3307,7 +3328,18 @@ export class ModelRegistry {
 							config.remoteCompaction,
 							modelDef as CustomModelDefinitionLike,
 						);
-						if (overlay) results.push(finalizeCustomModel(overlay, { useDefaults: true }));
+						if (!overlay) continue;
+						// Static registrations fail validation on this mismatch; a live row is dropped instead.
+						if (overlay.kind !== undefined && !apiServesKind(overlay.api, overlay.kind)) {
+							logger.warn("fetchDynamicModels row dropped: its api does not serve its kind", {
+								provider: providerName,
+								model: overlay.id,
+								kind: overlay.kind,
+								api: overlay.api,
+							});
+							continue;
+						}
+						results.push(finalizeCustomModel(overlay, { useDefaults: true }));
 					}
 					return results.map(toModelSpec);
 				},
@@ -3432,6 +3464,7 @@ export interface ProviderConfigInput {
 		id: string;
 		name: string;
 		api?: Api;
+		kind?: ModelKind;
 		baseUrl?: string;
 		reasoning: boolean;
 		thinking?: ThinkingConfig;

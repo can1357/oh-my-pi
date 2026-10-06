@@ -3,6 +3,7 @@
  */
 
 import type { Api, ModelSpec } from "@oh-my-pi/pi-ai/types";
+import { type ModelKind, servedKinds } from "@oh-my-pi/pi-catalog/types";
 import { ConfigFile } from "./config-file";
 import type { ModelsConfig, ProviderAuthMode, ProviderDiscovery } from "./models-config-schema";
 import { getModelsConfigSchema } from "./models-config-schema-bundle";
@@ -12,6 +13,7 @@ export type ProviderValidationMode = "models-config" | "runtime-register";
 export interface ProviderValidationModel {
 	id: string;
 	api?: Api;
+	kind?: ModelKind;
 	contextWindow?: number;
 	supportsTools?: boolean;
 	maxTokens?: number;
@@ -30,9 +32,11 @@ export interface ProviderValidationConfig {
 	disableStrictTools?: boolean;
 	guardrailIdentifier?: string;
 	requestMetadata?: Record<string, string>;
-	modelOverrides?: Record<string, unknown>;
+	modelOverrides?: Record<string, { api?: Api; kind?: ModelKind }>;
 	models: ProviderValidationModel[];
 }
+
+const KIND_LIST = new Intl.ListFormat("en", { type: "disjunction" });
 
 export function validateProviderConfiguration(
 	providerName: string,
@@ -84,6 +88,15 @@ export function validateProviderConfiguration(
 		throw new Error(`Provider ${providerName}: "api" is required when discovery is enabled at provider level.`);
 	}
 
+	// Runners dispatch on `api`, so an explicit `kind` must be one its api serves. An
+	// omitted `kind` follows the api.
+	const checkKind = (subject: string, kind: ModelKind, api: Api) => {
+		const served = servedKinds(api);
+		if (served === undefined || served.includes(kind)) return;
+		throw new Error(
+			`Provider ${providerName}, ${subject}: kind "${kind}" does not match api "${api}", which serves kind ${KIND_LIST.format(served.map(k => `"${k}"`))}.`,
+		);
+	};
 	for (const modelDef of models) {
 		if (!hasProviderApi && !modelDef.api) {
 			throw new Error(
@@ -95,6 +108,8 @@ export function validateProviderConfiguration(
 		if (!modelDef.id) {
 			throw new Error(`Provider ${providerName}: model missing "id"`);
 		}
+		const api = modelDef.api ?? config.api;
+		if (modelDef.kind !== undefined && api !== undefined) checkKind(`model ${modelDef.id}`, modelDef.kind, api);
 		if (mode === "models-config") {
 			if (modelDef.contextWindow !== undefined && modelDef.contextWindow <= 0) {
 				throw new Error(`Provider ${providerName}, model ${modelDef.id}: invalid contextWindow`);
@@ -103,6 +118,15 @@ export function validateProviderConfiguration(
 				throw new Error(`Provider ${providerName}, model ${modelDef.id}: invalid maxTokens`);
 			}
 		}
+	}
+
+	// Only an api this file names is known here. Built-in, discovered, and `kind-apis`
+	// rows get their api later, so `applyModelOverride` checks their kind against it.
+	for (const [modelId, override] of Object.entries(config.modelOverrides ?? {})) {
+		if (override.kind === undefined) continue;
+		const declared = models.find(model => model.id === modelId);
+		const api = override.api ?? (declared ? (declared.api ?? config.api) : undefined);
+		if (api !== undefined) checkKind(`modelOverrides.${modelId}`, override.kind, api);
 	}
 }
 

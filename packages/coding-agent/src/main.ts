@@ -2188,6 +2188,7 @@ export async function runRootCommand(
 		sessionOptions.hasUI = isInteractive || mode === "rpc-ui";
 		sessionOptions.allowSessionModelFallback = isInteractive;
 		sessionOptions.settingsApproval = isInteractive;
+		sessionOptions.tuiTranscript = isInteractive;
 		sessionOptions.settings = settingsInstance;
 		sessionOptions.onPrewalkWarning = warning => {
 			if (isInteractive) notifs.push({ kind: "warn", message: warning });

@@ -201,6 +201,8 @@ export class AgentTranscriptViewer implements Component {
 			hideThinkingBlock: deps.hideThinkingBlock,
 			proseOnlyThinking: deps.proseOnlyThinking,
 			expandThinkingBlocks: deps.expandThinkingBlocks,
+			// Charts are for the main session's answers, not parked subagent, advisor, or guest transcripts.
+			tableCharts: false,
 			requestRender: deps.requestRender,
 		});
 		this.#browser = new TranscriptBrowser({
