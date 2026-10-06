@@ -6,6 +6,7 @@
 
 - Anthropic web search and Files API uploads follow `PI_ANTHROPIC_API_VERSION=2026-10-21`; web search omits `temperature` under that version ([#16706](https://github.com/can1357/oh-my-pi/pull/16706) by [@H4vC](https://github.com/H4vC))
 - llama.cpp auto-discovery now also finds local servers on llama-server's new default port 9931 when nothing answers on 8080 ([#16675](https://github.com/can1357/oh-my-pi/pull/16675) by [@bartbroere](https://github.com/bartbroere))
+- Interactive startup warns when omp runs on Bun older than 1.4, which still works but uses noticeably more memory and CPU; turning off `startup.checkUpdate` silences it too ([#14635](https://github.com/can1357/oh-my-pi/pull/14635) by [@jorgoose](https://github.com/jorgoose))
 
 ### Fixed
 
@@ -556,7 +557,6 @@
 - Extensions can observe and answer the interactive plan review, including refinement feedback and save-and-quit ([#14250](https://github.com/can1357/oh-my-pi/pull/14250) by [@rlfleming93](https://github.com/rlfleming93))
 - Added opt-in `omp gc --compress` (or `gc.compress`), which stores sessions idle for `gc.compressAfterDays` (default 7) with filesystem transparent compression (APFS, NTFS); they stay resumable and searchable ([#15600](https://github.com/can1357/oh-my-pi/pull/15600) by [@wolfiesch](https://github.com/wolfiesch))
 - Extensions can reopen a dismissed plan review while the session is idle (`ctx.openPlanReview()`) and pick the execution tier on `ctx.resolvePlanReview` (`input.role`); `plan_review_requested` now reports the slider's tiers ([#15552](https://github.com/can1357/oh-my-pi/pull/15552) by [@Shadorain](https://github.com/Shadorain))
-- Interactive startup warns when omp runs on Bun older than 1.4, which still works but uses noticeably more memory and CPU; turning off `startup.checkUpdate` silences it too ([#14635](https://github.com/can1357/oh-my-pi/pull/14635) by [@jorgoose](https://github.com/jorgoose))
 
 ### Changed
 
