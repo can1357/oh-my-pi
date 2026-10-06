@@ -14,7 +14,7 @@ import { createBackgroundTanDispatchBlock } from "@oh-my-pi/pi-tui/chat/backgrou
 import { BashExecutionComponent } from "@oh-my-pi/pi-tui/chat/bash-execution";
 import { detectCacheInvalidation } from "@oh-my-pi/pi-tui/chat/cache-invalidation-marker";
 import { ServedModelTracker } from "@oh-my-pi/pi-tui/chat/served-model-marker";
-import { CollabPromptMessageComponent } from "@oh-my-pi/pi-tui/chat/collab-prompt-message";
+import { RemotePromptMessageComponent } from "@oh-my-pi/pi-tui/chat/remote-prompt-message";
 import {
 	BranchSummaryMessageComponent,
 	CompactionSummaryMessageComponent,
@@ -60,6 +60,8 @@ import {
 	LSP_LATE_DIAGNOSTIC_MESSAGE_TYPE,
 	SKILL_PROMPT_MESSAGE_TYPE,
 	type SkillPromptDetails,
+	TELEGRAM_PROMPT_MESSAGE_TYPE,
+	type TelegramPromptDetails,
 } from "../../session/messages";
 import type { SessionContext, StrippedToolCallsMarker } from "../../session/session-context";
 import { executeBuiltinSlashCommand, lookupBuiltinSlashCommand } from "../../slash-commands/builtin-registry";
@@ -219,7 +221,15 @@ export class UiHelpers {
 						break;
 					}
 					if (message.customType === COLLAB_PROMPT_MESSAGE_TYPE) {
-						const component = new CollabPromptMessageComponent(message as CustomMessage<CollabPromptDetails>);
+						const component = new RemotePromptMessageComponent(message as CustomMessage<CollabPromptDetails>);
+						this.ctx.chatContainer.addChild(component);
+						break;
+					}
+					if (message.customType === TELEGRAM_PROMPT_MESSAGE_TYPE) {
+						const component = new RemotePromptMessageComponent(message as CustomMessage<TelegramPromptDetails>, {
+							fallbackFrom: "telegram",
+							via: "via Telegram",
+						});
 						this.ctx.chatContainer.addChild(component);
 						break;
 					}

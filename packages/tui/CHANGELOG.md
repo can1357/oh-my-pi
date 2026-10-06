@@ -8,6 +8,12 @@
 
 ### Added
 
+- Added the `telegram-prompt` custom message type: prompts relayed from Telegram render as the sender's prompt "via Telegram" in live and rebuilt transcripts ([#13532](https://github.com/can1357/oh-my-pi/pull/13532) by [@enyonee](https://github.com/enyonee))
+- Added display of subagent completion percent in agent tree, task, and wait views
+
+### Changed
+
+- Renamed `CollabPromptMessageComponent` (`chat/collab-prompt-message`) to `RemotePromptMessageComponent` (`chat/remote-prompt-message`); it now renders collab and Telegram prompts and strips control sequences from the sender name ([#13532](https://github.com/can1357/oh-my-pi/pull/13532) by [@enyonee](https://github.com/enyonee))
 - `ComposerNativeState.rate` shows a tok/s readout in the native composer bar after the effort chip, and `ComposerNativeState.thinkingInModel` draws the thinking level as the model chip's icon instead of a separate chip
 - `formatTooltipKey` formats a key for a native tooltip: unicode keycap glyphs whatever the symbol preset, `esc` for Escape
 - `ImageOptions.requestRender` repaints an image without an image budget once its SIXEL encode lands ([#14529](https://github.com/can1357/oh-my-pi/pull/14529) by [@H4vC](https://github.com/H4vC))

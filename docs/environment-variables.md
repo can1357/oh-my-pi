@@ -487,6 +487,7 @@ Shell subprocess filtering is separate (`packages/utils/src/env.ts`): it strips 
 | `PI_AUTO_QA_PUSH_URL`        | Endpoint override for auto QA grievance push; wins over the `dev.autoqaPush.endpoint` setting                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
 | `PI_AUTO_QA_PUSH_TOKEN` | Bearer-token override for auto QA grievance push; wins over `dev.autoqaPush.token` |
 | `PI_BROWSER_RELAY`           | `0`/`1` kill switch for the browser relay; overrides the `browser.relay` setting (relay auto-starts when Eval's browser API needs it)                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| `PI_TELEGRAM_BOT_TOKEN`      | BotFather token for the native Telegram bridge; takes precedence over the `telegram.botToken` setting (see [Telegram bridge](./telegram.md)). Never logged or printed; errors that may embed it are redacted.                                                                                                                                                                                                                                                                                                                                                                |
 
 ### Hindsight memory backend
 
@@ -653,6 +654,7 @@ export OTEL_EXPORTER_OTLP_TRACES_HEADERS="authorization=Bearer%20$LAMINAR_PROJEC
 Treat these as secrets; do not log or commit them:
 
 - Provider/API keys and OAuth/bearer credentials (all `*_API_KEY`, `*_TOKEN`, OAuth access/refresh tokens)
+- `PI_TELEGRAM_BOT_TOKEN` — a Telegram bot token grants full control of the bot
 - Cloud credentials (`AWS_*`, `GOOGLE_APPLICATION_CREDENTIALS` path may expose service-account material)
 - Search/provider auth vars (`EXA_API_KEY`, `BRAVE_API_KEY`, `PERPLEXITY_API_KEY`, Anthropic search keys)
 - Foundry mTLS material (`CLAUDE_CODE_CLIENT_CERT`, `CLAUDE_CODE_CLIENT_KEY`, `NODE_EXTRA_CA_CERTS` when it points to private CA bundles)

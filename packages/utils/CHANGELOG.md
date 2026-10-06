@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `getSessionPresenceDir()` and `getTelegramDir()` helpers for the agent subdirectories holding published session presence records and the Telegram bridge state ([#13532](https://github.com/can1357/oh-my-pi/pull/13532) by [@enyonee](https://github.com/enyonee))
 ### Breaking Changes
 
 - Replaced the `cursorPosition` option of `TerminalQueryResponder` with `hostCursorHandshake`, which leaves only the PTY host's own session-start cursor query unanswered instead of every cursor-position query
