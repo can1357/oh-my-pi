@@ -3975,7 +3975,9 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			: undefined;
 		const xdevReadAvailable =
 			builtInRegistryToolNames.has("read") &&
-			(explicitlyRequestedToolNameSet === undefined || explicitlyRequestedToolNameSet.has("read"));
+			(explicitlyRequestedToolNameSet === undefined ||
+				explicitlyRequestedToolNameSet.has("read") ||
+				toolSession.deviceOnlyRead === true);
 		const xdevWriteAvailable =
 			builtInRegistryToolNames.has("write") &&
 			(explicitlyRequestedToolNameSet === undefined ||
@@ -4042,9 +4044,9 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// Partition the initial enabled set for the xd:// transport. Tool instances
 		// remain in the canonical map; only presentation names move between layers.
 		// Mounting requires both transport halves in the granted set (`read xd://`
-		// discovers, `write xd://<tool>` executes); explicit-list sessions granted
-		// `read` without `write` can use the device-only transport registered by
-		// createTools without surfacing it when no device needs it.
+		// discovers, `write xd://<tool>` executes); explicit-list sessions that omit
+		// either can use the device-only transports registered by createTools
+		// without surfacing them when no device needs them.
 		if (toolSession.xdev) {
 			const topLevelToolNames: string[] = [];
 			const mountedNames: string[] = [];
@@ -4064,6 +4066,9 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				toolSession.getPlanModeState?.()?.enabled === true;
 			if (deviceTransportNeeded && xdevWriteAvailable && !initialToolNames.includes("write")) {
 				initialToolNames.push("write");
+			}
+			if (mountedNames.length > 0 && xdevReadAvailable && !initialToolNames.includes("read")) {
+				initialToolNames.push("read");
 			}
 		}
 
@@ -4430,10 +4435,12 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// (defaulting to read/grep/glob).
 		const advisorToolSession: ToolSession = {
 			...toolSession,
-			// The primary may carry a dormant xd:// write transport. Advisors use
-			// their own configured tool slate, so a selected write is always full.
+			// The primary may carry dormant xd:// read/write transports. Advisors use
+			// their own configured tool slate, so a selected read or write is always full.
 			deviceOnlyWrite: undefined,
 			pendingFullWriteDescription: undefined,
+			deviceOnlyRead: undefined,
+			pendingFullReadDescription: undefined,
 			get cwd() {
 				return sessionManager.getCwd();
 			},
@@ -4582,6 +4589,13 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			},
 			setPendingFullWriteDescription: enabled => {
 				toolSession.pendingFullWriteDescription = enabled ? true : undefined;
+			},
+			isDeviceOnlyRead: () => toolSession.deviceOnlyRead === true,
+			setDeviceOnlyRead: enabled => {
+				toolSession.deviceOnlyRead = enabled ? true : undefined;
+			},
+			setPendingFullReadDescription: enabled => {
+				toolSession.pendingFullReadDescription = enabled ? true : undefined;
 			},
 			ensureGoalRegistered,
 			reconcileSettingsGatedTools,
@@ -4759,7 +4773,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 						toolSession.xdev !== undefined &&
 						builtInRegistryToolNames.has("read") &&
 						builtInRegistryToolNames.has("write") &&
-						enabled.includes("read") &&
+						(enabled.includes("read") || toolSession.deviceOnlyRead === true) &&
 						(enabled.includes("write") || toolSession.deviceOnlyWrite === true) &&
 						isMountableUnderXdev(liveTool);
 					const nextMounted = shouldMount

@@ -376,8 +376,8 @@ export interface ToolSession {
 	 * Set when this session's `write` tool was granted only as the `xd://`
 	 * transport: `write xd://<tool>` dispatches mounted devices, but filesystem
 	 * writes are rejected. Granted by {@link createTools} to sessions whose
-	 * explicit tool list includes `read` but omits `write`, so xd:// mounting
-	 * can engage without expanding the write contract.
+	 * explicit tool list omits `write`, so xd:// mounting can engage without
+	 * expanding the write contract.
 	 */
 	deviceOnlyWrite?: boolean;
 	/**
@@ -386,6 +386,18 @@ export interface ToolSession {
 	 * remains restricted until the activation commits.
 	 */
 	pendingFullWriteDescription?: boolean;
+	/**
+	 * Set when this session's `read` tool was granted only as the `xd://`
+	 * documentation transport: `read xd://<tool>` loads device docs, but every
+	 * other path, URI, and URL is rejected. Granted by {@link createTools} to
+	 * sessions whose explicit tool list omits `read`.
+	 */
+	deviceOnlyRead?: boolean;
+	/**
+	 * Prompt-only preview used while a full-read activation rebuilds. It changes
+	 * the advertised schema without relaxing {@link deviceOnlyRead}.
+	 */
+	pendingFullReadDescription?: boolean;
 	/** Agent registry for IRC routing across live sessions. */
 	agentRegistry?: AgentRegistry;
 	/** Idle→parked→revive lifecycle owner; lets explicit cancellation stop a non-job-backed agent registration. Default: AgentLifecycleManager.global(). */
@@ -847,6 +859,10 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 		session.deviceOnlyWrite = undefined;
 		session.pendingFullWriteDescription = undefined;
 	}
+	if (requestedTools === undefined || requestedTools.includes("read")) {
+		session.deviceOnlyRead = undefined;
+		session.pendingFullReadDescription = undefined;
+	}
 	const allTools: Record<string, ToolFactory> = { ...BUILTIN_TOOLS, ...HIDDEN_TOOLS };
 	const baseEntries = names.map(name => [name, allTools[name]] as const);
 
@@ -870,22 +886,18 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 	for (const tool of tools) toolRegistry.set(tool.name, tool);
 
 	const xdevRequested = !restrictToolNames && cfgToolsXdev.get(session.settings);
-	// xd:// mounting rides the write tool as its execution transport, so a
-	// session whose explicit tool list grants `read` but omits `write` would
+	// xd:// mounting rides `read` (device docs) and `write` (dispatch) as its
+	// transports, so a session whose explicit tool list omits either would
 	// allocate no xd:// state and expose every later-registered MCP/extension
 	// tool top-level with its full schema on every request — the opposite of
 	// the intended restriction, and enough to overflow narrow provider context
-	// windows on MCP-heavy sessions. Grant a device-only `write` instead:
-	// `write xd://<tool>` dispatches mounted devices while filesystem writes
-	// stay rejected (enforced by WriteTool via `session.deviceOnlyWrite`). No
-	// capability is expanded: without mounting, those tools were already
-	// presented — and callable — top-level.
-	if (
-		xdevRequested &&
-		requestedTools !== undefined &&
-		!tools.some(tool => tool.name === "write") &&
-		tools.some(tool => tool.name === "read")
-	) {
+	// windows on MCP-heavy sessions. Grant device-only transports instead:
+	// `write xd://<tool>` dispatches mounted devices and `read xd://<tool>`
+	// loads their docs, while filesystem access stays rejected (enforced via
+	// `session.deviceOnlyWrite` / `session.deviceOnlyRead`). No capability is
+	// expanded: without mounting, those tools were already presented — and
+	// callable — top-level.
+	if (xdevRequested && requestedTools !== undefined && !tools.some(tool => tool.name === "write")) {
 		session.deviceOnlyWrite = true;
 		const writeTool = await logger.time("createTools:write:xdev-transport", BUILTIN_TOOLS.write, session);
 		if (writeTool) {
@@ -895,6 +907,18 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 			builtInNames.add(wrapped.name);
 		} else {
 			session.deviceOnlyWrite = undefined;
+		}
+	}
+	if (xdevRequested && requestedTools !== undefined && !tools.some(tool => tool.name === "read")) {
+		session.deviceOnlyRead = true;
+		const readTool = await logger.time("createTools:read:xdev-transport", BUILTIN_TOOLS.read, session);
+		if (readTool) {
+			const wrapped = wrapToolWithMetaNotice(readTool);
+			tools.push(wrapped);
+			toolRegistry.set(wrapped.name, wrapped);
+			builtInNames.add(wrapped.name);
+		} else {
+			session.deviceOnlyRead = undefined;
 		}
 	}
 

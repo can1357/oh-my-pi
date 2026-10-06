@@ -148,7 +148,7 @@ describe("createTools", () => {
 	});
 
 	it("includes hidden tools when explicitly requested", async () => {
-		const session = createTestSession();
+		const session = createTestSession({ restrictToolNames: true });
 		const tools = await createTools(session, ["yield"]);
 		const names = tools.map(t => t.name);
 
@@ -287,7 +287,7 @@ describe("createTools", () => {
 	});
 
 	it("records active tools on the original session object", async () => {
-		const session = createTestSession();
+		const session = createTestSession({ restrictToolNames: true });
 
 		await createTools(session, ["bash"]);
 

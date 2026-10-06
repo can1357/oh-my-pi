@@ -46,6 +46,7 @@ import {
 } from "../internal-urls";
 import { isMarkdownPath } from "@oh-my-pi/pi-tui/lang-from-path";
 import readDescription from "../prompts/tools/read.md" with { type: "text" };
+import readDeviceOnlyDescription from "../prompts/tools/read-device-only.md" with { type: "text" };
 import type { ToolSession } from "../sdk";
 import {
 	DEFAULT_MAX_BYTES,
@@ -682,6 +683,10 @@ const readSchema = type({
 	path: type("string").describe("Local path, internal URI, or URL; selectors inline."),
 });
 
+const readDeviceOnlySchema = type({
+	path: type("string").describe("Device docs URI: xd:// or xd://<tool>; selectors inline."),
+});
+
 export type ReadToolInput = typeof readSchema.infer;
 
 type ReadParams = ReadToolInput;
@@ -794,6 +799,7 @@ async function assessLocalReadSpeculation(
 	args: Readonly<Record<string, unknown>>,
 ): Promise<ToolSpeculationAssessment> {
 	if (getReadTextFileBridge(session)) return LOCAL_READ_SPECULATION_INELIGIBLE;
+	if (session.deviceOnlyRead === true) return LOCAL_READ_SPECULATION_INELIGIBLE;
 	if (typeof args.path !== "string") return LOCAL_READ_SPECULATION_INELIGIBLE;
 	const target = splitPathAndSel(args.path);
 	if (
@@ -847,7 +853,10 @@ async function assessLocalReadSpeculation(
  */
 export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 	readonly name = "read";
-	readonly readsSkillUris = true;
+	/** A device-only transport reads `xd://` docs alone, so it cannot carry skill guidance. */
+	get readsSkillUris(): boolean {
+		return !this.#deviceOnly;
+	}
 	readonly approval = (args: unknown): ToolTier => {
 		let readPath = "";
 		if (args && typeof args === "object" && "path" in args) readPath = String(args.path ?? "");
@@ -859,14 +868,24 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 	};
 	readonly label = "Read";
 	readonly loadMode = "essential";
+	/**
+	 * Set while this tool is only the `xd://` documentation transport. A pending
+	 * full-read preview widens the advertised schema, never execution access.
+	 */
+	get #deviceOnly(): boolean {
+		return this.session.deviceOnlyRead === true && this.session.pendingFullReadDescription !== true;
+	}
 	/** Rendered per access so the hashline guidance follows a live `edit.mode` change. */
 	get description(): string {
+		if (this.#deviceOnly) return prompt.render(readDeviceOnlyDescription);
 		return prompt.render(readDescription, {
 			IS_HL_MODE: resolveFileDisplayMode(this.session).hashLines,
 			BINARY_VIEWS: cfgIdaAvailable.get(this.session.settings),
 		});
 	}
-	readonly parameters = readSchema;
+	get parameters(): typeof readSchema {
+		return this.#deviceOnly ? readDeviceOnlySchema : readSchema;
+	}
 	readonly strict = true;
 
 	readonly speculation = {
@@ -1551,6 +1570,9 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		lexicalAbsolutePath?: string,
 	): Promise<AgentToolResult<ReadToolDetails>> {
 		let { path: readPath } = params;
+		if (this.session.deviceOnlyRead === true && !readPath.startsWith("xd://")) {
+			throw new ToolError("This read tool only accepts xd:// device documentation paths.");
+		}
 		if (readPath.startsWith("file://")) {
 			readPath = expandPath(readPath);
 		}

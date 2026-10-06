@@ -272,6 +272,12 @@ export interface AgentSessionConfig {
 	setDeviceOnlyWrite?: (enabled: boolean) => void;
 	/** Previews the full-write description without changing execution access. */
 	setPendingFullWriteDescription?: (enabled: boolean) => void;
+	/** Reports whether the registered read tool is currently transport-only. */
+	isDeviceOnlyRead?: () => boolean;
+	/** Switches the registered read tool between transport-only and full access. */
+	setDeviceOnlyRead?: (enabled: boolean) => void;
+	/** Previews the full-read description without changing execution access. */
+	setPendingFullReadDescription?: (enabled: boolean) => void;
 	/** Registers the hidden `goal` tool when goal mode is enabled at runtime. */
 	ensureGoalRegistered?: () => Promise<boolean>;
 	/** Re-resolves settings-gated tools against live settings; driven by `SessionTools.reconcileBuiltinTools`. */

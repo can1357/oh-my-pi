@@ -914,14 +914,20 @@ describe("device-only write transport for explicit lists omitting write", () => 
 		}
 	});
 
-	it("does not grant a transport write when read is also omitted", async () => {
+	it("rejects file access through transports when read and write are omitted", async () => {
 		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "write-xdev-no-transport-"));
 		try {
 			const session = xdevSession(tempDir);
 			const tools = await createTools(session, ["grep", "glob"]);
-			expect(tools.some(entry => entry.name === "write")).toBe(false);
-			expect(session.deviceOnlyWrite).toBeUndefined();
-			expect(session.xdev).toBeUndefined();
+			const read = tools.find(entry => entry.name === "read")!;
+			const write = tools.find(entry => entry.name === "write")!;
+			expect(session.deviceOnlyRead).toBe(true);
+			expect(session.deviceOnlyWrite).toBe(true);
+			const filePath = path.join(tempDir, "denied.txt");
+			await Bun.write(filePath, "secret");
+			await expect(read.execute("read-denied", { path: filePath })).rejects.toThrow("only accepts xd://");
+			await expect(write.execute("write-denied", { path: filePath, content: "changed" })).rejects.toThrow();
+			expect(await Bun.file(filePath).text()).toBe("secret");
 		} finally {
 			await removeWithRetries(tempDir);
 		}

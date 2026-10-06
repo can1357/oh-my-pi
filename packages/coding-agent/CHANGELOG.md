@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed sessions whose explicit tool list omits `read` (for example `--tools bash,wait`) exposing every MCP and extension tool top-level with full schemas; a device-only `read` now serves `xd://` docs while rejecting every other path, internal URI, and URL.
+
 ## [18.7.0] - 2026-10-06
 
 ### Added
