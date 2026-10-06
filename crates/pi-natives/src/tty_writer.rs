@@ -350,9 +350,9 @@ impl TtyWriter {
 			return;
 		};
 		let drained = self.flush_sync(flush_timeout_ms);
-		// Store under `back`: the idle pump checks `stop` under that lock and then
-		// parks, so a store and notify landing between the two would be lost and
-		// the join below would wait forever.
+		// Store under `back`: the idle pump checks `stop` under that lock and
+		// then parks, so a store and notify landing between the two would
+		// be lost and the join below would wait forever.
 		{
 			let _back = self.inner.back.lock();
 			self.inner.stop.store(true, Ordering::Release);
@@ -472,7 +472,8 @@ mod tests {
 	fn discard_drops_queued_output_and_keeps_later_writes() {
 		let (read_fd, write_fd) = pipe_pair();
 		let mut writer = TtyWriter::new(write_fd).unwrap();
-		// No reader yet: the pump claims the whole push and blocks once the pipe fills.
+		// No reader yet: the pump claims the whole push and blocks once the pipe
+		// fills.
 		push(&writer, &vec![b'x'; 4 * 1024 * 1024]);
 		// Discard only once the pump has claimed the push, so the in-flight
 		// abort path runs rather than the unclaimed-`back` clear alone.
