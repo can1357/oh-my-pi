@@ -8,7 +8,7 @@ function acpRuntime(
 ) {
 	const settings = Settings.isolated({
 		"computer.enabled": options.enabled ?? false,
-		"computer.display": options.display ?? "all",
+		"computer.display": options.display ?? "active",
 		"computer.maxWidth": options.maxWidth ?? 1920,
 		"computer.maxHeight": options.maxHeight ?? 1200,
 	});
@@ -27,7 +27,7 @@ function acpRuntime(
 }
 
 const enabledStatus =
-	"Computer use: enabled · prelude: active · configured: display=all, maxWidth=1920, maxHeight=1200";
+	"Computer use: enabled · prelude: active · configured: display=active, maxWidth=1920, maxHeight=1200";
 
 describe("/computer slash command", () => {
 	it("toggles a disabled session on without persisting", async () => {

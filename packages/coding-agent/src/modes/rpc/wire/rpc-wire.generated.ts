@@ -453,6 +453,30 @@ export interface GoalResult {
 	state: GoalModeState | null;
 }
 
+/** Where `/slow` lives: persisted config shared by every session, or this session's flex tier. */
+export type SlowModeScope = "session" | "global";
+
+/** Requests are served on the provider's low-priority (slow) lane. */
+export interface UsageLimitLowPriority {
+	stage: "low_priority";
+	/** Epoch seconds when the limit that was hit resets. */
+	resetsAtSec: number;
+	/** Percent of the low-priority allowance still available, when reported. */
+	allowanceLeftPercent?: number;
+}
+
+/** Requests run on a short wrap-up allowance past the limit. */
+export interface UsageLimitWrapUp {
+	stage: "wrap_up";
+	/** Whether paid extra usage serves requests once the allowance is spent. */
+	extraUsage: boolean;
+	/** Epoch seconds when the limit that was hit resets, if reported. */
+	resetsAtSec?: number;
+}
+
+/** Provider-neutral state of an account past its usage limit, discriminated by `stage`. */
+export type UsageLimitState = UsageLimitLowPriority | UsageLimitWrapUp;
+
 export interface SessionState {
 	sessionId: string;
 	model?: ModelInfo;
@@ -467,6 +491,14 @@ export interface SessionState {
 	autoCompactionEnabled?: boolean;
 	fastModeEnabled?: boolean;
 	fastModeActive?: boolean;
+	/** `/slow` applies to the active model. */
+	slowModeSupported?: boolean;
+	/** `/slow` is on for the active model; always `false` when `slowModeSupported` is `false`. */
+	slowModeEnabled?: boolean;
+	/** Where the active model's `/slow` lives; absent when unsupported. */
+	slowModeScope?: SlowModeScope;
+	/** Usage-limit stage of the active model's account; absent outside wrap-up and low priority. */
+	usageLimit?: UsageLimitState;
 	tokensPerSecond?: number | null;
 	messageCount?: number;
 	queuedMessageCount?: number;
@@ -539,10 +571,30 @@ export interface OpenSessionResult {
 
 export interface RemoveQueuedMessageResult {
 	removed: boolean;
+	/** The removed message's images, so the client can restore them with its text. */
+	images?: ImageContent[];
+	/** Only ever `true`: the images exceeded the transport limit and were omitted; the removal still happened. */
+	imagesDropped?: boolean;
 }
 
 export interface PromoteQueuedMessageResult {
 	promoted: boolean;
+}
+
+/** Queued user content withdrawn from the queue, as the editor would restore it. */
+export interface RestoredQueuedMessage {
+	text: string;
+	images?: ImageContent[];
+}
+
+/** User-authored queued input withdrawn before the abort, oldest first. */
+export interface AbortAndRestoreQueueResult {
+	steering: RestoredQueuedMessage[];
+	followUp: RestoredQueuedMessage[];
+	/** Only ever `true`: the full result exceeded the transport limit and every `images` was omitted. */
+	imagesDropped?: boolean;
+	/** Only ever `true`: even the text-only result exceeded the limit, so only an oldest-first prefix is listed. */
+	truncated?: boolean;
 }
 
 export interface BranchMessage {
@@ -650,6 +702,32 @@ export interface SubagentMessages {
 	reset: boolean;
 	entries: Record<string, unknown>[];
 	messages: AgentMessage[];
+}
+
+/** Side-question turn lifecycle; `interrupted` marks a turn whose process died while it ran. */
+export type BtwStatus = "running" | "complete" | "cancelled" | "error" | "interrupted";
+
+/** One question and its answer within a side-question topic. */
+export interface BtwHistoryTurn {
+	question: string;
+	answer: string;
+	status: BtwStatus;
+	createdAt: number;
+	updatedAt: number;
+	error?: string;
+}
+
+/** A side-question topic: its first turn's fields plus follow-ups; the latest turn is the last follow-up, else the record. */
+export interface BtwHistoryRecord {
+	question: string;
+	answer: string;
+	status: BtwStatus;
+	createdAt: number;
+	updatedAt: number;
+	id: string;
+	leafId: string | null;
+	error?: string;
+	followUps?: BtwHistoryTurn[];
 }
 
 export interface LoginProvider {
@@ -1034,6 +1112,19 @@ export interface LiveEndEvent {
 	error?: string;
 }
 
+/** Text appended to the running side question's latest answer. */
+export interface BtwDeltaEvent {
+	type: "btw_delta";
+	recordId: string;
+	delta: string;
+}
+
+/** Full side-question record on every lifecycle change (started, complete, cancelled, error); the last one per id wins. */
+export interface BtwRecordEvent {
+	type: "btw_record";
+	record: BtwHistoryRecord;
+}
+
 /** Output of a builtin slash command. */
 export interface CommandOutputEvent {
 	type: "command_output";
@@ -1339,7 +1430,7 @@ export interface HostUriSchemeDefinition {
 }
 
 /** Unsolicited outbound frame (everything except responses and host tool/URI requests), discriminated by `type`. */
-export type RpcNotification = ReadyEvent | PromptResultEvent | SessionSettledEvent | ExtensionError | ExtensionUiRequest | AvailableCommandsUpdateEvent | SubagentLifecycleEvent | SubagentProgressEvent | SubagentEvent | LivePhaseEvent | LiveLevelsEvent | LiveTranscriptEvent | LiveEndEvent | CommandOutputEvent | SessionInfoUpdateEvent | ConfigUpdateEvent | RpcFrameErrorEvent | RpcAgentEvent;
+export type RpcNotification = ReadyEvent | PromptResultEvent | SessionSettledEvent | ExtensionError | ExtensionUiRequest | AvailableCommandsUpdateEvent | SubagentLifecycleEvent | SubagentProgressEvent | SubagentEvent | LivePhaseEvent | LiveLevelsEvent | LiveTranscriptEvent | LiveEndEvent | BtwDeltaEvent | BtwRecordEvent | CommandOutputEvent | SessionInfoUpdateEvent | ConfigUpdateEvent | RpcFrameErrorEvent | RpcAgentEvent;
 
 /** Any frame the server writes to stdout (after reassembling `rpc_chunk` sequences), discriminated by `type`. */
 export type RpcServerFrame = RpcResponse | RpcHostRequest | RpcNotification;
@@ -1392,9 +1483,19 @@ export interface NewSessionParams {
 
 export interface OpenSessionParams {
 	sessionDir: string;
+	provider?: string;
+	modelId?: string;
 }
 
 export interface SetFastModeParams {
+	enabled: boolean;
+}
+
+export interface SetSlowModeParams {
+	enabled: boolean;
+}
+
+export interface SetSlowModeResult {
 	enabled: boolean;
 }
 
@@ -1565,6 +1666,8 @@ export interface ExportHtmlResult {
 
 export interface SwitchSessionParams {
 	sessionPath: string;
+	provider?: string;
+	modelId?: string;
 }
 
 export interface BranchParams {
@@ -1628,6 +1731,27 @@ export interface PredictWordFeedbackParams {
 	accepted: boolean;
 }
 
+export interface BtwParams {
+	question: string;
+	recordId?: string;
+}
+
+export interface BtwResult {
+	record: BtwHistoryRecord;
+}
+
+export interface BtwCancelParams {
+	recordId?: string;
+}
+
+export interface BtwCancelResult {
+	cancelled: boolean;
+}
+
+export interface GetBtwHistoryResult {
+	records: BtwHistoryRecord[];
+}
+
 /** Every RPC command's parameters and successful response `data`. */
 export interface RpcWireCommands {
 	negotiate_protocol: { params: NegotiateProtocolParams; result: NegotiateProtocolResult };
@@ -1638,10 +1762,12 @@ export interface RpcWireCommands {
 	promote_queued_message: { params: PromoteQueuedMessageParams; result: PromoteQueuedMessageResult };
 	abort: { params: undefined; result: undefined };
 	abort_and_prompt: { params: AbortAndPromptParams; result: undefined };
+	abort_and_restore_queue: { params: undefined; result: AbortAndRestoreQueueResult };
 	new_session: { params: NewSessionParams; result: CancellationResult };
 	open_session: { params: OpenSessionParams; result: OpenSessionResult };
 	get_state: { params: undefined; result: SessionState };
 	set_fast_mode: { params: SetFastModeParams; result: FastModeResult };
+	set_slow_mode: { params: SetSlowModeParams; result: SetSlowModeResult };
 	goal: { params: GoalParams; result: GoalResult };
 	set_ask_dialog: { params: SetAskDialogParams; result: SetAskDialogResult };
 	get_available_commands: { params: undefined; result: GetAvailableCommandsResult };
@@ -1690,4 +1816,7 @@ export interface RpcWireCommands {
 	login: { params: LoginParams; result: LoginResult };
 	predict_word: { params: PredictWordParams; result: PredictWordResult };
 	predict_word_feedback: { params: PredictWordFeedbackParams; result: undefined };
+	btw: { params: BtwParams; result: BtwResult };
+	btw_cancel: { params: BtwCancelParams; result: BtwCancelResult };
+	get_btw_history: { params: undefined; result: GetBtwHistoryResult };
 }

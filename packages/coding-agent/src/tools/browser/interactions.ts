@@ -1,8 +1,9 @@
 import * as path from "node:path";
 import { untilAborted } from "@oh-my-pi/pi-utils";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
-import type { ElementHandle, KeyInput, MouseButton, Page } from "puppeteer-core";
-import { throwIfAborted } from "../tool-errors";
+import type { ElementHandle, KeyInput, KeyPressOptions, MouseButton, Page } from "puppeteer-core";
+import { ToolAbortError, throwIfAborted } from "../tool-errors";
+import { splitKeyCombo, ternKey } from "./tern/keys";
 
 /** Options accepted by coordinate-based mouse clicks. */
 export interface ClickAtOptions {
@@ -10,6 +11,12 @@ export interface ClickAtOptions {
 	button?: MouseButton;
 	/** Number of clicks to dispatch. */
 	clickCount?: number;
+}
+
+/** Options accepted by element clicks. */
+export interface ElementClickOptions extends ClickAtOptions {
+	/** Accept an `opacity:0` element, such as a custom checkbox's real input under its drawn box. */
+	transparent?: boolean;
 }
 
 /** Options accepted by pointer movement. */
@@ -77,16 +84,20 @@ interface PageShadowRoot {
 interface PageElement {
 	readonly tagName: string;
 	id: string;
+	readonly isConnected: boolean;
 	type: string;
 	checked: boolean;
 	files: unknown;
 	inert: boolean;
+	readonly labels?: ArrayLike<PageElement> | null;
+	matches(selector: string): boolean;
 	readonly classList: ArrayLike<string>;
 	readonly dataset: Record<string, string>;
 	readonly style: Record<string, string>;
 	parentElement: PageElement | null;
 	shadowRoot: PageShadowRoot | null;
 	getBoundingClientRect(): PageRect;
+	getClientRects(): ArrayLike<PageRect>;
 	getRootNode(): PageRoot;
 	contains(other: PageElement): boolean;
 	getAttribute(name: string): string | null;
@@ -119,62 +130,141 @@ interface PageGlobals {
 	DragEvent: new (type: string, options: { bubbles: boolean; cancelable: boolean; dataTransfer: unknown }) => unknown;
 }
 
+/** A click aborted while its element was still refused; `refusal` names the last failed check. */
+export class ClickRefusedError extends ToolAbortError {
+	constructor(
+		readonly refusal: string,
+		options?: ErrorOptions,
+	) {
+		super(undefined, options);
+	}
+}
+
 function requireFiniteNumber(value: number, label: string): void {
 	if (!Number.isFinite(value)) throw new ToolError(`${label} must be a finite number`);
 }
 
-/** Return a visible point relative to the element's box, or explain why it cannot receive a click. */
-export async function isClickActionable(handle: ElementHandle, signal?: AbortSignal): Promise<ActionabilityResult> {
-	return (await untilAborted(signal, () =>
-		handle.evaluate(el => {
-			const element = el as unknown as PageElement;
-			const page = globalThis as unknown as PageGlobals;
-			const style = page.getComputedStyle(element);
-			if (style.display === "none") return { ok: false as const, reason: "display:none" };
-			if (style.visibility === "hidden" || style.visibility === "collapse") {
-				return { ok: false as const, reason: `visibility:${style.visibility}` };
-			}
-			if (style.pointerEvents === "none") return { ok: false as const, reason: "pointer-events:none" };
-			if (Number(style.opacity) === 0) return { ok: false as const, reason: "opacity:0" };
-			const rect = element.getBoundingClientRect();
-			if (rect.width < 1 || rect.height < 1) return { ok: false as const, reason: "zero-size" };
-			const left = Math.max(0, Math.min(page.innerWidth, rect.left));
-			const right = Math.max(0, Math.min(page.innerWidth, rect.right));
-			const top = Math.max(0, Math.min(page.innerHeight, rect.top));
-			const bottom = Math.max(0, Math.min(page.innerHeight, rect.bottom));
-			if (right - left < 1 || bottom - top < 1) return { ok: false as const, reason: "off-viewport" };
-			const x = Math.floor((left + right) / 2);
-			const y = Math.floor((top + bottom) / 2);
-			let topElement = page.document.elementFromPoint(x, y);
-			for (let depth = 0; topElement?.shadowRoot && depth < 16; depth++) {
-				const nested = topElement.shadowRoot.elementFromPoint(x, y);
-				if (!nested || nested === topElement) break;
-				topElement = nested;
-			}
-			if (!topElement) return { ok: false as const, reason: "elementFromPoint-null" };
-			const composedContains = (ancestor: PageElement, descendant: PageElement): boolean => {
-				for (let current: PageElement | null = descendant, depth = 0; current && depth < 64; depth++) {
-					if (current === ancestor) return true;
-					const root: PageRoot = current.getRootNode();
-					current = current.parentElement ?? root.host ?? null;
-				}
-				return false;
-			};
-			if (!composedContains(element, topElement) && !composedContains(topElement, element)) {
-				const tag = topElement.tagName.toLowerCase();
-				const id = topElement.id ? `#${topElement.id}` : "";
-				const classes = Array.from(topElement.classList)
-					.slice(0, 2)
-					.map(name => `.${name}`)
-					.join("");
-				return { ok: false as const, reason: "covered", coveredBy: `<${tag}${id}${classes}>` };
-			}
-			return { ok: true as const, x: x - rect.left, y: y - rect.top };
-		}),
-	)) as ActionabilityResult;
+/**
+ * Page function (self-contained; serialisable via `.toString()`): whether `descendant` is `ancestor` or
+ * sits inside it, crossing the shadow-root boundaries `Node.contains` stops at.
+ */
+export function composedContains(ancestor: unknown, descendant: unknown): boolean {
+	for (let current = descendant as PageElement | null; current;) {
+		if (current === ancestor) return true;
+		const root: PageRoot = current.getRootNode();
+		current = current.parentElement ?? root.host ?? null;
+	}
+	return false;
 }
 
-async function actionableClickPoint(handle: ElementHandle, label: string, signal?: AbortSignal): Promise<ClickPoint> {
+interface ClickFlags {
+	viaLabel: boolean;
+	transparent: boolean;
+}
+
+/** Page half of {@link isClickActionable}; `contains` is {@link composedContains}, bound in by `clickActionableInPage`. */
+function checkClickActionable(
+	el: unknown,
+	{ viaLabel, transparent }: ClickFlags,
+	contains: typeof composedContains,
+): ActionabilityResult {
+	const element = el as unknown as PageElement;
+	const page = globalThis as unknown as PageGlobals;
+	// A node the page replaced (e.g. a re-render) has no computed style; say so rather than misread it.
+	if (!element.isConnected) {
+		return { ok: false as const, reason: "detached (the page replaced this element; look it up again)" };
+	}
+	const style = page.getComputedStyle(element);
+	if (style.display === "none") return { ok: false as const, reason: "display:none" };
+	if (style.visibility === "hidden" || style.visibility === "collapse") {
+		return { ok: false as const, reason: `visibility:${style.visibility}` };
+	}
+	if (style.pointerEvents === "none") return { ok: false as const, reason: "pointer-events:none" };
+	if (!transparent && Number(style.opacity) === 0) return { ok: false as const, reason: "opacity:0" };
+	const rect = element.getBoundingClientRect();
+	if (rect.width < 1 || rect.height < 1) return { ok: false as const, reason: "zero-size" };
+	// A wrapped link's box centre can fall between its lines, on the parent; aim at its first visible line.
+	const fragments = Array.from(element.getClientRects());
+	const box =
+		fragments.length === 0
+			? rect
+			: fragments.find(
+					r =>
+						Math.min(page.innerWidth, r.right) - Math.max(0, r.left) >= 1 &&
+						Math.min(page.innerHeight, r.bottom) - Math.max(0, r.top) >= 1,
+				);
+	if (!box) return { ok: false as const, reason: "off-viewport" };
+	const left = Math.max(0, Math.min(page.innerWidth, box.left));
+	const right = Math.max(0, Math.min(page.innerWidth, box.right));
+	const top = Math.max(0, Math.min(page.innerHeight, box.top));
+	const bottom = Math.max(0, Math.min(page.innerHeight, box.bottom));
+	if (right - left < 1 || bottom - top < 1) return { ok: false as const, reason: "off-viewport" };
+	const x = Math.floor((left + right) / 2);
+	const y = Math.floor((top + bottom) / 2);
+	let topElement = page.document.elementFromPoint(x, y);
+	for (let depth = 0; topElement?.shadowRoot && depth < 16; depth++) {
+		const nested = topElement.shadowRoot.elementFromPoint(x, y);
+		if (!nested || nested === topElement) break;
+		topElement = nested;
+	}
+	if (!topElement) return { ok: false as const, reason: "elementFromPoint-null" };
+	// A label forwards a click to its control unless the hit is other interactive content inside it.
+	const interactiveContent =
+		'a[href], area[href], button, details, embed, iframe, input:not([type="hidden"]), label, select, textarea, summary, audio[controls], video[controls], [contenteditable=""], [contenteditable="true"]';
+	const hit: PageElement = topElement;
+	const forwardedBy = (owner: PageElement): boolean => {
+		let current: PageElement | null = hit;
+		while (current && current !== owner) {
+			if (current.matches(interactiveContent)) return false;
+			current = current.parentElement ?? current.getRootNode().host ?? null;
+		}
+		return current === owner;
+	};
+	const onTarget =
+		contains(element, topElement) ||
+		contains(topElement, element) ||
+		(viaLabel && Array.from(element.labels ?? []).some(forwardedBy));
+	if (!onTarget) {
+		const tag = topElement.tagName.toLowerCase();
+		const id = topElement.id ? `#${topElement.id}` : "";
+		const classes = Array.from(topElement.classList)
+			.slice(0, 2)
+			.map(name => `.${name}`)
+			.join("");
+		return { ok: false as const, reason: "covered", coveredBy: `<${tag}${id}${classes}>` };
+	}
+	return { ok: true as const, x: x - rect.left, y: y - rect.top };
+}
+
+/** {@link checkClickActionable} with {@link composedContains} bound in, as one self-contained page function. */
+const clickActionableInPage = new Function(
+	"el",
+	"flags",
+	`return (${checkClickActionable.toString()})(el, flags, ${composedContains.toString()});`,
+) as (el: unknown, flags: ClickFlags) => ActionabilityResult;
+
+/**
+ * Return a visible point relative to the element's box, or explain why it cannot receive a click.
+ * A left click on one of the control's own `<label>`s counts as on-target, since the label forwards it.
+ */
+export async function isClickActionable(
+	handle: ElementHandle,
+	signal?: AbortSignal,
+	options: Pick<ElementClickOptions, "button" | "transparent"> = {},
+): Promise<ActionabilityResult> {
+	const flags: ClickFlags = {
+		viaLabel: (options.button ?? "left") === "left",
+		transparent: options.transparent === true,
+	};
+	return await untilAborted(signal, () => handle.evaluate(clickActionableInPage, flags));
+}
+
+async function actionableClickPoint(
+	handle: ElementHandle,
+	label: string,
+	signal: AbortSignal | undefined,
+	options: ElementClickOptions,
+): Promise<ClickPoint> {
 	await untilAborted(signal, () =>
 		handle.evaluate(el => {
 			const element = el as unknown as PageElement;
@@ -182,25 +272,32 @@ async function actionableClickPoint(handle: ElementHandle, label: string, signal
 		}),
 	);
 	let previous = await untilAborted(signal, () => handle.boundingBox());
-	while (true) {
-		throwIfAborted(signal);
-		await untilAborted(signal, () => Bun.sleep(16));
-		const current = await untilAborted(signal, () => handle.boundingBox());
-		const stable =
-			previous !== null &&
-			current !== null &&
-			Math.abs(previous.x - current.x) < 0.5 &&
-			Math.abs(previous.y - current.y) < 0.5 &&
-			Math.abs(previous.width - current.width) < 0.5 &&
-			Math.abs(previous.height - current.height) < 0.5;
-		const result = await isClickActionable(handle, signal);
-		// ElementHandle.boundingBox() is relative to the main frame; elementFromPoint() above is frame-local.
-		if (stable && result.ok && current) return { x: current.x + result.x, y: current.y + result.y };
-		if (stable && !result.ok && result.coveredBy) {
-			throw new ToolError(`${label} blocked: covered by ${result.coveredBy}`);
+	let refusal: string | undefined;
+	try {
+		while (true) {
+			throwIfAborted(signal);
+			await untilAborted(signal, () => Bun.sleep(16));
+			const current = await untilAborted(signal, () => handle.boundingBox());
+			const stable =
+				previous !== null &&
+				current !== null &&
+				Math.abs(previous.x - current.x) < 0.5 &&
+				Math.abs(previous.y - current.y) < 0.5 &&
+				Math.abs(previous.width - current.width) < 0.5 &&
+				Math.abs(previous.height - current.height) < 0.5;
+			const result = await isClickActionable(handle, signal, options);
+			// ElementHandle.boundingBox() is relative to the main frame; elementFromPoint() above is frame-local.
+			if (stable && result.ok && current) return { x: current.x + result.x, y: current.y + result.y };
+			if (stable && !result.ok && result.coveredBy) {
+				throw new ToolError(`${label} blocked: covered by ${result.coveredBy}`);
+			}
+			refusal = result.ok ? "still moving" : result.coveredBy ? `covered by ${result.coveredBy}` : result.reason;
+			previous = current;
+			await untilAborted(signal, () => Bun.sleep(34));
 		}
-		previous = current;
-		await untilAborted(signal, () => Bun.sleep(34));
+	} catch (error) {
+		if (signal?.aborted && refusal !== undefined) throw new ClickRefusedError(refusal, { cause: signal.reason });
+		throw error;
 	}
 }
 
@@ -209,9 +306,9 @@ export async function clickElement(
 	handle: ElementHandle,
 	label: string,
 	signal?: AbortSignal,
-	options: ClickAtOptions = {},
+	options: ElementClickOptions = {},
 ): Promise<void> {
-	const point = await actionableClickPoint(handle, label, signal);
+	const point = await actionableClickPoint(handle, label, signal, options);
 	await untilAborted(signal, () =>
 		handle.frame.page().mouse.click(point.x, point.y, {
 			button: options.button,
@@ -221,7 +318,34 @@ export async function clickElement(
 }
 
 /**
- * Focus, clear any existing value, then retype.
+ * Focus a text-entry target, refusing one that cannot take keystrokes. A
+ * disabled control ignores `focus()`, so they would land in whichever element
+ * had focus; a read-only one drops them. The check runs after `focus()` so a
+ * focus handler that locks the field is seen.
+ */
+export async function focusTextEntryTarget(
+	handle: ElementHandle,
+	action: "fill" | "type into",
+	signal?: AbortSignal,
+): Promise<void> {
+	const refusal = await untilAborted(signal, () =>
+		handle.evaluate(el => {
+			const node = el as unknown as {
+				readOnly?: boolean;
+				focus?: () => void;
+				matches(selector: string): boolean;
+			};
+			node.focus?.();
+			if (node.matches(":disabled")) return "disabled";
+			if (node.readOnly) return "read-only";
+			return null;
+		}),
+	);
+	if (refusal) throw new ToolError(`Cannot ${action} a ${refusal} element`);
+}
+
+/**
+ * Focus a field that can take text, clear any existing value, then retype.
  *
  * Every step is a DOM evaluation or an input dispatch, so this works on tabs
  * that produce no animation frames — unlike Puppeteer's `Locator.fill`, whose
@@ -238,18 +362,33 @@ export async function fillViaHandle(
 	signal?: AbortSignal,
 	type: (text: string) => Promise<unknown> = text => handle.type(text, { delay: 0 }),
 ): Promise<void> {
+	await focusTextEntryTarget(handle, "fill", signal);
 	await untilAborted(signal, () =>
-		handle.evaluate(el => {
+		handle.evaluate((el, clearing) => {
 			const node = el as unknown as {
 				value?: string;
 				focus?: () => void;
 				isContentEditable?: boolean;
 				innerText?: string;
+				dispatchEvent(event: unknown): boolean;
 			};
 			node.focus?.();
+			const before = node.isContentEditable ? node.innerText : node.value;
 			if (node.isContentEditable) node.innerText = "";
-			else if ("value" in node) node.value = "";
-		}),
+			else if ("value" in node) {
+				// The prototype setter bypasses value trackers that frameworks (React) install on the
+				// element, so they see the cleared value as a change instead of their own write.
+				const setValue = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(node), "value")?.set;
+				if (setValue) setValue.call(node, "");
+				else node.value = "";
+			}
+			// Typing a value fires its own input events; an empty value types nothing,
+			// so report the clear itself when there was something to clear.
+			if (!clearing || !before) return;
+			const { Event } = globalThis as unknown as PageGlobals;
+			node.dispatchEvent(new Event("input", { bubbles: true }));
+			node.dispatchEvent(new Event("change", { bubbles: true }));
+		}, value === ""),
 	);
 	await untilAborted(signal, () => type(value));
 }
@@ -355,7 +494,7 @@ export async function setElementChecked(
 		);
 		return;
 	}
-	await clickElement(handle, label, signal);
+	await clickElement(handle, label, signal, { transparent: true });
 	await untilAborted(signal, () =>
 		handle.evaluate((el, desired) => {
 			const element = el as unknown as PageElement;
@@ -420,6 +559,74 @@ export async function highlightElement(
 	}
 }
 
+/**
+ * Select `<select>` options by value, then by visible label, and return the values this call
+ * selected. An exact value match always wins over a label, so value-based calls keep their
+ * meaning. A single `<select>` takes the first matching value. A value that matches no option
+ * throws before the select is touched, so a typo never commits the browser's default option.
+ */
+export async function selectElementOptions(
+	handle: ElementHandle,
+	values: string[],
+	label: string,
+	signal?: AbortSignal,
+): Promise<string[]> {
+	const outcome = (await untilAborted(signal, () =>
+		handle.evaluate((el, vals) => {
+			interface SelectOption {
+				value: string;
+				label: string;
+				text: string;
+				index: number;
+				selected: boolean;
+			}
+			interface SelectLike {
+				tagName: string;
+				multiple: boolean;
+				selectedIndex: number;
+				options: ArrayLike<SelectOption>;
+				dispatchEvent: (event: unknown) => boolean;
+			}
+			const select = el as unknown as SelectLike;
+			if (select?.tagName !== "SELECT") return null;
+			const page = globalThis as unknown as PageGlobals;
+			const options = Array.from(select.options);
+			const wanted: SelectOption[] = [];
+			const missing: string[] = [];
+			for (const value of vals as string[]) {
+				const option =
+					options.find(candidate => candidate.value === value) ??
+					options.find(
+						candidate => candidate.label === value || candidate.text.replace(/\s+/g, " ").trim() === value,
+					);
+				if (option) wanted.push(option);
+				else missing.push(value);
+			}
+			if (missing.length > 0) return { missing };
+			let selected: string[];
+			if (wanted.length === 0) {
+				for (const option of options) option.selected = false;
+				selected = [];
+			} else if (select.multiple) {
+				for (const option of options) option.selected = wanted.includes(option);
+				selected = options.filter(option => option.selected).map(option => option.value);
+			} else {
+				select.selectedIndex = wanted[0]!.index;
+				selected = [wanted[0]!.value];
+			}
+			select.dispatchEvent(new page.Event("input", { bubbles: true }));
+			select.dispatchEvent(new page.Event("change", { bubbles: true }));
+			return { selected };
+		}, values),
+	)) as { missing: string[] } | { selected: string[] } | null;
+	if (!outcome) throw new ToolError(`${label} requires a <select> element`);
+	if ("missing" in outcome)
+		throw new ToolError(
+			`No <select> option matches ${outcome.missing.map(value => JSON.stringify(value)).join(", ")}`,
+		);
+	return outcome.selected;
+}
+
 /** Upload files through an input, native chooser trigger, or synthetic drop-zone event sequence. */
 export async function uploadFilesToElement(
 	page: Page,
@@ -482,6 +689,62 @@ export async function keyDown(page: Page, key: KeyInput, signal?: AbortSignal): 
 /** Release a keyboard key previously pressed with keyDown. */
 export async function keyUp(page: Page, key: KeyInput, signal?: AbortSignal): Promise<void> {
 	await untilAborted(signal, () => page.keyboard.up(key));
+}
+
+/**
+ * macOS runs editing shortcuts as app-menu commands a CDP key event never reaches, so the key-down
+ * names Chrome's editor command instead; elsewhere the plain key event already edits.
+ * Keyed by the sorted Tern modifiers and the lower-cased letter.
+ */
+const EDITING_COMMANDS: Readonly<Record<string, string>> =
+	process.platform === "darwin"
+		? {
+				"meta+a": "selectAll",
+				"meta+c": "copy",
+				"meta+v": "paste",
+				"meta+x": "cut",
+				"meta+z": "undo",
+				"meta+shift+z": "redo",
+			}
+		: {};
+
+/** The editor command a combo names on macOS, whatever its spelling (`Meta+c`, `MetaLeft+KeyC`, `Shift+Meta+Z`). */
+function editingCommand(keys: readonly string[]): string | undefined {
+	const key = keys[keys.length - 1]!;
+	if (keys.length < 2 || !/^(?:Key[A-Z]|[A-Za-z])$/.test(key)) return undefined;
+	const modifiers = new Set<string>();
+	for (const name of keys.slice(0, -1)) {
+		// ternKey throws on names Tern cannot type; only modifiers can select a command.
+		const modifier = /^(?:Shift|Control|Alt|Meta)(?:Left|Right)?$/.test(name) ? ternKey(name).modifier : undefined;
+		if (!modifier) return undefined;
+		modifiers.add(modifier);
+	}
+	return EDITING_COMMANDS[`${[...modifiers].sort().join("+")}+${ternKey(key).key.toLowerCase()}`];
+}
+
+/**
+ * Press a key or a `+`-joined combo (`Enter`, `Shift+Tab`, `Meta+a`): the leading
+ * keys go down in order, the last key is pressed with `options`, then the leading
+ * keys are released in reverse.
+ */
+export async function pressKey(page: Page, combo: string, options?: KeyPressOptions): Promise<void> {
+	// Unchecked on purpose: puppeteer validates each name and throws `Unknown key: "…"`.
+	const keys = splitKeyCombo(combo) as KeyInput[];
+	const key = keys[keys.length - 1]!;
+	const held = keys.slice(0, -1);
+	const command = editingCommand(keys);
+	const pressed: KeyInput[] = [];
+	try {
+		for (const modifier of held) {
+			await page.keyboard.down(modifier);
+			pressed.push(modifier);
+		}
+		// `commands` is @deprecated in puppeteer but still forwarded to Input.dispatchKeyEvent,
+		// and puppeteer never adds the macOS editing commands itself.
+		await page.keyboard.press(key, command ? { ...options, commands: [command] } : options);
+	} finally {
+		for (const modifier of pressed.reverse()) await page.keyboard.up(modifier);
+	}
 }
 
 /** Move the page pointer to viewport coordinates. */

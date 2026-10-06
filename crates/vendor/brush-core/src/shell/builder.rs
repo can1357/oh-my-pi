@@ -280,6 +280,7 @@ impl<SE: extensions::ShellExtensions> Default for Shell<SE> {
 			key_bindings: None,
 			history: None,
 			resource_limits: crate::rlimits::ResourceLimits::default(),
+			umask: None,
 		}
 	}
 }

@@ -33,8 +33,10 @@ pub struct Snapshot {
 	pub text:       Arc<str>,
 	/// Four-character content tag.
 	pub hash:       String,
-	/// Lines displayed from this version, when provenance was recorded.
-	pub seen_lines: Option<BTreeSet<u32>>,
+	/// Lines displayed from this version, when provenance was recorded. Shared
+	/// when a caller clones the snapshot, without copying a set that holds one
+	/// entry per displayed line.
+	pub seen_lines: Option<Arc<BTreeSet<u32>>>,
 }
 
 /// Clipboard registers threaded through one patch application.
@@ -144,7 +146,7 @@ impl StoredSnapshot {
 			seen_lines: self
 				.seen_lines
 				.as_ref()
-				.map(|lines| lines.iter().copied().collect()),
+				.map(|lines| Arc::new(lines.iter().copied().collect())),
 		}
 	}
 }
@@ -288,6 +290,18 @@ impl EditStore {
 		history.versions.first().map(|v| v.snapshot(path))
 	}
 
+	/// Return the current version's tag and refresh path recency.
+	pub fn head_hash(&self, path: &Path) -> Option<String> {
+		let mut state = self.inner.lock();
+		touch(&mut state, path);
+		state
+			.histories
+			.get(path)?
+			.versions
+			.first()
+			.map(|v| v.hash.clone())
+	}
+
 	/// Every retained snapshot for a path, newest first.
 	pub fn versions(&self, path: &Path) -> Vec<Snapshot> {
 		let mut state = self.inner.lock();
@@ -316,6 +330,17 @@ impl EditStore {
 			.map(|v| v.snapshot(path))
 	}
 
+	/// Whether a version matching a tag is retained; refreshes path recency
+	/// like [`Self::by_hash`].
+	pub fn has_hash(&self, path: &Path, hash: &str) -> bool {
+		let mut state = self.inner.lock();
+		touch(&mut state, path);
+		state
+			.histories
+			.get(path)
+			.is_some_and(|history| history.versions.iter().any(|v| v.hash == hash))
+	}
+
 	/// Return the version with exactly equal text and refresh path recency.
 	pub fn by_content(&self, path: &Path, text: &str) -> Option<Snapshot> {
 		let mut state = self.inner.lock();
@@ -328,15 +353,15 @@ impl EditStore {
 			.map(|v| v.snapshot(path))
 	}
 
-	/// Return every retained version matching a tag.
-	pub fn find_by_hash(&self, hash: &str) -> Vec<Snapshot> {
+	/// Path of every retained version matching a tag (one entry per version).
+	pub fn paths_with_hash(&self, hash: &str) -> Vec<PathBuf> {
 		let state = self.inner.lock();
 		state
 			.histories
 			.iter()
 			.flat_map(|(path, h)| h.versions.iter().map(move |v| (path, v)))
 			.filter(|(_, v)| v.hash == hash)
-			.map(|(path, v)| v.snapshot(path))
+			.map(|(path, _)| path.clone())
 			.collect()
 	}
 
@@ -512,7 +537,7 @@ mod tests {
 		assert_eq!(store.record(path, "one", Some(&[3])), first);
 		let head = store.head(path).unwrap();
 		assert_eq!(&*head.text, "one");
-		assert_eq!(head.seen_lines.unwrap(), BTreeSet::from([1, 3]));
+		assert_eq!(*head.seen_lines.unwrap(), BTreeSet::from([1, 3]));
 	}
 
 	#[test]
@@ -577,11 +602,11 @@ mod tests {
 		assert!(store.head(old).is_some());
 		store.record_seen_lines(new, &hash, &(1..=500).rev().collect::<Vec<_>>());
 		assert!(store.head(old).is_none());
-		assert_eq!(store.head(new).unwrap().seen_lines.unwrap(), (1..=500).collect());
+		assert_eq!(*store.head(new).unwrap().seen_lines.unwrap(), (1..=500).collect());
 		for _ in 0..4 {
 			store.record_seen_lines(new, &hash, &(1..=500).collect::<Vec<_>>());
 		}
-		assert_eq!(store.head(new).unwrap().seen_lines.unwrap(), (1..=500).collect());
+		assert_eq!(*store.head(new).unwrap().seen_lines.unwrap(), (1..=500).collect());
 	}
 
 	#[test]

@@ -1436,7 +1436,9 @@ describe("AgentSession aside delivery", () => {
 			};
 		});
 
-		const run = session.prompt("go");
+		// The subagent's own run is executor-driven (agent-attributed), so only the
+		// aside wake turn starts an observation; a user prompt would open its own.
+		const run = session.prompt("go", { attribution: "agent" });
 		await started.promise;
 		await session.sendUserMessage("WAKE_BG_ASIDE", { deliverAs: "aside" });
 		await session.abort({ reason: "internal" });

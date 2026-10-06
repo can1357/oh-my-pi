@@ -1,5 +1,7 @@
+import { encodeSixelAsync } from "@oh-my-pi/pi-natives";
 import { getKittyGraphics } from "../kitty-graphics";
 import {
+	encodeSixelNow,
 	getCellDimensions,
 	getImageDimensions,
 	type ImageDimensions,
@@ -29,6 +31,29 @@ export interface ImageOptions {
 	 * repaint replaces the placement instead of stacking a duplicate.
 	 */
 	imageKey?: string;
+	/**
+	 * Schedules a repaint once this image's off-thread SIXEL encode lands.
+	 * Defaults to the budget's repaint; a host without a budget must pass one,
+	 * or the image's reserved rows stay blank until an unrelated repaint.
+	 */
+	requestRender?: () => void;
+}
+
+/** Renders in progress whose rows are bound for native scrollback. */
+let scrollbackRenderDepth = 0;
+
+/**
+ * Run `render` for rows bound for native scrollback. Those rows are never
+ * repainted, so an image whose off-thread SIXEL encode has not landed encodes
+ * synchronously instead of committing its reserved blank rows.
+ */
+export function renderForScrollback<T>(render: () => T): T {
+	scrollbackRenderDepth++;
+	try {
+		return render();
+	} finally {
+		scrollbackRenderDepth--;
+	}
 }
 
 const EMPTY_IDS: readonly number[] = [];
@@ -225,6 +250,11 @@ export class ImageBudget {
 
 	setRequestRender(requestRender: () => void): void {
 		this.#requestRender = requestRender;
+	}
+
+	/** Ask for a repaint, e.g. once an image's off-thread encode settles. */
+	requestRender(): void {
+		this.#requestRender();
 	}
 
 	setCap(cap: number): void {
@@ -735,6 +765,8 @@ export class Image implements Component {
 	// (its rows may already be committed to native scrollback).
 	#renderedGraphicRows = 0;
 	#native?: NativeNode;
+	/** Newest SIXEL encode: its target size and, once settled, the sequence (`null` on failure). */
+	#sixel?: { widthPx: number; heightPx: number; sequence?: string | null };
 
 	constructor(
 		base64Data: string,
@@ -766,6 +798,38 @@ export class Image implements Component {
 	invalidate(): void {
 		this.#cachedLines = undefined;
 		this.#cachedWidth = undefined;
+	}
+
+	/**
+	 * SIXEL sequence for a target size. A new size starts the encode off the JS
+	 * thread and answers `undefined` until it settles; the settled encode
+	 * invalidates the cached lines and requests a repaint. A render bound for
+	 * scrollback cannot wait, so it encodes synchronously.
+	 */
+	#sixelSequence(widthPx: number, heightPx: number): string | null | undefined {
+		const current = this.#sixel;
+		const sameSize = current !== undefined && current.widthPx === widthPx && current.heightPx === heightPx;
+		if (sameSize && current.sequence !== undefined) return current.sequence;
+		if (scrollbackRenderDepth > 0) {
+			// Replacing the entry makes a still-pending async encode settle as stale.
+			const sequence = encodeSixelNow(this.#base64Data, widthPx, heightPx);
+			this.#sixel = { widthPx, heightPx, sequence };
+			return sequence;
+		}
+		if (sameSize) return undefined;
+		const request: { widthPx: number; heightPx: number; sequence?: string | null } = { widthPx, heightPx };
+		this.#sixel = request;
+		const settle = (sequence: string | null): void => {
+			request.sequence = sequence;
+			if (this.#sixel !== request) return;
+			this.invalidate();
+			if (this.#options.requestRender) this.#options.requestRender();
+			else this.#budget?.requestRender();
+		};
+		encodeSixelAsync(new Uint8Array(Buffer.from(this.#base64Data, "base64")), widthPx, heightPx).then(settle, () =>
+			settle(null),
+		);
+		return undefined;
 	}
 
 	/**
@@ -820,7 +884,9 @@ export class Image implements Component {
 			this.#cachedCellWidthPx === cellDimensions.widthPx &&
 			this.#cachedCellHeightPx === cellDimensions.heightPx &&
 			this.#cachedKittyUnicodePlaceholders === kittyUnicodePlaceholders &&
-			(!transmitsSeparately || this.#budget?.shouldTransmit(imageId) !== true)
+			(!transmitsSeparately || this.#budget?.shouldTransmit(imageId) !== true) &&
+			// Cached rows reserved for a pending SIXEL encode must not reach scrollback.
+			!(scrollbackRenderDepth > 0 && this.#sixel !== undefined && this.#sixel.sequence === undefined)
 		) {
 			return this.#cachedLines;
 		}
@@ -839,6 +905,7 @@ export class Image implements Component {
 				maxHeightCells: this.#options.maxHeightCells,
 				imageId: this.#imageId,
 				includeTransmit: needsTransmit,
+				sixel: (widthPx, heightPx) => this.#sixelSequence(widthPx, heightPx),
 			});
 
 			if (result?.transmit && this.#imageId != null && this.#budget !== undefined) {

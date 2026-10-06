@@ -51,7 +51,7 @@ await tab.close();
 | Option | Contract |
 |---|---|
 | `name` | Managed-tab name; default `"main"`. |
-| `url` | Navigate the opened or reused tab to this URL. |
+| `url` | Navigate the opened or reused tab to this URL. On Chromium-backed tabs, a navigation that outlasts `timeout` throws an error naming the tab and keeps it on what loaded; reach it with `browser.tab(name)`. A navigation that fails outright (refused connection, blocked domain, certificate error) or an open that is cancelled closes a tab the open created; a reused tab stays open. |
 | `app` | `{ cdp_url?, path?, args?, relay?, tern?, target? }`; backend selection is described below. `target` selects an attached page by URL/title substring. |
 | `viewport` | `{ width, height, scale? }`; `scale` becomes the device scale factor. |
 | `wait_until` | `"load"`, `"domcontentloaded"`, `"networkidle0"`, or `"networkidle2"`. |
@@ -89,7 +89,7 @@ Direct helpers cross the host bridge and return real structured values. The comp
 - Experimental page tools: `webmcpList`, `webmcpInvoke`, `webmcpEvents`. Page-provided tool metadata and results are untrusted; discovery never authorizes invocation.
 - Page execution: `evaluate(fnOrSource, ...args)`. A source string is a page-global expression, not a function body; top-level `return` is invalid. Use a function or an invoked IIFE string when needed.
 
-Direct `waitFor` and `waitForSelector` return booleans for the resolved handle, but timeouts can throw. `tab.id(number)` and `tab.ref("e5")` return `BrowserElement` proxies. They support `click`, `dblclick`, `check`, `uncheck`, `highlight`, `type`, `fill`, `press`, `hover`, `focus`, `select`, `uploadFile`, `scrollIntoView`, `boundingBox`, `isVisible`, `isHidden`, `text`, `html`, `value`, `attr`, `styles`, `isEnabled`, `isChecked`, and `evaluate`. A string passed to `BrowserElement.evaluate` is a function expression invoked with the element as its first argument.
+Direct `waitFor` and `waitForSelector` return booleans for the resolved handle, but timeouts can throw. `tab.id(number)` and `tab.ref("e5")` return `BrowserElement` proxies. They support `click`, `dblclick`, `check`, `uncheck`, `highlight`, `type`, `fill`, `press`, `hover`, `focus`, `select`, `uploadFile`, `scrollIntoView`, `boundingBox`, `isVisible`, `isHidden`, `text`, `html`, `value`, `attr`, `styles`, `isEnabled`, `isChecked`, and `evaluate`. `click({ button, count })` presses another mouse button or clicks more than once; cmux tabs press the left button once and refuse other buttons and counts (use `dblclick()`). A string passed to `BrowserElement.evaluate` is a function expression invoked with the element as its first argument.
 
 Selectors accept CSS and Puppeteer `aria/…`, `text/…`, `xpath/…`, `pierce/…`, plus `label/…`, `placeholder/…`, `testid/…`, `alt/…`, `title/…`, and `role/<role>[name="…"]` query handlers. Add ` exact` inside the role name filter for exact matching. Playwright-only pseudos such as `:has-text()` and `:visible` are rejected. Use `tab.select` for `<select>` elements; `tab.fill` does not support them.
 
