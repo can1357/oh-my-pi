@@ -62,6 +62,14 @@ describe("ModelsConfigSchema Responses compat overrides", () => {
 		}
 	});
 
+	test("rejects a non-boolean statefulResponses override instead of silently storing responses", () => {
+		const checked = ModelsConfigSchema(astraProxyConfig({ statefulResponses: "false" }));
+		if (!(checked instanceof OmpErrors)) throw new Error("expected the schema to reject a string value");
+		expect(checked.map(error => `${error.path.join(".")}: ${error.problem}`)).toEqual([
+			expect.stringMatching(/^providers\.astra-proxy\.compat\.statefulResponses: must be boolean/),
+		]);
+	});
+
 	test("rejects a non-boolean supportsConfigurationUpdate override instead of passing the typo through", () => {
 		// A truthy string would reach the driver as "enabled"; the schema must
 		// name the key and the expected type like it does for its declared siblings.

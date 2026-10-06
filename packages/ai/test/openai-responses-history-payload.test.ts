@@ -7,9 +7,13 @@ import {
 import { type OpenAIResponsesOptions, streamOpenAIResponses } from "@oh-my-pi/pi-ai/providers/openai-responses";
 import { buildResponsesInput } from "@oh-my-pi/pi-ai/providers/openai-shared";
 import type { AssistantMessage, Context, Model, ModelSpec, ProviderSessionState, Tool } from "@oh-my-pi/pi-ai/types";
-import { createOpenAIResponsesHistoryPayload } from "@oh-my-pi/pi-ai/utils";
+import {
+	createOpenAIResponsesHistoryPayload,
+	sanitizeOpenAIResponsesHistoryItemsForReplay,
+} from "@oh-my-pi/pi-ai/utils";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { type GeneratedProvider, getBundledModel } from "@oh-my-pi/pi-catalog/models";
+import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import * as piUtils from "@oh-my-pi/pi-utils";
 
 const TEST_INSTALLATION_ID = "00000000-0000-4000-8000-000000000001";
@@ -431,6 +435,83 @@ function containsUserInputText(input: unknown[] | undefined, text: string): bool
 }
 
 describe("OpenAI responses history payload", () => {
+	it("clamps stored original image hints when replay support is unknown", () => {
+		const items = [
+			{ type: "input_image", detail: "original", image_url: "data:image/png;base64,ZmFrZQ==" },
+			{
+				type: "message",
+				role: "user",
+				content: [{ type: "input_image", detail: "original", image_url: "data:image/png;base64,ZmFrZQ==" }],
+			},
+		];
+		expect(collectResponsesInputImageDetails(sanitizeOpenAIResponsesHistoryItemsForReplay(items))).toEqual([
+			"auto",
+			"auto",
+		]);
+		expect(
+			collectResponsesInputImageDetails(
+				sanitizeOpenAIResponsesHistoryItemsForReplay(items, { supportsImageDetailOriginal: true }),
+			),
+		).toEqual(["original", "original"]);
+	});
+
+	it("honors Codex image-detail opt-out in persisted assistant snapshots", () => {
+		const items = [
+			{
+				type: "message",
+				role: "user",
+				content: [{ type: "input_image", detail: "original", image_url: "data:image/png;base64,ZmFrZQ==" }],
+			},
+			{ type: "message", role: "assistant", content: [{ type: "output_text", text: "Frame received" }] },
+		];
+		const original = getBundledModel<"openai-codex-responses">("openai-codex", "gpt-5.5");
+		const clamped = buildModel({ ...original, compat: { supportsImageDetailOriginal: false } });
+		const context: Context = { messages: [makeAssistantMessage(items, false, "openai-codex", original.id)] };
+		expect(collectResponsesInputImageDetails(convertCodexResponsesMessages(original, context))).toEqual(["original"]);
+		expect(collectResponsesInputImageDetails(convertCodexResponsesMessages(clamped, context))).toEqual(["auto"]);
+	});
+
+	it.each([
+		["user", true],
+		["user", false],
+		["developer", true],
+		["developer", false],
+	] as const)("clamps persisted %s images before Codex replay with computer use %s", (role, supportsComputerUse) => {
+		const items = [
+			{
+				type: "message",
+				id: "msg_saved",
+				status: "completed",
+				role,
+				content: [{ type: "input_image", detail: "original", image_url: "data:image/png;base64,ZmFrZQ==" }],
+			},
+			{ type: "item_reference", id: "item_saved" },
+		];
+		const context: Context = {
+			messages: [
+				{
+					role,
+					content: "fallback",
+					providerPayload: createOpenAIResponsesHistoryPayload("openai-codex", items),
+					timestamp: 1,
+				},
+			],
+		};
+		for (const supportsImageDetailOriginal of [false, true]) {
+			const model = buildModel({
+				...getBundledModel<"openai-codex-responses">("openai-codex", "gpt-5.5"),
+				baseUrl: "http://127.0.0.1:8080/v1",
+				supportsComputerUse,
+				compat: { supportsImageDetailOriginal },
+			});
+			const replay = convertCodexResponsesMessages(model, context);
+			expect(collectResponsesInputImageDetails(replay)).toEqual([supportsImageDetailOriginal ? "original" : "auto"]);
+			expect(replay[0]).toMatchObject({ type: "message", id: "msg_saved", status: "completed", role });
+			expect(replay).toContainEqual({ type: "item_reference", id: "item_saved" });
+		}
+		expect(collectResponsesInputImageDetails(items)).toEqual(["original"]);
+	});
+
 	it("appends user-message replacement history without wiping prefix or tail", () => {
 		const middleItems = [
 			{ type: "function_call", call_id: "call_middle", name: "middle_tool", arguments: "{}" },
@@ -1073,6 +1154,135 @@ describe("OpenAI responses history payload", () => {
 		expect(findResponsesInputItemByCallId(input, "function_call", "call_a")?.arguments).toBe('{"path": "a.txt"}');
 		expect(containsEncryptedReasoning(input)).toBe(false);
 		expect(JSON.stringify(input)).not.toContain("ig_c");
+	});
+
+	describe("summary-only reasoning on a warm session (#14288)", () => {
+		// Servers that stream reasoning as summary text return reasoning items
+		// without `reasoning_text`. A warm session replays them natively, so the
+		// targets that require `reasoning_text` on every turn (DeepSeek family)
+		// need it filled in, as the cold rebuild already does.
+		function summaryOnlyReasoningContext(model: Model<"openai-responses">): Context {
+			const turn = {
+				api: model.api,
+				provider: model.provider,
+				model: model.id,
+				usage: issue5002ZeroUsage,
+			} as const;
+			return {
+				messages: [
+					{ role: "user", content: "Read a.txt.", timestamp: Date.now() },
+					{
+						...turn,
+						role: "assistant",
+						content: [
+							{ type: "thinking", thinking: "Open a.txt." },
+							{ type: "toolCall", id: "call_a", name: "read", arguments: { path: "a.txt" } },
+						],
+						stopReason: "toolUse",
+						providerPayload: createOpenAIResponsesHistoryPayload(model.provider, [
+							{ type: "reasoning", id: "rs_a", summary: [{ type: "summary_text", text: "Open a.txt." }] },
+							{ type: "function_call", call_id: "call_a", name: "read", arguments: '{"path":"a.txt"}' },
+						]),
+						timestamp: Date.now(),
+					},
+					{
+						role: "toolResult",
+						toolCallId: "call_a",
+						toolName: "read",
+						content: [{ type: "text", text: "A" }],
+						isError: false,
+						timestamp: Date.now(),
+					},
+					{
+						// No native payload: the warm path replays the thinking signature.
+						...turn,
+						role: "assistant",
+						content: [
+							{
+								type: "thinking",
+								thinking: "It says A.",
+								thinkingSignature: JSON.stringify({
+									type: "reasoning",
+									id: "rs_b",
+									summary: [{ type: "summary_text", text: "It says A." }],
+								}),
+							},
+							{ type: "text", text: "A." },
+						],
+						stopReason: "stop",
+						timestamp: Date.now(),
+					},
+					{ role: "user", content: "Thanks.", timestamp: Date.now() },
+				],
+			};
+		}
+
+		it("carries the cold rebuild's reasoning_text for targets that require it", async () => {
+			const model = getOpenAIReasoningModel("commandcode", "deepseek/deepseek-v4.1-flash");
+			const context = summaryOnlyReasoningContext(model);
+			const options = { reasoning: Effort.Medium };
+			const cold = (await captureResponsesPayload(model, context, new Map(), options)) as { input?: unknown[] };
+			const warm = (await captureResponsesPayload(model, context, undefined, options)) as { input?: unknown[] };
+
+			expect(replayedReasoningTexts(cold.input)).toEqual(["Open a.txt.", "It says A."]);
+			expect(replayedReasoningTexts(warm.input)).toEqual(["Open a.txt.", "It says A."]);
+		});
+
+		it("replays summary-only items verbatim for targets that do not require reasoning_text", async () => {
+			const context = summaryOnlyReasoningContext(plaintextReasoningModel);
+			const warm = (await captureResponsesPayload(plaintextReasoningModel, context, undefined, {
+				reasoning: Effort.Medium,
+			})) as { input?: unknown[] };
+
+			expect(replayedReasoningTexts(warm.input)).toEqual([]);
+		});
+
+		it("replays encrypted summary items verbatim on OpenRouter tool-call turns", async () => {
+			// OpenRouter requires reasoning on tool-call turns for every reasoning
+			// model; an OpenAI-family item's opaque `encrypted_content` is its
+			// reasoning, so the summary must not be injected as `reasoning_text`.
+			const model = getOpenAIReasoningModel("openrouter", "openai/gpt-5");
+			const reasoningItem = {
+				type: "reasoning",
+				encrypted_content: "enc_blob",
+				summary: [{ type: "summary_text", text: "Open a.txt." }],
+			};
+			const context: Context = {
+				messages: [
+					{ role: "user", content: "Read a.txt.", timestamp: Date.now() },
+					{
+						api: model.api,
+						provider: model.provider,
+						model: model.id,
+						usage: issue5002ZeroUsage,
+						role: "assistant",
+						content: [
+							{ type: "thinking", thinking: "Open a.txt." },
+							{ type: "toolCall", id: "call_a", name: "read", arguments: { path: "a.txt" } },
+						],
+						stopReason: "toolUse",
+						providerPayload: createOpenAIResponsesHistoryPayload(model.provider, [
+							reasoningItem,
+							{ type: "function_call", call_id: "call_a", name: "read", arguments: '{"path":"a.txt"}' },
+						]),
+						timestamp: Date.now(),
+					},
+					{
+						role: "toolResult",
+						toolCallId: "call_a",
+						toolName: "read",
+						content: [{ type: "text", text: "A" }],
+						isError: false,
+						timestamp: Date.now(),
+					},
+				],
+			};
+			const warm = (await captureResponsesPayload(model, context, undefined, { reasoning: Effort.Medium })) as {
+				input?: Array<{ type?: string }>;
+			};
+
+			expect(warm.input?.filter(item => item.type === "reasoning")).toEqual([reasoningItem]);
+		});
 	});
 
 	it("prefers assistant native history snapshots for openai-codex-responses", async () => {

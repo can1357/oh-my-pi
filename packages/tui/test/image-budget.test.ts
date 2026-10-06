@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, spyOn, vi } from "bun:test";
 import * as natives from "@oh-my-pi/pi-natives";
 import { TUI } from "@oh-my-pi/pi-tui";
+import { TranscriptContainer } from "@oh-my-pi/pi-tui/chrome/transcript-container";
 import { Image, ImageBudget } from "@oh-my-pi/pi-tui/components/image";
 import { Text } from "@oh-my-pi/pi-tui/components/text";
 import {
@@ -458,30 +459,97 @@ describe("Image budget integration", () => {
 		expect([...budget.takeTransmits()]).toEqual([]);
 	});
 
-	it("encodes a budgeted SIXEL image once across render passes", () => {
+	it("encodes a budgeted SIXEL image once, off the render pass, and repaints when it lands", async () => {
 		terminal.imageProtocol = ImageProtocol.Sixel;
-		const encodeSixel = spyOn(natives, "encodeSixel");
+		const encodeSixel = spyOn(natives, "encodeSixelAsync");
 		try {
-			const budget = new ImageBudget(3, () => {});
+			let repaints = 0;
+			const budget = new ImageBudget(3, () => {
+				repaints++;
+			});
 			const image = new Image(
 				BASE64_ONE_PIXEL_PNG,
 				"image/png",
 				{ fallbackColor: t => t },
 				{ maxWidthCells: 4, maxHeightCells: 4, budget, imageKey: "k" },
 			);
-
-			const frames: (readonly string[])[] = [];
-			for (let pass = 0; pass < 3; pass++) {
+			const render = (): readonly string[] => {
 				budget.beginPass();
-				frames.push(image.render(20));
+				const lines = image.render(20);
 				budget.endPass();
-			}
+				return lines;
+			};
 
+			// The first pass reserves the image's rows while the encode runs.
+			const pending = render();
+			expect(pending.join("")).not.toContain("\x1bP");
+			const repaintsBefore = repaints;
+			await encodeSixel.mock.results[0]?.value;
+			expect(repaints).toBe(repaintsBefore + 1);
+
+			const frames = [render(), render()];
 			// SIXEL carries the image inside the line and never registers a
-			// transmit; each extra encode is a full synchronous re-encode per frame.
+			// transmit; each extra encode would be a full re-encode per frame.
 			expect(encodeSixel).toHaveBeenCalledTimes(1);
 			expect(frames[0]?.at(-1)).toContain("\x1bP");
-			expect(frames[2]).toEqual(frames[0]!);
+			expect(frames[0]).toHaveLength(pending.length);
+			expect(frames[1]).toEqual(frames[0]!);
+		} finally {
+			encodeSixel.mockRestore();
+		}
+	});
+
+	it("repaints a budget-less SIXEL image through its requestRender once the encode lands", async () => {
+		terminal.imageProtocol = ImageProtocol.Sixel;
+		const encodeSixel = spyOn(natives, "encodeSixelAsync");
+		try {
+			let repaints = 0;
+			const image = new Image(
+				BASE64_ONE_PIXEL_PNG,
+				"image/png",
+				{ fallbackColor: t => t },
+				{
+					maxWidthCells: 4,
+					maxHeightCells: 4,
+					requestRender: () => {
+						repaints++;
+					},
+				},
+			);
+
+			expect(image.render(20).join("")).not.toContain("\x1bP");
+			await encodeSixel.mock.results[0]?.value;
+			expect(repaints).toBe(1);
+			expect(image.render(20).at(-1)).toContain("\x1bP");
+		} finally {
+			encodeSixel.mockRestore();
+		}
+	});
+
+	it("commits a SIXEL image to scrollback with its sequence while the off-thread encode is pending", async () => {
+		terminal.imageProtocol = ImageProtocol.Sixel;
+		const encodeSixel = spyOn(natives, "encodeSixelAsync");
+		try {
+			const transcript = new TranscriptContainer();
+			transcript.addChild(
+				new Image(
+					BASE64_ONE_PIXEL_PNG,
+					"image/png",
+					{ fallbackColor: t => t },
+					{ maxWidthCells: 4, maxHeightCells: 4, requestRender: () => {} },
+					// Several rows, so the pending block is reserved rows rather than one empty line.
+					{ widthPx: 40, heightPx: 40 },
+				),
+			);
+
+			// The live frame starts the encode and reserves the image's rows.
+			expect(transcript.renderViewport(80, 10, { tick: 0, now: 0 }).join("")).not.toContain("\x1bP");
+			expect(encodeSixel).toHaveBeenCalledTimes(1);
+			// Pressure retires the block before the encode lands; nothing can
+			// repaint those rows once they reach native scrollback.
+			const retired = transcript.peekFinalizedBatch(80, 0);
+			expect(retired?.rows.join("")).toContain("\x1bP");
+			await encodeSixel.mock.results[0]?.value;
 		} finally {
 			encodeSixel.mockRestore();
 		}

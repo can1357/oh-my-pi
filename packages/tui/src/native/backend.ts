@@ -120,6 +120,7 @@ class NativeContext implements DescribeContext {
 	cols: number;
 	reduceMotion: boolean;
 	dark: boolean;
+	hour12: boolean | undefined;
 	#kinds: ReadonlySet<string>;
 	#features: ReadonlySet<string>;
 
@@ -127,6 +128,7 @@ class NativeContext implements DescribeContext {
 		this.cols = cols;
 		this.reduceMotion = hello.reduceMotion === true;
 		this.dark = hello.dark !== false;
+		this.hour12 = hello.hour12;
 		this.#kinds = new Set(hello.kinds);
 		this.#features = new Set(hello.features);
 	}
@@ -398,8 +400,8 @@ export class NativeBackend {
 	 * The terminal's real `hello` reply after an optimistic start: adopt its
 	 * APC limit, credits, cell size, kinds, appearance and motion preference.
 	 * A width the terminal already reported in a `resize` event wins over the
-	 * reply's. A different vocabulary or motion preference re-describes every
-	 * component, so kinds the terminal lacks fall back.
+	 * reply's. A different vocabulary, motion preference or clock re-describes
+	 * every component, so kinds the terminal lacks fall back.
 	 */
 	confirm(hello: TspHello): void {
 		const before = this.#cx;
@@ -411,7 +413,12 @@ export class NativeBackend {
 			this.#sawResize = true;
 		}
 		if (this.#cx.dark !== before.dark) this.#host.appearanceChanged(this.#cx.dark);
-		if (this.#cx.reduceMotion !== before.reduceMotion || !this.#cx.sameVocabulary(before)) this.#host.invalidate();
+		if (
+			this.#cx.reduceMotion !== before.reduceMotion ||
+			this.#cx.hour12 !== before.hour12 ||
+			!this.#cx.sameVocabulary(before)
+		)
+			this.#host.invalidate();
 		this.#host.requestRender();
 	}
 

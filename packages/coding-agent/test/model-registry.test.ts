@@ -688,6 +688,35 @@ describe("ModelRegistry", () => {
 	});
 
 	describe("provider compat overrides", () => {
+		test("models.yml can opt a Responses provider in while opting one model out of stored chaining", async () => {
+			const modelsPath = path.join(tempDir, "models.yml");
+			await Bun.write(
+				modelsPath,
+				`providers:
+  stateful-proxy:
+    api: openai-responses
+    baseUrl: https://proxy.example.com/v1
+    apiKey: test-key
+    compat:
+      statefulResponses: true
+    models:
+      - id: chained-model
+      - id: stateless-model
+        compat:
+          statefulResponses: false
+`,
+			);
+			const registry = new ModelRegistry(authStorage, modelsPath);
+			expect(registry.find("stateful-proxy", "chained-model")?.compat).toMatchObject({
+				statefulResponses: true,
+				officialEndpoint: false,
+			});
+			expect(registry.find("stateful-proxy", "stateless-model")?.compat).toMatchObject({
+				statefulResponses: false,
+				officialEndpoint: false,
+			});
+		});
+
 		let providerCompat: ModelRegistry;
 		let customCompat: ModelRegistry;
 		let customModelCompat: ModelRegistry;
@@ -3338,6 +3367,24 @@ describe("ModelRegistry", () => {
 			const vertexModels = getModelsForProvider(vertexAuthoritative, "google-vertex");
 			expect(vertexModels.map(model => model.id)).toEqual(["zai-org/glm-4.7-maas"]);
 			expect(vertexAuthoritative.find("google-vertex", "gemini-1.5-pro")).toBeUndefined();
+		});
+
+		test("does not offer bundled Antigravity chat ids absent from a fresh account roster after restart", () => {
+			const served = getBundledModels("google-antigravity").find(model => model.id === "claude-sonnet-4-6");
+			if (!served) throw new Error("Missing bundled Antigravity control model");
+			writeModelCache(
+				"google-antigravity",
+				Date.now(),
+				[served],
+				true,
+				fingerprintStaticModels(getBundledModels("google-antigravity"), true),
+				path.join(tempDir, "models.db"),
+			);
+			const restarted = new ModelRegistry(authStorage, modelsJsonPath);
+
+			expect(restarted.find("google-antigravity", "claude-sonnet-4-6")).toBeDefined();
+			expect(restarted.find("google-antigravity", "claude-sonnet-5-5")).toBeUndefined();
+			expect(restarted.find("google-antigravity", "gemini-3-pro-image")).toBeDefined();
 		});
 
 		test("does not re-add bundled synthetic models after authoritative cache load", () => {

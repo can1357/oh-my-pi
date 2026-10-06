@@ -509,28 +509,36 @@ function buildThinkingLoopError(model: Model<Api>, detail: string): AssistantMes
 	};
 }
 
+/** Reused Z-array scratch; scans are synchronous, so one buffer suffices. */
+const exactZ = new Uint16Array(EXACT_MAX_UNIT + 1);
+
 /**
  * Detect an exact cycle at the text suffix. A Z-array over the reversed tail
  * finds every possible suffix period in linear time without substring churn.
- * Short cycles retain the original 180-character/four-repeat sensitivity; long
+ * The reversal is virtual (indexed from the end) and only `z[1..maxUnit]` is
+ * computed — the period check reads nothing past it, and each `z[i]` reads
+ * only `z[i - left]` with `i - left < i`, which is already filled. Short
+ * cycles retain the original 180-character/four-repeat sensitivity; long
  * cycles require at least three repeats and 1024 repeated characters.
  */
 function detectExactSuffixCycle(text: string): [unit: string, count: number] | null {
-	if (text.length < EXACT_SHORT_MIN_REPEATED_CHARS) return null;
-	const reversed = text.split("").reverse().join("");
-	const z = new Uint16Array(reversed.length);
+	const n = text.length;
+	if (n < EXACT_SHORT_MIN_REPEATED_CHARS) return null;
+	const last = n - 1;
+	const maxUnit = Math.min(EXACT_MAX_UNIT, Math.floor(n / 3));
+	const z = exactZ;
 	let left = 0;
 	let right = 0;
-	for (let i = 1; i < reversed.length; i++) {
-		if (i <= right) z[i] = Math.min(right - i + 1, z[i - left]);
-		while (i + z[i] < reversed.length && reversed[z[i]] === reversed[i + z[i]]) z[i]++;
-		if (i + z[i] - 1 > right) {
+	for (let i = 1; i <= maxUnit; i++) {
+		let zi = i <= right ? Math.min(right - i + 1, z[i - left]) : 0;
+		while (i + zi < n && text.charCodeAt(last - zi) === text.charCodeAt(last - i - zi)) zi++;
+		z[i] = zi;
+		if (i + zi - 1 > right) {
 			left = i;
-			right = i + z[i] - 1;
+			right = i + zi - 1;
 		}
 	}
 
-	const maxUnit = Math.min(EXACT_MAX_UNIT, Math.floor(reversed.length / 3));
 	for (let len = 2; len <= maxUnit; len++) {
 		const count = 1 + Math.floor(z[len] / len);
 		const minCount = len <= EXACT_SHORT_MAX_UNIT ? 4 : 3;

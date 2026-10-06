@@ -27,7 +27,10 @@ import {
 	resolveWireModelId,
 } from "@oh-my-pi/pi-catalog/model-thinking";
 import { getBundledModel, getBundledModels } from "@oh-my-pi/pi-catalog/models";
-import { googleGeminiCliModelManagerOptions } from "@oh-my-pi/pi-catalog/provider-models/google";
+import {
+	googleAntigravityModelManagerOptions,
+	googleGeminiCliModelManagerOptions,
+} from "@oh-my-pi/pi-catalog/provider-models/google";
 import type { ModelSpec } from "@oh-my-pi/pi-catalog/types";
 
 function requireReviewedTable(provider: string): VariantCollapseTable {
@@ -1661,6 +1664,41 @@ describe("antigravity discovery collapsing", () => {
 		expect(discoveryUrl).toBeDefined();
 		expect(discoveryUrl).toContain(ANTIGRAVITY_PRIMARY_ENDPOINT);
 		expect(models?.[0]?.baseUrl).toBe(ANTIGRAVITY_PRIMARY_ENDPOINT);
+	});
+
+	it("drops bundled rows the account roster does not serve, and keeps them when discovery fails", async () => {
+		const roster = {
+			models: {
+				"claude-sonnet-4-6": { displayName: "Claude Sonnet 4.6", supportsThinking: true, maxTokens: 250_000 },
+				"gemini-3.1-pro-low": { displayName: "Gemini 3.1 Pro (Low)", supportsThinking: true },
+			},
+		};
+		const resolve = async (discovery: () => Response) => {
+			const dir = await fs.mkdtemp(path.join(os.tmpdir(), "antigravity-roster-"));
+			const fetcher = Object.assign(
+				(input: string | URL | Request, _init?: RequestInit) =>
+					Promise.resolve(
+						String(input).includes(":fetchAvailableModels") ? discovery() : new Response("version: 2.19.1\n"),
+					),
+				{ preconnect: fetch.preconnect },
+			);
+			const options = googleAntigravityModelManagerOptions({ oauthToken: "t", fetch: fetcher });
+			const result = await resolveProviderModels({ ...options, cacheDbPath: path.join(dir, "models.db") }, "online");
+			return result.models.map(m => m.id);
+		};
+
+		// Bundled Claude 5.5 rows 404 on accounts whose roster omits them (#14328).
+		const served = await resolve(() => Response.json(roster));
+		expect(served).toContain("claude-sonnet-4-6");
+		expect(served).toContain("gemini-3.1-pro");
+		expect(served).not.toContain("claude-sonnet-5-5");
+		expect(served).not.toContain("claude-opus-5-5");
+		// Image SKUs are not chat rows and stay available to the image role.
+		expect(served).toContain("gemini-3-pro-image");
+
+		const unreachable = await resolve(() => new Response("Forbidden", { status: 403 }));
+		expect(unreachable).toContain("claude-sonnet-5-5");
+		expect(unreachable).toContain("claude-opus-5-5");
 	});
 });
 
