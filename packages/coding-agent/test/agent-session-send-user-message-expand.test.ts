@@ -9,7 +9,7 @@ import * as skillsModule from "@oh-my-pi/pi-coding-agent/extensibility/skills";
 import * as imageLoading from "@oh-my-pi/pi-coding-agent/utils/image-loading";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
-import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
+import { convertToLlm, SKILL_PROMPT_MESSAGE_TYPE } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { createAssistantMessage } from "./helpers/agent-session-setup";
@@ -23,11 +23,13 @@ describe("AgentSession.sendUserMessage expandPromptTemplates", () => {
 	/** Set by a test to hold the next model turn open until it resolves `release`. */
 	let heldTurn: { started: PromiseWithResolvers<void>; release: PromiseWithResolvers<void> } | undefined;
 	const observedTurns: string[] = [];
+	const observedRoles: string[] = [];
 	let skillsSettings: { enableSkillCommands: boolean };
 
 	beforeEach(async () => {
 		tempDir = TempDir.createSync("@pi-send-user-message-expand-");
 		observedTurns.length = 0;
+		observedRoles.length = 0;
 		heldTurn = undefined;
 		skillsSettings = { enableSkillCommands: true };
 		const skillDir = path.join(tempDir.path(), "demo");
@@ -46,6 +48,7 @@ describe("AgentSession.sendUserMessage expandPromptTemplates", () => {
 			streamFn: (_model, context) => {
 				const last = context.messages.at(-1);
 				const content = last?.content;
+				observedRoles.push(last?.role ?? "");
 				observedTurns.push(
 					typeof content === "string"
 						? content
@@ -138,7 +141,7 @@ describe("AgentSession.sendUserMessage expandPromptTemplates", () => {
 		expect(observedTurns).toHaveLength(0);
 	});
 
-	it("drops a queued skill with images when abort lands during image normalization", async () => {
+	it("reports a queued custom message dropped by abort during image normalization", async () => {
 		const normalizing = Promise.withResolvers<void>();
 		const normalized = Promise.withResolvers<void>();
 		vi.spyOn(imageLoading, "normalizeModelContextImages").mockImplementation(async images => {
@@ -146,21 +149,34 @@ describe("AgentSession.sendUserMessage expandPromptTemplates", () => {
 			await normalized.promise;
 			return images;
 		});
-		const send = session.sendUserMessage(
-			[
-				{ type: "text", text: "/skill:demo look" },
-				{ type: "image", data: "aW1n", mimeType: "image/png" },
-			],
-			{ expandPromptTemplates: true, deliverAs: "followUp" },
+		const send = session.promptCustomMessage(
+			{
+				customType: SKILL_PROMPT_MESSAGE_TYPE,
+				content: [
+					{ type: "text", text: "skill body" },
+					{ type: "image", data: "aW1n", mimeType: "image/png" },
+				],
+				display: true,
+				attribution: "user",
+			},
+			{ streamingBehavior: "followUp", queueOnly: true },
 		);
 		await normalizing.promise;
 		await session.abort();
 		normalized.resolve();
-		await send;
-		await session.waitForIdle();
 
+		expect(await send).toBe(false);
+		await session.waitForIdle();
 		expect(session.queuedMessageCount).toBe(0);
 		expect(observedTurns).toHaveLength(0);
+	});
+
+	it("delivers an agent-attributed expanded skill as a user-role message", async () => {
+		await session.sendUserMessage("/skill:demo relay", { expandPromptTemplates: true, attribution: "agent" });
+		await session.waitForIdle();
+
+		expect(observedRoles).toEqual(["user"]);
+		expect(observedTurns[0]).toContain(SKILL_BODY);
 	});
 
 	it("expands a /skill: command queued as a follow-up while the agent is streaming", async () => {

@@ -8553,14 +8553,14 @@ export class AgentSession implements SettingsScope {
 				throw new AgentBusyError();
 			}
 
-			await this.#queueCustomMessage(message, streamingBehavior, {
+			const queued = await this.#queueCustomMessage(message, streamingBehavior, {
 				queueChipText: options?.queueChipText,
 				prependMessages: queuedNotices,
 				onPromptAdmitted: options?.onPromptAdmitted,
 				onPromptQueued: options?.onPromptQueued,
 			});
-			outcome.sessionClaimed = true;
-			return true;
+			outcome.sessionClaimed = queued;
+			return queued;
 		}
 
 		const customMessage: CustomMessage<T> = {
@@ -8599,15 +8599,15 @@ export class AgentSession implements SettingsScope {
 				outcome.sessionClaimed = this.agent.state.isStreaming;
 				throw new AgentBusyError();
 			}
-			await this.#queueCustomMessage(message, streamingBehavior, {
+			const queued = await this.#queueCustomMessage(message, streamingBehavior, {
 				queueChipText: options?.queueChipText,
 				preprocessed: { content: preparedMessage.content, descriptionNotice },
 				prependMessages: queuedNotices,
 				onPromptAdmitted: options?.onPromptAdmitted,
 				onPromptQueued: options?.onPromptQueued,
 			});
-			outcome.sessionClaimed = true;
-			return true;
+			outcome.sessionClaimed = queued;
+			return queued;
 		}
 		outcome.sessionClaimed = await this.#promptWithMessage(preparedMessage, textContent, {
 			...options,
@@ -9991,7 +9991,8 @@ export class AgentSession implements SettingsScope {
 		}
 	}
 
-	/** Queue a custom message without starting a turn, matching steer/follow-up/aside delivery. */
+	/** Queue a custom message without starting a turn, matching steer/follow-up/aside delivery.
+	 *  Resolves false when an abort or session change during image preparation dropped it. */
 	async #queueCustomMessage<T = unknown>(
 		message: Pick<CustomMessage<T>, "customType" | "content" | "display" | "details" | "attribution">,
 		deliverAs: "steer" | "followUp" | "aside",
@@ -10006,7 +10007,7 @@ export class AgentSession implements SettingsScope {
 			/** Called synchronously with the messages pushed onto the queue. See {@link PromptOptions.onPromptQueued}. */
 			onPromptQueued?: (queued: readonly AgentMessage[]) => void;
 		},
-	): Promise<void> {
+	): Promise<boolean> {
 		// Captured before the normalization await below — see #sessionGeneration's doc comment.
 		const sessionGeneration = this.#sessionGeneration;
 		const promptGeneration = this.#promptGeneration;
@@ -10045,10 +10046,10 @@ export class AgentSession implements SettingsScope {
 			deliverAs !== "aside" &&
 			(this.#promptGeneration !== promptGeneration || this.#sessionGeneration !== sessionGeneration)
 		) {
-			return;
+			return false;
 		}
 		if (deliverAs === "aside") {
-			if (await this.#sessionGenerationChanged(sessionGeneration)) return;
+			if (await this.#sessionGenerationChanged(sessionGeneration)) return false;
 			// Non-interrupting: rides the same step-boundary aside poll as
 			// sendCustomMessage's streaming aside branch — not an agent-core queue
 			// entry, so no drain-retry latch and no idle-queue drain scheduling.
@@ -10063,7 +10064,7 @@ export class AgentSession implements SettingsScope {
 			// left to drain it. Resuming here is a no-op while streaming and wakes/folds
 			// correctly once idle, matching #queueUserMessage's aside branch.
 			this.#resumeStrandedIrcAsides();
-			return;
+			return true;
 		}
 		this.#allowQueuedMessageDrainRetry();
 		// Keyword notices and their user message must enter the queue in one synchronous phase.
@@ -10079,6 +10080,7 @@ export class AgentSession implements SettingsScope {
 		onPromptQueued?.([...prependMessages, ...(descriptionNotice ? [descriptionNotice] : []), normalizedAppMessage]);
 		onPromptAdmitted?.();
 		this.#scheduleIdleQueueDrain();
+		return true;
 	}
 
 	/**
@@ -10372,13 +10374,20 @@ export class AgentSession implements SettingsScope {
 				) {
 					return;
 				}
+				const skillContent = images ? [{ type: "text" as const, text: built.message }, ...images] : built.message;
+				if (options?.attribution === "agent") {
+					// The skill custom message is user-invoked by definition; an agent-attributed send
+					// stays a plain user-role message, like every other sendUserMessage path.
+					await this.sendUserMessage(skillContent, { deliverAs: options.deliverAs, attribution: "agent" });
+					return;
+				}
 				await this.promptCustomMessage(
 					{
 						customType: SKILL_PROMPT_MESSAGE_TYPE,
-						content: images ? [{ type: "text", text: built.message }, ...images] : built.message,
+						content: skillContent,
 						display: true,
 						details: built.details,
-						attribution: options?.attribution ?? "user",
+						attribution: "user",
 					},
 					{
 						streamingBehavior: options?.deliverAs ?? "steer",
