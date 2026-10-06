@@ -212,8 +212,9 @@ meaningful differences, and a recommendation. It can recommend keeping all
 copies or preferring one for OMP. Inferences do not establish authorship, origin,
 authenticity, or interchangeable runtime behavior. Supporting scripts and
 references are inspected as data, never executed; the main conversation and
-session system prompt are not sent. If the reviewed files change after an
-analysis finishes, the result is marked stale: it stays visible but cannot be applied.
+session system prompt are not sent. Reviewed contents are checked again before
+sending and immediately before a preference is saved. Changed contents invalidate
+the analysis record; any completed result stays visible but cannot be applied.
 
 Known credential files and secret patterns are filtered, but a resource may still
 contain private information that detection cannot identify. Review the selected

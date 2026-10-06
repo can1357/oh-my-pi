@@ -8,7 +8,7 @@ import {
 	type ResourceAnalysis,
 } from "./resource-analysis";
 import { SEND_DISCLOSURE } from "./resource-consent";
-import { excludeReviewedResources } from "./resource-decisions";
+import { excludeReviewedResources, StaleResourceReviewError } from "./resource-decisions";
 import { snapshotResource, type ResourceCandidate, type ResourceSnapshot } from "./resource-snapshot";
 import {
 	serializeSkillDiagnosticEntry,
@@ -98,13 +98,12 @@ export class SkillDiagnosticController {
 				retained: serializeSkillDiagnosticEntry(copy.retained),
 				match: copy.match,
 			}));
+			const variants = [...skills, ...duplicates.map(copy => copy.skill)];
 			const issues: SkillDiagnosticIssue[] = [];
 			if (skills.length > 1) issues.push("conflict");
 			if (duplicates.length > 0) issues.push("redundancy");
-			if ([...skills, ...duplicates.map(copy => copy.skill)].some(skill => !skill.repository))
-				issues.push("missing-provenance");
-			const canAnalyze =
-				new Set([...skills, ...duplicates.map(copy => copy.skill)].map(skill => skill.filePath)).size > 1;
+			if (variants.some(skill => !skill.repository)) issues.push("missing-provenance");
+			const canAnalyze = new Set(variants.map(skill => skill.filePath)).size > 1;
 			items.push({
 				name: group.name,
 				skills,
@@ -289,10 +288,6 @@ export class SkillDiagnosticController {
 	async #apply(plan: PreparedAnalysis, preferredId: string): Promise<SkillDiagnosticAnalysisRecord> {
 		delete plan.record.error;
 		try {
-			if (!(await this.#unchanged(plan))) {
-				this.#finish(plan, "stale", "Resource contents changed after analysis; nothing was saved.");
-				throw new Error("Resource contents changed after analysis; prepare and analyze the changed copies again.");
-			}
 			this.#assertContext(plan.context);
 			await excludeReviewedResources(plan.snapshots, preferredId, this.#session.settings, () =>
 				this.#assertContext(plan.context),
@@ -307,6 +302,7 @@ export class SkillDiagnosticController {
 			this.#emit();
 			return structuredClone(plan.record);
 		} catch (error) {
+			if (error instanceof StaleResourceReviewError) this.#finish(plan, "stale", sanitizeText(error.message));
 			if (this.#active(plan)) {
 				const message = sanitizeText(error instanceof Error ? error.message : String(error));
 				plan.record.error = plan.record.applied ? `Choice saved, but session reload failed: ${message}` : message;
