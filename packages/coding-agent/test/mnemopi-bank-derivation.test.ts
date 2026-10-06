@@ -136,21 +136,29 @@ describe("computeMnemopiBankScope (#2412)", () => {
 		expect(a).not.toBe(b);
 	});
 
-	// Regression: `resolveProjectRoot`'s discovery walk is lexical, so a
-	// checkout reached through a symlinked alias hashed a different string
-	// than the same checkout reached through its real path. Canonicalizing
-	// the resolved root (`fs.realpathSync`) collapses them onto one bank —
-	// the same identity contract worktrees and workspaces already get.
-	it("collapses a symlinked alias directory onto its real path", async () => {
+	// Regression: `resolveProjectRoot` can get a root back as the caller
+	// spelled it: the directory itself outside any repository, and from native
+	// discovery inside one (jj's walk is lexical; git reports the spelled root
+	// when that spelling reaches the same checkout). So a checkout or a plain
+	// directory reached through a symlinked alias hashed a different string
+	// than its real path. Canonicalizing the resolved root (`fs.realpathSync`)
+	// collapses them onto one bank, the same identity contract worktrees and
+	// workspaces already get.
+	it("collapses a symlinked alias onto its real path, inside and outside a repository", async () => {
 		const baseDir = await TempDir.create("@mnemopi-symlink-");
 		try {
-			const realProject = baseDir.join("real-project");
-			const aliasProject = baseDir.join("alias-project");
-			await fs.mkdir(realProject, { recursive: true });
-			await fs.symlink(realProject, aliasProject, "dir");
-			const fromReal = computeMnemopiBankScope(undefined, realProject, "per-project").bank;
-			const fromAlias = computeMnemopiBankScope(undefined, aliasProject, "per-project").bank;
-			expect(fromAlias).toBe(fromReal);
+			const realCheckout = baseDir.join("real-checkout");
+			const realPlain = baseDir.join("real-plain");
+			await fs.mkdir(realCheckout, { recursive: true });
+			await fs.mkdir(realPlain, { recursive: true });
+			runGit(realCheckout, ["-c", "init.defaultBranch=main", "init"]);
+			for (const real of [realCheckout, realPlain]) {
+				const alias = `${real}-alias`;
+				await fs.symlink(real, alias, "dir");
+				const fromReal = computeMnemopiBankScope(undefined, real, "per-project").bank;
+				const fromAlias = computeMnemopiBankScope(undefined, alias, "per-project").bank;
+				expect(fromAlias).toBe(fromReal);
+			}
 		} finally {
 			await Bun.sleep(0);
 			await baseDir.remove();
@@ -413,11 +421,12 @@ describe("computeMnemopiBankScope worktree/workspace collapsing", () => {
 });
 
 // Regression: a pure jj workspace nested under an *unrelated* outer Git
-// checkout — the topology `jj.isPureJjRepo` documents as real — used to
-// derive its bank from the outer checkout, because `resolveProjectRoot`
-// always tried Git resolution before Jujutsu. The nearer VCS root (the
-// jj workspace, since it sits deeper than the unrelated outer `.git`) must
-// win, or the inner project's memories mix into the outer checkout's bank.
+// checkout (the topology `is_pure_jj` in `crates/pi-vcs` reports as a pure
+// Jujutsu workspace) used to derive its bank from the outer checkout,
+// because `resolveProjectRoot` always tried Git resolution before Jujutsu.
+// The nearer VCS root (the jj workspace, since it sits deeper than the
+// unrelated outer `.git`) must win, or the inner project's memories mix into
+// the outer checkout's bank.
 describe("computeMnemopiBankScope pure jj nested under an unrelated outer git checkout", () => {
 	let baseDir: TempDir;
 	let outerGitRoot: string;
@@ -455,14 +464,15 @@ describe("computeMnemopiBankScope pure jj nested under an unrelated outer git ch
 	});
 });
 
-// Regression: `isNearerAncestor` used to reject a jj workspace as a
-// descendant whenever its `path.relative` result merely *started with* the
-// two-character string "..", which also matches directory names like
-// `..jj-workspace` that are not a parent traversal at all. That false
-// rejection made the nearer jj workspace lose to the unrelated outer git
-// checkout, exactly like the topology above but with a dotdot-prefixed
-// workspace directory name standing in for the ordinary "outer git wins"
-// bug this suite already covers.
+// Regression: the nearer-root check used to treat a jj workspace as outside
+// the outer git checkout whenever its `path.relative` result merely
+// *started with* the two-character string "..", which also matches
+// directory names like `..jj-workspace` that are not a parent traversal at
+// all. That false rejection made the nearer jj workspace lose to the
+// unrelated outer git checkout, the topology above with a dotdot-prefixed
+// workspace directory name. The check now lives in native discovery
+// (`is_strict_descendant` in `crates/pi-vcs`), which compares path
+// components.
 describe("computeMnemopiBankScope nested jj workspace name starting with '..'", () => {
 	let baseDir: TempDir;
 	let outerGitRoot: string;
