@@ -40,6 +40,7 @@ import {
 	AUTO_THINKING,
 	type ConfiguredThinkingLevel,
 	clampThinkingLevelToCeiling,
+	concreteThinkingLevel,
 	modelSupportsEffortCeiling,
 	resolveThinkingLevelForModel,
 } from "@oh-my-pi/pi-tui/thinking";
@@ -1721,6 +1722,32 @@ export class TurnRecovery {
 	clearActiveRetryFallback(): void {
 		this.#activeRetryFallback = undefined;
 		this.#fallbackRoutedFor = undefined;
+	}
+
+	/** Selector this session will return to when the active fallback is released. */
+	get retryFallbackRestoreSelector(): string | undefined {
+		return this.#activeRetryFallback?.originalSelector;
+	}
+
+	/** Retarget a role-owned fallback's primary while leaving its active candidate intact. */
+	retargetActiveRetryFallbackPrimary(
+		expectedFrom: Model,
+		model: Model,
+		thinkingLevel: ConfiguredThinkingLevel | undefined,
+	): boolean {
+		if (!this.#activeRetryFallback) return false;
+		const currentPrimary = parseRetryFallbackSelector(
+			this.#activeRetryFallback.originalSelector,
+			this.#host.modelRegistry,
+		);
+		if (!currentPrimary) return false;
+		if (currentPrimary.provider !== expectedFrom.provider || currentPrimary.id !== expectedFrom.id) return false;
+		this.#activeRetryFallback.originalSelector = formatRetryFallbackSelector(
+			model,
+			concreteThinkingLevel(thinkingLevel),
+		);
+		this.#activeRetryFallback.originalThinkingLevel = thinkingLevel;
+		return true;
 	}
 
 	/** Checks whether a fallback selector remains in cooldown. */
