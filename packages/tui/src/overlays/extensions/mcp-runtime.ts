@@ -253,6 +253,11 @@ export function formatMcpListHint(snapshot: MCPRuntimeSnapshot): string {
 		case "connecting":
 			return "connecting…";
 		case "disconnected":
+			// Registered tools without a connection are deferred entries (a lazy
+			// server's cached catalog): invoking one connects the server.
+			if (snapshot.tools.length > 0) {
+				return `${snapshot.tools.length} tool${snapshot.tools.length === 1 ? "" : "s"} · connects on first use`;
+			}
 			return "unavailable";
 		case "connected": {
 			const parts = [`${snapshot.tools.length} tool${snapshot.tools.length === 1 ? "" : "s"}`];

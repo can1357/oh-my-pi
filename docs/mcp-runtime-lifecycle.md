@@ -94,6 +94,8 @@ For each discovered server in `connectServers()`:
 9. cache tool definitions (`MCPToolCache.set`) best-effort,
 10. best-effort load resources, resource templates, prompts, and subscriptions after tools load.
 
+A server with `lazy: true` stops after validation: `connectServers()` saves its unresolved config for reconnect, removes it from the headless startup barrier (`#startupServers`, read by `waitForStartup`), and does not connect it. Its cached tool definitions (`MCPToolCache.get`) are registered as `DeferredMCPTool`s; because nothing is in flight, the first call's `waitForConnection` throws and the tool's reconnect fallback connects the server through `reconnectServer`. Each startup that installs the cached tools rewrites the cache entry, so its 30-day expiry counts from the last session that loaded the server. With no cache entry the server stays tool-less until `/mcp reconnect` or `/mcp test` connects it. If a first use connects the server while the cache lookup is still pending, the live catalog wins and the lookup result is discarded. A lazy config that fails validation reports its error like any other server.
+
 `connectToServer()` behavior (`src/mcp/client.ts`):
 
 - creates stdio or HTTP/SSE transport,
@@ -121,6 +123,8 @@ After the startup window:
   - otherwise contribute no tools at startup; they stay in flight, and the background continuation registers their tools via `#onToolsChanged` once connect/list finishes (a slow server no longer blocks startup — issue #2100).
 
 This is a hybrid startup model: fast return with deferred handles when cache is available, late background registration when it is not.
+
+Lazy servers take no part in this race; their cached tools are installed as described in the connect pipeline above.
 
 ### Background completion behavior
 

@@ -24,6 +24,7 @@ import {
 	getProjectPath,
 	getUserPath,
 	loadFilesFromDir,
+	parseMcpBooleanField,
 } from "./helpers";
 
 const PROVIDER_ID = "windsurf";
@@ -49,6 +50,7 @@ function parseServerConfig(
 		server: {
 			name,
 			enabled: typeof server.enabled === "boolean" ? server.enabled : undefined,
+			lazy: parseMcpBooleanField(server.lazy),
 			command: server.command as string | undefined,
 			args: server.args as string[] | undefined,
 			env: server.env as Record<string, string> | undefined,
