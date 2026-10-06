@@ -7,7 +7,7 @@ Every release addon is built by Bazel (`rules_rust` + `crate_universe` + hermeti
 It follows the architecture terms from `docs/natives-architecture.md`:
 
 - **build-time artifact production** (Bazel `//:natives-<target>` or the Cargo-backed `host` target via `scripts/bazel-natives.ts`)
-- **embedded addon manifest generation** (`scripts/embed-native.ts`)
+- **embedded addon manifest + archive generation** (`scripts/embed-native.ts`, in memory during binary compilation)
 - **runtime addon loading** (`native/index.js`, `native/loader-state.js`)
 
 ## Implementation files
@@ -51,9 +51,10 @@ Root `BUILD.bazel` instantiates one `native_addon` per Bazel-built `(platform, a
 
 Notes:
 
-- Windows ARM64 cross-builds from Linux like win32-x64 (msvc toolchain with an aarch64 xwin splat); `release_smoke_win32_arm64` runs the resulting binary on `windows-11-arm`. A Windows ARM64 dev host can still build `host` through Cargo/N-API.
+- Windows ARM64 cross-builds from Linux like win32-x64 (msvc toolchain with an aarch64 xwin splat); `release_smoke` runs the resulting binary on `windows-11-arm`. A Windows ARM64 dev host can still build `host` through Cargo/N-API.
 - musl addons **intentionally reuse** the plain `linux-<arch>` filenames — the loader never sees gnu and musl side by side; release jobs keep them in separate invocations/dest dirs (`scripts/bazel-natives.ts` hard-errors on a basename collision within one run).
-- Aggregates: `//:natives-linux-all` (all linux targets + the msvc cross build, i.e. everything buildable from a linux-x64 host) and `//:natives-darwin-all` (mac hosts only).
+- Darwin addons cross-build from Linux too (`//bazel/toolchains/darwin`, below); mac hosts build them with the host Xcode toolchain instead. `release_smoke` runs the release binaries on `macos-15-intel` and `macos-15`.
+- Aggregates: `//:natives-all` (every addon; linux hosts cross-build all of them) and `//:natives-darwin-all`.
 
 ### 2) `native_addon` rule (`bazel/defs.bzl`)
 
@@ -74,11 +75,13 @@ Per-target codegen that is not part of the transition lives in `crates/pi-native
 | ---------------------- | -------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------- |
 | linux gnu (x64/arm64)  | `@zig_sdk//libc_aware/toolchain:linux_*_gnu.2.17` (hermetic zig cc)        | glibc **2.17** portability floor — same floor the previous cross builds used                          |
 | linux musl (x64/arm64) | `@zig_sdk//libc_aware/toolchain:linux_*_musl`                              | dynamic CRT (`-Ctarget-feature=-crt-static` in the crate BUILD)                                       |
-| darwin (x64/arm64)     | host Xcode toolchain                                                       | Apple frameworks aren't redistributable; darwin addons build on mac hosts only                        |
+| darwin (x64/arm64)     | linux exec hosts: `//bazel/toolchains/darwin` (`@darwin_cc_{arm64,x64}`): LLVM 23.1.3 clang + ld64.lld against `MacOSX27.0.sdk`; mac exec hosts: the host Xcode toolchain | the SDK comes straight from Apple: `@macos_sdk` downloads the Command Line Tools SDK package from Apple's software update CDN and unpacks it with `extract_pkg.py` (python3 on the host). LLVM ≥ 23.1.3 is required: older ld64.lld rejects the `arm64e.x1` targets in the SDK 27 `.tbd` stubs. Deployment target 12.0 on both hosts (`--macos_minimum_os`) |
 | win32-x64 msvc         | `//bazel/toolchains/msvc` (`@msvc_cc`): clang-cl + lld-link + xwin CRT/SDK | hermetic cross-link from linux-x64 CI pods and darwin dev hosts; **static CRT** (`+crt-static` + `static_link_msvcrt`) so the addon needs no VC++ Redistributable; see `bazel/toolchains/msvc/NOTES.md` |
 | win32-arm64 msvc       | `//bazel/toolchains/msvc` (`@msvc_cc_arm64`): clang-cl + lld-link + xwin aarch64 CRT/SDK (10.0.22621) | same cross-link and **static CRT** as win32-x64; `ring` builds through a GNU-driver `clang` shim and opus with NEON presumed (no RTCD); the binary is smoke-tested on `windows-11-arm` |
 
 Rust toolchains are nightly (pinned in `MODULE.bazel`), with repo-local musl re-registrations in `//bazel/toolchains` carrying an explicit `@zig_sdk//libc:musl` constraint (rules_rust's generated gnu and musl toolchains otherwise share (os, cpu) constraints).
+
+The darwin-arm64 addon embeds the Apple Foundation Models bridge (`crates/pi-natives/src/applefm/bridge.swift`, Swift 6.4 against the macOS 27 SDK), built by the `applefm_bridge` rule with the `//bazel/toolchains/swift` toolchain: on mac exec hosts the host-detected Xcode/Command Line Tools Swift (`@applefm_swift`), on linux exec hosts the pinned swift.org Swift 6.4.0 for Ubuntu 22.04 (`@swift_linux`) against `@macos_sdk`, linked by `@llvm_darwin_tools`' ld64.lld. The open-source compiler reads the SDK's `.swiftinterface`s as long as the versions match; it needs `-resource-dir` pointed away from the Linux corelibs module maps and `-I <sdk>/usr/lib/swift/shims` (see `bazel/toolchains/swift/linux.bzl`). Without a toolchain (x86_64, or a mac without Swift 6.4 + SDK 27) the bridge is an empty file the addon reports as not built. The AppKit/ScreenCaptureKit helpers (`darwin_helper`) compile with whichever darwin cc toolchain resolved.
 
 ### 4) Third-party crates (`crate_universe`)
 
@@ -107,19 +110,19 @@ bun --cwd=packages/natives run build          # = bun ../../scripts/bazel-native
 bun run build:native
 
 # The driver directly — targets are //:natives-* names plus pseudo-targets
-# host / linux-all / darwin-all:
+# host / all / darwin-all:
 bun scripts/bazel-natives.ts <target>... [--dest <dir>] [-- <extra bazel args>]
 bun scripts/bazel-natives.ts linux-x64-baseline linux-x64-modern --dest packages/natives/native
 bun scripts/bazel-natives.ts darwin-all
 
 # Or bazelisk directly (outputs stay in bazel-bin, nothing is installed):
 bazelisk build //:natives-darwin-arm64
-bazelisk build //:natives-linux-all
+bazelisk build //:natives-all
 ```
 
 The driver builds `host` through the local cargo/napi-rs path (`packages/natives/scripts/build-bindings.ts`) unless Bazel is requested via `OMP_NATIVE_BUILD_BACKEND=bazel` or extra Bazel args. The Cargo path also regenerates declarations and ESM/enum exports. `OMP_NATIVE_BUILD_BACKEND=cargo` forces that host-only path; Windows hosts always use it and cannot build explicit Bazel cross targets. `OMP_NATIVE_CARGO_PROFILE` selects the Cargo profile (default `local`; `ci` is stripped). `OMP_NATIVE_FEATURES` passes extra cargo features to `napi build --features` on that path (e.g. `OMP_NATIVE_FEATURES=wayland-pipewire`); Bazel builds ignore it. For explicit targets it runs one `bazel build` for all requested targets, locates outputs via `bazel cquery --output=files` (falling back to the `bazel-bin/natives-<t>/<canonical>.node` path convention), and copies them dereferenced into `--dest` (default `packages/natives/native`). Extra args after `--` go to bazel verbatim. It resolves `bazelisk` (or `bazel`) from `PATH` and honors an `OMP_BAZEL_RC` env var as a `--bazelrc=` startup option (that's how CI injects cache wiring).
 
-Building `linux-all` into one dest would clobber gnu addons with musl ones (shared basenames) — the driver refuses; use separate invocations with separate `--dest` dirs.
+Building `all` into one dest would clobber gnu addons with musl ones (shared basenames) — the driver refuses; use separate invocations with separate `--dest` dirs.
 
 The driver also supports `--source <dir>` to install prebuilt outputs arranged as `natives-<target>/<canonical>.node`, without invoking Bazel. This mode cannot take extra Bazel arguments. Installation stamps a temporary copy before atomic rename; pre-stamp artifacts can remain unstamped when accepted by that path. For a host-loadable target, the driver runs a child-process load probe with a 60-second timeout and checks the reported version when stamped.
 
@@ -150,9 +153,9 @@ build --tls_certificate=infra/bazel-remote/ca.crt
 
 ### Split Rust validation and addon production
 
-`.github/workflows/ci.yml` separates `rust_validate` from the addon jobs: `native_addons` produces the linux-x64 pair and `native_addons_cross` (non-PR only) the other Linux-hosted targets. TypeScript jobs depend only on `native_addons`.
+`.github/workflows/ci.yml` separates `rust_validate` from the addon jobs: `native_addons` produces the linux-x64 pair and `native_addons_cross` (non-PR only) every other target, darwin included — every addon is built on Linux. TypeScript jobs depend only on `native_addons`.
 
-**Pull requests never build or validate Rust.** Native-affecting PRs are rare enough that they don't warrant a PR-side bazel build: `rust_validate` is skipped entirely (`if: github.event_name != 'pull_request'`), and `native_addons` restores the linux-x64 pair main built for the same native sources from actions/cache (`natives-linux-x64-v1-<hash>`, hashed over the same inputs as the bazel-cache config and source hashes). Without an exact entry (the PR changes native inputs, or main has not built that state yet) it takes main's newest entry, and without any entry the latest `@oh-my-pi/pi-natives-linux-x64` npm release. It smoke-loads the pair, uploads it as the `natives-linux-x64` workflow artifact, and emits a notice whenever the addons are not source-matched. The loader skips its version sentinel for workspace loads, so any of these load fine under a newer checkout; a symbol added after that build is a throwing stub that names the addon and the rebuild command, rather than `undefined`. A PR whose TypeScript tests depend on its own native changes fails visibly; the Rust side is validated post-merge on main and again at release. Only main saves the cache entry (other refs' entries are unreadable elsewhere but still count against the 10 GB repo quota) and prunes all but the newest two.
+**Pull requests never build or validate Rust.** Native-affecting PRs are rare enough that they don't warrant a PR-side bazel build: `rust_validate` is skipped entirely (`if: github.event_name != 'pull_request'`), and `native_addons` restores the linux-x64 pair main built for the same native sources from actions/cache (`natives-linux-x64-v1-<hash>`, hashed over every native build input: Cargo/Bazel/toolchain settings plus `crates/**` and root `BUILD.bazel`). Without an exact entry (the PR changes native inputs, or main has not built that state yet) it takes main's newest entry, and without any entry the latest `@oh-my-pi/pi-natives-linux-x64` npm release. It smoke-loads the pair, uploads it as the `natives-linux-x64` workflow artifact, and emits a notice whenever the addons are not source-matched. The loader skips its version sentinel for workspace loads, so any of these load fine under a newer checkout; a symbol added after that build is a throwing stub that names the addon and the rebuild command, rather than `undefined`. A PR whose TypeScript tests depend on its own native changes fails visibly; the Rust side is validated post-merge on main and again at release. Only main saves the cache entry (other refs' entries are unreadable elsewhere but still count against the 10 GB repo quota) and prunes all but the newest two.
 
 On non-PR events all three jobs run on `omp-kata` pods against the cluster remote cache. `rust_validate` runs:
 
@@ -173,32 +176,25 @@ bazelisk --bazelrc="$rc" build --config=rustfmt //crates/...
 - `--config=clippy-ported` retains zero rustc warnings while allowing the clippy groups permitted by the ported `pi-builtins` manifest.
 - `--config=rustfmt` = rustfmt aspect against the workspace `rustfmt.toml`.
 
-On main, `native_addons` builds `NATIVES_X64_TARGETS` and `native_addons_cross` builds `NATIVES_CROSS_TARGETS` in parallel, each one target per invocation to avoid concurrent-link OOMs; the cross job then checks that the two lists together equal the `//:natives-linux-all` srcs. The TS fan-out waits only for the pair. `native_addons` uploads the pair as `natives-linux-x64` and also stashes it content-addressed on the shared runner-cache PVC (`/opt/bazel-repo-cache/ci-natives/<sha256>.node`, pruned after two days); `native_addons_cross` uploads everything else as `native-addons`. Downstream jobs use `.github/actions/native-artifacts`: on omp-kata it restores the pair from the stash by the digests in `native_addons`' `stash` output (re-verified, falling back to the artifact on any miss), elsewhere it downloads `natives-linux-x64`; it adds `native-addons` only when a requested target is outside that pair, and installs the requested target set without invoking Bazel.
+On main, `native_addons` builds `NATIVES_X64_TARGETS` and `native_addons_cross` builds `NATIVES_CROSS_TARGETS` in parallel, each one target per invocation to avoid concurrent-link OOMs; the cross job then checks that the two lists together equal the `//:natives-all` srcs, and that the darwin-arm64 addon embeds the Apple Foundation Models bridge dylib while linking neither the Swift runtime nor FoundationModels (the addon dlopens the bridge only on macOS 27+). The TS fan-out waits only for the pair. `native_addons` uploads the pair as `natives-linux-x64` and also stashes it content-addressed on the shared runner-cache PVC (`/opt/bazel-repo-cache/ci-natives/<sha256>.node`, pruned after two days); `native_addons_cross` uploads everything else as `native-addons`. Downstream jobs use `.github/actions/native-artifacts`: on omp-kata it restores the pair from the stash by the digests in `native_addons`' `stash` output (re-verified, falling back to the artifact on any miss), elsewhere it downloads `natives-linux-x64`; it adds `native-addons` only when a requested target is outside that pair, and installs the requested target set without invoking Bazel.
 
-Bazel native jobs need no toolchain setup: bazelisk is on the GitHub images and baked into the kata runner image, while Bazel fetches Rust/zig/LLVM/xwin hermetically. `windows-11-arm` only runs the win32-arm64 smoke test; it builds nothing.
+Bazel native jobs need no toolchain setup: bazelisk is baked into the kata runner image, while Bazel fetches Rust/zig/LLVM/xwin/Swift and the macOS SDK hermetically (the SDK unpack needs the image's python3). `macos-15` and `windows-11-arm` only run the release smoke tests; they build nothing.
 
-### Hosted cache warmer
+### Bun store warmer
 
-`.github/workflows/bazel-cache-warm.yml` seeds the GitHub-hosted caches that have no other reliable producer: the `release-darwin-*` bazel disk caches (built on the same macOS images as the Darwin legs of the `release_binary_hosted` matrix, so a release's bazel build is the version-bump delta instead of a ~40-min cold graph) and the shared bun store entry PR jobs restore but never save. It triggers only on pushes that can change those archives (crate/bazel/lock inputs, `bun.lock`, `.github/**`).
+`.github/workflows/bun-cache-warm.yml` seeds the shared bun store entry PR jobs restore but never save. It triggers only on pushes that can change it (`bun.lock`, the `bun-install` action).
 
 ### `bazel-cache` action (`.github/actions/bazel-cache`)
 
-Single source of truth for cache wiring, emitted as a bazelrc fragment (its `rc` output) that consumers pass via `bazelisk --bazelrc=...` or `OMP_BAZEL_RC`. Two modes are selected via `BAZEL_REMOTE_USER`/`BAZEL_REMOTE_PASSWORD`:
-
-| Runner        | Fragment contents                                                                                                                                                                                            |
-| ------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| omp-kata pod  | A temporary output root, `--config=ci`, the PVC-backed repository/xwin caches, `--config=cache-rw`, the in-cluster TLS remote-cache endpoint and masked Basic-auth header, plus `--remote_download_toplevel` |
-| GitHub-hosted | `--config=ci`, `--disk_cache=$HOME/.cache/omp-bazel-disk`, and `--repository_cache=$HOME/.cache/omp-bazel-repo`                                                                                              |
-
-Hosted disk caches use `bazel-disk-v3-<scope>-<os>-<arch>-<config-hash>-<source-hash>`. The config hash covers Cargo/Bazel/toolchain settings; the source hash covers `crates/**` and root `BUILD.bazel`. Restores fall back from the exact key to the config-scoped prefix, then to a bare `<scope>-<os>-<arch>` prefix — the bare fallback is what keeps release version bumps (which rewrite `Cargo.toml`/`Cargo.lock` and thus the config hash) from rebuilding cold; bazel's content-addressed action keys make a stale archive a partial hit, never a wrong output. An inexact restore permits one refreshed exact-key save, and only on `main`: cache entries are scoped to the saving ref, so a tag- or branch-scoped archive is unreadable by later releases yet still counts against the 10 GB quota (a tag-dispatched v18.2.10 release saved a 5 GB darwin archive and evicted main's). The bun store saves follow the same main-only rule. Before a hosted build, disk-cache files untouched for 14 days are pruned; repository-cache contents are deliberately not age-pruned because extracted files retain upstream mtimes. The remote endpoint resolves only inside the cluster.
+Single source of truth for cache wiring, emitted as a bazelrc fragment (its `rc` output) that consumers pass via `bazelisk --bazelrc=...` or `OMP_BAZEL_RC`. Every Bazel job runs on omp-kata, where the pod env's `BAZEL_REMOTE_USER`/`BAZEL_REMOTE_PASSWORD` select the cluster remote cache: a temporary output root, `--config=ci`, the PVC-backed repository/xwin caches, `--config=cache-rw`, the in-cluster TLS remote-cache endpoint and masked Basic-auth header, plus `--remote_download_toplevel`. Without those credentials the fragment carries only `--config=ci` and the build runs uncached. The remote endpoint resolves only inside the cluster.
 
 ### Native artifact actions
 
-`.github/actions/bazel-natives` is the direct builder: `bazel-cache` → `OMP_BAZEL_RC=<rc> bun scripts/bazel-natives.ts <targets> --dest <dest>`, followed by a disk-cache save after a hosted miss. `.github/actions/native-artifacts` is the no-build consumer: in-cluster stash or `natives-linux-x64` download (plus `native-addons` for any other target) → run the same driver with `--source`.
+`.github/actions/native-artifacts` installs addons without building: in-cluster stash or `natives-linux-x64` download (plus `native-addons` for any other target) → `scripts/bazel-natives.ts --source`, which stamps the version into each addon on whatever host runs it (a signed darwin addon gets its ad-hoc signature's page hashes refreshed in place, so Linux jobs stamp darwin addons too).
 
 ### Release binary builds and publishing
 
-Binary builds are build-only and run in parallel with the test fan-out. `release_binary` (Linux plus cross-built win32-x64 and win32-arm64) needs only the two addon jobs, whose workflow artifacts supply its addons. `release_binary_hosted` needs only `release_metadata` and starts when a release is detected: Darwin x64 cross-builds on `macos-15` Apple silicon for Rosetta's AVX2 support, while Darwin arm64 builds on the `xcode-27` Apple silicon image so the addon includes the Swift 6.4 / macOS 27 Apple Foundation Models bridge. The arm64 leg checks before packaging that its addon embeds the bridge dylib and links neither the Swift runtime nor FoundationModels; the addon dlopens the bridge only on macOS 27+. Each leg uses a separate `release-darwin-*` disk-cache scope, seeded by the matching image in the warmer workflow. The legs do not save their bazel archive (the warm workflow saves the same key). `release_smoke_win32_arm64` runs the linux-built win32-arm64 binary on `windows-11-arm` before publishing.
+Binary builds are build-only and run in parallel with the test fan-out. `release_binary` builds every binary on one `ubuntu-22.04` image (bun cross-compiles every target) and needs only the two addon jobs, whose workflow artifacts supply its addons. The darwin legs then sign with `scripts/ci-macos-sign.sh` (rcodesign: Developer ID + notarization when the `APPLE_*` secrets exist, ad hoc otherwise; see `docs/macos-signing-notarization.md`). Before publishing, the `release_smoke` matrix downloads each binary on its own platform and runs `--version` and `--smoke-test`: `ubuntu-22.04` / `ubuntu-24.04-arm` for linux (musl inside an Alpine container), `macos-15-intel` / `macos-15` for darwin (after `codesign --verify --strict`), `windows-2025` / `windows-11-arm` for win32.
 
 ## Debugging playbook
 
@@ -240,7 +236,8 @@ bazelisk build --nobuild //:natives-win32-x64-baseline
 ### Cache behavior
 
 - **omp-kata:** read-write gRPC to the in-cluster bazel-remote (`grpcs://bazel-remote.bazel-cache.svc.cluster.local:9092`, TLS via the committed `infra/bazel-remote/ca.crt`, htpasswd user `ci`). `--remote_local_fallback` plus retries make an outage degrade to local execution rather than fail the build.
-- **GitHub-hosted:** no cluster access; only the Darwin release/warm jobs build with Bazel here. Darwin x64 uses `macos-15`, arm64 uses `xcode-27`; their disk caches cannot share host-toolchain action keys. The v3 `actions/cache` disk key separates config and source generations with prefix + bare fallbacks (see the `bazel-cache` action section above); `.github/workflows/bazel-cache-warm.yml` publishes the `release-darwin-*` archives from the same images as the release consumers.
+- **GitHub-hosted:** no cluster access and no Bazel builds; PR runs restore main's linux-x64 pair from actions/cache.
+- **darwin repos:** `@llvm_darwin_tools` (~2 GiB LLVM 23.1.3), `@swift_linux` (~1.1 GiB Swift 6.4.0) and `@macos_sdk` (~70 MiB Command Line Tools package) are sha256-pinned, repository-cache backed and opt into the repo contents cache. The SDK input set is ~50k files, staged into every darwin compile/link sandbox.
 - **msvc repos:** the ~2 GiB LLVM download is sha256-pinned and repository-cache backed; the ~1 GiB xwin CRT/SDK splat is fetched from the Microsoft CDN inside the repo rule and is **not** repo-cache backed — a cold output base re-downloads it. Microsoft advances the VS channel payload over time, so remote-cache hit rates for win32 actions degrade gracefully after an MS bump (same property the previous cross toolchain had). Win32 link actions also don't share cache entries across host OSes (linux vs mac clang binaries).
 - Server-side operations (deploy, TLS/auth, egress, poisoning boundary): `infra/docs/04-arc-and-caching.md` §5.
 
@@ -276,15 +273,17 @@ Runtime x64 candidate order also includes the unsuffixed default filename after 
 
 ## Embed lifecycle (`embed-native.ts`)
 
-1. **Init**: compute the platform tag from host values, overridable with `TARGET_PLATFORM` and `TARGET_ARCH` for cross-target archives.
+`compileCodingAgent` (`packages/coding-agent/scripts/compile-binary.ts`) calls `embeddedAddonFiles()` for the binary's target and hands the result to `Bun.build({ files })`. Nothing under `native/` is written; the checked-in `embedded-addon.js` stays the null stub.
+
+1. **Init**: the platform tag comes from the compile target (`CROSS_TARGET` for local builds, the release matrix entry for release builds, else the host).
 2. **Candidate set**:
    - x64 looks for `modern` and `baseline` files;
    - non-x64 looks for one default file.
 3. **Validate availability**: at least one expected file must exist in `packages/natives/native`.
-4. **Validate release and generate archive + manifest**: every available addon must contain the current version stamp or legacy version sentinel. Write `native/embedded-addons.<platform>-<arch>.tar.gz` containing those files and `native/embedded-addon.js` with package version, archive metadata, and sizes.
+4. **Validate release and generate archive + manifest**: every available addon must contain the current version stamp or legacy version sentinel. Build an in-memory `native/embedded-addons.<platform>-<arch>.tar.gz` containing those files and an in-memory `native/embedded-addon.js` replacement with package version, archive metadata, and sizes.
 5. **Runtime extraction ready** for compiled mode.
 
-`--reset` writes the null manifest stub (`embeddedAddon = null`) without validating addon availability, and deletes any existing `embedded-addons.*.tar.gz` archives from `native/`.
+The overrides stay in memory on purpose: `Bun.build` shares the runtime's directory cache and does not re-read it on a miss, so a build process that imported pi-natives before writing an archive to `native/` could not resolve it.
 
 ## Dev workflow vs shipped/compiled behavior
 
@@ -330,7 +329,7 @@ Generated declarations currently include exports from these Rust modules:
 ## Build-time failures
 
 - Bazel analysis/compile failure: `scripts/bazel-natives.ts` surfaces the exit code plus a stderr tail; re-run the printed `bazel build` line directly (add `--verbose_failures`, `--sandbox_debug`) to iterate.
-- Unknown target name: the driver errors with the full known-target list (`//:natives-*` names + `host`/`linux-all`/`darwin-all`).
+- Unknown target name: the driver errors with the full known-target list (`//:natives-*` names + `host`/`all`/`darwin-all`).
 - No `.node` outputs located after a successful build: driver exits 1 (check `bazel cquery --output=files` manually).
 - Basename collision (gnu + musl in one invocation): driver refuses to install and names both sources — split into separate `--dest` dirs.
 - `build:bindings` (napi) failure: script surfaces non-zero exit and stderr; artifact builds are unaffected (Bazel never runs the napi CLI).
@@ -351,7 +350,7 @@ Generated declarations currently include exports from these Rust modules:
 | x64 machine loads baseline when modern expected                        | `PI_NATIVE_VARIANT=baseline`, no AVX2 detected, or modern file unavailable                  | Check env and filenames in `native/`                              | Build and ship the modern target (`bun scripts/bazel-natives.ts linux-x64-modern --dest packages/natives/native`)                    |
 | gnu addon overwritten by musl (or vice versa)                          | Both built into one dest — they share canonical basenames by design                         | Compare `bazel-bin/natives-<t>/` sources vs installed file        | Separate invocations with separate `--dest` dirs (release matrix already does this)                                                  |
 | Compiled binary fails after upgrade                                    | Stale extracted cache, embedded archive mismatch, or embedded manifest version mismatch     | Inspect `<getNativesDir()>/<version>` and loader error list       | Delete versioned cache for the package version; regenerate embedded archive/manifest during packaging                                |
-| `gen:native` fails with `No native addons found`                       | Required platform artifact was not built before embedding                                   | Check expected list in error text                                 | Build at least one expected artifact for the target, then rerun `gen:native`                                                         |
+| Binary build fails with `No native addons found`                       | Required platform artifact was not built before embedding                                   | Check expected list in error text                                 | Build at least one expected artifact for the target, then rerun the binary build                                                     |
 
 ## Operational commands
 
@@ -368,12 +367,8 @@ bazelisk build //:natives-darwin-arm64
 # Regenerate TS typedefs + enum exports (napi CLI, only on Rust API changes)
 bun --cwd=packages/natives run build:bindings
 
-# Generate embedded addon manifest from built native files
-bun run gen:native
-# Output archive: packages/natives/native/embedded-addons.<platform>-<arch>.tar.gz
-
-# Reset embedded manifest to null stub
-bun run gen:native:reset
+# Compile a standalone binary embedding the host addon (CROSS_TARGET=<id> for another target)
+bun --cwd=packages/coding-agent run build
 ```
 
 ## Orchestrator-side content-addressed build cache (robomp)
