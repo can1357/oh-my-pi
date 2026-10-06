@@ -160,6 +160,25 @@ describe("ToolExecutionComponent tool-result render memoization", () => {
 		expect(contextLines[0]).not.toContain("\t");
 	});
 
+	it("truncates long passive context to one line until tools are expanded, then shows all of it", () => {
+		const ui = { requestRender() {}, requestComponentRender() {} } as unknown as TUI;
+		const component = new ToolExecutionComponent("probe", {}, {}, undefined, ui, process.cwd());
+		component.updateResult(finalResult("done"), false);
+		const words = Array.from({ length: 40 }, (_, i) => `word${i}`);
+		component.setAdditionalContext(words.join(" "));
+		const contextText = () => {
+			const lines = stripVTControlCharacters(component.render(60).join("\n")).split("\n");
+			const start = lines.findIndex(line => line.includes("Context:"));
+			return lines.slice(start).join(" ");
+		};
+
+		expect(contextText()).not.toContain("word39");
+		component.setExpanded(true);
+		expect(contextText()).toContain("word39");
+		component.setExpanded(false);
+		expect(contextText()).not.toContain("word39");
+	});
+
 	it("shows passive context in both native serializers after they were cached", () => {
 		const ui = { requestRender() {}, requestComponentRender() {} } as unknown as TUI;
 		const component = new ToolExecutionComponent("probe", {}, {}, undefined, ui, process.cwd());
@@ -193,6 +212,13 @@ describe("ToolExecutionComponent tool-result render memoization", () => {
 		for (const described of [component.describe(toolCx), component.describe()]) {
 			expect(contextOf(described)).toEqual(["↳ Context: updated guidance"]);
 		}
+
+		// Collapsed: one clamped line, the full text as its tooltip. Expanded: wrapped, no clamp.
+		expect(component.describe().c?.[1]).toMatchObject({ p: { lines: 1, title: "↳ Context: updated guidance" } });
+		component.setExpanded(true);
+		const expanded = component.describe().c?.[1] as NativeNode;
+		expect(expanded.p).toMatchObject({ wrap: "word" });
+		expect(expanded.p).not.toHaveProperty("lines");
 	});
 	// Regression: freezing a backgrounded task (seal()) flips #backgroundTaskFrozen,
 	// which the render context consumes (context.frozen) — so it must be in the memo
