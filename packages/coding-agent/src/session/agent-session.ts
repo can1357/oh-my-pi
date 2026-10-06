@@ -329,6 +329,7 @@ import type {
 	RoleModelCycle,
 	RoleModelCycleResult,
 	SendUserMessageOptions,
+	RoleModelRebindOutcome,
 	SessionHandoffOptions,
 	SessionOAuthAccountList,
 	SessionStats,
@@ -453,7 +454,7 @@ import {
 	toRestoredQueuedMessage,
 } from "./queued-messages";
 import { checkCodexBalance, readResetMarker, resetLockPath, withResetFence } from "./reset-fence";
-import type { ServingModel } from "./retry-fallback-chains";
+import { parseRetryFallbackSelector, type ServingModel } from "./retry-fallback-chains";
 import {
 	type AdvisorCatchupOptions,
 	type AdvisorStats,
@@ -1421,6 +1422,10 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	#skippedPostTurnSpeculationCompletion: Promise<void> | undefined;
 	#pendingAgentEndEmit: AgentSessionEvent | undefined;
 	#inFlightSettledCallbacks: Array<() => void | Promise<void>> = [];
+	/** Default-role ownership comes from selection provenance, never model equality. */
+	#roleBoundModel: Model | undefined;
+	#pendingRoleModelRebind = false;
+	#roleModelRebindInFlight: Promise<RoleModelRebindOutcome> | undefined;
 	#sessionStopContinuationCount = 0;
 	#sessionStopHookActive = false;
 	#obfuscator: SecretObfuscator | undefined;
@@ -2375,6 +2380,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		});
 		this.agent.prepareQueuedMessages = this.#prepareQueuedUserMessages;
 		this.#detachUsageBeforeModelCall = this.agent.addBeforeModelCallHook(async signal => {
+			await this.#flushPendingRoleModelRebind();
 			if (!cfgRetryUsageAwareFallback.get(this.settings)) return;
 			if (this.#usagePreflightReadyForNextModelCall) {
 				const checkedModel = this.#usagePreflightReadyModel;
@@ -2471,6 +2477,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			}
 			this.#loopGuards.recordTurn(messages, context);
 			await this.#prewalk.advanceAtTurnEnd(messages, context);
+			await this.#flushPendingRoleModelRebind();
 			if (context?.willContinue) this.#steerAnthropicWrapUp();
 			await this.#advisors.onPrimaryTurnEnd(messages, context?.willContinue, signal);
 			await this.#maintenance.maintainContextMidRun(messages, signal, context);
@@ -3039,7 +3046,27 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		this.#unsubscribeQueueChange = this.agent.onQueueChange(() => this.#emitQueueUpdateIfChanged());
 		// Re-evaluate append-only context mode when the setting changes at runtime.
 		cfgProviderAppendOnlyContext.listen(this, () => this.#syncAppendOnlyContext(this.model));
-		cfgModelRoles.listen(this, () => this.#advisors.reconcileModelRoles());
+		// A startup fallback retains ownership of its primary, not its active candidate.
+		if (config.modelFromDefaultRole) {
+			const startupPrimary = this.#recovery.retryFallbackRestoreSelector;
+			const startupPrimarySelector = startupPrimary
+				? parseRetryFallbackSelector(startupPrimary, this.#modelRegistry)
+				: undefined;
+			this.#roleBoundModel =
+				(startupPrimarySelector
+					? this.#modelRegistry.find(startupPrimarySelector.provider, startupPrimarySelector.id)
+					: undefined) ??
+				this.model ??
+				undefined;
+		}
+		let defaultRoleValue = this.settings.getModelRole("default");
+		cfgModelRoles.listen(this, async () => {
+			this.#advisors.reconcileModelRoles();
+			const next = this.settings.getModelRole("default");
+			if (next === defaultRoleValue) return;
+			defaultRoleValue = next;
+			await this.reapplyDefaultRoleModel();
+		});
 		// Re-derive the active model's effective context window when the
 		// extended-context setting flips at runtime, or a per-model compaction
 		// point moves past (or back inside) a standard window or is switched on/off: the registry
@@ -6476,6 +6503,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	 */
 	beginDispose(): void {
 		this.#isDisposed = true;
+		this.#roleBoundModel = undefined;
+		this.#pendingRoleModelRebind = false;
 		for (const dispose of this.#disposers.splice(0)) dispose();
 		this.#modelDiscoveryAbortController.abort();
 		this.#queuedMessageDrainBlocked = false;
@@ -6743,6 +6772,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			await withTimeout(
 				(async () => {
 					await this.agent.waitForIdle();
+					await this.#roleModelRebindInFlight?.catch(() => {});
 					await this.#drainInFlightEventHandlers();
 				})(),
 				options.drainTimeoutMs ?? POST_PROMPT_DRAIN_TIMEOUT_MS,
@@ -7024,6 +7054,11 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	 */
 	get servingModel(): ServingModel | undefined {
 		return this.#recovery.servingModel;
+	}
+
+	/** Selector this session returns to when an active retry fallback is released. */
+	get retryFallbackRestoreSelector(): string | undefined {
+		return this.#recovery.retryFallbackRestoreSelector;
 	}
 
 	/** Install the interactive decision surface for reserve-triggered model changes; it waits for the user mid-turn. */
@@ -12087,20 +12122,105 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			persist?: boolean;
 		},
 	): Promise<{ switched: boolean }> {
+		await this.#releaseDefaultRoleModel();
 		return this.#models.setModel(model, role, options);
 	}
 
+	/** Reapply a changed default after plan mode restores its entry model. */
+	reapplyDefaultRoleModel(): Promise<RoleModelRebindOutcome> {
+		return this.#queueRoleModelRebind(false);
+	}
+
+	async #releaseDefaultRoleModel(): Promise<void> {
+		this.#roleBoundModel = undefined;
+		this.#pendingRoleModelRebind = false;
+		if (this.#roleModelRebindInFlight) await this.#roleModelRebindInFlight.catch(() => {});
+	}
+
+	async #queueRoleModelRebind(atModelBoundary: boolean): Promise<RoleModelRebindOutcome> {
+		const previous = this.#roleModelRebindInFlight;
+		const run = (async () => {
+			if (previous) await previous.catch(() => {});
+			return this.#applyDefaultRoleModel(atModelBoundary);
+		})();
+		this.#roleModelRebindInFlight = run;
+		try {
+			return await run;
+		} finally {
+			if (this.#roleModelRebindInFlight === run) this.#roleModelRebindInFlight = undefined;
+		}
+	}
+
+	/** These hooks are awaited by agent-core before it starts another request. */
+	async #flushPendingRoleModelRebind(): Promise<void> {
+		try {
+			if (this.#roleModelRebindInFlight) await this.#roleModelRebindInFlight;
+			if (this.#pendingRoleModelRebind) await this.#queueRoleModelRebind(true);
+		} catch (error) {
+			logger.warn("Failed to apply deferred role model rebind", { error: String(error) });
+		}
+	}
+
+	async #applyDefaultRoleModel(atModelBoundary: boolean): Promise<RoleModelRebindOutcome> {
+		const ownedModel = this.#roleBoundModel;
+		if (this.#isDisposed || !ownedModel) return "declined";
+		if (this.#planModeState?.enabled === true) {
+			this.#pendingRoleModelRebind = true;
+			return "deferred-plan-mode";
+		}
+		const resolved = this.#models.resolveRoleModelWithThinking("default");
+		const target = resolved.model;
+		this.#pendingRoleModelRebind = false;
+		if (!target) return "declined";
+		const desiredThinking = resolved.explicitThinkingLevel ? resolved.thinkingLevel : target.thinking?.defaultLevel;
+		if (this.#recovery.retryFallbackRestoreSelector) {
+			if (!this.#recovery.retargetActiveRetryFallbackPrimary(ownedModel, target, desiredThinking)) return "declined";
+			this.#roleBoundModel = target;
+			return "fallback-retargeted";
+		}
+		const current = this.model;
+		const sameModel = modelsAreEqual(current, target);
+		const thinkingMatches = desiredThinking === undefined || desiredThinking === this.configuredThinkingLevel();
+		if (sameModel && thinkingMatches) {
+			this.#roleBoundModel = target;
+			return "unchanged";
+		}
+		if (this.isStreaming && !atModelBoundary) {
+			this.#pendingRoleModelRebind = true;
+			return "deferred-turn";
+		}
+		if (sameModel) {
+			this.#roleBoundModel = target;
+			this.setThinkingLevel(desiredThinking);
+			return "thinking-applied";
+		}
+		const result = await this.#models.setModel(target, "default");
+		if (!result.switched || this.#isDisposed || this.#roleBoundModel !== ownedModel) return "declined";
+		this.#roleBoundModel = target;
+		// ModelControls applies the model's default effort; a role suffix takes precedence.
+		if (desiredThinking !== undefined && desiredThinking !== this.configuredThinkingLevel()) {
+			this.setThinkingLevel(desiredThinking);
+		}
+		return "switched";
+	}
+
 	/** Selects a model for this session without updating persisted model settings. */
-	setModelTemporary(
+	async setModelTemporary(
 		model: Model,
 		thinkingLevel?: ConfiguredThinkingLevel,
-		options?: { ephemeral?: boolean },
+		options?: { ephemeral?: boolean; preserveDefaultRole?: boolean },
 	): Promise<void> {
+		if (options?.preserveDefaultRole) {
+			if (this.#roleModelRebindInFlight) await this.#roleModelRebindInFlight.catch(() => {});
+		} else {
+			await this.#releaseDefaultRoleModel();
+		}
 		return this.#models.setModelTemporary(model, thinkingLevel, options);
 	}
 
 	/** Cycles the scoped model set, or all available models when no scope exists. */
-	cycleModel(direction: "forward" | "backward" = "forward"): Promise<ModelCycleResult | undefined> {
+	async cycleModel(direction: "forward" | "backward" = "forward"): Promise<ModelCycleResult | undefined> {
+		await this.#releaseDefaultRoleModel();
 		return this.#models.cycleModel(direction);
 	}
 
@@ -12110,15 +12230,17 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 	}
 
 	/** Applies a resolved role model without changing global settings. */
-	applyRoleModel(entry: ResolvedRoleModel): Promise<void> {
+	async applyRoleModel(entry: ResolvedRoleModel): Promise<void> {
+		await this.#releaseDefaultRoleModel();
 		return this.#models.applyRoleModel(entry);
 	}
 
 	/** Cycles the configured role models in the supplied order. */
-	cycleRoleModels(
+	async cycleRoleModels(
 		roleOrder: readonly string[],
 		direction: "forward" | "backward" = "forward",
 	): Promise<RoleModelCycleResult | undefined> {
+		await this.#releaseDefaultRoleModel();
 		return this.#models.cycleRoleModels(roleOrder, direction);
 	}
 
@@ -13532,6 +13654,7 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		await this.#bash.flushPending();
 		// Flush pending writes before switching so restore snapshots reflect committed state.
 		await this.sessionManager.flush();
+		if (this.#roleModelRebindInFlight) await this.#roleModelRebindInFlight.catch(() => {});
 		const previousSessionState = this.sessionManager.captureState();
 		const bashTransition = this.#bash.beginSessionTransition();
 		// Only same-session reloads compare against the prior context to detect
@@ -13555,6 +13678,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 		const previousUsagePreflightReadyForNextModelCall = this.#usagePreflightReadyForNextModelCall;
 		const previousUsagePreflightReadyModel = this.#usagePreflightReadyModel;
 		const previousModel = this.model;
+		const previousRoleBoundModel = this.#roleBoundModel;
+		const previousPendingRoleModelRebind = this.#pendingRoleModelRebind;
 		const previousThinkingLevel = this.thinkingLevel;
 		const previousAutoThinking = this.isAutoThinking;
 		const previousAutoResolvedLevel = this.autoResolvedThinkingLevel();
@@ -13697,6 +13822,9 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 				this.#closeAllProviderSessions("session reload");
 			}
 
+			if (switchingToDifferentSession || explicitModel || (!options?.keepModel && targetModel)) {
+				await this.#releaseDefaultRoleModel();
+			}
 			if (targetModel) {
 				const currentModel = this.model;
 				const shouldResetProviderState =
@@ -13858,6 +13986,8 @@ export class AgentSession implements SettingsScope, AgentViewSession {
 			// here — before the target session's thinking level is unwound —
 			// would push a { previousModel, target-session-thinking } config that
 			// was never a real session state.
+			this.#roleBoundModel = previousRoleBoundModel;
+			this.#pendingRoleModelRebind = previousPendingRoleModelRebind;
 			let modelRolledBack = false;
 			if (previousModel) {
 				const rolledBackModel = this.model;
