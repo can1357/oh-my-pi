@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `mnemopi embed-serve`, an OpenAI-compatible embeddings server that lets several processes share one local model through `MNEMOPI_EMBEDDING_API_URL`, over loopback HTTP or an owner-only unix socket (`--socket PATH`, `unix:<path>` API URLs). ([#13785](https://github.com/can1357/oh-my-pi/pull/13785) by [@STRML](https://github.com/STRML))
+
 ## [18.5.1] - 2026-10-03
 
 ### Changed
