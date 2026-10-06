@@ -72,10 +72,10 @@ export class IdleSubscriptions {
 			const asking = this.#asking.get(notice.from.entryId);
 			if (notice.aboutId === undefined || asking?.id !== notice.aboutId) return;
 			this.cancel(notice.from.entryId, notice.aboutId);
-			this.host.deliverNotice(
-				from,
-				`@${from.address} switched to a different conversation; the idle notice was cancelled.`,
-			);
+			const decision = this.decision(notice.from);
+			const text = `@${from.address} switched to a different conversation; the idle notice was cancelled.`;
+			if (decision === "accept") this.host.deliverNotice(from, text);
+			else if (decision !== "refuse") this.host.showNotice(text);
 			return;
 		}
 		if (notice.kind === "idle" || notice.kind === "exited") {
