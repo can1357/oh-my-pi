@@ -184,7 +184,7 @@ describe("SelectorController.switchSessionModel effort prompt", () => {
 		expect(harness.setModelTemporary).toHaveBeenCalledWith(plainModel, undefined);
 	});
 
-	it("prompts for effort after an alt+p picker pick", async () => {
+	it("Enter pick switches immediately with no prompt", async () => {
 		vi.spyOn(modelPickerModule, "ModelPickerComponent").mockImplementation(function (...args: unknown[]) {
 			pickerCallbacks = args[4] as ModelPickerCallbacks;
 			return {};
@@ -194,7 +194,30 @@ describe("SelectorController.switchSessionModel effort prompt", () => {
 		harness.controller.showModelSelector({ temporaryOnly: true });
 		if (!pickerCallbacks) throw new Error("model picker was not shown");
 
-		const picked = pickerCallbacks.onPick(reasoningModel, "anthropic/claude-opus-4-5", {
+		await pickerCallbacks.onPick(reasoningModel, "anthropic/claude-opus-4-5", {
+			overContext: false,
+		});
+
+		expect(captured).toBeUndefined();
+		expect(harness.setModelTemporary).toHaveBeenCalledWith(reasoningModel, undefined);
+		// Only the picker overlay opened, and it closed.
+		expect(harness.showOverlay).toHaveBeenCalledTimes(1);
+		expect(harness.shownHides).toHaveLength(1);
+		expect(harness.shownHides[0]).toHaveBeenCalledTimes(1);
+	});
+
+	it("Shift+Enter pick prompts for effort before applying", async () => {
+		vi.spyOn(modelPickerModule, "ModelPickerComponent").mockImplementation(function (...args: unknown[]) {
+			pickerCallbacks = args[4] as ModelPickerCallbacks;
+			return {};
+		} as never);
+		const harness = start({ currentLevel: ThinkingLevel.Medium });
+
+		harness.controller.showModelSelector({ temporaryOnly: true });
+		const onPickWithEffort = pickerCallbacks?.onPickWithEffort;
+		if (!onPickWithEffort) throw new Error("model picker has no effort pick");
+
+		const picked = onPickWithEffort(reasoningModel, "anthropic/claude-opus-4-5", {
 			overContext: false,
 		}) as unknown as Promise<void>;
 		if (!captured) throw new Error("effort prompt was not shown");
@@ -210,7 +233,29 @@ describe("SelectorController.switchSessionModel effort prompt", () => {
 		for (const hide of harness.shownHides) expect(hide).toHaveBeenCalledTimes(1);
 	});
 
-	it("prompts before compacting on an over-context picker pick", async () => {
+	it("Shift+Enter prompts even when the session runs auto", async () => {
+		vi.spyOn(modelPickerModule, "ModelPickerComponent").mockImplementation(function (...args: unknown[]) {
+			pickerCallbacks = args[4] as ModelPickerCallbacks;
+			return {};
+		} as never);
+		const harness = start({ configured: AUTO_THINKING, currentLevel: ThinkingLevel.Medium });
+
+		harness.controller.showModelSelector({ temporaryOnly: true });
+		const onPickWithEffort = pickerCallbacks?.onPickWithEffort;
+		if (!onPickWithEffort) throw new Error("model picker has no effort pick");
+
+		const picked = onPickWithEffort(reasoningModel, "anthropic/claude-opus-4-5", {
+			overContext: false,
+		}) as unknown as Promise<void>;
+		if (!captured) throw new Error("effort prompt was not shown");
+
+		captured.onCancel();
+		await picked;
+
+		expect(harness.setModelTemporary).toHaveBeenCalledWith(reasoningModel, undefined);
+	});
+
+	it("Shift+Enter prompts before compacting on an over-context pick", async () => {
 		vi.spyOn(modelPickerModule, "ModelPickerComponent").mockImplementation(function (...args: unknown[]) {
 			pickerCallbacks = args[4] as ModelPickerCallbacks;
 			return {};
@@ -218,9 +263,10 @@ describe("SelectorController.switchSessionModel effort prompt", () => {
 		const harness = start({ currentLevel: ThinkingLevel.Medium });
 
 		harness.controller.showModelSelector({ temporaryOnly: true });
-		if (!pickerCallbacks) throw new Error("model picker was not shown");
+		const onPickWithEffort = pickerCallbacks?.onPickWithEffort;
+		if (!onPickWithEffort) throw new Error("model picker has no effort pick");
 
-		const picked = pickerCallbacks.onPick(reasoningModel, "anthropic/claude-opus-4-5", {
+		const picked = onPickWithEffort(reasoningModel, "anthropic/claude-opus-4-5", {
 			overContext: true,
 		}) as unknown as Promise<void>;
 		// The effort choice precedes compaction: no compaction starts while

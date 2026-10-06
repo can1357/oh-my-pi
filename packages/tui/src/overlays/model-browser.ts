@@ -973,6 +973,11 @@ export class ModelBrowser implements Component {
 		return item.id === "separator";
 	}
 
+	/** True when the row cannot be activated (separator rows). */
+	isDisabled(item: ModelBrowserItem): boolean {
+		return this.#isDisabled(item);
+	}
+
 	/**
 	 * Rank base items for the live query and seat the recent/role separator.
 	 * Runs inside the menu filter for non-blank queries; the blank-query path

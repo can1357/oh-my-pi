@@ -630,19 +630,19 @@ export class SelectorController {
 	}
 
 	/**
-	 * Effort follow-up for a session-only switch (`/switch`, alt+p): when the
-	 * target model reasons with selectable efforts, offer them before applying.
-	 * Cancelling (Esc) resolves `undefined`, preserving the previous
-	 * role-configured/model-default behavior. Skipped (same outcome) when the
-	 * session runs `auto`/`off`, which have no row to offer, and for
-	 * non-reasoning models (and reasoners without an effort ladder).
+	 * Effort follow-up for a session-only switch: when the target model reasons
+	 * with selectable efforts, offer them before applying. Cancelling (Esc)
+	 * resolves `undefined`, preserving the previous role-configured/model-default
+	 * behavior. Skipped (same outcome) when the session runs `auto`/`off`, which
+	 * have no row to offer, and for non-reasoning models (and reasoners without
+	 * an effort ladder) — unless explicitly requested via Shift+Enter.
 	 */
-	#promptSwitchEffort(model: Model): Promise<Effort | undefined> {
+	#promptSwitchEffort(model: Model, options?: { explicit?: boolean }): Promise<Effort | undefined> {
 		const configured = this.ctx.session.configuredThinkingLevel();
 		// `auto` and `off` have no row in the effort list, so there is no
 		// faithful default to offer: skip the prompt and keep the previous
-		// outcome (an explicit `:level` still applies, bypassing this).
-		if (configured === AUTO_THINKING || configured === ThinkingLevel.Off) {
+		// outcome (an explicit `:level` or Shift+Enter still shows it).
+		if (!options?.explicit && (configured === AUTO_THINKING || configured === ThinkingLevel.Off)) {
 			return Promise.resolve(undefined);
 		}
 		const efforts = getSupportedEfforts(model);
@@ -775,10 +775,23 @@ export class SelectorController {
 			{
 				onPick: async (model, selector, { overContext }) => {
 					try {
-						// Effort choice precedes compaction so the switch lands with it.
-						const level = await this.#promptSwitchEffort(model);
+						// Enter switches immediately, preserving the previous
+						// role-configured/model-default effort behavior.
 						// Over-context pick: close the picker first so the compaction
 						// loader is visible.
+						if (overContext) done();
+						await this.#applySessionModel(model, selector, undefined, overContext);
+						if (!overContext) done();
+					} catch (error) {
+						this.ctx.showError(error instanceof Error ? error.message : String(error));
+					}
+				},
+				onPickWithEffort: async (model, selector, { overContext }) => {
+					try {
+						// Shift+Enter explicitly requests the effort follow-up;
+						// Esc keeps the previous behavior like an Enter pick.
+						// Effort choice precedes compaction so the switch lands with it.
+						const level = await this.#promptSwitchEffort(model, { explicit: true });
 						if (overContext) done();
 						await this.#applySessionModel(model, selector, level, overContext);
 						if (!overContext) done();

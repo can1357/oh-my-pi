@@ -47,6 +47,7 @@ interface RegistryOverrides {
 interface PickerHarness {
 	picker: ModelPickerComponent;
 	onPick: Mock<(model: Model, selector: string, meta: { overContext: boolean }) => void>;
+	onPickWithEffort: Mock<(model: Model, selector: string, meta: { overContext: boolean }) => void>;
 	onPickRole: Mock<(entry: ResolvedRoleModel) => void>;
 	onCancel: Mock<() => void>;
 }
@@ -57,6 +58,7 @@ function createPicker(options: {
 	settings?: Settings;
 	registry?: RegistryOverrides;
 	picker?: ModelPickerOptions;
+	effort?: boolean;
 }): PickerHarness {
 	installTestTheme();
 	const modelsFn = typeof options.models === "function" ? options.models : () => options.models as Model[];
@@ -69,6 +71,8 @@ function createPicker(options: {
 	} as unknown as ModelRegistry;
 	const ui = { requestRender: vi.fn(), terminal: { rows: 40 } } as unknown as TUI;
 	const onPick = vi.fn();
+	const onPickWithEffort = vi.fn();
+
 	const onPickRole = vi.fn();
 	const onCancel = vi.fn();
 	const picker = new ModelPickerComponent(
@@ -76,10 +80,10 @@ function createPicker(options: {
 		createModelBrowserSource(settings),
 		registry,
 		options.scoped ? modelsFn().map(model => ({ model })) : [],
-		{ onPick, onPickRole, onCancel },
+		{ onPick, ...(options.effort ? { onPickWithEffort } : {}), onPickRole, onCancel },
 		options.picker ?? {},
 	);
-	return { picker, onPick, onPickRole, onCancel };
+	return { picker, onPick, onPickWithEffort, onPickRole, onCancel };
 }
 
 const DOWN = "\x1b[B";
@@ -254,14 +258,42 @@ describe("ModelPicker", () => {
 		expect(onPick).not.toHaveBeenCalled();
 	});
 
-	test("Esc clears an active query first, then cancels", () => {
-		const { picker, onCancel } = createPicker({ models: [makeModel("test", "test-model")], scoped: true });
+	test("Shift+Enter routes a model row to the effort follow-up", () => {
+		const models = [makeModel("test", "aa-model"), makeModel("test", "bb-model")];
+		const { picker, onPick, onPickWithEffort } = createPicker({ models, scoped: true, effort: true });
 
-		picker.handleInput("q");
-		picker.handleInput(ESC);
-		expect(onCancel).not.toHaveBeenCalled();
+		picker.handleInput("\x1b[13;2u");
 
-		picker.handleInput(ESC);
-		expect(onCancel).toHaveBeenCalledTimes(1);
+		expect(onPick).not.toHaveBeenCalled();
+		expect(onPickWithEffort).toHaveBeenCalledTimes(1);
+		expect(onPickWithEffort.mock.calls[0]?.[1]).toMatch(/^test\//);
+		expect(onPickWithEffort.mock.calls[0]?.[2]).toEqual({ overContext: false });
+		expect(normalize(picker.render(220))).toContain("pick effort");
+	});
+
+	test("Enter still switches immediately when the effort follow-up exists", () => {
+		const { picker, onPick, onPickWithEffort } = createPicker({
+			models: [makeModel("test", "test-model")],
+			scoped: true,
+			effort: true,
+		});
+
+		picker.handleInput("\n");
+
+		expect(onPick).toHaveBeenCalledTimes(1);
+		expect(onPickWithEffort).not.toHaveBeenCalled();
+	});
+
+	test("Shift+Enter without an effort host behaves like Enter", () => {
+		const { picker, onPick, onPickWithEffort } = createPicker({
+			models: [makeModel("test", "test-model")],
+			scoped: true,
+		});
+
+		picker.handleInput("\x1b[13;2u");
+
+		expect(onPickWithEffort).not.toHaveBeenCalled();
+		expect(onPick).toHaveBeenCalledTimes(1);
+		expect(normalize(picker.render(220))).not.toContain("pick effort");
 	});
 });

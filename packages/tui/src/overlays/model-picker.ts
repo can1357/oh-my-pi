@@ -6,7 +6,7 @@
  */
 import type { Model } from "@oh-my-pi/pi-ai";
 import { addKeyAliases, canonicalKeyId } from "../keybindings";
-import { type KeyId, parseKey } from "../keys";
+import { type KeyId, matchesKey, parseKey } from "../keys";
 import type { Component, TUI } from "../tui";
 import { type ThemeColor, theme } from "../theme/theme";
 import {
@@ -50,6 +50,12 @@ export interface ModelPickerCallbacks {
 	 * context window — the host must compact before switching.
 	 */
 	onPick: (model: Model, selector: string, meta: { overContext: boolean }) => void;
+	/**
+	 * Shift+Enter on a model row: choose the model, then let the host offer
+	 * its thinking efforts before applying the session-only switch. Absent,
+	 * Shift+Enter behaves like Enter.
+	 */
+	onPickWithEffort?: (model: Model, selector: string, meta: { overContext: boolean }) => void;
 	/** A configured ctrl+p quick role was chosen. */
 	onPickRole?: (entry: ResolvedRoleModel) => void;
 	/**
@@ -92,9 +98,10 @@ const QUICK_ROLE_STATUS_HINT = "Quick role switch — applies its model and thin
 const TASK_STATUS_HINT = "Task subagent switch — spawned task agents use this model (session-only)";
 
 /** Footer hint for the active mode; keys resolve at render time so theme/keybinding changes apply. */
-function footerHint(mode: "session" | "role" | "task"): string {
+function footerHint(mode: "session" | "role" | "task", effort: boolean): string {
 	const upDown = editorKeys("tui.select.up", "tui.select.down");
 	const enter = formatKeyHint("enter");
+	const effortHint = effort ? ` · ${formatKeyHint("shift+enter")} pick effort` : "";
 	const close = `${editorKey("tui.select.cancel")} close`;
 	switch (mode) {
 		case "role":
@@ -102,7 +109,7 @@ function footerHint(mode: "session" | "role" | "task"): string {
 		case "task":
 			return `${upDown} models · ${enter} use for Task subagents · type to search · ${close}`;
 		default:
-			return `${upDown} models · ${enter} use for this session · type to search · @ quick roles · ${close}`;
+			return `${upDown} models · ${enter} use for this session${effortHint} · type to search · @ quick roles · ${close}`;
 	}
 }
 
@@ -123,6 +130,7 @@ export class ModelPickerComponent implements Component {
 	#modelItems: ModelBrowserItem[] = [];
 	#quickRoleItems: ModelBrowserItem[] = [];
 	#quickRoles = new Map<string, ResolvedRoleModel>();
+	#onPickWithEffort: ModelPickerCallbacks["onPickWithEffort"];
 	#roleMode = false;
 	#taskMode = false;
 	#taskMatchKeys = new Set<string>();
@@ -152,6 +160,7 @@ export class ModelPickerComponent implements Component {
 		this.#registry = registry;
 		this.#scopedModels = scopedModels;
 		this.#currentSelector = options.currentSelector;
+		this.#onPickWithEffort = callbacks.onPickWithEffort;
 		this.#currentQuickRoleSelector = options.currentQuickRole ? `@${options.currentQuickRole}` : undefined;
 		this.#taskSelector = options.taskSelector;
 		if (callbacks.onPickTask) {
@@ -270,10 +279,33 @@ export class ModelPickerComponent implements Component {
 		}
 	}
 
+	/**
+	 * Shift+Enter on a model row: route to the effort follow-up. True when
+	 * consumed. Role rows, task mode, separators, and a host without
+	 * `onPickWithEffort` fall through to normal Enter handling.
+	 */
+	#handleEffortKey(data: string): boolean {
+		if (!this.#onPickWithEffort || this.#taskMode || !matchesKey(data, "shift+enter")) return false;
+		const selected = this.#browser.getSelected();
+		if (!selected || this.#browser.isDisabled(selected) || this.#quickRoles.has(selected.selector)) {
+			return false;
+		}
+		this.#onPickWithEffort(selected.model, selected.selector, {
+			overContext: this.#browser.isOverContext(selected),
+		});
+		return true;
+	}
+
 	handleInput(data: string): void {
 		// Mouse tracking is off outside fullscreen overlays; drop any stray SGR
 		// reports instead of feeding them to the search input.
 		if (data.startsWith("\x1b[<")) return;
+		// Without an effort host, Shift+Enter is plain Enter (otherwise the
+		// raw bytes would leak into the search query on kitty terminals).
+		if (!this.#onPickWithEffort && matchesKey(data, "shift+enter")) {
+			this.#browser.handleInput("\n");
+			return;
+		}
 		if (this.#taskMatchKeys.size > 0) {
 			const parsed = parseKey(data);
 			const canonical = parsed !== undefined ? canonicalKeyId(parsed) : undefined;
@@ -281,6 +313,12 @@ export class ModelPickerComponent implements Component {
 				this.#toggleTaskMode();
 				return;
 			}
+		}
+		// Shift+Enter on a model row routes to the effort follow-up instead of
+		// switching immediately. Role rows, task mode, and separators keep
+		// their Enter behavior.
+		if (this.#handleEffortKey(data)) {
+			return;
 		}
 		this.#browser.handleInput(data);
 	}
@@ -306,7 +344,10 @@ export class ModelPickerComponent implements Component {
 				: theme.fg("muted", ` ${this.#roleMode ? QUICK_ROLE_STATUS_HINT : STATUS_HINT}`);
 
 		const borderColor: ThemeColor | undefined = this.#taskMode ? "error" : undefined;
-		let footer = footerHint(this.#taskMode ? "task" : this.#roleMode ? "role" : "session");
+		let footer = footerHint(
+			this.#taskMode ? "task" : this.#roleMode ? "role" : "session",
+			this.#onPickWithEffort !== undefined,
+		);
 		if (this.#taskModeKey !== undefined && !this.#roleMode) {
 			footer += ` · ${formatKeyHint(this.#taskModeKey)} ${this.#taskMode ? "session model" : "task model"}`;
 		}
