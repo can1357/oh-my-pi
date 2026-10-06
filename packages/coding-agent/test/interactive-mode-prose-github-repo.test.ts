@@ -47,7 +47,8 @@ describe("InteractiveMode prose GitHub repo", () => {
 		resetSettingsForTest();
 	});
 
-	it("binds a reply rebuilt after a cwd change to the repo it was written in", async () => {
+	/** Stubs gh's repo lookup and the session's cwd; returns the pending lookups and a cwd setter. */
+	function stubSession(initialCwd: string): { lookups: Promise<string | undefined>[]; moveTo: (cwd: string) => void } {
 		const repos: Record<string, string> = { "/work/alpha": "owner/alpha", "/work/beta": "owner/beta" };
 		const lookups: Promise<string | undefined>[] = [];
 		vi.spyOn(ghCommon, "tryResolveCurrentRepo").mockImplementation(cwd => {
@@ -55,12 +56,16 @@ describe("InteractiveMode prose GitHub repo", () => {
 			lookups.push(lookup);
 			return lookup;
 		});
-		let cwd = "/work/alpha";
+		let cwd = initialCwd;
 		vi.spyOn(session.sessionManager, "getCwd").mockImplementation(() => cwd);
+		return { lookups, moveTo: next => (cwd = next) };
+	}
 
+	it("binds a reply rebuilt after a cwd change to the repo it was written in", async () => {
+		const { lookups, moveTo } = stubSession("/work/alpha");
 		mode.proseGithubRepo();
 		const writtenInAlpha = Date.now() - 1_000;
-		cwd = "/work/beta";
+		moveTo("/work/beta");
 		mode.proseGithubRepo();
 		const writtenInBeta = Date.now() + 1_000;
 		await Promise.all(lookups);
@@ -69,5 +74,18 @@ describe("InteractiveMode prose GitHub repo", () => {
 		expect(mode.proseGithubRepo(writtenInBeta)()).toBe("owner/beta");
 		// The live (streaming) component has no message yet and follows the current cwd.
 		expect(mode.proseGithubRepo()()).toBe("owner/beta");
+	});
+
+	it("binds a resumed session's older replies to that session's repo", async () => {
+		const { lookups, moveTo } = stubSession("/work/alpha");
+		mode.proseGithubRepo();
+		// `/resume` loads another session, from another repo, into the same AgentSession.
+		const writtenBeforeResume = Date.now() - 1_000;
+		vi.spyOn(session.sessionManager, "getSessionId").mockReturnValue("resumed-session");
+		moveTo("/work/beta");
+		mode.proseGithubRepo();
+		await Promise.all(lookups);
+
+		expect(mode.proseGithubRepo(writtenBeforeResume)()).toBe("owner/beta");
 	});
 });
