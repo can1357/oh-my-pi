@@ -125,7 +125,9 @@ export async function sendSessionUserInput(
 			await session.prompt(result.prompt, { streamingBehavior, images, tag });
 			return { handled: "prompt", ...output };
 		}
-		return { handled: "command", ...output };
+		// `/retry` and the like start a turn without submitting a message; hosts must not treat it as local.
+		const agentInvoked = result?.agentInvoked === true ? { agentInvoked: true } : undefined;
+		return { handled: "command", ...agentInvoked, ...output };
 	}
 
 	if (text.startsWith("/") && !session.namesPromptCommand(text)) return { handled: "unknown" };

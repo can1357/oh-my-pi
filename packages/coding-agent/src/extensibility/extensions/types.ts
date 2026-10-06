@@ -1870,6 +1870,8 @@ export interface SendUserInputResult {
 	handled: "prompt" | "command" | "skill" | "terminal-only" | "unknown" | "unavailable";
 	/** Text a built-in command printed, when it printed any. */
 	output?: string;
+	/** True when a `command` started an agent turn without submitting a message, as `/retry` does. */
+	agentInvoked?: boolean;
 }
 
 export type SendUserInputHandler = (text: string, options?: SendUserInputOptions) => Promise<SendUserInputResult>;

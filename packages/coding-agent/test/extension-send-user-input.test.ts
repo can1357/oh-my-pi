@@ -10,7 +10,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { Agent, type AgentMessage } from "@oh-my-pi/pi-agent-core";
-import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
+import { createMockModel, type MockResponse } from "@oh-my-pi/pi-ai/providers/mock";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import type { PromptTemplate } from "@oh-my-pi/pi-coding-agent/config/prompt-templates";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
@@ -43,6 +43,8 @@ interface Harness {
 	deployRuns: string[];
 	/** Status lines the interactive host showed (only with `host: "interactive"`). */
 	statuses: string[];
+	/** Each turn-ownership task `initializeExtensions` reported for a `sendUserInput` call, in order. */
+	invoking: Promise<unknown>[];
 }
 
 function messageText(message: AgentMessage): string {
@@ -86,12 +88,15 @@ describe("pi.sendUserInput", () => {
 		host?: "runtime-init" | "interactive" | "unwired";
 		/** An `input` handler the bridge extension registers. */
 		onInput?: (event: InputEvent) => InputEventResult | undefined;
+		/** The model's scripted replies, one per turn. */
+		responses?: MockResponse[];
 	}): Promise<Harness> {
 		const manager = SessionManager.inMemory();
 		const runtime = new ExtensionRuntime();
 		const started: AgentMessage[] = [];
 		const deployRuns: string[] = [];
 		const statuses: string[] = [];
+		const invoking: Promise<unknown>[] = [];
 		let api: ExtensionAPI | undefined;
 		const extension = await loadExtensionFromFactory(
 			pi => {
@@ -119,13 +124,16 @@ describe("pi.sendUserInput", () => {
 		const agent = new Agent({
 			getApiKey: () => "test-key",
 			initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] },
-			streamFn: createMockModel({ responses: [{ content: ["First reply"] }, { content: ["Second reply"] }] }).stream,
+			streamFn: createMockModel({
+				responses: options?.responses ?? [{ content: ["First reply"] }, { content: ["Second reply"] }],
+			}).stream,
 		});
 		const runner = new ExtensionRunner([extension], runtime, manager.getCwd(), manager, modelRegistry);
 		const created = new AgentSession({
 			agent,
 			sessionManager: manager,
-			settings: Settings.isolated({ "compaction.enabled": false }),
+			// No automatic retry, so a failed turn stays failed for `/retry`.
+			settings: Settings.isolated({ "compaction.enabled": false, "retry.enabled": false }),
 			modelRegistry,
 			extensionRunner: runner,
 			skills: options?.skills,
@@ -182,9 +190,12 @@ describe("pi.sendUserInput", () => {
 				reportRuntimeError: error => {
 					throw new Error(error.error);
 				},
+				trackAgentInvokingMessage: task => {
+					invoking.push(task);
+				},
 			});
 		}
-		return { api, session: created, manager, started, deployRuns, statuses };
+		return { api, session: created, manager, started, deployRuns, statuses, invoking };
 	}
 
 	it("submits plain text as a user turn whose message carries the caller's tag", async () => {
@@ -295,6 +306,22 @@ describe("pi.sendUserInput", () => {
 		expect(result.output).toBeString();
 		expect(result.output?.length).toBeGreaterThan(0);
 		expect(userTurns(started)).toHaveLength(0);
+	});
+
+	it("reports a built-in that starts a turn, as /retry does, so the host counts the input as invoking the agent", async () => {
+		const { api, session, invoking } = await start({
+			responses: [{ throw: "first attempt fails" }, { content: ["Recovered"] }],
+		});
+		await session.prompt("fail once");
+		await session.waitForIdle();
+
+		const result = await api.sendUserInput("/retry");
+		await session.waitForIdle();
+
+		expect(result).toEqual({ handled: "command", agentInvoked: true, output: "Retrying the last failed turn." });
+		expect(invoking).toHaveLength(1);
+		await expect(invoking[0]).resolves.toBeUndefined();
+		expect(messageText(session.messages.at(-1)!)).toBe("Recovered");
 	});
 
 	it("shows a built-in's output in the interactive TUI's status line, as typing it there does", async () => {

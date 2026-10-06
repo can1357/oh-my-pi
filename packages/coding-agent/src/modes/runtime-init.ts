@@ -128,9 +128,10 @@ export async function initializeExtensions(session: AgentSession, options: Initi
 			sendUserInput: (text, inputOptions) => {
 				const inputTask = sendSessionUserInput(session, text, inputOptions, slashCommandHost);
 				trackExtensionSend?.(inputTask);
-				// Only a submitted prompt or skill starts a turn; the rest handle the text locally.
+				// A submitted prompt or skill starts a turn, and so does a built-in that reports one (`/retry`);
+				// the rest handle the text locally.
 				const invokingTask = inputTask.then(result => {
-					if (result.handled !== "prompt" && result.handled !== "skill") {
+					if (result.handled !== "prompt" && result.handled !== "skill" && !result.agentInvoked) {
 						throw new Error("input did not invoke the agent");
 					}
 				});
