@@ -48,11 +48,37 @@ function getEditDestructiveIntent(args: unknown): { kind: "delete" | "move"; pat
 export function getPermissionIntent(
 	toolName: string,
 	args: unknown,
-): { toolName: string; title: string; paths?: string[]; cacheKey: string } | undefined {
+	sessionCwd?: string,
+): { toolName: string; title: string; paths?: string[]; cacheKey: string; preferenceScope?: string } | undefined {
 	const input = isRecord(args) ? args : {};
 	if (toolName === "bash") {
-		const command = stringProperty(input, "command")?.slice(0, 80);
-		return { toolName, title: command || toolName, cacheKey: toolName };
+		const command = stringProperty(input, "command");
+		// "Always allow" / "Always reject" have to name something narrower than the
+		// tool. Keying on `bash` alone let a single remembered answer decide every
+		// later bash call in the session, so one rejection of an unrelated command
+		// silently denied read-only ones the user never saw. Key on the exact
+		// command bytes in the effective working directory: a rewrite (line
+		// endings, whitespace) or a different cwd can change what the bytes do,
+		// so anything genuinely different asks again.
+		const explicitCwd = stringProperty(input, "cwd");
+		let effectiveCwd = sessionCwd ?? "";
+		if (explicitCwd) {
+			try {
+				effectiveCwd = resolveToCwd(explicitCwd, sessionCwd ?? explicitCwd);
+			} catch {
+				effectiveCwd = explicitCwd;
+			}
+		}
+		const scope = command === undefined ? undefined : `${effectiveCwd}\n${command}`;
+		return {
+			toolName,
+			title: command?.slice(0, 80) || toolName,
+			cacheKey: scope === undefined ? toolName : `bash:${scope}`,
+			// Echoed in the remembered-rejection message: a denial that does not say
+			// it came from a stored preference reads like a fresh refusal, and the
+			// model retries the identical command.
+			preferenceScope: command === undefined ? undefined : `\`${command}\``,
+		};
 	}
 	if (toolName === "delete") {
 		const filePath = stringProperty(input, "path");

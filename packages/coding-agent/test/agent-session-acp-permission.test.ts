@@ -826,10 +826,11 @@ it("unknown selected permission option ID fails closed without executing", async
 });
 
 // ---------------------------------------------------------------------------
-// 3. Always allow caches: bridge called exactly once across two executions
+// 3. Always allow caches per command: the same command skips the bridge, a
+//    different one asks again
 // ---------------------------------------------------------------------------
 
-it("allow_always: caches decision and calls bridge only once for subsequent executes", async () => {
+it("allow_always: caches the decision for the command it was given and calls the bridge only once", async () => {
 	const bashTool = makeFakeTool("bash");
 	const bridge = makeBridge({ outcome: "selected", optionId: "allow_always", kind: "allow_always" });
 	const permissionSpy = spyOn(bridge, "requestPermission");
@@ -839,12 +840,155 @@ it("allow_always: caches decision and calls bridge only once for subsequent exec
 	const wrappedBash = session.agent.state.tools.find(t => t.name === "bash");
 
 	// First call — bridge is consulted, decision cached.
-	await wrappedBash!.execute("call-1", { command: "echo a" }, undefined, undefined as never, undefined as never);
-	// Second call — must skip the bridge entirely.
-	await wrappedBash!.execute("call-2", { command: "echo b" }, undefined, undefined as never, undefined as never);
+	await wrappedBash!.execute("call-1", { command: "npm test" }, undefined, undefined as never, undefined as never);
+	// Second call with the same command — must skip the bridge entirely.
+	await wrappedBash!.execute("call-2", { command: "npm test" }, undefined, undefined as never, undefined as never);
 
 	expect(permissionSpy).toHaveBeenCalledTimes(1);
 	expect(bashTool.executeCalls).toBe(2);
+});
+
+it("allow_always: a different command is not covered by the remembered decision", async () => {
+	// The reported failure: the cache was keyed on the tool name alone, so one
+	// "Always allow" answered for every later bash call in the session. Anything
+	// the user did not actually answer for has to ask.
+	const bashTool = makeFakeTool("bash");
+	const bridge = makeBridge({ outcome: "selected", optionId: "allow_always", kind: "allow_always" });
+	const permissionSpy = spyOn(bridge, "requestPermission");
+	session = await createSession([bashTool], bridge);
+
+	await session.setActiveToolsByName(["bash"]);
+	const wrappedBash = session.agent.state.tools.find(t => t.name === "bash");
+
+	await wrappedBash!.execute("call-1", { command: "npm test" }, undefined, undefined as never, undefined as never);
+	await wrappedBash!.execute("call-2", { command: "git status" }, undefined, undefined as never, undefined as never);
+	await wrappedBash!.execute("call-3", { command: "npm test" }, undefined, undefined as never, undefined as never);
+
+	// Asked for `npm test` and again for `git status`; the repeat of `npm test`
+	// hit the cache.
+	expect(permissionSpy).toHaveBeenCalledTimes(2);
+	expect(bashTool.executeCalls).toBe(3);
+});
+
+it("allow_always: a command that differs in whitespace or line endings asks again", async () => {
+	// Exact bytes key the decision: trailing spaces and \r\n change what the
+	// shell runs, so each spelling is a decision of its own.
+	const bashTool = makeFakeTool("bash");
+	const bridge = makeBridge({ outcome: "selected", optionId: "allow_always", kind: "allow_always" });
+	const permissionSpy = spyOn(bridge, "requestPermission");
+	session = await createSession([bashTool], bridge);
+
+	await session.setActiveToolsByName(["bash"]);
+	const wrappedBash = session.agent.state.tools.find(t => t.name === "bash");
+
+	await wrappedBash!.execute("call-1", { command: "npm test" }, undefined, undefined as never, undefined as never);
+	await wrappedBash!.execute("call-2", { command: "  npm test  " }, undefined, undefined as never, undefined as never);
+	await wrappedBash!.execute(
+		"call-3",
+		{ command: 'printf "<%s>" build\r\n' },
+		undefined,
+		undefined as never,
+		undefined as never,
+	);
+	await wrappedBash!.execute(
+		"call-4",
+		{ command: 'printf "<%s>" build\n' },
+		undefined,
+		undefined as never,
+		undefined as never,
+	);
+
+	expect(permissionSpy).toHaveBeenCalledTimes(4);
+	expect(bashTool.executeCalls).toBe(4);
+});
+
+it("allow_always: the same command in a different directory asks again", async () => {
+	// The working directory is part of the grant: `rm -rf build` in a sandbox
+	// must not spend the approval given for the repository checkout.
+	const bashTool = makeFakeTool("bash");
+	const bridge = makeBridge({ outcome: "selected", optionId: "allow_always", kind: "allow_always" });
+	const permissionSpy = spyOn(bridge, "requestPermission");
+	session = await createSession([bashTool], bridge);
+
+	await session.setActiveToolsByName(["bash"]);
+	const wrappedBash = session.agent.state.tools.find(t => t.name === "bash");
+	const otherCwd = `${tempDir.path()}-other`;
+
+	await wrappedBash!.execute("call-1", { command: "rm -rf build" }, undefined, undefined as never, undefined as never);
+	await wrappedBash!.execute(
+		"call-2",
+		{ command: "rm -rf build", cwd: otherCwd },
+		undefined,
+		undefined as never,
+		undefined as never,
+	);
+	await wrappedBash!.execute(
+		"call-3",
+		{ command: "rm -rf build", cwd: otherCwd },
+		undefined,
+		undefined as never,
+		undefined as never,
+	);
+
+	expect(permissionSpy).toHaveBeenCalledTimes(2);
+	expect(bashTool.executeCalls).toBe(3);
+});
+
+it("reject_always: the remembered denial names the command it applies to", async () => {
+	// A bare "(preference)" is indistinguishable from a fresh refusal, so the
+	// model has no way to learn that repeating the identical command will be
+	// denied again and retries it.
+	const bashTool = makeFakeTool("bash");
+	const bridge = makeBridge({ outcome: "selected", optionId: "reject_always", kind: "reject_always" });
+	session = await createSession([bashTool], bridge);
+
+	await session.setActiveToolsByName(["bash"]);
+	const wrappedBash = session.agent.state.tools.find(t => t.name === "bash");
+
+	const run = (command: string) =>
+		wrappedBash!.execute(`call-${command}`, { command }, undefined, undefined as never, undefined as never);
+
+	await expect(run("rm -rf build")).rejects.toThrow(/rejected by user/);
+	await expect(run("rm -rf build")).rejects.toThrow(/rejected by user \(preference: `rm -rf build`\)/);
+	expect(bashTool.executeCalls).toBe(0);
+});
+
+it("reject_always: a different command is still asked about after one command was rejected", async () => {
+	const bashTool = makeFakeTool("bash");
+	const requests: ClientBridgePermissionToolCall[] = [];
+	const bridge: ClientBridge = {
+		capabilities: { requestPermission: true },
+		requestPermission: (toolCall: ClientBridgePermissionToolCall) => {
+			requests.push(toolCall);
+			return Promise.resolve({
+				outcome: "selected",
+				optionId: "reject_always",
+				kind: "reject_always",
+			} as const);
+		},
+	};
+	session = await createSession([bashTool], bridge);
+
+	await session.setActiveToolsByName(["bash"]);
+	const wrappedBash = session.agent.state.tools.find(t => t.name === "bash");
+
+	for (const command of ["rm -rf build", "ls"]) {
+		await expect(
+			wrappedBash!.execute(`call-${command}`, { command }, undefined, undefined as never, undefined as never),
+		).rejects.toThrow(/rejected by user/);
+	}
+
+	// The reported complaint: `ls` was never answered, so it must not be denied
+	// by the decision the user gave for `rm -rf build`.
+	const asked = requests.map(request => {
+		const raw: unknown = request.rawInput;
+		if (raw !== null && typeof raw === "object" && "command" in raw && typeof raw.command === "string") {
+			return raw.command;
+		}
+		return null;
+	});
+	expect(asked).toEqual(["rm -rf build", "ls"]);
+	expect(bashTool.executeCalls).toBe(0);
 });
 
 it.each(boundaryCases)(
