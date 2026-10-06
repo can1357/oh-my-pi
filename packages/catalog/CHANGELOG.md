@@ -17,6 +17,7 @@
 
 ### Fixed
 
+- Upgraded GitHub Copilot GPT-6 models with neutral discovery to the full reasoning effort ladder and invalidated stale pre-3bb803a caches ([#14612](https://github.com/can1357/oh-my-pi/pull/14612) by [@harshaygadekar](https://github.com/harshaygadekar)).
 - Fixed GPT-6 Astra's Ultrafast service tier being unpriced: the catalog now carries OpenAI's published multiplier, 6x on the first-party API and 8x (the included-usage rate, matching Fast's 2.5x) on the Codex card ([#14471](https://github.com/can1357/oh-my-pi/pull/14471) by [@eggpeat](https://github.com/eggpeat)).
 
 ## [18.6.3] - 2026-10-06

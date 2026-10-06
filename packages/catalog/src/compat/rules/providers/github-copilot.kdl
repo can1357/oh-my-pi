@@ -30,6 +30,10 @@ provider "github-copilot" {
 		revision ">=5 <5.7" {
 			thinking-mode "effort"
 		}
+		revision ">=6" {
+			thinking-upgrade-neutral #true
+			thinking-mode "effort"
+		}
 	}
 	class "unknown" {
 		thinking-mode "effort"
