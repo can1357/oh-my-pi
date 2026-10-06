@@ -11,6 +11,10 @@
 - Fixed Ultrafast service-tier turns being billed at standard rates; GPT-6 Astra now carries its published Ultrafast premium (6x on the OpenAI API, 8x included usage on Codex), and the premium-request counter counts them ([#14471](https://github.com/can1357/oh-my-pi/pull/14471) by [@eggpeat](https://github.com/eggpeat)).
 - Fixed Vertex AI on Windows ignoring credentials from `gcloud auth application-default login`, which gcloud writes to `%APPDATA%\gcloud\application_default_credentials.json` rather than `~/.config/gcloud` ([#14549](https://github.com/can1357/oh-my-pi/pull/14549) by [@jorgoose](https://github.com/jorgoose))
 - Fixed `auth.accountPolicies` and `/session pin` being unable to select a Cursor account by email: Cursor logins now store the account email, and accounts stored earlier gain it at their next token refresh ([#14511](https://github.com/can1357/oh-my-pi/pull/14511) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed Anthropic sessions on a custom `baseUrl` (a gateway in front of Anthropic) losing the server-side fallback marker and redacted thinking from a persisted turn, which made the next request fail with `thinking … blocks in the latest assistant message cannot be modified` ([#12352](https://github.com/can1357/oh-my-pi/pull/12352) by [@sjawhar](https://github.com/sjawhar)).
+- Persisted server-side fallback markers are now replayed to any Anthropic endpoint the request opts into fallbacks with, not only api.anthropic.com ([#12352](https://github.com/can1357/oh-my-pi/pull/12352) by [@sjawhar](https://github.com/sjawhar)).
+- Anthropic's `thinking … blocks in the latest assistant message cannot be modified` rejection now retries without that turn's replayed thinking instead of ending the turn with the error ([#12352](https://github.com/can1357/oh-my-pi/pull/12352) by [@sjawhar](https://github.com/sjawhar)).
+- Fixed Anthropic conversations surfacing a 400 when a fallback or prefix change would replay only part of the latest assistant turn's thinking ([#12352](https://github.com/can1357/oh-my-pi/pull/12352) by [@sjawhar](https://github.com/sjawhar)).
 
 ## [18.6.3] - 2026-10-06
 

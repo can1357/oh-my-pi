@@ -270,8 +270,9 @@ describe("anthropic server-side fallback opt-in", () => {
 describe("anthropic fallback content-block replay policy", () => {
 	// A prior assistant turn that took a fallback carries a persisted `fallback`
 	// content block. On the next request the outgoing wire body must strip it
-	// UNLESS the current request also opts into the beta chain AND the target
-	// is official Anthropic.
+	// UNLESS the current request also opts into the beta chain — the endpoint
+	// that accepts `fallbacks` accepts the marker, whether it is
+	// api.anthropic.com or a transparent gateway in front of it.
 
 	function priorFallbackAssistant(): AssistantMessage {
 		return {
@@ -319,14 +320,20 @@ describe("anthropic fallback content-block replay policy", () => {
 		expect(params[0]?.content).toEqual([{ type: "text", text: "continued" }]);
 	});
 
-	it("drops the fallback block on non-official Anthropic targets even when opted in", () => {
+	it("keeps the fallback block on a non-official Anthropic target when the request opts in", () => {
+		// A gateway relaying to Anthropic returned this marker; stripping it on
+		// replay while keeping the thinking around it rewrites the latest turn
+		// and Anthropic rejects the request.
 		const params = convertAnthropicMessages(
 			[priorFallbackAssistant(), { role: "user", content: "next", timestamp: 0 }],
 			umansModel,
 			false,
 			{ serverSideFallbackEnabled: true },
 		);
-		expect(params[0]?.content).toEqual([{ type: "text", text: "continued" }]);
+		expect(params[0]?.content).toEqual([
+			{ type: "fallback", from: { model: "claude-fable-5" }, to: { model: "claude-opus-4-8" } },
+			{ type: "text", text: "continued" },
+		]);
 	});
 });
 
@@ -415,7 +422,7 @@ describe("anthropic assistant replay block ordering (tool_use partition)", () =>
 		]);
 	});
 
-	it("opt-out drops the fallback marker but still defers tool_use to the tail", () => {
+	it("opt-out drops the latest turn's thinking chain with its fallback marker and still defers tool_use", () => {
 		const params = convertAnthropicMessages(
 			[
 				assistant([
@@ -434,10 +441,10 @@ describe("anthropic assistant replay block ordering (tool_use partition)", () =>
 			],
 			fableModel,
 			false,
-			// serverSideFallbackEnabled omitted → fallback block dropped
+			// serverSideFallbackEnabled omitted → fallback marker and the
+			// latest turn's native thinking chain are dropped together
 		);
 		expect(assistantParam(params).content).toEqual([
-			{ type: "thinking", thinking: "plan", signature: "sig-1" },
 			{ type: "text", text: "before" },
 			{ type: "text", text: "after" },
 			{ type: "tool_use", id: "call_a", name: "read", input: {} },
