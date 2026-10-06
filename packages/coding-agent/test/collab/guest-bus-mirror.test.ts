@@ -35,6 +35,7 @@ function makeGuestContext(eventBus: EventBus): InteractiveModeContext {
 			getCwd: () => "/local",
 		},
 		session: {
+			suspendMessagingReceiving: () => () => {},
 			messages: [],
 			switchSession: () => Promise.resolve(),
 			newSession: () => Promise.resolve(),

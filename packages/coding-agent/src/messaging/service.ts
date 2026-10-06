@@ -48,6 +48,9 @@ export interface RemoteSender {
 }
 export interface RemoteDelivery {
 	id: string;
+	recipientSessionId: string;
+	sender?: SenderInfo;
+	receiver?: SenderInfo;
 	from: RemoteSender;
 	body: string;
 	chain: readonly string[];
@@ -85,21 +88,23 @@ export interface MessagingHost {
 	sessionName(): string | undefined;
 	titleSource(): SessionTitleSource | undefined;
 	isBusy(): boolean;
+	isReceivingSuspended(): boolean;
+	isSessionTransitioning(): boolean;
 	permissionClass(): PermissionClass;
 	onPolicyInputsChange(cb: () => void): () => void;
-	deliverRemote(deliveries: readonly RemoteDelivery[]): void;
+	deliverRemote(deliveries: readonly RemoteDelivery[]): Promise<boolean>;
 	pendingRemoteCount(): number;
 	showNotice(text: string): void;
-	deliverNotice(from: RemoteSender, text: string): void;
+	deliverNotice(from: RemoteSender, text: string, recipientSessionId: string): Promise<boolean>;
 	askApproval: ((v: HeldMessageView, signal: AbortSignal) => Promise<"approve" | "deny" | undefined>) | undefined;
 	currentRelayChain(): readonly string[];
 	lastFinished(): { finishedAt: number; status: string | null } | undefined;
 }
 
 type BufferedDelivery =
-	| { type: "message"; delivery: RemoteDelivery }
-	| { type: "notice"; from: RemoteSender; text: string }
-	| { type: "receipt"; text: string };
+	| { type: "message"; delivery: RemoteDelivery; receiver: SenderInfo }
+	| { type: "notice"; from: RemoteSender; text: string; recipientSessionId: string }
+	| { type: "receipt"; text: string; recipientSessionId: string };
 
 export class MessagingService {
 	#publication!: InboxPublication;
@@ -108,6 +113,7 @@ export class MessagingService {
 	#suspendedIdentity: Pick<SessionSnapshot, "sessionId" | "name" | "title" | "cwd"> | undefined;
 	#closed = false;
 	#batching = 0;
+	#pendingHandoffs = 0;
 	#closing: Promise<void> | undefined;
 	readonly #buffer: BufferedDelivery[] = [];
 	readonly #sent = new Map<string, number[]>();
@@ -123,7 +129,7 @@ export class MessagingService {
 	) {
 		const receivingHost: MessagingHost = {
 			...host,
-			sessionId: () => host.sessionId(),
+			sessionId: () => this.#ownSessionId(),
 			cwd: () => host.cwd(),
 			sessionName: () => host.sessionName(),
 			titleSource: () => host.titleSource(),
@@ -131,11 +137,18 @@ export class MessagingService {
 			permissionClass: () => host.permissionClass(),
 			onPolicyInputsChange: cb => host.onPolicyInputsChange(cb),
 			pendingRemoteCount: () =>
-				host.pendingRemoteCount() + this.#buffer.filter(item => item.type === "message").length,
-			deliverRemote: deliveries => {
-				for (const delivery of deliveries) this.#deliver({ type: "message", delivery });
+				host.pendingRemoteCount() +
+				this.#pendingHandoffs +
+				this.#buffer.filter(item => item.type === "message").length,
+			deliverRemote: async deliveries => {
+				for (const delivery of deliveries)
+					this.#deliver({ type: "message", delivery, receiver: delivery.receiver ?? this.#sender() });
+				return true;
 			},
-			deliverNotice: (from, text) => this.#deliver({ type: "notice", from, text }),
+			deliverNotice: async (from, text, recipientSessionId) => {
+				this.#deliver({ type: "notice", from, text, recipientSessionId });
+				return true;
+			},
 			showNotice: text => host.showNotice(text),
 			askApproval: host.askApproval ? (view, signal) => host.askApproval!(view, signal) : undefined,
 			currentRelayChain: () => host.currentRelayChain(),
@@ -146,7 +159,7 @@ export class MessagingService {
 			settings,
 			() => this.ownShortId(),
 			(sender, notice, from) => this.#reply(sender, notice, from),
-			() => this.#ready,
+			() => this.#ready && this.#suspended === 0 && !host.isReceivingSuspended() && !host.isSessionTransitioning(),
 			() => this.#sender(),
 		);
 		this.#idle = new IdleSubscriptions(
@@ -166,15 +179,22 @@ export class MessagingService {
 		});
 	}
 
-	static async start(host: MessagingHost, settings: Settings): Promise<MessagingService> {
+	static async start(
+		host: MessagingHost,
+		settings: Settings,
+		suspendedIdentity?: Pick<SessionSnapshot, "sessionId" | "name" | "title" | "cwd">,
+	): Promise<MessagingService> {
 		const service = new MessagingService(host, settings);
+		service.#suspendedIdentity = suspendedIdentity;
+		let receiver: SenderInfo;
 		try {
-			service.#publication = await publishInbox((request, auth) => service.#receive(request, auth), {
-				sessionId: host.sessionId(),
+			service.#publication = await publishInbox((request, auth) => service.#receive(request, auth, receiver), {
+				sessionId: service.#ownSessionId(),
 			});
+			receiver = service.#sender();
 			const mail = await withOfflineMailboxLock(
-				host.sessionId(),
-				() => drainOfflineUnlocked(host.sessionId(), { dir: service.#publication.registryDir }),
+				service.#ownSessionId(),
+				() => drainOfflineUnlocked(service.#ownSessionId(), { dir: service.#publication.registryDir }),
 				{ dir: service.#publication.registryDir },
 			);
 			await service.#deliverOfflineMail(mail);
@@ -201,9 +221,9 @@ export class MessagingService {
 		this.#flush();
 	}
 
-	suspendReceiving(): () => void {
+	suspendReceiving(identity?: Pick<SessionSnapshot, "sessionId" | "name" | "title" | "cwd">): () => void {
 		if (this.#suspended === 0) {
-			this.#suspendedIdentity = {
+			this.#suspendedIdentity = identity ?? {
 				sessionId: this.host.sessionId(),
 				name: this.ownAddress(),
 				title: this.host.sessionName() ?? null,
@@ -228,12 +248,48 @@ export class MessagingService {
 		};
 	}
 
+	#retireDelivery(item: Extract<BufferedDelivery, { type: "message" }>): void {
+		if (!item.delivery.sender) return;
+		void this.#reply(
+			item.delivery.sender,
+			{ type: "notice", kind: "retired", subject: "message", aboutId: item.delivery.id },
+			item.receiver,
+		);
+	}
+
+	#forwardMessages(items: Extract<BufferedDelivery, { type: "message" }>[]): void {
+		const owned = items.filter(item => {
+			if (item.delivery.recipientSessionId === this.host.sessionId()) return true;
+			this.#retireDelivery(item);
+			return false;
+		});
+		if (owned.length === 0) return;
+		this.#pendingHandoffs += owned.length;
+		void this.host
+			.deliverRemote(owned.map(item => item.delivery))
+			.then(delivered => {
+				if (!delivered && !this.#closed) for (const item of owned) this.#retireDelivery(item);
+			})
+			.catch(error => logger.warn("Failed to deliver cross-session messages", { error: String(error) }))
+			.finally(() => {
+				this.#pendingHandoffs -= owned.length;
+			});
+	}
+
 	#deliver(item: BufferedDelivery): void {
 		if (this.#closed) return;
-		if (!this.#ready || this.#suspended > 0 || this.#batching > 0) this.#buffer.push(item);
-		else if (item.type === "message") this.host.deliverRemote([item.delivery]);
-		else if (item.type === "receipt") this.host.showNotice(item.text);
-		else this.host.deliverNotice(item.from, item.text);
+		if (!this.#ready || this.#suspended > 0 || this.#batching > 0) {
+			this.#buffer.push(item);
+			return;
+		}
+		if (item.type === "message") this.#forwardMessages([item]);
+		else if (item.recipientSessionId === this.host.sessionId()) {
+			if (item.type === "receipt") this.host.showNotice(item.text);
+			else
+				void this.host
+					.deliverNotice(item.from, item.text, item.recipientSessionId)
+					.catch(error => logger.warn("Failed to deliver cross-session notice", { error: String(error) }));
+		}
 	}
 
 	#flush(): void {
@@ -244,10 +300,10 @@ export class MessagingService {
 				this.#deliver(item);
 				continue;
 			}
-			const deliveries = [item.delivery];
+			const items = [item];
 			while (this.#buffer[0]?.type === "message")
-				deliveries.push((this.#buffer.shift()! as Extract<BufferedDelivery, { type: "message" }>).delivery);
-			this.host.deliverRemote(deliveries);
+				items.push(this.#buffer.shift()! as Extract<BufferedDelivery, { type: "message" }>);
+			this.#forwardMessages(items);
 		}
 	}
 
@@ -296,6 +352,16 @@ export class MessagingService {
 				.filter(entry => entry.entryId !== this.#publication.entryId)
 				.map(async entry => {
 					const result = await requestInbox(entry, { type: "snapshot" }, { dir, signal });
+					if (process.platform === "win32" && !result.ok && result.error === "unsupported_protocol") {
+						liveSessionIds.add(entry.sessionId);
+						incompatible.push({
+							sessionId: entry.sessionId,
+							name: null,
+							shortId: sessionShortId(entry.sessionId),
+							cwd: "",
+						});
+						return;
+					}
 					if (!result.ok || !("snapshot" in result)) return;
 					const { sessionId, name, shortId, title, cwd, busy, v } = result.snapshot;
 					liveSessionIds.add(sessionId);
@@ -500,7 +566,8 @@ export class MessagingService {
 				`Failed to send to ${address}: ${error === "unreachable" ? "the session is no longer running." : error}`,
 			);
 		}
-		if (result.outcome !== "held") this.#outgoing.delete(id);
+		if (result.outcome !== "held" && result.outcome !== "queued" && result.outcome !== "delivered")
+			this.#outgoing.delete(id);
 		if (result.outcome === "refused" || result.outcome === "dropped") this.#idle.cancel(target.entry.entryId, id);
 		switch (result.outcome) {
 			case "delivered":
@@ -508,7 +575,9 @@ export class MessagingService {
 			case "queued":
 				return {
 					ok: true,
-					text: `Queued for ${address} (busy; it will read this at its next step).${idleNoticeSkipped}`,
+					text: result.receivingSuspended
+						? `Queued for ${address} (it will read this when receiving resumes).${idleNoticeSkipped}`
+						: `Queued for ${address} (busy; it will read this at its next step).${idleNoticeSkipped}`,
 				};
 			case "held":
 				return { ok: true, text: `Held by ${address} for its user's approval.${idleNoticeSkipped}` };
@@ -521,19 +590,24 @@ export class MessagingService {
 		}
 	}
 
-	async #receive(request: InboxRequest, auth: InboxAuth): Promise<InboxResponse> {
+	async #receive(request: InboxRequest, auth: InboxAuth, receiver: SenderInfo): Promise<InboxResponse> {
 		if (this.#closed) return { ok: false, error: "unreachable" };
 		if (JSON.stringify(request).length > MAX_SERIALIZED_CHARS) return { ok: false, error: "too_large" };
+		if (receiver.sessionId === this.#ownSessionId()) {
+			receiver.name = this.ownAddress();
+			receiver.cwd = this.#suspendedIdentity?.cwd ?? this.host.cwd();
+		}
+		receiver.class = this.host.permissionClass();
 		if (request.type === "snapshot")
 			return {
 				ok: true,
 				snapshot: {
 					v: MESSAGING_WIRE_VERSION,
-					sessionId: this.#ownSessionId(),
-					name: this.ownAddress(),
-					shortId: this.ownShortId(),
+					sessionId: receiver.sessionId,
+					name: receiver.name,
+					shortId: receiver.shortId,
 					title: this.#suspendedIdentity ? this.#suspendedIdentity.title : (this.host.sessionName() ?? null),
-					cwd: this.#suspendedIdentity?.cwd ?? this.host.cwd(),
+					cwd: receiver.cwd,
 					busy: this.host.isBusy(),
 					pid: process.pid,
 					startedAt: this.#startedAt,
@@ -545,8 +619,10 @@ export class MessagingService {
 				if (request.from) this.#idle.subscribe(request.from, request.id);
 				return { ok: true, outcome: "subscribed" };
 			}
-			const sender = request.from ?? { ...this.#sender(), name: "own-child" };
-			const result = this.#gate.receive(request, sender, auth === "own-child");
+			const sender = request.from ?? { ...receiver, name: "own-child" };
+			const receivingSuspended =
+				this.#suspended > 0 || this.host.isReceivingSuspended() || this.host.isSessionTransitioning();
+			const result = this.#gate.receive(request, sender, auth === "own-child", { ...receiver });
 			if (
 				request.notifyWhenIdle &&
 				request.from &&
@@ -558,17 +634,21 @@ export class MessagingService {
 					result.outcome === "refused")
 			)
 				this.#idle.subscribe(request.from, request.id);
-			return result;
+			return receivingSuspended && result.ok && "outcome" in result && result.outcome === "queued"
+				? { ...result, receivingSuspended: true }
+				: result;
 		}
 		if (request.type === "subscribe") {
 			this.#idle.subscribe(request.from, request.id);
 			return { ok: true, outcome: "subscribed" };
 		}
+		if (receiver.sessionId !== this.#ownSessionId()) return { ok: true, outcome: "delivered" };
 		if (request.kind === "refused") {
 			if (request.toSessionId === this.#ownSessionId()) {
 				this.#outgoing.delete(request.aboutId);
 				this.#deliver({
 					type: "receipt",
+					recipientSessionId: this.#ownSessionId(),
 					text: `Your offline message to ${request.from.name ?? request.from.shortId} was refused.`,
 				});
 			}
@@ -595,17 +675,24 @@ export class MessagingService {
 				if (request.kind === "expired")
 					this.#deliver({
 						type: "notice",
+						recipientSessionId: this.#ownSessionId(),
 						from,
 						text: `Your message to @${from.address} expired before its user approved it.`,
 					});
 				else if (request.kind === "retired")
 					this.#deliver({
 						type: "notice",
+						recipientSessionId: this.#ownSessionId(),
 						from,
 						text: `Your message to @${from.address} was dropped unread: that session switched to a different conversation.`,
 					});
 				else if (request.reason)
-					this.#deliver({ type: "notice", from, text: droppedMessageText(from.address, request.reason) });
+					this.#deliver({
+						type: "notice",
+						from,
+						text: droppedMessageText(from.address, request.reason),
+						recipientSessionId: this.#ownSessionId(),
+					});
 			}
 		} else this.#idle.receive(request);
 		return { ok: true, outcome: "delivered" };
@@ -628,12 +715,16 @@ export class MessagingService {
 	async retireConversation(): Promise<void> {
 		if (this.#closed || this.#suspended > 0) return;
 		this.#outgoing.clear();
+		this.#flush();
 		await Promise.all([this.#gate.retire(), this.#idle.retire()]);
 		const previous = this.#publication;
-		this.#publication = await publishInbox((request, auth) => this.#receive(request, auth), {
-			dir: previous.registryDir,
-			sessionId: this.host.sessionId(),
-		});
+		const receiver = this.#sender();
+		const publication: InboxPublication = await publishInbox(
+			(request, auth) => this.#receive(request, auth, receiver),
+			{ dir: previous.registryDir, sessionId: receiver.sessionId },
+		);
+		receiver.entryId = publication.entryId;
+		this.#publication = publication;
 		await previous.close();
 		await this.#deliverOfflineMail(await drainOffline(this.host.sessionId(), { dir: this.#publication.registryDir }));
 	}
@@ -699,6 +790,7 @@ export class MessagingService {
 					if (message.toSessionId === this.#ownSessionId())
 						this.#deliver({
 							type: "receipt",
+							recipientSessionId: this.#ownSessionId(),
 							text: `Your offline message to ${message.from.name ?? message.from.shortId} was refused.`,
 						});
 					await ack();

@@ -495,7 +495,7 @@ export class CollabGuestLink {
 		}
 		if (this.#left) return;
 		// Buffer messages until the local conversation is restored.
-		this.#resumeReceiving ??= this.#ctx.session.messaging?.suspendReceiving();
+		this.#resumeReceiving ??= this.#ctx.session.suspendMessagingReceiving();
 
 		// Resume through AgentSession without adopting the host's cwd. The replica
 		// keeps its model: #applyHostState mirrors the host's, which runs inference.

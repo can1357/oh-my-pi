@@ -1,14 +1,16 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import type { ExtensionActions } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
 import {
 	PRINT_MODE_ADVISOR_DRAIN_TIMEOUT_MS,
 	PRINT_MODE_ERROR_ADVISOR_DRAIN_TIMEOUT_MS,
 	runPrintMode,
 } from "@oh-my-pi/pi-coding-agent/modes/print-mode";
 import type { PlanModeState } from "@oh-my-pi/pi-coding-agent/plan-mode/state";
-import type { AgentSession, AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import type { AgentSession, AgentSessionEvent, PromptOptions } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { CREDENTIAL_DISABLED_NOTICE_SOURCE } from "@oh-my-pi/pi-coding-agent/session/credential-disabled-notice";
+import * as messagingHost from "@oh-my-pi/pi-coding-agent/session/messaging-host";
 import type { PlanProposalHandler } from "@oh-my-pi/pi-coding-agent/tools/resolve";
 
 function makeAssistantMessage(text: string): AssistantMessage {
@@ -149,6 +151,51 @@ function createDelayedSession(
 	};
 }
 
+function createExtensionCommandSession(
+	finalMessage: AssistantMessage,
+	command: (actions: ExtensionActions, nestedTurn: Promise<void>) => Promise<void>,
+): DelayedSession {
+	const delayed = createDelayedSession(finalMessage);
+	const nestedPrompt = delayed.session.prompt.bind(delayed.session);
+	const { promise: nestedTurn, resolve: finishNestedTurn } = Promise.withResolvers<void>();
+	let extensionActions: ExtensionActions | undefined;
+	const sendNestedMessage = async (): Promise<void> => {
+		delayed.emit({ type: "agent_start" });
+		await nestedPrompt("nested prompt");
+		delayed.emit({ type: "message_end", message: finalMessage });
+		delayed.emit({ type: "agent_end", messages: [finalMessage], yielded: true });
+		finishNestedTurn();
+	};
+	Object.assign(delayed.session, {
+		messaging: {},
+		agent: { hasQueuedMessages: () => false },
+		extensionRunner: {
+			initialize: (actions: ExtensionActions) => {
+				extensionActions = actions;
+			},
+			onError: () => {},
+			emit: async () => {},
+		},
+		sendUserMessage: sendNestedMessage,
+		sendCustomMessage: async () => {
+			await sendNestedMessage();
+			return true;
+		},
+		prompt: async (_text: string, options?: PromptOptions) => {
+			if (!extensionActions) throw new Error("extensions not initialized");
+			options?.onPromptAdmitted?.();
+			await command(extensionActions, nestedTurn);
+			return false;
+		},
+		waitForIdle: async () => {},
+	});
+	vi.spyOn(messagingHost, "bindSessionMessaging").mockResolvedValue({
+		ready: () => {},
+		dispose: async () => {},
+	});
+	return delayed;
+}
+
 describe("print mode working indicator", () => {
 	let stderrOutput: string[];
 	let stdoutOutput: string[];
@@ -179,6 +226,93 @@ describe("print mode working indicator", () => {
 
 	afterEach(() => {
 		vi.restoreAllMocks();
+	});
+
+	it("prints the nested answer when an extension command finishes locally after its user-message turn", async () => {
+		const delayed = createExtensionCommandSession(makeAssistantMessage("nested answer"), async (actions, turn) => {
+			actions.sendUserMessage("answer me");
+			await turn;
+		});
+		const run = runPrintMode(delayed.session, { mode: "text", initialMessage: "/nested" });
+		await delayed.promptStarted;
+		delayed.resolvePrompt();
+
+		expect(await run).toBe(0);
+		expect(stdoutOutput.join("")).toBe("nested answer\n");
+	});
+
+	for (const mode of ["text", "json"] as const) {
+		it(`returns a failure for an extension command's nested provider error in ${mode} mode`, async () => {
+			const message = makeAssistantMessage("");
+			message.stopReason = "error";
+			message.errorMessage = "nested provider failure";
+			const delayed = createExtensionCommandSession(message, async (actions, turn) => {
+				actions.sendUserMessage("answer me");
+				await turn;
+			});
+			const run = runPrintMode(delayed.session, { mode, initialMessage: "/nested" });
+			await delayed.promptStarted;
+			delayed.resolvePrompt();
+
+			expect(await run).toBe(1);
+			if (mode === "text") {
+				expect(stdoutOutput.join("")).toBe("");
+				expect(stderrOutput.join("")).toContain("nested provider failure");
+			} else {
+				const events = stdoutOutput.map(line => JSON.parse(line));
+				expect(events).toContainEqual({ type: "message_end", message });
+				expect(stderrOutput.join("")).toBe("");
+			}
+		});
+	}
+
+	it("waits for a delayed custom-message turn after the outer extension command has returned", async () => {
+		const { promise: outerReturned, resolve: markOuterReturned } = Promise.withResolvers<void>();
+		const delayed = createExtensionCommandSession(makeAssistantMessage("delayed nested answer"), async actions => {
+			actions.sendMessage(
+				{ customType: "test", content: "answer me", display: true, details: undefined, attribution: "agent" },
+				{ triggerTurn: true },
+			);
+			markOuterReturned();
+		});
+		const run = runPrintMode(delayed.session, { mode: "text", initialMessage: "/nested" });
+		await outerReturned;
+		delayed.resolvePrompt();
+
+		expect(await run).toBe(0);
+		expect(stdoutOutput.join("")).toBe("delayed nested answer\n");
+	});
+
+	it("does not attribute an agent answer to a custom send that starts no turn", async () => {
+		const delayed = createExtensionCommandSession(makeAssistantMessage("not an answer"), async actions => {
+			actions.sendMessage(
+				{ customType: "test", content: "context", display: true, details: undefined, attribution: "agent" },
+				{ deliverAs: "aside" },
+			);
+		});
+		vi.spyOn(delayed.session, "sendCustomMessage").mockResolvedValue(false);
+
+		expect(await runPrintMode(delayed.session, { mode: "text", initialMessage: "/context" })).toBe(0);
+		expect(stdoutOutput.join("")).toBe("");
+		expect(stderrOutput.join("")).not.toContain("failed");
+	});
+
+	it("reports a rejected nested send without waiting for a nonexistent turn", async () => {
+		const delayed = createExtensionCommandSession(makeAssistantMessage("not an answer"), async actions => {
+			actions.sendUserMessage("answer me");
+		});
+		vi.spyOn(delayed.session, "sendUserMessage").mockRejectedValue(new Error("missing model"));
+
+		expect(await runPrintMode(delayed.session, { mode: "text", initialMessage: "/nested" })).toBe(0);
+		expect(stdoutOutput.join("")).toBe("");
+		expect(stderrOutput.join("")).toContain("sendUserMessage failed: missing model");
+	});
+
+	it("keeps a genuinely local extension command local", async () => {
+		const delayed = createExtensionCommandSession(makeAssistantMessage("not an answer"), async () => {});
+
+		expect(await runPrintMode(delayed.session, { mode: "text", initialMessage: "/local" })).toBe(0);
+		expect(stdoutOutput.join("")).toBe("");
 	});
 
 	it("does not enter startup plan mode in headless print mode and warns instead (#8272)", async () => {

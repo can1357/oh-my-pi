@@ -85,6 +85,8 @@ export async function bindSessionMessaging(
 			sessionName: () => session.sessionManager.getSessionName(),
 			titleSource: () => session.sessionManager.titleSource,
 			isBusy: () => session.isStreaming,
+			isReceivingSuspended: () => session.isMessagingReceivingSuspended,
+			isSessionTransitioning: () => session.isSessionTransitioning,
 			permissionClass: () => session.permissionClass(),
 			onPolicyInputsChange: callback =>
 				session.settings.onEffectiveChange(
@@ -106,10 +108,11 @@ export async function bindSessionMessaging(
 			deliverRemote: deliveries => session.deliverRemoteMessages(deliveries),
 			pendingRemoteCount: () => session.pendingRemoteCount(),
 			showNotice: text => session.emitNotice("info", text, "messaging"),
-			deliverNotice: (from, body) =>
+			deliverNotice: (from, body, recipientSessionId) =>
 				session.deliverRemoteMessages([
 					{
 						id: crypto.randomUUID(),
+						recipientSessionId,
 						from,
 						body,
 						chain: [],
@@ -121,7 +124,7 @@ export async function bindSessionMessaging(
 			lastFinished: () => session.lastFinished(),
 		};
 		try {
-			const started = await MessagingService.start(host, session.settings);
+			const started = await MessagingService.start(host, session.settings, session.suspendedMessagingIdentity);
 			if (disposed || !cfgMessagingEnabled.get(session.settings)) {
 				await started.close();
 				return;

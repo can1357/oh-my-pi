@@ -1,9 +1,11 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
+import * as crypto from "node:crypto";
 import * as nodeFs from "node:fs";
 import * as fs from "node:fs/promises";
 import * as net from "node:net";
 import * as path from "node:path";
 import { TempDir } from "@oh-my-pi/pi-utils";
+import { publishLocalEndpoint, type LocalEndpointPublication } from "../../src/ipc/local-endpoint-registry";
 import {
 	type InboxRequest,
 	type InboxResponse,
@@ -19,13 +21,16 @@ import {
 import {
 	handleInboxConnection,
 	type InboxAuth,
+	type InboxEntry,
 	type InboxPublication,
 	listInboxEntries,
 	publishInbox,
+	readInboxEntries,
 	requestInbox,
 } from "../../src/messaging/transport";
 
 const publications: InboxPublication[] = [];
+const impostorPublications: LocalEndpointPublication[] = [];
 const directories: TempDir[] = [];
 const sockets: net.Socket[] = [];
 
@@ -34,6 +39,7 @@ afterEach(async () => {
 	vi.restoreAllMocks();
 	for (const socket of sockets.splice(0)) socket.destroy();
 	for (const pub of publications.splice(0)) await pub.close();
+	for (const pub of impostorPublications.splice(0)) await pub.close();
 	for (const dir of directories.splice(0)) dir[Symbol.dispose]();
 });
 
@@ -84,21 +90,283 @@ function framingSocket(requireAuth: boolean): {
 	socket: net.Socket;
 	handle: (request: InboxRequest, auth: InboxAuth) => Promise<InboxResponse>;
 	responses: string[];
+	writes: string[];
 	responded: Promise<void>;
 } {
 	const socket = new net.Socket();
 	sockets.push(socket);
 	const handle = vi.fn(async (): Promise<InboxResponse> => ({ ok: true, outcome: "delivered" }));
 	const responses: string[] = [];
+	const writes: string[] = [];
+	vi.spyOn(socket, "write").mockImplementation((...args: unknown[]) => {
+		writes.push(String(args[0]));
+		return true;
+	});
 	const responded = Promise.withResolvers<void>();
 	vi.spyOn(socket, "end").mockImplementation((...args: unknown[]) => {
 		responses.push(String(args[0]));
 		responded.resolve();
 		return socket;
 	});
-	handleInboxConnection(socket, handle, { sessionToken: "session", peerKey: "peer", requireAuth });
-	return { socket, handle, responses, responded: responded.promise };
+	handleInboxConnection(socket, handle, {
+		sessionToken: "session",
+		peerKey: "peer",
+		entryId: "12345678",
+		requireAuth,
+	});
+	return { socket, handle, responses, writes, responded: responded.promise };
 }
+
+function proofFor(peerKey: string, entryId: string, nonce: string): string {
+	return crypto.createHmac("sha256", peerKey).update(`omp-messaging-server-proof\0${entryId}\0${nonce}`).digest("hex");
+}
+
+async function proofClient(
+	request: InboxRequest,
+	signal?: AbortSignal,
+): Promise<{
+	socket: net.Socket;
+	writes: string[];
+	entry: InboxEntry;
+	peerKey: string;
+	result: Promise<InboxResponse>;
+}> {
+	const dir = tempDir();
+	await publish(dir, async () => ({ ok: true, snapshot }));
+	const [entry] = await listInboxEntries({ dir });
+	const peerKey = await Bun.file(path.join(dir, "peer.key")).text();
+	const socket = new net.Socket();
+	sockets.push(socket);
+	const writes: string[] = [];
+	vi.spyOn(socket, "write").mockImplementation((...args: unknown[]) => {
+		writes.push(String(args[0]));
+		return true;
+	});
+	const connecting = Promise.withResolvers<void>();
+	vi.spyOn(net, "createConnection").mockImplementation(() => {
+		connecting.resolve();
+		return socket;
+	});
+	vi.useFakeTimers();
+	const result = requestInbox(entry!, request, { dir, timeoutMs: 100, signal });
+	await connecting.promise;
+	socket.emit("connect");
+	return { socket, writes, entry: entry!, peerKey, result };
+}
+
+describe("server proof framing", () => {
+	it.each([true, false])("proves the entry-bound nonce before one request (requireAuth=%s)", async requireAuth => {
+		vi.useFakeTimers();
+		const { socket, handle, writes, responded } = framingSocket(requireAuth);
+		const nonce = "a".repeat(64);
+		const challenge = JSON.stringify({ type: "challenge", nonce });
+		socket.emit("data", challenge.slice(0, 30));
+		expect(writes).toEqual([]);
+		socket.emit("data", `${challenge.slice(30)}\n`);
+		expect(writes).toEqual([`${JSON.stringify({ type: "proof", proof: proofFor("peer", "12345678", nonce) })}\n`]);
+		expect(handle).not.toHaveBeenCalled();
+		socket.emit(
+			"data",
+			`${requireAuth ? '{"type":"auth","token":"peer"}\n' : ""}{"type":"snapshot"}\n{"type":"snapshot"}\n`,
+		);
+		await responded;
+		expect(handle).toHaveBeenCalledTimes(1);
+		expect(handle).toHaveBeenCalledWith({ type: "snapshot" }, "peer");
+	});
+
+	it.each([
+		{ type: "challenge", nonce: "a".repeat(63) },
+		{ type: "challenge", nonce: "A".repeat(64) },
+		{ type: "challenge", nonce: 1 },
+		{ type: "challenge", nonce: "a".repeat(64), extra: true },
+	])("rejects malformed challenges without a proof or delivery: %j", challenge => {
+		vi.useFakeTimers();
+		const { socket, handle, writes } = framingSocket(true);
+		socket.emit("data", `${JSON.stringify(challenge)}\n`);
+		expect(socket.destroyed).toBe(true);
+		expect(writes).toEqual([]);
+		expect(handle).not.toHaveBeenCalled();
+	});
+
+	it.each(["duplicate", "after-auth", "missing-auth"])("closes a %s challenge exchange without delivery", kind => {
+		vi.useFakeTimers();
+		const { socket, handle, writes } = framingSocket(true);
+		const challenge = `${JSON.stringify({ type: "challenge", nonce: "a".repeat(64) })}\n`;
+		if (kind === "after-auth") socket.emit("data", '{"type":"auth","token":"peer"}\n');
+		socket.emit("data", challenge);
+		if (kind === "duplicate") socket.emit("data", challenge);
+		if (kind === "missing-auth") socket.emit("data", '{"type":"snapshot"}\n');
+		expect(socket.destroyed).toBe(true);
+		expect(writes).toHaveLength(kind === "after-auth" ? 0 : 1);
+		expect(handle).not.toHaveBeenCalled();
+	});
+
+	it("resets the fixed auth deadline after proof but not for trickled challenge bytes", () => {
+		vi.useFakeTimers();
+		const waiting = framingSocket(true);
+		waiting.socket.emit("data", '{"type":"challenge","nonce":"');
+		vi.advanceTimersByTime(LINE_DEADLINE_MS - 1);
+		waiting.socket.emit("data", "a");
+		vi.advanceTimersByTime(1);
+		expect(waiting.socket.destroyed).toBe(true);
+		expect(waiting.writes).toEqual([]);
+
+		const proved = framingSocket(true);
+		vi.advanceTimersByTime(20_000);
+		proved.socket.emit("data", `${JSON.stringify({ type: "challenge", nonce: "a".repeat(64) })}\n`);
+		vi.advanceTimersByTime(LINE_DEADLINE_MS - 1);
+		expect(proved.socket.destroyed).toBe(false);
+		proved.socket.emit("data", '{"type":"auth"');
+		vi.advanceTimersByTime(1);
+		expect(proved.socket.destroyed).toBe(true);
+		expect(proved.handle).not.toHaveBeenCalled();
+	});
+
+	it("bounds an unfinished challenge without sending a proof", () => {
+		vi.useFakeTimers();
+		const { socket, handle, writes } = framingSocket(true);
+		socket.emit("data", '{"type":"challenge","nonce":"');
+		socket.emit("data", "a".repeat(MAX_SERIALIZED_CHARS));
+		expect(socket.destroyed).toBe(true);
+		expect(writes).toEqual([]);
+		expect(handle).not.toHaveBeenCalled();
+	});
+});
+
+it.skipIf(process.platform !== "win32")(
+	"sends an impostor pipe only challenges, never the key or message body",
+	async () => {
+		const dir = tempDir();
+		const seed = await publish(dir, async () => ({ ok: true, snapshot }));
+		const peerKey = await Bun.file(path.join(dir, "peer.key")).text();
+		await seed.close();
+		const received: string[] = [];
+		const impostor = await publishLocalEndpoint(
+			{
+				dir,
+				pipePrefix: "omp-msg",
+				version: MESSAGING_WIRE_VERSION,
+				maxRequestBytes: MAX_SERIALIZED_CHARS,
+				maxResponseBytes: MAX_SERIALIZED_CHARS,
+			},
+			socket => {
+				sockets.push(socket);
+				let bytes = "";
+				socket.setEncoding("utf8");
+				socket.on("error", () => socket.destroy());
+				socket.on("data", chunk => {
+					bytes += chunk;
+					if (!bytes.includes("\n")) return;
+					received.push(bytes);
+					socket.end(`${JSON.stringify({ type: "proof", proof: "0".repeat(64) })}\n`);
+				});
+			},
+			{ extra: { sessionId: "impostor-session" } },
+		);
+		impostorPublications.push(impostor);
+		const [entry] = await readInboxEntries({ dir });
+		expect(entry!.pid).toBe(process.pid);
+		for (const request of [
+			{ type: "message", id: "private", body: "PRIVATE BODY MARKER" },
+			{ type: "snapshot" },
+		] satisfies InboxRequest[]) {
+			expect(await requestInbox(entry!, request, { dir })).toEqual({ ok: false, error: "authentication_failed" });
+		}
+		expect(received).toHaveLength(2);
+		for (const bytes of received) {
+			expect(bytes.split("\n")).toHaveLength(2);
+			expect(JSON.parse(bytes)).toEqual({ type: "challenge", nonce: expect.stringMatching(/^[0-9a-f]{64}$/) });
+			expect(bytes).not.toContain(peerKey);
+			expect(bytes).not.toContain('"auth"');
+			expect(bytes).not.toContain("PRIVATE BODY MARKER");
+		}
+		expect(JSON.parse(received[0]!).nonce).not.toBe(JSON.parse(received[1]!).nonce);
+	},
+);
+
+describe.skipIf(process.platform !== "win32")("Windows proof client", () => {
+	it.each(["fragmented", "coalesced"])("waits for a valid %s proof before writing auth and body", async framing => {
+		const request: InboxRequest = { type: "message", id: "private", body: "PRIVATE BODY MARKER" };
+		const { socket, writes, entry, peerKey, result } = await proofClient(request);
+		expect(writes).toHaveLength(1);
+		const challenge = JSON.parse(writes[0]!);
+		expect(challenge).toEqual({ type: "challenge", nonce: expect.stringMatching(/^[0-9a-f]{64}$/) });
+		const proof = `${JSON.stringify({ type: "proof", proof: proofFor(peerKey, entry.entryId, challenge.nonce) })}\n`;
+		const response = '{"ok":true,"outcome":"delivered"}\n';
+		if (framing === "fragmented") {
+			socket.emit("data", proof.slice(0, 40));
+			expect(writes).toHaveLength(1);
+			socket.emit("data", proof.slice(40));
+			socket.emit("data", response);
+		} else {
+			socket.emit("data", proof + response);
+		}
+		expect(writes).toEqual([
+			writes[0]!,
+			`${JSON.stringify({ type: "auth", token: peerKey })}\n${JSON.stringify(request)}\n`,
+		]);
+		expect(await result).toEqual({ ok: true, outcome: "delivered" });
+	});
+
+	it.each([
+		"wrong-key",
+		"wrong-entry",
+		"replay",
+		"extra-field",
+		"uppercase",
+		"short",
+		"wrong-type",
+		"malformed",
+		"oversized",
+	])("fails closed on a %s proof without writing credentials", async kind => {
+		const { socket, writes, entry, peerKey, result } = await proofClient({ type: "snapshot" });
+		const nonce = JSON.parse(writes[0]!).nonce;
+		const proof = proofFor(
+			kind === "wrong-key" ? "wrong" : peerKey,
+			kind === "wrong-entry" ? "other-entry" : entry.entryId,
+			kind === "replay" ? "0".repeat(64) : nonce,
+		);
+		let line = JSON.stringify({
+			type: kind === "wrong-type" ? "auth" : "proof",
+			proof: kind === "uppercase" ? proof.toUpperCase() : kind === "short" ? proof.slice(1) : proof,
+			...(kind === "extra-field" ? { extra: true } : {}),
+		});
+		if (kind === "malformed") line = "not JSON";
+		if (kind === "oversized") line = "x".repeat(MAX_SERIALIZED_CHARS + 1);
+		socket.emit("data", `${line}\n`);
+		expect(await result).toEqual({ ok: false, error: "authentication_failed" });
+		expect(writes).toHaveLength(1);
+		expect(writes[0]).not.toContain(peerKey);
+	});
+
+	it.each(["close", "error", "timeout"])("keeps a pre-proof %s unreachable without disclosure", async kind => {
+		const { socket, writes, result } = await proofClient({ type: "snapshot" });
+		if (kind === "timeout") {
+			socket.emit("data", '{"type":"proof"');
+			vi.advanceTimersByTime(99);
+			socket.emit("data", ',"proof":"');
+			vi.advanceTimersByTime(1);
+		} else socket.emit(kind, new Error("peer unavailable"));
+		expect(await result).toEqual({ ok: false, error: "unreachable" });
+		expect(writes).toHaveLength(1);
+	});
+
+	it("honors abort while waiting for proof without sending credentials", async () => {
+		const controller = new AbortController();
+		const { writes, result } = await proofClient({ type: "snapshot" }, controller.signal);
+		controller.abort();
+		expect(await result).toEqual({ ok: false, error: "aborted" });
+		expect(writes).toHaveLength(1);
+	});
+
+	it("does not interpret a duplicate proof as a successful response", async () => {
+		const { socket, writes, entry, peerKey, result } = await proofClient({ type: "snapshot" });
+		const nonce = JSON.parse(writes[0]!).nonce;
+		const proof = `${JSON.stringify({ type: "proof", proof: proofFor(peerKey, entry.entryId, nonce) })}\n`;
+		socket.emit("data", proof + proof);
+		expect(await result).toEqual({ ok: false, error: "invalid_response" });
+	});
+});
 
 describe("inbox transport", () => {
 	it("discovers two concurrent publications and round-trips a peer-authenticated snapshot", async () => {
@@ -133,17 +401,17 @@ describe("inbox transport", () => {
 		}
 	});
 
-	it("lists and preserves a live version 2 inbox and parses its snapshot version", async () => {
+	it("preserves a live foreign-version inbox without disclosing credentials on Windows", async () => {
 		const dir = tempDir();
-		const futureSnapshot: SessionSnapshot = { ...snapshot, v: 2 };
+		const futureSnapshot: SessionSnapshot = { ...snapshot, v: MESSAGING_WIRE_VERSION + 1 };
 		const pub = await publish(dir, async () => ({ ok: true, snapshot: futureSnapshot }));
 		const file = path.join(dir, `${pub.entryId}.json`);
-		const metadata = { ...(await Bun.file(file).json()), version: 2 };
+		const metadata = { ...(await Bun.file(file).json()), version: MESSAGING_WIRE_VERSION + 1 };
 		await fs.writeFile(file, JSON.stringify(metadata), { mode: 0o600 });
 
 		const [entry] = await listInboxEntries({ dir });
 		expect(entry).toEqual({
-			version: 2,
+			version: MESSAGING_WIRE_VERSION + 1,
 			sessionId: "receiver-session",
 			entryId: pub.entryId,
 			pid: process.pid,
@@ -151,10 +419,20 @@ describe("inbox transport", () => {
 			createdAt: metadata.createdAt,
 		});
 		expect(await Bun.file(file).json()).toEqual(metadata);
-		expect(await requestInbox(entry!, { type: "snapshot" }, { dir })).toEqual({
-			ok: true,
-			snapshot: futureSnapshot,
-		});
+		if (process.platform === "win32") {
+			const connect = vi.spyOn(net, "createConnection");
+			expect(await requestInbox(entry!, { type: "snapshot" }, { dir })).toEqual({
+				ok: false,
+				error: "unsupported_protocol",
+			});
+			expect(connect).not.toHaveBeenCalled();
+			connect.mockRestore();
+		} else {
+			expect(await requestInbox(entry!, { type: "snapshot" }, { dir })).toEqual({
+				ok: true,
+				snapshot: futureSnapshot,
+			});
+		}
 		expect(await listInboxEntries({ dir })).toEqual([entry!]);
 		expect(await Bun.file(file).exists()).toBe(true);
 	});

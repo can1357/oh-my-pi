@@ -87,6 +87,12 @@ class FakeHost implements MessagingHost {
 	isBusy(): boolean {
 		return this.busy;
 	}
+	isReceivingSuspended(): boolean {
+		return false;
+	}
+	isSessionTransitioning(): boolean {
+		return false;
+	}
 	permissionClass(): PermissionClass {
 		return this.permission;
 	}
@@ -99,18 +105,20 @@ class FakeHost implements MessagingHost {
 	pendingRemoteCount(): number {
 		return this.pending;
 	}
-	deliverRemote(deliveries: readonly RemoteDelivery[]): void {
+	async deliverRemote(deliveries: readonly RemoteDelivery[]): Promise<boolean> {
 		this.deliveries.push(...deliveries);
 		this.events.push(...deliveries.map(delivery => delivery.body));
 		this.pending += deliveries.length;
+		return true;
 	}
 	showNotice(text: string): void {
 		this.display.push(text);
 	}
-	deliverNotice(_from: RemoteSender, text: string): void {
+	async deliverNotice(_from: RemoteSender, text: string, _recipientSessionId: string): Promise<boolean> {
 		this.notices.push(text);
 		this.events.push(text);
 		this.noticeWaiters.shift()?.(text);
+		return true;
 	}
 	currentRelayChain(): readonly string[] {
 		return this.chain;
@@ -310,7 +318,7 @@ describe("inbound gate", () => {
 		const deliver = host.deliverRemote.bind(host);
 		vi.spyOn(host, "deliverRemote").mockImplementation(delivery => {
 			host.busy = true;
-			deliver(delivery);
+			return deliver(delivery);
 		});
 		const request = message("wake receiver");
 		const result =
@@ -486,7 +494,10 @@ describe("messaging service with real inboxes", () => {
 		const resume = b.suspendReceiving();
 		const resumeAgain = b.suspendReceiving();
 		b.markReady();
-		await a.send(target, "suspended", { notifyWhenIdle: false });
+		expect(await a.send(target, "suspended", { notifyWhenIdle: false })).toEqual({
+			ok: true,
+			text: "Queued for beta (it will read this when receiving resumes).",
+		});
 		expect(await a.send(target, "before ready", { notifyWhenIdle: false })).toEqual({
 			ok: false,
 			text: `Cross-session message was dropped at the recipient session's inbox (recipient: beta) and not delivered — ${dropText.repeat}. Do not resend right away.`,
@@ -788,7 +799,11 @@ describe("messaging service with real inboxes", () => {
 				});
 			}
 			expect(await a.listSessions()).toEqual([]);
-			expect(await a.resolve("beta")).toEqual({ kind: "incompatible", name: "beta" });
+			expect(await a.resolve("beta")).toEqual(
+				source === "metadata" && process.platform === "win32"
+					? { kind: "none" }
+					: { kind: "incompatible", name: "beta" },
+			);
 			expect(await a.resolve(target.shortId)).toEqual({ kind: "incompatible", name: target.shortId });
 			expect(
 				await a.send({ ...target, entry: { ...target.entry, version: MESSAGING_WIRE_VERSION + 1 } }, "no", {
@@ -1540,4 +1555,63 @@ it("keeps the original local identity published while a suspended receiver tempo
 	resume();
 	expect(bh.deliveries.map(delivery => delivery.body)).toEqual(["MAIL_FOR_LOCAL_CONVERSATION"]);
 	expect(b.env).toEqual(originalEnv);
+});
+
+it("retires suspended original-conversation mail and notices instead of delivering to a successor", async () => {
+	const { a, b, ah, bh, target } = await pair();
+	const resume = b.suspendReceiving();
+	const nestedResume = b.suspendReceiving();
+	await a.send(target, "ORIGINAL_OWNER_MAIL", { notifyWhenIdle: false });
+	const reverse = (await b.listSessions())[0]!;
+	ah.busy = true;
+	const requests = vi.spyOn(transport, "requestInbox");
+	await b.send(reverse, "", { notifyWhenIdle: true });
+	const subscription = requests.mock.calls
+		.map(call => call[1])
+		.find(
+			(request): request is Extract<InboxRequest, { type: "subscribe" }> =>
+				request.type === "subscribe" && request.from.sessionId === "b",
+		);
+	expect(subscription).toBeDefined();
+	await transport.requestInbox(target.entry, {
+		type: "notice",
+		id: "buffered-notice",
+		kind: "idle",
+		aboutId: subscription!.id,
+		from: { ...sender, shortId: a.ownShortId(), entryId: reverse.entry.entryId },
+	});
+	bh.id = "successor";
+	bh.name = "successor-name";
+	await b.retireConversation();
+	expect(bh.deliveries).toEqual([]);
+	const retired = ah.nextNotice();
+	resume();
+	resume();
+	expect(bh.deliveries).toEqual([]);
+	nestedResume();
+	expect(await retired).toBe(
+		"Your message to @beta was dropped unread: that session switched to a different conversation.",
+	);
+	expect(bh.deliveries).toEqual([]);
+	expect(bh.notices).toEqual([]);
+});
+
+it("retires a batch rejected after asynchronous host handoff with the captured old receiver", async () => {
+	const { a, bh, ah, target } = await pair();
+	const entered = Promise.withResolvers<void>();
+	const disposition = Promise.withResolvers<boolean>();
+	vi.spyOn(bh, "deliverRemote").mockImplementation(async () => {
+		entered.resolve();
+		return disposition.promise;
+	});
+	await a.send(target, "HANDOFF_MAIL", { notifyWhenIdle: false });
+	await entered.promise;
+	const retired = ah.nextNotice();
+	bh.id = "new-owner";
+	bh.name = "new-name";
+	disposition.resolve(false);
+	expect(await retired).toBe(
+		"Your message to @beta was dropped unread: that session switched to a different conversation.",
+	);
+	expect(bh.deliveries).toEqual([]);
 });

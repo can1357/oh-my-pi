@@ -21,7 +21,7 @@ import {
 	formatPersistenceNotice,
 } from "./persistence-failure";
 import { initializeExtensions } from "./runtime-init";
-import { RpcPromptResults } from "./rpc/rpc-prompt-results";
+import { RpcExtensionUserMessageTracker, RpcPromptResults } from "./rpc/rpc-prompt-results";
 import type { RpcSettleSession } from "./rpc/rpc-session-settle";
 
 import { cfgPlanDefaultOnStartup, cfgPlanEnabled } from "../plan-mode/settings";
@@ -195,8 +195,10 @@ async function runPrintModeCore(
 		}
 	}
 	// Set up extensions for print mode (no UI, no command context)
+	const extensionUserMessages = new RpcExtensionUserMessageTracker();
 	await initializeExtensions(session, {
 		mode: mode === "json" ? "json" : "print",
+		trackAgentInvokingMessage: task => extensionUserMessages.trackAgentMessageTask(task),
 		reportSendError: (action, err) => {
 			process.stderr.write(
 				`Extension ${action === "extension_send" ? "sendMessage" : "sendUserMessage"} failed: ${err.message}\n`,
@@ -338,14 +340,18 @@ async function runPrintModeCore(
 			completed.resolve();
 		});
 		try {
-			const invoked = await logger.time(label, () =>
-				session.prompt(text, {
-					images,
-					streamingBehavior: "followUp",
-					onPromptAdmitted: () => promptResults.admit(ticket),
-				}),
+			const tracked = extensionUserMessages.watchPrompt(() =>
+				logger.time(label, () =>
+					session.prompt(text, {
+						images,
+						streamingBehavior: "followUp",
+						onPromptAdmitted: () => promptResults.admit(ticket),
+					}),
+				),
 			);
-			if (invoked) promptResults.settle(ticket);
+			const invoked = await tracked.prompt;
+			if (!invoked) await tracked.waitForAgentMessageTasks();
+			if (invoked || tracked.hasAgentMessageTask()) promptResults.settle(ticket);
 			else promptResults.completeLocal(ticket);
 		} catch (error) {
 			promptResults.discard(ticket);

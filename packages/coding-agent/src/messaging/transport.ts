@@ -24,6 +24,8 @@ import {
 	MessagingUnavailableError,
 	parseInboxRequest,
 	SEND_TIMEOUT_MS,
+	type ServerChallengeLine,
+	type ServerProofLine,
 	SNAPSHOT_TIMEOUT_MS,
 } from "./protocol";
 
@@ -141,14 +143,25 @@ async function readPeerKey(registry: LocalEndpointRegistry): Promise<string> {
 	}
 }
 
+function serverProof(peerKey: string, entryId: string, nonce: string): string {
+	return crypto
+		.createHmac("sha256", peerKey)
+		.update("omp-messaging-server-proof\0")
+		.update(entryId)
+		.update("\0")
+		.update(nonce)
+		.digest("hex");
+}
+
 /** JSONL connection boundary; requireAuth also lets tests exercise Windows framing on POSIX. */
 export function handleInboxConnection(
 	socket: net.Socket,
 	handle: (req: InboxRequest, auth: InboxAuth) => Promise<InboxResponse>,
-	options: { sessionToken: string; peerKey: string; requireAuth: boolean },
+	options: { sessionToken: string; peerKey: string; entryId: string; requireAuth: boolean },
 ): void {
 	let buffer = "";
 	let firstLine = true;
+	let challenged = false;
 	let claimed = false;
 	let auth: InboxAuth = "peer";
 	let deadline = setTimeout(() => socket.destroy(), LINE_DEADLINE_MS);
@@ -188,6 +201,26 @@ export function handleInboxConnection(
 				return;
 			}
 			if (firstLine) {
+				if (typeof raw === "object" && raw !== null && (raw as ServerChallengeLine).type === "challenge") {
+					const value = raw as ServerChallengeLine;
+					if (
+						challenged ||
+						Object.keys(value).length !== 2 ||
+						typeof value.nonce !== "string" ||
+						!/^[0-9a-f]{64}$/.test(value.nonce)
+					) {
+						socket.destroy();
+						return;
+					}
+					challenged = true;
+					const proof: ServerProofLine = {
+						type: "proof",
+						proof: serverProof(options.peerKey, options.entryId, value.nonce),
+					};
+					socket.write(`${JSON.stringify(proof)}\n`);
+					deadline = setTimeout(() => socket.destroy(), LINE_DEADLINE_MS);
+					continue;
+				}
 				firstLine = false;
 				if (typeof raw === "object" && raw !== null && (raw as AuthLine).type === "auth") {
 					const value = raw as AuthLine;
@@ -241,6 +274,7 @@ export async function publishInbox(
 				handleInboxConnection(socket, handle, {
 					sessionToken: token,
 					peerKey,
+					entryId,
 					requireAuth: process.platform === "win32",
 				}),
 			{
@@ -358,6 +392,8 @@ function parseResponse(raw: unknown): InboxResponse | undefined {
 	const value = raw as Record<string, unknown>;
 	if (value.ok === false && typeof value.error === "string") return { ok: false, error: value.error };
 	if (value.ok !== true) return undefined;
+	if (value.receivingSuspended !== undefined && (value.outcome !== "queued" || value.receivingSuspended !== true))
+		return undefined;
 	if (
 		typeof value.outcome === "string" &&
 		["delivered", "queued", "held", "refused", "subscribed"].includes(value.outcome)
@@ -400,6 +436,9 @@ export async function requestInbox(
 	options?: { timeoutMs?: number; signal?: AbortSignal; dir?: string },
 ): Promise<InboxResponse> {
 	if (options?.signal?.aborted) return { ok: false, error: "aborted" };
+	if (process.platform === "win32" && entry.version !== MESSAGING_WIRE_VERSION) {
+		return { ok: false, error: "unsupported_protocol" };
+	}
 	const serialized = JSON.stringify(request);
 	let peerKey: string;
 	try {
@@ -416,6 +455,10 @@ export async function requestInbox(
 	const socket = net.createConnection({ path: entry.endpoint });
 	let buffer = "";
 	let finished = false;
+	let awaitingProof = process.platform === "win32";
+	const challenge: ServerChallengeLine | undefined = awaitingProof
+		? { type: "challenge", nonce: crypto.randomBytes(32).toString("hex") }
+		: undefined;
 	const finish = (response: InboxResponse): void => {
 		if (finished) return;
 		finished = true;
@@ -433,21 +476,50 @@ export async function requestInbox(
 	socket.once("error", () => finish({ ok: false, error: "unreachable" }));
 	socket.once("close", () => finish({ ok: false, error: "unreachable" }));
 	socket.once("connect", () => {
-		if (!finished) socket.write(`${JSON.stringify({ type: "auth", token: peerKey })}\n${serialized}\n`);
+		if (!finished) {
+			socket.write(
+				challenge
+					? `${JSON.stringify(challenge)}\n`
+					: `${JSON.stringify({ type: "auth", token: peerKey })}\n${serialized}\n`,
+			);
+		}
 	});
 	socket.on("data", chunk => {
 		if (finished) return;
 		buffer += chunk;
-		const newline = buffer.indexOf("\n");
-		if ((newline < 0 ? buffer.length : newline) > MAX_SERIALIZED_CHARS) {
-			finish({ ok: false, error: "too_large" });
-			return;
-		}
-		if (newline < 0) return;
-		try {
-			finish(parseResponse(JSON.parse(buffer.slice(0, newline))) ?? { ok: false, error: "invalid_response" });
-		} catch {
-			finish({ ok: false, error: "invalid_response" });
+		while (!finished) {
+			const newline = buffer.indexOf("\n");
+			if ((newline < 0 ? buffer.length : newline) > MAX_SERIALIZED_CHARS) {
+				finish({ ok: false, error: awaitingProof ? "authentication_failed" : "too_large" });
+				return;
+			}
+			if (newline < 0) return;
+			const line = buffer.slice(0, newline);
+			buffer = buffer.slice(newline + 1);
+			try {
+				const raw: unknown = JSON.parse(line);
+				if (awaitingProof) {
+					const proof = raw as ServerProofLine | null;
+					if (
+						typeof proof !== "object" ||
+						proof === null ||
+						Object.keys(proof).length !== 2 ||
+						proof.type !== "proof" ||
+						typeof proof.proof !== "string" ||
+						!/^[0-9a-f]{64}$/.test(proof.proof) ||
+						!tokenMatches(serverProof(peerKey, entry.entryId, challenge!.nonce), proof.proof)
+					) {
+						finish({ ok: false, error: "authentication_failed" });
+						return;
+					}
+					awaitingProof = false;
+					socket.write(`${JSON.stringify({ type: "auth", token: peerKey })}\n${serialized}\n`);
+					continue;
+				}
+				finish(parseResponse(raw) ?? { ok: false, error: "invalid_response" });
+			} catch {
+				finish({ ok: false, error: awaitingProof ? "authentication_failed" : "invalid_response" });
+			}
 		}
 	});
 	options?.signal?.addEventListener("abort", abort, { once: true });

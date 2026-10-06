@@ -250,8 +250,9 @@ import { parseCommandArgs } from "../utils/command-args";
 import type { EditMode } from "@oh-my-pi/pi-tui/tools/edit";
 import { resolveFileDisplayMode } from "../utils/file-display-mode";
 import { extractFileMentions, generateFileMentionMessages } from "../utils/file-mentions";
-import { formatAddressForUrl } from "../messaging/names";
+import { formatAddressForUrl, sessionAddress } from "../messaging/names";
 import { permissionClassFromApproval, type PermissionClass } from "../messaging/policy";
+import type { SessionSnapshot } from "../messaging/protocol";
 import type { MessagingService, RemoteDelivery, SessionListing } from "../messaging/service";
 import { resolveApprovalFromContext } from "../tools/approval";
 import { resolveReadPath } from "../tools/path-utils";
@@ -904,6 +905,9 @@ export class AgentSession implements SettingsScope {
 
 	readonly #irc: IrcBridge;
 	#messaging: MessagingService | undefined;
+	#messagingSuspensionDepth = 0;
+	#resumeMessagingReceiving: (() => void) | undefined;
+	#suspendedMessagingIdentity: Pick<SessionSnapshot, "sessionId" | "name" | "title" | "cwd"> | undefined;
 	#relayChain: readonly string[] = [];
 	#lastMessagingFinished: { finishedAt: number; status: string | null } | undefined;
 	#sessionMentionCache: { service: MessagingService; refreshedAt: number; sessions: SessionListing[] } | undefined;
@@ -1279,39 +1283,23 @@ export class AgentSession implements SettingsScope {
 			this.#irc.queueAside(records);
 			return;
 		}
-		// Park only a *blocked* follow-up (one a user interrupt is intentionally holding); an
-		// already-resumable follow-up can ride the wake turn normally without reordering.
-		const parkedFollowUps =
-			this.agent.peekSteeringQueue().length === 0 &&
-			this.agent.peekFollowUpQueue().length > 0 &&
-			!this.#canAutoContinueForFollowUp()
-				? [...this.agent.peekFollowUpQueue()]
-				: [];
-		const parkedQueueDrainBlocked = parkedFollowUps.length > 0 && this.#queuedMessageDrainBlocked;
-		if (parkedFollowUps.length > 0) {
-			this.agent.replaceQueues([...this.agent.peekSteeringQueue()], []);
-			if (parkedQueueDrainBlocked) this.#queuedMessageDrainBlocked = false;
-		}
-		// The wake observer is attached only once prompt ownership is won below: a
-		// deferred wake runs no turn, so observing it would capture the next
-		// turn's yield/output and relay it as this wake's reply.
+		const sessionGeneration = this.#sessionGeneration;
+		const sessionId = this.sessionId;
+		let parkedFollowUps: AgentMessage[] = [];
+		let parkedQueueDrainBlocked = false;
+		let acquired = false;
+		let generation = this.#promptGeneration;
 		let observation: TurnObservation | undefined;
-		this.#resetPromptMaintenanceState();
-		// Capture the generation before the wake so its post-prompt recovery wait
-		// bails the instant an abort (which bumps #promptGeneration) supersedes
-		// this wake — otherwise the wait would follow a successor turn (a queued
-		// follow-up or another stranded IRC wake started by abort cleanup),
-		// delaying the observation's finish and mis-attributing the successor's RPC
-		// progress to this now-dead wake monitor.
-		const generation = this.#promptGeneration;
-		this.#beginInFlight();
 		let turnError: unknown;
-		// A pooled-turn yield transition (item-set mutation + prompt rebuild) may be
-		// in flight when the wake lands. Starting the turn on the stale prompt would
-		// advertise one yield schema while the runtime enforces the other, so join
-		// the transition before building the turn from a consistent contract.
-		void this.whenWorkPoolYieldSettled()
-			.then(() => {
+		// Acquire in-flight ownership only after both barriers; transitions drain
+		// in-flight turns and must not wait for their own blocked wake.
+		void Promise.all([this.whenWorkPoolYieldSettled(), this.waitForSessionTransition()])
+			.then(async () => {
+				do {
+					await this.waitForSessionTransition();
+					if (await this.#sessionGenerationChanged(sessionGeneration)) return;
+				} while (this.isSessionTransitioning);
+				if (this.#isDisposed || this.#unsubscribeAgent === undefined || this.sessionId !== sessionId) return;
 				// Synchronous ownership check, atomic with the dispatch below:
 				// agent.prompt() claims streaming with no await in between, and the
 				// yield contract above mutates synchronously, so no install can
@@ -1331,6 +1319,22 @@ export class AgentSession implements SettingsScope {
 					logger.debug("IRC wake turn deferred behind the running turn");
 					return;
 				}
+				// Park only follow-ups deliberately blocked by a user interrupt.
+				parkedFollowUps =
+					this.agent.peekSteeringQueue().length === 0 &&
+					this.agent.peekFollowUpQueue().length > 0 &&
+					!this.#canAutoContinueForFollowUp()
+						? [...this.agent.peekFollowUpQueue()]
+						: [];
+				parkedQueueDrainBlocked = parkedFollowUps.length > 0 && this.#queuedMessageDrainBlocked;
+				if (parkedFollowUps.length > 0) {
+					this.agent.replaceQueues([...this.agent.peekSteeringQueue()], []);
+					if (parkedQueueDrainBlocked) this.#queuedMessageDrainBlocked = false;
+				}
+				this.#resetPromptMaintenanceState();
+				generation = this.#promptGeneration;
+				this.#beginInFlight();
+				acquired = true;
 				observation = this.#startTurnObservation(records);
 				if (
 					!records.some(
@@ -1360,6 +1364,7 @@ export class AgentSession implements SettingsScope {
 				logger.warn("IRC wake turn failed", { error: String(error) });
 			})
 			.finally(async () => {
+				if (!acquired) return;
 				try {
 					await this.#waitForPostPromptRecovery(generation);
 				} catch (error) {
@@ -2652,11 +2657,56 @@ export class AgentSession implements SettingsScope {
 	setMessaging(service: MessagingService | undefined): void {
 		if (service && this.isSubagent)
 			throw new Error("Cross-session messaging is only available to the main conversation.");
+		this.#resumeMessagingReceiving?.();
+		this.#resumeMessagingReceiving = undefined;
 		this.#messaging = service;
+		if (service && this.#messagingSuspensionDepth > 0)
+			this.#resumeMessagingReceiving = service.suspendReceiving(this.#suspendedMessagingIdentity);
 		this.#sessionMentionCache = undefined;
 		void this.refreshBaseSystemPrompt().catch(error => {
 			logger.warn("Failed to refresh cross-session system prompt", { error: String(error) });
 		});
+	}
+
+	get isMessagingReceivingSuspended(): boolean {
+		return this.#messagingSuspensionDepth > 0;
+	}
+
+	get suspendedMessagingIdentity(): Pick<SessionSnapshot, "sessionId" | "name" | "title" | "cwd"> | undefined {
+		return this.#suspendedMessagingIdentity;
+	}
+
+	suspendMessagingReceiving(): () => void {
+		if (this.#messagingSuspensionDepth++ === 0) {
+			const sessionId = this.sessionId;
+			const cwd = this.sessionManager.getCwd();
+			const title = this.sessionManager.getSessionName() ?? null;
+			this.#suspendedMessagingIdentity = {
+				sessionId,
+				cwd,
+				title,
+				name:
+					this.#messaging?.ownAddress() ??
+					sessionAddress({
+						sessionId,
+						cwd,
+						sessionName: title ?? undefined,
+						titleSource: this.sessionManager.titleSource,
+						directPrint: false,
+					}),
+			};
+			this.#resumeMessagingReceiving = this.#messaging?.suspendReceiving(this.#suspendedMessagingIdentity);
+		}
+		let resumed = false;
+		return () => {
+			if (resumed) return;
+			resumed = true;
+			if (--this.#messagingSuspensionDepth > 0) return;
+			this.#suspendedMessagingIdentity = undefined;
+			const resume = this.#resumeMessagingReceiving;
+			this.#resumeMessagingReceiving = undefined;
+			resume?.();
+		};
 	}
 
 	permissionClass(): PermissionClass {
@@ -2667,15 +2717,25 @@ export class AgentSession implements SettingsScope {
 		);
 	}
 
-	deliverRemoteMessages(deliveries: readonly RemoteDelivery[]): void {
+	async deliverRemoteMessages(deliveries: readonly RemoteDelivery[]): Promise<boolean> {
 		if (this.isSubagent) throw new Error("Cross-session messaging cannot deliver to a subagent.");
-		if (deliveries.length === 0) return;
+		const sessionGeneration = this.#sessionGeneration;
+		do {
+			await this.waitForSessionTransition();
+			if (await this.#sessionGenerationChanged(sessionGeneration)) return false;
+		} while (this.isSessionTransitioning);
+		if (
+			this.#isDisposed ||
+			this.#unsubscribeAgent === undefined ||
+			deliveries.some(delivery => delivery.recipientSessionId !== this.sessionId)
+		)
+			return false;
+		if (deliveries.length === 0) return true;
 		if (!this.isStreaming) this.#relayChain = [];
 		for (const delivery of deliveries)
 			if (delivery.chain.length > this.#relayChain.length) this.#relayChain = delivery.chain;
-		void this.#irc.deliverRemote(deliveries).catch(error => {
-			logger.warn("Failed to deliver cross-session message", { error: String(error) });
-		});
+		await this.#irc.deliverRemote(deliveries);
+		return true;
 	}
 
 	pendingRemoteCount(): number {

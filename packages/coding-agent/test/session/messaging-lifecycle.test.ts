@@ -10,6 +10,8 @@ import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { IrcBus } from "@oh-my-pi/pi-coding-agent/irc/bus";
 import * as transport from "@oh-my-pi/pi-coding-agent/messaging/transport";
+import { ACCEPTED_QUEUE_CAP } from "@oh-my-pi/pi-coding-agent/messaging/protocol";
+import { cfgMessagingEnabled, cfgMessagingRateLimit } from "@oh-my-pi/pi-coding-agent/messaging/settings";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
@@ -76,7 +78,7 @@ describe("cross-session messaging lifecycle", () => {
 		}
 	});
 
-	async function makeSession(name: string, messaging = true) {
+	async function makeSession(name: string, messaging = true, persisted = false) {
 		const contexts: string[] = [];
 		const mock = createMockModel({
 			provider: "openai",
@@ -92,8 +94,14 @@ describe("cross-session messaging lifecycle", () => {
 			convertToLlm,
 			streamFn: mock.stream,
 		});
-		const manager = SessionManager.inMemory(temp.path());
+		const manager = persisted
+			? SessionManager.create(temp.path(), path.join(temp.path(), "sessions"))
+			: SessionManager.inMemory(temp.path());
 		await manager.setSessionName(name, "user");
+		if (persisted) {
+			await manager.ensureOnDisk();
+			await manager.flush();
+		}
 		const settings = Settings.isolated({
 			"messaging.enabled": messaging,
 			"tools.approvalMode": "yolo",
@@ -110,15 +118,13 @@ describe("cross-session messaging lifecycle", () => {
 			rebuildSystemPrompt: async () => ({ systemPrompt: ["Lifecycle harness"] }),
 		});
 		sessions.push(session);
-		if (messaging) {
-			const binding = await bindSessionMessaging(session, {
-				directPrint: false,
-				exportProcessEnv: false,
-				claimNames: false,
-			});
-			bindings.push(binding);
-			binding.ready();
-		}
+		const binding = await bindSessionMessaging(session, {
+			directPrint: false,
+			exportProcessEnv: false,
+			claimNames: false,
+		});
+		bindings.push(binding);
+		binding.ready();
 		return { session, manager, settings, contexts };
 	}
 
@@ -188,7 +194,9 @@ describe("cross-session messaging lifecycle", () => {
 			updateEditorBorderColor() {},
 			eventController: { handleEvent: async () => {}, takeDisplaceableComponents: () => [] },
 			collabGuest: undefined as CollabGuestLink | undefined,
-			handleResumeSession: async () => {},
+			handleResumeSession: async (file: string) => {
+				await session.switchSession(file);
+			},
 		};
 		const guest = new CollabGuestLink(ctx as unknown as InteractiveModeContext);
 		guests.push({ guest, socket });
@@ -259,7 +267,7 @@ describe("cross-session messaging lifecycle", () => {
 		expect(contexts).toEqual([]);
 	});
 
-	it("releases buffered mail to the committed local conversation when post-restoration rendering fails", async () => {
+	it("retires original mail rather than migrating it to a new local id after post-restoration rendering fails", async () => {
 		const sender = await makeSession("sender");
 		const { session, manager, contexts } = await makeSession("local");
 		const { guest, ctx } = await join(session);
@@ -279,7 +287,313 @@ describe("cross-session messaging lifecycle", () => {
 		await session.whenWorkPoolYieldSettled();
 		await session.waitForIdle();
 		expect(manager.getSessionId()).not.toBe(replicaId);
+		expect(contexts).toEqual([]);
+		expect(JSON.stringify(session.messages)).not.toContain("MAIL_AFTER_LOCAL_COMMIT");
+	});
+
+	it("preserves saved original-conversation mail across guest adoption and successful restoration", async () => {
+		const sender = await makeSession("sender");
+		const { session, manager, contexts } = await makeSession("local", true, true);
+		const originalId = manager.getSessionId();
+		const { guest } = await join(session);
+		const target = (await sender.session.messaging!.listSessions()).find(peer => peer.sessionId === originalId)!;
+		expect(target).toBeDefined();
+		expect(await sender.session.messaging!.send(target, "SAVED_LOCAL_MAIL", { notifyWhenIdle: false })).toEqual({
+			ok: true,
+			text: "Queued for local (it will read this when receiving resumes).",
+		});
+		expect(contexts).toEqual([]);
+		const woken = Promise.withResolvers<void>();
+		session.subscribe(event => {
+			if (event.type === "agent_start") woken.resolve();
+		});
+		await guest.leave("restore saved local");
+		await woken.promise;
+		await session.waitForIdle();
+		expect(manager.getSessionId()).toBe(originalId);
 		expect(contexts).toHaveLength(1);
-		expect(contexts[0]).toContain("MAIL_AFTER_LOCAL_COMMIT");
+		expect(contexts[0]).toContain("SAVED_LOCAL_MAIL");
+	});
+
+	for (const initiallyEnabled of [false, true]) {
+		it(`suspends receiving when messaging is enabled mid-guest (initially ${initiallyEnabled ? "on" : "off"})`, async () => {
+			const sender = await makeSession("sender");
+			const { session, manager, settings, contexts } = await makeSession("local", initiallyEnabled, true);
+			const originalId = manager.getSessionId();
+			const { guest } = await join(session);
+			const replicaId = manager.getSessionId();
+			const stopped = Promise.withResolvers<void>();
+			const ready = Promise.withResolvers<void>();
+			const originalSet = session.setMessaging.bind(session);
+			vi.spyOn(session, "setMessaging").mockImplementation(service => {
+				originalSet(service);
+				if (service) ready.resolve();
+				else stopped.resolve();
+			});
+			if (initiallyEnabled) {
+				cfgMessagingEnabled.override(settings, false);
+				await stopped.promise;
+			}
+			cfgMessagingEnabled.override(settings, true);
+			await ready.promise;
+			const target = (await sender.session.messaging!.listSessions()).find(peer => peer.sessionId === originalId)!;
+			expect(target).toBeDefined();
+			expect(session.isMessagingReceivingSuspended).toBe(true);
+			expect((await sender.session.messaging!.send(target, "MID_GUEST_MAIL", { notifyWhenIdle: false })).text).toBe(
+				"Queued for local (it will read this when receiving resumes).",
+			);
+			expect(manager.getSessionId()).toBe(replicaId);
+			expect(contexts).toEqual([]);
+			const woken = Promise.withResolvers<void>();
+			session.subscribe(event => {
+				if (event.type === "agent_start") woken.resolve();
+			});
+			await guest.leave("restore local");
+			await woken.promise;
+			await session.waitForIdle();
+			expect(contexts).toHaveLength(1);
+			expect(contexts[0]).toContain("MID_GUEST_MAIL");
+		});
+	}
+
+	for (const action of ["new", "switch"] as const) {
+		it(`does not wake outgoing mail inside a committed ${action} transition`, async () => {
+			const sender = await makeSession("sender");
+			const { session, manager, contexts } = await makeSession("local", true, action === "switch");
+			const target = (await sender.session.messaging!.listSessions()).find(
+				peer => peer.sessionId === manager.getSessionId(),
+			)!;
+			const successor = action === "switch" ? await makeSession("successor", false, true) : undefined;
+			const reached = Promise.withResolvers<void>();
+			const release = Promise.withResolvers<void>();
+			const abort = session.abort.bind(session);
+			vi.spyOn(session, "abort").mockImplementation(async options => {
+				await abort(options);
+				reached.resolve();
+				await release.promise;
+			});
+			const retired = Promise.withResolvers<void>();
+			sender.session.subscribe(event => {
+				if (event.type === "irc_message" && JSON.stringify(event.message).includes("dropped unread"))
+					retired.resolve();
+			});
+			const transition =
+				action === "new" ? session.newSession() : session.switchSession(successor!.manager.getSessionFile()!);
+			try {
+				await reached.promise;
+				expect(session.isSessionTransitioning).toBe(true);
+				expect(
+					(await sender.session.messaging!.send(target, "TRANSITION_MAIL", { notifyWhenIdle: false })).text,
+				).toBe("Queued for local (it will read this when receiving resumes).");
+				expect(contexts).toEqual([]);
+				release.resolve();
+				expect(await transition).toBe(true);
+				await retired.promise;
+				await session.waitForIdle();
+				expect(contexts).toEqual([]);
+				expect(JSON.stringify(session.messages)).not.toContain("TRANSITION_MAIL");
+			} finally {
+				release.resolve();
+				await transition;
+			}
+		});
+	}
+
+	it("delivers an outgoing-owner batch once after switch rollback settles", async () => {
+		const sender = await makeSession("sender");
+		const { session, manager, contexts } = await makeSession("local", true, true);
+		const target = (await sender.session.messaging!.listSessions()).find(
+			peer => peer.sessionId === manager.getSessionId(),
+		)!;
+		const successor = await makeSession("successor", false, true);
+		const reached = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		const abort = session.abort.bind(session);
+		vi.spyOn(session, "abort").mockImplementation(async options => {
+			await abort(options);
+			reached.resolve();
+			await release.promise;
+		});
+		const failure = new Error("adoption failed");
+		const adopt = manager.setSessionFile.bind(manager);
+		vi.spyOn(manager, "setSessionFile").mockImplementationOnce(async file => {
+			await adopt(file);
+			throw failure;
+		});
+		const transition = session.switchSession(successor.manager.getSessionFile()!);
+		const woken = Promise.withResolvers<void>();
+		session.subscribe(event => {
+			if (event.type === "agent_start") woken.resolve();
+		});
+		try {
+			await reached.promise;
+			await sender.session.messaging!.send(target, "ROLLBACK_MAIL", { notifyWhenIdle: false });
+			expect(contexts).toEqual([]);
+			release.resolve();
+			await expect(transition).rejects.toBe(failure);
+			await woken.promise;
+			await session.waitForIdle();
+			expect(manager.getSessionId()).toBe(target.sessionId);
+			expect(contexts).toHaveLength(1);
+			expect(contexts[0]).toContain("ROLLBACK_MAIL");
+		} finally {
+			release.resolve();
+			await transition.catch(() => {});
+		}
+	});
+
+	it("does not acquire in-flight ownership while a remote wake waits for the work-pool barrier", async () => {
+		const sender = await makeSession("sender");
+		const { session, manager, contexts } = await makeSession("local");
+		const target = (await sender.session.messaging!.listSessions()).find(
+			peer => peer.sessionId === manager.getSessionId(),
+		)!;
+		const reached = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		vi.spyOn(session, "whenWorkPoolYieldSettled").mockImplementation(() => {
+			reached.resolve();
+			return release.promise;
+		});
+		await sender.session.messaging!.send(target, "POOL_WAIT_MAIL", { notifyWhenIdle: false });
+		await reached.promise;
+		const transitioned = session.newSession();
+		try {
+			// The transition must finish even though the wake's pool wait is unresolved.
+			expect(await transitioned).toBe(true);
+			release.resolve();
+			await session.waitForSessionTransition();
+			await session.waitForIdle();
+			expect(contexts).toEqual([]);
+			expect(JSON.stringify(session.messages)).not.toContain("POOL_WAIT_MAIL");
+		} finally {
+			release.resolve();
+			await transitioned;
+		}
+	});
+
+	it("rechecks the transition after a remote wake's work-pool wait resolves", async () => {
+		const sender = await makeSession("sender");
+		const { session, manager, contexts } = await makeSession("local");
+		const target = (await sender.session.messaging!.listSessions()).find(
+			peer => peer.sessionId === manager.getSessionId(),
+		)!;
+		const poolReached = Promise.withResolvers<void>();
+		const releasePool = Promise.withResolvers<void>();
+		vi.spyOn(session, "whenWorkPoolYieldSettled").mockImplementation(() => {
+			poolReached.resolve();
+			return releasePool.promise;
+		});
+		await sender.session.messaging!.send(target, "LATE_POOL_MAIL", { notifyWhenIdle: false });
+		await poolReached.promise;
+		const abortReached = Promise.withResolvers<void>();
+		const releaseAbort = Promise.withResolvers<void>();
+		const abort = session.abort.bind(session);
+		vi.spyOn(session, "abort").mockImplementation(async options => {
+			await abort(options);
+			abortReached.resolve();
+			await releaseAbort.promise;
+		});
+		const transitioned = session.newSession();
+		try {
+			await abortReached.promise;
+			releasePool.resolve();
+			// Drain the wake's scheduled continuations while the real /new is paused.
+			for (let i = 0; i < 8; i++) await Promise.resolve();
+			expect(session.isSessionTransitioning).toBe(true);
+			expect(contexts).toEqual([]);
+			releaseAbort.resolve();
+			expect(await transitioned).toBe(true);
+			await session.waitForIdle();
+			expect(contexts).toEqual([]);
+			expect(JSON.stringify(session.messages)).not.toContain("LATE_POOL_MAIL");
+		} finally {
+			releasePool.resolve();
+			releaseAbort.resolve();
+			await transitioned;
+		}
+	});
+
+	it("pins late-adoption mail to the original published inbox, not the adopted successor", async () => {
+		const sender = await makeSession("sender");
+		const { session, manager, contexts } = await makeSession("local", true, true);
+		const target = (await sender.session.messaging!.listSessions()).find(
+			peer => peer.sessionId === manager.getSessionId(),
+		)!;
+		const successor = await makeSession("successor", false, true);
+		const adopted = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		const adopt = manager.setSessionFile.bind(manager);
+		vi.spyOn(manager, "setSessionFile").mockImplementationOnce(async file => {
+			await adopt(file);
+			adopted.resolve();
+			await release.promise;
+		});
+		const retired = Promise.withResolvers<void>();
+		sender.session.subscribe(event => {
+			if (
+				event.type === "irc_message" &&
+				JSON.stringify(event.message).includes("Your message to @local was dropped unread")
+			)
+				retired.resolve();
+		});
+		const transition = session.switchSession(successor.manager.getSessionFile()!);
+		try {
+			await adopted.promise;
+			expect(manager.getSessionId()).toBe(successor.manager.getSessionId());
+			expect((await sender.session.messaging!.listSessions()).map(peer => peer.sessionId)).toContain(
+				target.sessionId,
+			);
+			await sender.session.messaging!.send(target, "LATE_ADOPTION_MAIL", { notifyWhenIdle: false });
+			await retired.promise;
+			expect(contexts).toEqual([]);
+			release.resolve();
+			expect(await transition).toBe(true);
+			await session.waitForIdle();
+			expect(contexts).toEqual([]);
+			expect(JSON.stringify(session.messages)).not.toContain("LATE_ADOPTION_MAIL");
+		} finally {
+			release.resolve();
+			await transition;
+		}
+	});
+
+	it("counts handoffs waiting for a real session transition toward the accepted queue cap", async () => {
+		const sender = await makeSession("sender");
+		const { session, manager, settings, contexts } = await makeSession("local");
+		cfgMessagingRateLimit.override(sender.settings, 100);
+		cfgMessagingRateLimit.override(settings, 100);
+		const target = (await sender.session.messaging!.listSessions()).find(
+			peer => peer.sessionId === manager.getSessionId(),
+		)!;
+		const reached = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		const abort = session.abort.bind(session);
+		vi.spyOn(session, "abort").mockImplementation(async options => {
+			await abort(options);
+			reached.resolve();
+			await release.promise;
+		});
+		const transition = session.newSession();
+		try {
+			await reached.promise;
+			for (let i = 0; i < ACCEPTED_QUEUE_CAP; i++) {
+				expect(await sender.session.messaging!.send(target, `CAP_MAIL_${i}`, { notifyWhenIdle: false })).toEqual({
+					ok: true,
+					text: "Queued for local (it will read this when receiving resumes).",
+				});
+			}
+			const overflow = await sender.session.messaging!.send(target, "CAP_OVERFLOW_MAIL", { notifyWhenIdle: false });
+			expect(overflow.ok).toBe(false);
+			expect(overflow.text).toContain("its queue of undelivered peer messages was full");
+			expect(contexts).toEqual([]);
+			release.resolve();
+			expect(await transition).toBe(true);
+			await session.waitForIdle();
+			expect(contexts).toEqual([]);
+			expect(JSON.stringify(session.messages)).not.toContain("CAP_MAIL_");
+		} finally {
+			release.resolve();
+			await transition;
+		}
 	});
 });

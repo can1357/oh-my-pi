@@ -60,7 +60,7 @@ export class InboundGate {
 		});
 	}
 
-	receive(request: MessageRequest, sender: SenderInfo, ownChild: boolean): InboxResponse {
+	receive(request: MessageRequest, sender: SenderInfo, ownChild: boolean, receiver?: SenderInfo): InboxResponse {
 		if (JSON.stringify(request).length > MAX_SERIALIZED_CHARS) return { ok: false, error: "too_large" };
 		if (this.#relayLoops(request.chain ?? [])) return { ok: true, outcome: "dropped", reason: "relay_loop" };
 		const now = Date.now();
@@ -79,7 +79,7 @@ export class InboundGate {
 		if (rates.length >= cfgMessagingRateLimit.get(this.settings))
 			return { ok: true, outcome: "dropped", reason: "rate" };
 		rates.push(now);
-		return this.#admit(request, sender, ownChild);
+		return this.#admit(request, sender, ownChild, receiver);
 	}
 
 	receiveOffline(message: StoredMessage): InboxResponse {
@@ -94,11 +94,19 @@ export class InboundGate {
 		);
 	}
 
-	#admit(request: MessageRequest, sender: SenderInfo, ownChild: boolean): InboxResponse {
+	#admit(
+		request: MessageRequest,
+		sender: SenderInfo,
+		ownChild: boolean,
+		receiver = this.ownSender?.(),
+	): InboxResponse {
 		const decision = this.decision(ownChild ? undefined : request.from, ownChild);
 		if (decision === "refuse") return { ok: true, outcome: "refused" };
 		const delivery: RemoteDelivery = {
 			id: request.id,
+			recipientSessionId: receiver?.sessionId ?? this.host.sessionId(),
+			sender,
+			receiver,
 			from: { name: sender.name, shortId: sender.shortId, address: sender.name ?? sender.shortId, cwd: sender.cwd },
 			body: request.body,
 			chain: request.chain ?? [],
@@ -114,7 +122,7 @@ export class InboundGate {
 		const held: HeldMessage = {
 			request,
 			sender,
-			receiver: this.ownSender?.(),
+			receiver,
 			ownChild,
 			delivery,
 			controller: new AbortController(),
