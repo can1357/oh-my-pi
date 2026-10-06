@@ -7,6 +7,7 @@ import type {
 	SkillDiagnosticAnalysisRecord,
 	SkillDiagnosticController,
 } from "../extensibility/skill-diagnostic-controller";
+import { INCOMPLETE_COVERAGE_DISCLOSURE } from "../extensibility/resource-consent";
 import {
 	SkillDiagnosticsPanel,
 	type SkillDiagnosticsPanelNotice,
@@ -132,9 +133,7 @@ function consentMessage(record: SkillDiagnosticAnalysisRecord): string {
 		`Resource data: ${(record.bytes / 1024).toFixed(1)} KiB, plus prompt framing.`,
 	];
 	if (record.candidates.some(candidate => !candidate.complete)) {
-		lines.push(
-			"Coverage is incomplete: skipped files (links, oversized, unreadable or past a limit) are not shown to the model, so the result is advisory and can never be used to hide a copy.",
-		);
+		lines.push(INCOMPLETE_COVERAGE_DISCLOSURE);
 	}
 	lines.push(
 		"",

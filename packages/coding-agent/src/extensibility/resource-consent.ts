@@ -14,6 +14,9 @@ import type { ResourceSnapshot } from "./resource-snapshot";
 export const SEND_DISCLOSURE =
 	"Files are treated as data and never executed. Known secret patterns and credential files are filtered out, but the files can still contain private information in other forms: review what is listed before sending. Your conversation, system prompt and credential store are not included. Charges may apply.";
 
+export const INCOMPLETE_COVERAGE_DISCLOSURE =
+	"Coverage is incomplete: skipped files (links, oversized, unreadable or past a limit) are not shown to the model, so the result is advisory and can never be used to hide a copy.";
+
 const kib = (bytes: number): string => `${(bytes / 1024).toFixed(1)} KiB`;
 
 /** One line: label, location, files and size read, and whether coverage was partial. */
@@ -36,9 +39,7 @@ export function describeRequest(snapshots: readonly ResourceSnapshot[]): string 
 		`Resource data: ${kib(bytes)} of the ${kib(MAX_RESOURCE_ANALYSIS_PROMPT_BYTES)} budget, plus prompt framing.`,
 	);
 	if (snapshots.some(snapshot => !snapshot.complete)) {
-		lines.push(
-			"Coverage is incomplete: skipped files (links, oversized, unreadable or past a limit) are not shown to the model, so the result is advisory and can never be used to hide a copy.",
-		);
+		lines.push(INCOMPLETE_COVERAGE_DISCLOSURE);
 	}
 	return lines.join("\n");
 }
