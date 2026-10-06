@@ -1691,13 +1691,14 @@ describe("antigravity discovery collapsing", () => {
 		const served = await resolve(() => Response.json(roster));
 		expect(served).toContain("claude-sonnet-4-6");
 		expect(served).toContain("gemini-3.1-pro");
-		expect(served).not.toContain("claude-sonnet-5-5-low");
-		expect(served).not.toContain("claude-opus-5-5-high");
+		expect(served).not.toContain("claude-sonnet-5-5");
+		expect(served).not.toContain("claude-opus-5-5");
 		// Image SKUs are not chat rows and stay available to the image role.
 		expect(served).toContain("gemini-3-pro-image");
 
 		const unreachable = await resolve(() => new Response("Forbidden", { status: 403 }));
-		expect(unreachable).toContain("claude-sonnet-5-5-low");
+		expect(unreachable).toContain("claude-sonnet-5-5");
+		expect(unreachable).toContain("claude-opus-5-5");
 	});
 });
 

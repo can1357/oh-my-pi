@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Model mentions (`^`), `/switch` completions, and model picker search stay responsive on every keystroke with large model catalogs ([#14595](https://github.com/can1357/oh-my-pi/pull/14595) by [@H4vC](https://github.com/H4vC))
+
+### Fixed
+
+- Fixed autocomplete popups (slash commands, arguments, `@` files, `#` actions, `^` model mentions, emoji, internal URLs) lagging 100 ms behind typing; they now update on every keystroke, so typing `/mod` and pressing Enter quickly runs `/model` instead of the top row shown for `/` (e.g. `/login`) ([#14595](https://github.com/can1357/oh-my-pi/pull/14595) by [@H4vC](https://github.com/H4vC))
+- Fixed same-provider `-latest` models (e.g. `chatgpt-4o-latest` variants) swapping places in the model picker and mention list depending on the query; they now sort alphabetically ([#14595](https://github.com/can1357/oh-my-pi/pull/14595) by [@H4vC](https://github.com/H4vC))
+
+## [18.6.3] - 2026-10-06
+
 ### Breaking Changes
 
 - `WorkingRowSpec` no longer takes `rate`: the native working row reads spinner, elapsed time, divider, then the intent, and the tok/s readout moved to the composer bar

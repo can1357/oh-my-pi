@@ -737,9 +737,6 @@ export class Editor implements Component, Focusable {
 	#undoStack: EditorState[] = [];
 	#suspendUndo = false;
 
-	// Debounce timer for autocomplete updates
-	#autocompleteTimeout?: NodeJS.Timeout;
-
 	onSubmit?: (text: string) => void | Promise<void>;
 	onAltEnter?: (text: string) => void;
 	onChange?: (text: string) => void;
@@ -1907,7 +1904,7 @@ export class Editor implements Component, Focusable {
 				if (kb.matchesCanonical(canonical, "tui.input.tab") || rightArrowAccepts) {
 					const selected = this.#autocompleteList.getSelectedItem();
 					// Check for stale autocomplete state due to buffer edits since last refresh
-					// (destructive keys or paste can outrun the debounced update).
+					// (destructive keys or paste can outrun the async refresh).
 					const currentLine = this.#state.lines[this.#state.cursorLine] ?? "";
 					const currentTextBeforeCursor = currentLine.slice(0, this.#state.cursorCol);
 					if (!this.#autocompletePrefixMatchesCursorText(currentTextBeforeCursor, selected)) {
@@ -1917,7 +1914,7 @@ export class Editor implements Component, Focusable {
 					}
 					if (!selected) {
 						// An `@` popup whose narrowing filter matched nothing stays open with no
-						// candidate (see #debouncedUpdateAutocomplete). Nothing to accept: cancel the
+						// candidate (see #refreshAutocomplete). Nothing to accept: cancel the
 						// popup and fall through so Tab keeps its normal completion role and a right
 						// arrow at end of line moves the cursor.
 						this.#cancelAutocomplete();
@@ -1939,7 +1936,7 @@ export class Editor implements Component, Focusable {
 					!this.#selectedCompletionIsSkillNamespace()
 				) {
 					const selected = this.#autocompleteList.getSelectedItem();
-					// Check for stale autocomplete state due to debounce
+					// Check for stale autocomplete state while an async refresh is pending
 					const currentLine = this.#state.lines[this.#state.cursorLine] ?? "";
 					const currentTextBeforeCursor = currentLine.slice(0, this.#state.cursorCol);
 					if (!this.#autocompletePrefixMatchesCursorText(currentTextBeforeCursor, selected)) {
@@ -2116,15 +2113,18 @@ export class Editor implements Component, Focusable {
 				const textBeforeCursor = currentLine.slice(0, this.#state.cursorCol);
 				if (
 					findLeadingSlashCommandStart(textBeforeCursor) !== null &&
+					textBeforeCursor.trim() !== "/" &&
 					this.#isInSubmittedSlashCommandContext() &&
 					this.#autocompleteProvider?.trySyncSlashCompletion
 				) {
 					const syncResult = this.#autocompleteProvider.trySyncSlashCompletion(textBeforeCursor);
-					if (syncResult && syncResult.items.length > 0) {
+					// The collapsed `/skill:` namespace row is not a runnable command; Enter submits
+					// immediately after applying, so only a real command may be completed here.
+					const selected = syncResult?.items.find(item => item.value !== SKILL_NAMESPACE);
+					if (syncResult && selected) {
 						// Invalidate any pending async autocomplete so its stale results are discarded
 						this.#autocompleteRequestId += 1;
 						// Apply the best match and submit the completed command
-						const selected = syncResult.items[0]!;
 						const result = this.#autocompleteProvider.applyCompletion(
 							this.#state.lines,
 							this.#state.cursorLine,
@@ -2774,7 +2774,7 @@ export class Editor implements Component, Focusable {
 	 *  Mirrors the transient state the key dispatch tears down before this action so the two
 	 *  cannot diverge: a pending character jump is cancelled by any other key, and an open
 	 *  spelling-assist popup is dismissed by anything that is not one of its accept keys (its
-	 *  debounced refresh skips assist mode, so a surviving list would hang around forever).
+	 *  refresh skips assist mode, so a surviving list would hang around forever).
 	 *  While Vim owns the buffer (Normal or Visual) the operation is Vim's `x` — deleting the
 	 *  selection and returning to Normal in Visual mode, the grapheme under the cursor
 	 *  otherwise. Only Insert mode and Vim-off editors delete straight through. */
@@ -3184,7 +3184,7 @@ export class Editor implements Component, Focusable {
 				}
 			}
 		} else {
-			this.#debouncedUpdateAutocomplete();
+			this.#refreshAutocomplete();
 		}
 	}
 
@@ -3280,7 +3280,7 @@ export class Editor implements Component, Focusable {
 	/** Re-evaluate autocomplete triggers for the text ending at the cursor (used after bulk edits). */
 	#retriggerAutocompleteAtCursor(): void {
 		if (this.#autocompleteState) {
-			this.#debouncedUpdateAutocomplete();
+			this.#refreshAutocomplete();
 			return;
 		}
 		const currentLine = this.#state.lines[this.#state.cursorLine] || "";
@@ -3462,7 +3462,7 @@ export class Editor implements Component, Focusable {
 				this.#cancelAutocomplete();
 				this.onAutocompleteUpdate?.();
 			} else {
-				this.#debouncedUpdateAutocomplete();
+				this.#refreshAutocomplete();
 			}
 		} else {
 			// If autocomplete was cancelled (no matches), re-trigger if we're in a completable context
@@ -3642,7 +3642,7 @@ export class Editor implements Component, Focusable {
 		this.#notifyChange();
 
 		if (this.#autocompleteState) {
-			this.#debouncedUpdateAutocomplete();
+			this.#refreshAutocomplete();
 		} else {
 			const currentLine = this.#state.lines[this.#state.cursorLine] || "";
 			const textBeforeCursor = currentLine.slice(0, this.#state.cursorCol);
@@ -3976,7 +3976,7 @@ export class Editor implements Component, Focusable {
 
 		// Update or re-trigger autocomplete after forward delete
 		if (this.#autocompleteState) {
-			this.#debouncedUpdateAutocomplete();
+			this.#refreshAutocomplete();
 		} else {
 			const currentLine = this.#state.lines[this.#state.cursorLine] || "";
 			const textBeforeCursor = currentLine.slice(0, this.#state.cursorCol);
@@ -4260,7 +4260,7 @@ export class Editor implements Component, Focusable {
 				if (!token.includes(" ") && !token.slice(1).includes("/")) {
 					// Guard the timing window where the popup was built for an earlier
 					// query (e.g. bare `/`) and the user typed further characters before
-					// the 100 ms debounced refresh fired: accept the stale skill only
+					// the async refresh landed: accept the stale skill only
 					// when the refreshed popup would still surface it (same gate as
 					// buildMidPromptSkillCompletions). `tmp` after a bare slash
 					// therefore falls through to file completion instead of rewriting
@@ -4547,7 +4547,6 @@ export class Editor implements Component, Focusable {
 
 	#cancelAutocomplete(notifyCancel: boolean = false): void {
 		const wasAutocompleting = this.#autocompleteState !== null;
-		this.#clearAutocompleteTimeout();
 		this.#invalidateAutocompleteRequests();
 		this.#autocompleteState = null;
 		this.#autocompleteList = undefined;
@@ -4666,7 +4665,7 @@ export class Editor implements Component, Focusable {
 		this.onAutocompleteUpdate?.();
 	}
 
-	/** Filter a shown `@` file list to the live `@` token until the debounced refresh replaces it. */
+	/** Filter a shown `@` file list to the live `@` token until the async refresh replaces it. */
 	#narrowAtFileList(): void {
 		if (!this.#autocompleteList || !this.#autocompletePrefix.startsWith("@")) return;
 		const currentLine = this.#state.lines[this.#state.cursorLine] ?? "";
@@ -4682,22 +4681,45 @@ export class Editor implements Component, Focusable {
 		for (const resolve of waiters) resolve();
 	}
 
-	#debouncedUpdateAutocomplete(): void {
-		if (this.#autocompleteState !== "assist") this.#narrowAtFileList();
-		if (this.#autocompleteTimeout) {
-			clearTimeout(this.#autocompleteTimeout);
-		}
-		this.#autocompleteTimeout = setTimeout(() => {
-			void this.#updateAutocomplete();
-			this.#autocompleteTimeout = undefined;
-		}, 100);
+	/**
+	 * Re-query suggestions for the live text after an edit while the popup is open. Runs on
+	 * every edit; the request queue coalesces bursts (a newer request replaces the pending one
+	 * and aborts the in-flight one), so no timer delays the popup behind the typing.
+	 */
+	#refreshAutocomplete(): void {
+		if (this.#autocompleteState === "assist") return;
+		if (this.#refreshSlashCommandListSync()) return;
+		this.#narrowAtFileList();
+		void this.#updateAutocomplete();
 	}
 
-	#clearAutocompleteTimeout(): void {
-		if (this.#autocompleteTimeout) {
-			clearTimeout(this.#autocompleteTimeout);
-			this.#autocompleteTimeout = undefined;
+	/**
+	 * Rebuild a shown slash command-name popup from the live token synchronously. An async
+	 * refresh resolves a microtask later at best, so Enter/Tab arriving in the same input
+	 * batch would accept a row computed for an earlier query (`/` → `mod` → Enter ran `/login`).
+	 * Returns false when the async refresh must handle the edit (arguments, mid-prompt
+	 * skills, absolute-path fall-through).
+	 */
+	#refreshSlashCommandListSync(): boolean {
+		const provider = this.#autocompleteProvider;
+		if (this.#autocompleteState !== "regular" || !provider?.trySyncSlashCompletion) return false;
+		if (!this.#isInSubmittedSlashCommandContext()) return false;
+		const currentLine = this.#state.lines[this.#state.cursorLine] ?? "";
+		const textBeforeCursor = currentLine.slice(0, this.#state.cursorCol);
+		const token = textBeforeCursor.trimStart();
+		if (token.includes(" ")) return false;
+		const suggestions = provider.trySyncSlashCompletion(textBeforeCursor);
+		if (suggestions) {
+			this.#invalidateAutocompleteRequests();
+			this.#showAutocompleteSuggestions(suggestions, "regular");
+			return true;
 		}
+		// No command matches: an inner slash may still be an absolute path, which needs the
+		// async file lookup. Otherwise the async refresh would only close the popup.
+		if (token.slice(1).includes("/")) return false;
+		this.#cancelAutocomplete();
+		this.onAutocompleteUpdate?.();
+		return true;
 	}
 
 	/**
