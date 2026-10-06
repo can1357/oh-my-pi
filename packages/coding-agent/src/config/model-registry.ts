@@ -31,6 +31,7 @@ import {
 	fingerprintStaticModels,
 	type ModelManagerOptions,
 	type ModelRefreshStrategy,
+	stripProviderDefaultFlags,
 } from "@oh-my-pi/pi-catalog/model-manager";
 import { getBundledModels, getBundledProviders } from "@oh-my-pi/pi-catalog/models";
 import {
@@ -1275,7 +1276,8 @@ export class ModelRegistry {
 				? new Map(bundledModels.map(bundledModel => [bundledModel.id, bundledModel]))
 				: undefined;
 			const models: Model<Api>[] = [];
-			for (const cachedModel of cache.models) {
+			const cacheModels = cache.authoritative ? cache.models : stripProviderDefaultFlags(cache.models);
+			for (const cachedModel of cacheModels) {
 				// Shared catalog rows can be projected under another provider id.
 				// That changes policy inputs, so only this projection is rebuilt;
 				// same-provider materialized cache rows stay on the zero-build path.

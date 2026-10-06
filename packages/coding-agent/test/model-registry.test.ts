@@ -17,7 +17,7 @@ import { modelKind } from "@oh-my-pi/pi-catalog/types";
 import { finalizeCustomModel } from "@oh-my-pi/pi-coding-agent/config/custom-models";
 import { applyModelPatch, mergeDiscoveredModel } from "@oh-my-pi/pi-coding-agent/config/model-patch";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
-import { resolveRoleChain } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
+import { pickDefaultAvailableModel, resolveRoleChain } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
 import { roleCandidatePool } from "@oh-my-pi/pi-coding-agent/config/model-roles";
 import { resetSettingsForTest, Settings, settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
@@ -3425,6 +3425,25 @@ describe("ModelRegistry", () => {
 			const vertexModels = getModelsForProvider(vertexNonAuthoritative, "google-vertex");
 			expect(vertexModels.some(model => model.id === "zai-org/glm-4.7-maas")).toBe(true);
 			expect(vertexModels.some(model => model.id.startsWith("gemini-"))).toBe(true);
+		});
+
+		test("ignores a provider default from a non-authoritative standard cache", () => {
+			const bundled = getBundledModels("venice");
+			const previouslyTagged = bundled.find(model => model.id === "llama-3.3-70b");
+			if (!previouslyTagged) throw new Error("Missing bundled Venice control model");
+			writeModelCache(
+				"venice",
+				Date.now(),
+				[{ ...previouslyTagged, providerDefault: true }],
+				false,
+				fingerprintStaticModels(bundled),
+				path.join(tempDir, "models.db"),
+			);
+			const registry = new ModelRegistry(authStorage, modelsJsonPath);
+			const veniceModels = getModelsForProvider(registry, "venice");
+
+			expect(veniceModels.find(model => model.id === "llama-3.3-70b")?.providerDefault).toBeUndefined();
+			expect(pickDefaultAvailableModel(veniceModels)?.id).toBe("zai-org-glm-5-2");
 		});
 
 		test("keeps bundled google-vertex fallback when cached project catalog is stale", () => {

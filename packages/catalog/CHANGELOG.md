@@ -10,6 +10,7 @@
 
 ### Changed
 
+- Venice's default model now follows the model Venice tags `default` (currently `zai-org-glm-5-2`) instead of `llama-3.3-70b` ([#14476](https://github.com/can1357/oh-my-pi/issues/14476), [#14497](https://github.com/can1357/oh-my-pi/pull/14497) by [@joshua-mo-143](https://github.com/joshua-mo-143)).
 - Changed OpenAI Responses endpoints other than OpenAI, Azure OpenAI, and Codex (custom and local servers, proxies including `azure`/`openai-codex` providers pointed at a non-Azure/non-Codex `baseUrl`, OpenRouter) to default `supportsImageDetailOriginal` to `false`, so snapcompact frames and computer screenshots go out as `detail: "auto"` instead of failing on servers that reject `original`; set `compat.supportsImageDetailOriginal: true` to opt a host in ([#13687](https://github.com/can1357/oh-my-pi/pull/13687) by [@alphastorm](https://github.com/alphastorm)).
 
 ### Fixed
