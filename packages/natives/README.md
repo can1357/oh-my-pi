@@ -20,7 +20,7 @@ that terminal protocol.
 ## Usage
 
 ```typescript
-import { encodeSixel, grep, pdfToMarkdown } from "@oh-my-pi/pi-natives";
+import { encodeSixelAsync, grep, pdfToMarkdown } from "@oh-my-pi/pi-natives";
 
 // Grep for a pattern
 const results = await grep({
@@ -37,8 +37,9 @@ const files = await find({
 	fileType: "file",
 });
 
-// SIXEL encode for a terminal cell box (px)
-const sequence = encodeSixel(pngBytes, widthPx, heightPx);
+// SIXEL encode for a terminal cell box (px), off the JS thread
+// (`encodeSixel` is the synchronous form)
+const sequence = await encodeSixelAsync(pngBytes, widthPx, heightPx);
 
 // Extract PDF text and identify pages that still need OCR
 const pdf = await pdfToMarkdown(pdfBytes);

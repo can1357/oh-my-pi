@@ -156,6 +156,25 @@ describe("ModelBrowser search ranking", () => {
 		expect(ranked.length).toBe(browser.visibleCount);
 	});
 
+	test("orders same-provider -latest models alphabetically regardless of input order", () => {
+		// Regression: the comparator answered "first wins" for two `-latest` ids, so their
+		// order followed whatever order the catalog or fuzzy pass handed in.
+		const alpha = makeModel("demo", "alpha-latest");
+		const beta = makeModel("demo", "beta-latest");
+		const roles: RoleAssignments = {};
+		const options = { roles, mruOrder: [], affinity: buildSearchAffinity([], roles, []) };
+		for (const models of [
+			[alpha, beta],
+			[beta, alpha],
+		]) {
+			const sorted = buildBrowserItems(models);
+			sortModelItems(sorted);
+			expect(sorted.map(item => item.selector)).toEqual(["demo/alpha-latest", "demo/beta-latest"]);
+			const ranked = rankModelItems("latest", buildBrowserItems(models), options);
+			expect(ranked.map(item => item.selector)).toEqual(["demo/alpha-latest", "demo/beta-latest"]);
+		}
+	});
+
 	test("an exact query match outranks the MRU model", () => {
 		// Regression: with gpt-5.6-sol as the active (MRU) model, typing
 		// "gpt-5.5" must select gpt-5.5, not keep the MRU pinned on top.

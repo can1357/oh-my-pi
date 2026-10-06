@@ -269,6 +269,22 @@ describe("RPC Pi-compatible primitives (live server)", () => {
 		});
 	}, 60000);
 
+	test("set_slow_mode rejects a non-boolean enabled before touching the persisted Claude setting", async () => {
+		await withRpcServer(async (send, next) => {
+			send({ type: "get_state", id: "slow-state" });
+			const state = (await next()).data as { slowModeSupported: unknown; slowModeScope: unknown };
+			expect([state.slowModeSupported, state.slowModeScope]).toEqual([true, "global"]);
+			send({ type: "set_slow_mode", id: "slow-bad", enabled: "false" });
+			expect(await next()).toEqual({
+				id: "slow-bad",
+				type: "response",
+				command: "set_slow_mode",
+				success: false,
+				error: "set_slow_mode requires boolean enabled",
+			});
+		});
+	}, 60000);
+
 	test("get_entries, get_tree, thinking levels, and command-discovery dialect", async () => {
 		await withRpcServer(async (send, next) => {
 			send({ type: "get_entries", id: "entries-base" });

@@ -14,6 +14,7 @@ import {
 	type HookMessage,
 	type FileMentionMessage,
 	isUserInvokedSkillPrompt,
+	isUserTurnInitiator,
 } from "@oh-my-pi/pi-tui/chat/messages";
 export {
 	SKILL_PROMPT_MESSAGE_TYPE,
@@ -708,6 +709,11 @@ function wrapSteeringUserMessage(message: SteeringUserMessage): UserMessage {
 	return { ...userMessage, content };
 }
 
+// One wrapper per steering message. Per-request transforms key on identity (the
+// date/cwd reminder treats an unseen user turn as new), so a fresh wrapper each
+// request would read as a never-sent turn. Owner edits evict it below.
+const steeringWrapperCache = new WeakMap<AgentMessage, UserMessage>();
+
 export function wrapSteeringForModel(messages: AgentMessage[]): AgentMessage[] {
 	// Wrap EVERY steering message, not just a trailing run. The wire bytes of a
 	// steering message must be a pure function of the message itself, independent
@@ -719,7 +725,11 @@ export function wrapSteeringForModel(messages: AgentMessage[]): AgentMessage[] {
 	for (let i = 0; i < messages.length; i++) {
 		const message = messages[i];
 		if (!isSteeringUserMessage(message)) continue;
-		const wrappedMessage = wrapSteeringUserMessage(message);
+		let wrappedMessage = steeringWrapperCache.get(message);
+		if (wrappedMessage === undefined) {
+			wrappedMessage = wrapSteeringUserMessage(message);
+			steeringWrapperCache.set(message, wrappedMessage);
+		}
 		if (wrappedMessage === message) continue;
 		if (wrappedMessages === undefined) {
 			wrappedMessages = messages.slice();
@@ -1025,6 +1035,7 @@ export function invalidateConvertToLlmArrayCache(messages: AgentMessage[]): void
 }
 
 registerMessageCacheInvalidator(message => {
+	steeringWrapperCache.delete(message);
 	convertCache.delete(message);
 	convertGeneration++;
 });
@@ -1170,6 +1181,11 @@ function convertOneCached(m: AgentMessage, interruptedNext: boolean): Message[] 
 	for (const message of fragment) copyPerCallContextMessage(message, m);
 	convertCache.set(m, { interruptedNext, fragment });
 	return fragment;
+}
+
+/** A turn the user wrote: a user message, or a user-initiated custom prompt (`/skill:`, collab). */
+export function isUserAuthoredMessage(message: AgentMessage): boolean {
+	return message.role === "user" || (message.role === "custom" && isUserTurnInitiator(message));
 }
 
 /**

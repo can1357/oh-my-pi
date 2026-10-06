@@ -257,7 +257,9 @@ pub fn line_tokens_str(text: &str) -> Vec<&str> {
 	text.split_inclusive('\n').collect()
 }
 
-fn diff_line_tokens<T: Eq + Hash + Copy>(old_tokens: &[T], new_tokens: &[T]) -> Vec<Run> {
+/// Myers runs over pre-split line tokens, so callers that also need the token
+/// slices for rendering split each text only once.
+pub fn diff_line_tokens<T: Eq + Hash + Copy>(old_tokens: &[T], new_tokens: &[T]) -> Vec<Run> {
 	let (old_ids, new_ids) = intern(old_tokens, new_tokens);
 	myers_diff(&old_ids, &new_ids)
 }
@@ -285,28 +287,12 @@ pub fn concat_tokens_u16(tokens: &[&[u16]]) -> Vec<u16> {
 	out
 }
 
-fn concat_tokens_str(tokens: &[&str]) -> String {
-	let mut out = String::with_capacity(tokens.iter().map(|token| token.len()).sum());
-	for token in tokens {
-		out.push_str(token);
-	}
-	out
-}
-
 /// Line changes with jsdiff `diffLines` semantics over UTF-16 code units.
 pub fn diff_lines_u16(old: &[u16], new: &[u16]) -> Vec<Change<Vec<u16>>> {
 	let old_tokens = line_tokens_u16(old);
 	let new_tokens = line_tokens_u16(new);
 	let runs = diff_line_tokens(&old_tokens, &new_tokens);
 	build_changes(&runs, &old_tokens, &new_tokens, concat_tokens_u16)
-}
-
-/// Line changes with jsdiff `diffLines` semantics over UTF-8 text.
-pub fn line_changes_str(old: &str, new: &str) -> Vec<Change<String>> {
-	let old_tokens = line_tokens_str(old);
-	let new_tokens = line_tokens_str(new);
-	let runs = diff_line_tokens(&old_tokens, &new_tokens);
-	build_changes(&runs, &old_tokens, &new_tokens, concat_tokens_str)
 }
 
 /// One hunk of a unified diff.
@@ -324,17 +310,56 @@ pub struct Hunk {
 	pub lines:     Vec<Vec<u16>>,
 }
 
-/// Prepend a unified-diff marker to a UTF-16 line.
-fn prefixed_line(prefix: u8, line: &[u16]) -> Vec<u16> {
-	let mut out = Vec::with_capacity(1 + line.len());
-	out.push(u16::from(prefix));
-	out.extend_from_slice(line);
-	out
+/// Line token that may end in a line feed.
+pub trait LineToken {
+	/// The token without its trailing line feed, and whether one was present.
+	fn strip_lf(&self) -> (&Self, bool);
 }
 
-/// `\ No newline at end of file`, as UTF-16 code units.
-fn no_newline_marker() -> Vec<u16> {
-	"\\ No newline at end of file".encode_utf16().collect()
+impl LineToken for [u16] {
+	fn strip_lf(&self) -> (&Self, bool) {
+		match self.split_last() {
+			Some((&LF, body)) => (body, true),
+			_ => (self, false),
+		}
+	}
+}
+
+impl LineToken for str {
+	fn strip_lf(&self) -> (&Self, bool) {
+		match self.strip_suffix('\n') {
+			Some(body) => (body, true),
+			None => (self, false),
+		}
+	}
+}
+
+/// Body row of a unified hunk, borrowing its text from the line tokens.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HunkLine<'a, T: ?Sized> {
+	/// ` ` row: line present in both texts.
+	Context(&'a T),
+	/// `-` row: line only in the old text.
+	Removed(&'a T),
+	/// `+` row: line only in the new text.
+	Added(&'a T),
+	/// `\ No newline at end of file` after the preceding row.
+	NoNewlineAtEof,
+}
+
+/// Unified hunk whose rows borrow from the line tokens.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HunkRows<'a, T: ?Sized> {
+	/// 1-based first line of the hunk in the old text.
+	pub old_start: u32,
+	/// Number of old-text lines covered by the hunk.
+	pub old_lines: u32,
+	/// 1-based first line of the hunk in the new text.
+	pub new_start: u32,
+	/// Number of new-text lines covered by the hunk.
+	pub new_lines: u32,
+	/// Hunk body rows, line feeds stripped.
+	pub lines:     Vec<HunkLine<'a, T>>,
 }
 
 /// Build jsdiff-compatible unified hunks from UTF-16 texts.
@@ -349,28 +374,64 @@ pub fn structured_patch_hunks_u16(
 	structured_patch_hunks_from_runs_u16(context, &old_tokens, &new_tokens, &runs)
 }
 
-/// Build jsdiff-compatible unified hunks from precomputed line runs.
+/// Build jsdiff-compatible unified hunks from precomputed UTF-16 line runs.
 pub fn structured_patch_hunks_from_runs_u16(
 	context: Option<u32>,
 	old_tokens: &[&[u16]],
 	new_tokens: &[&[u16]],
 	runs: &[Run],
 ) -> Vec<Hunk> {
+	const NO_NEWLINE_MARKER: &str = "\\ No newline at end of file";
+	let prefixed = |prefix: u8, line: &[u16]| {
+		let mut out = Vec::with_capacity(1 + line.len());
+		out.push(u16::from(prefix));
+		out.extend_from_slice(line);
+		out
+	};
+	structured_patch_hunk_rows(context, old_tokens, new_tokens, runs)
+		.into_iter()
+		.map(|hunk| Hunk {
+			old_start: hunk.old_start,
+			old_lines: hunk.old_lines,
+			new_start: hunk.new_start,
+			new_lines: hunk.new_lines,
+			lines:     hunk
+				.lines
+				.into_iter()
+				.map(|line| match line {
+					HunkLine::Context(text) => prefixed(b' ', text),
+					HunkLine::Removed(text) => prefixed(b'-', text),
+					HunkLine::Added(text) => prefixed(b'+', text),
+					HunkLine::NoNewlineAtEof => NO_NEWLINE_MARKER.encode_utf16().collect(),
+				})
+				.collect(),
+		})
+		.collect()
+}
+
+/// Build jsdiff-compatible unified hunks from precomputed line runs over any
+/// token type; rows borrow from the tokens.
+pub fn structured_patch_hunk_rows<'a, T: LineToken + ?Sized>(
+	context: Option<u32>,
+	old_tokens: &[&'a T],
+	new_tokens: &[&'a T],
+	runs: &[Run],
+) -> Vec<HunkRows<'a, T>> {
 	let context = context.map_or(4usize, |value| value as usize);
 
 	// Change list with per-change line slices; the trailing sentinel mirrors
 	// jsdiff's pushed empty change that flushes the final hunk.
-	struct ChangeLines<'a> {
+	struct ChangeLines<'s, 'a, T: ?Sized> {
 		added:   bool,
 		removed: bool,
-		lines:   &'a [&'a [u16]],
+		lines:   &'s [&'a T],
 	}
-	let mut list: Vec<ChangeLines> = Vec::with_capacity(runs.len() + 1);
+	let mut list: Vec<ChangeLines<'_, 'a, T>> = Vec::with_capacity(runs.len() + 1);
 	let mut old_pos = 0usize;
 	let mut new_pos = 0usize;
 	for run in runs {
 		let count = run.count as usize;
-		let lines: &[&[u16]] = if run.removed {
+		let lines = if run.removed {
 			let slice = &old_tokens[old_pos..old_pos + count];
 			old_pos += count;
 			slice
@@ -386,19 +447,25 @@ pub fn structured_patch_hunks_from_runs_u16(
 	}
 	list.push(ChangeLines { added: false, removed: false, lines: &[] });
 
-	// Hunk skeleton before the trailing-newline post-pass; lines stay `Vec<u16>`
-	// so the pass below can pop terminators in place.
-	struct RawHunk {
-		old_start: usize,
-		old_lines: usize,
-		new_start: usize,
-		new_lines: usize,
-		lines:     Vec<Vec<u16>>,
+	// jsdiff strips each line's terminator and follows any line lacking one
+	// with the "no newline at EOF" marker; doing it per row on push is
+	// equivalent to its post-pass over finished hunks.
+	fn push_row<'a, T: LineToken + ?Sized>(
+		rows: &mut Vec<HunkLine<'a, T>>,
+		row: fn(&'a T) -> HunkLine<'a, T>,
+		line: &'a T,
+	) {
+		let (body, had_lf) = line.strip_lf();
+		rows.push(row(body));
+		if !had_lf {
+			rows.push(HunkLine::NoNewlineAtEof);
+		}
 	}
-	let mut hunks: Vec<RawHunk> = Vec::new();
+
+	let mut hunks = Vec::new();
 	let mut old_range_start = 0usize;
 	let mut new_range_start = 0usize;
-	let mut cur_range: Vec<Vec<u16>> = Vec::new();
+	let mut cur_range: Vec<HunkLine<'a, T>> = Vec::new();
 	let mut old_line = 1usize;
 	let mut new_line = 1usize;
 	for i in 0..list.len() {
@@ -412,17 +479,20 @@ pub fn structured_patch_hunks_from_runs_u16(
 				if i > 0 && context > 0 {
 					let prev_lines = list[i - 1].lines;
 					let take = prev_lines.len().min(context);
-					cur_range = prev_lines[prev_lines.len() - take..]
-						.iter()
-						.map(|line| prefixed_line(b' ', line))
-						.collect();
-					old_range_start -= cur_range.len();
-					new_range_start -= cur_range.len();
+					for line in &prev_lines[prev_lines.len() - take..] {
+						push_row(&mut cur_range, HunkLine::Context, line);
+					}
+					old_range_start -= take;
+					new_range_start -= take;
 				}
 			}
-			let marker = if current.added { b'+' } else { b'-' };
+			let row: fn(&'a T) -> HunkLine<'a, T> = if current.added {
+				HunkLine::Added
+			} else {
+				HunkLine::Removed
+			};
 			for line in current.lines {
-				cur_range.push(prefixed_line(marker, line));
+				push_row(&mut cur_range, row, line);
 			}
 			if current.added {
 				new_line += current.lines.len();
@@ -434,19 +504,19 @@ pub fn structured_patch_hunks_from_runs_u16(
 				if current.lines.len() <= context * 2 && i + 2 < list.len() {
 					// Common run small enough to join adjacent hunks.
 					for line in current.lines {
-						cur_range.push(prefixed_line(b' ', line));
+						push_row(&mut cur_range, HunkLine::Context, line);
 					}
 				} else {
 					// Close the hunk with leading context.
 					let context_size = current.lines.len().min(context);
 					for line in &current.lines[..context_size] {
-						cur_range.push(prefixed_line(b' ', line));
+						push_row(&mut cur_range, HunkLine::Context, line);
 					}
-					hunks.push(RawHunk {
-						old_start: old_range_start,
-						old_lines: old_line - old_range_start + context_size,
-						new_start: new_range_start,
-						new_lines: new_line - new_range_start + context_size,
+					hunks.push(HunkRows {
+						old_start: old_range_start as u32,
+						old_lines: (old_line - old_range_start + context_size) as u32,
+						new_start: new_range_start as u32,
+						new_lines: (new_line - new_range_start + context_size) as u32,
 						lines:     std::mem::take(&mut cur_range),
 					});
 					old_range_start = 0;
@@ -457,30 +527,7 @@ pub fn structured_patch_hunks_from_runs_u16(
 			new_line += current.lines.len();
 		}
 	}
-
-	// Strip trailing newlines and add "no newline at EOF" markers.
-	for hunk in &mut hunks {
-		let mut i = 0;
-		while i < hunk.lines.len() {
-			if hunk.lines[i].last() == Some(&LF) {
-				hunk.lines[i].pop();
-			} else {
-				hunk.lines.insert(i + 1, no_newline_marker());
-				i += 1;
-			}
-			i += 1;
-		}
-	}
 	hunks
-		.into_iter()
-		.map(|hunk| Hunk {
-			old_start: hunk.old_start as u32,
-			old_lines: hunk.old_lines as u32,
-			new_start: hunk.new_start as u32,
-			new_lines: hunk.new_lines as u32,
-			lines:     hunk.lines,
-		})
-		.collect()
 }
 
 const fn is_word_char(cp: u32) -> bool {
@@ -885,24 +932,6 @@ mod tests {
 	}
 
 	#[test]
-	fn utf8_and_utf16_line_changes_agree_for_ascii() {
-		let old = "a\nb\nc\n";
-		let new = "a\nx\nc\n";
-		let utf8 = line_changes_str(old, new);
-		let utf16 = diff_lines_u16(&u16s(old), &u16s(new));
-		let utf16_shaped: Vec<Change<String>> = utf16
-			.into_iter()
-			.map(|change| Change {
-				value:   String::from_utf16(&change.value).unwrap(),
-				count:   change.count,
-				added:   change.added,
-				removed: change.removed,
-			})
-			.collect();
-		assert_eq!(utf8, utf16_shaped);
-	}
-
-	#[test]
 	fn common_runs_take_values_from_new_tokens() {
 		let old = String::from("same");
 		let new = String::from("same");
@@ -916,7 +945,6 @@ mod tests {
 		);
 		assert_eq!(changes[0].value, new.as_ptr());
 		assert_ne!(changes[0].value, old.as_ptr());
-		assert_eq!(line_changes_str(&old, &new)[0].value, new);
 	}
 
 	#[test]

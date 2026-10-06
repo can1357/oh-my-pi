@@ -2955,6 +2955,85 @@ pub struct GoalResult {
 	pub state: Option<GoalModeState>,
 }
 
+/// Where `/slow` lives: persisted config shared by every session, or this session's flex tier.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum SlowModeScope {
+	#[serde(rename = "session")]
+	Session,
+	#[serde(rename = "global")]
+	Global,
+}
+
+impl SlowModeScope {
+	/// Wire value.
+	pub fn as_str(self) -> &'static str {
+		match self {
+			Self::Session => "session",
+			Self::Global => "global",
+		}
+	}
+}
+
+/// Requests are served on the provider's low-priority (slow) lane.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct UsageLimitLowPriority {
+	/// Epoch seconds when the limit that was hit resets.
+	#[serde(rename = "resetsAtSec")]
+	pub resets_at_sec: f64,
+	/// Percent of the low-priority allowance still available, when reported.
+	#[serde(rename = "allowanceLeftPercent", default, skip_serializing_if = "Option::is_none")]
+	pub allowance_left_percent: Option<i64>,
+}
+
+/// Requests run on a short wrap-up allowance past the limit.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct UsageLimitWrapUp {
+	/// Whether paid extra usage serves requests once the allowance is spent.
+	#[serde(rename = "extraUsage")]
+	pub extra_usage: bool,
+	/// Epoch seconds when the limit that was hit resets, if reported.
+	#[serde(rename = "resetsAtSec", default, skip_serializing_if = "Option::is_none")]
+	pub resets_at_sec: Option<f64>,
+}
+
+/// Provider-neutral state of an account past its usage limit, discriminated by `stage`.
+#[derive(Debug, Clone, PartialEq)]
+pub enum UsageLimitState {
+	/// Requests are served on the provider's low-priority (slow) lane.
+	LowPriority(UsageLimitLowPriority),
+	/// Requests run on a short wrap-up allowance past the limit.
+	WrapUp(UsageLimitWrapUp),
+}
+
+impl UsageLimitState {
+	/// Decodes from JSON, dispatching on `stage`.
+	pub fn from_value(value: Value) -> Result<Self, serde_json::Error> {
+		let decode: fn(Value) -> Result<Self, serde_json::Error> = match value.get("stage").and_then(Value::as_str) {
+			Some("low_priority") => |value| serde_json::from_value(value).map(Self::LowPriority),
+			Some("wrap_up") => |value| serde_json::from_value(value).map(Self::WrapUp),
+			other => {
+				return Err(serde_json::Error::custom(format!("unknown UsageLimitState stage {other:?}")));
+			}
+		};
+		decode(value)
+	}
+}
+
+impl Serialize for UsageLimitState {
+	fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+		match self {
+			Self::LowPriority(member) => serialize_tagged(member, &[("stage", "low_priority")], serializer),
+			Self::WrapUp(member) => serialize_tagged(member, &[("stage", "wrap_up")], serializer),
+		}
+	}
+}
+
+impl<'de> Deserialize<'de> for UsageLimitState {
+	fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+		Self::from_value(Value::deserialize(deserializer)?).map_err(D::Error::custom)
+	}
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SessionState {
 	#[serde(rename = "sessionId")]
@@ -2983,6 +3062,18 @@ pub struct SessionState {
 	pub fast_mode_enabled: bool,
 	#[serde(rename = "fastModeActive", default = "default_session_state_fast_mode_active")]
 	pub fast_mode_active: bool,
+	/// `/slow` applies to the active model.
+	#[serde(rename = "slowModeSupported", default = "default_session_state_slow_mode_supported")]
+	pub slow_mode_supported: bool,
+	/// `/slow` is on for the active model; always `false` when `slowModeSupported` is `false`.
+	#[serde(rename = "slowModeEnabled", default = "default_session_state_slow_mode_enabled")]
+	pub slow_mode_enabled: bool,
+	/// Where the active model's `/slow` lives; absent when unsupported.
+	#[serde(rename = "slowModeScope", default, skip_serializing_if = "Option::is_none")]
+	pub slow_mode_scope: Option<SlowModeScope>,
+	/// Usage-limit stage of the active model's account; absent outside wrap-up and low priority.
+	#[serde(rename = "usageLimit", default, skip_serializing_if = "Option::is_none")]
+	pub usage_limit: Option<UsageLimitState>,
 	#[serde(rename = "tokensPerSecond", default = "default_session_state_tokens_per_second")]
 	pub tokens_per_second: Option<f64>,
 	#[serde(rename = "messageCount", default = "default_session_state_message_count")]
@@ -3094,11 +3185,39 @@ pub struct OpenSessionResult {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RemoveQueuedMessageResult {
 	pub removed: bool,
+	/// The removed message's images, so the client can restore them with its text.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub images: Option<Vec<ImageContent>>,
+	/// Only ever `true`: the images exceeded the transport limit and were omitted; the removal still happened.
+	#[serde(rename = "imagesDropped", default, skip_serializing_if = "Option::is_none")]
+	pub images_dropped: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PromoteQueuedMessageResult {
 	pub promoted: bool,
+}
+
+/// Queued user content withdrawn from the queue, as the editor would restore it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RestoredQueuedMessage {
+	pub text: String,
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub images: Option<Vec<ImageContent>>,
+}
+
+/// User-authored queued input withdrawn before the abort, oldest first.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AbortAndRestoreQueueResult {
+	pub steering: Vec<RestoredQueuedMessage>,
+	#[serde(rename = "followUp")]
+	pub follow_up: Vec<RestoredQueuedMessage>,
+	/// Only ever `true`: the full result exceeded the transport limit and every `images` was omitted.
+	#[serde(rename = "imagesDropped", default, skip_serializing_if = "Option::is_none")]
+	pub images_dropped: Option<bool>,
+	/// Only ever `true`: even the text-only result exceeded the limit, so only an oldest-first prefix is listed.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub truncated: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -3258,6 +3377,67 @@ pub struct SubagentMessages {
 	pub reset: bool,
 	pub entries: Vec<Map<String, Value>>,
 	pub messages: Vec<AgentMessage>,
+}
+
+/// Side-question turn lifecycle; `interrupted` marks a turn whose process died while it ran.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum BtwStatus {
+	#[serde(rename = "running")]
+	Running,
+	#[serde(rename = "complete")]
+	Complete,
+	#[serde(rename = "cancelled")]
+	Cancelled,
+	#[serde(rename = "error")]
+	Error,
+	#[serde(rename = "interrupted")]
+	Interrupted,
+}
+
+impl BtwStatus {
+	/// Wire value.
+	pub fn as_str(self) -> &'static str {
+		match self {
+			Self::Running => "running",
+			Self::Complete => "complete",
+			Self::Cancelled => "cancelled",
+			Self::Error => "error",
+			Self::Interrupted => "interrupted",
+		}
+	}
+}
+
+/// One question and its answer within a side-question topic.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BtwHistoryTurn {
+	pub question: String,
+	pub answer: String,
+	pub status: BtwStatus,
+	#[serde(rename = "createdAt")]
+	pub created_at: i64,
+	#[serde(rename = "updatedAt")]
+	pub updated_at: i64,
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub error: Option<String>,
+}
+
+/// A side-question topic: its first turn's fields plus follow-ups; the latest turn is the last follow-up, else the record.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BtwHistoryRecord {
+	pub question: String,
+	pub answer: String,
+	pub status: BtwStatus,
+	#[serde(rename = "createdAt")]
+	pub created_at: i64,
+	#[serde(rename = "updatedAt")]
+	pub updated_at: i64,
+	pub id: String,
+	#[serde(rename = "leafId", deserialize_with = "Deserialize::deserialize")]
+	pub leaf_id: Option<String>,
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub error: Option<String>,
+	#[serde(rename = "followUps", default, skip_serializing_if = "Option::is_none")]
+	pub follow_ups: Option<Vec<BtwHistoryTurn>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -4027,6 +4207,20 @@ pub struct LiveEndEvent {
 	pub error: Option<String>,
 }
 
+/// Text appended to the running side question's latest answer.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BtwDeltaEvent {
+	#[serde(rename = "recordId")]
+	pub record_id: String,
+	pub delta: String,
+}
+
+/// Full side-question record on every lifecycle change (started, complete, cancelled, error); the last one per id wins.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BtwRecordEvent {
+	pub record: BtwHistoryRecord,
+}
+
 /// Output of a builtin slash command.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CommandOutputEvent {
@@ -4684,6 +4878,10 @@ pub enum RpcNotification {
 	LiveTranscript(LiveTranscriptEvent),
 	/// Sent exactly once when a live session ends; `error` carries the failure cause.
 	LiveEnd(LiveEndEvent),
+	/// Text appended to the running side question's latest answer.
+	BtwDelta(BtwDeltaEvent),
+	/// Full side-question record on every lifecycle change (started, complete, cancelled, error); the last one per id wins.
+	BtwRecord(BtwRecordEvent),
 	/// Output of a builtin slash command.
 	CommandOutput(CommandOutputEvent),
 	/// A builtin slash command changed the session title.
@@ -4715,6 +4913,8 @@ impl RpcNotification {
 			Some("live_levels") => |value| serde_json::from_value(value).map(Self::LiveLevels),
 			Some("live_transcript") => |value| serde_json::from_value(value).map(Self::LiveTranscript),
 			Some("live_end") => |value| serde_json::from_value(value).map(Self::LiveEnd),
+			Some("btw_delta") => |value| serde_json::from_value(value).map(Self::BtwDelta),
+			Some("btw_record") => |value| serde_json::from_value(value).map(Self::BtwRecord),
 			Some("command_output") => |value| serde_json::from_value(value).map(Self::CommandOutput),
 			Some("session_info_update") => |value| serde_json::from_value(value).map(Self::SessionInfoUpdate),
 			Some("config_update") => |value| serde_json::from_value(value).map(Self::ConfigUpdate),
@@ -4742,6 +4942,8 @@ impl Serialize for RpcNotification {
 			Self::LiveLevels(member) => serialize_tagged(member, &[("type", "live_levels")], serializer),
 			Self::LiveTranscript(member) => serialize_tagged(member, &[("type", "live_transcript")], serializer),
 			Self::LiveEnd(member) => serialize_tagged(member, &[("type", "live_end")], serializer),
+			Self::BtwDelta(member) => serialize_tagged(member, &[("type", "btw_delta")], serializer),
+			Self::BtwRecord(member) => serialize_tagged(member, &[("type", "btw_record")], serializer),
 			Self::CommandOutput(member) => serialize_tagged(member, &[("type", "command_output")], serializer),
 			Self::SessionInfoUpdate(member) => serialize_tagged(member, &[("type", "session_info_update")], serializer),
 			Self::ConfigUpdate(member) => serialize_tagged(member, &[("type", "config_update")], serializer),
@@ -4777,7 +4979,7 @@ impl RpcServerFrame {
 		let decode: fn(Value) -> Result<Self, serde_json::Error> = match value.get("type").and_then(Value::as_str) {
 			Some("response") => |value| serde_json::from_value(value).map(Self::Response),
 			Some("host_tool_call" | "host_tool_cancel" | "host_uri_request" | "host_uri_cancel") => |value| serde_json::from_value(value).map(Self::RpcHostRequest),
-			Some("ready" | "prompt_result" | "session_settled" | "extension_error" | "extension_ui_request" | "available_commands_update" | "subagent_lifecycle" | "subagent_progress" | "subagent_event" | "live_phase" | "live_levels" | "live_transcript" | "live_end" | "command_output" | "session_info_update" | "config_update" | "rpc_frame_error" | "agent_start" | "agent_end" | "turn_start" | "turn_end" | "message_start" | "message_update" | "message_end" | "tool_execution_start" | "tool_execution_update" | "tool_stream_update" | "tool_execution_end" | "auto_compaction_start" | "auto_compaction_end" | "auto_retry_start" | "auto_retry_end" | "cache_warming_start" | "cache_warming_end" | "retry_fallback_applied" | "retry_fallback_succeeded" | "model_changed" | "config_warnings_changed" | "advisor_cost_changed" | "advisor_yielded" | "ttsr_triggered" | "todo_reminder" | "todo_auto_clear" | "irc_message" | "notice" | "thinking_level_changed" | "goal_updated" | "queue_update") => |value| serde_json::from_value(value).map(Self::RpcNotification),
+			Some("ready" | "prompt_result" | "session_settled" | "extension_error" | "extension_ui_request" | "available_commands_update" | "subagent_lifecycle" | "subagent_progress" | "subagent_event" | "live_phase" | "live_levels" | "live_transcript" | "live_end" | "btw_delta" | "btw_record" | "command_output" | "session_info_update" | "config_update" | "rpc_frame_error" | "agent_start" | "agent_end" | "turn_start" | "turn_end" | "message_start" | "message_update" | "message_end" | "tool_execution_start" | "tool_execution_update" | "tool_stream_update" | "tool_execution_end" | "auto_compaction_start" | "auto_compaction_end" | "auto_retry_start" | "auto_retry_end" | "cache_warming_start" | "cache_warming_end" | "retry_fallback_applied" | "retry_fallback_succeeded" | "model_changed" | "config_warnings_changed" | "advisor_cost_changed" | "advisor_yielded" | "ttsr_triggered" | "todo_reminder" | "todo_auto_clear" | "irc_message" | "notice" | "thinking_level_changed" | "goal_updated" | "queue_update") => |value| serde_json::from_value(value).map(Self::RpcNotification),
 			_ => |value| Ok(Self::Unknown(value)),
 		};
 		decode(value)
@@ -4868,10 +5070,24 @@ pub struct NewSessionParams {
 pub struct OpenSessionParams {
 	#[serde(rename = "sessionDir")]
 	pub session_dir: String,
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub provider: Option<String>,
+	#[serde(rename = "modelId", default, skip_serializing_if = "Option::is_none")]
+	pub model_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SetFastModeParams {
+	pub enabled: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SetSlowModeParams {
+	pub enabled: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SetSlowModeResult {
 	pub enabled: bool,
 }
 
@@ -5103,6 +5319,10 @@ pub struct ExportHtmlResult {
 pub struct SwitchSessionParams {
 	#[serde(rename = "sessionPath")]
 	pub session_path: String,
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub provider: Option<String>,
+	#[serde(rename = "modelId", default, skip_serializing_if = "Option::is_none")]
+	pub model_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -5187,6 +5407,34 @@ pub struct PredictWordFeedbackParams {
 	pub cursor: i64,
 	pub suggestion: String,
 	pub accepted: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BtwParams {
+	pub question: String,
+	#[serde(rename = "recordId", default, skip_serializing_if = "Option::is_none")]
+	pub record_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BtwResult {
+	pub record: BtwHistoryRecord,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BtwCancelParams {
+	#[serde(rename = "recordId", default, skip_serializing_if = "Option::is_none")]
+	pub record_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BtwCancelResult {
+	pub cancelled: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct GetBtwHistoryResult {
+	pub records: Vec<BtwHistoryRecord>,
 }
 
 /// The constant `"image"`.
@@ -5488,6 +5736,14 @@ fn default_session_state_fast_mode_active() -> bool {
 	serde_json::from_str("false").expect("valid wire default")
 }
 
+fn default_session_state_slow_mode_supported() -> bool {
+	serde_json::from_str("false").expect("valid wire default")
+}
+
+fn default_session_state_slow_mode_enabled() -> bool {
+	serde_json::from_str("false").expect("valid wire default")
+}
+
 fn default_session_state_tokens_per_second() -> Option<f64> {
 	serde_json::from_str("null").expect("valid wire default")
 }
@@ -5692,6 +5948,20 @@ impl Command for AbortAndPromptCommand {
 	}
 }
 
+/// Withdraw queued user input, then abort the current run; returns the withdrawn input.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct AbortAndRestoreQueueCommand {}
+
+impl Command for AbortAndRestoreQueueCommand {
+	const NAME: &'static str = "abort_and_restore_queue";
+	const TIMEOUT_MS: Option<u64> = None;
+	type Output = AbortAndRestoreQueueResult;
+
+	fn decode(data: Option<Value>) -> Result<Self::Output, serde_json::Error> {
+		serde_json::from_value::<AbortAndRestoreQueueResult>(data.unwrap_or_else(|| Value::Object(Map::new())))
+	}
+}
+
 /// Start a new session.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct NewSessionCommand {
@@ -5709,11 +5979,15 @@ impl Command for NewSessionCommand {
 	}
 }
 
-/// Continue the newest non-empty session in a directory, or start a fresh one there.
+/// Continue the newest non-empty session in a directory, or start a fresh one there. Give provider and modelId together to override the saved model; otherwise an unavailable saved model fails the request.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct OpenSessionCommand {
 	#[serde(rename = "sessionDir")]
 	pub session_dir: String,
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub provider: Option<String>,
+	#[serde(rename = "modelId", default, skip_serializing_if = "Option::is_none")]
+	pub model_id: Option<String>,
 }
 
 impl Command for OpenSessionCommand {
@@ -5753,6 +6027,22 @@ impl Command for SetFastModeCommand {
 
 	fn decode(data: Option<Value>) -> Result<Self::Output, serde_json::Error> {
 		serde_json::from_value::<FastModeResult>(data.unwrap_or_else(|| Value::Object(Map::new())))
+	}
+}
+
+/// Turn `/slow` on or off for the active model; returns whether it is now on.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SetSlowModeCommand {
+	pub enabled: bool,
+}
+
+impl Command for SetSlowModeCommand {
+	const NAME: &'static str = "set_slow_mode";
+	const TIMEOUT_MS: Option<u64> = None;
+	type Output = bool;
+
+	fn decode(data: Option<Value>) -> Result<Self::Output, serde_json::Error> {
+		serde_json::from_value::<SetSlowModeResult>(data.unwrap_or_else(|| Value::Object(Map::new()))).map(|result| result.enabled)
 	}
 }
 
@@ -6332,11 +6622,15 @@ impl Command for ExportHtmlCommand {
 	}
 }
 
-/// Switch to another session file.
+/// Switch to another session file. Give provider and modelId together to override the saved model; otherwise an unavailable saved model fails the request and keeps the current session.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SwitchSessionCommand {
 	#[serde(rename = "sessionPath")]
 	pub session_path: String,
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub provider: Option<String>,
+	#[serde(rename = "modelId", default, skip_serializing_if = "Option::is_none")]
+	pub model_id: Option<String>,
 }
 
 impl Command for SwitchSessionCommand {
@@ -6546,5 +6840,54 @@ impl Command for PredictWordFeedbackCommand {
 	fn decode(data: Option<Value>) -> Result<Self::Output, serde_json::Error> {
 		let _ = data;
 		Ok(())
+	}
+}
+
+/// Ask a side question, or a follow-up in topic `recordId`; returns the record once it is running.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BtwCommand {
+	pub question: String,
+	#[serde(rename = "recordId", default, skip_serializing_if = "Option::is_none")]
+	pub record_id: Option<String>,
+}
+
+impl Command for BtwCommand {
+	const NAME: &'static str = "btw";
+	const TIMEOUT_MS: Option<u64> = None;
+	type Output = BtwHistoryRecord;
+
+	fn decode(data: Option<Value>) -> Result<Self::Output, serde_json::Error> {
+		serde_json::from_value::<BtwResult>(data.unwrap_or_else(|| Value::Object(Map::new()))).map(|result| result.record)
+	}
+}
+
+/// Cancel the running side question (only topic `recordId` when given); false when none matches.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct BtwCancelCommand {
+	#[serde(rename = "recordId", default, skip_serializing_if = "Option::is_none")]
+	pub record_id: Option<String>,
+}
+
+impl Command for BtwCancelCommand {
+	const NAME: &'static str = "btw_cancel";
+	const TIMEOUT_MS: Option<u64> = None;
+	type Output = bool;
+
+	fn decode(data: Option<Value>) -> Result<Self::Output, serde_json::Error> {
+		serde_json::from_value::<BtwCancelResult>(data.unwrap_or_else(|| Value::Object(Map::new()))).map(|result| result.cancelled)
+	}
+}
+
+/// List the session's side-question records, newest first.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct GetBtwHistoryCommand {}
+
+impl Command for GetBtwHistoryCommand {
+	const NAME: &'static str = "get_btw_history";
+	const TIMEOUT_MS: Option<u64> = None;
+	type Output = Vec<BtwHistoryRecord>;
+
+	fn decode(data: Option<Value>) -> Result<Self::Output, serde_json::Error> {
+		serde_json::from_value::<GetBtwHistoryResult>(data.unwrap_or_else(|| Value::Object(Map::new()))).map(|result| result.records)
 	}
 }
