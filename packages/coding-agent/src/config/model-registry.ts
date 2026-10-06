@@ -2009,7 +2009,10 @@ export class ModelRegistry {
 			return;
 		}
 		this.#lastDiscoveryWarnings.set(providerConfig.provider, error);
-		logger.warn("model discovery failed for provider", {
+		// Optional providers are implicit default endpoints the user never configured
+		// (e.g. loopback Ollama, LM Studio, llama.cpp); being unreachable is expected.
+		const log = providerConfig.optional ? logger.debug : logger.warn;
+		log.call(logger, "model discovery failed for provider", {
 			provider: providerConfig.provider,
 			url: providerConfig.baseUrl,
 			error,

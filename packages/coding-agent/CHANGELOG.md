@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Unreachable default loopback model servers (Ollama, LM Studio, llama.cpp) you never configured no longer print a `model discovery failed` warning at startup ([#12156](https://github.com/can1357/oh-my-pi/issues/12156)).
+
 ## [18.8.0] - 2026-10-07
 
 ### Added

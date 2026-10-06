@@ -21,7 +21,7 @@ import { resolveRoleChain } from "@oh-my-pi/pi-coding-agent/config/model-resolve
 import { roleCandidatePool } from "@oh-my-pi/pi-coding-agent/config/model-roles";
 import { resetSettingsForTest, Settings, settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
-import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
+import { logger, removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
 
 import { cfgExtendedContext } from "@oh-my-pi/pi-coding-agent/session/context-settings";
 
@@ -2466,6 +2466,48 @@ describe("ModelRegistry", () => {
 				url => url.includes("127.0.0.1:11434") || url.includes("127.0.0.1:8080") || url.includes("127.0.0.1:1234"),
 			);
 			expect(disabledProbeUrls).toEqual([]);
+		});
+
+		test("unreachable implicit loopback providers log at debug, not warn", async () => {
+			const warn = spyOn(logger, "warn").mockImplementation(() => {});
+			const debug = spyOn(logger, "debug").mockImplementation(() => {});
+			spies.push(warn, debug);
+			const fetchMock: FetchImpl = () => {
+				throw new Error("connect ECONNREFUSED");
+			};
+
+			const registry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: fetchMock });
+			await registry.refresh("online");
+
+			const failed = (spy: typeof warn) =>
+				spy.mock.calls.filter(([message]) => message === "model discovery failed for provider");
+			const debugProviders = failed(debug).map(([, meta]) => (meta as { provider: string }).provider);
+			expect(debugProviders).toEqual(expect.arrayContaining(["ollama", "llama.cpp", "lm-studio"]));
+			expect(failed(warn)).toEqual([]);
+		});
+
+		test("an explicitly configured provider that fails discovery still warns", async () => {
+			const warn = spyOn(logger, "warn").mockImplementation(() => {});
+			spies.push(warn);
+			writeRawModelsJson({
+				ollama: {
+					baseUrl: "http://127.0.0.1:11434/v1",
+					api: "openai-completions",
+					auth: "none",
+					discovery: { type: "ollama" },
+				},
+			});
+			const fetchMock: FetchImpl = () => {
+				throw new Error("connect ECONNREFUSED");
+			};
+
+			const registry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: fetchMock });
+			await registry.refresh("online");
+
+			const warned = warn.mock.calls
+				.filter(([message]) => message === "model discovery failed for provider")
+				.map(([, meta]) => (meta as { provider: string }).provider);
+			expect(warned).toContain("ollama");
 		});
 
 		test("a disabled provider's model neither resolves by name nor gets a key", async () => {
