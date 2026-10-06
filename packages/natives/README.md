@@ -77,7 +77,7 @@ crates/pi-natives/       # Rust source (workspace member)
 native/                  # Core loader files and local/CI native build outputs
   index.js               # Public native export surface
   loader-state.js        # Platform, ISA variant, and addon resolution
-  embedded-addon.js      # Standalone binary embed stub/generated metadata
+  embedded-addon.js      # Null embed stub; binary builds replace it in memory
   pi_natives.<platform>-<arch>-modern.node   # x64 modern ISA (local/CI artifact)
   pi_natives.<platform>-<arch>-baseline.node # x64 baseline ISA (local/CI artifact)
   pi_natives.<platform>-<arch>.node          # non-x64 build artifact

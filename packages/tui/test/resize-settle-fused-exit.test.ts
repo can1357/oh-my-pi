@@ -56,6 +56,25 @@ function count(haystack: string, needle: string): number {
 	return haystack.split(needle).length - 1;
 }
 
+describe("resize alt borrow entry", () => {
+	it("switches to the borrowed buffer in the same write as the first resize frame", async () => {
+		const { terminal, scheduler, tui } = await startRig();
+		try {
+			terminal.resize(30, 4);
+			await scheduler.advance(terminal, 10);
+
+			// A switch written on its own lets the terminal present the blank
+			// alternate screen for a frame before the resize frame fills it.
+			const enterWrites = terminal.written.filter(data => data.includes(ALT_ENTER));
+			expect(enterWrites).toHaveLength(1);
+			const [enter] = enterWrites;
+			expect(enter!.indexOf("editor@30")).toBeGreaterThan(enter!.indexOf(ALT_ENTER));
+		} finally {
+			tui.stop();
+		}
+	});
+});
+
 describe("resize settle fused alt exit", () => {
 	it("restores the normal buffer in the same write as the settled rebuild", async () => {
 		const { terminal, scheduler, tui } = await startRig();

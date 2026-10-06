@@ -4,18 +4,32 @@
 
 ### Changed
 
-- Model mentions (`^`), `/switch` completions, and model picker search stay responsive on every keystroke with large model catalogs ([#14595](https://github.com/can1357/oh-my-pi/pull/14595) by [@H4vC](https://github.com/H4vC))
 - The status line's git-status polling interval now widens automatically for a repository whose `git status` stays slow across consecutive calls, instead of holding a fixed 10-second refresh regardless of cost ([#13405](https://github.com/can1357/oh-my-pi/pull/13405) by [@sjawhar](https://github.com/sjawhar)).
+
+## [18.7.0] - 2026-10-06
+
+### Added
+
+- Assistant SVG code blocks now render as inline, theme-colored images on terminals with graphics support, updating as responses stream and adapting to terminal width; SVG that cannot be rendered remains available as code.
+- Numeric tables in assistant responses can now include automatically selected, themed charts based on the table’s structure and units.
+
+### Changed
+
+- The status line now recognizes projects located in the user’s `repos` directory.
+- Model mentions, `/switch` completions, and model-picker search now update immediately while typing, including with large model catalogs.
 
 ### Fixed
 
-- Fixed autocomplete popups (slash commands, arguments, `@` files, `#` actions, `^` model mentions, emoji, internal URLs) lagging 100 ms behind typing; they now update on every keystroke, so typing `/mod` and pressing Enter quickly runs `/model` instead of the top row shown for `/` (e.g. `/login`) ([#14595](https://github.com/can1357/oh-my-pi/pull/14595) by [@H4vC](https://github.com/H4vC))
-- Fixed same-provider `-latest` models (e.g. `chatgpt-4o-latest` variants) swapping places in the model picker and mention list depending on the query; they now sort alphabetically ([#14595](https://github.com/can1357/oh-my-pi/pull/14595) by [@H4vC](https://github.com/H4vC))
-- Fixed the model browser showing one blended speed for a model run on a fast service tier: rows now show the tier's own measured numbers, labeled with the tier ([#14471](https://github.com/can1357/oh-my-pi/pull/14471) by [@eggpeat](https://github.com/eggpeat)).
-- Fixed plan review in Tern still using ↑/↓ to move between its horizontally laid-out options; ←/→ now select options and Shift+←/→ step the model slider ([#14607](https://github.com/can1357/oh-my-pi/pull/14607) by [@H4vC](https://github.com/H4vC))
-- Fixed the Ask dialog footer showing the question-switch keys without a label; they now read `⇥/←/→ question` ([#14269](https://github.com/can1357/oh-my-pi/issues/14269), [#14590](https://github.com/can1357/oh-my-pi/pull/14590) by [@tahakotil](https://github.com/tahakotil))
-- `/agents` New agent no longer fails with a JSON parse error when the generated system prompt contains a markdown code fence ([#12255](https://github.com/can1357/oh-my-pi/issues/12255), [#14589](https://github.com/can1357/oh-my-pi/pull/14589) by [@tahakotil](https://github.com/tahakotil))
-- Fixed a `glob` result that ended in a timeout being shown as merely "truncated" in the transcript, which read like a result-limit cut; partial listings from a timed-out scan are now labelled "timed out" ([#6370](https://github.com/can1357/oh-my-pi/issues/6370), [#14426](https://github.com/can1357/oh-my-pi/pull/14426) by [@F0Rextasy](https://github.com/F0Rextasy))
+- Fixed terminal resizing issues that could cause flicker or briefly display an empty frame.
+- Improved `/annotate` handling for long source lines and filenames, preserving indentation and typed note text.
+- Fixed fullscreen inputs that could hide the cursor when hardware-cursor support was enabled.
+- Fixed model picker and mention-list ordering for same-provider `-latest` models so results remain alphabetically stable.
+- Model browser performance metrics now show the correct measurements for each service tier and identify the tier.
+- Fixed plan review keyboard navigation so horizontal options use Left/Right and model-slider adjustments use Shift+Left/Right.
+- Improved the Ask dialog footer so question-switching keyboard shortcuts are clearly labeled.
+- Fixed creating a new agent when its generated system prompt contains a Markdown code fence.
+- Timed-out `glob` scans are now labeled as timed out rather than truncated.
+- Ctrl+Delete now deletes the word after the cursor, matching Ctrl+Backspace behavior.
 
 ## [18.6.3] - 2026-10-06
 
@@ -37,7 +51,6 @@
 
 ### Fixed
 
-- Fixed Ctrl+Delete doing nothing in the editor; it deletes the word after the cursor, as Ctrl+Backspace deletes the one before
 - Fixed native tooltips (composer, working row, queue, pause screen, git and extension dashboards) naming keys with Nerd Font icons Tern's UI font lacks, or as raw key ids (`ctrl+g`); they use keycap glyphs (`⇧⇥`, `⌃G`)
 - Fixed Tern's per-turn usage row showing a 24-hour time on a 12-hour terminal clock; the row and its tooltip now follow the terminal's clock, keeping the tooltip's ISO date ([#14565](https://github.com/can1357/oh-my-pi/pull/14565) by [@wolfiesch](https://github.com/wolfiesch))
 - Fixed hold-Space push-to-talk stopping the instant recording began (showing "No speech detected.") when opening the microphone briefly froze the UI ([#14463](https://github.com/can1357/oh-my-pi/pull/14463) by [@pgkt04](https://github.com/pgkt04))
@@ -3014,61 +3027,4 @@ Initial release under @oh-my-pi scope. See previous releases at [badlogic/pi-mon
 
 - `Editor.getExpandedText()` method that returns text with paste markers expanded to their actual content ([#444](https://github.com/badlogic/pi-mono/pull/444) by [@aliou](https://github.com/aliou))
 
-## [0.33.0] - 2026-01-04
-
-### Breaking Changes
-
-- **Key detection functions removed**: All `isXxx()` key detection functions (`isEnter()`, `isEscape()`, `isCtrlC()`, etc.) have been removed. Use `matchesKey(data, keyId)` instead (e.g., `matchesKey(data, "enter")`, `matchesKey(data, "ctrl+c")`). This affects hooks and custom tools that use `ctx.ui.custom()` with keyboard input handling. ([#405](https://github.com/badlogic/pi-mono/pull/405))
-
-### Added
-
-- `Editor.insertTextAtCursor(text)` method for programmatic text insertion ([#419](https://github.com/badlogic/pi-mono/issues/419))
-- `EditorKeybindingsManager` for configurable editor keybindings. Components now use `matchesKey()` and keybindings manager instead of individual `isXxx()` functions. ([#405](https://github.com/badlogic/pi-mono/pull/405) by [@hjanuschka](https://github.com/hjanuschka))
-
-### Changed
-
-- Key detection refactored: consolidated `is*()` functions into generic `matchesKey(data, keyId)` function that accepts key identifiers like `"ctrl+c"`, `"shift+enter"`, `"alt+left"`, etc.
-
-## [0.32.2] - 2026-01-03
-
-### Fixed
-
-- Slash command autocomplete now triggers for commands starting with `.`, `-`, or `_` (e.g., `/.land`, `/-foo`) ([#422](https://github.com/badlogic/pi-mono/issues/422))
-
-## [0.32.0] - 2026-01-03
-
-### Changed
-
-- Editor component now uses word wrapping instead of character-level wrapping for better readability ([#382](https://github.com/badlogic/pi-mono/pull/382) by [@nickseelert](https://github.com/nickseelert))
-
-### Fixed
-
-- Shift+Space, Shift+Backspace, and Shift+Delete now work correctly in Kitty-protocol terminals (Kitty, WezTerm, etc.) instead of being silently ignored ([#411](https://github.com/badlogic/pi-mono/pull/411) by [@nathyong](https://github.com/nathyong))
-
-## [0.31.1] - 2026-01-02
-
-### Fixed
-
-- `visibleWidth()` now strips OSC 8 hyperlink sequences, fixing text wrapping for clickable links ([#396](https://github.com/badlogic/pi-mono/pull/396) by [@Cursivez](https://github.com/Cursivez))
-
-## [0.31.0] - 2026-01-02
-
-### Added
-
-- `isShiftCtrlO()` key detection function for Shift+Ctrl+O (Kitty protocol)
-- `isShiftCtrlD()` key detection function for Shift+Ctrl+D (Kitty protocol)
-- `TUI.onDebug` callback for global debug key handling (Shift+Ctrl+D)
-- `wrapTextWithAnsi()` utility now exported (wraps text to width, preserving ANSI codes)
-
-### Changed
-
-- README.md completely rewritten with accurate component documentation, theme interfaces, and examples
-- `visibleWidth()` reimplemented with grapheme-based width calculation, 10x faster on Bun and ~15% faster on Node ([#369](https://github.com/badlogic/pi-mono/pull/369) by [@nathyong](https://github.com/nathyong))
-
-### Fixed
-
-- Markdown component now renders HTML tags as plain text instead of silently dropping them ([#359](https://github.com/badlogic/pi-mono/issues/359))
-- Crash in `visibleWidth()` and grapheme iteration when encountering undefined code points ([#372](https://github.com/badlogic/pi-mono/pull/372) by [@HACKE-RC](https://github.com/HACKE-RC))
-- ZWJ emoji sequences (rainbow flag, family, etc.) now render with correct width instead of being split into multiple characters ([#369](https://github.com/badlogic/pi-mono/pull/369) by [@nathyong](https://github.com/nathyong))
-
-Older entries are archived in [packages/tui/CHANGELOG.md@bac7e83b5b0e](https://github.com/can1357/oh-my-pi/blob/bac7e83b5b0eb86c909c17830a6666efc359578b/packages/tui/CHANGELOG.md).
+Older entries are archived in [packages/tui/CHANGELOG.md@58141d4e5fa8](https://github.com/can1357/oh-my-pi/blob/58141d4e5fa892166024e2168866c45e0baacde3/packages/tui/CHANGELOG.md).
