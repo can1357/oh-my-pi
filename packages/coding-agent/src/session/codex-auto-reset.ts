@@ -600,7 +600,14 @@ export function overlayLiveResetCredits(
 				availableCount: status.availableCount,
 				credits: status.credits
 					.filter(credit => (credit.status ?? "available") === "available")
-					.map(credit => ({ grantedAt: credit.grantedAt, expiresAt: credit.expiresAt, status: credit.status })),
+					.map(credit => ({
+						// Keep the provider's stable credit id so a consumer can identify one
+						// credit across reads instead of matching on timestamps alone.
+						id: credit.id,
+						grantedAt: credit.grantedAt,
+						expiresAt: credit.expiresAt,
+						status: credit.status,
+					})),
 			},
 		};
 	});
@@ -635,6 +642,8 @@ export function overlayLiveResetCredits(
 					credits: active.credits
 						.filter(credit => (credit.status ?? "available") === "available")
 						.map(credit => ({
+							// Same stable identity as the per-account mapping above.
+							id: credit.id,
 							grantedAt: credit.grantedAt,
 							expiresAt: credit.expiresAt,
 							status: credit.status,

@@ -641,6 +641,11 @@ export const openaiCodexUsageProvider: UsageProvider = {
 					resetCredits.credits = list.credits
 						.filter(c => (c.status ?? "available") === "available")
 						.map(c => ({
+							// The detail endpoint's opaque credit id is the identity its consume
+							// endpoint takes, so it must survive into the report. Dropping it left
+							// `omp usage --json` credits distinguishable only by timestamp, which
+							// cannot identify one credit across repeated reads.
+							id: c.id,
 							grantedAt: c.grantedAt,
 							expiresAt: c.expiresAt,
 							status: c.status,

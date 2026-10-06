@@ -385,6 +385,51 @@ describe("openai-codex usage parser", () => {
 		expect(report?.resetCredits?.credits?.[1]?.expiresAt).toBe("2025-02-19T00:00:00Z");
 	});
 
+	it("carries each available credit's provider id into resetCredits.credits", async () => {
+		// The detail endpoint's `id` is the identity `consumeCodexResetCredit` takes, and
+		// the only thing that distinguishes two credits granted at the same instant.
+		// Dropping it left `omp usage --json` credits identifiable only by timestamp.
+		const usagePayload = { ...makePayload(), rate_limit_reset_credits: { available_count: 2 } };
+		const creditsPayload = {
+			available_count: 2,
+			credits: [
+				{
+					id: "RateLimitResetCredit_same",
+					status: "available",
+					granted_at: "2025-01-15T00:00:00Z",
+					expires_at: "2025-02-14T00:00:00Z",
+				},
+				{
+					id: "RateLimitResetCredit_same_twin",
+					status: "available",
+					granted_at: "2025-01-15T00:00:00Z",
+					expires_at: "2025-02-14T00:00:00Z",
+				},
+			],
+		};
+		const fetchImpl: FetchImpl = async (url: string | URL | Request) => {
+			const path = typeof url === "string" ? url : url.toString();
+			const body = path.includes("rate-limit-reset-credits") ? creditsPayload : usagePayload;
+			return new Response(JSON.stringify(body), {
+				status: 200,
+				headers: { "content-type": "application/json" },
+			});
+		};
+		const report = await openaiCodexUsageProvider.fetchUsage(
+			{
+				provider: "openai-codex",
+				credential: { type: "oauth", accessToken: accessTokenFixture, accountId: "acct-1", email: "u@example.com" },
+			},
+			{ fetch: fetchImpl },
+		);
+		const credits = report?.resetCredits?.credits ?? [];
+		expect(credits).toHaveLength(2);
+		// Identical timestamps on purpose: only the id can tell these two apart.
+		expect(credits[0]?.id).toBe("RateLimitResetCredit_same");
+		expect(credits[1]?.id).toBe("RateLimitResetCredit_same_twin");
+		expect(new Set(credits.map(c => c.id)).size).toBe(2);
+	});
+
 	it("does not call listCodexResetCredits when available_count is 0", async () => {
 		const usagePayload = { ...makePayload(), rate_limit_reset_credits: { available_count: 0 } };
 		let extraFetchCalls = 0;

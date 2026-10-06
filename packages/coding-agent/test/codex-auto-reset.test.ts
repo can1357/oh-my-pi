@@ -18,18 +18,19 @@
  *   ({@link isTerminalRedeemOutcome}).
  */
 import { describe, expect, it } from "bun:test";
-import type { UsageReport } from "@oh-my-pi/pi-ai";
-import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import type { ResetCreditAccountStatus, UsageReport } from "@oh-my-pi/pi-ai";
 import {
 	blockedAttemptKey,
 	type CodexResetPlanInput,
 	isTerminalRedeemOutcome,
+	overlayLiveResetCredits,
 	planCodexResetRedemptions,
 	SALVAGE_MIN_USED_FRACTION,
 	salvageAttemptKey,
 } from "@oh-my-pi/pi-coding-agent/session/codex-auto-reset";
 
 import { cfgCodexResetsAutoRedeem } from "@oh-my-pi/pi-coding-agent/session/settings";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 
 // Epoch ms divisible by 60_000 so minute-boundary reset/expiry times let the
 // debounce-jitter cases reason about bucket crossings precisely.
@@ -754,5 +755,35 @@ describe("codexResets policy plumbing", () => {
 	it("migrates legacy boolean autoRedeem config to the tri-state policy", () => {
 		expect(cfgCodexResetsAutoRedeem.get(Settings.isolated({ "codexResets.autoRedeem": true }))).toBe("yes");
 		expect(cfgCodexResetsAutoRedeem.get(Settings.isolated({ "codexResets.autoRedeem": false }))).toBe("no");
+	});
+});
+
+describe("overlayLiveResetCredits credit identity", () => {
+	const expiresAt = new Date(NOW + DAY).toISOString();
+	const status = (): ResetCreditAccountStatus => ({
+		provider: "openai-codex",
+		credentialId: CREDENTIAL_ID,
+		accountId: ACCOUNT_ID,
+		email: EMAIL,
+		active: true,
+		availableCount: 2,
+		credits: [
+			// Identical timestamps on purpose: only the id distinguishes these.
+			{ id: "credit-a", status: "available", expiresAt },
+			{ id: "credit-b", status: "available", expiresAt },
+		],
+	});
+
+	it("keeps each credit's id when overlaying a live listing onto a stored report", () => {
+		const merged = overlayLiveResetCredits([report()], [status()]);
+		const credits = merged?.[0]?.resetCredits?.credits ?? [];
+		expect(credits).toHaveLength(2);
+		expect(credits.map(credit => credit.id)).toEqual(["credit-a", "credit-b"]);
+	});
+
+	it("keeps the id on the synthesized active report too", () => {
+		const merged = overlayLiveResetCredits([], [status()], { synthesizeActive: true, nowMs: NOW });
+		const credits = merged?.[0]?.resetCredits?.credits ?? [];
+		expect(credits.map(credit => credit.id)).toEqual(["credit-a", "credit-b"]);
 	});
 });
