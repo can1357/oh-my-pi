@@ -6,6 +6,7 @@ import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import * as skillsModule from "@oh-my-pi/pi-coding-agent/extensibility/skills";
+import * as imageLoading from "@oh-my-pi/pi-coding-agent/utils/image-loading";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
@@ -134,6 +135,31 @@ describe("AgentSession.sendUserMessage expandPromptTemplates", () => {
 		await send;
 		await session.waitForIdle();
 
+		expect(observedTurns).toHaveLength(0);
+	});
+
+	it("drops a queued skill with images when abort lands during image normalization", async () => {
+		const normalizing = Promise.withResolvers<void>();
+		const normalized = Promise.withResolvers<void>();
+		vi.spyOn(imageLoading, "normalizeModelContextImages").mockImplementation(async images => {
+			normalizing.resolve();
+			await normalized.promise;
+			return images;
+		});
+		const send = session.sendUserMessage(
+			[
+				{ type: "text", text: "/skill:demo look" },
+				{ type: "image", data: "aW1n", mimeType: "image/png" },
+			],
+			{ expandPromptTemplates: true, deliverAs: "followUp" },
+		);
+		await normalizing.promise;
+		await session.abort();
+		normalized.resolve();
+		await send;
+		await session.waitForIdle();
+
+		expect(session.queuedMessageCount).toBe(0);
 		expect(observedTurns).toHaveLength(0);
 	});
 
