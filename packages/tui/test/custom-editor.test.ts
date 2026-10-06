@@ -10,6 +10,8 @@ import {
 	modelMentionChipLabel,
 	skillChipLabel,
 } from "@oh-my-pi/pi-tui/prompt/composer-attachments";
+import { setMotionEffects } from "@oh-my-pi/pi-tui/motion-effects";
+import { setMagicKeywords } from "@oh-my-pi/pi-tui/prompt/magic-keywords";
 import {
 	CustomEditor,
 	extractBracketedImagePastePaths,
@@ -1113,5 +1115,65 @@ describe("CustomEditor space-hold push-to-talk", () => {
 		expect(editor.getText()).toBe("ab cd");
 		expect(editor.getCursor()).toEqual({ line: 0, col: 2 });
 		expect(events).toEqual([]);
+	});
+});
+
+describe("magic-keyword shimmer honours tui.motion", () => {
+	beforeEach(() => {
+		setMagicKeywords([{ word: "ultrathink", hue: [0, 180] }]);
+	});
+	afterEach(() => {
+		setMagicKeywords([]);
+		setMotionEffects(true);
+		vi.useRealTimers();
+	});
+
+	function litKeyword() {
+		const editor = new CustomEditor(getEditorTheme());
+		editor.focused = true;
+		editor.setText("please ultrathink this");
+		return editor;
+	}
+	const decorate = (editor: CustomEditor) =>
+		editor.decorateText(editor.getText(), { line: 0, startCol: 0, endCol: editor.getText().length });
+
+	it("sweeps when motion effects are on", () => {
+		vi.useFakeTimers();
+		setMotionEffects(true);
+		const editor = litKeyword();
+		const repaint = vi.fn();
+		editor.setShimmerRepaintHandler(repaint);
+		const lit = decorate(editor);
+		expect(lit).not.toBe(editor.getText()); // keyword is styled
+		vi.advanceTimersByTime(CustomEditor.SHIMMER_FRAME_MS);
+		expect(repaint).toHaveBeenCalledTimes(1); // a sweep frame was armed
+		editor.setShimmerRepaintHandler(undefined);
+	});
+
+	it("does not arm a sweep when motion effects are off, but keeps the keyword highlighted", () => {
+		vi.useFakeTimers();
+		setMotionEffects(false);
+		const editor = litKeyword();
+		const repaint = vi.fn();
+		editor.setShimmerRepaintHandler(repaint);
+		const still = decorate(editor);
+		expect(still).not.toBe(editor.getText()); // still highlighted (static gradient)
+		vi.advanceTimersByTime(CustomEditor.SHIMMER_FRAME_MS * 4);
+		expect(repaint).toHaveBeenCalledTimes(0); // no sweep frames
+		editor.setShimmerRepaintHandler(undefined);
+	});
+
+	it("stops a running sweep the instant motion effects are switched off", () => {
+		vi.useFakeTimers();
+		setMotionEffects(true);
+		const editor = litKeyword();
+		const repaint = vi.fn();
+		editor.setShimmerRepaintHandler(repaint);
+		decorate(editor); // arms a frame
+		setMotionEffects(false); // live switch: cancels the pending frame, repaints once to settle
+		repaint.mockClear();
+		vi.advanceTimersByTime(CustomEditor.SHIMMER_FRAME_MS * 4);
+		expect(repaint).toHaveBeenCalledTimes(0);
+		editor.setShimmerRepaintHandler(undefined);
 	});
 });
