@@ -5,6 +5,7 @@
 ### Added
 
 - Extensions can observe and answer the interactive plan review, including refinement feedback and save-and-quit ([#14250](https://github.com/can1357/oh-my-pi/pull/14250) by [@rlfleming93](https://github.com/rlfleming93))
+- Interactive startup warns when omp runs on Bun older than 1.4, which still works but uses noticeably more memory and CPU; turning off `startup.checkUpdate` silences it too ([#14635](https://github.com/can1357/oh-my-pi/pull/14635) by [@jorgoose](https://github.com/jorgoose))
 
 ### Changed
 

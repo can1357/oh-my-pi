@@ -39,6 +39,15 @@ export const USER_AGENT = `omp/${VERSION}`;
 /** Minimum Bun version */
 export const MIN_BUN_VERSION: string = engines.bun.replace(/[^0-9.]/g, "");
 
+/** Bun version below which interactive startup recommends upgrading (older runtimes still work, but are slower). */
+export const RECOMMENDED_BUN_VERSION: string = "1.4.0";
+
+/** Upgrade notice for a supported but older Bun runtime; undefined when `bunVersion` is current. */
+export function bunUpgradeNotice(bunVersion: string): string | undefined {
+	if (Bun.semver.order(bunVersion, RECOMMENDED_BUN_VERSION) >= 0) return undefined;
+	return `omp is running on Bun v${bunVersion}. Bun ${RECOMMENDED_BUN_VERSION} or newer uses noticeably less memory and CPU.`;
+}
+
 const PROFILE_NAME_RE = /^[a-z0-9][a-z0-9._-]{0,63}$/;
 const PROFILE_ENV_KEYS = ["OMP_PROFILE", "PI_PROFILE"] as const;
 
