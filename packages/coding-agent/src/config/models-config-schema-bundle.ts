@@ -1,4 +1,5 @@
 import { type NarrowContext, type } from "@oh-my-pi/omptype";
+import { MODEL_KINDS, RUNNER_API_KINDS } from "@oh-my-pi/pi-catalog/types";
 import { once } from "@oh-my-pi/pi-utils";
 
 function validateMaxContextWindow(
@@ -70,6 +71,7 @@ export const getModelsConfigSchemaBundle = once(() => {
 		"supportsLongPromptCacheRetention?": "boolean",
 		"supportsReasoningParams?": "boolean",
 		"supportsReasoningSummary?": "boolean",
+		"statefulResponses?": "boolean",
 		"alwaysSendMaxTokens?": "boolean",
 		"strictResponsesPairing?": "boolean",
 		"supportsImageDetailOriginal?": "boolean",
@@ -106,6 +108,14 @@ export const getModelsConfigSchemaBundle = once(() => {
 	const ApiSchema = type(
 		'"openai-completions" | "openai-responses" | "openai-codex-responses" | "azure-openai-responses" | "anthropic-messages" | "bedrock-converse-stream" | "google-generative-ai" | "google-gemini-cli" | "google-vertex" | "openrouter-decisions" | "typesafe"',
 	);
+
+	// Models may also name a runner API (web search is built in). `validateProviderConfiguration`
+	// checks that `kind` matches the api's kind. `search` is left out with `web-search`: no api
+	// a models.yml entry can name serves it.
+	const ModelApiSchema = ApiSchema.or(
+		type.enumerated(...Object.keys(RUNNER_API_KINDS).filter(api => api !== "web-search")),
+	);
+	const ModelKindSchema = type.enumerated(...MODEL_KINDS.filter(kind => kind !== "search"));
 
 	const EffortSchema = type('"minimal" | "low" | "medium" | "high" | "xhigh" | "max"');
 
@@ -192,7 +202,8 @@ export const getModelsConfigSchemaBundle = once(() => {
 	const ModelDefinitionSchema = type({
 		id: "string",
 		"name?": "string",
-		"api?": ApiSchema,
+		"api?": ModelApiSchema,
+		"kind?": ModelKindSchema,
 		"baseUrl?": "string",
 		"reasoning?": "boolean",
 		"thinking?": ModelThinkingSchema,
@@ -251,6 +262,8 @@ export const getModelsConfigSchemaBundle = once(() => {
 
 	const ModelOverrideSchema = type({
 		"name?": "string",
+		"api?": ModelApiSchema,
+		"kind?": ModelKindSchema,
 		"reasoning?": "boolean",
 		"thinking?": ModelThinkingSchema,
 		"input?": '("text" | "image")[]',

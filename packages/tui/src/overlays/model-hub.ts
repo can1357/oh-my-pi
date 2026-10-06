@@ -28,7 +28,7 @@ import { providerEntry } from "@oh-my-pi/pi-catalog/compat/providers";
 import { MODEL_KINDS, modelKind, type ModelKind } from "@oh-my-pi/pi-catalog/types";
 import type { Component, TUI } from "../tui";
 import { extractPrintableText, matchesKey } from "../keys";
-import { fuzzyFilter } from "../fuzzy";
+import { FuzzyCorpus } from "../fuzzy";
 import { formatKeyHint, formatKeyHints } from "../app-keybindings";
 import { boundKeys, editorKey, editorKeys } from "../chrome/keybinding-hints";
 import type { KeyName } from "../key-hint-format";
@@ -334,7 +334,15 @@ export class ModelHubComponent implements Component {
 	#roles: RoleAssignments = {};
 	#availableItems: ModelBrowserItem[] = [];
 	#recentItems: ModelBrowserItem[] = [];
+	/** Selectors of {@link #recentItems}, rebuilt with it, for search hit counts. */
+	#recentSelectors: ReadonlySet<string> = new Set();
 	#candidateItems: ModelBrowserItem[] = [];
+	/** {@link #availableItems} when the candidates are that whole catalog (All scope, no role filter). */
+	#candidateCatalog: readonly ModelBrowserItem[] | undefined;
+	/** {@link #availableItems} when the browser's base items are that whole catalog; its query ranking then covers every count. */
+	#browserCatalog: readonly ModelBrowserItem[] | undefined;
+	/** Fuzzy index over {@link #availableItems}, for match counts while the browser holds a narrower scope. */
+	#catalogCorpus: { items: readonly ModelBrowserItem[]; corpus: FuzzyCorpus<ModelBrowserItem> } | undefined;
 	#modelKindTab: "all" | ModelKind = "all";
 	#roleTab: RoleTab = "all";
 	#configError: string | undefined;
@@ -587,6 +595,7 @@ export class ModelHubComponent implements Component {
 			if (item) this.#recentItems.push(item);
 			if (this.#recentItems.length >= RECENT_LIMIT) break;
 		}
+		this.#recentSelectors = new Set(this.#recentItems.map(item => item.selector));
 
 		this.#buildSidebar(allModels, availableModels);
 		this.#restoreSidebarAnchor(anchor);
@@ -823,11 +832,13 @@ export class ModelHubComponent implements Component {
 				? items.filter(item => this.#settings.getRoleInfo(assigning.role).accepts(item.model))
 				: items;
 		this.#candidateItems = [...scoped];
+		this.#candidateCatalog = scoped === this.#availableItems ? this.#availableItems : undefined;
 		this.#applyModelKind();
 	}
 
 	#applyModelKind(): void {
 		const kind = this.#modelKindTab;
+		this.#browserCatalog = kind === "all" ? this.#candidateCatalog : undefined;
 		this.#browser.setItems(
 			kind === "all"
 				? [...this.#candidateItems]
@@ -936,16 +947,14 @@ export class ModelHubComponent implements Component {
 			this.#composeEntries();
 			return;
 		}
-		const matches = fuzzyFilter(this.#availableItems, query, modelSearchText);
+		const matches = this.#catalogMatches(query);
 		const counts = new Map<string, number>();
+		let recentCount = 0;
 		for (const item of matches) {
 			counts.set(item.provider, (counts.get(item.provider) ?? 0) + 1);
+			if (this.#recentSelectors.has(item.selector)) recentCount++;
 		}
-		const recentSelectors = new Set(this.#recentItems.map(item => item.selector));
-		this.#recentSearchCount = matches.reduce(
-			(total, item) => total + (recentSelectors.has(item.selector) ? 1 : 0),
-			0,
-		);
+		this.#recentSearchCount = recentCount;
 		this.#searchTotal = matches.length;
 		this.#searchCounts = counts;
 		this.#composeEntries();
@@ -957,6 +966,24 @@ export class ModelHubComponent implements Component {
 		) {
 			this.#setActiveEntry("all");
 		}
+	}
+
+	/**
+	 * Catalog items matching a non-blank `query`. When the browser holds the
+	 * whole catalog its ranking for this query already ran, so reuse it;
+	 * otherwise scan a catalog index kept across keystrokes.
+	 */
+	#catalogMatches(query: string): readonly ModelBrowserItem[] {
+		if (this.#browserCatalog === this.#availableItems && this.#browser.query === query) {
+			const ranked = this.#browser.queryMatches;
+			if (ranked) return ranked;
+		}
+		let cached = this.#catalogCorpus;
+		if (cached?.items !== this.#availableItems) {
+			cached = { items: this.#availableItems, corpus: new FuzzyCorpus(this.#availableItems, modelSearchText) };
+			this.#catalogCorpus = cached;
+		}
+		return cached.corpus.rank(query).map(result => result.item);
 	}
 
 	/**

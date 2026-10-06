@@ -48,6 +48,7 @@ import {
 import type { XdevMountedState } from "../tools/xdev";
 import { isFramedBlockComponent, markFramedBlockComponent, renderStatusLine, WidthAwareText } from "../render/index";
 import { cachedPngConversion, convertImageToPngShared, imagePayloadKey } from "./image-loading";
+import { FenceFigure } from "./fence-figure";
 import { sanitizeWithOptionalSixelPassthrough } from "../render/sixel";
 import { renderDiff } from "../chrome/diff";
 import { type AnimationFrame, trimBlankEdges } from "../chrome/transcript-container";
@@ -301,6 +302,8 @@ export class ToolExecutionComponent extends Container {
 	#multiFileBoxes: (Box | Spacer)[] = []; // Extra boxes for multi-file edit results
 	#imageComponents: Image[] = [];
 	#imageSpacers: Spacer[] = [];
+	/** The renderer's {@link ToolRenderer.figure} drawing; kept across rebuilds while its language is unchanged, so it redraws in place and its raster survives them. */
+	#figure: FenceFigure | undefined;
 	readonly #instanceId = ++toolExecutionInstanceSeq;
 	#toolName: string;
 	#toolLabel: string;
@@ -757,6 +760,11 @@ export class ToolExecutionComponent extends Container {
 			this.#spinnerFrame = undefined;
 			this.#renderState.spinnerFrame = undefined;
 		}
+	}
+
+	/** Whether the result's figure still waits for its raster; the transcript holds retirement meanwhile. */
+	isTranscriptBlockPending(): boolean {
+		return this.#toolActivityVisible && this.#figure?.pending === true;
 	}
 
 	/**
@@ -1611,6 +1619,7 @@ export class ToolExecutionComponent extends Container {
 			this.removeChild(spacer);
 		}
 		this.#imageSpacers = [];
+		this.#syncFigure();
 
 		if (this.#result) {
 			const imageBlocks = this.#getAllImageBlocks();
@@ -1639,7 +1648,12 @@ export class ToolExecutionComponent extends Container {
 						imageData,
 						imageMimeType,
 						{ fallbackColor: (s: string) => theme.fg("toolOutput", s) },
-						{ ...resolveImageOptions(), budget: this.#ui.imageBudget, imageKey: `te${this.#instanceId}:${i}` },
+						{
+							...resolveImageOptions(),
+							budget: this.#ui.imageBudget,
+							imageKey: `te${this.#instanceId}:${i}`,
+							requestRender: () => this.#ui.requestRender(),
+						},
 					);
 					this.#imageComponents.push(imageComponent);
 					this.addChild(imageComponent);
@@ -1647,6 +1661,43 @@ export class ToolExecutionComponent extends Container {
 			}
 		}
 		this.#renderedImageCount = this.#imageComponents.length;
+	}
+
+	/**
+	 * Mount the built-in renderer's figure under the card and feed it the fence
+	 * as it stands: the mounted one stays while its language is unchanged, so it
+	 * redraws in place as the args stream.
+	 */
+	#syncFigure(): void {
+		const result = this.#result;
+		const renderer = this.#tool?.renderCall || this.#tool?.renderResult ? undefined : this.#renderer;
+		const fence =
+			this.#isBenignSkip() || isNativeRendering()
+				? undefined
+				: renderer?.figure?.(
+						this.#args,
+						result && { content: result.content, details: result.details, isError: result.isError },
+						this.#renderState,
+					);
+		const drawable = fence !== undefined && FenceFigure.draws(fence, { showImages: this.#showImages });
+		let figure = this.#figure;
+		if (figure && (!drawable || figure.lang !== fence.lang)) {
+			this.removeChild(figure);
+			figure.dispose();
+			figure = this.#figure = undefined;
+		}
+		if (!drawable) return;
+		if (!figure) {
+			figure = this.#figure = new FenceFigure(fence.lang, {
+				budget: this.#ui.imageBudget,
+				onChange: () => {
+					this.#blockVersion++;
+					this.#ui.requestRender();
+				},
+			});
+			this.addChild(figure);
+		}
+		figure.update(fence);
 	}
 
 	#getCallArgsForRender(): unknown {

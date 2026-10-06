@@ -28,6 +28,7 @@ import {
 	type Api,
 	type KindApiKind,
 	type KnownApi,
+	runnerApiKind,
 	type TokenCost,
 } from "../../src/types";
 import { axisFor, collectAxis, type RuleAxes } from "./compile-axes";
@@ -78,6 +79,7 @@ export const PROVIDER_CATALOG_NODES: ReadonlySet<string> = new Set([
 	"default-model",
 	"env",
 	"allow-unauthenticated",
+	"automatic-default",
 	"dynamic-models-authoritative",
 	"skip-cross-provider-reference-fills",
 	"discovery",
@@ -303,7 +305,18 @@ function parseKindApis(node: KdlNodeView): Partial<Record<KindApiKind, Api>> {
 		if (kindApis[kind] !== undefined) malformed(child);
 		validateProps(child, []);
 		if (child.children) malformed(child);
-		kindApis[kind] = validateApi(child, requiredName(child));
+		const api = validateApi(child, requiredName(child));
+		// A runner API serves one kind; chat APIs (hosted image generation) and
+		// multi-kind `local-inference` may back any kind.
+		const apiKind = runnerApiKind(api);
+		if (apiKind !== undefined && apiKind !== kind) {
+			throw new CompatCompileError(
+				child.file,
+				child.line,
+				`kind-apis \`${kind}\` names api \`${api}\`, which serves kind \`${apiKind}\``,
+			);
+		}
+		kindApis[kind] = api;
 	}
 	return kindApis;
 }
@@ -354,6 +367,10 @@ function parseProvider(node: KdlNodeView): ParsedProvider | undefined {
 			case "allow-unauthenticated":
 				if (provider.allowUnauthenticated !== undefined) malformed(child);
 				provider.allowUnauthenticated = singleBoolean(child);
+				break;
+			case "automatic-default":
+				if (provider.automaticDefault !== undefined) malformed(child);
+				provider.automaticDefault = singleBoolean(child);
 				break;
 			case "dynamic-models-authoritative":
 				if (provider.dynamicModelsAuthoritative !== undefined) malformed(child);

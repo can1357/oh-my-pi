@@ -6,7 +6,8 @@ import { registerOAuthProvider, unregisterOAuthProvider, unregisterOAuthProvider
 import type { OAuthCredentials, OAuthLoginCallbacks } from "@oh-my-pi/pi-ai/oauth/types";
 import { setCodexAttestationProvider } from "@oh-my-pi/pi-ai/providers/openai-codex-attestation";
 import { getProviderDefinition } from "@oh-my-pi/pi-ai/registry";
-import { getEnvApiKey, isOfficialCodexApiUrl } from "@oh-my-pi/pi-ai/stream";
+import { getEnvApiKey } from "@oh-my-pi/pi-ai/env-api-key";
+import { isOfficialCodexApiUrl } from "@oh-my-pi/pi-ai/stream";
 import type {
 	Api,
 	Context,
@@ -45,7 +46,7 @@ import {
 	resolveOllamaModelCacheProviderId,
 } from "@oh-my-pi/pi-catalog/provider-models";
 import { toModelSpec } from "@oh-my-pi/pi-catalog/provider-models/bundled-references";
-import { modelKind, type ModelKind } from "@oh-my-pi/pi-catalog/types";
+import { apiServesKind, modelKind, type ModelKind } from "@oh-my-pi/pi-catalog/types";
 import { getAgentDir, isBunTestRuntime, logger, wrapFetchForExtraCa } from "@oh-my-pi/pi-utils";
 import { resolveProviderModelReference } from "../config/model-resolver";
 import { generateCodexAttestation } from "../live/attestation";
@@ -98,6 +99,7 @@ import {
 	resolveProviderBaseUrl,
 	type ProviderOverride,
 	providersWithAuthoritativeProjectCatalog,
+	unservedOverrideKind,
 } from "./model-patch";
 import {
 	BUILT_IN_DISCOVERY_CACHE_TTL_MS,
@@ -268,8 +270,7 @@ export class ModelRegistry {
 	#catalogMetrics = new CatalogMetricsIndex();
 	#internedStaticModels: Map<string, Model<Api>> = new Map();
 	#providerLookupSnapshots: Map<string, Model<Api>[]> = new Map();
-	#fullKindSnapshotSource: Model<Api>[] | undefined;
-	#fullKindSnapshots: Partial<Record<ModelKind, Model<Api>[]>> = {};
+	#fullKindSnapshots = new WeakMap<Model<Api>[], Partial<Record<ModelKind, Model<Api>[]>>>();
 	#customProviderApiKeys: Map<string, string> = new Map();
 	// Every command-backed (`!cmd`) config value a provider carries — apiKey plus
 	// provider/model-override header values — keyed by provider. The 401 auth
@@ -281,6 +282,9 @@ export class ModelRegistry {
 	#customModelOverlays: CustomModelOverlay[] = [];
 	#providerOverrides: Map<string, ProviderOverride> = new Map();
 	#modelOverrides: Map<string, Map<string, ModelOverride>> = new Map();
+	// `provider/id:kind` of modelOverrides kinds already reported as unserved, so
+	// every rebuild does not log the same ignored override again.
+	#warnedUnservedOverrideKinds: Set<string> = new Set();
 	#configError: ConfigError | undefined = undefined;
 	#modelsConfigFile: ConfigFile<ModelsConfig>;
 	#lastStaticLoadMtime: number | null = null;
@@ -2124,13 +2128,11 @@ export class ModelRegistry {
 	): Promise<ModelManagerOptions<Api>[]> {
 		const specialProviderDescriptors: Array<{
 			providerId: string;
-			authoritative: boolean;
 			resolveKey: (value: string | undefined) => string | undefined;
 			createOptions: (key: string, raw: string | undefined) => ModelManagerOptions<Api>;
 		}> = [
 			{
 				providerId: "google-antigravity",
-				authoritative: false,
 				resolveKey: extractGoogleOAuthToken,
 				createOptions: oauthToken =>
 					googleAntigravityModelManagerOptions({
@@ -2141,7 +2143,6 @@ export class ModelRegistry {
 			},
 			{
 				providerId: "google-gemini-cli",
-				authoritative: false,
 				resolveKey: extractGoogleOAuthToken,
 				createOptions: (oauthToken, raw) =>
 					googleGeminiCliModelManagerOptions({
@@ -2153,7 +2154,6 @@ export class ModelRegistry {
 			},
 			{
 				providerId: "openai-codex",
-				authoritative: true,
 				resolveKey: value => value,
 				createOptions: accessToken => {
 					// A custom endpoint (models.yml `baseUrl`) receives only a configured,
@@ -2212,7 +2212,7 @@ export class ModelRegistry {
 					descriptor.providerId,
 					strategy,
 					descriptor.providerId,
-					descriptor.authoritative,
+					AUTHORITATIVE_RUNTIME_CATALOG_PROVIDERS.has(descriptor.providerId),
 				),
 			),
 		);
@@ -2547,6 +2547,7 @@ export class ModelRegistry {
 	 * both, so the clamp must hold on both.
 	 */
 	#applyModelOverrideWithClamp(model: Model<Api>, override: ModelOverride): Model<Api> {
+		this.#warnUnservedOverrideKind(model, override);
 		const overridden = applyModelOverride(model, override);
 		if (
 			override.contextWindow === undefined ||
@@ -2558,6 +2559,21 @@ export class ModelRegistry {
 		const clamped = clampCodexContextWindow(model, overridden.contextWindow);
 		if (clamped === overridden.contextWindow) return overridden;
 		return applyModelOverride(overridden, { contextWindow: clamped });
+	}
+
+	/** Logs, once per model and kind, a `modelOverrides` kind that `applyModelOverride` ignores. */
+	#warnUnservedOverrideKind(model: Model<Api>, override: ModelOverride): void {
+		const unservedKind = unservedOverrideKind(model, override);
+		if (unservedKind === undefined) return;
+		const warningKey = `${model.provider}/${model.id}:${unservedKind}`;
+		if (this.#warnedUnservedOverrideKinds.has(warningKey)) return;
+		this.#warnedUnservedOverrideKinds.add(warningKey);
+		logger.warn("modelOverrides kind ignored: the model's api does not serve it", {
+			provider: model.provider,
+			model: model.id,
+			kind: unservedKind,
+			api: override.api ?? model.api,
+		});
 	}
 
 	#applyHardcodedModelPolicies(models: Model<Api>[]): Model<Api>[] {
@@ -2612,6 +2628,7 @@ export class ModelRegistry {
 		if (!overrides) {
 			return applyModelOverride(model, { contextWindow: 1_000_000 });
 		}
+		this.#warnUnservedOverrideKind(model, overrides);
 		return applyModelOverride(model, {
 			contextWindow: overrides.contextWindow ?? 1_000_000,
 			...overrides,
@@ -2672,14 +2689,15 @@ export class ModelRegistry {
 	getAll(kind: ModelKind | "all" = "chat"): Model<Api>[] {
 		const models = this.#ensureFullSnapshot();
 		if (kind === "all") return models;
-		if (this.#fullKindSnapshotSource !== models) {
-			this.#fullKindSnapshotSource = models;
-			this.#fullKindSnapshots = {};
+		let snapshots = this.#fullKindSnapshots.get(models);
+		if (!snapshots) {
+			snapshots = {};
+			this.#fullKindSnapshots.set(models, snapshots);
 		}
-		const cached = this.#fullKindSnapshots[kind];
+		const cached = snapshots[kind];
 		if (cached) return cached;
 		const filtered = models.filter(model => modelKind(model) === kind);
-		this.#fullKindSnapshots[kind] = filtered;
+		snapshots[kind] = filtered;
 		return filtered;
 	}
 
@@ -3311,7 +3329,18 @@ export class ModelRegistry {
 							config.remoteCompaction,
 							modelDef as CustomModelDefinitionLike,
 						);
-						if (overlay) results.push(finalizeCustomModel(overlay, { useDefaults: true }));
+						if (!overlay) continue;
+						// Static registrations fail validation on this mismatch; a live row is dropped instead.
+						if (overlay.kind !== undefined && !apiServesKind(overlay.api, overlay.kind)) {
+							logger.warn("fetchDynamicModels row dropped: its api does not serve its kind", {
+								provider: providerName,
+								model: overlay.id,
+								kind: overlay.kind,
+								api: overlay.api,
+							});
+							continue;
+						}
+						results.push(finalizeCustomModel(overlay, { useDefaults: true }));
 					}
 					return results.map(toModelSpec);
 				},
@@ -3436,6 +3465,7 @@ export interface ProviderConfigInput {
 		id: string;
 		name: string;
 		api?: Api;
+		kind?: ModelKind;
 		baseUrl?: string;
 		reasoning: boolean;
 		thinking?: ThinkingConfig;

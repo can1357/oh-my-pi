@@ -465,6 +465,53 @@ describe("AuthStorage usage cache: Claude saved resets", () => {
 	});
 });
 
+describe("AuthStorage usage cache: Claude rate limits", () => {
+	afterEach(() => {
+		vi.restoreAllMocks();
+	});
+
+	it("waits a minute before re-polling Claude usage after a 429", async () => {
+		let now = 1_800_000_000_000;
+		vi.spyOn(Date, "now").mockImplementation(() => now);
+		vi.spyOn(Math, "random").mockReturnValue(0.5);
+		let usageRequests = 0;
+		const usageFetch = (async (input: string | URL | Request) => {
+			const url = new URL(typeof input === "string" ? input : input instanceof URL ? input.href : input.url);
+			if (url.search === "") usageRequests += 1;
+			if (usageRequests === 1) {
+				return Response.json(
+					{ error: { type: "rate_limit_error", message: "Rate limited. Please try again later." } },
+					{ status: 429, headers: { "retry-after": "0" } },
+				);
+			}
+			return Response.json({
+				five_hour: { utilization: 25, resets_at: "2099-09-23T00:00:00Z" },
+				cedar_ember: null,
+				juniper_tide: null,
+			});
+		}) as unknown as typeof fetch;
+		const storage = new AuthStorage(makeStore([oauthRow(1, "a@example.com")]), {
+			usageFetch,
+			usageProviderResolver: provider => (provider === "anthropic" ? claudeUsage.claudeUsageProvider : undefined),
+		});
+		try {
+			await storage.credentials.reload();
+			expect(anthropicReports(await storage.usage.reports())).toEqual([]);
+
+			now += 30_000;
+			expect(anthropicReports(await storage.usage.reports())).toEqual([]);
+			expect(usageRequests).toBe(1);
+
+			now += 31_000;
+			const recovered = requireAnthropicReport(await storage.usage.reports());
+			expect(requireLimit(recovered, "anthropic:5h").amount.used).toBe(25);
+			expect(usageRequests).toBe(2);
+		} finally {
+			storage.close();
+		}
+	});
+});
+
 describe("AuthStorage usage cache: explicit invalidation", () => {
 	it("preserves failed-probe cooldown across repeated invalidation and storage recreation", async () => {
 		const row = oauthRow(1, "a@example.com");
@@ -1039,7 +1086,7 @@ describe("AuthStorage usage cache: header ingestion", () => {
 		expect(await storage.usage.reports()).toHaveLength(1);
 		expect(calls).toBe(1);
 
-		now.mockReturnValue(start + 12_501);
+		now.mockReturnValue(start + 75_001);
 		expect(await storage.usage.reports()).toHaveLength(1);
 		expect(calls).toBe(2);
 	});

@@ -16,7 +16,6 @@ try {
  */
 import type * as WorkerThreads from "node:worker_threads";
 import type { MessagePort } from "node:worker_threads";
-import type { Process, ProcessStatus } from "@oh-my-pi/pi-natives";
 import type { CliConfig, CommandMetadata } from "@oh-my-pi/pi-utils/cli";
 import type * as Postmortem from "@oh-my-pi/pi-utils/postmortem";
 import {
@@ -36,12 +35,14 @@ import {
 	DAEMON_BROKER_WORKER_ARG,
 	IDA_HOST_WORKER_ARG,
 	LSP_MUX_WORKER_ARG,
+	PARENT_WATCHDOG_WORKER_ARG,
 	STATS_ACTIVITY_WORKER_ARG,
 	TERMINAL_OUTPUT_WORKER_ARG,
 	TEXT_PREDICT_WORKER_ARG,
 } from "./cli/worker-selectors";
 import type * as JsProcessEntry from "./eval/js/process-entry";
 import type { WorkerInbound as JsWorkerInbound, WorkerOutbound as JsWorkerOutbound } from "./eval/js/worker-protocol";
+import { startParentWatchdog } from "./subprocess/parent-watchdog";
 
 if (Bun.semver.order(Bun.version, MIN_BUN_VERSION) < 0) {
 	process.stderr.write(
@@ -282,6 +283,12 @@ async function runWorkerEntrypoint(arg: string | undefined): Promise<boolean> {
 		await import("./launch/terminal-output-worker");
 		return true;
 	}
+	if (arg === PARENT_WATCHDOG_WORKER_ARG) {
+		const parentPort = getWorkerParentPort();
+		if (parentPort) installWorkerInbox(parentPort);
+		await import("./subprocess/parent-watchdog-worker");
+		return true;
+	}
 	if (arg === DAEMON_BROKER_WORKER_ARG) {
 		// Worker selectors must dispatch before the normal command graph loads.
 		const { startDaemonBrokerFromEnvironment } = await import("./launch/broker");
@@ -319,7 +326,8 @@ async function runWorkerEntrypoint(arg: string | undefined): Promise<boolean> {
  * finalizer segfaults Bun on shutdown (issue #1606); the parent `SIGKILL`s the
  * child so that finalizer never runs in either process. This wires `process`
  * IPC to the worker's typed transport, keeps the event loop alive while the
- * worker is idle, and hard-kills the process on parent `disconnect`.
+ * worker is idle, and hard-kills the process on parent `disconnect` or — via
+ * the off-main-thread {@link startParentWatchdog} — parent exit.
  */
 async function runIpcSubprocessWorker<In, Out>(
 	start: (transport: {
@@ -390,65 +398,11 @@ async function runIpcSubprocessWorker<In, Out>(
 			};
 		},
 	});
-	let parentWatchdog: NodeJS.Timeout | undefined;
 	const initialParentPid = process.ppid;
 	if (process.platform === "win32" && initialParentPid <= 0) {
 		shutdown();
 	} else if (initialParentPid > 0) {
-		let parentProcess: Process | null = null;
-		let runningStatus: ProcessStatus | undefined;
-		try {
-			if (!process.env.PI_TEST_NO_NATIVES) {
-				const natives = await import("@oh-my-pi/pi-natives");
-				parentProcess = natives.Process.fromPid(initialParentPid);
-				runningStatus = natives.ProcessStatus.Running;
-			}
-		} catch {}
-
-		// Note on container environments (Docker/Kubernetes): omp often runs as
-		// PID 1, so workers start with process.ppid === 1. Treating ppid <= 1 as
-		// an orphan at boot would break containerized workers. Instead, we allow
-		// PID 1 to boot normally and detect post-spawn reparenting dynamically via
-		// `process.ppid !== initialParentPid`.
-		//
-		// Note on Linux seccomp/kernels: On hosts where pidfd_open is blocked or
-		// unavailable (e.g. pre-5.3 kernels, restrictive seccomp), Process.fromPid
-		// returns null even when the parent is alive. We treat null as the native
-		// handle being unavailable and fall through to the isParentAlive() check
-		// rather than assuming null means dead at boot.
-		const isParentAlive = (): boolean => {
-			if (process.ppid !== initialParentPid) {
-				return false;
-			}
-			if (parentProcess && runningStatus !== undefined) {
-				try {
-					return parentProcess.status() === runningStatus;
-				} catch {}
-			}
-			try {
-				process.kill(initialParentPid, 0);
-				return true;
-			} catch (err: unknown) {
-				return (err as NodeJS.ErrnoException)?.code === "EPERM";
-			}
-		};
-
-		if (!isParentAlive()) {
-			shutdown();
-		} else {
-			if (parentProcess) {
-				void parentProcess.waitForExit().then(
-					() => shutdown(),
-					() => shutdown(),
-				);
-			}
-			parentWatchdog = setInterval(() => {
-				if (!isParentAlive()) {
-					shutdown();
-				}
-			}, 1000);
-			parentWatchdog.unref();
-		}
+		startParentWatchdog(initialParentPid);
 	}
 	const keepalive = setInterval(() => {}, 2 ** 30);
 	// Parent went away (crashed, SIGKILL, etc.) — commit suicide so we don't
@@ -459,7 +413,6 @@ async function runIpcSubprocessWorker<In, Out>(
 		await shuttingDown;
 	} finally {
 		clearInterval(keepalive);
-		if (parentWatchdog) clearInterval(parentWatchdog);
 	}
 	process.kill(process.pid, "SIGKILL");
 }
