@@ -4,6 +4,7 @@ import type { AgentTool } from "@oh-my-pi/pi-agent-core";
 import { ToolExecutionComponent } from "@oh-my-pi/pi-tui/chat/tool-execution";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import { Text, type TUI } from "@oh-my-pi/pi-tui";
+import type { DescribeContext } from "@oh-my-pi/pi-tui/native/node";
 
 /**
  * Contract under test (tool-result render memoization):
@@ -157,6 +158,30 @@ describe("ToolExecutionComponent tool-result render memoization", () => {
 		expect(contextLines).toHaveLength(1);
 		expect(contextLines[0]).toContain("first instruction second instruction");
 		expect(contextLines[0]).not.toContain("\t");
+	});
+
+	it("shows passive context in both native serializers after they were cached", () => {
+		const ui = { requestRender() {}, requestComponentRender() {} } as unknown as TUI;
+		const component = new ToolExecutionComponent("probe", {}, {}, undefined, ui, process.cwd());
+		component.updateResult(finalResult("done"), false);
+		const toolCx: DescribeContext = {
+			cols: 120,
+			reduceMotion: false,
+			dark: true,
+			supports: kind => kind === "tool",
+			feature: () => true,
+		};
+		// Prime the describe cache: setting context afterwards must still reach native output.
+		component.describe(toolCx);
+		component.describe();
+
+		component.setAdditionalContext("native\tguidance\u001b[31m");
+
+		for (const described of [component.describe(toolCx), component.describe()]) {
+			const json = JSON.stringify(described);
+			expect(json).toContain("↳ Context: native guidance");
+			expect(json).not.toContain("\\u001b");
+		}
 	});
 	// Regression: freezing a backgrounded task (seal()) flips #backgroundTaskFrozen,
 	// which the render context consumes (context.frozen) — so it must be in the memo
