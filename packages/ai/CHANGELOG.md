@@ -42,6 +42,9 @@
 - Fixed the Cursor provider retaining request resources after requests completed.
 - Fixed session-affinity pins growing without bound in long-lived gateways; pins are now capped at 256 sessions per provider.
 - Fixed Anthropic sessions failing every request with HTTP 400 ("role 'system' must precede an 'assistant' message") after a tool change coincided with compaction or an interrupted or failed reply; sessions already stuck this way recover on the next message ([#14746](https://github.com/can1357/oh-my-pi/issues/14746)).
+### Fixed
+
+- Fixed GPT Image generation and edits failing on gateways that validate request parameters, such as LiteLLM ([#14619](https://github.com/can1357/oh-my-pi/pull/14619) by [@jimhester](https://github.com/jimhester))
 
 ## [18.7.0] - 2026-10-06
 
@@ -54,7 +57,6 @@
 - Fixed Ultrafast service-tier billing and usage accounting: GPT-6 Astra now applies its published premium rates—6× on the OpenAI API and 8× included usage on Codex—and is counted toward the premium-request limit.
 - Fixed Vertex AI authentication on Windows when credentials are created with `gcloud auth application-default login`.
 - Fixed selecting Cursor accounts by email through `auth.accountPolicies` and `/session pin`; newly refreshed and existing accounts now retain the account email.
-- Fixed GPT Image generation and edits failing on gateways that validate request parameters, such as LiteLLM ([#14619](https://github.com/can1357/oh-my-pi/pull/14619) by [@jimhester](https://github.com/jimhester))
 
 ## [18.6.3] - 2026-10-06
 
