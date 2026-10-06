@@ -86,4 +86,29 @@ describe("write to file-backed internal URLs", () => {
 		);
 		expect((await fs.stat(path.join(vaultRoot, "Folder"))).isDirectory()).toBe(true);
 	});
+
+	it("tells a read-only subagent to return content in yield instead of retrying write", async () => {
+		const readOnly = {
+			...createSession(tmpDir),
+			deviceOnlyWrite: true,
+			isToolActive: (name: string) => name === "yield",
+		} satisfies ToolSession;
+
+		await expect(
+			new WriteTool(readOnly).execute("ro", { path: path.join(tmpDir, "report.md"), content: "# Report\n" }),
+		).rejects.toThrow("return the content in `yield` instead of writing it to a file.");
+		expect(await fs.stat(path.join(tmpDir, "report.md")).catch(() => undefined)).toBeUndefined();
+	});
+
+	it("omits the yield advice when the session cannot yield", async () => {
+		const deviceOnly = {
+			...createSession(tmpDir),
+			deviceOnlyWrite: true,
+			isToolActive: () => false,
+		} satisfies ToolSession;
+
+		await expect(
+			new WriteTool(deviceOnly).execute("no-yield", { path: path.join(tmpDir, "report.md"), content: "x\n" }),
+		).rejects.toThrow(/Filesystem writes are not available elsewhere\.$/);
+	});
 });

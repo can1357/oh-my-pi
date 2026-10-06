@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import * as ai from "@oh-my-pi/pi-ai";
 import { Effort, type Model } from "@oh-my-pi/pi-ai";
@@ -7,6 +7,11 @@ import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { classifyDifficulty } from "@oh-my-pi/pi-coding-agent/auto-thinking/classifier";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import {
+	ModelControls,
+	resolveAutoThinkingTimeoutMs,
+	type ModelControlsHost,
+} from "@oh-my-pi/pi-coding-agent/session/model-controls";
 import {
 	AUTO_THINKING,
 	clampAutoThinkingEffort,
@@ -488,5 +493,101 @@ describe("auto thinking classifier helpers", () => {
 			expect(parseThinkingLevel(selector)).toBeUndefined();
 			expect(parseConfiguredThinkingLevel(selector)).toBeUndefined();
 		}
+	});
+});
+
+describe("auto-thinking judgment timeout (#14321)", () => {
+	const ENV_KEY = "OMP_JUDGMENT_TIMEOUT_MS";
+	let saved: string | undefined;
+
+	beforeEach(() => {
+		saved = process.env[ENV_KEY];
+		delete process.env[ENV_KEY];
+	});
+
+	afterEach(() => {
+		if (saved === undefined) delete process.env[ENV_KEY];
+		else process.env[ENV_KEY] = saved;
+		vi.restoreAllMocks();
+	});
+
+	it("defaults to 4000ms when no override is set", () => {
+		expect(resolveAutoThinkingTimeoutMs()).toBe(4000);
+	});
+
+	it("honors the override", () => {
+		process.env[ENV_KEY] = "12000";
+		expect(resolveAutoThinkingTimeoutMs()).toBe(12000);
+	});
+
+	it("ignores blank and non-positive overrides instead of trusting them", () => {
+		for (const bad of ["", "   ", "abc", "0", "-5", "NaN", "1e999"]) {
+			process.env[ENV_KEY] = bad;
+			expect(resolveAutoThinkingTimeoutMs()).toBe(4000);
+		}
+	});
+
+	it("bounds classification by the configured timeout, not the 4000ms default", async () => {
+		const ladderModel = buildModel({
+			id: "mock-timeout-target",
+			name: "mock-timeout-target",
+			api: "openai-completions",
+			provider: "mock",
+			baseUrl: "https://example.com",
+			reasoning: true,
+			thinking: { mode: "effort", efforts: [Effort.Low, Effort.Medium, Effort.High, Effort.XHigh] },
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 128_000,
+			maxTokens: 4096,
+		});
+		const judge = getBundledModel("anthropic", "claude-sonnet-4-6");
+		if (!judge) throw new Error("Expected bundled Claude Sonnet 4.6 model");
+
+		// A judge that never answers until aborted — exactly the slow-link / cold
+		// local-model stall the hardcoded 4000ms budget used to cut short.
+		vi.spyOn(ai, "completeSimple").mockImplementation(
+			(_model, _context, options) =>
+				new Promise((_resolve, reject) => {
+					options?.signal?.addEventListener("abort", () => reject(new Error("aborted")));
+				}),
+		);
+
+		const authStorage = createInMemoryAuthStorage();
+		authStorage.keys.setRuntime(judge.provider, "test-key");
+		const registry = new ModelRegistry(authStorage, "/nonexistent/auto-thinking-timeout-models.yml");
+		vi.spyOn(registry, "getAvailable").mockReturnValue([judge]);
+
+		const settings = Settings.isolated({ modelRoles: { judge: `${judge.provider}/${judge.id}` } });
+		const host = {
+			agent: {
+				setThinkingLevel: () => {},
+				setDisableReasoning: () => {},
+				metadataForProvider: () => undefined,
+				telemetry: undefined,
+			},
+			settings,
+			modelRegistry: registry,
+			sessionManager: {
+				getSessionId: () => "session-1",
+				getLeafId: () => undefined,
+				appendModelUsage: () => undefined,
+				appendThinkingLevelChange: () => {},
+			},
+			model: () => ladderModel,
+			sessionId: () => "session-1",
+			promptGeneration: () => 1,
+			magicKeywordEnabled: () => false,
+			emit: () => {},
+		} as unknown as ModelControlsHost;
+
+		const controls = new ModelControls(host, { thinkingLevel: AUTO_THINKING });
+
+		// A narrowed budget must abort the stalled judge and fall back. Hardcoded
+		// 4000ms would instead hold the turn for ~4s, which fails the bound.
+		process.env[ENV_KEY] = "40";
+		const started = performance.now();
+		await controls.applyAutoThinkingLevel("classify this turn", 1);
+		expect(performance.now() - started).toBeLessThan(2000);
 	});
 });

@@ -780,7 +780,12 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 			)
 		) {
 			throw new ToolError(
-				"This `write` tool is limited to the xd:// device transport: call it with path `xd://<tool>` and the device's JSON arguments in `content` (`read xd://` lists mounted devices). Active plan mode additionally permits local:// sandbox drafts. Filesystem writes are not available elsewhere.",
+				"This `write` tool is limited to the xd:// device transport: call it with path `xd://<tool>` and the device's JSON arguments in `content` (`read xd://` lists mounted devices). Active plan mode additionally permits local:// sandbox drafts. Filesystem writes are not available elsewhere." +
+					// A read-only subagent that reaches for `write` needs the exit ramp named
+					// explicitly, or it retries the same call instead of reporting its findings.
+					(this.session.isToolActive?.("yield") === true
+						? " This session is read-only: return the content in `yield` instead of writing it to a file."
+						: ""),
 			);
 		}
 		return untilAborted(signal, async () => {

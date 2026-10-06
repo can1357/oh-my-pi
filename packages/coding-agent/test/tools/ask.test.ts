@@ -1824,6 +1824,86 @@ describe("AskTool rich ask dialog", () => {
 		}
 	});
 
+	it("keeps ticked options alongside a typed Other answer in a multi-question response", async () => {
+		const tool = new AskTool(createSession());
+		const askDialog = vi.fn().mockResolvedValue({
+			kind: "submit",
+			results: [
+				{
+					id: "q1",
+					question: "Choose any?",
+					options: ["A", "B"],
+					multi: true,
+					selectedOptions: ["A", "B"],
+					customInput: "Also a third thing",
+				},
+				{
+					id: "q2",
+					question: "Choose one?",
+					options: ["C", "D"],
+					multi: false,
+					customInput: "none of those",
+				},
+			],
+		});
+
+		const result = await tool.execute(
+			"call-multi-with-other",
+			{
+				questions: [
+					{ id: "q1", question: "Choose any?", options: [{ label: "A" }, { label: "B" }], multi: true },
+					{ id: "q2", question: "Choose one?", options: [{ label: "C" }, { label: "D" }] },
+				],
+			},
+			undefined,
+			undefined,
+			createContext({ askDialog }),
+		);
+
+		expect(result.content[0]?.type).toBe("text");
+		if (result.content[0]?.type === "text") {
+			expect(stripAnsi(result.content[0].text)).toBe(
+				'User answers:\nq1: [A, B] + "Also a third thing"\nq2: "none of those"',
+			);
+		}
+	});
+
+	it("keeps ticked options alongside a typed Other answer when navigating a multi question", async () => {
+		const tool = new AskTool(createSession());
+		let firstVisits = 0;
+		const context = createContext({
+			select: async (prompt, _options, dialogOptions) => {
+				if (prompt.includes("First?")) {
+					firstVisits += 1;
+					return firstVisits === 1 ? "one" : "Other (type your own)";
+				}
+				dialogOptions?.onRight?.();
+				return undefined;
+			},
+			editor: async () => "and two",
+		});
+
+		const result = await tool.execute(
+			"call-multi-select-other",
+			{
+				questions: [
+					{ id: "first", question: "First?", options: [{ label: "one" }, { label: "two" }], multi: true },
+					{ id: "second", question: "Second?", options: [{ label: "alpha" }, { label: "beta" }] },
+				],
+			},
+			undefined,
+			undefined,
+			context,
+		);
+
+		expect(result.details?.results?.[0]?.selectedOptions).toEqual(["one"]);
+		expect(result.details?.results?.[0]?.customInput).toBe("and two");
+		expect(result.content[0]?.type).toBe("text");
+		if (result.content[0]?.type === "text") {
+			expect(stripAnsi(result.content[0].text)).toBe('User answers:\nfirst: [one] + "and two"\nsecond: (cancelled)');
+		}
+	});
+
 	it("returns chat redirect result when askDialog returns kind chat", async () => {
 		const tool = new AskTool(createSession());
 		const abort = vi.fn();
