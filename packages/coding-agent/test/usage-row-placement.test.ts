@@ -83,6 +83,7 @@ function makeHarness(showTokenUsage: boolean): { ctx: InteractiveModeContext; he
 		toolOutputExpanded: false,
 		hideThinkingBlock: false,
 		clearTransientSessionUi: () => {},
+		proseGithubRepo: () => () => undefined,
 	} as unknown as InteractiveModeContext;
 	const helpers = new UiHelpers(ctx);
 	return { ctx, helpers };
