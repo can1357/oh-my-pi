@@ -1,6 +1,6 @@
 import { inflateSync } from "node:zlib";
 import type { ImageContent } from "@oh-my-pi/pi-ai";
-import { decodeSixelToPng } from "@oh-my-pi/pi-natives";
+import { decodeSixelToPngAsync } from "@oh-my-pi/pi-natives";
 import { MAX_IMAGE_INPUT_BYTES, convertImageToPng } from "@oh-my-pi/pi-tui/chat/image-loading";
 import { encodeRawPng, PNG_SIGNATURE } from "./png-encode";
 
@@ -341,7 +341,7 @@ export async function encodeTerminalImage(image: ImageContent): Promise<string> 
 }
 
 async function decodeSixel(bytes: Uint8Array): Promise<ImageContent | undefined> {
-	const png = decodeSixelToPng(bytes);
+	const png = await decodeSixelToPngAsync(bytes);
 	if (png.length > MAX_IMAGE_INPUT_BYTES) return undefined;
 	return normalizePng(png);
 }

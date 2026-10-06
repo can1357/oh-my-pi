@@ -88,9 +88,9 @@ fn write_all_with(
 fn wait_writable(fd: i32) -> std::io::Result<()> {
 	let mut pollfd = libc::pollfd { fd, events: libc::POLLOUT, revents: 0 };
 	loop {
-		// A child can change O_NONBLOCK on a shared open file description; backpressure
-		// is not a dead terminal. SAFETY: pollfd points to one valid element;
-		// TtyWriter owns fd until the pump stops.
+		// A child can change O_NONBLOCK on a shared open file description;
+		// backpressure is not a dead terminal. SAFETY: pollfd points to one
+		// valid element; TtyWriter owns fd until the pump stops.
 		let result = unsafe { libc::poll(&mut pollfd, 1, -1) };
 		if result > 0 {
 			if pollfd.revents & libc::POLLNVAL != 0 {
@@ -502,13 +502,13 @@ mod tests {
 	fn nonblocking_writer_waits_for_drain_instead_of_dying() {
 		let (read_fd, write_fd) = pipe_pair();
 		let mut writer = TtyWriter::new(write_fd).unwrap();
-		// Set the flag after construction to exercise the pump's dup of the same open
-		// file description. SAFETY: write_fd remains open until the writer stops;
-		// this only reads its flags.
+		// Set the flag after construction to exercise the pump's dup of the same
+		// open file description. SAFETY: write_fd remains open until the
+		// writer stops; this only reads its flags.
 		let flags = unsafe { libc::fcntl(write_fd, libc::F_GETFL) };
 		assert!(flags >= 0);
-		// SAFETY: write_fd remains open; this simulates an inherited child changing the
-		// shared flags.
+		// SAFETY: write_fd remains open; this simulates an inherited child
+		// changing the shared flags.
 		assert_eq!(unsafe { libc::fcntl(write_fd, libc::F_SETFL, flags | libc::O_NONBLOCK) }, 0);
 		let total = 512 * 1024;
 		push(&writer, &vec![b'x'; total]);
@@ -528,7 +528,8 @@ mod tests {
 			let mut buf = [0u8; 64 * 1024];
 			let mut received = 0usize;
 			while received < total {
-				// SAFETY: this thread owns read_fd and buf is valid writable storage.
+				// SAFETY: this thread owns read_fd and buf is valid writable
+				// storage.
 				let n = unsafe { libc::read(read_fd, buf.as_mut_ptr().cast(), buf.len()) };
 				if n <= 0 {
 					break;
@@ -638,7 +639,8 @@ mod tests {
 			let mut buf = [0u8; 4096];
 			let mut total = 0usize;
 			while total < WRITES {
-				// SAFETY: buf is a valid out-buffer and read_fd stays open for this loop.
+				// SAFETY: buf is a valid out-buffer and read_fd stays open for this
+				// loop.
 				let n = unsafe { libc::read(read_fd, buf.as_mut_ptr().cast(), buf.len()) };
 				if n <= 0 {
 					break;
@@ -656,7 +658,8 @@ mod tests {
 		assert!(writer.flush_sync(5_000));
 		assert_eq!(writer.pending(), 0);
 		writer.stop(1_000);
-		// SAFETY: closing the test-owned original write fd lets the reader observe EOF.
+		// SAFETY: closing the test-owned original write fd lets the reader
+		// observe EOF.
 		unsafe { libc::close(write_fd) };
 		assert_eq!(reader.join().unwrap(), WRITES);
 	}

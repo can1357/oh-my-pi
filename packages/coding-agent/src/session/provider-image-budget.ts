@@ -22,9 +22,23 @@ const TOOL_RESULT_IMAGE_OMISSION: TextContent = {
 	text: "[image omitted: provider image limit]",
 };
 
+/**
+ * Images the clamp below is actually able to remove, and therefore the only
+ * ones worth charging against the provider budget.
+ *
+ * Assistant turns are excluded on purpose. An assistant `ImageContent` is a
+ * model OUTPUT (the Responses image-generation tool appends one per
+ * `image_generation_call`), and no serializer sends it back as an input image:
+ * `convertResponsesAssistantMessage` skips every block that is not text,
+ * thinking, or a tool call, and the Anthropic replay branch has no `image`
+ * arm at all. So an assistant image never occupies an input-image slot, and
+ * counting it inflates the drop budget until the clamp starts evicting user
+ * and tool-result images the provider was perfectly happy to accept.
+ */
 function countImages(context: Context): number {
 	let count = 0;
 	for (const message of context.messages) {
+		if (message.role === "assistant") continue;
 		if (!Array.isArray(message.content)) continue;
 		for (const part of message.content) {
 			if (part.type === "image") count++;
@@ -69,7 +83,13 @@ function clampToolResultMessage(message: ToolResultMessage, state: { remainingDr
 	return { ...message, content: content.length > 0 ? content : [TOOL_RESULT_IMAGE_OMISSION] };
 }
 
-/** Drops oldest transient image blocks so outgoing vision requests fit the active provider's image cap. */
+/**
+ * Drops oldest transient image blocks so outgoing vision requests fit the active provider's image cap.
+ *
+ * {@link countImages} counts exactly the roles this switch can drop, so the
+ * budget is always fully spendable and the clamp never evicts an input image
+ * on behalf of a model output.
+ */
 export function clampProviderContextImages(context: Context, model: Model): Context {
 	if (!model.input.includes("image")) return context;
 	const limit = providerImageBudget(model.provider);

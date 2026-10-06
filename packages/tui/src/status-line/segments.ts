@@ -183,7 +183,9 @@ function getProjectDirDisplay(projectDir: string): ProjectDirDisplay {
 		}
 	}
 	if (!scratch) {
-		displayRoots ??= [path.join(homeDir, "Projects"), "/work"].map(normalizePathForComparison);
+		displayRoots ??= [path.join(homeDir, "Projects"), path.join(homeDir, "repos"), "/work"].map(
+			normalizePathForComparison,
+		);
 		for (const root of displayRoots) {
 			const relative = relativePathWithinNormalizedRoot(root, normalizedProjectDir);
 			if (relative) {

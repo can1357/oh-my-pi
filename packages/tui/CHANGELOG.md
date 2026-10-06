@@ -7,10 +7,57 @@
 - Added optional `Terminal.settleOutput()`, which drains or drops queued output before the terminal is handed over; custom terminals may implement it ([#13794](https://github.com/can1357/oh-my-pi/pull/13794) by [@sjawhar](https://github.com/sjawhar)).
 - Added `writeStderrBehindTerminal()` (`@oh-my-pi/pi-tui/terminal-handoff`), which writes to stderr after the output a stopped terminal has not delivered yet ([#13794](https://github.com/can1357/oh-my-pi/pull/13794) by [@sjawhar](https://github.com/sjawhar)).
 
+### Changed
+
+- Expanded status-line project directory detection to include the user's `repos` folder
+- Model mentions (`^`), `/switch` completions, and model picker search stay responsive on every keystroke with large model catalogs ([#14595](https://github.com/can1357/oh-my-pi/pull/14595) by [@H4vC](https://github.com/H4vC))
+
 ### Fixed
 
+- Fixed `/annotate` truncating long source lines and selected filenames, losing indentation when wrapping, and hiding typed note characters ([#14609](https://github.com/can1357/oh-my-pi/pull/14609) by [@anatoli-tsinovoy](https://github.com/anatoli-tsinovoy)).
+- Fixed fullscreen inputs such as setup sign-in showing no cursor when the hardware-cursor setting is on ([#14609](https://github.com/can1357/oh-my-pi/pull/14609) by [@anatoli-tsinovoy](https://github.com/anatoli-tsinovoy)).
+- Fixed autocomplete popups (slash commands, arguments, `@` files, `#` actions, `^` model mentions, emoji, internal URLs) lagging 100 ms behind typing; they now update on every keystroke, so typing `/mod` and pressing Enter quickly runs `/model` instead of the top row shown for `/` (e.g. `/login`) ([#14595](https://github.com/can1357/oh-my-pi/pull/14595) by [@H4vC](https://github.com/H4vC))
+- Fixed same-provider `-latest` models (e.g. `chatgpt-4o-latest` variants) swapping places in the model picker and mention list depending on the query; they now sort alphabetically ([#14595](https://github.com/can1357/oh-my-pi/pull/14595) by [@H4vC](https://github.com/H4vC))
+- Fixed the model browser showing one blended speed for a model run on a fast service tier: rows now show the tier's own measured numbers, labeled with the tier ([#14471](https://github.com/can1357/oh-my-pi/pull/14471) by [@eggpeat](https://github.com/eggpeat)).
+- Fixed plan review in Tern still using ↑/↓ to move between its horizontally laid-out options; ←/→ now select options and Shift+←/→ step the model slider ([#14607](https://github.com/can1357/oh-my-pi/pull/14607) by [@H4vC](https://github.com/H4vC))
+- Fixed the Ask dialog footer showing the question-switch keys without a label; they now read `⇥/←/→ question` ([#14269](https://github.com/can1357/oh-my-pi/issues/14269), [#14590](https://github.com/can1357/oh-my-pi/pull/14590) by [@tahakotil](https://github.com/tahakotil))
+- `/agents` New agent no longer fails with a JSON parse error when the generated system prompt contains a markdown code fence ([#12255](https://github.com/can1357/oh-my-pi/issues/12255), [#14589](https://github.com/can1357/oh-my-pi/pull/14589) by [@tahakotil](https://github.com/tahakotil))
+- Fixed a `glob` result that ended in a timeout being shown as merely "truncated" in the transcript, which read like a result-limit cut; partial listings from a timed-out scan are now labelled "timed out" ([#6370](https://github.com/can1357/oh-my-pi/issues/6370), [#14426](https://github.com/can1357/oh-my-pi/pull/14426) by [@F0Rextasy](https://github.com/F0Rextasy))
 - Fixed stopping the TUI after a large write leaving queued output to paint over the shell or editor that takes the terminal next ([#13794](https://github.com/can1357/oh-my-pi/pull/13794) by [@sjawhar](https://github.com/sjawhar)).
 - Fixed text containing a lone UTF-16 surrogate swallowing the next character on unix terminals; the surrogate now shows as `�` ([#13794](https://github.com/can1357/oh-my-pi/pull/13794) by [@sjawhar](https://github.com/sjawhar)).
+
+## [18.6.3] - 2026-10-06
+
+### Breaking Changes
+
+- `WorkingRowSpec` no longer takes `rate`: the native working row reads spinner, elapsed time, divider, then the intent, and the tok/s readout moved to the composer bar
+
+### Added
+
+- `ComposerNativeState.rate` shows a tok/s readout in the native composer bar after the effort chip, and `ComposerNativeState.thinkingInModel` draws the thinking level as the model chip's icon instead of a separate chip
+- `formatTooltipKey` formats a key for a native tooltip: unicode keycap glyphs whatever the symbol preset, `esc` for Escape
+- `ImageOptions.requestRender` repaints an image without an image budget once its SIXEL encode lands ([#14529](https://github.com/can1357/oh-my-pi/pull/14529) by [@H4vC](https://github.com/H4vC))
+- `AssistantMessageComponent` can keep finished thinking sections expanded via `setExpandThinkingBlocks()`; sections folded by hand stay folded ([#14519](https://github.com/can1357/oh-my-pi/pull/14519) by [@H4vC](https://github.com/H4vC))
+
+### Changed
+
+- `/hotkeys` shows the effective `app.stt.pushToTalk` binding, including `Disabled` when unbound ([#6592](https://github.com/can1357/oh-my-pi/pull/6592) by [@anatoli-tsinovoy](https://github.com/anatoli-tsinovoy)).
+- SIXEL images are encoded off the main thread, so showing an image no longer stalls the terminal ([#14529](https://github.com/can1357/oh-my-pi/pull/14529) by [@H4vC](https://github.com/H4vC))
+
+### Fixed
+
+- Fixed Ctrl+Delete doing nothing in the editor; it deletes the word after the cursor, as Ctrl+Backspace deletes the one before
+- Fixed native tooltips (composer, working row, queue, pause screen, git and extension dashboards) naming keys with Nerd Font icons Tern's UI font lacks, or as raw key ids (`ctrl+g`); they use keycap glyphs (`⇧⇥`, `⌃G`)
+- Fixed Tern's per-turn usage row showing a 24-hour time on a 12-hour terminal clock; the row and its tooltip now follow the terminal's clock, keeping the tooltip's ISO date ([#14565](https://github.com/can1357/oh-my-pi/pull/14565) by [@wolfiesch](https://github.com/wolfiesch))
+- Fixed hold-Space push-to-talk stopping the instant recording began (showing "No speech detected.") when opening the microphone briefly froze the UI ([#14463](https://github.com/can1357/oh-my-pi/pull/14463) by [@pgkt04](https://github.com/pgkt04))
+
+## [18.6.1] - 2026-10-04
+
+### Fixed
+
+- Fixed the Space key in the Git diff pane so it stages or unstages the focused hunk instead of scrolling or acting on the wrong change.
+- Fixed the BTW history sheet in Tern: the history list no longer collapses beside a long answer, the panes lose their foldable `##` headings, and the arrow/page keys scroll the answer ([#14331](https://github.com/can1357/oh-my-pi/pull/14331) by [@H4vC](https://github.com/H4vC))
+- Fixed a single saved side question in the BTW history panel opening on its one-row list: its answer now has focus, and Enter or `f` to follow up jumps to the bottom of the conversation ([#14331](https://github.com/can1357/oh-my-pi/pull/14331) by [@H4vC](https://github.com/H4vC))
 
 ## [18.6.0] - 2026-10-03
 

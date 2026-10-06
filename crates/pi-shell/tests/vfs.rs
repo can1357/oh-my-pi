@@ -17,8 +17,8 @@ use brush_core::{
 };
 use pi_builtins::{BuiltinSet, default_builtins, utility_builtins};
 use pi_vfs::{
-	DirEntry, File, FileHandle, FileSystem, Fs, Metadata, OpenOptions, Permissions, ReadDir,
-	join_path,
+	DirEntry, File, FileHandle, FileSystem, FileTime, Fs, Metadata, OpenOptions, Permissions,
+	ReadDir, join_path,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -100,9 +100,23 @@ impl FileSystem for DelayedFilesystem {
 			.await
 	}
 
+	/// Like any provider, this one cannot move entries to or from the host:
+	/// `mv` between the two must fall back to copying.
 	async fn rename(&self, from: &Path, to: &Path) -> io::Result<()> {
 		delay().await;
+		if !pi_vfs::is_virtual_path(from) || !pi_vfs::is_virtual_path(to) {
+			return Err(pi_vfs::crosses_devices());
+		}
 		Fs::native().rename(self.path(from)?, self.path(to)?).await
+	}
+
+	// Symbolic links and special files keep the trait's `Unsupported`
+	// default, as on vfat.
+	async fn hard_link(&self, original: &Path, link: &Path) -> io::Result<()> {
+		delay().await;
+		Fs::native()
+			.hard_link(self.path(original)?, self.path(link)?)
+			.await
 	}
 
 	async fn remove_file(&self, path: &Path) -> io::Result<()> {
@@ -110,11 +124,40 @@ impl FileSystem for DelayedFilesystem {
 		Fs::native().remove_file(self.path(path)?).await
 	}
 
+	async fn remove_dir(&self, path: &Path) -> io::Result<()> {
+		delay().await;
+		Fs::native().remove_dir(self.path(path)?).await
+	}
+
 	async fn set_permissions(&self, path: &Path, permissions: Permissions) -> io::Result<()> {
 		delay().await;
 		Fs::native()
 			.set_permissions(self.path(path)?, permissions)
 			.await
+	}
+
+	async fn set_times(
+		&self,
+		path: &Path,
+		accessed: FileTime,
+		modified: FileTime,
+		follow: bool,
+	) -> io::Result<()> {
+		delay().await;
+		Fs::native()
+			.set_times(self.path(path)?, accessed, modified, follow)
+			.await
+	}
+
+	async fn chown(
+		&self,
+		path: &Path,
+		uid: Option<u32>,
+		gid: Option<u32>,
+		follow: bool,
+	) -> io::Result<()> {
+		delay().await;
+		Fs::native().chown(self.path(path)?, uid, gid, follow).await
 	}
 }
 
@@ -318,6 +361,51 @@ async fn virtual_follow_observes_append_same_size_rotation_and_truncation() {
 	);
 }
 
+/// A provider path has no kernel watcher, so `tail -f` polls it; that idle
+/// loop must still stop once the reader of its stdout pipe exits, as in
+/// `tail -f virtual://log | grep -m1 line`.
+#[cfg(unix)]
+#[tokio::test]
+async fn virtual_follow_stops_once_stdout_reader_is_gone() {
+	let directory = tempfile::tempdir().expect("isolated provider filesystem");
+	fs::write(directory.path().join("log"), b"line\n").expect("followed log");
+	let error = tempfile::tempfile().expect("captured stderr");
+	let (mut reader, writer) = io::pipe().expect("stdout pipe");
+	let mut shell = virtual_shell(directory.path()).await;
+	let mut parameters = shell.default_exec_params();
+	parameters.set_fd(OpenFiles::STDIN_FD, openfiles::null().expect("null stdin"));
+	parameters.set_fd(OpenFiles::STDOUT_FD, OpenFile::from(writer));
+	parameters
+		.set_fd(OpenFiles::STDERR_FD, OpenFile::from(error.try_clone().expect("stderr descriptor")));
+	let cancel = CancellationToken::new();
+	parameters.set_cancel_token(cancel.clone());
+	let runner = tokio::spawn(async move {
+		shell
+			.run_string(
+				"tail -f --sleep-interval=.01 virtual://log",
+				&SourceInfo::from("vfs-follow-reader-gone"),
+				&parameters,
+			)
+			.await
+	});
+	// Consume the first line like `grep -m1 line`, then close the read end.
+	let first = tokio::task::spawn_blocking(move || {
+		let mut first = [0; 5];
+		reader.read_exact(&mut first).map(|()| first)
+	})
+	.await
+	.expect("reader thread")
+	.expect("initial output");
+	assert_eq!(&first, b"line\n");
+	let stopped = tokio::time::timeout(Duration::from_secs(5), runner).await;
+	cancel.cancel();
+	let result = stopped
+		.expect("tail -f kept following after its reader exited")
+		.expect("tail worker")
+		.expect("tail command");
+	assert_eq!(u8::from(result.exit_code), 0, "{}", captured_text(&error));
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn backed_urls_expose_physical_paths_without_changing_native_readlink() {
@@ -379,4 +467,113 @@ async fn cmp_compares_nonseekable_files_and_discards_requested_prefixes() {
 		.await
 		.expect("stream comparison");
 	assert_eq!(u8::from(result.exit_code), 0, "{}", captured_text(&error));
+}
+
+/// Runs `script` from the host directory `cwd` with `virtual://` backed by
+/// `provider_root`, returning the exit status and stderr.
+#[cfg(unix)]
+async fn run_from_host_dir(provider_root: &Path, cwd: &Path, script: &str) -> (u8, String) {
+	let output = tempfile::tempfile().expect("captured stdout");
+	let error = tempfile::tempfile().expect("captured stderr");
+	let mut shell = virtual_shell(provider_root).await;
+	shell
+		.set_working_dir(cwd)
+		.await
+		.expect("host working directory");
+	let parameters = capture_parameters(&shell, &output, &error);
+	let result = shell
+		.run_string(script, &SourceInfo::from("vfs-cross-device-mv"), &parameters)
+		.await
+		.expect("mv between host and provider");
+	(u8::from(result.exit_code), captured_text(&error))
+}
+
+/// A rename from the host into a provider is `EXDEV`, so `mv` copies and
+/// removes: the copy must keep modes and modification times, and names of
+/// one file given as separate operands must stay one file.
+#[cfg(unix)]
+#[tokio::test]
+async fn cross_device_mv_keeps_modes_times_and_hard_links() {
+	use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+	let provider = tempfile::tempdir().expect("isolated provider filesystem");
+	let host = tempfile::tempdir().expect("host directory");
+	let tree = host.path().join("tree");
+	fs::create_dir_all(tree.join("sub")).expect("source tree");
+	fs::write(tree.join("sub/tool"), b"#!/bin/sh\n").expect("source file");
+	let modified = std::time::UNIX_EPOCH + Duration::from_secs(1_000_000_000);
+	fs::File::options()
+		.write(true)
+		.open(tree.join("sub/tool"))
+		.and_then(|file| file.set_modified(modified))
+		.expect("old modification time");
+	fs::set_permissions(tree.join("sub/tool"), fs::Permissions::from_mode(0o751))
+		.expect("file mode");
+	fs::set_permissions(tree.join("sub"), fs::Permissions::from_mode(0o750)).expect("dir mode");
+	fs::write(host.path().join("a"), b"shared").expect("linked file");
+	fs::hard_link(host.path().join("a"), host.path().join("b")).expect("second name");
+
+	let (status, stderr) = run_from_host_dir(
+		provider.path(),
+		host.path(),
+		"mv tree virtual://tree && mkdir virtual://dest && mv a b virtual://dest",
+	)
+	.await;
+	assert_eq!(status, 0, "{stderr}");
+	assert!(!tree.exists() && !host.path().join("a").exists() && !host.path().join("b").exists());
+
+	let moved = provider.path().join("tree/sub/tool");
+	let metadata = fs::metadata(&moved).expect("moved file");
+	assert_eq!(metadata.mode() & 0o7777, 0o751);
+	assert_eq!(metadata.modified().expect("moved mtime"), modified);
+	let dir_mode = fs::metadata(provider.path().join("tree/sub"))
+		.expect("moved dir")
+		.mode();
+	assert_eq!(dir_mode & 0o7777, 0o750);
+	let a = fs::metadata(provider.path().join("dest/a")).expect("first name");
+	let b = fs::metadata(provider.path().join("dest/b")).expect("second name");
+	assert_eq!((a.dev(), a.ino()), (b.dev(), b.ino()));
+	assert_eq!(a.nlink(), 2);
+}
+
+/// An entry inside a tree that cannot be copied fails the move: `mv` reports
+/// it, exits 1, and keeps the whole source tree.
+#[cfg(unix)]
+#[tokio::test]
+async fn cross_device_mv_keeps_a_tree_with_an_entry_it_could_not_copy() {
+	let provider = tempfile::tempdir().expect("isolated provider filesystem");
+	let host = tempfile::tempdir().expect("host directory");
+	let tree = host.path().join("tree");
+	fs::create_dir(&tree).expect("source tree");
+	fs::write(tree.join("file"), b"data").expect("source file");
+	// The provider supports no special files.
+	drop(std::os::unix::net::UnixListener::bind(tree.join("socket")).expect("source socket"));
+
+	let (status, stderr) =
+		run_from_host_dir(provider.path(), host.path(), "mv tree virtual://tree").await;
+	assert_eq!(status, 1, "{stderr}");
+	assert!(stderr.contains("cannot create special file"), "{stderr}");
+	assert!(tree.join("file").is_file());
+	assert!(fs::symlink_metadata(tree.join("socket")).is_ok());
+}
+
+/// A symlink the destination cannot hold (vfat, here a provider without
+/// links) fails the move like any other entry. `mv` used to drop the error
+/// and then delete the source link.
+#[cfg(unix)]
+#[tokio::test]
+async fn cross_device_mv_keeps_a_symlink_it_could_not_copy() {
+	let provider = tempfile::tempdir().expect("isolated provider filesystem");
+	let host = tempfile::tempdir().expect("host directory");
+	let tree = host.path().join("tree");
+	fs::create_dir(&tree).expect("source tree");
+	fs::write(tree.join("file"), b"data").expect("source file");
+	symlink("file", tree.join("link")).expect("source link");
+
+	let (status, stderr) =
+		run_from_host_dir(provider.path(), host.path(), "mv tree virtual://tree").await;
+	assert_eq!(status, 1, "{stderr}");
+	assert!(stderr.contains("symbolic link"), "{stderr}");
+	assert_eq!(fs::read_link(tree.join("link")).expect("source link kept"), Path::new("file"));
+	assert!(tree.join("file").is_file());
 }
