@@ -22,7 +22,7 @@ Frame shapes are provider-aware, chosen by SQuAD recall evals (see `research/`) 
 | OpenAI | `8on22-bw` | X.org 8x13 glyphs on a 22px pitch, sent at `detail: "original"` |
 | Unknown | Anthropic shape | Per-provider image-count budgets guard against gateways that silently drop frames |
 
-`resolveShape({ api, id })` matches the model id, not just the wire API — a Claude routed through Vertex or OpenRouter keeps its Claude shape, priced for the gateway actually carrying the request.
+`resolveShape({ api, id })` matches the model id, not just the wire API — a Claude routed through Vertex or OpenRouter keeps its Claude shape. Frames are priced by the reading model's lineage: its catalog `image-tokenization` rule (so that Claude is billed as Claude, and Opus 4.6 under the standard 1,568-token tier), falling back to the catalog rule for the wire API carrying the request when the lineage has none. A reader with neither costs `FRAME_TOKEN_ESTIMATE` per frame.
 
 Bitmap shapes keep their provider-tuned geometry and draw missing glyphs through the embedded Silver TrueType fallback one character at a time; East Asian (CJK/Kana/Hangul) glyphs render full-width across two cells so they stay legible in the narrow ASCII grid. Selecting `silver16-bw` uses Silver for the whole frame.
 
@@ -62,7 +62,7 @@ const result = await compact(preparation, { model });
 - **Rendering**: `render`, `renderMany`, `frames`, `geometry`
 - **Shapes**: `SHAPES`, `SHAPE_VARIANTS`, `resolveShape`, `resolveShapeForText`, `idealShapeVariant`, `isShape`, `isShapeVariantName`
 - **Text**: `serializeConversation`, `normalize`, `scanRenderability`, `renderabilityProbeText`, `dimStopwords`, `wrap`
-- **Budgets**: `providerImageBudget`, `MAX_FRAMES_DEFAULT`, `FRAME_TOKEN_ESTIMATE`, `HQ_EDGE_FRAMES`
+- **Budgets**: `providerImageBudget`, `MAX_FRAMES_DEFAULT`, `FRAME_TOKEN_ESTIMATE`, `frameBilling`, `frameTokens`, `frameBillingKey`, `HQ_EDGE_FRAMES`
 - **File ops**: `createFileOps`, `computeFileLists`, `upsertFileOperations`
 
 ## References

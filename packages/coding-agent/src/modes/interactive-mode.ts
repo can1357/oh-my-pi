@@ -371,7 +371,7 @@ import {
 	cfgTuiVimModeDisplay,
 } from "./settings";
 import { cfgTasksTodoClearDelay } from "../tools/settings";
-import { cfgProseOnlyThinking } from "../session/settings";
+import { cfgExpandThinkingBlocks, cfgProseOnlyThinking } from "../session/settings";
 import { cfgHideThinkingBlock } from "../session/settings";
 import { cfgCycleOrder, cfgModelRoles } from "../config/model-settings";
 import { cfgGoalContinuationModes, cfgGoalEnabled } from "../goals/settings";
@@ -419,6 +419,7 @@ const cfgLiveUiSettings = combine({
 	"terminal.showImages": cfgTerminalShowImages,
 	hideThinkingBlock: cfgHideThinkingBlock,
 	proseOnlyThinking: cfgProseOnlyThinking,
+	expandThinkingBlocks: cfgExpandThinkingBlocks,
 	"display.cacheMissMarker": cfgDisplayCacheMissMarker,
 	"display.collapseCompacted": cfgDisplayCollapseCompacted,
 	"display.showTokenUsage": cfgDisplayShowTokenUsage,
@@ -1287,6 +1288,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		return this.hideThinkingBlock || (thinkingOff && !this.hasDisplayableThinkingContent);
 	}
 	proseOnlyThinking = true;
+	expandThinkingBlocks = false;
 	compactionQueuedMessages: CompactionQueuedMessage[] = [];
 	pendingTools = new Map<string, ToolExecutionHandle>();
 	transcriptMessageComponents = new WeakMap<AgentMessage, Component>();
@@ -1917,6 +1919,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.chatContainer.setToolActivityVisible(!this.hideToolActivity);
 		this.hideThinkingBlock = cfgHideThinkingBlock.get(settings);
 		this.proseOnlyThinking = cfgProseOnlyThinking.get(settings);
+		this.expandThinkingBlocks = cfgExpandThinkingBlocks.get(settings);
 
 		// Store pending commands for init() where file commands are loaded async
 		this.#pendingSlashCommands = this.#buildPendingSlashCommands();
@@ -3500,6 +3503,14 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.proseOnlyThinking = proseOnlyThinking;
 			for (const child of this.chatContainer.children) {
 				if (child instanceof AssistantMessageComponent) child.setProseOnlyThinking(proseOnlyThinking);
+			}
+			this.ui.requestRender(true);
+		}
+		const expandThinkingBlocks = cfgExpandThinkingBlocks.get(this.settings);
+		if (any("expandThinkingBlocks") && expandThinkingBlocks !== this.expandThinkingBlocks) {
+			this.expandThinkingBlocks = expandThinkingBlocks;
+			for (const child of this.chatContainer.children) {
+				if (child instanceof AssistantMessageComponent) child.setExpandThinkingBlocks(expandThinkingBlocks);
 			}
 			this.ui.requestRender(true);
 		}

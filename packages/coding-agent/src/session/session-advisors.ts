@@ -100,7 +100,7 @@ import {
 import type { AgentSessionEvent } from "./agent-session-events";
 import type { ClientBridge } from "./client-bridge";
 import { resolveCompactionMethodOrder, resolveMethodSettings } from "./compaction-methods";
-import { type CustomMessage, type CustomMessagePayload, isUserTurnInitiator } from "./messages";
+import { type CustomMessage, type CustomMessagePayload, isUserAuthoredMessage, isUserTurnInitiator } from "./messages";
 import { isAdvisorCard, isTerminalTextAssistantAnswer } from "./queued-messages";
 import {
 	calculateRetryBackoffDelayMs,
@@ -2476,6 +2476,7 @@ export class SessionAdvisors {
 					{
 						thinkingLevel: advisorCompactionThinkingLevel,
 						convertToLlm: messages => this.#host.convertToLlmForSideRequest(messages),
+						isUserAuthored: isUserAuthoredMessage,
 						telemetry,
 						tools: agent.state.tools,
 						// The advisor's own live prompt, so a provider-native compaction

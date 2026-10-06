@@ -324,6 +324,8 @@ export class SessionTools {
 	 * drop it before the request. Cleared when the turn ends.
 	 */
 	#turnSystemPromptOverride: string[] | undefined;
+	/** The latest per-turn override and the base its hook was given; kept after the turn ends. */
+	#lastTurnSystemPromptOverride: { prompt: string[]; base: string[] } | undefined;
 	#lastAppliedToolSignature: string | undefined;
 	/** Full enabled set, including tools demoted from the model-visible surface. */
 	#enabledToolNames = new Set<string>();
@@ -480,9 +482,18 @@ export class SessionTools {
 	 * applies it to the agent. Base rebuilds during the turn preserve it until
 	 * {@link clearTurnSystemPromptOverride}.
 	 */
-	setTurnSystemPromptOverride(prompt: string[]): void {
+	setTurnSystemPromptOverride(prompt: string[], base: string[]): void {
 		this.#turnSystemPromptOverride = prompt;
+		this.#lastTurnSystemPromptOverride = { prompt, base };
 		this.#host.agent.setSystemPrompt(prompt);
+	}
+
+	/**
+	 * The base prompt a system prompt the agent sent was built from: the hook's input when it is a
+	 * per-turn override, else the prompt itself, since every other prompt applied to the agent is a base.
+	 */
+	baseOfSystemPrompt(prompt: string[]): string[] {
+		return prompt === this.#lastTurnSystemPromptOverride?.prompt ? this.#lastTurnSystemPromptOverride.base : prompt;
 	}
 
 	/** Drops the active per-turn override; later rebuilds fall back to the base prompt. */

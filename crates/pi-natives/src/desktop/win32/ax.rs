@@ -7,6 +7,7 @@ use uiautomation::{
 		UISelectionItemPattern, UITogglePattern, UIValuePattern,
 	},
 	types::{ControlType, ExpandCollapseState, Handle, Point, UIProperty},
+	variants::Value,
 };
 use windows_sys::Win32::{
 	Foundation::{HWND, POINT},
@@ -52,7 +53,7 @@ impl Win32Ax {
 	)]
 	fn element(handle: &AxHandle) -> CoreResult<&UIElement> {
 		match handle {
-			AxHandle::Uia(element) => Ok(element),
+			AxHandle::Uia(element, _) => Ok(element),
 			#[cfg(test)]
 			_ => Err(DesktopError::ax_failed("accessibility handle does not belong to UI Automation")),
 		}
@@ -160,6 +161,20 @@ impl Win32Ax {
 
 fn ax_error(error: impl std::fmt::Display) -> DesktopError {
 	DesktopError::ax_failed(format!("UI Automation failed: {error}"))
+}
+
+/// Handle for `element` carrying the `RuntimeId` that identifies it across
+/// reads, or none when the element reports none. Read as a property:
+/// `UIElement::get_runtime_id` leaks the array UI Automation returns.
+fn uia_handle(element: UIElement) -> AxHandle {
+	let runtime_id = match element
+		.get_property_value(UIProperty::RuntimeId)
+		.and_then(|value| value.get_value())
+	{
+		Ok(Value::ArrayI4(id)) if !id.is_empty() => Some(id.into_boxed_slice()),
+		_ => None,
+	};
+	AxHandle::Uia(element, runtime_id)
 }
 
 /// Native window handle `element` represents, if any.
@@ -338,7 +353,7 @@ impl AxBackend for Win32Ax {
 		self
 			.automation()?
 			.element_from_handle(handle)
-			.map(AxHandle::Uia)
+			.map(uia_handle)
 			.map_err(ax_error)
 	}
 
@@ -379,13 +394,13 @@ impl AxBackend for Win32Ax {
 			.get_children(element)
 			.unwrap_or_default()
 			.into_iter()
-			.map(AxHandle::Uia)
+			.map(uia_handle)
 			.collect())
 	}
 
 	fn parent(&mut self, handle: &AxHandle) -> CoreResult<Option<AxHandle>> {
 		let element = Self::element(handle)?;
-		Ok(self.walker()?.get_parent(element).ok().map(AxHandle::Uia))
+		Ok(self.walker()?.get_parent(element).ok().map(uia_handle))
 	}
 
 	fn perform(&mut self, handle: &AxHandle, action: &str) -> CoreResult<()> {
@@ -461,7 +476,7 @@ impl AxBackend for Win32Ax {
 		self
 			.automation()?
 			.element_from_point(Point::new(x.round() as i32, y.round() as i32))
-			.map(AxHandle::Uia)
+			.map(uia_handle)
 			.map(Some)
 			.map_err(ax_error)
 	}
@@ -470,7 +485,7 @@ impl AxBackend for Win32Ax {
 		self
 			.automation()?
 			.get_focused_element()
-			.map(AxHandle::Uia)
+			.map(uia_handle)
 			.map(Some)
 			.map_err(ax_error)
 	}
@@ -518,6 +533,13 @@ impl AxBackend for Win32Ax {
 			}
 		}
 		Ok(attributes)
+	}
+
+	/// `RuntimeId`s are only unique among live elements. Any failure to read
+	/// the stored element counts as gone: a needless new ref is harmless, a ref
+	/// renewed onto another element is not.
+	fn alive(&mut self, handle: &AxHandle) -> bool {
+		Self::element(handle).is_ok_and(|element| element.get_process_id().is_ok())
 	}
 }
 

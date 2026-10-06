@@ -124,4 +124,10 @@ pub trait AxBackend {
 	fn element_at(&mut self, x: f64, y: f64) -> CoreResult<Option<AxHandle>>;
 	fn focused_element(&mut self) -> CoreResult<Option<AxHandle>>;
 	fn attributes(&mut self, h: &AxHandle) -> CoreResult<Vec<(String, String)>>;
+	/// Whether the element `h` was read from still exists. Backends whose
+	/// identities a later element can take over once the first is gone check
+	/// it, so a ref is never renewed onto the newcomer.
+	fn alive(&mut self, _h: &AxHandle) -> bool {
+		true
+	}
 }

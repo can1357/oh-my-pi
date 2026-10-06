@@ -1259,10 +1259,13 @@ mod capture_tests {
 	}
 
 	fn click_reference(worker: &mut Worker, origin: &str) -> CoreResult<Response> {
-		let generation = worker.registry.current_generation(origin);
-		let reference = worker
-			.registry
-			.register(origin, generation, AxHandle::Test(1));
+		let (backend, registry) = (&mut worker.backend, &mut worker.registry);
+		let ax = backend
+			.as_mut()
+			.map_err(|error| error.clone())?
+			.ax()
+			.ok_or_else(DesktopError::ax_unsupported)?;
+		let reference = register_node(ax, registry, origin, AxHandle::Test(1))?.ref_;
 		let (reply, _rx) = flume::bounded(1);
 		worker.process(&Request::AxClick {
 			reference,

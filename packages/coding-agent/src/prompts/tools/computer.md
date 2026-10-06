@@ -41,7 +41,7 @@ await win.click(120, 48, button="right")
 <rules>
 - PREFER AX over pixels: `win.ax()` → `el.press()`/`el.click()`/`el.setValue()`. Element actions need no screenshot.
 - Pointer `x,y`: pixels in the MOST RECENT screenshot of the SAME target. AX coordinates are global desktop coordinates. NEVER mix them.
-- Each window `.ax()` starts a ref generation. Current/previous snapshot refs remain valid; older refs throw `StaleRef`. Re-snapshot; NEVER guess.
+- An element keeps its `[ref=eN]` across `.ax()`/`find()` reads until its role or label changes; a ref whose element is missing from the window's last two `.ax()` snapshots throws `StaleRef`. Re-snapshot; NEVER guess.
 - Window input defaults to background routes without moving the user's pointer or deliberately activating the target. NEVER pass `takeover` by default. Only after THAT call throws `BackgroundUnavailable` or a screenshot proves a no-op, and AX cannot do it, retry that call with `{ takeover: true }`. A keyboard refusal does not make clicks need takeover. OS acceptance alone does not prove the application acted.
 - Partial-delivery or restoration error? Inspect the target before retrying; input may already have landed. NEVER blindly repeat it with takeover.
 - Desktop-root pointer helpers (`computer.click`, `computer.move`, …) drive the user's real pointer; act through window handles.

@@ -116,7 +116,7 @@ On macOS, `setValue` on a date or time control (one whose `AXValue` is a date) t
 
 On macOS, `setValue(value)` on a popup button (`popupbutton`) chooses the menu option titled exactly `value`: it opens a closed menu, presses the option, and confirms the choice by reading the popup's value back. No match, or several options with that title, throws with the available option titles, and a menu the call opened is closed again.
 
-AX actions need no screenshot. AX bounds and `desktop.elementAt()` use platform-native global desktop coordinates (logical points on macOS, physical pixels on Windows), not screenshot pixels. A window AX snapshot advances its ref generation; current and immediately previous refs remain valid, while older refs throw `StaleRef`.
+AX actions need no screenshot. AX bounds and `desktop.elementAt()` use platform-native global desktop coordinates (logical points on macOS, physical pixels on Windows), not screenshot pixels. An element keeps its ref across AX snapshots; a ref throws `StaleRef` once its element is missing from the window's current and previous snapshots. A role or label change gives the element a new ref, and its old ref keeps working until it expires the same way.
 
 ### Clipboard
 
