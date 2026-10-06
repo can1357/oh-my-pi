@@ -108,23 +108,15 @@ const ISSUE_TEXT: Record<SkillDiagnosticIssue, string> = {
 	redundancy: "Redundant: identical or same-origin copies exist and are not loaded.",
 	"missing-provenance": "Provenance is missing: a copy does not declare where it came from.",
 };
-const RESULT_WORD: Record<SkillAnalysisStatus, string> = {
-	prepared: "prepared",
-	running: "analyzing",
-	complete: "analyzed",
-	failed: "failed",
-	cancelled: "cancelled",
-	applied: "applied",
-	stale: "stale",
-};
-const RESULT_TONE: Record<SkillAnalysisStatus, Tone> = {
-	prepared: "warning",
-	running: "accent",
-	complete: "success",
-	failed: "error",
-	cancelled: "dim",
-	applied: "success",
-	stale: "warning",
+/** Per-status word, row/heading tone and `theme.status` glyph key; the glyph is read at render so theme changes apply. */
+const RESULT: Record<SkillAnalysisStatus, { word: string; tone: Tone; icon: keyof typeof theme.status }> = {
+	prepared: { word: "prepared", tone: "warning", icon: "pending" },
+	running: { word: "analyzing", tone: "accent", icon: "running" },
+	complete: { word: "analyzed", tone: "success", icon: "success" },
+	failed: { word: "failed", tone: "error", icon: "error" },
+	cancelled: { word: "cancelled", tone: "dim", icon: "aborted" },
+	applied: { word: "applied", tone: "success", icon: "success" },
+	stale: { word: "stale", tone: "warning", icon: "warning" },
 };
 const NOTICE_TONE: Record<SkillDiagnosticsPanelNotice["tone"], Tone> = {
 	info: "accent",
@@ -137,24 +129,6 @@ const EMPTY_PARAS: readonly Para[] = [{ text: "No skills are loaded in this sess
 /** A plain letter key in either case, as the legacy and kitty keyboard protocols deliver it. */
 const isLetter = (data: string, letter: "a" | "c"): boolean =>
 	matchesKey(data, letter) || matchesKey(data, `shift+${letter}`) || data === letter.toUpperCase();
-
-function resultIcon(status: SkillAnalysisStatus): string {
-	switch (status) {
-		case "running":
-			return theme.status.running;
-		case "complete":
-		case "applied":
-			return theme.status.success;
-		case "failed":
-			return theme.status.error;
-		case "cancelled":
-			return theme.status.aborted;
-		case "stale":
-			return theme.status.warning;
-		case "prepared":
-			return theme.status.pending;
-	}
-}
 
 /** The lead issue's word, plus how many more the row has: `conflict +2`. */
 function issueWord(item: SkillDiagnosticItem): string | undefined {
@@ -169,9 +143,9 @@ function rowState(item: SkillDiagnosticItem): { tone: Tone; icon: string; word: 
 	const word = issueWord(item) ?? "clean";
 	if (record) {
 		return {
-			tone: RESULT_TONE[record.status],
-			icon: resultIcon(record.status),
-			word: `${word === "clean" ? "" : `${word} · `}${RESULT_WORD[record.status]}`,
+			tone: RESULT[record.status].tone,
+			icon: theme.status[RESULT[record.status].icon],
+			word: `${word === "clean" ? "" : `${word} · `}${RESULT[record.status].word}`,
 		};
 	}
 	// Only comparable groups call for action; a lone copy's missing origin stays quiet.
@@ -250,7 +224,7 @@ function describeRecord(record: SkillDiagnosticAnalysisRecord, label: string, ad
 		const found = record.candidates.find(entry => entry.id === id);
 		return found ? `${id} (${shortenPath(found.root)})` : id;
 	};
-	add(`${label}: ${RESULT_WORD[record.status]}`, RESULT_TONE[record.status], { strong: true });
+	add(`${label}: ${RESULT[record.status].word}`, RESULT[record.status].tone, { strong: true });
 	add(
 		`${record.model} · ${(record.bytes / 1024).toFixed(1)} KiB · ${new Date(record.createdAt).toLocaleString()}`,
 		"dim",
@@ -437,7 +411,6 @@ export class SkillDiagnosticsPanel implements Component {
 		theme: { track: value => theme.fg("dim", value), thumb: value => theme.fg("accent", value) },
 	});
 	#items: readonly SkillDiagnosticItem[] = [];
-	#byName = new Map<string, SkillDiagnosticItem>();
 	#entries: SidebarEntry<"skill">[] = [];
 	#selected: string | undefined;
 	#selectedIndex = 0;
@@ -449,8 +422,8 @@ export class SkillDiagnosticsPanel implements Component {
 	#scroll: NativeScroll | undefined;
 	#native: { version: number; scroll: NativeScroll | undefined; node: NativeNode } | undefined;
 
-	#sidebarStyle = (entry: SidebarEntry<"skill">): SidebarStyle => {
-		const item = this.#byName.get(entry.id);
+	#sidebarStyle = (entry: SidebarEntry<"skill">, index: number): SidebarStyle => {
+		const item = this.#items[index];
 		if (!item) return { icon: " ", annotation: "" };
 		const state = rowState(item);
 		return {
@@ -614,7 +587,6 @@ export class SkillDiagnosticsPanel implements Component {
 		const name = items[index]?.name;
 		if (name !== this.#selected) this.#resetDetailScroll();
 		this.#items = items;
-		this.#byName = new Map(items.map(item => [item.name, item]));
 		this.#selectedIndex = index;
 		this.#selected = name;
 		this.#entries = items.map((item): SidebarEntry<"skill"> => {
@@ -626,7 +598,7 @@ export class SkillDiagnosticsPanel implements Component {
 	}
 
 	#current(): SkillDiagnosticItem | undefined {
-		return this.#selected === undefined ? undefined : this.#byName.get(this.#selected);
+		return this.#items[this.#selectedIndex];
 	}
 
 	#actions(): { analyze: boolean; apply: boolean; cancel: boolean } {
