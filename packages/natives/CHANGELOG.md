@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Minimized cargo output keeps one "Blocking waiting for file lock on …" line, so a build stuck behind another cargo process says why ([#14631](https://github.com/can1357/oh-my-pi/pull/14631) by [@jorgoose](https://github.com/jorgoose))
+
 ## [18.7.0] - 2026-10-06
 
 ### Breaking Changes
