@@ -548,7 +548,9 @@ impl Libei {
 			} else {
 				None
 			};
-		let keyboard = if !key_codes.is_empty() {
+		let keyboard = if key_codes.is_empty() {
+			None
+		} else {
 			let keyboard = self
 				.devices
 				.iter()
@@ -569,8 +571,6 @@ impl Libei {
 					DesktopError::input_failed("libei keyboard interface is unavailable")
 				})?,
 			))
-		} else {
-			None
 		};
 		let serial = self.serial();
 		let mut time = Self::timestamp()?;

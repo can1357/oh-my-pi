@@ -129,7 +129,6 @@ export function createComputerPrelude(
 	// JavaScript or Python kernel actually asks for its enabled preludes.
 	const { computerPreludeAssets } = require("./computer/prelude-definition");
 	let closed = false;
-	let unregisterDisposal: (() => void) | void;
 	const lifetime: ComputerLifetime = {
 		isClosed: () => closed,
 		close: async () => {
@@ -140,7 +139,7 @@ export function createComputerPrelude(
 			await controller.close();
 		},
 	};
-	unregisterDisposal = session.registerDisposeCallback?.(() => {
+	const unregisterDisposal = session.registerDisposeCallback?.(() => {
 		void lifetime.close();
 	});
 
