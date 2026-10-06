@@ -98,18 +98,27 @@ export function pickDefaultAvailableModel(
 					});
 					return concrete.length > 0 ? concrete : availableModels;
 				})();
-	const firstDefault = models.find(
-		model => isKnownProvider(model.provider) && DEFAULT_MODEL_PER_PROVIDER[model.provider] === model.id,
-	);
-	if (!firstDefault) return models[0];
+	const isDeclaredDefault = (model: Model<Api>) =>
+		isKnownProvider(model.provider) && DEFAULT_MODEL_PER_PROVIDER[model.provider] === model.id;
+	/**
+	 * A provider that names its own current default in discovery (Venice's
+	 * `default` trait) outranks the id we committed for it, which only ever
+	 * snapshots whatever that provider recommended the day the rule was written.
+	 * Availability order still decides *which provider* wins, so a tagged model
+	 * from a provider the user is not signed into cannot displace the winner.
+	 */
+	const isNamedDefault = (model: Model<Api>) => model.isProviderDefault === true || isDeclaredDefault(model);
+
+	const declared = models.find(isDeclaredDefault);
+	// No committed default in the list: a provider that tagged its own default
+	// (Venice retiring the id we recorded) is still a stated default, so it beats
+	// whatever happens to sort first.
+	if (!declared) return models.find(model => model.isProviderDefault === true) ?? models[0];
+	const firstDefault =
+		models.find(model => model.provider === declared.provider && model.isProviderDefault === true) ?? declared;
 
 	const providerPriority = buildModelProviderPriorityRank();
-	const sharedDefaultMatches = models.filter(
-		model =>
-			model.id === firstDefault.id &&
-			isKnownProvider(model.provider) &&
-			DEFAULT_MODEL_PER_PROVIDER[model.provider] === model.id,
-	);
+	const sharedDefaultMatches = models.filter(model => model.id === firstDefault.id && isNamedDefault(model));
 	return [...sharedDefaultMatches].sort((a, b) => {
 		const aRank = providerPriority.get(a.provider.toLowerCase()) ?? Number.POSITIVE_INFINITY;
 		const bRank = providerPriority.get(b.provider.toLowerCase()) ?? Number.POSITIVE_INFINITY;

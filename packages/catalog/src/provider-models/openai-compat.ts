@@ -4367,6 +4367,12 @@ export interface VeniceModelManagerConfig {
 	fetch?: FetchImpl;
 }
 
+/** Venice tags the account's current default model with a `default` trait. */
+function isVeniceDefaultModel(entry: OpenAICompatibleModelRecord): boolean {
+	const spec = isRecord(entry.model_spec) ? entry.model_spec : undefined;
+	return Array.isArray(spec?.traits) && spec.traits.includes("default");
+}
+
 export function veniceModelManagerOptions(
 	config?: VeniceModelManagerConfig,
 ): ModelManagerOptions<"openai-completions"> {
@@ -4381,6 +4387,7 @@ export function veniceModelManagerOptions(
 				...model,
 				maxTokens: clampKimiK27CodeMaxTokens(defaults.id, model.maxTokens),
 				compat: { ...model.compat, supportsUsageInStreaming: false },
+				...(isVeniceDefaultModel(entry) && { isProviderDefault: true }),
 			};
 		},
 	});

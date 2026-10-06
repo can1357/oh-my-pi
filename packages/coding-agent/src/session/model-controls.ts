@@ -70,6 +70,26 @@ export interface ModelControlsHost {
 	emitNotice(level: "info" | "warning" | "error", message: string, source?: string): void;
 }
 
+/** Env overrides for the auto-thinking (judgment) classification budget, first match wins. */
+const AUTO_THINKING_TIMEOUT_ENVS = ["OMP_JUDGMENT_TIMEOUT_MS", "OMP_AUTO_THINKING_TIMEOUT_MS"] as const;
+const DEFAULT_AUTO_THINKING_TIMEOUT_MS = 4000;
+
+/**
+ * Budget (ms) for one auto-thinking classification round. 4000ms is plenty for
+ * hosted judges but aborts a slow link or a cold local model mid-flight, so
+ * `OMP_JUDGMENT_TIMEOUT_MS` / `OMP_AUTO_THINKING_TIMEOUT_MS` widen it.
+ */
+export function resolveAutoThinkingTimeoutMs(): number {
+	for (const env of AUTO_THINKING_TIMEOUT_ENVS) {
+		const raw = Bun.env[env]?.trim();
+		if (!raw) continue;
+		const value = Number(raw);
+		if (Number.isFinite(value) && value > 0) return value;
+		logger.warn(`Ignoring invalid ${env} env value; expected a positive number`, { value: raw });
+	}
+	return DEFAULT_AUTO_THINKING_TIMEOUT_MS;
+}
+
 /** Owns model selection, thinking effort, role cycling, and service tiers. */
 export class ModelControls {
 	readonly #host: ModelControlsHost;
@@ -603,9 +623,6 @@ export class ModelControls {
 		return nextLevel;
 	}
 
-	/** Timeout (ms) for per-turn auto-thinking classification before falling back. */
-	static readonly #AUTO_THINKING_TIMEOUT_MS = 4000;
-
 	/**
 	 * Classify the current user turn and set the effective thinking level for it.
 	 * `solutionSpace` is a delegator's open-endedness description (task-spawned turns
@@ -630,7 +647,7 @@ export class ModelControls {
 			resolved = clampAutoThinkingEffort(model, Effort.Max);
 		} else {
 			const controller = new AbortController();
-			const timer = setTimeout(() => controller.abort(), ModelControls.#AUTO_THINKING_TIMEOUT_MS);
+			const timer = setTimeout(() => controller.abort(), resolveAutoThinkingTimeoutMs());
 			const usageOwner = {
 				sessionId: this.#host.sessionManager.getSessionId(),
 				parentId: this.#host.sessionManager.getLeafId(),

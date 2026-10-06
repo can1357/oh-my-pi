@@ -480,7 +480,11 @@ async function askSingleQuestion(
 function formatQuestionResult(result: QuestionResult): string {
 	const noteSuffix = result.note ? ` (note: ${result.note})` : "";
 	if (result.customInput !== undefined) {
-		return `${result.id}: "${result.customInput}"${noteSuffix}`;
+		// A multi question can keep checked options when the user also typed an
+		// "Other" answer; dropping them here reported only the typed text.
+		const selectedSuffix =
+			result.multi && result.selectedOptions.length > 0 ? `[${result.selectedOptions.join(", ")}] + ` : "";
+		return `${result.id}: ${selectedSuffix}"${result.customInput}"${noteSuffix}`;
 	}
 	if (result.selectedOptions.length > 0) {
 		const suffix = `${result.timedOut ? " (auto-selected after timeout)" : ""}${noteSuffix}`;

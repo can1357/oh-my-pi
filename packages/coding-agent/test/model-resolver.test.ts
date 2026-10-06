@@ -395,6 +395,44 @@ describe("pickDefaultAvailableModel", () => {
 		expect(result?.id).toBe("gpt-5.5");
 	});
 
+	/**
+	 * Issue #14476: Venice's committed `default-model` only ever snapshots the
+	 * recommendation of the day it was written, while its models endpoint keeps
+	 * tagging the current one. A tagged model must win over our stale id, but
+	 * only within the provider availability order already picked — a tagged model
+	 * from a provider the user is not signed into must not steal the default.
+	 */
+	test("prefers the model the provider tagged as its default over the committed id", () => {
+		const tagged = roleChainModel("venice", "venice-tagged");
+		tagged.isProviderDefault = true;
+		const declared = roleChainModel("venice", DEFAULT_MODEL_PER_PROVIDER.venice);
+
+		expect(pickDefaultAvailableModel([declared, tagged, roleChainModel("venice", "venice-other")])).toBe(tagged);
+		expect(pickDefaultAvailableModel([tagged, declared])).toBe(tagged);
+
+		// Venice retiring the id we committed leaves no declared default at all;
+		// the tag is then the only statement of intent available.
+		const taggedElsewhere = roleChainModel("mock", "mock-tagged");
+		taggedElsewhere.isProviderDefault = true;
+		expect(pickDefaultAvailableModel([roleChainModel("mock", "mock-other"), taggedElsewhere, tagged])).toBe(
+			taggedElsewhere,
+		);
+	});
+
+	test("ignores a tagged default belonging to a provider the availability order did not pick", () => {
+		const anthropicDefault = createOpusModel("anthropic", DEFAULT_MODEL_PER_PROVIDER.anthropic, "Claude Opus");
+		const veniceTagged = roleChainModel("venice", "venice-tagged");
+		veniceTagged.isProviderDefault = true;
+
+		const picked = pickDefaultAvailableModel([
+			anthropicDefault,
+			roleChainModel("venice", DEFAULT_MODEL_PER_PROVIDER.venice),
+			veniceTagged,
+		]);
+
+		expect(picked?.provider).toBe("anthropic");
+	});
+
 	test("keeps earlier unrelated provider defaults ahead of shared Codex defaults", () => {
 		const anthropicDefault = buildModel({
 			id: DEFAULT_MODEL_PER_PROVIDER.anthropic,
