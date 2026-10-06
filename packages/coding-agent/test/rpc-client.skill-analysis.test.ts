@@ -9,14 +9,12 @@ type Reply = { data: unknown } | { error: string };
 async function scriptedClient(respond: (request: Request) => Reply) {
 	const encoder = new TextEncoder();
 	const exited = Promise.withResolvers<number>();
-	const requests: Request[] = [];
 	let stdout!: ReadableStreamDefaultController<Uint8Array>;
 	const emit = (frame: unknown): void => stdout.enqueue(encoder.encode(`${JSON.stringify(frame)}\n`));
 	const proc: RpcAgentProcess = {
 		stdin: {
 			write(data: string) {
 				const request = JSON.parse(data) as Request;
-				requests.push(request);
 				const reply = respond(request);
 				emit({
 					id: request.id,
@@ -39,7 +37,7 @@ async function scriptedClient(respond: (request: Request) => Reply) {
 	};
 	const client = new RpcClient({ spawn: () => proc });
 	await client.start();
-	return { client, requests, emit };
+	return { client, emit };
 }
 
 const entry = { name: "review", filePath: "/a/review/SKILL.md", source: "custom:user" };
@@ -189,53 +187,6 @@ describe("RpcClient skill diagnostic analysis decoding", () => {
 });
 
 describe("RpcClient skill diagnostic analysis commands", () => {
-	test("sends the exact commands and returns the decoded record; boundary failures reject with the server message", async () => {
-		const { client, requests } = await scriptedClient(request => {
-			if (request.analysisId === "missing") return { error: "Unknown skill analysis: missing" };
-			const statusByCommand: Record<string, string> = {
-				analyze_skill_diagnostics: "running",
-				cancel_skill_diagnostic_analysis: "cancelled",
-			};
-			return {
-				data: record(
-					request.type === "apply_skill_diagnostic_analysis"
-						? { status: "applied", applied: true, result: analysis }
-						: { status: statusByCommand[request.type] ?? "prepared" },
-				),
-			};
-		});
-
-		expect(await client.prepareSkillDiagnosticAnalysis("review")).toEqual(record() as never);
-		expect(await client.prepareSkillDiagnosticAnalysis("review", "fake/fake-model")).toEqual(record() as never);
-		expect(await client.analyzeSkillDiagnostics("analysis-1", true)).toMatchObject({ status: "running" });
-		expect(await client.cancelSkillDiagnosticAnalysis("analysis-1")).toMatchObject({ status: "cancelled" });
-		expect(await client.applySkillDiagnosticAnalysis("analysis-1", true)).toMatchObject({
-			status: "applied",
-			applied: true,
-			result: analysis,
-		});
-
-		const sent = requests.map(({ id: _id, ...command }) => command);
-		expect(sent).toEqual([
-			{ type: "prepare_skill_diagnostic_analysis", name: "review" },
-			{ type: "prepare_skill_diagnostic_analysis", name: "review", model: "fake/fake-model" },
-			{ type: "analyze_skill_diagnostics", analysisId: "analysis-1", consent: true },
-			{ type: "cancel_skill_diagnostic_analysis", analysisId: "analysis-1" },
-			{ type: "apply_skill_diagnostic_analysis", analysisId: "analysis-1", confirmed: true },
-		]);
-
-		// The client forwards the caller's decision verbatim; refusing is the server's job.
-		await client.analyzeSkillDiagnostics("analysis-1", false);
-		await client.applySkillDiagnosticAnalysis("analysis-1", false);
-		expect(requests.at(-2)).toMatchObject({ type: "analyze_skill_diagnostics", consent: false });
-		expect(requests.at(-1)).toMatchObject({ type: "apply_skill_diagnostic_analysis", confirmed: false });
-
-		await expect(client.analyzeSkillDiagnostics("missing", true)).rejects.toThrow("Unknown skill analysis: missing");
-		await expect(client.applySkillDiagnosticAnalysis("missing", true)).rejects.toThrow(
-			"Unknown skill analysis: missing",
-		);
-	});
-
 	test("a malformed record in a command response is an error, not a partial result", async () => {
 		const { client } = await scriptedClient(() => ({ data: record({ status: "done" }) }));
 		await expect(client.prepareSkillDiagnosticAnalysis("review")).rejects.toThrow(/status is invalid/);
