@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Added
+
+- `TerminalFramePlan.pinBottom` keeps a short viewport on the screen's bottom row by padding only below history still on screen
+
+### Fixed
+
+- Fixed an `ask` panel that retired transcript rows painting a screenful of blank rows above itself instead of leaving those rows visible, including while a normal overlay that fits below them is open ([#14570](https://github.com/can1357/oh-my-pi/issues/14570))
+
 ## [18.7.0] - 2026-10-06
 
 ### Added

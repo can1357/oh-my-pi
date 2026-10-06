@@ -175,6 +175,13 @@ export interface HistoryBatch {
 export interface TerminalFramePlan {
 	readonly history?: HistoryBatch;
 	readonly viewport: readonly string[];
+	/**
+	 * Keep the viewport's last row on the screen's last row when it is shorter
+	 * than the space below history still on screen. The writer fills only that
+	 * gap with blank rows, so retained history stays visible instead of being
+	 * scrolled into native scrollback to make room for padding.
+	 */
+	readonly pinBottom?: boolean;
 }
 
 /** Produces bounded terminal frames and retires acknowledged history batches. */
@@ -784,8 +791,8 @@ export class TUI extends Container {
 	#providerViewportTop = 0;
 	// Net composer-space offset of the published hit-test origin behind the
 	// painted top, from the last paint: replay-replaced rows minus viewport
-	// rows the paint prepended for a short viewport. Negative while prepended
-	// blanks outweigh replaced rows; zero on ordinary frames.
+	// rows the paint prepended for a short replay or pinned viewport. Negative
+	// while prepended blanks outweigh replaced rows; zero on ordinary frames.
 	#providerViewportPadTop = 0;
 	// Viewport-relative row of the hardware cursor after the last normal paint
 	// (0 = parked at the viewport top). A resize reflows the normal buffer
@@ -1300,8 +1307,9 @@ export class TUI extends Container {
 	 * image paint is deferred — the painted rows predate the latest spans in
 	 * all three cases, so hits would map to unrelated old rows.
 	 * The origin is in composer rows: a replay paint replaces leading composer
-	 * blanks with history rows and prepends blanks for a short viewport, so
-	 * the painted top is backed out by that net pad.
+	 * blanks with history rows and prepends blanks for a short viewport, and a
+	 * pinned paint prepends blanks above it, so the painted top is backed out
+	 * by that net pad.
 	 */
 	getMutableViewport(): { top: number; length: number } {
 		if (
@@ -2421,10 +2429,11 @@ export class TUI extends Container {
 				plan = provider.renderFrame({ columns: width, rows: height });
 				viewport = Array.from(plan.viewport);
 				if (viewport.length > height) viewport = viewport.slice(0, height);
+				if (this.#pinsBottom(plan)) viewport = this.#padPinnedViewport(viewport, plan, height);
 			} while (this.#imageBudget.endPass());
 			if (plan.history === undefined) return;
 			const acceptedBefore = this.#acceptedHistoryBatchId;
-			this.#emitPlanFrame(width, height, viewport, plan.history, provider);
+			this.#emitPlanFrame(width, height, viewport, plan, provider);
 			if (plan.history.id > acceptedBefore && this.#acceptedHistoryBatchId === acceptedBefore) {
 				throw new Error("History flush did not accept the offered batch");
 			}
@@ -2999,16 +3008,30 @@ export class TUI extends Container {
 	 * native scrollback.
 	 */
 	/**
-	 * Composite the visible overlays onto a full-height copy of `viewport`, or
+	 * Composite the visible overlays onto a full-height copy of `viewport` (a
+	 * pinned one keeps its own height when no overlay reaches above it), or
 	 * hand it back untouched when nothing is stacked. Callers run this inside
 	 * their image-budget pass so the frame's whole image set — transcript plus
 	 * modal — reaches one reconcile, instead of leaving the overlay's graphics
 	 * outside the cap for as long as it stays up.
 	 */
-	#compositeVisibleOverlays(viewport: string[], width: number, height: number): string[] {
+	#compositeVisibleOverlays(viewport: string[], width: number, height: number, pinBottom = false): string[] {
 		if (this.#getTopmostVisibleOverlay() === undefined) return viewport;
-		while (viewport.length < height) viewport.push("");
-		return this.#compositeOverlaysIntoWindow(viewport, width, height);
+		if (!pinBottom) {
+			while (viewport.length < height) viewport.push("");
+			return this.#compositeOverlaysIntoWindow(viewport, width, height);
+		}
+		// A pinned frame sits on the screen's bottom rows below history still on
+		// screen, so composite it there. Overlays position in screen rows; when
+		// none reaches above the frame, keep the frame its own height so the
+		// retained history stays visible. Otherwise the frame has to cover the
+		// screen, still bottom-aligned so the composer does not jump to the top.
+		const above = Math.max(0, height - viewport.length);
+		const window = this.#compositeOverlaysIntoWindow([...Array<string>(above).fill(""), ...viewport], width, height);
+		for (let row = 0; row < above; row++) {
+			if (window[row] !== "") return window;
+		}
+		return window.slice(above);
 	}
 
 	#compositeOverlaysIntoWindow(window: string[], termWidth: number, termHeight: number): string[] {
@@ -3127,10 +3150,12 @@ export class TUI extends Container {
 				logger.error("TUI layout contract violated", { rows: viewport.length, height });
 				viewport = viewport.slice(0, height);
 			}
-			viewport = this.#compositeVisibleOverlays(viewport, width, height);
+			const pinned = this.#pinsBottom(plan);
+			if (pinned) viewport = this.#padPinnedViewport(viewport, plan, height);
+			viewport = this.#compositeVisibleOverlays(viewport, width, height, pinned);
 		} while (this.#imageBudget.endPass());
 		if (this.#maybeDeferGhosttyInitialImagePaint()) return;
-		this.#emitPlanFrame(width, height, viewport, plan.history, provider);
+		this.#emitPlanFrame(width, height, viewport, plan, provider);
 	}
 	/**
 	 * Re-offer finalized history once after a settled resize.
@@ -3251,6 +3276,41 @@ export class TUI extends Container {
 	}
 
 	/**
+	 * Whether `plan` keeps its viewport on the screen's bottom rows. A replay
+	 * rebuilds the screen from row zero and fills its own short viewport, so
+	 * it never pins.
+	 */
+	#pinsBottom(plan: TerminalFramePlan): boolean {
+		return plan.pinBottom === true && this.#pendingHistory(plan)?.kind !== "replay";
+	}
+
+	/** The offered history batch this frame writes, if not yet accepted. */
+	#pendingHistory(plan: TerminalFramePlan | undefined): HistoryBatch | undefined {
+		const offered = plan?.history;
+		return offered !== undefined && offered.id > this.#acceptedHistoryBatchId ? offered : undefined;
+	}
+
+	/** Screen row the next frame's history and viewport start writing at. */
+	#frameStartTop(height: number): number {
+		// Destructive reset (session replace, /tree, explicit clear, or a settled
+		// resize in rebuild mode): erase native history and the viewport,
+		// then repaint from row zero.
+		if (this.#clearScrollbackOnNextRender) return 0;
+		return Math.min(this.#providerViewportTop, Math.max(0, height - 1));
+	}
+
+	/**
+	 * Pad a pinned viewport down to the screen's last row. Only the gap below
+	 * history that stays on screen is filled: a full-height pad would scroll
+	 * that history away and paint blanks in its place.
+	 */
+	#padPinnedViewport(viewport: string[], plan: TerminalFramePlan, height: number): string[] {
+		const historyRows = this.#pendingHistory(plan)?.rows.length ?? 0;
+		const pad = height - this.#frameStartTop(height) - historyRows - viewport.length;
+		return pad > 0 ? [...Array<string>(pad).fill(""), ...viewport] : viewport;
+	}
+
+	/**
 	 * Physical write transaction: append an ordinary batch, or bottom-split one
 	 * complete replay into a history remainder and final viewport, then serialize
 	 * the whole result in one terminal write before acknowledgement.
@@ -3259,7 +3319,7 @@ export class TUI extends Container {
 		width: number,
 		height: number,
 		viewportRows: string[],
-		offered: HistoryBatch | undefined,
+		plan: TerminalFramePlan | undefined,
 		provider: TerminalFrameProvider | undefined,
 	): void {
 		// Callers composite their overlays inside the budget pass, so `viewportRows`
@@ -3268,16 +3328,19 @@ export class TUI extends Container {
 		// out, and it runs once per emitted frame instead of once per retry.
 		let viewport = viewportRows;
 		this.#imageBudget.limitResidentImages();
-		const history = offered !== undefined && offered.id > this.#acceptedHistoryBatchId ? offered : undefined;
-		if (offered !== undefined && offered.id <= this.#acceptedHistoryBatchId) provider?.acknowledgeHistory(offered.id);
+		const offered = plan?.history;
+		const history = this.#pendingHistory(plan);
+		if (offered !== undefined && history === undefined) provider?.acknowledgeHistory(offered.id);
+		const destructiveReset = this.#clearScrollbackOnNextRender;
+		const startTop = this.#frameStartTop(height);
 
 		let historyRows = history?.rows ?? [];
 		let replayViewportRows = 0;
-		let replayPrependedBlanks = 0;
+		let prependedBlanks = 0;
 		if (history?.kind === "replay") {
 			// Providers may omit unused leading rows from a short viewport. Make
 			// that logical space explicit before the bottom-first replay split.
-			replayPrependedBlanks = Math.max(0, height - viewport.length);
+			prependedBlanks = Math.max(0, height - viewport.length);
 			while (viewport.length < height) viewport.unshift("");
 			let leadingBlankRows = 0;
 			while (leadingBlankRows < viewport.length && !/\S/.test(viewport[leadingBlankRows]!)) {
@@ -3289,6 +3352,10 @@ export class TUI extends Container {
 				historyRows = historyRows.slice(0, historyRows.length - moved);
 				replayViewportRows = moved;
 			}
+		} else if (plan !== undefined && this.#pinsBottom(plan)) {
+			// Callers pad a pinned viewport down to the screen's last row before
+			// compositing overlays; those blanks sit above the composer's rows.
+			prependedBlanks = Math.max(0, viewport.length - plan.viewport.length);
 		}
 		// History first: it reuses the previous viewport's rows by content, and
 		// the viewport pass replaces that memo with its own rows.
@@ -3296,10 +3363,6 @@ export class TUI extends Container {
 		const markers: { row: number; col: number }[] = [];
 		const prepared = this.#prepareLinesArray(viewport, width, this.#providerPreparedRows, viewport.length, markers);
 		const rows = prepared.lines.length;
-		// Destructive reset (session replace, /tree, explicit clear, or a settled
-		// resize in rebuild mode): erase native history and the viewport,
-		// then repaint from row zero.
-		const destructiveReset = this.#clearScrollbackOnNextRender;
 		const compactReplay = destructiveReset && classifyTerminalMultiplexer() === "tmux";
 		if (destructiveReset) {
 			this.#providerViewportTop = 0;
@@ -3311,7 +3374,6 @@ export class TUI extends Container {
 		// scrolls only when history + viewport overflow the physical screen, and
 		// the rows that scroll off the top are exactly the oldest history rows.
 		const geometryStable = this.#hasEverRendered && this.#previousWidth === width && this.#previousHeight === height;
-		const startTop = destructiveReset ? 0 : Math.min(this.#providerViewportTop, Math.max(0, height - 1));
 		const newTop = Math.max(0, Math.min(startTop + historyRows.length, height - rows));
 		const pendingAltExit = this.#pendingAltExit;
 		// A fused resize exit whose borrow never painted still owes its entry.
@@ -3487,7 +3549,7 @@ export class TUI extends Container {
 		this.#providerWindow = mutablePreparedLines;
 		this.#providerPreparedRows = mutablePreparedRows;
 		this.#providerViewportTop = mutableTop;
-		this.#providerViewportPadTop = replayViewportRows - replayPrependedBlanks;
+		this.#providerViewportPadTop = replayViewportRows - prependedBlanks;
 		this.#previousWidth = width;
 		this.#previousHeight = height;
 		this.#resizeBurstGrew = false;

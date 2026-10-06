@@ -444,11 +444,6 @@ export class Composer implements TerminalFrameProvider, NativeSurfaceProvider {
 		const mutable = [...before, ...active, ...after].slice(drop);
 		// Once live rows fill the screen again, the retired gap is gone.
 		if (!decisionPanelOpen && mutable.length >= rows) this.#anchorAfterInlineRetirement = false;
-		// Rows retired during a decision panel cannot be pulled back from native
-		// history when it closes. Keep the input pinned to the bottom without
-		// replaying those rows (which would duplicate them) or clearing history.
-		const topPadding = this.#anchorAfterInlineRetirement ? Math.max(0, rows - mutable.length) : 0;
-		if (topPadding > 0) mutable.unshift(...Array<string>(topPadding).fill(""));
 		const viewportLength = mutable.length;
 		const spans: ViewportClickSpan[] = [];
 		const shift = (span: ViewportClickSpan, base: number): void => {
@@ -462,14 +457,23 @@ export class Composer implements TerminalFrameProvider, NativeSurfaceProvider {
 				spans.push({ start: clamped, end, candidates: (local: number) => span.candidates(local + skew) });
 			}
 		};
-		for (const span of activeSpans) shift(span, topPadding + before.length - drop);
-		for (const span of afterSpans) shift(span, topPadding + before.length + active.length - drop);
+		for (const span of activeSpans) shift(span, before.length - drop);
+		for (const span of afterSpans) shift(span, before.length + active.length - drop);
 		this.#lastClickSpans = spans;
 		if (history !== undefined && this.#offeredHistory?.source === "header") {
 			const visibleHeaderRows = Math.max(0, rows - (mutable.length + drop));
 			this.#retiredHeaderStart = Math.max(0, history.rows.length - visibleHeaderRows);
 		}
-		return { history, viewport: this.#paintHoverBand(mutable, spans) };
+		// Rows retired during a decision panel cannot be pulled back from native
+		// history when it closes. Keep the input pinned to the bottom without
+		// replaying those rows (which would duplicate them) or clearing history;
+		// the writer pads only below history still on screen, so the rows a
+		// panel retires stay visible above it.
+		return {
+			history,
+			viewport: this.#paintHoverBand(mutable, spans),
+			pinBottom: this.#anchorAfterInlineRetirement,
+		};
 	}
 
 	/**
