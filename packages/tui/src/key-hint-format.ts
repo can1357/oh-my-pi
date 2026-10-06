@@ -7,7 +7,7 @@
 import type { KeyId } from "./keybindings";
 import type { ModifierName } from "./keys";
 import { activeThemeSymbol } from "./theme/active-symbols";
-import type { SymbolKey } from "./theme/symbols";
+import { SYMBOL_PRESETS, type SymbolKey } from "./theme/symbols";
 
 /**
  * Key hint formatting: every key shown to the user renders through
@@ -69,9 +69,8 @@ const KEY_WORDS: Record<string, string | undefined> = {
 	insert: "Ins",
 };
 
-function keySymbol(key: SymbolKey): string {
-	return activeThemeSymbol(key);
-}
+/** Where a key's glyphs come from: the active theme, or a fixed preset. */
+type KeySymbols = (key: SymbolKey) => string;
 
 const HAS_LETTER = /[A-Za-z0-9]/;
 
@@ -89,6 +88,22 @@ export type KeyName = KeyId | ModifierName;
  * is capitalized. Other keys are capitalized (`f5` → `F5`).
  */
 export function formatKeyHint(key: KeyName): string {
+	return formatKey(key, activeThemeSymbol);
+}
+
+/**
+ * Format one key for a native tooltip (a TSP `title`): unicode keycap glyphs
+ * whatever the theme's symbol preset (`shift+tab` → `⇧⇥`), which Tern's
+ * tooltip splits into keycaps, and `esc` as Tern's own keycaps read. The nerd
+ * preset's icons are missing from Tern's UI font, and its spaced chords would
+ * not parse as keys.
+ */
+export function formatTooltipKey(key: KeyName): string {
+	return key === "escape" ? "esc" : formatKey(key, symbol => SYMBOL_PRESETS.unicode[symbol]);
+}
+
+/** {@link formatKeyHint} with glyphs from `symbol`. */
+function formatKey(key: KeyName, symbol: KeySymbols): string {
 	const mac = keyHintPlatform() === "darwin";
 	// A trailing `+` is the plus key itself (`+`, `ctrl++`), not a separator.
 	const parts = key.endsWith("+") ? [...key.slice(0, -1).split("+").slice(0, -1), "+"] : key.split("+");
@@ -96,14 +111,14 @@ export function formatKeyHint(key: KeyName): string {
 	let out = "";
 	for (const modifier in MODIFIER_SYMBOLS) {
 		if (!parts.includes(modifier)) continue;
-		const label = keySymbol(MODIFIER_SYMBOLS[modifier]![mac ? 1 : 0]);
-		out += HAS_LETTER.test(label) ? `${label}+` : label + keySymbol("key.joiner");
+		const label = symbol(MODIFIER_SYMBOLS[modifier]![mac ? 1 : 0]);
+		out += HAS_LETTER.test(label) ? `${label}+` : label + symbol("key.joiner");
 	}
 	const lower = base.toLowerCase();
 	const modifier = MODIFIER_SYMBOLS[lower];
-	const symbol = KEY_SYMBOLS[lower];
-	if (modifier) out += keySymbol(modifier[mac ? 1 : 0]);
-	else if (symbol !== undefined) out += keySymbol(symbol);
+	const glyph = KEY_SYMBOLS[lower];
+	if (modifier) out += symbol(modifier[mac ? 1 : 0]);
+	else if (glyph !== undefined) out += symbol(glyph);
 	else if (KEY_WORDS[lower] !== undefined) out += KEY_WORDS[lower];
 	else if (base.length === 1) out += parts.length === 0 ? base : base.toUpperCase();
 	else out += base[0]!.toUpperCase() + base.slice(1);
@@ -118,5 +133,5 @@ export function formatKeyHints(keys: KeyName | readonly KeyName[]): string {
 /** Format a double-tap gesture: `←←` with glyphs, `Left Left` with words. */
 export function formatDoubleTap(key: KeyName): string {
 	const label = formatKeyHint(key);
-	return `${label}${HAS_LETTER.test(label) ? " " : keySymbol("key.joiner")}${label}`;
+	return `${label}${HAS_LETTER.test(label) ? " " : activeThemeSymbol("key.joiner")}${label}`;
 }

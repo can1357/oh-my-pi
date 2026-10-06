@@ -8,7 +8,10 @@ use std::{
 	os::fd::AsRawFd,
 };
 
-use crate::desktop::error::{CoreResult, DesktopError};
+use crate::desktop::{
+	control,
+	error::{CoreResult, DesktopError},
+};
 
 /// evdev keycodes are X keycodes minus this offset (X reserves 0..=7).
 pub(super) const X_KEYCODE_OFFSET: u8 = 8;
@@ -67,6 +70,7 @@ impl UInputDevice {
 
 	/// Press or release X button 1..=3.
 	pub(super) fn button(&mut self, button: u8, press: bool) -> CoreResult<()> {
+		control::check()?;
 		let code = match button {
 			1 => BTN_LEFT,
 			2 => BTN_MIDDLE,
@@ -81,6 +85,7 @@ impl UInputDevice {
 
 	/// One relative motion frame; a zero delta on both axes emits nothing.
 	pub(super) fn motion(&mut self, dx: i32, dy: i32) -> CoreResult<()> {
+		control::check()?;
 		if dx == 0 && dy == 0 {
 			return Ok(());
 		}
@@ -96,12 +101,14 @@ impl UInputDevice {
 	/// One wheel frame. evdev convention: `REL_WHEEL` positive scrolls up,
 	/// `REL_HWHEEL` positive scrolls right.
 	pub(super) fn wheel(&mut self, horizontal: bool, value: i32) -> CoreResult<()> {
+		control::check()?;
 		self.emit(EV_REL, if horizontal { REL_HWHEEL } else { REL_WHEEL }, value)?;
 		self.sync()
 	}
 
 	/// Press or release the key at X keycode `keycode`.
 	pub(super) fn key(&mut self, keycode: u8, press: bool) -> CoreResult<()> {
+		control::check()?;
 		let code = evdev_code(keycode).ok_or_else(|| {
 			DesktopError::input_failed(format!("X keycode {keycode} has no evdev counterpart"))
 		})?;

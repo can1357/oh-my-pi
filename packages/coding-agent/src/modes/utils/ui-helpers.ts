@@ -45,7 +45,12 @@ import { decodeStreamedToolArgs, streamingStringKeysForTool } from "../../modes/
 import { materializeImageReferenceLinksSync } from "@oh-my-pi/pi-tui/prompt/image-references";
 import { imageAttachmentSource } from "@oh-my-pi/pi-tui/prompt/image-source";
 import { theme } from "@oh-my-pi/pi-tui/theme";
-import type { CompactionQueuedMessage, InteractiveModeContext, RenderSessionContextOptions } from "../../modes/types";
+import type {
+	CompactionQueuedMessage,
+	InteractiveModeContext,
+	RenderSessionContextOptions,
+	ShowStatusOptions,
+} from "../../modes/types";
 import { extractVisibleAssistantText } from "../rpc/rpc-live";
 import { LAUNCH_COMPLETION_MESSAGE_TYPE } from "../../session/launch-completion";
 import {
@@ -139,23 +144,24 @@ export class UiHelpers {
 	 * If multiple status messages are emitted back-to-back (without anything else being added to the chat),
 	 * we update the previous status line instead of appending new ones to avoid log spam.
 	 */
-	showStatus(message: string, options?: { dim?: boolean }): void {
+	showStatus(message: string, options?: ShowStatusOptions): void {
 		const children = this.ctx.chatContainer.children;
 		const last = children.length > 0 ? children[children.length - 1] : undefined;
 		const useDim = options?.dim ?? true;
 		// Resolve the dim color lazily so a later theme change re-shapes the line
 		// instead of leaving the palette that was active when it was presented.
 		const styleFn = useDim ? (t: string) => theme.fg("dim", t) : undefined;
+		const notice = { styleFn, toast: options?.toast };
 
 		if (last && last === this.ctx.lastStatus) {
-			this.ctx.lastStatus.setMessage(message, styleFn);
+			this.ctx.lastStatus.setMessage(message, notice);
 			this.ctx.ui.requestRender();
 			return;
 		}
 
-		const notice = new StatusNotice(message, styleFn);
-		this.ctx.present([notice]);
-		this.ctx.lastStatus = notice;
+		const status = new StatusNotice(message, notice);
+		this.ctx.present([status]);
+		this.ctx.lastStatus = status;
 	}
 
 	addMessageToChat(message: AgentMessage, options?: AddMessageOptions): Component[] {
@@ -1096,13 +1102,12 @@ export class UiHelpers {
 		const queuedMessages = this.ctx.viewSession.getQueuedMessages() as QueuedMessages;
 
 		const steeringMessages = [...queuedMessages.steering];
-		for (const entry of this.ctx.compactionQueuedMessages as CompactionQueuedMessage[]) {
-			if (entry.mode === "steer") steeringMessages.push(entry.text);
-		}
-
 		const followUpMessages = [...queuedMessages.followUp];
-		for (const entry of this.ctx.compactionQueuedMessages as CompactionQueuedMessage[]) {
-			if (entry.mode === "followUp") followUpMessages.push(entry.text);
+		if (!this.ctx.focusedAgentId) {
+			for (const entry of this.ctx.compactionQueuedMessages as CompactionQueuedMessage[]) {
+				if (entry.mode === "steer") steeringMessages.push(entry.text);
+				else followUpMessages.push(entry.text);
+			}
 		}
 
 		const groups = [

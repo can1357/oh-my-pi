@@ -1055,7 +1055,9 @@ export class CredentialSelector {
 				}
 			}
 			this.#deps.pool.noteBearer(provider, result.apiKey, credentialId);
-			this.#deps.affinity.record(provider, sessionId, "oauth", selection.index);
+			if (options?.recordAffinity !== false) {
+				this.#deps.affinity.record(provider, sessionId, "oauth", selection.index);
+			}
 			return { apiKey: result.apiKey, credential: updated, credentialId };
 		} catch (error) {
 			const errorMsg = String(error);

@@ -65,7 +65,7 @@ import { cfgToolsMaxTimeout, cfgToolsSpeculativeExecutionEnabled } from "./setti
 export type EvalLanguageToken = "py" | "js";
 const EVAL_LANGUAGE_ORDER: readonly EvalLanguageToken[] = ["py", "js"];
 const EVAL_LANGUAGE_RUNTIME: Record<EvalLanguageToken, string> = {
-	py: '"py": IPython',
+	py: '"py": Python with IPython-style magics (not IPython)',
 	js: '"js": Bun',
 };
 const EVAL_LANGUAGE_NAME: Record<EvalLanguageToken, string> = {
@@ -1000,18 +1000,23 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 						}
 					}
 					if (output.type === "image") {
-						const resized = await resizeImage(
-							{
-								type: "image",
-								data: output.data,
-								mimeType: output.mimeType,
-							},
-							{ excludeWebP },
-						);
+						// Computer frames have a matching native input coordinate space. Generic
+						// display resizing must not change it; provider-boundary safety still applies.
+						if (output.detail === "original") {
+							images.push(output);
+							continue;
+						}
+						const resized = await resizeImage(output, { excludeWebP });
+						const data = resized.data;
 						const image: ImageContent = {
 							type: "image",
-							data: resized.data,
+							data,
 							mimeType: resized.mimeType,
+							...(output.detail === undefined ? {} : { detail: output.detail }),
+							// Remote references are valid only while the bytes remain unchanged.
+							...(data === output.data && resized.mimeType === output.mimeType
+								? { url: output.url, providerFile: output.providerFile }
+								: {}),
 						};
 						images.push(image);
 						const dimensionNote = formatDimensionNote(resized);
