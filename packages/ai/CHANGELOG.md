@@ -59,6 +59,8 @@
 - Improved tool-call parsing performance for long calls and Apple Foundation Models requests.
 - Improved Cloudflare AI Gateway request performance and AWS credential-source detection.
 - Reduced memory usage when handling generated images and usage reports.
+- Added `getOAuthCredentialProvider()` to resolve a login alias (such as `openai-codex-device`) to the provider its credentials are stored under ([#14588](https://github.com/can1357/oh-my-pi/pull/14588) by [@andrebrait](https://github.com/andrebrait))
+- Exposed Codex subscription-account usage-credit balances as exact decimal strings in normalized usage reports, broker/gateway `/v1/usage`, and `omp usage --json`.
 
 ### Fixed
 

@@ -262,6 +262,13 @@ const arkUsageReportSchema = type({
 	fetchedAt: "number",
 	limits: usageLimitSchema.array(),
 	"resetCredits?": usageResetCreditsSchema,
+	"credits?": {
+		balance: "string | null",
+		unit: "'credits'",
+		"hasCredits?": "boolean",
+		"unlimited?": "boolean",
+		"overageLimitReached?": "boolean",
+	},
 	"notes?": "string[]",
 	"metadata?": { "[string]": "unknown" },
 	"raw?": "unknown",
