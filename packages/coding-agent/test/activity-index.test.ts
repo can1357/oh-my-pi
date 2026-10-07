@@ -163,4 +163,51 @@ describe("AgentActivityIndex", () => {
 		await expect(activity.sync("Guest")).resolves.toBeUndefined();
 		expect(activity.query()).toEqual([]);
 	});
+
+	it("drops a truncated remote transcript's rows even when the new tail has none", async () => {
+		let transcript = `${messageEntry("old", 1_000, { role: "assistant", content: "Old remote result" })}\n`;
+		const activity = new AgentActivityIndex({
+			remote: {
+				readTranscript: async (_agentId, fromByte) => {
+					const bytes = Buffer.from(transcript);
+					return { text: bytes.subarray(Math.min(fromByte, bytes.byteLength)).toString("utf-8"), newSize: bytes.byteLength };
+				},
+			},
+		});
+		await activity.sync("Guest");
+		expect(activity.query().map(row => row.summary)).toEqual(["Old remote result"]);
+		expect(activity.recent("Guest").map(row => row.summary)).toEqual(["Old remote result"]);
+
+		transcript = "";
+		await activity.sync("Guest");
+		expect(activity.query()).toEqual([]);
+		expect(activity.recent("Guest")).toEqual([]);
+	});
+
+	it("keeps a long response whose text follows a long run of leading whitespace", async () => {
+		using tempDir = TempDir.createSync("activity-index-whitespace-");
+		const sessionFile = path.join(tempDir.path(), "worker.jsonl");
+		await Bun.write(
+			sessionFile,
+			`${messageEntry("r1", 1_000, { role: "assistant", content: `${" \n".repeat(5_000)}Visible answer` })}\n`,
+		);
+		const activity = new AgentActivityIndex();
+		await activity.sync("Worker", sessionFile);
+		expect(activity.query().map(row => row.summary)).toEqual(["Visible answer"]);
+	});
+
+	it("retains the newest rows when one sync ingests a large backlog", async () => {
+		using tempDir = TempDir.createSync("activity-index-backlog-");
+		const sessionFile = path.join(tempDir.path(), "worker.jsonl");
+		const lines = Array.from({ length: 1_000 }, (_, index) =>
+			messageEntry(`r${index}`, 1_000 + index, { role: "assistant", content: `answer ${index}` }),
+		);
+		await Bun.write(sessionFile, `${lines.join("\n")}\n`);
+		const activity = new AgentActivityIndex();
+		await activity.sync("Worker", sessionFile);
+		const rows = activity.query({ agentIds: new Set(["Worker"]), limit: 2_000 });
+		expect(rows).toHaveLength(256);
+		expect(rows[0]?.summary).toBe("answer 744");
+		expect(rows.at(-1)?.summary).toBe("answer 999");
+	});
 });

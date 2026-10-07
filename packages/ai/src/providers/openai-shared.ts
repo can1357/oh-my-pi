@@ -24,13 +24,13 @@ import { parseGitHubCopilotApiKey } from "@oh-my-pi/pi-catalog/wire/github-copil
 import {
 	$env,
 	classifyJsonPrefix,
+	cloneJsonTree,
 	extractHttpStatusFromError,
 	isRecord,
 	logger,
 	parseImageMetadata,
 	parseStreamingJsonThrottled,
 	stringifyJson,
-	structuredCloneJSON,
 	USER_AGENT,
 } from "@oh-my-pi/pi-utils";
 import { NO_AUTH_SENTINEL } from "../auth-retry";
@@ -2089,9 +2089,35 @@ export function buildResponsesInput<TApi extends Api>(options: BuildResponsesInp
 	const customToolWireNameMap = supportsCustomToolCalls
 		? undefined
 		: buildCustomToolWireNameMap(options.context.tools);
-	let knownCallIds = new Set<string>();
+	const knownCallIds = new Set<string>();
 	const customCallIds = new Set<string>();
 	const computerCallIds = new Set<string>();
+	// Call-id bookkeeping is incremental; rescanning `messages` after every native
+	// replay made request building O(turns × items). `messageCallIds` mirrors the
+	// call ids present in `messages`. `unpushedCallIds` holds ids the assistant
+	// converter registered in `knownCallIds` whose items were then dropped: a
+	// native replay resets `knownCallIds` to exactly the ids in `messages`.
+	const messageCallIds = new Set<string>();
+	const unpushedCallIds = new Set<string>();
+	const recordPushedCallIds = (items: ResponseInput): void => {
+		for (const item of items) {
+			const kind = responsesToolCallKind(item.type);
+			if (kind === undefined) continue;
+			const callId = responseInputCallId(item);
+			if (!callId) continue;
+			knownCallIds.add(callId);
+			messageCallIds.add(callId);
+			unpushedCallIds.delete(callId);
+			if (kind === "custom") customCallIds.add(callId);
+			else if (kind === "computer") computerCallIds.add(callId);
+		}
+	};
+	const pushNativeReplayItems = (items: ResponseInput): void => {
+		messages.push(...items);
+		for (const id of unpushedCallIds) knownCallIds.delete(id);
+		unpushedCallIds.clear();
+		recordPushedCallIds(items);
+	};
 	const transformedMessages = transformMessages(
 		options.context.messages,
 		options.model,
@@ -2132,10 +2158,7 @@ export function buildResponsesInput<TApi extends Api>(options: BuildResponsesInp
 					customToolWireNameMap,
 					options.model.supportsComputerUse === true,
 				);
-				messages.push(...(escapeControlTokens ? escapeReplayedControlTokens(replayItems) : replayItems));
-				knownCallIds = collectKnownCallIds(messages);
-				for (const id of collectCustomCallIds(messages)) customCallIds.add(id);
-				for (const id of collectComputerCallIds(messages)) computerCallIds.add(id);
+				pushNativeReplayItems(escapeControlTokens ? escapeReplayedControlTokens(replayItems) : replayItems);
 				msgIndex++;
 				continue;
 			}
@@ -2210,15 +2233,16 @@ export function buildResponsesInput<TApi extends Api>(options: BuildResponsesInp
 						? escapeReplayedControlTokens(sanitizedHistoryItems)
 						: sanitizedHistoryItems;
 					if (providerPayload?.dt) {
-						messages.push(...wireItems);
+						pushNativeReplayItems(wireItems);
 					} else {
 						messages.splice(0, messages.length, ...wireItems);
+						knownCallIds.clear();
 						customCallIds.clear();
 						computerCallIds.clear();
+						messageCallIds.clear();
+						unpushedCallIds.clear();
+						recordPushedCallIds(wireItems);
 					}
-					knownCallIds = collectKnownCallIds(messages);
-					for (const id of collectCustomCallIds(messages)) customCallIds.add(id);
-					for (const id of collectComputerCallIds(messages)) computerCallIds.add(id);
 					msgIndex++;
 					continue;
 				}
@@ -2242,8 +2266,19 @@ export function buildResponsesInput<TApi extends Api>(options: BuildResponsesInp
 			const outputItems = suppressHiddenEmptyFallback
 				? sanitizeOpenAIResponsesAssistantFallbackItemsForReplay(convertedOutputItems)
 				: convertedOutputItems;
+			if (outputItems !== convertedOutputItems) {
+				// The converter registered every call id it emitted; remember the ones
+				// the fallback sanitizer may drop so a later native replay forgets them.
+				for (const item of convertedOutputItems) {
+					if (responsesToolCallKind(item.type) === undefined) continue;
+					const callId = responseInputCallId(item);
+					if (callId && !messageCallIds.has(callId)) unpushedCallIds.add(callId);
+				}
+			}
 			if (outputItems.length === 0) continue;
-			messages.push(...(escapeControlTokens ? escapeReplayedControlTokens(outputItems) : outputItems));
+			const pushedItems = escapeControlTokens ? escapeReplayedControlTokens(outputItems) : outputItems;
+			messages.push(...pushedItems);
+			recordPushedCallIds(pushedItems);
 		} else if (msg.role === "toolResult") {
 			appendResponsesToolResultMessages(
 				messages,
@@ -2496,8 +2531,8 @@ export function convertResponsesAssistantMessage<TApi extends Api>(
 				type: "computer_call",
 				id: block.providerMetadata.providerItemId,
 				call_id: normalized.callId,
-				actions: structuredCloneJSON(block.providerMetadata.actions),
-				pending_safety_checks: structuredCloneJSON(block.providerMetadata.pendingSafetyChecks),
+				actions: cloneJsonTree(block.providerMetadata.actions),
+				pending_safety_checks: cloneJsonTree(block.providerMetadata.pendingSafetyChecks),
 				status: "completed",
 			} as ResponseInput[number]);
 			continue;
@@ -2665,8 +2700,8 @@ export function appendResponsesToolResultMessages<TApi extends Api>(
 		messages.push({
 			type: "computer_call_output",
 			call_id: normalized.callId,
-			output: structuredCloneJSON(toolResult.providerMetadata.screenshot),
-			acknowledged_safety_checks: structuredCloneJSON(toolResult.providerMetadata.acknowledgedSafetyChecks),
+			output: cloneJsonTree(toolResult.providerMetadata.screenshot),
+			acknowledged_safety_checks: cloneJsonTree(toolResult.providerMetadata.acknowledgedSafetyChecks),
 		} as ResponseInput[number]);
 		return;
 	}
@@ -3092,8 +3127,8 @@ export function computerCallMetadata(item: ResponseComputerToolCall): ComputerTo
 	return {
 		type: "computer",
 		providerItemId: item.id,
-		actions: structuredCloneJSON(actions) as ComputerAction[],
-		pendingSafetyChecks: structuredCloneJSON(item.pending_safety_checks ?? []),
+		actions: cloneJsonTree(actions) as ComputerAction[],
+		pendingSafetyChecks: cloneJsonTree(item.pending_safety_checks ?? []),
 	};
 }
 
@@ -3556,7 +3591,7 @@ export async function processResponsesStream<TApi extends Api>(
 				entry.block[kStreamingArgumentsDone] = true;
 			}
 		} else if (event.type === "response.output_item.done") {
-			const item = structuredCloneJSON(event.item);
+			const item = cloneJsonTree(event.item);
 			const entry =
 				item.type === "function_call" || item.type === "custom_tool_call"
 					? lookupOpenItem({ output_index: event.output_index, item_id: item.id ?? item.call_id })

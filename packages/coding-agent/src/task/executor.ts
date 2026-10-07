@@ -1532,7 +1532,11 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 	const refreshRecentOutput = () => {
 		if (!recentOutputDirty) return;
 		recentOutputDirty = false;
-		const filtered = recentOutputTail.split("\n").filter(line => line.trim());
+		const tail =
+			recentOutputTail.length > RECENT_OUTPUT_TAIL_BYTES
+				? recentOutputTail.slice(-RECENT_OUTPUT_TAIL_BYTES)
+				: recentOutputTail;
+		const filtered = tail.split("\n").filter(line => line.trim());
 		progress.recentOutput = filtered.slice(-8).reverse();
 	};
 
@@ -1619,12 +1623,19 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 		return message.usage;
 	};
 
+	// Hysteresis: let the tail grow to 2x the cap before trimming, so the
+	// 8KB slice copy runs once per ~8KB of output instead of on every token
+	// once the cap is reached. refreshRecentOutput() re-applies the exact cap.
+	const trimRecentOutputTail = () => {
+		if (recentOutputTail.length > RECENT_OUTPUT_TAIL_BYTES * 2) {
+			recentOutputTail = recentOutputTail.slice(-RECENT_OUTPUT_TAIL_BYTES);
+		}
+	};
+
 	const appendRecentOutputTail = (text: string) => {
 		if (!text) return;
 		recentOutputTail += text;
-		if (recentOutputTail.length > RECENT_OUTPUT_TAIL_BYTES) {
-			recentOutputTail = recentOutputTail.slice(-RECENT_OUTPUT_TAIL_BYTES);
-		}
+		trimRecentOutputTail();
 		// O(chunk) hot path: this runs on every text_delta token (hundreds/
 		// thousands per second while streaming). Line reconstruction is deferred
 		// to refreshRecentOutput() at the emit boundary.
@@ -1639,9 +1650,7 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 			if (record.type !== "text" || typeof record.text !== "string") continue;
 			if (!record.text) continue;
 			recentOutputTail += record.text;
-			if (recentOutputTail.length > RECENT_OUTPUT_TAIL_BYTES) {
-				recentOutputTail = recentOutputTail.slice(-RECENT_OUTPUT_TAIL_BYTES);
-			}
+			trimRecentOutputTail();
 		}
 		recentOutputDirty = true;
 	};

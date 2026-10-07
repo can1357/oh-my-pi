@@ -6,7 +6,8 @@ import { registerOAuthProvider, unregisterOAuthProvider, unregisterOAuthProvider
 import type { OAuthCredentials, OAuthLoginCallbacks } from "@oh-my-pi/pi-ai/oauth/types";
 import { setCodexAttestationProvider } from "@oh-my-pi/pi-ai/providers/openai-codex-attestation";
 import { getProviderDefinition } from "@oh-my-pi/pi-ai/registry";
-import { getEnvApiKey, isOfficialCodexApiUrl } from "@oh-my-pi/pi-ai/stream";
+import { getEnvApiKey } from "@oh-my-pi/pi-ai/env-api-key";
+import { isOfficialCodexApiUrl } from "@oh-my-pi/pi-ai/stream";
 import type {
 	Api,
 	Context,

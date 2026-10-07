@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- `TspEditorProps.placeholder` (and `TspInputProps.placeholder`) take `TspText`, so a placeholder can be styled spans
+
 ## [18.5.1] - 2026-10-03
 
 ### Added

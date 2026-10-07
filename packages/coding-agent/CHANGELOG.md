@@ -2,13 +2,65 @@
 
 ## [Unreleased]
 
+### Added
+
+- Files the write tool creates now preview the way the matching code blocks in replies do, building up while the write streams: `.svg` as an image and Mermaid (`.mmd`, `.mermaid`) as a diagram under the write card, and in Tern also 3D models (`.obj`, `.ply`, `.wrl`, `.x3dv`, `.stl`, `.gltf`, `.usda`); in Tern an SVG write now draws like an SVG figure in a reply
+
 ### Changed
 
 - Inside a Tern pane, browser opens with `headed: false` now show as a Tern picture-in-picture too; only `app.tern: false` (or `browser.tern` / `PI_BROWSER_TERN=0`) opens Chromium instead
-
+- Inside a Tern pane, `/fork` opens the fork in a new pane beside the original, which keeps the original session
+- Inside a Tern pane, the empty composer shows the session title in quotes and italics, or "What are we cooking?" before the session has one
+- Roughly halved browser `extract` time in text mode on large pages ([#14668](https://github.com/can1357/oh-my-pi/pull/14668) by [@H4vC](https://github.com/H4vC))
+- Reduced per-turn session branch copying on long sessions ([#14677](https://github.com/can1357/oh-my-pi/pull/14677) by [@H4vC](https://github.com/H4vC))
+- Sped up bash startup; direnv reuses its verified environment for 5 s when nothing changed ([#14680](https://github.com/can1357/oh-my-pi/pull/14680) by [@H4vC](https://github.com/H4vC))
+- Prompt history search (Ctrl+R) now updates results 100 ms after you stop typing instead of on every keystroke; Enter and clicks always act on the current query's results ([#14687](https://github.com/can1357/oh-my-pi/pull/14687) by [@H4vC](https://github.com/H4vC))
+- Sped up agent hub activity rows ([#14688](https://github.com/can1357/oh-my-pi/pull/14688) by [@H4vC](https://github.com/H4vC))
+- Sped up `local://`, `history://` and `artifact://` autocomplete by reusing directory scans for 2 s, so a just-created file can take up to 2 s to appear ([#14692](https://github.com/can1357/oh-my-pi/pull/14692) by [@H4vC](https://github.com/H4vC))
+- Removed quadratic slowdown of TTSR stream rules on long responses ([#14693](https://github.com/can1357/oh-my-pi/pull/14693) by [@H4vC](https://github.com/H4vC))
+- Reduced per-prompt session overhead from pruning, goal-mode token accounting, branch appends, publishing and full session rewrites ([#14694](https://github.com/can1357/oh-my-pi/pull/14694) by [@H4vC](https://github.com/H4vC))
+- Reduced per-event session overhead: no branch copies for persisted-message checks, and extension hooks without handlers are skipped before building their context ([#14695](https://github.com/can1357/oh-my-pi/pull/14695) by [@H4vC](https://github.com/H4vC))
+- Reduced edit and `write` CPU on large files ([#14700](https://github.com/can1357/oh-my-pi/pull/14700) by [@H4vC](https://github.com/H4vC))
+- Sped up `read` on large files (`:-N` tails ~8× faster on 50 MB), repeated archive reads, SQLite last pages and speculative reads ([#14701](https://github.com/can1357/oh-my-pi/pull/14701) by [@H4vC](https://github.com/H4vC))
+- Sped up `grep` and `glob` results ([#14702](https://github.com/can1357/oh-my-pi/pull/14702) by [@H4vC](https://github.com/H4vC))
+- Sped up output schema validation by memoizing validators ([#14702](https://github.com/can1357/oh-my-pi/pull/14702) by [@H4vC](https://github.com/H4vC))
+- Reduced eval live-output overhead (~7× less on 100k-line cells) and sped up terminal graphics extraction (~5×) ([#14704](https://github.com/can1357/oh-my-pi/pull/14704) by [@H4vC](https://github.com/H4vC))
+- A backpressured `omp stream` viewer that catches up now gets the current screen redacted with the latest secret patterns ([#14705](https://github.com/can1357/oh-my-pi/pull/14705) by [@H4vC](https://github.com/H4vC))
+- Fetching URLs on hosts that are not Mastodon, Lemmy or Discourse no longer re-probes those platforms on every request; a host found not to run one is skipped for 10 minutes ([#14707](https://github.com/can1357/oh-my-pi/pull/14707) by [@H4vC](https://github.com/H4vC))
+- Sped up fetching Hacker News, GitHub, NuGet, docs.rs, Mastodon/Lemmy/Discourse and binary (PDF/document) URLs ([#14708](https://github.com/can1357/oh-my-pi/pull/14708) by [@H4vC](https://github.com/H4vC))
+- Sped up Perplexity OAuth search streaming ([#14708](https://github.com/can1357/oh-my-pi/pull/14708) by [@H4vC](https://github.com/H4vC))
+- Sped up DOCX, PPTX, XLSX and EPUB conversion and cut its memory use on media-heavy documents ([#14709](https://github.com/can1357/oh-my-pi/pull/14709) by [@H4vC](https://github.com/H4vC))
+- Reduced LSP traffic: `didSave` includes the file text only for servers that request it, on both saves and refreshes ([#14710](https://github.com/can1357/oh-my-pi/pull/14710) by [@H4vC](https://github.com/H4vC))
+- Sped up LSP/DAP message framing ([#14710](https://github.com/can1357/oh-my-pi/pull/14710) by [@H4vC](https://github.com/H4vC))
+- Reduced MCP refreshes by coalescing bursts of tool-set change notifications and `tools/list` refreshes ([#14711](https://github.com/can1357/oh-my-pi/pull/14711) by [@H4vC](https://github.com/H4vC))
+- Sped up repeated LLM requests with inline images and blob uploads ([#14712](https://github.com/can1357/oh-my-pi/pull/14712) by [@H4vC](https://github.com/H4vC))
+- Sped up concurrent subagent launches by sharing one agent discovery scan ([#14713](https://github.com/can1357/oh-my-pi/pull/14713) by [@H4vC](https://github.com/H4vC))
+- Sped up ssh:// file operations by reusing verified connections for 30 s ([#14713](https://github.com/can1357/oh-my-pi/pull/14713) by [@H4vC](https://github.com/H4vC))
+- Reduced collab host overhead: nothing is mirrored while no guest is joined, and frames and guest joins serialize once ([#14714](https://github.com/can1357/oh-my-pi/pull/14714) by [@H4vC](https://github.com/H4vC))
+- Reduced per-turn advisor work: advisor deltas are rendered only when a single-block fallback or requeue needs them ([#14717](https://github.com/can1357/oh-my-pi/pull/14717) by [@H4vC](https://github.com/H4vC))
+- Reduced memory use of local memory extraction and `run_experiment` on large inputs ([#14718](https://github.com/can1357/oh-my-pi/pull/14718) by [@H4vC](https://github.com/H4vC))
+- Sped up Mnemopi session start ([#14718](https://github.com/can1357/oh-my-pi/pull/14718) by [@H4vC](https://github.com/H4vC))
+- Reduced CPU during live voice calls and dictation by avoiding per-frame audio buffer copies ([#14719](https://github.com/can1357/oh-my-pi/pull/14719) by [@H4vC](https://github.com/H4vC))
+- Reduced RPC `message_update` encoding CPU for streaming messages with many small content blocks, and stopped re-sending unchanged live audio level updates ([#14716](https://github.com/can1357/oh-my-pi/pull/14716) by [@H4vC](https://github.com/H4vC))
+- Fixed multi-second freezes after large pastes with unclosed tags in title/auto-thinking preprocessing ([#14720](https://github.com/can1357/oh-my-pi/pull/14720) by [@H4vC](https://github.com/H4vC))
+- Sped up image resizing up to ~2.6× by decoding the source once ([#14720](https://github.com/can1357/oh-my-pi/pull/14720) by [@H4vC](https://github.com/H4vC))
+- Stopped text prediction from touching the filesystem on every keystroke while SmolLM weights download ([#14720](https://github.com/can1357/oh-my-pi/pull/14720) by [@H4vC](https://github.com/H4vC))
+- Reduced CPU during live voice calls and dictation by avoiding per-frame audio buffer copies ([#14719](https://github.com/can1357/oh-my-pi/pull/14719) by [@H4vC](https://github.com/H4vC))
 ### Fixed
 
 - Fixed the status line pinning multiple CPU cores in worktrees created by `jj workspace add`. Their git index carries no file stat data, so every status call re-read and re-hashed the whole worktree (measured 2.2s and 47s of CPU per call on a 94k-file checkout) and leaked a `git-lfs filter-process` per call; the refreshed stat data is now written back, so the first call repairs the index and later calls are ~80x cheaper. Status refreshes also back off to five times the last call's duration, and a status call slower than a second is logged with its repository ([#13405](https://github.com/can1357/oh-my-pi/pull/13405) by [@sjawhar](https://github.com/sjawhar)).
+- Fixed `/new` keeping plan mode (and its plan-role model) or goal mode active in the new session ([#14653](https://github.com/can1357/oh-my-pi/issues/14653))
+- Fixed parallel first bash calls each spawning an rc-sourcing shell ([#14680](https://github.com/can1357/oh-my-pi/pull/14680) by [@H4vC](https://github.com/H4vC))
+- Fixed the todo list's auto-clear never firing while subagents were streaming progress ([#14692](https://github.com/can1357/oh-my-pi/pull/14692) by [@H4vC](https://github.com/H4vC))
+- Fixed memory growth while ACP client-terminal commands run ([#14680](https://github.com/can1357/oh-my-pi/pull/14680) by [@H4vC](https://github.com/H4vC))
+- Fixed ephemeral side-channel replies (idle recap, completion probe, `runEphemeralTurn`) truncating in quadratic time ([#14695](https://github.com/can1357/oh-my-pi/pull/14695) by [@H4vC](https://github.com/H4vC))
+- Sped up `omp compress` by tokenizing each draft once per round ([#14702](https://github.com/can1357/oh-my-pi/pull/14702) by [@H4vC](https://github.com/H4vC))
+- Fixed the agent slowing down while streaming long eval cells ([#14704](https://github.com/can1357/oh-my-pi/pull/14704) by [@H4vC](https://github.com/H4vC))
+- Fixed quadratic slowdown reading large Python kernel output (big reprs, base64 images) ([#14704](https://github.com/can1357/oh-my-pi/pull/14704) by [@H4vC](https://github.com/H4vC))
+- Sped up TUI repaints of live stream and `/record` rows ([#14705](https://github.com/can1357/oh-my-pi/pull/14705) by [@H4vC](https://github.com/H4vC))
+- Fixed quadratic slowdown in `omp cleanse` on large tsc/clippy/golangci output ([#14706](https://github.com/can1357/oh-my-pi/pull/14706) by [@H4vC](https://github.com/H4vC))
+- Fixed documents served as `application/octet-stream` being downloaded twice ([#14708](https://github.com/can1357/oh-my-pi/pull/14708) by [@H4vC](https://github.com/H4vC))
+- Fixed collab TUI guests rebuilding the transcript per token ([#14715](https://github.com/can1357/oh-my-pi/pull/14715) by [@H4vC](https://github.com/H4vC))
 
 ## [18.7.0] - 2026-10-06
 

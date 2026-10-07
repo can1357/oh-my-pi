@@ -120,14 +120,19 @@ export class GlobTool implements AgentTool<typeof findSchema, GlobToolDetails> {
 	readonly loadMode = "essential";
 	readonly label = "Glob";
 	get description(): string {
-		return prompt.render(globDescription, {
-			hasFind: this.session.isToolActive?.("find") ?? isFindEnabled(this.session),
-			eagerDelegation: sessionDelegationBias(this.session) === "eager",
-			scoutAvailable: isScoutSpawnable(
-				cfgTaskDisabledAgents.get(this.session.settings),
-				this.session.getSessionSpawns?.() ?? "*",
-			),
-		});
+		const hasFind = this.session.isToolActive?.("find") ?? isFindEnabled(this.session);
+		const eagerDelegation = sessionDelegationBias(this.session) === "eager";
+		const scoutAvailable = isScoutSpawnable(
+			cfgTaskDisabledAgents.get(this.session.settings),
+			this.session.getSessionSpawns?.() ?? "*",
+		);
+		// Every render input is a boolean; pack them so repeat reads skip the template render.
+		const key = (hasFind ? 1 : 0) | (eagerDelegation ? 2 : 0) | (scoutAvailable ? 4 : 0);
+		if (key !== this.#descriptionKey) {
+			this.#description = prompt.render(globDescription, { hasFind, eagerDelegation, scoutAvailable });
+			this.#descriptionKey = key;
+		}
+		return this.#description;
 	}
 	readonly parameters = findSchema;
 
@@ -138,6 +143,8 @@ export class GlobTool implements AgentTool<typeof findSchema, GlobToolDetails> {
 	readonly #nativeGlob: typeof natives.glob;
 	readonly #stat: typeof fs.promises.stat;
 	readonly #timeoutMs: number;
+	#descriptionKey = -1;
+	#description = "";
 
 	constructor(
 		private readonly session: ToolSession,
@@ -506,10 +513,10 @@ export class GlobTool implements AgentTool<typeof findSchema, GlobToolDetails> {
 			};
 			const streamed = new Set<string>();
 			const makeOnMatch =
-				(base: string) =>
+				(formatTargetMatch: (match: natives.GlobMatch) => string) =>
 				(err: Error | null, match: natives.GlobMatch | null): void => {
 					if (err || combinedSignal.aborted || !match?.path) return;
-					const relativePath = formatMatchPath(match.path, base, match.fileType);
+					const relativePath = formatTargetMatch(match);
 					if (streamed.has(relativePath)) return;
 					streamed.add(relativePath);
 					onUpdateMatches.push(relativePath);
@@ -521,6 +528,18 @@ export class GlobTool implements AgentTool<typeof findSchema, GlobToolDetails> {
 			const runTarget = async (prepared: NativePreparedTarget): Promise<Array<{ path: string; mtime: number }>> => {
 				if (prepared.result) return prepared.result;
 				const { target } = prepared;
+				// Native streams exactly the matches it returns; the streamed update and
+				// the final list share one formatting pass per raw path (a path's file
+				// type is fixed within one walk).
+				const formattedPaths = new Map<string, string>();
+				const formatTargetMatch = (match: natives.GlobMatch): string => {
+					let formatted = formattedPaths.get(match.path);
+					if (formatted === undefined) {
+						formatted = formatMatchPath(match.path, target.searchPath, match.fileType);
+						formattedPaths.set(match.path, formatted);
+					}
+					return formatted;
+				};
 				try {
 					const result = await this.#nativeGlob(
 						{
@@ -541,16 +560,13 @@ export class GlobTool implements AgentTool<typeof findSchema, GlobToolDetails> {
 							timeoutMs,
 							filesystem: urlFilesystem.shellFilesystem(),
 						},
-						makeOnMatch(target.searchPath),
+						makeOnMatch(formatTargetMatch),
 					);
 					throwIfAborted(signal);
 					const out: Array<{ path: string; mtime: number }> = [];
 					for (const match of result.matches) {
 						if (!match.path) continue;
-						out.push({
-							path: formatMatchPath(match.path, target.searchPath, match.fileType),
-							mtime: match.mtime ?? 0,
-						});
+						out.push({ path: formatTargetMatch(match), mtime: match.mtime ?? 0 });
 					}
 					return out;
 				} catch (error) {

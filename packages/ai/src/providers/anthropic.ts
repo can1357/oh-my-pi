@@ -20,7 +20,8 @@ import { NO_AUTH_SENTINEL } from "../auth-retry";
 import { renderDemotedThinking } from "../dialect/demotion";
 import * as AIError from "../error";
 import { parseToolCallArguments } from "../utils/tool-call-arguments";
-import { getEnvApiKey, OUTPUT_FALLBACK_BUFFER } from "../stream";
+import { getEnvApiKey } from "../env-api-key";
+import { OUTPUT_FALLBACK_BUFFER } from "../stream";
 import type {
 	AnthropicCompactionFiles,
 	AnthropicCompactionPayload,

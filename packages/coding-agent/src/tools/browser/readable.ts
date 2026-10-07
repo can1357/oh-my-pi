@@ -167,24 +167,25 @@ export async function extractReadableFromHtml(
 	format: ReadableFormat,
 	options: ReadableExtractOptions = {},
 ): Promise<ReadableResult | null> {
-	const [{ parseHTML }, { Readability }] = await Promise.all([loadDom(), loadReadability()]);
+	const [{ parseHTML, Element }, { Readability }] = await Promise.all([loadDom(), loadReadability()]);
 	const { document } = parseHTML(html);
 	const selected = options.selector ? document.querySelector(options.selector) : null;
 	if (options.selector && !selected) return null;
 
 	// --- Primary: Readability article extraction ---
 	if (!selected) {
-		const article = new Readability(document).parse();
+		// Keep the article element: text mode walks it for block boundaries, which Readability's
+		// `textContent` lacks, and markup is serialized only when Markdown is needed.
+		const article = new Readability(document, {
+			serializer: node => (node instanceof Element ? node : null),
+		}).parse();
 		if (article) {
-			// Readability's `textContent` has no block boundaries at all, so re-read
-			// its own markup for them. The markup is a fragment and needs a body.
-			const body =
-				format === "text" && article.content ? parseHTML(`<body>${article.content}</body>`).document.body : null;
+			const content = article.content;
 			const result = await toReadableResult(
 				url,
 				format,
-				body ? blockText(body) : article.textContent?.trim(),
-				article.content,
+				format === "text" && content ? blockText(content) : article.textContent?.trim(),
+				() => content?.innerHTML,
 				{
 					title: article.title,
 					byline: article.byline,
@@ -217,7 +218,7 @@ export async function extractReadableFromHtml(
 			url,
 			format,
 			textContent,
-			innerHTML,
+			() => innerHTML,
 			{
 				title: document.title,
 				excerpt: textContent.slice(0, 240),
@@ -277,31 +278,40 @@ function markdownToPlainText(markdown: string): string {
 		.trim();
 }
 
+/** Markdown-derived content for Markdown output or a filtered/outlined view; undefined once a step leaves nothing. */
+async function markdownContent(
+	format: ReadableFormat,
+	text: string | undefined,
+	htmlContent: string | null | undefined,
+	options: ReadableExtractOptions,
+): Promise<string | undefined> {
+	let processedMarkdown = normalize(await htmlToBasicMarkdown(htmlContent ?? "")) ?? text;
+	if (!processedMarkdown) return undefined;
+	if (options.filter) processedMarkdown = normalize(filterMarkdownSections(processedMarkdown, options.filter));
+	if (!processedMarkdown) return undefined;
+	if (options.outline) processedMarkdown = normalize(extractMarkdownOutline(processedMarkdown));
+	if (!processedMarkdown) return undefined;
+	// Plain text only gets here with a filter.
+	return options.outline || format === "markdown" ? processedMarkdown : markdownToPlainText(processedMarkdown);
+}
+
 /** Shared builder for both extraction paths. */
 async function toReadableResult(
 	url: string,
 	format: ReadableFormat,
 	textContent: string | null | undefined,
-	htmlContent: string | null | undefined,
+	htmlContent: () => string | null | undefined,
 	meta: { title?: string | null; byline?: string | null; excerpt?: string | null; length?: number | null },
 	options: ReadableExtractOptions,
 ): Promise<ReadableResult | null> {
 	// Text-format content is `blockText` output, already free of leading whitespace except a
 	// first-cell tab or `<pre>` indentation, both of which are content.
 	const text = format === "text" ? textContent?.trimEnd() || undefined : normalize(textContent);
-	let processedMarkdown = normalize(await htmlToBasicMarkdown(htmlContent ?? "")) ?? text;
-	if (!processedMarkdown) return null;
-	if (options.filter) processedMarkdown = normalize(filterMarkdownSections(processedMarkdown, options.filter));
-	if (!processedMarkdown) return null;
-	if (options.outline) processedMarkdown = normalize(extractMarkdownOutline(processedMarkdown));
-	if (!processedMarkdown) return null;
-	const content = options.outline
-		? processedMarkdown
-		: format === "markdown"
-			? processedMarkdown
-			: options.filter
-				? markdownToPlainText(processedMarkdown)
-				: text;
+	// Unfiltered plain text is `text` itself; rendering Markdown would only repeat its emptiness check.
+	const content =
+		format === "text" && !options.filter && !options.outline
+			? text
+			: await markdownContent(format, text, htmlContent(), options);
 	if (!content) return null;
 	return {
 		url,

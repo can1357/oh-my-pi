@@ -53,13 +53,19 @@ interface AstEditRenderArgs {
 const COLLAPSED_CHANGE_LIMIT = PREVIEW_LIMITS.COLLAPSED_LINES * 2;
 
 /**
- * Flatten pre-styled change groups into frame body lines. Groups are separated
- * by a blank line and carry no tree guides — the frame border is the container,
- * so nested `├─ │` gutters would just be noise. Collapsed mode always shows at
- * least the first group, then fills up to `budget` lines before summarizing the
- * rest as `… N more changes`.
+ * Flatten change groups (line indices, styled on demand) into frame body
+ * lines. Groups are separated by a blank line and carry no tree guides — the
+ * frame border is the container, so nested `├─ │` gutters would just be
+ * noise. Collapsed mode always shows at least the first group, then fills up
+ * to `budget` lines before summarizing the rest as `… N more changes`.
  */
-function buildChangeBody(groups: string[][], expanded: boolean, budget: number, theme: Theme): string[] {
+function buildChangeBody(
+	groups: readonly (readonly number[])[],
+	styleLine: (index: number) => string,
+	expanded: boolean,
+	budget: number,
+	theme: Theme,
+): string[] {
 	const lines: string[] = [];
 	let shown = 0;
 	for (let i = 0; i < groups.length; i++) {
@@ -70,7 +76,7 @@ function buildChangeBody(groups: string[][], expanded: boolean, budget: number, 
 		// Always emit the first group; budget only gates subsequent ones.
 		if (!expanded && shown > 0 && lines.length + separator + group.length + reserved > budget) break;
 		if (separator) lines.push("");
-		lines.push(...group);
+		for (const index of group) lines.push(styleLine(index));
 		shown++;
 	}
 	const remaining = groups.length - shown;
@@ -239,29 +245,36 @@ export const astEditToolRenderer = {
 		// Resolve hyperlinks over the whole output so nested directory headers
 		// reconstruct across the blank-line groups the tree list collapses by.
 		const contexts = classifyGroupedLines(allLines, details?.cwd ?? details?.searchPath, details?.searchPath);
-		const styledLines = allLines.map((line, index) => {
+		// Style lazily: collapsed bodies show only the first groups.
+		const styledLines: (string | undefined)[] = new Array(allLines.length);
+		const styleLine = (index: number): string => {
+			const cached = styledLines[index];
+			if (cached !== undefined) return cached;
 			const ctx = contexts[index]!;
 			// Swap the inner code-frame gutter `│` for a space so it does not nest a
 			// second vertical bar inside the frame border.
-			const display = replaceTabs(line.replace("│", " "));
+			const display = replaceTabs(allLines[index]!.replace("│", " "));
+			let styled: string;
 			if (ctx.kind === "dir") {
-				const styled = uiTheme.fg("accent", display);
-				return ctx.headerPath ? fileHyperlink(ctx.headerPath, styled) : styled;
+				const accent = uiTheme.fg("accent", display);
+				styled = ctx.headerPath ? fileHyperlink(ctx.headerPath, accent) : accent;
+			} else if (ctx.kind === "file") {
+				const tinted = uiTheme.fg(ctx.depth === 1 ? "accent" : "dim", display);
+				styled = ctx.headerPath ? fileHyperlink(ctx.headerPath, tinted) : tinted;
+			} else if (display.startsWith("+")) {
+				styled = uiTheme.fg("toolDiffAdded", display);
+			} else if (display.startsWith("-")) {
+				styled = uiTheme.fg("toolDiffRemoved", display);
+			} else {
+				styled = uiTheme.fg("toolOutput", display);
 			}
-			if (ctx.kind === "file") {
-				const styled = uiTheme.fg(ctx.depth === 1 ? "accent" : "dim", display);
-				return ctx.headerPath ? fileHyperlink(ctx.headerPath, styled) : styled;
-			}
-			if (display.startsWith("+")) return uiTheme.fg("toolDiffAdded", display);
-			if (display.startsWith("-")) return uiTheme.fg("toolDiffRemoved", display);
-			return uiTheme.fg("toolOutput", display);
+			styledLines[index] = styled;
+			return styled;
+		};
+		const changeGroups = groupLineIndicesByBlank(allLines).filter(indices => {
+			const first = allLines[indices[0]!]!;
+			return !first.startsWith("Safety cap reached") && !first.startsWith("Parse issues:");
 		});
-		const changeGroups = groupLineIndicesByBlank(allLines)
-			.filter(indices => {
-				const first = allLines[indices[0]!]!;
-				return !first.startsWith("Safety cap reached") && !first.startsWith("Parse issues:");
-			})
-			.map(indices => indices.map(index => styledLines[index]!));
 
 		const badge = { label: "proposed", color: "warning" as const };
 		const header = renderStatusLine(
@@ -278,17 +291,28 @@ export const astEditToolRenderer = {
 				uiTheme.fg("warning", formatParseErrorsCountLabel(details.parseErrors, details.parseErrorsTotal)),
 			);
 		}
-		return framedToolCard(uiTheme, ({ contentWidth }) => {
-			const changeLines = buildChangeBody(changeGroups, Boolean(options.expanded), COLLAPSED_CHANGE_LIMIT, uiTheme);
-			const bodyLines = [...changeLines, ...extraLines].map(l => truncateToWidth(l, contentWidth, Ellipsis.Omit));
-			while (bodyLines.length > 0 && bodyLines[0].trim() === "") bodyLines.shift();
-			return {
-				header,
-				sections: bodyLines.length > 0 ? [{ content: bodyLines }] : [],
-				phase: options.isPartial ? "partial" : "success",
-				borderColor: "borderMuted",
-			};
-		});
+		// The body is spinner-invariant: rebuild it only on expansion/width change.
+		let bodyMemo: { expanded: boolean; width: number; lines: readonly string[] } | undefined;
+		return framedToolCard(
+			uiTheme,
+			({ contentWidth }) => {
+				const expanded = Boolean(options.expanded);
+				if (bodyMemo === undefined || bodyMemo.expanded !== expanded || bodyMemo.width !== contentWidth) {
+					const changeLines = buildChangeBody(changeGroups, styleLine, expanded, COLLAPSED_CHANGE_LIMIT, uiTheme);
+					const lines = [...changeLines, ...extraLines].map(l => truncateToWidth(l, contentWidth, Ellipsis.Omit));
+					while (lines.length > 0 && lines[0].trim() === "") lines.shift();
+					bodyMemo = { expanded, width: contentWidth, lines };
+				}
+				const bodyLines = bodyMemo.lines;
+				return {
+					header,
+					sections: bodyLines.length > 0 ? [{ content: bodyLines }] : [],
+					phase: options.isPartial ? "partial" : "success",
+					borderColor: "borderMuted",
+				};
+			},
+			{ onInvalidate: () => (bodyMemo = undefined) },
+		);
 	},
 	describeCall(args: AstEditRenderArgs): NativeToolView {
 		return {

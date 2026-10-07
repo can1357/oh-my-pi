@@ -164,7 +164,7 @@ import type { Skill, SkillWarning } from "../extensibility/skills";
 import { expandSlashCommand, type FileSlashCommand, loadSlashCommands } from "../extensibility/slash-commands";
 import { normalizeToolEventInput, resolveToolEventInput } from "../extensibility/tool-event-input";
 import { GoalRuntime } from "../goals/runtime";
-import type { GoalModeState } from "../goals/state";
+import type { GoalModeState, GoalTokenUsage } from "../goals/state";
 import type { HindsightSessionState } from "../hindsight/state";
 import { InternalUrlRouter, type LocalProtocolOptions } from "../internal-urls";
 import { type ChainJudge, hasNativeJudge, journalJudgmentUsage, resolveJudge, sharedJudgmentCache } from "../judgment";
@@ -2069,15 +2069,7 @@ export class AgentSession implements SettingsScope {
 			setState: state => {
 				this.#goalModeState = state;
 			},
-			getCurrentUsage: () => {
-				const usage = this.getSessionStats().tokens;
-				return {
-					input: usage.input,
-					output: usage.output,
-					cacheRead: usage.cacheRead,
-					cacheWrite: usage.cacheWrite,
-				};
-			},
+			getCurrentUsage: () => this.#goalUsage(),
 			emit: event => {
 				if (event.type === "goal_updated") {
 					return this.#emitSessionEvent({ type: "goal_updated", goal: event.goal, state: event.state });
@@ -2655,19 +2647,20 @@ export class AgentSession implements SettingsScope {
 	}
 
 	/**
-	 * Re-anchor mode state to the session a branch just minted. Branching mints a
-	 * new session id/file (see {@link SessionManager.createBranchedSession}), so
-	 * without this the interactive-mode reconciler keeps the pre-branch vibe owner
-	 * scope and disabling vibe mode trips the stale-scope guard in
-	 * `VibeRuntime.#persistModeExit` (issue #10468). Mirrors the reconcile step
-	 * `switchSession` runs for the same reason. Best-effort: a reconcile failure
-	 * must not roll back an otherwise-successful branch.
+	 * Re-anchor mode state to the session a branch or `/new` just minted. Both
+	 * mint a new session id/file, so without this the interactive-mode reconciler
+	 * keeps the previous session's transient mode: a stale vibe owner scope trips
+	 * the guard in `VibeRuntime.#persistModeExit` after a branch (issue #10468),
+	 * and plan/goal mode keeps running in a new session that records no mode
+	 * (issue #14653). Mirrors the reconcile step `switchSession` runs for the same
+	 * reason. Best-effort: a reconcile failure must not roll back an
+	 * otherwise-successful transition.
 	 */
-	async #reconcileModeAfterBranch(): Promise<void> {
+	async #reconcileModeAfterTransition(): Promise<void> {
 		try {
 			await this.#sessionSwitchReconciler?.();
 		} catch (error) {
-			logger.warn("Failed to reconcile session mode after branch", {
+			logger.warn("Failed to reconcile session mode after session transition", {
 				sessionFile: this.sessionFile,
 				error: String(error),
 			});
@@ -3036,9 +3029,9 @@ export class AgentSession implements SettingsScope {
 
 	/** Emit an event to all listeners */
 	#emit(event: AgentSessionEvent): void {
-		// Copy array before iteration to avoid mutation during iteration.
-		const listeners = [...this.#eventListeners];
-		for (const l of listeners) {
+		// Listener array is copy-on-write (see `subscribe`), so iterating the
+		// current array is safe against (un)subscribes made by a listener.
+		for (const l of this.#eventListeners) {
 			try {
 				const result = l(event) as unknown;
 				// Listener may be an async function whose returned Promise we don't await;
@@ -3406,7 +3399,7 @@ export class AgentSession implements SettingsScope {
 
 	#buildPersistedMessageKeySet(): Set<string> {
 		const keys = new Set<string>();
-		for (const entry of this.sessionManager.getBranch()) {
+		for (const entry of this.sessionManager.getBranchView()) {
 			if (entry.type !== "message") continue;
 			const key = sessionMessagePersistenceKey(entry.message);
 			if (key !== undefined) keys.add(key);
@@ -3435,7 +3428,7 @@ export class AgentSession implements SettingsScope {
 		if (key === undefined) return false;
 		const keys = this.#ensurePersistedMessageKeys();
 		if (!keys.has(key)) return false;
-		const branch = this.sessionManager.getBranch();
+		const branch = this.sessionManager.getBranchView();
 		for (let index = branch.length - 1; index >= 0; index--) {
 			const entry = branch[index];
 			if (entry.type !== "message") continue;
@@ -3819,13 +3812,7 @@ export class AgentSession implements SettingsScope {
 
 		if (event.type === "turn_start") {
 			this.#advisors.onPrimaryTurnStart();
-			const usage = this.getSessionStats().tokens;
-			this.#goalRuntime.onTurnStart(`turn-${++this.#goalTurnCounter}`, {
-				input: usage.input,
-				output: usage.output,
-				cacheRead: usage.cacheRead,
-				cacheWrite: usage.cacheWrite,
-			});
+			this.#goalRuntime.onTurnStart(`turn-${++this.#goalTurnCounter}`, this.#goalUsage());
 		}
 
 		if (event.type === "tool_execution_start") {
@@ -4055,18 +4042,10 @@ export class AgentSession implements SettingsScope {
 			const ttsrAbortPendingAtAgentEnd = this.#ttsr.abortPending;
 			const emitAgentEndNotification = (options?: AgentEndSettleOptions) =>
 				this.#settleAgentEnd(event, activeMessages, options);
-			const usage = this.getSessionStats().tokens;
-			await this.#goalRuntime.onAgentEnd({
-				currentUsage: {
-					input: usage.input,
-					output: usage.output,
-					cacheRead: usage.cacheRead,
-					cacheWrite: usage.cacheWrite,
-				},
-			});
-			const fallbackAssistant = [...settledMessages]
-				.reverse()
-				.find((message): message is AssistantMessage => message.role === "assistant");
+			await this.#goalRuntime.onAgentEnd({ currentUsage: () => this.#goalUsage() });
+			const fallbackAssistant = settledMessages.findLast(
+				(message): message is AssistantMessage => message.role === "assistant",
+			);
 			const msg = this.#lastAssistantMessage ?? fallbackAssistant;
 			this.#lastAssistantMessage = undefined;
 			if (!msg) {
@@ -5027,14 +5006,16 @@ export class AgentSession implements SettingsScope {
 	 * Multiple listeners can be added. Returns unsubscribe function for this listener.
 	 */
 	subscribe(listener: AgentSessionEventListener): () => void {
-		this.#eventListeners.push(listener);
+		// Copy-on-write: `#emit` iterates the array it read without copying it.
+		this.#eventListeners = [...this.#eventListeners, listener];
 
 		// Return unsubscribe function for this specific listener
 		return () => {
 			const index = this.#eventListeners.indexOf(listener);
-			if (index !== -1) {
-				this.#eventListeners.splice(index, 1);
-			}
+			if (index === -1) return;
+			const listeners = this.#eventListeners.slice();
+			listeners.splice(index, 1);
+			this.#eventListeners = listeners;
 		};
 	}
 
@@ -8314,7 +8295,7 @@ export class AgentSession implements SettingsScope {
 	}
 
 	/**
-	 * Gate for idle-path queued-message auto-continue. See `#scheduleIdleQueueDrain` for rationale.
+	 * Gate for idle-path queued-message auto-continue (see `#scheduleQueuedMessageDrain`).
 	 */
 	#canAutoContinueForFollowUp(): boolean {
 		if (this.isStreaming) return false;
@@ -9559,6 +9540,7 @@ export class AgentSession implements SettingsScope {
 			this.#advisors.resetSessionState();
 			advisorRecordersDetached = false;
 			this.#reconnectToAgent();
+			await this.#reconcileModeAfterTransition();
 			// Drop the process-lifetime context-file cache so the rebuild re-reads
 			// AGENTS.md and friends from disk: the user may have edited them since
 			// the previous session started, and refreshBaseSystemPrompt() re-runs
@@ -9593,6 +9575,12 @@ export class AgentSession implements SettingsScope {
 	setSessionName(name: string, source: "auto" | "user" = "auto", trigger?: SessionNameTrigger): Promise<boolean> {
 		const setSessionName = this.sessionManager.setSessionName as SetSessionNameWithTrigger;
 		return setSessionName.call(this.sessionManager, name, source, trigger);
+	}
+
+	/** Write pending bash output and every session entry to the session file, as {@link fork} does before copying it. */
+	async flushToDisk(): Promise<void> {
+		await this.#bash.flushPending();
+		await this.sessionManager.flush();
 	}
 
 	/**
@@ -9642,9 +9630,7 @@ export class AgentSession implements SettingsScope {
 			}
 		}
 
-		await this.#bash.flushPending();
-		// Flush current session to ensure all entries are written
-		await this.sessionManager.flush();
+		await this.flushToDisk();
 		// Work admitted during the hook or flush awaits would be copied mid-flight.
 		if (requireIdleFor) this.#assertIdleForSnapshot(requireIdleFor);
 		let advisorRecordersDetached = false;
@@ -11537,7 +11523,7 @@ export class AgentSession implements SettingsScope {
 
 			this.#advisors.reattachRecorderFeeds();
 			advisorRecordersDetached = false;
-			await this.#reconcileModeAfterBranch();
+			await this.#reconcileModeAfterTransition();
 			return true;
 		} finally {
 			if (advisorRecordersDetached) {
@@ -11653,7 +11639,7 @@ export class AgentSession implements SettingsScope {
 			this.#advisors.resetSessionState();
 			this.#closeCodexProviderSessionsForHistoryRewrite();
 			advisorRecordersDetached = false;
-			await this.#reconcileModeAfterBranch();
+			await this.#reconcileModeAfterTransition();
 
 			return { cancelled: false, sessionFile: this.sessionFile };
 		} finally {
@@ -12145,6 +12131,11 @@ export class AgentSession implements SettingsScope {
 	 */
 	getSessionStats(): SessionStats {
 		return this.#stats.getSessionStats();
+	}
+
+	#goalUsage(): GoalTokenUsage {
+		const { input, output, cacheRead, cacheWrite } = this.#stats.getTokenTotals();
+		return { input, output, cacheRead, cacheWrite };
 	}
 
 	/**

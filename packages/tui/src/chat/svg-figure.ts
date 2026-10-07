@@ -15,7 +15,7 @@
 import { rasterizeSvg } from "@oh-my-pi/pi-natives";
 import { logger } from "@oh-my-pi/pi-utils";
 import { Image, type ImageBudget, imageMaxColumns } from "../components/image";
-import type { Markdown } from "../components/markdown";
+import { fencedCode, type Markdown } from "../components/markdown";
 import { type CellDimensions, getCellDimensions, getImageDimensions } from "../terminal-capabilities";
 import { getThemeEpoch, type ThemeColor, theme } from "../theme";
 import type { Component } from "../tui";
@@ -355,9 +355,7 @@ export class SvgFigure implements Component {
 		const source = this.#source;
 		if (!this.#options.markdown) return [];
 		if (this.#fallback?.source !== source) {
-			const longest = Math.max(2, ...(source.match(/`+/g) ?? []).map(run => run.length));
-			const fence = "`".repeat(longest + 1);
-			this.#fallback = { source, md: this.#options.markdown(`${fence}svg\n${source.trimEnd()}\n${fence}`) };
+			this.#fallback = { source, md: this.#options.markdown(fencedCode("svg", source)) };
 		}
 		return this.#fallback.md.render(width);
 	}

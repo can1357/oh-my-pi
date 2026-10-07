@@ -688,14 +688,7 @@ export async function listSessionFiles(folderPath: string): Promise<string[]> {
  */
 export async function listAllSessionFiles(): Promise<string[]> {
 	const folders = await listSessionFolders();
-	const allFiles: string[] = [];
-
-	for (const folder of folders) {
-		const files = await listSessionFiles(folder);
-		allFiles.push(...files);
-	}
-
-	return allFiles;
+	return (await Promise.all(folders.map(listSessionFiles))).flat();
 }
 
 /**
