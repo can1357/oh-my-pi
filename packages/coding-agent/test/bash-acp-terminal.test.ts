@@ -114,6 +114,42 @@ describe("BashTool ACP terminal routing", () => {
 		expect(releaseSpy).toHaveBeenCalledTimes(1);
 	});
 
+	it("passes the live session identity on every run and blanks the file once unpersisted", async () => {
+		const handle: ClientBridgeTerminalHandle = {
+			terminalId: "term-env",
+			waitForExit: async () => ({ exitCode: 0, signal: null }),
+			currentOutput: async () => ({ output: "", truncated: false }),
+			kill: async () => {},
+			release: async () => {},
+		};
+		const bridge: ClientBridge = { capabilities: { terminal: true }, createTerminal: async () => handle };
+		const createSpy = spyOn(bridge, "createTerminal");
+		let sessionId = "session-a";
+		let sessionFile: string | null = "/sessions/a.jsonl";
+		const tool = new BashTool({
+			...makeSession(bridge),
+			getSessionFile: () => sessionFile,
+			// Advisors key tool state as `<id>-advisor`; the env must carry the owning session.
+			getSessionId: () => `${sessionId}-advisor`,
+			sessionManager: { getSessionId: () => sessionId },
+		} as unknown as ToolSession);
+		const sessionEnvOf = (call: number) =>
+			Object.fromEntries(
+				(createSpy.mock.calls[call]![0].env ?? [])
+					.filter(({ name }) => name === "PI_SESSION_ID" || name === "PI_SESSION_FILE")
+					.map(({ name, value }) => [name, value]),
+			);
+
+		await tool.execute("call-env-a", { command: "true" });
+		sessionId = "session-b";
+		sessionFile = null;
+		await tool.execute("call-env-b", { command: "true" });
+
+		expect(sessionEnvOf(0)).toEqual({ PI_SESSION_ID: "session-a", PI_SESSION_FILE: "/sessions/a.jsonl" });
+		// Empty, not absent: an env overlay cannot unset a stale value inherited from a parent omp.
+		expect(sessionEnvOf(1)).toEqual({ PI_SESSION_ID: "session-b", PI_SESSION_FILE: "" });
+	});
+
 	it("extracts graphics from cumulative terminal snapshots without leaking escapes", async () => {
 		const frame = await encodeTerminalImage({
 			type: "image",
