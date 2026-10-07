@@ -7,8 +7,13 @@
 - Added optional `Terminal.settleOutput()`, which drains or drops queued output before the terminal is handed over; custom terminals may implement it ([#13794](https://github.com/can1357/oh-my-pi/pull/13794) by [@sjawhar](https://github.com/sjawhar)).
 - Added `writeStderrBehindTerminal()` (`@oh-my-pi/pi-tui/terminal-handoff`), which writes to stderr after the output a stopped terminal has not delivered yet ([#13794](https://github.com/can1357/oh-my-pi/pull/13794) by [@sjawhar](https://github.com/sjawhar)).
 
+### Changed
+
+- Sped up Markdown lexing of large documents (532 KB: ~29 ms → ~19 ms) ([#14667](https://github.com/can1357/oh-my-pi/pull/14667) by [@H4vC](https://github.com/H4vC))
+
 ### Fixed
 
+- Fixed quadratic Markdown lexing of documents with bare `\begin{…}` environments or unclosed `\[` openers ([#14667](https://github.com/can1357/oh-my-pi/pull/14667) by [@H4vC](https://github.com/H4vC))
 - Fixed stopping the TUI after a large write leaving queued output to paint over the shell or editor that takes the terminal next ([#13794](https://github.com/can1357/oh-my-pi/pull/13794) by [@sjawhar](https://github.com/sjawhar)).
 - Fixed text containing a lone UTF-16 surrogate swallowing the next character on unix terminals; the surrogate now shows as `�` ([#13794](https://github.com/can1357/oh-my-pi/pull/13794) by [@sjawhar](https://github.com/sjawhar)).
 

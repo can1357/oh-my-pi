@@ -5,9 +5,11 @@
 ### Changed
 
 - Inside a Tern pane, browser opens with `headed: false` now show as a Tern picture-in-picture too; only `app.tern: false` (or `browser.tern` / `PI_BROWSER_TERN=0`) opens Chromium instead
-
+- Inside a Tern pane, `/fork` opens the fork in a new pane beside the original, which keeps the original session
+- Roughly halved browser `extract` time in text mode on large pages ([#14668](https://github.com/can1357/oh-my-pi/pull/14668) by [@H4vC](https://github.com/H4vC))
 ### Fixed
 
+- Fixed `/new` keeping plan mode (and its plan-role model) or goal mode active in the new session ([#14653](https://github.com/can1357/oh-my-pi/issues/14653))
 - Fixed quitting a long session leaving the resume hint in the middle of output: it is now the last line, and nothing keeps painting after omp exits. When the terminal stops reading during the quit, omp waits for it to take the terminal restore and the hint before exiting ([#13794](https://github.com/can1357/oh-my-pi/pull/13794) by [@sjawhar](https://github.com/sjawhar)).
 - Fixed quitting after a large write sometimes leaving the terminal or tmux window title set to omp's title instead of restoring the previous one ([#13794](https://github.com/can1357/oh-my-pi/pull/13794) by [@sjawhar](https://github.com/sjawhar)).
 
