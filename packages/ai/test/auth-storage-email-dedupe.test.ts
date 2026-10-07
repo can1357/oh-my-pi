@@ -48,7 +48,7 @@ function countCredentialRows(dbPath: string, provider: string): number {
 			| undefined;
 		return row?.count ?? 0;
 	} finally {
-		db.close();
+		db.close(true);
 	}
 }
 
@@ -62,7 +62,7 @@ function readDisabledCauses(dbPath: string, provider: string): string[] {
 			.all(provider) as Array<{ disabled_cause?: string | null }>;
 		return rows.flatMap(row => (typeof row.disabled_cause === "string" ? [row.disabled_cause] : []));
 	} finally {
-		db.close();
+		db.close(true);
 	}
 }
 
@@ -76,7 +76,7 @@ function readStoredIdentityRows(
 			.query("SELECT identity_key, disabled_cause FROM auth_credentials WHERE provider = ? ORDER BY id ASC")
 			.all(provider) as Array<{ identity_key: string | null; disabled_cause: string | null }>;
 	} finally {
-		db.close();
+		db.close(true);
 	}
 }
 
@@ -88,7 +88,7 @@ function readAuthSchemaVersion(dbPath: string): number | null {
 			| undefined;
 		return typeof row?.version === "number" ? row.version : null;
 	} finally {
-		db.close();
+		db.close(true);
 	}
 }
 
@@ -100,7 +100,7 @@ function readTableSql(dbPath: string, tableName: string): string | null {
 			| undefined;
 		return row?.sql ?? null;
 	} finally {
-		db.close();
+		db.close(true);
 	}
 }
 
@@ -118,9 +118,11 @@ describe("AuthStorage openai-codex email dedupe", () => {
 	});
 
 	afterEach(async () => {
+		// Release the pool and its owning store before removing the fixture.
+		authStorage?.close();
+		authStorage = null;
 		store?.close();
 		store = null;
-		authStorage = null;
 		dbPath = "";
 		if (tempDir) {
 			await removeWithRetries(tempDir);

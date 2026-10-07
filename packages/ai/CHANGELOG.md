@@ -84,6 +84,10 @@
 
 - Fixed Codex Fast (`priority`) and Ultrafast usage being recorded, billed, and reported as Standard when the backend echoed a default service tier; the requested tier is now preserved in usage and performance records.
 
+### Fixed
+
+- Fixed the SQLite auth credential store leaving its database handle open on Windows after `close()`, which blocked temporary-directory cleanup with `EBUSY`; the store and its test helpers now force-close
+
 ## [18.8.0] - 2026-10-07
 
 ### Breaking Changes
