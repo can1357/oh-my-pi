@@ -212,10 +212,10 @@ Both PTY and non-PTY paths use `OutputSink`.
 
 ## OutputSink semantics
 
-The bash executor builds the sink with `headBytes` and `maxColumns` from settings (`resolveOutputSinkHeadBytes` / `resolveOutputMaxColumns`).
+The bash executor builds the sink with the inline windows and `maxColumns` from settings (`resolveOutputSinkWindows` / `resolveOutputMaxColumns`).
 
-- keeps the inline body within `spillThreshold` (`DEFAULT_MAX_BYTES`, 50 KiB by default), using UTF-8-safe boundaries,
-- when `headBytes > 0` (`tools.artifactHeadBytes`, default 20 KiB) it reserves a **head** window within that same budget and uses the remainder for a rolling **tail**; head retention is capped at half the total budget, and `dump()` splices in a middle-elision marker when necessary,
+- keeps output up to `spillThreshold` (`tools.artifactSpillThreshold`, 50 KiB by default) whole; past it the inline body stays within that budget, using UTF-8-safe boundaries,
+- when `headBytes > 0` (`tools.artifactHeadBytes`, default 20 KiB) it reserves a **head** window within that same budget, capped at half of it; once output overflows, the rolling **tail** keeps `tailBytes` (`tools.artifactTailBytes`, default 20 KiB, capped at the budget the head leaves), and `dump()` splices in a middle-elision marker when necessary,
 - per-line column cap: when `maxColumns > 0` (`tools.outputMaxColumns`, default 768 bytes) over-wide lines are ellipsis-truncated at write time and the rest of the line is dropped,
 - tracks total bytes/lines seen,
 - mirrors the sanitized, uncapped text stream to the artifact file when output overflows, a column cap dropped bytes, or the file is already active; the artifact file is capped at `tools.artifactMaxBytes` (default 16 MB: the first 3 MB plus a rolling tail, joined by an `[ARTIFACT TRUNCATED: …]` notice; `0` = unbounded),
@@ -235,7 +235,7 @@ The bash executor builds the sink with `headBytes` and `maxColumns` from setting
 
 ### Long-output caveat
 
-Runtime truncation is byte-threshold based in `OutputSink` (50 KiB shared head/tail budget by default, plus marker text). It does not enforce a hard line-count cap in this code path.
+Runtime truncation is byte-threshold based in `OutputSink` (the spill threshold bounds the head plus tail windows, plus marker text). It does not enforce a hard line-count cap (`tools.artifactTailLines`) in this code path.
 
 Kitty direct-image and Sixel frames are extracted before text sanitization/truncation and returned as image content. Their control bytes are not preserved as ordinary artifact text.
 

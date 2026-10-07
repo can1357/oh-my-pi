@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- `OutputSink` accepts a `tailBytes` window kept once output overflows `spillThreshold`, and `enforceInlineByteCap` accepts `headBytes` / `tailBytes` windows in place of its default 60%/25% split ([#14774](https://github.com/can1357/oh-my-pi/issues/14774))
+
 ## [18.8.0] - 2026-10-07
 
 ### Added

@@ -19,7 +19,7 @@ import { type OutputArtifactError, OutputSink, type OutputSummary } from "@oh-my
 import {
 	resolveOutputMaxColumns,
 	resolveOutputSinkArtifactMaxBytes,
-	resolveOutputSinkHeadBytes,
+	resolveOutputSinkWindows,
 } from "../tools/output-meta";
 import { getOrCreateSnapshot } from "../utils/shell-snapshot";
 import { TerminalGraphicsDecoder } from "../utils/terminal-graphics";
@@ -585,7 +585,7 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 				: undefined,
 		artifactPath: options?.artifactPath,
 		artifactId: options?.artifactId,
-		headBytes: resolveOutputSinkHeadBytes(settings),
+		...resolveOutputSinkWindows(settings),
 		artifactMaxBytes: resolveOutputSinkArtifactMaxBytes(settings),
 		maxColumns: resolveOutputMaxColumns(settings),
 		chunkThrottleMs: onChunk || onPreview ? (options?.chunkThrottleMs ?? 50) : 0,

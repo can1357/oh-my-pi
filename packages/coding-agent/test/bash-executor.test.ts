@@ -20,10 +20,12 @@ import * as piNatives from "@oh-my-pi/pi-natives";
 import { $which, removeSyncWithRetries } from "@oh-my-pi/pi-utils";
 
 import { cfgBashDirenvLoadTimeoutMs, cfgShellPath } from "@oh-my-pi/pi-coding-agent/exec/settings";
+import {
+	cfgToolsArtifactHeadBytes,
+	cfgToolsArtifactSpillThreshold,
+	cfgToolsArtifactTailBytes,
+} from "@oh-my-pi/pi-coding-agent/tools/settings";
 
-// Matches the schema default for `tools.artifactHeadBytes` (20 KB) used by
-// OutputSink when bash-executor pulls settings via resolveOutputSinkHeadBytes.
-const ARTIFACT_HEAD_BYTES_DEFAULT = 20 * 1024;
 const BACKGROUND_COMPLETION_RACE_MS = 750;
 // Killed-vs-orphaned proof: the command's marker write is gated on a `release`
 // file the test creates only AFTER the cancel has landed. A truly killed process
@@ -1029,7 +1031,7 @@ exit 64
 		// path is volume-independent, so a few hundred KB exercises the same
 		// no-freeze / no-OOM contract the original 40MB did without paying several
 		// seconds to generate it. 100k lines of `seq` is ~690KB — an order of
-		// magnitude past the ~71KB head+tail cap asserted below.
+		// magnitude past the ~50KB head+tail cap asserted below.
 		const lineCount = 100_000;
 		let chunkCount = 0;
 		const start = Date.now();
@@ -1049,10 +1051,10 @@ exit 64
 		// Output summary reflects every line even though the visible text is capped.
 		expect(result.totalLines).toBeGreaterThanOrEqual(lineCount);
 
-		// Truncated output stays bounded by head + tail + marker overhead
-		// (middle-elision keeps the head budget plus the tail spill window) — proof
-		// the full ~690KB stream was never accumulated in the visible buffer.
-		expect(result.outputBytes).toBeLessThanOrEqual(DEFAULT_MAX_BYTES + ARTIFACT_HEAD_BYTES_DEFAULT + 1024);
+		// Truncated output stays bounded by the spill threshold (shared by the
+		// head and tail windows) plus marker overhead — proof the full ~690KB
+		// stream was never accumulated in the visible buffer.
+		expect(result.outputBytes).toBeLessThanOrEqual(DEFAULT_MAX_BYTES + 1024);
 
 		// The tail should still contain numeric values near the end of the range.
 		// BSD `seq` on macOS formats large numbers in scientific notation, so parse
@@ -1072,6 +1074,40 @@ exit 64
 		// Should complete promptly (not frozen).
 		expect(elapsed).toBeLessThan(10_000);
 	}, 15_000);
+
+	it("keeps the configured head and tail windows once output spills", async () => {
+		if (process.platform === "win32") return;
+		const settings = await Settings.init();
+		cfgToolsArtifactSpillThreshold.set(settings, 16);
+		cfgToolsArtifactHeadBytes.set(settings, 4);
+		cfgToolsArtifactTailBytes.set(settings, 10);
+		// 160 lines of 128 bytes: 4 KiB of HEAD, 6 KiB of MIDDLE, 10 KiB of TAIL lines (#14774).
+		const sections: [string, number][] = [
+			["HEAD", 32],
+			["MIDDLE", 48],
+			["TAIL", 80],
+		];
+		const payload = sections
+			.flatMap(([label, count]) => Array.from({ length: count }, (_, i) => `${`${label}-${i}|`.padEnd(127, "x")}\n`))
+			.join("");
+		const payloadPath = path.join(tempDir, "payload.txt");
+		fs.writeFileSync(payloadPath, payload);
+		const artifactPath = path.join(tempDir, "artifact.log");
+
+		const result = await executeBash(`cat ${shellQuote(payloadPath)}`, {
+			cwd: tempDir,
+			timeout: 5000,
+			artifactPath,
+			artifactId: "spilled",
+		});
+
+		expect(result.artifactId).toBe("spilled");
+		expect(fs.readFileSync(artifactPath, "utf-8")).toBe(payload);
+		const lines = result.output.split("\n");
+		expect(lines.filter(line => line.startsWith("HEAD-"))).toHaveLength(32);
+		expect(lines.some(line => line.startsWith("MIDDLE-"))).toBe(false);
+		expect(lines.filter(line => line.startsWith("TAIL-"))).toHaveLength(80);
+	});
 
 	it("sources snapshot env vars across session commands", async () => {
 		if (process.platform === "win32") {

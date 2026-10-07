@@ -70,9 +70,10 @@ export interface OutputSinkOptions {
 	artifactPath?: string;
 	artifactId?: string;
 	/**
-	 * Total inline body budget (bytes). Default DEFAULT_MAX_BYTES. The head
-	 * window and rolling tail window share this budget, so a composed
-	 * `dump()` body never exceeds it (plus the elision marker).
+	 * Total inline body budget (bytes). Default DEFAULT_MAX_BYTES. Output up to
+	 * this size stays whole; past it the sink keeps the head window plus a
+	 * rolling tail window, so a composed `dump()` body never exceeds it (plus
+	 * the elision marker).
 	 */
 	spillThreshold?: number;
 	/**
@@ -82,6 +83,11 @@ export interface OutputSinkOptions {
 	 * least half the inline budget. Default 0 = tail-only behavior.
 	 */
 	headBytes?: number;
+	/**
+	 * Rolling tail kept once output overflows `spillThreshold`. Defaults to,
+	 * and is clamped to, the part of `spillThreshold` the head window leaves.
+	 */
+	tailBytes?: number;
 	/**
 	 * Per-line byte cap. When > 0, lines wider than `maxColumns` bytes are
 	 * truncated with an ellipsis at write time; remaining bytes up to the next
@@ -671,6 +677,14 @@ export interface InlineByteCapOptions {
 	/** Inline byte budget. Defaults to {@link DEFAULT_MAX_BYTES}. */
 	maxBytes?: number;
 	/**
+	 * Head window kept when over budget. Defaults to 60% of `maxBytes`. Callers
+	 * overriding a window must leave room under `maxBytes` for the elision
+	 * marker and the artifact footer.
+	 */
+	headBytes?: number;
+	/** Tail window kept when over budget. Defaults to 25% of `maxBytes`. */
+	tailBytes?: number;
+	/**
 	 * Persist the full text as a session artifact. When an artifact id is
 	 * returned, a `[raw output: artifact://<id>]` footer is appended so the
 	 * elided bytes stay recoverable.
@@ -695,10 +709,11 @@ function trimTailToLineBoundary(text: string): string {
  * Final-defense inline size guard for tool results.
  *
  * No-op when `text` fits within `maxBytes` (the common path). Otherwise keeps
- * ~60% of the budget from the head and ~25% from the tail — cut on line
- * boundaries, never splitting a multi-byte UTF-8 sequence — with an elision
- * marker between. The remaining ~15% is slack for the marker and the optional
- * `[raw output: artifact://<id>]` footer, so the result stays under `maxBytes`.
+ * the `headBytes` / `tailBytes` windows (default ~60% / ~25% of the budget) —
+ * cut on line boundaries, never splitting a multi-byte UTF-8 sequence — with
+ * an elision marker between. With the defaults, the remaining ~15% is slack
+ * for the marker and the optional `[raw output: artifact://<id>]` footer, so
+ * the result stays under `maxBytes`.
  */
 export async function enforceInlineByteCap(text: string, options: InlineByteCapOptions): Promise<string> {
 	const maxBytes = options.maxBytes ?? DEFAULT_MAX_BYTES;
@@ -706,11 +721,13 @@ export async function enforceInlineByteCap(text: string, options: InlineByteCapO
 	const totalBytes = Buffer.byteLength(text, "utf-8");
 	if (totalBytes <= maxBytes) return text;
 
-	const head = trimHeadToLineBoundary(truncateHeadBytes(text, Math.floor(maxBytes * 0.6)).text);
-	const tail = trimTailToLineBoundary(truncateTailBytes(text, Math.floor(maxBytes * 0.25)).text);
+	const headBytes = options.headBytes ?? Math.floor(maxBytes * 0.6);
+	const tailBytes = options.tailBytes ?? Math.floor(maxBytes * 0.25);
+	const head = trimHeadToLineBoundary(truncateHeadBytes(text, headBytes).text);
+	const tail = trimTailToLineBoundary(truncateTailBytes(text, tailBytes).text);
 	const elidedBytes = Math.max(0, totalBytes - Buffer.byteLength(head, "utf-8") - Buffer.byteLength(tail, "utf-8"));
 	const marker = `[…${elidedBytes}B elided…]`;
-	let composed = `${head}\n${marker}\n${tail}`;
+	let composed = head ? `${head}\n${marker}\n${tail}` : `${marker}\n${tail}`;
 
 	const artifactId = await options.saveArtifact?.(text);
 	if (artifactId) {
@@ -882,6 +899,8 @@ export class OutputSink {
 	#bufferBytes = 0;
 	/** The overflowed tail window may exceed its budget until {@link #trimTail} runs. */
 	#tailUntrimmed = false;
+	/** The in-memory windows dropped output; the tail now keeps at most `#tailLimit`. */
+	#overflowed = false;
 	#head = "";
 	#headBytes = 0;
 	#headLines = 0; // newline count inside #head
@@ -922,6 +941,7 @@ export class OutputSink {
 	readonly #artifactId?: string;
 	readonly #spillThreshold: number;
 	readonly #headLimit: number;
+	readonly #tailLimit: number;
 	readonly #onChunk?: (chunk: string) => void;
 	readonly #chunkThrottleMs: number;
 	readonly #maxColumns: number;
@@ -950,6 +970,7 @@ export class OutputSink {
 			artifactId,
 			spillThreshold = DEFAULT_MAX_BYTES,
 			headBytes = 0,
+			tailBytes = Number.POSITIVE_INFINITY,
 			maxColumns = 0,
 			onChunk,
 			chunkThrottleMs = 0,
@@ -960,6 +981,7 @@ export class OutputSink {
 		this.#artifactId = artifactId;
 		this.#spillThreshold = spillThreshold;
 		this.#headLimit = Math.max(0, Math.min(headBytes, Math.floor(spillThreshold / 2)));
+		this.#tailLimit = Math.max(0, tailBytes);
 		this.#maxColumns = Math.max(0, maxColumns);
 		this.#onChunk = onChunk;
 		this.#chunkThrottleMs = chunkThrottleMs;
@@ -1178,26 +1200,32 @@ export class OutputSink {
 		return true;
 	}
 
-	// The rolling tail budget is whatever the head window has not consumed of
-	// the inline budget: `spillThreshold - #headBytes`. While the head window
-	// fills it shrinks toward `spillThreshold - headLimit`; after `replace()`
-	// (head cleared) it grows back to the full threshold. This keeps
+	// Until output first overflows, the rolling tail may hold whatever the head
+	// window has not consumed of the inline budget (`spillThreshold -
+	// #headBytes`), so sub-threshold output stays whole. Once it overflows, the
+	// tail shrinks to `#tailLimit` when that is smaller. After `replace()` (head
+	// cleared) the budget grows back to the full threshold. Either way
 	// `head + tail <= spillThreshold`, so the composed dump body fits the
 	// inline byte cap by construction.
+
+	/** Current rolling tail budget; see the comment above. */
+	#tailBudget(): number {
+		const room = Math.max(0, this.#spillThreshold - this.#headBytes);
+		return this.#overflowed ? Math.min(room, this.#tailLimit) : room;
+	}
 
 	#willOverflow(dataBytes: number): boolean {
 		// Triggers file mirroring as soon as the next chunk would push us over
 		// the tail budget — i.e. the first byte that could be lost from memory.
-		return this.#bufferBytes + dataBytes > this.#spillThreshold - this.#headBytes;
+		// After an overflow every byte is mirrored: the shrunken tail window may
+		// have room again, but the artifact must stay contiguous.
+		return this.#overflowed || this.#bufferBytes + dataBytes > this.#spillThreshold - this.#headBytes;
 	}
 
 	#pushTail(chunk: string, dataBytes: number): void {
 		if (dataBytes === 0) return;
 
-		const threshold = Math.max(0, this.#spillThreshold - this.#headBytes);
-		const willOverflow = this.#bufferBytes + dataBytes > threshold;
-
-		if (!willOverflow) {
+		if (!this.#willOverflow(dataBytes)) {
 			this.#buffer += chunk;
 			this.#bufferBytes += dataBytes;
 			return;
@@ -1205,10 +1233,12 @@ export class OutputSink {
 
 		// Overflow: keep only a tail window in memory.
 		this.#truncated = true;
+		this.#overflowed = true;
+		const budget = this.#tailBudget();
 
 		// Avoid creating a giant intermediate string when chunk alone dominates.
-		if (dataBytes >= threshold) {
-			const { text, bytes } = truncateTailBytes(chunk, threshold);
+		if (dataBytes >= budget) {
+			const { text, bytes } = truncateTailBytes(chunk, budget);
 			this.#buffer = text;
 			this.#bufferBytes = bytes;
 			this.#tailUntrimmed = false;
@@ -1220,16 +1250,16 @@ export class OutputSink {
 		this.#buffer += chunk;
 		this.#bufferBytes += dataBytes;
 		this.#tailUntrimmed = true;
-		if (this.#bufferBytes > threshold * 2) this.#trimTail();
+		if (this.#bufferBytes > budget * 2) this.#trimTail();
 	}
 
 	/** Cut an overflowed tail window back to the current tail budget. */
 	#trimTail(): void {
 		if (!this.#tailUntrimmed) return;
 		this.#tailUntrimmed = false;
-		const threshold = Math.max(0, this.#spillThreshold - this.#headBytes);
-		if (this.#bufferBytes <= threshold) return;
-		const { text, bytes } = truncateTailBytes(this.#buffer, threshold);
+		const budget = this.#tailBudget();
+		if (this.#bufferBytes <= budget) return;
+		const { text, bytes } = truncateTailBytes(this.#buffer, budget);
 		this.#buffer = text;
 		this.#bufferBytes = bytes;
 	}
@@ -1424,6 +1454,7 @@ export class OutputSink {
 		this.#buffer = text;
 		this.#bufferBytes = Buffer.byteLength(text, "utf-8");
 		this.#tailUntrimmed = false;
+		this.#overflowed = false;
 		this.#head = "";
 		this.#headBytes = 0;
 		this.#headLines = 0;

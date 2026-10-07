@@ -1,9 +1,9 @@
-import { DEFAULT_MAX_BYTES, type OutputArtifactError, OutputSink } from "@oh-my-pi/pi-tui/tools/streaming-output";
+import { type OutputArtifactError, OutputSink } from "@oh-my-pi/pi-tui/tools/streaming-output";
 import type { ToolSession } from "../../tools";
 import {
 	resolveOutputMaxColumns,
 	resolveOutputSinkArtifactMaxBytes,
-	resolveOutputSinkHeadBytes,
+	resolveOutputSinkWindows,
 } from "../../tools/output-meta";
 import { isEvalTimeoutControlEvent, withBridgeTimeoutPause } from "../bridge-timeout";
 import { DisplayOutputCollector } from "../executor-base";
@@ -110,8 +110,7 @@ export async function executeJs(code: string, options: JsExecutorOptions): Promi
 	const outputSink = new OutputSink({
 		artifactPath: options.artifactPath,
 		artifactId: options.artifactId,
-		spillThreshold: DEFAULT_MAX_BYTES,
-		headBytes: resolveOutputSinkHeadBytes(options.session.settings),
+		...resolveOutputSinkWindows(options.session.settings),
 		artifactMaxBytes: resolveOutputSinkArtifactMaxBytes(options.session.settings),
 		maxColumns: resolveOutputMaxColumns(options.session.settings),
 		onChunk: chunk => options.onChunk?.(chunk),

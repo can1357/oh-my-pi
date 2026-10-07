@@ -17,6 +17,7 @@ import type { Setting } from "../config/registry";
 import type { Settings } from "../config/settings";
 
 import {
+	type InlineByteCapOptions,
 	type OutputSummary,
 	type TruncationResult,
 	truncateMiddle,
@@ -471,13 +472,24 @@ function getSpillConfig(s: Settings | undefined) {
 	};
 }
 
+/** Inline windows of a streaming `OutputSink`, in bytes; see {@link resolveOutputSinkWindows}. */
+export interface OutputSinkWindows {
+	spillThreshold: number;
+	headBytes: number;
+	tailBytes: number;
+}
+
 /**
- * Resolve the OutputSink `headBytes` budget from session settings.
- * Exposed so streaming executors (bash/python/ssh/eval) can opt into
- * middle elision with the same per-user configuration.
+ * Resolve the OutputSink inline windows from the same settings as the generic
+ * artifact spill (`tools.artifactSpillThreshold`, `tools.artifactHeadBytes`,
+ * `tools.artifactTailBytes`), so streaming executors (bash/eval) keep the
+ * configured head and tail. Head is clamped to half the threshold and tail to
+ * the rest: the sink's `head + tail <= spillThreshold` invariant.
  */
-export function resolveOutputSinkHeadBytes(s: Settings | undefined): number {
-	return getSpillConfig(s).headBytes;
+export function resolveOutputSinkWindows(s: Settings | undefined): OutputSinkWindows {
+	const { threshold, headBytes, tailBytes } = getSpillConfig(s);
+	const head = Math.min(headBytes, Math.floor(threshold / 2));
+	return { spillThreshold: threshold, headBytes: head, tailBytes: Math.min(tailBytes, threshold - head) };
 }
 
 /**
@@ -493,11 +505,13 @@ export function resolveOutputSinkHeadBytes(s: Settings | undefined): number {
 const INLINE_CAP_SLACK_BYTES = 2 * 1024;
 
 /**
- * Resolve the `enforceInlineByteCap` budget for streaming tools (bash/ssh)
- * from session settings: the user's spill threshold plus notice slack.
+ * Resolve the `enforceInlineByteCap` budget for streaming tools (bash) from
+ * session settings: the user's spill threshold plus notice slack, keeping the
+ * same head/tail windows as {@link resolveOutputSinkWindows}.
  */
-export function resolveInlineByteCapBudget(s: Settings | undefined): number {
-	return getSpillConfig(s).threshold + INLINE_CAP_SLACK_BYTES;
+export function resolveInlineByteCap(s: Settings | undefined): InlineByteCapOptions {
+	const { spillThreshold, headBytes, tailBytes } = resolveOutputSinkWindows(s);
+	return { maxBytes: spillThreshold + INLINE_CAP_SLACK_BYTES, headBytes, tailBytes };
 }
 
 /**

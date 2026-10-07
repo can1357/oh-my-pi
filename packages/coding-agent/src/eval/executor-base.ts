@@ -6,7 +6,7 @@ import type { ToolSession } from "../tools";
 import {
 	resolveOutputMaxColumns,
 	resolveOutputSinkArtifactMaxBytes,
-	resolveOutputSinkHeadBytes,
+	resolveOutputSinkWindows,
 } from "../tools/output-meta";
 import { EVAL_TIMEOUT_PAUSE_OP, EVAL_TIMEOUT_RESUME_OP, isEvalTimeoutControlEvent } from "./bridge-timeout";
 import type { JsStatusEvent } from "./js/shared/types";
@@ -448,7 +448,7 @@ export async function executeWithKernelBase<
 		onChunk: options?.onChunk,
 		artifactPath: options?.artifactPath,
 		artifactId: options?.artifactId,
-		headBytes: resolveOutputSinkHeadBytes(settings),
+		...resolveOutputSinkWindows(settings),
 		artifactMaxBytes: resolveOutputSinkArtifactMaxBytes(settings),
 		maxColumns: resolveOutputMaxColumns(settings),
 	});

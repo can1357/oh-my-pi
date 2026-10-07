@@ -45,7 +45,7 @@ import { type EvalBackendsAllowance, resolveEvalBackends } from "./eval-backends
 import { generateCodeModeDeclarations } from "@oh-my-pi/pi-tui/tools/eval-format/code-mode-declarations";
 import { upsertStatusEvent } from "@oh-my-pi/pi-tui/tools/eval";
 import { formatOutputNotice } from "@oh-my-pi/pi-tui/tools/output-meta";
-import { resolveOutputMaxColumns, resolveOutputSinkArtifactMaxBytes, resolveOutputSinkHeadBytes } from "./output-meta";
+import { resolveOutputMaxColumns, resolveOutputSinkArtifactMaxBytes, resolveOutputSinkWindows } from "./output-meta";
 import { ToolAbortError, throwIfAborted } from "./tool-errors";
 import { hasWaitTool } from "./wait";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
@@ -891,7 +891,7 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 			outputSink = new OutputSink({
 				artifactPath,
 				artifactId,
-				headBytes: resolveOutputSinkHeadBytes(session.settings),
+				...resolveOutputSinkWindows(session.settings),
 				artifactMaxBytes: resolveOutputSinkArtifactMaxBytes(session.settings),
 				maxColumns: resolveOutputMaxColumns(session.settings),
 				onChunk: chunk => {

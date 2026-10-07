@@ -44,7 +44,7 @@ import { startService, type ServiceReady } from "../launch/services";
 import { isFindEnabled } from "./jfind";
 import { formatArtifactErrorNotice } from "@oh-my-pi/pi-tui/tools/output-meta";
 import { formatOutputNotice } from "@oh-my-pi/pi-tui/tools/output-meta";
-import { resolveInlineByteCapBudget } from "./output-meta";
+import { resolveInlineByteCap } from "./output-meta";
 import { resolveToCwd } from "./path-utils";
 import { extractLeadingCdTarget, extractLiteralAndChainSegments, tokenizeShellSegments } from "./shell-tokenize";
 import { ToolAbortError } from "./tool-errors";
@@ -733,12 +733,13 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 		// Final-defense inline cap config, shared by the timeout and normal
 		// completion paths. The sink already bounds inline bodies to the spill
 		// threshold, so with the notice slack this only fires on paths that
-		// bypass the sink (client-bridge terminals, minimizer misses). When the
-		// sink spilled, its artifact already holds the full raw stream — reuse
-		// that id instead of saving a second (already-truncated) copy, so the
+		// bypass the sink (client-bridge terminals, minimizer misses), and then
+		// keeps the configured head/tail windows. When the sink spilled, its
+		// artifact already holds the full raw stream — reuse that id instead of
+		// saving a second (already-truncated) copy, so the
 		// `[raw output: artifact://N]` footer and the truncation notice agree.
 		const inlineCap = {
-			maxBytes: resolveInlineByteCapBudget(this.session.settings),
+			...resolveInlineByteCap(this.session.settings),
 			saveArtifact: result.artifactError
 				? undefined
 				: (full: string) => result.artifactId ?? saveBashOriginalArtifact(this.session, full),

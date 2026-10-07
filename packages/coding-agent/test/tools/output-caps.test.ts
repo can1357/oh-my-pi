@@ -1,9 +1,9 @@
 /**
  * Contract tests for `enforceInlineByteCap`, the final-defense inline size
  * guard at the tool-result boundary (bash, browser). Over-cap text keeps a
- * head (~60% of budget) and tail (~25%) cut on line boundaries with an
- * elision marker between; sub-cap text passes through untouched so existing
- * bounded-output paths (bash sink/minimizer) see zero behavior change.
+ * head (~60% of budget by default) and tail (~25%) cut on line boundaries
+ * with an elision marker between; sub-cap text passes through untouched so
+ * existing bounded-output paths (bash sink/minimizer) see zero behavior change.
  */
 import { describe, expect, it } from "bun:test";
 import { DEFAULT_MAX_BYTES, enforceInlineByteCap } from "@oh-my-pi/pi-tui/tools/streaming-output";
@@ -74,6 +74,21 @@ describe("enforceInlineByteCap", () => {
 		expect(headBytes).toBeLessThanOrEqual(Math.floor(maxBytes * 0.6));
 		expect(tailBytes).toBeLessThanOrEqual(Math.floor(maxBytes * 0.25));
 		expect(headBytes).toBeGreaterThan(tailBytes);
+	});
+
+	it("keeps caller-supplied head/tail windows instead of the default ratios", async () => {
+		const text = makeLines(500); // 52-byte lines including the newline
+		const lines = (
+			await enforceInlineByteCap(text, { maxBytes: 4096, headBytes: 10 * 52, tailBytes: 50 * 52 })
+		).split("\n");
+		expect(lines).toHaveLength(10 + 1 + 50);
+		expect(lines[9]).toStartWith("line-00010 ");
+		expect(lines[10]).toMatch(MARKER_PATTERN);
+		expect(lines[11]).toStartWith("line-00451 ");
+
+		// `headBytes: 0` is tail-only: no blank head line before the marker.
+		const tailOnly = await enforceInlineByteCap(text, { maxBytes: 4096, headBytes: 0, tailBytes: 52 });
+		expect(tailOnly).toBe(`[…25948B elided…]\nline-00500 ${"x".repeat(40)}`);
 	});
 
 	it("does not corrupt multi-byte UTF-8 near the cut boundaries", async () => {

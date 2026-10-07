@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Bash, Python, and JavaScript eval output now spills at `tools.artifactSpillThreshold` and keeps the configured `tools.artifactHeadBytes` / `tools.artifactTailBytes` windows inline instead of a fixed 60%/25% split ([#14774](https://github.com/can1357/oh-my-pi/issues/14774))
+
 ## [18.8.0] - 2026-10-07
 
 ### Added

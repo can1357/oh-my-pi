@@ -364,6 +364,27 @@ describe("OutputSink", () => {
 		expect(artifactText).toBe("headabcdefgh");
 	});
 
+	test("keeps output whole up to the spill threshold, then the configured head and tail windows", async () => {
+		const windows = { spillThreshold: 32, headBytes: 4, tailBytes: 8 };
+		const fits = "0123456789abcdefghijklmnopqrstuv"; // exactly the threshold, more than head + tail
+		const whole = new OutputSink(windows);
+		whole.push(fits);
+		expect((await whole.dump()).output).toBe(fits);
+
+		const dir = await createTempDir();
+		const artifactPath = path.join(dir, "windows.log");
+		const sink = new OutputSink({ ...windows, artifactPath, artifactId: "windows" });
+		// One byte per push, all before the artifact file opens: bytes after the
+		// overflow land while the shrunken tail window has room again, and must
+		// still reach the artifact.
+		const payload = `${fits}wxyzABCD`;
+		for (const char of payload) sink.push(char);
+		const dumped = await sink.dump();
+
+		expect(dumped.output).toBe(`0123\n${formatMiddleElisionMarker(0, 28)}\nwxyzABCD`);
+		expect(await Bun.file(artifactPath).text()).toBe(payload);
+	});
+
 	test("throttled onChunk coalesces held-back chunks instead of dropping them", async () => {
 		const chunks: string[] = [];
 		const sink = new OutputSink({ onChunk: chunk => chunks.push(chunk), chunkThrottleMs: 60_000 });
