@@ -1050,7 +1050,7 @@ export interface InputEvent {
  * the built-in approval picker opens. Lets an external reviewer (a web UI, a
  * second human, an internal tool) own the decision instead of the TUI picker.
  *
- * Aggregation is **first-wins**: the first handler returning a defined result
+ * Aggregation is **first-wins**: the first handler returning a valid decision
  * decides and no later handler runs. This is a decision hook, not a policy
  * gate — an extension that must veto every plan unconditionally belongs on
  * `tool_call` for `xd://propose`, which fires earlier and cannot be outraced.

@@ -402,9 +402,15 @@ describe("InteractiveMode plan_review event", () => {
 		expect(promptSpy.mock.calls.some(isPlanApprovedCall)).toBe(false);
 	});
 
-	it("falls back to the picker when an approval asks to keep an over-full context", async () => {
-		await createMode(pi => pi.on("plan_review", () => ({ action: "approve", context: "keep" })));
-		await enterPlanMode("local://PLAN.md", "# Plan\n\nbody");
+	it("falls back to the picker with the reviewer's revision when an approval asks to keep an over-full context", async () => {
+		await createMode(pi =>
+			pi.on("plan_review", async () => {
+				// The reviewer edits the plan, then asks for a context mode the host must refuse.
+				await Bun.write(localPath("local://PLAN.md"), "# Plan\n\nreviewer revision");
+				return { action: "approve", context: "keep" };
+			}),
+		);
+		await enterPlanMode("local://PLAN.md", "# Plan\n\noriginal");
 		vi.spyOn(session, "getContextUsage").mockReturnValue({
 			tokens: 99_000,
 			contextWindow: 100_000,
@@ -418,6 +424,8 @@ describe("InteractiveMode plan_review event", () => {
 
 		expect(warning).toHaveBeenCalledWith(expect.stringContaining("too full"));
 		expect(picker).toHaveBeenCalledTimes(1);
+		// The picker must preview the revision an approval from it would execute.
+		expect(picker.mock.calls[0]?.[0]).toContain("reviewer revision");
 		expect(promptSpy.mock.calls.some(isPlanApprovedCall)).toBe(false);
 	});
 

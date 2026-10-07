@@ -561,9 +561,9 @@ Contract:
 - `approve` executes the plan. `context` applies in interactive mode only and defaults to `"fresh"` (equivalent to the picker's "Approve and execute"); `"compact"` distills the plan-mode transcript first, `"keep"` preserves context and is refused — with a warning and a fall back to the picker — when the context is too full, exactly as the picker disables that option.
 - `refine` requires a non-empty `feedback`, which is delivered as a user turn; plan mode stays active.
 - `dismiss` leaves plan mode active and stops the current turn.
-- An invalid result (unknown `action`, `refine` without feedback, bad `context`) is reported once through the extension-error channel and treated as no decision.
+- An invalid result (unknown `action`, `refine` without feedback, bad `context`) is reported once through the extension-error channel and treated as no decision: the next `plan_review` handler still runs.
 
-**First-wins, not a policy gate.** The first handler returning anything other than `undefined` decides; later handlers do not run. Do not use `plan_review` for a mandatory veto — another extension can answer first. A veto that must always apply belongs on `tool_call` for `xd://propose`, which fires earlier, is seen by every subscriber, and composes with this event.
+**First-wins, not a policy gate.** The first handler returning a valid decision decides; later handlers do not run. Do not use `plan_review` for a mandatory veto — another extension can answer first. A veto that must always apply belongs on `tool_call` for `xd://propose`, which fires earlier, is seen by every subscriber, and composes with this event.
 
 **No timeout.** `plan_review` handlers are exempt from the 30s extension-handler budget (`extensionHandlers.toolCallTimeoutMs` and friends) because a human review has no deadline. Cancellation is signal-based: `event.signal` aborts when the operator cancels the wait (Esc/Ctrl+C on the waiting overlay), a newer proposal supersedes this one, the session switches, plan mode exits, or the host shuts down. Tear down your own review surface — dialogs, spawned processes — from that signal; a handler that ignores it simply has its (late) answer discarded.
 

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added the `plan_review` extension event, letting an external reviewer approve, refine, or dismiss a plan instead of the built-in plan-mode picker (interactive and ACP) ([#12982](https://github.com/can1357/oh-my-pi/pull/12982) by [@consegrado](https://github.com/consegrado)).
+
 ### Fixed
 
 - Fixed Claude Opus 5.5 and Sonnet 5.5 disappearing with mixed-access Google Antigravity accounts; models now route to accounts that serve them, and revoked accounts no longer block catalog refresh ([#14924](https://github.com/can1357/oh-my-pi/issues/14924)).
@@ -14,16 +18,6 @@
 - Fixed the terminal title and Tern busy state staying in the working state after an interrupt cancels a scheduled retry or continuation before it starts ([#14917](https://github.com/can1357/oh-my-pi/pull/14917) by [@wolfiesch](https://github.com/wolfiesch))
 
 ## [18.8.4] - 2026-10-08
-### Added
-
-- Added `omp login` command for terminal-based OAuth authentication, including automated model discovery refresh and browser-opening support
-- Enabled `org-scoped-identity` and `oauth-token-env` configuration parsing for authentication providers
-- Adopted namespaced `authStorage` API for CLI and session management
-- Added usage reporting for failed native judgments, including error stop reason and message
-- Added openrouter/~typesafe/jev-latest as a native judge candidate in priority configuration
-- Added `OMP_MCP_STARTUP_TIMEOUT_MS` and `mcp.startupTimeoutMs` to configure the initial MCP discovery window, plus `OMP_MCP_REQUIRE_READY=1` to fail headless print runs before the first turn when a server is unavailable.
-- Added `auth.accountPolicies` for per-account OAuth priority and reserve controls, with matching policy state in `omp usage` ([#12243](https://github.com/can1357/oh-my-pi/pull/12243) by [@schickling-assistant](https://github.com/schickling-assistant)).
-- Added the `plan_review` extension event, letting an external reviewer approve, refine, or dismiss a plan instead of the built-in plan-mode picker (interactive and ACP) ([#12982](https://github.com/can1357/oh-my-pi/pull/12982) by [@consegrado](https://github.com/consegrado)).
 
 ### Changed
 

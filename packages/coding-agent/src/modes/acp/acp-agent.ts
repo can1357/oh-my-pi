@@ -601,6 +601,10 @@ export class AcpAgent implements Agent {
 	#clientCapabilities: ClientCapabilities | undefined;
 	#cancelCleanupTimeoutMs = ACP_CANCEL_CLEANUP_TIMEOUT_MS;
 	#blobs = new BlobStore(getBlobsDir());
+	/** Pending plan review per session. A `plan_review` handler runs unbounded, so a mode
+	 *  switch, a newer proposal, or closing the session aborts it explicitly — the tool
+	 *  call's own signal only covers turn cancellation. */
+	#planReviews = new WeakMap<AgentSession, AbortController>();
 
 	constructor(connection: AgentSideConnection, createSession: CreateAcpSession, initialSession?: AgentSession) {
 		this.#connection = connection;
@@ -1849,6 +1853,7 @@ export class AcpAgent implements Agent {
 		if (!availableModes.some(mode => mode.id === modeId)) {
 			throw new Error(`Unsupported ACP mode: ${modeId}`);
 		}
+		this.#abortAcpPlanReview(session, "ACP session mode changed");
 		if (modeId === ACP_PLAN_MODE_ID) {
 			const previous = session.getPlanModeState();
 			session.setPlanModeState({
@@ -1889,6 +1894,33 @@ export class AcpAgent implements Agent {
 		signal?: AbortSignal,
 		toolCallId?: string,
 	): Promise<AgentToolResult<unknown>> {
+		// A newer proposal supersedes the one still under review.
+		this.#abortAcpPlanReview(session, "Superseded by a newer plan proposal");
+		const review = new AbortController();
+		this.#planReviews.set(session, review);
+		try {
+			const reviewSignal = signal ? AbortSignal.any([signal, review.signal]) : review.signal;
+			return await this.#reviewAcpPlanProposal(session, title, reviewSignal, toolCallId);
+		} finally {
+			if (this.#planReviews.get(session) === review) this.#planReviews.delete(session);
+		}
+	}
+
+	#abortAcpPlanReview(session: AgentSession, reason: string): void {
+		const review = this.#planReviews.get(session);
+		if (!review) return;
+		this.#planReviews.delete(session);
+		review.abort(new DOMException(reason, "AbortError"));
+	}
+
+	/** Body of {@link #handleAcpPlanProposal}; `signal` covers turn cancellation and every
+	 *  host-side reason the review went stale. */
+	async #reviewAcpPlanProposal(
+		session: AgentSession,
+		title: string,
+		signal: AbortSignal,
+		toolCallId?: string,
+	): Promise<AgentToolResult<unknown>> {
 		const state = session.getPlanModeState();
 		if (!state?.enabled) {
 			throw new ToolError("Plan mode is not active.");
@@ -1925,7 +1957,7 @@ export class AcpAgent implements Agent {
 						resolvedPlanPath: this.#resolveAcpPlanFilePath(session, planFilePath),
 						title: resolvedTitle,
 						planContent,
-						signal: signal ?? new AbortController().signal,
+						signal,
 					},
 					{ signal },
 				)
@@ -2077,14 +2109,15 @@ export class AcpAgent implements Agent {
 	 * Guard every resumption point in an ACP plan review: the turn may have been
 	 * cancelled, or the client may have switched the session mode, while a
 	 * `plan_review` handler or an elicitation was pending. Either way the
-	 * decision is stale and must not reach the approval side effects.
+	 * decision is stale and must not reach the approval side effects. A mode
+	 * switch also aborts `signal`, so the mode check runs first to name it.
 	 */
-	#assertAcpPlanReviewCurrent(session: AgentSession, state: PlanModeState, signal: AbortSignal | undefined): void {
-		if (signal?.aborted) {
-			throw new ToolError("Plan review cancelled");
-		}
+	#assertAcpPlanReviewCurrent(session: AgentSession, state: PlanModeState, signal: AbortSignal): void {
 		if (session.getPlanModeState() !== state) {
 			throw new ToolError("Plan mode changed during review — the proposal was not applied.");
+		}
+		if (signal.aborted) {
+			throw new ToolError("Plan review cancelled");
 		}
 	}
 
@@ -2896,6 +2929,7 @@ export class AcpAgent implements Agent {
 	}
 
 	async #disposeSessionRecord(record: ManagedSessionRecord, reason?: postmortem.Reason): Promise<void> {
+		this.#abortAcpPlanReview(record.session, "ACP session closed");
 		record.lifetimeUnsubscribe?.();
 		if (record.mcpManager) {
 			try {

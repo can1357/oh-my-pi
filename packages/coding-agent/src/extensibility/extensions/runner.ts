@@ -1942,8 +1942,8 @@ export class ExtensionRunner {
 	/**
 	 * Emit `plan_review` and return the first decision an extension makes.
 	 *
-	 * First-wins, like `emitUserBash`/`emitInput`: the first handler returning
-	 * anything other than `undefined` decides and no later handler runs. This is
+	 * First-wins, like `emitUserBash`/`emitInput`: the first handler returning a
+	 * valid decision decides and no later handler runs. This is
 	 * deliberately **not** a policy gate — mandatory vetoes belong on `tool_call`
 	 * for `xd://propose`, which fires earlier and every extension sees.
 	 *
@@ -1956,8 +1956,8 @@ export class ExtensionRunner {
 	 * first subscriber.
 	 *
 	 * A defined-but-invalid result is reported once through the extension-error
-	 * channel and downgraded to `undefined` (host falls back to its own
-	 * approval surface) — no second warning path.
+	 * channel and counts as "no decision": the next handler gets its turn, and
+	 * only when none decides does the host fall back to its own approval surface.
 	 */
 	async emitPlanReview(
 		event: PlanReviewEvent,
@@ -1987,7 +1987,7 @@ export class ExtensionRunner {
 						event: "plan_review",
 						error: `invalid plan_review result: ${describePlanReviewResult(handlerResult)}`,
 					});
-					return undefined;
+					continue;
 				}
 				return decision;
 			}

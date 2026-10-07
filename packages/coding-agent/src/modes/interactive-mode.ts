@@ -87,6 +87,7 @@ import type {
 	ExtensionWidgetOptions,
 } from "../extensibility/extensions";
 import type { CompactOptions, PlanReviewEventResult } from "../extensibility/extensions/types";
+import type { ExtensionRunner } from "../extensibility/extensions/runner";
 import type { Skill } from "../extensibility/skills";
 import type { FileSlashCommand } from "../extensibility/slash-commands";
 import { loadSlashCommands } from "../extensibility/slash-commands";
@@ -6590,8 +6591,9 @@ export class InteractiveMode implements InteractiveModeContext {
 		// Hand the decision to a `plan_review` extension first. Everything above is
 		// a pure read of state the picker would have shown, so the external
 		// reviewer sees exactly the revision and options the operator would.
-		if (options?.external !== false) {
-			const outcome = await this.#reviewPlanExternally(planFilePath, planContent, details.title);
+		const runner = this.session.extensionRunner;
+		if (options?.external !== false && runner?.hasHandlers("plan_review")) {
+			const outcome = await this.#reviewPlanExternally(runner, planFilePath, planContent, details.title);
 			if (outcome.kind === "cancelled") return;
 			if (outcome.kind === "decided") {
 				const applied = await this.#applyExternalPlanReview(
@@ -6607,11 +6609,16 @@ export class InteractiveMode implements InteractiveModeContext {
 					},
 				);
 				if (applied) return;
-			} else {
-				// Esc re-reads the file: the reviewer may have rewritten it, and the
-				// preview must show the same revision approval would execute.
-				planContent = outcome.planContent;
 			}
+			// Both fallbacks (Esc, or a decision that could not be honored) re-read
+			// the file: the reviewer may have rewritten it while holding the
+			// decision, and the picker must preview the revision approval executes.
+			const latestPlanContent = await this.#readPlanFile(planFilePath);
+			if (latestPlanContent === null) {
+				this.showError(`Plan file not found at ${planFilePath}`);
+				return;
+			}
+			planContent = latestPlanContent;
 		}
 
 		const choice = await this.showPlanReview(
@@ -6719,17 +6726,15 @@ export class InteractiveMode implements InteractiveModeContext {
 	 * is the operator's way back to the built-in picker.
 	 */
 	async #reviewPlanExternally(
+		runner: ExtensionRunner,
 		planFilePath: string,
 		planContent: string,
 		title: string,
 	): Promise<
 		| { kind: "decided"; result: PlanReviewEventResult; reviewer: string; hideWaitingOverlay: () => void }
-		| { kind: "picker"; planContent: string }
+		| { kind: "picker" }
 		| { kind: "cancelled" }
 	> {
-		const runner = this.session.extensionRunner;
-		if (!runner?.hasHandlers("plan_review")) return { kind: "picker", planContent };
-
 		// Single-flight: a newer proposal supersedes the review still on screen,
 		// exactly as `showPlanReview` replaces a live picker. Tear the old surface
 		// down here, before the new one exists, so the superseded continuation
@@ -6799,16 +6804,11 @@ export class InteractiveMode implements InteractiveModeContext {
 			// nothing will ever resolve.
 			if (controller.signal.reason !== "esc") return { kind: "cancelled" };
 			hideIfStillOurs();
-			const latestPlanContent = await this.#readPlanFile(planFilePath);
-			if (latestPlanContent === null) {
-				this.showError(`Plan file not found at ${planFilePath}`);
-				return { kind: "cancelled" };
-			}
-			return { kind: "picker", planContent: latestPlanContent };
+			return { kind: "picker" };
 		}
 		if (!result) {
 			hideIfStillOurs();
-			return { kind: "picker", planContent };
+			return { kind: "picker" };
 		}
 		return { kind: "decided", result, reviewer, hideWaitingOverlay: hideIfStillOurs };
 	}
@@ -7012,6 +7012,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		if (choice === CFG_APPROVE_ONCE) return "once";
 		return "deny";
 	}
+
 	stop(): void {
 		this.#abortPendingPlanReview("shutdown");
 		this.#appearanceRefreshRequest = undefined;

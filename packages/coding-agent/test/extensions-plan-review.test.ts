@@ -127,6 +127,21 @@ describe("ExtensionRunner plan_review", () => {
 		expect(errors[0]?.extensionPath).toContain("ext-0.ts");
 	});
 
+	it("lets the next extension decide after an invalid decision", async () => {
+		// A broken reviewer must not silence a working one behind it.
+		const runner = await createRunner(
+			pi => pi.on("plan_review", () => ({ action: "refine" }) as PlanReviewEventResult),
+			pi => pi.on("plan_review", () => ({ action: "approve", context: "compact" })),
+		);
+		const errors: ExtensionError[] = [];
+		runner.onError(error => errors.push(error));
+
+		const result = await runner.emitPlanReview(planEvent(new AbortController().signal));
+
+		expect(result).toEqual({ action: "approve", context: "compact" });
+		expect(errors.map(error => error.extensionPath)).toEqual([expect.stringContaining("ext-0.ts")]);
+	});
+
 	it("never expires a review, however long the reviewer takes", async () => {
 		const entered = Promise.withResolvers<void>();
 		const release = Promise.withResolvers<PlanReviewEventResult>();

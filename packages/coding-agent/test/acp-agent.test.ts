@@ -951,8 +951,8 @@ describe("ACP agent", () => {
 				return { action: "cancel" };
 			},
 		});
-		Settings.instance.set("plan.enabled", true);
-		Settings.instance.set("plan.autosave", true);
+		cfgPlanEnabled.set(Settings.instance, true);
+		cfgPlanAutosave.set(Settings.instance, true);
 		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
 		const session = harness.findSession(created.sessionId)!;
 		await attachPlanReviewer(session, () => ({ action: "approve" }));
@@ -978,7 +978,7 @@ describe("ACP agent", () => {
 
 	it("returns extension refinement feedback to the agent and keeps plan mode", async () => {
 		const harness = await createHarness();
-		Settings.instance.set("plan.enabled", true);
+		cfgPlanEnabled.set(Settings.instance, true);
 		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
 		const session = harness.findSession(created.sessionId)!;
 		await attachPlanReviewer(session, () => ({ action: "refine", feedback: "Name the rollback step." }));
@@ -997,7 +997,7 @@ describe("ACP agent", () => {
 
 	it("stops the turn when an extension dismisses the plan", async () => {
 		const harness = await createHarness();
-		Settings.instance.set("plan.enabled", true);
+		cfgPlanEnabled.set(Settings.instance, true);
 		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
 		const session = harness.findSession(created.sessionId)!;
 		await attachPlanReviewer(session, () => ({ action: "dismiss" }));
@@ -1033,7 +1033,7 @@ describe("ACP agent", () => {
 		// A client without `elicitation.form` auto-approves, so an aborted turn that
 		// reached the elicitation would silently grant write access.
 		const harness = await createHarness();
-		Settings.instance.set("plan.enabled", true);
+		cfgPlanEnabled.set(Settings.instance, true);
 		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
 		const session = harness.findSession(created.sessionId)!;
 		const turn = new AbortController();
@@ -1052,7 +1052,7 @@ describe("ACP agent", () => {
 
 	it("ignores a decision made for a mode the client already switched away from", async () => {
 		const harness = await createHarness();
-		Settings.instance.set("plan.enabled", true);
+		cfgPlanEnabled.set(Settings.instance, true);
 		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
 		const session = harness.findSession(created.sessionId)!;
 		await attachPlanReviewer(session, () => {
@@ -1063,6 +1063,34 @@ describe("ACP agent", () => {
 		await enterAcpPlanMode(harness, created.sessionId);
 
 		await expect(session.planProposalHandler!("words-counter")).rejects.toThrow(/Plan mode changed/);
+		expect(session.planReferencePath).toBeUndefined();
+
+		harness.abortController.abort();
+	});
+
+	it("releases a pending reviewer when the client switches the session mode", async () => {
+		// A reviewer has no deadline; without this the review — and the tool call
+		// parked on it — would outlive the mode it was deciding about.
+		const harness = await createHarness();
+		cfgPlanEnabled.set(Settings.instance, true);
+		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+		const session = harness.findSession(created.sessionId)!;
+		const entered = Promise.withResolvers<void>();
+		let reviewerSignal: AbortSignal | undefined;
+		await attachPlanReviewer(session, async event => {
+			reviewerSignal = event.signal;
+			entered.resolve();
+			await new Promise<void>(resolve => event.signal.addEventListener("abort", () => resolve(), { once: true }));
+			return { action: "approve" };
+		});
+		await enterAcpPlanMode(harness, created.sessionId);
+
+		const proposal = session.planProposalHandler!("words-counter");
+		await entered.promise;
+		await harness.agent.setSessionMode({ sessionId: created.sessionId, modeId: "default" });
+
+		await expect(proposal).rejects.toThrow(/Plan mode changed/);
+		expect(reviewerSignal?.aborted).toBe(true);
 		expect(session.planReferencePath).toBeUndefined();
 
 		harness.abortController.abort();

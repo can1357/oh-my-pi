@@ -3,6 +3,7 @@ import { truncateToWidth } from "../index";
 import { matchesSelectCancel } from "../keybinding-matchers";
 import { theme } from "../theme/theme";
 import { OverlayPanel, PanelRows } from "../chrome/overlay-box";
+import { sanitizeDisplayLine } from "./extensions/display-text";
 
 /**
  * Modal placeholder shown while an extension owns the plan-review decision.
@@ -20,7 +21,7 @@ export class PlanReviewWaitingOverlay implements Component, Focusable {
 	readonly #body: PanelRows;
 
 	constructor(reviewer: string, onCancel: () => void) {
-		this.#reviewer = reviewer;
+		this.#reviewer = sanitizeDisplayLine(reviewer);
 		this.#onCancel = onCancel;
 		this.#panel = new OverlayPanel("Plan review");
 		this.#body = new PanelRows();
@@ -36,9 +37,10 @@ export class PlanReviewWaitingOverlay implements Component, Focusable {
 		this.#focused = value;
 	}
 
-	/** Name the extension that currently holds the decision. */
+	/** Name the extension that currently holds the decision. The name comes from an
+	 *  extension's file path, so strip control text before it reaches the terminal. */
 	setReviewer(reviewer: string): void {
-		this.#reviewer = reviewer;
+		this.#reviewer = sanitizeDisplayLine(reviewer);
 	}
 
 	handleInput(data: string): void {
