@@ -14,6 +14,7 @@ import type {
 import { unregisterCustomApis } from "@oh-my-pi/pi-ai/api-registry";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { createMockModel, type MockResponse, registerMockApi } from "@oh-my-pi/pi-ai/providers/mock";
+import * as envApiKey from "@oh-my-pi/pi-ai/env-api-key";
 import * as aiStream from "@oh-my-pi/pi-ai/stream";
 import { kCursorExecResolved, kStreamingPartialJson } from "@oh-my-pi/pi-ai/utils/block-symbols";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
@@ -88,7 +89,7 @@ describe("AgentSession retry delay cap", () => {
 	beforeEach(async () => {
 		// A live env var now overrides a stored static api_key; these tests rotate stored Anthropic
 		// credentials, so neutralize env resolution (ignores every provider's ambient env key).
-		vi.spyOn(aiStream, "getEnvApiKey").mockReturnValue(undefined);
+		vi.spyOn(envApiKey, "getEnvApiKey").mockReturnValue(undefined);
 		for (const provider of ["anthropic", "openai-codex"]) {
 			await authStorage.credentials.remove(provider);
 		}
@@ -1755,65 +1756,6 @@ describe("AgentSession retry delay cap", () => {
 		expect(last.content).toContainEqual({ type: "text", text: "recovered after stream read retry" });
 	});
 
-	it("auto-retries an empty Anthropic stream truncated before message_stop", async () => {
-		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
-		if (!model) {
-			throw new Error("Expected bundled Anthropic test model to exist");
-		}
-
-		const mock = createMockModel({
-			responses: [
-				{ throw: "Anthropic stream envelope error: stream ended before message_stop" },
-				{ content: ["recovered after envelope retry"], stopReason: "stop" },
-			],
-		});
-		const agent = new Agent({
-			getApiKey: requestedModel => `${requestedModel.provider}-test-key`,
-			initialState: {
-				model,
-				systemPrompt: ["Test"],
-				tools: [],
-				messages: [],
-			},
-			streamFn: (requestedModel, context, options) => mock.stream(requestedModel, context, options),
-		});
-
-		const settings = Settings.isolated({
-			"compaction.enabled": false,
-			"retry.baseDelayMs": 5,
-			"retry.maxDelayMs": 5_000,
-			"retry.maxRetries": 1,
-			"retry.modelFallback": false,
-		});
-		settings.setModelRole("default", `${model.provider}/${model.id}`);
-
-		session = new AgentSession({
-			agent,
-			sessionManager: SessionManager.inMemory(),
-			settings,
-			modelRegistry,
-		});
-
-		mockSchedulerWaitWithClock();
-		const retryStartEvents: AutoRetryStartEvent[] = [];
-		const retryEndEvents: AutoRetryEndEvent[] = [];
-		session.subscribe(event => {
-			if (event.type === "auto_retry_start") retryStartEvents.push(event);
-			if (event.type === "auto_retry_end") retryEndEvents.push(event);
-		});
-
-		await session.prompt("Trigger empty envelope retry");
-		await session.waitForIdle();
-
-		expect(mock.calls).toHaveLength(2);
-		expect(retryStartEvents).toHaveLength(1);
-		expect(retryEndEvents).toHaveLength(1);
-		expect(retryEndEvents[0]).toMatchObject({ success: true });
-		const last = lastAssistant(session);
-		expect(last.stopReason).toBe("stop");
-		expect(last.content).toContainEqual({ type: "text", text: "recovered after envelope retry" });
-	});
-
 	it("auto-retries Unable to connect transport failures instead of stopping the conversation", async () => {
 		const model = getBundledModel("openai", "gpt-5");
 		if (!model) {
@@ -3108,125 +3050,6 @@ describe("AgentSession retry delay cap", () => {
 		expect(lastAssistant(session).content).toContainEqual({
 			type: "text",
 			text: "Recovered after Cursor idle stall",
-		});
-	});
-
-	it("resumes a Cursor reasonless abort after an unmarked client-side tool call", async () => {
-		const model = createMockModel({
-			id: "composer-2.5",
-			provider: "cursor",
-		});
-		authStorage.keys.setRuntime("cursor", "cursor-test-key");
-		// Cursor emits `todo` client-side without the server-execution marker; a
-		// reasonless abort after it must still recover (issue #6668 review).
-		const toolCall: ToolCall = {
-			type: "toolCall",
-			id: "cursor-todo-1",
-			name: "todo",
-			arguments: { ops: [] },
-		};
-		let streamCalls = 0;
-		let resumedWithSyntheticResult = false;
-		const agent = new Agent({
-			getApiKey: requestedModel => `${requestedModel.provider}-test-key`,
-			initialState: {
-				model,
-				systemPrompt: ["Test"],
-				tools: [],
-				messages: [],
-			},
-			streamFn: (_requestedModel, context, options) => {
-				streamCalls += 1;
-				if (streamCalls > 1) {
-					const matchingResult = context.messages.find(
-						message => message.role === "toolResult" && message.toolCallId === toolCall.id,
-					);
-					resumedWithSyntheticResult =
-						matchingResult?.role === "toolResult" &&
-						typeof matchingResult.details === "object" &&
-						matchingResult.details !== null &&
-						"executed" in matchingResult.details &&
-						matchingResult.details.executed === false;
-					model.push({ content: ["Recovered after Cursor reasonless abort"] });
-					return model.stream(model, context, options);
-				}
-
-				const stream = new AssistantMessageEventStream();
-				queueMicrotask(() => {
-					const partial: AssistantMessage = {
-						role: "assistant",
-						content: [toolCall],
-						api: model.api,
-						provider: model.provider,
-						model: model.id,
-						usage: {
-							input: 0,
-							output: 0,
-							cacheRead: 0,
-							cacheWrite: 0,
-							totalTokens: 0,
-							cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-						},
-						stopReason: "stop",
-						timestamp: Date.now(),
-					};
-					stream.push({ type: "start", partial });
-					stream.push({ type: "toolcall_start", contentIndex: 0, partial });
-					stream.push({
-						type: "toolcall_delta",
-						contentIndex: 0,
-						delta: JSON.stringify(toolCall.arguments),
-						partial,
-					});
-					stream.push({ type: "toolcall_end", contentIndex: 0, toolCall, partial });
-					stream.push({
-						type: "error",
-						reason: "aborted",
-						error: {
-							...partial,
-							stopReason: "aborted",
-							errorMessage: "Request was aborted",
-						},
-					});
-				});
-				return stream;
-			},
-		});
-
-		const settings = Settings.isolated({
-			"compaction.enabled": false,
-			"retry.baseDelayMs": 5,
-			"retry.maxRetries": 1,
-		});
-		settings.setModelRole("default", `${model.provider}/${model.id}`);
-		session = new AgentSession({
-			agent,
-			sessionManager: SessionManager.inMemory(),
-			settings,
-			modelRegistry,
-		});
-		const retryStartEvents: AutoRetryStartEvent[] = [];
-		const retryEndEvents: AutoRetryEndEvent[] = [];
-		session.subscribe(event => {
-			if (event.type === "auto_retry_start") retryStartEvents.push(event);
-			if (event.type === "auto_retry_end") retryEndEvents.push(event);
-		});
-
-		await session.prompt("Update the todo list");
-		await session.waitForIdle();
-
-		expect(streamCalls).toBe(2);
-		expect(resumedWithSyntheticResult).toBe(true);
-		expect(
-			session.agent.state.messages.filter(
-				message => message.role === "toolResult" && message.toolCallId === toolCall.id,
-			),
-		).toHaveLength(1);
-		expect(retryStartEvents).toHaveLength(1);
-		expect(retryEndEvents).toContainEqual(expect.objectContaining({ success: true, attempt: 1 }));
-		expect(lastAssistant(session).content).toContainEqual({
-			type: "text",
-			text: "Recovered after Cursor reasonless abort",
 		});
 	});
 

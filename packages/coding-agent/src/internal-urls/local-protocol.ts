@@ -2,6 +2,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { isEnoent } from "@oh-my-pi/pi-utils";
+import { LRUCache } from "@oh-my-pi/pi-utils/lru";
 import localDoc from "../prompts/internal-urls/local.md" with { type: "text" };
 import { AgentRegistry } from "../registry/agent-registry";
 import {
@@ -22,6 +23,7 @@ import type {
 	SchemeSpec,
 	UrlCompletion,
 } from "./types";
+import { formatByteSize } from "../utils/video";
 
 export interface LocalProtocolOptions {
 	getArtifactsDir?: () => string | null;
@@ -33,7 +35,7 @@ const WINDOWS_LOCAL_ROOT_MAX_CHARS = 180;
 function safeSessionId(options: LocalProtocolOptions): string {
 	const raw = options.getSessionId?.() ?? "session";
 	const safe = raw.replace(/[^a-zA-Z0-9_.-]/g, "_");
-	return safe.length > 0 ? safe : "session";
+	return safe && safe !== "." && safe !== ".." ? safe : "session";
 }
 
 function shortLocalRoot(options: LocalProtocolOptions): string {
@@ -78,17 +80,8 @@ const BINARY_FILE_EXTENSIONS = new Set([
 	".zip",
 ]);
 
-function formatLocalByteSize(bytes: number): string {
-	if (bytes < 1024) return `${bytes} B`;
-	const kib = bytes / 1024;
-	if (kib < 1024) return `${kib.toFixed(1)} KiB`;
-	const mib = kib / 1024;
-	if (mib < 1024) return `${mib.toFixed(1)} MiB`;
-	return `${(mib / 1024).toFixed(1)} GiB`;
-}
-
 function buildNonTextLocalResource(url: InternalUrl, filePath: string, size: number, reason: string): InternalResource {
-	const content = `[Cannot read binary local:// file '${url.href}' (${formatLocalByteSize(size)}): ${reason}. This resource is not text. Use a metadata/key-frame/video-specific workflow instead.]`;
+	const content = `[Cannot read binary local:// file '${url.href}' (${formatByteSize(size)}): ${reason}. This resource is not text. Use a metadata/key-frame/video-specific workflow instead.]`;
 	return {
 		url: url.href,
 		content,
@@ -100,7 +93,7 @@ function buildNonTextLocalResource(url: InternalUrl, filePath: string, size: num
 }
 
 function buildLargeLocalTextResource(url: InternalUrl, filePath: string, size: number): InternalResource {
-	const content = `[Cannot materialize local:// file '${url.href}' as an internal text resource (${formatLocalByteSize(size)} exceeds ${formatLocalByteSize(LOCAL_TEXT_RESOURCE_MAX_BYTES)}). Use the read tool's filesystem path handling or a line selector so content is streamed with file-size safeguards.]`;
+	const content = `[Cannot materialize local:// file '${url.href}' as an internal text resource (${formatByteSize(size)} exceeds ${formatByteSize(LOCAL_TEXT_RESOURCE_MAX_BYTES)}). Use the read tool's filesystem path handling or a line selector so content is streamed with file-size safeguards.]`;
 	return {
 		url: url.href,
 		content,
@@ -159,28 +152,38 @@ async function buildFileResource(
 }
 
 async function listFilesRecursively(rootPath: string): Promise<string[]> {
-	const pending = [""];
 	const files: string[] = [];
-
-	while (pending.length > 0) {
-		const relativeDir = pending.pop();
-		if (relativeDir === undefined) continue;
-		const absoluteDir = path.join(rootPath, relativeDir);
-		const entries = await fs.readdir(absoluteDir, { withFileTypes: true });
-
+	// Sibling directories are read concurrently; the final sort fixes the order.
+	const walk = async (relativeDir: string): Promise<void> => {
+		const entries = await fs.readdir(path.join(rootPath, relativeDir), { withFileTypes: true });
+		const subdirs: Promise<void>[] = [];
 		for (const entry of entries) {
 			const entryPath = path.join(relativeDir, entry.name);
 			if (entry.isDirectory()) {
-				pending.push(entryPath);
-				continue;
-			}
-			if (entry.isFile()) {
+				subdirs.push(walk(entryPath));
+			} else if (entry.isFile()) {
 				files.push(entryPath.replaceAll(path.sep, "/"));
 			}
 		}
-	}
-
+		await Promise.all(subdirs);
+	};
+	await walk("");
 	return files.sort((a, b) => a.localeCompare(b));
+}
+
+/**
+ * `complete()` runs on every keystroke; reuse a root's sorted listing for a
+ * short window instead of re-walking and re-sorting the tree each time.
+ */
+const completionListings = new LRUCache<string, Promise<string[]>>({ max: 16, ttl: 2000 });
+
+function listCompletionFiles(localRoot: string): Promise<string[]> {
+	const cached = completionListings.get(localRoot);
+	if (cached) return cached;
+	const listing = listFilesRecursively(localRoot);
+	completionListings.set(localRoot, listing);
+	listing.catch(() => completionListings.delete(localRoot));
+	return listing;
 }
 
 async function buildListing(url: InternalUrl, localRoot: string): Promise<InternalResource> {
@@ -525,7 +528,7 @@ export class LocalProtocolHandler implements ProtocolHandler {
 		if (!opts) return [];
 		const localRoot = path.resolve(resolveLocalRoot(opts));
 		try {
-			const files = await listFilesRecursively(localRoot);
+			const files = await listCompletionFiles(localRoot);
 			return files.map(value => ({ value }));
 		} catch (err) {
 			if (isEnoent(err)) return [];

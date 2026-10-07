@@ -2,7 +2,7 @@ import type { Component, OverlayHandle, TUI } from "@oh-my-pi/pi-tui";
 import { Container, Spacer, Text } from "@oh-my-pi/pi-tui";
 import type { CollabUiRequestDraft, CollabUiSelectItem } from "@oh-my-pi/pi-wire";
 import type { CollabHost } from "../../collab/host";
-import { KeybindingsManager } from "@oh-my-pi/pi-tui/app-keybindings";
+import { formatKeyHint, formatKeyHints, KeybindingsManager } from "@oh-my-pi/pi-tui/app-keybindings";
 import type {
 	CompactOptions,
 	ExtensionActions,
@@ -19,14 +19,20 @@ import type {
 	ExtensionUiComponent,
 	ExtensionWidgetContent,
 	ExtensionWidgetOptions,
+	SendMessageHandler,
 	SendUserMessageHandler,
 	TerminalInputHandler,
 } from "../../extensibility/extensions";
 import { getSessionSlashCommands } from "../../extensibility/extensions/get-commands-handler";
-import { AskDialogComponent, boundPromptTitle, normalizeDialogQuestions } from "@oh-my-pi/pi-tui/overlays/ask-dialog";
+import {
+	type AskDialogPrompt,
+	type AskDialogPromptValue,
+	AskDialogComponent,
+	normalizeDialogQuestions,
+} from "@oh-my-pi/pi-tui/overlays/ask-dialog";
 import { installExtensionComposerShape } from "@oh-my-pi/pi-tui/overlays/composer-shape-registry";
 import { EditorTopGap } from "@oh-my-pi/pi-tui/prompt/editor-top-gap";
-import { HookEditorComponent } from "@oh-my-pi/pi-tui/overlays/hook-editor";
+import { boundPromptTitle, HookEditorComponent, type HookEditorOptions } from "@oh-my-pi/pi-tui/overlays/hook-editor";
 import { HookInputComponent } from "@oh-my-pi/pi-tui/overlays/hook-input";
 import { HookSelectorComponent, type HookSelectorSlider } from "@oh-my-pi/pi-tui/overlays/hook-selector";
 import { getAvailableThemesWithPaths, getThemeByName, setTheme, type Theme, theme } from "@oh-my-pi/pi-tui/theme";
@@ -37,6 +43,15 @@ import { setExtensionTerminalTitle, setSessionTerminalTitle } from "../../utils/
 import { getEditorCommand, openInEditor } from "../../utils/external-editor";
 
 const MAX_WIDGET_LINES = 10;
+
+/**
+ * Footer hint for a guest-rendered ask selector. The guest's selector handles
+ * the keys, so the host can't know its bindings: advertise the defaults.
+ */
+function guestAskHelpText(enterAction: string, extra = ""): string {
+	return `${formatKeyHints(["up", "down"])} navigate  ${formatKeyHint("enter")} ${enterAction}  ${extra}${formatKeyHint("escape")} cancel`;
+}
+
 const ASK_OTHER_OPTION = "Other (type your own)";
 const ASK_CHAT_OPTION = "Chat about this";
 const ASK_NEXT_OPTION = "Next →";
@@ -172,18 +187,7 @@ export class ExtensionUiController {
 		}
 
 		const actions: ExtensionActions = {
-			sendMessage: (message, options) => {
-				const wasStreaming = this.ctx.session.isStreaming;
-				const normalized = normalizeCustomMessagePayload(message);
-				this.ctx.session
-					.sendCustomMessage(normalized, options)
-					.then(() => this.#applyCustomMessageDisplay(wasStreaming, normalized.display))
-					.catch((err: unknown) => {
-						this.ctx.showError(
-							`Extension sendMessage failed: ${err instanceof Error ? err.message : String(err)}`,
-						);
-					});
-			},
+			sendMessage: this.#sendExtensionMessage,
 			sendUserMessage: this.#sendExtensionUserMessage,
 			appendEntry: (customType, data) => {
 				this.ctx.sessionManager.appendCustomEntry(customType, data);
@@ -239,7 +243,11 @@ export class ExtensionUiController {
 				if (!success) {
 					return { cancelled: true };
 				}
-				setSessionTerminalTitle(this.ctx.sessionManager.getSessionName(), this.ctx.sessionManager.getCwd());
+				setSessionTerminalTitle(
+					this.ctx.sessionManager.getSessionName(),
+					this.ctx.sessionManager.getCwd(),
+					this.ctx.sessionManager.getSessionTitleCard(),
+				);
 
 				// Call setup callback if provided
 				if (options?.setup) {
@@ -296,13 +304,23 @@ export class ExtensionUiController {
 			switchSession: async sessionPath => {
 				await this.ctx.prepareSessionSwitch();
 				this.clearHookWidgets();
-				const result = await this.ctx.session.switchSession(sessionPath);
+				let modelFallbackWarning: string | undefined;
+				const result = await this.ctx.session.switchSession(sessionPath, {
+					onModelFallback: warning => {
+						modelFallbackWarning = warning;
+					},
+				});
 				if (!result) {
 					return { cancelled: true };
 				}
-				setSessionTerminalTitle(this.ctx.sessionManager.getSessionName(), this.ctx.sessionManager.getCwd());
+				setSessionTerminalTitle(
+					this.ctx.sessionManager.getSessionName(),
+					this.ctx.sessionManager.getCwd(),
+					this.ctx.sessionManager.getSessionTitleCard(),
+				);
 				await this.ctx.renderInitialMessages({ clearTerminalHistory: true });
 				await this.ctx.reloadTodos();
+				if (modelFallbackWarning) this.ctx.showWarning(modelFallbackWarning);
 				return { cancelled: false };
 			},
 		};
@@ -405,17 +423,7 @@ export class ExtensionUiController {
 		}
 
 		const actions: ExtensionActions = {
-			sendMessage: (message, options) => {
-				const wasStreaming = this.ctx.session.isStreaming;
-				const normalized = normalizeCustomMessagePayload(message);
-				this.ctx.session
-					.sendCustomMessage(normalized, options)
-					.then(() => this.#applyCustomMessageDisplay(wasStreaming, normalized.display))
-					.catch((err: unknown) => {
-						const errorText = `Extension sendMessage failed: ${err instanceof Error ? err.message : String(err)}`;
-						this.ctx.showError(errorText);
-					});
-			},
+			sendMessage: this.#sendExtensionMessage,
 			sendUserMessage: this.#sendExtensionUserMessage,
 			appendEntry: (customType, data) => {
 				this.ctx.sessionManager.appendCustomEntry(customType, data);
@@ -525,12 +533,18 @@ export class ExtensionUiController {
 			switchSession: async sessionPath => {
 				await this.ctx.prepareSessionSwitch();
 				this.clearHookWidgets();
-				const result = await this.ctx.session.switchSession(sessionPath);
+				let modelFallbackWarning: string | undefined;
+				const result = await this.ctx.session.switchSession(sessionPath, {
+					onModelFallback: warning => {
+						modelFallbackWarning = warning;
+					},
+				});
 				if (!result) {
 					return { cancelled: true };
 				}
 				await this.ctx.renderInitialMessages({ clearTerminalHistory: true });
 				await this.ctx.reloadTodos();
+				if (modelFallbackWarning) this.ctx.showWarning(modelFallbackWarning);
 				return { cancelled: false };
 			},
 		};
@@ -651,7 +665,7 @@ export class ExtensionUiController {
 	): Promise<ExtensionAskDialogResult | undefined> {
 		return this.#presentDialog<ExtensionAskDialogResult>(dialogOptions?.signal, settle => {
 			let promptEditor: HookEditorComponent | undefined;
-			let promptResolve: ((value: string | undefined) => void) | undefined;
+			let promptResolve: ((value: AskDialogPromptValue | undefined) => void) | undefined;
 			let closed = false;
 			const draftEditor = this.ctx.editor;
 			const inputGuard =
@@ -681,7 +695,7 @@ export class ExtensionUiController {
 				this.ctx.ui.requestRender();
 			};
 
-			const finishPrompt = (value: string | undefined): void => {
+			const finishPrompt = (value: AskDialogPromptValue | undefined): void => {
 				const resolvePrompt = promptResolve;
 				promptResolve = undefined;
 				promptEditor?.dispose();
@@ -691,27 +705,51 @@ export class ExtensionUiController {
 				// making the dialog visible and interactive again. This single-hop
 				// deferral relies on #promptForCustomInput/#promptForNote clearing
 				// #promptActive in the synchronous resume after their lone
-				// `await onPrompt(...)` (no await before the `finally`); adding one
+				// `await this.#openPrompt(...)` (no await before the `finally`); adding one
 				// there reopens the drop-Enter race, so revisit this deferral then.
 				queueMicrotask(restoreAskDialog);
 			};
 
-			const promptForText = (title: string, prefill?: string): Promise<string | undefined> => {
-				if (closed) return Promise.resolve(undefined);
-				const { promise, resolve } = Promise.withResolvers<string | undefined>();
-				promptResolve = resolve;
+			const openPrompt = (
+				prompt: AskDialogPrompt,
+				prefill: string | undefined,
+				options: HookEditorOptions,
+			): void => {
 				promptEditor = new HookEditorComponent(
 					this.ctx.ui,
-					title,
+					prompt.title,
 					prefill,
-					value => finishPrompt(value),
+					(text, images) => finishPrompt({ text, images }),
 					() => finishPrompt(undefined),
-					{ promptStyle: true, externalEditor: editDialogExternally },
+					{ promptStyle: true, externalEditor: editDialogExternally, question: prompt.question, ...options },
 				);
 				this.ctx.editorContainer.clear();
 				this.ctx.editorContainer.addChild(promptEditor);
 				this.ctx.ui.setFocus(promptEditor);
 				this.ctx.ui.requestRender();
+			};
+
+			const promptForText = (prompt: AskDialogPrompt, prefill?: string): Promise<string | undefined> => {
+				if (closed) return Promise.resolve(undefined);
+				const { promise, resolve } = Promise.withResolvers<string | undefined>();
+				promptResolve = value => resolve(value?.text);
+				openPrompt(prompt, prefill, {});
+				return promise;
+			};
+
+			const promptWithImages = (
+				prompt: AskDialogPrompt,
+				prefill: AskDialogPromptValue | undefined,
+			): Promise<AskDialogPromptValue | undefined> => {
+				if (closed) return Promise.resolve(undefined);
+				const { promise, resolve } = Promise.withResolvers<AskDialogPromptValue | undefined>();
+				promptResolve = resolve;
+				openPrompt(prompt, prefill?.text, {
+					acceptImages: true,
+					images: prefill?.images,
+					onPasteImage: () => this.ctx.handleImagePaste(),
+					onPasteImagePath: path => this.ctx.handleImagePathPaste(path),
+				});
 				return promise;
 			};
 
@@ -721,6 +759,7 @@ export class ExtensionUiController {
 					onSubmit: result => settle(result),
 					onCancel: () => settle(undefined),
 					onPrompt: promptForText,
+					onImagePrompt: dialogOptions?.acceptImages ? promptWithImages : undefined,
 				},
 				{
 					timeout: dialogOptions?.timeout,
@@ -850,9 +889,7 @@ export class ExtensionUiController {
 						selectionMarker: "checkbox",
 						checkedIndices,
 						markableCount: question.options.length,
-						helpText: hasAnswer
-							? "up/down navigate  enter toggle  Next → continue  esc cancel"
-							: "up/down navigate  enter toggle  esc cancel",
+						helpText: guestAskHelpText("toggle", hasAnswer ? "Next → continue  " : ""),
 					},
 					signal,
 				);
@@ -893,7 +930,7 @@ export class ExtensionUiController {
 						initialIndex,
 						selectionMarker: "radio",
 						markableCount: question.options.length,
-						helpText: "up/down navigate  enter select  esc cancel",
+						helpText: guestAskHelpText("select"),
 					},
 					signal,
 				);
@@ -1240,7 +1277,39 @@ export class ExtensionUiController {
 		await this.ctx.sessionManager.setSessionName(name, "user");
 	}
 
+	/**
+	 * Collab guest: the replica session only mirrors the host, and mirrored host
+	 * lifecycle events (`agent_end`, `turn_end`, …) reach guest extensions. An
+	 * extension reacting to them must not start or queue a turn on the replica —
+	 * it would run on the guest's local model and diverge from the host. Refuse
+	 * like typed prompts are refused (input-controller); true when dropped.
+	 */
+	#rejectGuestExtensionTurn(): boolean {
+		if (!this.ctx.collabGuest) return false;
+		this.ctx.showStatus("Extension-initiated turns are host-only during a collab session");
+		return true;
+	}
+
+	#sendExtensionMessage: SendMessageHandler = (message, options) => {
+		const startsTurn =
+			options?.triggerTurn === true ||
+			options?.deliverAs === "steer" ||
+			options?.deliverAs === "followUp" ||
+			options?.deliverAs === "aside";
+		if (startsTurn && this.#rejectGuestExtensionTurn()) return;
+		const wasStreaming = this.ctx.session.isStreaming;
+		const normalized = normalizeCustomMessagePayload(message);
+		this.ctx.session
+			.sendCustomMessage(normalized, options)
+			.then(() => this.#applyCustomMessageDisplay(wasStreaming, normalized.display))
+			.catch((err: unknown) => {
+				this.ctx.showError(`Extension sendMessage failed: ${err instanceof Error ? err.message : String(err)}`);
+			});
+	};
+
+	/** Every `sendUserMessage` form prompts or queues a user turn (see `AgentSession.sendUserMessage`). */
 	#sendExtensionUserMessage: SendUserMessageHandler = (content, options) => {
+		if (this.#rejectGuestExtensionTurn()) return;
 		this.ctx.session.sendUserMessage(content, options).catch((err: unknown) => {
 			this.ctx.showError(`Extension sendUserMessage failed: ${err instanceof Error ? err.message : String(err)}`);
 		});

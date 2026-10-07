@@ -97,5 +97,15 @@
 		"pageBg": "abyssBlack",
 		"cardBg": "deepWater",
 		"infoBg": "midWater"
+	},
+	"terminal": {
+		"background": "abyssBlack",
+		"foreground": "#e0e1dd",
+		"chrome": "abyssBlack",
+		"widget": "deepWater",
+		"ansi": [
+			"midWater", "brightCoral", "#7fd88f", "#ffd166", "#4f9de8", "#c58fe0", "teal", "#c0cad6",
+			"dimTeal", "#ff968a", "#a3ecb0", "#ffe09a", "#8cc2f5", "#ddb3f0", "aquamarine", "#f4f6f8"
+		]
 	}
 }

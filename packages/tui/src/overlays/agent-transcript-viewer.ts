@@ -15,12 +15,14 @@
  */
 import type * as fs from "node:fs";
 import type { AgentTool } from "@oh-my-pi/pi-agent-core";
+import type { TspSpan, TspTone } from "@oh-my-pi/pi-wire";
 import type { Component, TUI } from "../tui";
 import { Editor } from "../components/editor";
 import { matchesKey } from "../keys";
 import { routeSgrMouseInput } from "../mouse";
 import { formatDuration, formatNumber, logger } from "@oh-my-pi/pi-utils";
-import type { KeyId } from "../app-keybindings";
+import { formatKeyHint, formatKeyHints, type KeyId } from "../app-keybindings";
+import { editorKey } from "../chrome/keybinding-hints";
 import type { MessageRenderer } from "../chat/extension-types";
 import type { AgentLifecycleLike } from "./agent-hub-types";
 import type { AgentHubRegistry, AgentStatus } from "./agent-hub-types";
@@ -38,13 +40,23 @@ import {
 import { sanitizeErrorLine } from "../chrome/error-block";
 import type { ScrollRangeAnchor } from "../components/scroll-view";
 import { formatContextUsage } from "../chrome/context-thresholds";
+import { node, span, text } from "../native/describe";
+import type { DescribeContext, NativeChild, NativeNode } from "../native/node";
+import { actionHint, hintsRow, overlayCard } from "../native/overlay";
 
 /** Parsed message and model metadata relevant to a transcript viewer. */
 export type AgentTranscriptEntry = SessionMessageEntryLike | { type: "model_change"; model: string };
 
 /** Local filesystem and session parsing capabilities supplied by the host. */
 export interface AgentTranscriptSource {
-	fs: Pick<typeof fs, "openSync" | "closeSync" | "readSync" | "readFileSync" | "statSync">;
+	/**
+	 * Sync primitives drive the first paint and the incremental tail. When the
+	 * host also supplies `promises.readFile` (e.g. passes `node:fs` itself), full
+	 * reloads after rotation/rewrite read the file off the UI thread.
+	 */
+	fs: Pick<typeof fs, "openSync" | "closeSync" | "readSync" | "readFileSync" | "statSync"> & {
+		promises?: Pick<typeof fs.promises, "readFile">;
+	};
 	parseEntries(text: string): AgentTranscriptEntry[];
 }
 
@@ -68,6 +80,7 @@ export interface AgentTranscriptViewerDeps {
 	cwd: string;
 	hideThinkingBlock?: () => boolean;
 	proseOnlyThinking?: () => boolean;
+	expandThinkingBlocks?: () => boolean;
 	expandKeys: KeyId[];
 	/** Keys that toggle the whole hub closed (app.agents.hub + app.session.observe). */
 	hubKeys: KeyId[];
@@ -80,6 +93,8 @@ export interface AgentTranscriptViewerDeps {
 
 /** How often to re-stat a file-backed transcript for growth (advisor/live tail). */
 const POLL_MS = 250;
+/** Every Nth idle poll re-verifies sentinels, catching same-size/mtime rewrites. */
+const IDLE_SENTINEL_CHECK_EVERY = 5;
 
 const SENTINEL_BYTES = 4096;
 
@@ -131,6 +146,19 @@ function sentinelsFromFile(fs: AgentTranscriptSource["fs"], file: string, size: 
 	return sentinelOffsets(size).map(offset => ({ offset, bytes: readFileRangeSync(fs, file, offset, length) }));
 }
 
+/**
+ * `sanitizeErrorLine` width for described text, which the terminal truncates
+ * itself: effectively unbounded, but within the native truncate's i32 range.
+ */
+const NATIVE_LINE_WIDTH = 0x7fff_ffff;
+
+const STATUS_TONE: Record<AgentStatus, TspTone> = {
+	running: "success",
+	idle: "accent",
+	parked: "muted",
+	aborted: "error",
+};
+
 function statusBadge(status: AgentStatus): string {
 	switch (status) {
 		case "running":
@@ -164,7 +192,13 @@ export class AgentTranscriptViewer implements Component {
 	#model: string | undefined;
 	#pollTimer: NodeJS.Timeout | undefined;
 	#disposed = false;
+	/** Async full reload in flight; polls are skipped until it lands. */
+	#localLoadInFlight = false;
+	/** Idle polls since the sentinels were last verified. */
+	#idlePolls = 0;
 	#initialEntryId: string | undefined;
+	/** Last described node and the visible inputs it was built from. */
+	#nativeCache: { signature: string; node: NativeNode } | undefined;
 
 	readonly #deps: AgentTranscriptViewerDeps;
 
@@ -179,6 +213,9 @@ export class AgentTranscriptViewer implements Component {
 			cwd: deps.cwd,
 			hideThinkingBlock: deps.hideThinkingBlock,
 			proseOnlyThinking: deps.proseOnlyThinking,
+			expandThinkingBlocks: deps.expandThinkingBlocks,
+			// Charts are for the main session's answers, not parked subagent, advisor, or guest transcripts.
+			tableCharts: false,
 			requestRender: deps.requestRender,
 		});
 		this.#browser = new TranscriptBrowser({
@@ -191,8 +228,10 @@ export class AgentTranscriptViewer implements Component {
 			this.#editor.setMaxHeight(4);
 			this.#editor.onSubmit = text => this.#submit(text);
 		}
-		this.#refresh();
-		this.#pollTimer = setInterval(() => this.#refresh(), POLL_MS);
+		// First paint loads synchronously so the initial entry can be revealed
+		// immediately; later full reloads from the poll may go async.
+		this.#refresh(false);
+		this.#pollTimer = setInterval(() => this.#refresh(true), POLL_MS);
 		this.#pollTimer.unref?.();
 	}
 
@@ -221,12 +260,13 @@ export class AgentTranscriptViewer implements Component {
 	// ========================================================================
 
 	/** Refresh the transcript from a local file or remote host. */
-	#refresh(): void {
+	#refresh(allowAsync: boolean): void {
 		if (this.#disposed) return;
 		if (this.#deps.remote) {
 			this.#fetchRemote();
 			return;
 		}
+		if (this.#localLoadInFlight) return;
 		const sessionFile = this.#deps.registry.get(this.#deps.agentId)?.sessionFile;
 		if (!sessionFile) {
 			this.#clearLocal("none");
@@ -240,14 +280,29 @@ export class AgentTranscriptViewer implements Component {
 			return;
 		}
 		const state = this.#localState;
-		if (state && this.#canAppendLocal(sessionFile, stat, state)) {
-			if (stat.size === state.size && stat.mtimeMs === state.mtimeMs) return;
-			if (stat.size > state.size) {
-				this.#appendLocal(sessionFile, stat, state);
+		if (state) {
+			// Idle fast path: an unchanged identity/size/mtime costs one stat;
+			// sentinels are re-read only every Nth idle poll so a rewrite that
+			// keeps size and mtime is still noticed.
+			if (
+				state.path === sessionFile &&
+				state.dev === stat.dev &&
+				state.ino === stat.ino &&
+				stat.size === state.size &&
+				stat.mtimeMs === state.mtimeMs
+			) {
+				if (++this.#idlePolls < IDLE_SENTINEL_CHECK_EVERY) return;
+				this.#idlePolls = 0;
+				if (this.#canAppendLocal(sessionFile, stat, state)) return;
+				this.#loadLocalFull(sessionFile, stat, allowAsync);
+				return;
+			}
+			if (stat.size > state.size && this.#canAppendLocal(sessionFile, stat, state)) {
+				this.#appendLocal(sessionFile, stat, state, allowAsync);
 				return;
 			}
 		}
-		this.#loadLocalFull(sessionFile, stat);
+		this.#loadLocalFull(sessionFile, stat, allowAsync);
 	}
 
 	#clearLocal(reason: string): void {
@@ -281,7 +336,23 @@ export class AgentTranscriptViewer implements Component {
 		return true;
 	}
 
-	#loadLocalFull(sessionFile: string, stat: fs.Stats): void {
+	#loadLocalFull(sessionFile: string, stat: fs.Stats, allowAsync: boolean): void {
+		const promises = allowAsync ? this.#deps.transcript.fs.promises : undefined;
+		if (promises) {
+			this.#localLoadInFlight = true;
+			void promises
+				.readFile(sessionFile)
+				.then(data => {
+					this.#localLoadInFlight = false;
+					if (!this.#disposed) this.#applyLocalFull(sessionFile, stat, data);
+				})
+				.catch((err: unknown) => {
+					// Leave #localState unchanged so a transient read error retries next poll.
+					this.#localLoadInFlight = false;
+					logger.debug("transcript viewer: read failed", { err: String(err) });
+				});
+			return;
+		}
 		let data: Buffer;
 		try {
 			data = this.#deps.transcript.fs.readFileSync(sessionFile);
@@ -290,6 +361,10 @@ export class AgentTranscriptViewer implements Component {
 			logger.debug("transcript viewer: read failed", { err: String(err) });
 			return;
 		}
+		this.#applyLocalFull(sessionFile, stat, data);
+	}
+
+	#applyLocalFull(sessionFile: string, stat: fs.Stats, data: Buffer): void {
 		// The file may have grown between the earlier `statSync` and this read.
 		// Anchor the tail cursor to what we actually consumed so the next poll's
 		// `#appendLocal` never re-renders bytes already in the rebuilt transcript;
@@ -323,7 +398,7 @@ export class AgentTranscriptViewer implements Component {
 		this.#rebuild(this.#extractMessages(this.#deps.transcript.parseEntries(complete)));
 	}
 
-	#appendLocal(sessionFile: string, stat: fs.Stats, state: LocalTranscriptState): void {
+	#appendLocal(sessionFile: string, stat: fs.Stats, state: LocalTranscriptState, allowAsync: boolean): void {
 		let chunk: string;
 		try {
 			chunk = readFileRangeSync(
@@ -334,7 +409,7 @@ export class AgentTranscriptViewer implements Component {
 			).toString("utf-8");
 		} catch (err) {
 			logger.debug("transcript viewer: tail read failed", { err: String(err) });
-			this.#loadLocalFull(sessionFile, stat);
+			this.#loadLocalFull(sessionFile, stat, allowAsync);
 			return;
 		}
 		const combined = state.pending + chunk;
@@ -349,7 +424,7 @@ export class AgentTranscriptViewer implements Component {
 			// File unlinked/rotated mid-poll: fall back to a guarded full reload
 			// instead of letting the open escape the poll timer.
 			logger.debug("transcript viewer: sentinel recompute failed", { err: String(err) });
-			this.#loadLocalFull(sessionFile, stat);
+			this.#loadLocalFull(sessionFile, stat, allowAsync);
 			return;
 		}
 		this.#localState = {
@@ -572,6 +647,116 @@ export class AgentTranscriptViewer implements Component {
 		return lines;
 	}
 
+	/**
+	 * Header, transcript body (the builder's container, which describes its own
+	 * blocks), notice, message editor, stats and key hints. Scrolling is the
+	 * terminal's, so the j/k/g/G scroll hints are omitted.
+	 */
+	describe(_cx: DescribeContext): NativeNode {
+		const ref = this.#deps.registry.get(this.#deps.agentId);
+		const notice = this.#notice ?? (this.#remoteError && !this.#builder.isEmpty ? this.#remoteError : undefined);
+		const placeholder = this.#builder.isEmpty ? this.#placeholder(NATIVE_LINE_WIDTH) : undefined;
+		const progress = this.#deps.observers?.getSession(this.#deps.agentId)?.progress;
+		const stats = progress
+			? [progress.contextTokens, progress.contextWindow, progress.durationMs, progress.toolCount, progress.cost]
+			: undefined;
+		const signature = JSON.stringify([
+			ref?.status,
+			ref?.kind,
+			ref?.parentId,
+			this.#model,
+			notice,
+			placeholder,
+			stats,
+			this.#deps.expandKeys[0],
+		]);
+		const cached = this.#nativeCache;
+		if (cached?.signature === signature) return cached.node;
+
+		const id = this.#deps.agentId;
+		const children: NativeChild[] = [];
+		if (ref) {
+			const kindTag = ref.parentId ? `${ref.kind} ${theme.sep.dot} of ${ref.parentId}` : ref.kind;
+			const meta: NativeChild[] = [
+				text([span(id, "strong")]),
+				node("badge", { text: ref.status, tone: STATUS_TONE[ref.status] }),
+				text([span(kindTag, "dim")], { truncate: "end" }),
+			];
+			if (this.#model) meta.push(text([span(this.#model, "muted")], { truncate: "end" }));
+			children.push(node("row", { gap: "sm", align: "center" }, meta, "meta"));
+		}
+		children.push(
+			placeholder === undefined
+				? node("col", { grow: 1 }, [this.#builder.container], "transcript")
+				: node("text", { spans: [span(placeholder, "dim")], wrap: "word" }, undefined, "placeholder"),
+		);
+		if (notice) {
+			children.push(
+				node(
+					"text",
+					{ text: sanitizeErrorLine(notice, NATIVE_LINE_WIDTH), tone: "error", truncate: "end" },
+					undefined,
+					"notice",
+				),
+			);
+		}
+		if (this.#editor) children.push(this.#editor);
+		if (progress) {
+			const statSpans: TspSpan[] = [];
+			const sep = (): void => {
+				if (statSpans.length > 0) statSpans.push(span(theme.sep.dot, "dim"));
+			};
+			if (progress.toolCount > 0) {
+				statSpans.push(span(`${formatNumber(progress.toolCount)} ${theme.icon.extensionTool}`, "dim"));
+			}
+			if (
+				progress.contextTokens &&
+				progress.contextTokens > 0 &&
+				!(progress.contextWindow && progress.contextWindow > 0)
+			) {
+				sep();
+				statSpans.push(span(formatNumber(progress.contextTokens), "dim"));
+			}
+			if (progress.durationMs > 0) {
+				sep();
+				statSpans.push(span(formatDuration(progress.durationMs), "dim"));
+			}
+			if (progress.cost > 0) {
+				sep();
+				statSpans.push(span(`$${progress.cost.toFixed(2)}`, "statusLineCost"));
+			}
+			const statsRow: NativeChild[] = [];
+			if (
+				progress.contextTokens &&
+				progress.contextTokens > 0 &&
+				progress.contextWindow &&
+				progress.contextWindow > 0
+			) {
+				const fraction = progress.contextTokens / progress.contextWindow;
+				statsRow.push(
+					node("progress", {
+						value: Math.min(1, fraction),
+						label: formatContextUsage(fraction * 100, progress.contextWindow),
+						max: { w: "24ch" },
+					}),
+				);
+			}
+			if (statSpans.length > 0) statsRow.push(text(statSpans, { truncate: "end" }));
+			if (statsRow.length > 0) children.push(node("row", { gap: "md", align: "center" }, statsRow, "stats"));
+		}
+		children.push(
+			hintsRow([
+				this.#editor ? actionHint("tui.input.submit", "send") : undefined,
+				{ keys: ["escape"], label: "close" },
+				{ keys: [this.#deps.expandKeys[0] ?? "ctrl+o"], label: "expand" },
+			]),
+		);
+		const head = [span("Agent Hub", "accent"), span(` ${theme.sep.dot} `, "dim"), span(id, "accent")];
+		const described = overlayCard("omp.hub.transcript", head, children);
+		this.#nativeCache = { signature, node: described };
+		return described;
+	}
+
 	#frame(context: TranscriptBrowserRenderContext): TranscriptBrowserFrame {
 		// The transcript components carry their own 1-col left gutter, so body
 		// rows are emitted WITHOUT an extra outer space; header/footer rows are
@@ -627,9 +812,10 @@ export class AgentTranscriptViewer implements Component {
 		const lines: string[] = [];
 		const statsLine = this.#statsLine();
 		if (statsLine) lines.push(statsLine);
-		const hint = this.#editor
-			? `Enter:send  Esc:close  ${this.#deps.expandKeys[0] ?? "ctrl+o"}:expand  empty input → j/k:scroll  g/G:top/bottom`
-			: `Esc:close  ${this.#deps.expandKeys[0] ?? "ctrl+o"}:expand  j/k:scroll  g/G:top/bottom`;
+		const keys =
+			`${formatKeyHint("escape")}:close  ${formatKeyHint(this.#deps.expandKeys[0] ?? "ctrl+o")}:expand  ` +
+			`${this.#editor ? "empty input → " : ""}${formatKeyHints(["j", "k"])}:scroll  ${formatKeyHints(["g", "shift+g"])}:top/bottom`;
+		const hint = this.#editor ? `${editorKey("tui.input.submit")}:send  ${keys}` : keys;
 		lines.push(theme.fg("dim", hint));
 		return lines;
 	}

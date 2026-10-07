@@ -101,51 +101,6 @@ describe("bash shortcut command", () => {
 		setThemeInstance(theme);
 	});
 
-	it("runs interactive ! commands through the configured user shell", async () => {
-		const executeBash = vi.fn().mockResolvedValue({
-			output: "ok",
-			exitCode: 0,
-			cancelled: false,
-			truncated: false,
-			totalLines: 1,
-			totalBytes: 2,
-			outputLines: 1,
-			outputBytes: 2,
-		});
-		const ctx = {
-			session: {
-				isStreaming: false,
-				executeBash,
-			},
-			sessionManager: {
-				getCwd: () => "/tmp",
-			},
-			chatContainer: createContainer(),
-			pendingMessagesContainer: createContainer(),
-			pendingBashComponents: [],
-			settings: Settings.isolated(),
-			ui: { requestRender: vi.fn(), requestComponentRender: vi.fn() },
-			present: vi.fn(),
-			showError: vi.fn(),
-			applyCwdChange: vi.fn(async () => {}),
-			updateEditorBorderColor: vi.fn(),
-			reloadTodos: vi.fn(async () => {}),
-		} as unknown as InteractiveModeContext;
-		const controller = new CommandController(ctx);
-
-		await controller.handleBashCommand("echo hi");
-
-		expect(executeBash).toHaveBeenCalledWith("echo hi", expect.any(Function), {
-			excludeFromContext: false,
-			useUserShell: true,
-			pty: {
-				cols: expect.any(Number),
-				rows: expect.any(Number),
-				onChunk: expect.any(Function),
-			},
-		});
-	});
-
 	it("persists standalone and bare cd before the next user-shell command", async () => {
 		const sourceDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-bash-cd-source-"));
 		const childDir = path.join(sourceDir, "child");

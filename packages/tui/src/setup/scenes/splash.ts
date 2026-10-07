@@ -1,7 +1,11 @@
 import { centerLine, visibleWidth } from "../../utils";
 import { padToWidth } from "../../render/utils";
-import { gradientEscape, gradientLogo, PI_LOGO, type ShineConfig } from "../../prompt/welcome";
+import { gradientEscape, gradientLogo, logoNode, PI_LOGO, type ShineConfig } from "../../prompt/welcome";
 import { theme } from "../../theme/theme";
+import { formatKeyHint } from "../../app-keybindings";
+import { col, node, span, text } from "../../native/describe";
+import type { NativeNode } from "../../native/node";
+import { Memo } from "../../native/memo";
 
 export const SETUP_SPLASH_MS = 2600;
 export const SETUP_TICK_MS = 33;
@@ -22,15 +26,10 @@ const RESET = "\x1b[0m";
 const MIN_SCENE_WIDTH = 56;
 const MIN_SCENE_HEIGHT = 22;
 
-const SKIP_HINT = "press enter to skip";
-
-/** Density ramp for the rippling water, lightest → heaviest. */
-const WATER_RAMP = [
-	{ min: 0.62, char: "█" },
-	{ min: 0.5, char: "▓" },
-	{ min: 0.36, char: "▒" },
-	{ min: 0.24, char: "░" },
-];
+/** Skip affordance; built at render time so it follows the live symbol preset. */
+function skipHint(): string {
+	return `press ${formatKeyHint("enter")} to skip`;
+}
 
 function starAt(x: number, y: number, frame: number): string {
 	const hash = (x * 73856093) ^ (y * 19349663) ^ (frame * 83492791);
@@ -78,32 +77,85 @@ function waterJitter(x: number, y: number): number {
 }
 
 /**
- * Rippling water amplitude in [0,1] at (x, y): three travelling sine waves
- * interfere, then a radial edge falloff and a downward fade concentrate the
- * ripples beneath the mark and dissolve them toward the edges/bottom. `t`
- * advances each tick, so the surface drifts.
+ * Time-invariant terms of the rippling water for one screen size: three
+ * travelling sine waves interfere, then a radial edge falloff and a downward
+ * fade concentrate the ripples beneath the mark and dissolve them toward the
+ * edges/bottom. Only the sine phases move per tick, so everything else is
+ * computed once per size.
  */
-function waterAmplitude(
-	x: number,
-	y: number,
-	cx: number,
-	waterTop: number,
-	waterHeight: number,
-	width: number,
-	t: number,
-): number {
-	const dx = (x - cx) / 2;
-	const dy = y - waterTop;
-	const dist = Math.sqrt(dx * dx + dy * dy);
-	const wave =
-		0.5 * Math.sin(dist * 0.55 - t) +
-		0.3 * Math.sin(x * 0.22 + y * 0.45 - t * 0.7) +
-		0.2 * Math.sin(Math.abs(dx) * 0.8 + dy * 0.5 - t * 1.4);
-	const level = 0.5 + 0.5 * wave;
-	const edge = Math.max(0, 1 - Math.abs(x - cx) / (width * 0.5));
-	const fade = Math.max(0, 1 - (dy / Math.max(1, waterHeight)) * 0.55);
-	return level * edge ** 0.7 * fade;
+interface WaterField {
+	readonly width: number;
+	readonly height: number;
+	readonly waterTop: number;
+	/** Per cell (row-major from `waterTop`): `dist * 0.55`. */
+	readonly radial: Float64Array;
+	/** Per cell: `x * 0.22 + y * 0.45`. */
+	readonly diagonal: Float64Array;
+	/** Per cell: `|dx| * 0.8 + dy * 0.5`. */
+	readonly cross: Float64Array;
+	/** Per cell: `(waterJitter(x, y) - 0.5) * 0.06`. */
+	readonly jitter: Float64Array;
+	/** Per column: `edge ** 0.7`. */
+	readonly edge: Float64Array;
+	/** Per water row: downward fade. */
+	readonly fade: Float64Array;
 }
+
+let waterField: WaterField | undefined;
+
+function getWaterField(width: number, height: number, cx: number, waterTop: number): WaterField {
+	const cached = waterField;
+	if (cached && cached.width === width && cached.height === height && cached.waterTop === waterTop) return cached;
+	const waterHeight = Math.max(1, height - waterTop);
+	const rows = Math.max(0, height - waterTop);
+	const radial = new Float64Array(rows * width);
+	const diagonal = new Float64Array(rows * width);
+	const cross = new Float64Array(rows * width);
+	const jitter = new Float64Array(rows * width);
+	const edge = new Float64Array(width);
+	const fade = new Float64Array(rows);
+	for (let x = 0; x < width; x++) edge[x] = Math.max(0, 1 - Math.abs(x - cx) / (width * 0.5)) ** 0.7;
+	for (let row = 0; row < rows; row++) {
+		const y = waterTop + row;
+		const dy = y - waterTop;
+		fade[row] = Math.max(0, 1 - (dy / waterHeight) * 0.55);
+		for (let x = 0; x < width; x++) {
+			const i = row * width + x;
+			const dx = (x - cx) / 2;
+			radial[i] = Math.sqrt(dx * dx + dy * dy) * 0.55;
+			diagonal[i] = x * 0.22 + y * 0.45;
+			cross[i] = Math.abs(dx) * 0.8 + dy * 0.5;
+			jitter[i] = (waterJitter(x, y) - 0.5) * 0.06;
+		}
+	}
+	waterField = { width, height, waterTop, radial, diagonal, cross, jitter, edge, fade };
+	return waterField;
+}
+
+/** Water glyph for an amplitude, lightest → heaviest density ramp; undefined below the floor. */
+function waterChar(amp: number): string | undefined {
+	if (amp > 0.62) return "█";
+	if (amp > 0.5) return "▓";
+	if (amp > 0.36) return "▒";
+	if (amp > 0.24) return "░";
+	return undefined;
+}
+
+/** Reused cell grid; resized when the screen changes. */
+let splashCells: string[][] = [];
+
+function resetCells(width: number, height: number): string[][] {
+	if (splashCells.length !== height || splashCells[0]?.length !== width) {
+		// oxlint-disable-next-line unicorn/no-new-array -- length preallocation
+		splashCells = Array.from({ length: height }, () => new Array<string>(width).fill(" "));
+	} else {
+		for (const row of splashCells) row.fill(" ");
+	}
+	return splashCells;
+}
+
+/** Per-frame gradient escapes, one per screen diagonal (the gradient only varies along it). */
+let diagonalEscapes: (string | undefined)[] = [];
 
 /**
  * Animated setup splash, in the spirit of the omp landing page: the brand π
@@ -125,23 +177,46 @@ export function renderSetupSplash(width: number, height: number, elapsedMs: numb
 	const cx = Math.floor(w / 2);
 	const surfaceTime = frame * 0.13;
 
-	// oxlint-disable-next-line unicorn/no-new-array -- length preallocation
-	const cells: string[][] = Array.from({ length: h }, () => new Array<string>(w).fill(" "));
+	const cells = resetCells(w, h);
 	const put = (x: number, y: number, glyph: string): void => {
 		if (y >= 0 && y < h && x >= 0 && x < w) cells[y][x] = glyph;
+	};
+	// Every cell on a diagonal shares one gradient position, so resolve each
+	// escape once per frame instead of once per cell.
+	const diagonals = w + h - 1;
+	if (diagonalEscapes.length !== diagonals) diagonalEscapes = Array.from({ length: diagonals });
+	else diagonalEscapes.fill(undefined);
+	const escapes = diagonalEscapes;
+	const gradient = (x: number, y: number): string => {
+		const d = x + (h - 1 - y);
+		let escape = escapes[d];
+		if (escape === undefined) {
+			escape = gradientEscape(screenGradientT(x, y, w, h, phase), shine);
+			escapes[d] = escape;
+		}
+		return escape;
 	};
 
 	const hx = Math.floor((w - LOGO_WIDTH) / 2);
 	const hy = Math.max(2, Math.floor(h * 0.16));
 	const waterTop = hy + LOGO_HEIGHT;
-	const waterHeight = Math.max(1, h - waterTop);
 
 	// 1. rippling water surface (shares the screen-wide gradient with the mark)
+	const field = getWaterField(w, h, cx, waterTop);
+	const tDiagonal = surfaceTime * 0.7;
+	const tCross = surfaceTime * 1.4;
 	for (let y = waterTop; y < h; y++) {
+		const row = y - waterTop;
+		const fade = field.fade[row];
 		for (let x = 0; x < w; x++) {
-			const amp = waterAmplitude(x, y, cx, waterTop, waterHeight, w, surfaceTime) + (waterJitter(x, y) - 0.5) * 0.06;
-			const cell = WATER_RAMP.find(step => amp > step.min);
-			if (cell) put(x, y, gradientEscape(screenGradientT(x, y, w, h, phase), shine) + cell.char + RESET);
+			const i = row * w + x;
+			const wave =
+				0.5 * Math.sin(field.radial[i] - surfaceTime) +
+				0.3 * Math.sin(field.diagonal[i] - tDiagonal) +
+				0.2 * Math.sin(field.cross[i] - tCross);
+			const level = 0.5 + 0.5 * wave;
+			const char = waterChar(level * field.edge[x] * fade + field.jitter[i]);
+			if (char) cells[y][x] = gradient(x, y) + char + RESET;
 		}
 	}
 	// 2. twinkling starfield in the sky above the water
@@ -155,25 +230,46 @@ export function renderSetupSplash(width: number, height: number, elapsedMs: numb
 	LARGE_LOGO.forEach((line, row) => {
 		let col = 0;
 		for (const ch of line) {
-			if (ch !== " ") {
-				put(
-					hx + col,
-					hy + row,
-					gradientEscape(screenGradientT(hx + col, hy + row, w, h, phase), shine) + ch + RESET,
-				);
-			}
+			const x = hx + col;
+			const y = hy + row;
+			if (ch !== " " && y >= 0 && y < h && x >= 0 && x < w) cells[y][x] = gradient(x, y) + ch + RESET;
 			col++;
 		}
 	});
 	// 4. skip hint on a cleared strip at the bottom so it stays legible over the water
-	const hintWidth = visibleWidth(SKIP_HINT);
+	const hint = skipHint();
+	const hintWidth = visibleWidth(hint);
 	const hintStart = Math.floor((w - hintWidth) / 2);
 	const hintRow = h - 1;
 	for (let x = hintStart - 1; x <= hintStart + hintWidth; x++) put(x, hintRow, " ");
 	let col = hintStart;
-	for (const ch of SKIP_HINT) put(col++, hintRow, ch === " " ? " " : theme.fg("dim", ch));
+	for (const ch of hint) put(col++, hintRow, ch === " " ? " " : theme.fg("dim", ch));
 
 	return cells.map(row => row.join(""));
+}
+
+const splashMemo = new Memo();
+
+/**
+ * Native splash: the 2x brand mark with a terminal-clocked shimmer, the
+ * wordmark, and the skip hint pinned to the bottom. The water and starfield
+ * are cell paintings with no semantic counterpart. A click on the splash
+ * sends the `skip` action.
+ */
+export function describeSetupSplash(): NativeNode {
+	const hint = skipHint();
+	return splashMemo.get([hint], () =>
+		col(
+			[
+				node("spacer", { grow: 1 }),
+				logoNode(LARGE_LOGO, true),
+				text([span("O h   M y   P i", "strong")], { wrap: "none" }),
+				node("spacer", { grow: 1 }),
+				text([span(hint, "dim")], { wrap: "none" }),
+			],
+			{ align: "center", gap: "md", grow: 1, role: "omp.setup.splash", actions: { click: "skip" } },
+		),
+	);
 }
 
 /** Centered fallback for windows too small to hold the full scene. */
@@ -187,6 +283,6 @@ function renderCompactSplash(width: number, height: number, phase: number, shine
 		lines.push(width > 0 ? padToWidth(item !== undefined ? centerLine(item, width) : "", width) : "");
 	}
 	if (height > 2)
-		lines[height - 2] = width > 0 ? padToWidth(centerLine(theme.fg("dim", SKIP_HINT), width), width) : "";
+		lines[height - 2] = width > 0 ? padToWidth(centerLine(theme.fg("dim", skipHint()), width), width) : "";
 	return lines;
 }

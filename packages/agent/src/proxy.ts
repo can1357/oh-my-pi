@@ -20,7 +20,8 @@ import {
 	type StreamingPartialJsonCarrier,
 	setStreamingPartialJson,
 } from "@oh-my-pi/pi-ai/utils/block-symbols";
-import { parseStreamingJson, parseStreamingJsonThrottled, readSseJson } from "@oh-my-pi/pi-utils";
+import { parseToolCallArguments } from "@oh-my-pi/pi-ai/utils/tool-call-arguments";
+import { parseStreamingJsonThrottled, readSseJson } from "@oh-my-pi/pi-utils";
 
 // Event stream adapter for proxy SSE events
 export class ProxyMessageEventStream extends EventStream<AssistantMessageEvent, AssistantMessage> {
@@ -378,7 +379,7 @@ function processProxyEvent(
 				// throttle may have skipped trailing deltas, so the last
 				// parsed arguments can lag the accumulated buffer.
 				const acc = partialJsonByIndex.get(proxyEvent.contentIndex);
-				if (acc !== undefined && acc.length > 0) content.arguments = parseStreamingJson(acc) || {};
+				if (acc !== undefined && acc.length > 0) content.arguments = parseToolCallArguments(acc) || {};
 				partialJsonByIndex.delete(proxyEvent.contentIndex);
 				parsedLenByIndex.delete(proxyEvent.contentIndex);
 				clearStreamingPartialJson(content);
@@ -427,6 +428,6 @@ function finalizeBufferedArguments(partial: AssistantMessage, partialJsonByIndex
 	for (const [index, acc] of partialJsonByIndex) {
 		if (acc.length === 0) continue;
 		const content = partial.content[index];
-		if (content?.type === "toolCall") content.arguments = parseStreamingJson(acc) || {};
+		if (content?.type === "toolCall") content.arguments = parseToolCallArguments(acc) || {};
 	}
 }

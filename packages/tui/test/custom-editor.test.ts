@@ -1,9 +1,9 @@
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
 import type { ImageContent } from "@oh-my-pi/pi-ai";
-import { CURSOR_MARKER } from "@oh-my-pi/pi-tui";
+import { CURSOR_MARKER, getKeybindings, setKeybindings } from "@oh-my-pi/pi-tui";
 import { setKittyProtocolActive } from "@oh-my-pi/pi-tui/keys";
 import { $ } from "bun";
-import { getDefaultPasteImageKeys } from "@oh-my-pi/pi-tui/app-keybindings";
+import { KeybindingsManager, getDefaultPasteImageKeys } from "@oh-my-pi/pi-tui/app-keybindings";
 import {
 	chipLabel,
 	COMPOSER_TOKEN_REGEX,
@@ -18,7 +18,12 @@ import {
 	extractImagePathFromText,
 	extractPastePathsFromText,
 } from "@oh-my-pi/pi-tui/prompt/custom-editor";
-import { SPACE_HOLD_MECHANICAL_RUN, SPACE_HOLD_RELEASE_MS, SPACE_REPEAT_MAX_GAP_MS } from "@oh-my-pi/pi-tui/space-hold";
+import {
+	SPACE_HOLD_MECHANICAL_RUN,
+	SPACE_HOLD_RELEASE_MS,
+	SPACE_HOLD_STALL_SLACK_MS,
+	SPACE_REPEAT_MAX_GAP_MS,
+} from "@oh-my-pi/pi-tui/space-hold";
 import { getEditorTheme, initTheme, theme } from "@oh-my-pi/pi-tui/theme";
 
 function makeEditor(holdEnabled = true) {
@@ -57,6 +62,22 @@ function feedGaps(editor: CustomEditor, gaps: number[]): void {
 	for (const gapMs of gaps) {
 		vi.advanceTimersByTime(gapMs);
 		editor.handleInput(" ");
+	}
+}
+
+/** Feed repeated key events at the given cadence on the fake clock. */
+function feedKey(editor: CustomEditor, key: string, count: number, gapMs: number): void {
+	for (let i = 0; i < count; i++) {
+		vi.advanceTimersByTime(gapMs);
+		editor.handleInput(key);
+	}
+}
+
+/** Feed key events at explicit per-press gaps on the fake clock. */
+function feedKeyGaps(editor: CustomEditor, key: string, gaps: number[]): void {
+	for (const gapMs of gaps) {
+		vi.advanceTimersByTime(gapMs);
+		editor.handleInput(key);
 	}
 }
 
@@ -211,6 +232,25 @@ describe("CustomEditor bracketed path paste", () => {
 		]);
 	});
 
+	it("attaches escaped home paths without unescaping Windows tilde directories", () => {
+		for (const [pasted, imagePath] of [
+			[String.raw`\~/Pictures/image.png`, "~/Pictures/image.png"],
+			[String.raw`C:\~\capture.png`, String.raw`C:\~\capture.png`],
+		]) {
+			const { editor } = makeEditor();
+			const attached: string[] = [];
+			editor.onPasteImagePath = path => {
+				attached.push(path);
+			};
+
+			editor.handleInput(bracketedPaste(pasted));
+
+			expect(attached).toEqual([imagePath]);
+			expect(editor.getText()).toBe("");
+			expect(extractImagePathFromText(pasted)).toBe(imagePath);
+		}
+	});
+
 	it("routes a pasted video path through the attachment callback", () => {
 		const { editor } = makeEditor();
 		const video = "/Users/me/Movies/launch cut.mp4";
@@ -234,6 +274,77 @@ describe("CustomEditor bracketed path paste", () => {
 
 		expect(editor.getText()).toBe(chipLabel("video", 1));
 		expect(editor.composerChips()).toMatchObject([{ kind: "video", n: 1 }]);
+	});
+
+	it("shows only the chip whose full attachment number remains in the buffer", () => {
+		const { editor } = makeEditor();
+		for (let n = 1; n <= 10; n++) editor.insertTextAttachment(`blob ${n}`);
+		const image: ImageContent = { type: "image", data: "aW1hZ2U=", mimeType: "image/png" };
+		editor.pendingImages = Array.from({ length: 10 }, () => image);
+		editor.setText(`${chipLabel("paste", 10)} ${chipLabel("image", 10)}`);
+
+		expect(editor.composerChips().map(chip => `${chip.kind}#${chip.n}`)).toEqual(["image#10", "paste#10"]);
+	});
+
+	it("tracks chips drawn with a theme's overridden chip glyph", async () => {
+		await initTheme();
+		const symbol = theme.symbol.bind(theme);
+		const spy = vi.spyOn(theme, "symbol").mockImplementation(key => (key === "chip.paste" ? "📎" : symbol(key)));
+		try {
+			const { editor } = makeEditor();
+			for (let n = 1; n <= 10; n++) editor.insertTextAttachment(`blob ${n}`);
+			editor.setText(`see ${chipLabel("paste", 10)}`);
+
+			expect(editor.getText()).toBe("see 📎 #10");
+			expect(editor.composerChips().map(chip => `${chip.kind}#${chip.n}`)).toEqual(["paste#10"]);
+		} finally {
+			spy.mockRestore();
+		}
+	});
+
+	it("keeps recorded paste and image chips after their theme glyph changes", async () => {
+		await initTheme();
+		const { editor } = makeEditor();
+		const symbol = theme.symbol.bind(theme);
+		const spy = vi.spyOn(theme, "symbol").mockImplementation(key => {
+			if (key === "chip.paste") return "🧷";
+			if (key === "chip.image") return "🔶";
+			return symbol(key);
+		});
+		let draft = "";
+		try {
+			const image: ImageContent = { type: "image", data: "aW1hZ2U=", mimeType: "image/png" };
+			editor.setDraft("[Image #1]", [image]);
+			for (let n = 1; n <= 10; n++) editor.insertTextAttachment(`blob ${n}`);
+			draft = `${chipLabel("image", 1)} ${chipLabel("paste", 10)}`;
+			editor.setText(draft);
+			expect(editor.composerChips().map(chip => `${chip.kind}#${chip.n}`)).toEqual(["image#1", "paste#10"]);
+		} finally {
+			spy.mockRestore();
+		}
+
+		editor.setText(`${draft} edited`);
+		expect(editor.composerChips().map(chip => `${chip.kind}#${chip.n}`)).toEqual(["image#1", "paste#10"]);
+		expect(editor.getExpandedText()).toBe("[Image #1] blob 10 edited");
+	});
+
+	it("favors an active image atom when its glyph reuses a deleted paste label", async () => {
+		await initTheme();
+		const { editor } = makeEditor();
+		const symbol = theme.symbol.bind(theme);
+		const spy = vi.spyOn(theme, "symbol").mockImplementation(key => (key === "chip.paste" ? "📎" : symbol(key)));
+		try {
+			editor.insertTextAttachment("deleted paste");
+			editor.setText("");
+			spy.mockImplementation(key => (key === "chip.image" ? "📎" : symbol(key)));
+			editor.pendingImages.push({ type: "image", data: "aW1hZ2U=", mimeType: "image/png" });
+			editor.insertAtom(chipLabel("image", 1), "[Image #1]");
+
+			expect(editor.composerChips().map(chip => `${chip.kind}#${chip.n}`)).toEqual(["image#1"]);
+			expect(editor.getExpandedText().trimEnd()).toBe("[Image #1]");
+		} finally {
+			spy.mockRestore();
+		}
 	});
 
 	describe("skill chips", () => {
@@ -696,13 +807,7 @@ describe("CustomEditor space-hold push-to-talk", () => {
 
 	afterEach(() => {
 		vi.useRealTimers();
-	});
-
-	it("types deliberate space taps without triggering, even several in a row", () => {
-		const { editor, events } = makeEditor();
-		feedSpaces(editor, 3, TAP_GAP_MS);
-		expect(editor.getText()).toBe("   ");
-		expect(events).toEqual([]);
+		vi.restoreAllMocks();
 	});
 
 	it("recognizes a held bar from a steady fast cadence and tracks back the burst", () => {
@@ -719,6 +824,29 @@ describe("CustomEditor space-hold push-to-talk", () => {
 		expect(editor.getText()).toBe("hi");
 		expect(events).toEqual(["start"]);
 		// An idle gap with no further repeats means the bar was released -> stop + transcribe.
+		vi.advanceTimersByTime(SPACE_HOLD_RELEASE_MS + 1);
+		expect(events).toEqual(["start", "end"]);
+	});
+
+	it("keeps recording when starting it stalls the event loop past the release window", () => {
+		const { editor, events } = makeEditor();
+		// Opening the microphone blocks the loop synchronously: the clock jumps while the repeats
+		// the held bar emits during the block sit unread in stdin.
+		const fakeNow = performance.now.bind(performance);
+		let stalledMs = 0;
+		vi.spyOn(performance, "now").mockImplementation(() => fakeNow() + stalledMs);
+		editor.spaceHold.handler!.onStart = () => {
+			events.push("start");
+			stalledMs += SPACE_HOLD_RELEASE_MS + SPACE_HOLD_STALL_SLACK_MS + 300;
+		};
+		feedSpaces(editor, SPACE_HOLD_MECHANICAL_RUN + 2, REPEAT_GAP_MS);
+		expect(events).toEqual(["start"]);
+		// The overdue release timer fires before the queued repeats are read; it must not stop.
+		vi.advanceTimersByTime(SPACE_HOLD_RELEASE_MS + 1);
+		expect(events).toEqual(["start"]);
+		// The queued repeats arrive and keep the hold alive; a real idle gap then releases.
+		feedSpaces(editor, 5, REPEAT_GAP_MS);
+		expect(events).toEqual(["start"]);
 		vi.advanceTimersByTime(SPACE_HOLD_RELEASE_MS + 1);
 		expect(events).toEqual(["start", "end"]);
 	});
@@ -755,6 +883,254 @@ describe("CustomEditor space-hold push-to-talk", () => {
 		const { editor, events } = makeEditor(false);
 		feedSpaces(editor, 8, REPEAT_GAP_MS);
 		expect(editor.getText()).toBe(" ".repeat(8));
+		expect(events).toEqual([]);
+	});
+
+	it("uses a remapped printable key for PTT without intercepting Space", () => {
+		const { editor, events } = makeEditor();
+		editor.spaceHold.keys = ["x"];
+		editor.handleInput(" ");
+		feedKey(editor, "x", SPACE_HOLD_MECHANICAL_RUN + 2, REPEAT_GAP_MS);
+
+		expect(editor.getText()).toBe(" ");
+		expect(events).toEqual(["start"]);
+	});
+
+	it("types and holds a printable PTT binding instead of submitting when the key is also Submit", () => {
+		const previous = getKeybindings();
+		setKeybindings(KeybindingsManager.inMemory({ "tui.input.submit": ["x"] }));
+		try {
+			const { editor, events } = makeEditor();
+			const onSubmit = vi.fn();
+			editor.spaceHold.keys = ["x"];
+			editor.onSubmit = onSubmit;
+			editor.setText("draft");
+
+			editor.handleInput("x");
+			expect(editor.getText()).toBe("draftx");
+			expect(onSubmit).not.toHaveBeenCalled();
+			expect(events).toEqual([]);
+
+			feedKey(editor, "x", SPACE_HOLD_MECHANICAL_RUN + 1, REPEAT_GAP_MS);
+			expect(editor.getText()).toBe("draft");
+			expect(onSubmit).not.toHaveBeenCalled();
+			expect(events).toEqual(["start"]);
+		} finally {
+			setKeybindings(previous);
+		}
+	});
+
+	it("preserves editor autocorrection on printable PTT taps", () => {
+		const { editor, events } = makeEditor();
+		editor.spaceHold.keys = ["space"];
+		editor.setTextAssistProvider({
+			tryAutocorrect(lines, line, col) {
+				return lines[line]?.slice(0, col) === "teh " ? { replaceLen: 4, insert: "the " } : null;
+			},
+		});
+		editor.setText("teh");
+
+		editor.handleInput(" ");
+
+		expect(editor.getText()).toBe("the ");
+		expect(events).toEqual([]);
+	});
+
+	it("keeps a synchronous inline replacement intact through a PTT hold", () => {
+		const { editor, events } = makeEditor();
+		editor.spaceHold.keys = [":"];
+		editor.setAutocompleteProvider({
+			async getSuggestions() {
+				return null;
+			},
+			applyCompletion: (lines, cursorLine, cursorCol) => ({ lines, cursorLine, cursorCol }),
+			trySyncInlineReplace(textBeforeCursor) {
+				return textBeforeCursor.endsWith(":joy:") ? { replaceLen: 5, insert: "😂" } : null;
+			},
+		});
+		editor.setText(":joy");
+
+		feedKey(editor, ":", SPACE_HOLD_MECHANICAL_RUN + 4, REPEAT_GAP_MS);
+
+		expect(editor.getText()).toBe("😂");
+		expect(events).toEqual(["start"]);
+	});
+
+	it("starts a Space hold after accepting a word completion without deleting its provisional space", () => {
+		const { editor, events } = makeEditor();
+		editor.setTextAssistProvider({
+			getWordCompletion: (lines, line, col) => ((lines[line] ?? "").slice(0, col).endsWith("weath") ? "er" : null),
+		});
+		editor.setText("The weath");
+		editor.handleInput("\t");
+		expect(editor.getText()).toBe("The weather ");
+		editor.spaceHold.keys = ["space"];
+
+		feedSpaces(editor, SPACE_HOLD_MECHANICAL_RUN + 4, REPEAT_GAP_MS);
+
+		expect(editor.getText()).toBe("The weather ");
+		expect(events).toEqual(["start"]);
+	});
+
+	it("keeps printable and Space input normal when the PTT key list is empty", () => {
+		const { editor, events } = makeEditor();
+		editor.spaceHold.keys = [];
+		editor.handleInput("x");
+		feedSpaces(editor, 6, REPEAT_GAP_MS);
+
+		expect(editor.getText()).toBe(`x${" ".repeat(6)}`);
+		expect(events).toEqual([]);
+	});
+
+	it("does not combine alternative bindings into one hold", () => {
+		const { editor, events } = makeEditor();
+		editor.spaceHold.keys = ["x", "y"];
+		feedKey(editor, "x", 2, REPEAT_GAP_MS);
+		feedKey(editor, "y", 2, REPEAT_GAP_MS);
+
+		expect(editor.getText()).toBe("xxyy");
+		expect(events).toEqual([]);
+
+		feedKey(editor, "x", SPACE_HOLD_MECHANICAL_RUN + 2, REPEAT_GAP_MS);
+		expect(editor.getText()).toBe("xxyy");
+		expect(events).toEqual(["start"]);
+		vi.advanceTimersByTime(SPACE_HOLD_RELEASE_MS + 1);
+		feedKey(editor, "y", SPACE_HOLD_MECHANICAL_RUN + 2, REPEAT_GAP_MS);
+		expect(editor.getText()).toBe("xxyy");
+		expect(events).toEqual(["start", "end", "start"]);
+	});
+
+	it("keeps slow taps before a later hold instead of rolling them back", () => {
+		const { editor, events } = makeEditor();
+		editor.spaceHold.keys = ["x"];
+		feedKey(editor, "x", 3, TAP_GAP_MS);
+		expect(editor.getText()).toBe("xxx");
+		expect(events).toEqual([]);
+
+		// The first press of the later hold follows another deliberate tap by a slow gap; only it
+		// and the ensuing fast repeat burst belong to the held gesture.
+		vi.advanceTimersByTime(TAP_GAP_MS);
+		editor.handleInput("x");
+		expect(editor.getText()).toBe("xxxx");
+		expect(events).toEqual([]);
+
+		feedKey(editor, "x", SPACE_HOLD_MECHANICAL_RUN + 1, REPEAT_GAP_MS);
+		expect(editor.getText()).toBe("xxx");
+		expect(events).toEqual(["start"]);
+	});
+
+	it("resets candidate rollback across jitter before a later hold", () => {
+		const { editor, events } = makeEditor();
+		editor.spaceHold.keys = ["x"];
+		feedKeyGaps(editor, "x", [40, 95, 45, 100, 35, 90]);
+		expect(editor.getText()).toBe("x".repeat(6));
+		expect(events).toEqual([]);
+
+		feedKey(editor, "x", SPACE_HOLD_MECHANICAL_RUN + 2, REPEAT_GAP_MS);
+		expect(editor.getText()).toBe("x".repeat(6));
+		expect(events).toEqual(["start"]);
+	});
+
+	it("reserves delete, movement, submit, and app-action chords from their first PTT candidate", () => {
+		const backspace = makeEditor();
+		backspace.editor.setText("word");
+		backspace.editor.spaceHold.keys = ["backspace"];
+		backspace.editor.handleInput("\x7f");
+		expect(backspace.editor.getText()).toBe("word");
+
+		const forwardDelete = makeEditor();
+		forwardDelete.editor.setText("word");
+		forwardDelete.editor.spaceHold.keys = ["delete"];
+		forwardDelete.editor.handleInput("\x1b[H");
+		forwardDelete.editor.handleInput("\x1b[3~");
+		expect(forwardDelete.editor.getText()).toBe("word");
+
+		const submit = makeEditor();
+		const onSubmit = vi.fn(async () => {});
+		submit.editor.setText("word");
+		submit.editor.spaceHold.keys = ["enter"];
+		submit.editor.onSubmit = onSubmit;
+		submit.editor.handleInput("\r");
+		expect(submit.editor.getText()).toBe("word");
+		expect(onSubmit).not.toHaveBeenCalled();
+
+		const movement = makeEditor();
+		movement.editor.setText("word");
+		movement.editor.spaceHold.keys = ["ctrl+a"];
+		const cursorBefore = movement.editor.getCursor();
+		movement.editor.handleInput("\x01");
+		expect(movement.editor.getCursor()).toEqual(cursorBefore);
+
+		const chord = makeEditor();
+		const onDisplayReset = vi.fn();
+		chord.editor.setText("word");
+		chord.editor.spaceHold.keys = ["ctrl+w"];
+		chord.editor.setActionKeys("app.display.reset", ["ctrl+w"]);
+		chord.editor.onDisplayReset = onDisplayReset;
+		chord.editor.handleInput("\x17");
+		expect(chord.editor.getText()).toBe("word");
+		expect(onDisplayReset).not.toHaveBeenCalled();
+	});
+
+	it("restores normal editing and action behavior when PTT is disabled", () => {
+		const backspace = makeEditor(false);
+		backspace.editor.setText("word");
+		backspace.editor.spaceHold.keys = ["backspace"];
+		backspace.editor.handleInput("\x7f");
+		expect(backspace.editor.getText()).toBe("wor");
+
+		const forwardDelete = makeEditor(false);
+		forwardDelete.editor.setText("word");
+		forwardDelete.editor.spaceHold.keys = ["delete"];
+		forwardDelete.editor.handleInput("\x1b[H");
+		forwardDelete.editor.handleInput("\x1b[3~");
+		expect(forwardDelete.editor.getText()).toBe("ord");
+
+		const submit = makeEditor(false);
+		const onSubmit = vi.fn(async () => {});
+		submit.editor.setText("word");
+		submit.editor.spaceHold.keys = ["enter"];
+		submit.editor.onSubmit = onSubmit;
+		submit.editor.handleInput("\r");
+		expect(onSubmit).toHaveBeenCalled();
+
+		const movement = makeEditor(false);
+		movement.editor.setText("word");
+		movement.editor.spaceHold.keys = ["ctrl+a"];
+		movement.editor.handleInput("\x01");
+		expect(movement.editor.getCursor()).toEqual({ line: 0, col: 0 });
+
+		const chord = makeEditor(false);
+		const onDisplayReset = vi.fn();
+		chord.editor.spaceHold.keys = ["ctrl+w"];
+		chord.editor.setActionKeys("app.display.reset", ["ctrl+w"]);
+		chord.editor.onDisplayReset = onDisplayReset;
+		chord.editor.handleInput("\x17");
+		expect(onDisplayReset).toHaveBeenCalled();
+	});
+
+	it("keeps the STT toggle binding separate from a remapped hold", () => {
+		const { editor, events } = makeEditor();
+		const toggle = vi.fn();
+		editor.spaceHold.keys = ["x"];
+		editor.setCustomKeyHandler("alt+h", toggle);
+		editor.handleInput("\x1bh");
+		expect(toggle).toHaveBeenCalledTimes(1);
+		expect(events).toEqual([]);
+
+		feedKey(editor, "x", SPACE_HOLD_MECHANICAL_RUN + 2, REPEAT_GAP_MS);
+		expect(events).toEqual(["start"]);
+	});
+
+	it("lets a pending character jump target the PTT key instead of typing it", () => {
+		const { editor, events } = makeEditor();
+		editor.setText("ab cd");
+		editor.handleInput("\x1b[H");
+		editor.handleInput("\x1d"); // Ctrl+] — jump forward
+		editor.handleInput(" ");
+
+		expect(editor.getText()).toBe("ab cd");
+		expect(editor.getCursor()).toEqual({ line: 0, col: 2 });
 		expect(events).toEqual([]);
 	});
 });

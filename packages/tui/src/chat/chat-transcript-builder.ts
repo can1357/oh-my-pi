@@ -27,7 +27,12 @@ import {
 	SKILL_PROMPT_MESSAGE_TYPE,
 	type SkillPromptDetails,
 } from "./messages";
-import { textContent, type TranscriptEntryLike as TranscriptEntry, transcriptEntryMessage } from "./transcript-entry";
+import {
+	imageContent,
+	textContent,
+	type TranscriptEntryLike as TranscriptEntry,
+	transcriptEntryMessage,
+} from "./transcript-entry";
 import { theme } from "../theme";
 import {
 	assistantHasVisibleContent,
@@ -54,12 +59,16 @@ import {
 } from "./compaction-summary-message";
 import { CustomMessageComponent } from "./custom-message";
 import { EvalExecutionComponent } from "./eval-execution";
-import { type LateDiagnosticsFile, LateDiagnosticsMessageComponent } from "./late-diagnostics-message";
+import {
+	type LateDiagnosticsFile,
+	LateDiagnosticsMessageComponent,
+	routeLateDiagnostics,
+} from "./late-diagnostics-message";
 import { groupedReadUsageCallIds, ReadToolGroupComponent, readArgsCollapseIntoGroup } from "./read-tool-group";
 import { SkillMessageComponent } from "./skill-message";
 import { ToolExecutionComponent } from "./tool-execution";
 import { TranscriptContainer } from "../chrome/transcript-container";
-import { createUsageRowBlock, turnElapsedMs } from "../overlays/usage-row";
+import { createUsageRowBlock, TurnUsageTally, turnElapsedMs } from "../overlays/usage-row";
 import { CollapsedSyntheticMessageComponent, UserMessageComponent } from "./user-message";
 
 export interface ChatTranscriptBuilderDeps {
@@ -71,8 +80,11 @@ export interface ChatTranscriptBuilderDeps {
 	cwd: string;
 	hideThinkingBlock?: () => boolean;
 	proseOnlyThinking?: () => boolean;
+	expandThinkingBlocks?: () => boolean;
 	/** Session-scoped resolved destinations for model-authored Markdown links. */
 	linkTargets?: ReadonlyMap<string, string>;
+	/** Draw charts under numeric tables; false for transcripts that are not the main session's. Default: true. */
+	tableCharts?: boolean;
 	requestRender: () => void;
 }
 
@@ -88,6 +100,7 @@ export class ChatTranscriptBuilder {
 	#pendingReadUsageCallIds: string[] | undefined;
 	#pendingUsageElapsedMs: number | undefined;
 	#turnStartedAt: number | undefined;
+	readonly #turnUsage = new TurnUsageTally();
 	#lastAssistantUsage: Usage | undefined;
 	#servedModelTracker = new ServedModelTracker();
 	#waitingPoll: ToolExecutionComponent | null = null;
@@ -124,7 +137,12 @@ export class ChatTranscriptBuilder {
 		if (this.#readArgs.size === 0 && this.#pendingTools.size === 0) this.#flushPendingUsage();
 	}
 
-	/** Toggle tool-output expansion across every expandable component. */
+	/**
+	 * Toggle tool-output expansion across every expandable component. Cards a
+	 * TSP terminal collapsed or expanded locally mirror that into their own
+	 * state, so this re-applies the transcript-wide state to every one of them
+	 * even when it equals the previous value.
+	 */
 	setExpanded(expanded: boolean): void {
 		this.#expanded = expanded;
 		for (const component of this.#expandables) component.setExpanded(expanded);
@@ -156,6 +174,7 @@ export class ChatTranscriptBuilder {
 		this.#pendingReadUsageCallIds = undefined;
 		this.#pendingUsageElapsedMs = undefined;
 		this.#turnStartedAt = undefined;
+		this.#turnUsage.reset();
 		this.#lastAssistantUsage = undefined;
 		this.#servedModelTracker = new ServedModelTracker();
 		this.#waitingPoll = null;
@@ -189,7 +208,7 @@ export class ChatTranscriptBuilder {
 		const previous = this.#waitingPoll;
 		if (!previous) return;
 		this.#waitingPoll = null;
-		if (nextToolName === "wait" && previous.isDisplaceableBlock() && this.container.canRemoveBlock(previous)) {
+		if (nextToolName === "wait" && previous.isDisplaceableBlock() && this.container.canDisplaceBlock(previous)) {
 			this.container.removeChild(previous);
 		}
 		previous.seal();
@@ -282,7 +301,9 @@ export class ChatTranscriptBuilder {
 				// agent-attributed `user` message (advisor tool-loop redirect) must not.
 				if (message.role === "user" && message.attribution !== "agent") {
 					this.#turnStartedAt = message.timestamp;
+					this.#turnUsage.reset();
 				} else if (message.role === "developer" && message.synthetic) {
+					this.#turnUsage.reset();
 					// A synthetic developer message initiates a fresh run (auto-
 					// continue, /goal, approved plan): replay must not inherit the
 					// preceding user prompt's timestamp, mirroring the live
@@ -313,6 +334,8 @@ export class ChatTranscriptBuilder {
 						this.container.addChild(
 							new UserMessageComponent(userText, {
 								liveSteered: message.role === "user" && message.liveSteered === true,
+								timestamp: message.timestamp,
+								images: imageContent(message.content),
 							}),
 						);
 					}
@@ -348,6 +371,7 @@ export class ChatTranscriptBuilder {
 				// message does.
 				if (message.role === "custom" && isUserTurnInitiator(message as CustomMessage)) {
 					this.#turnStartedAt = message.timestamp;
+					this.#turnUsage.reset();
 				}
 				this.#appendCustomMessage(message);
 				break;
@@ -383,6 +407,7 @@ export class ChatTranscriptBuilder {
 	#appendAssistantMessage(message: Extract<AgentMessage, { role: "assistant" }>): void {
 		const hideThinkingBlock = this.#deps.hideThinkingBlock?.() ?? false;
 		const proseOnlyThinking = this.#deps.proseOnlyThinking ? this.#deps.proseOnlyThinking() : true;
+		const expandThinkingBlocks = this.#deps.expandThinkingBlocks?.() ?? false;
 		const timeline = splitAssistantMessageToolTimeline(message);
 		const assistantComponent = new AssistantMessageComponent(
 			timeline.beforeTools,
@@ -392,12 +417,15 @@ export class ChatTranscriptBuilder {
 			this.#deps.ui.imageBudget,
 			proseOnlyThinking,
 			this.#deps.linkTargets,
+			expandThinkingBlocks,
 		);
 		assistantComponent.setImagesVisible(displayPreferences.showImages);
 		assistantComponent.setToolResultImagesVisible(!displayPreferences.hideToolActivity);
+		assistantComponent.setTableChartsVisible(this.#deps.tableCharts !== false);
 		this.#trackExpandable(assistantComponent);
 		assistantComponent.pickReactionTarget(this.container.children);
 		this.container.addChild(assistantComponent);
+		let lastAssistantComponent = assistantComponent;
 
 		if (displayPreferences.cacheMissMarker) {
 			const invalidation = detectCacheInvalidation(this.#lastAssistantUsage, message.usage);
@@ -428,11 +456,14 @@ export class ChatTranscriptBuilder {
 				undefined,
 				proseOnlyThinking,
 				this.#deps.linkTargets,
+				expandThinkingBlocks,
 			);
 			component.setImagesVisible(displayPreferences.showImages);
 			component.setToolResultImagesVisible(!displayPreferences.hideToolActivity);
+			component.setTableChartsVisible(this.#deps.tableCharts !== false);
 			this.#trackExpandable(component);
 			this.container.addChild(component);
+			lastAssistantComponent = component;
 		};
 
 		for (const content of message.content) {
@@ -491,6 +522,8 @@ export class ChatTranscriptBuilder {
 			}
 			appendAssistantSegment(afterToolSegment);
 		}
+		const turnUsage = this.#turnUsage.add(message, this.#turnStartedAt);
+		if (turnUsage) lastAssistantComponent.setTurnUsage(turnUsage);
 
 		this.#pendingUsage =
 			displayPreferences.showTokenUsage && assistantUsageIsBilled(message.usage) ? message.usage : undefined;
@@ -544,7 +577,10 @@ export class ChatTranscriptBuilder {
 		}
 		if (message.customType === LSP_LATE_DIAGNOSTIC_MESSAGE_TYPE) {
 			const details = (message as CustomMessage<{ files?: LateDiagnosticsFile[] }>).details;
-			const component = new LateDiagnosticsMessageComponent(details?.files ?? []);
+			// Native: into the edit/write frames they belong to; the rest stand alone.
+			const files = routeLateDiagnostics(this.container.children, details?.files ?? []);
+			if (files.length === 0) return;
+			const component = new LateDiagnosticsMessageComponent(files);
 			this.#trackExpandable(component);
 			this.container.addChild(component);
 			return;
@@ -570,7 +606,10 @@ export class ChatTranscriptBuilder {
 		}
 		if (message.customType === "advisor") {
 			const details = (message as CustomMessage<AdvisorMessageDetails>).details;
-			this.container.addChild(createAdvisorMessageCard(details, () => this.#expanded, theme));
+			const card = createAdvisorMessageCard(details, () => this.#expanded, theme);
+			// Tracked so a transcript-wide toggle also clears a per-card native toggle.
+			this.#trackExpandable(card);
+			this.container.addChild(card);
 			return;
 		}
 		if (message.customType === LAUNCH_COMPLETION_MESSAGE_TYPE) {

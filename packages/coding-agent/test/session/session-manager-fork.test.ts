@@ -11,6 +11,7 @@ import {
 } from "@oh-my-pi/pi-coding-agent/session/session-entries";
 import { loadEntriesFromFile } from "@oh-my-pi/pi-coding-agent/session/session-loader";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { FileSessionStorage, MemorySessionStorage } from "@oh-my-pi/pi-coding-agent/session/session-storage";
 import { getTerminalId } from "@oh-my-pi/pi-tui";
 import { getAgentDir, getTerminalSessionsDir, removeWithRetries, setAgentDir, TempDir } from "@oh-my-pi/pi-utils";
 
@@ -221,6 +222,8 @@ describe("SessionManager.forkFrom", () => {
 			},
 		};
 		await Bun.write(sourceFile, `${JSON.stringify(sourceHeader)}\n${JSON.stringify(assistantEntry)}\n`);
+		const sourceText = await Bun.file(sourceFile).text();
+		const sourceManager = await SessionManager.open(sourceFile, sessionDir, undefined, { suppressBreadcrumb: true });
 
 		const findAssistant = async (file: string) => {
 			const entries = await loadEntriesFromFile(file);
@@ -252,7 +255,75 @@ describe("SessionManager.forkFrom", () => {
 		expect(resetMessage.usage.input).toBe(100);
 		expect(resetMessage.usage.output).toBe(50);
 		expect(resetMessage.usage.totalTokens).toBe(165);
+		const sourceMessage = sourceManager.getEntries().find(entry => entry.type === "message");
+		if (sourceMessage?.type !== "message" || sourceMessage.message.role !== "assistant") {
+			throw new Error("expected source assistant message");
+		}
+		expect(sourceMessage.message.usage.cost.total).toBe(6);
+		expect(sourceMessage.message.usage.premiumRequests).toBe(2);
+		expect(await Bun.file(sourceFile).text()).toBe(sourceText);
+		await sourceManager.close();
 	});
+
+	for (const { name, createStorage, padding } of [
+		{ name: "buffered file", createStorage: () => new FileSessionStorage(), padding: "" },
+		{ name: "streamed file", createStorage: () => new FileSessionStorage(), padding: "x".repeat(8 * 1024 * 1024) },
+		{ name: "memory", createStorage: () => new MemorySessionStorage(), padding: "" },
+	]) {
+		it(`keeps independently loaded ${name} entries unchanged when the fork migrates and branches`, async () => {
+			using tempDir = TempDir.createSync("@omp-session-fork-ownership-");
+			const cwd = tempDir.path();
+			const sessionDir = path.join(cwd, "sessions");
+			const sourceFile = path.join(sessionDir, "source.jsonl");
+			const storage = createStorage();
+			const timestamp = new Date().toISOString();
+			const sourceText =
+				[
+					{ type: "session", version: 2, id: "legacy-source", timestamp, cwd },
+					{
+						type: "message",
+						id: "user",
+						parentId: null,
+						timestamp,
+						message: { role: "user", content: "source", timestamp: 1 },
+					},
+					{
+						type: "message",
+						id: "hook",
+						parentId: "user",
+						timestamp,
+						message: {
+							role: "hookMessage",
+							customType: "legacy",
+							content: padding || "legacy output",
+							display: true,
+							timestamp: 2,
+						},
+					},
+				]
+					.map(entry => JSON.stringify(entry))
+					.join("\n") + "\n";
+			await storage.writeText(sourceFile, sourceText);
+			const loadedBeforeFork = await loadEntriesFromFile(sourceFile, storage);
+			const forked = await SessionManager.forkFrom(sourceFile, cwd, path.join(cwd, "forks"), storage, {
+				suppressBreadcrumb: true,
+				copyArtifacts: false,
+			});
+			const migrated = forked.getEntries().find(entry => entry.id === "hook");
+			expect(migrated).toMatchObject({ type: "message", message: { role: "custom", customType: "legacy" } });
+			forked.branch("user");
+			forked.appendMessage({ role: "user", content: "fork-only continuation", timestamp: 3 });
+			expect(forked.buildSessionContext().messages).toMatchObject([
+				{ role: "user", content: "source" },
+				{ role: "user", content: "fork-only continuation" },
+			]);
+			await forked.close();
+			expect(loadedBeforeFork[0]).toMatchObject({ type: "session", version: 2 });
+			expect(loadedBeforeFork[2]).toMatchObject({ type: "message", message: { role: "hookMessage" } });
+			expect(loadedBeforeFork).toEqual(await loadEntriesFromFile(sourceFile, storage));
+			expect(await storage.readText(sourceFile)).toBe(sourceText);
+		});
+	}
 
 	it("pairs an unresolved tool call with a synthetic aborted result only when repair is requested", async () => {
 		using tempDir = TempDir.createSync("@omp-session-fork-repair-");

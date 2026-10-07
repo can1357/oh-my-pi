@@ -137,6 +137,19 @@ export function normalizeSearchText(value: unknown): string | undefined {
 }
 
 /**
+ * Bare, deduplicated hosts from `site:` values (`github.com/anthropics` → `github.com`)
+ * for provider domain filters; path parts are enforced by the central lenient post-filter.
+ */
+export function siteHosts(sites: readonly string[]): string[] {
+	const hosts = new Set<string>();
+	for (const site of sites) {
+		const host = site.split("/", 1)[0];
+		if (host) hosts.add(host);
+	}
+	return [...hosts];
+}
+
+/**
  * Read a provider response body up to a byte cap, truncating or throwing when
  * the limit is exceeded. Shared so streaming-cap fixes land in one place.
  */

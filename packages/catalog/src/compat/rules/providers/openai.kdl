@@ -176,6 +176,11 @@ provider "openai" {
 			cache-read 2.0
 			cache-write 25.0
 		}
+		// Ultrafast is Astra-only: $60/$6/$75/$300 per 1M short-context
+		// (6x the standard card), and the same 6x holds on the long-context tier.
+		service-tier-cost {
+			ultrafast 6
+		}
 	}
 	// residue: the bare Daybreak rolling aliases pin the documented 5.6-gen
 	// wire restrictions without carrying the gpt- prefix identity.

@@ -11,11 +11,16 @@ import { DEFAULT_MODEL_PER_PROVIDER } from "@oh-my-pi/pi-catalog/provider-models
 import { parseArgs } from "@oh-my-pi/pi-coding-agent/cli/args";
 import { ModelRegistry, type ProviderConfigInput } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { getModelMatchPreferences, resolveModelScope } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
-import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { buildSessionOptions as buildCliSessionOptions } from "@oh-my-pi/pi-coding-agent/main";
 import { createAgentSession, type ExtensionFactory } from "@oh-my-pi/pi-coding-agent/sdk";
+import * as discoveryModule from "@oh-my-pi/pi-coding-agent/task/discovery";
+import * as executorModule from "@oh-my-pi/pi-coding-agent/task/executor";
+import { getBundledAgent } from "@oh-my-pi/pi-coding-agent/task/agents";
+import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
 import type { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
 import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
 import { createInMemoryAuthStorage } from "./helpers/agent-session-setup";
 
@@ -46,6 +51,10 @@ describe("createAgentSession deferred model pattern resolution", () => {
 			authStorage.close();
 		}
 		authStoragesToClose.length = 0;
+		// Sessions without explicit settings run `Settings.init({ agentDir: tempDir })`, which
+		// opens `<tempDir>/agent.db` process-wide; release it so Windows can delete tempDir.
+		resetSettingsForTest();
+		AgentStorage.close();
 		if (tempDir && fs.existsSync(tempDir)) {
 			removeSyncWithRetries(tempDir);
 		}
@@ -143,6 +152,209 @@ describe("createAgentSession deferred model pattern resolution", () => {
 			expect(session.model?.provider).toBe("runtime-provider");
 			expect(session.model?.id).toBe("runtime-model");
 			expect(modelFallbackMessage).toBeUndefined();
+		} finally {
+			await session.dispose();
+		}
+	});
+
+	test("lets a child task spawn a model agent inherited from its parent", async () => {
+		const bundledTask = getBundledAgent("task");
+		if (!bundledTask) throw new Error("Expected bundled task agent");
+		const modelAgent: AgentDefinition = {
+			...bundledTask,
+			name: "m1",
+			model: ["runtime-provider/runtime-model"],
+		};
+		vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({ agents: [bundledTask], projectAgentsDir: null });
+		const dispatched: executorModule.ExecutorOptions[] = [];
+		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
+			dispatched.push(options);
+			return {
+				index: options.index,
+				id: options.id,
+				agent: options.agent.name,
+				agentSource: options.agent.source,
+				task: options.task,
+				exitCode: 0,
+				output: "done",
+				stderr: "",
+				truncated: false,
+				durationMs: 1,
+				tokens: 0,
+				requests: 1,
+			};
+		});
+		const { session } = await createAgentSession({
+			...buildSessionOptions("runtime-provider/runtime-model"),
+			settings: Settings.isolated({ "async.enabled": false }),
+			toolNames: ["task"],
+			inheritedSessionAgents: [modelAgent],
+		});
+
+		try {
+			const taskTool = session.getToolByName("task");
+			if (!taskTool) throw new Error("Expected child task tool");
+			await taskTool.execute("nested-model-agent-call", {
+				agent: "m1",
+				task: "Inspect the target with the tagged model.",
+			});
+
+			expect(dispatched[0]?.modelOverride).toEqual(["runtime-provider/runtime-model"]);
+		} finally {
+			await session.dispose();
+		}
+	});
+
+	async function startPrewalkSession(
+		prewalkInto: string | undefined,
+		{
+			model = "runtime-provider/runtime-model",
+			defaultRole,
+			smolRole,
+			extension = providerExtension,
+			authenticatedProvider,
+			hasUI = false,
+			onPrewalkWarning,
+		}: {
+			model?: string;
+			defaultRole?: string;
+			smolRole?: string;
+			extension?: ExtensionFactory;
+			authenticatedProvider?: string;
+			hasUI?: boolean;
+			onPrewalkWarning?: (warning: string) => void;
+		} = {},
+	) {
+		const authStorage = createInMemoryAuthStorage();
+		authStoragesToClose.push(authStorage);
+		if (authenticatedProvider) authStorage.keys.setRuntime(authenticatedProvider, "test-key");
+		const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir, "models.yml"));
+		const settings = Settings.isolated();
+		if (defaultRole) settings.setModelRole("default", defaultRole);
+		if (smolRole) settings.setModelRole("smol", smolRole);
+		const cliOptions = await buildCliSessionOptions(
+			parseArgs(["--model", model, ...(prewalkInto ? ["--prewalk-into", prewalkInto] : ["--prewalk"])]),
+			[],
+			SessionManager.inMemory(),
+			modelRegistry,
+			settings,
+		);
+		const { session } = await createAgentSession({
+			...cliOptions,
+			cwd: tempDir,
+			agentDir: tempDir,
+			authStorage,
+			modelRegistry,
+			settings,
+			hasUI,
+			onPrewalkWarning,
+			disableExtensionDiscovery: true,
+			extensions: [extension],
+			skills: [],
+			contextFiles: [],
+			promptTemplates: [],
+			slashCommands: [],
+			enableMCP: false,
+			enableLsp: false,
+			skipPythonPreflight: true,
+			rules: [],
+			preloadedCustomToolPaths: [],
+			toolNames: ["read"],
+		});
+		return session;
+	}
+
+	test("resolves prewalk target registered by an extension", async () => {
+		const session = await startPrewalkSession("runtime-provider/runtime-fallback-model:low");
+		try {
+			expect(session.model?.id).toBe("runtime-model");
+			expect(session.getPrewalkState()?.target.id).toBe("runtime-fallback-model");
+			expect(session.getPrewalkState()?.thinkingLevel).toBe(Effort.Low);
+		} finally {
+			await session.dispose();
+		}
+	});
+
+	test("resolves the default smol prewalk role from an extension", async () => {
+		const session = await startPrewalkSession(undefined, {
+			smolRole: "runtime-provider/runtime-fallback-model:low",
+		});
+		try {
+			expect(session.getPrewalkState()?.target.id).toBe("runtime-fallback-model");
+			expect(session.getPrewalkState()?.thinkingLevel).toBe(Effort.Low);
+		} finally {
+			await session.dispose();
+		}
+	});
+
+	test("prefers an earlier extension role target to a later bundled fallback", async () => {
+		const fallback = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!fallback) throw new Error("expected claude-sonnet-4-5 to be bundled");
+		const session = await startPrewalkSession("@default", {
+			defaultRole: `runtime-provider/runtime-fallback-model:low,${fallback.provider}/${fallback.id}`,
+			authenticatedProvider: fallback.provider,
+		});
+		try {
+			expect(session.getPrewalkState()?.target.provider).toBe("runtime-provider");
+			expect(session.getPrewalkState()?.target.id).toBe("runtime-fallback-model");
+			expect(session.getPrewalkState()?.thinkingLevel).toBe(Effort.Low);
+		} finally {
+			await session.dispose();
+		}
+	});
+
+	test("keeps a bundled fallback when the earlier extension target is absent", async () => {
+		const startup = getBundledModel("anthropic", "claude-opus-4-5");
+		const fallback = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!startup || !fallback) throw new Error("expected bundled models");
+		const session = await startPrewalkSession("@default", {
+			model: `${startup.provider}/${startup.id}`,
+			defaultRole: `runtime-provider/missing,${fallback.provider}/${fallback.id}`,
+			authenticatedProvider: fallback.provider,
+			extension: () => {},
+		});
+		try {
+			expect(session.model?.id).toBe(startup.id);
+			expect(session.getPrewalkState()?.target.id).toBe(fallback.id);
+		} finally {
+			await session.dispose();
+		}
+	});
+
+	test("fetches a mixed-case cold extension provider without probing unrelated providers", async () => {
+		const unrelatedFetch = vi.fn(async () => []);
+		const extension: ExtensionFactory = pi => {
+			pi.registerProvider("runtime-provider", dynamicOnlyProviderConfig);
+			pi.registerProvider("unrelated-provider", {
+				...dynamicOnlyProviderConfig,
+				fetchDynamicModels: unrelatedFetch,
+			});
+		};
+		const session = await startPrewalkSession("Runtime-Provider/cached-runtime-model", {
+			model: "anthropic/claude-sonnet-4-5",
+			authenticatedProvider: "anthropic",
+			extension,
+			hasUI: true,
+		});
+		try {
+			expect(session.getPrewalkState()?.target.id).toBe("cached-runtime-model");
+			expect(unrelatedFetch).not.toHaveBeenCalled();
+		} finally {
+			await session.dispose();
+		}
+	});
+
+	test("warns and continues when an extension prewalk target never registers", async () => {
+		const writes = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+		const warnings: string[] = [];
+		const session = await startPrewalkSession("missing-provider/missing-model", {
+			onPrewalkWarning: warning => warnings.push(warning),
+		});
+		try {
+			expect(session.getPrewalkState()).toBeUndefined();
+			expect(warnings).toHaveLength(1);
+			expect(warnings[0]).toContain("missing-provider/missing-model");
+			expect(writes).not.toHaveBeenCalled();
 		} finally {
 			await session.dispose();
 		}
@@ -1273,6 +1485,247 @@ describe("createAgentSession deferred model pattern resolution", () => {
 		}
 	});
 
+	function buildResumeOptions() {
+		const authStorage = createInMemoryAuthStorage();
+		authStoragesToClose.push(authStorage);
+		authStorage.keys.setRuntime("anthropic", "test-key");
+		const sessionManager = SessionManager.inMemory();
+		sessionManager.appendModelChange("missing-provider/missing-model");
+		return {
+			...buildSessionOptions(""),
+			authStorage,
+			modelRegistry: new ModelRegistry(authStorage, path.join(tempDir, "models.yml")),
+			sessionManager,
+			settings: Settings.isolated({ modelRoles: { default: "anthropic/claude-sonnet-4-5" } }),
+			extensions: [],
+		};
+	}
+
+	test("rejects a headless resume instead of substituting the settings default", async () => {
+		await expect(createAgentSession(buildResumeOptions())).rejects.toThrow(
+			"Could not restore model missing-provider/missing-model",
+		);
+	});
+
+	test("rejects a headless resume instead of selecting the first available model", async () => {
+		await expect(createAgentSession({ ...buildResumeOptions(), settings: Settings.isolated() })).rejects.toThrow(
+			"Could not restore model missing-provider/missing-model",
+		);
+	});
+
+	test("rejects an interactive resume when retry model fallback is disabled", async () => {
+		await expect(
+			createAgentSession({
+				...buildResumeOptions(),
+				hasUI: true,
+				settings: Settings.isolated({
+					modelRoles: { default: "anthropic/claude-sonnet-4-5" },
+					retry: { modelFallback: false },
+				}),
+			}),
+		).rejects.toThrow("Could not restore model missing-provider/missing-model");
+	});
+
+	test("rejects a resume when tool UI is available but startup fallback warnings are not", async () => {
+		await expect(
+			createAgentSession({ ...buildResumeOptions(), hasUI: true, allowSessionModelFallback: false }),
+		).rejects.toThrow("Could not restore model missing-provider/missing-model");
+	});
+
+	test("keeps the fallback warning and settings default for interactive resume", async () => {
+		const { session, modelFallbackMessage } = await createAgentSession({ ...buildResumeOptions(), hasUI: true });
+		try {
+			expect(session.model?.provider).toBe("anthropic");
+			expect(session.model?.id).toBe("claude-sonnet-4-5");
+			expect(modelFallbackMessage).toContain("Could not restore model missing-provider/missing-model");
+		} finally {
+			await session.dispose();
+		}
+	});
+
+	test.each(["model", "modelPattern"] as const)(
+		"honors an explicit %s instead of the unavailable saved model",
+		async selection => {
+			const options = buildResumeOptions();
+			const model = options.modelRegistry.find("anthropic", "claude-sonnet-4-5");
+			if (!model) throw new Error("Expected bundled anthropic default model");
+			const { session, modelFallbackMessage } = await createAgentSession({
+				...options,
+				...(selection === "model" ? { model } : { modelPattern: "anthropic/claude-sonnet-4-5" }),
+			});
+			try {
+				expect(session.model?.provider).toBe("anthropic");
+				expect(session.model?.id).toBe("claude-sonnet-4-5");
+				expect(modelFallbackMessage).toBeUndefined();
+			} finally {
+				await session.dispose();
+			}
+		},
+	);
+
+	test("restores an extension-discovered session model before rejecting headless resume", async () => {
+		const options = buildResumeOptions();
+		options.sessionManager.appendModelChange("runtime-provider/cached-runtime-model");
+		const discoveryStarted = Promise.withResolvers<void>();
+		const finishDiscovery = Promise.withResolvers<void>();
+		const extension: ExtensionFactory = pi => {
+			pi.registerProvider("runtime-provider", {
+				...dynamicOnlyProviderConfig,
+				fetchDynamicModels: async context => {
+					discoveryStarted.resolve();
+					await finishDiscovery.promise;
+					return dynamicOnlyProviderConfig.fetchDynamicModels!(context);
+				},
+			});
+		};
+		const startup = createAgentSession({ ...options, extensions: [extension] });
+		await discoveryStarted.promise;
+		finishDiscovery.resolve();
+		const { session, modelFallbackMessage } = await startup;
+		try {
+			expect(session.model?.provider).toBe("runtime-provider");
+			expect(session.model?.id).toBe("cached-runtime-model");
+			expect(modelFallbackMessage).toBeUndefined();
+		} finally {
+			await session.dispose();
+		}
+	});
+
+	/** A fresh persisted session on the settings default, ready to switch at runtime. */
+	function buildSwitchOptions() {
+		return {
+			...buildResumeOptions(),
+			sessionManager: SessionManager.create(tempDir, path.join(tempDir, "sessions")),
+		};
+	}
+
+	/** A session file whose only saved model is `model`, holding one user turn. */
+	async function writeSavedModelSession(model: string): Promise<string> {
+		const sessionFile = path.join(tempDir, `saved-${Snowflake.next()}.jsonl`);
+		const timestamp = "2026-06-01T00:00:00.000Z";
+		await Bun.write(
+			sessionFile,
+			`${[
+				{ type: "session", version: 3, id: `saved-${Snowflake.next()}`, timestamp, cwd: tempDir },
+				{ type: "model_change", id: "model", parentId: null, timestamp, model, role: "default" },
+				{
+					type: "message",
+					id: "user",
+					parentId: "model",
+					timestamp,
+					message: { role: "user", content: "Remember ZEBRA-42.", timestamp: Date.parse(timestamp) },
+				},
+			]
+				.map(entry => JSON.stringify(entry))
+				.join("\n")}\n`,
+		);
+		return sessionFile;
+	}
+
+	test.each([
+		["headless", {}],
+		["tool-UI-only", { hasUI: true, allowSessionModelFallback: false }],
+		[
+			"retry-fallback-disabled UI",
+			{
+				hasUI: true,
+				settings: Settings.isolated({
+					modelRoles: { default: "anthropic/claude-sonnet-4-5" },
+					retry: { modelFallback: false },
+				}),
+			},
+		],
+	] as const)("keeps a %s session when switching to one whose saved model is unavailable", async (_host, host) => {
+		const { session } = await createAgentSession({ ...buildSwitchOptions(), ...host });
+		try {
+			const previousFile = session.sessionFile;
+			const target = await writeSavedModelSession("missing-provider/missing-model");
+			await expect(session.switchSession(target)).rejects.toThrow(
+				"Could not restore model missing-provider/missing-model",
+			);
+			expect(session.sessionFile).toBe(previousFile);
+			expect(session.messages).toEqual([]);
+			expect(session.model?.id).toBe("claude-sonnet-4-5");
+		} finally {
+			await session.dispose();
+		}
+	});
+
+	test("switches a UI session to an unavailable saved model with a restore warning", async () => {
+		const { session } = await createAgentSession({ ...buildSwitchOptions(), hasUI: true });
+		const notices: string[] = [];
+		session.subscribe(event => {
+			if (event.type === "notice") notices.push(`${event.level}: ${event.message}`);
+		});
+		try {
+			const target = await writeSavedModelSession("missing-provider/missing-model");
+			await expect(session.switchSession(target)).resolves.toBe(true);
+			expect(session.sessionFile).toBe(target);
+			expect(session.model?.id).toBe("claude-sonnet-4-5");
+			const warning = "Could not restore model missing-provider/missing-model. Using anthropic/claude-sonnet-4-5";
+			expect(notices).toEqual([`warning: ${warning}`]);
+
+			// A host that re-renders after switching takes the warning itself.
+			const reported: string[] = [];
+			const next = await writeSavedModelSession("missing-provider/missing-model");
+			await session.switchSession(next, { onModelFallback: message => reported.push(message) });
+			expect(reported).toEqual([warning]);
+			expect(notices).toHaveLength(1);
+		} finally {
+			await session.dispose();
+		}
+	});
+
+	test("restores an extension-discovered model when switching before discovery ran", async () => {
+		// UI startup defers runtime discovery until after the first paint, so
+		// `/resume` can run before the provider's models exist in the registry.
+		const { session } = await createAgentSession({
+			...buildSwitchOptions(),
+			hasUI: true,
+			extensions: [dynamicOnlyProviderExtension],
+		});
+		try {
+			const target = await writeSavedModelSession("runtime-provider/cached-runtime-model");
+			await expect(session.switchSession(target)).resolves.toBe(true);
+			expect(session.model?.provider).toBe("runtime-provider");
+			expect(session.model?.id).toBe("cached-runtime-model");
+		} finally {
+			await session.dispose();
+		}
+	});
+
+	test("binds an explicit switch model and restores it on the next switch", async () => {
+		const { session } = await createAgentSession(buildSwitchOptions());
+		try {
+			const settingsDefault = session.modelRegistry.find("anthropic", "claude-sonnet-4-5");
+			const explicit = session.modelRegistry.find("anthropic", "claude-sonnet-4-6");
+			if (!settingsDefault || !explicit) throw new Error("Expected bundled anthropic Sonnet models");
+			const target = await writeSavedModelSession("missing-provider/missing-model");
+			await expect(session.switchSession(target, { model: explicit })).resolves.toBe(true);
+			expect(session.model?.id).toBe("claude-sonnet-4-6");
+
+			// The target recorded the explicit model, so a later switch restores it.
+			await session.newSession();
+			await session.setModel(settingsDefault);
+			await expect(session.switchSession(target)).resolves.toBe(true);
+			expect(session.model?.id).toBe("claude-sonnet-4-6");
+		} finally {
+			await session.dispose();
+		}
+	});
+
+	test("keeps the current model for a replica switch that mirrors another host's model", async () => {
+		const { session } = await createAgentSession(buildSwitchOptions());
+		try {
+			const target = await writeSavedModelSession("missing-provider/missing-model");
+			await expect(session.switchSession(target, { keepModel: true })).resolves.toBe(true);
+			expect(session.sessionFile).toBe(target);
+			expect(session.model?.id).toBe("claude-sonnet-4-5");
+		} finally {
+			await session.dispose();
+		}
+	});
+
 	test("restores a discovery-backed session model instead of falling back to the default role", async () => {
 		// Regression: on `omp --resume`, the session-model restore probed
 		// candidates only against the static+cached catalog. A discovery-backed
@@ -1431,17 +1884,19 @@ describe("createAgentSession deferred model pattern resolution", () => {
 		}
 	});
 
-	test("prefers Codex OAuth over plain OpenAI for the shared startup default", async () => {
-		const openaiDefault = getBundledModel("openai", "gpt-5.5");
-		const codexDefault = getBundledModel("openai-codex", "gpt-5.5");
-		if (!openaiDefault || !codexDefault) {
-			throw new Error("Expected bundled OpenAI and Codex GPT-5.5 defaults");
+	test("resolves the default thinking level against the startup fallback model", async () => {
+		// Regression: with no configured model, the provider-default fallback kept
+		// the settings default thinking level (`high`) unresolved, so a reasoning
+		// model without an effort ladder failed its first turn with
+		// "Thinking effort high is not supported by devin/swe-1-6".
+		const fallbackModel = getBundledModel("devin", "swe-1-6");
+		if (!fallbackModel?.reasoning || fallbackModel.thinking) {
+			throw new Error("Expected bundled devin/swe-1-6 as a reasoning model without an effort ladder");
 		}
 
 		const authStorage = createInMemoryAuthStorage();
 		authStoragesToClose.push(authStorage);
-		authStorage.keys.setRuntime("openai", "sk-or-v1-invalid-openai-key");
-		authStorage.keys.setRuntime("openai-codex", "codex-oauth-token");
+		authStorage.keys.setRuntime("devin", "test-key");
 		const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir, "models.yml"));
 
 		const { session } = await createAgentSession({
@@ -1449,7 +1904,7 @@ describe("createAgentSession deferred model pattern resolution", () => {
 			agentDir: tempDir,
 			authStorage,
 			modelRegistry,
-			settings: Settings.isolated({ enabledModels: ["openai/gpt-5.5", "openai-codex/gpt-5.5"] }),
+			settings: Settings.isolated({ enabledModels: ["devin/swe-1-6"], defaultThinkingLevel: Effort.High }),
 			sessionManager: SessionManager.inMemory(),
 			disableExtensionDiscovery: true,
 			skills: [],
@@ -1465,9 +1920,9 @@ describe("createAgentSession deferred model pattern resolution", () => {
 		});
 
 		try {
-			expect(session.model?.provider).toBe("openai-codex");
-			expect(session.model?.id).toBe(codexDefault.id);
-			expect(session.model?.id).toBe(openaiDefault.id);
+			expect(session.model?.provider).toBe("devin");
+			expect(session.model?.id).toBe("swe-1-6");
+			expect(session.thinkingLevel).toBeUndefined();
 		} finally {
 			await session.dispose();
 		}

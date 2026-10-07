@@ -20,7 +20,7 @@ Most runtime lookups use `$env` from `@oh-my-pi/pi-utils` (`packages/utils/src/e
 4. Active config-root `.env` (normally `~/.omp/.env`) for keys whose current value is empty/unset
 5. Home `.env` (`~/.env`) for keys whose current value is empty/unset
 
-The agent/root locations respect profiles, `PI_CONFIG_DIR`, and—only for the default profile—`PI_CODING_AGENT_DIR`. Whole dotenv files are parsed with Bun's `node:util.parseEnv`, including quoted multiline values, escaped newlines, and inline comments. Names must be shell identifiers (`[A-Za-z_][A-Za-z0-9_]*`); unsafe names/values are discarded. Variable references remain literal in this parser; only Bun's launch-directory dotenv autoload performs variable expansion before this module runs. Child-shell filtering uses the same parser to identify project dotenv values.
+The agent/root locations respect profiles, `PI_CONFIG_DIR`, and—only for the default profile—`PI_CODING_AGENT_DIR`. Whole dotenv files are parsed with Bun's `node:util.parseEnv`, including quoted multiline values, escaped newlines, and inline comments. Names must be shell identifiers (`[A-Za-z_][A-Za-z0-9_]*`); unsafe names/values are discarded. Variable references remain literal in this parser; only Bun's launch-directory dotenv autoload performs variable expansion before this module runs. Child-shell filtering uses the same parser to identify project dotenv values across `.env`, `.env.<NODE_ENV>` (default `development`), `.env.local`, and `.env.<NODE_ENV>.local`. It removes project-dotenv credentials from shell subprocesses while preserving launcher-owned variables; Linux's original exec environment provides the authoritative launch snapshot, with best-effort value matching elsewhere.
 
 Additional rule inside each `.env` file: every `OMP_*` key is mirrored to its `PI_*` alias, and that mirrored value replaces a same-file `PI_*` value. This mirroring applies to parsed dotenv files, not arbitrary variables inherited from the parent process.
 
@@ -31,6 +31,8 @@ Variables declared on a setting definition (see [settings precedence](./settings
 ## 1) Model/provider authentication
 
 These are consumed via `getEnvApiKey()` (`packages/ai/src/stream.ts`) unless noted otherwise.
+
+Plain provider credential names come from `env` entries in `packages/catalog/src/compat/rules/providers/*.kdl` and `auth/*.kdl`; `packages/ai/src/registry/hooks/env.ts` supplies computed Foundry, Bedrock, and Vertex resolvers.
 
 ### Core provider credentials
 
@@ -48,6 +50,7 @@ These are consumed via `getEnvApiKey()` (`packages/ai/src/stream.ts`) unless not
 | `FIREWORKS_API_KEY`             | Fireworks auth                                   | Using Fireworks models                                         |                                                                                                     |
 | `FIREPASS_API_KEY`              | Fire Pass auth                                   | Using Fire Pass models                                         |                                                                                                     |
 | `TOGETHER_API_KEY`              | Together auth                                    | Using `together` provider                                      |                                                                                                     |
+| `ABLITERATION_API_KEY` / `ABLIT_KEY` | Abliteration auth | Using `abliteration` provider | `ABLITERATION_API_KEY` wins |
 | `AIMLAPI_API_KEY`               | AIML API auth                                    | Using `aimlapi` provider                                       | OpenAI-compatible AIML API endpoint at `https://api.aimlapi.com/v1`                                 |
 | `HUGGINGFACE_HUB_TOKEN`         | Hugging Face auth                                | Using `huggingface` provider                                   | Primary Hugging Face token env var                                                                  |
 | `HF_TOKEN`                      | Hugging Face auth                                | Using `huggingface` provider                                   | Fallback when `HUGGINGFACE_HUB_TOKEN` is unset                                                      |
@@ -66,6 +69,7 @@ These are consumed via `getEnvApiKey()` (`packages/ai/src/stream.ts`) unless not
 | `XIAOMI_TOKEN_PLAN_SGP_API_KEY` | Xiaomi MiMo Token Plan auth (SGP)                | Using `xiaomi-token-plan-sgp` provider                         |                                                                                                     |
 | `MOONSHOT_API_KEY`              | Moonshot auth                                    | Using `moonshot` provider                                      | `KIMI_API_KEY` is accepted as a fallback alias                                                                      |
 | `STEPFUN_API_KEY`               | StepFun auth                                     | Using `stepfun` provider                                       | Keys are region-scoped: the `.ai` key works against `api.stepfun.ai`, the `.com` key against `api.stepfun.com`  |
+| `HELMCODE_API_KEY`              | Helmcode auth                                    | Using `helmcode` provider                                      |                                                                                                     |
 | `XAI_API_KEY`                   | xAI auth                                         | Using xAI models or as fallback for `xai-oauth`                |                                                                                                     |
 | `XAI_OAUTH_TOKEN`               | xAI OAuth/SuperGrok auth                         | Using `xai-oauth` provider                                     | Takes precedence over `XAI_API_KEY` for `xai-oauth`                                                 |
 | `OPENROUTER_API_KEY`            | OpenRouter auth                                  | Using OpenRouter models                                        | Also used by image tool when preferred/auto provider is OpenRouter                                  |
@@ -89,6 +93,8 @@ These are consumed via `getEnvApiKey()` (`packages/ai/src/stream.ts`) unless not
 | `CLOUDFLARE_AI_GATEWAY_API_KEY` | Cloudflare AI Gateway auth                       | Using `cloudflare-ai-gateway` provider                         | Gateway token with AI Gateway Run permission; `/login` stores it with the routing IDs               |
 | `CLOUDFLARE_ACCOUNT_ID`         | Cloudflare AI Gateway account routing            | Using an environment-supplied gateway token                    | Not required when the account ID was stored by `/login`                                             |
 | `CLOUDFLARE_GATEWAY_ID`         | Cloudflare AI Gateway selection                  | Using an environment-supplied gateway token                    | Gateway slug, commonly `default`; not required when stored by `/login`                               |
+| `SNOWFLAKE_PAT`                 | Snowflake Cortex auth                            | Using `snowflake` provider without `/login`                    | Programmatic access token; prefer short-lived and role-restricted                                   |
+| `SNOWFLAKE_ACCOUNT`             | Snowflake Cortex account routing                 | Using `SNOWFLAKE_PAT`                                          | Account identifier (`orgname-accountname`) or account URL; not required after `/login`              |
 | `ALIBABA_CODING_PLAN_API_KEY`   | Alibaba Coding Plan auth                         | Using `alibaba-coding-plan` provider                           |                                                                                                     |
 | `ALIBABA_TOKEN_PLAN_API_KEY`    | QwenCloud Token Plan auth                        | Using `alibaba-token-plan` provider                            | Preferred provider-specific name                                                                    |
 | `BAILIAN_TOKEN_PLAN_API_KEY`    | QwenCloud Token Plan auth                        | Using `alibaba-token-plan` provider                            | Compatible with Qwen Code's Token Plan preset                                                       |
@@ -209,11 +215,13 @@ When `CLAUDE_CODE_USE_FOUNDRY` is enabled, Anthropic requests switch to Foundry 
 | `AWS_BEARER_TOKEN_BEDROCK`                                                      | Highest-precedence bearer token auth path; skips AWS profile/credential-chain lookup when set                                                   |
 | `AWS_CONTAINER_CREDENTIALS_RELATIVE_URI` / `AWS_CONTAINER_CREDENTIALS_FULL_URI` | Marks Bedrock as available in provider detection (credential resolution itself covers env keys, profiles/SSO/`credential_process`, then IMDSv2) |
 | `AWS_WEB_IDENTITY_TOKEN_FILE` + `AWS_ROLE_ARN`                                  | Marks Bedrock as available in provider detection (same caveat as the ECS variables above)                                                       |
-| `AWS_BEDROCK_SKIP_AUTH`                                                         | If `1`, injects dummy credentials (proxy/non-auth scenarios)                                                                                    |
+| `AWS_BEDROCK_SKIP_AUTH` | Boolean flag injects dummy credentials for Converse (proxy/non-auth scenarios); empty defers to false |
 | `HTTPS_PROXY` / `HTTP_PROXY`                                                    | Honored via Bun's native fetch proxy support (the provider no longer ships an AWS SDK / proxy-agent transport)                                  |
 | `NO_PROXY`                                                                      | Excludes matching hosts from Bun's native proxy routing                                                                                         |
 
 Region fallback in provider code: `options.region` → `AWS_REGION` → `AWS_DEFAULT_REGION` → `us-east-1`.
+
+The `bedrock-mantle` provider also detects bearer tokens and AWS credential sources through `packages/ai/src/registry/aws.ts`; `AWS_BEDROCK_SKIP_AUTH` applies only to the Converse provider's resolver, not Mantle.
 
 Additional credential-chain controls implemented by the native Bedrock resolver:
 
@@ -271,7 +279,7 @@ OAuth host chain: `KIMI_CODE_OAUTH_HOST` → `KIMI_OAUTH_HOST` → `https://auth
 | ----------------------------------- | ------------------------------------------------------------------------------------------- |
 | `OPENAI_BASE_URL`                   | Base URL fallback for OpenAI-compatible requests when the model/provider supplies a default |
 | `MOONSHOT_BASE_URL`                 | Moonshot chat and model-discovery endpoint override                                         |
-| `XAI_BASE_URL`                      | xAI HTTP endpoint override                                                                  |
+| `XAI_BASE_URL`                      | xAI endpoint override for `xai`/`xai-oauth` chat, image generation, and web search; applies only when the model uses the bundled `https://api.x.ai/v1` endpoint, so a models.yml `baseUrl` wins; never receives `xai-oauth` OAuth credentials |
 | `SAKANA_BASE_URL` / `FUGU_BASE_URL` | Sakana/Fugu endpoint override (`SAKANA_BASE_URL` wins)                                      |
 | `PI_OPENROUTER_RESPONSES`           | Responses API is enabled unless set to `0`; `0` selects the OpenAI Completions route        |
 | `UMANS_WEBSEARCH_PROVIDER`          | Default Umans Anthropic web-search provider selection when not supplied explicitly          |
@@ -322,7 +330,7 @@ therefore completes through the paste-code path.
 | `PI_CODEX_WEBSOCKET_PING_INTERVAL_MS`       | Ping interval override (default `10000`)                                                                                                                                                                      |
 | `PI_CODEX_WEBSOCKET_PONG_TIMEOUT_MS`        | Pong timeout override (default `60000`)                                                                                                                                                                       |
 | `PI_CODEX_WEBSOCKET_MESSAGE_QUEUE_CAPACITY` | Buffered message capacity override (default `4096`)                                                                                                                                                           |
-| `PI_CODEX_WEBSOCKET_MAX_IDLE_REUSE_MS`      | Maximum idle time before a connection is not reused (default `30000`)                                                                                                                                         |
+| `PI_CODEX_WEBSOCKET_MAX_IDLE_REUSE_MS` | Maximum idle time before a connection is not reused (default `30000`); `0` disables the idle-age cutoff |
 | `PI_CODEX_WEBSOCKET_RETRY_BUDGET`           | Non-negative integer override (default `5`)                                                                                                                                                                   |
 | `PI_CODEX_WEBSOCKET_RETRY_DELAY_MS`         | Positive integer base backoff override (default `500`)                                                                                                                                                        |
 | `PI_STREAM_FIRST_EVENT_TIMEOUT_MS`          | Generic stream first-event timeout; `0` disables                                                                                                                                                              |
@@ -421,6 +429,8 @@ Small typed decisions the app makes about its own state (the `auto` thinking-lev
 
 Python subprocess filtering denies common API keys and allows safe base variables plus `LC_`, `XDG_`, and `PI_` prefixes.
 
+Shell subprocess filtering is separate (`packages/utils/src/env.ts`): it strips project-dotenv values rather than applying Python's key allowlist.
+
 ---
 
 ## 5) Agent/runtime behavior toggles
@@ -443,6 +453,7 @@ Python subprocess filtering denies common API keys and allows safe base variable
 | `PI_WALK_WORKERS`            | Filesystem walker worker count used by the `omp grep` walker and related parallel traversal (`pi-walker`; default `4`; `0` = auto-detect, `1` = serial). Renamed from `PI_GREP_WORKERS`; the old name is no longer read                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
 | `PI_TIMING`                  | If set (any non-empty value), prints a hierarchical timing-span tree to **stderr** via `logger.printTimings()`. In interactive mode the tree prints once the agent is ready (before the TUI starts); in print mode it prints after the whole prompt batch completes. Print-mode prompts are wrapped in `print:prompt:initial` / `print:prompt:next` spans so each user message shows up as its own row. `PI_TIMING=x` exits the process with code 0 right after printing in interactive mode (use to measure cold startup only). `PI_TIMING=full` lists every module-load entry instead of just the top N. |
 | `PI_DEBUG_STARTUP`           | If set (any non-empty value), streams one synchronous `[startup] <phase>:start` / `:done` marker line to **stderr** as each startup phase begins/ends — including command-module imports (`cli:load:<name>`) and the native addon extraction/`dlopen` (`native:*`). Unlike `PI_TIMING` (which prints only once startup completes), the markers survive a hard hang: the last line on stderr names the phase the process is stuck in. Combine with `PI_TIMING` freely; markers and the span tree share the same phase names.                                                                                |
+| `OMP_LOG_LEVEL`              | Most verbose level written to the `logs/omp.<date>.<pid>.log` file: `error`, `warn`, `info`, or `debug` (default: all levels). Records are written in batches (at most one write per second or per 64 KiB); `warn` and `error` records are written immediately, and exit, signal, and fatal-error paths flush the rest.                                                                                                                                                                                                                                                                                    |
 | `PI_PACKAGE_DIR`             | Overrides package asset base dir resolution (`docs/`, `examples/`, `CHANGELOG.md`)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
 | `OMP_SKIP_SETUP`             | Any non-empty value except `0`, `false`, or `no` skips automatic interactive setup scenes; an explicitly forced setup ignores it                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
 | `PI_DISABLE_LSPMUX`          | If `1`, disables lspmux detection/integration and forces direct LSP server spawning                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
@@ -474,7 +485,9 @@ Python subprocess filtering denies common API keys and allows safe base variable
 | `PI_AUTO_QA`                 | Boolean flag with highest precedence for the automatic tool-issue report injection/recording; any non-empty value other than `1`/`y`/`true`/`yes`/`on` disables it; unset or empty consults the `dev.autoqa` setting                                                                                                                                                                                                                                                                                                                                                       |
 | `PI_AUTO_QA_PUSH`            | `1`/`true` bypasses the consent dialog and forces tool-issue push recording in headless/non-interactive environments                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
 | `PI_AUTO_QA_PUSH_URL`        | Endpoint override for auto QA grievance push; wins over the `dev.autoqaPush.endpoint` setting                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| `PI_AUTO_QA_PUSH_TOKEN` | Bearer-token override for auto QA grievance push; wins over `dev.autoqaPush.token` |
 | `PI_BROWSER_RELAY`           | `0`/`1` kill switch for the browser relay; overrides the `browser.relay` setting (relay auto-starts when Eval's browser API needs it)                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| `OMP_DAEMON_IDLE_GRACE_MS`   | Milliseconds a daemon broker waits after its last `omp` client disconnects before it shuts down and stops the non-detached daemons it supervises, such as services started with the bash tool's `name` (default `3000`). Read once when an `omp` process launches the broker, using the base-10 `parseInt` prefix (`5s` reads as `5`, `2.5` as `2`); `0` shuts the broker down as soon as the last client disconnects, and negative values or values without leading digits use the default |
 
 ### Hindsight memory backend
 
@@ -523,7 +536,9 @@ These affect where coding-agent stores data and which process-local settings ove
 | `PI_CONFIG_DIR`                                     | Config root dirname under home (default `.omp`)                                                                            |
 | `PI_CODING_AGENT_DIR`                               | Full agent-directory override for the default profile only; named profiles ignore it                                       |
 | `PI_CODING_AGENT_SESSION_DIR`                       | Initial session-directory override consumed by launch argument parsing                                                     |
+| `PI_NATIVES_DIR`                                    | Native addon extraction/staging root override, before XDG/default paths; the loader appends `<version>`. Trimmed, `~`-expanded, and normalized; empty or relative values are ignored. Does not move sessions, plugins, or other data. Must be writable only by the user(s) running `omp`: an existing addon of the expected size is reused without re-extraction, and its version is checked only after it loads |
 | `PI_CONFIG_FILES`                                   | Platform path-list of settings overlays (`:` on Unix, `;` on Windows); loaded in order before explicit `--config` overlays |
+| `CLAUDE_CONFIG_DIR` | Claude Code user-config directory override (trimmed, resolved relative to process cwd); also moves Claude's `.claude.json` to `<override>/.claude.json`. Does not relocate project `.claude` directories |
 | `OMP_AUTORESEARCH_DB_DIR`                           | Directory override for per-project autoresearch DB and project-artifact roots                                              |
 | `XDG_DATA_HOME`, `XDG_STATE_HOME`, `XDG_CACHE_HOME` | On macOS/Linux, redirect corresponding OMP paths only when the target `omp` root (or named-profile root) already exists    |
 | `PWD`                                               | Used when matching canonical current working directory in path helpers                                                     |
@@ -540,16 +555,14 @@ These affect where coding-agent stores data and which process-local settings ove
 | -------------------------- | ------------------------------------------------------------------------------ |
 | `PI_BASH_NO_CI`            | Suppresses automatic `CI=true` injection into spawned shell env                |
 | `CLAUDE_BASH_NO_CI`        | Legacy alias fallback for `PI_BASH_NO_CI`                                      |
-| `PI_BASH_NO_LOGIN`         | Disables login-shell mode; shell args become `['-c']` instead of `['-l','-c']` |
+| `PI_BASH_NO_LOGIN`         | Non-empty value disables POSIX login-shell mode (`-c` instead of `-l -c`) and adds PowerShell `-NoProfile`; cmd.exe always uses `/c` |
 | `CLAUDE_BASH_NO_LOGIN`     | Legacy alias fallback for `PI_BASH_NO_LOGIN`                                   |
 | `PI_SHELL_PREFIX`          | Optional command prefix wrapper                                                |
 | `CLAUDE_CODE_SHELL_PREFIX` | Legacy alias fallback for `PI_SHELL_PREFIX`                                    |
 | `VISUAL`                   | Preferred external editor command                                              |
 | `EDITOR`                   | Fallback external editor command                                               |
 
-Current implementation: `PI_BASH_NO_LOGIN`/`CLAUDE_BASH_NO_LOGIN` are active; when either is set, `getShellArgs()` returns `['-c']`.
-
-`PI_BASH_NO_CI`, `PI_BASH_NO_LOGIN`, and `PI_SHELL_PREFIX` use their `CLAUDE_*` aliases only when the canonical variable is unset.
+`PI_BASH_NO_CI`, `PI_BASH_NO_LOGIN`, and `PI_SHELL_PREFIX` use their `CLAUDE_*` aliases when the canonical variable is unset or empty. These controls use non-empty string checks, not boolean parsing: even `0` or `false` activates the corresponding no-CI/no-login control.
 
 ---
 
@@ -576,12 +589,15 @@ These are read as runtime signals; they are usually set by the terminal/OS rathe
 | Variable                       | Behavior                                                                                                                                                                                                                                           |
 | ------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `PI_NOTIFICATIONS`             | `off` / `0` / `false` suppress desktop notifications                                                                                                                                                                                               |
-| `PI_TUI_WRITE_LOG`             | If set, logs TUI writes to file                                                                                                                                                                                                                    |
+| `PI_TUI_WRITE_LOG`             | If set, logs TUI writes to file; an OSC 52 clipboard write is logged as its payload length, not its contents                                                                                                                                       |
 | `PI_TUI_RAW_BACKSPACE_IS_CTRL` | If `1`, interprets raw `0x08` as Ctrl+Backspace instead of Backspace; use when SSH/container hops hide a Windows Terminal client                                                                                                                   |
 | `PI_HARDWARE_CURSOR`           | If `1`, enables hardware cursor mode                                                                                                                                                                                                               |
 | `PI_NO_SYNC_OUTPUT`            | If set (any non-empty value), disables DEC 2026 synchronized-output wrappers while keeping TUI autowrap guards                                                                                                                                     |
 | `PI_NO_DECCARA`                | If set (truthy), disables Kitty DECCARA rectangular-SGR background fills (forces padded-string rendering)                                                                                                                                          |
 | `PI_NO_GLYPH_PROTOCOL`         | If `1`, skips the Glyph Protocol handshake (APC `25a1`), so nerd-preset icons come only from the terminal's own fonts instead of the outlines omp registers in-band on Rio/Ghostty                                                             |
+| `PI_TUI_NATIVE`                | Tern Surface Protocol probe: `0` never probes (always the ANSI row renderer); `1` probes even inside multiplexers and test runtimes. Unset probes every direct terminal; only a `hello` reply switches to native rendering                          |
+| `PI_TUI_TSP_RECORD`            | Path of a JSONL file that receives every Tern Surface Protocol message sent and received, with timestamps                                                                                                                                          |
+| `PI_TUI_NATIVE_STATS`          | If `1`, logs each native frame's op count and `rows` fallback count at debug level                                                                                                                                                                 |
 | `PI_DEBUG_REDRAW`              | If `1`, enables redraw debug logging                                                                                                                                                                                                               |
 | `PI_FORCE_IMAGE_PROTOCOL`      | Forces terminal image protocol detection (`kitty`, `iterm2`/`iterm`, `sixel`, `none`). Setting `kitty` inside a terminal multiplexer also opts into Kitty Unicode placeholder placement unless `PI_KITTY_PLACEHOLDERS=0` or `PI_NO_KITTY_PLACEHOLDERS=1` disables it |
 | `PI_KITTY_PLACEHOLDERS`        | `1` forces Kitty Unicode placeholder placement on; `0` forces it off. Under a terminal multiplexer, use `1` only after confirming the outer terminal supports Kitty `U=1` placeholders—otherwise U+10EEEE may render as literal PUA boxes              |
@@ -606,14 +622,13 @@ These are read as runtime signals; they are usually set by the terminal/OS rathe
 | ------------------------- | ------------------------------------------------------------------- |
 | `PI_COMMIT_TEST_FALLBACK` | If `true` (case-insensitive), force commit fallback generation path |
 | `PI_COMMIT_NO_FALLBACK`   | If `true`, disables fallback when agent returns no proposal         |
-| `PI_COMMIT_MAP_REDUCE`    | If `false`, disables map-reduce commit analysis path                |
 | `DEBUG`                   | If set, commit agent error stack traces are printed                 |
 
 ---
 
 ## 11) OpenTelemetry export
 
-OMP initializes OTLP export only when at least one signal has an endpoint. `OTEL_SDK_DISABLED=true` disables initialization.
+OMP initializes OTLP export only when at least one signal has an endpoint. Set `telemetry.otlpExportEnabled: false` (`/settings` → Providers → Privacy) to skip export even when endpoints are configured. `OTEL_SDK_DISABLED=true` also disables initialization.
 
 | Variable group                                                                                                  | Behavior                                                                                        |
 | --------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------- |

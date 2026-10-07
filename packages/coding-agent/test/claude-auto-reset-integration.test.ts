@@ -2,7 +2,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } 
 import { Agent } from "@oh-my-pi/pi-agent-core";
 import type { ResetCreditAccountStatus, ResetCreditTarget, UsageReport } from "@oh-my-pi/pi-ai";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
-import * as aiStream from "@oh-my-pi/pi-ai/stream";
+import * as envApiKey from "@oh-my-pi/pi-ai/env-api-key";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -13,6 +13,7 @@ import {
 	createCodexAutoRedeemCoordinator,
 } from "@oh-my-pi/pi-coding-agent/session/codex-auto-reset";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { TempDir } from "@oh-my-pi/pi-utils";
 import { mockSchedulerWaitWithClock } from "./helpers/mock-scheduler-clock";
 
 import { cfgClaudeResetsAutoRedeem } from "@oh-my-pi/pi-coding-agent/session/settings";
@@ -55,6 +56,7 @@ function claudeStatus(requiresLimit: boolean): ResetCreditAccountStatus {
 	return {
 		provider: "anthropic",
 		credentialId: CREDENTIAL_ID,
+		report: claudeReport(requiresLimit ? 1 : 0.5),
 		accountId: ACCOUNT_ID,
 		email: EMAIL,
 		orgId: ORG_ID,
@@ -86,6 +88,7 @@ describe("Claude saved-reset trigger integration", () => {
 	let modelRegistry: ModelRegistry;
 	let sessions: AgentSession[];
 	let managers: SessionManager[];
+	let tempDir: TempDir;
 
 	beforeAll(async () => {
 		authStorage = await AuthStorage.create(":memory:");
@@ -93,9 +96,10 @@ describe("Claude saved-reset trigger integration", () => {
 	});
 
 	beforeEach(() => {
-		vi.spyOn(aiStream, "getEnvApiKey").mockReturnValue(undefined);
+		vi.spyOn(envApiKey, "getEnvApiKey").mockReturnValue(undefined);
 		sessions = [];
 		managers = [];
+		tempDir = TempDir.createSync("@pi-claude-reset-");
 	});
 
 	afterEach(async () => {
@@ -105,6 +109,7 @@ describe("Claude saved-reset trigger integration", () => {
 		for (const manager of managers.splice(0).reverse()) {
 			await manager.close();
 		}
+		tempDir.removeSync();
 		vi.restoreAllMocks();
 	});
 
@@ -113,10 +118,16 @@ describe("Claude saved-reset trigger integration", () => {
 	});
 
 	function buildSession(options: {
-		report: UsageReport;
+		report: UsageReport | null;
 		status: ResetCreditAccountStatus;
 		streamErrorFirst?: boolean;
+		transientFailures?: number;
+		listFailures?: number;
+		maxDelayMs?: number;
+		quota?: { restored: boolean };
 		autoRedeem?: "unset" | "yes" | "no";
+		salvageHorizonHours?: number;
+		keepCredits?: number;
 	}): { session: AgentSession; coordinator: CodexAutoRedeemCoordinator; targets: ResetCreditTarget[] } {
 		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
 		if (!model) throw new Error("Expected bundled anthropic/claude-sonnet-4-5 to exist");
@@ -126,13 +137,22 @@ describe("Claude saved-reset trigger integration", () => {
 			email: EMAIL,
 			orgId: ORG_ID,
 		});
-		vi.spyOn(authStorage.usage, "reports").mockImplementation(async () => [options.report]);
-		vi.spyOn(authStorage.resets, "list").mockImplementation(async request =>
-			request?.provider === "anthropic" ? [options.status] : [],
-		);
+		vi.spyOn(authStorage.usage, "reports").mockImplementation(async () => options.report && [options.report]);
+		let listAttempts = 0;
+		vi.spyOn(authStorage.resets, "list").mockImplementation(async request => {
+			if (request?.provider !== "anthropic") return [];
+			listAttempts++;
+			return [
+				listAttempts <= (options.listFailures ?? 0)
+					? { ...options.status, report: undefined, error: "Rate limited", retryAfterMs: 0 }
+					: options.status,
+			];
+		});
 		const targets: ResetCreditTarget[] = [];
+		const quota = options.quota ?? { restored: !options.streamErrorFirst };
 		vi.spyOn(authStorage.resets, "redeem").mockImplementation(async request => {
 			targets.push(request.target);
+			quota.restored = true;
 			return {
 				ok: true,
 				code: "reset",
@@ -152,24 +172,29 @@ describe("Claude saved-reset trigger integration", () => {
 			initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] },
 			streamFn: (requestedModel, context, streamOptions) => {
 				calls++;
-				if (options.streamErrorFirst && calls === 1) mock.push({ throw: CLAUDE_USAGE_LIMIT_ERROR });
-				else mock.push({ content: ["recovered after Claude reset"], stopReason: "stop" });
+				const transientFailures = options.transientFailures ?? 0;
+				if (calls <= transientFailures) mock.push({ throw: "503 Service unavailable" });
+				else if (options.streamErrorFirst && (calls === transientFailures + 1 || !quota.restored)) {
+					mock.push({ throw: CLAUDE_USAGE_LIMIT_ERROR });
+				} else mock.push({ content: ["recovered after Claude reset"], stopReason: "stop" });
 				return mock.stream(requestedModel, context, streamOptions);
 			},
 		});
 		const settings = Settings.isolated({
 			"compaction.enabled": false,
 			"retry.baseDelayMs": 5,
-			"retry.maxDelayMs": 100,
+			"retry.maxDelayMs": options.maxDelayMs ?? 100,
 			"retry.maxRetries": 1,
 			"codexResets.autoRedeem": "no",
 			"claudeResets.autoRedeem": options.autoRedeem ?? "yes",
-			"claudeResets.salvageHorizonHours": 12,
+			"claudeResets.salvageHorizonHours": options.salvageHorizonHours ?? 12,
+			"claudeResets.keepCredits": options.keepCredits ?? 0,
 		});
 		settings.setModelRole("default", `${model.provider}/${model.id}`);
 		const sessionManager = SessionManager.inMemory();
 		managers.push(sessionManager);
 		const coordinator = createCodexAutoRedeemCoordinator();
+		coordinator.resetLockPath = `${tempDir.path()}/auth.db`;
 		const session = new AgentSession({
 			agent,
 			sessionManager,
@@ -215,6 +240,110 @@ describe("Claude saved-reset trigger integration", () => {
 		expect(recovered).toBe(true);
 	});
 
+	it("continues the task using live reset evidence when broker usage polling is unavailable", async () => {
+		const { session, targets } = buildSession({
+			report: null,
+			status: claudeStatus(true),
+			streamErrorFirst: true,
+		});
+
+		await session.prompt("continue through a quota reset");
+		await session.waitForIdle();
+
+		expect(targets.map(target => target.credentialId)).toEqual([CREDENTIAL_ID]);
+		expect(session.agent.state.messages.at(-1)).toMatchObject({
+			role: "assistant",
+			stopReason: "stop",
+			content: [{ type: "text", text: "recovered after Claude reset" }],
+		});
+	});
+
+	it("redeems and continues when earlier provider failures consumed the retry budget", async () => {
+		const { session, targets } = buildSession({
+			report: null,
+			status: claudeStatus(true),
+			streamErrorFirst: true,
+			transientFailures: 1,
+		});
+		mockSchedulerWaitWithClock();
+
+		await session.prompt("recover after retry budget exhaustion");
+		await session.waitForIdle();
+
+		expect(targets.map(target => target.credentialId)).toEqual([CREDENTIAL_ID]);
+		expect(session.agent.state.messages.at(-1)).toMatchObject({ role: "assistant", stopReason: "stop" });
+	});
+
+	it("waits for throttled reset discovery and resumes without retrying the blocked model prematurely", async () => {
+		const { session, targets } = buildSession({
+			report: null,
+			status: claudeStatus(true),
+			streamErrorFirst: true,
+			listFailures: 1,
+			maxDelayMs: 2_500,
+		});
+		mockSchedulerWaitWithClock();
+
+		await session.prompt("wait for reset eligibility");
+		await session.waitForIdle();
+
+		expect(targets.map(target => target.credentialId)).toEqual([CREDENTIAL_ID]);
+		expect(session.agent.state.messages.at(-1)).toMatchObject({ role: "assistant", stopReason: "stop" });
+	});
+
+	it("cancels reset discovery backoff without spending a credit or resuming the task", async () => {
+		const { session, targets } = buildSession({
+			report: null,
+			status: claudeStatus(true),
+			streamErrorFirst: true,
+			maxDelayMs: 5_000,
+		});
+		const listed = Promise.withResolvers<void>();
+		vi.spyOn(authStorage.resets, "list").mockImplementation(async () => {
+			listed.resolve();
+			return [{ ...claudeStatus(true), report: undefined, error: "Rate limited", retryAfterMs: 1_000 }];
+		});
+
+		const prompt = session.prompt("cancel while waiting for reset eligibility");
+		await listed.promise;
+		await session.abort();
+		await prompt;
+		await session.waitForIdle();
+
+		expect(targets).toEqual([]);
+		expect(session.isRetrying).toBe(false);
+		expect(session.agent.state.messages.at(-1)).not.toMatchObject({ stopReason: "stop" });
+	});
+
+	it("adopts a peer's confirmed reset without spending again or looping on the same marker", async () => {
+		const quota = { restored: false };
+		const first = buildSession({
+			report: null,
+			status: claudeStatus(true),
+			streamErrorFirst: true,
+			quota,
+		});
+		await first.session.prompt("restore the shared account");
+		await first.session.waitForIdle();
+		expect(first.targets).toHaveLength(1);
+
+		const spent = claudeStatus(true);
+		spent.availableCount = 0;
+		spent.redeemableCount = 0;
+		spent.eligible = false;
+		const peer = buildSession({ report: null, status: spent, streamErrorFirst: true, quota });
+		await peer.session.prompt("recover a request issued before the peer reset");
+		await peer.session.waitForIdle();
+		expect(peer.targets).toEqual([]);
+		expect(peer.session.agent.state.messages.at(-1)).toMatchObject({ role: "assistant", stopReason: "stop" });
+
+		quota.restored = false;
+		await peer.session.prompt("do not reuse an old reset for a new quota failure");
+		await peer.session.waitForIdle();
+		expect(peer.targets).toEqual([]);
+		expect(peer.session.agent.state.messages.at(-1)).toMatchObject({ role: "assistant", stopReason: "error" });
+	});
+
 	it("salvages an expiring early-use Cedar grant from the usage heartbeat exactly once", async () => {
 		const { session, coordinator, targets } = buildSession({
 			report: claudeReport(0.5),
@@ -231,6 +360,48 @@ describe("Claude saved-reset trigger integration", () => {
 		await coordinator.sweepPromise;
 		expect(targets).toHaveLength(1);
 	});
+
+	it.each(["yes", "no", "unset"] as const)(
+		"only consumes an imminent reset with consent when auto-redeem is %s",
+		async autoRedeem => {
+			const report = claudeReport(0);
+			const status = claudeStatus(false);
+			status.report = report;
+			for (const credit of status.credits) {
+				credit.expiresAt = new Date(Date.now() + 4 * 60_000).toISOString();
+				credit.usedFractions = { "anthropic:7d": 0 };
+			}
+			const { session, coordinator, targets } = buildSession({
+				report,
+				status,
+				autoRedeem,
+				salvageHorizonHours: 0,
+				keepCredits: 1,
+			});
+
+			await session.fetchUsageReports();
+			await coordinator.sweepPromise;
+			expect(targets).toEqual(
+				autoRedeem === "yes"
+					? [
+							{
+								provider: "anthropic",
+								credentialId: CREDENTIAL_ID,
+								creditId: "cedar-grant-1",
+								accountId: ACCOUNT_ID,
+								email: EMAIL,
+								orgId: ORG_ID,
+							},
+						]
+					: [],
+			);
+
+			coordinator.lastSweepAt = 0;
+			await session.fetchUsageReports();
+			await coordinator.sweepPromise;
+			expect(targets).toHaveLength(autoRedeem === "yes" ? 1 : 0);
+		},
+	);
 
 	it("does not spend headlessly before independent Claude consent", async () => {
 		// Codex being disabled does not enable Claude, and an unset headless

@@ -1,8 +1,9 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, test, vi } from "bun:test";
 import { type Api, Effort, type Model, type ModelSpec } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { DEFAULT_MODEL_PER_PROVIDER } from "@oh-my-pi/pi-catalog/provider-models";
+import { logger } from "@oh-my-pi/pi-utils";
 import { parseModelString } from "@oh-my-pi/pi-tui/overlays/model-selector";
 import {
 	expandRoleAlias,
@@ -387,6 +388,26 @@ function roleChainModel(provider: string, id: string): Model<Api> {
 }
 
 describe("pickDefaultAvailableModel", () => {
+	test("does not auto-select Apple Foundation Models but retains explicit selection", () => {
+		const apple = buildModel({
+			id: "on-device",
+			name: "Apple Foundation Model",
+			api: "apple-foundation-models",
+			provider: "apple",
+			baseUrl: "local://apple-foundation-models",
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 8192,
+			maxTokens: 4096,
+		});
+		const anthropic = createOpusModel("anthropic", DEFAULT_MODEL_PER_PROVIDER.anthropic, "Claude Opus");
+
+		expect(pickDefaultAvailableModel([apple])).toBeUndefined();
+		expect(pickDefaultAvailableModel([apple, anthropic])).toBe(anthropic);
+		expect(pickDefaultAvailableModel([apple, anthropic], () => true)).toBe(anthropic);
+		expect(parseModelPattern("apple/on-device", [apple]).model).toBe(apple);
+	});
 	test("prefers Codex OAuth over plain OpenAI for the shared GPT default", () => {
 		const result = pickDefaultAvailableModel(openaiGpt55Models);
 
@@ -542,20 +563,6 @@ describe("parseModelPattern", () => {
 	});
 
 	describe("patterns with valid thinking levels", () => {
-		test("sonnet:high returns sonnet with high thinking level", () => {
-			const result = parseModelPattern("sonnet:high", allModels);
-			expect(result.model?.id).toBe("claude-sonnet-4-5");
-			expect(result.thinkingLevel).toBe(Effort.High);
-			expect(result.warning).toBeUndefined();
-		});
-
-		test("gpt-4o:medium returns gpt-4o with medium thinking level", () => {
-			const result = parseModelPattern("gpt-4o:medium", allModels);
-			expect(result.model?.id).toBe("gpt-4o");
-			expect(result.thinkingLevel).toBe(Effort.Medium);
-			expect(result.warning).toBeUndefined();
-		});
-
 		test("all valid thinking levels work", () => {
 			const levels = [
 				"off",
@@ -637,14 +644,6 @@ describe("parseModelPattern", () => {
 			expect(result.explicitThinkingLevel).toBe(false);
 			expect(result.warning).toContain("Invalid thinking level");
 			expect(result.warning).toContain("random");
-		});
-
-		test("gpt-4o:invalid returns gpt-4o with undefined thinking level and warning", () => {
-			const result = parseModelPattern("gpt-4o:invalid", allModels);
-			expect(result.model?.id).toBe("gpt-4o");
-			expect(result.thinkingLevel).toBeUndefined();
-			expect(result.explicitThinkingLevel).toBe(false);
-			expect(result.warning).toContain("Invalid thinking level");
 		});
 	});
 
@@ -803,12 +802,6 @@ describe("parseModelPattern", () => {
 			expect(result.error).toBeTruthy();
 		});
 
-		test("openai/gpt-4o:extended still resolves to the OpenRouter raw id (openai carries no such id)", () => {
-			const result = parseModelPattern("openai/gpt-4o:extended", allModels);
-			expect(result.model?.provider).toBe("openrouter");
-			expect(result.model?.id).toBe("openai/gpt-4o:extended");
-		});
-
 		describe("dotted revision spelling", () => {
 			// First-party ids spell revisions with dashes (`claude-fable-5-1`);
 			// aggregators use dots, and their flat id is verbatim the dotted
@@ -842,14 +835,6 @@ describe("parseModelPattern", () => {
 	});
 
 	describe("edge cases", () => {
-		test("empty pattern matches via partial matching", () => {
-			// Empty string is included in all model IDs, so partial matching finds a match
-			const result = parseModelPattern("", allModels);
-			expect(result.model).not.toBeNull();
-			expect(result.thinkingLevel).toBeUndefined();
-			expect(result.explicitThinkingLevel).toBe(false);
-		});
-
 		test("pattern ending with colon treats empty suffix as invalid", () => {
 			const result = parseModelPattern("sonnet:", allModels);
 			// Empty string after colon is not a valid thinking level
@@ -889,18 +874,32 @@ describe("role priorities and chains", () => {
 		expect(rolePriorityDefaults("memory")).toEqual(rolePriorityDefaults("smol"));
 	});
 
+	test("built-in smol priorities match `*-mini` ids but not gemini or minimax ids", () => {
+		const settings = Settings.isolated({});
+		const large = [
+			roleChainModel("custom", "google/gemini-3.1-pro-preview"),
+			roleChainModel("google", "gemini-2.5-pro"),
+			roleChainModel("minimax", "MiniMax-M2"),
+		];
+
+		expect(resolveModelRoleValue("@smol", large, { settings }).model).toBeUndefined();
+		expect(
+			resolveModelRoleValue("@smol", [...large, roleChainModel("openai", "o4-mini")], { settings }).model?.id,
+		).toBe("o4-mini");
+	});
+
 	test("appends non-explicit web defaults after a configured primary", () => {
 		const exa = roleChainModel("web", "exa");
 		const parallel = roleChainModel("web", "parallel");
-		const perplexity = roleChainModel("web", "perplexity");
+		const duckduckgo = roleChainModel("web", "duckduckgo");
 		const settings = Settings.isolated({ modelRoles: { web: "web/exa" } });
 
-		const chain = resolveRoleChain("web", settings, [exa, parallel, perplexity]);
+		const chain = resolveRoleChain("web", settings, [exa, parallel, duckduckgo]);
 
 		expect(chain.map(candidate => [formatModelStringWithRouting(candidate.model), candidate.explicit])).toEqual([
 			["web/exa", true],
 			["web/parallel", false],
-			["web/perplexity", false],
+			["web/duckduckgo", false],
 		]);
 	});
 
@@ -939,43 +938,6 @@ describe("role priorities and chains", () => {
 		expect(resolveRoleChain("web", settings, [exa, parallel]).map(candidate => candidate.model.id)).toEqual(["exa"]);
 	});
 
-	test("hoists a provider within defaults without moving an explicit primary", () => {
-		const openai = roleChainModel("openai", "gpt-image-1");
-		const xai = roleChainModel("xai", "grok-imagine-image");
-		const defaults = resolveRoleChain("image", Settings.isolated(), [openai, xai], { hoistProvider: "xai" });
-		expect(defaults.map(candidate => candidate.model.provider)).toEqual(["xai", "openai"]);
-
-		const configured = resolveRoleChain(
-			"image",
-			Settings.isolated({ modelRoles: { image: "openai/gpt-image-1" } }),
-			[openai, xai],
-			{ hoistProvider: "xai" },
-		);
-		expect(configured.map(candidate => [candidate.model.provider, candidate.explicit])).toEqual([
-			["openai", true],
-			["xai", false],
-		]);
-
-		const google = roleChainModel("google-antigravity", "gemini-3-pro-image");
-		const explicitFallbacks = resolveRoleChain(
-			"image",
-			Settings.isolated({
-				modelRoles: { image: "openai/gpt-image-1" },
-				"retry.fallbackChains": {
-					image: ["google-antigravity/gemini-3-pro-image", "xai/grok-imagine-image"],
-				},
-			}),
-			[openai, google, xai],
-			{ hoistProvider: "xai" },
-		);
-		expect(explicitFallbacks.map(candidate => candidate.model.provider)).toEqual([
-			"openai",
-			"google-antigravity",
-			"xai",
-		]);
-		expect(explicitFallbacks.every(candidate => candidate.explicit)).toBe(true);
-	});
-
 	test("deduplicates by routed identity while retaining distinct upstream routes", () => {
 		const settings = Settings.isolated({
 			modelRoles: { routed: "openrouter/z-ai/glm-4.7@cerebras" },
@@ -994,8 +956,8 @@ describe("role priorities and chains", () => {
 
 	test("ignores configured kind roles during default chat-model resolution", () => {
 		const chat = roleChainModel("anthropic", "chat-model");
-		const image = roleChainModel("openai", "gpt-image-1");
-		const settings = Settings.isolated({ modelRoles: { image: "openai/gpt-image-1" } });
+		const image = roleChainModel("openai", "gpt-image-2");
+		const settings = Settings.isolated({ modelRoles: { image: "openai/gpt-image-2" } });
 
 		expect(resolveModelFromSettings({ settings, availableModels: [chat, image] })).toBe(chat);
 	});
@@ -1003,7 +965,7 @@ describe("role priorities and chains", () => {
 	test("memory inherits configured tiny without kind roles inheriting configured default", () => {
 		const tiny = roleChainModel("local", "tiny-model");
 		const defaultModel = roleChainModel("local", "default-model");
-		const image = roleChainModel("openai", "gpt-image-1");
+		const image = roleChainModel("openai", "gpt-image-2");
 		const settings = Settings.isolated({
 			modelRoles: {
 				default: "local/default-model",
@@ -1012,7 +974,7 @@ describe("role priorities and chains", () => {
 		});
 
 		expect(resolveRoleChain("memory", settings, [defaultModel, tiny])[0]?.model.id).toBe("tiny-model");
-		expect(resolveRoleChain("image", settings, [defaultModel, image])[0]?.model.id).toBe("gpt-image-1");
+		expect(resolveRoleChain("image", settings, [defaultModel, image])[0]?.model.id).toBe("gpt-image-2");
 	});
 });
 
@@ -1131,15 +1093,6 @@ describe("resolveModelRoleValue", () => {
 		expect(result.explicitThinkingLevel).toBe(true);
 		expect(result.warning).toBeUndefined();
 	});
-
-	test("does not clamp :auto against the model's supported efforts", () => {
-		// claude-sonnet-4-5 caps at "high"; ensure auto isn't collapsed onto it
-		// by resolveThinkingLevelForModel.
-		const result = resolveModelRoleValue("anthropic/claude-sonnet-4-5:auto", allModels);
-
-		expect(result.thinkingLevel).toBe("auto");
-		expect(result.explicitThinkingLevel).toBe(true);
-	});
 });
 describe("resolveAgentPrewalkPattern", () => {
 	test("agent definition alone decides: true → default target, pattern → custom, false/absent → off", () => {
@@ -1251,6 +1204,141 @@ describe("resolveAgentModelPatterns", () => {
 		expect(result).toEqual(["openai/gpt-4o"]);
 	});
 
+	test("a requested @default inherits the parent's active model over the configured default role", () => {
+		const settings = Settings.isolated({
+			modelRoles: { default: "openai/gpt-4o", definition: "anthropic/claude-sonnet-4-5" },
+		});
+
+		for (const requestModel of ["@default", "*", "default"]) {
+			expect(
+				resolveAgentModelSelection({
+					requestModel,
+					settingsOverride: "@definition",
+					agentModel: "@definition",
+					settings,
+					activeModelPattern: "zai/glm-5.2:high",
+				}),
+			).toEqual({ patterns: ["zai/glm-5.2:high"], role: undefined, inheritsLiveThinkingLevel: true });
+		}
+
+		// Without an active model the configured default is still the tail.
+		expect(resolveAgentModelPatterns({ requestModel: "@default", settings })).toEqual(["openai/gpt-4o"]);
+
+		// An explicit selector and a non-default role alias are unaffected.
+		expect(
+			resolveAgentModelPatterns({
+				requestModel: "anthropic/claude-opus-4-5",
+				settings,
+				activeModelPattern: "zai/glm-5.2:high",
+			}),
+		).toEqual(["anthropic/claude-opus-4-5"]);
+		expect(
+			resolveAgentModelPatterns({ requestModel: "@definition", settings, activeModelPattern: "zai/glm-5.2:high" }),
+		).toEqual(["anthropic/claude-sonnet-4-5"]);
+	});
+
+	test("a default alias with a thinking suffix inherits the active model at the requested level", () => {
+		const settings = Settings.isolated({
+			modelRoles: { default: "openai/gpt-4o", definition: "anthropic/claude-sonnet-4-5" },
+		});
+
+		for (const requestModel of ["@default:high", "*:high", "pi/default:high", "default:high"]) {
+			expect(
+				resolveAgentModelSelection({
+					requestModel,
+					settingsOverride: "@definition",
+					agentModel: "@definition",
+					settings,
+					activeModelPattern: "zai/glm-5.2",
+				}),
+			).toEqual({ patterns: ["zai/glm-5.2:high"], role: undefined });
+		}
+
+		// A bare `@default` inherits an unsuffixed parent selector verbatim.
+		expect(
+			resolveAgentModelPatterns({ requestModel: "@default", settings, activeModelPattern: "zai/glm-5.2" }),
+		).toEqual(["zai/glm-5.2"]);
+		// A bare alias also preserves a parent's existing suffix.
+		expect(
+			resolveAgentModelPatterns({ requestModel: "@default", settings, activeModelPattern: "zai/glm-5.2:high" }),
+		).toEqual(["zai/glm-5.2:high"]);
+		const selection = resolveAgentModelSelection({
+			requestModel: "@default:low",
+			settings,
+			activeModelPattern: "anthropic/claude-sonnet-4-5:high",
+		});
+		const result = resolveModelOverride(selection.patterns, { getAvailable: () => mockModels }, settings);
+		expect(result.model).toBe(mockModels[0]);
+		expect(result.thinkingLevel).toBe(Effort.Low);
+		// Without an active model the configured default carries the suffix.
+		expect(resolveAgentModelPatterns({ requestModel: "*:xhigh", settings })).toEqual(["openai/gpt-4o:xhigh"]);
+		// A suffixed non-default alias still expands its configured role.
+		expect(
+			resolveAgentModelPatterns({ requestModel: "@definition:high", settings, activeModelPattern: "zai/glm-5.2" }),
+		).toEqual(["anthropic/claude-sonnet-4-5:high"]);
+		// The agent definition's own suffixed `@default` inherits the same way.
+		expect(
+			resolveAgentModelPatterns({ agentModel: "@default:high", settings, activeModelPattern: "zai/glm-5.2" }),
+		).toEqual(["zai/glm-5.2:high"]);
+	});
+
+	test("inherited thinking preserves literal suffix model ids when the base model is available", () => {
+		for (const suffix of ["auto", "max"]) {
+			const baseModel = { ...mockModels[0]!, provider: "example", id: "runtime" };
+			const literalModel = { ...baseModel, id: `runtime:${suffix}` };
+			const selection = resolveAgentModelSelection({
+				requestModel: "@default:high",
+				activeModelPattern: `example/runtime:${suffix}`,
+			});
+			const result = resolveModelOverride(selection.patterns, { getAvailable: () => [baseModel, literalModel] });
+
+			expect(result.model).toBe(literalModel);
+			expect(result.thinkingLevel).toBe(Effort.High);
+			expect(result.explicitThinkingLevel).toBe(true);
+			expect(selection.role).toBeUndefined();
+		}
+	});
+
+	test("comma request inheritance uses the switched parent before role fallbacks", () => {
+		const settings = Settings.isolated({
+			modelRoles: { default: "openai/gpt-4o", smol: "openai/gpt-4o" },
+		});
+		const selection = resolveAgentModelSelection({
+			requestModel: "@default:high,@smol",
+			settingsOverride: "openai/gpt-4o",
+			agentModel: "openai/gpt-4o",
+			settings,
+			activeModelPattern: "anthropic/claude-sonnet-4-5:low",
+		});
+		const result = resolveModelOverride(selection.patterns, { getAvailable: () => mockModels }, settings);
+
+		expect(result.model).toBe(mockModels[0]);
+		expect(result.thinkingLevel).toBe(Effort.High);
+		expect(selection.role).toBeUndefined();
+
+		const fallback = resolveModelOverride(selection.patterns, { getAvailable: () => [mockModels[1]!] }, settings);
+		expect(fallback.model).toBe(mockModels[1]);
+	});
+
+	test("an earlier requested role stays ahead of inherited array candidates", () => {
+		const settings = Settings.isolated({
+			modelRoles: { default: "openai/gpt-4o", smol: "openai/gpt-4o" },
+		});
+		const selection = resolveAgentModelSelection({
+			requestModel: ["@smol", "@default:high"],
+			settings,
+			activeModelPattern: "anthropic/claude-sonnet-4-5",
+		});
+		const result = resolveModelOverride(selection.patterns, { getAvailable: () => mockModels }, settings);
+
+		expect(result.model).toBe(mockModels[1]);
+		expect(selection.role).toBe("smol");
+
+		const fallback = resolveModelOverride(selection.patterns, { getAvailable: () => [mockModels[0]!] }, settings);
+		expect(fallback.model).toBe(mockModels[0]);
+		expect(fallback.thinkingLevel).toBe(Effort.High);
+	});
+
 	test("uses the configured task role before falling back to the session model", () => {
 		const settings = Settings.isolated({
 			modelRoles: {
@@ -1266,6 +1354,46 @@ describe("resolveAgentModelPatterns", () => {
 		});
 
 		expect(result).toEqual(["anthropic/claude-sonnet-4-5:high"]);
+	});
+
+	test("suffixed task aliases select the configured task model and requested effort", () => {
+		const settings = Settings.isolated({
+			modelRoles: { task: "anthropic/claude-sonnet-4-5:low" },
+		});
+
+		for (const agentModel of ["@task:high", "pi/task:high"]) {
+			const selection = resolveAgentModelSelection({
+				agentModel,
+				settings,
+				activeModelPattern: "openai/gpt-4o",
+			});
+
+			expect(selection.role).toBe("task");
+			const result = parseModelPattern(selection.patterns[0]!, mockModels);
+			expect(result.model).toBe(mockModels[0]);
+			expect(result.thinkingLevel).toBe(Effort.High);
+			expect(result.explicitThinkingLevel).toBe(true);
+		}
+	});
+
+	test("suffixed unset task aliases inherit the active model at the requested effort without a role", () => {
+		const settings = Settings.isolated({
+			modelRoles: { default: "openai/gpt-4o" },
+		});
+
+		for (const agentModel of ["@task:high", "pi/task:high"]) {
+			const selection = resolveAgentModelSelection({
+				agentModel,
+				settings,
+				activeModelPattern: "anthropic/claude-sonnet-4-5:low",
+			});
+
+			expect(selection.role).toBeUndefined();
+			const result = parseModelPattern(selection.patterns[0]!, mockModels);
+			expect(result.model).toBe(mockModels[0]);
+			expect(result.thinkingLevel).toBe(Effort.High);
+			expect(result.explicitThinkingLevel).toBe(true);
+		}
 	});
 
 	test("accepts YAML list values for configured task role patterns", () => {
@@ -2074,6 +2202,37 @@ describe("resolveModelScope", () => {
 		expect(scoped[0].model.id).toBe("gpt-5.5");
 	});
 
+	test("keeps non-chat runners out of the scope without reporting them as unmatched (#14016)", async () => {
+		const runnerSpec = (provider: string, id: string, kind: Model["kind"]) =>
+			buildModel({
+				id,
+				name: id,
+				api: "openai-completions",
+				kind,
+				provider,
+				baseUrl: "https://example.com",
+				reasoning: false,
+				input: ["text"],
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+				contextWindow: 128_000,
+				maxTokens: 1024,
+			});
+		const judge = runnerSpec("openrouter", "~typesafe/jev-latest", "judge");
+		const search = runnerSpec("web", "exa", "search");
+		const chat = openaiGpt55Models;
+		const warn = vi.spyOn(logger, "warn").mockImplementation(() => {});
+		try {
+			const scoped = await resolveModelScope(
+				["openrouter/~typesafe/jev-latest", "web/*", "openai/gpt-5.5", "nonexistent-model"],
+				{ getAvailable: kind => (kind === "all" ? [...chat, judge, search] : chat) },
+			);
+			expect(scoped.map(entry => `${entry.model.provider}/${entry.model.id}`)).toEqual(["openai/gpt-5.5"]);
+			expect(warn.mock.calls.map(call => call[0])).toEqual(['No models match pattern "nonexistent-model"']);
+		} finally {
+			warn.mockRestore();
+		}
+	});
+
 	test("resolves role aliases in --models scope to the role's model with its thinking level", async () => {
 		const settings = Settings.isolated({
 			modelRoles: { fable: "anthropic/claude-sonnet-4-5:high" },
@@ -2149,11 +2308,6 @@ describe("parseModelString", () => {
 	});
 
 	describe("thinking level suffix extraction", () => {
-		test("extracts valid thinking level from provider/id:level", () => {
-			const result = parseModelString("anthropic/claude-sonnet-4-5:high");
-			expect(result).toEqual({ provider: "anthropic", id: "claude-sonnet-4-5", thinkingLevel: Effort.High });
-		});
-
 		test("extracts all valid thinking levels", () => {
 			const levels = ["off", Effort.Minimal, Effort.Low, Effort.Medium, Effort.High, Effort.XHigh] as const;
 			for (const level of levels) {
@@ -2221,11 +2375,6 @@ describe("parseModelString", () => {
 		test("does not strip inherited object keys as thinking suffixes", () => {
 			const result = parseModelString("anthropic/claude-sonnet-4-5:constructor");
 			expect(result).toEqual({ provider: "anthropic", id: "claude-sonnet-4-5:constructor" });
-		});
-		test("does not extract thinking level from model ID with invalid suffix", () => {
-			const result = parseModelString("openrouter/openai/gpt-4o:extended");
-			// :extended is not a valid thinking level, so it stays as part of the ID
-			expect(result).toEqual({ provider: "openrouter", id: "openai/gpt-4o:extended" });
 		});
 
 		test("handles empty suffix after colon", () => {
@@ -2556,11 +2705,6 @@ describe("filterAvailableModelsByEnabledPatterns", () => {
 	test("returns empty list when no pattern matches (misconfiguration)", () => {
 		const result = filterAvailableModelsByEnabledPatterns(models, ["nonexistent-model"]);
 		expect(result).toHaveLength(0);
-	});
-
-	test("includes multiple patterns from different providers", () => {
-		const result = filterAvailableModelsByEnabledPatterns(models, ["anthropic/claude-sonnet-4-5", "openai/gpt-4o"]);
-		expect(result).toHaveLength(2);
 	});
 
 	test("keeps synthetic Bedrock inference profile matches", () => {

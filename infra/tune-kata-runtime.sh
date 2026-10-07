@@ -1,7 +1,13 @@
 #!/usr/bin/env bash
 # Patch the live Kata QEMU config: set the guest BOOT floor (default_vcpus /
-# default_memory), raise guest and host open-file limits, and enlarge the
-# virtiofsd worker pool. Runner pods are burstable (see reload-runner.sh):
+# default_memory), raise guest and host open-file limits, enlarge the
+# virtiofsd worker pool, and enable balloon free-page reporting so memory a
+# guest frees goes back to the host instead of staying pinned to the VM
+# until the job ends. Also installs `kata-cgroup-gc.timer`, which removes the
+# empty per-pod cgroups the shim leaves behind at the cgroup root (they
+# accumulate by the thousand on a busy runner host).
+#
+# Runner pods are burstable (see reload-runner.sh):
 # the boot floor stays deliberately at or below the pod's CPU/memory REQUEST
 # so VMs boot small and fast, and Kata hotplugs each guest toward the pod
 # LIMIT under load. Keep BOOT_VCPUS/BOOT_MEMORY_MIB <= the request when
@@ -68,6 +74,7 @@ replacements = [
     (r'(^\s*default_vcpus\s*=\s*)\d+', rf'\g<1>{boot_vcpus}'),
     (r'(^\s*default_memory\s*=\s*)\d+', rf'\g<1>{boot_mem}'),
     (r'(^\s*virtio_fs_extra_args\s*=\s*)\[[^\]]*\]', rf'\g<1>["--thread-pool-size={thread_pool}", "--announce-submounts", "--rlimit-nofile={fd_limit}"]'),
+    (r'(^\s*reclaim_guest_freed_memory\s*=\s*)\w+', r'\g<1>true'),
 ]
 for pattern, replacement in replacements:
     text, n = re.subn(pattern, replacement, text, count=1, flags=re.MULTILINE)
@@ -95,7 +102,48 @@ path.write_text(text)
 PY
 
 echo "==> active Kata knobs"
-grep -nE 'kernel_params|default_vcpus|default_memory|virtio_fs_extra_args' "$KATA_CONFIG"
+grep -nE 'kernel_params|default_vcpus|default_memory|virtio_fs_extra_args|reclaim_guest_freed_memory' "$KATA_CONFIG"
+
+echo "==> kata-cgroup-gc.timer"
+# The shim creates each pod's cgroup at the root as a literal
+# `kubepods-*.slice:cri-containerd:<id>` directory (plus one under
+# kata_overhead/) and never removes it. rmdir only succeeds on cgroups with no
+# processes and no children, and the one-hour age floor keeps it away from
+# sandboxes that are still starting.
+cat >/usr/local/sbin/kata-cgroup-gc <<'GC'
+#!/usr/bin/env bash
+set -uo pipefail
+removed=0
+while IFS= read -r dir; do
+  rmdir "$dir" 2>/dev/null && removed=$((removed + 1))
+done < <(find /sys/fs/cgroup /sys/fs/cgroup/kata_overhead -mindepth 1 -maxdepth 1 -type d -mmin +60 \
+           \( -name '*:cri-containerd:*' -o -path '/sys/fs/cgroup/kata_overhead/*' \) -print 2>/dev/null)
+echo "kata-cgroup-gc: removed ${removed} empty cgroups"
+GC
+chmod 0755 /usr/local/sbin/kata-cgroup-gc
+cat >/etc/systemd/system/kata-cgroup-gc.service <<'UNIT'
+[Unit]
+Description=Remove empty cgroups leaked by the Kata shim
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/kata-cgroup-gc
+UNIT
+cat >/etc/systemd/system/kata-cgroup-gc.timer <<'UNIT'
+[Unit]
+Description=Hourly Kata cgroup GC
+
+[Timer]
+OnBootSec=15min
+OnUnitActiveSec=1h
+
+[Install]
+WantedBy=timers.target
+UNIT
+systemctl daemon-reload
+systemctl enable --now kata-cgroup-gc.timer
+systemctl start kata-cgroup-gc.service
+journalctl -u kata-cgroup-gc.service -n 1 --no-pager -o cat
 
 image="$(kubectl get autoscalingrunnerset "$ARC_RELEASE" -n "$ARC_NAMESPACE" -o jsonpath='{.spec.template.spec.containers[0].image}')"
 pod="kata-runtime-smoke-$(date +%H%M%S)"

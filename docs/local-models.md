@@ -1,6 +1,6 @@
 # Local Model Catalog and Experiments
 
-This document covers the on-device models in the `local` catalog and records the tiny-model experiments behind the shipped title and memory recommendations. Model selection is role-based: use `modelRoles.<role>` for the primary selector and `retry.fallbackChains.<role>` for ordered alternatives.
+This document covers the on-device models in the `local` catalog and records the tiny-model experiments behind the shipped title and memory recommendations. Model selection is role-based: use `modelRoles.<role>` for the primary selector and `retry.fallbackChains.<role>` for ordered alternatives. Catalog entries are authored in `packages/catalog/src/compat/rules/providers/local.kdl`; text model exports live in `packages/coding-agent/src/tiny/models.ts`. Benchmark timings below are historical measurements, not current-runtime guarantees.
 
 ```yaml
 modelRoles:
@@ -28,8 +28,9 @@ The tiny-model CLI and source registry retain **title** and **memory** groupings
 
 ## Runtime / environment findings
 
-- **Stack**: `@huggingface/transformers` (transformers.js) v4 running under Bun. In Bun the library
-  loads the **native `onnxruntime-node` backend** (not the WASM build).
+- **Text/Whisper stack**: `@huggingface/transformers` (transformers.js) v4 running in a Bun
+  worker, using the native `onnxruntime-node` backend by default. Kokoro uses a separate
+  `kokoro-js` side runtime in an isolated worker; Parakeet uses `sherpa-onnx-node`.
 - **Non-FHS distros (NixOS, and any host without `libstdc++.so.6` on the loader path)**: the
   on-demand `onnxruntime-node` / `sherpa-onnx-node` / `sharp` addons are prebuilt binaries that
   `dlopen` `libstdc++.so.6` and `libgcc_s.so.1`, and they carry their own `DT_RUNPATH`, so nothing in
@@ -37,19 +38,22 @@ The tiny-model CLI and source registry retain **title** and **memory** groupings
   colon-separated directories holding those libraries; omp appends it to `LD_LIBRARY_PATH` for the
   inference worker subprocesses only (never for shell/eval/daemon children). The Nix package
   (`nix/package.nix`) sets this by default.
-- **One worker per model, keep-alive not persistent**: every local model is served by exactly one
-  worker process on the machine that owns the socket `~/.omp/run/tiny/<model>-<backend>.sock`
-  (Windows: a named pipe). The first omp process that needs the model spawns the worker detached
-  (log next to the socket, `*.sock.log`); every other omp process just connects, so the model is
-  resident once rather than once per instance. Nothing supervises it: the worker exits on its own
+- **One text worker per model/backend, keep-alive not persistent**: each tiny text model/backend
+  pair is served by one machine-wide worker owning
+  `~/.omp/run/tiny/<model>-<backend>.sock` (Windows: a named pipe).
+  ONNX and MLX workers for the same model can coexist. The first omp process that needs
+  the pair spawns it detached (log next to the socket, `<model>-<backend>.log`);
+  other omp processes connect, so weights are not duplicated per omp instance.
+  Nothing supervises it: the worker exits on its own
   after 15 minutes without a request (`OMP_TINY_WORKER_IDLE_MS` overrides the window for tests),
   unlinks its socket, and the next request from any omp process spawns a fresh one. Concurrent
   spawns race on a `.bind.lock` file lock: the loser sees a live socket and exits while its parent
   adopts the winner. `ping` returns a launch tag (`<omp version>|onnx|<device>|<dtype>` or
   `mlx|<mlx-lm version>|<script crc>`), so an omp upgrade or a changed
-  `providers.tinyModelDevice`/`Dtype` tells the running worker to shut down and respawns it.
-  Two concurrent instances with *conflicting* device settings would keep replacing each other's
-  worker, so agree on one. The protocol is message-level (`load`, `chat` with messages / prefill /
+  `providers.tinyModelDevice`/`providers.tinyModelDtype` replaces a stale ONNX worker;
+  MLX replacement follows its runtime version/script tag. Concurrent ONNX clients with
+  conflicting device/dtype settings can replace each other's worker, so agree on those settings.
+  The protocol is message-level (`load`, `chat` with messages / prefill /
   stop / max tokens); prompt construction and title extraction live in the client so both worker
   kinds are interchangeable.
 - **Device policy**: local tiny models default to CPU-only inference and retry once on CPU if an
@@ -71,8 +75,8 @@ The tiny-model CLI and source registry retain **title** and **memory** groupings
   `python3 -m venv` with Python ≥ 3.10). It downloads the model's pre-quantized 4-bit MLX export
   (`mlxRepo` in the registry) into `~/.omp/agent/cache/tiny-models/mlx/` with per-byte progress,
   loads it with `mlx_lm.load`, and speaks the exact protocol the ONNX worker speaks, so titles,
-  memory completions, and the `auto` thinking classifier all work unchanged and the Python process
-  is the only process involved. `PI_TINY_DTYPE` is ignored. If the venv bootstrap fails (no Python,
+  memory completions, and local typed judgments use the same backend. Inference runs in the
+  Python worker. `PI_TINY_DTYPE` is ignored by MLX. If the venv bootstrap fails (no Python,
   install error, non-Apple host) omp logs a warning and uses the ONNX CPU worker for the rest of
   the process. Measured on an M4 Max: cold venv install + LFM2.5-230M download + load 15.7s; a
   second omp instance attaches to a running worker in well under a second; titles 15–60ms after
@@ -112,8 +116,8 @@ The tiny-model CLI and source registry retain **title** and **memory** groupings
 
 **What we learned**:
 
-- **Few-shot examples contaminate sub-0.6B titles** with copied example subjects. The shared prompt
-  gates examples off for embedded models while retaining them for capable online models.
+- **Few-shot examples contaminate sub-0.6B titles** with copied example subjects. The current
+  local title system prompt contains no examples.
 - **Casing instructions become output** on the smallest models. [`normalizeGeneratedTitle`](../packages/coding-agent/src/tiny/text.ts)
   reconciles casing after generation, so the prompt omits that rule.
 - **Token biasing (`bad_words_ids`) is a confirmed no-op** here — the prefill already controls the
@@ -128,7 +132,7 @@ The tiny-model CLI and source registry retain **title** and **memory** groupings
 | LFM2.5-350M        | 292MB |     166 / 266ms |        4/30 | Aggressively terse, often a one-word label       |
 
 **Shipped local options**: `lfm2.5-230m`, `lfm2.5-350m`, `falcon-h1-90m`.
-When `modelRoles.tiny` is unset, title generation resolves its built-in online role path; no local weights are downloaded automatically. The default download for a bare `omp tiny-models` command is `lfm2.5-230m`.
+When `modelRoles.tiny` is unset, title generation resolves its built-in online role path; no local weights are downloaded automatically. A local primary is an explicit no-billing boundary: if its worker fails or returns no title, the session stays untitled instead of falling through to an online model. The default download for a bare `omp tiny-models` command is `lfm2.5-230m`.
 
 ## Task 2: Mnemopi memory (`modelRoles.memory`)
 
@@ -142,15 +146,16 @@ and gemma-3-1b (q4, CPU) via four parallel agents each running 27–31 experimen
 
 ### Extraction findings
 
-The stock 5-category JSON prompt fails on small models in two ways:
+The experiments exposed two problems with the stock 5-category JSON prompt:
 
-1. The all-empty example `{"facts":[],...}` gets **copied verbatim** → 0 facts extracted.
-2. Capable models emit **JSON objects inside arrays**, which Mnemopi's `String(item)` coerces into
-   the literal string `[object Object]`.
+1. The all-empty example `{"facts":[],...}` was **copied verbatim**, producing no facts.
+2. Object-valued category entries previously became `[object Object]`.
 
-The robust fix is a **one-item-per-line output format** (consumed by Mnemopi's parser line-fallback)
-or a **flat JSON array of strings**. Every model also over-extracts pure small talk; an explicit
-chit-chat → NONE example is the best mitigation.
+The managed memory path now puts extraction instructions in a system turn and the raw
+message in the user turn, for both local and online models. It requests **one plain-text
+fact per line**, or exactly `NO_FACTS` for greetings and other nonpersistent content.
+The current parser also accepts structured category objects with string entries or
+recognized text fields; it no longer coerces arbitrary objects to strings.
 
 ### Technique polarity flips vs titles
 
@@ -176,21 +181,26 @@ chit-chat → NONE example is the best mitigation.
 
 ### Recommendation and current availability
 
-The experiments favored **Qwen3-1.7B** for extraction precision, but the shipped ONNX export cannot
-currently run under `onnxruntime-node`: its RotaryEmbedding cache updates are unsupported. The
-runtime rejects this choice before loading the model rather than failing during inference.
+The experiments favored **Qwen3-1.7B** for extraction precision. Its shipped ONNX export is
+disabled because `onnxruntime-node` does not support its RotaryEmbedding cache updates;
+the ONNX worker rejects it before loading the runtime. It is available through the MLX
+backend on Apple silicon (`providers.tinyModelDevice: mlx` or `PI_TINY_DEVICE=mlx`).
+`omp tiny-models download all` skips ONNX-disabled models unless MLX is active.
 
-Of the runnable options, the registry marks `lfm2-1.2b` as the recommended local memory model.
+Of the runnable options, `lfm2-1.2b` loads fastest and is a solid all-rounder; nothing selects it automatically.
 `gemma-3-1b` favors consolidation quality, while `qwen2.5-1.5b` favors fine-grained extraction.
 
 **Configured local options**: `llama3.2:3b`, `qwen3-1.7b` (ONNX-disabled as described above),
 `gemma-3-1b`, `qwen2.5-1.5b`, `lfm2-1.2b`.
 When `modelRoles.memory` is unset, it resolves through the effective `tiny` role and then the built-in smol priority list; no local weights are downloaded automatically.
 
-### Known Mnemopi parser bugs (surfaced by these experiments)
+### Mnemopi parser behavior
 
-- `String(item)` produces `[object Object]` on object array items.
-- The line-fallback drops items `<=10` chars, so a correct short fact like `Name: Can` is discarded.
+`packages/mnemopi/src/core/extraction.ts` preserves structured facts, instructions,
+preferences, timelines, and knowledge-graph triples. It extracts recognized text fields
+from object-valued entries rather than returning `[object Object]`. The plain-line
+fallback still ignores lines of 10 characters or fewer, so a short fact such as
+`Name: Can` is discarded; structured string entries do not have that length gate.
 
 ## Local speech and dictation models
 
@@ -215,7 +225,7 @@ Use these canonical catalog model ids:
 | `local/whisper-large-v3-turbo`   | `onnx-community/whisper-large-v3-turbo`                       | transformers.js q4  | ~600 MB  | Whisper large-v3-turbo, 99 languages       |
 | `local/parakeet-tdt-0.6b-v3`     | `csukuangfj/sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8`      | sherpa-onnx int8    | ~680 MB  | Default; fast multilingual Parakeet TDT v3 |
 
-Kokoro and the transformers.js Whisper models use the same `providers.tinyModelDevice` / `PI_TINY_DEVICE` device policy and `providers.tinyModelDtype` / `PI_TINY_DTYPE` precision override as the tiny-model workers. Parakeet uses its shipped sherpa-onnx int8 files. Keep `stt.language`, `stt.submitTrigger`, `tts.localVoice`, and the other speech/live settings for behavior; only model selection moved into roles.
+Kokoro and the transformers.js Whisper models read `providers.tinyModelDevice` / `PI_TINY_DEVICE` and `providers.tinyModelDtype` / `PI_TINY_DTYPE`; the default precision comes from each speech model's spec, not the text models' q4 default. Kokoro maps the device preference to its narrower CPU/WASM/WebGPU set. MLX is a text-model backend, so selecting it leaves speech inference on CPU. Parakeet uses its shipped sherpa-onnx int8 files. Keep `stt.language`, `stt.submitTrigger`, `tts.localVoice`, and the other speech/live settings for behavior; only model selection moved into roles.
 
 ## Integration notes
 
@@ -223,4 +233,4 @@ Kokoro and the transformers.js Whisper models use the same `providers.tinyModelD
 - Local inference runs **in a worker** (off the main thread); weights are downloaded only when a local candidate is used or explicitly prefetched with `omp tiny-models` or `omp setup speech`, then cached on disk.
 - Session-title generation uses `modelRoles.tiny`; Mnemopi extraction and consolidation use `modelRoles.memory` when its LLM mode is enabled. Their distinct prompts and benchmark groups do not impose separate runtime model types.
 - Auto-thinking, Smart unexpected-stop detection, typed Eval judgments, and AI-assisted git staging use the `judge` role. Assign `typesafe/jev-latest` for TypeSafe or a compatible local tiny model for on-device judgment; order alternatives under `retry.fallbackChains.judge`.
-- The memory local path applies the refined line-format and small-talk-guarded extraction prompt plus the hardened consolidation prompt; selecting an online chat model for the role keeps the online transport path.
+- Managed memory extraction uses the shared line-format, small-talk-guarded system prompt on both local and online transports. A local primary additionally selects the local consolidation prompt. Explicit external Mnemopi endpoints remain authoritative instead of being replaced by the memory role.

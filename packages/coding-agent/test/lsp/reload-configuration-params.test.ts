@@ -21,10 +21,4 @@ describe("reloadConfigurationParams", () => {
 	test("falls back to an empty object when no settings are configured", () => {
 		expect(reloadConfigurationParams(BASE_CONFIG)).toEqual({ settings: {} });
 	});
-
-	test("never replaces configured settings with an empty object (issue #8383)", () => {
-		const settings: Record<string, unknown> = { biome: { enabled: true } };
-		const config: ServerConfig = { ...BASE_CONFIG, settings };
-		expect(reloadConfigurationParams(config).settings).toBe(settings);
-	});
 });

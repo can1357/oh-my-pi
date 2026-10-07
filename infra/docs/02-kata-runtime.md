@@ -271,6 +271,7 @@ default_maxvcpus = 0
 default_memory   = 4096
 default_maxmemory = 0
 memory_slots     = 10
+reclaim_guest_freed_memory = true
 
 shared_fs        = "virtio-fs"
 virtio_fs_daemon = "/opt/kata/libexec/virtiofsd"
@@ -332,6 +333,19 @@ This is the most important block to understand for a CI runner.
   hotplugs beyond the boot floor as needed. So a runner pod requesting `2 CPU /
   4Gi` with limits `8 CPU / 12Gi` now boots at 2 vCPU/4 GiB and grows toward
   8 vCPU / 12 GiB. If a pod sets no limits, the VM stays at the defaults.
+
+- `reclaim_guest_freed_memory = true` gives the VM's virtio-balloon
+  `free-page-reporting=on`: pages the guest kernel frees go back to the host.
+  Without it a runner holds its high-water mark until the job ends, and the
+  host sees eight idle-but-fat VMs next to its Docker services. Kata VM cgroups
+  live outside `kubepods.slice` with no host-side memory limit, so this (and
+  the pod limits) is the only thing bounding them.
+
+The shim also leaves each pod's cgroup behind at the cgroup root (a literal
+`kubepods-*.slice:cri-containerd:<id>` directory plus one under
+`kata_overhead/`); they accumulate by the thousand. `tune-kata-runtime.sh`
+installs `kata-cgroup-gc.timer`, an hourly `rmdir` of the ones that are empty
+and older than an hour.
 
 The practical rule here is simple: align the defaults to the runner pod's
 requests when every job creates a fresh VM and immediately needs that baseline

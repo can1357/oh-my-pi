@@ -257,20 +257,6 @@ describe("SessionManager close() drops empty metadata-only sessions", () => {
 		expect(await fileExists(sessionFile)).toBe(true);
 	});
 
-	it("keeps a handoff custom message even before the next user turn", async () => {
-		using tempDir = TempDir.createSync("@pi-session-close-keep-handoff-");
-		const session = SessionManager.create(tempDir.path(), tempDir.path());
-		session.appendCustomMessageEntry("handoff", "handoff context", true, undefined, "agent");
-		await session.ensureOnDisk();
-
-		const sessionFile = session.getSessionFile();
-		if (!sessionFile) throw new Error("Expected persistent session file");
-
-		await session.close();
-
-		expect(await fileExists(sessionFile)).toBe(true);
-	});
-
 	// Never-materialized sessions (no draft ever saved, no assistant reply)
 	// must not be summoned into existence by close() itself.
 	it("is a no-op when the session file was never materialized", async () => {

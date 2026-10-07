@@ -1,4 +1,6 @@
-import type { OAuthAccountIdentity, StoredAuthCredential } from "../../session/auth-storage";
+import { getOAuthCredentialProvider } from "@oh-my-pi/pi-ai/oauth";
+import type { ModelRegistry } from "../../config/model-registry";
+import type { AuthStorage, OAuthAccountIdentity, StoredAuthCredential } from "../../session/auth-storage";
 
 import type { LogoutAccount } from "@oh-my-pi/pi-tui/overlays/logout-account-selector";
 
@@ -98,4 +100,43 @@ export function toLogoutAccounts(
 			if (left.active !== right.active) return left.active ? -1 : 1;
 			return left.label.localeCompare(right.label) || left.credentialId - right.credentialId;
 		});
+}
+
+/** Stored accounts `/logout` can remove for `provider`, active first. Reloads the store to see other processes' changes. */
+export async function listLogoutAccounts(
+	authStorage: AuthStorage,
+	loginProvider: string,
+	sessionId: string,
+): Promise<LogoutAccount[]> {
+	const provider = getOAuthCredentialProvider(loginProvider);
+	await authStorage.credentials.reload();
+	return toLogoutAccounts(provider, authStorage.credentials.list(provider), {
+		activeIdentity: authStorage.oauth.identity(provider, sessionId),
+		activeApiKey: authStorage.keys.source(provider)?.kind === "api_key",
+	});
+}
+
+/**
+ * Removes one stored credential and refreshes the provider's models.
+ * `removed: false` means the credential was already gone; `remainingSource`
+ * names the auth source that still authenticates the provider, if any.
+ */
+export async function logoutCredential(
+	modelRegistry: ModelRegistry,
+	loginProvider: string,
+	credentialId: number,
+	sessionId: string,
+): Promise<{ removed: boolean; remainingSource?: string }> {
+	const provider = getOAuthCredentialProvider(loginProvider);
+	const authStorage = modelRegistry.authStorage;
+	// Reload so an id stored by another process is found, not reported missing.
+	await authStorage.credentials.reload();
+	if (!(await authStorage.credentials.removeById(provider, credentialId))) return { removed: false };
+	// Provider-scoped online refresh so the removed credential's stale
+	// endpoint/deployment models are invalidated deterministically; the
+	// default all-provider `online-if-uncached` would reuse the fresh
+	// authoritative cache row and keep showing models the credential
+	// unlocked (#5780). Other providers are left untouched.
+	await modelRegistry.refreshProvider(provider, "online");
+	return { removed: true, remainingSource: authStorage.keys.describe(provider, sessionId) };
 }

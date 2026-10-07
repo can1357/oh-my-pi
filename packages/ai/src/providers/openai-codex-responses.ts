@@ -14,16 +14,18 @@ import {
 	$env,
 	$flag,
 	asRecord,
+	cloneJsonTree,
 	fetchWithRetry,
 	getInstallId,
 	logger,
-	parseStreamingJson,
 	readSseJson,
 	structuredCloneJSON,
 	USER_AGENT,
 } from "@oh-my-pi/pi-utils";
 import * as AIError from "../error";
-import { getEnvApiKey, isOfficialCodexApiUrl } from "../stream";
+import { parseToolCallArguments, replayableToolCallArguments } from "../utils/tool-call-arguments";
+import { getEnvApiKey } from "../env-api-key";
+import { isOfficialCodexApiUrl } from "../stream";
 import type {
 	Api,
 	AssistantMessage,
@@ -45,8 +47,11 @@ import type {
 	ToolResultMessage,
 	Usage,
 } from "../types";
+import { getPremiumServiceTierRequests, parseServiceTier } from "../types";
 import {
+	clampOpenAIResponsesImageDetailForReplay,
 	createOpenAIResponsesHistoryPayload,
+	dropMalformedOpenAIResponsesToolCalls,
 	getOpenAIResponsesHistoryItems,
 	getOpenAIResponsesHistoryPayload,
 	normalizeSystemPrompts,
@@ -272,7 +277,14 @@ const CODEX_WEBSOCKET_FIRST_EVENT_TIMEOUT_MS = Number($env.PI_CODEX_WEBSOCKET_FI
 const CODEX_WEBSOCKET_RETRY_BUDGET = Number($env.PI_CODEX_WEBSOCKET_RETRY_BUDGET || CODEX_MAX_RETRIES);
 const CODEX_WEBSOCKET_RETRY_DELAY_MS = Number($env.PI_CODEX_WEBSOCKET_RETRY_DELAY_MS || CODEX_RETRY_DELAY_MS);
 const CODEX_WEBSOCKET_TRANSPORT_ERROR_PREFIX = "Codex websocket transport error";
-const CODEX_RETRYABLE_EVENT_CODES = new Set(["model_error", "server_error", "internal_error"]);
+// The native-lane steering rejection is replayable: the session stops steering
+// first, so the replay cannot trip it again.
+const CODEX_RETRYABLE_EVENT_CODES = new Set([
+	"model_error",
+	"server_error",
+	"internal_error",
+	AIError.CODEX_NATIVE_LANE_STEER_REJECTED_CODE,
+]);
 const CODEX_RETRYABLE_EVENT_MESSAGE =
 	/processing your request|retry your request|temporar(?:y|ily)|overloaded|service.?unavailable|internal error|server error/i;
 const CODEX_PROVIDER_SESSION_STATE_KEY = "openai-codex-responses";
@@ -436,6 +448,8 @@ type CodexWebSocketSessionState = {
 	 * pending tool output; see {@link planSteeredRequest}.
 	 */
 	acceptedSteering?: { connection: CodexWebSocketConnection; steers: CodexAcceptedSteer[] };
+	/** The server refused steering for this session (native turn lane); later responses are not steered. */
+	steeringUnsupported?: boolean;
 	lastTransport?: CodexTransport;
 	fallbackCount: number;
 	lastFallbackAt?: number;
@@ -1325,38 +1339,41 @@ function getCodexServiceTierCostMultiplier(
 	model: Pick<Model<"openai-codex-responses">, "serviceTierCost">,
 	serviceTier: ServiceTier | "default" | undefined,
 ): number {
-	if (serviceTier !== "flex" && serviceTier !== "priority") return 1;
+	// The subscription route draws on included plan usage, so its cost is the
+	// usage-equivalent: each tier's multiplier comes from the catalog table, which
+	// uses OpenAI's included-usage rates (Astra: Fast 2.5x, Ultrafast 8x). A tier
+	// with no entry stays at 1x rather than an invented multiplier.
+	if (serviceTier !== "flex" && serviceTier !== "priority" && serviceTier !== "ultrafast") return 1;
 	return model.serviceTierCost?.[serviceTier] ?? 1;
 }
 
-function resolveCodexCostServiceTier(res: unknown, req?: unknown): ServiceTier | "default" | undefined {
-	switch (res) {
-		case "flex":
-			return "flex";
-		case "priority":
-			return "priority";
-		default:
-			if (req === "flex" || req === "priority") {
-				return req;
-			}
-			return "default";
-	}
+/**
+ * The tier a Codex response was billed at. The response echo is authoritative
+ * whenever it reports a tier (the backend may serve a requested priority/flex
+ * turn as `default`); the requested tier is used only when the echo is absent.
+ * The tier's identity is preserved even when it has no pricing entry (`scale`),
+ * because the recorded tier also drives premium-request and speed accounting.
+ */
+function resolveCodexCostServiceTier(res: ServiceTier | undefined, req?: unknown): ServiceTier {
+	return res ?? parseServiceTier(req) ?? "default";
 }
 
 function applyCodexServiceTierPricing(
-	model: Pick<Model<"openai-codex-responses">, "serviceTierCost">,
+	model: Pick<Model<"openai-codex-responses">, "provider" | "api" | "identity" | "serviceTierCost">,
 	usage: AssistantMessage["usage"],
-	resTier: unknown,
+	resTier: ServiceTier | undefined,
 	reqTier: unknown,
-): void {
-	const resolvedTier = resolveCodexCostServiceTier(resTier, reqTier);
+): ServiceTier {
+	const resolvedTier = resolveCodexCostServiceTier(resTier, reqTier) ?? "default";
+	usage.premiumRequests ??= getPremiumServiceTierRequests(resolvedTier, model, { served: true });
 	const multiplier = getCodexServiceTierCostMultiplier(model, resolvedTier);
-	if (multiplier === 1) return;
+	if (multiplier === 1) return resolvedTier;
 	usage.cost.input *= multiplier;
 	usage.cost.output *= multiplier;
 	usage.cost.cacheRead *= multiplier;
 	usage.cost.cacheWrite *= multiplier;
 	usage.cost.total = usage.cost.input + usage.cost.output + usage.cost.cacheRead + usage.cost.cacheWrite;
+	return resolvedTier;
 }
 
 function resetOutputState(output: AssistantMessage): void {
@@ -1859,7 +1876,7 @@ async function openCodexWebSocketTransport(
 					requestSetup.requestSignal,
 					onSseEvent,
 				),
-				requestBodyForState: structuredCloneJSON(requestContext.transformedBody),
+				requestBodyForState: cloneJsonTree(requestContext.transformedBody),
 				transport: "websocket",
 			};
 		}
@@ -1903,7 +1920,7 @@ async function openCodexWebSocketTransport(
 		websocketRequest = replacementWebsocketRequest as typeof websocketRequest;
 	}
 	recordCodexTurnRequestDiagnostics(websocketState, websocketRequest, "websocket", canAppendBeforeRequest);
-	const requestBodyForState = structuredCloneJSON(requestContext.transformedBody);
+	const requestBodyForState = cloneJsonTree(requestContext.transformedBody);
 	// `onPayload` may rewrite the outgoing frame (e.g. drop `stream_options`);
 	// recorded state must reflect what was actually sent — the sequential-cutoff
 	// summary decoder keys off it.
@@ -2006,7 +2023,14 @@ async function openCodexSseTransport(
 		wireBody = replacementWireBody as RequestBody;
 	}
 	recordCodexTurnRequestDiagnostics(state, wireBody, "sse", canAppendBeforeRequest);
-	return { eventStream: await open(wireBody), requestBodyForState: structuredCloneJSON(wireBody), transport: "sse" };
+	// SSE turns never chain, so later reads need only the per-turn knobs (summary
+	// delivery, service tier); copying the whole transcript would be wasted work.
+	const requestBodyForState: RequestBody = {
+		model: wireBody.model,
+		stream_options: wireBody.stream_options ? { ...wireBody.stream_options } : undefined,
+		service_tier: wireBody.service_tier,
+	};
+	return { eventStream: await open(wireBody), requestBodyForState, transport: "sse" };
 }
 
 function isJsonWhitespaceOnly(value: string): boolean {
@@ -2455,11 +2479,13 @@ class CodexStreamProcessor {
 	/** Start delivering caller steering into the response `response.created` announced. */
 	#startSteering(rawEvent: Record<string, unknown>): void {
 		const source = this.options?.liveSteering;
-		const connection = this.runtime.websocketState?.connection;
+		const state = this.runtime.websocketState;
+		const connection = state?.connection;
 		const responseId = asRecord(rawEvent.response)?.id;
 		if (
 			!source ||
 			!connection ||
+			state?.steeringUnsupported ||
 			this.#steerPump ||
 			typeof responseId !== "string" ||
 			this.runtime.transport !== "websocket" ||
@@ -2529,7 +2555,7 @@ class CodexStreamProcessor {
 		const { runtime, output, stream } = this;
 		const rawItem = rawEvent.item;
 		if (!rawItem || typeof rawItem !== "object") return;
-		const item = structuredCloneJSON(rawItem) as CodexEventItem;
+		const item = cloneJsonTree(rawItem) as CodexEventItem;
 		if (item.type === "image_generation_call" && item.result) item.status = "completed";
 
 		// Match the finalization to the OPEN ITEM that started this block, not the
@@ -2588,8 +2614,9 @@ class CodexStreamProcessor {
 				type: "toolCall",
 				id: encodeResponsesToolCallId(item.call_id, item.id),
 				name: item.name,
-				arguments: parseStreamingJson(item.arguments || "{}"),
+				arguments: parseToolCallArguments(item.arguments),
 			};
+			item.arguments = replayableToolCallArguments(item.arguments, toolCall.arguments);
 			if (block?.type === "toolCall") {
 				// Persist the authoritative final args on the stored block; the throttled
 				// delta parser may have left block.arguments stale (often `{}`).
@@ -2655,8 +2682,7 @@ class CodexStreamProcessor {
 		const response = rawResponse && typeof rawResponse === "object" ? rawResponse : undefined;
 		const responseId = response && "id" in response && typeof response.id === "string" ? response.id : undefined;
 		const usage = response && "usage" in response ? parseCodexResponseUsage(response.usage) : undefined;
-		const serviceTier =
-			response && "service_tier" in response ? parseCodexServiceTier(response.service_tier) : undefined;
+		const serviceTier = response && "service_tier" in response ? parseServiceTier(response.service_tier) : undefined;
 		const status = response && "status" in response ? parseCodexResponseStatus(response.status) : undefined;
 		const endTurn = response && "end_turn" in response ? response.end_turn : undefined;
 
@@ -2689,10 +2715,13 @@ class CodexStreamProcessor {
 				// baseline, which no longer matches the transcript.
 				resetCodexWebSocketAppendState(state);
 			} else {
-				state.lastRequest = structuredCloneJSON(runtime.requestBodyForState);
+				// requestBodyForState is already a private copy and is not mutated after
+				// the request, so the append baseline takes ownership of it.
+				state.lastRequest = runtime.requestBodyForState;
 				const nativeOutputItems = runtime.finalizeNativeOutputItems();
 				const replayableResponseItems = sanitizeOpenAIResponsesAssistantHistoryItemsForReplay(
-					structuredCloneJSON(nativeOutputItems),
+					cloneJsonTree(nativeOutputItems),
+					{ supportsImageDetailOriginal: model.compat.supportsImageDetailOriginal },
 				);
 				if (responseId && replayableResponseItems && replayableResponseItems.length === nativeOutputItems.length) {
 					state.lastResponseId = responseId;
@@ -2714,7 +2743,12 @@ class CodexStreamProcessor {
 		finalizePendingResponsesToolCalls(output);
 
 		calculateCost(model, output.usage, output.timestamp);
-		applyCodexServiceTierPricing(model, output.usage, serviceTier, runtime.requestBodyForState.service_tier);
+		output.serviceTier = applyCodexServiceTierPricing(
+			model,
+			output.usage,
+			serviceTier,
+			runtime.requestBodyForState.service_tier,
+		);
 		output.stopReason = mapOpenAIResponsesStopReason(steered ? "completed" : status);
 		promoteResponsesToolUseStopReason(
 			output,
@@ -2723,7 +2757,28 @@ class CodexStreamProcessor {
 		);
 	}
 
+	/**
+	 * The native turn lane rejected our steering and dropped the response with
+	 * its socket: stop steering this session and forget the dead socket so the
+	 * provider retry replays on a fresh one.
+	 */
+	#stopSteeringOnNativeLaneRejection(error: unknown): void {
+		const state = this.runtime.websocketState;
+		if (
+			!state ||
+			!(error instanceof CodexProviderStreamError) ||
+			error.code !== AIError.CODEX_NATIVE_LANE_STEER_REJECTED_CODE
+		) {
+			return;
+		}
+		state.steeringUnsupported = true;
+		state.connection?.close("native-lane-steer-rejected");
+		state.connection = undefined;
+		resetCodexWebSocketAppendState(state);
+	}
+
 	async #recoverStreamError(error: unknown): Promise<boolean> {
+		this.#stopSteeringOnNativeLaneRejection(error);
 		if (
 			error instanceof CodexSteerCommitError &&
 			this.runtime.websocketState &&
@@ -3511,29 +3566,9 @@ export function getOpenAICodexTransportDetails(
 	};
 }
 
-const codexDiagnosticsTextEncoder = new TextEncoder();
-
-function jsonByteLength(value: unknown): number {
-	const json = JSON.stringify(value);
-	return codexDiagnosticsTextEncoder.encode(json === undefined ? "undefined" : json).byteLength;
-}
-
 function hashJson(value: unknown): string {
 	const json = JSON.stringify(value);
 	return String(Bun.hash(json === undefined ? "undefined" : json));
-}
-
-function parseCodexServiceTier(value: unknown): ServiceTier | undefined {
-	switch (value) {
-		case "auto":
-		case "default":
-		case "flex":
-		case "scale":
-		case "priority":
-			return value;
-		default:
-			return undefined;
-	}
 }
 
 function parseCodexResponseStatus(value: unknown): ResponseStatus | undefined {
@@ -3662,7 +3697,7 @@ function buildCodexTurnRequestDiagnostics(
 		inputItemCount: inputItems.length,
 		inputItemTypes,
 		...(inputItemTypes[0] ? { firstInputItemType: inputItemTypes[0] } : {}),
-		inputJsonBytes: jsonByteLength(inputItems),
+		inputJsonBytes: Buffer.byteLength(JSON.stringify(inputItems), "utf8"),
 		...(promptCacheKey !== undefined ? { promptCacheKey } : {}),
 		...(toolsHash !== undefined ? { toolsHash } : {}),
 		optionsHash: createCodexOptionsHash(request),
@@ -3690,6 +3725,8 @@ function recordCodexTurnRequestDiagnostics(
 		state.stats.lastDeltaInputItems = undefined;
 		state.stats.lastPreviousResponseId = undefined;
 	}
+	// Measured at send time: the request object may be reused or mutated by an
+	// `onPayload` hook afterwards, and retaining it would pin the transcript.
 	state.stats.lastTurn = {
 		request: buildCodexTurnRequestDiagnostics(request, transport, canAppendBeforeRequest),
 	};
@@ -3749,12 +3786,18 @@ const CODEX_CHAIN_TOP_LEVEL_EXCLUDE_MAP = {
  * request schema has no `previous_response_id` (codex-rs carries it only on
  * websocket `response.create` frames) and strict gateway validators 400 it
  * with `{"detail":"Unsupported parameter: previous_response_id"}`.
+ *
+ * Entering or leaving `ultrafast` still breaks the chain: that tier is a
+ * separate serving path, and codex-rs sends a full `response.create` across
+ * such a switch rather than a `previous_response_id` delta.
  */
 function buildCodexChainedRequestBody(
 	requestBody: RequestBody,
 	state: CodexWebSocketSessionState | undefined,
 ): RequestBody {
-	const chainable = state?.canAppend === true;
+	const chainable =
+		state?.canAppend === true &&
+		(state.lastRequest?.service_tier === "ultrafast") === (requestBody.service_tier === "ultrafast");
 	const appendInput = chainable
 		? buildResponsesDeltaInput(
 				state.lastRequest,
@@ -4036,6 +4079,11 @@ class CodexWebSocketConnection {
 				if (typeof parsed.type === "string" && parsed.type.startsWith("response.steer.")) {
 					this.#handleSteerEvent(parsed);
 					return;
+				}
+				// The native lane answers `response.steer` with a plain `error` that
+				// also ends the response: refuse the submission, then fail the stream.
+				if (parsed.type === "error" && parsed.code === AIError.CODEX_NATIVE_LANE_STEER_REJECTED_CODE) {
+					this.#refuseSteerWaiters(parsed.code, typeof parsed.message === "string" ? parsed.message : undefined);
 				}
 				this.#push(parsed);
 			} catch (error) {
@@ -4330,6 +4378,12 @@ class CodexWebSocketConnection {
 		return index < 0 ? undefined : this.#steerWaiters.splice(index, 1)[0];
 	}
 
+	#refuseSteerWaiters(code: string, message: string | undefined): void {
+		const waiters = this.#steerWaiters;
+		this.#steerWaiters = [];
+		for (const waiter of waiters) waiter.resolve({ accepted: false, code, message });
+	}
+
 	#rejectSteerWaiters(reason: string): void {
 		const waiters = this.#steerWaiters;
 		if (waiters.length === 0) return;
@@ -4587,10 +4641,12 @@ async function getOrCreateCodexWebSocketConnection(
  * compression is disabled or fails, in which case the caller sends the
  * plain JSON string without a `content-encoding` header.
  */
-function compressCodexRequestBody(bodyJson: string, baseUrl: string): Uint8Array | undefined {
+async function compressCodexRequestBody(bodyJson: string, baseUrl: string): Promise<Uint8Array | undefined> {
 	if (!isOfficialCodexApiUrl(baseUrl) || !$flag("PI_CODEX_ZSTD", true)) return undefined;
 	try {
-		return Bun.zstdCompressSync(bodyJson, { level: 3 });
+		// Off the main thread: SSE sends the full transcript, so multi-MB bodies
+		// would otherwise block the event loop for the whole compression.
+		return await Bun.zstdCompress(bodyJson, { level: 3 });
 	} catch (error) {
 		CODEX_DEBUG &&
 			logger.debug("[codex] codex request body compression failed", {
@@ -4657,7 +4713,7 @@ async function openCodexSseEventStream(
 		}
 	};
 	const bodyJson = JSON.stringify(body);
-	const compressedBody = compressCodexRequestBody(bodyJson, url);
+	const compressedBody = await compressCodexRequestBody(bodyJson, url);
 	if (compressedBody !== undefined) {
 		headers.set("content-encoding", "zstd");
 	}
@@ -4730,8 +4786,14 @@ async function openCodexSseEventStream(
 	if (!response.body) {
 		throw new CodexProviderStreamError("No response body", false);
 	}
-	return readSseJson<Record<string, unknown>>(response.body, signal, event =>
-		onSseEvent?.({ event: event.event, data: event.data, raw: [...event.raw] }, undefined),
+	// Attach the observer only when a diagnostic listener exists: any observer
+	// turns on per-line raw capture in `readSseJson`.
+	return readSseJson<Record<string, unknown>>(
+		response.body,
+		signal,
+		onSseEvent
+			? event => onSseEvent({ event: event.event, data: event.data, raw: [...event.raw] }, undefined)
+			: undefined,
 	);
 }
 
@@ -4896,10 +4958,15 @@ function convertMessages(model: Model<"openai-codex-responses">, context: Contex
 				| undefined;
 			if (historyItems) {
 				const redactedHistoryItems = redactSensitiveInObject(historyItems).result as Array<ResponseInput[number]>;
+				const sanitizedHistoryItems = dropMalformedOpenAIResponsesToolCalls(redactedHistoryItems);
+				const clampedHistoryItems = clampOpenAIResponsesImageDetailForReplay(
+					sanitizedHistoryItems,
+					model.compat.supportsImageDetailOriginal,
+				);
 				const replayItems =
 					model.supportsComputerUse === true
-						? redactedHistoryItems
-						: unrollCodexComputerItems(redactedHistoryItems, model.compat.supportsImageDetailOriginal);
+						? clampedHistoryItems
+						: unrollCodexComputerItems(clampedHistoryItems, model.compat.supportsImageDetailOriginal);
 				for (const item of replayItems) {
 					if (item.type === "custom_tool_call") {
 						customCallIds.add(item.call_id);
@@ -4933,7 +5000,9 @@ function convertMessages(model: Model<"openai-codex-responses">, context: Contex
 			const historyItems = providerPayload?.items as Array<Record<string, unknown>> | undefined;
 			let suppressHiddenEmptyFallback = false;
 			if (historyItems) {
-				const sanitizedHistoryItems = sanitizeOpenAIResponsesAssistantHistoryItemsForReplay(historyItems);
+				const sanitizedHistoryItems = sanitizeOpenAIResponsesAssistantHistoryItemsForReplay(historyItems, {
+					supportsImageDetailOriginal: model.compat.supportsImageDetailOriginal,
+				});
 				if (sanitizedHistoryItems) {
 					const rawReplayItems =
 						model.supportsComputerUse === true

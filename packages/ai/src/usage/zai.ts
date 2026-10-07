@@ -2,17 +2,15 @@ import { toNumber } from "@oh-my-pi/pi-catalog/utils";
 import { USER_AGENT } from "@oh-my-pi/pi-utils";
 import type {
 	CredentialRankingStrategy,
-	UsageAmount,
 	UsageFetchContext,
 	UsageFetchParams,
 	UsageLimit,
 	UsageProvider,
 	UsageReport,
-	UsageStatus,
 	UsageWindow,
 } from "../usage";
 import { isRecord } from "../utils";
-import { DAY_MS, HOUR_MS, WEEK_MS } from "./shared";
+import { buildUsageAmount, DAY_MS, HOUR_MS, usageStatus, WEEK_MS } from "./shared";
 
 const DEFAULT_ENDPOINT = "https://api.z.ai";
 const QUOTA_PATH = "/api/monitor/usage/quota/limit";
@@ -94,35 +92,9 @@ function parseLimitItem(value: unknown): ZaiUsageLimitItem | null {
 	};
 }
 
-function buildUsageAmount(args: {
-	used: number | undefined;
-	limit: number | undefined;
-	remaining: number | undefined;
-	unit: UsageAmount["unit"];
-	percentage?: number;
-}): UsageAmount {
-	const usedFraction =
-		args.percentage !== undefined
-			? Math.min(Math.max(args.percentage / 100, 0), 1)
-			: args.used !== undefined && args.limit !== undefined && args.limit > 0
-				? Math.min(args.used / args.limit, 1)
-				: undefined;
-	const remainingFraction = usedFraction !== undefined ? Math.max(1 - usedFraction, 0) : undefined;
-	return {
-		used: args.used,
-		limit: args.limit,
-		remaining: args.remaining,
-		usedFraction,
-		remainingFraction,
-		unit: args.unit,
-	};
-}
-
-function getUsageStatus(usedFraction: number | undefined): UsageStatus | undefined {
-	if (usedFraction === undefined) return undefined;
-	if (usedFraction >= 1) return "exhausted";
-	if (usedFraction >= 0.9) return "warning";
-	return "ok";
+/** Z.AI `percentage` is 0-100 and may overshoot; clamp it to a used fraction. */
+function percentageFraction(percentage: number | undefined): number | undefined {
+	return percentage === undefined ? undefined : Math.min(Math.max(percentage / 100, 0), 1);
 }
 
 function formatDate(value: Date): string {
@@ -283,7 +255,7 @@ async function fetchZaiUsage(params: UsageFetchParams, ctx: UsageFetchContext): 
 				used: parsed.currentValue,
 				limit: parsed.usage,
 				remaining: parsed.remaining,
-				percentage: parsed.percentage,
+				usedFraction: percentageFraction(parsed.percentage),
 				unit: "tokens",
 			});
 			const window = buildZaiWindow(parsed);
@@ -297,7 +269,7 @@ async function fetchZaiUsage(params: UsageFetchParams, ctx: UsageFetchContext): 
 				},
 				window,
 				amount,
-				status: getUsageStatus(amount.usedFraction),
+				status: amount.usedFraction === undefined ? undefined : usageStatus(amount.usedFraction),
 			});
 		}
 		if (parsed.type === "TIME_LIMIT") {
@@ -306,7 +278,7 @@ async function fetchZaiUsage(params: UsageFetchParams, ctx: UsageFetchContext): 
 				used: parsed.currentValue,
 				limit: parsed.usage,
 				remaining: parsed.remaining,
-				percentage: parsed.percentage,
+				usedFraction: percentageFraction(parsed.percentage),
 				unit: "requests",
 			});
 			const featureLimit = isZaiFeatureRequestLimit(parsed);
@@ -321,7 +293,7 @@ async function fetchZaiUsage(params: UsageFetchParams, ctx: UsageFetchContext): 
 				},
 				window,
 				amount,
-				status: getUsageStatus(amount.usedFraction),
+				status: amount.usedFraction === undefined ? undefined : usageStatus(amount.usedFraction),
 			});
 		}
 		if (parsed.type === "CREDIT_LIMIT") {
@@ -335,7 +307,7 @@ async function fetchZaiUsage(params: UsageFetchParams, ctx: UsageFetchContext): 
 				used: parsed.currentValue,
 				limit: parsed.usage,
 				remaining: parsed.remaining,
-				percentage: hasAbsoluteMeter ? undefined : parsed.percentage,
+				usedFraction: hasAbsoluteMeter ? undefined : percentageFraction(parsed.percentage),
 				unit: "credits",
 			});
 			limits.push({
@@ -348,7 +320,7 @@ async function fetchZaiUsage(params: UsageFetchParams, ctx: UsageFetchContext): 
 				},
 				window,
 				amount,
-				status: getUsageStatus(amount.usedFraction),
+				status: amount.usedFraction === undefined ? undefined : usageStatus(amount.usedFraction),
 			});
 		}
 	}
@@ -390,6 +362,7 @@ async function fetchZaiUsage(params: UsageFetchParams, ctx: UsageFetchContext): 
 	return report;
 }
 
+/** Fetches the account-wide quota windows for ZAI credentials. */
 export const zaiUsageProvider: UsageProvider = {
 	id: "zai",
 	cacheVersion: 2,
@@ -399,7 +372,10 @@ export const zaiUsageProvider: UsageProvider = {
 		(params.credential.type === "oauth" ? Boolean(params.credential.accessToken) : Boolean(params.credential.apiKey)),
 };
 
+/** Ranks ZAI credentials and identifies quota blocks a live report can heal. */
 export const zaiRankingStrategy: CredentialRankingStrategy = {
+	// Pre-scoping ZAI quota blocks are unscoped; let the usage preflight probe them.
+	healsGlobalBlocks: true,
 	findWindowLimits(report) {
 		const ranked = rankZaiRequestLimits(report);
 		return { primary: ranked[0], secondary: ranked[1] };
@@ -407,6 +383,22 @@ export const zaiRankingStrategy: CredentialRankingStrategy = {
 	scopeLimits(report) {
 		const limits = getZaiCredentialLimits(report);
 		return limits;
+	},
+	// All GLM requests share the account's quota pool; keep reactive blocks
+	// separate from provider-wide failures that a usage report cannot heal.
+	blockScope() {
+		return "credits";
+	},
+	healableBlockScopes(report) {
+		const limits = getZaiCredentialLimits(report);
+		// A feature-only report cannot prove the shared credit/token pool recovered.
+		if (!limits.some(limit => limit.id.startsWith("zai:credits:") || limit.id.startsWith("zai:tokens:"))) {
+			return [];
+		}
+		return [
+			{ blockScope: "credits", limits },
+			{ blockScope: "", limits },
+		];
 	},
 	windowDefaults: {
 		primaryMs: 5 * HOUR_MS,

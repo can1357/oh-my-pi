@@ -39,6 +39,7 @@ import type { CompactionResult } from "@oh-my-pi/pi-agent-core/compaction";
 import type { ContextUsage } from "@oh-my-pi/pi-tui/status-line/types";
 import type {
 	Api,
+	AssistantMessage,
 	AssistantMessageEvent,
 	AssistantMessageEventStream,
 	Context,
@@ -80,6 +81,7 @@ import type { LocalProtocolOptions } from "../../internal-urls/local-protocol";
 import type { MemoryRuntimeContext } from "../../memory-backend";
 import type { CustomEditor } from "@oh-my-pi/pi-tui/prompt/custom-editor";
 import type { Theme } from "@oh-my-pi/pi-tui/theme";
+import type { NativeToolView } from "@oh-my-pi/pi-tui/tools/renderer";
 import type { AsyncJobSnapshot, SendUserMessageOptions } from "../../session/agent-session";
 import type { EphemeralTurnOptions, EphemeralTurnResult } from "../../session/agent-session-types";
 import type { CompactMode } from "../../session/compact-modes";
@@ -100,6 +102,8 @@ import type {
 	AutoCompactionStartEvent,
 	AutoRetryEndEvent,
 	AutoRetryStartEvent,
+	CacheWarmingDecisionEvent,
+	CacheWarmingDecisionEventResult,
 	ContextEvent,
 	GoalUpdatedEvent,
 	RetryFallbackAppliedEvent,
@@ -148,7 +152,11 @@ export interface ExtensionUISelectOption {
 
 export type ExtensionUISelectItem = string | ExtensionUISelectOption;
 
-import type { ExtensionAskDialogQuestion, ExtensionAskDialogResult } from "@oh-my-pi/pi-tui/overlays/ask-dialog";
+import type {
+	ExtensionAskDialogQuestion,
+	ExtensionAskDialogResult,
+	ExtensionAskDialogSubmitResult,
+} from "@oh-my-pi/pi-tui/overlays/ask-dialog";
 export type {
 	ExtensionAskDialogOption,
 	ExtensionAskDialogQuestion,
@@ -160,6 +168,27 @@ export type {
 
 export function getExtensionUISelectOptionLabel(option: ExtensionUISelectItem): string {
 	return typeof option === "string" ? option : option.label;
+}
+
+/** Answers an ask dialog whose timeout elapsed: each question gets its recommended option, else the first. */
+export function timedOutAskDialogResult(questions: ExtensionAskDialogQuestion[]): ExtensionAskDialogSubmitResult {
+	return {
+		kind: "submit",
+		results: questions.map(question => {
+			const labels = question.options.map(option => option.label);
+			const fallbackIndex = Math.min(Math.max(question.recommended ?? 0, 0), Math.max(labels.length - 1, 0));
+			const fallback = labels[fallbackIndex];
+			return {
+				id: question.id,
+				question: question.question,
+				options: labels,
+				multi: question.multi ?? false,
+				selectedOptions: fallback === undefined ? [] : [fallback],
+				customInput: undefined,
+				timedOut: true,
+			};
+		}),
+	};
 }
 
 /**
@@ -197,6 +226,8 @@ export interface ExtensionUIDialogOptions {
 	 *  trailing options (e.g. "Other"/"Done" actions) keep the plain cursor.
 	 *  Defaults to all options when `selectionMarker` is set. */
 	markableCount?: number;
+	/** Allow image pastes in rich ask-dialog custom-answer and note prompts. */
+	acceptImages?: boolean;
 }
 
 /** Raw terminal input listener for extensions. */
@@ -426,6 +457,31 @@ export interface ExtensionModelQuery {
 /** Runtime host mode exposed to Pi-compatible extensions. */
 export type ExtensionMode = "tui" | "rpc" | "json" | "print";
 
+/**
+ * The agent a session runs. Extension factories are rebound to every subagent session
+ * (task tool, eval `agent()`, `/tan` clones), so this tells a handler which agent it is serving.
+ * An advisor's own tool calls reach the advising session's `tool_call`/`tool_result` handlers
+ * with `{ kind: "sub", id: "advisor", name: "advisor", depth: 0, parentId: <session agent id> }`.
+ */
+export interface ExtensionAgentIdentity {
+	/**
+	 * `"main"` for a top-level session, `"sub"` for any spawned session. Check this, not `depth`,
+	 * to tell subagents apart: `/tan` clones are subagents at depth 0.
+	 */
+	kind: "main" | "sub";
+	/** Agent registry id, e.g. `"Main"` or `"0-Explore"`. */
+	id: string;
+	/**
+	 * Lowercased agent definition name, e.g. `"main"`, `"task"`, `"explore"`. Subagents spawned
+	 * without a definition (such as `/tan` clones) report `"sub"`.
+	 */
+	name: string;
+	/** Task-tool nesting depth: 0 for a top-level session and for subagents not spawned by `task`. */
+	depth: number;
+	/** Registry id of the spawning agent; absent for a top-level session. */
+	parentId?: string;
+}
+
 export interface ExtensionContext {
 	/** UI methods for user interaction */
 	ui: ExtensionUIContext;
@@ -459,6 +515,8 @@ export interface ExtensionContext {
 	hasPendingMessages(): boolean;
 	/** Gracefully shutdown and exit. */
 	shutdown(): void;
+	/** Identity of the agent this session runs: the top-level session or a subagent. */
+	agent: ExtensionAgentIdentity;
 	/**
 	 * Whether the current project/workspace is trusted. OMP performs no
 	 * project-trust gating — project-level settings and extensions load
@@ -657,7 +715,13 @@ export interface ToolDefinition<TParams extends TSchema = TSchema, TDetails = un
 	/** Called on session lifecycle events - use to reconstruct state or cleanup resources */
 	onSession?: (event: ToolSessionEvent, ctx: ExtensionContext) => void | Promise<void>;
 
-	/** Custom rendering for tool call display */
+	/**
+	 * Custom rendering for tool call display.
+	 *
+	 * At runtime `options` also answers the {@link Theme} API, so renderers
+	 * ported from upstream pi — declared `renderCall(args, theme, context)` —
+	 * keep styling correctly.
+	 */
 	renderCall?: (args: Static<TParams>, options: ToolRenderResultOptions, theme: Theme) => Component;
 
 	/** Custom rendering for tool result display */
@@ -667,6 +731,16 @@ export interface ToolDefinition<TParams extends TSchema = TSchema, TDetails = un
 		theme: Theme,
 		args?: Static<TParams>,
 	) => Component;
+
+	/** Semantic call view for TSP terminals (the native counterpart of {@link renderCall}). */
+	describeCall?: (args: Static<TParams>, options: ToolRenderResultOptions) => NativeToolView | undefined;
+
+	/** Semantic result view for TSP terminals (the native counterpart of {@link renderResult}). */
+	describeResult?: (
+		result: AgentToolResult<TDetails>,
+		options: ToolRenderResultOptions,
+		args?: Static<TParams>,
+	) => NativeToolView | undefined;
 }
 
 /** Whether a tool's source is scoped to the user, the project, or a transient runtime session. */
@@ -727,6 +801,7 @@ export type {
 	SessionBeforeSwitchEvent,
 	SessionBeforeTreeEvent,
 	SessionBranchEvent,
+	SessionBranchReason,
 	SessionCompactEvent,
 	SessionCompactingEvent,
 	SessionEvent,
@@ -742,6 +817,18 @@ export type {
 // ============================================================================
 
 export type { ContextEvent } from "../shared-events";
+
+// ============================================================================
+// Cache Warming Events
+// ============================================================================
+
+export type { CacheWarmingDecisionEvent, CacheWarmingDecisionEventResult } from "../shared-events";
+export type {
+	CacheWarmingAction,
+	CacheWarmingDecision,
+	CacheWarmingMode,
+	CacheWarmingStatus,
+} from "../../session/cache-warmer";
 
 /** Fired before a provider request is sent. Can replace the payload. */
 export interface BeforeProviderRequestEvent {
@@ -804,10 +891,32 @@ export interface MessageUpdateEvent {
  * Fired when a message ends. Notification-only: the message is a detached
  * snapshot, so in-place changes do not rewrite agent or provider context.
  * Persistence and subscriber delivery do not wait for this handler to finish.
+ * Use `assistant_message` to rewrite a finalized assistant message.
  */
 export interface MessageEndEvent {
 	type: "message_end";
 	message: AgentMessage;
+}
+
+/**
+ * Fired once per finalized assistant message, after the provider stream settles
+ * and before the message reaches agent context, `message_end` listeners (TUI,
+ * RPC, exporters), session persistence, or tool dispatch. Return
+ * {@link AssistantMessageRewriteResult} to replace its content; the replacement
+ * is the single source of truth for history, persistence, `message_end`
+ * consumers, and the next provider request. Text already streamed through
+ * `message_update` is not retracted, so stream-rendering clients may keep
+ * showing the original. Handlers chain: each sees the previous handler's
+ * replacement.
+ *
+ * `message` is a detached copy — in-place mutation has no effect; return
+ * `content` instead. If cancellation arrives while handlers are pending,
+ * rewrites accepted so far are returned and remaining handlers are skipped.
+ * This event is not fired if the provider stream is cut off before finalizing.
+ */
+export interface AssistantMessageRewriteEvent {
+	type: "assistant_message";
+	message: AssistantMessage;
 }
 
 /** Fired when a tool starts executing */
@@ -1096,6 +1205,7 @@ export type ExtensionEvent =
 	| ResourcesDiscoverEvent
 	| SessionEvent
 	| ContextEvent
+	| CacheWarmingDecisionEvent
 	| BeforeProviderRequestEvent
 	| AfterProviderResponseEvent
 	| BeforeAgentStartEvent
@@ -1108,6 +1218,7 @@ export type ExtensionEvent =
 	| MessageStartEvent
 	| MessageUpdateEvent
 	| MessageEndEvent
+	| AssistantMessageRewriteEvent
 	| ToolExecutionStartEvent
 	| ToolExecutionUpdateEvent
 	| ToolExecutionEndEvent
@@ -1136,6 +1247,21 @@ export type ExtensionEvent =
 
 export interface ContextEventResult {
 	messages?: AgentMessage[];
+}
+
+/**
+ * Result from an `assistant_message` handler. Return `undefined` to leave the
+ * message unchanged.
+ *
+ * Text blocks must remain in their original positions: only their `text` may
+ * change. Non-text blocks and all other block metadata must remain unchanged.
+ * A text block with unchanged text keeps its original `textSignature` even if
+ * a handler replaces it; editing text removes its signature because that
+ * provider replay state cannot be reused for different text. Invalid
+ * replacements are reported as extension errors and skipped.
+ */
+export interface AssistantMessageRewriteResult {
+	content?: AssistantMessage["content"];
 }
 
 export type BeforeProviderRequestEventResult = unknown;
@@ -1269,6 +1395,10 @@ export interface ExtensionAPI {
 		handler: ExtensionHandler<SessionBeforeCompactEvent, SessionBeforeCompactResult>,
 	): void;
 	on(event: "session.compacting", handler: ExtensionHandler<SessionCompactingEvent, SessionCompactingResult>): void;
+	on(
+		event: "cache_warming_decision",
+		handler: ExtensionHandler<CacheWarmingDecisionEvent, CacheWarmingDecisionEventResult>,
+	): void;
 	on(event: "session_compact", handler: ExtensionHandler<SessionCompactEvent>): void;
 	on(event: "session_shutdown", handler: ExtensionHandler<SessionShutdownEvent>): void;
 	on(event: "session_before_tree", handler: ExtensionHandler<SessionBeforeTreeEvent, SessionBeforeTreeResult>): void;
@@ -1292,6 +1422,10 @@ export interface ExtensionAPI {
 	on(event: "message_start", handler: ExtensionHandler<MessageStartEvent>): void;
 	on(event: "message_update", handler: ExtensionHandler<MessageUpdateEvent>): void;
 	on(event: "message_end", handler: ExtensionHandler<MessageEndEvent>): void;
+	on(
+		event: "assistant_message",
+		handler: ExtensionHandler<AssistantMessageRewriteEvent, AssistantMessageRewriteResult>,
+	): void;
 	on(event: "tool_execution_start", handler: ExtensionHandler<ToolExecutionStartEvent>): void;
 	on(event: "tool_execution_update", handler: ExtensionHandler<ToolExecutionUpdateEvent>): void;
 	on(event: "tool_execution_end", handler: ExtensionHandler<ToolExecutionEndEvent>): void;
@@ -1442,6 +1576,11 @@ export interface ExtensionAPI {
 	/**
 	 * Send a custom message to the session.
 	 *
+	 * With the default delivery (no `deliverAs`), an idle `display: true` message renders in the
+	 * transcript immediately, even with `triggerTurn: false`, without starting a turn. This does
+	 * not apply to `deliverAs: "nextTurn"` or `deliverAs: "aside"`, which keep the semantics
+	 * described below (`nextTurn` stays hidden until consumed; `aside` starts a turn when idle).
+	 *
 	 * `deliverAs: "nextTurn"` keeps the message hidden from the editable pending-message UI.
 	 * If `triggerTurn` is also true while the current turn is still unwinding, the session schedules
 	 * an internal continuation that consumes the message on the next turn.
@@ -1564,7 +1703,13 @@ export interface ExtensionAPI {
 export interface ProviderConfig {
 	/** Base URL for the API endpoint. Required when defining models. */
 	baseUrl?: string;
-	/** API key or environment variable name. Required when defining models unless oauth is provided. */
+	/**
+	 * API key or environment variable name. Required when defining models unless oauth is provided.
+	 *
+	 * Without `oauth`, this overrides stored OAuth and `/login` credentials for the provider. With
+	 * `oauth`, it is a fallback: a key saved by `/login` wins, and this value is used only when no
+	 * stored login credential exists.
+	 */
 	apiKey?: string;
 	/** API type identifier. Required when registering streamSimple or when models don't specify one. */
 	api?: Api;
@@ -1609,6 +1754,11 @@ export interface ProviderModelConfig {
 	name: string;
 	/** API type override for this model. */
 	api?: Api;
+	/**
+	 * Catalog kind; omitted means the api's kind (`image` for `openai-images`, …) or `chat`.
+	 * Must be a kind the api serves, as in `models.yml`.
+	 */
+	kind?: Model["kind"];
 	/** Whether the model supports extended thinking at all. */
 	reasoning: boolean;
 	/** Optional canonical thinking capability metadata for per-model effort support. */

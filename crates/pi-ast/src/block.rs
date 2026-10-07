@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 use tree_sitter::{Node, Point, TreeCursor};
 
 use crate::{
-	parse_cache::parse_cached,
+	parse_cache::{MAX_ENTRY_SOURCE_BYTES, parse_cached},
 	summary::{node_content_end_line, node_start_line, resolve_language},
 };
 
@@ -142,8 +142,10 @@ pub fn block_range_at(options: BlockRangeOptions) -> Result<Option<BlockRange>> 
 /// through to reach the declaration. Braced `block`s never match because they
 /// begin at `{`; requiring the next sibling to start a later row at `node`'s
 /// column also rules out a leading label (`'a: {` in Rust). Extras (comments)
-/// trailing `node` on its last row are skipped so `if … {} // note` still
-/// stops the climb.
+/// are skipped when looking for that next sibling, so `if … {} // note` and
+/// comment-only lines — even dedented ones — still stop the climb. When only
+/// extras follow `node`, the container merely adds those trailing comments to
+/// `node`'s span, so the climb stops there too rather than swallowing them.
 fn is_statement_sequence(parent: Node<'_>, node: Node<'_>) -> bool {
 	if !matches!(
 		parent.kind(),
@@ -163,13 +165,18 @@ fn is_statement_sequence(parent: Node<'_>, node: Node<'_>) -> bool {
 	}
 	let end_row = node.end_position().row;
 	let mut next = node.next_named_sibling();
-	while let Some(sibling) = next.filter(|s| s.is_extra() && s.start_position().row == end_row) {
+	let mut skipped_extra = false;
+	while let Some(sibling) = next.filter(|s| s.is_extra()) {
+		skipped_extra = true;
 		next = sibling.next_named_sibling();
 	}
-	next.is_some_and(|next| {
-		let next_start = next.start_position();
-		next_start.row > end_row && next_start.column == node.start_position().column
-	})
+	match next {
+		Some(next) => {
+			let next_start = next.start_position();
+			next_start.row > end_row && next_start.column == node.start_position().column
+		},
+		None => skipped_extra,
+	}
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -331,6 +338,22 @@ pub struct NodeSpan {
 	pub end_line:   u32,
 	/// Tree-sitter grammar node kind (e.g. `attribute_item`, `function_item`).
 	pub kind:       String,
+}
+
+/// Parse `code` into the shared tree cache.
+///
+/// The next block query over the same source and language is then a cache
+/// hit. Does nothing for empty source or an unrecognized language, where the
+/// queries never parse either, nor for a source the cache will not retain
+/// (the tree would be discarded and parsed again by the query).
+pub fn warm_parse(code: &str, lang: Option<&str>, path: Option<&str>) -> Result<()> {
+	if !code.is_empty()
+		&& code.len() <= MAX_ENTRY_SOURCE_BYTES
+		&& let Some(language) = resolve_language(lang, path)
+	{
+		parse_cached(code, language)?;
+	}
+	Ok(())
 }
 
 /// Named-node chain containing `options.line`, innermost-first, excluding the
@@ -576,6 +599,39 @@ mod tests {
 		assert_eq!(resolve(go, "x.go", 4), Some(BlockRange { start_line: 4, end_line: 6 }));
 		let py = "def f(x):\n    y = 2  # note\n    z = 3\n    return y\n";
 		assert_eq!(resolve(py, "f.py", 2), Some(BlockRange { start_line: 2, end_line: 2 }));
+	}
+
+	#[test]
+	fn leading_statement_with_dedented_comment_excludes_following_siblings() {
+		// A comment-only line at a different column is still an extra between
+		// statements; it must not hide the next statement and let the climb
+		// swallow the whole body.
+		let code = "def f(x):\n    y = 2\n# dedented\n    z = 3\n    return y\n";
+		assert_eq!(resolve(code, "f.py", 2), Some(BlockRange { start_line: 2, end_line: 2 }));
+	}
+
+	// Only comments follow the body's last statement: the container adds
+	// nothing but those comments, so they must stay outside the block.
+	#[test]
+	fn python_last_statement_with_trailing_comments_excludes_them() {
+		let one = "def f(x):\n    y = 2\n    # trailing\n";
+		assert_eq!(resolve(one, "f.py", 2), Some(BlockRange { start_line: 2, end_line: 2 }));
+		let two = "def f(x):\n    y = 2\n    # one\n    # two\n";
+		assert_eq!(resolve(two, "f.py", 2), Some(BlockRange { start_line: 2, end_line: 2 }));
+	}
+
+	#[test]
+	fn ruby_last_statement_with_trailing_comment_excludes_it() {
+		let code = "def f\n  x = 1\n  # c\nend\n";
+		assert_eq!(resolve(code, "f.rb", 2), Some(BlockRange { start_line: 2, end_line: 2 }));
+	}
+
+	#[test]
+	fn yaml_last_entry_with_trailing_comment_excludes_it() {
+		let top = "a: 1\n# c\n";
+		assert_eq!(resolve(top, "c.yml", 1), Some(BlockRange { start_line: 1, end_line: 1 }));
+		let nested = "jobs:\n  build: 1\n  # c\nother: 2\n";
+		assert_eq!(resolve(nested, "c.yml", 2), Some(BlockRange { start_line: 2, end_line: 2 }));
 	}
 
 	#[test]

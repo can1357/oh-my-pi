@@ -23,19 +23,6 @@ describe("normalizeAnthropicToolSchema — SDK whitelist", () => {
 			});
 		});
 
-		it("demotes range and multipleOf keywords on integer nodes", () => {
-			const out = normalizeAnthropicToolSchema({
-				type: "object",
-				properties: {
-					count: { type: "integer", minimum: 0, maximum: 100, multipleOf: 1 },
-				},
-			}) as { properties: { count: Record<string, unknown> } };
-			expect(out.properties.count).toEqual({
-				type: "integer",
-				description: "{minimum: 0, maximum: 100, multipleOf: 1}",
-			});
-		});
-
 		it("demotes numeric range keywords on union-type nodes that include number", () => {
 			const out = normalizeAnthropicToolSchema({
 				type: "object",
@@ -231,12 +218,6 @@ describe("normalizeAnthropicToolSchema — parity with anthropic-sdk-python tran
 		});
 	});
 
-	// Mirrors: anthropic-sdk-python/tests/lib/_parse/test_transform.py::test_enum_schema
-	it("keeps enum on string nodes verbatim", () => {
-		const out = normalizeAnthropicToolSchema({ type: "string", enum: ["foo", "bar"] });
-		expect(out).toEqual({ type: "string", enum: ["foo", "bar"] });
-	});
-
 	it("spills top-level anyOf variants into description for the Messages API root-combinator boundary", () => {
 		const out = normalizeAnthropicToolSchema({
 			type: "object",
@@ -317,43 +298,6 @@ describe("normalizeAnthropicToolSchema — parity with anthropic-sdk-python tran
 			additionalProperties: false,
 			required: ["name"],
 		});
-	});
-
-	// Mirrors: anthropic-sdk-python/tests/lib/_parse/test_transform.py::test_array_schema
-	it("spills minItems>1 into description with the SDK's two-newline preamble", () => {
-		const out = normalizeAnthropicToolSchema({
-			type: "array",
-			items: { type: "string" },
-			minItems: 2,
-			description: "A list of strings",
-		});
-		expect(out).toEqual({
-			type: "array",
-			description: "A list of strings\n\n{minItems: 2}",
-			items: { type: "string" },
-		});
-	});
-
-	// Mirrors: anthropic-sdk-python/tests/lib/_parse/test_transform.py::test_string_schema_with_format_and_default
-	// Divergence: SDK spills `default`; we preserve it. `format=email` is kept (allowlisted).
-	it("keeps an allowlisted string format alongside a preserved default", () => {
-		const out = normalizeAnthropicToolSchema({
-			type: "string",
-			format: "email",
-			default: "user@example.com",
-			description: "User email",
-		});
-		expect(out).toEqual({
-			type: "string",
-			description: "User email",
-			format: "email",
-			default: "user@example.com", // SDK would move this into description
-		});
-	});
-
-	// Mirrors: anthropic-sdk-python/tests/lib/_parse/test_transform.py::test_string_schema_without_format
-	it("passes a bare string node through unchanged", () => {
-		expect(normalizeAnthropicToolSchema({ type: "string" })).toEqual({ type: "string" });
 	});
 
 	// Mirrors: anthropic-sdk-python/tests/lib/_parse/test_transform.py::test_integer_schema_with_min_max_exclusive

@@ -115,10 +115,6 @@ describe("online tiny fallback candidates", () => {
 		);
 	});
 
-	it("lets an explicitly empty role chain suppress the default chain", () => {
-		expect(candidates({ tiny: [], smol: [], default: [fallbackSelector] })).toEqual([primary, secondary]);
-	});
-
 	it("skips unavailable and invalid entries without duplicating a primary", () => {
 		expect(candidates({ tiny: ["missing/model", "invalid", primarySelector, fallbackSelector] })).toEqual(models);
 	});

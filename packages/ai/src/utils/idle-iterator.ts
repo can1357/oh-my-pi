@@ -1,5 +1,6 @@
 import { $env } from "@oh-my-pi/pi-utils";
 import * as AIError from "../error";
+import type { LocalWorkSource } from "./event-stream";
 
 const DEFAULT_STREAM_IDLE_TIMEOUT_MS = 300_000;
 const DEFAULT_STREAM_FIRST_EVENT_TIMEOUT_MS = 300_000;
@@ -138,15 +139,17 @@ export interface IdleTimeoutIteratorOptions {
 	 */
 	isProgressItem?: (item: unknown) => boolean;
 	/**
-	 * Reports consumer-side local work in flight for the stream: the provider
-	 * transport is waiting on a server-requested local tool bridge (e.g. the
-	 * Cursor exec channel) before anything can flow upstream again. While it
-	 * returns true, an expired idle / first-item deadline slides forward
-	 * instead of aborting — the silence is ours, not a provider stall. The
-	 * watchdog re-arms with a full budget once the local work completes, so a
-	 * provider that stalls afterwards is still caught.
+	 * Consumer-side local work in flight for the stream: the provider transport
+	 * is waiting on a server-requested local tool bridge (e.g. the Cursor exec
+	 * channel) before anything can flow upstream again. While work is pending,
+	 * an expired idle / first-item deadline slides forward instead of aborting —
+	 * the silence is ours, not a provider stall. The provider cannot respond
+	 * before it receives the local result, so both deadlines are measured from
+	 * no earlier than `localWorkSettledAt`: a tool that finishes just before the
+	 * deadline gets a full budget, and a provider that stalls afterwards is
+	 * still caught.
 	 */
-	hasPendingLocalWork?: () => boolean;
+	localWork?: LocalWorkSource;
 	/**
 	 * Cancel iteration as soon as this signal aborts. Required for caller-driven
 	 * cancellation (ESC) when the underlying transport does not surface signal
@@ -209,18 +212,12 @@ export async function* iterateWithIdleTimeout<T>(
 	};
 	let lastProgressAt = Date.now();
 
-	const hasPendingLocalWork = (): boolean => {
-		if (!options.hasPendingLocalWork) return false;
-		try {
-			return options.hasPendingLocalWork();
-		} catch {
-			return false;
-		}
-	};
+	const hasPendingLocalWork = (): boolean => options.localWork?.hasPendingLocalWork ?? false;
+	const localWorkSettledAt = (): number => options.localWork?.localWorkSettledAt ?? 0;
 	// Local work means the current gap is attributable to the consumer side,
 	// not the provider: slide the active deadline a full budget past now
-	// instead of aborting. Once the work completes the watchdog resumes from
-	// the last extension, so a provider that stalls afterwards is still caught.
+	// instead of aborting. Completion restarts the budget via
+	// `localWorkSettledAt`, so a provider that stalls afterwards is still caught.
 	const extendDeadlineForLocalWork = (): void => {
 		if (awaitingFirstItem) {
 			if (firstItemDeadlineMs !== undefined && firstItemTimeoutMs !== undefined) {
@@ -229,6 +226,13 @@ export async function* iterateWithIdleTimeout<T>(
 		} else {
 			lastProgressAt = Date.now();
 		}
+	};
+	// Deadlines as seen by the provider: never earlier than a full budget after
+	// the last local tool result became available to send upstream.
+	const firstItemDeadline = (): number | undefined => {
+		if (firstItemDeadlineMs === undefined || firstItemTimeoutMs === undefined) return firstItemDeadlineMs;
+		const settledAt = localWorkSettledAt();
+		return settledAt > 0 ? Math.max(firstItemDeadlineMs, settledAt + firstItemTimeoutMs) : firstItemDeadlineMs;
 	};
 
 	const noTimeoutEnforced =
@@ -265,9 +269,9 @@ export async function* iterateWithIdleTimeout<T>(
 	let timerFireAtMs = Infinity;
 
 	const currentDeadlineMs = (): number | undefined => {
-		if (awaitingFirstItem) return firstItemDeadlineMs;
+		if (awaitingFirstItem) return firstItemDeadline();
 		if (options.idleTimeoutMs !== undefined && options.idleTimeoutMs > 0) {
-			return lastProgressAt + options.idleTimeoutMs;
+			return Math.max(lastProgressAt, localWorkSettledAt()) + options.idleTimeoutMs;
 		}
 		return undefined;
 	};
@@ -328,8 +332,9 @@ export async function* iterateWithIdleTimeout<T>(
 			}
 			let activeTimeoutMs: number | undefined;
 			if (awaitingFirstItem) {
-				if (firstItemDeadlineMs !== undefined) {
-					activeTimeoutMs = firstItemDeadlineMs - Date.now();
+				const deadlineMs = firstItemDeadline();
+				if (deadlineMs !== undefined) {
+					activeTimeoutMs = deadlineMs - Date.now();
 					if (activeTimeoutMs <= 0) {
 						if (!hasPendingLocalWork()) {
 							options.onFirstItemTimeout?.();
@@ -337,11 +342,11 @@ export async function* iterateWithIdleTimeout<T>(
 							throw new AIError.StreamTimeoutError(options.firstItemErrorMessage ?? options.errorMessage);
 						}
 						extendDeadlineForLocalWork();
-						activeTimeoutMs = firstItemDeadlineMs! - Date.now();
+						activeTimeoutMs = firstItemDeadline()! - Date.now();
 					}
 				}
 			} else if (options.idleTimeoutMs !== undefined && options.idleTimeoutMs > 0) {
-				activeTimeoutMs = options.idleTimeoutMs - (Date.now() - lastProgressAt);
+				activeTimeoutMs = options.idleTimeoutMs - (Date.now() - Math.max(lastProgressAt, localWorkSettledAt()));
 				if (activeTimeoutMs <= 0) {
 					if (!hasPendingLocalWork()) {
 						options.onIdle?.();
@@ -463,6 +468,12 @@ export interface TerminalGraceIteratorOptions {
 	 * the transport until that pending read settles.
 	 */
 	onGraceEnd?: () => void;
+	/**
+	 * Wait for the bounded drain when the consumer returns early. Capped
+	 * requests must not release their in-flight permit while the transport
+	 * still owns a live connection.
+	 */
+	awaitDrainOnReturn?: boolean;
 }
 
 /**
@@ -474,52 +485,91 @@ export interface TerminalGraceIteratorOptions {
  * hangs on `iterator.next()` until the idle watchdog converts an
  * already-successful turn into a timeout error. Grace expiry is a clean end
  * of iteration, never an error.
+ *
+ * A consumer that stops early (`break`) after `finishedAtMs()` is set leaves
+ * the source draining until `[DONE]`/EOF or the same grace deadline. Without
+ * `awaitDrainOnReturn`, the consumer is not held up; capped requests await
+ * the drain before completing and releasing their in-flight permit.
  */
 export async function* iterateWithTerminalGrace<T>(
 	iterable: AsyncIterable<T>,
 	options: TerminalGraceIteratorOptions,
 ): AsyncGenerator<T> {
 	const iterator = iterable[Symbol.asyncIterator]();
+	// Set only while suspended at `yield`: `finally` then runs because the
+	// consumer stopped early, not because the source ended or failed.
+	let consumerStopped = false;
 	try {
 		while (true) {
-			const finishedAtMs = options.finishedAtMs();
-			if (finishedAtMs === undefined) {
-				const result = await iterator.next();
-				if (result.done) return;
-				yield result.value;
-				continue;
-			}
-			const remainingMs = finishedAtMs + options.graceMs - Date.now();
-			if (remainingMs <= 0) {
-				options.onGraceEnd?.();
-				return;
-			}
-			const nextPromise = iterator.next();
-			let timer: NodeJS.Timeout | undefined;
-			const timeoutPromise = new Promise<"timeout">(resolve => {
-				timer = setTimeout(() => resolve("timeout"), remainingMs);
-			});
-			try {
-				const outcome = await Promise.race([nextPromise, timeoutPromise]);
-				if (outcome === "timeout") {
-					// The abandoned read settles (likely rejects) once onGraceEnd
-					// aborts the transport — mark it handled so it cannot surface
-					// as an unhandled rejection.
-					nextPromise.catch(() => {});
-					options.onGraceEnd?.();
-					return;
-				}
-				if (outcome.done) return;
-				yield outcome.value;
-			} finally {
-				if (timer !== undefined) clearTimeout(timer);
-			}
+			const result = await nextWithinGrace(iterator, options);
+			if (result.done) return;
+			consumerStopped = true;
+			yield result.value;
+			consumerStopped = false;
 		}
 	} finally {
-		const returnPromise = iterator.return?.();
-		if (returnPromise) {
-			void Promise.resolve(returnPromise).catch(() => {});
+		if (consumerStopped && options.finishedAtMs() !== undefined) {
+			if (options.awaitDrainOnReturn) await drainWithinGrace(iterator, options);
+			else void drainWithinGrace(iterator, options);
+		} else {
+			releaseIterator(iterator);
 		}
+	}
+}
+
+const GRACE_ENDED: IteratorReturnResult<undefined> = { done: true, value: undefined };
+
+/**
+ * Pulls the next item, ending with `done` (after `onGraceEnd`) once the
+ * post-terminal grace deadline passes. Unbounded while `finishedAtMs()` is unset.
+ */
+async function nextWithinGrace<T>(
+	iterator: AsyncIterator<T>,
+	options: TerminalGraceIteratorOptions,
+): Promise<IteratorResult<T, unknown>> {
+	const finishedAtMs = options.finishedAtMs();
+	if (finishedAtMs === undefined) return iterator.next();
+	const remainingMs = finishedAtMs + options.graceMs - Date.now();
+	if (remainingMs <= 0) {
+		options.onGraceEnd?.();
+		return GRACE_ENDED;
+	}
+	const nextPromise = iterator.next();
+	const timeout = Promise.withResolvers<"timeout">();
+	const timer = setTimeout(() => timeout.resolve("timeout"), remainingMs);
+	try {
+		const outcome = await Promise.race([nextPromise, timeout.promise]);
+		if (outcome !== "timeout") return outcome;
+		// The abandoned read settles (likely rejects) once onGraceEnd aborts
+		// the transport — mark it handled so it cannot surface as an
+		// unhandled rejection.
+		nextPromise.catch(() => {});
+		options.onGraceEnd?.();
+		return GRACE_ENDED;
+	} finally {
+		clearTimeout(timer);
+	}
+}
+
+/**
+ * Discards the source's trailing items until it ends or the grace window
+ * closes, then releases it. Failures are swallowed: the consumer already
+ * accepted the response.
+ */
+async function drainWithinGrace<T>(iterator: AsyncIterator<T>, options: TerminalGraceIteratorOptions): Promise<void> {
+	try {
+		while (!(await nextWithinGrace(iterator, options)).done) {}
+	} catch {
+		// Transport errors after the consumer finished cannot change its result.
+	} finally {
+		releaseIterator(iterator);
+	}
+}
+
+function releaseIterator<T>(iterator: AsyncIterator<T>): void {
+	const returnPromise = iterator.return?.();
+	if (returnPromise) {
+		void Promise.resolve(returnPromise).catch(() => {});
 	}
 }
 

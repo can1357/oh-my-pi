@@ -16,6 +16,24 @@ export interface ThemeJson {
 		cardBg?: ColorValue;
 		infoBg?: ColorValue;
 	};
+	/**
+	 * The terminal this theme was made for, for hosts that paint the terminal
+	 * themselves (Tern). omp never sets the terminal's colors: its TUI draws on
+	 * whatever background the terminal has. A host derives absent fields from
+	 * `colors`.
+	 */
+	terminal?: {
+		/** Terminal background. */
+		background?: ColorValue;
+		/** Default text. */
+		foreground?: ColorValue;
+		/** The window around the terminal: sidebar, tab bar, title bar. */
+		chrome?: ColorValue;
+		/** Lifted surfaces: popovers, menus, buttons. */
+		widget?: ColorValue;
+		/** ANSI colors 0–15: exactly 16. */
+		ansi?: ColorValue[];
+	};
 	symbols?: {
 		preset?: "unicode" | "nerd" | "ascii";
 		overrides?: Record<string, string>;
@@ -164,5 +182,20 @@ export type ThemeBg =
 	| "toolSuccessBg"
 	| "toolErrorBg"
 	| "statusLineBg";
+
+const VALID_THEME_BGS: ReadonlySet<string> = new Set([
+	"selectedBg",
+	"userMessageBg",
+	"customMessageBg",
+	"toolPendingBg",
+	"toolSuccessBg",
+	"toolErrorBg",
+	"statusLineBg",
+] satisfies ThemeBg[]);
+
+/** Check if a string is a valid ThemeBg value */
+export function isValidThemeBg(color: string): color is ThemeBg {
+	return VALID_THEME_BGS.has(color);
+}
 
 export type ColorMode = "truecolor" | "256color";

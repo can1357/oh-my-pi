@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import { extractPrintableText } from "@oh-my-pi/pi-tui/keys";
-import { ProcessTerminal } from "@oh-my-pi/pi-tui/terminal";
+import { ProcessTerminal, type TerminalStartOptions } from "@oh-my-pi/pi-tui/terminal";
 import {
 	type CellDimensions,
 	getCellDimensions,
@@ -731,7 +731,7 @@ describe("ProcessTerminal DECRQM + in-band resize (DEC 2026/2048)", () => {
 		setCellDimensions(originalCellDims);
 	});
 
-	function setup() {
+	function setup(startOptions?: TerminalStartOptions) {
 		const writes: string[] = [];
 		const received: string[] = [];
 		let resizeCount = 0;
@@ -752,6 +752,8 @@ describe("ProcessTerminal DECRQM + in-band resize (DEC 2026/2048)", () => {
 			() => {
 				resizeCount++;
 			},
+			undefined,
+			startOptions,
 		);
 		return { terminal, writes, received, reports, resizeCount: () => resizeCount };
 	}
@@ -767,19 +769,63 @@ describe("ProcessTerminal DECRQM + in-band resize (DEC 2026/2048)", () => {
 		terminal.stop();
 	});
 
-	it("disables raw-paste coalescing once DECRQM confirms bracketed-paste (mode 2004) support (#12540)", () => {
-		const { terminal, received } = setup();
-
-		// Confirm bracketed-paste support: a genuine paste now always arrives
-		// wrapped, so a multiline keystroke burst an event-loop stall batched into
-		// one read must submit per Enter instead of coalescing onto the paste path.
+	it("decides each unbracketed multiline burst by the stall probe once DECRQM confirms 2004 (#13344, #12540)", () => {
+		let stalled = false;
+		const { terminal, received } = setup({ isLoopStalled: () => stalled });
 		process.stdin.emit("data", "\x1b[?2004;1$y");
 		received.length = 0;
-		process.stdin.emit("data", "aaa\rbbb\rccc");
 
+		// IME/dictation commits are typed input, never bracketed: on a responsive
+		// loop the block lands as one paste instead of one submit per line.
+		process.stdin.emit("data", "1. do xxx\r2. do yyy\r3. do zzz");
+		expect(received).toEqual(["\x1b[200~1. do xxx\r2. do yyy\r3. do zzz\x1b[201~"]);
+
+		// The same shape drained after an event-loop stall is batched typing:
+		// every Enter must still submit.
+		stalled = true;
+		received.length = 0;
+		process.stdin.emit("data", "aaa\rbbb\rccc");
 		expect(received).toEqual(["a", "a", "a", "\r", "b", "b", "b", "\r", "c", "c", "c"]);
-		expect(received.some(seq => seq.includes("\x1b[200~"))).toBe(false);
 		terminal.stop();
+	});
+
+	it("emits no output while idle after confirming bracketed paste", () => {
+		vi.useFakeTimers();
+		const { terminal, writes } = setup();
+		process.stdin.emit("data", "\x1b[?2004;1$y");
+		// Let the one-shot keyboard fallback finish before measuring idle output.
+		vi.advanceTimersByTime(1000);
+		writes.length = 0;
+		vi.advanceTimersByTime(15000);
+		expect(writes).toEqual([]);
+		terminal.stop();
+		const stopped = writes.length;
+		vi.advanceTimersByTime(1000);
+		expect(writes).toHaveLength(stopped);
+	});
+
+	it("rearms bracketed paste on input so a subsequent multiline paste stays one input", () => {
+		const { terminal, writes, received } = setup();
+		process.stdin.emit("data", "\x1b[?2004;1$y");
+		writes.length = 0;
+		process.stdin.emit("data", "x");
+		expect(writes).toEqual(["\x1b[?2004h"]);
+		process.stdin.emit("data", "\x1b[200~first\nsecond\x1b[201~");
+		expect(received).toEqual(["x", "\x1b[200~first\nsecond\x1b[201~"]);
+		terminal.stop();
+	});
+
+	it("rearms confirmed bracketed paste in the same write as a render, only while active", () => {
+		const { terminal, writes } = setup();
+		terminal.write("before confirmation");
+		expect(writes.at(-1)).toBe("before confirmation");
+		process.stdin.emit("data", "\x1b[?2004;1$y");
+		writes.length = 0;
+		terminal.write("frame");
+		expect(writes).toEqual(["\x1b[?2004hframe"]);
+		terminal.stop();
+		terminal.write("after stop");
+		expect(writes.at(-1)).toBe("after stop");
 	});
 
 	it("coalesces an unbracketed multiline burst when bracketed paste is unconfirmed (#12540)", () => {
