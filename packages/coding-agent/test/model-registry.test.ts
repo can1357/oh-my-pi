@@ -2344,6 +2344,42 @@ describe("ModelRegistry", () => {
 			expect(requestedUrls).toContain("https://copilot-api.ghe.example.com/models");
 			expect(requestedUrls).not.toContain("https://api.githubcopilot.com/models");
 		});
+		test("offers only account-enabled Copilot models after discovery and on restart", async () => {
+			await authStorage.credentials.set("github-copilot", [
+				{
+					type: "oauth",
+					access: "ghu_business_token",
+					refresh: "ghu_business_token",
+					expires: Date.now() + 60_000,
+					apiEndpoint: "https://api.business.githubcopilot.com",
+				},
+			]);
+			const fetchMock: FetchImpl = async input => {
+				const url = input instanceof Request ? input.url : String(input);
+				if (url !== "https://api.business.githubcopilot.com/models") throw new Error(`Unexpected URL: ${url}`);
+				return Response.json({
+					data: [
+						{ id: "gpt-4o", capabilities: { type: "chat" }, policy: { state: "enabled" } },
+						{ id: "grok-4.7", capabilities: { type: "chat" }, policy: { state: "disabled" } },
+						{ id: "claude-haiku-4.5", capabilities: { type: "chat" }, model_picker_enabled: false },
+					],
+				});
+			};
+			const cacheDbPath = path.join(tempDir, "copilot-models.db");
+			const registry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: fetchMock, cacheDbPath });
+			await registry.refreshProvider("github-copilot", "online");
+			const selectable = registry.getAvailable().filter(model => model.provider === "github-copilot");
+			expect(selectable.map(model => model.id)).toEqual(["gpt-4o"]);
+
+			const restarted = new ModelRegistry(authStorage, modelsJsonPath, { cacheDbPath });
+			await restarted.refreshProvider("github-copilot", "online-if-uncached");
+			expect(
+				restarted
+					.getAvailable()
+					.filter(model => model.provider === "github-copilot")
+					.map(model => model.id),
+			).toEqual(["gpt-4o"]);
+		});
 	});
 
 	describe("Factory Droid account residency", () => {

@@ -278,6 +278,12 @@ export async function resolveProviderModels<TApi extends Api = Api, TModelsDevPa
 	const hasModelsDevFetcher = options.modelsDev !== undefined;
 	const hasRemoteFetcher = hasDynamicFetcher || hasModelsDevFetcher;
 	const hasAuthoritativeCache = ((cache?.authoritative ?? false) && hasUsableFreshCache) || !hasRemoteFetcher;
+	// A scoped authoritative provider snapshot contains same-id models served
+	// by the account, not additive shared-catalog rows to discard.
+	const additiveCacheIds =
+		dynamicModelsAuthoritative && cache?.authoritative && cacheFingerprintMatches
+			? undefined
+			: additiveStaticModelIds;
 	const cacheAgeMs = cache ? now() - cache.updatedAt : Number.POSITIVE_INFINITY;
 	const shouldFetchFromNetwork =
 		hasRemoteFetcher && shouldFetchRemoteSources(strategy, hasUsableFreshCache, hasAuthoritativeCache, cacheAgeMs);
@@ -285,8 +291,8 @@ export async function resolveProviderModels<TApi extends Api = Api, TModelsDevPa
 	// Cold-start fast path: when a fresh, authoritative cache exists, the network
 	// fetch is skipped, AND the static catalog slice is byte-identical to what
 	// was merged in last time, the cache row IS the authoritative merge result.
-	// Additive caches still need same-id rows stripped because an older binary
-	// may have written the snapshot before additive semantics were enabled.
+	// Strip legacy same-id additive rows, but preserve a provider-authoritative
+	// snapshot even when its models also exist in the bundled catalog.
 	if (
 		!shouldFetchFromNetwork &&
 		cache?.fresh &&
@@ -294,10 +300,10 @@ export async function resolveProviderModels<TApi extends Api = Api, TModelsDevPa
 		cacheFingerprintMatches &&
 		!cacheHasUnresolvedHeaders
 	) {
-		const cacheContribution = additiveStaticModelIds
-			? restoredCache.models.filter(model => !additiveStaticModelIds.has(model.id))
+		const cacheContribution = additiveCacheIds
+			? restoredCache.models.filter(model => !additiveCacheIds.has(model.id))
 			: restoredCache.models;
-		const cachedModels = additiveStaticModelIds
+		const cachedModels = additiveCacheIds
 			? mergeCatalogMetrics(mergeDynamicModels(staticModels, cacheContribution), restoredCache.models)
 			: restoredCache.models;
 		const source: ModelResolutionSource = cacheContribution.length > 0 ? "cache" : "bundled";
@@ -335,10 +341,10 @@ export async function resolveProviderModels<TApi extends Api = Api, TModelsDevPa
 				cacheFingerprintMatches,
 				options.dropCachedModelIdsOnStaticMismatch,
 			);
-	// Additive shared-catalog rows may only introduce IDs. Apply that boundary
-	// to cache fallback too, including snapshots written by an older binary.
-	const cacheModels = additiveStaticModelIds
-		? preparedCacheModels.filter(model => !additiveStaticModelIds.has(model.id))
+	// Only legacy additive snapshots need same-id rows stripped; an
+	// authoritative provider snapshot owns those rows.
+	const cacheModels = additiveCacheIds
+		? preparedCacheModels.filter(model => !additiveCacheIds.has(model.id))
 		: preparedCacheModels;
 	const dynamicModels = fetchedDynamicModels?.models ?? [];
 	// A successful empty endpoint result stays authoritative for THIS cycle (so an

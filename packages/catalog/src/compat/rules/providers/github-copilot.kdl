@@ -3,6 +3,8 @@
 provider "github-copilot" {
 	default-model "gpt-5.5"
 	env "COPILOT_GITHUB_TOKEN"
+	// The authenticated /models roster omits models unavailable to this account.
+	dynamic-models-authoritative #true
 
 	// Replaces the strict-mode provider whitelist entry.
 	supports-strict-mode #true
