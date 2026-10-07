@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `APPEND_PLAN.md` and `--append-plan-prompt` for instructions that apply only while plan mode is enabled: the text is appended to the plan-mode context message rebuilt on each planning turn, so plan-only guidance (such as telling the planner to consult a docs MCP) never leaks into implementation turns. Also available programmatically as `CreateAgentSessionOptions.appendPlanPrompt` ([#9405](https://github.com/can1357/oh-my-pi/issues/9405), [#14792](https://github.com/can1357/oh-my-pi/pull/14792) by [@qian-123456](https://github.com/qian-123456))
+
 ## [18.8.0] - 2026-10-07
 
 ### Added
