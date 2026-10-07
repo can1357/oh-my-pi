@@ -158,6 +158,24 @@ describe("path-pasted image source path (#12244)", () => {
 		expect(editor.pendingImageLinks[0]).toBe(imagePath);
 	});
 
+	it("attaches lowercase macOS screenshot names with a narrow no-break AM/PM space", async () => {
+		const storedPath = path.join(tmpDir, "Screenshot 2026-10-07 at 4.07.48\u202fpm.png");
+		const pastedPath = storedPath.replace("\u202f", " ");
+		await Bun.write(storedPath, Buffer.from(TINY_PNG, "base64"));
+
+		const { ctx, editor, showStatus } = createPasteContext(SessionManager.inMemory(tmpDir));
+		const controller = new InputController(ctx, {
+			readImage: async () => null,
+			readText: async () => null,
+		});
+		await controller.handleImagePathPaste(pastedPath);
+
+		expect(editor.pendingImages).toHaveLength(1);
+		expect(editor.pendingImageLinks[0]).toBe(storedPath);
+		expect(showStatus).not.toHaveBeenCalled();
+	});
+
+
 	it("names the pasted file in the advisor's session update, where the image itself is only `[image]`", async () => {
 		if (!session) throw new Error("Session was not initialized");
 		const { editor, imagePath } = await pasteImageFile();
