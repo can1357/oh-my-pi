@@ -4,8 +4,8 @@
 
 ### Fixed
 
-- Fixed task result rendering so incremental yield batches and nested array items keep their schema-defined shape.
-- Fixed relayed agent messages losing their agent attribution in chat and transcript views.
+- Fixed task result rendering so incremental yield batches and nested array items keep their schema-defined shape ([#14860](https://github.com/can1357/oh-my-pi/pull/14860) by [@vavilonska](https://github.com/vavilonska))
+- Fixed relayed agent messages losing their agent attribution in chat and transcript views ([#14860](https://github.com/can1357/oh-my-pi/pull/14860) by [@vavilonska](https://github.com/vavilonska))
 - Fixed the native ask dialog opening as a modal sheet over the transcript; on TSP surfaces it now takes the composer's place in the dock, framed as the composer (`omp.editor`), so the transcript above stays readable and scrollable ([#14812](https://github.com/can1357/oh-my-pi/pull/14812) by [@H4vC](https://github.com/H4vC))
 
 ## [18.8.0] - 2026-10-07

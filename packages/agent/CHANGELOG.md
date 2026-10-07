@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- Fixed live steering and compaction so relayed agent messages retain their agent attribution.
+- Fixed live steering and compaction so relayed agent messages retain their agent attribution ([#14860](https://github.com/can1357/oh-my-pi/pull/14860) by [@vavilonska](https://github.com/vavilonska))
 
 ## [18.8.0] - 2026-10-07
 
