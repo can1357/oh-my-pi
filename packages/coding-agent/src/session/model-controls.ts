@@ -46,7 +46,12 @@ import { formatRoleModelValue, resolveRoleModelFull } from "./role-models";
 import { EPHEMERAL_MODEL_CHANGE_ROLE } from "./session-entries";
 import type { SessionManager } from "./session-manager";
 
-import { cfgDefaultThinkingLevel, cfgProvidersAutoThinkingTimeoutMs, cfgProvidersFireworksTier } from "./settings";
+import {
+	cfgDefaultThinkingLevel,
+	cfgProvidersAutoThinkingTimeoutMs,
+	cfgProvidersFireworksTier,
+	MAX_AUTO_THINKING_TIMEOUT_MS,
+} from "./settings";
 import { cfgDisabledProviders, cfgEnabledModels } from "../config/model-settings";
 
 /** Capabilities borrowed from the owning AgentSession. */
@@ -611,11 +616,11 @@ export class ModelControls {
 		const envOverride = Bun.env.OMP_AUTO_THINKING_TIMEOUT_MS ?? Bun.env.OMP_JUDGMENT_TIMEOUT_MS;
 		if (envOverride !== undefined && envOverride.trim() !== "") {
 			const parsed = Number(envOverride.trim());
-			if (Number.isFinite(parsed) && parsed > 0) return parsed;
+			if (Number.isFinite(parsed) && parsed > 0) return Math.min(Math.floor(parsed), MAX_AUTO_THINKING_TIMEOUT_MS);
 		}
 		const configured = cfgProvidersAutoThinkingTimeoutMs.get(this.#host.settings);
 		return Number.isFinite(configured) && configured > 0
-			? configured
+			? Math.min(Math.floor(configured), MAX_AUTO_THINKING_TIMEOUT_MS)
 			: ModelControls.#DEFAULT_AUTO_THINKING_TIMEOUT_MS;
 	}
 
