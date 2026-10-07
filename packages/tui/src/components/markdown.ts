@@ -1179,6 +1179,18 @@ export function lexDocument(text: string): TokensList {
 	return markdownParser.lexer(text);
 }
 
+/**
+ * `source` as a fenced code block in `lang`: the fence is one backtick longer
+ * than any backtick run in the source (at least three), so the block always
+ * closes where intended. `open` leaves it unclosed, the source verbatim, for
+ * a body that is still arriving.
+ */
+export function fencedCode(lang: string, source: string, options?: { open?: boolean }): string {
+	const longest = source.match(/`+/g)?.reduce((max, run) => Math.max(max, run.length), 2) ?? 2;
+	const fence = "`".repeat(longest + 1);
+	return options?.open ? `${fence}${lang}\n${source}` : `${fence}${lang}\n${source.trimEnd()}\n${fence}`;
+}
+
 /** A hyperlink as the renderer sees it: inline `[text](href)`, `<autolink>`, bare GFM URL, or reference link. */
 export interface MarkdownLink {
 	/** Flattened visible label with whitespace collapsed to one row; falls back to `href` when empty. */

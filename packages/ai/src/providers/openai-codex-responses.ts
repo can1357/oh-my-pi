@@ -24,7 +24,8 @@ import {
 } from "@oh-my-pi/pi-utils";
 import * as AIError from "../error";
 import { parseToolCallArguments, replayableToolCallArguments } from "../utils/tool-call-arguments";
-import { getEnvApiKey, isOfficialCodexApiUrl } from "../stream";
+import { getEnvApiKey } from "../env-api-key";
+import { isOfficialCodexApiUrl } from "../stream";
 import type {
 	Api,
 	AssistantMessage,

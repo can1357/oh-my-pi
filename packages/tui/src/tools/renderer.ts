@@ -39,6 +39,19 @@ export interface ToolRenderResult<TDetails = unknown> {
 }
 
 /**
+ * A fence a tool call draws under its card, as assistant Markdown draws that
+ * fence. Any fence language may be named (`svg`, `mermaid`, `obj`); the
+ * transcript draws only those it draws as figures in assistant text.
+ */
+export interface ToolFigure {
+	readonly lang: string;
+	/** The body so far. */
+	readonly source: string;
+	/** No more of the body arrives. */
+	readonly closed: boolean;
+}
+
+/**
  * Per-renderer opt-in for a full viewport replay when the first result
  * replaces a painted pending-call render. A predicate receives the painted
  * call args and render options so the repaint stays scoped to the pending
@@ -138,6 +151,18 @@ export interface ToolRenderer<TArgs = unknown, TDetails = unknown> {
 		args?: TArgs,
 	): NativeToolView | undefined;
 	mergeCallAndResult?: boolean;
+	/**
+	 * The fence a call draws under its card (a `.svg` being written, as its
+	 * image): growing while the args stream, closed once they are final; none
+	 * after an error. `result` is undefined until the call has one. Rendered
+	 * TUI only, and only fences the terminal draws as figures; native views put
+	 * their drawing in their describe hooks.
+	 */
+	figure?(
+		args: TArgs,
+		result: ToolRenderResult<TDetails> | undefined,
+		options: RenderResultOptions,
+	): ToolFigure | undefined;
 	/** Describes current activity without coupling a renderer to terminal layout. */
 	activitySummary?(args: TArgs, context: ToolActivityContext): ToolActivitySummary;
 	/** Render without background box, inline in the response flow */
