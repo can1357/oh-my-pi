@@ -914,20 +914,82 @@ describe("device-only write transport for explicit lists omitting write", () => 
 		}
 	});
 
-	it("rejects file access through transports when read and write are omitted", async () => {
+	it("narrows the transport write to xd:// dispatch when read and write are both omitted", async () => {
 		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "write-xdev-no-transport-"));
 		try {
 			const session = xdevSession(tempDir);
 			const tools = await createTools(session, ["grep", "glob"]);
-			const read = tools.find(entry => entry.name === "read")!;
-			const write = tools.find(entry => entry.name === "write")!;
+			const read = tools.find(entry => entry.name === "read");
+			const write = tools.find(entry => entry.name === "write");
+			expect(read).toBeDefined();
+			expect(write).toBeDefined();
 			expect(session.deviceOnlyRead).toBe(true);
 			expect(session.deviceOnlyWrite).toBe(true);
+			expect(session.xdev).toBeDefined();
+
 			const filePath = path.join(tempDir, "denied.txt");
 			await Bun.write(filePath, "secret");
-			await expect(read.execute("read-denied", { path: filePath })).rejects.toThrow("only accepts xd://");
-			await expect(write.execute("write-denied", { path: filePath, content: "changed" })).rejects.toThrow();
+			await expect(read!.execute("read-denied", { path: filePath })).rejects.toThrow("only accepts xd://");
+			await expect(write!.execute("write-denied", { path: filePath, content: "changed" })).rejects.toThrow(
+				"Filesystem writes are not available",
+			);
 			expect(await Bun.file(filePath).text()).toBe("secret");
+
+			// Neither half was granted, so coordination targets stay refused exactly
+			// as before the transport existed: no peer messages, no job cancellation,
+			// no sandbox drafts.
+			for (const [id, target] of [
+				["write-denied-agent", "agent://Main"],
+				["write-denied-proc", "proc://bg_1/kill"],
+				["write-denied-local", "local://draft.md"],
+			] as const) {
+				await expect(write!.execute(id, { path: target, content: "x" })).rejects.toThrow(
+					"limited to the xd:// device transport",
+				);
+			}
+
+			// Device dispatch still flows past the transport guard to the router.
+			const unknown = await write!.execute("write-device-only-dispatch", {
+				path: "xd://no_such_tool",
+				content: "{}",
+			});
+			expect(unknown.isError).toBe(true);
+			expect(unknown.details?.xdev?.tool).toBe("no_such_tool");
+			expect(unknown.content.find(entry => entry.type === "text")?.text).toContain(
+				"No such tool: xd://no_such_tool",
+			);
+		} finally {
+			await removeWithRetries(tempDir);
+		}
+	});
+
+	it("serves mounted device docs through the docs-only read transport", async () => {
+		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "read-xdev-docs-only-"));
+		try {
+			const session = xdevSession(tempDir);
+			const tools = await createTools(session, ["bash"]);
+			const read = tools.find(entry => entry.name === "read");
+			expect(read).toBeDefined();
+			expect(session.deviceOnlyRead).toBe(true);
+			const device = {
+				name: "docs_device",
+				label: "Docs Device",
+				description: "Docs-only transport fixture.",
+				parameters: type({ query: "string" }),
+				async execute() {
+					return { content: [{ type: "text" as const, text: "ok" }] };
+				},
+			} as unknown as Tool;
+			session.xdev!.tools.set(device.name, device);
+			session.xdev!.mountedNames.add(device.name);
+
+			const listing = await read!.execute("read-xd-docs-list", { path: "xd://" });
+			expect(listing.content.find(entry => entry.type === "text")?.text).toContain("xd://docs_device");
+			const docs = await read!.execute("read-xd-docs-device", { path: "xd://docs_device" });
+			const docsText = docs.content.find(entry => entry.type === "text")?.text ?? "";
+			expect(docsText).toContain("docs_device");
+			expect(docsText).toContain("Docs-only transport fixture.");
+			expect(docsText).toContain("query");
 		} finally {
 			await removeWithRetries(tempDir);
 		}

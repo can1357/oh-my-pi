@@ -148,11 +148,15 @@ describe("createTools", () => {
 	});
 
 	it("includes hidden tools when explicitly requested", async () => {
-		const session = createTestSession({ restrictToolNames: true });
+		const session = createTestSession();
 		const tools = await createTools(session, ["yield"]);
 		const names = tools.map(t => t.name);
 
-		expect(names).toEqual(["yield"]);
+		// The explicit list omits read and write, so both join after it as
+		// device-only xd:// transports (docs and dispatch only).
+		expect(names).toEqual(["yield", "read", "write"]);
+		expect(session.deviceOnlyRead).toBe(true);
+		expect(session.deviceOnlyWrite).toBe(true);
 	});
 
 	it("includes yield tool when required", async () => {
@@ -287,12 +291,15 @@ describe("createTools", () => {
 	});
 
 	it("records active tools on the original session object", async () => {
-		const session = createTestSession({ restrictToolNames: true });
+		const session = createTestSession();
 
 		await createTools(session, ["bash"]);
 
 		expect(session.isToolActive?.("bash")).toBe(true);
-		expect(session.isToolActive?.("read")).toBe(false);
+		// `read` is registered only as the dormant device-only docs transport;
+		// SDK assembly activates it once a device mounts.
+		expect(session.deviceOnlyRead).toBe(true);
+		expect(session.isToolActive?.("read")).toBe(true);
 	});
 
 	it("allows checkpoint/rewind in subagent when explicitly requested and enabled", async () => {

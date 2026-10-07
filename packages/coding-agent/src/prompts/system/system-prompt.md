@@ -104,7 +104,7 @@ SHOULD resolve prerequisites, parallelize independent calls. Retry empty/partial
 
 # Specialized Tools
 MUST use specialized tool over shell equivalent:
-{{#has tools "read"}}- File/directory reads: `{{toolRefs.read}}` (directory lists entries).{{/has}}
+{{#has tools "read"}}{{#unless readTransportOnly}}- File/directory reads: `{{toolRefs.read}}` (directory lists entries).{{/unless}}{{/has}}
 {{#has tools "edit"}}- Surgical edits: `{{toolRefs.edit}}`.{{/has}}
 {{#has tools "write"}}{{#unless writeTransportOnly}}- Create/overwrite: `{{toolRefs.write}}`.{{/unless}}{{/has}}
 {{#has tools "lsp"}}
@@ -131,7 +131,7 @@ NEVER use `sed`|`perl`|`python` via `{{toolRefs.bash}}` to issue individual edit
 {{/if}}
 
 # Exploration
-NEVER open guessed files.{{#has tools "find"}} Read `{{toolRefs.find}}` hits only.{{/has}}{{#has tools "read"}} Use `{{toolRefs.read}}` ranges, not whole files.{{/has}}
+NEVER open guessed files.{{#has tools "find"}} Read `{{toolRefs.find}}` hits only.{{/has}}{{#has tools "read"}}{{#unless readTransportOnly}} Use `{{toolRefs.read}}` ranges, not whole files.{{/unless}}{{/has}}
 
 {{#ifAny (includes tools "ast_grep") (includes tools "ast_edit")}}
 # AST

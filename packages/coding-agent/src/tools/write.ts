@@ -790,14 +790,17 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 		const coordination =
 			policy?.scope === "coordination" || (target !== undefined && policy?.cancels?.(target.url) === true);
 		// A device-only session grants `write` purely as the device transport (see
-		// createTools): device dispatches and coordination writes proceed, every
-		// other target is rejected before any handler, guard, conflict resolver, or
-		// bridge sees it. Active plan mode additionally permits its sandbox, but does
+		// createTools): device dispatches proceed, every other target is rejected
+		// before any handler, guard, conflict resolver, or bridge sees it. A session
+		// that kept `read` may also coordinate, as every read-capable agent could
+		// before the transport existed; one whose `read` is itself only the xd://
+		// docs transport never held a write-capable tool, so coordination stays
+		// refused there. Active plan mode additionally permits its sandbox, but does
 		// not relax the restriction for working-tree or other internal URLs.
 		if (
 			this.session.deviceOnlyWrite === true &&
 			policy?.scope !== "device" &&
-			!coordination &&
+			!(coordination && this.session.deviceOnlyRead !== true) &&
 			!(
 				this.session.getPlanModeState?.()?.enabled === true &&
 				(await targetsLocalSandbox(this.session, path, signal))

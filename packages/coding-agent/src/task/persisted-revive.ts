@@ -149,6 +149,8 @@ export function createPersistedSubagentReviverFactory(
 			// Older session files persisted the synthetic xd:// write transport in the
 			// enabled set. A read-only agent definition could never grant full write,
 			// so remove that transport name before replaying tools as explicit grants.
+			// The docs-only read transport needs no such strip: no released build
+			// registered it, so only the executor's filtered list can name `read`.
 			const revivedToolNames =
 				init.readOnly === true && init.tools.includes("write")
 					? init.tools.filter(name => name !== "write")

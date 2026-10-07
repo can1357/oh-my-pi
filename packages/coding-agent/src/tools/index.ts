@@ -892,23 +892,11 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 	// tool top-level with its full schema on every request — the opposite of
 	// the intended restriction, and enough to overflow narrow provider context
 	// windows on MCP-heavy sessions. Grant device-only transports instead:
-	// `write xd://<tool>` dispatches mounted devices and `read xd://<tool>`
-	// loads their docs, while filesystem access stays rejected (enforced via
-	// `session.deviceOnlyWrite` / `session.deviceOnlyRead`). No capability is
+	// `read xd://<tool>` loads device docs and `write xd://<tool>` dispatches
+	// mounted devices, while filesystem access stays rejected (enforced via
+	// `session.deviceOnlyRead` / `session.deviceOnlyWrite`). No capability is
 	// expanded: without mounting, those tools were already presented — and
 	// callable — top-level.
-	if (xdevRequested && requestedTools !== undefined && !tools.some(tool => tool.name === "write")) {
-		session.deviceOnlyWrite = true;
-		const writeTool = await logger.time("createTools:write:xdev-transport", BUILTIN_TOOLS.write, session);
-		if (writeTool) {
-			const wrapped = wrapToolWithMetaNotice(writeTool);
-			tools.push(wrapped);
-			toolRegistry.set(wrapped.name, wrapped);
-			builtInNames.add(wrapped.name);
-		} else {
-			session.deviceOnlyWrite = undefined;
-		}
-	}
 	if (xdevRequested && requestedTools !== undefined && !tools.some(tool => tool.name === "read")) {
 		session.deviceOnlyRead = true;
 		const readTool = await logger.time("createTools:read:xdev-transport", BUILTIN_TOOLS.read, session);
@@ -919,6 +907,27 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 			builtInNames.add(wrapped.name);
 		} else {
 			session.deviceOnlyRead = undefined;
+		}
+	}
+	// The write transport only makes sense beside a `read` (granted or the
+	// device-only one above) that can discover what it dispatches. When `read`
+	// was itself only granted as transport, WriteTool also refuses coordination
+	// targets, so a `--tools grep,glob` session gains xd:// dispatch alone.
+	if (
+		xdevRequested &&
+		requestedTools !== undefined &&
+		!tools.some(tool => tool.name === "write") &&
+		tools.some(tool => tool.name === "read")
+	) {
+		session.deviceOnlyWrite = true;
+		const writeTool = await logger.time("createTools:write:xdev-transport", BUILTIN_TOOLS.write, session);
+		if (writeTool) {
+			const wrapped = wrapToolWithMetaNotice(writeTool);
+			tools.push(wrapped);
+			toolRegistry.set(wrapped.name, wrapped);
+			builtInNames.add(wrapped.name);
+		} else {
+			session.deviceOnlyWrite = undefined;
 		}
 	}
 

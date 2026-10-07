@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- Fixed sessions whose explicit tool list omits `read` (for example `--tools bash,wait`) exposing every MCP and extension tool top-level with full schemas; a device-only `read` now serves `xd://` docs while rejecting every other path, internal URI, and URL ([#14798](https://github.com/can1357/oh-my-pi/pull/14798) by [@kasrakhosravi](https://github.com/kasrakhosravi))
+- Fixed sessions whose explicit tool list omits `read` (for example `--tools bash,wait`) exposing every MCP and extension tool top-level with full schemas; a device-only `read` now serves `xd://` docs while rejecting every other path, internal URI, and URL, and the paired device-only `write` dispatches `xd://` devices only, refusing `agent://`, `proc://`, and `local://` targets the session was never granted ([#14798](https://github.com/can1357/oh-my-pi/pull/14798) by [@kasrakhosravi](https://github.com/kasrakhosravi))
 
 ## [18.8.0] - 2026-10-07
 

@@ -107,6 +107,7 @@ describe("AgentSession refreshMCPTools rebuild skipping", () => {
 		xdev?: XdevState;
 		lazyWrite?: boolean;
 		deviceOnlyWrite?: boolean;
+		deviceOnlyRead?: boolean;
 		/** Scripted mock model responses; enables driving `session.prompt()`. */
 		responses?: MockResponseSource;
 		/** Persisted history seeded into the agent, e.g. to model a resumed session. */
@@ -136,6 +137,8 @@ describe("AgentSession refreshMCPTools rebuild skipping", () => {
 		toolRegistry: Map<string, AgentTool>;
 		isDeviceOnlyWrite: () => boolean;
 		isPendingFullWriteDescription: () => boolean;
+		isDeviceOnlyRead: () => boolean;
+		isPendingFullReadDescription: () => boolean;
 		isToolActive: (name: string) => boolean;
 	} {
 		const readTool = createBasicTool("read", "Read");
@@ -144,6 +147,8 @@ describe("AgentSession refreshMCPTools rebuild skipping", () => {
 		const toolRegistry = options.xdev?.tools ?? new Map<string, AgentTool>();
 		let deviceOnlyWrite = options.deviceOnlyWrite === true;
 		let pendingFullWriteDescription = false;
+		let deviceOnlyRead = options.deviceOnlyRead === true;
+		let pendingFullReadDescription = false;
 		toolRegistry.set(readTool.name, readTool);
 		toolRegistry.set(initialMcp.name, initialMcp as unknown as AgentTool);
 		if (options.xdev && !options.lazyWrite) toolRegistry.set(writeTool.name, writeTool);
@@ -195,6 +200,13 @@ describe("AgentSession refreshMCPTools rebuild skipping", () => {
 			setPendingFullWriteDescription: enabled => {
 				pendingFullWriteDescription = enabled;
 			},
+			isDeviceOnlyRead: () => deviceOnlyRead,
+			setDeviceOnlyRead: enabled => {
+				deviceOnlyRead = enabled;
+			},
+			setPendingFullReadDescription: enabled => {
+				pendingFullReadDescription = enabled;
+			},
 			extensionRunner: options.beforeAgentStartSystemPrompt
 				? ({
 						emitBeforeAgentStart: async () => ({ systemPrompt: options.beforeAgentStartSystemPrompt }),
@@ -219,6 +231,8 @@ describe("AgentSession refreshMCPTools rebuild skipping", () => {
 			toolRegistry,
 			isDeviceOnlyWrite: () => deviceOnlyWrite,
 			isPendingFullWriteDescription: () => pendingFullWriteDescription,
+			isDeviceOnlyRead: () => deviceOnlyRead,
+			isPendingFullReadDescription: () => pendingFullReadDescription,
 			isToolActive: name => activeToolNames.has(name),
 		};
 	}
@@ -1508,6 +1522,84 @@ These tools became available:
 
 		expect(isDeviceOnlyWrite()).toBe(true);
 		expect(session.getActiveToolNames()).toEqual(activeBefore);
+	});
+
+	it("keeps device-only read access until a full-read activation commits", async () => {
+		let blockRebuild = false;
+		const rebuildStarted = Promise.withResolvers<void>();
+		const releaseRebuild = Promise.withResolvers<void>();
+		const { session, isDeviceOnlyRead, isPendingFullReadDescription } = newSession(
+			async toolNames => {
+				if (blockRebuild) {
+					rebuildStarted.resolve();
+					await releaseRebuild.promise;
+				}
+				return `tools:${toolNames.join(",")}`;
+			},
+			{ xdev: createTestXdevState(), deviceOnlyRead: true },
+		);
+
+		blockRebuild = true;
+		const activation = session.setActiveToolsByName(["read"]);
+		try {
+			await rebuildStarted.promise;
+			// The rebuild previews the full-read schema, but execution stays
+			// docs-only until the activation publishes.
+			expect(isDeviceOnlyRead()).toBe(true);
+			expect(isPendingFullReadDescription()).toBe(true);
+		} finally {
+			releaseRebuild.resolve();
+		}
+		await activation;
+
+		expect(isDeviceOnlyRead()).toBe(false);
+		expect(isPendingFullReadDescription()).toBe(false);
+	});
+
+	it("restores device-only read access when a full-read prompt rebuild fails", async () => {
+		let failRebuild = false;
+		const { session, isDeviceOnlyRead, isPendingFullReadDescription } = newSession(
+			async toolNames => {
+				if (failRebuild) throw new Error("rebuild failed");
+				return `tools:${toolNames.join(",")}`;
+			},
+			{ xdev: createTestXdevState(), deviceOnlyRead: true },
+		);
+		const activeBefore = session.getActiveToolNames();
+
+		failRebuild = true;
+		await expect(session.setActiveToolsByName(["read"])).rejects.toThrow("rebuild failed");
+
+		expect(isDeviceOnlyRead()).toBe(true);
+		expect(isPendingFullReadDescription()).toBe(false);
+		expect(session.getActiveToolNames()).toEqual(activeBefore);
+	});
+
+	it("restores device-only read access when the session disposes during a full-read rebuild", async () => {
+		let blockRebuild = false;
+		const rebuildStarted = Promise.withResolvers<void>();
+		const releaseRebuild = Promise.withResolvers<void>();
+		const { session, isDeviceOnlyRead, isPendingFullReadDescription } = newSession(
+			async toolNames => {
+				if (blockRebuild) {
+					rebuildStarted.resolve();
+					await releaseRebuild.promise;
+				}
+				return `tools:${toolNames.join(",")}`;
+			},
+			{ xdev: createTestXdevState(), deviceOnlyRead: true },
+		);
+
+		blockRebuild = true;
+		const activation = session.setActiveToolsByName(["read"]);
+		await rebuildStarted.promise;
+		const disposal = session.dispose();
+		releaseRebuild.resolve();
+		await activation;
+		await disposal;
+
+		expect(isDeviceOnlyRead()).toBe(true);
+		expect(isPendingFullReadDescription()).toBe(false);
 	});
 
 	it("restores full write mode when transport reactivation fails", async () => {
