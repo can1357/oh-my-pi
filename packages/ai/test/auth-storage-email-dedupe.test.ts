@@ -101,9 +101,10 @@ describe("AuthStorage openai-codex email dedupe", () => {
 	});
 
 	afterEach(() => {
+		authStorage?.close();
+		authStorage = null;
 		store?.close();
 		store = null;
-		authStorage = null;
 		db = null;
 	});
 
