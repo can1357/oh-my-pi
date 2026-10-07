@@ -103,6 +103,14 @@ export const frameDefs = {
 		{ type: "'live_end'", "error?": "string" },
 		"Sent exactly once when a live session ends; `error` carries the failure cause.",
 	),
+	BtwDeltaEvent: doc(
+		{ type: "'btw_delta'", recordId: "string", delta: "string" },
+		"Text appended to the running side question's latest answer.",
+	),
+	BtwRecordEvent: doc(
+		{ type: "'btw_record'", record: "BtwHistoryRecord" },
+		"Full side-question record on every lifecycle change (started, complete, cancelled, error); the last one per id wins.",
+	),
 	CommandOutputEvent: doc({ type: "'command_output'", text: "string" }, "Output of a builtin slash command."),
 	SessionInfoUpdateEvent: doc(
 		{ type: "'session_info_update'", "title?": "string", sessionId: "string" },

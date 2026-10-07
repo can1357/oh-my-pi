@@ -14,6 +14,7 @@ import type {
 import { unregisterCustomApis } from "@oh-my-pi/pi-ai/api-registry";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { createMockModel, type MockResponse, registerMockApi } from "@oh-my-pi/pi-ai/providers/mock";
+import * as envApiKey from "@oh-my-pi/pi-ai/env-api-key";
 import * as aiStream from "@oh-my-pi/pi-ai/stream";
 import { kCursorExecResolved, kStreamingPartialJson } from "@oh-my-pi/pi-ai/utils/block-symbols";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
@@ -88,7 +89,7 @@ describe("AgentSession retry delay cap", () => {
 	beforeEach(async () => {
 		// A live env var now overrides a stored static api_key; these tests rotate stored Anthropic
 		// credentials, so neutralize env resolution (ignores every provider's ambient env key).
-		vi.spyOn(aiStream, "getEnvApiKey").mockReturnValue(undefined);
+		vi.spyOn(envApiKey, "getEnvApiKey").mockReturnValue(undefined);
 		for (const provider of ["anthropic", "openai-codex"]) {
 			await authStorage.credentials.remove(provider);
 		}

@@ -4,14 +4,15 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { Agent } from "@oh-my-pi/pi-agent-core";
 import { completeSimple, type OneshotRetryInfo, retryTransientCompletion, streamSimple } from "@oh-my-pi/pi-ai";
-import { resolvedApiKeyBearer, withAuth } from "@oh-my-pi/pi-ai/auth-retry";
+import { resolveApiKeyOnce, resolvedApiKeyBearer, withAuth } from "@oh-my-pi/pi-ai/auth-retry";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { unregisterCustomApis } from "@oh-my-pi/pi-ai/api-registry";
 import { createMockModel, registerMockApi } from "@oh-my-pi/pi-ai/providers/mock";
 import * as awsCredentials from "@oh-my-pi/pi-ai/providers/aws-credentials";
-import * as aiStream from "@oh-my-pi/pi-ai/stream";
+import * as envApiKey from "@oh-my-pi/pi-ai/env-api-key";
 import type { Api, Context, FetchImpl, Model } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import { SessionAccountPoolScope } from "@oh-my-pi/pi-coding-agent/config/account-pools";
 import { invalidateAllCommandConfigs, resolveConfigValue } from "@oh-my-pi/pi-coding-agent/config/resolve-config-value";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -433,7 +434,7 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 	});
 
 	test("a provider with no apiKey configured still fails with the non-retryable missing-key error", async () => {
-		const envApiKey = spyOn(aiStream, "getEnvApiKey").mockReturnValue(undefined);
+		const envKey = spyOn(envApiKey, "getEnvApiKey").mockReturnValue(undefined);
 		const registry = new ModelRegistry(authStorage, modelsPath);
 		const model = registry.find("anthropic", "claude-sonnet-4-5");
 		if (!model) throw new Error("Expected bundled Anthropic model");
@@ -445,7 +446,7 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 				() => undefined,
 				(failure: unknown) => failure,
 			)
-			.finally(() => envApiKey.mockRestore());
+			.finally(() => envKey.mockRestore());
 
 		expect(error).toBeInstanceOf(AIError.MissingApiKeyError);
 		expect(AIError.retriable(AIError.classify(error))).toBe(false);
@@ -732,6 +733,56 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 
 		const pending = withAuth(
 			registry.resolver(model),
+			async () => {
+				attempts += 1;
+				return "sent";
+			},
+			{ signal: controller.signal },
+		);
+		controller.abort(reason);
+
+		await expect(pending).rejects.toBe(reason);
+		expect(attempts).toBe(0);
+	});
+
+	test("a registry restricted to OAuth account pools keeps the apiKey command turn retry and abort handling", async () => {
+		fs.writeFileSync(
+			modelsPath,
+			JSON.stringify({
+				providers: {
+					"failing-proxy": {
+						baseUrl: "https://failing-proxy.example.com/v1",
+						api: "openai-completions",
+						apiKey: `!${failingCommandWithSecret("sk-synthetic-command-secret")}`,
+						models: [{ id: "custom-model", name: "Custom Model" }],
+					},
+					"slow-proxy": {
+						baseUrl: "https://slow-proxy.example.com/v1",
+						api: "openai-completions",
+						apiKey: `!${slowStdoutCommand("slow-key")}`,
+						models: [{ id: "custom-model", name: "Custom Model" }],
+					},
+				},
+			}),
+		);
+		const registry = new SessionAccountPoolScope(authStorage, { anthropic: [] }, "pooled-session").registry(
+			new ModelRegistry(authStorage, modelsPath),
+		);
+		const failing = registry.find("failing-proxy", "custom-model");
+		const slow = registry.find("slow-proxy", "custom-model");
+		if (!failing || !slow) throw new Error("Expected custom models");
+
+		const error = await resolveApiKeyOnce(registry.turnResolver(failing, "turn-session")).then(
+			() => undefined,
+			(failure: unknown) => failure,
+		);
+		expect(error).toBeInstanceOf(AIError.CredentialUnavailableError);
+
+		const controller = new AbortController();
+		const reason = new Error("synthetic user abort");
+		let attempts = 0;
+		const pending = withAuth(
+			registry.resolver(slow),
 			async () => {
 				attempts += 1;
 				return "sent";

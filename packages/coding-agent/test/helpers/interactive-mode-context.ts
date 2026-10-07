@@ -206,6 +206,7 @@ export function createInteractiveModeContext(overrides: ContextOverrides = {}): 
 		setFocus: vi.fn(),
 		terminal: { setProgress: vi.fn() },
 		imageBudget: undefined,
+		overlayStack: [],
 	};
 	const mount = (content: Component | readonly Component[]): void => {
 		for (const item of Array.isArray(content) ? content : [content as Component]) chatContainer.addChild(item);
@@ -245,6 +246,7 @@ export function createInteractiveModeContext(overrides: ContextOverrides = {}): 
 		get assistantImagesVisible() {
 			return cfgTerminalShowImages.get(contextSettings);
 		},
+		tableChartsVisible: true,
 		hasDisplayableThinkingContent: false,
 		noteDisplayableThinkingContent: vi.fn(() => false),
 		proseOnlyThinking: true,

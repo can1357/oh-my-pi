@@ -12,6 +12,7 @@ import { callSessionTool } from "../../eval/js/tool-bridge";
 import { webpExclusionForModel } from "@oh-my-pi/pi-tui/chat/image-loading";
 import type { ToolSession } from "../index";
 import { expandPath } from "../path-utils";
+import { CELL_BUDGET_SLACK_MS } from "../run-scope";
 import { ToolAbortError, toWorkerErrorPayload } from "../tool-errors";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { gracefulKillTreeOnce, pickElectronTarget, shouldPreserveConnectedBrowserFocus } from "./attach";
@@ -222,12 +223,17 @@ const SETUP_BUDGET_CAP_MS = 10_000;
 // a sub-3s caller's entire init budget, so the remaining-budget math must
 // never hand raceWithTimeout a non-positive value.
 const READY_BUDGET_FLOOR_MS = 500;
+// Share of an open's remaining budget kept back from its navigation so the
+// goto's own timeout report reaches the caller before the open's deadline.
+const OPEN_NAVIGATION_REPORT_MS = 500;
 // Names of tabs the supervisor force-killed (timeout past grace, failed recycle),
 // mapped to the kill reason. Lets the next `run` on that name explain WHY the tab
 // vanished instead of a bare "not alive". Cleared when the name is opened again.
 const killedTabs = new Map<string, string>();
 const DEFAULT_TAB_CLOSE_TIMEOUT_MS = 5_000;
 class RecoverableWorkerError extends ToolError {}
+/** A worker `tab.goto` outlasted its budget; the page stays on what loaded. */
+class NavigationTimeoutError extends ToolError {}
 const REPORTED_INIT_FAILURE = Symbol("reported-init-failure");
 
 type ReportedInitFailure = Error & { [REPORTED_INIT_FAILURE]?: true };
@@ -397,11 +403,6 @@ async function acquireTabImpl(
 						`await tab.emulate({ viewport: ${JSON.stringify({ width: opts.viewport.width, height: opts.viewport.height, scale: opts.viewport.deviceScaleFactor })} });`,
 					);
 				}
-				if (opts.url) {
-					reuseSteps.push(
-						`await tab.goto(${JSON.stringify(opts.url)}, { waitUntil: ${JSON.stringify(opts.waitUntil ?? "load")} });`,
-					);
-				}
 				if (reuseSteps.length) {
 					await runInTabWithSnapshot(
 						name,
@@ -413,6 +414,7 @@ async function acquireTabImpl(
 						{ cwd: getProjectDir() },
 					);
 				}
+				if (opts.url) await navigateOpenedTab(name, opts.url, opts, startedAt);
 				return { tab: tabs.get(name)!, created: false };
 			}
 		} else {
@@ -534,7 +536,67 @@ async function acquireTabImpl(
 	// this process dies abnormally before its own teardown closes the tab.
 	const scope = sharedScopeOf(browser);
 	if (scope) void recordSharedTarget(scope, info.targetId);
+	if (opts.url) await navigateOpenedTab(name, opts.url, opts, startedAt, tab);
 	return { tab, created: true };
+}
+
+/**
+ * Navigate a tab for an open, within what is left of the open's budget. A
+ * page that outlasts it fails with goto's own report while the tab stays on
+ * what loaded, instead of losing to the open's bare deadline. A tab this open
+ * created (`created`) is kept only for that timeout: a navigation that fails
+ * outright, or an open cancelled or past its deadline, closes it again so the
+ * failed open leaves nothing behind.
+ */
+async function navigateOpenedTab(
+	name: string,
+	url: string,
+	opts: AcquireTabOptions,
+	startedAt: number,
+	created?: WorkerTabSession,
+): Promise<void> {
+	const remainingMs = opts.timeoutMs - (performance.now() - startedAt);
+	const gotoMs = Math.max(1, Math.round(remainingMs - Math.min(OPEN_NAVIGATION_REPORT_MS, remainingMs / 2)));
+	try {
+		await runInTabWithSnapshot(
+			name,
+			{
+				code: `await tab.goto(${JSON.stringify(url)}, { waitUntil: ${JSON.stringify(opts.waitUntil ?? "load")} });`,
+				// tab.goto bounds itself to the cell budget less CELL_BUDGET_SLACK_MS.
+				timeoutMs: gotoMs + CELL_BUDGET_SLACK_MS,
+				signal: opts.signal,
+			},
+			{ cwd: getProjectDir() },
+		);
+	} catch (error) {
+		if (created && (opts.signal?.aborted || !(error instanceof NavigationTimeoutError))) {
+			await rollBackCreatedTab(name, created);
+			throw error;
+		}
+		if (error instanceof ToolAbortError || !(error instanceof Error) || tabs.get(name)?.state !== "alive")
+			throw error;
+		throw new ToolError(
+			`${error.message}\nTab ${JSON.stringify(name)} stays open on what loaded; reach it with browser.tab(${JSON.stringify(name)}).`,
+		);
+	}
+	// An abort that lands as the navigation completes still cancels the open.
+	if (created && opts.signal?.aborted) {
+		await rollBackCreatedTab(name, created);
+		throw new ToolAbortError("Browser tab open aborted");
+	}
+}
+
+/** Close a tab its failed open created, unless something already replaced or closed it. */
+async function rollBackCreatedTab(name: string, tab: WorkerTabSession): Promise<void> {
+	if (tabs.get(name) !== tab) return;
+	try {
+		await releaseTab(name, { kill: false });
+	} catch (error) {
+		logger.warn("Failed to close the tab of a failed browser open", {
+			name,
+			error: error instanceof Error ? error.message : String(error),
+		});
+	}
 }
 
 async function acquireCmuxTab(
@@ -810,31 +872,35 @@ async function runInTabWithSnapshot(
 			session: snapshot,
 		});
 		try {
-			return await raceWithTimeout(
+			const result = await raceWithTimeout(
 				promise,
 				opts.timeoutMs + GRACE_MS,
 				"Browser code execution hung past grace; tab killed",
 				async reason => await forceKillTab(name, reason),
 			);
+			if (result.recoverTab) {
+				const reattached = await recoverWorkerTab(
+					tab,
+					name,
+					opts.timeoutMs,
+					"Browser request interception cleanup failed; tab killed",
+				);
+				result.displays.push({
+					type: "text",
+					text: reattached
+						? "Browser request interception could not be reset after this run; the tab was reattached to a new worker. Tab state set since it was opened was reset (tab.route routes, emulation and user agent, init scripts, element ids, the request log, HAR recording, run globals), any open dialog was dismissed, and any page still loading was stopped."
+						: "Browser request interception could not be reset after this run; the tab was closed.",
+				});
+			}
+			return result;
 		} catch (error) {
 			const runTimedOut =
 				error instanceof ToolError && error.message.startsWith("Browser code execution timed out after ");
 			if (runTimedOut || error instanceof RecoverableWorkerError) {
-				try {
-					if (tab.worker.mode === "inline") {
-						const reason = runTimedOut
-							? "Browser code execution timed out; tab killed"
-							: "Browser request interception cleanup failed; tab killed";
-						await forceKillTab(name, reason);
-					} else {
-						await recycleTimedOutWorkerTab(tab, opts.timeoutMs + GRACE_MS);
-					}
-				} catch (recycleError) {
-					logger.warn("Failed to recycle browser tab worker; killing tab", {
-						error: recycleError instanceof Error ? recycleError.message : String(recycleError),
-					});
-					await forceKillTab(name, "Browser tab worker recovery failed; tab killed");
-				}
+				const reason = runTimedOut
+					? "Browser code execution timed out; tab killed"
+					: "Browser request interception cleanup failed; tab killed";
+				await recoverWorkerTab(tab, name, opts.timeoutMs, reason);
 			}
 			throw error;
 		}
@@ -844,6 +910,32 @@ async function runInTabWithSnapshot(
 		// Completion is use too: a run outlasting the idle timeout must
 		// not look stale to the sweep right after it finishes.
 		tab.lastActivityAt = Date.now();
+	}
+}
+
+/**
+ * Recycle a worker whose tab state is unknown; an inline worker shares this process, so its tab is killed instead.
+ * Resolves `true` when the tab was reattached to a new worker, `false` when it was killed.
+ */
+async function recoverWorkerTab(
+	tab: WorkerTabSession,
+	name: string,
+	timeoutMs: number,
+	reason: string,
+): Promise<boolean> {
+	try {
+		if (tab.worker.mode === "inline") {
+			await forceKillTab(name, reason);
+			return false;
+		}
+		await recycleTimedOutWorkerTab(tab, timeoutMs + GRACE_MS);
+		return true;
+	} catch (recycleError) {
+		logger.warn("Failed to recycle browser tab worker; killing tab", {
+			error: recycleError instanceof Error ? recycleError.message : String(recycleError),
+		});
+		await forceKillTab(name, "Browser tab worker recovery failed; tab killed");
+		return false;
 	}
 }
 
@@ -1418,9 +1510,6 @@ async function buildInitPayload(browser: PuppeteerBrowserHandle, opts: AcquireTa
 			downloadsPath: opts.downloadsPath,
 			userAgent: opts.userAgent,
 			ignoreHttpsErrors: opts.ignoreHttpsErrors,
-			url: opts.url,
-			waitUntil: opts.waitUntil,
-			timeoutMs: opts.timeoutMs,
 		};
 	}
 	// Connected and relay browsers are user-driven. When no target is requested,
@@ -1446,9 +1535,6 @@ async function buildInitPayload(browser: PuppeteerBrowserHandle, opts: AcquireTa
 		downloadsPath: opts.downloadsPath,
 		userAgent: opts.userAgent,
 		ignoreHttpsErrors: opts.ignoreHttpsErrors,
-		url: opts.url,
-		waitUntil: opts.waitUntil,
-		timeoutMs: opts.timeoutMs,
 		activateForScreenshot,
 	};
 }
@@ -1543,7 +1629,6 @@ async function recycleTimedOutWorkerTab(tab: WorkerTabSession, timeoutMs: number
 		// otherwise init stalls, times out, and the tab gets force-killed.
 		recover: true,
 		emulateFocus: tab.kindTag === "headless",
-		timeoutMs,
 		activateForScreenshot: tab.activateForScreenshot,
 	};
 	let worker = await spawnTabWorker();
@@ -1758,9 +1843,11 @@ function errorFromPayload(payload: RunErrorPayload): Error {
 		? new RecoverableWorkerError(payload.message)
 		: payload.isAbort
 			? new ToolAbortError()
-			: payload.isToolError
-				? new ToolError(payload.message)
-				: new Error(payload.message);
+			: payload.navigationTimeout
+				? new NavigationTimeoutError(payload.message)
+				: payload.isToolError
+					? new ToolError(payload.message)
+					: new Error(payload.message);
 	error.name = payload.name;
 	if (payload.stack) error.stack = payload.stack;
 	return error;
@@ -1880,10 +1967,10 @@ async function spawnInlineWorker(): Promise<WorkerHandle> {
 /**
  * Init a tab worker under a single listener spanning the whole init: a short
  * `setup` handshake (bounded by the cold-start guard so a stalled cold start
- * triggers the inline fallback early) and the ready wait for page acquisition
- * and the first navigation. Both phases are bounded by the time LEFT of the
- * caller's `timeoutMs` budget, measured from `deadlineStart` (performance.now()
- * when the caller's budget began): a retried attempt — the inline fallback
+ * triggers the inline fallback early) and the ready wait for page acquisition.
+ * Both phases are bounded by the time LEFT of the caller's `timeoutMs`
+ * budget, measured from `deadlineStart` (performance.now() when the caller's
+ * budget began): a retried attempt — the inline fallback
  * after a failed isolated worker — passes the same start, so total init
  * across attempts stays within the caller's timeout instead of the retry
  * restarting the clock. A headless worker's `page-created` report (the new
@@ -1893,7 +1980,7 @@ async function spawnInlineWorker(): Promise<WorkerHandle> {
  * created — a killed worker can't clean up after itself. The listener is
  * never removed between the phases: the inline transport delivers messages
  * on microtasks, so a `ready` or `init-failed` emitted right after `setup`
- * (e.g. a fast `page.goto` rejection) could otherwise reach the
+ * (e.g. a fast page-creation failure) could otherwise reach the
  * already-settled setup listener before a phase switch re-listens and be
  * dropped.
  */

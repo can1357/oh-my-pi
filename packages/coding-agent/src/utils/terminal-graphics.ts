@@ -1,6 +1,6 @@
 import { inflateSync } from "node:zlib";
 import type { ImageContent } from "@oh-my-pi/pi-ai";
-import { decodeSixelToPng } from "@oh-my-pi/pi-natives";
+import { decodeSixelToPngAsync } from "@oh-my-pi/pi-natives";
 import { MAX_IMAGE_INPUT_BYTES, convertImageToPng } from "@oh-my-pi/pi-tui/chat/image-loading";
 import { encodeRawPng, PNG_SIGNATURE } from "./png-encode";
 
@@ -15,6 +15,8 @@ const MAX_FRAME_CHARS = MAX_BASE64_CHARS + 4096;
 const MAX_FRAME_PARTS = 8192;
 const MAX_KITTY_CHUNKS = 8192;
 const MAX_SIXEL_CHARS = MAX_IMAGE_INPUT_BYTES;
+/** Any byte sequence that can start (or begin to start) a Kitty APC or sixel DCS frame. */
+const GRAPHICS_INTRODUCER = /\x1b[_P]|[\x90\x9f]/u;
 
 type FrameKind = "kitty" | "sixel";
 type ParserMode = "ground" | FrameKind | "discard";
@@ -54,6 +56,16 @@ export class TerminalGraphicsDecoder {
 
 	push(chunk: string): string {
 		if (!chunk && !this.#groundPrefix) return "";
+		// Graphics are rare: a ground-state chunk with no introducer candidate (and
+		// no trailing ESC that could start one) passes through without a scan.
+		if (
+			this.#mode === "ground" &&
+			!this.#groundPrefix &&
+			chunk.charCodeAt(chunk.length - 1) !== 0x1b &&
+			!GRAPHICS_INTRODUCER.test(chunk)
+		) {
+			return chunk;
+		}
 		let input = this.#groundPrefix + chunk;
 		this.#groundPrefix = "";
 		let output = "";
@@ -341,7 +353,7 @@ export async function encodeTerminalImage(image: ImageContent): Promise<string> 
 }
 
 async function decodeSixel(bytes: Uint8Array): Promise<ImageContent | undefined> {
-	const png = decodeSixelToPng(bytes);
+	const png = await decodeSixelToPngAsync(bytes);
 	if (png.length > MAX_IMAGE_INPUT_BYTES) return undefined;
 	return normalizePng(png);
 }

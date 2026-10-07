@@ -7,7 +7,9 @@ import { registerOAuthProvider, unregisterOAuthProvider, unregisterOAuthProvider
 import type { OAuthCredentials, OAuthLoginCallbacks } from "@oh-my-pi/pi-ai/oauth/types";
 import { setCodexAttestationProvider } from "@oh-my-pi/pi-ai/providers/openai-codex-attestation";
 import { getProviderDefinition } from "@oh-my-pi/pi-ai/registry";
-import { getEnvApiKey, isOfficialCodexApiUrl } from "@oh-my-pi/pi-ai/stream";
+import { getEnvApiKey } from "@oh-my-pi/pi-ai/env-api-key";
+import { OAuthRefreshUnavailableError } from "@oh-my-pi/pi-ai/error";
+import { isOfficialCodexApiUrl } from "@oh-my-pi/pi-ai/stream";
 import type {
 	Api,
 	Context,
@@ -46,7 +48,7 @@ import {
 	resolveOllamaModelCacheProviderId,
 } from "@oh-my-pi/pi-catalog/provider-models";
 import { toModelSpec } from "@oh-my-pi/pi-catalog/provider-models/bundled-references";
-import { modelKind, type ModelKind } from "@oh-my-pi/pi-catalog/types";
+import { apiServesKind, modelKind, type ModelKind } from "@oh-my-pi/pi-catalog/types";
 import { getAgentDir, isBunTestRuntime, logger, untilAborted, wrapFetchForExtraCa } from "@oh-my-pi/pi-utils";
 import { resolveProviderModelReference } from "../config/model-resolver";
 import { generateCodexAttestation } from "../live/attestation";
@@ -105,6 +107,7 @@ import {
 	resolveProviderBaseUrl,
 	type ProviderOverride,
 	providersWithAuthoritativeProjectCatalog,
+	unservedOverrideKind,
 } from "./model-patch";
 import {
 	BUILT_IN_DISCOVERY_CACHE_TTL_MS,
@@ -132,7 +135,12 @@ export {
 	type ProviderDiscoveryStatus,
 } from "./model-provider-discovery";
 
-import { ModelsConfigFile, type ProviderValidationModel, validateProviderConfiguration } from "./models-config";
+import {
+	getUnknownCompatKeys,
+	ModelsConfigFile,
+	type ProviderValidationModel,
+	validateProviderConfiguration,
+} from "./models-config";
 import type { ModelOverride, ModelsConfig, ProviderAuthMode } from "./models-config-schema";
 import { type Settings, settings } from "./settings";
 
@@ -275,8 +283,7 @@ export class ModelRegistry {
 	#catalogMetrics = new CatalogMetricsIndex();
 	#internedStaticModels: Map<string, Model<Api>> = new Map();
 	#providerLookupSnapshots: Map<string, Model<Api>[]> = new Map();
-	#fullKindSnapshotSource: Model<Api>[] | undefined;
-	#fullKindSnapshots: Partial<Record<ModelKind, Model<Api>[]>> = {};
+	#fullKindSnapshots = new WeakMap<Model<Api>[], Partial<Record<ModelKind, Model<Api>[]>>>();
 	#customProviderApiKeys: Map<string, string> = new Map();
 	// Every command-backed (`!cmd`) config value a provider carries — apiKey plus
 	// provider/model-override header values — keyed by provider. The 401 auth
@@ -288,7 +295,12 @@ export class ModelRegistry {
 	#customModelOverlays: CustomModelOverlay[] = [];
 	#providerOverrides: Map<string, ProviderOverride> = new Map();
 	#modelOverrides: Map<string, Map<string, ModelOverride>> = new Map();
+	// `provider/id:kind` of modelOverrides kinds already reported as unserved, so
+	// every rebuild does not log the same ignored override again.
+	#warnedUnservedOverrideKinds: Set<string> = new Set();
 	#configError: ConfigError | undefined = undefined;
+	#warnedCompatKeys = new Set<string>();
+	#configWarnings: string[] = [];
 	#modelsConfigFile: ConfigFile<ModelsConfig>;
 	#lastStaticLoadMtime: number | null = null;
 	#registeredProviderSources: Set<string> = new Set();
@@ -900,6 +912,13 @@ export class ModelRegistry {
 	 */
 	getError(): ConfigError | undefined {
 		return this.#configError;
+	}
+
+	/** Drain non-fatal file diagnostics, reporting each key path once per registry. */
+	drainConfigWarnings(): string[] {
+		const warnings = this.#configWarnings;
+		this.#configWarnings = [];
+		return warnings;
 	}
 
 	#loadModels() {
@@ -1605,6 +1624,14 @@ export class ModelRegistry {
 			};
 		}
 
+		for (const keyPath of getUnknownCompatKeys(value)) {
+			if (this.#warnedCompatKeys.has(keyPath)) continue;
+			this.#warnedCompatKeys.add(keyPath);
+			this.#configWarnings.push(
+				`Unknown compat key in ${this.#modelsConfigFile.path()}: ${keyPath} (configuration still loaded).`,
+			);
+		}
+
 		const overrides = new Map<string, ProviderOverride>();
 		const allModelOverrides = new Map<string, Map<string, ModelOverride>>();
 		const keylessProviders = new Set<string>();
@@ -2131,13 +2158,11 @@ export class ModelRegistry {
 	): Promise<ModelManagerOptions<Api>[]> {
 		const specialProviderDescriptors: Array<{
 			providerId: string;
-			authoritative: boolean;
 			resolveKey: (value: string | undefined) => string | undefined;
 			createOptions: (key: string, raw: string | undefined) => ModelManagerOptions<Api>;
 		}> = [
 			{
 				providerId: "google-antigravity",
-				authoritative: false,
 				resolveKey: extractGoogleOAuthToken,
 				createOptions: oauthToken =>
 					googleAntigravityModelManagerOptions({
@@ -2148,7 +2173,6 @@ export class ModelRegistry {
 			},
 			{
 				providerId: "google-gemini-cli",
-				authoritative: false,
 				resolveKey: extractGoogleOAuthToken,
 				createOptions: (oauthToken, raw) =>
 					googleGeminiCliModelManagerOptions({
@@ -2160,7 +2184,6 @@ export class ModelRegistry {
 			},
 			{
 				providerId: "openai-codex",
-				authoritative: true,
 				resolveKey: value => value,
 				createOptions: accessToken => {
 					// A custom endpoint (models.yml `baseUrl`) receives only a configured,
@@ -2219,7 +2242,7 @@ export class ModelRegistry {
 					descriptor.providerId,
 					strategy,
 					descriptor.providerId,
-					descriptor.authoritative,
+					AUTHORITATIVE_RUNTIME_CATALOG_PROVIDERS.has(descriptor.providerId),
 				),
 			),
 		);
@@ -2554,6 +2577,7 @@ export class ModelRegistry {
 	 * both, so the clamp must hold on both.
 	 */
 	#applyModelOverrideWithClamp(model: Model<Api>, override: ModelOverride): Model<Api> {
+		this.#warnUnservedOverrideKind(model, override);
 		const overridden = applyModelOverride(model, override);
 		if (
 			override.contextWindow === undefined ||
@@ -2565,6 +2589,21 @@ export class ModelRegistry {
 		const clamped = clampCodexContextWindow(model, overridden.contextWindow);
 		if (clamped === overridden.contextWindow) return overridden;
 		return applyModelOverride(overridden, { contextWindow: clamped });
+	}
+
+	/** Logs, once per model and kind, a `modelOverrides` kind that `applyModelOverride` ignores. */
+	#warnUnservedOverrideKind(model: Model<Api>, override: ModelOverride): void {
+		const unservedKind = unservedOverrideKind(model, override);
+		if (unservedKind === undefined) return;
+		const warningKey = `${model.provider}/${model.id}:${unservedKind}`;
+		if (this.#warnedUnservedOverrideKinds.has(warningKey)) return;
+		this.#warnedUnservedOverrideKinds.add(warningKey);
+		logger.warn("modelOverrides kind ignored: the model's api does not serve it", {
+			provider: model.provider,
+			model: model.id,
+			kind: unservedKind,
+			api: override.api ?? model.api,
+		});
 	}
 
 	#applyHardcodedModelPolicies(models: Model<Api>[]): Model<Api>[] {
@@ -2619,6 +2658,7 @@ export class ModelRegistry {
 		if (!overrides) {
 			return applyModelOverride(model, { contextWindow: 1_000_000 });
 		}
+		this.#warnUnservedOverrideKind(model, overrides);
 		return applyModelOverride(model, {
 			contextWindow: overrides.contextWindow ?? 1_000_000,
 			...overrides,
@@ -2679,14 +2719,15 @@ export class ModelRegistry {
 	getAll(kind: ModelKind | "all" = "chat"): Model<Api>[] {
 		const models = this.#ensureFullSnapshot();
 		if (kind === "all") return models;
-		if (this.#fullKindSnapshotSource !== models) {
-			this.#fullKindSnapshotSource = models;
-			this.#fullKindSnapshots = {};
+		let snapshots = this.#fullKindSnapshots.get(models);
+		if (!snapshots) {
+			snapshots = {};
+			this.#fullKindSnapshots.set(models, snapshots);
 		}
-		const cached = this.#fullKindSnapshots[kind];
+		const cached = snapshots[kind];
 		if (cached) return cached;
 		const filtered = models.filter(model => modelKind(model) === kind);
-		this.#fullKindSnapshots[kind] = filtered;
+		snapshots[kind] = filtered;
 		return filtered;
 	}
 
@@ -2986,20 +3027,35 @@ export class ModelRegistry {
 	}
 
 	/**
-	 * Resolve a provider's request credential or the no-auth sentinel.
+	 * Resolve a provider's credential or the no-auth sentinel, for availability
+	 * checks. A transient OAuth refresh failure resolves `undefined` (like
+	 * `authStorage.keys.get`); request paths use
+	 * {@link getApiKeyWithCredentialForProvider}, which surfaces it.
 	 *
-	 * `options.forceRefresh` powers step (b) of the auth-retry policy — it
-	 * re-mints the session-sticky OAuth token even when the cached copy still
-	 * looks valid. `options.signal` is threaded into any broker-bound refresh.
+	 * `options.forceRefresh` re-mints the session-sticky OAuth token even when
+	 * the cached copy still looks valid. `options.signal` is threaded into any
+	 * broker-bound refresh.
 	 */
 	async getApiKeyForProvider(
 		provider: string,
 		sessionId?: string,
 		options?: AuthApiKeyOptions,
 	): Promise<string | undefined> {
-		return (await this.getApiKeyWithCredentialForProvider(provider, sessionId, options))?.apiKey;
+		try {
+			return (await this.getApiKeyWithCredentialForProvider(provider, sessionId, options))?.apiKey;
+		} catch (error) {
+			if (error instanceof OAuthRefreshUnavailableError) return undefined;
+			throw error;
+		}
 	}
 
+	/**
+	 * Resolve a provider's request credential or the no-auth sentinel.
+	 *
+	 * `options.forceRefresh` powers step (b) of the auth-retry policy. Rejects
+	 * with `OAuthRefreshUnavailableError` (transient, retryable) when OAuth
+	 * refresh failed with a retryable error and nothing else can serve.
+	 */
 	async getApiKeyWithCredentialForProvider(
 		provider: string,
 		sessionId?: string,
@@ -3042,6 +3098,16 @@ export class ModelRegistry {
 			typeof target === "string"
 				? createApiKeyResolver(this, target, options)
 				: createApiKeyResolver(this, target.provider, { ...options, baseUrl: target.baseUrl, modelId: target.id });
+		return this.settleCommandKeyOnAbort(provider, resolve);
+	}
+
+	/**
+	 * `resolve` with {@link resolver}'s abort handling: for a provider whose apiKey
+	 * is a `!command`, the initial resolve settles as soon as the request's signal
+	 * aborts instead of waiting on the command. Other providers get `resolve`
+	 * itself. A registry view that builds its own resolvers wraps them with this.
+	 */
+	settleCommandKeyOnAbort(provider: string, resolve: ApiKeyResolver): ApiKeyResolver {
 		if (!this.hasCommandBackedApiKey(provider)) return resolve;
 		return async ctx => (ctx.error === undefined ? untilAborted(ctx.signal, async () => resolve(ctx)) : resolve(ctx));
 	}
@@ -3054,17 +3120,26 @@ export class ModelRegistry {
 	 * keep {@link resolver}, where such a request fails at once as a missing key.
 	 */
 	turnResolver(model: ApiKeyResolverModel, sessionId?: string): ApiKeyResolver {
-		const resolve = this.resolver(model, sessionId);
+		return this.failCommandKeyRetryably(model.provider, this.resolver(model, sessionId));
+	}
+
+	/**
+	 * `resolve` as {@link turnResolver} hands it out: an initial resolve that
+	 * returns no key throws {@link ApiKeyCommandError} when the provider's apiKey
+	 * is a `!command`. A registry view that builds its own resolvers wraps them
+	 * with this.
+	 */
+	failCommandKeyRetryably(provider: string, resolve: ApiKeyResolver): ApiKeyResolver {
 		return async ctx => {
 			const resolved = await resolve(ctx);
 			if (
 				ctx.error === undefined &&
 				resolvedApiKeyBearer(resolved) === undefined &&
-				this.retriesFailedCommandKey(model.provider)
+				this.retriesFailedCommandKey(provider)
 			) {
 				throw new ApiKeyCommandError(
-					model.provider,
-					commandFailureRetryAfterMs(this.#customProviderApiKeys.get(model.provider)),
+					provider,
+					commandFailureRetryAfterMs(this.#customProviderApiKeys.get(provider)),
 				);
 			}
 			return resolved;
@@ -3358,7 +3433,18 @@ export class ModelRegistry {
 							config.remoteCompaction,
 							modelDef as CustomModelDefinitionLike,
 						);
-						if (overlay) results.push(finalizeCustomModel(overlay, { useDefaults: true }));
+						if (!overlay) continue;
+						// Static registrations fail validation on this mismatch; a live row is dropped instead.
+						if (overlay.kind !== undefined && !apiServesKind(overlay.api, overlay.kind)) {
+							logger.warn("fetchDynamicModels row dropped: its api does not serve its kind", {
+								provider: providerName,
+								model: overlay.id,
+								kind: overlay.kind,
+								api: overlay.api,
+							});
+							continue;
+						}
+						results.push(finalizeCustomModel(overlay, { useDefaults: true }));
 					}
 					return results.map(toModelSpec);
 				},
@@ -3483,6 +3569,7 @@ export interface ProviderConfigInput {
 		id: string;
 		name: string;
 		api?: Api;
+		kind?: ModelKind;
 		baseUrl?: string;
 		reasoning: boolean;
 		thinking?: ThinkingConfig;

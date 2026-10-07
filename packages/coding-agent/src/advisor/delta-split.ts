@@ -93,7 +93,6 @@ export function renderAdvisorDeltaChunks(
 		for (let i = 0; i < chunks.length; i++) chunks[i].content[0].text = individuallyObfuscated[i];
 	}
 	chunks[0].content[0].text = `${heading}\n\n${chunks[0].content[0].text}`;
-	if (chunks.length === 0) return null;
 	if (opts.wip) {
 		const last = chunks[chunks.length - 1];
 		last.content[0].text += `\n\n---\n\n[in progress — more steps follow]`;

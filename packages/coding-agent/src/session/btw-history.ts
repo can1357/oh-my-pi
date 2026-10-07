@@ -85,6 +85,14 @@ function historyDirectory(artifactsDir: string, scope: string | undefined): stri
 	return path.join(root, "sessions", segment);
 }
 
+/** The topic on disk is missing or was rewritten since this store read it; retrying the same write can never succeed. */
+export class BtwHistoryConflictError extends Error {
+	constructor(readonly recordId: string) {
+		super(`BTW history conflict for ${recordId}; reopen history before retrying`);
+		this.name = "BtwHistoryConflictError";
+	}
+}
+
 /** Session-local sidecar storage; never reads or writes the main session journal. */
 export class BtwHistoryStore {
 	readonly #directory: string | undefined;
@@ -168,7 +176,7 @@ export class BtwHistoryStore {
 			// Missing records and new-id collisions are conflicts, not blind inserts.
 			const stored = await readRecord(filePath);
 			if (stored?.revision !== this.#revisions.get(snapshot.id)) {
-				throw new Error(`BTW history conflict for ${snapshot.id}; reopen history before retrying`);
+				throw new BtwHistoryConflictError(snapshot.id);
 			}
 			const temporaryPath = `${filePath}.${process.pid}.${crypto.randomUUID()}.tmp`;
 			try {

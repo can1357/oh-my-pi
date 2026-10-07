@@ -615,4 +615,54 @@ describe("queued message preparation", () => {
 			["opening follow-up", "context 1", "idle steering", "context 2"],
 		]);
 	});
+
+	it("withdrawn batches stay out of the aborted run but a later run records them", async () => {
+		// Esc between dequeue and the next model call: the aborted run records neither the withdrawn
+		// input nor its prepared context — in the transcript or in agent_end — yet the same message
+		// queued again is a later run's input.
+		const mock = createMockModel({ handler: { content: ["done"] } });
+		const agent = new Agent({ streamFn: mock.stream, initialState: { model: mock.model }, steeringMode: "all" });
+		const first = createUserMessage("first steer");
+		const second = createUserMessage("second steer");
+		const followUp = createUserMessage("follow-up");
+		agent.setOnBeforeYield(() => {
+			agent.setOnBeforeYield(undefined);
+			agent.steer(first);
+			agent.steer(second);
+			agent.followUp(followUp);
+		});
+		agent.prepareQueuedMessages = messages => ({
+			commit: () => [createUserMessage(`context for ${userTexts(messages).join(" + ")}`)],
+		});
+		const reached = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		let calls = 0;
+		const removeGate = agent.addBeforeModelCallHook(async () => {
+			if (calls++ === 0) return;
+			reached.resolve();
+			await release.promise;
+		});
+		const ends: AgentMessage[][] = [];
+		agent.subscribe(event => {
+			if (event.type === "agent_end") ends.push(event.messages);
+		});
+		const running = agent.prompt("ordinary");
+		await reached.promise;
+
+		expect(agent.withdrawUndeliveredQueuedMessages()).toEqual({ steering: [first, second], followUp: [followUp] });
+		agent.abort();
+		release.resolve();
+		await running;
+		removeGate();
+
+		expect(userTexts(agent.state.messages)).toEqual(["ordinary"]);
+		expect(userTexts(ends[0])).toEqual(["ordinary"]);
+		expect(agent.hasQueuedMessages()).toBe(false);
+
+		agent.prepareQueuedMessages = undefined;
+		agent.steer(first);
+		await agent.continue();
+		expect(userTexts(agent.state.messages)).toEqual(["ordinary", "first steer"]);
+		expect(ends[1]).toContain(first);
+	});
 });
