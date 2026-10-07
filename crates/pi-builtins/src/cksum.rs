@@ -1111,7 +1111,7 @@ impl LineFormat {
 		// openssl's tagged format does not put a space before (filename)
 
 		let par_idx = rest.iter().position(|&b| b == b'(')?;
-		let sub_case = if rest[par_idx - 1] == b' ' {
+		let sub_case = if par_idx > 0 && rest[par_idx - 1] == b' ' {
 			SubCase::Posix
 		} else {
 			SubCase::OpenSSL
@@ -1836,6 +1836,15 @@ mod tests {
     use std::ffi::OsString;
 
     use super::*;
+
+    #[test]
+    fn leading_paren_line_is_rejected_not_panicked() {
+        // The tagged-format parser finds the first '(' at index 0 when the
+        // remainder starts with one; rest[par_idx - 1] used to underflow there
+        // and panic the whole run instead of rejecting the line.
+        assert!(LineFormat::parse_algo_based(b"(file) = d41d8cd98f00b204e9800998ecf8427e").is_none());
+        assert!(LineFormat::parse_algo_based(b"((file) = d41d8cd98f00b204e9800998ecf8427e").is_none());
+    }
 
     #[test]
     fn test_algo_based_parser() {

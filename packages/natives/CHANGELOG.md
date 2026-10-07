@@ -18,6 +18,10 @@
 
 - Fixed background shell builtins and other in-process commands so they terminate when their subshell exits and can be stopped with `kill %N`, matching the behavior of external commands.
 
+### Fixed
+
+- Fixed `cksum --check` panicking on a tagged-format line that starts with `(` instead of rejecting the line
+
 ## [18.7.0] - 2026-10-06
 
 ### Breaking Changes
