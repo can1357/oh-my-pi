@@ -241,7 +241,7 @@ export class ModelControls {
 		this.#host.modelRegistry.clearSuppressedSelector(formatModelStringWithRouting(targetModel));
 		this.#host.clearActiveRetryFallback();
 		await this.#host.setModelWithProviderSessionReset(targetModel);
-		this.#host.sessionManager.appendModelChange(`${targetModel.provider}/${targetModel.id}`, role);
+		this.#host.sessionManager.appendModelChange(formatModelStringWithRouting(targetModel), role);
 		if (options?.persist) {
 			this.#host.settings.setModelRole(
 				role,
@@ -288,7 +288,7 @@ export class ModelControls {
 		this.#host.clearActiveRetryFallback();
 		await this.#host.setModelWithProviderSessionReset(targetModel, selection);
 		this.#host.sessionManager.appendModelChange(
-			`${targetModel.provider}/${targetModel.id}`,
+			options?.ephemeral ? `${targetModel.provider}/${targetModel.id}` : formatModelStringWithRouting(targetModel),
 			options?.ephemeral ? EPHEMERAL_MODEL_CHANGE_ROLE : "temporary",
 		);
 		this.#host.settings.getStorage()?.recordModelUsage(`${targetModel.provider}/${targetModel.id}`);
@@ -447,7 +447,7 @@ export class ModelControls {
 		this.#host.modelRegistry.clearSuppressedSelector(formatModelStringWithRouting(next.model));
 		this.#host.clearActiveRetryFallback();
 		await this.#host.setModelWithProviderSessionReset(next.model);
-		this.#host.sessionManager.appendModelChange(`${next.model.provider}/${next.model.id}`);
+		this.#host.sessionManager.appendModelChange(formatModelStringWithRouting(next.model));
 		this.#host.settings.getStorage()?.recordModelUsage(`${next.model.provider}/${next.model.id}`);
 
 		// Apply the scoped model's configured thinking level, preserving auto.
@@ -478,7 +478,7 @@ export class ModelControls {
 		this.#host.modelRegistry.clearSuppressedSelector(formatModelStringWithRouting(nextModel));
 		this.#host.clearActiveRetryFallback();
 		await this.#host.setModelWithProviderSessionReset(nextModel);
-		this.#host.sessionManager.appendModelChange(`${nextModel.provider}/${nextModel.id}`);
+		this.#host.sessionManager.appendModelChange(formatModelStringWithRouting(nextModel));
 		this.#host.settings.getStorage()?.recordModelUsage(`${nextModel.provider}/${nextModel.id}`);
 		// Re-apply the current thinking level (or auto) for the newly selected model
 		this.#reapplyThinkingLevel();

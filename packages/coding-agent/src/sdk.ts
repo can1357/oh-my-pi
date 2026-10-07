@@ -2932,8 +2932,12 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					if (resolved.model) {
 						return [
 							{
+								// Rebuild the pattern from the resolved model: `resolveCliModel`
+								// echoes the normalized bare `provider/id` selector, which drops a
+								// routing/funding modifier (`@credits`, aggregator `@upstream`)
+								// and would re-resolve below without it.
 								pattern: formatModelSelectorValue(
-									resolved.selector ?? formatModelStringWithRouting(resolved.model),
+									formatModelStringWithRouting(resolved.model),
 									resolved.thinkingLevel,
 								),
 								retryFallback: undefined,
@@ -4439,7 +4443,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		} else {
 			// Save initial model, thinking level, and service tier for new sessions so they can be restored on resume.
 			if (model) {
-				sessionManager.appendModelChange(`${model.provider}/${model.id}`);
+				sessionManager.appendModelChange(formatModelStringWithRouting(model));
 			}
 			if (!autoThinking) {
 				// Do not write the `auto` selector before the first turn resolves; auto

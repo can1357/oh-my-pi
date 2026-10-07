@@ -1682,10 +1682,30 @@ export function resolveSessionModelSelector(
 	selector: string,
 ): { model: Model<Api>; thinkingLevel?: ConfiguredThinkingLevel } | undefined {
 	const parsed = parseSessionModelSelector(modelRegistry, selector);
-	if (!parsed) return undefined;
-	const model = modelRegistry.find(parsed.provider, parsed.id);
+	if (parsed) {
+		const model = modelRegistry.find(parsed.provider, parsed.id);
+		if (model && modelRegistry.hasConfiguredAuth(model)) {
+			return { model, thinkingLevel: parsed.thinkingLevel };
+		}
+	}
+	// Saved selections carry their routing/funding modifier (`provider/id@credits`,
+	// aggregator `provider/id@upstream`), which the literal lookup above cannot
+	// see because the modifier rides inside the id. Resolve the base model
+	// through the registry, then re-apply the modifier with the same grammar —
+	// and the same `@credits` validation — a live selector gets.
+	const routing = splitUpstreamRouting(selector);
+	if (!routing) return undefined;
+	const base = parseSessionModelSelector(modelRegistry, routing.base);
+	if (!base) return undefined;
+	const model = modelRegistry.find(base.provider, base.id);
 	if (!model || !modelRegistry.hasConfiguredAuth(model)) return undefined;
-	return { model, thinkingLevel: parsed.thinkingLevel };
+	if (supportsUpstreamRouting(model)) {
+		return { model: applyUpstreamRouting(model, routing.upstream), thinkingLevel: base.thinkingLevel };
+	}
+	if (routing.upstream === CREDITS_FUNDING_ROUTE && defaultUsageProvider(model.provider)?.supportsCreditOverage) {
+		return { model: { ...model, usageFunding: "credits" }, thinkingLevel: base.thinkingLevel };
+	}
+	return undefined;
 }
 
 /**
