@@ -173,3 +173,42 @@ describe("real read results through the supersede pass", () => {
 		expect(result.prunedCount).toBe(pruned);
 	});
 });
+
+describe("covered reads through the supersede pass", () => {
+	test("a superseded read cannot vouch for an older version it matched", async () => {
+		const file = path.join(cwd, "chain.txt");
+		const lines = (changed: boolean) =>
+			Array.from({ length: 10 }, (_, i) => `chain ${i + 1}${changed && (i === 1 || i === 2) ? " v2" : ""}`).join(
+				"\n",
+			);
+		await Bun.write(file, lines(false));
+		const narrow = await reader.execute("narrow", { path: "chain.txt:2-3" });
+		const wideOld = await reader.execute("wide-old", { path: "chain.txt:1-5" });
+		await Bun.write(file, lines(true));
+		const wideNew = await reader.execute("wide-new", { path: "chain.txt:1-5" });
+		const entries = [
+			...readEntries("narrow", "chain.txt:2-3", narrow),
+			...readEntries("wide-old", "chain.txt:1-5", wideOld),
+			...readEntries("wide-new", "chain.txt:1-5", wideNew),
+		];
+
+		const result = pruneSupersededToolResults(entries, new Tokenizer(), {
+			supersedeKey: readToolSupersedeKey,
+			supersedeComplete: isCompleteReadResult,
+			supersedeShown: shownReadLines,
+			protectedTools: [],
+			now: Date.now(),
+		});
+
+		// The new wide read replaces the old one by key. The narrow read showed the
+		// old lines 2-3, which only the replaced read repeated, so it must stay.
+		expect(result.prunedCount).toBe(1);
+		const kept = entries
+			.filter(
+				entry =>
+					entry.type === "message" && entry.message.role === "toolResult" && entry.message.prunedAt === undefined,
+			)
+			.map(entry => entry.id);
+		expect(kept).toEqual(["narrow-result", "wide-new-result"]);
+	});
+});

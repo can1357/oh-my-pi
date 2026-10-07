@@ -320,15 +320,19 @@ function collectSupersededResults(
 			newer.complete = supersedeComplete?.(message) ?? true;
 		}
 		newerByKey.set(key, newer);
+		if (superseded) {
+			candidates.push({
+				entry: entry as SessionMessageEntry,
+				message,
+				index: i,
+				tokens: tokenizer.countMessage(message as AgentMessage),
+				notice: SUPERSEDED_NOTICE,
+			});
+			continue;
+		}
+		// Only a result that stays in context vouches for the lines it showed: one
+		// superseded here may be blanked, and then the text it matched is gone.
 		if (shown) newerShown.push(shown);
-		if (!superseded) continue;
-		candidates.push({
-			entry: entry as SessionMessageEntry,
-			message,
-			index: i,
-			tokens: tokenizer.countMessage(message as AgentMessage),
-			notice: SUPERSEDED_NOTICE,
-		});
 	}
 	return candidates.reverse();
 }
