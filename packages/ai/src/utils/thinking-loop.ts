@@ -33,6 +33,10 @@
  * 4. **Gemini summary-header runaway** — handled separately by
  *    {@link GeminiHeaderRunDetector}.
  *
+ * The semantic heuristics (2, 3) judge prose only: code-shaped lines are dropped
+ * before analysis because legitimate code repeats one keyword skeleton with
+ * different literals, and numeric tokens are stripped during normalization.
+ *
  * Scope: exact cycles are guarded for every model; semantic heuristics remain
  * limited to Gemini, DeepSeek, and Grok family streams. Thinking stays armed
  * after a tool call starts — xAI/Grok can keep emitting `thinking_delta` after
@@ -107,6 +111,13 @@ const LEX_STALL_MIN_RUN = 8;
  *  matchAll, so never used with the stateful test(). */
 const CONCRETE_ANCHOR =
 	/`[^`]+`|\b\w{2,}\.[a-zA-Z]\w{0,4}\b|[\w-]+(?:\/[\w-]+){2,}|\b\w+_\w+\b|\b[a-z]+[A-Z]\w*\b|\b[A-Z][a-z]+[A-Z]\w*\b/g;
+
+/** A whole line shaped like code rather than prose: a fence marker, an indented
+ *  line that is not a nested list item, or a line ending in a block, statement,
+ *  or markup delimiter. Classified per line rather than by fence state because Gemini
+ *  thought summaries routinely end inside an unclosed fence; tracking fences
+ *  would hide every later prose paragraph from the heuristics. */
+const CODE_LINE = /^(?:[ \t]*```.*|(?: {2,}|\t)(?![ \t]*(?:[-*+]|\d+[.)])[ \t]).*|.*[{}[\](;,>][ \t]*)$/gm;
 
 /**
  * True when resolved compatibility policy enables semantic loop heuristics for
@@ -222,9 +233,13 @@ export class ThinkingLoopDetector {
 	#consumeSegment(raw: string): string | null {
 		// Reasoning-summarizer titles ("**Maintaining Momentum**", "## Heading")
 		// are per-thought formatting, not chain-of-thought; their ever-changing
-		// wording would otherwise mask a loop by inflating novelty. Strip them
-		// before analysis (a title-only segment then falls below the length gate).
-		const segment = raw.replace(/^[ \t]*#{1,6}[ \t].*$/gm, "").replace(/^[ \t]*\*{2,3}.+?\*{2,3}[ \t]*$/gm, "");
+		// wording would otherwise mask a loop by inflating novelty. Strip them and
+		// code lines before analysis (a title- or code-only segment then falls below
+		// the length gate).
+		const segment = raw
+			.replace(CODE_LINE, "")
+			.replace(/^[ \t]*#{1,6}[ \t].*$/gm, "")
+			.replace(/^[ \t]*\*{2,3}.+?\*{2,3}[ \t]*$/gm, "");
 		const normalized = normalizeSegment(segment);
 		if (normalized.length < SEGMENT_MIN_NORM_CHARS) return null;
 

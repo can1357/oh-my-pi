@@ -114,14 +114,19 @@ const FORMAT_ROUTES: Record<string, { module: FormatModule; label: string }> = {
  * bucket and can't trample each other's prefix-tree entries.
  *
  * Anthropic-backed requests ignore `sessionId`; the key is harmless there.
+ *
+ * The derivation MUST stay byte-stable: AuthStorage persists credential pins
+ * under this id, so changing it re-routes every in-flight conversation.
+ * `toolsJson` lets the caller share one `JSON.stringify(context.tools)` with
+ * {@link AuthGatewaySessionStateStore.acquire}.
  */
-function deriveSessionId(modelId: string, context: Context): string {
+function deriveSessionId(modelId: string, context: Context, toolsJson = serializeTools(context)): string {
 	const parts: string[] = [modelId];
 	if (context.systemPrompt && context.systemPrompt.length > 0) {
 		parts.push(context.systemPrompt.join("\n\n"));
 	}
-	if (context.tools && context.tools.length > 0) {
-		parts.push(JSON.stringify(context.tools));
+	if (toolsJson !== undefined) {
+		parts.push(toolsJson);
 	}
 	const first = context.messages?.[0];
 	if (first) {
@@ -134,6 +139,11 @@ function deriveSessionId(modelId: string, context: Context): string {
 	// The 36-char UUID flows through unchanged:
 	// `normalizeOpenAIPromptCacheKey` accepts ≤64 chars verbatim.
 	return deterministicUuid(seed);
+}
+
+/** `JSON.stringify(context.tools)`, or `undefined` when the request declares none. */
+function serializeTools(context: Context): string | undefined {
+	return context.tools && context.tools.length > 0 ? JSON.stringify(context.tools) : undefined;
 }
 
 function buildStreamOptions(parsed: ParsedFormatRequest, api: Api, signal: AbortSignal): SimpleStreamOptions {
@@ -341,7 +351,8 @@ async function handleFormatEndpoint(
 	// modelId + system + tools + first message. Mirrored into
 	// streamOpts.sessionId / promptCacheKey by `buildStreamOptions`.
 	const clientKey = normalizeClientSessionKey(parsed.options.promptCacheKey);
-	const sessionId = clientKey ?? deriveSessionId(parsed.modelId, parsed.context);
+	const toolsJson = clientKey === undefined ? serializeTools(parsed.context) : undefined;
+	const sessionId = clientKey ?? deriveSessionId(parsed.modelId, parsed.context, toolsJson);
 	parsed.options.promptCacheKey = sessionId;
 
 	// pi-ai's stream() does NOT consult AuthStorage — the caller (us) is
@@ -364,6 +375,7 @@ async function handleFormatEndpoint(
 		clientKey,
 		model,
 		context: parsed.context,
+		toolsJson,
 		account: resolveGatewayAccount(bootOpts.storage, model.provider, sessionId, apiKey.apiKey),
 	});
 	streamOpts.providerSessionState = lease.states;
@@ -538,7 +550,8 @@ async function handlePiNative(
 	// the next turn of this conversation reuses the same credential until
 	// it hits a usage cap, then markUsageLimitReached can hand off.
 	const clientKey = normalizeClientSessionKey(parsed.options.sessionId);
-	const sessionId = clientKey ?? deriveSessionId(parsed.modelId, parsed.context);
+	const toolsJson = clientKey === undefined ? serializeTools(parsed.context) : undefined;
+	const sessionId = clientKey ?? deriveSessionId(parsed.modelId, parsed.context, toolsJson);
 	parsed.options.sessionId = sessionId;
 
 	const apiKey = await resolveGatewayApiKey(bootOpts.storage, model, sessionId, controller.signal, peer);
@@ -554,6 +567,7 @@ async function handlePiNative(
 		clientKey,
 		model,
 		context: parsed.context,
+		toolsJson,
 		account: resolveGatewayAccount(bootOpts.storage, model.provider, sessionId, apiKey.apiKey),
 	});
 	// Build the SimpleStreamOptions actually handed to `streamSimple`. We

@@ -131,6 +131,61 @@ describe("model cache write churn", () => {
 		expect(entry?.authoritative).toBe(false);
 	});
 
+	/** Serialized `models` payload for `ids`, as this binary writes it. */
+	function payloadFor(ids: string[]): string {
+		const otherPath = path.join(tempDir, "payload-source.db");
+		writeModelCache(
+			"rewrite-test",
+			1_000,
+			ids.map(id => model(id)),
+			true,
+			"fp",
+			otherPath,
+		);
+		const row = payloadRow(otherPath, "rewrite-test");
+		if (!row) throw new Error("expected payload row");
+		return row.models;
+	}
+
+	it("re-reads a row an older binary replaced without recording its payload hash", () => {
+		writeModelCache("rewrite-test", 1_000, [model("a")], true, "fp", dbPath);
+		expect(readModelCache("rewrite-test", TTL_MS, () => 1_000, dbPath)?.models.map(m => m.id)).toEqual(["a"]);
+		const replacement = payloadFor(["a", "legacy"]);
+		const db = new Database(dbPath);
+		db.run(
+			`INSERT OR REPLACE INTO model_cache (
+				provider_id, version, materialization_policy, updated_at, authoritative, static_fingerprint,
+				header_omitted_model_ids, unrestorable_header_model_ids, header_restore_version, models
+			)
+			SELECT provider_id, version, materialization_policy, updated_at, authoritative, static_fingerprint,
+				header_omitted_model_ids, unrestorable_header_model_ids, header_restore_version, ?
+			FROM model_cache WHERE provider_id = 'rewrite-test'`,
+			[replacement],
+		);
+		db.close();
+		expect(readModelCache("rewrite-test", TTL_MS, () => 1_000, dbPath)?.models.map(m => m.id)).toEqual([
+			"a",
+			"legacy",
+		]);
+	});
+
+	it("re-reads and rewrites a payload edited in place", () => {
+		writeModelCache("rewrite-test", 1_000, [model("a")], true, "fp", dbPath);
+		expect(readModelCache("rewrite-test", TTL_MS, () => 1_000, dbPath)?.models.map(m => m.id)).toEqual(["a"]);
+		const edited = payloadFor(["a", "edited"]);
+		const db = new Database(dbPath);
+		db.run("UPDATE model_cache SET models = ? WHERE provider_id = 'rewrite-test'", [edited]);
+		db.close();
+		expect(readModelCache("rewrite-test", TTL_MS, () => 1_000, dbPath)?.models.map(m => m.id)).toEqual([
+			"a",
+			"edited",
+		]);
+
+		// Writing the original snapshot again must replace the edited row, not skip it as unchanged.
+		writeModelCache("rewrite-test", 1_000, [model("a")], true, "fp", dbPath);
+		expect(readModelCache("rewrite-test", TTL_MS, () => 1_000, dbPath)?.models.map(m => m.id)).toEqual(["a"]);
+	});
+
 	it("does not re-persist an unchanged snapshot while discovery keeps failing", async () => {
 		let online = true;
 		let clock = 10_000;

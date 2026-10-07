@@ -731,17 +731,28 @@ export function queryRows(
 	const validatedWhere = validateWhereClause(opts.where);
 	const whereClause = validatedWhere ? ` WHERE ${validatedWhere}` : "";
 	const orderClause = resolveOrderClause(opts.order, columns);
-	const countSql = `SELECT COUNT(*) AS count FROM ${quoteSqliteIdentifier(table)}${whereClause}`;
 	const selectSql = `SELECT * FROM ${quoteSqliteIdentifier(table)}${whereClause}${orderClause} LIMIT ? OFFSET ?`;
-	const totalCount = db.query<SqliteCountRow, []>(countSql).get()?.count ?? 0;
 	const statement = db.query<SqliteRow, SQLQueryBindings[]>(selectSql);
 	if (statement.paramsCount !== 2) {
 		throw new ToolError(
 			"SQLite where clause changed the expected pagination parameters; use q=SELECT ... for raw SQL",
 		);
 	}
-	const rows = statement.all(opts.limit, opts.offset);
-	return { columns, rows, totalCount };
+	const countRows = (): number =>
+		db.query<SqliteCountRow, []>(`SELECT COUNT(*) AS count FROM ${quoteSqliteIdentifier(table)}${whereClause}`).get()
+			?.count ?? 0;
+	if (!Number.isSafeInteger(opts.limit) || opts.limit < 1 || !Number.isSafeInteger(opts.offset) || opts.offset < 0) {
+		const totalCount = countRows();
+		return { columns, rows: statement.all(opts.limit, opts.offset), totalCount };
+	}
+	// Fetch one row past the page: a page that ends the result set already knows
+	// its exact total, so only a page with rows behind it (or an offset past the
+	// end) pays for the full `COUNT(*)` scan.
+	const fetched = statement.all(opts.limit + 1, opts.offset);
+	const hasMore = fetched.length > opts.limit;
+	const rows = hasMore ? fetched.slice(0, opts.limit) : fetched;
+	const endsResultSet = !hasMore && (rows.length > 0 || opts.offset === 0);
+	return { columns, rows, totalCount: endsResultSet ? opts.offset + rows.length : countRows() };
 }
 
 export function getRowByKey(

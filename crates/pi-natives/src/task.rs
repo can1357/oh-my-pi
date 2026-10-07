@@ -76,7 +76,8 @@ impl CancelToken {
 		let mut result = Self { core: core_cancel::CancelToken::new(timeout_ms) };
 		if let Some(raw_signal) = signal {
 			// `on_abort` only fires for a future JS `abort` event. Do not wrap an
-			// already-aborted signal: napi's wrapper replaces its `onabort` handler.
+			// already-aborted signal: napi's wrapper replaces its `onabort`
+			// handler.
 			if signal_aborted(&raw_signal) {
 				result.emplace_abort_token().abort(AbortReason::Signal);
 			} else if let Ok(signal) = AbortSignal::from_unknown(raw_signal) {

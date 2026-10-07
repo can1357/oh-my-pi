@@ -2,7 +2,9 @@
  * Generate session titles using a smol, fast model.
  */
 import { dlopen, FFIType, ptr } from "bun:ffi";
+import * as os from "node:os";
 import * as path from "node:path";
+import * as url from "node:url";
 
 import {
 	type Api,
@@ -15,6 +17,7 @@ import {
 import { StreamMarkupHealing } from "@oh-my-pi/pi-ai/utils/stream-markup-healing";
 import { writeTerminalSequence } from "@oh-my-pi/pi-tui";
 import { isNativeRendering, onNativeRenderingChange } from "@oh-my-pi/pi-tui/native/state";
+import { theme } from "@oh-my-pi/pi-tui/theme";
 import { SPINNER_FRAMES } from "@oh-my-pi/pi-tui/theme/symbols";
 import { $env, isTerminalHeadless, isWsl, logger, prompt } from "@oh-my-pi/pi-utils";
 import type { ModelRegistry } from "../config/model-registry";
@@ -23,6 +26,8 @@ import { roleCandidatePool } from "../config/model-roles";
 import { formatModelStringWithRouting } from "../config/model-resolver";
 import { collectOnlineTinyCandidates, expandOnlineTinyModelFallbacks } from "../tiny/online-candidates";
 import type { Settings } from "../config/settings";
+import type { TitleIcons } from "./title-settings";
+import type { SessionTitleCard } from "../session/session-entries";
 import titleMarkerInstruction from "../prompts/system/title-marker-instruction.md" with { type: "text" };
 import titleSystemPrompt from "../prompts/system/title-system.md" with { type: "text" };
 import { formatTitleUserMessage } from "../tiny/message-preproc";
@@ -30,6 +35,7 @@ import { isLowSignalTitleInput, normalizeGeneratedTitle } from "../tiny/text";
 import { tinyTitleClient } from "../tiny/title-client";
 
 import { cfgRetryModelFallback } from "../session/settings";
+import { formatCardTitle } from "./title-card";
 
 const TITLE_SYSTEM_PROMPT = prompt.render(titleSystemPrompt);
 const TITLE_MARKER_INSTRUCTION = prompt.render(titleMarkerInstruction);
@@ -632,7 +638,16 @@ function writeTerminalTitle(title: string, recomposeStaticOnFailure = false): vo
 	lastTerminalTitle = next;
 }
 
-export function setSessionTerminalTitle(sessionName: string | undefined, cwd?: string): void {
+/**
+ * Set the session's base terminal title. With a `card` (the session manager's
+ * `getSessionTitleCard()`) the session name is shown in the card form
+ * `<icon> <CODE>: <name>` that Tern indexes parked panes by, unless `title.icons`
+ * is `boring`. Under `nf+emoji` the icon is the card's Nerd Fonts glyph only
+ * while a TSP terminal renders the title and the effective symbol preset is
+ * `nerd` (forced while a Tern surface is live); window titles elsewhere render in
+ * the OS UI font, so they get the card's emoji.
+ */
+export function setSessionTerminalTitle(sessionName: string | undefined, cwd?: string, card?: SessionTitleCard): void {
 	// An authoritative session title (rename, new session, focus swap) supersedes
 	// any extension override so the base title tracks the real session again.
 	//
@@ -645,43 +660,94 @@ export function setSessionTerminalTitle(sessionName: string | undefined, cwd?: s
 	// explicit terminal-ownership path, releases the latch.
 	terminalTitleRuntime.extensionOverride = undefined;
 	terminalTitleRuntime.sessionName = sanitizeTerminalTitlePart(sessionName);
-	terminalTitleRuntime.label = terminalTitleRuntime.sessionName ?? getFallbackTerminalTitle(cwd);
+	terminalTitleRuntime.card = terminalTitleRuntime.sessionName ? card : undefined;
+	terminalTitleRuntime.label =
+		terminalTitleRuntime.sessionName === undefined
+			? getFallbackTerminalTitle(cwd)
+			: formatCardTitle(terminalTitleRuntime.sessionName, card, iconsWithoutNerdFonts());
 	emitTerminalTitle();
-	reportTernSessionFile();
+	reportTernSession();
+}
+
+/**
+ * Choose how the session title shows its card icon (driven by `title.icons`).
+ * Re-renders the current title in the new style.
+ */
+export function setTerminalTitleIcons(icons: TitleIcons): void {
+	if (icons === terminalTitleRuntime.icons) return;
+	terminalTitleRuntime.icons = icons;
+	const { sessionName, card } = terminalTitleRuntime;
+	if (sessionName !== undefined)
+		terminalTitleRuntime.label = formatCardTitle(sessionName, card, iconsWithoutNerdFonts());
+	emitTerminalTitle();
+}
+
+/** `title.icons` for a title rendered without Nerd Fonts: `nf+emoji` shows the emoji. */
+function iconsWithoutNerdFonts(): TitleIcons {
+	return terminalTitleRuntime.icons === "nf+emoji" ? "emoji" : terminalTitleRuntime.icons;
+}
+
+/**
+ * Whether the effective symbol preset is `nerd`: under `nf+emoji` title icons,
+ * card titles then show the card's Nerd Fonts glyph, and the title fork asks the
+ * model for one.
+ */
+export function nerdGlyphsActive(): boolean {
+	return typeof theme !== "undefined" && theme.getSymbolPreset() === "nerd";
 }
 
 /** The OSC 1337 user variable Tern reads the session file from. */
 const TERN_SESSION_FILE_VAR = "omp_session_file";
-/** Where the current session file is read from (the interactive session manager). */
-let sessionFileSource: (() => string | undefined) | undefined;
+
+/** The live session as Tern hears about it (read from the interactive session manager). */
+export interface TerminalSessionSource {
+	/** The session file, if the session persists to one. */
+	file(): string | undefined;
+	/** The session's working directory. */
+	cwd(): string;
+}
+
+/** Where the current session's file and directory are read from. */
+let sessionSource: TerminalSessionSource | undefined;
 /** The session file Tern was last told about. */
 let reportedSessionFile: string | undefined;
+/** The working directory Tern was last told about. */
+let reportedCwd: string | undefined;
 
 /**
- * Name the live session's file source. Every session title update (start, new
- * session, resume, cwd switch) and {@link reportTernSessionFile} re-read it and,
- * in Tern, report a changed file, so Tern's daemon can relaunch
- * `omp --resume <file>` after it restarts.
+ * Name the live session's source. Every session title update (start, new
+ * session, resume, cwd switch) and {@link reportTernSession} re-read it and, in
+ * Tern, report what changed: the file, so Tern's daemon can relaunch
+ * `omp --resume <file>` after it restarts, and the directory, which Tern names
+ * in omp's composer bar.
  */
-export function setTerminalSessionFileSource(source: (() => string | undefined) | undefined): void {
-	sessionFileSource = source;
-	reportTernSessionFile();
+export function setTerminalSessionSource(source: TerminalSessionSource | undefined): void {
+	sessionSource = source;
+	reportTernSession();
 }
 
 /**
- * Tell Tern (`TERM_PROGRAM=tern`, nowhere else) the session file, if it changed,
- * as an OSC 1337 user variable holding its absolute path in base64; no file
- * removes the variable.
+ * Tell Tern (`TERM_PROGRAM=tern`, nowhere else) what changed about the session:
+ * the file as an OSC 1337 user variable holding its absolute path in base64 (no
+ * file removes the variable), and the working directory as OSC 7
+ * (`file://host/path`), as a shell reports it at each prompt.
  */
-export function reportTernSessionFile(): void {
+export function reportTernSession(): void {
 	if (terminalTitleRuntime.disposed || $env.TERM_PROGRAM?.toLowerCase() !== "tern") return;
 	if (!process.stdout.isTTY || isTerminalHeadless()) return;
-	const file = sessionFileSource?.();
-	const resolved = file ? path.resolve(file) : undefined;
-	if (resolved === reportedSessionFile) return;
-	reportedSessionFile = resolved;
-	const value = resolved ? `=${Buffer.from(resolved).toString("base64")}` : "";
-	writeTerminalSequence(`\x1b]1337;SetUserVar=${TERN_SESSION_FILE_VAR}${value}\x07`);
+	const file = sessionSource?.file();
+	const resolvedFile = file ? path.resolve(file) : undefined;
+	if (resolvedFile !== reportedSessionFile) {
+		reportedSessionFile = resolvedFile;
+		const value = resolvedFile ? `=${Buffer.from(resolvedFile).toString("base64")}` : "";
+		writeTerminalSequence(`\x1b]1337;SetUserVar=${TERN_SESSION_FILE_VAR}${value}\x07`);
+	}
+	// Without a session the shell takes the directory back at its next prompt.
+	const cwd = sessionSource ? path.resolve(sessionSource.cwd()) : undefined;
+	if (cwd && cwd !== reportedCwd) {
+		writeTerminalSequence(`\x1b]7;file://${os.hostname()}${url.pathToFileURL(cwd).pathname}\x07`);
+	}
+	reportedCwd = cwd;
 }
 
 /**
@@ -742,9 +808,14 @@ const TITLE_IDLE_SEPARATOR = ">";
 const TITLE_ATTENTION_SEPARATOR = "!";
 
 const terminalTitleRuntime: {
+	/** The classic title's label: the session name in its emoji card form, else the cwd. */
 	label: string | undefined;
 	/** The session's own name, without the cwd fallback `label` uses. */
 	sessionName: string | undefined;
+	/** The session name's card index, if it has one. */
+	card: SessionTitleCard | undefined;
+	/** How the card shows its icon (`title.icons`). */
+	icons: TitleIcons;
 	/** The branch's pull request, shown in the native title only. */
 	pullRequest: number | undefined;
 	/** Unsubscribes the native-rendering watch taken by `initTerminalTitleState()`. */
@@ -774,6 +845,8 @@ const terminalTitleRuntime: {
 } = {
 	label: undefined,
 	sessionName: undefined,
+	card: undefined,
+	icons: "nf+emoji",
 	pullRequest: undefined,
 	unwatchNative: undefined,
 	state: "idle",
@@ -837,10 +910,18 @@ function emitTerminalTitle(): void {
 	// An extension override owns the terminal verbatim; the terminal sink
 	// deduplicates repeated state updates.
 	const native = isNativeRendering();
+	const nativeName =
+		native && terminalTitleRuntime.sessionName !== undefined
+			? formatCardTitle(
+					terminalTitleRuntime.sessionName,
+					terminalTitleRuntime.card,
+					nerdGlyphsActive() ? terminalTitleRuntime.icons : iconsWithoutNerdFonts(),
+				)
+			: undefined;
 	const next =
 		terminalTitleRuntime.extensionOverride ??
 		(native
-			? buildNativeTerminalTitle(terminalTitleRuntime.sessionName, terminalTitleRuntime.pullRequest)
+			? buildNativeTerminalTitle(nativeName, terminalTitleRuntime.pullRequest)
 			: buildTerminalTitleWithState(
 					terminalTitleRuntime.label,
 					terminalTitleRuntime.state,
@@ -969,8 +1050,8 @@ export function initTerminalTitleState(): void {
  */
 export function disposeTerminalTitleState(): void {
 	// The session ends with the UI: Tern must not resume it in this pane.
-	sessionFileSource = undefined;
-	reportTernSessionFile();
+	sessionSource = undefined;
+	reportTernSession();
 	terminalTitleRuntime.disposed = true;
 	terminalTitleRuntime.unwatchNative?.();
 	terminalTitleRuntime.unwatchNative = undefined;

@@ -767,11 +767,12 @@ mod imp {
 		for entry in fs::read_dir(&source_dir)? {
 			let entry = entry?;
 			let path = entry.path();
-			// Not `DirEntry::metadata`: on Windows that is the FindNextFileW record,
-			// whose size and write time NTFS updates lazily while a writer holds the
-			// file open. The placeholder's FileSize bounds what hydration serves, so a
-			// lower-root file written during enumeration would project truncated;
-			// opening the path reads the live values.
+			// Not `DirEntry::metadata`: on Windows that is the FindNextFileW
+			// record, whose size and write time NTFS updates lazily while
+			// a writer holds the file open. The placeholder's FileSize
+			// bounds what hydration serves, so a lower-root file written
+			// during enumeration would project truncated; opening the
+			// path reads the live values.
 			let metadata = fs::symlink_metadata(&path)?;
 			let symlink_target = symlink_target_wide(&path, &metadata)?;
 			let name = entry.file_name();

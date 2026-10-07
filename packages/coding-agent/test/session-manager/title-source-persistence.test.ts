@@ -112,6 +112,25 @@ describe("session title source persistence", () => {
 		await session.close();
 	});
 
+	it("restores a title's card on reopen and drops it once a rename names no card", async () => {
+		const card = { code: "FLAKY", emoji: "🧪", nf: "nf-md-flask" };
+		const session = SessionManager.create(cwd);
+		session.appendMessage({ role: "user", content: "fix the flaky park tests", timestamp: 1 });
+		await session.setSessionName("Fix flaky park tests", "auto", undefined, card);
+		session.appendMessage(makeAssistantMessage());
+		await session.flush();
+		const sessionFile = session.getSessionFile()!;
+		await session.close();
+
+		const reopened = await SessionManager.open(sessionFile);
+		// The plain title stays the title of record; the card rides on the title change.
+		expect(reopened.getSessionName()).toBe("Fix flaky park tests");
+		expect(reopened.getSessionTitleCard()).toEqual(card);
+		await reopened.setSessionName("Stabilize park tests", "user");
+		expect(reopened.getSessionTitleCard()).toBeUndefined();
+		await reopened.close();
+	});
+
 	it("loads legacy slotless files with header titles", async () => {
 		const sessionDir = SessionManager.getDefaultSessionDir(cwd);
 		fs.mkdirSync(sessionDir, { recursive: true });

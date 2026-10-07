@@ -95,7 +95,11 @@ function makeGuestContext(): InteractiveModeContext {
 		showError: () => {},
 		updateEditorTopBorder: () => {},
 		updateEditorBorderColor: () => {},
-		eventController: { handleEvent: () => Promise.resolve(), takeDisplaceableComponents: () => [] },
+		eventController: {
+			dispatchSessionEvent: () => Promise.resolve(),
+			takeDisplaceableComponents: () => [],
+			resetTranscriptAnchors: () => {},
+		},
 		syncRunningSubagentBadge: () => {
 			const registry = getRunningSubagentBadgeRegistry(ctx.collabGuest, AgentRegistry.global());
 			const agentIds = getRunningSubagentBadgeAgentIds(registry);

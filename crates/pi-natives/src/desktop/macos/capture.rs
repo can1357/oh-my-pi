@@ -327,7 +327,8 @@ fn window_value<'a>(dictionary: &'a WindowDictionary, key: &CFString) -> Option<
 fn window_number(dictionary: &WindowDictionary, key: &CFString) -> Option<i64> {
 	let number = window_value(dictionary, key)?.downcast_ref::<CFNumber>()?;
 	let mut value = 0i64;
-	// SAFETY: The output is writable storage for the requested signed 64-bit type.
+	// SAFETY: The output is writable storage for the requested signed 64-bit
+	// type.
 	unsafe { number.value(CFNumberType::SInt64Type, ptr::from_mut(&mut value).cast()) }
 		.then_some(value)
 }
@@ -335,8 +336,7 @@ fn window_number(dictionary: &WindowDictionary, key: &CFString) -> Option<i64> {
 fn window_string(dictionary: &WindowDictionary, key: &CFString) -> String {
 	window_value(dictionary, key)
 		.and_then(CFType::downcast_ref::<CFString>)
-		.map(ToString::to_string)
-		.unwrap_or_default()
+		.map_or_default(ToString::to_string)
 }
 
 fn window_metadata(dictionary: &WindowDictionary) -> Option<(u32, DesktopWindow)> {

@@ -487,11 +487,12 @@ fn fallback_variants(hunk: &DiffHunk, aggressive: bool) -> Vec<HunkVariant> {
 			|| !matches!(
 				variant.kind,
 				HunkVariantKind::CollapseRepeated | HunkVariantKind::SingleLine
-			)) && seen.insert(format!(
-			"{}||{}",
-			variant.old_lines.join("\n"),
-			variant.new_lines.join("\n")
-		))
+			))
+			&& seen.insert(format!(
+				"{}||{}",
+				variant.old_lines.join("\n"),
+				variant.new_lines.join("\n")
+			))
 	});
 	variants
 }
@@ -1800,7 +1801,8 @@ impl ModeEngine for PatchEngine {
 		let mut file_ops = Vec::new();
 		for entry in &args.edits {
 			if let Some(diff) = &entry.diff {
-				// Create bodies may omit `+` prefixes; their digest is then the whole text.
+				// Create bodies may omit `+` prefixes; their digest is then the
+				// whole text.
 				let added = super::added_lines(diff.split('\n')).unwrap_or_else(|| {
 					if entry.op.as_deref() == Some("create") {
 						diff.clone()
@@ -1827,9 +1829,7 @@ impl ModeEngine for PatchEngine {
 		}
 		Inspection {
 			paths: vec![path.clone()],
-			entries: digest
-				.map(|value| vec![(path.clone(), value)])
-				.unwrap_or_default(),
+			entries: digest.map_or_default(|value| vec![(path.clone(), value)]),
 			file_ops,
 		}
 	}
