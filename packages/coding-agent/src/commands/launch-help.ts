@@ -43,6 +43,7 @@ export const launchHelp = {
 			description: "Handlebars system prompt template (mutually exclusive with --system-prompt)",
 		}),
 		"append-system-prompt": Flags.string({ description: "Append text or file contents to the system prompt" }),
+		"append-plan-prompt": Flags.string({ description: "Append text or file contents to the plan-mode prompt" }),
 		"allow-home": Flags.boolean({ description: "Allow starting in ~ without auto-switching to a temp dir" }),
 		profile: Flags.string({ description: "Use an isolated profile for auth, sessions, settings, and caches" }),
 		alias: Flags.string({ description: "Create a shell shortcut for the selected profile and exit" }),

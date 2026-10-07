@@ -357,6 +357,7 @@ import {
 	INTERRUPTED_THINKING_MESSAGE_TYPE,
 	type InterruptedThinkingDetails,
 	isEmptyErrorTurn,
+	dropStalePlanModeContext,
 	titleContextWordCount,
 	isUserInterruptAbort,
 	isUserInvokedSkillPrompt,
@@ -805,6 +806,8 @@ export class AgentSession implements SettingsScope {
 	/** A single model-only notebook reminder queued for the current prompt generation. */
 	#experimentalContextNotesReminder: { prompt: string; generation: number } | undefined;
 	#planModeState: PlanModeState | undefined;
+	/** User-authored text appended to the plan-mode context message each turn while plan mode is enabled. */
+	readonly #planModeAppendPrompt: string | undefined;
 	#vibeModeState: VibeModeState | undefined;
 	#goalModeState: GoalModeState | undefined;
 	#goalRuntime: GoalRuntime;
@@ -1644,6 +1647,7 @@ export class AgentSession implements SettingsScope {
 			prewalk: config.prewalk,
 			planYolo: config.planYolo,
 		});
+		this.#planModeAppendPrompt = config.planModeAppendPrompt?.trim() ? config.planModeAppendPrompt.trim() : undefined;
 		const todoHost: TodoTrackerHost = {
 			agent: this.agent,
 			sessionManager: this.sessionManager,
@@ -2031,7 +2035,15 @@ export class AgentSession implements SettingsScope {
 			model: () => this.model,
 			sessionId: () => this.sessionId,
 			localProtocolOptions: () => this.#localProtocolOptions(),
-			transformContext: (messages, signal) => this.#transformContext(messages, signal),
+			transformContext: (messages, signal) =>
+				this.#transformContext(
+					// Plan-mode turns already rebuild the context message; retained
+					// copies would keep delivering its text (including the user's
+					// APPEND_PLAN.md append) as developer messages after plan mode
+					// exits, so the boundary drops them once the mode is off.
+					dropStalePlanModeContext(messages, this.#planModeState?.enabled === true),
+					signal,
+				),
 			convertToLlm: messages => this.#convertToLlm(messages),
 			onPayload: this.#onPayload,
 			onResponse: this.#onResponse,
@@ -6936,11 +6948,15 @@ export class AgentSession implements SettingsScope {
 			reentry: state.reentry ?? false,
 			iterative: state.workflow === "iterative",
 			scoutAvailable: this.#isScoutAvailable(),
+			appendPrompt: this.#planModeAppendPrompt,
 		});
 
 		return {
 			role: "custom",
 			customType: "plan-mode-context",
+			// APPEND_PLAN.md / --append-plan-prompt enter the rendered content via
+			// the template's appendPrompt slot; retained copies are dropped at the
+			// provider boundary once plan mode exits (dropStalePlanModeContext).
 			content,
 			display: false,
 			attribution: "agent",

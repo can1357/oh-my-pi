@@ -453,6 +453,8 @@ export interface ToolSession {
 	settings: Settings;
 	/** Plan mode state (if active) */
 	getPlanModeState?: () => PlanModeState | undefined;
+	/** User-authored plan-mode append text (APPEND_PLAN.md / --append-plan-prompt) of this session, if any. */
+	getPlanModeAppendPrompt?: () => string | undefined;
 	/** Path of the session's active plan reference (e.g. `local://<title>.md`); defaults to `local://PLAN.md`. */
 	getPlanReferencePath?: () => string;
 	/** Goal mode state (if active or paused) */

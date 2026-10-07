@@ -47,6 +47,7 @@ export interface Args {
 	systemPrompt?: string;
 	systemPromptTemplate?: string;
 	appendSystemPrompt?: string;
+	appendPlanPrompt?: string;
 	thinking?: ConfiguredThinkingLevel;
 	serviceTier?: ServiceTierOpenAISettingValue;
 	hideThinking?: boolean;

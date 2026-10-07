@@ -615,6 +615,12 @@ export interface CreateAgentSessionOptions {
 	/** Already-loaded text appended through the bundled system prompt templates. */
 	appendSystemPrompt?: string;
 	/**
+	 * Already-loaded text appended to the plan-mode context message
+	 * (`APPEND_PLAN.md` / `--append-plan-prompt`). Injected only while plan mode
+	 * is enabled; invisible on regular and implementation turns.
+	 */
+	appendPlanPrompt?: string;
+	/**
 	 * Already-loaded title-generation system prompt override (typically
 	 * {@link discoverTitleSystemPromptFile} → {@link resolvePromptInput}). When
 	 * set, every automatic session-title generation path on this session — the
@@ -2294,6 +2300,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			getServiceTierByFamily: () => session?.serviceTierByFamily,
 			getImageAttachments: () => session?.getImageAttachments() ?? [],
 			getPlanModeState: () => session?.getPlanModeState(),
+			getPlanModeAppendPrompt: () => options.appendPlanPrompt,
 			getPlanReferencePath: () => session?.getPlanReferencePath() ?? "local://PLAN.md",
 			getGoalModeState: () => session?.getGoalModeState(),
 			getGoalRuntime: () => session?.goalRuntime,
@@ -4505,6 +4512,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			deferRetryFallbackValidation: options.deferRetryFallbackValidation,
 			prewalk,
 			planYolo: options.planYolo,
+			planModeAppendPrompt: options.appendPlanPrompt,
 			serviceTierByFamily: initialServiceTierByFamily,
 			sessionManager,
 			settings,

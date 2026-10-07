@@ -27,8 +27,10 @@ On Anthropic, the system cache breakpoint lands on the last block before the fir
 | `SYSTEM.md`                             | Discovered config file | Existing plain-text custom route. Used only when no explicit override is supplied.                                                 |
 | `--append-system-prompt <text-or-file>` | CLI                    | Adds plain text to the rendered prompt. Highest append precedence.                                                                 |
 | `APPEND_SYSTEM.md`                      | Discovered config file | Existing plain-text append route; used when the append flag is absent.                                                             |
+| `--append-plan-prompt <text-or-file>`    | CLI                    | Adds plain text to the plan-mode context message. Highest plan-append precedence; see [Plan-mode append](#plan-mode-append). |
+| `APPEND_PLAN.md`                        | Discovered config file | Plan-mode-only append route; used when the plan-append flag is absent. See [Plan-mode append](#plan-mode-append).         |
 
-**CLI precedence:** An explicit `--system-prompt` or `--system-prompt-template` flag wins over discovered `SYSTEM_TEMPLATE.md` and `SYSTEM.md`; an explicit `--append-system-prompt` wins over discovered `APPEND_SYSTEM.md`. The two custom-prompt flags are mutually exclusive, and supplying both fails clearly. An explicitly supplied empty `--system-prompt` literal still counts as explicit and suppresses custom-prompt discovery.
+**CLI precedence:** An explicit `--system-prompt` or `--system-prompt-template` flag wins over discovered `SYSTEM_TEMPLATE.md` and `SYSTEM.md`; an explicit `--append-system-prompt` wins over discovered `APPEND_SYSTEM.md`; an explicit `--append-plan-prompt` wins over discovered `APPEND_PLAN.md`. The two custom-prompt flags are mutually exclusive, and supplying both fails clearly. An explicitly supplied empty `--system-prompt` literal still counts as explicit and suppresses custom-prompt discovery.
 
 Programmatic API options use separate contracts, not CLI flags; see [Programmatic API options](#programmatic-api-options).
 
@@ -79,6 +81,14 @@ itself server-controlled and unverified. Whenever a generated block precedes the
 user-supplied text, the text is rendered under its own `## User Instructions` heading
 so it cannot read as a trailing paragraph of a server-owned section. On its own — no
 generated block — the append text is emitted unchanged, without a heading.
+
+## Plan-mode append
+
+`APPEND_PLAN.md` and `--append-plan-prompt <text-or-file>` append plain text to the `plan-mode-context` message OMP re-injects on every user turn **while plan mode is enabled**. The bundled plan-mode instructions stay unchanged; the extra text follows them in the same hidden message. Because the message exists only on planning turns, plan-only guidance (for example "consult the context7 docs MCP while planning") never leaks into implementation or normal sessions — unlike `APPEND_SYSTEM.md`, which applies to every turn.
+
+Discovery mirrors `APPEND_SYSTEM.md`: project config bases first, then the user agent directory; an explicit `--append-plan-prompt` wins over the discovered file, and the same text-or-file resolution rules apply (a single-line value is tried as a path first; newline-containing values are literal). The programmatic `CreateAgentSessionOptions.appendPlanPrompt` accepts already-loaded text.
+
+Plan-mode subagents spawned via `task` receive the same append after the bundled `plan-mode-subagent.md` block and their own agent prompt. Retained `plan-mode-context` copies in history are dropped from provider input once plan mode is disabled, so the append never reaches implementation turns.
 
 ## Inputs by session type
 
@@ -228,6 +238,7 @@ The CLI flags and files do **not** set `systemPrompt`: they select the plain/tem
 | Goal                                                                       | Use                                                                                                              |
 | -------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------- |
 | Add instructions while keeping the complete default prompt                 | `APPEND_SYSTEM.md` or `--append-system-prompt`                                                                   |
+| Add plan-mode-only instructions                                          | `APPEND_PLAN.md` or `--append-plan-prompt`                                                                       |
 | Replace the default instruction block with plain text                      | `SYSTEM.md` or `--system-prompt`                                                                                 |
 | Replace the default instruction block with Handlebars                      | `SYSTEM_TEMPLATE.md` or `--system-prompt-template <path>`                                                        |
 | Supply raw Handlebars through the programmatic API                         | `CreateAgentSessionOptions.systemPromptTemplate` or `buildSystemPrompt({ systemPromptTemplate })`                |
