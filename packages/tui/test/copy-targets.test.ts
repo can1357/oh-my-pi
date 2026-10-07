@@ -2,6 +2,7 @@ import { describe, expect, it } from "bun:test";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import {
 	extractCodeBlocks,
+	extractLastAssistantText,
 	extractLastCommand,
 	extractLastLink,
 	extractLinks,
@@ -141,5 +142,53 @@ describe("extractLastLink", () => {
 		] as unknown as AgentMessage[];
 		expect(extractLastLink(messages)).toEqual({ text: "https://example.com/b", href: "https://example.com/b" });
 		expect(extractLastLink(messages.slice(3))).toBeUndefined();
+	});
+});
+
+describe("extractLastAssistantText", () => {
+	it("returns undefined for empty messages or messages without assistant text", () => {
+		expect(extractLastAssistantText([])).toBeUndefined();
+		const nonAssistant = [
+			{ role: "user", content: [{ type: "text", text: "hello" }] },
+			{ role: "assistant", content: [{ type: "text", text: "   " }], stopReason: "stop" },
+		] as unknown as AgentMessage[];
+		expect(extractLastAssistantText(nonAssistant)).toBeUndefined();
+	});
+
+	it("returns the most recent completed assistant message text, walking backwards", () => {
+		const messages = [
+			{ role: "assistant", content: [{ type: "text", text: "older assistant response" }], stopReason: "stop" },
+			{ role: "user", content: [{ type: "text", text: "user message" }] },
+			{
+				role: "assistant",
+				content: [
+					{ type: "text", text: "latest part 1. " },
+					{ type: "text", text: "latest part 2." },
+				],
+				stopReason: "stop",
+			},
+			{ role: "user", content: [{ type: "text", text: "follow up" }] },
+		] as unknown as AgentMessage[];
+		expect(extractLastAssistantText(messages)).toBe("latest part 1. latest part 2.");
+	});
+
+	it("skips text from an in-progress tool-use turn", () => {
+		const messages = [
+			{
+				role: "assistant",
+				content: [{ type: "text", text: "completed response" }],
+				stopReason: "stop",
+			},
+			{
+				role: "assistant",
+				content: [
+					{ type: "text", text: "Running checks..." },
+					{ type: "toolCall", id: "tc-1", name: "bash", arguments: { command: "bun check" } },
+				],
+				stopReason: "toolUse",
+			},
+		] as unknown as AgentMessage[];
+
+		expect(extractLastAssistantText(messages)).toBe("completed response");
 	});
 });

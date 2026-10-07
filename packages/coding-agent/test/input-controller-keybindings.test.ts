@@ -11,9 +11,14 @@ import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/typ
 import type { SessionTreeNode } from "@oh-my-pi/pi-coding-agent/session/session-entries";
 import { type KeyId, matchesKey } from "@oh-my-pi/pi-tui";
 import { TempDir } from "@oh-my-pi/pi-utils";
+import * as clipboard from "@oh-my-pi/pi-coding-agent/utils/clipboard";
 import manualContinuePrompt from "../src/prompts/system/manual-continue.md" with { type: "text" };
 import { imageAttachmentSource } from "@oh-my-pi/pi-tui/prompt/image-source";
 import { beginSettingsTest, restoreSettingsTestState, type SettingsTestState } from "./helpers/settings-test-state";
+
+afterEach(() => {
+	vi.restoreAllMocks();
+});
 
 type FakeEditor = {
 	onEscape?: () => void;
@@ -406,6 +411,30 @@ describe("InputController keybinding setup", () => {
 
 		expect(focusedRetry).toHaveBeenCalledTimes(1);
 		expect(spies.retry).not.toHaveBeenCalled();
+	});
+
+	it("registers copyLastAssistant as a custom key handler and copies the last assistant response", async () => {
+		const copySpy = vi.spyOn(clipboard, "copyToClipboard").mockResolvedValue(undefined);
+		const { InputController, ctx, customHandlers, setKeybinding } = await createContext();
+		setKeybinding("app.clipboard.copyLastAssistant", ["alt+c"]);
+		(ctx.session as { messages: unknown[] }).messages = [
+			{ role: "assistant", content: [{ type: "text", text: "main response" }], stopReason: "stop" },
+		];
+		const focusedViewSession = {
+			messages: [{ role: "assistant", content: [{ type: "text", text: "last response" }], stopReason: "stop" }],
+		} as unknown as InteractiveModeContext["viewSession"];
+		Object.assign(ctx, { focusedAgentId: "worker", viewSession: focusedViewSession });
+		const controller = new InputController(ctx);
+		controller.setupKeyHandlers();
+
+		const handler = customHandlers.get("alt+c");
+		expect(handler).toBeDefined();
+
+		handler?.();
+		await Promise.resolve();
+
+		expect(copySpy).toHaveBeenCalledWith("last response");
+		expect(ctx.showStatus).toHaveBeenCalledWith("Copied assistant response to clipboard");
 	});
 
 	it("keeps retry host-only for collab guests", async () => {
