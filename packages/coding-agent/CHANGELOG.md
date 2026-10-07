@@ -5,6 +5,7 @@
 ### Added
 
 - Files the write tool creates now preview the way the matching code blocks in replies do, building up while the write streams: `.svg` as an image and Mermaid (`.mmd`, `.mermaid`) as a diagram under the write card, and in Tern also 3D models (`.obj`, `.ply`, `.wrl`, `.x3dv`, `.stl`, `.gltf`, `.usda`); in Tern an SVG write now draws like an SVG figure in a reply
+- Added `PI_SESSION_ID` and `PI_SESSION_FILE` to the environment of `bash` tool commands, so the agent can read the running session's ID and transcript path ([#14729](https://github.com/can1357/oh-my-pi/pull/14729) by [@johnrichardrinehart](https://github.com/johnrichardrinehart))
 
 ### Changed
 

@@ -96,6 +96,24 @@ describe("BashTool execution results", () => {
 		expect(text).not.toContain("Command exited with code");
 	});
 
+	it("exposes the session identity to the command over an inherited stale value", async () => {
+		const inherited = process.env.PI_SESSION_FILE;
+		process.env.PI_SESSION_FILE = "/stale/parent.jsonl";
+		try {
+			const tool = new BashTool({
+				...makeSession(),
+				sessionManager: { getSessionId: () => "session-fg" },
+			} as unknown as ToolSession);
+			const result = await tool.execute("call-env", {
+				command: `printf '%s|%s|' "$PI_SESSION_ID" "$PI_SESSION_FILE"`,
+			});
+			expect(result.content.find(c => c.type === "text")?.text).toStartWith("session-fg||");
+		} finally {
+			if (inherited === undefined) delete process.env.PI_SESSION_FILE;
+			else process.env.PI_SESSION_FILE = inherited;
+		}
+	});
+
 	it("keeps the raw diagnostics when a minimized failure cannot be persisted as an artifact", async () => {
 		// The native minimizer streams the raw bytes live, then reports a lossy
 		// summary. This session has no artifact allocator (the `ToolSession`
