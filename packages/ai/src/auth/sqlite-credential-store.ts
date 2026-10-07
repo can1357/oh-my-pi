@@ -217,6 +217,12 @@ function resolveProviderCredentialIdentityKey(provider: string, identifiers: str
 	return null;
 }
 
+/**
+ * Identity key of a credential: the `identityKey` that broker snapshots carry
+ * and that broker account pools and `sessions.restrict` match, such as
+ * `email:<address>|org:<id>` for org-scoped providers. `null` for an API key or
+ * an OAuth credential without any account, email, project, or org identity.
+ */
 export function resolveCredentialIdentityKey(provider: string, credential: AuthCredential): string | null {
 	if (credential.type === "api_key") return null;
 	return resolveProviderCredentialIdentityKey(provider, extractOAuthCredentialIdentifiers(credential));
