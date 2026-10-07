@@ -355,7 +355,9 @@ async fn external_commands_receive_host_paths_for_backed_url_arguments() {
 }
 
 /// A provider directory that aliases a real one is a usable working directory
-/// for a child process; one that aliases nothing still is not.
+/// for a child process, and the `PWD` the child inherits names that same host
+/// directory rather than the URL it cannot open; one that aliases nothing is
+/// still no working directory at all.
 #[tokio::test]
 async fn external_commands_start_in_backed_working_directories_only() {
 	let directory = tempfile::tempdir().expect("isolated provider filesystem");
@@ -365,18 +367,21 @@ async fn external_commands_start_in_backed_working_directories_only() {
 	let error = tempfile::tempfile().expect("captured stderr");
 	let mut shell = virtual_shell(directory.path()).await;
 	let parameters = capture_parameters(&shell, &output, &error);
+	// `printenv` and `cmd /c echo` report the inherited variable; a shell would
+	// re-derive `PWD` from `getcwd()` and hide a wrong value.
 	#[cfg(unix)]
-	let script = "cd virtual://docs && /bin/sh -c 'printf %s \"$PWD\"'";
+	let script = "cd virtual://docs && /bin/sh -c 'printf %s \"$PWD\"' && /usr/bin/printenv PWD";
 	#[cfg(windows)]
-	let script = "cd virtual://docs && cmd.exe /c cd";
+	let script = "cd virtual://docs && cmd.exe /c cd && cmd.exe /c echo %PWD%";
 	let result = shell
 		.run_string(script, &SourceInfo::from("vfs-external-cwd"), &parameters)
 		.await
 		.expect("external command in a backed working directory");
 	assert_eq!(u8::from(result.exit_code), 0, "{}", captured_text(&error));
+	let docs = directory.path().join("docs").display().to_string();
 	assert!(
-		captured_text(&output).contains(&directory.path().join("docs").display().to_string()),
-		"child did not start in the aliased directory: {}",
+		captured_text(&output).matches(docs.as_str()).count() >= 2,
+		"child saw the wrong working directory or inherited PWD: {}",
 		captured_text(&output)
 	);
 
