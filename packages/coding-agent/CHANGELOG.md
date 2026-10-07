@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Copy the latest assistant response to the clipboard with `/copy last` or the `Alt+C` keybinding (`app.clipboard.copyLastAssistant`) ([#14652](https://github.com/can1357/oh-my-pi/pull/14652) by [@danzaio](https://github.com/danzaio)).
+
 ### Changed
 
 - Agent Hub keeps existing agents in place while open; new agents appear first in the flat roster or within their tree sibling group ([#13066](https://github.com/can1357/oh-my-pi/pull/13066) by [@kmccleary3301](https://github.com/kmccleary3301))
@@ -96,9 +100,6 @@
 - Fixed slowdowns when processing long evaluation output, large Python kernel results, compiler/linter output, and ephemeral side-channel replies.
 - Fixed documents served as `application/octet-stream` being downloaded twice.
 - Fixed collaboration guests rebuilding the transcript excessively during streaming.
-### Added
-
-- Copy the latest assistant response to the clipboard with `/copy last` or the `Alt+C` keybinding (`app.clipboard.copyLastAssistant`) ([#14652](https://github.com/can1357/oh-my-pi/pull/14652) by [@danzaio](https://github.com/danzaio)).
 
 ## [18.7.0] - 2026-10-06
 
