@@ -29,6 +29,7 @@ import {
 	resolveModelOverride,
 } from "../config/model-resolver";
 import type { Settings } from "../config/settings";
+import { type JudgmentUsage, journalJudgmentUsage } from "../judgment";
 import { MAIN_AGENT_ID } from "../registry/agent-registry";
 import { Semaphore } from "../task/parallel";
 import type { ToolSession } from "../tools";
@@ -297,6 +298,7 @@ async function executeCompletion(
 	candidates: CompletionCandidate[],
 	session: ToolSession,
 	signal: AbortSignal,
+	onUsage: ((usage: JudgmentUsage) => void) | undefined,
 ): Promise<EvalCompletionResult> {
 	const registry = session.modelRegistry;
 	if (!registry) throw new ToolError("completion() has no model registry.");
@@ -357,6 +359,19 @@ async function executeCompletion(
 			if (signal.aborted || index === candidates.length - 1) throw error;
 			continue;
 		}
+		// Bill every returned attempt — failed, aborted, and later-rejected ones
+		// included — before any branch can discard it. Kept outside the try so a
+		// journal failure never triggers another billed fallback request.
+		onUsage?.({
+			purpose: "completion",
+			role: finalTier,
+			api: model.api,
+			provider: model.provider,
+			model: model.id,
+			usage: response.usage,
+			stopReason: response.stopReason,
+			errorMessage: response.errorMessage,
+		});
 		if (response.stopReason === "aborted") {
 			throw new ToolError("completion() request aborted.");
 		}
@@ -418,8 +433,11 @@ export async function runEvalCompletion(
 		);
 	}
 
+	// Bind the ledger to the initiating session now: a reply landing after
+	// /new, fork, or session switch is dropped instead of billing the successor.
+	const onUsage = journalJudgmentUsage(options.session.sessionManager);
 	return retainCompletionHandle("cmp", options, signal =>
-		executeCompletion(prompt, finalTier, system, schema, candidates, options.session, signal),
+		executeCompletion(prompt, finalTier, system, schema, candidates, options.session, signal, onUsage),
 	);
 }
 

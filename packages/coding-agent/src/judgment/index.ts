@@ -99,26 +99,37 @@ interface JudgmentAttempt extends Omit<JudgmentUsage, "purpose"> {
 }
 
 /** Session journal surface that records off-transcript model cost; journal-only managers omit it. */
-export type JudgmentUsageLedger = Pick<SessionManager, "appendModelUsage" | "getSessionId" | "getLeafId">;
+export type JudgmentUsageLedger = Pick<SessionManager, "appendModelUsage" | "getSessionId" | "getLeafId" | "getBranch">;
 
 function isUsageLedger(manager: Partial<JudgmentUsageLedger>): manager is JudgmentUsageLedger {
 	return (
-		manager.appendModelUsage !== undefined && manager.getSessionId !== undefined && manager.getLeafId !== undefined
+		manager.appendModelUsage !== undefined &&
+		manager.getSessionId !== undefined &&
+		manager.getLeafId !== undefined &&
+		manager.getBranch !== undefined
 	);
 }
 
 /**
  * Build a {@link JudgeDeps.onUsage} that journals every billed judgment attempt
- * as a `model_usage` entry beneath the session leaf at record time, so
- * `getSessionStats()` counts it in session totals. Attempts that land after
- * the session changes are dropped by the ledger. Returns `undefined` when the
- * journal cannot record usage.
+ * as a `model_usage` entry, so `getSessionStats()` counts it in session totals.
+ * The session id and leaf are snapshotted when the callback is built: while the
+ * active branch still descends from that leaf, usage lands beneath the current
+ * leaf; after navigation to another branch it stays on the initiating branch,
+ * chained after the previous entry. Attempts that land after the session
+ * changes are dropped by the ledger. Returns `undefined` when the journal
+ * cannot record usage.
  */
 export function journalJudgmentUsage(manager: Partial<JudgmentUsageLedger> | undefined): JudgeDeps["onUsage"] {
 	if (!manager || !isUsageLedger(manager)) return undefined;
 	const sessionId = manager.getSessionId();
+	let anchorId = manager.getLeafId();
 	return usage => {
-		manager.appendModelUsage(usage, { sessionId, parentId: manager.getLeafId() });
+		// `getBranch()` is the index's memoized walk; it stops at the first
+		// repeated id, so a corrupt cyclic parent chain cannot hang this check.
+		const onAnchorBranch = anchorId === null || manager.getBranch().some(entry => entry.id === anchorId);
+		const parentId = onAnchorBranch ? manager.getLeafId() : anchorId;
+		anchorId = manager.appendModelUsage(usage, { sessionId, parentId }) ?? anchorId;
 	};
 }
 

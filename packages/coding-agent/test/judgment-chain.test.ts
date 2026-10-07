@@ -205,6 +205,42 @@ describe("ChainJudge", () => {
 		expect(manager.getBranch().filter(entry => entry.type === "model_usage")).toHaveLength(0);
 	});
 
+	it("journals usage on the initiating branch when the active branch has a corrupt parent cycle", () => {
+		const manager = SessionManager.inMemory();
+		const root = manager.appendMessage({ role: "user", content: "root", timestamp: 1 });
+		const origin = manager.appendMessage({ role: "user", content: "origin", timestamp: 2 });
+		const journal = journalJudgmentUsage(manager);
+		if (!journal) throw new Error("in-memory manager must journal usage");
+		manager.branch(root);
+		const other = manager.appendMessage({ role: "user", content: "other", timestamp: 3 });
+		const otherEntry = manager.getEntry(other)!;
+		otherEntry.parentId = other;
+		// Re-enter the leaf so the branch view is rebuilt over the corrupt chain.
+		manager.branch(root);
+		manager.branch(other);
+
+		journal({
+			purpose: "find",
+			role: "judge",
+			api: "openai-responses",
+			provider: "p",
+			model: "m",
+			usage: {
+				input: 1,
+				output: 1,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 2,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			stopReason: "stop",
+		});
+
+		const usage = manager.getEntries().filter(entry => entry.type === "model_usage");
+		expect(usage.map(entry => entry.parentId)).toEqual([origin]);
+		expect(manager.getLeafId()).toBe(other);
+	});
+
 	it("falls back from a failed native judge only to another native judge", async () => {
 		const settings = Settings.isolated({
 			modelRoles: { judge: "typesafe/jev-preview" },

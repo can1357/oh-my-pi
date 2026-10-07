@@ -21,6 +21,7 @@ import { IdleTimeout } from "../../src/eval/idle-timeout";
 import { disposeAllVmContexts } from "../../src/eval/js/context-manager";
 import { executeJs } from "../../src/eval/js/executor";
 import { disposeAllKernelSessions, type PythonResult } from "../../src/eval/py/executor";
+import { SessionManager } from "../../src/session/session-manager";
 import type { ToolSession } from "../../src/tools";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 
@@ -101,6 +102,7 @@ function assistant(opts: {
 	toolCall?: { name: string; arguments: Record<string, unknown> };
 	stopReason?: AssistantMessage["stopReason"];
 	errorMessage?: string;
+	output?: number;
 }): AssistantMessage {
 	const content: AssistantMessage["content"] = [];
 	if (opts.text) content.push({ type: "text", text: opts.text });
@@ -115,10 +117,10 @@ function assistant(opts: {
 		model: "default",
 		usage: {
 			input: 0,
-			output: 0,
+			output: opts.output ?? 0,
 			cacheRead: 0,
 			cacheWrite: 0,
-			totalTokens: 0,
+			totalTokens: opts.output ?? 0,
 			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 		},
 		stopReason: opts.stopReason ?? "stop",
@@ -338,6 +340,80 @@ describe("runEvalCompletion", () => {
 
 		expect(spy.mock.calls.map(call => (call[0] as Model<Api>).id)).toEqual(["smol", "b", "d", "e"]);
 		expect(result.text).toBe("e answer");
+	});
+
+	it("charges every returned attempt to the owning session's totals and turn budget", async () => {
+		const fallback = makeModel("p", "fallback");
+		const session = makeSession({ available: [SMOL, fallback] });
+		cfgRetryFallbackChains.set(session.settings, { smol: ["p/fallback"] });
+		const sessionManager = SessionManager.inMemory();
+		sessionManager.beginTurnBudget(20, true);
+		session.sessionManager = sessionManager;
+		vi.spyOn(ai, "completeSimple")
+			.mockResolvedValueOnce(assistant({ stopReason: "error", errorMessage: "quota exhausted", output: 3 }))
+			.mockResolvedValueOnce(assistant({ text: "fallback answer", output: 7 }));
+
+		const result = await runEvalCompletionAndWait({ prompt: "q", model: "smol" }, { session });
+
+		expect(result.text).toBe("fallback answer");
+		expect(sessionManager.getUsageStatistics().output).toBe(10);
+		expect(sessionManager.getTurnBudget()).toEqual({ total: 20, spent: 10, hard: true });
+		// Usage is journal-only; it never becomes conversation context.
+		expect(sessionManager.buildSessionContext().messages).toEqual([]);
+	});
+
+	it("charges a response that is rejected while parsing the result", async () => {
+		const session = makeSession();
+		const sessionManager = SessionManager.inMemory();
+		session.sessionManager = sessionManager;
+		vi.spyOn(ai, "completeSimple").mockResolvedValueOnce(assistant({ output: 5 }));
+
+		await expect(runEvalCompletionAndWait({ prompt: "q", model: "smol" }, { session })).rejects.toThrow(
+			"completion() returned no text output.",
+		);
+		expect(sessionManager.getUsageStatistics().output).toBe(5);
+	});
+
+	it("keeps a pending completion's usage on its initiating branch after navigation", async () => {
+		const fallback = makeModel("p", "fallback");
+		const session = makeSession({ available: [SMOL, fallback] });
+		cfgRetryFallbackChains.set(session.settings, { smol: ["p/fallback"] });
+		const sessionManager = SessionManager.inMemory();
+		session.sessionManager = sessionManager;
+		const root = sessionManager.appendMessage({ role: "user", content: "root", timestamp: 1 });
+		const origin = sessionManager.appendMessage({ role: "user", content: "origin branch", timestamp: 2 });
+		const gate = Promise.withResolvers<AssistantMessage>();
+		vi.spyOn(ai, "completeSimple")
+			.mockReturnValueOnce(gate.promise)
+			.mockResolvedValueOnce(assistant({ text: "fallback answer", output: 7 }));
+
+		const handle = await runEvalCompletion({ prompt: "q", model: "smol" }, { session });
+		sessionManager.branch(root);
+		const other = sessionManager.appendMessage({ role: "user", content: "other branch", timestamp: 3 });
+		gate.resolve(assistant({ stopReason: "error", errorMessage: "quota exhausted", output: 3 }));
+		await getCompletionHandle(handle.id)?.promise;
+
+		const usage = sessionManager.getEntries().filter(entry => entry.type === "model_usage");
+		expect(usage.map(entry => entry.parentId)).toEqual([origin, usage[0]?.id]);
+		expect(sessionManager.getLeafId()).toBe(other);
+		expect(sessionManager.getBranch().some(entry => entry.type === "model_usage")).toBe(false);
+	});
+
+	it("journals a pending completion beneath the current leaf while its branch keeps growing", async () => {
+		const session = makeSession();
+		const sessionManager = SessionManager.inMemory();
+		session.sessionManager = sessionManager;
+		sessionManager.appendMessage({ role: "user", content: "start", timestamp: 1 });
+		const gate = Promise.withResolvers<AssistantMessage>();
+		vi.spyOn(ai, "completeSimple").mockReturnValueOnce(gate.promise);
+
+		const handle = await runEvalCompletion({ prompt: "q", model: "smol" }, { session });
+		const later = sessionManager.appendMessage({ role: "user", content: "same branch", timestamp: 2 });
+		gate.resolve(assistant({ text: "ok", output: 4 }));
+		await getCompletionHandle(handle.id)?.promise;
+
+		const usage = sessionManager.getBranch().filter(entry => entry.type === "model_usage");
+		expect(usage.map(entry => entry.parentId)).toEqual([later]);
 	});
 
 	it("inherits the failed candidate's effort for bare nested entries", async () => {

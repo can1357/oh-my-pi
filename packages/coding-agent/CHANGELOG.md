@@ -9,6 +9,7 @@
 ### Fixed
 
 - Fixed relative file links in Tern assistant replies opening against the folder omp was started in after `/wt` or `/move`; they now open the file in the session's working directory ([#14879](https://github.com/can1357/oh-my-pi/pull/14879) by [@H4vC](https://github.com/H4vC))
+- Fixed eval `completion()` token usage missing from session usage totals and turn budgets; usage from pending completions and judgments now stays on the branch that started them after navigating to another branch ([#14887](https://github.com/can1357/oh-my-pi/issues/14887))
 
 ## [18.8.3] - 2026-10-07
 
