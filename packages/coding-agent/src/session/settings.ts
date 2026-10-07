@@ -1022,6 +1022,34 @@ export const cfgProvidersAutoThinkingMaxEffort = register({
 	},
 });
 
+export const cfgProvidersAutoThinkingTimeoutMs = register({
+	id: "providers.autoThinkingTimeoutMs",
+	type: "number",
+	default: 4000,
+	env: {
+		name: "PI_AUTO_THINKING_TIMEOUT_MS",
+		parse: raw => {
+			const parsed = Number(raw.trim());
+			return Number.isFinite(parsed) && parsed > 0 ? parsed : undefined;
+		},
+	},
+	ui: {
+		tab: "model",
+		group: "Thinking",
+		label: "Auto Thinking Timeout",
+		description:
+			"Timeout in milliseconds for per-turn auto-thinking difficulty classification before falling back. Default is 4000 ms.",
+		condition: "autoThinkingActive",
+		options: [
+			{ value: "2000", label: "2 seconds" },
+			{ value: "4000", label: "4 seconds (default)" },
+			{ value: "6000", label: "6 seconds" },
+			{ value: "8000", label: "8 seconds" },
+			{ value: "10000", label: "10 seconds" },
+		],
+	},
+});
+
 export const cfgFeaturesUnexpectedStopDetection = register({
 	id: "features.unexpectedStopDetection",
 	type: "enum",

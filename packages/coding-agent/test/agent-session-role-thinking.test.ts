@@ -14,7 +14,7 @@ import { AUTO_THINKING, clampAutoThinkingEffort, resolveProvisionalAutoLevel } f
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { createAssistantMessage } from "./helpers/agent-session-setup";
 
-import { cfgDefaultThinkingLevel } from "@oh-my-pi/pi-coding-agent/session/settings";
+import { cfgDefaultThinkingLevel, cfgProvidersAutoThinkingTimeoutMs } from "@oh-my-pi/pi-coding-agent/session/settings";
 
 describe("AgentSession role model thinking behavior", () => {
 	let tempDir: TempDir;
@@ -847,5 +847,96 @@ describe("AgentSession role model thinking behavior", () => {
 		expect(session.thinkingLevel).toBe(provisional);
 		expect(session.agent.state.thinkingLevel).toBe(provisional);
 		expect(entries.at(-1)).toMatchObject({ thinkingLevel: provisional, configured: AUTO_THINKING });
+	});
+
+	it("respects providers.autoThinkingTimeoutMs configuration", async () => {
+		const model = getAnthropicModelOrThrow("claude-sonnet-4-5");
+		await createSession({
+			initialModelId: model.id,
+			initialThinkingLevel: Effort.High,
+			modelRoles: { default: `${model.provider}/${model.id}` },
+		});
+		cfgProvidersAutoThinkingTimeoutMs.set(sessionSettings, 40);
+		vi.spyOn(session.agent, "prompt").mockResolvedValue(undefined);
+		const abortedPromise = Promise.withResolvers<boolean>();
+		const classificationDone = Promise.withResolvers<Effort>();
+		vi.spyOn(autoThinkingClassifier, "classifyDifficulty").mockImplementation(async (_prompt, options) => {
+			options.signal?.addEventListener("abort", () => {
+				abortedPromise.resolve(options.signal?.aborted ?? false);
+				classificationDone.reject(new DOMException("The operation was aborted", "AbortError"));
+			});
+			return classificationDone.promise;
+		});
+
+		session.setThinkingLevel(AUTO_THINKING);
+		await session.prompt("Investigate timeout");
+		expect(await abortedPromise.promise).toBe(true);
+		expect(session.autoResolvedThinkingLevel()).toBe(resolveProvisionalAutoLevel(model));
+	});
+
+	it("respects PI_AUTO_THINKING_TIMEOUT_MS env var override", async () => {
+		const model = getAnthropicModelOrThrow("claude-sonnet-4-5");
+		await createSession({
+			initialModelId: model.id,
+			initialThinkingLevel: Effort.High,
+			modelRoles: { default: `${model.provider}/${model.id}` },
+		});
+		const oldEnv = Bun.env.PI_AUTO_THINKING_TIMEOUT_MS;
+		Bun.env.PI_AUTO_THINKING_TIMEOUT_MS = "40";
+		try {
+			vi.spyOn(session.agent, "prompt").mockResolvedValue(undefined);
+			const abortedPromise = Promise.withResolvers<boolean>();
+			const classificationDone = Promise.withResolvers<Effort>();
+			vi.spyOn(autoThinkingClassifier, "classifyDifficulty").mockImplementation(async (_prompt, options) => {
+				options.signal?.addEventListener("abort", () => {
+					abortedPromise.resolve(options.signal?.aborted ?? false);
+					classificationDone.reject(new DOMException("The operation was aborted", "AbortError"));
+				});
+				return classificationDone.promise;
+			});
+
+			session.setThinkingLevel(AUTO_THINKING);
+			await session.prompt("Investigate env timeout");
+			expect(await abortedPromise.promise).toBe(true);
+		} finally {
+			if (oldEnv === undefined) {
+				delete Bun.env.PI_AUTO_THINKING_TIMEOUT_MS;
+			} else {
+				Bun.env.PI_AUTO_THINKING_TIMEOUT_MS = oldEnv;
+			}
+		}
+	});
+
+	it("respects OMP_AUTO_THINKING_TIMEOUT_MS env var override", async () => {
+		const model = getAnthropicModelOrThrow("claude-sonnet-4-5");
+		await createSession({
+			initialModelId: model.id,
+			initialThinkingLevel: Effort.High,
+			modelRoles: { default: `${model.provider}/${model.id}` },
+		});
+		const oldEnv = Bun.env.OMP_AUTO_THINKING_TIMEOUT_MS;
+		Bun.env.OMP_AUTO_THINKING_TIMEOUT_MS = "40";
+		try {
+			vi.spyOn(session.agent, "prompt").mockResolvedValue(undefined);
+			const abortedPromise = Promise.withResolvers<boolean>();
+			const classificationDone = Promise.withResolvers<Effort>();
+			vi.spyOn(autoThinkingClassifier, "classifyDifficulty").mockImplementation(async (_prompt, options) => {
+				options.signal?.addEventListener("abort", () => {
+					abortedPromise.resolve(options.signal?.aborted ?? false);
+					classificationDone.reject(new DOMException("The operation was aborted", "AbortError"));
+				});
+				return classificationDone.promise;
+			});
+
+			session.setThinkingLevel(AUTO_THINKING);
+			await session.prompt("Investigate omp env timeout");
+			expect(await abortedPromise.promise).toBe(true);
+		} finally {
+			if (oldEnv === undefined) {
+				delete Bun.env.OMP_AUTO_THINKING_TIMEOUT_MS;
+			} else {
+				Bun.env.OMP_AUTO_THINKING_TIMEOUT_MS = oldEnv;
+			}
+		}
 	});
 });
