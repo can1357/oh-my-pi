@@ -14,7 +14,7 @@ import { AUTO_THINKING, clampAutoThinkingEffort, resolveProvisionalAutoLevel } f
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { createAssistantMessage } from "./helpers/agent-session-setup";
 
-import { cfgDefaultThinkingLevel } from "@oh-my-pi/pi-coding-agent/session/settings";
+import { cfgDefaultThinkingLevel, cfgProvidersAutoThinkingTimeoutMs } from "@oh-my-pi/pi-coding-agent/session/settings";
 
 describe("AgentSession role model thinking behavior", () => {
 	let tempDir: TempDir;
@@ -847,5 +847,135 @@ describe("AgentSession role model thinking behavior", () => {
 		expect(session.thinkingLevel).toBe(provisional);
 		expect(session.agent.state.thinkingLevel).toBe(provisional);
 		expect(entries.at(-1)).toMatchObject({ thinkingLevel: provisional, configured: AUTO_THINKING });
+	});
+
+	it("respects providers.autoThinkingTimeoutMs configuration", async () => {
+		const model = getAnthropicModelOrThrow("claude-sonnet-4-5");
+		await createSession({
+			initialModelId: model.id,
+			initialThinkingLevel: Effort.High,
+			modelRoles: { default: `${model.provider}/${model.id}` },
+		});
+		vi.spyOn(session.agent, "prompt").mockResolvedValue(undefined);
+
+		function mockDelayedClassifier(delayMs: number, result: Effort = Effort.Medium) {
+			return vi.spyOn(autoThinkingClassifier, "classifyDifficulty").mockImplementation(async (_prompt, options) => {
+				const done = Promise.withResolvers<Effort>();
+				const timer = setTimeout(() => done.resolve(result), delayMs);
+				options.signal?.addEventListener("abort", () => {
+					clearTimeout(timer);
+					done.reject(new DOMException("The operation was aborted", "AbortError"));
+				});
+				return done.promise;
+			});
+		}
+
+		// 1. Short timeout aborts delayed classification and falls back to provisional effort
+		cfgProvidersAutoThinkingTimeoutMs.set(sessionSettings, 20);
+		mockDelayedClassifier(60, Effort.Medium);
+		session.setThinkingLevel(AUTO_THINKING);
+		await session.prompt("Investigate short timeout");
+		expect(session.autoResolvedThinkingLevel()).toBe(resolveProvisionalAutoLevel(model));
+
+		// 2. Raised timeout allows classification to finish and resolve Effort.Medium
+		cfgProvidersAutoThinkingTimeoutMs.set(sessionSettings, 150);
+		mockDelayedClassifier(40, Effort.Medium);
+		await session.prompt("Investigate raised timeout");
+		expect(session.autoResolvedThinkingLevel()).toBe(Effort.Medium);
+	});
+
+	it("prefers PI_AUTO_THINKING_TIMEOUT_MS env var override over settings", async () => {
+		const model = getAnthropicModelOrThrow("claude-sonnet-4-5");
+		await createSession({
+			initialModelId: model.id,
+			initialThinkingLevel: Effort.High,
+			modelRoles: { default: `${model.provider}/${model.id}` },
+		});
+		vi.spyOn(session.agent, "prompt").mockResolvedValue(undefined);
+		cfgProvidersAutoThinkingTimeoutMs.set(sessionSettings, 20);
+
+		const oldEnv = Bun.env.PI_AUTO_THINKING_TIMEOUT_MS;
+		Bun.env.PI_AUTO_THINKING_TIMEOUT_MS = "150";
+		try {
+			const done = Promise.withResolvers<Effort>();
+			const timer = setTimeout(() => done.resolve(Effort.Medium), 40);
+			vi.spyOn(autoThinkingClassifier, "classifyDifficulty").mockImplementation(async (_prompt, options) => {
+				options.signal?.addEventListener("abort", () => {
+					clearTimeout(timer);
+					done.reject(new DOMException("The operation was aborted", "AbortError"));
+				});
+				return done.promise;
+			});
+
+			session.setThinkingLevel(AUTO_THINKING);
+			await session.prompt("Investigate env timeout override");
+			expect(session.autoResolvedThinkingLevel()).toBe(Effort.Medium);
+		} finally {
+			if (oldEnv === undefined) {
+				delete Bun.env.PI_AUTO_THINKING_TIMEOUT_MS;
+			} else {
+				Bun.env.PI_AUTO_THINKING_TIMEOUT_MS = oldEnv;
+			}
+		}
+	});
+
+	it("prefers OMP_AUTO_THINKING_TIMEOUT_MS env var override over settings", async () => {
+		const model = getAnthropicModelOrThrow("claude-sonnet-4-5");
+		await createSession({
+			initialModelId: model.id,
+			initialThinkingLevel: Effort.High,
+			modelRoles: { default: `${model.provider}/${model.id}` },
+		});
+		vi.spyOn(session.agent, "prompt").mockResolvedValue(undefined);
+		cfgProvidersAutoThinkingTimeoutMs.set(sessionSettings, 20);
+
+		const oldEnv = Bun.env.OMP_AUTO_THINKING_TIMEOUT_MS;
+		Bun.env.OMP_AUTO_THINKING_TIMEOUT_MS = "150";
+		try {
+			const done = Promise.withResolvers<Effort>();
+			const timer = setTimeout(() => done.resolve(Effort.Medium), 40);
+			vi.spyOn(autoThinkingClassifier, "classifyDifficulty").mockImplementation(async (_prompt, options) => {
+				options.signal?.addEventListener("abort", () => {
+					clearTimeout(timer);
+					done.reject(new DOMException("The operation was aborted", "AbortError"));
+				});
+				return done.promise;
+			});
+
+			session.setThinkingLevel(AUTO_THINKING);
+			await session.prompt("Investigate omp env timeout override");
+			expect(session.autoResolvedThinkingLevel()).toBe(Effort.Medium);
+		} finally {
+			if (oldEnv === undefined) {
+				delete Bun.env.OMP_AUTO_THINKING_TIMEOUT_MS;
+			} else {
+				Bun.env.OMP_AUTO_THINKING_TIMEOUT_MS = oldEnv;
+			}
+		}
+	});
+
+	it("clamps oversized timeouts without premature 1ms overflow abort", async () => {
+		const model = getAnthropicModelOrThrow("claude-sonnet-4-5");
+		await createSession({
+			initialModelId: model.id,
+			initialThinkingLevel: Effort.High,
+			modelRoles: { default: `${model.provider}/${model.id}` },
+		});
+		vi.spyOn(session.agent, "prompt").mockResolvedValue(undefined);
+		cfgProvidersAutoThinkingTimeoutMs.set(sessionSettings, 2147483648);
+
+		const done = Promise.withResolvers<Effort>();
+		const timer = setTimeout(() => done.resolve(Effort.Medium), 30);
+		vi.spyOn(autoThinkingClassifier, "classifyDifficulty").mockImplementation(async (_prompt, options) => {
+			options.signal?.addEventListener("abort", () => {
+				clearTimeout(timer);
+				done.reject(new DOMException("The operation was aborted", "AbortError"));
+			});
+			return done.promise;
+		});
+
+		session.setThinkingLevel(AUTO_THINKING);
+		await session.prompt("Investigate clamped timeout");
+		expect(session.autoResolvedThinkingLevel()).toBe(Effort.Medium);
 	});
 });
