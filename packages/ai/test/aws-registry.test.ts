@@ -80,6 +80,42 @@ describe("AWS provider availability", () => {
 		}
 	});
 
+	test.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
+		"keeps other providers available when AWS profile files cannot be accessed",
+		async () => {
+			const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "aws-registry-denied-"));
+			const awsDir = path.join(tmp, ".aws");
+			const credentialsPath = path.join(awsDir, "credentials");
+			const configPath = path.join(awsDir, "config");
+			try {
+				await fs.mkdir(awsDir);
+				await fs.chmod(awsDir, 0o000);
+				await withEnv(
+					{
+						...EMPTY_AWS_ENV,
+						AWS_SHARED_CREDENTIALS_FILE: credentialsPath,
+						AWS_CONFIG_FILE: configPath,
+						AWS_EC2_METADATA_DISABLED: "true",
+						OPENAI_API_KEY: "non-aws-test-key",
+					},
+					async () => {
+						expect(getEnvApiKey("amazon-bedrock")).toBeUndefined();
+						expect(getEnvApiKey("openai")).toBe("non-aws-test-key");
+						await fs.chmod(awsDir, 0o700);
+						await Bun.write(
+							credentialsPath,
+							"[default]\naws_access_key_id = test\naws_secret_access_key = secret\n",
+						);
+						expect(getEnvApiKey("amazon-bedrock")).toBeDefined();
+					},
+				);
+			} finally {
+				await fs.chmod(awsDir, 0o700);
+				await removeWithRetries(tmp);
+			}
+		},
+	);
+
 	test("loads implicit default config profiles only when AWS_SDK_LOAD_CONFIG is enabled", async () => {
 		const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "aws-registry-load-config-"));
 		try {

@@ -45,10 +45,15 @@ function isEc2Host(): boolean {
 
 let awsProfileProbe: { key: string; value: boolean } | undefined;
 
-/** Change stamp of one shared INI file; a missing file has its own stamp. */
+/** Change stamp of one shared INI file; unavailable files have their own stamp. */
 function awsFileStamp(filePath: string): string {
-	const stat = fs.statSync(filePath, { throwIfNoEntry: false });
-	return stat ? `${stat.mtimeMs}:${stat.size}` : "-";
+	try {
+		const stat = fs.statSync(filePath, { throwIfNoEntry: false });
+		return stat ? `${stat.mtimeMs}:${stat.size}` : "-";
+	} catch {
+		// Unreadable profile files are unavailable, just as in the INI reader.
+		return "-";
+	}
 }
 
 /**

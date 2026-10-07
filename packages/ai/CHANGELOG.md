@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed `/model` crashing when AWS credential files are inaccessible while using another provider ([#14817](https://github.com/can1357/oh-my-pi/issues/14817)).
+
 ## [18.8.0] - 2026-10-07
 
 ### Breaking Changes
