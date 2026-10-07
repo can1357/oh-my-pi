@@ -29,7 +29,7 @@ import { AgentRegistry } from "../registry/agent-registry";
 import type { AgentSessionEvent } from "../session/agent-session";
 import type { SessionEntry } from "../session/session-entries";
 import { mintSessionId } from "../session/session-manager";
-import { FileSessionStorage } from "../session/session-storage";
+import { defaultSessionStorage, FileSessionStorage } from "../session/session-storage";
 import { shouldDisableReasoning, toReasoningEffort } from "@oh-my-pi/pi-tui/thinking";
 import { emitSubagentFrame } from "../utils/event-bus";
 import { GuestLifecycleEmitter } from "../extensibility/extensions/lifecycle-mirror";
@@ -165,6 +165,20 @@ export function reconcileGuestSnapshotHostState(ctx: GuestSnapshotActivityReconc
 	reconcileGuestIdleHostState(ctx, false);
 }
 
+/**
+ * Refuse a guest join unless sessions use file storage. The replica is a local
+ * file (see `#finalizeSnapshot`) loaded through the guest's own session
+ * storage; any other backend would resume an empty session in its place
+ * instead of the host's transcript.
+ */
+export function assertCollabReplicaStorage(): void {
+	if (!(defaultSessionStorage() instanceof FileSessionStorage)) {
+		throw new Error(
+			'Cannot join a collab session while session.storage is not "file": collab replicas need file session storage',
+		);
+	}
+}
+
 export class CollabGuestLink {
 	#ctx: InteractiveModeContext;
 	#socket: CollabSocket | null = null;
@@ -285,6 +299,7 @@ export class CollabGuestLink {
 		const parsed = parseCollabLink(link);
 		if ("error" in parsed) throw new Error(parsed.error);
 		if (this.#ctx.collabGuest || this.#left) throw new Error("Already in a collab session (/leave first)");
+		assertCollabReplicaStorage();
 		this.#roomId = parsed.roomId;
 		this.#writeToken = parsed.writeToken ? Buffer.from(parsed.writeToken).toString("base64url") : undefined;
 		this.#returnSessionFile = this.#ctx.sessionManager.getSessionFile() ?? null;

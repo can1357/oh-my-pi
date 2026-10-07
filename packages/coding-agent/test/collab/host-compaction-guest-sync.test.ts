@@ -23,8 +23,14 @@ import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/typ
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import type { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
-import { tryAcquireSessionLease } from "@oh-my-pi/pi-coding-agent/session/session-storage";
+import {
+	FileSessionStorage,
+	setDefaultSessionStorage,
+	tryAcquireSessionLease,
+} from "@oh-my-pi/pi-coding-agent/session/session-storage";
+import { SqlSessionStorage } from "@oh-my-pi/pi-coding-agent/session/sql-session-storage";
 import { refreshDirsFromEnv, TempDir } from "@oh-my-pi/pi-utils";
+import { SQL } from "bun";
 import { createAssistantMessage, createInMemoryAuthStorage } from "../helpers/agent-session-setup";
 import { installInMemoryRelay, uninstallInMemoryRelay } from "./helpers/in-memory-relay";
 
@@ -252,5 +258,33 @@ describe("collab guest replica identity", () => {
 		await settleFrames(() => harness.session.messages[0]?.role === "compactionSummary");
 		expect(harness.session.sessionManager.getSessionId()).toBe(replicaId);
 		expect(leaseFree()).toBe(false);
+	});
+});
+
+describe("collab guest under session.storage: sql", () => {
+	it("refuses to join instead of activating an empty replica, leaving the local session in place", async () => {
+		const hostManager = SessionManager.inMemory();
+		hostManager.appendMessage({ role: "user", content: "first", timestamp: Date.now() });
+		hostManager.appendMessage(createAssistantMessage("reply"));
+		const host = new CollabHost(makeHostContext(hostManager));
+		await host.start("ws://localhost:8788");
+		cleanups.push(() => host.stop("test done"));
+
+		// What main.ts installs for `session.storage: sql`: the guest's SessionManager reads through it.
+		const client = new SQL("sqlite::memory:");
+		setDefaultSessionStorage(await SqlSessionStorage.create({ client }));
+		cleanups.push(async () => {
+			setDefaultSessionStorage(new FileSessionStorage());
+			await client.end();
+		});
+		const harness = makeGuestHarness(model, modelRegistry);
+		cleanups.push(harness.dispose);
+		const localFile = harness.session.sessionManager.getSessionFile();
+
+		// The replica is written as a local file the SQL storage cannot load: joining would
+		// swap the guest onto an empty session instead of the host's transcript.
+		await expect(harness.guest.join(host.link)).rejects.toThrow(/session\.storage/);
+		expect(harness.session.sessionManager.getSessionFile()).toBe(localFile);
+		expect(harness.session.messages).toHaveLength(0);
 	});
 });

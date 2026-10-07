@@ -29,7 +29,13 @@ import { BLOB_HASH_RE, BLOB_STAGING_RE, blobStagingPath } from "../session/blob-
 import { listSessionsReadOnly, type SessionInfo, type SessionStatus } from "../session/session-listing";
 import { parseTerminalBreadcrumb } from "../session/session-paths";
 import { readSessionHeaderId } from "../session/session-loader";
-import { FileSessionStorage, tryAcquireSessionLease } from "../session/session-storage";
+import {
+	defaultSessionStorage,
+	FileSessionStorage,
+	type SessionStorage,
+	tryAcquireSessionLease,
+} from "../session/session-storage";
+import { resolveSessionStorage } from "../session/session-storage-config";
 import {
 	cfgGcArchive,
 	cfgGcBlobs,
@@ -374,31 +380,49 @@ async function collectBackupJsonlFiles(root: string): Promise<string[]> {
 	}
 }
 
-async function collectReferencedBlobHashes(sessionRoots: string[], exactSessionFiles: string[]): Promise<Set<string>> {
-	const files = new Map<string, string>();
-	const decoder = new TextDecoder();
+function collectBlobHashesFromText(text: string, hashes: Set<string>): void {
+	for (const match of text.matchAll(BLOB_REF_RE)) {
+		const hash = match[1]?.toLowerCase();
+		if (hash && BLOB_HASH_RE.test(hash)) hashes.add(hash);
+	}
+}
+
+async function collectReferencedBlobHashes(
+	sessionRoots: string[],
+	exactSessionFiles: string[],
+	storage: SessionStorage,
+): Promise<Set<string>> {
+	const fsFiles = new Map<string, string>();
 	for (const root of sessionRoots) {
 		for (const file of [
 			...(await collectJsonlFiles(root)),
 			...(await collectCompressedJsonlFiles(root)),
 			...(await collectBackupJsonlFiles(root)),
 		]) {
-			files.set(normalizePathForComparison(file), file);
+			fsFiles.set(normalizePathForComparison(file), file);
 		}
 	}
 	for (const file of exactSessionFiles) {
-		files.set(normalizePathForComparison(file), file);
+		fsFiles.set(normalizePathForComparison(file), file);
 	}
 
+	const decoder = new TextDecoder();
 	const hashes = new Set<string>();
-	for (const file of files.values()) {
+	for (const file of fsFiles.values()) {
 		// Keep raw-text matching: recoverable malformed records can still own blobs.
-		await scanSessionLinesIfPresent(file, line => {
-			for (const match of decoder.decode(line).matchAll(BLOB_REF_RE)) {
-				const hash = match[1]?.toLowerCase();
-				if (hash && BLOB_HASH_RE.test(hash)) hashes.add(hash);
+		await scanSessionLinesIfPresent(file, line => collectBlobHashesFromText(decoder.decode(line), hashes));
+	}
+
+	// A non-file backend (SQL, Redis) never puts transcripts on the local
+	// filesystem, so the scan above never sees a session stored only there:
+	// enumerate and read it through the storage abstraction instead.
+	if (!(storage instanceof FileSessionStorage)) {
+		for (const root of sessionRoots) {
+			for (const file of storage.listFilesSync(root, "*/*.jsonl")) {
+				if (fsFiles.has(normalizePathForComparison(file))) continue;
+				collectBlobHashesFromText(await storage.readText(file), hashes);
 			}
-		});
+		}
 	}
 	return hashes;
 }
@@ -565,7 +589,11 @@ async function runBlobGc(options: ResolvedGcOptions, archiveSessionsRoot: string
 	for (const file of await collectBreadcrumbSessionFiles(getTerminalSessionsDir(options.agentDir))) {
 		exactSessionFiles.set(normalizePathForComparison(file), file);
 	}
-	const referenced = await collectReferencedBlobHashes(defaultRoots, [...exactSessionFiles.values()]);
+	const storage = await resolveSessionStorage({
+		settings: await Settings.loadReadOnly({ agentDir: options.agentDir }),
+		env: process.env,
+	});
+	const referenced = await collectReferencedBlobHashes(defaultRoots, [...exactSessionFiles.values()], storage);
 	const { candidates, staging } = await collectBlobCandidates(blobDir);
 	const result: BlobGcResult = {
 		referenced: referenced.size,
@@ -781,7 +809,7 @@ async function listActiveSessions(sessionsRoot: string): Promise<SessionInfo[]> 
 		throw error;
 	}
 
-	const storage = new FileSessionStorage();
+	const storage = defaultSessionStorage();
 	const sessions: SessionInfo[] = [];
 	for (const entry of entries) {
 		if (!entry.isDirectory()) continue;
@@ -794,7 +822,7 @@ async function listActiveSessions(sessionsRoot: string): Promise<SessionInfo[]> 
 async function listNestedSessionsReadOnly(artifactsRoot: string): Promise<SessionInfo[]> {
 	const files = await collectJsonlFiles(artifactsRoot);
 	const dirs = [...new Set(files.map(file => path.dirname(file)))].sort();
-	const storage = new FileSessionStorage();
+	const storage = defaultSessionStorage();
 	const sessions: SessionInfo[] = [];
 	for (const dir of dirs) sessions.push(...(await listSessionsReadOnly(dir, storage)));
 	sessions.sort((a, b) => b.modified.getTime() - a.modified.getTime());

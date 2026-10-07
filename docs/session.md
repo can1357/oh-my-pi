@@ -572,8 +572,20 @@ Implementations and adapters:
 - `FileSessionStorage`: real local files
 - `MemorySessionStorage`: map/chunk-backed in-memory storage for non-persistent sessions and tests
 - `IndexedSessionStorage`: shared local index plus ordered remote publication used by Redis/SQL-backed storage
+- `SqlSessionStorage`: one row per session in a PostgreSQL, MySQL, or SQLite table (`omp_session_files`, created on first use; columns `path`, `content`, `mtime_ms`, `title`, `title_source`, `title_updated_at`), keyed by the same path string a file session would have
 
 `SessionStorageWriter` exposes `append`, optional `appendSync`, `flush`, optional `flushSync`, `isOpen`, `close`, and `getError`.
+
+### Selecting the storage
+
+The root command (interactive, print, RPC and ACP modes, and `omp join`) resolves one process-wide default storage at start-up (`resolveSessionStorage` in `session-storage-config.ts`, installed with `setDefaultSessionStorage`) before it opens any session; every `SessionManager` factory, `resolveResumableSession`, the session picker, recent-session listing, the session archive's listing and lookup by id, and the subagent transcript discovery behind `/export` and `/dump all` fall back to `defaultSessionStorage()` when no storage is passed, so a session written to SQL is found by `--resume`, `--continue`, the picker, and the archive, and exports with its subagents, without a second path. `--export` and `omp share` read a session without reaching that install, so each resolves and installs the same storage itself first. `omp gc`'s blob sweep resolves `session.storage` the same way at maintenance time so it can discover a SQL-only session's blob references; its archive and WAL sweeps are unrelated to the transcript backend and stay on-disk-tree-only. The other subcommands never install the configured storage and still use the JSONL tree: `omp render` and session-id shell completion read sessions there, `omp stats` counts usage only from transcripts there (so SQL-stored sessions are not counted), and `omp cleanse` and `omp compress` write their own sessions there.
+
+- `session.storage: file` (default) — the JSONL tree above; nothing is read or logged.
+- `session.storage: sql` — read the file `session.sql.dsnFile` names, trim it, open it with `Bun.SQL` (dialect from the URL scheme: `postgres://`, `mysql://`, `sqlite:`), and `await SqlSessionStorage.create({ client })`, which creates the table and warms the index. `OMP_SESSION_STORAGE` and `OMP_SESSION_SQL_DSN_FILE` take precedence over both settings.
+- Resume takes the same value as today, `--resume=<session path>`: under SQL that string is the row's `path` key, and it embeds the home-relative sessions root, so the resuming process needs the same storage variables and the same home directory.
+- Refusals (exit 1, message on stderr, never a fallback to files): `sql` with no file named anywhere names both `OMP_SESSION_SQL_DSN_FILE` and `session.sql.dsnFile`; a missing or unreadable file — `<source> names <path>, which could not be read: <reason>`; a blank file — `<source> names <path>, which is empty`; an unreachable database — `<source> names <path>, but the session database could not be opened: <driver error> (<code>)`; any other storage value — `<source> is "<value>"; expected "file" or "sql"`. `<source>` is the variable or setting that supplied the value; the connection string itself is never printed.
+- Tool artifacts and image blobs stay under the agent directory on local disk in either mode; only the transcript moves. `omp gc`'s archive and WAL sweeps keep working on that on-disk tree; the blob sweep also reads a SQL-only session's transcript straight from the table so it never deletes a blob that transcript still references.
+- Joining a collab session (`/join`) needs file storage: the guest's replica of the host session is a local file, so under `sql` the join refuses with an error naming `session.storage` rather than resuming an empty session.
 
 ### Manual storage maintenance
 

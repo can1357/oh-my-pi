@@ -1304,7 +1304,27 @@ export class FileSessionStorage implements SessionStorage {
 	}
 }
 
-function matchesPattern(name: string, pattern: string): boolean {
+let defaultStorage: SessionStorage | undefined;
+
+/**
+ * The storage every session factory, listing, resume, and maintenance path
+ * falls back to when the caller passes none. Lazily a {@link FileSessionStorage}
+ * (stateless, so one shared instance is safe); {@link setDefaultSessionStorage}
+ * replaces it with the configured storage before the first session is opened,
+ * so `--resume`, the resume picker, `--continue`, and listing all read the same
+ * store the session is written to.
+ */
+export function defaultSessionStorage(): SessionStorage {
+	defaultStorage ??= new FileSessionStorage();
+	return defaultStorage;
+}
+
+/** Install the process-wide default storage. Call before any session is opened. */
+export function setDefaultSessionStorage(storage: SessionStorage): void {
+	defaultStorage = storage;
+}
+
+function matchesPatternSegment(name: string, pattern: string): boolean {
 	if (pattern === "*") return true;
 	if (pattern.startsWith("*.")) {
 		return name.endsWith(pattern.slice(1));
@@ -1313,15 +1333,36 @@ function matchesPattern(name: string, pattern: string): boolean {
 }
 
 /**
- * Name of `key` when it sits directly inside `resolvedDir` (a `path.resolve`d
- * directory), else `undefined`. Key-indexed storages keep whatever spelling
- * callers wrote, so both sides are resolved: on Windows `/sessions/x` and the
- * `path.join`-built `\sessions\x\…` keys must list as the same directory.
+ * Name of `key` relative to `resolvedDir` (a `path.resolve`d directory),
+ * slash-joined, when it sits exactly `segments` levels inside it; else
+ * `undefined`. Key-indexed storages keep whatever spelling callers wrote, so
+ * both sides are resolved: on Windows `/sessions/x` and the `path.join`-built
+ * `\sessions\x\…` keys must list as the same directory.
  */
-export function directChildKeyName(resolvedDir: string, key: string): string | undefined {
-	const name = path.basename(key);
-	if (!name || name.includes("/") || name.includes("\\")) return undefined;
-	return path.resolve(path.dirname(key)) === resolvedDir ? name : undefined;
+export function childKeyName(resolvedDir: string, key: string, segments: number): string | undefined {
+	const names: string[] = [];
+	let parent = key;
+	for (let i = 0; i < segments; i++) {
+		const name = path.basename(parent);
+		if (!name || name.includes("/") || name.includes("\\")) return undefined;
+		names.unshift(name);
+		parent = path.dirname(parent);
+	}
+	return path.resolve(parent) === resolvedDir ? names.join("/") : undefined;
+}
+
+/**
+ * Match a slash-joined path remainder against a pattern of the same shape
+ * (a single segment such as `"*.jsonl"`, or a wildcard project directory
+ * followed by `"*.jsonl"` for the one-level cross-project case). Segment
+ * counts must agree, so a direct child never matches a two-segment pattern
+ * and a nested key never matches a one-segment one.
+ */
+function matchesPattern(name: string, pattern: string): boolean {
+	const nameParts = name.split("/");
+	const patternParts = pattern.split("/");
+	if (nameParts.length !== patternParts.length) return false;
+	return nameParts.every((part, i) => matchesPatternSegment(part, patternParts[i]));
 }
 
 class MemorySessionStorageWriter implements SessionStorageWriter {
@@ -1580,8 +1621,9 @@ export class MemorySessionStorage implements SessionStorage {
 	listFilesSync(dir: string, pattern: string): string[] {
 		const resolvedDir = path.resolve(dir);
 		const files: string[] = [];
+		const segments = pattern.split("/").length;
 		for (const key of this.#files.keys()) {
-			const name = directChildKeyName(resolvedDir, key);
+			const name = childKeyName(resolvedDir, key, segments);
 			if (name === undefined || !matchesPattern(name, pattern)) continue;
 			files.push(key);
 		}

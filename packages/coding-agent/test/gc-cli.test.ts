@@ -1,3 +1,4 @@
+import { SQL } from "bun";
 import { Database } from "bun:sqlite";
 import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import * as fs from "node:fs/promises";
@@ -11,6 +12,7 @@ import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
 import { BlobStore, blobStagingPath } from "@oh-my-pi/pi-coding-agent/session/blob-store";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { FileSessionStorage } from "@oh-my-pi/pi-coding-agent/session/session-storage";
+import { SqlSessionStorage } from "@oh-my-pi/pi-coding-agent/session/sql-session-storage";
 import {
 	getAgentDir,
 	getBlobsDir,
@@ -389,6 +391,52 @@ describe("runGcCommand blob sweep", () => {
 			expect(await Bun.file(referenced).exists()).toBe(true);
 		} finally {
 			setAgentDir(originalAgentDir);
+		}
+	});
+
+	test("--apply preserves a blob referenced only by a SQL-backed session", async () => {
+		const referencedHash = hashFor("sql-reference");
+		const orphanHash = hashFor("sql-orphan");
+		const referenced = await writeBlob(root, referencedHash, "referenced");
+		const orphan = await writeBlob(root, orphanHash, "orphan");
+		await agePath(referenced);
+		await agePath(orphan);
+
+		// The transcript referencing `referenced` lives only in a SQL table, never
+		// as a local .jsonl file, so the root-scan globs can never see it.
+		const dbPath = path.join(root, "sessions.db");
+		const dsnFile = path.join(root, "session.dsn");
+		await Bun.write(dsnFile, `sqlite:${dbPath}`);
+		const client = new SQL(`sqlite:${dbPath}`);
+		const storage = await SqlSessionStorage.create({ client });
+		const sessionFile = path.join(getSessionsDir(root), "sql-project", "sql-session.jsonl");
+		await storage.writeText(
+			sessionFile,
+			[
+				JSON.stringify({ type: "session", version: 3, id: "sql-session", timestamp: "2026-01-01T00:00:00.000Z" }),
+				JSON.stringify({ type: "message", message: { role: "user", content: `blob:sha256:${referencedHash}` } }),
+				"",
+			].join("\n"),
+		);
+		await client.end();
+
+		const originalStorageEnv = process.env.OMP_SESSION_STORAGE;
+		const originalDsnEnv = process.env.OMP_SESSION_SQL_DSN_FILE;
+		process.env.OMP_SESSION_STORAGE = "sql";
+		process.env.OMP_SESSION_SQL_DSN_FILE = dsnFile;
+		try {
+			const result = await runGcCommand({ flags: { agentDir: root, blobs: true, apply: true } });
+
+			expect(result.blobs?.referenced).toBe(1);
+			expect(result.blobs?.wouldDelete).toBe(1);
+			expect(result.blobs?.deleted).toBe(1);
+			expect(await Bun.file(referenced).exists()).toBe(true);
+			expect(await Bun.file(orphan).exists()).toBe(false);
+		} finally {
+			if (originalStorageEnv === undefined) delete process.env.OMP_SESSION_STORAGE;
+			else process.env.OMP_SESSION_STORAGE = originalStorageEnv;
+			if (originalDsnEnv === undefined) delete process.env.OMP_SESSION_SQL_DSN_FILE;
+			else process.env.OMP_SESSION_SQL_DSN_FILE = originalDsnEnv;
 		}
 	});
 

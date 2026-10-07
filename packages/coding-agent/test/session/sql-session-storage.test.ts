@@ -7,6 +7,7 @@
  */
 
 import { describe, expect, it } from "bun:test";
+import { listAllSessions } from "@oh-my-pi/pi-coding-agent/session/session-listing";
 import { serializeTitleSlot } from "@oh-my-pi/pi-coding-agent/session/session-title-slot";
 import { SqlSessionStorage, type SqlSessionStorageClient } from "@oh-my-pi/pi-coding-agent/session/sql-session-storage";
 import { SQL } from "bun";
@@ -78,6 +79,17 @@ describe("SqlSessionStorage (SQLite backend)", () => {
 
 		expect(storage.listFilesSync("/dir", "*.jsonl").sort()).toEqual(["/dir/a.jsonl", "/dir/b.jsonl"]);
 		expect(storage.listFilesSync("/dir", "*.bak")).toEqual(["/dir/note.bak"]);
+		await client.end();
+	});
+
+	it("listAllSessions finds SQL-only sessions across every project directory", async () => {
+		const { client, storage } = await createSqlite();
+		await storage.writeText("/sessions/projA/a.jsonl", '{"type":"session","id":"session-a","cwd":"/work/a"}\n');
+		await storage.writeText("/sessions/projB/b.jsonl", '{"type":"session","id":"session-b","cwd":"/work/b"}\n');
+
+		const sessions = await listAllSessions(storage, "/sessions");
+
+		expect(sessions.map(session => session.id).sort()).toEqual(["session-a", "session-b"]);
 		await client.end();
 	});
 

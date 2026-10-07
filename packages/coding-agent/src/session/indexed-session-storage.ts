@@ -1,7 +1,7 @@
 import * as path from "node:path";
 import { toError } from "@oh-my-pi/pi-utils";
 import {
-	directChildKeyName,
+	childKeyName,
 	SessionWriteConflictError,
 	type SessionStorage,
 	type SessionStorageStat,
@@ -79,10 +79,24 @@ interface IndexAppend {
 
 const RESOLVED = Promise.resolve();
 
-function matchesGlob(name: string, pattern: string): boolean {
+function matchesGlobSegment(name: string, pattern: string): boolean {
 	if (pattern === "*") return true;
 	if (pattern.startsWith("*.")) return name.endsWith(pattern.slice(1));
 	return name === pattern;
+}
+
+/**
+ * Match a slash-joined index key remainder against a pattern of the same
+ * shape (`"*.jsonl"`, or a wildcard project directory followed by
+ * `"*.jsonl"` for the one-level cross-project case). Segment counts must
+ * agree, so a direct child never matches a two-segment pattern and a
+ * nested key never matches a one-segment one.
+ */
+function matchesGlob(name: string, pattern: string): boolean {
+	const nameParts = name.split("/");
+	const patternParts = pattern.split("/");
+	if (nameParts.length !== patternParts.length) return false;
+	return nameParts.every((part, i) => matchesGlobSegment(part, patternParts[i]));
 }
 
 function byteLength(text: string): number {
@@ -247,8 +261,9 @@ export class IndexedSessionStorage implements SessionStorage {
 	listFilesSync(dir: string, pattern: string): string[] {
 		const resolvedDir = path.resolve(dir);
 		const out: string[] = [];
+		const segments = pattern.split("/").length;
 		for (const key of this.#index.keys()) {
-			const name = directChildKeyName(resolvedDir, key);
+			const name = childKeyName(resolvedDir, key, segments);
 			if (name === undefined || !matchesGlob(name, pattern)) continue;
 			out.push(key);
 		}
