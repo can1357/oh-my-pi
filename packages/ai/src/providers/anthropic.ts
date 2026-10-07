@@ -10,6 +10,7 @@ import { isAnthropicOAuthToken } from "@oh-my-pi/pi-catalog/utils";
 import { parseGitHubCopilotApiKey } from "@oh-my-pi/pi-catalog/wire/github-copilot";
 import {
 	$env,
+	AttemptBudgetExhaustedError,
 	isEnoent,
 	logger,
 	parseJsonWithRepair,
@@ -91,7 +92,7 @@ import { notifyProviderResponse } from "../utils/provider-response";
 import { getHeadersFromError, getRetryAfterMsFromHeaders } from "../utils/retry-after";
 import { COMBINATOR_KEYS, NO_STRICT, toolWireSchema } from "../utils/schema";
 import { spillToDescription } from "../utils/schema/spill";
-import { createSdkStreamRequestOptions } from "../utils/sdk-stream-timeout";
+import { createSdkStreamRequestOptions, providerAttemptDeadlineMs } from "../utils/sdk-stream-timeout";
 import { notifyRawSseEvent } from "../utils/sse-debug";
 import { isForcedToolChoice } from "../utils/tool-choice";
 import {
@@ -2341,8 +2342,10 @@ const streamAnthropicOnce = (
 			const seenInputTransformations = new Set<string>();
 			const idleTimeoutMs = options?.streamIdleTimeoutMs ?? getStreamIdleTimeoutMs(model.compat.streamIdleTimeoutMs);
 			const firstEventTimeoutMs = options?.streamFirstEventTimeoutMs ?? getStreamFirstEventTimeoutMs(idleTimeoutMs);
-			const requestTimeoutMs =
-				firstEventTimeoutMs !== undefined && firstEventTimeoutMs > 0 ? firstEventTimeoutMs : undefined;
+			// `retry.provider.timeoutMs` caps one attempt's wait for the first event:
+			// the tighter of it and the first-event watchdog bounds both the
+			// per-request SDK timeout and the local abort below.
+			const requestTimeoutMs = providerAttemptDeadlineMs(firstEventTimeoutMs, options?.providerTimeoutMs);
 
 			// Opt-in flag: the response parser only honors `fallback` content
 			// blocks and `usage.iterations` when the current request opted into
@@ -2476,7 +2479,16 @@ const streamAnthropicOnce = (
 			// every wire attempt charges it, slow-lane retries included.
 			const sharedBudget = options?.providerAttemptBudget;
 			const providerRetryLimit = sharedBudget === undefined ? PROVIDER_MAX_RETRIES : Number.POSITIVE_INFINITY;
+			// Failure that ended the previous iteration: when the allowance is spent
+			// the guard below surfaces it instead of the synthetic budget error.
+			let lastStreamFailure: unknown;
 			while (true) {
+				// Recovery `continue`s inside this loop (slow lane, strict tools, fast
+				// mode) each issue a fresh wire attempt; a spent allowance must not
+				// start another one.
+				if (sharedBudget && sharedBudget.remaining <= 0) {
+					throw lastStreamFailure ?? new AttemptBudgetExhaustedError();
+				}
 				if (sharedBudget) sharedBudget.remaining -= 1;
 				activeAbortTracker = createAbortSourceTracker(options?.signal);
 				const { requestSignal } = activeAbortTracker;
@@ -3123,6 +3135,7 @@ const streamAnthropicOnce = (
 					break;
 				} catch (streamError) {
 					const streamFailure = activeAbortTracker.getLocalAbortReason() ?? streamError;
+					lastStreamFailure = streamFailure;
 					if (
 						!disableStrictTools &&
 						firstTokenTime === undefined &&

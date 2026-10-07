@@ -10,6 +10,8 @@
  * `Retry-After` hint.
  */
 import { describe, expect, it } from "bun:test";
+import { streamSimple } from "@oh-my-pi/pi-ai";
+import { streamAnthropic } from "@oh-my-pi/pi-ai/providers/anthropic";
 import { streamOpenAICompletions } from "@oh-my-pi/pi-ai/providers/openai-completions";
 import type { AssistantMessageEventStream, Context, FetchImpl, Model, ModelSpec } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
@@ -34,6 +36,15 @@ const model: Model<"openai-completions"> = buildModel({
 const context: Context = {
 	messages: [{ role: "user", content: "Say hello", timestamp: 1_000 }],
 };
+
+const anthropicModel: Model<"anthropic-messages"> = buildModel({
+	...modelDefaults,
+	id: "claude-test",
+	name: "Claude test",
+	api: "anthropic-messages",
+	provider: "anthropic",
+	baseUrl: "https://api.anthropic.test/v1",
+});
 
 const RATE_LIMIT_BODY = JSON.stringify({ error: { message: "rate limit exceeded", type: "rate_limit_error" } });
 
@@ -166,5 +177,143 @@ describe("provider attempt budget", () => {
 		expect(requests).toBe(1);
 		expect(result.stopReason).toBe("stop");
 		expect(result.content).toEqual([{ type: "text", text: "hello" }]);
+	});
+
+	it("honors the allowance when the call arrives through streamSimple", async () => {
+		let requests = 0;
+		const fetchImpl: FetchImpl = async () => {
+			requests++;
+			return rateLimited();
+		};
+
+		// `streamSimple` maps `SimpleStreamOptions` onto api-specific options, so a
+		// field missing from that mapping silently disarms the whole allowance.
+		const stream = await streamSimple(model, context, {
+			apiKey: "test-key",
+			fetch: fetchImpl,
+			providerMaxAttempts: 1,
+			providerBaseDelayMs: 0,
+		});
+		const result = await stream.result();
+
+		expect(requests).toBe(1);
+		expect(result.stopReason).toBe("error");
+	});
+
+	it("retries a hinted 429 when retry.maxDelayMs disables the delay cap", async () => {
+		let requests = 0;
+		const fetchImpl: FetchImpl = async () => {
+			requests++;
+			if (requests < 3) {
+				return new Response(RATE_LIMIT_BODY, {
+					status: 429,
+					headers: { "content-type": "application/json", "retry-after-ms": "5" },
+				});
+			}
+			return completedSse("recovered");
+		};
+
+		const stream = streamOpenAICompletions(model, context, {
+			apiKey: "test-key",
+			fetch: fetchImpl,
+			providerMaxAttempts: 3,
+			// `0` disables the ceiling (settings.md): a hinted wait must still be
+			// honored instead of the retry being declined outright.
+			maxRetryDelayMs: 0,
+		});
+		const result = await stream.result();
+
+		expect(requests).toBe(3);
+		expect(result.stopReason).toBe("stop");
+		expect(result.content).toEqual([{ type: "text", text: "recovered" }]);
+	});
+
+	it("issues no further Anthropic request once the shared allowance is spent", async () => {
+		let requests = 0;
+		const fetchImpl: FetchImpl = async () => {
+			requests++;
+			return new Response(JSON.stringify({ type: "error", error: { message: "boom" } }), {
+				status: 500,
+				headers: { "content-type": "application/json" },
+			});
+		};
+
+		const stream = streamAnthropic(anthropicModel, context, {
+			apiKey: "test-key",
+			fetch: fetchImpl,
+			providerMaxAttempts: 1,
+			// The retry loop would sleep before the second attempt; there is none.
+			providerRetryWait: async () => {},
+		});
+		const result = await stream.result();
+
+		expect(requests).toBe(1);
+		expect(result.stopReason).toBe("error");
+		// The failure that consumed the allowance surfaces, not a budget error.
+		expect(result.errorMessage ?? "").not.toMatch(/attempt budget/i);
+	});
+
+	it("bounds a hanging Anthropic request with retry.provider.timeoutMs", async () => {
+		let requests = 0;
+		let dispatched: () => void = () => {};
+		const fetchStarted = new Promise<void>(resolve => {
+			dispatched = resolve;
+		});
+		// Hangs until the client aborts: the pre-response watchdog is the only
+		// thing that can end this request, and it must do so on its own.
+		const hangingFetch: FetchImpl = (_url, init) => {
+			requests++;
+			dispatched();
+			return new Promise<Response>((_resolve, reject) => {
+				init?.signal?.addEventListener("abort", () => reject(new DOMException("Aborted", "AbortError")), {
+					once: true,
+				});
+			});
+		};
+
+		const stream = streamAnthropic(anthropicModel, context, {
+			apiKey: "test-key",
+			fetch: hangingFetch,
+			providerMaxAttempts: 1,
+			providerTimeoutMs: 40,
+		});
+		await fetchStarted;
+		const result = await stream.result();
+
+		expect(requests).toBe(1);
+		expect(result.stopReason).toBe("error");
+		expect(result.errorMessage ?? "").toMatch(/timed out/i);
+	});
+
+	it("keeps the tighter first-event watchdog when it is smaller than the explicit timeout", async () => {
+		let requests = 0;
+		let dispatched: () => void = () => {};
+		const fetchStarted = new Promise<void>(resolve => {
+			dispatched = resolve;
+		});
+		const hangingFetch: FetchImpl = (_url, init) => {
+			requests++;
+			dispatched();
+			return new Promise<Response>((_resolve, reject) => {
+				init?.signal?.addEventListener("abort", () => reject(new DOMException("Aborted", "AbortError")), {
+					once: true,
+				});
+			});
+		};
+
+		// A cap never extends the session's own watchdog: 40ms wins over 30s.
+		const stream = streamAnthropic(anthropicModel, context, {
+			apiKey: "test-key",
+			fetch: hangingFetch,
+			providerMaxAttempts: 1,
+			streamFirstEventTimeoutMs: 40,
+			providerTimeoutMs: 30_000,
+		});
+		await fetchStarted;
+		const result = await stream.result();
+
+		expect(requests).toBe(1);
+		expect(result.stopReason).toBe("error");
+		expect(result.errorMessage ?? "").toMatch(/timed out/i);
 	});
 });

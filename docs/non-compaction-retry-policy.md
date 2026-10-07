@@ -111,7 +111,7 @@ Settings:
 - `retry.maxRetries` (default `10`)
 - `retry.baseDelayMs` (default `500`)
 - `retry.provider.maxRetries` (default `5`; attempts = retries + 1, shared across every provider-layer retry)
-- `retry.provider.timeoutMs` (default `0`; leaves the request deadline to the stream watchdogs)
+- `retry.provider.timeoutMs` (default `0`; caps one attempt's wait for the first event — the tighter of it and the first-event watchdog applies — and additionally sets Bun's native pre-response ceiling on the OpenAI family; honored by the OpenAI-family transports and Anthropic, ignored elsewhere)
 - `retry.maxDelayMs` (default `300000`, 5 minutes; `<= 0` disables the fail-fast cap)
 - `retry.waitForUsageReset` (default `false`; allows provider-timed usage resets to exceed the delay cap)
 

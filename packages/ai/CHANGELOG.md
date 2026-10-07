@@ -18,7 +18,7 @@
 
 ### Added
 
-- Added `providerMaxAttempts`, `providerBaseDelayMs`, and `providerTimeoutMs` stream options: the OpenAI-family and Anthropic transports now share one provider attempt budget with the replay-safe retry layer instead of multiplying their retries, and honor a caller-supplied base backoff delay ([#14626](https://github.com/can1357/oh-my-pi/pull/14626) by [@lysci](https://github.com/lysci)).
+- Added `providerMaxAttempts`, `providerBaseDelayMs`, and `providerTimeoutMs` stream options: the OpenAI-family and Anthropic transports now share one provider attempt budget with the replay-safe retry layer instead of multiplying their retries, never issue another request once that allowance is spent (fallback re-entries included), apply the configured base delay and delay ceiling in both layers, and honor a caller-supplied request timeout ([#14626](https://github.com/can1357/oh-my-pi/pull/14626) by [@lysci](https://github.com/lysci)).
 - Added per-model `compat.statefulResponses` to enable or disable stored Responses chaining (`previous_response_id` with `store: true`) for one endpoint without the official-only request fields that `compat.officialEndpoint` implies ([#13686](https://github.com/can1357/oh-my-pi/pull/13686) by [@alphastorm](https://github.com/alphastorm)).
 - Added Snowflake Cortex with browser OAuth, token refresh, PAT environment authentication, and streaming Claude/OpenAI models with local tool execution ([#14507](https://github.com/can1357/oh-my-pi/pull/14507) by [@jorgoose](https://github.com/jorgoose)).
 - `AuthStorage.health.check()` accepts `excludeProviders` to skip credentials of providers the caller does not serve ([#14234](https://github.com/can1357/oh-my-pi/pull/14234) by [@will-bogusz](https://github.com/will-bogusz))

@@ -118,7 +118,13 @@ export async function postOpenAIStream<TEvent>(init: OpenAIStreamRequestInit): P
 		...(init.baseDelayMs !== undefined
 			? { defaultDelayMs: (attempt: number) => init.baseDelayMs! * 2 ** attempt }
 			: {}),
-		...(init.maxDelayMs !== undefined ? { maxDelayMs: init.maxDelayMs } : {}),
+		// `retry.maxDelayMs: 0` means "no cap" (settings.md), while `fetchWithRetry`
+		// reads a non-positive cap as "decline any hinted retry and sleep 0ms" —
+		// forward an explicit infinity so the disabled-cap contract survives the
+		// trip into the transport.
+		...(init.maxDelayMs !== undefined
+			? { maxDelayMs: init.maxDelayMs > 0 ? init.maxDelayMs : Number.POSITIVE_INFINITY }
+			: {}),
 		attemptBudget: init.attemptBudget,
 		// A proxy concurrency-admission 429 (`rate_limit_type: max_parallel_requests`)
 		// surfaces immediately instead of being slept-and-retried here; session

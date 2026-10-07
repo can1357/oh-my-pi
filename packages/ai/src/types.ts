@@ -700,7 +700,12 @@ export interface StreamOptions {
 	/**
 	 * Pre-response timeout for provider requests in milliseconds. `0` (or
 	 * negative) leaves it disabled — the default, because the first-event/idle
-	 * watchdogs own that deadline. Configured through `retry.provider.timeoutMs`.
+	 * watchdogs own that deadline. A positive value caps one attempt's wait for the
+	 * first event: the tighter of it and `streamFirstEventTimeoutMs` applies, and
+	 * the OpenAI-family transports additionally set Bun's native pre-response
+	 * ceiling for the request. Honored by the OpenAI-family transports and
+	 * Anthropic; other protocols ignore it. Configured through
+	 * `retry.provider.timeoutMs`.
 	 */
 	providerTimeoutMs?: number;
 	/**

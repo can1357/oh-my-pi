@@ -590,4 +590,44 @@ describe("withReplaySafeStreamRetry", () => {
 		expect(events.some(e => e.type === "toolcall_end")).toBe(true);
 		expect(result.stopReason).toBe("error");
 	});
+
+	it("schedules provider-error replays with the configured base delay", async () => {
+		let attempts = 0;
+		const waits: number[] = [];
+		const stream = withReplaySafeStreamRetry(
+			{},
+			CTX,
+			{ providerRetryWait: async ms => void waits.push(ms), providerBaseDelayMs: 2_000 },
+			() => {
+				attempts++;
+				return failingAttempt();
+			},
+			{ retryProviderErrors: true, maxProviderErrorRetries: 2 },
+		);
+
+		await drain(stream);
+
+		expect(attempts).toBe(3);
+		// `retry.baseDelayMs` × 2^attempt — not the hardcoded 500ms schedule.
+		expect(waits).toEqual([2_000, 4_000]);
+	});
+
+	it("caps provider-error replay delays and treats a non-positive cap as uncapped", async () => {
+		const waitsFor = async (maxRetryDelayMs: number): Promise<number[]> => {
+			const waits: number[] = [];
+			const stream = withReplaySafeStreamRetry(
+				{},
+				CTX,
+				{ providerRetryWait: async ms => void waits.push(ms), providerBaseDelayMs: 1_000, maxRetryDelayMs },
+				() => failingAttempt(),
+				{ retryProviderErrors: true, maxProviderErrorRetries: 2 },
+			);
+			await drain(stream);
+			return waits;
+		};
+
+		expect(await waitsFor(1_500)).toEqual([1_000, 1_500]);
+		// `0` disables the ceiling instead of zeroing every replay sleep.
+		expect(await waitsFor(0)).toEqual([1_000, 2_000]);
+	});
 });

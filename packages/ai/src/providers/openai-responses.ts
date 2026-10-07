@@ -47,6 +47,7 @@ import {
 	sanitizeSchemaForOpenAIResponses,
 	toolWireSchema,
 } from "../utils/schema";
+import { providerAttemptDeadlineMs } from "../utils/sdk-stream-timeout";
 import {
 	isForcedToolChoice,
 	mapToOpenAIResponsesToolChoice,
@@ -779,8 +780,9 @@ const streamOpenAIResponsesOnce = (
 			const firstEventTimeoutMs =
 				options?.streamFirstEventTimeoutMs ??
 				getOpenAIStreamFirstEventTimeoutMs(idleTimeoutMs, model.compat.streamFirstEventTimeoutMs);
-			const requestTimeoutMs =
-				firstEventTimeoutMs !== undefined && firstEventTimeoutMs > 0 ? firstEventTimeoutMs : undefined;
+			// `retry.provider.timeoutMs` caps one attempt's wait for the first event:
+			// the tighter of it and the first-event watchdog applies.
+			const requestTimeoutMs = providerAttemptDeadlineMs(firstEventTimeoutMs, options?.providerTimeoutMs);
 			const requestUrl = `${resolvedBaseUrl}/responses`;
 			const applyPayloadReplacement = async (requestParams: OpenAIResponsesSamplingParams) => {
 				const replacementPayload = await options?.onPayload?.(requestParams, model);
@@ -884,6 +886,11 @@ const streamOpenAIResponsesOnce = (
 						}
 						break;
 					} catch (error) {
+						// The loop re-enters `openResponsesStream` on every fallback path
+						// (reasoning-effort, strict tools), which issues another physical
+						// request: once the shared provider budget is spent, surface the
+						// failure that consumed it rather than overshooting the allowance.
+						if (options?.providerAttemptBudget && options.providerAttemptBudget.remaining <= 0) throw error;
 						const capturedErrorResponse = error instanceof OpenAIHttpError ? error.captured : undefined;
 						const reasoningEffortFallback =
 							activeReasoningEffortFallbackKey && activeRequestParams && !requestSignal.aborted

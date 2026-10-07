@@ -57,6 +57,7 @@ import {
 	sanitizeSchemaForGrammar,
 	toolWireSchema,
 } from "../utils/schema";
+import { providerAttemptDeadlineMs } from "../utils/sdk-stream-timeout";
 import {
 	type HealedToolCall,
 	StreamMarkupHealing,
@@ -842,8 +843,9 @@ const streamOpenAICompletionsOnce = (
 			const firstEventTimeoutMs =
 				options?.streamFirstEventTimeoutMs ??
 				getOpenAIStreamFirstEventTimeoutMs(idleTimeoutMs, model.compat.streamFirstEventTimeoutMs);
-			const requestTimeoutMs =
-				firstEventTimeoutMs !== undefined && firstEventTimeoutMs > 0 ? firstEventTimeoutMs : undefined;
+			// `retry.provider.timeoutMs` caps one attempt's wait for the first event:
+			// the tighter of it and the first-event watchdog applies.
+			const requestTimeoutMs = providerAttemptDeadlineMs(firstEventTimeoutMs, options?.providerTimeoutMs);
 			const {
 				copilotPremiumRequests,
 				baseUrl,
@@ -971,6 +973,11 @@ const streamOpenAICompletionsOnce = (
 			try {
 				openaiStream = await createCompletionsStream();
 			} catch (error) {
+				// Every fallback below re-enters `createCompletionsStream`, i.e. issues
+				// another physical request. Once the shared provider budget is spent,
+				// surface the failure that consumed it instead of overshooting the
+				// caller's allowance (the transport would refuse the request anyway).
+				if (options?.providerAttemptBudget && options.providerAttemptBudget.remaining <= 0) throw error;
 				const capturedErrorResponse = error instanceof OpenAIHttpError ? error.captured : undefined;
 				// A caller disable with a retained effort preference is still an
 				// explicit disable: without this, a fieldless rejection of the

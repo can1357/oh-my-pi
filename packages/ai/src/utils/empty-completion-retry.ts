@@ -68,6 +68,17 @@ interface StreamRetryOptions {
 	 * retry cannot multiply the transport's own budget.
 	 */
 	providerAttemptBudget?: { remaining: number };
+	/**
+	 * Base delay for provider-error replays (`retry.baseDelayMs`); defaults to the
+	 * empty-completion schedule's {@link EMPTY_COMPLETION_BASE_DELAY_MS}. Empty
+	 * completions keep their own fixed schedule.
+	 */
+	providerBaseDelayMs?: number;
+	/**
+	 * Per-delay ceiling for provider-error replays (`retry.maxDelayMs`). A
+	 * non-positive value disables the ceiling, matching the transport.
+	 */
+	maxRetryDelayMs?: number;
 }
 
 /** Controls which replay-safe provider results may issue a fresh request. */
@@ -121,6 +132,17 @@ export function withReplaySafeStreamRetry<M, O extends StreamRetryOptions>(
 			? undefined
 			: { remaining: Math.max(1, Math.floor(policy.maxProviderAttempts)) };
 	const attemptOptions = budget === undefined ? options : ({ ...options, providerAttemptBudget: budget } as O);
+	// Provider-error replays honor the caller's backoff knobs
+	// (`retry.baseDelayMs` / `retry.maxDelayMs`), which the transport applies to
+	// its own retries too, so `retry.baseDelayMs: 0` stays immediate here as well
+	// instead of being silently replaced by the 500ms default. Non-positive caps
+	// disable the ceiling, matching the transport.
+	const providerReplayDelayMs = (attempt: number): number => {
+		const baseDelayMs = Math.max(0, options?.providerBaseDelayMs ?? EMPTY_COMPLETION_BASE_DELAY_MS);
+		const delayMs = baseDelayMs * 2 ** attempt;
+		const capMs = options?.maxRetryDelayMs;
+		return capMs === undefined || capMs <= 0 ? delayMs : Math.min(delayMs, capMs);
+	};
 	void (async () => {
 		let emptyRetries = 0;
 		let providerErrorRetries = 0;
@@ -201,7 +223,7 @@ export function withReplaySafeStreamRetry<M, O extends StreamRetryOptions>(
 				delayMs = EMPTY_COMPLETION_BASE_DELAY_MS * 2 ** emptyRetries;
 				emptyRetries++;
 			} else if (retryProviderError) {
-				delayMs = EMPTY_COMPLETION_BASE_DELAY_MS * 2 ** providerErrorRetries;
+				delayMs = providerReplayDelayMs(providerErrorRetries);
 				providerErrorRetries++;
 			}
 

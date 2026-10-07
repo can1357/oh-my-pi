@@ -22,6 +22,24 @@ export function resolveSdkTimeoutMs(streamFirstEventTimeoutMs: number | undefine
 }
 
 /**
+ * Narrow a single provider attempt's pre-response deadline to the tighter of the
+ * session's first-event watchdog (`streamFirstEventTimeoutMs`) and an explicit
+ * per-attempt cap (`retry.provider.timeoutMs`). Neither value extends the other:
+ * a cap is a ceiling, and a request already governed by a watchdog must not gain
+ * waiting time from a larger cap.
+ */
+export function providerAttemptDeadlineMs(
+	streamFirstEventTimeoutMs: number | undefined,
+	providerTimeoutMs: number | undefined,
+): number | undefined {
+	const firstEventMs = resolveSdkTimeoutMs(streamFirstEventTimeoutMs);
+	const capMs = resolveSdkTimeoutMs(providerTimeoutMs);
+	if (firstEventMs === undefined) return capMs;
+	if (capMs === undefined) return firstEventMs;
+	return Math.min(firstEventMs, capMs);
+}
+
+/**
  * Build per-request SDK options that combine an abort signal with the optional
  * `streamFirstEventTimeoutMs` request-timeout hint.
  *
