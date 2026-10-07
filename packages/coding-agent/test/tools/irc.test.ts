@@ -622,7 +622,11 @@ describe("IRC", () => {
 			expect(parentSteer.attribution).toBe("agent");
 			expect(parentSteer.steeringSource).toBe("agent");
 			expect(parentSteer.details).toMatchObject({
-				id: "msg-parent", from: "Main", to: "0-Child", message: "change approach", fromParent: true,
+				id: "msg-parent",
+				from: "Main",
+				to: "0-Child",
+				message: "change approach",
+				fromParent: true,
 			});
 			expect(parentSteer.content).toContain("change approach");
 		});
@@ -635,12 +639,19 @@ describe("IRC", () => {
 			const receipt = await bus.send({ from: "0-Peer", to: "0-DeviceWait", body: "synthetic bus payload" });
 			expect(receipt.outcome).toBe("failed");
 			const toolSession: ToolSession = {
-				cwd: tempDir.path(), hasUI: false, getSessionFile: () => null, getSessionSpawns: () => "*",
-				settings: Settings.isolated({}), agentRegistry: registry, getAgentId: () => "0-DeviceWait",
+				cwd: tempDir.path(),
+				hasUI: false,
+				getSessionFile: () => null,
+				getSessionSpawns: () => "*",
+				settings: Settings.isolated({}),
+				agentRegistry: registry,
+				getAgentId: () => "0-DeviceWait",
 			};
 			const wait = new WaitTool(toolSession);
 			const xdev: XdevState = {
-				tools: new Map([["wait", wait]]), mountedNames: new Set(), builtInNames: new Set(["wait"]),
+				tools: new Map([["wait", wait]]),
+				mountedNames: new Set(),
+				builtInNames: new Set(["wait"]),
 				isActive: name => name === "wait",
 			};
 			toolSession.xdev = xdev;
@@ -653,28 +664,53 @@ describe("IRC", () => {
 			}
 			expect(dispatch).toMatchObject({ mode: "execute", tool: "wait" });
 			const waited = dispatch.inner.waited;
-			if (typeof waited.id !== "string" || typeof waited.ts !== "number") throw new Error("Expected transport identity");
+			if (typeof waited.id !== "string" || typeof waited.ts !== "number")
+				throw new Error("Expected transport identity");
 			const consumed: IrcMessage = {
-				id: waited.id, from: "0-Peer", to: "0-DeviceWait", body: "synthetic bus payload", ts: waited.ts,
+				id: waited.id,
+				from: "0-Peer",
+				to: "0-DeviceWait",
+				body: "synthetic bus payload",
+				ts: waited.ts,
 			};
 			expect(waited).toEqual({ ...consumed });
 			const manager = SessionManager.inMemory(tempDir.path());
 			manager.appendMessage({
-				role: "toolResult", toolName: "write", toolCallId: "device-wait-call",
-				content: result.content, details: result.details, isError: false, timestamp: 1700000003000,
+				role: "toolResult",
+				toolName: "write",
+				toolCallId: "device-wait-call",
+				content: result.content,
+				details: result.details,
+				isError: false,
+				timestamp: 1700000003000,
 			});
 			const storage = new MemorySessionStorage();
 			const durable = await manager.persistCopy({ sessionDir: tempDir.path(), suppressBreadcrumb: true }, storage);
 			const file = durable.getSessionFile();
 			if (!file) throw new Error("Expected synthetic durable session");
 			await durable.close();
-			const resumed = await SessionManager.open(file, tempDir.path(), storage, { suppressBreadcrumb: true, throwIfMissing: true });
-			const agent = new Agent({ streamFn: () => { throw new Error("Unexpected model request"); } });
+			const resumed = await SessionManager.open(file, tempDir.path(), storage, {
+				suppressBreadcrumb: true,
+				throwIfMissing: true,
+			});
+			const agent = new Agent({
+				streamFn: () => {
+					throw new Error("Unexpected model request");
+				},
+			});
 			const records: AgentSessionEvent[] = [];
 			const bridge = new IrcBridge({
-				agent, sessionManager: resumed, isDisposed: () => false, isStreaming: () => true,
-				planModeEnabled: () => false, emitSessionEvent: async event => { records.push(event); },
-				wakeForIrc: () => { throw new Error("Unexpected wake"); },
+				agent,
+				sessionManager: resumed,
+				isDisposed: () => false,
+				isStreaming: () => true,
+				planModeEnabled: () => false,
+				emitSessionEvent: async event => {
+					records.push(event);
+				},
+				wakeForIrc: () => {
+					throw new Error("Unexpected wake");
+				},
 			});
 			try {
 				await bridge.deliver(consumed);

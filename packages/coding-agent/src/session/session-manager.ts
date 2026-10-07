@@ -3542,7 +3542,12 @@ export class SessionManager {
 		steeringSource?: "agent",
 	): string {
 		const normalized = normalizeCustomMessagePayload<T>({
-			customType, content, display, details, attribution, steeringSource,
+			customType,
+			content,
+			display,
+			details,
+			attribution,
+			steeringSource,
 		});
 		const fresh = this.#freshEntryFields();
 		const entry: CustomMessageEntry<T> = {

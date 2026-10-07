@@ -191,35 +191,48 @@ describe("agent loop live steering", () => {
 
 	it("delivers sourced parent transport and a subsequent genuine user live without losing original records", async () => {
 		const parent: AgentMessage = {
-			role: "custom", customType: "irc:incoming", content: "synthetic parent envelope",
-			display: true, attribution: "agent", steeringSource: "agent", timestamp: 1,
+			role: "custom",
+			customType: "irc:incoming",
+			content: "synthetic parent envelope",
+			display: true,
+			attribution: "agent",
+			steeringSource: "agent",
+			timestamp: 1,
 			details: { id: "parent-id", from: "parent", to: "worker", ts: 1, fromParent: true },
 		};
-		const { transcript } = await runSteered(async (live, queue) => {
-			const signal = new AbortController().signal;
-			queue.push(parent);
-			await live.wait(signal);
-			const parentClaim = await live.claim(signal);
-			expect(parentClaim?.messages).toEqual([{
-				role: "user",
-				content: typeof parent.content === "string" ? [{ type: "text", text: parent.content }] : parent.content,
-				attribution: "agent", timestamp: 1,
-			}]);
-			if (!parentClaim) throw new Error("Expected live parent transport");
-			parentClaim.accept();
-			queue.push(createUserMessage("genuine follow-up"));
-			await live.wait(signal);
-			const userClaim = await live.claim(signal);
-			expect(userClaim?.messages[0].role).toBe("user");
-			expect(userClaim?.messages[0].attribution).not.toBe("agent");
-			if (!userClaim) throw new Error("Parent must not block later live user input");
-			userClaim.accept();
-		}, {
-			convertToLlm: messages => messages.flatMap(message => {
-				const converted = convertMessageToLlm(message);
-				return converted ? [converted] : [];
-			}),
-		});
+		const { transcript } = await runSteered(
+			async (live, queue) => {
+				const signal = new AbortController().signal;
+				queue.push(parent);
+				await live.wait(signal);
+				const parentClaim = await live.claim(signal);
+				expect(parentClaim?.messages).toEqual([
+					{
+						role: "user",
+						content:
+							typeof parent.content === "string" ? [{ type: "text", text: parent.content }] : parent.content,
+						attribution: "agent",
+						timestamp: 1,
+					},
+				]);
+				if (!parentClaim) throw new Error("Expected live parent transport");
+				parentClaim.accept();
+				queue.push(createUserMessage("genuine follow-up"));
+				await live.wait(signal);
+				const userClaim = await live.claim(signal);
+				expect(userClaim?.messages[0].role).toBe("user");
+				expect(userClaim?.messages[0].attribution).not.toBe("agent");
+				if (!userClaim) throw new Error("Parent must not block later live user input");
+				userClaim.accept();
+			},
+			{
+				convertToLlm: messages =>
+					messages.flatMap(message => {
+						const converted = convertMessageToLlm(message);
+						return converted ? [converted] : [];
+					}),
+			},
+		);
 		expect(transcript).toContainEqual(parent);
 		expect(liveSteeredTexts(transcript)).toEqual(["genuine follow-up"]);
 	});
@@ -227,19 +240,34 @@ describe("agent loop live steering", () => {
 	it("does not deliver peers or advisors live merely because an agent steering marker is present", async () => {
 		for (const customType of ["irc:incoming", "advisor"]) {
 			const card: AgentMessage = {
-				role: "custom", customType, content: "synthetic non-parent card",
-				display: true, attribution: "agent", steeringSource: "agent", timestamp: 1,
-				details: { id: "peer-id", from: "peer", to: "worker", ts: 1, ...(customType === "advisor" ? { fromParent: true } : {}) },
+				role: "custom",
+				customType,
+				content: "synthetic non-parent card",
+				display: true,
+				attribution: "agent",
+				steeringSource: "agent",
+				timestamp: 1,
+				details: {
+					id: "peer-id",
+					from: "peer",
+					to: "worker",
+					ts: 1,
+					...(customType === "advisor" ? { fromParent: true } : {}),
+				},
 			};
-			await runSteered(async live => {
-				expect(await live.claim(new AbortController().signal)).toBeUndefined();
-			}, {
-				initialQueue: [card],
-				convertToLlm: messages => messages.flatMap(message => {
-					const converted = convertMessageToLlm(message);
-					return converted ? [converted] : [];
-				}),
-			});
+			await runSteered(
+				async live => {
+					expect(await live.claim(new AbortController().signal)).toBeUndefined();
+				},
+				{
+					initialQueue: [card],
+					convertToLlm: messages =>
+						messages.flatMap(message => {
+							const converted = convertMessageToLlm(message);
+							return converted ? [converted] : [];
+						}),
+				},
+			);
 		}
 	});
 

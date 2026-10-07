@@ -41,10 +41,15 @@ describe("buildOutputValidator", () => {
 		const schema = {
 			type: "object",
 			properties: {
-				rows: { type: "array", items: {
-					type: "object", properties: { value: { type: "string" }, detail: { type: "string" } },
-					required: ["value"], additionalProperties: false,
-				} },
+				rows: {
+					type: "array",
+					items: {
+						type: "object",
+						properties: { value: { type: "string" }, detail: { type: "string" } },
+						required: ["value"],
+						additionalProperties: false,
+					},
+				},
 			},
 			required: ["rows"],
 			additionalProperties: false,
@@ -158,10 +163,18 @@ describe("buildOutputValidator", () => {
 		it(`normalizes optional nulls only through a valid ${keyword} branch and preserves its required nulls`, () => {
 			const { validator } = buildOutputValidator({
 				[keyword]: [
-					{ type: "object", properties: { kind: { const: "optional" }, note: { type: "string" } },
-						required: ["kind"], additionalProperties: false },
-					{ type: "object", properties: { kind: { const: "required" }, note: { type: "string" } },
-						required: ["kind", "note"], additionalProperties: false },
+					{
+						type: "object",
+						properties: { kind: { const: "optional" }, note: { type: "string" } },
+						required: ["kind"],
+						additionalProperties: false,
+					},
+					{
+						type: "object",
+						properties: { kind: { const: "required" }, note: { type: "string" } },
+						required: ["kind", "note"],
+						additionalProperties: false,
+					},
 				],
 			});
 			const optional = validator?.normalize({ kind: "optional", note: null });

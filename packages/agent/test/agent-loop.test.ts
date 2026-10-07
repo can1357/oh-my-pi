@@ -80,8 +80,13 @@ const harmonyMitigationModel = createHarmonyMitigationModel();
 describe("steeringQueueState", () => {
 	it("keeps explicit parent steers agent-sourced without promoting peer/advisor records", () => {
 		const parent: AgentMessage = {
-			role: "custom", customType: "irc:incoming", content: "parent payload",
-			display: true, attribution: "agent", steeringSource: "agent", timestamp: 1,
+			role: "custom",
+			customType: "irc:incoming",
+			content: "parent payload",
+			display: true,
+			attribution: "agent",
+			steeringSource: "agent",
+			timestamp: 1,
 		};
 		const peer: AgentMessage = { ...parent, steeringSource: undefined };
 		expect(steeringQueueState([parent])).toEqual({ queued: true, source: "agent" });

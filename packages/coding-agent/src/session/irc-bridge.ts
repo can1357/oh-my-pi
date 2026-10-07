@@ -75,7 +75,8 @@ export class IrcBridge {
 					dispatch.mode !== "execute" ||
 					typeof dispatch.tool !== "string" ||
 					normalizeToolName(dispatch.tool) !== "wait"
-				) return;
+				)
+					return;
 				details = dispatch.inner;
 			} else if (toolName !== "wait") return;
 			if (isRecord(details) && details.op === "wait") this.#rememberIncoming(details.waited);
@@ -155,8 +156,11 @@ export class IrcBridge {
 		const received = new Map<string, Set<string>>();
 		for (const [sender, ids] of this.#received) received.set(sender, new Set(ids));
 		const snapshot: IrcPendingSnapshot = {
-			interrupts: this.#interrupts, asides: this.#asides, deferredWakes: this.#deferredWakes,
-			sessionId: this.#indexedSessionId, received,
+			interrupts: this.#interrupts,
+			asides: this.#asides,
+			deferredWakes: this.#deferredWakes,
+			sessionId: this.#indexedSessionId,
+			received,
 		};
 		this.#interrupts = [];
 		this.#asides = [];

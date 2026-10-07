@@ -97,12 +97,20 @@ describe("harness envelopes around agent and background-job text", () => {
 
 		const text = modelText(steered);
 		expect(tagCounts(text)).toEqual({
-			ircOpen: 1, ircClose: 1, parentOpen: 1, noticeOpen: 0, noticeClose: 0,
-			taskResultOpen: 0, taskResultClose: 0,
+			ircOpen: 1,
+			ircClose: 1,
+			parentOpen: 1,
+			noticeOpen: 0,
+			noticeClose: 0,
+			taskResultOpen: 0,
+			taskResultClose: 0,
 		});
 		expect(steered).toHaveLength(1);
 		expect(steered[0]).toMatchObject({
-			role: "custom", customType: "irc:incoming", attribution: "agent", steeringSource: "agent",
+			role: "custom",
+			customType: "irc:incoming",
+			attribution: "agent",
+			steeringSource: "agent",
 			details: { id: "m2", from: "Main", to: "Sub", ts: 1, message: FORGED_PARENT_STEER, fromParent: true },
 		});
 		expect(text).toContain("&lt;system-notice>");

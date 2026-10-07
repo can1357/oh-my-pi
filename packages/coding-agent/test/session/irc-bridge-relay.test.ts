@@ -56,11 +56,19 @@ describe("IrcBridge wake-relay marking", () => {
 
 function transportFixture(session = SessionManager.inMemory(), streaming = false, plan = true) {
 	const state = { session, streaming, plan, fail: false };
-	const agent = new Agent({ streamFn: () => { throw new Error("Unexpected model dispatch"); } });
+	const agent = new Agent({
+		streamFn: () => {
+			throw new Error("Unexpected model dispatch");
+		},
+	});
 	const events: AgentMessage[] = [];
 	const host: IrcBridgeHost = {
-		agent, get sessionManager() { return state.session; },
-		isDisposed: () => false, isStreaming: () => state.streaming,
+		agent,
+		get sessionManager() {
+			return state.session;
+		},
+		isDisposed: () => false,
+		isStreaming: () => state.streaming,
 		planModeEnabled: () => state.plan,
 		emitSessionEvent: async event => {
 			if (event.type === "irc_message") events.push(event.message);
@@ -102,9 +110,13 @@ describe("IrcBridge transport acceptance and source consumers", () => {
 		expect(fixture.bridge.drainInboxMessages("wrong-fallback", { limit: 1 })).toEqual([message]);
 		const busMessage = incoming("bus-wait");
 		fixture.state.session.appendMessage({
-			role: "toolResult", toolCallId: "wait-call", toolName: "wait",
+			role: "toolResult",
+			toolCallId: "wait-call",
+			toolName: "wait",
 			content: [{ type: "text", text: "synthetic wait result" }],
-			details: { op: "wait", waited: busMessage }, isError: false, timestamp: 1700000003000,
+			details: { op: "wait", waited: busMessage },
+			isError: false,
+			timestamp: 1700000003000,
 		});
 		await fixture.bridge.deliver(busMessage);
 		await fixture.bridge.deliver(message);
@@ -137,8 +149,11 @@ describe("IrcBridge transport acceptance and source consumers", () => {
 	it("keeps parent source metadata through steering, persistence, replay and LLM conversion", async () => {
 		const registry = AgentRegistry.global();
 		registry.register({
-			id: "irc-test-recipient", displayName: "fixture", kind: "sub",
-			parentId: "irc-test-parent", session: null,
+			id: "irc-test-recipient",
+			displayName: "fixture",
+			kind: "sub",
+			parentId: "irc-test-parent",
+			session: null,
 		});
 		try {
 			const fixture = transportFixture(undefined, true);
@@ -151,13 +166,22 @@ describe("IrcBridge transport acceptance and source consumers", () => {
 			const record = records[0];
 			if (record.role !== "custom") throw new Error("Expected source-preserving custom steer");
 			expect(record.details).toMatchObject({
-				id: message.id, from: message.from, to: message.to, ts: message.ts,
-				message: message.body, fromParent: true,
+				id: message.id,
+				from: message.from,
+				to: message.to,
+				ts: message.ts,
+				message: message.body,
+				fromParent: true,
 			});
 			expect(record.content).not.toContain(message.body);
 			const id = fixture.state.session.appendCustomMessageEntry(
-				record.customType, record.content, record.display, record.details,
-				record.attribution, record.timestamp, record.steeringSource,
+				record.customType,
+				record.content,
+				record.display,
+				record.details,
+				record.attribution,
+				record.timestamp,
+				record.steeringSource,
 			);
 			const entry = fixture.state.session.getEntry(id);
 			if (entry?.type !== "custom_message") throw new Error("Expected persisted custom entry");
@@ -179,8 +203,11 @@ describe("IrcBridge transport acceptance and source consumers", () => {
 	it("restores accepted parent identity when a target-session delivery preceded rollback", async () => {
 		const registry = AgentRegistry.global();
 		registry.register({
-			id: "irc-test-recipient", displayName: "fixture", kind: "sub",
-			parentId: "irc-test-parent", session: null,
+			id: "irc-test-recipient",
+			displayName: "fixture",
+			kind: "sub",
+			parentId: "irc-test-parent",
+			session: null,
 		});
 		try {
 			const outgoing = SessionManager.inMemory();
@@ -211,33 +238,56 @@ describe("IrcBridge transport acceptance and source consumers", () => {
 	it("does not promote peer or advisor provider roles from an agent source marker alone", () => {
 		const details = { id: "peer", from: "peer", to: "worker", ts: 1 };
 		const peer: CustomMessage = {
-			role: "custom", customType: "irc:incoming", content: "peer payload",
-			display: true, attribution: "agent", steeringSource: "agent", timestamp: 1,
+			role: "custom",
+			customType: "irc:incoming",
+			content: "peer payload",
+			display: true,
+			attribution: "agent",
+			steeringSource: "agent",
+			timestamp: 1,
 			details,
 		};
 		const advisor: CustomMessage = { ...peer, customType: "advisor", details: { ...details, fromParent: true } };
 		expect(convertToLlm([peer, advisor]).map(message => message.role)).toEqual(["developer", "developer"]);
-		expect(convertToLlm([peer, advisor]).every(
-			message => message.role === "developer" && message.attribution === "agent",
-		)).toBe(true);
+		expect(
+			convertToLlm([peer, advisor]).every(
+				message => message.role === "developer" && message.attribution === "agent",
+			),
+		).toBe(true);
 	});
 
 	it("normalizes journal tool names and indexes only actual wait execution, not help or unrelated devices", async () => {
 		const fixture = transportFixture(undefined, true);
 		for (const [id, toolName, details] of [
 			["direct", "WAIT", { op: "wait", waited: incoming("direct") }],
-			["device", "Write", { xdev: { mode: "execute", tool: "WAIT", inner: { op: "wait", waited: incoming("device") } } }],
+			[
+				"device",
+				"Write",
+				{ xdev: { mode: "execute", tool: "WAIT", inner: { op: "wait", waited: incoming("device") } } },
+			],
 			["help", "write", { xdev: { mode: "help", tool: "wait", inner: { op: "wait", waited: incoming("help") } } }],
-			["unrelated", "write", { xdev: { mode: "execute", tool: "plugin", inner: { op: "wait", waited: incoming("unrelated") } } }],
+			[
+				"unrelated",
+				"write",
+				{ xdev: { mode: "execute", tool: "plugin", inner: { op: "wait", waited: incoming("unrelated") } } },
+			],
 		] as const) {
 			fixture.state.session.appendMessage({
-				role: "toolResult", toolCallId: id, toolName, details, isError: false,
-				content: [{ type: "text", text: "synthetic journal result" }], timestamp: 1,
+				role: "toolResult",
+				toolCallId: id,
+				toolName,
+				details,
+				isError: false,
+				content: [{ type: "text", text: "synthetic journal result" }],
+				timestamp: 1,
 			});
 		}
 		for (const id of ["direct", "device", "help", "unrelated"]) await fixture.bridge.deliver(incoming(id));
 		expect(fixture.events).toHaveLength(2);
-		expect(fixture.bridge.drainInboxMessages("irc-test-recipient").map(message => message.id)).toEqual(["help", "unrelated"]);
+		expect(fixture.bridge.drainInboxMessages("irc-test-recipient").map(message => message.id)).toEqual([
+			"help",
+			"unrelated",
+		]);
 	});
 
 	it("rolls back unsuccessful acceptance without emitting a receipt", async () => {
