@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed `omp stats` replaying unchanged ZFS transcripts when filesystem device numbers change ([#14736](https://github.com/can1357/oh-my-pi/issues/14736)).
+
 ## [18.7.0] - 2026-10-06
 
 ### Fixed

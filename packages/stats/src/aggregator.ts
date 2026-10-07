@@ -376,6 +376,7 @@ async function syncAllSessionsLocked(
 			stored?.parserState &&
 			stored.lastModified === fileStats.mtimeMs &&
 			stored.parserState.size === fileStats.size &&
+			stored.parserState.dev === fileStats.dev &&
 			matchesSessionFile(stored.parserState, fileStats)
 		) {
 			return null;

@@ -478,7 +478,8 @@ export class Terminal {
 		while (column >= 0 && line.cells[column]?.width === 0) column--;
 		const cell = line.cells[column];
 		// Cells are frozen and may be shared; replace instead of mutating.
-		if (cell?.chars) line.cells[column] = Object.freeze({ chars: cell.chars + mark, width: cell.width, attrs: cell.attrs });
+		if (cell?.chars)
+			line.cells[column] = Object.freeze({ chars: cell.chars + mark, width: cell.width, attrs: cell.attrs });
 	}
 
 	#lineFeed(wrapped: boolean): void {

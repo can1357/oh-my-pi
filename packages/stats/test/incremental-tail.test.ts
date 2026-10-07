@@ -57,6 +57,19 @@ async function session(content: string): Promise<string> {
 	return file;
 }
 
+async function changeCachedDevice(file: string, mtimeMs?: number): Promise<void> {
+	const offset = getFileOffset(file);
+	if (!offset?.parserState) throw new Error("Expected a persisted parser cursor");
+	const timestamp = mtimeMs ?? offset.lastModified;
+	const state = { ...offset.parserState, dev: offset.parserState.dev + 1, mtimeMs: timestamp };
+	const db = await initDb();
+	db.prepare("UPDATE file_offsets SET last_modified = ?, parser_state = ? WHERE session_file = ?").run(
+		timestamp,
+		JSON.stringify(state),
+		file,
+	);
+}
+
 describe("incremental stats ingestion", () => {
 	for (const kind of ["message", "user", "tool", "tool-entry"] as const) {
 		const title =
@@ -207,6 +220,29 @@ describe("incremental stats ingestion", () => {
 		}
 		expect(getOverallStats().totalRequests).toBe(2);
 		expect(getOverallStats().totalPremiumRequests).toBe(2);
+	});
+
+	it("keeps an unchanged transcript cached after its filesystem device changes", async () => {
+		const file = await session(assistant("old"));
+		await syncAllSessions({ workers: 1 });
+		await changeCachedDevice(file);
+		closeDb();
+
+		const synced = await syncAllSessions({ workers: 1 });
+		expect(synced.processed).toBe(0);
+		expect(getRecentRequests().map(row => row.entryId)).toEqual(["old"]);
+	});
+
+	it("rebuilds changed content despite a device-only cached identity mismatch", async () => {
+		const file = await session(assistant("old") + `${JSON.stringify({ type: "custom", marker: "old" })}\n`);
+		await syncAllSessions({ workers: 1 });
+		await fs.writeFile(file, assistant("new") + `${JSON.stringify({ type: "custom", marker: "new" })}\n`);
+		// Match the current metadata to isolate the checkpoint from size and mtime checks.
+		await changeCachedDevice(file, (await fs.stat(file)).mtimeMs);
+		closeDb();
+
+		await syncAllSessions({ workers: 1 });
+		expect(getRecentRequests().map(row => row.entryId)).toEqual(["new"]);
 	});
 
 	for (const operation of ["replace", "truncate"] as const) {

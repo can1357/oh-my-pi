@@ -528,8 +528,9 @@ async function readCheckpoint(handle: fs.FileHandle, end: number): Promise<Uint8
 	return bytes.subarray(0, read);
 }
 
+/** Match a persisted cursor to its file across mounts; callers validate the checkpoint before resuming. */
 export function matchesSessionFile(state: SessionParserState, info: nodeFs.Stats): boolean {
-	return state.dev === info.dev && state.ino === info.ino && state.birthtimeMs === info.birthtimeMs;
+	return state.ino === info.ino && state.birthtimeMs === info.birthtimeMs;
 }
 
 /** Offset-only callers reconstruct service-tier state once; persisted cursors read only the appended tail. */
