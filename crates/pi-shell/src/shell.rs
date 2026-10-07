@@ -5700,7 +5700,8 @@ mod tests {
 			std::fs::metadata(dir.path().join(name))
 				.expect("created file")
 				.permissions()
-				.mode() & 0o777
+				.mode()
+				& 0o777
 		};
 		assert_eq!(mode("redirect"), 0o600, "redirections use the shell umask");
 		assert_eq!(mode("builtin"), 0o600, "builtins use the shell umask");

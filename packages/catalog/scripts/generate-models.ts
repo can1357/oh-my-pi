@@ -782,6 +782,7 @@ export function buildGeneratedModel(model: ModelSpec<Api>): Model<Api> {
 	const spec = { ...model };
 	delete spec.promptCache;
 	delete spec.promptCacheConfig;
+	delete spec.kindConfig;
 	return buildModel(spec);
 }
 

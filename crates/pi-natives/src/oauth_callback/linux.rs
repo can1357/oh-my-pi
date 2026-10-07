@@ -123,15 +123,15 @@ fn desktop_names(context: &Context) -> Vec<String> {
 	context
 		.env
 		.get("XDG_CURRENT_DESKTOP")
-		.map(String::as_str)
-		.unwrap_or_default()
+		.map_or_default(String::as_str)
 		.split(':')
 		.filter_map(|raw| {
 			let name = raw.trim().to_ascii_lowercase();
 			if name.is_empty()
 				|| !name.bytes().all(|byte| {
 					byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'_' | b'-')
-				}) || !seen.insert(name.clone())
+				})
+				|| !seen.insert(name.clone())
 			{
 				None
 			} else {
@@ -209,7 +209,8 @@ fn read_preference(path: &Path, mime_type: &str) -> anyhow::Result<PreferenceSta
 			let mode = fs::metadata(path)
 				.with_context(|| format!("failed to stat {}", path.display()))?
 				.permissions()
-				.mode() & 0o777;
+				.mode()
+				& 0o777;
 			let (default_section_present, entry) = parse_default_entry(&content, mime_type)?;
 			Ok(PreferenceState { content, default_section_present, entry, exists: true, mode })
 		},

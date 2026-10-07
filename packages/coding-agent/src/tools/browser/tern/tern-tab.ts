@@ -154,7 +154,7 @@ import {
 	type TernTargetAction,
 } from "./page-kit";
 import { parseTernSelector, type TernSelector } from "./selectors";
-import { TernBrowserError, type TernSocketClient } from "./wire";
+import { TernError, type TernSocketClient } from "./wire";
 
 type WaitUntil = "load" | "domcontentloaded" | "networkidle0" | "networkidle2";
 type DragTarget = string | { readonly x: number; readonly y: number };
@@ -245,7 +245,7 @@ function unsupported(name: string, reason: string): ToolError {
 }
 
 /** The message of a page-side exception answered by Tern (`js` errors), without Tern's prefix. */
-function pageErrorText(error: TernBrowserError): string {
+function pageErrorText(error: TernError): string {
 	return error.message.replace(/^Tern browser \w+ failed \(js\): /, "");
 }
 
@@ -271,7 +271,7 @@ export function userSourceFunction(source: string): string {
 }
 
 /** The first line of a page-side exception, without the `Error: ` prefix: agent-readable kit failures. */
-function kitErrorText(error: TernBrowserError): string {
+function kitErrorText(error: TernError): string {
 	return (pageErrorText(error).split("\n", 1)[0] ?? "").replace(/^Error: /, "");
 }
 
@@ -478,7 +478,7 @@ export class TernTab implements InProcessRunTab {
 		try {
 			await this.#client.request({ op: "close", block: this.block }, { timeoutMs: opts.timeoutMs });
 		} catch (error) {
-			if (error instanceof TernBrowserError && (error.kind === "not_found" || error.kind === "closed")) return;
+			if (error instanceof TernError && (error.kind === "not_found" || error.kind === "closed")) return;
 			throw error;
 		}
 	}
@@ -520,7 +520,7 @@ export class TernTab implements InProcessRunTab {
 			try {
 				result = await this.#eval(KIT_CALL, [method, args], "isolated", frame);
 			} catch (error) {
-				if (error instanceof TernBrowserError && error.kind === "js") throw new ToolError(kitErrorText(error));
+				if (error instanceof TernError && error.kind === "js") throw new ToolError(kitErrorText(error));
 				throw error;
 			}
 			if (isRecord(result) && result.missing === true) {
@@ -539,7 +539,7 @@ export class TernTab implements InProcessRunTab {
 			if (typeof fn !== "string") throw new ToolError(`${label} expects a function or a source string`);
 			return await this.#eval(userSourceFunction(fn), [], "page", frame);
 		} catch (error) {
-			if (error instanceof TernBrowserError && error.kind === "js") {
+			if (error instanceof TernError && error.kind === "js") {
 				throw new ToolError(`${label} threw a JavaScript exception:\n${pageErrorText(error)}`);
 			}
 			throw error;
@@ -1653,7 +1653,7 @@ export class TernTab implements InProcessRunTab {
 		try {
 			return await this.#eval(wrapper, [token, args], "page", frame);
 		} catch (error) {
-			if (error instanceof TernBrowserError && error.kind === "js") {
+			if (error instanceof TernError && error.kind === "js") {
 				throw new ToolError(`elementHandle.evaluate() threw a JavaScript exception:\n${pageErrorText(error)}`);
 			}
 			throw error;
@@ -1717,7 +1717,7 @@ export class TernTab implements InProcessRunTab {
 			null,
 			context.timeoutMs,
 		).catch(error => {
-			if (error instanceof TernBrowserError && error.kind === "js") {
+			if (error instanceof TernError && error.kind === "js") {
 				throw new ToolError(`tab.a11y() failed: ${kitErrorText(error)}`);
 			}
 			throw error;
@@ -1994,7 +1994,7 @@ export class TernTab implements InProcessRunTab {
 				...(opts.text !== undefined ? { text: opts.text } : {}),
 			});
 		} catch (error) {
-			if (error instanceof TernBrowserError && error.kind === "failed") {
+			if (error instanceof TernError && error.kind === "failed") {
 				throw new ToolError("tab.handleDialog() found no pending confirm or prompt");
 			}
 			throw error;
@@ -2660,8 +2660,7 @@ export class TernTab implements InProcessRunTab {
 							logger.debug("Tern recording frame capture failed", {
 								error: error instanceof Error ? error.message : String(error),
 							});
-							if (error instanceof TernBrowserError && (error.kind === "closed" || error.kind === "not_found"))
-								return;
+							if (error instanceof TernError && (error.kind === "closed" || error.kind === "not_found")) return;
 						}
 						await Bun.sleep(Math.max(0, intervalMs - (Date.now() - startedAt)));
 					}

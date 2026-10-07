@@ -146,8 +146,32 @@ pub(crate) fn pin_index_mtime(repo: &GitRepo) {
 		.expect("pin index mtime");
 }
 /// Discover repository metadata for `dir` without opening gitoxide.
+///
+/// The walk goes up `dir`'s real path, as git does: a shell reports the
+/// directory it reached through a symbolic link (`$PWD`), whose parents as
+/// spelled may lie outside the checkout the link leads into, or in another
+/// one. The repository found comes back as spelled only when the spelled
+/// walk reaches the same checkout root.
 pub fn discover_info(dir: &Path) -> Result<Option<GitRepoInfo>> {
-	let mut current = std::path::absolute(dir)?;
+	let spelled = std::path::absolute(dir)?;
+	let real = match std::fs::canonicalize(&spelled) {
+		Ok(real) if real != spelled => real,
+		_ => return walk_up(spelled),
+	};
+	let Some(found) = walk_up(real)? else {
+		return Ok(None);
+	};
+	if let Ok(Some(as_spelled)) = walk_up(spelled)
+		&& std::fs::canonicalize(&as_spelled.repo_root).is_ok_and(|root| root == found.repo_root)
+	{
+		return Ok(Some(as_spelled));
+	}
+	Ok(Some(found))
+}
+
+/// The repository holding `current` (an absolute path), up its parents as
+/// spelled.
+fn walk_up(mut current: PathBuf) -> Result<Option<GitRepoInfo>> {
 	loop {
 		let git_entry = current.join(".git");
 		if let Some(entry) = entry_type(&git_entry) {
@@ -437,6 +461,51 @@ mod tests {
 				.unwrap()
 				.unwrap()
 				.is_linked_worktree()
+		);
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn discovery_follows_a_symlink_into_a_checkouts_subdirectory() {
+		let temp = tempfile::tempdir().unwrap();
+		let repo = temp.path().join("monorepo");
+		fs::create_dir_all(repo.join("projects/app")).unwrap();
+		run_git(&repo, &["init", "-q", "-b", "main"]);
+		// `cd ~/app` through `~/app -> ~/monorepo/projects/app`: the shell's
+		// `$PWD` keeps the link, whose parents hold no `.git`.
+		let link = temp.path().join("app");
+		std::os::unix::fs::symlink(repo.join("projects/app"), &link).unwrap();
+
+		let info = discover_info(&link)
+			.unwrap()
+			.expect("the checkout the link leads into");
+		assert_eq!(info.repo_root, fs::canonicalize(&repo).unwrap());
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn discovery_through_a_symlink_into_another_checkout_finds_that_checkout() {
+		let temp = tempfile::tempdir().unwrap();
+		let a = temp.path().join("repos/A");
+		let b = temp.path().join("repos/B");
+		fs::create_dir_all(&a).unwrap();
+		fs::create_dir_all(b.join("subdir")).unwrap();
+		run_git(&a, &["init", "-q", "-b", "main"]);
+		run_git(&b, &["init", "-q", "-b", "main"]);
+		// `cd /repos/A/link` through `link -> /repos/B/subdir`: the spelled
+		// parents reach A, but the shell works in B, as git sees it.
+		let link = a.join("link");
+		std::os::unix::fs::symlink(b.join("subdir"), &link).unwrap();
+
+		let info = discover_info(&link)
+			.unwrap()
+			.expect("the checkout the link leads into");
+		assert_eq!(info.repo_root, fs::canonicalize(&b).unwrap());
+		let info = discover_info(&a).unwrap().expect("checkout A");
+		assert_eq!(
+			info.repo_root,
+			std::path::absolute(&a).unwrap(),
+			"spelled when it is the same checkout"
 		);
 	}
 

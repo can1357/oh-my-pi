@@ -98,6 +98,12 @@ export interface CredentialCacheStore {
 export interface CredentialBlockStore {
 	/** Non-expired block for one (credential, providerKey, scope) key, or undefined. */
 	getCredentialBlock(credentialId: number, providerKey: string, blockScope: string): number | undefined;
+	/**
+	 * Non-expired blocks for one credential and providerKey, keyed by block
+	 * scope (`""` is unscoped), in one read. Optional: selectors fall back to
+	 * {@link CredentialBlockStore.getCredentialBlock} per scope when absent.
+	 */
+	getCredentialBlockScopes?(credentialId: number, providerKey: string): ReadonlyMap<string, number>;
 	/** Earliest time a shared-store block should be eligible for live-usage reconciliation. */
 	getCredentialBlockReconcileAfter(credentialId: number, providerKey: string, blockScope: string): number | undefined;
 	/** Upsert with MAX semantics: keep the later blockedUntilMs on conflict. */

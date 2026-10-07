@@ -368,7 +368,7 @@ With an argument:
 
 `createSessionManager()` resolution order:
 
-1. If value looks like path (`/`, `\`, or `.jsonl`), open directly.
+1. If value looks like path (`/`, `\`, or `.jsonl`), open directly. A path that does not exist fails with `Session "<path>" not found.` rather than creating a session there.
 2. Else `resolveResumableSession(...)` searches:
    - current scope (`SessionManager.list(cwd, sessionDir)`)
    - global sessions (`SessionManager.listAll()`) only when no explicit `sessionDir` was provided
@@ -386,7 +386,8 @@ prompt. If its recorded cwd is missing or permission-blocked, startup retains
 the launch cwd without relocating the transcript; a failed cwd switch/rescope
 also prints a fallback warning.
 The same enterability policy applies to picker selections. A missing direct path
-initializes a new session at that path; malformed non-empty headers fail closed.
+fails with `Session "<path>" not found.`; an existing empty file or malformed
+non-empty headers fail closed without modifying the file.
 
 ## CLI `--continue`
 

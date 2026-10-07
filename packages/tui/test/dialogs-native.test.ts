@@ -5,10 +5,16 @@ import type { DescribeContext, NativeChild, NativeNode } from "@oh-my-pi/pi-tui/
 import { AskDialogComponent, type ExtensionAskDialogQuestion } from "@oh-my-pi/pi-tui/overlays/ask-dialog";
 import { LoginDialogComponent } from "@oh-my-pi/pi-tui/overlays/login-dialog";
 import { PlanReviewOverlay } from "@oh-my-pi/pi-tui/overlays/plan-review-overlay";
+import { setNativeRendering } from "@oh-my-pi/pi-tui/native/state";
 import { getThemeByName, setThemeInstance } from "@oh-my-pi/pi-tui/theme";
 
 const ENTER = "\n";
+const UP = "\x1b[A";
 const DOWN = "\x1b[B";
+const RIGHT = "\x1b[C";
+const LEFT = "\x1b[D";
+const SHIFT_RIGHT = "\x1b[1;2C";
+const SHIFT_LEFT = "\x1b[1;2D";
 
 /** A terminal that draws every kind (`meter` included). */
 const CX: DescribeContext = { cols: 100, reduceMotion: false, dark: true, supports: () => true, feature: () => true };
@@ -136,6 +142,39 @@ describe("dialogs under a native surface", () => {
 		pointed.handleNativeEvent({ type: "action", key: "tools/copyPlan", act: "copyPlan", mods: [] });
 		expect(viaButton.mock.calls).toEqual(viaKey.mock.calls);
 		expect(viaKey).toHaveBeenCalledTimes(1);
+	});
+
+	it("plan review: ←/→ walk the horizontal decision bar, Shift+←/→ step the model slider, ↑ leaves it", () => {
+		const onPick = vi.fn();
+		const onChange = vi.fn();
+		const overlay = new PlanReviewOverlay(
+			"# Plan\n\nbody\n",
+			{
+				options: ["Approve", "Refine", "Stay"],
+				slider: { segments: [{ label: "Fast" }, { label: "Smart" }], index: 0, onChange },
+			},
+			{ onPick, onCancel: vi.fn() },
+		);
+		setNativeRendering(true);
+		try {
+			// → → ← lands on the middle option; Shift+→ then Shift+← round-trips the slider.
+			overlay.handleInput(RIGHT);
+			overlay.handleInput(RIGHT);
+			overlay.handleInput(LEFT);
+			overlay.handleInput(SHIFT_RIGHT);
+			overlay.handleInput(SHIFT_LEFT);
+			// ↓ has nothing below the bar: the selection stays put.
+			overlay.handleInput(DOWN);
+			// ↑ hands focus to the body, where Enter returns to the bar instead of confirming.
+			overlay.handleInput(UP);
+			overlay.handleInput(ENTER);
+			expect(onPick).not.toHaveBeenCalled();
+			overlay.handleInput(ENTER);
+		} finally {
+			setNativeRendering(false);
+		}
+		expect(onChange.mock.calls).toEqual([[1], [0]]);
+		expect(onPick).toHaveBeenCalledWith("Refine");
 	});
 
 	it("login: Cancel runs Esc's path and Continue submits the pasted code", async () => {

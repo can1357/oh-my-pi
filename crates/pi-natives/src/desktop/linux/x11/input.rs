@@ -172,8 +172,9 @@ impl X11Input {
 						let wm = Wm { conn: &self.conn, root: self.root, atoms: &self.atoms };
 						let result = pointer_mpx(wm, mpx, window, &event);
 						if control::check().is_err() {
-							// Retire cancelled devices, never replay uncertain queued input.
-							// A later explicit operation may create a fresh isolated pair.
+							// Retire cancelled devices, never replay uncertain queued
+							// input. A later explicit operation
+							// may create a fresh isolated pair.
 							self.mpx = None;
 						}
 						return result;
@@ -988,8 +989,7 @@ impl X11Input {
 			.get_property(false, window, AtomEnum::WM_CLASS, AtomEnum::STRING, 0, 1024)
 			.ok()
 			.and_then(|cookie| cookie.reply().ok())
-			.map(|reply| String::from_utf8_lossy(&reply.value).into_owned())
-			.unwrap_or_default();
+			.map_or_default(|reply| String::from_utf8_lossy(&reply.value).into_owned());
 		toolkit::requires_core_events(&class, self.wm().owning_pid(window))
 	}
 
@@ -1001,8 +1001,7 @@ impl X11Input {
 			.get_property(false, window, AtomEnum::WM_CLASS, AtomEnum::STRING, 0, 1024)
 			.ok()
 			.and_then(|cookie| cookie.reply().ok())
-			.map(|reply| String::from_utf8_lossy(&reply.value).into_owned())
-			.unwrap_or_default();
+			.map_or_default(|reply| String::from_utf8_lossy(&reply.value).into_owned());
 		toolkit::class_drops_synthetic(&class)
 			|| self
 				.wm()

@@ -170,7 +170,8 @@ impl AtSpiAx {
 				if dbus
 					.get_connection_unix_process_id(bus_name.clone().into())
 					.await
-					.ok() == Some(pid)
+					.ok()
+					== Some(pid)
 				{
 					matches.push(app);
 				}
@@ -251,7 +252,8 @@ impl AtSpiAx {
 		root: ObjectRefOwned,
 		depth: u8,
 	) -> Result<Option<ObjectRefOwned>, String> {
-		// Chromium/Electron frames report children that are the AT-SPI null object.
+		// Chromium/Electron frames report children that are the AT-SPI null
+		// object.
 		if depth > 40 || root.is_null() {
 			return Ok(None);
 		}
@@ -276,7 +278,7 @@ impl AtSpiAx {
 }
 
 fn atspi_window_id(frame: &ObjectRefOwned) -> String {
-	let name = frame.name().map(ToString::to_string).unwrap_or_default();
+	let name = frame.name().map_or_default(ToString::to_string);
 	format!("atspi:{name}:{}", frame.path())
 }
 

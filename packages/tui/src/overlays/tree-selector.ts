@@ -2,7 +2,8 @@ import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import {
 	type Component,
 	Container,
-	fuzzyMatch,
+	FuzzyQuery,
+	FuzzyText,
 	Input,
 	matchesKey,
 	Spacer,
@@ -210,6 +211,8 @@ class TreeList implements Component {
 	#multipleRoots = false;
 	#activePathIds: Set<string> = new Set();
 	#containsActive: Map<TreeSelectorNode, boolean> = new Map();
+	/** Prepared search text per node; rebuilt when the node's label changes. */
+	#searchTextCache = new WeakMap<TreeSelectorNode, { label: string | undefined; text: FuzzyText }>();
 
 	onSelect?: (entryId: string, options: { summarize: boolean }) => void;
 	onCancel?: () => void;
@@ -373,7 +376,11 @@ class TreeList implements Component {
 	#buildFilter(): (node: TreeSelectorNode, row: TreeRow<TreeSelectorNode, string>) => boolean {
 		const filterMode = this.#filterMode;
 		const leafId = this.currentLeafId;
-		const searchTokens = this.getSearchQuery().toLowerCase().split(/\s+/).filter(Boolean);
+		const searchTokens = this.getSearchQuery()
+			.toLowerCase()
+			.split(/\s+/)
+			.filter(Boolean)
+			.map(token => new FuzzyQuery(token));
 		return node => {
 			const entry = node.entry;
 			const isCurrentLeaf = entry.id === leafId;
@@ -435,12 +442,21 @@ class TreeList implements Component {
 
 			// Apply fuzzy search filter
 			if (searchTokens.length > 0) {
-				const nodeText = this.#getSearchableText(node);
-				return searchTokens.every(token => fuzzyMatch(token, nodeText).matches);
+				const nodeText = this.#getFuzzyText(node);
+				return searchTokens.every(token => token.match(nodeText).matches);
 			}
 
 			return true;
 		};
+	}
+
+	/** Prepared fuzzy text for a node's searchable content, built once per label. */
+	#getFuzzyText(node: TreeSelectorNode): FuzzyText {
+		const cached = this.#searchTextCache.get(node);
+		if (cached !== undefined && cached.label === node.label) return cached.text;
+		const text = new FuzzyText(this.#getSearchableText(node));
+		this.#searchTextCache.set(node, { label: node.label, text });
+		return text;
 	}
 
 	/** Get searchable text content from a node */

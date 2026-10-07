@@ -165,6 +165,9 @@ export const COMPOSER_TOKEN_REGEX = new RegExp(
 	"gu",
 );
 
+/** Last compiled {@link referencedAttachments} scanner, keyed by its source (labels and glyphs rarely change). */
+let cachedScanner: { source: string; scanner: RegExp } | undefined;
+
 /**
  * Attachment indices referenced by a composer buffer, per kind. Image/video count compact chips
  * and expanded markers; paste counts compact chips only, since `[Paste #N]` markers number the
@@ -182,10 +185,9 @@ export function referencedAttachments(
 	const icons = [...kindByIcon.keys()].sort((a, b) => b.length - a.length).map(glyphSource);
 	const labels = [...recorded.keys()].sort((a, b) => b.length - a.length).map(label => RegExp.escape(label));
 	const recordedSource = labels.length > 0 ? labels.join("|") : "(?!)";
-	const scanner = new RegExp(
-		`${PLACEHOLDER_REGEX.source}|(${recordedSource})(?!\\d)|(${icons.join("|")}) #([1-9]\\d*)`,
-		"gu",
-	);
+	const source = `${PLACEHOLDER_REGEX.source}|(${recordedSource})(?!\\d)|(${icons.join("|")}) #([1-9]\\d*)`;
+	if (cachedScanner?.source !== source) cachedScanner = { source, scanner: new RegExp(source, "gu") };
+	const { scanner } = cachedScanner;
 
 	const refs: Record<ChipKind, Set<number>> = { image: new Set(), video: new Set(), paste: new Set() };
 	for (const match of text.matchAll(scanner)) {

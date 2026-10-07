@@ -1799,10 +1799,11 @@ export class ProcessTerminal implements Terminal {
 
 	#handleTspMessage(sequence: string): void {
 		const message = parseTspMessage(sequence);
-		if (message?.verb === "r") {
-			if (message.reply.r === "hello") this.#resolveTspSupport(message.reply);
+		if (message?.verb === "r" && message.reply.r === "hello") {
+			this.#resolveTspSupport(message.reply);
 			return;
 		}
+		// Events and every other reply (`blobs`) go to the native backend.
 		this.#inputHandler?.(sequence);
 	}
 

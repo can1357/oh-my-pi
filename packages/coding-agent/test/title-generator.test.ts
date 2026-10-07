@@ -18,6 +18,7 @@ import {
 	setTerminalTitleState,
 } from "@oh-my-pi/pi-coding-agent/utils/title-generator";
 import { setNativeRendering } from "@oh-my-pi/pi-tui/native/state";
+import { initThemeSync, theme } from "@oh-my-pi/pi-tui/theme";
 import { isWsl, logger, setTerminalHeadless } from "@oh-my-pi/pi-utils";
 import { mockWindowsConsoleTitle, type WindowsConsoleTitleMock } from "./terminal-title-test-utils";
 
@@ -1182,5 +1183,27 @@ describe("terminal title runtime", () => {
 			setTerminalTitlePullRequest(undefined);
 		}
 		expectWorkingSeparator(emittedTitles().at(-1), "Renamed");
+	});
+
+	it("emits a carded session title in Tern's `<icon> <CODE>: <title>` form, with the glyph only on a nerd TSP terminal", () => {
+		const card = { code: "FLAKY", emoji: "🧪", nf: "nf-md-flask" };
+		if (typeof theme === "undefined") initThemeSync("unicode");
+		const preset = spyOn(theme, "getSymbolPreset").mockReturnValue("nerd");
+		try {
+			setSessionTerminalTitle("Fix flaky park tests", undefined, card);
+			// Classic titles render in the OS UI font: the emoji, behind the brand and state.
+			expect(emittedTitles().at(-1)).toBe("π > 🧪 FLAKY: Fix flaky park tests");
+			setNativeRendering(true);
+			expect(emittedTitles().at(-1)).toBe("\u{f0093} FLAKY: Fix flaky park tests");
+			preset.mockReturnValue("unicode");
+			setSessionTerminalTitle("Fix flaky park tests", undefined, card);
+			expect(emittedTitles().at(-1)).toBe("🧪 FLAKY: Fix flaky park tests");
+			// A title without a card is shown as-is.
+			setSessionTerminalTitle("Renamed by hand");
+			expect(emittedTitles().at(-1)).toBe("Renamed by hand");
+		} finally {
+			setNativeRendering(false);
+			preset.mockRestore();
+		}
 	});
 });

@@ -71,7 +71,8 @@ const fn physical_escape(kind: u32, key: i64, pid: i64, tag: i64) -> bool {
 }
 
 unsafe extern "C" fn observe(_proxy: Ref, kind: u32, event: Ref, user: Ref) -> Ref {
-	// SAFETY: the monitor thread retains this stack context through invalidation.
+	// SAFETY: the monitor thread retains this stack context through
+	// invalidation.
 	let context = unsafe { &*(user.cast::<TapContext>()) };
 	if kind == u32::MAX || kind == u32::MAX - 1 {
 		context.stop.cancel();
@@ -156,7 +157,8 @@ impl EscapeMonitor {
 					)
 				};
 				if source.is_null() || stop_source.is_null() {
-					// SAFETY: release exactly the objects successfully created above.
+					// SAFETY: release exactly the objects successfully created
+					// above.
 					unsafe {
 						if !source.is_null() {
 							CFRelease(source);
@@ -170,8 +172,9 @@ impl EscapeMonitor {
 					let _ = ready.send(None);
 					return;
 				}
-				// SAFETY: all sources remain retained throughout the loop; the owner
-				// gets separate retains for its signal/wakeup request.
+				// SAFETY: all sources remain retained throughout the loop; the
+				// owner gets separate retains for its signal/wakeup
+				// request.
 				unsafe {
 					let run_loop = CFRunLoopGetCurrent();
 					CFRunLoopAddSource(run_loop, source, kCFRunLoopDefaultMode);

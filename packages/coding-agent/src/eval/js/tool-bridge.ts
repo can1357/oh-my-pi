@@ -1,5 +1,5 @@
-import type { AgentTool, AgentToolResult } from "@oh-my-pi/pi-agent-core";
-import { type ImageContent, toolWireSchema, validateToolArguments } from "@oh-my-pi/pi-ai";
+import { type AgentTool, type AgentToolResult, validateAgentToolArguments } from "@oh-my-pi/pi-agent-core";
+import { type ImageContent, toolWireSchema } from "@oh-my-pi/pi-ai";
 import { isRecord } from "@oh-my-pi/pi-utils";
 import { INTENT_FIELD } from "@oh-my-pi/pi-wire";
 import type { ToolSession } from "../../tools";
@@ -273,28 +273,18 @@ export async function callSessionTool(name: string, args: unknown, options: Tool
 	if (isRecord(validationArgs) && !intentIsDeclared) delete validationArgs[INTENT_FIELD];
 	let validatedArgs: unknown;
 	try {
-		validatedArgs = validateToolArguments(tool, {
-			type: "toolCall",
-			id: toolCallId,
-			name,
-			arguments: validationArgs as Record<string, unknown>,
-		});
+		// Script-written args: `__parseError`/`__rawJson` keys are forged, so lenience strips them.
+		validatedArgs = validateAgentToolArguments(
+			tool,
+			{ type: "toolCall", id: toolCallId, name, arguments: validationArgs as Record<string, unknown> },
+			"payload",
+		);
 	} catch (error) {
-		if (!tool.lenientArgValidation) {
-			options.emitStatus?.({
-				op: name,
-				error: error instanceof Error ? error.message : String(error),
-			});
-			throw error;
-		}
-		if (isRecord(validationArgs)) {
-			const fallback = { ...validationArgs };
-			delete fallback.__parseError;
-			delete fallback.__rawJson;
-			validatedArgs = fallback;
-		} else {
-			validatedArgs = validationArgs;
-		}
+		options.emitStatus?.({
+			op: name,
+			error: error instanceof Error ? error.message : String(error),
+		});
+		throw error;
 	}
 	const shadowCell = options.shadowCell ?? getActiveEvalShadowCell();
 	if (shadowCell && options.identity) {

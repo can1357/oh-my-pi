@@ -252,7 +252,8 @@ fn display_spaces(spi: &SpaceSpi, connection: i32) -> CoreResult<Vec<(String, u6
 		let display = display
 			.downcast_ref::<CFString>()
 			.ok_or_else(|| denied("WindowServer returned malformed managed displays"))?;
-		// SAFETY: The retained display identifier and live connection outlive the call.
+		// SAFETY: The retained display identifier and live connection outlive the
+		// call.
 		let space = unsafe { (spi.display_space)(connection, display) };
 		if space == 0 {
 			return Err(denied("cannot establish the current Space for every display"));
