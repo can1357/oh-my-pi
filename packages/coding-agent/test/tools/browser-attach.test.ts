@@ -47,10 +47,11 @@ function makeSession(): ToolSession {
 		cwd: process.cwd(),
 		hasUI: true,
 		getSessionId: () => sessionId,
-		getToolContext: () => ({
-			hasUI: true,
-			ui: { select: async (_title: string, options: string[]) => options[0] } as never,
-		} as never),
+		getToolContext: () =>
+			({
+				hasUI: true,
+				ui: { select: async (_title: string, options: string[]) => options[0] } as never,
+			}) as never,
 		getSessionFile: () => null,
 		getSessionSpawns: () => "*",
 		settings: Settings.isolated({
@@ -237,15 +238,21 @@ describe("pickElectronTarget", () => {
 			try {
 				const cdpUrl = `http://127.0.0.1:${port}`;
 				await waitForCdp(cdpUrl, 15_000);
-				const error = await rejectionOf(prelude.invoke({
-					action: "open",
-					name,
-					url: "data:text/html,<title>Must not navigate</title>",
-					app: { cdp_url: cdpUrl },
-				}, context));
+				const error = await rejectionOf(
+					prelude.invoke(
+						{
+							action: "open",
+							name,
+							url: "data:text/html,<title>Must not navigate</title>",
+							app: { cdp_url: cdpUrl },
+						},
+						context,
+					),
+				);
 				expect(error).toMatchObject({ message: expect.stringContaining("No eligible browser tabs") });
 				const response = await fetch(`${cdpUrl}/json`);
-				expect(await response.json()).toEqual([]);
+				const entries = (await response.json()) as Array<{ type: string }>;
+				expect(entries.filter(entry => entry.type === "page")).toEqual([]);
 				expect(getTab(name)).toBeUndefined();
 			} finally {
 				child.kill();
@@ -637,8 +644,11 @@ describe("pickElectronTarget", () => {
 			const tabName = `attach-failure-${process.pid}-${Math.random().toString(36).slice(2)}`;
 			try {
 				attached = await acquireBrowser(
-					{ kind: "connected", cdpUrl: `http://${endpoint.host}`,
-						selectedTargetId: (targetPage.target() as Target & { _targetId: string })._targetId },
+					{
+						kind: "connected",
+						cdpUrl: `http://${endpoint.host}`,
+						selectedTargetId: (targetPage.target() as Target & { _targetId: string })._targetId,
+					},
 					{ cwd: process.cwd() },
 				);
 				attempted = true;

@@ -1,5 +1,7 @@
 import { afterEach, describe, expect, it } from "bun:test";
 import { findFreeCdpPort } from "@oh-my-pi/pi-coding-agent/tools/browser/attach";
+import { acquireBrowser, releaseBrowser } from "@oh-my-pi/pi-coding-agent/tools/browser/registry";
+import type { TabSnapshot } from "@oh-my-pi/pi-coding-agent/tools/browser/relay/protocol";
 import {
 	type RelayServer,
 	type RelayUnavailableInfo,
@@ -71,13 +73,13 @@ function parseVersion(response: string): Record<string, string> {
 	>;
 }
 
-async function connectExtension(port: number): Promise<WebSocket> {
+async function connectExtension(port: number, tabs: TabSnapshot[] = []): Promise<WebSocket> {
 	const { promise, resolve, reject } = Promise.withResolvers<WebSocket>();
 	const ws = new WebSocket(`ws://127.0.0.1:${port}/ext`);
 	ws.addEventListener(
 		"open",
 		() => {
-			ws.send(JSON.stringify(EXTENSION_HELLO));
+			ws.send(JSON.stringify({ ...EXTENSION_HELLO, tabs }));
 			resolve(ws);
 		},
 		{ once: true },
@@ -106,13 +108,62 @@ describe("browser relay discovery endpoint", () => {
 		relay = undefined;
 	});
 
-	async function startReadyRelay(): Promise<number> {
+	async function startReadyRelay(tabs: TabSnapshot[] = []): Promise<number> {
 		const port = await findFreeCdpPort();
 		relay = startRelayServer({ port });
-		extension = await connectExtension(port);
+		extension = await connectExtension(port, tabs);
 		await waitForDiscovery(port);
 		return port;
 	}
+
+	it("binds actual Puppeteer bootstrap and navigation to the selected relay websocket target", async () => {
+		const snapshots: TabSnapshot[] = [1, 2].map(tabId => ({
+			tabId,
+			url: `https://example.test/${tabId}`,
+			title: "Same profile title",
+			active: tabId === 1,
+			discarded: false,
+			windowId: 1,
+			pinned: false,
+			groupId: -1,
+		}));
+		const port = await startReadyRelay(snapshots);
+		const requests: Array<{ op: string; tabId?: number; method?: string }> = [];
+		extension!.addEventListener("message", event => {
+			const request = JSON.parse(String(event.data));
+			if (request.t !== "rpc") return;
+			requests.push(request);
+			extension!.send(JSON.stringify({ t: "rpcResult", id: request.id, ok: true, result: {} }));
+		});
+		const entries = (await (await fetch(`http://127.0.0.1:${port}/json`)).json()) as Array<{
+			id: string;
+			url: string;
+		}>;
+		const selectedTargetId = entries.find(entry => entry.url.endsWith("/2"))!.id;
+		const selected = await acquireBrowser(
+			{ kind: "relay", cdpUrl: `http://127.0.0.1:${port}`, selectedTargetId },
+			{ cwd: process.cwd() },
+		);
+		try {
+			if (!("browser" in selected)) throw new Error("Expected a Puppeteer relay connection");
+			expect(new URL(selected.browser.wsEndpoint()).searchParams.get("targetId")).toBe(selectedTargetId);
+			const pageTargets = selected.browser.targets().filter(target => target.type() === "page");
+			expect(pageTargets).toHaveLength(1);
+			expect(pageTargets[0]!.url()).toBe("https://example.test/2");
+			const session = await pageTargets[0]!.createCDPSession();
+			await session.send("Page.navigate", { url: "https://task.test/" });
+			await session.detach();
+			expect(requests.filter(request => request.op === "attach").map(request => request.tabId)).toEqual([2]);
+			expect(requests.filter(request => request.method === "Page.navigate").map(request => request.tabId)).toEqual([
+				2,
+			]);
+			expect(requests.some(request => request.tabId === 1)).toBe(false);
+			const unavailable = await fetch(`http://127.0.0.1:${port}/cdp?targetId=PAGEremoved.999`);
+			expect(unavailable.status).toBe(409);
+		} finally {
+			await releaseBrowser(selected, { kill: false });
+		}
+	});
 
 	it("advertises the requested Host authority so a remote Puppeteer client dials the relay", async () => {
 		const port = await startReadyRelay();

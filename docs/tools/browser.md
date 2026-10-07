@@ -134,12 +134,12 @@ Python `tab.run` accepts a JavaScript string only; it does not accept a Python c
 
 ## Browser modes
 
-`browser.open` prefers explicit `app.cdp_url`, `app.path`, `app.relay: true`, then `app.tern: true`. Otherwise it considers configured relay, configured CDP, automatic Tern, cmux, then project-shared managed Chromium. Relay and Tern environment kill switches can disable those modes.
+`browser.open` prefers explicit `app.cdp_url`, `app.path`, `app.relay: true`, then `app.tern: true`. Otherwise it considers automatic Tern, cmux, then project-shared managed Chromium. Standing relay/CDP settings and `PI_BROWSER_RELAY=1` never authorize user-tab adoption. `headed:false` bypasses automatic user surfaces and requests managed Chromium. Relay and Tern kill switches can disable explicit requests.
 
 - **Managed Chromium:** creates an omp-owned page in project-shared Chromium and applies stealth patches. Installation happens automatically on first use. `headed` overrides the default hidden mode.
 - **Spawned (`app.path`):** starts or reuses a CDP-enabled browser/Electron executable. `app.args` applies only here; Chromium-family processes use an omp-owned profile unless args specify `--user-data-dir`.
-- **Connected (`app.cdp_url`):** attaches to an existing HTTP CDP discovery endpoint.
-- **Relay (`app.relay: true`):** adopts the user's real Chrome tab. `app.target` selects by URL/title substring; without it the visible usable tab is adopted. Passing `url` navigates the adopted tab.
+- **Connected (`app.cdp_url`):** requests an existing HTTP CDP discovery endpoint and host-user selection of one exact tab for this task.
+- **Relay (`app.relay: true`):** requires the same host-user picker before any attachment. Start the relay before discovery; `app.target` only filters choices by URL/title. The chosen instance-scoped target ID, never the active tab, binds the attachment. Passing `url` navigates that chosen tab.
 - **Tern:** inside a Tern pane, opens a visible browser picture-in-picture over the pane using native WKWebView, not Chromium. `headed: false` or `app.tern: false` opts out; `app.tern: true` requires Tern. Automatic Tern selection falls back to Chromium with an explanatory result when Tern cannot host the page.
 - **Cmux:** drives an available cmux WKWebView surface.
 
@@ -157,7 +157,9 @@ Host result details preserve structured `value` separately from displayed conten
 
 ## Safety and lifecycle
 
-Relay and attached modes operate on real logged-in sessions; sites attribute actions to the user. Name a target or create a dedicated tab. Never navigate the user's visible tab or take a consequential action without direct authorization.
+Relay and attached modes operate on real logged-in sessions; sites attribute actions to the user. Titles and URLs do not identify the signed-in profile/email. The host-user picker authorizes one exact browser-instance/tab for the approving task; cancellation, missing UI/task identity and changed/disappeared tabs fail without fallback. Previously approved named attachments are reusable only by that task. Browser selection does not authorize consequential external actions.
+
+Relay websocket connections confine discovery, debugger bootstrap, and commands to the selected tab. An older relay server without this isolation is rejected, including through `app.cdp_url`; restart it under the fixed runtime. The extension protocol is unchanged.
 
 Each named tab permits one active run; Chromium-backed tabs have one worker, while Tern/cmux use their own backend. A timed-out or aborted run can recycle the worker and invalidate handles. `browser.close({ all: true })` releases all managed tabs; `kill` never closes or kills relay/CDP-attached browsers.
 
@@ -170,6 +172,6 @@ By default, omp-owned managed Chromium tabs freeze at turn settle and unfreeze o
 - Busy tab: await the active helper/run before issuing another.
 - Selector timeout: re-observe and use a supported selector.
 - Relay unavailable: install/start the relay and verify its Chrome extension connection.
-- Attached target missing: inspect available pages and use a precise `app.target`.
+- Attached target missing: select it again in the host-user picker; `app.target` is only a choice filter.
 
 `tab.run` and direct helpers execute against live browser state. Verify the actual page after every UI-changing action.

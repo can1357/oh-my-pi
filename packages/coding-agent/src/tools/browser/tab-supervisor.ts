@@ -1517,11 +1517,9 @@ async function buildInitPayload(browser: PuppeteerBrowserHandle, opts: AcquireTa
 			ignoreHttpsErrors: opts.ignoreHttpsErrors,
 		};
 	}
-	// Borrowed browsers must use the exact host-user-approved target, never
-	// visibility/title heuristics. Spawned apps retain their window matcher.
 	const userDriven = browser.kind.kind === "connected" || browser.kind.kind === "relay";
-	const selectedTargetId = browser.kind.kind === "connected" || browser.kind.kind === "relay"
-		? browser.kind.selectedTargetId : undefined;
+	const selectedTargetId =
+		browser.kind.kind === "connected" || browser.kind.kind === "relay" ? browser.kind.selectedTargetId : undefined;
 	if (userDriven && !selectedTargetId) {
 		throw new ToolError("User-browser attachment requires a host-user-selected target ID.");
 	}

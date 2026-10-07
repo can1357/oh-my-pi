@@ -88,7 +88,12 @@ class CdpConnection {
 	constructor(
 		readonly id: number,
 		readonly socket: RelaySocket,
+		readonly selectedTabKey?: string,
 	) {}
+
+	allows(tabKey: string): boolean {
+		return this.selectedTabKey === undefined || this.selectedTabKey === tabKey;
+	}
 
 	sessionsForTab(tabKey: string, kind?: "tab" | "page"): string[] {
 		const out: string[] = [];
@@ -322,6 +327,7 @@ export class RelayBridge {
 			ompRelayVersion: VERSION,
 			ompRelayDiscardedTabsProtocol: String(DISCARDED_TABS_PROTOCOL_VERSION),
 			ompExtensionDiscardedTabsProtocol: String(hasCompatibleExtension ? DISCARDED_TABS_PROTOCOL_VERSION : 0),
+			ompRelayTargetSelection: "1",
 		};
 	}
 
@@ -340,6 +346,12 @@ export class RelayBridge {
 			});
 		}
 		return out;
+	}
+
+	canSelectTarget(targetId: string): boolean {
+		const parsed = parseTargetId(targetId);
+		const tab = parsed?.kind === "page" ? this.#tabs.get(parsed.key) : undefined;
+		return tab !== undefined && this.#eligible(tab) && !tab.discarded;
 	}
 
 	// ---- extension lifecycle -------------------------------------------------
@@ -507,8 +519,12 @@ export class RelayBridge {
 	// ---- downstream (puppeteer) lifecycle -------------------------------------
 
 	/** Register a downstream CDP websocket; returns the connection id. */
-	cdpConnected(socket: RelaySocket): number {
-		const conn = new CdpConnection(++this.#connSeq, socket);
+	cdpConnected(socket: RelaySocket, selectedTargetId?: string): number {
+		if (selectedTargetId !== undefined && !this.canSelectTarget(selectedTargetId)) {
+			throw new Error("Selected relay target is no longer available");
+		}
+		const selectedTabKey = selectedTargetId === undefined ? undefined : parseTargetId(selectedTargetId)!.key;
+		const conn = new CdpConnection(++this.#connSeq, socket, selectedTabKey);
 		this.#conns.set(conn.id, conn);
 		this.#log("cdp client connected", { conn: conn.id });
 		return conn.id;
@@ -567,6 +583,9 @@ export class RelayBridge {
 			return;
 		}
 		const realTabKey = this.#realSessionTabs.get(sessionId);
+		if (realTabKey !== undefined && !conn.allows(realTabKey)) {
+			throw new Error("CDP session is outside the selected relay tab");
+		}
 		if (realTabKey !== undefined) {
 			const announce =
 				msg.method === "Target.setAutoAttach" && msg.params?.autoAttach === true && conn.childParents.has(sessionId)
@@ -833,13 +852,27 @@ export class RelayBridge {
 	}
 
 	async #handleBrowserCommand(conn: CdpConnection, msg: CdpCommand): Promise<void> {
+		if (conn.selectedTabKey !== undefined && typeof msg.params?.targetId === "string") {
+			const parsed = parseTargetId(msg.params.targetId);
+			if (!parsed || !conn.allows(parsed.key)) throw new Error("Target is outside the selected relay tab");
+		}
+		if (conn.selectedTabKey !== undefined && msg.method === "Target.createTarget") {
+			throw new Error("A selected-tab relay connection cannot create another tab");
+		}
 		switch (msg.method) {
 			case "Browser.getVersion": {
+				const selectedTab = conn.selectedTabKey === undefined ? undefined : this.#tabs.get(conn.selectedTabKey);
+				const info =
+					conn.selectedTabKey === undefined
+						? this.#lastHello()?.info
+						: selectedTab
+							? this.#instances.get(selectedTab.instanceId)?.info
+							: undefined;
 				this.#reply(conn, msg, {
 					protocolVersion: "1.3",
-					product: this.#lastHello()?.info?.browserVersion ?? "Chrome/unknown",
+					product: info?.browserVersion ?? "Chrome/unknown",
 					revision: "",
-					userAgent: this.#lastHello()?.info?.userAgent ?? "",
+					userAgent: info?.userAgent ?? "",
 					jsVersion: "",
 				});
 				return;
@@ -850,7 +883,7 @@ export class RelayBridge {
 			case "Target.getTargets": {
 				const targetInfos: TargetInfo[] = [];
 				for (const tab of this.#tabs.values()) {
-					if (this.#eligible(tab)) targetInfos.push(this.#pageInfo(tab, tab.attached));
+					if (this.#eligible(tab) && conn.allows(tab.tabKey)) targetInfos.push(this.#pageInfo(tab, tab.attached));
 				}
 				this.#reply(conn, msg, { targetInfos });
 				return;
@@ -858,7 +891,7 @@ export class RelayBridge {
 			case "Target.setDiscoverTargets": {
 				conn.discover = true;
 				for (const tab of this.#tabs.values()) {
-					if (!this.#eligible(tab)) continue;
+					if (!this.#eligible(tab) || !conn.allows(tab.tabKey)) continue;
 					tab.announced = true;
 					this.#emit(conn, "Target.targetCreated", { targetInfo: this.#tabInfo(tab, tab.attached) });
 					this.#emit(conn, "Target.targetCreated", { targetInfo: this.#pageInfo(tab, tab.attached) });
@@ -870,7 +903,9 @@ export class RelayBridge {
 				conn.autoAttach = true;
 				// Discarded tabs can stall debugger calls. Retract targets already
 				// announced by Target.setDiscoverTargets so Puppeteer can connect().
-				const tabs = [...this.#tabs.values()].filter(tab => this.#eligible(tab) && !tab.discarded);
+				const tabs = [...this.#tabs.values()].filter(
+					tab => this.#eligible(tab) && !tab.discarded && conn.allows(tab.tabKey),
+				);
 				await Promise.all(tabs.map(tab => this.#ensureAttached(tab, { retryAfterDiscard: true })));
 				for (const tab of tabs) {
 					if (!tab.attached || tab.discarded || !this.#eligible(tab)) {
@@ -882,7 +917,7 @@ export class RelayBridge {
 					this.#emitTabAttached(conn, tab);
 				}
 				for (const tab of this.#tabs.values()) {
-					if (tab.announced && tab.discarded && this.#eligible(tab)) {
+					if (tab.announced && tab.discarded && this.#eligible(tab) && conn.allows(tab.tabKey)) {
 						this.#retractTab(tab);
 						this.#detachIfUnheld(tab.tabKey);
 					}
@@ -1160,12 +1195,12 @@ export class RelayBridge {
 		if (eligible && !tab.announced && !tab.discarded) {
 			tab.announced = true;
 			for (const conn of this.#conns.values()) {
-				if (!conn.discover) continue;
+				if (!conn.discover || !conn.allows(tab.tabKey)) continue;
 				this.#emit(conn, "Target.targetCreated", { targetInfo: this.#tabInfo(tab, tab.attached) });
 				this.#emit(conn, "Target.targetCreated", { targetInfo: this.#pageInfo(tab, tab.attached) });
 			}
 			for (const conn of this.#conns.values()) {
-				if (!conn.autoAttach) continue;
+				if (!conn.autoAttach || !conn.allows(tab.tabKey)) continue;
 				this.#attachForAutoAttach(tab);
 				break;
 			}
@@ -1179,7 +1214,7 @@ export class RelayBridge {
 		}
 		if (eligible && tab.announced) {
 			for (const conn of this.#conns.values()) {
-				if (!conn.discover) continue;
+				if (!conn.discover || !conn.allows(tab.tabKey)) continue;
 				this.#emit(conn, "Target.targetInfoChanged", { targetInfo: this.#tabInfo(tab, tab.attached) });
 				this.#emit(conn, "Target.targetInfoChanged", { targetInfo: this.#pageInfo(tab, tab.attached) });
 			}
@@ -1189,7 +1224,7 @@ export class RelayBridge {
 	#attachForAutoAttach(tab: TabState): void {
 		let hasAutoAttach = false;
 		for (const conn of this.#conns.values()) {
-			if (conn.autoAttach) {
+			if (conn.autoAttach && conn.allows(tab.tabKey)) {
 				hasAutoAttach = true;
 				break;
 			}
@@ -1203,7 +1238,7 @@ export class RelayBridge {
 				return;
 			}
 			for (const conn of this.#conns.values()) {
-				if (conn.autoAttach) this.#emitTabAttached(conn, tab);
+				if (conn.autoAttach && conn.allows(tab.tabKey)) this.#emitTabAttached(conn, tab);
 			}
 		});
 	}
@@ -1324,7 +1359,7 @@ export class RelayBridge {
 					targetId: tabTargetIdFromKey(tab.tabKey),
 				});
 			}
-			if (conn.discover && tab.announced) {
+			if (conn.discover && tab.announced && conn.allows(tab.tabKey)) {
 				this.#emit(conn, "Target.targetDestroyed", { targetId: pageTargetIdFromKey(tab.tabKey) });
 				this.#emit(conn, "Target.targetDestroyed", { targetId: tabTargetIdFromKey(tab.tabKey) });
 			}

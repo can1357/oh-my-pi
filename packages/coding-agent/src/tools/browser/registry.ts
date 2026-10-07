@@ -1,10 +1,17 @@
 import * as path from "node:path";
-import { isCompiledBinary, logger, withTimeout, workerHostEntry } from "@oh-my-pi/pi-utils";
+import { isCompiledBinary, isRecord, logger, withTimeout, workerHostEntry } from "@oh-my-pi/pi-utils";
 import type { Subprocess } from "bun";
-import type { Browser, CDPSession } from "puppeteer-core";
+import type { Browser, CDPSession, ConnectOptions } from "puppeteer-core";
 import { ToolAbortError } from "../tool-errors";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
-import { findFreeCdpPort, findReusableCdp, gracefulKillTreeOnce, resolveSpawnArgs, waitForCdp } from "./attach";
+import {
+	findFreeCdpPort,
+	findReusableCdp,
+	gracefulKillTreeOnce,
+	probeCdpResponse,
+	resolveSpawnArgs,
+	waitForCdp,
+} from "./attach";
 import type { CmuxKind } from "./cmux/rpc";
 import { CmuxSocketClient } from "./cmux/socket-client";
 import {
@@ -180,6 +187,31 @@ export function normalizeConnectedCdpUrl(rawCdpUrl: string): string {
 	return cdpUrl;
 }
 
+async function selectedAttachmentConnection(
+	cdpUrl: string,
+	targetId: string,
+	requireRelay: boolean,
+	signal?: AbortSignal,
+): Promise<Pick<ConnectOptions, "browserURL" | "browserWSEndpoint">> {
+	const response = await probeCdpResponse(`${cdpUrl}/json/version`, { timeoutMs: 3_000, signal });
+	if (!response || response.status !== 200)
+		throw new ToolError("Browser discovery is unavailable before selected-tab connection.");
+	const version: unknown = JSON.parse(Buffer.from(response.body, "latin1").toString("utf8"));
+	if (!isRecord(version)) throw new ToolError("Browser discovery returned invalid version metadata.");
+	if (requireRelay || typeof version.ompRelayVersion === "string") {
+		if (version.ompRelayTargetSelection !== "1") {
+			throw new ToolError(
+				"The relay cannot isolate the selected tab. Restart the relay under the fixed OMP runtime before attaching.",
+			);
+		}
+		const socketUrl = new URL(`${cdpUrl}/cdp`);
+		socketUrl.protocol = socketUrl.protocol === "https:" ? "wss:" : "ws:";
+		socketUrl.searchParams.set("targetId", targetId);
+		return { browserWSEndpoint: socketUrl.toString() };
+	}
+	return { browserURL: cdpUrl };
+}
+
 async function openBrowserHandle(kind: BrowserKind, opts: AcquireBrowserOptions): Promise<BrowserHandle> {
 	if (kind.kind === "cmux") {
 		const client = new CmuxSocketClient({ socketPath: kind.socketPath, password: kind.password });
@@ -226,7 +258,7 @@ async function openBrowserHandle(kind: BrowserKind, opts: AcquireBrowserOptions)
 		await waitForCdp(cdpUrl, 5_000, opts.signal);
 		const puppeteer = await loadPuppeteer();
 		const browser = await connectPuppeteer(puppeteer, {
-			browserURL: cdpUrl,
+			...(await selectedAttachmentConnection(cdpUrl, kind.selectedTargetId!, false, opts.signal)),
 			defaultViewport: null,
 			protocolTimeout: BROWSER_PROTOCOL_TIMEOUT_MS,
 			targetFilter: attachmentTargetFilter(kind.selectedTargetId!),
@@ -280,7 +312,7 @@ async function openBrowserHandle(kind: BrowserKind, opts: AcquireBrowserOptions)
 		}
 		const puppeteer = await loadPuppeteer();
 		const browser = await connectPuppeteer(puppeteer, {
-			browserURL: cdpUrl,
+			...(await selectedAttachmentConnection(cdpUrl, kind.selectedTargetId!, true, opts.signal)),
 			defaultViewport: null,
 			protocolTimeout: BROWSER_PROTOCOL_TIMEOUT_MS,
 			targetFilter: attachmentTargetFilter(kind.selectedTargetId!),

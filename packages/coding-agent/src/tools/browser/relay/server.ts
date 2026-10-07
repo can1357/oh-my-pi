@@ -49,6 +49,7 @@ export interface RelayServer {
 interface SocketData {
 	role: "cdp" | "ext";
 	connId?: number;
+	selectedTargetId?: string;
 }
 
 type RelayWebSocket = Bun.ServerWebSocket<SocketData>;
@@ -95,7 +96,11 @@ export function startRelayServer(opts: RelayServerOptions): RelayServer {
 				// Browsers set Origin on websocket upgrades; native CDP clients
 				// don't. Reject any Origin so a web page can't drive the relay.
 				if (req.headers.get("origin")) return new Response("Forbidden", { status: 403 });
-				const data: SocketData = { role: "cdp" };
+				const selectedTargetId = url.searchParams.get("targetId") ?? undefined;
+				if (selectedTargetId !== undefined && !bridge.canSelectTarget(selectedTargetId)) {
+					return new Response("Selected relay target is no longer available", { status: 409 });
+				}
+				const data: SocketData = { role: "cdp", selectedTargetId };
 				if (srv.upgrade(req, { data })) return undefined;
 				return new Response("websocket upgrade required", { status: 426 });
 			}
@@ -141,7 +146,11 @@ export function startRelayServer(opts: RelayServerOptions): RelayServer {
 				if (ws.data.role === "ext") {
 					bridge.extConnected(ws);
 				} else {
-					ws.data.connId = bridge.cdpConnected(ws);
+					try {
+						ws.data.connId = bridge.cdpConnected(ws, ws.data.selectedTargetId);
+					} catch {
+						ws.close(1008, "Selected relay target is no longer available");
+					}
 				}
 			},
 			message(ws: RelayWebSocket, message: string | Buffer): void {

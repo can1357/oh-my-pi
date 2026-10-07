@@ -12,7 +12,6 @@ import { parseFlag } from "@oh-my-pi/pi-utils";
 export interface RelayKind {
 	kind: "relay";
 	cdpUrl: string;
-	/** Exact instance-scoped page ID approved by the host user for this task. */
 	selectedTargetId?: string;
 }
 

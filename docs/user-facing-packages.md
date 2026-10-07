@@ -75,13 +75,12 @@ Sources: [`packages/browser-relay/README.md`](../packages/browser-relay/README.m
 
 - Package: private `@oh-my-pi/browser-relay`; user command: `omp browser-relay`.
 - Setup: run `omp browser-relay install`, load the unpacked extension from
-  `~/.omp/browser-relay/extension`, then opt in per call with `app.relay: true` — or set
-  `browser.relay`, which makes the relay the profile-wide default across projects (scope
-  details in the package README).
-- Behavior: the relay auto-starts through the profile-independent global daemon broker; consumers
-  across projects hold leases, and the relay stops after the last lease is released. `app.target`
-  selects a tab by URL/title substring, otherwise the visible tab is adopted. Supplying a URL
-  navigates that adopted tab. `omp browser-relay --no-group` disables automatic tab grouping.
+  `~/.omp/browser-relay/extension`, start `omp browser-relay`, then request
+  `app.relay: true` and select one browser-instance/tab in the host UI.
+- Behavior: standing configuration never adopts the visible tab. `app.target`
+  filters picker choices but does not authorize attachment. Supplying a URL
+  navigates only the exact selected tab; approved named attachments belong to
+  the approving task. `omp browser-relay --no-group` disables automatic tab grouping.
 - Security/limits: it binds loopback; use `--token` when local processes are untrusted. Chrome
   internal pages, DevTools, Web Store, extension pages, and tabs with DevTools open cannot attach.
 

@@ -439,7 +439,6 @@ export function shouldPreserveConnectedBrowserFocus(target?: string): boolean {
 
 export interface PickTargetOptions {
 	matcher?: string;
-	/** Exact host-user-approved target. Never probe or fall back to other pages. */
 	targetId?: string;
 	preferVisible?: boolean;
 	/** Relay /json endpoint (e.g. http://127.0.0.1:9224); enables metadata-first target selection. */

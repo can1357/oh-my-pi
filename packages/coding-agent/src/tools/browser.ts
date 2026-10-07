@@ -18,7 +18,12 @@ import {
 import { ensureChromiumExecutable } from "./browser/launch";
 import { resolveInitScriptSources } from "./browser/open-options";
 import { resolveRelayKind } from "./browser/relay/kind";
-import { assertAttachmentOwner, requestedAttachment, selectAttachmentTarget, type AttachmentTarget } from "./browser/ownership";
+import {
+	assertAttachmentOwner,
+	requestedAttachment,
+	selectAttachmentTarget,
+	type AttachmentTarget,
+} from "./browser/ownership";
 import { probeCdpResponse } from "./browser/attach";
 import { resolveTernKind } from "./browser/tern/kind";
 import { isTernUnavailable } from "./browser/tern/wire";
@@ -98,7 +103,9 @@ const appSchema = type({
 	"relay?": type("boolean").describe("request host-user selection of one tab via the omp browser relay"),
 	"tern?": type("boolean").describe("inside Tern: true forces a Tern picture-in-picture, false opts out"),
 	"args?": type("string[]").describe("extra cli args"),
-	"target?": type("string").describe("URL/title filter for host-user attachment selection; spawned apps select a window"),
+	"target?": type("string").describe(
+		"URL/title filter for host-user attachment selection; spawned apps select a window",
+	),
 });
 
 const tabCallStepSchema = type({
@@ -150,7 +157,6 @@ interface BrowserPreludeDetails {
 	value?: unknown;
 }
 
-/** Explicit attachments require host-user selection; configured relay/CDP never authorize adoption. */
 export function resolveBrowserKind(
 	params: BrowserParams,
 	session: ToolSession,
@@ -189,9 +195,8 @@ export function resolveBrowserKind(
 		}
 		return ternKind;
 	}
-	// Headless is an agent-owned request, not permission to drive a user surface.
 	if (params.headed === false) return chromiumKind(params, session);
-	if (params.headed !== false && app?.tern !== false) {
+	if (app?.tern !== false) {
 		const ternKind = resolveTernKind({ settingEnabled: cfgBrowserTern.get(session.settings) }, env);
 		if (ternKind) return ternKind;
 	}
@@ -342,39 +347,70 @@ async function openBrowser(
 	let resolved = resolveBrowserKind(params, session);
 	const autoTern = resolved.kind === "tern" && params.app?.tern !== true;
 	const existing = getTab(name);
-	if (existing && (existing.kindTag === "relay" || existing.kindTag === "connected") &&
-		params.headed !== false && !params.app?.path && !params.app?.cdp_url &&
-		params.app?.relay === undefined && params.app?.tern !== true && params.app?.target === undefined) {
+	if (
+		existing &&
+		(existing.kindTag === "relay" || existing.kindTag === "connected") &&
+		params.headed !== false &&
+		!params.app?.path &&
+		!params.app?.cdp_url &&
+		params.app?.relay === undefined &&
+		params.app?.tern !== true &&
+		params.app?.target === undefined
+	) {
 		assertAttachmentOwner(existing.kindTag, existing.ownerSessionId, session.getSessionId?.());
 		resolved = existing.browser.kind;
 	}
 	if (resolved.kind === "relay" || resolved.kind === "connected") {
-		const ownerSessionId = session.getSessionId?.();
-		if (existing && existing.browser.kind.kind === resolved.kind &&
-			existing.browser.kind.cdpUrl === resolved.cdpUrl && params.app?.target === undefined) {
+		const ownerSessionId = session.getSessionId?.() ?? undefined;
+		if (
+			existing &&
+			existing.browser.kind.kind === resolved.kind &&
+			existing.browser.kind.cdpUrl === resolved.cdpUrl &&
+			params.app?.target === undefined
+		) {
 			assertAttachmentOwner(existing.kindTag, existing.ownerSessionId, ownerSessionId);
 			resolved = existing.browser.kind;
 		} else {
 			const uiContext = context?.context ?? session.getToolContext?.();
 			const endpoint = resolved.cdpUrl;
-			const selectedTargetId = await selectAttachmentTarget(endpoint, async () => {
-				const response = await probeCdpResponse(`${endpoint}/json`, { timeoutMs: 3_000, signal });
-				if (!response || response.status !== 200) {
-					throw new ToolError(`Cannot list tabs at ${endpoint}. Start the relay/CDP endpoint before requesting selection.`);
-				}
-				const entries: unknown = JSON.parse(Buffer.from(response.body, "latin1").toString("utf8"));
-				if (!Array.isArray(entries) || !entries.every(entry =>
-					isRecord(entry) && typeof entry.id === "string" && typeof entry.type === "string" &&
-					typeof entry.title === "string" && typeof entry.url === "string")) {
-					throw new ToolError("Browser target discovery returned invalid metadata.");
-				}
-				return entries as AttachmentTarget[];
-			}, {
-				ownerSessionId,
-				hasUI: uiContext?.hasUI,
-				select: uiContext?.ui ? (title, rows, selectionSignal) =>
-					untilAborted(selectionSignal, () => uiContext.ui!.select(title, rows, { signal: selectionSignal })) : undefined,
-			}, params.app?.target, signal);
+			const selectedTargetId = await selectAttachmentTarget(
+				endpoint,
+				async () => {
+					const response = await probeCdpResponse(`${endpoint}/json`, { timeoutMs: 3_000, signal });
+					if (!response || response.status !== 200) {
+						throw new ToolError(
+							`Cannot list tabs at ${endpoint}. Start the relay/CDP endpoint before requesting selection.`,
+						);
+					}
+					const entries: unknown = JSON.parse(Buffer.from(response.body, "latin1").toString("utf8"));
+					if (
+						!Array.isArray(entries) ||
+						!entries.every(
+							entry =>
+								isRecord(entry) &&
+								typeof entry.id === "string" &&
+								typeof entry.type === "string" &&
+								typeof entry.title === "string" &&
+								typeof entry.url === "string",
+						)
+					) {
+						throw new ToolError("Browser target discovery returned invalid metadata.");
+					}
+					return entries as AttachmentTarget[];
+				},
+				{
+					ownerSessionId,
+					hasUI: uiContext?.hasUI,
+					select: uiContext?.ui
+						? (title, rows, selectionSignal) =>
+								untilAborted(selectionSignal, () =>
+									uiContext.ui!.select(title, rows, { signal: selectionSignal }),
+								)
+						: undefined,
+				},
+				params.app?.target,
+				signal,
+			);
 			resolved = { ...resolved, selectedTargetId };
 		}
 	}
