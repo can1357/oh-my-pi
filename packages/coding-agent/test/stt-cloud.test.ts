@@ -103,6 +103,7 @@ describe("STTController cloud transcription", () => {
 		expect(callOptions.signal).toBeInstanceOf(AbortSignal);
 
 		const wav = request.audio;
+		if (!(wav instanceof Uint8Array)) throw new Error("expected encoded WAV bytes");
 		const view = new DataView(wav.buffer, wav.byteOffset, wav.byteLength);
 		expect(new TextDecoder().decode(wav.subarray(0, 4))).toBe("RIFF");
 		expect(view.getUint32(4, true)).toBe(wav.byteLength - 8);

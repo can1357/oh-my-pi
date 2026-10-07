@@ -671,7 +671,7 @@ describe("interactive collaboration startup", () => {
 		const send = CollabSocket.prototype.send;
 		const capture = spyOn(CollabSocket.prototype, "send").mockImplementation(
 			function (this: CollabSocket, frame, targetPeer) {
-				if (frame.t === "hello") transport = this;
+				if (typeof frame !== "string" && frame.t === "hello") transport = this;
 				return send.call(this, frame, targetPeer);
 			},
 		);
@@ -1729,6 +1729,9 @@ describe("CollabController", () => {
 				// Only the host's 15 s connect timeout can end the stalled attempt.
 				vi.advanceTimersByTime(15_000);
 				expect(await state.firstStatus.promise).toMatch(/auto-start failed: timed out connecting to relay/);
+				// Restore before the retry publishes: Bun's fake clock stalls the
+				// real registry server's listen callback.
+				vi.useRealTimers();
 				await settled(publishSpy, 1);
 				await controller.idle();
 

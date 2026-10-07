@@ -50,8 +50,11 @@ describe("resolveBrowserKind with Tern", () => {
 		).toBe("connected");
 	});
 
-	it("skips Tern for headed:false, app.tern:false and the setting, falling through to cmux", () => {
-		expect(resolveBrowserKind({ action: "open", headed: false }, session(), cmuxEnv).kind).toBe("cmux");
+	it("keeps the Tern PiP for headed:false", () => {
+		expect(resolveBrowserKind({ action: "open", headed: false }, session(), cmuxEnv)).toEqual(TERN);
+	});
+
+	it("skips Tern for app.tern:false and the setting, falling through to cmux", () => {
 		expect(resolveBrowserKind({ action: "open", app: { tern: false } }, session(), cmuxEnv).kind).toBe("cmux");
 		expect(resolveBrowserKind({ action: "open" }, session({ "browser.tern": false }), cmuxEnv).kind).toBe("cmux");
 	});

@@ -1,14 +1,19 @@
 import { describe, expect, it } from "bun:test";
+import * as fs from "node:fs";
+import * as path from "node:path";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { ImageContent, TextContent } from "@oh-my-pi/pi-ai";
-import { BlobStore, isBlobRef, lazyImageDataSync } from "@oh-my-pi/pi-coding-agent/session/blob-store";
+import { BlobStore, isBlobRef, lazyImageDataSync, parseBlobRef } from "@oh-my-pi/pi-coding-agent/session/blob-store";
 import type {
 	CompactionEntry,
 	FileEntry,
 	SessionMessageEntry,
 } from "@oh-my-pi/pi-coding-agent/session/session-entries";
 import { resolveBlobRefsInEntries } from "@oh-my-pi/pi-coding-agent/session/session-loader";
-import { prepareEntryForPersistence } from "@oh-my-pi/pi-coding-agent/session/session-persistence";
+import {
+	forgetExternalizedImages,
+	prepareEntryForPersistence,
+} from "@oh-my-pi/pi-coding-agent/session/session-persistence";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import type { Archive } from "@oh-my-pi/snapcompact";
 import * as snapcompact from "@oh-my-pi/snapcompact";
@@ -180,6 +185,43 @@ describe("session image persistence", () => {
 		const resolved = loaded[loaded.length - 1] as ToolResultEntry;
 		const resolvedImage = resolved.message.content.find((block): block is ImageContent => block.type === "image");
 		expect(resolvedImage?.data).toBe(imageData);
+	});
+
+	it("re-externalizes an image mutated in place, into each blob store, and after a forgotten write", () => {
+		using firstDir = TempDir.createSync("@session-image-memo-a-");
+		using secondDir = TempDir.createSync("@session-image-memo-b-");
+		const first = new BlobStore(firstDir.path());
+		const second = new BlobStore(secondDir.path());
+		const image = png(Buffer.alloc(1500, 5).toString("base64"));
+		const entry = messageEntry({
+			role: "toolResult",
+			toolCallId: "tc1",
+			toolName: "screenshot",
+			content: [image],
+			isError: false,
+			timestamp: 0,
+		});
+		const persistedRef = (store: BlobStore): string => {
+			const persisted = prepareEntryForPersistence(entry, store) as ToolResultEntry;
+			const block = persisted.message.content[0] as ImageContent;
+			return block.data;
+		};
+
+		const ref = persistedRef(first);
+		const hash = parseBlobRef(ref) ?? "";
+		expect(persistedRef(first)).toBe(ref);
+		expect(persistedRef(second)).toBe(ref);
+		expect(second.getSync(hash)?.toString("base64")).toBe(image.data);
+
+		fs.rmSync(path.join(firstDir.path(), hash));
+		forgetExternalizedImages(first);
+		expect(persistedRef(first)).toBe(ref);
+		expect(first.getSync(hash)?.toString("base64")).toBe(image.data);
+
+		image.data = Buffer.alloc(1500, 6).toString("base64");
+		const mutatedRef = persistedRef(first);
+		expect(mutatedRef).not.toBe(ref);
+		expect(first.getSync(parseBlobRef(mutatedRef) ?? "")?.toString("base64")).toBe(image.data);
 	});
 });
 

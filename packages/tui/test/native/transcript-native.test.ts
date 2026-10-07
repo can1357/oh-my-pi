@@ -153,6 +153,26 @@ describe("native transcript", () => {
 		}
 	});
 
+	it("keeps a finished todo call's checklist open", () => {
+		const ui = { requestRender: () => {}, requestComponentRender: () => {}, resetDisplay: () => {} };
+		const tool = new ToolExecutionComponent("todo", { op: "start", task: "lex" }, {}, undefined, ui);
+		try {
+			tool.setArgsComplete("call-1");
+			tool.setExecutionStarted("call-1");
+			tool.updateResult({
+				content: [{ type: "text", text: "ok" }],
+				details: {
+					storage: "memory",
+					phases: [{ name: "Build", tasks: [{ content: "lex", status: "in_progress" }] }],
+				},
+				isError: false,
+			});
+			expect(tool.describe().p).toMatchObject({ status: "done", collapsible: true, collapsed: false });
+		} finally {
+			tool.dispose();
+		}
+	});
+
 	it("describes a custom tool (MCP) through the tool's own describe hooks", async () => {
 		const tool = {
 			name: "mcp__demo_lookup",

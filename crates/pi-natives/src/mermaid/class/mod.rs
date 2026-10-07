@@ -7,7 +7,10 @@ pub use parser::parse_class_diagram;
 use crate::mermaid::{
 	ansi::{CharRole, ColorMode, Theme},
 	canvas::{Canvas, Cell, RoleCanvas, to_cells},
-	flowchart::{AsciiConfig, draw::draw_multi_box},
+	flowchart::{
+		AsciiConfig,
+		draw::{multi_box_size, set_cell, stamp_multi_box},
+	},
 	text::{display_width, split_lines},
 };
 
@@ -237,16 +240,6 @@ fn build_class_sections(class: &ClassNode) -> Vec<Vec<String>> {
 	}
 }
 
-fn classify_box_cell(cell: &Cell) -> CharRole {
-	match cell.as_char() {
-		Some(
-			'┌' | '┐' | '└' | '┘' | '├' | '┤' | '┬' | '┴' | '┼' | '│' | '─' | '╭' | '╮' | '╰' | '╯'
-			| '+' | '-' | '|',
-		) => CharRole::Border,
-		_ => CharRole::Text,
-	}
-}
-
 #[derive(Clone, Copy)]
 enum MarkerDirection {
 	Up,
@@ -310,25 +303,10 @@ const fn is_dashed(kind: RelationshipType) -> bool {
 
 struct PlacedClass {
 	class_index: usize,
-	sections:    Vec<Vec<String>>,
 	x:           i32,
 	y:           i32,
 	width:       i32,
 	height:      i32,
-}
-
-fn set_cell(
-	canvas: &mut Canvas,
-	roles: &mut RoleCanvas,
-	x: i32,
-	y: i32,
-	cell: Cell,
-	role: CharRole,
-) {
-	if canvas.in_bounds(x, y) {
-		canvas.set(x, y, cell);
-		roles.set_role(x, y, role);
-	}
 }
 
 fn set_char(
@@ -392,25 +370,12 @@ pub fn render(text: &str, config: &AsciiConfig, mode: ColorMode, theme: &Theme) 
 	let use_ascii = config.use_ascii;
 	let horizontal_gap = 4;
 	let vertical_gap = 3;
-	let mut class_sections = Vec::with_capacity(diagram.classes.len());
-	let mut class_widths = Vec::with_capacity(diagram.classes.len());
-	let mut class_heights = Vec::with_capacity(diagram.classes.len());
-	for class in &diagram.classes {
-		let sections = build_class_sections(class);
-		let max_text_width = sections
-			.iter()
-			.flatten()
-			.map(|line| display_width(line) as i32)
-			.max()
-			.unwrap_or(0);
-		let total_lines: i32 = sections
-			.iter()
-			.map(|section| section.len().max(1) as i32)
-			.sum();
-		class_widths.push(max_text_width + 4);
-		class_heights.push(total_lines + sections.len() as i32 - 1 + 2);
-		class_sections.push(sections);
-	}
+	let class_sections: Vec<Vec<Vec<String>>> =
+		diagram.classes.iter().map(build_class_sections).collect();
+	let class_sizes: Vec<(i32, i32)> = class_sections
+		.iter()
+		.map(|sections| multi_box_size(sections))
+		.collect();
 
 	let class_indices: HashMap<&str, usize> = diagram
 		.classes
@@ -488,16 +453,9 @@ pub fn render(text: &str, config: &AsciiConfig, mode: ColorMode, theme: &Theme) 
 		let mut current_x = 0;
 		let mut max_height = 0;
 		for class_index in group {
-			let width = class_widths[class_index];
-			let height = class_heights[class_index];
-			placed[class_index] = Some(PlacedClass {
-				class_index,
-				sections: class_sections[class_index].clone(),
-				x: current_x,
-				y: current_y,
-				width,
-				height,
-			});
+			let (width, height) = class_sizes[class_index];
+			placed[class_index] =
+				Some(PlacedClass { class_index, x: current_x, y: current_y, width, height });
 			current_x += width + horizontal_gap;
 			max_height = max_height.max(height);
 		}
@@ -516,18 +474,14 @@ pub fn render(text: &str, config: &AsciiConfig, mode: ColorMode, theme: &Theme) 
 	let mut roles = RoleCanvas::new(total_width, total_height);
 
 	for class in placed.iter().flatten() {
-		let class_canvas = draw_multi_box(&class.sections, use_ascii, 1);
-		for x in 0..class_canvas.width() {
-			for y in 0..class_canvas.height() {
-				let Some(cell) = class_canvas.get(x, y) else {
-					continue;
-				};
-				if !cell.is_space() {
-					let role = classify_box_cell(cell);
-					set_cell(&mut canvas, &mut roles, class.x + x, class.y + y, cell.clone(), role);
-				}
-			}
-		}
+		stamp_multi_box(
+			&mut canvas,
+			&mut roles,
+			&class_sections[class.class_index],
+			class.x,
+			class.y,
+			use_ascii,
+		);
 	}
 
 	let horizontal = if use_ascii { '-' } else { '─' };

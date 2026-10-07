@@ -1,4 +1,10 @@
 import type { ImageContent } from "@oh-my-pi/pi-ai";
+import {
+	type ImageSize,
+	type ImageTokenization,
+	imageTokens,
+	resolveImageTokenization,
+} from "@oh-my-pi/pi-catalog/compat/image-tokenization";
 import { parseImageMetadata } from "@oh-my-pi/pi-utils";
 
 /**
@@ -9,63 +15,30 @@ import { parseImageMetadata } from "@oh-my-pi/pi-utils";
  * stayed under the local compaction trigger yet was refused as over-window by
  * the remote probe.
  *
- * Follows OpenAI's patch-based rule (32px patches, a per-detail pixel limit
- * and patch budget, x1.2 multiplier), which is also a close upper estimate for
- * other providers once omp has downscaled the image (≤1568px by default).
+ * Follows the catalog's image rule for the OpenAI Responses wire (GPT-5.5's
+ * 32px patches, a per-detail pixel limit and patch budget, x1.2 multiplier),
+ * which is also a close upper estimate for other providers once omp has
+ * downscaled the image (≤1568px by default).
  */
 
 /** OpenAI image `detail` values; `undefined` means the provider default (`auto`). */
 export type ImageDetail = ImageContent["detail"];
 
-export interface ImageSize {
-	width: number;
-	height: number;
-}
+export type { ImageSize };
 
-const PATCH_PX = 32;
-const PATCH_TOKEN_MULTIPLIER = 1.2;
+// Larger than every detail level's pixel limit, so an unknown size charges
+// the level's full patch budget.
+const UNKNOWN_SIZE: ImageSize = { width: 65_535, height: 65_535 };
 
-interface DetailSizing {
-	/** Longest side after the pixel-dimension fit. */
-	maxDimension: number;
-	/** Resizing patch budget, when the detail level defines one. */
-	patchBudget?: number;
-	/** Patches charged when the image size is unknown. */
-	unknownPatches: number;
-}
+let wireRule: ImageTokenization | undefined;
 
-const LOW_SIZING: DetailSizing = { maxDimension: 512, unknownPatches: 16 * 16 };
-const HIGH_SIZING: DetailSizing = { maxDimension: 2048, patchBudget: 2_500, unknownPatches: 2_500 };
-// `auto` resolves to `original` sizing on current models, so it shares the
-// larger budget rather than risk undercounting.
-const ORIGINAL_SIZING: DetailSizing = { maxDimension: 6_000, patchBudget: 10_000, unknownPatches: 10_000 };
-
-function sizingFor(detail: ImageDetail): DetailSizing {
-	if (detail === "low") return LOW_SIZING;
-	if (detail === "high") return HIGH_SIZING;
-	return ORIGINAL_SIZING;
-}
-
-function countPatches(size: ImageSize, sizing: DetailSizing): number {
-	let { width, height } = size;
-	const longest = Math.max(width, height);
-	if (longest > sizing.maxDimension) {
-		const scale = sizing.maxDimension / longest;
-		width = Math.max(1, Math.round(width * scale));
-		height = Math.max(1, Math.round(height * scale));
-	}
-	const patches = Math.ceil(width / PATCH_PX) * Math.ceil(height / PATCH_PX);
-	const budget = sizing.patchBudget;
-	if (budget === undefined || patches <= budget) return patches;
-
-	const shrink = Math.sqrt((PATCH_PX * PATCH_PX * budget) / (width * height));
-	const scaledW = (width * shrink) / PATCH_PX;
-	const scaledH = (height * shrink) / PATCH_PX;
-	const adjusted = shrink * Math.min(Math.floor(scaledW) / scaledW, Math.floor(scaledH) / scaledH);
-	const resizedW = Math.floor(width * adjusted);
-	const resizedH = Math.floor(height * adjusted);
-	if (resizedW <= 0 || resizedH <= 0) return budget;
-	return Math.min(budget, Math.ceil(resizedW / PATCH_PX) * Math.ceil(resizedH / PATCH_PX));
+/** The OpenAI Responses wire's image rule, resolved from the catalog once. */
+function openAiWireRule(): ImageTokenization {
+	if (wireRule) return wireRule;
+	const rule = resolveImageTokenization({ api: "openai-responses" });
+	if (!rule) throw new Error("The catalog has no image-tokenization rule for the openai-responses wire");
+	wireRule = rule;
+	return rule;
 }
 
 /**
@@ -73,9 +46,7 @@ function countPatches(size: ImageSize, sizing: DetailSizing): number {
  * remote URLs, provider file ids) charge the detail level's full patch budget.
  */
 export function estimateImageTokens(size: ImageSize | null | undefined, detail?: ImageDetail): number {
-	const sizing = sizingFor(detail);
-	const patches = size && size.width > 0 && size.height > 0 ? countPatches(size, sizing) : sizing.unknownPatches;
-	return Math.ceil(patches * PATCH_TOKEN_MULTIPLIER);
+	return imageTokens(openAiWireRule(), size && size.width > 0 && size.height > 0 ? size : UNKNOWN_SIZE, detail);
 }
 
 // Enough decoded bytes to reach a JPEG SOF marker behind typical EXIF/ICC

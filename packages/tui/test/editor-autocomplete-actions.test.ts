@@ -37,13 +37,15 @@ describe("Editor async autocomplete scheduling", () => {
 		const forcedItems = [{ label: "zeta.ts", value: "@zeta.ts" }];
 		const pending: Array<PromiseWithResolvers<{ items: AutocompleteItem[]; prefix: string } | null>> = [];
 		// Prime the zero-candidate state: `@` opens the popup, then the narrowing filter (`z`,
-		// see Editor#debouncedUpdateAutocomplete) empties the list, hiding the still-open popup.
+		// see Editor#refreshAutocomplete) empties the list, hiding the still-open popup.
 		const primed = async (): Promise<Editor> => {
 			const editor = new Editor(defaultEditorTheme);
 			editor.setAutocompleteProvider({
-				async getSuggestions(lines, cursorLine) {
+				async getSuggestions(lines, cursorLine, _cursorCol, signal) {
 					if (lines[cursorLine] === "@") return { items, prefix: "@" };
+					// The refresh stays pending until a newer request (Tab's fallback) aborts it.
 					const deferred = Promise.withResolvers<{ items: AutocompleteItem[]; prefix: string } | null>();
+					signal?.addEventListener("abort", () => deferred.resolve(null));
 					pending.push(deferred);
 					return deferred.promise;
 				},
@@ -384,16 +386,16 @@ describe("Editor slash argument autocomplete", () => {
 
 		editor.handleInput("/");
 		await untilAutocompleteShown(editor);
-		const popupClosed = onceAutocompleteUpdate(editor);
 		for (const char of "probe a") editor.handleInput(char);
-		await popupClosed;
+		// Command-name keystrokes refresh synchronously; each argument keystroke queries the provider.
+		await onceAutocompleteUpdate(editor);
 		expect(editor.isShowingAutocomplete()).toBeFalse();
-		expect(argumentPrefixes).toEqual(["a"]);
+		expect(argumentPrefixes).toEqual(["", "a"]);
 
 		const popupOpened = onceAutocompleteUpdate(editor);
 		editor.handleInput(" ");
 		await popupOpened;
-		expect(argumentPrefixes).toEqual(["a", "a "]);
+		expect(argumentPrefixes).toEqual(["", "a", "a "]);
 		expect(editor.isShowingAutocomplete()).toBeTrue();
 	});
 });
@@ -468,6 +470,92 @@ describe("Editor slash autocomplete acceptance", () => {
 		editor.handleInput("\t");
 
 		expect(editor.getText()).toBe("/skills:fix-bug ");
+	});
+
+	it("submits the command matching characters typed after the popup opened", async () => {
+		// Regression: the popup built for bare `/` stayed stale while its refresh was deferred,
+		// so typing `mod` + Enter quickly ran its top row (`/login`) instead of `/model`.
+		const editor = new Editor(defaultEditorTheme);
+		editor.setAutocompleteProvider(
+			new CombinedAutocompleteProvider(
+				[
+					{ name: "login", description: "Log in" },
+					{ name: "model", description: "Switch model" },
+				],
+				"/tmp",
+			),
+		);
+		let submitted = "";
+		editor.onSubmit = text => {
+			submitted = text;
+		};
+
+		editor.handleInput("/");
+		await untilAutocompleteShown(editor);
+		for (const char of "mod") editor.handleInput(char);
+		editor.handleInput("\r");
+
+		expect(submitted).toBe("/model");
+	});
+
+	it("closes the popup at once when the typed command matches nothing", async () => {
+		const editor = new Editor(defaultEditorTheme);
+		editor.setAutocompleteProvider(
+			new CombinedAutocompleteProvider([{ name: "login", description: "Log in" }], "/tmp"),
+		);
+		let submitted = "";
+		editor.onSubmit = text => {
+			submitted = text;
+		};
+
+		editor.handleInput("/");
+		await untilAutocompleteShown(editor);
+		for (const char of "xyz") editor.handleInput(char);
+		expect(editor.isShowingAutocomplete()).toBe(false);
+		editor.handleInput("\r");
+
+		expect(submitted).toBe("/xyz");
+	});
+
+	it("never completes Enter to the bare skill namespace row", () => {
+		const editor = new Editor(defaultEditorTheme);
+		editor.setAutocompleteProvider(
+			new CombinedAutocompleteProvider([{ name: "skill:humanizer", description: "Humanize" }], "/tmp"),
+		);
+		let submitted = "";
+		editor.onSubmit = text => {
+			submitted = text;
+		};
+
+		editor.setText("/sk");
+		editor.handleInput("\r");
+
+		expect(submitted).toBe("/sk");
+	});
+
+	it("refreshes an async popup without waiting on a timer", async () => {
+		// Every edit re-queries the provider immediately; no debounce holds the request back.
+		const requested: string[] = [];
+		const editor = new Editor(defaultEditorTheme);
+		editor.setAutocompleteProvider({
+			async getSuggestions(lines, cursorLine, cursorCol) {
+				const text = (lines[cursorLine] ?? "").slice(0, cursorCol);
+				requested.push(text);
+				return { items: [{ value: `${text}.ts`, label: `${text}.ts` }], prefix: text };
+			},
+			applyCompletion(lines, cursorLine, cursorCol) {
+				return { lines, cursorLine, cursorCol };
+			},
+		});
+
+		editor.handleInput("@");
+		await untilAutocompleteShown(editor);
+		const refreshed = onceAutocompleteUpdate(editor);
+		editor.handleInput("a");
+		await refreshed;
+
+		expect(requested).toEqual(["@", "@a"]);
+		expect(editor.render(80).join("\n")).toContain("@a.ts");
 	});
 
 	it("accepts an absolute path completion with Tab when the line has leading whitespace", async () => {

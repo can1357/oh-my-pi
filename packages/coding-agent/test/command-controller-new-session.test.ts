@@ -38,6 +38,7 @@ function makeHarness(): NewSessionHarness {
 		},
 		sessionManager: {
 			getSessionName: () => undefined,
+			getSessionTitleCard: () => undefined,
 			getCwd: () => "/tmp",
 		},
 		get focusedAgentId() {

@@ -17,7 +17,7 @@ import { formatCoarseDuration } from "../chrome/format";
 import { centerLine } from "../utils";
 import { theme } from "../theme/theme";
 import { matchesAppInterrupt } from "../keybinding-matchers";
-import { formatKeyHint } from "../app-keybindings";
+import { formatKeyHint, formatTooltipKey } from "../app-keybindings";
 import { boundKeys, interruptKey } from "../chrome/keybinding-hints";
 import type { NativeNode, NativeUiEvent } from "../native/node";
 import { col, node, row, span, text } from "../native/describe";
@@ -198,7 +198,7 @@ export class PauseScreenComponent implements Component, OverlayFocusOwner {
 				actionButton("Resume", "resume", {
 					keys: resumeKey,
 					tone: "accent",
-					title: `Resume  ${resumeKey} · enter · space`,
+					title: `Resume  ${formatTooltipKey(resumeKey)} · enter · space`,
 				}),
 			]),
 		);
