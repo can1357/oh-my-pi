@@ -1293,17 +1293,34 @@ function discoverAppendSystemPromptFile(): string | undefined {
 	return undefined;
 }
 
+/** Discover APPEND_PLAN.md file if no CLI append plan prompt was provided */
+function discoverAppendPlanPromptFile(): string | undefined {
+	const projectPath = findConfigFile("APPEND_PLAN.md", { user: false });
+	if (projectPath) {
+		return projectPath;
+	}
+	const globalPath = findConfigFile("APPEND_PLAN.md", { user: true });
+	if (globalPath) {
+		return globalPath;
+	}
+	return undefined;
+}
+
 /** Apply resolved CLI/discovered prompt files without bypassing system prompt templates. */
 export function applyResolvedSystemPromptInputs(
 	options: CreateAgentSessionOptions,
 	resolvedSystemPrompt: string | undefined,
 	resolvedAppendPrompt: string | undefined,
+	resolvedAppendPlanPrompt?: string | undefined,
 ): void {
 	if (resolvedSystemPrompt !== undefined) {
 		options.customSystemPrompt = resolvedSystemPrompt;
 	}
 	if (resolvedAppendPrompt) {
 		options.appendSystemPrompt = resolvedAppendPrompt;
+	}
+	if (resolvedAppendPlanPrompt) {
+		options.appendPlanPrompt = resolvedAppendPlanPrompt;
 	}
 }
 
@@ -1346,22 +1363,29 @@ export async function buildSessionOptions(
 	const templatePath =
 		parsed.systemPromptTemplate ?? (discoveredOverride?.kind === "template" ? discoveredOverride.path : undefined);
 	const appendPromptSource = parsed.appendSystemPrompt ?? discoverAppendSystemPromptFile();
+	const appendPlanPromptSource = parsed.appendPlanPrompt ?? discoverAppendPlanPromptFile();
 	const titleSystemPromptSource = discoverTitleSystemPromptFile(cwd);
-	const [resolvedSystemPrompt, resolvedAppendPrompt, titleSystemPrompt, resolvedSystemPromptTemplate] =
-		await Promise.all([
-			discoveredOverride?.kind === "text"
-				? Promise.resolve(discoveredOverride.content)
-				: resolvePromptInput(systemPromptSource, "system prompt"),
-			resolvePromptInput(appendPromptSource, "append system prompt"),
-			resolvePromptInput(titleSystemPromptSource, "title system prompt"),
-			// Discovered templates arrive pre-loaded from the capability; only
-			// explicit CLI paths hit the strict file loader here.
-			discoveredOverride?.kind === "template" && parsed.systemPromptTemplate === undefined
-				? Promise.resolve(discoveredOverride.content)
-				: templatePath === undefined
-					? Promise.resolve(undefined)
-					: loadSystemPromptTemplateFile(templatePath),
-		]);
+	const [
+		resolvedSystemPrompt,
+		resolvedAppendPrompt,
+		resolvedAppendPlanPrompt,
+		titleSystemPrompt,
+		resolvedSystemPromptTemplate,
+	] = await Promise.all([
+		discoveredOverride?.kind === "text"
+			? Promise.resolve(discoveredOverride.content)
+			: resolvePromptInput(systemPromptSource, "system prompt"),
+		resolvePromptInput(appendPromptSource, "append system prompt"),
+		resolvePromptInput(appendPlanPromptSource, "append plan prompt"),
+		resolvePromptInput(titleSystemPromptSource, "title system prompt"),
+		// Discovered templates arrive pre-loaded from the capability; only
+		// explicit CLI paths hit the strict file loader here.
+		discoveredOverride?.kind === "template" && parsed.systemPromptTemplate === undefined
+			? Promise.resolve(discoveredOverride.content)
+			: templatePath === undefined
+				? Promise.resolve(undefined)
+				: loadSystemPromptTemplateFile(templatePath),
+	]);
 
 	if (sessionManager) {
 		options.sessionManager = sessionManager;
@@ -1382,6 +1406,7 @@ export async function buildSessionOptions(
 			parsed.systemPrompt !== undefined ||
 			parsed.systemPromptTemplate !== undefined ||
 			parsed.appendSystemPrompt !== undefined ||
+			parsed.appendPlanPrompt !== undefined ||
 			parsed.tools !== undefined ||
 			parsed.noTools === true;
 		if (!forkCacheShapeChanged && header?.providerPromptCacheKey) {
@@ -1609,7 +1634,7 @@ export async function buildSessionOptions(
 	// (handled by caller before createAgentSession)
 
 	// System prompt
-	applyResolvedSystemPromptInputs(options, resolvedSystemPrompt, resolvedAppendPrompt);
+	applyResolvedSystemPromptInputs(options, resolvedSystemPrompt, resolvedAppendPrompt, resolvedAppendPlanPrompt);
 	if (resolvedSystemPromptTemplate !== undefined) {
 		options.systemPromptTemplate = resolvedSystemPromptTemplate;
 	}

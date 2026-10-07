@@ -201,6 +201,8 @@ export interface AgentSessionConfig {
 	prewalk?: Prewalk;
 	/** Force read-only plan mode at start, auto-approve, then switch to the target. */
 	planYolo?: PlanYolo;
+	/** User-authored text appended to the plan-mode context message while plan mode is enabled. */
+	planModeAppendPrompt?: string;
 	/** Initial per-family service tiers for the live session. */
 	serviceTierByFamily?: ServiceTierByFamily;
 	/** Prompt templates for expansion. */

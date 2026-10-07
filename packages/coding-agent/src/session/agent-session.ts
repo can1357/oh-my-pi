@@ -805,6 +805,8 @@ export class AgentSession implements SettingsScope {
 	/** A single model-only notebook reminder queued for the current prompt generation. */
 	#experimentalContextNotesReminder: { prompt: string; generation: number } | undefined;
 	#planModeState: PlanModeState | undefined;
+	/** User-authored text appended to the plan-mode context message each turn while plan mode is enabled. */
+	readonly #planModeAppendPrompt: string | undefined;
 	#vibeModeState: VibeModeState | undefined;
 	#goalModeState: GoalModeState | undefined;
 	#goalRuntime: GoalRuntime;
@@ -1644,6 +1646,7 @@ export class AgentSession implements SettingsScope {
 			prewalk: config.prewalk,
 			planYolo: config.planYolo,
 		});
+		this.#planModeAppendPrompt = config.planModeAppendPrompt?.trim() ? config.planModeAppendPrompt.trim() : undefined;
 		const todoHost: TodoTrackerHost = {
 			agent: this.agent,
 			sessionManager: this.sessionManager,
@@ -6941,7 +6944,10 @@ export class AgentSession implements SettingsScope {
 		return {
 			role: "custom",
 			customType: "plan-mode-context",
-			content,
+			// APPEND_PLAN.md / --append-plan-prompt ride this hidden per-turn
+			// message, so user planning guidance applies only while plan mode is
+			// enabled and drops out automatically on implementation turns.
+			content: this.#planModeAppendPrompt ? `${content}\n\n${this.#planModeAppendPrompt}` : content,
 			display: false,
 			attribution: "agent",
 			timestamp: Date.now(),

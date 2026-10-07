@@ -179,6 +179,9 @@ export const STRING_SETTERS: Record<string, StringSetter> = {
 	"--append-system-prompt": (result, value) => {
 		result.appendSystemPrompt = value;
 	},
+	"--append-plan-prompt": (result, value) => {
+		result.appendPlanPrompt = value;
+	},
 	"--provider-session-id": (result, value) => {
 		result.providerSessionId = value;
 	},
