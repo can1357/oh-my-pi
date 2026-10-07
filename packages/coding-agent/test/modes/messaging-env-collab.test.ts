@@ -97,7 +97,11 @@ it("keeps messages buffered after failed collab restoration, including repeated 
 		showError: () => {},
 		updateEditorTopBorder: () => {},
 		updateEditorBorderColor: () => {},
-		eventController: { handleEvent: async () => {}, takeDisplaceableComponents: () => [] },
+		eventController: {
+			dispatchSessionEvent: async () => {},
+			takeDisplaceableComponents: () => [],
+			resetTranscriptAnchors: () => {},
+		},
 		syncRunningSubagentBadge: () => {},
 		eventBus: new EventBus(),
 	} as unknown as InteractiveModeContext;
