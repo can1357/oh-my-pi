@@ -21,6 +21,7 @@
 ### Fixed
 
 - Fixed `cksum --check` panicking on a tagged-format line that starts with `(` instead of rejecting the line
+- Fixed `cksum --check` panicking on a tagged-format line that starts with `(` instead of rejecting the line ([#14823](https://github.com/can1357/oh-my-pi/pull/14823) by [@jchanghong023](https://github.com/jchanghong023)).
 
 ## [18.7.0] - 2026-10-06
 
