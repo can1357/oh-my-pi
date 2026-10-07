@@ -81,12 +81,16 @@ export async function embeddedAddonFiles({
 		level: 9,
 	});
 	const files = available.map(({ variant, filename, bytes }) => ({ variant, filename, size: bytes.length }));
-	const manifest = `import filePath from ${JSON.stringify(`./${archiveFilename}`)} with { type: "file" };
+	const manifest = `import assetPath from ${JSON.stringify(`./${archiveFilename}`)} with { type: "file" };
+import { fileURLToPath } from "node:url";
+
+const archivePath =
+	process.env.PI_ANDROID_BUNDLE === "1" ? fileURLToPath(new URL(assetPath, import.meta.url)) : assetPath;
 
 export const embeddedAddon = {
 	platformTag: ${JSON.stringify(platformTag)},
 	version: ${JSON.stringify(version)},
-	archive: { format: "tar.gz", filename: ${JSON.stringify(archiveFilename)}, filePath },
+	archive: { format: "tar.gz", filename: ${JSON.stringify(archiveFilename)}, filePath: archivePath },
 	files: ${JSON.stringify(files)},
 };
 `;

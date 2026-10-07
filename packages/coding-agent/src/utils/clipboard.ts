@@ -107,7 +107,7 @@ let macClipboardWrite = Promise.resolve();
  *
  * Emits OSC 52 first when running in a real terminal (works over SSH/mosh),
  * then attempts native clipboard copy as best-effort for local sessions.
- * On Termux, tries `termux-clipboard-set` before native.
+ * On Termux, only the bounded asynchronous `termux-clipboard-set` path runs.
  *
  * The OSC 52 goes through `writeTerminalSequence`, so it cannot tear a TUI
  * frame; from a worker thread it is skipped and only the native copy runs.
@@ -130,12 +130,8 @@ export async function copyToClipboard(text: string): Promise<void> {
 	// Also try native tools (best effort for local sessions)
 	try {
 		if (process.env.TERMUX_VERSION) {
-			try {
-				await spawnCapture(["termux-clipboard-set"], { input: text, timeoutMs: 5000 });
-				return;
-			} catch {
-				// Fall through to native
-			}
+			await spawnCapture(["termux-clipboard-set"], { input: text, timeoutMs: 5000 });
+			return;
 		}
 		// macOS: prefer `pbcopy` over the in-process AppKit write, mirroring the
 		// read path which already shells out to `pbpaste`. An in-process

@@ -292,7 +292,7 @@ pub use proc_snapshot::{ProcInfo, ProcessStatus};
 /// implementation.
 #[cfg(all(
 	feature = "util.procs",
-	any(target_os = "linux", target_os = "macos", target_os = "windows")
+	any(target_os = "android", target_os = "linux", target_os = "macos", target_os = "windows")
 ))]
 pub use proc_snapshot::sys as proc_sys;
 

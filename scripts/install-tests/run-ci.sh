@@ -89,9 +89,19 @@ fi
 align_native_manifest
 bun --cwd=packages/coding-agent run build
 
+host_platform="$(bun -e "process.stdout.write(process.platform)")"
 BINARY_DIR="$WORK_DIR/binary-bin"
 mkdir -p "$BINARY_DIR"
-cp packages/coding-agent/dist/omp "$BINARY_DIR/omp"
+# Android builds emit a relocatable directory: cli.js, the canonical preload,
+# and every generated `type:file` asset (including the embedded native archive)
+# stay beside the canonical shell launcher. Desktop builds retain the existing
+# single-file compiled binary contract.
+# Choose by the host platform; dist/android may be stale after a desktop build.
+if [ "$host_platform" = "android" ]; then
+   cp -R packages/coding-agent/dist/android/. "$BINARY_DIR/"
+else
+   cp packages/coding-agent/dist/omp "$BINARY_DIR/omp"
+fi
 smoke_cli "$BINARY_DIR/omp"
 
 section "Source install smoke"
@@ -103,6 +113,8 @@ SOURCE_BUN_HOME="$WORK_DIR/bun-source"
    smoke_cli "$BUN_INSTALL/bin/omp"
 )
 
+# Android has no npm native-leaf package for this tarball smoke.
+if [ "$host_platform" != "android" ]; then
 section "Tarball install smoke"
 TARBALL_DIR="$WORK_DIR/tarballs"
 mkdir -p "$TARBALL_DIR"
@@ -234,6 +246,7 @@ mkdir -p "$TARBALL_APP_DIR"
    }
    smoke_cli ./node_modules/.bin/omp
 )
+fi
 
 echo ""
 echo "All install method smoke tests passed"

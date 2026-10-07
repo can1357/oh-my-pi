@@ -25,7 +25,7 @@ describe("native addon embedding", () => {
 		});
 	}
 
-	it("emits a manifest whose archive the loader extracts back to the addon", async () => {
+	it("resolves a bundled archive next to the CLI, independent of caller cwd", async () => {
 		const root = await fs.mkdtemp(path.join(os.tmpdir(), "pi-natives-embed-"));
 		const nativeDir = path.join(root, "native");
 		const outDir = path.join(root, "out");
@@ -33,21 +33,46 @@ describe("native addon embedding", () => {
 		// A pre-stamp addon whose legacy sentinel matches the version (the loader accepts it).
 		const addon = "binary__piNativesV18_1_1\0";
 		try {
+			await Promise.all([fs.mkdir(nativeDir), fs.mkdir(outDir), fs.mkdir(cacheDir)]);
 			await Bun.write(path.join(nativeDir, "pi_natives.win32-arm64.node"), addon);
-			await fs.mkdir(cacheDir);
-			const files = await embeddedAddonFiles({ platform: "win32", arch: "arm64", nativeDir, version: "18.1.1" });
-			for (const filePath in files) {
-				await Bun.write(path.join(outDir, path.basename(filePath)), files[filePath]);
+			const embeddedFiles = await embeddedAddonFiles({
+				platform: "win32",
+				arch: "arm64",
+				nativeDir,
+				version: "18.1.1",
+			});
+			for (const [filePath, contents] of Object.entries(embeddedFiles)) {
+				await Bun.write(filePath, contents);
 			}
 
-			// Dynamic: the manifest under test is generated into a per-test temp dir.
-			const { embeddedAddon }: { embeddedAddon: EmbeddedAddon } = await import(
-				path.join(outDir, "embedded-addon.js")
+			const output = await Bun.build({
+				entrypoints: [path.join(nativeDir, "embedded-addon.js")],
+				outdir: outDir,
+				target: "bun",
+				files: embeddedFiles,
+				define: { "process.env.PI_ANDROID_BUNDLE": JSON.stringify("1") },
+			});
+			if (!output.success) {
+				throw new Error(`Bundle embedded addon manifest failed:\n${output.logs.map(log => log.message).join("\n")}`);
+			}
+
+			const entry = output.outputs.find(artifact => artifact.kind === "entry-point");
+			if (!entry) throw new Error("Bundle emitted no entrypoint");
+			const runner = path.join(root, "run-bundle.ts");
+			await Bun.write(
+				runner,
+				`import { embeddedAddon } from ${JSON.stringify(entry.path)};\nconsole.log(JSON.stringify(embeddedAddon));\n`,
 			);
+			const result = Bun.spawnSync([process.execPath, runner], { cwd: cacheDir, stdout: "pipe", stderr: "pipe" });
+			if (result.exitCode !== 0) throw new Error(result.stderr.toString());
+			const embeddedAddon = JSON.parse(result.stdout.toString()) as EmbeddedAddon;
 			expect(embeddedAddon.platformTag).toBe("win32-arm64");
 			expect(embeddedAddon.version).toBe("18.1.1");
+			const archivePath = embeddedAddon.archive?.filePath ?? "";
+			expect(path.isAbsolute(archivePath)).toBe(true);
+			await fs.access(archivePath);
 			extractEmbeddedAddonArchive({
-				archivePath: embeddedAddon.archive?.filePath ?? "",
+				archivePath,
 				files: embeddedAddon.files,
 				targetDir: cacheDir,
 			});

@@ -1,5 +1,6 @@
 #!/usr/bin/env bun
 
+import * as fs from "node:fs/promises";
 import { createRequire } from "node:module";
 import * as path from "node:path";
 import { compileCodingAgent } from "./compile-binary";
@@ -56,9 +57,10 @@ if (
 }
 const transformersVersion = transformersManifest.version;
 
-async function runCommand(command: string[]): Promise<void> {
+async function runCommand(command: string[], env?: Record<string, string | undefined>): Promise<void> {
 	const proc = Bun.spawn(command, {
 		cwd: packageDir,
+		env: env ?? Bun.env,
 		stdout: "inherit",
 		stderr: "inherit",
 	});
@@ -68,14 +70,44 @@ async function runCommand(command: string[]): Promise<void> {
 	}
 }
 
+async function buildAndroidLauncher(outputPath: string): Promise<void> {
+	const artifactDir = path.dirname(outputPath);
+	await fs.rm(artifactDir, { recursive: true, force: true });
+	await fs.mkdir(artifactDir, { recursive: true });
+
+	// Android Bun cannot run the compiled executable, so produce a relocatable
+	// bundle directory instead. The bundle script emits every generated runtime
+	// asset (native archive, dashboard, export templates, and changelog) into
+	// this directory; the launcher and its preload are the only files copied
+	// from the canonical source launcher.
+	await runCommand(["bun", "run", "gen:bundle"], {
+		...Bun.env,
+		OMP_ANDROID_BUNDLE: "1",
+		OMP_BUNDLE_OUTDIR: artifactDir,
+	});
+
+	const canonicalLauncherPath = path.join(packageDir, "scripts", "omp");
+	const canonicalPreloadPath = path.join(packageDir, "scripts", "omp.ts");
+	const canonicalLauncher = await Bun.file(canonicalLauncherPath).text();
+	const launcher = canonicalLauncher.replace(/^#![^\n]*\n/, "#!/data/data/com.termux/files/usr/bin/sh\n");
+	if (launcher === canonicalLauncher) {
+		throw new Error(`Canonical launcher has no shebang: ${canonicalLauncherPath}`);
+	}
+	await Bun.write(outputPath, launcher);
+	await fs.copyFile(canonicalPreloadPath, path.join(artifactDir, "omp.ts"));
+	await fs.chmod(outputPath, 0o755);
+}
+
 async function main(): Promise<void> {
 	const crossBuild = resolveCrossBuild(Bun.env.CROSS_TARGET);
+	const isAndroidBuild = process.platform === "android" && !crossBuild;
 	const shouldAdhocSign =
 		process.platform === "darwin" &&
 		(!crossBuild || crossBuild.platform === "darwin") &&
 		Bun.env.BUN_NO_CODESIGN_MACHO_BINARY !== "1";
 	const outName = crossBuild ? `omp-${crossBuild.id}` : "omp";
-	const outputPath = path.join(packageDir, "dist", outName);
+	const outputDir = isAndroidBuild ? path.join(packageDir, "dist", "android") : path.join(packageDir, "dist");
+	const outputPath = path.join(outputDir, outName);
 	// Generate inside the try so the finally always restores the empty checked-in
 	// placeholders (stats client archive, docs index) even on failure.
 	try {
@@ -85,16 +117,24 @@ async function main(): Promise<void> {
 		// Rebuild it before compilation so clean checkouts that skipped install
 		// hooks still contain that generated bundle.
 		await runCommand(["bun", "--cwd=../collab-web", "run", "gen:tool-views"]);
-		await compileCodingAgent({
-			repoRoot,
-			entrypoint: path.join(packageDir, "src", "cli.ts"),
-			outfile: outputPath,
-			transformersVersion,
-			native: crossBuild ?? { platform: process.platform, arch: process.arch },
-			target: crossBuild?.target,
-			executablePath: Bun.env.BUN_COMPILE_EXECUTABLE_PATH || undefined,
-			skipBuiltinCodesign: shouldAdhocSign,
-		});
+		if (isAndroidBuild) {
+			await runCommand(["bun", "--cwd=../natives", "run", "build"], {
+				...Bun.env,
+				OMP_NATIVE_BUILD_BACKEND: "cargo",
+			});
+			await buildAndroidLauncher(outputPath);
+		} else {
+			await compileCodingAgent({
+				repoRoot,
+				entrypoint: path.join(packageDir, "src", "cli.ts"),
+				outfile: outputPath,
+				transformersVersion,
+				native: crossBuild ?? { platform: process.platform, arch: process.arch },
+				target: crossBuild?.target,
+				executablePath: Bun.env.BUN_COMPILE_EXECUTABLE_PATH || undefined,
+				skipBuiltinCodesign: shouldAdhocSign,
+			});
+		}
 
 		if (shouldAdhocSign) {
 			await runCommand([

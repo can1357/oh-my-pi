@@ -1,12 +1,13 @@
 #!/bin/sh
-# Dev launcher for the omp CLI, installed by `bun run setup`.
+# Shell launcher for the omp CLI, used by both source installs and bundled
+# Android artifacts.
 #
-# Problem it solves: Bun reads `bunfig.toml` from the *current working
-# directory* at startup and evaluates its `preload` entries before running the
-# script. A bun-shebang bin (what `bun link` creates for `src/cli.ts`)
-# therefore inherits whatever `preload` the directory you happen to be in
-# declares. Running `omp`/`pi` inside an unrelated Bun project can execute — and
-# crash on — that project's preload, e.g.
+# Bun reads `bunfig.toml` from the *current working directory* at startup and
+# evaluates its `preload` entries before running the script. A bun-shebang bin
+# (what `bun link` creates for `src/cli.ts`) therefore inherits whatever
+# `preload` the directory you happen to be in. Running `omp`/`pi` inside an
+# unrelated Bun project can execute — and crash on — that project's preload,
+# e.g.
 #   error: Cannot find module '@v12sh/utils/frontmatter' from '.../loader.ts'
 #
 # Bun only reads the *exact* cwd (it does not walk parents) and ignores
@@ -26,9 +27,44 @@ while [ -L "$self" ]; do
 	esac
 done
 scripts_dir=$(CDPATH= cd -- "$(dirname -- "$self")" && pwd -P)
-cli=$scripts_dir/../src/cli.ts
-preload=$scripts_dir/omp.ts
-timing_preload=$scripts_dir/../../utils/src/module-timer.ts
+
+# Source launchers live in scripts/ beside omp.ts and point at src/cli.ts.
+# Android artifacts keep the generated cli.js, this launcher, and omp.ts
+# together in one relocatable directory. Detect the bundle by its entrypoint,
+# not by omp.ts (both layouts intentionally carry the same canonical preload).
+if [ -r "$scripts_dir/cli.js" ]; then
+	cli=$scripts_dir/cli.js
+	# Relocated bundles have no package.json for package-root discovery.
+	# Preserve explicit overrides while keeping legacy resource lookups out of cwd.
+	PI_PACKAGE_DIR=${PI_PACKAGE_DIR:-$scripts_dir}
+	export PI_PACKAGE_DIR
+	if [ -r "$scripts_dir/omp.ts" ]; then
+		preload=$scripts_dir/omp.ts
+	else
+		# Keep older in-repository dist/omp artifacts usable while new Android
+		# builds use the self-contained dist/android directory.
+		package_dir=$(CDPATH= cd -- "$scripts_dir/.." && pwd -P)
+		preload=$package_dir/scripts/omp.ts
+	fi
+	timing_preload=
+else
+	cli=$scripts_dir/../src/cli.ts
+	preload=$scripts_dir/omp.ts
+	timing_preload=$scripts_dir/../../utils/src/module-timer.ts
+fi
+
+if [ ! -r "$cli" ]; then
+	echo "omp: missing CLI entrypoint: $cli" >&2
+	exit 127
+fi
+if [ ! -r "$preload" ]; then
+	echo "omp: missing launch preload: $preload" >&2
+	exit 127
+fi
+if [ -n "${PI_TIMING:-}" ] && [ -n "$timing_preload" ] && [ ! -r "$timing_preload" ]; then
+	echo "omp: missing timing preload: $timing_preload" >&2
+	exit 127
+fi
 
 launch_dir=${OMP_DEV_LAUNCH_DIR:-${HOME}/.omp/.dev-cwd}
 mkdir -p "$launch_dir"
@@ -37,7 +73,7 @@ OMP_LAUNCH_CWD=$PWD
 export OMP_LAUNCH_CWD
 cd "$launch_dir"
 # Herdr 0.7.5 validates the foreground process name. The macOS shell can
-# preserve OMP's identity while still running the development CLI through Bun.
+# preserve OMP's identity while still running the CLI through Bun.
 run_bun() {
 	if [ "${HERDR_ENV:-}" = 1 ] && [ "$(uname -s)" = Darwin ]; then
 		exec -a omp bun "$@"
@@ -45,7 +81,7 @@ run_bun() {
 	exec bun "$@"
 }
 
-if [ -n "${PI_TIMING:-}" ]; then
+if [ -n "${PI_TIMING:-}" ] && [ -n "$timing_preload" ]; then
 	run_bun --preload "$preload" --preload "$timing_preload" "$cli" "$@"
 fi
 run_bun --preload "$preload" "$cli" "$@"
