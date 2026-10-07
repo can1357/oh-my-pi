@@ -44,12 +44,6 @@ struct ShellSessionCore {
 	filesystem: Fs,
 }
 
-impl Drop for ShellSessionCore {
-	fn drop(&mut self) {
-		terminate_internal_background_jobs(&mut self.shell);
-	}
-}
-
 #[derive(Clone, Default)]
 struct ShellAbortState(Arc<TokioMutex<Option<AbortToken>>>);
 
@@ -1724,15 +1718,12 @@ async fn terminate_run(registry: &process::SpawnRegistry) {
 		}
 	}
 }
-fn terminate_internal_background_jobs(shell: &mut BrushShell) {
-	for job in &mut shell.jobs_mut().jobs {
-		job.abort_internal_tasks();
-	}
-}
 
 fn terminate_background_jobs(shell: &mut BrushShell) {
 	let mut targets = process::TerminationTargets::new();
-	terminate_internal_background_jobs(shell);
+	for job in &mut shell.jobs_mut().jobs {
+		job.abort_internal_tasks();
+	}
 	for job in &shell.jobs().jobs {
 		if let Some(pgid) = job.process_group_id() {
 			targets.add_pgid(pgid);
@@ -6209,6 +6200,56 @@ replace = [{ pattern = "hello", replacement = "HI" }]
 			!marker.path().exists(),
 			"an internal background job outlived its one-shot shell session"
 		);
+	}
+
+	/// Lets in-flight writes land, empties `path`, and reports whether anything
+	/// wrote to it again: a background `yes` still running refills it within
+	/// milliseconds.
+	async fn still_written(path: &std::path::Path) -> bool {
+		time::sleep(Duration::from_millis(300)).await;
+		std::fs::File::options()
+			.write(true)
+			.open(path)
+			.and_then(|file| file.set_len(0))
+			.expect("truncate output");
+		time::sleep(Duration::from_millis(300)).await;
+		std::fs::metadata(path).expect("stat output").len() > 0
+	}
+
+	/// A background builtin started in a subshell ends with the subshell, as an
+	/// external one does. Left running it was out of reach — no process for
+	/// `pkill`, no job for `kill %N` — and spun for the life of the host.
+	#[tokio::test(flavor = "multi_thread")]
+	async fn subshell_exit_ends_its_background_builtins() {
+		let _guard = shell_test_lock().lock().await;
+		let output = tempfile::NamedTempFile::new().expect("output file");
+		let shell = Shell::new(None);
+		let command = format!("(yes > {} &)", quote_arg(&output.path().to_string_lossy()));
+
+		shell
+			.run(ShellRunOptions { command, ..Default::default() }, None, CancelToken::default())
+			.await
+			.expect("run subshell");
+
+		assert!(!still_written(output.path()).await, "background `yes` outlived its subshell");
+	}
+
+	/// `kill %N` ends a background job running inside the shell, which has no
+	/// process to deliver the signal to.
+	#[tokio::test(flavor = "multi_thread")]
+	async fn kill_jobspec_ends_in_process_background_job() {
+		let _guard = shell_test_lock().lock().await;
+		let output = tempfile::NamedTempFile::new().expect("output file");
+		let shell = Shell::new(None);
+		let command = format!("yes > {} & kill %1", quote_arg(&output.path().to_string_lossy()));
+
+		let result = shell
+			.run(ShellRunOptions { command, ..Default::default() }, None, CancelToken::default())
+			.await
+			.expect("run kill");
+
+		assert_eq!(result.exit_code, Some(0), "kill %1 failed");
+		assert!(!still_written(output.path()).await, "`yes` kept running after kill %1");
 	}
 
 	/// `live_background_job_count` reports 0 when the session has no live

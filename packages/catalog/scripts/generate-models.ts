@@ -17,12 +17,14 @@ import { getGitLabDuoModels } from "@oh-my-pi/pi-ai/providers/gitlab-duo";
 import { getProviderDefinition } from "@oh-my-pi/pi-ai/registry";
 import { $env } from "@oh-my-pi/pi-utils";
 import { buildModel } from "../src/build";
+import { AXES } from "../src/compat/axes";
 import { isRetiredProvider } from "../src/compat/behavior";
 import { collapseVariants } from "../src/compat/collapse";
 import { providerEntries, providerEntry, seedModels } from "../src/compat/providers";
 import type { CompiledProvider } from "../src/compat/types";
 import { ANTIGRAVITY_PRIMARY_ENDPOINT, fetchAntigravityDiscoveryModels } from "../src/discovery/antigravity";
 import { createModelManager } from "../src/model-manager";
+import { resolveModelTokenizer } from "../src/model-tokenizer";
 import prevModelsJson from "../src/models.json" with { type: "json" };
 import { toModelSpec } from "../src/provider-models/bundled-references";
 import {
@@ -776,16 +778,63 @@ function canonicalizeModelCompat(model: ModelSpec<Api>): void {
  * Materialize one bundled row. Prompt-cache lifetimes are rule-owned output,
  * not snapshot input: stale lifetimes and configuration provenance from a
  * previous snapshot (or a copied reference row) are dropped so `buildModel`
- * reapplies only the current KDL policy.
+ * reapplies only the current KDL policy. A tokenizer the row's own id resolves
+ * is policy output too; a copied one survives only for ids policy cannot
+ * classify (e.g. GitLab Duo aliases of Claude models).
  */
 export function buildGeneratedModel(model: ModelSpec<Api>): Model<Api> {
 	const spec = { ...model };
+	if (resolveModelTokenizer(spec.requestModelId ?? spec.id, spec.provider) !== undefined) delete spec.tokenizer;
 	delete spec.promptCache;
 	delete spec.promptCacheConfig;
 	delete spec.kindConfig;
 	return buildModel(spec);
 }
 
+async function refreshSnapshotWireAxis(snapshotPath: string, axisName: string): Promise<void> {
+	const axis = AXES[axisName];
+	if (!axis || axis.set !== "wire" || axis.shape !== "scalar") {
+		throw new Error(`Expected a scalar wire axis, got ${axisName}`);
+	}
+	const snapshot = (await Bun.file(snapshotPath).json()) as Record<string, Record<string, Model<Api>>>;
+	const refreshed = structuredClone(snapshot);
+	let rows = 0;
+	let assigned = 0;
+	for (const [provider, models] of Object.entries(snapshot)) {
+		for (const [id, model] of Object.entries(models)) {
+			const generated = buildGeneratedModel(toModelSpec(model));
+			if (generated.provider !== provider || generated.id !== id) {
+				throw new Error(`Snapshot model identity changed: ${provider}/${id}`);
+			}
+			const value = (generated.compat as Record<string, unknown> | undefined)?.[axis.key];
+			const current = refreshed[provider][id];
+			const compat = current.compat as Record<string, unknown> | undefined;
+			if (value === undefined) {
+				if (compat) delete compat[axis.key];
+			} else if (compat) {
+				compat[axis.key] = value;
+				assigned++;
+			} else {
+				current.compat = { [axis.key]: value } as Model<Api>["compat"];
+				assigned++;
+			}
+			rows++;
+		}
+	}
+	await Bun.write(path.join(packageRoot, "src/models.json"), JSON.stringify(refreshed));
+	console.log(`Refreshed ${axisName} from ${snapshotPath} (${assigned}/${rows} rows assigned)`);
+}
+
 if (import.meta.main) {
-	generateModels().catch(console.error);
+	const args = process.argv.slice(2);
+	const action =
+		args.length === 0
+			? generateModels()
+			: args.length === 4 && args[0] === "--snapshot" && args[2] === "--policy-axis"
+				? refreshSnapshotWireAxis(args[1], args[3])
+				: Promise.reject(new Error("Expected --snapshot <path> --policy-axis <scalar-wire-axis>"));
+	action.catch(error => {
+		console.error(error);
+		process.exitCode = 1;
+	});
 }

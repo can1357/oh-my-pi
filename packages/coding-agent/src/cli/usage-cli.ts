@@ -10,8 +10,10 @@
 import {
 	ANTHROPIC_OAUTH_GRANT_TTL_MS,
 	type AuthAccountPolicy,
+	type AuthStorage,
 	type DisabledCredentialSummary,
 	type OAuthAccountIdentity,
+	resolveCredentialIdentityKey,
 	resolveUsedFraction,
 	type UsageHistoryEntry,
 	type UsageLimit,
@@ -980,6 +982,55 @@ export function formatClientUsage(clients: ClientUsageClientSummary[], sinceMs: 
 	return lines.join("\n");
 }
 
+/** One OAuth account as `omp usage accounts` lists it. */
+interface OAuthIdentityKeyRow {
+	provider: string;
+	/** `null` when the credential carries no account identity, so no pool can name it. */
+	identityKey: string | null;
+	/** Organization or workspace display name, when the provider reports one. */
+	orgName?: string;
+}
+
+/**
+ * Every OAuth account this process sees (after any broker account pool), with
+ * the identity key that `task.agentAccountPools`, `sessions.restrict`, and
+ * broker account pools match. Only the provider, the key, and the
+ * organization's display name leave each credential; tokens never do.
+ */
+function collectOAuthIdentityKeys(authStorage: AuthStorage, provider: string | undefined): OAuthIdentityKeyRow[] {
+	const rows: OAuthIdentityKeyRow[] = [];
+	for (const { provider: rowProvider, credential } of authStorage.credentials.list(provider)) {
+		if (credential.type !== "oauth") continue;
+		const identityKey = resolveCredentialIdentityKey(rowProvider, credential);
+		rows.push(
+			credential.orgName
+				? { provider: rowProvider, identityKey, orgName: credential.orgName }
+				: { provider: rowProvider, identityKey },
+		);
+	}
+	return rows;
+}
+
+/** Render {@link collectOAuthIdentityKeys} rows grouped under their provider, one key per line. */
+function formatOAuthIdentityKeys(rows: readonly OAuthIdentityKeyRow[]): string {
+	const width = Math.max(...rows.map(row => row.identityKey?.length ?? 0));
+	const lines: string[] = [];
+	let provider: string | undefined;
+	for (const row of rows) {
+		if (row.provider !== provider) {
+			provider = row.provider;
+			lines.push(chalk.bold(provider));
+		}
+		if (row.identityKey === null) {
+			lines.push(chalk.dim("  (no identity key: no pool can name this account)"));
+			continue;
+		}
+		const orgName = row.orgName ? sanitizeText(row.orgName.replace(/[\r\n\t]+/g, " ")) : undefined;
+		lines.push(orgName ? `  ${row.identityKey.padEnd(width)}  ${chalk.dim(orgName)}` : `  ${row.identityKey}`);
+	}
+	return lines.join("\n");
+}
+
 export async function runUsageCommand(cmd: UsageCommandArgs): Promise<void> {
 	const settings = await Settings.loadReadOnly();
 	const authStorage = await discoverAuthStorage(undefined, { settings });
@@ -992,6 +1043,40 @@ export async function runUsageCommand(cmd: UsageCommandArgs): Promise<void> {
 			} else {
 				process.stdout.write("Invalidated cached usage reports for all providers.\n");
 			}
+			return;
+		}
+		if (cmd.action === "accounts") {
+			if (cmd.redact) {
+				process.stderr.write(
+					chalk.red(
+						"`omp usage accounts` prints identity keys verbatim for configuration; --redact does not apply.\n",
+					),
+				);
+				process.exitCode = 1;
+				return;
+			}
+			// The listed keys get pasted into task.agentAccountPools, so read the
+			// broker's current accounts, not a cached snapshot; offline brokers
+			// keep the snapshot.
+			try {
+				await authStorage.credentials.revalidate();
+			} catch {
+				// Stale identities beat no output.
+			}
+			const rows = collectOAuthIdentityKeys(authStorage, cmd.provider?.toLowerCase());
+			if (cmd.json) {
+				process.stdout.write(`${JSON.stringify({ accounts: rows }, null, 2)}\n`);
+				return;
+			}
+			if (rows.length === 0) {
+				const scope = cmd.provider ? ` for provider "${cmd.provider}"` : "";
+				process.stderr.write(
+					chalk.yellow(`No OAuth accounts found${scope}. Run \`omp\` and use /login to add accounts.\n`),
+				);
+				process.exitCode = 1;
+				return;
+			}
+			process.stdout.write(`${formatOAuthIdentityKeys(rows)}\n`);
 			return;
 		}
 		if (cmd.action === "clients") {
