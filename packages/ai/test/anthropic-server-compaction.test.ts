@@ -720,6 +720,32 @@ describe("Anthropic compaction replay", () => {
 		expect(wire.slice(0, keptIndex).some(message => message.role === "system")).toBe(false);
 	});
 
+	it("places a new tool addition after compaction file metadata, not before a user turn", async () => {
+		const first = await captureRequest(preserved, options, context.messages, [readTool]);
+		const opened = keptFrom(first);
+		const summary = summaryMessage(
+			{ signature: SIGNATURE, filesText: "<files>handlers.ts (Read)</files>" },
+			"anthropic",
+			3,
+		);
+		const request = await captureRequest(
+			preserved,
+			options,
+			[...context.messages, opened, summary],
+			[readTool, addedTool],
+		);
+		const wire = request.payload.messages;
+		if (!Array.isArray(wire)) throw new Error("Expected wire messages");
+		const controls = toolControls(wire);
+		expect(controls).toHaveLength(1);
+		const controlIndex = controls[0]?.index ?? -1;
+		expect(wire[controlIndex]?.role).toBe("system");
+		const filesIndex = wire.findIndex(message => JSON.stringify(message).includes("<files>handlers.ts"));
+		expect(filesIndex).toBeGreaterThan(-1);
+		expect(controlIndex).toBeGreaterThan(filesIndex);
+		expect(wire[controlIndex + 1]?.role === "assistant" || controlIndex === wire.length - 1).toBe(true);
+	});
+
 	it("makes no tool or effort change of its own on a compaction request", async () => {
 		const live = { ...options, thinkingEnabled: true, effort: "high" as const };
 		const first = await captureRequest(preserved, live, context.messages, [readTool, removedTool]);

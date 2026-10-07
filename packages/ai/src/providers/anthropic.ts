@@ -5120,10 +5120,14 @@ export function convertAnthropicMessages(
 	let pendingCompactionFiles: AnthropicCompactionFiles[] = [];
 	const pushCompactionFiles = (filesText: string): void => {
 		if (filesText.trim().length === 0) return;
+		// Control markers belong after this user turn: a nonempty `system`
+		// control immediately before file metadata is rejected by Anthropic.
+		let index = params.length;
+		while (index > 0 && controlParams.has(params[index - 1])) index--;
 		// The payload bypassed the `transformMessages` redaction pass, so
 		// the metadata takes the same credential redaction here that the
 		// dropped message text received there.
-		params.push({ role: "user", content: redactSensitiveCredentials(filesText) });
+		params.splice(index, 0, { role: "user", content: redactSensitiveCredentials(filesText) });
 	};
 	const flushCompactionFiles = (before: number): void => {
 		const due = pendingCompactionFiles.filter(files => files.after < before);
