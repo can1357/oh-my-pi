@@ -18,10 +18,7 @@ import {
 	sanitizeSchemaForStrictMode,
 	tryEnforceStrictSchema,
 } from "@oh-my-pi/pi-ai/utils/schema";
-import {
-	resolveYieldSectionValue,
-	type YieldSectionShapes,
-} from "@oh-my-pi/pi-tui/tools/task-yield-assembly";
+import { resolveYieldSectionValue, type YieldSectionShapes } from "@oh-my-pi/pi-tui/tools/task-yield-assembly";
 import { prompt } from "@oh-my-pi/pi-utils";
 import yieldDescription from "../prompts/tools/yield.md" with { type: "text" };
 import { subprocessToolRegistry } from "../task/subprocess-tool-registry";
