@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Stale-read pruning now also drops an earlier `read` whose lines a later read of the same file shows again unchanged — a narrow range inside a wider one — and keeps it when a line changed, the ranges only overlap, or a line was cut by the column cap ([#14799](https://github.com/can1357/oh-my-pi/pull/14799) by [@kasrakhosravi](https://github.com/kasrakhosravi))
+
 ## [18.8.0] - 2026-10-07
 
 ### Added
@@ -40,9 +44,6 @@
 - Fixed parallel first bash calls each spawning an rc-sourcing shell ([#14680](https://github.com/can1357/oh-my-pi/pull/14680) by [@H4vC](https://github.com/H4vC))
 - Fixed the todo list's auto-clear never firing while subagents were streaming progress ([#14692](https://github.com/can1357/oh-my-pi/pull/14692) by [@H4vC](https://github.com/H4vC))
 - Fixed memory growth while ACP client-terminal commands run ([#14680](https://github.com/can1357/oh-my-pi/pull/14680) by [@H4vC](https://github.com/H4vC))
-### Changed
-
-- Stale-read pruning now also drops an earlier `read` whose lines a later read of the same file shows again unchanged — a narrow range inside a wider one — and keeps it when a line changed, the ranges only overlap, or a line was cut by the column cap.
 
 ## [18.7.0] - 2026-10-06
 
