@@ -40,6 +40,22 @@ describe("AskDialogComponent", () => {
 		vi.restoreAllMocks();
 	});
 
+	it("multi-question footer labels the question-switch keys", () => {
+		const questions: ExtensionAskDialogQuestion[] = [
+			{ id: "q1", question: "First?", options: [{ label: "A1" }, { label: "A2" }] },
+			{ id: "q2", question: "Second?", options: [{ label: "B1" }, { label: "B2" }] },
+		];
+		const component = new AskDialogComponent(questions, {
+			onSubmit: vi.fn(),
+			onCancel: vi.fn(),
+			onPrompt: vi.fn(),
+		});
+		const lines = component.render(80).map(line => stripVTControlCharacters(line));
+		const footer = lines.find(line => line.includes("select"));
+		expect(footer).toContain("⇥/←/→ question · ");
+		expect(footer).toContain("cancel");
+	});
+
 	it("single-question, single-select: Enter on option submits immediately", () => {
 		const onSubmit = vi.fn();
 		const onCancel = vi.fn();

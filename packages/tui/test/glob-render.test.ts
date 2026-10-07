@@ -51,6 +51,45 @@ describe("globToolRenderer", () => {
 		expect(plain).not.toContain("No files found");
 	});
 
+	it("distinguishes a timed-out partial listing from a result-limit truncation", async () => {
+		const theme = await getThemeByName("dark");
+		expect(theme).toBeDefined();
+		const uiTheme = theme!;
+		// Both are `truncated`, but only one means the scan died. Showing a
+		// dead scan as "truncated" invites a blind retry with a bigger limit.
+		const timedOut = {
+			content: [{ type: "text", text: "src/a.ts\nglob timed out after 5s; returning 2 partial matches" }],
+			details: {
+				fileCount: 2,
+				files: ["src/a.ts", "src/b.ts"],
+				truncated: true,
+				timedOut: true,
+			},
+		};
+		const limitOnly = {
+			content: [{ type: "text", text: "src/a.ts" }],
+			details: {
+				fileCount: 2,
+				files: ["src/a.ts", "src/b.ts"],
+				truncated: true,
+				resultLimitReached: 2,
+			},
+		};
+
+		const render = (result: unknown): string =>
+			sanitizeText(
+				globToolRenderer
+					.renderResult(result as never, { expanded: true, isPartial: false }, uiTheme, { paths: "src/**/*.ts" })
+					.render(240)
+					.join("\n"),
+			);
+
+		expect(render(timedOut)).toContain("timed out");
+		const limited = render(limitOnly);
+		expect(limited).toContain("truncated");
+		expect(limited).not.toContain("timed out");
+	});
+
 	it("renders a genuinely empty result as no files found", async () => {
 		const theme = await getThemeByName("dark");
 		expect(theme).toBeDefined();

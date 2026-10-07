@@ -15,7 +15,7 @@ import type { TspPickerAction, TspPickerColumn, TspPickerItem, TspPickerScope, T
 import {
 	type Component,
 	Editor,
-	fuzzyMatch,
+	FuzzyQuery,
 	Input,
 	matchesKey,
 	replaceTabs,
@@ -141,6 +141,11 @@ export interface AgentsHubCallbacks {
 const IDENTIFIER_PATTERN = /^[a-z0-9]+(?:-[a-z0-9]+){1,5}$/;
 
 function extractJsonObject(raw: string): string {
+	// A bare JSON object may legitimately contain code fences inside string values; keep it intact.
+	try {
+		JSON.parse(raw);
+		return raw;
+	} catch {}
 	const fenceMatch = raw.match(/```(?:json)?\s*([\s\S]*?)```/i);
 	if (fenceMatch?.[1]) return fenceMatch[1].trim();
 	const start = raw.indexOf("{");
@@ -149,7 +154,15 @@ function extractJsonObject(raw: string): string {
 	return raw.trim();
 }
 
-function parseGeneratedAgentSpec(raw: string): GeneratedAgentSpec {
+/**
+ * Parse model output into a {@link GeneratedAgentSpec}. Accepts a bare JSON object
+ * (tried first) or one wrapped in a code fence. Returns the spec with trimmed fields.
+ * Throws if the output is not valid JSON or not an object, if `identifier`, `whenToUse`
+ * or `systemPrompt` is missing or not a string, if the identifier is not lowercase
+ * kebab-case with 2+ words, if `whenToUse` does not start with "Use this agent when",
+ * or if `systemPrompt` is empty.
+ */
+export function parseGeneratedAgentSpec(raw: string): GeneratedAgentSpec {
 	const parsed = JSON.parse(extractJsonObject(raw)) as Partial<GeneratedAgentSpec>;
 	if (!parsed || typeof parsed !== "object") {
 		throw new Error("Model output is not a JSON object");
@@ -181,12 +194,12 @@ function listRowId(rowDef: ListRow): string {
 	return rowDef.kind === "new" ? "new" : `agent:${rowDef.agent.source}:${rowDef.agent.name}`;
 }
 
-function matchAgent(agent: HubAgent, query: string): boolean {
+/** All `tokens` (prepared once per query) fuzzy-match the agent's searchable text. */
+function matchAgent(agent: HubAgent, tokens: readonly FuzzyQuery[]): boolean {
+	// Not memoized: `overrideModel` is edited in place, and the module index
+	// cache already reuses the per-text index for unchanged agents.
 	const text = `${agent.name} ${agent.description} ${SOURCE_LABEL[agent.source]} ${agent.overrideModel ?? ""}`;
-	return query
-		.trim()
-		.split(/\s+/)
-		.every(token => fuzzyMatch(token, text).matches);
+	return tokens.every(token => token.match(text).matches);
 }
 
 /**
@@ -360,7 +373,14 @@ export class AgentsHubComponent implements Component {
 		const scoped =
 			entry.kind === "source" ? this.#allAgents.filter(agent => agent.source === entry.source) : this.#allAgents;
 		const query = this.#search.getValue();
-		const filtered = query ? scoped.filter(agent => matchAgent(agent, query)) : scoped;
+		let filtered = scoped;
+		if (query) {
+			const tokens = query
+				.trim()
+				.split(/\s+/)
+				.map(token => new FuzzyQuery(token));
+			filtered = scoped.filter(agent => matchAgent(agent, tokens));
+		}
 		this.#rows = [...filtered.map(agent => ({ kind: "agent", agent }) as ListRow), { kind: "new" }];
 	}
 

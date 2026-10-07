@@ -47,7 +47,7 @@ pub fn filter(ctx: &MinimizerCtx<'_>, input: &str, exit_code: i32) -> MinimizerO
 			if primitives::command_has_ordered_tokens(ctx.command, "mr", "view")
 				|| primitives::command_has_ordered_tokens(ctx.command, "issue", "view") =>
 		{
-			filter_mr_issue_view(&cleaned, exit_code)
+			super::gh::markdown_view(&cleaned, exit_code)
 		},
 		_ => primitives::head_tail_dedup(&cleaned),
 	};
@@ -283,69 +283,6 @@ fn filter_release_view(input: &str) -> String {
 
 	// Collapse multiple blank lines
 	MULTI_BLANK_RE.replace_all(&filtered, "\n\n").to_string()
-}
-
-// ── MR/issue view filter ─────────────────────────────────────────────
-
-/// On error (non-zero exit), skip markdown filtering to preserve error context.
-/// On success, apply markdown body noise filtering.
-fn filter_mr_issue_view(input: &str, exit_code: i32) -> String {
-	if exit_code != 0 {
-		return primitives::head_tail_dedup(input);
-	}
-	filter_markdown_body_view(input)
-}
-
-// ── Markdown body filter (mr view / issue view) ──────────────────────
-
-/// Filter markdown body noise: HTML comments, badges, image-only lines,
-/// horizontal rules. Collapse multiple blank lines. Apply `head_tail_dedup`.
-fn filter_markdown_body_view(input: &str) -> String {
-	let mut out = String::new();
-	let mut in_html_comment = false;
-	let mut previous_blank = false;
-	let mut comment_lines = 0usize;
-
-	for line in input.lines() {
-		let trimmed = line.trim();
-		if in_html_comment {
-			if trimmed.contains("-->") {
-				in_html_comment = false;
-				comment_lines = 0;
-			} else {
-				comment_lines += 1;
-				// Safety: cap unclosed comment consumption at 50 lines to
-				// prevent data loss from malformed/truncated markdown.
-				if comment_lines > 50 {
-					in_html_comment = false;
-					comment_lines = 0;
-				}
-			}
-			continue;
-		}
-		if trimmed.starts_with("<!--") {
-			if !trimmed.contains("-->") {
-				in_html_comment = true;
-				comment_lines = 0;
-			}
-			continue;
-		}
-		if primitives::is_markdown_badge_or_image(trimmed) || primitives::is_horizontal_rule(trimmed)
-		{
-			continue;
-		}
-		if trimmed.is_empty() {
-			if !previous_blank {
-				out.push('\n');
-			}
-			previous_blank = true;
-			continue;
-		}
-		previous_blank = false;
-		out.push_str(line.trim_end());
-		out.push('\n');
-	}
-	primitives::head_tail_dedup(&out)
 }
 
 #[cfg(test)]

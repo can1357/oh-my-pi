@@ -1,13 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import { type } from "@oh-my-pi/omptype";
-import {
-	convertCodexResponsesMessages,
-	streamOpenAICodexResponses,
-} from "@oh-my-pi/pi-ai/providers/openai-codex-responses";
 import { type OpenAIResponsesOptions, streamOpenAIResponses } from "@oh-my-pi/pi-ai/providers/openai-responses";
 import { buildResponsesInput } from "@oh-my-pi/pi-ai/providers/openai-shared";
 import type { AssistantMessage, Context, Model, ModelSpec, ProviderSessionState, Tool } from "@oh-my-pi/pi-ai/types";
-import { createOpenAIResponsesHistoryPayload } from "@oh-my-pi/pi-ai/utils";
+import {
+	createOpenAIResponsesHistoryPayload,
+	sanitizeOpenAIResponsesHistoryItemsForReplay,
+} from "@oh-my-pi/pi-ai/utils";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { type GeneratedProvider, getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
@@ -27,14 +26,6 @@ function createAbortedSignal(): AbortSignal {
 	const controller = new AbortController();
 	controller.abort();
 	return controller.signal;
-}
-
-function createCodexToken(accountId: string): string {
-	const header = Buffer.from(JSON.stringify({ alg: "none", typ: "JWT" })).toString("base64url");
-	const payload = Buffer.from(
-		JSON.stringify({ "https://api.openai.com/auth": { chatgpt_account_id: accountId } }),
-	).toString("base64url");
-	return `${header}.${payload}.signature`;
 }
 
 function getOpenAIReasoningModel(provider: GeneratedProvider, id: string): Model<"openai-responses"> {
@@ -102,14 +93,6 @@ const assistantSnapshotContext: Context = {
 	messages: [
 		{ role: "user", content: "generic history that should be replaced", timestamp: Date.now() },
 		makeAssistantMessage(snapshotHistoryItems),
-		{ role: "user", content: "follow-up user", timestamp: Date.now() },
-	],
-};
-
-const codexAssistantSnapshotContext: Context = {
-	messages: [
-		{ role: "user", content: "generic history that should be replaced", timestamp: Date.now() },
-		makeAssistantMessage(snapshotHistoryItems, false, "openai-codex", "gpt-5.5"),
 		{ role: "user", content: "follow-up user", timestamp: Date.now() },
 	],
 };
@@ -278,16 +261,6 @@ function captureResponsesPayload(
 	return promise;
 }
 
-function captureCodexPayload(model: Model<"openai-codex-responses">, context: Context): Promise<unknown> {
-	const { promise, resolve } = Promise.withResolvers<unknown>();
-	streamOpenAICodexResponses(model, context, {
-		apiKey: createCodexToken("acc_test"),
-		signal: createAbortedSignal(),
-		onPayload: payload => resolve(payload),
-	});
-	return promise;
-}
-
 const incrementalItems1 = [
 	{
 		type: "message",
@@ -432,63 +405,24 @@ function containsUserInputText(input: unknown[] | undefined, text: string): bool
 }
 
 describe("OpenAI responses history payload", () => {
-	it("appends user-message replacement history without wiping prefix or tail", () => {
-		const middleItems = [
-			{ type: "function_call", call_id: "call_middle", name: "middle_tool", arguments: "{}" },
-			{ type: "function_call_output", call_id: "call_middle", output: "middle result" },
+	it("clamps stored original image hints when replay support is unknown", () => {
+		const items = [
+			{ type: "input_image", detail: "original", image_url: "data:image/png;base64,ZmFrZQ==" },
+			{
+				type: "message",
+				role: "user",
+				content: [{ type: "input_image", detail: "original", image_url: "data:image/png;base64,ZmFrZQ==" }],
+			},
 		];
-		const makeContext = (provider: "openai" | "openai-codex"): Context => ({
-			messages: [
-				{ role: "user", content: "prefix user", timestamp: Date.now() },
-				{
-					role: "user",
-					content: "range archive summary",
-					providerPayload: createOpenAIResponsesHistoryPayload(provider, middleItems),
-					timestamp: Date.now(),
-				},
-				{ role: "user", content: "tail user", timestamp: Date.now() },
-				{ role: "user", content: "post user", timestamp: Date.now() },
-			],
-		});
-		const assertWireOrder = (items: unknown[]) => {
-			const wire = JSON.stringify(items);
-			const prefixIndex = wire.indexOf("prefix user");
-			const middleIndex = wire.indexOf("middle_tool");
-			const tailIndex = wire.indexOf("tail user");
-			const postIndex = wire.indexOf("post user");
-			expect(prefixIndex).toBeGreaterThanOrEqual(0);
-			expect(middleIndex).toBeGreaterThan(prefixIndex);
-			expect(tailIndex).toBeGreaterThan(middleIndex);
-			expect(postIndex).toBeGreaterThan(tailIndex);
-
-			const callIds = new Set<string>();
-			const outputIds = new Set<string>();
-			for (const item of items) {
-				if (typeof item !== "object" || item === null) continue;
-				const record = item as Record<string, unknown>;
-				if (record.type === "function_call" && typeof record.call_id === "string") {
-					callIds.add(record.call_id);
-				}
-				if (record.type === "function_call_output" && typeof record.call_id === "string") {
-					outputIds.add(record.call_id);
-				}
-			}
-			expect(callIds).toEqual(new Set(["call_middle"]));
-			expect(outputIds).toEqual(new Set(["call_middle"]));
-		};
-
-		const openaiItems = buildResponsesInput({
-			model: getOpenAIReasoningModel("openai", "gpt-5-mini"),
-			context: makeContext("openai"),
-			strictResponsesPairing: true,
-			supportsImageDetailOriginal: true,
-			nativeHistory: { replay: true, filterReasoning: false },
-		});
-		assertWireOrder(openaiItems);
-
-		const codexModel = getBundledModel<"openai-codex-responses">("openai-codex", "gpt-5.5");
-		const codexItems = convertCodexResponsesMessages(codexModel, makeContext("openai-codex"));
-		assertWireOrder(codexItems);
+		expect(collectResponsesInputImageDetails(sanitizeOpenAIResponsesHistoryItemsForReplay(items))).toEqual([
+			"auto",
+			"auto",
+		]);
+		expect(
+			collectResponsesInputImageDetails(
+				sanitizeOpenAIResponsesHistoryItemsForReplay(items, { supportsImageDetailOriginal: true }),
+			),
+		).toEqual(["original", "original"]);
 	});
 
 	it("adapts reconstructed apply_patch replay for xai-oauth while preserving OpenAI custom replay", () => {
@@ -668,56 +602,6 @@ describe("OpenAI responses history payload", () => {
 		expect(collectResponsesInputImageDetails(openaiInput)).toEqual(["original"]);
 	});
 
-	it("preserves encrypted_function_args on replayed Codex function calls", () => {
-		// codex-rs #35845: an empty `encrypted_function_args` array marks plaintext
-		// collaboration arguments; the marker must survive replay verbatim or the
-		// backend would treat the replayed arguments as encrypted.
-		const codexModel = getBundledModel<"openai-codex-responses">("openai-codex", "gpt-5.5");
-		const nativeItems = [
-			{
-				type: "function_call",
-				id: "fc_plaintext_1",
-				call_id: "call_plaintext_collab",
-				name: "send_message",
-				namespace: "collaboration",
-				arguments: JSON.stringify({ message: "hello", task_name: "worker" }),
-				encrypted_function_args: [],
-				status: "completed",
-			},
-			{
-				type: "function_call_output",
-				call_id: "call_plaintext_collab",
-				output: "delivered",
-			},
-		];
-		const context: Context = {
-			messages: [
-				{
-					role: "assistant",
-					content: [{ type: "text", text: "fallback should not be replayed" }],
-					api: "openai-codex-responses",
-					provider: "openai-codex",
-					model: codexModel.id,
-					usage: issue5002ZeroUsage,
-					stopReason: "stop",
-					providerPayload: createOpenAIResponsesHistoryPayload("openai-codex", nativeItems),
-					timestamp: Date.now(),
-				},
-				{ role: "user", content: "continue", timestamp: Date.now() },
-			],
-		};
-
-		const input = convertCodexResponsesMessages(codexModel, context);
-		expect(findResponsesInputItemByCallId(input, "function_call", "call_plaintext_collab")).toEqual({
-			type: "function_call",
-			call_id: "call_plaintext_collab",
-			name: "send_message",
-			namespace: "collaboration",
-			arguments: JSON.stringify({ message: "hello", task_name: "worker" }),
-			encrypted_function_args: [],
-		});
-	});
-
 	it("uses canonical instructions field for endpoints without developer-role support", async () => {
 		const baseModel = getOpenAIReasoningModel("openai", "gpt-5-mini");
 		const model = buildModel({
@@ -753,63 +637,6 @@ describe("OpenAI responses history payload", () => {
 		const model = getOpenAIReasoningModel("openai", "gpt-5-mini");
 		const payload = (await captureResponsesPayload(model, preservedHistoryContext)) as { input?: unknown[] };
 		expect(payload.input).toEqual(preservedHistoryItems);
-	});
-
-	it("normalizes result-bearing native images for full Codex replay", () => {
-		const model = getBundledModel<"openai-codex-responses">("openai-codex", "gpt-5.5");
-		const context: Context = {
-			messages: [
-				{ role: "user", content: "first user", timestamp: Date.now() },
-				makeAssistantMessage(
-					[
-						{
-							id: "ig_failed",
-							type: "image_generation_call",
-							status: "failed",
-						},
-						{
-							id: "ig_generating",
-							type: "image_generation_call",
-							status: "generating",
-						},
-						{
-							id: "ig_stale_result",
-							type: "image_generation_call",
-							status: "generating",
-							result: "stale-result-image",
-						},
-						{
-							id: "ig_completed",
-							type: "image_generation_call",
-							status: "completed",
-							result: "completed-image",
-						},
-					],
-					false,
-					"openai-codex",
-					model.id,
-				),
-				{ role: "user", content: "follow-up user", timestamp: Date.now() },
-			],
-		};
-		const imageGenerationItems = convertCodexResponsesMessages(model, context).filter(
-			item => item.type === "image_generation_call",
-		);
-
-		expect(imageGenerationItems).toEqual([
-			{
-				id: "ig_stale_result",
-				type: "image_generation_call",
-				status: "completed",
-				result: "stale-result-image",
-			},
-			{
-				id: "ig_completed",
-				type: "image_generation_call",
-				status: "completed",
-				result: "completed-image",
-			},
-		]);
 	});
 
 	it("falls back to rebuilt history on resumed same-provider sessions with fresh session state", async () => {
@@ -1203,213 +1030,6 @@ describe("OpenAI responses history payload", () => {
 
 			expect(warm.input?.filter(item => item.type === "reasoning")).toEqual([reasoningItem]);
 		});
-	});
-
-	it("prefers assistant native history snapshots for openai-codex-responses", async () => {
-		const model = getBundledModel("openai-codex", "gpt-5.5") as Model<"openai-codex-responses">;
-		const payload = (await captureCodexPayload(model, codexAssistantSnapshotContext)) as { input?: unknown[] };
-		expect(payload.input).toEqual([
-			...snapshotHistoryItems,
-			{ role: "user", content: [{ type: "input_text", text: "follow-up user" }] },
-		]);
-	});
-
-	it("does not replay an empty Codex final_answer message or its trailing reasoning item", async () => {
-		// gpt-5.6 shape captured from a live omp session: the answer landed in the
-		// `commentary` phase, so the turn closed with an empty `final_answer`.
-		// Replaying that item seeds the next turn with an empty slot the model
-		// fills with drift ("\n\n", stray words, non-Latin residue).
-		const commentaryThenEmptyFinal = [
-			{ type: "reasoning", encrypted_content: "enc_commentary", summary: [{ type: "summary_text", text: "plan" }] },
-			{
-				type: "message",
-				role: "assistant",
-				phase: "commentary",
-				content: [{ type: "output_text", text: "Awaiting the wake for job 7." }],
-			},
-			{ type: "reasoning", encrypted_content: "enc_empty_final", summary: [] },
-			{ type: "message", role: "assistant", phase: "final_answer", content: [{ type: "output_text", text: "" }] },
-		];
-		const context: Context = {
-			messages: [
-				{ role: "user", content: "start the jobs", timestamp: Date.now() },
-				makeAssistantMessage(commentaryThenEmptyFinal, true, "openai-codex", "gpt-5.5"),
-				{ role: "user", content: "job 7 completed", timestamp: Date.now() },
-			],
-		};
-		const model = getBundledModel("openai-codex", "gpt-5.5") as Model<"openai-codex-responses">;
-		const payload = (await captureCodexPayload(model, context)) as { input?: unknown[] };
-		expect(payload.input).toEqual([
-			{ role: "user", content: [{ type: "input_text", text: "start the jobs" }] },
-			{ type: "reasoning", encrypted_content: "enc_commentary", summary: [{ type: "summary_text", text: "plan" }] },
-			{
-				type: "message",
-				role: "assistant",
-				phase: "commentary",
-				content: [{ type: "output_text", text: "Awaiting the wake for job 7." }],
-			},
-			{ role: "user", content: [{ type: "input_text", text: "job 7 completed" }] },
-		]);
-	});
-
-	it("keeps a whitespace-only Codex final_answer drift out of replay while the commentary survives", async () => {
-		// Second stage of the same drift: the empty slot has already become "\n\n".
-		const items = [
-			{ type: "reasoning", encrypted_content: "enc_c", summary: [] },
-			{
-				type: "message",
-				role: "assistant",
-				phase: "commentary",
-				content: [{ type: "output_text", text: "Awaiting job 19." }],
-			},
-			{
-				type: "message",
-				role: "assistant",
-				phase: "final_answer",
-				content: [{ type: "output_text", text: "\n\n" }],
-			},
-		];
-		const context: Context = {
-			messages: [
-				{ role: "user", content: "go", timestamp: Date.now() },
-				makeAssistantMessage(items, true, "openai-codex", "gpt-5.5"),
-				{ role: "user", content: "next", timestamp: Date.now() },
-			],
-		};
-		const model = getBundledModel("openai-codex", "gpt-5.5") as Model<"openai-codex-responses">;
-		const payload = (await captureCodexPayload(model, context)) as { input?: unknown[] };
-		expect(payload.input).toEqual([
-			{ role: "user", content: [{ type: "input_text", text: "go" }] },
-			{ type: "reasoning", encrypted_content: "enc_c", summary: [] },
-			{
-				type: "message",
-				role: "assistant",
-				phase: "commentary",
-				content: [{ type: "output_text", text: "Awaiting job 19." }],
-			},
-			{ role: "user", content: [{ type: "input_text", text: "next" }] },
-		]);
-	});
-
-	it("keeps reasoning for a tool call after removing an earlier empty assistant message", async () => {
-		const emptyMessageThenToolCall = [
-			{ type: "reasoning", encrypted_content: "enc_tool", summary: [] },
-			{
-				type: "message",
-				role: "assistant",
-				phase: "commentary",
-				content: [{ type: "output_text", text: "" }],
-			},
-			{ type: "function_call", call_id: "call_read", name: "read", arguments: '{"path":"README.md"}' },
-		];
-		const context: Context = {
-			messages: [
-				{ role: "user", content: "read the file", timestamp: Date.now() },
-				makeAssistantMessage(emptyMessageThenToolCall, true, "openai-codex", "gpt-5.5"),
-				{ role: "user", content: "continue", timestamp: Date.now() },
-			],
-		};
-		const model = getBundledModel("openai-codex", "gpt-5.5") as Model<"openai-codex-responses">;
-		const payload = (await captureCodexPayload(model, context)) as { input?: unknown[] };
-		const input = payload.input ?? [];
-		const reasoningIndex = input.findIndex(
-			item => isIssue5002Record(item) && item.type === "reasoning" && item.encrypted_content === "enc_tool",
-		);
-		const callIndex = input.findIndex(
-			item => isIssue5002Record(item) && item.type === "function_call" && item.call_id === "call_read",
-		);
-		expect(reasoningIndex).toBeGreaterThanOrEqual(0);
-		expect(callIndex).toBe(reasoningIndex + 1);
-		expect(input[callIndex]).toEqual({
-			type: "function_call",
-			call_id: "call_read",
-			name: "read",
-			arguments: '{"path":"README.md"}',
-		});
-		expect(input).not.toContainEqual(expect.objectContaining({ role: "assistant", phase: "commentary" }));
-	});
-
-	it("drops reasoning orphaned by an empty message before a new reasoning group", async () => {
-		const items = [
-			{ type: "reasoning", encrypted_content: "enc_empty_commentary", summary: [] },
-			{
-				type: "message",
-				role: "assistant",
-				phase: "commentary",
-				content: [{ type: "output_text", text: "" }],
-			},
-			{ type: "reasoning", encrypted_content: "enc_final", summary: [] },
-			{
-				type: "message",
-				role: "assistant",
-				phase: "final_answer",
-				content: [{ type: "output_text", text: "Recovered answer." }],
-			},
-		];
-		const context: Context = {
-			messages: [
-				{ role: "user", content: "go", timestamp: Date.now() },
-				makeAssistantMessage(items, true, "openai-codex", "gpt-5.5"),
-				{ role: "user", content: "next", timestamp: Date.now() },
-			],
-		};
-		const model = getBundledModel("openai-codex", "gpt-5.5") as Model<"openai-codex-responses">;
-		const payload = (await captureCodexPayload(model, context)) as { input?: unknown[] };
-		expect(payload.input).toEqual([
-			{ role: "user", content: [{ type: "input_text", text: "go" }] },
-			{ type: "reasoning", encrypted_content: "enc_final", summary: [] },
-			{
-				type: "message",
-				role: "assistant",
-				phase: "final_answer",
-				content: [{ type: "output_text", text: "Recovered answer." }],
-			},
-			{ role: "user", content: [{ type: "input_text", text: "next" }] },
-		]);
-	});
-
-	it("isolates full-snapshot reasoning groups and keeps every summary for surviving output", async () => {
-		const snapshot = [
-			{ role: "user", content: [{ type: "input_text", text: "first snapshot user" }] },
-			{ type: "reasoning", encrypted_content: "enc_before_boundary", summary: [] },
-			{ role: "user", content: [{ type: "input_text", text: "second snapshot user" }] },
-			{ type: "reasoning", encrypted_content: "enc_summary_1", summary: [] },
-			{ type: "reasoning", encrypted_content: "enc_summary_2", summary: [] },
-			{
-				type: "message",
-				role: "assistant",
-				phase: "commentary",
-				content: [{ type: "output_text", text: "Snapshot answer." }],
-			},
-			{ type: "reasoning", encrypted_content: "enc_empty_final", summary: [] },
-			{
-				type: "message",
-				role: "assistant",
-				phase: "final_answer",
-				content: [{ type: "output_text", text: "" }],
-			},
-		];
-		const context: Context = {
-			messages: [
-				makeAssistantMessage(snapshot, false, "openai-codex", "gpt-5.5"),
-				{ role: "user", content: "follow up", timestamp: Date.now() },
-			],
-		};
-		const model = getBundledModel("openai-codex", "gpt-5.5") as Model<"openai-codex-responses">;
-		const payload = (await captureCodexPayload(model, context)) as { input?: unknown[] };
-		expect(payload.input).toEqual([
-			{ role: "user", content: [{ type: "input_text", text: "first snapshot user" }] },
-			{ role: "user", content: [{ type: "input_text", text: "second snapshot user" }] },
-			{ type: "reasoning", encrypted_content: "enc_summary_1", summary: [] },
-			{ type: "reasoning", encrypted_content: "enc_summary_2", summary: [] },
-			{
-				type: "message",
-				role: "assistant",
-				phase: "commentary",
-				content: [{ type: "output_text", text: "Snapshot answer." }],
-			},
-			{ role: "user", content: [{ type: "input_text", text: "follow up" }] },
-		]);
 	});
 
 	it("ignores incompatible native history snapshots across providers", async () => {
@@ -2077,58 +1697,6 @@ describe("OpenAI responses history payload", () => {
 		});
 	});
 
-	it("rebuilds failed tool calls before replaying tool results for openai-codex-responses", async () => {
-		const callId = "call_failed_codex_1";
-		const context: Context = {
-			messages: [
-				{ role: "user", content: "Start", timestamp: Date.now() },
-				{
-					role: "assistant",
-					content: [{ type: "toolCall", id: callId, name: "read", arguments: { path: "README.md" } }],
-					api: "openai-codex-responses",
-					provider: "openai-codex",
-					model: "gpt-5.5",
-					usage: {
-						input: 0,
-						output: 0,
-						cacheRead: 0,
-						cacheWrite: 0,
-						totalTokens: 0,
-						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-					},
-					stopReason: "error",
-					errorMessage: "Tool arguments were invalid.",
-					timestamp: Date.now(),
-				},
-				{
-					role: "toolResult",
-					toolCallId: callId,
-					toolName: "read",
-					content: [{ type: "text", text: "Tool execution was aborted." }],
-					isError: true,
-					timestamp: Date.now(),
-				},
-				{ role: "user", content: "Resume", timestamp: Date.now() },
-			],
-		};
-		const model = getBundledModel<"openai-codex-responses">("openai-codex", "gpt-5.5");
-		const payload = (await captureCodexPayload(model, context)) as { input?: unknown[] };
-		const functionCallItem = findResponsesInputItem(payload.input, "function_call");
-		const functionCallOutputItem = findResponsesInputItem(payload.input, "function_call_output");
-
-		expect(functionCallItem).toMatchObject({
-			type: "function_call",
-			call_id: callId,
-			name: "read",
-			arguments: '{"path":"README.md"}',
-		});
-		expect(functionCallOutputItem).toMatchObject({
-			type: "function_call_output",
-			call_id: callId,
-			output: "Tool execution was aborted.",
-		});
-	});
-
 	it("keeps an invocation-text tool name from another API out of the Responses request", async () => {
 		// Shape of a GLM-5.3 (openai-completions) turn whose gateway returned the
 		// whole tool invocation as the name; OpenAI rejected the replay with
@@ -2293,46 +1861,6 @@ describe("OpenAI responses history payload", () => {
 		expect(findResponsesInputItemByCallId(input, "function_call_output", "call_shared")?.output).toBe(
 			"file contents",
 		);
-	});
-
-	it("drops malformed names from Codex user and developer providerPayload replay", () => {
-		const malformedName = "bad invocation text";
-		const items = [
-			{ type: "reasoning", id: "rs_user", summary: [], encrypted_content: "enc_user" },
-			{ type: "function_call", call_id: "call_bad", name: malformedName, arguments: "{}" },
-			{ type: "function_call_output", call_id: "call_bad", output: "Tool not found" },
-			{ type: "function_call", call_id: "call_ok", name: "read", arguments: "{}" },
-			{ type: "function_call_output", call_id: "call_ok", output: "ok" },
-		];
-		const codexModel = getBundledModel<"openai-codex-responses">("openai-codex", "gpt-5.5");
-		if (!codexModel) throw new Error("expected bundled Codex model");
-		for (const role of ["user", "developer"] as const) {
-			const replay = convertCodexResponsesMessages(codexModel, {
-				messages: [
-					{
-						role,
-						content: "continue",
-						timestamp: 1,
-						providerPayload: createOpenAIResponsesHistoryPayload("openai-codex", items, false),
-					},
-				],
-			});
-			const wire = JSON.stringify(replay);
-			expect(wire).not.toContain(malformedName);
-			expect(wire).not.toContain("Tool not found");
-			expect(replay).toContainEqual(
-				expect.objectContaining({ type: "function_call", call_id: "call_ok", name: "read" }),
-			);
-			expect(replay).toContainEqual(
-				expect.objectContaining({ type: "function_call_output", call_id: "call_ok", output: "ok" }),
-			);
-			expect(
-				replay.some(
-					item =>
-						item.type === "reasoning" && "encrypted_content" in item && item.encrypted_content === "enc_user",
-				),
-			).toBe(true);
-		}
 	});
 
 	it("converts orphan function_call_output replayed from providerPayload into an assistant note (issue #1351)", async () => {

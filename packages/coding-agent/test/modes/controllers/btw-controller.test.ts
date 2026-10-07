@@ -4,6 +4,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { BtwHistoryPanel } from "@oh-my-pi/pi-tui/overlays/btw-history-panel";
+import { KeybindingsManager } from "@oh-my-pi/pi-tui/app-keybindings";
 import { BtwHistoryStore } from "@oh-my-pi/pi-coding-agent/session/btw-history";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { BtwPanelComponent } from "@oh-my-pi/pi-tui/overlays/btw-panel";
@@ -68,6 +69,7 @@ function makeCtx(session: InteractiveModeContext["session"], btwContainer = new 
 			setFocus: vi.fn(),
 			terminal: { rows: 30 },
 		} as unknown as TUI,
+		keybindings: KeybindingsManager.inMemory(),
 		btwContainer,
 		session,
 		sessionManager: {

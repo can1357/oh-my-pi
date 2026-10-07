@@ -42,18 +42,12 @@ export async function generateOpenAIImage(
 				response_format: "b64_json",
 				...(size ? { size } : {}),
 			};
-	const references = (request.inputImages ?? []).map(image => ({ type: "image_url", url: toDataUrl(image) }));
-	if (isXAI && references.length > XAI_MAX_EDIT_IMAGES) {
+	const inputImages = request.inputImages ?? [];
+	if (isXAI && inputImages.length > XAI_MAX_EDIT_IMAGES) {
 		throw new AIError.ValidationError(
-			`${model.provider} image edits accept up to ${XAI_MAX_EDIT_IMAGES} reference images; got ${references.length}`,
+			`${model.provider} image edits accept up to ${XAI_MAX_EDIT_IMAGES} reference images; got ${inputImages.length}`,
 		);
 	}
-	const [firstReference, ...remainingReferences] = references;
-	const body = isXAI
-		? remainingReferences.length === 0
-			? { ...generationBody, image: firstReference }
-			: { ...generationBody, images: references }
-		: { ...generationBody, input_references: references };
 	const baseUrl = imageBaseUrl(model);
 	// xAI resolves the endpoint per bearer: XAI_BASE_URL never receives an xai-oauth OAuth access token.
 	const endpoint = (path: string) =>
@@ -61,7 +55,7 @@ export async function generateOpenAIImage(
 			? (bearer: string) => `${resolveXaiBaseUrl(model.provider, baseUrl, bearer) ?? baseUrl}${path}`
 			: `${baseUrl}${path}`;
 	let response: unknown;
-	if (references.length === 0) {
+	if (inputImages.length === 0) {
 		response = await postJson({
 			model,
 			url: endpoint("/images/generations"),
@@ -71,6 +65,17 @@ export async function generateOpenAIImage(
 			signal: options.signal,
 		});
 	} else {
+		// Data URLs copy every multi-MB reference, so only the JSON routes build
+		// them; OpenAI's multipart edit sends raw bytes and needs them only for
+		// the 404 fallback.
+		const buildEditBody = (): Record<string, unknown> => {
+			const references = inputImages.map(image => ({ type: "image_url", url: toDataUrl(image) }));
+			if (!isXAI) return { ...generationBody, input_references: references };
+			return references.length === 1
+				? { ...generationBody, image: references[0] }
+				: { ...generationBody, images: references };
+		};
+		let editBody: Record<string, unknown> | undefined;
 		try {
 			if (model.provider === "openai") {
 				const form = new FormData();
@@ -79,7 +84,7 @@ export async function generateOpenAIImage(
 				form.set("n", String(count));
 				form.set("response_format", "b64_json");
 				if (size) form.set("size", size);
-				for (const image of request.inputImages ?? []) {
+				for (const image of inputImages) {
 					form.append("image", new File([Buffer.from(image.data, "base64")], "image", { type: image.mimeType }));
 				}
 				response = await postMultipart({
@@ -91,10 +96,11 @@ export async function generateOpenAIImage(
 					signal: options.signal,
 				});
 			} else {
+				editBody = buildEditBody();
 				response = await postJson({
 					model,
 					url: endpoint("/images/edits"),
-					body,
+					body: editBody,
 					apiKey: options.apiKey,
 					fetch: fetchImpl,
 					signal: options.signal,
@@ -105,7 +111,7 @@ export async function generateOpenAIImage(
 			response = await postJson({
 				model,
 				url: endpoint("/images/generations"),
-				body,
+				body: editBody ?? buildEditBody(),
 				apiKey: options.apiKey,
 				fetch: fetchImpl,
 				signal: options.signal,
