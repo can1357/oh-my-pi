@@ -30,7 +30,6 @@ pub mod block;
 #[cfg(not(target_os = "android"))]
 pub mod clipboard;
 pub mod crash_handler;
-#[cfg(not(target_os = "android"))]
 pub mod desktop;
 pub mod devicecheck;
 pub mod diff;

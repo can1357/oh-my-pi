@@ -68,25 +68,12 @@ const repoRoot = path.join(import.meta.dir, "../../..");
 const rustDir = path.join(repoRoot, "crates/pi-natives");
 const nativeDir = path.join(import.meta.dir, "../native");
 const packageJsonPath = path.join(import.meta.dir, "../package.json");
-// napi-rs omits modules guarded out for the target (currently desktop and
-// clipboard on Android), but the package's public entrypoint remains
-// platform-neutral. Keep the declarations needed by those optional modules in
-// the generated surface so `gen-enums.ts` preserves their named exports.
-const PLATFORM_NEUTRAL_BINDING_NAMES: Record<string, true> = {
-	AxNode: true,
-	AxQuery: true,
-	AxSnapshot: true,
-	AxSnapshotOptions: true,
-	CaptureCaps: true,
+// napi-rs omits modules guarded out for the target (clipboard on Android), but
+// the package's public entrypoint remains platform-neutral. Preserve clipboard
+// declarations and their referenced-type closure so `gen-enums.ts` retains
+// the corresponding named exports.
+const CLIPBOARD_BINDING_NAMES: Record<string, true> = {
 	ClipboardImage: true,
-	DesktopCapabilities: true,
-	DesktopCapture: true,
-	DesktopDisplay: true,
-	DesktopPoint: true,
-	DesktopSession: true,
-	DesktopSessionOptions: true,
-	DesktopWindow: true,
-	PointerOptions: true,
 	copyToClipboard: true,
 	readImageFromClipboard: true,
 	readTextFromClipboard: true,
@@ -111,12 +98,12 @@ function declarationBlocks(dts: string): Map<string, string> {
 	return blocks;
 }
 
-function preservePlatformNeutralDeclarations(generated: string, existing: string): string {
+function preserveClipboardDeclarations(generated: string, existing: string): string {
 	const generatedBlocks = declarationBlocks(generated);
 	const existingBlocks = declarationBlocks(existing);
-	// Keep each optional entry's full referenced-type closure, not only its root signature.
+	// Keep each clipboard entry's full referenced-type closure, not only its root signature.
 	const preservedNames = new Set(
-		Object.keys(PLATFORM_NEUTRAL_BINDING_NAMES).filter(name => existingBlocks.has(name) && !generatedBlocks.has(name)),
+		Object.keys(CLIPBOARD_BINDING_NAMES).filter(name => existingBlocks.has(name) && !generatedBlocks.has(name)),
 	);
 	const pending = [...preservedNames];
 	while (pending.length > 0) {
@@ -133,6 +120,7 @@ function preservePlatformNeutralDeclarations(generated: string, existing: string
 	if (preserved.length === 0) return generated;
 	return `${generated.trimEnd()}\n\n${preserved.join("\n\n")}\n`;
 }
+
 
 const localAddon = resolveLocalHostAddon({
 	platform: process.platform,
@@ -246,7 +234,7 @@ async function installGeneratedBindings(outputDir: string): Promise<void> {
 		const existing = await fs
 			.readFile(destPath, "utf8")
 			.catch(err => ((err as NodeJS.ErrnoException).code === "ENOENT" ? "" : Promise.reject(err)));
-		await fs.writeFile(destPath, preservePlatformNeutralDeclarations(generated, existing));
+		await fs.writeFile(destPath, preserveClipboardDeclarations(generated, existing));
 	} catch (err) {
 		const message = err instanceof Error ? err.message : String(err);
 		throw new Error(`Failed to install generated index.d.ts: ${message}`);

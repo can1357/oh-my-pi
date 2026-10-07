@@ -31,7 +31,29 @@ async function expectRejectionCode(operation: () => Promise<unknown>, acceptedCo
 	expect(acceptedCodes).toContain(match[1]);
 }
 
-describe.skipIf(process.platform === "android")("DesktopSession", () => {
+describe("DesktopSession", () => {
+	it.skipIf(process.platform !== "android")("reports an unavailable backend on Android", async () => {
+		const session = createDesktopSession({ display: "all" });
+		try {
+			expect(session.capabilities).toMatchObject({
+				backend: "unavailable",
+				capture: false,
+				input: false,
+				ax: false,
+				backgroundWindowInput: false,
+				takeover: false,
+				capturePermission: "unavailable",
+				inputPermission: "unavailable",
+				axPermission: "unavailable",
+			});
+			await expect(session.capture("desktop")).rejects.toThrow(
+				"CaptureFailed: desktop backend unavailable on this platform",
+			);
+		} finally {
+			await session.close();
+		}
+	});
+
 	it("constructs through the factory and reports the complete capability shape", async () => {
 		const session = createDesktopSession({ display: "all" });
 		try {
@@ -68,7 +90,7 @@ describe.skipIf(process.platform === "android")("DesktopSession", () => {
 		}
 	});
 
-	it("rejects coordinate input before capture", async () => {
+	it.skipIf(process.platform === "android")("rejects coordinate input before capture", async () => {
 		const session = new DesktopSession({ display: "all" });
 		try {
 			await expectRejectionCode(

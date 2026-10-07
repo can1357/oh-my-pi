@@ -34,17 +34,24 @@ impl AxHandle {
 	/// Handles without one all compare equal, so they never enter the ref
 	/// index.
 	const fn identified(&self) -> bool {
-		match self {
-			#[cfg(target_os = "macos")]
-			Self::Mac(_) => true,
-			#[cfg(target_os = "windows")]
-			Self::Uia(_, runtime_id) => runtime_id.is_some(),
-			#[cfg(target_os = "linux")]
-			Self::AtSpi(_) => true,
-			#[cfg(test)]
-			Self::Test(_) => true,
-			#[cfg(test)]
-			Self::TestUnidentified(_) => false,
+		#[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux", test)))]
+		{
+			match *self {}
+		}
+		#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux", test))]
+		{
+			match self {
+				#[cfg(target_os = "macos")]
+				Self::Mac(_) => true,
+				#[cfg(target_os = "windows")]
+				Self::Uia(_, runtime_id) => runtime_id.is_some(),
+				#[cfg(target_os = "linux")]
+				Self::AtSpi(_) => true,
+				#[cfg(test)]
+				Self::Test(_) => true,
+				#[cfg(test)]
+				Self::TestUnidentified(_) => false,
+			}
 		}
 	}
 }
@@ -53,20 +60,27 @@ impl AxHandle {
 /// reads produced them: `CFEqual` on macOS, the `RuntimeId` on Windows, the bus
 /// name and object path on Linux.
 impl PartialEq for AxHandle {
-	fn eq(&self, other: &Self) -> bool {
-		match (self, other) {
-			#[cfg(target_os = "macos")]
-			(Self::Mac(a), Self::Mac(b)) => **a == **b,
-			#[cfg(target_os = "windows")]
-			(Self::Uia(_, a), Self::Uia(_, b)) => a == b,
-			#[cfg(target_os = "linux")]
-			(Self::AtSpi(a), Self::AtSpi(b)) => a == b,
-			#[cfg(test)]
-			(Self::Test(a), Self::Test(b)) => a == b,
-			#[cfg(test)]
-			(Self::TestUnidentified(_), Self::TestUnidentified(_)) => true,
-			#[cfg(test)]
-			_ => false,
+	fn eq(&self, _other: &Self) -> bool {
+		#[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux", test)))]
+		{
+			match *self {}
+		}
+		#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux", test))]
+		{
+			match (self, _other) {
+				#[cfg(target_os = "macos")]
+				(Self::Mac(a), Self::Mac(b)) => **a == **b,
+				#[cfg(target_os = "windows")]
+				(Self::Uia(_, a), Self::Uia(_, b)) => a == b,
+				#[cfg(target_os = "linux")]
+				(Self::AtSpi(a), Self::AtSpi(b)) => a == b,
+				#[cfg(test)]
+				(Self::Test(a), Self::Test(b)) => a == b,
+				#[cfg(test)]
+				(Self::TestUnidentified(_), Self::TestUnidentified(_)) => true,
+				#[cfg(test)]
+				_ => false,
+			}
 		}
 	}
 }
@@ -74,18 +88,25 @@ impl PartialEq for AxHandle {
 impl Eq for AxHandle {}
 
 impl Hash for AxHandle {
-	fn hash<H: Hasher>(&self, state: &mut H) {
-		match self {
-			#[cfg(target_os = "macos")]
-			Self::Mac(element) => (**element).hash(state),
-			#[cfg(target_os = "windows")]
-			Self::Uia(_, runtime_id) => runtime_id.hash(state),
-			#[cfg(target_os = "linux")]
-			Self::AtSpi(object) => object.hash(state),
-			#[cfg(test)]
-			Self::Test(id) => id.hash(state),
-			#[cfg(test)]
-			Self::TestUnidentified(_) => {},
+	fn hash<H: Hasher>(&self, _state: &mut H) {
+		#[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux", test)))]
+		{
+			match *self {}
+		}
+		#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux", test))]
+		{
+			match self {
+				#[cfg(target_os = "macos")]
+				Self::Mac(element) => (**element).hash(_state),
+				#[cfg(target_os = "windows")]
+				Self::Uia(_, runtime_id) => runtime_id.hash(_state),
+				#[cfg(target_os = "linux")]
+				Self::AtSpi(object) => object.hash(_state),
+				#[cfg(test)]
+				Self::Test(id) => id.hash(_state),
+				#[cfg(test)]
+				Self::TestUnidentified(_) => {},
+			}
 		}
 	}
 }
