@@ -32,9 +32,12 @@
  *   ~80% headroom (openai/codex#28525). The natural unblock is the LATEST
  *   reset among the exhausted windows (the account stays blocked until every
  *   one rolls over) and must be far enough away to justify the spend, with
- *   credits above the reserve. One candidate is redeemed — active account
- *   first, then the account whose credit dies soonest — and the redeem clears
- *   its credential blocks so the retry's re-rank picks it up.
+ *   credits above the reserve. One candidate is redeemed: the one whose
+ *   natural unblock is furthest away, because the account refills on its own
+ *   then, so a reset is worth the wait it skips. Among candidates within
+ *   {@link RESTORE_WAIT_TOLERANCE_MS} of that wait the active account wins,
+ *   then the account whose credit dies soonest. The redeem clears its
+ *   credential blocks so the retry's re-rank picks it up.
  *
  * TRIGGERS: `blocked` runs from the usage-limit branch of the retry pipeline
  * after sibling switch fails, on force-refreshed reports (the cached snapshot
@@ -89,6 +92,8 @@ export const ATTEMPT_COOLDOWN_MS = 60_000;
 export const DEBOUNCE_BUCKET_MS = 60_000;
 /** Floor between salvage sweeps; dedupe keys make sweeps idempotent, this just avoids useless re-planning. */
 export const SWEEP_MIN_INTERVAL_MS = 60_000;
+/** Restore candidates whose natural waits differ by at most this buy about the same time; the active account wins among them. */
+export const RESTORE_WAIT_TOLERANCE_MS = 60 * 60_000;
 
 export function shouldEvaluateCodexAutoRedeem(mode: ResetAutoRedeemMode): boolean {
 	return mode !== "no";
@@ -461,7 +466,10 @@ export function planCodexResetRedemptions(input: CodexResetPlanInput): CodexRese
 			}
 			return b.remainingMs - a.remainingMs;
 		});
-		const best = candidates[0];
+		// That order only breaks near-ties: a reset is worth the wait it skips,
+		// so only candidates within the tolerance of the longest wait qualify.
+		const longestWaitMs = Math.max(...candidates.map(candidate => candidate.remainingMs));
+		const best = candidates.find(candidate => candidate.remainingMs >= longestWaitMs - RESTORE_WAIT_TOLERANCE_MS);
 		if (best) {
 			restore = {
 				reason: "blocked-account",

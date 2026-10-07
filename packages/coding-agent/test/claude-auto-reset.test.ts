@@ -5,6 +5,7 @@ import {
 	type ClaudeResetPlanInput,
 	type ClaudeResetSkipReason,
 } from "@oh-my-pi/pi-coding-agent/session/claude-auto-reset";
+import { RESTORE_WAIT_TOLERANCE_MS } from "@oh-my-pi/pi-coding-agent/session/codex-auto-reset";
 
 const NOW = 1_700_000_040_000;
 const HOUR = 3_600_000;
@@ -15,6 +16,7 @@ interface ReportOptions {
 	email?: string;
 	fiveHourUsed?: number;
 	weeklyUsed?: number;
+	weeklyResetInMs?: number;
 	sonnetUsed?: number;
 }
 
@@ -36,7 +38,12 @@ function report(options: ReportOptions = {}): UsageReport {
 				id: "anthropic:7d",
 				label: "Claude 7 Day",
 				scope: { provider: "anthropic", shared: true, windowId: "7d" },
-				window: { id: "7d", label: "7 Day", durationMs: WEEK, resetsAt: NOW + 3 * 24 * HOUR },
+				window: {
+					id: "7d",
+					label: "7 Day",
+					durationMs: WEEK,
+					resetsAt: NOW + (options.weeklyResetInMs ?? 3 * 24 * HOUR),
+				},
 				amount: { usedFraction: options.weeklyUsed ?? 1, unit: "percent" },
 			},
 			{
@@ -267,6 +274,23 @@ describe("planClaudeResetRedemptions: blocked recovery", () => {
 			rule: "blocked-account",
 			reason: "deferred",
 		});
+	});
+
+	it("spends the grant that skips the longest wait, keeping the active account within the tolerance", () => {
+		const sibling = status({ credentialId: 22, orgId: "org-b", active: false, credit: { id: "cedar-2" } });
+		const restoredFor = (activeWaitMs: number, siblingWaitMs: number) =>
+			planClaudeResetRedemptions(
+				input({
+					reports: [
+						report({ orgId: "org-a", weeklyResetInMs: activeWaitMs }),
+						report({ orgId: "org-b", weeklyResetInMs: siblingWaitMs }),
+					],
+					statuses: [status(), sibling],
+				}),
+			).actions[0]?.accountKey;
+		expect(restoredFor(4 * HOUR, 6 * 24 * HOUR)).toBe("anthropic|org-b|22");
+		expect(restoredFor(3 * 24 * HOUR, 3 * 24 * HOUR + RESTORE_WAIT_TOLERANCE_MS)).toBe("anthropic|org-a|11");
+		expect(restoredFor(3 * 24 * HOUR, 3 * 24 * HOUR + RESTORE_WAIT_TOLERANCE_MS + 60_000)).toBe("anthropic|org-b|22");
 	});
 });
 
