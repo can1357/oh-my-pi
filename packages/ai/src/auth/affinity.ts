@@ -1,10 +1,11 @@
 import { logger } from "@oh-my-pi/pi-utils";
 import { LRUCache } from "@oh-my-pi/pi-utils/lru";
 import { getEnvApiKey } from "../env-api-key";
-import type { AuthCredential, OAuthCredential, SessionsApi } from "./types";
+import type { AuthCredential, OAuthCredential, SessionRestrictionLease, SessionsApi } from "./types";
 import type { AuthCredentialStore } from "./store";
 import type { CredentialPool } from "./pool";
 import type { KeyOverrides } from "./cascade";
+import { resolveCredentialIdentityKey } from "./sqlite-credential-store";
 
 /** Prefix for persisted session-to-credential affinity. */
 export const SESSION_STICKY_CACHE_PREFIX = "session:sticky:";
@@ -39,6 +40,16 @@ export type SessionCredential = {
 	explicit?: true;
 };
 
+/** One installed restriction: the allowed OAuth identity keys and the lease that lifts it. */
+type SessionRestriction = { readonly allowed: ReadonlySet<string>; readonly lease: SessionRestrictionLease };
+
+/**
+ * Provider → session id → installed restriction. Owned by `AuthStorage` so
+ * restrictions outlive store replacement, which rebuilds every store-bound
+ * module (pins included) around the same identities.
+ */
+export type SessionRestrictions = Map<string, Map<string, SessionRestriction>>;
+
 /** Session → credential affinity (pins), persisted in the store cache. */
 export class SessionAffinity implements SessionsApi {
 	/** Tracks the last used credential per provider for a session (used for rate-limit switching). */
@@ -48,11 +59,58 @@ export class SessionAffinity implements SessionsApi {
 	#store: AuthCredentialStore;
 	#pool: CredentialPool;
 	#overrides: KeyOverrides;
+	#restrictions: SessionRestrictions;
 
-	constructor(store: AuthCredentialStore, pool: CredentialPool, overrides: KeyOverrides) {
+	constructor(
+		store: AuthCredentialStore,
+		pool: CredentialPool,
+		overrides: KeyOverrides,
+		restrictions: SessionRestrictions,
+	) {
 		this.#store = store;
 		this.#pool = pool;
 		this.#overrides = overrides;
+		this.#restrictions = restrictions;
+	}
+
+	restrict(provider: string, sessionId: string, identityKeys: readonly string[]): SessionRestrictionLease {
+		if (!provider || !sessionId) throw new Error("sessions.restrict requires a provider and a session id");
+		const lease = Symbol("sessions.restrict");
+		const sessions = this.#restrictions.get(provider) ?? new Map<string, SessionRestriction>();
+		sessions.set(sessionId, { allowed: new Set(identityKeys), lease });
+		this.#restrictions.set(provider, sessions);
+		return lease;
+	}
+
+	unrestrict(provider: string, sessionId: string, lease: SessionRestrictionLease): void {
+		const sessions = this.#restrictions.get(provider);
+		if (sessions?.get(sessionId)?.lease !== lease) return;
+		sessions.delete(sessionId);
+		if (sessions.size === 0) this.#restrictions.delete(provider);
+	}
+
+	/** True when {@link restrict} limits `sessionId` for `provider`. */
+	isRestricted(provider: string, sessionId: string | undefined): boolean {
+		return sessionId !== undefined && this.#restrictions.get(provider)?.has(sessionId) === true;
+	}
+
+	/**
+	 * True when `credential` may serve `sessionId`: always for an unrestricted
+	 * session, otherwise only an OAuth credential whose identity key is allowed.
+	 */
+	allows(provider: string, sessionId: string | undefined, credential: AuthCredential): boolean {
+		const allowed = sessionId === undefined ? undefined : this.#restrictions.get(provider)?.get(sessionId)?.allowed;
+		if (allowed === undefined) return true;
+		if (credential.type !== "oauth") return false;
+		const identityKey = resolveCredentialIdentityKey(provider, credential);
+		return identityKey !== null && allowed.has(identityKey);
+	}
+
+	/** Whether the stored row at `index` may serve `sessionId` (see {@link allows}). */
+	#permits(provider: string, sessionId: string, index: number): boolean {
+		if (!this.isRestricted(provider, sessionId)) return true;
+		const credential = this.#pool.credentials(provider)[index];
+		return credential !== undefined && this.allows(provider, sessionId, credential);
 	}
 
 	/** Bounded per-provider session map, created on first use. */
@@ -101,7 +159,7 @@ export class SessionAffinity implements SessionsApi {
 		lastUsedAtMs?: number,
 		explicit = false,
 	): void {
-		if (!sessionId) return;
+		if (!sessionId || !this.#permits(provider, sessionId, index)) return;
 		const nowMs = lastUsedAtMs ?? Date.now();
 		const credentialId = this.#pool.entries(provider)[index]?.id;
 		const sessionMap = SessionAffinity.#sessionsFor(this.#sessionLastCredential, provider);
@@ -147,9 +205,18 @@ export class SessionAffinity implements SessionsApi {
 		}
 	}
 
-	/** Retrieves the last credential used by a session. */
+	/**
+	 * Retrieves the last credential used by a session. A restricted session
+	 * never sees a pin outside its allowlist — inherited, restored, or recorded
+	 * before the restriction — so it re-ranks inside the allowlist instead.
+	 */
 	get(provider: string, sessionId: string | undefined): SessionCredential | undefined {
 		if (!sessionId) return undefined;
+		const credential = this.#lookup(provider, sessionId);
+		return credential && this.#permits(provider, sessionId, credential.index) ? credential : undefined;
+	}
+
+	#lookup(provider: string, sessionId: string): SessionCredential | undefined {
 		const live = this.#sessionLastCredential.get(provider)?.get(sessionId);
 		if (live) {
 			// Another process can add or drop rows mid-session and the pool is an
@@ -233,12 +300,17 @@ export class SessionAffinity implements SessionsApi {
 
 	activeOAuth(provider: string, sessionId?: string): OAuthCredential | undefined {
 		const allCredentials = this.#pool.credentials(provider);
-		const oauthCredentials = allCredentials.filter((c): c is OAuthCredential => c.type === "oauth");
+		const oauthCredentials = allCredentials.filter(
+			(c): c is OAuthCredential => c.type === "oauth" && this.allows(provider, sessionId, c),
+		);
 		if (oauthCredentials.length === 0) return undefined;
 
 		// Runtime / config overrides bypass OAuth account_uuid attribution — the
 		// caller is authenticating with an explicit key, not the broker's OAuth.
-		if (this.#overrides.has(provider)) return undefined;
+		// A restricted session skips a runtime key, and a config key fails it
+		// closed (see `KeyCascade.get`).
+		const restricted = this.isRestricted(provider, sessionId);
+		if (this.#overrides.suppressesOAuth(provider, restricted)) return undefined;
 
 		// Prefer the session-sticky credential when available.
 		const sessionPref = this.get(provider, sessionId);
@@ -251,7 +323,7 @@ export class SessionAffinity implements SessionsApi {
 		// would misattribute traffic. Only apply this guard when sessionPref is absent; a
 		// recorded OAuth sticky (sessionPref.type === "oauth") must NOT be blocked even if an
 		// env key also happens to exist.
-		if (!sessionPref && getEnvApiKey(provider)) return undefined;
+		if (!restricted && !sessionPref && getEnvApiKey(provider)) return undefined;
 		// Resolve the sticky index against the full credential list — the index is
 		// recorded against the unfiltered provider array (by record /
 		// CredentialSelector.tryOAuth), not the OAuth-only subset, so dereferencing it into the
@@ -275,13 +347,13 @@ export class SessionAffinity implements SessionsApi {
 	 * account, a stale resume re-ranks.
 	 */
 	pin(provider: string, sessionId: string, credentialId: number, options?: { restoredAtMs?: number }): boolean {
-		if (!sessionId || this.#overrides.has(provider)) {
+		if (!sessionId || this.#overrides.suppressesOAuth(provider, this.isRestricted(provider, sessionId))) {
 			return false;
 		}
 		const stored = this.#pool.entries(provider);
 		const index = stored.findIndex(entry => entry.id === credentialId);
 		const target = stored[index];
-		if (target?.credential.type !== "oauth") return false;
+		if (target?.credential.type !== "oauth" || !this.allows(provider, sessionId, target.credential)) return false;
 		const restoredAtMs = options?.restoredAtMs;
 		this.record(provider, sessionId, "oauth", index, restoredAtMs, restoredAtMs === undefined);
 		return true;
@@ -300,7 +372,7 @@ export class SessionAffinity implements SessionsApi {
 		let inherited = 0;
 		for (const provider of this.#pool.providers()) {
 			const credential = this.get(provider, sourceSessionId);
-			if (!credential) continue;
+			if (!credential || !this.#permits(provider, targetSessionId, credential.index)) continue;
 			this.record(
 				provider,
 				targetSessionId,
