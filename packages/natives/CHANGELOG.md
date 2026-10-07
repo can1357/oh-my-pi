@@ -21,6 +21,7 @@
 ### Fixed
 
 - Fixed `timeout` on Windows reporting POSIX signal-death statuses for signals it cannot deliver; it now reports the zero-signal status and no longer claims a bare `-s KILL` took the command down
+- Fixed `timeout` on Windows reporting POSIX signal-death statuses for signals it cannot deliver; it now reports the zero-signal status and no longer claims a bare `-s KILL` took the command down ([#14827](https://github.com/can1357/oh-my-pi/pull/14827) by [@jchanghong023](https://github.com/jchanghong023)).
 
 ## [18.7.0] - 2026-10-06
 
