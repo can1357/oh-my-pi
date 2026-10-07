@@ -524,3 +524,47 @@ export function prepareEntryForPersistence(entry: FileEntry, blobStore: BlobStor
 	const projected = stripSpilledMcpStructuredContent(stripReplayedReasoningSignatures(entry));
 	return truncateForPersistence(projected, blobStore) as FileEntry;
 }
+
+/**
+ * `entry` with each image payload its persisted line stores as a blob ref
+ * swapped for that ref. Everything else keeps its live value: text the line
+ * truncates, MCP structured content and reasoning signatures it drops all
+ * stay. Copy-on-write, so the result shares every unchanged node with `entry`
+ * and is `entry` itself when nothing changes. Refs only land where the line has
+ * them, so a blob `omp gc` keeps for the session file covers every ref returned.
+ */
+export function externalizePersistedImages(entry: FileEntry, blobStore: BlobStore): FileEntry {
+	return adoptPersistedBlobRefs(entry, prepareEntryForPersistence(entry, blobStore)) as FileEntry;
+}
+
+/** Walk `live` alongside its persisted projection, taking only the projection's new blob refs. */
+function adoptPersistedBlobRefs(live: unknown, persisted: unknown): unknown {
+	if (live === persisted) return live;
+	if (typeof persisted === "string") {
+		return typeof live === "string" && isBlobRef(persisted) && !isBlobRef(live) ? persisted : live;
+	}
+	if (live === null || persisted === null || typeof live !== "object" || typeof persisted !== "object") return live;
+	if (Array.isArray(live)) {
+		if (!Array.isArray(persisted) || persisted.length !== live.length) return live;
+		let copy: unknown[] | undefined;
+		for (let i = 0; i < live.length; i++) {
+			const next = adoptPersistedBlobRefs(live[i], persisted[i]);
+			if (next === live[i]) continue;
+			copy ??= [...live];
+			copy[i] = next;
+		}
+		return copy ?? live;
+	}
+	const liveRecord = live as Record<string, unknown>;
+	const persistedRecord = persisted as Record<string, unknown>;
+	let copy: Record<string, unknown> | undefined;
+	for (const key in liveRecord) {
+		if (!Object.hasOwn(liveRecord, key) || !Object.hasOwn(persistedRecord, key)) continue;
+		const value = liveRecord[key];
+		const next = adoptPersistedBlobRefs(value, persistedRecord[key]);
+		if (next === value) continue;
+		copy ??= { ...liveRecord };
+		copy[key] = next;
+	}
+	return copy ?? live;
+}

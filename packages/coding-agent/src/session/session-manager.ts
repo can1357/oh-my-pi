@@ -99,7 +99,11 @@ import {
 	resolveManagedSessionRoot,
 	writeTerminalBreadcrumb,
 } from "./session-paths";
-import { forgetExternalizedImages, prepareEntryForPersistence } from "./session-persistence";
+import {
+	externalizePersistedImages,
+	forgetExternalizedImages,
+	prepareEntryForPersistence,
+} from "./session-persistence";
 import { loadPinnedSessionIds, sortPinnedFirst } from "./session-pins";
 import {
 	FileSessionStorage,
@@ -902,6 +906,8 @@ export class SessionManager {
 	#titleUpdatedAt = "";
 	#hasTitleSlot = true;
 	#entries: SessionEntry[] = [];
+	/** Entries a leaf move inlined from blob refs; the next leaf move re-externalizes those left behind again. */
+	#reinlinedImages = new WeakSet<SessionEntry>();
 	#index = new SessionEntryIndex();
 
 	/** File reflects all current entries; appends can go incrementally. */
@@ -2054,6 +2060,7 @@ export class SessionManager {
 	#setLeaf(id: string | null): void {
 		this.#index.setLeaf(id);
 		this.#inlineActiveImages();
+		this.#externalizeCompactedImages(true);
 		const batch = this.#atomicEntryBatch;
 		if (batch && !batch.collecting) {
 			batch.externalLeafChanged = true;
@@ -2071,7 +2078,9 @@ export class SessionManager {
 		const branch = this.#index.branchView();
 		const compaction = branch.findLast(isSummarizingCompaction);
 		const keptAt = compaction ? branch.findIndex(entry => entry.id === compaction.firstKeptEntryId) : -1;
-		resolveBlobRefsInEntriesSync(branch.slice(Math.max(0, keptAt)), this.#blobs);
+		for (const entry of resolveBlobRefsInEntriesSync(branch.slice(Math.max(0, keptAt)), this.#blobs)) {
+			this.#reinlinedImages.add(entry as SessionEntry);
+		}
 	}
 
 	#recordEntry(entry: SessionEntry): void {
@@ -2091,31 +2100,32 @@ export class SessionManager {
 			batch.externalLeafId = entry.id;
 		}
 		this.#appendToSessionFile(entry);
-		if (entry.type === "compaction") this.#externalizeCompactedImages();
+		if (entry.type === "compaction") this.#externalizeCompactedImages(false);
 		if (batch) batch.deferredNotifications.push(entry);
 		else this.#notifyEntryAppended(entry);
 	}
 
 	/**
-	 * Swap every entry the latest compaction left behind for its persisted form,
-	 * whose images are blob refs instead of base64. In place, so holders of the
+	 * Swap the images of entries the leaf's latest compaction left behind for
+	 * the blob refs their persisted lines hold. A landing compaction covers every
+	 * such entry; a leaf move covers only the ones an earlier move inlined, so
+	 * returning from compacted history drops the bytes it loaded. Only images
+	 * change: other fields keep their live values. In place, so holders of the
 	 * entry objects (branch views, maintenance passes) keep seeing the journal.
-	 * The persisted form is what a resume would load, and readers that need the
-	 * bytes resolve refs themselves ({@link buildSessionContext},
-	 * {@link withInlineImages}). Only runs while the file holds every entry: a
-	 * ref nothing on disk points at could be collected by `omp gc`.
+	 * Readers that need the bytes resolve refs themselves
+	 * ({@link buildSessionContext}, {@link withInlineImages}). Only runs while the
+	 * file holds every entry: a ref nothing on disk points at could be collected
+	 * by `omp gc`.
 	 */
-	#externalizeCompactedImages(): void {
+	#externalizeCompactedImages(onlyReinlined: boolean): void {
 		if (!this.#persist || !this.#fileIsCurrent || this.#diskFailure || this.#atomicEntryBatch) return;
 		const end = compactedPrefixLength(this.#entries, this.#index.entriesById(), this.#index.leafId());
 		for (let i = 0; i < end; i++) {
 			const entry = this.#entries[i] as SessionEntry;
-			const persisted = prepareEntryForPersistence(entry, this.#blobs);
-			if (persisted === entry) continue;
-			for (const key of Object.keys(entry)) {
-				if (!Object.hasOwn(persisted, key)) delete (entry as unknown as Record<string, unknown>)[key];
-			}
-			Object.assign(entry, persisted);
+			if (onlyReinlined && !this.#reinlinedImages.has(entry)) continue;
+			this.#reinlinedImages.delete(entry);
+			const externalized = externalizePersistedImages(entry, this.#blobs);
+			if (externalized !== entry) Object.assign(entry, externalized);
 		}
 	}
 

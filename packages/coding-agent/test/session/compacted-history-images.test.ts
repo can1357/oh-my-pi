@@ -1,8 +1,13 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import type { ImageContent, ToolResultMessage } from "@oh-my-pi/pi-ai";
+import { Agent } from "@oh-my-pi/pi-agent-core";
+import type { ImageContent, TextContent, ToolResultMessage } from "@oh-my-pi/pi-ai";
+import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { buildSessionData } from "@oh-my-pi/pi-coding-agent/export/html";
+import type { ExtensionRunner, TreePreparation } from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
+import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { isBlobRef } from "@oh-my-pi/pi-coding-agent/session/blob-store";
 import type { SessionEntry } from "@oh-my-pi/pi-coding-agent/session/session-entries";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
@@ -23,7 +28,7 @@ function pngData(fill: number): string {
 }
 
 /** One read call whose result carries `data` as an image; returns the result entry id. */
-function appendImageRead(sm: SessionManager, callId: string, data: string): string {
+function appendImageRead(sm: SessionManager, callId: string, data: string, text = callId): string {
 	sm.appendMessage({
 		role: "assistant",
 		content: [{ type: "toolCall", id: callId, name: "read", arguments: {} }],
@@ -39,7 +44,7 @@ function appendImageRead(sm: SessionManager, callId: string, data: string): stri
 		toolCallId: callId,
 		toolName: "read",
 		content: [
-			{ type: "text", text: callId },
+			{ type: "text", text },
 			{ type: "image", data, mimeType: "image/png" },
 		],
 		isError: false,
@@ -59,6 +64,11 @@ function appendCompactedImageRead(sm: SessionManager, data: string): string {
 function imageOf(entry: SessionEntry | undefined): string | undefined {
 	if (entry?.type !== "message" || entry.message.role !== "toolResult") return undefined;
 	return entry.message.content.find((part): part is ImageContent => part.type === "image")?.data;
+}
+
+function textOf(entry: SessionEntry | undefined): string | undefined {
+	if (entry?.type !== "message" || entry.message.role !== "toolResult") return undefined;
+	return entry.message.content.find((part): part is TextContent => part.type === "text")?.text;
 }
 
 function contextImages(sm: SessionManager, options?: { transcript?: boolean }): string[] {
@@ -130,8 +140,83 @@ describe("images in compacted session history", () => {
 		await sm.rewriteEntries();
 		expect(await Bun.file(file).bytes()).toEqual(afterCompaction);
 
+		const leafId = sm.getLeafId()!;
 		sm.branch(compactedId);
 		expect(contextImages(sm)).toEqual([oldImage]);
+		expect(imageOf(compactedEntry)).toBe(oldImage);
+
+		// Returning to the compacted branch drops the bytes the detour inlined.
+		sm.branch(leafId);
+		expect(isBlobRef(imageOf(compactedEntry)!)).toBe(true);
+		expect(contextImages(sm, { transcript: true })).toEqual([oldImage]);
+	});
+
+	it("keeps a live entry's non-image fields when its images move to blob refs", async () => {
+		// Persistence truncates text this long; the live entry must not be.
+		const longText = "x".repeat(600_000);
+		const sm = SessionManager.create(tempDir.path(), sessionDir);
+		sm.appendMessage({ role: "user", content: "start", timestamp: 0 });
+		const compactedId = appendImageRead(sm, "old", pngData(6), longText);
+		const keptId = sm.appendMessage({ role: "user", content: "kept turn", timestamp: 0 });
+		await sm.flush();
+
+		sm.appendCompaction("summary", undefined, keptId, 100);
+		await sm.flush();
+		const file = sm.getSessionFile()!;
+		const afterCompaction = await Bun.file(file).bytes();
+
+		expect(isBlobRef(imageOf(sm.getEntry(compactedId))!)).toBe(true);
+		expect(textOf(sm.getEntry(compactedId))).toBe(longText);
+
+		await sm.rewriteEntries();
+		expect(await Bun.file(file).bytes()).toEqual(afterCompaction);
+	});
+
+	it("hands session_before_tree the image bytes of an abandoned branch that reaches into compacted history", async () => {
+		const oldImage = pngData(7);
+		const sm = SessionManager.create(tempDir.path(), sessionDir);
+		const startId = sm.appendMessage({ role: "user", content: "start", timestamp: 0 });
+		const compactedId = appendImageRead(sm, "old", oldImage);
+		const keptId = sm.appendMessage({ role: "user", content: "kept turn", timestamp: 0 });
+		sm.appendCompaction("summary", undefined, keptId, 100);
+		const leafId = sm.getLeafId()!;
+		sm.branch(startId);
+		const siblingId = sm.appendMessage({ role: "user", content: "other path", timestamp: 0 });
+		sm.branch(leafId);
+		await sm.flush();
+		expect(isBlobRef(imageOf(sm.getEntry(compactedId))!)).toBe(true);
+
+		const preparations: TreePreparation[] = [];
+		const extensionRunner = {
+			hasHandlers: (eventType: string) => eventType === "session_before_tree",
+			emit: async (event: { type: string; preparation?: TreePreparation }) => {
+				if (event.preparation) preparations.push(event.preparation);
+				return { cancel: true };
+			},
+		} as unknown as ExtensionRunner;
+		const session = new AgentSession({
+			agent: new Agent({
+				getApiKey: () => "test-key",
+				initialState: {
+					model: getBundledModel("anthropic", "claude-sonnet-4-5")!,
+					systemPrompt: ["test"],
+					tools: [],
+				},
+			}),
+			sessionManager: sm,
+			settings: Settings.isolated(),
+			modelRegistry: {} as never,
+			extensionRunner,
+		});
+		try {
+			expect((await session.navigateTree(siblingId)).cancelled).toBe(true);
+		} finally {
+			await session.dispose();
+		}
+
+		expect(preparations).toHaveLength(1);
+		const summarized = preparations[0]!.entriesToSummarize.find(entry => entry.id === compactedId);
+		expect(imageOf(summarized)).toBe(oldImage);
 	});
 
 	it("keeps compacted images inline when the session is not persisted", async () => {

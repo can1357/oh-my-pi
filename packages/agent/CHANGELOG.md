@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `getRemoteCompactionPreserve()` to read a compaction's provider-native replay state, so callers can tell provider-native compactions from summarizing ones ([#14880](https://github.com/can1357/oh-my-pi/pull/14880) by [@Hamoudii91](https://github.com/Hamoudii91))
+
 ## [18.8.1] - 2026-10-07
 
 ### Added

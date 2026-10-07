@@ -644,20 +644,29 @@ export async function resolveBlobRefsInEntries(
 	await resolveBlobRefs(entriesForBlobResolution(entries.slice(keepExternalized)), blobStore);
 }
 
-/** Synchronous {@link resolveBlobRefsInEntries}. */
-export function resolveBlobRefsInEntriesSync(entries: FileEntry[], blobStore: BlobStore): void {
+/** Synchronous {@link resolveBlobRefsInEntries}. Returns the entries it resolved a ref in. */
+export function resolveBlobRefsInEntriesSync(entries: FileEntry[], blobStore: BlobStore): FileEntry[] {
 	const resolved = new Map<string, string>();
-	for (const site of blobRefSites(entriesForBlobResolution(entries))) {
-		const key = blobSiteKey(site);
-		let data = resolved.get(key);
-		if (data === undefined) {
-			data = site.asDataUrl
-				? resolveImageDataUrlSync(blobStore, site.ref)
-				: resolveImageDataSync(blobStore, site.ref);
-			resolved.set(key, data);
+	const changed: FileEntry[] = [];
+	for (const entry of entriesForBlobResolution(entries)) {
+		if (!containsBlobRef(entry)) continue;
+		const sites: BlobRefSite[] = [];
+		collectBlobRefSites(entry, sites);
+		if (sites.length === 0) continue;
+		changed.push(entry);
+		for (const site of sites) {
+			const key = blobSiteKey(site);
+			let data = resolved.get(key);
+			if (data === undefined) {
+				data = site.asDataUrl
+					? resolveImageDataUrlSync(blobStore, site.ref)
+					: resolveImageDataSync(blobStore, site.ref);
+				resolved.set(key, data);
+			}
+			site.holder[site.key] = data;
 		}
-		site.holder[site.key] = data;
 	}
+	return changed;
 }
 
 /**

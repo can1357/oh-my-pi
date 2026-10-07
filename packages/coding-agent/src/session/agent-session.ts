@@ -12014,11 +12014,10 @@ export class AgentSession implements SettingsScope {
 			targetEntry.parentId !== null
 				? targetEntry.parentId
 				: targetId;
-		const { entries: entriesToSummarize, commonAncestorId } = collectEntriesForBranchSummary(
-			this.sessionManager,
-			oldLeafId,
-			summaryAnchorId,
-		);
+		const collected = collectEntriesForBranchSummary(this.sessionManager, oldLeafId, summaryAnchorId);
+		const commonAncestorId = collected.commonAncestorId;
+		// The abandoned branch can reach back past a compaction, whose entries hold blob refs.
+		const entriesToSummarize = this.sessionManager.withInlineImages(collected.entries);
 
 		// Prepare event data
 		const preparation: TreePreparation = {
