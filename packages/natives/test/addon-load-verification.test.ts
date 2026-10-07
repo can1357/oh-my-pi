@@ -23,6 +23,7 @@ import {
 	type HostInfo,
 	hostProbeFilename,
 	resolveTargetMembers,
+	targetToolchainArgs,
 	verifyHostAddonLoads,
 } from "../../../scripts/bazel-natives";
 import { detectHostAvx2Support, resolveLocalHostAddon } from "../../../scripts/host-detect";
@@ -150,6 +151,14 @@ describe("hostProbeFilename", () => {
 		expect(hostProbeFilename(["win32-x64-baseline"], windowsArm64)).toBeNull();
 	});
 
+	test("a Termux ARM64 host resolves and probes only the Android addon", () => {
+		const termuxArm64: HostInfo = { platform: "android", arch: "arm64", avx2: false, musl: false };
+		expect(resolveTargetMembers(["host"], termuxArm64)).toEqual(["android-arm64"]);
+		expect(hostProbeFilename(["android-arm64"], termuxArm64)).toBe("pi_natives.android-arm64.node");
+		// An Android artifact is foreign on Linux even when the CPU architecture matches.
+		expect(hostProbeFilename(["android-arm64"], glibcArm64)).toBeNull();
+	});
+
 	test("probes the host's own target, however it was requested", () => {
 		expect(hostProbeFilename(["linux-arm64"], glibcArm64)).toBe("pi_natives.linux-arm64.node");
 		expect(hostProbeFilename(["host"], glibcArm64)).toBe("pi_natives.linux-arm64.node");
@@ -160,5 +169,18 @@ describe("hostProbeFilename", () => {
 		expect(hostProbeFilename(["win32-x64-baseline", "darwin-arm64"], glibcArm64)).toBeNull();
 		// A baseline-only host never claims the modern x64 addon as its own.
 		expect(hostProbeFilename(["linux-x64-modern"], glibcX64Baseline)).toBeNull();
+	});
+});
+
+describe("targetToolchainArgs", () => {
+	const linuxX64: HostInfo = { platform: "linux", arch: "x64", avx2: false, musl: false };
+	const termuxArm64: HostInfo = { platform: "android", arch: "arm64", avx2: false, musl: false };
+	const ndkToolchainArg = "--extra_toolchains=@androidndk//:all";
+
+	test("adds the NDK toolchain argument only for Android targets", () => {
+		expect(targetToolchainArgs(["android-arm64"], linuxX64)).toEqual([ndkToolchainArg]);
+		expect(targetToolchainArgs(["host"], termuxArm64)).toEqual([ndkToolchainArg]);
+		expect(targetToolchainArgs(["linux-x64-baseline"], linuxX64)).toEqual([]);
+		expect(targetToolchainArgs(["all"], linuxX64)).toEqual([]);
 	});
 });

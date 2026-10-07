@@ -2,7 +2,7 @@
 
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { isEnoent } from "@oh-my-pi/pi-utils";
+import { isEnoent } from "@oh-my-pi/pi-utils/fs-error";
 import { embeddedRelayExtensionFiles } from "./embed-relay-extension";
 import { embeddedAddonFiles } from "../../natives/scripts/embed-native";
 import { buildDocsIndexPayload } from "./generate-docs-index";
@@ -115,7 +115,7 @@ export async function bundleDist(outDir: string = defaultOutDir): Promise<void> 
 	try {
 		const docsPayload = await buildDocsIndexPayload();
 		const embeddedFiles = androidBundle
-			? await embeddedAddonFiles({ platform: "android", arch: process.arch })
+			? await embeddedAddonFiles({ platform: "android", arch: "arm64" })
 			: {};
 		// Build in-process: the docs embed payload is far larger than Linux's
 		// 128KiB per-argv-string cap, so it can never be passed as a CLI
@@ -125,10 +125,12 @@ export async function bundleDist(outDir: string = defaultOutDir): Promise<void> 
 			outdir: outDir,
 			target: "bun",
 			// Also refreshes `src/.../extension.generated.json`, which SDK consumers of `src` read.
-			files: await embeddedRelayExtensionFiles(),
+			files: {
+				...embeddedFiles,
+				...(await embeddedRelayExtensionFiles()),
+			},
 			plugins: [createJsonParsePlugin(), await createLegacyPiVirtualModulePlugin(), inlineNativeNoticesPlugin],
 			external: [...ALWAYS_EXTERNAL, ...RUNTIME_EXTERNAL],
-			files: embeddedFiles,
 			define: {
 				"process.env.PI_BUNDLED": JSON.stringify("true"),
 				"process.env.PI_DOCS_EMBED": JSON.stringify(docsPayload.payload),
