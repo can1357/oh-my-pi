@@ -105,21 +105,48 @@ def _make_computer():
         async def children(self):
             return [_Element(snapshot) for snapshot in await self._method("children", (), {})]
 
-    class _Window:
-        __slots__ = ("id", "app", "title", "pid", "bounds", "focused")
+    class _Namespace:
+        __slots__ = ("_root", "_namespace")
 
-        def __init__(self, snapshot):
-            for field in self.__slots__:
-                setattr(self, field, snapshot.get(field))
-
-        def __repr__(self):
-            return f"<computer.Window id={self.id!r} app={self.app!r}>"
+        def __init__(self, root, namespace):
+            self._root = root
+            self._namespace = namespace
 
         async def _method(self, method, args, kwargs):
-            return await _call([_step("window", (self.id,), {}), _step(method, args, kwargs)])
+            return await self._root._method(f"{self._namespace}.{method}", args, kwargs)
+
+    class _Menu(_Namespace):
+        async def items(self, path=None):
+            return await self._method("items", (path,), {})
+
+        async def select(self, path):
+            return await self._method("select", (path,), {})
+
+    class _Apps(_Namespace):
+        async def list(self, options=None, **kwargs):
+            return await self._method("list", (options,), kwargs)
+
+        async def open(self, id_or_name_or_path, options=None, **kwargs):
+            return await self._method("open", (id_or_name_or_path, options), kwargs)
+
+    class _Control(_Namespace):
+        async def acquire(self, options=None, **kwargs):
+            return await self._method("acquire", (options,), kwargs)
+
+        async def release(self):
+            return await self._method("release", (), {})
+
+        async def state(self):
+            return await self._method("state", (), {})
+
+    class _InputTarget:
+        __slots__ = ()
 
         async def screenshot(self, *args, **kwargs):
             return await self._method("screenshot", args, kwargs)
+
+        async def zoom(self, region, *args, **kwargs):
+            return await self._method("zoom", (region, *args), kwargs)
 
         async def click(self, *args, **kwargs):
             return await self._method("click", args, kwargs)
@@ -141,6 +168,41 @@ def _make_computer():
 
         async def press(self, *args, **kwargs):
             return await self._method("press", args, kwargs)
+
+        async def holdKeys(self, keys, options=None, **kwargs):
+            return await self._method("holdKeys", (keys, options), kwargs)
+
+        async def holdMouse(self, x, y, options=None, **kwargs):
+            return await self._method("holdMouse", (x, y, options), kwargs)
+
+    class _Display(_InputTarget):
+        __slots__ = ("id",)
+
+        def __init__(self, snapshot):
+            self.id = snapshot["id"]
+
+        async def _method(self, method, args, kwargs):
+            return await _call([_step("display", (self.id,), {}), _step(method, args, kwargs)])
+
+    class _Window(_InputTarget):
+        __slots__ = ("id", "app", "title", "pid", "bounds", "focused", "menu")
+
+        def __init__(self, snapshot):
+            for field in ("id", "app", "title", "pid", "bounds", "focused"):
+                setattr(self, field, snapshot.get(field))
+            self.menu = _Menu(self, "menu")
+
+        async def observe(self, options=None, **kwargs):
+            return await self._method("observe", (options,), kwargs)
+
+        async def bringToCurrentSpace(self):
+            return await self._method("bringToCurrentSpace", (), {})
+
+        def __repr__(self):
+            return f"<computer.Window id={self.id!r} app={self.app!r}>"
+
+        async def _method(self, method, args, kwargs):
+            return await _call([_step("window", (self.id,), {}), _step(method, args, kwargs)])
 
         async def raise_(self, *args, **kwargs):
             return await self._method("raise", args, kwargs)
@@ -165,11 +227,16 @@ def _make_computer():
         async def write(self, text):
             return await _call([_step("clipboard.write", (text,), {})])
 
-    class _Computer:
-        __slots__ = ("clipboard",)
+    class _Computer(_InputTarget):
+        __slots__ = ("clipboard", "apps", "control")
 
         def __init__(self):
             self.clipboard = _Clipboard()
+            self.apps = _Apps(self, "apps")
+            self.control = _Control(self, "control")
+
+        async def display(self, selector):
+            return _Display(await self._method("display", (selector,), {}))
 
         def __repr__(self):
             return "<computer>"
@@ -182,30 +249,6 @@ def _make_computer():
 
         async def windows(self, *args, **kwargs):
             return await self._method("windows", args, kwargs)
-
-        async def screenshot(self, *args, **kwargs):
-            return await self._method("screenshot", args, kwargs)
-
-        async def click(self, *args, **kwargs):
-            return await self._method("click", args, kwargs)
-
-        async def doubleClick(self, *args, **kwargs):
-            return await self._method("doubleClick", args, kwargs)
-
-        async def move(self, *args, **kwargs):
-            return await self._method("move", args, kwargs)
-
-        async def drag(self, *args, **kwargs):
-            return await self._method("drag", args, kwargs)
-
-        async def scroll(self, *args, **kwargs):
-            return await self._method("scroll", args, kwargs)
-
-        async def type(self, *args, **kwargs):
-            return await self._method("type", args, kwargs)
-
-        async def press(self, *args, **kwargs):
-            return await self._method("press", args, kwargs)
 
         async def window(self, *args, **kwargs):
             """Resolve one window by id ("74" or 74) or by `app`/`title` filter keywords."""

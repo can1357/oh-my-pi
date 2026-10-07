@@ -111,6 +111,32 @@
 	cursor: grabbing;
 }
 
+/* Scene canvas with the hover/selection boxes stacked on top. */
+.traces-canvas-stack {
+	position: relative;
+	flex-shrink: 0;
+	overflow: hidden;
+}
+
+.traces-canvas-stack > canvas {
+	display: block;
+}
+
+.traces-canvas-hover,
+.traces-canvas-selection {
+	position: absolute;
+	pointer-events: none;
+	box-sizing: border-box;
+}
+
+.traces-canvas-hover {
+	background: rgba(255, 255, 255, 0.16);
+}
+
+.traces-canvas-selection {
+	border: 1.5px solid;
+}
+
 .traces-chevron {
 	display: inline-flex;
 	background: none;

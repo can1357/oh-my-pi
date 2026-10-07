@@ -2,7 +2,9 @@
  * Generate session titles using a smol, fast model.
  */
 import { dlopen, FFIType, ptr } from "bun:ffi";
+import * as os from "node:os";
 import * as path from "node:path";
+import * as url from "node:url";
 
 import {
 	type Api,
@@ -15,6 +17,7 @@ import {
 import { StreamMarkupHealing } from "@oh-my-pi/pi-ai/utils/stream-markup-healing";
 import { writeTerminalSequence } from "@oh-my-pi/pi-tui";
 import { isNativeRendering, onNativeRenderingChange } from "@oh-my-pi/pi-tui/native/state";
+import { theme } from "@oh-my-pi/pi-tui/theme";
 import { SPINNER_FRAMES } from "@oh-my-pi/pi-tui/theme/symbols";
 import { $env, isTerminalHeadless, isWsl, logger, prompt } from "@oh-my-pi/pi-utils";
 import type { ModelRegistry } from "../config/model-registry";
@@ -632,6 +635,11 @@ function writeTerminalTitle(title: string, recomposeStaticOnFailure = false): vo
 	lastTerminalTitle = next;
 }
 
+/**
+ * Set the session's base terminal title: the session name, which a generated
+ * title carries in the card form `<icon> <CODE>: <name>` that Tern indexes
+ * parked panes by, else the cwd.
+ */
 export function setSessionTerminalTitle(sessionName: string | undefined, cwd?: string): void {
 	// An authoritative session title (rename, new session, focus swap) supersedes
 	// any extension override so the base title tracks the real session again.
@@ -647,41 +655,69 @@ export function setSessionTerminalTitle(sessionName: string | undefined, cwd?: s
 	terminalTitleRuntime.sessionName = sanitizeTerminalTitlePart(sessionName);
 	terminalTitleRuntime.label = terminalTitleRuntime.sessionName ?? getFallbackTerminalTitle(cwd);
 	emitTerminalTitle();
-	reportTernSessionFile();
+	reportTernSession();
+}
+
+/**
+ * Whether the effective symbol preset is `nerd`: under `nf+emoji` title icons,
+ * the title fork then asks the model for a Nerd Fonts glyph to head the title.
+ */
+export function nerdGlyphsActive(): boolean {
+	return typeof theme !== "undefined" && theme.getSymbolPreset() === "nerd";
 }
 
 /** The OSC 1337 user variable Tern reads the session file from. */
 const TERN_SESSION_FILE_VAR = "omp_session_file";
-/** Where the current session file is read from (the interactive session manager). */
-let sessionFileSource: (() => string | undefined) | undefined;
+
+/** The live session as Tern hears about it (read from the interactive session manager). */
+export interface TerminalSessionSource {
+	/** The session file, if the session persists to one. */
+	file(): string | undefined;
+	/** The session's working directory. */
+	cwd(): string;
+}
+
+/** Where the current session's file and directory are read from. */
+let sessionSource: TerminalSessionSource | undefined;
 /** The session file Tern was last told about. */
 let reportedSessionFile: string | undefined;
+/** The working directory Tern was last told about. */
+let reportedCwd: string | undefined;
 
 /**
- * Name the live session's file source. Every session title update (start, new
- * session, resume, cwd switch) and {@link reportTernSessionFile} re-read it and,
- * in Tern, report a changed file, so Tern's daemon can relaunch
- * `omp --resume <file>` after it restarts.
+ * Name the live session's source. Every session title update (start, new
+ * session, resume, cwd switch) and {@link reportTernSession} re-read it and, in
+ * Tern, report what changed: the file, so Tern's daemon can relaunch
+ * `omp --resume <file>` after it restarts, and the directory, which Tern names
+ * in omp's composer bar.
  */
-export function setTerminalSessionFileSource(source: (() => string | undefined) | undefined): void {
-	sessionFileSource = source;
-	reportTernSessionFile();
+export function setTerminalSessionSource(source: TerminalSessionSource | undefined): void {
+	sessionSource = source;
+	reportTernSession();
 }
 
 /**
- * Tell Tern (`TERM_PROGRAM=tern`, nowhere else) the session file, if it changed,
- * as an OSC 1337 user variable holding its absolute path in base64; no file
- * removes the variable.
+ * Tell Tern (`TERM_PROGRAM=tern`, nowhere else) what changed about the session:
+ * the file as an OSC 1337 user variable holding its absolute path in base64 (no
+ * file removes the variable), and the working directory as OSC 7
+ * (`file://host/path`), as a shell reports it at each prompt.
  */
-export function reportTernSessionFile(): void {
+export function reportTernSession(): void {
 	if (terminalTitleRuntime.disposed || $env.TERM_PROGRAM?.toLowerCase() !== "tern") return;
 	if (!process.stdout.isTTY || isTerminalHeadless()) return;
-	const file = sessionFileSource?.();
-	const resolved = file ? path.resolve(file) : undefined;
-	if (resolved === reportedSessionFile) return;
-	reportedSessionFile = resolved;
-	const value = resolved ? `=${Buffer.from(resolved).toString("base64")}` : "";
-	writeTerminalSequence(`\x1b]1337;SetUserVar=${TERN_SESSION_FILE_VAR}${value}\x07`);
+	const file = sessionSource?.file();
+	const resolvedFile = file ? path.resolve(file) : undefined;
+	if (resolvedFile !== reportedSessionFile) {
+		reportedSessionFile = resolvedFile;
+		const value = resolvedFile ? `=${Buffer.from(resolvedFile).toString("base64")}` : "";
+		writeTerminalSequence(`\x1b]1337;SetUserVar=${TERN_SESSION_FILE_VAR}${value}\x07`);
+	}
+	// Without a session the shell takes the directory back at its next prompt.
+	const cwd = sessionSource ? path.resolve(sessionSource.cwd()) : undefined;
+	if (cwd && cwd !== reportedCwd) {
+		writeTerminalSequence(`\x1b]7;file://${os.hostname()}${url.pathToFileURL(cwd).pathname}\x07`);
+	}
+	reportedCwd = cwd;
 }
 
 /**
@@ -742,6 +778,7 @@ const TITLE_IDLE_SEPARATOR = ">";
 const TITLE_ATTENTION_SEPARATOR = "!";
 
 const terminalTitleRuntime: {
+	/** The classic title's label: the session name, else the cwd. */
 	label: string | undefined;
 	/** The session's own name, without the cwd fallback `label` uses. */
 	sessionName: string | undefined;
@@ -969,8 +1006,8 @@ export function initTerminalTitleState(): void {
  */
 export function disposeTerminalTitleState(): void {
 	// The session ends with the UI: Tern must not resume it in this pane.
-	sessionFileSource = undefined;
-	reportTernSessionFile();
+	sessionSource = undefined;
+	reportTernSession();
 	terminalTitleRuntime.disposed = true;
 	terminalTitleRuntime.unwatchNative?.();
 	terminalTitleRuntime.unwatchNative = undefined;

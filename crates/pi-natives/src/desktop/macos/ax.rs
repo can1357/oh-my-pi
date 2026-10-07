@@ -1,3 +1,4 @@
+pub(crate) mod menus;
 mod popup;
 
 use std::{
@@ -481,7 +482,8 @@ impl AxBackend for MacAx {
 			});
 		}
 		// Web AXValue can echo a write without the renderer accepting it. The
-		// API has no "unverified" outcome, so refuse before mutating that surface.
+		// API has no "unverified" outcome, so refuse before mutating that
+		// surface.
 		ensure_native_text_target(element)?;
 		if !attribute_settable(element, "AXValue") {
 			return Err(DesktopError::ax_failed(
@@ -501,8 +503,8 @@ impl AxBackend for MacAx {
 		let element = mac_handle(h)?;
 		let attribute = CFString::from_str("AXFocused");
 		skylight::with_background_guard(element_pid(element)?, || {
-			// SAFETY: The singleton CFBoolean and retained element remain valid for
-			// the synchronous setter call.
+			// SAFETY: The singleton CFBoolean and retained element remain valid
+			// for the synchronous setter call.
 			let error = unsafe { element.set_attribute_value(&attribute, CFBoolean::new(true)) };
 			ax_result(error, "setting AXFocused=true failed")
 		})
@@ -647,7 +649,8 @@ fn verify_text_value(element: &AXUIElement, expected: &str) -> CoreResult<()> {
 /// date written as a `CFString`, so an ISO-8601 value is written as a `CFDate`
 /// in the system time zone the control displays, then read back as one.
 fn set_date_value(element: &AXUIElement, text: &str, current: f64) -> CoreResult<()> {
-	// CF caches the system zone per process; the target app follows changes to it.
+	// CF caches the system zone per process; the target app follows changes to
+	// it.
 	CFTimeZone::reset_system();
 	let zone = CFTimeZone::system()
 		.ok_or_else(|| DesktopError::ax_failed("the system time zone is unavailable"))?;
@@ -696,7 +699,8 @@ pub(super) fn insert_native_text(pid: libc::pid_t, wid: u32, text: &str) -> Core
 		|| !matches!(
 			copy_string(&element, "AXRole").as_deref(),
 			Some("AXTextField" | "AXTextArea" | "AXComboBox")
-		) || !attribute_settable(&element, "AXSelectedText")
+		)
+		|| !attribute_settable(&element, "AXSelectedText")
 	{
 		return Ok(false);
 	}
@@ -1000,17 +1004,17 @@ fn retained_element(pointer: *const AXUIElement) -> CoreResult<CFRetained<AXUIEl
 	Ok(unsafe { CFRetained::from_raw(pointer) })
 }
 
-// The test-only handle variant makes this fallible under `cfg(test)`; keep one
+// The test-only handle variants make this fallible under `cfg(test)`; keep one
 // call contract.
 #[cfg_attr(
 	not(test),
-	allow(clippy::unnecessary_wraps, reason = "the test-only handle variant is fallible")
+	allow(clippy::unnecessary_wraps, reason = "the test-only handle variants are fallible")
 )]
 fn mac_handle(handle: &AxHandle) -> CoreResult<&AXUIElement> {
 	match handle {
 		AxHandle::Mac(element) => Ok(element),
 		#[cfg(test)]
-		AxHandle::Test(_) => Err(DesktopError::ax_failed("non-macOS AX handle passed to MacAx")),
+		_ => Err(DesktopError::ax_failed("non-macOS AX handle passed to MacAx")),
 	}
 }
 

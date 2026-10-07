@@ -23,7 +23,6 @@ import {
 	type TSchema,
 	toolWireSchema,
 	type UserMessage,
-	validateToolArguments,
 } from "@oh-my-pi/pi-ai";
 import {
 	type Dialect,
@@ -76,6 +75,7 @@ import {
 	startExecuteToolSpan,
 	startInvokeAgentSpan,
 } from "./telemetry";
+import { validateAgentToolArguments } from "./tool-arguments";
 import { createAdditionalContextMessage, isNonBlankContext, joinAdditionalContext } from "./tool-context";
 import dsmlToolCallLeakPrompt from "./prompts/dsml-tool-call-leak.md" with { type: "text" };
 import type {
@@ -3062,15 +3062,9 @@ async function prepareToolCallDispatch(
 				if (!tool) {
 					throw new Error(formatToolNotFoundMessage(toolCall.name, context.tools, suggestFallbackToolNames?.()));
 				}
-				return validateToolArguments(tool, { ...toolCall, arguments: args });
+				return validateAgentToolArguments(tool, { ...toolCall, arguments: args });
 			} catch (validationError) {
-				// Lenience covers schema mismatches; a parse failure has no args to hand over.
 				const parseFailed = "__parseError" in args;
-				if (tool?.lenientArgValidation && !parseFailed) {
-					const fallback = { ...args };
-					delete fallback.__rawJson;
-					return fallback;
-				}
 				entry.args = parseFailed ? { __parseError: args.__parseError } : args;
 				entry.validationErrorMessage =
 					validationError instanceof Error ? validationError.message : String(validationError);

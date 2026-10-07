@@ -3,6 +3,7 @@ import { scheduler } from "node:timers/promises";
 import * as tls from "node:tls";
 import { isAnthropicSigningProxyUrl, isOfficialAnthropicApiUrl } from "@oh-my-pi/pi-catalog/compat/anthropic";
 import { hostMatchesUrl, isVertexRawPredictUrl } from "@oh-my-pi/pi-catalog/hosts";
+import type { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { mapEffortToAnthropicAdaptiveEffort } from "@oh-my-pi/pi-catalog/model-thinking";
 import { calculateCost, getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { isAnthropicOAuthToken } from "@oh-my-pi/pi-catalog/utils";
@@ -19,9 +20,12 @@ import { NO_AUTH_SENTINEL } from "../auth-retry";
 import { renderDemotedThinking } from "../dialect/demotion";
 import * as AIError from "../error";
 import { parseToolCallArguments } from "../utils/tool-call-arguments";
-import { getEnvApiKey, OUTPUT_FALLBACK_BUFFER } from "../stream";
+import { getEnvApiKey } from "../env-api-key";
+import { OUTPUT_FALLBACK_BUFFER } from "../stream";
 import type {
+	AnthropicCompactionFiles,
 	AnthropicCompactionPayload,
+	AnthropicCompactionRequest,
 	AnthropicFallbackContent,
 	AnthropicMessagePayload,
 	AnthropicOutputEffort,
@@ -646,7 +650,7 @@ const CLAUDE_BILLING_HEADER_PREFIX = "x-anthropic-billing-header:";
 function createClaudeBillingHeader(firstUserMessageText: string): string {
 	// Fingerprint: SHA256(salt + msg[4] + msg[7] + msg[20] + version)[:3]
 	// Matches CC's computeFingerprint in utils/fingerprint.ts.
-	// Uses chars from the first user message (not the system prompt).
+	// Uses chars from the first conversational wire user turn (not the system prompt).
 	const k = [4, 7, 20].map(i => firstUserMessageText[i] ?? "0").join("");
 	const version = getClaudeCodeVersion();
 	const versionSuffix = Bun.SHA256.hash(`59cf53e54c78${k}${version}`, "hex").slice(0, 3);
@@ -3498,7 +3502,7 @@ export type AnthropicSystemBlock = {
 type SystemBlockOptions = {
 	includeClaudeCodeInstruction?: boolean;
 	extraInstructions?: string[];
-	/** Text of the first user message — used as fingerprint seed for the billing header. */
+	/** Text of the first conversational wire user turn, used as the billing fingerprint seed. */
 	firstUserMessageText?: string;
 	/** Cache lifetime shared by the OAuth system breakpoint and later message breakpoints. */
 	cacheControl?: AnthropicCacheControl;
@@ -4185,16 +4189,19 @@ function resolveAnthropicAdaptiveEffort(
 	return mapEffortToAnthropicAdaptiveEffort(model, requestedEffort);
 }
 
-function extractClaudeCodeFirstUserMessageText(messages: readonly Message[]): string {
+function extractClaudeCodeFirstWireUserMessageText(messages: readonly Message[]): string {
 	for (const message of messages) {
-		if (message.role !== "user") continue;
+		if ((message.role !== "user" && message.role !== "developer") || anthropicControlOf(message)) continue;
 		const { content } = message;
-		if (typeof content === "string") return content;
-		if (!Array.isArray(content)) return "";
-		for (const block of content) {
-			if (block.type === "text") return block.text;
+		if (typeof content === "string") {
+			if (content.trim()) return content;
+			continue;
 		}
-		return "";
+		if (!Array.isArray(content)) continue;
+		for (const block of content) {
+			if (block.type === "text" && block.text.trim()) return block.text;
+		}
+		if (content.some(block => block.type === "image")) return "";
 	}
 	return "";
 }
@@ -4306,11 +4313,16 @@ function diffAnthropicActiveTools(
  * at the tail. Records at a different index than they were written at are
  * rewritten history: they keep the declaration but emit no controls, so the
  * net change from the declared baseline lands at the first live position.
+ * Without `ownChange` (an on-demand compaction request, which ends inside the
+ * conversation) the tail control is left out: there it would sit between the
+ * summarized prefix and the retained turns, where live requests never sent
+ * it, and invalidate their signed thinking. The next live turn sends it.
  */
 function planAnthropicToolControls(
 	context: Context,
 	records: readonly AnthropicControlRecord[],
 	enabled: boolean,
+	ownChange: boolean,
 ): { tools: Tool[] | undefined; inserts: AnthropicControlInsert[]; record: AnthropicToolControls | undefined } {
 	if (!enabled || !context.tools) return { tools: context.tools, inserts: [], record: undefined };
 	const definitions = new Map<string, Tool>();
@@ -4353,7 +4365,7 @@ function planAnthropicToolControls(
 			if (toolChanges.length > 0) inserts.push({ index: record.index, spec: { toolChanges } });
 			previous = record.tools.active;
 		}
-		const toolChanges = diffAnthropicActiveTools(previous, activeNames, declaredSet);
+		const toolChanges = ownChange ? diffAnthropicActiveTools(previous, activeNames, declaredSet) : [];
 		if (toolChanges.length > 0) inserts.push({ index: context.messages.length, spec: { toolChanges } });
 	}
 
@@ -4380,7 +4392,8 @@ function planAnthropicToolControls(
  * restore, so a request without an explicit effort keeps the level in force.
  * Records at a different index than they were written at are rewritten history:
  * they keep the top-level effort but emit no controls, so the net change lands
- * at the first live position.
+ * at the first live position. Without `ownChange` (an on-demand compaction
+ * request) `current` is not applied: the request runs at the effort in force.
  */
 function planAnthropicEffortControls(
 	current: AnthropicOutputEffort | undefined,
@@ -4388,6 +4401,7 @@ function planAnthropicEffortControls(
 	records: readonly AnthropicControlRecord[],
 	enabled: boolean,
 	compactionReplay: AnthropicCompactionReplay | undefined,
+	ownChange: boolean,
 ): {
 	topLevel: AnthropicOutputEffort | undefined;
 	inserts: AnthropicControlInsert[];
@@ -4418,7 +4432,7 @@ function planAnthropicEffortControls(
 		}
 		tail = recorded ?? tail;
 	}
-	if (current !== undefined && current !== tail) {
+	if (ownChange && current !== undefined && current !== tail) {
 		inserts.push({
 			index: anthropicEffortInsertIndex(messages, messages.length, compactionReplay),
 			spec: { toolChanges: [], effort: current },
@@ -4426,6 +4440,32 @@ function planAnthropicEffortControls(
 		tail = current;
 	}
 	return { topLevel, inserts, record: { topLevel: topLevel ?? null, tail: tail ?? null } };
+}
+
+/**
+ * The effort whose thinking allowance an on-demand compaction request over
+ * `messages` gets. It sends no effort change of its own, so once an earlier
+ * request recorded an effort, the one it left in force applies, even when
+ * `requested` differs or is off. When that request named none, the API's
+ * per-model default applies, which is not known here: the request gets the
+ * largest effort's allowance (`max_tokens` is a cap, not spend). Without a
+ * recorded effort the request sets its own.
+ */
+export function resolveAnthropicCompactionEffort(
+	model: Model<"anthropic-messages">,
+	messages: readonly Message[],
+	requested: Effort | undefined,
+): Effort | undefined {
+	if (model.compat.supportsPerMessageEffort !== true) return requested;
+	const records = collectAnthropicControlRecords(messages);
+	if (!records.some(record => record.controls.effort)) return requested;
+	const inForce = planAnthropicEffortControls(undefined, messages, records, true, undefined, false).record?.tail;
+	if (!inForce) return requested && (model.thinking?.efforts.at(-1) ?? requested);
+	if (requested && mapEffortToAnthropicAdaptiveEffort(model, requested) === inForce) return requested;
+	return (
+		model.thinking?.efforts?.findLast(effort => mapEffortToAnthropicAdaptiveEffort(model, effort) === inForce) ??
+		requested
+	);
 }
 
 /**
@@ -4593,7 +4633,7 @@ function buildParams(
 	// Pre-compute system blocks so they occupy the right slot in the serialized body.
 	const shouldInjectClaudeCodeInstruction = isOAuthToken && model.compat.injectClaudeCodeInstruction !== false;
 	const firstUserMessageText = shouldInjectClaudeCodeInstruction
-		? extractClaudeCodeFirstUserMessageText(context.messages)
+		? extractClaudeCodeFirstWireUserMessageText(context.messages)
 		: "";
 	const systemBlocks = buildAnthropicSystemBlocks(context.systemPrompt, {
 		includeClaudeCodeInstruction: shouldInjectClaudeCodeInstruction,
@@ -4601,6 +4641,9 @@ function buildParams(
 		cacheControl,
 	});
 
+	// An on-demand compaction request ends inside the conversation: it gets
+	// nothing live requests lack there, so it makes no tool or effort change.
+	const compactionRequest = compactionSupported ? options?.anthropicCompaction : undefined;
 	// Controls earlier requests recorded on their responses fix the declared
 	// tools, the top-level effort and every control message in between.
 	const records = collectAnthropicControlRecords(context.messages);
@@ -4608,6 +4651,7 @@ function buildParams(
 		context,
 		records,
 		model.compat.supportsMidConversationToolChanges === true,
+		!compactionRequest,
 	);
 
 	// Pre-compute tools.
@@ -4750,7 +4794,6 @@ function buildParams(
 	// A new on-demand compaction request cannot carry context_management.
 	// Later turns carrying its signed block may keep clear_thinking as usual.
 	// Persisted encrypted threshold blocks alone need a legacy replay edit.
-	const compactionRequest = compactionSupported ? options?.anthropicCompaction : undefined;
 	const signedReplay = compactionSupported && contextReplaysAnthropicCompaction(context.messages, model, "signed");
 	const legacyReplay =
 		compactionSupported && !signedReplay && contextReplaysAnthropicCompaction(context.messages, model, "legacy");
@@ -4776,6 +4819,7 @@ function buildParams(
 		records,
 		model.compat.supportsPerMessageEffort === true,
 		compactionReplay,
+		!compactionRequest,
 	);
 	// `between_tools` returns a 400 at `xhigh`/`max` effort, and the effort in
 	// force from earlier turns outlives a thinking toggle. Fall back to the
@@ -4794,6 +4838,7 @@ function buildParams(
 			dropAllThinking: dropAllThinking || stripThinkingHistory,
 			droppedThinkingBlocks,
 			credentialId: options?.credentialId,
+			compactionRequest,
 		},
 	);
 	// Anchor the stable tools+system head so it stays cached across turns; the
@@ -5053,6 +5098,8 @@ export function convertAnthropicMessages(
 		dropAllThinking?: boolean;
 		droppedThinkingBlocks?: ReadonlySet<string>;
 		credentialId?: number;
+		/** On-demand compaction request: it ends inside the conversation, so it gets nothing live requests lack there. */
+		compactionRequest?: AnthropicCompactionRequest;
 	},
 ): AnthropicMessageParam[] {
 	// Indices of params emitted from `developer` messages. After the main pass,
@@ -5064,21 +5111,33 @@ export function convertAnthropicMessages(
 	// and the developer upgrade below look through them: they were inserted
 	// by this provider, not authored in the conversation.
 	const controlParams = new Set<AnthropicMessageParam>();
-	// Harness file metadata queued behind a replayed compaction block. Flushed
-	// after the next param boundary that keeps it clear of both the block (the
-	// fold below must still join the block with a following assistant turn, or
-	// that turn's thinking prefix changes) and any open tool_use turn (its
-	// results must follow it contiguously).
-	const pendingCompactionFiles: string[] = [];
-	const flushCompactionFiles = (): void => {
-		while (pendingCompactionFiles.length > 0) {
-			const filesText = pendingCompactionFiles.shift();
-			if (filesText === undefined || filesText.trim().length === 0) continue;
-			// The payload bypassed the `transformMessages` redaction pass, so
-			// the metadata takes the same credential redaction here that the
-			// dropped message text received there.
-			params.push({ role: "user", content: redactSensitiveCredentials(filesText) });
-		}
+	// Harness file metadata queued behind a replayed compaction block, oldest
+	// replay point first. Messages kept after a summary must reach the API
+	// exactly as they were sent before, or their signed thinking no longer
+	// matches its prefix; each entry therefore waits for the first message
+	// created after its replay point (past any tool results that close an open
+	// tool_use turn), or the end of the list.
+	let pendingCompactionFiles: AnthropicCompactionFiles[] = [];
+	const pushCompactionFiles = (filesText: string): void => {
+		if (filesText.trim().length === 0) return;
+		// The payload bypassed the `transformMessages` redaction pass, so
+		// the metadata takes the same credential redaction here that the
+		// dropped message text received there.
+		params.push({ role: "user", content: redactSensitiveCredentials(filesText) });
+	};
+	const flushCompactionFiles = (before: number): void => {
+		const due = pendingCompactionFiles.filter(files => files.after < before);
+		pendingCompactionFiles = pendingCompactionFiles.filter(files => files.after >= before);
+		for (const files of due) pushCompactionFiles(files.text);
+	};
+	// Summaries without `exactTail` replay their metadata after the first param
+	// boundary past the block (clear of the fold and of an open tool_use turn):
+	// thinking created after them was signed against that layout.
+	let legacyCompactionFiles: string | undefined;
+	const flushLegacyCompactionFiles = (): void => {
+		if (legacyCompactionFiles === undefined) return;
+		pushCompactionFiles(legacyCompactionFiles);
+		legacyCompactionFiles = undefined;
 	};
 
 	const transformedMessages = transformMessages(
@@ -5118,17 +5177,23 @@ export function convertAnthropicMessages(
 			params.push(compactionParam);
 			// The block carries the verbatim API summary, so the message text
 			// (which holds the harness file lists) would be dropped with it.
-			// Queue the file metadata for after the block: it sits past the
-			// compaction boundary the API enforces, unlike anything before it.
-			// The flush waits past a following assistant turn (see above).
-			if (msg.providerPayload.filesText !== undefined) {
-				pendingCompactionFiles.push(msg.providerPayload.filesText);
+			// Queue the file metadata past the retained tail (see above); the
+			// summary message carries the compaction's commit time.
+			const { filesText, retainedFiles, exactTail } = msg.providerPayload;
+			if (exactTail) {
+				pendingCompactionFiles = [
+					...(retainedFiles ?? []),
+					...(filesText !== undefined ? [{ text: filesText, after: msg.timestamp }] : []),
+				].sort((a, b) => a.after - b.after);
+			} else {
+				pendingCompactionFiles = [];
+				legacyCompactionFiles = filesText;
 			}
 			continue;
 		}
+		if (msg.role !== "toolResult") flushCompactionFiles(msg.timestamp);
 		if (msg.role === "user" || msg.role === "developer") {
-			// Queued file metadata predates this message, so it emits first.
-			flushCompactionFiles();
+			flushLegacyCompactionFiles();
 			const payload =
 				msg.role === "developer" && msg.providerPayload?.type === "anthropicMessage"
 					? msg.providerPayload
@@ -5328,12 +5393,7 @@ export function convertAnthropicMessages(
 			};
 			copyPerCallContextMessage(assistantParam, msg);
 			params.push(assistantParam);
-			// Flush queued file metadata unless this turn left tool calls open:
-			// their results must follow the turn contiguously, so the metadata
-			// waits for the merged result message (or the end of the list).
-			if (!blocks.some(block => block.type === "tool_use")) {
-				flushCompactionFiles();
-			}
+			if (!blocks.some(block => block.type === "tool_use")) flushLegacyCompactionFiles();
 		} else if (msg.role === "toolResult") {
 			// Collect all consecutive toolResult messages, needed for z.ai Anthropic endpoint
 			const toolResults: ContentBlockParam[] = [];
@@ -5369,10 +5429,23 @@ export function convertAnthropicMessages(
 
 			// Add a single user message with all tool results
 			params.push(toolResultParam);
-			// An open tool_use turn's results are whole again; queued file
-			// metadata can follow without splitting the pairing.
-			flushCompactionFiles();
+			flushLegacyCompactionFiles();
 		}
+	}
+
+	// Queued compaction metadata lands before the passes below, which place
+	// `system` params by their neighbours.
+	if (opts?.compactionRequest) {
+		// Metadata due before `filesDueBefore` ends the summarized range; the
+		// rest replays with the retained tail and is carried by the new summary
+		// instead. Legacy metadata still pending here belongs after the first
+		// retained turn, outside this request.
+		flushCompactionFiles(opts.compactionRequest.filesDueBefore ?? Number.POSITIVE_INFINITY);
+	} else {
+		// A trailing compaction summary leaves its file metadata queued; emit it
+		// before the prefill check so the list ends the request as a user turn.
+		flushCompactionFiles(Number.POSITIVE_INFINITY);
+		flushLegacyCompactionFiles();
 	}
 
 	// Upgrade developer-origin params to mid-conversation `system` messages where
@@ -5468,9 +5541,28 @@ export function convertAnthropicMessages(
 		params.splice(previous + 1, 0, { role: "user", content: "Continue." });
 		i = previous + 1;
 	}
-	// A trailing compaction summary leaves its file metadata queued; emit it
-	// before the prefill check so the list ends the request as a user turn.
-	flushCompactionFiles();
+	// A control carrying tool changes must precede an `assistant` turn or end
+	// the request (only the directive-only effort form is accepted anywhere),
+	// or every later request in the session fails with a 400. Its slot is the
+	// response of the request that sent it; when a `user` param follows instead
+	// — that response was an empty interrupted or failed turn `transformMessages`
+	// dropped, or compaction file metadata was flushed after it — it moves to
+	// the next assistant turn, the first response that saw the change. Every
+	// later request derives the same slot, so continuations stay cache-stable.
+	for (let i = 0; i < params.length; i++) {
+		const control = params[i];
+		if (!controlParams.has(control) || control.content.length === 0) continue;
+		const next = skipControls(i, 1);
+		if (params[next]?.role !== "user") continue;
+		let slot = next;
+		while (slot < params.length && params[slot].role !== "assistant") slot++;
+		// Controls already waiting for that turn came from later requests.
+		while (controlParams.has(params[slot - 1])) slot--;
+		params.splice(slot, 0, control);
+		params.splice(i, 1);
+		i--;
+	}
+	if (opts?.compactionRequest) return params;
 	const last = skipControls(params.length, -1);
 	if (params[last]?.role === "assistant") {
 		params.splice(last + 1, 0, { role: "user", content: "Continue." });

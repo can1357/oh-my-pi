@@ -1,11 +1,11 @@
 import { beforeAll, describe, expect, it } from "bun:test";
 import { stripVTControlCharacters } from "node:util";
 import { getThemeByName, initTheme } from "@oh-my-pi/pi-tui/theme";
+import { PROBE_WINDOW_BYTES } from "@oh-my-pi/pi-tui/components/markdown";
 import { renderMarkdownCell } from "@oh-my-pi/pi-tui/render/code-cell";
 import { renderOutputBlock } from "@oh-my-pi/pi-tui/render/output-block";
 import { OverlayPanel, PanelRows } from "@oh-my-pi/pi-tui/chrome/overlay-box";
 import { visibleWidth } from "@oh-my-pi/pi-tui/utils";
-import { straddleFirstWindow } from "./markdown-fixtures.js";
 
 describe("renderOutputBlock", () => {
 	beforeAll(async () => {
@@ -87,6 +87,20 @@ describe("renderMarkdownCell collapsed previews", () => {
 		).join("\n\n");
 	const outro = prose("outro", 100);
 	const numbered = (count: number, line: (i: number) => string) => Array.from({ length: count }, (_, i) => line(i));
+	/**
+	 * `Intro.`, then a construct (`open`, lines one blank line apart, `close`), then
+	 * `rest`. The lines are padded so that a `"\n\n"` inside the construct ends
+	 * exactly at PROBE_WINDOW_BYTES, the end of the first probe window, where a
+	 * probe that stops at the window's end would cut it.
+	 */
+	const straddleFirstWindow = (open: string, line: (i: number) => string, close: string, rest: string) => {
+		const prefix = `Intro.\n\n${open}\n`;
+		let body = "";
+		let i = 0;
+		while (prefix.length + body.length < PROBE_WINDOW_BYTES - 60) body += `${line(i++)}\n\n`;
+		body += `${"y".repeat(PROBE_WINDOW_BYTES - prefix.length - body.length - 2)}\n\n${line(i)}\n`;
+		return `${prefix}${body}${close}\n\n${rest}`;
+	};
 
 	// Each document is over 8 KB and has a construct crossing the first 2 KB
 	// probe window, so a collapsed preview renders a cut prefix (or, for the

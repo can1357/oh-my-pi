@@ -613,9 +613,32 @@ export async function pickElectronTarget(browser: Browser, options: PickTargetOp
 		}
 	}
 
+	let targets = browser.targets();
+	if (!targets.some(target => String(target.type()) === "page")) {
+		const pages = await abortable(options.signal, () => browser.pages());
+		if (pages.length > 0) return pickPageFromList(pages, options);
+		// CDP discovery can start answering before Chromium or Electron has
+		// created its first window. Wait for the page, never create a tab in a
+		// borrowed browser or mistake endpoint readiness for page readiness.
+		try {
+			await abortable(options.signal, () =>
+				browser.waitForTarget(target => String(target.type()) === "page", {
+					timeout: PAGE_ATTACH_TIMEOUT_MS,
+					signal: options.signal,
+				}),
+			);
+		} catch (error) {
+			throwIfAborted(options.signal);
+			if (error instanceof Error && error.name === "TimeoutError") {
+				throw new ToolError("No page targets available on the attached browser");
+			}
+			throw error;
+		}
+		targets = browser.targets();
+	}
 	let hasUnreadablePage = false;
 	const discoveredPages = await Promise.all(
-		browser.targets().map(async target => {
+		targets.map(async target => {
 			if (String(target.type()) !== "page") return null;
 			const page = await attachPageWithTimeout(target, PAGE_ATTACH_TIMEOUT_MS, options.signal);
 			if (!page || !(await waitForMainFrame(page, FRAME_READY_TIMEOUT_MS, options.signal))) {
