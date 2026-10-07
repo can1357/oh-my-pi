@@ -273,7 +273,11 @@ impl GitRepo {
 		let timeout = super::cli::COMMAND_TIMEOUT;
 		let result = if let Some(repair) = repair {
 			let result = cli_text_owned_refreshing_capped(self.root(), &args, timeout, limit);
-			self.settle_stat_cache_repair(repair);
+			if result.is_ok() && !repair.path.with_file_name("index.lock").exists() {
+				self.settle_stat_cache_repair(repair);
+			} else {
+				Self::abandon_stat_cache_repair(&repair);
+			}
 			result
 		} else {
 			cli_text_owned_capped(self.root(), &args, timeout, limit)
@@ -354,6 +358,22 @@ impl GitRepo {
 			return;
 		};
 		stat_cache_checks().insert(repair.path, StatCacheCheck { version, left_by_repair });
+	}
+
+	/// Forget a claimed repair whose status command did not persist it.
+	///
+	/// A non-zero status, or one that returns while another process still owns
+	/// `index.lock`, cannot have written this refresh back. Leaving the claim
+	/// would make an identical stat-less index installed by that writer look
+	/// like the residue of a successful repair, so no later poll would retry.
+	fn abandon_stat_cache_repair(repair: &StatCacheRepair) {
+		let mut checks = stat_cache_checks();
+		if checks
+			.get(&repair.path)
+			.is_some_and(|check| check.version == repair.version)
+		{
+			checks.remove(&repair.path);
+		}
 	}
 
 	/// Index entries carrying no stat data at all, which git and gitoxide can
@@ -2239,6 +2259,50 @@ mod tests {
 		poll(&repo, 3)?;
 		assert_eq!(locks.take()?, 1, "a newly stale index must be repaired");
 		assert_eq!(entries_missing_stat(root)?, 3, "changed, deleted and intended stay stat-less");
+		Ok(())
+	}
+	/// A refreshing status skips its optional write while another writer holds
+	/// `index.lock`, but still exits successfully. That skipped call must not
+	/// record the stat-less count as its repair floor: when the writer replaces
+	/// the index with the same number of stat-less entries, the next poll must
+	/// repair it rather than re-hash it forever.
+	#[cfg(target_os = "linux")]
+	#[test]
+	fn status_poll_retries_after_an_optional_lock_skip() -> TestResult {
+		let (dir, repo) = repo()?;
+		let root = dir.path();
+		for name in ["one", "two", "three"] {
+			fs::write(root.join(name), format!("{name}\n"))?;
+		}
+		git(root, &["add", "-A"])?;
+		git(root, &["commit", "-m", "seed"])?;
+		clear_index_stat(root)?;
+		assert_eq!(entries_missing_stat(root)?, 3, "fixture must start stat-less");
+
+		let git_dir = root.join(".git");
+		let lock = fs::File::create(git_dir.join("index.lock"))?;
+		let locks = IndexLockWatch::new(&git_dir)?;
+		assert_eq!(repo.status_summary()?, StatusSummary::default());
+		assert_eq!(
+			entries_missing_stat(root)?,
+			3,
+			"the held optional lock must leave the stat cache untouched",
+		);
+
+		drop(lock);
+		fs::remove_file(git_dir.join("index.lock"))?;
+		// Another writer replaces the index without fixing its three stat-less
+		// entries, exactly as `git add` / jj can between two polls.
+		git(root, &["read-tree", "HEAD"])?;
+		locks.take()?;
+
+		assert_eq!(repo.status_summary()?, StatusSummary::default());
+		assert_eq!(locks.take()?, 1, "the changed index must get the deferred stat-cache repair");
+		assert_eq!(
+			entries_missing_stat(root)?,
+			0,
+			"the deferred repair must write refreshed stat data back",
+		);
 		Ok(())
 	}
 
