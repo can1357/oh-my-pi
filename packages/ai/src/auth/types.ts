@@ -60,6 +60,14 @@ export interface AuthAccountSelector {
 	readonly orgId?: string;
 }
 
+/** Reserve override for one usage window of a provider account. */
+export interface AuthAccountWindowPolicy {
+	/** Protected remaining quota percentage for this window; defaults to the account's reserve. */
+	readonly reservePct?: number;
+	/** Hours before this window's reset over which its reserve releases to 0; defaults to the account's taper. */
+	readonly taperHours?: number;
+}
+
 /** Priority and reserve policy for a provider account. */
 export interface AuthAccountPolicy {
 	readonly provider: string;
@@ -70,6 +78,8 @@ export interface AuthAccountPolicy {
 	readonly reservePct?: number;
 	/** Hours before each window's reset over which this account's reserve releases to 0; overrides the global taper. */
 	readonly taperHours?: number;
+	/** Reserve overrides keyed by the usage window id the provider reports (e.g. `5h`, `7d`). */
+	readonly windows?: Readonly<Record<string, AuthAccountWindowPolicy>>;
 }
 
 /** Read-only set of per-account routing policies. */

@@ -74,6 +74,7 @@ describe("resolveAuthBrokerConfig config discovery", () => {
 				account: { email: "policy@example.com" },
 				reservePct: 25,
 				taperHours: 6,
+				windows: { "5h": { reservePct: 15 }, "7d": { reservePct: 30, taperHours: 72 } },
 			},
 		] satisfies AuthAccountPolicies;
 		await Bun.write(
@@ -268,6 +269,58 @@ describe("resolveAuthBrokerConfig config discovery", () => {
 					"",
 				].join("\n"),
 				error: "auth.accountPolicies[0].taperHours must be a finite number of at least 0",
+			},
+			{
+				yaml: [
+					"auth:",
+					"  accountPolicies:",
+					"    - provider: openai-codex",
+					"      account:",
+					"        email: preferred@example.com",
+					"      windows:",
+					"        - 7d",
+					"",
+				].join("\n"),
+				error: "auth.accountPolicies[0].windows must be an object keyed by usage window id",
+			},
+			{
+				yaml: [
+					"auth:",
+					"  accountPolicies:",
+					"    - provider: openai-codex",
+					"      account:",
+					"        email: preferred@example.com",
+					"      windows:",
+					"        7d: { reservePercent: 30 }",
+					"",
+				].join("\n"),
+				error: "auth.accountPolicies[0].windows.7d has unknown fields: reservePercent",
+			},
+			{
+				yaml: [
+					"auth:",
+					"  accountPolicies:",
+					"    - provider: openai-codex",
+					"      account:",
+					"        email: preferred@example.com",
+					"      windows:",
+					"        7d: {}",
+					"",
+				].join("\n"),
+				error: "auth.accountPolicies[0].windows.7d must set reservePct or taperHours",
+			},
+			{
+				yaml: [
+					"auth:",
+					"  accountPolicies:",
+					"    - provider: openai-codex",
+					"      account:",
+					"        email: preferred@example.com",
+					"      windows:",
+					"        7d: { reservePct: 101 }",
+					"",
+				].join("\n"),
+				error: "auth.accountPolicies[0].windows.7d.reservePct must be between 0 and 100",
 			},
 			{
 				yaml: [

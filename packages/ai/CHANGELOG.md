@@ -98,6 +98,8 @@
 - Fixed the Cursor provider retaining request resources after requests completed.
 - Fixed session-affinity pins growing without bound in long-lived gateways; pins are now capped at 256 sessions per provider.
 - Fixed Anthropic sessions failing every request with HTTP 400 ("role 'system' must precede an 'assistant' message") after a tool change coincided with compaction or an interrupted or failed reply; sessions already stuck this way recover on the next message ([#14746](https://github.com/can1357/oh-my-pi/issues/14746)).
+- Added a reset-aware usage reserve: `AuthStorageOptions.defaultReserveTaperHours` and per-account `AuthAccountPolicy.taperHours` release the reserve as `reserve × min(1, timeToReset / taper)` per usage window (taper capped at the window length; unknown or rolling resets keep the static reserve), in both model usage health and credential ranking. Default `0` keeps reserves static ([#14074](https://github.com/can1357/oh-my-pi/pull/14074) by [@schickling-assistant](https://github.com/schickling-assistant)).
+- Added per-window reserve overrides: `AuthAccountPolicy.windows` sets `reservePct` and `taperHours` for one usage window by its id (e.g. `5h`, `7d`), in usage health, credential ranking and warm-pin eviction.
 
 ## [18.7.0] - 2026-10-06
 

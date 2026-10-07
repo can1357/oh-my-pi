@@ -19,6 +19,7 @@ import {
 import { YAML } from "bun";
 import {
 	type AuthAccountPolicies,
+	type AuthAccountWindowPolicy,
 	type AuthCredentialStore,
 	AuthStorage,
 	type AuthStorageOptions,
@@ -111,6 +112,56 @@ function readDottedString(record: Record<string, unknown>, dottedKey: string): s
 	return typeof value === "string" ? value : undefined;
 }
 
+/** Validate the `reservePct` / `taperHours` pair shared by an account policy and its window overrides. */
+function parseReserveFields(record: Record<string, unknown>, path: string): AuthAccountWindowPolicy {
+	const { reservePct, taperHours } = record;
+	if (
+		reservePct !== undefined &&
+		(typeof reservePct !== "number" || !Number.isFinite(reservePct) || reservePct < 0 || reservePct > 100)
+	) {
+		throw new AIError.ConfigurationError(`${path}.reservePct must be between 0 and 100`);
+	}
+	if (taperHours !== undefined && (typeof taperHours !== "number" || !Number.isFinite(taperHours) || taperHours < 0)) {
+		throw new AIError.ConfigurationError(`${path}.taperHours must be a finite number of at least 0`);
+	}
+	return {
+		...(typeof reservePct === "number" ? { reservePct } : {}),
+		...(typeof taperHours === "number" ? { taperHours } : {}),
+	};
+}
+
+function parseAccountWindowPolicies(value: unknown, path: string): Record<string, AuthAccountWindowPolicy> {
+	if (value === null || typeof value !== "object" || Array.isArray(value)) {
+		throw new AIError.ConfigurationError(`${path} must be an object keyed by usage window id`);
+	}
+	const entries = Object.entries(value);
+	if (entries.length === 0) {
+		throw new AIError.ConfigurationError(`${path} must name at least one usage window`);
+	}
+	return Object.fromEntries(
+		entries.map(([windowId, entry]) => {
+			if (windowId.length === 0 || windowId.trim() !== windowId) {
+				throw new AIError.ConfigurationError(
+					`${path} keys must be usage window ids without surrounding whitespace`,
+				);
+			}
+			const windowPath = `${path}.${windowId}`;
+			if (entry === null || typeof entry !== "object" || Array.isArray(entry)) {
+				throw new AIError.ConfigurationError(`${windowPath} must be an object`);
+			}
+			const override = entry as Record<string, unknown>;
+			const unknownFields = Object.keys(override).filter(key => key !== "reservePct" && key !== "taperHours");
+			if (unknownFields.length > 0) {
+				throw new AIError.ConfigurationError(`${windowPath} has unknown fields: ${unknownFields.join(", ")}`);
+			}
+			if (override.reservePct === undefined && override.taperHours === undefined) {
+				throw new AIError.ConfigurationError(`${windowPath} must set reservePct or taperHours`);
+			}
+			return [windowId, parseReserveFields(override, windowPath)];
+		}),
+	);
+}
+
 function parseAuthAccountPolicies(value: unknown): AuthAccountPolicies {
 	if (value === undefined) return [];
 	if (!Array.isArray(value)) {
@@ -129,7 +180,8 @@ function parseAuthAccountPolicies(value: unknown): AuthAccountPolicies {
 				key !== "account" &&
 				key !== "priority" &&
 				key !== "reservePct" &&
-				key !== "taperHours",
+				key !== "taperHours" &&
+				key !== "windows",
 		);
 		if (unknownPolicyFields.length > 0) {
 			throw new AIError.ConfigurationError(`${path} has unknown fields: ${unknownPolicyFields.join(", ")}`);
@@ -169,21 +221,9 @@ function parseAuthAccountPolicies(value: unknown): AuthAccountPolicies {
 		if (policy.priority !== undefined && (typeof policy.priority !== "number" || !Number.isFinite(policy.priority))) {
 			throw new AIError.ConfigurationError(`${path}.priority must be a finite number`);
 		}
-		if (
-			policy.reservePct !== undefined &&
-			(typeof policy.reservePct !== "number" ||
-				!Number.isFinite(policy.reservePct) ||
-				policy.reservePct < 0 ||
-				policy.reservePct > 100)
-		) {
-			throw new AIError.ConfigurationError(`${path}.reservePct must be between 0 and 100`);
-		}
-		if (
-			policy.taperHours !== undefined &&
-			(typeof policy.taperHours !== "number" || !Number.isFinite(policy.taperHours) || policy.taperHours < 0)
-		) {
-			throw new AIError.ConfigurationError(`${path}.taperHours must be a finite number of at least 0`);
-		}
+		const reserve = parseReserveFields(policy, path);
+		const windows =
+			policy.windows === undefined ? undefined : parseAccountWindowPolicies(policy.windows, `${path}.windows`);
 
 		return {
 			provider,
@@ -194,8 +234,8 @@ function parseAuthAccountPolicies(value: unknown): AuthAccountPolicies {
 				...(typeof rawAccount.orgId === "string" ? { orgId: rawAccount.orgId } : {}),
 			},
 			...(typeof policy.priority === "number" ? { priority: policy.priority } : {}),
-			...(typeof policy.reservePct === "number" ? { reservePct: policy.reservePct } : {}),
-			...(typeof policy.taperHours === "number" ? { taperHours: policy.taperHours } : {}),
+			...reserve,
+			...(windows ? { windows } : {}),
 		};
 	});
 }

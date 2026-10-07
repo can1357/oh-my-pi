@@ -574,6 +574,68 @@ describe("AuthStorage codex oauth ranking", () => {
 		expect(health.accounts.map(account => account.state)).toEqual(["healthy", "healthy"]);
 	});
 
+	test("per-window reserves keep a shared account's 5h and weekly shares apart in ranking and eviction", async () => {
+		if (!store) throw new Error("test setup failed");
+		const base = Date.now();
+		let clockOffset = 0;
+		vi.spyOn(Date, "now").mockImplementation(() => base + clockOffset);
+		authStorage = new AuthStorage(store, {
+			usageProviderResolver: provider => (provider === "openai-codex" ? usageProvider : undefined),
+			accountPolicies: [
+				{
+					provider: "openai-codex",
+					account: { accountId: "acct-shared" },
+					priority: 20,
+					reservePct: 15,
+					windows: { "7d": { reservePct: 30, taperHours: 72 } },
+				},
+				{ provider: "openai-codex", account: { accountId: "acct-own" }, priority: 10, reservePct: 0 },
+			],
+		});
+		await authStorage.credentials.set("openai-codex", [
+			{ type: "oauth", ...createCredential("acct-shared", "shared@example.com") },
+			{ type: "oauth", ...createCredential("acct-own", "own@example.com") },
+		]);
+		const fiveHourWindow: UsageWindowConfig = { windowId: "5h", windowLabel: "5 Hours", durationMs: FIVE_HOUR_MS };
+		const setUsage = (shared: { fiveHour: number; week: number; weekResetInMs: number }): void => {
+			usageByAccount.set(
+				"acct-shared",
+				createCodexUsageReport({
+					accountId: "acct-shared",
+					primary: { usedFraction: shared.fiveHour, resetInMs: HOUR_MS },
+					secondary: { usedFraction: shared.week, resetInMs: shared.weekResetInMs },
+					primaryWindow: fiveHourWindow,
+				}),
+			);
+			usageByAccount.set(
+				"acct-own",
+				createCodexUsageReport({
+					accountId: "acct-own",
+					primary: { usedFraction: 0.1, resetInMs: HOUR_MS },
+					secondary: { usedFraction: 0.1, resetInMs: WEEK_MS },
+					primaryWindow: fiveHourWindow,
+				}),
+			);
+		};
+
+		// 5h at 80% is outside its 15% reserve even though one 30% reserve would have refused it.
+		setUsage({ fiveHour: 0.8, week: 0.5, weekResetInMs: 5 * 24 * HOUR_MS });
+		expect(await authStorage.keys.get("openai-codex", "running")).toBe("api-acct-shared");
+
+		// Weekly at 75% used five days before its reset: inside the 30% weekly reserve.
+		clockOffset = 10 * 60_000;
+		setUsage({ fiveHour: 0.2, week: 0.75, weekResetInMs: 5 * 24 * HOUR_MS });
+		await authStorage.usage.invalidate("openai-codex");
+		expect(await authStorage.keys.get("openai-codex", "running")).toBe("api-acct-own");
+		expect(await authStorage.keys.get("openai-codex", "new-early")).toBe("api-acct-own");
+
+		// A day before the reset the weekly reserve has tapered to 10%: new sessions spend it.
+		clockOffset = 20 * 60_000;
+		setUsage({ fiveHour: 0.2, week: 0.75, weekResetInMs: 24 * HOUR_MS });
+		await authStorage.usage.invalidate("openai-codex");
+		expect(await authStorage.keys.get("openai-codex", "new-late")).toBe("api-acct-shared");
+	});
+
 	test("applies the global reserve fallback to unconfigured siblings", async () => {
 		if (!store) throw new Error("test setup failed");
 		authStorage = new AuthStorage(store, {
@@ -877,6 +939,25 @@ describe("AuthStorage codex oauth ranking", () => {
 					accountPolicies: [{ provider: " openai-codex", account: { email: "account@example.com" }, priority: 1 }],
 				}),
 		).toThrow("without surrounding whitespace");
+	});
+
+	test.each([
+		[{}, "auth.accountPolicies[0].windows must name at least one usage window"],
+		[{ "7d": {} }, "auth.accountPolicies[0].windows.7d must set reservePct or taperHours"],
+		[{ " 7d": { reservePct: 30 } }, "windows keys must be usage window ids without surrounding whitespace"],
+		[
+			{ "7d": { reservePct: 130 } },
+			"auth.accountPolicies[0].windows.7d.reservePct must be a finite number between 0 and 100",
+		],
+	])("rejects per-window reserve overrides that cannot apply: %j", (windows, error) => {
+		if (!store) throw new Error("test setup failed");
+		const activeStore = store;
+		expect(
+			() =>
+				new AuthStorage(activeStore, {
+					accountPolicies: [{ provider: "openai-codex", account: { accountId: "acct-shared" }, windows }],
+				}),
+		).toThrow(error);
 	});
 
 	test("keeps hot-window and measured-usage safety ahead of configured priority", async () => {

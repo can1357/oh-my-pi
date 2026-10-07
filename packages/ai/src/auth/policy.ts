@@ -4,6 +4,7 @@ import type {
 	AuthAccountPolicies,
 	AuthAccountPolicy,
 	AuthAccountSelector,
+	AuthAccountWindowPolicy,
 	AuthCredential,
 	OAuthAccountIdentity,
 	OAuthCredential,
@@ -102,26 +103,57 @@ export class AccountPolicies {
 			if (policy.priority !== undefined && !Number.isFinite(policy.priority)) {
 				throw new AIError.ConfigurationError(`${path}.priority must be a finite number`);
 			}
-			if (
-				policy.reservePct !== undefined &&
-				(!Number.isFinite(policy.reservePct) || policy.reservePct < 0 || policy.reservePct > 100)
-			) {
-				throw new AIError.ConfigurationError(`${path}.reservePct must be a finite number between 0 and 100`);
+			AccountPolicies.#validateReserveFields(path, policy);
+			if (policy.windows === undefined) continue;
+			if (!policy.windows || typeof policy.windows !== "object" || Array.isArray(policy.windows)) {
+				throw new AIError.ConfigurationError(`${path}.windows must be an object keyed by usage window id`);
 			}
-			if (policy.taperHours !== undefined && (!Number.isFinite(policy.taperHours) || policy.taperHours < 0)) {
-				throw new AIError.ConfigurationError(`${path}.taperHours must be a finite number of at least 0`);
+			const windowIds = Object.keys(policy.windows);
+			if (windowIds.length === 0) {
+				throw new AIError.ConfigurationError(`${path}.windows must name at least one usage window`);
+			}
+			for (const windowId of windowIds) {
+				if (windowId.length === 0 || windowId.trim() !== windowId) {
+					throw new AIError.ConfigurationError(
+						`${path}.windows keys must be usage window ids without surrounding whitespace`,
+					);
+				}
+				const windowPath = `${path}.windows.${windowId}`;
+				const override = policy.windows[windowId];
+				if (!override || typeof override !== "object") {
+					throw new AIError.ConfigurationError(`${windowPath} must be an object`);
+				}
+				if (override.reservePct === undefined && override.taperHours === undefined) {
+					throw new AIError.ConfigurationError(`${windowPath} must set reservePct or taperHours`);
+				}
+				AccountPolicies.#validateReserveFields(windowPath, override);
 			}
 		}
 	}
 
+	static #validateReserveFields(path: string, fields: AuthAccountWindowPolicy): void {
+		if (
+			fields.reservePct !== undefined &&
+			(!Number.isFinite(fields.reservePct) || fields.reservePct < 0 || fields.reservePct > 100)
+		) {
+			throw new AIError.ConfigurationError(`${path}.reservePct must be a finite number between 0 and 100`);
+		}
+		if (fields.taperHours !== undefined && (!Number.isFinite(fields.taperHours) || fields.taperHours < 0)) {
+			throw new AIError.ConfigurationError(`${path}.taperHours must be a finite number of at least 0`);
+		}
+	}
+
 	validateUsageCapability(provider: string, canFetchUsage: boolean): void {
-		const policyIndex = this.#accountPolicies.findIndex(
-			policy => policy.provider === provider && policy.reservePct !== undefined,
-		);
-		if (policyIndex !== -1 && !canFetchUsage) {
-			throw new AIError.ConfigurationError(
-				`auth.accountPolicies[${policyIndex}].reservePct requires a usage provider for ${provider}`,
+		if (canFetchUsage) return;
+		for (const field of ["reservePct", "windows"] as const) {
+			const policyIndex = this.#accountPolicies.findIndex(
+				policy => policy.provider === provider && policy[field] !== undefined,
 			);
+			if (policyIndex !== -1) {
+				throw new AIError.ConfigurationError(
+					`auth.accountPolicies[${policyIndex}].${field} requires a usage provider for ${provider}`,
+				);
+			}
 		}
 	}
 

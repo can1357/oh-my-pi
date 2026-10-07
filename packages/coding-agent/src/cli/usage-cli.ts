@@ -675,16 +675,25 @@ function formatPolicyLine(
 	const usedFractions = (limits ?? [])
 		.map(resolveUsedFraction)
 		.filter((fraction): fraction is number => fraction !== undefined && Number.isFinite(fraction));
-	if (usedFractions.length === 0) {
+	const measured = usedFractions.length > 0;
+	const windowLabels = Object.entries(policy?.windows ?? {})
+		.map(([windowId, override]) => {
+			const windowTaperHours = override.taperHours ?? taperHours;
+			const windowTaperLabel = windowTaperHours > 0 ? `, tapers over ${windowTaperHours}h` : "";
+			const unmatched = measured && !limits?.some(limit => limit.window?.id === windowId) ? " (no such window)" : "";
+			return ` · ${windowId} reserve ${override.reservePct ?? reservePct}%${windowTaperLabel}${unmatched}`;
+		})
+		.join("");
+	if (!measured) {
 		const unmeasured = exhausted ? "exhausted" : "reserve unknown";
-		return `policy: priority ${priority} · reserve ${reserveLabel} · ${unmeasured}`;
+		return `policy: priority ${priority} · reserve ${reserveLabel}${windowLabels} · ${unmeasured}`;
 	}
 	const remainingFraction = Math.max(0, 1 - Math.max(...usedFractions));
 	const reserve = resolveUsageReserve(policy, options.globalReservePct / 100, options.globalReserveTaperHours ?? 0);
 	let state = "eligible";
 	if (exhausted || remainingFraction <= 0) state = "exhausted";
 	else if (reserve !== undefined && usageLimitsInReserve(limits ?? [], reserve, Date.now())) state = "inside reserve";
-	return `policy: priority ${priority} · reserve ${reserveLabel} · ${state} · ${(remainingFraction * 100).toFixed(1)}% left`;
+	return `policy: priority ${priority} · reserve ${reserveLabel}${windowLabels} · ${state} · ${(remainingFraction * 100).toFixed(1)}% left`;
 }
 
 /**

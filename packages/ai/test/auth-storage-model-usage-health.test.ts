@@ -804,4 +804,53 @@ describe("AuthStorage reset-aware usage reserve", () => {
 			"reserve",
 		);
 	});
+
+	/** A 5-hour window resetting in 10 minutes and a weekly window resetting in `hoursToWeeklyReset`. */
+	function twoWindowReport(fiveHourUsed: number, weekUsed: number, hoursToWeeklyReset: number): UsageReport {
+		const fiveHour = limit("5h", fiveHourUsed);
+		fiveHour.window = { id: "5h", label: "5h", durationMs: 5 * HOUR_MS, resetsAt: Date.now() + 10 * 60_000 };
+		const week = limit("7d", weekUsed);
+		week.window = {
+			id: "7d",
+			label: "7d",
+			durationMs: 7 * 24 * HOUR_MS,
+			resetsAt: Date.now() + hoursToWeeklyReset * HOUR_MS,
+		};
+		return report("account-1", [fiveHour, week]);
+	}
+
+	const account = { provider: "anthropic", account: { accountId: "account-1" } } as const;
+	// 5h stops at 85% used and stays static; 7d stops at 70% used and releases over its last 72 h.
+	const sharedAccount: AuthAccountPolicies = [
+		{ ...account, reservePct: 15, windows: { "7d": { reservePct: 30, taperHours: 72 } } },
+	];
+
+	it.each([
+		["lets the 5h window run past the weekly reserve", sharedAccount, 0.84, 0.6, 120, "healthy"],
+		["keeps the 5h reserve static right before its reset", sharedAccount, 0.9, 0.6, 120, "reserve"],
+		["holds the weekly reserve early in the week", sharedAccount, 0.2, 0.75, 120, "reserve"],
+		// 66 h to reset: 30% × 66/72 = 27.5% ≥ 25% left.
+		["releases the weekly reserve linearly, not at once", sharedAccount, 0.2, 0.75, 66, "reserve"],
+		// 54 h to reset: 30% × 54/72 = 22.5% < 25% left.
+		["spends the weekly reserve that would expire unused", sharedAccount, 0.2, 0.75, 54, "healthy"],
+		[
+			"inherits the account reserve for a window that only sets a taper",
+			[{ ...account, reservePct: 30, windows: { "7d": { taperHours: 72 } } }],
+			0.2,
+			0.75,
+			120,
+			"reserve",
+		],
+		[
+			"lets a window's taperHours 0 override the account taper",
+			[{ ...account, reservePct: 15, taperHours: 72, windows: { "5h": { taperHours: 0 } } }],
+			0.9,
+			0.2,
+			120,
+			"reserve",
+		],
+	] as const)("%s", async (_name, accountPolicies, fiveHourUsed, weekUsed, hoursToWeeklyReset, expected) => {
+		const usageReport = twoWindowReport(fiveHourUsed, weekUsed, hoursToWeeklyReset);
+		expect(await reserveState(usageReport, { accountPolicies })).toBe(expected);
+	});
 });
