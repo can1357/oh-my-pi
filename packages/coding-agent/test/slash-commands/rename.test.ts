@@ -438,6 +438,9 @@ it.each(["TUI", "headless"] as const)(
 			.mockImplementationOnce(() => manual.promise);
 		let pending: Promise<unknown> | undefined;
 		try {
+			// A TITLE_SYSTEM.md override keeps the automatic title on the title model
+			// (no reply fork), so both titles race through `generate`.
+			session.setTitleSystemPrompt("Name the session in 3-6 words.");
 			session.maybeStartTitleGeneration("Repair cache invalidation after writes");
 			pending = execute("/rename");
 			expect(generate).toHaveBeenCalledTimes(2);

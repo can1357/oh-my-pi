@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed GitHub Copilot models with tier-level prompt limits showing the long-context window by default ([#14770](https://github.com/can1357/oh-my-pi/issues/14770)).
+
+## [18.8.0] - 2026-10-07
+
+### Changed
+
+- Improved catalog performance by speeding up model cache reads and repeated catalog-wide model builds, especially for large catalogs.
+
 ## [18.7.0] - 2026-10-06
 
 ### Added

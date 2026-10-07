@@ -249,7 +249,8 @@ export class AttachmentChipsBand implements Component {
 
 	/** Leading 4 rows x 12 cols of the pasted text, muted. */
 	#textInterior(entry: TextAttachment): string[] {
-		const lines = entry.content.split("\n");
+		// Only the leading rows are drawn; don't split a multi-KB paste every frame.
+		const lines = entry.content.split("\n", INNER_ROWS);
 		const rows: string[] = [];
 		for (let r = 0; r < INNER_ROWS; r++) {
 			const cut = truncateToWidth(replaceTabs(lines[r] ?? ""), INNER_COLS);

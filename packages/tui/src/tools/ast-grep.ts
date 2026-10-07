@@ -123,25 +123,41 @@ export const astGrepToolRenderer = {
 		// Resolve hyperlinks over the whole output so nested directory headers
 		// reconstruct across the blank-line groups the tree list collapses by.
 		const contexts = classifyGroupedLines(allLines, details?.cwd ?? details?.searchPath, details?.searchPath);
-		const styledLines = allLines.map((line, index) => {
+		// Style lazily: the collapsed tree list only renders the first few groups,
+		// so a large result never styles/hyperlinks rows nobody sees.
+		const styledLines: (string | undefined)[] = Array.from({ length: allLines.length }, () => undefined);
+		const styleLine = (index: number): string => {
+			const cached = styledLines[index];
+			if (cached !== undefined) return cached;
+			const line = allLines[index]!;
 			const ctx = contexts[index]!;
+			let styled: string;
 			if (ctx.kind === "dir") {
-				const styled = uiTheme.fg("accent", line);
-				return ctx.headerPath ? fileHyperlink(ctx.headerPath, styled) : styled;
+				const accent = uiTheme.fg("accent", line);
+				styled = ctx.headerPath ? fileHyperlink(ctx.headerPath, accent) : accent;
+			} else if (ctx.kind === "file") {
+				const tinted = uiTheme.fg(ctx.depth === 1 ? "accent" : "dim", line);
+				styled = ctx.headerPath ? fileHyperlink(ctx.headerPath, tinted) : tinted;
+			} else {
+				styled = uiTheme.fg(line.startsWith("  meta:") ? "dim" : "toolOutput", line);
 			}
-			if (ctx.kind === "file") {
-				const styled = uiTheme.fg(ctx.depth === 1 ? "accent" : "dim", line);
-				return ctx.headerPath ? fileHyperlink(ctx.headerPath, styled) : styled;
-			}
-			if (line.startsWith("  meta:")) return uiTheme.fg("dim", line);
-			return uiTheme.fg("toolOutput", line);
+			styledLines[index] = styled;
+			return styled;
+		};
+		const matchGroups = groupLineIndicesByBlank(allLines).filter(indices => {
+			const first = allLines[indices[0]!]!;
+			return !first.startsWith("Result limit reached") && !first.startsWith("Parse issues:");
 		});
-		const matchGroups = groupLineIndicesByBlank(allLines)
-			.filter(indices => {
-				const first = allLines[indices[0]!]!;
-				return !first.startsWith("Result limit reached") && !first.startsWith("Parse issues:");
-			})
-			.map(indices => indices.map(index => styledLines[index]!));
+		// Line offset at which each group starts. A collapsed tree list stops at the
+		// first group that overflows its line budget, so groups starting at or past
+		// the budget are never shown — hand it same-length placeholders instead of
+		// styling them (renderTreeList only needs their line counts).
+		const groupStarts: number[] = [];
+		let groupStart = 0;
+		for (const group of matchGroups) {
+			groupStarts.push(groupStart);
+			groupStart += group.length;
+		}
 
 		const extraLines: string[] = [];
 		if (limitReached) {
@@ -163,7 +179,10 @@ export const astGrepToolRenderer = {
 						maxCollapsed: matchGroups.length,
 						maxCollapsedLines: COLLAPSED_MATCH_LIMIT,
 						itemType: "match",
-						renderItem: group => group,
+						renderItem: (group, context) =>
+							!options.expanded && groupStarts[context.index]! >= COLLAPSED_MATCH_LIMIT
+								? Array.from({ length: group.length }, () => "")
+								: group.map(styleLine),
 					},
 					uiTheme,
 				);

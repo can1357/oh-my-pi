@@ -27,7 +27,7 @@ import {
 	parseConfiguredThinkingLevel,
 } from "../thinking";
 import { thinkingLevelGlyph } from "../render/render-utils";
-import { type ThemeColor, theme } from "../theme/theme";
+import { type Theme, type ThemeColor, theme } from "../theme/theme";
 import {
 	matchesSelectCancel,
 	matchesSelectDown,
@@ -887,6 +887,24 @@ function metaColumnsWidth(widths: readonly number[]): number {
 /** What the per-row perf column shows at the current width. */
 type PerfMode = "off" | "tps" | "full";
 
+/** A measured perf aggregate and, when it came from one, its service tier. */
+interface MeasuredPerf {
+	perf: ModelBrowserPerf;
+	tier?: string;
+}
+
+/** Plain catalog metric cells of one row and their terminal widths, valid for one model and theme. */
+interface MetricCells {
+	model: Model;
+	theme: Theme;
+	intelligence: string;
+	intelligenceWidth: number;
+	ctx: string;
+	ctxWidth: number;
+	cost: string;
+	costWidth: number;
+}
+
 /**
  * The reusable browser component. Renders a fixed-height block
  * (`maxVisible + LIST_ROW_START + DETAIL_ROWS` rows) so host mouse geometry
@@ -907,6 +925,14 @@ export class ModelBrowser implements Component {
 	/** Ranker for the menu's current item array; rebuilt when items or affinity change. */
 	#ranker?: { source: readonly ModelBrowserItem[]; ranker: ModelItemRanker };
 	#perf: ReadonlyMap<string, ModelBrowserPerf> = new Map();
+	/** Fastest tier aggregate per selector in {@link #perf}, built on the first lookup miss. */
+	#perfTiers:
+		| { perf: ReadonlyMap<string, ModelBrowserPerf>; size: number; best: Map<string, MeasuredPerf> }
+		| undefined;
+	/** Theme-formatted catalog metric cells per item; rebuilt when the item's model or the theme changes. */
+	#metricCells = new WeakMap<ModelBrowserItem, MetricCells>();
+	/** Non-separator items of the last ranked visible list, for {@link queryMatches}. */
+	#queryMatches: { visible: readonly ModelBrowserItem[]; matches: readonly ModelBrowserItem[] } | undefined;
 	#hoveredIndex: number | null = null;
 	#maxVisible = 10;
 	#showProvider: boolean;
@@ -1073,6 +1099,22 @@ export class ModelBrowser implements Component {
 
 	get visibleCount(): number {
 		return this.#menu.visibleItems.length;
+	}
+
+	/**
+	 * Base items matching the live query, best first, without the separator
+	 * row; undefined while the query is blank. Reuses the ranking the list
+	 * already ran, so hosts can derive match counts without ranking again.
+	 */
+	get queryMatches(): readonly ModelBrowserItem[] | undefined {
+		if (!this.query.trim()) return undefined;
+		const visible = this.#menu.visibleItems;
+		let cached = this.#queryMatches;
+		if (cached?.visible !== visible) {
+			cached = { visible, matches: visible.filter(item => !this.#isDisabled(item)) };
+			this.#queryMatches = cached;
+		}
+		return cached.matches;
 	}
 
 	/** Move selection to `selector`; false when it is not in the current view. */
@@ -1339,7 +1381,8 @@ export class ModelBrowser implements Component {
 	 * on a non-default tier still shows its real speed. `tier` is set whenever
 	 * the numbers come from a tier aggregate, for the caller to label.
 	 */
-	#perfFor(item: ModelBrowserItem): { perf: ModelBrowserPerf; tier?: string } | undefined {
+	#perfFor(item: ModelBrowserItem): MeasuredPerf | undefined {
+		if (this.#perf.size === 0) return undefined;
 		const tier = this.#settings.serviceTierFor?.(item.model);
 		if (tier) {
 			const tiered = this.#perf.get(`${item.selector}@${tier}`);
@@ -1347,13 +1390,48 @@ export class ModelBrowser implements Component {
 		}
 		const standard = this.#perf.get(item.selector);
 		if (standard) return { perf: standard };
-		const prefix = `${item.selector}@`;
-		let best: { perf: ModelBrowserPerf; tier: string } | undefined;
-		for (const [key, perf] of this.#perf) {
-			if (!key.startsWith(prefix)) continue;
-			if (!best || perf.tps > best.perf.tps) best = { perf, tier: key.slice(prefix.length) };
+		return this.#fastestTierPerf(item.selector);
+	}
+
+	/** Fastest `selector@tier` aggregate (first wins ties), from an index built once per perf map. */
+	#fastestTierPerf(selector: string): MeasuredPerf | undefined {
+		const perfMap = this.#perf;
+		let index = this.#perfTiers;
+		if (index?.perf !== perfMap || index.size !== perfMap.size) {
+			const best = new Map<string, MeasuredPerf>();
+			for (const [key, perf] of perfMap) {
+				// Every `@` may end the selector: `a@b@t` is tier `b@t` of `a` and tier `t` of `a@b`.
+				for (let at = key.indexOf("@"); at >= 0; at = key.indexOf("@", at + 1)) {
+					const owner = key.slice(0, at);
+					const current = best.get(owner);
+					if (!current || perf.tps > current.perf.tps) best.set(owner, { perf, tier: key.slice(at + 1) });
+				}
+			}
+			index = { perf: perfMap, size: perfMap.size, best };
+			this.#perfTiers = index;
 		}
-		return best;
+		return index.best.get(selector);
+	}
+
+	/** Catalog metric cells of a row, formatted once per model and theme. */
+	#metricCellsFor(item: ModelBrowserItem): MetricCells {
+		const cached = this.#metricCells.get(item);
+		if (cached?.model === item.model && cached.theme === theme) return cached;
+		const intelligence = formatIntelligence(item.model);
+		const ctx = formatContext(item.model);
+		const cost = formatCostPair(item.model);
+		const cells: MetricCells = {
+			model: item.model,
+			theme,
+			intelligence,
+			intelligenceWidth: visibleWidth(intelligence),
+			ctx,
+			ctxWidth: visibleWidth(ctx),
+			cost,
+			costWidth: visibleWidth(cost),
+		};
+		this.#metricCells.set(item, cells);
+		return cells;
 	}
 
 	/** Measured TPS/TTFT, falling back to the catalog TPS as an estimated `~118t/s`. */
@@ -1381,7 +1459,8 @@ export class ModelBrowser implements Component {
 		costWidth: number,
 		intelligenceWidth: number,
 		perfWidth: number,
-		perfMode: PerfMode,
+		metrics: MetricCells,
+		perfCell: string,
 	): string {
 		if (item.id === "separator") {
 			const dashCount = Math.max(0, width - 4);
@@ -1405,11 +1484,10 @@ export class ModelBrowser implements Component {
 
 		// Metric columns collapse when empty or when the row needs room for its name.
 		const cols: string[] = [];
-		if (intelligenceWidth > 0)
-			cols.push(theme.fg("dim", padLeftVisible(formatIntelligence(item.model), intelligenceWidth)));
-		if (perfWidth > 0) cols.push(theme.fg("dim", padLeftVisible(this.#perfCell(item, perfMode), perfWidth)));
-		if (ctxWidth > 0) cols.push(theme.fg("dim", padLeftVisible(formatContext(item.model), ctxWidth)));
-		if (costWidth > 0) cols.push(theme.fg("dim", padLeftVisible(formatCostPair(item.model), costWidth)));
+		if (intelligenceWidth > 0) cols.push(theme.fg("dim", padLeftVisible(metrics.intelligence, intelligenceWidth)));
+		if (perfWidth > 0) cols.push(theme.fg("dim", padLeftVisible(perfCell, perfWidth)));
+		if (ctxWidth > 0) cols.push(theme.fg("dim", padLeftVisible(metrics.ctx, ctxWidth)));
+		if (costWidth > 0) cols.push(theme.fg("dim", padLeftVisible(metrics.cost, costWidth)));
 		const metaWidth = metaColumnsWidth([intelligenceWidth, perfWidth, ctxWidth, costWidth]);
 		const available = Math.max(1, width - metaWidth - (cols.length > 0 ? 1 : 0));
 		left = truncateToWidth(left, available);
@@ -1515,15 +1593,22 @@ export class ModelBrowser implements Component {
 			const perfMode: PerfMode = width >= PERF_FULL_MIN_WIDTH ? "full" : width >= PERF_TPS_MIN_WIDTH ? "tps" : "off";
 			let intelligenceWidth = 0;
 			let perfWidth = 0;
+			const visible = this.#menu.visibleItems;
+			const windowMetrics: MetricCells[] = [];
+			const windowPerf: string[] = [];
 			for (let i = startIndex; i < endIndex; i++) {
-				const item = this.#menu.visibleItems[i];
+				const item = visible[i];
 				if (!item) continue;
-				ctxWidth = Math.max(ctxWidth, visibleWidth(formatContext(item.model)));
-				costWidth = Math.max(costWidth, visibleWidth(formatCostPair(item.model)));
+				const metrics = this.#metricCellsFor(item);
+				const perfCell = this.#perfCell(item, perfMode);
+				windowMetrics[i - startIndex] = metrics;
+				windowPerf[i - startIndex] = perfCell;
+				ctxWidth = Math.max(ctxWidth, metrics.ctxWidth);
+				costWidth = Math.max(costWidth, metrics.costWidth);
 				if (perfMode !== "off") {
-					intelligenceWidth = Math.max(intelligenceWidth, visibleWidth(formatIntelligence(item.model)));
+					intelligenceWidth = Math.max(intelligenceWidth, metrics.intelligenceWidth);
 				}
-				perfWidth = Math.max(perfWidth, visibleWidth(this.#perfCell(item, perfMode)));
+				perfWidth = Math.max(perfWidth, visibleWidth(perfCell));
 			}
 			// Preserve at least a readable name by dropping cost, then context.
 			let nameRoom = width - 2 - metaColumnsWidth([intelligenceWidth, perfWidth, ctxWidth, costWidth]);
@@ -1533,7 +1618,7 @@ export class ModelBrowser implements Component {
 
 			const rows: string[] = [];
 			for (let i = startIndex; i < endIndex; i++) {
-				const item = this.#menu.visibleItems[i];
+				const item = visible[i];
 				if (!item) continue;
 				rows.push(
 					this.#renderRow(
@@ -1545,7 +1630,8 @@ export class ModelBrowser implements Component {
 						costWidth,
 						intelligenceWidth,
 						perfWidth,
-						perfMode,
+						windowMetrics[i - startIndex]!,
+						windowPerf[i - startIndex]!,
 					),
 				);
 			}

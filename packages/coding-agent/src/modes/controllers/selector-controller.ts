@@ -64,7 +64,7 @@ import {
 import type { ForeignSessionInfo, ForeignSessionSource } from "../../session/foreign-session-store";
 import { isTranscriptEntry, type TranscriptEntry } from "../../session/session-context";
 import { isUserRequestEntry } from "@oh-my-pi/pi-tui/chat/transcript-entry";
-import type { SessionEntry, SessionTreeNode } from "../../session/session-entries";
+import type { SessionEntry, SessionTitleCard, SessionTreeNode } from "../../session/session-entries";
 import type { SessionInfo } from "../../session/session-listing";
 import { SessionManager } from "../../session/session-manager";
 import { loadPinnedSessionIds } from "../../session/session-pins";
@@ -552,6 +552,7 @@ export class SelectorController {
 					this.ctx.ui.requestRender();
 				},
 			);
+			component.setOnRequestRender(() => this.ctx.ui.requestRender());
 			return { component, focus: component };
 		});
 	}
@@ -1756,10 +1757,15 @@ export class SelectorController {
 	#refreshSessionTerminalTitle(): void {
 		const sessionManager = this.ctx.sessionManager as {
 			getSessionName?: () => string | undefined;
+			getSessionTitleCard?: () => SessionTitleCard | undefined;
 			getCwd: () => string;
 			titleSource?: "auto" | "user" | undefined;
 		};
-		setSessionTerminalTitle(sessionManager.getSessionName?.(), sessionManager.getCwd());
+		setSessionTerminalTitle(
+			sessionManager.getSessionName?.(),
+			sessionManager.getCwd(),
+			sessionManager.getSessionTitleCard?.(),
+		);
 	}
 
 	async #detachActiveSessionBeforeDeletion(sessionPath: string): Promise<boolean> {

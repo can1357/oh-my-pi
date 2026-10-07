@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `PI_NATIVES_DIR` to choose where a compiled binary extracts its native addon; the version subdirectory is still appended, so runs with separate `HOME`s can share one copy without sharing other data ([#14735](https://github.com/can1357/oh-my-pi/pull/14735) by [@alphastorm](https://github.com/alphastorm))
+
 ## [18.7.0] - 2026-10-06
 
 ### Breaking Changes
