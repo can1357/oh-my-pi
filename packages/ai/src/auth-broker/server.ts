@@ -829,13 +829,21 @@ export function startAuthBroker(opts: AuthBrokerServerOptions): AuthBrokerServer
 					return serveSnapshot(req, url, snapshotSource, generationGate, peer);
 				}
 				if (req.method === "GET" && pathname === "/v1/usage") {
+					const maxAgeRaw = url.searchParams.get("maxAgeMs");
+					const maxAgeMs = maxAgeRaw === null ? undefined : Number(maxAgeRaw);
+					if (
+						maxAgeMs !== undefined &&
+						(!Number.isFinite(maxAgeMs) || maxAgeMs < 60_000 || maxAgeMs > 86_400_000)
+					) {
+						return json(400, { error: "maxAgeMs must be between 60000 and 86400000" });
+					}
 					try {
 						// AuthStorage caches usage reports internally with a 5-minute per-credential
 						// TTL (USAGE_REPORT_TTL_MS) so back-to-back widget polls re-use the
 						// last fetch instead of hitting provider endpoints repeatedly.
 						// `req.signal` propagates HTTP-client disconnects all the way to the
 						// per-caller cancel without touching the shared upstream fetch.
-						const reports = (await opts.storage.usage.reports?.({ signal: req.signal })) ?? [];
+						const reports = (await opts.storage.usage.reports?.({ signal: req.signal, maxAgeMs })) ?? [];
 						// Drop the `raw` field — it's the provider-specific upstream body,
 						// large and unstable. Everything UI-relevant lives in `limits` and
 						// `metadata`.

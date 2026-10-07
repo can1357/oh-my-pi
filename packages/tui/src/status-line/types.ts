@@ -60,6 +60,8 @@ export interface StatusLineSettings {
 	 *  usage. `embedded` moves configured context segments into the annotated
 	 *  gauge as percentage and window labels. Box composer only. */
 	contextLine?: ContextLineMode;
+	/** Provider quota refresh interval in seconds (default 300, minimum 60). */
+	usageRefreshInterval?: number;
 }
 
 export type EffectiveStatusLineSettings = Required<

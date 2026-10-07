@@ -174,6 +174,32 @@ describe("StatusLineComponent usage refresh", () => {
 		expect(calls).toBe(1);
 	});
 
+	it("shows fresh usage at a shorter interval and applies interval changes without restarting", async () => {
+		let calls = 0;
+		const component = new StatusLineComponent(
+			makeSession(async () => usageReport(++calls * 10)),
+			statusLineHost,
+		);
+		const appearance = { preset: "custom" as const, leftSegments: ["usage" as const], rightSegments: [] };
+		component.updateSettings({ ...appearance, usageRefreshInterval: 60 });
+		try {
+			await refreshUsage(component);
+			expect(plain(component.getTopBorder(80).content)).toContain("5h 10%");
+			await refreshUsage(component, 59_999);
+			expect(plain(component.getTopBorder(80).content)).toContain("5h 10%");
+			await refreshUsage(component, 1);
+			expect(plain(component.getTopBorder(80).content)).toContain("5h 20%");
+
+			component.updateSettings({ ...appearance, usageRefreshInterval: 600 });
+			await refreshUsage(component, 300_000);
+			expect(plain(component.getTopBorder(80).content)).toContain("5h 20%");
+			await refreshUsage(component, 300_000);
+			expect(plain(component.getTopBorder(80).content)).toContain("5h 30%");
+		} finally {
+			component.dispose();
+		}
+	});
+
 	it("passes a startup timeout signal to the background usage fetch", async () => {
 		let signal: AbortSignal | undefined;
 		const component = new StatusLineComponent(

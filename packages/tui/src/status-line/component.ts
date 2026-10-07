@@ -1967,7 +1967,8 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 			this.#cachedUsageContextKey = usageContextKey;
 		}
 		if (this.#usageInFlight || this.#usageStartTimer) return;
-		if (this.#usageFetchedAt > 0 && now - this.#usageFetchedAt < 5 * 60_000) return;
+		const intervalMs = (this.#settings.usageRefreshInterval ?? 300) * 1000;
+		if (this.#usageFetchedAt > 0 && now - this.#usageFetchedAt < intervalMs) return;
 		if (!this.host.canFetchUsageReports(session)) return;
 		this.#usageInFlight = true;
 		this.#usageStartTimer = setTimeout(() => {
@@ -1985,7 +1986,8 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 		const signal = AbortSignal.timeout(STATUS_USAGE_REFRESH_TIMEOUT_MS);
 		let reportsPromise: Promise<unknown> | undefined;
 		try {
-			reportsPromise = this.host.fetchUsageReports(session, signal);
+			const intervalMs = (this.#settings.usageRefreshInterval ?? 300) * 1000;
+			reportsPromise = this.host.fetchUsageReports(session, signal, intervalMs === 300_000 ? undefined : intervalMs);
 			this.#applyUsageRefreshReports(
 				session,
 				await this.#raceUsageRefreshWithSignal(reportsPromise, signal),

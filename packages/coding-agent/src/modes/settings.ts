@@ -170,6 +170,32 @@ export const cfgStatusLinePreset = register({
 	},
 });
 
+export const cfgStatusLineUsageRefreshInterval = register({
+	id: "statusLine.usageRefreshInterval",
+	type: "number",
+	default: 300,
+	validate: value => {
+		if (value === undefined) return;
+		if (typeof value !== "number" || !Number.isInteger(value) || value < 60 || value > 86_400) {
+			throw new Error("statusLine.usageRefreshInterval must be an integer between 60 and 86400 seconds");
+		}
+	},
+	ui: {
+		tab: "appearance",
+		group: "Status Line",
+		label: "Usage Refresh Interval",
+		description:
+			"Provider quota refresh interval in seconds (60–86400). Shorter intervals increase provider requests.",
+		options: [
+			{ value: "60", label: "1 minute" },
+			{ value: "120", label: "2 minutes" },
+			{ value: "300", label: "5 minutes (default)" },
+			{ value: "600", label: "10 minutes" },
+			{ value: "1800", label: "30 minutes" },
+		],
+	},
+});
+
 export const cfgStatusLineSeparator = register({
 	id: "statusLine.separator",
 	type: "enum",

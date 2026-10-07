@@ -12371,7 +12371,7 @@ export class AgentSession implements SettingsScope {
 		return this.#stats.revision;
 	}
 
-	async fetchUsageReports(signal?: AbortSignal): Promise<UsageReport[] | null> {
+	async fetchUsageReports(signal?: AbortSignal, maxAgeMs?: number): Promise<UsageReport[] | null> {
 		const authStorage = this.#modelRegistry.authStorage;
 		if (!authStorage.usage.reports) return null;
 		const reports = await authStorage.usage.reports({
@@ -12387,9 +12387,9 @@ export class AgentSession implements SettingsScope {
 				return this.#modelRegistry.getProviderBaseUrl?.(provider);
 			},
 			signal,
+			maxAgeMs,
 		});
-		// Every fresh usage snapshot doubles as the salvage-sweep heartbeat: the
-		// status line calls this every 5 minutes while the TUI is open.
+		// Fresh snapshots also drive the salvage sweep at the status line's configured cadence.
 		if (reports) this.#maybeScheduleResetSweep(reports);
 		return reports;
 	}

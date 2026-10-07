@@ -226,6 +226,8 @@ Two layers cache the aggregate provider-usage report. Both are intentional and s
 
 Constants: `USAGE_REPORT_TTL_MS = 5 * 60_000` in `packages/ai/src/auth/sqlite-credential-store.ts`; `USAGE_LAST_GOOD_RETENTION_MS = 24 * 60 * 60_000` and `USAGE_FAILURE_BACKOFF_MS = 10_000` in `packages/ai/src/auth/usage-cache.ts`. Fetch policy is in `packages/ai/src/auth/usage.ts`.
 
+`GET /v1/usage?maxAgeMs=<milliseconds>` accepts a display freshness limit from `60000` to `86400000` (invalid values return HTTP 400). The status line forwards its non-default `statusLine.usageRefreshInterval` through this parameter. Shorter limits expire old reports and shorten the jittered cache TTL; longer limits never extend the shared five-minute recovery cache. The client’s 15-second cache cannot satisfy a stricter freshness request with an old report: it waits for any current request, then rechecks the requested freshness. Failure cooldowns and block/reset safety windows remain unchanged.
+
 ### Client-side single-flight (`RemoteAuthCredentialStore`)
 
 When the gateway (or any other broker client) calls `fetchUsageReports()` / `getUsageReport(provider, credential)`, `RemoteAuthCredentialStore` coalesces concurrent calls into a single `GET /v1/usage` round-trip and caches the result for **15 s** in memory.

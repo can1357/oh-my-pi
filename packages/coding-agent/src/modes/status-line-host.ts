@@ -19,6 +19,7 @@ import {
 	cfgStatusLineSessionAccent,
 	cfgStatusLineShowHookStatus,
 	cfgStatusLineTransparent,
+	cfgStatusLineUsageRefreshInterval,
 	cfgTuiCodexResetFireworks,
 } from "./settings";
 import { cfgGoalStatusInFooter } from "../goals/settings";
@@ -44,6 +45,7 @@ export const statusLineHost: StatusLineHost<StatusLineHostSession> = {
 		transparent: cfgStatusLineTransparent.get(settings),
 		compactThinkingLevel: cfgStatusLineCompactThinkingLevel.get(settings),
 		contextLine: cfgStatusLineContextLine.get(settings),
+		usageRefreshInterval: cfgStatusLineUsageRefreshInterval.get(settings),
 	}),
 	gitEnabled: () => cfgGitEnabled.get(settings),
 	codexResetFireworksEnabled: () => cfgTuiCodexResetFireworks.get(settings),
@@ -55,7 +57,8 @@ export const statusLineHost: StatusLineHost<StatusLineHostSession> = {
 	activeAccount: (session, provider) =>
 		session.modelRegistry?.authStorage?.oauth.identity(provider, session.sessionId),
 	canFetchUsageReports: session => typeof session.fetchUsageReports === "function",
-	fetchUsageReports: (session, signal) => session.fetchUsageReports?.(signal) ?? Promise.resolve(null),
+	fetchUsageReports: (session, signal, maxAgeMs) =>
+		session.fetchUsageReports?.(signal, maxAgeMs) ?? Promise.resolve(null),
 	resolveActiveRepo: resolveActiveRepoContextSync,
 	lookupPullRequest: cwd =>
 		github.run(cwd, ["pr", "view", "--json", "number,url"], AbortSignal.timeout(GH_COMMAND_TIMEOUT_MS)),

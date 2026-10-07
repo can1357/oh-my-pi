@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added configurable quota-refresh intervals to the status line ([#14801](https://github.com/can1357/oh-my-pi/issues/14801)).
+
 ## [18.8.0] - 2026-10-07
 
 ### Added
