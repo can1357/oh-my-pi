@@ -148,7 +148,7 @@ async function parseMultipart(bytes: Uint8Array, contentType: string): Promise<T
 	return {
 		modelId,
 		request: {
-			audio: new Uint8Array(await file.arrayBuffer()),
+			audio: file,
 			mimeType: mimeTypeForFile(file),
 			fileName: file.name || undefined,
 			language: stringField(form, "language"),

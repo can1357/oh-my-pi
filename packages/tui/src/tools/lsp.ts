@@ -205,38 +205,56 @@ export function renderResult(
 	if (request?.new_name) requestLines.push(theme.fg("dim", `new name: ${request.new_name}`));
 	if (request?.apply !== undefined) requestLines.push(theme.fg("dim", `apply: ${request.apply ? "true" : "false"}`));
 
+	// The body depends only on the (immutable) text, theme and `expanded`; parse
+	// and render it once per expanded state instead of on every spinner frame.
+	const bodies: Array<LspResultBody | undefined> = [undefined, undefined];
+	const renderBody = (expanded: boolean): LspResultBody => {
+		if (codeBlockMatch) {
+			return {
+				label: "Hover",
+				state: "success",
+				bodyLines: renderHover(codeBlockMatch, text, lines, expanded, theme),
+			};
+		}
+		if (errorMatch || warningMatch || hasStatusError) {
+			const errorCount = errorMatch ? Number.parseInt(errorMatch[1], 10) : 0;
+			const warnCount = warningMatch ? Number.parseInt(warningMatch[1], 10) : 0;
+			return {
+				label: "Diagnostics",
+				state: errorCount > 0 ? "error" : warnCount > 0 ? "warning" : "success",
+				bodyLines: renderDiagnostics(errorMatch, warningMatch, lines, expanded, theme),
+			};
+		}
+		if (refMatch) {
+			return {
+				label: "References",
+				state: "success",
+				bodyLines: renderReferences(refMatch, lines, expanded, theme),
+			};
+		}
+		if (symbolsMatch) {
+			return { label: "Symbols", state: "success", bodyLines: renderSymbols(symbolsMatch, lines, expanded, theme) };
+		}
+		if (result.details?.action === "diagnostics" && text === "OK") {
+			return {
+				label: "Diagnostics",
+				state: "success",
+				bodyLines: [`${theme.styledSymbol("tool.lsp", "accent")} ${theme.fg("dim", "OK")}`],
+			};
+		}
+		return { label: "Response", state: "success", bodyLines: renderGeneric(text, lines, expanded, theme) };
+	};
+
 	return framedToolCard(theme, () => {
 		// Read mutable state at render time
 		const { expanded, isPartial, spinnerFrame } = options;
-
-		// Determine label, state, bodyLines based on type + current expanded
-		let label = "Result";
-		let state: "success" | "warning" | "error" = "success";
-		let bodyLines: string[] = [];
-
-		if (codeBlockMatch) {
-			label = "Hover";
-			bodyLines = renderHover(codeBlockMatch, text, lines, expanded, theme);
-		} else if (errorMatch || warningMatch || hasStatusError) {
-			label = "Diagnostics";
-			const errorCount = errorMatch ? Number.parseInt(errorMatch[1], 10) : 0;
-			const warnCount = warningMatch ? Number.parseInt(warningMatch[1], 10) : 0;
-			state = errorCount > 0 ? "error" : warnCount > 0 ? "warning" : "success";
-			bodyLines = renderDiagnostics(errorMatch, warningMatch, lines, expanded, theme);
-		} else if (refMatch) {
-			label = "References";
-			bodyLines = renderReferences(refMatch, lines, expanded, theme);
-		} else if (symbolsMatch) {
-			label = "Symbols";
-			bodyLines = renderSymbols(symbolsMatch, lines, expanded, theme);
-		} else if (result.details?.action === "diagnostics" && text === "OK") {
-			label = "Diagnostics";
-			state = "success";
-			bodyLines = [`${theme.styledSymbol("tool.lsp", "accent")} ${theme.fg("dim", "OK")}`];
-		} else {
-			label = "Response";
-			bodyLines = renderGeneric(text, lines, expanded, theme);
+		const slot = expanded ? 1 : 0;
+		let body = bodies[slot];
+		if (!body) {
+			body = renderBody(expanded);
+			bodies[slot] = body;
 		}
+		const { label, state, bodyLines } = body;
 
 		const actionLabel = (request?.action ?? result.details?.action ?? label.toLowerCase()).replace(/_/g, " ");
 		const isSuccess = !isPartial && !result.isError;
@@ -550,36 +568,32 @@ function renderSymbols(symbolsMatch: RegExpMatchArray, lines: string[], expanded
 		}
 	}
 
-	const isLastSibling = (i: number): boolean => {
+	// One linear pass each: `isLast[i]` — the next symbol at indent <= mine is
+	// not a sibling (monotonic stack, right to left); `prefixes[i]` — per
+	// ancestor level, the nearest earlier symbol at that indent decides the rail.
+	const isLast = Array.from({ length: symbols.length }, () => false);
+	const pending: number[] = [];
+	for (let i = symbols.length - 1; i >= 0; i--) {
 		const myIndent = symbols[i].indent;
-		for (let j = i + 1; j < symbols.length; j++) {
-			const nextIndent = symbols[j].indent;
-			if (nextIndent === myIndent) return false;
-			if (nextIndent < myIndent) return true;
-		}
-		return true;
-	};
-
-	const getPrefix = (i: number): string => {
-		const myIndent = symbols[i].indent;
-		if (myIndent === 0) return " ";
-
-		let prefix = " ";
-		for (let level = 2; level <= myIndent; level += 2) {
-			let ancestorIdx = -1;
-			for (let j = i - 1; j >= 0; j--) {
-				if (symbols[j].indent === level - 2) {
-					ancestorIdx = j;
-					break;
-				}
+		while (pending.length > 0 && symbols[pending[pending.length - 1]].indent > myIndent) pending.pop();
+		const next = pending.length > 0 ? pending[pending.length - 1] : -1;
+		isLast[i] = next < 0 || symbols[next].indent !== myIndent;
+		pending.push(i);
+	}
+	const getPrefixes = (): string[] => {
+		const prefixes: string[] = [];
+		const lastAtIndent = new Map<number, number>();
+		for (let i = 0; i < symbols.length; i++) {
+			const myIndent = symbols[i].indent;
+			let prefix = " ";
+			for (let level = 2; level <= myIndent; level += 2) {
+				const ancestorIdx = lastAtIndent.get(level - 2);
+				prefix += ancestorIdx !== undefined && isLast[ancestorIdx] ? "   " : `${theme.tree.vertical}  `;
 			}
-			if (ancestorIdx >= 0 && isLastSibling(ancestorIdx)) {
-				prefix += "   ";
-			} else {
-				prefix += `${theme.tree.vertical}  `;
-			}
+			prefixes.push(prefix);
+			lastAtIndent.set(myIndent, i);
 		}
-		return prefix;
+		return prefixes;
 	};
 
 	const topLevelCount = symbols.filter(s => s.indent === 0).length;
@@ -587,12 +601,13 @@ function renderSymbols(symbolsMatch: RegExpMatchArray, lines: string[], expanded
 	if (expanded) {
 		let output = `${icon} ${theme.fg("dim", `in ${fileName}`)}`;
 
+		const prefixes = getPrefixes();
 		for (let i = 0; i < symbols.length; i++) {
 			const sym = symbols[i];
-			const prefix = getPrefix(i);
-			const isLast = isLastSibling(i);
-			const branch = isLast ? theme.tree.last : theme.tree.branch;
-			const detailPrefix = isLast ? "   " : `${theme.tree.vertical}  `;
+			const prefix = prefixes[i];
+			const symIsLast = isLast[i];
+			const branch = symIsLast ? theme.tree.last : theme.tree.branch;
+			const detailPrefix = symIsLast ? "   " : `${theme.tree.vertical}  `;
 			output += `\n${prefix}${theme.fg("dim", branch)} ${theme.fg("accent", sym.icon)} ${theme.fg("accent", sym.name)}`;
 			output += `\n${prefix}${theme.fg("dim", detailPrefix)}${theme.fg("muted", `line ${sym.line}`)}`;
 		}
@@ -679,6 +694,13 @@ function renderGeneric(text: string, lines: string[], expanded: boolean, theme: 
 
 interface RawDiagnostic {
 	raw: string;
+}
+
+/** A rendered LSP result body for one `expanded` state. */
+interface LspResultBody {
+	label: string;
+	state: "success" | "warning" | "error";
+	bodyLines: string[];
 }
 
 type DiagnosticItem = ParsedDiagnostic | RawDiagnostic;

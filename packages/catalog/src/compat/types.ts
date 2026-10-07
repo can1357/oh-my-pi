@@ -656,6 +656,8 @@ export interface CompiledProvider {
 	id: string;
 	/** Preferred model id when no explicit selection is made. */
 	defaultModel: string;
+	/** Whether the provider participates in automatic default selection (defaults to true). */
+	automaticDefault?: boolean;
 	/** Env vars consulted, in order, for the runtime API-key fallback. */
 	envVars?: string[];
 	/** The runtime creates a model manager even without a valid API key. */

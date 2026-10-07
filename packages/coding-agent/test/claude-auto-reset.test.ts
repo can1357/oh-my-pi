@@ -3,6 +3,7 @@ import type { ResetCreditAccountStatus, UsageReport, UsageResetCredit } from "@o
 import {
 	planClaudeResetRedemptions,
 	type ClaudeResetPlanInput,
+	type ClaudeResetSkipReason,
 } from "@oh-my-pi/pi-coding-agent/session/claude-auto-reset";
 
 const NOW = 1_700_000_040_000;
@@ -270,6 +271,237 @@ describe("planClaudeResetRedemptions: blocked recovery", () => {
 });
 
 describe("planClaudeResetRedemptions: expiry salvage", () => {
+	it("salvages at the inclusive five-minute boundary despite zero horizon, reserve, and zero usage", () => {
+		const urgentInput = input({
+			trigger: "sweep",
+			settings: { enabled: true, minBlockedMinutes: 60, keepCredits: 1, salvageHorizonMs: 0 },
+			reports: [report({ fiveHourUsed: 0, weeklyUsed: 0, sonnetUsed: 0 })],
+			statuses: [
+				status({
+					credit: {
+						expiresAt: new Date(NOW + 5 * 60_000).toISOString(),
+						requiresLimit: false,
+						blocking: [],
+						usedFractions: {},
+					},
+				}),
+			],
+		});
+		expect(planClaudeResetRedemptions(urgentInput).actions).toMatchObject([
+			{
+				reason: "expiring-credit",
+				target: { credentialId: 11, creditId: "cedar-1" },
+				expiresInMs: 5 * 60_000,
+				salvageUsedFraction: 0,
+				requiresLimit: false,
+			},
+		]);
+		expect(
+			planClaudeResetRedemptions({ ...urgentInput, settings: { ...urgentInput.settings, enabled: false } }).actions,
+		).toEqual([]);
+		for (const expiresInMs of [-1, 0, 5 * 60_000 + 1]) {
+			expect(
+				planClaudeResetRedemptions({
+					...urgentInput,
+					statuses: [
+						status({
+							credit: {
+								...urgentInput.statuses[0]!.credits[0]!,
+								expiresAt: new Date(NOW + expiresInMs).toISOString(),
+							},
+						}),
+					],
+				}).actions,
+			).toEqual([]);
+		}
+		expect(
+			planClaudeResetRedemptions({
+				...urgentInput,
+				nowMs: NOW + 5 * 60_000 - 1,
+				reports: [report({ fiveHourUsed: 0, weeklyUsed: 0, sonnetUsed: 0 })],
+			}).actions,
+		).toHaveLength(1);
+	});
+
+	it("preserves reserve, usage, and horizon policies immediately outside the urgent window", () => {
+		const outsideInput = input({
+			trigger: "sweep",
+			reports: [report({ fiveHourUsed: 0.1, weeklyUsed: 0.1, sonnetUsed: 0.1 })],
+			statuses: [
+				status({
+					credit: {
+						expiresAt: new Date(NOW + 5 * 60_000 + 1).toISOString(),
+						requiresLimit: false,
+						blocking: [],
+						usedFractions: {},
+					},
+				}),
+			],
+		});
+		const mostlyFree = planClaudeResetRedemptions(outsideInput);
+		expect(mostlyFree.actions).toEqual([]);
+		expect(mostlyFree.skipped[0]?.reason).toBe("window-mostly-free");
+		const reserved = planClaudeResetRedemptions({
+			...outsideInput,
+			settings: { ...outsideInput.settings, keepCredits: 1 },
+		});
+		expect(reserved.actions).toEqual([]);
+		expect(reserved.skipped[0]?.reason).toBe("reserve");
+		const noHorizon = planClaudeResetRedemptions({
+			...outsideInput,
+			reports: [report()],
+			settings: { ...outsideInput.settings, salvageHorizonMs: 0 },
+		});
+		expect(noHorizon.actions).toEqual([]);
+	});
+
+	it("uses urgent salvage rather than bypassing the blocked-recovery reserve", () => {
+		const plan = planClaudeResetRedemptions(
+			input({
+				settings: { enabled: true, minBlockedMinutes: 60, keepCredits: 1, salvageHorizonMs: 0 },
+				statuses: [status({ credit: { expiresAt: new Date(NOW + 60_000).toISOString() } })],
+			}),
+		);
+		expect(plan.actions).toMatchObject([{ reason: "expiring-credit", requiresLimit: true }]);
+		expect(plan.skipped).toContainEqual({
+			accountKey: "anthropic|org-a|11",
+			rule: "blocked-account",
+			reason: "reserve",
+		});
+	});
+
+	it("salvages only live eligible Juniper grants with supported five-hour exhaustion", () => {
+		const juniper = status({
+			credit: {
+				id: "juniper_tide",
+				program: "juniper_tide",
+				clears: ["anthropic:5h"],
+				blocking: [],
+				usedFractions: {},
+				requiresLimit: true,
+				expiresAt: new Date(NOW + 5 * 60_000).toISOString(),
+			},
+		});
+		const juniperInput = input({
+			trigger: "sweep",
+			reports: [report({ fiveHourUsed: 1, weeklyUsed: 0.5 })],
+			statuses: [juniper],
+		});
+		expect(planClaudeResetRedemptions(juniperInput).actions).toMatchObject([
+			{
+				reason: "expiring-credit",
+				program: "juniper_tide",
+				target: { creditId: "juniper_tide" },
+				salvageWindow: "anthropic:5h",
+				requiresLimit: true,
+			},
+		]);
+		for (const [fiveHourUsed, weeklyUsed, reason] of [
+			[0, 0, "no-blocked-window"],
+			[1, 1, "incomplete-coverage"],
+		] as const) {
+			const plan = planClaudeResetRedemptions({
+				...juniperInput,
+				reports: [report({ fiveHourUsed, weeklyUsed })],
+			});
+			expect(plan.actions).toEqual([]);
+			expect(plan.skipped[0]?.reason).toBe(reason);
+		}
+		expect(
+			planClaudeResetRedemptions({ ...juniperInput, statuses: [{ ...juniper, eligible: false }] }).actions,
+		).toEqual([]);
+		const outside = planClaudeResetRedemptions({
+			...juniperInput,
+			statuses: [
+				status({
+					credit: { ...juniper.credits[0]!, expiresAt: new Date(NOW + 5 * 60_000 + 1).toISOString() },
+				}),
+			],
+		});
+		expect(outside.actions).toEqual([]);
+		expect(outside.skipped[0]?.reason).toBe("unsupported-program");
+	});
+
+	it("never overrides live grant safety or provider constraints for imminent expiry", () => {
+		const urgent = status({ credit: { expiresAt: new Date(NOW + 60_000).toISOString() } });
+		const credit = urgent.credits[0]!;
+		const cases: { live: ResetCreditAccountStatus; reason: ClaudeResetSkipReason }[] = [
+			{ live: { ...urgent, eligible: false }, reason: "ineligible" },
+			{ live: { ...urgent, error: "listing failed" }, reason: "credits-unknown" },
+			{ live: { ...urgent, credentialId: Number.NaN }, reason: "no-identity" },
+			{ live: { ...urgent, availableCount: 0 }, reason: "no-credits" },
+			{ live: { ...urgent, redeemableCount: 0 }, reason: "no-credits" },
+			{ live: { ...urgent, nextCreditId: "unselected" }, reason: "no-selected-credit" },
+			{
+				live: { ...urgent, cooldownUntil: new Date(NOW + 1).toISOString() },
+				reason: "provider-cooldown",
+			},
+			{ live: { ...urgent, credits: [{ ...credit, usable: false }] }, reason: "credit-unusable" },
+			{ live: { ...urgent, credits: [{ ...credit, remainingCount: 0 }] }, reason: "credit-unusable" },
+			{ live: { ...urgent, credits: [{ ...credit, expiresAt: "invalid" }] }, reason: "credit-expired" },
+			{ live: { ...urgent, credits: [{ ...credit, expiresAt: undefined }] }, reason: "no-expiring-credit" },
+			{
+				live: { ...urgent, credits: [{ ...credit, clears: ["anthropic:5h"] }] },
+				reason: "incomplete-coverage",
+			},
+			{
+				live: { ...urgent, credits: [{ ...credit, blocking: ["anthropic:unsupported"] }] },
+				reason: "unsupported-window",
+			},
+		];
+		for (const { live, reason } of cases) {
+			const plan = planClaudeResetRedemptions(input({ trigger: "sweep", statuses: [live] }));
+			expect(plan.actions).toEqual([]);
+			expect(plan.skipped[0]?.reason).toBe(reason);
+		}
+		const limitGated = planClaudeResetRedemptions(
+			input({
+				trigger: "sweep",
+				reports: [report({ fiveHourUsed: 0, weeklyUsed: 0, sonnetUsed: 0 })],
+				statuses: [{ ...urgent, credits: [{ ...credit, blocking: [], usedFractions: {} }] }],
+			}),
+		);
+		expect(limitGated.actions).toEqual([]);
+		expect(limitGated.skipped[0]?.reason).toBe("no-blocked-window");
+	});
+
+	it("ignores long nonterminal deferrals only while urgent, retaining dedupe and the 60-second cooldown", () => {
+		const urgentInput = input({
+			trigger: "sweep",
+			statuses: [status({ credit: { expiresAt: new Date(NOW + 5 * 60_000).toISOString() } })],
+		});
+		const action = planClaudeResetRedemptions(urgentInput).actions[0]!;
+		expect(action).toBeDefined();
+		for (const deferredKey of [action.attemptKey, `block|${action.accountKey}|previous-episode`]) {
+			const deferredUntilByKey = new Map([[deferredKey, NOW + HOUR]]);
+			expect(planClaudeResetRedemptions({ ...urgentInput, deferredUntilByKey }).actions).toHaveLength(1);
+			const outside = planClaudeResetRedemptions({ ...urgentInput, nowMs: NOW - 1, deferredUntilByKey });
+			expect(outside.actions).toEqual([]);
+			expect(outside.skipped[0]?.reason).toBe("deferred");
+			const attempted = planClaudeResetRedemptions({
+				...urgentInput,
+				deferredUntilByKey,
+				attemptedKeys: new Set([action.attemptKey]),
+			});
+			expect(attempted.actions).toEqual([]);
+			expect(attempted.skipped[0]?.reason).toBe("already-attempted");
+			const cooling = planClaudeResetRedemptions({
+				...urgentInput,
+				deferredUntilByKey,
+				lastAttemptAtByAccount: new Map([[action.accountKey, NOW - 60_000 + 1]]),
+			});
+			expect(cooling.actions).toEqual([]);
+			expect(cooling.skipped[0]?.reason).toBe("cooldown");
+			expect(
+				planClaudeResetRedemptions({
+					...urgentInput,
+					deferredUntilByKey,
+					lastAttemptAtByAccount: new Map([[action.accountKey, NOW - 60_000]]),
+				}).actions,
+			).toHaveLength(1);
+		}
+	});
+
 	it("salvages an expiring early-use Cedar grant only for materially used covered quota", () => {
 		const early = status({
 			credit: {
