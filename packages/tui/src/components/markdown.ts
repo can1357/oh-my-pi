@@ -1176,13 +1176,17 @@ function nextProbeSize(text: string, size: number, blockEnd: number): number {
  *    block one `math` token across its blank lines; `blockEnd` is its end, or
  *    0. An opener with no closer, or with a whitespace-only body, is no block
  *    in either lex, so it leaves later boundaries alone.
+ * The tokens may start past offset 0: the lexer gives a lone leading newline
+ * no token, so positions start at what the tokens leave of the window.
  */
 function probeBoundary(text: string, size: number, mathBlocks: MathBlockScan): { end: number; blockEnd: number } {
 	const probe = new Lexer(markdownParser.defaults);
 	const tokens = probe.blockTokens(text.slice(0, size), probe.tokens);
+	let base = size;
+	for (const token of tokens) base -= token.raw.length;
 	let endIndex = tokens.length - 1;
 	let blockEnd = 0;
-	for (let i = 0, pos = 0; i < tokens.length; pos += tokens[i].raw.length, i++) {
+	for (let i = 0, pos = base; i < tokens.length; pos += tokens[i].raw.length, i++) {
 		if (tokens[i].type === "math") continue;
 		const block = mathBlocks.at(pos);
 		if (block !== undefined) {
@@ -1191,7 +1195,7 @@ function probeBoundary(text: string, size: number, mathBlocks: MathBlockScan): {
 			break;
 		}
 	}
-	return { end: stableBlockBoundary(text, 0, tokens, { endIndex }).end, blockEnd };
+	return { end: stableBlockBoundary(text, base, tokens, { endIndex }).end, blockEnd };
 }
 
 /**

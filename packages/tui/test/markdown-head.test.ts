@@ -34,6 +34,19 @@ describe("renderMarkdownHead", () => {
 		expect(head.lines).toEqual(full.slice(0, head.lines.length));
 	});
 
+	it("renders only the leading rows of a long document whose first line is empty", () => {
+		// The lexer gives a lone leading newline no token, so the probe's tokens
+		// start one byte into the window.
+		const doc = `\n${paragraphs(5000)}\n`;
+		const head = renderMarkdownHead(doc, 120, defaultMarkdownTheme, 12);
+		const full = new Markdown(doc, 0, 0, defaultMarkdownTheme).render(120);
+
+		expect(head.truncated).toBe(true);
+		expect(head.lines.length).toBeGreaterThan(12);
+		expect(head.lines.length).toBeLessThan(full.length);
+		expect(head.lines).toEqual(full.slice(0, head.lines.length));
+	});
+
 	it("renders the head of a bracket-heavy document faster than the whole document", () => {
 		// 30,000 `[` on one line inside a fence, past the first probe window, then
 		// a `]:` on a line that opens no bracket: the reference-definition check
