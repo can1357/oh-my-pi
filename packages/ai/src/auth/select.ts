@@ -65,6 +65,8 @@ export type TryOAuthOptions = {
 	blockScopes?: readonly string[];
 	/** When false, a definitive failure of THIS credential returns undefined instead of falling back to the ranked/round-robin selector (target-only resolution). */
 	allowFallback?: boolean;
+	/** Receives a non-definitive refresh failure that left this credential unusable; the caller filters for retryable ones. */
+	onTransientRefreshFailure?: (error: unknown) => void;
 };
 
 /** Services consulted by CredentialSelector for policy, usage, blocks, refresh, and session affinity. */
@@ -516,14 +518,17 @@ export class CredentialSelector {
 		options?: AuthApiKeyOptions,
 	): Promise<OAuthResolutionResult | undefined> {
 		await this.#deps.pool.adoptExternalChanges();
-		const credentials = this.#deps.pool
+		const stored = this.#deps.pool
 			.credentials(provider)
 			.map((credential, index) => ({ credential, index }))
 			.filter((entry): entry is { credential: OAuthCredential; index: number } => entry.credential.type === "oauth");
 		this.#deps.policies.validateFor(
 			provider,
-			credentials.map(entry => entry.credential),
+			stored.map(entry => entry.credential),
 		);
+		// A session restriction drops every other account before ranking, pins,
+		// and the fallback passes below, so none of them can route back to it.
+		const credentials = stored.filter(entry => this.#deps.affinity.allows(provider, sessionId, entry.credential));
 
 		if (credentials.length === 0) return undefined;
 		this.#deps.policies.validateUsageCapability(provider, this.#deps.usage.canFetchOAuthUsage(provider));
@@ -650,6 +655,14 @@ export class CredentialSelector {
 							: { selection, usage: null, usageChecked: false },
 					);
 		const preflightFailures = new Set<OAuthCandidate>();
+		// The last retryable refresh error (network, timeout, 5xx) that removed a candidate.
+		// When no candidate resolves, it is rethrown so callers retry instead of reporting
+		// a missing key. Refresher outcomes after a dead grant (row disabled, CAS lost) are
+		// classified auth failures and keep resolving to undefined.
+		let transientRefreshFailure: unknown;
+		const recordTransientRefreshFailure = (error: unknown): void => {
+			if (AIError.retriable(AIError.classify(error))) transientRefreshFailure = error;
+		};
 
 		const sessionPreferredCandidate = candidates.findIndex(
 			candidate =>
@@ -796,16 +809,21 @@ export class CredentialSelector {
 							// to a sibling account with the wrong prefetched usage/plan.
 							return;
 						}
-					} else if (credentialId !== undefined) {
-						const latestIndex = this.#deps.pool.entries(provider).findIndex(entry => entry.id === credentialId);
-						if (latestIndex !== -1) {
-							this.#deps.blocks.mark(
-								provider,
-								providerKey,
-								latestIndex,
-								Date.now() + OAUTH_REFRESH_FAILURE_BACKOFF_MS,
-								AUTH_BLOCK_SCOPE,
-							);
+					} else {
+						recordTransientRefreshFailure(error);
+						if (credentialId !== undefined) {
+							const latestIndex = this.#deps.pool
+								.entries(provider)
+								.findIndex(entry => entry.id === credentialId);
+							if (latestIndex !== -1) {
+								this.#deps.blocks.mark(
+									provider,
+									providerKey,
+									latestIndex,
+									Date.now() + OAUTH_REFRESH_FAILURE_BACKOFF_MS,
+									AUTH_BLOCK_SCOPE,
+								);
+							}
 						}
 					}
 					preflightFailures.add(candidate);
@@ -879,11 +897,15 @@ export class CredentialSelector {
 					rankingContext,
 					blockScope,
 					blockScopes,
+					onTransientRefreshFailure: recordTransientRefreshFailure,
 				});
 				if (resolved) return resolved;
 			}
 		}
 
+		if (transientRefreshFailure !== undefined) {
+			throw new AIError.OAuthRefreshUnavailableError(provider, transientRefreshFailure);
+		}
 		return undefined;
 	}
 
@@ -1114,6 +1136,7 @@ export class CredentialSelector {
 					if (allowFallback) return this.resolveOAuth(provider, sessionId, options);
 				}
 			} else {
+				usageOptions.onTransientRefreshFailure?.(error);
 				// Block temporarily for transient failures (5 minutes)
 				this.#deps.blocks.mark(
 					provider,

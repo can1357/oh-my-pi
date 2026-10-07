@@ -8,7 +8,7 @@ use std::{
 use brush_parser::ast::{self, CommandPrefixOrSuffixItem};
 use itertools::Itertools;
 
-use tokio_util::sync::CancellationToken;
+use tokio_util::{sync::CancellationToken, task::AbortOnDropHandle};
 
 use crate::{
 	ShellFd,
@@ -595,7 +595,7 @@ fn spawn_async_ao_list_in_task<SE: extensions::ShellExtensions>(
 	});
 
 	jobs::Job::new(
-		[jobs::JobTask::Internal(join_handle)],
+		[jobs::JobTask::Internal(AbortOnDropHandle::new(join_handle))],
 		ao_list.to_string(),
 		jobs::JobState::Running,
 	)
@@ -1149,7 +1149,7 @@ impl Execute for ast::CoprocessCommand {
 		});
 
 		let job = shell.jobs_mut().add_as_current(jobs::Job::new(
-			[jobs::JobTask::Internal(join_handle)],
+			[jobs::JobTask::Internal(AbortOnDropHandle::new(join_handle))],
 			format!("coproc {name}"),
 			jobs::JobState::Running,
 		));
