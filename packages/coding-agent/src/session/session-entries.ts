@@ -190,19 +190,6 @@ export interface LabelEntry extends SessionEntryBase {
 	label: string | undefined;
 }
 
-/**
- * The card index of a generated title, for terminals that show sessions as
- * small cards (Tern): an icon and a short code. Validated before it is stored.
- */
-export interface SessionTitleCard {
-	/** 1-6 ASCII capitals or digits naming the subject (`FLAKY`, `Z3`). */
-	code: string;
-	/** One emoji picturing the subject; the icon where Nerd Fonts are missing. */
-	emoji?: string;
-	/** A Nerd Fonts class name the bundled catalog knows (`nf-md-flask`). */
-	nf?: string;
-}
-
 /** Append-only audit entry recording a session title change. */
 export interface TitleChangeEntry extends SessionEntryBase {
 	type: typeof TITLE_CHANGE_ENTRY_TYPE;
@@ -210,8 +197,6 @@ export interface TitleChangeEntry extends SessionEntryBase {
 	previousTitle?: string;
 	source: SessionTitleSource;
 	trigger?: string;
-	/** The card index shown with `title`; a title change without one shows the plain title. */
-	card?: SessionTitleCard;
 }
 
 declare module "@oh-my-pi/pi-agent-core/compaction/entries" {

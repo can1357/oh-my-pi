@@ -616,6 +616,11 @@ export class AgentHubOverlayComponent<TRecord extends AgentRecordLike = AgentRec
 		this.#lastLeftTap = Date.now();
 	}
 
+	/** Show `section`, as a slash-command deep link into an already-open hub does. */
+	showSection(section: AgentHubSection): void {
+		this.#switchSection(section);
+	}
+
 	/**
 	 * Open the fullscreen transcript viewer for an agent id (public for table Enter
 	 * and tests). Mounts {@link AgentTranscriptViewer} as a `fullscreen` overlay so it

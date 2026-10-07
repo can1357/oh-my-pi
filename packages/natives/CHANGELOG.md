@@ -30,9 +30,15 @@ Completeness reporting is Linux-only. **macOS and Windows descendant walks and p
 - `kill` and `pkill` derive the ancestor chain they refuse to signal from an unchecked process-table snapshot, so a short snapshot can leave an ancestor unprotected; Windows `kill -0` answers process existence from the same snapshot.
 - A cancelled shell run counts the children it could never pin and reports that count nowhere. Plumbing is not what blocks it: all three cancellation paths already await the termination bridge (`shell.rs:347`, `:417`, `:483`) and all three normal paths abort and then await it (`:359-360`, `:428-429`, `:494-495`), so a value can come back without restructuring. The cost is result handling in the three cancellation arms, six result literals (`:348`, `:368`, `:418`, `:433`, `:484`, `:499` — `ShellExecuteResult` at `:143` is an alias of the same struct, not a second one), two native fixtures, and a new field on each of two parallel structs — the serde wire type in `pi-shell` and the `#[napi(object)]` in `pi-natives` that converts from it. What actually defers it is the decision at the end: on the cancellation path the JS caller never reads the native result at all, quarantining the pending run and returning a synthetic cancellation notice, so surfacing the count means first deciding what a cancelled run should tell the agent about children it could not account for. Deferred with the `kill`/`pkill` residual above.
 
+## [18.8.1] - 2026-10-07
+
 ### Added
 
-- Added `PI_NATIVES_DIR` to choose where a compiled binary extracts its native addon; the version subdirectory is still appended, so runs with separate `HOME`s can share one copy without sharing other data ([#14735](https://github.com/can1357/oh-my-pi/pull/14735) by [@alphastorm](https://github.com/alphastorm))
+- Added the `PI_NATIVES_DIR` configuration option to control where compiled native addons are extracted. The version-specific subdirectory remains appended, allowing separate `HOME` environments to share the same native addon copy without sharing other data.
+
+### Fixed
+
+- Fixed background shell builtins and other in-process commands so they terminate when their subshell exits and can be stopped with `kill %N`, matching the behavior of external commands.
 
 ## [18.7.0] - 2026-10-06
 

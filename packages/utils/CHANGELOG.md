@@ -25,14 +25,18 @@
 ### Known gaps
 
 **A command deadline that fires after a detached root, or a Windows root with a retained handle, has already exited records a `TimeoutError` even when nothing was left behind.** The deadline sweeps the group or the retained-handle tree in that state, which it must — a detached group outlives its leader, and an earlier round on this branch fixed the opposite defect of skipping that sweep. What it cannot do is tell "swept a survivor" from "swept nothing": the native sweep reports only whether it completed, so an empty tree and one whose survivor it killed both come back `true` (it does reject when it cannot account for a live member, but that is a different question from whether one was there). Reporting no timeout in both cases is worse, because a real survivor past the deadline is exactly what the timeout is for — `ptree-timeout.test.ts` pins that case with a root that exits immediately while its `sleep 30` holds the group. Closing this needs the sweep to report what it found, which is a native API change and is deferred with the platform work.
+## [18.8.1] - 2026-10-07
+
+### Added
+
+- Added `PI_NATIVES_DIR` support to `getNativesDir()` for configuring the native addon directory.
+- Added `ZipPackage` for lazily reading ZIP-based document packages with a total decompressed-size limit, along with `DocxImage.readBytes()` for accessing raw DOCX image data.
 
 ## [18.8.0] - 2026-10-07
 
 ### Added
 
 - Added `ZipPackage` to `@oh-my-pi/pi-utils/ar` for lazily reading ZIP-based document packages with a configurable total-inflation limit, plus `DocxImage.readBytes()` for accessing raw DOCX image data.
-- Added `PI_NATIVES_DIR` support to `getNativesDir()`, matching the native addon loader's override ([#14735](https://github.com/can1357/oh-my-pi/pull/14735) by [@alphastorm](https://github.com/alphastorm))
-- Added `ZipPackage` to `@oh-my-pi/pi-utils/ar`: a lazily inflated ZIP document package with a cap on total inflated bytes, and `DocxImage.readBytes()` for raw DOCX image bytes ([#14709](https://github.com/can1357/oh-my-pi/pull/14709) by [@H4vC](https://github.com/H4vC))
 
 ### Changed
 
