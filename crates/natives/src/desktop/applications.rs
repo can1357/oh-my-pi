@@ -1,6 +1,7 @@
 //! Installed application discovery does not require capture or input
 //! permission.
 
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
 use std::path::Path;
 
 use napi_derive::napi;
@@ -80,31 +81,36 @@ pub(crate) const fn supported() -> bool {
 }
 
 pub(crate) fn list(options: ApplicationQuery) -> CoreResult<Vec<Application>> {
-	#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
-	let mut apps = platform::list()?;
 	#[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
-	let mut apps: Vec<Application> = return Err(DesktopError::invalid_target(
+	let _ = options;
+	#[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
+	return Err(DesktopError::invalid_target(
 		"installed application discovery is unsupported on this operating system",
 	));
-	let query = options.query.as_deref().unwrap_or_default().to_lowercase();
-	apps.retain(|app| {
-		(!options.running_only.unwrap_or(false) || app.running)
-			&& (query.is_empty()
-				|| app.name.to_lowercase().contains(&query)
-				|| app.id.to_lowercase().contains(&query)
-				|| app.path.to_lowercase().contains(&query))
-	});
-	apps.sort_by(|a, b| {
-		a.name
-			.cmp(&b.name)
-			.then(a.id.cmp(&b.id))
-			.then(a.path.cmp(&b.path))
-	});
-	Ok(apps)
+	#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
+	{
+		let mut apps = platform::list()?;
+		let query = options.query.as_deref().unwrap_or_default().to_lowercase();
+		apps.retain(|app| {
+			(!options.running_only.unwrap_or(false) || app.running)
+				&& (query.is_empty()
+					|| app.name.to_lowercase().contains(&query)
+					|| app.id.to_lowercase().contains(&query)
+					|| app.path.to_lowercase().contains(&query))
+		});
+		apps.sort_by(|a, b| {
+			a.name
+				.cmp(&b.name)
+				.then(a.id.cmp(&b.id))
+				.then(a.path.cmp(&b.path))
+		});
+		Ok(apps)
+	}
 }
 
 /// Resolve identity before display name; ambiguity never launches an arbitrary
 /// app.
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux", test))]
 fn resolve<'a>(apps: &'a [Application], input: &str) -> CoreResult<Option<&'a Application>> {
 	resolve_by(apps, input, is_helper)
 }
@@ -159,6 +165,7 @@ const fn is_helper(_: &Application) -> bool {
 	false
 }
 
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux", test))]
 fn unique<'a>(
 	first: &'a Application,
 	second: Option<&Application>,

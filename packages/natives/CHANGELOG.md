@@ -8,6 +8,10 @@
 ### Changed
 
 - Added source-built Android ARM64/Termux support for local native addon builds and Bionic process management; clipboard integration remains Termux API based.
+- Android ARM64 bindings now include the desktop-session API shape, but the
+  desktop backend remains unavailable: all desktop capability flags are false,
+  and capture rejects with `CaptureFailed`; this adds no screen-capture or
+  input support.
 
 ### Fixed
 

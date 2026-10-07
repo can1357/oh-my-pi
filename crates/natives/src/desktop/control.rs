@@ -710,6 +710,7 @@ impl ControlLease {
 
 	fn background(source: &CancellationSource) -> CoreResult<Self> {
 		Ok(Self {
+			#[cfg(any(target_os = "macos", target_os = "linux", windows))]
 			_escape: None,
 			_kernel: KernelOwner::acquire(source.0.agent.clone())?,
 			running: AtomicBool::new(false),
@@ -1296,7 +1297,12 @@ pub(crate) fn grant_for_test(source: &CancellationSource) {
 			Err(error) => panic!("test kernel owner: {error:?}"),
 		}
 	};
-	let owner = ControlLease { _escape: None, _kernel: kernel, running: AtomicBool::new(false) };
+	let owner = ControlLease {
+		#[cfg(any(target_os = "macos", target_os = "linux", windows))]
+		_escape: None,
+		_kernel: kernel,
+		running: AtomicBool::new(false),
+	};
 	*source.0.state.lock() = Some(Arc::new(owner));
 }
 
