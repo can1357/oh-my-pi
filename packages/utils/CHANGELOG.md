@@ -5,14 +5,18 @@
 ### Fixed
 
 - Long-running commands no longer accumulate promise handlers for every output chunk while retaining bounded stderr previews. ([#12291](https://github.com/can1357/oh-my-pi/pull/12291) by [@iliaal](https://github.com/iliaal))
+## [18.8.1] - 2026-10-07
+
+### Added
+
+- Added `PI_NATIVES_DIR` support to `getNativesDir()` for configuring the native addon directory.
+- Added `ZipPackage` for lazily reading ZIP-based document packages with a total decompressed-size limit, along with `DocxImage.readBytes()` for accessing raw DOCX image data.
 
 ## [18.8.0] - 2026-10-07
 
 ### Added
 
 - Added `ZipPackage` to `@oh-my-pi/pi-utils/ar` for lazily reading ZIP-based document packages with a configurable total-inflation limit, plus `DocxImage.readBytes()` for accessing raw DOCX image data.
-- Added `PI_NATIVES_DIR` support to `getNativesDir()`, matching the native addon loader's override ([#14735](https://github.com/can1357/oh-my-pi/pull/14735) by [@alphastorm](https://github.com/alphastorm))
-- Added `ZipPackage` to `@oh-my-pi/pi-utils/ar`: a lazily inflated ZIP document package with a cap on total inflated bytes, and `DocxImage.readBytes()` for raw DOCX image bytes ([#14709](https://github.com/can1357/oh-my-pi/pull/14709) by [@H4vC](https://github.com/H4vC))
 
 ### Changed
 

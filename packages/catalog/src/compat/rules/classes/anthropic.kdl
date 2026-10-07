@@ -72,7 +72,7 @@ class "anthropic" {
 			thinking-prefix-binding #true
 		}
 	}
-	// Adaptive Claude (Opus 4.7+, Sonnet/Fable/Mythos 5+) rejects explicit
+	// Adaptive Claude (Opus 4.7+, Sonnet/Fable/Mythos 5+, Haiku 5.5+) rejects explicit
 	// sampling params (`temperature`, `top_p`, `top_k`) with a 400 on every
 	// serving host. The `<10` bound keeps whole-number revisions such as
 	// `claude-opus-45` (Opus 4.5) out of the range.
@@ -93,6 +93,11 @@ class "anthropic" {
 	}
 	family "mythos" {
 		revision ">=5 <10" {
+			supports-sampling-params #false
+		}
+	}
+	family "haiku" {
+		revision ">=5.5 <10" {
 			supports-sampling-params #false
 		}
 	}
@@ -118,6 +123,11 @@ class "anthropic" {
 		}
 		family "sonnet" {
 			revision ">=4.6" {
+				supports-server-compaction #true
+			}
+		}
+		family "haiku" {
+			revision ">=5.5 <6" {
 				supports-server-compaction #true
 			}
 		}
@@ -173,6 +183,15 @@ class "anthropic" {
 			thinking-prefix-binding #true
 		}
 	}
+	// Haiku 5.5 binds signed thinking to the exact preceding conversation like
+	// Sonnet 5.5. It accepts a forced `tool_choice` (the response just skips
+	// thinking), so it keeps forced tool selection.
+	// https://platform.claude.com/docs/en/models/haiku-5-5/migration-guide
+	family "haiku" {
+		revision ">=5.5 <6" {
+			thinking-prefix-binding #true
+		}
+	}
 	on "anthropic" "cloudflare-ai-gateway" "google-vertex" {
 		family "fable" {
 			revision ">=5" {
@@ -195,6 +214,13 @@ class "anthropic" {
 		}
 		family "sonnet" {
 			revision ">=5.5" {
+				supports-mid-conversation-system #true
+				supports-mid-conversation-tool-changes #true
+				supports-turn-scoped-system #true
+			}
+		}
+		family "haiku" {
+			revision ">=5.5 <6" {
 				supports-mid-conversation-system #true
 				supports-mid-conversation-tool-changes #true
 				supports-turn-scoped-system #true
@@ -230,6 +256,13 @@ class "anthropic" {
 				supports-per-message-effort #true
 			}
 		}
+		// Haiku 5.5 mirrors Sonnet 5.5; Vertex stays off until verified.
+		family "haiku" {
+			revision ">=5.5 <6" {
+				supports-thinking-binding-controls #true
+				supports-per-message-effort #true
+			}
+		}
 		family "opus" {
 			revision ">=5" {
 				supports-per-message-effort #true
@@ -257,6 +290,10 @@ class "anthropic" {
 		"google-vertex" "opencode-zen" "snowflake" "vercel-ai-gateway" {
 		family "haiku" {
 			thinking-mode "budget"
+			// Haiku 5.5 is the first adaptive Haiku: `budget_tokens` is a 400.
+			revision ">=5.5 <6" {
+				thinking-mode "anthropic-adaptive"
+			}
 		}
 	}
 	on "amazon-bedrock" "anthropic" "cloudflare-ai-gateway" "github-copilot" "gitlab-duo" \
@@ -363,6 +400,34 @@ class "anthropic" {
 			limits-patch {
 				context-window 1000000
 				max-tokens 128000
+			}
+		}
+		// /v1/models reports neither reasoning, vision, pricing nor limits for
+		// Haiku 5.5, so a discovered row would materialize as a text-only,
+		// unpriced, non-reasoning model; pin the model card. Prompts over 100K
+		// input tokens bill the whole request at the long-context rates.
+		// https://platform.claude.com/docs/en/models/haiku-5-5/overview
+		family "haiku" {
+			revision ">=5.5 <6" {
+				thinking-upgrade-neutral #true
+				input-modalities "text" "image"
+				cost-patch {
+					input 0.1
+					output 0.5
+					cache-read 0.01
+					cache-write 0.125
+				}
+				long-context-cost {
+					input-threshold 100000
+					input 0.5
+					output 2.5
+					cache-read 0.05
+					cache-write 0.625
+				}
+				limits-patch {
+					context-window 1000000
+					max-tokens 128000
+				}
 			}
 		}
 		family "mythos" {
