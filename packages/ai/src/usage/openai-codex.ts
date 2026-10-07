@@ -683,6 +683,7 @@ type OpenAICodexPlanClass = "free" | "paid" | "pro" | "unknown";
 
 const OPENAI_CODEX_PRO_PLAN_TOKENS: Record<string, true> = {
 	pro: true,
+	promax: true,
 };
 const OPENAI_CODEX_PAID_PLAN_TOKENS: Record<string, true> = {
 	plus: true,

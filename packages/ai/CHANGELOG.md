@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed Pro Max Codex accounts being skipped for plan-gated models when another Pro account was available ([#14779](https://github.com/can1357/oh-my-pi/issues/14779)).
+
 ## [18.8.0] - 2026-10-07
 
 ### Breaking Changes

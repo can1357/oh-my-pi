@@ -435,6 +435,35 @@ describe("AuthStorage codex oauth ranking", () => {
 		expectExclusivePreference(counts, "api-acct-preferred", "api-acct-urgent");
 	});
 
+	test("applies account priority to Pro Max on a paid-gated Codex model", async () => {
+		if (!store) throw new Error("test setup failed");
+		authStorage = new AuthStorage(store, {
+			usageProviderResolver: provider => (provider === "openai-codex" ? usageProvider : undefined),
+			accountPolicies: [{ provider: "openai-codex", account: { email: "max@example.com" }, priority: 100 }],
+		});
+		await authStorage.credentials.reload();
+		await authStorage.credentials.set("openai-codex", [
+			{ type: "oauth", ...createCredential("acct-pro", "pro@example.com") },
+			{ type: "oauth", ...createCredential("acct-max", "max@example.com") },
+		]);
+		for (const [accountId, planType, usedFraction] of [
+			["acct-pro", "pro", 0.1],
+			["acct-max", "promax", 0.8],
+		] as const) {
+			usageByAccount.set(
+				accountId,
+				createCodexUsageReport({
+					accountId,
+					primary: { usedFraction, resetInMs: HOUR_MS },
+					secondary: { usedFraction, resetInMs: WEEK_MS },
+					metadata: { planType },
+				}),
+			);
+		}
+
+		expect(await authStorage.keys.get("openai-codex", undefined, { modelId: "gpt-5.6-sol" })).toBe("api-acct-max");
+	});
+
 	test("account reserve protects a preferred account while an eligible sibling remains", async () => {
 		if (!store) throw new Error("test setup failed");
 		authStorage = new AuthStorage(store, {
@@ -2692,6 +2721,39 @@ describe("AuthStorage codex oauth ranking", () => {
 
 		const apiKey = await authStorage.keys.get("openai-codex", undefined, { modelId });
 		expect(apiKey).toBe("api-acct-paid");
+	});
+
+	test("keeps a pinned Pro Max account on a Pro-gated Codex model", async () => {
+		if (!authStorage) throw new Error("test setup failed");
+		await authStorage.credentials.set("openai-codex", [
+			{ type: "oauth", ...createCredential("acct-pro", "pro@example.com") },
+			{ type: "oauth", ...createCredential("acct-max", "max@example.com") },
+		]);
+		for (const [accountId, planType, usedFraction] of [
+			["acct-pro", "pro", 0.1],
+			["acct-max", "promax", 0.8],
+		] as const) {
+			usageByAccount.set(
+				accountId,
+				addSparkUsage(
+					createCodexUsageReport({
+						accountId,
+						primary: { usedFraction, resetInMs: HOUR_MS },
+						secondary: { usedFraction, resetInMs: WEEK_MS },
+						metadata: { planType },
+					}),
+					usedFraction,
+					usedFraction,
+				),
+			);
+		}
+		const maxAccount = authStorage.oauth.accounts("openai-codex").find(account => account.accountId === "acct-max");
+		if (!maxAccount) throw new Error("expected Pro Max account");
+		const sessionId = "pinned-pro-max";
+		expect(authStorage.sessions.pin("openai-codex", sessionId, maxAccount.credentialId)).toBe(true);
+		expect(await authStorage.keys.get("openai-codex", sessionId, { modelId: "gpt-5.3-codex-spark" })).toBe(
+			"api-acct-max",
+		);
 	});
 
 	test.each([
