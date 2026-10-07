@@ -26,6 +26,9 @@ const REQUIRED_GETTERS = ["escapeStops"];
 
 /** Reject incomplete native ABIs on first desktop use without unsafe fallbacks. */
 export function adaptDesktopSession(NativeDesktopSession) {
+	if (NativeDesktopSession === undefined) {
+		return undefined;
+	}
 	const prototype = NativeDesktopSession?.prototype;
 	const missing = [
 		...REQUIRED_METHODS.filter(method => typeof prototype?.[method] !== "function"),

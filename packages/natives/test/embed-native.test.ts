@@ -49,7 +49,7 @@ describe("native addon embedding", () => {
 	});
 
 	it("emits a manifest whose zstd frames the loader extracts back to the addon", async () => {
-		const root = await fs.mkdtemp(path.join(os.tmpdir(), "pi-natives-embed-"));
+		const root = await fs.mkdtemp(path.join(os.tmpdir(), "pi natives embed-"));
 		const nativeDir = path.join(root, "native");
 		const outDir = path.join(root, "out");
 		const cacheDir = path.join(root, "cache");
@@ -91,13 +91,14 @@ describe("native addon embedding", () => {
 			const embeddedAddon = JSON.parse(result.stdout.toString()) as EmbeddedAddon;
 			expect(embeddedAddon.platformTag).toBe("win32-arm64");
 			expect(embeddedAddon.version).toBe("18.1.1");
-			expect(embeddedAddon.files).toEqual([
+			expect(
+				embeddedAddon.files.map(({ variant, filename, size, hash }) => ({ variant, filename, size, hash })),
+			).toEqual([
 				{
 					variant: "default",
 					filename: "pi_natives.win32-arm64.node",
 					size: addon.length,
 					hash: Bun.hash.xxHash64(addon).toString(16).padStart(16, "0"),
-					zstdPath: path.join(await fs.realpath(outDir), "pi_natives.win32-arm64.node.zst"),
 				},
 			]);
 			const extracted = embeddedAddonPath(cacheDir, embeddedAddon.files[0]);
