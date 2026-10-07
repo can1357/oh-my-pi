@@ -53,6 +53,15 @@ impl FileSystem for DelayedFilesystem {
 
 	async fn backing_path(&self, path: &Path) -> io::Result<Option<PathBuf>> {
 		delay().await;
+		// `virtual://rendered/…` stands in for a scheme that aliases no file
+		// (`omp://`, `history://`): the provider serves it, but there is
+		// nothing for the operating system to open.
+		if path
+			.to_str()
+			.is_some_and(|path| path.starts_with("virtual://rendered"))
+		{
+			return Ok(None);
+		}
 		self.path(path).map(Some)
 	}
 
@@ -273,8 +282,8 @@ cat ./*.txt"#,
 }
 
 /// `xargs`, `ifne`, and `find -exec`/`-execdir` must dispatch their command
-/// through the shell: only in-process builtins can open provider URLs, and an
-/// external program cannot even start in a provider working directory.
+/// through the shell: only in-process builtins can open provider URLs, whereas
+/// an external program is limited to the files those URLs alias.
 #[tokio::test]
 async fn command_running_utilities_dispatch_builtins_that_open_urls() {
 	let directory = tempfile::tempdir().expect("isolated provider filesystem");
@@ -297,6 +306,133 @@ async fn command_running_utilities_dispatch_builtins_that_open_urls() {
 		.expect("command-running utilities");
 	assert_eq!(u8::from(result.exit_code), 0, "{}", captured_text(&error));
 	assert_eq!(captured_text(&output), "alpha\nbeta\nbeta\nalpha\n");
+}
+
+/// An external program cannot open a provider URL, so one it is handed must
+/// name the file that URL aliases, in the bare spelling and in the
+/// attached-value spelling a tool's own flags use. A scheme the filesystem
+/// does not route is not a path and must reach the child as written.
+#[tokio::test]
+async fn external_commands_receive_host_paths_for_backed_url_arguments() {
+	let directory = tempfile::tempdir().expect("isolated provider filesystem");
+	fs::create_dir(directory.path().join("docs")).expect("provider directory");
+	fs::write(directory.path().join("docs/a.txt"), b"alpha\n").expect("document");
+	let output = tempfile::tempfile().expect("captured stdout");
+	let error = tempfile::tempfile().expect("captured stderr");
+	let mut shell = virtual_shell(directory.path()).await;
+	let parameters = capture_parameters(&shell, &output, &error);
+	#[cfg(unix)]
+	let script = r#"/bin/sh -c 'printf "%s\n" "$0" "$1" "$2"' virtual://docs/a.txt --data-dir=virtual://docs https://example.com/a.txt"#;
+	#[cfg(windows)]
+	let script = "cmd.exe /c echo virtual://docs/a.txt && cmd.exe /c echo \
+	              --data-dir=virtual://docs && cmd.exe /c echo https://example.com/a.txt";
+	let result = shell
+		.run_string(script, &SourceInfo::from("vfs-external-args"), &parameters)
+		.await
+		.expect("external command with url arguments");
+	let stdout = captured_text(&output);
+	assert_eq!(u8::from(result.exit_code), 0, "{}", captured_text(&error));
+	// The provider aliases `virtual://x` to `root/x`, keeping the URL's own
+	// separators, so the expectation is built the same way.
+	let docs = directory.path().join("docs");
+	assert!(
+		stdout.contains(&directory.path().join("docs/a.txt").display().to_string()),
+		"bare url reached the child unresolved: {stdout}"
+	);
+	assert!(
+		stdout.contains(&format!("--data-dir={}", docs.display())),
+		"attached value reached the child unresolved: {stdout}"
+	);
+	assert!(
+		stdout.contains("https://example.com/a.txt"),
+		"an unrouted scheme was rewritten: {stdout}"
+	);
+}
+
+/// A provider directory that aliases a real one is a usable working directory
+/// for a child process; one that aliases nothing still is not.
+#[tokio::test]
+async fn external_commands_start_in_backed_working_directories_only() {
+	let directory = tempfile::tempdir().expect("isolated provider filesystem");
+	fs::create_dir(directory.path().join("docs")).expect("provider directory");
+	fs::create_dir(directory.path().join("rendered")).expect("unbacked directory");
+	let output = tempfile::tempfile().expect("captured stdout");
+	let error = tempfile::tempfile().expect("captured stderr");
+	let mut shell = virtual_shell(directory.path()).await;
+	let parameters = capture_parameters(&shell, &output, &error);
+	#[cfg(unix)]
+	let script = "cd virtual://docs && /bin/sh -c 'printf %s \"$PWD\"'";
+	#[cfg(windows)]
+	let script = "cd virtual://docs && cmd.exe /c cd";
+	let result = shell
+		.run_string(script, &SourceInfo::from("vfs-external-cwd"), &parameters)
+		.await
+		.expect("external command in a backed working directory");
+	assert_eq!(u8::from(result.exit_code), 0, "{}", captured_text(&error));
+	assert!(
+		captured_text(&output).contains(&directory.path().join("docs").display().to_string()),
+		"child did not start in the aliased directory: {}",
+		captured_text(&output)
+	);
+
+	let error = tempfile::tempfile().expect("captured stderr");
+	let parameters = capture_parameters(&shell, &output, &error);
+	#[cfg(unix)]
+	let unbacked = "cd virtual://rendered && /bin/sh -c 'exit 0'";
+	#[cfg(windows)]
+	let unbacked = "cd virtual://rendered && cmd.exe /c exit 0";
+	let result = shell
+		.run_string(unbacked, &SourceInfo::from("vfs-external-cwd"), &parameters)
+		.await
+		.expect("external command in an unbacked working directory");
+	assert_ne!(u8::from(result.exit_code), 0, "an unbacked directory hosted a child process");
+	assert!(
+		captured_text(&error).contains("virtual working directory"),
+		"unexpected failure: {}",
+		captured_text(&error)
+	);
+}
+
+/// A script the provider aliases is executable as itself: the child runs the
+/// file behind the URL rather than failing on a path the kernel cannot see.
+#[cfg(unix)]
+#[tokio::test]
+async fn an_executable_url_runs_as_the_file_it_aliases() {
+	use std::os::unix::fs::PermissionsExt;
+
+	let directory = tempfile::tempdir().expect("isolated provider filesystem");
+	let tool = directory.path().join("tool");
+	fs::write(&tool, b"#!/bin/sh\nprintf tool-ran\n").expect("provider script");
+	fs::set_permissions(&tool, fs::Permissions::from_mode(0o755)).expect("executable script");
+	let output = tempfile::tempfile().expect("captured stdout");
+	let error = tempfile::tempfile().expect("captured stderr");
+	let mut shell = virtual_shell(directory.path()).await;
+	let parameters = capture_parameters(&shell, &output, &error);
+	let result = shell
+		.run_string("virtual://tool", &SourceInfo::from("vfs-external-program"), &parameters)
+		.await
+		.expect("executable provider url");
+	assert_eq!(u8::from(result.exit_code), 0, "{}", captured_text(&error));
+	assert_eq!(captured_text(&output), "tool-ran");
+}
+
+/// The same contract on Windows, where an executable is recognized by its
+/// extension rather than by its mode bits.
+#[cfg(windows)]
+#[tokio::test]
+async fn an_executable_url_runs_as_the_file_it_aliases() {
+	let directory = tempfile::tempdir().expect("isolated provider filesystem");
+	fs::write(directory.path().join("tool.cmd"), b"@echo tool-ran\r\n").expect("provider script");
+	let output = tempfile::tempfile().expect("captured stdout");
+	let error = tempfile::tempfile().expect("captured stderr");
+	let mut shell = virtual_shell(directory.path()).await;
+	let parameters = capture_parameters(&shell, &output, &error);
+	let result = shell
+		.run_string("virtual://tool.cmd", &SourceInfo::from("vfs-external-program"), &parameters)
+		.await
+		.expect("executable provider url");
+	assert_eq!(u8::from(result.exit_code), 0, "{}", captured_text(&error));
+	assert!(captured_text(&output).contains("tool-ran"), "{}", captured_text(&output));
 }
 
 async fn wait_for_output(path: &Path, suffix: &str) -> io::Result<()> {

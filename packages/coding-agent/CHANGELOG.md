@@ -146,6 +146,8 @@
 - Corrected tool behavior and configuration documentation for `read`, background `bash`, Python evaluation, replace editing, goal removal, and `advisor.immuneTurns`.
 - Fixed custom glob backends from hanging indefinitely; scans now respect the tool deadline and report incomplete results when necessary.
 - Fixed `--resume <path>` from silently creating a new session for a missing path; it now reports the missing path, consistent with `--fork <path>` and `--resume <id>`.
+- Generated session titles now carry their card in the title itself (`🧪 FLAKY: Fix flaky park tests`), so the `/resume` picker and session listings show the icon and short code too; `title.icons` applies to newly generated titles.
+- Commands in `bash` can hand `skill://`, `local://`, and other file-backed URLs to external programs again (`python skill://example-skill/tool.py "query"`), and can run them from a `cd`'d URL directory.
 
 ## [18.8.0] - 2026-10-07
 
