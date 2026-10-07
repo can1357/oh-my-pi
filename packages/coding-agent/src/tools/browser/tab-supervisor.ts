@@ -351,6 +351,11 @@ async function acquireTabImpl(
 	let tempHold = false;
 	const existing = tabs.get(name);
 	if (existing) {
+		if (existing.kindTag === "relay" || existing.kindTag === "connected") {
+			if (!opts.ownerSessionId || existing.ownerSessionId !== opts.ownerSessionId) {
+				throw new ToolError("This attached browser tab belongs to another task.");
+			}
+		}
 		if (existing.browser === browser && existing.state === "alive") {
 			const requestedCmuxSurface = "client" in browser ? (opts.cmuxSurface ?? browser.surface) : undefined;
 			if (existing.backend === "cmux" && existing.cmuxAttachedSurface !== requestedCmuxSurface) {
@@ -1512,13 +1517,16 @@ async function buildInitPayload(browser: PuppeteerBrowserHandle, opts: AcquireTa
 			ignoreHttpsErrors: opts.ignoreHttpsErrors,
 		};
 	}
-	// Connected and relay browsers are user-driven. When no target is requested,
-	// adopt the visible tab and avoid raising it before screenshots. An explicit
-	// target may be backgrounded, so retain activation for target-correct pixels.
+	// Borrowed browsers must use the exact host-user-approved target, never
+	// visibility/title heuristics. Spawned apps retain their window matcher.
 	const userDriven = browser.kind.kind === "connected" || browser.kind.kind === "relay";
+	if (userDriven && !browser.kind.selectedTargetId) {
+		throw new ToolError("User-browser attachment requires a host-user-selected target ID.");
+	}
 	const activateForScreenshot = !userDriven || !shouldPreserveConnectedBrowserFocus(opts.target);
 	const page = await pickElectronTarget(browser.browser, {
 		matcher: opts.target,
+		targetId: userDriven ? browser.kind.selectedTargetId : undefined,
 		preferVisible: !activateForScreenshot,
 		relayJson: browser.kind.kind === "relay" ? browser.kind.cdpUrl : undefined,
 		signal: opts.signal,

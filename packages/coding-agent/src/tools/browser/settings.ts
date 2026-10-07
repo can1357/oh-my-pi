@@ -25,7 +25,7 @@ export const cfgBrowserCdpUrl = register({
 		group: "Grep & Browser",
 		label: "Browser CDP URL",
 		description:
-			"Default HTTP CDP discovery endpoint (for example http://127.0.0.1:9222) to attach to instead of launching a browser. Explicit app.cdp_url or app.path on the tool call take precedence.",
+			"Stored endpoint hint only; never authorizes automatic attachment. Request app.cdp_url explicitly and select the browser tab in the host UI.",
 	},
 });
 
@@ -38,7 +38,7 @@ export const cfgBrowserRelay = register({
 		group: "Grep & Browser",
 		label: "Browser Relay",
 		description:
-			"Drive your own Chrome tabs through the omp browser relay. Install the extension once (`omp browser-relay install`); the relay server auto-starts when the browser prelude needs it. Takes precedence over Browser CDP URL; set PI_BROWSER_RELAY=0 or PI_BROWSER_RELAY=1 to override.",
+			"Standing relay configuration never authorizes automatic attachment. Request app.relay:true and select one browser-instance/tab in the host UI. PI_BROWSER_RELAY=0 disables explicit relay requests.",
 	},
 });
 

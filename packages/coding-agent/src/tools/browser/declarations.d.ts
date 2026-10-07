@@ -5,15 +5,15 @@ type BrowserWaitUntil = "load" | "domcontentloaded" | "networkidle0" | "networki
 interface BrowserAppOptions {
 	/** Absolute or cwd-relative browser/Electron executable to spawn. Chromium-family browsers launch on an omp-owned profile unless `args` sets `--user-data-dir`. */
 	path?: string;
-	/** HTTP Chrome DevTools Protocol discovery endpoint to attach to. */
+	/** Request HTTP CDP attachment; requires host-user selection of one exact tab for this task. */
 	cdp_url?: string;
-	/** Drive the user's existing Chrome tabs through the omp Browser Relay. */
+	/** Request one host-user-selected browser-instance/tab through the omp Browser Relay. No implicit visible-tab adoption. */
 	relay?: boolean;
 	/** Inside a Tern pane: `true` requires a Tern browser picture-in-picture, `false` opens Chromium instead. */
 	tern?: boolean;
 	/** Extra command-line arguments for a spawned executable. */
 	args?: string[];
-	/** URL/title substring used to select an attached tab. */
+	/** Filter host-user attachment choices by URL/title; never grants attachment permission. Spawned apps use it as a window matcher. */
 	target?: string;
 }
 

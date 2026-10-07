@@ -18,6 +18,8 @@ import {
 import { ensureChromiumExecutable } from "./browser/launch";
 import { resolveInitScriptSources } from "./browser/open-options";
 import { resolveRelayKind } from "./browser/relay/kind";
+import { assertAttachmentOwner, requestedAttachment, selectAttachmentTarget, type AttachmentTarget } from "./browser/ownership";
+import { probeCdpResponse } from "./browser/attach";
 import { resolveTernKind } from "./browser/tern/kind";
 import { isTernUnavailable } from "./browser/tern/wire";
 import type { AriaSnapshotOptions } from "./browser/aria/aria-snapshot";
@@ -44,11 +46,9 @@ import { toolResult } from "./tool-result";
 import { clampTimeout } from "./tool-timeouts";
 
 import {
-	cfgBrowserCdpUrl,
 	cfgBrowserCmux,
 	cfgBrowserHeadless,
 	cfgBrowserIdleCloseSec,
-	cfgBrowserRelay,
 	cfgBrowserRelayUrl,
 	cfgBrowserTern,
 } from "./browser/settings";
@@ -95,10 +95,10 @@ const BROWSER_RUN_SCOPE: readonly string[] = ["tab", "page", "browser", "wait", 
 const appSchema = type({
 	"path?": type("string").describe("binary path to spawn"),
 	"cdp_url?": type("string").describe("existing cdp endpoint"),
-	"relay?": type("boolean").describe("drive the user's own tabs via the omp browser relay"),
+	"relay?": type("boolean").describe("request host-user selection of one tab via the omp browser relay"),
 	"tern?": type("boolean").describe("inside Tern: true forces a Tern picture-in-picture, false opts out"),
 	"args?": type("string[]").describe("extra cli args"),
-	"target?": type("string").describe("substring to pick a window"),
+	"target?": type("string").describe("URL/title filter for host-user attachment selection; spawned apps select a window"),
 });
 
 const tabCallStepSchema = type({
@@ -150,20 +150,16 @@ interface BrowserPreludeDetails {
 	value?: unknown;
 }
 
-/**
- * The browser an open drives, by precedence: explicit `app.*` options, the
- * relay, `browser.cdpUrl`, a Tern PiP (inside a Tern pane, unless
- * `app.tern: false`; `app.tern: true` forces it; `headed` does not opt out),
- * a cmux surface, then Chromium.
- */
+/** Explicit attachments require host-user selection; configured relay/CDP never authorize adoption. */
 export function resolveBrowserKind(
 	params: BrowserParams,
 	session: ToolSession,
 	env: Record<string, string | undefined> = process.env,
 ): BrowserKind {
 	const app = params.app;
-	if (app?.cdp_url) {
-		return { kind: "connected", cdpUrl: app.cdp_url.replace(/\/+$/, "") };
+	const attachment = requestedAttachment(app);
+	if (attachment === "connected") {
+		return { kind: "connected", cdpUrl: app!.cdp_url!.replace(/\/+$/, "") };
 	}
 	if (app?.path) {
 		const exe = resolveToCwd(app.path, session.cwd);
@@ -179,9 +175,10 @@ export function resolveBrowserKind(
 	const relayUrl = cfgBrowserRelayUrl.get(session.settings);
 	// Explicit app.relay wins over every setting; PI_BROWSER_RELAY stays the
 	// final kill switch (a relay that is down would otherwise brick the tool).
-	if (app?.relay) {
+	if (attachment === "relay") {
 		const relayKind = resolveRelayKind({ settingEnabled: true, url: relayUrl }, env);
-		if (relayKind) return relayKind;
+		if (!relayKind) throw new ToolError("Explicit browser relay requested but PI_BROWSER_RELAY=0 disables it.");
+		return relayKind;
 	}
 	if (app?.tern === true) {
 		const ternKind = resolveTernKind({ settingEnabled: true }, env);
@@ -192,25 +189,9 @@ export function resolveBrowserKind(
 		}
 		return ternKind;
 	}
-	// Relay before cdpUrl among settings: enabling the opt-out-by-default relay
-	// is a deliberate mode selection, while cdpUrl is a standing fallback
-	// endpoint. A configured endpoint is a default, not an override: explicit
-	// app options win.
-	if (app?.relay !== false) {
-		const relayKind = resolveRelayKind(
-			{
-				settingEnabled: cfgBrowserRelay.get(session.settings),
-				url: relayUrl,
-			},
-			env,
-		);
-		if (relayKind) return relayKind;
-	}
-	const configuredCdpUrl = cfgBrowserCdpUrl.get(session.settings)?.trim();
-	if (configuredCdpUrl) {
-		return { kind: "connected", cdpUrl: configuredCdpUrl.replace(/\/+$/, "") };
-	}
-	if (app?.tern !== false) {
+	// Headless is an agent-owned request, not permission to drive a user surface.
+	if (params.headed === false) return chromiumKind(params, session);
+	if (params.headed !== false && app?.tern !== false) {
 		const ternKind = resolveTernKind({ settingEnabled: cfgBrowserTern.get(session.settings) }, env);
 		if (ternKind) return ternKind;
 	}
@@ -311,12 +292,22 @@ async function invokeBrowser(
 		const timeoutMs = timeoutSeconds * 1000;
 		const name = parsed.name ?? DEFAULT_TAB_NAME;
 		const details: BrowserPreludeDetails = { action: parsed.action, name };
+		const selectedTab = getTab(name);
+		if (parsed.action !== "tabs" && selectedTab) {
+			assertAttachmentOwner(selectedTab.kindTag, selectedTab.ownerSessionId, session.getSessionId?.());
+		}
+		if (parsed.action === "close" && parsed.all) {
+			for (const tab of listTabs()) {
+				const live = getTab(tab.name);
+				if (live) assertAttachmentOwner(live.kindTag, live.ownerSessionId, session.getSessionId?.());
+			}
+		}
 
 		switch (parsed.action) {
 			case "open":
-				return await openBrowser(session, name, parsed, details, timeoutMs, context.signal);
+				return await openBrowser(session, name, parsed, details, timeoutMs, context.signal, context);
 			case "close":
-				return await closeBrowser(name, parsed, details, timeoutMs, context.signal);
+				return await closeBrowser(session, name, parsed, details, timeoutMs, context.signal);
 			case "tabs":
 				details.value = listTabs();
 				return toolResult(details).done();
@@ -346,11 +337,48 @@ async function openBrowser(
 	details: BrowserPreludeDetails,
 	timeoutMs: number,
 	signal?: AbortSignal,
+	context?: EvalPreludeContext,
 ): Promise<AgentToolResult<unknown>> {
-	const resolved = resolveBrowserKind(params, session);
+	let resolved = resolveBrowserKind(params, session);
 	const autoTern = resolved.kind === "tern" && params.app?.tern !== true;
 	const existing = getTab(name);
-	const kind = autoTern && existing && existing.kindTag !== "tern" ? existing.browser.kind : resolved;
+	if (existing && (existing.kindTag === "relay" || existing.kindTag === "connected") &&
+		params.headed !== false && !params.app?.path && !params.app?.cdp_url &&
+		params.app?.relay === undefined && params.app?.tern !== true && params.app?.target === undefined) {
+		assertAttachmentOwner(existing.kindTag, existing.ownerSessionId, session.getSessionId?.());
+		resolved = existing.browser.kind;
+	}
+	if (resolved.kind === "relay" || resolved.kind === "connected") {
+		const ownerSessionId = session.getSessionId?.();
+		if (existing && existing.browser.kind.kind === resolved.kind &&
+			existing.browser.kind.cdpUrl === resolved.cdpUrl && params.app?.target === undefined) {
+			assertAttachmentOwner(existing.kindTag, existing.ownerSessionId, ownerSessionId);
+			resolved = existing.browser.kind;
+		} else {
+			const uiContext = context?.context ?? session.getToolContext?.();
+			const endpoint = resolved.cdpUrl;
+			const selectedTargetId = await selectAttachmentTarget(endpoint, async () => {
+				const response = await probeCdpResponse(`${endpoint}/json`, { timeoutMs: 3_000, signal });
+				if (!response || response.status !== 200) {
+					throw new ToolError(`Cannot list tabs at ${endpoint}. Start the relay/CDP endpoint before requesting selection.`);
+				}
+				const entries: unknown = JSON.parse(Buffer.from(response.body, "latin1").toString("utf8"));
+				if (!Array.isArray(entries) || !entries.every(entry =>
+					isRecord(entry) && typeof entry.id === "string" && typeof entry.type === "string" &&
+					typeof entry.title === "string" && typeof entry.url === "string")) {
+					throw new ToolError("Browser target discovery returned invalid metadata.");
+				}
+				return entries as AttachmentTarget[];
+			}, {
+				ownerSessionId,
+				hasUI: uiContext?.hasUI,
+				select: uiContext?.ui ? (title, rows, selectionSignal) =>
+					untilAborted(selectionSignal, () => uiContext.ui!.select(title, rows, { signal: selectionSignal })) : undefined,
+			}, params.app?.target, signal);
+			resolved = { ...resolved, selectedTargetId };
+		}
+	}
+	const kind = autoTern && existing?.kindTag === "headless" ? existing.browser.kind : resolved;
 	const startedAt = performance.now();
 	try {
 		return await openOnKind(session, name, params, details, kind, timeoutMs, [], signal);

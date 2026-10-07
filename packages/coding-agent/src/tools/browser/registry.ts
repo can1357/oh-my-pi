@@ -19,6 +19,7 @@ import {
 import { reapOrphanSharedTargets } from "./orphan-registry";
 import { ensureRelayDaemon, isLoopbackRelayUrl } from "./relay/daemon";
 import type { RelayKind } from "./relay/kind";
+import { attachmentTargetFilter } from "./ownership";
 import { waitForRelayExtension } from "./relay/probe";
 import { ensureSharedBrowser } from "./shared-daemon";
 import type { TernKind } from "./tern/kind";
@@ -34,7 +35,7 @@ export type PuppeteerBrowserKind =
 			allowFileAccess?: boolean;
 	  }
 	| { kind: "spawned"; path: string; args?: string[] }
-	| { kind: "connected"; cdpUrl: string }
+	| { kind: "connected"; cdpUrl: string; selectedTargetId?: string }
 	| RelayKind;
 
 export type BrowserKind = PuppeteerBrowserKind | CmuxKind | TernKind;
@@ -100,9 +101,9 @@ export function browserKey(kind: BrowserKind): string {
 		case "spawned":
 			return `spawned:${JSON.stringify([kind.path, kind.args ?? []])}`;
 		case "connected":
-			return `connected:${kind.cdpUrl}`;
+			return `connected:${kind.cdpUrl}:${kind.selectedTargetId ?? ""}`;
 		case "relay":
-			return `relay:${kind.cdpUrl}`;
+			return `relay:${kind.cdpUrl}:${kind.selectedTargetId ?? ""}`;
 		case "cmux":
 			return `cmux:${kind.socketPath}`;
 		case "tern":
@@ -118,6 +119,9 @@ export interface AcquireBrowserOptions {
 
 export async function acquireBrowser(kind: BrowserKind, opts: AcquireBrowserOptions): Promise<BrowserHandle> {
 	if (kind.kind === "spawned") kind = { ...kind, args: resolveSpawnArgs(kind.path, kind.args, opts.cwd) };
+	if ((kind.kind === "connected" || kind.kind === "relay") && !kind.selectedTargetId) {
+		throw new ToolError("User-browser attachment requires a host-user-selected target ID.");
+	}
 	const key = browserKey(kind);
 	for (;;) {
 		const existing = browsers.get(key);
@@ -225,6 +229,7 @@ async function openBrowserHandle(kind: BrowserKind, opts: AcquireBrowserOptions)
 			browserURL: cdpUrl,
 			defaultViewport: null,
 			protocolTimeout: BROWSER_PROTOCOL_TIMEOUT_MS,
+			targetFilter: attachmentTargetFilter(kind.selectedTargetId!),
 		});
 		return {
 			key: browserKey(kind),
@@ -278,6 +283,7 @@ async function openBrowserHandle(kind: BrowserKind, opts: AcquireBrowserOptions)
 			browserURL: cdpUrl,
 			defaultViewport: null,
 			protocolTimeout: BROWSER_PROTOCOL_TIMEOUT_MS,
+			targetFilter: attachmentTargetFilter(kind.selectedTargetId!),
 		});
 		return {
 			key: browserKey(kind),
