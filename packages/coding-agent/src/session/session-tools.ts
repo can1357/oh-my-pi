@@ -139,6 +139,18 @@ interface SessionToolsOptions {
 	skillsReloadable?: boolean;
 }
 
+/** Options for {@link SessionTools.refreshSkills}. */
+export interface SkillsRefreshOptions {
+	/**
+	 * `"always"` (default) rebuilds the base system prompt unconditionally, for
+	 * callers whose other prompt inputs may also have changed (cwd moves,
+	 * settings, plugins). `"skills-changed"` rebuilds only when the model-visible
+	 * skill projection changed — for pure skill/command rediscovery, so a no-op
+	 * refresh leaves the prompt byte-identical and provider prompt caches survive.
+	 */
+	promptRebuild?: "always" | "skills-changed";
+}
+
 interface SystemPromptPreparation {
 	systemPrompt: string[];
 	/** Publish staged state at validated delivery; false declines the prepared turn without mutation. */
@@ -1726,8 +1738,12 @@ export class SessionTools {
 		};
 	}
 
-	/** Rediscovers reloadable skills and refreshes prompt metadata. */
-	async refreshSkills(): Promise<void> {
+	/**
+	 * Rediscovers reloadable skills, refreshes prompt metadata, and notifies
+	 * command-metadata listeners once the executable skill list is current.
+	 */
+	async refreshSkills(options: SkillsRefreshOptions = {}): Promise<void> {
+		const previousProjection = options.promptRebuild === "skills-changed" ? this.#skillPromptProjection() : undefined;
 		resetCapabilities();
 		if (this.#skillsReloadable) {
 			const skillsSettings = cfgSkills.get(this.#host.settings);
@@ -1745,8 +1761,31 @@ export class SessionTools {
 				setActiveSkills(this.#skills);
 			}
 		}
-		await this.refreshBaseSystemPrompt();
+		if (previousProjection === undefined || previousProjection !== this.#skillPromptProjection()) {
+			await this.refreshBaseSystemPrompt();
+		}
 		this.#host.notifyCommandMetadataChanged();
+	}
+
+	/**
+	 * Fingerprint of every base-prompt input derived from the skill list, so a
+	 * rediscovery that leaves it unchanged can skip the rebuild and keep the
+	 * provider prompt-cache prefix byte-stable. Mirrors `buildSystemPrompt`:
+	 * - the `skillful` gate (off → the prompt receives no skills at all);
+	 * - whether any skill exists, hidden ones included: it decides `skill://`
+	 *   URI guidance and the bash tool's skill hint ({@link #derivePromptSurface});
+	 * - the ordered `name`/`description` of non-`hide` skills (`hide` already
+	 *   folds in `disable-model-invocation`; dedup, collisions, and disabled
+	 *   skills are resolved by `loadSkills`). These are exactly the
+	 *   `SkillDescriptionCatalog` keys whose session-frozen descriptions render
+	 *   the `<skills>` rows, so equal fingerprints render identical rows.
+	 * The listing is hashed even when no active tool can read `skill://` (the
+	 * prompt then omits it); that only costs an unneeded rebuild, never a stale prompt.
+	 */
+	#skillPromptProjection(): string {
+		if (!cfgSkillful.get(this.#host.settings)) return "";
+		const listed = this.#skills.filter(skill => skill.hide !== true).map(skill => [skill.name, skill.description]);
+		return JSON.stringify([this.#skills.length > 0, listed]);
 	}
 
 	/** Selects enabled tools, ignoring names absent from the registry. */

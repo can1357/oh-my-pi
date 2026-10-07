@@ -6873,6 +6873,25 @@ func (v *GetAvailableCommandsResult) decodeFrom(raw map[string]json.RawMessage) 
 	return nil
 }
 
+type RefreshCommandsResult struct {
+	Commands []AvailableSlashCommand `json:"commands"`
+}
+
+func (v *RefreshCommandsResult) UnmarshalJSON(data []byte) error {
+	return decodeWith(data, "RefreshCommandsResult", v.decodeFrom)
+}
+
+func (v *RefreshCommandsResult) decodeFrom(raw map[string]json.RawMessage) error {
+	var out RefreshCommandsResult
+	d := fieldDecoder{raw: raw, owner: "RefreshCommandsResult"}
+	d.required("commands", &out.Commands)
+	if d.err != nil {
+		return d.err
+	}
+	*v = out
+	return nil
+}
+
 type SetTodosResult struct {
 	TodoPhases []TodoPhase `json:"todoPhases"`
 }
@@ -7520,6 +7539,13 @@ func (c Commands) SetAskDialog(ctx context.Context, p SetAskDialogCommand) (bool
 func (c Commands) GetAvailableCommands(ctx context.Context) ([]AvailableSlashCommand, error) {
 	var out GetAvailableCommandsResult
 	err := c.call(ctx, "get_available_commands", nil, 0, &out)
+	return out.Commands, err
+}
+
+// RefreshCommands sends "refresh_commands": Rediscover skills and file slash commands, then list the slash-command catalog. `available_commands_update` is pushed first only if the catalog changed; the system prompt is rebuilt only if the model-visible skill listing changed.
+func (c Commands) RefreshCommands(ctx context.Context) ([]AvailableSlashCommand, error) {
+	var out RefreshCommandsResult
+	err := c.call(ctx, "refresh_commands", nil, 0, &out)
 	return out.Commands, err
 }
 

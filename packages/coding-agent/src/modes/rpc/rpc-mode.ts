@@ -87,6 +87,7 @@ import { isRpcSessionSettled, RpcSessionSettleWatcher, watchedScheduledTurnProbe
 import { RpcSubagentRegistry, readRpcSubagentTranscript, resolveOwnedLiveSubagent } from "./rpc-subagents";
 import type {
 	RpcAbortAndRestoreQueueResult,
+	RpcAvailableSlashCommand,
 	RpcCommand,
 	RpcExtensionUIRequest,
 	RpcExtensionUIResponse,
@@ -1740,11 +1741,32 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 		await session.refreshSkillsAndCommands();
 		await emitAvailableCommandsUpdate();
 	};
-	const emitAvailableCommandsUpdate = async () => {
-		output({ type: "available_commands_update", commands: await getAvailableCommands() });
+	// Advertisements are serialized so concurrent emitters publish in call order and
+	// the change check compares against the catalog clients last received.
+	let commandsAdvertisement: Promise<RpcAvailableSlashCommand[]> = Promise.resolve([]);
+	let advertisedCommandsKey: string | undefined;
+	const advertiseAvailableCommands = (when: "always" | "changed"): Promise<RpcAvailableSlashCommand[]> => {
+		const next = commandsAdvertisement
+			.catch(() => [])
+			.then(async () => {
+				const commands = await getAvailableCommands();
+				const key = JSON.stringify(commands);
+				if (when === "always" || key !== advertisedCommandsKey) {
+					advertisedCommandsKey = key;
+					output({ type: "available_commands_update", commands });
+				}
+				return commands;
+			});
+		commandsAdvertisement = next;
+		return next;
 	};
+	const emitAvailableCommandsUpdate = async () => {
+		await advertiseAvailableCommands("always");
+	};
+	// Metadata notifications fire on every rediscovery, including no-op ones
+	// (settings echoes, `refresh_commands`); only a changed catalog is pushed.
 	session.subscribeCommandMetadataChanged(() => {
-		void emitAvailableCommandsUpdate();
+		void advertiseAvailableCommands("changed");
 	});
 	await emitAvailableCommandsUpdate();
 
@@ -2098,6 +2120,16 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 
 			case "get_available_commands": {
 				return success(id, "get_available_commands", { commands: await getAvailableCommands() });
+			}
+
+			case "refresh_commands": {
+				// Rediscover before answering so `/skill:<new>` dispatch resolves immediately;
+				// the base system prompt is rebuilt only if the model-visible skill listing
+				// changed, keeping provider prompt caches warm across no-op refreshes.
+				await session.refreshSkillsAndCommands({ promptRebuild: "skills-changed" });
+				// Queued behind the refresh's own notification, so any changed-catalog frame
+				// precedes this response and the response never triggers a duplicate frame.
+				return success(id, "refresh_commands", { commands: await advertiseAvailableCommands("changed") });
 			}
 
 			case "get_entries": {

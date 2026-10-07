@@ -118,6 +118,12 @@ export const rpcCommands: readonly RpcCommandSpec[] = [
 		unwrap: "commands",
 	},
 	{
+		name: "refresh_commands",
+		doc: "Rediscover skills and file slash commands, then list the slash-command catalog. `available_commands_update` is pushed first only if the catalog changed; the system prompt is rebuilt only if the model-visible skill listing changed.",
+		result: { commands: "AvailableSlashCommand[]" },
+		unwrap: "commands",
+	},
+	{
 		name: "get_entries",
 		doc: "Read the append-history; with `since`, only entries strictly after that durable entry id.",
 		params: { "since?": "string" },

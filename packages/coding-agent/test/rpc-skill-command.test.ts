@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { RpcClient } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-client";
 import { dispatchRpcSkillPrompt, tryRunRpcSkillCommand } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-mode";
 import {
 	RpcExtensionUserMessageTracker,
@@ -452,4 +453,54 @@ describe("dispatchRpcSkillPrompt", () => {
 			await removeWithRetries(dir);
 		}
 	});
+});
+
+describe("refresh_commands", () => {
+	test("exposes a skill installed after startup, makes it dispatchable, and pushes only real catalog changes", async () => {
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), `omp-rpc-refresh-${Snowflake.next()}-`));
+		// A cwd equal to HOME would make `.omp/skills` the (disabled) user root, not the project root.
+		const home = path.join(dir, "home");
+		const client = new RpcClient({
+			command: [process.execPath, path.join(import.meta.dir, "fixtures", "refresh-commands-rpc-agent.ts")],
+			cwd: dir,
+			env: { HOME: home, PI_CODING_AGENT_DIR: path.join(home, ".omp", "agent"), PI_NO_TITLE: "1" },
+		});
+		const updates: string[][] = [];
+		const unsubscribe = client.onAvailableCommandsUpdate(commands => {
+			updates.push(commands.map(command => command.name));
+		});
+		try {
+			await client.start();
+			expect((await client.getAvailableCommands()).map(command => command.name)).not.toContain("skill:fresh");
+			const updatesBeforeInstall = updates.length;
+
+			await Bun.write(
+				path.join(dir, ".omp", "skills", "fresh", "SKILL.md"),
+				"---\nname: fresh\ndescription: Freshly installed skill\n---\n\nFollow the freshly installed skill.\n",
+			);
+			const refreshed = await client.refreshCommands();
+			expect(refreshed).toContainEqual(
+				expect.objectContaining({ name: "skill:fresh", description: "Freshly installed skill", source: "skill" }),
+			);
+			// The changed catalog is pushed once, ahead of the response.
+			expect(updates.length).toBe(updatesBeforeInstall + 1);
+			expect(updates.at(-1)).toContain("skill:fresh");
+
+			// Nothing changed on disk: same catalog, no frame.
+			expect(await client.refreshCommands()).toEqual(refreshed);
+			expect(updates.length).toBe(updatesBeforeInstall + 1);
+
+			await client.promptAndWait("/skill:fresh now");
+			const skillMessage = (await client.getMessages()).find(
+				message => message.role === "custom" && message.customType === SKILL_PROMPT_MESSAGE_TYPE,
+			);
+			expect(skillMessage?.role === "custom" ? skillMessage.content : undefined).toContain(
+				"Follow the freshly installed skill.",
+			);
+		} finally {
+			unsubscribe();
+			await client.stop();
+			await removeWithRetries(dir);
+		}
+	}, 30_000);
 });

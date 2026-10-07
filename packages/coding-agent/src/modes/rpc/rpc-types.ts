@@ -61,6 +61,7 @@ export type RpcCommand =
 	  }
 	| { id?: string; type: "set_ask_dialog"; enabled: boolean }
 	| { id?: string; type: "get_available_commands" }
+	| { id?: string; type: "refresh_commands" }
 	| { id?: string; type: "get_entries"; since?: string }
 	| { id?: string; type: "get_tree" }
 	| { id?: string; type: "set_todos"; phases: TodoPhase[] }
@@ -416,6 +417,13 @@ export type RpcResponse =
 			id?: string;
 			type: "response";
 			command: "get_available_commands";
+			success: true;
+			data: { commands: RpcAvailableSlashCommand[] };
+	  }
+	| {
+			id?: string;
+			type: "response";
+			command: "refresh_commands";
 			success: true;
 			data: { commands: RpcAvailableSlashCommand[] };
 	  }
