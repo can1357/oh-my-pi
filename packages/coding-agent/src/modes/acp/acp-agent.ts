@@ -170,6 +170,10 @@ type ManagedSessionRecord = {
 	// `#configureMcpServers` call; drained on reconfigure so a stale in-flight
 	// refresh can never land after a newer configuration's tools.
 	mcpRefreshChain: Promise<void> | undefined;
+	// A restored prefix-bound base can absorb reconnecting MCP tools until the
+	// first provider turn in this process; afterward signed history keeps it frozen.
+	resumePromptPending: boolean;
+	resumePromptUnsubscribe: (() => void) | undefined;
 	promptTurn: PromptTurnState | undefined;
 	promptQueue: PromptQueueState;
 	liveMessageId: string | undefined;
@@ -1323,6 +1327,18 @@ export class AcpAgent implements Agent {
 		// so it shares the bootstrap race guard — see that comment for why.
 		try {
 			await this.#configureExtensions(record);
+			record.resumePromptPending =
+				mcpServers.length > 0 &&
+				session.model?.thinking?.prefixBinding === true &&
+				session.agent.state.messages.some(message => message.role === "assistant");
+			if (record.resumePromptPending) {
+				record.resumePromptUnsubscribe = session.subscribe(event => {
+					if (event.type !== "turn_start") return;
+					record.resumePromptPending = false;
+					record.resumePromptUnsubscribe?.();
+					record.resumePromptUnsubscribe = undefined;
+				});
+			}
 			await this.#configureMcpServers(record, mcpServers);
 			this.#sessions.set(session.sessionId, record);
 			return record;
@@ -1341,6 +1357,8 @@ export class AcpAgent implements Agent {
 			setToolUIContext,
 			mcpManager: undefined,
 			mcpRefreshChain: undefined,
+			resumePromptPending: false,
+			resumePromptUnsubscribe: undefined,
 			promptTurn: undefined,
 			promptQueue: { promise: Promise.resolve(), release: undefined },
 			liveMessageId: undefined,
@@ -2673,6 +2691,7 @@ export class AcpAgent implements Agent {
 			const run = (record.mcpRefreshChain ?? Promise.resolve()).then(async () => {
 				if (record.mcpManager !== manager) return;
 				await record.session.refreshMCPTools(manager.getTools());
+				if (record.resumePromptPending) await record.session.refreshBaseSystemPrompt();
 			});
 			record.mcpRefreshChain = run.catch(error => {
 				logger.warn("ACP MCP tool refresh failed", {
@@ -2682,8 +2701,9 @@ export class AcpAgent implements Agent {
 			return run;
 		};
 		manager.setOnToolsChanged(() => {
-			// Failures are logged once via the stored chain's catch above.
-			enqueueMcpToolsRefresh().catch(() => {});
+			// The manager reports a server connected only after its queued prompt
+			// refresh settles, so an ACP client can wait for it before prompting.
+			return enqueueMcpToolsRefresh().catch(() => {});
 		});
 		const configs: MCPConfigMap = {};
 		const sources: MCPSourceMap = {};
@@ -2768,6 +2788,7 @@ export class AcpAgent implements Agent {
 
 	async #disposeSessionRecord(record: ManagedSessionRecord, reason?: postmortem.Reason): Promise<void> {
 		record.lifetimeUnsubscribe?.();
+		record.resumePromptUnsubscribe?.();
 		if (record.mcpManager) {
 			try {
 				await record.mcpManager.disconnectAll();

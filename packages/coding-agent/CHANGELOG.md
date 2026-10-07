@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed ACP sessions losing MCP tool routes from the first resumed request on prefix-bound thinking models, preserving the cached prompt prefix ([#14794](https://github.com/can1357/oh-my-pi/issues/14794)).
+
 ## [18.8.0] - 2026-10-07
 
 ### Added
