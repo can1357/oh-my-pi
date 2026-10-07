@@ -2118,8 +2118,19 @@ export class Agent {
 				turnOpen = false;
 				this.#emit({ type: "agent_end", messages: agentEndMessages });
 			} else {
+				// Context hooks can reject on abort before provider streaming starts.
+				// Publish the boundary just like a streaming abort so subscribers can
+				// persist it and recover the interrupted turn after a reload.
+				if (!turnOpen) this.#emit({ type: "turn_start" });
+				if (!hadAssistantStart) {
+					this.#state.streamMessage = errorMsg;
+					this.#emit({ type: "message_start", message: errorMsg });
+				}
+				this.#state.streamMessage = null;
 				this.appendMessage(errorMsg);
 				this.#state.error = errorMessage;
+				this.#emit({ type: "message_end", message: errorMsg });
+				this.#emit({ type: "turn_end", message: errorMsg, toolResults: [] });
 				this.#emit({ type: "agent_end", messages: [errorMsg] });
 			}
 		} finally {

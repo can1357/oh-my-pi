@@ -654,6 +654,53 @@ return { ...state, nested, shadowed, rightClick };`,
 			await prelude.invoke({ action: "close", name: tabName, kill: true }, context).catch(() => undefined);
 		}
 	}, 30_000);
+
+	test("clicks a radio or checkbox whose real input is transparent, by id, ref and selector", async () => {
+		const session = makeSession();
+		const prelude = createBrowserPrelude(session);
+		const context = { session, toolCallId: "browser-transparent-radio" };
+		const tabName = `transparent-radio-${crypto.randomUUID()}`;
+		// GOV.UK radios: the opacity:0 input sits on top of the circle its label draws. #agree's label draws over its input.
+		const radiosHtml = `<!doctype html><style>
+.item { display: flex; position: relative; margin-bottom: 10px }
+.radio { z-index: 1; width: 44px; height: 44px; margin: 0; opacity: 0 }
+.item label::before { content: ""; position: absolute; top: 2px; left: 2px; width: 40px; height: 40px; border: 2px solid; border-radius: 50%; box-sizing: border-box }
+#agree { position: absolute; left: 0; top: 0; width: 44px; height: 44px; margin: 0; opacity: 0 }
+#agree + label { padding-left: 50px }
+</style>
+<div class="item"><input class="radio" id="maternity" name="leave" type="radio"><label for="maternity">Maternity</label></div>
+<div class="item"><input class="radio" id="paternity" name="leave" type="radio"><label for="paternity">Paternity</label></div>
+<div class="item"><input id="agree" type="checkbox"><label for="agree">I agree</label></div>
+<script>window.changes = 0; document.addEventListener("change", event => { if (event.isTrusted) changes++; });</script>`;
+		await prelude.invoke(
+			{ action: "open", name: tabName, url: `data:text/html,${encodeURIComponent(radiosHtml)}` },
+			context,
+		);
+		try {
+			const result = await prelude.invoke(
+				{
+					action: "run",
+					name: tabName,
+					code: `const { elements } = await tab.observe();
+await (await tab.id(elements.find(element => element.name === "Maternity").id)).click();
+const ref = (await tab.ariaSnapshot()).match(/radio "Paternity".*\\[ref=(e\\d+)\\]/)[1];
+await (await tab.ref(ref)).click();
+await tab.click("#agree");
+return await tab.evaluate(() => ({
+	leave: document.querySelector("input[name=leave]:checked")?.id,
+	agree: document.querySelector("#agree").checked,
+	changes: window.changes,
+}));`,
+					timeout: 15,
+				},
+				context,
+			);
+			// One trusted change per click: each one really reached its input.
+			expect(valueFrom<Record<string, unknown>>(result)).toEqual({ leave: "paternity", agree: true, changes: 3 });
+		} finally {
+			await prelude.invoke({ action: "close", name: tabName, kill: true }, context).catch(() => undefined);
+		}
+	}, 30_000);
 });
 
 describe.skipIf(!CHROMIUM_AVAILABLE)("browser element handle clicks", () => {

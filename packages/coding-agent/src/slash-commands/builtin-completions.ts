@@ -273,7 +273,9 @@ export function buildModelSelectorCompletions(
 			}
 		} else {
 			rankModels ??= createModelMentionSource({
-				source: createModelBrowserSource(runtime.ctx.settings),
+				source: createModelBrowserSource(runtime.ctx.settings, model =>
+					runtime.ctx.session.effectiveServiceTier(model),
+				),
 				registry: runtime.ctx.session.modelRegistry,
 				scopedModels: () => runtime.ctx.session.scopedModels.map(entry => entry.model),
 			});

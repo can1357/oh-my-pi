@@ -778,7 +778,8 @@ mod tests {
 		let file = ["let v0001 = 1;", "let v0002 = 2;", "let v0003 = 3;", "let v0004 = 4;"];
 		let faithful = body(&["let v0001 = 1;", "let v0002 = 20;", "let v0004 = 4; // edit"]);
 		assert!(body_targets(&faithful, &file, 1, 4));
-		// Lines shifted up: a stale range ends one line past what the body carries.
+		// Lines shifted up: a stale range ends one line past what the body
+		// carries.
 		let stale = body(&["let v0001 = 1;", "let v0002 = 2;", "let v0003 = 30;"]);
 		assert!(!body_targets(&stale, &file, 1, 4));
 		// Tail carried only before the head is not this range.

@@ -564,8 +564,7 @@ fn parse_file_patch(raw: &str) -> std::result::Result<FilePatch, ApplyFailure> {
 	let lines: Vec<&str> = raw.split_inclusive('\n').collect();
 	let first = lines
 		.first()
-		.map(|line| line.trim_end_matches('\n'))
-		.unwrap_or_default();
+		.map_or_default(|line| line.trim_end_matches('\n'));
 	let paths = first
 		.strip_prefix("diff --git ")
 		.ok_or_else(|| ApplyFailure::Invalid("invalid diff header".into()))?;
@@ -1298,9 +1297,7 @@ fn index_map_at(
 	repo: &gix::Repository,
 	index_path: Option<&Path>,
 ) -> Result<BTreeMap<String, FileEntry>> {
-	Ok(load_index_at(repo, index_path)?
-		.map(|index| index_state_map(&index))
-		.unwrap_or_default())
+	Ok(load_index_at(repo, index_path)?.map_or_default(|index| index_state_map(&index)))
 }
 
 /// The index at `index_path`, or the repository's when `None`; `None` when an
@@ -1870,7 +1867,8 @@ fn validate_repo_path(path: &str) -> std::result::Result<(), ApplyFailure> {
 	if candidate.is_absolute()
 		|| candidate.components().any(|component| {
 			matches!(component, Component::ParentDir | Component::RootDir | Component::Prefix(_))
-		}) || path.is_empty()
+		})
+		|| path.is_empty()
 	{
 		return Err(ApplyFailure::Invalid(format!("unsafe patch path: {path}")));
 	}

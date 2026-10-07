@@ -925,60 +925,6 @@ export declare namespace Response {
 			 */
 			type: "error";
 		}
-		/**
-		 * A moderation result produced for the response input or output.
-		 */
-		interface ModerationResult {
-			/**
-			 * A dictionary of moderation categories to booleans, True if the input is flagged
-			 * under this category.
-			 */
-			categories: {
-				[key: string]: boolean;
-			};
-			/**
-			 * Which modalities of input are reflected by the score for each category.
-			 */
-			category_applied_input_types: {
-				[key: string]: Array<"text" | "image">;
-			};
-			/**
-			 * A dictionary of moderation categories to scores.
-			 */
-			category_scores: {
-				[key: string]: number;
-			};
-			/**
-			 * A boolean indicating whether the content was flagged by any category.
-			 */
-			flagged: boolean;
-			/**
-			 * The moderation model that produced this result.
-			 */
-			model: string;
-			/**
-			 * The object type, which was always `moderation_result` for successful moderation
-			 * results.
-			 */
-			type: "moderation_result";
-		}
-		/**
-		 * An error produced while attempting moderation for the response input or output.
-		 */
-		interface Error {
-			/**
-			 * The error code.
-			 */
-			code: string;
-			/**
-			 * The error message.
-			 */
-			message: string;
-			/**
-			 * The object type, which was always `error` for moderation failures.
-			 */
-			type: "error";
-		}
 	}
 }
 /**

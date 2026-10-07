@@ -7,9 +7,28 @@
 - Added Mistral to `/login` with an API-key flow that validates against `https://api.mistral.ai/v1/models`, so `MISTRAL_API_KEY` no longer has to come from the environment
 - Added Google Cloud partner-model pricing for Claude Opus 5.5 and Sonnet 5.5 on Google Antigravity ([#14195](https://github.com/can1357/oh-my-pi/pull/14195) by [@eggpeat](https://github.com/eggpeat)).
 
+## [18.8.0] - 2026-10-07
+
 ### Changed
 
-- Google Antigravity now lists Claude Opus 5.5 and Sonnet 5.5 once each, with selectable low, medium, and high thinking levels ([#14195](https://github.com/can1357/oh-my-pi/pull/14195) by [@eggpeat](https://github.com/eggpeat)).
+- Improved catalog performance by speeding up model cache reads and repeated catalog-wide model builds, especially for large catalogs.
+
+## [18.7.0] - 2026-10-06
+
+### Added
+
+- Added Mistral Large 4 with reasoning support, image input, a 1M-token context window, and preview pricing.
+- Added configurable thinking levels from low through maximum for MiniMax-M3.1-Flash-Preview; because the model always reasons, requests that disable thinking use the low level.
+- Added Google Antigravity pricing and model support for Claude Opus 5.5 and Sonnet 5.5.
+
+### Changed
+
+- MiniMax Token Plan providers (`minimax-code` and `minimax-code-cn`) now use MiniMax's recommended Anthropic-compatible API for model requests and login key validation.
+- Google Antigravity now exposes Claude Opus 5.5 and Sonnet 5.5 once each, with selectable low, medium, and high thinking levels.
+
+### Fixed
+
+- Added the correct published pricing for GPT-6 Astra's Ultrafast service tier: a 6× multiplier on the OpenAI API and an 8× multiplier on the Codex card.
 
 ## [18.6.3] - 2026-10-06
 

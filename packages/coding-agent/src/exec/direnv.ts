@@ -65,6 +65,9 @@ function direnvBinary(): string | null {
 const envrcCache = new Map<string, { found: string | null; atMs: number }>();
 const ENVRC_CACHE_MAX = 512;
 const ENVRC_CACHE_TTL_MS = 5_000;
+// A stat-guard hit within this window of the last direnv export/verification
+// reuses the cached diff without forking `direnv export json` again.
+const DIRENV_WARM_TTL_MS = 5_000;
 
 interface DirenvWatch {
 	path: string;
@@ -84,6 +87,8 @@ const exportCache = new Map<
 		mtimeNs: bigint;
 		size: bigint;
 		watches: DirenvWatch[];
+		/** `Date.now()` of the last export or warm verification that confirmed this entry. */
+		verifiedAtMs: number;
 	}
 >();
 
@@ -305,6 +310,8 @@ async function direnvDenied(
  * reuses the loaded environment until a watched input changes. High-resolution
  * stats of `.envrc` and every watched path (including direnv's allow/deny
  * files) catch same-second edits that direnv's whole-second timestamps miss.
+ * While those stats are unchanged, an entry verified by direnv within the last
+ * {@link DIRENV_WARM_TTL_MS} is reused without spawning direnv at all.
  * A warm export that reports any change is discarded and re-run cold, so a
  * revoked allow or an input the stat guard missed never leaves the result
  * relative to stale direnv state. The returned diff is always relative to the
@@ -336,9 +343,14 @@ export async function loadDirenvEnv(
 	exportCache.delete(dir);
 	try {
 		if (previous) {
+			if (Date.now() - previous.verifiedAtMs < DIRENV_WARM_TTL_MS) {
+				exportCache.set(dir, previous);
+				return previous.diff;
+			}
 			const warm = await exportDirenv(bin, dir, timeoutMs, previous.loaded, opts?.signal);
 			if (!warm) return null;
 			if (Object.keys(warm.set).length === 0 && warm.unset.length === 0) {
+				previous.verifiedAtMs = Date.now();
 				exportCache.set(dir, previous);
 				return previous.diff;
 			}
@@ -361,7 +373,15 @@ export async function loadDirenvEnv(
 		// Retain state only when every watched path can be tracked.
 		if (envrcStat && watches) {
 			if (exportCache.size >= ENVRC_CACHE_MAX) exportCache.clear();
-			exportCache.set(dir, { base, loaded, diff, mtimeNs: envrcStat.mtimeNs, size: envrcStat.size, watches });
+			exportCache.set(dir, {
+				base,
+				loaded,
+				diff,
+				mtimeNs: envrcStat.mtimeNs,
+				size: envrcStat.size,
+				watches,
+				verifiedAtMs: Date.now(),
+			});
 		}
 		return diff;
 	} catch (err) {

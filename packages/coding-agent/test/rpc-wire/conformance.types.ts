@@ -61,6 +61,7 @@ import type { SessionStats } from "@oh-my-pi/pi-coding-agent/session/agent-sessi
 import type { BtwHistoryRecord, BtwHistoryTurn } from "@oh-my-pi/pi-coding-agent/session/btw-history";
 import type { UsageLimitState } from "@oh-my-pi/pi-coding-agent/session/usage-limit";
 import type { ContextUsage } from "@oh-my-pi/pi-tui/status-line/types";
+import type { LogoutAccount } from "@oh-my-pi/pi-tui/overlays/logout-account-selector";
 import type { Goal } from "@oh-my-pi/pi-tui/tools/goal";
 import type { TodoItem, TodoPhase } from "@oh-my-pi/pi-tui/tools/todo";
 
@@ -272,6 +273,7 @@ export type State = Assert<
 		subagentMessages: Outbound<RpcSubagentMessagesResult, Wire.SubagentMessages>;
 		btwHistoryRecord: Outbound<BtwHistoryRecord, Wire.BtwHistoryRecord>;
 		btwHistoryTurn: Outbound<BtwHistoryTurn, Wire.BtwHistoryTurn>;
+		logoutAccount: Outbound<LogoutAccount, Wire.LogoutAccount>;
 		btwStatuses: Same<BtwHistoryTurn["status"], Wire.BtwStatus>;
 		model: OutboundSubset<Model, Wire.ModelInfo>;
 		modelCost: OutboundSubset<Model["cost"], Wire.ModelCost>;

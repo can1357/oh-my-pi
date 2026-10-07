@@ -654,7 +654,8 @@ fn case_form(span: &str, allcaps_min: Option<usize>, head_mark: bool) -> CaseFor
 			|| matches!(
 				c.general_category_group(),
 				GeneralCategoryGroup::Letter | GeneralCategoryGroup::Mark
-			)) && !is_lower_x(c)
+			))
+			&& !is_lower_x(c)
 			&& (!is_upper_x(c) || lowers_to_self(c))
 	});
 	if let Some(min) = allcaps_min

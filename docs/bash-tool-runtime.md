@@ -165,7 +165,7 @@ If the selected shell includes `bash`, it attempts `getOrCreateSnapshot()`:
 
 - snapshot captures aliases/functions/options from user rc,
 - snapshot creation is best-effort,
-- failure falls back to no snapshot.
+- failure falls back to no snapshot; a failed snapshot is retried after 60 s, or sooner when the rc file's mtime or size or the shell environment changes.
 
 If `prefix` is configured, it wraps the command after any direnv unset prefix.
 
@@ -245,7 +245,7 @@ Non-PTY execution also passes shell-minimizer settings into the native `Shell` s
 
 ## Live tool updates and async jobs
 
-For non-PTY foreground execution, `BashTool` uses a separate `TailBuffer` for partial updates and emits `onUpdate` snapshots while command is running.
+For non-PTY foreground execution, `BashTool` passes an `onPreview` callback to `executeBash()`, which streams the `OutputSink`'s own inline view (`OutputSink.preview()`) as `onUpdate` snapshots while the command is running; there is no separate partial-update buffer.
 
 For PTY execution, live rendering is handled by custom UI overlay, not by `onUpdate` text chunks.
 

@@ -95,9 +95,9 @@ impl builtins::Command for GitCommand {
 			{
 				let cwd = context.shell.working_dir().to_owned();
 				let filesystem = context.shell.filesystem().clone();
-				// Planning and cloning are synchronous filesystem work. They are not
-				// abandoned on cancellation: a half-registered worktree is worse than a
-				// late one.
+				// Planning and cloning are synchronous filesystem work. They are
+				// not abandoned on cancellation: a half-registered
+				// worktree is worse than a late one.
 				let outcome = tokio::task::spawn_blocking(move || request.create(&cwd, &filesystem))
 					.await
 					.map_err(|err| Error::from(ErrorKind::ThreadingError(err)))?;
@@ -303,7 +303,8 @@ impl AddRequest {
 			return Ok(None);
 		}
 		let worktrees = repo.worktrees()?;
-		// A registered worktree whose directory is gone needs git's `-f` handling.
+		// A registered worktree whose directory is gone needs git's `-f`
+		// handling.
 		if worktrees.iter().any(|entry| entry.path == path) {
 			return Ok(None);
 		}
@@ -314,7 +315,8 @@ impl AddRequest {
 				.any(|entry| entry.branch.as_deref() == Some(full.as_str()))
 		};
 		let branch_exists = |branch: &str| repo.ref_exists(&format!("refs/heads/{branch}"));
-		// Whether creating a branch at `start` stays untracked, as pi-vcs creates it.
+		// Whether creating a branch at `start` stays untracked, as pi-vcs creates
+		// it.
 		let untracked = |start: &str| match self.track {
 			Some(false) => Ok(true),
 			_ => creates_untracked_branch(&repo, start),
@@ -376,7 +378,8 @@ impl AddRequest {
 				(Some(branch), name.clone(), false, Preparing::NewBranch(name))
 			}
 		};
-		// Covers unborn HEAD and names that are not commits (trees, blobs, typos).
+		// Covers unborn HEAD and names that are not commits (trees, blobs,
+		// typos).
 		let start = branch
 			.as_ref()
 			.map_or(target.as_str(), |branch| branch.start.as_str());
@@ -598,7 +601,8 @@ fn creates_untracked_branch(repo: &GitRepo, start: &str) -> pi_vcs::Result<bool>
 	if matches!(repo.config_get("branch.autoSetupMerge")?.as_deref(), Some("always" | "inherit")) {
 		return Ok(false);
 	}
-	// `@{upstream}` forms and remote-tracking branches set up tracking by default.
+	// `@{upstream}` forms and remote-tracking branches set up tracking by
+	// default.
 	Ok(!start.contains("@{")
 		&& !start.starts_with("refs/remotes/")
 		&& !repo.ref_exists(&format!("refs/remotes/{start}"))?)

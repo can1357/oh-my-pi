@@ -89,7 +89,7 @@ Breadcrumb writes are best-effort and non-fatal.
 `createSessionManager(...)` handles string-valued `--resume` in two modes:
 
 1. Path-like value (contains `/`, `\\`, or ends with `.jsonl`)
-   - direct `SessionManager.open(sessionArg, parsed.sessionDir)`
+   - direct `SessionManager.open(sessionArg, parsed.sessionDir, undefined, { throwIfMissing: true })`; a missing path fails with `Session "<path>" not found.` instead of creating a session there
 
 2. Resume key value
    - `resolveResumableSession(...)` searches local sessions first, then all sessions unless a custom `sessionDir` disables global fallback

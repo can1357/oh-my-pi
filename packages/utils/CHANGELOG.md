@@ -2,6 +2,22 @@
 
 ## [Unreleased]
 
+## [18.8.0] - 2026-10-07
+
+### Added
+
+- Added `ZipPackage` to `@oh-my-pi/pi-utils/ar` for lazily reading ZIP-based document packages with a configurable total-inflation limit, plus `DocxImage.readBytes()` for accessing raw DOCX image data.
+
+### Changed
+
+- Improved DOCX conversion to inflate only the package contents it needs, reducing unnecessary work and memory use.
+- Improved performance across HTML-to-Markdown conversion, Readability extraction, Markdown lexing, terminal emulation, terminal styling, streaming tool-argument parsing, and log writing. Large-page processing and terminal workloads now use substantially less time and memory.
+
+### Fixed
+
+- Fixed memory growth in long-lived child processes, streaming readers, prompt template compilation, and retried HTTP requests by releasing buffers, cache entries, and discarded response bodies promptly.
+- Fixed prompt templates rejecting `{{else if …}}` chains as unclosed blocks; a chain now closes with its opening block's single closing tag, as in Handlebars.
+
 ## [18.6.3] - 2026-10-06
 
 ### Breaking Changes
