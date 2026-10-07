@@ -58,7 +58,7 @@ import { buildAvailableSlashCommands } from "../../slash-commands/available-comm
 import { listLogoutAccounts, logoutCredential } from "../../slash-commands/helpers/logout";
 import { defaultLoadModeForToolName } from "../../tools/essential-tools";
 import type { EventBus } from "../../utils/event-bus";
-import { selectRpcEntries } from "./rpc-compat";
+import { type RpcEntrySelection, selectRpcEntries } from "./rpc-compat";
 import { calculateTokensPerSecond } from "../../utils/token-rate";
 import {
 	formatPersistenceDurabilityFailure,
@@ -2101,24 +2101,25 @@ export async function runRpcMode(session: AgentSession, options: RpcModeOptions 
 			}
 
 			case "get_entries": {
+				let selected: RpcEntrySelection;
 				try {
-					return success(
-						id,
-						"get_entries",
-						selectRpcEntries(
-							session.sessionManager.getEntries(),
-							session.sessionManager.getLeafId(),
-							command.since,
-						),
+					selected = selectRpcEntries(
+						session.sessionManager.getEntries(),
+						session.sessionManager.getLeafId(),
+						command.since,
 					);
 				} catch (err) {
 					return error(id, "get_entries", err instanceof Error ? err.message : String(err), "unknown_since");
 				}
+				return success(id, "get_entries", {
+					...selected,
+					entries: session.sessionManager.withInlineImages(selected.entries),
+				});
 			}
 
 			case "get_tree": {
 				return success(id, "get_tree", {
-					tree: session.sessionManager.getTree(),
+					tree: session.sessionManager.getTree({ inlineImages: true }),
 					leafId: session.sessionManager.getLeafId(),
 				});
 			}

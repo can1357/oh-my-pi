@@ -630,9 +630,18 @@ function entriesForBlobResolution(entries: FileEntry[]): FileEntry[] {
 	return sessionEntries;
 }
 
-/** Restore the image data that persistence externalized to the blob store, in place. */
-export async function resolveBlobRefsInEntries(entries: FileEntry[], blobStore: BlobStore): Promise<void> {
-	await resolveBlobRefs(entriesForBlobResolution(entries), blobStore);
+/**
+ * Restore the image data that persistence externalized to the blob store, in place.
+ * The first `keepExternalized` items of `entries` keep their blob refs; legacy
+ * snapcompact frame repairs still apply to them.
+ */
+export async function resolveBlobRefsInEntries(
+	entries: FileEntry[],
+	blobStore: BlobStore,
+	keepExternalized = 0,
+): Promise<void> {
+	for (const entry of entries.slice(0, keepExternalized)) repairTruncatedSnapcompactFrames(entry);
+	await resolveBlobRefs(entriesForBlobResolution(entries.slice(keepExternalized)), blobStore);
 }
 
 /** Synchronous {@link resolveBlobRefsInEntries}. */
@@ -649,6 +658,75 @@ export function resolveBlobRefsInEntriesSync(entries: FileEntry[], blobStore: Bl
 		}
 		site.holder[site.key] = data;
 	}
+}
+
+/**
+ * `value` with every blob ref {@link collectBlobRefSites} would resolve replaced
+ * by its data. Copies only the objects and arrays on the way to a ref, so
+ * `value` itself is never mutated and ref-free subtrees stay shared.
+ */
+function resolvedCopy(value: unknown, resolve: (ref: string, asDataUrl: boolean) => string, key?: string): unknown {
+	if (key !== "frames" && isExternalizableImagePosition(value, key) && isBlobRef(value.data)) {
+		return { ...value, data: resolve(value.data, false) };
+	}
+
+	if (Array.isArray(value)) {
+		let copy: unknown[] | undefined;
+		for (let i = 0; i < value.length; i++) {
+			const item = resolvedCopy(value[i], resolve, key);
+			if (item !== value[i]) (copy ??= value.slice())[i] = item;
+		}
+		return copy ?? value;
+	}
+
+	if (typeof value !== "object" || value === null) return value;
+	const holder = value as Record<string, unknown>;
+	let copy: Record<string, unknown> | undefined;
+	if (holder.type === "image_generation_call" && typeof holder.result === "string" && isBlobRef(holder.result)) {
+		copy = { ...holder, result: resolve(holder.result, false) };
+	}
+	if (hasImageUrl(value) && isBlobRef(value.image_url)) {
+		copy = { ...(copy ?? holder), image_url: resolve(value.image_url, true) };
+	}
+	for (const childKey in holder) {
+		const child = holder[childKey];
+		const next = resolvedCopy(child, resolve, childKey);
+		if (next !== child) (copy ??= { ...holder })[childKey] = next;
+	}
+	return copy ?? value;
+}
+
+/**
+ * `values` with their blob refs resolved back to inline image data. A value
+ * holding refs is replaced by a copy; every other value passes through, and the
+ * array itself is returned when nothing needed resolving.
+ */
+export function withResolvedBlobRefsSync<T>(values: T[], blobStore: BlobStore): T[] {
+	const resolved = new Map<string, string>();
+	const resolve = (ref: string, asDataUrl: boolean): string => {
+		const key = `${asDataUrl ? "url" : "base64"}:${ref}`;
+		let data = resolved.get(key);
+		if (data === undefined) {
+			data = asDataUrl ? resolveImageDataUrlSync(blobStore, ref) : resolveImageDataSync(blobStore, ref);
+			resolved.set(key, data);
+		}
+		return data;
+	};
+	let out: T[] | undefined;
+	for (let i = 0; i < values.length; i++) {
+		let copy: T;
+		try {
+			if (!containsBlobRef(values[i])) continue;
+			copy = resolvedCopy(values[i], resolve) as T;
+		} catch (error) {
+			// Nested past the engine stack limit: nothing can walk or serialize it,
+			// so it passes through to its consumer's own degradation path.
+			if (error instanceof RangeError) continue;
+			throw error;
+		}
+		if (copy !== values[i]) (out ??= values.slice())[i] = copy;
+	}
+	return out ?? values;
 }
 
 /**

@@ -1289,6 +1289,17 @@ export interface CompactionPreparation {
 }
 
 /**
+ * The provider-native replay payload a compaction carries in place of a
+ * readable summary, if any. Only the provider that produced it can consume it;
+ * for every other model the history behind the compaction is still unsummarized.
+ */
+export function getRemoteCompactionPreserve(
+	preserveData: Record<string, unknown> | undefined,
+): { provider?: string } | undefined {
+	return getCompactionV2PreserveData(preserveData) ?? getPreservedOpenAiRemoteCompactionData(preserveData);
+}
+
+/**
  * Whether the active model's normal encoder can consume stored native history.
  * Creating future compactions is a separate policy: disabling it does not disable
  * Responses-family replay. Local summaries have no provider restriction.
@@ -1297,7 +1308,7 @@ export function canReplayRemoteCompaction(
 	preserveData: Record<string, unknown> | undefined,
 	activeModel: Model,
 ): boolean {
-	const remote = getCompactionV2PreserveData(preserveData) ?? getPreservedOpenAiRemoteCompactionData(preserveData);
+	const remote = getRemoteCompactionPreserve(preserveData);
 	return !remote || (remote.provider === activeModel.provider && isOpenAiRemoteCompactionApi(activeModel.api));
 }
 
@@ -1316,7 +1327,7 @@ export function remotePreserveReusable(
 	activeModel: Model,
 	settings: CompactionSettings,
 ): boolean {
-	const remote = getCompactionV2PreserveData(preserveData) ?? getPreservedOpenAiRemoteCompactionData(preserveData);
+	const remote = getRemoteCompactionPreserve(preserveData);
 	if (!remote) return true;
 	return (
 		remote.provider === activeModel.provider &&

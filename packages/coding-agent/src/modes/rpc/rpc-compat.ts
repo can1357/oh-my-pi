@@ -1,5 +1,11 @@
 import type { SessionEntry } from "../../session/session-entries";
 
+/** Entries picked for `get_entries`, with the leaf they were read against. */
+export interface RpcEntrySelection {
+	entries: SessionEntry[];
+	leafId: string | null;
+}
+
 /**
  * Slice canonical append-history for the Pi-compatible `get_entries` command.
  *
@@ -15,7 +21,7 @@ export function selectRpcEntries(
 	entries: readonly SessionEntry[],
 	leafId: string | null,
 	since?: string,
-): { entries: SessionEntry[]; leafId: string | null } {
+): RpcEntrySelection {
 	if (since === undefined) return { entries: [...entries], leafId };
 	const index = entries.findIndex(entry => entry.id === since);
 	if (index === -1) throw new Error(`Unknown entries cursor: ${since}`);

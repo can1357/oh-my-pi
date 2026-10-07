@@ -1225,7 +1225,8 @@ export class SelectorController {
 	}
 
 	showUserMessageSelector(): void {
-		const entries = this.ctx.sessionManager.getBranch().filter(isTranscriptEntry);
+		const sessionManager = this.ctx.sessionManager;
+		const entries = sessionManager.withInlineImages(sessionManager.getBranch().filter(isTranscriptEntry));
 		if (entries.length === 0) {
 			this.ctx.showStatus("No messages to branch from");
 			return;
@@ -1300,7 +1301,9 @@ export class SelectorController {
 				if (isTranscriptEntry(node.entry)) entries.push(node.entry);
 				node = node.children.at(-1);
 			}
-			if (entries.length > 0) paths.push({ rootId: sibling.entry.id, entries });
+			if (entries.length > 0) {
+				paths.push({ rootId: sibling.entry.id, entries: this.ctx.sessionManager.withInlineImages(entries) });
+			}
 		}
 		return paths;
 	}
@@ -1357,7 +1360,8 @@ export class SelectorController {
 	}
 
 	showCopySelector(): void {
-		const entries = this.ctx.sessionManager.getBranch().filter(isTranscriptEntry);
+		const sessionManager = this.ctx.sessionManager;
+		const entries = sessionManager.withInlineImages(sessionManager.getBranch().filter(isTranscriptEntry));
 		if (entries.length === 0) {
 			this.ctx.showStatus("Nothing to copy yet.");
 			return;

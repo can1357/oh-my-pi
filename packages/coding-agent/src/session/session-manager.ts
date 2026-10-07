@@ -10,6 +10,7 @@ import type {
 	Usage,
 } from "@oh-my-pi/pi-ai";
 import { createSyntheticToolResultMessage } from "@oh-my-pi/pi-agent-core";
+import { getRemoteCompactionPreserve } from "@oh-my-pi/pi-agent-core/compaction";
 import {
 	directoryIsEnterable,
 	getBlobsDir,
@@ -88,6 +89,7 @@ import {
 	resolveBlobRefsInEntriesSync,
 	type SessionLoadResult,
 	visitEntriesFromFile,
+	withResolvedBlobRefsSync,
 } from "./session-loader";
 import { generateId, migrateToCurrentVersion } from "./session-migrations";
 import {
@@ -451,6 +453,39 @@ function isAssistantEntry(entry: SessionEntry): boolean {
 	return entry.type === "message" && entry.message.role === "assistant";
 }
 
+/**
+ * A compaction whose summary every model can read. A provider-native one holds
+ * an opaque payload instead, so preparation for another provider re-expands
+ * the history behind it (see `findReadableCompactionIndex`).
+ */
+function isSummarizingCompaction(entry: SessionEntry): entry is CompactionEntry {
+	return entry.type === "compaction" && !getRemoteCompactionPreserve(entry.preserveData);
+}
+
+/**
+ * How many leading journal entries precede the kept range of the latest
+ * summarizing compaction on the leaf's path. Neither the model context nor
+ * compaction preparation reads them, so they can keep their images as blob
+ * refs. Defaults to the leaf a freshly loaded journal gets: its last entry.
+ */
+function compactedPrefixLength(
+	entries: readonly SessionEntry[],
+	byId: ReadonlyMap<string, SessionEntry> = new Map(entries.map(entry => [entry.id, entry])),
+	leafId: string | null = entries.at(-1)?.id ?? null,
+): number {
+	const seen = new Set<string>();
+	let entry = leafId ? byId.get(leafId) : undefined;
+	while (entry && !seen.has(entry.id)) {
+		if (isSummarizingCompaction(entry)) {
+			const kept = byId.get(entry.firstKeptEntryId);
+			return kept ? Math.max(0, entries.indexOf(kept)) : 0;
+		}
+		seen.add(entry.id);
+		entry = entry.parentId ? byId.get(entry.parentId) : undefined;
+	}
+	return 0;
+}
+
 function isDraftOnlyMetadataEntry(entry: SessionEntry): boolean {
 	// Startup-recorded selector state that does not survive as user intent
 	// once the draft is cleared. `mode_change` covers the `plan.defaultOnStartup`
@@ -697,6 +732,7 @@ export type ReadonlySessionManager = Pick<
 	| "getEntries"
 	| "getTree"
 	| "getUsageStatistics"
+	| "withInlineImages"
 	| "putBlob"
 	| "putBlobSync"
 >;
@@ -2017,11 +2053,25 @@ export class SessionManager {
 
 	#setLeaf(id: string | null): void {
 		this.#index.setLeaf(id);
+		this.#inlineActiveImages();
 		const batch = this.#atomicEntryBatch;
 		if (batch && !batch.collecting) {
 			batch.externalLeafChanged = true;
 			batch.externalLeafId = id;
 		}
+	}
+
+	/**
+	 * Inline the images of the leaf path's context range, from the latest
+	 * summarizing compaction's kept entry to the leaf. A leaf move can turn
+	 * compacted history back into model context, and readers of the active
+	 * branch expect bytes.
+	 */
+	#inlineActiveImages(): void {
+		const branch = this.#index.branchView();
+		const compaction = branch.findLast(isSummarizingCompaction);
+		const keptAt = compaction ? branch.findIndex(entry => entry.id === compaction.firstKeptEntryId) : -1;
+		resolveBlobRefsInEntriesSync(branch.slice(Math.max(0, keptAt)), this.#blobs);
 	}
 
 	#recordEntry(entry: SessionEntry): void {
@@ -2041,8 +2091,32 @@ export class SessionManager {
 			batch.externalLeafId = entry.id;
 		}
 		this.#appendToSessionFile(entry);
+		if (entry.type === "compaction") this.#externalizeCompactedImages();
 		if (batch) batch.deferredNotifications.push(entry);
 		else this.#notifyEntryAppended(entry);
+	}
+
+	/**
+	 * Swap every entry the latest compaction left behind for its persisted form,
+	 * whose images are blob refs instead of base64. In place, so holders of the
+	 * entry objects (branch views, maintenance passes) keep seeing the journal.
+	 * The persisted form is what a resume would load, and readers that need the
+	 * bytes resolve refs themselves ({@link buildSessionContext},
+	 * {@link withInlineImages}). Only runs while the file holds every entry: a
+	 * ref nothing on disk points at could be collected by `omp gc`.
+	 */
+	#externalizeCompactedImages(): void {
+		if (!this.#persist || !this.#fileIsCurrent || this.#diskFailure || this.#atomicEntryBatch) return;
+		const end = compactedPrefixLength(this.#entries, this.#index.entriesById(), this.#index.leafId());
+		for (let i = 0; i < end; i++) {
+			const entry = this.#entries[i] as SessionEntry;
+			const persisted = prepareEntryForPersistence(entry, this.#blobs);
+			if (persisted === entry) continue;
+			for (const key of Object.keys(entry)) {
+				if (!Object.hasOwn(persisted, key)) delete (entry as unknown as Record<string, unknown>)[key];
+			}
+			Object.assign(entry, persisted);
+		}
 	}
 
 	#rollbackAtomicEntryBatch(batch: AtomicEntryBatch): void {
@@ -2201,6 +2275,7 @@ export class SessionManager {
 		this.#draftOnlySessionCleanupArmed = snapshot.draftOnlySessionCleanupArmed;
 		this.#fallbackRuntimeOnly = snapshot.fallbackRuntimeOnly;
 		this.#applyEntries(snapshot.header, [...snapshot.entries]);
+		this.#inlineActiveImages();
 		this.#additionalDirectories = snapshot.header.additionalDirectories ?? [];
 		this.#sessionName = snapshot.sessionName;
 
@@ -2304,9 +2379,12 @@ export class SessionManager {
 		}
 
 		const migrated = migrateToCurrentVersion(fileEntries);
-		await resolveBlobRefsInEntries(fileEntries, this.#blobs);
 		// loadEntriesFromFile guarantees entries[0] is a valid session header.
 		const header = fileEntries[0] as SessionHeader;
+		const entries = fileEntries.slice(1) as SessionEntry[];
+		// Compacted history stays externalized: its images would otherwise sit in
+		// memory as base64 for the whole session without ever reaching the model.
+		await resolveBlobRefsInEntries(entries, this.#blobs, compactedPrefixLength(entries));
 
 		// Adopt the loaded session's working directory only when it is verifiably
 		// accessible. Sessions live in a dir keyed by their cwd, so resuming a
@@ -2331,7 +2409,7 @@ export class SessionManager {
 			this.#fallbackRuntimeOnly = false;
 		}
 
-		this.#applyEntries(header, fileEntries.slice(1) as SessionEntry[]);
+		this.#applyEntries(header, entries);
 		this.#expectedDiskSize = sourceSize;
 		this.#additionalDirectories = header.additionalDirectories ?? [];
 		this.#titleUpdatedAt = titleSlot?.updatedAt ?? header.timestamp;
@@ -3314,13 +3392,14 @@ export class SessionManager {
 	}
 
 	/**
-	 * The live header and entries, for collab replication. Nothing is copied:
-	 * the host mutates entries in place on rewrite paths, so callers must not
-	 * mutate what this returns and must serialize it synchronously, before any
-	 * such rewrite can run.
+	 * The live header and entries, for collab replication. Entries holding
+	 * compacted-history blob refs are copied with their images inlined; the rest
+	 * are the live objects. The host mutates those in place on rewrite paths, so
+	 * callers must not mutate what this returns and must serialize it
+	 * synchronously, before any such rewrite can run.
 	 */
 	snapshotForReplication(): { header: SessionHeader; entries: readonly SessionEntry[] } {
-		return { header: this.#header, entries: this.#entries };
+		return { header: this.#header, entries: this.withInlineImages(this.#entries) };
 	}
 
 	/**
@@ -3683,10 +3762,25 @@ export class SessionManager {
 	 * the full-history display transcript, from the current leaf path.
 	 */
 	buildSessionContext(options?: BuildSessionContextOptions): SessionContext {
-		return buildSessionContext(this.#entries, this.#index.leafId(), this.#index.entriesById(), {
+		const context = buildSessionContext(this.#entries, this.#index.leafId(), this.#index.entriesById(), {
 			resolveFrameData: data => lazyImageDataSync(this.#blobs, data),
 			...options,
 		});
+		// Compacted history keeps its images as blob refs; a branch back into it or
+		// the full transcript surfaces those messages here.
+		const messages = withResolvedBlobRefsSync(context.messages, this.#blobs);
+		return messages === context.messages ? context : { ...context, messages };
+	}
+
+	/**
+	 * Entries (or their messages) with images inlined, for readers that render
+	 * or ship history outside the active context: export, RPC, collab, the rewind
+	 * and copy selectors, editor draft restores. Entries before the latest
+	 * compaction keep images as blob refs in memory; values holding refs come
+	 * back as copies, every other value as itself.
+	 */
+	withInlineImages<T>(values: T[]): T[] {
+		return withResolvedBlobRefsSync(values, this.#blobs);
 	}
 
 	/** Strip stale OpenAI Responses replay metadata from loaded assistant entries. */
@@ -3708,17 +3802,22 @@ export class SessionManager {
 		return this.#header;
 	}
 
-	/** All session entries (excludes header). Returns a shallow copy. */
+	/**
+	 * All session entries (excludes header). Returns a shallow copy. Entries
+	 * before the latest compaction carry their images as blob refs; pass them
+	 * through {@link withInlineImages} when the bytes are needed.
+	 */
 	getEntries(): SessionEntry[] {
 		return [...this.#entries];
 	}
 
 	/**
 	 * The session as a tree. A well-formed session has exactly one root; orphaned
-	 * entries (broken parent chain) are returned as roots too.
+	 * entries (broken parent chain) are returned as roots too. `inlineImages`
+	 * resolves compacted-history blob refs, for trees leaving the process.
 	 */
-	getTree(): SessionTreeNode[] {
-		return this.#index.tree(this.#entries);
+	getTree(options?: { inlineImages?: boolean }): SessionTreeNode[] {
+		return this.#index.tree(options?.inlineImages ? this.withInlineImages(this.#entries) : this.#entries);
 	}
 
 	/**
@@ -3844,6 +3943,7 @@ export class SessionManager {
 		this.#titleUpdatedAt = timestamp;
 		this.#hasTitleSlot = true;
 		this.#index.rebuild(this.#entries);
+		this.#inlineActiveImages();
 		this.#artifactManager = null;
 		this.#artifactManagerSessionFile = null;
 		this.#forceFileCreation = this.#persist;
@@ -3947,10 +4047,10 @@ export class SessionManager {
 			throw err;
 		}
 		migrateToCurrentVersion(sourceEntries);
-		await resolveBlobRefsInEntries(sourceEntries, manager.#blobs);
 
 		const sourceHeader = sourceEntries.find(entry => entry.type === "session") as SessionHeader | undefined;
 		const history = sourceEntries.filter(entry => entry.type !== "session") as SessionEntry[];
+		await resolveBlobRefsInEntries(history, manager.#blobs, compactedPrefixLength(history));
 		normalizeLoadedUsage(history);
 		if (options?.resetInheritedCost) SessionManager.#resetInheritedUsageCost(history);
 		manager.#resetToNewSession(

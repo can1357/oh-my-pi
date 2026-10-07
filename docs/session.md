@@ -471,7 +471,7 @@ Applied when header `version < 3`:
 
 - Missing or genuinely empty files initialize a new session at that exact path and materialize its header immediately. `SessionManager.open(..., { throwIfMissing: true })` instead rejects missing/empty input.
 - Non-empty data without a valid leading session header is rejected without modifying the file. An array-only `loadEntriesFromFile()` result of `[]` therefore does not distinguish empty from corrupt input; the manager uses `loadSessionFile()` diagnostics.
-- Valid files are loaded, migrated if needed, blob refs resolved, then indexed. Migrations, skipped malformed records, and loaded OpenAI replay sanitization mark the next persistence operation for a full rewrite.
+- Valid files are loaded, migrated if needed, blob refs resolved from the latest summarizing compaction's kept range onward, then indexed. Migrations, skipped malformed records, and loaded OpenAI replay sanitization mark the next persistence operation for a full rewrite.
 - A recorded cwd is adopted only when it is enterable. Otherwise runtime cwd stays at the launch/current directory while the transcript remains in its original location; workspace-root edits stay runtime-only until relocation.
 
 ## Tree and Leaf Semantics
@@ -561,7 +561,7 @@ Before persisting entries:
 - Redundant OpenAI Responses `thinkingSignature` copies are omitted when the authoritative reasoning item already exists in `providerPayload`.
 - Spilled MCP tool results omit duplicate `details.structuredContent` when the rendered structured output already lives in their truncation artifact.
 
-These projections leave the live entries unchanged. On load, ordinary persisted image references are resolved back to inline payloads. Snapcompact frames stay lazy until context reconstruction selects them. Archives with frames truncated by older persistence code fall back to their retained text or undamaged frames.
+These projections leave the live entries unchanged, with one exception. Entries before the kept range of the latest summarizing compaction on the active path (provider-native compactions do not count: another provider re-summarizes the history behind them) are not read by the model context or compaction preparation, so their images stay as blob refs: on load they are not resolved, and when a compaction lands in a persisted session whose file holds every entry, each such entry is replaced in place by its persisted projection. Moving the leaf re-inlines the new path's context range. `buildSessionContext()` resolves refs in the messages it returns, and `withInlineImages(values)` (HTML/share export, RPC `get_entries`/`get_tree`, collab snapshots, the rewind and copy selectors, editor draft restores) returns copies with images inlined. Snapcompact frames stay lazy until context reconstruction selects them. Archives with frames truncated by older persistence code fall back to their retained text or undamaged frames.
 
 ## Storage Abstractions
 

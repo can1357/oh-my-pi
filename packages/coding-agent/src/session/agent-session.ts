@@ -11632,7 +11632,7 @@ export class AgentSession implements SettingsScope {
 		cancelled: boolean;
 	}> {
 		using _transition = this.#beginSessionTransition();
-		const selectedEntry = this.sessionManager.getEntry(entryId);
+		const [selectedEntry] = this.sessionManager.withInlineImages([this.sessionManager.getEntry(entryId)]);
 
 		if (selectedEntry?.type !== "message" || selectedEntry.message.role !== "user") {
 			throw new Error("Invalid entry ID for branching");
@@ -12112,7 +12112,7 @@ export class AgentSession implements SettingsScope {
 			// (null if root), the draft the user typed goes back to the editor with its images.
 			newLeafId = targetEntry.parentId;
 			editorText = userTurnDraft(targetEntry);
-			const request = transcriptEntryMessage(targetEntry);
+			const [request] = this.sessionManager.withInlineImages([transcriptEntryMessage(targetEntry)]);
 			const targetImages =
 				request && (request.role === "user" || request.role === "custom")
 					? this.#extractUserMessageImages(request.content)
