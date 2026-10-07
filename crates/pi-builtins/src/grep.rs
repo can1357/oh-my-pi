@@ -105,6 +105,7 @@ pub(crate) const fn exit_status(quiet: bool, any_match: bool, had_error: bool) -
 #[derive(Clone, Copy)]
 pub(crate) struct RecordFormat {
 	/// Byte printed in place of each `/` in a path (`rg --path-separator`).
+	/// On Windows `\` is rewritten too, so displayed paths stay uniform.
 	pub path_separator: Option<u8>,
 	/// End a printed path with NUL instead of its separator or terminator
 	/// (`grep -Z`, `rg -0`).
@@ -119,7 +120,10 @@ impl RecordFormat {
 			return out.write_all(path);
 		};
 		let mut rest = path;
-		while let Some(pos) = rest.iter().position(|&byte| byte == b'/') {
+		while let Some(pos) = rest
+			.iter()
+			.position(|&byte| byte == b'/' || (cfg!(windows) && byte == b'\\'))
+		{
 			out.write_all(&rest[..pos])?;
 			out.write_all(&[separator])?;
 			rest = &rest[pos + 1..];
@@ -1650,6 +1654,26 @@ mod tests {
 	use parking_lot::Mutex;
 
 	use super::*;
+
+	#[test]
+	fn path_separator_rewrites_the_native_separator_on_windows() {
+		// Defends: --path-separator must rewrite the platform's own separator
+		// too, or Windows paths keep mixing \ and the configured separator.
+		let mut out = Vec::new();
+		RecordFormat {
+			path_separator: Some(b'#'),
+			null_paths: false,
+			terminator: b'
+',
+		}
+		.write_path(&mut out, b"a\b/c")
+		.unwrap();
+		if cfg!(windows) {
+			assert_eq!(out, b"a#b#c");
+		} else {
+			assert_eq!(out, b"a\b#c");
+		}
+	}
 	use brush_core::openfiles;
 	use crate::host::{Host, run_caught, run_util};
 
