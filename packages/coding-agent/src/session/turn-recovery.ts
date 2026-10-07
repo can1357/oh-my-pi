@@ -715,6 +715,11 @@ export class TurnRecovery {
 		return this.#maybeRestoreRetryFallbackPrimary();
 	}
 
+	/** Allows the next prompt to reconsider the primary without switching during compaction. */
+	releaseRetryFallbackRefusalPin(): void {
+		if (this.#activeRetryFallback) this.#activeRetryFallback.refusalPinned = false;
+	}
+
 	/** Applies model fallback policy from live usage health before a turn starts. */
 	maybeApplyUsageAwareFallback(signal: AbortSignal, confirmer?: UsageFallbackConfirmer): Promise<boolean> {
 		return this.#maybeApplyUsageAwareFallback(signal, confirmer);
@@ -2012,7 +2017,13 @@ export class TurnRecovery {
 		role: string,
 		selector: RetryFallbackSelector,
 		currentSelector: string,
-		options?: { pinFallback?: boolean; apiKey?: string; signal?: AbortSignal; reason?: string },
+		options?: {
+			pinFallback?: boolean;
+			pinFallbackForRefusal?: boolean;
+			apiKey?: string;
+			signal?: AbortSignal;
+			reason?: string;
+		},
 	): Promise<boolean> {
 		const resolved = resolveModelOverride([selector.raw], this.#host.modelRegistry, this.#host.settings);
 		const candidate = resolved.model ?? this.#host.modelRegistry.find(selector.provider, selector.id);
@@ -2078,10 +2089,13 @@ export class TurnRecovery {
 				originalThinkingLevel: currentThinkingLevel,
 				lastAppliedFallbackThinkingLevel: nextThinkingLevel,
 				pinned: options?.pinFallback === true,
+				refusalPinned: options?.pinFallbackForRefusal === true,
 			};
 		} else {
 			this.#activeRetryFallback.lastAppliedFallbackThinkingLevel = nextThinkingLevel;
 			this.#activeRetryFallback.pinned = this.#activeRetryFallback.pinned || options?.pinFallback === true;
+			this.#activeRetryFallback.refusalPinned =
+				this.#activeRetryFallback.refusalPinned || options?.pinFallbackForRefusal === true;
 		}
 		await this.#host.syncAfterModelChange(previousEditMode);
 		await this.#host.emitSessionEvent({
@@ -2099,7 +2113,7 @@ export class TurnRecovery {
 		failedMessage: AssistantMessage,
 		options?: {
 			excludeProvider?: string;
-			pinFallback?: boolean;
+			pinFallbackForRefusal?: boolean;
 			preserveFailedTurn?: boolean;
 			wrapAround?: boolean;
 		},
@@ -2175,7 +2189,7 @@ export class TurnRecovery {
 					reason: `Request failed: ${failedMessage.errorMessage ?? "provider returned an error without details"}`,
 				});
 				const editModeChanged = this.#host.resolveActiveEditMode() !== previousEditMode;
-				if (applied && options?.pinFallback === true && canRedeemFallbackCredit && !editModeChanged) {
+				if (applied && options?.pinFallbackForRefusal === true && canRedeemFallbackCredit && !editModeChanged) {
 					this.#activeFallbackCreditRedemption = {
 						targetSelector: `${candidate.provider}/${candidate.id}`,
 						handle: failedMessage.fallbackCreditHandle!,
@@ -2233,7 +2247,7 @@ export class TurnRecovery {
 	 * model switch cannot fix or must not replay: cancellations (abort-flavored
 	 * errors are not model faults), context overflow (compaction's job),
 	 * classifier refusals (chain consult is handled on the retryable path with
-	 * `pinFallback`), and turns that already emitted replay-unsafe output.
+	 * `pinFallbackForRefusal`), and turns that already emitted replay-unsafe output.
 	 */
 	isHardErrorFallbackEligible(message: AssistantMessage): boolean {
 		if (message.stopReason !== "error") return false;
@@ -2299,7 +2313,7 @@ export class TurnRecovery {
 
 	async #maybeRestoreRetryFallbackPrimary(): Promise<boolean> {
 		if (!this.#activeRetryFallback) return false;
-		if (this.#activeRetryFallback.pinned) return false;
+		if (this.#activeRetryFallback.pinned || this.#activeRetryFallback.refusalPinned) return false;
 		if (this.#getRetryFallbackRevertPolicy() !== "cooldown-expiry") return false;
 
 		const {
@@ -2645,7 +2659,7 @@ export class TurnRecovery {
 				}
 				switchedModel = await this.#tryRetryModelFallback(currentSelector, message, {
 					excludeProvider: longUsageLimitFallback ? currentModel.provider : undefined,
-					pinFallback: classifierRefusal,
+					pinFallbackForRefusal: classifierRefusal,
 					preserveFailedTurn,
 					wrapAround: longUsageLimitFallback,
 				});
