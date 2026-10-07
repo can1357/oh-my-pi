@@ -140,8 +140,23 @@ override matching model tags. These fields do not configure the Anthropic Messag
 - `google-vertex`
 - `typesafe`
 - `openrouter-decisions`
+- `openai-decisions`
 
-`typesafe` and `openrouter-decisions` are judgment APIs, not chat transports: a model declared with one answers System One judgment requests (`{baseUrl}/v1/systemone` and `{baseUrl}/decisions` respectively) and is selected by the `judge` model role. Its `headers` carry gateway routing or custom authentication headers for that traffic.
+`typesafe`, `openrouter-decisions`, and `openai-decisions` are judgment APIs, not chat transports: a model declared with one answers judgment requests and is selected by the `judge` model role. `typesafe` and `openrouter-decisions` speak System One (`{baseUrl}/v1/systemone` and `{baseUrl}/decisions` respectively); `openai-decisions` translates the same questions to [OpenAI's Decisions API](https://developers.openai.com/api/docs/guides/decisions) at `{baseUrl}/decisions` (yes/no → `predicate`, `choice` → `choice`, `score` → `score`; a refused question fails the attempt). Its `headers` carry gateway routing or custom authentication headers for that traffic. The built-in `openai/gpt-6-luna` is a chat model, so declare the Decisions model under its own provider:
+
+```yaml
+providers:
+  openai-decisions:
+    baseUrl: https://api.openai.com/v1
+    apiKey: OPENAI_API_KEY
+    api: openai-decisions
+    models:
+      - id: gpt-6-luna
+        name: GPT-6 Luna (Decisions)
+        cost: { input: 0.1, output: 0, cacheRead: 0, cacheWrite: 0 }
+```
+
+Then set `judge: openai-decisions/gpt-6-luna` under `modelRoles` in `config.yml`.
 
 A model or `modelOverrides` entry may also use a runner API, which serves one model `kind`; `RUNNER_API_KINDS` in `packages/catalog/src/types.ts` lists them (for example `openai-images` serves `image`, `openai-embeddings` serves `embedding`, `openai-speech` serves `tts`). `web-search` is built in and cannot be named here, so neither can `kind: search`. `kind` defaults to the api's kind (`chat` for chat transports), and an explicit `kind` must be one its api serves. Chat transports serve `chat` and `tiny` (small models for the `tiny`, `memory`, and `judge` roles); those that `generate_image` runs (`openai-responses`, `openai-codex-responses`, `google-generative-ai`, `google-gemini-cli`) also serve `image`: on `openai-responses`, the image is generated through the Responses `image_generation` tool, carried by a GPT-5+ chat model on the same provider, instead of `/images/generations`. This moves discovered gateway models to the image role:
 

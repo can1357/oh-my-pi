@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `openai-decisions` runner API kind for judgment models.
+
 ### Changed
 
 - Sped up model cache reads from `models.db` (~6× faster for large rows) ([#14676](https://github.com/can1357/oh-my-pi/pull/14676) by [@H4vC](https://github.com/H4vC))

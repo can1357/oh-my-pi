@@ -373,6 +373,57 @@ describe("ChainJudge", () => {
 		]);
 	});
 
+	it("routes openai-decisions models through OpenAIDecisionsJudge", async () => {
+		const openaiDecisionsModel = {
+			id: "gpt-6-luna",
+			name: "GPT-6 Luna",
+			api: "openai-decisions" as const,
+			provider: "openai",
+			baseUrl: "https://api.openai.com/v1",
+			cost: { input: 0.1, output: 0, cacheRead: 0, cacheWrite: 0 },
+		} as Model<Api>;
+
+		const settings = Settings.isolated({
+			modelRoles: { judge: "openai/gpt-6-luna" },
+		});
+		const registry = makeRegistry([openaiDecisionsModel], { openai: "openai-key" });
+		const urls: string[] = [];
+		vi.spyOn(globalThis, "fetch").mockImplementation(
+			asGlobalFetch(async (url, init) => {
+				urls.push(String(url));
+				expect(new Headers(init?.headers).get("authorization")).toBe("Bearer openai-key");
+				const body = JSON.parse(String(init?.body)) as { model: string; input: string };
+				expect(body.model).toBe("gpt-6-luna");
+				expect(body.input).toBe("mechanical task");
+				return Response.json({
+					model: "gpt-6-luna",
+					answers: [
+						{
+							type: "choice",
+							name: "level",
+							choice: "low",
+							confidence: 0.9,
+							probabilities: [
+								{ value: "low", probability: 0.9 },
+								{ value: "medium", probability: 0.1 },
+							],
+						},
+					],
+					usage: { input_tokens: 15, output_tokens: 0 },
+				});
+			}),
+		);
+
+		const result = await new ChainJudge({ settings, registry, purpose: "test" }).judge({
+			state: "mechanical task",
+			questions: { level: TIER_QUESTION },
+		});
+
+		expect(result.answers.level.choice).toBe("low");
+		expect(result.provider).toBe("openai");
+		expect(urls).toEqual(["https://api.openai.com/v1/decisions"]);
+	});
+
 	it("answers repeated questions from the cache and sends only the unanswered ones", async () => {
 		using tempDir = TempDir.createSync("@omp-judgment-cache-");
 		const dbPath = path.join(tempDir.path(), "judgment-cache.db");

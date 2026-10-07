@@ -3,6 +3,8 @@ import { describe, expect, it } from "bun:test";
 import {
 	type ApiKeyResolveContext,
 	JudgmentParseError,
+	OpenAIDecisionsApiError,
+	OpenAIDecisionsJudge,
 	parseChoiceReply,
 	parseNoulReply,
 	parseScoreReply,
@@ -13,6 +15,7 @@ import {
 	TypeSafeApiError,
 	TypeSafeJudge,
 } from "@oh-my-pi/pi-ai";
+import { MissingApiKeyError, ProviderResponseError } from "@oh-my-pi/pi-ai/error";
 
 const LEVELS = ["low", "medium", "high", "xhigh", "max"] as const;
 
@@ -357,5 +360,242 @@ describe("TypeSafeJudge", () => {
 				Response.json({ model: "jev-latest", answers: { urgent: { type: "choice", choice: "x" } }, usage: {} }),
 		});
 		await expect(mismatched.judge(request)).rejects.toThrow(/missing a "noul" answer/);
+	});
+});
+
+describe("OpenAIDecisionsJudge", () => {
+	const request = {
+		state: "The user reported: Export fails in Safari but works in Chrome.",
+		questions: {
+			urgent: {
+				type: "noul",
+				instructions: "Is this issue urgent?",
+				criteria: { true: "Work is completely blocked", false: "Workaround exists" },
+			},
+			category: {
+				type: "choice",
+				instructions: "Which category does this issue fall into?",
+				criteria: { bug: "Software defect", feature: "New capability request" },
+			},
+			severity: {
+				type: "score",
+				instructions: "Rate severity from 0 to 2",
+				criteria: ["Cosmetic", "Moderate", "Critical"] as const,
+			},
+		},
+	} as const;
+
+	it("maps questions to OpenAI Decisions schema and parses predicate, choice, and score answers", async () => {
+		const calls: { url: string; init: RequestInit | undefined }[] = [];
+		const judge = new OpenAIDecisionsJudge({
+			apiKey: "test-openai-key",
+			baseUrl: "https://api.openai.com/v1",
+			model: "gpt-6-luna",
+			fetch: async (url, init) => {
+				calls.push({ url: String(url), init });
+				return Response.json({
+					model: "gpt-6-luna",
+					answers: [
+						{ type: "predicate", name: "urgent", probability: 0.85 },
+						{
+							type: "choice",
+							name: "category",
+							choice: "bug",
+							confidence: 0.9,
+							probabilities: [
+								{ value: "bug", probability: 0.9 },
+								{ value: "feature", probability: 0.1 },
+							],
+						},
+						{
+							type: "score",
+							name: "severity",
+							score: 1.2,
+							confidence: 0.8,
+							probabilities: [
+								{ value: 0, label: "Level 0", probability: 0.1 },
+								{ value: 1, label: "Level 1", probability: 0.6 },
+								{ value: 2, label: "Level 2", probability: 0.3 },
+							],
+						},
+					],
+					usage: { input_tokens: 100, output_tokens: 0, total_tokens: 100 },
+				});
+			},
+		});
+
+		const result = await judge.judge(request);
+
+		expect(calls).toHaveLength(1);
+		expect(calls[0].url).toBe("https://api.openai.com/v1/decisions");
+		expect(new Headers(calls[0].init?.headers).get("authorization")).toBe("Bearer test-openai-key");
+		expect(new Headers(calls[0].init?.headers).get("content-type")).toBe("application/json");
+
+		const body = JSON.parse(String(calls[0].init?.body));
+		expect(body.model).toBe("gpt-6-luna");
+		expect(body.input).toBe(request.state);
+		expect(body.questions).toEqual([
+			{
+				type: "predicate",
+				name: "urgent",
+				instructions: "Is this issue urgent?\n\nYes: Work is completely blocked\nNo: Workaround exists",
+			},
+			{
+				type: "choice",
+				name: "category",
+				instructions: "Which category does this issue fall into?",
+				choices: [
+					{ value: "bug", description: "Software defect" },
+					{ value: "feature", description: "New capability request" },
+				],
+			},
+			{
+				type: "score",
+				name: "severity",
+				instructions: "Rate severity from 0 to 2",
+				levels: [
+					{ label: "Level 0", description: "Cosmetic" },
+					{ label: "Level 1", description: "Moderate" },
+					{ label: "Level 2", description: "Critical" },
+				],
+			},
+		]);
+
+		expect(result.api).toBe("openai-decisions");
+		expect(result.provider).toBe("openai");
+		expect(result.model).toBe("gpt-6-luna");
+		expect(result.answers.urgent).toEqual({ type: "noul", noul: 0.85 });
+		expect(result.answers.category).toEqual({
+			type: "choice",
+			choice: "bug",
+			confidence: 0.9,
+			probabilities: { bug: 0.9, feature: 0.1 },
+		});
+		expect(result.answers.severity).toEqual({
+			type: "score",
+			score: 1.2,
+			confidence: 0.8,
+			probabilities: { "0": 0.1, "1": 0.6, "2": 0.3 },
+		});
+		expect(result.usage.input).toBe(100);
+		expect(result.usage.cost.total).toBe(0);
+	});
+
+	it("serializes non-string state to JSON", async () => {
+		let capturedBody: { input?: unknown } | undefined;
+		const judge = new OpenAIDecisionsJudge({
+			apiKey: "test-key",
+			fetch: async (_url, init) => {
+				capturedBody = JSON.parse(String(init?.body));
+				return Response.json({
+					model: "gpt-6-luna",
+					answers: [{ type: "predicate", name: "ok", probability: 0.99 }],
+					usage: { input_tokens: 10 },
+				});
+			},
+		});
+
+		await judge.judge({
+			state: { count: 42, active: true },
+			questions: { ok: { type: "noul", instructions: "Is it active?" } },
+		});
+
+		expect(capturedBody?.input).toBe(JSON.stringify({ count: 42, active: true }));
+	});
+
+	it("throws ProviderResponseError with kind content-blocked on refusal", async () => {
+		const judge = new OpenAIDecisionsJudge({
+			apiKey: "test-key",
+			fetch: async () =>
+				Response.json({
+					model: "gpt-6-luna",
+					answers: [{ type: "refusal", name: "urgent" }],
+					usage: { input_tokens: 10 },
+				}),
+		});
+
+		const promise = judge.judge({
+			state: "malicious prompt",
+			questions: { urgent: { type: "noul", instructions: "Evaluate" } },
+		});
+		await expect(promise).rejects.toBeInstanceOf(ProviderResponseError);
+		await expect(promise).rejects.toThrow(/refused question "urgent"/);
+	});
+
+	it("throws ProviderResponseError when an answer is missing", async () => {
+		const judge = new OpenAIDecisionsJudge({
+			apiKey: "test-key",
+			fetch: async () =>
+				Response.json({
+					model: "gpt-6-luna",
+					answers: [],
+					usage: { input_tokens: 10 },
+				}),
+		});
+
+		await expect(
+			judge.judge({
+				state: "foo",
+				questions: { urgent: { type: "noul", instructions: "Evaluate" } },
+			}),
+		).rejects.toThrow(/missing a "noul" answer for question "urgent"/);
+	});
+
+	it("throws OpenAIDecisionsApiError on non-2xx without retry for 4xx errors", async () => {
+		let calls = 0;
+		const judge = new OpenAIDecisionsJudge({
+			apiKey: "test-key",
+			fetch: async () => {
+				calls++;
+				return new Response('{"error":{"message":"Invalid question"}}', { status: 400 });
+			},
+		});
+
+		await expect(
+			judge.judge({
+				state: "foo",
+				questions: { urgent: { type: "noul", instructions: "Evaluate" } },
+			}),
+		).rejects.toBeInstanceOf(OpenAIDecisionsApiError);
+		expect(calls).toBe(1);
+	});
+
+	it("retries transient HTTP errors and resolves rotated API key", async () => {
+		const keys: string[] = [];
+		const statuses = [401, 500, 200];
+		const resolver = (ctx: ApiKeyResolveContext) => (ctx.error === undefined ? "stale-key" : "fresh-key");
+		const judge = new OpenAIDecisionsJudge({
+			apiKey: resolver,
+			fetch: async (_url, init) => {
+				keys.push(new Headers(init?.headers).get("authorization") ?? "");
+				const status = statuses.shift() ?? 200;
+				if (status === 200) {
+					return Response.json({
+						model: "gpt-6-luna",
+						answers: [{ type: "predicate", name: "urgent", probability: 0.9 }],
+						usage: { input_tokens: 20 },
+					});
+				}
+				return new Response("server error", { status, headers: { "retry-after-ms": "1" } });
+			},
+		});
+
+		const result = await judge.judge({
+			state: "foo",
+			questions: { urgent: { type: "noul", instructions: "Evaluate" } },
+		});
+
+		expect(result.answers.urgent.noul).toBe(0.9);
+		expect(keys).toEqual(["Bearer stale-key", "Bearer fresh-key", "Bearer fresh-key"]);
+	});
+
+	it("throws MissingApiKeyError when no API key is provided or found in environment", () => {
+		const orig = Bun.env.OPENAI_API_KEY;
+		delete Bun.env.OPENAI_API_KEY;
+		try {
+			expect(() => new OpenAIDecisionsJudge({ apiKey: "" })).toThrow(MissingApiKeyError);
+		} finally {
+			if (orig !== undefined) Bun.env.OPENAI_API_KEY = orig;
+		}
 	});
 });
