@@ -3,6 +3,10 @@
 ## [Unreleased]
 ### Added
 
+- Added an explicit Android ARM64 Bazel cross-target using the Android NDK toolchain and API level 24; it remains outside the shipping native aggregates.
+
+### Changed
+
 - Added source-built Android ARM64/Termux support for local native addon builds and Bionic process management; clipboard integration remains Termux API based.
 
 ### Fixed

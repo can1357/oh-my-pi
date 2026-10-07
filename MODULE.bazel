@@ -1,14 +1,16 @@
 """omp — Bazel build for the native (Rust) side of the workspace.
 
-Builds the pi_natives NAPI cdylib for every shipped target with hermetic
-toolchains, replacing cargo-zigbuild/cargo-xwin/sccache plus the hand-rolled
-CI caches with Bazel's content-addressed action cache (see infra/docs/03-caching.md).
+Builds the pi_natives NAPI cdylib for every shipped target, plus an explicit
+experimental Android ARM64 cross-target, with hermetic toolchains. This replaces
+cargo-zigbuild/cargo-xwin/sccache plus hand-rolled CI caches with Bazel's
+content-addressed action cache (see infra/docs/03-caching.md).
 
 Layout:
   //:natives-<target>      release-grade renamed .node artifacts (root BUILD.bazel)
   //crates/...             first-party crate targets
   //bazel/...              platforms, ISA-variant constraints, toolchains, rules
   @crates//...             third-party crates from Cargo.lock via crate_universe
+  //:natives-android-arm64  explicit experimental Android ARM64 target
 
 The cargo workspace stays authoritative for local iteration (rust-analyzer,
 `cargo nextest`, napi typedef regeneration); Bazel is the artifact and CI
@@ -22,6 +24,7 @@ bazel_dep(name = "bazel_skylib", version = "1.8.2")
 bazel_dep(name = "platforms", version = "1.1.0")
 bazel_dep(name = "rules_rust", version = "0.71.3")
 bazel_dep(name = "hermetic_cc_toolchain", version = "4.2.0")
+bazel_dep(name = "rules_android_ndk", version = "0.1.5")
 
 # zig-wrapper patches (rationale in each patch header):
 # - zig 0.14's cache corrupts under concurrent `zig cc` (ziglang/zig#18763);
@@ -58,6 +61,7 @@ rust.toolchain(
     extra_target_triples = [
         "x86_64-unknown-linux-gnu",
         "aarch64-unknown-linux-gnu",
+        "aarch64-linux-android",
         "x86_64-unknown-linux-musl",
         "aarch64-unknown-linux-musl",
         "x86_64-apple-darwin",
@@ -91,6 +95,7 @@ rust.toolchain(
         "2026-11-08/rust-std-nightly-aarch64-pc-windows-msvc.tar.xz": "76c1a9ab1e9efbbb77bd179f1fe365952daecfbc1796bbb19ee90754221bfcfb",
         "2026-11-08/rust-std-nightly-aarch64-apple-darwin.tar.xz": "b281bdc8c8d0217d3d8aafbe77f763246014fd925068f41c20a6efed57e62b8c",
         "2026-11-08/rust-std-nightly-aarch64-unknown-linux-gnu.tar.xz": "dccff165f3cbb7fe622c11c6efdb9b18a37d38eaf2663d8c402e321f301dc178",
+        "2026-11-08/rust-std-nightly-aarch64-linux-android.tar.xz": "eeeb23fef4457ead44ac347d524e37467dbea44ad76ef996f2e939c26944cf97",
         "2026-11-08/rust-std-nightly-aarch64-unknown-linux-musl.tar.xz": "3af90e6db4580f3b9d526cf5ee76d9cd231dc26984c9227678bbdbd8ffd2de19",
         "2026-11-08/rust-std-nightly-x86_64-apple-darwin.tar.xz": "6b459120e0d47e01729bb91c63492c07e70ef6f6fe081721a09d8c4886e5f16c",
         "2026-11-08/rust-std-nightly-x86_64-pc-windows-msvc.tar.xz": "d1d26602d89f981f07e0607be5b4f35764e0f8b2413801c294f4b682b335d314",
@@ -130,6 +135,14 @@ use_repo(
 register_toolchains("//bazel/toolchains:all")
 
 register_toolchains("@rust_toolchains//:all")
+
+# --- Android NDK toolchain ----------------------------------------------------
+# Keep the local NDK repository lazy: desktop Bazel builds must not require
+# ANDROID_NDK_HOME. The installer opts into the C++ toolchain only when an
+# Android target is requested; rules_android_ndk 0.1.5 supports NDK 25b+.
+android_ndk = use_extension("@rules_android_ndk//:extension.bzl", "android_ndk_repository_extension")
+android_ndk.configure(api_level = 24)
+use_repo(android_ndk, "androidndk")
 
 # --- C/C++ toolchains ---------------------------------------------------------
 # zig cc provides hermetic linux-gnu (pinned glibc 2.17 portability floor, same
@@ -177,12 +190,13 @@ crate.from_cargo(
     # crates (members so their sources render hermetically; the
     # [patch.crates-io] entries redirect registry deps to them).
     manifests = ["//:Cargo.toml"],
-    # Exactly the shipped addon triples: crate BUILD files get
-    # target_compatible_with selects over this set (defaults omit darwin-x64
-    # and musl), and features/deps resolve per-triple from Cargo.lock.
+    # Shipped addon triples plus the explicit experimental Android ARM64 target;
+    # crate BUILD files use target_compatible_with to select over this set
+    # (defaults omit darwin-x64 and musl), and features/deps resolve per triple.
     supported_platform_triples = [
         "x86_64-unknown-linux-gnu",
         "aarch64-unknown-linux-gnu",
+        "aarch64-linux-android",
         "x86_64-unknown-linux-musl",
         "aarch64-unknown-linux-musl",
         "x86_64-apple-darwin",

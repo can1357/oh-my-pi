@@ -74,6 +74,15 @@ config_setting(
     ],
 )
 
+# Rust's aarch64-linux-android target selects the Android OS/ARM64 platform.
+config_setting(
+    name = "aarch64-linux-android",
+    constraint_values = [
+        "@platforms//os:android",
+        "@platforms//cpu:aarch64",
+    ],
+)
+
 config_setting(
     name = "x86_64-apple-darwin",
     constraint_values = [
