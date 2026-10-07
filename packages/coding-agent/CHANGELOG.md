@@ -5,39 +5,97 @@
 ### Added
 
 - Sessions can now be stored in PostgreSQL, MySQL, or SQLite instead of JSONL files: set `session.storage: sql` and point `session.sql.dsnFile` at a file holding the connection string (or set `OMP_SESSION_STORAGE=sql` and `OMP_SESSION_SQL_DSN_FILE`); `--resume`, `--continue`, the session picker, and listing follow the same store, and joining a collab session needs file storage. ([#13416](https://github.com/can1357/oh-my-pi/pull/13416) by [@sjawhar](https://github.com/sjawhar))
-- Files the write tool creates now preview the way the matching code blocks in replies do, building up while the write streams: `.svg` as an image and Mermaid (`.mmd`, `.mermaid`) as a diagram under the write card, and in Tern also 3D models (`.obj`, `.ply`, `.wrl`, `.x3dv`, `.stl`, `.gltf`, `.usda`); in Tern an SVG write now draws like an SVG figure in a reply
 
-### Changed
-
-- Inside a Tern pane, browser opens with `headed: false` now show as a Tern picture-in-picture too; only `app.tern: false` (or `browser.tern` / `PI_BROWSER_TERN=0`) opens Chromium instead
-- Inside a Tern pane, `/fork` opens the fork in a new pane beside the original, which keeps the original session
-- Roughly halved browser `extract` time in text mode on large pages ([#14668](https://github.com/can1357/oh-my-pi/pull/14668) by [@H4vC](https://github.com/H4vC))
-- Reduced per-turn session branch copying on long sessions ([#14677](https://github.com/can1357/oh-my-pi/pull/14677) by [@H4vC](https://github.com/H4vC))
-- Sped up bash startup; direnv reuses its verified environment for 5 s when nothing changed ([#14680](https://github.com/can1357/oh-my-pi/pull/14680) by [@H4vC](https://github.com/H4vC))
-- Prompt history search (Ctrl+R) now updates results 100 ms after you stop typing instead of on every keystroke; Enter and clicks always act on the current query's results ([#14687](https://github.com/can1357/oh-my-pi/pull/14687) by [@H4vC](https://github.com/H4vC))
-- Sped up agent hub activity rows ([#14688](https://github.com/can1357/oh-my-pi/pull/14688) by [@H4vC](https://github.com/H4vC))
-- Sped up `local://`, `history://` and `artifact://` autocomplete by reusing directory scans for 2 s, so a just-created file can take up to 2 s to appear ([#14692](https://github.com/can1357/oh-my-pi/pull/14692) by [@H4vC](https://github.com/H4vC))
-- Removed quadratic slowdown of TTSR stream rules on long responses ([#14693](https://github.com/can1357/oh-my-pi/pull/14693) by [@H4vC](https://github.com/H4vC))
-- Reduced per-prompt session overhead from pruning, goal-mode token accounting, branch appends, publishing and full session rewrites ([#14694](https://github.com/can1357/oh-my-pi/pull/14694) by [@H4vC](https://github.com/H4vC))
-- Reduced per-event session overhead: no branch copies for persisted-message checks, and extension hooks without handlers are skipped before building their context ([#14695](https://github.com/can1357/oh-my-pi/pull/14695) by [@H4vC](https://github.com/H4vC))
-- Reduced edit and `write` CPU on large files ([#14700](https://github.com/can1357/oh-my-pi/pull/14700) by [@H4vC](https://github.com/H4vC))
-- Sped up `read` on large files (`:-N` tails ~8× faster on 50 MB), repeated archive reads, SQLite last pages and speculative reads ([#14701](https://github.com/can1357/oh-my-pi/pull/14701) by [@H4vC](https://github.com/H4vC))
-- Sped up `grep` and `glob` results ([#14702](https://github.com/can1357/oh-my-pi/pull/14702) by [@H4vC](https://github.com/H4vC))
-- Sped up output schema validation by memoizing validators ([#14702](https://github.com/can1357/oh-my-pi/pull/14702) by [@H4vC](https://github.com/H4vC))
-- Reduced eval live-output overhead (~7× less on 100k-line cells) and sped up terminal graphics extraction (~5×) ([#14704](https://github.com/can1357/oh-my-pi/pull/14704) by [@H4vC](https://github.com/H4vC))
-- A backpressured `omp stream` viewer that catches up now gets the current screen redacted with the latest secret patterns ([#14705](https://github.com/can1357/oh-my-pi/pull/14705) by [@H4vC](https://github.com/H4vC))
 ### Fixed
 
 - Fixed a `session.sql.dsnFile` whose contents are not a connection URL surfacing the driver's parse error (which embeds the connection string) instead of a refusal that names only the variable and the path. ([#13416](https://github.com/can1357/oh-my-pi/pull/13416) by [@sjawhar](https://github.com/sjawhar))
-- Fixed `/new` keeping plan mode (and its plan-role model) or goal mode active in the new session ([#14653](https://github.com/can1357/oh-my-pi/issues/14653))
-- Fixed parallel first bash calls each spawning an rc-sourcing shell ([#14680](https://github.com/can1357/oh-my-pi/pull/14680) by [@H4vC](https://github.com/H4vC))
-- Fixed the todo list's auto-clear never firing while subagents were streaming progress ([#14692](https://github.com/can1357/oh-my-pi/pull/14692) by [@H4vC](https://github.com/H4vC))
-- Fixed memory growth while ACP client-terminal commands run ([#14680](https://github.com/can1357/oh-my-pi/pull/14680) by [@H4vC](https://github.com/H4vC))
-- Fixed ephemeral side-channel replies (idle recap, completion probe, `runEphemeralTurn`) truncating in quadratic time ([#14695](https://github.com/can1357/oh-my-pi/pull/14695) by [@H4vC](https://github.com/H4vC))
-- Sped up `omp compress` by tokenizing each draft once per round ([#14702](https://github.com/can1357/oh-my-pi/pull/14702) by [@H4vC](https://github.com/H4vC))
-- Fixed the agent slowing down while streaming long eval cells ([#14704](https://github.com/can1357/oh-my-pi/pull/14704) by [@H4vC](https://github.com/H4vC))
-- Fixed quadratic slowdown reading large Python kernel output (big reprs, base64 images) ([#14704](https://github.com/can1357/oh-my-pi/pull/14704) by [@H4vC](https://github.com/H4vC))
-- Sped up TUI repaints of live stream and `/record` rows ([#14705](https://github.com/can1357/oh-my-pi/pull/14705) by [@H4vC](https://github.com/H4vC))
+
+## [18.8.3] - 2026-10-07
+
+### Fixed
+
+- Fixed repeat opens of the model picker, model hub, or agents views stacking duplicates; the open one is brought forward instead ([#14846](https://github.com/can1357/oh-my-pi/pull/14846) by [@H4vC](https://github.com/H4vC))
+
+## [18.8.2] - 2026-10-07
+
+### Fixed
+
+- Fixed long Anthropic sessions with repeated tool screenshots exceeding the request-size limit; live images are now trimmed by bytes, recoverable 413s may compact older history, and terminal subagent failures reach the parent ([#14453](https://github.com/can1357/oh-my-pi/issues/14453)).
+- Fixed Tern browser tabs opened with a `url` returning before the page loaded, which made the first `observe()` or `title()` read the blank page.
+
+### Removed
+
+- Removed per-call `model` overrides from `task`, eval `agent()`, and `workpool()`; subagents use configured agent models and settings.
+
+## [18.8.1] - 2026-10-07
+
+### Added
+
+- Added account pools for task agents, allowing an agent and its related work—including advisors, title generation, subagents, and resumed sessions—to use only specified OAuth accounts and fail rather than fall back to another account or an API key.
+- Added `omp usage accounts` to list OAuth account provider and identity keys without exposing tokens, making account-pool configuration easier.
+
+### Changed
+
+- Generated session titles now include their card icon and short code, so the `/resume` picker and session listings show this context; `title.icons` applies to newly generated titles.
+- Symlinked routing configurations now reload when an intermediate file or profile-directory link is replaced, without requiring a session restart.
+
+### Fixed
+
+- Improved Tern `ask` questions so the question no longer obscures the transcript and can be answered while reviewing and scrolling through the relevant context.
+- Added warnings for unrecognized `compat` keys in `models.yml` while continuing to load the configuration; warnings identify the file and key path.
+- Fixed `/new` so new sessions reset plan and goal modes, todo state, and related planning configuration instead of carrying stale state forward; fresh prewalk behavior is also restored after handoffs, cancellations, or automatic recovery.
+- Fixed OAuth alias login and logout flows so they refresh the underlying provider's models, report authentication state correctly, and list and remove the accounts associated with that provider.
+- Fixed model speed statistics so throughput from non-default OpenAI or Codex service tiers is kept separate and displayed for the tier used by the session.
+- Fixed stale model catalogs remaining in memory after provider or catalog refreshes.
+- Fixed `write` and `edit` from hanging or exhausting memory when given FIFOs, terminals, device files, or other non-regular targets; unsupported targets are now rejected safely.
+- Fixed long conversations from losing user and tool-result images when the conversation also contained assistant-generated images.
+- Fixed `local://` session paths from escaping their intended storage directory when given `.` or `..` session identifiers.
+- Fixed `omp gc --archive --apply` from leaving orphaned session-title records behind.
+- Fixed `/retry` after an interrupted reopened `ask` prompt when an extension had registered a context handler.
+- Fixed browser relay sessions from missing cross-origin iframe content that loaded before the tab was opened.
+- Fixed browser clicks on invisible native radio and checkbox inputs, including controls commonly used by GOV.UK forms.
+- Fixed `/model` so selecting the model already assigned to a project's default role still switches to that model correctly.
+- Fixed `wait` and background task state when a completion has already been consumed elsewhere, preventing premature interruption and incorrect idle detection.
+- Fixed repeated coding-plan fallback confirmations after declining a fallback in cases involving changing thinking settings, unavailable quota data, or account recovery.
+- Fixed Python evaluation when the shared runner temporary directory was created by another user.
+- Added RPC support for completing multi-select `ask` questions without relying on TUI keyboard navigation.
+- Corrected tool behavior and configuration documentation for `read`, background `bash`, Python evaluation, replace editing, goal removal, and `advisor.immuneTurns`.
+- Fixed custom glob backends from hanging indefinitely; scans now respect the tool deadline and report incomplete results when necessary.
+- Fixed `--resume <path>` from silently creating a new session for a missing path; it now reports the missing path, consistent with `--fork <path>` and `--resume <id>`.
+
+## [18.8.0] - 2026-10-07
+
+### Added
+
+- Write-tool previews now render as files stream: SVG files appear as images, and Mermaid files (`.mmd` and `.mermaid`) appear as diagrams. Tern also previews supported 3D model formats (`.obj`, `.ply`, `.wrl`, `.x3dv`, `.stl`, `.gltf`, and `.usda`) and renders SVG writes as SVG figures.
+- Added the `title.icons` setting to show session title cards with a Nerd Font glyph and emoji fallback (`nf+emoji`, default), always the emoji (`emoji`), or as plain titles (`boring`).
+- Added the `title.generator` setting to name sessions from a fork of the reply (`fork`, default) or with the title model only (`tiny`).
+
+### Changed
+
+- Session titles are generated using the session's model when possible, with a fallback to the lightweight title model; `TITLE_SYSTEM.md` continues to override the title prompt.
+- Session titles now include a card index, icon, and short code, with appropriate Nerd Font rendering in Tern panes.
+- When Nerd Font symbols are unavailable, session titling requests only an emoji.
+- Subagent completion indicators now advance to 99% when the subagent submits its result.
+- In Tern panes, headed and headless browser opens are shown in Tern picture-in-picture by default; set `app.tern: false`, `browser.tern`, or `PI_BROWSER_TERN=0` to open Chromium instead.
+- In Tern panes, `/fork` opens the fork in a neighboring pane while preserving the original session.
+- Tern's empty composer now shows the session title, or “What are we cooking?” when no title is available.
+- Tern todo cards now display their checklist by default and can be collapsed by clicking the card header.
+- Improved performance across browser extraction, web and document fetching, file tools, search, session handling, LSP/DAP, MCP, subagents, SSH file operations, image processing, voice and dictation, collaboration, and large-output or large-file workflows.
+- Prompt history search now updates shortly after typing stops while Enter and mouse selections use the latest query.
+- Improved responsiveness and reduced resource usage for long sessions, large files and documents, streaming evaluations, terminal graphics, live voice calls, and other high-volume workflows.
+- Hosts that are not supported Mastodon, Lemmy, or Discourse instances are no longer repeatedly probed for those services, improving URL-fetch performance.
+
+### Fixed
+
+- Fixed a message sent while an earlier title request was still running never getting its own try at naming the session when that request came back empty.
+- Fixed `/new` incorrectly carrying plan mode, its plan-specific model, or goal mode into the new session.
+- Fixed todo lists failing to auto-clear while subagents streamed progress.
+- Fixed memory growth during ACP client-terminal commands.
+- Fixed freezes after large pastes containing unclosed tags.
+- Fixed slowdowns when processing long evaluation output, large Python kernel results, compiler/linter output, and ephemeral side-channel replies.
+- Fixed documents served as `application/octet-stream` being downloaded twice.
+- Fixed collaboration guests rebuilding the transcript excessively during streaming.
 
 ## [18.7.0] - 2026-10-06
 

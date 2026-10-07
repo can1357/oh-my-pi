@@ -654,8 +654,34 @@ export async function buildRemoteCommand(
 
 let registered = false;
 
+/**
+ * How long a successful {@link ensureConnection} stays trusted. Within this
+ * window repeated ssh:// operations skip the `ssh -O check` spawn and the key
+ * stat; the control-dir ownership check still runs on every call. A master
+ * that died in the meantime is harmless: every command runs with
+ * `ControlMaster=auto`, which opens a new connection on demand.
+ */
+const CONNECTION_VERIFY_TTL_MS = 30_000;
+
+/** Per host: when the connection was last verified, and the target it was verified for. */
+const verifiedConnections = new Map<string, { at: number; fingerprint: string }>();
+
 export async function ensureConnection(host: SSHConnectionTarget): Promise<void> {
 	const key = host.name;
+	const fingerprint = `${host.username ?? ""}@${host.host}:${host.port ?? ""}\0${host.keyPath ?? ""}`;
+	const verified = verifiedConnections.get(key);
+	if (
+		verified &&
+		Date.now() - verified.at < CONNECTION_VERIFY_TTL_MS &&
+		verified.fingerprint === fingerprint &&
+		activeHosts.has(key) &&
+		hostInfoCache.has(key)
+	) {
+		// The socket directory can be replaced after verification; never hand
+		// OpenSSH an untrusted ControlPath.
+		ensureSshControlDir();
+		return;
+	}
 	const pending = pendingConnections.get(key);
 	if (pending) {
 		await pending;
@@ -707,6 +733,7 @@ export async function ensureConnection(host: SSHConnectionTarget): Promise<void>
 	pendingConnections.set(key, promise);
 	try {
 		await promise;
+		verifiedConnections.set(key, { at: Date.now(), fingerprint });
 	} finally {
 		pendingConnections.delete(key);
 	}
@@ -715,6 +742,7 @@ export async function ensureConnection(host: SSHConnectionTarget): Promise<void>
 export async function invalidateHostMetadata(hostNames: Iterable<string>): Promise<void> {
 	const names = [...hostNames];
 	for (const hostName of names) {
+		verifiedConnections.delete(hostName);
 		hostInfoCache.delete(hostName);
 		await deleteHostInfoFromDisk(hostName);
 	}
@@ -743,6 +771,7 @@ export async function closeAllConnections(): Promise<void> {
 	for (const [name, host] of Array.from(activeHosts.entries())) {
 		await closeConnectionInternal(host);
 		activeHosts.delete(name);
+		verifiedConnections.delete(name);
 	}
 }
 

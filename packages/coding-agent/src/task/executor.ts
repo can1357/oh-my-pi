@@ -40,6 +40,7 @@ import {
 	type ServiceTierInheritSettingValue,
 } from "../config/service-tier";
 import type { CompactionThresholdPair } from "../config/compaction-threshold";
+import { type OAuthAccountPools, validateAgentAccountPools } from "../config/account-pools";
 import { type OverlayLayers, Settings } from "../config/settings";
 
 import type { ToolPathWithSource } from "../extensibility/custom-tools";
@@ -133,6 +134,7 @@ import {
 	cfgTaskMaxRuntimeMs,
 	cfgTaskMaxRecursionDepth,
 	cfgTaskAgentAdvisor,
+	cfgTaskAgentAccountPools,
 } from "./settings";
 import {
 	cfgTierSubagent,
@@ -421,12 +423,6 @@ export interface ExecutorOptions {
 	 * if the resolved subagent model has no working credentials. See #985.
 	 */
 	parentActiveModelPattern?: string;
-	/**
-	 * The model patterns are the parent's live selector without a requested
-	 * level, so a `:level` on them is inherited effort that {@link thinkingLevel}
-	 * outranks rather than a level the caller asked for.
-	 */
-	modelInheritsLiveThinkingLevel?: boolean;
 	thinkingLevel?: ConfiguredThinkingLevel;
 	/** Caller-requested coarse effort (`lo`/`med`/`hi`); maps onto the resolved model's supported thinking range and wins over {@link thinkingLevel}. */
 	effort?: TaskEffort;
@@ -533,6 +529,8 @@ export interface ExecutorOptions {
 	serviceTierOverride?: ServiceTierInheritSettingValue;
 	/** Exact-name `task.agentCompactionThresholdOverrides` pair selected by dispatch. */
 	compactionThresholdOverride?: CompactionThresholdPair;
+	/** Exact-name `task.agentAccountPools` entry selected by dispatch; see `CreateAgentSessionOptions.oauthAccountPools`. */
+	oauthAccountPools?: OAuthAccountPools;
 	/** Override local:// protocol options so subagent shares parent's local:// root */
 	localProtocolOptions?: LocalProtocolOptions;
 	/**
@@ -1532,7 +1530,11 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 	const refreshRecentOutput = () => {
 		if (!recentOutputDirty) return;
 		recentOutputDirty = false;
-		const filtered = recentOutputTail.split("\n").filter(line => line.trim());
+		const tail =
+			recentOutputTail.length > RECENT_OUTPUT_TAIL_BYTES
+				? recentOutputTail.slice(-RECENT_OUTPUT_TAIL_BYTES)
+				: recentOutputTail;
+		const filtered = tail.split("\n").filter(line => line.trim());
 		progress.recentOutput = filtered.slice(-8).reverse();
 	};
 
@@ -1619,12 +1621,19 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 		return message.usage;
 	};
 
+	// Hysteresis: let the tail grow to 2x the cap before trimming, so the
+	// 8KB slice copy runs once per ~8KB of output instead of on every token
+	// once the cap is reached. refreshRecentOutput() re-applies the exact cap.
+	const trimRecentOutputTail = () => {
+		if (recentOutputTail.length > RECENT_OUTPUT_TAIL_BYTES * 2) {
+			recentOutputTail = recentOutputTail.slice(-RECENT_OUTPUT_TAIL_BYTES);
+		}
+	};
+
 	const appendRecentOutputTail = (text: string) => {
 		if (!text) return;
 		recentOutputTail += text;
-		if (recentOutputTail.length > RECENT_OUTPUT_TAIL_BYTES) {
-			recentOutputTail = recentOutputTail.slice(-RECENT_OUTPUT_TAIL_BYTES);
-		}
+		trimRecentOutputTail();
 		// O(chunk) hot path: this runs on every text_delta token (hundreds/
 		// thousands per second while streaming). Line reconstruction is deferred
 		// to refreshRecentOutput() at the emit boundary.
@@ -1639,9 +1648,7 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 			if (record.type !== "text" || typeof record.text !== "string") continue;
 			if (!record.text) continue;
 			recentOutputTail += record.text;
-			if (recentOutputTail.length > RECENT_OUTPUT_TAIL_BYTES) {
-				recentOutputTail = recentOutputTail.slice(-RECENT_OUTPUT_TAIL_BYTES);
-			}
+			trimRecentOutputTail();
 		}
 		recentOutputDirty = true;
 	};
@@ -1674,6 +1681,9 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 			if (yieldCalled) {
 				yieldInvalidatedByAsync = false;
 				yieldAcceptedAt = Date.now();
+				// Submitted: the remaining work is finalization (or waiting on owned
+				// async jobs), so stop showing the last stale self-estimate.
+				if (completionProbe) progress.completionPercent = 99;
 				args.onYieldAccepted?.();
 			}
 		}
@@ -2235,7 +2245,8 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 					signal: AbortSignal.any([listenerSignal, abortSignal]),
 					onEstimate: (percent, cost) => {
 						if (resolved) return;
-						progress.completionPercent = percent;
+						// A probe in flight when the yield landed must not pull the bar back from 99%.
+						if (!yieldCalled) progress.completionPercent = percent;
 						progress.cost += cost;
 						scheduleProgress(true);
 					},
@@ -3750,6 +3761,8 @@ interface WarmReviveCapture {
 	/** Todos are parent-owned and stripped from subagents, except under prewalk (its todo gate needs them). */
 	keepTodo: boolean;
 	wake: IrcWakeTurnMonitorOptions;
+	/** Exact agent name the live `task.agentAccountPools` entry is looked up by on revive. */
+	agentName: string;
 }
 
 /** Keeps `capture.settings` current with `session`'s overlay writes until the session is disposed. */
@@ -3788,15 +3801,21 @@ function createWarmSubagentReviver(capture: WarmReviveCapture): AgentReviver {
 		const mcpManager = capture.spec.options.mcpManager;
 		const mcpFollower = mcpManager ? followMCPTools(mcpManager, explicitSubagentToolNames(capture.spec)) : undefined;
 		let revived: AgentSession;
+		// Account pools are owner policy: take the live exact-name entry, as
+		// dispatch and persisted revival do, never the spawn-time copy.
+		const agentAccountPools = validateAgentAccountPools(cfgTaskAgentAccountPools.get(capture.settings.parent));
 		try {
-			({ session: revived } = await createAgentSession(
-				buildSubagentSessionOptions(
+			({ session: revived } = await createAgentSession({
+				...buildSubagentSessionOptions(
 					capture.spec,
 					restoreSubagentSettings(capture.settings),
 					reopened,
 					expectedAgentRef,
 				),
-			));
+				oauthAccountPools: Object.hasOwn(agentAccountPools, capture.agentName)
+					? agentAccountPools[capture.agentName]
+					: undefined,
+			}));
 		} catch (error) {
 			mcpFollower?.dispose();
 			throw error;
@@ -4154,20 +4173,8 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				options.effort !== undefined
 					? resolveTaskEffortLevel(model, options.effort, spawnEffortCeiling)
 					: undefined;
-			// The parent's live effort rides inherited selectors (and the auth
-			// fallback) as a `:level` suffix; it ranks below the agent definition's
-			// own level so inheriting the parent's model does not override it.
-			const inheritedThinkingLevel =
-				explicitThinkingLevel && (authFallbackUsed || options.modelInheritsLiveThinkingLevel === true);
-			const requestedThinkingLevel =
-				explicitThinkingLevel && !inheritedThinkingLevel ? resolvedThinkingLevel : undefined;
-			// Precedence: caller `effort` > requested `:level` suffix on the resolved
-			// model pattern > agent-definition default (e.g. task's `auto`) >
-			// inherited parent effort / pattern-derived level.
-			const effectiveThinkingLevel = effortLevel ?? requestedThinkingLevel ?? thinkingLevel ?? resolvedThinkingLevel;
 			if (model) {
-				const displayLevel =
-					effortLevel ?? requestedThinkingLevel ?? (inheritedThinkingLevel ? effectiveThinkingLevel : undefined);
+				const displayLevel = effortLevel ?? (explicitThinkingLevel ? resolvedThinkingLevel : undefined);
 				progress.resolvedModelIdentity = formatModelStringWithRouting(model);
 				progress.resolvedThinkingLevel = displayLevel;
 				progress.resolvedModel =
@@ -4175,6 +4182,11 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 						? formatModelSelectorValue(progress.resolvedModelIdentity, displayLevel)
 						: progress.resolvedModelIdentity;
 			}
+			// Precedence: caller `effort` > explicit `:level` suffix on the resolved
+			// model pattern > agent-definition default (e.g. task's `auto`) >
+			// pattern-derived level.
+			const effectiveThinkingLevel =
+				effortLevel ?? (explicitThinkingLevel ? resolvedThinkingLevel : (thinkingLevel ?? resolvedThinkingLevel));
 			resolvedAt = performance.now();
 			const effectiveCwd = worktree ?? cwd;
 			const sessionManagerPromise = sessionFile
@@ -4271,6 +4283,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 					modelRegistry,
 					getApiKey: options.getApiKey,
 					credentialSourceSessionId: options.credentialSourceSessionId,
+					oauthAccountPools: options.oauthAccountPools,
 					inheritedSessionAgents: options.inheritedSessionAgents,
 					model,
 					modelPattern: model || modelOverride === undefined ? undefined : modelPatterns,
@@ -4421,6 +4434,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 					parentArtifactManager: options.parentArtifactManager,
 					keepTodo: prewalk !== undefined,
 					wake: wakeOptions,
+					agentName: agent.name,
 				};
 				trackSubagentSettings(session, reviveCapture);
 				reviveSession = createWarmSubagentReviver(reviveCapture);

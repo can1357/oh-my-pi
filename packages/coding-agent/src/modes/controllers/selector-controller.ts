@@ -185,20 +185,25 @@ function loadProviderAuthUi(): ProviderAuthUiModules {
 	};
 }
 
-/** The open `/settings` menu: set when the command runs, filled once theme discovery resolves. */
-interface SettingsMenu {
+/** Menus that open at most once: a repeat request focuses the open one. */
+type MenuKind = "settings" | "model-picker" | "model-hub" | "agents-dashboard" | "agent-hub";
+
+/** An open menu: registered when the request runs, filled once its component mounts. */
+interface OpenMenu {
 	component?: Component;
 	handle?: OverlayHandle;
+	/** Shows `component` as a new overlay and focuses it; also raises a covered menu. */
+	mount?: () => OverlayHandle;
 }
 
 export class SelectorController {
 	/**
-	 * The `/settings` menu from the moment the command runs until it closes, so a
-	 * second `/settings` (typed while theme discovery is still pending, or from a
-	 * composer that stays reachable, as in Tern's native view) focuses it instead
-	 * of stacking another menu on top.
+	 * Each single-instance menu from the moment it is requested until it closes,
+	 * so a repeat request (typed or clicked while the first is still loading,
+	 * or from a composer that stays reachable, as in Tern's native view)
+	 * focuses it instead of stacking another menu on top.
 	 */
-	#settingsMenu: SettingsMenu | undefined;
+	#openMenus = new Map<MenuKind, OpenMenu>();
 
 	constructor(private ctx: InteractiveModeContext) {}
 	/**
@@ -216,6 +221,49 @@ export class SelectorController {
 		this.ctx.ui.setFocus(component);
 		this.ctx.ui.requestRender();
 		return handle;
+	}
+
+	/**
+	 * Bring the open `kind` menu forward; true when one was open and the request
+	 * is handled. Overlays have no raise API, so a menu another overlay covers
+	 * is remounted on top rather than handed keys while hidden.
+	 */
+	#focusOpenMenu(kind: MenuKind): boolean {
+		const open = this.#openMenus.get(kind);
+		if (!open) return false;
+		if (open.component && open.mount && this.#isCovered(open.component)) {
+			open.handle?.hide();
+			open.handle = open.mount();
+		} else if (open.component) {
+			this.ctx.ui.setFocus(open.component);
+		}
+		this.ctx.ui.requestRender();
+		return true;
+	}
+
+	/** Whether a visible overlay sits above `component`'s overlay. */
+	#isCovered(component: Component): boolean {
+		const stack = this.ctx.ui.overlayStack;
+		const at = stack.findIndex(entry => entry.component === component);
+		return at >= 0 && stack.slice(at + 1).some(entry => !entry.hidden);
+	}
+
+	/** Mount `component` as `menu`'s overlay through `mount`, which also raises it later. */
+	#mountMenu(menu: OpenMenu, component: Component, mount: () => OverlayHandle): void {
+		menu.component = component;
+		menu.mount = mount;
+		menu.handle = mount();
+	}
+
+	/** Register a new `kind` menu; pass it to {@link #releaseMenu} when it closes or fails to open. */
+	#claimMenu(kind: MenuKind): OpenMenu {
+		const menu: OpenMenu = {};
+		this.#openMenus.set(kind, menu);
+		return menu;
+	}
+
+	#releaseMenu(kind: MenuKind, menu: OpenMenu): void {
+		if (this.#openMenus.get(kind) === menu) this.#openMenus.delete(kind);
 	}
 
 	/**
@@ -277,14 +325,8 @@ export class SelectorController {
 	}
 
 	showSettingsSelector(): void {
-		const open = this.#settingsMenu;
-		if (open) {
-			if (open.component) this.ctx.ui.setFocus(open.component);
-			this.ctx.ui.requestRender();
-			return;
-		}
-		const menu: SettingsMenu = {};
-		this.#settingsMenu = menu;
+		if (this.#focusOpenMenu("settings")) return;
+		const menu = this.#claimMenu("settings");
 		getAvailableThemes()
 			.then(availableThemes => {
 				// Fullscreen settings editor on the alternate screen: the overlay
@@ -292,7 +334,7 @@ export class SelectorController {
 				// the transcript stays untouched underneath.
 				const done = () => {
 					menu.handle?.hide();
-					if (this.#settingsMenu === menu) this.#settingsMenu = undefined;
+					this.#releaseMenu("settings", menu);
 					this.focusActiveEditorArea();
 					this.ctx.ui.requestRender();
 				};
@@ -372,12 +414,11 @@ export class SelectorController {
 						},
 					},
 				);
-				menu.component = selector;
-				menu.handle = this.#showFullscreenMenu(selector);
+				this.#mountMenu(menu, selector, () => this.#showFullscreenMenu(selector));
 			})
 			.catch((error: unknown) => {
 				// A menu that never opened must not block the next `/settings`.
-				if (this.#settingsMenu === menu) this.#settingsMenu = undefined;
+				this.#releaseMenu("settings", menu);
 				throw error;
 			});
 	}
@@ -619,6 +660,8 @@ export class SelectorController {
 	 * sidebar, agent rows, and chip strips that dive into the model browser.
 	 */
 	async showAgentsDashboard(): Promise<void> {
+		if (this.#focusOpenMenu("agents-dashboard")) return;
+		const menu = this.#claimMenu("agents-dashboard");
 		const activeModel = this.ctx.session.model;
 		const activeModelPattern = activeModel ? `${activeModel.provider}/${activeModel.id}` : undefined;
 		const defaultModelPattern = this.ctx.settings.getModelRole("default");
@@ -627,24 +670,32 @@ export class SelectorController {
 			if (closed) return;
 			closed = true;
 			hub?.dispose();
-			overlayHandle?.hide();
+			menu.handle?.hide();
+			this.#releaseMenu("agents-dashboard", menu);
 			this.focusActiveEditorArea();
 			this.ctx.ui.requestRender();
 		};
-		const hub = await AgentsHubComponent.create(
-			this.ctx.ui,
-			createAgentsHubDeps(
-				getProjectDir(),
-				this.ctx.settings,
-				this.ctx.session.modelRegistry,
-				() => this.ctx.session.effectiveExtensionRoots,
-				activeModelPattern,
-				defaultModelPattern,
-				model => this.ctx.session.effectiveServiceTier(model),
-			),
-			{ onCancel: () => done() },
-		);
-		const overlayHandle = this.#showFullscreenMenu(hub);
+		let hub: AgentsHubComponent;
+		try {
+			hub = await AgentsHubComponent.create(
+				this.ctx.ui,
+				createAgentsHubDeps(
+					getProjectDir(),
+					this.ctx.settings,
+					this.ctx.session.modelRegistry,
+					() => this.ctx.session.effectiveExtensionRoots,
+					activeModelPattern,
+					defaultModelPattern,
+					model => this.ctx.session.effectiveServiceTier(model),
+				),
+				{ onCancel: () => done() },
+			);
+		} catch (error) {
+			// A dashboard that never opened must not block the next `/agents`.
+			this.#releaseMenu("agents-dashboard", menu);
+			throw error;
+		}
+		this.#mountMenu(menu, hub, () => this.#showFullscreenMenu(hub));
 	}
 
 	/**
@@ -729,6 +780,7 @@ export class SelectorController {
 	 * highlighted and preselected; a leading `@` searches ctrl+p quick roles.
 	 */
 	#showModelPicker(): void {
+		if (this.#focusOpenMenu("model-picker")) return;
 		const { ModelPickerComponent } = loadModelOverlayComponents();
 		const currentContextTokens = this.ctx.session.getContextUsage()?.tokens ?? 0;
 		const current = this.ctx.session.model;
@@ -743,7 +795,8 @@ export class SelectorController {
 		const done = () => {
 			if (closed) return;
 			closed = true;
-			overlayHandle?.hide();
+			menu.handle?.hide();
+			this.#releaseMenu("model-picker", menu);
 			this.focusActiveEditorArea();
 			this.ctx.ui.requestRender();
 		};
@@ -800,13 +853,17 @@ export class SelectorController {
 				currentQuickRole: quickRoleCycle?.models[quickRoleCycle.currentIndex]?.role,
 			},
 		);
-		const overlayHandle = this.ctx.ui.showOverlay(picker, {
-			anchor: "bottom-center",
-			width: "100%",
-			maxHeight: "100%",
-			margin: 0,
+		const menu = this.#claimMenu("model-picker");
+		this.#mountMenu(menu, picker, () => {
+			const handle = this.ctx.ui.showOverlay(picker, {
+				anchor: "bottom-center",
+				width: "100%",
+				maxHeight: "100%",
+				margin: 0,
+			});
+			this.ctx.ui.setFocus(picker);
+			return handle;
 		});
-		this.ctx.ui.setFocus(picker);
 		this.ctx.ui.requestRender();
 	}
 
@@ -817,6 +874,7 @@ export class SelectorController {
 	 * entry — used when reopening the hub after a /login round-trip.
 	 */
 	#showModelHub(hubOptions: { initialProviderId?: string }): void {
+		if (this.#focusOpenMenu("model-hub")) return;
 		const { ModelHubComponent } = loadModelOverlayComponents();
 		let closed = false;
 		const done = () => {
@@ -825,7 +883,8 @@ export class SelectorController {
 			if (closed) return;
 			closed = true;
 			hub?.dispose();
-			overlayHandle?.hide();
+			menu.handle?.hide();
+			this.#releaseMenu("model-hub", menu);
 			this.focusActiveEditorArea();
 			this.ctx.ui.requestRender();
 		};
@@ -1066,7 +1125,8 @@ export class SelectorController {
 					: undefined,
 			},
 		);
-		const overlayHandle = this.#showFullscreenMenu(hub);
+		const menu = this.#claimMenu("model-hub");
+		this.#mountMenu(menu, hub, () => this.#showFullscreenMenu(hub));
 	}
 
 	/** /login round-trip for a locked provider; reopen the hub on that provider only after a successful login. */
@@ -2270,21 +2330,35 @@ export class SelectorController {
 	}
 
 	showAgentHub(observers: SessionObserverRegistry, options?: AgentHubOpenOptions): void {
+		// A repeat request reuses the open hub, still honoring its deep link (`/hub` → activity).
+		const reuseOpenHub = (): boolean => {
+			const open = this.#openMenus.get("agent-hub")?.component;
+			if (!this.#focusOpenMenu("agent-hub")) return false;
+			if (options?.initialSection && open instanceof AgentHubOverlayComponent)
+				open.showSection(options.initialSection);
+			return true;
+		};
+		if (reuseOpenHub()) return;
 		const hubKeys = [
 			...this.ctx.keybindings.getKeys("app.agents.hub"),
 			...this.ctx.keybindings.getKeys("app.session.observe"),
 		];
-		let overlayHandle: OverlayHandle | undefined;
+		let menu: OpenMenu | undefined;
 		let closed = false;
 
 		const done = () => {
 			if (closed) return;
 			closed = true;
 			hub.dispose();
-			overlayHandle?.hide();
-			// A gated empty Hub may never have been mounted. Restoring editor
-			// focus in that case would steal focus from a menu opened meanwhile.
-			if (overlayHandle) this.focusActiveEditorArea();
+			if (!menu) {
+				// A gated empty Hub never mounted. Restoring editor focus here
+				// would steal focus from a menu opened meanwhile.
+				this.ctx.ui.requestRender();
+				return;
+			}
+			menu.handle?.hide();
+			this.#releaseMenu("agent-hub", menu);
+			this.focusActiveEditorArea();
 			this.ctx.ui.requestRender();
 		};
 
@@ -2322,11 +2396,17 @@ export class SelectorController {
 				done();
 				return;
 			}
+			// Another open mounted while discovery was pending: keep that one.
+			if (reuseOpenHub()) {
+				done();
+				return;
+			}
 
 			// Prime the detector before the first frame when the editor's double-←
 			// gesture opened the hub, so the next single ← dismisses it.
 			if (options?.armCloseTap) hub.armCloseTap();
-			overlayHandle = this.#showFullscreenMenu(hub);
+			menu = this.#claimMenu("agent-hub");
+			this.#mountMenu(menu, hub, () => this.#showFullscreenMenu(hub));
 		};
 
 		if (options?.requireContent && hub.isEmpty) {

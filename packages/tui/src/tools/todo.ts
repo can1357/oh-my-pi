@@ -525,6 +525,7 @@ function describeTodoResult(
 		tool: { title: "Todo", target: `${closed}/${total}`, targetKind: "text" },
 		body: [node("checklist", { mode: "full", phases: todoChecklistPhases(phases, isMatched) }, [], "checklist")],
 		preview: "none",
+		open: true,
 	};
 }
 

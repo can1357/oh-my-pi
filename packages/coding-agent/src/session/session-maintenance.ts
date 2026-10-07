@@ -259,15 +259,15 @@ function compactionDeadEndWarning(remedies: string): string {
 	);
 }
 
-/** Honest-skip notice for a payload-shaped HTTP 413 where compaction was correctly withheld (#9235). */
+/** A terminal payload rejection may be byte-sized history or irreducible media, not necessarily token overflow. */
 function payloadRejectionNotice(storedTokens: number, contextWindow: number): string {
 	const remedies =
-		"Token compaction cannot shrink bytes or image budgets; reduce or remove archived image frames (e.g. switch compaction.methodOrder away from snapcompact) or raise the server/proxy body limit.";
+		"Reduce or remove oversized media from the live request, shrink older history, or raise the provider/proxy body limit.";
 	if (contextWindow <= 0) {
-		return `The provider rejected the request size or media budget (HTTP 413), and this model has no known context window to compare against — this is NOT a token-context problem. ${remedies}`;
+		return `The provider rejected the request size or media budget (HTTP 413), and this model has no known context window to compare against — this is NOT necessarily a token-context problem. ${remedies}`;
 	}
 	const headroom = Math.max(0, Math.floor(contextWindow - storedTokens));
-	return `The provider rejected the request size or media budget (HTTP 413), but ~${headroom.toLocaleString("en-US")} tokens of headroom remain locally — this is NOT a token-context problem. ${remedies}`;
+	return `The provider rejected the request size or media budget (HTTP 413), but ~${headroom.toLocaleString("en-US")} tokens of headroom remain locally — this is NOT necessarily a token-context problem. ${remedies}`;
 }
 
 /** Dead-end notice when provider-reported usage proves context overflow but no recovery exists (#9235). */
@@ -2847,24 +2847,46 @@ export class SessionMaintenance {
 		// (Named distinctly from the `compactionSettings` used further down in
 		// this function's later, unrelated threshold check.)
 		const payloadCompactionSettings = cfgCompaction.get(this.#host.settings);
+		const payloadModel = this.#model;
 		const compactionAvailable =
 			payloadCompactionSettings.enabled &&
 			(this.#usesExperimentalContextManagement() ||
 				hasUsableCompactionMethod(
 					"overflow",
-					this.#model,
+					payloadModel,
 					payloadCompactionSettings,
 					excludeMediaForPayloadRejection,
 				));
-		// Unknown context window (common for custom/self-hosted models the
-		// registry has no metadata for) used to be treated the same as a
-		// confirmed media/byte-budget rejection and blocked outright — even
-		// when the payload bloat is plain message-count growth that ordinary
-		// compaction would shrink just fine (#11479). Only skip straight to the
-		// honest "can't help" notice here when there is genuinely no compaction
-		// method configured to try — an absence of proof, gated to the
-		// unknown-window case since a known window's own evidence (below) already
-		// covers it.
+		// A cut point inside the failing turn is not older reclaimable history.
+		// Require a delivered assistant turn in the part being summarized;
+		// shake selects its own victims and has a no-progress guard.
+		const payloadBranch = trustedPayloadRejection ? this.#host.sessionManager.getBranch() : undefined;
+		const reclaimablePayloadHistory =
+			trustedPayloadRejection &&
+			compactionAvailable &&
+			!explicitMediaRejection &&
+			payloadModel !== undefined &&
+			payloadBranch?.some(
+				entry =>
+					entry.type === "message" && entry.message.role === "assistant" && entry.message.stopReason !== "error",
+			) === true &&
+			(this.#usesExperimentalContextManagement() ||
+				resolveCompactionMethodOrder(payloadCompactionSettings.methodOrder).some(candidate => {
+					if (!isCompactionMethodUsable(candidate, "overflow", payloadModel, payloadCompactionSettings, true))
+						return false;
+					if (candidate === "shake") return true;
+					const preparation = prepareCompaction(
+						payloadBranch,
+						resolveMethodSettings(payloadCompactionSettings, candidate),
+						payloadModel,
+						this.#tokenizer,
+					);
+					return (
+						preparation?.messagesToSummarize.some(
+							message => message.role === "assistant" && message.stopReason !== "error",
+						) === true
+					);
+				}));
 		const unknownWindowDeadEnd =
 			payloadRejection && contextWindow <= 0 && !ambiguousPayloadRejection && !compactionAvailable;
 		// Explicit media evidence is a terminal signal independent of whether the
@@ -2878,13 +2900,15 @@ export class SessionMaintenance {
 		// it (with media methods excluded per `excludeMediaForPayloadRejection`
 		// above), not be discarded just because the same response also named a
 		// media limit (#11482).
-		if (unknownWindowDeadEnd || trustedPayloadRejection || (explicitMediaRejection && !usageBackedOverflow)) {
-			// Every disjunct above implies `!usageBackedOverflow` (unknown window ⇒
-			// `isUsageBackedContextOverflow` is false by definition; trusted requires
-			// `reportedInputTokens <= contextWindow`; the third is explicit), so this
-			// is always the honest "NOT a token-context problem" notice — the sibling
-			// usage-backed selection lives further down, where that case is reachable.
+		if (
+			unknownWindowDeadEnd ||
+			(trustedPayloadRejection && !reclaimablePayloadHistory) ||
+			(explicitMediaRejection && !usageBackedOverflow)
+		) {
+			// None of these branches has usage-backed overflow evidence; the
+			// provider's byte/media limit can still be hit with local token headroom.
 			this.#host.removeAssistantMessageFromActiveContext(assistantMessage);
+			this.#host.retainTerminalFailure(assistantMessage);
 			this.#host.emitNotice("warning", payloadRejectionNotice(storedTokens, contextWindow), "compaction");
 			logger.debug("Payload-shaped 413 withheld from token compaction", {
 				provider: assistantMessage.provider,
@@ -2897,11 +2921,11 @@ export class SessionMaintenance {
 		}
 		const overflowEvidence =
 			sameModel && !errorIsFromBeforeCompaction && AIError.isContextOverflow(assistantMessage, contextWindow);
-		if (overflowEvidence || (payloadRejection && !trustedPayloadRejection)) {
+		if (overflowEvidence || reclaimablePayloadHistory || (payloadRejection && !trustedPayloadRejection)) {
 			this.#host.removeAssistantMessageFromActiveContext(assistantMessage);
 
-			// Try context promotion first - switch to a larger model and retry without compacting
-			const promoted = await this.#tryContextPromotion(assistantMessage);
+			// A larger token window cannot raise a trusted byte-size limit.
+			const promoted = !trustedPayloadRejection && (await this.#tryContextPromotion(assistantMessage));
 			if (promoted) {
 				await this.#host.dropPersistedAssistantTurn(assistantMessage);
 				// Retry on the promoted (larger) model without compacting
@@ -2948,6 +2972,7 @@ export class SessionMaintenance {
 					// persisted session history (separate from this active-context view)
 					// still keeps the turn visible.
 					this.#host.removeAssistantMessageFromActiveContext(assistantMessage);
+					this.#host.retainTerminalFailure(assistantMessage);
 					if (compactionResult.automaticContinuationBlocked === true) {
 						// `runAutoCompaction` already blocked and emitted its own notice for
 						// this outcome (e.g. its own compaction dead end) — only the cleanup
@@ -2976,9 +3001,13 @@ export class SessionMaintenance {
 					});
 					return COMPACTION_CHECK_BLOCK_AUTOMATIC_CONTINUATION;
 				}
+				if (payloadRejection && !compactionResult.continuationScheduled) {
+					this.#host.retainTerminalFailure(assistantMessage);
+				}
 				return compactionResult;
 			}
 			if (payloadRejection) {
+				this.#host.retainTerminalFailure(assistantMessage);
 				this.#host.emitNotice(
 					"warning",
 					usageBackedOverflow

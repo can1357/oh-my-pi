@@ -478,7 +478,8 @@ export class Terminal {
 		while (column >= 0 && line.cells[column]?.width === 0) column--;
 		const cell = line.cells[column];
 		// Cells are frozen and may be shared; replace instead of mutating.
-		if (cell?.chars) line.cells[column] = Object.freeze({ chars: cell.chars + mark, width: cell.width, attrs: cell.attrs });
+		if (cell?.chars)
+			line.cells[column] = Object.freeze({ chars: cell.chars + mark, width: cell.width, attrs: cell.attrs });
 	}
 
 	#lineFeed(wrapped: boolean): void {
@@ -604,7 +605,8 @@ export class Terminal {
 
 	#shiftCells(line: BufferLine, column: number, count: number): void {
 		// Inserting more than a row's worth only pushes everything past the edge.
-		const blanks = new Array<CellData>(Math.min(count, this.cols)).fill(sharedBlankCell(this.#attrs));
+		const blank = sharedBlankCell(this.#attrs);
+		const blanks = Array.from({ length: Math.min(count, this.cols) }, () => blank);
 		line.cells.splice(column, 0, ...blanks);
 		line.cells.length = this.cols;
 	}

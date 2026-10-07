@@ -14,7 +14,7 @@ import { BracketedPasteHandler, decodeReencodedPasteControls } from "../brackete
 import { canonicalKeyId, getKeybindings, type KeybindingsManager } from "../keybindings";
 import { extractPrintableText, matchesKey, parseKey } from "../keys";
 import { KillRing } from "../kill-ring";
-import type { TspEditorDecoration, TspEditorProps, TspTone } from "@oh-my-pi/pi-wire";
+import type { TspEditorDecoration, TspEditorProps, TspText, TspTone } from "@oh-my-pi/pi-wire";
 import { col, node } from "../native/describe";
 import { sameItems, sameProps } from "../native/memo";
 import { plainText } from "../native/spans";
@@ -625,8 +625,11 @@ export class Editor implements Component, Focusable {
 	 * dialog's text field; only the prompt composer claims `omp.editor`).
 	 */
 	describeLayout: ((input: NativeNode, cx: DescribeContext) => NativeEditorLayout) | undefined;
-	/** TSP placeholder for the empty buffer; natively it replaces the rotating ANSI {@link placeholder} hints. */
-	describePlaceholder: (() => string) | undefined;
+	/**
+	 * TSP placeholder for the empty buffer; natively it replaces the rotating ANSI {@link placeholder} hints.
+	 * Return a stable value (the same spans array) while it is unchanged: the editor node is reused by identity.
+	 */
+	describePlaceholder: (() => TspText) | undefined;
 	#promptGutter: string | undefined;
 	/** Bumped by {@link invalidate}: host-side decoration inputs (spelling results, settings) changed. */
 	#nativeGeneration = 0;

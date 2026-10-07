@@ -1,4 +1,3 @@
-import { formatModelSelectorValue } from "@oh-my-pi/pi-tui/overlays/model-selector";
 /**
  * Interactive mode for the coding agent.
  * Handles TUI rendering and user interaction, delegating business logic to AgentSession.
@@ -74,7 +73,7 @@ import { CollabController } from "../collab/controller";
 import type { CollabHost } from "../collab/host";
 import { KeybindingsManager } from "@oh-my-pi/pi-tui/app-keybindings";
 import { appKey, editorKey, rawKeyHint } from "@oh-my-pi/pi-tui/chrome/keybinding-hints";
-import { formatModelStringWithRouting, type ResolvedModelRoleValue } from "../config/model-resolver";
+import { formatModelString, type ResolvedModelRoleValue } from "../config/model-resolver";
 import { isSettingsInitialized, Settings, settings } from "../config/settings";
 import { clearClaudePluginRootsCache } from "../discovery/helpers";
 import type {
@@ -3746,7 +3745,8 @@ export class InteractiveMode implements InteractiveModeContext {
 	/**
 	 * What the TSP composer shows: the draft's shell mode, the effort chip
 	 * (the viewed agent's, like the model chip beside it) or the model chip's
-	 * effort icon, the tok/s readout after it, and send vs Stop.
+	 * effort icon, the tok/s readout after it, send vs Stop, and the session
+	 * title the empty composer's placeholder quotes.
 	 */
 	#composerNativeState(): ComposerNativeState {
 		const draft = this.editor.getText().trimStart();
@@ -3761,6 +3761,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			rate: this.#nativeTokenRate(),
 			running: this.loadingAnimation !== undefined || this.session.isStreaming,
 			viewing: this.#viewingLineage(),
+			title: this.sessionManager.getSessionName(),
 		};
 	}
 
@@ -4542,10 +4543,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			// (same as the spawn-path ToolSession), not the settings default. This is
 			// the primary fallback in resolveAgentModelPatterns, so the `good` worker's
 			// pi/task inheritance tracks the reopened session's model.
-			getActiveModelString: () =>
-				this.session.model
-					? formatModelSelectorValue(formatModelStringWithRouting(this.session.model), this.session.thinkingLevel)
-					: undefined,
+			getActiveModelString: () => (this.session.model ? formatModelString(this.session.model) : undefined),
 		};
 	}
 
