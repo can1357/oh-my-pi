@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added ai& credit balance and usage reporting via the `/billing/balance` and `/analytics/summary` endpoints ([#14750](https://github.com/can1357/oh-my-pi/pull/14750) by [@fenilmodi00](https://github.com/fenilmodi00)).
+
 ## [18.8.0] - 2026-10-07
 
 ### Breaking Changes

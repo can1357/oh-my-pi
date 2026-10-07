@@ -1229,7 +1229,18 @@ function fillExplicitThinking<TApi extends Api>(
 		thinking.requiresEffort === undefined &&
 		(rule.requiresEffort ??
 			(impliesMandatoryReasoning(facts, spec.id) || isQwenTemplateReasoningEffortCompat(compat)));
-	const needsDefaultLevel = thinking.defaultLevel === undefined && rule.defaultLevel !== undefined;
+	// An inherited default is only valid when the discovered ladder can
+	// express it. That matters when discovery declares an explicit wire
+	// vocabulary (`effortMap` set, e.g. ai& collapsing a none-only ladder to
+	// [minimal]→"none"): the rule default was validated against the KDL
+	// ladder, not the discovered one, and would emit a wire value the host
+	// never advertised. A plain pi-level ladder without an effortMap keeps
+	// inheriting (reviewed KDL stays authoritative over a truncated generic
+	// discovery list, per issue #9960).
+	const needsDefaultLevel =
+		thinking.defaultLevel === undefined &&
+		rule.defaultLevel !== undefined &&
+		(thinking.effortMap === undefined || thinking.efforts.includes(rule.defaultLevel));
 	const needsPrefixBinding = thinking.prefixBinding === undefined && rule.prefixBinding === true;
 	const needsEffortBudgets = thinking.effortBudgets === undefined && rule.effortBudgets !== undefined;
 	if (
