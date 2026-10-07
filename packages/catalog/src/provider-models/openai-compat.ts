@@ -4802,6 +4802,9 @@ const EFFORT_BY_WIRE_VALUE: Record<string, Effort> = {
 	max: Effort.Max,
 };
 
+/** ai&'s thinking-off tier. pi's Effort enum has no off level, so it never maps to one. */
+const AIAND_WIRE_EFFORT_NONE = "none";
+
 function normalizeAiandBaseUrl(baseUrl: string | undefined): string {
 	const value = baseUrl?.trim() || AIAND_DEFAULT_BASE_URL;
 	const normalized = value.replace(/\/+$/, "");
@@ -4839,6 +4842,8 @@ function mapAiandThinking(entry: OpenAICompatibleModelRecord): ThinkingConfig | 
  * ai& reports prices as decimal strings per 1M tokens in the org's billing
  * currency (`usd` or `jpy`). Costs are only mapped for USD orgs — JPY figures
  * would corrupt the USD-denominated cost model, so they fall back to zero.
+ * `cached_input_per_1m` is only present on models with a cache rate and maps
+ * onto the cache-read rate (`cacheWrite` has no ai& equivalent).
  */
 function mapAiandCost(entry: OpenAICompatibleModelRecord): ModelSpec<"openai-completions">["cost"] {
 	if (typeof entry.currency === "string" && entry.currency !== "usd") {
@@ -4847,7 +4852,7 @@ function mapAiandCost(entry: OpenAICompatibleModelRecord): ModelSpec<"openai-com
 	return {
 		input: toPositiveNumber(entry.input_per_1m, 0),
 		output: toPositiveNumber(entry.output_per_1m, 0),
-		cacheRead: 0,
+		cacheRead: toPositiveNumber(entry.cached_input_per_1m, 0),
 		cacheWrite: 0,
 	};
 }
@@ -4857,14 +4862,33 @@ function mapAiandModel(
 	defaults: ModelSpec<"openai-completions">,
 ): ModelSpec<"openai-completions"> {
 	const capabilities: unknown[] = Array.isArray(entry.capabilities) ? entry.capabilities : [];
+	const wireEfforts: unknown[] = Array.isArray(entry.reasoning_efforts) ? entry.reasoning_efforts : [];
 	const reasoning = capabilities.includes("reasoning");
-	const thinking = reasoning ? mapAiandThinking(entry) : undefined;
+	const thinking = reasoning
+		? (mapAiandThinking(entry) ??
+			// Nothing in `reasoning_efforts` maps to a pi level. When `none` was
+			// advertised the model's whole effort surface is ai&'s thinking-off
+			// tier: leaving `thinking` undefined would let `resolveModelPolicy`
+			// inject the generic `minimal..xhigh` ladder for openai-completions,
+			// and the transport would emit those unadvertised `reasoning_effort`
+			// values. Bind the published off tier to `minimal` — the shape the
+			// reviewed Synthetic mapping uses for the same vocabulary — so the
+			// ladder is exactly what ai& published. (A model with no
+			// `reasoning_efforts` at all carries no vocabulary to protect and
+			// keeps the generic policy.)
+			(wireEfforts.includes(AIAND_WIRE_EFFORT_NONE)
+				? { mode: "effort", efforts: [Effort.Minimal], effortMap: { [Effort.Minimal]: AIAND_WIRE_EFFORT_NONE } }
+				: undefined))
+		: undefined;
 	const description =
 		typeof entry.description === "string" && entry.description.trim() ? entry.description : undefined;
 	return {
 		...defaults,
 		name: description ?? toModelName(entry.name, defaults.name),
 		reasoning,
+		// ModelSpec input has no video/document modality, so those ai&
+		// capabilities are not representable; `image` requires `vision`
+		// (`video`/`document` alone do not imply it).
 		input: capabilities.includes("vision") ? ["text", "image"] : ["text"],
 		cost: mapAiandCost(entry),
 		contextWindow: toPositiveNumber(entry.context_window, null),

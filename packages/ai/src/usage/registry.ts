@@ -1,5 +1,6 @@
 import type { Provider } from "../types";
 import type { CredentialRankingStrategy, UsageProvider } from "../usage";
+import { aiandUsageProvider } from "./aiand";
 import { alibabaTokenPlanRankingStrategy, alibabaTokenPlanUsageProvider } from "./alibaba-token-plan";
 import { charmHyperUsageProvider } from "./charm-hyper";
 import { claudeRankingStrategy, claudeUsageProvider } from "./claude";
@@ -49,6 +50,7 @@ export const DEFAULT_USAGE_PROVIDERS: readonly UsageProvider[] = [
 	devinUsageProvider,
 	charmHyperUsageProvider,
 	commandCodeUsageProvider,
+	aiandUsageProvider,
 ];
 
 const DEFAULT_USAGE_PROVIDER_MAP = new Map<Provider, UsageProvider>(

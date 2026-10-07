@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- ai& model discovery now maps cached-input pricing onto cost.cacheRead and image input from the `vision` capability (`video`/`document` inputs remain unrepresentable) ([#14750](https://github.com/can1357/oh-my-pi/pull/14750) by [@fenilmodi00](https://github.com/fenilmodi00)).
+
 ### Fixed
 
 - Fixed GitHub Copilot models with tier-level prompt limits showing the long-context window by default ([#14770](https://github.com/can1357/oh-my-pi/issues/14770)).

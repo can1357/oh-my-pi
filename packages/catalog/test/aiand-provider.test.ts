@@ -6,6 +6,7 @@ import { getBundledModels } from "@oh-my-pi/pi-catalog/models";
 import { DEFAULT_MODEL_PER_PROVIDER, PROVIDER_DESCRIPTORS } from "@oh-my-pi/pi-catalog/provider-models/descriptors";
 import { aiandModelManagerOptions } from "@oh-my-pi/pi-catalog/provider-models/openai-compat";
 import type { FetchImpl } from "@oh-my-pi/pi-catalog/types";
+import { buildModel } from "@oh-my-pi/pi-catalog/build";
 
 const ORIGINAL_ENV = {
 	AIAND_API_KEY: Bun.env.AIAND_API_KEY,
@@ -75,6 +76,7 @@ describe("ai& provider support", () => {
 					currency: "usd",
 					input_per_1m: "0.150000",
 					output_per_1m: "0.600000",
+					cached_input_per_1m: "0.080000",
 				},
 				{
 					id: "google/gemma-4-31b-it",
@@ -85,6 +87,14 @@ describe("ai& provider support", () => {
 					currency: "usd",
 					input_per_1m: "0.200000",
 					output_per_1m: "0.500000",
+				},
+				{
+					id: "example/video-only",
+					context_window: 65536,
+					capabilities: ["tool_calling", "video", "document"],
+					currency: "usd",
+					input_per_1m: "0.100000",
+					output_per_1m: "0.200000",
 				},
 			]),
 		) as unknown as FetchImpl;
@@ -107,13 +117,19 @@ describe("ai& provider support", () => {
 		expect(gptOss?.thinking?.efforts).toEqual([Effort.Low, Effort.Medium, Effort.High]);
 		expect(gptOss?.thinking?.defaultLevel).toBe(Effort.Medium);
 		expect(gptOss?.contextWindow).toBe(131072);
-		expect(gptOss?.cost).toEqual({ input: 0.15, output: 0.6, cacheRead: 0, cacheWrite: 0 });
+		expect(gptOss?.cost).toEqual({ input: 0.15, output: 0.6, cacheRead: 0.08, cacheWrite: 0 });
 		expect(gptOss?.input).toEqual(["text"]);
 
 		const gemma = models?.find(model => model.id === "google/gemma-4-31b-it");
 		expect(gemma?.reasoning).toBe(false);
 		expect(gemma?.thinking).toBeUndefined();
 		expect(gemma?.input).toEqual(["text", "image"]);
+
+		// `video`/`document` alone have no ModelSpec modality and must not imply
+		// `image`; only `vision` widens the input list.
+		const videoOnly = models?.find(model => model.id === "example/video-only");
+		expect(videoOnly?.reasoning).toBe(false);
+		expect(videoOnly?.input).toEqual(["text"]);
 	});
 
 	test("ignores non-USD pricing so JPY orgs do not corrupt USD cost accounting", async () => {
@@ -126,6 +142,7 @@ describe("ai& provider support", () => {
 					currency: "jpy",
 					input_per_1m: "150.000000",
 					output_per_1m: "600.000000",
+					cached_input_per_1m: "50.000000",
 				},
 			]),
 		) as unknown as FetchImpl;
@@ -133,6 +150,85 @@ describe("ai& provider support", () => {
 		const options = aiandModelManagerOptions({ apiKey: "aiand-key", fetch: fetchMock });
 		const models = await options.fetchDynamicModels?.();
 		expect(models?.[0]?.cost).toEqual({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
+	});
+
+	test("drops ai&'s thinking-off effort and keeps a lone `none` as the minimal wire tier", async () => {
+		const fetchMock: FetchImpl = vi.fn(async () =>
+			aiandModelsResponse([
+				{
+					id: "deepseek-ai/deepseek-v4-flash",
+					context_window: 1048576,
+					capabilities: ["reasoning", "tool_calling"],
+					reasoning_efforts: ["none", "high", "max"],
+					reasoning_effort_default: "none",
+					currency: "usd",
+					input_per_1m: "0.150000",
+					output_per_1m: "0.250000",
+					cached_input_per_1m: "0.080000",
+				},
+				{
+					id: "zai-org/glm-5-off",
+					context_window: 1000000,
+					capabilities: ["reasoning", "tool_calling"],
+					reasoning_efforts: ["none"],
+					reasoning_effort_default: "none",
+					currency: "usd",
+					input_per_1m: "1.000000",
+					output_per_1m: "4.000000",
+				},
+			]),
+		) as unknown as FetchImpl;
+
+		const options = aiandModelManagerOptions({ apiKey: "aiand-key", fetch: fetchMock });
+		const models = await options.fetchDynamicModels?.();
+
+		// `none` is not an Effort level: dropped from the ladder, and it cannot
+		// become defaultLevel.
+		const flash = models?.find(model => model.id === "deepseek-ai/deepseek-v4-flash");
+		expect(flash?.reasoning).toBe(true);
+		expect(flash?.thinking?.efforts).toEqual([Effort.High, Effort.Max]);
+		expect(flash?.thinking?.defaultLevel).toBeUndefined();
+		expect(flash?.cost.cacheRead).toBe(0.08);
+
+		// The model's whole advertised surface is thinking-off: keep it as the
+		// minimal tier bound to the `none` wire value instead of letting the
+		// generic ladder be fabricated for it.
+		const noneOnly = models?.find(model => model.id === "zai-org/glm-5-off");
+		expect(noneOnly?.reasoning).toBe(true);
+		expect(noneOnly?.thinking?.efforts).toEqual([Effort.Minimal]);
+		expect(noneOnly?.thinking?.effortMap).toEqual({ [Effort.Minimal]: "none" });
+		expect(noneOnly?.thinking?.defaultLevel).toBeUndefined();
+	});
+
+	test("a none-only discovered ladder does not inherit an out-of-ladder class-rule default", async () => {
+		const fetchMock: FetchImpl = vi.fn(async () =>
+			aiandModelsResponse([
+				{
+					id: "zai-org/glm-5.3-flash",
+					context_window: 1048550,
+					capabilities: ["reasoning", "tool_calling", "vision"],
+					reasoning_efforts: ["none"],
+					reasoning_effort_default: "none",
+					currency: "usd",
+					input_per_1m: "0.150000",
+					output_per_1m: "0.500000",
+					cached_input_per_1m: "0.030000",
+				},
+			]),
+		) as unknown as FetchImpl;
+
+		const options = aiandModelManagerOptions({ apiKey: "aiand-key", fetch: fetchMock });
+		const models = await options.fetchDynamicModels?.();
+
+		// The glm 5.3-flash class rule grants thinking-default-level "max",
+		// but this discovered ladder's only wire value is the `none` off
+		// tier. The built model must not carry a default the ladder cannot
+		// express — resolveModelPolicy would emit `reasoning_effort: "max"`
+		// and the host would reject it with a 400.
+		const built = buildModel(models!.find(model => model.id === "zai-org/glm-5.3-flash")!);
+		expect(built.thinking?.efforts).toEqual([Effort.Minimal]);
+		expect(built.thinking?.effortMap).toEqual({ [Effort.Minimal]: "none" });
+		expect(built.thinking?.defaultLevel).toBeUndefined();
 	});
 
 	test("prefers explicit base URL over AIAND_BASE_URL and appends /v1", async () => {
@@ -152,5 +248,11 @@ describe("ai& provider support", () => {
 			"https://config.aiand.test/v1/models",
 			expect.objectContaining({ method: "GET" }),
 		);
+	});
+
+	test("returns null on a failed ai& discovery so the bundled fallback survives", async () => {
+		const failing: FetchImpl = vi.fn(async () => new Response("nope", { status: 500 })) as unknown as FetchImpl;
+		const options = aiandModelManagerOptions({ apiKey: "aiand-key", fetch: failing });
+		expect(await options.fetchDynamicModels?.()).toBeNull();
 	});
 });
