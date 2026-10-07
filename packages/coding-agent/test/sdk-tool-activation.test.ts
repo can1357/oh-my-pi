@@ -1887,6 +1887,36 @@ describe("createAgentSession defaultInactive tool activation", () => {
 			await session.dispose();
 		}
 	});
+
+	it("upgrades read explicitly selected by a runtime caller to file access", async () => {
+		const tempDir = makeTempDir();
+		const { session } = await createAgentSession({
+			...baseOptions(tempDir),
+			toolNames: ["grep"],
+			extensions: [toolActivationExtension],
+		});
+
+		try {
+			const filePath = path.join(tempDir, "runtime-read.txt");
+			await Bun.write(filePath, "runtime read body\n");
+			// The mounted extension tool keeps the docs-only read transport active.
+			expect(session.getXdevToolEntries().map(entry => entry.name)).toContain("default_active_tool");
+			const read = session.getToolByName("read");
+			expect(read).toBeDefined();
+			await expect(read!.execute("transport-read-file", { path: filePath })).rejects.toThrow("only accepts xd://");
+			const docs = await read!.execute("transport-read-docs", { path: "xd://default_active_tool" });
+			expect(docs.content.find(part => part.type === "text")?.text).toContain("default_active_tool");
+
+			await session.setActiveToolsByName(["grep", "read"]);
+			await session.refreshMCPTools([]);
+
+			expect(session.getActiveToolNames()).toContain("read");
+			const upgraded = await read!.execute("runtime-full-read", { path: filePath });
+			expect(upgraded.content.find(part => part.type === "text")?.text).toContain("runtime read body");
+		} finally {
+			await session.dispose();
+		}
+	});
 	it("registers vibe tools only during explicit vibe activation and exposes parent Todo bookkeeping", async () => {
 		const tempDir = makeTempDir();
 		const { session } = await createAgentSession(baseOptions(tempDir));

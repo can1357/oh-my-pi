@@ -4462,13 +4462,17 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				await awaitAbortable(session.setWorkPoolYieldItems(options.workPoolYieldItems));
 			}
 			const enabledSubagentTools = session.getEnabledToolNames();
-			// The enabled set includes the synthetic write transport injected for
-			// explicit tool lists that omitted write. `session_init.tools` is later
-			// replayed as an explicit grant during cold revival, so persist write
-			// only when the original agent contract granted it.
+			// The enabled set includes the synthetic xd:// transports injected for
+			// explicit tool lists that omitted read or write. `session_init.tools` is
+			// later replayed as an explicit grant during cold revival, so persist each
+			// only when the original agent contract granted it; revival re-creates the
+			// device-only transports from the same explicit list.
+			const grantedToolNames = toolNames;
 			const persistedSubagentTools =
-				toolNames !== undefined && !toolNames.includes("write")
-					? enabledSubagentTools.filter(name => name !== "write")
+				grantedToolNames !== undefined
+					? enabledSubagentTools.filter(
+							name => (name !== "write" && name !== "read") || grantedToolNames.includes(name),
+						)
 					: enabledSubagentTools;
 
 			session.sessionManager.appendSessionInit({

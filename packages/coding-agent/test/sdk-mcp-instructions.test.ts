@@ -540,7 +540,7 @@ describe("createAgentSession MCP server instructions (deferred UI)", () => {
 		}
 	}, 20_000);
 
-	it("keeps deferred tools top-level when an explicit session omitted read", async () => {
+	it("mounts deferred tools behind device-only read and write when an explicit session omitted both", async () => {
 		const { session } = await createAgentSession({
 			cwd: tempDir,
 			agentDir: tempDir,
@@ -560,21 +560,49 @@ describe("createAgentSession MCP server instructions (deferred UI)", () => {
 			toolNames: ["bash"],
 		});
 		try {
+			// `--tools bash` grants neither transport half. Device-only read (docs)
+			// and write (dispatch) transports carry xd:// instead, so the deferred
+			// MCP tool mounts after connection rather than shipping its full schema
+			// top-level. Real stdio discovery is fire-and-forget with no completion
+			// signal; poll for the whole applied selection, as above.
 			const deadline = Date.now() + 12_000;
-			let prompt = session.systemPrompt.join("\n");
-			while (!prompt.includes(SERVER_INSTRUCTIONS) && Date.now() < deadline) {
-				await Bun.sleep(10);
-				prompt = session.systemPrompt.join("\n");
-			}
+			let mountedNames = session.getXdevToolEntries().map(entry => entry.name);
 			let activeNames = session.getActiveToolNames();
-			while (!activeNames.includes(MCP_TOOL_NAME) && Date.now() < deadline) {
+			while (
+				(!mountedNames.includes(MCP_TOOL_NAME) ||
+					!activeNames.includes("read") ||
+					!activeNames.includes("write")) &&
+				Date.now() < deadline
+			) {
 				await Bun.sleep(10);
+				mountedNames = session.getXdevToolEntries().map(entry => entry.name);
 				activeNames = session.getActiveToolNames();
 			}
 
-			expect(activeNames).not.toContain("read");
-			expect(activeNames).toContain(MCP_TOOL_NAME);
-			expect(session.getXdevToolEntries().map(entry => entry.name)).not.toContain(MCP_TOOL_NAME);
+			expect(mountedNames).toContain(MCP_TOOL_NAME);
+			expect(activeNames).not.toContain(MCP_TOOL_NAME);
+			expect(activeNames).toEqual(expect.arrayContaining(["bash", "read", "write"]));
+
+			// Both transports stay device-only: the read serves the mounted tool's
+			// docs and rejects files; the write dispatches it and rejects files.
+			const read = session.getToolByName("read");
+			const write = session.getToolByName("write");
+			expect(read).toBeDefined();
+			expect(write).toBeDefined();
+			const docs = await read!.execute("device-only-read-docs", { path: `xd://${MCP_TOOL_NAME}` });
+			expect(docs.content.find(part => part.type === "text")?.text).toContain(MCP_TOOL_NAME);
+			const filePath = path.join(tempDir, "device-only-read.txt");
+			await Bun.write(filePath, "secret");
+			await expect(read!.execute("device-only-read-file", { path: filePath })).rejects.toThrow("only accepts xd://");
+			const dispatched = await write!.execute("device-only-write-dispatch", {
+				path: `xd://${MCP_TOOL_NAME}`,
+				content: "{}",
+			});
+			expect(dispatched.content.find(part => part.type === "text")?.text).toBe(TOOL_RESULT);
+			await expect(write!.execute("device-only-write-file", { path: filePath, content: "changed" })).rejects.toThrow(
+				"Filesystem writes are not available",
+			);
+			expect(await Bun.file(filePath).text()).toBe("secret");
 		} finally {
 			await session.dispose();
 		}

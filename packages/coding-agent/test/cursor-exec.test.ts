@@ -1,4 +1,5 @@
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
+import * as nodeFs from "node:fs";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -2134,6 +2135,45 @@ describe("CursorExecHandlers Pi frame translation", () => {
 				.join("")
 				.trimEnd(),
 		).toBe("line1000");
+	});
+
+	it("does not open a file to resolve a negative offset when read is the docs-only transport", async () => {
+		const target = path.join(cwd, "secret-tail.txt");
+		await Bun.write(target, `${Array.from({ length: 50 }, (_, i) => `secret${i + 1}`).join("\n")}\n`);
+		const session = createTestSession(cwd, { deviceOnlyRead: true });
+		let deviceOnly = true;
+		const handlers = new CursorExecHandlers({
+			cwd,
+			tools: new Map<string, Tool>([["read", new ReadTool(session)]]),
+			allowFileRead: () => !deviceOnly,
+		});
+		// The offset resolver counts lines through `node:fs` promises; watch every open.
+		const open = spyOn(nodeFs.promises, "open");
+		const openedTarget = () => open.mock.calls.some(([file]) => String(file).endsWith("secret-tail.txt"));
+		try {
+			for (const result of [
+				await handlers.read(create(ReadArgsSchema, { path: target, offset: -4, limit: 2 })),
+				await handlers.piRead({
+					toolCallId: "docs-only-tail",
+					args: { path: "secret-tail.txt", offset: -4 },
+				} as never),
+			]) {
+				expect(result.isError).toBe(true);
+				expect(JSON.stringify(result.content)).toContain("only accepts xd://");
+				expect(JSON.stringify(result.content)).not.toContain("secret");
+			}
+			expect(openedTarget()).toBe(false);
+
+			// After a runtime upgrade to full read, the same frame resolves the tail.
+			deviceOnly = false;
+			session.deviceOnlyRead = undefined;
+			const upgraded = await handlers.read(create(ReadArgsSchema, { path: target, offset: -2, limit: 2 }));
+			expect(upgraded.isError).toBe(false);
+			expect(upgraded.content).toEqual([{ type: "text", text: "secret49\nsecret50" }]);
+			expect(openedTarget()).toBe(true);
+		} finally {
+			open.mockRestore();
+		}
 	});
 
 	it("serves the final lines through the native read frame", async () => {

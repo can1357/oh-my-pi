@@ -117,6 +117,9 @@ interface SessionToolsOptions {
 	isDeviceOnlyWrite?: () => boolean;
 	setDeviceOnlyWrite?: (enabled: boolean) => void;
 	setPendingFullWriteDescription?: (enabled: boolean) => void;
+	isDeviceOnlyRead?: () => boolean;
+	setDeviceOnlyRead?: (enabled: boolean) => void;
+	setPendingFullReadDescription?: (enabled: boolean) => void;
 	/** Registers the hidden `goal` tool when goal mode is enabled at runtime. */
 	ensureGoalRegistered?: () => Promise<boolean>;
 	/**
@@ -385,6 +388,14 @@ export class SessionTools {
 	 * device-only flag, this survives temporary full-write upgrades.
 	 */
 	readonly #deviceOnlyWriteTransportAvailable: boolean;
+	#isDeviceOnlyRead: SessionToolsOptions["isDeviceOnlyRead"];
+	#setDeviceOnlyRead: SessionToolsOptions["setDeviceOnlyRead"];
+	#setPendingFullReadDescription: SessionToolsOptions["setPendingFullReadDescription"];
+	/**
+	 * The session originated with an xd:// documentation-read grant. Unlike the
+	 * live device-only flag, this survives temporary full-read upgrades.
+	 */
+	readonly #deviceOnlyReadTransportAvailable: boolean;
 	#ensureGoalRegistered: SessionToolsOptions["ensureGoalRegistered"];
 	#reconcileSettingsGatedTools: SessionToolsOptions["reconcileSettingsGatedTools"];
 	#skills: Skill[];
@@ -427,6 +438,10 @@ export class SessionTools {
 		this.#deviceOnlyWriteTransportAvailable = this.#isDeviceOnlyWrite?.() === true;
 		this.#setDeviceOnlyWrite = options.setDeviceOnlyWrite;
 		this.#setPendingFullWriteDescription = options.setPendingFullWriteDescription;
+		this.#isDeviceOnlyRead = options.isDeviceOnlyRead;
+		this.#deviceOnlyReadTransportAvailable = this.#isDeviceOnlyRead?.() === true;
+		this.#setDeviceOnlyRead = options.setDeviceOnlyRead;
+		this.#setPendingFullReadDescription = options.setPendingFullReadDescription;
 		this.#ensureGoalRegistered = options.ensureGoalRegistered;
 		this.#reconcileSettingsGatedTools = options.reconcileSettingsGatedTools;
 		this.#rebuildSystemPrompt = options.rebuildSystemPrompt;
@@ -1077,7 +1092,9 @@ export class SessionTools {
 			const tool = this.#toolRegistry.get(name);
 			return tool ? [{ name, tool }] : [];
 		});
-		const xdevReadAvailable = this.#builtInToolNames.has("read") && selectedTools.some(({ name }) => name === "read");
+		const xdevReadAvailable =
+			this.#builtInToolNames.has("read") &&
+			(selectedTools.some(({ name }) => name === "read") || this.#deviceOnlyReadTransportAvailable);
 		const xdevWriteAvailable =
 			builtInWriteAvailable &&
 			(selectedTools.some(({ name }) => name === "write") || this.#deviceOnlyWriteTransportAvailable);
@@ -1101,6 +1118,15 @@ export class SessionTools {
 			if (mountNames.has(name)) continue;
 			tools.push(this.#wrapToolForAcpPermission(tool));
 			validToolNames.push(name);
+		}
+		// A device-only read transport carries `read xd://<tool>` docs whenever a
+		// device mounts, even when the selection never named `read`.
+		if (mountNames.size > 0 && this.#deviceOnlyReadTransportAvailable && !validToolNames.includes("read")) {
+			const read = this.#toolRegistry.get("read");
+			if (read) {
+				tools.push(this.#wrapToolForAcpPermission(read));
+				validToolNames.push("read");
+			}
 		}
 
 		const pinnedWrite = isPresentationPinned("write");
@@ -1190,8 +1216,16 @@ export class SessionTools {
 		let rebuiltSignature: string | undefined;
 		let frozenSignature: string | undefined;
 		let rebuiltXdevCatalogNames: readonly string[] | undefined;
+		// Read access follows the explicit grant: the originating transport stays
+		// docs-only unless `read` is pinned, and an upgrade previews the full schema
+		// during the rebuild without relaxing execution until publication commits.
+		const previousDeviceOnlyRead = this.#isDeviceOnlyRead?.() === true;
+		const nextDeviceOnlyRead = this.#deviceOnlyReadTransportAvailable && !isPresentationPinned("read");
+		const upgradeDeviceOnlyRead = previousDeviceOnlyRead && !nextDeviceOnlyRead;
 		let candidateSurface: PromptSurface | undefined;
 		try {
+			if (nextDeviceOnlyRead) this.#setDeviceOnlyRead?.(true);
+			if (upgradeDeviceOnlyRead) this.#setPendingFullReadDescription?.(true);
 			if (restrictDeviceOnlyWrite) this.#setDeviceOnlyWrite?.(true);
 			if (upgradeDeviceOnlyWrite) this.#setPendingFullWriteDescription?.(true);
 			if (this.#rebuildSystemPrompt) {
@@ -1262,6 +1296,8 @@ export class SessionTools {
 			}
 			signal?.throwIfAborted();
 		} catch (error) {
+			this.#setDeviceOnlyRead?.(previousDeviceOnlyRead);
+			if (upgradeDeviceOnlyRead) this.#setPendingFullReadDescription?.(false);
 			if (restrictDeviceOnlyWrite) this.#setDeviceOnlyWrite?.(false);
 			if (upgradeDeviceOnlyWrite) this.#setPendingFullWriteDescription?.(false);
 			this.#setMountedNames(previousMounted);
@@ -1273,6 +1309,8 @@ export class SessionTools {
 		}
 
 		if (this.#host.isDisposed()) {
+			this.#setDeviceOnlyRead?.(previousDeviceOnlyRead);
+			if (upgradeDeviceOnlyRead) this.#setPendingFullReadDescription?.(false);
 			if (restrictDeviceOnlyWrite) this.#setDeviceOnlyWrite?.(false);
 			if (upgradeDeviceOnlyWrite) this.#setPendingFullWriteDescription?.(false);
 			this.#setMountedNames(previousMounted);
@@ -1317,12 +1355,14 @@ export class SessionTools {
 				this.#notifyToolRosterDelta(previousActiveToolNames, appliedNames);
 				this.#lastAppliedToolSignature = frozenSignature;
 			}
+			this.#setDeviceOnlyRead?.(nextDeviceOnlyRead);
 			if (restoreDormantDeviceOnlyWrite) {
 				this.#setDeviceOnlyWrite?.(true);
 			} else if (upgradeDeviceOnlyWrite || deactivateDeviceOnlyWrite) {
 				this.#setDeviceOnlyWrite?.(false);
 			}
 		} finally {
+			if (upgradeDeviceOnlyRead) this.#setPendingFullReadDescription?.(false);
 			if (upgradeDeviceOnlyWrite) this.#setPendingFullWriteDescription?.(false);
 		}
 	}
@@ -1835,8 +1875,15 @@ export class SessionTools {
 			((this.#host.planModeEnabled() && (!writeSelected || deviceOnlyWriteActive)) ||
 				(writeSelected && deviceOnlyWriteActive && (retainedMountedDevice || retainedDeferrableTool)));
 		const previousRuntimeSelectedToolNames = this.#runtimeSelectedToolNames;
+		// An automatically retained docs-only `read` is transport, not a selection.
+		const transportReadActive = this.#isDeviceOnlyRead?.() === true && retainedMountedDevice;
 		this.#runtimeSelectedToolNames = new Set(
-			normalized.filter(name => !mounted.has(name) && !(name === "write" && transportWriteActive)),
+			normalized.filter(
+				name =>
+					!mounted.has(name) &&
+					!(name === "write" && transportWriteActive) &&
+					!(name === "read" && transportReadActive),
+			),
 		);
 		try {
 			await this.#applyActiveToolsByName(normalized, forcePromptRefresh, signal);

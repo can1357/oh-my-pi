@@ -108,6 +108,15 @@ interface CursorExecBridgeOptions {
 	 */
 	allowDirectFileMutation?: boolean | (() => boolean);
 	/**
+	 * Whether a Cursor read frame may open the target file itself. A negative
+	 * offset is resolved by counting the file's lines before `read` runs, so a
+	 * session whose `read` is only the docs-only xd:// transport must answer no:
+	 * that `read` refuses every file, and the bridge must not open one first. A
+	 * resolver keeps the answer current across runtime read upgrades. Defaults
+	 * to allowed, matching a full `read`.
+	 */
+	allowFileRead?: boolean | (() => boolean);
+	/**
 	 * Mirror Cursor's server-owned todo list into local session state. Cursor
 	 * resolves `update_todos` / `read_todos` remotely, so without this bridge
 	 * the provider's list and the local `todo` state diverge silently.
@@ -418,6 +427,10 @@ async function resolveCursorReadOffset(
 	offset?: number,
 ): Promise<number | undefined> {
 	if (offset === undefined || offset >= 0) return offset;
+	// Counting lines opens the file before `read` judges the path; a docs-only
+	// read transport refuses every file, so pass the offset through for it to refuse.
+	const allowed = options.allowFileRead;
+	if ((typeof allowed === "function" ? allowed() : allowed) === false) return offset;
 	try {
 		const cwd = options.getCwd?.() ?? options.cwd;
 		const { path: filePath } = await splitPathAndSelPreferringLiteral(readPath, cwd);

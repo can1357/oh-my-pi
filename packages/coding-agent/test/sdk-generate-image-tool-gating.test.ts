@@ -201,6 +201,26 @@ describe("generate_image tool gating", () => {
 		expect(await Bun.file(target).text()).toBe("upgraded\n");
 	});
 
+	it("drops file-read guidance while read is only the xd:// docs transport", async () => {
+		const ambientTool = customTool("docs_only_search");
+		const session = await sessionWithCustomTools(["bash"], [ambientTool]);
+		expect(session.getActiveToolNames()).toEqual(expect.arrayContaining(["bash", "read", "write"]));
+		expect(session.getXdevToolEntries().map(entry => entry.name)).toContain(ambientTool.name);
+		const exploration = (): string => {
+			const rendered = session.systemPrompt.join("\n");
+			const start = rendered.indexOf("# Exploration");
+			if (start < 0) throw new Error("Expected the exploration policy section");
+			return rendered.slice(start, rendered.indexOf("\n#", start + 1));
+		};
+		expect(specializedToolsPolicy(session)).not.toContain("File/directory reads");
+		expect(exploration()).not.toContain("`read` ranges");
+
+		await session.setActiveToolsByName(["bash", "read"]);
+
+		expect(specializedToolsPolicy(session)).toContain("File/directory reads: `read`");
+		expect(exploration()).toContain("`read` ranges");
+	});
+
 	it("mounts ambient MCP-shaped tools when write was omitted", async () => {
 		let mcpCalls = 0;
 		const mcpTool = {
@@ -286,13 +306,18 @@ describe("generate_image tool gating", () => {
 		expect(session.getXdevToolEntries().map(entry => entry.name)).toContain(ambientTool.name);
 	});
 
-	it("keeps ambient custom tools top-level when an explicit session omitted read", async () => {
+	it("mounts ambient custom tools behind device-only transports when an explicit session omitted read", async () => {
 		const ambientTool = customTool("ambient_search");
 		const session = await sessionWithCustomTools(["bash"], [ambientTool]);
 
-		expect(session.getActiveToolNames()).not.toContain("read");
-		expect(session.getActiveToolNames()).toContain(ambientTool.name);
-		expect(session.getXdevToolEntries().map(entry => entry.name)).not.toContain(ambientTool.name);
+		expect(session.getActiveToolNames()).toEqual(expect.arrayContaining(["bash", "read", "write"]));
+		expect(session.getActiveToolNames()).not.toContain(ambientTool.name);
+		expect(session.getXdevToolEntries().map(entry => entry.name)).toContain(ambientTool.name);
+		const read = session.getToolByName("read");
+		expect(read).toBeDefined();
+		await expect(read!.execute("omitted-read-file", { path: path.join(registryDir, "auth.db") })).rejects.toThrow(
+			"only accepts xd://",
+		);
 	});
 
 	it("keeps ambient tools top-level when write is shadowed by a custom tool", async () => {

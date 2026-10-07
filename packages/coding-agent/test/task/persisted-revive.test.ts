@@ -510,6 +510,32 @@ describe("persisted subagent revival", () => {
 		expect(activeToolNames).toEqual([["read", "write", "yield"]]);
 	});
 
+	it("replays a read-less contract without granting read on cold revival", async () => {
+		const cwd = makeTempDir("@pi-read-less-revive-");
+		// The executor persists only the granted names, so a `--tools grep` child
+		// never records its docs-only read transport. Replaying the list as an
+		// explicit grant must keep `read` absent: createTools then re-creates the
+		// device-only transport instead of a full ReadTool.
+		const sessionFile = await createPersistedSession(cwd, undefined, undefined, undefined, {
+			tools: ["grep", "yield"],
+			readOnly: true,
+		});
+		const activeToolNames: string[][] = [];
+		let capturedOptions: CreateAgentSessionOptions | undefined;
+		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async options => {
+			capturedOptions = options;
+			return { session: createRevivedSession(activeToolNames).session } as CreateAgentSessionResult;
+		});
+
+		const ref = createRef(sessionFile);
+		const reviver = await createFactory(cwd)(ref);
+		if (!reviver) throw new Error("Expected a persisted reviver");
+		await reviver(ref);
+
+		expect(capturedOptions?.toolNames).toEqual(["grep", "yield"]);
+		expect(activeToolNames).toEqual([["grep", "yield"]]);
+	});
+
 	it("preserves normal revival capability wiring for contracts without the marker", async () => {
 		const cwd = makeTempDir("@pi-normal-revive-");
 		const sessionFile = await createPersistedSession(cwd);
