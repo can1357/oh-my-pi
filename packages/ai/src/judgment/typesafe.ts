@@ -36,6 +36,7 @@ export const TYPESAFE_DEFAULT_MODEL = "jev-latest";
 export const JUDGMENT_ROUTES = {
 	typesafe: "/v1/systemone",
 	"openrouter-decisions": "/decisions",
+	"openai-decisions": "/decisions",
 } as const satisfies Partial<Record<Api, string>>;
 
 /** APIs {@link TypeSafeJudge} can serve. */
@@ -97,6 +98,66 @@ function backoffMs(attempt: number, headers: Headers | undefined): number {
 	return Math.min(BACKOFF_BASE_MS * 2 ** attempt, BACKOFF_MAX_MS);
 }
 
+export interface PostJudgmentArgs {
+	url: string;
+	body: string;
+	key: string;
+	headers?: Record<string, string>;
+	fetch?: FetchImpl;
+	timeoutMs?: number;
+	signal?: AbortSignal;
+	label: string;
+	makeError: (message: string, status: number, headers: Headers) => AIError.ProviderHttpError;
+}
+
+/**
+ * Shared retry loop for native judgment APIs.
+ * Retries up to 3 attempts on network errors (unless aborted) and transient 408/429/5xx status codes,
+ * honoring Retry-After headers capped at 5 seconds.
+ */
+export async function postJudgment<T>(args: PostJudgmentArgs): Promise<T> {
+	const {
+		url,
+		body,
+		key,
+		headers: extraHeaders,
+		fetch: fetchImpl = fetch,
+		timeoutMs = DEFAULT_TIMEOUT_MS,
+		signal,
+		label,
+		makeError,
+	} = args;
+	const headers: Record<string, string> = {
+		...extraHeaders,
+		Authorization: `Bearer ${key}`,
+		Accept: "application/json",
+		"Content-Type": "application/json",
+	};
+	for (let attempt = 0; ; attempt++) {
+		signal?.throwIfAborted();
+		const timeout = AbortSignal.timeout(timeoutMs);
+		let response: Response;
+		try {
+			response = await fetchImpl(url, {
+				method: "POST",
+				headers,
+				body,
+				signal: signal ? AbortSignal.any([signal, timeout]) : timeout,
+			});
+		} catch (error) {
+			if (signal?.aborted || attempt + 1 >= MAX_ATTEMPTS) throw error;
+			await Bun.sleep(backoffMs(attempt, undefined));
+			continue;
+		}
+		if (response.ok) return (await response.json()) as T;
+		const text = await response.text();
+		const error = makeError(`${label} API error (${response.status}): ${text}`, response.status, response.headers);
+		const transient = response.status === 408 || response.status === 429 || response.status >= 500;
+		if (!transient || attempt + 1 >= MAX_ATTEMPTS) throw error;
+		await Bun.sleep(backoffMs(attempt, response.headers));
+	}
+}
+
 export class TypeSafeJudge implements Judge {
 	readonly label: string;
 	readonly api: JudgmentApi;
@@ -125,7 +186,18 @@ export class TypeSafeJudge implements Judge {
 		const signal = options?.signal;
 		const response = await withAuth(
 			this.#apiKey,
-			key => this.#attempt<SystemOneResponse>(JUDGMENT_ROUTES[this.api], body, key, signal),
+			key =>
+				postJudgment<SystemOneResponse>({
+					url: `${this.baseUrl}${JUDGMENT_ROUTES[this.api]}`,
+					body,
+					key,
+					headers: this.#headers,
+					fetch: this.#fetch,
+					timeoutMs: this.#timeoutMs,
+					signal,
+					label: this.label,
+					makeError: (message, status, headers) => new TypeSafeApiError(message, status, { headers }),
+				}),
 			{ signal },
 		);
 		for (const id in request.questions) {
@@ -144,40 +216,5 @@ export class TypeSafeJudge implements Judge {
 			answers: response.answers as JudgmentResult<Q>["answers"],
 			usage: tokenUsage(response.usage.input_tokens, response.usage.output_tokens, response.usage.cost),
 		};
-	}
-
-	async #attempt<T>(path: string, body: string, key: string, signal: AbortSignal | undefined): Promise<T> {
-		const url = `${this.baseUrl}${path}`;
-		const headers: Record<string, string> = {
-			...this.#headers,
-			Authorization: `Bearer ${key}`,
-			Accept: "application/json",
-			"Content-Type": "application/json",
-		};
-		for (let attempt = 0; ; attempt++) {
-			signal?.throwIfAborted();
-			const timeout = AbortSignal.timeout(this.#timeoutMs);
-			let response: Response;
-			try {
-				response = await this.#fetch(url, {
-					method: "POST",
-					headers,
-					body,
-					signal: signal ? AbortSignal.any([signal, timeout]) : timeout,
-				});
-			} catch (error) {
-				if (signal?.aborted || attempt + 1 >= MAX_ATTEMPTS) throw error;
-				await Bun.sleep(backoffMs(attempt, undefined));
-				continue;
-			}
-			if (response.ok) return (await response.json()) as T;
-			const text = await response.text();
-			const error = new TypeSafeApiError(`${this.label} API error (${response.status}): ${text}`, response.status, {
-				headers: response.headers,
-			});
-			const transient = response.status === 408 || response.status === 429 || response.status >= 500;
-			if (!transient || attempt + 1 >= MAX_ATTEMPTS) throw error;
-			await Bun.sleep(backoffMs(attempt, response.headers));
-		}
 	}
 }

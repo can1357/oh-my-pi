@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `OpenAIDecisionsJudge` client for OpenAI's Decisions API (`POST /v1/decisions`).
+
 ### Breaking Changes
 
 - `getEnvApiKey`, `getEnvApiKeyName` and `listProvidersWithEnvKey` are no longer exported from `@oh-my-pi/pi-ai/stream`; import them from `@oh-my-pi/pi-ai` or `@oh-my-pi/pi-ai/env-api-key` ([#14672](https://github.com/can1357/oh-my-pi/pull/14672) by [@H4vC](https://github.com/H4vC))

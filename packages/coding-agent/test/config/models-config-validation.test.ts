@@ -192,4 +192,25 @@ describe("model kind must match its api", () => {
 			),
 		).not.toThrow();
 	});
+
+	test("an openai-decisions model is a judge", () => {
+		// The docs/models.md example.
+		const provider = {
+			baseUrl: "https://api.openai.com/v1",
+			apiKey: "OPENAI_API_KEY",
+			api: "openai-decisions" as const,
+			models: [
+				{
+					id: "gpt-6-luna",
+					name: "GPT-6 Luna (Decisions)",
+					cost: { input: 0.1, output: 0, cacheRead: 0, cacheWrite: 0 },
+				},
+			],
+		};
+		expect(ModelsConfigSchema({ providers: { "openai-decisions": provider } }) instanceof OmpErrors).toBe(false);
+		expect(() => validateProviderConfiguration("openai-decisions", provider, "models-config")).not.toThrow();
+		expect(validate({ models: [{ id: "gpt-6-luna", api: "openai-decisions", kind: "chat" }] })).toThrow(
+			/kind "chat" does not match api "openai-decisions"/,
+		);
+	});
 });

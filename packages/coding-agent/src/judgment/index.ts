@@ -33,6 +33,7 @@ import {
 	type TextPrompt,
 	TextJudge,
 	TYPESAFE_PROVIDER,
+	OpenAIDecisionsJudge,
 	TypeSafeJudge,
 	tokenUsage,
 	type Usage,
@@ -331,14 +332,24 @@ export class ChainJudge implements Judge {
 		const apiKey = this.#deps.registry.resolver(model, this.#deps.sessionId);
 		if (isJudgmentApi(model.api)) {
 			const headers = await this.#deps.registry.resolveModelHeaders(model, signal);
-			const judge = new TypeSafeJudge({
-				apiKey,
-				api: model.api,
-				provider: model.provider,
-				model: model.id,
-				baseUrl: model.baseUrl,
-				headers,
-			});
+			const judge =
+				model.api === "openai-decisions"
+					? new OpenAIDecisionsJudge({
+							apiKey,
+							api: model.api,
+							provider: model.provider,
+							model: model.id,
+							baseUrl: model.baseUrl,
+							headers,
+						})
+					: new TypeSafeJudge({
+							apiKey,
+							api: model.api,
+							provider: model.provider,
+							model: model.id,
+							baseUrl: model.baseUrl,
+							headers,
+						});
 			return nativeJudge(judge, model, this.#deps.cache, attempt => this.#report(attempt));
 		}
 		// Resolve metadata after getApiKey so the session-sticky credential is recorded first.
@@ -403,7 +414,7 @@ class LocalTextBackend implements TextBackend {
  * the catalog model; a route that bills (OpenRouter) keeps its reported cost.
  */
 function nativeJudge(
-	judge: TypeSafeJudge,
+	judge: TypeSafeJudge | OpenAIDecisionsJudge,
 	model: Model,
 	cache: JudgmentCache | undefined,
 	report: (attempt: JudgmentAttempt) => void,
