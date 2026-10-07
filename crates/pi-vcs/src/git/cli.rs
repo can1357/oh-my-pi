@@ -319,30 +319,33 @@ pub(crate) fn run_sync_capped(
 	run_sync_with(cwd, args, timeout, limit, false)
 }
 
-/// Read runner that lets git persist the index stat cache it refreshed, with
-/// an explicit retention cap for whole-worktree status calls whose output the
-/// caller wants to bound (e.g. a probe like [`GitRepo::is_dirty`] that only
-/// needs the first few entries).
+/// Read runner that lets git write back the index stat cache it refreshed,
+/// with an explicit retention cap (e.g. a probe like [`GitRepo::is_dirty`]
+/// that only needs the first few entries). It runs only the status call that
+/// repairs a stale stat cache; every other whole-worktree status runs
+/// lock-free through [`run_sync_capped`] (see [`GitRepo::status_porcelain`]).
 ///
-/// Deviates from the blanket read-only hardening for whole-worktree status
-/// only, and deliberately. `git status` re-stats every entry; without the
-/// write-back that work is discarded and repeated on the next call. An index
-/// with no stat data — which is how every worktree `jj workspace add` creates
-/// starts — therefore re-reads and re-hashes the whole tree on every single
-/// status, measured here at 42s wall on a 94k-entry checkout, with
-/// `--no-optional-locks` turning a one-time cost into a permanent one.
+/// `git status` re-stats every entry, and a lock-free status discards that
+/// work. An index with no stat data, which is how every worktree `jj
+/// workspace add` creates starts, therefore re-reads and re-hashes the whole
+/// tree on every lock-free status, measured here at 42s wall on a 94k-entry
+/// checkout. Letting one call write the refresh back makes the calls after
+/// it take the stat fast path.
 ///
-/// Safe under concurrency by construction: the lock is *optional*, so git
-/// skips the write when another process holds `index.lock` rather than
-/// waiting or failing.
+/// That call costs every other writer. The lock is *optional*, so this call
+/// never waits for or fails on another process's `index.lock`; it skips the
+/// write instead. But git takes the lock after its stat refresh and holds it
+/// to the end of the worktree walk, whether or not it ends up writing, and
+/// while it does every other writer fails on it: `git add`, `commit` and
+/// `checkout` at once, jj after a one-second retry. A status line polling
+/// through this runner would hold the lock on every poll.
 ///
 /// The call runs as the user's own `git status` would, so the repository's
 /// fsmonitor and untracked cache are used and kept, as on every other read.
 /// Pinning them off here would not be inert: with the index write allowed,
 /// git honours a `core.fsmonitor=false` or `core.untrackedCache=false` pin by
 /// dropping the index's fsmonitor and untracked-cache extensions and writing
-/// that removal back, undoing on every poll what the user's own `git status`
-/// built.
+/// that removal back, undoing what the user's own `git status` built.
 pub(crate) fn run_sync_refreshing_capped(
 	cwd: &Path,
 	args: &[String],
