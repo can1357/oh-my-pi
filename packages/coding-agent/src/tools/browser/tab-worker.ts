@@ -1,3 +1,4 @@
+import { attachmentTargetFilter } from "./ownership";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -1484,6 +1485,7 @@ export class WorkerCore {
 				browserWSEndpoint: payload.browserWSEndpoint,
 				defaultViewport: null,
 				protocolTimeout: BROWSER_PROTOCOL_TIMEOUT_MS,
+				targetFilter: payload.mode === "attach" ? attachmentTargetFilter(payload.targetId) : undefined,
 			});
 
 			// Realm setup is done: puppeteer loaded and browser connected. Sent before

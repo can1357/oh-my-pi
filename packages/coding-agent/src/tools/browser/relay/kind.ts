@@ -12,6 +12,7 @@ import { parseFlag } from "@oh-my-pi/pi-utils";
 export interface RelayKind {
 	kind: "relay";
 	cdpUrl: string;
+	selectedTargetId?: string;
 }
 
 /** Default endpoint of the `omp-browser-relay` CLI. */

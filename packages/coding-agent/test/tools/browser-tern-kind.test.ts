@@ -37,24 +37,21 @@ describe("resolveBrowserKind with Tern", () => {
 		expect(resolveBrowserKind({ action: "open" }, session(), cmuxEnv)).toEqual(TERN);
 	});
 
-	it("keeps explicit app options, the relay and browser.cdpUrl ahead of Tern", () => {
+	it("keeps explicit app options ahead of Tern but never treats standing attachment settings as permission", () => {
 		expect(
 			resolveBrowserKind({ action: "open", app: { cdp_url: "http://127.0.0.1:9222" } }, session(), TERN_ENV),
 		).toEqual({
 			kind: "connected",
 			cdpUrl: "http://127.0.0.1:9222",
 		});
-		expect(resolveBrowserKind({ action: "open" }, session({ "browser.relay": true }), TERN_ENV).kind).toBe("relay");
+		expect(resolveBrowserKind({ action: "open" }, session({ "browser.relay": true }), TERN_ENV).kind).toBe("tern");
 		expect(
 			resolveBrowserKind({ action: "open" }, session({ "browser.cdpUrl": "http://127.0.0.1:9333" }), TERN_ENV).kind,
-		).toBe("connected");
+		).toBe("tern");
 	});
 
-	it("keeps the Tern PiP for headed:false", () => {
-		expect(resolveBrowserKind({ action: "open", headed: false }, session(), cmuxEnv)).toEqual(TERN);
-	});
-
-	it("skips Tern for app.tern:false and the setting, falling through to cmux", () => {
+	it("headed:false requires managed Chromium; opting out of Tern still permits cmux", () => {
+		expect(resolveBrowserKind({ action: "open", headed: false }, session(), cmuxEnv).kind).toBe("headless");
 		expect(resolveBrowserKind({ action: "open", app: { tern: false } }, session(), cmuxEnv).kind).toBe("cmux");
 		expect(resolveBrowserKind({ action: "open" }, session({ "browser.tern": false }), cmuxEnv).kind).toBe("cmux");
 	});

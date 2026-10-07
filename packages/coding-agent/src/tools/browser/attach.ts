@@ -7,6 +7,7 @@ import type { Socket } from "bun";
 import type { Browser, Page, Target } from "puppeteer-core";
 import { throwIfAborted } from "../tool-errors";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import { selectedAttachmentTarget } from "./ownership";
 
 const ATTACH_TARGET_SKIP_PATTERN =
 	/request[\s_-]?handler|devtools|background[\s_-]?(?:page|host)|service[\s_-]?worker/i;
@@ -438,6 +439,7 @@ export function shouldPreserveConnectedBrowserFocus(target?: string): boolean {
 
 export interface PickTargetOptions {
 	matcher?: string;
+	targetId?: string;
 	preferVisible?: boolean;
 	/** Relay /json endpoint (e.g. http://127.0.0.1:9224); enables metadata-first target selection. */
 	relayJson?: string;
@@ -561,6 +563,14 @@ function selectRelayEntry(entries: RelayJsonEntry[], options: PickTargetOptions)
 /** Select relay pages from /json metadata before probing pages; enumerate targets when metadata offers no selection. */
 export async function pickElectronTarget(browser: Browser, options: PickTargetOptions = {}): Promise<Page> {
 	throwIfAborted(options.signal);
+	if (options.targetId) {
+		const target = selectedAttachmentTarget(browser.targets(), options.targetId);
+		const page = await attachPageWithTimeout(target, PAGE_ATTACH_TIMEOUT_MS, options.signal);
+		if (!page || !(await waitForMainFrame(page, FRAME_READY_TIMEOUT_MS, options.signal))) {
+			throw new ToolError("Selected browser tab is not ready; no other tab was attached.");
+		}
+		return page;
+	}
 	if (options.relayJson) {
 		const entries = await fetchRelayEntries(options.relayJson, options.signal);
 		if (entries) {

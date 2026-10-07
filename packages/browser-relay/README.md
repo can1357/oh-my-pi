@@ -7,13 +7,14 @@ The companion relay server lives in the omp CLI (`omp browser-relay`, see `packa
 ## Setup
 
 1. `omp browser-relay install` — writes the bundled extension to `~/.omp/browser-relay/extension`, then load it via `chrome://extensions` → Developer mode → *Load unpacked*. (Or grab `omp-browser-relay-extension.zip` from GitHub releases.)
-2. Opt in, one of two ways:
-   - **Per call** — pass `app: { relay: true }` to `browser.open(...)` in Eval. Works without any setting and persists nothing: the configured default for every other call and session stays whatever it already was.
-   - **As the default** — `omp config set browser.relay true` makes the relay the default for **every session using this profile, in every project** (project-level settings, `PI_BROWSER_RELAY`, and an explicit `app` choice still take precedence). Any session's ordinary `browser.open(...)` call will then drive your real browser — including background sessions you aren't watching; without `app.target` such a call adopts the currently visible tab, and if it carries a `url` it navigates that tab away from what you were reading.
+2. Start `omp browser-relay` and verify that the extension badge turns **on**. Use `--token`, `--no-group`, or a non-default port as needed.
+3. Pass `app: { relay: true }` to `browser.open(...)` in Eval, then select one exact browser-instance/tab in the host-user picker. A task session identity and an interactive UI are required; no-UI/background calls cannot authorize new attachments.
 
-That's it: the relay server auto-starts under omp's profile-independent global daemon broker the first time Eval's browser API needs it. Every relay consumer holds a broker lease, so one project exiting cannot interrupt another; the server stops after the last consumer across all projects exits. The extension badge turns **on** when connected. Run `omp browser-relay` manually only for `--token`, `--no-group`, or a non-default port — a relay already serving the port is adopted, never fought over.
+Standing `browser.relay`, `browser.cdpUrl`, and `PI_BROWSER_RELAY=1` never authorize automatic adoption of user tabs. `PI_BROWSER_RELAY=0` disables explicit relay requests. `app.target` only filters the picker's URL/title choices; it cannot replace user selection. Instance-scoped target IDs bind the chosen browser/tab, while titles and URLs do not establish the signed-in profile/email. Cancellation, interruption, and changed/disappeared targets fail without selecting another tab. Previously approved named attachments are reusable only by their approving task.
 
-`app.target` picks a specific tab by URL/title substring; without it, omp adopts the visible tab without stealing focus. Tabs omp is **actively driving** are gathered into a per-window **"omp" tab group** (cyan) — released when omp lets go of the tab and dissolved on disconnect; the rest of your tabs, pinned tabs, tabs in your own groups, and tabs you drag out are left alone. Disable with `omp browser-relay --no-group`.
+The selected-tab websocket connection confines debugger bootstrap and commands to that tab. Older relay servers without selected-target isolation are rejected, even through `app.cdp_url`; restart the relay under the fixed runtime. The Chrome extension wire protocol is unchanged.
+
+Tabs omp is **actively driving** are gathered into a per-window **"omp" tab group** (cyan) — released when omp lets go of the tab and dissolved on disconnect; the rest of your tabs, pinned tabs, tabs in your own groups, and tabs you drag out are left alone. Disable with `omp browser-relay --no-group`.
 
 ## Development
 

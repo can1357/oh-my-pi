@@ -42,9 +42,16 @@ const CHROMIUM_AVAILABLE = await chromiumAvailable();
 let sharedHeadless: BrowserHandle | undefined;
 
 function makeSession(): ToolSession {
+	const sessionId = `attach-test-${crypto.randomUUID()}`;
 	return {
 		cwd: process.cwd(),
-		hasUI: false,
+		hasUI: true,
+		getSessionId: () => sessionId,
+		getToolContext: () =>
+			({
+				hasUI: true,
+				ui: { select: async (_title: string, options: string[]) => options[0] } as never,
+			}) as never,
 		getSessionFile: () => null,
 		getSessionSpawns: () => "*",
 		settings: Settings.isolated({
@@ -203,7 +210,7 @@ describe("pickElectronTarget", () => {
 	});
 
 	test.skipIf(!CHROMIUM_AVAILABLE)(
-		"waits for a real attached Chromium's first page before opening the managed tab",
+		"refuses a real borrowed Chromium without a selectable page, without creating one",
 		async () => {
 			const exe = await ensureChromiumExecutable();
 			if (!exe) throw new Error("Expected a Chromium executable");
@@ -228,60 +235,26 @@ describe("pickElectronTarget", () => {
 			const prelude = createBrowserPrelude(session);
 			const context = { session, toolCallId: "attach-page-readiness" };
 			const name = `page-readiness-${crypto.randomUUID()}`;
-			const controller = new AbortController();
-			let attached: BrowserHandle | undefined;
-			let restoreWait: (() => void) | undefined;
 			try {
 				const cdpUrl = `http://127.0.0.1:${port}`;
 				await waitForCdp(cdpUrl, 15_000);
-				attached = await acquireBrowser({ kind: "connected", cdpUrl }, { cwd: process.cwd() });
-				if (!("browser" in attached)) throw new Error("Expected a Puppeteer browser");
-				const browser = attached.browser;
-				expect(await browser.pages()).toHaveLength(0);
-				const waiting = Promise.withResolvers<void>();
-				const waitForTarget = browser.waitForTarget.bind(browser);
-				// Observe the real waiter starting, without replacing its CDP behavior.
-				// The first page is then created externally, not by browser.open.
-				const waitSpy = vi.spyOn(browser, "waitForTarget").mockImplementation((predicate, options) => {
-					waiting.resolve();
-					return waitForTarget(predicate, options);
-				});
-				restoreWait = () => waitSpy.mockRestore();
-				const opening = prelude
-					.invoke(
+				const error = await rejectionOf(
+					prelude.invoke(
 						{
 							action: "open",
 							name,
-							url: "data:text/html,<title>First attached page</title>",
-							timeout: 15,
+							url: "data:text/html,<title>Must not navigate</title>",
 							app: { cdp_url: cdpUrl },
 						},
-						{ ...context, signal: controller.signal },
-					)
-					.then(
-						result => ({ result }),
-						(error: unknown) => ({ error }),
-					);
-				await Promise.race([
-					waiting.promise,
-					opening.then(outcome => {
-						if ("error" in outcome) throw outcome.error;
-						throw new Error("Attached open finished before an external page was created");
-					}),
-				]);
-				expect(await browser.pages()).toHaveLength(0);
-				await browser.newPage();
-				const outcome = await opening;
-				if ("error" in outcome) throw outcome.error;
-				const title = await prelude.invoke({ action: "run", name, code: "return await tab.title();" }, context);
-				expect(title.details).toMatchObject({ value: "First attached page" });
-				await prelude.invoke({ action: "close", name, kill: true }, context);
-				expect(await probeCdpStatus(`${cdpUrl}/json/version`, { timeoutMs: 1500 })).toBe(200);
+						context,
+					),
+				);
+				expect(error).toMatchObject({ message: expect.stringContaining("No eligible browser tabs") });
+				const response = await fetch(`${cdpUrl}/json`);
+				const entries = (await response.json()) as Array<{ type: string }>;
+				expect(entries.filter(entry => entry.type === "page")).toEqual([]);
+				expect(getTab(name)).toBeUndefined();
 			} finally {
-				controller.abort();
-				restoreWait?.();
-				await prelude.invoke({ action: "close", name }, context).catch(() => {});
-				if (attached) await releaseBrowser(attached, { kill: false });
 				child.kill();
 				await child.exited;
 				await fs.rm(root, { recursive: true, force: true });
@@ -671,7 +644,11 @@ describe("pickElectronTarget", () => {
 			const tabName = `attach-failure-${process.pid}-${Math.random().toString(36).slice(2)}`;
 			try {
 				attached = await acquireBrowser(
-					{ kind: "connected", cdpUrl: `http://${endpoint.host}` },
+					{
+						kind: "connected",
+						cdpUrl: `http://${endpoint.host}`,
+						selectedTargetId: (targetPage.target() as Target & { _targetId: string })._targetId,
+					},
 					{ cwd: process.cwd() },
 				);
 				attempted = true;
@@ -687,6 +664,7 @@ describe("pickElectronTarget", () => {
 						url: "http://127.0.0.1:9/aborted-by-interception",
 						waitUntil: "domcontentloaded",
 						timeoutMs: 15_000,
+						ownerSessionId: "attach-navigation-failure",
 					}),
 				);
 				expect(error).toBeInstanceOf(Error);
@@ -712,7 +690,9 @@ describe("pickElectronTarget", () => {
 			fetch: (request, server) =>
 				new URL(request.url).pathname === "/json/version"
 					? Response.json({ webSocketDebuggerUrl: `ws://127.0.0.1:${server.port}/devtools/browser/gone` })
-					: new Response("gone", { status: 404 }),
+					: new URL(request.url).pathname === "/json"
+						? Response.json([{ id: "chosen", type: "page", title: "Chosen", url: "about:blank" }])
+						: new Response("gone", { status: 404 }),
 		});
 		const session = makeSession();
 		const prelude = createBrowserPrelude(session);

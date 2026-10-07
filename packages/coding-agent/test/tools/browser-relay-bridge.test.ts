@@ -179,6 +179,82 @@ async function claimTab(
 	await flush();
 }
 
+describe("RelayBridge selected-target isolation", () => {
+	it("limits discovery, bootstrap attachment and navigation to the chosen browser instance/tab", async () => {
+		const bridge = new RelayBridge();
+		const personal = new FakeExtSocket();
+		const work = new FakeExtSocket();
+		connectInstance(bridge, personal, "personal", [tab({ tabId: 7, active: true })]);
+		connectInstance(bridge, work, "work", [tab({ tabId: 7 })]);
+		const selectedId = `PAGE${instanceCode("work")}.7`;
+		const cdp = new FakeCdpSocket();
+		const conn = bridge.cdpConnected(cdp, selectedId);
+		bridge.cdpMessage(conn, JSON.stringify({ id: 1, method: "Target.getTargets" }));
+		bridge.cdpMessage(conn, JSON.stringify({ id: 2, method: "Target.setDiscoverTargets" }));
+		bridge.cdpMessage(conn, JSON.stringify({ id: 3, method: "Target.setAutoAttach" }));
+		expect(personal.rpcs("attach")).toHaveLength(0);
+		expect(work.rpcs("attach").map(request => request.tabId)).toEqual([7]);
+		ack(bridge, work, "attach");
+		await flush();
+		const targets = cdp.messages.find(message => message.id === 1)?.result as {
+			targetInfos: Array<{ targetId: string }>;
+		};
+		expect(targets.targetInfos.map(info => info.targetId)).toEqual([selectedId]);
+		const pageSession = await attachPage(bridge, work, cdp, conn, 7, "work");
+		bridge.cdpMessage(
+			conn,
+			JSON.stringify({
+				id: 4,
+				sessionId: pageSession,
+				method: "Page.navigate",
+				params: { url: "https://task.test/" },
+			}),
+		);
+		await flush();
+		expect(personal.rpcs("send")).toHaveLength(0);
+		expect(work.rpcs("send").some(request => request.tabId === 7 && request.method === "Page.navigate")).toBe(true);
+		ack(bridge, work, "send");
+		await flush();
+		for (const method of ["Target.attachToTarget", "Target.activateTarget", "Target.closeTarget"]) {
+			bridge.cdpMessage(
+				conn,
+				JSON.stringify({ id: ++msgSeq, method, params: { targetId: `PAGE${instanceCode("personal")}.7` } }),
+			);
+		}
+		bridge.cdpMessage(
+			conn,
+			JSON.stringify({ id: ++msgSeq, method: "Target.createTarget", params: { url: "https://unselected.test/" } }),
+		);
+		bridge.extMessage(personal, JSON.stringify({ t: "tabCreated", tab: tab({ tabId: 8 }) }));
+		bridge.extMessage(
+			personal,
+			JSON.stringify({ t: "tabUpdated", tab: tab({ tabId: 7, active: true, title: "Now visible" }) }),
+		);
+		await flush();
+		expect(personal.rpcs("attach")).toHaveLength(0);
+		expect(personal.rpcs("send")).toHaveLength(0);
+		expect(personal.rpcs("activateTab")).toHaveLength(0);
+		expect(personal.rpcs("removeTab")).toHaveLength(0);
+		expect(personal.rpcs("createTab")).toHaveLength(0);
+		expect(work.rpcs("createTab")).toHaveLength(0);
+		expect(cdp.messages.filter(message => message.error)).toHaveLength(4);
+		bridge.cdpClosed(conn);
+		ack(bridge, work, "detach");
+		await flush();
+	});
+
+	it("rejects missing/discarded exact selections instead of falling back to an active tab", () => {
+		const bridge = new RelayBridge();
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, [tab({ tabId: 1, active: true }), tab({ tabId: 2, discarded: true })]);
+		for (const id of [`PAGE${ANON}.2`, `PAGE${ANON}.999`, `TAB${ANON}.1`]) {
+			expect(bridge.canSelectTarget(id)).toBe(false);
+			expect(() => bridge.cdpConnected(new FakeCdpSocket(), id)).toThrow("no longer available");
+		}
+		expect(ext.rpcs("attach")).toHaveLength(0);
+	});
+});
+
 describe("RelayBridge target discovery", () => {
 	it("enumerates current eligible pages without attaching or claiming tabs", () => {
 		const bridge = new RelayBridge({ group: { title: "omp", color: "cyan" } });
