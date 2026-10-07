@@ -395,7 +395,11 @@ describe("cross-session messaging lifecycle", () => {
 			showError() {},
 			updateEditorTopBorder() {},
 			updateEditorBorderColor() {},
-			eventController: { handleEvent: async () => {}, takeDisplaceableComponents: () => [] },
+			eventController: {
+				dispatchSessionEvent: async () => {},
+				takeDisplaceableComponents: () => [],
+				resetTranscriptAnchors: () => {},
+			},
 			collabGuest: undefined as CollabGuestLink | undefined,
 			handleResumeSession: async (file: string) => {
 				await session.switchSession(file);
