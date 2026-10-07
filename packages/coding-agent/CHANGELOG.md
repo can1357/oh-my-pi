@@ -179,7 +179,7 @@
 - Added `omp usage accounts` to list OAuth account provider and identity keys without exposing tokens, making account-pool configuration easier.
 
 - Fixed `ask` questions in Tern covering the end of the transcript with a sheet that blocked scrolling, hiding the explanation the question was about; the question now sits in the composer's place, framed like the composer, below a transcript you can read and scroll while deciding ([#14812](https://github.com/can1357/oh-my-pi/pull/14812) by [@H4vC](https://github.com/H4vC))
-- Fixed `--print` mode hanging on exit instead of printing the final error line when stderr cannot take the write; the drain wait now also settles when the stream errors or closes
+- Fixed `--print` mode hanging on exit instead of printing the final error line when stderr cannot take the write; the drain wait now also settles when the stream errors or closes ([#14825](https://github.com/can1357/oh-my-pi/pull/14825) by [@jchanghong023](https://github.com/jchanghong023)).
 ### Changed
 
 - Generated session titles now include their card icon and short code, so the `/resume` picker and session listings show this context; `title.icons` applies to newly generated titles.
