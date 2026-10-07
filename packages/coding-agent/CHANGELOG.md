@@ -4,11 +4,11 @@
 
 ### Added
 
-- Added the RPC `refresh_commands` command so hosts can pick up skills and slash commands installed while a session is running; `/skill:<name>` for a newly installed skill works right away, and the system prompt (and its provider cache) stays untouched unless the listed skills changed.
+- Added the RPC `refresh_commands` command so hosts can pick up skills and slash commands installed while a session is running; `/skill:<name>` for a newly installed skill works right away, and the system prompt (and its provider cache) stays untouched unless the listed skills changed ([#14796](https://github.com/can1357/oh-my-pi/pull/14796) by [@Khang5687](https://github.com/Khang5687))
 
 ### Changed
 
-- RPC no longer pushes an `available_commands_update` frame when a skill or command rediscovery leaves the slash-command catalog unchanged.
+- RPC no longer pushes an `available_commands_update` frame when a skill or command rediscovery leaves the slash-command catalog unchanged ([#14796](https://github.com/can1357/oh-my-pi/pull/14796) by [@Khang5687](https://github.com/Khang5687))
 
 ## [18.8.0] - 2026-10-07
 
