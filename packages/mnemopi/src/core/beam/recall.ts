@@ -1,4 +1,16 @@
-import { normalizedRecallWeights, polyphonicRecallEnabled, temporalHalflifeHours } from "../../config";
+import {
+	importedWeight,
+	inferredWeight,
+	normalizedRecallWeights,
+	polyphonicRecallEnabled,
+	statedWeight,
+	temporalHalflifeHours,
+	tier1Weight,
+	tier2Weight,
+	tier3Weight,
+	toolWeight,
+	unknownWeight,
+} from "../../config";
 import { hasCjk, matchesWordForm } from "../../util/regex";
 import { embedQuery } from "../embeddings";
 import { mmrRerank } from "../mmr";
@@ -62,16 +74,33 @@ type RecallMmrItem = {
 	readonly [key: string]: unknown;
 };
 
-const VERACITY_WEIGHTS: Record<string, number> = {
-	stated: 1.0,
-	true: 1.0,
-	likely_true: 1.0,
-	unknown: 0.8,
-	inferred: 0.7,
-	imported: 0.6,
-	tool: 0.5,
-	false: 0,
-};
+/**
+ * Score multipliers for a candidate's stored `veracity` label and, for episodic
+ * rows, its degradation tier. Resolved once per {@link recall} from the
+ * `MNEMOPI_<LABEL>_WEIGHT` and `MNEMOPI_TIER<N>_WEIGHT` readers in `config.ts`,
+ * clamped at 0 like the hybrid weights so a negative value cannot rank a row
+ * below one labelled `false`; `true`, `likely_true` and `false` have no override.
+ */
+interface TrustWeights {
+	readonly veracity: Readonly<Record<string, number>> & { readonly unknown: number };
+	readonly tiers: readonly [tier1: number, tier2: number, tier3: number];
+}
+
+function resolveTrustWeights(): TrustWeights {
+	return {
+		veracity: {
+			stated: Math.max(0, statedWeight()),
+			true: 1.0,
+			likely_true: 1.0,
+			unknown: Math.max(0, unknownWeight()),
+			inferred: Math.max(0, inferredWeight()),
+			imported: Math.max(0, importedWeight()),
+			tool: Math.max(0, toolWeight()),
+			false: 0,
+		},
+		tiers: [Math.max(0, tier1Weight()), Math.max(0, tier2Weight()), Math.max(0, tier3Weight())],
+	};
+}
 
 /**
  * Default per-result content preview cap enforced by {@link recall}. Content
@@ -670,6 +699,7 @@ function scoreCandidate(
 	queryTokens: readonly string[],
 	queryGroups: readonly (readonly string[])[],
 	weights: readonly [number, number, number],
+	trust: TrustWeights,
 	options: RecallOptionsInternal,
 ): RecallResult | null {
 	const content = asString(candidate.row.content);
@@ -713,11 +743,11 @@ function scoreCandidate(
 		score *= 1 + temporalWeight * temporalScore;
 	}
 	const veracity = asString(candidate.row.veracity) || "unknown";
-	const veracityWeight = VERACITY_WEIGHTS[veracity] ?? VERACITY_WEIGHTS.unknown ?? 0.8;
+	const veracityWeight = trust.veracity[veracity] ?? trust.veracity.unknown;
 	const degradationTier = candidate.tierLabel === "episodic" ? asNumber(candidate.row.tier, 1) : undefined;
 	if (candidate.tierLabel === "episodic") {
-		const tierWeight = degradationTier === 1 ? 1 : degradationTier === 2 ? 0.85 : 0.7;
-		score *= tierWeight;
+		const [tier1, tier2, tier3] = trust.tiers;
+		score *= degradationTier === 1 ? tier1 : degradationTier === 2 ? tier2 : tier3;
 	}
 	score *= veracityWeight * currentContentAdjustment(searchableContent, options.currentSensitive === true);
 	const preview = clipRecallContent(content, options.contentPreviewChars ?? RECALL_CONTENT_PREVIEW_CHARS);
@@ -936,9 +966,10 @@ export async function recall(
 	const tokens = expandedTokens(query, useSynonyms);
 	const tokenGroups = expandedTokenGroups(query, useSynonyms);
 	const candidates = collectMemoryCandidates(beam, query, topK, temporalOptions);
+	const trust = resolveTrustWeights();
 	const scored: RecallResult[] = [];
 	for (const candidate of candidates) {
-		const result = scoreCandidate(candidate, tokens, tokenGroups, weights, temporalOptions);
+		const result = scoreCandidate(candidate, tokens, tokenGroups, weights, trust, temporalOptions);
 		if (result !== null) scored.push(result);
 	}
 	scored.sort((left, right) => (right.score ?? 0) - (left.score ?? 0));

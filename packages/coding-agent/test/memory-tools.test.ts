@@ -889,6 +889,21 @@ describe("Mnemopi backend lifecycle", () => {
 		expect(retainMemory.sleepAllSessions).toHaveBeenCalledTimes(1);
 	});
 
+	it("stores an explicit memory save as stated, not as an unlabelled transcript row", async () => {
+		const state = registerMnemopiState();
+		const result = await mnemopiBackend.save!(
+			{ agentDir: path.dirname(tempDbPath!), cwd: "/tmp", session: state.session },
+			{ content: "The greenhouse sprinklers run at dawn." },
+		);
+		expect(result.stored).toBe(1);
+
+		const row = state
+			.getScopedRetainTarget()
+			.memory.beam.db.prepare<{ veracity: string }, [string]>("SELECT veracity FROM working_memory WHERE id = ?")
+			.get(result.ids?.[0] ?? "");
+		expect(row?.veracity).toBe("stated");
+	});
+
 	it("promotes aged working memory when the backend starts a top-level session (#10770)", async () => {
 		// Resolve seed and started session to the SAME bank/db: `global` scoping
 		// with the shared `default` bank maps the retain bank straight to dbPath.

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- An explicit Mnemopi save through the extension `memory.save` API is now stored as `stated` rather than as `unknown`, the label automatic transcript retention writes, so it ranks as a deliberate memory ([#13824](https://github.com/can1357/oh-my-pi/pull/13824) by [@sjawhar](https://github.com/sjawhar))
+
 ### Fixed
 
 - Fixed relative file links in Tern assistant replies opening against the folder omp was started in after `/wt` or `/move`; they now open the file in the session's working directory ([#14879](https://github.com/can1357/oh-my-pi/pull/14879) by [@H4vC](https://github.com/H4vC))
