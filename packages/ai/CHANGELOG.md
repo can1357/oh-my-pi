@@ -4,7 +4,7 @@
 
 ### Added
 
-- Added per-request usage-report freshness limits locally and through the auth-broker, without extending credential recovery caches ([#14801](https://github.com/can1357/oh-my-pi/issues/14801)).
+- Added per-request usage-report freshness limits locally and through the auth-broker, without extending credential recovery caches ([#14801](https://github.com/can1357/oh-my-pi/issues/14801), [#14805](https://github.com/can1357/oh-my-pi/pull/14805) by [@miaopan607](https://github.com/miaopan607)).
 
 ## [18.8.0] - 2026-10-07
 

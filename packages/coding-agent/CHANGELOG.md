@@ -4,7 +4,7 @@
 
 ### Added
 
-- Added `statusLine.usageRefreshInterval` to configure quota refreshes from 60 seconds to 24 hours, including auth-broker cache freshness ([#14801](https://github.com/can1357/oh-my-pi/issues/14801)).
+- Added `statusLine.usageRefreshInterval` to configure quota refreshes from 60 seconds to 24 hours, including auth-broker cache freshness ([#14801](https://github.com/can1357/oh-my-pi/issues/14801), [#14805](https://github.com/can1357/oh-my-pi/pull/14805) by [@miaopan607](https://github.com/miaopan607)).
 
 ## [18.8.0] - 2026-10-07
 
