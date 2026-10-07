@@ -35,6 +35,24 @@ describe("FileSessionStorage.deleteSessionWithArtifacts", () => {
 	});
 });
 
+function queueMail(sessionId: string, sessionFile: string, id: string, body: string) {
+	return mailbox.enqueueOffline(sessionId, {
+		id,
+		from: {
+			sessionId: "sender",
+			name: "sender",
+			shortId: "12345678",
+			cwd: path.dirname(sessionFile),
+			entryId: "sender-entry",
+			class: "bypass",
+		},
+		body,
+		chain: [],
+		sentAt: Date.now(),
+		sessionFile,
+	});
+}
+
 it("retires mail only after successful transcript deletion, including guarded deletion", async () => {
 	const temp = TempDir.createSync("@omp-delete-mail-");
 	try {
@@ -43,41 +61,13 @@ it("retires mail only after successful transcript deletion, including guarded de
 		const sessionId = "full-header-identity";
 		const file = path.join(temp.path(), "unrelated-filename.jsonl");
 		await Bun.write(file, JSON.stringify({ type: "session", id: sessionId }) + "\n");
-		await mailbox.enqueueOffline(sessionId, {
-			id: "delete-mail",
-			from: {
-				sessionId: "sender",
-				name: "sender",
-				shortId: "12345678",
-				cwd: temp.path(),
-				entryId: "sender-entry",
-				class: "bypass",
-			},
-			body: "delete with owner",
-			chain: [],
-			sentAt: Date.now(),
-			sessionFile: file,
-		});
+		await queueMail(sessionId, file, "delete-mail", "delete with owner");
 		expect(await storage.deleteSessionWithArtifactsIf(file, () => false)).toBe(false);
 		expect(await mailbox.drainOffline(sessionId)).toHaveLength(1);
 		expect(await storage.deleteSessionWithArtifactsIf(file, () => true)).toBe(true);
 		expect(await mailbox.drainOffline(sessionId)).toEqual([]);
 		await Bun.write(file, JSON.stringify({ type: "session", id: sessionId }) + "\n");
-		await mailbox.enqueueOffline(sessionId, {
-			id: "delete-again",
-			from: {
-				sessionId: "sender",
-				name: "sender",
-				shortId: "12345678",
-				cwd: temp.path(),
-				entryId: "sender-entry",
-				class: "bypass",
-			},
-			body: "delete normally",
-			chain: [],
-			sentAt: Date.now(),
-			sessionFile: file,
-		});
+		await queueMail(sessionId, file, "delete-again", "delete normally");
 		await storage.deleteSessionWithArtifacts(file);
 		expect(await mailbox.drainOffline(sessionId)).toEqual([]);
 	} finally {
@@ -92,21 +82,7 @@ it("retires mail after unlink even when conditional artifact cleanup fails", asy
 		vi.spyOn(transport, "messagingRegistryDir").mockReturnValue(path.join(temp.path(), "messaging"));
 		const file = path.join(temp.path(), "owner.jsonl");
 		await Bun.write(file, '{"type":"session","id":"artifact-failure-owner"}\n');
-		await mailbox.enqueueOffline("artifact-failure-owner", {
-			id: "retire-despite-artifacts",
-			from: {
-				sessionId: "sender",
-				name: "sender",
-				shortId: "12345678",
-				cwd: temp.path(),
-				entryId: "sender-entry",
-				class: "bypass",
-			},
-			body: "retire",
-			chain: [],
-			sentAt: Date.now(),
-			sessionFile: file,
-		});
+		await queueMail("artifact-failure-owner", file, "retire-despite-artifacts", "retire");
 		const storage = new FileSessionStorage();
 		const rm = nodeFs.rmSync;
 		vi.spyOn(nodeFs, "rmSync").mockImplementation((target, options) => {
@@ -154,21 +130,7 @@ it.each(["mail", "registry"] as const)(
 			const unrelatedBackup = path.join(temp.path(), "unrelated.jsonl.999.bak");
 			await Bun.write(backup, "old transcript");
 			await Bun.write(unrelatedBackup, "keep");
-			await mailbox.enqueueOffline("cleanup-failure-owner", {
-				id: "mail",
-				from: {
-					sessionId: "sender",
-					name: "sender",
-					shortId: "12345678",
-					cwd: temp.path(),
-					entryId: "sender-entry",
-					class: "bypass",
-				},
-				body: "mail",
-				chain: [],
-				sentAt: Date.now(),
-				sessionFile: file,
-			});
+			await queueMail("cleanup-failure-owner", file, "mail", "mail");
 			const failure = new Error(`${failureKind} cleanup failed`);
 			if (failureKind === "mail") vi.spyOn(mailbox, "retireOfflineMailbox").mockRejectedValueOnce(failure);
 			else vi.spyOn(transport, "resolveRegistry").mockRejectedValueOnce(failure);

@@ -437,46 +437,42 @@ describe("inbox transport", () => {
 		expect(await Bun.file(file).exists()).toBe(true);
 	});
 
-	it("lists and exchanges messages with a 201-character session name", async () => {
-		const dir = tempDir();
-		const name = "x".repeat(201);
-		const namedSnapshot: SessionSnapshot = { ...snapshot, name };
-		const handler = vi.fn(async (request: InboxRequest): Promise<InboxResponse> =>
-			request.type === "snapshot" ? { ok: true, snapshot: namedSnapshot } : { ok: true, outcome: "delivered" },
-		);
-		const pub = await publish(dir, handler);
-		const [entry] = await listInboxEntries({ dir });
-		expect(entry?.entryId).toBe(pub.entryId);
-		expect(await requestInbox(entry!, { type: "snapshot" }, { dir })).toEqual({
-			ok: true,
-			snapshot: namedSnapshot,
-		});
-		const request: InboxRequest = {
-			type: "message",
-			id: "long-name",
-			from: {
-				sessionId: "sender-session",
-				name,
-				shortId: "abcdef12",
-				cwd: "/workspace",
-				entryId: pub.entryId,
-				class: "bypass",
-			},
-			body: "hello",
-		};
-		expect(await requestInbox(entry!, request, { dir })).toEqual({ ok: true, outcome: "delivered" });
-		expect(handler).toHaveBeenCalledWith(request, "peer");
-	});
-
-	it("round-trips the queued outcome", async () => {
-		const dir = tempDir();
-		await publish(dir, async () => ({ ok: true, outcome: "queued" }));
-		const [entry] = await listInboxEntries({ dir });
-		expect(await requestInbox(entry!, { type: "message", id: "queued", body: "hello" }, { dir })).toEqual({
-			ok: true,
-			outcome: "queued",
-		});
-	});
+	it.each(["delivered", "queued"] as const)(
+		"exchanges %s messages with a 201-character session name",
+		async outcome => {
+			const dir = tempDir();
+			const name = "x".repeat(201);
+			const namedSnapshot: SessionSnapshot = { ...snapshot, name };
+			const handler = vi.fn(async (request: InboxRequest): Promise<InboxResponse> =>
+				request.type === "snapshot" ? { ok: true, snapshot: namedSnapshot } : { ok: true, outcome },
+			);
+			const pub = await publish(dir, handler);
+			const [entry] = await listInboxEntries({ dir });
+			expect(entry?.entryId).toBe(pub.entryId);
+			expect(await requestInbox(entry!, { type: "snapshot" }, { dir })).toEqual({
+				ok: true,
+				snapshot: namedSnapshot,
+			});
+			const request: InboxRequest =
+				outcome === "queued"
+					? { type: "message", id: "queued", body: "hello" }
+					: {
+							type: "message",
+							id: "long-name",
+							from: {
+								sessionId: "sender-session",
+								name,
+								shortId: "abcdef12",
+								cwd: "/workspace",
+								entryId: pub.entryId,
+								class: "bypass",
+							},
+							body: "hello",
+						};
+			expect(await requestInbox(entry!, request, { dir })).toEqual({ ok: true, outcome });
+			expect(handler).toHaveBeenCalledWith(request, "peer");
+		},
+	);
 
 	it("authenticates a script with the memory-only session token as own-child", async () => {
 		const dir = tempDir();
@@ -505,11 +501,15 @@ describe("inbox transport", () => {
 		expect(handler).toHaveBeenCalledTimes(1);
 	});
 
-	it("closes a wrong-token connection without responding or invoking the handler", async () => {
+	it.each(["wrong token", "malformed JSON"])("closes %s without responding or invoking the handler", async kind => {
 		const dir = tempDir();
 		const handler = vi.fn(async (): Promise<InboxResponse> => ({ ok: true, snapshot }));
 		const pub = await publish(dir, handler);
-		expect(await rawRequest(pub.endpoint, '{"type":"auth","token":"wrong"}\n{"type":"snapshot"}\n')).toBe("");
+		const lines =
+			kind === "wrong token"
+				? '{"type":"auth","token":"wrong"}\n{"type":"snapshot"}\n'
+				: `${JSON.stringify({ type: "auth", token: pub.token })}\nnot JSON\n`;
+		expect(await rawRequest(pub.endpoint, lines)).toBe("");
 		expect(handler).not.toHaveBeenCalled();
 	});
 
@@ -522,25 +522,16 @@ describe("inbox transport", () => {
 		expect(handle).not.toHaveBeenCalled();
 	});
 
-	it("enforces a fixed 30-second line deadline despite trickled bytes", () => {
+	it.each([false, true])("enforces a fixed line deadline despite trickled bytes (afterAuth=%s)", afterAuth => {
 		vi.useFakeTimers();
-		const { socket, handle } = framingSocket(false);
-		socket.emit("data", '{"type":"message"');
+		const { socket, handle } = framingSocket(afterAuth);
+		if (afterAuth) {
+			vi.advanceTimersByTime(20_000);
+			socket.emit("data", '{"type":"auth","token":"session"}\n{"type":');
+		} else socket.emit("data", '{"type":"message"');
 		vi.advanceTimersByTime(LINE_DEADLINE_MS - 1);
 		expect(socket.destroyed).toBe(false);
-		socket.emit("data", ',"id":');
-		vi.advanceTimersByTime(1);
-		expect(socket.destroyed).toBe(true);
-		expect(handle).not.toHaveBeenCalled();
-	});
-
-	it("starts a fresh fixed line deadline after a complete auth line", () => {
-		vi.useFakeTimers();
-		const { socket, handle } = framingSocket(true);
-		vi.advanceTimersByTime(20_000);
-		socket.emit("data", '{"type":"auth","token":"session"}\n{"type":');
-		vi.advanceTimersByTime(LINE_DEADLINE_MS - 1);
-		expect(socket.destroyed).toBe(false);
+		if (!afterAuth) socket.emit("data", ',"id":');
 		vi.advanceTimersByTime(1);
 		expect(socket.destroyed).toBe(true);
 		expect(handle).not.toHaveBeenCalled();
@@ -554,16 +545,6 @@ describe("inbox transport", () => {
 		expect(handle).toHaveBeenCalledTimes(1);
 		expect(handle).toHaveBeenCalledWith({ type: "snapshot" }, "peer");
 		expect(responses).toEqual(['{"ok":true,"outcome":"delivered"}\n']);
-	});
-
-	it("destroys malformed JSON without handing it to the session", async () => {
-		const dir = tempDir();
-		const handler = vi.fn(async (): Promise<InboxResponse> => ({ ok: true, snapshot }));
-		const pub = await publish(dir, handler);
-		expect(await rawRequest(pub.endpoint, `${JSON.stringify({ type: "auth", token: pub.token })}\nnot JSON\n`)).toBe(
-			"",
-		);
-		expect(handler).not.toHaveBeenCalled();
 	});
 
 	it("does not leak handler exceptions into the response", async () => {
@@ -702,21 +683,19 @@ describe("inbox transport", () => {
 		},
 	);
 
-	it("prunes a dead inbox entry left behind after a process exits", async () => {
+	it.each(["dead endpoint", "unparseable metadata"])("prunes an inbox entry with %s", async kind => {
 		const dir = tempDir();
-		const pub = await publish(dir, async () => ({ ok: true, snapshot }));
-		const file = path.join(dir, `${pub.entryId}.json`);
-		const metadata = await Bun.file(file).text();
-		await pub.close();
-		await fs.writeFile(file, metadata, { mode: 0o600 });
-		expect(await listInboxEntries({ dir })).toEqual([]);
-		expect(await Bun.file(file).exists()).toBe(false);
-	});
-
-	it("prunes unparseable inbox metadata", async () => {
-		const dir = tempDir();
-		const file = path.join(dir, "12345678.json");
-		await fs.writeFile(file, "not JSON", { mode: 0o600 });
+		let file: string;
+		if (kind === "dead endpoint") {
+			const pub = await publish(dir, async () => ({ ok: true, snapshot }));
+			file = path.join(dir, `${pub.entryId}.json`);
+			const metadata = await Bun.file(file).text();
+			await pub.close();
+			await fs.writeFile(file, metadata, { mode: 0o600 });
+		} else {
+			file = path.join(dir, "12345678.json");
+			await fs.writeFile(file, "not JSON", { mode: 0o600 });
+		}
 		expect(await listInboxEntries({ dir })).toEqual([]);
 		expect(await Bun.file(file).exists()).toBe(false);
 	});

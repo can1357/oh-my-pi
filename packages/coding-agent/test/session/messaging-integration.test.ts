@@ -1,4 +1,4 @@
-import { afterAll, afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
+import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
 import { Agent, type AgentTool } from "@oh-my-pi/pi-agent-core";
@@ -38,30 +38,20 @@ describe("top-level cross-session delivery", () => {
 	const originalList = transport.listInboxEntries;
 	const originalRequest = transport.requestInbox;
 	const originalListAllSessions = sessionListing.listAllSessions;
-	const restore: Array<() => void> = [];
 
 	beforeEach(() => {
 		temp = TempDir.createSync("@omp-session-messaging-");
 		const dir = path.join(temp.path(), "inboxes");
-		const publishSpy = spyOn(transport, "publishInbox").mockImplementation((handler, options) =>
+		vi.spyOn(transport, "publishInbox").mockImplementation((handler, options) =>
 			originalPublish(handler, { ...options, dir }),
 		);
-		const listSpy = spyOn(transport, "listInboxEntries").mockImplementation(options =>
-			originalList({ ...options, dir }),
-		);
-		const requestSpy = spyOn(transport, "requestInbox").mockImplementation((entry, request, options) =>
+		vi.spyOn(transport, "listInboxEntries").mockImplementation(options => originalList({ ...options, dir }));
+		vi.spyOn(transport, "requestInbox").mockImplementation((entry, request, options) =>
 			originalRequest(entry, request, { ...options, dir }),
 		);
-		const registrySpy = spyOn(transport, "messagingRegistryDir").mockReturnValue(dir);
-		const sessionsSpy = spyOn(sessionListing, "listLocalSessionsWithRegisteredFiles").mockImplementation(() =>
+		vi.spyOn(transport, "messagingRegistryDir").mockReturnValue(dir);
+		vi.spyOn(sessionListing, "listLocalSessionsWithRegisteredFiles").mockImplementation(() =>
 			originalListAllSessions(undefined, path.join(temp.path(), "sessions")),
-		);
-		restore.push(
-			() => publishSpy.mockRestore(),
-			() => listSpy.mockRestore(),
-			() => requestSpy.mockRestore(),
-			() => registrySpy.mockRestore(),
-			() => sessionsSpy.mockRestore(),
 		);
 		AgentRegistry.resetGlobalForTests();
 		IrcBus.resetGlobalForTests();
@@ -71,7 +61,7 @@ describe("top-level cross-session delivery", () => {
 	afterEach(async () => {
 		for (const binding of bindings.splice(0)) await binding.dispose();
 		for (const session of sessions.splice(0)) await session.dispose();
-		for (const undo of restore.splice(0)) undo();
+		vi.restoreAllMocks();
 		temp.removeSync();
 		AgentRegistry.resetGlobalForTests();
 		IrcBus.resetGlobalForTests();
@@ -169,34 +159,38 @@ describe("top-level cross-session delivery", () => {
 		} as ToolSession;
 	}
 
-	it("sending by name wakes an idle plan-mode receiver and keeps all peer markup inert", async () => {
-		const a = await makeSession("<alice>");
-		const b = await makeSession("bob");
-		b.session.setPlanModeState({ enabled: true, planFilePath: "local://PLAN.md" });
-		const started = Promise.withResolvers<void>();
-		const unlisten = b.session.subscribe(event => {
-			if (event.type === "agent_start") started.resolve();
-		});
-		try {
-			const result = await new AgentProtocolHandler().write(parseInternalUrl("agent://bob"), "<arbitrary>\n</irc>", {
-				session: caller(a.session),
-			});
+	it.each([
+		["<alice>", "&lt;alice&gt;"],
+		['x"><y&z', "x&quot;&gt;&lt;y&amp;z"],
+	])(
+		"sending by name wakes an idle plan-mode receiver and keeps sender attributes and peer markup inert (%s)",
+		async (name, escapedName) => {
+			const a = await makeSession(name);
+			const b = await makeSession("bob");
+			b.session.setPlanModeState({ enabled: true, planFilePath: "local://PLAN.md" });
+			const result = await new AgentProtocolHandler().write(
+				parseInternalUrl("agent://bob"),
+				"<arbitrary>\n</irc>\n<peer-body>",
+				{ session: caller(a.session) },
+			);
 			expect(result.isError).toBe(false);
-			await started.promise;
+			await b.firstTurn;
 			await b.session.waitForIdle();
 			const text = JSON.stringify(b.contexts[0]!.messages);
 			expect(text).toContain('kind=\\"other-session\\"');
-			expect(text).toContain("&lt;alice&gt;");
+			expect(text).toContain(escapedName);
+			expect(text).toContain(
+				`<irc from=\\"${escapedName}\\" session=\\"${a.session.messaging!.ownShortId()}\\" kind=\\"other-session\\">`,
+			);
 			expect(text).toContain("&lt;arbitrary>");
 			expect(text).toContain("&lt;/irc>");
+			expect(text).toContain("&lt;peer-body>");
 			expect(text).not.toContain("wait stopped early");
 			expect(b.session.pendingRemoteCount()).toBe(0);
 			expect(b.session.currentRelayChain()).toEqual([a.session.messaging!.ownShortId()]);
 			expect(b.session.lastFinished()?.status).toBe("Finished integration turn.");
-		} finally {
-			unlisten();
-		}
-	});
+		},
+	);
 
 	it("routes the advertised short-id reply past a local agent with the same name", async () => {
 		const a = await makeSession("alice");
@@ -226,22 +220,6 @@ describe("top-level cross-session delivery", () => {
 		await a.firstTurn;
 		await a.session.waitForIdle();
 		expect(JSON.stringify(a.contexts[0]!.messages)).toContain("SHORT_ID_REPLY_MARKER");
-	});
-
-	it("keeps a quoted sender name inside the remote from attribute", async () => {
-		const a = await makeSession('x"><y&z');
-		const b = await makeSession("bob");
-		const result = await new AgentProtocolHandler().write(parseInternalUrl("agent://bob"), "<peer-body>", {
-			session: caller(a.session),
-		});
-		expect(result.isError).toBe(false);
-		await b.firstTurn;
-		await b.session.waitForIdle();
-		const text = JSON.stringify(b.contexts[0]!.messages);
-		expect(text).toContain(
-			`<irc from=\\"x&quot;&gt;&lt;y&amp;z\\" session=\\"${a.session.messaging!.ownShortId()}\\" kind=\\"other-session\\">`,
-		);
-		expect(text).toContain("&lt;peer-body>");
 	});
 
 	it("busy peer messages bypass bus waiters and never abort an interruptible wait", async () => {
@@ -359,42 +337,31 @@ describe("top-level cross-session delivery", () => {
 		};
 		const dir = path.join(temp.path(), "inboxes");
 		const sentAt = Date.now() - 3;
-		await enqueueOffline(
-			id,
-			{
-				id: "mixed-a",
-				from,
-				body: "MIXED_MAIL_A",
-				chain: [],
-				sentAt,
-			},
-			{ dir },
-		);
-		await enqueueOffline(
-			id,
-			{
-				type: "notice",
-				id: "refused-mixed",
-				from,
-				kind: "refused",
-				subject: "message",
-				aboutId: "earlier-outgoing",
-				toSessionId: id,
-				sentAt: sentAt + 1,
-			},
-			{ dir },
-		);
-		await enqueueOffline(
-			id,
-			{
-				id: "mixed-b",
-				from,
-				body: "MIXED_MAIL_B",
-				chain: [],
-				sentAt: sentAt + 2,
-			},
-			{ dir },
-		);
+		const enqueue = (envelope: Parameters<typeof enqueueOffline>[1]) => enqueueOffline(id, envelope, { dir });
+		await enqueue({
+			id: "mixed-a",
+			from,
+			body: "MIXED_MAIL_A",
+			chain: [],
+			sentAt,
+		});
+		await enqueue({
+			type: "notice",
+			id: "refused-mixed",
+			from,
+			kind: "refused",
+			subject: "message",
+			aboutId: "earlier-outgoing",
+			toSessionId: id,
+			sentAt: sentAt + 1,
+		});
+		await enqueue({
+			id: "mixed-b",
+			from,
+			body: "MIXED_MAIL_B",
+			chain: [],
+			sentAt: sentAt + 2,
+		});
 		const resumed = await makeSession("bob", { manager });
 		await resumed.firstTurn;
 		await resumed.session.waitForIdle();

@@ -144,17 +144,45 @@ describe("cross-session messaging lifecycle", () => {
 		return { session, manager, settings, contexts, binding };
 	}
 
+	function watchMessaging(session: AgentSession) {
+		const stopped = Promise.withResolvers<void>();
+		const installed = Promise.withResolvers<void>();
+		const setMessaging = session.setMessaging.bind(session);
+		vi.spyOn(session, "setMessaging").mockImplementation(service => {
+			setMessaging(service);
+			(service ? installed : stopped).resolve();
+		});
+		return { stopped, installed };
+	}
+
+	async function peerFor(sender: AgentSession, sessionId: string) {
+		return (await sender.messaging!.listSessions()).find(peer => peer.sessionId === sessionId)!;
+	}
+
+	function nextWake(session: AgentSession) {
+		const woken = Promise.withResolvers<void>();
+		session.subscribe(event => {
+			if (event.type === "agent_start") woken.resolve();
+		});
+		return woken.promise;
+	}
+
+	function pauseAbort(session: AgentSession) {
+		const reached = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		const abort = session.abort.bind(session);
+		vi.spyOn(session, "abort").mockImplementation(async options => {
+			await abort(options);
+			reached.resolve();
+			await release.promise;
+		});
+		return { reached, release };
+	}
+
 	it("keeps cutoff permanent when an in-flight settings reconcile recreates the service", async () => {
 		const owner = await makeSession("cutoff-owner");
 		const peer = await makeSession("cutoff-peer");
-		const stopped = Promise.withResolvers<void>();
-		const setMessaging = owner.session.setMessaging.bind(owner.session);
-		const installed = Promise.withResolvers<void>();
-		vi.spyOn(owner.session, "setMessaging").mockImplementation(service => {
-			setMessaging(service);
-			if (service) installed.resolve();
-			else stopped.resolve();
-		});
+		const { stopped, installed } = watchMessaging(owner.session);
 		cfgMessagingEnabled.override(owner.settings, false);
 		await stopped.promise;
 		const start = MessagingService.start;
@@ -193,20 +221,13 @@ describe("cross-session messaging lifecycle", () => {
 		const published = Promise.withResolvers<void>();
 		const release = Promise.withResolvers<void>();
 		const closing = Promise.withResolvers<void>();
-		const stopped = Promise.withResolvers<void>();
-		const installed = Promise.withResolvers<void>();
+		const { stopped, installed } = watchMessaging(owner.session);
 		const publications: transport.InboxPublication[] = [];
 		const close = oldService.close.bind(oldService);
 		vi.spyOn(oldService, "close").mockImplementation(() => {
 			const pending = close();
 			closing.resolve();
 			return pending;
-		});
-		const setMessaging = owner.session.setMessaging.bind(owner.session);
-		vi.spyOn(owner.session, "setMessaging").mockImplementation(service => {
-			setMessaging(service);
-			if (service) installed.resolve();
-			else stopped.resolve();
 		});
 		vi.spyOn(transport, "publishInbox").mockImplementation(async (handler, options) => {
 			const publication = await originalPublish(handler, {
@@ -292,12 +313,7 @@ describe("cross-session messaging lifecycle", () => {
 			expect((await b.session.executeBash(probe)).output).toBe(
 				`${bEnv.OMP_MESSAGING_SOCKET}|${bEnv.OMP_MESSAGING_TOKEN}`,
 			);
-			const stopped = Promise.withResolvers<void>();
-			const setMessaging = a.session.setMessaging.bind(a.session);
-			vi.spyOn(a.session, "setMessaging").mockImplementation(service => {
-				setMessaging(service);
-				if (!service) stopped.resolve();
-			});
+			const { stopped } = watchMessaging(a.session);
 			cfgMessagingEnabled.override(a.settings, false);
 			await stopped.promise;
 			expect(a.session.messaging).toBeUndefined();
@@ -483,19 +499,16 @@ describe("cross-session messaging lifecycle", () => {
 		const { session, manager, contexts } = await makeSession("local", true, true);
 		const originalId = manager.getSessionId();
 		const { guest } = await join(session);
-		const target = (await sender.session.messaging!.listSessions()).find(peer => peer.sessionId === originalId)!;
+		const target = await peerFor(sender.session, originalId);
 		expect(target).toBeDefined();
 		expect(await sender.session.messaging!.send(target, "SAVED_LOCAL_MAIL", { notifyWhenIdle: false })).toEqual({
 			ok: true,
 			text: "Queued for local (it will read this when receiving resumes).",
 		});
 		expect(contexts).toEqual([]);
-		const woken = Promise.withResolvers<void>();
-		session.subscribe(event => {
-			if (event.type === "agent_start") woken.resolve();
-		});
+		const woken = nextWake(session);
 		await guest.leave("restore saved local");
-		await woken.promise;
+		await woken;
 		await session.waitForIdle();
 		expect(manager.getSessionId()).toBe(originalId);
 		expect(contexts).toHaveLength(1);
@@ -509,21 +522,14 @@ describe("cross-session messaging lifecycle", () => {
 			const originalId = manager.getSessionId();
 			const { guest } = await join(session);
 			const replicaId = manager.getSessionId();
-			const stopped = Promise.withResolvers<void>();
-			const ready = Promise.withResolvers<void>();
-			const originalSet = session.setMessaging.bind(session);
-			vi.spyOn(session, "setMessaging").mockImplementation(service => {
-				originalSet(service);
-				if (service) ready.resolve();
-				else stopped.resolve();
-			});
+			const { stopped, installed: ready } = watchMessaging(session);
 			if (initiallyEnabled) {
 				cfgMessagingEnabled.override(settings, false);
 				await stopped.promise;
 			}
 			cfgMessagingEnabled.override(settings, true);
 			await ready.promise;
-			const target = (await sender.session.messaging!.listSessions()).find(peer => peer.sessionId === originalId)!;
+			const target = await peerFor(sender.session, originalId);
 			expect(target).toBeDefined();
 			expect(session.isMessagingReceivingSuspended).toBe(true);
 			expect((await sender.session.messaging!.send(target, "MID_GUEST_MAIL", { notifyWhenIdle: false })).text).toBe(
@@ -531,12 +537,9 @@ describe("cross-session messaging lifecycle", () => {
 			);
 			expect(manager.getSessionId()).toBe(replicaId);
 			expect(contexts).toEqual([]);
-			const woken = Promise.withResolvers<void>();
-			session.subscribe(event => {
-				if (event.type === "agent_start") woken.resolve();
-			});
+			const woken = nextWake(session);
 			await guest.leave("restore local");
-			await woken.promise;
+			await woken;
 			await session.waitForIdle();
 			expect(contexts).toHaveLength(1);
 			expect(contexts[0]).toContain("MID_GUEST_MAIL");
@@ -547,18 +550,9 @@ describe("cross-session messaging lifecycle", () => {
 		it(`does not wake outgoing mail inside a committed ${action} transition`, async () => {
 			const sender = await makeSession("sender");
 			const { session, manager, contexts } = await makeSession("local", true, action === "switch");
-			const target = (await sender.session.messaging!.listSessions()).find(
-				peer => peer.sessionId === manager.getSessionId(),
-			)!;
+			const target = await peerFor(sender.session, manager.getSessionId());
 			const successor = action === "switch" ? await makeSession("successor", false, true) : undefined;
-			const reached = Promise.withResolvers<void>();
-			const release = Promise.withResolvers<void>();
-			const abort = session.abort.bind(session);
-			vi.spyOn(session, "abort").mockImplementation(async options => {
-				await abort(options);
-				reached.resolve();
-				await release.promise;
-			});
+			const { reached, release } = pauseAbort(session);
 			const retired = Promise.withResolvers<void>();
 			sender.session.subscribe(event => {
 				if (event.type === "irc_message" && JSON.stringify(event.message).includes("dropped unread"))
@@ -589,18 +583,9 @@ describe("cross-session messaging lifecycle", () => {
 	it("delivers an outgoing-owner batch once after switch rollback settles", async () => {
 		const sender = await makeSession("sender");
 		const { session, manager, contexts } = await makeSession("local", true, true);
-		const target = (await sender.session.messaging!.listSessions()).find(
-			peer => peer.sessionId === manager.getSessionId(),
-		)!;
+		const target = await peerFor(sender.session, manager.getSessionId());
 		const successor = await makeSession("successor", false, true);
-		const reached = Promise.withResolvers<void>();
-		const release = Promise.withResolvers<void>();
-		const abort = session.abort.bind(session);
-		vi.spyOn(session, "abort").mockImplementation(async options => {
-			await abort(options);
-			reached.resolve();
-			await release.promise;
-		});
+		const { reached, release } = pauseAbort(session);
 		const failure = new Error("adoption failed");
 		const adopt = manager.setSessionFile.bind(manager);
 		vi.spyOn(manager, "setSessionFile").mockImplementationOnce(async file => {
@@ -608,17 +593,14 @@ describe("cross-session messaging lifecycle", () => {
 			throw failure;
 		});
 		const transition = session.switchSession(successor.manager.getSessionFile()!);
-		const woken = Promise.withResolvers<void>();
-		session.subscribe(event => {
-			if (event.type === "agent_start") woken.resolve();
-		});
+		const woken = nextWake(session);
 		try {
 			await reached.promise;
 			await sender.session.messaging!.send(target, "ROLLBACK_MAIL", { notifyWhenIdle: false });
 			expect(contexts).toEqual([]);
 			release.resolve();
 			await expect(transition).rejects.toBe(failure);
-			await woken.promise;
+			await woken;
 			await session.waitForIdle();
 			expect(manager.getSessionId()).toBe(target.sessionId);
 			expect(contexts).toHaveLength(1);
@@ -632,9 +614,7 @@ describe("cross-session messaging lifecycle", () => {
 	it("retires a pool-barrier wake across /new and releases capacity for the successor", async () => {
 		const sender = await makeSession("sender");
 		const { session, manager, contexts } = await makeSession("local");
-		const target = (await sender.session.messaging!.listSessions()).find(
-			peer => peer.sessionId === manager.getSessionId(),
-		)!;
+		const target = await peerFor(sender.session, manager.getSessionId());
 		const reached = Promise.withResolvers<void>();
 		const release = Promise.withResolvers<void>();
 		vi.spyOn(session, "whenWorkPoolYieldSettled").mockImplementation(() => {
@@ -668,17 +648,12 @@ describe("cross-session messaging lifecycle", () => {
 			expect(session.pendingRemoteCount()).toBe(0);
 			expect(await retired.promise).toContain("Your message to @local was dropped unread");
 			await republished.promise;
-			const successor = (await sender.session.messaging!.listSessions()).find(
-				peer => peer.sessionId === manager.getSessionId(),
-			)!;
-			const woken = Promise.withResolvers<void>();
-			session.subscribe(event => {
-				if (event.type === "agent_start") woken.resolve();
-			});
+			const successor = await peerFor(sender.session, manager.getSessionId());
+			const woken = nextWake(session);
 			expect((await sender.session.messaging!.send(successor, "SUCCESSOR_MAIL", { notifyWhenIdle: false })).ok).toBe(
 				true,
 			);
-			await woken.promise;
+			await woken;
 			await session.waitForIdle();
 			expect(contexts).toHaveLength(1);
 			expect(contexts[0]).toContain("SUCCESSOR_MAIL");
@@ -692,9 +667,7 @@ describe("cross-session messaging lifecycle", () => {
 	it("rechecks the transition after a remote wake's work-pool wait resolves", async () => {
 		const sender = await makeSession("sender");
 		const { session, manager, contexts } = await makeSession("local");
-		const target = (await sender.session.messaging!.listSessions()).find(
-			peer => peer.sessionId === manager.getSessionId(),
-		)!;
+		const target = await peerFor(sender.session, manager.getSessionId());
 		const poolReached = Promise.withResolvers<void>();
 		const releasePool = Promise.withResolvers<void>();
 		vi.spyOn(session, "whenWorkPoolYieldSettled").mockImplementation(() => {
@@ -703,14 +676,7 @@ describe("cross-session messaging lifecycle", () => {
 		});
 		await sender.session.messaging!.send(target, "LATE_POOL_MAIL", { notifyWhenIdle: false });
 		await poolReached.promise;
-		const abortReached = Promise.withResolvers<void>();
-		const releaseAbort = Promise.withResolvers<void>();
-		const abort = session.abort.bind(session);
-		vi.spyOn(session, "abort").mockImplementation(async options => {
-			await abort(options);
-			abortReached.resolve();
-			await releaseAbort.promise;
-		});
+		const { reached: abortReached, release: releaseAbort } = pauseAbort(session);
 		const transitioned = session.newSession();
 		try {
 			await abortReached.promise;
@@ -734,9 +700,7 @@ describe("cross-session messaging lifecycle", () => {
 	it("pins late-adoption mail to the original published inbox, not the adopted successor", async () => {
 		const sender = await makeSession("sender");
 		const { session, manager, contexts } = await makeSession("local", true, true);
-		const target = (await sender.session.messaging!.listSessions()).find(
-			peer => peer.sessionId === manager.getSessionId(),
-		)!;
+		const target = await peerFor(sender.session, manager.getSessionId());
 		const successor = await makeSession("successor", false, true);
 		const adopted = Promise.withResolvers<void>();
 		const release = Promise.withResolvers<void>();
@@ -780,17 +744,8 @@ describe("cross-session messaging lifecycle", () => {
 		const { session, manager, settings, contexts } = await makeSession("local");
 		cfgMessagingRateLimit.override(sender.settings, 100);
 		cfgMessagingRateLimit.override(settings, 100);
-		const target = (await sender.session.messaging!.listSessions()).find(
-			peer => peer.sessionId === manager.getSessionId(),
-		)!;
-		const reached = Promise.withResolvers<void>();
-		const release = Promise.withResolvers<void>();
-		const abort = session.abort.bind(session);
-		vi.spyOn(session, "abort").mockImplementation(async options => {
-			await abort(options);
-			reached.resolve();
-			await release.promise;
-		});
+		const target = await peerFor(sender.session, manager.getSessionId());
+		const { reached, release } = pauseAbort(session);
 		const transition = session.newSession();
 		try {
 			await reached.promise;

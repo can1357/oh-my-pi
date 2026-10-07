@@ -18,7 +18,6 @@ import {
 	RESERVED_SESSION_NAME_ERROR,
 	sessionAddress,
 } from "../../src/messaging/names";
-import { CommandController } from "../../src/modes/controllers/command-controller";
 import { executeSend } from "../../src/irc/messaging";
 
 afterEach(() => {
@@ -45,35 +44,6 @@ describe("cross-session naming UI", () => {
 			expect(claimSessionName(name, new Set())).toBe(name);
 			expect(sessionAddress({ ...title, sessionName: name })).toBe(name);
 		}
-	});
-
-	it("reports the reserved-name error in interactive and headless rename without changing the title", async () => {
-		const manager = SessionManager.inMemory();
-		await manager.setSessionName("previous", "user");
-		const settings = Settings.isolated();
-		const session = { titleGenerationSignal: new AbortController().signal } as unknown as AgentSession;
-		const showError = vi.fn();
-		const controller = new CommandController({
-			session,
-			sessionManager: manager,
-			showError,
-		} as unknown as InteractiveModeContext);
-		await controller.handleRenameCommand(" all ");
-		expect(showError).toHaveBeenCalledWith(RESERVED_SESSION_NAME_ERROR);
-		const output: string[] = [];
-		await executeAcpBuiltinSlashCommand("/rename all", {
-			session,
-			sessionManager: manager,
-			settings,
-			cwd: "/project",
-			output: text => {
-				output.push(text);
-			},
-			refreshCommands: () => {},
-			reloadPlugins: async () => {},
-		});
-		expect(output).toEqual([RESERVED_SESSION_NAME_ERROR]);
-		expect(manager.getSessionName()).toBe("previous");
 	});
 
 	it("retains local broadcast routing for all instead of resolving a session name", async () => {

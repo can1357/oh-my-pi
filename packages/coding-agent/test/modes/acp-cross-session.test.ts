@@ -160,6 +160,34 @@ async function bootstrap(): Promise<void> {
 	for (let i = 0; i < 10; i++) await Promise.resolve();
 }
 
+async function startHarness(cwd: string) {
+	vi.useFakeTimers();
+	const h = harness(cwd);
+	const created = await h.agent.newSession({ cwd, mcpServers: [] });
+	await bootstrap();
+	return { ...h, created };
+}
+
+function blockUpdate(
+	h: { connection: AgentSideConnection; updates: SessionNotification[] },
+	matches: (update: SessionNotification["update"]) => boolean,
+	fail = false,
+) {
+	const blocked = Promise.withResolvers<void>();
+	const reached = Promise.withResolvers<void>();
+	let attempted = false;
+	vi.spyOn(h.connection, "sessionUpdate").mockImplementation(async notification => {
+		h.updates.push(notification);
+		if ((!fail || !attempted) && matches(notification.update)) {
+			attempted = true;
+			reached.resolve();
+			await blocked.promise;
+			if (fail) throw new Error("Delivery failed");
+		}
+	});
+	return { blocked, reached };
+}
+
 describe("ACP cross-session messaging", () => {
 	it("awaits per-conversation binding before SessionStart, releases after the wire guard, and disposes it first", async () => {
 		using dir = TempDir.createSync("@acp-cross-session-");
@@ -187,10 +215,8 @@ describe("ACP cross-session messaging", () => {
 
 	it("streams remote wakes and autonomous answers under the editor's original id after a session switch", async () => {
 		using dir = TempDir.createSync("@acp-cross-session-");
-		vi.useFakeTimers();
-		const h = harness(dir.path());
-		const created = await h.agent.newSession({ cwd: dir.path(), mcpServers: [] });
-		await bootstrap();
+		const h = await startHarness(dir.path());
+		const { created } = h;
 		await h.session.sessionManager.newSession();
 		expect(h.session.sessionId).not.toBe(created.sessionId);
 		h.updates.length = 0;
@@ -221,20 +247,9 @@ describe("ACP cross-session messaging", () => {
 
 	it("keeps successor chunks on one message id when an old agent_end is backpressured", async () => {
 		using dir = TempDir.createSync("@acp-cross-session-");
-		vi.useFakeTimers();
-		const h = harness(dir.path());
-		await h.agent.newSession({ cwd: dir.path(), mcpServers: [] });
-		await bootstrap();
+		const h = await startHarness(dir.path());
 		h.updates.length = 0;
-		const blocked = Promise.withResolvers<void>();
-		const reached = Promise.withResolvers<void>();
-		vi.spyOn(h.connection, "sessionUpdate").mockImplementation(async notification => {
-			h.updates.push(notification);
-			if (notification.update.sessionUpdate === "session_info_update") {
-				reached.resolve();
-				await blocked.promise;
-			}
-		});
+		const { blocked, reached } = blockUpdate(h, update => update.sessionUpdate === "session_info_update");
 		const old = assistant("Old reply");
 		h.emit({ type: "agent_start" });
 		h.emit({
@@ -281,25 +296,15 @@ describe("ACP cross-session messaging", () => {
 
 	it("does not repeat successor text after an old message_end finishes delivering", async () => {
 		using dir = TempDir.createSync("@acp-cross-session-");
-		vi.useFakeTimers();
-		const h = harness(dir.path());
-		await h.agent.newSession({ cwd: dir.path(), mcpServers: [] });
-		await bootstrap();
+		const h = await startHarness(dir.path());
 		h.updates.length = 0;
-		const blocked = Promise.withResolvers<void>();
-		const reached = Promise.withResolvers<void>();
-		vi.spyOn(h.connection, "sessionUpdate").mockImplementation(async notification => {
-			h.updates.push(notification);
-			const update = notification.update;
-			if (
+		const { blocked, reached } = blockUpdate(
+			h,
+			update =>
 				update.sessionUpdate === "agent_message_chunk" &&
 				update.content.type === "text" &&
-				update.content.text === "Old reply"
-			) {
-				reached.resolve();
-				await blocked.promise;
-			}
-		});
+				update.content.text === "Old reply",
+		);
 		const old = assistant("Old reply");
 		h.emit({ type: "agent_start" });
 		h.emit({ type: "message_start", message: old });
@@ -330,29 +335,16 @@ describe("ACP cross-session messaging", () => {
 
 	it("uses the old message id for a failed error delivery fallback after a successor starts", async () => {
 		using dir = TempDir.createSync("@acp-cross-session-");
-		vi.useFakeTimers();
-		const h = harness(dir.path());
-		await h.agent.newSession({ cwd: dir.path(), mcpServers: [] });
-		await bootstrap();
+		const h = await startHarness(dir.path());
 		h.updates.length = 0;
-		const blocked = Promise.withResolvers<void>();
-		const reached = Promise.withResolvers<void>();
-		let attempted = false;
-		vi.spyOn(h.connection, "sessionUpdate").mockImplementation(async notification => {
-			h.updates.push(notification);
-			const update = notification.update;
-			if (
-				!attempted &&
+		const { blocked, reached } = blockUpdate(
+			h,
+			update =>
 				update.sessionUpdate === "agent_message_chunk" &&
 				update.content.type === "text" &&
-				update.content.text === "Old provider failure"
-			) {
-				attempted = true;
-				reached.resolve();
-				await blocked.promise;
-				throw new Error("Delivery failed");
-			}
-		});
+				update.content.text === "Old provider failure",
+			true,
+		);
 		const old = assistant("");
 		old.stopReason = "error";
 		old.errorMessage = "Old provider failure";
@@ -403,10 +395,8 @@ describe("ACP cross-session messaging", () => {
 
 	it("does not abort an idle session when messaging is off, including a late cancel after an autonomous turn", async () => {
 		using dir = TempDir.createSync("@acp-cross-session-");
-		vi.useFakeTimers();
-		const h = harness(dir.path());
-		const created = await h.agent.newSession({ cwd: dir.path(), mcpServers: [] });
-		await bootstrap();
+		const h = await startHarness(dir.path());
+		const { created } = h;
 		expect(h.session.messaging).toBeUndefined();
 
 		await h.agent.cancel({ sessionId: created.sessionId });
@@ -422,10 +412,8 @@ describe("ACP cross-session messaging", () => {
 
 	it("cancels an autonomous turn without an owning session/prompt and shares concurrent cleanup", async () => {
 		using dir = TempDir.createSync("@acp-cross-session-");
-		vi.useFakeTimers();
-		const h = harness(dir.path());
-		const created = await h.agent.newSession({ cwd: dir.path(), mcpServers: [] });
-		await bootstrap();
+		const h = await startHarness(dir.path());
+		const { created } = h;
 		h.session.isStreaming = true;
 		h.emit({ type: "agent_start" } as AgentSessionEvent);
 		const aborted = Promise.withResolvers<void>();

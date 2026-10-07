@@ -198,15 +198,16 @@ it("cancels title inference without applying or announcing a late rename", async
 
 for (const mode of ["TUI", "headless"] as const) {
 	describe(`/rename (${mode})`, () => {
-		it("refuses reserved @ names without changing the stored name", async () => {
+		it.each(["@x", "all", " all "])("refuses reserved name %s without changing the stored name", async name => {
 			const { session, sessionManager, runtime, ctx, execute } = createRuntime(mode);
 			await sessionManager.setSessionName("Keep this name", "user");
 			const entries = sessionManager.getEntries();
 			const output = mode === "TUI" ? vi.spyOn(ctx, "showError") : vi.spyOn(runtime, "output");
 
-			await execute("/rename @x");
+			if (mode === "TUI" && name === " all ") await ctx.handleRenameCommand(name);
+			else await execute(`/rename ${name}`);
 
-			expect(output).toHaveBeenCalledWith(RESERVED_SESSION_NAME_ERROR);
+			expect(output.mock.calls).toEqual([[RESERVED_SESSION_NAME_ERROR]]);
 			expect(session.sessionName).toBe("Keep this name");
 			expect(sessionManager.getEntries()).toEqual(entries);
 		});

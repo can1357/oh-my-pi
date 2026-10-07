@@ -90,16 +90,6 @@ describe("offline mailbox", () => {
 		expect(await drainOffline(sessionId, { dir, now })).toEqual([]);
 	});
 
-	it("returns full for the 51st message without writing it", async () => {
-		const dir = tempDir();
-		for (let i = 0; i < OFFLINE_INBOX_CAP; i++) {
-			expect(await enqueueOffline(sessionId, message(`message-${i}`), { dir, now })).toBe("queued");
-		}
-		expect(await enqueueOffline(sessionId, message("overflow"), { dir, now })).toBe("full");
-		expect(await fs.readdir(mailboxDir(sessionId, { dir }))).toHaveLength(OFFLINE_INBOX_CAP);
-		expect((await drainOffline(sessionId, { dir, now })).some(item => item.message.id === "overflow")).toBe(false);
-	});
-
 	it("purges expired files before applying the cap", async () => {
 		const dir = tempDir();
 		for (let i = 0; i < OFFLINE_INBOX_CAP; i++) {
@@ -242,16 +232,19 @@ describe("offline mailbox", () => {
 });
 
 describe("locked offline receipt storage", () => {
-	it("enforces the cap for competing writers and releases a failed transaction", async () => {
+	it("enforces the sequential and competing-writer cap and releases a failed transaction", async () => {
 		const dir = tempDir();
 		for (let i = 0; i < OFFLINE_INBOX_CAP - 1; i++)
-			await enqueueOffline(sessionId, message(`filled-${i}`), { dir, now });
+			expect(await enqueueOffline(sessionId, message(`filled-${i}`), { dir, now })).toBe("queued");
 		const outcomes = await Promise.all([
 			enqueueOffline(sessionId, message("racer-one"), { dir, now }),
 			enqueueOffline(sessionId, message("racer-two"), { dir, now }),
 		]);
 		expect(outcomes.sort()).toEqual(["full", "queued"]);
 		expect(await drainOffline(sessionId, { dir, now })).toHaveLength(OFFLINE_INBOX_CAP);
+		expect(await enqueueOffline(sessionId, message("overflow"), { dir, now })).toBe("full");
+		expect(await fs.readdir(mailboxDir(sessionId, { dir }))).toHaveLength(OFFLINE_INBOX_CAP);
+		expect((await drainOffline(sessionId, { dir, now })).some(item => item.message.id === "overflow")).toBe(false);
 		await expect(
 			withOfflineMailboxLock(
 				sessionId,

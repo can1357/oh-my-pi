@@ -9,7 +9,7 @@ import { FileSessionStorage } from "../../src/session/session-storage";
 import { SessionManager } from "../../src/session/session-manager";
 import { Settings } from "../../src/config/settings";
 import { IdleSubscriptions } from "../../src/messaging/idle";
-import { InboundGate } from "../../src/messaging/inbound";
+import { InboundGate, type OutgoingNotice } from "../../src/messaging/inbound";
 import * as mailbox from "../../src/messaging/mailbox";
 import {
 	claimSessionName,
@@ -21,12 +21,13 @@ import {
 	sessionAddress,
 	sessionShortId,
 } from "../../src/messaging/names";
-import type { PermissionClass } from "../../src/messaging/policy";
+import type { InboundDecision, PermissionClass } from "../../src/messaging/policy";
 import {
 	ACCEPTED_QUEUE_CAP,
 	HELD_CAP,
 	IDLE_SUBSCRIPTION_TTL_MS,
 	type InboxRequest,
+	type InboxResponse,
 	MAX_SERIALIZED_CHARS,
 	MESSAGING_WIRE_VERSION,
 	type SenderInfo,
@@ -202,6 +203,21 @@ async function pair(ready = true): Promise<{
 	return { a, b, ah, bh, as, bs, target };
 }
 
+async function stoppedBeta() {
+	const fixture = await pair();
+	await fixture.b.close();
+	const stopped: mailbox.OfflineSession = {
+		sessionId: "b",
+		path: path.join(temp!.path(), "b.jsonl"),
+		shortId: fixture.target.shortId,
+		name: "beta",
+		cwd: fixture.target.cwd,
+		title: fixture.target.title,
+		modified: Date.now(),
+	};
+	return { ...fixture, stopped };
+}
+
 const sender: SenderInfo = {
 	sessionId: "a",
 	name: "alpha",
@@ -224,6 +240,20 @@ function gateFixture(): { gate: InboundGate; host: FakeHost; settings: Settings;
 	);
 	gates.push(gate);
 	return { gate, host, settings, replies };
+}
+function idleFixture(
+	host: FakeHost,
+	decision: (sender: SenderInfo) => InboundDecision,
+	checkTraffic: (sender: SenderInfo, key: string) => InboxResponse | undefined = () => undefined,
+	ownSender?: () => SenderInfo,
+) {
+	const replies: InboxRequest[] = [];
+	const reply = vi.fn(async (_sender: SenderInfo, notice: OutgoingNotice) => {
+		replies.push({ ...notice, id: "notice", from: sender });
+	});
+	const idle = new IdleSubscriptions(host, decision, reply, checkTraffic, ownSender);
+	subscriptions.push(idle);
+	return { idle, replies, reply };
 }
 function message(body: string, chain?: string[]): Extract<InboxRequest, { type: "message" }> {
 	return { type: "message", id: crypto.randomUUID(), from: sender, body, ...(chain ? { chain } : {}) };
@@ -588,41 +618,83 @@ describe("messaging service with real inboxes", () => {
 		);
 	});
 
-	it("returns exact send-denied, size, burst, unsafe-target and unreachable failures", async () => {
-		const { a, as, b, target } = await pair();
-		cfgMessagingSend.override(as, "deny");
-		expect(await a.send(target, "blocked", { notifyWhenIdle: false })).toEqual({
-			ok: false,
-			text: "Not sent: sending to other sessions is turned off (messaging.send).",
-		});
-		cfgMessagingSend.override(as, "allow");
-		expect(await a.send(target, " \n ", { notifyWhenIdle: false })).toEqual({ ok: false, text: "empty" });
-		const large = await a.send(target, "x".repeat(MAX_SERIALIZED_CHARS), { notifyWhenIdle: false });
-		expect(large.ok).toBe(false);
-		expect(large.text).toMatch(
-			/^Failed to send to beta: Message too large for cross-session delivery: the serialized message is \d+ characters and the limit is 1,048,576\. Shorten the message text — put bulk content in a file the recipient can read rather than in the message — or split it into smaller messages\.$/,
-		);
-		cfgMessagingRateLimit.override(as, 1);
-		await a.send(target, "one", { notifyWhenIdle: false });
-		expect(await a.send(target, "two", { notifyWhenIdle: false })).toEqual({
-			ok: false,
-			text: "Failed to send to beta: Too many messages to this session just now: 1 were sent recently and more would be dropped by its rate limit, so this one was not sent. Batch what remains into one message, or wait a little before sending more.",
-		});
-		cfgMessagingRateLimit.override(as, 100);
-		vi.spyOn(transport, "requestInbox").mockResolvedValueOnce({
-			ok: false,
-			error: "Refusing to send: reply target is a symlink",
-		});
-		expect((await a.send(target, "unsafe", { notifyWhenIdle: false })).text).toBe(
-			"Failed to send to beta: Refusing to send: reply target is a symlink",
-		);
-		await b.close();
-		expect(await a.send(target, "gone", { notifyWhenIdle: false })).toEqual({
-			ok: false,
-			text: "Failed to send to beta: the session is no longer running.",
-		});
-		expect(await a.listSessions()).toEqual([]);
-	});
+	it.each(["live", "offline"] as const)(
+		"returns exact %s send guards and destination-specific failures",
+		async source => {
+			const {
+				a,
+				as,
+				b,
+				target: live,
+				stopped,
+			} = source === "offline" ? await stoppedBeta() : { ...(await pair()), stopped: undefined };
+			const target = stopped ?? live;
+			if (stopped) {
+				vi.spyOn(mailbox, "listOfflineSessions").mockResolvedValue([stopped]);
+				expect(await a.resolve("beta")).toEqual({ kind: "offline", target: stopped });
+				expect(await a.send(target, "", { notifyWhenIdle: true })).toEqual({
+					ok: false,
+					text: "Not sent: notify=idle needs a running session; beta is not running.",
+				});
+			}
+			cfgMessagingSend.override(as, "deny");
+			expect(await a.send(target, "blocked", { notifyWhenIdle: false })).toEqual({
+				ok: false,
+				text: "Not sent: sending to other sessions is turned off (messaging.send).",
+			});
+			cfgMessagingSend.override(as, "allow");
+			if (source === "live")
+				expect(await a.send(target, " \n ", { notifyWhenIdle: false })).toEqual({ ok: false, text: "empty" });
+			const large = await a.send(target, "x".repeat(MAX_SERIALIZED_CHARS), { notifyWhenIdle: false });
+			if (source === "live") expect(large.ok).toBe(false);
+			expect(large.text).toMatch(
+				source === "live"
+					? /^Failed to send to beta: Message too large for cross-session delivery: the serialized message is \d+ characters and the limit is 1,048,576\. Shorten the message text — put bulk content in a file the recipient can read rather than in the message — or split it into smaller messages\.$/
+					: /^Failed to send to beta: Message too large for cross-session delivery:/,
+			);
+			cfgMessagingRateLimit.override(as, 1);
+			const first = await a.send(target, source === "offline" ? "saved" : "one", { notifyWhenIdle: false });
+			if (source === "offline")
+				expect(first).toEqual({
+					ok: true,
+					text: "Queued for beta (not running); it will see this when resumed.",
+				});
+			expect(await a.send(target, source === "offline" ? "too soon" : "two", { notifyWhenIdle: false })).toEqual({
+				ok: false,
+				text: "Failed to send to beta: Too many messages to this session just now: 1 were sent recently and more would be dropped by its rate limit, so this one was not sent. Batch what remains into one message, or wait a little before sending more.",
+			});
+			cfgMessagingRateLimit.override(as, 100);
+			if (source === "offline") {
+				for (let i = 1; i < mailbox.OFFLINE_INBOX_CAP; i++)
+					await a.send(target, `saved-${i}`, { notifyWhenIdle: false });
+				expect(await a.send(target, "full", { notifyWhenIdle: false })).toEqual({
+					ok: false,
+					text: "Not sent: beta's offline inbox is full (50 messages).",
+				});
+				const stored = await mailbox.drainOffline("b");
+				expect(stored).toHaveLength(50);
+				expect(stored[0].message).toMatchObject({
+					body: "saved",
+					from: { name: "alpha", class: "bypass" },
+					chain: [a.ownShortId()],
+				});
+			} else {
+				vi.spyOn(transport, "requestInbox").mockResolvedValueOnce({
+					ok: false,
+					error: "Refusing to send: reply target is a symlink",
+				});
+				expect((await a.send(target, "unsafe", { notifyWhenIdle: false })).text).toBe(
+					"Failed to send to beta: Refusing to send: reply target is a symlink",
+				);
+				await b.close();
+				expect(await a.send(target, "gone", { notifyWhenIdle: false })).toEqual({
+					ok: false,
+					text: "Failed to send to beta: the session is no longer running.",
+				});
+				expect(await a.listSessions()).toEqual([]);
+			}
+		},
+	);
 
 	it("expires a held default message and ignores unknown aboutIds", async () => {
 		const { a, ah, bh, bs, target } = await pair();
@@ -852,58 +924,6 @@ describe("messaging service with real inboxes", () => {
 		expect(await a.resolve("stopped")).toEqual({ kind: "ambiguous", candidates: [stopped, duplicate] });
 	});
 
-	it("queues offline sends with the usual deny, size and burst guards, and refuses notify/full", async () => {
-		const { a, as, b, target } = await pair();
-		await b.close();
-		const stopped: mailbox.OfflineSession = {
-			sessionId: "b",
-			path: path.join(temp!.path(), "b.jsonl"),
-			shortId: target.shortId,
-			name: "beta",
-			cwd: target.cwd,
-			title: target.title,
-			modified: Date.now(),
-		};
-		vi.spyOn(mailbox, "listOfflineSessions").mockResolvedValue([stopped]);
-		expect(await a.resolve("beta")).toEqual({ kind: "offline", target: stopped });
-		expect(await a.send(stopped, "", { notifyWhenIdle: true })).toEqual({
-			ok: false,
-			text: "Not sent: notify=idle needs a running session; beta is not running.",
-		});
-		cfgMessagingSend.override(as, "deny");
-		expect(await a.send(stopped, "blocked", { notifyWhenIdle: false })).toEqual({
-			ok: false,
-			text: "Not sent: sending to other sessions is turned off (messaging.send).",
-		});
-		cfgMessagingSend.override(as, "allow");
-		expect((await a.send(stopped, "x".repeat(MAX_SERIALIZED_CHARS), { notifyWhenIdle: false })).text).toMatch(
-			/^Failed to send to beta: Message too large for cross-session delivery:/,
-		);
-		cfgMessagingRateLimit.override(as, 1);
-		expect(await a.send(stopped, "saved", { notifyWhenIdle: false })).toEqual({
-			ok: true,
-			text: "Queued for beta (not running); it will see this when resumed.",
-		});
-		expect(await a.send(stopped, "too soon", { notifyWhenIdle: false })).toEqual({
-			ok: false,
-			text: "Failed to send to beta: Too many messages to this session just now: 1 were sent recently and more would be dropped by its rate limit, so this one was not sent. Batch what remains into one message, or wait a little before sending more.",
-		});
-		cfgMessagingRateLimit.override(as, 100);
-		for (let i = 1; i < mailbox.OFFLINE_INBOX_CAP; i++)
-			await a.send(stopped, `saved-${i}`, { notifyWhenIdle: false });
-		expect(await a.send(stopped, "full", { notifyWhenIdle: false })).toEqual({
-			ok: false,
-			text: "Not sent: beta's offline inbox is full (50 messages).",
-		});
-		const stored = await mailbox.drainOffline("b");
-		expect(stored).toHaveLength(50);
-		expect(stored[0].message).toMatchObject({
-			body: "saved",
-			from: { name: "alpha", class: "bypass" },
-			chain: [a.ownShortId()],
-		});
-	});
-
 	it("retires held messages and subscriptions using the old address, aborts dialogs, and clears timers", async () => {
 		const { a, b, ah, bh, target, bs } = await pair();
 		vi.useFakeTimers();
@@ -1012,17 +1032,7 @@ describe("messaging service with real inboxes", () => {
 	});
 
 	it("rechecks offline targets and sends to newly live peers even when listing is denied", async () => {
-		const { a, as, b, bh, bs, target } = await pair();
-		await b.close();
-		const stopped: mailbox.OfflineSession = {
-			sessionId: "b",
-			path: path.join(temp!.path(), "b.jsonl"),
-			shortId: target.shortId,
-			name: "beta",
-			cwd: target.cwd,
-			title: target.title,
-			modified: Date.now(),
-		};
+		const { a, as, bh, bs, stopped } = await stoppedBeta();
 		vi.spyOn(mailbox, "listOfflineSessions").mockResolvedValue([stopped]);
 		expect(await a.resolve("beta")).toEqual({ kind: "offline", target: stopped });
 		bh.name = "resumed-beta";
@@ -1093,19 +1103,9 @@ describe("messaging service with real inboxes", () => {
 	});
 
 	it("delivers offline send receipts through resume and retains correlation for held-message expiry", async () => {
-		const { a, ah, b, bh, bs, target } = await pair();
-		await b.close();
+		const { a, ah, bh, bs, stopped } = await stoppedBeta();
 		bh.permission = "prompting";
 		cfgMessagingDialogExpiry.override(bs, "60s");
-		const stopped: mailbox.OfflineSession = {
-			sessionId: "b",
-			path: path.join(temp!.path(), "b.jsonl"),
-			shortId: target.shortId,
-			name: "beta",
-			cwd: target.cwd,
-			title: target.title,
-			modified: Date.now(),
-		};
 		expect(await a.send(stopped, "offline approval", { notifyWhenIdle: false })).toEqual({
 			ok: true,
 			text: "Queued for beta (not running); it will see this when resumed.",
@@ -1158,16 +1158,7 @@ it("deduplicates subscriptions and cancels superseded expiry timers", async () =
 	vi.useFakeTimers();
 	const host = new FakeHost("watcher");
 	host.busy = true;
-	const replies: InboxRequest[] = [];
-	const idle = new IdleSubscriptions(
-		host,
-		() => "accept",
-		async (_sender, notice) => {
-			replies.push({ ...notice, id: "notice", from: sender });
-		},
-		() => undefined,
-	);
-	subscriptions.push(idle);
+	const { idle, replies } = idleFixture(host, () => "accept");
 	idle.subscribe(sender, "old");
 	idle.subscribe(sender, "latest");
 	idle.turnSettledIdle();
@@ -1197,14 +1188,7 @@ it.each(["idle", "exited"] as const)("suppresses %s notices when watched policy 
 	const host = new FakeHost("watched");
 	host.busy = true;
 	let decision: "accept" | "refuse" = "accept";
-	const reply = vi.fn(async () => {});
-	const idle = new IdleSubscriptions(
-		host,
-		() => decision,
-		reply,
-		() => undefined,
-	);
-	subscriptions.push(idle);
+	const { idle, reply } = idleFixture(host, () => decision);
 	idle.subscribe(sender, "watch");
 	decision = "refuse";
 	if (kind === "exited") await idle.close();
@@ -1219,16 +1203,7 @@ it("redacts idle status after watched policy tightens to hold and restores it af
 	const host = new FakeHost("watched");
 	host.busy = true;
 	let decision: "accept" | "hold-explicit" = "accept";
-	const replies: InboxRequest[] = [];
-	const idle = new IdleSubscriptions(
-		host,
-		() => decision,
-		async (_sender, notice) => {
-			replies.push({ ...notice, id: "notice", from: sender });
-		},
-		() => undefined,
-	);
-	subscriptions.push(idle);
+	const { idle, replies } = idleFixture(host, () => decision);
 	idle.subscribe(sender, "held-watch");
 	decision = "hold-explicit";
 	idle.turnSettledIdle();
@@ -1254,14 +1229,12 @@ it.each(["accept", "hold-explicit", "refuse"] as const)(
 		vi.useFakeTimers();
 		const host = new FakeHost("requester");
 		let decision: "accept" | "hold-explicit" | "refuse" = "accept";
-		const idle = new IdleSubscriptions(
+		const { idle } = idleFixture(
 			host,
 			() => decision,
-			vi.fn(async () => {}),
-			() => undefined,
+			undefined,
 			() => sender,
 		);
-		subscriptions.push(idle);
 		idle.arm(sender.entryId, { ...sender, address: sender.name! }, "watch");
 		decision = policy;
 		idle.receive({
@@ -1283,21 +1256,6 @@ it.each(["accept", "hold-explicit", "refuse"] as const)(
 );
 
 describe("offline handoff regressions", () => {
-	async function stoppedBeta() {
-		const fixture = await pair();
-		await fixture.b.close();
-		const stopped: mailbox.OfflineSession = {
-			sessionId: "b",
-			path: path.join(temp!.path(), "b.jsonl"),
-			shortId: fixture.target.shortId,
-			name: "beta",
-			cwd: "/project",
-			title: "beta",
-			modified: Date.now(),
-		};
-		return { ...fixture, stopped };
-	}
-
 	it("does not suppress or promote a saved session whose display hash collides with another live session", async () => {
 		const { a } = await pair();
 		const id = "collision-session-101974";
@@ -1722,13 +1680,11 @@ it("ignores unsolicited idle and exited notices at the real inbox", async () => 
 it("consumes only matching idle subscriptions once and enforces notice queue capacity", () => {
 	const { gate, host, settings } = gateFixture();
 	cfgMessagingRateLimit.override(settings, 100);
-	const idle = new IdleSubscriptions(
+	const { idle } = idleFixture(
 		host,
 		() => "accept",
-		async () => {},
 		(from, key) => gate.checkTraffic(from, false, key),
 	);
-	subscriptions.push(idle);
 	const from = { name: sender.name, shortId: sender.shortId, address: "alpha", cwd: sender.cwd };
 	const notice: Extract<InboxRequest, { type: "notice" }> = {
 		type: "notice",
@@ -1755,13 +1711,11 @@ it("consumes only matching idle subscriptions once and enforces notice queue cap
 it("shares message and subscription rate accounting and bounds watched senders", () => {
 	const { gate, host, settings } = gateFixture();
 	host.busy = true;
-	const idle = new IdleSubscriptions(
+	const { idle } = idleFixture(
 		host,
 		() => "accept",
-		async () => {},
 		(from, key) => gate.checkTraffic(from, false, key),
 	);
-	subscriptions.push(idle);
 	cfgMessagingRateLimit.override(settings, 1);
 	gate.receive(message("body"), sender, false);
 	expect(idle.subscribe(sender, "rate-limited")).toEqual({ ok: true, outcome: "dropped", reason: "rate" });

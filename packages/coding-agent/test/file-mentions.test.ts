@@ -48,12 +48,6 @@ describe("quoted session mention identity", () => {
 		},
 	);
 
-	test("preserves both leading backslashes in a raw quoted UNC path", () => {
-		expect(extractFileMentions(String.raw`@"\\server\share\my file.txt"`)).toEqual([
-			String.raw`\\server\share\my file.txt`,
-		]);
-	});
-
 	test("allows a trailing backslash in a single-quoted name", () => {
 		expect(extractFileMentions(String.raw`@'release notes\'`)).toEqual([String.raw`release notes` + "\\"]);
 	});
@@ -74,6 +68,7 @@ describe("generateFileMentionMessages path resolution", () => {
 		const fixture = path.join(cwd, "my file.txt");
 		await Bun.write(fixture, "network attachment contents");
 		const unc = String.raw`\\server\share\my file.txt`;
+		expect(extractFileMentions(String.raw`@"\\server\share\my file.txt"`)).toEqual([unc]);
 		const resolveReadPath = pathUtils.resolveReadPath;
 		// Use a real local file for the share so this test needs no external SMB server.
 		vi.spyOn(pathUtils, "resolveReadPath").mockImplementation((filePath, base) =>

@@ -43,8 +43,18 @@ async function publish(reg: LocalEndpointRegistry): Promise<LocalEndpointPublica
 	return publication;
 }
 
+async function writeMetadata(reg: LocalEndpointRegistry, id: string, endpoint: string, createdAt = 1): Promise<string> {
+	const file = path.join(reg.dir, `${id}.json`);
+	await fs.writeFile(
+		file,
+		JSON.stringify({ version: reg.version, instanceId: id, pid: process.pid, endpoint, createdAt }),
+		{ mode: 0o600 },
+	);
+	return file;
+}
+
 describe("local endpoint registry", () => {
-	it("authenticates the existing version/token JSONL envelope and withdraws artifacts idempotently", async () => {
+	it("authenticates the version/token envelope and withdraws artifacts idempotently with lingering clients", async () => {
 		const reg = registry();
 		const pub = await publish(reg);
 		const [entry] = await readLocalEndpointEntries(reg);
@@ -61,9 +71,18 @@ describe("local endpoint registry", () => {
 			expect((await fs.stat(path.join(reg.dir, `${pub.entryId}.json`))).mode & 0o777).toBe(0o600);
 			expect((await fs.stat(pub.endpoint)).mode & 0o777).toBe(0o600);
 		}
-		await Promise.all([pub.close(), pub.close()]);
-		expect(await readLocalEndpointEntries(reg)).toEqual([]);
-		if (process.platform !== "win32") expect(await Bun.file(pub.endpoint).exists()).toBe(false);
+		const socket = net.createConnection({ path: pub.endpoint });
+		const connected = Promise.withResolvers<void>();
+		socket.once("connect", () => connected.resolve());
+		socket.once("error", connected.reject);
+		await connected.promise;
+		try {
+			await Promise.all([pub.close(), pub.close()]);
+			expect(await readLocalEndpointEntries(reg)).toEqual([]);
+			if (process.platform !== "win32") expect(await Bun.file(pub.endpoint).exists()).toBe(false);
+		} finally {
+			socket.destroy();
+		}
 	});
 
 	it("prunes an unreachable publication without removing its live successor", async () => {
@@ -135,18 +154,11 @@ describe("local endpoint registry", () => {
 
 	it("preserves another OS's transport instead of probing or pruning it", async () => {
 		const reg = registry();
-		const id = "12345678";
-		const metadata = path.join(reg.dir, `${id}.json`);
-		await fs.writeFile(
-			metadata,
-			JSON.stringify({
-				version: 1,
-				instanceId: id,
-				pid: process.pid,
-				createdAt: Date.now(),
-				endpoint: process.platform === "win32" ? "/tmp/foreign.sock" : "\\\\.\\pipe\\foreign",
-			}),
-			{ mode: 0o600 },
+		const metadata = await writeMetadata(
+			reg,
+			"12345678",
+			process.platform === "win32" ? "/tmp/foreign.sock" : "\\\\.\\pipe\\foreign",
+			Date.now(),
 		);
 		const probe = vi.fn(async () => ({ status: "dead" as const }));
 		expect(await listLocalEndpoints(reg, probe)).toEqual([]);
@@ -175,16 +187,10 @@ describe("local endpoint registry", () => {
 		const reg = registry();
 		for (let n = 0; n < 12; n++) {
 			const id = n.toString(16).padStart(8, "0");
-			await fs.writeFile(
-				path.join(reg.dir, `${id}.json`),
-				JSON.stringify({
-					version: 1,
-					instanceId: id,
-					pid: process.pid,
-					endpoint: process.platform === "win32" ? `\\\\.\\pipe\\test-${id}` : path.join(reg.dir, `${id}.sock`),
-					createdAt: 1,
-				}),
-				{ mode: 0o600 },
+			await writeMetadata(
+				reg,
+				id,
+				process.platform === "win32" ? `\\\\.\\pipe\\test-${id}` : path.join(reg.dir, `${id}.sock`),
 			);
 		}
 		let active = 0;
@@ -240,23 +246,6 @@ describe("local endpoint registry", () => {
 			);
 		} finally {
 			await fs.unlink(link);
-		}
-	});
-
-	it("closes lingering clients so unpublishing cannot hang", async () => {
-		const reg = registry();
-		const pub = await publishLocalEndpoint(reg, () => {});
-		publications.push(pub);
-		const socket = net.createConnection({ path: pub.endpoint });
-		const connected = Promise.withResolvers<void>();
-		socket.once("connect", () => connected.resolve());
-		socket.once("error", connected.reject);
-		await connected.promise;
-		try {
-			await pub.close();
-			expect(await readLocalEndpointEntries(reg)).toEqual([]);
-		} finally {
-			socket.destroy();
 		}
 	});
 });
