@@ -5,7 +5,9 @@ import { handleMastodon } from "@oh-my-pi/pi-coding-agent/web/scrapers/mastodon"
 type FetchArgs = Parameters<typeof fetch>;
 
 /** Route every fetch to `respond`, counting calls. */
-function mockFetch(respond: (url: string, init?: RequestInit) => Promise<Response> | Response): { calls: () => number } {
+function mockFetch(respond: (url: string, init?: RequestInit) => Promise<Response> | Response): {
+	calls: () => number;
+} {
 	let calls = 0;
 	const implementation = async (...[input, init]: FetchArgs): Promise<Response> => {
 		calls++;

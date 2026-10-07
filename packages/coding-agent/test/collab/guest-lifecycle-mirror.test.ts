@@ -498,7 +498,10 @@ describe("collab guest extension lifecycle mirror", () => {
 		vi.useFakeTimers();
 		try {
 			for (const text of ["a", "ab", "abc"]) sendUpdate(harness, makeAssistant(text));
-			harness.hostSocket.send({ t: "event", event: { type: "message_end", message: makeAssistant("abc") } } as CollabFrame);
+			harness.hostSocket.send({
+				t: "event",
+				event: { type: "message_end", message: makeAssistant("abc") },
+			} as CollabFrame);
 			await harness.barrier();
 			await controller.dispatchSessionEvent({ type: "turn_start" } as AgentSessionEvent);
 

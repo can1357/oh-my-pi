@@ -74,11 +74,7 @@ function remember(key: string, entry: CacheEntry): void {
  * among concurrent callers of the same key. The caller holds one waiter on
  * the returned request; pair with {@link releaseQuery}.
  */
-export function loadQuery<T>(
-	key: string,
-	version: number,
-	fetcher: QueryFetcher<T>,
-): Inflight {
+export function loadQuery<T>(key: string, version: number, fetcher: QueryFetcher<T>): Inflight {
 	const pending = inflight.get(key);
 	if (pending) {
 		pending.waiters++;

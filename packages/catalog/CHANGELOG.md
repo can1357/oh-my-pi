@@ -2,10 +2,11 @@
 
 ## [Unreleased]
 
+## [18.8.0] - 2026-10-07
+
 ### Changed
 
-- Sped up model cache reads from `models.db` (~6× faster for large rows) ([#14676](https://github.com/can1357/oh-my-pi/pull/14676) by [@H4vC](https://github.com/H4vC))
-- Sped up repeated catalog-wide model builds (~88→38 ms) ([#14676](https://github.com/can1357/oh-my-pi/pull/14676) by [@H4vC](https://github.com/H4vC))
+- Improved catalog performance by speeding up model cache reads and repeated catalog-wide model builds, especially for large catalogs.
 
 ## [18.7.0] - 2026-10-06
 

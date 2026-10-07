@@ -210,6 +210,7 @@ import {
 	setSessionTerminalTitle,
 	setTerminalSessionSource,
 	setTerminalTitlePullRequest,
+	setTerminalTitleIcons,
 	setTerminalTitleSpinnerStyle,
 	setTerminalTitleStateEnabled,
 } from "../utils/title-generator";
@@ -382,6 +383,7 @@ import { cfgExpandThinkingBlocks, cfgProseOnlyThinking } from "../session/settin
 import { cfgHideThinkingBlock } from "../session/settings";
 import { cfgCycleOrder, cfgModelRoles } from "../config/model-settings";
 import { cfgGoalContinuationModes, cfgGoalEnabled } from "../goals/settings";
+import { cfgTitleIcons } from "../utils/title-settings";
 import { goalContinuationActivity, goalFromModeData } from "../goals/state";
 import { cfgPlanDefaultOnStartup, cfgPlanEnabled } from "../plan-mode/settings";
 import { cfgStreamRedactPatterns } from "../stream/settings";
@@ -439,6 +441,7 @@ const cfgLiveUiSettings = combine({
 	"tui.hyperlinks": cfgTuiHyperlinks,
 	"tui.titleState": cfgTuiTitleState,
 	"tui.titleSpinner": cfgTuiTitleSpinner,
+	"title.icons": cfgTitleIcons,
 	"statusLine.preset": cfgStatusLinePreset,
 	"statusLine.leftSegments": cfgStatusLineLeftSegments,
 	"statusLine.rightSegments": cfgStatusLineRightSegments,
@@ -2235,11 +2238,16 @@ export class InteractiveMode implements InteractiveModeContext {
 		initTerminalTitleState();
 		setTerminalTitleStateEnabled(cfgTuiTitleState.get(this.settings));
 		setTerminalTitleSpinnerStyle(cfgTuiTitleSpinner.get(this.settings));
+		setTerminalTitleIcons(cfgTitleIcons.get(this.settings));
 		setTerminalSessionSource({
 			file: () => this.sessionManager.getSessionFile(),
 			cwd: () => this.sessionManager.getCwd(),
 		});
-		setSessionTerminalTitle(this.sessionManager.getSessionName(), this.sessionManager.getCwd());
+		setSessionTerminalTitle(
+			this.sessionManager.getSessionName(),
+			this.sessionManager.getCwd(),
+			this.sessionManager.getSessionTitleCard(),
+		);
 		// Seeds the border, the status-line `vim` segment, and the cursor shape in one call.
 		// Deliberately here rather than beside #applyVimMode in the constructor: that runs before
 		// #focusController exists, which updateEditorBorderColor dereferences.
@@ -2261,7 +2269,11 @@ export class InteractiveMode implements InteractiveModeContext {
 			}),
 			this.sessionManager.onPersistenceNotice(notice => this.showWarning(formatPersistenceNotice(notice))),
 			this.sessionManager.onSessionNameChanged(() => {
-				setSessionTerminalTitle(this.sessionManager.getSessionName(), this.sessionManager.getCwd());
+				setSessionTerminalTitle(
+					this.sessionManager.getSessionName(),
+					this.sessionManager.getCwd(),
+					this.sessionManager.getSessionTitleCard(),
+				);
 				this.#handleSessionAccentInputsChanged();
 			}),
 			// Fork and branch adopt a new session file without retitling.
@@ -2756,7 +2768,11 @@ export class InteractiveMode implements InteractiveModeContext {
 			);
 			return false;
 		}
-		setSessionTerminalTitle(this.sessionManager.getSessionName(), this.sessionManager.getCwd());
+		setSessionTerminalTitle(
+			this.sessionManager.getSessionName(),
+			this.sessionManager.getCwd(),
+			this.sessionManager.getSessionTitleCard(),
+		);
 		this.statusLine.applyCwdChange();
 		return true;
 	}
@@ -3549,6 +3565,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		}
 		if (any("tui.titleState")) setTerminalTitleStateEnabled(cfgTuiTitleState.get(this.settings));
 		if (any("tui.titleSpinner")) setTerminalTitleSpinnerStyle(cfgTuiTitleSpinner.get(this.settings));
+		if (any("title.icons")) setTerminalTitleIcons(cfgTitleIcons.get(this.settings));
 
 		if (
 			any(

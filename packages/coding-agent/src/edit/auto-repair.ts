@@ -142,22 +142,22 @@ function isolateCulpritHunks(path: string, a: string[], b: string[], hunks: Edit
 		}
 	}
 
-	const keep = new Array<boolean>(n).fill(true);
-	// Whether reverting exactly the current `keep` set is known to parse.
+	const keepBits = new Uint8Array(Math.ceil(n / 8)).fill(0xff);
+	// Whether reverting exactly the current `keepBits` set is known to parse.
 	let keepParses = false;
 	for (let i = 0; i < n; i++) {
 		trial.length = 0;
 		for (let k = 0; k < n; k++) {
-			if (keep[k] && k !== i) trial.push(k);
+			if ((keepBits[k >>> 3] & (1 << (k & 7))) !== 0 && k !== i) trial.push(k);
 		}
 		if (parsesReverted(trial)) {
-			keep[i] = false;
+			keepBits[i >>> 3] &= ~(1 << (i & 7));
 			keepParses = true;
 		}
 	}
 	const culprits: number[] = [];
 	for (let k = 0; k < n; k++) {
-		if (keep[k]) culprits.push(k);
+		if ((keepBits[k >>> 3] & (1 << (k & 7))) !== 0) culprits.push(k);
 	}
 	// Reverting every remaining hunk must parse (the full revert is the
 	// pre-image); an empty set would mean the pre-image itself is broken.

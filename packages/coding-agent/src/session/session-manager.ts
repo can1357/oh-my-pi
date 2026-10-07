@@ -62,6 +62,7 @@ import {
 	type SessionHeader,
 	type SessionInitEntry,
 	type SessionMessageEntry,
+	type SessionTitleCard,
 	type SessionTitleSource,
 	type SessionTreeNode,
 	type ThinkingLevelChangeEntry,
@@ -3212,6 +3213,22 @@ export class SessionManager {
 		return this.#sessionName;
 	}
 
+	/**
+	 * The card index of the current title, if it has one. Read from the latest
+	 * title change rather than stored beside the title (header, title slot,
+	 * listings): a rename that passes no card drops it, and a resumed session
+	 * gets it back from its own entries.
+	 */
+	getSessionTitleCard(): SessionTitleCard | undefined {
+		const title = this.#sessionName;
+		if (!title) return undefined;
+		for (let i = this.#entries.length - 1; i >= 0; i--) {
+			const entry = this.#entries[i]!;
+			if (entry.type === TITLE_CHANGE_ENTRY_TYPE) return entry.title === title ? entry.card : undefined;
+		}
+		return undefined;
+	}
+
 	onSessionNameChanged(cb: () => void): () => void {
 		this.#sessionNameChangedCallbacks.add(cb);
 		return () => {
@@ -3255,8 +3272,14 @@ export class SessionManager {
 	 * Set the session display name.
 	 * @param source "user" for explicit renames; "auto" for generated titles.
 	 *   Auto titles are ignored once the user has set a name.
+	 * @param card The card index generated with this title (see {@link getSessionTitleCard}).
 	 */
-	async setSessionName(name: string, source: SessionTitleSource = "auto", trigger?: string): Promise<boolean> {
+	async setSessionName(
+		name: string,
+		source: SessionTitleSource = "auto",
+		trigger?: string,
+		card?: SessionTitleCard,
+	): Promise<boolean> {
 		if (this.#released) return false;
 		if (this.#titleSource === "user" && source === "auto") return false;
 
@@ -3281,6 +3304,7 @@ export class SessionManager {
 		};
 		if (previousTitle) entry.previousTitle = previousTitle;
 		if (trigger) entry.trigger = trigger;
+		if (card) entry.card = card;
 		this.#entries.push(entry);
 		this.#index.insert(entry);
 		this.#notifyEntryAppended(entry);
