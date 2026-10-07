@@ -284,12 +284,17 @@ describe("print mode working indicator", () => {
 		expect(stdoutOutput.join("")).toBe("delayed nested answer\n");
 	});
 
-	it("does not attribute an agent answer to a custom send that starts no turn", async () => {
+	it.each([
+		["genuinely local extension command", false],
+		["custom send that starts no turn", true],
+	])("does not attribute an agent answer to a %s", async (_name, send) => {
 		const delayed = createExtensionCommandSession(makeAssistantMessage("not an answer"), async actions => {
-			actions.sendMessage(
-				{ customType: "test", content: "context", display: true, details: undefined, attribution: "agent" },
-				{ deliverAs: "aside" },
-			);
+			if (send) {
+				actions.sendMessage(
+					{ customType: "test", content: "context", display: true, details: undefined, attribution: "agent" },
+					{ deliverAs: "aside" },
+				);
+			}
 		});
 		vi.spyOn(delayed.session, "sendCustomMessage").mockResolvedValue(false);
 
@@ -307,13 +312,6 @@ describe("print mode working indicator", () => {
 		expect(await runPrintMode(delayed.session, { mode: "text", initialMessage: "/nested" })).toBe(0);
 		expect(stdoutOutput.join("")).toBe("");
 		expect(stderrOutput.join("")).toContain("sendUserMessage failed: missing model");
-	});
-
-	it("keeps a genuinely local extension command local", async () => {
-		const delayed = createExtensionCommandSession(makeAssistantMessage("not an answer"), async () => {});
-
-		expect(await runPrintMode(delayed.session, { mode: "text", initialMessage: "/local" })).toBe(0);
-		expect(stdoutOutput.join("")).toBe("");
 	});
 
 	it("does not enter startup plan mode in headless print mode and warns instead (#8272)", async () => {

@@ -783,24 +783,28 @@ describe("runGcCommand history checkpoint", () => {
 	}, 10_000);
 });
 
+function queueMail(sessionId: string, sessionFile: string, id: string, body: string) {
+	return mailbox.enqueueOffline(sessionId, {
+		id,
+		from: {
+			sessionId: "sender",
+			name: "sender",
+			shortId: "12345678",
+			cwd: root,
+			entryId: "sender-entry",
+			class: "bypass",
+		},
+		body,
+		chain: [],
+		sentAt: Date.now(),
+		sessionFile,
+	});
+}
+
 describe("runGcCommand cold-session archive", () => {
 	test("archives old completed sessions while honoring keep-count and active-status skips", async () => {
 		const archiveMe = await writeSession(root, "project", "archive-me", "complete", { ageDays: 90 });
-		await mailbox.enqueueOffline("archive-me", {
-			id: "archive-mail",
-			from: {
-				sessionId: "sender",
-				name: "sender",
-				shortId: "12345678",
-				cwd: root,
-				entryId: "sender-entry",
-				class: "bypass",
-			},
-			body: "retire on archive",
-			chain: [],
-			sentAt: Date.now(),
-			sessionFile: archiveMe,
-		});
+		await queueMail("archive-me", archiveMe, "archive-mail", "retire on archive");
 		// 60d keeps keep-recent cold-eligible (>30d cutoff) yet unambiguously newer than
 		// archive-me's 90d, so retainNewestGlobal:1 deterministically protects it regardless
 		// of readdir order when two sessions would otherwise share an mtime millisecond.
@@ -899,21 +903,7 @@ describe("runGcCommand cold-session archive", () => {
 		await agePath(session, 90);
 		const artifacts = session.slice(0, -".jsonl".length);
 		await Bun.write(path.join(artifacts, "0.bash.log"), "retained artifact");
-		await mailbox.enqueueOffline("rollback", {
-			id: "rollback-mail",
-			from: {
-				sessionId: "sender",
-				name: "sender",
-				shortId: "12345678",
-				cwd: root,
-				entryId: "sender-entry",
-				class: "bypass",
-			},
-			body: "keep on rollback",
-			chain: [],
-			sentAt: Date.now(),
-			sessionFile: session,
-		});
+		await queueMail("rollback", session, "rollback-mail", "keep on rollback");
 		const archiveDir = path.join(root, "archive", "sessions", "project");
 		const rename = fs.rename.bind(fs);
 		const renameSpy = spyOn(fs, "rename").mockImplementation(async (source, destination) => {
@@ -2598,21 +2588,7 @@ describe("offline mail GC", () => {
 			} finally {
 				await original.close();
 			}
-			await mailbox.enqueueOffline(sessionId, {
-				id: "retained",
-				from: {
-					sessionId: "sender",
-					name: "sender",
-					shortId: "12345678",
-					cwd: root,
-					entryId: "sender-entry",
-					class: "bypass",
-				},
-				body: "mail queued before relocation",
-				chain: [],
-				sentAt: Date.now(),
-				sessionFile: oldFile,
-			});
+			await queueMail(sessionId, oldFile, "retained", "mail queued before relocation");
 			const inbox = mailbox.mailboxDir(sessionId);
 			const file = path.join(inbox, (await fs.readdir(inbox))[0]);
 			await agePath(file);
