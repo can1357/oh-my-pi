@@ -300,6 +300,8 @@ export interface CustomMessageEntry<T = unknown> extends SessionEntryBase {
 	display: boolean;
 	/** Who initiated this message for billing/attribution semantics. */
 	attribution?: MessageAttribution;
+	/** Explicit agent origin for custom steering, not user authority. */
+	steeringSource?: "agent";
 }
 
 /** Session entry - has id/parentId for tree structure (returned by "read" methods in SessionManager) */

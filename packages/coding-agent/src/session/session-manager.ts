@@ -3530,6 +3530,7 @@ export class SessionManager {
 	 * @param display Whether to show in TUI (true = styled display, false = hidden)
 	 * @param details Optional extension-specific metadata (not sent to LLM)
 	 * @param attribution Who initiated this message for billing/attribution semantics
+	 * @param steeringSource Explicit agent origin for custom steering, not user authority
 	 */
 	appendCustomMessageEntry<T = unknown>(
 		customType: string | undefined,
@@ -3538,8 +3539,11 @@ export class SessionManager {
 		details?: T,
 		attribution: MessageAttribution | undefined = "agent",
 		timestamp?: number,
+		steeringSource?: "agent",
 	): string {
-		const normalized = normalizeCustomMessagePayload<T>({ customType, content, display, details, attribution });
+		const normalized = normalizeCustomMessagePayload<T>({
+			customType, content, display, details, attribution, steeringSource,
+		});
 		const fresh = this.#freshEntryFields();
 		const entry: CustomMessageEntry<T> = {
 			type: "custom_message",
@@ -3555,6 +3559,7 @@ export class SessionManager {
 			// preparation / hook time from the prompt→yield anchor.
 			timestamp: timestamp !== undefined ? new Date(timestamp).toISOString() : fresh.timestamp,
 		};
+		if (normalized.steeringSource === "agent") entry.steeringSource = normalized.steeringSource;
 		this.#recordEntry(entry);
 		return entry.id;
 	}

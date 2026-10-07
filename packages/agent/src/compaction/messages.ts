@@ -6,7 +6,7 @@ import type {
 	TextContent,
 	ToolResultMessage,
 } from "@oh-my-pi/pi-ai";
-import { prompt } from "@oh-my-pi/pi-utils";
+import { isRecord, prompt } from "@oh-my-pi/pi-utils";
 import type { AgentMessage } from "../types";
 import branchSummaryContextPrompt from "./prompts/branch-summary-context.md" with { type: "text" };
 import compactionSummaryContextPrompt from "./prompts/compaction-summary-context.md" with { type: "text" };
@@ -24,6 +24,8 @@ export interface CustomMessage<T = unknown> {
 	details?: T;
 	/** Who initiated this message for billing/attribution semantics. */
 	attribution?: MessageAttribution;
+	/** Explicit agent origin for custom steering, not user authority. */
+	steeringSource?: "agent";
 	timestamp: number;
 }
 
@@ -179,8 +181,9 @@ export function createCustomMessage(
 	details: unknown | undefined,
 	timestamp: string,
 	attribution?: MessageAttribution,
+	steeringSource?: "agent",
 ): CustomMessage {
-	return {
+	const message: CustomMessage = {
 		role: "custom",
 		customType,
 		content,
@@ -189,6 +192,8 @@ export function createCustomMessage(
 		attribution,
 		timestamp: new Date(timestamp).getTime(),
 	};
+	if (steeringSource === "agent") message.steeringSource = steeringSource;
+	return message;
 }
 
 function isCoreCompactionMessage(message: AgentMessage): message is AgentMessage & CoreCompactionMessage {
@@ -219,8 +224,21 @@ export function convertMessageToLlm(message: AgentMessage): Message | undefined 
 					typeof message.content === "string"
 						? [{ type: "text" as const, text: message.content }]
 						: message.content;
+				// Only source-preserving parent transport steers retain the native
+				// agent-attributed user provider view required by live steering.
+				const isParentSteer =
+					message.role === "custom" &&
+					message.customType === "irc:incoming" &&
+					message.steeringSource === "agent" &&
+					message.attribution === "agent" &&
+					isRecord(message.details) &&
+					message.details.fromParent === true &&
+					typeof message.details.id === "string" &&
+					typeof message.details.from === "string" &&
+					typeof message.details.to === "string" &&
+					typeof message.details.ts === "number";
 				return {
-					role: "developer",
+					role: isParentSteer ? "user" : "developer",
 					content,
 					attribution: message.attribution,
 					timestamp: message.timestamp,

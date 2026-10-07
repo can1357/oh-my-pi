@@ -37,6 +37,38 @@ describe("buildOutputValidator", () => {
 		expect(validator?.validate({ result: "ok" }).success).toBe(false);
 	});
 
+	it("reuses identical content without aliasing later caller mutations or freezing normalization to the old declaration", () => {
+		const schema = {
+			type: "object",
+			properties: {
+				rows: { type: "array", items: {
+					type: "object", properties: { value: { type: "string" }, detail: { type: "string" } },
+					required: ["value"], additionalProperties: false,
+				} },
+			},
+			required: ["rows"],
+			additionalProperties: false,
+		};
+		const first = buildOutputValidator(schema);
+		expect(buildOutputValidator(JSON.parse(JSON.stringify(schema)))).toBe(first);
+		schema.properties.rows.items.properties.value.type = "number";
+		const next = buildOutputValidator(schema);
+		expect(next).not.toBe(first);
+		const oldBatch = [{ value: "old", detail: null }];
+		expect(first.validator?.normalizeSection("rows", oldBatch)).toEqual([{ value: "old" }]);
+		expect(first.validator?.validateSection.get("rows")?.([{ value: "old" }]).success).toBe(true);
+		expect(next.validator?.validateSection.get("rows")?.([{ value: "old" }]).success).toBe(false);
+		expect(next.validator?.validateSection.get("rows")?.([{ value: 1 }]).success).toBe(true);
+		// Exceed the native 32-entry cache and check that an evicted schema is rebuilt, not corrupted.
+		for (let index = 0; index < 33; index++) {
+			buildOutputValidator({ type: "string", enum: [`cache-${index}`] });
+		}
+		const rebuilt = buildOutputValidator(schema);
+		expect(rebuilt).not.toBe(next);
+		expect(rebuilt.validator?.validate({ rows: [{ value: 1 }] }).success).toBe(true);
+		expect(first.validator?.validate({ rows: [{ value: "old" }] }).success).toBe(true);
+	});
+
 	it("errors on a malformed JSON Schema", () => {
 		const result = buildOutputValidator({
 			type: "object",
@@ -91,7 +123,7 @@ describe("buildOutputValidator", () => {
 		expect(validator?.validate({ name: null, receipt: null }).success).toBe(false);
 	});
 
-	it("exposes per-label sub-validators that accept items (not whole arrays) for elements properties", () => {
+	it("exposes per-label validators for single items and batches while rejecting invalid elements", () => {
 		const { validator } = buildOutputValidator({
 			properties: {
 				overall_correctness: { enum: ["correct", "incorrect"] },
@@ -114,12 +146,36 @@ describe("buildOutputValidator", () => {
 		// String property: any string passes, non-strings fail.
 		expect(sections?.get("explanation")?.("ok").success).toBe(true);
 		expect(sections?.get("explanation")?.(123).success).toBe(false);
-		// Array property: each section validates ONE item against the items schema, not the whole array.
+		// Array sections accept either an item or a batch; an invalid batch element still fails.
 		expect(sections?.get("findings")?.({ title: "t", body: "b" }).success).toBe(true);
-		expect(sections?.get("findings")?.([{ title: "t", body: "b" }]).success).toBe(false);
+		expect(sections?.get("findings")?.([{ title: "t", body: "b" }]).success).toBe(true);
+		expect(sections?.get("findings")?.([{ title: "t", body: "b" }, { title: "missing body" }]).success).toBe(false);
 		// Unknown labels have no validator so user-defined sections stay loose.
 		expect(sections?.has("scratchpad")).toBe(false);
 	});
+
+	for (const keyword of ["oneOf", "anyOf"] as const) {
+		it(`normalizes optional nulls only through a valid ${keyword} branch and preserves its required nulls`, () => {
+			const { validator } = buildOutputValidator({
+				[keyword]: [
+					{ type: "object", properties: { kind: { const: "optional" }, note: { type: "string" } },
+						required: ["kind"], additionalProperties: false },
+					{ type: "object", properties: { kind: { const: "required" }, note: { type: "string" } },
+						required: ["kind", "note"], additionalProperties: false },
+				],
+			});
+			const optional = validator?.normalize({ kind: "optional", note: null });
+			expect(optional).toEqual({ kind: "optional" });
+			expect(validator?.validate(optional).success).toBe(true);
+			const required = validator?.normalize({ kind: "required", note: null });
+			expect(required).toEqual({ kind: "required", note: null });
+			expect(validator?.validate(required).success).toBe(false);
+			// A branch-local cleanup is not sufficient if the original union still rejects the candidate.
+			const unknown = validator?.normalize({ kind: "unknown", note: null });
+			expect(unknown).toEqual({ kind: "unknown", note: null });
+			expect(validator?.validate(unknown).success).toBe(false);
+		});
+	}
 });
 describe("summarizeValidationFailure", () => {
 	it("returns an empty summary when the result is a success", () => {

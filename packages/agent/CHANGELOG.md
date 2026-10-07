@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed live steering and compaction so relayed agent messages retain their agent attribution.
+
 ## [18.8.0] - 2026-10-07
 
 ### Changed

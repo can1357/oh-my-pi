@@ -1851,9 +1851,9 @@ interface PreparedProviderCall {
 
 /**
  * Classify the first `count` steering messages for a tool-batch interrupt:
- * any user-authored message wins, then agent-attributed user messages, else
- * system steering (advisor cards, hidden directives). Shared by the agent's
- * queue peek and the loop's live-taken steering.
+ * any user-authored message wins, then agent-attributed user messages or
+ * explicitly agent-sourced custom steers, else system steering. Attribution
+ * alone does not turn a custom advisory into an agent interrupt.
  */
 export function steeringQueueState(messages: readonly AgentMessage[], count = messages.length): SteeringQueueState {
 	if (count === 0) return { queued: false };
@@ -1863,6 +1863,15 @@ export function steeringQueueState(messages: readonly AgentMessage[], count = me
 		const role = "role" in message ? message.role : undefined;
 		const attribution = "attribution" in message ? message.attribution : undefined;
 		if (attribution === "user") return { queued: true, source: "user" };
+		if (
+			role === "custom" &&
+			attribution === "agent" &&
+			"steeringSource" in message &&
+			message.steeringSource === "agent"
+		) {
+			hasAgentSteering = true;
+			continue;
+		}
 		if (role !== "user") continue;
 		if (attribution !== "agent") return { queued: true, source: "user" };
 		hasAgentSteering = true;

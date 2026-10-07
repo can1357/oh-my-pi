@@ -249,6 +249,7 @@ export class ChainJudge implements Judge {
 		const signal = options.signal;
 		let lastFailure: string | undefined;
 		let lastUnavailable: string | undefined;
+		let failures: unknown[] | undefined;
 		const candidates = this.#resolveCandidates();
 		const rejections = this.#rejections();
 		for (const candidate of candidates) {
@@ -260,6 +261,7 @@ export class ChainJudge implements Judge {
 			if (skippedUntil !== undefined) {
 				if (skippedUntil > Date.now()) {
 					lastUnavailable = `${identity} rejected the account recently`;
+					(failures ??= []).push(new Error(lastUnavailable));
 					continue;
 				}
 				rejections.delete(identity);
@@ -268,6 +270,7 @@ export class ChainJudge implements Judge {
 				const judge = await this.#createJudge(candidate, signal);
 				if (!judge) {
 					lastUnavailable = `no API key for ${candidate.model.provider}/${candidate.model.id}`;
+					(failures ??= []).push(new Error(lastUnavailable));
 					continue;
 				}
 				return await run(judge, kindOf(candidate));
@@ -275,10 +278,16 @@ export class ChainJudge implements Judge {
 				if (signal?.aborted) {
 					throw signal.reason instanceof Error ? signal.reason : new AIError.AbortError("judgment aborted");
 				}
-				if (isAbortOrTimeout(error)) throw error;
+				if (isAbortOrTimeout(error)) {
+					if (!(error instanceof Error) || error.name !== "TimeoutError" || !failures?.length) throw error;
+					lastFailure = error.message;
+					failures.push(error);
+					break;
+				}
 				const rejected = isAccountRejection(error);
 				if (rejected) rejections.set(identity, Date.now() + CANDIDATE_REJECTION_COOLDOWN_MS);
 				lastFailure = error instanceof Error ? error.message : String(error);
+				(failures ??= []).push(error);
 				logger.warn("judgment candidate failed", {
 					candidate: identity,
 					status: AIError.status(error),
@@ -288,7 +297,12 @@ export class ChainJudge implements Judge {
 			}
 		}
 		if (candidates.length === 0) throw new Error("judgment: no judge model available");
-		throw new Error(`judgment: every judge candidate failed: ${lastFailure ?? lastUnavailable ?? "unknown error"}`);
+		// Unavailable candidates are causes too: mixed configuration/account and
+		// transport failures must not appear to be a reusable infrastructure outage.
+		throw new AggregateError(
+			failures ?? [],
+			`judgment: every judge candidate failed: ${lastFailure ?? lastUnavailable ?? "unknown error"}`,
+		);
 	}
 
 	/** Attribute one attempt: the ledger unless answered wholly from cache, and one telemetry span. */

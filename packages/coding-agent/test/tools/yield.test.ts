@@ -1568,14 +1568,14 @@ describe("YieldTool", () => {
 			}),
 		);
 		const finding = { title: "bug", body: "details" };
-		// Two malformed findings: bare string, then double-encoded wrapper.
+		// Two malformed findings: bare string, then an encoded batch with an invalid item.
 		await expect(
 			tool.execute("call-reset-bad-1", { type: ["findings"], data: "just text" } as never),
 		).rejects.toThrow(/Section "findings" does not match schema.*2 retry attempt\(s\) remain/);
 		await expect(
 			tool.execute("call-reset-bad-2", {
 				type: ["findings"],
-				data: JSON.stringify({ findings: [finding] }),
+				data: JSON.stringify({ findings: [{ title: "missing body" }] }),
 			} as never),
 		).rejects.toThrow(/Section "findings" does not match schema.*1 retry attempt\(s\) remain/);
 		// One valid finding: budget resets to full.

@@ -5,7 +5,7 @@ import type { DaemonSnapshot, DaemonSpec } from "@oh-my-pi/pi-tui/tools/daemon";
 import { formatDuration, replaceTabs } from "@oh-my-pi/pi-tui/render/render-utils";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { getDaemonRuntimeDir, logger, sanitizeText } from "@oh-my-pi/pi-utils";
-import { type DaemonBrokerClient, daemonClientForProject } from "./client";
+import { type DaemonBrokerClient, DaemonBrokerUnavailableError, daemonClientForProject } from "./client";
 import { canonicalProjectDir } from "./paths";
 import type { DaemonOperation, DaemonRpcResult } from "./protocol";
 import { renderTerminalOutputIsolated } from "./terminal-output-worker-client";
@@ -29,11 +29,19 @@ export interface ServiceStart {
 }
 
 const serviceStateKey = Symbol("ownedServices");
+interface ServiceRequest {
+	sequence: number;
+	changed: Set<string>;
+	completed: Set<string>;
+}
 interface ServiceSession extends ToolSession {
 	[serviceStateKey]?: {
 		owned: Map<string, { id: string; startedAt: number }>;
 		listeners: Set<() => void>;
 		subscribed: Set<DaemonBrokerClient>;
+		revision: number;
+		requestSequence: number;
+		pending: Set<ServiceRequest>;
 	};
 }
 function serviceState(session: ToolSession): NonNullable<ServiceSession[typeof serviceStateKey]> {
@@ -41,6 +49,9 @@ function serviceState(session: ToolSession): NonNullable<ServiceSession[typeof s
 		owned: new Map(),
 		listeners: new Set(),
 		subscribed: new Set(),
+		revision: 0,
+		requestSequence: 0,
+		pending: new Set(),
 	});
 }
 
@@ -66,12 +77,21 @@ function serviceOwner(session: ToolSession): string | null | undefined {
 	return session.getSessionId?.() ?? session.getAgentId?.();
 }
 
-function track(session: ToolSession, daemon: DaemonSnapshot): void {
+function track(session: ToolSession, daemon: DaemonSnapshot, sequence?: number): void {
 	const owner = serviceOwner(session);
 	if (daemon.owner !== owner) return;
 	const services = serviceState(session).owned;
-	if (TERMINAL_STATES[daemon.state]) services.delete(daemon.name);
-	else services.set(daemon.name, { id: daemon.id, startedAt: daemon.startedAt });
+	if (sequence !== undefined) {
+		for (const pending of serviceState(session).pending) {
+			if (pending.sequence < sequence) pending.changed.add(daemon.name);
+		}
+	}
+	if (TERMINAL_STATES[daemon.state]) {
+		const tracked = services.get(daemon.name);
+		if (tracked?.id !== daemon.id || tracked.startedAt !== daemon.startedAt) return;
+		services.delete(daemon.name);
+		for (const listener of serviceState(session).listeners) listener();
+	} else services.set(daemon.name, { id: daemon.id, startedAt: daemon.startedAt });
 }
 
 function subscribe(session: ToolSession, client: DaemonBrokerClient): void {
@@ -80,11 +100,15 @@ function subscribe(session: ToolSession, client: DaemonBrokerClient): void {
 	const clients = serviceState(session).subscribed;
 	if (clients.has(client)) return;
 	clients.add(client);
+	const revision = serviceState(session).revision;
+	const cwd = session.cwd;
 	const unsubscribe = client.onCompletion(owner, notification => {
+		if (serviceOwner(session) !== owner || session.cwd !== cwd || serviceState(session).revision !== revision) return;
+		const generation = `${notification.daemon.id}:${notification.daemon.startedAt}`;
+		for (const pending of serviceState(session).pending) pending.completed.add(generation);
 		const tracked = serviceState(session).owned.get(notification.daemon.name);
 		if (tracked?.id === notification.daemon.id && tracked.startedAt === notification.daemon.startedAt) {
 			track(session, notification.daemon);
-			for (const listener of serviceState(session).listeners) listener();
 		}
 		return session.queueLaunchCompletion?.(notification);
 	});
@@ -92,6 +116,7 @@ function subscribe(session: ToolSession, client: DaemonBrokerClient): void {
 		unsubscribe({ preservePending: true });
 		clients.delete(client);
 		serviceState(session).owned.clear();
+		serviceState(session).revision++;
 		for (const listener of serviceState(session).listeners) listener();
 	});
 	session.registerSessionChangeCallback?.(() => {
@@ -100,6 +125,7 @@ function subscribe(session: ToolSession, client: DaemonBrokerClient): void {
 		unsubscribe({ preservePending: true });
 		clients.delete(client);
 		serviceState(session).owned.clear();
+		serviceState(session).revision++;
 		for (const listener of serviceState(session).listeners) listener();
 	});
 }
@@ -109,15 +135,70 @@ async function request(
 	operation: DaemonOperation,
 	signal?: AbortSignal,
 ): Promise<DaemonRpcResult> {
-	const client = await daemonClientForProject(session.cwd);
-	subscribe(session, client);
-	const result = await client.request(operation, signal);
-	if (result.op === "list") {
-		const owner = serviceOwner(session);
-		serviceState(session).owned.clear();
-		for (const daemon of result.daemons) if (daemon.owner === owner) track(session, daemon);
-	} else if ("daemon" in result) track(session, result.daemon);
-	return result;
+	signal?.throwIfAborted();
+	const owner = serviceOwner(session);
+	const cwd = session.cwd;
+	const state = serviceState(session);
+	const revision = state.revision;
+	const pending: ServiceRequest = { sequence: 0, changed: new Set(), completed: new Set() };
+	try {
+		const client = await daemonClientForProject(cwd);
+		signal?.throwIfAborted();
+		if (serviceOwner(session) !== owner || session.cwd !== cwd || state.revision !== revision)
+			throw new Error("Service session changed during request");
+		subscribe(session, client);
+		pending.sequence = ++state.requestSequence;
+		state.pending.add(pending);
+		const result = await client.request(operation, signal);
+		signal?.throwIfAborted();
+		if (serviceOwner(session) !== owner || session.cwd !== cwd || state.revision !== revision)
+			throw new Error("Service session changed during request");
+		state.pending.delete(pending);
+		// Observation order is not daemon creation order: a list can describe
+		// the predecessor of a replacement whose start response is still pending.
+		if (result.op === "list") {
+			// Notify from terminal snapshots before replacing the live set: the
+			// broker may expose its exit state before publishing the completion.
+			for (const daemon of result.daemons) {
+				if (
+					daemon.owner === owner &&
+					TERMINAL_STATES[daemon.state] &&
+					!pending.changed.has(daemon.name) &&
+					!pending.completed.has(`${daemon.id}:${daemon.startedAt}`)
+				)
+					track(session, daemon, pending.sequence);
+			}
+			for (const name of state.owned.keys()) {
+				if (pending.changed.has(name)) continue;
+				state.owned.delete(name);
+				for (const other of state.pending) {
+					if (other.sequence < pending.sequence) other.changed.add(name);
+				}
+			}
+			for (const daemon of result.daemons) {
+				if (
+					daemon.owner === owner &&
+					!pending.changed.has(daemon.name) &&
+					!pending.completed.has(`${daemon.id}:${daemon.startedAt}`)
+				)
+					track(session, daemon, pending.sequence);
+			}
+		} else if (result.op === "start" && pending.changed.has(result.daemon.name)) {
+			// Resolve conflicting generations from the broker, not response timing.
+			await listServices(session, signal);
+			signal?.throwIfAborted();
+			if (serviceOwner(session) !== owner || session.cwd !== cwd || state.revision !== revision)
+				throw new Error("Service session changed during request");
+		} else if (
+			"daemon" in result &&
+			!pending.changed.has(result.daemon.name) &&
+			!pending.completed.has(`${result.daemon.id}:${result.daemon.startedAt}`)
+		)
+			track(session, result.daemon, pending.sequence);
+		return result;
+	} finally {
+		state.pending.delete(pending);
+	}
 }
 
 export async function listServices(session: ToolSession, signal?: AbortSignal): Promise<DaemonSnapshot[]> {
@@ -135,14 +216,14 @@ export async function listServices(session: ToolSession, signal?: AbortSignal): 
 export async function listServicesTolerant(
 	session: ToolSession,
 	signal?: AbortSignal,
-): Promise<{ services: DaemonSnapshot[]; error?: string }> {
+): Promise<{ services: DaemonSnapshot[]; error?: string; brokerUnavailable?: boolean }> {
 	try {
 		return { services: await listServices(session, signal) };
 	} catch (error) {
 		if (signal?.aborted) throw error;
 		const message = error instanceof Error ? error.message : String(error);
 		logger.warn("Daemon broker list failed; continuing without service state", { error: message });
-		return { services: [], error: message };
+		return { services: [], error: message, brokerUnavailable: error instanceof DaemonBrokerUnavailableError };
 	}
 }
 

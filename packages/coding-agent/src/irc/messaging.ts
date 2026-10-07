@@ -22,7 +22,7 @@ export function isIrcEnabled(settings: Settings, taskDepth: number): boolean {
 
 export function formatIncoming(msg: IrcMessage): string {
 	const replyTag = msg.replyTo ? ` (reply to ${msg.replyTo})` : "";
-	return `[${msg.id}] ${msg.from}${replyTag}: ${msg.body}`;
+	return `[${msg.id}] ${msg.from} -> ${msg.to} @ ${msg.ts}${replyTag}: ${msg.body}`;
 }
 
 /** Session-buffered inbox drain used before parking a bus waiter. */

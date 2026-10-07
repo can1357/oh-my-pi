@@ -41,12 +41,14 @@ export type CustomMessageContent = string | (TextContent | ImageContent)[];
 /** Public input accepted by `pi.sendMessage` and `AgentSession.sendCustomMessage`. */
 export type CustomMessagePayload<T = unknown> =
 	| string
-	| Partial<Pick<CustomMessage<T>, "customType" | "content" | "display" | "details" | "attribution">>;
+	| Partial<
+			Pick<CustomMessage<T>, "customType" | "content" | "display" | "details" | "attribution" | "steeringSource">
+	  >;
 
 /** Custom message payload after applying runtime defaults. */
 export type NormalizedCustomMessagePayload<T = unknown> = Pick<
 	CustomMessage<T>,
-	"customType" | "content" | "display" | "details" | "attribution"
+	"customType" | "content" | "display" | "details" | "attribution" | "steeringSource"
 >;
 
 /** Details persisted on a `/tan` background-dispatch breadcrumb. */
@@ -154,7 +156,9 @@ function normalizeCustomMessageAttribution(attribution: unknown): MessageAttribu
 
 function isCustomMessagePayloadObject<T>(
 	payload: unknown,
-): payload is Partial<Pick<CustomMessage<T>, "customType" | "content" | "display" | "details" | "attribution">> {
+): payload is Partial<
+	Pick<CustomMessage<T>, "customType" | "content" | "display" | "details" | "attribution" | "steeringSource">
+> {
 	return payload !== null && typeof payload === "object" && !Array.isArray(payload);
 }
 
@@ -179,13 +183,15 @@ export function normalizeCustomMessagePayload<T = unknown>(
 			attribution: "agent",
 		};
 	}
-	return {
+	const normalized: NormalizedCustomMessagePayload<T> = {
 		customType: normalizeCustomMessageType(payload.customType),
 		content: normalizeCustomMessageContent(payload.content),
 		display: typeof payload.display === "boolean" ? payload.display : false,
 		details: payload.details,
 		attribution: normalizeCustomMessageAttribution(payload.attribution),
 	};
+	if (payload.steeringSource === "agent") normalized.steeringSource = payload.steeringSource;
+	return normalized;
 }
 
 /**
@@ -234,6 +240,8 @@ export interface CustomMessage<T = unknown> {
 	details?: T;
 	/** Who initiated this message for billing/attribution semantics. */
 	attribution?: MessageAttribution;
+	/** Explicit agent origin for custom steering, not user authority. */
+	steeringSource?: "agent";
 	timestamp: number;
 }
 

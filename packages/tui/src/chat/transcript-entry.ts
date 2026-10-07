@@ -30,6 +30,7 @@ export interface CustomMessageEntryLike {
 	details?: unknown;
 	display: boolean;
 	attribution?: MessageAttribution;
+	steeringSource?: "agent";
 }
 
 /** Entries that replay as visible or hidden transcript messages. */
@@ -47,6 +48,7 @@ export function customMessageEntryMessage(entry: CustomMessageEntryLike): Custom
 		normalized.details,
 		entry.timestamp,
 		attribution,
+		normalized.steeringSource,
 	);
 }
 
