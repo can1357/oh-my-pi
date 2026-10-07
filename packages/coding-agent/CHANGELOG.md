@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- `browser` now takes `new_tab: true` on `open`, which drives a dedicated background tab in relay sessions instead of adopting one the user is working in ([#11662](https://github.com/can1357/oh-my-pi/pull/11662) by [@jwaldrip](https://github.com/jwaldrip)).
+
 ### Changed
 
 - Agent Hub keeps existing agents in place while open; new agents appear first in the flat roster or within their tree sibling group ([#13066](https://github.com/can1357/oh-my-pi/pull/13066) by [@kmccleary3301](https://github.com/kmccleary3301))
@@ -96,6 +100,10 @@
 - Fixed slowdowns when processing long evaluation output, large Python kernel results, compiler/linter output, and ephemeral side-channel replies.
 - Fixed documents served as `application/octet-stream` being downloaded twice.
 - Fixed collaboration guests rebuilding the transcript excessively during streaming.
+
+### Fixed
+
+- The browser relay no longer steals window focus when activating driven tabs for screenshots ([#11662](https://github.com/can1357/oh-my-pi/pull/11662) by [@jwaldrip](https://github.com/jwaldrip)).
 
 ## [18.7.0] - 2026-10-06
 

@@ -4,7 +4,7 @@ Drive real Chromium tabs from JavaScript or Python Eval with the global `browser
 - Static content? Use `read`. Use `browser` for JavaScript execution, authenticated sessions, and interactive actions.
 - JavaScript: `await browser.open(options)` returns a `BrowserTab`; `browser.tab(name)` returns an existing handle; `await browser.tabs()` lists managed tabs; `await browser.close(options)` releases tabs.
 - Python: `await browser.open(name=…, url=…)`, synchronous `browser.tab(name)`, `await browser.tabs()`, and `await browser.close(name=…)`. Python methods accept keyword arguments.
-- `open` options: `name`, `url`, `app`, `viewport`, `wait_until`, `dialogs`, `allowed_domains`, `init_scripts`, `downloads`, `user_agent`, `ignore_https_errors`, `allow_file_access`, `headed`, `timeout`, `persist`.
+- `open` options: `name`, `url`, `app`, `new_tab`, `viewport`, `wait_until`, `dialogs`, `allowed_domains`, `init_scripts`, `downloads`, `user_agent`, `ignore_https_errors`, `allow_file_access`, `headed`, `timeout`, `persist`.
 - `close` options: `name`, `all`, `kill`, `timeout`.
 - Direct tab helpers:
   - Navigation: `url`, `title`, `goto`, `back`, `forward`, `reload`, `pushState`.
@@ -44,12 +44,13 @@ Application modes:
 - `app.path`: launch the specified browser or Electron executable. Chromium-family browsers use an omp-owned profile unless `args` supplies `--user-data-dir`.
 - `app.cdp_url`: attach to an existing CDP endpoint.
 - `app.relay: true`: drive the user's Chrome through the omp relay. `app.target` selects a tab by URL/title substring; without it, the visible tab is adopted. Opening with `url` navigates that adopted tab.
-- Relay sessions are the user's real logged-in browser. Sites attribute actions to the user. Name a target or create a dedicated tab; NEVER navigate the visible tab without authorization.
+- `new_tab: true` (relay only) opens a background tab of its own instead of adopting one the user is working in, and closes it on release. Prefer it for anything that navigates; it ignores `app.target`. A screenshot still has to make that tab the active one in its window (no window is ever raised).
+- Relay sessions are the user's real logged-in browser. Sites attribute actions to the user. Use `new_tab: true` or name a target; NEVER navigate the visible tab without authorization.
 - Inside a Tern pane, tabs open by default as browser picture-in-pictures over this pane (native WKWebView, visible to the user, not Chromium); the open result names the backend. Explicit `app` options, the relay, and a configured CDP URL win; `app.tern: false` opens Chromium instead (`headed` only picks Chromium's display mode, it does not skip Tern); `app.tern: true` requires Tern. When no Tern window can host the page, the open falls back to Chromium and says so.
 - Tern tabs: input is trusted native mouse/keyboard events at element centres; `tab.evaluate` runs in the page world. Console, `requests`, `route`, and HAR cover the page's `fetch`/XHR plus navigation responses only (no images/scripts/styles; `route` accepts only `resourceType` `fetch`/`xhr`); request bodies exist only for the current document. Frames inside CSS-scaled/rotated elements cannot be driven. `emulate` supports viewport/device, userAgent, colorScheme, credentials, geolocation, locale, offline (JS-visible); timezone, headers, any reducedMotion, CPU and network throttling throw. Clipboard helpers use the system clipboard. `pdf` supports only `path`. `a11y`, `webmcp*` cover the main frame; `loadState` restores storage for the current origin only. `traceStart`/`traceStop`/`profileStart`/`profileStop` are unsupported; raw `page`/`browser` in `tab.run` are a Puppeteer-like subset (`goto`, `evaluate`, `content`, `$`, `$$`, `locator`, waits, `screenshot`, `keyboard`, `mouse`, `cookies`).
-- Closing releases the managed tab. It never closes relay/CDP-attached pages. `kill: true` terminates only applications spawned by this process, never reused browser processes.
+- Closing releases the managed tab, and closes it when `new_tab: true` created it. It never closes a relay/CDP tab it merely adopted. `kill: true` terminates only applications spawned by this process, never reused browser processes.
 - Idle tabs auto-freeze at turn settle (animated pages stop burning CPU/GPU) and unfreeze on next use; tabs idle past the idle-close timeout are closed. Pass `persist: true` on `open` to keep a tab live across turns (e.g. multi-step login); `browser.close` still releases explicitly.
- </instruction>
+</instruction>
 
 <examples>
 ```javascript
