@@ -772,11 +772,9 @@ describe("ModelRegistry command-resolved models.yml values", () => {
 		const slow = registry.find("slow-proxy", "custom-model");
 		if (!failing || !slow) throw new Error("Expected custom models");
 
-		const error = await resolveApiKeyOnce(registry.turnResolver(failing, "turn-session")).then(
-			() => undefined,
-			(failure: unknown) => failure,
+		await expect(resolveApiKeyOnce(registry.turnResolver(failing, "turn-session"))).rejects.toBeInstanceOf(
+			AIError.CredentialUnavailableError,
 		);
-		expect(error).toBeInstanceOf(AIError.CredentialUnavailableError);
 
 		const controller = new AbortController();
 		const reason = new Error("synthetic user abort");
