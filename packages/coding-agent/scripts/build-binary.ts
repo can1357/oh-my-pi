@@ -82,13 +82,17 @@ async function buildAndroidLauncher(outputPath: string): Promise<void> {
 }
 
 async function main(): Promise<void> {
-	const crossBuild = resolveCrossBuild(Bun.env.CROSS_TARGET);
-	const isAndroidBuild = process.platform === "android" && !crossBuild;
+	const crossTarget = Bun.env.CROSS_TARGET;
+	// Android is a relocatable bundle, not a Bun compile target.
+	const isAndroidCrossBuild = crossTarget === "android-arm64";
+	const crossBuild = isAndroidCrossBuild ? null : resolveCrossBuild(crossTarget);
+	const isAndroidBuild = isAndroidCrossBuild || (process.platform === "android" && !crossBuild);
 	const shouldAdhocSign =
+		!isAndroidBuild &&
 		process.platform === "darwin" &&
 		(!crossBuild || crossBuild.platform === "darwin") &&
 		Bun.env.BUN_NO_CODESIGN_MACHO_BINARY !== "1";
-	const outName = crossBuild ? `omp-${crossBuild.id}` : "omp";
+	const outName = isAndroidBuild ? "omp" : crossBuild ? `omp-${crossBuild.id}` : "omp";
 	const outputDir = isAndroidBuild ? path.join(packageDir, "dist", "android") : path.join(packageDir, "dist");
 	const outputPath = path.join(outputDir, outName);
 	// Generate inside the try so the finally always restores the empty checked-in
@@ -99,10 +103,19 @@ async function main(): Promise<void> {
 		// Generate here too for clean checkouts that skipped install hooks.
 		await runCommand(["bun", "--cwd=../collab-web", "run", "gen:export-viewer"]);
 		if (isAndroidBuild) {
-			await runCommand(["bun", "--cwd=../natives", "run", "build"], {
-				...Bun.env,
-				OMP_NATIVE_BUILD_BACKEND: "cargo",
-			});
+			if (isAndroidCrossBuild && process.platform !== "android") {
+				// Explicit target builds use the canonical Bazel driver; only a
+				// native Termux build uses the local Cargo/N-API host path.
+				await runCommand(
+					["bun", "../../scripts/bazel-natives.ts", "android-arm64", "--dest", "../natives/native"],
+					{ ...Bun.env, OMP_NATIVE_BUILD_BACKEND: "bazel" },
+				);
+			} else {
+				await runCommand(["bun", "--cwd=../natives", "run", "build"], {
+					...Bun.env,
+					OMP_NATIVE_BUILD_BACKEND: "cargo",
+				});
+			}
 			await buildAndroidLauncher(outputPath);
 		} else {
 			await compileCodingAgent({

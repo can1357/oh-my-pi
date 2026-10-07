@@ -83,6 +83,18 @@ bun run build
 bun run check
 ```
 
+Android ARM64 has an explicit experimental Bazel target; it is not part of the
+`all` native aggregate. From the workspace root, with Bazel and an installed
+Android NDK 25b or newer available:
+
+```sh
+ANDROID_NDK_HOME=/path/to/android-ndk bun scripts/bazel-natives.ts android-arm64
+```
+
+The installer targets API level 24, stamps the addon version, and installs
+`packages/natives/native/pi_natives.android-arm64.node`. It only load-probes
+artifacts native to the current host, so a Linux builder never loads Android.
+
 ## Architecture
 
 `@oh-my-pi/pi-natives` publishes a small core package plus generated
