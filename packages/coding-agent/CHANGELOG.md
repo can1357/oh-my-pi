@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Stale-read pruning now also drops an earlier `read` whose lines a later read of the same file shows again unchanged — a narrow range inside a wider one — and keeps it when a line changed, the ranges only overlap, or a line was cut by the column cap ([#14799](https://github.com/can1357/oh-my-pi/pull/14799) by [@kasrakhosravi](https://github.com/kasrakhosravi))
+
 ## [18.8.0] - 2026-10-07
 
 ### Added

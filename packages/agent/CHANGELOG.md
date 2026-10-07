@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added the optional `supersedeShown` prune hook: a result whose shown lines a newer result of the same target shows again, each unchanged, is superseded whatever their keys, so a range re-read inside a wider one stops riding along in context ([#14799](https://github.com/can1357/oh-my-pi/pull/14799) by [@kasrakhosravi](https://github.com/kasrakhosravi))
+
 ## [18.8.0] - 2026-10-07
 
 ### Changed
