@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- `/fast ultra` now uses an entitled Codex account in mixed-plan profiles without separating provider logins into another profile ([#14769](https://github.com/can1357/oh-my-pi/issues/14769)).
+
 ## [18.8.0] - 2026-10-07
 
 ### Added

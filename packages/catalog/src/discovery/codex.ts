@@ -407,7 +407,10 @@ function buildNormalizedCodexModel(
 			...(accountId && accountId.trim().length > 0
 				? {
 						accountAccess: {
-							[accountId]: parsed.cyberPrograms === undefined ? {} : { cyberPrograms: parsed.cyberPrograms },
+							[accountId]: {
+								...(parsed.cyberPrograms !== undefined ? { cyberPrograms: parsed.cyberPrograms } : {}),
+								...(parsed.serviceTiers !== undefined ? { serviceTiers: parsed.serviceTiers } : {}),
+							},
 						},
 					}
 				: {}),

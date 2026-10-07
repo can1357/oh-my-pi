@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Codex model discovery now keeps each account's available service tiers, so Ultrafast remains available in mixed-plan profiles ([#14769](https://github.com/can1357/oh-my-pi/issues/14769)).
+
 ## [18.8.0] - 2026-10-07
 
 ### Changed

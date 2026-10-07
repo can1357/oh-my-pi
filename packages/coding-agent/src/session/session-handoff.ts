@@ -157,13 +157,14 @@ export class SessionHandoff {
 				handoffLlmMessages,
 				this.#host.baseSystemPrompt(),
 			);
+			const serviceTier = this.#host.effectiveServiceTier(model);
 			const handoffStreamOptions = this.#host.prepareSimpleStreamOptions(
 				{
-					apiKey: this.#host.modelRegistry.resolver(model, cacheSessionId),
+					apiKey: this.#host.modelRegistry.resolver(model, { sessionId: cacheSessionId, serviceTier }),
 					sessionId: `${cacheSessionId}:side:${Snowflake.next()}`,
 					promptCacheKey: handoffPromptCacheKey,
 					preferWebsockets: false,
-					serviceTier: this.#host.effectiveServiceTier(model),
+					serviceTier,
 					hideThinkingSummary: this.#host.agent.hideThinkingSummary,
 					initiatorOverride: "agent",
 					signal: handoffSignal,

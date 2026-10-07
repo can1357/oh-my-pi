@@ -515,6 +515,69 @@ describe("Codex model discovery", () => {
 		}
 	});
 
+	it("unions advertised tiers without losing each Codex account's tier availability", async () => {
+		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-catalog-codex-tiers-"));
+		const fetchFn: typeof fetch = Object.assign(
+			async (_input: string | URL | Request, init?: RequestInit) => {
+				const accountId = new Headers(init?.headers).get("chatgpt-account-id");
+				return Response.json({
+					models: [
+						{
+							slug: "gpt-6.1-sol",
+							service_tiers:
+								accountId === "account-a"
+									? [{ id: "priority", name: "Fast" }]
+									: [
+											{ id: "priority", name: "Fast" },
+											{ id: "ultrafast", name: "Ultrafast" },
+										],
+						},
+						{
+							slug: "gpt-6-sol",
+							...(accountId === "account-b" ? { service_tiers: [] } : {}),
+						},
+						{ slug: "gpt-5.5" },
+					],
+				});
+			},
+			{ preconnect() {} },
+		);
+		try {
+			const result = await resolveProviderModels(
+				{
+					...openaiCodexModelManagerOptions({
+						resolveAccounts: async () => [
+							{ accessToken: "token-a", accountId: "account-a" },
+							{ accessToken: "token-b", accountId: "account-b" },
+						],
+						fetch: fetchFn,
+					}),
+					cacheDbPath: path.join(tempDir, "models.db"),
+				},
+				"online",
+			);
+			const sol = result.models.find(model => model.id === "gpt-6.1-sol");
+			expect(sol?.serviceTiers).toEqual(["priority", "ultrafast"]);
+			expect(sol?.accountAccess).toEqual({
+				"account-a": { serviceTiers: ["priority"] },
+				"account-b": { serviceTiers: ["priority", "ultrafast"] },
+			});
+			expect(shouldSendServiceTier("ultrafast", sol!)).toBe(true);
+
+			const empty = result.models.find(model => model.id === "gpt-6-sol");
+			expect(empty?.serviceTiers).toEqual([]);
+			expect(empty?.accountAccess).toEqual({
+				"account-a": {},
+				"account-b": { serviceTiers: [] },
+			});
+			const omitted = result.models.find(model => model.id === "gpt-5.5");
+			expect(omitted?.serviceTiers).toBeUndefined();
+			expect(omitted?.accountAccess).toEqual({ "account-a": {}, "account-b": {} });
+		} finally {
+			await fs.rm(tempDir, { recursive: true, force: true });
+		}
+	});
+
 	it("keeps per-account Codex cyber entitlements on shared and exclusive models", async () => {
 		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-catalog-codex-access-"));
 		const fetchFn: typeof fetch = Object.assign(

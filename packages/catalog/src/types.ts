@@ -1361,6 +1361,12 @@ export interface ModelAccountAccess {
 	 * Absent when the backend reported no program metadata.
 	 */
 	cyberPrograms?: readonly string[];
+	/**
+	 * Codex `service_tiers[].id` offered to this account on this model.
+	 * Absent when `/models` omits the list; an explicit empty list means no
+	 * optional tiers were advertised.
+	 */
+	serviceTiers?: readonly string[];
 }
 
 /** One Cursor `RequestedModel.parameters` entry recovered from rich discovery. */
@@ -1583,8 +1589,10 @@ export interface Model<TApi extends Api = Api> {
 	toolMode?: "code_mode_only";
 	/**
 	 * Service-tier ids the provider advertises for this model (Codex discovery
-	 * `service_tiers[].id`, e.g. `priority`, `ultrafast`). Absent when the
-	 * provider publishes no per-model tier list.
+	 * `service_tiers[].id`, e.g. `priority`, `ultrafast`). For a multi-account
+	 * catalog this is the union of advertised tiers; consult {@link accountAccess}
+	 * for an individual account's tiers. Absent when no account publishes a list;
+	 * an explicit empty list is preserved.
 	 */
 	serviceTiers?: readonly string[];
 	/** Preferred model to switch to when context promotion is triggered (model id or provider/id). */

@@ -6,7 +6,7 @@ import type {
 	OAuthPrompt,
 	OAuthProviderId,
 } from "../registry/oauth/types";
-import type { Provider } from "../types";
+import type { Provider, ServiceTier } from "../types";
 import type {
 	ClientUsageIdentity,
 	ClientUsageReport,
@@ -472,8 +472,12 @@ export interface ModelUsageHealthOptions {
 export type AuthApiKeyOptions = {
 	baseUrl?: string;
 	modelId?: string;
+	/** Effective tier for model-scoped credential selection. */
+	serviceTier?: ServiceTier;
 	/** Provider account ids known to serve `modelId` from multi-account discovery; OAuth selection prefers them and tries other accounts only as a last resort. */
 	accountIds?: readonly string[];
+	/** Require OAuth selection to stay within `accountIds`; an empty or missing list has no eligible OAuth accounts. */
+	strictAccountIds?: boolean;
 	/**
 	 * Caller's cancel signal. Threaded into any broker-bound OAuth refresh so
 	 * `ESC` / request abort actually kills a hung broker fetch instead of

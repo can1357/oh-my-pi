@@ -502,9 +502,9 @@ export class CredentialSelector {
 	 *    accounts are allowed (blocked candidates rank earliest-unblocking
 	 *    first) so the caller gets real usage-limit semantics from the wire
 	 *    instead of a missing key;
-	 * 3. unfiltered last resort: the plan filter matched nothing usable —
-	 *    skip it and try every account once; the server is the final arbiter
-	 *    of model access.
+	 * 3. unfiltered last resort: drop the plan filter, and drop the account
+	 *    preference unless `strictAccountIds` is set; the server is the final
+	 *    arbiter of model access for the remaining candidates.
 	 *
 	 * Returns both the API key bytes for outbound requests AND the refreshed
 	 * {@link OAuthCredential} so callers needing identity metadata (account id,
@@ -515,11 +515,19 @@ export class CredentialSelector {
 		sessionId?: string,
 		options?: AuthApiKeyOptions,
 	): Promise<OAuthResolutionResult | undefined> {
+		const strictAccountIds = options?.strictAccountIds === true;
+		const accountIds = options?.accountIds?.length ? new Set(options.accountIds) : undefined;
+		if (strictAccountIds && !accountIds?.size) return undefined;
 		await this.#deps.pool.adoptExternalChanges();
 		const credentials = this.#deps.pool
 			.credentials(provider)
 			.map((credential, index) => ({ credential, index }))
-			.filter((entry): entry is { credential: OAuthCredential; index: number } => entry.credential.type === "oauth");
+			.filter(
+				(entry): entry is { credential: OAuthCredential; index: number } =>
+					entry.credential.type === "oauth" &&
+					(!strictAccountIds ||
+						(entry.credential.accountId !== undefined && accountIds?.has(entry.credential.accountId) === true)),
+			);
 		this.#deps.policies.validateFor(
 			provider,
 			credentials.map(entry => entry.credential),
@@ -539,7 +547,6 @@ export class CredentialSelector {
 		const blockScopes = credentialBlockScopesForRequest(provider, strategy, rankingContext, blockScope);
 		const planGate = strategy?.planGate?.(rankingContext);
 		const hasPlanRequirement = planGate !== undefined;
-		const accountIds = options?.accountIds?.length ? new Set(options.accountIds) : undefined;
 		const enforceAccounts =
 			accountIds !== undefined &&
 			credentials.some(
@@ -855,12 +862,15 @@ export class CredentialSelector {
 			allowBlocked: boolean;
 			enforcePlanRequirement: boolean;
 			enforceAccounts: boolean;
-		}> = [
-			{ allowBlocked: false, enforcePlanRequirement, enforceAccounts },
-			{ allowBlocked: true, enforcePlanRequirement, enforceAccounts },
-		];
-		if (enforcePlanRequirement) passes.push({ allowBlocked: true, enforcePlanRequirement: false, enforceAccounts });
-		if (enforceAccounts) passes.push({ allowBlocked: true, enforcePlanRequirement: false, enforceAccounts: false });
+		}> = [{ allowBlocked: false, enforcePlanRequirement, enforceAccounts }];
+		if (!strictAccountIds) {
+			passes.push({ allowBlocked: true, enforcePlanRequirement, enforceAccounts });
+			if (enforcePlanRequirement)
+				passes.push({ allowBlocked: true, enforcePlanRequirement: false, enforceAccounts });
+		}
+		if (enforceAccounts && !strictAccountIds) {
+			passes.push({ allowBlocked: true, enforcePlanRequirement: false, enforceAccounts: false });
+		}
 
 		for (const pass of passes) {
 			for (const candidate of candidates) {
@@ -968,6 +978,12 @@ export class CredentialSelector {
 		if (!(await this.#prepareOAuthCredentialForRequest(provider, selection, options))) {
 			return undefined;
 		}
+		if (
+			options?.strictAccountIds &&
+			(!selection.credential.accountId || !options.accountIds?.includes(selection.credential.accountId))
+		) {
+			return undefined;
+		}
 		// Capture the row id once, immediately after #prepareOAuthCredentialForRequest
 		// resynced selection.index from the store. A concurrent disable during the
 		// usage/refresh awaits below can shift positional indices, so every later
@@ -1044,6 +1060,9 @@ export class CredentialSelector {
 			}
 			if (!result) return undefined;
 			const updated = mergeRefreshedCredential(selection.credential, result.newCredentials);
+			if (options?.strictAccountIds && (!updated.accountId || !options.accountIds?.includes(updated.accountId))) {
+				return undefined;
+			}
 			if (credentialId !== undefined) {
 				const idx = this.#deps.pool.replaceById(provider, credentialId, updated);
 				if (idx !== -1) selection.index = idx;

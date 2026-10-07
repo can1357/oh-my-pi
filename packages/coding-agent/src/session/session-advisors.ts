@@ -991,7 +991,13 @@ export class SessionAdvisors {
 		advisor.providerSessionId = providerSessionId;
 		advisor.agent.sessionId = providerSessionId;
 		advisor.agent.promptCacheKey = this.#host.agent.promptCacheKey ?? providerSessionId;
-		advisor.agent.getApiKey = requestModel => this.#host.modelRegistry.resolver(requestModel, providerSessionId);
+		advisor.agent.getApiKey = requestModel =>
+			this.#host.modelRegistry.resolver(requestModel, {
+				sessionId: providerSessionId,
+				serviceTier: advisor.agent.serviceTierResolver
+					? advisor.agent.serviceTierResolver(requestModel)
+					: advisor.agent.serviceTier,
+			});
 		advisor.agent.setMetadataResolver(
 			providerSessionId
 				? provider => buildSessionMetadata(providerSessionId, provider, this.#host.modelRegistry.authStorage)
@@ -1417,7 +1423,11 @@ export class SessionAdvisors {
 				providerSessionState: this.#host.providerSessionState,
 				cursorExecHandlers: advisorCursorExecHandlers,
 				cwdResolver: () => this.#host.sessionManager.getCwd(),
-				getApiKey: requestModel => this.#host.modelRegistry.resolver(requestModel, advisorProviderSessionId),
+				getApiKey: requestModel =>
+					this.#host.modelRegistry.resolver(requestModel, {
+						sessionId: advisorProviderSessionId,
+						serviceTier: advisorServiceTierResolver(requestModel),
+					}),
 				streamFn: advisorStreamFn,
 				// Maintenance installs compactionSummary messages; the core Agent's
 				// default converter drops custom roles and would discard their replay.

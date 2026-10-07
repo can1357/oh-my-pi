@@ -2131,7 +2131,12 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 
 	let agent: Agent;
 	const effectiveGetApiKey =
-		options.getApiKey ?? (requestModel => modelRegistry.resolver(requestModel, agent.sessionId));
+		options.getApiKey ??
+		((requestModel: Model) =>
+			modelRegistry.resolver(requestModel, {
+				sessionId: agent.sessionId,
+				serviceTier: agent.serviceTierResolver ? agent.serviceTierResolver(requestModel) : agent.serviceTier,
+			}));
 	let session!: AgentSession;
 	let hasSession = false;
 	let hasRegistered = false;

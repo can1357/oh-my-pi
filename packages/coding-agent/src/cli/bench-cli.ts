@@ -1221,7 +1221,10 @@ export async function runBenchCommand(command: BenchCommandArgs, deps: BenchDepe
 						// Provider-session state is still recreated by runBenchRequest and
 						// stateful Responses chaining is disabled below.
 						const credentialAffinitySessionId = pairIndex === 0 ? testSessionId : randomSessionId();
-						const credentialResolver = runtime.modelRegistry.resolver(model, credentialAffinitySessionId);
+						const credentialResolver = runtime.modelRegistry.resolver(model, {
+							sessionId: credentialAffinitySessionId,
+							serviceTier,
+						});
 						const coldResult = await runBenchRequest(
 							model,
 							{
@@ -1324,7 +1327,7 @@ export async function runBenchCommand(command: BenchCommandArgs, deps: BenchDepe
 						...(await runBenchRequest(
 							model,
 							{
-								apiKey: runtime.modelRegistry.resolver(model, sessionId),
+								apiKey: runtime.modelRegistry.resolver(model, { sessionId, serviceTier }),
 								sessionId,
 								messages: challenge.messages,
 								maxTokens: challenge.maxTokens,

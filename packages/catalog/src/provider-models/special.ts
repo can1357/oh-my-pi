@@ -90,7 +90,8 @@ export function openaiCodexModelManagerOptions(
 /**
  * Merge complete per-account Codex catalogs into one authoritative list,
  * deduped by model id. The first account to expose an id supplies its spec;
- * account access is merged from every account whose catalog lists that id.
+ * account access is merged from every account whose catalog lists that id,
+ * while model-level tiers are the union of all advertised tier lists.
  *
  * Returns `null` when any account's fetch failed transiently, so a partial list
  * cannot replace the previous or bundled authoritative catalog. An account
@@ -118,10 +119,21 @@ function unionCodexModels(
 			const existing = byId.get(model.id);
 			if (!existing) {
 				byId.set(model.id, model);
-			} else if (model.accountAccess) {
+			} else {
+				let serviceTiers = existing.serviceTiers;
+				if (model.serviceTiers) {
+					if (serviceTiers === undefined) {
+						serviceTiers = model.serviceTiers;
+					} else {
+						for (const tier of model.serviceTiers) {
+							if (!serviceTiers.includes(tier)) serviceTiers = [...serviceTiers, tier];
+						}
+					}
+				}
 				byId.set(model.id, {
 					...existing,
-					accountAccess: { ...existing.accountAccess, ...model.accountAccess },
+					...(serviceTiers !== undefined ? { serviceTiers } : {}),
+					...(model.accountAccess ? { accountAccess: { ...existing.accountAccess, ...model.accountAccess } } : {}),
 				});
 			}
 		}

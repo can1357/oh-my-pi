@@ -2,7 +2,7 @@ import { type ApiKeyResolution, type ApiKeyResolver, markAfterSiblingWait } from
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { isUsageLimitOutcome } from "@oh-my-pi/pi-ai/error/rate-limit";
 import type { AuthApiKeyOptions, AuthStorage } from "@oh-my-pi/pi-ai/auth-storage";
-import type { Api, Model } from "@oh-my-pi/pi-ai/types";
+import type { Api, Model, ServiceTier } from "@oh-my-pi/pi-ai/types";
 
 /** Model slice accepted by the model-form `resolver(model, sessionId)` overload. */
 export type ApiKeyResolverModel = Pick<Model<Api>, "provider" | "baseUrl" | "id">;
@@ -14,6 +14,8 @@ export interface ApiKeyResolverOptions {
 	baseUrl?: string;
 	/** Provider model id forwarded to model-scoped usage ranking/backoff. */
 	modelId?: string;
+	/** Effective wire tier for this request, used to constrain account selection. */
+	serviceTier?: ServiceTier;
 }
 
 /**
@@ -36,13 +38,14 @@ export interface ApiKeyResolverRegistry {
 	 * → rotate to a sibling and re-resolve, unless quota exhaustion has no sibling.
 	 *
 	 * Two call forms: `resolver(provider, options?)` for provider-scoped keys,
-	 * and `resolver(model, sessionId?)` which derives `baseUrl`/`modelId` from
-	 * the model. The resolver is stateless (safe to reuse across requests).
+	 * and `resolver(model, sessionIdOrOptions?)` which derives `baseUrl`/`modelId`
+	 * from the model. The resolver is stateless (safe to reuse across requests).
 	 * Callers that need the initial key for a guard can call
 	 * `resolveApiKeyOnce(resolver)`.
 	 */
 	resolver(provider: string, options?: ApiKeyResolverOptions): ApiKeyResolver;
 	resolver(model: ApiKeyResolverModel, sessionId?: string): ApiKeyResolver;
+	resolver(model: ApiKeyResolverModel, options?: ApiKeyResolverOptions): ApiKeyResolver;
 }
 
 /**
@@ -54,7 +57,7 @@ export function createApiKeyResolver(
 	provider: string,
 	options: ApiKeyResolverOptions = {},
 ): ApiKeyResolver {
-	const { sessionId, baseUrl, modelId } = options;
+	const { sessionId, baseUrl, modelId, serviceTier } = options;
 	const resolveKey = (
 		forceRefresh: boolean | undefined,
 		signal?: AbortSignal,
@@ -63,6 +66,7 @@ export function createApiKeyResolver(
 		registry.getApiKeyWithCredentialForProvider(provider, sessionId, {
 			baseUrl,
 			modelId,
+			serviceTier,
 			forceRefresh,
 			signal,
 			refreshReason,

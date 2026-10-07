@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Codex requests that require an account's service tier no longer fall through to accounts without that entitlement ([#14769](https://github.com/can1357/oh-my-pi/issues/14769)).
+
 ## [18.8.0] - 2026-10-07
 
 ### Breaking Changes

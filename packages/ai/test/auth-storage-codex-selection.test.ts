@@ -2659,6 +2659,102 @@ describe("AuthStorage codex oauth ranking", () => {
 		).toBe("api-account-A");
 	});
 
+	test("strict account IDs never escape to a healthier pinned account or after eligible accounts run out", async () => {
+		if (!authStorage || !store?.upsertCredentialBlock) throw new Error("test setup failed");
+
+		await authStorage.credentials.set("openai-codex", [
+			{ type: "oauth", ...createCredential("acct-exhausted", "exhausted@example.com") },
+			{ type: "oauth", ...createCredential("acct-blocked", "blocked@example.com") },
+			{ type: "oauth", ...createCredential("acct-ineligible", "ineligible@example.com") },
+		]);
+		usageByAccount.set(
+			"acct-exhausted",
+			createCodexUsageReport({
+				accountId: "acct-exhausted",
+				primary: { usedFraction: 1, resetInMs: HOUR_MS },
+				secondary: { usedFraction: 1, resetInMs: WEEK_MS },
+			}),
+		);
+		for (const accountId of ["acct-blocked", "acct-ineligible"]) {
+			usageByAccount.set(
+				accountId,
+				createCodexUsageReport({
+					accountId,
+					primary: { usedFraction: 0.1, resetInMs: HOUR_MS },
+					secondary: { usedFraction: 0.1, resetInMs: WEEK_MS },
+				}),
+			);
+		}
+
+		const ineligible = authStorage.oauth
+			.accounts("openai-codex")
+			.find(account => account.accountId === "acct-ineligible");
+		if (!ineligible) throw new Error("expected ineligible account");
+		const sessionId = "strict-codex-accounts";
+		expect(authStorage.sessions.pin("openai-codex", sessionId, ineligible.credentialId)).toBe(true);
+		expect(await authStorage.keys.get("openai-codex", sessionId)).toBe("api-acct-ineligible");
+		expect(
+			await authStorage.keys.get("openai-codex", sessionId, {
+				accountIds: ["acct-blocked"],
+				strictAccountIds: true,
+			}),
+		).toBe("api-acct-blocked");
+
+		const blockedRow = store.listAuthCredentials("openai-codex").find(row => {
+			return row.credential.type === "oauth" && row.credential.accountId === "acct-blocked";
+		});
+		if (!blockedRow) throw new Error("expected blocked account");
+		store.upsertCredentialBlock({
+			credentialId: blockedRow.id,
+			providerKey: "openai-codex:oauth",
+			blockScope: "shared",
+			blockedUntilMs: Date.now() + HOUR_MS,
+		});
+
+		expect(
+			await authStorage.keys.get("openai-codex", sessionId, {
+				accountIds: ["acct-exhausted", "acct-blocked"],
+				strictAccountIds: true,
+			}),
+		).toBeUndefined();
+		expect(
+			await authStorage.keys.get("openai-codex", "strict-exhausted-only", {
+				accountIds: ["acct-exhausted"],
+				strictAccountIds: true,
+			}),
+		).toBeUndefined();
+		expect(
+			await authStorage.keys.get("openai-codex", "strict-blocked-only", {
+				accountIds: ["acct-blocked"],
+				strictAccountIds: true,
+			}),
+		).toBeUndefined();
+		expect(
+			await authStorage.keys.get("openai-codex", "strict-unmatched", {
+				accountIds: ["acct-missing"],
+				strictAccountIds: true,
+			}),
+		).toBeUndefined();
+		expect(
+			await authStorage.keys.get("openai-codex", "strict-empty", {
+				accountIds: [],
+				strictAccountIds: true,
+			}),
+		).toBeUndefined();
+		expect(
+			await authStorage.keys.get("openai-codex", "strict-absent", {
+				strictAccountIds: true,
+			}),
+		).toBeUndefined();
+		const fallbackSessionId = "strict-codex-ordinary-fallback";
+		expect(authStorage.sessions.pin("openai-codex", fallbackSessionId, ineligible.credentialId)).toBe(true);
+		expect(
+			await authStorage.keys.get("openai-codex", fallbackSessionId, {
+				accountIds: ["acct-missing"],
+			}),
+		).toBe("api-acct-ineligible");
+	});
+
 	test.each([
 		["gpt-5.6-sol", "free", "plus"],
 		["gpt-5.6-luna", "go", "business"],

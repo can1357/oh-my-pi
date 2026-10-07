@@ -14,6 +14,7 @@ import type {
 	Model,
 	ModelSpec,
 	RemoteCompactionConfig,
+	ServiceTier,
 	SimpleStreamOptions,
 	ThinkingConfig,
 } from "@oh-my-pi/pi-ai/types";
@@ -2951,11 +2952,32 @@ export class ModelRegistry {
 		);
 	}
 
+	#accountSelection(
+		model: Model<Api> | undefined,
+		serviceTier: AuthApiKeyOptions["serviceTier"],
+	): Pick<AuthApiKeyOptions, "accountIds" | "strictAccountIds"> {
+		const access = model?.accountAccess;
+		if (
+			model?.api === "openai-codex-responses" &&
+			serviceTier === "ultrafast" &&
+			model.serviceTiers?.includes("ultrafast")
+		) {
+			const accountIds: string[] = [];
+			if (access) {
+				for (const id in access) {
+					if (access[id]?.serviceTiers?.includes("ultrafast")) accountIds.push(id);
+				}
+			}
+			return { accountIds, strictAccountIds: true };
+		}
+		return { accountIds: access && Object.keys(access) };
+	}
+
 	/** Resolve a model's request credential or the no-auth sentinel. */
 	async getApiKey(
 		model: Model<Api>,
 		sessionId?: string,
-		options?: { signal?: AbortSignal },
+		options?: { signal?: AbortSignal; serviceTier?: ServiceTier },
 	): Promise<string | undefined> {
 		// A disabled provider gets no credential, so no request reaches it however
 		// its model was obtained.
@@ -2966,7 +2988,7 @@ export class ModelRegistry {
 		return this.authStorage.keys.get(model.provider, sessionId, {
 			baseUrl: model.baseUrl,
 			modelId: model.id,
-			accountIds: model.accountAccess && Object.keys(model.accountAccess),
+			...this.#accountSelection(model, options?.serviceTier),
 			signal: options?.signal,
 		});
 	}
@@ -3010,15 +3032,20 @@ export class ModelRegistry {
 		if (this.#isKeylessProvider(provider)) {
 			return { apiKey: kNoAuth };
 		}
-		const accountAccess = options?.modelId ? this.find(provider, options.modelId)?.accountAccess : undefined;
-		return this.authStorage.keys.getWithCredential(provider, sessionId, {
+		const model = options?.modelId ? this.find(provider, options.modelId) : undefined;
+		const selection = this.#accountSelection(model, options?.serviceTier);
+		const resolved = await this.authStorage.keys.getWithCredential(provider, sessionId, {
 			baseUrl: options?.baseUrl,
 			modelId: options?.modelId,
-			accountIds: accountAccess && Object.keys(accountAccess),
+			...selection,
 			forceRefresh: options?.forceRefresh,
 			refreshReason: options?.refreshReason,
 			signal: options?.signal,
 		});
+		if (!resolved && selection.strictAccountIds) {
+			throw new Error(`No Codex account advertising Ultrafast is available for ${options?.modelId}`);
+		}
+		return resolved;
 	}
 
 	/**
@@ -3030,6 +3057,7 @@ export class ModelRegistry {
 	 */
 	resolver(provider: string, options?: ApiKeyResolverOptions): ApiKeyResolver;
 	resolver(model: ApiKeyResolverModel, sessionId?: string): ApiKeyResolver;
+	resolver(model: ApiKeyResolverModel, options?: ApiKeyResolverOptions): ApiKeyResolver;
 	resolver(target: string | ApiKeyResolverModel, optionsOrSessionId?: ApiKeyResolverOptions | string): ApiKeyResolver {
 		const options = typeof optionsOrSessionId === "string" ? { sessionId: optionsOrSessionId } : optionsOrSessionId;
 		if (typeof target === "string") {

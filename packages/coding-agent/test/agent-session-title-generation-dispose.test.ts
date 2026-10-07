@@ -88,7 +88,6 @@ describe("AgentSession title generation disposal", () => {
 				.find(account => account.active)?.credentialId;
 			return "test-key";
 		});
-		const resolver = vi.spyOn(modelRegistry, "resolver");
 		session = new AgentSession({
 			agent,
 			sessionManager: SessionManager.inMemory(),
@@ -114,7 +113,6 @@ describe("AgentSession title generation disposal", () => {
 		const titleSessionId = getApiKey.mock.calls[0]?.[1];
 		expect(titleSessionId).toBeTruthy();
 		expect(titleSessionId).not.toBe(providerSessionId);
-		expect(resolver.mock.calls[0]?.[1]).toBe(titleSessionId);
 		expect(titleProvider).toBe("anthropic");
 		expect(titleCredentialId).toBe(pinnedAccount.credentialId);
 		session.beginDispose();

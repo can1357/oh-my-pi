@@ -10997,9 +10997,10 @@ export class AgentSession implements SettingsScope {
 		// inference and queueing output nobody reads. Abort the request ourselves when
 		// we stop consuming it, without touching the caller's signal.
 		const streamAbort = new AbortController();
+		const serviceTier = this.#models.effectiveServiceTier(model);
 		const options = this.prepareSimpleStreamOptions(
 			{
-				apiKey: this.#modelRegistry.resolver(model, cacheSessionId),
+				apiKey: this.#modelRegistry.resolver(model, { sessionId: cacheSessionId, serviceTier }),
 				// Side-channel turns must not share OpenAI/Codex append-only
 				// conversation state with the main agent turn: IRC and /btw can run
 				// while the main turn is mid-tool-call. Keep the prompt-cache key
@@ -11017,7 +11018,7 @@ export class AgentSession implements SettingsScope {
 				// default thinking budget. A side turn's cap is a hard resource boundary.
 				disableReasoning: shouldDisableReasoning(this.thinkingLevel) || cappedBudgetThinking,
 				hideThinkingSummary: this.agent.hideThinkingSummary,
-				serviceTier: this.#models.effectiveServiceTier(model),
+				serviceTier,
 				maxTokens: args.maxTokens,
 				signal: args.signal ? AbortSignal.any([args.signal, streamAbort.signal]) : streamAbort.signal,
 			},

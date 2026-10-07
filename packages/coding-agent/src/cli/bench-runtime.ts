@@ -19,7 +19,7 @@ import type {
 import { buildModelProviderPriorityRank } from "@oh-my-pi/pi-catalog/identity";
 import { getProjectDir, logger } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
-import type { ApiKeyResolverModel } from "../config/api-key-resolver";
+import type { ApiKeyResolverModel, ApiKeyResolverOptions } from "../config/api-key-resolver";
 import { ModelRegistry } from "../config/model-registry";
 import { formatModelString, getModelMatchPreferences, resolveCliModel } from "../config/model-resolver";
 import { Settings } from "../config/settings";
@@ -39,6 +39,7 @@ export interface BenchModelRegistry {
 	getAvailable(): Model<Api>[];
 	getApiKey(model: Model<Api>, sessionId?: string): Promise<string | undefined>;
 	resolver(model: ApiKeyResolverModel, sessionId?: string): ApiKeyResolver;
+	resolver(model: ApiKeyResolverModel, options?: ApiKeyResolverOptions): ApiKeyResolver;
 	hasConfiguredAuth?(model: Model<Api>): boolean;
 	/**
 	 * Discovery-backed providers the catalog may still need to fetch
