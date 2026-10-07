@@ -140,6 +140,25 @@ labeling action. `getAllTools()` returns tool schemas and source metadata, while
 
 ### Provider registration
 
+Provider `models` entries and rows returned by `fetchDynamicModels` accept the same `api`/`kind` pairs as `models.yml` (see [Models](./models.md)): a runner API such as `openai-images` implies its kind, so the model reaches the `image` role and `generate_image` instead of registering as chat. A static `models` entry whose `kind` its api cannot serve fails `registerProvider`; such a `fetchDynamicModels` row is dropped with a logged warning.
+
+```ts
+pi.registerProvider("my-gateway", {
+  baseUrl: "https://gateway.example.com/v1",
+  apiKey: "GATEWAY_API_KEY",
+  models: [{
+    id: "gpt-image-2",
+    name: "GPT Image 2",
+    api: "openai-images", // kind: "image" implied
+    reasoning: false,
+    input: ["text"],
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    contextWindow: 128000,
+    maxTokens: 16384,
+  }],
+});
+```
+
 `pi.registerProvider(name, config)` can include an optional `usage` field containing a
 `UsageProvider` imported from `@oh-my-pi/pi-ai`. Its `fetchUsage` implementation receives the
 normalized credential and returns a normalized `UsageReport`; the result is then handled

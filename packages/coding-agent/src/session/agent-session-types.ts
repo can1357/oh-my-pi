@@ -24,6 +24,7 @@ import type { AdvisorConfig } from "@oh-my-pi/pi-tui/overlays/advisor-config";
 import type { AsyncJob, AsyncJobDeliveryState, AsyncJobManager } from "../async";
 import type { EffectiveExtensionRoots } from "../capability/types";
 import type { AgentDefinition } from "../task/types";
+import type { SessionAccountPoolScope } from "../config/account-pools";
 import type { ModelRegistry } from "../config/model-registry";
 import type { PromptTemplate } from "../config/prompt-templates";
 import type { Settings } from "../config/settings";
@@ -249,6 +250,14 @@ export interface AgentSessionConfig {
 	createThinkTool?: () => Promise<AgentTool | null>;
 	/** Model registry for API key resolution and model discovery. */
 	modelRegistry: ModelRegistry;
+	/**
+	 * Whether `switchSession` may open a session whose saved models cannot be
+	 * restored, keeping the current model and warning, instead of throwing
+	 * `Could not restore model <provider/id>`. `retry.modelFallback: false`
+	 * still forbids it. `createAgentSession` sets this from `hasUI` and its
+	 * `allowSessionModelFallback` option. Default: false.
+	 */
+	allowSessionModelFallback?: boolean;
 	/** Whether the startup model may be replaced by refreshed same-selector registry metadata. */
 	rebindModelAfterDiscovery?: boolean;
 	/** Tool registry for LSP and settings. */
@@ -324,6 +333,8 @@ export interface AgentSessionConfig {
 	agentKind?: "main" | "sub";
 	/** Provider-facing session ID override. */
 	providerSessionId?: string;
+	/** OAuth account pools enforced on the session's key lookups; the session lifts them on dispose. */
+	accountPoolScope?: SessionAccountPoolScope;
 	/** Whether the provider prompt-cache key was explicit or fork-inherited. */
 	providerPromptCacheKeySource?: "explicit" | "fork";
 	/** Full advisor toolset built against an advisor-scoped tool session. */
@@ -573,6 +584,8 @@ export interface EphemeralTurnOptions {
 	onTextDelta?: (delta: string) => void | Promise<void>;
 	signal?: AbortSignal;
 	dedupeReply?: boolean;
+	/** UTF-8 byte cap of the deduped reply (default 4 KiB); `Infinity` keeps a long answer whole. */
+	replyMaxBytes?: number;
 }
 
 /** A side-turn response that is not appended to session history. */

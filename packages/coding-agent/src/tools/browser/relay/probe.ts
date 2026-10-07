@@ -5,13 +5,15 @@
  * ({@link RelayUnavailableInfo}) says whether an extension has ever done so.
  * That splits the two reasons for a 503 that used to look identical:
  * - Extension seen before: Chrome reaped its MV3 service worker; the
- *   extension's 30s keepalive alarm revives it, so waiting one alarm period
- *   pays off.
+ *   extension's 30s keepalive alarm revives it, so waiting out one alarm
+ *   period after the disconnect pays off. Past that, Chrome itself is gone
+ *   (quit, profile closed) and the open fails at once.
  * - Extension never seen: an installed extension dials within one alarm
  *   period of the server starting, so once the server has been up that long
  *   nothing is coming and the open fails at once instead of burning the
  *   whole window every call.
  */
+import { VERSION } from "@oh-my-pi/pi-utils/dirs";
 import { throwIfAborted } from "../../tool-errors";
 import { probeCdpResponse } from "../attach";
 import type { RelayUnavailableInfo } from "./server";
@@ -33,6 +35,8 @@ export type RelayWaitOutcome =
 	| "unreachable"
 	/** The relay is serving but no extension connected within the dial window. */
 	| "no-extension"
+	/** An extension connected earlier but has stayed away past the redial window (e.g. Chrome quit). */
+	| "extension-gone"
 	/** An older relay server is still running. */
 	| "outdated-relay"
 	/** The relay extension is older than the running server. */
@@ -49,7 +53,16 @@ function parseUnavailableInfo(body: string): RelayUnavailableInfo | null {
 			"uptimeMs" in parsed &&
 			typeof parsed.uptimeMs === "number"
 		) {
-			return { error: "", extensionSeen: parsed.extensionSeen, uptimeMs: parsed.uptimeMs };
+			const disconnectedMs =
+				"disconnectedMs" in parsed && typeof parsed.disconnectedMs === "number" ? parsed.disconnectedMs : undefined;
+			return {
+				error: "",
+				extensionSeen: parsed.extensionSeen,
+				uptimeMs: parsed.uptimeMs,
+				ompRelayVersion:
+					"ompRelayVersion" in parsed && typeof parsed.ompRelayVersion === "string" ? parsed.ompRelayVersion : "",
+				disconnectedMs,
+			};
 		}
 	} catch {
 		// Not a relay body (older relay or foreign server); treated as opaque 503 below.
@@ -72,6 +85,8 @@ function readyOutcome(body: string): RelayWaitOutcome {
 			!("ompExtensionDiscardedTabsProtocol" in parsed) ||
 			parsed.ompExtensionDiscardedTabsProtocol !== String(DISCARDED_TABS_PROTOCOL_VERSION)
 		) {
+			// A relay from another OMP version is the likelier culprit than the extension.
+			if (!("ompRelayVersion" in parsed) || parsed.ompRelayVersion !== VERSION) return "outdated-relay";
 			return "outdated-extension";
 		}
 		return "ready";
@@ -82,13 +97,15 @@ function readyOutcome(body: string): RelayWaitOutcome {
 
 /**
  * Poll the relay at `cdpUrl` until its extension is connected. Gives up
- * immediately when nothing serves the endpoint, after one dial window when
- * an extension has connected before (service-worker revival), or as soon as
- * the server has been up a full dial window without ever seeing one.
+ * immediately when nothing serves the endpoint, once one dial window has
+ * passed since a previously connected extension went away (service-worker
+ * revival), or as soon as the server has been up a full dial window without
+ * ever seeing one.
  */
 export async function waitForRelayExtension(cdpUrl: string, signal?: AbortSignal): Promise<RelayWaitOutcome> {
 	const probeUrl = `${cdpUrl}/json/version`;
 	let deadline = Date.now() + EXTENSION_DIAL_WINDOW_MS;
+	let staleRelay = false;
 	for (;;) {
 		throwIfAborted(signal);
 		const response = await probeCdpResponse(probeUrl, { timeoutMs: PROBE_TIMEOUT_MS, signal });
@@ -97,11 +114,16 @@ export async function waitForRelayExtension(cdpUrl: string, signal?: AbortSignal
 		if (response.status >= 200 && response.status < 300) return readyOutcome(response.body);
 		if (response.status !== 503) return "unreachable";
 		const info = parseUnavailableInfo(response.body);
+		staleRelay = info !== null && info.ompRelayVersion !== VERSION;
 		if (info && !info.extensionSeen) {
 			// Never connected: the window is measured from server start, not from now.
 			deadline = Math.min(deadline, Date.now() - info.uptimeMs + EXTENSION_DIAL_WINDOW_MS);
+		} else if (info?.disconnectedMs !== undefined) {
+			// Seen, then gone: the redial window is measured from the disconnect.
+			deadline = Math.min(deadline, Date.now() - info.disconnectedMs + EXTENSION_DIAL_WINDOW_MS);
+			if (Date.now() >= deadline) return staleRelay ? "outdated-relay" : "extension-gone";
 		}
-		if (Date.now() >= deadline) return "no-extension";
+		if (Date.now() >= deadline) return staleRelay ? "outdated-relay" : "no-extension";
 		await Bun.sleep(POLL_INTERVAL_MS);
 	}
 }

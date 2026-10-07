@@ -26,7 +26,7 @@ use super::{
 use crate::error::EditError;
 
 const MAX_EXPANDED_RANGE_LINES: u32 = 100_000;
-static UNIFIED_HUNK_RE: LazyLock<Regex> =
+pub(super) static UNIFIED_HUNK_RE: LazyLock<Regex> =
 	LazyLock::new(|| Regex::new(r"^@@\s+[-+]?\d+,\d+\s+[-+]?\d+,\d+\s+@@").expect("valid regex"));
 
 /// Inverted concrete range with metadata for source-aware enrichment.

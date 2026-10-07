@@ -76,7 +76,10 @@ mod count_fast {
 	/// The descriptor shortcuts apply only to handles backed by a native host
 	/// file; provider-backed files always take the `read` path.
 	#[inline]
-	pub(crate) fn count_bytes_fast<T: WordCountable>(handle: &mut T) -> (usize, Option<io::Error>) {
+	pub(crate) fn count_bytes_fast<T: WordCountable>(
+		handle: &mut T,
+		buffer: &mut AlignedBuffer,
+	) -> (usize, Option<io::Error>) {
 		let mut byte_count = 0;
 	
 		#[cfg(unix)]
@@ -136,9 +139,8 @@ mod count_fast {
 		}
 	
 		// Fall back on `read`, but without the overhead of counting words and lines.
-		let mut buf = [0_u8; BUF_SIZE];
 		loop {
-			match handle.read(&mut buf) {
+			match handle.read(&mut buffer.data) {
 				Ok(0) => return (byte_count, None),
 				Ok(n) => {
 					byte_count += n;
@@ -149,18 +151,20 @@ mod count_fast {
 		}
 	}
 	
-	/// A simple structure used to align a [`BUF_SIZE`] buffer to 32-byte boundary.
+	/// A [`BUF_SIZE`] read buffer aligned to a 32-byte boundary.
 	///
 	/// This is useful as bytecount uses 256-bit wide vector operations that run
-	/// much faster on aligned data (at least on x86 with AVX2 support).
+	/// much faster on aligned data (at least on x86 with AVX2 support). One
+	/// serves every input of an invocation: zero-filling 256 KiB per file
+	/// dwarfs counting a small one.
 	#[repr(align(32))]
-	struct AlignedBuffer {
+	pub(crate) struct AlignedBuffer {
 		data: [u8; BUF_SIZE],
 	}
 	
-	impl Default for AlignedBuffer {
-		fn default() -> Self {
-			Self { data: [0; BUF_SIZE] }
+	impl AlignedBuffer {
+		pub(crate) fn boxed() -> Box<Self> {
+			Box::new(Self { data: [0; BUF_SIZE] })
 		}
 	}
 	
@@ -179,9 +183,10 @@ mod count_fast {
 		const COUNT_LINES: bool,
 	>(
 		handle: &mut R,
+		buffer: &mut AlignedBuffer,
 	) -> (WordCount, Option<io::Error>) {
 		let mut total = WordCount::default();
-		let buf: &mut [u8] = &mut AlignedBuffer::default().data;
+		let buf: &mut [u8] = &mut buffer.data;
 		let policy = SimdPolicy::detect();
 		let simd_allowed = wc_simd_allowed(policy);
 		loop {
@@ -554,7 +559,7 @@ use uucore::{
 };
 
 use self::{
-	count_fast::{count_bytes_chars_and_lines_fast, count_bytes_fast},
+	count_fast::{AlignedBuffer, count_bytes_chars_and_lines_fast, count_bytes_fast},
 	countable::WordCountable,
 	word_count::WordCount,
 };
@@ -938,6 +943,7 @@ fn app() -> Command {
 fn word_count_from_reader<T: WordCountable>(
 	mut reader: T,
 	settings: &Settings,
+	buffer: &mut AlignedBuffer,
 ) -> (WordCount, Option<io::Error>) {
 	match (
 		settings.show_bytes,
@@ -952,34 +958,34 @@ fn word_count_from_reader<T: WordCountable>(
 		// show_bytes
 		(true, false, false, false, false) => {
 			// Fast path when only show_bytes is true.
-			let (bytes, error) = count_bytes_fast(&mut reader);
+			let (bytes, error) = count_bytes_fast(&mut reader, buffer);
 			(WordCount { bytes, ..WordCount::default() }, error)
 		},
 
 		// Fast paths that can be computed without Unicode decoding.
 		// show_lines
 		(false, false, true, false, false) => {
-			count_bytes_chars_and_lines_fast::<_, false, false, true>(&mut reader)
+			count_bytes_chars_and_lines_fast::<_, false, false, true>(&mut reader, buffer)
 		},
 		// show_chars
 		(false, true, false, false, false) => {
-			count_bytes_chars_and_lines_fast::<_, false, true, false>(&mut reader)
+			count_bytes_chars_and_lines_fast::<_, false, true, false>(&mut reader, buffer)
 		},
 		// show_chars, show_lines
 		(false, true, true, false, false) => {
-			count_bytes_chars_and_lines_fast::<_, false, true, true>(&mut reader)
+			count_bytes_chars_and_lines_fast::<_, false, true, true>(&mut reader, buffer)
 		},
 		// show_bytes, show_lines
 		(true, false, true, false, false) => {
-			count_bytes_chars_and_lines_fast::<_, true, false, true>(&mut reader)
+			count_bytes_chars_and_lines_fast::<_, true, false, true>(&mut reader, buffer)
 		},
 		// show_bytes, show_chars
 		(true, true, false, false, false) => {
-			count_bytes_chars_and_lines_fast::<_, true, true, false>(&mut reader)
+			count_bytes_chars_and_lines_fast::<_, true, true, false>(&mut reader, buffer)
 		},
 		// show_bytes, show_chars, show_lines
 		(true, true, true, false, false) => {
-			count_bytes_chars_and_lines_fast::<_, true, true, true>(&mut reader)
+			count_bytes_chars_and_lines_fast::<_, true, true, true>(&mut reader, buffer)
 		},
 		// show_words
 		(_, false, false, false, true) => word_count_from_reader_specialized::<
@@ -1203,11 +1209,16 @@ enum CountResult {
 ///
 /// Therefore, the reading implementations always return a total and sometimes
 /// return an error: ([`WordCount`], `Option<io::Error>`).
-fn word_count_from_input(input: &Input, settings: &Settings, host: &mut Host) -> CountResult {
+fn word_count_from_input(
+	input: &Input,
+	settings: &Settings,
+	host: &mut Host,
+	buffer: &mut AlignedBuffer,
+) -> CountResult {
 	let (total, maybe_err) = match input {
-		Input::Stdin(_) => word_count_from_reader(&mut host.stdin, settings),
+		Input::Stdin(_) => word_count_from_reader(&mut host.stdin, settings, buffer),
 		Input::Path(path) => match host.fs().open(host.resolve(path)) {
-			Ok(file) => word_count_from_reader(file, settings),
+			Ok(file) => word_count_from_reader(file, settings, buffer),
 			Err(error) => return CountResult::Failure(error),
 		},
 	};
@@ -1473,6 +1484,7 @@ fn wc(inputs: &Inputs, settings: &Settings, host: &mut Host) {
 		}
 	}
 
+	let mut buffer = AlignedBuffer::boxed();
 	for maybe_input in inputs.iter() {
 		// An aborted invocation prints no partial total.
 		if host.is_cancelled() {
@@ -1487,7 +1499,7 @@ fn wc(inputs: &Inputs, settings: &Settings, host: &mut Host) {
 			},
 		};
 
-		let (word_count, deferred_error) = match word_count_from_input(&input, settings, host) {
+		let (word_count, deferred_error) = match word_count_from_input(&input, settings, host, &mut buffer) {
 			CountResult::Success(word_count) => (word_count, None),
 			CountResult::Interrupted(word_count, source) => (
 				word_count,
@@ -1556,17 +1568,22 @@ fn print_stats(
 		(settings.show_max_line_length, result.max_line_length),
 	];
 
+	// Rendered whole, then written once: the raw stdout would otherwise take
+	// a write per column, space and title, and a concurrent writer could tear
+	// the line.
+	let mut line = Vec::with_capacity(64);
 	let mut space = "";
 	for (_, num) in maybe_cols.iter().filter(|(show, _)| *show) {
-		write!(stdout, "{space}{num:number_width$}")?;
+		write!(line, "{space}{num:number_width$}")?;
 		space = " ";
 	}
 
 	if let Some(title) = title {
-		write!(stdout, "{space}")?;
-		stdout.write_all(&os_bytes_lossy(title))?;
+		line.extend_from_slice(space.as_bytes());
+		line.extend_from_slice(&os_bytes_lossy(title));
 	}
-	writeln!(stdout)
+	line.push(b'\n');
+	stdout.write_all(&line)
 }
 
 /// Creates the `wc` builtin registration.
@@ -1580,7 +1597,11 @@ mod tests {
 
 	use pi_vfs::BlockingFs;
 
-	use super::{Wc, count_fast::count_bytes_fast, word_count::WordCount};
+	use super::{
+		Wc,
+		count_fast::{AlignedBuffer, count_bytes_fast},
+		word_count::WordCount,
+	};
 	use crate::host::run_util;
 
 	#[test]
@@ -1631,7 +1652,7 @@ mod tests {
 		std::fs::write(&path, b"abcdef").unwrap();
 		let mut file = BlockingFs::default().open(&path).unwrap();
 		file.seek(SeekFrom::Start(2)).unwrap();
-		let (bytes, error) = count_bytes_fast(&mut file);
+		let (bytes, error) = count_bytes_fast(&mut file, &mut AlignedBuffer::boxed());
 		assert_eq!(bytes, 4);
 		assert!(error.is_none());
 	}

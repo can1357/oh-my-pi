@@ -427,7 +427,7 @@ describe("subagent session_init persistence ordering (regression: PR #9379 revie
 	 */
 	function createStartupSession(overrides: {
 		systemPromptParts: string[];
-		appendSessionInit: (init: { systemPrompt: string }) => string;
+		appendSessionInit: (init: { systemPrompt: string[] }) => string;
 		discoverStartupSkillPaths: () => Promise<void>;
 		onSessionStart?: (actions: ExtensionActions) => void;
 		sendUserMessage?: () => Promise<void>;
@@ -487,7 +487,7 @@ describe("subagent session_init persistence ordering (regression: PR #9379 revie
 		// session.agent.state.systemPrompt when a resources_discover handler
 		// contributes a directory.
 		const systemPromptParts = ["base prompt"];
-		const appendSessionInitCalls: Array<{ systemPrompt: string }> = [];
+		const appendSessionInitCalls: Array<{ systemPrompt: string[] }> = [];
 		const session = createStartupSession({
 			systemPromptParts,
 			appendSessionInit: init => {
@@ -503,25 +503,30 @@ describe("subagent session_init persistence ordering (regression: PR #9379 revie
 
 		await runSubprocess({ ...baseOptions });
 
-		expect(appendSessionInitCalls).toHaveLength(1);
-		// Persisted verbatim by persisted-revive.ts on every cold revival — must
-		// reflect the post-discovery prompt, not the pre-discovery snapshot.
-		expect(appendSessionInitCalls[0]?.systemPrompt).toBe("base prompt\n\ndiscovered skill notice");
+		// One session_init at spawn, inside the Agent Hub's bounded prefix read
+		// (persisted-agents.ts), and a newer one after discovery: cold revival
+		// (persisted-revive.ts) replays the latest, so it must carry the
+		// post-discovery prompt, not the pre-discovery snapshot.
+		expect(appendSessionInitCalls).toHaveLength(2);
+		expect(appendSessionInitCalls.at(-1)?.systemPrompt).toEqual(["base prompt", "discovered skill notice"]);
 	});
 
 	it("runs a session_start-triggered turn after discovery and session_init (regression: PR #9379 review, executor.ts startup sends)", async () => {
 		// The turn must see the child's discovered skills, and its records must
 		// follow session_init: persisted-agents.ts reads agent metadata from the
-		// first records of the session file only.
+		// first records of the session file only. The spawn record comes first;
+		// discovery changes the prompt, so a newer record follows before the send.
 		const order: string[] = [];
+		const systemPromptParts = ["base prompt"];
 		const session = createStartupSession({
-			systemPromptParts: ["base prompt"],
+			systemPromptParts,
 			appendSessionInit: () => {
 				order.push("session_init");
 				return "init-id";
 			},
 			discoverStartupSkillPaths: async () => {
 				order.push("discovery");
+				systemPromptParts.push("discovered skill notice");
 			},
 			onSessionStart: actions => actions.sendUserMessage("hello from session_start"),
 			sendUserMessage: async () => {
@@ -533,6 +538,6 @@ describe("subagent session_init persistence ordering (regression: PR #9379 revie
 
 		await runSubprocess({ ...baseOptions });
 
-		expect(order).toEqual(["discovery", "session_init", "send"]);
+		expect(order).toEqual(["session_init", "discovery", "session_init", "send"]);
 	});
 });

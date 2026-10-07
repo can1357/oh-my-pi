@@ -9,6 +9,13 @@ fn main() {
 	napi_build::setup();
 	build_oauth_callback_helper();
 	if env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("macos") {
+		build_darwin_native_helper(
+			"src/desktop/macos/capture/helper.m",
+			"omp-capture-helper",
+			"OMP_CAPTURE_DARWIN_HELPER",
+			&["AppKit", "ScreenCaptureKit", "CoreGraphics"],
+			"14.0",
+		);
 		build_applefm_bridge();
 	}
 }
@@ -189,27 +196,44 @@ fn build_oauth_callback_relay(target_os: &str) {
 mod darwin_compiler;
 
 fn build_darwin_oauth_callback_helper() {
+	build_darwin_native_helper(
+		"src/oauth_callback/darwin-helper.m",
+		"omp-oauth-callback-darwin-helper",
+		"OMP_OAUTH_DARWIN_HELPER",
+		&["AppKit"],
+		"12.0",
+	);
+}
+
+fn build_darwin_native_helper(
+	source: &str,
+	name: &str,
+	embed_variable: &str,
+	frameworks: &[&str],
+	minimum_macos: &str,
+) {
 	let manifest_dir =
 		PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR should be set"));
-	let source = manifest_dir.join("src/oauth_callback/darwin-helper.m");
-	let output = PathBuf::from(env::var_os("OUT_DIR").expect("OUT_DIR should be set"))
-		.join("omp-oauth-callback-darwin-helper");
+	let source = manifest_dir.join(source);
+	let output = PathBuf::from(env::var_os("OUT_DIR").expect("OUT_DIR should be set")).join(name);
 	let architecture = match env::var("CARGO_CFG_TARGET_ARCH").as_deref() {
 		Ok("aarch64") => "arm64",
 		Ok("x86_64") => "x86_64",
-		Ok(architecture) => panic!("unsupported macOS OAuth helper architecture: {architecture}"),
+		Ok(architecture) => panic!("unsupported macOS helper architecture: {architecture}"),
 		Err(error) => panic!("CARGO_CFG_TARGET_ARCH should be set: {error}"),
 	};
 	println!("cargo:rerun-if-changed={}", source.display());
+	println!("cargo:rerun-if-changed=src/oauth_callback/darwin_compiler.rs");
 	println!("cargo:rerun-if-env-changed=CC");
 	println!("cargo:rerun-if-env-changed=SDKROOT");
+	println!("cargo:rerun-if-env-changed=DEVELOPER_DIR");
 
 	let mut command = darwin_compiler::darwin_compiler_command(env::var_os("CC").as_deref());
 	command.current_dir(&manifest_dir);
 	if let Some(sdk_root) = darwin_compiler::darwin_sdk_root(env::var_os("SDKROOT").as_deref()) {
 		command.arg("-isysroot").arg(sdk_root);
 	}
-	let result = command
+	command
 		.args([
 			"-x",
 			"objective-c",
@@ -217,27 +241,29 @@ fn build_darwin_oauth_callback_helper() {
 			"-fblocks",
 			"-fno-ident",
 			"-Os",
-			"-mmacosx-version-min=12.0",
 			"-arch",
 			architecture,
-			"-framework",
-			"AppKit",
 			"-Wl,-dead_strip",
 			"-Wl,-adhoc_codesign",
 		])
+		.arg(format!("-mmacosx-version-min={minimum_macos}"));
+	for framework in frameworks {
+		command.arg("-framework").arg(framework);
+	}
+	let result = command
 		.arg(&source)
 		.arg("-o")
 		.arg(&output)
 		.output()
-		.unwrap_or_else(|error| panic!("failed to invoke clang for OAuth callback helper: {error}"));
+		.unwrap_or_else(|error| panic!("failed to invoke clang for {name}: {error}"));
 	assert!(
 		result.status.success(),
-		"failed to build macOS OAuth callback helper ({}):\nstdout:\n{}\nstderr:\n{}",
+		"failed to build macOS {name} ({}):\nstdout:\n{}\nstderr:\n{}",
 		result.status,
 		String::from_utf8_lossy(&result.stdout),
 		String::from_utf8_lossy(&result.stderr)
 	);
-	println!("cargo:rustc-env=OMP_OAUTH_DARWIN_HELPER={}", output.display());
+	println!("cargo:rustc-env={embed_variable}={}", output.display());
 }
 
 fn target_linker(target: &str) -> Option<OsString> {

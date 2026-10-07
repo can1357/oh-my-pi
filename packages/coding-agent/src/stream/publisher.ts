@@ -4,7 +4,13 @@ import type { TUI } from "@oh-my-pi/pi-tui";
 import { logger } from "@oh-my-pi/pi-utils";
 import { STREAM_FLUSH_INTERVAL_MS, StreamPaintEncoder } from "./paint-encoder";
 import { streamSocketEndpoint } from "./paths";
-import { encodeStreamFrame, STREAM_LOCAL_PROTO, type StreamSessionFrame, type StreamStreamerFrame } from "./protocol";
+import {
+	encodeStreamFrame,
+	STREAM_LOCAL_PROTO,
+	StreamLineReader,
+	type StreamSessionFrame,
+	type StreamStreamerFrame,
+} from "./protocol";
 import type { StreamRedactor } from "./redactor";
 
 const CONNECT_TIMEOUT_MS = 500;
@@ -71,7 +77,8 @@ async function openStreamSocket(options: Omit<StreamPublisherOptions, "redactor"
 	}
 
 	const socket = net.createConnection(endpoint);
-	let input = "";
+	// Uncapped: the session side has always accepted any line length from the streamer.
+	const lines = new StreamLineReader(Number.POSITIVE_INFINITY);
 	let settled = false;
 	let frameHandler: ((frame: StreamStreamerFrame) => void) | undefined;
 	const queuedFrames: StreamStreamerFrame[] = [];
@@ -108,39 +115,36 @@ async function openStreamSocket(options: Omit<StreamPublisherOptions, "redactor"
 		};
 		socket.write(encodeStreamFrame(hello));
 	});
-	socket.on("data", chunk => {
-		input += chunk.toString("utf8");
-		for (;;) {
-			const newline = input.indexOf("\n");
-			if (newline < 0) break;
-			const line = input.slice(0, newline);
-			input = input.slice(newline + 1);
-			if (!line) continue;
-			const frame = parseFrame(line);
-			if (!frame) continue;
-			if (!settled) {
-				if (frame.t !== "welcome") {
-					finishNull(new Error("streamer did not welcome session"));
-					return;
-				}
-				if (frame.proto !== STREAM_LOCAL_PROTO) {
-					finishNull(new Error(`streamer protocol mismatch: ${frame.proto}`));
-					return;
-				}
-				settled = true;
-				clearTimeout(timer);
-				resolve({
-					socket,
-					takeQueuedFrames: () => queuedFrames.splice(0),
-					setFrameHandler: handler => {
-						frameHandler = handler;
-					},
-				});
-				continue;
+	const handleLine = (line: string): boolean => {
+		if (!line) return true;
+		const frame = parseFrame(line);
+		if (!frame) return true;
+		if (!settled) {
+			if (frame.t !== "welcome") {
+				finishNull(new Error("streamer did not welcome session"));
+				return false;
 			}
-			if (frameHandler) frameHandler(frame);
-			else queuedFrames.push(frame);
+			if (frame.proto !== STREAM_LOCAL_PROTO) {
+				finishNull(new Error(`streamer protocol mismatch: ${frame.proto}`));
+				return false;
+			}
+			settled = true;
+			clearTimeout(timer);
+			resolve({
+				socket,
+				takeQueuedFrames: () => queuedFrames.splice(0),
+				setFrameHandler: handler => {
+					frameHandler = handler;
+				},
+			});
+			return true;
 		}
+		if (frameHandler) frameHandler(frame);
+		else queuedFrames.push(frame);
+		return true;
+	};
+	socket.on("data", chunk => {
+		if (!socket.destroyed) lines.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk), handleLine);
 	});
 	socket.once("close", () => {
 		if (!settled) finishNull();

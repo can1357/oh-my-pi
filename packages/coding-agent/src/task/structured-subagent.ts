@@ -9,19 +9,15 @@ import * as os from "node:os";
 import path from "node:path";
 import { $env, prompt, Snowflake } from "@oh-my-pi/pi-utils";
 import { shortenPath } from "@oh-my-pi/pi-tui/render/render-utils";
-import {
-	modelSelectionInheritsSessionModel,
-	normalizeModelPatternList,
-	resolveAgentModelSelection,
-	resolveConfiguredModelPatterns,
-	resolveModelOverride,
-	splitRoleAliasThinkingSuffix,
-} from "../config/model-resolver";
+import { resolveAgentModelSelection, resolveConfiguredModelPatterns } from "../config/model-resolver";
+import { type OAuthAccountPools, validateAgentAccountPools } from "../config/account-pools";
 import {
 	type CompactionThresholdPair,
 	validateAgentCompactionThresholdOverrides,
 } from "../config/compaction-threshold";
 import { type ServiceTierInheritSettingValue, validateAgentServiceTierOverrides } from "../config/service-tier";
+import { isProviderEnabled, isUserSourceEnabled } from "../capability";
+import type { EffectiveExtensionRoots } from "../capability/types";
 import type { CustomTool } from "../extensibility/custom-tools/types";
 import { sessionLocalProtocolOptions } from "../internal-urls/context";
 import { registerArtifactsDir } from "../internal-urls/registry-helpers";
@@ -65,6 +61,7 @@ import { parseIsolationBackend } from "./worktree";
 
 import {
 	cfgIsolationBackend,
+	cfgTaskAgentAccountPools,
 	cfgTaskAgentCompactionThresholdOverrides,
 	cfgTaskAgentModelOverrides,
 	cfgTaskAgentServiceTierOverrides,
@@ -170,15 +167,9 @@ export interface EffectiveSubagentPolicy {
 	serviceTierOverride?: ServiceTierInheritSettingValue;
 	/** Exact-name entry normalized to both child compaction threshold fields. */
 	compactionThresholdOverride?: CompactionThresholdPair;
-	/**
-	 * Parent model the child falls back to when its own candidates have no
-	 * working credentials. Absent for an explicit per-call `model` (other than
-	 * `@default`): a requested model that cannot run fails instead of being
-	 * replaced by the parent's.
-	 */
+	/** Exact-name `task.agentAccountPools` entry: the only OAuth accounts the child may use, per listed provider. */
+	oauthAccountPools?: OAuthAccountPools;
 	parentActiveModelPattern?: string;
-	/** The selected patterns carry the parent's live effort, which the agent's own `thinking-level` outranks. */
-	modelInheritsLiveThinkingLevel?: boolean;
 	schema: StructuredSubagentSchemaResolution;
 	planMode: boolean;
 	isIsolated: boolean;
@@ -301,35 +292,36 @@ function assertDepthAndSpawnAllowed(request: StructuredSubagentRequest, agentNam
 }
 
 /**
- * Reason a per-spawn `model` selector cannot mean anything useful, or
- * `undefined` when it is usable. The literal `"default"` (with or without a
- * `:level` suffix) is singled out because it reads as "leave the agent's
- * model alone" while resolving as the `default` role — the ambiguity that got
- * the previous per-call override removed (#6438). `@default` states the
- * inherit intent explicitly.
- * Shared so task, eval `agent()` and `workpool()` reject malformed input
- * identically before dispatch.
+ * In-flight agent discovery, keyed by resolved cwd, the effective extension
+ * roots and the provider/source toggles `discoverAgents` consults. Concurrent
+ * preflights (task batch items, eval `agent()` fan-out) share one disk scan;
+ * the entry is dropped when the scan settles, so any later call rescans and
+ * policy resolution stays as fresh as before. A toggle flipped mid-scan changes
+ * the key, so later callers rescan under the new policy. The live
+ * `discoverAgents` binding is part of the entry so spies swapped mid-flight
+ * never receive a stale result.
  */
-export function invalidModelSelectorReason(model: unknown, label: string): string | undefined {
-	if (model === undefined) return undefined;
-	const values: unknown[] = Array.isArray(model) ? model : [model];
-	const patterns: string[] = [];
-	const invalid = `${label} has an invalid \`model\` value ${JSON.stringify(model)}. Use a selector or a non-empty array of selectors such as "openai/gpt-5.4:high" or "@smol".`;
-	for (const value of values) {
-		if (typeof value !== "string") return invalid;
-		const normalized = normalizeModelPatternList(value);
-		if (normalized.length === 0) return invalid;
-		patterns.push(...normalized);
-	}
-	if (patterns.length === 0) return invalid;
-	if (
-		patterns.some(pattern =>
-			["default", "inherit"].includes(splitRoleAliasThinkingSuffix(pattern).base.toLowerCase()),
-		)
-	) {
-		return `${label} has an ambiguous \`model\` value ${JSON.stringify(model)}. Use "@default" to inherit the parent session's model, or name a model explicitly.`;
-	}
-	return undefined;
+const inflightDiscovery = new Map<string, { fn: typeof discoverAgents; promise: Promise<DiscoveryResult> }>();
+
+function discoverAgentsShared(cwd: string, extensionRoots?: EffectiveExtensionRoots): Promise<DiscoveryResult> {
+	const fn = discoverAgents;
+	const policy = [
+		isProviderEnabled("omp-plugins"),
+		isProviderEnabled("claude-plugins"),
+		isUserSourceEnabled("claude-plugins"),
+		isUserSourceEnabled("claude"),
+	].join(",");
+	const key = `${path.resolve(cwd)}\0${policy}\0${JSON.stringify(extensionRoots ?? null)}`;
+	const existing = inflightDiscovery.get(key);
+	if (existing && existing.fn === fn) return existing.promise;
+	const promise = fn(cwd, undefined, extensionRoots);
+	const entry = { fn, promise };
+	inflightDiscovery.set(key, entry);
+	const clear = () => {
+		if (inflightDiscovery.get(key) === entry) inflightDiscovery.delete(key);
+	};
+	promise.then(clear, clear);
+	return promise;
 }
 
 /**
@@ -347,7 +339,7 @@ export async function resolveEffectiveSubagentPolicy(
 	assertPlanControlsAllowed(request, planMode);
 	assertDepthAndSpawnAllowed(request, agentName);
 
-	const discovery = await discoverAgents(request.session.cwd, undefined, request.session.effectiveExtensionRoots?.());
+	const discovery = await discoverAgentsShared(request.session.cwd, request.session.effectiveExtensionRoots?.());
 	const agents = [...discovery.agents, ...(request.session.getSessionAgents?.() ?? [])];
 	const agent = getAgent(agents, agentName);
 	if (!agent) {
@@ -392,6 +384,8 @@ export async function resolveEffectiveSubagentPolicy(
 	const compactionThresholdOverride = Object.hasOwn(compactionThresholdOverrides, agentName)
 		? compactionThresholdOverrides[agentName]
 		: undefined;
+	const agentAccountPools = validateAgentAccountPools(cfgTaskAgentAccountPools.get(request.session.settings));
+	const oauthAccountPools = Object.hasOwn(agentAccountPools, agentName) ? agentAccountPools[agentName] : undefined;
 	const parentActiveModelPattern = request.session.getActiveModelString?.();
 	const modelResolution = {
 		requestModel: request.model,
@@ -404,69 +398,7 @@ export async function resolveEffectiveSubagentPolicy(
 	// Role identity and patterns come from one call so they cannot be derived
 	// from different sources: the expansion below discards the alias, and the
 	// child's inherited retry-fallback chain is keyed off the role.
-	const {
-		patterns: modelOverride,
-		role: modelRole,
-		inheritsLiveThinkingLevel: modelInheritsLiveThinkingLevel,
-	} = resolveAgentModelSelection(modelResolution);
-	// A per-call `model` is chosen by a model mid-turn, not read from a config
-	// file the user can re-check: reject an ambiguous or unmatchable selector
-	// here instead of letting the spawn die downstream on the generic
-	// "No model selected." credential error. Emptiness is decided by the
-	// resolver's own normalization, not a local predicate, so the set of
-	// values treated as "no selector" (internal callers pass one through the
-	// same slot) is exactly the set the resolver ignores — otherwise the
-	// checks below would validate whichever lower-precedence source won.
-	const requestPatterns = normalizeModelPatternList(request.model);
-	if (requestPatterns.length > 0) {
-		const { settings, modelRegistry } = request.session;
-		// A cold registry (discovery races startup) must never reject a valid
-		// selector; only syntax and empty expansions are judged without one.
-		const warmRegistry = modelRegistry && modelRegistry.getAvailable().length > 0 ? modelRegistry : undefined;
-		for (const pattern of requestPatterns) {
-			const selectorProblem = invalidModelSelectorReason(pattern, "The call");
-			if (selectorProblem) throw new StructuredSubagentError("preflight", selectorProblem);
-			// `@default` asks for the parent's live model, not a pattern to look up.
-			if (!warmRegistry || modelSelectionInheritsSessionModel(pattern)) continue;
-			// Validate every concrete candidate, even beside @default or another
-			// usable candidate: a successful alternative must not hide a typo'd
-			// suffix that the resolver would otherwise recover from with a warning.
-			for (const candidate of resolveConfiguredModelPatterns(pattern, settings)) {
-				const strict = resolveModelOverride([candidate], warmRegistry, settings, {
-					allowInvalidThinkingSelectorFallback: false,
-				});
-				if (strict.model) continue;
-				const recovered = resolveModelOverride([candidate], warmRegistry, settings);
-				if (recovered.model && recovered.warning) {
-					throw new StructuredSubagentError(
-						"preflight",
-						`Invalid thinking suffix in model selector ${JSON.stringify(candidate)}. Use a supported thinking level or a literal model ID.`,
-					);
-				}
-			}
-		}
-		// With `@default` in the selection the resolver already answered with the
-		// inherited model the parent is running; there is nothing left to match.
-		if (!modelSelectionInheritsSessionModel(request.model)) {
-			// Role-expand the request's own patterns: `modelOverride` may come
-			// from a lower-precedence source, and blaming `model` for its
-			// failure misleads. An empty expansion is a config/shape failure no
-			// amount of discovery can fix, so it is rejected even on a cold registry.
-			const resolvedRequest = resolveConfiguredModelPatterns(request.model, settings);
-			const unmatched =
-				resolvedRequest.length === 0 ||
-				(warmRegistry !== undefined &&
-					!resolveModelOverride(resolvedRequest, warmRegistry, settings, {
-						allowInvalidThinkingSelectorFallback: false,
-					}).model);
-			if (unmatched) {
-				throw new StructuredSubagentError(
-					"preflight",
-					`No available model matches \`model\`: ${JSON.stringify(request.model)}. \`omp models find <query> --json\` lists selectors, but only fix the spelling of the same model. Do NOT substitute a different model or drop \`model\` unless the user allowed it: stop and report that the requested model is unavailable.`,
-				);
-			}
-		}
-	}
+	const { patterns: modelOverride, role: modelRole } = resolveAgentModelSelection(modelResolution);
 	const isolationEnabled = cfgTaskIsolationEnabled.get(request.session.settings);
 	const isIsolated = request.isolation?.requested === true;
 	if (isIsolated && !isolationEnabled) {
@@ -484,11 +416,8 @@ export async function resolveEffectiveSubagentPolicy(
 		modelRole,
 		serviceTierOverride,
 		compactionThresholdOverride,
-		parentActiveModelPattern:
-			requestPatterns.length > 0 && !modelSelectionInheritsSessionModel(request.model)
-				? undefined
-				: parentActiveModelPattern,
-		modelInheritsLiveThinkingLevel,
+		oauthAccountPools,
+		parentActiveModelPattern,
 		schema,
 		planMode,
 		isIsolated,
@@ -540,12 +469,7 @@ async function applySpawnHook(
 	if (spawnResult?.model === undefined) return policy;
 	const replacement = resolveConfiguredModelPatterns(spawnResult.model, request.session.settings);
 	if (replacement.length === 0) return policy;
-	return {
-		...policy,
-		modelOverride: replacement,
-		modelRoute: spawnResult.note,
-		modelInheritsLiveThinkingLevel: undefined,
-	};
+	return { ...policy, modelOverride: replacement, modelRoute: spawnResult.note };
 }
 
 /** Reserve a session-global agent id only after preflight has succeeded. */
@@ -629,8 +553,8 @@ function buildExecutorOptions(
 		modelRoute: policy.modelRoute,
 		serviceTierOverride: policy.serviceTierOverride,
 		compactionThresholdOverride: policy.compactionThresholdOverride,
+		oauthAccountPools: policy.oauthAccountPools,
 		parentActiveModelPattern: policy.parentActiveModelPattern,
-		modelInheritsLiveThinkingLevel: policy.modelInheritsLiveThinkingLevel,
 		thinkingLevel: policy.effectiveAgent.thinkingLevel,
 		effort: request.effort,
 		solutionSpace: request.solutionSpace?.trim() || undefined,
