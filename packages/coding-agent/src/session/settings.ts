@@ -1172,6 +1172,9 @@ export const cfgProvidersAutoThinkingMaxEffort = register({
 	},
 });
 
+/** Maximum 32-bit signed integer delay (ms) supported by setTimeout before overflow. */
+export const MAX_AUTO_THINKING_TIMEOUT_MS = 2147483647;
+
 export const cfgProvidersAutoThinkingTimeoutMs = register({
 	id: "providers.autoThinkingTimeoutMs",
 	type: "number",
@@ -1180,7 +1183,9 @@ export const cfgProvidersAutoThinkingTimeoutMs = register({
 		name: "PI_AUTO_THINKING_TIMEOUT_MS",
 		parse: raw => {
 			const parsed = Number(raw.trim());
-			return Number.isFinite(parsed) && parsed > 0 ? parsed : undefined;
+			return Number.isFinite(parsed) && parsed > 0
+				? Math.min(Math.floor(parsed), MAX_AUTO_THINKING_TIMEOUT_MS)
+				: undefined;
 		},
 	},
 	ui: {
