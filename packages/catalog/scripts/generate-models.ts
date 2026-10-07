@@ -429,6 +429,27 @@ function applyKimiMaxTokensCap(models: readonly ModelSpec[]): ModelSpec[] {
 }
 
 /**
+ * Same-id reference fills refill the `null` output cap that `mapInfronModel`
+ * chose on purpose when a cap reaches the served window (a cap at or above the
+ * context ceiling restates the window, e.g. gemma-3-27b-it borrowing a 131072
+ * cap against a 128000 window). Drop those again so the bundled rows match
+ * what live discovery reports. The fills are kept for `reasoning`, which the
+ * Infron roster does not report natively.
+ */
+function dropInfronOutputCapsAtContextWindow(models: ModelSpec[]): void {
+	for (const model of models) {
+		if (
+			model.provider === "infron" &&
+			model.maxTokens !== null &&
+			model.contextWindow !== null &&
+			model.maxTokens >= model.contextWindow
+		) {
+			model.maxTokens = null;
+		}
+	}
+}
+
+/**
  * Fireworks' DeepSeek V4 endpoint accepts the user's effort through
  * `reasoning_effort` and rejects the DeepSeek-native binary `thinking` toggle
  * when both are present. Strip stale reference metadata from generated fallbacks.
@@ -701,6 +722,10 @@ async function generateModels() {
 	// Pin every Ollama Cloud model's max-output to the enforced ceiling; runs
 	// after canonical fallback so finalized context windows drive the cap.
 	applyOllamaCloudOutputCap(allModels);
+	// Same-id fills and the canonical fallback refill output caps that reach
+	// the served window; drop those last so the bundled rows match what live
+	// discovery reports.
+	dropInfronOutputCapsAtContextWindow(allModels);
 
 	for (const model of allModels) {
 		canonicalizeModelCompat(model);
