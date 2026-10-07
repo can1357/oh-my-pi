@@ -16,6 +16,19 @@ const UMANS_MODEL = buildModel({
 	maxTokens: 4096,
 });
 
+const OPENAI_RESPONSES_MODEL = buildModel({
+	id: "gpt-5.2",
+	name: "gpt-5.2",
+	api: "openai-responses",
+	provider: "openai",
+	baseUrl: "https://api.openai.com/v1",
+	reasoning: true,
+	input: ["text", "image"],
+	cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+	contextWindow: 400000,
+	maxTokens: 128000,
+});
+
 function image(data: string): ImageContent {
 	return { type: "image", data, mimeType: "image/png" };
 }
@@ -135,6 +148,72 @@ describe("provider context image budgets", () => {
 		expect(originalUser.providerPayload).toBe(userPayload);
 		expect(originalDeveloper.providerPayload).toBe(developerPayload);
 		expect(imageData(clamped)).toEqual(Array.from({ length: 10 }, (_, index) => `kept-image-${index}`));
+	});
+
+	it("does not charge assistant images against the budget user and tool result images pay", () => {
+		// OpenAI budgets 200 input images per request. A Responses turn that ran
+		// the image generation tool carries one `ImageContent` per
+		// `image_generation_call`, and none of those are re-read as input images
+		// on the next turn, so they must not consume the budget.
+		const generated = Array.from({ length: 202 }, (_, index) => image(`generated-${index}`));
+		const context: Context = {
+			systemPrompt: [],
+			tools: [],
+			messages: [
+				{ role: "user", content: [text("draw 202 of them"), image("user-image")], timestamp: 0 },
+				{
+					role: "assistant",
+					content: [text("here they are"), ...generated],
+					api: "openai-responses",
+					provider: "openai",
+					model: OPENAI_RESPONSES_MODEL.id,
+					usage: {
+						input: 0,
+						output: 0,
+						cacheRead: 0,
+						cacheWrite: 0,
+						totalTokens: 0,
+						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+					},
+					stopReason: "stop",
+					timestamp: 1,
+				},
+				{
+					role: "toolResult",
+					toolCallId: "call-0",
+					toolName: "screenshot",
+					content: [image("tool-image")],
+					isError: false,
+					timestamp: 2,
+				},
+			],
+		};
+
+		const clamped = clampProviderContextImages(context, OPENAI_RESPONSES_MODEL);
+
+		// 204 images total, 2 of them inputs. The clamp must leave both inputs in
+		// place instead of evicting them to pay for 202 model outputs.
+		expect(imageData(clamped)).toEqual(["user-image", ...generated.map(part => part.data), "tool-image"]);
+		expect(clamped.messages[0]).toBe(context.messages[0]);
+		expect(clamped.messages[2]).toBe(context.messages[2]);
+	});
+
+	it("still clamps user and tool result images that genuinely exceed the cap", () => {
+		const context: Context = {
+			systemPrompt: [],
+			tools: [],
+			messages: [
+				{
+					role: "user",
+					content: [text("all of these"), ...Array.from({ length: 202 }, (_, index) => image(`input-${index}`))],
+					timestamp: 0,
+				},
+			],
+		};
+
+		const clamped = clampProviderContextImages(context, OPENAI_RESPONSES_MODEL);
+
+		expect(imageData(clamped)).toEqual(Array.from({ length: 200 }, (_, index) => `input-${index + 2}`));
 	});
 
 	it("preserves context identity when the provider cap is not exceeded", () => {

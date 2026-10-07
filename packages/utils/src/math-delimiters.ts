@@ -235,6 +235,22 @@ export class MathBlockScan {
 	}
 }
 
+const blockScansByContext = new WeakMap<object, MathBlockScan>();
+
+/**
+ * The own-line display block at the start of `src`, for a marked block tokenizer: `src` is the part of
+ * `context.source` that starts at `context.end - src.length`. One {@link MathBlockScan} is kept per context, which
+ * marked keeps for one `blockTokens` source, so asking at every block start takes linear time even when an opener
+ * never closes. Without `context.source` it is {@link mathBlockAt}.
+ */
+export function mathBlockInContext(context: { source?: string; end?: number }, src: string): MathBlock | undefined {
+	const source = context.source;
+	if (source === undefined) return mathBlockAt(src);
+	let scan = blockScansByContext.get(context);
+	if (!scan) blockScansByContext.set(context, (scan = new MathBlockScan(source)));
+	return scan.at((context.end ?? source.length) - src.length);
+}
+
 /**
  * The display opener alone on the line at `from` (up to 3 leading spaces,
  * trailing spaces or tabs; the source's last line may be unterminated), or

@@ -13,13 +13,13 @@ import {
 	requireSupportedEffort,
 	resolveWireModelId,
 } from "@oh-my-pi/pi-catalog/model-thinking";
-import { providerEntries } from "@oh-my-pi/pi-catalog/compat/providers";
 import { CODEX_BASE_URL } from "@oh-my-pi/pi-catalog/wire/codex";
 import { isOpenCodeProvider, withOpenCodeGateTools } from "@oh-my-pi/pi-catalog/wire/opencode";
-import { $env, $pickenv, getProviderInFlightRoot, isEnoent, logger, untilAborted } from "@oh-my-pi/pi-utils";
+import { $env, getProviderInFlightRoot, isEnoent, logger, untilAborted } from "@oh-my-pi/pi-utils";
 import { getCustomApi } from "./api-registry";
 import { createAuthRetryKeyState, isApiKeyResolver, resolvedApiKeyBearer, resolveNextAuthRetryKey } from "./auth-retry";
 import type { OAuthRequestIdentity } from "./auth/types";
+import { getEnvApiKey } from "./env-api-key";
 import * as AIError from "./error";
 import { ProviderHttpError } from "./error";
 import { isConcurrencyCapExclusion, isUsageLimitOutcome } from "./error/rate-limit";
@@ -55,7 +55,7 @@ import {
 	streamOpenAICompletions,
 	streamOpenAIResponses,
 } from "./providers/register-builtins";
-import { getProviderDefinition, PROVIDER_REGISTRY } from "./registry";
+import { getProviderDefinition } from "./registry";
 import type {
 	Api,
 	AssistantMessage,
@@ -712,14 +712,14 @@ export const __providerInFlightForTesting = {
 function withProviderInFlightLimit<TOptions extends Pick<StreamOptions, "signal" | "maxInFlightRequests">>(
 	model: Model<Api>,
 	options: TOptions | undefined,
-	dispatch: () => AssistantMessageEventStream,
+	dispatch: (limited: boolean) => AssistantMessageEventStream,
 ): AssistantMessageEventStream {
 	// Leaked-thinking healing folds in here — the one shared provider-dispatch
 	// chokepoint — so the loop guard (which wraps this) sees healed events and all
 	// provider exits are covered by one wrap. Official first-party providers are
 	// exempt (see `healLeakedThinking`); healing is otherwise idempotent.
 	const limit = resolveProviderInFlightLimit(model.provider, options);
-	if (limit === undefined) return healLeakedThinking(model, dispatch());
+	if (limit === undefined) return healLeakedThinking(model, dispatch(false));
 
 	const outer = new AssistantMessageEventStream();
 	void (async () => {
@@ -754,7 +754,7 @@ function withProviderInFlightLimit<TOptions extends Pick<StreamOptions, "signal"
 			if (options?.signal?.aborted) {
 				throw options.signal.reason ?? new AIError.AbortError("Provider request aborted before dispatch");
 			}
-			const inner = healLeakedThinking(model, dispatch());
+			const inner = healLeakedThinking(model, dispatch(true));
 			let terminalEvent: AssistantMessageEvent | undefined;
 			for await (const event of inner) {
 				if (event.type === "done" || event.type === "error") {
@@ -866,75 +866,6 @@ function resolveVertexRequest(input: string | URL | Request): string | URL | Req
 	return rewriteUrl(input);
 }
 
-type KeyResolver = string | (() => string | undefined);
-
-const LEGACY_ENV_KEYS: Record<string, KeyResolver> = {
-	// Non-provider / search-tool keys and API-name keys not modeled as registry provider defs.
-	"azure-openai-responses": "AZURE_OPENAI_API_KEY",
-	jina: "JINA_API_KEY",
-	brave: "BRAVE_API_KEY",
-	tinyfish: "TINYFISH_API_KEY",
-	firecrawl: "FIRECRAWL_API_KEY",
-};
-
-/**
- * Env fallbacks derived from the catalog provider entries (`env` in
- * `providers/<id>.kdl`) — the single source for plain provider env-var names.
- * Registry defs override with computed resolvers (Foundry/ADC/Bedrock
- * probes); legacy non-provider keys merge last.
- */
-const CATALOG_ENTRY_ENV_KEYS = Object.values(providerEntries()).flatMap(provider => {
-	const envVars = provider.envVars;
-	if (!envVars || envVars.length === 0) return [];
-	const resolver: KeyResolver = envVars.length === 1 ? envVars[0] : () => $pickenv(...envVars);
-	return [[provider.id, resolver] as [string, KeyResolver]];
-});
-
-const serviceProviderMap: Record<string, KeyResolver> = {
-	...Object.fromEntries(CATALOG_ENTRY_ENV_KEYS),
-	...Object.fromEntries(
-		PROVIDER_REGISTRY.flatMap(provider =>
-			provider.envKeys != null ? [[provider.id, provider.envKeys] as [string, KeyResolver]] : [],
-		),
-	),
-	...LEGACY_ENV_KEYS,
-};
-
-/**
- * Get API key for provider from known environment variables, e.g. OPENAI_API_KEY.
- *
- * Will not return API keys for providers that require OAuth tokens.
- * Checks Bun.env, then cwd/.env, then ~/.env.
- */
-export function getEnvApiKey(provider: string): string | undefined {
-	const resolver = serviceProviderMap[provider];
-	if (typeof resolver === "string") {
-		return $env[resolver];
-	}
-	return resolver?.();
-}
-
-/**
- * Name of the environment variable that backs `getEnvApiKey` for a provider,
- * when that provider maps to a single named variable (e.g. `github-copilot` →
- * `COPILOT_GITHUB_TOKEN`). Returns undefined for providers whose env fallback
- * is computed (multi-var pickers, Vertex ADC / Bedrock probes, …) since no
- * single variable name describes the source.
- */
-export function getEnvApiKeyName(provider: string): string | undefined {
-	const resolver = serviceProviderMap[provider];
-	return typeof resolver === "string" ? resolver : undefined;
-}
-
-/**
- * Enumerate every provider that has an env-var fallback for `getEnvApiKey`.
- * Used by `omp auth-broker migrate --include-env` to discover env-sourced keys
- * that should be uploaded to the broker.
- */
-export function listProvidersWithEnvKey(): string[] {
-	return Object.keys(serviceProviderMap);
-}
-
 function withResolvedModelHeaders<TApi extends Api>(
 	model: Model<TApi>,
 	signal: AbortSignal | undefined,
@@ -971,7 +902,7 @@ export function stream<TApi extends Api>(
 	}
 	if (!model.requiresGlyphTokenization) {
 		return withThinkingLoopGuard(model, options, opts =>
-			withProviderInFlightLimit(model, opts, () => streamDispatch(model, context, opts)),
+			withProviderInFlightLimit(model, opts, limited => streamDispatch(model, context, opts, limited)),
 		);
 	}
 	const codec = applyGlyphCodec(context);
@@ -980,7 +911,7 @@ export function stream<TApi extends Api>(
 		execHandlers === undefined ? options : { ...options, execHandlers: codec.wrapCursorExecHandlers(execHandlers) };
 	return codec.wrap(
 		withThinkingLoopGuard(model, wireOptions, opts =>
-			withProviderInFlightLimit(model, opts, () => streamDispatch(model, codec.context, opts)),
+			withProviderInFlightLimit(model, opts, limited => streamDispatch(model, codec.context, opts, limited)),
 		),
 	);
 }
@@ -988,7 +919,8 @@ export function stream<TApi extends Api>(
 function streamDispatch<TApi extends Api>(
 	model: Model<TApi>,
 	context: Context,
-	options?: OptionsForApi<TApi>,
+	options: OptionsForApi<TApi> | undefined,
+	limited: boolean,
 ): AssistantMessageEventStream {
 	let requestOptions = withSupportedSamplingParams(
 		model,
@@ -1021,7 +953,7 @@ function streamDispatch<TApi extends Api>(
 	// Check custom API registry first (extension-provided APIs like "vertex-claude-api")
 	const customApiProvider = getCustomApi(model.api);
 	if (customApiProvider) {
-		return customApiProvider.stream(model, context, requestOptions as StreamOptions);
+		return customApiProvider.stream(model, context, { ...requestOptions, waitForTerminalDrain: limited });
 	}
 
 	if (model.provider === "gitlab-duo") {
@@ -1032,6 +964,7 @@ function streamDispatch<TApi extends Api>(
 		return streamGitLabDuo(model, context, {
 			...(requestOptions as SimpleStreamOptions),
 			apiKey,
+			waitForTerminalDrain: limited,
 		});
 	}
 
@@ -1054,7 +987,10 @@ function streamDispatch<TApi extends Api>(
 		return streamBedrock(model as Model<"bedrock-converse-stream">, context, requestOptions as BedrockOptions);
 	}
 	if (model.api === "factory-droid-agent") {
-		return streamFactoryDroid(model as Model<"factory-droid-agent">, context, requestOptions as FactoryDroidOptions);
+		return streamFactoryDroid(model as Model<"factory-droid-agent">, context, {
+			...(requestOptions as FactoryDroidOptions),
+			waitForTerminalDrain: limited,
+		});
 	}
 
 	const providerDefinition = getProviderDefinition(model.provider);
@@ -1075,6 +1011,13 @@ function streamDispatch<TApi extends Api>(
 		: { ...preparedOptions, apiKey };
 
 	const api: Api = providerModel.api;
+	if (api === "openrouter" && $env.PI_OPENROUTER_RESPONSES !== "0") {
+		return streamOpenAIResponses(
+			providerModel as Model<"openai-responses">,
+			context,
+			providerOptions as OptionsForApi<"openai-responses">,
+		);
+	}
 	switch (api) {
 		case "anthropic-messages": {
 			const anthropicOptions = providerOptions as AnthropicOptions;
@@ -1084,28 +1027,12 @@ function streamDispatch<TApi extends Api>(
 			});
 		}
 
-		case "openrouter": {
-			const useResponses = $env.PI_OPENROUTER_RESPONSES !== "0";
-			if (useResponses) {
-				return streamOpenAIResponses(
-					providerModel as Model<"openai-responses">,
-					context,
-					providerOptions as OptionsForApi<"openai-responses">,
-				);
-			}
-			return streamOpenAICompletions(
-				providerModel as Model<"openai-completions">,
-				context,
-				providerOptions as OptionsForApi<"openai-completions">,
-			);
-		}
-
+		case "openrouter":
 		case "openai-completions":
-			return streamOpenAICompletions(
-				providerModel as Model<"openai-completions">,
-				context,
-				providerOptions as OptionsForApi<"openai-completions">,
-			);
+			return streamOpenAICompletions(providerModel as Model<"openai-completions">, context, {
+				...(providerOptions as OpenAICompletionsOptions),
+				waitForTerminalDrain: limited,
+			});
 
 		case "openai-responses":
 			return streamOpenAIResponses(
@@ -1574,7 +1501,9 @@ function streamSimpleRequest<TApi extends Api>(
 	const customApiProvider = getCustomApi(model.api);
 	if (customApiProvider) {
 		return withThinkingLoopGuard(model, requestOptions, opts =>
-			withProviderInFlightLimit(model, opts, () => customApiProvider.streamSimple(model, context, opts)),
+			withProviderInFlightLimit(model, opts, limited =>
+				customApiProvider.streamSimple(model, context, { ...opts, waitForTerminalDrain: limited }),
+			),
 		);
 	}
 
@@ -1606,10 +1535,11 @@ function streamSimpleRequest<TApi extends Api>(
 	// GitLab Duo - wraps Anthropic/OpenAI behind GitLab AI Gateway direct access tokens
 	if (model.provider === "gitlab-duo") {
 		return withThinkingLoopGuard(model, requestOptions, opts =>
-			withProviderInFlightLimit(model, opts, () =>
+			withProviderInFlightLimit(model, opts, limited =>
 				streamGitLabDuo(model, context, {
 					...opts,
 					apiKey,
+					waitForTerminalDrain: limited,
 				}),
 			),
 		);
@@ -1638,11 +1568,12 @@ function streamSimpleRequest<TApi extends Api>(
 		// (mirrors the mapOptionsForApi path every other provider takes).
 		const kimiOptions = normalizeMandatoryReasoningOptions(model, requestOptions);
 		return withThinkingLoopGuard(model, kimiOptions, opts =>
-			withProviderInFlightLimit(model, opts, () =>
+			withProviderInFlightLimit(model, opts, limited =>
 				streamKimi(model as Model<"openai-completions">, context, {
 					...opts,
 					apiKey,
 					format: opts?.kimiApiFormat,
+					waitForTerminalDrain: limited,
 				}),
 			),
 		);
@@ -1652,11 +1583,12 @@ function streamSimpleRequest<TApi extends Api>(
 	if (model.provider === "synthetic") {
 		// Pass raw SimpleStreamOptions - streamSynthetic handles mapping internally.
 		return withThinkingLoopGuard(model, requestOptions, opts =>
-			withProviderInFlightLimit(model, opts, () =>
+			withProviderInFlightLimit(model, opts, limited =>
 				streamSynthetic(model as Model<"openai-completions">, context, {
 					...opts,
 					apiKey,
 					format: opts?.syntheticApiFormat ?? "openai",
+					waitForTerminalDrain: limited,
 				}),
 			),
 		);
@@ -2193,6 +2125,7 @@ function mapOptionsForApi<TApi extends Api>(
 				textVerbosity: options?.textVerbosity,
 				promptCache: options?.promptCache,
 				statefulResponses: options?.statefulResponses,
+				storeResponses: options?.storeResponses,
 			});
 
 		case "azure-openai-responses":

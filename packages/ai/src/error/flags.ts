@@ -187,6 +187,25 @@ export function isResponsesRequestBodyReadTimeout(message: {
 	);
 }
 
+/**
+ * Codex code for the experimental native turn lane refusing a mid-response
+ * `response.steer`; the server then drops the in-flight response and closes
+ * the socket.
+ */
+export const CODEX_NATIVE_LANE_STEER_REJECTED_CODE = "unsupported_native_inflight_message";
+
+/**
+ * A Codex turn the native turn lane dropped because omp steered it. The
+ * rejection answers our own `response.steer`, not the model's health: the
+ * provider stops steering the session, so the same model replays cleanly.
+ */
+export function isCodexSteerRejection(message: { api?: Api; errorMessage?: string }): boolean {
+	return (
+		message.api === "openai-codex-responses" &&
+		message.errorMessage?.includes(`code=${CODEX_NATIVE_LANE_STEER_REJECTED_CODE}`) === true
+	);
+}
+
 export const TRANSIENT_TRANSPORT_PATTERN =
 	/\b(?:no[_ -]?capacity|(?:high|peak)[ _-]?demand|(?:at|over|insufficient)[ _-]?capacity|capacity[ _-]?(?:exceeded|exhausted)|peak[ _-]?load)\b|overloaded|provider.?returned.?error|rate.?limit|too many requests|auth-gateway\s+5\d{2}(?=[:\s]|$)|\b(?:429|500|502|503|504)\b|service.?unavailable|server.?error|internal.?error|retry your request|network.?error|connection.?error|connection.?refused|unable.?to.?connect\.\s*is the computer able to access the url\?|other side closed|fetch failed|upstream.?connect|upstream.?request.?failed|reset before headers|socket hang up|timed? out|timeout|terminated|retry delay|stream stall|no error details in response|HTTP2(?:StreamReset|RefusedStream|EnhanceYourCalm)|nghttp2_(?:internal_error|refused_stream)|stream closed with error code nghttp2_(?:internal_error|refused_stream)|malformed.?function.?call/i;
 const AUTH_FAILURE_PATTERN =
@@ -586,6 +605,9 @@ function classifyText(
 		if ((api === "openai-responses" || api === "openai-codex-responses") && isStaleResponsesText(errorMessage)) {
 			kinds |= Flag.StaleResponsesItem;
 		}
+		// Retryable like the provider's own classification of the code, so a
+		// message reclassified from its text alone still retries.
+		if (isCodexSteerRejection({ api, errorMessage })) kinds |= Flag.Transient;
 
 		// Fireworks mid-generation NaN 400 is a model-side decode fault, not a bad
 		// request; a byte-identical replay succeeds, so treat it as transient.

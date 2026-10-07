@@ -2,8 +2,10 @@
  * Content-addressed binary blobs (images) for `image` nodes.
  *
  * `describe()` registers the bytes and puts the returned id in `image.p.blob`;
- * the native backend uploads each referenced blob once per surface with verb
- * `b` before the frame that first references it.
+ * the native backend delivers each referenced blob once per terminal
+ * connection (asking the terminal first which it holds, or through its blob
+ * cache), else uploads it with verb `b` before the frame that first
+ * references it.
  */
 import type { TspProps } from "@oh-my-pi/pi-wire";
 import { getImageDimensions } from "../terminal-capabilities";

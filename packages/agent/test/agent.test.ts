@@ -502,6 +502,66 @@ describe("Agent", () => {
 		expect(finalMessage.errorMessage).toBe("caller cancelled");
 	});
 
+	it("emits an aborted assistant boundary when context transformation rejects after tool cancellation", async () => {
+		const toolStarted = Promise.withResolvers<void>();
+		const parameters = type({ question: "string" });
+		const tool: AgentTool<typeof parameters> = {
+			name: "ask",
+			label: "Ask",
+			description: "Interactive question",
+			parameters,
+			async execute(_toolCallId, _params, signal) {
+				if (!signal) throw new Error("Expected tool abort signal");
+				toolStarted.resolve();
+				await new Promise<void>(resolve => {
+					if (signal.aborted) resolve();
+					else signal.addEventListener("abort", () => resolve(), { once: true });
+				});
+				throw new Error("Ask input was cancelled");
+			},
+		};
+		const mock = createMockModel({ responses: [] });
+		const agent = new Agent({
+			initialState: { model: mock.model, tools: [tool] },
+			streamFn: mock.stream,
+			transformContext: async (messages, signal) => {
+				signal?.throwIfAborted();
+				return messages;
+			},
+		});
+		agent.replaceMessages([
+			createUserMessage("ask a question"),
+			createAssistantMessage(
+				[{ type: "toolCall", id: "ask_1", name: "ask", arguments: { question: "Deploy?" } }],
+				"toolUse",
+			),
+		]);
+		const events: AgentEvent[] = [];
+		agent.subscribe(event => events.push(event));
+
+		const running = agent.continue();
+		await toolStarted.promise;
+		agent.abort("Interrupted by user");
+		await running;
+
+		const boundaryIndex = events.findIndex(
+			event =>
+				event.type === "message_end" &&
+				event.message.role === "assistant" &&
+				event.message.stopReason === "aborted",
+		);
+		expect(boundaryIndex).toBeGreaterThanOrEqual(0);
+		const boundary = events[boundaryIndex];
+		if (boundary.type !== "message_end") throw new Error("Expected persisted assistant boundary");
+		expect(boundary.message).toMatchObject({ role: "assistant", errorMessage: "Interrupted by user" });
+		expect(events.slice(boundaryIndex + 1).map(event => event.type)).toEqual(["turn_end", "agent_end"]);
+		expect(agent.state.messages.at(-1)).toEqual(boundary.message);
+		expect(
+			agent.state.messages.filter(message => message.role === "assistant" && message.stopReason === "aborted"),
+		).toHaveLength(1);
+		expect(mock.calls).toHaveLength(0);
+	});
+
 	it("continue() should process queued follow-up messages after an assistant turn", async () => {
 		const mock = createMockModel({ responses: [{ content: ["Processed"] }] });
 		const agent = new Agent({ streamFn: mock.stream });

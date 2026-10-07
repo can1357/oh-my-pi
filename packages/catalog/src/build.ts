@@ -101,9 +101,11 @@ function applyCatalogAssignments<TApi extends Api>(model: Model<TApi>, catalog: 
 	if (serviceTierCost !== undefined) {
 		const flex = numberField(serviceTierCost, "flex");
 		const priorityTier = numberField(serviceTierCost, "priority");
+		const ultrafast = numberField(serviceTierCost, "ultrafast");
 		model.serviceTierCost = {
 			...(flex !== undefined && { flex }),
 			...(priorityTier !== undefined && { priority: priorityTier }),
+			...(ultrafast !== undefined && { ultrafast }),
 		};
 	}
 	const priority = catalog.priority;
@@ -363,7 +365,8 @@ export function buildModel<TApi extends Api>(spec: ModelSpec<TApi>): Model<TApi>
 	};
 	applyCatalogAssignments(model, policy.catalog);
 	applyCatalogCorrections(model, policy.catalog);
-	// Configured lifetimes replace catalog lifetimes rather than merging with them.
+	// Configured kinds and lifetimes replace catalog values rather than merging with them.
+	if (spec.kindConfig !== undefined) model.kind = spec.kindConfig;
 	if (spec.promptCacheConfig !== undefined) model.promptCache = { ...spec.promptCacheConfig };
 	return model;
 }

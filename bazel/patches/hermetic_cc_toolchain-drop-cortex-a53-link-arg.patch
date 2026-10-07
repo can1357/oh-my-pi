@@ -1,0 +1,30 @@
+Drop rustc's -Wl,--fix-cortex-a53-843419 before it reaches `zig cc`.
+
+rustc passes the flag on every aarch64-unknown-linux-{gnu,musl} link
+(rust-lang/rust#155453, nightlies since 2026-06), and zig cc's linker-arg
+parser rejects it ("error: unsupported linker arg: --fix-cortex-a53-843419"),
+failing every arm64 Linux link. zig has no spelling that forwards the fix to
+its lld (none through 0.15.2), so the wrapper drops the arg: links stay
+exactly as they were before #155453.
+
+Listed after hermetic_cc_toolchain-isolated-compile-cache.patch: this hunk
+precedes that patch's, so the line numbers below are unaffected by it.
+
+diff --git a/toolchain/zig-wrapper.zig b/toolchain/zig-wrapper.zig
+--- a/toolchain/zig-wrapper.zig
++++ b/toolchain/zig-wrapper.zig
+@@ -258,7 +258,12 @@
+         .arg1, .cc => try args.appendSlice(arena, &[_][]const u8{arg0_noexe}),
+     }
+ 
+-    while (argv_it.next()) |arg|
+-        try args.append(arena, arg);
++    while (argv_it.next()) |arg| {
++        // rustc adds this on aarch64 linux (rust-lang/rust#155453); zig cc
++        // rejects it as an unsupported linker arg.
++        if (run_mode == RunMode.cc and mem.eql(u8, arg, "-Wl,--fix-cortex-a53-843419"))
++            continue;
++        try args.append(arena, arg);
++    }
+ 
+     // Workaround for https://github.com/ziglang/zig/issues/23287: zig 0.14.0

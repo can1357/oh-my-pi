@@ -2,6 +2,30 @@
 
 ## [Unreleased]
 
+## [18.8.0] - 2026-10-07
+
+### Added
+
+- Added `ZipPackage` to `@oh-my-pi/pi-utils/ar` for lazily reading ZIP-based document packages with a configurable total-inflation limit, plus `DocxImage.readBytes()` for accessing raw DOCX image data.
+- Added `PI_NATIVES_DIR` support to `getNativesDir()`, matching the native addon loader's override ([#14735](https://github.com/can1357/oh-my-pi/pull/14735) by [@alphastorm](https://github.com/alphastorm))
+- Added `ZipPackage` to `@oh-my-pi/pi-utils/ar`: a lazily inflated ZIP document package with a cap on total inflated bytes, and `DocxImage.readBytes()` for raw DOCX image bytes ([#14709](https://github.com/can1357/oh-my-pi/pull/14709) by [@H4vC](https://github.com/H4vC))
+
+### Changed
+
+- Improved DOCX conversion to inflate only the package contents it needs, reducing unnecessary work and memory use.
+- Improved performance across HTML-to-Markdown conversion, Readability extraction, Markdown lexing, terminal emulation, terminal styling, streaming tool-argument parsing, and log writing. Large-page processing and terminal workloads now use substantially less time and memory.
+
+### Fixed
+
+- Fixed memory growth in long-lived child processes, streaming readers, prompt template compilation, and retried HTTP requests by releasing buffers, cache entries, and discarded response bodies promptly.
+- Fixed prompt templates rejecting `{{else if …}}` chains as unclosed blocks; a chain now closes with its opening block's single closing tag, as in Handlebars.
+
+## [18.6.3] - 2026-10-06
+
+### Breaking Changes
+
+- Replaced the `cursorPosition` option of `TerminalQueryResponder` with `hostCursorHandshake`, which leaves only the PTY host's own session-start cursor query unanswered instead of every cursor-position query
+
 ## [18.5.1] - 2026-10-03
 
 ### Added
