@@ -2490,6 +2490,9 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 		if (this.#closed) return;
 		this.#closed = true;
 		for (const stmt of this.#statements) stmt.finalize();
-		if (!this.#borrowConnection) this.#db.close();
+		if (!this.#borrowConnection) {
+			// A deferred close can leave the database file locked on Windows.
+			this.#db.close(true);
+		}
 	}
 }
