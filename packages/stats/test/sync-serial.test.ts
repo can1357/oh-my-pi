@@ -83,6 +83,30 @@ describe("stats sync serial mode", () => {
 		expect(workerSpy).not.toHaveBeenCalled();
 	});
 
+	it("spawns no worker when every transcript is unchanged", async () => {
+		await writeSessionFile();
+		await syncAllSessions({ workers: 1 });
+		const workerSpy = vi.spyOn(globalThis, "Worker");
+
+		const synced = await syncAllSessions({ workers: 2 });
+
+		expect(synced).toEqual({ processed: 0, files: 0 });
+		expect(workerSpy).not.toHaveBeenCalled();
+	});
+
+	it("parses a few already-tracked transcripts inline by default", async () => {
+		await writeSessionFile();
+		await syncAllSessions({ workers: 1 });
+		const sessionFile = path.join(getSessionsDir(), "--tmp--sync-serial", "session.jsonl");
+		await fs.appendFile(sessionFile, "\n");
+		vi.spyOn(process, "platform", "get").mockReturnValue("linux");
+		const workerSpy = vi.spyOn(globalThis, "Worker");
+
+		await syncAllSessions({ files: [sessionFile] });
+
+		expect(workerSpy).not.toHaveBeenCalled();
+	});
+
 	it("spawns a worker pool when callers explicitly request workers: 2 with a single file", async () => {
 		await writeSessionFile();
 		const workerProbe = new Error("worker probe");

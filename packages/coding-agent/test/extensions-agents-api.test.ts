@@ -637,7 +637,7 @@ describe("ExtensionAPI agents", () => {
 	it("ACP-safe reviver cold-revives a genuinely parked agent through a session-scoped persisted reviver", async () => {
 		using tempDir = TempDir.createSync("@omp-extension-agents-cold-");
 		const cwd = tempDir.path();
-		MCPManager.setInstance({ getTools: () => [] } as unknown as MCPManager);
+		MCPManager.setInstance({ getTools: () => [], addToolsChangedListener: () => () => {} } as unknown as MCPManager);
 
 		// Real, on-disk parent + child transcripts — exactly what a live spawn
 		// leaves behind — not an in-memory `revive: async () => stub` shortcut.
@@ -649,7 +649,7 @@ describe("ExtensionAPI agents", () => {
 		const childFile = childManager.getSessionFile();
 		if (!childFile) throw new Error("Expected a persisted child session file");
 		childManager.appendSessionInit({
-			systemPrompt: "persisted child prompt",
+			systemPrompt: ["persisted child prompt"],
 			task: "persisted child task",
 			tools: ["read", "yield"],
 		});
@@ -694,6 +694,7 @@ describe("ExtensionAPI agents", () => {
 			subscribe: () => () => {},
 			setIrcWakeTurnObserver: () => {},
 			subscribeRunState: () => () => {},
+			addDisposer: () => {},
 			getLastAssistantMessage: () => undefined,
 			extensionRunner: undefined,
 		} as unknown as AgentSession;
@@ -839,7 +840,7 @@ describe("ExtensionAPI agents", () => {
 	it("propagates the ACP-safe reviver into a cold-revived subagent's own extension runtime so its persisted children stay cold-revivable", async () => {
 		using tempDir = TempDir.createSync("@omp-extension-agents-nested-cold-");
 		const cwd = tempDir.path();
-		MCPManager.setInstance({ getTools: () => [] } as unknown as MCPManager);
+		MCPManager.setInstance({ getTools: () => [], addToolsChangedListener: () => () => {} } as unknown as MCPManager);
 
 		const assistantMessage = {
 			role: "assistant" as const,
@@ -869,7 +870,7 @@ describe("ExtensionAPI agents", () => {
 		const bManager = SessionManager.create(cwd, topFile.slice(0, -6));
 		const bFile = bManager.getSessionFile();
 		if (!bFile) throw new Error("Expected a persisted child (B) session file");
-		bManager.appendSessionInit({ systemPrompt: "B prompt", task: "B task", tools: ["read", "yield"] });
+		bManager.appendSessionInit({ systemPrompt: ["B prompt"], task: "B task", tools: ["read", "yield"] });
 		bManager.appendMessage(assistantMessage);
 		await bManager.close();
 		const bId = path.basename(bFile, ".jsonl");
@@ -877,7 +878,7 @@ describe("ExtensionAPI agents", () => {
 		const cManager = SessionManager.create(cwd, bFile.slice(0, -6));
 		const cFile = cManager.getSessionFile();
 		if (!cFile) throw new Error("Expected a persisted grandchild (C) session file");
-		cManager.appendSessionInit({ systemPrompt: "C prompt", task: "C task", tools: ["read", "yield"] });
+		cManager.appendSessionInit({ systemPrompt: ["C prompt"], task: "C task", tools: ["read", "yield"] });
 		cManager.appendMessage(assistantMessage);
 		await cManager.close();
 		const cId = path.basename(cFile, ".jsonl");
@@ -923,6 +924,7 @@ describe("ExtensionAPI agents", () => {
 			subscribe: () => () => {},
 			setIrcWakeTurnObserver: () => {},
 			subscribeRunState: () => () => {},
+			addDisposer: () => {},
 			getLastAssistantMessage: () => undefined,
 			discoverStartupSkillPaths: async () => {},
 			extensionRunner: bExtensionRunner,
@@ -942,6 +944,7 @@ describe("ExtensionAPI agents", () => {
 					subscribe: () => () => {},
 					setIrcWakeTurnObserver: () => {},
 					subscribeRunState: () => () => {},
+					addDisposer: () => {},
 					getLastAssistantMessage: () => undefined,
 					extensionRunner: undefined,
 				} as unknown as AgentSession,

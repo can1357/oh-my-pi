@@ -16,7 +16,7 @@ use std::{
 
 use gix::{
 	bstr::{BStr, ByteSlice},
-	index::entry::{Flags, Mode, Stat},
+	index::entry::{Flags, Mode, Stage, Stat},
 	merge::tree::TreatAsUnresolved,
 	objs::tree::EntryKind,
 	refs::transaction::PreviousValue,
@@ -119,8 +119,7 @@ impl GitRepo {
 			return write_index_map_at(&repo, &state, options.index_path.as_deref());
 		}
 		let mut filter = apply_filter(&repo, &patches, options.reverse)?;
-		let mut state = worktree_map(self, &repo, &mut filter)?;
-		augment_patch_sources(self, &repo, &mut filter, &mut state, &patches, options.reverse)?;
+		let mut state = patch_worktree_map(self, &repo, &mut filter, &patches, options.reverse)?;
 		apply_patches_to_map(&repo, &mut state, &patches, options)?;
 		write_patch_worktree(self, &repo, &mut filter, &patches, options.reverse, &state)
 	}
@@ -138,9 +137,7 @@ impl GitRepo {
 			index_map_at(&repo, options.index_path.as_deref())?
 		} else {
 			let mut filter = apply_filter(&repo, &patches, options.reverse)?;
-			let mut state = worktree_map(self, &repo, &mut filter)?;
-			augment_patch_sources(self, &repo, &mut filter, &mut state, &patches, options.reverse)?;
-			state
+			patch_worktree_map(self, &repo, &mut filter, &patches, options.reverse)?
 		};
 		match apply_patches_to_map(&repo, &mut state, &patches, options) {
 			Ok(()) => Ok(true),
@@ -567,8 +564,7 @@ fn parse_file_patch(raw: &str) -> std::result::Result<FilePatch, ApplyFailure> {
 	let lines: Vec<&str> = raw.split_inclusive('\n').collect();
 	let first = lines
 		.first()
-		.map(|line| line.trim_end_matches('\n'))
-		.unwrap_or_default();
+		.map_or_default(|line| line.trim_end_matches('\n'));
 	let paths = first
 		.strip_prefix("diff --git ")
 		.ok_or_else(|| ApplyFailure::Invalid("invalid diff header".into()))?;
@@ -882,7 +878,13 @@ fn apply_file_bytes(
 	if patch.hunks.is_empty() {
 		return Ok(source.to_vec());
 	}
-	let mut lines = split_lines(source);
+	let source_lines = split_lines(source);
+	// The image each hunk applies to is always `head` (rewritten so far)
+	// followed by the untouched `source_lines[tail..]`. Ascending hunks land in
+	// the tail and copy forward; one reaching back into rewritten lines
+	// (overlapping hunks) materializes the image and splices into it.
+	let mut head: Vec<Line<'_>> = Vec::with_capacity(source_lines.len());
+	let mut tail = 0;
 	let mut offset: isize = 0;
 	for hunk in &patch.hunks {
 		let (start, count, replacement, expected) = hunk_sides(hunk, reverse);
@@ -895,27 +897,57 @@ fn apply_file_bytes(
 			return Err(ApplyFailure::Context("hunk position precedes file".into()));
 		}
 		let position = position as usize;
-		if position.saturating_add(expected.len()) > lines.len()
-			|| lines[position..position + expected.len()] != expected
-		{
+		let applies = if position >= head.len() {
+			let from = tail + (position - head.len());
+			let end = from.saturating_add(expected.len());
+			let applies = source_lines.get(from..end) == Some(&expected[..]);
+			if applies {
+				head.extend_from_slice(&source_lines[tail..from]);
+				head.extend_from_slice(&replacement);
+				tail = end;
+			}
+			applies
+		} else {
+			head.extend_from_slice(&source_lines[tail..]);
+			tail = source_lines.len();
+			let range = position..position + expected.len();
+			let applies = head.get(range.clone()) == Some(&expected[..]);
+			if applies {
+				head.splice(range, replacement.iter().copied());
+			}
+			applies
+		};
+		if !applies {
 			return Err(ApplyFailure::Context(format!("hunk at line {start} does not apply")));
 		}
-		lines.splice(position..position + expected.len(), replacement.clone());
 		offset += replacement.len() as isize - expected.len() as isize;
 	}
-	Ok(lines.concat())
+	head.extend_from_slice(&source_lines[tail..]);
+	let mut out = Vec::with_capacity(source.len());
+	for line in head {
+		out.extend_from_slice(line.data);
+		if line.newline {
+			out.push(b'\n');
+		}
+	}
+	Ok(out)
 }
 
-fn hunk_sides(hunk: &Hunk, reverse: bool) -> (usize, usize, Vec<Vec<u8>>, Vec<Vec<u8>>) {
+/// One source or hunk line, borrowed: its bytes without the terminator and
+/// whether a `\n` follows.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct Line<'a> {
+	data:    &'a [u8],
+	newline: bool,
+}
+
+fn hunk_sides(hunk: &Hunk, reverse: bool) -> (usize, usize, Vec<Line<'_>>, Vec<Line<'_>>) {
 	let mut old = Vec::new();
 	let mut new = Vec::new();
 	for line in &hunk.lines {
-		let mut content = line.data.clone();
-		if !line.no_newline {
-			content.push(b'\n');
-		}
+		let content = Line { data: &line.data, newline: !line.no_newline };
 		if line.kind != b'+' {
-			old.push(content.clone());
+			old.push(content);
 		}
 		if line.kind != b'-' {
 			new.push(content);
@@ -928,17 +960,17 @@ fn hunk_sides(hunk: &Hunk, reverse: bool) -> (usize, usize, Vec<Vec<u8>>, Vec<Ve
 	}
 }
 
-fn split_lines(bytes: &[u8]) -> Vec<Vec<u8>> {
+fn split_lines(bytes: &[u8]) -> Vec<Line<'_>> {
 	let mut lines = Vec::new();
-	let mut start = 0;
-	for (index, byte) in bytes.iter().enumerate() {
-		if *byte == b'\n' {
-			lines.push(bytes[start..=index].to_vec());
-			start = index + 1;
+	let mut rest = bytes;
+	while !rest.is_empty() {
+		if let Some(end) = rest.iter().position(|&byte| byte == b'\n') {
+			lines.push(Line { data: &rest[..end], newline: true });
+			rest = &rest[end + 1..];
+		} else {
+			lines.push(Line { data: rest, newline: false });
+			break;
 		}
-	}
-	if start < bytes.len() {
-		lines.push(bytes[start..].to_vec());
 	}
 	lines
 }
@@ -1265,21 +1297,28 @@ fn index_map_at(
 	repo: &gix::Repository,
 	index_path: Option<&Path>,
 ) -> Result<BTreeMap<String, FileEntry>> {
+	Ok(load_index_at(repo, index_path)?.map_or_default(|index| index_state_map(&index)))
+}
+
+/// The index at `index_path`, or the repository's when `None`; `None` when an
+/// alternate index does not exist yet.
+fn load_index_at(
+	repo: &gix::Repository,
+	index_path: Option<&Path>,
+) -> Result<Option<gix::index::File>> {
 	let Some(path) = index_path else {
-		return index_map(repo);
+		return load_index_or_head(repo, "git read index").map(Some);
 	};
 	match fs::metadata(path) {
-		Ok(_) => {
-			let index = gix::index::File::at(
-				path,
-				repo.object_hash(),
-				false,
-				gix::index::decode::Options::default(),
-			)
-			.map_err(|err| Error::backend("git read alternate index", err))?;
-			Ok(index_state_map(&index))
-		},
-		Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(BTreeMap::new()),
+		Ok(_) => gix::index::File::at(
+			path,
+			repo.object_hash(),
+			false,
+			gix::index::decode::Options::default(),
+		)
+		.map(Some)
+		.map_err(|err| Error::backend("git read alternate index", err)),
+		Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
 		Err(err) => Err(err.into()),
 	}
 }
@@ -1311,13 +1350,43 @@ fn tree_map(repo: &gix::Repository, tree: gix::ObjectId) -> Result<BTreeMap<Stri
 	Ok(map)
 }
 
-fn worktree_map(
+/// The worktree content, in blob form, of the paths `patches` read: each
+/// patch's source, or its target when it creates one. Applying needs nothing
+/// else, so the rest of the worktree is never read or hashed. Tracked paths
+/// take their index mode (there is no executable bit on Windows), others the
+/// mode the patch records.
+fn patch_worktree_map(
 	repo: &GitRepo,
 	gix_repo: &gix::Repository,
 	filter: &mut WorktreeFilter<'_>,
+	patches: &[FilePatch],
+	reverse: bool,
 ) -> Result<BTreeMap<String, FileEntry>> {
 	let index = index_map(gix_repo)?;
-	tracked_worktree_map(repo, gix_repo, filter, &index)
+	let mut state = BTreeMap::new();
+	for patch in patches {
+		let (source, target, source_mode, target_mode) = patch_sides(patch, reverse);
+		let Some(path) = source.or(target) else {
+			continue;
+		};
+		if state.contains_key(path) {
+			continue;
+		}
+		let mode = index
+			.get(path)
+			.map(|entry| entry.mode)
+			.or(source_mode)
+			.or(target_mode)
+			.unwrap_or(Mode::FILE);
+		if let Some((bytes, mode)) = read_worktree_entry(repo, filter, path, mode)? {
+			let id = gix_repo
+				.write_blob(bytes)
+				.map_err(|err| Error::backend("git hash patch source", err))?
+				.detach();
+			state.insert(path.to_owned(), FileEntry::new(id, mode));
+		}
+	}
+	Ok(state)
 }
 
 /// `git apply` reads worktree files renormalized, except paths whose patch
@@ -1346,39 +1415,6 @@ fn crlf_in_preimage(patch: &FilePatch, reverse: bool) -> bool {
 	patch.hunks.iter().flat_map(|hunk| &hunk.lines).any(|line| {
 		(line.kind == b' ' || line.kind == removed) && !line.no_newline && line.data.ends_with(b"\r")
 	})
-}
-
-fn augment_patch_sources(
-	repo: &GitRepo,
-	gix_repo: &gix::Repository,
-	filter: &mut WorktreeFilter<'_>,
-	state: &mut BTreeMap<String, FileEntry>,
-	patches: &[FilePatch],
-	reverse: bool,
-) -> Result<()> {
-	for patch in patches {
-		let (source, target, source_mode, target_mode) = patch_sides(patch, reverse);
-		let path = if let Some(path) = source {
-			path
-		} else {
-			let Some(target) = target else {
-				continue;
-			};
-			target
-		};
-		if state.contains_key(path) {
-			continue;
-		}
-		let mode = source_mode.or(target_mode).unwrap_or(Mode::FILE);
-		if let Some((bytes, mode)) = read_worktree_entry(repo, filter, path, mode)? {
-			let id = gix_repo
-				.write_blob(bytes)
-				.map_err(|err| Error::backend("git hash patch source", err))?
-				.detach();
-			state.insert(path.to_owned(), FileEntry::new(id, mode));
-		}
-	}
-	Ok(())
 }
 
 fn tracked_worktree_map(
@@ -1503,23 +1539,41 @@ fn write_index_map_at(
 	map: &BTreeMap<String, FileEntry>,
 	index_path: Option<&Path>,
 ) -> Result<()> {
+	// Entries the map leaves as they were keep their stat data and flags:
+	// zeroed stats make every later status re-hash each tracked file, and
+	// sparse checkouts would lose their skip-worktree bits.
+	let previous = load_index_at(repo, index_path)?;
 	let mut state = gix::index::State::new(repo.object_hash());
 	for (path, entry) in map {
 		validate_repo_path(path).map_err(ApplyFailure::into_error)?;
-		// INTENT_TO_ADD lives in the extended flag word; losing it here would
-		// silently stage promised paths as empty files.
-		let flags = if entry.intent_to_add {
-			Flags::EXTENDED | Flags::INTENT_TO_ADD
-		} else {
-			Flags::empty()
+		let rela_path = BStr::new(path.as_bytes());
+		let unchanged = previous.as_ref().and_then(|index| {
+			let old = index
+				.entry_by_path_and_stage(rela_path, Stage::Unconflicted)
+				.filter(|old| {
+					old.id == entry.id
+						&& old.mode == entry.mode
+						&& old.flags.contains(Flags::INTENT_TO_ADD) == entry.intent_to_add
+				})?;
+			// A stat as new as the old index is racy: only that index's
+			// timestamp makes git re-check the file's content, and the index
+			// written here is newer, so the stat is dropped to keep the check
+			// (git smudges such entries when it writes an index).
+			let stat = if old.stat.is_racy(index.timestamp(), Default::default()) {
+				Stat::default()
+			} else {
+				old.stat
+			};
+			Some((stat, old.flags))
+		});
+		let (stat, flags) = match unchanged {
+			Some(kept) => kept,
+			// INTENT_TO_ADD lives in the extended flag word; losing it here
+			// would silently stage promised paths as empty files.
+			None if entry.intent_to_add => (Stat::default(), Flags::EXTENDED | Flags::INTENT_TO_ADD),
+			None => (Stat::default(), Flags::empty()),
 		};
-		state.dangerously_push_entry(
-			Stat::default(),
-			entry.id,
-			flags,
-			entry.mode,
-			BStr::new(path.as_bytes()),
-		);
+		state.dangerously_push_entry(stat, entry.id, flags, entry.mode, rela_path);
 	}
 	state.sort_entries();
 	let mut index = gix::index::File::from_state(
@@ -1813,7 +1867,8 @@ fn validate_repo_path(path: &str) -> std::result::Result<(), ApplyFailure> {
 	if candidate.is_absolute()
 		|| candidate.components().any(|component| {
 			matches!(component, Component::ParentDir | Component::RootDir | Component::Prefix(_))
-		}) || path.is_empty()
+		})
+		|| path.is_empty()
 	{
 		return Err(ApplyFailure::Invalid(format!("unsafe patch path: {path}")));
 	}
@@ -1915,6 +1970,100 @@ mod tests {
 		assert!(status.contains(" A promised.txt"), "promised.txt keeps intent-to-add: {status}");
 	}
 
+	/// The index stat entry for `path`, as git last recorded it.
+	fn index_stat(path: &Path, rela: &str) -> gix::index::entry::Stat {
+		let index = gix::open(path).expect("open").open_index().expect("index");
+		index
+			.entry_by_path(rela.into())
+			.unwrap_or_else(|| panic!("{rela} is in the index"))
+			.stat
+	}
+
+	/// Back-date `path`'s modification time to `when`.
+	fn set_mtime(path: &Path, when: std::time::SystemTime) {
+		fs::OpenOptions::new()
+			.write(true)
+			.open(path)
+			.and_then(|file| file.set_modified(when))
+			.expect("set mtime");
+	}
+
+	/// Staging hunks rewrites the index; entries the patch does not touch must
+	/// keep their stat cache, or every later `git status` re-hashes them, and
+	/// their flags, or a sparse checkout's skipped files read as deleted.
+	#[test]
+	fn stage_hunks_keeps_stat_cache_and_flags_of_untouched_entries() {
+		let temp = init(&[
+			("edited.txt", b"one\n"),
+			("untouched.txt", b"same\n"),
+			("sparse.txt", b"elsewhere\n"),
+		]);
+		// A stat from the second the index was written is racy and is not
+		// kept; give `untouched.txt` an older one, as settled files have.
+		let then = std::time::SystemTime::now() - std::time::Duration::from_secs(30);
+		set_mtime(&temp.path().join("untouched.txt"), then);
+		git(temp.path(), &["update-index", "--refresh"]);
+		git(temp.path(), &["update-index", "--skip-worktree", "sparse.txt"]);
+		fs::remove_file(temp.path().join("sparse.txt")).expect("drop skipped file");
+		let before = index_stat(temp.path(), "untouched.txt");
+		assert_ne!(before, Stat::default(), "git records a stat cache");
+		fs::write(temp.path().join("edited.txt"), b"two\n").expect("edit");
+		let repo = repo(temp.path());
+		repo
+			.stage_hunks(&[HunkSelection { path: "edited.txt".into(), hunks: HunkSpec::All }], None)
+			.expect("stage hunks");
+		assert_eq!(index_stat(temp.path(), "untouched.txt"), before);
+		assert_eq!(git(temp.path(), &["ls-files", "-v", "sparse.txt"]), "S sparse.txt\n");
+		assert_eq!(git(temp.path(), &["status", "--porcelain"]), "M  edited.txt\n");
+	}
+
+	/// An entry whose stat is as new as the index is racy: git compares its
+	/// content, because a same-second, same-size edit leaves the stat alone.
+	/// A newer index written later must keep that check, or the edit vanishes
+	/// from `git status`.
+	#[test]
+	fn stage_hunks_keeps_racy_entries_checked_by_content() {
+		let temp = init(&[("edited.txt", b"one\n"), ("racy.txt", b"base\n")]);
+		git(temp.path(), &["config", "core.trustctime", "false"]);
+		let then = std::time::SystemTime::now() - std::time::Duration::from_secs(30);
+		// Stage a change, then change the file again within what the index
+		// sees as the second it was written, keeping the size.
+		fs::write(temp.path().join("racy.txt"), b"one!\n").expect("write");
+		set_mtime(&temp.path().join("racy.txt"), then);
+		git(temp.path(), &["add", "racy.txt"]);
+		fs::write(temp.path().join("racy.txt"), b"two!\n").expect("rewrite");
+		set_mtime(&temp.path().join("racy.txt"), then);
+		set_mtime(&temp.path().join(".git/index"), then);
+		let status = || git(temp.path(), &["--no-optional-locks", "status", "--porcelain"]);
+		assert_eq!(status(), "MM racy.txt\n", "git sees the racy edit");
+
+		fs::write(temp.path().join("edited.txt"), b"two\n").expect("edit");
+		repo(temp.path())
+			.stage_hunks(&[HunkSelection { path: "edited.txt".into(), hunks: HunkSpec::All }], None)
+			.expect("stage hunks");
+		assert_eq!(status(), "M  edited.txt\nMM racy.txt\n");
+	}
+
+	/// Applying to the worktree reads only the files the patch touches: an
+	/// unreadable unrelated file must not fail it.
+	#[cfg(unix)]
+	#[test]
+	fn worktree_apply_reads_only_patched_paths() {
+		use std::os::unix::fs::PermissionsExt;
+
+		let temp = init(&[("edited.txt", b"one\n"), ("locked.txt", b"secret\n")]);
+		fs::write(temp.path().join("edited.txt"), b"two\n").expect("edit");
+		let patch = git(temp.path(), &["diff", "--no-ext-diff", "--full-index"]);
+		reset(temp.path());
+		let locked = temp.path().join("locked.txt");
+		fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).expect("lock");
+		let repo = repo(temp.path());
+		let applied = repo.apply_patch(&patch, &ApplyOptions::default());
+		fs::set_permissions(&locked, fs::Permissions::from_mode(0o644)).expect("unlock");
+		applied.expect("apply ignores unrelated files");
+		assert_eq!(fs::read(temp.path().join("edited.txt")).expect("read"), b"two\n");
+	}
+
 	#[test]
 	fn stage_hunks_commit_split_survives_unadvanced_index_mtime() {
 		// Regression for #10130 (the issue-966 split-commit repro): two
@@ -1973,6 +2122,31 @@ mod tests {
 		]);
 		assert_eq!(errors.len(), 1);
 		assert_eq!(errors[0].path, "a.bin");
+	}
+
+	#[test]
+	fn patch_apply_second_hunk_rewrites_lines_of_the_first() {
+		// The second hunk targets `ONE`, a line only the first hunk produced, so
+		// it lands behind the forward cursor and takes the materialize-and-splice
+		// path instead of the ascending copy-forward one.
+		let temp = init(&[("a.txt", b"one\ntwo\nthree\nfour\n")]);
+		let patch = "diff --git a/a.txt b/a.txt\n--- a/a.txt\n+++ b/a.txt\n@@ -1,2 +1,2 \
+		             @@\n-one\n+ONE\n two\n@@ -1 +1 @@\n-ONE\n+uno\n";
+		let options =
+			ApplyOptions { cached: false, index_path: None, reverse: false, three_way: false };
+		let repository = repo(temp.path());
+		assert!(
+			repository
+				.can_apply_patch(patch, &options)
+				.expect("check overlapping patch")
+		);
+		repository
+			.apply_patch(patch, &options)
+			.expect("apply overlapping patch");
+		assert_eq!(
+			fs::read(temp.path().join("a.txt")).expect("read patched"),
+			b"uno\ntwo\nthree\nfour\n"
+		);
 	}
 
 	#[test]

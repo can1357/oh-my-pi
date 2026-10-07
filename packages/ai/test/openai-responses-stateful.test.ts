@@ -1,10 +1,12 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
 import { streamOpenAIResponses } from "@oh-my-pi/pi-ai/providers/openai-responses";
+import { stream } from "@oh-my-pi/pi-ai/stream";
 import type { Context, FetchImpl, Model, ModelSpec, ProviderSessionState } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { resolveModelPolicy } from "@oh-my-pi/pi-catalog/compat/resolve";
 import { classifyModel } from "@oh-my-pi/pi-catalog/compat/taxonomy";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
+import * as utils from "@oh-my-pi/pi-utils";
 
 const model = getBundledModel("openai", "gpt-5-mini") as Model<"openai-responses">;
 
@@ -780,6 +782,73 @@ describe("openai-responses stateful chaining", () => {
 		expect(sentRequests[2]?.store).toBe(false);
 		expect(sentRequests[3]?.previous_response_id).toBeUndefined();
 		expect(sentRequests[3]?.store).toBe(false);
+	});
+
+	it.each([
+		["opts a custom endpoint into chaining without official-only fields", "custom", true, undefined, undefined, true],
+		["opts an official endpoint out of chaining", "openai", false, undefined, undefined, false],
+		["lets the env opt-out override model opt-in", "custom", true, "0", undefined, false],
+		["lets the env opt-in override model opt-out", "openai", false, "1", undefined, true],
+		["lets the call opt-in override env and model opt-outs", "custom", false, "0", true, true],
+		["lets the call opt-out override env and model opt-ins", "openai", true, "1", false, false],
+		[
+			"preserves model opt-in through OpenRouter's Responses dispatch",
+			"openrouter",
+			true,
+			undefined,
+			undefined,
+			true,
+		],
+	] as const)("%s", async (_name, provider, compatValue, envValue, callValue, enabled) => {
+		const originalFlag = utils.$flag;
+		vi.spyOn(utils, "$flag").mockImplementation((name, fallback) =>
+			name === "PI_OPENAI_STATEFUL" ? utils.parseFlag(envValue, fallback) : originalFlag(name, fallback),
+		);
+		const endpointModel = buildModel({
+			...model,
+			api: provider === "openrouter" ? "openrouter" : "openai-responses",
+			provider,
+			baseUrl: provider === "openai" ? model.baseUrl : "https://proxy.example.com/v1",
+			compat: { statefulResponses: compatValue },
+		});
+		const sentRequests: Array<Record<string, unknown>> = [];
+		const options = {
+			apiKey: "test-key",
+			sessionId: "stateful-compat-session",
+			providerSessionState: new Map<string, ProviderSessionState>(),
+			statefulResponses: callValue,
+			textVerbosity: "medium" as const,
+			fetch: createCapturingFetch(sentRequests),
+		};
+		const firstUser = { role: "user" as const, content: "First question", timestamp: 1000 };
+		const firstResponse = await stream(endpointModel, { systemPrompt, messages: [firstUser] }, options).result();
+		const secondResponse = await stream(
+			endpointModel,
+			{
+				systemPrompt,
+				messages: [firstUser, firstResponse, { role: "user", content: "Second question", timestamp: 1001 }],
+			},
+			options,
+		).result();
+
+		expect(firstResponse.stopReason).toBe("stop");
+		expect(secondResponse.stopReason).toBe("stop");
+		expect(sentRequests).toHaveLength(2);
+		expect(sentRequests[0]?.store).toBe(enabled);
+		expect(sentRequests[1]?.store).toBe(enabled);
+		expect(sentRequests[1]?.previous_response_id).toBe(enabled ? "resp_1" : undefined);
+		if (enabled) {
+			expect(sentRequests[1]?.input).toEqual([
+				{ role: "user", content: [{ type: "input_text", text: "Second question" }] },
+			]);
+		} else {
+			expect(JSON.stringify(sentRequests[1]?.input)).toContain("First question");
+		}
+		if (provider !== "openai") {
+			expect(sentRequests[0]?.text).toBeUndefined();
+			expect(sentRequests[0]?.stream_options).toBeUndefined();
+			expect(sentRequests[0]?.prompt_cache_retention).toBeUndefined();
+		}
 	});
 
 	it("chains by default against the official OpenAI API", async () => {

@@ -17,7 +17,7 @@ A successful call is not memoized by JS. Repeated calls rely on the runtime's `r
 - `platformTag`: `${platform}-${process.arch}`;
 - package version (the expected addon release, subject to the pre-sentinel compatibility exception below);
 - package-local `nativeDir` and the directory of `process.execPath`;
-- `nativesDir`, normally `~/.omp/natives`; it uses `$XDG_DATA_HOME/omp/natives` only when `$XDG_DATA_HOME/omp` exists;
+- `nativesDir`: `PI_NATIVES_DIR` first (trimmed, `~`-expanded, and normalized; empty or relative values are ignored), then `$XDG_DATA_HOME/omp/natives` only when `$XDG_DATA_HOME/omp` exists, otherwise `~/.omp/natives`;
 - `versionedDir`: `<nativesDir>/<packageVersion>`;
 - legacy compiled-binary directory: `%LOCALAPPDATA%/omp` (or `~/AppData/Local/omp`) on Windows, `~/.local/bin` elsewhere;
 - workspace/install/compiled mode, optional leaf directory, Windows staging policy, CPU variant, filenames, and ordered candidates.
@@ -83,7 +83,7 @@ A successfully selected embedded candidate is prepended. Windows staging is disa
 
 ## Embedded manifest and extraction
 
-`embedded-addon.js` is reset to `embeddedAddon = null` in normal source/published-core state. `scripts/embed-native.ts` can generate a matching manifest containing:
+`embedded-addon.js` is always `embeddedAddon = null` on disk, including the published core. Standalone binary builds replace it in memory with a manifest from `scripts/embed-native.ts` containing:
 
 - `platformTag` and package `version`;
 - a gzip-compressed tar archive reference;

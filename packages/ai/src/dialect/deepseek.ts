@@ -4,6 +4,7 @@ import { parseToolCallArguments } from "../utils/tool-call-arguments";
 import { asRecord, mintToolCallId, partialSuffixOverlapAny } from "./coercion";
 import dialectPrompt from "./deepseek.md" with { type: "text" };
 import { assistantTranscriptParts, collectToolResultRun, messageContentText, stringifyJson } from "./rendering";
+import { TerminatorWait } from "./terminator-wait";
 import type {
 	DialectDefinition,
 	DialectRenderOptions,
@@ -128,6 +129,8 @@ export class DeepSeekInbandScanner implements InbandScanner {
 	#dsmlParamName = "";
 	#dsmlParamIsString = true;
 	#dsmlParamRaw = "";
+	/** Unclassified wrapper text is kept until an invoke proves it is a tool call. */
+	#pendingDsmlSection: string | undefined;
 	#rawBlock = "";
 	#stripLeadingWhitespace = false;
 	/**
@@ -139,6 +142,7 @@ export class DeepSeekInbandScanner implements InbandScanner {
 	#bareDsmlOpenVisible = false;
 	/** Last few visible characters, so a bare opener split across chunks is still seen. */
 	#visibleTail = "";
+	readonly #closeWait = new TerminatorWait();
 
 	constructor(options: InbandScannerOptions = {}) {
 		this.#parseThinking = options.parseThinking ?? true;
@@ -146,11 +150,17 @@ export class DeepSeekInbandScanner implements InbandScanner {
 
 	feed(text: string): InbandScanEvent[] {
 		if (text.length === 0) return [];
-		this.#buffer += text;
-		return this.#consume(false);
+		if (this.#closeWait.absorb(text)) return [];
+		this.#buffer = this.#closeWait.release(this.#buffer) + text;
+		const events = this.#consume(false);
+		if (this.#state === "args" || this.#state === "legacyArgs") {
+			this.#closeWait.arm(DEEPSEEK_TOOL_CALL_END, this.#buffer);
+		}
+		return events;
 	}
 
 	flush(): InbandScanEvent[] {
+		this.#buffer = this.#closeWait.release(this.#buffer);
 		return this.#consume(true);
 	}
 
@@ -194,6 +204,12 @@ export class DeepSeekInbandScanner implements InbandScanner {
 			if (!this.#consumeDsmlParam(final, events)) break;
 		}
 		if (final && this.#state === "thinking") this.#endThinking(events);
+		if (final && this.#pendingDsmlSection !== undefined) {
+			this.#emitText(this.#pendingDsmlSection + this.#buffer, events);
+			this.#pendingDsmlSection = undefined;
+			this.#buffer = "";
+			this.#state = "outside";
+		}
 		if (final && this.#buffer.length === 0 && this.#rawBlock.length > 0) this.#rawBlock = "";
 		return events;
 	}
@@ -249,6 +265,7 @@ export class DeepSeekInbandScanner implements InbandScanner {
 					? DSML_TOOL_CALLS_OPEN_FULLWIDTH
 					: DSML_TOOL_CALLS_OPEN_ASCII;
 				this.#buffer = this.#buffer.slice(openToken.length);
+				this.#pendingDsmlSection = openToken;
 				this.#state = "dsmlSection";
 				return;
 			}
@@ -381,16 +398,25 @@ export class DeepSeekInbandScanner implements InbandScanner {
 	}
 
 	#consumeDsmlSection(final: boolean, events: InbandScanEvent[]): boolean {
+		const initial = this.#buffer;
 		while (this.#buffer.length > 0) {
 			this.#skipWhitespace();
 			const close = this.#matchingDsmlClose(DSML_TOOL_CALLS_CLOSE_FULLWIDTH, DSML_TOOL_CALLS_CLOSE_ASCII);
 			if (close) {
+				if (this.#pendingDsmlSection !== undefined) {
+					this.#emitText(
+						this.#pendingDsmlSection + initial.slice(0, initial.length - this.#buffer.length) + close,
+						events,
+					);
+					this.#pendingDsmlSection = undefined;
+				}
 				this.#buffer = this.#buffer.slice(close.length);
 				this.#state = "outside";
 				return true;
 			}
 			const invoke = this.#matchDsmlOpen("invoke");
 			if (invoke) {
+				this.#pendingDsmlSection = undefined;
 				this.#rawBlock = invoke.raw;
 				this.#name = invoke.name;
 				this.#id = mintToolCallId();
@@ -404,11 +430,14 @@ export class DeepSeekInbandScanner implements InbandScanner {
 					(this.#buffer.startsWith("<｜DSML｜invoke") || this.#buffer.startsWith("<|DSML|invoke")) &&
 					!this.#buffer.includes(">")
 				)
-					return false;
-				if (partialSuffixOverlapAny(this.#buffer, DSML_SECTION_TOKENS) === this.#buffer.length) return false;
+					break;
+				if (partialSuffixOverlapAny(this.#buffer, DSML_SECTION_TOKENS) === this.#buffer.length) break;
 			}
-			if (this.#buffer.length === 0) return false;
+			if (this.#buffer.length === 0) break;
 			this.#buffer = this.#buffer.slice(1);
+		}
+		if (this.#pendingDsmlSection !== undefined) {
+			this.#pendingDsmlSection += initial.slice(0, initial.length - this.#buffer.length);
 		}
 		return final;
 	}

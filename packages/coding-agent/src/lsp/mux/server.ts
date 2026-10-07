@@ -1,7 +1,7 @@
 import * as fs from "node:fs/promises";
 import * as net from "node:net";
 import { isRecord, logger, postmortem, ptree, setProcessName } from "@oh-my-pi/pi-utils";
-import { MessageFramer } from "../../jsonrpc/message-framing";
+import { encodeMessageFrame, MessageFramer } from "../../jsonrpc/message-framing";
 import type { LspJsonRpcId, LspJsonRpcNotification, LspJsonRpcRequest, LspJsonRpcResponse } from "../types";
 import {
 	LSP_MUX_PROJECT_DIR_ENV,
@@ -124,11 +124,6 @@ function hasRequestId(message: LspJsonRpcRequest | LspJsonRpcNotification): mess
 	return "id" in message && (typeof message.id === "number" || typeof message.id === "string");
 }
 
-function frame(message: RpcMessage): string {
-	const body = JSON.stringify(message);
-	return `Content-Length: ${Buffer.byteLength(body, "utf8")}\r\n\r\n${body}`;
-}
-
 function rpcResult(id: LspJsonRpcId, result: unknown): LspJsonRpcResponse {
 	return { jsonrpc: "2.0", id, result };
 }
@@ -166,10 +161,6 @@ function parseDiagnostics(params: unknown): DiagnosticsParams | undefined {
 function parseProgress(params: unknown): ProgressParams | undefined {
 	if (!isRecord(params) || (typeof params.token !== "string" && typeof params.token !== "number")) return undefined;
 	return params as unknown as ProgressParams;
-}
-
-function cloneParams<T>(params: T): T {
-	return structuredClone(params);
 }
 
 /**
@@ -278,7 +269,7 @@ export class LspMuxServer {
 		this.#disarmMuxIdle();
 		socket.on("data", chunk => {
 			try {
-				session.framer.push(Buffer.from(chunk));
+				session.framer.push(typeof chunk === "string" ? Buffer.from(chunk) : chunk);
 				for (const text of session.framer.drain(header => {
 					logger.warn("LSP mux client framing resync", { header: header.slice(0, 200) });
 				})) {
@@ -462,7 +453,7 @@ export class LspMuxServer {
 			while (true) {
 				const { done, value } = await reader.read();
 				if (done) break;
-				framer.push(Buffer.from(value));
+				framer.push(value);
 				for (const text of framer.drain(header => {
 					logger.warn("LSP mux server framing resync", { server: server.key, header: header.slice(0, 200) });
 				})) {
@@ -495,18 +486,19 @@ export class LspMuxServer {
 		if (message.method === "textDocument/publishDiagnostics") {
 			const params = parseDiagnostics(message.params);
 			if (!params) return;
-			server.diagnostics.set(params.uri, cloneParams(params));
-			for (const session of server.sessions) if (session.initialized) this.#sendDiagnostics(session, params);
+			// Freshly parsed and never mutated: stored as-is for replay to later sessions.
+			server.diagnostics.set(params.uri, params);
+			this.#broadcast(server, { jsonrpc: "2.0", method: "textDocument/publishDiagnostics", params });
 			return;
 		}
 		if (message.method === "$/progress") {
 			const params = parseProgress(message.params);
 			if (params) {
-				if (params.value?.kind === "begin") server.progress.set(params.token, cloneParams(params));
+				if (params.value?.kind === "begin") server.progress.set(params.token, params);
 				else if (params.value?.kind === "end") server.progress.delete(params.token);
 			}
 		}
-		for (const session of server.sessions) if (session.initialized) this.#sendSession(session, message);
+		this.#broadcast(server, message);
 	}
 
 	#handleServerResponse(server: ServerInstance, message: LspJsonRpcResponse): void {
@@ -552,7 +544,7 @@ export class LspMuxServer {
 						(registration): registration is Registration =>
 							isRecord(registration) && typeof registration.id === "string",
 					);
-					server.registrations.push({ registrations: cloneParams(valid) });
+					server.registrations.push({ registrations: valid });
 				}
 			} else if (message.method === "client/unregisterCapability" && isRecord(message.params)) {
 				const raw = message.params.unregisterations ?? message.params.unregistrations;
@@ -600,14 +592,6 @@ export class LspMuxServer {
 		void this.#writeServer(session.server, { ...message, id: pending.serverId });
 	}
 
-	#sendDiagnostics(session: Session, params: DiagnosticsParams): void {
-		this.#sendSession(session, {
-			jsonrpc: "2.0",
-			method: "textDocument/publishDiagnostics",
-			params: cloneParams(params),
-		});
-	}
-
 	#replayState(session: Session, server: ServerInstance): void {
 		for (const batch of server.registrations) {
 			if (batch.registrations.length === 0) continue;
@@ -615,24 +599,36 @@ export class LspMuxServer {
 				jsonrpc: "2.0",
 				id: "replaced",
 				method: "client/registerCapability",
-				params: cloneParams(batch),
+				params: batch,
 			});
 		}
-		for (const params of server.diagnostics.values()) this.#sendDiagnostics(session, params);
+		for (const params of server.diagnostics.values()) {
+			this.#sendSession(session, { jsonrpc: "2.0", method: "textDocument/publishDiagnostics", params });
+		}
 		for (const params of server.progress.values()) {
-			this.#sendSession(session, { jsonrpc: "2.0", method: "$/progress", params: cloneParams(params) });
+			this.#sendSession(session, { jsonrpc: "2.0", method: "$/progress", params });
+		}
+	}
+
+	/** Serialize a server notification once and write the same frame to every initialized session. */
+	#broadcast(server: ServerInstance, message: RpcMessage): void {
+		let data: Buffer | undefined;
+		for (const session of server.sessions) {
+			if (!session.initialized || session.closed || session.socket.destroyed) continue;
+			data ??= encodeMessageFrame(message);
+			session.socket.write(data);
 		}
 	}
 
 	#sendSession(session: Session, message: RpcMessage): void {
-		if (!session.closed && !session.socket.destroyed) session.socket.write(frame(message));
+		if (!session.closed && !session.socket.destroyed) session.socket.write(encodeMessageFrame(message));
 	}
 
 	#writeServer(server: ServerInstance, message: RpcMessage): Promise<void> {
 		const write = server.writeQueue
 			.catch(() => {})
 			.then(async () => {
-				const data = frame(message);
+				const data = encodeMessageFrame(message);
 				const pendingWrite = Promise.resolve(server.proc.stdin.write(data));
 				void pendingWrite.catch(() => {});
 				await Promise.all([pendingWrite, Promise.resolve(server.proc.stdin.flush())]);
