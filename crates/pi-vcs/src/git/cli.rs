@@ -10,10 +10,10 @@
 //!
 //! The runner ports the hardened subprocess contract of the TS wrapper:
 //! non-interactive env (`GIT_TERMINAL_PROMPT=0`, askpass rejection, `LC_ALL`
-//! handling), `--no-optional-locks` for reads, fsmonitor/untracked-cache
-//! disabled for writes, ambient `GIT_DIR`-family vars stripped, bounded output
-//! capture, and deadline + SIGTERM→SIGKILL termination on both the async and
-//! sync runners (git releases its lock files from its SIGTERM handler only).
+//! handling), `--no-optional-locks` for reads, ambient `GIT_DIR`-family vars
+//! stripped, bounded output capture, and deadline + SIGTERM→SIGKILL termination
+//! on both the async and sync runners (git releases its lock files from its
+//! SIGTERM handler only).
 
 use std::{path::Path, process::Stdio, time::Duration};
 
@@ -319,34 +319,14 @@ pub(crate) fn run_sync_capped(
 	run_sync_with(cwd, args, timeout, limit, false)
 }
 
-/// Read runner that lets git write back the index stat cache it refreshed,
-/// with an explicit retention cap (e.g. a probe like [`GitRepo::is_dirty`]
-/// that only needs the first few entries). It runs only the status call that
-/// repairs a stale stat cache; every other whole-worktree status runs
-/// lock-free through [`run_sync_capped`] (see [`GitRepo::status_porcelain`]).
+/// Write-capable runner with an explicit retention cap.
 ///
-/// `git status` re-stats every entry, and a lock-free status discards that
-/// work. An index with no stat data, which is how every worktree `jj
-/// workspace add` creates starts, therefore re-reads and re-hashes the whole
-/// tree on every lock-free status, measured here at 42s wall on a 94k-entry
-/// checkout. Letting one call write the refresh back makes the calls after
-/// it take the stat fast path.
-///
-/// That call costs every other writer. The lock is *optional*, so this call
-/// never waits for or fails on another process's `index.lock`; it skips the
-/// write instead. But git takes the lock after its stat refresh and holds it
-/// to the end of the worktree walk, whether or not it ends up writing, and
-/// while it does every other writer fails on it: `git add`, `commit` and
-/// `checkout` at once, jj after a one-second retry. A status line polling
-/// through this runner would hold the lock on every poll.
-///
-/// The call runs as the user's own `git status` would, so the repository's
-/// fsmonitor and untracked cache are used and kept, as on every other read.
-/// Pinning them off here would not be inert: with the index write allowed,
-/// git honours a `core.fsmonitor=false` or `core.untrackedCache=false` pin by
-/// dropping the index's fsmonitor and untracked-cache extensions and writing
-/// that removal back, undoing what the user's own `git status` built.
-pub(crate) fn run_sync_refreshing_capped(
+/// This keeps the repository's fsmonitor and untracked-cache configuration,
+/// just as the user's own git command would. Pinning either off while an index
+/// write is allowed would drop its extension from the rewritten index. Callers
+/// use this only after a lock-free read has established that the index stat
+/// cache needs a refresh.
+pub(crate) fn run_sync_writable_capped(
 	cwd: &Path,
 	args: &[String],
 	timeout: Duration,
@@ -356,32 +336,28 @@ pub(crate) fn run_sync_refreshing_capped(
 }
 
 /// Shared implementation behind [`run_sync_capped`] and
-/// [`run_sync_refreshing_capped`]. `allow_index_refresh` permits the
-/// opportunistic index write a plain `git status` performs: the stat cache it
-/// just refreshed, and the fsmonitor and untracked-cache state the
-/// repository's own config maintains.
+/// [`run_sync_writable_capped`]. `allow_index_write` removes the
+/// `GIT_OPTIONAL_LOCKS=0` read policy, letting a command that modifies the
+/// index report a lock conflict through its exit status.
 fn run_sync_with(
 	cwd: &Path,
 	args: &[String],
 	timeout: Duration,
 	limit: usize,
-	allow_index_refresh: bool,
+	allow_index_write: bool,
 ) -> Result<CliOutput> {
-	let argv = if allow_index_refresh {
-		args.to_vec()
-	} else {
-		hardened_args(args, true)
-	};
+	let hardened = (!allow_index_write).then(|| hardened_args(args, true));
+	let argv = hardened.as_deref().unwrap_or(args);
 	let mut cmd = std::process::Command::new("git");
-	cmd.args(&argv)
+	cmd.args(argv)
 		.current_dir(cwd)
 		.stdin(Stdio::null())
 		.stdout(Stdio::piped())
 		.stderr(Stdio::piped());
 	apply_env(&mut cmd);
-	if allow_index_refresh {
+	if allow_index_write {
 		// `--no-optional-locks` and `GIT_OPTIONAL_LOCKS=0` are the same switch;
-		// pinning the env var would re-disable what the argv opted into.
+		// pinning the environment variable would re-disable the writer.
 		cmd.env_remove("GIT_OPTIONAL_LOCKS");
 	}
 	let mut child = cmd.spawn().map_err(|err| spawn_error(cwd, err))?;

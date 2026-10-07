@@ -236,9 +236,9 @@ impl GitRepo {
 	///
 	/// git runs lock-free (`--no-optional-locks`), so a status line can poll
 	/// this without making the user's own `git add`, `commit` or jj writes
-	/// fail on `index.lock`. The one exception is a whole-worktree call that
-	/// finds the index stat cache stale: it lets git write the refresh back,
-	/// taking the lock for that one call.
+	/// fail on `index.lock`. A whole-worktree call that finds the index stat
+	/// cache stale runs one separate, lock-taking refresh after its lock-free
+	/// status read.
 	pub fn status_porcelain(&self, options: &StatusOptions) -> Result<String> {
 		self.status_porcelain_capped(options, super::cli::OUTPUT_LIMIT_BYTES)
 	}
@@ -247,10 +247,10 @@ impl GitRepo {
 	/// subprocess capture. The in-process fallback ignores the cap: it builds
 	/// the rendering itself and has nothing to drain.
 	///
-	/// git runs lock-free, as for every other read, unless this call is the
-	/// one that repairs a stale stat cache ([`Self::stat_cache_repair_due`]).
-	/// A status with pathspecs refreshes only the entries they match, so it is
-	/// never that call.
+	/// git status itself always runs lock-free, as for every other read. A
+	/// whole-worktree call with stale stat data then runs the separate refresh
+	/// selected by [`Self::stat_cache_repair_due`]. A status with pathspecs
+	/// refreshes only the entries they match, so it is never that call.
 	fn status_porcelain_capped(&self, options: &StatusOptions, limit: usize) -> Result<String> {
 		let mut args = vec!["status".to_owned(), "--porcelain".to_owned()];
 		args.push(match options.untracked {
@@ -271,17 +271,14 @@ impl GitRepo {
 			None
 		};
 		let timeout = super::cli::COMMAND_TIMEOUT;
-		let result = if let Some(repair) = repair {
-			let result = cli_text_owned_refreshing_capped(self.root(), &args, timeout, limit);
-			if result.is_ok() && !repair.path.with_file_name("index.lock").exists() {
+		let result = cli_text_owned_capped(self.root(), &args, timeout, limit);
+		if let Some(repair) = repair {
+			if result.is_ok() && refresh_index_stat_cache(self.root(), timeout).is_ok() {
 				self.settle_stat_cache_repair(repair);
 			} else {
 				Self::abandon_stat_cache_repair(&repair);
 			}
-			result
-		} else {
-			cli_text_owned_capped(self.root(), &args, timeout, limit)
-		};
+		}
 		match result {
 			Err(err) if !self.is_reftable() && super::cli::prefers_in_process(&err) => {
 				self.status_porcelain_gix(options)
@@ -290,19 +287,14 @@ impl GitRepo {
 		}
 	}
 
-	/// Whether this whole-worktree status should repair the index stat cache:
-	/// run git without `--no-optional-locks`, so it writes back the stat data
-	/// its refresh collected.
+	/// Whether this whole-worktree status should repair the index stat cache.
 	///
-	/// A lock-free status refreshes the stat cache in memory and discards it.
-	/// An entry with no stat data at all (every entry of the index `jj
-	/// workspace add` writes, and each entry `jj new` or `git read-tree`
-	/// rewrites from a tree) can only be compared by re-hashing its file, so
-	/// every lock-free status re-hashes a stat-less index, forever. A status
-	/// that may write repairs it in one call, but it holds `index.lock` from
-	/// the end of its stat refresh to the end of the worktree walk, whether or
-	/// not it writes, and every other writer fails on the lock meanwhile:
-	/// `git add`, `commit` and `checkout` at once, jj after a one-second retry.
+	/// The status read stays lock-free. When it finds stale stat data, the
+	/// caller follows it with `git update-index -q --ignore-missing
+	/// --ignore-submodules --unmerged --refresh`. Unlike status's optional
+	/// write, that command either owns `index.lock` while it updates the stat
+	/// cache or fails. Its exit status therefore tells the caller whether it
+	/// may settle the repair claim without racing another writer's lock.
 	/// So only an index that needs the repair gets it:
 	///
 	/// - An index file unchanged since this process last looked at it costs one
@@ -333,16 +325,16 @@ impl GitRepo {
 		(stat_less > left_by_repair).then_some(StatCacheRepair { path, version, stat_less })
 	}
 
-	/// Record what a repairing status left on disk.
+	/// Record what a completed index refresh left on disk.
 	///
 	/// - Fewer stat-less entries: git wrote its refresh back, and the entries
 	///   left are ones no refresh fills in. Later versions of the index are
 	///   repaired only when they have more.
-	/// - The same index file, untouched: git had nothing it could fill in, and
-	///   its stat-less entries become the bar.
+	/// - The same index file, untouched: the lock-taking refresh completed and
+	///   had no stat data it could fill in, so its entries become the bar.
 	/// - Another index with no fewer stat-less entries: a different writer
 	///   replaced the index while the call ran, so the index on disk is that
-	///   writer's, whatever git did. The next status examines it afresh.
+	///   writer's. The next status examines it afresh.
 	fn settle_stat_cache_repair(&self, repair: StatCacheRepair) {
 		let Some(version) = IndexVersion::read(&repair.path) else {
 			return;
@@ -360,12 +352,12 @@ impl GitRepo {
 		stat_cache_checks().insert(repair.path, StatCacheCheck { version, left_by_repair });
 	}
 
-	/// Forget a claimed repair whose status command did not persist it.
+	/// Forget a claimed repair whose status read or index refresh failed.
 	///
-	/// A non-zero status, or one that returns while another process still owns
-	/// `index.lock`, cannot have written this refresh back. Leaving the claim
-	/// would make an identical stat-less index installed by that writer look
-	/// like the residue of a successful repair, so no later poll would retry.
+	/// A non-zero result is the only trustworthy evidence of contention or an
+	/// otherwise uncertain refresh outcome. Leaving the claim would make an
+	/// identical stat-less index look like the residue of a successful repair,
+	/// so no later poll would retry.
 	fn abandon_stat_cache_repair(repair: &StatCacheRepair) {
 		let mut checks = stat_cache_checks();
 		if checks
@@ -1230,19 +1222,24 @@ fn cli_text_owned_capped(
 		.stdout)
 }
 
-/// [`cli_text_owned_capped`] that lets git write back the index stat cache
-/// it refreshed: the one status call that repairs a stale stat cache
-/// ([`GitRepo::stat_cache_repair_due`]). What that call costs other writers
-/// is on [`run_sync_refreshing_capped`](super::cli::run_sync_refreshing_capped).
-fn cli_text_owned_refreshing_capped(
-	cwd: &Path,
-	args: &[String],
-	timeout: std::time::Duration,
-	limit: usize,
-) -> Result<String> {
-	Ok(super::cli::run_sync_refreshing_capped(cwd, args, timeout, limit)?
-		.into_checked(args)?
-		.stdout)
+/// Run the lock-taking stat-cache refresh after a successful lock-free status.
+///
+/// `update-index --refresh` modifies only cached stat data. `-q`,
+/// `--ignore-missing`, `--ignore-submodules`, and `--unmerged` make entries
+/// that cannot receive stat data a successful no-op, so the caller can settle
+/// their repair floor instead of retrying every poll.
+fn refresh_index_stat_cache(cwd: &Path, timeout: std::time::Duration) -> Result<()> {
+	let args = vec![
+		"update-index".to_owned(),
+		"-q".to_owned(),
+		"--ignore-missing".to_owned(),
+		"--ignore-submodules".to_owned(),
+		"--unmerged".to_owned(),
+		"--refresh".to_owned(),
+	];
+	super::cli::run_sync_writable_capped(cwd, &args, timeout, super::cli::OUTPUT_LIMIT_BYTES)?
+		.into_checked(&args)?;
+	Ok(())
 }
 
 /// Retention cap for path-list captures.
@@ -1589,7 +1586,7 @@ fn stat_cache_checks() -> std::sync::MutexGuard<'static, HashMap<PathBuf, StatCa
 
 #[cfg(test)]
 mod tests {
-	use std::{fs, process::Command};
+	use std::{env, fs, process::Command};
 
 	use tempfile::TempDir;
 
@@ -2261,15 +2258,98 @@ mod tests {
 		assert_eq!(entries_missing_stat(root)?, 3, "changed, deleted and intended stay stat-less");
 		Ok(())
 	}
-	/// A refreshing status skips its optional write while another writer holds
-	/// `index.lock`, but still exits successfully. That skipped call must not
-	/// record the stat-less count as its repair floor: when the writer replaces
-	/// the index with the same number of stat-less entries, the next poll must
-	/// repair it rather than re-hash it forever.
+	/// Environment variables used only by the re-executed child in
+	/// [`status_poll_retries_after_an_optional_lock_skip`]. The parent creates
+	/// a real repository and puts a wrapper in the child's `PATH`, so the test
+	/// can control an otherwise unobservable optional-lock interleaving without
+	/// mutating the test process's environment.
+	const ENV_LOCK_SKIP_REPO: &str = "PI_VCS_TEST_LOCK_SKIP_REPO";
+	const ENV_LOCK_SKIP_INDEX_LOCK: &str = "PI_VCS_TEST_LOCK_SKIP_INDEX_LOCK";
+	const ENV_LOCK_SKIP_MARKER: &str = "PI_VCS_TEST_LOCK_SKIP_MARKER";
+
+	/// A `git` wrapper for the re-executed child. The first status runs while
+	/// the fixture's lock exists, then releases it before the CLI runner can
+	/// inspect the filesystem. The first index refresh recreates that lock just
+	/// for the refresh command, which makes a non-optional refresh report
+	/// contention by failing. Later invocations delegate directly to real git.
+	const LOCK_SKIP_GIT_WRAPPER: &str = r#"#!/bin/sh
+case "$1" in
+	--no-optional-locks) command="$2" ;;
+	*) command="$1" ;;
+esac
+run_git() {
+	PATH="${PATH#*:}" command git "$@"
+}
+case "$command" in
+	status)
+		run_git "$@"
+		status=$?
+		rm -f "$PI_VCS_TEST_LOCK_SKIP_INDEX_LOCK"
+		exit "$status"
+		;;
+	update-index)
+		if [ ! -e "$PI_VCS_TEST_LOCK_SKIP_MARKER" ]; then
+			: > "$PI_VCS_TEST_LOCK_SKIP_MARKER"
+			: > "$PI_VCS_TEST_LOCK_SKIP_INDEX_LOCK"
+			run_git "$@"
+			status=$?
+			rm -f "$PI_VCS_TEST_LOCK_SKIP_INDEX_LOCK"
+			exit "$status"
+		fi
+		;;
+esac
+PATH="${PATH#*:}" exec git "$@"
+"#;
+
+	/// A status that cannot write because another writer owns `index.lock`
+	/// must leave its repair claim unsettled. The next poll of the *same*
+	/// stat-less index then takes one lock and persists the refreshed stats.
+	///
+	/// A re-executed child gives the wrapper a private `PATH`: no other test
+	/// can observe a changed process environment. The wrapper releases the
+	/// fixture lock after `git status` has skipped its optional write but before
+	/// the parent runner can probe it. The old post-exit probe therefore
+	/// settles the unchanged index and this test's second poll takes no lock.
 	#[cfg(target_os = "linux")]
 	#[test]
 	fn status_poll_retries_after_an_optional_lock_skip() -> TestResult {
-		let (dir, repo) = repo()?;
+		use std::os::unix::fs::PermissionsExt;
+
+		if let Some(root) = env::var_os(ENV_LOCK_SKIP_REPO) {
+			let root = PathBuf::from(root);
+			let repo = GitRepo::require(&root)?;
+			let git_dir = root.join(".git");
+			let index = git_dir.join("index");
+			let version = IndexVersion::read(&index).ok_or("fixture index must exist")?;
+			let locks = IndexLockWatch::new(&git_dir)?;
+
+			assert_eq!(repo.status_summary()?, StatusSummary::default());
+			assert_eq!(
+				entries_missing_stat(&root)?,
+				3,
+				"the contended refresh must leave the stat cache untouched",
+			);
+			assert!(
+				IndexVersion::read(&index).is_some_and(|after| after == version),
+				"the skipped refresh must leave the same index version on disk",
+			);
+			locks.take()?;
+
+			assert_eq!(repo.status_summary()?, StatusSummary::default());
+			assert_eq!(
+				locks.take()?,
+				1,
+				"the next poll of that same index must perform exactly one deferred repair",
+			);
+			assert_eq!(
+				entries_missing_stat(&root)?,
+				0,
+				"the deferred repair must write refreshed stat data back",
+			);
+			return Ok(());
+		}
+
+		let (dir, _repo) = repo()?;
 		let root = dir.path();
 		for name in ["one", "two", "three"] {
 			fs::write(root.join(name), format!("{name}\n"))?;
@@ -2280,28 +2360,36 @@ mod tests {
 		assert_eq!(entries_missing_stat(root)?, 3, "fixture must start stat-less");
 
 		let git_dir = root.join(".git");
-		let lock = fs::File::create(git_dir.join("index.lock"))?;
-		let locks = IndexLockWatch::new(&git_dir)?;
-		assert_eq!(repo.status_summary()?, StatusSummary::default());
-		assert_eq!(
-			entries_missing_stat(root)?,
-			3,
-			"the held optional lock must leave the stat cache untouched",
+		let index_lock = git_dir.join("index.lock");
+		fs::File::create(&index_lock)?;
+		let marker = git_dir.join("refresh-contended");
+		let bin = git_dir.join("test-bin");
+		fs::create_dir(&bin)?;
+		let wrapper = bin.join("git");
+		fs::write(&wrapper, LOCK_SKIP_GIT_WRAPPER)?;
+		fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o755))?;
+		let mut path = vec![bin];
+		path.extend(env::split_paths(&env::var_os("PATH").ok_or("PATH must be set")?));
+		let path = env::join_paths(path)?;
+		let name = format!(
+			"{}::status_poll_retries_after_an_optional_lock_skip",
+			module_path!()
+				.split_once("::")
+				.expect("crate-qualified module path")
+				.1
 		);
-
-		drop(lock);
-		fs::remove_file(git_dir.join("index.lock"))?;
-		// Another writer replaces the index without fixing its three stat-less
-		// entries, exactly as `git add` / jj can between two polls.
-		git(root, &["read-tree", "HEAD"])?;
-		locks.take()?;
-
-		assert_eq!(repo.status_summary()?, StatusSummary::default());
-		assert_eq!(locks.take()?, 1, "the changed index must get the deferred stat-cache repair");
-		assert_eq!(
-			entries_missing_stat(root)?,
-			0,
-			"the deferred repair must write refreshed stat data back",
+		let child = Command::new(env::current_exe()?)
+			.args(["--exact", &name, "--nocapture", "--test-threads=1"])
+			.env(ENV_LOCK_SKIP_REPO, root)
+			.env(ENV_LOCK_SKIP_INDEX_LOCK, &index_lock)
+			.env(ENV_LOCK_SKIP_MARKER, marker)
+			.env("PATH", path)
+			.output()?;
+		assert!(
+			child.status.success(),
+			"contention regression child failed:\n{}{}",
+			String::from_utf8_lossy(&child.stdout),
+			String::from_utf8_lossy(&child.stderr),
 		);
 		Ok(())
 	}
