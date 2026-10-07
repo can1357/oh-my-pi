@@ -34,6 +34,8 @@
 - Reduced MCP refreshes by coalescing bursts of tool-set change notifications and `tools/list` refreshes ([#14711](https://github.com/can1357/oh-my-pi/pull/14711) by [@H4vC](https://github.com/H4vC))
 ### Fixed
 
+- Fixed quitting or restarting a long session stalling while it wrote the whole un-retired transcript; a saved session, a signal exit or a terminal disconnect now writes only the newest 2,000 rows to scrollback, and `omp --resume` restores a saved session's older messages (notices such as errors older than those rows are not kept) ([#13799](https://github.com/can1357/oh-my-pi/pull/13799) by [@sjawhar](https://github.com/sjawhar)).
+- Fixed opening the external editor from a fullscreen view, such as `/annotate` or plan review, stalling for many seconds on a long session ([#13799](https://github.com/can1357/oh-my-pi/pull/13799) by [@sjawhar](https://github.com/sjawhar)).
 - Fixed `/new` keeping plan mode (and its plan-role model) or goal mode active in the new session ([#14653](https://github.com/can1357/oh-my-pi/issues/14653))
 - Fixed parallel first bash calls each spawning an rc-sourcing shell ([#14680](https://github.com/can1357/oh-my-pi/pull/14680) by [@H4vC](https://github.com/H4vC))
 - Fixed the todo list's auto-clear never firing while subagents were streaming progress ([#14692](https://github.com/can1357/oh-my-pi/pull/14692) by [@H4vC](https://github.com/H4vC))

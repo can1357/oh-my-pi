@@ -23,7 +23,48 @@ Each normal frame:
 5. Return one bounded `TerminalFramePlan`.
 
 Graceful shutdown switches the provider to Flush policy and synchronously drains
-every currently eligible finalized prefix before terminal handoff.
+every currently eligible finalized prefix before terminal handoff. A capped stop
+(`TUI.stop({ maxRows: EXIT_FLUSH_MAX_ROWS })`, 2,000 rows) hands native
+scrollback only the newest whole blocks that fit in `maxRows` rows, never part
+of a block, since a direct-placement image's last row draws over the rows its
+block reserved above it; a newest block taller than the cap is written whole.
+The older eligible blocks retire without being written anywhere.
+
+Which stops cap the flush:
+
+| Stop | Flush |
+|---|---|
+| `stop()` without options: quit, restart, Ctrl+D, the debug `quit` op | as the owner's `TUI.setExitFlushProvider()` says |
+| postmortem `tui-restore` for a fatal error, `postmortem.quit()` without a prior stop (the escape hatch after a failed teardown, the stdout-EPIPE route), or a bare `process.exit()` | as the provider says |
+| postmortem `tui-restore` for SIGHUP, SIGTERM or SIGINT; a terminal disconnect | always capped |
+| `stop({ resuming: true })` | full; nothing under a fullscreen overlay (below) |
+| any of the above with no provider | full, except the always-capped row |
+
+A signal or disconnect caps because the terminal is gone (SIGHUP, disconnect)
+or a kill usually follows (SIGTERM, SIGINT); the rows the cap skips are lost
+unless the session file holds them. InteractiveMode's provider caps only a
+saved session whose file is still being written: an unsaved session
+(`--no-session`, or one not yet on disk), a failed teardown, or a latched disk
+failure get the full flush, because scrollback is then the only complete copy.
+Even for a saved session, only persisted messages survive the cap: errors,
+warnings and other notices older than the capped rows are not kept anywhere.
+
+A head that progressive append emitted in full retires without its separator,
+so the next batch on any path that writes a row opens with a blank; so does a
+capped batch that leaves out the rest of a partly emitted frontier head. The
+frame that writes a fresh flush batch comes from a second, display-order pass
+whenever the first one saw images, so the image budget demotes the oldest images
+rather than the newest.
+
+A handoff stop that resumes with `start()` (`TUI.stop({ resuming: true })`:
+suspend, external editors) keeps the full flush, except while a fullscreen
+overlay holds the screen: it resumes into that overlay, so it flushes nothing,
+commits nothing, and pressure retires the rows once the overlay closes. A
+clearing repaint queued under that overlay stays queued across the handoff and
+runs when the overlay closes. A process killed while suspended or while the
+external editor is open never writes the rows the overlay held; a saved session
+keeps them in its file. Either way the flush ends with `endHistoryFlush()`, so
+frames after `start()` resumes retire by pressure again.
 
 The welcome header follows the same ordered retirement model but is composer-owned: it stays live viewport chrome while its intro animates and while the screen has room, then retires once — before any transcript batch — when content first overflows.
 
@@ -47,7 +88,7 @@ Optimistic user submissions call `renderNow()` before agent dispatch so synchron
 - **settled** — finalized but still live: it re-renders at the current width every frame (so resizes reflow it) until capacity pressure retires it;
 - **committed** — acknowledged by the terminal writer and released from render caches.
 
-Finalizing a later block never bypasses an active predecessor. `peekFinalizedBatch(width, capacity)` retires the shortest settled prefix that lets the remaining live tail fit `capacity`, in batches capped by a per-frame render budget (the remainder is offered on later frames), stops at the first active block, and reoffers the same id until `acknowledgeFinalizedBatch()` succeeds. An append-only head may instead emit a monotonically extending prefix of stable semantic rows under pressure, retaining its mutable suffix; final retirement emits only the remainder. `peekFlushBatch(width)` takes the whole eligible finalized prefix during graceful shutdown. Ordinary retirement also bounds the number of live blocks; otherwise, while the screen has room nothing retires, so recent blocks keep reflowing on resize.
+Finalizing a later block never bypasses an active predecessor. `peekFinalizedBatch(width, capacity)` retires the shortest settled prefix that lets the remaining live tail fit `capacity`, in batches capped by a per-frame render budget (the remainder is offered on later frames), stops at the first active block, and reoffers the same id until `acknowledgeFinalizedBatch()` succeeds. An append-only head may instead emit a monotonically extending prefix of stable semantic rows under pressure, retaining its mutable suffix; final retirement emits only the remainder. `peekFlushBatch(width, maxRows?)` takes the whole eligible finalized prefix during graceful shutdown; with `maxRows` it emits only the prefix's newest whole blocks that fit in `maxRows` rows (trailing blank included; a newest block taller than the cap is emitted whole), never part of a block, measuring back from the prefix end so the older blocks never render, apart from the frontier head and the one block measured to find it does not fit, and acknowledging it still retires the whole prefix. Ordinary retirement also bounds the number of live blocks; otherwise, while the screen has room nothing retires, so recent blocks keep reflowing on resize.
 
 The composer opens each frame with `beginFrame(frame)` before offering history. Until that frame's `renderViewport(width, rows, frame)` returns, every full-allocation measurement of a live block (retirement peek, `liveRowCount`, viewport layout) renders the block once and replays those rows; `renderViewport` closes the frame, so no measurement outlives the synchronous composition that took it. Allocation-constrained viewport renders are never shared.
 
@@ -135,4 +176,4 @@ native frames. See [native rendering](./tui-core-renderer.md#native-rendering-te
 
 ## Shutdown
 
-Interactive shutdown disposes session-owned work, drains terminal input, restores title/protocol state, and calls `TUI.stop()`. TUI exits any alternate buffer, asks the provider to Flush all eligible finalized history, cancels render/resize timers, preserves terminal-owned image state, places the shell cursor directly after visible TUI content, restores cursor visibility, then delegates terminal-mode restoration to `ProcessTerminal.stop()`.
+Interactive shutdown disposes session-owned work, drains terminal input, restores title/protocol state, and calls `TUI.stop()`, which asks the exit flush provider (see the table above). TUI exits any alternate buffer, asks the provider to Flush eligible finalized history (a capped stop writes only its newest whole blocks within `maxRows` rows, or the newest block whole when it alone is taller), ends the flush with `endHistoryFlush()`, cancels render/resize timers, preserves terminal-owned image state, places the shell cursor directly after visible TUI content, restores cursor visibility, then delegates terminal-mode restoration to `ProcessTerminal.stop()`.

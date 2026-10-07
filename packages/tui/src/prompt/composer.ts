@@ -8,6 +8,7 @@ import { ProcessTerminal, type Terminal } from "../terminal";
 import {
 	type Component,
 	Container,
+	type HistoryFlushOptions,
 	type ResizeScrollbackMode,
 	type TerminalFramePlan,
 	type TerminalFrameProvider,
@@ -239,7 +240,8 @@ export class Composer implements TerminalFrameProvider, NativeSurfaceProvider {
 		| undefined;
 	#historyReplayRequested = false;
 	#headerReplayPending = false;
-	#historyFlush = false;
+	/** The stop-time flush in progress, if any; its `maxRows` caps the rows it emits. */
+	#historyFlush: HistoryFlushOptions | undefined;
 	// The welcome header retires to terminal history exactly once, after the
 	// intro settles; until then it renders as mutable viewport chrome.
 	#headerRetired = false;
@@ -651,8 +653,8 @@ export class Composer implements TerminalFrameProvider, NativeSurfaceProvider {
 	}
 
 	/** Forces every currently eligible finalized prefix to retire before stop. */
-	beginHistoryFlush(): void {
-		this.#historyFlush = true;
+	beginHistoryFlush(options?: HistoryFlushOptions): void {
+		this.#historyFlush = options ?? {};
 		// A pending replay would re-render and re-stream the entire committed
 		// ledger during shutdown; the terminal already holds that history, so
 		// flush emits only genuinely un-retired rows. An already offered batch
@@ -662,6 +664,11 @@ export class Composer implements TerminalFrameProvider, NativeSurfaceProvider {
 		for (const child of this.#runtimeChildren) {
 			if (child instanceof TranscriptContainer) child.cancelReplay();
 		}
+	}
+
+	/** Ends the stop-time flush, so frames after `start()` resumes retire by pressure again. */
+	endHistoryFlush(): void {
+		this.#historyFlush = undefined;
 	}
 
 	#startHistoryReplay(): void {
@@ -722,7 +729,8 @@ export class Composer implements TerminalFrameProvider, NativeSurfaceProvider {
 				// Only the comparison below reads the height, so the walk stops at
 				// the budget instead of rendering every replayed block (#12933).
 				const liveRows = transcript.liveRowCount(width, Math.max(0, rows - renderedHeader.length - chromeRows));
-				if (!this.#historyFlush && renderedHeader.length + chromeRows + liveRows <= rows) return undefined;
+				if (this.#historyFlush === undefined && renderedHeader.length + chromeRows + liveRows <= rows)
+					return undefined;
 				this.#offeredHistory = {
 					id: this.#nextHistoryId++,
 					rows: [...renderedHeader, ""],
@@ -739,7 +747,7 @@ export class Composer implements TerminalFrameProvider, NativeSurfaceProvider {
 			this.#retiredHeaderRows = [];
 		}
 		const batch = this.#historyFlush
-			? transcript.peekFlushBatch(width)
+			? transcript.peekFlushBatch(width, this.#historyFlush.maxRows)
 			: transcript.peekFinalizedBatch(width, Math.max(0, rows - chromeRows));
 		if (batch === undefined) return undefined;
 		this.#offeredHistory = {

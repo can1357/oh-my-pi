@@ -1,9 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, spyOn, vi } from "bun:test";
 import * as natives from "@oh-my-pi/pi-natives";
-import { TUI } from "@oh-my-pi/pi-tui";
+import { EXIT_FLUSH_MAX_ROWS, TUI } from "@oh-my-pi/pi-tui";
 import { TranscriptContainer } from "@oh-my-pi/pi-tui/chrome/transcript-container";
 import { Image, ImageBudget } from "@oh-my-pi/pi-tui/components/image";
 import { Text } from "@oh-my-pi/pi-tui/components/text";
+import { COMPOSER_DEFAULTS, Composer } from "@oh-my-pi/pi-tui/prompt/composer";
 import {
 	encodeKittyVirtualPlacement,
 	getKittyGraphics,
@@ -638,6 +639,49 @@ describe("Image budget integration", () => {
 		expect(olderLines.join("")).not.toContain("\x1b_G");
 		expect(newerLines.at(-1) ?? "").toContain("\x1b_G");
 	});
+
+	it("never starts a capped exit flush inside a direct-placement image block", () => {
+		// A direct placement (Kitty without Unicode placeholders, iTerm2, SIXEL)
+		// draws from its block's last row, moving the cursor up over the rows the
+		// block reserved. A batch holding that row without all of them would paint
+		// the image over whatever scrollback precedes the batch.
+		const build = () => {
+			const transcript = new TranscriptContainer();
+			transcript.addChild(new Text("before", 0, 0));
+			transcript.addChild(
+				new Image(
+					BASE64_ONE_PIXEL_PNG,
+					"image/png",
+					{ fallbackColor: t => t },
+					{ maxWidthCells: 4, maxHeightCells: 4 },
+					{ widthPx: 40, heightPx: 40 },
+				),
+			);
+			for (let i = 0; i < 3; i++) transcript.addChild(new Text(`after-${i}`, 0, 0));
+			return transcript;
+		};
+		const full = build().peekFlushBatch(20)!.rows;
+		// The three newest blocks and their blanks take 6 rows and the 4-row image
+		// block 5 more, so caps of 8-10 end inside the image block and 11 fits it.
+		for (const maxRows of [8, 9, 10, 11]) {
+			const rows = build().peekFlushBatch(20, maxRows)!.rows;
+			expect(rows.length).toBeLessThanOrEqual(maxRows);
+			expect(rows).toEqual(full.slice(full.length - rows.length));
+			for (const [index, row] of rows.entries()) {
+				const up = /\x1b\[(\d+)A/.exec(row);
+				if (up === null) continue;
+				const reserved = Number(up[1]);
+				expect(rows.slice(Math.max(0, index - reserved), index)).toEqual(Array(reserved).fill("\x1b[0m"));
+			}
+		}
+		// With room for the whole block, the image is written with its reserved rows.
+		expect(build().peekFlushBatch(20, 11)!.rows.slice(0, 4)).toEqual([
+			"\x1b[0m",
+			"\x1b[0m",
+			"\x1b[0m",
+			expect.stringContaining("\x1b[3A"),
+		]);
+	});
 });
 
 describe("Image budget + Unicode placeholders", () => {
@@ -757,6 +801,42 @@ describe("TUI inline-image budget", () => {
 			"image/png",
 			{ fallbackColor: t => t },
 			{ maxWidthCells: 4, maxHeightCells: 4, budget, imageKey: key },
+		);
+	}
+
+	/**
+	 * A started composer over `term`, with a transcript above an editor row.
+	 * Renders run synchronously, so no frame waits on the clock.
+	 */
+	function startTranscriptComposer(term: VirtualTerminal): { composer: Composer; transcript: TranscriptContainer } {
+		const composer = new Composer({
+			terminal: term,
+			tuiOptions: {
+				renderScheduler: {
+					now: () => 0,
+					scheduleImmediate: (callback: () => void) => callback(),
+					scheduleRender: (callback: () => void) => {
+						callback();
+						return { cancel() {} };
+					},
+				},
+			},
+			preferences: { ...COMPOSER_DEFAULTS, quiet: true },
+		});
+		const transcript = new TranscriptContainer();
+		composer.setRuntimeChildren([transcript, new Text("editor", 0, 0)]);
+		composer.start({ playWelcomeIntro: false });
+		return { composer, transcript };
+	}
+
+	/** A one-cell-wide image `rows` cells tall, counted against `budget`. */
+	function cellImage(budget: ImageBudget, key: string, rows = 1): Image {
+		return new Image(
+			BASE64_ONE_PIXEL_PNG,
+			"image/png",
+			{ fallbackColor: text => text },
+			{ maxWidthCells: 1, maxHeightCells: rows, budget, imageKey: key },
+			{ widthPx: 10, heightPx: 10 * rows },
 		);
 	}
 
@@ -1488,6 +1568,135 @@ describe("TUI inline-image budget", () => {
 
 			expect(deleted.filter(id => behindIds.includes(id))).toEqual([]);
 			expect(behindIds.every(id => placed.has(id))).toBe(true);
+		} finally {
+			setKittyGraphics(originalGraphics);
+		}
+	});
+
+	it("hands only the newest rows to scrollback at a capped stop, through an image-budget retry", async () => {
+		const originalGraphics = { ...getKittyGraphics() };
+		setKittyGraphics({ unicodePlaceholders: true });
+		// One-row blocks, so the full flush alternates block rows and separators.
+		// Ten one-row images sit in the newest 200 rows: over the default cap of 8,
+		// so the flush repeats its first pass and re-renders the offered batch.
+		// Block 0 is an image too: it is the frontier head the cap skips, and the
+		// retry must count it as the first pass did.
+		const isImage = (index: number) => index === 0 || (index >= EXIT_FLUSH_MAX_ROWS - 50 && index % 5 === 0);
+		const quit = async (capped: boolean) => {
+			const term = new VirtualTerminal(40, 10, 20_000);
+			const { composer, transcript } = startTranscriptComposer(term);
+			// The fullscreen overlay freezes retirement, as the viewport does.
+			composer.ui.showOverlay({ render: () => ["overlay"], invalidate: () => {} }, { fullscreen: true });
+			for (let index = 0; index < EXIT_FLUSH_MAX_ROWS; index++) {
+				transcript.addChild(
+					isImage(index) ? cellImage(composer.ui.imageBudget, `image-${index}`) : new Text(`row-${index}`, 0, 0),
+				);
+			}
+			composer.ui.requestRender();
+			composer.ui.stop(capped ? { maxRows: EXIT_FLUSH_MAX_ROWS } : undefined);
+			await term.flush();
+			return {
+				rows: term.getScrollBuffer().map(row => Bun.stripANSI(row).trimEnd()),
+				states: transcript.blockStates(),
+			};
+		};
+
+		try {
+			const capped = await quit(true);
+			const full = await quit(false);
+
+			expect(capped.rows).toEqual(full.rows.slice(-capped.rows.length));
+			const transcriptRows = capped.rows.slice(0, capped.rows.indexOf("editor"));
+			expect(transcriptRows).toHaveLength(EXIT_FLUSH_MAX_ROWS);
+			const blockRows = transcriptRows.filter((_, row) => row % 2 === 0);
+			expect(transcriptRows.filter((_, row) => row % 2 === 1).every(row => row === "")).toBe(true);
+			// The newest EXIT_FLUSH_MAX_ROWS / 2 blocks, oldest first; image rows are not text.
+			const newest = Array.from(
+				{ length: EXIT_FLUSH_MAX_ROWS / 2 },
+				(_, offset) => EXIT_FLUSH_MAX_ROWS / 2 + offset,
+			);
+			expect(blockRows.map(row => (row.startsWith("row-") ? row : "image"))).toEqual(
+				newest.map(index => (isImage(index) ? "image" : `row-${index}`)),
+			);
+			expect(blockRows.every(row => row !== "")).toBe(true);
+			expect(capped.states.every(state => state === "committed")).toBe(true);
+			expect(full.states.every(state => state === "committed")).toBe(true);
+		} finally {
+			setKittyGraphics(originalGraphics);
+		}
+	});
+
+	it("keeps every image a capped stop writes live when the block the cap leaves out holds one", async () => {
+		const originalGraphics = { ...getKittyGraphics() };
+		setKittyGraphics({ unicodePlaceholders: true });
+		const term = new VirtualTerminal(40, 10, 1_000);
+		const { composer, transcript } = startTranscriptComposer(term);
+		composer.ui.showOverlay({ render: () => ["overlay"], invalidate: () => {} }, { fullscreen: true });
+		// Eight one-row images and their blanks fill 16 of 18 rows, so the cap
+		// measures the older two-row image, finds it does not fit, and leaves it
+		// out. Nine images passed the default cap of 8 in that first pass, and its
+		// retry must count the left-out one again: otherwise it demotes the oldest
+		// image it writes instead.
+		transcript.addChild(new Text("head", 0, 0));
+		for (let i = 0; i < 9; i++) {
+			// Block 1 is the two-row image the cap leaves out.
+			transcript.addChild(cellImage(composer.ui.imageBudget, `image-${i}`, i === 0 ? 2 : 1));
+		}
+		try {
+			composer.ui.stop({ maxRows: 18 });
+			await term.flush();
+			const rows = term.getScrollBuffer().map(row => Bun.stripANSI(row).trimEnd());
+			const written = rows.slice(0, rows.indexOf("editor"));
+			expect(written).toHaveLength(16);
+			expect(written.filter((_, row) => row % 2 === 0).every(row => row.includes(KITTY_PLACEHOLDER))).toBe(true);
+			expect(written.some(row => row.includes("[Image:"))).toBe(false);
+		} finally {
+			setKittyGraphics(originalGraphics);
+		}
+	});
+
+	it("never writes an older image live while a newer one is demoted at a stop", async () => {
+		const originalGraphics = { ...getKittyGraphics() };
+		setKittyGraphics({ unicodePlaceholders: true });
+		try {
+			// The live frame shows more images than the default cap of 8, so the budget
+			// demotes the oldest ones. A capped flush walks newest-first; the frame that
+			// writes the batch must still demote in display order.
+			const images = (from: number, to: number, status: string) =>
+				Array.from({ length: to - from }, (_, offset) => `${from + offset}:${status}`);
+			// Pressure retires images 0 and 1 during the live frame, already text there.
+			// The capped batch then holds images 8-11, under the cap; the uncapped one
+			// holds images 2-11, of which the oldest two are past the cap.
+			const cases: [maxRows: number | undefined, expected: string[]][] = [
+				[18, [...images(0, 2, "text"), ...images(8, 12, "live")]],
+				[undefined, [...images(0, 4, "text"), ...images(4, 12, "live")]],
+			];
+			for (const [maxRows, expected] of cases) {
+				const term = new VirtualTerminal(40, 40, 1_000);
+				const { composer, transcript } = startTranscriptComposer(term);
+				transcript.addChild(new Text("head", 0, 0));
+				for (let i = 0; i < 12; i++) {
+					transcript.addChild(new Text(`label-${i}`, 0, 0));
+					transcript.addChild(cellImage(composer.ui.imageBudget, `image-${i}`));
+				}
+				composer.ui.requestRender();
+				await term.flush();
+				composer.ui.stop(maxRows === undefined ? {} : { maxRows });
+				await term.flush();
+				const rows = term.getScrollBuffer().map(row => Bun.stripANSI(row).trimEnd());
+				// Each label row is followed by a blank and its image's row.
+				const written = rows.flatMap((row, index) => {
+					const label = /^label-(\d+)$/.exec(row);
+					if (label === null) return [];
+					const image = rows[index + 2] ?? "";
+					return [
+						`${label[1]}:${image.includes(KITTY_PLACEHOLDER) ? "live" : image.includes("[Image:") ? "text" : "missing"}`,
+					];
+				});
+				// Only the four images past the cap of 8, the oldest, are text; a capped
+				// stop writes images under the cap, all of them live.
+				expect(written).toEqual(expected);
+			}
 		} finally {
 			setKittyGraphics(originalGraphics);
 		}

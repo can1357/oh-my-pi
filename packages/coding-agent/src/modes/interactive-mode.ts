@@ -21,6 +21,7 @@ import type {
 	AutocompleteProvider,
 	Component,
 	EditorTheme,
+	HistoryFlushOptions,
 	KeyId,
 	LoaderMessageColorFn,
 	OverlayHandle,
@@ -29,6 +30,7 @@ import type {
 import {
 	Container,
 	clearRenderCache,
+	EXIT_FLUSH_MAX_ROWS,
 	getComposerStyle,
 	getPaddingX,
 	getWidthConfigEpoch,
@@ -1794,6 +1796,9 @@ export class InteractiveMode implements InteractiveModeContext {
 			}),
 		);
 		this.ui.setInlineMouseTrackingProvider(() => this.#mouseCapture);
+		// Every exiting stop (quit, Ctrl+D, a postmortem restore other than a
+		// signal) flushes on this session's condition.
+		this.ui.setExitFlushProvider(() => this.#exitFlush());
 		this.chatContainer = new TranscriptContainer();
 		this.pendingMessagesContainer = new AnchoredLiveContainer();
 		this.progressHudContainer = new AnchoredLiveContainer();
@@ -5501,7 +5506,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		}
 
 		try {
-			this.ui.stop();
+			this.ui.stop({ resuming: true });
 			const result = await openInEditor(editorCmd, currentText, {
 				extension: path.extname(resolvedPath) || ".md",
 				trimTrailingNewline: false,
@@ -5527,7 +5532,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		}
 
 		try {
-			this.ui.stop();
+			this.ui.stop({ resuming: true });
 			const result = await openInEditor(editorCmd, draft, { extension: ".md" });
 			if (result !== null) {
 				commit(result);
@@ -6896,6 +6901,27 @@ export class InteractiveMode implements InteractiveModeContext {
 		const sessionId = this.sessionManager.getSessionId();
 		const sessionFile = this.sessionManager.getSessionFile();
 		return sessionId && sessionFile && this.sessionManager.isSessionOnDisk() ? sessionId : undefined;
+	}
+
+	/**
+	 * How the transcript flushes when this session hands the terminal back at
+	 * exit: capped only when the session file keeps the messages the cap skips
+	 * (the resume hint's condition); otherwise native scrollback is the
+	 * transcript's only copy, so it gets the full flush. A failed teardown (the
+	 * escape hatch quits without writing the log) or a latched disk failure
+	 * means the file exists but lacks the newest entries, so both flush in full.
+	 * Notices (errors, warnings) are never persisted, so a capped exit does not
+	 * keep those older than the capped rows.
+	 */
+	#exitFlush(): HistoryFlushOptions {
+		if (
+			this.#teardownFailed ||
+			this.sessionManager.hasPersistenceFailure() ||
+			this.#resumableSessionId() === undefined
+		) {
+			return {};
+		}
+		return { maxRows: EXIT_FLUSH_MAX_ROWS };
 	}
 
 	/** Shared `shutdown()`/`restart()` teardown: dispose the session and hand the terminal back. */
