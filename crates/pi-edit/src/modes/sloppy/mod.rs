@@ -82,9 +82,12 @@ impl ModeEngine for SloppyEngine {
 			.into_iter()
 			.enumerate()
 			.filter_map(|(index, section)| {
+				// Only the last section can still be streaming; the next
+				// `*** Edit File:` header closes every earlier one.
+				let streaming = streaming && index == last;
 				let read = match files.read(&section.path) {
 					Ok(read) => read,
-					Err(_error) if streaming && index == last => return None,
+					Err(_error) if streaming => return None,
 					Err(error) => {
 						return Some(PreviewFile {
 							display: section.path,
@@ -99,12 +102,14 @@ impl ModeEngine for SloppyEngine {
 					notes: &mut notes,
 					store,
 					canonical: &read.canonical,
+					streaming,
 				}) {
 					Ok(after) => {
 						let output =
 							generate_diff_string(&read.text, &after, None, &BlockContextSource {
 								path: Some(&read.resolved.display),
 								lang: None,
+								streaming,
 							});
 						Some(PreviewFile {
 							display: read.resolved.display.clone(),
@@ -114,7 +119,7 @@ impl ModeEngine for SloppyEngine {
 							..PreviewFile::default()
 						})
 					},
-					Err(_) if streaming && index == last => None,
+					Err(_) if streaming => None,
 					Err(error) => Some(PreviewFile {
 						display: read.resolved.display.clone(),
 						error: Some(error.to_string()),
@@ -161,6 +166,7 @@ impl ModeEngine for SloppyEngine {
 				notes: &mut notes,
 				store,
 				canonical: &read.canonical,
+				streaming: false,
 			})
 			.map_err(|error| {
 				if multi_file {
@@ -174,8 +180,9 @@ impl ModeEngine for SloppyEngine {
 			})?;
 			let persisted = read.persist(&after)?;
 			let output = generate_diff_string(&read.text, &after, None, &BlockContextSource {
-				path: Some(&read.resolved.display),
-				lang: None,
+				path:      Some(&read.resolved.display),
+				lang:      None,
+				streaming: false,
 			});
 			let mut file = StagedFile::new(
 				read.resolved.display.clone(),

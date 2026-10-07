@@ -43,7 +43,7 @@ import { editorKey, editorKeys } from "../chrome/keybinding-hints";
 import type { TspSpan, TspTableColumn, TspText, TspTone } from "@oh-my-pi/pi-wire";
 import { col, elapsed, node, span, text } from "../native/describe";
 import { type DescribeContext, leafKey, type NativeChild, type NativeNode, type NativeUiEvent } from "../native/node";
-import { actionButton } from "../native/overlay";
+import { actionBar, actionButton } from "../native/overlay";
 
 /** Local calendar-day activity consumed by the usage heatmap. */
 export interface DailyActivityPoint {
@@ -463,16 +463,14 @@ function detailWindowLabel(label: string, limit: UsageLimit): string | undefined
 	return sanitizeDisplayLine(windowLabel);
 }
 
+const WHOLE_DOLLARS = new Intl.NumberFormat("en-US", { maximumFractionDigits: 0 });
+const COMPACT_COUNT = new Intl.NumberFormat("en-US", { notation: "compact", maximumFractionDigits: 1 });
+
 /** `$1,234 · 5.6K requests` totals for the activity summary. */
 function formatActivityTotals(layout: HeatmapLayout): string {
 	const cost =
-		layout.totalCost >= 1
-			? `$${new Intl.NumberFormat("en-US", { maximumFractionDigits: 0 }).format(layout.totalCost)}`
-			: `$${layout.totalCost.toFixed(2)}`;
-	const requests = new Intl.NumberFormat("en-US", { notation: "compact", maximumFractionDigits: 1 }).format(
-		layout.totalRequests,
-	);
-	return `${cost} · ${requests} requests`;
+		layout.totalCost >= 1 ? `$${WHOLE_DOLLARS.format(layout.totalCost)}` : `$${layout.totalCost.toFixed(2)}`;
+	return `${cost} · ${COMPACT_COUNT.format(layout.totalRequests)} requests`;
 }
 
 // =============================================================================
@@ -547,6 +545,8 @@ export class UsageDashboardComponent implements Component {
 	#activityError: string | null = null;
 	#syncing = true;
 	#detailCache: { width: number; lines: string[] } | null = null;
+	/** ANSI overview rows; rebuilt when the revision or width changes. */
+	#overviewCache: { revision: number; width: number; lines: string[] } | null = null;
 	#lastViewportRows = 10;
 	#closed = false;
 	readonly #panel: OverlayPanel;
@@ -592,6 +592,7 @@ export class UsageDashboardComponent implements Component {
 
 	invalidate(): void {
 		this.#detailCache = null;
+		this.#overviewCache = null;
 		this.#panel.invalidate();
 	}
 
@@ -836,15 +837,8 @@ export class UsageDashboardComponent implements Component {
 		const ramp = this.#heatRamp();
 		const reset = "\x1b[39m";
 
-		const cost =
-			layout.totalCost >= 1
-				? `$${new Intl.NumberFormat("en-US", { maximumFractionDigits: 0 }).format(layout.totalCost)}`
-				: `$${layout.totalCost.toFixed(2)}`;
-		const requests = new Intl.NumberFormat("en-US", { notation: "compact", maximumFractionDigits: 1 }).format(
-			layout.totalRequests,
-		);
 		summary.push(
-			`${theme.bold(theme.fg("accent", "Activity"))} ${theme.fg("dim", `${cost} · ${requests} requests · last ${weeks} weeks`)}${this.#syncing ? theme.fg("dim", " · syncing…") : ""}`,
+			`${theme.bold(theme.fg("accent", "Activity"))} ${theme.fg("dim", `${formatActivityTotals(layout)} · last ${weeks} weeks`)}${this.#syncing ? theme.fg("dim", " · syncing…") : ""}`,
 		);
 		summary.push("");
 
@@ -876,10 +870,13 @@ export class UsageDashboardComponent implements Component {
 	// ---------------------------------------------------------------------------
 
 	#overviewLines(innerWidth: number): string[] {
+		const cached = this.#overviewCache;
+		if (cached?.revision === this.#revision && cached.width === innerWidth) return cached.lines;
 		const lines: string[] = [];
 		lines.push(...this.#renderCardsGrid(innerWidth));
 		lines.push("");
 		lines.push(...this.#renderHeatmap(innerWidth));
+		this.#overviewCache = { revision: this.#revision, width: innerWidth, lines };
 		return lines;
 	}
 
@@ -935,9 +932,9 @@ export class UsageDashboardComponent implements Component {
 	 * The sheet body (the terminal's `lg` overlay is the frame): a head row
 	 * (checked ago, Overview/Details tabs, Refresh), then either the provider
 	 * grid of frames with window meters and the activity heatmap, or the
-	 * per-provider detail tables. `meter`/`chart` fall back to
-	 * `progress`/`table` on terminals without them. Rebuilt only when its
-	 * inputs change.
+	 * per-provider detail tables, then Close like the other report sheets.
+	 * `meter`/`chart` fall back to `progress`/`table` on terminals without
+	 * them. Rebuilt only when its inputs change.
 	 */
 	describe(cx: DescribeContext): NativeNode {
 		const meter = cx.supports("meter");
@@ -947,15 +944,20 @@ export class UsageDashboardComponent implements Component {
 			return cache.node;
 		}
 		const body = this.#view === "detail" ? this.#describeDetail() : this.#describeOverview(meter, chart);
-		const root = col([this.#describeHead(), node("col", { gap: "lg" }, body, this.#view)], { gap: "lg" });
+		// Esc leaves Details for Overview first, so only Overview's Close wears its keycap.
+		const close = actionButton("Close", "close", this.#view === "overview" ? { keys: "escape" } : {});
+		const root = col([this.#describeHead(), node("col", { gap: "lg" }, body, this.#view), actionBar([null, close])], {
+			gap: "lg",
+		});
 		this.#nativeCache = { revision: this.#revision, meter, chart, node: root };
 		return root;
 	}
 
-	/** Tab clicks switch views like Enter/Esc; the Refresh button runs `r`. */
+	/** Tab clicks switch views like Enter/Esc; the Refresh button runs `r`; Close closes from either view. */
 	handleNativeEvent(event: NativeUiEvent): void {
 		if (event.type === "action") {
 			if (event.act === "refresh") void this.#refresh();
+			else if (event.act === "close") this.#close();
 			return;
 		}
 		if (event.type !== "select" && event.type !== "activate") return;
@@ -1379,8 +1381,7 @@ export class UsageDashboardComponent implements Component {
 				this.#setView("overview");
 				return;
 			}
-			this.dispose();
-			this.#options.onClose();
+			this.#close();
 			return;
 		}
 		if (matchesKey(data, "r")) {
@@ -1402,5 +1403,10 @@ export class UsageDashboardComponent implements Component {
 			this.#scroll = 0;
 			this.#options.requestRender();
 		} else if (matchesKey(data, "end")) this.#scrollBy(Number.MAX_SAFE_INTEGER);
+	}
+
+	#close(): void {
+		this.dispose();
+		this.#options.onClose();
 	}
 }

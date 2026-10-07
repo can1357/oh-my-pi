@@ -222,4 +222,31 @@ describe("EvalArgsStreamDecoder", () => {
 		expect(decoded.kind).toBe("snapshot");
 		if (decoded.kind === "snapshot") expect(decoded.snapshot.complete).toBe(true);
 	});
+
+	it("resumes the code scan with the same results as decoding each prefix from scratch", () => {
+		const raw = JSON.stringify({
+			language: "py",
+			code: 'print("tab\\there")\n\u0001 face=😀 é \\u00e9 "quoted" / done',
+			timeout: 5,
+		})
+			.replace("\\u0001", "\\u00e9\\ud83d\\ude00\\/")
+			.replace("done", 'done\\"');
+		for (let step = 1; step <= 7; step++) {
+			const incremental = new EvalArgsStreamDecoder();
+			for (let end = 0; end <= raw.length; end += step) {
+				const prefix = raw.slice(0, end);
+				const resumed = incremental.update(prefix);
+				const fresh = new EvalArgsStreamDecoder().update(prefix);
+				expect(resumed.kind).toBe(fresh.kind);
+				if (resumed.kind === "snapshot" && fresh.kind === "snapshot") {
+					expect({ ...resumed.snapshot, revision: 1 }).toEqual(fresh.snapshot);
+				} else {
+					expect(resumed).toEqual(fresh);
+				}
+			}
+			const final = incremental.update(raw);
+			expect(final.kind).toBe("snapshot");
+			if (final.kind === "snapshot") expect(final.snapshot.codePrefix).toBe(JSON.parse(raw).code);
+		}
+	});
 });

@@ -11,7 +11,7 @@
 //! symbol (a few control and unused UTF-8 lead bytes) are dropped, as the
 //! reference BPE does without an unknown token.
 
-use std::{collections::HashMap, path::Path};
+use std::{collections::HashMap, path::Path, sync::Arc};
 
 use anyhow::{Context, bail, ensure};
 use regex::Regex;
@@ -119,6 +119,44 @@ pub struct Encoding {
 	pub offsets: Vec<(usize, usize)>,
 }
 
+/// Every token's raw bytes in one arena (one allocation instead of one per
+/// token), shared with the search index.
+#[derive(Default)]
+pub struct TokenBytes {
+	bytes: Vec<u8>,
+	/// `bytes[ends[id - 1]..ends[id]]` is token `id` (`0` before the first).
+	ends:  Vec<u32>,
+}
+
+impl TokenBytes {
+	/// Append the next token id's bytes.
+	fn push(&mut self, token: impl IntoIterator<Item = u8>) {
+		self.bytes.extend(token);
+		self.ends.push(self.bytes.len() as u32);
+	}
+
+	/// Bytes of token `id`; empty for ids past the vocab.
+	pub fn get(&self, id: u32) -> &[u8] {
+		let id = id as usize;
+		let Some(&end) = self.ends.get(id) else {
+			return &[];
+		};
+		let start = if id == 0 { 0 } else { self.ends[id - 1] };
+		&self.bytes[start as usize..end as usize]
+	}
+}
+
+#[cfg(test)]
+impl<T: AsRef<[u8]>> FromIterator<T> for TokenBytes {
+	fn from_iter<I: IntoIterator<Item = T>>(tokens: I) -> Self {
+		let mut out = Self::default();
+		for token in tokens {
+			out.push(token.as_ref().iter().copied());
+		}
+		out
+	}
+}
+
 /// `SmolLM2`'s byte-level BPE tokenizer.
 pub struct Tokenizer {
 	/// Single-byte token id for every byte value, if the vocab has one.
@@ -126,7 +164,7 @@ pub struct Tokenizer {
 	/// `(left, right)` → `(rank, merged id)`.
 	merges:      HashMap<(u32, u32), (u32, u32)>,
 	/// Raw bytes each token decodes to.
-	token_bytes: Vec<Box<[u8]>>,
+	token_bytes: Arc<TokenBytes>,
 	/// Special added tokens (never produced by `encode`).
 	special:     Vec<bool>,
 	split:       Regex,
@@ -204,20 +242,33 @@ impl Tokenizer {
 			.chain(json.added_tokens.iter().map(|token| &token.id))
 			.max()
 			.map_or(0, |&id| id as usize + 1);
-		let mut token_bytes: Vec<Box<[u8]>> = vec![Box::default(); size];
+		// Final source text per id: added tokens override their vocab entry and
+		// are literal, vocab entries are byte-level encoded.
+		let mut sources: Vec<Option<(&str, bool)>> = vec![None; size];
 		for (text, &id) in &model.vocab {
-			let bytes: Option<Vec<u8>> = text
-				.chars()
-				.map(|c| char_to_byte.get(&c).copied())
-				.collect();
-			// Added tokens also live in the vocab under their literal text.
-			token_bytes[id as usize] = bytes.unwrap_or_else(|| text.as_bytes().to_vec()).into();
+			sources[id as usize] = Some((text, true));
 		}
 		let mut special = vec![false; size];
 		for token in &json.added_tokens {
-			token_bytes[token.id as usize] = token.content.as_bytes().into();
+			sources[token.id as usize] = Some((&token.content, false));
 			special[token.id as usize] = token.special;
 		}
+		let mut token_bytes = TokenBytes::default();
+		token_bytes
+			.bytes
+			.reserve(sources.iter().flatten().map(|(text, _)| text.len()).sum());
+		token_bytes.ends.reserve(size);
+		for source in sources {
+			match source {
+				Some((text, true)) if text.chars().all(|c| char_to_byte.contains_key(&c)) => {
+					token_bytes.push(text.chars().map(|c| char_to_byte[&c]));
+				},
+				// Added tokens also live in the vocab under their literal text.
+				Some((text, _)) => token_bytes.push(text.bytes()),
+				None => token_bytes.push([]),
+			}
+		}
+		let token_bytes = Arc::new(token_bytes);
 
 		let mut byte_ids = [None; 256];
 		for (byte, c) in chars.iter().enumerate() {
@@ -251,8 +302,13 @@ impl Tokenizer {
 		if self.special.get(index).copied().unwrap_or(true) {
 			return None;
 		}
-		let text = std::str::from_utf8(&self.token_bytes[index]).ok()?;
+		let text = std::str::from_utf8(self.token_bytes.get(id)).ok()?;
 		(!text.is_empty() && !text.contains('\u{FFFD}')).then_some(text)
+	}
+
+	/// The token byte arena, for sharing with the search index.
+	pub fn token_bytes(&self) -> Arc<TokenBytes> {
+		Arc::clone(&self.token_bytes)
 	}
 
 	/// Tokenize `text` (no special tokens are added or matched).

@@ -51,6 +51,11 @@ class StreamConsoleComponent implements Component, Focusable {
 	readonly #logLines: string[] = [];
 	/** Native twin of {@link #logLines}: one keyed text node per entry, built once. */
 	readonly #logNodes: NativeNode[] = [];
+	/** {@link #logLines} truncated to {@link #logWidth}; rebuilt only when the width changes. */
+	#logRendered: string[] = [];
+	#logWidth: number | undefined;
+	/** True when {@link #logRendered} changed since it was last handed to the scroll view. */
+	#logDirty = false;
 	#native: { revision: number; node: NativeNode } | undefined;
 	#revision = 0;
 	readonly #panes = new Map<number, PaneSummary>();
@@ -177,6 +182,8 @@ class StreamConsoleComponent implements Component, Focusable {
 	#log(ansi: string, spans: readonly TspSpan[]): void {
 		this.#logLines.push(ansi);
 		this.#logNodes.push(node("text", { spans }, undefined, `${this.#logNodes.length}`));
+		if (this.#logWidth !== undefined) this.#logRendered.push(truncateToWidth(ansi, this.#logWidth));
+		this.#logDirty = true;
 	}
 
 	render(width: number): readonly string[] {
@@ -199,7 +206,15 @@ class StreamConsoleComponent implements Component, Focusable {
 			`/title <text> · /quit · ${formatKeyHints(["up", "down"])} history · ${formatKeyHint("ctrl+c")} quit`,
 		);
 
-		this.#logView.setLines(this.#logLines.map(line => truncateToWidth(line, width)));
+		if (width !== this.#logWidth) {
+			this.#logRendered = this.#logLines.map(line => truncateToWidth(line, width));
+			this.#logWidth = width;
+			this.#logDirty = true;
+		}
+		if (this.#logDirty) {
+			this.#logView.setLines(this.#logRendered);
+			this.#logDirty = false;
+		}
 		this.#logView.setHeight(bodyHeight);
 		return [
 			truncateToWidth(header, width),

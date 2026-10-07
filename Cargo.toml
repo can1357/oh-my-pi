@@ -25,7 +25,7 @@ members = [
 resolver = "3"
 
 [workspace.package]
-version = "18.6.0"
+version = "18.7.0"
 edition = "2024"
 license = "MIT"
 authors = ["Stencil Labs, Inc."]
@@ -246,7 +246,6 @@ pi-builtins = { path = "crates/pi-builtins" }
 # ──────────────────────────────────────────────────────────────────────────────
 async-trait = "0.1"
 futures = "0.3"
-dashmap = "6.2"
 parking_lot = "0.12.5"
 rayon = "1.12"
 tokio = { version = "1", features = ["full"] }
@@ -323,8 +322,9 @@ windows-sys = { version = "0.61", features = [
    "Win32_System_Ioctl",
    "Win32_System_Threading",
 ] }
-# Transitive-only pin (wired through crates/pi-natives build-deps so the
-# constraint participates in resolution): cc 1.2.x passes
+# Transitive-only pin (wired through crates/pi-natives' `cfg(false)` target
+# deps so the constraint participates in resolution without tripping the
+# unused-dependency lint): cc 1.2.x passes
 # FILE_ATTRIBUTE_TEMPORARY to OpenOptionsExt::custom_flags as u32, but
 # find-msvc-tools 0.1.13 retyped that constant to i32, breaking every Windows
 # build. tree-sitter-sequel caps cc at ~1.2.1 so the fixed cc 1.4.x line is
