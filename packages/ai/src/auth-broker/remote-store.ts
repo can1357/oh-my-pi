@@ -161,6 +161,8 @@ interface UsageCacheEntry {
 	 */
 	reports: UsageReport[] | null;
 	fetchedAt: number;
+	/** Freshness requested from the broker; also covers last-good failure fallbacks. */
+	maxAgeMs?: number;
 }
 
 /** Identity of one credential block row: credential, provider key, and scope. */
@@ -1286,9 +1288,9 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 	 * to the broker's `/v1/usage` endpoint. Shared per-credential caches and
 	 * cooldowns keep separate clients from multiplying provider probes.
 	 */
-	async fetchUsageReports(signal?: AbortSignal): Promise<UsageReport[] | null> {
+	async fetchUsageReports(signal?: AbortSignal, maxAgeMs?: number): Promise<UsageReport[] | null> {
 		this.#noteActivity();
-		const reports = await raceSignal(this.#loadUsageReports(), signal, "auth-broker request aborted");
+		const reports = await raceSignal(this.#loadUsageReports(maxAgeMs), signal, "auth-broker request aborted");
 		if (!reports) return null;
 		return this.#filterUsageReports(this.#applyUsageOverlays(reports));
 	}
@@ -1422,21 +1424,34 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 		return maximum;
 	}
 
-	#loadUsageReports(): Promise<UsageReport[] | null> {
+	#loadUsageReports(maxAgeMs?: number): Promise<UsageReport[] | null> {
 		const cached = this.#usageCache;
-		if (cached && Date.now() - cached.fetchedAt < USAGE_CACHE_TTL_MS) {
+		const now = Date.now();
+		if (
+			cached &&
+			now - cached.fetchedAt < USAGE_CACHE_TTL_MS &&
+			(maxAgeMs === undefined ||
+				cached.reports === null ||
+				(cached.maxAgeMs !== undefined && cached.maxAgeMs <= maxAgeMs) ||
+				cached.reports.every(report => now - report.fetchedAt < maxAgeMs))
+		) {
 			return Promise.resolve(cached.reports);
 		}
-		if (this.#usageInflight) return this.#usageInflight;
+		if (this.#usageInflight) {
+			// Recheck freshness after a shared poll, which may have used a longer interval.
+			return maxAgeMs === undefined
+				? this.#usageInflight
+				: this.#usageInflight.then(() => this.#loadUsageReports(maxAgeMs));
+		}
 		const epoch = this.#usageCacheEpoch;
 		const inflight = this.#client
-			.fetchUsage({ maxAccountsPerProvider: this.#maxBrokerUsageAccounts() })
+			.fetchUsage({ maxAccountsPerProvider: this.#maxBrokerUsageAccounts(), maxAgeMs })
 			.then(body => {
 				if (epoch !== this.#usageCacheEpoch) {
 					if (this.#usageInflight === inflight) this.#usageInflight = undefined;
-					return this.#loadUsageReports();
+					return this.#loadUsageReports(maxAgeMs);
 				}
-				this.#usageCache = { reports: body.reports, fetchedAt: Date.now() };
+				this.#usageCache = { reports: body.reports, fetchedAt: Date.now(), maxAgeMs };
 				return body.reports;
 			})
 			.catch(error => {

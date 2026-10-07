@@ -1128,6 +1128,8 @@ export interface UsageApi {
 	reports(options?: {
 		baseUrlResolver?: (provider: Provider) => string | undefined;
 		signal?: AbortSignal;
+		/** Display freshness limit in ms (60000–86400000); does not extend block/reset safety windows. */
+		maxAgeMs?: number;
 	}): Promise<UsageReport[] | null>;
 	/** Ingest provider usage limits from response headers. */
 	ingestHeaders(

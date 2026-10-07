@@ -146,6 +146,7 @@ import {
 	cfgStatusLineSessionAccent,
 	cfgStatusLineShowHookStatus,
 	cfgStatusLineTransparent,
+	cfgStatusLineUsageRefreshInterval,
 	cfgTreeFilterMode,
 } from "../settings";
 import { cfgTaskAgentModelOverrides } from "../../task/settings";
@@ -333,6 +334,7 @@ export class SelectorController {
 								transparent: cfgStatusLineTransparent.get(settings),
 								compactThinkingLevel: cfgStatusLineCompactThinkingLevel.get(settings),
 								contextLine: cfgStatusLineContextLine.get(settings),
+								usageRefreshInterval: cfgStatusLineUsageRefreshInterval.get(settings),
 								segmentOptions: cfgStatusLineSegmentOptions.get(settings),
 								...previewSettings,
 							});
@@ -366,6 +368,7 @@ export class SelectorController {
 								transparent: cfgStatusLineTransparent.get(settings),
 								compactThinkingLevel: cfgStatusLineCompactThinkingLevel.get(settings),
 								contextLine: cfgStatusLineContextLine.get(settings),
+								usageRefreshInterval: cfgStatusLineUsageRefreshInterval.get(settings),
 								segmentOptions: cfgStatusLineSegmentOptions.get(settings),
 							});
 							this.ctx.ui.requestRender();

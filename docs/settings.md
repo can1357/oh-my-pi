@@ -839,6 +839,7 @@ tui:
 | `statusLine.sessionAccent`    | boolean | `true`           | Tint the editor border with the session color.                            |
 | `statusLine.transparent`      | boolean | `false`          | Use the terminal background for the status line.                          |
 | `statusLine.showHookStatus`   | boolean | `true`           | Show hook status messages.                                                |
+| `statusLine.usageRefreshInterval` | number | `300` | Usage refresh interval in seconds; integer from `60` to `86400`. |
 | `terminal.showImages`         | boolean | `true`           | Render images inline (when the terminal supports it).                     |
 | `images.autoResize`           | boolean | `true`           | Resize large images for model compatibility.                              |
 | `images.blockImages`          | boolean | `false`          | Never send images to providers.                                           |
@@ -850,6 +851,10 @@ tui:
 | `tui.resizeScrollback`        | enum    | `rebuild`        | How a settled width resize refreshes transcript rows kept in terminal scrollback: `append` replays the transcript at the new width below retained history, `rebuild` erases pane scrollback then replays one current-width copy, `preserve` repaints only the viewport. |
 
 For a custom status line, set `statusLine.preset: custom` and configure `statusLine.leftSegments`, `statusLine.rightSegments`, and `statusLine.segmentOptions`. Include `status` in either segment list to render extension statuses registered through `ctx.ui.setStatus()`, ordered by key and joined inline. Set `statusLine.showHookStatus: false` to suppress the same statuses in the footer.
+
+Set `statusLine.usageRefreshInterval` through `/settings` → Appearance → Status Line, or `omp config set statusLine.usageRefreshInterval 60`. Changes apply without restarting. Refresh is checked on status-line redraws, not a separate idle polling timer. Shorter intervals also shorten report-cache freshness locally and through the auth-broker; longer intervals reduce status-line requests without extending credential-block or reset safety windows. Provider rate limits and failure cooldowns still apply.
+
+Saved-reset auto-redemption keeps a five-minute check cadence on status-line redraws even with a longer display interval. These checks query live reset eligibility, not the full usage report; successful redemptions still refresh usage. Set both `codexResets.autoRedeem` and `claudeResets.autoRedeem` to `no` to disable the additional checks.
 
 The `path` segment abbreviates the home directory to `~`. On Windows, shared path formatting recognizes both the long home name and its existing 8.3 aliases (such as `ADMINI~1`), including in tool labels and error text. Only the home prefix is abbreviated; remaining path components keep their spelling, and formatting does not change the working directory or environment. Set `statusLine.segmentOptions.path.abbreviate: false` to keep the full path in the status line.
 

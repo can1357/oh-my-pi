@@ -108,6 +108,7 @@ export interface UsageServiceDeps {
 type UsageReportsOptions = {
 	baseUrlResolver?: (provider: Provider) => string | undefined;
 	signal?: AbortSignal;
+	maxAgeMs?: number;
 };
 
 /** Usage reports: per-credential cached fetches, aggregate reports, header ingestion, history. */
@@ -320,7 +321,7 @@ export class UsageService implements UsageApi {
 	/** Cache a credential report with jitter and failure cooldown. */
 	async #fetchUsageCached(
 		request: UsageRequestDescriptor,
-		options: { timeoutMs?: number } = {},
+		options: { timeoutMs?: number; maxAgeMs?: number } = {},
 	): Promise<UsageReport | null> {
 		const timeoutMs = options.timeoutMs;
 		const cacheKey = this.#deps.cache.reportKey(request);
@@ -328,7 +329,11 @@ export class UsageService implements UsageApi {
 		const now = Date.now();
 		const cached = this.#deps.cache.get<UsageReport | null>(cacheKey);
 		// Fresh cache hit: return whatever's there (success or null fallback).
-		if (cached && cached.expiresAt > now) {
+		if (
+			cached &&
+			cached.expiresAt > now &&
+			(options.maxAgeMs === undefined || !cached.value || now - cached.value.fetchedAt < options.maxAgeMs)
+		) {
 			return cached.value;
 		}
 
@@ -359,7 +364,9 @@ export class UsageService implements UsageApi {
 			if (report !== null) {
 				if (invalidated) return report;
 				this.#deps.blocks.reconcileRequest(request, report);
-				const ttlJitter = USAGE_REPORT_TTL_MS * (Math.random() * 0.5 - 0.25);
+				// Display polls may shorten freshness, but must never lengthen recovery caches.
+				const ttlMs = Math.min(USAGE_REPORT_TTL_MS, options.maxAgeMs ?? USAGE_REPORT_TTL_MS);
+				const ttlJitter = ttlMs * (Math.random() * 0.5 - 0.25);
 				// Success: stagger per-credential cache expiry so all accounts don't
 				// refresh in the same window — Anthropic / OpenAI rate-limit `/usage`
 				// per source IP regardless of account, and synchronized 5-credential
@@ -367,7 +374,7 @@ export class UsageService implements UsageApi {
 				// times decorrelate within a few cycles.
 				this.#deps.cache.set(cacheKey, {
 					value: report,
-					expiresAt: Date.now() + USAGE_REPORT_TTL_MS + ttlJitter,
+					expiresAt: Date.now() + Math.max(60_000, ttlMs + ttlJitter),
 				});
 				this.#recordUsageHistory(request, report);
 				return report;
@@ -731,6 +738,7 @@ export class UsageService implements UsageApi {
 	#fetchUsageRequests(
 		requests: readonly UsageRequestDescriptor[],
 		serializedProviders: ReadonlySet<Provider>,
+		maxAgeMs?: number,
 	): Promise<Array<UsageReport | null>> {
 		const tails = new Map<Provider, Promise<void>>();
 		return Promise.all(
@@ -738,12 +746,14 @@ export class UsageService implements UsageApi {
 				if (!serializedProviders.has(request.provider)) {
 					return this.#fetchUsageCached(request, {
 						timeoutMs: this.requestTimeoutMs,
+						maxAgeMs,
 					});
 				}
 				const tail = tails.get(request.provider) ?? Promise.resolve();
 				const current = tail.then(() =>
 					this.#fetchUsageCached(request, {
 						timeoutMs: this.requestTimeoutMs,
+						maxAgeMs,
 					}),
 				);
 				tails.set(
@@ -760,6 +770,12 @@ export class UsageService implements UsageApi {
 
 	/** Fetch all providers’ current usage reports, sharing concurrent polls. */
 	async reports(options?: UsageReportsOptions): Promise<UsageReport[] | null> {
+		if (
+			options?.maxAgeMs !== undefined &&
+			(!Number.isFinite(options.maxAgeMs) || options.maxAgeMs < 60_000 || options.maxAgeMs > 86_400_000)
+		) {
+			throw new RangeError("Usage report maxAgeMs must be between 60000 and 86400000");
+		}
 		// The broker owns its providers' reports; runtime providers registered
 		// only in this process still need local per-credential probes.
 		const storeOverride = this.#deps.store.fetchUsageReports?.bind(this.#deps.store);
@@ -768,12 +784,12 @@ export class UsageService implements UsageApi {
 			// dispatch + credential selection) coalesce into one upstream call.
 			// Each caller's `signal` only cancels THAT caller's await; the
 			// shared upstream fetch runs to completion so peers aren't punished.
-			const overrideKey = `__override__\0${this.#deps.cache.epoch}`;
+			const overrideKey = `__override__\0${this.#deps.cache.epoch}\0${options?.maxAgeMs ?? ""}`;
 			let shared = this.#usageReportsInFlight.get(overrideKey);
 			if (!shared) {
 				// Don't forward the caller signal into the shared fetch — first caller's
 				// abort would otherwise cancel the upstream for every peer.
-				shared = storeOverride().finally(() => {
+				shared = storeOverride(undefined, options?.maxAgeMs).finally(() => {
 					this.#usageReportsInFlight.delete(overrideKey);
 				});
 				this.#usageReportsInFlight.set(overrideKey, shared);
@@ -815,7 +831,7 @@ export class UsageService implements UsageApi {
 		// aggregate cache freezes whichever set landed first).
 		const forcedRefresh = this.#deps.cache.forcedRefresh(requests);
 		const usageCacheEpoch = this.#deps.cache.epoch;
-		const cacheKey = `${this.#deps.cache.reportsKey(requests)}\0${usageCacheEpoch}`;
+		const cacheKey = `${this.#deps.cache.reportsKey(requests)}\0${usageCacheEpoch}\0${options?.maxAgeMs ?? ""}`;
 
 		const inFlight = this.#usageReportsInFlight.get(cacheKey);
 		if (inFlight) return raceSignal(inFlight, options?.signal, "usage fetch aborted");
@@ -831,7 +847,7 @@ export class UsageService implements UsageApi {
 				});
 			}
 
-			const results = await this.#fetchUsageRequests(requests, forcedRefresh.providers);
+			const results = await this.#fetchUsageRequests(requests, forcedRefresh.providers, options?.maxAgeMs);
 			const reports = results.filter((report): report is UsageReport => report !== null);
 			const deduped = dedupeUsageReports(reports, this.logger);
 			// no outer cache write — see comment above.

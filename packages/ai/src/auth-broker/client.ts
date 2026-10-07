@@ -262,7 +262,9 @@ export class AuthBrokerClient {
 	 * Fetch aggregate broker usage with a timeout sized for serialized
 	 * same-provider account probes.
 	 */
-	fetchUsage(options: { signal?: AbortSignal; maxAccountsPerProvider?: number } = {}): Promise<UsageResponse> {
+	fetchUsage(
+		options: { signal?: AbortSignal; maxAccountsPerProvider?: number; maxAgeMs?: number } = {},
+	): Promise<UsageResponse> {
 		const requestedAccountCount = options.maxAccountsPerProvider;
 		const accountCount =
 			typeof requestedAccountCount === "number" && Number.isFinite(requestedAccountCount)
@@ -270,7 +272,8 @@ export class AuthBrokerClient {
 				: 1;
 		const perAccountTimeoutMs = Math.max(DEFAULT_TIMEOUT_MS, this.#timeoutMs);
 		const timeoutMs = perAccountTimeoutMs * (accountCount + 1);
-		return this.#request<UsageResponse>("GET", "/v1/usage", {
+		const path = options.maxAgeMs === undefined ? "/v1/usage" : `/v1/usage?maxAgeMs=${options.maxAgeMs}`;
+		return this.#request<UsageResponse>("GET", path, {
 			schema: "usageResponseSchema",
 			signal: options.signal,
 			timeoutMs,

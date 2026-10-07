@@ -665,7 +665,7 @@ export class CredentialPool implements CredentialsApi {
 	 * Check if OAuth credentials are configured for a provider.
 	 */
 	hasOAuth(provider: string): boolean {
-		return this.credentials(provider).some(credential => credential.type === "oauth");
+		return this.entries(provider).some(entry => entry.credential.type === "oauth");
 	}
 
 	/**
