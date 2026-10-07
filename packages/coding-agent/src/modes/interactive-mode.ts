@@ -2689,11 +2689,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			file: () => this.sessionManager.getSessionFile(),
 			cwd: () => this.sessionManager.getCwd(),
 		});
-		setSessionTerminalTitle(
-			this.sessionManager.getSessionName(),
-			this.sessionManager.getCwd(),
-			this.sessionManager.getSessionTitleCard(),
-		);
+		setSessionTerminalTitle(this.sessionManager.getSessionName(), this.sessionManager.getCwd());
 		// Before any cwd change, so replies written here stay bound to this repo.
 		this.#trackProseGithubRepo(this.session);
 		// Seeds the border, the status-line `vim` segment, and the cursor shape in one call.
