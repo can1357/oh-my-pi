@@ -5,9 +5,11 @@
 ### Added
 
 - Added `stderrSharesStdoutTerminal()`, which reports whether stderr is the terminal stdout writes to ([#13794](https://github.com/can1357/oh-my-pi/pull/13794) by [@sjawhar](https://github.com/sjawhar)).
+- Added `ZipPackage` to `@oh-my-pi/pi-utils/ar`: a lazily inflated ZIP document package with a cap on total inflated bytes, and `DocxImage.readBytes()` for raw DOCX image bytes ([#14709](https://github.com/can1357/oh-my-pi/pull/14709) by [@H4vC](https://github.com/H4vC))
 
 ### Changed
 
+- DOCX conversion inflates only the package members it reads ([#14709](https://github.com/can1357/oh-my-pi/pull/14709) by [@H4vC](https://github.com/H4vC))
 - Sped up Turndown HTML-to-Markdown on nested tables, long ordered lists and large pages ([#14668](https://github.com/can1357/oh-my-pi/pull/14668) by [@H4vC](https://github.com/H4vC))
 - Sped up Readability extraction ~5–10× on large pages and reduced parsed-DOM heap ~30% ([#14668](https://github.com/can1357/oh-my-pi/pull/14668) by [@H4vC](https://github.com/H4vC))
 - Sped up markdown lexing (`@oh-my-pi/pi-utils/marked`) from quadratic to linear in document size (199 KB: 1.6 s → 35 ms) ([#14667](https://github.com/can1357/oh-my-pi/pull/14667) by [@H4vC](https://github.com/H4vC))

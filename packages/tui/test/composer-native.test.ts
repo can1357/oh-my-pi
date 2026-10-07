@@ -111,6 +111,19 @@ describe("native composer", () => {
 		expect(editor.onEscape).toHaveBeenCalledTimes(1);
 	});
 
+	it("quotes the session title in italics as the placeholder; a viewed subagent's name wins", () => {
+		const placeholder = (state: ComposerNativeState) =>
+			nodes(composer(state).describe(cx)).find(n => n.k === "editor")?.p;
+		expect(placeholder({ running: false })).toMatchObject({ placeholder: "What are we cooking?" });
+		expect(placeholder({ running: false, title: "" })).toMatchObject({ placeholder: "What are we cooking?" });
+		expect(placeholder({ running: false, title: "Fix login" })).toMatchObject({
+			placeholder: [{ t: '"Fix login"', s: "em" }],
+		});
+		expect(placeholder({ running: false, title: "Fix login", viewing: ["Scout"] })).toMatchObject({
+			placeholder: "Message Scout",
+		});
+	});
+
 	it("names the viewed subagent over the draft and routes its links to the focus handler", () => {
 		expect(byRole(composer({ running: false }).describe(cx), "omp.composer.focus")).toBeUndefined();
 

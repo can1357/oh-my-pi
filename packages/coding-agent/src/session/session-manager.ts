@@ -97,7 +97,7 @@ import {
 	resolveManagedSessionRoot,
 	writeTerminalBreadcrumb,
 } from "./session-paths";
-import { prepareEntryForPersistence } from "./session-persistence";
+import { forgetExternalizedImages, prepareEntryForPersistence } from "./session-persistence";
 import { loadPinnedSessionIds, sortPinnedFirst } from "./session-pins";
 import {
 	FileSessionStorage,
@@ -735,6 +735,42 @@ interface AtomicEntryBatch {
 }
 
 /**
+ * The state a full-file body was serialized from, cheap to compare against
+ * the live state. Entries change only by append, array replacement, or an
+ * in-place update announced through `rewriteEntries()` (which bumps the
+ * revision); the title slot and header are small and compared by value.
+ */
+interface SessionBodyStamp {
+	entries: readonly SessionEntry[];
+	entryCount: number;
+	lastEntry: SessionEntry | undefined;
+	revision: number;
+	/** Serialized title slot and header lines. */
+	prefix: string;
+}
+
+/**
+ * One full-file serialization: title slot, header, and entry lines in file
+ * order plus their total UTF-8 byte length. Kept as lines so the file backend
+ * streams them instead of materializing one string the size of the session.
+ */
+interface SessionFileBody {
+	lines: string[];
+	bytes: number;
+	stamp: SessionBodyStamp;
+}
+
+/** Whether `text` is exactly the concatenation of `lines`, compared without building it. */
+function textMatchesLines(text: string, lines: readonly string[]): boolean {
+	let offset = 0;
+	for (const line of lines) {
+		if (!text.startsWith(line, offset)) return false;
+		offset += line.length;
+	}
+	return offset === text.length;
+}
+
+/**
  * The storage may have published a write that rejected, and an authoritative
  * repair could not be proven durable. Callers must fail closed until recovery.
  */
@@ -823,6 +859,8 @@ export class SessionManager {
 	#sessionName: string | undefined;
 	#titleSource: SessionTitleSource | undefined;
 	#titleRevision = 0;
+	/** Bumped by in-place entry updates, which a {@link SessionBodyStamp} cannot otherwise see. */
+	#bodyRevision = 0;
 	#sessionFile: string | undefined;
 	#header!: SessionHeader;
 	#titleUpdatedAt = "";
@@ -867,7 +905,7 @@ export class SessionManager {
 	#writer: SessionStorageWriter | undefined;
 	/** Sealed by {@link releaseRetainedEntries}: every later append/title/rewrite is a dropped no-op. */
 	#released = false;
-	/** Set by {@link releaseRetainedEntries}: `#entries` was cleared, so `#fileBody()` is no longer authoritative. */
+	/** Set by {@link releaseRetainedEntries}: `#entries` was cleared, so `#serializeBody()` is no longer authoritative. */
 	#entriesReleased = false;
 	/** Serializes async disk work (flush/close/atomic rewrite). Appends are synchronous and bypass it. */
 	#diskTail: Promise<void> = Promise.resolve();
@@ -985,6 +1023,9 @@ export class SessionManager {
 	#noteDiskFailure(errorLike: unknown): Error {
 		const error = toError(errorLike);
 		if (!this.#diskFailure) this.#diskFailure = error;
+		// A line that failed to land leaves its blob refs unreferenced on disk,
+		// so the next persist must re-check those blobs instead of trusting the memo.
+		forgetExternalizedImages(this.#blobs);
 
 		if (!this.#diskFailureLogged) {
 			this.#diskFailureLogged = true;
@@ -1258,6 +1299,7 @@ export class SessionManager {
 	#latchIndeterminate(operationError: Error, recoveryErrors: readonly Error[]): SessionPersistenceIndeterminateError {
 		const error = new SessionPersistenceIndeterminateError(operationError, recoveryErrors);
 		this.#diskFailure = error;
+		forgetExternalizedImages(this.#blobs);
 		if (!this.#diskFailureLogged) {
 			this.#diskFailureLogged = true;
 			logger.error("Session persistence became indeterminate.", {
@@ -1283,7 +1325,7 @@ export class SessionManager {
 	async #authoritativelyRewriteCurrentStateLocked(operationError: Error): Promise<void> {
 		if (this.#released) {
 			// Terminal seal: repair would reset the disk tail (escaping the
-			// close() serialization) and atomically publish #fileBody() — after
+			// close() serialization) and atomically publish #serializeBody() — after
 			// release that truncates, and a revival may already own the file.
 			// The original operation error still propagates to the caller.
 			logger.warn("Skipped authoritative session repair after terminal release", {
@@ -1376,9 +1418,12 @@ export class SessionManager {
 			sessionFile === this.#sessionFile && this.#sessionOwnedElsewhere()
 				? this.#moveOffSessionFile("open-elsewhere")
 				: sessionFile;
-		const body = this.#fileBody();
+		const body = this.#serializeBody();
+		const options = { expectedSize: this.#expectedDiskSize, commitGuard };
 		try {
-			await this.#storage.writeTextAtomic(target, body, { expectedSize: this.#expectedDiskSize, commitGuard });
+			await (this.#storage.writeLinesAtomic
+				? this.#storage.writeLinesAtomic(target, body.lines, options)
+				: this.#storage.writeTextAtomic(target, body.lines.join(""), options));
 		} catch (error) {
 			const retryPath = await this.#recoverFromWriteConflict(error, recoveries);
 			if (retryPath) return this.#publishAuthoritativeBody(retryPath, operationError, commitGuard, recoveries + 1);
@@ -1395,12 +1440,12 @@ export class SessionManager {
 				recoveryErrors.push(toError(readFailure));
 				throw this.#latchIndeterminate(operationError, recoveryErrors);
 			}
-			if (actual !== body) {
+			if (!textMatchesLines(actual, body.lines)) {
 				recoveryErrors.push(new Error("Authoritative session repair did not match durable storage."));
 				throw this.#latchIndeterminate(operationError, recoveryErrors);
 			}
 		}
-		this.#recordFullRewrite(body);
+		this.#recordFullRewrite(body.bytes);
 	}
 
 	#appendWriter(): SessionStorageWriter {
@@ -1422,8 +1467,8 @@ export class SessionManager {
 		this.#expectedDiskSize = (this.#expectedDiskSize ?? 0) + Buffer.byteLength(line, "utf8");
 	}
 
-	#recordFullRewrite(body: string): void {
-		this.#expectedDiskSize = Buffer.byteLength(body, "utf8");
+	#recordFullRewrite(bytes: number): void {
+		this.#expectedDiskSize = bytes;
 	}
 
 	/**
@@ -1472,11 +1517,26 @@ export class SessionManager {
 		});
 	}
 
-	#fileBody(): string {
-		let body = this.#titleSlotLine();
-		body += this.#lineFor(this.#header);
-		for (const entry of this.#entries) body += this.#lineFor(entry);
-		return body;
+	/** Serialize the whole file — title slot, header, entries — as lines, stamped with the state they came from. */
+	#serializeBody(): SessionFileBody {
+		const titleLine = this.#titleSlotLine();
+		const headerLine = this.#lineFor(this.#header);
+		const entries = this.#entries;
+		const lines = [titleLine, headerLine];
+		let bytes = Buffer.byteLength(titleLine, "utf8") + Buffer.byteLength(headerLine, "utf8");
+		for (const entry of entries) {
+			const line = this.#lineFor(entry);
+			bytes += Buffer.byteLength(line, "utf8");
+			lines.push(line);
+		}
+		const stamp: SessionBodyStamp = {
+			entries,
+			entryCount: entries.length,
+			lastEntry: entries.at(-1),
+			revision: this.#bodyRevision,
+			prefix: titleLine + headerLine,
+		};
+		return { lines, bytes, stamp };
 	}
 
 	#historyContainsAssistantMessage(): boolean {
@@ -1520,19 +1580,21 @@ export class SessionManager {
 
 		try {
 			if (this.#sessionOwnedElsewhere()) targetPath = this.#moveOffSessionFile("open-elsewhere");
-			let body = this.#fileBody();
+			let body = this.#serializeBody();
 			this.#diskEpoch++;
 			this.#diskTail = Promise.resolve();
 			this.#closeWriterEventually();
 			for (let recoveries = 0; ; recoveries++) {
 				try {
-					this.#storage.writeTextSync(targetPath, body, { expectedSize: this.#expectedDiskSize });
+					const options = { expectedSize: this.#expectedDiskSize };
+					if (this.#storage.writeLinesSync) this.#storage.writeLinesSync(targetPath, body.lines, options);
+					else this.#storage.writeTextSync(targetPath, body.lines.join(""), options);
 					break;
 				} catch (err) {
 					const retryPath = this.#recoverFromWriteConflictSync(err, recoveries);
 					if (!retryPath) throw err;
 					targetPath = retryPath;
-					body = this.#fileBody();
+					body = this.#serializeBody();
 				}
 			}
 			this.#clearDiskError();
@@ -1547,12 +1609,20 @@ export class SessionManager {
 				// The success handler below is the single place the replacement
 				// becomes durable state.
 				const generation = ++this.#deferredPublishGen;
+				const { bytes, stamp } = body;
 				this.#confirmDeferredPublish(targetPath, () => {
 					// A newer deferred publish owns the durability record now;
 					// this body is no longer on the backend, so record nothing.
 					if (generation !== this.#deferredPublishGen) return;
-					this.#recordFullRewrite(body);
-					if (this.#fileBody() !== body) {
+					this.#recordFullRewrite(bytes);
+					const entries = this.#entries;
+					const bodyIsCurrent =
+						stamp.entries === entries &&
+						stamp.entryCount === entries.length &&
+						stamp.lastEntry === entries.at(-1) &&
+						stamp.revision === this.#bodyRevision &&
+						stamp.prefix === this.#titleSlotLine() + this.#lineFor(this.#header);
+					if (!bodyIsCurrent) {
 						// Entries raced the unconfirmed publish: the confirmed
 						// body predates them. Stay non-current and re-issue the
 						// full transcript instead of declaring it durable
@@ -1573,7 +1643,7 @@ export class SessionManager {
 				});
 				return;
 			}
-			this.#recordFullRewrite(body);
+			this.#recordFullRewrite(body.bytes);
 			// Only mark the manager current when writing the active session path.
 			// Mid-move writes update the live relocation path; `#sessionFile` is
 			// still the pre-repoint source until moveTo repoints it.
@@ -1643,12 +1713,15 @@ export class SessionManager {
 				const sessionFile = this.#sessionFile;
 				if (!sessionFile) return false;
 				if (this.#diskEpoch !== epoch) return false;
-				const body = this.#fileBody();
+				const body = this.#serializeBody();
+				const options = {
+					expectedSize: this.#expectedDiskSize,
+					commitGuard: () => !this.#released && this.#diskEpoch === epoch,
+				};
 				try {
-					await this.#storage.writeTextAtomic(sessionFile, body, {
-						expectedSize: this.#expectedDiskSize,
-						commitGuard: () => !this.#released && this.#diskEpoch === epoch,
-					});
+					await (this.#storage.writeLinesAtomic
+						? this.#storage.writeLinesAtomic(sessionFile, body.lines, options)
+						: this.#storage.writeTextAtomic(sessionFile, body.lines.join(""), options));
 				} catch (error) {
 					if (await this.#recoverFromWriteConflict(error, recoveries)) {
 						recoveries++;
@@ -1657,14 +1730,16 @@ export class SessionManager {
 						continue;
 					}
 					try {
-						if ((await this.#storage.readText(sessionFile)) === body) this.#recordFullRewrite(body);
+						if (textMatchesLines(await this.#storage.readText(sessionFile), body.lines)) {
+							this.#recordFullRewrite(body.bytes);
+						}
 					} catch {
 						// Preserve the publish error when durable state cannot be read back.
 					}
 					throw error;
 				}
 				if (this.#diskEpoch !== epoch) return false;
-				this.#recordFullRewrite(body);
+				this.#recordFullRewrite(body.bytes);
 			} while (this.#atomicRewriteDirty);
 			return true;
 		} finally {
@@ -3239,24 +3314,13 @@ export class SessionManager {
 	}
 
 	/**
-	 * Snapshot the session for collab replication: the live header plus a deep
-	 * copy of every entry (the host mutates entries in place on rewrite paths, so
-	 * guests must not share references).
-	 *
-	 * `copy` is injectable because the copier decides whether the snapshot
-	 * survives pathological input at all: `structuredClone` throws `RangeError`
-	 * on a payload nested past the engine's recursion limit, and the collab
-	 * snapshot path builds its chunk train from this return value — so that
-	 * throw lands before the shrinker that exists to bound such an entry, and
-	 * the guest never receives its `final` chunk (issue #11433). The collab host
-	 * passes a depth-bounded copier so one pathological entry degrades on its
-	 * own instead of aborting the whole snapshot.
+	 * The live header and entries, for collab replication. Nothing is copied:
+	 * the host mutates entries in place on rewrite paths, so callers must not
+	 * mutate what this returns and must serialize it synchronously, before any
+	 * such rewrite can run.
 	 */
-	snapshotForReplication(copy: <T>(value: T) => T = structuredClone): {
-		header: SessionHeader;
-		entries: SessionEntry[];
-	} {
-		return { header: copy(this.#header), entries: copy(this.#entries) };
+	snapshotForReplication(): { header: SessionHeader; entries: readonly SessionEntry[] } {
+		return { header: this.#header, entries: this.#entries };
 	}
 
 	/**
@@ -3454,6 +3518,7 @@ export class SessionManager {
 	 * outputs). Use sparingly.
 	 */
 	async rewriteEntries(): Promise<void> {
+		this.#bodyRevision++;
 		if (!this.#persist || !this.#sessionFile) return;
 		await this.#rewriteAtomically();
 	}
@@ -3635,7 +3700,7 @@ export class SessionManager {
 			entry.message = sanitized;
 			changed = true;
 		}
-
+		if (changed) this.#bodyRevision++;
 		return changed;
 	}
 

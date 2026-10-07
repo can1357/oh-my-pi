@@ -3747,7 +3747,8 @@ export class InteractiveMode implements InteractiveModeContext {
 	/**
 	 * What the TSP composer shows: the draft's shell mode, the effort chip
 	 * (the viewed agent's, like the model chip beside it) or the model chip's
-	 * effort icon, the tok/s readout after it, and send vs Stop.
+	 * effort icon, the tok/s readout after it, send vs Stop, and the session
+	 * title the empty composer's placeholder quotes.
 	 */
 	#composerNativeState(): ComposerNativeState {
 		const draft = this.editor.getText().trimStart();
@@ -3762,6 +3763,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			rate: this.#nativeTokenRate(),
 			running: this.loadingAnimation !== undefined || this.session.isStreaming,
 			viewing: this.#viewingLineage(),
+			title: this.sessionManager.getSessionName(),
 		};
 	}
 
