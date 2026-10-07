@@ -34,6 +34,52 @@ describe("Loader component", () => {
 		tui.stop();
 	});
 
+	it("does not schedule ticks for a single-frame spinner with a static colorizer", () => {
+		vi.useFakeTimers();
+		const ui = { requestComponentRender: vi.fn() };
+		const loader = new Loader(
+			ui as unknown as TUI,
+			text => text,
+			text => text,
+			"Checking",
+			["•"],
+		);
+
+		// Exactly the initial paint; the frozen loader never ticks.
+		expect(ui.requestComponentRender).toHaveBeenCalledTimes(1);
+
+		vi.advanceTimersByTime(400);
+
+		expect(ui.requestComponentRender).toHaveBeenCalledTimes(1);
+
+		// setMessage still repaints independently.
+		loader.setMessage("Still checking");
+		expect(ui.requestComponentRender).toHaveBeenCalledTimes(2);
+
+		loader.stop();
+	});
+
+	it("keeps a live countdown label updating with a frozen spinner", () => {
+		vi.useFakeTimers();
+		let remaining = 3;
+		const ui = { requestComponentRender: vi.fn() };
+		const loader = new Loader(
+			ui as unknown as TUI,
+			text => text,
+			text => text,
+			() => `Retry in ${remaining}s`,
+			["•"],
+		);
+		try {
+			expect(loader.render(40).join("\n")).toContain("Retry in 3s");
+			remaining = 2;
+			vi.advanceTimersByTime(80);
+			expect(loader.render(40).join("\n")).toContain("Retry in 2s");
+		} finally {
+			loader.stop();
+		}
+	});
+
 	it("keeps spinner cadence when animated messages repaint at 30fps", () => {
 		vi.useFakeTimers();
 		const ui = { requestComponentRender: vi.fn() };

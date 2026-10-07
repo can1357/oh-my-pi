@@ -117,6 +117,7 @@
 
 ### Added
 
+- Added `display.reduceMotion` and `--reduce-motion` to freeze cosmetic terminal animations, with a strict mode that caps content repaints at approximately 4fps ([#8336](https://github.com/can1357/oh-my-pi/pull/8336) by [@Seas0](https://github.com/Seas0))
 - Added an agents HUD pill counting running subagents, opening the agent hub on click
 - In Tern the thinking level shows as the composer model chip's icon instead of a separate chip, still cycling on click, while `statusLine.compactThinkingLevel` (Compact Thinking Level, on by default) is on
 - Added `computer.zoom()` and window-local `zoom()` in JavaScript and Python Eval, with native-detail region captures that preserve full-screenshot click coordinates.

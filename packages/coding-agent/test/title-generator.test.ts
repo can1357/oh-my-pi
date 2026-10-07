@@ -7,6 +7,7 @@ import { formatModelStringWithRouting, resolveModelOverride } from "@oh-my-pi/pi
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { tinyTitleClient } from "@oh-my-pi/pi-coding-agent/tiny/title-client";
 import {
+	buildTerminalTitleWithState,
 	disposeTerminalTitleState,
 	generateSessionTitle,
 	initTerminalTitleState,
@@ -1182,5 +1183,18 @@ describe("terminal title runtime", () => {
 			setTerminalTitlePullRequest(undefined);
 		}
 		expectWorkingSeparator(emittedTitles().at(-1), "Renamed");
+	});
+});
+
+describe("buildTerminalTitleWithState static separator (reduce-motion)", () => {
+	it("renders a static ':' working separator instead of braille frames", () => {
+		const title = buildTerminalTitleWithState("proj", "working", 3, true, "linux", "braille", {}, false, true);
+		expect(title).toContain(":");
+		for (const frame of SPINNER_FRAMES) expect(title).not.toContain(frame);
+	});
+
+	it("keeps the animated braille frame when staticSpinner is false", () => {
+		const title = buildTerminalTitleWithState("proj", "working", 3, true, "linux", "braille", {}, false, false);
+		expect(SPINNER_FRAMES.some(frame => title.includes(frame))).toBe(true);
 	});
 });

@@ -16,6 +16,7 @@ import type { InteractiveModeContext } from "./types";
 
 import {
 	cfgColorBlindMode,
+	cfgDisplayReduceMotion,
 	cfgComposerShape,
 	cfgSetupVersion,
 	cfgSymbolPreset,
@@ -33,6 +34,9 @@ export function createSetupHost(ctx: InteractiveModeContext): SetupHost {
 	const modelSource = createModelBrowserSource(ctx.settings, model => ctx.session.effectiveServiceTier(model));
 	return {
 		ui: ctx.ui,
+		get reduceMotion() {
+			return cfgDisplayReduceMotion.get(ctx.settings) !== "off";
+		},
 		get statusLine() {
 			return ctx.statusLine;
 		},

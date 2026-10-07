@@ -152,6 +152,20 @@ it("renders completed tasks as checked before revealing strikethrough", async ()
 	expect(revealFrame).toContain("\x1b[9m");
 });
 
+it("renders completed tasks fully struck when no animation frame is set (reduce-motion)", async () => {
+	// Under reduce-motion the strike sweep never runs, so the renderer sees no
+	// frame and must land on the terminal state: full strikethrough, no sweep.
+	const tool = new TodoTool(createSession());
+	await tool.execute("call-1", { op: "init", list: [{ phase: "Execution", items: ["finish"] }] });
+	const result = await tool.execute("call-2", { op: "done", task: "finish" });
+	const options = { expanded: true, isPartial: false, spinnerFrame: undefined };
+	const component = todoToolRenderer.renderResult(result, options, theme);
+
+	const staticFrame = component.render(120).join("\n");
+	expect(Bun.stripANSI(staticFrame)).toContain("finish");
+	expect(staticFrame).toContain("\x1b[9m");
+});
+
 describe("TodoTool operations", () => {
 	it("jumps to a specific task out of order", async () => {
 		const tool = new TodoTool(createSession());

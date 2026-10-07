@@ -1,3 +1,4 @@
+import { isReduceMotion } from "../reduce-motion";
 import type { ImageContent } from "@oh-my-pi/pi-ai";
 import type { AgentTool } from "@oh-my-pi/pi-agent-core";
 import { Box } from "../components/box";
@@ -691,14 +692,15 @@ export class ToolExecutionComponent extends Container {
 		// TSP terminals clock spinners themselves; the frame counter is ANSI-only.
 		const needsSpinner =
 			!isNativeRendering() && (isStreamingArgs || isLivePartialTool || this.#displaceableByToolName === "wait");
-		if (needsSpinner && !this.#spinnerActive) {
+		const shouldTick = needsSpinner && !isReduceMotion();
+		if (shouldTick && !this.#spinnerActive) {
 			const frameCount = theme.spinnerFrames.length;
 			const frame = sharedSpinnerFrame(frameCount);
 			this.#spinnerFrame = frame;
 			this.#renderState.spinnerFrame = frame;
 			this.#spinnerActive = true;
 			registerSpinnerBlock(this);
-		} else if (!needsSpinner && this.#spinnerActive) {
+		} else if (!shouldTick && this.#spinnerActive) {
 			this.#spinnerActive = false;
 			unregisterSpinnerBlock(this);
 			// Clear the last drawn frame so a non-live renderCall (e.g. a write whose
@@ -709,6 +711,13 @@ export class ToolExecutionComponent extends Container {
 				this.#renderState.spinnerFrame = undefined;
 			}
 		}
+		if (needsSpinner && isReduceMotion()) {
+			this.#spinnerFrame = 0;
+			this.#renderState.spinnerFrame = 0;
+		} else if (!needsSpinner && !this.#todoStrikeInterval) {
+			this.#spinnerFrame = undefined;
+			this.#renderState.spinnerFrame = undefined;
+		}
 	}
 
 	/**
@@ -717,6 +726,11 @@ export class ToolExecutionComponent extends Container {
 	 * component-scoped so the TUI reuses every other root subtree (issue #4377).
 	 */
 	tickSpinner(frame: number): void {
+		if (isReduceMotion()) {
+			this.#updateSpinnerAnimation();
+			this.#ui.requestComponentRender(this);
+			return;
+		}
 		this.#spinnerFrame = frame;
 		this.#renderState.spinnerFrame = frame;
 		this.#ui.requestComponentRender(this);
@@ -733,13 +747,17 @@ export class ToolExecutionComponent extends Container {
 			this.#stopTodoStrikeAnimation();
 			return;
 		}
+		if (isReduceMotion()) {
+			this.#stopTodoStrikeAnimation();
+			return;
+		}
 		if (this.#todoStrikeInterval) return;
 
 		this.#spinnerFrame = 0;
 		this.#renderState.spinnerFrame = 0;
 		this.#todoStrikeInterval = setInterval(() => {
 			const nextFrame = (this.#spinnerFrame ?? 0) + 1;
-			if (nextFrame > TODO_STRIKE_TOTAL_FRAMES) {
+			if (isReduceMotion() || nextFrame > TODO_STRIKE_TOTAL_FRAMES) {
 				this.#stopTodoStrikeAnimation();
 			} else {
 				this.#spinnerFrame = nextFrame;
@@ -1207,6 +1225,8 @@ export class ToolExecutionComponent extends Container {
 	}
 
 	override invalidate(): void {
+		this.#updateSpinnerAnimation();
+		if (this.#todoStrikeInterval && isReduceMotion()) this.#stopTodoStrikeAnimation();
 		super.invalidate();
 		this.#updateDisplay();
 	}

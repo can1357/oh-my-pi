@@ -1,3 +1,4 @@
+import { isReduceMotion } from "../reduce-motion";
 import { APP_NAME } from "@oh-my-pi/pi-utils/dirs";
 import type { TspSpan } from "@oh-my-pi/pi-wire";
 import { formatDoubleTap, formatKeyHint, formatKeyHints, type KeyName } from "../app-keybindings";
@@ -265,7 +266,7 @@ export class WelcomeComponent implements Component {
 		this.#stopAnimation();
 		// The intro is a repaint-only gradient sweep; a TSP terminal shows the
 		// settled card right away.
-		if (isNativeRendering()) {
+		if (isNativeRendering() || isReduceMotion()) {
 			requestRender();
 			return;
 		}
@@ -275,7 +276,7 @@ export class WelcomeComponent implements Component {
 		this.#animTimer = setInterval(() => {
 			const elapsed = performance.now() - (this.#animStart ?? 0);
 			const requestRender = this.#requestRender;
-			if (elapsed >= INTRO_MS) {
+			if (elapsed >= INTRO_MS || isReduceMotion()) {
 				this.#stopAnimation();
 			}
 			// Stopping clears the callback, but the settled frame must still paint

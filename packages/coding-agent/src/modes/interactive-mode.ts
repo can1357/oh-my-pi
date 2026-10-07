@@ -1,3 +1,4 @@
+import { REDUCE_MOTION_STRICT_RENDER_INTERVAL_MS } from "@oh-my-pi/pi-tui/reduce-motion";
 import { formatModelSelectorValue } from "@oh-my-pi/pi-tui/overlays/model-selector";
 /**
  * Interactive mode for the coding agent.
@@ -334,6 +335,7 @@ import {
 	cfgDisplayCacheMissMarker,
 	cfgDisplayCollapseCompacted,
 	cfgDisplayHideToolActivity,
+	cfgDisplayReduceMotion,
 	cfgDisplayPinnedAgents,
 	cfgDisplayShowTokenUsage,
 	cfgDisplayShowTurnTime,
@@ -413,6 +415,7 @@ const cfgLiveUiSettings = combine({
 	"composer.shape": cfgComposerShape,
 	"tui.vimMode": cfgTuiVimMode,
 	"tui.vimModeDisplay": cfgTuiVimModeDisplay,
+	"display.reduceMotion": cfgDisplayReduceMotion,
 	"display.pinnedAgents": cfgDisplayPinnedAgents,
 	"display.subagentLivePreview": cfgDisplaySubagentLivePreview,
 	"compaction.idleEnabled": cfgCompactionIdleEnabled,
@@ -1723,6 +1726,9 @@ export class InteractiveMode implements InteractiveModeContext {
 			});
 		this.composer.setPreferences(preferences);
 		this.ui = this.composer.ui;
+		this.ui.setMinRenderInterval(
+			cfgDisplayReduceMotion.get(this.settings) === "strict" ? REDUCE_MOTION_STRICT_RENDER_INTERVAL_MS : undefined,
+		);
 		this.editor = this.composer.editor;
 		this.editor.magicKeywordsEnabled = () => cfgMagicKeywordsEnabled.get(this.settings);
 		this.editor.placeholder = () => this.#composerHint();
@@ -3547,7 +3553,15 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.ui.invalidate();
 			this.ui.requestRender();
 		}
-		if (any("tui.titleState")) setTerminalTitleStateEnabled(cfgTuiTitleState.get(this.settings));
+		if (any("display.reduceMotion")) {
+			this.ui.setMinRenderInterval(
+				next["display.reduceMotion"] === "strict" ? REDUCE_MOTION_STRICT_RENDER_INTERVAL_MS : undefined,
+			);
+			this.ui.invalidate();
+			this.ui.requestRender();
+		}
+		if (any("tui.titleState", "display.reduceMotion"))
+			setTerminalTitleStateEnabled(cfgTuiTitleState.get(this.settings));
 		if (any("tui.titleSpinner")) setTerminalTitleSpinnerStyle(cfgTuiTitleSpinner.get(this.settings));
 
 		if (

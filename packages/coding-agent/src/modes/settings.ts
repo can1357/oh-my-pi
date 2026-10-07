@@ -1,3 +1,4 @@
+import { setReduceMotion } from "@oh-my-pi/pi-tui/reduce-motion";
 import { combine, effect, register, type Setting } from "../config/registry";
 import { formatKeyHint, formatKeyHints } from "@oh-my-pi/pi-tui/app-keybindings";
 import { cfgReadToolResultPreview } from "../tools/settings";
@@ -567,6 +568,25 @@ export const cfgTuiTight = register({
 		description: "Remove the 1-character horizontal padding from the left and right of the terminal output",
 	},
 });
+
+export const cfgDisplayReduceMotion = register({
+	id: "display.reduceMotion",
+	type: "enum",
+	values: ["off", "on", "strict"] as const,
+	default: "off",
+	ui: {
+		tab: "appearance",
+		group: "Display",
+		label: "Reduce Motion",
+		description: "Reduce cosmetic TUI animation for accessibility and remote sessions",
+		options: [
+			{ value: "off", label: "Off", description: "Full animations" },
+			{ value: "on", label: "On", description: "Freeze spinners, shimmer, and pulses; content repaints normally" },
+			{ value: "strict", label: "Strict", description: "Also cap content repaints at approximately 4fps" },
+		],
+	},
+});
+effect(cfgDisplayReduceMotion, setReduceMotion);
 
 export const cfgDisplayShimmer = register({
 	id: "display.shimmer",

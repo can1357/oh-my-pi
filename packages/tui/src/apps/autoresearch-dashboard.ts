@@ -1,3 +1,4 @@
+import { isReduceMotion } from "../reduce-motion";
 import { formatKeyHint, formatKeyHints } from "../app-keybindings";
 import { matchesKey } from "../keys";
 import { replaceTabs, truncateToWidth, visibleWidth } from "../utils";
@@ -139,7 +140,7 @@ export function createDashboardController(): DashboardController {
 				(tui, theme, _keybindings, done) => {
 					overlayTui = tui;
 					// Repaint-only: the native overlay declares a spinner and elapsed timer instead.
-					if (!spinnerTimer && !isNativeRendering()) {
+					if (!spinnerTimer && !isNativeRendering() && !isReduceMotion()) {
 						spinnerTimer = setInterval(() => {
 							spinnerFrame += 1;
 							requestRender();

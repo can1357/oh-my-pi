@@ -1,3 +1,4 @@
+import { isReduceMotion } from "../reduce-motion";
 import type { TspProps } from "@oh-my-pi/pi-wire";
 import { formatTooltipKey } from "../key-hint-format";
 import type { KeyId } from "../keys";
@@ -189,7 +190,7 @@ export class Loader extends Text {
 			});
 		}
 
-		const frame = this.#frames[this.#currentFrame];
+		const frame = this.#frames[isReduceMotion() ? 0 : this.#currentFrame];
 		// The wrapped text carries one stable representative per frame width.
 		// Same-width frames swap only the visible glyph here; crossing widths
 		// rewraps against the representative selected by #syncText.
@@ -306,6 +307,10 @@ export class Loader extends Text {
 			this.#startNativeCountdown();
 			return;
 		}
+		// A static glyph and label need no repaint loop. Function labels still
+		// tick so retry countdowns continue to report real progress.
+		if (this.#frames.length <= 1 && this.messageColorFn.animated !== true && typeof this.message !== "function")
+			return;
 		const intervalMs = this.messageColorFn.animated === true ? RENDER_INTERVAL_MS : SPINNER_ADVANCE_MS;
 		this.#scheduleTick(intervalMs, intervalMs);
 	}
@@ -386,7 +391,7 @@ export class Loader extends Text {
 	 * tick, so a dynamic label (e.g. a live countdown) advances in sync with
 	 * the glyph instead of freezing on the initial value. */
 	#syncText(): boolean {
-		const layoutFrame = this.#layoutFrames[this.#currentFrame];
+		const layoutFrame = this.#layoutFrames[isReduceMotion() ? 0 : this.#currentFrame];
 		this.#layoutFrame = layoutFrame;
 		return this.setText(`${layoutFrame} ${this.#resolveMessage()}`);
 	}

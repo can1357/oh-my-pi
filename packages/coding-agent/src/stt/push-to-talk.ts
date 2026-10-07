@@ -1,3 +1,4 @@
+import { isReduceMotion } from "@oh-my-pi/pi-tui/reduce-motion";
 import type { Component, TUI } from "@oh-my-pi/pi-tui";
 import { theme } from "@oh-my-pi/pi-tui/theme";
 import { hsvToRgb, type RGB } from "@oh-my-pi/pi-utils";
@@ -34,7 +35,12 @@ export class MicCursor {
 		ui.setShowHardwareCursor(false);
 		target.setUseTerminalCursor(false);
 		this.#paintHue();
+		if (isReduceMotion()) return;
 		this.#animation = setInterval(() => {
+			if (isReduceMotion()) {
+				this.#stopAnimation();
+				return;
+			}
 			this.#hue = (this.#hue + 8) % 360;
 			this.#paintHue();
 			// Component-scoped: the hue sweep only recolors the input's cursor

@@ -79,6 +79,11 @@ export const launchHelp = {
 			description: "OpenAI service tier for this session (none omits service_tier)",
 			options: [...SERVICE_TIER_OPENAI_VALUES],
 		}),
+		"reduce-motion": Flags.string({
+			description:
+				"Reduce cosmetic TUI animation: on freezes spinners/shimmer/pulses, strict also caps repaints (~4fps) for low-bandwidth links",
+			options: ["on", "strict", "off"],
+		}),
 		"hide-thinking": Flags.boolean({
 			description: "Hide thinking blocks in TUI output (display only, does not disable model thinking)",
 		}),

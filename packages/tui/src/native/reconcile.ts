@@ -30,6 +30,8 @@
 import * as logger from "@oh-my-pi/pi-utils/logger";
 import { TSP_TEXT_KINDS, type TspKind, type TspNode, type TspOp, type TspScrollBy } from "@oh-my-pi/pi-wire";
 import { type Component, Container, CURSOR_MARKER } from "../tui";
+import { isReduceMotion } from "../reduce-motion";
+import { reduceNativeMotion } from "./reduce-motion";
 import { normalizeIconProps } from "./icons";
 import type { DescribeContext, NativeChild, NativeNode, NativeRevealAt } from "./node";
 import { isNativeSettled } from "./settle";
@@ -207,6 +209,7 @@ const EMPTY_ENTRIES: readonly Entry[] = [];
 export class Reconciler {
 	readonly surface: string;
 	#cx: DescribeContext | undefined;
+	#reduceMotion = false;
 	#states = new Map<Component, CompState>();
 	#byId = new Map<string, CompState>();
 	#frame = 0;
@@ -252,6 +255,7 @@ export class Reconciler {
 	/** Diff the regions against the previous frame; the first call adds everything. */
 	reconcile(regions: NativeRegions, cx: DescribeContext): TspOp[] {
 		this.#cx = cx;
+		this.#reduceMotion = isReduceMotion() || cx.reduceMotion;
 		this.#frame++;
 		this.#ops = [];
 		this.#dels = [];
@@ -272,7 +276,10 @@ export class Reconciler {
 		for (const region of REGION_IDS) {
 			const hoist = region !== "layer";
 			const walk: Walk = { owner: this.#regionOwners[region], inner: null, settled: false, hoist };
-			const entries = this.#entries(regions[region], "", walk.owner, hoist, walk);
+			const children = this.#reduceMotion
+				? regions[region].map(child => ("k" in child ? reduceNativeMotion(child) : child))
+				: regions[region];
+			const entries = this.#entries(children, "", walk.owner, hoist, walk);
 			this.#diffChildren(region, prev[region], entries, null, walk);
 			next[region] = entries;
 		}
@@ -908,7 +915,7 @@ export class Reconciler {
 		const inherited = describe === Container.prototype.describe && comp.render !== Container.prototype.render;
 		if (describe && !inherited) {
 			const node = describe.call(comp, this.#cx!);
-			if (node) return node;
+			if (node) return this.#reduceMotion ? reduceNativeMotion(node) : node;
 		}
 		this.#rows++;
 		const cols = Math.max(1, this.#cx!.cols);

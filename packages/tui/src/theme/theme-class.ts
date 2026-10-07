@@ -1,6 +1,7 @@
 import { colorLuma, relativeLuminance } from "@oh-my-pi/pi-utils/color";
 import * as logger from "@oh-my-pi/pi-utils/logger";
 import chalk from "@oh-my-pi/pi-utils/chalk";
+import { isReduceMotion } from "../reduce-motion";
 import { bgAnsi, colorToAnsi, fgAnsi, resolveToHex } from "./color";
 import { type ColorMode, isValidThemeColor, type ThemeBg, type ThemeColor } from "./schema";
 import type { SessionAccentTheme } from "./session-color";
@@ -173,6 +174,8 @@ export class Theme {
 	#sessionAccentInputs: SessionAccentTheme | undefined;
 	#symbols: SymbolMap;
 	#spinnerFramesOverrides: Partial<Record<SpinnerType, string[]>>;
+	/** Frozen single-frame spinner arrays, memoized per source identity (reduce-motion). */
+	#frozenSpinnerFrames = new Map<string[], string[]>();
 	/**
 	 * Perceptual luma (0..1) of the status-line background — used to classify the
 	 * theme light/dark. Undefined when it can't be resolved. Classified against the
@@ -777,7 +780,14 @@ export class Theme {
 	 * Get spinner frames by type.
 	 */
 	getSpinnerFrames(type: SpinnerType = "status"): string[] {
-		return this.#spinnerFramesOverrides[type] ?? SPINNER_FRAMES[this.symbolPreset][type];
+		const source = this.#spinnerFramesOverrides[type] ?? SPINNER_FRAMES[this.symbolPreset][type];
+		if (!isReduceMotion() || source.length <= 1) return source;
+		let frozen = this.#frozenSpinnerFrames.get(source);
+		if (frozen === undefined) {
+			frozen = [source[0]];
+			this.#frozenSpinnerFrames.set(source, frozen);
+		}
+		return frozen;
 	}
 
 	/**

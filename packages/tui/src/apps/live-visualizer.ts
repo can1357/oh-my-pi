@@ -1,3 +1,4 @@
+import { isReduceMotion } from "../reduce-motion";
 import { formatKeyHint } from "../app-keybindings";
 import type { Component } from "../tui";
 import { OverlayPanel, PanelRows } from "../chrome/overlay-box";
@@ -79,6 +80,7 @@ export class LiveVisualizer implements Component {
 				phase: LivePhase;
 				displayLevel: number;
 				frame: number;
+				reduceMotion: boolean;
 				userTranscript: string;
 				lines: readonly string[];
 		  }
@@ -202,12 +204,14 @@ export class LiveVisualizer implements Component {
 
 	/** Renders the microphone spectrum into a compact fixed-height panel. */
 	render(width: number): readonly string[] {
+		const reduceMotion = isReduceMotion();
 		if (
 			this.#cache &&
 			this.#cache.width === width &&
 			this.#cache.phase === this.#phase &&
 			this.#cache.displayLevel === this.#displayLevel &&
 			this.#cache.frame === this.#frame &&
+			this.#cache.reduceMotion === reduceMotion &&
 			this.#cache.userTranscript === this.#userTranscript
 		) {
 			return this.#cache.lines;
@@ -219,6 +223,7 @@ export class LiveVisualizer implements Component {
 			phase: this.#phase,
 			displayLevel: this.#displayLevel,
 			frame: this.#frame,
+			reduceMotion,
 			userTranscript: this.#userTranscript,
 			lines,
 		};
@@ -261,7 +266,10 @@ export class LiveVisualizer implements Component {
 
 	#renderFooter(width: number, innerWidth: number): string {
 		const frames = theme.spinnerFrames;
-		const icon = this.#phase === "working" ? frames[this.#frame % frames.length] : PHASE_ICONS[this.#phase];
+		const icon =
+			this.#phase === "working" && !isReduceMotion()
+				? frames[this.#frame % frames.length]
+				: PHASE_ICONS[this.#phase];
 		const status = `${icon} ${this.#phase}`;
 		const fullLabel = ` ${status} · ${formatKeyHint("space")} mute · ${formatKeyHint("escape")} end `;
 		const shortLabel = ` ${status} `;
@@ -290,9 +298,11 @@ export class LiveVisualizer implements Component {
 		const output = Array.from({ length: rows }, () => "");
 		const energy = this.#phase === "muted" ? 0 : Math.min(1, Math.sqrt(this.#displayLevel * 5));
 		const maxHeight = rows * (SPECTRUM_BLOCKS.length - 1);
+		// Freeze only the cosmetic carrier; microphone levels and decay stay live.
+		const frame = isReduceMotion() ? 0 : this.#frame;
 		for (let column = 0; column < width; column += 1) {
-			const carrier = 0.5 + 0.5 * Math.sin(this.#frame * 0.43 + column * 0.71);
-			const shimmer = 0.5 + 0.5 * Math.sin(this.#frame * 0.19 - column * 1.17);
+			const carrier = 0.5 + 0.5 * Math.sin(frame * 0.43 + column * 0.71);
+			const shimmer = 0.5 + 0.5 * Math.sin(frame * 0.19 - column * 1.17);
 			const height = Math.round(energy * (0.3 + carrier * 0.5 + shimmer * 0.2) * maxHeight);
 			for (let row = 0; row < rows; row += 1) {
 				const units = Math.max(0, Math.min(SPECTRUM_BLOCKS.length - 1, height - (rows - row - 1) * 8));

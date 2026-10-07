@@ -298,14 +298,18 @@ class McpConnectingBlock extends ChatBlock {
 	protected override onMount(): void {
 		const frames = theme.spinnerFrames;
 		let frame = 0;
-		const interval = setInterval(() => {
-			frame++;
-			this.#text.setText(
-				theme.fg("muted", `${frames[frame % frames.length] ?? "|"} Connecting to "${this.serverName}"...`),
-			);
-			this.requestRender();
-		}, 80);
-		this.onCleanup(() => clearInterval(interval));
+		// A frozen single-frame spinner (reduce-motion) never advances; the
+		// initial static frame set in the constructor is the final state.
+		if (frames.length > 1) {
+			const interval = setInterval(() => {
+				frame++;
+				this.#text.setText(
+					theme.fg("muted", `${frames[frame % frames.length] ?? "|"} Connecting to "${this.serverName}"...`),
+				);
+				this.requestRender();
+			}, 80);
+			this.onCleanup(() => clearInterval(interval));
+		}
 	}
 
 	/** Replace the spinner line with a terminal status; pair with {@link finish}. */

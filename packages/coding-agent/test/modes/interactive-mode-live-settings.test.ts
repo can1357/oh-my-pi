@@ -8,9 +8,12 @@ import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import * as theme from "@oh-my-pi/pi-tui/theme";
+import { AssistantMessageComponent } from "@oh-my-pi/pi-tui/chat/assistant-message";
+import { createAssistantMessage } from "../helpers/agent-session-setup";
 import { TempDir } from "@oh-my-pi/pi-utils";
 
 import {
+	cfgDisplayReduceMotion,
 	cfgStatusLineContextLine,
 	cfgStatusLineLeftSegments,
 	cfgSymbolPreset,
@@ -73,6 +76,35 @@ describe("InteractiveMode live settings", () => {
 		expect(effective.leftSegments).toEqual(["time", "model"]);
 		expect(effective.contextLine).toBe("off");
 		expect(mode.hideThinkingBlock).toBe(true);
+	});
+
+	it("stops and resumes an active thinking pulse through the live settings subscription", async () => {
+		// Stop terminal I/O while retaining the settings subscription and component tree.
+		mode.ui.stop();
+		vi.useFakeTimers();
+		const repaint = vi.fn();
+		const thinking = new AssistantMessageComponent(undefined, true, repaint);
+		const message = createAssistantMessage("");
+		message.content = [{ type: "thinking", thinking: "hidden reasoning" }];
+		mode.chatContainer.addChild(thinking);
+		try {
+			thinking.updateContent(message);
+			vi.advanceTimersByTime(100);
+			expect(repaint).toHaveBeenCalled();
+			cfgDisplayReduceMotion.set(session.settings, "strict");
+			await Promise.resolve();
+			repaint.mockClear();
+			vi.advanceTimersByTime(1000);
+			expect(repaint).not.toHaveBeenCalled();
+			expect(thinking.render(80).join("\n")).toContain("Thinking");
+			cfgDisplayReduceMotion.set(session.settings, "off");
+			await Promise.resolve();
+			vi.advanceTimersByTime(100);
+			expect(repaint).toHaveBeenCalled();
+		} finally {
+			thinking.dispose();
+			vi.useRealTimers();
+		}
 	});
 
 	it("keeps an explicitly configured unicode status bar after Glyph Protocol confirmation", async () => {

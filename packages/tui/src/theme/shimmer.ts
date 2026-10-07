@@ -1,3 +1,4 @@
+import { isReduceMotion } from "../reduce-motion";
 import type { TspSpan } from "@oh-my-pi/pi-wire";
 import { node } from "../native/describe";
 import type { NativeNode } from "../native/node";
@@ -152,7 +153,7 @@ function tierFor(intensity: number): Tier {
 
 /** Whether shimmer animations are active (any mode other than `disabled`). */
 export function shimmerEnabled(): boolean {
-	return activeMode !== "disabled";
+	return activeMode !== "disabled" && !isReduceMotion();
 }
 
 /**
@@ -168,7 +169,7 @@ export function describeShimmer(segments: readonly ShimmerSegment[], key?: strin
 		const mid = (palette ?? DEFAULT_SHIMMER_PALETTE).mid;
 		spans.push(typeof mid === "string" ? { t: value, s: mid } : { t: value });
 	}
-	if (activeMode === "disabled") return node("text", { spans }, undefined, key);
+	if (activeMode === "disabled" || isReduceMotion()) return node("text", { spans }, undefined, key);
 	const palette = segments[0]?.palette ?? DEFAULT_SHIMMER_PALETTE;
 	const tokens: { low?: string; mid?: string; high?: string } = {};
 	if (typeof palette.low === "string") tokens.low = palette.low;
@@ -198,7 +199,7 @@ export function shimmerSegments(segments: readonly ShimmerSegment[], theme: Shim
 		for (const { text: value } of segments) out += value;
 		return out;
 	}
-	const mode = activeMode;
+	const mode = isReduceMotion() ? "disabled" : activeMode;
 
 	// Disabled: no animation or code-point scan. Preserve the all-empty result,
 	// but include empty segments' ANSI pairs when any segment has text.

@@ -1,3 +1,4 @@
+import { isReduceMotion } from "../reduce-motion";
 import type { CredentialsApi, KeysApi } from "@oh-my-pi/pi-ai";
 import { getOAuthProviders } from "@oh-my-pi/pi-ai/oauth";
 import type { OAuthProviderInfo } from "@oh-my-pi/pi-ai/oauth/types";
@@ -209,7 +210,7 @@ export class OAuthSelectorComponent extends OverlayPanel {
 
 	#startSpinner(): void {
 		// Natively the "checking" status pulses on the terminal's clock.
-		if (this.#spinnerInterval || isNativeRendering()) return;
+		if (this.#spinnerInterval || isNativeRendering() || isReduceMotion()) return;
 		this.#spinnerInterval = setInterval(() => {
 			const frameCount = theme.spinnerFrames.length;
 			if (frameCount > 0) {

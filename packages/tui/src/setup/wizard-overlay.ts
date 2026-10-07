@@ -86,12 +86,14 @@ export class SetupWizardComponent implements Component, OverlayFocusOwner {
 	constructor(
 		readonly ctx: SetupHost,
 		readonly scenes: readonly SetupScene[],
+		readonly reduceMotion = ctx.reduceMotion === true,
 	) {}
 
 	run(): Promise<void> {
 		this.#phase = this.scenes.length === 0 ? "outro" : "splash";
 		this.#phaseStartedAt = performance.now();
-		this.#startTimer();
+		if (this.reduceMotion) this.#beginScene();
+		else this.#startTimer();
 		this.ctx.ui.requestRender();
 		return this.#done.promise;
 	}
@@ -183,7 +185,11 @@ export class SetupWizardComponent implements Component, OverlayFocusOwner {
 		let lines: string[];
 		switch (this.#phase) {
 			case "splash":
-				lines = renderSetupSplash(safeWidth, height, performance.now() - this.#phaseStartedAt);
+				lines = renderSetupSplash(
+					safeWidth,
+					height,
+					this.reduceMotion ? SETUP_SPLASH_MS : performance.now() - this.#phaseStartedAt,
+				);
 				break;
 			case "transition": {
 				const elapsed = performance.now() - this.#phaseStartedAt;
@@ -194,7 +200,11 @@ export class SetupWizardComponent implements Component, OverlayFocusOwner {
 				break;
 			}
 			case "outro":
-				lines = renderSetupOutro(safeWidth, height, performance.now() - this.#phaseStartedAt);
+				lines = renderSetupOutro(
+					safeWidth,
+					height,
+					this.reduceMotion ? SETUP_OUTRO_MS : performance.now() - this.#phaseStartedAt,
+				);
 				break;
 			case "scene":
 				lines = this.#renderScene(safeWidth, height);
@@ -319,6 +329,7 @@ export class SetupWizardComponent implements Component, OverlayFocusOwner {
 	 * while a scene is up). Call again whenever the phase changes.
 	 */
 	#startTimer(): void {
+		if (this.reduceMotion) return;
 		if (isNativeRendering()) {
 			if (this.#timer) {
 				clearInterval(this.#timer);
@@ -397,7 +408,7 @@ export class SetupWizardComponent implements Component, OverlayFocusOwner {
 
 	/** Enter the first scene through a dissolve from the splash (a row effect, so native cuts straight in). */
 	#beginScene(): void {
-		this.#mountSceneController(isNativeRendering() ? "scene" : "transition");
+		this.#mountSceneController(this.reduceMotion || isNativeRendering() ? "scene" : "transition");
 	}
 
 	#mountCurrentScene(): void {
@@ -421,6 +432,10 @@ export class SetupWizardComponent implements Component, OverlayFocusOwner {
 	#beginOutro(): void {
 		if (this.#phase === "done") return;
 		this.#unmountActiveScene();
+		if (this.reduceMotion) {
+			this.#complete();
+			return;
+		}
 		this.#phase = "outro";
 		this.#phaseStartedAt = performance.now();
 		this.ctx.ui.setFocus(this);

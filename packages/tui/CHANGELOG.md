@@ -62,6 +62,7 @@
 
 ### Added
 
+- Added reduced-motion rendering for ANSI and native surfaces, plus `TUI.setMinRenderInterval()` for configurable repaint cadence ([#8336](https://github.com/can1357/oh-my-pi/pull/8336) by [@Seas0](https://github.com/Seas0))
 - `ComposerNativeState.rate` shows a tok/s readout in the native composer bar after the effort chip, and `ComposerNativeState.thinkingInModel` draws the thinking level as the model chip's icon instead of a separate chip
 - `formatTooltipKey` formats a key for a native tooltip: unicode keycap glyphs whatever the symbol preset, `esc` for Escape
 - `ImageOptions.requestRender` repaints an image without an image budget once its SIXEL encode lands ([#14529](https://github.com/can1357/oh-my-pi/pull/14529) by [@H4vC](https://github.com/H4vC))

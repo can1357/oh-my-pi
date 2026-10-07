@@ -1,3 +1,4 @@
+import { isReduceMotion } from "@oh-my-pi/pi-tui/reduce-motion";
 /**
  * Generate session titles using a smol, fast model.
  */
@@ -828,13 +829,14 @@ export function buildTerminalTitleWithState(
 	style: TerminalTitleSpinnerStyle = "braille",
 	env: NodeJS.ProcessEnv = $env as NodeJS.ProcessEnv,
 	nativeTitleFailed = false,
+	staticSpinner = isReduceMotion(),
 ): string {
 	if (!enabled) return label ? `${DEFAULT_TERMINAL_TITLE}: ${label}` : DEFAULT_TERMINAL_TITLE;
 	const frames = TERMINAL_TITLE_SPINNER_STYLES[style] ?? TERMINAL_TITLE_SPINNER_STYLES.braille;
 	const staticHost = isStaticTitleHost(platform, env) || (platform === "win32" && nativeTitleFailed);
 	const separator =
 		state === "working"
-			? staticHost
+			? staticHost || staticSpinner
 				? STATIC_TITLE_WORKING_SEPARATOR
 				: frames[frame % frames.length]
 			: state === "attention"
@@ -893,6 +895,7 @@ function stopTerminalTitleSpinner(): void {
 function startTerminalTitleSpinner(): void {
 	if (
 		isNativeRendering() ||
+		isReduceMotion() ||
 		isStaticTitleHost() ||
 		terminalTitleRuntime.disposed ||
 		terminalTitleRuntime.timer ||
@@ -902,6 +905,11 @@ function startTerminalTitleSpinner(): void {
 		return;
 
 	terminalTitleRuntime.timer = setInterval(() => {
+		if (isReduceMotion()) {
+			stopTerminalTitleSpinner();
+			emitTerminalTitle();
+			return;
+		}
 		terminalTitleRuntime.frame =
 			(terminalTitleRuntime.frame + 1) % TERMINAL_TITLE_SPINNER_STYLES[terminalTitleRuntime.style].length;
 		// An extension override is frame-independent; the sink would dedupe it anyway.
@@ -926,7 +934,7 @@ export function setTerminalTitleState(state: TerminalTitleState): void {
 /** Enable/disable the run-state separator (driven by the `tui.titleState` setting). */
 export function setTerminalTitleStateEnabled(enabled: boolean): void {
 	terminalTitleRuntime.enabled = enabled;
-	if (enabled && terminalTitleRuntime.state === "working") startTerminalTitleSpinner();
+	if (enabled && terminalTitleRuntime.state === "working" && !isReduceMotion()) startTerminalTitleSpinner();
 	else stopTerminalTitleSpinner();
 	emitTerminalTitle();
 }

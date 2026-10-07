@@ -22,6 +22,8 @@ export interface SetupUiHost {
 
 /** Application-owned preferences and effects consumed by setup scenes. */
 export interface SetupHost extends SetupUiHost {
+	/** Host preference: enter scenes directly and omit decorative transitions. */
+	readonly reduceMotion?: boolean;
 	readonly statusLine: ComposerPreviewStatusSource | undefined;
 	readonly composerShape: ComposerShape;
 	readonly symbolPreset: SymbolPreset;

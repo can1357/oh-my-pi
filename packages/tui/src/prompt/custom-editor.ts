@@ -1,3 +1,4 @@
+import { isReduceMotion } from "../reduce-motion";
 import * as url from "node:url";
 import type { ImageContent } from "@oh-my-pi/pi-ai";
 import { BracketedPasteHandler } from "../bracketed-paste";
@@ -1009,7 +1010,7 @@ export class CustomEditor extends Editor {
 	) => string = (label, _index, _imageLinks, renderLabel) => renderLabel(label);
 
 	#shimmerEnabled(): boolean {
-		return this.magicKeywordsEnabledOverride ?? this.magicKeywordsEnabled();
+		return !isReduceMotion() && (this.magicKeywordsEnabledOverride ?? this.magicKeywordsEnabled());
 	}
 
 	/** Bind the host's render request callback. Idempotent — the host wires this

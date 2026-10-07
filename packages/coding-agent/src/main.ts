@@ -146,6 +146,7 @@ import {
 	cfgAutoResume,
 	cfgColorBlindMode,
 	cfgComposerShape,
+	cfgDisplayReduceMotion,
 	cfgImagesAutoResize,
 	cfgMarketplaceAutoUpdate,
 	cfgSetupVersion,
@@ -668,7 +669,11 @@ async function runInteractiveMode(
 
 		await logger.time("InteractiveMode.init", () =>
 			mode.init({
-				suppressWelcomeIntro: resuming || setupScenes.length > 0 || playStartupSplash,
+				suppressWelcomeIntro:
+					resuming ||
+					setupScenes.length > 0 ||
+					playStartupSplash ||
+					cfgDisplayReduceMotion.get(settings) !== "off",
 				clearInitialTerminalHistory: true,
 				autoStartCollab: joinLink === undefined,
 			}),
@@ -1919,6 +1924,10 @@ export async function runRootCommand(
 		if (parsedArgs.hideThinking) {
 			cfgHideThinkingBlock.override(settingsInstance, true);
 		}
+		// Apply --reduce-motion for this session only.
+		if (parsedArgs.reduceMotion) {
+			cfgDisplayReduceMotion.override(settingsInstance, parsedArgs.reduceMotion);
+		}
 		// Apply --advisor CLI flag (ephemeral, not persisted)
 		if (parsedArgs.advisor) {
 			cfgAdvisorEnabled.override(settingsInstance, true);
@@ -2363,6 +2372,7 @@ export async function runRootCommand(
 				timing: Boolean($env.PI_TIMING),
 				stdinIsTTY: process.stdin.isTTY,
 				stdoutIsTTY: process.stdout.isTTY,
+				reduceMotion: cfgDisplayReduceMotion.get(settingsInstance) !== "off",
 			});
 
 			// Read the changelog marker before the changelog resolution below writes it.

@@ -895,6 +895,7 @@ export class TUI extends Container {
 	 */
 	#lastFrameCostMs = 0;
 	static readonly #MIN_RENDER_INTERVAL_MS = 1000 / 30;
+	#minRenderIntervalMs: number | undefined;
 	static readonly #INPUT_RENDER_GRACE_MS = TUI.#MIN_RENDER_INTERVAL_MS;
 	/**
 	 * Cap on the adaptive floor derived from `#lastFrameCostMs`. Bounds the UI
@@ -1130,6 +1131,11 @@ export class TUI extends Container {
 		for (const id of transmittedIds) {
 			this.terminal.write(encodeKittyDeleteImage(id));
 		}
+	}
+
+	/** Set a minimum repaint interval; undefined restores the backend default. */
+	setMinRenderInterval(ms: number | undefined): void {
+		this.#minRenderIntervalMs = ms;
 	}
 
 	getShowHardwareCursor(): boolean {
@@ -2662,7 +2668,7 @@ export class TUI extends Container {
 		}
 		const now = this.#renderScheduler.now();
 		const elapsed = now - this.#lastRenderAt;
-		const cadenceDelay = Math.max(0, TUI.#MIN_RENDER_INTERVAL_MS - elapsed);
+		const cadenceDelay = Math.max(0, (this.#minRenderIntervalMs ?? TUI.#MIN_RENDER_INTERVAL_MS) - elapsed);
 		// Adaptive backpressure — target ~50% render duty cycle: the next frame
 		// starts no sooner than `last_frame_end + last_frame_cost`, i.e.
 		// `last_frame_start + 2 × last_frame_cost`. So `elapsed` (which counts
@@ -2674,7 +2680,9 @@ export class TUI extends Container {
 		const inputGraceDelay = Math.max(0, this.#inputRenderGraceUntilMs - now);
 		// Native frames are paced by the terminal's acknowledgements (credits),
 		// not by the row renderer's cadence.
-		const delay = this.#nativeLive ? 0 : Math.max(cadenceDelay, adaptiveDelay, inputGraceDelay);
+		const delay = this.#nativeLive
+			? Math.max(0, (this.#minRenderIntervalMs ?? 0) - elapsed)
+			: Math.max(cadenceDelay, adaptiveDelay, inputGraceDelay);
 		this.#renderTimer = this.#renderScheduler.scheduleRender(this.#runScheduledRender, delay);
 	}
 

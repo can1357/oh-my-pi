@@ -1,3 +1,4 @@
+import { isReduceMotion } from "../reduce-motion";
 import { parseModelString, splitUpstreamRouting, formatModelSelectorValue } from "./model-selector";
 /**
  * Fullscreen /models hub, shown on the alternate screen like /settings.
@@ -1009,7 +1010,7 @@ export class ModelHubComponent implements Component {
 
 	#startRefreshSpinner(): void {
 		// Native surfaces clock the refresh spinner themselves.
-		if (this.#refreshSpinnerInterval || isNativeRendering()) return;
+		if (this.#refreshSpinnerInterval || isNativeRendering() || isReduceMotion()) return;
 		this.#refreshSpinnerInterval = setInterval(() => {
 			const frameCount = theme.spinnerFrames.length;
 			if (frameCount > 0) {

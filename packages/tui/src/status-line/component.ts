@@ -1,3 +1,4 @@
+import { isReduceMotion } from "../reduce-motion";
 import * as path from "node:path";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, UsageLimit, UsageReport } from "@oh-my-pi/pi-ai";
@@ -2030,7 +2031,7 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 		const contextKey = this.#formatUsageContextKey(activeProvider, activeIdentity);
 		const previous = this.#codexResetSnapshots.get(contextKey);
 		this.#codexResetSnapshots.set(contextKey, resetSnapshot);
-		if (!previous || !this.host.codexResetFireworksEnabled()) return;
+		if (!previous || !this.host.codexResetFireworksEnabled() || isReduceMotion()) return;
 		const event = detectCodexResetFireworks(previous, resetSnapshot);
 		if (event) this.#onCodexResetFireworks?.(event);
 	}

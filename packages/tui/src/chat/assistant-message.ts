@@ -1,3 +1,4 @@
+import { isReduceMotion } from "../reduce-motion";
 import type { AssistantMessage, ImageContent, TextContent } from "@oh-my-pi/pi-ai";
 import { type Component, Container } from "../tui";
 import { Image, type ImageBudget } from "../components/image";
@@ -643,7 +644,8 @@ export class AssistantMessageComponent extends Container {
 	}
 
 	#thinkingDotsLabel(): string {
-		const glyph = THINKING_DOTS_FRAMES[this.#thinkingDotsFrame % THINKING_DOTS_FRAMES.length] ?? "…";
+		const frame = isReduceMotion() ? 0 : this.#thinkingDotsFrame;
+		const glyph = THINKING_DOTS_FRAMES[frame % THINKING_DOTS_FRAMES.length] ?? "…";
 		const coloredGlyph = theme.fg("thinkingText", glyph);
 		const thinkingLabel = theme.fg("muted", " Thinking");
 		const rate = Math.min(SPEED_MAX, sharedSpeedTracker.getSpeed());
@@ -669,6 +671,10 @@ export class AssistantMessageComponent extends Container {
 	}
 
 	#startThinkingAnimation(): void {
+		if (isReduceMotion()) {
+			this.#stopThinkingAnimation();
+			return;
+		}
 		// A native terminal clocks the described starburst itself.
 		if (this.#thinkingDotsTimer || isNativeRendering()) return;
 		this.#scheduleThinkingFrame();
@@ -691,7 +697,7 @@ export class AssistantMessageComponent extends Container {
 
 	#advanceThinkingDots(): void {
 		this.#thinkingDotsTimer = undefined;
-		if (!this.#thinkingDots || isNativeRendering()) {
+		if (!this.#thinkingDots || isNativeRendering() || isReduceMotion()) {
 			this.#stopThinkingAnimation();
 			return;
 		}

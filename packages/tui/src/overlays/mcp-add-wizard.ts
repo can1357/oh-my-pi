@@ -1440,18 +1440,19 @@ export class MCPAddWizard extends OverlayPanel {
 
 			// The frame ticker only repaints; a native terminal animates the described spinner itself.
 			let spinnerIndex = 0;
-			const spinner = isNativeRendering()
-				? undefined
-				: setInterval(() => {
-						healthText.setText(
-							theme.fg(
-								"muted",
-								`${spinnerFrames[spinnerIndex % spinnerFrames.length]} Checking server connection...`,
-							),
-						);
-						spinnerIndex++;
-						this.#requestRender();
-					}, 80);
+			const spinner =
+				isNativeRendering() || spinnerFrames.length <= 1
+					? undefined
+					: setInterval(() => {
+							healthText.setText(
+								theme.fg(
+									"muted",
+									`${spinnerFrames[spinnerIndex % spinnerFrames.length]} Checking server connection...`,
+								),
+							);
+							spinnerIndex++;
+							this.#requestRender();
+						}, 80);
 
 			let healthPassed = true;
 			let healthError = "";

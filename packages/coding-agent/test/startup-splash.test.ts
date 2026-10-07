@@ -19,6 +19,7 @@ describe("startup splash", () => {
 			timing: false,
 			stdinIsTTY: true,
 			stdoutIsTTY: true,
+			reduceMotion: false,
 		};
 
 		expect(shouldShowStartupSplash(base)).toBe(true);
@@ -26,6 +27,7 @@ describe("startup splash", () => {
 		expect(shouldShowStartupSplash({ ...base, isInteractive: false })).toBe(false);
 		expect(shouldShowStartupSplash({ ...base, resuming: true })).toBe(false);
 		expect(shouldShowStartupSplash({ ...base, quiet: true })).toBe(false);
+		expect(shouldShowStartupSplash({ ...base, reduceMotion: true })).toBe(false);
 		expect(shouldShowStartupSplash({ ...base, timing: true })).toBe(false);
 		expect(shouldShowStartupSplash({ ...base, stdinIsTTY: false })).toBe(false);
 		expect(shouldShowStartupSplash({ ...base, stdoutIsTTY: false })).toBe(false);

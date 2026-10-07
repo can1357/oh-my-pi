@@ -172,4 +172,44 @@ describe("TUI adaptive render backpressure (#4145)", () => {
 			tui.stop();
 		}
 	});
+
+	it("raises the render floor via setMinRenderInterval and restores it with undefined", () => {
+		const term = new VirtualTerminal(20, 4);
+		const scheduler = new DeferredRenderScheduler();
+		const probe = new ScriptedFrameCost();
+		probe.scheduler = scheduler;
+		const tui = new TUI(term, undefined, { renderScheduler: scheduler });
+		tui.addChild(probe);
+
+		try {
+			tui.start();
+			stepRender(scheduler);
+			scheduler.timers.length = 0;
+
+			// Raised floor: each scheduled render idles at (at least) the
+			// configured 250ms minus whatever elapsed since the last frame.
+			tui.setMinRenderInterval(250);
+			probe.scheduleCost(1);
+			tui.requestRender();
+			const firstDelay = stepRender(scheduler);
+			expect(firstDelay).not.toBeNull();
+			expect(firstDelay!).toBeGreaterThanOrEqual(250);
+
+			probe.scheduleCost(1);
+			tui.requestRender();
+			const secondDelay = stepRender(scheduler);
+			expect(secondDelay).not.toBeNull();
+			expect(secondDelay!).toBeGreaterThanOrEqual(250 - firstDelay!);
+
+			// Restoring the default returns the ~30fps floor.
+			tui.setMinRenderInterval(undefined);
+			probe.scheduleCost(1);
+			tui.requestRender();
+			const restoredDelay = stepRender(scheduler);
+			expect(restoredDelay).not.toBeNull();
+			expect(restoredDelay!).toBeLessThanOrEqual(MIN_RENDER_INTERVAL_MS + 1);
+		} finally {
+			tui.stop();
+		}
+	});
 });
