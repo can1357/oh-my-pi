@@ -735,8 +735,8 @@ mod tests {
 		let lock = dir.path().join("index.lock");
 		let script = dir.path().join("hold-lock.sh");
 		const HOLD_LOCK: &str = "#!/bin/sh
-touch \"$1\"
 trap 'rm -f \"$1\"; kill $sleeper; exit 143' TERM
+touch \"$1\"
 sleep 60 & sleeper=$!
 wait $sleeper
 ";
