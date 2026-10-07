@@ -1,6 +1,10 @@
 # Changelog
 
 ## [Unreleased]
+### Added
+
+- Added ChatGPT-subscription dictation: assign `openai-codex/chatgpt-transcribe` to the `dictation` role to transcribe push-to-talk speech through your ChatGPT plan instead of a paid transcription API ([#11216](https://github.com/can1357/oh-my-pi/pull/11216) by [@rxaviers](https://github.com/rxaviers)).
+
 
 ## [18.8.0] - 2026-10-07
 
