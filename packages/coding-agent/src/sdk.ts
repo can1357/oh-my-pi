@@ -3669,6 +3669,9 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				(toolSession.isToolActive?.("write") === true &&
 					toolRegistry.has("write") &&
 					toolSession.deviceOnlyWrite !== true),
+			// Negative-offset read frames count the file's lines before `read` runs;
+			// a docs-only read transport must refuse that file, not have it opened.
+			allowFileRead: () => toolSession.deviceOnlyRead !== true,
 		});
 
 		// Resolve the live inline-descriptors setting against the active model.
