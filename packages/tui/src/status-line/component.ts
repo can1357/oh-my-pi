@@ -1968,7 +1968,10 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 		}
 		if (this.#usageInFlight || this.#usageStartTimer) return;
 		const intervalMs = (this.#settings.usageRefreshInterval ?? 300) * 1000;
-		if (this.#usageFetchedAt > 0 && now - this.#usageFetchedAt < intervalMs) return;
+		if (this.#usageFetchedAt > 0 && now - this.#usageFetchedAt < intervalMs) {
+			this.host.refreshResetCredits?.(session);
+			return;
+		}
 		if (!this.host.canFetchUsageReports(session)) return;
 		this.#usageInFlight = true;
 		this.#usageStartTimer = setTimeout(() => {

@@ -14,6 +14,8 @@ import {
 } from "@oh-my-pi/pi-coding-agent/session/codex-auto-reset";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { TempDir } from "@oh-my-pi/pi-utils";
+import { statusLineHost } from "@oh-my-pi/pi-coding-agent/modes/status-line-host";
+import { StatusLineComponent } from "@oh-my-pi/pi-tui/status-line";
 import { mockSchedulerWaitWithClock } from "./helpers/mock-scheduler-clock";
 
 import { cfgClaudeResetsAutoRedeem } from "@oh-my-pi/pi-coding-agent/session/settings";
@@ -360,6 +362,67 @@ describe("Claude saved-reset trigger integration", () => {
 		await coordinator.sweepPromise;
 		expect(targets).toHaveLength(1);
 	});
+
+	it.each([
+		{ autoRedeem: "yes", hasUsage: true },
+		{ autoRedeem: "yes", hasUsage: false },
+		{ autoRedeem: "no", hasUsage: true },
+	] as const)(
+		"keeps imminent reset checks independent of a ten-minute display interval: %j",
+		async ({ autoRedeem, hasUsage }) => {
+			let now = Date.now();
+			vi.spyOn(Date, "now").mockImplementation(() => now);
+			const report = claudeReport(0);
+			const status = claudeStatus(false);
+			status.report = report;
+			status.credits[0]!.expiresAt = new Date(now + 8 * 60_000).toISOString();
+			status.credits[0]!.usedFractions = { "anthropic:7d": 0 };
+			const { session, coordinator, targets } = buildSession({
+				report: hasUsage ? report : null,
+				status,
+				autoRedeem,
+				salvageHorizonHours: 0,
+			});
+			vi.spyOn(authStorage.credentials, "hasOAuth").mockImplementation(provider => provider === "anthropic");
+			const firstRefresh = Promise.withResolvers<void>();
+			const fetchReports = session.fetchUsageReports.bind(session);
+			const usageFetch = vi.spyOn(session, "fetchUsageReports").mockImplementation(async (signal, maxAgeMs) => {
+				const reports = await fetchReports(signal, maxAgeMs);
+				firstRefresh.resolve();
+				return reports;
+			});
+			const component = new StatusLineComponent(session, {
+				...statusLineHost,
+				getSettings: () => ({ usageRefreshInterval: 600 }),
+			});
+			const listings = vi.spyOn(authStorage.resets, "list");
+			try {
+				component.refreshUsageInBackground();
+				await firstRefresh.promise;
+				session.refreshResetCredits();
+				await coordinator.sweepPromise;
+				expect(targets).toEqual([]);
+				const initialListings = listings.mock.calls.length;
+
+				now += 4 * 60_000;
+				component.refreshUsageInBackground();
+				await coordinator.sweepPromise;
+				expect(listings.mock.calls.length).toBe(initialListings);
+				expect(usageFetch).toHaveBeenCalledTimes(1);
+
+				now += 60_000;
+				component.refreshUsageInBackground();
+				await coordinator.sweepPromise;
+				expect(targets.map(target => target.creditId)).toEqual(autoRedeem === "yes" ? ["cedar-grant-1"] : []);
+				if (autoRedeem === "no") {
+					expect(listings).not.toHaveBeenCalled();
+					expect(usageFetch).toHaveBeenCalledTimes(1);
+				}
+			} finally {
+				component.dispose();
+			}
+		},
+	);
 
 	it.each(["yes", "no", "unset"] as const)(
 		"only consumes an imminent reset with consent when auto-redeem is %s",

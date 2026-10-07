@@ -89,6 +89,7 @@ export interface StatusLineHost<TSession extends StatusLineSession = StatusLineS
 	activeAccount(session: TSession, provider: string): StatusAccountIdentity | undefined;
 	canFetchUsageReports(session: TSession): boolean;
 	fetchUsageReports(session: TSession, signal: AbortSignal, maxAgeMs?: number): Promise<unknown>;
+	refreshResetCredits?(session: TSession): void;
 	resolveActiveRepo(cwd: string): ActiveRepoContext | null;
 	lookupPullRequest(cwd: string): Promise<{ stdout: string; exitCode: number }>;
 	calculateTokensPerSecond(messages: readonly AgentMessage[], isStreaming: boolean): number | null;

@@ -4,7 +4,7 @@
 
 ### Added
 
-- Added configurable quota-refresh intervals to the status line ([#14801](https://github.com/can1357/oh-my-pi/issues/14801), [#14805](https://github.com/can1357/oh-my-pi/pull/14805) by [@miaopan607](https://github.com/miaopan607)).
+- Added configurable quota-refresh intervals to the status line while retaining five-minute saved-reset checks ([#14801](https://github.com/can1357/oh-my-pi/issues/14801), [#14805](https://github.com/can1357/oh-my-pi/pull/14805) by [@miaopan607](https://github.com/miaopan607)).
 
 ## [18.8.0] - 2026-10-07
 

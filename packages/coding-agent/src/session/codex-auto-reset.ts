@@ -38,9 +38,9 @@
  *
  * TRIGGERS: `blocked` runs from the usage-limit branch of the retry pipeline
  * after sibling switch fails, on force-refreshed reports (the cached snapshot
- * predates the 429 that got us there). `sweep` piggybacks on every successful
- * usage-report fetch — the status line polls every 5 minutes while the TUI is
- * open — so expiring credits are caught even when nothing is blocked.
+ * predates the 429 that got us there). `sweep` runs after successful usage-report
+ * fetches and on a five-minute status-line redraw heartbeat, independently of
+ * the display interval, so expiring credits are checked even when nothing is blocked.
  *
  * THE DECISION-2 TRAP (status MUST NOT be used to find the blocker):
  * `openai-codex.ts` applies the top-level `rate_limit.limit_reached` flag to
@@ -575,20 +575,20 @@ export function salvageAttemptKey(accountKey: string, creditExpiresAtMs: number)
 
 /**
  * Overlay LIVE per-account credit state (from the dedicated
- * `rate-limit-reset-credits` route) onto usage reports before a blocked pass.
+ * `rate-limit-reset-credits` route) onto usage reports before planning.
  *
  * `/wham/usage` credit counts can be stale or pre-feature, and the usage
  * provider only consults the live detail endpoint when the usage payload
  * already reports a POSITIVE count — a stale ZERO is never corrected there.
  * Live data replaces the report's credit block wholesale; accounts with no
- * live row get the block stripped. For blocked recovery, the active live row
- * may synthesize a minimal report carrying its durable credential id when
- * usage is missing/stale; the 429 supplies timing, never credit eligibility.
+ * live row get the block stripped. Missing/stale usage may be replaced by a
+ * credit-only report: the active account for blocked recovery, or every live
+ * account for last-chance salvage. It never supplies fabricated usage windows.
  */
 export function overlayLiveResetCredits(
 	reports: UsageReport[] | null,
 	statuses: readonly ResetCreditAccountStatus[],
-	options?: { synthesizeActive?: boolean; nowMs?: number },
+	options?: { synthesize?: "active" | "all"; nowMs?: number },
 ): UsageReport[] | null {
 	const merged = (reports ?? []).map(report => {
 		if (report.provider !== "openai-codex") return report;
@@ -615,35 +615,39 @@ export function overlayLiveResetCredits(
 			},
 		};
 	});
-	if (options?.synthesizeActive) {
+	if (options?.synthesize) {
 		const nowMs = options.nowMs ?? Date.now();
-		const active = statuses.find(
-			status => status.provider === "openai-codex" && status.active && !status.error && status.availableCount > 0,
-		);
-		const hasFreshActive =
-			active !== undefined &&
-			merged.some(
+		for (const status of statuses) {
+			if (
+				status.provider !== "openai-codex" ||
+				status.error ||
+				status.availableCount < 1 ||
+				(options.synthesize === "active" && !status.active)
+			)
+				continue;
+			const hasFreshReport = merged.some(
 				report =>
 					report.provider === "openai-codex" &&
-					report.metadata?.resetCreditCredentialId === active.credentialId &&
+					report.metadata?.resetCreditCredentialId === status.credentialId &&
 					nowMs - report.fetchedAt <= REPORT_FRESHNESS_MS,
 			);
-		if (active && !hasFreshActive) {
+			if (hasFreshReport) continue;
+			// Live inventory supports last-chance salvage, not stale usage-window decisions.
 			merged.push({
 				provider: "openai-codex",
 				fetchedAt: nowMs,
 				limits: [],
 				metadata: {
-					accountId: active.accountId,
-					email: active.email,
-					orgId: active.orgId,
-					limitReached: true,
-					resetCreditCredentialId: active.credentialId,
-					resetCreditActive: true,
+					accountId: status.accountId,
+					email: status.email,
+					orgId: status.orgId,
+					limitReached: options.synthesize === "active" ? true : undefined,
+					resetCreditCredentialId: status.credentialId,
+					resetCreditActive: status.active,
 				},
 				resetCredits: {
-					availableCount: active.availableCount,
-					credits: active.credits
+					availableCount: status.availableCount,
+					credits: status.credits
 						.filter(credit => (credit.status ?? "available") === "available")
 						.map(credit => ({
 							grantedAt: credit.grantedAt,

@@ -18,7 +18,7 @@
  *   consent, live credit eligibility, terminal dedupe, and account cooldown.
  */
 import { describe, expect, it } from "bun:test";
-import type { UsageReport } from "@oh-my-pi/pi-ai";
+import type { ResetCreditAccountStatus, UsageReport } from "@oh-my-pi/pi-ai";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import {
 	ATTEMPT_COOLDOWN_MS,
@@ -26,6 +26,7 @@ import {
 	type CodexResetPlanInput,
 	IMMINENT_RESET_EXPIRY_MS,
 	isTerminalRedeemOutcome,
+	overlayLiveResetCredits,
 	planCodexResetRedemptions,
 	SALVAGE_MIN_USED_FRACTION,
 	salvageAttemptKey,
@@ -151,6 +152,26 @@ function input(reports: UsageReport[] | null, overrides: Partial<CodexResetPlanI
 		...overrides,
 	};
 }
+
+it("salvages live imminent Codex credits across the pool without trusting old usage windows", () => {
+	const statuses: ResetCreditAccountStatus[] = [
+		{ credentialId: 1, accountId: ACCOUNT_ID, active: true, expiresInMs: 4 * 60_000 },
+		{ credentialId: 2, accountId: "acct-sib", active: false, expiresInMs: 3 * 60_000 },
+		{ credentialId: 3, accountId: "acct-a", active: false, expiresInMs: 2 * HOUR },
+	].map(({ expiresInMs, ...account }) => ({
+		...account,
+		provider: "openai-codex",
+		availableCount: 1,
+		credits: [{ id: `credit-${account.credentialId}`, expiresAt: new Date(NOW + expiresInMs).toISOString() }],
+	}));
+	const reports = overlayLiveResetCredits(
+		[report({ fetchedAgoMs: 20 * 60_000 }), report({ accountId: "acct-a", fetchedAgoMs: 20 * 60_000 })],
+		statuses,
+		{ synthesize: "all", nowMs: NOW },
+	);
+	const plan = planCodexResetRedemptions(input(reports, { trigger: "sweep" }));
+	expect(plan.actions.map(action => action.target.credentialId).sort((a, b) => a! - b!)).toEqual([1, 2]);
+});
 
 describe("planCodexResetRedemptions: blocked-account", () => {
 	it("restores a weekly-only block (5h has headroom) far from the natural reset", () => {

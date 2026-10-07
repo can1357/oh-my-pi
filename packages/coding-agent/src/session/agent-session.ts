@@ -913,6 +913,7 @@ export class AgentSession implements SettingsScope {
 	#modelDiscoveryAbortController = new AbortController();
 	/** Process-wide by default (double-spend safety across sessions); injectable for tests. */
 	#resetCoordinator: CodexAutoRedeemCoordinator;
+	#resetSweepReports: UsageReport[] | null = null;
 	/** Each turn stream may adopt a peer's confirmed reset once, not retry on it indefinitely. */
 	#adoptedResetMarkers = new Map<string, number>();
 	// Extension system
@@ -12389,9 +12390,17 @@ export class AgentSession implements SettingsScope {
 			signal,
 			maxAgeMs,
 		});
-		// Fresh snapshots also drive the salvage sweep at the status line's configured cadence.
-		if (reports) this.#maybeScheduleResetSweep(reports);
+		if (reports) {
+			this.#resetSweepReports = reports;
+			this.#maybeScheduleResetSweep(reports);
+		}
 		return reports;
+	}
+
+	/** Preserve the five-minute reset heartbeat while displayed usage stays cached. */
+	refreshResetCredits(): void {
+		if (this.#isDisposed || Date.now() - this.#resetCoordinator.lastSweepAt < 5 * 60_000) return;
+		this.#maybeScheduleResetSweep(this.#resetSweepReports);
 	}
 
 	/** Models whose live `/usage` reports map to a quantitative provider scope. */
@@ -12843,7 +12852,7 @@ export class AgentSession implements SettingsScope {
 					? this.#planClaudeResets("blocked", reports, statuses, coordinator, activeBlockUnblockAtMs)
 					: this.#planCodexResets(
 							"blocked",
-							overlayLiveResetCredits(reports, statuses, { synthesizeActive: true, nowMs: Date.now() }),
+							overlayLiveResetCredits(reports, statuses, { synthesize: "active", nowMs: Date.now() }),
 							identity,
 							coordinator,
 							activeBlockUnblockAtMs,
@@ -12884,55 +12893,60 @@ export class AgentSession implements SettingsScope {
 	 * the broader salvage horizon disabled. Every candidate is refreshed through
 	 * its live listing before spend; a failed listing cannot fall back to stale usage.
 	 */
-	#maybeScheduleResetSweep(reports: UsageReport[]): void {
+	#maybeScheduleResetSweep(reports: UsageReport[] | null): void {
 		const coordinator = this.#resetCoordinator;
 		const codexCfg = cfgCodexResets.get(this.settings);
 		const claudeCfg = cfgClaudeResets.get(this.settings);
 		const codexEnabled =
 			shouldEvaluateCodexAutoRedeem(codexCfg.autoRedeem) &&
-			reports.some(report => report.provider === "openai-codex");
+			(reports?.some(report => report.provider === "openai-codex") ||
+				this.#modelRegistry.authStorage.credentials.hasOAuth("openai-codex"));
 		const claudeEnabled =
-			shouldEvaluateCodexAutoRedeem(claudeCfg.autoRedeem) && reports.some(report => report.provider === "anthropic");
+			shouldEvaluateCodexAutoRedeem(claudeCfg.autoRedeem) &&
+			(reports?.some(report => report.provider === "anthropic") ||
+				this.#modelRegistry.authStorage.credentials.hasOAuth("anthropic"));
 		if (!codexEnabled && !claudeEnabled) return;
 		if (coordinator.sweepInFlight || coordinator.inFlightByAccount.size > 0) return;
 		const now = Date.now();
 		if (now - coordinator.lastSweepAt < SWEEP_MIN_INTERVAL_MS) return;
 		coordinator.sweepInFlight = true;
 		coordinator.lastSweepAt = now;
-		coordinator.sweepPromise = (async () => {
-			if (codexEnabled) {
-				try {
-					const statuses = await this.listResetCredits(AbortSignal.timeout(10_000), "openai-codex");
-					const effectiveReports = overlayLiveResetCredits(reports, statuses);
-					const identity = this.#modelRegistry.authStorage.oauth.identity("openai-codex", this.sessionId);
-					const plan = this.#planCodexResets("sweep", effectiveReports, identity, coordinator);
-					if (
-						plan.actions.length > 0 &&
-						(!shouldPromptCodexAutoRedeem(codexCfg.autoRedeem) ||
-							(await this.#confirmAutoRedeem("openai-codex", plan.actions, coordinator)))
-					) {
-						await this.#executeResetActions("openai-codex", plan.actions, coordinator);
+		coordinator.sweepPromise = Promise.resolve()
+			.then(async () => {
+				if (this.#isDisposed) return;
+				if (codexEnabled) {
+					try {
+						const statuses = await this.listResetCredits(AbortSignal.timeout(10_000), "openai-codex");
+						const effectiveReports = overlayLiveResetCredits(reports, statuses, { synthesize: "all" });
+						const identity = this.#modelRegistry.authStorage.oauth.identity("openai-codex", this.sessionId);
+						const plan = this.#planCodexResets("sweep", effectiveReports, identity, coordinator);
+						if (
+							plan.actions.length > 0 &&
+							(!shouldPromptCodexAutoRedeem(codexCfg.autoRedeem) ||
+								(await this.#confirmAutoRedeem("openai-codex", plan.actions, coordinator)))
+						) {
+							await this.#executeResetActions("openai-codex", plan.actions, coordinator);
+						}
+					} catch (error) {
+						logger.warn("codex-auto-reset: salvage listing failed", { error: String(error) });
 					}
-				} catch (error) {
-					logger.warn("codex-auto-reset: salvage listing failed", { error: String(error) });
 				}
-			}
-			if (claudeEnabled) {
-				try {
-					const statuses = await this.listResetCredits(AbortSignal.timeout(10_000), "anthropic");
-					const plan = this.#planClaudeResets("sweep", reports, statuses, coordinator);
-					if (
-						plan.actions.length > 0 &&
-						(!shouldPromptCodexAutoRedeem(claudeCfg.autoRedeem) ||
-							(await this.#confirmAutoRedeem("anthropic", plan.actions, coordinator)))
-					) {
-						await this.#executeResetActions("anthropic", plan.actions, coordinator);
+				if (claudeEnabled) {
+					try {
+						const statuses = await this.listResetCredits(AbortSignal.timeout(10_000), "anthropic");
+						const plan = this.#planClaudeResets("sweep", reports, statuses, coordinator);
+						if (
+							plan.actions.length > 0 &&
+							(!shouldPromptCodexAutoRedeem(claudeCfg.autoRedeem) ||
+								(await this.#confirmAutoRedeem("anthropic", plan.actions, coordinator)))
+						) {
+							await this.#executeResetActions("anthropic", plan.actions, coordinator);
+						}
+					} catch (error) {
+						logger.warn("claude-auto-reset: salvage listing failed", { error: String(error) });
 					}
-				} catch (error) {
-					logger.warn("claude-auto-reset: salvage listing failed", { error: String(error) });
 				}
-			}
-		})()
+			})
 			.catch(error => logger.warn("reset salvage sweep failed", { error: String(error) }))
 			.finally(() => {
 				coordinator.sweepInFlight = false;

@@ -30,7 +30,9 @@ import { cfgGoalStatusInFooter } from "../goals/settings";
  * fixtures) still render; a live `AgentSession` satisfies it structurally.
  */
 export type StatusLineHostSession = StatusLineSession &
-	Partial<Pick<AgentSession, "settings" | "modelRegistry" | "sessionId" | "fetchUsageReports">>;
+	Partial<
+		Pick<AgentSession, "settings" | "modelRegistry" | "sessionId" | "fetchUsageReports" | "refreshResetCredits">
+	>;
 
 /** Application policy and runtime services consumed by the portable status renderer. */
 export const statusLineHost: StatusLineHost<StatusLineHostSession> = {
@@ -59,6 +61,7 @@ export const statusLineHost: StatusLineHost<StatusLineHostSession> = {
 	canFetchUsageReports: session => typeof session.fetchUsageReports === "function",
 	fetchUsageReports: (session, signal, maxAgeMs) =>
 		session.fetchUsageReports?.(signal, maxAgeMs) ?? Promise.resolve(null),
+	refreshResetCredits: session => session.refreshResetCredits?.(),
 	resolveActiveRepo: resolveActiveRepoContextSync,
 	lookupPullRequest: cwd =>
 		github.run(cwd, ["pr", "view", "--json", "number,url"], AbortSignal.timeout(GH_COMMAND_TIMEOUT_MS)),
