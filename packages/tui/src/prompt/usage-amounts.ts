@@ -48,11 +48,12 @@ function formatQuantity(value: number, unit: UsageLimit["amount"]["unit"], suffi
  *
  * A `scope.shared` limit is one account-wide pool observed once per stored
  * credential, so N keys on the same account yield N identical rows that must
- * collapse to a single value — summing them would claim several times the
- * credits a single request can draw on. Limits without the flag are genuinely
- * per-account and do add up. Returns `undefined` unless every limit is
- * remaining-only and agrees on a unit, so mixed buckets fall through to the
- * caller's own handling.
+ * collapse to a single value within their `sharedGroup` — summing them would
+ * claim several times the credits a single request can draw on. Distinct
+ * shared groups represent independent pools and do add up. Limits without the
+ * flag are genuinely per-account and do add up. Returns `undefined` unless
+ * every limit is remaining-only and agrees on a unit, so mixed buckets fall
+ * through to the caller's own handling.
  */
 export function totalRemainingOnly(
 	limits: readonly UsageLimit[],
@@ -61,18 +62,21 @@ export function totalRemainingOnly(
 	if (first === undefined || !limits.every(isRemainingOnlyAbsoluteAmount)) return undefined;
 	const unit = first.amount.unit;
 	if (!limits.every(limit => limit.amount.unit === unit)) return undefined;
-
 	let total = 0;
-	let sharedMax: number | undefined;
+	const sharedMaxByGroup = new Map<string, number>();
 	for (const limit of limits) {
 		const remaining = limit.amount.remaining ?? 0;
 		if (limit.scope.shared === true) {
-			sharedMax = sharedMax === undefined ? remaining : Math.max(sharedMax, remaining);
+			const account = limit.scope.accountId ?? limit.scope.projectId ?? limit.scope.orgId ?? "";
+			const group = `${account}\0${limit.scope.sharedGroup ?? "shared"}`;
+			const current = sharedMaxByGroup.get(group);
+			sharedMaxByGroup.set(group, current === undefined ? remaining : Math.max(current, remaining));
 			continue;
 		}
 		total += remaining;
 	}
-	return { value: total + (sharedMax ?? 0), unit };
+	for (const remaining of sharedMaxByGroup.values()) total += remaining;
+	return { value: total, unit };
 }
 
 /** `"100 credits left"` for a bucket of remaining-only limits, else `undefined`. */

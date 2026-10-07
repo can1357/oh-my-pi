@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "bun:test";
 import * as path from "node:path";
 import { stripVTControlCharacters } from "node:util";
 import type { UsageReport } from "@oh-my-pi/pi-ai";
+import chalk from "@oh-my-pi/pi-utils/chalk";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import {
 	buildRedactionMap,
@@ -580,6 +581,33 @@ describe("formatUsageBreakdown", () => {
 		expect(text).toContain("user@example.test · plan: team");
 	});
 
+	it("collapses per-key probes of one shared pool into a single account row", () => {
+		// The CLI is the third surface of the same collapse rule: two stored keys
+		// on one Charm Hyper account must read as one account holding one balance.
+		const charmReport = (remaining: number): UsageReport => ({
+			provider: "charm-hyper",
+			fetchedAt: Date.now(),
+			limits: [
+				{
+					id: "charm-hyper:credits",
+					label: "Credit balance",
+					scope: {
+						provider: "charm-hyper",
+						windowId: "balance",
+						shared: true,
+						sharedGroup: "charm-hyper:credits:https://hyper.charm.land/v1/credits",
+					},
+					amount: { remaining, unit: "credits" },
+				},
+			],
+			metadata: { endpoint: "https://hyper.charm.land/v1/credits" },
+		});
+
+		const text = stripVTControlCharacters(formatUsageBreakdown([charmReport(100), charmReport(95)], [], Date.now()));
+		expect(text).toContain("— 1 account");
+		expect(text).not.toContain("— 2 accounts");
+	});
+
 	it("renders marked Antigravity shared quotas once per account", () => {
 		const antigravity = makeReport("google-antigravity", "user@example.test", [
 			makeLimit({
@@ -1114,5 +1142,82 @@ describe("omp usage accounts", () => {
 			vi.restoreAllMocks();
 			authStorage.close();
 		}
+	});
+});
+
+describe("status classification parity", () => {
+	// Status is only visible as colour in this surface, so pin colour on for the
+	// test and restore whatever the runtime configured.
+	function withColor<T>(run: () => T): T {
+		const previous = chalk.level;
+		chalk.level = 3;
+		try {
+			return run();
+		} finally {
+			chalk.level = previous;
+		}
+	}
+
+	const geminiReport = (usedFraction: number, status?: "unknown" | "exhausted"): UsageReport =>
+		makeReport("gemini", "a@example.test", [
+			{
+				id: "gemini:7d",
+				label: "7 days",
+				scope: { provider: "gemini", windowId: "7d" },
+				window: { id: "7d", label: "7 days" },
+				amount: { unit: "percent", usedFraction },
+				...(status === undefined ? {} : { status }),
+			},
+		]);
+
+	it("colours a limit by its resolved status, not by the raw field", () => {
+		const exhausted = withColor(() => formatUsageBreakdown([geminiReport(1)], [], Date.now()));
+		const warning = withColor(() => formatUsageBreakdown([geminiReport(0.95)], [], Date.now()));
+		const healthy = withColor(() => formatUsageBreakdown([geminiReport(0.2)], [], Date.now()));
+
+		// Red/yellow/green differ from each other and from the dim "unknown" row.
+		expect(exhausted).not.toBe(warning);
+		expect(warning).not.toBe(healthy);
+		expect(exhausted).not.toBe(healthy);
+	});
+
+	it("treats a provider's unknown as unreported", () => {
+		const inferred = withColor(() => formatUsageBreakdown([geminiReport(1)], [], Date.now()));
+		const reported = withColor(() => formatUsageBreakdown([geminiReport(1, "exhausted")], [], Date.now()));
+		const unknown = withColor(() => formatUsageBreakdown([geminiReport(1, "unknown")], [], Date.now()));
+		expect(unknown).toBe(inferred);
+		expect(reported).toBe(inferred);
+	});
+
+	it("reads a mixed account group as warning rather than exhausted", () => {
+		const mixed = withColor(() =>
+			formatUsageBreakdown(
+				[
+					makeReport("gemini", "light@example.test", [
+						makeLimit({ id: "7d", provider: "gemini", usedFraction: 0.1, windowId: "7d" }),
+					]),
+					makeReport("gemini", "spent@example.test", [
+						makeLimit({ id: "7d", provider: "gemini", usedFraction: 1, windowId: "7d" }),
+					]),
+				],
+				[],
+				Date.now(),
+			),
+		);
+		const allSpent = withColor(() =>
+			formatUsageBreakdown(
+				[
+					makeReport("gemini", "spent-a@example.test", [
+						makeLimit({ id: "7d", provider: "gemini", usedFraction: 1, windowId: "7d" }),
+					]),
+					makeReport("gemini", "spent-b@example.test", [
+						makeLimit({ id: "7d", provider: "gemini", usedFraction: 1, windowId: "7d" }),
+					]),
+				],
+				[],
+				Date.now(),
+			),
+		);
+		expect(mixed).not.toBe(allSpent);
 	});
 });

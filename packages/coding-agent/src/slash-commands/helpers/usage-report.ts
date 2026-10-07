@@ -1,9 +1,13 @@
-import type { UsageLimit, UsageReport } from "@oh-my-pi/pi-ai";
+import { resolveUsedFraction, type UsageLimit, type UsageReport } from "@oh-my-pi/pi-ai";
 import { sanitizeText } from "@oh-my-pi/pi-utils";
 import type { OAuthAccountIdentity } from "../../session/auth-storage";
-import { collapseSharedUsageReports, summarizeUsageResetCredits } from "@oh-my-pi/pi-tui/overlays/usage-display";
+import {
+	accountLabelsFor,
+	collapseSharedReports,
+	summarizeUsageResetCredits,
+} from "@oh-my-pi/pi-tui/overlays/usage-display";
 import type { SlashCommandRuntime } from "../types";
-import { formatCodexUsageReportLabel, reportMatchesActiveAccount } from "./active-oauth-account";
+import { codexUsagePlan, reportMatchesActiveAccount } from "./active-oauth-account";
 import { formatCoarseDuration, formatProviderName, renderAsciiBar } from "@oh-my-pi/pi-tui/chrome/format";
 
 function formatWindowSuffix(label: string, windowLabel: string | undefined): string {
@@ -26,30 +30,6 @@ function formatUsageAmount(limit: UsageLimit): string {
 	return `${usedText}${remainingText}`;
 }
 
-function formatUsageReportAccount(
-	report: UsageReport,
-	peers: readonly UsageReport[],
-	limit: UsageLimit,
-	index: number,
-): string {
-	const codex = report.provider === "openai-codex";
-	const metaOrgName = report.metadata?.orgName;
-	const metaOrgId = report.metadata?.orgId;
-	const org = typeof metaOrgName === "string" && metaOrgName ? metaOrgName : metaOrgId;
-	const label = (identity: string, includeOrg: boolean): string => {
-		if (codex) return formatCodexUsageReportLabel(report, peers, identity);
-		return includeOrg && typeof org === "string" && org && org !== identity ? `${identity} (${org})` : identity;
-	};
-	const email = report.metadata?.email;
-	if (typeof email === "string" && email) return label(email, true);
-	// Empty metadata must not hide a valid scoped identity.
-	const metaAccountId = report.metadata?.accountId;
-	const accountId = typeof metaAccountId === "string" && metaAccountId ? metaAccountId : limit.scope.accountId;
-	if (typeof accountId === "string" && accountId) return label(accountId, true);
-	const metaProjectId = report.metadata?.projectId;
-	const projectId = typeof metaProjectId === "string" && metaProjectId ? metaProjectId : limit.scope.projectId;
-	return label(typeof projectId === "string" && projectId ? projectId : `account ${index + 1}`, false);
-}
 
 function renderUsageReports(
 	reports: UsageReport[],
@@ -57,7 +37,7 @@ function renderUsageReports(
 	resolveActiveAccount?: (provider: string) => OAuthAccountIdentity | undefined,
 	usageModelSelectors: readonly string[] = [],
 ): string {
-	const displayReports = collapseSharedUsageReports(reports);
+	const displayReports = collapseSharedReports(reports);
 	const latestFetchedAt = Math.max(...displayReports.map(report => report.fetchedAt ?? 0));
 	const lines = [`Usage${latestFetchedAt ? ` (${formatCoarseDuration(nowMs - latestFetchedAt)} ago)` : ""}`];
 	const grouped = new Map<string, UsageReport[]>();
@@ -81,27 +61,17 @@ function renderUsageReports(
 		const providerNotes = [...new Set(providerReports.flatMap(report => report.notes ?? []))];
 		for (const note of providerNotes)
 			lines.push(`  ${sanitizeText(note.replace(/[\r\n]+/g, " ").replace(/\t/g, "  "))}`);
-		for (const report of providerReports) {
+		const accountLabels = accountLabelsFor(providerReports);
+		providerReports.forEach((report, reportIndex) => {
+			// Codex qualifies its identity with the login-time plan; every other
+			// provider's unified label already carries org and collision suffixes.
+			const baseLabel = accountLabels[reportIndex] ?? `account ${reportIndex + 1}`;
+			const plan = codexUsagePlan(report);
+			const accountLabel = plan ? `${baseLabel} · plan: ${plan}` : baseLabel;
 			const inUse = reportMatchesActiveAccount(report, activeAccount);
 			const resets = summarizeUsageResetCredits(report.resetCredits, nowMs);
 			if (resets && resets.bankedCount > 0) {
-				const resetIdentity =
-					typeof report.metadata?.email === "string"
-						? report.metadata.email
-						: typeof report.metadata?.accountId === "string"
-							? report.metadata.accountId
-							: "account";
-				let resetLabel: string;
-				if (report.provider === "openai-codex") {
-					resetLabel = formatCodexUsageReportLabel(report, providerReports, resetIdentity);
-				} else {
-					const orgName = report.metadata?.orgName;
-					const orgId = report.metadata?.orgId;
-					const org =
-						typeof orgName === "string" && orgName ? orgName : typeof orgId === "string" ? orgId : undefined;
-					const raw = org && org !== resetIdentity ? `${resetIdentity} (${org})` : resetIdentity;
-					resetLabel = sanitizeText(raw.replace(/[\r\n\t]+/g, " "));
-				}
+				const resetLabel = sanitizeText(accountLabel.replace(/[\r\n\t]+/g, " "));
 				const availability =
 					resets.redeemableCount === resets.bankedCount ? "available" : `${resets.redeemableCount} usable now`;
 				lines.push(
@@ -124,11 +94,8 @@ function renderUsageReports(
 				}
 			}
 			if (report.limits.length === 0) {
-				const email = typeof report.metadata?.email === "string" ? report.metadata.email : "account";
-				const label =
-					report.provider === "openai-codex" ? formatCodexUsageReportLabel(report, providerReports, email) : email;
-				lines.push(`- ${label}: no limits reported`);
-				continue;
+				lines.push(`- ${accountLabel}: no limits reported`);
+				return;
 			}
 			for (let index = 0; index < report.limits.length; index++) {
 				const limit = report.limits[index]!;
@@ -140,10 +107,8 @@ function renderUsageReports(
 						? ` (${limit.scope.tier})`
 						: "";
 				lines.push(`- ${limit.label}${tier}${formatWindowSuffix(limit.label, window)}`);
-				lines.push(
-					`  ${formatUsageReportAccount(report, providerReports, limit, index)}: ${formatUsageAmount(limit)}${inUse ? "  ← in use by this session" : ""}`,
-				);
-				lines.push(`  ${renderAsciiBar(limit.amount.usedFraction)}`);
+				lines.push(`  ${accountLabel}: ${formatUsageAmount(limit)}${inUse ? "  ← in use by this session" : ""}`);
+				lines.push(`  ${renderAsciiBar(resolveUsedFraction(limit))}`);
 				if (limit.window?.resetsAt && limit.window.resetsAt > nowMs) {
 					lines.push(
 						`  ${limit.window.resetLabel ?? "resets"} in ${formatCoarseDuration(limit.window.resetsAt - nowMs)}`,
@@ -154,7 +119,7 @@ function renderUsageReports(
 						`  ${limit.notes.map(n => sanitizeText(n.replace(/[\r\n]+/g, " ").replace(/\t/g, "  "))).join(" • ")}`,
 					);
 			}
-		}
+		});
 	}
 	return ["```", ...lines, "```"].join("\n");
 }

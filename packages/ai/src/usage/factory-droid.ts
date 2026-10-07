@@ -15,7 +15,8 @@ import type {
 	UsageWindow,
 } from "../usage";
 import { isRecord } from "../utils";
-import { DAY_MS, HOUR_MS, parseIsoTimestamp, usageStatus, WEEK_MS } from "./shared";
+import { usageStatus } from "../usage";
+import { DAY_MS, HOUR_MS, parseIsoTimestamp, WEEK_MS } from "./shared";
 
 const WINDOW_DEFS = [
 	{ key: "fiveHour", id: "5h", label: "5 Hour", durationMs: 5 * HOUR_MS },

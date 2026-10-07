@@ -2,7 +2,7 @@ import { CLINEPASS_API_BASE_URL, clinePassClientHeaders } from "@oh-my-pi/pi-cat
 import { ProviderHttpError } from "../error";
 import type { UsageFetchContext, UsageFetchParams, UsageLimit, UsageProvider, UsageReport } from "../usage";
 import { isRecord } from "../utils";
-import { usageStatus } from "./shared";
+import { usageStatus } from "../usage";
 
 const PROVIDER = "cline-pass";
 const DEFAULT_BASE_URL = CLINEPASS_API_BASE_URL;

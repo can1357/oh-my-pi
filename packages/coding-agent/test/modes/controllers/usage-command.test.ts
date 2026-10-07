@@ -5,7 +5,7 @@ import { CommandController, renderUsageReports } from "@oh-my-pi/pi-coding-agent
 import { SelectorController } from "@oh-my-pi/pi-coding-agent/modes/controllers/selector-controller";
 import * as activityClient from "@oh-my-pi/pi-coding-agent/stats/activity-client";
 import { visibleWidth } from "@oh-my-pi/pi-tui";
-import { UsageDashboardComponent } from "@oh-my-pi/pi-tui/overlays/usage-dashboard";
+import { UsageDashboardComponent, buildProviderCards } from "@oh-my-pi/pi-tui/overlays/usage-dashboard";
 import { getThemeByName, setThemeInstance, theme } from "@oh-my-pi/pi-tui/theme";
 import { createInteractiveModeContext } from "../../helpers/interactive-mode-context";
 
@@ -305,6 +305,155 @@ describe("renderUsageReports content", () => {
 		expect(rendered).not.toContain("\x1b[2J");
 		expect(output).not.toContain("\r");
 		expect(output).not.toContain("\t");
+	});
+
+	it("uses the newest shared snapshot instead of stale max headroom", () => {
+		const now = Date.now();
+		// Production shape: `fetchCharmHyperUsage` marks the balance with an
+		// endpoint-scoped pool group, which is what makes two key probes of one
+		// account the same pool rather than two accounts.
+		const balance = (fetchedAt: number, remaining: number): UsageReport => ({
+			provider: "charm-hyper",
+			fetchedAt,
+			limits: [
+				{
+					id: "charm-hyper:credits",
+					label: "Credit balance",
+					scope: {
+						provider: "charm-hyper",
+						windowId: "balance",
+						shared: true,
+						sharedGroup: "charm-hyper:credits",
+					},
+					amount: { remaining, unit: "credits" },
+				},
+			],
+		});
+
+		// Two probes of one pool: the later one observed 95. Reporting the
+		// earlier 100 would claim headroom the account already spent.
+		const output = stripVTControlCharacters(renderUsageReports([balance(1, 100), balance(2, 95)], theme, now, 98));
+		expect(output).toContain("95 credits left");
+		expect(output).not.toContain("100 credits left");
+	});
+
+	it("keeps independent account pools apart in the detail grid", () => {
+		const now = Date.now();
+		const balance = (accountId: string, remaining: number): UsageReport => ({
+			provider: "zai",
+			fetchedAt: now,
+			limits: [
+				{
+					id: "zai:credits",
+					label: "Credits",
+					scope: { provider: "zai", accountId, windowId: "credits", shared: true },
+					window: { id: "credits", label: "credits" },
+					amount: { remaining, unit: "credits" },
+				},
+			],
+			metadata: { accountId, email: `${accountId}@example.test` },
+		});
+
+		const output = stripVTControlCharacters(
+			renderUsageReports([balance("acct-a", 100), balance("acct-b", 50)], theme, now, 120),
+		);
+		expect(output).toContain("150 credits left");
+	});
+
+	it("disambiguates duplicate account labels in the detail grid", () => {
+		const now = Date.now();
+		const shared = (accountId: string, usedFraction: number): UsageReport => ({
+			provider: "anthropic",
+			fetchedAt: now,
+			limits: [
+				{
+					id: "anthropic:primary",
+					label: "Claude 7 Day",
+					scope: { provider: "anthropic", accountId, windowId: "7d" },
+					window: { id: "7d", label: "7 days" },
+					amount: { usedFraction, unit: "percent" },
+				},
+			],
+			metadata: { accountId, email: "same@example.test" },
+		});
+
+		const output = stripVTControlCharacters(
+			renderUsageReports([shared("acct-a", 0.2), shared("acct-b", 0.8)], theme, now, 140),
+		);
+		expect(output).toContain("same@example.test (acct-a)");
+		expect(output).toContain("same@example.test (acct-b)");
+	});
+
+	it("reports the same pooled balance as the dashboard card model", () => {
+		// The two surfaces share one collapse rule now; a divergence here means
+		// one of them drifted back to its own aggregation.
+		const now = Date.now();
+		const charmReport = (remaining: number, endpoint = "https://api.example.test/credits"): UsageReport => ({
+			provider: "charm-hyper",
+			fetchedAt: now,
+			limits: [
+				{
+					id: "charm-hyper:credits",
+					label: "Credit balance",
+					scope: {
+						provider: "charm-hyper",
+						windowId: "balance",
+						shared: true,
+						sharedGroup: `charm-hyper:credits:${endpoint}`,
+					},
+					amount: { remaining, unit: "credits" },
+				},
+			],
+			metadata: { endpoint },
+		});
+		const onePool = [charmReport(100), charmReport(95)];
+		const twoPools = [charmReport(100), charmReport(95, "https://other.example.test/credits")];
+
+		for (const [label, reports, expected] of [
+			["one pool", onePool, "100 credits left"],
+			["two pools", twoPools, "195 credits left"],
+		] as const) {
+			const dashboardText = buildProviderCards([...reports], now)[0]?.windows[0]?.usedText;
+			expect(dashboardText, label).toBe(expected);
+			expect(stripVTControlCharacters(renderUsageReports([...reports], theme, now, 120)), label).toContain(expected);
+		}
+	});
+
+	it("classifies an omitted status the same way the dashboard does", () => {
+		// The dismissed review finding: a limit with no provider status used to
+		// render a dim/unknown group icon here while the dashboard inferred a
+		// verdict from the same numbers.
+		const now = Date.now();
+		const gemini = (usedFraction: number, status?: "unknown"): UsageReport => ({
+			provider: "gemini",
+			fetchedAt: now,
+			metadata: { email: "a@example.test" },
+			limits: [
+				{
+					id: "gemini:7d",
+					label: "7 days",
+					scope: { provider: "gemini", windowId: "7d" },
+					window: { id: "7d", label: "7 days" },
+					amount: { usedFraction, unit: "percent" },
+					...(status === undefined ? {} : { status }),
+				},
+			],
+		});
+
+		const groupIcon = (report: UsageReport): string => {
+			const lines = stripVTControlCharacters(renderUsageReports([report], theme, now, 100)).split("\n");
+			return lines.find(line => line.includes("7 days")) ?? "";
+		};
+
+		// Same glyph as the dashboard's verdict for these fractions.
+		expect(groupIcon(gemini(1))).toContain("✘");
+		expect(groupIcon(gemini(0.95))).toContain("⚠");
+		expect(groupIcon(gemini(0.2))).toContain("✔");
+		// `unknown` is unreported, not a verdict: the fraction still decides.
+		expect(groupIcon(gemini(1, "unknown"))).toContain("✘");
+		expect(groupIcon(gemini(1))).toBe(
+			groupIcon({ ...gemini(1), limits: [{ ...gemini(1).limits[0]!, status: "exhausted" }] }),
+		);
 	});
 });
 

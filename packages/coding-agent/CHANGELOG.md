@@ -1,6 +1,11 @@
 # Changelog
 
 ## [Unreleased]
+### Fixed
+
+- The `/usage` detail view and `omp usage` now classify limits through the shared status contract: a provider that omits `status` no longer renders a dim bar under a pending group icon, warning boundaries match the dashboard, and quantitative exhaustion overrides a lenient provider stamp.
+
+- ACP usage reports now draw their ASCII bar from the resolved used fraction, so remaining-only providers no longer render an empty placeholder bar.
 
 ## [18.8.3] - 2026-10-07
 

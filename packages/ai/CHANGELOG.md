@@ -1,6 +1,9 @@
 # Changelog
 
 ## [Unreleased]
+### Fixed
+
+- Usage surfaces now classify a limit through one shared contract instead of per-surface rules, and quantitative exhaustion overrides a lenient provider stamp.
 
 ## [18.8.3] - 2026-10-07
 

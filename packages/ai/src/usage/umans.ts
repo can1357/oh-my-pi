@@ -9,7 +9,8 @@ import type {
 	UsageWindow,
 } from "../usage";
 import { isRecord } from "../utils";
-import { buildUsageAmount, HOUR_MS, usageStatus } from "./shared";
+import { usageStatus } from "../usage";
+import { buildUsageAmount, HOUR_MS } from "./shared";
 
 const UMANS_PROVIDER = "umans";
 const DEFAULT_ENDPOINT = "https://api.code.umans.ai";

@@ -8,7 +8,8 @@ import type {
 	UsageReport,
 } from "../usage";
 import { isRecord } from "../utils";
-import { HOUR_MS, parsePositiveTimestamp, usageStatus, WEEK_MS } from "./shared";
+import { usageStatus } from "../usage";
+import { HOUR_MS, parsePositiveTimestamp, WEEK_MS } from "./shared";
 
 const PROVIDER = "commandcode";
 const DEFAULT_ORIGIN = "https://api.commandcode.ai";

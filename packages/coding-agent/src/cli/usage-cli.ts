@@ -8,16 +8,20 @@
  * always covers the full credential pool.
  */
 import {
+	aggregateUsageStatus,
 	ANTHROPIC_OAUTH_GRANT_TTL_MS,
 	type AuthAccountPolicy,
 	type AuthStorage,
 	type DisabledCredentialSummary,
 	type OAuthAccountIdentity,
 	resolveCredentialIdentityKey,
+	resolveLimitStatus,
+	resolveUsageStatus,
 	resolveUsedFraction,
 	type UsageHistoryEntry,
 	type UsageLimit,
 	type UsageReport,
+	type UsageStatus,
 	type UsageUnit,
 } from "@oh-my-pi/pi-ai";
 import { AuthBrokerClient } from "@oh-my-pi/pi-ai/auth-broker";
@@ -29,7 +33,13 @@ import { ModelRegistry } from "../config/model-registry";
 import { Settings } from "../config/settings";
 import { discoverAuthStorage, loadCliExtensionProviders } from "../sdk";
 import { resolveAuthBrokerConfig } from "../session/auth-broker-config";
-import { collapseSharedUsageReports, summarizeUsageResetCredits } from "@oh-my-pi/pi-tui/overlays/usage-display";
+import {
+	accountLabelPartsFor,
+	type AccountLabelParts,
+	collapseSharedReports,
+	composeAccountLabel,
+	summarizeUsageResetCredits,
+} from "@oh-my-pi/pi-tui/overlays/usage-display";
 import { formatCodexUsageReportLabel } from "../slash-commands/helpers/active-oauth-account";
 import {
 	accountIdentityLabel,
@@ -38,7 +48,6 @@ import {
 	selectReportableAccounts,
 	type UsageAccountIdentity,
 } from "../slash-commands/helpers/usage-accounts";
-
 import { cfgRetryUsageReservePct } from "../session/settings";
 
 const BAR_WIDTH = 28;
@@ -184,16 +193,8 @@ function collectIdentityStrings(
 	return values;
 }
 
-type LimitStatus = NonNullable<UsageLimit["status"]>;
-
-function resolveStatus(limit: UsageLimit): LimitStatus {
-	if (limit.status && limit.status !== "unknown") return limit.status;
-	const fraction = resolveUsedFraction(limit);
-	if (fraction === undefined) return "unknown";
-	if (fraction >= 1) return "exhausted";
-	if (fraction >= 0.8) return "warning";
-	return "ok";
-}
+/** Status as the CLI renders it: the shared enum, never `undefined`. */
+type LimitStatus = UsageStatus;
 
 const STATUS_COLOR: Record<LimitStatus, (text: string) => string> = {
 	exhausted: chalk.red,
@@ -201,15 +202,6 @@ const STATUS_COLOR: Record<LimitStatus, (text: string) => string> = {
 	ok: chalk.green,
 	unknown: chalk.dim,
 };
-
-/** Worst-of aggregation: exhausted > warning > ok > unknown. */
-function aggregateStatus(limits: UsageLimit[]): LimitStatus {
-	const statuses = limits.map(resolveStatus);
-	if (statuses.includes("exhausted")) return "exhausted";
-	if (statuses.includes("warning")) return "warning";
-	if (statuses.includes("ok")) return "ok";
-	return "unknown";
-}
 
 function formatUnitValue(value: number, unit: UsageUnit): string {
 	if (unit === "usd") return `$${value.toFixed(2)}`;
@@ -262,7 +254,7 @@ function renderBar(limit: UsageLimit): string {
 	if (fraction === undefined) return chalk.dim("·".repeat(BAR_WIDTH));
 	const clamped = Math.min(Math.max(fraction, 0), 1);
 	const filled = Math.round(clamped * BAR_WIDTH);
-	const color = STATUS_COLOR[resolveStatus(limit)];
+	const color = STATUS_COLOR[resolveLimitStatus(limit)];
 	return color("█".repeat(filled)) + chalk.dim("░".repeat(BAR_WIDTH - filled));
 }
 
@@ -278,17 +270,22 @@ function limitTitle(limit: UsageLimit): string {
 	return `${label} (${windowLabel})`;
 }
 
-function reportAccountLabel(report: UsageReport, index: number): string {
-	const meta = report.metadata ?? {};
-	for (const key of ["email", "accountId", "projectId"] as const) {
-		const value = meta[key];
-		if (typeof value === "string" && value) return value;
-	}
-	for (const limit of report.limits) {
-		const scoped = limit.scope.accountId ?? limit.scope.projectId;
-		if (scoped) return scoped;
-	}
-	return `account ${index + 1}`;
+/**
+ * Compose a CLI account label from canonical parts, masking every identity
+ * string before composition: masking the finished label would leave the parts
+ * inside it readable under `--redact`.
+ */
+function cliAccountLabel(parts: AccountLabelParts, index: number, redaction?: Map<string, string>): string {
+	const mask = (value: string): string => redaction?.get(value) ?? value;
+	return composeAccountLabel(
+		{
+			...(parts.base === undefined ? {} : { base: mask(parts.base) }),
+			...(parts.org === undefined ? {} : { org: mask(parts.org) }),
+			...(parts.suffix === undefined ? {} : { suffix: parts.suffix.map(mask) }),
+			...(parts.ordinal === undefined ? {} : { ordinal: parts.ordinal }),
+		},
+		index,
+	);
 }
 
 function formatAccountHeader(
@@ -296,13 +293,18 @@ function formatAccountHeader(
 	peers: readonly UsageReport[],
 	index: number,
 	nowMs: number,
+	label: string,
 	redaction?: Map<string, string>,
 ): string {
-	const status = aggregateStatus(report.limits);
+	const status = aggregateUsageStatus(report.limits);
 	const icon = STATUS_COLOR[status]("●");
-	const label = reportAccountLabel(report, index);
+	// The canonical label already carries the org as `(org)` when it differs
+	// from the base identity, so no separate org fragment is appended here.
 	let header = `${icon} ${chalk.bold(redaction?.get(label) ?? label)}`;
 	if (report.provider === "openai-codex") {
+		// Codex qualifies its own row inline, and only on an email collision, so
+		// the bare identity is the correct base here. Handing the formatter the
+		// composed label would print the workspace twice (`(id) · id`).
 		const identity = sanitizeText((redaction?.get(label) ?? label).replace(/[\r\n\t]+/g, " "));
 		const rendered = formatCodexUsageReportLabel(report, peers, label, redaction, true, "inline");
 		header = `${icon} ${chalk.bold(identity)}${chalk.dim(rendered.slice(identity.length))}`;
@@ -343,7 +345,7 @@ function formatAccountHeader(
 }
 
 function formatLimitLine(limit: UsageLimit, labelWidth: number, nowMs: number): string[] {
-	const status = resolveStatus(limit);
+	const status = resolveLimitStatus(limit);
 	const title = limitTitle(limit);
 	const padded = title.padEnd(labelWidth);
 	const details: string[] = [describeAmount(limit)];
@@ -632,7 +634,7 @@ export function formatUsageBreakdown(
 	disabled: DisabledCredentialSummary[] = [],
 	policyOptions?: UsagePolicyDiagnosticsOptions,
 ): string {
-	const displayReports = collapseSharedUsageReports(reports);
+	const displayReports = collapseSharedReports(reports);
 	const reportsByProvider = new Map<string, UsageReport[]>();
 	for (const report of displayReports) {
 		const list = reportsByProvider.get(report.provider) ?? [];
@@ -679,9 +681,18 @@ export function formatUsageBreakdown(
 
 		const providerLimitTemplates = collectProviderLimitTemplates(providerReports);
 		const labelWidth = providerLimitTemplates.reduce((max, template) => Math.max(max, template.title.length), 0);
+		const labelParts = accountLabelPartsFor(providerReports);
 
 		providerReports.forEach((report, index) => {
-			lines.push(`  ${formatAccountHeader(report, providerReports, index, nowMs, redaction)}`);
+			const parts = labelParts[index] ?? {};
+			// Codex qualifies its own row inline, and only on an email collision
+			// (see `formatCodexUsageReportLabel`), so it takes the bare base here.
+			// Composing the generic label first would print the workspace twice.
+			const label =
+				report.provider === "openai-codex" && parts.base !== undefined
+					? cliAccountLabel({ base: parts.base }, index, redaction)
+					: cliAccountLabel(parts, index, redaction);
+			lines.push(`  ${formatAccountHeader(report, providerReports, index, nowMs, label, redaction)}`);
 			if (policyOptions && policyProviders.has(provider)) {
 				lines.push(
 					`      ${chalk.dim(formatPolicyLine(provider, metadataIdentity(report), report.limits, policyOptions))}`,
@@ -769,11 +780,7 @@ function historyAccountLabel(entry: UsageHistoryEntry): string {
 }
 
 function historyStatus(fraction: number | undefined, status: UsageHistoryEntry["status"]): LimitStatus {
-	if (status && status !== "unknown") return status;
-	if (fraction === undefined) return "unknown";
-	if (fraction >= 1) return "exhausted";
-	if (fraction >= 0.8) return "warning";
-	return "ok";
+	return resolveUsageStatus({ status, usedFraction: fraction });
 }
 
 /** Peak-per-bucket sparkline over [sinceMs, nowMs]; empty buckets render dim dots. */
@@ -1193,10 +1200,13 @@ export async function runUsageCommand(cmd: UsageCommandArgs): Promise<void> {
 			: undefined;
 
 		if (cmd.json) {
+			// Merge per-credential probes of one account-wide pool first, so the
+			// JSON surface reports the same accounts and capacity as the text view.
+			const displayReports = collapseSharedReports(filteredReports);
 			// Drop the heavy provider-specific `raw` payload — same shape as the
 			// broker/gateway `/v1/usage` endpoints.
-			let trimmed = filteredReports.map(({ raw: _raw, ...rest }) => rest);
-			let unreportedAccounts = collectUnreportedAccounts(filteredReports, accounts);
+			let trimmed = displayReports.map(({ raw: _raw, ...rest }) => rest);
+			let unreportedAccounts = collectUnreportedAccounts(displayReports, accounts);
 			if (redaction) {
 				trimmed = trimmed.map(report => redactReportForJson(report, redaction));
 				unreportedAccounts = unreportedAccounts.map(account => ({
@@ -1210,9 +1220,9 @@ export async function runUsageCommand(cmd: UsageCommandArgs): Promise<void> {
 				}));
 			}
 			const capacity: Record<string, ProviderWindowStat[]> = {};
-			for (const report of filteredReports) {
+			for (const report of displayReports) {
 				if (capacity[report.provider]) continue;
-				const stats = computeProviderWindowStats(filteredReports.filter(peer => peer.provider === report.provider));
+				const stats = computeProviderWindowStats(displayReports.filter(peer => peer.provider === report.provider));
 				if (stats.length > 0) capacity[report.provider] = stats;
 			}
 			let disabledForJson = disabled.filter(summary => isActionableDisable(summary, accounts));
