@@ -130,7 +130,10 @@ function convertSchemaForm(schema: unknown): unknown {
 
 	// Ref form: { ref: "MyType" } → { $ref: "#/$defs/MyType" }
 	if (isJTDRef(schema)) {
-		return { $ref: `#/$defs/${schema.ref}` };
+		// `$defs` keys keep raw names and the in-repo $ref resolvers only decode
+		// `~0`/`~1` pointer tokens, so the name must not be percent-encoded.
+		const name = schema.ref.replace(/~/g, "~0").replace(/\//g, "~1");
+		return { $ref: `#/$defs/${name}` };
 	}
 
 	// Empty form: {} → {} (accepts anything)
@@ -359,13 +362,33 @@ function normalizeJsonSchemaNode(schema: unknown): unknown {
 }
 
 /**
+ * Convert a JTD document, mapping the root `definitions` map (RFC 8927 §2.2.1) to
+ * JSON Schema `$defs` so `{ ref: "X" }` → `{ $ref: "#/$defs/X" }` resolves; without
+ * this the refs dangle and consumers drop the whole schema as unvalidatable.
+ */
+function convertJtdDocument(schema: unknown): unknown {
+	if (!isRecord(schema) || !isRecord(schema.definitions)) {
+		return convertSchema(schema);
+	}
+	const $defs = Object.fromEntries(
+		Object.entries(schema.definitions).map(([name, definition]) => [name, convertSchema(definition)]),
+	);
+	const root: Record<string, unknown> = {};
+	for (const [key, value] of Object.entries(schema)) {
+		if (key !== "definitions") root[key] = value;
+	}
+	const convertedRoot = convertSchema(root) as Record<string, unknown>;
+	return { ...convertedRoot, $defs };
+}
+
+/**
  * Convert JTD schema to JSON Schema.
  * If already JSON Schema, returns as-is.
  */
 export function jtdToJsonSchema(schema: unknown): unknown {
 	if (isJTDSchema(schema)) {
 		// convertSchema is recursive; re-walking its JSON Schema output caused #1345.
-		return convertSchema(schema);
+		return convertJtdDocument(schema);
 	}
 	return normalizeJsonSchemaNode(schema);
 }
