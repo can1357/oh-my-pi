@@ -13203,18 +13203,17 @@ export class AgentSession implements SettingsScope {
 	 *
 	 * Startup resolves the active model from the pre-discovery catalog snapshot
 	 * (`main.ts` fires `refreshInBackground` only after the session is built), so
-	 * a discovery-backed provider that re-clamps or splits a selector after the
-	 * fact leaves the live model holding stale metadata. GitHub Copilot caps a
-	 * tiered base selector (e.g. `github-copilot/gpt-5.6-sol`) to its default-tier
-	 * context window and synthesizes a separate `-1m` sibling only during live
-	 * discovery; the bundled base entry still carries the full long-context
-	 * window, so a fresh session runs with the 1.05M window that contradicts the
-	 * 400K catalog value until the user re-selects the same model. Re-look-up the
-	 * active selector post-discovery and, when its context window changed, fold
-	 * the refreshed spec into the live model. Same selector, so this is a metadata
+	 * a discovery-backed provider that refines a selector after the fact leaves
+	 * the live model holding stale metadata. GitHub Copilot caps a tiered base
+	 * selector (e.g. `github-copilot/gpt-5.6-sol`) to its default-tier context
+	 * window only during live discovery (issue #10488); a cold Codex cache binds
+	 * the bundled row whose `serviceTiers` omit the account's `ultrafast`, so the
+	 * tier is dropped from every request (issue #14778). Re-look-up the active
+	 * selector post-discovery and, when any of its metadata changed, fold the
+	 * refreshed spec into the live model. Same selector, so this is a metadata
 	 * refresh with no provider-session reset; reconcile model-dependent tools and
 	 * append-only state before `model_changed` notifies the status line and RPC
-	 * subscribers. Issue #10488.
+	 * subscribers.
 	 */
 	async #rebindActiveModelAfterModelDiscovery(): Promise<void> {
 		const boundAtStartup = this.model;
@@ -13227,7 +13226,7 @@ export class AgentSession implements SettingsScope {
 		const current = this.model;
 		if (!current || !modelsAreEqual(current, boundAtStartup)) return;
 		const refreshed = this.#modelRegistry.find(current.provider, current.id);
-		if (!refreshed || refreshed.contextWindow === current.contextWindow) return;
+		if (!refreshed || Bun.deepEquals(refreshed, current)) return;
 		this.agent.setModel(refreshed);
 		await this.#reconcileModelDependentState(current, refreshed);
 		if (this.#isDisposed) return;

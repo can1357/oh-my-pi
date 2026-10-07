@@ -13,6 +13,7 @@ import {
 	type Model,
 	type ModelUsageHealth,
 	type ProviderSessionState,
+	shouldSendServiceTier,
 	type ToolCall,
 } from "@oh-my-pi/pi-ai";
 import * as AIError from "@oh-my-pi/pi-ai/error";
@@ -22,6 +23,7 @@ import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream"
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { writeModelCache } from "@oh-my-pi/pi-catalog/model-cache";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
+import { resolveModelCacheProviderId } from "@oh-my-pi/pi-catalog/provider-models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { parseModelString } from "@oh-my-pi/pi-tui/overlays/model-selector";
 import { parseModelPattern } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
@@ -6030,6 +6032,95 @@ describe("AgentSession retry fallback", () => {
 		expect(session.model?.id).toBe("deepseek-v4-tiered");
 		expect(session.model?.contextWindow).toBe(400_000);
 		expect(session.getContextUsage()?.contextWindow).toBe(400_000);
+	});
+
+	it("rebinds the active model when discovery changes only its service tiers (#14778)", async () => {
+		// Cold Codex cache: startup binds the bundled row (priority only); the
+		// account's discovered roster adds `ultrafast` at the same context window.
+		const bundled = getBundledModel("openai-codex", "gpt-6-astra");
+		if (!bundled) throw new Error("Expected bundled openai-codex/gpt-6-astra");
+		expect(shouldSendServiceTier("ultrafast", bundled)).toBe(false);
+		authStorage.keys.setRuntime("openai-codex", "openai-codex-test-key");
+		writeModelCache(
+			resolveModelCacheProviderId("openai-codex"),
+			Date.now(),
+			[{ ...bundled, name: "GPT-6-Astra", serviceTiers: ["priority", "ultrafast"] }],
+			true,
+			"",
+			path.join(tempDir.path(), "models.db"),
+		);
+		const registry = new ModelRegistry(authStorage, path.join(tempDir.path(), "models.json"));
+		const agent = new Agent({
+			getApiKey: model => `${model.provider}-test-key`,
+			initialState: { model: bundled, systemPrompt: ["Test"], tools: [], messages: [] },
+			streamFn: () => {
+				throw new Error("Not exercised");
+			},
+		});
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings: Settings.isolated({ "compaction.enabled": false }),
+			modelRegistry: registry,
+			rebindModelAfterDiscovery: true,
+		});
+
+		const { promise: modelChanged, resolve: resolveModelChanged } = Promise.withResolvers<void>();
+		const unsubscribe = session.subscribe(event => {
+			if (event.type === "model_changed") {
+				unsubscribe();
+				resolveModelChanged();
+			}
+		});
+		registry.refreshInBackground("offline");
+		await Promise.race([
+			modelChanged,
+			scheduler.wait(5_000).then(() => {
+				throw new Error("model_changed was not emitted after discovery settled");
+			}),
+		]);
+
+		expect(session.model?.name).toBe("GPT-6-Astra");
+		expect(session.model && shouldSendServiceTier("ultrafast", session.model)).toBe(true);
+	});
+
+	it("keeps the startup model when discovery returns identical metadata", async () => {
+		const bundled = getBundledModel("openai-codex", "gpt-6-astra");
+		if (!bundled) throw new Error("Expected bundled openai-codex/gpt-6-astra");
+		authStorage.keys.setRuntime("openai-codex", "openai-codex-test-key");
+		writeModelCache(
+			resolveModelCacheProviderId("openai-codex"),
+			Date.now(),
+			[{ ...bundled }],
+			true,
+			"",
+			path.join(tempDir.path(), "models.db"),
+		);
+		const registry = new ModelRegistry(authStorage, path.join(tempDir.path(), "models.json"));
+		const agent = new Agent({
+			getApiKey: model => `${model.provider}-test-key`,
+			initialState: { model: bundled, systemPrompt: ["Test"], tools: [], messages: [] },
+			streamFn: () => {
+				throw new Error("Not exercised");
+			},
+		});
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings: Settings.isolated({ "compaction.enabled": false }),
+			modelRegistry: registry,
+			rebindModelAfterDiscovery: true,
+		});
+		let modelChangedEvents = 0;
+		session.subscribe(event => {
+			if (event.type === "model_changed") modelChangedEvents++;
+		});
+		registry.refreshInBackground("offline");
+		await registry.awaitInitialBackgroundRefresh();
+		await scheduler.wait(50);
+
+		expect(modelChangedEvents).toBe(0);
+		expect(session.model).toBe(bundled);
 	});
 
 	it("warns on unknown or malformed model-selector chain keys at startup", () => {

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed sessions started on a cold Codex model cache keeping the bundled model row after discovery, which silently dropped `--service-tier ultrafast` and refused `/fast ultra` until restart ([#14778](https://github.com/can1357/oh-my-pi/issues/14778))
+
 ## [18.8.0] - 2026-10-07
 
 ### Added
