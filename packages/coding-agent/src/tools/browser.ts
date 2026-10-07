@@ -307,7 +307,7 @@ async function invokeBrowser(
 			case "open":
 				return await openBrowser(session, name, parsed, details, timeoutMs, context.signal, context);
 			case "close":
-				return await closeBrowser(session, name, parsed, details, timeoutMs, context.signal);
+				return await closeBrowser(name, parsed, details, timeoutMs, context.signal);
 			case "tabs":
 				details.value = listTabs();
 				return toolResult(details).done();
