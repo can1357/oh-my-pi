@@ -202,6 +202,12 @@ async fn host_arg(filesystem: &pi_vfs::Fs, arg: &OsStr) -> Option<OsString> {
 		return Some(host.into_os_string());
 	}
 	let (name, value) = text.split_once('=')?;
+	// Only an option name may carry an attached URL. A URL of its own that
+	// happens to embed one in a query string (`https://host/cb?next=local://x`)
+	// is one opaque string to the program receiving it.
+	if name.contains("://") {
+		return None;
+	}
 	let host = host_path(filesystem, Path::new(value)).await?;
 	let mut rewritten = OsString::from(name);
 	rewritten.push("=");
@@ -315,6 +321,13 @@ pub async fn compose_std_command<S: AsRef<OsStr>, SE: extensions::ShellExtension
 			if v.value().is_set() {
 				cmd.env(k.as_str(), v.value().to_cow_str(context.shell).as_ref());
 			}
+		}
+		// A child started in the directory a URL aliases must not be told its
+		// working directory is the URL: anything reading `PWD` directly would
+		// disagree with its own `getcwd()`. The shell's own `$PWD` keeps the
+		// URL spelling; only the child's environment is corrected.
+		if spawn_dir != working_dir {
+			cmd.env("PWD", &spawn_dir);
 		}
 		// Set _ to the resolved command path for external commands.
 		cmd.env("_", command_name);

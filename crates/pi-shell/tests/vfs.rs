@@ -322,10 +322,11 @@ async fn external_commands_receive_host_paths_for_backed_url_arguments() {
 	let mut shell = virtual_shell(directory.path()).await;
 	let parameters = capture_parameters(&shell, &output, &error);
 	#[cfg(unix)]
-	let script = r#"/bin/sh -c 'printf "%s\n" "$0" "$1" "$2"' virtual://docs/a.txt --data-dir=virtual://docs https://example.com/a.txt"#;
+	let script = r#"/bin/sh -c 'printf "%s\n" "$0" "$1" "$2" "$3"' virtual://docs/a.txt --data-dir=virtual://docs https://example.com/a.txt 'https://example.com/?next=virtual://docs'"#;
 	#[cfg(windows)]
 	let script = "cmd.exe /c echo virtual://docs/a.txt && cmd.exe /c echo \
-	              --data-dir=virtual://docs && cmd.exe /c echo https://example.com/a.txt";
+	              --data-dir=virtual://docs && cmd.exe /c echo https://example.com/a.txt && \
+	              cmd.exe /c echo 'https://example.com/?next=virtual://docs'";
 	let result = shell
 		.run_string(script, &SourceInfo::from("vfs-external-args"), &parameters)
 		.await
@@ -346,6 +347,10 @@ async fn external_commands_receive_host_paths_for_backed_url_arguments() {
 	assert!(
 		stdout.contains("https://example.com/a.txt"),
 		"an unrouted scheme was rewritten: {stdout}"
+	);
+	assert!(
+		stdout.contains("https://example.com/?next=virtual://docs"),
+		"a url embedded in a query string was rewritten: {stdout}"
 	);
 }
 

@@ -93,13 +93,16 @@ describe("bash internal URLs through the shell filesystem", () => {
 
 	it("starts an external program in the directory a URL working directory aliases", async () => {
 		const script = path.join(tempDir, "cwd.js");
-		await fs.writeFile(script, "console.log(process.cwd());\n");
+		await fs.writeFile(script, "console.log(process.cwd());\nconsole.log(process.env.PWD);\n");
 		await fs.mkdir(path.join(localRoot, "work"), { recursive: true });
 
 		const { text, isError } = await run(`'${process.execPath}' '${script}'`, "local://work");
 
+		const work = path.join(localRoot, "work");
 		expect(isError).toBeUndefined();
-		expect(text).toContain(path.join(localRoot, "work"));
+		// `PWD` must agree with `getcwd()`: a program reading the variable
+		// directly cannot open the URL spelling.
+		expect(text).toContain(`${work}\n${work}`);
 	});
 
 	it("fails a redirection into a read-only scheme", async () => {
