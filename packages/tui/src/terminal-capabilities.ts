@@ -29,6 +29,7 @@ export enum NotifyProtocol {
 	Osc9 = "\x1b]9;",
 }
 
+/** Terminal family used to select renderer and escape-sequence capabilities. */
 export type TerminalId =
 	| "kitty"
 	| "ghostty"
@@ -42,6 +43,7 @@ export type TerminalId =
 	| "rio"
 	| "tern"
 	| "monstar"
+	| "vte"
 	| "base"
 	| "trueColor";
 
@@ -329,6 +331,26 @@ function parseMajorMinorVersion(versionRaw?: string): { major: number; minor: nu
 	return { major, minor };
 }
 
+function vteVersion(env: NodeJS.ProcessEnv): number | null {
+	const raw = env.VTE_VERSION;
+	if (!raw || !/^\d+$/u.test(raw)) return null;
+	const version = Number(raw);
+	return Number.isSafeInteger(version) ? version : null;
+}
+
+/**
+ * Whether the active emulator is VTE rather than a child terminal that merely
+ * inherited `VTE_VERSION`. VTE pins `COLORTERM=truecolor` and defaults `TERM`
+ * to `xterm-256color`; emulators launched from it either replace `TERM`
+ * (xterm, foot, st, urxvt) or export their own marker (xterm, Konsole). A VTE
+ * host that overrides `TERM` stays on the conservative `trueColor` fallback.
+ */
+function isVteHost(env: NodeJS.ProcessEnv): boolean {
+	if ((vteVersion(env) ?? 0) < 5000) return false;
+	if (env.TERM !== "xterm-256color" || env.COLORTERM !== "truecolor") return false;
+	return !env.XTERM_VERSION && !env.KONSOLE_VERSION;
+}
+
 /**
  * Returns true when running in Windows Terminal with known SIXEL support.
  *
@@ -465,13 +487,12 @@ export function detectRectangularSgrSupport(terminalId: TerminalId, env: NodeJS.
  *
  * This is an underline-style capability, not a color depth, so it is keyed on
  * the detected terminal, never on `TERM`/`COLORTERM`. kitty, Ghostty, WezTerm,
- * and iTerm2 (>= 3.5) implement the full pair. Apple Terminal does NOT: it
- * renders `CSI 4 : 0 m` (the reset half) as a solid black background that
- * persists to end of line, and ignores SGR 58/59 — so it, along with every
- * other unproven terminal, gets the flat underline instead. Disabled under any
- * multiplexer: GNU screen and older tmux drop colon-form SGR, and the outer
- * terminal's id leaks into the session env, so a proven id is not proof the
- * bytes survive — the same reason DECCARA and synchronized output gate on it.
+ * VTE (>= 0.52), and iTerm2 (>= 3.5) implement the full pair. Apple Terminal
+ * does NOT: it renders `CSI 4 : 0 m` (the reset half) as a solid black
+ * background that persists to end of line, and ignores SGR 58/59 — so it,
+ * along with every other unproven terminal, gets the flat underline instead.
+ * Disabled under multiplexers: the outer terminal's capabilities can leak into
+ * the session environment without the escapes surviving the intermediate layer.
  */
 export function detectStyledUnderlineSupport(terminalId: TerminalId, env: NodeJS.ProcessEnv = Bun.env): boolean {
 	// A multiplexer in the path (GNU screen, older tmux) does not forward the
@@ -484,6 +505,8 @@ export function detectStyledUnderlineSupport(terminalId: TerminalId, env: NodeJS
 		case "monstar":
 		case "wezterm":
 			return true;
+		case "vte":
+			return (vteVersion(env) ?? 0) >= 5200;
 		case "iterm2": {
 			// The full curly-and-colored pair did not ship together until iTerm2 3.5
 			// (curly first targeted 3.3.12; SGR 58/59 underline color was beta,
@@ -676,6 +699,9 @@ const KNOWN_TERMINALS = Object.freeze({
 	// Fallback terminals
 	base: new TerminalInfo("base", null, false, false, NotifyProtocol.Bell),
 	trueColor: new TerminalInfo("trueColor", null, true, false, NotifyProtocol.Bell),
+	// OSC 8 is available since VTE 0.50; styled underlines since 0.52.
+	// Keep BEL notifications and unproven graphics/rendering protocols off.
+	vte: new TerminalInfo("vte", null, true, true, NotifyProtocol.Bell),
 	// Recognized terminals
 	kitty: new TerminalInfo("kitty", ImageProtocol.Kitty, true, true, NotifyProtocol.Osc99, true, true, true),
 	ghostty: new TerminalInfo("ghostty", ImageProtocol.Kitty, true, true, NotifyProtocol.Osc9, false, false, false, 2),
@@ -783,6 +809,9 @@ export function detectTerminalId(env: NodeJS.ProcessEnv = Bun.env): TerminalId {
 
 	if (TERM?.toLowerCase().includes("ghostty")) return "ghostty";
 	if (TERM && caseEq(TERM, "monstar")) return "monstar";
+
+	// VTE_VERSION identifies the outer emulator, not a multiplexer in the path.
+	if (!isInsideTerminalMultiplexer(env) && isVteHost(env)) return "vte";
 
 	if (COLORTERM) {
 		if (caseEq(COLORTERM, "truecolor") || caseEq(COLORTERM, "24bit")) return "trueColor";

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed wrapped URLs opening as fragments and styled underlines staying off by default in VTE terminals such as Ptyxis and GNOME Terminal ([#14807](https://github.com/can1357/oh-my-pi/issues/14807)).
+
 ## [18.8.0] - 2026-10-07
 
 ### Added

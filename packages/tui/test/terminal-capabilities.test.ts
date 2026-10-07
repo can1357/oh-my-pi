@@ -103,10 +103,42 @@ describe("detectTerminalId", () => {
 		expect(getTerminalInfo(id).notifyProtocol).toBe(NotifyProtocol.Osc9);
 	});
 
-	it("falls back to trueColor on VTE/Ptyxis environments — VTE OSC 9 is ConEmu progress, not a notification protocol", () => {
-		const env = { TERM: "xterm-256color", TERM_PROGRAM: "", COLORTERM: "truecolor", VTE_VERSION: "8400" };
+	it("recognizes VTE/Ptyxis for OSC 8 and styled underlines without enabling unrelated protocols", () => {
+		const env = { TERM: "xterm-256color", COLORTERM: "truecolor", VTE_VERSION: "8401" };
+		const id = detectTerminalId(env);
+		const info = getTerminalInfo(id);
 
-		expect(detectTerminalId(env)).toBe("trueColor");
+		expect(id).toBe("vte");
+		expect(shouldEnableHyperlinksByDefault(env, id)).toBe(true);
+		expect(detectStyledUnderlineSupport(id, env)).toBe(true);
+		expect(info.trueColor).toBe(true);
+		expect(info.notifyProtocol).toBe(NotifyProtocol.Bell);
+		expect(info.imageProtocol).toBeNull();
+		expect(info.supportsTextSizing).toBe(false);
+		expect(shouldEnableSynchronizedOutputByDefault(env, id)).toBe(false);
+	});
+
+	it("enables VTE capabilities only at their supported versions and outside multiplexers", () => {
+		const older = { TERM: "xterm-256color", COLORTERM: "truecolor", VTE_VERSION: "5000" };
+		expect(detectTerminalId({ ...older, VTE_VERSION: "4999" })).toBe("trueColor");
+		expect(detectTerminalId({ ...older, VTE_VERSION: "5e3" })).toBe("trueColor");
+		expect(detectTerminalId(older)).toBe("vte");
+		expect(shouldEnableHyperlinksByDefault(older, "vte")).toBe(true);
+		expect(detectStyledUnderlineSupport("vte", { ...older, VTE_VERSION: "5199" })).toBe(false);
+		expect(detectStyledUnderlineSupport("vte", { ...older, VTE_VERSION: "5200" })).toBe(true);
+		expect(detectTerminalId({ ...older, VTE_VERSION: "8401", TERM: "screen-256color" })).toBe("trueColor");
+		expect(detectTerminalId({ ...older, VTE_VERSION: "8401", TERM_PROGRAM: "kitty" })).toBe("kitty");
+	});
+
+	it("ignores VTE_VERSION inherited by a non-VTE emulator launched from a VTE terminal", () => {
+		// VTE exports VTE_VERSION to every child, so xterm/Konsole/foot started
+		// from Ptyxis inherit it while owning their own PTY.
+		const inherited = { COLORTERM: "truecolor", VTE_VERSION: "8401" };
+		expect(detectTerminalId({ ...inherited, TERM: "xterm", XTERM_VERSION: "XTerm(397)" })).toBe("trueColor");
+		expect(detectTerminalId({ ...inherited, TERM: "xterm-256color", XTERM_VERSION: "XTerm(397)" })).toBe("trueColor");
+		expect(detectTerminalId({ ...inherited, TERM: "xterm-256color", KONSOLE_VERSION: "250401" })).toBe("trueColor");
+		expect(detectTerminalId({ ...inherited, TERM: "foot" })).toBe("trueColor");
+		expect(detectTerminalId({ VTE_VERSION: "8401", TERM: "xterm-256color", COLORTERM: "24bit" })).toBe("trueColor");
 	});
 });
 
