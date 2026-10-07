@@ -253,63 +253,35 @@ the identities live on the host, so the boundary has to be reported across.
 ## What a byte charge means
 
 One charge per entry, levied at admission and refunded when the entry leaves the
-queue or is discarded. For a frame it is the serialized length in bytes. For a
-lazy batch it is the size of the data the iterator keeps reachable — the caller
-declares it, because only the caller knows what its generator closed over, and
-`CollabHost` passes the size of the snapshot it retained, re-measured after image
-stripping.
+queue or is discarded. A frame is charged its serialized UTF-8 byte length. A
+lazy batch is charged for the data its iterator retains, as declared by its caller.
+`CollabHost` sums the bounded snapshot-entry byte lengths, the encoded welcome
+byte length, and the serialized replayed asks. Image stripping and entry bounding
+finish before this charge is calculated.
 
-What that declaration is, exactly: `Buffer.byteLength(JSON.stringify(snapshot))`,
-the serialized form in UTF-8 bytes — the unit a frame is charged in and the unit
-the budget is named in. Not measured retained memory: a JS string costs 1 byte per
-character while it stays Latin-1 and 2 once it does not, so for CJK text this
-figure over-reads the heap by about 1.5x, where the UTF-16 code-unit count it
-replaced under-read it by 2x. Both directions of error cost something.
-Over-declaring refuses joins the budget has room for and sheds other guests to
-make room for memory nobody is holding, which is why the host measures after
-stripping and not before. Under-declaring lets the queue hold more memory than the
-nominal budget: the bound is on declared charge, which is a proxy for the heap and
-not a measurement of it.
+The declaration approximates retained memory; it does not measure the heap. UTF-8
+bytes and JavaScript string storage differ, and arrays and objects add overhead.
+Over-declaring can shed guests unnecessarily, while under-declaring permits more
+retained memory than the nominal budget. The queue invariant bounds declarations.
 
-`WELCOME_IMAGE_STRIP_THRESHOLD` deliberately keeps comparing UTF-16 code units,
-against the same serialization. It is not a queue charge and it was tuned in that
-unit; in bytes it would fire at roughly a third of the true size on a session
-written in CJK and take that guest's images out of replicated history three times
-sooner. Stripping is lossy, so the two comparisons use different units on purpose.
+`WELCOME_IMAGE_STRIP_THRESHOLD` now compares the snapshot entries' serialized UTF-8
+byte lengths. Upstream serialization strips images from private copies when that
+sum exceeds the threshold or an entry cannot serialize. The live session stays
+unchanged. Entries that still exceed `MAX_REPLICATED_PAYLOAD_BYTES` or cannot be
+serialized pass through the bounded serializer, which can emit a placeholder.
 
-That matters because a batch is one entry that can hold a whole cloned session:
-`snapshotForReplication()` deep-clones per call, and the clone stays reachable
-until the last chunk drains. Charged as nothing, repeated joins stacked clone on
-clone — 321 MB of heap growth for a 3.8 MB session, measured over the in-memory
-relay — while the 16 MiB budget reported an empty queue. Bytes serialized as
-chunks pass through are _not_ charged again: one chunk is materialized at a time,
-so the retained charge is the larger and the longer-lived of the two. Exactly one,
-including while the transport is backpressured — the drain advances the head entry
-before it waits, so a parked batch holds the chunk it is about to send. It does
-that because advancing is also what _releases_ a batch: resuming the generator past
-its last frame is what lets go of the clone. Waiting first kept the whole snapshot
-reachable, and the entry queued, charged and shedable, for as long as the socket
-buffer took to drain — so the room could shed a guest over a snapshot already in
-the buffer and tell it to rejoin. Trading a chunk held during a park for a whole
-session released at the end of one is the right way round.
-`SNAPSHOT_CHUNK_BYTES` is a _soft_ cap on a chunk — `#snapshotChunks` always puts
-at least one entry in a chunk, so an entry larger than the cap ships in a chunk of
-its own. Behind it there is **no enforced per-entry ceiling at all**, and this note
-claimed one twice before saying so. `shrinkForReplication` bounds two axes, long
-strings and long array tails, and returns its last pass whether or not the result
-fits; `MAX_REPLICATED_PAYLOAD_BYTES` is the threshold that decides whether to try,
-not a limit on what comes back. Measured, unchanged, against a nominal 1 MiB: an
-entry whose object key is 17 MiB comes back at 17,825,799 bytes, an object of
-200,000 short keys at 5,377,781, and a 50,000-deep nesting throws
-`RangeError: Maximum call stack size exceeded` out of the walk. The comparison is
-also in UTF-16 code units, so a CJK entry of 700,112 code units passes the
-threshold untouched at 2,100,112 bytes.
+`snapshotForReplication()` returns live data. The host synchronously serializes the
+welcome and entries before queueing the batch, so later session rewrites cannot
+change an admitted snapshot or its declared charge. The iterator retains encoded
+strings rather than a cloned session, and releases entry strings as it builds
+chunks. Historical testing of the earlier cloned-snapshot implementation measured
+321 MB of heap growth for a 3.8 MB session when batches were charged zero bytes.
 
-Nothing downstream re-checks, so the real ceiling on a chunk is whatever the relay
-enforces: a payload past its `maxPayloadLength` closes the host socket with 1006,
-which `CollabSocket` treats as transient and retries into the same send — issue
-#3739, the loop the shrink helper was written to break. It breaks it for the shape
-that caused it, a single giant string, and not in general.
+Chunks are not charged again. The original charge lasts until the batch completes
+or is discarded, including while the transport is backpressured. The drain
+advances before waiting for socket capacity so a completed batch is released
+without waiting for the socket buffer to empty. `SNAPSHOT_CHUNK_BYTES` remains a
+soft chunk cap: one bounded entry larger than that cap occupies its own chunk.
 
 Two consequences worth stating. An entry with nothing ahead of it is admitted
 whatever it costs, so a session larger than the whole budget is still shareable
@@ -394,7 +366,7 @@ is worth a transcript line.
 | Bound                                                 | Value                   | Why this number                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
 | ----------------------------------------------------- | ----------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `MAX_PENDING_SENDS`                                   | 256                     | Entries, not bytes. Deep enough to ride out a reconnect without buffering a session's worth of live traffic                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
-| `MAX_PENDING_SEND_BYTES`                              | 16 MiB                  | Declared charge, once per entry, as a proxy for retained memory — a `transcript` reply alone can be 4 MiB and a welcome batch holds a whole session clone. Enough for several concurrent joins on a normal session; a lone entry is admitted past it so an unusually large one still ships, and that entry's charge is then excluded so live traffic can queue behind it rather than evict it. The invariant is on the declarations, not on the heap and not on cumulative work: the queue holds at most this much charge, plus at most one entry admitted past it by the empty-queue floor. Exact, not approximate, and no longer conditional on the caller — an entry over the budget is exempt by construction, so the comparison sums at most `MAX_PENDING_SENDS` terms of at most 16 MiB and stays inside exact integer arithmetic, and `sendBatch` maps a declaration outside the finite non-negative domain onto the oversized path rather than into the sum |
+| `MAX_PENDING_SEND_BYTES`                              | 16 MiB                  | Declared charge, once per entry, as a proxy for retained memory — a `transcript` reply alone can be 4 MiB and a welcome batch holds the encoded snapshot. Enough for several concurrent joins on a normal session; a lone entry is admitted past it so an unusually large one still ships, and that entry's charge is then excluded so live traffic can queue behind it rather than evict it. The invariant is on the declarations, not on the heap and not on cumulative work: the queue holds at most this much charge, plus at most one entry admitted past it by the empty-queue floor. Exact, not approximate, and no longer conditional on the caller — an entry over the budget is exempt by construction, so the comparison sums at most `MAX_PENDING_SENDS` terms of at most 16 MiB and stays inside exact integer arithmetic, and `sendBatch` maps a declaration outside the finite non-negative domain onto the oversized path rather than into the sum |
 | `MAX_PEER_PENDING_SENDS`                              | 32                      | Legitimate targeted traffic for one peer is a welcome-plus-snapshot and a handful of `ui-request`s, so a peer holding this many is spamming or hopelessly behind                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
 | `MAX_PEER_PENDING_BATCHES`                            | 1                       | A batch always follows a welcome that re-primes the guest's accumulator, so only the newest welcome+snapshot pair is self-consistent. With the welcome inside the generator this reads as one snapshot per peer                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
 | `MAX_RETIRED_PEERS`                                   | 256                     | A memory backstop, not the correctness bound. Correctness is an _ordering_ obligation — a record must outlive the frames already on `#recvChain` when the departure arrived — and connection churn can cross any count while an earlier frame is still decrypting, so eviction skips records whose obligation is unmet — undispatched frames, or a reply still being computed for the id — and this bounds only the remainder. Capped at all because relay ids climb for the room's lifetime, and a client with the view link can connect and disconnect in a loop                                                                                                                                                                                                                                                                                                                                                                                                  |
@@ -403,22 +375,12 @@ is worth a transcript line.
 ## Known gaps
 
 - **`hello` re-serializes the whole snapshot.** Every `hello` runs
-  `snapshotForReplication()` and `JSON.stringify` over it for the image-strip
-  threshold, before any admission decision. A guest can repeat `hello` at will, so
+  `snapshotForReplication()` and serializes each entry to determine image stripping
+  and bounded wire payloads, before any admission decision. A guest can repeat `hello` at will, so
   this is unbounded inbound CPU that the queue policy cannot see. The natural fix
   is to reject a second `hello` from a peer already in `#peers` — a reconnecting
   guest always gets a fresh relay id, so a repeat from a live id is never
   legitimate — but it changes join semantics and is not done here.
-- **`shrinkForReplication` has no enforced ceiling.** It bounds string length and
-  array length; object key length, object key _count_ and nesting depth are all
-  unbounded, and the final pass is returned without a size check. Enforcing one
-  needs a decision this policy cannot make on its own: the helper's contract is
-  that the wire shape survives — only string leaves and array tails change, so
-  discriminators and ids reach the guest intact — and no bounded fallback exists
-  inside that contract. Anything that actually fits has to abandon the shape, which
-  is a replication-semantics change (what a guest sees in place of an entry the
-  host cannot ship) rather than a queue-policy one. The code is unchanged from
-  `main`, so this is not something the admission work introduced.
 - **A transcript read pins a retirement record for as long as it takes.** Each
   `fetch-transcript` reply is capped at `TRANSCRIPT_READ_CAP` (4 MiB) and costs the
   asker one queue entry, so the queue side is accounted for and the work per read

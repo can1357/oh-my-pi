@@ -152,9 +152,8 @@ describe("InteractiveMode tiny-title prewarm", () => {
 			order.push("pending-row");
 			return { text: input.text, cancelled: false, started: false };
 		});
-		const generateTitle = vi.spyOn(session, "generateTitle").mockImplementation(async () => {
+		const startTitle = vi.spyOn(session, "maybeStartTitleGeneration").mockImplementation(() => {
 			order.push("title-gen");
-			return null;
 		});
 		const onInput = vi.fn();
 		mode.onInputCallback = onInput;
@@ -162,7 +161,7 @@ describe("InteractiveMode tiny-title prewarm", () => {
 		await mode.editor.onSubmit?.("investigate the failing title worker");
 
 		expect(order).toEqual(["pending-row", "title-gen"]);
-		expect(generateTitle).toHaveBeenCalledWith("investigate the failing title worker");
+		expect(startTitle).toHaveBeenCalledWith("investigate the failing title worker");
 		expect(onInput).toHaveBeenCalledTimes(1);
 	});
 });

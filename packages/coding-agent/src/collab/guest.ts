@@ -524,6 +524,10 @@ export class CollabGuestLink {
 			...this.#ctx.pendingTools.values(),
 			...this.#ctx.eventController.takeDisplaceableComponents(),
 		];
+		// Drop turn-scoped controller state (coalesced message_update timer,
+		// in-flight anchors) so a pending pre-boundary snapshot cannot flush
+		// into the replacement transcript.
+		this.#ctx.eventController.resetTranscriptAnchors();
 		this.#clearTransientUi();
 		this.#clearAgentMirror();
 		this.state = pending.state;
@@ -692,9 +696,9 @@ export class CollabGuestLink {
 			!this.#assistantStreamSynced
 		) {
 			this.#assistantStreamSynced = true;
-			void this.#ctx.eventController.handleEvent({ type: "message_start", message: event.message });
+			this.#dispatchEvent({ type: "message_start", message: event.message });
 		}
-		void this.#ctx.eventController.handleEvent(event);
+		this.#dispatchEvent(event);
 		// Lifecycle mirror: the guest's own agent loop never runs, so the session's
 		// extension-event path stays silent. Route the mirrored wire event through
 		// the same mapping the session uses so extension-installed lifecycle
@@ -704,6 +708,18 @@ export class CollabGuestLink {
 		// application nor completes out of order.
 		const runner = this.#ctx.session.extensionRunner;
 		if (runner) this.#lifecycleEmitter.emit(runner, event);
+	}
+
+	/**
+	 * Feed a mirrored event through the same pipeline as a local session:
+	 * `message_update` joins the controller's coalesced streaming rebuild and
+	 * every other event runs serialized behind it, so a mirrored stream tail
+	 * cannot reorder (message_update → message_end → agent_end).
+	 */
+	#dispatchEvent(event: AgentSessionEvent): void {
+		this.#ctx.eventController.dispatchSessionEvent(event).catch(err => {
+			logger.warn("collab guest event dispatch failed", { type: event.type, error: String(err) });
+		});
 	}
 
 	/**
@@ -927,6 +943,8 @@ export class CollabGuestLink {
 	async #resumeLocalSession(): Promise<void> {
 		this.#ctx.statusLine.setCollabStatus(null);
 		this.#flushPendingTranscripts();
+		// A pending coalesced mirror message_update must not flush after leave.
+		this.#ctx.eventController.resetTranscriptAnchors();
 		this.#clearAgentMirror();
 		this.#ctx.syncRunningSubagentBadge();
 		this.#ctx.resetObserverRegistry();

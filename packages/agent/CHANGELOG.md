@@ -2,6 +2,21 @@
 
 ## [Unreleased]
 
+## [18.8.0] - 2026-10-07
+
+### Changed
+
+- Improved performance when pruning tool output and capturing telemetry messages during long-running sessions.
+
+## [18.7.0] - 2026-10-06
+### Added
+
+- Added `validateAgentToolArguments()`, the shared `lenientArgValidation`-aware tool argument validator now used by the agent loop, speculative execution, and coding-agent's Cursor, eval-bridge, and `xd://` dispatch ([#14624](https://github.com/can1357/oh-my-pi/pull/14624) by [@alphastorm](https://github.com/alphastorm))
+
+### Fixed
+
+- Fixed interrupted runs so assistant message boundaries are emitted reliably, allowing subscribers to persist and recover the interrupted turn.
+
 ## [18.6.3] - 2026-10-06
 
 ### Breaking Changes

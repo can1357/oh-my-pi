@@ -1,10 +1,14 @@
 import * as AIError from "../../error";
+import type { FetchImpl } from "../../types";
+import { isRecord } from "../../utils";
 import { generatePKCE } from "./pkce";
 import type { OAuthController, OAuthCredentials } from "./types";
 
 const CURSOR_LOGIN_URL = "https://cursor.com/loginDeepControl";
 const CURSOR_POLL_URL = "https://api2.cursor.sh/auth/poll";
 const CURSOR_REFRESH_URL = "https://api2.cursor.sh/auth/exchange_user_api_key";
+const CURSOR_PROFILE_URL = "https://cursor.com/api/auth/me";
+const CURSOR_PROFILE_TIMEOUT_MS = 3_000;
 
 const POLL_MAX_ATTEMPTS = 150;
 const POLL_BASE_DELAY = 1000;
@@ -107,10 +111,11 @@ export async function loginCursor(
 }
 
 export async function loginCursorHook(callbacks: OAuthController): Promise<OAuthCredentials> {
-	return loginCursor(
+	const credentials = await loginCursor(
 		url => callbacks.onAuth?.({ url }),
 		callbacks.onProgress ? () => callbacks.onProgress?.("Waiting for browser authentication...") : undefined,
 	);
+	return withCursorAccountEmail(credentials, callbacks.fetch ?? fetch, callbacks.signal);
 }
 
 export async function refreshCursorToken(apiKeyOrRefreshToken: string): Promise<OAuthCredentials> {
@@ -145,8 +150,57 @@ export async function refreshCursorToken(apiKeyOrRefreshToken: string): Promise<
 	};
 }
 
-export async function refreshCursorHook(credentials: OAuthCredentials): Promise<OAuthCredentials> {
-	return refreshCursorToken(credentials.refresh);
+export async function refreshCursorHook(
+	credentials: OAuthCredentials,
+	signal?: AbortSignal,
+): Promise<OAuthCredentials> {
+	const refreshed = await refreshCursorToken(credentials.refresh);
+	// A stored email survives the refresh merge; rows stored before email capture gain it here.
+	return credentials.email ? refreshed : withCursorAccountEmail(refreshed, fetch, signal);
+}
+
+/** Request headers that present `accessToken` to cursor.com as its user's web session. */
+export function cursorSessionHeaders(userId: string, accessToken: string): Record<string, string> {
+	return {
+		Accept: "application/json",
+		Cookie: `WorkosCursorSessionToken=${encodeURIComponent(`${userId}::${accessToken}`)}`,
+	};
+}
+
+/**
+ * Email of the Cursor account that owns `accessToken`, read from its cursor.com
+ * profile. Undefined when the token names no user or the profile names another.
+ */
+export async function fetchCursorAccountEmail(
+	accessToken: string,
+	fetchImpl: FetchImpl = fetch,
+	signal?: AbortSignal,
+): Promise<string | undefined> {
+	const userId = extractCursorAccessTokenUserId(accessToken);
+	if (!userId) return undefined;
+	const response = await fetchImpl(CURSOR_PROFILE_URL, { headers: cursorSessionHeaders(userId, accessToken), signal });
+	if (!response.ok) {
+		throw new AIError.ProviderHttpError(`Cursor profile request failed: ${response.status}`, response.status);
+	}
+	const payload: unknown = await response.json();
+	if (!isRecord(payload) || payload.sub !== userId || typeof payload.email !== "string") return undefined;
+	return payload.email.trim() || undefined;
+}
+
+/** Attach the account email so account policies and pickers can name this login; a failed lookup leaves it off. */
+async function withCursorAccountEmail(
+	credentials: OAuthCredentials,
+	fetchImpl: FetchImpl,
+	signal?: AbortSignal,
+): Promise<OAuthCredentials> {
+	// Refresh runs under a 10s deadline; a stalled lookup must not discard tokens the exchange already minted.
+	const timeout = AbortSignal.timeout(CURSOR_PROFILE_TIMEOUT_MS);
+	const email = await fetchCursorAccountEmail(
+		credentials.access,
+		fetchImpl,
+		signal ? AbortSignal.any([signal, timeout]) : timeout,
+	).catch(() => undefined);
+	return email ? { ...credentials, email } : credentials;
 }
 
 function decodeCursorAccessTokenPayload(token: string): unknown | undefined {

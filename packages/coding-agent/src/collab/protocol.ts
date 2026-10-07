@@ -96,6 +96,63 @@ export type CollabFrame =
 	| { t: "error"; message: string };
 
 // ═══════════════════════════════════════════════════════════════════════════
+// Pre-serialized frames: the host bounds replicated payloads by serializing
+// them, so the frames that carry them are assembled from that JSON instead of
+// stringifying the payload a second time.
+// ═══════════════════════════════════════════════════════════════════════════
+
+declare const encodedFrameBrand: unique symbol;
+
+/** A `CollabFrame`'s JSON form, produced only by the encoders below. */
+export type EncodedFrame = string & { readonly [encodedFrameBrand]: true };
+
+/**
+ * Field table for a `CollabFrame` variant: its tag under `t`, every other
+ * field mapped to its own name. Annotating an encoder's table with this makes
+ * renaming, adding, or removing a field of that variant a type error here.
+ */
+type FrameFields<T extends CollabFrame["t"]> = {
+	readonly [K in keyof Extract<CollabFrame, { t: T }>]-?: K extends "t" ? T : K;
+};
+
+const ENTRY_FIELDS: FrameFields<"entry"> = { t: "entry", entry: "entry" };
+const EVENT_FIELDS: FrameFields<"event"> = { t: "event", event: "event" };
+const SNAPSHOT_CHUNK_FIELDS: FrameFields<"snapshot-chunk"> = {
+	t: "snapshot-chunk",
+	entries: "entries",
+	final: "final",
+};
+
+const ENTRY_FRAME_HEAD = `{"t":"${ENTRY_FIELDS.t}","${ENTRY_FIELDS.entry}":`;
+const EVENT_FRAME_HEAD = `{"t":"${EVENT_FIELDS.t}","${EVENT_FIELDS.event}":`;
+const SNAPSHOT_CHUNK_HEAD = `{"t":"${SNAPSHOT_CHUNK_FIELDS.t}","${SNAPSHOT_CHUNK_FIELDS.entries}":[`;
+const SNAPSHOT_CHUNK_FINAL = `],"${SNAPSHOT_CHUNK_FIELDS.final}":`;
+
+/** The single construction point of {@link EncodedFrame}. */
+function encodedFrame(json: string): EncodedFrame {
+	return json as EncodedFrame;
+}
+
+export function encodeFrame(frame: CollabFrame): EncodedFrame {
+	return encodedFrame(JSON.stringify(frame));
+}
+
+/** `{ t: "entry", entry }` from the entry's JSON. */
+export function encodeEntryFrame(entryJson: string): EncodedFrame {
+	return encodedFrame(`${ENTRY_FRAME_HEAD}${entryJson}}`);
+}
+
+/** `{ t: "event", event }` from the event's JSON. */
+export function encodeEventFrame(eventJson: string): EncodedFrame {
+	return encodedFrame(`${EVENT_FRAME_HEAD}${eventJson}}`);
+}
+
+/** `{ t: "snapshot-chunk", entries, final }` from each entry's JSON. */
+export function encodeSnapshotChunk(entryJsons: readonly string[], final: boolean): EncodedFrame {
+	return encodedFrame(`${SNAPSHOT_CHUNK_HEAD}${entryJsons.join(",")}${SNAPSHOT_CHUNK_FINAL}${final}}`);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 // Wire envelope: [4B uint32 BE peerId][sealed payload]
 // Host→relay: peerId 0 broadcasts to all guests; peerId N targets guest N.
 // Guest→relay: always 0; the relay rewrites it to the sender's id.

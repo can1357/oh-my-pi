@@ -120,7 +120,7 @@ export function createControlHandler(
 				const publication = await backend.lookupBlob(body.key);
 				return json((publication ? { publication } : { missing: true }) satisfies EnsureBlobResponse);
 			}
-			const bytes = new Uint8Array(Buffer.from(body.data, "base64"));
+			const bytes = Buffer.from(body.data, "base64");
 			const publication = await backend.ensureBlob(body.key, body.mimeType, () => bytes);
 			if (!publication) return json({ error: "unavailable" }, 503);
 			return json({ publication } satisfies EnsureBlobResponse);

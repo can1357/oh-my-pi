@@ -365,7 +365,8 @@ export function buildModel<TApi extends Api>(spec: ModelSpec<TApi>): Model<TApi>
 	};
 	applyCatalogAssignments(model, policy.catalog);
 	applyCatalogCorrections(model, policy.catalog);
-	// Configured lifetimes replace catalog lifetimes rather than merging with them.
+	// Configured kinds and lifetimes replace catalog values rather than merging with them.
+	if (spec.kindConfig !== undefined) model.kind = spec.kindConfig;
 	if (spec.promptCacheConfig !== undefined) model.promptCache = { ...spec.promptCacheConfig };
 	return model;
 }

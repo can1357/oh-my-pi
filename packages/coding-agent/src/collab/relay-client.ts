@@ -12,7 +12,7 @@
 import { getProxyForUrl } from "@oh-my-pi/pi-ai/utils/proxy";
 import { logger } from "@oh-my-pi/pi-utils";
 import { open, sealSerialized } from "./crypto";
-import type { CollabFrame, RelayControlMessage } from "./protocol";
+import type { CollabFrame, EncodedFrame, RelayControlMessage } from "./protocol";
 import { describeThrown, packEnvelope, unpackEnvelope } from "./protocol";
 
 const RELAY_CLOSE_REASONS: Record<number, string> = {
@@ -329,10 +329,10 @@ export class CollabSocket {
 	}
 
 	/** @returns whether the frame was admitted to the queue; a caller awaiting a reply to it has to settle when it was not. */
-	send(frame: CollabFrame, targetPeer = 0): boolean {
+	send(frame: CollabFrame | EncodedFrame, targetPeer = 0): boolean {
 		if (this.#closed) return false;
 		try {
-			const serialized = JSON.stringify(frame);
+			const serialized = typeof frame === "string" ? frame : JSON.stringify(frame);
 			const prepared = Promise.withResolvers<void>();
 			this.#sendChain = Promise.all([this.#sendChain, prepared.promise]).then(() => {});
 			const admitted = this.#enqueueSend(
@@ -370,7 +370,7 @@ export class CollabSocket {
 	 * that when it was not: the guest ignores everything until a welcome arrives, so
 	 * a host that counts it as joined is describing a participant that is not there.
 	 */
-	sendBatch(frames: Iterable<CollabFrame>, targetPeer: number, retainedBytes: number): boolean {
+	sendBatch(frames: Iterable<CollabFrame | EncodedFrame>, targetPeer: number, retainedBytes: number): boolean {
 		if (this.#closed) return false;
 		// The budget is a sum of declarations, so the domain has to hold at the one
 		// place a declaration enters. `NaN` fails every comparison, which makes the
@@ -403,10 +403,10 @@ export class CollabSocket {
 	 * addressed to them — one notice per `hello` — and a peer-caused pile-up must
 	 * never reach the terminal path, so it is shed ahead of everything else.
 	 */
-	broadcastAdvisory(frame: CollabFrame): boolean {
+	broadcastAdvisory(frame: CollabFrame | EncodedFrame): boolean {
 		if (this.#closed) return false;
 		try {
-			const serialized = JSON.stringify(frame);
+			const serialized = typeof frame === "string" ? frame : JSON.stringify(frame);
 			return this.#enqueueSend([serialized].values(), 0, Buffer.byteLength(serialized), false, true);
 		} catch (err) {
 			this.#failFatal(

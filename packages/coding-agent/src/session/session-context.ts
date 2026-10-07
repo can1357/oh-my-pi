@@ -147,7 +147,7 @@ export function getRestorableSessionModels(
 	return [roleModel, defaultModel];
 }
 
-export function getLatestCompactionEntry(entries: SessionEntry[]): CompactionEntry | null {
+export function getLatestCompactionEntry(entries: readonly SessionEntry[]): CompactionEntry | null {
 	for (let i = entries.length - 1; i >= 0; i--) {
 		if (entries[i].type === "compaction") {
 			return entries[i] as CompactionEntry;

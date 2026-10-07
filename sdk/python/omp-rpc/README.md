@@ -309,6 +309,9 @@ be parsed).
   (up to 10 minutes) until credentials are stored. The flow arrives as UI
   requests: an `open_url` request (prefer `launch_url` as the copy target) and,
   for pasted-code providers, an `input` request answered with `send_ui_value()`.
+- `get_logout_accounts(provider_id)` lists a provider's stored credentials, active
+  first; `logout(provider_id, credential_id)` removes one and returns a
+  `LogoutResult` whose `remaining_source` names auth that still applies.
 - `handoff(custom_instructions=None)` returns a `HandoffResult`, or `None` when
   no handoff was produced.
 - `predict_word(text, cursor)` returns ghost text for a host-rendered composer

@@ -16,7 +16,7 @@
 import { afterEach, expect, it } from "bun:test";
 import { importRoomKey } from "@oh-my-pi/pi-coding-agent/collab/crypto";
 import { CollabHost } from "@oh-my-pi/pi-coding-agent/collab/host";
-import { COLLAB_PROTO, parseCollabLink } from "@oh-my-pi/pi-coding-agent/collab/protocol";
+import { COLLAB_PROTO, type CollabFrame, parseCollabLink } from "@oh-my-pi/pi-coding-agent/collab/protocol";
 import { CollabSocket } from "@oh-my-pi/pi-coding-agent/collab/relay-client";
 import { installInMemoryRelay, uninstallInMemoryRelay } from "./helpers/in-memory-relay";
 import {
@@ -36,6 +36,37 @@ afterEach(() => {
 
 /** Past the 16 MB budget's reach for a 1.5 MB snapshot, inside the 256-entry cap's. */
 const JOINERS = 14;
+
+it("delivers the admitted header when the live session changes before the welcome drains", async () => {
+	const relay = installInMemoryRelay();
+	const probe = instrumentRelay(relay, { throttle: false });
+	const snapshot = makeSnapshot();
+	snapshot.entries = [];
+	snapshot.header.cwd = "/tmp/admitted-workspace";
+	const seen: HostObservations = { notices: [], participantCounts: [] };
+	const ctx = makeHostContext(snapshot, seen);
+	ctx.sessionManager.snapshotForReplication = () => snapshot;
+	const host = new CollabHost(ctx);
+	cleanups.push(() => void host.stop("test done"));
+	await host.start("ws://localhost:8788");
+	probe.hostSocket().bufferedAmount = HIGH_WATER_MARK;
+	const parsed = parseCollabLink(host.link);
+	if ("error" in parsed) throw new Error(parsed.error);
+	const key = await importRoomKey(parsed.key);
+	const guest = new CollabSocket({ wsUrl: parsed.wsUrl, role: "guest", key });
+	cleanups.push(() => guest.close());
+	const frames: CollabFrame[] = [];
+	guest.onFrame = frame => frames.push(frame);
+	guest.onOpen = () => guest.send({ t: "hello", proto: COLLAB_PROTO, name: "queued-joiner" });
+	guest.connect();
+	await waitFor(() => seen.notices.some(notice => notice.includes("joined the collab session")), "join not admitted");
+	expect(frames).toEqual([]);
+	snapshot.header.cwd = "/tmp/later-workspace";
+	probe.hostSocket().bufferedAmount = 0;
+	await waitFor(() => frames.some(frame => frame.t === "snapshot-chunk" && frame.final), "welcome did not drain");
+	const welcome = frames.find(frame => frame.t === "welcome");
+	expect(welcome?.header.cwd).toBe("/tmp/admitted-workspace");
+});
 
 it("sheds an earlier guest's retained snapshot instead of holding every joiner's clone", async () => {
 	const relay = installInMemoryRelay();

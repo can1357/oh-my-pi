@@ -34,7 +34,9 @@ export interface RequestDrawerProps {
 
 /** Full detail sheet for one model request: timing, tokens, cost, ids, error, and the raw session entry. */
 export function RequestDrawer({ id, onClose }: RequestDrawerProps) {
-	const query = useQuery(["request", id], () => getRequestDetails(id ?? 0), { enabled: id !== null });
+	const query = useQuery(["request", id], ({ signal }) => getRequestDetails(id ?? 0, signal), {
+		enabled: id !== null,
+	});
 	// Never show the previous request's payload under a new id.
 	const details = query.stale ? null : query.data;
 	const status = details ? REQUEST_STATUS[requestStatus(details)] : null;

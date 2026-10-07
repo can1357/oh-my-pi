@@ -246,7 +246,11 @@ async function makeHarness(opts?: { readOnly?: boolean; rejectWith?: unknown }):
 		},
 		updateEditorTopBorder: () => {},
 		updateEditorBorderColor: () => {},
-		eventController: { handleEvent: () => Promise.resolve(), takeDisplaceableComponents: () => [] },
+		eventController: {
+			dispatchSessionEvent: () => Promise.resolve(),
+			takeDisplaceableComponents: () => [],
+			resetTranscriptAnchors: () => {},
+		},
 		syncRunningSubagentBadge: () => {},
 		showHookSelector: (
 			title: string,

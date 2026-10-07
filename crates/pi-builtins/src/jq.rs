@@ -750,24 +750,14 @@ mod read {
 
 	use super::{Cli, Val};
 
-	/// Load a file through the injected filesystem. Native files are memory
-	/// mapped when possible; everything else is read through the handle.
-	pub fn load_file(
-		fs: &BlockingFs,
-		path: &Path,
-	) -> io::Result<Box<dyn core::ops::Deref<Target = [u8]>>> {
-		let mut file = fs.open(path)?;
-		if let Some(native) = file.native()
-			// SAFETY: the mapping is read-only and dropped before any in-place
-			// replacement of the file; concurrent external truncation is the
-			// same hazard upstream jaq accepts.
-			&& let Ok(mmap) = unsafe { memmap2::Mmap::map(native) }
-		{
-			return Ok(Box::new(mmap));
-		}
+	/// Read a whole file through the injected filesystem into owned bytes.
+	///
+	/// Never memory-mapped: jq runs inside the host process, where a concurrent
+	/// truncation of a mapped file would SIGBUS the whole host.
+	pub fn load_file(fs: &BlockingFs, path: &Path) -> io::Result<Vec<u8>> {
 		let mut bytes = Vec::new();
-		file.read_to_end(&mut bytes)?;
-		Ok(Box::new(bytes))
+		fs.open(path)?.read_to_end(&mut bytes)?;
+		Ok(bytes)
 	}
 
 	pub fn invalid_data(e: impl std::error::Error + Send + Sync + 'static) -> std::io::Error {
@@ -1596,6 +1586,23 @@ mod tests {
 		assert_eq!(code, 0, "stderr: {err:?}");
 		let rewritten = std::fs::read_to_string(dir.path().join("in.json")).expect("read back");
 		assert_eq!(rewritten, "1\n");
+	}
+
+	/// Truncating an input file after jq loaded it must not fault the host
+	/// process; the loaded bytes stay readable.
+	#[test]
+	fn input_file_truncated_after_load_stays_readable() {
+		let dir = tempfile::TempDir::new().expect("tempdir");
+		let path = dir.path().join("in.json");
+		let json = format!("[{}]", vec!["1"; 8192].join(","));
+		std::fs::write(&path, &json).expect("write input");
+		let loaded = super::read::load_file(&pi_vfs::BlockingFs::native(), &path).expect("load");
+		std::fs::File::options()
+			.write(true)
+			.open(&path)
+			.and_then(|file| file.set_len(0))
+			.expect("truncate input");
+		assert_eq!(&loaded[..], json.as_bytes());
 	}
 
 	#[test]

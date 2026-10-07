@@ -309,6 +309,77 @@ describe("GuestClient frame apply", () => {
 		expect(client.getSnapshot().progress.get("Sub1")).toEqual(payload);
 	});
 
+	it("publishes streaming frames once per animation frame and flushes them with the next immediate frame", () => {
+		vi.useFakeTimers();
+		try {
+			const client = liveClient();
+			let commits = 0;
+			client.subscribe(() => commits++);
+			for (const text of ["a", "ab", "abc"]) {
+				client.applyFrameForTest(
+					{ t: "event", event: { type: "message_update", message: assistantMessage(text) } },
+					{ flush: false },
+				);
+			}
+			expect(commits).toBe(0);
+			expect(client.getSnapshot().stream).toBeNull();
+
+			vi.advanceTimersByTime(16);
+			expect(commits).toBe(1);
+			expect(client.getSnapshot().stream).toEqual(assistantMessage("abc"));
+
+			client.applyFrameForTest(
+				{ t: "event", event: { type: "message_update", message: assistantMessage("abcd") } },
+				{ flush: false },
+			);
+			client.applyFrameForTest({ t: "state", state: { ...STATE, isStreaming: true } }, { flush: false });
+			expect(commits).toBe(2);
+			expect(client.getSnapshot().stream).toEqual(assistantMessage("abcd"));
+			vi.advanceTimersByTime(16);
+			expect(commits).toBe(2);
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it("prunes subagent progress once the host stops listing the agent", () => {
+		const client = liveClient();
+		const payload = (id: string): SubagentProgressPayload => ({
+			index: 0,
+			agent: "task",
+			task: "t",
+			progress: {
+				index: 0,
+				id,
+				agent: "task",
+				status: "running",
+				task: "t",
+				recentTools: [],
+				recentOutput: [],
+				toolCount: 0,
+				requests: 0,
+				tokens: 0,
+				cost: 0,
+				durationMs: 0,
+			},
+		});
+		const sub: AgentSnapshot = { ...AGENTS[0]!, id: "Sub1", kind: "sub" };
+		client.applyFrameForTest({ t: "bus", channel: "task:subagent:progress", data: payload("Sub1") });
+		// Progress may outrun its agent's first listing: one unlisted `agents` frame keeps it.
+		client.applyFrameForTest({ t: "agents", agents: AGENTS });
+		expect(client.getSnapshot().progress.has("Sub1")).toBe(true);
+		client.applyFrameForTest({ t: "agents", agents: [...AGENTS, sub] });
+		expect(client.getSnapshot().progress.has("Sub1")).toBe(true);
+
+		const before = client.getSnapshot().progress;
+		client.applyFrameForTest({ t: "agents", agents: AGENTS });
+		expect(client.getSnapshot().progress.has("Sub1")).toBe(true);
+		expect(client.getSnapshot().progress).toBe(before);
+		client.applyFrameForTest({ t: "agents", agents: AGENTS });
+		expect(client.getSnapshot().progress.has("Sub1")).toBe(false);
+		expect(client.getSnapshot().progress).not.toBe(before);
+	});
+
 	it("bye ends the session with a reason", () => {
 		const client = liveClient();
 		client.applyFrameForTest({ t: "bye", reason: "host left" });

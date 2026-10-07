@@ -231,6 +231,23 @@ describe("pruneSupersededToolResults — tail case", () => {
 		expect(resultText(result1)).toBe(FILE_CONTENT);
 		expect(resultText(result2)).toBe(FILE_CONTENT);
 	});
+
+	test("resolves a sent result's tool call that sits before the compaction boundary", () => {
+		const [call1, result1] = readPair("src/foo.ts", FILE_CONTENT, T0);
+		const [call2, result2] = readPair("src/foo.ts", FILE_CONTENT, T0 + 1_000);
+		const entries: SessionEntry[] = [call1, result1, call2, result2];
+
+		// Boundary between call1 and result1: call1 is only reachable via the prefix lookup.
+		const result = pruneSupersededToolResults(
+			entries,
+			tokenizer,
+			cfg({ keepBoundaryId: result1.id, now: T0 + 1_000 }),
+		);
+
+		expect(result.prunedCount).toBe(1);
+		expect(resultText(result1)).toBe(SUPERSEDED_NOTICE);
+		expect(resultText(result2)).toBe(FILE_CONTENT);
+	});
 });
 
 describe("pruneSupersededToolResults — selectors", () => {
