@@ -95,6 +95,12 @@ The installer targets API level 24, stamps the addon version, and installs
 `packages/natives/native/pi_natives.android-arm64.node`. It only load-probes
 artifacts native to the current host, so a Linux builder never loads Android.
 
+The Android ARM64 addon also includes the desktop-session exports and
+declarations, keeping the API shape consistent. Its desktop backend is
+unavailable: all desktop capability flags are `false`, and capture rejects
+with `CaptureFailed`. These exports do not provide Android screen-capture or
+input support.
+
 ## Architecture
 
 `@oh-my-pi/pi-natives` publishes a small core package plus generated
