@@ -8360,9 +8360,9 @@ export class AgentSession implements SettingsScope {
 		// / eval execution record) still resumes — no tail-role enumeration needed.
 		if (this.agent.peekSteeringQueue().length > 0) return true;
 		// Follow-up-only auto-resume stays suppressed while a deliberate user interrupt is in effect
-		// (#advisorAutoResumeSuppressed, cleared on the next user prompt): the user stopped, so their
-		// queued follow-up waits for an explicit resume — even if an interleaving IRC wake turn has
-		// since left a provider-valid tail.
+		// (#advisorAutoResumeSuppressed, cleared on the next user prompt or manual retry): the user
+		// stopped, so their queued follow-up waits for an explicit resume — even if an interleaving
+		// IRC wake turn has since left a provider-valid tail.
 		if (this.#advisors.autoResumeSuppressed) return false;
 		// Follow-up-only resume has no steer to inject, so Agent.continue() continues from the
 		// existing context tail — which must itself be a valid provider tail. An injected
@@ -10786,8 +10786,12 @@ export class AgentSession implements SettingsScope {
 	}
 
 	/** Retry the last failed assistant turn when the session is idle. */
-	retry(): Promise<boolean> {
-		return this.#recovery.retry();
+	async retry(): Promise<boolean> {
+		const didRetry = await this.#recovery.retry();
+		// A manual retry is the user resuming the run they interrupted, so it lifts the
+		// interrupt's auto-resume suppression the same way a typed prompt does.
+		if (didRetry) this.#advisors.autoResumeSuppressed = false;
+		return didRetry;
 	}
 
 	// =========================================================================
