@@ -242,7 +242,11 @@ async function makeHarness(opts?: { readOnly?: boolean }): Promise<GuestUiHarnes
 		},
 		updateEditorTopBorder: () => {},
 		updateEditorBorderColor: () => {},
-		eventController: { dispatchSessionEvent: () => Promise.resolve(), takeDisplaceableComponents: () => [], resetTranscriptAnchors: () => {} },
+		eventController: {
+			dispatchSessionEvent: () => Promise.resolve(),
+			takeDisplaceableComponents: () => [],
+			resetTranscriptAnchors: () => {},
+		},
 		syncRunningSubagentBadge: () => {},
 		showHookSelector: (
 			title: string,

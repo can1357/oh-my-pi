@@ -1683,6 +1683,9 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 			if (yieldCalled) {
 				yieldInvalidatedByAsync = false;
 				yieldAcceptedAt = Date.now();
+				// Submitted: the remaining work is finalization (or waiting on owned
+				// async jobs), so stop showing the last stale self-estimate.
+				if (completionProbe) progress.completionPercent = 99;
 				args.onYieldAccepted?.();
 			}
 		}
@@ -2244,7 +2247,8 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 					signal: AbortSignal.any([listenerSignal, abortSignal]),
 					onEstimate: (percent, cost) => {
 						if (resolved) return;
-						progress.completionPercent = percent;
+						// A probe in flight when the yield landed must not pull the bar back from 99%.
+						if (!yieldCalled) progress.completionPercent = percent;
 						progress.cost += cost;
 						scheduleProgress(true);
 					},

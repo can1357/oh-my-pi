@@ -134,7 +134,14 @@ describe("model cache write churn", () => {
 	/** Serialized `models` payload for `ids`, as this binary writes it. */
 	function payloadFor(ids: string[]): string {
 		const otherPath = path.join(tempDir, "payload-source.db");
-		writeModelCache("rewrite-test", 1_000, ids.map(id => model(id)), true, "fp", otherPath);
+		writeModelCache(
+			"rewrite-test",
+			1_000,
+			ids.map(id => model(id)),
+			true,
+			"fp",
+			otherPath,
+		);
 		const row = payloadRow(otherPath, "rewrite-test");
 		if (!row) throw new Error("expected payload row");
 		return row.models;

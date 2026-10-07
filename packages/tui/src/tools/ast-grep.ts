@@ -125,7 +125,7 @@ export const astGrepToolRenderer = {
 		const contexts = classifyGroupedLines(allLines, details?.cwd ?? details?.searchPath, details?.searchPath);
 		// Style lazily: the collapsed tree list only renders the first few groups,
 		// so a large result never styles/hyperlinks rows nobody sees.
-		const styledLines: (string | undefined)[] = new Array(allLines.length);
+		const styledLines: (string | undefined)[] = Array.from({ length: allLines.length }, () => undefined);
 		const styleLine = (index: number): string => {
 			const cached = styledLines[index];
 			if (cached !== undefined) return cached;
@@ -181,7 +181,7 @@ export const astGrepToolRenderer = {
 						itemType: "match",
 						renderItem: (group, context) =>
 							!options.expanded && groupStarts[context.index]! >= COLLAPSED_MATCH_LIMIT
-								? new Array<string>(group.length).fill("")
+								? Array.from({ length: group.length }, () => "")
 								: group.map(styleLine),
 					},
 					uiTheme,

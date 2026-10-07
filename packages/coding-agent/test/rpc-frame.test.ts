@@ -49,7 +49,12 @@ describe("RPC frame encoding", () => {
 			content: Array.from({ length: blockCount }, (_, index) =>
 				index % 2 === 0
 					? { type: "text", text: `${index}: ${tricky}` }
-					: { type: "toolCall", id: `call-${index}`, name: "edit", arguments: { path: tricky, skipped: undefined } },
+					: {
+							type: "toolCall",
+							id: `call-${index}`,
+							name: "edit",
+							arguments: { path: tricky, skipped: undefined },
+						},
 			),
 			usage: { input: 1, output: 2 },
 			errorMessage: undefined,

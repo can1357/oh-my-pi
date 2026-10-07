@@ -2,36 +2,35 @@
 
 ## [Unreleased]
 
-### Changed
+### Added
 
-- `ComposerNativeState.title` makes the TSP composer's placeholder the quoted title in italics (`em`); untitled it reads "What are we cooking?", and `CustomEditor.describePlaceholder` returns `TspText`
-- Sped up Markdown lexing of large documents (532 KB: ~29 ms → ~19 ms) ([#14667](https://github.com/can1357/oh-my-pi/pull/14667) by [@H4vC](https://github.com/H4vC))
-- Sped up `OutputSink` on many single-line chunks (100k chunks: ~1.3–9 s → ~15 ms) ([#14679](https://github.com/can1357/oh-my-pi/pull/14679) by [@H4vC](https://github.com/H4vC))
-- Reduced CPU spent redrawing AST, grep, LSP, MCP and generic tool result cards ([#14684](https://github.com/can1357/oh-my-pi/pull/14684) by [@H4vC](https://github.com/H4vC))
-- The debug log viewer stops loading older history once 50,000 entries are loaded; the newest entries are always kept ([#14686](https://github.com/can1357/oh-my-pi/pull/14686) by [@H4vC](https://github.com/H4vC))
-- Sped up the raw SSE viewer and the git diff pane ([#14686](https://github.com/can1357/oh-my-pi/pull/14686) by [@H4vC](https://github.com/H4vC))
-- Limited plan review undo history to 100 steps ([#14686](https://github.com/can1357/oh-my-pi/pull/14686) by [@H4vC](https://github.com/H4vC))
-- Sped up `@` path completion in folders with many symlinks ([#14687](https://github.com/can1357/oh-my-pi/pull/14687) by [@H4vC](https://github.com/H4vC))
-- Sped up model hub search (~4×) and session tree, settings and extension-dashboard search (~2×) on large lists ([#14687](https://github.com/can1357/oh-my-pi/pull/14687) by [@H4vC](https://github.com/H4vC))
-- Reduced idle agent transcript viewer file I/O ([#14688](https://github.com/can1357/oh-my-pi/pull/14688) by [@H4vC](https://github.com/H4vC))
-- Reduced status-line work: fast repaints and brand-fade frames happen only with the animated `pi` segment, and git refreshes follow cache expiry instead of a 1 s poll ([#14691](https://github.com/can1357/oh-my-pi/pull/14691) by [@H4vC](https://github.com/H4vC))
-- Assistant messages extract their link targets once per text change, and converted Kitty images are no longer pinned after they leave the screen (they reconvert if shown again) ([#14692](https://github.com/can1357/oh-my-pi/pull/14692) by [@H4vC](https://github.com/H4vC))
-- `AssistantMessageHost.resolveAssistantMessageLinks(texts)` is replaced by `resolveAssistantMessageLinkHrefs(hrefs)`, which takes already-extracted link destinations ([#14692](https://github.com/can1357/oh-my-pi/pull/14692) by [@H4vC](https://github.com/H4vC))
+- Added optional `Terminal.settleOutput()`, which drains or drops queued output before the terminal is handed over; custom terminals may implement it ([#13794](https://github.com/can1357/oh-my-pi/pull/13794) by [@sjawhar](https://github.com/sjawhar)).
+- Added `writeStderrBehindTerminal()` (`@oh-my-pi/pi-tui/terminal-handoff`), which writes to stderr after the output a stopped terminal has not delivered yet ([#13794](https://github.com/can1357/oh-my-pi/pull/13794) by [@sjawhar](https://github.com/sjawhar)).
 
 ### Fixed
 
 - Fixed stopping the TUI after a large write leaving queued output to paint over the shell or editor that takes the terminal next ([#13794](https://github.com/can1357/oh-my-pi/pull/13794) by [@sjawhar](https://github.com/sjawhar)).
 - Fixed text containing a lone UTF-16 surrogate swallowing the next character on unix terminals; the surrogate now shows as `�` ([#13794](https://github.com/can1357/oh-my-pi/pull/13794) by [@sjawhar](https://github.com/sjawhar)).
-- Fixed quadratic Markdown lexing of documents with bare `\begin{…}` environments or unclosed `\[` openers ([#14667](https://github.com/can1357/oh-my-pi/pull/14667) by [@H4vC](https://github.com/H4vC))
-- Fixed quadratic eval display formatting on long semicolon-free JavaScript ([#14685](https://github.com/can1357/oh-my-pi/pull/14685) by [@H4vC](https://github.com/H4vC))
-- Fixed debug log viewer re-formatting every row each frame (select-all over 20k rows: ~3 s → ~2 ms per frame) ([#14686](https://github.com/can1357/oh-my-pi/pull/14686) by [@H4vC](https://github.com/H4vC))
-- Fixed plan review slowing down on long annotated plans ([#14686](https://github.com/can1357/oh-my-pi/pull/14686) by [@H4vC](https://github.com/H4vC))
-- Fixed prompt editor lag on large drafts containing a magic keyword ([#14690](https://github.com/can1357/oh-my-pi/pull/14690) by [@H4vC](https://github.com/H4vC))
+
+## [18.8.0] - 2026-10-07
+
 ### Added
 
-- Added optional `Terminal.settleOutput()`, which drains or drops queued output before the terminal is handed over; custom terminals may implement it ([#13794](https://github.com/can1357/oh-my-pi/pull/13794) by [@sjawhar](https://github.com/sjawhar)).
-- Added `writeStderrBehindTerminal()` (`@oh-my-pi/pi-tui/terminal-handoff`), which writes to stderr after the output a stopped terminal has not delivered yet ([#13794](https://github.com/can1357/oh-my-pi/pull/13794) by [@sjawhar](https://github.com/sjawhar)).
-- Writes of `.svg` and Mermaid (`.mmd`, `.mermaid`) files draw the image or diagram under the card, as the same code blocks draw in assistant replies: an SVG redraws as it streams, a diagram appears once the file is complete; tool renderers opt in through `figure`.
+- SVG and Mermaid files now render as images or diagrams beneath their file cards, with SVG previews updating while the file streams and Mermaid previews appearing when the file is complete.
+- Native tool cards can open expanded regardless of the transcript’s expansion state; the todo checklist uses this behavior.
+
+### Changed
+
+- TSP composer placeholders now appear as the composer title in italicized curly quotes, with “What are we cooking?” used when no title is provided.
+- TSP image transfers are more efficient across reconnects and multiple surfaces: images are sent once per connection, existing terminal blobs are detected before upload, and images in the Tern blob cache can be reused without crossing the terminal pty.
+- Improved performance and responsiveness across the TUI, including large TSP messages and Markdown documents, streaming output, tool-result cards, debug logs, raw SSE and Git diff views, path and model searches, session and settings lists, plan review, agent transcripts, status updates, assistant links, Kitty images, and large prompt or evaluation content.
+- Large debug logs and plan-review histories now retain bounded history to keep the interface responsive, while preserving the newest log entries.
+
+### Fixed
+
+- Fixed slow Markdown processing for certain LaTeX environments and incomplete delimiters.
+- Fixed excessive slowdown when formatting long semicolon-free JavaScript evaluations.
+- Fixed prompt-editor lag in large drafts containing magic keywords.
 
 ## [18.7.0] - 2026-10-06
 
@@ -3003,55 +3002,4 @@ Initial release under @oh-my-pi scope. See previous releases at [badlogic/pi-mon
 
 - **Experimental:** Overlay compositing for `ctx.ui.custom()` with `{ overlay: true }` option ([#558](https://github.com/badlogic/pi-mono/pull/558) by [@nicobailon](https://github.com/nicobailon))
 
-## [0.38.0] - 2026-01-08
-
-### Added
-
-- `EditorComponent` interface for custom editor implementations
-- `StdinBuffer` class to split batched stdin into individual sequences (adapted from [OpenTUI](https://github.com/anomalyco/opentui), MIT license)
-
-### Fixed
-
-- Key presses no longer dropped when batched with other events over SSH ([#538](https://github.com/badlogic/pi-mono/pull/538))
-
-## [0.37.8] - 2026-01-07
-
-### Added
-
-- `Component.wantsKeyRelease` property to opt-in to key release events (default false)
-
-### Fixed
-
-- TUI now filters out key release events by default, preventing double-processing of keys in editors and other components
-
-## [0.37.7] - 2026-01-07
-
-### Fixed
-
-- `matchesKey()` now correctly matches Kitty protocol sequences for unmodified letter keys (needed for key release events)
-
-## [0.37.6] - 2026-01-06
-
-### Added
-
-- Kitty keyboard protocol flag 2 support for key release events. New exports: `isKeyRelease(data)`, `isKeyRepeat(data)`, `KeyEventType` type. Terminals supporting Kitty protocol (Kitty, Ghostty, WezTerm) now send proper key-up events.
-
-## [0.37.0] - 2026-01-05
-
-### Fixed
-
-- Crash when pasting text with trailing whitespace exceeding terminal width through Markdown rendering ([#457](https://github.com/badlogic/pi-mono/pull/457) by [@robinwander](https://github.com/robinwander))
-
-## [0.34.1] - 2026-01-04
-
-### Added
-
-- Symbol key support in keybinding system: `SymbolKey` type with 32 symbol keys, `Key` constants (e.g., `Key.backtick`, `Key.comma`), updated `matchesKey()` and `parseKey()` to handle symbol input ([#450](https://github.com/badlogic/pi-mono/pull/450) by [@kaofelix](https://github.com/kaofelix))
-
-## [0.34.0] - 2026-01-04
-
-### Added
-
-- `Editor.getExpandedText()` method that returns text with paste markers expanded to their actual content ([#444](https://github.com/badlogic/pi-mono/pull/444) by [@aliou](https://github.com/aliou))
-
-Older entries are archived in [packages/tui/CHANGELOG.md@58141d4e5fa8](https://github.com/can1357/oh-my-pi/blob/58141d4e5fa892166024e2168866c45e0baacde3/packages/tui/CHANGELOG.md).
+Older entries are archived in [packages/tui/CHANGELOG.md@fa14205f838f](https://github.com/can1357/oh-my-pi/blob/fa14205f838f282fcea048c64fca74026789a492/packages/tui/CHANGELOG.md).

@@ -243,7 +243,11 @@ export class ExtensionUiController {
 				if (!success) {
 					return { cancelled: true };
 				}
-				setSessionTerminalTitle(this.ctx.sessionManager.getSessionName(), this.ctx.sessionManager.getCwd());
+				setSessionTerminalTitle(
+					this.ctx.sessionManager.getSessionName(),
+					this.ctx.sessionManager.getCwd(),
+					this.ctx.sessionManager.getSessionTitleCard(),
+				);
 
 				// Call setup callback if provided
 				if (options?.setup) {
@@ -309,7 +313,11 @@ export class ExtensionUiController {
 				if (!result) {
 					return { cancelled: true };
 				}
-				setSessionTerminalTitle(this.ctx.sessionManager.getSessionName(), this.ctx.sessionManager.getCwd());
+				setSessionTerminalTitle(
+					this.ctx.sessionManager.getSessionName(),
+					this.ctx.sessionManager.getCwd(),
+					this.ctx.sessionManager.getSessionTitleCard(),
+				);
 				await this.ctx.renderInitialMessages({ clearTerminalHistory: true });
 				await this.ctx.reloadTodos();
 				if (modelFallbackWarning) this.ctx.showWarning(modelFallbackWarning);

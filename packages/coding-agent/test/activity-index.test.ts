@@ -170,7 +170,10 @@ describe("AgentActivityIndex", () => {
 			remote: {
 				readTranscript: async (_agentId, fromByte) => {
 					const bytes = Buffer.from(transcript);
-					return { text: bytes.subarray(Math.min(fromByte, bytes.byteLength)).toString("utf-8"), newSize: bytes.byteLength };
+					return {
+						text: bytes.subarray(Math.min(fromByte, bytes.byteLength)).toString("utf-8"),
+						newSize: bytes.byteLength,
+					};
 				},
 			},
 		});

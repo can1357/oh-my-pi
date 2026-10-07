@@ -2,32 +2,27 @@
 
 ## [Unreleased]
 
+## [18.8.0] - 2026-10-07
+
 ### Breaking Changes
 
-- `getEnvApiKey`, `getEnvApiKeyName` and `listProvidersWithEnvKey` are no longer exported from `@oh-my-pi/pi-ai/stream`; import them from `@oh-my-pi/pi-ai` or `@oh-my-pi/pi-ai/env-api-key` ([#14672](https://github.com/can1357/oh-my-pi/pull/14672) by [@H4vC](https://github.com/H4vC))
-- `TranscriptionRequest.audio` is now `Uint8Array | Blob`; code that reads `request.audio` must handle a `Blob` (the transcription endpoint passes multipart uploads through without copying) ([#14674](https://github.com/can1357/oh-my-pi/pull/14674) by [@H4vC](https://github.com/H4vC))
-
-### Fixed
-
-- Fixed false thinking-loop detections on Gemini, DeepSeek, and Grok when the model drafts or answers with repetitive code or markup (VRML, SVG, JSON); such output is no longer discarded and retried.
-- Fixed Cursor provider leaking conversation checkpoints, blob stores and abort listeners after requests end ([#14669](https://github.com/can1357/oh-my-pi/pull/14669) by [@H4vC](https://github.com/H4vC))
-- Fixed session-affinity pins growing without bound in long-lived gateways (now capped at 256 sessions per provider) ([#14672](https://github.com/can1357/oh-my-pi/pull/14672) by [@H4vC](https://github.com/H4vC))
+- The environment API-key helpers (`getEnvApiKey`, `getEnvApiKeyName`, and `listProvidersWithEnvKey`) are no longer exported from `@oh-my-pi/pi-ai/stream`; import them from `@oh-my-pi/pi-ai` or `@oh-my-pi/pi-ai/env-api-key` instead.
+- `TranscriptionRequest.audio` now accepts `Uint8Array | Blob`. Consumers must handle `Blob` values when reading transcription requests.
 
 ### Changed
 
-- Reduced CPU and memory spent decoding large Cursor and Devin streamed responses ([#14669](https://github.com/can1357/oh-my-pi/pull/14669) by [@H4vC](https://github.com/H4vC))
-- Reduced per-request CPU and memory use for Codex and OpenAI Responses requests, and moved Codex SSE body compression off the event loop ([#14670](https://github.com/can1357/oh-my-pi/pull/14670) by [@H4vC](https://github.com/H4vC))
-- Sped up in-band tool-call dialect parsing for long tool calls ([#14671](https://github.com/can1357/oh-my-pi/pull/14671) by [@H4vC](https://github.com/H4vC))
-- Sped up loading the auth modules (`AuthStorage`) by no longer pulling in the provider stream modules for env API key lookup ([#14672](https://github.com/can1357/oh-my-pi/pull/14672) by [@H4vC](https://github.com/H4vC))
-- Reduced usage-report cache memory by not caching the provider's `raw` payload ([#14672](https://github.com/can1357/oh-my-pi/pull/14672) by [@H4vC](https://github.com/H4vC))
-- Sped up account ranking, OAuth preflight and credential rate-limit checks by cutting SQLite reads and write locks ([#14672](https://github.com/can1357/oh-my-pi/pull/14672) by [@H4vC](https://github.com/H4vC))
-- Reduced auth broker server and client CPU use for credential sync and SSE streams ([#14673](https://github.com/can1357/oh-my-pi/pull/14673) by [@H4vC](https://github.com/H4vC))
-- Sped up Apple Foundation Models tool-call argument parsing ([#14674](https://github.com/can1357/oh-my-pi/pull/14674) by [@H4vC](https://github.com/H4vC))
-- Reduced auth gateway per-request serialization overhead ([#14674](https://github.com/can1357/oh-my-pi/pull/14674) by [@H4vC](https://github.com/H4vC))
-- Sped up Cloudflare AI Gateway requests by reusing rebuilt models ([#14674](https://github.com/can1357/oh-my-pi/pull/14674) by [@H4vC](https://github.com/H4vC))
-- Sped up AWS credential-source detection by caching its probes ([#14674](https://github.com/can1357/oh-my-pi/pull/14674) by [@H4vC](https://github.com/H4vC))
-- Reduced memory and copying for generated images by sniffing their type from a few bytes and building data URLs only when read ([#14674](https://github.com/can1357/oh-my-pi/pull/14674) by [@H4vC](https://github.com/H4vC))
-- Reduced GitLab Duo Workflow stream memory by de-duplicating message snapshots by content hash ([#14674](https://github.com/can1357/oh-my-pi/pull/14674) by [@H4vC](https://github.com/H4vC))
+- Improved CPU and memory efficiency across streamed model responses, including Cursor, Devin, Codex, OpenAI Responses, and GitLab Duo Workflow.
+- Improved request and authentication performance, including account ranking, OAuth preflight, credential rate-limit checks, credential synchronization, and auth gateway requests.
+- Improved tool-call parsing performance for long calls and Apple Foundation Models requests.
+- Improved Cloudflare AI Gateway request performance and AWS credential-source detection.
+- Reduced memory usage when handling generated images and usage reports.
+
+### Fixed
+
+- Fixed false thinking-loop detections for Gemini, DeepSeek, and Grok when responses contain repetitive code or markup such as VRML, SVG, or JSON; valid output is no longer discarded and retried.
+- Fixed the Cursor provider retaining request resources after requests completed.
+- Fixed session-affinity pins growing without bound in long-lived gateways; pins are now capped at 256 sessions per provider.
+- Fixed Anthropic sessions failing every request with HTTP 400 ("role 'system' must precede an 'assistant' message") after a tool change coincided with compaction or an interrupted or failed reply; sessions already stuck this way recover on the next message ([#14746](https://github.com/can1357/oh-my-pi/issues/14746)).
 
 ## [18.7.0] - 2026-10-06
 

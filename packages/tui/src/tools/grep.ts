@@ -137,8 +137,8 @@ function createSearchLineStyler(
 	const contexts = classifyGroupedLines(lines, headerBase, fileScope);
 	// `classifyGroupedLines` can't resolve internal URLs (TUI-only), so track the
 	// resolved URL target here and use it for the body lines that follow.
-	const urlRaw: (string | undefined)[] = new Array(lines.length);
-	const urlFiles: (string | undefined)[] = new Array(lines.length);
+	const urlRaw: (string | undefined)[] = Array.from({ length: lines.length }, () => undefined);
+	const urlFiles: (string | undefined)[] = Array.from({ length: lines.length }, () => undefined);
 	let urlFile: string | undefined;
 	for (let index = 0; index < lines.length; index++) {
 		const ctx = contexts[index]!;
@@ -158,7 +158,7 @@ function createSearchLineStyler(
 			urlFiles[index] = urlFile;
 		}
 	}
-	const styledLines: (string | undefined)[] = new Array(lines.length);
+	const styledLines: (string | undefined)[] = Array.from({ length: lines.length }, () => undefined);
 	return index => {
 		const cached = styledLines[index];
 		if (cached !== undefined) return cached;
