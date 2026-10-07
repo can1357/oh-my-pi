@@ -1016,22 +1016,12 @@ function lexInlineTokens(text: string): Token[] {
 const REF_DEF_LINE_RE = /^ {0,3}\[(?:\\.|[^\]\\])+\]:/;
 const HAS_REF_DEF = new RegExp(REF_DEF_LINE_RE.source, "m");
 
-/** A probe window: see {@link stableBlockBoundary}. */
-interface ProbeWindow {
-	/** Offset in `text` where the window, and so the lex of `tokens`, ends. */
-	end: number;
-	/** The display-math blocks of the whole of `text`. */
-	mathBlocks: MathBlockScan;
-}
-
 /** The last stable block boundary of a token run: see {@link stableBlockBoundary}. */
 interface BlockBoundary {
 	/** Offset just past the boundary token, or 0 when the run holds none. */
 	end: number;
 	/** Number of tokens up to and including the boundary token, or 0. */
 	count: number;
-	/** End of the display-math block a probe's scan stopped at, which a later window must reach past; 0 when it stopped at none. */
-	blockEnd: number;
 }
 
 // A whitespace-only line, capturing its terminator: "\n", or "" at the end of the text.
@@ -1057,16 +1047,10 @@ const NO_OPENERS: readonly PrefixOpener[] = [];
  * `"\n\n"` break, together with the number of tokens up to and including it.
  * `count === 0` means the run holds no usable boundary.
  *
- * `base` is where `tokens[0]` starts inside `text`. Without `window`, `tokens`
- * lex the rest of `text`, which appends may still extend: the streaming
- * freeze. With it, they lex `text.slice(base, window.end)` of a whole
- * document: a probe ({@link renderMarkdownHead}). A boundary qualifies only
- * when splitting there is invisible to the lexer, i.e.
+ * `base` is where `tokens[0]` starts inside `text`; `tokens` lex the rest of
+ * `text`, which appends may still extend (the streaming freeze). A boundary
+ * qualifies only when splitting there is invisible to the lexer, i.e.
  * `lex(head) ++ lex(tail) === lex(text)`:
- *  - In a probe, the token must end before `window.end`. An unclosed fence,
- *    HTML block or comment runs to the end of its input, so a window that
- *    ends just after a blank line inside one hands back a truncated token
- *    whose raw ends in `"\n\n"`.
  *  - The break must sit inside `text`. At end-of-text the next character is
  *    unknown (and, while streaming, may still arrive), so the cut is deferred.
  *  - The next line must start real block content. A leading space or newline
@@ -1078,15 +1062,8 @@ const NO_OPENERS: readonly PrefixOpener[] = [];
  *  - A preceding `list` must be provably closed: CommonMark lets a same-marker
  *    item continue the list across the blank line, and marked merges both into
  *    one renumbered loose list (`listMayContinueAt`).
- *  - In a probe, no earlier token may open a display-math block that the
- *    window cut short: a token other than `math` (which is the block itself)
- *    where `window.mathBlocks` finds a block in the whole document. The
- *    one-pass lex makes that block one `math` token across its blank lines,
- *    so the scan stops there and reports the block's end as `blockEnd`. An
- *    opener with no closer, or with a whitespace-only body, is no block in
- *    either lex, so it leaves later boundaries alone.
- *  - While streaming, `tokens` are the one-pass lex of `text` as it stands,
- *    so a block the lex already made is a `math` token, and one that an
+ *  - Display math: `tokens` are the one-pass lex of `text` as it stands, so
+ *    a block the lex already made is a `math` token, and one that an
  *    append could still close becomes one only once a closer line arrives,
  *    which Markdown#lexTokens watches for. With `settle`, the scan instead
  *    stops at a token whose display-math block an append could still close
@@ -1109,30 +1086,18 @@ function stableBlockBoundary(
 	{
 		startIndex = 0,
 		endIndex = tokens.length,
-		window,
 		settle = false,
-	}: { startIndex?: number; endIndex?: number; window?: ProbeWindow; settle?: boolean } = {},
+	}: { startIndex?: number; endIndex?: number; settle?: boolean } = {},
 ): BlockBoundary {
 	let pos = base;
 	let end = 0;
 	let count = 0;
-	let blockEnd = 0;
 	for (let i = startIndex; i < endIndex; i++) {
 		const token = tokens[i];
 		const raw = token.raw;
 		const tokenEnd = pos + raw.length;
-		if (token.type !== "math") {
-			if (window !== undefined) {
-				const block = window.mathBlocks.at(pos);
-				if (block !== undefined) {
-					blockEnd = pos + block.raw.length;
-					break;
-				}
-			} else if (settle && mathBlockMayCloseAt(text, pos)) {
-				break;
-			}
-		}
-		if (raw.endsWith("\n\n") && (window === undefined || tokenEnd < window.end)) {
+		if (settle && token.type !== "math" && mathBlockMayCloseAt(text, pos)) break;
+		if (raw.endsWith("\n\n")) {
 			const prev = i > 0 ? tokens[i - 1] : undefined;
 			if (prev === undefined || prev.type !== "list" || !listMayContinueAt(text, tokenEnd, prev.raw)) {
 				end = tokenEnd;
@@ -1141,13 +1106,12 @@ function stableBlockBoundary(
 		}
 		pos = tokenEnd;
 	}
-	if (count === 0 || end >= text.length) return { end: 0, count: 0, blockEnd };
+	if (count === 0 || end >= text.length) return { end: 0, count: 0 };
 	const next = text.charCodeAt(end);
-	if (next === 0x20 /* space */ || next === 0x0a /* \n */) return { end: 0, count: 0, blockEnd };
+	if (next === 0x20 /* space */ || next === 0x0a /* \n */) return { end: 0, count: 0 };
 	WHITESPACE_LINE_RE.lastIndex = end;
-	const blank = WHITESPACE_LINE_RE.exec(text);
-	if (blank !== null && (blank[1] === "\n" || window === undefined)) return { end: 0, count: 0, blockEnd };
-	return { end, count, blockEnd };
+	if (WHITESPACE_LINE_RE.test(text)) return { end: 0, count: 0 };
+	return { end, count };
 }
 
 /**
@@ -1201,13 +1165,33 @@ function nextProbeSize(text: string, size: number, blockEnd: number): number {
 
 /**
  * The last stable block boundary ({@link stableBlockBoundary}) in the window
- * `text.slice(0, size)`, from a throwaway block-only lex of the window.
- * `mathBlocks` holds the display-math blocks of all of `text`.
+ * `text.slice(0, size)`, from a throwaway block-only lex of the window, and
+ * the `blockEnd` {@link nextProbeSize} reaches past. `mathBlocks` holds the
+ * display-math blocks of all of `text`. The scan stops in front of the first
+ * window token the one-pass lex of `text` may lex differently:
+ *  - The last one: it runs to the window's end, and an unclosed fence, HTML
+ *    block or comment runs to the end of its input, so it can be cut short.
+ *  - One that opens a display-math block the window cut short: a token other
+ *    than `math` where `mathBlocks` finds a block. The one-pass lex makes that
+ *    block one `math` token across its blank lines; `blockEnd` is its end, or
+ *    0. An opener with no closer, or with a whitespace-only body, is no block
+ *    in either lex, so it leaves later boundaries alone.
  */
-function probeBoundary(text: string, size: number, mathBlocks: MathBlockScan): BlockBoundary {
+function probeBoundary(text: string, size: number, mathBlocks: MathBlockScan): { end: number; blockEnd: number } {
 	const probe = new Lexer(markdownParser.defaults);
-	probe.blockTokens(text.slice(0, size), probe.tokens);
-	return stableBlockBoundary(text, 0, probe.tokens, { window: { end: size, mathBlocks } });
+	const tokens = probe.blockTokens(text.slice(0, size), probe.tokens);
+	let endIndex = tokens.length - 1;
+	let blockEnd = 0;
+	for (let i = 0, pos = 0; i < tokens.length; pos += tokens[i].raw.length, i++) {
+		if (tokens[i].type === "math") continue;
+		const block = mathBlocks.at(pos);
+		if (block !== undefined) {
+			blockEnd = pos + block.raw.length;
+			endIndex = Math.min(endIndex, i);
+			break;
+		}
+	}
+	return { end: stableBlockBoundary(text, 0, tokens, { endIndex }).end, blockEnd };
 }
 
 /**

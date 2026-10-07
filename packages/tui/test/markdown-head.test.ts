@@ -1,5 +1,11 @@
 import { afterEach, describe, expect, it } from "bun:test";
-import { clearRenderCache, Markdown, renderMarkdownHead } from "@oh-my-pi/pi-tui/components/markdown";
+import {
+	clearRenderCache,
+	Markdown,
+	PROBE_WINDOW_BYTES,
+	renderMarkdownHead,
+} from "@oh-my-pi/pi-tui/components/markdown";
+import { Lexer } from "@oh-my-pi/pi-utils/marked";
 import { defaultMarkdownTheme } from "./test-themes.js";
 
 describe("renderMarkdownHead", () => {
@@ -45,8 +51,8 @@ describe("renderMarkdownHead", () => {
 		// Each paragraph opens a `\[` block that no `\]` line closes, so no block
 		// forms; deciding that per opener by scanning the rest of the text made
 		// the head's cost grow with the whole document. A same-size document with
-		// no openers pays the same whole-document passes, so the two heads cost
-		// about the same unless the openers rescan.
+		// no openers pays the same whole-document passes except one closer search,
+		// so the two heads cost about the same unless the openers rescan.
 		const repeats = Math.ceil((1024 * 1024) / 6);
 		const openers = "\\[\nx\n\n".repeat(repeats);
 		const control = "yy\nx\n\n".repeat(repeats);
@@ -56,14 +62,40 @@ describe("renderMarkdownHead", () => {
 		expect(bestOf3(cut(openers))).toBeLessThan(5 * bestOf3(cut(control)));
 	});
 
-	it("cuts past a display-math block whose closer is far away faster than the whole document", () => {
+	it("probes past a display-math block whose closer is far away in one step", () => {
 		// Every window short of the `\]` 128 KB down stops at the `\[`. Windows
-		// that doubled toward the closer re-lexed the block each time.
+		// that doubled toward the closer re-lexed the block each time; the window
+		// after the first reaches just past the block, so the probes lex the
+		// first window and the block once.
 		const doc = `Intro.\n\n\\[\n${paragraphs(3000)}\n\\]\n\n${paragraphs(3000)}\n`;
-		const head = bestOf3(() => renderMarkdownHead(doc, 120, defaultMarkdownTheme, 12));
-		const full = elapsed(() => new Markdown(doc, 0, 0, defaultMarkdownTheme).render(120));
-		expect(head).toBeLessThan(full);
-		expect(renderMarkdownHead(doc, 120, defaultMarkdownTheme, 12).truncated).toBe(true);
+		const closerEnd = doc.indexOf("\\]\n\n") + 4;
+		// A probe block-lexes its window directly; a render lexes through `lex`.
+		const proto = Lexer.prototype;
+		const { lex, blockTokens } = proto;
+		let lexDepth = 0;
+		let probedBytes = 0;
+		proto.lex = function (this: Lexer, src: string) {
+			lexDepth++;
+			try {
+				return lex.call(this, src);
+			} finally {
+				lexDepth--;
+			}
+		};
+		proto.blockTokens = function (this: Lexer, src: string, tokens = this.tokens) {
+			if (lexDepth === 0 && tokens === this.tokens) probedBytes += src.length;
+			return blockTokens.call(this, src, tokens);
+		};
+		let truncated: boolean;
+		try {
+			truncated = renderMarkdownHead(doc, 120, defaultMarkdownTheme, 12).truncated;
+		} finally {
+			proto.lex = lex;
+			proto.blockTokens = blockTokens;
+		}
+		expect(truncated).toBe(true);
+		expect(probedBytes).toBeGreaterThan(closerEnd);
+		expect(probedBytes).toBeLessThan(closerEnd + 2 * PROBE_WINDOW_BYTES);
 	});
 
 	it("cuts the text the renderer lexes after repairing an orphan closing fence", () => {
@@ -80,17 +112,17 @@ describe("renderMarkdownHead", () => {
 		expect(head.lines).toEqual(full.slice(0, head.lines.length));
 	});
 
-	it("marks a cut head truncated when only no-break spaces follow the cut", () => {
-		// A fence holds no blank line, so the first cut past `Intro.` is right
-		// after it. The no-break spaces past the cut are no blank line to marked:
-		// a full render gives them a row of their own.
+	it("renders the whole document when only no-break spaces follow the last cut", () => {
+		// A fence holds no blank line, so the last cut past `Intro.` is right after
+		// it, and only no-break spaces follow it. They are no blank line to marked,
+		// so a full render gives them a row of their own: a cut there would skip
+		// only that line's render and turn the footer's exact count into a minimum.
 		const code = Array.from({ length: 400 }, (_, i) => `const value${i} = ${i};`).join("\n");
 		const doc = `Intro.\n\n\`\`\`ts\n${code}\n\`\`\`\n\n\u00a0\u00a0\u00a0`;
 
 		const head = renderMarkdownHead(doc, 80, defaultMarkdownTheme, 12);
-		const full = new Markdown(doc, 0, 0, defaultMarkdownTheme).render(80);
-		expect(full.length).toBeGreaterThan(head.lines.length);
-		expect(head.truncated).toBe(true);
+		expect(head.truncated).toBe(false);
+		expect(head.lines).toEqual(new Markdown(doc, 0, 0, defaultMarkdownTheme).render(80));
 	});
 
 	for (const [name, doc] of [
