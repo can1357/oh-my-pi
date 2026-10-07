@@ -402,7 +402,7 @@ test("shows a non-default service tier's own speed aggregate", () => {
 		{ currentSelector: "demo/demo" },
 	);
 	hubs.push(hub);
-	const items = props(hub.describe(withPicker)).items ?? [];
+	const items = props(hub.describe(withPicker)!).items ?? [];
 	const speed = (id: string) => items.find(entry => entry.id === id)?.facts?.speed;
 	// The tier the host would send wins over the standard aggregate.
 	expect(speed("openai/gpt-5.6")).toBe("300 ultrafast");
