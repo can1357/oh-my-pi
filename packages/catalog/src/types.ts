@@ -1226,6 +1226,14 @@ export type ResolvedGoogleCompat = Required<
 	supportsSamplingParams?: boolean;
 };
 
+/** Ollama chat history compatibility resolved by the catalog. */
+export interface OllamaCompat {
+	/** Omit assistant thinking when the deployment rejects it in history. */
+	stripThinkingHistory?: boolean;
+}
+
+export type ResolvedOllamaCompat = Required<OllamaCompat>;
+
 /** Sparse, user-authored compat overrides for a given API (models.json / config vocabulary). */
 export type CompatConfigOf<TApi extends Api> = TApi extends
 	| "openai-completions"
@@ -1242,7 +1250,9 @@ export type CompatConfigOf<TApi extends Api> = TApi extends
 				? DevinCompat
 				: TApi extends "google-generative-ai" | "google-vertex" | "google-gemini-cli"
 					? GoogleCompat
-					: undefined;
+					: TApi extends "ollama-chat"
+						? OllamaCompat
+						: undefined;
 
 /** Resolved compat for a given API: complete record, materialized once by `buildModel`. */
 export type CompatOf<TApi extends Api> = TApi extends "openrouter"
@@ -1259,7 +1269,9 @@ export type CompatOf<TApi extends Api> = TApi extends "openrouter"
 						? ResolvedDevinCompat
 						: TApi extends "google-generative-ai" | "google-vertex" | "google-gemini-cli"
 							? ResolvedGoogleCompat
-							: undefined;
+							: TApi extends "ollama-chat"
+								? ResolvedOllamaCompat
+								: undefined;
 
 /** Provider-native compaction endpoint configuration for one model. */
 export interface RemoteCompactionConfig<TApi extends Api = Api> {

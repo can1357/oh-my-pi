@@ -252,7 +252,7 @@ function convertMessages(model: Model<"ollama-chat">, context: Context): OllamaM
 		timestamp: Date.now(),
 	}));
 	const messages: Message[] = [...systemMessages, ...context.messages];
-	const isCloud = model.provider === "ollama-cloud";
+	const stripThinkingHistory = model.compat.stripThinkingHistory;
 	const supportsImages = model.input.includes("image");
 	const converted = transformMessages(messages, model).map((msg, index) => {
 		// Real `systemPrompt` entries (always emitted first) stay on Ollama's
@@ -266,10 +266,9 @@ function convertMessages(model: Model<"ollama-chat">, context: Context): OllamaM
 		const developerRole =
 			msg.role === "developer" && (index < systemPrompts.length || msg.attribution !== "user") ? "system" : "user";
 		const converted = convertMessage(msg, supportsImages, developerRole);
-		// Ollama cloud rejects requests when assistant history messages contain the `thinking`
-		// field — it's valid in model responses but not accepted as a history input. Strip it
-		// to prevent HTTP 400 errors. Local Ollama instances are unaffected.
-		if (isCloud && converted.role === "assistant" && converted.thinking) {
+		// Some Ollama Cloud models historically rejected thinking in history (#1000).
+		// Preserve reasoning for the verified model without weakening that guard everywhere.
+		if (stripThinkingHistory && converted.role === "assistant" && converted.thinking) {
 			const { thinking: _t, ...rest } = converted;
 			return rest;
 		}

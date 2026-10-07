@@ -26,6 +26,7 @@ import type {
 	ResolvedBedrockCompat,
 	ResolvedDevinCompat,
 	ResolvedGoogleCompat,
+	ResolvedOllamaCompat,
 	ResolvedOpenAICompat,
 	ResolvedOpenAIResponsesCompat,
 	ResolvedOpenAISharedCompat,
@@ -940,6 +941,13 @@ function resolveBedrockPolicy(spec: ModelSpec<"bedrock-converse-stream">, axes: 
 	return compat;
 }
 
+function resolveOllamaPolicy(spec: ModelSpec<"ollama-chat">, axes: ResolvedAxes): ResolvedOllamaCompat {
+	const compat: ResolvedOllamaCompat = { stripThinkingHistory: false };
+	applyWireAxes(compat, axes.wire, "ollama-chat");
+	applyCompatOverrides(compat, spec.compat);
+	return compat;
+}
+
 function resolveDevinPolicy(spec: ModelSpec<"devin-agent">, axes: ResolvedAxes): ResolvedDevinCompat {
 	const compat: ResolvedDevinCompat = {
 		trustExplicitThinkingOnly: true,
@@ -1324,6 +1332,8 @@ export function resolveModelPolicy(spec: ModelSpec<Api>, route?: ResolveRoute): 
 		compat = resolveAnthropicPolicy(spec, facts, axes);
 	} else if (specUsesApi(spec, "bedrock-converse-stream")) {
 		compat = resolveBedrockPolicy(spec, axes);
+	} else if (specUsesApi(spec, "ollama-chat")) {
+		compat = resolveOllamaPolicy(spec, axes);
 	} else if (specUsesApi(spec, "devin-agent")) {
 		compat = resolveDevinPolicy(spec, axes);
 	} else if (
