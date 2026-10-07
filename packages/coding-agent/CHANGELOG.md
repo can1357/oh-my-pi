@@ -4,11 +4,11 @@
 
 ### Changed
 
-- `SessionManager.getEntries()` and related entry accessors now return images from before the latest compaction as blob refs; call `sessionManager.withInlineImages(entries)` when the image bytes are needed ([#14803](https://github.com/can1357/oh-my-pi/issues/14803))
+- `SessionManager.getEntries()` and related entry accessors now return images from before the latest compaction as blob refs; call `sessionManager.withInlineImages(entries)` when the image bytes are needed ([#14880](https://github.com/can1357/oh-my-pi/pull/14880) by [@Hamoudii91](https://github.com/Hamoudii91))
 
 ### Fixed
 
-- Fixed long-running and resumed sessions keeping every screenshot from compacted history in memory; a session with ~600 screenshots now holds about 60 MB instead of about 145 MB ([#14803](https://github.com/can1357/oh-my-pi/issues/14803))
+- Fixed long-running and resumed sessions keeping every screenshot from compacted history in memory; a session with ~600 screenshots now holds about 60 MB instead of about 145 MB ([#14880](https://github.com/can1357/oh-my-pi/pull/14880) by [@Hamoudii91](https://github.com/Hamoudii91))
 
 ## [18.8.3] - 2026-10-07
 
