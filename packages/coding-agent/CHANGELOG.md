@@ -121,6 +121,7 @@
 - Fixed the `advisor.immuneTurns` setting description claiming blockers are suppressed during the cooldown; blockers are exempt from it ([#10493](https://github.com/can1357/oh-my-pi/issues/10493), [#14360](https://github.com/can1357/oh-my-pi/pull/14360) by [@F0Rextasy](https://github.com/F0Rextasy))
 - Fixed custom `GlobOperations` backends hanging a `glob` call forever: the call now stops at the tool's scan deadline and reports the scan as incomplete, and the backend receives the resolved hidden/gitignore/limit policy plus a cancellation signal ([#6370](https://github.com/can1357/oh-my-pi/issues/6370), [#14426](https://github.com/can1357/oh-my-pi/pull/14426) by [@F0Rextasy](https://github.com/F0Rextasy))
 - Fixed `--resume <path>` silently creating a brand new session when the path did not exist; it now fails with a message naming the path, matching `--fork <path>` and `--resume <id>` ([#14404](https://github.com/can1357/oh-my-pi/pull/14404) by [@F0Rextasy](https://github.com/F0Rextasy))
+- Fixed omp deleting the live project daemon scopes of omp processes sharing `~/.omp` from another Linux PID namespace, container or host, from another platform, or under another user, which left those sessions' tool calls failing with `Failed to start daemon broker … connect ENOENT` or `Daemon broker authentication failed` ([#14405](https://github.com/can1357/oh-my-pi/pull/14405) by [@sjawhar](https://github.com/sjawhar))
 
 ## [18.6.3] - 2026-10-06
 
