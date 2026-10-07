@@ -1049,6 +1049,31 @@ export const cfgFeaturesUnexpectedStopDetection = register({
 	},
 });
 
+export const cfgFeaturesUnexpectedStopMaxRetries = register({
+	id: "features.unexpectedStopMaxRetries",
+	type: "number",
+	default: 20,
+	ui: {
+		tab: "interaction",
+		group: "Agent",
+		label: "Unexpected Stop Retries",
+		description: "Maximum consecutive retry injections when the assistant stops unexpectedly. 0 disables recovery.",
+	},
+});
+
+export const cfgFeaturesTurnRecoveryMaxRetries = register({
+	id: "features.turnRecoveryMaxRetries",
+	type: "number",
+	default: 20,
+	ui: {
+		tab: "interaction",
+		group: "Agent",
+		label: "Turn Recovery Retries",
+		description:
+			"Shared retry cap for empty-stop, malformed-function-call, and stream-stall recovery injections. 0 disables them.",
+	},
+});
+
 export const cfgProvidersKimiApiFormat = register({
 	id: "providers.kimiApiFormat",
 	type: "enum",

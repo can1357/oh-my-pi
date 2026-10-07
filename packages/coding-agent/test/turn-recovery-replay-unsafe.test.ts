@@ -48,11 +48,13 @@ function createHost(
 		messages?: readonly AgentMessage[];
 		lastModelChangeRole?: string;
 		modelRoles?: Record<string, string>;
+		settingsOverrides?: Record<string, unknown>;
 	} = {},
 ): TurnRecoveryHost {
 	const settings = Settings.isolated({
 		...(options.fallbackChains ? { "retry.fallbackChains": options.fallbackChains } : {}),
 		...(options.modelRoles ? { modelRoles: options.modelRoles } : {}),
+		...(options.settingsOverrides ? options.settingsOverrides : {}),
 	});
 	if (options.modelRoles) {
 		for (const [role, selector] of Object.entries(options.modelRoles)) {
@@ -1096,10 +1098,10 @@ describe("TurnRecovery replay-unsafe output classification", () => {
 			return message;
 		}
 
-		function continuationHost(message: AssistantMessage) {
+		function continuationHost(message: AssistantMessage, settingsOverrides: Record<string, unknown> = {}) {
 			const messages: AgentMessage[] = [message];
 			const continues: string[] = [];
-			const host = createHost(model, modelRegistry, { messages });
+			const host = createHost(model, modelRegistry, { messages, settingsOverrides });
 			host.agent = {
 				state: { messages },
 				appendMessage: (appended: AgentMessage) => messages.push(appended),
@@ -1110,7 +1112,7 @@ describe("TurnRecovery replay-unsafe output classification", () => {
 
 		it("continues with a corrective developer message when replay is refused", () => {
 			const message = malformedTextTurn();
-			const { host, messages, continues } = continuationHost(message);
+			const { host, messages, continues } = continuationHost(message, { "features.turnRecoveryMaxRetries": 3 });
 			const recovery = new TurnRecovery(host);
 
 			expect(recovery.isRetryableError(message)).toBe(false);
@@ -1129,9 +1131,22 @@ describe("TurnRecovery replay-unsafe output classification", () => {
 			expect(continues).toEqual(["malformed-function-call-retry"]);
 		});
 
+		it("renders the default shared cap of 20 in the corrective reminder", () => {
+			const message = malformedTextTurn();
+			const { host, messages } = continuationHost(message);
+			expect(new TurnRecovery(host).handleMalformedFunctionCallStop(message)).toBe(true);
+			const reminder = messages[1];
+			if (reminder?.role !== "developer") throw new Error("expected developer reminder");
+			const text =
+				typeof reminder.content === "string"
+					? reminder.content
+					: reminder.content.map(part => (part.type === "text" ? part.text : "")).join("");
+			expect(text).toContain("Attempt #1/20");
+		});
+
 		it("stops continuing past the per-prompt cap and resets on a new prompt", () => {
 			const message = malformedTextTurn();
-			const { host, continues } = continuationHost(message);
+			const { host, continues } = continuationHost(message, { "features.turnRecoveryMaxRetries": 3 });
 			const recovery = new TurnRecovery(host);
 
 			expect(recovery.handleMalformedFunctionCallStop(message)).toBe(true);
@@ -1171,10 +1186,14 @@ describe("TurnRecovery replay-unsafe output classification", () => {
 			return message;
 		}
 
-		function continuationHost(message: AssistantMessage, textOutputCommitted = true) {
+		function continuationHost(
+			message: AssistantMessage,
+			textOutputCommitted = true,
+			settingsOverrides: Record<string, unknown> = {},
+		) {
 			const messages: AgentMessage[] = [message];
 			const continues: string[] = [];
-			const host = createHost(model, modelRegistry, { messages, textOutputCommitted });
+			const host = createHost(model, modelRegistry, { messages, textOutputCommitted, settingsOverrides });
 			host.agent = {
 				state: { messages },
 				appendMessage: (appended: AgentMessage) => messages.push(appended),
@@ -1185,7 +1204,9 @@ describe("TurnRecovery replay-unsafe output classification", () => {
 
 		it("keeps the partial turn and continues with a resume reminder", () => {
 			const message = stalledTextTurn();
-			const { host, messages, continues } = continuationHost(message);
+			const { host, messages, continues } = continuationHost(message, true, {
+				"features.turnRecoveryMaxRetries": 3,
+			});
 			const recovery = new TurnRecovery(host);
 
 			expect(recovery.isRetryableError(message)).toBe(false);
@@ -1219,7 +1240,7 @@ describe("TurnRecovery replay-unsafe output classification", () => {
 
 		it("stops continuing past the per-prompt cap and resets on a new prompt", () => {
 			const message = stalledTextTurn();
-			const { host, continues } = continuationHost(message);
+			const { host, continues } = continuationHost(message, true, { "features.turnRecoveryMaxRetries": 3 });
 			const recovery = new TurnRecovery(host);
 
 			expect(recovery.handleCommittedTextStreamStall(message)).toBe(true);

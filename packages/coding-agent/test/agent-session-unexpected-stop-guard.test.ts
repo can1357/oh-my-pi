@@ -269,6 +269,46 @@ describe("AgentSession unexpected stop guard", () => {
 		expect(reminderMessages(session.agent.state.messages)).toHaveLength(1);
 	});
 
+	it("renders the default cap of 20 in the retry reminder", async () => {
+		const { session, mock } = await createHarness([
+			thinkingOnlyStop("first thought"),
+			{ content: ["done now"], stopReason: "stop" },
+		]);
+
+		await session.prompt("do the thing");
+		await session.waitForIdle();
+
+		expect(mock.calls).toHaveLength(2);
+		const reminder = reminderMessages(session.agent.state.messages)[0];
+		if (reminder?.role !== "developer") throw new Error("expected developer reminder");
+		const text =
+			typeof reminder.content === "string"
+				? reminder.content
+				: reminder.content.map(part => (part.type === "text" ? part.text : "")).join("");
+		expect(text).toContain("Attempt #1/20");
+	});
+
+	it("stops thinking-only retries at features.unexpectedStopMaxRetries", async () => {
+		const { session, mock } = await createHarness(
+			[
+				thinkingOnlyStop("first thought"),
+				thinkingOnlyStop("second thought"),
+				thinkingOnlyStop("third thought"),
+				{ content: ["unreachable"], stopReason: "stop" },
+			],
+			{
+				"features.unexpectedStopMaxRetries": 1,
+			},
+		);
+
+		await session.prompt("do the thing");
+		await session.waitForIdle();
+
+		expect(mock.calls).toHaveLength(2);
+		expect(reminderMessages(session.agent.state.messages)).toHaveLength(1);
+		expect(assistantText(session.agent.state.messages)).not.toContain("unreachable");
+	});
+
 	it("does not continue when the classifier returns false", async () => {
 		const spy = vi.spyOn(unexpectedStopClassifier, "classifyUnexpectedStop").mockResolvedValue(false);
 		const { session, mock } = await createHarness(
@@ -298,6 +338,7 @@ describe("AgentSession unexpected stop guard", () => {
 			],
 			{
 				"features.unexpectedStopDetection": "smart",
+				"features.unexpectedStopMaxRetries": 3,
 			},
 		);
 
