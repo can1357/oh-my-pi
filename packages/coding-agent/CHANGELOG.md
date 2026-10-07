@@ -5,10 +5,12 @@
 ### Changed
 
 - `SessionManager.getEntries()` and related entry accessors now return images from before the latest compaction as blob refs; call `sessionManager.withInlineImages(entries)` when the image bytes are needed ([#14880](https://github.com/can1357/oh-my-pi/pull/14880) by [@Hamoudii91](https://github.com/Hamoudii91))
+- Agent Hub keeps existing agents in place while open; new agents appear first in the flat roster or within their tree sibling group ([#13066](https://github.com/can1357/oh-my-pi/pull/13066) by [@kmccleary3301](https://github.com/kmccleary3301))
 
 ### Fixed
 
 - Fixed long-running and resumed sessions keeping every screenshot from compacted history in memory; a session with ~600 screenshots now holds about 60 MB instead of about 145 MB ([#14880](https://github.com/can1357/oh-my-pi/pull/14880) by [@Hamoudii91](https://github.com/Hamoudii91))
+- Fixed relative file links in Tern assistant replies opening against the folder omp was started in after `/wt` or `/move`; they now open the file in the session's working directory ([#14879](https://github.com/can1357/oh-my-pi/pull/14879) by [@H4vC](https://github.com/H4vC))
 
 ## [18.8.3] - 2026-10-07
 
