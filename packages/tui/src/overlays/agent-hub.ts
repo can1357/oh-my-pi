@@ -616,6 +616,11 @@ export class AgentHubOverlayComponent<TRecord extends AgentRecordLike = AgentRec
 		this.#lastLeftTap = Date.now();
 	}
 
+	/** Show `section`, as a slash-command deep link into an already-open hub does. */
+	showSection(section: AgentHubSection): void {
+		this.#switchSection(section);
+	}
+
 	/**
 	 * Open the fullscreen transcript viewer for an agent id (public for table Enter
 	 * and tests). Mounts {@link AgentTranscriptViewer} as a `fullscreen` overlay so it
@@ -1589,7 +1594,8 @@ export class AgentHubOverlayComponent<TRecord extends AgentRecordLike = AgentRec
 		for (const ref of rosterRows) this.#statusCounts[ref.status]++;
 		this.#refreshAggregate();
 		this.#refreshActivityData(rosterRows);
-		this.#refreshActivityRows();
+		// The 2,000-row activity query only feeds the Activity tab; switching to it refreshes.
+		if (this.#section === "activity") this.#refreshActivityRows();
 	}
 
 	#refreshActivityData(refs: readonly TRecord[]): void {
@@ -1620,7 +1626,7 @@ export class AgentHubOverlayComponent<TRecord extends AgentRecordLike = AgentRec
 		void Promise.all(pending)
 			.then(() => {
 				if (this.#disposed || generation !== this.#activitySyncGeneration) return;
-				this.#refreshActivityRows();
+				if (this.#section === "activity") this.#refreshActivityRows();
 				this.#requestRender();
 			})
 			.catch(() => {

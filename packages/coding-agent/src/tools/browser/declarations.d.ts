@@ -143,7 +143,7 @@ interface BrowserOpenOptions {
 	ignore_https_errors?: boolean;
 	/** Permit local file pages to read other local files in an owned browser process. */
 	allow_file_access?: boolean;
-	/** Override the configured display mode for this open. */
+	/** Override the configured Chromium display mode for this open; inside Tern the open stays a picture-in-picture (use `app.tern: false` for Chromium). */
 	headed?: boolean;
 	/** Keep the tab live across turn settle and idle close (default false). */
 	persist?: boolean;

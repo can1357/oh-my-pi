@@ -2,7 +2,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } 
 import { Agent } from "@oh-my-pi/pi-agent-core";
 import type { ResetCreditAccountStatus, ResetCreditTarget, UsageReport } from "@oh-my-pi/pi-ai";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
-import * as aiStream from "@oh-my-pi/pi-ai/stream";
+import * as envApiKey from "@oh-my-pi/pi-ai/env-api-key";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -96,7 +96,7 @@ describe("Claude saved-reset trigger integration", () => {
 	});
 
 	beforeEach(() => {
-		vi.spyOn(aiStream, "getEnvApiKey").mockReturnValue(undefined);
+		vi.spyOn(envApiKey, "getEnvApiKey").mockReturnValue(undefined);
 		sessions = [];
 		managers = [];
 		tempDir = TempDir.createSync("@pi-claude-reset-");
@@ -126,6 +126,8 @@ describe("Claude saved-reset trigger integration", () => {
 		maxDelayMs?: number;
 		quota?: { restored: boolean };
 		autoRedeem?: "unset" | "yes" | "no";
+		salvageHorizonHours?: number;
+		keepCredits?: number;
 	}): { session: AgentSession; coordinator: CodexAutoRedeemCoordinator; targets: ResetCreditTarget[] } {
 		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
 		if (!model) throw new Error("Expected bundled anthropic/claude-sonnet-4-5 to exist");
@@ -185,7 +187,8 @@ describe("Claude saved-reset trigger integration", () => {
 			"retry.maxRetries": 1,
 			"codexResets.autoRedeem": "no",
 			"claudeResets.autoRedeem": options.autoRedeem ?? "yes",
-			"claudeResets.salvageHorizonHours": 12,
+			"claudeResets.salvageHorizonHours": options.salvageHorizonHours ?? 12,
+			"claudeResets.keepCredits": options.keepCredits ?? 0,
 		});
 		settings.setModelRole("default", `${model.provider}/${model.id}`);
 		const sessionManager = SessionManager.inMemory();
@@ -357,6 +360,48 @@ describe("Claude saved-reset trigger integration", () => {
 		await coordinator.sweepPromise;
 		expect(targets).toHaveLength(1);
 	});
+
+	it.each(["yes", "no", "unset"] as const)(
+		"only consumes an imminent reset with consent when auto-redeem is %s",
+		async autoRedeem => {
+			const report = claudeReport(0);
+			const status = claudeStatus(false);
+			status.report = report;
+			for (const credit of status.credits) {
+				credit.expiresAt = new Date(Date.now() + 4 * 60_000).toISOString();
+				credit.usedFractions = { "anthropic:7d": 0 };
+			}
+			const { session, coordinator, targets } = buildSession({
+				report,
+				status,
+				autoRedeem,
+				salvageHorizonHours: 0,
+				keepCredits: 1,
+			});
+
+			await session.fetchUsageReports();
+			await coordinator.sweepPromise;
+			expect(targets).toEqual(
+				autoRedeem === "yes"
+					? [
+							{
+								provider: "anthropic",
+								credentialId: CREDENTIAL_ID,
+								creditId: "cedar-grant-1",
+								accountId: ACCOUNT_ID,
+								email: EMAIL,
+								orgId: ORG_ID,
+							},
+						]
+					: [],
+			);
+
+			coordinator.lastSweepAt = 0;
+			await session.fetchUsageReports();
+			await coordinator.sweepPromise;
+			expect(targets).toHaveLength(autoRedeem === "yes" ? 1 : 0);
+		},
+	);
 
 	it("does not spend headlessly before independent Claude consent", async () => {
 		// Codex being disabled does not enable Claude, and an unset headless

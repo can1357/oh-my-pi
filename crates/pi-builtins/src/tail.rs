@@ -2294,10 +2294,22 @@ mod follow {
 				return false;
 			}
 			// POLLRDBAND like GNU tail/tee: never ready on a pipe's write end, so
-			// only POLLERR (no reader left) wakes it.
+			// only a missing reader wakes it.
 			let mut fds = [PollFd::new(fd, PollFlags::POLLRDBAND)];
-			matches!(poll(&mut fds, PollTimeout::ZERO), Ok(n) if n > 0)
-				&& fds[0].revents().is_none_or(|revents| revents.contains(PollFlags::POLLERR))
+			matches!(poll(&mut fds, PollTimeout::ZERO), Ok(n) if n > 0) && reader_gone(fds[0].revents())
+		}
+		
+		/// Whether `poll` revents on a pipe's write end report that no reader is
+		/// left. Linux sets POLLERR; Darwin and most other Unices set POLLHUP
+		/// instead, so accept any of POLLERR | POLLHUP | POLLNVAL like GNU
+		/// `iopoll()`. Unrecognized bits (`None`) also count as broken.
+		#[cfg(unix)]
+		fn reader_gone(revents: Option<nix::poll::PollFlags>) -> bool {
+			use nix::poll::PollFlags;
+		
+			revents.is_none_or(|revents| {
+				revents.intersects(PollFlags::POLLERR | PollFlags::POLLHUP | PollFlags::POLLNVAL)
+			})
 		}
 		
 		#[allow(clippy::cognitive_complexity, reason = "preserves upstream follow loop")]
@@ -2481,6 +2493,23 @@ mod follow {
 			}
 		
 			Ok(())
+		}
+		
+		#[cfg(all(test, unix))]
+		mod tests {
+			use nix::poll::PollFlags;
+		
+			use super::reader_gone;
+		
+			// Failure mode: Darwin reports a widowed pipe write end as
+			// POLLHUP|POLLRDBAND without POLLERR, so `tail -f log | head -n1`
+			// kept following on macOS after head exited.
+			#[test]
+			fn reader_gone_accepts_darwin_and_linux_revents() {
+				assert!(reader_gone(Some(PollFlags::POLLHUP | PollFlags::POLLRDBAND)));
+				assert!(reader_gone(Some(PollFlags::POLLERR)));
+				assert!(!reader_gone(Some(PollFlags::POLLRDBAND)));
+			}
 		}
 	}
 	

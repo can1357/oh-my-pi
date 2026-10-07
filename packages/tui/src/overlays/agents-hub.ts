@@ -15,7 +15,7 @@ import type { TspPickerAction, TspPickerColumn, TspPickerItem, TspPickerScope, T
 import {
 	type Component,
 	Editor,
-	fuzzyMatch,
+	FuzzyQuery,
 	Input,
 	matchesKey,
 	replaceTabs,
@@ -194,12 +194,12 @@ function listRowId(rowDef: ListRow): string {
 	return rowDef.kind === "new" ? "new" : `agent:${rowDef.agent.source}:${rowDef.agent.name}`;
 }
 
-function matchAgent(agent: HubAgent, query: string): boolean {
+/** All `tokens` (prepared once per query) fuzzy-match the agent's searchable text. */
+function matchAgent(agent: HubAgent, tokens: readonly FuzzyQuery[]): boolean {
+	// Not memoized: `overrideModel` is edited in place, and the module index
+	// cache already reuses the per-text index for unchanged agents.
 	const text = `${agent.name} ${agent.description} ${SOURCE_LABEL[agent.source]} ${agent.overrideModel ?? ""}`;
-	return query
-		.trim()
-		.split(/\s+/)
-		.every(token => fuzzyMatch(token, text).matches);
+	return tokens.every(token => token.match(text).matches);
 }
 
 /**
@@ -373,7 +373,14 @@ export class AgentsHubComponent implements Component {
 		const scoped =
 			entry.kind === "source" ? this.#allAgents.filter(agent => agent.source === entry.source) : this.#allAgents;
 		const query = this.#search.getValue();
-		const filtered = query ? scoped.filter(agent => matchAgent(agent, query)) : scoped;
+		let filtered = scoped;
+		if (query) {
+			const tokens = query
+				.trim()
+				.split(/\s+/)
+				.map(token => new FuzzyQuery(token));
+			filtered = scoped.filter(agent => matchAgent(agent, tokens));
+		}
 		this.#rows = [...filtered.map(agent => ({ kind: "agent", agent }) as ListRow), { kind: "new" }];
 	}
 

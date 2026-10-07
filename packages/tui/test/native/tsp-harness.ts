@@ -10,6 +10,8 @@
  * expect(h.region("main")?.c?.[0]?.k).toBe("text");
  * h.stop();
  */
+import * as fs from "node:fs";
+import * as path from "node:path";
 import { type TspApplyError, TspDocument } from "@oh-my-pi/pi-tui/native/apply";
 import { splitTspMessage, type TspHello } from "@oh-my-pi/pi-tui/native/encode";
 import type { Terminal, TerminalAppearance, TerminalStartOptions, TspHelloHandler } from "@oh-my-pi/pi-tui/terminal";
@@ -39,6 +41,23 @@ export interface TspHarnessOptions {
 	manualProbe?: boolean;
 	/** Start the TUI the way the startup prepaint does. */
 	deferInput?: boolean;
+	/** Blobs the terminal already holds (from an earlier connection). */
+	heldBlobs?: readonly Uint8Array[];
+	/**
+	 * The terminal's blob cache folder: `blobs` queries also find blobs saved
+	 * there. {@link TspHarness.start} exports it as `TERN_BLOB_DIR` (and
+	 * unsets that variable without it) until {@link TspHarness.stop}.
+	 */
+	blobDir?: string;
+	/** Answer `blobs` queries (default true). */
+	answerBlobs?: boolean;
+	/** Reject a blob whose `id` isn't the sha256 of its bytes, as Tern 0.5.3 and earlier do. */
+	requireBlobId?: boolean;
+}
+
+/** The id Tern names a blob by. */
+function blobId(bytes: Uint8Array): string {
+	return new Bun.CryptoHasher("sha256").update(bytes).digest("hex");
 }
 
 interface Task {
@@ -121,6 +140,23 @@ export class TspTestTerminal implements Terminal {
 		this.#options = options;
 		this.#cols = options.cols ?? 100;
 		this.#rows = options.rows ?? 30;
+		for (const bytes of options.heldBlobs ?? []) this.blobs.set(blobId(bytes), bytes);
+	}
+
+	/** Whether the terminal holds blob `id`, loading it from the blob cache (verified) when it has it there. */
+	#holdsBlob(id: string): boolean {
+		if (this.blobs.has(id)) return true;
+		const dir = this.#options.blobDir;
+		if (!dir || !/^[0-9a-f]{64}$/.test(id)) return false;
+		let bytes: Uint8Array;
+		try {
+			bytes = fs.readFileSync(path.join(dir, id));
+		} catch {
+			return false;
+		}
+		if (blobId(bytes) !== id) return false;
+		this.blobs.set(id, bytes);
+		return true;
 	}
 
 	get columns(): number {
@@ -266,6 +302,13 @@ export class TspTestTerminal implements Terminal {
 			case "t":
 				this.palettes.push(JSON.parse(body) as TspPalette);
 				return;
+			case "q": {
+				const query = JSON.parse(body) as { q: string; ids?: string[] };
+				if (query.q !== "blobs" || this.#options.answerBlobs === false) return;
+				const have = (query.ids ?? []).filter(id => this.#holdsBlob(id));
+				this.send(`\x1b_tsp;r;${JSON.stringify({ r: "blobs", have })}\x1b\\`);
+				return;
+			}
 			case "o": {
 				const open = JSON.parse(body) as { id: string; adopt?: boolean };
 				if (open.adopt && !this.docs.has(open.id)) {
@@ -295,8 +338,11 @@ export class TspTestTerminal implements Terminal {
 				return;
 			}
 			case "b": {
-				const id = raw.params.id;
-				if (id) this.blobs.set(id, Buffer.from(body, "base64"));
+				// Named by the sha256 of its bytes, as Tern names it.
+				const bytes = Buffer.from(body, "base64");
+				const id = blobId(bytes);
+				if (this.#options.requireBlobId && raw.params.id !== id) return;
+				this.blobs.set(id, bytes);
 				return;
 			}
 			default:
@@ -325,6 +371,8 @@ export class TspHarness {
 	readonly tui: TUI;
 	readonly terminal: TspTestTerminal;
 	#scheduler: ManualScheduler;
+	/** `TERN_BLOB_DIR` before {@link start} set it, restored by {@link stop}. */
+	#blobDirBefore: { value: string | undefined } | undefined;
 
 	constructor(terminal: TspTestTerminal, scheduler: ManualScheduler) {
 		this.terminal = terminal;
@@ -336,6 +384,10 @@ export class TspHarness {
 	static async start(setup?: (tui: TUI) => void, options: TspHarnessOptions = {}): Promise<TspHarness> {
 		const scheduler = new ManualScheduler();
 		const harness = new TspHarness(new TspTestTerminal(options), scheduler);
+		// The terminal's blob cache is the fake one, never the cache of a Tern running the tests.
+		harness.#blobDirBefore = { value: Bun.env.TERN_BLOB_DIR };
+		if (options.blobDir) Bun.env.TERN_BLOB_DIR = options.blobDir;
+		else delete Bun.env.TERN_BLOB_DIR;
 		setup?.(harness.tui);
 		harness.tui.start({ deferInput: options.deferInput });
 		harness.flush();
@@ -354,6 +406,17 @@ export class TspHarness {
 	flush(advanceMs = 0): void {
 		const terminal = this.terminal;
 		this.#scheduler.flush(advanceMs, () => (terminal.answersProbe && terminal.answerProbe()) || terminal.deliver());
+	}
+
+	/** Flush until `done()` holds, letting real async work (blob cache writes) run in between. */
+	async until(done: () => boolean, timeoutMs = 2000): Promise<void> {
+		const deadline = Date.now() + timeoutMs;
+		for (;;) {
+			this.flush();
+			if (done()) return;
+			if (Date.now() > deadline) throw new Error("condition not met in time");
+			await Bun.sleep(1);
+		}
 	}
 
 	/** The event loop was blocked for `ms`: when it resumes, due timers run before any queued input. */
@@ -407,5 +470,10 @@ export class TspHarness {
 	stop(): void {
 		this.tui.stop();
 		this.flush();
+		const before = this.#blobDirBefore;
+		this.#blobDirBefore = undefined;
+		if (!before) return;
+		if (before.value === undefined) delete Bun.env.TERN_BLOB_DIR;
+		else Bun.env.TERN_BLOB_DIR = before.value;
 	}
 }

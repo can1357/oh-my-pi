@@ -2729,14 +2729,23 @@ export interface PtyStartOptions {
 /**
  * Rasterize SVG/SVGZ bytes into a bounded PNG without resolving local files.
  *
- * Conversion runs on the native blocking pool so parsing and rendering do not
- * stall the JavaScript event loop.
+ * The image is drawn at `scale` times the SVG's intrinsic size (default 1;
+ * above 1 renders vector content crisply at display resolution), then shrunk
+ * as needed to fit `max_width_px` x `max_height_px` with its aspect ratio
+ * kept. Conversion runs on the native blocking pool so parsing and rendering
+ * do not stall the JavaScript event loop.
+ *
+ * With `cell`, the limits round down to whole cells and the canvas pads with
+ * transparency, right and bottom, to whole cells: a terminal placing the PNG
+ * over `width / cell.width_px` columns and `height / cell.height_px` rows
+ * shows it 1:1 instead of resampling it.
  *
  * # Errors
- * Returns an error for invalid SVG data, zero/oversized limits, allocation
- * failure, or PNG encoding failure.
+ * Returns an error for invalid SVG data, zero/oversized limits, a zero cell
+ * size, a scale that is not finite and positive, allocation failure, or PNG
+ * encoding failure.
  */
-export declare function rasterizeSvg(input: Uint8Array, maxWidthPx: number, maxHeightPx: number): Promise<Uint8Array>
+export declare function rasterizeSvg(input: Uint8Array, maxWidthPx: number, maxHeightPx: number, scale?: number | undefined | null, cell?: SvgCell | undefined | null): Promise<Uint8Array>
 
 /**
  * Read an image from the system clipboard.
@@ -3389,6 +3398,15 @@ export interface SummarySegment {
  * mapping.
  */
 export declare function supportsLanguage(lang: string): boolean
+
+/**
+ * Terminal cell size in device pixels, for [`rasterize_svg`] canvases a
+ * terminal shows over whole cells.
+ */
+export interface SvgCell {
+  widthPx: number
+  heightPx: number
+}
 
 /** Options for [`TextPredictor::new`]. */
 export interface TextPredictorOptions {

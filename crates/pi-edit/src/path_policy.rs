@@ -994,8 +994,8 @@ mod tests {
 			);
 		});
 		// A regression blocks the reader in open(2) forever; an O_RDWR open never
-		// blocks and counts as a writer, so it releases that reader before the test
-		// fails.
+		// blocks and counts as a writer, so it releases that reader before the
+		// test fails.
 		let result = receiver
 			.recv_timeout(std::time::Duration::from_secs(5))
 			.unwrap_or_else(|_| {

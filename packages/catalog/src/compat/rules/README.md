@@ -217,6 +217,8 @@ One object axis carries a computed form: `long-context-cost` accepts either the 
 
 `context-window-authoritative #true` preserves a host's supplied context window through runtime model selection instead of applying inferred expansion or reference-price-tier caps. Explicit user context overrides still apply afterward. It applies to rows materialized through `buildModel` (discovery and regenerated bundles). See [`providers/factory-droid.kdl`](providers/factory-droid.kdl).
 
+`inline-image-byte-budget` caps retained base64 image characters for a deployment's request body. It leaves room for tool schemas and text beneath the provider's body-size limit; the coding agent reads it through `resolveInlineImageByteBudget` before sending live history. The budget applies only while `compat.officialEndpoint` holds: a custom `baseUrl` imposes its own body limit.
+
 The routed-subscription registry axes (`upstream-rotation`, `region-upstreams-global|us|eu`, `region-limits-eu`, `credit-rates`, `list-price-from`, `routing-family`, `policy-aliases`, `entitlement`, `default-reasoning-off`) describe a gateway whose proxy fans one model out to several upstreams. They are read through `src/compat/factory-droid.ts` by Factory Droid discovery and its request provider, not materialized by `buildModel`. A provider-wide `region-upstreams-*` rule is the upstream serving table and a model rule replaces it for that region. `list-price-from "<provider>" ["<id>"]` shows a bundled row's list price beside the subscription's own billing; unlike seed values it is resolved at runtime and degrades to the seed's zero cost when the row is gone. See [`providers/factory-droid.kdl`](providers/factory-droid.kdl), whose wire and billing pool per model are `api-routes` and `quota-tiers` rules in `runtime/behavior.kdl`.
 
 ### Time-based pricing
@@ -412,6 +414,10 @@ provider "muse-code" {
 ```
 
 Only `discovery` enrolls a provider in `generate-models.ts`; providers without it are never fetched at generation time (see the `charm-hyper` entry for why a live gateway deliberately omits it).
+
+`automatic-default #false` keeps a provider available for explicit selection but excludes it from startup fallback and automatic model presets. The default is `#true`; `apple` opts out because its on-device context cannot accommodate the standard coding-agent prompt in many projects.
+
+`kind-apis { <kind> "<api>" }` maps each non-chat kind (`image`, `tts`, `stt`, `embedding`, `rerank`, `video`) to the API discovery assigns rows of that kind. A runner API must sit under the kind it serves (`RUNNER_API_KINDS` in `src/types.ts`); chat APIs, which serve hosted image generation, and multi-kind `local-inference` may back any kind.
 
 ### Seed rows
 

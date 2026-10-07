@@ -18,15 +18,6 @@ type MCPToolCachePayload = {
 	tools: MCPToolDefinition[];
 };
 
-function toHex(buffer: ArrayBuffer): string {
-	const bytes = new Uint8Array(buffer);
-	let output = "";
-	for (const byte of bytes) {
-		output += byte.toString(16).padStart(2, "0");
-	}
-	return output;
-}
-
 /**
  * Fields excluded from cache-identity hashing because they are connection
  * *policy* (when to connect, whether to connect at all, how long to wait
@@ -98,10 +89,8 @@ function stripKeys(config: MCPServerConfig, keys: readonly (keyof MCPServerConfi
 	return identity;
 }
 
-async function hashIdentity(identity: Record<string, unknown>): Promise<string> {
-	const stable = stableStringifyJson(identity);
-	const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(stable));
-	return toHex(digest);
+function hashIdentity(identity: Record<string, unknown>): string {
+	return Bun.SHA256.hash(stableStringifyJson(identity), "hex");
 }
 
 /**
@@ -155,7 +144,7 @@ function requestIdFormatCandidates(current: MCPRequestIdFormat | undefined): Arr
 }
 
 /** Hashes of `config` under every retired identity-exclusion set, for cache-miss migration. */
-async function hashLegacyConfigs(config: MCPServerConfig): Promise<string[]> {
+function hashLegacyConfigs(config: MCPServerConfig): string[] {
 	const identity = stripKeys(config, CURRENT_IDENTITY_EXCLUDED_KEYS);
 	const hashes = new Set<string>();
 	for (const excluded of LEGACY_IDENTITY_EXCLUDED_KEYS) {
@@ -176,7 +165,7 @@ async function hashLegacyConfigs(config: MCPServerConfig): Promise<string[]> {
 				if (timeoutValue !== undefined) base.timeout = timeoutValue;
 				if (requestIdFormatValue !== undefined) base.requestIdFormat = requestIdFormatValue;
 				for (const variant of policyVariants(enumeratedKeys)) {
-					hashes.add(await hashIdentity({ ...base, ...variant }));
+					hashes.add(hashIdentity({ ...base, ...variant }));
 				}
 			}
 		}
@@ -211,7 +200,7 @@ export class MCPToolCache {
 
 		let currentHash: string;
 		try {
-			currentHash = await hashIdentity(stripKeys(config, CURRENT_IDENTITY_EXCLUDED_KEYS));
+			currentHash = hashIdentity(stripKeys(config, CURRENT_IDENTITY_EXCLUDED_KEYS));
 		} catch (error) {
 			logger.warn("MCP tool cache hash failed", { serverName, error: String(error) });
 			return null;
@@ -220,7 +209,7 @@ export class MCPToolCache {
 		if (parsed.configHash !== currentHash) {
 			let legacyHashes: string[];
 			try {
-				legacyHashes = await hashLegacyConfigs(config);
+				legacyHashes = hashLegacyConfigs(config);
 			} catch (error) {
 				logger.warn("MCP tool cache legacy hash failed", { serverName, error: String(error) });
 				return null;
@@ -234,7 +223,7 @@ export class MCPToolCache {
 	async set(serverName: string, config: MCPServerConfig, tools: MCPToolDefinition[]): Promise<void> {
 		let configHash: string;
 		try {
-			configHash = await hashIdentity(stripKeys(config, CURRENT_IDENTITY_EXCLUDED_KEYS));
+			configHash = hashIdentity(stripKeys(config, CURRENT_IDENTITY_EXCLUDED_KEYS));
 		} catch (error) {
 			logger.warn("MCP tool cache hash failed", { serverName, error: String(error) });
 			return;

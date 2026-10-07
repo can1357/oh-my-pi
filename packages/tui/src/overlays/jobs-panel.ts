@@ -110,6 +110,8 @@ export class JobsSheet implements Component {
 	readonly #source: JobsSheetSource;
 	#selectedId: string | undefined;
 	#native: { key: string; output: string | undefined; node: NativeNode } | undefined;
+	/** Fallback output tail, reused while the selected job's output is unchanged. */
+	#tail: { id: string; output: string; lines: readonly string[] } | undefined;
 
 	constructor(source: JobsSheetSource) {
 		this.#source = source;
@@ -177,8 +179,9 @@ export class JobsSheet implements Component {
 				detail.artifactId && `artifact://${detail.artifactId}`,
 			]);
 			if (facts.length > 0) lines.push(truncateToWidth(`   ${facts.join(" · ")}`, width));
-			const tail = (detail.output ?? "").trimEnd().split("\n").slice(-FALLBACK_TAIL_LINES);
-			for (const line of tail) if (line) lines.push(truncateToWidth(`   ${line}`, width));
+			for (const line of this.#tailLines(selected.id, detail.output ?? "")) {
+				if (line) lines.push(truncateToWidth(`   ${line}`, width));
+			}
 		}
 		return lines;
 	}
@@ -210,6 +213,14 @@ export class JobsSheet implements Component {
 		return { jobs, selected };
 	}
 
+	#tailLines(id: string, output: string): readonly string[] {
+		const cached = this.#tail;
+		if (cached?.id === id && cached.output === output) return cached.lines;
+		const lines = tailLines(output, FALLBACK_TAIL_LINES);
+		this.#tail = { id, output, lines };
+		return lines;
+	}
+
 	#move(delta: number): void {
 		const { jobs, selected } = this.#current();
 		if (!selected) return;
@@ -226,6 +237,23 @@ export class JobsSheet implements Component {
 /** How long a job ran, or has been running. */
 function jobAge(job: JobsPanelJob, nowMs: number): number {
 	return Math.max(0, (job.endTime ?? nowMs) - job.startTime);
+}
+
+/**
+ * The last `count` pieces of `text.trimEnd().split("\n")`, found by scanning
+ * back from the end so a long running output is never split as a whole.
+ */
+function tailLines(text: string, count: number): string[] {
+	const trimmed = text.trimEnd();
+	const lines: string[] = [];
+	let end = trimmed.length;
+	while (lines.length < count) {
+		const newline = end > 0 ? trimmed.lastIndexOf("\n", end - 1) : -1;
+		lines.push(trimmed.slice(newline + 1, end));
+		if (newline < 0) break;
+		end = newline;
+	}
+	return lines.reverse();
 }
 
 /** A task job as an `agent` node when the terminal draws them, else a one-line dot row. */
