@@ -249,11 +249,14 @@ function resolveSchema(request: StructuredSubagentRequest, agent: AgentDefinitio
 	return { schema: undefined, source: "none", mode, outputSchemaOverridesAgent: false };
 }
 
-function createPlanModeAgent(agent: AgentDefinition): AgentDefinition {
+function createPlanModeAgent(agent: AgentDefinition, planAppendPrompt: string | undefined): AgentDefinition {
 	const tools = [...PLAN_MODE_TOOLS, ...(agent.tools ?? []).filter(tool => tool === "ast_grep")];
+	const systemPrompt = planAppendPrompt
+		? `${planModeSubagentPrompt}\n\n${agent.systemPrompt}\n\n${planAppendPrompt}`
+		: `${planModeSubagentPrompt}\n\n${agent.systemPrompt}`;
 	return {
 		...agent,
-		systemPrompt: `${planModeSubagentPrompt}\n\n${agent.systemPrompt}`,
+		systemPrompt,
 		tools,
 		spawns: undefined,
 		prewalk: undefined,
@@ -404,7 +407,7 @@ export async function resolveEffectiveSubagentPolicy(
 		);
 	}
 
-	const effectiveAgent = planMode ? createPlanModeAgent(agent) : agent;
+	const effectiveAgent = planMode ? createPlanModeAgent(agent, request.session.getPlanModeAppendPrompt?.()) : agent;
 	const schema = resolveSchema(request, effectiveAgent);
 	if (schema.source === "caller" || (schema.source !== "none" && schema.mode === "strict")) {
 		const { error } = buildOutputValidator(schema.schema);

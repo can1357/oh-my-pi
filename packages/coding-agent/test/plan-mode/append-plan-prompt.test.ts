@@ -1,16 +1,20 @@
 import { afterEach, describe, expect, it } from "bun:test";
 import { type } from "@oh-my-pi/omptype";
-import { Agent, type AgentTool } from "@oh-my-pi/pi-agent-core";
+import { Agent, type AgentMessage, type AgentTool } from "@oh-my-pi/pi-agent-core";
 import type { Model } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import { ModelRegistry } from "../../src/config/model-registry";
 import { Settings } from "../../src/config/settings";
 import { AgentSession } from "../../src/session/agent-session";
+import { dropStalePlanModeContext } from "../../src/session/messages";
+import { AuthStorage } from "../../src/session/auth-storage";
 import { SessionManager } from "../../src/session/session-manager";
 
 const sessions: AgentSession[] = [];
 
 afterEach(async () => {
 	for (const session of sessions.splice(0)) await session.dispose();
+	for (const authStorage of authStorages.splice(0)) authStorage.close();
 });
 
 function model(): Model {
@@ -40,18 +44,17 @@ function tool(name: string): AgentTool {
 	};
 }
 
-function createSession(planModeAppendPrompt?: string): AgentSession {
+const authStorages: AuthStorage[] = [];
+
+async function createSession(planModeAppendPrompt?: string): Promise<AgentSession> {
 	const tools = [tool("read")];
+	const authStorage = await AuthStorage.create(":memory:");
+	authStorages.push(authStorage);
 	const session = new AgentSession({
 		agent: new Agent({ initialState: { model: model(), systemPrompt: [], tools } }),
 		sessionManager: SessionManager.inMemory(),
 		settings: Settings.isolated(),
-		modelRegistry: {
-			getApiKey: async () => "test-key",
-			hasConfiguredAuth: () => true,
-			refreshSelectedModelMetadata: async (value: Model) => value,
-			clearSuppressedSelector: () => undefined,
-		} as never,
+		modelRegistry: new ModelRegistry(authStorage),
 		toolRegistry: new Map(tools.map(value => [value.name, value])),
 		builtInToolNames: tools.map(value => value.name),
 		planModeAppendPrompt,
@@ -70,7 +73,7 @@ async function planModeContext(session: AgentSession): Promise<string | undefine
 
 describe("planModeAppendPrompt", () => {
 	it("appends user planning guidance to the plan-mode context message", async () => {
-		const session = createSession("Use context7 MCP to look up library docs before writing the plan.");
+		const session = await createSession("Use context7 MCP to look up library docs before writing the plan.");
 		session.setPlanModeState({ enabled: true, planFilePath: "local://PLAN.md" });
 
 		const content = await planModeContext(session);
@@ -80,7 +83,7 @@ describe("planModeAppendPrompt", () => {
 	});
 
 	it("keeps the bundled plan-mode guidance unchanged when no append is configured", async () => {
-		const session = createSession();
+		const session = await createSession();
 		session.setPlanModeState({ enabled: true, planFilePath: "local://PLAN.md" });
 
 		const content = await planModeContext(session);
@@ -90,10 +93,26 @@ describe("planModeAppendPrompt", () => {
 	});
 
 	it("emits no plan-mode context while plan mode is disabled", async () => {
-		const session = createSession("Never seen");
+		const session = await createSession("Never seen");
 
 		const content = await planModeContext(session);
 
 		expect(content).toBeUndefined();
+	});
+
+	it("drops retained plan-mode context once plan mode is off, keeping other messages", () => {
+		const planMessage = {
+			role: "custom",
+			customType: "plan-mode-context",
+			content: "bundled rules\n\nplan-only append text",
+			display: false,
+			timestamp: 1,
+		} as AgentMessage;
+		const userMessage = { role: "user", content: [{ type: "text", text: "hi" }], timestamp: 2 } as AgentMessage;
+
+		expect(dropStalePlanModeContext([planMessage, userMessage], false)).toEqual([userMessage]);
+		// While plan mode is enabled the message stays — each planning turn
+		// re-injects the current version anyway.
+		expect(dropStalePlanModeContext([planMessage, userMessage], true)).toEqual([planMessage, userMessage]);
 	});
 });

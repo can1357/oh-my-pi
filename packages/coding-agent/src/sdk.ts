@@ -2300,6 +2300,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			getServiceTierByFamily: () => session?.serviceTierByFamily,
 			getImageAttachments: () => session?.getImageAttachments() ?? [],
 			getPlanModeState: () => session?.getPlanModeState(),
+			getPlanModeAppendPrompt: () => options.appendPlanPrompt,
 			getPlanReferencePath: () => session?.getPlanReferencePath() ?? "local://PLAN.md",
 			getGoalModeState: () => session?.getGoalModeState(),
 			getGoalRuntime: () => session?.goalRuntime,

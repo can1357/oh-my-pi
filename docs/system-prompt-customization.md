@@ -88,7 +88,7 @@ generated block — the append text is emitted unchanged, without a heading.
 
 Discovery mirrors `APPEND_SYSTEM.md`: project config bases first, then the user agent directory; an explicit `--append-plan-prompt` wins over the discovered file, and the same text-or-file resolution rules apply (a single-line value is tried as a path first; newline-containing values are literal). The programmatic `CreateAgentSessionOptions.appendPlanPrompt` accepts already-loaded text.
 
-Plan-mode subagents spawned via `task` do not receive the append; their plan-mode prompt stays the bundled `plan-mode-subagent.md`.
+Plan-mode subagents spawned via `task` receive the same append after the bundled `plan-mode-subagent.md` block and their own agent prompt. Retained `plan-mode-context` copies in history are dropped from provider input once plan mode is disabled, so the append never reaches implementation turns.
 
 ## Inputs by session type
 

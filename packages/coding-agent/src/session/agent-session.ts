@@ -357,6 +357,7 @@ import {
 	INTERRUPTED_THINKING_MESSAGE_TYPE,
 	type InterruptedThinkingDetails,
 	isEmptyErrorTurn,
+	dropStalePlanModeContext,
 	titleContextWordCount,
 	isUserInterruptAbort,
 	isUserInvokedSkillPrompt,
@@ -2034,7 +2035,15 @@ export class AgentSession implements SettingsScope {
 			model: () => this.model,
 			sessionId: () => this.sessionId,
 			localProtocolOptions: () => this.#localProtocolOptions(),
-			transformContext: (messages, signal) => this.#transformContext(messages, signal),
+			transformContext: (messages, signal) =>
+				this.#transformContext(
+					// Plan-mode turns already rebuild the context message; retained
+					// copies would keep delivering its text (including the user's
+					// APPEND_PLAN.md append) as developer messages after plan mode
+					// exits, so the boundary drops them once the mode is off.
+					dropStalePlanModeContext(messages, this.#planModeState?.enabled === true),
+					signal,
+				),
 			convertToLlm: messages => this.#convertToLlm(messages),
 			onPayload: this.#onPayload,
 			onResponse: this.#onResponse,
@@ -6939,15 +6948,16 @@ export class AgentSession implements SettingsScope {
 			reentry: state.reentry ?? false,
 			iterative: state.workflow === "iterative",
 			scoutAvailable: this.#isScoutAvailable(),
+			appendPrompt: this.#planModeAppendPrompt,
 		});
 
 		return {
 			role: "custom",
 			customType: "plan-mode-context",
-			// APPEND_PLAN.md / --append-plan-prompt ride this hidden per-turn
-			// message, so user planning guidance applies only while plan mode is
-			// enabled and drops out automatically on implementation turns.
-			content: this.#planModeAppendPrompt ? `${content}\n\n${this.#planModeAppendPrompt}` : content,
+			// APPEND_PLAN.md / --append-plan-prompt enter the rendered content via
+			// the template's appendPrompt slot; retained copies are dropped at the
+			// provider boundary once plan mode exits (dropStalePlanModeContext).
+			content,
 			display: false,
 			attribution: "agent",
 			timestamp: Date.now(),

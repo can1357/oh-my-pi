@@ -121,3 +121,7 @@ Turn ends ONLY:
 
 NEVER request plan approval via prose/{{#if askAvailable}}`{{askToolName}}`{{else}}a question{{/if}}; MUST use `xd://propose` write. MUST continue until decision-complete.
 </critical>
+
+{{#if appendPrompt}}
+{{appendPrompt}}
+{{/if}}

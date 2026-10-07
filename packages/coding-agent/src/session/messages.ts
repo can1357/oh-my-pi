@@ -654,6 +654,26 @@ function userMessageWithoutSteering(message: UserMessage): UserMessage {
 	return rest;
 }
 
+/**
+ * Custom type of the hidden per-turn message carrying plan-mode instructions.
+ * Re-injected on every planning turn; retained copies would otherwise keep
+ * reaching the provider as developer messages after plan mode exits.
+ */
+export const PLAN_MODE_CONTEXT_MESSAGE_TYPE = "plan-mode-context";
+
+/**
+ * Drop retained `plan-mode-context` messages once plan mode is disabled, so
+ * bundled rules and any user-supplied plan append stop reaching the provider
+ * as developer messages on implementation turns. No-op while plan mode is on
+ * (every planning turn re-injects the current message anyway).
+ */
+export function dropStalePlanModeContext(messages: AgentMessage[], planModeEnabled: boolean): AgentMessage[] {
+	if (planModeEnabled) return messages;
+	return messages.filter(
+		message => !(message.role === "custom" && message.customType === PLAN_MODE_CONTEXT_MESSAGE_TYPE),
+	);
+}
+
 function renderSteeringEnvelope(message: string): string {
 	return prompt.render(userInterjectionTemplate, { message });
 }
