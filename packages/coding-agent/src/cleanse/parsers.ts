@@ -67,7 +67,180 @@ interface ParsedLocation {
 
 /** Parse one checker invocation into normalized, project-relative diagnostics. */
 export function parseCleanseDiagnostics(kind: CleanseParserKind, input: CleanseParserInput): CleanseDiagnostic[] {
-	const parsed = (() => {
+	const parsed = parsePrimary(kind, input);
+	return deduplicateDiagnostics(parsed.length > 0 || !GENERIC_FALLBACK[kind] ? parsed : parseGeneric(input));
+}
+
+/** Kinds whose own format falls back to the generic line parser when it matches nothing. */
+const GENERIC_FALLBACK: Partial<Record<CleanseParserKind, true>> = { go: true, "go-test": true };
+
+/**
+ * Where partial output on one stream may be cut so both sides parse independently:
+ * at any line end, or only at line ends outside every JSON document.
+ */
+type StreamFraming = "lines" | "json";
+
+const LINES: { stdout: StreamFraming; stderr: StreamFraming } = { stdout: "lines", stderr: "lines" };
+const JSON_BOTH: { stdout: StreamFraming; stderr: StreamFraming } = { stdout: "json", stderr: "json" };
+const JSON_STDOUT: { stdout: StreamFraming; stderr: StreamFraming } = { stdout: "json", stderr: "lines" };
+
+const STREAM_FRAMING: Record<CleanseParserKind, { stdout: StreamFraming; stderr: StreamFraming }> = {
+	rust: JSON_STDOUT,
+	"rust-test": JSON_STDOUT,
+	go: JSON_BOTH,
+	"go-test": JSON_STDOUT,
+	staticcheck: JSON_BOTH,
+	golangci: LINES,
+	ruff: JSON_BOTH,
+	pyright: JSON_BOTH,
+	mypy: LINES,
+	pylint: JSON_BOTH,
+	flake8: LINES,
+	ty: LINES,
+	eslint: JSON_BOTH,
+	biome: JSON_BOTH,
+	oxlint: LINES,
+	"deno-lint": JSON_BOTH,
+	stylelint: JSON_BOTH,
+	rubocop: JSON_BOTH,
+	phpstan: JSON_BOTH,
+	psalm: JSON_BOTH,
+	swiftlint: JSON_BOTH,
+	dart: LINES,
+	credo: JSON_BOTH,
+	shellcheck: JSON_BOTH,
+	hlint: JSON_BOTH,
+	terraform: JSON_BOTH,
+	tflint: JSON_BOTH,
+	actionlint: JSON_BOTH,
+	generic: LINES,
+};
+
+/**
+ * Incremental parser for output of a checker that is still running.
+ *
+ * Each {@link push} takes the text appended to stdout/stderr since the previous call and
+ * parses only the output completed since then, cut where the format parses independently:
+ * at line ends, and for JSON streams only between documents. The diagnostics yielded across
+ * calls match re-parsing the whole completed prefix each time; callers dedupe across calls.
+ */
+export class CleanseStreamParser {
+	readonly #kind: CleanseParserKind;
+	readonly #context: Omit<CleanseParserInput, "stdout" | "stderr">;
+	readonly #stdout: StreamCutter;
+	readonly #stderr: StreamCutter;
+	#primaryFound = false;
+
+	constructor(kind: CleanseParserKind, context: Omit<CleanseParserInput, "stdout" | "stderr">) {
+		this.#kind = kind;
+		this.#context = context;
+		const framing = STREAM_FRAMING[kind];
+		this.#stdout = new StreamCutter(framing.stdout);
+		this.#stderr = new StreamCutter(framing.stderr);
+	}
+
+	/** Feed newly produced output; returns diagnostics parsed from newly completed segments. */
+	push(stdout: string, stderr: string): CleanseDiagnostic[] {
+		const input: CleanseParserInput = {
+			...this.#context,
+			stdout: this.#stdout.push(stdout),
+			stderr: this.#stderr.push(stderr),
+		};
+		if (!input.stdout && !input.stderr) return [];
+		const parsed = parsePrimary(this.#kind, input);
+		if (parsed.length > 0) this.#primaryFound = true;
+		// The generic fallback applies only while the primary format has matched nothing
+		// in the whole prefix, exactly as a full re-parse of that prefix would decide.
+		const fallback = !this.#primaryFound && GENERIC_FALLBACK[this.#kind];
+		return deduplicateDiagnostics(fallback ? parseGeneric(input) : parsed);
+	}
+}
+
+/** Splits one growing output stream into sanitized segments that parse independently. */
+class StreamCutter {
+	readonly #json: boolean;
+	/** Raw output after the last newline seen, as received; joined once its line completes. */
+	#partial: string[] = [];
+	/** Sanitized complete lines held back while a JSON document is open; joined once it closes. */
+	#held: string[] = [];
+	// JSON scanner state at the end of #held, mirroring parseJsonValues.
+	#inDocument = false;
+	#depth = 0;
+	#inString = false;
+	#escaped = false;
+	/** Whether the current line already has non-whitespace text outside a document. */
+	#lineHasText = false;
+
+	constructor(framing: StreamFraming) {
+		this.#json = framing === "json";
+	}
+
+	push(chunk: string): string {
+		const newline = chunk.lastIndexOf("\n");
+		if (newline < 0) {
+			if (chunk.length > 0) this.#partial.push(chunk);
+			return "";
+		}
+		this.#partial.push(chunk.slice(0, newline + 1));
+		const lines = this.#partial.join("");
+		this.#partial = newline + 1 < chunk.length ? [chunk.slice(newline + 1)] : [];
+		// Sanitize whole lines only: ANSI sequences never span a newline, so this
+		// equals the corresponding slice of the full sanitized output.
+		const complete = sanitizeText(lines);
+		if (!this.#json) return complete;
+		const cut = this.#scan(complete);
+		if (cut === 0) {
+			this.#held.push(complete);
+			return "";
+		}
+		this.#held.push(complete.slice(0, cut));
+		const emitted = this.#held.join("");
+		this.#held = cut < complete.length ? [complete.slice(cut)] : [];
+		return emitted;
+	}
+
+	/**
+	 * Advance the scanner over newly completed `text`; returns the offset in it
+	 * after the last line end outside a document, or 0. A document opens only
+	 * at a line's first non-whitespace character, so a brace inside a plain
+	 * text diagnostic (`expected '{'`) does not hold the stream back.
+	 */
+	#scan(text: string): number {
+		let cut = 0;
+		for (let index = 0; index < text.length; index += 1) {
+			const char = text[index];
+			if (!this.#inDocument) {
+				if (char === "\n") {
+					cut = index + 1;
+					this.#lineHasText = false;
+				} else if (!this.#lineHasText && (char === "{" || char === "[")) {
+					this.#inDocument = true;
+					this.#depth = 1;
+					this.#inString = false;
+					this.#escaped = false;
+				} else if (char !== " " && char !== "\t" && char !== "\r") {
+					this.#lineHasText = true;
+				}
+				continue;
+			}
+			if (this.#inString) {
+				if (this.#escaped) this.#escaped = false;
+				else if (char === "\\") this.#escaped = true;
+				else if (char === '"') this.#inString = false;
+				continue;
+			}
+			if (char === '"') this.#inString = true;
+			else if (char === "{" || char === "[") this.#depth += 1;
+			else if (char === "}" || char === "]") this.#depth -= 1;
+			if (this.#depth === 0) this.#inDocument = false;
+		}
+		return cut;
+	}
+}
+
+/** The kind's own format, without the generic fallback. */
+function parsePrimary(kind: CleanseParserKind, input: CleanseParserInput): CleanseDiagnostic[] {
+	return (() => {
 		switch (kind) {
 			case "rust":
 				return parseRust(input);
@@ -129,7 +302,6 @@ export function parseCleanseDiagnostics(kind: CleanseParserKind, input: CleanseP
 				return parseGeneric(input);
 		}
 	})();
-	return deduplicateDiagnostics(parsed);
 }
 
 function toRecord(value: unknown): Record<string, unknown> | undefined {
@@ -326,7 +498,7 @@ function parseGo(input: CleanseParserInput): CleanseDiagnostic[] {
 		for (const key in record) visit(record[key], key);
 	};
 	for (const value of allJsonValues(input)) visit(value);
-	return diagnostics.length > 0 ? diagnostics : parseGeneric(input);
+	return diagnostics;
 }
 
 function parseGoTest(input: CleanseParserInput): CleanseDiagnostic[] {
@@ -357,7 +529,7 @@ function parseGoTest(input: CleanseParserInput): CleanseDiagnostic[] {
 			});
 		}
 	}
-	return diagnostics.length > 0 ? diagnostics : parseGeneric(input);
+	return diagnostics;
 }
 
 function parseStaticcheck(input: CleanseParserInput): CleanseDiagnostic[] {

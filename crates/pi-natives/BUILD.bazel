@@ -1,5 +1,6 @@
 load("@crates//:defs.bzl", "aliases", "all_crate_deps")
 load("@rules_rust//rust:defs.bzl", "rust_binary", "rust_shared_library", "rust_test")
+load("//bazel/toolchains/swift:defs.bzl", "applefm_bridge")
 load(":darwin_helper.bzl", "darwin_helper")
 
 package(default_visibility = ["//visibility:public"])
@@ -19,22 +20,17 @@ darwin_helper(
 )
 
 # Apple Foundation Models bridge (src/applefm/build-bridge.sh): a bridge.swift
-# dylib built with the toolchain @applefm_swift detected, else an empty file.
-# The addon embeds it as compile data and dlopens it only on macOS 27+. The toolchain
-# fingerprint in toolchain.txt is an input, so cached outputs never cross
-# toolchains. build.rs does the same for cargo builds.
-genrule(
+# dylib built with the //bazel/toolchains/swift toolchain (host Xcode on mac
+# exec hosts, pinned swift.org Swift + @macos_sdk on linux ones), else an empty
+# file. The addon embeds it as compile data and dlopens it only on macOS 27+.
+# Mac hosts key the action on the detected toolchain's fingerprint
+# (toolchain.txt), linux hosts on the pinned toolchain's files, so cached
+# outputs never cross toolchains. build.rs does the same for cargo builds.
+applefm_bridge(
     name = "applefm_bridge",
-    srcs = [
-        "src/applefm/bridge.swift",
-        "src/applefm/build-bridge.sh",
-        "@applefm_swift//:toolchain.txt",
-    ],
-    outs = ["libomp_applefm.dylib"],
-    cmd = select({
-        "//bazel/triples:aarch64-apple-darwin": "/bin/sh $(location src/applefm/build-bridge.sh) build $@ arm64 $$(cut -f1,2 $(location @applefm_swift//:toolchain.txt))",
-        "//conditions:default": "/bin/sh $(location src/applefm/build-bridge.sh) build $@ x86_64",
-    }),
+    src = "src/applefm/bridge.swift",
+    out = "libomp_applefm.dylib",
+    script = "src/applefm/build-bridge.sh",
     target_compatible_with = ["@platforms//os:macos"],
 )
 
@@ -111,7 +107,12 @@ rust_shared_library(
         # keeps the addon resident across Worker teardown on linux-gnu (napi
         # emits it for gnu; harmless under musl's loader). windows-msvc needs
         # nothing — napi-sys v3 imports node.exe via raw-dylib.
-        "@platforms//os:macos": ["-Clink-arg=-Wl,-undefined,dynamic_lookup"],
+        # -adhoc_codesign: linkers sign arm64 ad hoc by default but not
+        # x86_64; every shipped darwin addon carries a signature.
+        "@platforms//os:macos": [
+            "-Clink-arg=-Wl,-undefined,dynamic_lookup",
+            "-Clink-arg=-Wl,-adhoc_codesign",
+        ],
         "@platforms//os:linux": ["-Clink-arg=-Wl,-z,nodelete"],
         "//conditions:default": [],
     }) + select({

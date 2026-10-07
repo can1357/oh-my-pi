@@ -23,6 +23,68 @@ function finiteMetric(value: number | undefined): number {
 	return typeof value === "number" && Number.isFinite(value) ? value : 0;
 }
 
+/** Message list a fallback metrics read was taken from; unchanged list ⇒ unchanged metrics. */
+interface FallbackReadStamp {
+	messages: readonly unknown[];
+	length: number;
+	last: unknown;
+	/** Usage and block count of the last message, which a streaming turn mutates in place. */
+	lastShape: string;
+	/** Session model, whose context window the context gauge reports. */
+	model: unknown;
+	contextWindow: number | null | undefined;
+}
+
+/** Stamp of each cached fallback read, keyed by the cache entry so it cannot outlive that read. */
+const fallbackReadStamps = new WeakMap<object, FallbackReadStamp>();
+
+function lastMessageShape(last: unknown): string {
+	if (!last || typeof last !== "object") return "";
+	const { usage, content } = last as {
+		usage?: { input?: number; output?: number; cacheWrite?: number; cost?: { total?: number } };
+		content?: unknown;
+	};
+	const blocks = Array.isArray(content) ? content.length : -1;
+	return `${usage?.input}:${usage?.output}:${usage?.cacheWrite}:${usage?.cost?.total}:${blocks}`;
+}
+
+function fallbackReadStamp(session: NonNullable<AgentRecordLike["session"]>): FallbackReadStamp | undefined {
+	try {
+		const messages = session.agent?.state?.messages;
+		if (!Array.isArray(messages)) return undefined;
+		const last = messages[messages.length - 1];
+		return {
+			messages,
+			length: messages.length,
+			last,
+			lastShape: lastMessageShape(last),
+			model: session.model,
+			contextWindow: session.model?.contextWindow,
+		};
+	} catch {
+		return undefined;
+	}
+}
+
+/**
+ * Whether a cached fallback read still matches the session's message list
+ * (append, compaction, rewrite, streaming tail) and model (context window).
+ */
+function fallbackReadCurrent(entry: object, session: NonNullable<AgentRecordLike["session"]>): boolean {
+	const stamp = fallbackReadStamps.get(entry);
+	if (!stamp) return false;
+	const current = fallbackReadStamp(session);
+	return (
+		current !== undefined &&
+		current.messages === stamp.messages &&
+		current.length === stamp.length &&
+		current.last === stamp.last &&
+		current.lastShape === stamp.lastShape &&
+		current.model === stamp.model &&
+		current.contextWindow === stamp.contextWindow
+	);
+}
+
 /** Exact observer usage for one roster entry. */
 export function progressMetrics(observed: ObservableSession | undefined): AgentMetrics | undefined {
 	const progress = observed?.progress;
@@ -163,8 +225,14 @@ export function aggregateMetrics<TRecord extends AgentRecordLike>(args: {
 		const fallbackSession = args.fallbackStatsSession(ref, observed);
 		if (fallbackSession) {
 			hasFallbackLiveSessions = true;
-			if (args.refreshFallback || !args.sessionMetrics.has(fallbackSession)) {
-				args.sessionMetrics.set(fallbackSession, { metrics: readSessionMetrics(fallbackSession) });
+			const cached = args.sessionMetrics.get(fallbackSession);
+			// A refresh rescans every assistant message (plus the host's stats);
+			// skip it while the message list is provably the one already read.
+			if (!cached || (args.refreshFallback && !fallbackReadCurrent(cached, fallbackSession))) {
+				const stamp = fallbackReadStamp(fallbackSession);
+				const entry = { metrics: readSessionMetrics(fallbackSession) };
+				if (stamp) fallbackReadStamps.set(entry, stamp);
+				args.sessionMetrics.set(fallbackSession, entry);
 			}
 		}
 		const metrics = args.metricsFor(ref, observed);

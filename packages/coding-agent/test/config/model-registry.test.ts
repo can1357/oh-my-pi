@@ -4,6 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { AuthStorage } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import { runModelsListing } from "../../src/cli/models-cli";
 import { ModelRegistry } from "../../src/config/model-registry";
 
 const testModel = buildModel({
@@ -38,6 +39,153 @@ describe("ModelRegistry", () => {
 		vi.restoreAllMocks();
 		authStorage.close();
 		fs.rmSync(tmpDir, { recursive: true, force: true });
+	});
+
+	async function listModels(): Promise<{ stdout: string; stderr: string }> {
+		let stdout = "";
+		let stderr = "";
+		const out = vi.spyOn(process.stdout, "write").mockImplementation(chunk => {
+			stdout += String(chunk);
+			return true;
+		});
+		const err = vi.spyOn(process.stderr, "write").mockImplementation(chunk => {
+			stderr += String(chunk);
+			return true;
+		});
+		try {
+			await runModelsListing({ modelRegistry: registry, cwd: tmpDir, json: true, disableExtensionDiscovery: true });
+		} finally {
+			out.mockRestore();
+			err.mockRestore();
+		}
+		return { stdout, stderr };
+	}
+
+	test("warns once for unknown compat keys without disabling models or corrupting JSON output", async () => {
+		const modelsPath = path.join(tmpDir, "models.yaml");
+		const content = `providers:
+  custom:
+    baseUrl: https://example.test/v1
+    auth: none
+    api: openai-completions
+    compat:
+      supportsStroe: false
+      supportsStore: false
+    models:
+      - id: custom-model
+        compat:
+          supportsStroe: false
+          supportsStore: false
+    modelOverrides:
+      custom-model:
+        compat:
+          supportsStroe: false
+          supportsStore: false
+`;
+		await Bun.write(modelsPath, content);
+		await registry.refresh("offline");
+		const listing = await listModels();
+		expect(registry.getError()).toBeUndefined();
+		expect(registry.find("custom", "custom-model")?.compatConfig).toMatchObject({
+			supportsStore: false,
+			supportsStroe: false,
+		});
+		expect(JSON.parse(listing.stdout).models).toContainEqual(expect.objectContaining({ id: "custom-model" }));
+		expect(listing.stderr.trim().split("\n")).toEqual(
+			["compat", "models.0.compat", "modelOverrides.custom-model.compat"].map(
+				location =>
+					`Warning: Unknown compat key in ${modelsPath}: providers.custom.${location}.supportsStroe (configuration still loaded).`,
+			),
+		);
+
+		await registry.refresh("offline");
+		await registry.refresh("offline", { refreshCommandCredentials: true });
+		// A file-watch reload can change mtime without changing any diagnostics.
+		await Bun.write(modelsPath, content);
+		const later = new Date(Date.now() + 1000);
+		fs.utimesSync(modelsPath, later, later);
+		await registry.refresh("offline");
+		expect((await listModels()).stderr).toBe("");
+
+		await Bun.write(modelsPath, content.replace("supportsStroe", "supportsStorre"));
+		await registry.refresh("offline", { refreshCommandCredentials: true });
+		expect((await listModels()).stderr).toBe(
+			`Warning: Unknown compat key in ${modelsPath}: providers.custom.compat.supportsStorre (configuration still loaded).\n`,
+		);
+	});
+
+	test("warns for nested fixed-field compat keys but accepts open extraBody payloads", async () => {
+		await Bun.write(
+			path.join(tmpDir, "models.yaml"),
+			JSON.stringify({
+				providers: {
+					custom: {
+						compat: {
+							supportsStore: false,
+							promptCacheMode: "explicit",
+							openRouterRouting: { only: ["example"], onyl: ["example"] },
+							vercelGatewayRouting: { order: ["example"], oder: [] },
+							reasoningEffortMap: { high: "high", hgh: "high" },
+							whenThinking: {
+								supportsStroe: false,
+								extraBody: { arbitrary: { nested: true } },
+								whenThinking: { supportsStore: false },
+							},
+							extraBody: { supportsStroe: false, arbitrary: { nested: true } },
+							defaultLevel: "high",
+							contextWindowFloor: 131072,
+						},
+					},
+				},
+			}),
+		);
+		await registry.refresh("offline");
+		expect(registry.getError()).toBeUndefined();
+		const listing = await listModels();
+		expect(listing.stderr.trim().split("\n")).toEqual(
+			[
+				"openRouterRouting.onyl",
+				"vercelGatewayRouting.oder",
+				"reasoningEffortMap.hgh",
+				"whenThinking.supportsStroe",
+				"whenThinking.whenThinking",
+				"defaultLevel",
+				"contextWindowFloor",
+			].map(
+				key =>
+					`Warning: Unknown compat key in ${path.join(tmpDir, "models.yaml")}: providers.custom.compat.${key} (configuration still loaded).`,
+			),
+		);
+	});
+
+	test("does not warn for declared compat keys or runtime extension compatibility fields", async () => {
+		await Bun.write(
+			path.join(tmpDir, "models.yaml"),
+			JSON.stringify({
+				providers: {
+					custom: {
+						compat: {
+							supportsStore: false,
+							promptCacheMode: "explicit",
+							extraBody: { custom: { nested: true } },
+							supportsSamplingParams: false,
+							streamFirstEventTimeoutMs: 0,
+							supportsContextManagement: false,
+							whenThinking: {
+								omitReasoningEffort: false,
+								reasoningDisableMode: "none",
+								supportsSamplingParams: false,
+							},
+						},
+					},
+				},
+			}),
+		);
+		await registry.refresh("offline");
+		const compat = { supportsStore: false, extensionSpecific: true };
+		registry.registerProvider("extension", { compat, api: "extension-api" });
+		expect(registry.getError()).toBeUndefined();
+		expect((await listModels()).stderr).toBe("");
 	});
 
 	test("resolves immediately when no background refresh is in flight", async () => {

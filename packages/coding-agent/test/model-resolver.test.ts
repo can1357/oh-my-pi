@@ -388,6 +388,26 @@ function roleChainModel(provider: string, id: string): Model<Api> {
 }
 
 describe("pickDefaultAvailableModel", () => {
+	test("does not auto-select Apple Foundation Models but retains explicit selection", () => {
+		const apple = buildModel({
+			id: "on-device",
+			name: "Apple Foundation Model",
+			api: "apple-foundation-models",
+			provider: "apple",
+			baseUrl: "local://apple-foundation-models",
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 8192,
+			maxTokens: 4096,
+		});
+		const anthropic = createOpusModel("anthropic", DEFAULT_MODEL_PER_PROVIDER.anthropic, "Claude Opus");
+
+		expect(pickDefaultAvailableModel([apple])).toBeUndefined();
+		expect(pickDefaultAvailableModel([apple, anthropic])).toBe(anthropic);
+		expect(pickDefaultAvailableModel([apple, anthropic], () => true)).toBe(anthropic);
+		expect(parseModelPattern("apple/on-device", [apple]).model).toBe(apple);
+	});
 	test("prefers Codex OAuth over plain OpenAI for the shared GPT default", () => {
 		const result = pickDefaultAvailableModel(openaiGpt55Models);
 

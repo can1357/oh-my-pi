@@ -27,6 +27,7 @@ import type { ModelRoleLookup } from "@oh-my-pi/pi-tui/overlays/model-browser";
 import type { Api, Effort, KnownProvider, Model, ModelSpec } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { resolveBareVariantSelector, resolveVariantSelector } from "@oh-my-pi/pi-catalog/compat/collapse";
+import { providerEntry } from "@oh-my-pi/pi-catalog/compat/providers";
 import { collapseVariantId, stripThinkingVariantSuffix } from "@oh-my-pi/pi-catalog/compat/taxonomy";
 import { modelMatchesHost } from "@oh-my-pi/pi-catalog/hosts";
 import { buildModelProviderPriorityRank } from "@oh-my-pi/pi-catalog/identity";
@@ -65,7 +66,7 @@ function isKnownProvider(provider: string): provider is KnownProvider {
 }
 
 /**
- * Pick the first provider-default model in availability order.
+ * Pick the first auto-selectable provider-default model in availability order.
  *
  * When `hasConcreteCredential` is supplied and at least one available model
  * belongs to a provider with a concrete credential, the candidate pool is
@@ -79,24 +80,27 @@ function isKnownProvider(provider: string): provider is KnownProvider {
  * If multiple providers expose that same default id, rank only that shared-id
  * group by canonical provider priority so native/OAuth transports beat mirrors
  * without changing unrelated provider fallback precedence.
+ * Providers with `automatic-default #false` remain available to explicit model
+ * selectors but cannot become the startup fallback.
  */
 export function pickDefaultAvailableModel(
 	availableModels: Model<Api>[],
 	hasConcreteCredential?: (provider: string) => boolean,
 ): Model<Api> | undefined {
+	const autoSelectable = availableModels.filter(model => providerEntry(model.provider)?.automaticDefault !== false);
 	const models =
 		hasConcreteCredential === undefined
-			? availableModels
+			? autoSelectable
 			: (() => {
 					const concreteAuthByProvider = new Map<string, boolean>();
-					const concrete = availableModels.filter(model => {
+					const concrete = autoSelectable.filter(model => {
 						const cached = concreteAuthByProvider.get(model.provider);
 						if (cached !== undefined) return cached;
 						const hasConcreteAuth = hasConcreteCredential(model.provider);
 						concreteAuthByProvider.set(model.provider, hasConcreteAuth);
 						return hasConcreteAuth;
 					});
-					return concrete.length > 0 ? concrete : availableModels;
+					return concrete.length > 0 ? concrete : autoSelectable;
 				})();
 	const firstDefault = models.find(
 		model => isKnownProvider(model.provider) && DEFAULT_MODEL_PER_PROVIDER[model.provider] === model.id,

@@ -54,7 +54,6 @@ function createClient(cwd: string, config: ServerConfig): LspClient {
 		diagnosticsVersion: 0,
 		openFiles: new Map(),
 		pendingRequests: new Map(),
-		messageBuffer: new Uint8Array(),
 		isReading: false,
 		status: "ready",
 		lastActivity: Date.now(),

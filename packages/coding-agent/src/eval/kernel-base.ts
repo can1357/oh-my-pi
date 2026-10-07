@@ -1,4 +1,4 @@
-import { logger, Snowflake } from "@oh-my-pi/pi-utils";
+import { logger, readLines, Snowflake } from "@oh-my-pi/pi-utils";
 import type { Subprocess } from "bun";
 import { type KernelDisplayOutput, renderKernelDisplay } from "./py/display";
 import type { ShadowBarrier, ShadowControlNode, ShadowOperation } from "./speculation/types";
@@ -222,7 +222,6 @@ export abstract class BaseKernel<TExecuteOptions extends KernelExecuteOptions = 
 	#exitedPromise: Promise<number> | null = null;
 	#pending = new Map<string, PendingExecution>();
 	#pendingControls = new Map<string, PromiseWithResolvers<Frame>>();
-	#readBuffer = "";
 	readonly #options: BaseKernelOptions<TExecuteOptions>;
 
 	constructor(id: string, options: BaseKernelOptions<TExecuteOptions>) {
@@ -539,28 +538,31 @@ export abstract class BaseKernel<TExecuteOptions extends KernelExecuteOptions = 
 	}
 
 	#startReader(stream: ReadableStream<Uint8Array>): void {
-		const reader = stream.getReader();
 		const decoder = new TextDecoder();
 		const loop = async () => {
 			try {
-				while (true) {
-					const { done, value } = await reader.read();
-					if (done) break;
-					this.#readBuffer += decoder.decode(value, { stream: true });
-					await this.#flushFrames();
+				for await (const bytes of readLines(stream)) {
+					const line = decoder.decode(bytes);
+					if (!line.trim()) continue;
+					let frame: Frame;
+					try {
+						frame = JSON.parse(line) as Frame;
+					} catch (err) {
+						logger.warn(`${this.#options.languageName} runner emitted invalid JSON`, {
+							line: line.slice(0, 200),
+							error: err instanceof Error ? err.message : String(err),
+						});
+						continue;
+					}
+					if (this.#options.traceIpc) {
+						logger.debug(`${this.#options.languageName}Kernel recv`, { type: frame.type, id: frame.id });
+					}
+					await this.#handleFrame(frame);
 				}
-				this.#readBuffer += decoder.decode();
-				await this.#flushFrames();
 			} catch (err) {
 				logger.warn(`${this.#options.languageName} kernel reader failed`, {
 					error: err instanceof Error ? err.message : String(err),
 				});
-			} finally {
-				try {
-					reader.releaseLock();
-				} catch {
-					/* ignore */
-				}
 			}
 		};
 		void loop();
@@ -590,30 +592,6 @@ export abstract class BaseKernel<TExecuteOptions extends KernelExecuteOptions = 
 			}
 		};
 		void loop();
-	}
-
-	async #flushFrames(): Promise<void> {
-		while (true) {
-			const nl = this.#readBuffer.indexOf("\n");
-			if (nl < 0) return;
-			const line = this.#readBuffer.slice(0, nl);
-			this.#readBuffer = this.#readBuffer.slice(nl + 1);
-			if (!line.trim()) continue;
-			let frame: Frame;
-			try {
-				frame = JSON.parse(line) as Frame;
-			} catch (err) {
-				logger.warn(`${this.#options.languageName} runner emitted invalid JSON`, {
-					line: line.slice(0, 200),
-					error: err instanceof Error ? err.message : String(err),
-				});
-				continue;
-			}
-			if (this.#options.traceIpc) {
-				logger.debug(`${this.#options.languageName}Kernel recv`, { type: frame.type, id: frame.id });
-			}
-			await this.#handleFrame(frame);
-		}
 	}
 
 	async #handleFrame(frame: Frame): Promise<void> {

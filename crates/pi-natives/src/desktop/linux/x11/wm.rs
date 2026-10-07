@@ -136,8 +136,7 @@ impl Wm<'_> {
 			.query_tree(window)
 			.ok()
 			.and_then(|cookie| cookie.reply().ok())
-			.map(|reply| reply.children)
-			.unwrap_or_default()
+			.map_or_default(|reply| reply.children)
 	}
 
 	/// Whether `window` is `target` or one of its descendants.

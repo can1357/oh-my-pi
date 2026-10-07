@@ -841,6 +841,106 @@ describe("AgentSession retry fallback", () => {
 		expect(session.messages.some(message => message.role === "user")).toBe(true);
 	});
 
+	it("keeps a declined reserve fallback until the selected account recovers", async () => {
+		const primaryModel = getBundledModel("anthropic", "claude-sonnet-4-5");
+		const fallbackModel = getBundledModel("openai", "gpt-4o-mini");
+		if (!primaryModel || !fallbackModel) throw new Error("Expected bundled reserve fallback models");
+		const mock = createMockModel({ handler: { content: ["stayed on primary"] } });
+		const agent = new Agent({
+			getApiKey: model => `${model.provider}-test-key`,
+			initialState: { model: primaryModel, systemPrompt: ["Test"], tools: [], messages: [] },
+			streamFn: mock.stream,
+		});
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"retry.usageAwareFallback": true,
+			"retry.usageReservePolicy": "confirm",
+			"retry.fallbackChains": { default: [`${fallbackModel.provider}/${fallbackModel.id}`] },
+		});
+		settings.setModelRole("default", `${primaryModel.provider}/${primaryModel.id}`);
+		let health: "reserve" | "unknown" | "healthy" = "reserve";
+		let selectedHealth: "reserve" | "healthy" | undefined = "reserve";
+		vi.spyOn(modelRegistry.authStorage.health, "model").mockImplementation(async provider => ({
+			state: provider === primaryModel.provider ? health : "healthy",
+			accounts:
+				provider === primaryModel.provider
+					? [
+							{
+								credentialId: 1,
+								credentialType: "oauth",
+								selected: selectedHealth === undefined ? undefined : true,
+								state: selectedHealth ?? "reserve",
+							},
+							{ credentialId: 2, credentialType: "oauth", state: health },
+						]
+					: [],
+		}));
+		const confirmFallback = vi.fn(async () => false);
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			providerSessionId: "shared-provider-session",
+			settings,
+			modelRegistry,
+		});
+		session.setUsageFallbackConfirmer(confirmFallback);
+		session.setThinkingLevel(Effort.Medium);
+		await session.prompt("Stay on the primary");
+		await session.waitForIdle();
+		session.setThinkingLevel(Effort.High);
+		await session.prompt("Continue with more thinking");
+		await session.waitForIdle();
+		expect(confirmFallback).toHaveBeenCalledTimes(1);
+		health = "unknown";
+		await session.prompt("Continue without quota data");
+		await session.waitForIdle();
+		health = "reserve";
+		await session.prompt("Continue when quota data returns");
+		await session.waitForIdle();
+		expect(confirmFallback).toHaveBeenCalledTimes(1);
+		expect(session.model?.id).toBe(primaryModel.id);
+		health = "healthy";
+		await session.prompt("Continue while only another account is healthy");
+		await session.waitForIdle();
+		health = "reserve";
+		await session.prompt("Keep the refusal when the other account reaches reserve");
+		await session.waitForIdle();
+		expect(confirmFallback).toHaveBeenCalledTimes(1);
+		selectedHealth = undefined;
+		health = "healthy";
+		await session.prompt("Continue while account selection is temporarily unavailable");
+		await session.waitForIdle();
+		selectedHealth = "reserve";
+		health = "reserve";
+		await session.prompt("Keep the refusal when the same reserved account is selected again");
+		await session.waitForIdle();
+		expect(confirmFallback).toHaveBeenCalledTimes(1);
+		selectedHealth = "healthy";
+		health = "healthy";
+		await session.prompt("Continue after quota recovery");
+		await session.waitForIdle();
+		selectedHealth = "reserve";
+		health = "reserve";
+		await session.prompt("Ask again for a new reserve episode");
+		await session.waitForIdle();
+		expect(confirmFallback).toHaveBeenCalledTimes(2);
+		session.freshSession();
+		await session.prompt("Keep the decision after resetting the provider connection");
+		await session.waitForIdle();
+		expect(confirmFallback).toHaveBeenCalledTimes(2);
+		const otherModel = getBundledModel("anthropic", "claude-haiku-4-5");
+		if (!otherModel) throw new Error("Expected another bundled reserve model");
+		await session.setModel(otherModel);
+		await session.prompt("Ask before spending another model's reserve");
+		await session.waitForIdle();
+		expect(confirmFallback).toHaveBeenCalledTimes(3);
+		await session.newSession();
+		await session.setModel(otherModel);
+		await session.prompt("Ask in a different transcript with the same provider session override");
+		await session.waitForIdle();
+		expect(confirmFallback).toHaveBeenCalledTimes(4);
+	});
+
 	it("honors a live fail-closed policy after reserve spending was approved", async () => {
 		const primaryModel = getBundledModel("anthropic", "claude-sonnet-4-5");
 		const fallbackModel = getBundledModel("openai", "gpt-4o-mini");

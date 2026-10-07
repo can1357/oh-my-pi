@@ -16,6 +16,7 @@ import {
 	encodeStreamFrame,
 	isSessionFrame,
 	STREAM_LOCAL_PROTO,
+	StreamLineReader,
 	type StreamScreen,
 	type StreamSessionFrame,
 	type StreamStreamerFrame,
@@ -23,8 +24,6 @@ import {
 import { streamSocketEndpoint } from "./paths";
 import { runStreamTui, type StreamTuiInfo } from "./console-tui";
 import { StreamServerClient, type StreamServerFatalError } from "./server-client";
-
-const MAX_LOCAL_LINE_BYTES = 4 * 1024 * 1024;
 
 interface PaneState extends StreamScreen {
 	id: number;
@@ -35,7 +34,7 @@ interface PaneState extends StreamScreen {
 interface LocalConnection {
 	socket: net.Socket;
 	pane?: PaneState;
-	buffer: Buffer;
+	lines: StreamLineReader;
 }
 
 export interface StreamUrls {
@@ -231,7 +230,7 @@ export class StreamMuxHost {
 			socket.destroy();
 			return;
 		}
-		const connection: LocalConnection = { socket, buffer: Buffer.alloc(0) };
+		const connection: LocalConnection = { socket, lines: new StreamLineReader() };
 		this.#connections.add(connection);
 		socket.setNoDelay(true);
 		socket.on("data", chunk => this.#consume(connection, Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)));
@@ -243,29 +242,7 @@ export class StreamMuxHost {
 
 	#consume(connection: LocalConnection, chunk: Buffer): void {
 		if (connection.socket.destroyed) return;
-		const input = connection.buffer.length === 0 ? chunk : Buffer.concat([connection.buffer, chunk]);
-		let offset = 0;
-		while (offset < input.length) {
-			const newline = input.indexOf(0x0a, offset);
-			if (newline === -1) break;
-			if (newline - offset > MAX_LOCAL_LINE_BYTES) {
-				connection.socket.destroy();
-				return;
-			}
-			const end = newline > offset && input[newline - 1] === 0x0d ? newline - 1 : newline;
-			const line = input.toString("utf8", offset, end);
-			offset = newline + 1;
-			if (!this.#handleLocalLine(connection, line)) {
-				connection.socket.destroy();
-				return;
-			}
-		}
-		const remaining = input.length - offset;
-		if (remaining > MAX_LOCAL_LINE_BYTES) {
-			connection.socket.destroy();
-			return;
-		}
-		connection.buffer = remaining === 0 ? Buffer.alloc(0) : Buffer.from(input.subarray(offset));
+		if (!connection.lines.push(chunk, line => this.#handleLocalLine(connection, line))) connection.socket.destroy();
 	}
 
 	#handleLocalLine(connection: LocalConnection, line: string): boolean {

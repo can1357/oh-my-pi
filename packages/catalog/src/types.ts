@@ -60,6 +60,59 @@ export const RUNNER_APIS = [
 	"openrouter-video",
 	"openai-transcriptions",
 ] as const;
+/** Kind each single-purpose runner API serves; `local-inference` hosts several kinds. */
+export const RUNNER_API_KINDS: Record<Exclude<(typeof RUNNER_APIS)[number], "local-inference">, ModelKind> = {
+	"web-search": "search",
+	typesafe: "judge",
+	"openrouter-decisions": "judge",
+	"openai-images": "image",
+	"openrouter-images": "image",
+	"xai-tts": "tts",
+	"openai-speech": "tts",
+	"openai-embeddings": "embedding",
+	"openrouter-rerank": "rerank",
+	"openrouter-video": "video",
+	"openai-transcriptions": "stt",
+};
+
+const RUNNER_API_KIND_BY_API: ReadonlyMap<Api, ModelKind> = new Map(Object.entries(RUNNER_API_KINDS));
+
+/** Kind a runner API serves; `undefined` for chat transports and multi-kind `local-inference`. */
+export function runnerApiKind(api: Api): ModelKind | undefined {
+	return RUNNER_API_KIND_BY_API.get(api);
+}
+
+/** Catalog APIs `generate_image` runs through a pi-ai image client; the hosted Responses pair needs a carrier model. */
+export const IMAGE_GENERATION_APIS = [
+	"openai-images",
+	"openrouter-images",
+	"google-generative-ai",
+	"google-gemini-cli",
+	"openai-responses",
+	"openai-codex-responses",
+] as const;
+export type ImageGenerationApi = (typeof IMAGE_GENERATION_APIS)[number];
+
+const CHAT_TRANSPORT_KINDS: readonly ModelKind[] = ["chat", "tiny"];
+const IMAGE_CHAT_TRANSPORT_KINDS: readonly ModelKind[] = ["chat", "tiny", "image"];
+
+/**
+ * Kinds a model on `api` may declare: a runner api serves its own kind; a chat
+ * transport serves `chat` and `tiny`, plus `image` when `generate_image` runs it
+ * (hosted Responses image tool, Gemini image models). `undefined` for
+ * `local-inference`, which hosts several kinds chosen by the model itself.
+ */
+export function servedKinds(api: Api): readonly ModelKind[] | undefined {
+	if (api === "local-inference") return undefined;
+	const runnerKind = runnerApiKind(api);
+	if (runnerKind !== undefined) return [runnerKind];
+	return (IMAGE_GENERATION_APIS as readonly Api[]).includes(api) ? IMAGE_CHAT_TRANSPORT_KINDS : CHAT_TRANSPORT_KINDS;
+}
+
+/** Whether a model of `kind` can run on `api`. */
+export function apiServesKind(api: Api, kind: ModelKind): boolean {
+	return servedKinds(api)?.includes(kind) ?? true;
+}
 
 /** Resolve a model's kind while preserving chat semantics for existing catalog rows. */
 export function modelKind(model: Pick<Model, "kind">): ModelKind {
@@ -1329,6 +1382,12 @@ export interface Model<TApi extends Api = Api> {
 	id: string;
 	/** Role-specific runner capability; omitted for ordinary chat models. */
 	kind?: ModelKind;
+	/**
+	 * Verbatim configured kind (models.yml, `modelOverrides`, runtime
+	 * registrations). `buildModel` applies it over catalog `kind` rules on every
+	 * rebuild, so a configured runner keeps its role.
+	 */
+	kindConfig?: ModelKind;
 	/** Grounding transport supported by this chat model. */
 	webSearch?: WebSearchGrounding;
 	/** Cheaper same-provider model to run hosted web search in this model's place (model id or provider/id). */
