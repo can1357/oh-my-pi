@@ -20,6 +20,9 @@
 ### Fixed
 
 - Fixed Codex Fast (`priority`) and Ultrafast usage being recorded, billed, and reported as Standard when the backend echoed a default service tier; the requested tier is now preserved in usage and performance records.
+### Fixed
+
+- Fixed GPT Image generation and edits failing on gateways that validate request parameters, such as LiteLLM ([#14619](https://github.com/can1357/oh-my-pi/pull/14619) by [@jimhester](https://github.com/jimhester))
 
 ## [18.8.0] - 2026-10-07
 
@@ -42,9 +45,6 @@
 - Fixed the Cursor provider retaining request resources after requests completed.
 - Fixed session-affinity pins growing without bound in long-lived gateways; pins are now capped at 256 sessions per provider.
 - Fixed Anthropic sessions failing every request with HTTP 400 ("role 'system' must precede an 'assistant' message") after a tool change coincided with compaction or an interrupted or failed reply; sessions already stuck this way recover on the next message ([#14746](https://github.com/can1357/oh-my-pi/issues/14746)).
-### Fixed
-
-- Fixed GPT Image generation and edits failing on gateways that validate request parameters, such as LiteLLM ([#14619](https://github.com/can1357/oh-my-pi/pull/14619) by [@jimhester](https://github.com/jimhester))
 
 ## [18.7.0] - 2026-10-06
 
