@@ -18,6 +18,10 @@
 
 - Fixed background shell builtins and other in-process commands so they terminate when their subshell exits and can be stopped with `kill %N`, matching the behavior of external commands.
 
+### Fixed
+
+- Fixed `timeout` on Windows reporting POSIX signal-death statuses for signals it cannot deliver; it now reports the zero-signal status and no longer claims a bare `-s KILL` took the command down
+
 ## [18.7.0] - 2026-10-06
 
 ### Breaking Changes
