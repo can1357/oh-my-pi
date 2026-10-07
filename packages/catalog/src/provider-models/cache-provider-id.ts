@@ -44,6 +44,8 @@ export function getDefaultModelDiscoveryBaseUrl(providerId: string): string | un
 			return "http://127.0.0.1:11434";
 		case "litellm":
 			return Bun.env.LITELLM_BASE_URL ?? "http://localhost:4000/v1";
+		case "openrouter":
+			return "https://openrouter.ai/api/v1";
 		case "opencode-go":
 			return "https://opencode.ai/zen/go/v1";
 		case "opencode-zen":
@@ -204,8 +206,12 @@ export function resolveModelCacheProviderId(providerId: string, options: ModelCa
 		}
 		case "factory-droid":
 			return factoryDroidModelCacheProviderId(options);
-		case "openrouter":
-			return "openrouter:pseudo-api";
+		case "openrouter": {
+			const baseUrl = options.baseUrl?.trim().replace(/\/+$/, "");
+			const official = getDefaultModelDiscoveryBaseUrl(providerId)!;
+			if (!baseUrl || baseUrl === official) return "openrouter:pseudo-api";
+			return `openrouter:pseudo-api:${Bun.hash(baseUrl).toString(36)}`;
+		}
 		case "vllm": {
 			// v2: qwen3.8 rows cached before the reasoning/template-effort upgrade
 			// carry `reasoning: false` and must be refetched.

@@ -4,6 +4,10 @@ provider "openrouter" {
 	default-model "openai/gpt-5.5"
 	env "OPENROUTER_API_KEY"
 	discovery label="OpenRouter" allow-unauthenticated=#true
+	// `/api/v1/models` is the complete chat roster and needs no key, so a
+	// successful listing prunes retired bundled chat rows (e.g. ended stealth
+	// previews) instead of keeping them selectable until requests 400 (#14882).
+	dynamic-models-authoritative #true
 	kind-apis {
 		embedding "openai-embeddings"
 		image "openrouter-images"

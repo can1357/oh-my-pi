@@ -1,6 +1,11 @@
+import * as fs from "node:fs/promises";
+import * as os from "node:os";
+import * as path from "node:path";
 import { describe, expect, it } from "bun:test";
 import { resolveProviderModels } from "@oh-my-pi/pi-catalog/model-manager";
+import { resolveModelCacheProviderId } from "@oh-my-pi/pi-catalog/provider-models";
 import { openrouterModelManagerOptions } from "@oh-my-pi/pi-catalog/provider-models/openai-compat";
+import type { FetchImpl, ModelSpec } from "@oh-my-pi/pi-catalog/types";
 
 const CHAT_PAYLOAD = {
 	data: [
@@ -207,6 +212,65 @@ describe("OpenRouter chat, image, decisions, rerank, video, and embedding discov
 		});
 	});
 
+	it("retains cached auxiliary kinds only when their listings fail during an authoritative chat refresh", async () => {
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "openrouter-partial-refresh-"));
+		const cacheDbPath = path.join(dir, "models.db");
+		let phase = 0;
+		const options = openrouterModelManagerOptions({
+			fetch: async input => {
+				const url = String(input);
+				if (url.endsWith("/images/models")) {
+					if (phase === 0) return Response.json(IMAGE_PAYLOAD);
+					return phase === 1 ? new Response(null, { status: 503 }) : Response.json({ data: [] });
+				}
+				if (url.endsWith("/models?output_modalities=decisions")) {
+					if (phase === 0) return Response.json(DECISIONS_PAYLOAD);
+					return phase === 1 ? new Response(null, { status: 503 }) : Response.json({ data: [] });
+				}
+				if (url.endsWith("/models?output_modalities=rerank")) {
+					return phase === 0 ? Response.json(RERANK_PAYLOAD) : Response.json({ data: [] });
+				}
+				if (url.endsWith("/videos/models")) {
+					return phase === 0 ? Response.json(VIDEO_PAYLOAD) : Response.json({ data: [] });
+				}
+				if (url.endsWith("/embeddings/models")) {
+					return phase === 0 ? Response.json(EMBEDDING_PAYLOAD) : Response.json({ data: [] });
+				}
+				return Response.json(
+					phase === 0
+						? CHAT_PAYLOAD
+						: { data: [{ id: "openrouter/new-chat", name: "New Chat", supported_parameters: ["tools"] }] },
+				);
+			},
+		});
+		try {
+			const config = { ...options, staticModels: [], cacheDbPath };
+			await resolveProviderModels(config, "online");
+			phase = 1;
+			const partial = await resolveProviderModels(config, "online");
+			const ids = partial.models.map(model => model.id);
+			expect(partial.source).toBe("provider");
+			expect(ids).toContain("openrouter/new-chat");
+			expect(ids).not.toContain("openrouter/auto");
+			expect(ids).toContain("bytedance-seed/seedream-5-0-pro");
+			expect(ids).toContain("~typesafe/jev-latest");
+			expect(ids).not.toContain("cohere/rerank-v3.5");
+			expect(ids).not.toContain("google/veo-3.1");
+			expect(ids).not.toContain("qwen/qwen3-embedding-8b");
+
+			const cached = await resolveProviderModels(config, "online-if-uncached");
+			expect(cached.source).toBe("cache");
+			expect(cached.models.map(model => model.id)).toContain("bytedance-seed/seedream-5-0-pro");
+
+			phase = 2;
+			const emptied = await resolveProviderModels(config, "online");
+			expect(emptied.models.map(model => model.id)).not.toContain("bytedance-seed/seedream-5-0-pro");
+			expect(emptied.models.map(model => model.id)).not.toContain("~typesafe/jev-latest");
+		} finally {
+			await fs.rm(dir, { recursive: true, force: true });
+		}
+	});
+
 	it("preserves chat discovery when the image endpoint fails", async () => {
 		const options = openrouterModelManagerOptions({
 			fetch: async input => {
@@ -236,10 +300,14 @@ describe("OpenRouter chat, image, decisions, rerank, video, and embedding discov
 		const result = await resolveProviderModels(
 			{
 				...openrouterModelManagerOptions({
-					fetch: async input =>
-						String(input).endsWith("/models?output_modalities=decisions")
-							? Response.json({ data: [...DECISIONS_PAYLOAD.data, spanLite] })
-							: new Response(null, { status: 404 }),
+					fetch: async input => {
+						const url = String(input);
+						if (url.endsWith("/models?output_modalities=decisions")) {
+							return Response.json({ data: [...DECISIONS_PAYLOAD.data, spanLite] });
+						}
+						if (url === "https://openrouter.ai/api/v1/models") return Response.json(CHAT_PAYLOAD);
+						return new Response(null, { status: 404 });
+					},
 				}),
 				staticModels: [],
 				cacheDbPath: ":memory:",
@@ -252,6 +320,110 @@ describe("OpenRouter chat, image, decisions, rerank, video, and embedding discov
 			kind: "judge",
 			contextWindow: null,
 			maxTokens: null,
+		});
+	});
+
+	it("discovers a custom gateway instead of pruning against the official cache", async () => {
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "openrouter-cache-scope-"));
+		const cacheDbPath = path.join(dir, "models.db");
+		const official = "https://openrouter.ai/api/v1";
+		const gateway = "https://gateway.example/openrouter/v1";
+		const requested: string[] = [];
+		try {
+			const fetch: FetchImpl = async input => {
+				const url = String(input);
+				requested.push(url);
+				if (url === `${official}/models`) return Response.json(CHAT_PAYLOAD);
+				if (url === `${gateway}/models`) {
+					return Response.json({
+						data: [{ id: "gateway/only", name: "Gateway Only", supported_parameters: ["tools"] }],
+					});
+				}
+				return Response.json({ data: [] });
+			};
+			const officialOptions = openrouterModelManagerOptions({ fetch });
+			const gatewayOptions = openrouterModelManagerOptions({ baseUrl: `${gateway}/`, fetch });
+			const officialResult = await resolveProviderModels(
+				{ ...officialOptions, staticModels: [], cacheDbPath },
+				"online",
+			);
+			expect(officialResult.models.map(model => model.id)).toContain("openrouter/auto");
+
+			const gatewayResult = await resolveProviderModels(
+				{ ...gatewayOptions, staticModels: [], cacheDbPath },
+				"online-if-uncached",
+			);
+			expect(gatewayResult.source).toBe("provider");
+			expect(gatewayResult.models.map(model => model.id)).toEqual(["gateway/only"]);
+			expect(requested).toContain(`${gateway}/models`);
+
+			// Startup reads the namespace without creating the manager or resolving a key.
+			expect(gatewayOptions.cacheProviderId).toBe(
+				resolveModelCacheProviderId("openrouter", { baseUrl: `${gateway}/` }),
+			);
+			expect(officialOptions.cacheProviderId).toBe(resolveModelCacheProviderId("openrouter"));
+			const restored = await resolveProviderModels(
+				{ ...officialOptions, staticModels: [], cacheDbPath },
+				"online-if-uncached",
+			);
+			expect(restored.source).toBe("cache");
+			expect(restored.models.map(model => model.id)).toContain("openrouter/auto");
+		} finally {
+			await fs.rm(dir, { recursive: true, force: true });
+		}
+	});
+
+	describe("bundled rows the live roster omits (#14882)", () => {
+		const retiredChat: ModelSpec<"openrouter"> = {
+			id: "stealth/ox-alpha",
+			name: "Ox Alpha",
+			api: "openrouter",
+			provider: "openrouter",
+			baseUrl: "https://openrouter.ai/api/v1",
+			reasoning: true,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 1_048_576,
+			maxTokens: 131_072,
+		};
+		const seededTranscription: ModelSpec<"openai-transcriptions"> = {
+			id: "openai/whisper-1",
+			name: "OpenAI: Whisper 1",
+			api: "openai-transcriptions",
+			provider: "openrouter",
+			baseUrl: "https://openrouter.ai/api/v1",
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			supportsTools: false,
+			contextWindow: null,
+			maxTokens: null,
+		};
+		const resolve = (chat: () => Response) =>
+			resolveProviderModels(
+				{
+					...openrouterModelManagerOptions({
+						fetch: async input =>
+							String(input) === "https://openrouter.ai/api/v1/models" ? chat() : Response.json({ data: [] }),
+					}),
+					staticModels: [retiredChat, seededTranscription],
+					cacheDbPath: ":memory:",
+				},
+				"online",
+			);
+
+		it("prunes retired chat rows after a successful refresh but keeps non-chat seeds", async () => {
+			const result = await resolve(() => Response.json(CHAT_PAYLOAD));
+			const ids = result.models.map(model => model.id);
+			expect(ids).not.toContain("stealth/ox-alpha");
+			expect(ids).toContain("openai/whisper-1");
+			expect(ids).toContain("openrouter/auto");
+		});
+
+		it("keeps the bundled chat roster when only the chat listing fails", async () => {
+			const result = await resolve(() => new Response(null, { status: 503 }));
+			expect(result.stale).toBe(true);
+			expect(result.models.map(model => model.id)).toContain("stealth/ox-alpha");
 		});
 	});
 });

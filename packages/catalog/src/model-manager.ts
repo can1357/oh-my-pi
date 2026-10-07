@@ -84,8 +84,8 @@ export interface ModelManagerOptions<TApi extends Api = Api, TModelsDevPayload =
 	 * command-backed credentials that must wait until an actual request.
 	 */
 	restoreCachedHeaders?: (model: Readonly<Model>) => Pick<Model, "headers" | "resolveHeaders"> | undefined;
-	/** Optional dynamic endpoint fetcher. */
-	fetchDynamicModels?: () => Promise<readonly ModelSpec<TApi>[] | null>;
+	/** Dynamic endpoint fetcher; receives restorable cached rows to preserve slices whose refresh fails. */
+	fetchDynamicModels?: (cachedModels?: readonly Model<Api>[]) => Promise<readonly ModelSpec<TApi>[] | null>;
 	/** Optional stencil.so fallback hook. */
 	modelsDev?: ModelsDevFallback<TApi, TModelsDevPayload>;
 	/** Clock override for deterministic tests. */
@@ -310,7 +310,10 @@ export async function resolveProviderModels<TApi extends Api = Api, TModelsDevPa
 	}
 
 	const [fetchedModelsDevModels, fetchedDynamicModels] = shouldFetchFromNetwork
-		? await Promise.all([fetchModelsDev(options), dynamicFetcher ? fetchDynamicModels(dynamicFetcher) : null])
+		? await Promise.all([
+				fetchModelsDev(options),
+				dynamicFetcher ? fetchDynamicModels(dynamicFetcher, usableCachedModels) : null,
+			])
 		: [null, null];
 	const modelsDevFetchSucceeded = fetchedModelsDevModels !== null;
 	const normalizedModelsDevModels = fetchedModelsDevModels?.models ?? [];
@@ -474,10 +477,11 @@ async function fetchModelsDev<TApi extends Api, TModelsDevPayload>(
 }
 
 async function fetchDynamicModels<TApi extends Api>(
-	fetcher: () => Promise<readonly ModelSpec<TApi>[] | null>,
+	fetcher: (cachedModels?: readonly Model<Api>[]) => Promise<readonly ModelSpec<TApi>[] | null>,
+	cachedModels: readonly Model<TApi>[],
 ): Promise<DiscoveredModelSet<TApi> | null> {
 	try {
-		const models = await fetcher();
+		const models = await fetcher(cachedModels);
 		if (models === null) {
 			return null;
 		}

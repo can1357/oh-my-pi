@@ -3314,16 +3314,17 @@ function mapOpenRouterThinking(entry: OpenAICompatibleModelRecord): ThinkingConf
 
 export function openrouterModelManagerOptions(config?: OpenRouterModelManagerConfig): ModelManagerOptions<Api> {
 	const apiKey = config?.apiKey;
-	const baseUrl = (config?.baseUrl ?? "https://openrouter.ai/api/v1").replace(/\/+$/g, "");
+	const baseUrl = (config?.baseUrl ?? getDefaultModelDiscoveryBaseUrl("openrouter")!).replace(/\/+$/g, "");
 	const decisionsBaseUrl = openrouterDecisionsBaseUrl(baseUrl);
 	const references = createBundledReferenceMap<"openrouter">("openrouter");
 	return {
 		providerId: "openrouter",
-		// Older builds cached OpenRouter discovery rows as `api: "openai-completions"`.
-		// Namespace the refreshed pseudo-API cache separately so those rows cannot
-		// override bundled `api: "openrouter"` models during online-if-uncached startup.
-		cacheProviderId: resolveModelCacheProviderId("openrouter"),
-		fetchDynamicModels: async () => {
+		// Keep the official pseudo-API namespace, but isolate custom gateways:
+		// their authoritative catalogs can differ from OpenRouter's own roster.
+		cacheProviderId: resolveModelCacheProviderId("openrouter", { baseUrl }),
+		// `createModelManager()` prunes bundled chat rows the live roster omits.
+		dynamicModelsAuthoritative: true,
+		fetchDynamicModels: async cachedModels => {
 			const [chatModels, imageModels, decisionModels, rerankModels, videoModels, embeddingModels] =
 				await Promise.all([
 					fetchOpenAICompatibleModels({
@@ -3545,24 +3546,41 @@ export function openrouterModelManagerOptions(config?: OpenRouterModelManagerCon
 					endpoint: `${baseUrl}/embeddings/models`,
 				});
 			}
-			if (
-				chatModels === null &&
-				imageModels === null &&
-				decisionModels === null &&
-				rerankModels === null &&
-				videoModels === null &&
-				embeddingModels === null
-			) {
+			// Authority rests on the chat roster: publishing only the other kinds
+			// would prune every chat model, so fall back to cache/bundled instead.
+			if (chatModels === null) {
 				return null;
 			}
 
 			const models = new Map<string, ModelSpec<Api>>();
-			for (const model of chatModels ?? []) models.set(model.id, model);
+			for (const model of chatModels) models.set(model.id, model);
 			for (const model of imageModels ?? []) models.set(model.id, model);
 			for (const model of decisionModels ?? []) models.set(model.id, model);
 			for (const model of rerankModels ?? []) models.set(model.id, model);
 			for (const model of videoModels ?? []) models.set(model.id, model);
 			for (const model of embeddingModels ?? []) models.set(model.id, model);
+			// A failed auxiliary listing says nothing about that runner's roster.
+			// Keep only its previous rows; a successful empty listing may remove them.
+			if (
+				imageModels === null ||
+				decisionModels === null ||
+				rerankModels === null ||
+				videoModels === null ||
+				embeddingModels === null
+			) {
+				for (const model of cachedModels ?? []) {
+					if (
+						((imageModels === null && model.api === "openrouter-images") ||
+							(decisionModels === null && model.api === "openrouter-decisions") ||
+							(rerankModels === null && model.api === "openrouter-rerank") ||
+							(videoModels === null && model.api === "openrouter-video") ||
+							(embeddingModels === null && model.api === "openai-embeddings")) &&
+						!models.has(model.id)
+					) {
+						models.set(model.id, toModelSpec(model));
+					}
+				}
+			}
 			return Array.from(models.values()).sort((left, right) => left.id.localeCompare(right.id));
 		},
 	};
