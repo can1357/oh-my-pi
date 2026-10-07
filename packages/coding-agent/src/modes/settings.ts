@@ -1073,7 +1073,7 @@ export const cfgStartupCheckUpdate = register({
 		tab: "interaction",
 		group: "Startup & Updates",
 		label: "Check for Updates",
-		description: "Check for omp updates on startup",
+		description: "Check for omp updates on startup and warn when Bun is older than 1.4",
 	},
 });
 
