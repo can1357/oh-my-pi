@@ -21,6 +21,7 @@
 ### Fixed
 
 - Fixed `grep --path-separator` leaving `\` separators untouched in printed paths on Windows
+- Fixed `grep --path-separator` leaving `\` separators untouched in printed paths on Windows ([#14829](https://github.com/can1357/oh-my-pi/pull/14829) by [@jchanghong023](https://github.com/jchanghong023)).
 
 ## [18.7.0] - 2026-10-06
 
