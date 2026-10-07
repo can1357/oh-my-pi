@@ -41,16 +41,19 @@ describe("renderMarkdownHead", () => {
 		expect(renderMarkdownHead(doc, 120, defaultMarkdownTheme, 12).truncated).toBe(true);
 	});
 
-	it("cuts a document of display-math openers that never close in time independent of its length", () => {
+	it("cuts a document of display-math openers that never close about as fast as one with no openers", () => {
 		// Each paragraph opens a `\[` block that no `\]` line closes, so no block
 		// forms; deciding that per opener by scanning the rest of the text made
-		// the head's cost grow with the whole document.
-		const doc = (kb: number) => "\\[\nx\n\n".repeat(Math.ceil((kb * 1024) / 6));
+		// the head's cost grow with the whole document. A same-size document with
+		// no openers pays the same whole-document passes, so the two heads cost
+		// about the same unless the openers rescan.
+		const repeats = Math.ceil((1024 * 1024) / 6);
+		const openers = "\\[\nx\n\n".repeat(repeats);
+		const control = "yy\nx\n\n".repeat(repeats);
 		const cut = (text: string) => () => {
 			expect(renderMarkdownHead(text, 80, defaultMarkdownTheme, 12).truncated).toBe(true);
 		};
-		const small = bestOf3(cut(doc(64)));
-		expect(bestOf3(cut(doc(1024)))).toBeLessThan(5 * small);
+		expect(bestOf3(cut(openers))).toBeLessThan(5 * bestOf3(cut(control)));
 	});
 
 	it("cuts past a display-math block whose closer is far away faster than the whole document", () => {
