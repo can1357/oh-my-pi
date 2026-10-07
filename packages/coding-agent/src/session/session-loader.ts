@@ -1,4 +1,6 @@
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
+import * as fs from "node:fs";
+import * as path from "node:path";
 import { ConcatSink, getBlobsDir, isEisdir, isEnoent, isEnotdir, parseJsonlLenient } from "@oh-my-pi/pi-utils";
 import * as snapcompact from "@oh-my-pi/snapcompact";
 import { Semaphore } from "../task/parallel";
@@ -437,6 +439,26 @@ async function loadWithKnownSize(
 	};
 }
 
+/**
+ * Windows reports ENOENT when a path component is a regular file, where POSIX
+ * yields ENOTDIR. Climbing to the first existing ancestor distinguishes that
+ * path error from a genuinely missing file.
+ */
+function hasFileAsPathComponent(filePath: string): boolean {
+	if (process.platform !== "win32") return false;
+	let current = path.resolve(filePath);
+	for (;;) {
+		const parent = path.dirname(current);
+		if (parent === current) return false;
+		current = parent;
+		try {
+			return !fs.statSync(current).isDirectory();
+		} catch {
+			// Missing ancestor: keep climbing to the first existing one.
+		}
+	}
+}
+
 /** Load and validate a session while retaining malformed-record diagnostics. */
 export async function loadSessionFile(
 	filePath: string,
@@ -452,6 +474,13 @@ export async function loadSessionFile(
 			throw err;
 		}
 		if (isEnoent(err)) {
+			// Keep the ENOTDIR rejection POSIX produces so a path-component
+			// error is not masked as a missing session.
+			if (storage instanceof FileSessionStorage && hasFileAsPathComponent(filePath)) {
+				const notDir = new Error(`ENOTDIR: not a directory, open '${filePath}'`) as Error & { code?: string };
+				notDir.code = "ENOTDIR";
+				throw notDir;
+			}
 			return {
 				entries: [],
 				titleSlot: undefined,
