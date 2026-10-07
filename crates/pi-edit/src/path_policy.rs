@@ -971,6 +971,44 @@ mod tests {
 		);
 	}
 
+	#[cfg(unix)]
+	#[test]
+	fn refuses_fifo_reads_without_blocking() {
+		let tmp = tempfile::tempdir().unwrap();
+		let fifo = tmp.path().join("pipe");
+		assert!(
+			std::process::Command::new("mkfifo")
+				.arg(&fifo)
+				.status()
+				.unwrap()
+				.success()
+		);
+		let mut files = FileCache::new(policy(tmp.path()));
+		let (sender, receiver) = std::sync::mpsc::channel();
+		std::thread::spawn(move || {
+			let _ = sender.send(
+				files
+					.read("pipe")
+					.map(|_| ())
+					.map_err(|error| error.to_string()),
+			);
+		});
+		// A regression blocks the reader in open(2) forever; an O_RDWR open never
+		// blocks and counts as a writer, so it releases that reader before the
+		// test fails.
+		let result = receiver
+			.recv_timeout(std::time::Duration::from_secs(5))
+			.unwrap_or_else(|_| {
+				let _writer = std::fs::OpenOptions::new()
+					.read(true)
+					.write(true)
+					.open(&fifo);
+				panic!("reading a FIFO blocked instead of being refused")
+			});
+		let error = result.unwrap_err();
+		assert!(error.contains("it is a FIFO"), "unexpected error: {error}");
+	}
+
 	#[test]
 	fn permits_hand_authored_openapi_json() {
 		let tmp = tempfile::tempdir().unwrap();

@@ -123,8 +123,7 @@ fn desktop_names(context: &Context) -> Vec<String> {
 	context
 		.env
 		.get("XDG_CURRENT_DESKTOP")
-		.map(String::as_str)
-		.unwrap_or_default()
+		.map_or_default(String::as_str)
 		.split(':')
 		.filter_map(|raw| {
 			let name = raw.trim().to_ascii_lowercase();

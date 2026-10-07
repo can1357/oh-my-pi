@@ -352,7 +352,8 @@ export interface TspEditorProps {
 	decor?: readonly TspEditorDecoration[];
 	/** Inline completion suffix drawn after the caret. */
 	ghost?: string;
-	placeholder?: string;
+	/** Dim text while `text` is empty; spans style it (`em` for italics). */
+	placeholder?: TspText;
 	prompt?: TspText;
 	/** Mode label (vim). */
 	mode?: string;

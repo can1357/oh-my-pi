@@ -232,6 +232,25 @@ describe("CustomEditor bracketed path paste", () => {
 		]);
 	});
 
+	it("attaches escaped home paths without unescaping Windows tilde directories", () => {
+		for (const [pasted, imagePath] of [
+			[String.raw`\~/Pictures/image.png`, "~/Pictures/image.png"],
+			[String.raw`C:\~\capture.png`, String.raw`C:\~\capture.png`],
+		]) {
+			const { editor } = makeEditor();
+			const attached: string[] = [];
+			editor.onPasteImagePath = path => {
+				attached.push(path);
+			};
+
+			editor.handleInput(bracketedPaste(pasted));
+
+			expect(attached).toEqual([imagePath]);
+			expect(editor.getText()).toBe("");
+			expect(extractImagePathFromText(pasted)).toBe(imagePath);
+		}
+	});
+
 	it("routes a pasted video path through the attachment callback", () => {
 		const { editor } = makeEditor();
 		const video = "/Users/me/Movies/launch cut.mp4";
