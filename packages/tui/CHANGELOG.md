@@ -12,20 +12,25 @@
 - Limited plan review undo history to 100 steps ([#14686](https://github.com/can1357/oh-my-pi/pull/14686) by [@H4vC](https://github.com/H4vC))
 - Sped up `@` path completion in folders with many symlinks ([#14687](https://github.com/can1357/oh-my-pi/pull/14687) by [@H4vC](https://github.com/H4vC))
 - Sped up model hub search (~4×) and session tree, settings and extension-dashboard search (~2×) on large lists ([#14687](https://github.com/can1357/oh-my-pi/pull/14687) by [@H4vC](https://github.com/H4vC))
+- Reduced idle agent transcript viewer file I/O ([#14688](https://github.com/can1357/oh-my-pi/pull/14688) by [@H4vC](https://github.com/H4vC))
+- Reduced status-line work: fast repaints and brand-fade frames happen only with the animated `pi` segment, and git refreshes follow cache expiry instead of a 1 s poll ([#14691](https://github.com/can1357/oh-my-pi/pull/14691) by [@H4vC](https://github.com/H4vC))
+- Assistant messages extract their link targets once per text change, and converted Kitty images are no longer pinned after they leave the screen (they reconvert if shown again) ([#14692](https://github.com/can1357/oh-my-pi/pull/14692) by [@H4vC](https://github.com/H4vC))
+- `AssistantMessageHost.resolveAssistantMessageLinks(texts)` is replaced by `resolveAssistantMessageLinkHrefs(hrefs)`, which takes already-extracted link destinations ([#14692](https://github.com/can1357/oh-my-pi/pull/14692) by [@H4vC](https://github.com/H4vC))
 
 ### Fixed
 
+- Fixed stopping the TUI after a large write leaving queued output to paint over the shell or editor that takes the terminal next ([#13794](https://github.com/can1357/oh-my-pi/pull/13794) by [@sjawhar](https://github.com/sjawhar)).
+- Fixed text containing a lone UTF-16 surrogate swallowing the next character on unix terminals; the surrogate now shows as `�` ([#13794](https://github.com/can1357/oh-my-pi/pull/13794) by [@sjawhar](https://github.com/sjawhar)).
 - Fixed quadratic Markdown lexing of documents with bare `\begin{…}` environments or unclosed `\[` openers ([#14667](https://github.com/can1357/oh-my-pi/pull/14667) by [@H4vC](https://github.com/H4vC))
 - Fixed quadratic eval display formatting on long semicolon-free JavaScript ([#14685](https://github.com/can1357/oh-my-pi/pull/14685) by [@H4vC](https://github.com/H4vC))
 - Fixed debug log viewer re-formatting every row each frame (select-all over 20k rows: ~3 s → ~2 ms per frame) ([#14686](https://github.com/can1357/oh-my-pi/pull/14686) by [@H4vC](https://github.com/H4vC))
 - Fixed plan review slowing down on long annotated plans ([#14686](https://github.com/can1357/oh-my-pi/pull/14686) by [@H4vC](https://github.com/H4vC))
-- Fixed stopping the TUI after a large write leaving queued output to paint over the shell or editor that takes the terminal next ([#13794](https://github.com/can1357/oh-my-pi/pull/13794) by [@sjawhar](https://github.com/sjawhar)).
-- Fixed text containing a lone UTF-16 surrogate swallowing the next character on unix terminals; the surrogate now shows as `�` ([#13794](https://github.com/can1357/oh-my-pi/pull/13794) by [@sjawhar](https://github.com/sjawhar)).
+- Fixed prompt editor lag on large drafts containing a magic keyword ([#14690](https://github.com/can1357/oh-my-pi/pull/14690) by [@H4vC](https://github.com/H4vC))
 ### Added
 
-- Writes of `.svg` and Mermaid (`.mmd`, `.mermaid`) files draw the image or diagram under the card, as the same code blocks draw in assistant replies: an SVG redraws as it streams, a diagram appears once the file is complete; tool renderers opt in through `figure`.
 - Added optional `Terminal.settleOutput()`, which drains or drops queued output before the terminal is handed over; custom terminals may implement it ([#13794](https://github.com/can1357/oh-my-pi/pull/13794) by [@sjawhar](https://github.com/sjawhar)).
 - Added `writeStderrBehindTerminal()` (`@oh-my-pi/pi-tui/terminal-handoff`), which writes to stderr after the output a stopped terminal has not delivered yet ([#13794](https://github.com/can1357/oh-my-pi/pull/13794) by [@sjawhar](https://github.com/sjawhar)).
+- Writes of `.svg` and Mermaid (`.mmd`, `.mermaid`) files draw the image or diagram under the card, as the same code blocks draw in assistant replies: an SVG redraws as it streams, a diagram appears once the file is complete; tool renderers opt in through `figure`.
 
 ## [18.7.0] - 2026-10-06
 

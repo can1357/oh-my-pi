@@ -798,10 +798,21 @@ export class CustomEditor extends Editor {
 	 *  indivisible: a stray backspace deletes the whole token instead of corrupting it. */
 	override atomicTokenPattern = COMPOSER_TOKEN_REGEX;
 
+	/** Atom-table revision and pattern the composer token matcher was last built for. */
+	#tokenPatternAtomsRevision = -1;
+	#tokenPattern: RegExp | undefined;
+
 	#syncComposerTokenPattern(): void {
-		const labels = [...this.atoms].filter(([, expansion]) => expansion.startsWith("^")).map(([label]) => label);
+		// Rebuild only when the atom table changed or someone replaced the pattern since the last sync.
+		if (this.#tokenPatternAtomsRevision === this.atomsRevision && this.#tokenPattern === this.atomicTokenPattern) {
+			return;
+		}
+		const labels: string[] = [];
+		for (const [label, expansion] of this.atoms) if (expansion.startsWith("^")) labels.push(label);
 		const next = composerTokenRegex(labels);
 		if (next.source !== this.atomicTokenPattern.source) this.atomicTokenPattern = next;
+		this.#tokenPatternAtomsRevision = this.atomsRevision;
+		this.#tokenPattern = this.atomicTokenPattern;
 	}
 
 	/** Magic-keyword shimmer cadence — drives one editor repaint every 70 ms while
@@ -819,27 +830,35 @@ export class CustomEditor extends Editor {
 	 *  timer to request the next animation frame. Undefined when nobody is
 	 *  listening (tests, headless callers); the timer chain still self-cleans. */
 	#requestShimmerRepaint: (() => void) | undefined;
-	#queueDecorationText: string | undefined;
+	/** Text revision the per-revision decoration inputs below were computed for. */
+	#decorationRevision = -1;
+	#decorationText = "";
 	#decorationLines: readonly string[] = [""];
 	#queueShorthandActive = false;
 	#queueListActive = false;
 
 	/** Decorate magic keywords, attachments, and the queue-composer header/list markers.
 	 *  Queue shorthand reserves its first logical line as a dim `Queueing` label; sequential
-	 *  item markers use the accent color so separate follow-ups remain visible while composing. */
+	 *  item markers use the accent color so separate follow-ups remain visible while composing.
+	 *  Called once per layout segment, so whole-buffer inputs are computed once per text revision. */
 	override decorateText = (text: string, context: EditorTextDecorationContext): string => {
 		this.#syncComposerTokenPattern();
-		const editorText = this.getText();
+		if (this.#decorationRevision !== this.textRevision) {
+			this.#decorationRevision = this.textRevision;
+			const editorText = this.getText();
+			if (this.#decorationText !== editorText) {
+				this.#decorationText = editorText;
+				this.#decorationLines = this.getLines();
+				const queueBody = parseQueueShorthand(editorText);
+				this.#queueShorthandActive = queueBody !== undefined;
+				this.#queueListActive = queueBody !== undefined && isQueuedMessageList(queueBody);
+			}
+		}
+		// One string instance per revision: whole-buffer memos downstream hit on identity.
+		const editorText = this.#decorationText;
 		const animated = this.focused && this.#shimmerEnabled() && hasMagicKeyword(editorText);
 		const phase = animated ? (Date.now() % CustomEditor.SHIMMER_PERIOD_MS) / CustomEditor.SHIMMER_PERIOD_MS : 0;
 		if (animated) this.#scheduleShimmerFrame();
-		if (this.#queueDecorationText !== editorText) {
-			this.#queueDecorationText = editorText;
-			this.#decorationLines = this.getLines();
-			const queueBody = parseQueueShorthand(editorText);
-			this.#queueShorthandActive = queueBody !== undefined;
-			this.#queueListActive = queueBody !== undefined && isQueuedMessageList(queueBody);
-		}
 		let sourceSearchOffset = 0;
 		const locateSource = (value: string): number => {
 			const offset = text.indexOf(value, sourceSearchOffset);

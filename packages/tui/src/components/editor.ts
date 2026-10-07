@@ -713,6 +713,7 @@ export class Editor implements Component, Focusable {
 
 	// Host-registered atomic chip tokens: exact buffer label → expansion emitted on submit.
 	#atoms: Map<string, string> = new Map();
+	#atomsRevision = 0;
 
 	/** Optional pattern matching atomic placeholder tokens (e.g. `[Image #1, 800x600]` or
 	 *  `[Paste #2, +30 lines]`) that the editor treats as indivisible: a backspace or forward-delete
@@ -1025,6 +1026,7 @@ export class Editor implements Component, Focusable {
 		this.#pastes.clear();
 		this.#pasteCounter = 0;
 		this.#atoms.clear();
+		this.#atomsRevision++;
 		this.#historyDraftActive = false;
 	}
 
@@ -1064,6 +1066,7 @@ export class Editor implements Component, Focusable {
 		if (entry?.draft || this.#historyDraftActive) {
 			this.#pastes = new Map(entry?.draft?.pastes);
 			this.#atoms = new Map(entry?.draft?.atoms);
+			this.#atomsRevision++;
 			this.#pasteCounter = entry?.draft?.pasteCounter ?? 0;
 			this.restoreHistoryState(entry?.draft?.restore);
 			this.#historyDraftActive = entry?.draft !== undefined;
@@ -2661,6 +2664,11 @@ export class Editor implements Component, Focusable {
 		return this.#textRevision;
 	}
 
+	/** Monotonic atom-table revision for render caches: advances whenever {@link atoms} is mutated or replaced. */
+	get atomsRevision(): number {
+		return this.#atomsRevision;
+	}
+
 	#notifyChange(text?: string): void {
 		this.#textRevision++;
 		this.onChange?.(text ?? this.getText());
@@ -2699,6 +2707,7 @@ export class Editor implements Component, Focusable {
 	 *  it — for hosts that re-collapse restored draft text via {@link setText}. */
 	registerAtom(label: string, expansion: string): void {
 		this.#atoms.set(label, expansion);
+		this.#atomsRevision++;
 	}
 
 	/** Insert `label` (plus a trailing space) at the cursor and register it as an atom expanding
@@ -2735,6 +2744,7 @@ export class Editor implements Component, Focusable {
 	/** Drop every registered atom expansion (draft cleared or replaced by the host). */
 	clearAtoms(): void {
 		this.#atoms.clear();
+		this.#atomsRevision++;
 	}
 
 	/**

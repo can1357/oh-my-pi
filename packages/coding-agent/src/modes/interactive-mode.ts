@@ -136,7 +136,8 @@ import { HistoryStorage } from "../session/history-storage";
 import { syncTextPrediction, textPredictionBackend } from "../predict/client";
 import { setWordPredictionHost } from "@oh-my-pi/pi-tui/prompt/word-completion";
 import { USER_INTERRUPT_LABEL } from "../session/messages";
-import { resolveMarkdownLinkTargets } from "../internal-urls/hyperlink-targets";
+import { resolveMarkdownLinkHrefs } from "../internal-urls/hyperlink-targets";
+import type { ResolveContext } from "../internal-urls/index";
 import { modelMentionDisplayName } from "@oh-my-pi/pi-tui/prompt/model-mention-syntax";
 import { modelMentionChipLabel, shiftImageMarkers } from "@oh-my-pi/pi-tui/prompt/composer-attachments";
 import type { SessionContext } from "../session/session-context";
@@ -1566,9 +1567,12 @@ export class InteractiveMode implements InteractiveModeContext {
 	get tableChartsVisible(): boolean {
 		return this.#focusController.target === undefined;
 	}
-	resolveAssistantMessageLinks(texts: readonly string[]): Promise<ReadonlyMap<string, string>> {
+	resolveAssistantMessageLinkHrefs(hrefs: readonly string[]): Promise<ReadonlyMap<string, string>> {
+		return resolveMarkdownLinkHrefs(hrefs, this.#linkResolveContext());
+	}
+	#linkResolveContext(): ResolveContext {
 		const session = this.viewSession;
-		return resolveMarkdownLinkTargets(texts, {
+		return {
 			cwd: session.sessionManager.getCwd(),
 			sessionFile: session.sessionFile,
 			settings: session.settings,
@@ -1578,7 +1582,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			},
 			skills: session.skills,
 			rules: session.ttsrManager?.getRules(),
-		});
+		};
 	}
 	get focusedAgentId(): string | undefined {
 		return this.#focusController.focusedAgentId;
@@ -1671,6 +1675,8 @@ export class InteractiveMode implements InteractiveModeContext {
 	/** Repaints the subagent HUD so live-preview elapsed markers advance between progress events. */
 	#subagentPreviewTickTimer?: NodeJS.Timeout;
 	#observerUiSyncNeedsTodoReconcile = false;
+	/** Active subagent descriptions the todo HUD last rendered with (joined); see #flushObserverUiSync. */
+	#todoHudSubagentKey: string | undefined;
 	#runningSubagentCount = 0;
 	#agentRegistryUnsubscribe?: () => void;
 	#agentRegistrySubscriptionTarget?: AgentHubRegistry;
@@ -4126,9 +4132,16 @@ export class InteractiveMode implements InteractiveModeContext {
 		if (this.#observerUiSyncNeedsTodoReconcile) {
 			this.#observerUiSyncNeedsTodoReconcile = false;
 			this.#reconcileTodosWithSubagents();
+			this.#syncTodoHudState(this.#todoPhasesOwner ?? this.session);
+			this.#renderTodoList();
+		} else if (this.#getActiveSubagentDescriptions().join("\n") !== this.#todoHudSubagentKey) {
+			// Progress-only ticks (10 Hz while subagents run) cannot change the
+			// todo phases or their persisted visibility — re-syncing would also
+			// re-arm the auto-clear timer so it could never fire. Only the HUD's
+			// subagent highlight depends on them, so repaint just when the active
+			// descriptions change.
+			this.#renderTodoList();
 		}
-		this.#syncTodoHudState(this.#todoPhasesOwner ?? this.session);
-		this.#renderTodoList();
 		this.#renderSubagentList();
 		this.ui.requestRender();
 	}
@@ -4145,6 +4158,8 @@ export class InteractiveMode implements InteractiveModeContext {
 	#renderTodoList(): void {
 		this.todoContainer.clear();
 		this.#todoHudNative = undefined;
+		const activeDescs = this.#getActiveSubagentDescriptions();
+		this.#todoHudSubagentKey = activeDescs.join("\n");
 		if (this.#todoHudHidden) return;
 		const phases = this.todoPhases.filter(phase => phase.tasks.length > 0);
 		if (phases.length === 0) return;
@@ -4155,7 +4170,6 @@ export class InteractiveMode implements InteractiveModeContext {
 		const subsequentStageCap = 4; // stages shown after the active one (a trailing summary row covers the rest)
 		const activeTaskCap = 5; // open tasks previewed for the active stage
 
-		const activeDescs = this.#getActiveSubagentDescriptions();
 		// A pending todo "lights up" (accent) when an in-flight subagent is doing
 		// its work, matched by normalized content overlap.
 		const isMatched = (todo: TodoItem): boolean =>
