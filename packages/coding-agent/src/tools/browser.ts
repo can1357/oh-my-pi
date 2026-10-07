@@ -126,7 +126,7 @@ const browserSchema = type({
 	"user_agent?": type("string").describe("tab user agent override"),
 	"ignore_https_errors?": type("boolean").describe("ignore invalid HTTPS certificates"),
 	"allow_file_access?": type("boolean").describe("allow file URLs to read local files"),
-	"headed?": type("boolean").describe("override the configured browser display mode"),
+	"headed?": type("boolean").describe("override the configured Chromium display mode"),
 	"code?": type("string").describe("js body to run in tab"),
 	"fn?": type("string").describe("serialized JavaScript function to run in tab"),
 	"args?": type("unknown[]").describe("arguments passed to a serialized function"),
@@ -153,8 +153,8 @@ interface BrowserPreludeDetails {
 /**
  * The browser an open drives, by precedence: explicit `app.*` options, the
  * relay, `browser.cdpUrl`, a Tern PiP (inside a Tern pane, unless
- * `headed: false` or `app.tern: false`; `app.tern: true` forces it), a cmux
- * surface, then Chromium.
+ * `app.tern: false`; `app.tern: true` forces it; `headed` does not opt out),
+ * a cmux surface, then Chromium.
  */
 export function resolveBrowserKind(
 	params: BrowserParams,
@@ -210,7 +210,7 @@ export function resolveBrowserKind(
 	if (configuredCdpUrl) {
 		return { kind: "connected", cdpUrl: configuredCdpUrl.replace(/\/+$/, "") };
 	}
-	if (params.headed !== false && app?.tern !== false) {
+	if (app?.tern !== false) {
 		const ternKind = resolveTernKind({ settingEnabled: cfgBrowserTern.get(session.settings) }, env);
 		if (ternKind) return ternKind;
 	}

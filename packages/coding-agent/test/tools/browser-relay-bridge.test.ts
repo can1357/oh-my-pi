@@ -472,6 +472,97 @@ describe("RelayBridge child targets", () => {
 		expect(childTraffic(cdp)).toEqual([]);
 		expect(childTraffic(otherCdp)).toEqual(lifecycleOn(otherSession));
 	});
+
+	const NESTED_ATTACH = {
+		sessionId: "CHILD1",
+		method: "Target.attachedToTarget",
+		params: { sessionId: "CHILD2", targetInfo: { targetId: "FRAME2", type: "iframe" } },
+	};
+
+	/** Bridge output from `start` on, as [method or "reply", session, announced child]. */
+	function trafficSince(socket: FakeCdpSocket, start: number): Array<[unknown, unknown, unknown]> {
+		return socket.messages
+			.slice(start)
+			.map(m => [m.method ?? "reply", m.sessionId, (m.params as { sessionId?: string } | undefined)?.sessionId]);
+	}
+
+	it("tells a connection that arms auto-attach late about the children Chrome already reported", async () => {
+		const bridge = new RelayBridge({});
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, [tab({ tabId: 1 })]);
+		const firstCdp = new FakeCdpSocket();
+		const first = bridge.cdpConnected(firstCdp);
+		await armAutoAttach(bridge, ext, first, await attachPage(bridge, ext, firstCdp, first, 1));
+		emit(bridge, ext, ATTACH);
+		await armAutoAttach(bridge, ext, first, "CHILD1");
+		emit(bridge, ext, NESTED_ATTACH);
+		const cdp = new FakeCdpSocket();
+		const conn = bridge.cdpConnected(cdp);
+		const late = await attachPage(bridge, ext, cdp, conn, 1);
+		const start = cdp.messages.length;
+
+		await armAutoAttach(bridge, ext, conn, late);
+		await armAutoAttach(bridge, ext, conn, "CHILD1");
+		emit(bridge, ext, NAVIGATE, DETACH);
+
+		// Each child arrives before the reply to the arm that covers it, as Chrome sends it.
+		expect(trafficSince(cdp, start)).toEqual([
+			["Target.attachedToTarget", late, "CHILD1"],
+			["reply", late, undefined],
+			["Target.attachedToTarget", "CHILD1", "CHILD2"],
+			["reply", "CHILD1", undefined],
+			["Page.frameNavigated", "CHILD1", undefined],
+			["Target.detachedFromTarget", late, "CHILD1"],
+		]);
+	});
+
+	it("does not tell a later connection about children that ended with the debugger attachment", async () => {
+		const bridge = new RelayBridge({});
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, [tab({ tabId: 1 })]);
+		const firstCdp = new FakeCdpSocket();
+		const first = bridge.cdpConnected(firstCdp);
+		const firstSession = await attachPage(bridge, ext, firstCdp, first, 1);
+		await armAutoAttach(bridge, ext, first, firstSession);
+		emit(bridge, ext, ATTACH);
+		// Releasing the only session drops the attachment, and Chrome ends its children with it.
+		bridge.cdpMessage(
+			first,
+			JSON.stringify({ id: ++msgSeq, method: "Target.detachFromTarget", params: { sessionId: firstSession } }),
+		);
+		ack(bridge, ext, "detach");
+		await flush();
+		const cdp = new FakeCdpSocket();
+		const conn = bridge.cdpConnected(cdp);
+		const late = await attachPage(bridge, ext, cdp, conn, 1);
+
+		await armAutoAttach(bridge, ext, conn, late);
+
+		expect(childTraffic(cdp)).toEqual([]);
+	});
+
+	it("detaches children from connections still holding the tab when the extension lost its attachment", async () => {
+		const bridge = new RelayBridge({});
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, [tab({ tabId: 1 })]);
+		const cdp = new FakeCdpSocket();
+		const conn = bridge.cdpConnected(cdp);
+		const session = await attachPage(bridge, ext, cdp, conn, 1);
+		await armAutoAttach(bridge, ext, conn, session);
+		emit(bridge, ext, ATTACH);
+		await armAutoAttach(bridge, ext, conn, "CHILD1");
+		emit(bridge, ext, NESTED_ATTACH);
+		const start = cdp.messages.length;
+
+		// A service-worker restart reconnects without the tab's debugger attachment.
+		connect(bridge, new FakeExtSocket(), [tab({ tabId: 1 })]);
+		await flush();
+
+		expect(trafficSince(cdp, start).filter(([method]) => method === "Target.detachedFromTarget")).toEqual([
+			["Target.detachedFromTarget", "CHILD1", "CHILD2"],
+			["Target.detachedFromTarget", session, "CHILD1"],
+		]);
+	});
 });
 
 describe("RelayBridge Runtime sessions", () => {

@@ -135,7 +135,7 @@ describe("review overlays under a native surface", () => {
 		};
 		let result: CodeReviewOverlayResult | undefined;
 		const overlay = new AnnotationOverlay(
-			{ requestRender() {} } as unknown as TUI,
+			{ terminal: { rows: 40 }, requestRender() {} } as unknown as TUI,
 			darkTheme!,
 			getKeybindings() as KeybindingsManager,
 			[file],
@@ -160,10 +160,49 @@ describe("review overlays under a native surface", () => {
 		expect(result).toEqual({ action: "paste", annotations: overlay.getAnnotations() });
 	});
 
+	it("code review: pages native diff selection by logical source rows", () => {
+		const hunkHeader = "@@ -1,6 +1,6 @@";
+		const sourceRows: ReviewDiffFile["rows"] = Array.from(
+			{ length: 6 },
+			(_, index): ReviewDiffFile["rows"][number] => {
+				const number = index + 1;
+				const content = `NATIVE_ROW_${number}`;
+				return { kind: "added", raw: `+${content}`, content, newLine: number, hunkHeader };
+			},
+		);
+		const file: ReviewDiffFile = {
+			path: "src/native.ts",
+			occurrence: 1,
+			rawDiff: "",
+			rows: [{ kind: "hunk", raw: hunkHeader, hunkHeader }, ...sourceRows],
+			linesAdded: sourceRows.length,
+			linesRemoved: 0,
+			isBinary: false,
+		};
+		const overlay = new AnnotationOverlay(
+			{ terminal: { rows: 12 }, requestRender() {}, nativeRendering: true } as unknown as TUI,
+			darkTheme!,
+			getKeybindings() as KeybindingsManager,
+			[file],
+			"Reviewing",
+			{ onComplete: () => {} },
+		);
+
+		overlay.describe();
+		overlay.handleInput("\t");
+		overlay.handleInput("\x1b[6~");
+		expect(list(overlay.describe(), "lines").selected).toBe("l2");
+		overlay.handleInput("\x1b[5~");
+		expect(list(overlay.describe(), "lines").selected).toBe("l0");
+		overlay.handleInput("G");
+		expect(list(overlay.describe(), "lines").selected).toBe("l5");
+		overlay.handleInput("g");
+		expect(list(overlay.describe(), "lines").selected).toBe("l0");
+	});
 	it("code review: a disabled paste action ignores activation", () => {
 		const onComplete = vi.fn();
 		const overlay = new AnnotationOverlay(
-			{ requestRender() {} } as unknown as TUI,
+			{ terminal: { rows: 40 }, requestRender() {} } as unknown as TUI,
 			darkTheme!,
 			getKeybindings() as KeybindingsManager,
 			[],

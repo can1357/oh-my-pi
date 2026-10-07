@@ -46,8 +46,16 @@ export interface BlobBackend {
 	 * Stable publication for the content behind `key`, or `null` when the backend
 	 * cannot provide one. `getBytes` is invoked only when the key is unknown —
 	 * persisted or already-registered blobs never decode or transfer bytes.
+	 * `getBase64`, when supplied, yields the same content already base64-encoded
+	 * so base64 transports (the daemon socket) forward it without a decode and
+	 * re-encode round trip.
 	 */
-	ensureBlob(key: string, mimeType: string, getBytes: () => Uint8Array): Promise<BlobPublication | null>;
+	ensureBlob(
+		key: string,
+		mimeType: string,
+		getBytes: () => Uint8Array,
+		getBase64?: () => string,
+	): Promise<BlobPublication | null>;
 	/** Stable publication served by invoking `fetcher` on demand; `null` when unsupported. */
 	ensureLazy(key: string, mimeType: string, fetcher: LazyBlobFetcher): Promise<BlobPublication | null>;
 	/** Release backend-owned stores, servers, and exposure processes. */
@@ -237,12 +245,28 @@ export class LocalBlobBackend implements BlobBackend {
 
 	#publish(key: string, baseUrl: string, entry: BlobRegistryEntry): BlobPublication {
 		const ttlMs = this.#config.persist?.ttlMs ?? 0;
+		const url = `${baseUrl}/${entry.path}`;
+		const now = Date.now();
+		const current = entry.publication;
+		// Matches the registry's re-arm granularity: a publication renewed within
+		// the last tenth of its window is returned as-is, so per-request lookups
+		// do not rewrite the persisted index.
+		if (
+			current?.url === url &&
+			current.destination === this.#config.kind &&
+			current.bytes === entry.bytes &&
+			(ttlMs > 0
+				? current.expiresAt !== undefined && current.expiresAt - now > ttlMs * 0.9
+				: current.expiresAt === undefined)
+		) {
+			return current;
+		}
 		const publication: BlobPublication = {
-			...entry.publication,
-			url: `${baseUrl}/${entry.path}`,
+			...current,
+			url,
 			destination: this.#config.kind,
 			bytes: entry.bytes,
-			...(ttlMs > 0 ? { expiresAt: Date.now() + ttlMs } : {}),
+			...(ttlMs > 0 ? { expiresAt: now + ttlMs } : {}),
 		};
 		this.#store.setPublication(key, publication);
 		return publication;

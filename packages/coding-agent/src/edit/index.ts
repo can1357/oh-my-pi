@@ -314,11 +314,8 @@ interface OpenEditSession {
 }
 
 function bytesEqual(left: Uint8Array, right: Uint8Array): boolean {
-	if (left.byteLength !== right.byteLength) return false;
-	for (let index = 0; index < left.byteLength; index++) {
-		if (left[index] !== right[index]) return false;
-	}
-	return true;
+	// Zero-copy Buffer view: `equals` is a native memcmp.
+	return Buffer.from(left.buffer, left.byteOffset, left.byteLength).equals(right);
 }
 
 export class EditTool implements AgentTool<TInput> {
@@ -705,6 +702,8 @@ export class EditTool implements AgentTool<TInput> {
 		);
 		if (bridge) return { written: bridge.text };
 
+		// The pre-image is the only way to tell "the write never landed" from
+		// "something else rewrote the file"; a stat cannot (coarse mtimes).
 		let preWriteBytes: Uint8Array | undefined;
 		if (request.op === "update") {
 			try {
@@ -733,20 +732,25 @@ export class EditTool implements AgentTool<TInput> {
 		);
 
 		if (preWriteBytes !== undefined) {
-			const requestedBytes = new TextEncoder().encode(request.content);
-			if (!bytesEqual(requestedBytes, preWriteBytes)) {
-				let postWriteBytes: Uint8Array | undefined;
-				try {
-					postWriteBytes = await Bun.file(request.path).bytes();
-				} catch (error) {
-					if (!isEnoent(error)) throw error;
-				}
-				if (postWriteBytes !== undefined && bytesEqual(postWriteBytes, preWriteBytes)) {
-					throw new ToolError(
-						`edit appeared successful but file content did not change on disk: ${request.displayPath}`,
-						{ path: request.path },
-					);
-				}
+			// Fail when a content-changing write left disk at the pre-image. Compare
+			// post vs pre first (native memcmp, usually a length mismatch) so the
+			// requested content is only encoded when disk really is unchanged.
+			let postWriteBytes: Uint8Array | undefined;
+			try {
+				postWriteBytes = await Bun.file(request.path).bytes();
+			} catch (error) {
+				if (!isEnoent(error)) throw error;
+			}
+			if (
+				postWriteBytes !== undefined &&
+				bytesEqual(postWriteBytes, preWriteBytes) &&
+				(Buffer.byteLength(request.content, "utf8") !== preWriteBytes.byteLength ||
+					!bytesEqual(Buffer.from(request.content, "utf8"), preWriteBytes))
+			) {
+				throw new ToolError(
+					`edit appeared successful but file content did not change on disk: ${request.displayPath}`,
+					{ path: request.path },
+				);
 			}
 		}
 

@@ -989,8 +989,7 @@ impl X11Input {
 			.get_property(false, window, AtomEnum::WM_CLASS, AtomEnum::STRING, 0, 1024)
 			.ok()
 			.and_then(|cookie| cookie.reply().ok())
-			.map(|reply| String::from_utf8_lossy(&reply.value).into_owned())
-			.unwrap_or_default();
+			.map_or_default(|reply| String::from_utf8_lossy(&reply.value).into_owned());
 		toolkit::requires_core_events(&class, self.wm().owning_pid(window))
 	}
 
@@ -1002,8 +1001,7 @@ impl X11Input {
 			.get_property(false, window, AtomEnum::WM_CLASS, AtomEnum::STRING, 0, 1024)
 			.ok()
 			.and_then(|cookie| cookie.reply().ok())
-			.map(|reply| String::from_utf8_lossy(&reply.value).into_owned())
-			.unwrap_or_default();
+			.map_or_default(|reply| String::from_utf8_lossy(&reply.value).into_owned());
 		toolkit::class_drops_synthetic(&class)
 			|| self
 				.wm()

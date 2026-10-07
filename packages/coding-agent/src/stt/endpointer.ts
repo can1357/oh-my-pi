@@ -88,6 +88,52 @@ class FloatBuffer {
 	}
 }
 
+/** Fixed-capacity ring keeping the most recent `capacity` samples. */
+class FloatRing {
+	readonly #data: Float32Array;
+	#start = 0;
+	#len = 0;
+
+	constructor(capacity: number) {
+		this.#data = new Float32Array(capacity);
+	}
+
+	push(samples: Float32Array): void {
+		const cap = this.#data.length;
+		if (cap === 0) return;
+		if (samples.length >= cap) {
+			this.#data.set(samples.subarray(samples.length - cap));
+			this.#start = 0;
+			this.#len = cap;
+			return;
+		}
+		const pos = (this.#start + this.#len) % cap;
+		const first = Math.min(samples.length, cap - pos);
+		this.#data.set(samples.subarray(0, first), pos);
+		if (first < samples.length) this.#data.set(samples.subarray(first), 0);
+		const total = this.#len + samples.length;
+		if (total > cap) {
+			this.#start = (this.#start + total - cap) % cap;
+			this.#len = cap;
+		} else {
+			this.#len = total;
+		}
+	}
+
+	/** Append the retained samples, oldest first, to `target`. */
+	copyInto(target: FloatBuffer): void {
+		const cap = this.#data.length;
+		const end = this.#start + this.#len;
+		target.push(this.#data.subarray(this.#start, Math.min(end, cap)));
+		if (end > cap) target.push(this.#data.subarray(0, end - cap));
+	}
+
+	reset(): void {
+		this.#start = 0;
+		this.#len = 0;
+	}
+}
+
 function rms(frame: Float32Array): number {
 	let sum = 0;
 	for (let i = 0; i < frame.length; i += 1) sum += frame[i]! * frame[i]!;
@@ -99,7 +145,9 @@ export class StreamEndpointer {
 	readonly #frameSamples: number;
 	readonly #preRollSamples: number;
 
-	#leftover = new Float32Array(0);
+	/** Partial frame carried to the next push; always shorter than one frame. */
+	readonly #leftover: Float32Array;
+	#leftoverLen = 0;
 	#inSpeech = false;
 	#noiseFloor: number;
 	#silenceMs = 0;
@@ -108,44 +156,51 @@ export class StreamEndpointer {
 	#partialDirty = false;
 
 	readonly #segment = new FloatBuffer();
-	/** Ring of the most recent pre-onset frames, used as segment pre-roll. */
-	readonly #preRoll = new FloatBuffer();
+	/** Ring of the most recent pre-onset samples, used as segment pre-roll. */
+	readonly #preRoll: FloatRing;
 
 	constructor(config: Partial<EndpointerConfig> = {}) {
 		this.#cfg = { ...DEFAULT_ENDPOINTER_CONFIG, ...config };
 		this.#frameSamples = Math.max(1, Math.round((this.#cfg.sampleRate * this.#cfg.frameMs) / 1000));
 		this.#preRollSamples = Math.max(0, Math.round((this.#cfg.sampleRate * this.#cfg.preRollMs) / 1000));
+		this.#leftover = new Float32Array(this.#frameSamples);
+		this.#preRoll = new FloatRing(this.#preRollSamples);
 		this.#noiseFloor = this.#cfg.minThreshold;
 	}
 
 	/** Feed newly-captured samples; returns ordered partial/segment events. */
 	push(samples: Float32Array): EndpointerEvent[] {
 		const events: EndpointerEvent[] = [];
-		// Prepend the carried-over tail, then consume whole frames.
-		let buf: Float32Array;
-		if (this.#leftover.length === 0) {
-			buf = samples;
-		} else {
-			buf = new Float32Array(this.#leftover.length + samples.length);
-			buf.set(this.#leftover, 0);
-			buf.set(samples, this.#leftover.length);
-		}
+		const frame = this.#frameSamples;
 		let offset = 0;
-		for (; offset + this.#frameSamples <= buf.length; offset += this.#frameSamples) {
-			this.#processFrame(buf.subarray(offset, offset + this.#frameSamples), events);
+		// Complete the carried-over partial frame first, then consume whole frames in place.
+		if (this.#leftoverLen > 0) {
+			const fill = Math.min(frame - this.#leftoverLen, samples.length);
+			this.#leftover.set(samples.subarray(0, fill), this.#leftoverLen);
+			this.#leftoverLen += fill;
+			offset = fill;
+			if (this.#leftoverLen < frame) return events;
+			this.#processFrame(this.#leftover, events);
+			this.#leftoverLen = 0;
 		}
-		this.#leftover = buf.slice(offset);
+		for (; offset + frame <= samples.length; offset += frame) {
+			this.#processFrame(samples.subarray(offset, offset + frame), events);
+		}
+		if (offset < samples.length) {
+			this.#leftover.set(samples.subarray(offset));
+			this.#leftoverLen = samples.length - offset;
+		}
 		return events;
 	}
 
 	/** End the stream; returns a trailing committed segment if one is pending. */
 	flush(): EndpointerEvent[] {
 		const events: EndpointerEvent[] = [];
-		if (this.#inSpeech && this.#leftover.length > 0) {
-			this.#segment.push(this.#leftover);
-			this.#segmentMs += (this.#leftover.length / this.#cfg.sampleRate) * 1000;
+		if (this.#inSpeech && this.#leftoverLen > 0) {
+			this.#segment.push(this.#leftover.subarray(0, this.#leftoverLen));
+			this.#segmentMs += (this.#leftoverLen / this.#cfg.sampleRate) * 1000;
 		}
-		this.#leftover = new Float32Array(0);
+		this.#leftoverLen = 0;
 		if (this.#inSpeech) {
 			const speechMs = this.#segmentMs - this.#silenceMs;
 			if (speechMs >= this.#cfg.minSpeechMs) {
@@ -169,12 +224,6 @@ export class StreamEndpointer {
 
 		if (!this.#inSpeech) {
 			this.#preRoll.push(frame);
-			// Keep only the most recent pre-roll window.
-			if (this.#preRoll.length > this.#preRollSamples) {
-				const tail = this.#preRoll.take().slice(this.#preRoll.length - this.#preRollSamples);
-				this.#preRoll.reset();
-				this.#preRoll.push(tail);
-			}
 			if (voiced) this.#beginSegment(frame);
 			return;
 		}
@@ -214,8 +263,7 @@ export class StreamEndpointer {
 	#beginSegment(onsetFrame: Float32Array): void {
 		this.#inSpeech = true;
 		this.#segment.reset();
-		const preRoll = this.#preRoll.take();
-		if (preRoll.length > 0) this.#segment.push(preRoll);
+		this.#preRoll.copyInto(this.#segment);
 		this.#segment.push(onsetFrame);
 		this.#preRoll.reset();
 		this.#silenceMs = 0;

@@ -23,13 +23,18 @@ bazel_dep(name = "platforms", version = "1.1.0")
 bazel_dep(name = "rules_rust", version = "0.71.3")
 bazel_dep(name = "hermetic_cc_toolchain", version = "4.2.0")
 
-# zig 0.14's cache corrupts under concurrent `zig cc` (ziglang/zig#18763);
-# the patch gives compile-only steps private throwaway caches while links
-# keep the shared cache. See the patch header for measurements.
+# zig-wrapper patches (rationale in each patch header):
+# - zig 0.14's cache corrupts under concurrent `zig cc` (ziglang/zig#18763);
+#   compile-only steps get private throwaway caches, links keep the shared one.
+# - rustc's -Wl,--fix-cortex-a53-843419 on aarch64 linux links is dropped;
+#   zig cc rejects it as an unsupported linker arg.
 single_version_override(
     module_name = "hermetic_cc_toolchain",
     patch_strip = 1,
-    patches = ["//bazel/patches:hermetic_cc_toolchain-isolated-compile-cache.patch"],
+    patches = [
+        "//bazel/patches:hermetic_cc_toolchain-isolated-compile-cache.patch",
+        "//bazel/patches:hermetic_cc_toolchain-drop-cortex-a53-link-arg.patch",
+    ],
 )
 
 # --- Rust toolchains ----------------------------------------------------------
@@ -115,9 +120,11 @@ register_toolchains("@rust_toolchains//:all")
 # --- C/C++ toolchains ---------------------------------------------------------
 # zig cc provides hermetic linux-gnu (pinned glibc 2.17 portability floor, same
 # floor cargo-zigbuild used) and linux-musl cross toolchains, executable from
-# both linux-x64 CI pods and darwin dev hosts. darwin targets use the host
-# Xcode toolchain (Apple frameworks are not redistributable); win32-msvc uses
-# the hermetic clang-cl+xwin toolchain in //bazel/toolchains/msvc.
+# both linux-x64 CI pods and darwin dev hosts. darwin targets use the hermetic
+# clang + ld64.lld + Command Line Tools SDK toolchain in
+# //bazel/toolchains/darwin from linux hosts and the host Xcode toolchain on mac
+# hosts; win32-msvc uses the hermetic clang-cl+xwin toolchain in
+# //bazel/toolchains/msvc.
 zig = use_extension("@hermetic_cc_toolchain//toolchain:ext.bzl", "toolchains")
 use_repo(zig, "zig_sdk")
 
@@ -212,13 +219,14 @@ use_repo(crate, "crates")
 # (replaces cargo-xwin). Three repos so flag iteration in cc.bzl never
 # invalidates the ~2 GiB LLVM download or the ~1 GiB xwin splat:
 #   @llvm_msvc_tools  pruned LLVM 20.1.7 release binaries for the exec host
+#                     (//bazel/toolchains:llvm.bzl)
 #   @xwin_sysroot     MSVC CRT + Windows SDK splatted by pinned xwin 0.6.5
 #   @msvc_cc          wrappers + MSVC-flavored cc_toolchain (rules_cc config)
 # toolchain() registrations live in //bazel/toolchains (one per exec host).
 # rules_cc pin matches Bazel 9.2's own builtin dependency.
 bazel_dep(name = "rules_cc", version = "0.2.17")
 
-llvm_msvc_tools = use_repo_rule("//bazel/toolchains/msvc:llvm.bzl", "llvm_msvc_tools_repository")
+llvm_msvc_tools = use_repo_rule("//bazel/toolchains:llvm.bzl", "llvm_msvc_tools_repository")
 
 llvm_msvc_tools(name = "llvm_msvc_tools")
 
@@ -242,11 +250,6 @@ msvc_cc(
     arch = "aarch64",
     xwin_repo = "@xwin_sysroot_arm64//:BUILD.bazel",
 )
-
-# Swift toolchain probe for the Apple Foundation Models bridge in pi-natives.
-applefm_swift = use_repo_rule("//bazel/toolchains/swift:applefm.bzl", "applefm_swift_repository")
-
-applefm_swift(name = "applefm_swift")
 
 # blake3 assembles MASM .asm for x64 msvc targets; cc-rs resolves `ml64.exe`
 # from the build-script PATH on non-windows hosts. Prepend @msvc_cc's wrapper
@@ -272,3 +275,43 @@ crate.annotation(
     crate = "ring",
 )
 # --- end msvc cross toolchain ---------------------------------------------------
+
+# --- darwin cross toolchain (owned by bazel/toolchains/darwin) -----------------
+# Hermetic clang + ld64.lld cc toolchain for {arm64,x86_64}-apple-darwin from
+# linux exec hosts, against the macOS SDK Apple ships in its Command Line Tools
+# package. Mac hosts never fetch these (the toolchain()s are exec-gated on
+# linux). Split like the msvc toolchain so flag iteration in cc.bzl never
+# invalidates the downloads:
+#   @llvm_darwin_tools      pruned LLVM 23.1.3 (clang, ld64.lld, llvm-ar, ...)
+#   @macos_sdk              MacOSX27.0.sdk from Apple's software update CDN
+#   @darwin_cc_{arm64,x64}  wrappers + macOS-flavored cc_toolchain
+llvm_darwin_tools = use_repo_rule("//bazel/toolchains:llvm.bzl", "llvm_darwin_tools_repository")
+
+llvm_darwin_tools(name = "llvm_darwin_tools")
+
+macos_sdk = use_repo_rule("//bazel/toolchains/darwin:sdk.bzl", "macos_sdk_repository")
+
+macos_sdk(name = "macos_sdk")
+
+darwin_cc = use_repo_rule("//bazel/toolchains/darwin:cc.bzl", "darwin_cc_repository")
+
+darwin_cc(
+    name = "darwin_cc_arm64",
+    arch = "arm64",
+)
+
+darwin_cc(
+    name = "darwin_cc_x64",
+    arch = "x86_64",
+)
+
+# Swift toolchains for the Apple Foundation Models bridge in pi-natives: the
+# host probe for mac exec hosts, the pinned swift.org release for linux ones.
+applefm_swift = use_repo_rule("//bazel/toolchains/swift:applefm.bzl", "applefm_swift_repository")
+
+applefm_swift(name = "applefm_swift")
+
+swift_linux = use_repo_rule("//bazel/toolchains/swift:linux.bzl", "swift_linux_repository")
+
+swift_linux(name = "swift_linux")
+# --- end darwin cross toolchain -------------------------------------------------

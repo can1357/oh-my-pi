@@ -238,6 +238,30 @@ describe("BlobRegistry persistence", () => {
 		// Same content address: registration reused the existing blob file.
 		expect(await sessionStore.has(hash)).toBe(true);
 	});
+
+	it("keeps the flushed index when a background save that started earlier finishes later", async () => {
+		const persist = makePersist(60_000);
+		const write = vi.spyOn(Bun, "write");
+		vi.useFakeTimers();
+		try {
+			const registry = new BlobRegistry({ persist });
+			const bytes = new Uint8Array(Buffer.from("shared-index"));
+			await registry.registerBytes("first-image", "image/png", bytes);
+			// Start the debounced background save, then register again and flush before it lands.
+			vi.advanceTimersByTime(1_000);
+			await registry.registerBytes("second-image", "image/png", bytes);
+			registry.flush();
+			// Let the stale background write (and its rename continuation) settle.
+			await Promise.allSettled(write.mock.results.map(result => result.value));
+		} finally {
+			vi.useRealTimers();
+			write.mockRestore();
+		}
+
+		const reloaded = new BlobRegistry({ persist });
+		expect(reloaded.lookup("first-image")).not.toBeNull();
+		expect(reloaded.lookup("second-image")).not.toBeNull();
+	});
 });
 
 describe("ImageUrlService", () => {
