@@ -251,6 +251,10 @@ export interface Usage {
 		committedCost?: number;
 		/** Final committed ACU cost, when reported. */
 		acuCost?: number;
+		/** Share of the plan's usage quota the turn used, in percent, when reported. */
+		quotaPercent?: number;
+		/** USD the turn billed to pay-as-you-go overage credits, when reported. */
+		overageUsd?: number;
 	};
 	cost: {
 		input: number;

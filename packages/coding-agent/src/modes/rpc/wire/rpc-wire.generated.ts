@@ -620,6 +620,10 @@ export interface SessionCredits {
 	cost: number;
 	committedCost: number;
 	acuCost: number;
+	/** Summed plan-quota share in percent; absent until a turn reports it. */
+	quotaPercent?: number;
+	/** Summed overage charge in USD; absent until a turn reports it. */
+	overageUsd?: number;
 }
 
 export interface SessionStats {

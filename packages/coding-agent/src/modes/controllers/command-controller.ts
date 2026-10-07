@@ -548,9 +548,18 @@ export class CommandController {
 				info += `${theme.fg("dim", "Premium Requests:")} ${normalizedPremiumRequests.toLocaleString()}\n`;
 			}
 			if (stats.credits !== undefined) {
-				info += `${theme.fg("dim", "Credits:")} ${formatCreditValue(stats.credits.cost)}\n`;
-				info += `${theme.fg("dim", "Committed Credits:")} ${formatCreditValue(stats.credits.committedCost)}\n`;
-				info += `${theme.fg("dim", "Committed ACU:")} ${formatCreditValue(stats.credits.acuCost)}\n`;
+				const { cost, committedCost, acuCost, quotaPercent, overageUsd } = stats.credits;
+				if (cost > 0 || committedCost > 0 || acuCost > 0) {
+					info += `${theme.fg("dim", "Credits:")} ${formatCreditValue(cost)}\n`;
+					info += `${theme.fg("dim", "Committed Credits:")} ${formatCreditValue(committedCost)}\n`;
+					info += `${theme.fg("dim", "Committed ACU:")} ${formatCreditValue(acuCost)}\n`;
+				}
+				if (quotaPercent !== undefined) {
+					info += `${theme.fg("dim", "Quota:")} ${formatCreditValue(quotaPercent)}%\n`;
+				}
+				if (overageUsd !== undefined) {
+					info += `${theme.fg("dim", "Overage:")} $${overageUsd.toFixed(2)}\n`;
+				}
 			}
 		}
 

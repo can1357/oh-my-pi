@@ -2987,6 +2987,14 @@
 				},
 				"acuCost": {
 					"type": "number"
+				},
+				"quotaPercent": {
+					"type": "number",
+					"description": "Summed plan-quota share in percent; absent until a turn reports it."
+				},
+				"overageUsd": {
+					"type": "number",
+					"description": "Summed overage charge in USD; absent until a turn reports it."
 				}
 			},
 			"required": [

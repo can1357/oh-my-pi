@@ -480,4 +480,52 @@ describe("AgentSession session stats", () => {
 			"swe-1-7-medium": 1,
 		});
 	});
+
+	it("sums quota share and overage only over turns that reported them", async () => {
+		const target = model();
+		const turn = (text: string, credits: Usage["credits"]): AssistantMessage => ({
+			role: "assistant",
+			content: [{ type: "text", text }],
+			api: target.api,
+			provider: target.provider,
+			model: target.id,
+			usage: {
+				input: 1,
+				output: 1,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 2,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+				credits,
+			},
+			stopReason: "stop",
+			timestamp: 1,
+		});
+		const statsFor = async (messages: Message[]) => {
+			await session?.dispose();
+			session = new AgentSession({
+				agent: new Agent({ initialState: { model: target, systemPrompt: ["Test"], tools: [], messages } }),
+				sessionManager: SessionManager.inMemory(),
+				settings: Settings.isolated({ "compaction.enabled": false }),
+				modelRegistry,
+			});
+			return session.getSessionStats();
+		};
+
+		const mixed = await statsFor([
+			turn("quota-paid", { quotaPercent: 0.25, overageUsd: 0 }),
+			turn("overage-paid", { quotaPercent: 0.5, overageUsd: 0.12 }),
+			turn("unreported", undefined),
+		]);
+		expect(mixed.credits).toStrictEqual({
+			cost: 0,
+			committedCost: 0,
+			acuCost: 0,
+			quotaPercent: 0.75,
+			overageUsd: 0.12,
+		});
+
+		const creditsOnly = await statsFor([turn("credit-billed", { cost: 3 })]);
+		expect(creditsOnly.credits).toStrictEqual({ cost: 3, committedCost: 0, acuCost: 0 });
+	});
 });

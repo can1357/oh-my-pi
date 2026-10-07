@@ -205,7 +205,13 @@ export const stateDefs = {
 		cacheWrite: "number.integer",
 		total: "number.integer",
 	},
-	SessionCredits: { cost: "number", committedCost: "number", acuCost: "number" },
+	SessionCredits: {
+		cost: "number",
+		committedCost: "number",
+		acuCost: "number",
+		"quotaPercent?": doc("number", "Summed plan-quota share in percent; absent until a turn reports it."),
+		"overageUsd?": doc("number", "Summed overage charge in USD; absent until a turn reports it."),
+	},
 	SessionStats: {
 		"sessionFile?": "string",
 		sessionId: "string",
