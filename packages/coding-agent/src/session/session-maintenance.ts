@@ -480,6 +480,7 @@ export interface SessionMaintenanceHost {
 	/** Re-aligns advisors after an in-place prune their own contexts already cover (no re-prime). */
 	rebaseAdvisorPrefix(reason: string): void;
 	rebaseAfterCompaction(): void;
+	releaseRetryFallbackRefusalPin(): void;
 	recordAnchoredHistoryRewrite(tokensRemoved: number): void;
 	getContextBreakdown(options?: {
 		contextWindow?: number;
@@ -2640,6 +2641,7 @@ export class SessionMaintenance {
 		const newEntries = this.#host.sessionManager.getEntries();
 		const sessionContext = this.#host.buildDisplaySessionContext();
 		this.#host.agent.replaceMessages(sessionContext.messages);
+		this.#host.releaseRetryFallbackRefusalPin();
 		this.#host.rebaseAfterCompaction();
 		// Compaction discarded the conversation history that carried the approved
 		// plan reference. Clear the sent-flag so #buildPlanReferenceMessage re-reads
@@ -4668,6 +4670,7 @@ export class SessionMaintenance {
 		this.#failedNativeSpeculation = undefined;
 		const sessionContext = this.#host.buildDisplaySessionContext();
 		this.#host.agent.replaceMessages(sessionContext.messages);
+		this.#host.releaseRetryFallbackRefusalPin();
 		this.#host.rebaseAfterCompaction();
 		// Same post-rewrite bookkeeping as the regular compaction append: the
 		// rebuilt context no longer carries the transient plan reference (#1246),
