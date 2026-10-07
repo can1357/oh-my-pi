@@ -256,6 +256,13 @@ export interface TurnRecoveryHost {
 	 * usage-limit error and never substitutes for live grant eligibility.
 	 */
 	maybeAutoRedeemReset(activeBlockUnblockAtMs?: number): Promise<ResetRecoveryResult>;
+	/**
+	 * With a sibling credential able to take over a usage-limited turn, whether
+	 * to try {@link maybeAutoRedeemReset} first: the provider's reset policy
+	 * enables auto-redeem and `restoreBeforeReserve`, and every account that can
+	 * take over is inside its usage reserve.
+	 */
+	shouldRedeemBeforeTakeover(): Promise<boolean>;
 	runAutoCompaction(
 		reason: "overflow" | "threshold" | "idle" | "incomplete",
 		willRetry: boolean,
@@ -2462,7 +2469,10 @@ export class TurnRecovery {
 		if (!staleOpenAIResponsesReplayError && recordedUsageLimitOutcome) {
 			const rotated = recordedUsageLimitOutcome.switchedCredential && !retryBudgetExhausted;
 			let restored = false;
-			if (!rotated) {
+			// With `restoreBeforeReserve`, a sibling that can serve only inside its
+			// usage reserve is a protected backup: spend the blocked account's saved
+			// reset first, and rotate onto the backup only when none is spent.
+			if (!rotated || (await this.#host.shouldRedeemBeforeTakeover())) {
 				const resetAbortController = new AbortController();
 				this.#retryAbortController?.abort();
 				this.#retryAbortController = resetAbortController;
@@ -2476,7 +2486,8 @@ export class TurnRecovery {
 							restored = true;
 							break;
 						}
-						if (result.retryAfterMs === undefined || attempt >= maxRetries) break;
+						// With a sibling to rotate to, never wait to re-read eligibility.
+						if (rotated || result.retryAfterMs === undefined || attempt >= maxRetries) break;
 						// Only retry the safe eligibility read, never the reset mutation or
 						// model request. Respect provider pacing within the configured wait cap.
 						const readDelayMs = Math.max(

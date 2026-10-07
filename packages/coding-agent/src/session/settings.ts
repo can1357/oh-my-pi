@@ -1330,12 +1330,26 @@ export const cfgCodexResetsSalvageHorizonHours = register({
 	},
 });
 
+export const cfgCodexResetsRestoreBeforeReserve = register({
+	id: "codexResets.restoreBeforeReserve",
+	type: "boolean",
+	default: false,
+	ui: {
+		tab: "providers",
+		group: "Services",
+		label: "Codex Restore Before Reserve",
+		description:
+			"With auto-redeem enabled, spend a blocked account's saved reset before moving the turn to an account that could only serve inside its usage reserve (reservePct, or a credit-funded account); move only if no reset is spent.",
+	},
+});
+
 /** Codex saved-reset auto-redeem policy (`codexResets.*`). */
 export const cfgCodexResets = combine({
 	autoRedeem: cfgCodexResetsAutoRedeem,
 	minBlockedMinutes: cfgCodexResetsMinBlockedMinutes,
 	keepCredits: cfgCodexResetsKeepCredits,
 	salvageHorizonHours: cfgCodexResetsSalvageHorizonHours,
+	restoreBeforeReserve: cfgCodexResetsRestoreBeforeReserve,
 });
 
 /** Whether automatic reset redemption asks first, spends, or remains disabled. */
@@ -1404,12 +1418,26 @@ export const cfgClaudeResetsSalvageHorizonHours = register({
 	},
 });
 
+export const cfgClaudeResetsRestoreBeforeReserve = register({
+	id: "claudeResets.restoreBeforeReserve",
+	type: "boolean",
+	default: false,
+	ui: {
+		tab: "providers",
+		group: "Services",
+		label: "Claude Restore Before Reserve",
+		description:
+			"With auto-redeem enabled, spend a blocked account's eligible Claude reset before moving the turn to an account that could only serve inside its usage reserve (reservePct); move only if no reset is spent.",
+	},
+});
+
 /** Claude reset auto-redeem policy (`claudeResets.*`), independent of {@link cfgCodexResets}. */
 export const cfgClaudeResets = combine({
 	autoRedeem: cfgClaudeResetsAutoRedeem,
 	minBlockedMinutes: cfgClaudeResetsMinBlockedMinutes,
 	keepCredits: cfgClaudeResetsKeepCredits,
 	salvageHorizonHours: cfgClaudeResetsSalvageHorizonHours,
+	restoreBeforeReserve: cfgClaudeResetsRestoreBeforeReserve,
 });
 
 export const cfgProviderAppendOnlyContext = register({

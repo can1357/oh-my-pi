@@ -985,6 +985,8 @@ When a usage refresh detects an eligible banked reset expiring within the next *
 
 `salvageHorizonHours` controls earlier, usage-based salvage; setting it to `0` leaves the five-minute last-chance rule active. Set the provider's `autoRedeem` to `no` to disable all automatic spending.
 
+By default a blocked turn moves to any account that can take over, and a reset restores the blocked account only when none can. Set the provider's `restoreBeforeReserve: true` to treat an account that could take over only inside its usage reserve (`auth.accountPolicies[].reservePct`, otherwise `retry.usageReservePct`; a Codex account serving on paid credits always reads this way) as a protected backup instead: auto-redeem spends the blocked account's reset first and moves the turn to the backup only if no reset is spent (none banked, `keepCredits`, a wait under `minBlockedMinutes`, or consent declined).
+
 ### Other groups
 
 Every schema path not individually tabulated in this catalog is explicitly deferred to `omp config list`. Additional groups include:

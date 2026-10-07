@@ -467,6 +467,7 @@ import {
 	cfgProvidersAntigravityEndpoint,
 	cfgRetryModelFallback,
 	cfgRetryUsageAwareFallback,
+	cfgRetryUsageReservePct,
 	cfgSampling,
 	cfgSkillful,
 	cfgTierAdvisor,
@@ -1761,6 +1762,7 @@ export class AgentSession implements SettingsScope {
 			syncAfterModelChange: previousEditMode => this.#tools.syncAfterModelChange(previousEditMode),
 			resetCurrentResponsesProviderSession: reason => this.#resetCurrentResponsesProviderSession(reason),
 			maybeAutoRedeemReset: activeBlockUnblockAtMs => this.#maybeAutoRedeemReset(activeBlockUnblockAtMs),
+			shouldRedeemBeforeTakeover: () => this.#shouldRedeemBeforeTakeover(),
 			runAutoCompaction: (reason, willRetry, options) =>
 				this.#maintenance.runAutoCompaction(reason, willRetry, options),
 			shakeForRequestBodyReadTimeout: generation => this.#maintenance.shakeForRequestBodyReadTimeout(generation),
@@ -12914,6 +12916,29 @@ export class AgentSession implements SettingsScope {
 			.finally(() => coordinator.inFlightByAccount.delete(accountKey));
 		coordinator.inFlightByAccount.set(accountKey, run);
 		return run;
+	}
+
+	async #shouldRedeemBeforeTakeover(): Promise<boolean> {
+		const model = this.model;
+		const provider = model?.provider;
+		if (!model || (provider !== "anthropic" && provider !== "openai-codex")) return false;
+		const cfg = (provider === "anthropic" ? cfgClaudeResets : cfgCodexResets).get(this.settings);
+		if (!cfg.restoreBeforeReserve || !shouldEvaluateCodexAutoRedeem(cfg.autoRedeem)) return false;
+		try {
+			// The blocked account reads depleted, so a "reserve" pool means every
+			// account able to take over would serve from its protected reserve.
+			const health = await this.#modelRegistry.authStorage.health.model(provider, {
+				modelId: model.id,
+				sessionId: this.sessionId,
+				baseUrl: model.baseUrl,
+				reserveFraction: cfgRetryUsageReservePct.get(this.settings) / 100,
+			});
+			return health.state === "reserve";
+		} catch (error) {
+			// Unknown pool health keeps the plain sibling rotation.
+			logger.debug("auto-reset: takeover health check failed", { provider, error: String(error) });
+			return false;
+		}
 	}
 
 	/**
