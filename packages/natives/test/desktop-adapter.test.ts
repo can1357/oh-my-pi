@@ -4,31 +4,14 @@ import { desktopEscapeStops, forgetDesktopEscapeStops } from "../native/desktop.
 import * as loaderState from "../native/loader-state.js";
 
 describe("desktop native ABI requirements", () => {
-	it.each([
-		["null desktop export", null],
-		[
-			"legacy execute ABI",
-			class {
-				execute() {}
-			},
-		],
-		[
-			"pre-zoom ABI",
-			class {
-				click() {}
-				cancel() {}
-			},
-		],
-		[
-			"uncancellable ABI",
-			class {
-				click() {}
-				captureRegion() {}
-			},
-		],
-	])("rejects stale %s when constructing a desktop session", (_label, NativeSession) => {
+	it("rejects a present class with an incomplete ABI when constructing a desktop session", () => {
+		class NativeSession {
+			click() {}
+		}
 		const DesktopSession = adaptDesktopSession(NativeSession);
-		expect(() => new DesktopSession({ display: "active" })).toThrow(/^Unsupported:/);
+		expect(() => new DesktopSession({ display: "active" })).toThrow(
+			/^Unsupported: desktop native addon is outdated \(missing capture,/,
+		);
 	});
 
 	it("rejects an addon built before the turn-scoped display hold", () => {

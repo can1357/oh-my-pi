@@ -25,12 +25,6 @@ import { generateEnumExports } from "./gen-enums";
 // static build so the local addon never retains host Homebrew paths.
 process.env.PCRE2_SYS_STATIC ??= "1";
 
-// Termux ships a stable Rust compiler, while xutf and pi-natives use features
-// enabled by the repository's pinned nightly. Scope the bootstrap escape hatch.
-if (process.platform === "android") {
-	process.env.RUSTC_BOOTSTRAP ??= "xutf,pi_natives";
-}
-
 // Windows: cc-rs and rustc auto-locate cl.exe/link.exe through the VS
 // registry, but the cmake crate (opusic-sys' bundled Opus) needs cmake —
 // and its Ninja generator needs ninja — on PATH. VS Build Tools ships both
@@ -68,11 +62,11 @@ const repoRoot = path.join(import.meta.dir, "../../..");
 const rustDir = path.join(repoRoot, "crates/pi-natives");
 const nativeDir = path.join(import.meta.dir, "../native");
 const packageJsonPath = path.join(import.meta.dir, "../package.json");
-// napi-rs omits modules guarded out for the target (clipboard on Android), but
-// the package's public entrypoint remains platform-neutral. Preserve clipboard
-// declarations and their referenced-type closure so `gen-enums.ts` retains
-// the corresponding named exports.
-const CLIPBOARD_BINDING_NAMES: Record<string, true> = {
+// napi-rs omits desktop and clipboard modules guarded out for the target.
+// Keep their platform-neutral root declarations and referenced-type closure so
+// generated declarations and ESM exports retain the package's public shape.
+const PLATFORM_NEUTRAL_BINDING_NAMES: Record<string, true> = {
+	DesktopSession: true,
 	ClipboardImage: true,
 	copyToClipboard: true,
 	readImageFromClipboard: true,
@@ -98,12 +92,14 @@ function declarationBlocks(dts: string): Map<string, string> {
 	return blocks;
 }
 
-function preserveClipboardDeclarations(generated: string, existing: string): string {
+function preservePlatformNeutralDeclarations(generated: string, existing: string): string {
 	const generatedBlocks = declarationBlocks(generated);
 	const existingBlocks = declarationBlocks(existing);
-	// Keep each clipboard entry's full referenced-type closure, not only its root signature.
+	// Preserve each platform-neutral entry's full referenced-type closure, not only its root signature.
 	const preservedNames = new Set(
-		Object.keys(CLIPBOARD_BINDING_NAMES).filter(name => existingBlocks.has(name) && !generatedBlocks.has(name)),
+		Object.keys(PLATFORM_NEUTRAL_BINDING_NAMES).filter(
+			name => existingBlocks.has(name) && !generatedBlocks.has(name),
+		),
 	);
 	const pending = [...preservedNames];
 	while (pending.length > 0) {
@@ -116,11 +112,12 @@ function preserveClipboardDeclarations(generated: string, existing: string): str
 			pending.push(name);
 		}
 	}
-	const preserved = [...existingBlocks.entries()].filter(([name]) => preservedNames.has(name)).map(([, block]) => block);
+	const preserved = [...existingBlocks.entries()]
+		.filter(([name]) => preservedNames.has(name))
+		.map(([, block]) => block);
 	if (preserved.length === 0) return generated;
 	return `${generated.trimEnd()}\n\n${preserved.join("\n\n")}\n`;
 }
-
 
 const localAddon = resolveLocalHostAddon({
 	platform: process.platform,
@@ -234,7 +231,7 @@ async function installGeneratedBindings(outputDir: string): Promise<void> {
 		const existing = await fs
 			.readFile(destPath, "utf8")
 			.catch(err => ((err as NodeJS.ErrnoException).code === "ENOENT" ? "" : Promise.reject(err)));
-		await fs.writeFile(destPath, preserveClipboardDeclarations(generated, existing));
+		await fs.writeFile(destPath, preservePlatformNeutralDeclarations(generated, existing));
 	} catch (err) {
 		const message = err instanceof Error ? err.message : String(err);
 		throw new Error(`Failed to install generated index.d.ts: ${message}`);

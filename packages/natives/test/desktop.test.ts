@@ -1,10 +1,10 @@
 import { describe, expect, it } from "bun:test";
-import { createDesktopSession } from "../native/desktop.js";
-import { DesktopSession } from "../native/index.js";
+import { DesktopSession, visibleWidth } from "@oh-my-pi/pi-natives";
+import { createDesktopSession } from "@oh-my-pi/pi-natives/desktop";
 
 const ERROR_CODE_PREFIX = /^([A-Z][A-Za-z]+): /;
 const PERMISSION_STATES = ["granted", "denied", "unknown", "unavailable", "prompt-or-granted"];
-const BACKENDS = ["quartz", "x11", "wayland", "win32", "unavailable"];
+const BACKENDS = ["quartz", "x11", "wayland", "win32"];
 
 async function expectRejectionCode(operation: () => Promise<unknown>, acceptedCodes: readonly string[]): Promise<void> {
 	const fulfilled = Symbol("fulfilled");
@@ -32,63 +32,55 @@ async function expectRejectionCode(operation: () => Promise<unknown>, acceptedCo
 }
 
 describe("DesktopSession", () => {
-	it.skipIf(process.platform !== "android")("reports an unavailable backend on Android", async () => {
-		const session = createDesktopSession({ display: "all" });
-		try {
-			expect(session.capabilities).toMatchObject({
-				backend: "unavailable",
-				capture: false,
-				input: false,
-				ax: false,
-				backgroundWindowInput: false,
-				takeover: false,
-				capturePermission: "unavailable",
-				inputPermission: "unavailable",
-				axPermission: "unavailable",
-			});
-			await expect(session.capture("desktop")).rejects.toThrow(
-				"CaptureFailed: desktop backend unavailable on this platform",
-			);
-		} finally {
-			await session.close();
-		}
+	it.skipIf(process.platform !== "android")("imports safely and rejects the unsupported factory on Android", () => {
+		expect(DesktopSession).toBeUndefined();
+		expect(visibleWidth("native", 3)).toBe(6);
+		expect(() => createDesktopSession({ display: "all" })).toThrow(
+			"Unsupported: desktop sessions are not supported on this platform.",
+		);
 	});
 
-	it("constructs through the factory and reports the complete capability shape", async () => {
-		const session = createDesktopSession({ display: "all" });
-		try {
-			expect(session).toBeInstanceOf(DesktopSession);
+	it.skipIf(process.platform === "android")(
+		"constructs through the factory and reports the complete capability shape",
+		async () => {
+			const session = createDesktopSession({ display: "all" });
+			try {
+				expect(session).toBeInstanceOf(DesktopSession);
 
-			const capabilities = session.capabilities;
-			expect(BACKENDS).toContain(capabilities.backend);
-			// displayServer is optional (`displayServer?: string`): napi omits the
-			// key entirely when the backend reports None (headless CI).
-			expect(["string", "undefined"]).toContain(typeof capabilities.displayServer);
-			expect(typeof capabilities.capture).toBe("boolean");
-			expect(typeof capabilities.input).toBe("boolean");
-			expect(typeof capabilities.ax).toBe("boolean");
-			expect(typeof capabilities.backgroundWindowInput).toBe("boolean");
-			expect(typeof capabilities.takeover).toBe("boolean");
-			expect(PERMISSION_STATES).toContain(capabilities.capturePermission);
-			expect(PERMISSION_STATES).toContain(capabilities.inputPermission);
-			expect(PERMISSION_STATES).toContain(capabilities.axPermission);
-			expect(typeof capabilities.displayCount).toBe("number");
-		} finally {
-			await session.close();
-		}
-	});
+				const capabilities = session.capabilities;
+				expect(BACKENDS).toContain(capabilities.backend);
+				// displayServer is optional (`displayServer?: string`): napi omits the
+				// key entirely when the backend reports None (headless CI).
+				expect(["string", "undefined"]).toContain(typeof capabilities.displayServer);
+				expect(typeof capabilities.capture).toBe("boolean");
+				expect(typeof capabilities.input).toBe("boolean");
+				expect(typeof capabilities.ax).toBe("boolean");
+				expect(typeof capabilities.backgroundWindowInput).toBe("boolean");
+				expect(typeof capabilities.takeover).toBe("boolean");
+				expect(PERMISSION_STATES).toContain(capabilities.capturePermission);
+				expect(PERMISSION_STATES).toContain(capabilities.inputPermission);
+				expect(PERMISSION_STATES).toContain(capabilities.axPermission);
+				expect(typeof capabilities.displayCount).toBe("number");
+			} finally {
+				await session.close();
+			}
+		},
+	);
 
-	it("rejects a nonexistent capture target with a documented native code", async () => {
-		const session = new DesktopSession({ display: "all" });
-		try {
-			await expectRejectionCode(
-				() => session.capture("no-such-window-id-999999"),
-				["WindowNotFound", "InvalidTarget", "CaptureFailed", "PermissionDenied"],
-			);
-		} finally {
-			await session.close();
-		}
-	});
+	it.skipIf(process.platform === "android")(
+		"rejects a nonexistent capture target with a documented native code",
+		async () => {
+			const session = new DesktopSession({ display: "all" });
+			try {
+				await expectRejectionCode(
+					() => session.capture("no-such-window-id-999999"),
+					["WindowNotFound", "InvalidTarget", "CaptureFailed", "PermissionDenied"],
+				);
+			} finally {
+				await session.close();
+			}
+		},
+	);
 
 	it.skipIf(process.platform === "android")("rejects coordinate input before capture", async () => {
 		const session = new DesktopSession({ display: "all" });
@@ -102,13 +94,13 @@ describe("DesktopSession", () => {
 		}
 	});
 
-	it("closes idempotently", async () => {
+	it.skipIf(process.platform === "android")("closes idempotently", async () => {
 		const session = new DesktopSession({ display: "all" });
 		await session.close();
 		await session.close();
 	});
 
-	it("rejects calls after close with Closed", async () => {
+	it.skipIf(process.platform === "android")("rejects calls after close with Closed", async () => {
 		const session = new DesktopSession({ display: "all" });
 		await session.close();
 

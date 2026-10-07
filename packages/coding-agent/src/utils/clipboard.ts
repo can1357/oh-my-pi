@@ -139,12 +139,14 @@ export async function copyToClipboard(text: string): Promise<void> {
 		await previousWrite;
 	}
 
-	// Also try native tools (best effort for local sessions)
+	// Use a local clipboard path after OSC 52. Android only has the Termux
+	// helper; without it, OSC 52 is the only available copy route.
 	try {
 		if (process.env.TERMUX_VERSION) {
 			await spawnCapture(["termux-clipboard-set"], { input: text, timeoutMs: 5000 });
 			return;
 		}
+		if (process.platform === "android") return;
 		// macOS: prefer `pbcopy` over the in-process AppKit write, mirroring the
 		// read path which already shells out to `pbpaste`. An in-process
 		// NSPasteboard write logs
@@ -308,18 +310,18 @@ async function readTextFromX11Clipboard(): Promise<string> {
 /**
  * Read an image from the system clipboard.
  *
- * Returns null on Termux (no image clipboard support) or when no display
- * server is available (headless/SSH without forwarding). Native Windows trusts
- * the native reader's "no image" answer — it returns null only when no bitmap
- * format is on the clipboard, and throws when one is present but undecodable —
- * so `powershell.exe` starts only after a throw and a text-only clipboard never
- * waits on a cold PowerShell start. WSL reaches the host clipboard through
- * `powershell.exe`.
+ * Returns null on Android or Termux (no image clipboard support) or when no
+ * display server is available (headless/SSH without forwarding). Native Windows
+ * trusts the native reader's "no image" answer — it returns null only when no
+ * bitmap format is on the clipboard, and throws when one is present but
+ * undecodable — so `powershell.exe` starts only after a throw and a text-only
+ * clipboard never waits on a cold PowerShell start. WSL reaches the host
+ * clipboard through `powershell.exe`.
  *
  * @returns A supported image payload or null when no image is available.
  */
 export async function readImageFromClipboard(): Promise<ClipboardImage | null> {
-	if (process.env.TERMUX_VERSION) {
+	if (process.platform === "android" || process.env.TERMUX_VERSION) {
 		return null;
 	}
 
@@ -379,6 +381,9 @@ export async function readImageFromClipboard(): Promise<ClipboardImage | null> {
 export async function readTextFromClipboard(): Promise<string> {
 	try {
 		const p = process.platform;
+		if (p === "android") {
+			return process.env.TERMUX_VERSION ? await spawnCapture(["termux-clipboard-get"]) : "";
+		}
 		if (p === "darwin") {
 			return await spawnCapture(["pbpaste"]);
 		}

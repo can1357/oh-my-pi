@@ -1,17 +1,24 @@
 # Changelog
 
 ## [Unreleased]
+
 ### Added
 
-- Added an explicit Android ARM64 Bazel cross-target using the Android NDK toolchain and API level 24; it remains outside the shipping native aggregates.
+- Added an explicit Android ARM64 Bazel cross-target using the Android NDK
+  toolchain and API level 24; it remains outside the shipping native
+  aggregates. The optional Linux-host coding-agent `build:android` bundle
+  cross-build uses the same target and leaves generic `build`/`CROSS_TARGET` behavior unchanged.
 
 ### Changed
 
-- Added source-built Android ARM64/Termux support for local native addon builds and Bionic process management; clipboard integration remains Termux API based.
-- Android ARM64 bindings now include the desktop-session API shape, but the
-  desktop backend remains unavailable: all desktop capability flags are false,
-  and capture rejects with `CaptureFailed`; this adds no screen-capture or
-  input support.
+- Added Android ARM64 Bionic process-management support. Native source builds on
+  Termux remain in the separate `backup/android-build-before-hybrid-20261007`
+  escape hatch; this branch's `build-bindings.ts` does not set
+  `RUSTC_BOOTSTRAP`. Clipboard integration remains Termux API based.
+- Android omits the native desktop and clipboard modules. Desktop declarations
+  remain for type compatibility, but `createDesktopSession()` throws
+  `Unsupported: desktop sessions are not supported on this platform.` Android
+  does not provide desktop capture or input.
 
 ### Fixed
 
