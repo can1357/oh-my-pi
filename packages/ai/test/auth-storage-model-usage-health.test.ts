@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
 import {
 	type ApiKeyCredential,
+	type AuthAccountPolicies,
 	type AuthCredential,
 	type AuthCredentialStore,
 	AuthStorage,
@@ -110,11 +111,13 @@ describe("AuthStorage model usage health", () => {
 		rows: StoredAuthCredential[],
 		reports: Record<string, UsageReport | null>,
 		blocked?: Map<number, number>,
+		accountPolicies?: AuthAccountPolicies,
 	): Promise<AuthStorage> {
 		const storage = new AuthStorage(makeStore(rows, blocked), {
 			usageProviderResolver: provider => (provider === "anthropic" ? makeUsageProvider(reports) : undefined),
 			rankingStrategyResolver: provider => (provider === "anthropic" ? strategy : undefined),
 			configValueResolver: async value => value,
+			accountPolicies,
 		});
 		await storage.credentials.reload();
 		storages.push(storage);
@@ -198,6 +201,28 @@ describe("AuthStorage model usage health", () => {
 
 		expect(health.state).toBe("reserve");
 		expect(health.accounts[0]?.remainingFraction).toBeCloseTo(0.05);
+	});
+
+	it.each([
+		["the global reserve", undefined, 0.85],
+		["a per-account reserve", 5, 0.88],
+	])("adds the requested margin on top of %s", async (_reserve, reservePct, usedFraction) => {
+		const policies =
+			reservePct === undefined
+				? undefined
+				: [{ provider: "anthropic", account: { accountId: "account-1" }, reservePct }];
+		const storage = await createStorage(
+			[oauthRow(1)],
+			{ "account-1": report("account-1", [limit("short", usedFraction)]) },
+			undefined,
+			policies,
+		);
+		const options = { modelId: "claude", reserveFraction: 0.1 };
+
+		expect((await storage.health.model("anthropic", options)).state).toBe("healthy");
+		expect((await storage.health.model("anthropic", { ...options, reserveMarginFraction: 0.1 })).state).toBe(
+			"reserve",
+		);
 	});
 
 	it("expires short and long usage windows independently", async () => {

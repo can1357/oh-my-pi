@@ -5,6 +5,7 @@
 ### Added
 
 - Files the write tool creates now preview the way the matching code blocks in replies do, building up while the write streams: `.svg` as an image and Mermaid (`.mmd`, `.mermaid`) as a diagram under the write card, and in Tern also 3D models (`.obj`, `.ply`, `.wrl`, `.x3dv`, `.stl`, `.gltf`, `.usda`); in Tern an SVG write now draws like an SVG figure in a reply
+- Added `retry.fallbackRevertPolicy: when-healthy`, which returns a session to its primary model after usage-driven fallbacks too, once the primary's usage report shows headroom above its reserve and the conversation fits its window without compacting
 
 ### Changed
 

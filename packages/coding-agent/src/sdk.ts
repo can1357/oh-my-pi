@@ -3060,7 +3060,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				}
 				model = selectedModel;
 				initialRetryFallback =
-					retryFallback && usageFallbackTriggered ? { ...retryFallback, pinned: true } : retryFallback;
+					retryFallback && usageFallbackTriggered ? { ...retryFallback, pin: "usage" } : retryFallback;
 				modelFallbackMessage = undefined;
 				if (selectedExplicitThinkingLevel) {
 					restoredSessionThinkingLevel = selectedThinkingLevel;

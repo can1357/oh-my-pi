@@ -13,6 +13,7 @@ import type {
 	Effort,
 	Model,
 	ModelUsageHealth,
+	ModelUsageHealthState,
 	TextContent,
 	ThinkingContent,
 	ToolChoice,
@@ -61,6 +62,7 @@ import {
 	getRetryFallbackRevertPolicy,
 	parseRetryFallbackSelector,
 	type RetryFallbackChains,
+	type RetryFallbackPin,
 	type RetryFallbackResolutionContext,
 	type RetryFallbackRevertPolicy,
 	type RetryFallbackSelector,
@@ -94,6 +96,13 @@ const EMPTY_STOP_MAX_RETRIES = 3;
 const MALFORMED_FUNCTION_CALL_MAX_RETRIES = 3;
 const STREAM_STALL_CONTINUE_MAX_RETRIES = 3;
 const SIBLING_UNBLOCK_BUFFER_MS = 1_000;
+/**
+ * Headroom above the reserve a primary needs before `when-healthy` hands the
+ * session back. Between resets remaining quota only falls, so the band allows
+ * at most one return per reset instead of a return that drops straight back
+ * into reserve.
+ */
+const FALLBACK_RETURN_HEADROOM_FRACTION = 0.1;
 const NON_WHITESPACE_RE = /\S/;
 const USAGE_PREFLIGHT_BLOCKED_PREFIX = "Usage preflight blocked:";
 const STREAM_STALL_ERROR_RE = /stream stall/i;
@@ -365,7 +374,7 @@ export class TurnRecovery {
 			this.#activeRetryFallback = {
 				...options.initialRetryFallback,
 				lastAppliedFallbackThinkingLevel: host.configuredThinkingLevel(),
-				pinned: options.initialRetryFallback.pinned ?? false,
+				pin: options.initialRetryFallback.pin,
 			};
 			this.#markFallbackRouted();
 		}
@@ -706,13 +715,13 @@ export class TurnRecovery {
 	}
 
 	/**
-	 * Restores the configured primary after fallback cooldown expiry.
+	 * Restores the configured primary once `retry.fallbackRevertPolicy` allows it.
 	 * @returns true when the active model was actually switched back to the
 	 * primary, so callers can re-run the pre-send context-fit check against the
 	 * reverted (possibly smaller) window before issuing the next request.
 	 */
-	maybeRestoreRetryFallbackPrimary(): Promise<boolean> {
-		return this.#maybeRestoreRetryFallbackPrimary();
+	maybeRestoreRetryFallbackPrimary(signal?: AbortSignal): Promise<boolean> {
+		return this.#maybeRestoreRetryFallbackPrimary(signal);
 	}
 
 	/** Applies model fallback policy from live usage health before a turn starts. */
@@ -1963,7 +1972,7 @@ export class TurnRecovery {
 		}
 		this.#usageReserveApproval = undefined;
 		return this.applyRetryFallbackCandidate(fallback.role, fallback.selector, currentSelector, {
-			pinFallback: true,
+			pin: "usage",
 			apiKey: fallback.apiKey,
 			signal,
 			reason: describeUsageFallback(health, cfgRetryUsageReservePct.get(this.#host.settings)),
@@ -2012,7 +2021,7 @@ export class TurnRecovery {
 		role: string,
 		selector: RetryFallbackSelector,
 		currentSelector: string,
-		options?: { pinFallback?: boolean; apiKey?: string; signal?: AbortSignal; reason?: string },
+		options?: { pin?: RetryFallbackPin; apiKey?: string; signal?: AbortSignal; reason?: string },
 	): Promise<boolean> {
 		const resolved = resolveModelOverride([selector.raw], this.#host.modelRegistry, this.#host.settings);
 		const candidate = resolved.model ?? this.#host.modelRegistry.find(selector.provider, selector.id);
@@ -2077,11 +2086,14 @@ export class TurnRecovery {
 				originalSelector: currentSelector,
 				originalThinkingLevel: currentThinkingLevel,
 				lastAppliedFallbackThinkingLevel: nextThinkingLevel,
-				pinned: options?.pinFallback === true,
+				pin: options?.pin,
 			};
 		} else {
 			this.#activeRetryFallback.lastAppliedFallbackThinkingLevel = nextThinkingLevel;
-			this.#activeRetryFallback.pinned = this.#activeRetryFallback.pinned || options?.pinFallback === true;
+			// A refusal pin outranks a usage pin: health recovery never answers a refusal.
+			if (options?.pin && this.#activeRetryFallback.pin !== "classifier-refusal") {
+				this.#activeRetryFallback.pin = options.pin;
+			}
 		}
 		await this.#host.syncAfterModelChange(previousEditMode);
 		await this.#host.emitSessionEvent({
@@ -2099,7 +2111,7 @@ export class TurnRecovery {
 		failedMessage: AssistantMessage,
 		options?: {
 			excludeProvider?: string;
-			pinFallback?: boolean;
+			pin?: RetryFallbackPin;
 			preserveFailedTurn?: boolean;
 			wrapAround?: boolean;
 		},
@@ -2175,7 +2187,7 @@ export class TurnRecovery {
 					reason: `Request failed: ${failedMessage.errorMessage ?? "provider returned an error without details"}`,
 				});
 				const editModeChanged = this.#host.resolveActiveEditMode() !== previousEditMode;
-				if (applied && options?.pinFallback === true && canRedeemFallbackCredit && !editModeChanged) {
+				if (applied && options?.pin === "classifier-refusal" && canRedeemFallbackCredit && !editModeChanged) {
 					this.#activeFallbackCreditRedemption = {
 						targetSelector: `${candidate.provider}/${candidate.id}`,
 						handle: failedMessage.fallbackCreditHandle!,
@@ -2233,7 +2245,7 @@ export class TurnRecovery {
 	 * model switch cannot fix or must not replay: cancellations (abort-flavored
 	 * errors are not model faults), context overflow (compaction's job),
 	 * classifier refusals (chain consult is handled on the retryable path with
-	 * `pinFallback`), and turns that already emitted replay-unsafe output.
+	 * a classifier-refusal pin), and turns that already emitted replay-unsafe output.
 	 */
 	isHardErrorFallbackEligible(message: AssistantMessage): boolean {
 		if (message.stopReason !== "error") return false;
@@ -2297,16 +2309,21 @@ export class TurnRecovery {
 		return true;
 	}
 
-	async #maybeRestoreRetryFallbackPrimary(): Promise<boolean> {
-		if (!this.#activeRetryFallback) return false;
-		if (this.#activeRetryFallback.pinned) return false;
-		if (this.#getRetryFallbackRevertPolicy() !== "cooldown-expiry") return false;
+	async #maybeRestoreRetryFallbackPrimary(signal?: AbortSignal): Promise<boolean> {
+		const fallback = this.#activeRetryFallback;
+		if (!fallback) return false;
+		const policy = this.#getRetryFallbackRevertPolicy();
+		if (policy === "never") return false;
+		// A refusal is the primary's verdict on this conversation, which usage
+		// recovery does not change (#10206).
+		if (fallback.pin === "classifier-refusal") return false;
+		if (fallback.pin === "usage" && policy !== "when-healthy") return false;
 
 		const {
 			originalSelector: originalSelectorRaw,
 			originalThinkingLevel,
 			lastAppliedFallbackThinkingLevel,
-		} = this.#activeRetryFallback;
+		} = fallback;
 		const originalSelector = parseRetryFallbackSelector(originalSelectorRaw, this.#host.modelRegistry);
 		if (!originalSelector) {
 			// Defensive: the stored selector is always produced by
@@ -2339,6 +2356,17 @@ export class TurnRecovery {
 		if (!primaryModel) return false;
 		const apiKey = await this.#host.modelRegistry.getApiKey(primaryModel, this.#host.sessionId());
 		if (!apiKey) return false;
+		if (policy === "when-healthy") {
+			const canReturn = await this.#primaryCanTakeSessionBack(primaryModel, fallback.pin, signal);
+			if (
+				!canReturn ||
+				signal?.aborted ||
+				this.#activeRetryFallback !== fallback ||
+				!modelsAreEqual(this.#host.model(), currentModel)
+			) {
+				return false;
+			}
+		}
 
 		const currentThinkingLevel = this.#host.configuredThinkingLevel();
 		const thinkingToApply =
@@ -2356,6 +2384,41 @@ export class TurnRecovery {
 		this.#host.setThinkingLevel(thinkingToApply);
 		await this.#host.syncAfterModelChange(previousEditMode);
 		return true;
+	}
+
+	/**
+	 * `when-healthy` return gate. The primary must hold the live context without
+	 * compacting and show usage headroom above its reserve. Unknown usage keeps
+	 * cooldown-expiry behavior for an error detour and holds a usage detour, so a
+	 * detour only ends on the same kind of evidence that started it.
+	 */
+	async #primaryCanTakeSessionBack(
+		primaryModel: Model,
+		pin: RetryFallbackPin | undefined,
+		signal: AbortSignal | undefined,
+	): Promise<boolean> {
+		if (!this.#host.contextFitsModel(primaryModel)) return false;
+		let state: ModelUsageHealthState;
+		try {
+			const health = await this.#host.modelRegistry.authStorage.health.model(primaryModel.provider, {
+				modelId: primaryModel.id,
+				sessionId: this.#host.sessionId(),
+				baseUrl: primaryModel.baseUrl,
+				reserveFraction: cfgRetryUsageReservePct.get(this.#host.settings) / 100,
+				reserveMarginFraction: FALLBACK_RETURN_HEADROOM_FRACTION,
+				signal,
+			});
+			state = health.state;
+		} catch (error) {
+			if (signal?.aborted) return false;
+			logger.debug("Fallback return usage check failed", {
+				provider: primaryModel.provider,
+				model: primaryModel.id,
+				error: String(error),
+			});
+			state = "unknown";
+		}
+		return state === "healthy" || (state === "unknown" && pin === undefined);
 	}
 
 	#parseRetryAfterMsFromError(errorMessage: string): number | undefined {
@@ -2645,7 +2708,7 @@ export class TurnRecovery {
 				}
 				switchedModel = await this.#tryRetryModelFallback(currentSelector, message, {
 					excludeProvider: longUsageLimitFallback ? currentModel.provider : undefined,
-					pinFallback: classifierRefusal,
+					pin: classifierRefusal ? "classifier-refusal" : undefined,
 					preserveFailedTurn,
 					wrapAround: longUsageLimitFallback,
 				});

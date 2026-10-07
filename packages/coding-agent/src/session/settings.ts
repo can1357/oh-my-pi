@@ -820,7 +820,7 @@ export const cfgRetryFallbackChains = register({
 export const cfgRetryFallbackRevertPolicy = register({
 	id: "retry.fallbackRevertPolicy",
 	type: "enum",
-	values: ["cooldown-expiry", "never"] as const,
+	values: ["cooldown-expiry", "when-healthy", "never"] as const,
 	default: "cooldown-expiry",
 	ui: {
 		tab: "model",
@@ -832,6 +832,12 @@ export const cfgRetryFallbackRevertPolicy = register({
 				value: "cooldown-expiry",
 				label: "Cooldown expiry",
 				description: "Return to the primary model after its suppression window ends",
+			},
+			{
+				value: "when-healthy",
+				label: "When healthy",
+				description:
+					"After the cooldown, return only when the primary's usage report shows headroom above its reserve and the context fits; also returns from usage-driven fallbacks",
 			},
 			{ value: "never", label: "Never", description: "Stay on the fallback model until manually changed" },
 		],

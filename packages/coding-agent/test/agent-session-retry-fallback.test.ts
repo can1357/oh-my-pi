@@ -16,7 +16,7 @@ import {
 	type ToolCall,
 } from "@oh-my-pi/pi-ai";
 import * as AIError from "@oh-my-pi/pi-ai/error";
-import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
+import { createMockModel, type MockResponse } from "@oh-my-pi/pi-ai/providers/mock";
 import { buildParams } from "@oh-my-pi/pi-ai/providers/openai-responses";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
@@ -6737,6 +6737,213 @@ describe("AgentSession retry fallback", () => {
 			thinkingLevel: undefined,
 			isFallback: true,
 			contextWindow: fallbackModel.contextWindow,
+		});
+	});
+
+	describe("fallbackRevertPolicy when-healthy", () => {
+		const primaryModel = getBundledModel("anthropic", "claude-sonnet-4-5");
+		const fallbackModel = getBundledModel("openai", "gpt-4o-mini");
+		if (!primaryModel || !fallbackModel) {
+			throw new Error("Expected bundled test models to exist");
+		}
+		const primarySelector = `${primaryModel.provider}/${primaryModel.id}`;
+		const fallbackSelector = `${fallbackModel.provider}/${fallbackModel.id}`;
+
+		function healthOf(state: ModelUsageHealth["state"]): ModelUsageHealth {
+			return { state, accounts: [] };
+		}
+
+		/**
+		 * Session on `primaryModel` whose chain falls back to `fallbackModel`. The
+		 * primary answers its first request with `primaryFailure`; its usage health
+		 * comes from `primaryHealth`, called with the reserve margin the caller
+		 * asked for. The fallback always reads healthy.
+		 */
+		function startSession(
+			settingsOverrides: Record<string, unknown>,
+			primaryHealth: (reserveMarginFraction: number) => ModelUsageHealth["state"] | Error,
+			primaryFailure?: MockResponse,
+		): string[] {
+			const requestedModels: string[] = [];
+			const mock = createMockModel();
+			let primaryAttempts = 0;
+			const agent = new Agent({
+				getApiKey: model => `${model.provider}-test-key`,
+				initialState: { model: primaryModel!, systemPrompt: ["Test"], tools: [], messages: [] },
+				streamFn: (model, context, options) => {
+					const selector = `${model.provider}/${model.id}`;
+					requestedModels.push(selector);
+					if (selector === primarySelector && primaryFailure && primaryAttempts++ === 0) {
+						mock.push(primaryFailure);
+					} else {
+						mock.push({ content: [`ok:${selector}`] });
+					}
+					return mock.stream(model, context, options);
+				},
+			});
+			const settings = Settings.isolated({
+				"compaction.enabled": false,
+				"retry.baseDelayMs": 5,
+				"retry.fallbackChains": { default: [fallbackSelector] },
+				"retry.fallbackRevertPolicy": "when-healthy",
+				...settingsOverrides,
+			});
+			settings.setModelRole("default", primarySelector);
+			vi.spyOn(modelRegistry.authStorage.health, "model").mockImplementation(async (provider, options) => {
+				if (provider !== primaryModel!.provider) return healthOf("healthy");
+				const state = primaryHealth(options.reserveMarginFraction ?? 0);
+				if (state instanceof Error) throw state;
+				return healthOf(state);
+			});
+			session = new AgentSession({ agent, sessionManager: SessionManager.inMemory(), settings, modelRegistry });
+			return requestedModels;
+		}
+
+		it.each([
+			["when-healthy", "has headroom above its reserve margin", "healthy", "healthy", primarySelector],
+			["when-healthy", "is out of reserve but inside the margin", "healthy", "reserve", fallbackSelector],
+			["when-healthy", "has unknown usage", "unknown", "unknown", fallbackSelector],
+			["cooldown-expiry", "has headroom above its reserve margin", "healthy", "healthy", fallbackSelector],
+		] as const)(
+			"under %s, a usage-driven fallback returns only when the primary %s",
+			async (policy, _case, withoutMargin, withMargin, expected) => {
+				let recovered = false;
+				const requestedModels = startSession(
+					{ "retry.usageAwareFallback": true, "retry.fallbackRevertPolicy": policy },
+					margin => (!recovered ? "depleted" : margin > 0 ? withMargin : withoutMargin),
+				);
+
+				await session!.prompt("Primary is depleted before the request");
+				await session!.waitForIdle();
+				expect(requestedModels).toEqual([fallbackSelector]);
+
+				recovered = true;
+				await session!.prompt("Primary usage moved");
+				await session!.waitForIdle();
+				expect(requestedModels).toEqual([fallbackSelector, expected]);
+				expect(`${session!.model?.provider}/${session!.model?.id}`).toBe(expected);
+			},
+		);
+
+		it.each([
+			["healthy", primarySelector],
+			["unknown", primarySelector],
+			["failed usage check", primarySelector],
+			["depleted", fallbackSelector],
+			["reserve", fallbackSelector],
+		] as const)("after an error-driven fallback, a primary reading %s gives %s", async (state, expected) => {
+			let now = Date.now();
+			vi.spyOn(Date, "now").mockImplementation(() => now);
+			const requestedModels = startSession(
+				{},
+				() => (state === "failed usage check" ? new Error("usage endpoint unavailable") : state),
+				{ throw: "rate limit exceeded retry-after-ms=200" },
+			);
+
+			await session!.prompt("Primary rate-limits");
+			await session!.waitForIdle();
+			expect(requestedModels).toEqual([primarySelector, fallbackSelector]);
+
+			// Still cooling down: no return, whatever the usage report says.
+			await session!.prompt("Cooldown has not expired");
+			await session!.waitForIdle();
+			expect(requestedModels).toEqual([primarySelector, fallbackSelector, fallbackSelector]);
+
+			now += 240;
+			await session!.prompt("Cooldown expired");
+			await session!.waitForIdle();
+			expect(requestedModels).toEqual([primarySelector, fallbackSelector, fallbackSelector, expected]);
+		});
+
+		it("keeps a classifier-refusal fallback pinned while the primary is healthy", async () => {
+			const requestedModels = startSession({ "retry.maxRetries": 1 }, () => "healthy", {
+				content: [{ type: "thinking", thinking: "Classifier evaluation before refusal." }],
+				stopReason: "error",
+				stopDetails: { type: "refusal", category: "cyber", explanation: "Classifier declined this turn." },
+				errorMessage: "Refusal (cyber): Classifier declined this turn.",
+			});
+			let now = Date.now();
+			vi.spyOn(Date, "now").mockImplementation(() => now);
+
+			await session!.prompt("Primary refuses");
+			await session!.waitForIdle();
+			expect(requestedModels).toEqual([primarySelector, fallbackSelector]);
+
+			now += 10 * 60 * 1000;
+			await session!.prompt("Primary is healthy, but refused this conversation");
+			await session!.waitForIdle();
+			expect(requestedModels).toEqual([primarySelector, fallbackSelector, fallbackSelector]);
+		});
+
+		it("stays on the fallback instead of compacting to fit a smaller primary", async () => {
+			const modelsConfigPath = path.join(tempDir.path(), "when-healthy-window-models.json");
+			await Bun.write(
+				modelsConfigPath,
+				JSON.stringify({
+					providers: {
+						openai: {
+							modelOverrides: {
+								"gpt-4o-mini": { contextWindow: 4000 },
+								"gpt-4o": { contextWindow: 1_000_000 },
+							},
+						},
+					},
+				}),
+			);
+			modelRegistry = new ModelRegistry(authStorage, modelsConfigPath);
+			const smallPrimary = modelRegistry.find("openai", "gpt-4o-mini");
+			const largeFallback = modelRegistry.find("openai", "gpt-4o");
+			if (!smallPrimary || !largeFallback) throw new Error("Expected override models to resolve");
+			const smallSelector = `${smallPrimary.provider}/${smallPrimary.id}`;
+			const largeSelector = `${largeFallback.provider}/${largeFallback.id}`;
+
+			// ~15k estimated tokens: over the primary's 4000 window, far under the fallback's.
+			const bigText = "lorem ipsum ".repeat(5000);
+			const requestedModels: string[] = [];
+			const mock = createMockModel();
+			let primaryAttempts = 0;
+			const agent = new Agent({
+				getApiKey: model => `${model.provider}-test-key`,
+				initialState: { model: smallPrimary, systemPrompt: ["Test"], tools: [], messages: [] },
+				streamFn: (model, context, options) => {
+					const selector = `${model.provider}/${model.id}`;
+					requestedModels.push(selector);
+					if (selector === smallSelector && primaryAttempts++ === 0) {
+						mock.push({ throw: "rate limit exceeded retry-after-ms=200" });
+					} else {
+						mock.push({ content: [selector === largeSelector ? bigText : "ok"] });
+					}
+					return mock.stream(model, context, options);
+				},
+			});
+			const settings = Settings.isolated({
+				"compaction.enabled": true,
+				"compaction.methodOrder": ["soft"],
+				"compaction.thresholdPercent": 80,
+				"compaction.thresholdTokens": -1,
+				"retry.baseDelayMs": 5,
+				"retry.fallbackChains": { default: [largeSelector] },
+				"retry.fallbackRevertPolicy": "when-healthy",
+			});
+			settings.setModelRole("default", smallSelector);
+			vi.spyOn(modelRegistry.authStorage.health, "model").mockResolvedValue(healthOf("healthy"));
+			session = new AgentSession({ agent, sessionManager: SessionManager.inMemory(), settings, modelRegistry });
+			const compactions: string[] = [];
+			session.subscribe(event => {
+				if (event.type === "auto_compaction_start") compactions.push(event.type);
+			});
+			let now = Date.now();
+			vi.spyOn(Date, "now").mockImplementation(() => now);
+
+			await session.prompt("Fall back and grow the context past the primary window");
+			await session.waitForIdle();
+			expect(requestedModels).toEqual([smallSelector, largeSelector]);
+
+			now += 60_000;
+			await session.prompt("Cooldown expired and the primary is healthy");
+			await session.waitForIdle();
+			expect(requestedModels).toEqual([smallSelector, largeSelector, largeSelector]);
+			expect(compactions).toEqual([]);
 		});
 	});
 
