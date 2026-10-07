@@ -491,7 +491,8 @@ describe("subagent session_init persistence ordering (regression: PR #9379 revie
 		const session = createStartupSession({
 			systemPromptParts,
 			appendSessionInit: init => {
-				appendSessionInitCalls.push(init);
+				// Copy: the live prompt array keeps changing after this record is written.
+				appendSessionInitCalls.push({ systemPrompt: [...init.systemPrompt] });
 				return "init-id";
 			},
 			discoverStartupSkillPaths: async () => {

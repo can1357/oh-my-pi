@@ -47,9 +47,10 @@ export interface InitializeExtensionsOptions {
 	) => Promise<T>;
 	/**
 	 * Runs inside the startup hold, after `discoverStartupSkillPaths()` and before
-	 * any held extension send dispatches. A task subagent persists `session_init`
-	 * here, so the revival contract carries the post-discovery prompt and precedes
-	 * the conversation records a startup send writes.
+	 * any held extension send dispatches. A task subagent appends a newer
+	 * `session_init` here when discovery changed its prompt, so the latest revival
+	 * contract carries the post-discovery prompt and precedes the conversation
+	 * records a startup send writes.
 	 */
 	afterStartupDiscovery?: (session: AgentSession) => void | Promise<void>;
 }
