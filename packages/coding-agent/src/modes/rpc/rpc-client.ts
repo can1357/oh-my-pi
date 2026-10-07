@@ -957,6 +957,16 @@ export class RpcClient {
 	}
 
 	/**
+	 * Rediscover skills and file slash commands, then return the current slash-command
+	 * catalog. An `available_commands_update` frame precedes the response only when the
+	 * catalog changed; the system prompt is rebuilt only when the listed skills changed.
+	 */
+	async refreshCommands(): Promise<RpcAvailableSlashCommand[]> {
+		const response = await this.#send({ type: "refresh_commands" });
+		return this.#getData<{ commands: RpcAvailableSlashCommand[] }>(response).commands;
+	}
+
+	/**
 	 * Pi-compatible append-history read. Delegates to the canonical
 	 * `SessionManager` on the server: no `since` returns all entries in append
 	 * order, `since` returns entries strictly after the matching durable entry.

@@ -5128,6 +5128,11 @@ pub struct GetAvailableCommandsResult {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RefreshCommandsResult {
+	pub commands: Vec<AvailableSlashCommand>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct GetEntriesParams {
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub since: Option<String>,
@@ -6148,6 +6153,20 @@ impl Command for GetAvailableCommandsCommand {
 
 	fn decode(data: Option<Value>) -> Result<Self::Output, serde_json::Error> {
 		serde_json::from_value::<GetAvailableCommandsResult>(data.unwrap_or_else(|| Value::Object(Map::new()))).map(|result| result.commands)
+	}
+}
+
+/// Rediscover skills and file slash commands, then list the slash-command catalog. `available_commands_update` is pushed first only if the catalog changed; the system prompt is rebuilt only if the model-visible skill listing changed.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct RefreshCommandsCommand {}
+
+impl Command for RefreshCommandsCommand {
+	const NAME: &'static str = "refresh_commands";
+	const TIMEOUT_MS: Option<u64> = None;
+	type Output = Vec<AvailableSlashCommand>;
+
+	fn decode(data: Option<Value>) -> Result<Self::Output, serde_json::Error> {
+		serde_json::from_value::<RefreshCommandsResult>(data.unwrap_or_else(|| Value::Object(Map::new()))).map(|result| result.commands)
 	}
 }
 

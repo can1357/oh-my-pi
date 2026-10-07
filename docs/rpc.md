@@ -148,6 +148,7 @@ Important edge behavior from runtime:
 - `{ id?, type: "goal", op: "get" | "create" | "resume" | "pause" | "drop", objective?: string, token_budget?: number }`
 - `{ id?, type: "set_ask_dialog", enabled: boolean }`
 - `{ id?, type: "get_available_commands" }`
+- `{ id?, type: "refresh_commands" }`
 - `{ id?, type: "get_entries", since?: string }`
 - `{ id?, type: "get_tree" }`
 - `{ id?, type: "set_todos", phases: TodoPhase[] }`
@@ -952,9 +953,22 @@ run.
 ### Available commands
 
 `get_available_commands` returns `{ commands }`, and the same array is pushed
-in `available_commands_update` frames at startup and after command metadata
-changes. Each command has `name`, `source`, and optional `aliases`,
-`description`, `input.hint`, and `subcommands`.
+in `available_commands_update` frames at startup, on session switches and
+plugin reloads, and when a skill/command rediscovery changes the catalog.
+Each command has `name`, `source`, and optional `aliases`, `description`,
+`input.hint`, and `subcommands`.
+
+Skills and file slash commands are discovered at startup and on settings,
+workspace, and plugin changes; they are not watched on disk. `refresh_commands`
+rediscovers them for the session's cwd on demand (for example, after a
+`SKILL.md` is installed while the session runs) and returns the same
+`{ commands }` payload. The new `/skill:<name>` commands are dispatchable as
+soon as the response arrives. When the catalog changed, its
+`available_commands_update` frame is written before the response. The base
+system prompt is rebuilt only when the model-visible skill listing changed, so
+a no-op refresh keeps provider prompt caches warm. Older builds answer
+`Unknown command: refresh_commands`; clients can fall back to
+`get_available_commands`.
 
 Command discovery is intentionally an OMP dialect: Pi's `get_commands` (a
 `RpcSlashCommand[]` projection over extensions → prompt templates → skills) is

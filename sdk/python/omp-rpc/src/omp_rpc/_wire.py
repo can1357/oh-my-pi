@@ -3205,6 +3205,11 @@ class WireClient:
         params: dict[str, object] = {}
         return required(expect_object(self._command("get_available_commands", params), "get_available_commands"), "commands", array(parse_available_slash_command), "get_available_commands")
 
+    def refresh_commands(self) -> tuple[AvailableSlashCommand, ...]:
+        """Rediscover skills and file slash commands, then list the slash-command catalog. `available_commands_update` is pushed first only if the catalog changed; the system prompt is rebuilt only if the model-visible skill listing changed."""
+        params: dict[str, object] = {}
+        return required(expect_object(self._command("refresh_commands", params), "refresh_commands"), "commands", array(parse_available_slash_command), "refresh_commands")
+
     def get_entries(self, since: str | None = None) -> SessionEntries:
         """Read the append-history; with `since`, only entries strictly after that durable entry id."""
         params: dict[str, object] = {}

@@ -418,7 +418,7 @@ import { SessionMemory, type SessionMemoryHost } from "./session-memory";
 import { buildSessionMetadata } from "./session-metadata";
 import { SessionProviderBoundary, type SessionProviderBoundaryHost } from "./session-provider-boundary";
 import { SessionStatsTracker, type SessionStatsTrackerHost } from "./session-stats";
-import { SessionTools, type SessionToolsHost } from "./session-tools";
+import { SessionTools, type SessionToolsHost, type SkillsRefreshOptions } from "./session-tools";
 import { resolveOpenAIWebsocketPreference } from "./settings-stream-fn";
 import type { ShakeMode, ShakeResult } from "./shake-types";
 import { skillPromptTitleInput } from "@oh-my-pi/pi-tui/chat/skill-title-input";
@@ -6247,10 +6247,11 @@ export class AgentSession implements SettingsScope {
 
 	/**
 	 * Rediscovers skills and file-based slash commands for the current cwd, rebuilds the
-	 * system prompt, and notifies command-metadata listeners (TUI autocomplete, RPC/ACP
-	 * command lists). Serialized so overlapping reloads apply in call order.
+	 * system prompt (see {@link SkillsRefreshOptions.promptRebuild}), and notifies
+	 * command-metadata listeners (TUI autocomplete, RPC/ACP command lists). Serialized so
+	 * overlapping reloads apply in call order.
 	 */
-	refreshSkillsAndCommands(): Promise<void> {
+	refreshSkillsAndCommands(options?: SkillsRefreshOptions): Promise<void> {
 		const refresh = this.#skillsAndCommandsRefresh
 			.catch(() => {})
 			.then(async () => {
@@ -6261,7 +6262,7 @@ export class AgentSession implements SettingsScope {
 				});
 				// Resets the capability cache again, rediscovers skills, rebuilds the prompt,
 				// and fires the command-metadata notification after both lists are current.
-				await this.#tools.refreshSkills();
+				await this.#tools.refreshSkills(options);
 			});
 		this.#skillsAndCommandsRefresh = refresh;
 		return refresh;

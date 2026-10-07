@@ -197,6 +197,17 @@
 				"clientOmit": []
 			},
 			{
+				"name": "refresh_commands",
+				"doc": "Rediscover skills and file slash commands, then list the slash-command catalog. `available_commands_update` is pushed first only if the catalog changed; the system prompt is rebuilt only if the model-visible skill listing changed.",
+				"params": null,
+				"result": "RefreshCommandsResult",
+				"nullable": false,
+				"unwrap": "commands",
+				"timeoutMs": null,
+				"completion": null,
+				"clientOmit": []
+			},
+			{
 				"name": "get_entries",
 				"doc": "Read the append-history; with `since`, only entries strictly after that durable entry id.",
 				"params": "GetEntriesParams",
@@ -5987,6 +5998,20 @@
 			]
 		},
 		"GetAvailableCommandsResult": {
+			"type": "object",
+			"properties": {
+				"commands": {
+					"type": "array",
+					"items": {
+						"$ref": "#/$defs/AvailableSlashCommand"
+					}
+				}
+			},
+			"required": [
+				"commands"
+			]
+		},
+		"RefreshCommandsResult": {
 			"type": "object",
 			"properties": {
 				"commands": {

@@ -246,6 +246,47 @@ This skill is added after session creation.
 		expect(session.skills.some((s: Skill) => s.name === "runtime-added-skill")).toBe(false);
 	});
 
+	it("skill-only rediscovery rebuilds the system prompt only when the listed skills change", async () => {
+		const { session } = await createAgentSession({
+			cwd: tempDir,
+			agentDir: tempDir,
+			sessionManager: SessionManager.inMemory(tempDir),
+			modelRegistry: sharedModelRegistry,
+			settings: createIsolatedSkillsSettings(),
+		});
+		const refresh = () => session.refreshSkillsAndCommands({ promptRebuild: "skills-changed" });
+		const skillFile = path.join(skillsDir, "SKILL.md");
+		const initialPrompt = session.agent.state.systemPrompt;
+		expect(initialPrompt.join("\n")).toContain("- test-skill: A test skill for SDK tests.");
+
+		// No-op rediscovery and a body-only edit (never rendered) keep the exact prompt
+		// object, so provider prompt caches survive.
+		await refresh();
+		expect(session.agent.state.systemPrompt).toBe(initialPrompt);
+		fs.writeFileSync(skillFile, "---\nname: test-skill\ndescription: A test skill for SDK tests.\n---\nNew body.\n");
+		await refresh();
+		expect(session.agent.state.systemPrompt).toBe(initialPrompt);
+
+		// A newly installed skill is listed and executable.
+		const freshDir = path.join(tempDir, ".omp", "skills", "fresh-skill");
+		fs.mkdirSync(freshDir, { recursive: true });
+		fs.writeFileSync(
+			path.join(freshDir, "SKILL.md"),
+			"---\nname: fresh-skill\ndescription: Installed mid-session.\n---\nbody\n",
+		);
+		await refresh();
+		expect(session.skills.some((s: Skill) => s.name === "fresh-skill")).toBe(true);
+		const withFreshSkill = session.agent.state.systemPrompt;
+		expect(withFreshSkill.join("\n")).toContain("- fresh-skill: Installed mid-session.");
+
+		// A description change of a listed skill rewrites its row.
+		fs.writeFileSync(skillFile, "---\nname: test-skill\ndescription: Reworded description.\n---\nNew body.\n");
+		await refresh();
+		const reworded = session.agent.state.systemPrompt.join("\n");
+		expect(reworded).toContain("- test-skill: Reworded description.");
+		expect(reworded).not.toContain("A test skill for SDK tests.");
+	});
+
 	it("a live skills.customDirectories edit exposes the directory's skills without restart", async () => {
 		const settings = createIsolatedSkillsSettings();
 		const { session } = await createAgentSession({
