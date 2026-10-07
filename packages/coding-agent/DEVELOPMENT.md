@@ -22,13 +22,15 @@ Run from `packages/coding-agent/` (or add `--cwd=packages/coding-agent`):
 | Autofix: lint + format prompts | `bun run fix`         |
 | Build the `dist/omp` binary    | `bun run build`       |
 
-From a Linux x64 build host, create a relocatable Termux Android ARM64 bundle from the repo root:
+## Optional Android ARM64 bundle
+
+From a Linux build host, run:
 
 ```sh
-CROSS_TARGET=android-arm64 bun --cwd=packages/coding-agent run build
+bun --cwd=packages/coding-agent run build:android
 ```
 
-Set `ANDROID_NDK_HOME` to an installed Android NDK before the build. It uses the canonical Bazel native builder for the Android addon and writes the complete bundle to `packages/coding-agent/dist/android`; it does not produce a Linux executable. A native Termux `bun run build` retains the local Cargo/N-API addon path.
+Set `ANDROID_NDK_HOME` to an installed Android NDK. This optional Linux cross-build uses the canonical Bazel `android-arm64` native driver and the existing Android bundle generator, writing the complete relocatable bundle to `packages/coding-agent/dist/android`. It does not produce a Bun-compiled executable or provide a Termux-host build path.
 
 Type checks use Bun's built-in checker (`bun check --no-script`); the explicit
 flag bypasses each package's `check` script. Stable TypeScript is retained only

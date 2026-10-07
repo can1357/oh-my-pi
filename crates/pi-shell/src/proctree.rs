@@ -28,13 +28,35 @@ mod platform {
 
 	use super::ProcessStatus;
 
-	/// Stable Linux/Android process reference. Linux requires a pidfd; Android
-	/// uses one when available and falls back to `/proc` start-time identity.
+	/// Stable process identity for Linux/Android processes. Linux requires a
+	/// pidfd; Android prefers one and falls back to `/proc` start-time identity.
+	#[derive(Clone)]
+	enum ProcessIdentity {
+		Pidfd {
+			pidfd:      Arc<OwnedFd>,
+			start_time: u64,
+		},
+		#[cfg(target_os = "android")]
+		ProcStartTime {
+			start_time: u64,
+		},
+	}
+
+	impl ProcessIdentity {
+		const fn start_time(&self) -> u64 {
+			match self {
+				Self::Pidfd { start_time, .. } => *start_time,
+				#[cfg(target_os = "android")]
+				Self::ProcStartTime { start_time } => *start_time,
+			}
+		}
+	}
+
+	/// Stable Linux/Android process reference.
 	#[derive(Clone)]
 	pub struct Process {
-		pid:        i32,
-		pidfd:      Option<Arc<OwnedFd>>,
-		start_time: u64,
+		pid:      i32,
+		identity: ProcessIdentity,
 	}
 
 	impl Process {
@@ -44,13 +66,14 @@ mod platform {
 			}
 			let pidfd = sys::open_pidfd(pid).map(Arc::new);
 			#[cfg(target_os = "linux")]
-			let pidfd = Some(pidfd?);
-			let start_time = if pidfd.is_some() {
-				sys::start_time(pid)?
-			} else {
-				read_live_start_time(pid)?
+			let identity =
+				ProcessIdentity::Pidfd { pidfd: pidfd?, start_time: sys::start_time(pid)? };
+			#[cfg(target_os = "android")]
+			let identity = match pidfd {
+				Some(pidfd) => ProcessIdentity::Pidfd { pidfd, start_time: sys::start_time(pid)? },
+				None => ProcessIdentity::ProcStartTime { start_time: read_live_start_time(pid)? },
 			};
-			Some(Self { pid, pidfd, start_time })
+			Some(Self { pid, identity })
 		}
 
 		pub const fn pid(&self) -> i32 {
@@ -154,18 +177,20 @@ mod platform {
 		}
 
 		pub fn kill(&self, signal: i32) -> bool {
-			if let Some(pidfd) = &self.pidfd {
-				return sys::pidfd_send_signal(pidfd.as_fd(), signal);
+			match &self.identity {
+				ProcessIdentity::Pidfd { pidfd, .. } => sys::pidfd_send_signal(pidfd.as_fd(), signal),
+				#[cfg(target_os = "android")]
+				ProcessIdentity::ProcStartTime { .. } => {
+					// Revalidate the recorded `/proc` start time immediately before
+					// the raw signal; never signal a bare pid.
+					if !self.live_identity() {
+						return false;
+					}
+					// SAFETY: `kill` takes integer identifiers by value and does not
+					// access caller-owned memory.
+					unsafe { libc::kill(self.pid, signal) == 0 }
+				},
 			}
-
-			// Android kernels without pidfd support use the recorded `/proc` start time.
-			// `live_identity` revalidates it immediately before the raw signal.
-			if !self.live_identity() {
-				return false;
-			}
-			// SAFETY: `kill` takes integer identifiers by value and does not access
-			// caller-owned memory.
-			unsafe { libc::kill(self.pid, signal) == 0 }
 		}
 
 		pub fn group_id(&self) -> Option<i32> {
@@ -173,66 +198,76 @@ mod platform {
 				return None;
 			}
 
-			// SAFETY: `status` just confirmed that `self.pid` still has the recorded
-			// identity. If it exits concurrently, `getpgid` reports failure rather than
-			// dereferencing caller-owned memory.
+			// SAFETY: `status` just confirmed that `self.pid` still has the
+			// recorded identity. If it exits concurrently, `getpgid`
+			// reports failure rather than dereferencing caller-owned
+			// memory.
 			let pgid = unsafe { libc::getpgid(self.pid) };
 			if pgid > 0 { Some(pgid) } else { None }
 		}
 
 		pub fn status(&self) -> ProcessStatus {
-			let Some(pidfd) = &self.pidfd else {
-				return if read_live_start_time(self.pid) == Some(self.start_time) {
-					ProcessStatus::Running
-				} else {
-					ProcessStatus::Exited
-				};
-			};
-
-			loop {
-				let mut pollfd =
-					libc::pollfd { fd: pidfd.as_raw_fd(), events: libc::POLLIN, revents: 0 };
-				// SAFETY: `pollfd` points to one initialized `pollfd` element, and the pidfd
-				// remains open for the duration of the call. Timeout zero makes this a
-				// non-blocking readiness probe.
-				let ready = unsafe { libc::poll(&raw mut pollfd, 1, 0) };
-				if ready < 0 {
-					// Retry on EINTR; for any other transient poll error treat the
-					// pidfd as still running. The pidfd is still owned and the
-					// kernel has not reported the process gone — a spurious
-					// `Exited` here makes every downstream signal/kill fall
-					// through silently.
-					if std::io::Error::last_os_error().raw_os_error() == Some(libc::EINTR) {
-						continue;
+			match &self.identity {
+				ProcessIdentity::Pidfd { pidfd, .. } => loop {
+					let mut pollfd =
+						libc::pollfd { fd: pidfd.as_raw_fd(), events: libc::POLLIN, revents: 0 };
+					// SAFETY: `pollfd` points to one initialized `pollfd` element,
+					// and the pidfd remains open for the duration of
+					// the call. Timeout zero makes this a
+					// non-blocking readiness probe.
+					let ready = unsafe { libc::poll(&raw mut pollfd, 1, 0) };
+					if ready < 0 {
+						// Retry on EINTR; for any other transient poll error treat
+						// the pidfd as still running. The pidfd is
+						// still owned and the kernel has not
+						// reported the process gone — a spurious
+						// `Exited` here makes every downstream signal/kill fall
+						// through silently.
+						if std::io::Error::last_os_error().raw_os_error() == Some(libc::EINTR) {
+							continue;
+						}
+						return ProcessStatus::Running;
+					}
+					if ready == 0 {
+						return ProcessStatus::Running;
+					}
+					if (pollfd.revents & (libc::POLLIN | libc::POLLHUP | libc::POLLERR | libc::POLLNVAL))
+						!= 0
+					{
+						return ProcessStatus::Exited;
 					}
 					return ProcessStatus::Running;
-				}
-				if ready == 0 {
-					return ProcessStatus::Running;
-				}
-				if (pollfd.revents & (libc::POLLIN | libc::POLLHUP | libc::POLLERR | libc::POLLNVAL))
-					!= 0
-				{
-					return ProcessStatus::Exited;
-				}
-				return ProcessStatus::Running;
+				},
+				#[cfg(target_os = "android")]
+				ProcessIdentity::ProcStartTime { start_time } => {
+					if read_live_start_time(self.pid) == Some(*start_time) {
+						ProcessStatus::Running
+					} else {
+						ProcessStatus::Exited
+					}
+				},
 			}
 		}
 
 		/// Resolves once the process exits, through a pidfd or `/proc` polling.
 		pub async fn exited(&self) -> std::io::Result<()> {
-			let Some(pidfd) = &self.pidfd else {
-				while self.status() == ProcessStatus::Running {
-					tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-				}
-				return Ok(());
-			};
-			let pidfd = tokio::io::unix::AsyncFd::with_interest(
-				pidfd.try_clone()?,
-				tokio::io::Interest::READABLE,
-			)?;
-			let _ready = pidfd.readable().await?;
-			Ok(())
+			match &self.identity {
+				ProcessIdentity::Pidfd { pidfd, .. } => {
+					let pidfd = tokio::io::unix::AsyncFd::with_interest(
+						pidfd.try_clone()?,
+						tokio::io::Interest::READABLE,
+					)?;
+					let _ready = pidfd.readable().await?;
+					Ok(())
+				},
+				#[cfg(target_os = "android")]
+				ProcessIdentity::ProcStartTime { .. } => {
+					while self.status() == ProcessStatus::Running {
+						tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+					}
+					Ok(())
+				},
+			}
 		}
 
 		/// Walk the descendant tree in post-order (leaves first), de-duplicating
@@ -256,14 +291,16 @@ mod platform {
 
 		fn live_identity(&self) -> bool {
 			self.status() == ProcessStatus::Running
-				&& sys::start_time(self.pid) == Some(self.start_time)
+				&& sys::start_time(self.pid) == Some(self.identity.start_time())
 		}
 	}
 
+	#[cfg(target_os = "android")]
 	fn read_live_start_time(pid: i32) -> Option<u64> {
-		// `/proc/[pid]/stat` field 22 is the process start time in clock ticks since
-		// boot. The comm field (between parens) may itself contain spaces and parens,
-		// so locate the *last* `)` and split the trailing whitespace-separated fields.
+		// `/proc/[pid]/stat` field 22 is the process start time in clock ticks
+		// since boot. The comm field (between parens) may itself contain
+		// spaces and parens, so locate the *last* `)` and split the
+		// trailing whitespace-separated fields.
 		let stat_path = format!("/proc/{pid}/stat");
 		let content = fs::read_to_string(stat_path).ok()?;
 		let last_paren = content.rfind(')')?;
@@ -284,6 +321,68 @@ mod platform {
 			})
 			.filter_map(Process::from_pid)
 			.collect()
+	}
+	#[cfg(all(test, target_os = "android"))]
+	mod fallback_tests {
+		use std::{process::Command, time::Duration};
+
+		use super::*;
+
+		#[tokio::test]
+		async fn proc_start_time_fallback_kills_and_observes_exit() {
+			let mut child = Command::new("sleep")
+				.arg("30")
+				.spawn()
+				.expect("spawn sleep");
+			let pid = i32::try_from(child.id()).expect("child pid fits in i32");
+			let start_time = read_live_start_time(pid).expect("read child start time");
+			let process = Process { pid, identity: ProcessIdentity::ProcStartTime { start_time } };
+			assert_eq!(process.status(), ProcessStatus::Running);
+
+			let signaled = process.kill(libc::SIGTERM);
+			let exit_observed = tokio::time::timeout(Duration::from_secs(5), process.exited()).await;
+			let status_after_exit = process.status();
+			let signal_after_exit = process.kill(libc::SIGKILL);
+			let _ = child.kill();
+			let _ = child.wait();
+
+			assert!(signaled, "the matching start-time identity must permit signaling");
+			assert!(
+				exit_observed.is_ok_and(|result| result.is_ok()),
+				"fallback exit polling must resolve after the process exits"
+			);
+			assert_eq!(status_after_exit, ProcessStatus::Exited, "an exited/zombie child is not live");
+			assert!(!signal_after_exit, "an exited process must not be signaled");
+		}
+
+		#[test]
+		fn proc_start_time_fallback_rejects_mismatched_identity_before_kill() {
+			let mut child = Command::new("sleep")
+				.arg("30")
+				.spawn()
+				.expect("spawn sleep");
+			let pid = i32::try_from(child.id()).expect("child pid fits in i32");
+			let start_time = read_live_start_time(pid).expect("read child start time");
+			let wrong_start_time = if start_time == u64::MAX {
+				start_time - 1
+			} else {
+				start_time + 1
+			};
+			let process = Process {
+				pid,
+				identity: ProcessIdentity::ProcStartTime { start_time: wrong_start_time },
+			};
+
+			let status = process.status();
+			let signaled = process.kill(libc::SIGKILL);
+			let original_process_survived = read_live_start_time(pid) == Some(start_time);
+			let _ = child.kill();
+			let _ = child.wait();
+
+			assert_eq!(status, ProcessStatus::Exited, "a mismatched start time is not this process");
+			assert!(!signaled, "a mismatched start-time identity must never signal the raw pid");
+			assert!(original_process_survived, "the actual process must survive the rejected signal");
+		}
 	}
 }
 
