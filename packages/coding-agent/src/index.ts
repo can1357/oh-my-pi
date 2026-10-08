@@ -23,6 +23,8 @@ export * from "./extensibility/custom-tools";
 export type * from "./extensibility/extensions";
 // Extension types and utilities
 export * from "./extensibility/extensions";
+// Local extension files in a compiled binary cannot import @oh-my-pi/pi-catalog directly.
+export { getSupportedEfforts } from "@oh-my-pi/pi-catalog/model-thinking";
 // Hook system types (legacy re-export)
 // Skills
 export * from "./extensibility/skills";

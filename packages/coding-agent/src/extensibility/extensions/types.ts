@@ -852,6 +852,9 @@ export interface BeforeAgentStartEvent {
 	systemPrompt: string[];
 }
 
+/** Field-surface marker. `2` is the first exported value: spawn context and `effort`, locks, a per-handler signal, and a `thinkingLevel` result. Not a policy version. */
+export const SUBAGENT_ROUTING_API_VERSION = 2 as const;
+
 /** Fired in the parent session before a subagent (task tool or eval `agent()`) resolves its model. */
 export interface BeforeSubagentSpawnEvent {
 	type: "before_subagent_spawn";
@@ -1327,6 +1330,8 @@ export interface BeforeAgentStartEventResult {
 export interface BeforeSubagentSpawnEventResult {
 	/** Replacement model patterns in attempt order (selectors or role aliases). Role identity is preserved. */
 	model?: string | string[];
+	/** Concrete effort for the applied model. Ignored when `effortLocked`. `inherit` is a no-op. */
+	thinkingLevel?: ThinkingLevel;
 	/** Refuse the spawn. */
 	block?: boolean;
 	/** Refusal reason surfaced to the caller. */

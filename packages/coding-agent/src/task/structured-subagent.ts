@@ -7,9 +7,17 @@
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import path from "node:path";
+import type { Model } from "@oh-my-pi/pi-ai";
+import { ThinkingLevel, type ThinkingLevel as ThinkingLevelType } from "@oh-my-pi/pi-agent-core/thinking";
+import { getSupportedEfforts } from "@oh-my-pi/pi-catalog/model-thinking";
 import { $env, prompt, Snowflake } from "@oh-my-pi/pi-utils";
 import { shortenPath } from "@oh-my-pi/pi-tui/render/render-utils";
-import { resolveAgentModelSelection, resolveConfiguredModelPatterns } from "../config/model-resolver";
+import {
+	formatModelStringWithRouting,
+	resolveAgentModelSelection,
+	resolveConfiguredModelPatterns,
+	resolveModelOverride,
+} from "../config/model-resolver";
 import { type OAuthAccountPools, validateAgentAccountPools } from "../config/account-pools";
 import {
 	type CompactionThresholdPair,
@@ -28,7 +36,7 @@ import subagentUserPromptTemplate from "../prompts/system/subagent-user-prompt.m
 import isolationRecoveryHintTemplate from "../prompts/tools/isolation-recovery-hint.md" with { type: "text" };
 import salvagedChildHintTemplate from "../prompts/tools/salvaged-child-hint.md" with { type: "text" };
 import { MAIN_AGENT_ID } from "../registry/agent-registry";
-import { concreteThinkingLevel, type TaskEffort } from "@oh-my-pi/pi-tui/thinking";
+import { concreteThinkingLevel, toReasoningEffort, type TaskEffort } from "@oh-my-pi/pi-tui/thinking";
 import type { ToolSession } from "../tools";
 import { isIrcEnabled } from "../irc/messaging";
 import { buildOutputValidator } from "../tools/output-schema-validator";
@@ -441,6 +449,88 @@ function hasNonEmptyModelOverride(value: unknown): boolean {
 	return Array.isArray(value) && value.some(pattern => typeof pattern === "string" && pattern.trim().length > 0);
 }
 
+function resolveRoutingModel(request: StructuredSubagentRequest, patterns: string[]): Model {
+	const registry = request.session.modelRegistry;
+	if (!registry) {
+		throw new StructuredSubagentError(
+			"preflight",
+			"before_subagent_spawn returned a model, but this session has no model registry",
+		);
+	}
+	const resolved = resolveModelOverride(patterns, registry, request.session.settings);
+	if (!resolved.model) {
+		throw new StructuredSubagentError(
+			"preflight",
+			`before_subagent_spawn returned unsupported model "${patterns.join(", ")}"`,
+		);
+	}
+	return resolved.model;
+}
+
+function resolveBaselineRoutingModel(
+	request: StructuredSubagentRequest,
+	patterns: string[] | undefined,
+): Model | undefined {
+	const registry = request.session.modelRegistry;
+	if (patterns?.length && registry) {
+		return (
+			resolveModelOverride(patterns, registry, request.session.settings).model ?? request.session.getActiveModel?.()
+		);
+	}
+	return request.session.getActiveModel?.();
+}
+
+function validateRoutingThinkingLevel(level: unknown, model: Model | undefined): asserts level is ThinkingLevelType {
+	const validLevel = Object.values(ThinkingLevel).find(value => value === level);
+	if (validLevel === undefined) {
+		throw new StructuredSubagentError(
+			"preflight",
+			`before_subagent_spawn returned invalid thinking level ${JSON.stringify(level)}`,
+		);
+	}
+	if (validLevel === ThinkingLevel.Off || validLevel === ThinkingLevel.Inherit) return;
+	const effort = toReasoningEffort(validLevel);
+	if (!effort || !model || !getSupportedEfforts(model).includes(effort)) {
+		const modelName = model ? `${model.provider}/${model.id}` : "the selected model";
+		throw new StructuredSubagentError(
+			"preflight",
+			`before_subagent_spawn returned unsupported thinking level "${validLevel}" for ${modelName}`,
+		);
+	}
+}
+
+function pinRoutedThinkingLevel(
+	policy: EffectiveSubagentPolicy,
+	request: StructuredSubagentRequest,
+	replacement: string[] | undefined,
+	appliedModel: Model | undefined,
+	thinkingLevel: ThinkingLevelType,
+	note: string | undefined,
+): EffectiveSubagentPolicy {
+	const nextPolicy: EffectiveSubagentPolicy = { ...policy };
+	if (replacement !== undefined) {
+		nextPolicy.modelOverride = replacement;
+		nextPolicy.modelRoute = note;
+	}
+	if (appliedModel) {
+		const appliedModelRoute = formatModelStringWithRouting(appliedModel);
+		const source = replacement ?? nextPolicy.modelOverride ?? [];
+		const registry = request.session.modelRegistry;
+		const appliedModelIndex = source.findIndex(pattern => {
+			const resolved = registry
+				? resolveModelOverride([pattern], registry, request.session.settings).model
+				: undefined;
+			return resolved !== undefined && formatModelStringWithRouting(resolved) === appliedModelRoute;
+		});
+		nextPolicy.modelOverride = [
+			appliedModelRoute,
+			...(appliedModelIndex >= 0 ? source.slice(appliedModelIndex + 1) : []),
+		];
+	}
+	nextPolicy.effectiveAgent = { ...policy.effectiveAgent, thinkingLevel };
+	return nextPolicy;
+}
+
 /**
  * Fire `before_subagent_spawn` for an actual child dispatch. Kept out of
  * {@link resolveEffectiveSubagentPolicy} because frontends run that as a
@@ -487,11 +577,24 @@ async function applySpawnHook(
 	if (spawnResult?.block) {
 		throw new StructuredSubagentError("preflight", spawnResult.reason ?? "Subagent spawn blocked by extension.");
 	}
-	// Effort results do not exist until a handler can return a thinking level.
-	// modelLocked already sets effortLocked so that later result cannot rewrite a pinned agent.
-	if (modelLocked || spawnResult?.model === undefined) return policy;
-	const replacement = resolveConfiguredModelPatterns(spawnResult.model, request.session.settings);
-	if (replacement.length === 0) return policy;
+	if (spawnResult === undefined) return policy;
+
+	const returnedModel = modelLocked ? undefined : spawnResult.model;
+	const expanded =
+		returnedModel === undefined ? undefined : resolveConfiguredModelPatterns(returnedModel, request.session.settings);
+	const replacement = expanded && expanded.length > 0 ? expanded : undefined;
+	const routedThinkingLevel =
+		effortLocked || spawnResult.thinkingLevel === undefined || spawnResult.thinkingLevel === ThinkingLevel.Inherit
+			? undefined
+			: spawnResult.thinkingLevel;
+	if (routedThinkingLevel !== undefined) {
+		const appliedModel = replacement
+			? resolveRoutingModel(request, replacement)
+			: resolveBaselineRoutingModel(request, policy.modelOverride);
+		validateRoutingThinkingLevel(routedThinkingLevel, appliedModel);
+		return pinRoutedThinkingLevel(policy, request, replacement, appliedModel, routedThinkingLevel, spawnResult.note);
+	}
+	if (replacement === undefined) return policy;
 	return { ...policy, modelOverride: replacement, modelRoute: spawnResult.note };
 }
 
