@@ -5,7 +5,6 @@ import {
 	agentLoop,
 	agentLoopContinue,
 	agentLoopDetailed,
-	steeringQueueState,
 	TERMINAL_TOOL_RESULT_ABORT_REASON,
 	TOOL_INTERRUPT_ABORT_REASON,
 } from "@oh-my-pi/pi-agent-core/agent-loop";
@@ -76,27 +75,6 @@ function makeEchoTool(executions: string[]) {
 }
 
 const harmonyMitigationModel = createHarmonyMitigationModel();
-
-describe("steeringQueueState", () => {
-	it("keeps explicit parent steers agent-sourced without promoting peer/advisor records", () => {
-		const parent: AgentMessage = {
-			role: "custom",
-			customType: "irc:incoming",
-			content: "parent payload",
-			display: true,
-			attribution: "agent",
-			steeringSource: "agent",
-			timestamp: 1,
-		};
-		const peer: AgentMessage = { ...parent, steeringSource: undefined };
-		expect(steeringQueueState([parent])).toEqual({ queued: true, source: "agent" });
-		expect(steeringQueueState([peer])).toEqual({ queued: true, source: "system" });
-		expect(steeringQueueState([{ ...peer, customType: "advisor" }])).toEqual({ queued: true, source: "system" });
-		expect(steeringQueueState([{ ...parent, attribution: undefined }])).toEqual({ queued: true, source: "system" });
-		expect(steeringQueueState([parent, createUserMessage("genuine stop")])).toEqual({ queued: true, source: "user" });
-		expect(steeringQueueState([])).toEqual({ queued: false });
-	});
-});
 
 describe("agentLoop with AgentMessage", () => {
 	it("should emit events with AgentMessage types", async () => {

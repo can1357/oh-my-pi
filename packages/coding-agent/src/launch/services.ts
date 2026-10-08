@@ -5,7 +5,7 @@ import type { DaemonSnapshot, DaemonSpec } from "@oh-my-pi/pi-tui/tools/daemon";
 import { formatDuration, replaceTabs } from "@oh-my-pi/pi-tui/render/render-utils";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { getDaemonRuntimeDir, logger, sanitizeText } from "@oh-my-pi/pi-utils";
-import { type DaemonBrokerClient, DaemonBrokerUnavailableError, daemonClientForProject } from "./client";
+import { type DaemonBrokerClient, daemonClientForProject } from "./client";
 import { canonicalProjectDir } from "./paths";
 import type { DaemonOperation, DaemonRpcResult } from "./protocol";
 import { renderTerminalOutputIsolated } from "./terminal-output-worker-client";
@@ -44,8 +44,8 @@ interface ServiceSession extends ToolSession {
 		pending: Set<ServiceRequest>;
 	};
 }
-function serviceState(session: ToolSession): NonNullable<ServiceSession[typeof serviceStateKey]> {
-	return ((session as ServiceSession)[serviceStateKey] ??= {
+function serviceState(session: ServiceSession): NonNullable<ServiceSession[typeof serviceStateKey]> {
+	return (session[serviceStateKey] ??= {
 		owned: new Map(),
 		listeners: new Set(),
 		subscribed: new Set(),
@@ -55,8 +55,8 @@ function serviceState(session: ToolSession): NonNullable<ServiceSession[typeof s
 	});
 }
 
-export function hasLiveOwnedService(session: ToolSession): boolean {
-	return ((session as ServiceSession)[serviceStateKey]?.owned.size ?? 0) > 0;
+export function hasLiveOwnedService(session: ServiceSession): boolean {
+	return (session[serviceStateKey]?.owned.size ?? 0) > 0;
 }
 
 export function waitForOwnedServiceCompletion(session: ToolSession, signal?: AbortSignal): Promise<void> {
@@ -216,14 +216,14 @@ export async function listServices(session: ToolSession, signal?: AbortSignal): 
 export async function listServicesTolerant(
 	session: ToolSession,
 	signal?: AbortSignal,
-): Promise<{ services: DaemonSnapshot[]; error?: string; brokerUnavailable?: boolean }> {
+): Promise<{ services: DaemonSnapshot[]; error?: string }> {
 	try {
 		return { services: await listServices(session, signal) };
 	} catch (error) {
 		if (signal?.aborted) throw error;
 		const message = error instanceof Error ? error.message : String(error);
 		logger.warn("Daemon broker list failed; continuing without service state", { error: message });
-		return { services: [], error: message, brokerUnavailable: error instanceof DaemonBrokerUnavailableError };
+		return { services: [], error: message };
 	}
 }
 

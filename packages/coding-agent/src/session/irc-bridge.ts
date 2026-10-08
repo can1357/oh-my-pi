@@ -1,10 +1,9 @@
 import type { Agent, AgentMessage } from "@oh-my-pi/pi-agent-core";
-import { isRecord, prompt } from "@oh-my-pi/pi-utils";
+import { prompt } from "@oh-my-pi/pi-utils";
 import { type IrcMessage } from "@oh-my-pi/pi-tui/tools/irc";
 import parentIrcSteerTemplate from "../prompts/steering/parent-irc.md" with { type: "text" };
 import ircIncomingTemplate from "../prompts/system/irc-incoming.md" with { type: "text" };
 import { AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-registry";
-import { normalizeToolName } from "../tools/builtin-names";
 import type { AgentSessionEvent } from "./agent-session-events";
 import { escapeHarnessTags } from "./harness-tags";
 import type { CustomMessage } from "./messages";
@@ -21,14 +20,6 @@ export interface IrcBridgeHost {
 	wakeForIrc(records: AgentMessage[]): void;
 }
 
-interface IrcPendingSnapshot {
-	interrupts: AgentMessage[];
-	asides: AgentMessage[];
-	deferredWakes: AgentMessage[];
-	sessionId: string | undefined;
-	received: Map<string, Set<string>>;
-}
-
 /** Owns incoming IRC queues and the session's non-interrupting aside queue. */
 export class IrcBridge {
 	readonly #host: IrcBridgeHost;
@@ -40,78 +31,9 @@ export class IrcBridge {
 	#deferredWakes: AgentMessage[] = [];
 	/** In-flight wake-turn relays owed to peers. */
 	readonly #pendingReplies = new Set<Promise<void>>();
-	/** Accepted transport identities, not interpreted request/control state. */
-	readonly #received = new Map<string, Set<string>>();
-	#indexedSessionId: string | undefined;
-	#indexedLeafId: string | null | undefined;
-	#indexedEntryCount = 0;
 
 	constructor(host: IrcBridgeHost) {
 		this.#host = host;
-	}
-
-	#rememberIncoming(details: unknown): void {
-		if (!details || typeof details !== "object") return;
-		const id = Reflect.get(details, "id");
-		const from = Reflect.get(details, "from");
-		if (typeof id !== "string" || typeof from !== "string") return;
-		let ids = this.#received.get(from);
-		if (!ids) {
-			ids = new Set();
-			this.#received.set(from, ids);
-		}
-		ids.add(id);
-	}
-
-	#rememberRecord(record: AgentMessage): void {
-		if (record.role === "custom" && record.customType === "irc:incoming") {
-			this.#rememberIncoming(record.details);
-		} else if (record.role === "toolResult") {
-			const toolName = normalizeToolName(record.toolName);
-			let details = record.details;
-			if (toolName === "write" && isRecord(details) && isRecord(details.xdev)) {
-				const dispatch = details.xdev;
-				if (
-					dispatch.mode !== "execute" ||
-					typeof dispatch.tool !== "string" ||
-					normalizeToolName(dispatch.tool) !== "wait"
-				)
-					return;
-				details = dispatch.inner;
-			} else if (toolName !== "wait") return;
-			if (isRecord(details) && details.op === "wait") this.#rememberIncoming(details.waited);
-		}
-	}
-
-	/** Index the whole durable journal, including compacted/abandoned branches.
-	 * Outgoing agent state must not poison the incoming session's ledger. */
-	#indexReceived(): void {
-		const sessionId = this.#host.sessionManager.getSessionId();
-		const leafId = this.#host.sessionManager.getLeafId();
-		const entries = this.#host.sessionManager.getEntries();
-		const changedSession = this.#indexedSessionId !== sessionId;
-		if (!changedSession && this.#indexedLeafId === leafId && this.#indexedEntryCount === entries.length) return;
-		if (changedSession) {
-			this.#received.clear();
-			this.#indexedEntryCount = 0;
-		}
-		if (this.#indexedEntryCount > entries.length) this.#indexedEntryCount = 0;
-		for (let index = this.#indexedEntryCount; index < entries.length; index++) {
-			const entry = entries[index];
-			if (entry.type === "custom_message" && entry.customType === "irc:incoming") {
-				this.#rememberIncoming(entry.details);
-			} else if (entry.type === "message") this.#rememberRecord(entry.message);
-		}
-		this.#indexedEntryCount = entries.length;
-		if (changedSession) {
-			// Transition clears these before changing manager ID; rollback restores
-			// the outgoing session's accepted pending records.
-			for (const records of [this.#interrupts, this.#asides, this.#deferredWakes]) {
-				for (const record of records) this.#rememberRecord(record);
-			}
-		}
-		this.#indexedSessionId = sessionId;
-		this.#indexedLeafId = leafId;
 	}
 
 	/** Whether an incoming peer message can interrupt a wait. */
@@ -152,16 +74,8 @@ export class IrcBridge {
 	 *  contract clear could wake the new transcript with a peer message belonging to the
 	 *  previous session. Pass the snapshot to `restorePending` to undo the clear
 	 *  if the transition is rolled back. */
-	clearPending(): IrcPendingSnapshot {
-		const received = new Map<string, Set<string>>();
-		for (const [sender, ids] of this.#received) received.set(sender, new Set(ids));
-		const snapshot: IrcPendingSnapshot = {
-			interrupts: this.#interrupts,
-			asides: this.#asides,
-			deferredWakes: this.#deferredWakes,
-			sessionId: this.#indexedSessionId,
-			received,
-		};
+	clearPending(): { interrupts: AgentMessage[]; asides: AgentMessage[]; deferredWakes: AgentMessage[] } {
+		const snapshot = { interrupts: this.#interrupts, asides: this.#asides, deferredWakes: this.#deferredWakes };
 		this.#interrupts = [];
 		this.#asides = [];
 		this.#deferredWakes = [];
@@ -173,23 +87,14 @@ export class IrcBridge {
 	 *  the rolled-back switch's async load/hooks were still running) instead of overwriting it, so
 	 *  those newly arrived records aren't silently discarded — snapshot records precede them since
 	 *  they arrived first. */
-	restorePending(snapshot: IrcPendingSnapshot): void {
+	restorePending(snapshot: {
+		interrupts: AgentMessage[];
+		asides: AgentMessage[];
+		deferredWakes: AgentMessage[];
+	}): void {
 		this.#interrupts = [...snapshot.interrupts, ...this.#interrupts];
 		this.#asides = [...snapshot.asides, ...this.#asides];
 		this.#deferredWakes = [...snapshot.deferredWakes, ...this.#deferredWakes];
-		if (snapshot.sessionId !== undefined) {
-			this.#indexReceived();
-			if (snapshot.sessionId === this.#indexedSessionId) {
-				for (const [sender, ids] of snapshot.received) {
-					let accepted = this.#received.get(sender);
-					if (!accepted) {
-						accepted = new Set();
-						this.#received.set(sender, accepted);
-					}
-					for (const id of ids) accepted.add(id);
-				}
-			}
-		}
 	}
 
 	/** Queues records for the next step-boundary aside injection: IRC wakes deferred by a
@@ -240,9 +145,6 @@ export class IrcBridge {
 				const from = Reflect.get(details, "from");
 				const body = Reflect.get(details, "message");
 				const replyTo = Reflect.get(details, "replyTo");
-				const to = Reflect.get(details, "to");
-				const ts = Reflect.get(details, "ts");
-				const wakeRelay = Reflect.get(details, "wakeRelay");
 				if (typeof id !== "string" || typeof from !== "string" || typeof body !== "string") {
 					queue.remaining.push(record);
 					continue;
@@ -258,11 +160,10 @@ export class IrcBridge {
 				messages.push({
 					id,
 					from,
-					to: typeof to === "string" ? to : agentId,
+					to: agentId,
 					body,
-					ts: typeof ts === "number" ? ts : record.timestamp,
+					ts: record.timestamp,
 					...(typeof replyTo === "string" ? { replyTo } : {}),
-					...(wakeRelay === true ? { wakeRelay: true } : {}),
 				});
 			}
 		}
@@ -274,8 +175,6 @@ export class IrcBridge {
 	/** Delivers an IRC message into the recipient session without awaiting any wake turn. */
 	async deliver(msg: IrcMessage): Promise<"injected" | "woken"> {
 		if (this.#host.isDisposed()) throw new Error("Recipient session is disposed.");
-		this.#indexReceived();
-		if (this.#received.get(msg.from)?.has(msg.id)) return "injected";
 		const streaming = this.#host.isStreaming();
 		const planModeIdle = !streaming && this.#host.planModeEnabled();
 		const fromParent = AgentRegistry.global().get(msg.to)?.parentId === msg.from;
@@ -291,7 +190,7 @@ export class IrcBridge {
 		const record: CustomMessage = {
 			role: "custom",
 			customType: "irc:incoming",
-			content: prompt.render(streaming && fromParent ? parentIrcSteerTemplate : ircIncomingTemplate, {
+			content: prompt.render(ircIncomingTemplate, {
 				from: msg.from,
 				message: envelopeBody,
 				replyTo: msg.replyTo ?? "",
@@ -302,8 +201,6 @@ export class IrcBridge {
 			details: {
 				id: msg.id,
 				from: msg.from,
-				to: msg.to,
-				ts: msg.ts,
 				message: msg.body,
 				...(msg.replyTo ? { replyTo: msg.replyTo } : {}),
 				...(msg.wakeRelay ? { wakeRelay: true } : {}),
@@ -312,32 +209,34 @@ export class IrcBridge {
 			attribution: "agent",
 			timestamp: msg.ts,
 		};
-		if (streaming && fromParent) record.steeringSource = "agent";
-		this.#rememberIncoming(record.details);
-		try {
-			if (streaming) {
-				if (fromParent) this.#host.agent.steer(record);
-				else this.#interrupts.push(record);
-			} else if (planModeIdle) {
-				this.#host.agent.appendMessage(record);
-				this.#host.sessionManager.appendCustomMessageEntry(
-					record.customType,
-					record.content,
-					record.display,
-					record.details,
-					record.attribution ?? "agent",
-					record.timestamp,
-					record.steeringSource,
-				);
-			} else {
-				this.#host.wakeForIrc([record]);
-			}
-		} catch (error) {
-			this.#received.get(msg.from)?.delete(msg.id);
-			throw error;
-		}
 		void this.#host.emitSessionEvent({ type: "irc_message", message: record });
-		return streaming || planModeIdle ? "injected" : "woken";
+		if (streaming) {
+			if (fromParent) {
+				this.#host.agent.steer({
+					role: "user",
+					content: prompt.render(parentIrcSteerTemplate, { from: msg.from, message: envelopeBody }),
+					attribution: "agent",
+					timestamp: msg.ts,
+					steering: true,
+				});
+			} else {
+				this.#interrupts.push(record);
+			}
+			return "injected";
+		}
+		if (this.#host.planModeEnabled()) {
+			this.#host.agent.appendMessage(record);
+			this.#host.sessionManager.appendCustomMessageEntry(
+				record.customType,
+				record.content,
+				record.display,
+				record.details,
+				record.attribution ?? "agent",
+			);
+			return "injected";
+		}
+		this.#host.wakeForIrc([record]);
+		return "woken";
 	}
 
 	/** Emits an IRC relay observation for rendering without persisting it. */

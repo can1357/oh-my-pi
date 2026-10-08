@@ -66,9 +66,6 @@ export interface DaemonBrokerClient {
 /** A request reached the broker and the broker rejected the operation. */
 export class DaemonBrokerRejectedError extends Error {}
 
-/** The broker transport or connection is unavailable, rather than rejecting an operation. */
-export class DaemonBrokerUnavailableError extends Error {}
-
 async function readOrCreateToken(runtimeDir: string): Promise<string> {
 	await fs.mkdir(runtimeDir, { recursive: true, mode: 0o700 });
 	const tokenPath = path.join(runtimeDir, TOKEN_FILE);
@@ -169,7 +166,7 @@ class SocketDaemonClient implements DaemonBrokerClient {
 	}
 
 	async request(operation: DaemonOperation, signal?: AbortSignal): Promise<DaemonRpcResult> {
-		if (this.#closed) throw new DaemonBrokerUnavailableError("Daemon broker client is closed");
+		if (this.#closed) throw new Error("Daemon broker client is closed");
 		if (signal?.aborted) throw new Error("Daemon broker request aborted");
 		const connecting = this.#connect();
 		if (signal) {
@@ -185,9 +182,9 @@ class SocketDaemonClient implements DaemonBrokerClient {
 			}
 		} else await connecting;
 		if (signal?.aborted) throw new Error("Daemon broker request aborted");
-		if (this.#closed) throw new DaemonBrokerUnavailableError("Daemon broker client is closed");
+		if (this.#closed) throw new Error("Daemon broker client is closed");
 		const socket = this.#socket;
-		if (!socket || socket.destroyed) throw new DaemonBrokerUnavailableError("Daemon broker socket is unavailable");
+		if (!socket || socket.destroyed) throw new Error("Daemon broker socket is unavailable");
 
 		const completionUnsubscribes = [...this.#completionUnsubscribes];
 		const completionReplays = [...this.#completionReplays];
@@ -198,7 +195,7 @@ class SocketDaemonClient implements DaemonBrokerClient {
 			if (!pending) return;
 			this.#pending.delete(id);
 			pending.removeAbort?.();
-			reject(new DaemonBrokerUnavailableError(`Daemon ${operation.op} request timed out`));
+			reject(new Error(`Daemon ${operation.op} request timed out`));
 		}, requestTimeoutMs(operation));
 		const pending: PendingRequest = { operation, resolve, reject, timer };
 		if (signal) {
@@ -230,7 +227,7 @@ class SocketDaemonClient implements DaemonBrokerClient {
 			this.#pending.delete(id);
 			clearTimeout(timer);
 			pending.removeAbort?.();
-			reject(new DaemonBrokerUnavailableError(error instanceof Error ? error.message : String(error)));
+			reject(error instanceof Error ? error : new Error(String(error)));
 		}
 		const result = await promise;
 		for (const owner of completionUnsubscribes) {
@@ -252,7 +249,7 @@ class SocketDaemonClient implements DaemonBrokerClient {
 		this.#preservedCompletionOwners.clear();
 		this.#completionReplays.clear();
 		this.#socket = undefined;
-		this.#rejectPending(new DaemonBrokerUnavailableError("Daemon broker client closed"));
+		this.#rejectPending(new Error("Daemon broker client closed"));
 	}
 
 	onCompletion(
@@ -321,12 +318,12 @@ class SocketDaemonClient implements DaemonBrokerClient {
 			// process-owned lease selects one winner before any candidate touches
 			// the socket.
 		}
-		if (this.#closed) throw new DaemonBrokerUnavailableError("Daemon broker client is closed");
+		if (this.#closed) throw new Error("Daemon broker client is closed");
 		this.#spawnBroker();
 		const deadline = Date.now() + CONNECT_TIMEOUT_MS;
 		let lastError: Error | undefined;
 		while (Date.now() < deadline) {
-			if (this.#closed) throw new DaemonBrokerUnavailableError("Daemon broker client is closed");
+			if (this.#closed) throw new Error("Daemon broker client is closed");
 			try {
 				this.#bindSocket(await openSocket(this.#endpoint, 250));
 				return;
@@ -335,7 +332,7 @@ class SocketDaemonClient implements DaemonBrokerClient {
 				await Bun.sleep(CONNECT_RETRY_MS);
 			}
 		}
-		throw new DaemonBrokerUnavailableError(
+		throw new Error(
 			`Failed to start daemon broker at ${this.#endpoint} after ${CONNECT_TIMEOUT_MS / 1000}s: ` +
 				`${lastError?.message ?? "socket unavailable"}. Scope: ${this.#runtimeDir}. ` +
 				"Run `omp --smoke-test` to verify broker startup, or `omp ps` to inspect supervised processes.",
@@ -363,7 +360,7 @@ class SocketDaemonClient implements DaemonBrokerClient {
 	#bindSocket(socket: net.Socket): void {
 		if (this.#closed) {
 			socket.destroy();
-			throw new DaemonBrokerUnavailableError("Daemon broker client is closed");
+			throw new Error("Daemon broker client is closed");
 		}
 		this.#socket = socket;
 		this.#buffer = "";
@@ -375,7 +372,7 @@ class SocketDaemonClient implements DaemonBrokerClient {
 		socket.on("close", () => {
 			if (this.#socket !== socket) return;
 			this.#socket = undefined;
-			this.#rejectPending(new DaemonBrokerUnavailableError("Daemon broker connection closed"));
+			this.#rejectPending(new Error("Daemon broker connection closed"));
 			this.#scheduleCompletionReconnect();
 		});
 	}

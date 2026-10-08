@@ -14,6 +14,7 @@ import * as services from "../../src/launch/services";
 import { WaitTool } from "../../src/tools/wait";
 import { IrcBus } from "../../src/irc/bus";
 import { AgentRegistry } from "../../src/registry/agent-registry";
+import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 
 interface Fixture {
 	client: DaemonBrokerClient;
@@ -215,8 +216,8 @@ describe("broker discovery and session generations", () => {
 			const freshGate = holdResponse(f.client, "list");
 			const installed = Promise.withResolvers<void>();
 			const waitForCompletion = services.waitForOwnedServiceCompletion;
-			vi.spyOn(services, "waitForOwnedServiceCompletion").mockImplementation((...args) => {
-				const result = waitForCompletion(...args);
+			vi.spyOn(services, "waitForOwnedServiceCompletion").mockImplementation((session, signal) => {
+				const result = waitForCompletion(session, signal);
 				installed.resolve();
 				return result;
 			});
@@ -325,8 +326,8 @@ describe("broker discovery and session generations", () => {
 			const installed = Promise.withResolvers<void>();
 			const bus = IrcBus.global();
 			const original = bus.wait.bind(bus);
-			vi.spyOn(bus, "wait").mockImplementation((...args) => {
-				const result = original(...args);
+			vi.spyOn(bus, "wait").mockImplementation((agentId, filter, timeoutMs, signal) => {
+				const result = original(agentId, filter, timeoutMs, signal);
 				installed.resolve();
 				return result;
 			});
@@ -399,16 +400,100 @@ describe("broker discovery and session generations", () => {
 				await waiting.catch(() => undefined);
 			}
 		}));
-	test("failed discovery does not claim last-known services are current", () =>
+	test("failed discovery without a local source reports failure rather than nothing to wait for", () =>
+		withBroker(async f => {
+			const closed = await clients.createDaemonBrokerClient(f.projectDir, { runtimeDir: f.runtimeDir });
+			closed.close();
+			vi.spyOn(clients, "daemonClientForProject").mockResolvedValue(closed);
+			await expect(new WaitTool(f.session).execute("failure", {})).rejects.toThrow(
+				"Service state unavailable: Daemon broker client is closed. Last-known service state is not current.",
+			);
+		}));
+	test("service-only wait survives a failed refresh and returns the real owned service exit", () =>
 		withBroker(async f => {
 			await startOwned(f, "last-known");
 			await services.listServices(f.session);
 			const closed = await clients.createDaemonBrokerClient(f.projectDir, { runtimeDir: f.runtimeDir });
 			closed.close();
 			vi.spyOn(clients, "daemonClientForProject").mockResolvedValue(closed);
-			await expect(new WaitTool(f.session).execute("failure", {}, AbortSignal.timeout(2000))).rejects.toThrow(
-				"Last-known service state is not current",
+			const listeningAfterFailure = Promise.withResolvers<void>();
+			const waitForCompletion = services.waitForOwnedServiceCompletion;
+			let installed = 0;
+			vi.spyOn(services, "waitForOwnedServiceCompletion").mockImplementation((session, signal) => {
+				const completion = waitForCompletion(session, signal);
+				if (++installed === 2) listeningAfterFailure.resolve();
+				return completion;
+			});
+			const controller = new AbortController();
+			const waiting = new WaitTool(f.session).execute("failed-refresh-service", {}, controller.signal);
+			void waiting.catch(() => undefined);
+			try {
+				await beforeRelease(listeningAfterFailure.resolve, listeningAfterFailure.promise);
+				expect(services.hasLiveOwnedService(f.session)).toBe(true);
+				// Discovery really rejected on a closed socket client. The original
+				// subscription is still live and its child really exits afterwards.
+				await f.client.request({ op: "send", name: "last-known", data: "finish\n" });
+				const result = await beforeRelease(() => controller.abort(), waiting);
+				expect(result.content).toEqual([
+					{ type: "text", text: "A service finished. Read proc:// for its status and output." },
+				]);
+				expect(result.details).toEqual({ op: "wait", jobs: [] });
+				expect(services.hasLiveOwnedService(f.session)).toBe(false);
+			} finally {
+				controller.abort();
+				await waiting.catch(() => undefined);
+			}
+		}));
+	test("service-only wait reports stale discovery failure at the cap without consuming the live service", () =>
+		withBroker(async f => {
+			await startOwned(f, "cap-survivor");
+			await services.listServices(f.session);
+			const closed = await clients.createDaemonBrokerClient(f.projectDir, { runtimeDir: f.runtimeDir });
+			closed.close();
+			vi.spyOn(clients, "daemonClientForProject").mockResolvedValue(closed);
+			const started = Date.now();
+			const clock = vi.spyOn(Date, "now").mockReturnValue(started);
+			const waitForCompletion = services.waitForOwnedServiceCompletion;
+			let installed = 0;
+			vi.spyOn(services, "waitForOwnedServiceCompletion").mockImplementation((session, signal) => {
+				const completion = waitForCompletion(session, signal);
+				// The second listener is installed after the real list failure.
+				// Advance only the deadline calculation; broker/socket timers stay real.
+				if (++installed === 2) clock.mockReturnValue(started + 30 * 60_000);
+				return completion;
+			});
+			const controller = new AbortController();
+			const waiting = new WaitTool(f.session).execute("failed-refresh-cap", {}, controller.signal);
+			const outcome = waiting.then(
+				() => {
+					throw new Error("Wait reported a successful snapshot after failed service discovery");
+				},
+				(error: unknown) => error,
 			);
+			try {
+				const error = await beforeRelease(() => controller.abort(), outcome);
+				expect(error).toBeInstanceOf(ToolError);
+				if (!(error instanceof ToolError)) throw new Error("Expected service discovery failure");
+				expect(error.message).toMatch(/service state unavailable/i);
+				expect(error.message).toMatch(/not current/i);
+				expect(error.message).not.toMatch(/nothing to wait for/i);
+				expect(services.hasLiveOwnedService(f.session)).toBe(true);
+				clock.mockRestore();
+				// A failed wait must leave the actual owned completion source usable.
+				const completionAbort = new AbortController();
+				const exited = services.waitForOwnedServiceCompletion(f.session, completionAbort.signal);
+				try {
+					await f.client.request({ op: "send", name: "cap-survivor", data: "finish\n" });
+					await beforeRelease(() => completionAbort.abort(), exited);
+					expect(services.hasLiveOwnedService(f.session)).toBe(false);
+				} finally {
+					completionAbort.abort();
+				}
+			} finally {
+				clock.mockRestore();
+				controller.abort();
+				await waiting.catch(() => undefined);
+			}
 		}));
 	test("late-list-cannot-resurrect-completed-generation", () =>
 		withBroker(async f => {

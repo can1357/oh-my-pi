@@ -18,12 +18,10 @@ import {
 	sanitizeSchemaForStrictMode,
 	tryEnforceStrictSchema,
 } from "@oh-my-pi/pi-ai/utils/schema";
-import { resolveYieldSectionValue, type YieldSectionShapes } from "@oh-my-pi/pi-tui/tools/task-yield-assembly";
 import { prompt } from "@oh-my-pi/pi-utils";
 import yieldDescription from "../prompts/tools/yield.md" with { type: "text" };
 import { subprocessToolRegistry } from "../task/subprocess-tool-registry";
 import type { WorkPoolYieldItem } from "../task/workpool-yield";
-import { yieldSectionShapes } from "../task/yield-assembly";
 import type { ToolSession } from ".";
 import { buildOutputValidator, formatAllValidationIssues } from "./output-schema-validator";
 
@@ -306,7 +304,6 @@ export class YieldTool implements AgentTool<TSchema, YieldDetails> {
 	#schemaValidationFailures = 0;
 	#emptyResultFailures = 0;
 	#hasIncrementalSections = false;
-	readonly #sectionShapes: YieldSectionShapes;
 	readonly #session: ToolSession;
 	readonly #parameters: TSchema;
 	#workPoolBatchKey = "";
@@ -333,7 +330,6 @@ export class YieldTool implements AgentTool<TSchema, YieldDetails> {
 		let normalizeData: ((value: unknown) => unknown) | undefined;
 		let normalizeSection: ((label: string, value: unknown) => unknown) | undefined;
 		let validateSection: ReadonlyMap<string, (value: unknown) => JsonSchemaValidationResult> | undefined;
-		let sectionShapes: YieldSectionShapes = new Map();
 		let rejectUnknownSections = false;
 		let knownSectionLabels: readonly string[] = [];
 		let isKnownSection: ((label: string) => boolean) | undefined;
@@ -349,7 +345,6 @@ export class YieldTool implements AgentTool<TSchema, YieldDetails> {
 			if (validator) {
 				validate = value => validator.validate(value);
 				validateSection = validator.validateSection;
-				sectionShapes = yieldSectionShapes(session.outputSchema);
 				rejectUnknownSections = validator.rejectUnknownSections;
 				knownSectionLabels = validator.knownSectionLabels;
 				isKnownSection = label => validator.isKnownSection(label);
@@ -408,7 +403,6 @@ export class YieldTool implements AgentTool<TSchema, YieldDetails> {
 		}
 
 		this.#session = session;
-		this.#sectionShapes = sectionShapes;
 		this.#validate = validate;
 		this.#normalizeData = normalizeData;
 		this.#normalizeSection = normalizeSection;
@@ -576,44 +570,14 @@ export class YieldTool implements AgentTool<TSchema, YieldDetails> {
 				useLastTurn = false;
 			}
 		}
-		// Snapshot section text now; finalization must not substitute terminal prose.
-		if (status === "success" && useLastTurn && isIncremental) {
-			const lastTurnText = this.#session.getLastAssistantText?.();
-			if (lastTurnText !== undefined) {
-				data = lastTurnText;
-				useLastTurn = false;
-			}
-		}
-		const normalizeData = (value: unknown): unknown => {
-			if (workPoolItemId !== undefined) return value;
-			if (!isIncremental) return this.#normalizeData?.(value) ?? value;
-			if (!this.#normalizeSection) return value;
-			const labels = yieldType as string[];
-			// Preserve broadcasts rather than manufacturing an ambiguous labelled object.
-			if (
-				labels.length > 1 &&
-				labels.every(label => resolveYieldSectionValue(value, labels, label, this.#sectionShapes) === value)
-			) {
-				return value;
-			}
-			let sections: Record<string, unknown> | undefined;
-			for (const label of labels) {
-				const section = resolveYieldSectionValue(value, labels, label, this.#sectionShapes);
-				const normalized = this.#normalizeSection(label, section);
-				if (normalized === section) continue;
-				if (!sections) {
-					sections = {};
-					for (const key of labels)
-						sections[key] = resolveYieldSectionValue(value, labels, key, this.#sectionShapes);
-				}
-				sections[label] = normalized;
-			}
-			if (!sections) return value;
-			if (labels.length === 1 && resolveYieldSectionValue(value, labels, labels[0], this.#sectionShapes) === value) {
-				return sections[labels[0]];
-			}
-			return sections;
-		};
+		const normalizeData = (value: unknown): unknown =>
+			workPoolItemId !== undefined
+				? value
+				: Array.isArray(yieldType) && yieldType.length === 1
+					? (this.#normalizeSection?.(yieldType[0], value) ?? value)
+					: !isIncremental
+						? (this.#normalizeData?.(value) ?? value)
+						: value;
 		if (status === "success" && data !== undefined) data = normalizeData(data);
 		if (status === "success" && !useLastTurn) {
 			const validateData = (value: unknown): JsonSchemaValidationResult | undefined =>
@@ -731,8 +695,7 @@ export class YieldTool implements AgentTool<TSchema, YieldDetails> {
 		for (const label of labels) {
 			const sub = subValidators.get(label);
 			if (!sub) continue;
-			const value = resolveYieldSectionValue(data, labels, label, this.#sectionShapes);
-			const parsed = sub(this.#normalizeSection?.(label, value) ?? value);
+			const parsed = sub(data);
 			if (!parsed.success) return parsed;
 		}
 		return undefined;

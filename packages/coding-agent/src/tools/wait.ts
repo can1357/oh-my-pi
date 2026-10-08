@@ -76,17 +76,15 @@ export class WaitTool implements AgentTool<typeof waitSchema, CoordinationDetail
 		if (pending && messaging) return messageResult(messaging.senderId, pending);
 		const deadline = Date.now() + WAIT_MAX_MS;
 		let serviceError: string | undefined;
-		let serviceCurrent = false;
 		const refreshAbort = new AbortController();
 		const abortRefresh = () => refreshAbort.abort(signal?.reason);
 		signal?.addEventListener("abort", abortRefresh, { once: true });
-		// Discovery races local delivery; last-known services alone cannot sustain a wait.
+		// Discovery races local delivery; completion subscriptions remain valid if discovery fails.
 		let refresh = cfgLaunchEnabled.get(this.session.settings)
 			? listServicesTolerant(this.session, refreshAbort.signal).then(
 					result => {
 						if (refreshAbort.signal.aborted) return;
 						serviceError = result.error;
-						serviceCurrent = result.error === undefined;
 					},
 					error => {
 						if (refreshAbort.signal.aborted) return;
@@ -94,36 +92,24 @@ export class WaitTool implements AgentTool<typeof waitSchema, CoordinationDetail
 					},
 				)
 			: undefined;
-		const finish = (result: AgentToolResult<CoordinationDetails>): AgentToolResult<CoordinationDetails> => {
-			if (serviceError === undefined) return result;
-			return {
-				...result,
-				content: [
-					...result.content,
-					{
-						type: "text",
-						text: `Service state unavailable: ${serviceError}. Last-known service state is not current.`,
-					},
-				],
-			};
-		};
 		try {
 			for (;;) {
 				const queued = takeQueuedMessage(messaging);
-				if (queued && messaging) return finish(messageResult(messaging.senderId, queued));
+				if (queued && messaging) return messageResult(messaging.senderId, queued);
 				const jobs = manager?.getRunningJobs({ ownerId: senderId }) ?? [];
 				// Preserve accepted completions until their native consumed-delivery boundary.
 				const undelivered = manager ? undeliveredJobs(manager, senderId) : [];
 				if (manager && undelivered.length > 0)
-					return finish(buildJobResult(this.session, manager, "wait", [...undelivered, ...jobs], []));
-				const serviceRunning = serviceCurrent && hasLiveOwnedService(this.session);
+					return buildJobResult(this.session, manager, "wait", [...undelivered, ...jobs], []);
+				const serviceRunning = hasLiveOwnedService(this.session);
 				if (jobs.length === 0 && !serviceRunning && !refresh) {
 					throwIfAborted(signal);
+					if (serviceError !== undefined)
+						throw new ToolError(
+							`Service state unavailable: ${serviceError}. Last-known service state is not current.`,
+						);
 					throw new ToolError(
-						"Nothing to wait for: no background job or service you started is running. Other agents' results and messages arrive on their own." +
-							(serviceError === undefined
-								? ""
-								: ` Service state unavailable: ${serviceError}. Last-known service state is not current.`),
+						"Nothing to wait for: no background job or service you started is running. Other agents' results and messages arrive on their own.",
 					);
 				}
 				const refreshing = refresh;
@@ -132,15 +118,16 @@ export class WaitTool implements AgentTool<typeof waitSchema, CoordinationDetail
 					manager,
 					messaging,
 					// Matching completion notifications are authoritative even during discovery.
-					serviceRunning: (serviceCurrent || refreshing !== undefined) && hasLiveOwnedService(this.session),
+					serviceRunning,
 					refresh: refreshing?.then(() => {
 						refresh = undefined;
 					}),
+					serviceError,
 					deadline,
 					signal,
 					onUpdate,
 				});
-				if (result) return finish(result);
+				if (result) return result;
 			}
 		} finally {
 			signal?.removeEventListener("abort", abortRefresh);
@@ -155,11 +142,12 @@ export class WaitTool implements AgentTool<typeof waitSchema, CoordinationDetail
 		messaging: WaitMessaging | undefined;
 		serviceRunning: boolean;
 		refresh: Promise<void> | undefined;
+		serviceError: string | undefined;
 		deadline: number;
 		signal: AbortSignal | undefined;
 		onUpdate: AgentToolUpdateCallback<CoordinationDetails> | undefined;
 	}): Promise<AgentToolResult<CoordinationDetails> | undefined> {
-		const { jobs, manager, messaging, serviceRunning, refresh, deadline, signal, onUpdate } = args;
+		const { jobs, manager, messaging, serviceRunning, refresh, serviceError, deadline, signal, onUpdate } = args;
 		const watchedIds = jobs.map(job => job.id);
 		manager?.watchJobs(watchedIds);
 		const serviceAbort = new AbortController();
@@ -239,6 +227,10 @@ export class WaitTool implements AgentTool<typeof waitSchema, CoordinationDetail
 				wake = "service";
 			}
 			if (manager && jobs.length > 0) return buildJobResult(this.session, manager, "wait", jobs, []);
+			if (wake === "timeout" && serviceError !== undefined)
+				throw new ToolError(
+					`Service state unavailable: ${serviceError}. Last-known service state is not current.`,
+				);
 			return {
 				content: [
 					{

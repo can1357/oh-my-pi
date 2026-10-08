@@ -3587,7 +3587,6 @@ export class AgentSession implements SettingsScope {
 					// otherwise records emission time, which on rebuild excludes
 					// provider preparation / hook time from the prompt→yield anchor.
 					message.timestamp,
-					message.role === "custom" ? message.steeringSource : undefined,
 				);
 			}
 			if (message.role === "custom" && message.customType === "ttsr-injection") {
@@ -7661,7 +7660,6 @@ export class AgentSession implements SettingsScope {
 						content: normalized.content,
 						display: normalized.display,
 						details: normalized.details,
-						steeringSource: normalized.steeringSource,
 						attribution: explicitAttribution
 							? normalized.attribution
 							: (attribution ?? (message.role === "user" ? "user" : "agent")),
@@ -8662,7 +8660,6 @@ export class AgentSession implements SettingsScope {
 			display: normalizedPayload.display,
 			details,
 			attribution: normalizedPayload.attribution,
-			steeringSource: normalizedPayload.steeringSource,
 			timestamp: Date.now(),
 		};
 		const normalizedAppMessage = await this.#normalizeAgentMessageImages(appMessage);
@@ -8712,8 +8709,6 @@ export class AgentSession implements SettingsScope {
 				normalizedAppMessage.display,
 				normalizedAppMessage.details,
 				normalizedAppMessage.attribution,
-				normalizedAppMessage.timestamp,
-				normalizedAppMessage.steeringSource,
 			);
 			return false;
 		}
@@ -8764,8 +8759,6 @@ export class AgentSession implements SettingsScope {
 			normalizedAppMessage.display,
 			normalizedAppMessage.details,
 			normalizedAppMessage.attribution,
-			normalizedAppMessage.timestamp,
-			normalizedAppMessage.steeringSource,
 		);
 		if (normalizedAppMessage.display === true) {
 			// Idle display append with no turn: notify session listeners so the interactive

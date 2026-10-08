@@ -10,9 +10,6 @@
 
 ### Fixed
 
-- Fixed task result rendering so incremental yield batches and nested array items keep their schema-defined shape ([#14860](https://github.com/can1357/oh-my-pi/pull/14860) by [@vavilonska](https://github.com/vavilonska))
-- Fixed relayed agent messages losing their agent attribution in chat and transcript views ([#14860](https://github.com/can1357/oh-my-pi/pull/14860) by [@vavilonska](https://github.com/vavilonska))
-- Fixed the native ask dialog opening as a modal sheet over the transcript; on TSP surfaces it now takes the composer's place in the dock, framed as the composer (`omp.editor`), so the transcript above stays readable and scrollable ([#14812](https://github.com/can1357/oh-my-pi/pull/14812) by [@H4vC](https://github.com/H4vC))
 - Fixed relative file links in Tern assistant replies opening against the folder omp was started in; they now open the file in the session's working directory ([#14879](https://github.com/can1357/oh-my-pi/pull/14879) by [@H4vC](https://github.com/H4vC))
 - Fixed Tern modals with no clickable exit: BTW history, git shortcuts and autoresearch gain a Close button, plan review a Cancel button, the agent transcript viewer and `/annotate` review a top-right `esc` that runs Esc, and the `/move` dialog Accept, Cancel and Confirm buttons; new `escCloseButton()` builds the `esc` keycap button ([#14894](https://github.com/can1357/oh-my-pi/pull/14894) by [@H4vC](https://github.com/H4vC))
 
