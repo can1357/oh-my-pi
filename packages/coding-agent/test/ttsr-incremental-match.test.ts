@@ -1,4 +1,4 @@
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it, vi } from "bun:test";
 import type { ToolCall } from "@oh-my-pi/pi-ai";
 import type { Rule } from "@oh-my-pi/pi-coding-agent/capability/rule";
 import { TtsrManager, type TtsrMatchContext } from "@oh-my-pi/pi-coding-agent/export/ttsr";
@@ -59,26 +59,31 @@ describe("TTSR incremental stream matching", () => {
 		expect(manager.checkSnapshot("clean", TEXT)).toEqual([]);
 	});
 
-	it("matches a condition that arrives late in a snapshot growing in small chunks, with linear cost", () => {
+	it("finds a late snapshot match without repeatedly scanning the full text", () => {
 		const chunk = "const value = compute(input);\n";
-		const run = (chunks: number): number => {
-			const manager = new TtsrManager({ enabled: true });
-			manager.addRule(rule("forbidden", "FORBIDDEN_\\w+\\("));
+		const condition = "FORBIDDEN_\\w+\\(";
+		const manager = new TtsrManager({ enabled: true });
+		manager.addRule(rule("forbidden", condition));
+		let scannedCharacters = 0;
+		const originalTest = RegExp.prototype.test;
+		const scan = vi.spyOn(RegExp.prototype, "test").mockImplementation(function (this: RegExp, text: string) {
+			if (this.source === condition) scannedCharacters += text.length;
+			return originalTest.call(this, text);
+		});
+		try {
 			let snapshot = "";
-			const start = Bun.nanoseconds();
-			for (let index = 0; index < chunks; index++) {
+			for (let index = 0; index < 2_000; index++) {
 				snapshot += chunk;
 				expect(manager.checkSnapshot(snapshot, TEXT, { final: false })).toEqual([]);
 			}
 			snapshot += "FORBIDDEN_api(1);\n";
 			expect(names(manager.checkSnapshot(snapshot, TEXT))).toEqual(["forbidden"]);
-			return Bun.nanoseconds() - start;
-		};
-		const smallNs = Math.min(run(250), run(250), run(250));
-		// 8 times the chunks: a full regex rescan per update would take ~64 times as long.
-		let largeNs = Number.POSITIVE_INFINITY;
-		for (let attempt = 0; attempt < 3 && largeNs >= 32 * smallNs; attempt++) largeNs = Math.min(largeNs, run(2_000));
-		expect(largeNs).toBeLessThan(32 * smallNs);
+			// Bound regex work, not snapshot-prefix comparisons or runtime warmup.
+			// Allow one incremental pass plus one final whole-buffer scan.
+			expect(scannedCharacters).toBeLessThanOrEqual(2 * snapshot.length);
+		} finally {
+			scan.mockRestore();
+		}
 	});
 });
 
