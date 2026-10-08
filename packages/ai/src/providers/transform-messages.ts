@@ -28,7 +28,7 @@ const enum ToolCallStatus {
  * `convertAnthropicMessages` (and friends) unchanged, so the `_dupN` suffix
  * MUST not push a normalized id past this bound.
  */
-const MAX_TOOL_CALL_ID_LENGTH = 64;
+export const MAX_TOOL_CALL_ID_LENGTH = 64;
 
 /**
  * OpenAI Responses-family APIs mint composite tool ids (`call_id|item_id`);
@@ -128,7 +128,7 @@ function toolCallPairingKey(id: string, originScope: ToolCallOriginScope): strin
 	return originScope.responsesComponents.has(prefix) ? prefix : id;
 }
 
-function appendDuplicateSuffix(originalId: string, suffix: string, maxLength: number): string {
+export function appendDuplicateSuffix(originalId: string, suffix: string, maxLength: number): string {
 	// Responses-family ids are composites (`callId|itemId`): the wire call_id is
 	// the FIRST segment (normalizeResponsesToolCallId splits on `|`), so the
 	// suffix must land on every segment or the duplicate collapses back onto the
@@ -518,24 +518,28 @@ export function redactSensitiveInObject(val: unknown): { result: unknown; change
 		const redacted = redactSensitiveCredentials(val);
 		return { result: redacted, changed: redacted !== val };
 	}
+	// Copy-on-write: history is re-redacted on every request and almost never
+	// contains a credential, so unchanged subtrees are returned as-is.
 	if (Array.isArray(val)) {
-		let changed = false;
-		const result = val.map(item => {
-			const res = redactSensitiveInObject(item);
-			if (res.changed) changed = true;
-			return res.result;
-		});
-		return { result, changed };
+		let result: unknown[] | undefined;
+		for (let i = 0; i < val.length; i++) {
+			const sub = redactSensitiveInObject(val[i]);
+			if (!sub.changed) continue;
+			result ??= val.slice();
+			result[i] = sub.result;
+		}
+		return result ? { result, changed: true } : { result: val, changed: false };
 	}
 	if (val !== null && typeof val === "object") {
-		let changed = false;
-		const res: Record<string, unknown> = {};
-		for (const [k, v] of Object.entries(val)) {
+		const entries = Object.entries(val);
+		let result: Record<string, unknown> | undefined;
+		for (const [k, v] of entries) {
 			const sub = redactSensitiveInObject(v);
-			if (sub.changed) changed = true;
-			res[k] = sub.result;
+			if (!sub.changed) continue;
+			result ??= Object.fromEntries(entries);
+			result[k] = sub.result;
 		}
-		return { result: res, changed };
+		return result ? { result, changed: true } : { result: val, changed: false };
 	}
 	return { result: val, changed: false };
 }

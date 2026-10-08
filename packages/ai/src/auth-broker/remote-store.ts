@@ -8,7 +8,7 @@
  * runs isn't required.
  */
 import * as os from "node:os";
-import { getAppName, getInstallId, logger } from "@oh-my-pi/pi-utils";
+import { getAppName, getInstallId, logger, postmortem } from "@oh-my-pi/pi-utils";
 import type { AuthCredentialStore } from "../auth/store";
 import {
 	type AuthCredential,
@@ -17,6 +17,7 @@ import {
 	type OAuthCredential,
 	type OAuthRefreshReason,
 	REMOTE_REFRESH_SENTINEL,
+	type RemoteOAuthCredential,
 	type StoredAuthCredential,
 	type StoredCredentialBlock,
 } from "../auth/types";
@@ -68,6 +69,8 @@ const BACKGROUND_BACKOFF_INITIAL_MS = 500;
 const BACKGROUND_BACKOFF_MAX_MS = 30_000;
 /** Idle window after the last foreground store use before background sync parks. */
 const BACKGROUND_IDLE_MS = 20_000;
+/** Longest a process exit waits for the final observed-usage report to reach the broker. */
+const OBSERVED_USAGE_EXIT_FLUSH_MS = 2_000;
 
 function toCredentialBlockSnapshot(block: StoredCredentialBlock): CredentialBlockSnapshot {
 	return {
@@ -121,6 +124,14 @@ function credentialEntryWithBlocks(
 	const incoming: SnapshotEntry = { ...entry, rotatesInMs: null };
 	if (blocks && blocks.length > 0) incoming.blocks = [...blocks].sort(compareCredentialBlockSnapshots);
 	return incoming;
+}
+
+/**
+ * Change-detection hash of one row's routable credential material (provider +
+ * credential; the id is the map key). Used only for equality, never persisted.
+ */
+function credentialContentHash(entry: SnapshotEntry): number | bigint {
+	return Bun.hash(`${entry.provider}\u0000${JSON.stringify(entry.credential)}`);
 }
 
 function emptySnapshot(): SnapshotResponse {
@@ -254,14 +265,19 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 	#snapshotReceivedAt = Date.now();
 	#generation = 0;
 	/**
-	 * Content fingerprint of the credential set in {@link #snapshot} (id +
-	 * provider + credential material), recomputed after every snapshot mutation.
-	 * Drives {@link #credentialRevision} independently of the broker's numeric
+	 * Content hash of each row's routable credential material, keyed by id —
+	 * exactly what {@link listAuthCredentials} exposes (id, provider,
+	 * credential); blocks and usage overlays are excluded. Drives
+	 * {@link #credentialRevision} independently of the broker's numeric
 	 * generation, which is an in-memory counter that resets when the broker
-	 * process restarts and so cannot be trusted for change detection.
+	 * process restarts and so cannot be trusted for change detection. Full
+	 * snapshots rehash every row; deltas and local writes rehash only the ids
+	 * they touched (see {@link #dirtyCredentialIds}).
 	 */
-	#credentialFingerprint = "";
-	/** Monotonic local counter bumped whenever {@link #credentialFingerprint} changes. */
+	#credentialHashes = new Map<number, number | bigint>();
+	/** Ids whose row changed since {@link #credentialHashes} was last reconciled. */
+	#dirtyCredentialIds = new Set<number>();
+	/** Monotonic local counter bumped whenever {@link #credentialHashes} changes. */
 	#credentialRevision = 0;
 	/** Revision last reported as "seen" by {@link pollExternalChanges}; seeded from the initial snapshot. */
 	#acknowledgedRevision = 0;
@@ -304,6 +320,10 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 	readonly #observedUsageFlushMs: number;
 	/** Latched once the broker answered 404 — old broker, never report again. */
 	#observedUsageUnsupported = false;
+	/** Tail of the serialized observed-usage sends; each flush waits for the one before it. */
+	#observedUsageFlush: Promise<void> = Promise.resolve();
+	/** Cancels the exit flush registered with the first buffered usage. */
+	#cancelObservedUsageExitFlush: (() => void) | undefined;
 
 	constructor(opts: RemoteAuthCredentialStoreOptions) {
 		this.#client = opts.client;
@@ -330,6 +350,9 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 
 	#applySnapshot(snapshot: SnapshotResponse, generation: number, protectNewBlocks = true): void {
 		const nowMs = Date.now();
+		// Reads check block expiry inline; expired rows and bookkeeping are pruned
+		// here so the block diff below compares only live rows.
+		this.cleanExpiredCredentialBlocks(nowMs);
 		this.#replaceBrokerUsageAccounts(snapshot.credentials);
 		const previousCredentials = this.#snapshot.credentials;
 		const credentials = snapshot.credentials
@@ -340,7 +363,7 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 		this.#snapshot = { ...snapshot, credentials };
 		this.#generation = generation;
 		this.#snapshotReceivedAt = nowMs;
-		this.#refreshCredentialRevision();
+		this.#rebuildCredentialHashes();
 		const onSnapshot = this.#onSnapshot;
 		if (!onSnapshot) return;
 		try {
@@ -351,32 +374,52 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 	}
 
 	/**
-	 * Recompute the credential-content fingerprint and bump
-	 * {@link #credentialRevision} when it changes. Called after every snapshot
-	 * mutation so {@link pollExternalChanges} detects add/remove/replace even
-	 * when the broker's numeric generation repeats (e.g. after a broker
-	 * restart resets its in-memory counter).
+	 * Rehash every row after a full snapshot apply and bump
+	 * {@link #credentialRevision} when the routable credential set changed, so
+	 * {@link pollExternalChanges} detects add/remove/replace even when the
+	 * broker's numeric generation repeats (e.g. after a broker restart resets
+	 * its in-memory counter).
 	 */
-	#refreshCredentialRevision(): void {
-		const fingerprint = this.#computeCredentialFingerprint();
-		if (fingerprint === this.#credentialFingerprint) return;
-		this.#credentialFingerprint = fingerprint;
-		this.#credentialRevision += 1;
+	#rebuildCredentialHashes(): void {
+		const previous = this.#credentialHashes;
+		const next = new Map<number, number | bigint>();
+		let changed = false;
+		for (const entry of this.#snapshot.credentials) {
+			const hash = credentialContentHash(entry);
+			next.set(entry.id, hash);
+			if (previous.get(entry.id) !== hash) changed = true;
+		}
+		this.#credentialHashes = next;
+		this.#dirtyCredentialIds.clear();
+		if (changed || next.size !== previous.size) this.#credentialRevision += 1;
 	}
 
 	/**
-	 * Order-independent digest of the routable credential material — exactly the
-	 * fields {@link listAuthCredentials} exposes (id, provider, credential). A
-	 * token rotation or an add/remove changes it; credential blocks and usage
-	 * overlays do not.
+	 * Rehash only the rows marked in {@link #dirtyCredentialIds} (stream deltas
+	 * and local writes) and bump {@link #credentialRevision} when any of them
+	 * was added, removed, or changed since the last reconcile.
 	 */
-	#computeCredentialFingerprint(): string {
-		const parts = this.#snapshot.credentials.map(
-			entry => `${entry.id}\u0000${entry.provider}\u0000${JSON.stringify(entry.credential)}`,
-		);
-		parts.sort();
-		return parts.join("\u0001");
+	#refreshCredentialRevision(): void {
+		const dirty = this.#dirtyCredentialIds;
+		if (dirty.size === 0) return;
+		let changed = false;
+		for (const entry of this.#snapshot.credentials) {
+			if (!dirty.delete(entry.id)) continue;
+			const hash = credentialContentHash(entry);
+			if (this.#credentialHashes.get(entry.id) !== hash) {
+				this.#credentialHashes.set(entry.id, hash);
+				changed = true;
+			}
+			if (dirty.size === 0) break;
+		}
+		// Dirty ids no longer in the snapshot were removed.
+		for (const id of dirty) {
+			if (this.#credentialHashes.delete(id)) changed = true;
+		}
+		dirty.clear();
+		if (changed) this.#credentialRevision += 1;
 	}
+
 	#protectNewSnapshotBlocks(previous: readonly SnapshotEntry[], next: readonly SnapshotEntry[], nowMs: number): void {
 		const previousBlocksByKey = new Map<string, string>();
 		for (const entry of previous) {
@@ -574,19 +617,25 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 			this.#removeStreamCredential(entry.id, refresher, generation, serverNowMs, { retainBrokerUsageAccount: true });
 			return;
 		}
-		const incoming = this.#normalizeSnapshotEntryBlocks(entry, Date.now());
+		const nowMs = Date.now();
+		const incoming = this.#normalizeSnapshotEntryBlocks(entry, nowMs);
 		const index = this.#snapshot.credentials.findIndex(candidate => candidate.id === incoming.id);
-		const previousBlocks = index === -1 ? undefined : this.#snapshot.credentials[index]?.blocks;
+		// Expired rows linger until the next prune; compare only live ones.
+		const previousBlocks =
+			index === -1
+				? undefined
+				: this.#snapshot.credentials[index]?.blocks?.filter(block => block.blockedUntilMs > nowMs);
 		const blocksChanged = !credentialBlockSnapshotsEqual(previousBlocks, incoming.blocks);
 		if (blocksChanged) this.#invalidateUsageCache();
 		const credentials =
 			index === -1
 				? [...this.#snapshot.credentials, incoming]
 				: this.#snapshot.credentials.map((candidate, i) => (i === index ? incoming : candidate));
-		if (blocksChanged) this.#protectNewSnapshotBlocks(this.#snapshot.credentials, credentials, Date.now());
+		if (blocksChanged) this.#protectNewSnapshotBlocks(this.#snapshot.credentials, credentials, nowMs);
 		this.#snapshot = { ...this.#snapshot, generation, serverNowMs, refresher, credentials };
 		this.#generation = generation;
-		this.#snapshotReceivedAt = Date.now();
+		this.#snapshotReceivedAt = nowMs;
+		this.#dirtyCredentialIds.add(incoming.id);
 		this.#refreshCredentialRevision();
 	}
 
@@ -598,12 +647,14 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 		options?: { retainBrokerUsageAccount?: boolean },
 	): void {
 		if (!options?.retainBrokerUsageAccount) this.#removeBrokerUsageAccount(id);
+		const nowMs = Date.now();
 		const removed = this.#snapshot.credentials.find(entry => entry.id === id);
-		if (removed?.blocks && removed.blocks.length > 0) this.#invalidateUsageCache();
+		if (removed?.blocks?.some(block => block.blockedUntilMs > nowMs)) this.#invalidateUsageCache();
 		const credentials = this.#snapshot.credentials.filter(entry => entry.id !== id);
 		this.#snapshot = { ...this.#snapshot, generation, serverNowMs, refresher, credentials };
 		this.#generation = generation;
-		this.#snapshotReceivedAt = Date.now();
+		this.#snapshotReceivedAt = nowMs;
+		this.#dirtyCredentialIds.add(id);
 		this.#refreshCredentialRevision();
 	}
 
@@ -661,26 +712,38 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 
 	getCredentialBlock(credentialId: number, providerKey: string, blockScope: string): number | undefined {
 		this.#noteActivity();
-		const nowMs = Date.now();
-		this.cleanExpiredCredentialBlocks(nowMs);
+		// Expired rows are pruned on snapshot apply, not per read; filter inline.
 		const entry = this.#snapshot.credentials.find(candidate => candidate.id === credentialId);
 		if (!entry?.blocks) return undefined;
 		const block = entry.blocks.find(
 			candidate => candidate.providerKey === providerKey && candidate.blockScope === blockScope,
 		);
-		if (!block || block.blockedUntilMs <= nowMs) return undefined;
+		if (!block || block.blockedUntilMs <= Date.now()) return undefined;
 		return block.blockedUntilMs;
+	}
+
+	getCredentialBlockScopes(credentialId: number, providerKey: string): Map<string, number> {
+		this.#noteActivity();
+		const nowMs = Date.now();
+		const scopes = new Map<string, number>();
+		const entry = this.#snapshot.credentials.find(candidate => candidate.id === credentialId);
+		for (const block of entry?.blocks ?? []) {
+			if (block.providerKey !== providerKey || block.blockedUntilMs <= nowMs) continue;
+			scopes.set(block.blockScope, block.blockedUntilMs);
+		}
+		return scopes;
 	}
 
 	getCredentialBlockReconcileAfter(credentialId: number, providerKey: string, blockScope: string): number | undefined {
 		if (this.getCredentialBlock(credentialId, providerKey, blockScope) === undefined) return undefined;
-		return this.#credentialBlockReconcileAfter.get(blockKey(credentialId, { providerKey, blockScope }));
+		const key = blockKey(credentialId, { providerKey, blockScope });
+		const reconcileAfterMs = this.#credentialBlockReconcileAfter.get(key);
+		return reconcileAfterMs !== undefined && reconcileAfterMs > Date.now() ? reconcileAfterMs : undefined;
 	}
 
 	listCredentialBlocks(credentialIds: readonly number[]): StoredCredentialBlock[] {
 		this.#noteActivity();
 		const nowMs = Date.now();
-		this.cleanExpiredCredentialBlocks(nowMs);
 		const ids = new Set(credentialIds);
 		const blocks: StoredCredentialBlock[] = [];
 		for (const entry of this.#snapshot.credentials) {
@@ -801,6 +864,7 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 		for (const entry of this.#snapshot.credentials) {
 			if (entry.id !== id) continue;
 			entry.credential = credential as typeof entry.credential;
+			this.#dirtyCredentialIds.add(id);
 			return;
 		}
 	}
@@ -849,15 +913,7 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 
 	async markCredentialSuspect(credentialId: number, opts: { signal?: AbortSignal } = {}): Promise<void> {
 		this.#noteActivity();
-		const { entry } = await this.#client.refreshCredential(credentialId, opts.signal, "auth-recovery");
-		if (entry.credential.type !== "oauth") {
-			throw new AIError.AuthBrokerError(`Broker returned non-OAuth credential for id=${credentialId}`);
-		}
-		if (!this.#applyCredentialEntry(entry)) {
-			throw new AIError.AuthBrokerError(
-				`Broker refreshed credential id=${credentialId} outside the configured account pool`,
-			);
-		}
+		await this.#refreshThroughBroker(credentialId, opts.signal, "auth-recovery");
 		this.#maybeRefreshSnapshot("suspect credential refresh");
 	}
 
@@ -931,15 +987,20 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 		// `entries` is the broker's authoritative post-upsert list of rows for
 		// `provider`. Drop our existing rows for the same provider and splice in
 		// the fresh set — preserving every other provider's rows in place.
-		const existingBlocks = new Map(
-			this.#snapshot.credentials
-				.filter(entry => entry.provider === provider && entry.blocks !== undefined)
-				.map(entry => [entry.id, entry.blocks] as const),
-		);
-		const others = this.#snapshot.credentials.filter(entry => entry.provider !== provider);
+		const existingBlocks = new Map<number, readonly CredentialBlockSnapshot[] | undefined>();
+		const others: SnapshotEntry[] = [];
+		for (const entry of this.#snapshot.credentials) {
+			if (entry.provider !== provider) {
+				others.push(entry);
+				continue;
+			}
+			this.#dirtyCredentialIds.add(entry.id);
+			if (entry.blocks !== undefined) existingBlocks.set(entry.id, entry.blocks);
+		}
 		const incoming = entries
 			.filter(entry => isCredentialInAccountPool(entry, this.#accountPool))
 			.map(entry => credentialEntryWithBlocks(entry, existingBlocks.get(entry.id)));
+		for (const entry of incoming) this.#dirtyCredentialIds.add(entry.id);
 		this.#snapshot = { ...this.#snapshot, credentials: [...others, ...incoming] };
 	}
 	#applyCredentialEntry(entry: AuthCredentialSnapshotEntry): boolean {
@@ -950,6 +1011,7 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 		const index = this.#snapshot.credentials.findIndex(candidate => candidate.id === entry.id);
 		const existingBlocks = index === -1 ? undefined : this.#snapshot.credentials[index]?.blocks;
 		const incoming = credentialEntryWithBlocks(entry, existingBlocks);
+		this.#dirtyCredentialIds.add(entry.id);
 		if (index === -1) {
 			this.#snapshot = { ...this.#snapshot, credentials: [...this.#snapshot.credentials, incoming] };
 			return true;
@@ -961,13 +1023,18 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 	}
 
 	#removeProviderEntries(provider: string): void {
-		const next = this.#snapshot.credentials.filter(entry => entry.provider !== provider);
+		const next: SnapshotEntry[] = [];
+		for (const entry of this.#snapshot.credentials) {
+			if (entry.provider === provider) this.#dirtyCredentialIds.add(entry.id);
+			else next.push(entry);
+		}
 		this.#snapshot = { ...this.#snapshot, credentials: next };
 	}
 
 	#removeCredentialById(id: number): void {
 		const next = this.#snapshot.credentials.filter(entry => entry.id !== id);
 		this.#snapshot = { ...this.#snapshot, credentials: next };
+		this.#dirtyCredentialIds.add(id);
 	}
 
 	#normalizeSnapshotEntryBlocks(entry: SnapshotEntry, nowMs: number): SnapshotEntry {
@@ -1037,7 +1104,10 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 		if (index === -1) return;
 		const entry = this.#snapshot.credentials[index]!;
 		const incoming = toCredentialBlockSnapshot(block);
-		const blocks = entry.blocks ? [...entry.blocks] : [];
+		// Expired rows linger until the next prune; drop this entry's now so an
+		// expired row in the same scope cannot lend the new block its stale fields.
+		const nowMs = Date.now();
+		const blocks = (entry.blocks ?? []).filter(candidate => candidate.blockedUntilMs > nowMs);
 		const blockIndex = blocks.findIndex(
 			candidate => candidate.providerKey === incoming.providerKey && candidate.blockScope === incoming.blockScope,
 		);
@@ -1132,11 +1202,11 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 		}
 	}
 
-	async invalidateUsageCache(signal?: AbortSignal): Promise<void> {
+	async invalidateUsageCache(provider?: string, signal?: AbortSignal): Promise<void> {
 		this.#noteActivity();
 		this.#invalidateUsageCache();
 		try {
-			await this.#client.notifyUsageStale(signal);
+			await this.#client.notifyUsageStale(provider, signal);
 		} catch (err) {
 			logger.warn("auth-broker notification of stale usage failed", { error: String(err) });
 		} finally {
@@ -1168,21 +1238,12 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 		reason?: OAuthRefreshReason,
 	): Promise<OAuthCredentials> {
 		this.#noteActivity();
-		const { entry } = await this.#client.refreshCredential(credentialId, signal, reason);
-		if (entry.credential.type !== "oauth") {
-			throw new AIError.AuthBrokerError(`Broker returned non-OAuth credential for id=${credentialId}`);
-		}
-		if (!this.#applyCredentialEntry(entry)) {
-			throw new AIError.AuthBrokerError(
-				`Broker refreshed credential id=${credentialId} outside the configured account pool`,
-			);
-		}
+		const refreshed = await this.#refreshThroughBroker(credentialId, signal, reason);
 		if (!this.#streamingActive) {
 			await this.refreshSnapshot().catch(error => {
 				logger.debug("auth-broker snapshot refresh after credential refresh failed", { error: String(error) });
 			});
 		}
-		const refreshed = entry.credential;
 		return {
 			access: refreshed.access,
 			refresh: REMOTE_REFRESH_SENTINEL,
@@ -1192,6 +1253,38 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 			projectId: refreshed.projectId,
 			enterpriseUrl: refreshed.enterpriseUrl,
 		};
+	}
+
+	/**
+	 * Refresh one credential through the broker and apply the reply. If this
+	 * client's copy changed to something else while the request was in flight,
+	 * the reply may be stale, so the broker's current row wins: a logout stays
+	 * logged out and a newer login is kept.
+	 */
+	async #refreshThroughBroker(
+		credentialId: number,
+		signal?: AbortSignal,
+		reason?: OAuthRefreshReason,
+	): Promise<RemoteOAuthCredential> {
+		const local = () => this.#snapshot.credentials.find(candidate => candidate.id === credentialId);
+		const before = JSON.stringify(local()?.credential);
+		let { entry } = await this.#client.refreshCredential(credentialId, signal, reason);
+		const current = JSON.stringify(local()?.credential);
+		if (current !== before && current !== JSON.stringify(entry.credential)) {
+			await this.refreshSnapshot();
+			const latest = local();
+			if (!latest) throw new AIError.AuthBrokerError(`Credential id=${credentialId} was removed during refresh`);
+			entry = latest;
+		}
+		if (entry.credential.type !== "oauth") {
+			throw new AIError.AuthBrokerError(`Broker returned non-OAuth credential for id=${credentialId}`);
+		}
+		if (!this.#applyCredentialEntry(entry)) {
+			throw new AIError.AuthBrokerError(
+				`Broker refreshed credential id=${credentialId} outside the configured account pool`,
+			);
+		}
+		return entry.credential;
 	}
 
 	/**
@@ -1369,9 +1462,10 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 
 	/**
 	 * Fold locally observed request usage into the pending report and schedule
-	 * a flush. One `POST /v1/usage/observed` at most per flush interval; on
-	 * failure the batch is retained and retried with the next flush. A 404
-	 * (pre-endpoint broker) disables reporting for the life of this store.
+	 * a flush. One `POST /v1/usage/observed` at most per flush interval, plus a
+	 * final one when the process exits; on failure the batch is retained and
+	 * retried with the next flush. A 404 (pre-endpoint broker) disables
+	 * reporting for the life of this store.
 	 *
 	 * `client` overrides the reporting identity — the auth-gateway attributes
 	 * each request to the originating install/app instead of the gateway host.
@@ -1401,9 +1495,31 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 			}, this.#observedUsageFlushMs);
 			this.#observedUsageTimer.unref?.();
 		}
+		// The timer never holds the process open, so a process that exits first (a
+		// one-shot run, a signal) sends what is still buffered on the way out. The
+		// wait is bounded: an unreachable broker must not stall the exit.
+		this.#cancelObservedUsageExitFlush ??= postmortem.register("auth-broker-observed-usage", () =>
+			raceSignal(
+				this.#flushObservedUsage(),
+				AbortSignal.timeout(OBSERVED_USAGE_EXIT_FLUSH_MS),
+				"observed usage exit flush timed out",
+			).catch(error => {
+				logger.debug("auth-broker observed usage dropped at exit", { error: String(error) });
+			}),
+		);
 	}
 
-	async #flushObservedUsage(): Promise<void> {
+	#flushObservedUsage(): Promise<void> {
+		// The tail never rejects, so one failed send cannot stall every later flush.
+		this.#observedUsageFlush = this.#observedUsageFlush
+			.then(() => this.#sendObservedUsage())
+			.catch(error => {
+				logger.debug("auth-broker observed usage flush failed", { error: String(error) });
+			});
+		return this.#observedUsageFlush;
+	}
+
+	async #sendObservedUsage(): Promise<void> {
 		if (this.#observedUsage.size === 0 || this.#observedUsageUnsupported) return;
 		const batch = [...this.#observedUsage.values()];
 		this.#observedUsage.clear();
@@ -1452,8 +1568,9 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 			clearTimeout(this.#observedUsageTimer);
 			this.#observedUsageTimer = undefined;
 		}
-		// Best-effort final flush; failures are dropped (the process is exiting).
-		if (this.#observedUsage.size > 0) void this.#flushObservedUsage();
+		// Final flush. The exit registration outlives close() until it settles, so a
+		// process exiting right after close() still sends it; failures are dropped.
+		void this.#flushObservedUsage().finally(() => this.#cancelObservedUsageExitFlush?.());
 		this.#cache.clear();
 		this.#usageOverlays.clear();
 	}

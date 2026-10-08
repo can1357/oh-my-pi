@@ -172,7 +172,7 @@ behavior {
 	// SuperGrok's roster interleaves media models the chat picker cannot
 	// serve; the dedicated tool surfaces route them instead.
 	exclude-models provider="xai-oauth" exact="grok-imagine-image-quality" exact="grok-imagine-image-2.0" \
-		exact="grok-imagine-video" exact="grok-imagine-video-1.5" prefix="grok-stt-" prefix="grok-voice-"
+		prefix="grok-imagine-video" prefix="grok-stt-" prefix="grok-voice-"
 	// Meta's /v1/models lists image generation and transcription SKUs beside
 	// the Muse Spark chat models.
 	exclude-models provider="meta" prefix="muse-image-" prefix="muse-voice-"
@@ -351,6 +351,8 @@ behavior {
 		alias "claude-opus-4-6" peer-id="claude-opus-4-6@default"
 		alias "claude-sonnet-4-5" peer-id="claude-sonnet-4-5@20250929"
 		alias "claude-sonnet-4-6" peer-id="claude-sonnet-4-6@default"
+		alias "claude-opus-5-5" peer-id="claude-opus-5-5@default"
+		alias "claude-sonnet-5-5" peer-id="claude-sonnet-5-5@default"
 	}
 	// SuperGrok surfaces a few models under IDs that differ from their public
 	// xai equivalent, so the exact-id price mirror misses them.

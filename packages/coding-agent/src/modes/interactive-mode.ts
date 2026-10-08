@@ -20,6 +20,7 @@ import type {
 	AutocompleteProvider,
 	Component,
 	EditorTheme,
+	KeyId,
 	LoaderMessageColorFn,
 	OverlayHandle,
 	SlashCommand,
@@ -49,7 +50,7 @@ import { describeSegmentTrack, renderSegmentTrack, type TrackSegment } from "@oh
 import type { WorkingRowSpec } from "@oh-my-pi/pi-tui/components/loader";
 import { formatDoubleTap } from "@oh-my-pi/pi-tui/key-hint-format";
 import { thinkingLevelWord } from "@oh-my-pi/pi-tui/status-line/segments";
-import type { TspChecklistItem, TspChecklistPhase, TspSpan, TspTreeNode } from "@oh-my-pi/pi-wire";
+import type { TspChecklistItem, TspChecklistPhase, TspSpan, TspText, TspTreeNode } from "@oh-my-pi/pi-wire";
 import { isInsideTerminalMultiplexer } from "@oh-my-pi/pi-tui/terminal-capabilities";
 import {
 	$env,
@@ -62,16 +63,16 @@ import {
 	postmortem,
 	prompt,
 	sanitizeText,
-	stableStringifyJson,
 	setProjectDir,
 } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
+import { pickTableChart } from "../auto-graph/planner";
 import { restartArgv } from "../cli/flag-tables";
 import type { CollabGuestLink } from "../collab/guest";
 import { CollabController } from "../collab/controller";
 import type { CollabHost } from "../collab/host";
-import { formatKeyHint, KeybindingsManager } from "@oh-my-pi/pi-tui/app-keybindings";
-import { appKey, editorKey } from "@oh-my-pi/pi-tui/chrome/keybinding-hints";
+import { KeybindingsManager } from "@oh-my-pi/pi-tui/app-keybindings";
+import { appKey, editorKey, rawKeyHint } from "@oh-my-pi/pi-tui/chrome/keybinding-hints";
 import { formatModelString, type ResolvedModelRoleValue } from "../config/model-resolver";
 import { isSettingsInitialized, Settings, settings } from "../config/settings";
 import { clearClaudePluginRootsCache } from "../discovery/helpers";
@@ -89,7 +90,6 @@ import type { CompactOptions } from "../extensibility/extensions/types";
 import type { Skill } from "../extensibility/skills";
 import type { FileSlashCommand } from "../extensibility/slash-commands";
 import { loadSlashCommands } from "../extensibility/slash-commands";
-import type { Goal } from "@oh-my-pi/pi-tui/tools/goal";
 import type { GoalModeState } from "../goals/state";
 import { rebindMemoryBackendForCwd } from "../hindsight/backend";
 import { copyLocalArtifacts, resolveLocalRoot } from "../internal-urls";
@@ -134,11 +134,11 @@ import { HistoryStorage } from "../session/history-storage";
 import { syncTextPrediction, textPredictionBackend } from "../predict/client";
 import { setWordPredictionHost } from "@oh-my-pi/pi-tui/prompt/word-completion";
 import { USER_INTERRUPT_LABEL } from "../session/messages";
-import { resolveMarkdownLinkTargets } from "../internal-urls/hyperlink-targets";
+import { resolveMarkdownLinkHrefs } from "../internal-urls/hyperlink-targets";
+import type { ResolveContext } from "../internal-urls/index";
 import { modelMentionDisplayName } from "@oh-my-pi/pi-tui/prompt/model-mention-syntax";
 import { modelMentionChipLabel, shiftImageMarkers } from "@oh-my-pi/pi-tui/prompt/composer-attachments";
 import type { SessionContext } from "../session/session-context";
-import { getRecentSessions } from "../session/session-listing";
 import type { SessionManager } from "../session/session-manager";
 import type { ShakeMode } from "../session/shake-types";
 import { BUILTIN_SLASH_COMMAND_RESERVED_NAMES, buildTuiBuiltinSlashCommands } from "../slash-commands/builtin-registry";
@@ -205,9 +205,9 @@ import {
 	initTerminalTitleState,
 	popTerminalTitle,
 	pushTerminalTitle,
-	reportTernSessionFile,
+	reportTernSession,
 	setSessionTerminalTitle,
-	setTerminalSessionFileSource,
+	setTerminalSessionSource,
 	setTerminalTitlePullRequest,
 	setTerminalTitleSpinnerStyle,
 	setTerminalTitleStateEnabled,
@@ -219,6 +219,8 @@ import {
 	VibeSessionRegistry,
 } from "../vibe/runtime";
 import { AssistantMessageComponent } from "@oh-my-pi/pi-tui/chat/assistant-message";
+import { setSvgFigureRendering } from "@oh-my-pi/pi-tui/chat/svg-figure";
+import { setTableCharts } from "@oh-my-pi/pi-tui/chat/table-chart";
 import { setTranscriptActionHandler } from "@oh-my-pi/pi-tui/chat/transcript-actions";
 import { StatusNotice } from "@oh-my-pi/pi-tui/chrome/status-notice";
 import { ReadToolGroupComponent } from "@oh-my-pi/pi-tui/chat/read-tool-group";
@@ -245,7 +247,6 @@ import { StatusLineComponent } from "@oh-my-pi/pi-tui/status-line";
 import { statusLineHost } from "./status-line-host";
 import { stopSharedSpinnerTicker, type ToolExecutionHandle } from "@oh-my-pi/pi-tui/chat/tool-execution";
 import { TranscriptContainer } from "@oh-my-pi/pi-tui/chrome/transcript-container";
-import type { LspServerInfo as WelcomeLspServerInfo } from "@oh-my-pi/pi-tui/prompt/welcome";
 import {
 	Composer,
 	type ComposerPreferences,
@@ -269,7 +270,7 @@ import { SessionFocusController } from "./controllers/session-focus-controller";
 import { SSHCommandController } from "./controllers/ssh-command-controller";
 import { TanCommandController } from "./controllers/tan-command-controller";
 import { TodoCommandController } from "./controllers/todo-command-controller";
-import { imageReferenceHyperlink, materializeImageReferenceLinks } from "@oh-my-pi/pi-tui/prompt/image-references";
+import { imageReferenceHyperlink } from "@oh-my-pi/pi-tui/prompt/image-references";
 import { describeLoopCondition, evaluateLoopCondition, type LoopConditionVerdict } from "./loop-condition";
 import {
 	consumeLoopLimitIteration,
@@ -319,10 +320,11 @@ import type {
 	InteractiveModeInitOptions,
 	InteractiveSelectorDialogOptions,
 	RenderSessionContextOptions,
+	ShowStatusOptions,
 	SubmittedUserInput,
 } from "./types";
 import type { TodoItem, TodoPhase } from "@oh-my-pi/pi-tui/tools/todo";
-import { UiHelpers } from "./utils/ui-helpers";
+import { materializeImageChipLinks, UiHelpers } from "./utils/ui-helpers";
 
 import {
 	cfgAutocompleteMaxVisible,
@@ -362,8 +364,10 @@ import {
 	cfgTuiHyperlinks,
 	cfgTuiImeSafeCursor,
 	cfgTuiMaxInlineImages,
+	cfgTuiAutoGraph,
 	cfgTuiMouse,
 	cfgTuiRenderMermaid,
+	cfgTuiRenderSvg,
 	cfgTuiResizeScrollback,
 	cfgTuiTextSizing,
 	cfgTuiTight,
@@ -373,10 +377,11 @@ import {
 	cfgTuiVimModeDisplay,
 } from "./settings";
 import { cfgTasksTodoClearDelay } from "../tools/settings";
-import { cfgProseOnlyThinking } from "../session/settings";
+import { cfgExpandThinkingBlocks, cfgProseOnlyThinking } from "../session/settings";
 import { cfgHideThinkingBlock } from "../session/settings";
 import { cfgCycleOrder, cfgModelRoles } from "../config/model-settings";
 import { cfgGoalContinuationModes, cfgGoalEnabled } from "../goals/settings";
+import { goalContinuationActivity, goalFromModeData } from "../goals/state";
 import { cfgPlanDefaultOnStartup, cfgPlanEnabled } from "../plan-mode/settings";
 import { cfgStreamRedactPatterns } from "../stream/settings";
 import { cfgSttEnabled } from "../stt/settings";
@@ -420,11 +425,14 @@ const cfgLiveUiSettings = combine({
 	"terminal.showImages": cfgTerminalShowImages,
 	hideThinkingBlock: cfgHideThinkingBlock,
 	proseOnlyThinking: cfgProseOnlyThinking,
+	expandThinkingBlocks: cfgExpandThinkingBlocks,
 	"display.cacheMissMarker": cfgDisplayCacheMissMarker,
 	"display.collapseCompacted": cfgDisplayCollapseCompacted,
 	"display.showTokenUsage": cfgDisplayShowTokenUsage,
 	"display.showTurnTime": cfgDisplayShowTurnTime,
 	"tui.renderMermaid": cfgTuiRenderMermaid,
+	"tui.renderSvg": cfgTuiRenderSvg,
+	"tui.autoGraph": cfgTuiAutoGraph,
 	"tui.textSizing": cfgTuiTextSizing,
 	"tui.tight": cfgTuiTight,
 	"tui.hyperlinks": cfgTuiHyperlinks,
@@ -657,23 +665,13 @@ class TodoHudContainer extends AnchoredLiveContainer {
 		}
 		return super.render(width);
 	}
-
-	/**
-	 * The plan built with the ANSI rows: a HUD `checklist` where the terminal
-	 * has one, else the phase tree. The short-terminal fold is ANSI layout only.
-	 */
-	override describe(cx: DescribeContext): NativeNode {
-		const hud = this.mode.todoHudNative;
-		if (!hud) return EMPTY_HUD;
-		return cx.supports("checklist") ? hud.checklist : hud.fallback;
-	}
 }
 
 /**
- * Native-only dock row of HUD pills (§8.1), right-aligned above the working
- * row: the todo HUD, the subagent pill and the background-jobs pill. ANSI
- * renders the first two in their own containers and the jobs count in the
- * status line, so this row renders nothing.
+ * Native-only dock row of HUD pills (§8.1), right-aligned above the activity
+ * line: the agents pill and the background-jobs pill. ANSI renders the pinned
+ * agent list in its own container and the agent and job counts in the status
+ * line, so this row renders nothing.
  */
 class HudPillsRow implements Component {
 	constructor(private readonly mode: InteractiveMode) {}
@@ -686,34 +684,57 @@ class HudPillsRow implements Component {
 		return this.mode.describeHudPills();
 	}
 
-	/** A click on the jobs pill opens the jobs sheet. */
+	/** A click on the agents pill opens the agent hub; one on the jobs pill, the jobs sheet. */
 	handleNativeEvent(event: NativeUiEvent): void {
-		if (event.type === "action" && event.act === "jobs.open") this.mode.showJobsSheet();
+		if (event.type !== "action") return;
+		if (event.act === "agents.open") this.mode.showAgentHub();
+		else if (event.act === "jobs.open") this.mode.showJobsSheet();
 	}
 }
 
-/** Native jobs pill (§8.1): the running background jobs, with a spinner; a click sends `jobs.open`. */
-function describeJobsHud(running: number): NativeNode {
+/** A described running-work pill with the count it shows, so an unchanged count reuses the node. */
+interface RunningPill {
+	readonly running: number;
+	readonly node: NativeNode;
+}
+
+/** `prev` while it still shows `running`, else a fresh pill from `describe`; undefined when nothing runs. */
+function runningPill(
+	prev: RunningPill | undefined,
+	running: number,
+	describe: (running: number) => NativeNode,
+): RunningPill | undefined {
+	if (running === 0) return undefined;
+	return prev?.running === running ? prev : { running, node: describe(running) };
+}
+
+/** What a running-work pill shows and the action a click on it sends to {@link HudPillsRow}. */
+interface RunningPillSpec {
+	/** Sibling key in the HUD row: the pill keeps its id, and skips its entrance, as the count changes. */
+	readonly key: string;
+	readonly icon: string;
+	/** Singular noun the count reads with (`1 job running`, `2 jobs running`). */
+	readonly noun: string;
+	readonly title: string;
+	readonly act: string;
+}
+
+/** Native dock pill (§8.1) counting running work, with a spinner. */
+function describeRunningPill(spec: RunningPillSpec, running: number): NativeNode {
 	return node(
 		"row",
-		{
-			role: "omp.hud.pill",
-			gap: "xs",
-			align: "center",
-			title: "Background jobs  /jobs",
-			actions: { click: "jobs.open" },
-		},
+		{ role: "omp.hud.pill", gap: "xs", align: "center", title: spec.title, actions: { click: spec.act } },
 		[
-			node("icon", { name: "job" }, undefined, "icon"),
+			node("icon", { name: spec.icon }, undefined, "icon"),
 			node("spinner", { style: "dots", tone: "accent" }, undefined, "spinner"),
 			node(
 				"text",
-				{ text: `${running} ${running === 1 ? "job" : "jobs"} running`, wrap: "none" },
+				{ text: `${running} ${spec.noun}${running === 1 ? "" : "s"} running`, wrap: "none" },
 				undefined,
 				"label",
 			),
 		],
-		"jobs",
+		spec.key,
 	);
 }
 
@@ -722,8 +743,8 @@ class StatusHudContainer extends AnchoredLiveContainer {
 		super();
 	}
 
-	override describe(): NativeNode {
-		return this.mode.describeStatusHud(this.children);
+	override describe(cx: DescribeContext): NativeNode {
+		return this.mode.describeStatusHud(this.children, cx);
 	}
 
 	override render(width: number): readonly string[] {
@@ -822,37 +843,19 @@ export class SubagentHudComponent implements Component {
 	#lines: readonly string[];
 	#order: readonly string[];
 	#toggleLine: number | undefined;
-	#node: NativeNode;
-	readonly #onOpen: (() => void) | undefined;
 	#physicalOwner?: (string | undefined)[];
 	#renderedWidth?: number;
 	#renderedRows = 0;
 	#renderedWidthConfigEpoch?: number;
-	constructor(lines: readonly string[], order: readonly string[], toggleRow?: number, native?: SubagentHudNative) {
+	constructor(lines: readonly string[], order: readonly string[], toggleRow?: number) {
 		this.#text = new Text(lines.join("\n"), 1, 0);
 		this.#lines = lines;
 		this.#order = order;
 		this.#toggleLine = toggleRow;
-		this.#node = native?.node ?? EMPTY_HUD;
-		this.#onOpen = native?.onOpen;
 	}
 
-	describe(): NativeNode {
-		return this.#node;
-	}
-
-	/** A click on the pill opens the agent hub, as the hub key does. */
-	handleNativeEvent(event: NativeUiEvent): void {
-		if (event.type === "action" && event.act === "agents.open") this.#onOpen?.();
-	}
-	/**
-	 * Repaint in place with a new view. Keeping the instance keeps its native
-	 * wire id, so the dock pill stays mounted (a fresh component would be
-	 * removed and re-added, replaying its entrance) and the HUD memo holds.
-	 * The click map rebuilds lazily.
-	 */
-	update(lines: readonly string[], order: readonly string[], toggleRow: number | undefined, node: NativeNode): void {
-		this.#node = node;
+	/** Repaint in place with a new view; the click map rebuilds lazily. */
+	update(lines: readonly string[], order: readonly string[], toggleRow: number | undefined): void {
 		this.#order = order;
 		this.#toggleLine = toggleRow;
 		this.#text.setText(lines.join("\n"));
@@ -909,41 +912,6 @@ export class SubagentHudComponent implements Component {
 		}
 		this.#physicalOwner = owner;
 	}
-}
-
-/** Native side of the subagent HUD: the pill and what a click on it opens. */
-export interface SubagentHudNative {
-	readonly node: NativeNode;
-	/** Open the agent hub. */
-	onOpen(): void;
-}
-
-/**
- * Native subagent HUD: one dock pill (§8.1) counting the running subagents,
- * with a spinner while they run; a click sends `agents.open`.
- */
-export function describeSubagentHud(sessions: ObservableSession[]): NativeNode {
-	const running = sessions.filter(isHudSubagent).length;
-	if (running === 0) return EMPTY_HUD;
-	return row(
-		[
-			node("icon", { name: "users" }, undefined, "icon"),
-			node("spinner", { style: "dots", tone: "accent" }, undefined, "spinner"),
-			node(
-				"text",
-				{ text: `${running} ${running === 1 ? "agent" : "agents"} running`, wrap: "none" },
-				undefined,
-				"label",
-			),
-		],
-		{
-			role: "omp.hud.pill",
-			gap: "xs",
-			align: "center",
-			title: `Agents  ${formatDoubleTap("left")}`,
-			actions: { click: "agents.open" },
-		},
-	);
 }
 
 const SUBAGENT_OBSERVER_UI_COALESCE_MS = 100;
@@ -1209,6 +1177,8 @@ export class InteractiveMode implements InteractiveModeContext {
 	errorBannerContainer: Container;
 	modelCycleContainer: Container;
 	deferredCommandContainer: Container;
+	/** The docked `/changelog`-style command report, just above the editor; Esc clears it. */
+	reportContainer: Container;
 	editor: CustomEditor;
 	editorContainer: Container;
 	/** Composer attachment band (chip cards) rendered directly above the prompt box. */
@@ -1286,6 +1256,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		return this.hideThinkingBlock || (thinkingOff && !this.hasDisplayableThinkingContent);
 	}
 	proseOnlyThinking = true;
+	expandThinkingBlocks = false;
 	compactionQueuedMessages: CompactionQueuedMessage[] = [];
 	pendingTools = new Map<string, ToolExecutionHandle>();
 	transcriptMessageComponents = new WeakMap<AgentMessage, Component>();
@@ -1350,35 +1321,34 @@ export class InteractiveMode implements InteractiveModeContext {
 	 * loader recreated by a focus switch keeps the real elapsed time.
 	 */
 	#workingStartedAt = 0;
-	#idleStatusNative: { rate: number | undefined; node: NativeNode } | undefined;
-	#statusHudNative: { children: readonly Component[]; slot: NativeNode | undefined; node: NativeNode } | undefined;
+	#statusHudNative: { children: readonly Component[]; todo: NativeNode | undefined; node: NativeNode } | undefined;
 	/**
 	 * The todo HUD, rebuilt with its ANSI rows; undefined while hidden. A
 	 * terminal with `checklist` gets the whole plan as a HUD checklist, others
-	 * the same stage window as a tree.
+	 * the same stage window as a tree; both keyed `todo` in the activity line.
 	 */
-	todoHudNative: { checklist: NativeNode; fallback: NativeNode } | undefined;
-	#hudPillsNative: { children: readonly NativeChild[]; empty: boolean; node: NativeNode } | undefined;
-	#jobsHudNative: { running: number; node: NativeNode } | undefined;
-	/** Live gen tok/s for the native working row, one decimal (a steadier `rate` target). */
+	#todoHudNative: { checklist: NativeNode; fallback: NativeNode } | undefined;
+	#hudPillsNative: { children: readonly NativeChild[]; node: NativeNode } | undefined;
+	#agentsPill: RunningPill | undefined;
+	#jobsPill: RunningPill | undefined;
+	/** Gen tok/s for the native composer bar, one decimal (a steadier `rate` target): live while running, else the last reading. */
 	#nativeTokenRate(): number | undefined {
 		if (!cfgComposerTokenRate.get(settings)) return undefined;
 		const rate = this.tokenRate.rate();
 		return rate === null ? undefined : Math.round(rate * 10) / 10;
 	}
 	/** The key that interrupts (the working row's stop control), or undefined when Esc would not cancel. */
-	maintenanceInterruptKey(): string | undefined {
+	maintenanceInterruptKey(): KeyId | undefined {
 		if (this.focusedAgentId) return undefined;
 		return this.keybindings.getKeys("app.interrupt")[0] ?? "escape";
 	}
-	/** The running turn's working row (§8.1): the intent, its elapsed time, tok/s and the stop control. */
+	/** The running turn's working row (§8.1): its elapsed time, the intent and the stop control. */
 	#workingRowSpec(): WorkingRowSpec {
 		const accent = this.#getWorkingMessageAccent() !== undefined;
 		return {
 			label: this.#workingMessage,
 			startedAt: this.#workingStartedAt,
 			palette: accent ? NATIVE_ACCENT_SHIMMER : undefined,
-			rate: this.#nativeTokenRate(),
 			interruptKey: this.keybindings.getKeys("app.interrupt")[0] ?? "escape",
 		};
 	}
@@ -1386,57 +1356,63 @@ export class InteractiveMode implements InteractiveModeContext {
 	interruptFromPointer(): void {
 		this.editor.onEscape?.();
 	}
-	/** Between turns: the last tok/s reading, docked right; nothing when there is none. */
-	#describeIdleStatusHud(): NativeNode | undefined {
-		const rate = this.#nativeTokenRate();
-		if (rate === undefined) return undefined;
-		if (this.#idleStatusNative?.rate !== rate) {
-			this.#idleStatusNative = {
-				rate,
-				node: row([node("rate", { value: rate, unit: "tok/s" }, undefined, "rate")], {
-					justify: "end",
-					role: "omp.working.idle",
-				}),
-			};
-		}
-		return this.#idleStatusNative.node;
-	}
-	/** The native HUD pills row: the todo HUD, the subagent pill, then the jobs pill; hidden while all are empty. */
+	/** The native HUD pills row: the agents pill, then the jobs pill; hidden while both are absent. */
 	describeHudPills(): NativeNode {
-		const running = this.statusLine.runningBackgroundJobCount();
-		if (running === 0) this.#jobsHudNative = undefined;
-		else if (this.#jobsHudNative?.running !== running) {
-			this.#jobsHudNative = { running, node: describeJobsHud(running) };
-		}
-		const children: NativeChild[] = [this.todoContainer, ...this.subagentContainer.children];
-		if (this.#jobsHudNative) children.push(this.#jobsHudNative.node);
+		// Agents count as the status-line badge counts them, from the agent
+		// registry: the observer registry only hears task-executor lifecycles,
+		// so an agent a peer message woke or revived would run without a pill.
+		const agents = cfgDisplayPinnedAgents.get(settings) === "off" ? 0 : this.#runningSubagentCount;
+		this.#agentsPill = runningPill(this.#agentsPill, agents, count =>
+			describeRunningPill(
+				{
+					key: "agents",
+					icon: "users",
+					noun: "agent",
+					title: `Agents  ${formatDoubleTap("left")}`,
+					act: "agents.open",
+				},
+				count,
+			),
+		);
+		this.#jobsPill = runningPill(this.#jobsPill, this.statusLine.runningBackgroundJobCount(), count =>
+			describeRunningPill(
+				{ key: "jobs", icon: "job", noun: "job", title: "Background jobs  /jobs", act: "jobs.open" },
+				count,
+			),
+		);
+		const children: NativeChild[] = [];
+		if (this.#agentsPill) children.push(this.#agentsPill.node);
+		if (this.#jobsPill) children.push(this.#jobsPill.node);
 		const memo = this.#hudPillsNative;
-		const empty = this.todoHudNative === undefined && this.subagentContainer.children.length === 0 && running === 0;
-		if (memo && memo.empty === empty && sameItems(memo.children, children)) return memo.node;
-		const described = row(children, { role: "omp.hud", justify: "end", gap: "sm", hidden: empty || undefined });
-		this.#hudPillsNative = { children, empty, node: described };
+		if (memo && sameItems(memo.children, children)) return memo.node;
+		const described = row(children, {
+			role: "omp.hud",
+			justify: "end",
+			gap: "sm",
+			hidden: children.length === 0 || undefined,
+		});
+		this.#hudPillsNative = { children, node: described };
 		return described;
 	}
 	/**
-	 * Native status HUD: the working, retry and compaction loaders describe
-	 * themselves as the working row; other rows describe themselves; an empty
-	 * HUD shows the idle tok/s readout.
+	 * Native activity line (`omp.hud.activity`): the status rows (the working,
+	 * retry and compaction loaders describe themselves as the working row;
+	 * other rows describe themselves) in an `omp.hud.status` column, then the
+	 * todo HUD, so the todo holds its place as the turn starts and ends.
+	 * Nothing to show describes the empty HUD.
 	 */
-	describeStatusHud(children: readonly Component[]): NativeNode {
-		const slot = children.length === 0 ? this.#describeIdleStatusHud() : undefined;
+	describeStatusHud(children: readonly Component[], cx: DescribeContext): NativeNode {
+		const hud = this.#todoHudNative;
+		const todo = hud && (cx.supports("checklist") ? hud.checklist : hud.fallback);
 		const memo = this.#statusHudNative;
-		if (
-			memo &&
-			memo.slot === slot &&
-			memo.children.length === children.length &&
-			memo.children.every((child, index) => child === children[index])
-		) {
-			return memo.node;
-		}
-		const parts: NativeChild[] = children.length === 0 ? (slot ? [slot] : []) : children.slice();
-		const hud = parts.length === 0 ? EMPTY_HUD : col(parts, { role: "omp.hud.status" });
-		this.#statusHudNative = { children: children.slice(), slot, node: hud };
-		return hud;
+		if (memo && memo.todo === todo && sameItems(memo.children, children)) return memo.node;
+		const parts: NativeChild[] = [];
+		if (children.length > 0) parts.push(node("col", { role: "omp.hud.status" }, children.slice(), "status"));
+		if (todo) parts.push(todo);
+		const described =
+			parts.length === 0 ? EMPTY_HUD : row(parts, { role: "omp.hud.activity", align: "center", gap: "sm" });
+		this.#statusHudNative = { children: children.slice(), todo, node: described };
+		return described;
 	}
 	unsubscribe?: () => void;
 	onInputCallback?: (input: SubmittedUserInput) => void;
@@ -1586,9 +1562,15 @@ export class InteractiveMode implements InteractiveModeContext {
 	get assistantImagesVisible(): boolean {
 		return cfgTerminalShowImages.get(this.settings);
 	}
-	resolveAssistantMessageLinks(texts: readonly string[]): Promise<ReadonlyMap<string, string>> {
+	get tableChartsVisible(): boolean {
+		return this.#focusController.target === undefined;
+	}
+	resolveAssistantMessageLinkHrefs(hrefs: readonly string[]): Promise<ReadonlyMap<string, string>> {
+		return resolveMarkdownLinkHrefs(hrefs, this.#linkResolveContext());
+	}
+	#linkResolveContext(): ResolveContext {
 		const session = this.viewSession;
-		return resolveMarkdownLinkTargets(texts, {
+		return {
 			cwd: session.sessionManager.getCwd(),
 			sessionFile: session.sessionFile,
 			settings: session.settings,
@@ -1598,7 +1580,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			},
 			skills: session.skills,
 			rules: session.ttsrManager?.getRules(),
-		});
+		};
 	}
 	get focusedAgentId(): string | undefined {
 		return this.#focusController.focusedAgentId;
@@ -1691,6 +1673,8 @@ export class InteractiveMode implements InteractiveModeContext {
 	/** Repaints the subagent HUD so live-preview elapsed markers advance between progress events. */
 	#subagentPreviewTickTimer?: NodeJS.Timeout;
 	#observerUiSyncNeedsTodoReconcile = false;
+	/** Active subagent descriptions the todo HUD last rendered with (joined); see #flushObserverUiSync. */
+	#todoHudSubagentKey: string | undefined;
 	#runningSubagentCount = 0;
 	#agentRegistryUnsubscribe?: () => void;
 	#agentRegistrySubscriptionTarget?: AgentHubRegistry;
@@ -1734,12 +1718,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			composer ??
 			new Composer({
 				preferences,
-				welcome: {
-					version,
-					modelName: session.model?.name ?? "Unknown",
-					providerName: session.model?.provider ?? "Unknown",
-					lspServers: this.#getWelcomeLspServers(lspServers),
-				},
+				welcome: { version },
 			});
 		this.composer.setPreferences(preferences);
 		this.ui = this.composer.ui;
@@ -1790,6 +1769,8 @@ export class InteractiveMode implements InteractiveModeContext {
 
 		setTuiTight(cfgTuiTight.get(settings));
 		setMarkdownMermaidRendering(cfgTuiRenderMermaid.get(settings));
+		setSvgFigureRendering(cfgTuiRenderSvg.get(settings));
+		this.#applyAutoGraphSetting();
 		this.#applyTextSizingSetting();
 		// Keep generic pi-tui renderers aligned with the coding-agent setting.
 		applyHyperlinkSetting();
@@ -1827,6 +1808,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.errorBannerContainer = new AnchoredLiveContainer();
 		this.modelCycleContainer = new AnchoredLiveContainer();
 		this.deferredCommandContainer = new AnchoredLiveContainer();
+		this.reportContainer = new AnchoredLiveContainer();
 		if (eventBus) {
 			this.#eventBusUnsubscribers.push(
 				eventBus.on(JUDGMENT_BATCH_PROGRESS_EVENT_CHANNEL, data => {
@@ -1861,6 +1843,9 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.historyStorage.setSessionResolver(() => this.sessionManager.getSessionId());
 			// The prediction daemon learns from history.db; nudge it once each prompt is durable.
 			this.historyStorage.setAddListener(syncTextPrediction);
+			this.historyStorage.setErrorListener(() => {
+				this.showWarning("Prompt history could not be saved; this prompt may be unavailable after restart.");
+			});
 		} catch (error) {
 			logger.warn("History storage unavailable", { error: String(error) });
 		}
@@ -1871,10 +1856,9 @@ export class InteractiveMode implements InteractiveModeContext {
 		const attachmentChips = new AttachmentChipsBand(this.editor, this.ui.imageBudget, () => this.ui.requestRender());
 		this.attachmentChipsContainer.addChild(attachmentChips);
 		this.editor.attachmentChips = attachmentChips;
-		// Restored drafts (esc-esc, /tree, branch) re-materialize blob-store links off the render
+		// Restored drafts (esc-esc, /tree, branch) re-materialize chip links off the render
 		// path so their chip tokens become clickable again instead of degrading to dead text.
-		this.editor.draftImageLinkMaterializer = images =>
-			materializeImageReferenceLinks(images, this.sessionManager.putBlob.bind(this.sessionManager));
+		this.editor.draftImageLinkMaterializer = images => materializeImageChipLinks(images, this.sessionManager);
 		this.editorContainer = new Container();
 		this.editorContainer.addChild(this.editor);
 		this.statusLine = new StatusLineComponent(session, statusLineHost);
@@ -1917,6 +1901,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.chatContainer.setToolActivityVisible(!this.hideToolActivity);
 		this.hideThinkingBlock = cfgHideThinkingBlock.get(settings);
 		this.proseOnlyThinking = cfgProseOnlyThinking.get(settings);
+		this.expandThinkingBlocks = cfgExpandThinkingBlocks.get(settings);
 
 		// Store pending commands for init() where file commands are loaded async
 		this.#pendingSlashCommands = this.#buildPendingSlashCommands();
@@ -2002,7 +1987,9 @@ export class InteractiveMode implements InteractiveModeContext {
 			connectedServers: this.#orderedMcpStatusServers(this.#mcpConnectedServers),
 			failedServers: this.#orderedMcpStatusFailures(),
 		});
-		if (message) this.showStatus(message);
+		// Progress of every server connecting or failing: a toast per change
+		// is noise on a native terminal (Tern), so it stays in the ANSI transcript.
+		if (message) this.showStatus(message, { toast: false });
 	}
 
 	#trackMcpStatusServer(serverName: string): void {
@@ -2090,29 +2077,9 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.session.slashCommands,
 		);
 
-		// Get current model info for welcome screen
-		const modelName = this.session.model?.name ?? "Unknown";
-		const providerName = this.session.model?.provider ?? "Unknown";
-
-		// Prepaint started this scan before the runtime module graph loaded. Only
-		// scan here when no startup composer exists (non-TTY/embedded hosts) or
-		// its best-effort load failed.
-		const recentSessions = await logger.time("InteractiveMode.init:recentSessions", async () => {
-			const preloaded = await options.recentSessions;
-			if (preloaded) return preloaded;
-			const sessions = await getRecentSessions(this.sessionManager.getSessionDir());
-			return sessions.map(s => ({ name: s.name, timeAgo: s.timeAgo, path: s.path }));
-		});
 		const startupQuiet = cfgStartupQuiet.get(settings);
 		this.composer.setPreferences({ quiet: startupQuiet });
-		this.composer.updateWelcome({
-			version: this.#version,
-			modelName,
-			providerName,
-			recentSessions,
-			lspServers: this.#getWelcomeLspServers(),
-		});
-		this.#persistComposerWelcome(modelName, providerName);
+		this.composer.updateWelcome({ version: this.#version });
 		const headerBefore = this.#buildConfigWarningComponents();
 		const headerAfter: Component[] = [];
 		if (!startupQuiet && this.#startupChangelog && cfgStartupChangelogMode.get(settings) !== "hidden") {
@@ -2144,6 +2111,7 @@ export class InteractiveMode implements InteractiveModeContext {
 				this.todoContainer,
 				this.subagentContainer,
 				this.btwContainer,
+				this.reportContainer,
 				this.omfgContainer,
 				this.cleanseContainer,
 				this.errorBannerContainer,
@@ -2164,8 +2132,11 @@ export class InteractiveMode implements InteractiveModeContext {
 			],
 			{
 				// Inline dialogs and a tall multi-line draft swap into the editor
-				// container and collapse again; everything else is turn-scoped.
-				transient: [this.editorContainer],
+				// container and collapse again, as a command report above it closes
+				// on Esc: they clip the transcript instead of retiring it to
+				// scrollback, so the editor returns to the bottom when they go.
+				// Everything else is turn-scoped.
+				transient: [this.editorContainer, this.reportContainer],
 				// Natively the HUD pills lead the dock, queued messages sit between
 				// the working row and the composer, and the attachment chips live
 				// inside the composer.
@@ -2205,7 +2176,9 @@ export class InteractiveMode implements InteractiveModeContext {
 					this.showUserMessageSelector();
 					return;
 				case "resume":
-					void this.handleResumeSession(action.path);
+					this.handleResumeSession(action.path).catch((error: unknown) =>
+						this.showError(error instanceof Error ? error.message : String(error)),
+					);
 					return;
 				case "copy":
 					copyToClipboard(action.text).then(
@@ -2260,7 +2233,10 @@ export class InteractiveMode implements InteractiveModeContext {
 		initTerminalTitleState();
 		setTerminalTitleStateEnabled(cfgTuiTitleState.get(this.settings));
 		setTerminalTitleSpinnerStyle(cfgTuiTitleSpinner.get(this.settings));
-		setTerminalSessionFileSource(() => this.sessionManager.getSessionFile());
+		setTerminalSessionSource({
+			file: () => this.sessionManager.getSessionFile(),
+			cwd: () => this.sessionManager.getCwd(),
+		});
 		setSessionTerminalTitle(this.sessionManager.getSessionName(), this.sessionManager.getCwd());
 		// Seeds the border, the status-line `vim` segment, and the cursor shape in one call.
 		// Deliberately here rather than beside #applyVimMode in the constructor: that runs before
@@ -2287,7 +2263,7 @@ export class InteractiveMode implements InteractiveModeContext {
 				this.#handleSessionAccentInputsChanged();
 			}),
 			// Fork and branch adopt a new session file without retitling.
-			this.session.registerSessionChangeCallback(reportTernSessionFile),
+			this.session.registerSessionChangeCallback(reportTernSession),
 		);
 		this.#syncEditorMaxHeight();
 		this.isInitialized = true;
@@ -2404,7 +2380,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#eventBusUnsubscribers.push(
 			this.session.subscribe(event => {
 				if (event.type === "model_changed") {
-					this.#updateWelcomeModel();
+					this.#scheduleComposerStatusPersist();
 				}
 				if (event.type === "config_warnings_changed") {
 					this.#syncConfigWarningHeader();
@@ -2413,11 +2389,11 @@ export class InteractiveMode implements InteractiveModeContext {
 			}),
 			cfgLiveUiSettings.listen(this.settings, (next, previous) => this.#applyUiSettingChanges(next, previous)),
 		);
-		// Resync the welcome banner to the live model: init-time reconciliations
-		// (#reconcileModeFromSession, #enterPlanMode for plan.defaultOnStartup)
-		// can change the model before this subscription exists, so the
-		// model_changed events they emit are never observed by the handler above.
-		this.#updateWelcomeModel();
+		// Cache the live model for the next status-bar prepaint: init-time
+		// reconciliations (#reconcileModeFromSession, #enterPlanMode for
+		// plan.defaultOnStartup) can change the model before this subscription
+		// exists, so the model_changed events they emit are never observed above.
+		this.#scheduleComposerStatusPersist();
 		// Config warnings can change during the same pre-subscription window; the
 		// event is not replayed, so rebuild from the live array once here too.
 		this.#syncConfigWarningHeader();
@@ -2518,6 +2494,8 @@ export class InteractiveMode implements InteractiveModeContext {
 		// `streamingBehavior: "steer"`, so whichever lands second queues into the
 		// other's turn instead of dying.
 		this.editor.disableSubmit = false;
+		// Publish native send readiness even when no user input triggers another frame.
+		this.ui.requestRender();
 	}
 
 	/** Reload the title-generation system prompt override for the provided working
@@ -3423,6 +3401,15 @@ export class InteractiveMode implements InteractiveModeContext {
 		setTerminalTextSizing(cfgTuiTextSizing.get(this.settings) && TERMINAL.supportsTextSizing);
 	}
 
+	/** Charts under assistant tables per `tui.autoGraph`; `smart` picks multi-series charts through the session's judge. */
+	#applyAutoGraphSetting(): void {
+		const mode = cfgTuiAutoGraph.get(this.settings);
+		setTableCharts(
+			mode,
+			mode === "smart" ? request => pickTableChart(request, this.session.tableChartJudge()) : undefined,
+		);
+	}
+
 	/**
 	 * Apply live UI side effects for settings changed through any path (`/settings`,
 	 * `cfg://`, `settings.set()`, on-disk reload). One coalesced {@link cfgLiveUiSettings}
@@ -3513,6 +3500,14 @@ export class InteractiveMode implements InteractiveModeContext {
 			}
 			this.ui.requestRender(true);
 		}
+		const expandThinkingBlocks = cfgExpandThinkingBlocks.get(this.settings);
+		if (any("expandThinkingBlocks") && expandThinkingBlocks !== this.expandThinkingBlocks) {
+			this.expandThinkingBlocks = expandThinkingBlocks;
+			for (const child of this.chatContainer.children) {
+				if (child instanceof AssistantMessageComponent) child.setExpandThinkingBlocks(expandThinkingBlocks);
+			}
+			this.ui.requestRender(true);
+		}
 
 		// Usage-row detection, compacted-history collapse, and markdown render
 		// options are baked in at build time: rebuild, then retire rows already
@@ -3524,6 +3519,14 @@ export class InteractiveMode implements InteractiveModeContext {
 		}
 		if (any("tui.renderMermaid")) {
 			setMarkdownMermaidRendering(cfgTuiRenderMermaid.get(this.settings));
+			rebuildChat = true;
+		}
+		if (any("tui.renderSvg")) {
+			setSvgFigureRendering(cfgTuiRenderSvg.get(this.settings));
+			rebuildChat = true;
+		}
+		if (any("tui.autoGraph")) {
+			this.#applyAutoGraphSetting();
 			rebuildChat = true;
 		}
 		if (any("tui.textSizing")) {
@@ -3740,7 +3743,9 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	/**
 	 * What the TSP composer shows: the draft's shell mode, the effort chip
-	 * (the viewed agent's, like the model chip beside it), and send vs Stop.
+	 * (the viewed agent's, like the model chip beside it) or the model chip's
+	 * effort icon, the tok/s readout after it, send vs Stop, and the session
+	 * title the empty composer's placeholder quotes.
 	 */
 	#composerNativeState(): ComposerNativeState {
 		const draft = this.editor.getText().trimStart();
@@ -3751,8 +3756,11 @@ export class InteractiveMode implements InteractiveModeContext {
 					? { kind: "python", excluded: draft.startsWith("$$") }
 					: undefined,
 			thinking: thinkingLevelWord(this.viewSession),
+			thinkingInModel: cfgStatusLineCompactThinkingLevel.get(settings),
+			rate: this.#nativeTokenRate(),
 			running: this.loadingAnimation !== undefined || this.session.isStreaming,
 			viewing: this.#viewingLineage(),
+			title: this.sessionManager.getSessionName(),
 		};
 	}
 
@@ -4123,9 +4131,16 @@ export class InteractiveMode implements InteractiveModeContext {
 		if (this.#observerUiSyncNeedsTodoReconcile) {
 			this.#observerUiSyncNeedsTodoReconcile = false;
 			this.#reconcileTodosWithSubagents();
+			this.#syncTodoHudState(this.#todoPhasesOwner ?? this.session);
+			this.#renderTodoList();
+		} else if (this.#getActiveSubagentDescriptions().join("\n") !== this.#todoHudSubagentKey) {
+			// Progress-only ticks (10 Hz while subagents run) cannot change the
+			// todo phases or their persisted visibility — re-syncing would also
+			// re-arm the auto-clear timer so it could never fire. Only the HUD's
+			// subagent highlight depends on them, so repaint just when the active
+			// descriptions change.
+			this.#renderTodoList();
 		}
-		this.#syncTodoHudState(this.#todoPhasesOwner ?? this.session);
-		this.#renderTodoList();
 		this.#renderSubagentList();
 		this.ui.requestRender();
 	}
@@ -4141,7 +4156,9 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	#renderTodoList(): void {
 		this.todoContainer.clear();
-		this.todoHudNative = undefined;
+		this.#todoHudNative = undefined;
+		const activeDescs = this.#getActiveSubagentDescriptions();
+		this.#todoHudSubagentKey = activeDescs.join("\n");
 		if (this.#todoHudHidden) return;
 		const phases = this.todoPhases.filter(phase => phase.tasks.length > 0);
 		if (phases.length === 0) return;
@@ -4152,7 +4169,6 @@ export class InteractiveMode implements InteractiveModeContext {
 		const subsequentStageCap = 4; // stages shown after the active one (a trailing summary row covers the rest)
 		const activeTaskCap = 5; // open tasks previewed for the active stage
 
-		const activeDescs = this.#getActiveSubagentDescriptions();
 		// A pending todo "lights up" (accent) when an in-flight subagent is doing
 		// its work, matched by normalized content overlap.
 		const isMatched = (todo: TodoItem): boolean =>
@@ -4298,7 +4314,9 @@ export class InteractiveMode implements InteractiveModeContext {
 		if (hiddenStages > 0) {
 			phaseNodes.push({ id: "more", label: [span(formatMoreItems(hiddenStages, "stage"), "muted")] });
 		}
-		const fallback = col(
+		const fallback = node(
+			"col",
+			{ role: "omp.hud.todo" },
 			[
 				row(
 					[
@@ -4309,7 +4327,7 @@ export class InteractiveMode implements InteractiveModeContext {
 				),
 				node("tree", { nodes: phaseNodes }),
 			],
-			{ role: "omp.hud.todo" },
+			"todo",
 		);
 		// A `checklist` HUD is a pill with the whole plan as its popover.
 		const checklistPhases: TspChecklistPhase[] = phases.map((phase, phaseIndex) => ({
@@ -4335,8 +4353,13 @@ export class InteractiveMode implements InteractiveModeContext {
 				};
 			}),
 		}));
-		this.todoHudNative = {
-			checklist: node("checklist", { phases: checklistPhases, mode: "hud", role: "omp.hud.todo" }),
+		this.#todoHudNative = {
+			checklist: node(
+				"checklist",
+				{ phases: checklistPhases, mode: "hud", role: "omp.hud.todo" },
+				undefined,
+				"todo",
+			),
 			fallback,
 		};
 	}
@@ -4459,24 +4482,15 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.subagentContainer.clear();
 			return;
 		}
-		const node = describeSubagentHud(view.sessions);
 		const hud = this.subagentContainer.children[0];
-		if (hud instanceof SubagentHudComponent) hud.update(view.lines, view.order, view.toggleRow, node);
-		else {
-			this.subagentContainer.addChild(
-				new SubagentHudComponent(view.lines, view.order, view.toggleRow, {
-					node,
-					onOpen: () => this.showAgentHub(),
-				}),
-			);
-		}
+		if (hud instanceof SubagentHudComponent) hud.update(view.lines, view.order, view.toggleRow);
+		else this.subagentContainer.addChild(new SubagentHudComponent(view.lines, view.order, view.toggleRow));
 		this.#armSubagentPreviewTick(view.tickMs);
 	}
 
 	/** Inputs for one HUD paint; undefined when the HUD is off or nothing is running. */
 	#buildSubagentHudView():
 		| {
-				sessions: ObservableSession[];
 				lines: string[];
 				order: string[];
 				toggleRow: number | undefined;
@@ -4496,7 +4510,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			livePreview && !agentPauseGate.paused
 				? nextSubagentPreviewTickMs(running.slice(0, layout.itemRows), Date.now())
 				: undefined;
-		return { sessions, lines, order: running.map(session => session.id), toggleRow: layout.toggleRow, tickMs };
+		return { lines, order: running.map(session => session.id), toggleRow: layout.toggleRow, tickMs };
 	}
 
 	#armSubagentPreviewTick(tickMs: number | undefined): void {
@@ -4553,58 +4567,12 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#previousGoalContinuationActivity = undefined;
 	}
 
-	/** Model-visible tool activity, excluding call IDs and timestamps that differ on every turn. */
-	#goalContinuationActivity(messages: AgentMessage[]): string {
-		const digests: string[] = [];
-		const record = (value: unknown): void => {
-			const serialized = stableStringifyJson(value);
-			digests.push(`${serialized.length}:${Bun.hash(serialized).toString(16)}`);
-		};
-		for (const message of messages) {
-			if (message.role === "assistant") {
-				for (const block of message.content) {
-					if (block.type === "toolCall") record(["call", block.name, block.arguments]);
-				}
-			} else if (message.role === "toolResult") {
-				record(["result", message.toolName, message.content, message.isError === true]);
-			}
-		}
-		return digests.join(":");
-	}
-
 	#getPausedGoalState(): GoalModeState | undefined {
 		const state = this.session.getGoalModeState();
 		if (!state?.goal || state.enabled || state.goal.status !== "paused") {
 			return undefined;
 		}
 		return state;
-	}
-
-	#goalFromModeData(modeData: SessionContext["modeData"]): Goal | undefined {
-		const goal = modeData?.goal;
-		if (!goal || typeof goal !== "object") return undefined;
-		const value = goal as Record<string, unknown>;
-		if (
-			typeof value.id !== "string" ||
-			typeof value.objective !== "string" ||
-			typeof value.status !== "string" ||
-			typeof value.tokensUsed !== "number" ||
-			typeof value.timeUsedSeconds !== "number" ||
-			typeof value.createdAt !== "number" ||
-			typeof value.updatedAt !== "number"
-		) {
-			return undefined;
-		}
-		return {
-			id: value.id,
-			objective: value.objective,
-			status: value.status as Goal["status"],
-			tokenBudget: typeof value.tokenBudget === "number" ? value.tokenBudget : undefined,
-			tokensUsed: value.tokensUsed,
-			timeUsedSeconds: value.timeUsedSeconds,
-			createdAt: value.createdAt,
-			updatedAt: value.updatedAt,
-		};
 	}
 
 	async #handleGoalSessionEvent(event: AgentSessionEvent): Promise<void> {
@@ -4640,7 +4608,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		}
 		if (this.#pendingGoalContinuationTurns > 0) {
 			this.#pendingGoalContinuationTurns--;
-			const activity = this.#goalContinuationActivity(event.messages);
+			const activity = goalContinuationActivity(event.messages);
 			this.#goalSuppressNextContinuation =
 				activity.length === 0 || activity === this.#previousGoalContinuationActivity;
 			this.#previousGoalContinuationActivity = activity;
@@ -4752,8 +4720,10 @@ export class InteractiveMode implements InteractiveModeContext {
 	async #clearTransientModeState(options?: {
 		preserveVibe?: boolean;
 		vibeScopeAlreadySuspended?: boolean;
+		restorePlanModel?: boolean;
 	}): Promise<void> {
 		if (this.planModeEnabled || this.planModePaused) {
+			const previousModel = this.#planModePreviousModelState;
 			this.session.setPlanModeState(undefined);
 			try {
 				const previousPresentation = this.#planModePreviousToolPresentation;
@@ -4774,6 +4744,9 @@ export class InteractiveMode implements InteractiveModeContext {
 				this.#pendingPlanModelSwitch = false;
 				this.#planModeHasEntered = false;
 				this.#updatePlanModeStatus();
+			}
+			if (options?.restorePlanModel && previousModel) {
+				await this.#restorePlanPreviousModel(previousModel);
 			}
 		}
 
@@ -4833,9 +4806,13 @@ export class InteractiveMode implements InteractiveModeContext {
 		// flags and settings, and that set — not a historical one — is what exiting
 		// vibe must restore.
 		const vibeToolsetLostToTeardown = this.vibeModeEnabled && !preserveVibe;
+		// A session that records no model (a `/new` boundary) keeps the live model,
+		// which during plan mode is the transient plan-role model; hand it the
+		// pre-plan model instead. A recorded model was already restored by switchSession.
 		await this.#clearTransientModeState({
 			preserveVibe,
 			vibeScopeAlreadySuspended,
+			restorePlanModel: Object.keys(sessionContext.models).length === 0,
 		});
 		await VibeSessionRegistry.global().rehydrate(vibeSession);
 		const goalEnabled = cfgGoalEnabled.get(this.session.settings);
@@ -4845,7 +4822,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			return;
 		}
 		if (sessionContext.mode === "goal" || sessionContext.mode === "goal_paused") {
-			const goal = this.#goalFromModeData(sessionContext.modeData);
+			const goal = goalFromModeData(sessionContext.modeData);
 			if (!goal) {
 				this.sessionManager.appendModeChange("none");
 				return;
@@ -6332,6 +6309,15 @@ export class InteractiveMode implements InteractiveModeContext {
 		await this.#exitGoalMode({ reason: "dropped" });
 	}
 
+	/** Enter through the same goal activation path as `/goal set`, then start its first turn. */
+	async startGoalAtStartup(objective: string): Promise<void> {
+		await this.#enterGoalMode({ objective, silent: true });
+		if (!this.goalModeEnabled) return;
+		this.#resetGoalContinuationSuppression();
+		using _keepalive = new EventLoopKeepalive();
+		await this.session.prompt(objective, { streamingBehavior: "steer" });
+	}
+
 	async #startGoalFromObjective(
 		objective: string,
 		input?: Pick<SubmittedUserInput, "images" | "imageLinks">,
@@ -6688,20 +6674,22 @@ export class InteractiveMode implements InteractiveModeContext {
 	];
 
 	/**
-	 * Show the report_tool_issue consent popup and return the user's decision.
+	 * Show the report_tool_issue consent popup (mirrored to writable `/collab` guests)
+	 * and return the user's decision.
 	 * Invoked by the process-global consent handler the tool dispatches to;
 	 * subagent invocations bubble up here through the shared module state.
 	 */
 	async #promptAutoQaConsent(): Promise<boolean | null> {
 		const pool = InteractiveMode.#AUTOQA_CONSENT_PROMPTS;
 		const [headline, body] = pool[Math.floor(Math.random() * pool.length)];
-		const choice = await this.showHookSelector(`${headline}\n${body}`, ["Yes", "No"]);
+		const choice = await this.#extensionUiController.showCollabAwareSelector(`${headline}\n${body}`, ["Yes", "No"]);
 		return choice === "Yes";
 	}
 
 	/**
-	 * Ask the user to approve one `cfg://` settings change. Dismissing the dialog denies it;
-	 * leaving it unanswered for {@link CFG_APPROVAL_TIMEOUT_MS} (any keypress restarts the
+	 * Ask the user to approve one `cfg://` settings change; writable `/collab` guests get the
+	 * same prompt and the first answer wins. Dismissing the dialog denies it; leaving it
+	 * unanswered for {@link CFG_APPROVAL_TIMEOUT_MS} (any host keypress restarts the
 	 * countdown) drops it as `timeout`.
 	 */
 	async #promptCfgChange(request: CfgChangeRequest): Promise<CfgApproval> {
@@ -6712,7 +6700,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			? `\n⚠️ Overridden by your ${request.shadowedBy}: the saved value won't take effect here.`
 			: "";
 		let timedOut = false;
-		const choice = await this.showHookSelector(
+		const choice = await this.#extensionUiController.showCollabAwareSelector(
 			`${headline}\n${request.previous} → ${request.value}${warning}`,
 			[CFG_APPROVE_SESSION, CFG_APPROVE_ONCE, CFG_DENY],
 			{
@@ -7232,10 +7220,10 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.transcriptMessageComponents = new WeakMap<AgentMessage, Component>();
 		this.chatContainer.dispose();
 		this.chatContainer.clear();
-		this.#commandController.resetContextView();
+		this.#commandController.clearCommandReport();
 	}
 
-	showStatus(message: string, options?: { dim?: boolean }): void {
+	showStatus(message: string, options?: ShowStatusOptions): void {
 		this.#uiHelpers.showStatus(message, options);
 	}
 
@@ -7268,8 +7256,6 @@ export class InteractiveMode implements InteractiveModeContext {
 	}
 
 	#handleLspStartupEvent(event: LspStartupEvent): void {
-		this.#updateWelcomeLspServers();
-
 		if (event.type === "failed") {
 			this.showWarning(`LSP startup failed: ${event.error}. It will retry lazily on write.`);
 			return;
@@ -7290,25 +7276,6 @@ export class InteractiveMode implements InteractiveModeContext {
 		}
 	}
 
-	/** Welcome rows for startup LSP servers; `null` (section hidden) when the session skipped LSP discovery. */
-	#getWelcomeLspServers(servers = this.lspServers): WelcomeLspServerInfo[] | null {
-		return (
-			servers?.map(server => ({
-				name: server.name,
-				status: server.status,
-				fileTypes: server.fileTypes,
-			})) ?? null
-		);
-	}
-
-	#updateWelcomeModel(): void {
-		const modelName = this.session.model?.name ?? "Unknown";
-		const providerName = this.session.model?.provider ?? "Unknown";
-		this.composer.updateWelcome({ modelName, providerName });
-		this.#persistComposerWelcome(modelName, providerName);
-		this.#scheduleComposerStatusPersist();
-	}
-
 	#syncConfigWarningHeader(): void {
 		this.composer.setHeaderExtras(this.#buildConfigWarningComponents(), this.#headerAfter);
 	}
@@ -7323,15 +7290,6 @@ export class InteractiveMode implements InteractiveModeContext {
 			);
 		}
 		return components;
-	}
-
-	#persistComposerWelcome(modelName: string, providerName: string): void {
-		if (!this.sessionManager.getSessionFile()) return;
-		sharedComposerCache()?.writeWelcome(this.sessionManager.getCwd(), { modelName, providerName });
-	}
-
-	#updateWelcomeLspServers(): void {
-		this.composer.updateWelcome({ lspServers: this.#getWelcomeLspServers() });
 	}
 
 	#clearWorkingMessageAccentCache(): void {
@@ -7556,14 +7514,15 @@ export class InteractiveMode implements InteractiveModeContext {
 		// Never contend with a live loader (working/auto-retry/compaction).
 		if (!show || this.statusContainer.children.length > 0) return;
 		const retryKey = this.keybindings.getKeys("app.retry")[0] ?? "f5";
+		// Laid out as the working row it replaces: a blank row above, then the
+		// key in the column where the working row's interrupt key stood.
+		const hint = new Container();
+		hint.addChild(new Spacer(1));
+		hint.addChild(new Text(` ${rawKeyHint(retryKey, "to retry")}`, 1, 0));
 		this.#retryHintRow = new DescribedComponent(
-			new Text(
-				`${theme.fg("muted", theme.icon.loop)} ${theme.fg("dim", `${formatKeyHint(retryKey)} to Retry`)}`,
-				1,
-				0,
-			),
-			row([node("icon", { name: "loop", tone: "muted" }), kbd(retryKey, "key"), text([span("to Retry", "dim")])], {
-				gap: "xs",
+			hint,
+			row([node("icon", { name: "loop", tone: "muted" }), kbd(retryKey, "key"), text([span("to retry", "muted")])], {
+				gap: "sm",
 				align: "center",
 				role: "omp.hint.retry",
 			}),
@@ -7594,6 +7553,10 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	async handleDumpCommand(): Promise<void> {
 		return this.#commandController.handleDumpCommand();
+	}
+
+	async handleDumpAllCommand(): Promise<void> {
+		return this.#commandController.handleDumpAllCommand();
 	}
 
 	handleAdvisorDumpCommand(isRaw?: boolean) {
@@ -7918,6 +7881,10 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#selectorController.showTreeSelector();
 	}
 
+	showThinkingSelector(): void {
+		this.#selectorController.showThinkingSelector();
+	}
+
 	showSessionSelector(source?: ForeignSessionSource): void {
 		void this.#selectorController.showSessionSelector(source);
 	}
@@ -8101,6 +8068,28 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	handleCleanseEscape(): boolean {
 		return this.#cleanseController.handleEscape();
+	}
+
+	showCommandReport(options: { title: string; head?: TspText; body: Component }): void {
+		this.#commandController.showCommandReport(options);
+	}
+
+	dismissCommandReport(): boolean {
+		return this.#commandController.dismissCommandReport();
+	}
+
+	commandReportRows(): number | undefined {
+		const below = this.composer.rowsBelow(this.reportContainer);
+		return below === undefined ? undefined : this.ui.terminal.rows - below;
+	}
+
+	composerInputAtBottom(): boolean {
+		const viewport = this.ui.getMutableViewport();
+		return viewport.length > 0 && viewport.top + viewport.length >= this.ui.terminal.rows;
+	}
+
+	pinComposerToBottom(): void {
+		this.composer.pinInputToBottom();
 	}
 
 	cycleThinkingLevel(): void {

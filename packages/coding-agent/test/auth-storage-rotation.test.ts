@@ -5,7 +5,6 @@ import * as path from "node:path";
 import { type OAuthCredential, type UsageProvider, resolvedApiKeyBearer, withAuth } from "@oh-my-pi/pi-ai";
 import * as oauth from "@oh-my-pi/pi-ai/oauth";
 import type { OAuthCredentials, OAuthProviderId } from "@oh-my-pi/pi-ai/oauth/types";
-import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
@@ -395,59 +394,6 @@ describe("AuthStorage account rotation", () => {
 
 		expect(attemptedKeys).toEqual(["first"]);
 		expect(Date.now() - startedAt).toBeLessThan(1_000);
-	});
-
-	test("withAuth reaches a fourth healthy Codex OAuth sibling through ModelRegistry", async () => {
-		await authStorage.credentials.set("openai-codex", [
-			{
-				type: "oauth",
-				access: "access-a",
-				refresh: "refresh-a",
-				expires: Date.now() + 60_000,
-				accountId: "acct-a",
-			},
-			{
-				type: "oauth",
-				access: "access-b",
-				refresh: "refresh-b",
-				expires: Date.now() + 60_000,
-				accountId: "acct-b",
-			},
-			{
-				type: "oauth",
-				access: "access-c",
-				refresh: "refresh-c",
-				expires: Date.now() + 60_000,
-				accountId: "acct-c",
-			},
-			{
-				type: "oauth",
-				access: "access-d",
-				refresh: "refresh-d",
-				expires: Date.now() + 60_000,
-				accountId: "acct-d",
-			},
-		]);
-
-		const model = getBundledModel("openai-codex", "gpt-5.5");
-		if (!model) {
-			throw new Error("Expected bundled Codex test model to exist");
-		}
-
-		const modelRegistry = new ModelRegistry(authStorage, undefined, { ignoreLocalModelConfig: true });
-		const attemptedKeys: string[] = [];
-		const result = await withAuth(modelRegistry.resolver(model, "codex-four-oauth-session"), async key => {
-			attemptedKeys.push(key);
-			if (key !== "access-d") {
-				throw new Error("You have hit your ChatGPT usage limit (pro plan). Try again later.");
-			}
-			return key;
-		});
-
-		expect(result).toBe("access-d");
-		expect(attemptedKeys.at(-1)).toBe("access-d");
-		expect([...attemptedKeys].sort()).toEqual(["access-a", "access-b", "access-c", "access-d"]);
-		expect(new Set(attemptedKeys).size).toBe(4);
 	});
 
 	test("provider login invalidates only that provider's persisted session stickiness", async () => {

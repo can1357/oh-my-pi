@@ -3,10 +3,19 @@ import * as os from "node:os";
 import * as path from "node:path";
 
 import type {
+	Application,
+	ApplicationQuery,
+	ApplicationOpenOptions,
+	DesktopMenuItem as MenuItem,
+	DesktopObservation as NativeObservation,
+	DesktopControlState,
+	HoldOptions as NativeHoldOptions,
 	AxNode,
 	AxQuery,
 	AxSnapshotOptions,
+	CaptureRegion,
 	DesktopCapabilities,
+	DesktopCapture,
 	DesktopDisplay,
 	DesktopPoint,
 	DesktopSessionOptions,
@@ -40,17 +49,29 @@ export interface NativeDesktopSession {
 	readonly capabilities: DesktopCapabilities;
 	listDisplays(): Promise<DesktopDisplay[]>;
 	listWindows(): Promise<DesktopWindow[]>;
-	capture(
+	capture(target: string, caps?: { maxWidth?: number; maxHeight?: number } | null): Promise<DesktopCapture>;
+	captureRegion(
 		target: string,
+		region: CaptureRegion,
 		caps?: { maxWidth?: number; maxHeight?: number } | null,
-	): Promise<{
-		data: Uint8Array;
-		width: number;
-		height: number;
-		sourceWidth: number;
-		sourceHeight: number;
-		target: string;
-	}>;
+	): Promise<DesktopCapture>;
+	cancel(): void;
+	retire(): void;
+	listApplications(options?: ApplicationQuery): Promise<Application[]>;
+	openApplication(id: string, options?: ApplicationOpenOptions): Promise<Application>;
+	menuItems(target: string, path?: string[]): Promise<MenuItem[]>;
+	menuSelect(target: string, path: string[]): Promise<void>;
+	observe(
+		target: string,
+		caps?: { maxWidth?: number; maxHeight?: number },
+		options?: AxOptions,
+	): Promise<NativeObservation>;
+	holdKeys(target: string, keys: string[], options: NativeHoldOptions): Promise<void>;
+	holdMouse(target: string, x: number, y: number, options: NativeHoldOptions): Promise<void>;
+	acquireControl(): Promise<DesktopControlState>;
+	releaseControl(): void;
+	controlState(): DesktopControlState;
+	bringToCurrentSpace(windowId: string): Promise<void>;
 	click(target: string, x: number, y: number, opts?: PointerOptions | null): Promise<void>;
 	moveMouse(target: string, x: number, y: number, opts?: PointerOptions | null): Promise<void>;
 	drag(target: string, points: DesktopPoint[], opts?: PointerOptions | null): Promise<void>;
@@ -81,10 +102,17 @@ export type NativeDesktopSessionFactory = (
 type WindowFilter = { id?: string | number; app?: string; title?: string };
 type InputOptions = { takeover?: boolean };
 type ScreenshotOptions = { silent?: boolean };
+type ScreenshotResult = Pick<
+	ComputerScreenshot,
+	"path" | "width" | "height" | "coordinateWidth" | "coordinateHeight" | "region"
+>;
 type ClickOptions = InputOptions & { button?: string; count?: number; modifiers?: string[] };
-type DragOptions = InputOptions & { modifiers?: string[] };
+type DragOptions = InputOptions & { modifiers?: string[]; keys?: string[] };
 type ScrollOptions = InputOptions & { dx?: number; dy?: number };
 type AxOptions = Pick<AxSnapshotOptions, "all" | "maxDepth">;
+type HoldOptions = Pick<NativeHoldOptions, "duration" | "takeover">;
+type HoldMouseOptions = NativeHoldOptions;
+type ObservationResult = ScreenshotResult & { ax: string; nodeCount: number; truncated: boolean };
 
 type PendingTool = { resolve(value: unknown): void; reject(reason?: unknown): void };
 interface ActiveRun {
@@ -99,6 +127,7 @@ interface ComputerRunContext {
 	readOnly: boolean;
 	snapshot: ComputerSessionSnapshot;
 	output: RunOutput;
+	confirmControl(reason: string): Promise<boolean>;
 	screenshots: ComputerScreenshot[];
 }
 
@@ -134,24 +163,26 @@ function nativeError(error: unknown): ToolError {
 	return new ToolError(error instanceof Error ? error.message : String(error));
 }
 
-async function nativeCall<T>(signal: AbortSignal, call: () => Promise<T>): Promise<T> {
+async function nativeCall<T>(signal: AbortSignal, call: () => T | Promise<T>): Promise<T> {
 	throwIfAborted(signal);
 	try {
 		const value = await call();
 		throwIfAborted(signal);
 		return value;
 	} catch (error) {
+		throwIfAborted(signal);
 		if (error instanceof ToolAbortError) throw error;
 		throw nativeError(error);
 	}
 }
 
-function pointerOptions(options?: ClickOptions | DragOptions | InputOptions): PointerOptions | undefined {
-	if (!options) return undefined;
+function pointerOptions(options?: ClickOptions | DragOptions | InputOptions): PointerOptions {
 	const mapped: PointerOptions = {};
+	if (!options) return mapped;
 	if ("button" in options && options.button !== undefined) mapped.button = options.button;
 	if ("count" in options && options.count !== undefined) mapped.count = options.count;
 	if ("modifiers" in options && options.modifiers !== undefined) mapped.modifiers = options.modifiers;
+	if ("keys" in options && options.keys !== undefined) mapped.keys = options.keys;
 	if (options.takeover !== undefined) mapped.takeover = options.takeover;
 	return mapped;
 }
@@ -163,6 +194,39 @@ function chordKeys(chord: string | string[]): string[] {
 				.map(key => key.trim())
 				.filter(Boolean)
 		: chord;
+}
+
+function validateKeys(value: unknown, label: string, options?: { allowEmpty?: boolean }): asserts value is string[] {
+	if (
+		!Array.isArray(value) ||
+		(!options?.allowEmpty && value.length === 0) ||
+		value.some(key => typeof key !== "string" || !key.trim())
+	) {
+		throw new ToolError(`${label} requires a non-empty array of non-empty strings`);
+	}
+}
+
+function validateHold(options: HoldOptions): void {
+	if (
+		!options ||
+		typeof options.duration !== "number" ||
+		!Number.isFinite(options.duration) ||
+		options.duration < 0 ||
+		options.duration > 100
+	) {
+		throw new ToolError("duration must be seconds in the range 0..100");
+	}
+}
+
+function strictObject(value: unknown, allowed: string[], label: string): asserts value is Record<string, unknown> {
+	if (
+		!value ||
+		typeof value !== "object" ||
+		Array.isArray(value) ||
+		Object.keys(value).some(key => !allowed.includes(key))
+	) {
+		throw new ToolError(`${label} must be an object with only: ${allowed.join(", ")}`);
+	}
 }
 
 function matchesFilter(window: DesktopWindow, filter?: WindowFilter): boolean {
@@ -186,39 +250,59 @@ async function captureScreenshot(
 	getContext: RunContextAccessor,
 	target: string,
 	options?: ScreenshotOptions,
-): Promise<{ path: string; width: number; height: number }> {
+	region?: CaptureRegion,
+): Promise<ScreenshotResult> {
 	const context = getContext();
+	const caps = {
+		maxWidth: context.snapshot.captureMaxWidth,
+		maxHeight: context.snapshot.captureMaxHeight,
+	};
 	const frame = await nativeCall(context.signal, () =>
-		session.capture(target, {
-			maxWidth: context.snapshot.captureMaxWidth,
-			maxHeight: context.snapshot.captureMaxHeight,
-		}),
+		region === undefined ? session.capture(target, caps) : session.captureRegion(target, region, caps),
 	);
+	return await emitScreenshot(context, frame, options);
+}
+
+async function emitScreenshot(
+	context: ComputerRunContext,
+	frame: DesktopCapture,
+	options?: ScreenshotOptions,
+): Promise<ScreenshotResult> {
 	const destination = path.join(os.tmpdir(), `omp-computer-${Snowflake.next()}.png`);
 	await Bun.write(destination, frame.data);
-	const scaled = frame.width !== frame.sourceWidth || frame.height !== frame.sourceHeight;
-	context.screenshots.push({
+	throwIfAborted(context.signal);
+	const result: ScreenshotResult = {
 		path: destination,
 		width: frame.width,
 		height: frame.height,
+		coordinateWidth: frame.coordinateWidth,
+		coordinateHeight: frame.coordinateHeight,
+		...(frame.region ? { region: frame.region } : {}),
+	};
+	const scaled = frame.width !== frame.sourceWidth || frame.height !== frame.sourceHeight;
+	context.screenshots.push({
+		...result,
 		sourceWidth: frame.sourceWidth,
 		sourceHeight: frame.sourceHeight,
 		target: frame.target,
 	});
 	if (!options?.silent) {
+		const dimensions = `${frame.width}×${frame.height}${scaled ? ` (scaled from ${frame.sourceWidth}×${frame.sourceHeight})` : ""}`;
+		const coordinates = `coordinateWidth=${frame.coordinateWidth} coordinateHeight=${frame.coordinateHeight}`;
 		context.output.push({
 			type: "text",
-			text: scaled
-				? `screenshot ${frame.target} ${frame.width}×${frame.height} (scaled from ${frame.sourceWidth}×${frame.sourceHeight}) → ${destination}`
-				: `screenshot ${frame.target} ${frame.width}×${frame.height} → ${destination}`,
+			text: frame.region
+				? `zoom ${frame.target} ${dimensions}; region=${JSON.stringify(frame.region)}; ${coordinates}; use the base full screenshot coordinates for input, not zoom pixels → ${destination}`
+				: `screenshot ${frame.target} ${dimensions}; ${coordinates} → ${destination}`,
 		});
 		context.output.push({
 			type: "image",
 			data: Buffer.from(frame.data.buffer, frame.data.byteOffset, frame.data.byteLength).toString("base64"),
 			mimeType: "image/png",
+			detail: "original",
 		});
 	}
-	return { path: destination, width: frame.width, height: frame.height };
+	return result;
 }
 
 class El {
@@ -334,8 +418,15 @@ class Win {
 		this.focused = window.focused;
 	}
 
-	screenshot(options?: ScreenshotOptions): Promise<{ path: string; width: number; height: number }> {
+	screenshot(options?: ScreenshotOptions): Promise<ScreenshotResult> {
 		return captureScreenshot(this.#session, this.#getContext, this.id, options);
+	}
+
+	zoom(region: CaptureRegion, options?: ScreenshotOptions): Promise<ScreenshotResult> {
+		if (!region || typeof region !== "object" || Array.isArray(region)) {
+			throw new ToolError("zoom requires a region { x, y, width, height } in the last full screenshot's pixels");
+		}
+		return captureScreenshot(this.#session, this.#getContext, this.id, options, region);
 	}
 
 	async click(x: number, y: number, options?: ClickOptions): Promise<void> {
@@ -355,7 +446,7 @@ class Win {
 	async move(x: number, y: number): Promise<void> {
 		const context = this.#getContext();
 		guardRun(context, "move");
-		await nativeCall(context.signal, () => this.#session.moveMouse(this.id, x, y));
+		await nativeCall(context.signal, () => this.#session.moveMouse(this.id, x, y, pointerOptions()));
 	}
 
 	async drag(points: Array<[number, number]>, options?: DragOptions): Promise<void> {
@@ -390,6 +481,67 @@ class Win {
 		await nativeCall(context.signal, () =>
 			this.#session.keyChord(this.id, chordKeys(chord), pointerOptions(options)),
 		);
+	}
+
+	async holdKeys(keys: string[], options: HoldOptions): Promise<void> {
+		const context = this.#getContext();
+		guardRun(context, "holdKeys");
+		validateHold(options);
+		validateKeys(keys, "keys");
+		await nativeCall(context.signal, () => this.#session.holdKeys(this.id, keys, options));
+	}
+
+	async holdMouse(x: number, y: number, options: HoldMouseOptions): Promise<void> {
+		const context = this.#getContext();
+		guardRun(context, "holdMouse");
+		validateHold(options);
+		if (options.keys !== undefined) validateKeys(options.keys, "keys");
+		await nativeCall(context.signal, () => this.#session.holdMouse(this.id, x, y, options));
+	}
+
+	async observe(options?: ScreenshotOptions & AxOptions): Promise<ObservationResult> {
+		const context = this.#getContext();
+		const result = await nativeCall(context.signal, () =>
+			this.#session.observe(
+				this.id,
+				{
+					maxWidth: context.snapshot.captureMaxWidth,
+					maxHeight: context.snapshot.captureMaxHeight,
+				},
+				options && { all: options.all, maxDepth: options.maxDepth },
+			),
+		);
+		const screenshot = await emitScreenshot(context, result.capture, options);
+		if (!options?.silent) context.output.push({ type: "text", text: result.accessibility.text });
+		return {
+			...screenshot,
+			ax: result.accessibility.text,
+			nodeCount: result.accessibility.nodeCount,
+			truncated: result.accessibility.truncated,
+		};
+	}
+
+	get menu() {
+		return {
+			items: async (path?: string | string[]): Promise<MenuItem[]> => {
+				const context = this.#getContext();
+				const segments = path === undefined ? undefined : typeof path === "string" ? [path] : path;
+				if (segments !== undefined) validateKeys(segments, "menu path", { allowEmpty: true });
+				return await nativeCall(context.signal, () => this.#session.menuItems(this.id, segments));
+			},
+			select: async (path: string[]): Promise<void> => {
+				const context = this.#getContext();
+				guardRun(context, "menu.select");
+				validateKeys(path, "menu path");
+				await nativeCall(context.signal, () => this.#session.menuSelect(this.id, path));
+			},
+		};
+	}
+
+	async bringToCurrentSpace(): Promise<void> {
+		const context = this.#getContext();
+		guardRun(context, "bringToCurrentSpace");
+		await nativeCall(context.signal, () => this.#session.bringToCurrentSpace(this.id));
 	}
 
 	async raise(): Promise<void> {
@@ -456,6 +608,11 @@ export class ComputerWorkerCore {
 			case "abort":
 				if (this.#active?.id === message.id) this.#active.ac.abort(new ToolAbortError());
 				return;
+			case "revoke-control":
+				this.#active?.ac.abort(new ToolAbortError("Computer control revoked"));
+				this.#session?.cancel();
+				this.#transport.send({ type: "control-revoked", id: message.id });
+				return;
 			case "tool-reply":
 				this.#deliverToolReply(message.id, message.reply);
 				return;
@@ -521,6 +678,16 @@ export class ComputerWorkerCore {
 		const signal = AbortSignal.any([timeoutSignal, ac.signal, runAc.signal]);
 		const active: ActiveRun = { id: message.id, ac, signal, pendingTools: new Map() };
 		this.#active = active;
+		// Cancel synchronously while this run owns the native session, including
+		// fire-and-forget operations still pending when the script returns.
+		let nativeCancelled = false;
+		const onNativeCancel = (): void => {
+			if (this.#active === active && this.#session) {
+				this.#session.cancel();
+				nativeCancelled = true;
+			}
+		};
+		signal.addEventListener("abort", onNativeCancel, { once: true });
 		const output = new RunOutput();
 		const screenshots: ComputerScreenshot[] = [];
 		const runContext: ComputerRunContext = {
@@ -529,6 +696,7 @@ export class ComputerWorkerCore {
 			snapshot: message.session,
 			output,
 			screenshots,
+			confirmControl: reason => this.#confirmControl(active, reason),
 		};
 		let returnValue: unknown;
 		let failure: { error: unknown } | undefined;
@@ -536,6 +704,7 @@ export class ComputerWorkerCore {
 		try {
 			throwIfAborted(signal);
 			const session = await this.#ensureSession(message.session);
+			throwIfAborted(signal);
 			const runtime = this.#ensureRuntime(message.session);
 			runtime.setCwd(message.session.cwd);
 			const desktop = this.#createDesktopScope(session);
@@ -591,6 +760,11 @@ export class ComputerWorkerCore {
 		} catch (error) {
 			failure = { error };
 		} finally {
+			// Successful helper completion invalidates outstanding native work but
+			// preserves an explicitly acquired task grant. Errors revoke it.
+			signal.removeEventListener("abort", onNativeCancel);
+			if (failure === undefined && !signal.aborted) this.#session?.retire();
+			else if (!nativeCancelled) this.#session?.cancel();
 			runAc.abort(postmortem.markExpectedCleanupError(new ToolAbortError("Computer run ended")));
 			if (this.#active?.id === message.id) this.#active = null;
 		}
@@ -673,6 +847,15 @@ export class ComputerWorkerCore {
 		return await promise;
 	}
 
+	async #confirmControl(active: ActiveRun, reason: string): Promise<boolean> {
+		throwIfAborted(active.signal);
+		const id = `computer-control-${active.id}-${crypto.randomUUID()}`;
+		const pending = Promise.withResolvers<unknown>();
+		active.pendingTools.set(id, pending);
+		this.#transport.send({ type: "control-request", id, runId: active.id, reason });
+		return (await pending.promise) === true;
+	}
+
 	#deliverToolReply(id: string, reply: ToolReply): void {
 		const pending = this.#active?.pendingTools.get(id);
 		if (!pending) return;
@@ -715,6 +898,74 @@ export class ComputerWorkerCore {
 				const { signal } = getContext();
 				return await nativeCall(signal, () => session.listDisplays());
 			},
+			display: async (selector: string): Promise<object> => {
+				const { signal } = getContext();
+				if (typeof selector !== "string" || !selector)
+					throw new ToolError("display requires an id, 'active', or 'all'");
+				if (selector !== "active" && selector !== "all") {
+					const displays = await nativeCall(signal, () => session.listDisplays());
+					if (!displays.some(display => display.id === selector))
+						throw new ToolError(`Unknown display: ${selector}`);
+				}
+				const target = new Win(session, getContext, {
+					id: `display:${selector}`,
+					app: "",
+					title: "",
+					x: 0,
+					y: 0,
+					width: 0,
+					height: 0,
+					focused: false,
+				});
+				return {
+					id: selector,
+					screenshot: target.screenshot.bind(target),
+					zoom: target.zoom.bind(target),
+					click: target.click.bind(target),
+					doubleClick: target.doubleClick.bind(target),
+					move: target.move.bind(target),
+					drag: target.drag.bind(target),
+					scroll: target.scroll.bind(target),
+					type: target.type.bind(target),
+					press: target.press.bind(target),
+					holdKeys: target.holdKeys.bind(target),
+					holdMouse: target.holdMouse.bind(target),
+				};
+			},
+			apps: {
+				list: async (options?: ApplicationQuery): Promise<Application[]> => {
+					const { signal } = getContext();
+					return await nativeCall(signal, () => session.listApplications(options));
+				},
+				open: async (id: string, options?: ApplicationOpenOptions): Promise<Application> => {
+					const context = getContext();
+					guardRun(context, "apps.open");
+					return await nativeCall(context.signal, () => session.openApplication(id, options));
+				},
+			},
+			control: {
+				acquire: async (options: { reason: string }): Promise<{ active: boolean }> => {
+					const context = getContext();
+					guardRun(context, "control.acquire");
+					strictObject(options, ["reason"], "control.acquire");
+					if (typeof options.reason !== "string" || !options.reason.trim())
+						throw new ToolError("control.acquire requires a non-empty reason");
+					if (session.controlState().active) return { active: true };
+					const approved = await context.confirmControl(options.reason);
+					throwIfAborted(context.signal);
+					if (!approved) return { active: false };
+					return await nativeCall(context.signal, () => session.acquireControl());
+				},
+				release: async (): Promise<void> => {
+					const context = getContext();
+					guardRun(context, "control.release");
+					await nativeCall(context.signal, () => session.releaseControl());
+				},
+				state: async (): Promise<{ active: boolean }> => {
+					throwIfAborted(getContext().signal);
+					return session.controlState();
+				},
+			},
 			windows: async (filter?: WindowFilter): Promise<DesktopWindow[]> => {
 				const { signal } = getContext();
 				return (await nativeCall(signal, () => session.listWindows())).filter(window =>
@@ -743,6 +994,7 @@ export class ComputerWorkerCore {
 				return window ? makeWin(window) : null;
 			},
 			screenshot: (options?: ScreenshotOptions) => captureScreenshot(session, getContext, "desktop", options),
+			zoom: desktopTarget.zoom.bind(desktopTarget),
 			click: desktopTarget.click.bind(desktopTarget),
 			doubleClick: desktopTarget.doubleClick.bind(desktopTarget),
 			move: desktopTarget.move.bind(desktopTarget),
@@ -750,6 +1002,8 @@ export class ComputerWorkerCore {
 			scroll: desktopTarget.scroll.bind(desktopTarget),
 			type: desktopTarget.type.bind(desktopTarget),
 			press: desktopTarget.press.bind(desktopTarget),
+			holdKeys: desktopTarget.holdKeys.bind(desktopTarget),
+			holdMouse: desktopTarget.holdMouse.bind(desktopTarget),
 			elementAt: async (x: number, y: number): Promise<El | null> => {
 				const { signal } = getContext();
 				const node = await nativeCall(signal, () => session.axElementAt("desktop", x, y));

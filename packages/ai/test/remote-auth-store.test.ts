@@ -161,6 +161,74 @@ describe("RemoteAuthCredentialStore + AuthStorage integration", () => {
 		remoteStore.close();
 	});
 
+	test.each([
+		["logout", undefined],
+		["re-login", "server-access-relogin"],
+	] as const)("a refresh reply delayed past a broker %s cannot overwrite the newer state", async (_, relogin) => {
+		vi.spyOn(oauthUtils, "refreshOAuthToken").mockResolvedValue({
+			access: "server-access-rotated",
+			refresh: "server-refresh-rotated",
+			expires: Date.now() + 120_000,
+			accountId: "account-1",
+			email: "a@example.com",
+		});
+		const brokerClient = new AuthBrokerClient({ url: handle!.url, token });
+		const initial = await brokerClient.fetchSnapshot();
+		if (initial.status !== 200) throw new Error("expected snapshot");
+		const entry = initial.snapshot.credentials[0];
+		if (entry?.credential.type !== "oauth") throw new Error("expected OAuth credential");
+		const streaming = Promise.withResolvers<void>();
+		const remoteStore = new RemoteAuthCredentialStore({
+			client: brokerClient,
+			initialSnapshot: initial.snapshot,
+			onSnapshot: () => streaming.resolve(),
+		});
+		const replyParked = Promise.withResolvers<void>();
+		const releaseReply = Promise.withResolvers<void>();
+		const refresh = brokerClient.refreshCredential.bind(brokerClient);
+		vi.spyOn(brokerClient, "refreshCredential").mockImplementation(async (...args) => {
+			const reply = await refresh(...args);
+			replyParked.resolve();
+			await releaseReply.promise;
+			return reply;
+		});
+		const otherClient = new AuthBrokerClient({ url: handle!.url, token });
+		const accessTokens = () =>
+			remoteStore
+				.listAuthCredentials("anthropic")
+				.map(row => row.credential.type === "oauth" && row.credential.access);
+		const expected = relogin ? [relogin] : [];
+		try {
+			await streaming.promise;
+			const outcome = remoteStore.refreshOAuthCredential("anthropic", entry.id, entry.credential).then(
+				credential => credential.access,
+				() => "rejected",
+			);
+			await replyParked.promise;
+			if (relogin) {
+				await otherClient.uploadCredential("anthropic", {
+					type: "oauth",
+					access: relogin,
+					refresh: "server-refresh-relogin",
+					expires: Date.now() + 120_000,
+					accountId: "account-1",
+					email: "a@example.com",
+				});
+			} else {
+				await otherClient.disableCredential(entry.id, "logout");
+			}
+			await remoteStore.refreshSnapshot();
+			expect(accessTokens()).toEqual(expected);
+
+			releaseReply.resolve();
+			expect(await outcome).toBe(relogin ?? "rejected");
+			expect(accessTokens()).toEqual(expected);
+		} finally {
+			releaseReply.resolve();
+			remoteStore.close();
+		}
+	});
+
 	test("invalidated OAuth tokens disable the remote row and rotate to a sibling", async () => {
 		await serverStore!.upsertAuthCredential("anthropic", {
 			type: "oauth",
@@ -1439,6 +1507,58 @@ describe("RemoteAuthCredentialStore + AuthStorage integration", () => {
 		try {
 			expect(await clientStorage.usage.reports()).toHaveLength(1);
 			await clientStorage.usage.invalidate();
+			expect(await clientStorage.usage.reports()).toEqual([]);
+			expect(fetchSpy).toHaveBeenCalledTimes(2);
+		} finally {
+			clientStorage.close();
+		}
+	});
+
+	test("a client's single-provider usage refresh leaves the broker's other providers cached", async () => {
+		const credential = serverStore!.listAuthCredentials("anthropic")[0];
+		if (credential?.credential.type !== "oauth") throw new Error("expected OAuth credential");
+		serverStore!.updateAuthCredential(credential.id, {
+			...credential.credential,
+			expires: Date.now() + 3_600_000,
+		});
+		await serverStorage!.credentials.reload();
+
+		let calls = 0;
+		const fetchSpy = vi.spyOn(claudeUsage.claudeUsageProvider, "fetchUsage").mockImplementation(async () => {
+			calls += 1;
+			if (calls > 1) return null;
+			return {
+				provider: "anthropic",
+				fetchedAt: Date.now(),
+				limits: [
+					{
+						id: "anthropic:5h",
+						label: "Claude 5 Hour",
+						scope: { provider: "anthropic", windowId: "5h" },
+						amount: { used: 80, limit: 100, unit: "percent" },
+						status: "ok",
+					},
+				],
+				metadata: { accountId: "account-1", email: "a@example.com" },
+			};
+		});
+		const brokerClient = new AuthBrokerClient({ url: handle!.url, token });
+		const initialResult = await brokerClient.fetchSnapshot();
+		if (initialResult.status !== 200) throw new Error("expected snapshot");
+		const remoteStore = new RemoteAuthCredentialStore({
+			client: brokerClient,
+			initialSnapshot: initialResult.snapshot,
+		});
+		const clientStorage = new AuthStorage(remoteStore);
+		await clientStorage.credentials.reload();
+		try {
+			expect(await clientStorage.usage.reports()).toHaveLength(1);
+			await clientStorage.usage.invalidate("openai-codex");
+			const reports = await clientStorage.usage.reports();
+			expect(reports?.map(report => report.provider)).toEqual(["anthropic"]);
+			expect(fetchSpy).toHaveBeenCalledTimes(1);
+
+			await clientStorage.usage.invalidate("anthropic");
 			expect(await clientStorage.usage.reports()).toEqual([]);
 			expect(fetchSpy).toHaveBeenCalledTimes(2);
 		} finally {

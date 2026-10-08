@@ -1,8 +1,9 @@
 import { describe, expect, it } from "bun:test";
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { readSessionHeaderId } from "@oh-my-pi/pi-coding-agent/session/session-loader";
 import { SessionManager, type SessionPersistenceNotice } from "@oh-my-pi/pi-coding-agent/session/session-manager";
-import { FileSessionStorage } from "@oh-my-pi/pi-coding-agent/session/session-storage";
+import { FileSessionStorage, tryAcquireSessionLease } from "@oh-my-pi/pi-coding-agent/session/session-storage";
 import { TempDir } from "@oh-my-pi/pi-utils";
 
 const SESSION_MANAGER_MODULE = path.join(import.meta.dir, "../../src/session/session-manager.ts");
@@ -58,7 +59,14 @@ class OtherProcess {
 			].join("\n"),
 		);
 		const other = new OtherProcess(
-			Bun.spawn([process.execPath, script, sessionFile], { stdin: "pipe", stdout: "pipe", stderr: "pipe" }),
+			// The live `process.env` (Bun.spawn defaults to the launch env), so the
+			// other process meets this test's private session-owner leases.
+			Bun.spawn([process.execPath, script, sessionFile], {
+				stdin: "pipe",
+				stdout: "pipe",
+				stderr: "pipe",
+				env: process.env,
+			}),
 		);
 		return { other, opened: await other.#nextState() };
 	}
@@ -206,5 +214,188 @@ describe("SessionManager on a session file another omp process writes", () => {
 		await other.kill();
 
 		expect(await resumeAndAppend(original, tempDir.path())).toEqual({ savedTo: original, notices: [] });
+	}, 30_000);
+
+	for (const [kind, link] of [
+		["symlink", fs.symlinkSync],
+		["hard link", fs.linkSync],
+	] as const) {
+		it(`keeps the file with its owner when another process resumes it through a ${kind}`, async () => {
+			using tempDir = TempDir.createSync("@omp-shared-session-file-");
+			const original = await createSession(tempDir);
+
+			const { other } = await OtherProcess.resume(tempDir, original);
+			try {
+				await other.run("append other 1");
+				const alias = path.join(tempDir.path(), "alias.jsonl");
+				link(original, alias);
+				const { savedTo, notices } = await resumeAndAppend(alias, tempDir.path());
+				if (!savedTo) throw new Error("Expected the resumed session to save somewhere");
+				expect(notices).toEqual([{ reason: "open-elsewhere", from: alias, to: savedTo }]);
+				expect(await userTurnsIn(savedTo, tempDir.path())).toContain("resumed here");
+			} finally {
+				await other.close();
+			}
+			// The owner's journal holds only the owner's turns.
+			expect(await userTurnsIn(original, tempDir.path())).toEqual(["before", "other 1"]);
+		}, 30_000);
+	}
+
+	it("carries the owner's artifacts to the sibling of a session resumed through a symlink", async () => {
+		using tempDir = TempDir.createSync("@omp-shared-session-file-");
+		const original = await createSession(tempDir);
+		// Artifacts live beside the journal's real name.
+		const artifactsDir = original.slice(0, -".jsonl".length);
+		fs.mkdirSync(artifactsDir, { recursive: true });
+		fs.writeFileSync(path.join(artifactsDir, "1.bash.log"), "tool output");
+
+		const { other } = await OtherProcess.resume(tempDir, original);
+		try {
+			await other.run("append other 1");
+			const alias = path.join(tempDir.path(), "alias.jsonl");
+			fs.symlinkSync(original, alias);
+			const { savedTo } = await resumeAndAppend(alias, tempDir.path());
+			if (!savedTo) throw new Error("Expected the resumed session to save somewhere");
+			const copied = path.join(savedTo.slice(0, -".jsonl".length), "1.bash.log");
+			expect(fs.readFileSync(copied, "utf8")).toBe("tool output");
+		} finally {
+			await other.close();
+		}
+	}, 30_000);
+
+	for (const [destination, prepare, refusal] of [
+		["a copy of this session", (source: string, target: string) => fs.copyFileSync(source, target), /writes it\./],
+		[
+			"another session under the same name",
+			(_source: string, target: string, other: string) => fs.renameSync(other, target),
+			/writes the session there/,
+		],
+	] as const) {
+		it(`refuses to move a session onto ${destination} that another process writes, moving nothing`, async () => {
+			using tempDir = TempDir.createSync("@omp-shared-session-file-");
+			const srcDir = path.join(tempDir.path(), "src");
+			const dstDir = path.join(tempDir.path(), "dst");
+			fs.mkdirSync(srcDir);
+			fs.mkdirSync(dstDir);
+			const source = await createSession(tempDir);
+			const movedSource = path.join(srcDir, path.basename(source));
+			fs.renameSync(source, movedSource);
+			const target = path.join(dstDir, path.basename(source));
+			prepare(movedSource, target, await createSession(tempDir));
+
+			const { other } = await OtherProcess.resume(tempDir, target);
+			try {
+				await other.run("append theirs");
+				const targetBefore = fs.readFileSync(target, "utf8");
+				const sourceBefore = fs.readFileSync(movedSource, "utf8");
+
+				const ours = await SessionManager.open(movedSource, srcDir, new FileSessionStorage(), {
+					suppressBreadcrumb: true,
+				});
+				await expect(ours.moveTo(tempDir.path(), dstDir)).rejects.toThrow(refusal);
+				expect(ours.getSessionFile()).toBe(movedSource);
+				await ours.close();
+
+				expect(fs.readFileSync(target, "utf8")).toBe(targetBefore);
+				expect(fs.readFileSync(movedSource, "utf8")).toBe(sourceBefore);
+			} finally {
+				await other.close();
+			}
+		}, 30_000);
+	}
+
+	it("moves over a destination nobody writes and leaves that session's lease free", async () => {
+		using tempDir = TempDir.createSync("@omp-shared-session-file-");
+		const srcDir = path.join(tempDir.path(), "src");
+		const dstDir = path.join(tempDir.path(), "dst");
+		fs.mkdirSync(srcDir);
+		fs.mkdirSync(dstDir);
+		const source = await createSession(tempDir);
+		const movedSource = path.join(srcDir, path.basename(source));
+		fs.renameSync(source, movedSource);
+		const target = path.join(dstDir, path.basename(source));
+		fs.renameSync(await createSession(tempDir), target);
+		const replacedId = await readSessionHeaderId(target);
+		if (!replacedId) throw new Error("Expected a session header at the destination");
+
+		const ours = await SessionManager.open(movedSource, srcDir, new FileSessionStorage(), {
+			suppressBreadcrumb: true,
+		});
+		await ours.moveTo(tempDir.path(), dstDir);
+		expect(ours.getSessionFile()).toBe(target);
+		expect(await readSessionHeaderId(target)).toBe(ours.getSessionId());
+		await ours.close();
+		// The destination's lease was held only while the move ran.
+		const probe = tryAcquireSessionLease(replacedId);
+		probe?.release();
+		expect(probe).not.toBeNull();
+	}, 30_000);
+
+	it("refuses to change the cwd of a session another process writes, even when the file stays put", async () => {
+		using tempDir = TempDir.createSync("@omp-shared-session-file-");
+		const original = await createSession(tempDir);
+		const { other } = await OtherProcess.resume(tempDir, original);
+		try {
+			await other.run("append theirs");
+			const before = fs.readFileSync(original, "utf8");
+			const ours = await SessionManager.open(original, tempDir.path(), new FileSessionStorage(), {
+				suppressBreadcrumb: true,
+			});
+			// Same session dir, new cwd: the file does not move, but its header would be rewritten.
+			await expect(ours.moveTo(path.join(tempDir.path(), "elsewhere"), tempDir.path())).rejects.toThrow(
+				/writes it\./,
+			);
+			await ours.close();
+			expect(fs.readFileSync(original, "utf8")).toBe(before);
+		} finally {
+			await other.close();
+		}
+	}, 30_000);
+
+	it("refuses to move a source path that another live session replaced since this manager opened it", async () => {
+		using tempDir = TempDir.createSync("@omp-shared-session-file-");
+		const dstDir = path.join(tempDir.path(), "dst");
+		fs.mkdirSync(dstDir);
+		const original = await createSession(tempDir);
+		const ours = await SessionManager.open(original, tempDir.path(), new FileSessionStorage(), {
+			suppressBreadcrumb: true,
+		});
+		// Another session takes over the path, and another process writes it.
+		fs.renameSync(await createSession(tempDir), original);
+		const { other } = await OtherProcess.resume(tempDir, original);
+		try {
+			await other.run("append theirs");
+			const before = fs.readFileSync(original, "utf8");
+			await expect(ours.moveTo(tempDir.path(), dstDir)).rejects.toThrow(/holds a different session/);
+			expect(fs.readFileSync(original, "utf8")).toBe(before);
+			expect(fs.readdirSync(dstDir)).toEqual([]);
+		} finally {
+			await ours.close();
+			await other.close();
+		}
+	}, 30_000);
+
+	it("does not append into another session that was moved onto the path after this manager opened it", async () => {
+		using tempDir = TempDir.createSync("@omp-shared-session-file-");
+		const original = await createSession(tempDir);
+		// Opened, not yet written: this manager holds no lease.
+		const ours = await SessionManager.open(original, tempDir.path(), new FileSessionStorage(), {
+			suppressBreadcrumb: true,
+		});
+		const notices: SessionPersistenceNotice[] = [];
+		ours.onPersistenceNotice(notice => notices.push(notice));
+		// Another session takes over the path; another process writes it.
+		fs.renameSync(await createSession(tempDir), original);
+		const { other } = await OtherProcess.resume(tempDir, original);
+		try {
+			await other.run("append theirs");
+			ours.appendMessage(userTurn("ours"));
+			await ours.flush();
+			expect(notices.map(n => n.reason)).toEqual(["open-elsewhere"]);
+			expect(await userTurnsIn(original, tempDir.path())).not.toContain("ours");
+		} finally {
+			await ours.close();
+			await other.close();
+		}
 	}, 30_000);
 });

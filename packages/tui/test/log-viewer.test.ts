@@ -221,6 +221,67 @@ describe("DebugLogViewerModel", () => {
 		expect(rendered).toContain("▾ beta");
 		expect(updates).toBe(1);
 	});
+
+	it("stops loading older history at the entry cap and never evicts the newest entries", async () => {
+		const model = new DebugLogViewerModel(["today-1", "today-2", "today-3"].join("\n"), {
+			processStartMs: Date.now(),
+			maxLogEntries: 5,
+			hasOlderLogs: () => true,
+			loadOlderLogs: async () => ["old-1", "old-2", "old-3", "old-4"].join("\n"),
+		});
+		await model.loadOlder(10);
+		const lines = Array.from({ length: model.logCount }, (_, index) => model.getRawLine(index));
+		// The chunk's entries nearest the loaded history fill the remaining room.
+		expect(lines).toEqual(["old-3", "old-4", "today-1", "today-2", "today-3"]);
+		expect(model.historyLimitReached).toBe(true);
+		while (model.canLoadOlder()) await model.loadOlder(10);
+		expect(await model.loadOlder(10)).toBe(false);
+		expect(model.logCount).toBe(5);
+	});
+
+	it("keeps the newest entries when the initial log already exceeds the cap", () => {
+		const model = new DebugLogViewerModel(["a", "b", "c", "d"].join("\n"), {
+			processStartMs: Date.now(),
+			maxLogEntries: 2,
+		});
+		expect([model.getRawLine(0), model.getRawLine(1)]).toEqual(["c", "d"]);
+	});
+
+	it("tracks selection queries across cursor moves, anchors and filter changes", () => {
+		const model = new DebugLogViewerModel(["alpha", "beta", "gamma", "delta"].join("\n"), {
+			processStartMs: Date.now(),
+		});
+		model.moveCursor(-999, false);
+		expect(model.isSelected(0)).toBe(true);
+		expect(model.getSelectedCount()).toBe(1);
+		model.moveCursor(2, true);
+		expect([0, 1, 2, 3].map(index => model.isSelected(index))).toEqual([true, true, true, false]);
+		expect(model.getSelectedCount()).toBe(3);
+		model.moveCursor(1, false);
+		expect([0, 1, 2, 3].map(index => model.isSelected(index))).toEqual([false, false, false, true]);
+		model.setFilterQuery("a");
+		expect(model.getSelectedCount()).toBe(1);
+		expect(model.isSelected(model.cursorLogIndex ?? -1)).toBe(true);
+	});
+
+	it("re-renders a cached row when its expansion or the width changes", () => {
+		const viewer = new DebugLogViewerComponent({
+			deps: { copyToClipboard: () => {} },
+			logs: ["alpha", `beta ${"x".repeat(120)}`, "gamma"].join("\n"),
+			terminalRows: 12,
+			onExit: () => {},
+		});
+		const text = (width: number) =>
+			viewer
+				.render(width)
+				.map(line => Bun.stripANSI(line))
+				.join("\n");
+		const wide = text(160);
+		expect(wide).toContain(`beta ${"x".repeat(120)}`);
+		expect(text(80)).not.toContain(`beta ${"x".repeat(120)}`);
+		viewer.handleInput("\x1b[<0;2;6M");
+		expect(text(80)).toContain("▾ beta");
+	});
 });
 
 describe("buildLogCopyPayload", () => {

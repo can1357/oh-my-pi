@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Any
 
 from omp_rpc import (
+    HostToolCompletedEvent,
     MessageUpdateEvent,
     RpcClient,
     RpcError,
@@ -559,12 +560,11 @@ def _run_rpc_blocking(
 
     def _on_tool_end(event: ToolExecutionEndEvent) -> None:
         tool_name = event.tool_name
-        # `tool_name` is transport-normalized by omp_rpc: an xd:// device
-        # dispatch (`write xd://submit_pr_review`) reports the host tool that
-        # ran, so terminal-action detection can match on host-tool names. A
-        # failed execution (`is_error`) does not count as reaching the
-        # terminal action — a rejected submit must still trigger the
-        # completion reminder.
+        # `tool_name` is transport-normalized by omp_rpc for top-level and
+        # xd:// device dispatches, but an eval-bridged host tool only surfaces
+        # as the enclosing `eval`; terminal-action detection therefore relies
+        # on `_on_host_tool_completed`. A failed execution (`is_error`) does
+        # not count — a rejected submit must still trigger the reminder.
         ok = event.result is not None and not event.is_error
         if ok:
             tools_called.add(tool_name)
@@ -575,6 +575,16 @@ def _run_rpc_blocking(
                 "tool": tool_name,
                 "ok": ok,
             },
+        )
+
+    def _on_host_tool_completed(event: HostToolCompletedEvent) -> None:
+        # Fires for every dispatch path (top-level, `write xd://X`, eval
+        # bridge) once the host tool's `execute()` returned, so a terminal
+        # action reached from inside `eval` still ends the task (#13583).
+        tools_called.add(event.tool_name)
+        log.info(
+            "host_tool_completed",
+            extra={"issue": bindings.issue_key, "tool": event.tool_name},
         )
 
     def _on_msg(event: MessageUpdateEvent) -> None:
@@ -691,6 +701,7 @@ def _run_rpc_blocking(
         try:
             client.install_headless_ui()
             client.on_tool_execution_end(_on_tool_end)
+            client.on_host_tool_completed(_on_host_tool_completed)
             client.on_message_update(_on_msg)
 
             phases = persona.seed_phases(task_kind)
@@ -710,26 +721,7 @@ def _run_rpc_blocking(
                         # Follow-up: keep prior phases (e.g. Reproduce / Fix / PR)
                         # so the agent still sees the context, but append the
                         # follow-up phase at the end.
-                        existing = list(client.get_todos())
-                        merged = [
-                            {
-                                "id": p.id,
-                                "name": p.name,
-                                "tasks": [
-                                    {
-                                        "id": t.id,
-                                        "content": t.content,
-                                        "status": t.status,
-                                        "notes": t.notes,
-                                        "details": t.details,
-                                        "blocker": t.blocker,
-                                    }
-                                    for t in p.tasks
-                                ],
-                            }
-                            for p in existing
-                        ] + phases
-                        client.set_todos(merged)
+                        client.set_todos([*client.get_todos(), *phases])
                 except RpcError as exc:
                     log.warning("set_todos failed", extra={"err": str(exc)})
 

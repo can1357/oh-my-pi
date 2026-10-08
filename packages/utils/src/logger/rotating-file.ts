@@ -109,11 +109,13 @@ export class RotatingFileSink {
 	/**
 	 * Append one already-formatted log record. A batching sink buffers it unless
 	 * `flushNow` is set or the buffer reached its size threshold; either way the
-	 * whole buffer, this record included, is then written in order.
+	 * whole buffer, this record included, is then written in order. `day` is the
+	 * record's `localDay` key, so callers that already took the record's `Date`
+	 * reuse it.
 	 */
-	write(line: string, flushNow = false): void {
+	write(line: string, flushNow = false, day = localDay(new Date())): void {
 		if (this.#closed) return;
-		this.#selectFile(localDay(new Date()));
+		this.#selectFile(day);
 		const record = `${line}${os.EOL}`;
 		const bytes = Buffer.byteLength(record, "utf8");
 		this.#pending += record;

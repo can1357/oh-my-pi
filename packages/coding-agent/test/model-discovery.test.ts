@@ -11,6 +11,7 @@ import { writeModelCache } from "@oh-my-pi/pi-catalog/model-cache";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { resolveModelCacheProviderId, resolveOllamaModelCacheProviderId } from "@oh-my-pi/pi-catalog/provider-models";
 import type { ModelKind, ModelSpec, OpenAICompat } from "@oh-my-pi/pi-catalog/types";
+import { CODEX_CLIENT_VERSION } from "@oh-my-pi/pi-catalog/wire/codex";
 import {
 	discoverOllamaModels,
 	discoverOpenAIModelsList,
@@ -526,6 +527,123 @@ describe("ModelRegistry runtime discovery", () => {
 		expect(registry.find("openai-codex", "runtime-codex-model")).toBeDefined();
 	});
 
+	test("Codex discovery follows a configured baseUrl and sends only the configured key there (#13830)", async () => {
+		writeRawModelsJson({
+			"openai-codex": { baseUrl: "https://codex-proxy.example/backend-api/", apiKey: "sk-gateway" },
+		});
+		await authStorage.credentials.set("openai-codex", {
+			type: "oauth",
+			access: "chatgpt-oauth-token",
+			refresh: "chatgpt-refresh",
+			expires: Date.now() + 3_600_000,
+		});
+		const requests: { url: string; authorization: string | null }[] = [];
+		const fetchMock: FetchImpl = async (input, init) => {
+			const url = String(input);
+			requests.push({ url, authorization: new Headers(init?.headers).get("Authorization") });
+			if (url.startsWith("https://codex-proxy.example/backend-api/codex/models")) {
+				return Response.json({
+					models: [
+						{
+							slug: "gpt-6.1-sol",
+							display_name: "GPT-6.1 Sol",
+							context_window: 272_000,
+							supported_in_api: true,
+							input_modalities: ["text", "image"],
+						},
+					],
+				});
+			}
+			throw new Error(`Unexpected URL: ${url}`);
+		};
+		const registry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: fetchMock });
+
+		await registry.refreshProvider("openai-codex", "online");
+
+		expect(requests).toEqual([
+			{
+				url: `https://codex-proxy.example/backend-api/codex/models?client_version=${CODEX_CLIENT_VERSION}`,
+				authorization: "Bearer sk-gateway",
+			},
+		]);
+		expect(registry.find("openai-codex", "gpt-6.1-sol")?.baseUrl).toBe("https://codex-proxy.example/backend-api/");
+	});
+
+	/** Serve an official Codex roster; any other URL fails the test. */
+	function mockOfficialCodexRoster(requests: { url: string; authorization: string | null }[]): FetchImpl {
+		return async (input, init) => {
+			const url = String(input);
+			requests.push({ url, authorization: new Headers(init?.headers).get("Authorization") });
+			if (url.startsWith("https://chatgpt.com/backend-api/codex/models")) {
+				return Response.json({
+					models: [
+						{
+							slug: "official-live-model",
+							display_name: "Official Live Model",
+							context_window: 272_000,
+							supported_in_api: true,
+							input_modalities: ["text"],
+						},
+					],
+				});
+			}
+			throw new Error(`Unexpected URL: ${url}`);
+		};
+	}
+
+	const officialOAuthDiscovery = {
+		url: `https://chatgpt.com/backend-api/codex/models?client_version=${CODEX_CLIENT_VERSION}`,
+		authorization: "Bearer chatgpt-oauth-token",
+	};
+
+	test("Codex discovery keeps stored ChatGPT OAuth on chatgpt.com when a relay baseUrl is configured", async () => {
+		writeRawModelsJson({ "openai-codex": { baseUrl: "https://codex-proxy.example/backend-api" } });
+		await authStorage.credentials.set("openai-codex", {
+			type: "oauth",
+			access: "chatgpt-oauth-token",
+			refresh: "chatgpt-refresh",
+			expires: Date.now() + 3_600_000,
+		});
+		const requests: { url: string; authorization: string | null }[] = [];
+		const registry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: mockOfficialCodexRoster(requests) });
+
+		await registry.refreshProvider("openai-codex", "online");
+
+		expect(requests).toEqual([officialOAuthDiscovery]);
+		expect(registry.find("openai-codex", "official-live-model")).toBeDefined();
+	});
+
+	test("Codex discovery keeps a live OAuth token off a runtime provider's custom baseUrl despite a command key", async () => {
+		// An extension provider that owns /login installs its command apiKey as a
+		// fallback, so `peek` still returns the unexpired ChatGPT OAuth token.
+		await authStorage.credentials.set("openai-codex", {
+			type: "oauth",
+			access: "chatgpt-oauth-token",
+			refresh: "chatgpt-refresh",
+			expires: Date.now() + 3_600_000,
+		});
+		const requests: { url: string; authorization: string | null }[] = [];
+		const registry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: mockOfficialCodexRoster(requests) });
+		const sourceId = "ext://codex-proxy";
+		try {
+			registry.registerProvider(
+				"openai-codex",
+				{
+					baseUrl: "https://codex-proxy.example/backend-api",
+					apiKey: "!printf sk-proxy-command",
+					oauth: { name: "Codex Proxy", login: async () => "proxy-login-token" },
+				},
+				sourceId,
+			);
+
+			await registry.refreshProvider("openai-codex", "online");
+
+			expect(requests).toEqual([officialOAuthDiscovery]);
+		} finally {
+			registry.clearSourceRegistrations(sourceId);
+		}
+	});
+
 	test("Codex discovery aborts (keeps bundled models) when any account credential fails to refresh", async () => {
 		// Two configured Codex accounts: the fresh one resolves, the expired one's
 		// refresh throws so getOAuthAccesses reports ok:false. A partial union would
@@ -559,6 +677,113 @@ describe("ModelRegistry runtime discovery", () => {
 
 		expect(modelListCalls).toBe(0);
 		expect(getModelsForProvider(registry, "openai-codex").length).toBeGreaterThan(0);
+	});
+
+	test("Antigravity discovery unions every account's roster and routes each model to an account serving it", async () => {
+		// Account A's plan omits Claude 5.5; account B's serves it. Discovery is
+		// authoritative, so reading only one account's roster would prune Claude
+		// 5.5 for both whenever A is the account discovery happens to pick.
+		await authStorage.credentials.set("google-antigravity", [
+			{
+				type: "oauth",
+				access: "token-a",
+				refresh: "refresh-a",
+				expires: Date.now() + 3_600_000,
+				email: "a@example.com",
+				projectId: "project-a",
+			},
+			{
+				type: "oauth",
+				access: "token-b",
+				refresh: "refresh-b",
+				expires: Date.now() + 3_600_000,
+				email: "b@example.com",
+				projectId: "project-b",
+			},
+		]);
+		const gemini = { "gemini-3.1-pro-low": { displayName: "Gemini 3.1 Pro (Low)", supportsThinking: true } };
+		const claude = Object.fromEntries(
+			["low", "medium", "high"].map(tier => [`claude-opus-5-5-${tier}`, { supportsThinking: true }]),
+		);
+		const rosters: Record<string, object> = {
+			"Bearer token-a": { models: gemini },
+			"Bearer token-b": { models: { ...gemini, ...claude } },
+		};
+		const fetchMock: FetchImpl = async (input, init) => {
+			const url = String(input);
+			if (url.includes(":fetchAvailableModels")) {
+				const roster = rosters[new Headers(init?.headers).get("authorization") ?? ""];
+				return roster ? Response.json(roster) : new Response("Unauthorized", { status: 401 });
+			}
+			return new Response("version: 2.19.1\n");
+		};
+		const registry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: fetchMock });
+
+		await registry.refreshProvider("google-antigravity", "online");
+
+		const opus = registry.find("google-antigravity", "claude-opus-5-5");
+		expect(opus?.accountAccess).toEqual({ "b@example.com": {} });
+		expect(registry.find("google-antigravity", "gemini-3.1-pro")?.accountAccess).toEqual({
+			"a@example.com": {},
+			"b@example.com": {},
+		});
+		// Bundled rows that no account serves stay pruned.
+		expect(registry.find("google-antigravity", "claude-sonnet-5-5")).toBeUndefined();
+
+		// A session pinned to account A moves to B for a model only B serves.
+		const sessionId = "antigravity-claude-session";
+		const accountA = authStorage.oauth.accounts("google-antigravity")[0];
+		if (!accountA || !opus) throw new Error("expected account A and Claude Opus 5.5");
+		expect(authStorage.sessions.pin("google-antigravity", sessionId, accountA.credentialId)).toBe(true);
+		expect(await registry.getApiKey(opus, sessionId)).toContain('"token":"token-b"');
+	});
+
+	test("Antigravity routing still works for an account whose login stored no email", async () => {
+		// Google's userinfo lookup is optional at login; such a credential keeps
+		// only its project id, which must still tag and select the account.
+		await authStorage.credentials.set("google-antigravity", [
+			{
+				type: "oauth",
+				access: "token-a",
+				refresh: "refresh-a",
+				expires: Date.now() + 3_600_000,
+				email: "a@example.com",
+				projectId: "project-a",
+			},
+			{
+				type: "oauth",
+				access: "token-b",
+				refresh: "refresh-b",
+				expires: Date.now() + 3_600_000,
+				projectId: "project-b",
+			},
+		]);
+		const gemini = { "gemini-3.1-pro-low": { displayName: "Gemini 3.1 Pro (Low)", supportsThinking: true } };
+		const claude = Object.fromEntries(
+			["low", "medium", "high"].map(tier => [`claude-opus-5-5-${tier}`, { supportsThinking: true }]),
+		);
+		const rosters: Record<string, object> = {
+			"Bearer token-a": { models: gemini },
+			"Bearer token-b": { models: { ...gemini, ...claude } },
+		};
+		const fetchMock: FetchImpl = async (input, init) => {
+			if (String(input).includes(":fetchAvailableModels")) {
+				const roster = rosters[new Headers(init?.headers).get("authorization") ?? ""];
+				return roster ? Response.json(roster) : new Response("Unauthorized", { status: 401 });
+			}
+			return new Response("version: 2.19.1\n");
+		};
+		const registry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: fetchMock });
+
+		await registry.refreshProvider("google-antigravity", "online");
+
+		const opus = registry.find("google-antigravity", "claude-opus-5-5");
+		expect(opus?.accountAccess).toEqual({ "project-b": {} });
+		const sessionId = "antigravity-emailless-session";
+		const accountA = authStorage.oauth.accounts("google-antigravity")[0];
+		if (!accountA || !opus) throw new Error("expected account A and Claude Opus 5.5");
+		expect(authStorage.sessions.pin("google-antigravity", sessionId, accountA.credentialId)).toBe(true);
+		expect(await registry.getApiKey(opus, sessionId)).toContain('"token":"token-b"');
 	});
 
 	test("Gemini CLI discovery forwards a stored OAuth project id to the quota fallback", async () => {

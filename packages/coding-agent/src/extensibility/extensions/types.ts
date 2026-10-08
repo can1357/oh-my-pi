@@ -460,6 +460,8 @@ export type ExtensionMode = "tui" | "rpc" | "json" | "print";
 /**
  * The agent a session runs. Extension factories are rebound to every subagent session
  * (task tool, eval `agent()`, `/tan` clones), so this tells a handler which agent it is serving.
+ * An advisor's own tool calls reach the advising session's `tool_call`/`tool_result` handlers
+ * with `{ kind: "sub", id: "advisor", name: "advisor", depth: 0, parentId: <session agent id> }`.
  */
 export interface ExtensionAgentIdentity {
 	/**
@@ -799,6 +801,7 @@ export type {
 	SessionBeforeSwitchEvent,
 	SessionBeforeTreeEvent,
 	SessionBranchEvent,
+	SessionBranchReason,
 	SessionCompactEvent,
 	SessionCompactingEvent,
 	SessionEvent,
@@ -1751,6 +1754,11 @@ export interface ProviderModelConfig {
 	name: string;
 	/** API type override for this model. */
 	api?: Api;
+	/**
+	 * Catalog kind; omitted means the api's kind (`image` for `openai-images`, …) or `chat`.
+	 * Must be a kind the api serves, as in `models.yml`.
+	 */
+	kind?: Model["kind"];
 	/** Whether the model supports extended thinking at all. */
 	reasoning: boolean;
 	/** Optional canonical thinking capability metadata for per-model effort support. */
