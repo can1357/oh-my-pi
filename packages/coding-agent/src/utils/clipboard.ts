@@ -340,6 +340,14 @@ export async function readImageFromClipboard(): Promise<ClipboardImage | null> {
 				const data = await spawnCapture(["wl-paste", "--type", mimeType], { encoding: "bytes" });
 				if (data.byteLength > 0) return { data, mimeType };
 			}
+			// WSLg can expose Windows screenshots only as BMP; providers consume PNG.
+			if (offeredMimeTypes.has("image/bmp")) {
+				const bmp = await spawnCapture(["wl-paste", "--type", "image/bmp"], { encoding: "bytes" });
+				if (bmp.byteLength > 0) {
+					const data = await new Bun.Image(bmp).png().bytes();
+					return { data, mimeType: "image/png" };
+				}
+			}
 		} catch {
 			// Fall through when wl-clipboard is absent or no advertised image payload can be read.
 		}

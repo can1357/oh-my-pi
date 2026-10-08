@@ -229,6 +229,33 @@ describe("readImageFromClipboard dispatch", () => {
 		},
 	);
 
+	it("converts a BMP-only WSLg clipboard to a PNG image", async () => {
+		setPlatform("linux");
+		process.env.WSL_DISTRO_NAME = "Ubuntu";
+		process.env.WAYLAND_DISPLAY = "wayland-0";
+		// 1x1 red BMP: the WSLg bridge advertises only image/bmp for host screenshots.
+		const bmp = Buffer.from(
+			"424d3a00000000000000360000002800000001000000010000000100180000000000040000000000000000000000000000000000000000000000ff00",
+			"hex",
+		);
+		const calls: SpawnCall[] = [];
+		spySpawn(
+			calls,
+			cmd => {
+				if (cmd[0] === "powershell.exe") return "";
+				if (cmd.includes("--list-types")) return "image/bmp\n";
+				return bmp;
+			},
+			[1, 0, 0],
+		);
+		vi.spyOn(native, "readImageFromClipboard").mockResolvedValue(null);
+
+		const image = await readImageFromClipboard();
+
+		expect(image?.mimeType).toBe("image/png");
+		expect(Array.from(image?.data.subarray(0, 8) ?? [])).toEqual([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+	});
+
 	it("returns null on Termux without spawning anything", async () => {
 		setPlatform("linux");
 		process.env.TERMUX_VERSION = "0.118";

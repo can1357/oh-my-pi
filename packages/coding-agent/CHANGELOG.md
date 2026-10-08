@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed Ctrl+V image paste on WSLg when the Windows clipboard offers only BMP and PowerShell image access is blocked ([#14940](https://github.com/can1357/oh-my-pi/issues/14940)).
+
 ## [18.8.4] - 2026-10-08
 
 ### Changed
