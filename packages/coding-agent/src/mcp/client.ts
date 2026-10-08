@@ -250,6 +250,19 @@ export async function listTools(
 }
 
 /**
+ * Confirm a connected server still responds by sending the spec `ping` request.
+ * A JSON-RPC "method not found" reply still proves the server answered, so it
+ * counts as alive; transport failures, timeouts, and aborts are rethrown.
+ */
+export async function pingServer(connection: MCPServerConnection, options?: MCPRequestOptions): Promise<void> {
+	try {
+		await connection.transport.request("ping", {}, options);
+	} catch (error) {
+		if (!isMethodNotFoundError(error)) throw error;
+	}
+}
+
+/**
  * Call a tool on a connected server.
  */
 export async function callTool(

@@ -6,7 +6,7 @@ import type { CustomTool } from "../extensibility/custom-tools/types";
 import type { AuthStorage } from "../session/auth-storage";
 import { raceAbortSignal, withTimeout } from "./action-utils";
 import { classifyMCPServer } from "./auth-capability";
-import { connectToServer, disconnectServer, listTools } from "./client";
+import { connectToServer, disconnectServer, listTools, pingServer } from "./client";
 import { setMcpServerEnabled, updateMCPServer } from "./config-writer";
 import {
 	MCPOAuthCancelledError,
@@ -184,13 +184,30 @@ export class MCPServerActions {
 			const state = manager.getConnectionStatus(target.name);
 			const connection = manager.getConnection(target.name);
 			if (state === "connected" && connection) {
-				const tools = await listTools(connection, { signal });
-				return {
-					action: "test",
-					message:
-						tools.length > 0 ? `Connected. ${tools.length} tool(s) available.` : "Connected. No tools reported.",
-					tools,
-				};
+				const timeout = getServerTimeout(target.config);
+				const controller = new AbortController();
+				const abort = () => controller.abort(signal?.reason ?? new DOMException("Aborted", "AbortError"));
+				if (signal?.aborted) abort();
+				else signal?.addEventListener("abort", abort, { once: true });
+				try {
+					await withTimeout(
+						raceAbortSignal(pingServer(connection, { signal: controller.signal }), controller.signal),
+						timeout,
+						`Server did not respond within ${timeout}ms`,
+						() => controller.abort(new Error(`Server did not respond within ${timeout}ms`)),
+					);
+					const tools = await listTools(connection, { signal: controller.signal });
+					return {
+						action: "test",
+						message:
+							tools.length > 0
+								? `Connected. ${tools.length} tool(s) available.`
+								: "Connected. No tools reported.",
+						tools,
+					};
+				} finally {
+					signal?.removeEventListener("abort", abort);
+				}
 			}
 		}
 

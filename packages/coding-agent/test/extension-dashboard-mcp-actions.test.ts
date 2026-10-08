@@ -108,6 +108,38 @@ describe("extensions dashboard MCP actions", () => {
 		expect(refreshTools).toHaveBeenCalledTimes(1);
 	});
 
+	test("test action probes a connected server instead of trusting cached tools", async () => {
+		const request = vi.fn(async (_method: string) => ({}));
+		const connection = {
+			name: "github",
+			config: CONFIG,
+			transport: { connected: true, request, notify: vi.fn(), close: vi.fn() },
+			serverInfo: { name: "github", version: "1.0" },
+			capabilities: { tools: {} },
+			tools: [{ name: "search", inputSchema: { type: "object" as const } }],
+		} as unknown as MCPServerConnection;
+		const manager = createMcpManagerStub({
+			getConnectionStatus: vi.fn(() => "connected" as const),
+			getConnection: vi.fn(() => connection),
+		});
+		const actions = new MCPServerActions({
+			cwd: projectDir,
+			manager,
+			authStorage: AUTH_STORAGE,
+			refreshMCPTools: async () => {},
+		});
+		const target = { name: "github", config: CONFIG };
+
+		await expect(actions.test(target)).resolves.toMatchObject({ message: "Connected. 1 tool(s) available." });
+		expect(request).toHaveBeenCalledWith("ping", {}, { signal: expect.any(AbortSignal) });
+
+		request.mockRejectedValueOnce(new Error("MCP error -32601: Method not found"));
+		await expect(actions.test(target)).resolves.toMatchObject({ action: "test" });
+
+		request.mockRejectedValueOnce(new Error("fetch failed: ECONNREFUSED"));
+		await expect(actions.test(target)).rejects.toThrow("ECONNREFUSED");
+	});
+
 	test("completes enable and disable persistence without a runtime manager", async () => {
 		const actions = new MCPServerActions({ cwd: projectDir, refreshMCPTools: async () => {} });
 		const source = { provider: "omp", providerName: "OMP", path: configPath, level: "project" as const };
