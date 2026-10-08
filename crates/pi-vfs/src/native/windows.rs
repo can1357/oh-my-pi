@@ -14,7 +14,10 @@ use std::{
 };
 
 use windows_sys::Win32::{
-	Foundation::{CloseHandle, GetLastError, HANDLE, MAX_PATH, NO_ERROR},
+	Foundation::{
+		CloseHandle, ERROR_ACCESS_DENIED, ERROR_CANT_ACCESS_FILE, ERROR_SHARING_VIOLATION,
+		GetLastError, HANDLE, MAX_PATH, NO_ERROR,
+	},
 	Storage::FileSystem::{
 		BY_HANDLE_FILE_INFORMATION, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
 		FILE_NAME_NORMALIZED, FILE_WRITE_ATTRIBUTES, GetCompressedFileSizeW, GetDiskFreeSpaceExW,
@@ -158,16 +161,14 @@ pub(crate) fn chown(
 }
 
 static PATHEXT: LazyLock<Vec<String>> = LazyLock::new(|| {
-	let parsed: Vec<String> = std::env::var_os("PATHEXT")
-		.map(|value| {
-			value
-				.to_string_lossy()
-				.split(';')
-				.map(|entry| entry.trim().trim_start_matches('.').to_ascii_lowercase())
-				.filter(|entry| !entry.is_empty())
-				.collect()
-		})
-		.unwrap_or_default();
+	let parsed: Vec<String> = std::env::var_os("PATHEXT").map_or_default(|value| {
+		value
+			.to_string_lossy()
+			.split(';')
+			.map(|entry| entry.trim().trim_start_matches('.').to_ascii_lowercase())
+			.filter(|entry| !entry.is_empty())
+			.collect()
+	});
 	if parsed.is_empty() {
 		["com", "exe", "bat", "cmd"].map(str::to_owned).to_vec()
 	} else {
@@ -211,6 +212,9 @@ pub(crate) fn file_id(path: &Path, follow: bool) -> io::Result<FileId> {
 
 pub(crate) fn file_id_of(file: &fs::File) -> io::Result<FileId> {
 	let info = handle_info(file)?;
+	if info.file_index == 0 {
+		return Err(unsupported("file identity"));
+	}
 	Ok(FileId::native(info.volume_serial, info.file_index))
 }
 
@@ -238,6 +242,46 @@ pub(crate) fn file_metadata(file: &fs::File) -> io::Result<Metadata> {
 		Ok(info) => Metadata::native_with_handle(meta, info),
 		Err(_) => Metadata::from(meta),
 	})
+}
+
+/// Path metadata with handle identity.
+///
+/// A Windows path stat cannot carry the volume serial and file index that
+/// identity comparisons need. Read both metadata and identity from one
+/// attribute-query handle so a rename between separate path lookups cannot
+/// combine two different objects. Objects that cannot be opened for identity
+/// queries keep path metadata with unknown identity.
+pub(crate) fn path_metadata(path: &Path, follow: bool) -> io::Result<Metadata> {
+	match open_for_info(path, follow, 0) {
+		Ok(file) => {
+			if let Ok(meta) = file.metadata() {
+				return Ok(match handle_info(&file) {
+					Ok(info) => Metadata::native_with_handle(meta, info),
+					Err(_) => Metadata::from(meta),
+				});
+			}
+		},
+		// std's stat opens the path exactly like `open_for_info` and only
+		// recovers from these (by reading the parent's directory listing);
+		// any other failure, a plain miss above all, would just repeat the
+		// same CreateFileW.
+		Err(error)
+			if !error.raw_os_error().is_some_and(|code| {
+				matches!(
+					code as u32,
+					ERROR_SHARING_VIOLATION | ERROR_ACCESS_DENIED | ERROR_CANT_ACCESS_FILE
+				)
+			}) =>
+		{
+			return Err(error);
+		},
+		Err(_) => {},
+	}
+	if follow {
+		fs::metadata(path).map(Metadata::from)
+	} else {
+		fs::symlink_metadata(path).map(Metadata::from)
+	}
 }
 
 pub(crate) fn file_is_locked(_file: &fs::File) -> io::Result<bool> {

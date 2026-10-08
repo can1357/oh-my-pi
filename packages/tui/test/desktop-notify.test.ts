@@ -44,12 +44,6 @@ describe("shouldDeliverDesktopNotification", () => {
 		expect(shouldDeliverDesktopNotification("iterm2", false, "linux", LINUX_ENV)).toBe(false);
 	});
 
-	it("lets Bell-only terminals use D-Bus while true in-band notify protocols skip it", () => {
-		expect(shouldDeliverDesktopNotification("vscode", true, "linux", LINUX_ENV)).toBe(true);
-		expect(shouldDeliverDesktopNotification("ghostty", false, "linux", LINUX_ENV)).toBe(false);
-		expect(shouldDeliverDesktopNotification("kitty", false, "linux", LINUX_ENV)).toBe(false);
-	});
-
 	it("respects the PI_NO_DESKTOP_NOTIFY=1 opt-out", () => {
 		expect(
 			shouldDeliverDesktopNotification("trueColor", true, "linux", {

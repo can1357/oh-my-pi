@@ -1,5 +1,6 @@
 import * as path from "node:path";
-import { type AssistantMessage, validateToolArguments } from "@oh-my-pi/pi-ai";
+import type { AssistantMessage } from "@oh-my-pi/pi-ai";
+import { validateAgentToolArguments } from "./tool-arguments";
 import type {
 	AgentContext,
 	AgentLoopConfig,
@@ -10,6 +11,7 @@ import type {
 	SpeculativeChildDefinition,
 	SpeculativeChildHandle,
 	SpeculativeCommitContext,
+	SpeculativeLaunchContext,
 	SpeculativeOperationContext,
 	SpeculativePhysicalOutcome,
 	SpeculativeResourceAccess,
@@ -520,6 +522,17 @@ export class SpeculativeOperationCoordinator {
 		}
 	}
 
+	async authorizeLaunch(context: SpeculativeLaunchContext): Promise<SpeculativeAuthorization> {
+		if (this.#closed) return { allowed: false, reason: "speculation coordinator is closed" };
+		const authorize = this.config.host?.authorizeLaunch;
+		if (!authorize) return { allowed: false, reason: "host does not authorize speculative launches" };
+		try {
+			return await authorize.call(this.config.host, context);
+		} catch {
+			return { allowed: false, reason: "host launch authorization failed" };
+		}
+	}
+
 	async discardChildren(parentToolCallId: string, reason: string): Promise<void> {
 		await this.#admission;
 		await Promise.all(
@@ -700,15 +713,10 @@ export class SpeculativeOperationCoordinator {
 		}
 		let validatedArgs: Record<string, unknown>;
 		try {
-			validatedArgs = validateToolArguments(tool, toolCall);
+			validatedArgs = validateAgentToolArguments(tool, toolCall);
 		} catch {
-			if (!tool.lenientArgValidation) {
-				this.ineligible(toolCall, "tool arguments are not valid", source, parentToolCallId);
-				return undefined;
-			}
-			validatedArgs = { ...(toolCall.arguments as Record<string, unknown>) };
-			delete validatedArgs.__parseError;
-			delete validatedArgs.__rawJson;
+			this.ineligible(toolCall, "tool arguments are not valid", source, parentToolCallId);
+			return undefined;
 		}
 		let executionArgs: Record<string, unknown>;
 		try {

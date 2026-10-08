@@ -3,13 +3,15 @@
 provider "openai-codex" {
 	default-model "gpt-5.5"
 	env "OPENAI_CODEX_OAUTH_TOKEN"
+	dynamic-models-authoritative #true
 	kind-apis {
 		image "openai-codex-responses"
 	}
 	web-search "codex"
 
 	seed api="openai-codex-responses" base-url="https://chatgpt.com/backend-api" bundle="always" {
-		model "gpt-image-1" name="GPT Image 1" {
+		// Label only: the Codex backend ignores `tool.model` and runs gpt-image-2-codex.
+		model "gpt-image-2" name="GPT Image 2" {
 			reasoning #false
 			input "text" "image"
 			cost input=0 output=0 cache-read=0 cache-write=0
@@ -18,14 +20,18 @@ provider "openai-codex" {
 		}
 	}
 
-	models "gpt-image-1" {
+	models "gpt-image-2" {
 		kind "image"
 	}
 
 	// Replaces the Codex provider's handwritten flex/priority pricing fallback.
+	// Fast (priority) draws included subscription usage at 2.5x Standard on
+	// every model that supports it; purchased credits and Enterprise
+	// pay-as-you-go bill 2x. See
+	// https://learn.chatgpt.com/docs/agent-configuration/speed.
 	service-tier-cost {
 		flex 0.5
-		priority 2
+		priority 2.5
 	}
 	// Harmony-protocol leak detection/mitigation applies to every Codex model,
 	// current and future; replaces the provider check in harmony-leak.ts.
@@ -74,6 +80,12 @@ provider "openai-codex" {
 		service-tier-cost {
 			flex 0.5
 			priority 2.5
+			// Ultrafast is Astra-only. This table uses OpenAI's included-usage
+			// multipliers for Codex: Ultrafast 8x and Fast 2.5x Standard (purchased
+			// credits / Enterprise pay-as-you-go bill 6x and 2x instead). See
+			// https://learn.chatgpt.com/docs/agent-configuration/speed and
+			// https://learn.chatgpt.com/docs/pricing.
+			ultrafast 8
 		}
 		limits-patch {
 			context-window 272000
@@ -87,6 +99,23 @@ provider "openai-codex" {
 			cache-read 0.2
 			cache-write 0
 		}
+	}
+	// GPT-6.1 Sol keeps GPT-6 Sol's $2/$10 list price but halves cached input
+	// to $0.10 (OpenAI API docs, 2026-09-29). Like Astra, Codex reports a 272K
+	// default and an 872K maximum while OpenAI documents 922K max input (1.05M
+	// total); the curated maximum applies only with extended context on, and a
+	// higher live maximum still wins.
+	models "gpt-6.1-sol" "gpt-6.1-sol-wm" {
+		cost-patch {
+			input 2.0
+			output 10.0
+			cache-read 0.1
+			cache-write 0
+		}
+		limits-patch {
+			context-window 272000
+		}
+		max-context-window 922000
 	}
 	models "gpt-6-luna" "gpt-6-luna-wm" {
 		cost-patch {
@@ -107,14 +136,6 @@ provider "openai-codex" {
 		}
 		revision "<5.4" {
 			supports-reasoning-summary #false
-		}
-		// Subscription Codex rates the priority service tier at 2.5x for the
-		// GPT-5.5 generation (2x elsewhere).
-		revision "=5.5" {
-			service-tier-cost {
-				flex 0.5
-				priority 2.5
-			}
 		}
 		// Codex discovery reports inconsistent priorities for the GPT-5.4
 		// family; normalize by variant. Mini/nano also keep the lower prompt

@@ -48,7 +48,7 @@ process.env.OTEL_SERVICE_NAME = "oh-my-pi-export-probe";
 process.env.OTEL_EXPORTER_OTLP_HEADERS = "x-tenant=acme,authorization=Bearer%20common";
 process.env.OTEL_EXPORTER_OTLP_TRACES_HEADERS = "authorization=Bearer%20traces";
 
-await initTelemetryExport();
+await initTelemetryExport(true);
 if (!isTelemetryExportEnabled()) {
 	console.error("PROBE: provider did not register");
 	await server.stop(true);

@@ -4,9 +4,9 @@ import type { ModelBrowserRegistry, ModelBrowserSource } from "../overlays/model
 import { modelMentionDisplayName } from "./model-mention-syntax";
 import type {
 	buildSearchAffinity as BuildSearchAffinity,
-	buildSessionModelScope as BuildSessionModelScope,
 	ModelBrowserItem,
-	rankModelItems as RankModelItems,
+	ModelItemRanker as ModelItemRankerClass,
+	SessionModelScopeCache as SessionModelScopeCacheClass,
 } from "../overlays/model-browser";
 import { theme } from "../theme/theme";
 
@@ -17,9 +17,9 @@ const MAX_MODEL_MENTION_SUGGESTIONS = 20;
 export type ModelMentionCandidateSource = (query: string) => ReadonlyArray<ModelBrowserItem>;
 
 interface ModelBrowserModules {
-	buildSessionModelScope: typeof BuildSessionModelScope;
+	SessionModelScopeCache: typeof SessionModelScopeCacheClass;
 	buildSearchAffinity: typeof BuildSearchAffinity;
-	rankModelItems: typeof RankModelItems;
+	ModelItemRanker: typeof ModelItemRankerClass;
 }
 
 /** Synchronous first-use boundary for the interactive model browser implementation. */
@@ -48,6 +48,7 @@ export function getModelMentionSuggestions(
 			label: item.selector,
 			description: modelMentionDisplayName(item.model),
 			icon: theme.symbol("icon.model"),
+			iconName: "model",
 		}));
 	return items.length > 0 ? { items, prefix } : null;
 }
@@ -75,20 +76,32 @@ export function applyModelMentionCompletion(
 	};
 }
 
-/** Create a fresh session-scoped model candidate lookup using picker ordering. */
+/**
+ * Create a session-scoped model candidate lookup using picker ordering. The
+ * scope and its prepared ranker are reused across queries until their inputs change.
+ */
 export function createModelMentionSource(host: {
 	source: ModelBrowserSource;
 	registry: ModelBrowserRegistry;
 	scopedModels: () => ReadonlyArray<Model>;
 }): ModelMentionCandidateSource {
+	let scopeCache: SessionModelScopeCacheClass | undefined;
+	let ranker: ModelItemRankerClass | undefined;
+	let rankerProviderOrder: readonly string[] | undefined;
 	return query => {
-		const { buildSearchAffinity, buildSessionModelScope, rankModelItems } = loadModelBrowser();
-		const scope = buildSessionModelScope(host.source, host.registry, host.scopedModels());
+		const { SessionModelScopeCache, buildSearchAffinity, ModelItemRanker } = loadModelBrowser();
+		scopeCache ??= new SessionModelScopeCache(host.source, host.registry);
+		const scope = scopeCache.get(host.scopedModels());
 		if (!query.trim()) return scope.items;
-		return rankModelItems(query, scope.items, {
-			roles: scope.roles,
-			mruOrder: scope.mruOrder,
-			affinity: buildSearchAffinity(host.source.modelProviderOrder, scope.roles, scope.mruOrder),
-		});
+		const providerOrder = host.source.modelProviderOrder;
+		if (ranker?.items !== scope.items || rankerProviderOrder !== providerOrder) {
+			ranker = new ModelItemRanker(scope.items, {
+				roles: scope.roles,
+				mruOrder: scope.mruOrder,
+				affinity: buildSearchAffinity(providerOrder, scope.roles, scope.mruOrder),
+			});
+			rankerProviderOrder = providerOrder;
+		}
+		return ranker.rank(query);
 	};
 }

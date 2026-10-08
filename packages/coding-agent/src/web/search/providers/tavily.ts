@@ -11,7 +11,7 @@ import { formatQuery, parseSearchQuery } from "../query";
 import { clampNumResults, dateToAgeSeconds } from "../utils";
 import type { SearchParams } from "./base";
 import { SearchProvider } from "./base";
-import { classifyProviderHttpError, withHardTimeout } from "./utils";
+import { classifyProviderHttpError, siteHosts, withHardTimeout } from "./utils";
 
 const TAVILY_SEARCH_URL = "https://api.tavily.com/search";
 const DEFAULT_NUM_RESULTS = 5;
@@ -171,16 +171,6 @@ function toSearchResponse(response: TavilySearchResponse, numResults: number): S
 function hasRenderableResponse(response: SearchResponse): boolean {
 	if (response.answer?.trim()) return true;
 	return response.sources.length > 0;
-}
-
-/** Bare hosts from `site:` values (path parts are enforced by the central lenient filter). */
-function siteHosts(sites: readonly string[]): string[] {
-	const hosts = new Set<string>();
-	for (const site of sites) {
-		const host = site.split("/", 1)[0];
-		if (host) hosts.add(host);
-	}
-	return [...hosts];
 }
 
 /** Execute Tavily web search. */

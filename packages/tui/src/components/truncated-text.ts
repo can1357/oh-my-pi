@@ -1,3 +1,6 @@
+import { styledSpans } from "../native/spans";
+import { text } from "../native/describe";
+import type { DescribeContext, NativeNode } from "../native/node";
 import type { Component } from "../tui";
 import { padding, truncateToWidth, visibleWidth } from "../utils";
 
@@ -10,6 +13,7 @@ export class TruncatedText implements Component {
 	#paddingY: number;
 	#cachedWidth = -1;
 	#cachedLines: string[] | undefined;
+	#native: NativeNode | undefined;
 
 	constructor(text: string, paddingX: number = 0, paddingY: number = 0) {
 		this.#text = text;
@@ -32,8 +36,18 @@ export class TruncatedText implements Component {
 	}
 
 	invalidate(): void {
+		this.#native = undefined;
 		this.#cachedWidth = -1;
 		this.#cachedLines = undefined;
+	}
+
+	/** First line only, clamped to one visual line with an end ellipsis. */
+	describe(_cx: DescribeContext): NativeNode {
+		if (this.#native) return this.#native;
+		const newlineIndex = this.#text.indexOf("\n");
+		const firstLine = newlineIndex === -1 ? this.#text : this.#text.slice(0, newlineIndex);
+		this.#native = text(styledSpans(firstLine), { wrap: "none", truncate: "end", lines: 1 });
+		return this.#native;
 	}
 
 	render(width: number): readonly string[] {

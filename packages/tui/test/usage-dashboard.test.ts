@@ -1,6 +1,6 @@
 import * as os from "node:os";
 import { beforeAll, describe, expect, it } from "bun:test";
-import type { DailyActivityPoint } from "@oh-my-pi/pi-tui/overlays/usage-dashboard";
+import type { DailyActivityPoint, UnavailableUsageAccount } from "@oh-my-pi/pi-tui/overlays/usage-dashboard";
 import type { UsageReport } from "@oh-my-pi/pi-ai";
 import {
 	buildHeatmapLayout,
@@ -8,7 +8,7 @@ import {
 	formatActivityErrorDetail,
 	UsageDashboardComponent,
 } from "@oh-my-pi/pi-tui/overlays/usage-dashboard";
-import { initTheme } from "@oh-my-pi/pi-tui/theme";
+import { initTheme, theme } from "@oh-my-pi/pi-tui/theme";
 import { visibleWidth } from "@oh-my-pi/pi-tui/utils";
 
 function day(day: string, cost: number, requests = 1): DailyActivityPoint {
@@ -160,6 +160,32 @@ describe("buildProviderCards", () => {
 		expect(unlimited?.unlimited).toBe(true);
 	});
 
+	it("keeps provider window order and ranks cards by their fullest window", () => {
+		// Rows used to sort by used fraction, so 5h/week/month reshuffled as
+		// usage moved and a glance read the wrong window.
+		const reports = [
+			report("opencode-go", "g@x.test", [
+				limit("opencode-go", "g", "5h", "5 Hour limit", 0.01, "ok"),
+				limit("opencode-go", "g", "7d", "Weekly limit", 0.42, "ok"),
+				limit("opencode-go", "g", "monthly", "Monthly limit", 0.21, "ok"),
+			]),
+			report("openai-codex", "o@x.test", [limit("openai-codex", "o", "7d", "7 days", 0.3, "ok")]),
+		];
+		const cards = buildProviderCards(reports, now);
+		expect(cards.map(card => card.provider)).toEqual(["opencode-go", "openai-codex"]);
+		expect(cards[0].windows.map(window => window.label)).toEqual(["5 Hour limit", "Weekly limit", "Monthly limit"]);
+	});
+
+	it("keeps an exhausted bucket past the row cap visible", () => {
+		// Gemini emits one limit per model bucket; with declared order alone an
+		// exhausted 5th bucket would hide behind "+1 more".
+		const buckets = ["a", "b", "c", "d", "e"].map((model, index) =>
+			limit("google-gemini-cli", "g", model, `Model ${model}`, index === 4 ? 1 : 0.1 * (index + 1), "ok"),
+		);
+		const [card] = buildProviderCards([report("google-gemini-cli", "g@x.test", buckets)], now);
+		expect(card.windows.map(window => window.label)).toEqual(["Model b", "Model c", "Model d", "Model e", "Model a"]);
+	});
+
 	it("shows a prepaid balance on the card instead of falling back to no data", () => {
 		// Balance-only limits carry no fraction, so the card used to render the
 		// literal "no data" for providers that sell prepaid credits.
@@ -241,9 +267,13 @@ describe("UsageDashboardComponent", () => {
 	beforeAll(async () => {
 		await initTheme(false);
 	});
-	function dashboard(reports: UsageReport[]): UsageDashboardComponent {
+	function dashboard(
+		reports: UsageReport[],
+		unavailableAccounts: UnavailableUsageAccount[] = [],
+	): UsageDashboardComponent {
 		return new UsageDashboardComponent({
 			reports,
+			unavailableAccounts,
 			renderDetail: () => "",
 			loadActivity: async push => {
 				push([]);
@@ -398,6 +428,20 @@ describe("UsageDashboardComponent", () => {
 				expect(output).toContain("95%");
 				for (const line of lines) expect(visibleWidth(line)).toBeLessThanOrEqual(width);
 			}
+		} finally {
+			component.dispose();
+		}
+	});
+
+	it("keeps the error icon on an exhausted card when another account's lookup fails", () => {
+		const component = dashboard(
+			[report("anthropic", "a@test", [limit("anthropic", "a", "7d", "Claude 7 Day", 1, "exhausted")])],
+			[{ provider: "anthropic", label: "b@test" }],
+		);
+		try {
+			const output = Bun.stripANSI(component.render(100).join("\n"));
+			const title = output.split("\n").find(line => line.includes("2 accts"));
+			expect(title?.replace(/^[│\s]+/, "")).toStartWith(`${theme.status.error} Anthropic`);
 		} finally {
 			component.dispose();
 		}

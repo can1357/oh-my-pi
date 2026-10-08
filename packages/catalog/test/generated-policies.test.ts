@@ -2,9 +2,9 @@ import { describe, expect, it } from "bun:test";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import type { Api, Model, ModelSpec, Provider } from "@oh-my-pi/pi-catalog/types";
 import {
-	applyAntigravityPricingFallback,
 	applyGeneratedModelPolicies,
 	applyOllamaCloudOutputCap,
+	applyPricingPeerFallback,
 	linkOpenAIPromotionTargets,
 } from "../scripts/generated-policies";
 import { buildModel } from "../src/build";
@@ -132,6 +132,14 @@ describe("generated model policies", () => {
 			name: "cursor-grok-4.6",
 		});
 		expect(rebuiltGrok.requiresCursorToolSchemaProjection).toBeUndefined();
+	});
+
+	it("marks Cursor's default router as variably priced", () => {
+		const routed = buildGenerated(createSpec({ id: "default", api: "cursor-agent", provider: "cursor" }));
+		const named = buildGenerated(createSpec({ id: "composer-2.5", api: "cursor-agent", provider: "cursor" }));
+
+		expect(routed.pricingStatus).toBe("variable");
+		expect(named.pricingStatus).toBeUndefined();
 	});
 
 	it("preserves OpenRouter's mandatory provider-authored effort ladder", () => {
@@ -307,6 +315,31 @@ describe("generated model policies", () => {
 		});
 	});
 
+	it("bands Claude Haiku 5.5 at 100K input tokens on non-Anthropic hosts from their own list price", () => {
+		const bedrock = buildModel(
+			createSpec({
+				id: "anthropic.claude-haiku-5-5",
+				api: "bedrock-converse-stream",
+				provider: "amazon-bedrock",
+				contextWindow: 1_000_000,
+				cost: { input: 0.2, output: 1, cacheRead: 0.02, cacheWrite: 0.25 },
+			}),
+		);
+		expect(bedrock.cost.longContext).toEqual({
+			inputThreshold: 100_000,
+			input: 1,
+			output: 5,
+			cacheRead: 0.1,
+			cacheWrite: 1.25,
+		});
+
+		// Zero-priced subscription rows have no band, so no 100K window cap.
+		const copilot = buildModel(
+			createSpec({ id: "claude-haiku-5.5", api: "anthropic-messages", provider: "github-copilot" }),
+		);
+		expect(copilot.cost.longContext).toBeUndefined();
+	});
+
 	it("preserves QwenCloud's provider-authored qwen3.8 effort ladders", () => {
 		const models: ModelSpec<Api>[] = [
 			createSpec({
@@ -394,6 +427,22 @@ describe("generated model policies", () => {
 		}
 	});
 
+	it("keeps the GLM-5.3 low/high/max ladder on Fast serving-path ids on every host", () => {
+		const models = [
+			createSpec({ id: "glm-5.3-fast", api: "openai-completions", provider: "fireworks" }),
+			createSpec({ id: "zai-org/GLM-5.3-Fast", api: "openai-completions", provider: "baseten" }),
+			createSpec({ id: "zai/glm-5.3-fast", api: "anthropic-messages", provider: "vercel-ai-gateway" }),
+		].map(model => buildGenerated(model));
+
+		// Fast serves the same weights faster, so it keeps the base model's
+		// mandatory-thinking ladder rather than the host's generic one.
+		for (const model of models) {
+			expect(model.thinking?.efforts).toEqual([Effort.Low, Effort.High, Effort.Max]);
+			expect(model.thinking?.requiresEffort).toBe(true);
+			expect(model.thinking?.defaultLevel).toBe(Effort.Max);
+		}
+	});
+
 	it("pins zai glm-5.3-flash to the 1M tier and restores its native image input", () => {
 		const models = [
 			createSpec({
@@ -423,6 +472,20 @@ describe("generated model policies", () => {
 			expect(model.thinking?.requiresEffort).toBe(true);
 			expect(model.thinking?.defaultLevel).toBe(Effort.Max);
 		}
+
+		// Z.AI's native OpenAI-completions route: list price (not the launch
+		// promotion) and max_tokens clamped to the advertised 131K cap.
+		const native = buildGenerated(
+			createSpec({
+				id: "glm-5.3-flash",
+				api: "openai-completions",
+				provider: "zai",
+				baseUrl: "https://api.z.ai/api/coding/paas/v4",
+				cost: { input: 0.075, output: 0.25, cacheRead: 0.015, cacheWrite: 0 },
+			}),
+		);
+		expect(native.cost).toEqual({ input: 0.15, output: 0.5, cacheRead: 0.03, cacheWrite: 0 });
+		expect(native.compat?.clampOutputToModelMax).toBe(true);
 	});
 
 	it("bakes verified Cursor image families into the offline catalog", () => {
@@ -449,6 +512,29 @@ describe("generated model policies", () => {
 		for (const model of models.slice(verifiedIds.length)) {
 			expect(model.input).toEqual(["text"]);
 		}
+	});
+
+	it("bills Cerebras cache reads at the live input rate", () => {
+		const cost = { input: 0.99, output: 1.49, cacheRead: 0, cacheWrite: 0 };
+		const cerebras = buildGenerated(
+			createSpec({ id: "qwen-3.8-27b", api: "openai-completions", provider: "cerebras", cost }),
+		);
+		expect(cerebras.cost.cacheRead).toBe(0.99);
+		// Tracks upstream list-price changes instead of pinning a number.
+		const repriced = buildGenerated(
+			createSpec({
+				id: "gpt-oss-120b",
+				api: "openai-completions",
+				provider: "cerebras",
+				cost: { ...cost, input: 0.35 },
+			}),
+		);
+		expect(repriced.cost.cacheRead).toBe(0.35);
+		// Other providers keep their discounted (or unset) cache-read rate.
+		const groq = buildGenerated(
+			createSpec({ id: "qwen-3.8-27b", api: "openai-completions", provider: "groq", cost }),
+		);
+		expect(groq.cost.cacheRead).toBe(0);
 	});
 
 	it("applies documented Cursor context-window floors at build time", () => {
@@ -828,7 +914,7 @@ describe("applyOllamaCloudOutputCap", () => {
 	});
 });
 
-describe("applyAntigravityPricingFallback", () => {
+describe("applyPricingPeerFallback", () => {
 	it("prices Gemini ids at Google API peers and Claude ids at Vertex, falling back to Anthropic", () => {
 		const googleCost = { input: 1.5, output: 9, cacheRead: 0.15, cacheWrite: 0 };
 		const previewCost = { input: 2, output: 12, cacheRead: 0.2, cacheWrite: 0 };
@@ -856,7 +942,7 @@ describe("applyAntigravityPricingFallback", () => {
 			createSpec({ id: "claude-sonnet-4-6", api: "google-gemini-cli", provider: "google-antigravity" }),
 		];
 
-		const result = applyAntigravityPricingFallback(models);
+		const result = applyPricingPeerFallback(models);
 
 		expect(result[5]?.cost).toEqual(googleCost);
 		expect(result[6]?.cost).toEqual(previewCost);
@@ -887,12 +973,34 @@ describe("applyAntigravityPricingFallback", () => {
 			}),
 		];
 
-		const result = applyAntigravityPricingFallback(models);
+		const result = applyPricingPeerFallback(models);
 
 		// No billable google peer (zero-cost peer is not a pricing source).
 		expect(result[1]?.cost).toEqual(zeroCost);
 		expect(result[2]?.cost).toEqual(zeroCost);
 		// Already-billable antigravity rows keep their own pricing.
 		expect(result[3]?.cost).toEqual(pricedCost);
+	});
+
+	it("prices MiniMax Token Plan rows at pay-as-you-go peers, M3.1 Flash Preview at the M3 rate", () => {
+		const m3Cost = { input: 0.3, output: 1.2, cacheRead: 0.06, cacheWrite: 0 };
+		const m27Cost = { input: 0.3, output: 1.2, cacheRead: 0.06, cacheWrite: 0.375 };
+		const zeroCost = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
+		const models: ModelSpec<Api>[] = [
+			createSpec({ id: "MiniMax-M3", api: "anthropic-messages", provider: "minimax", cost: m3Cost }),
+			createSpec({ id: "MiniMax-M2.7", api: "anthropic-messages", provider: "minimax", cost: m27Cost }),
+			createSpec({ id: "MiniMax-M3.1-Flash-Preview", api: "anthropic-messages", provider: "minimax-code" }),
+			createSpec({ id: "MiniMax-M2.7", api: "anthropic-messages", provider: "minimax-code" }),
+			createSpec({ id: "MiniMax-M2.1-lightning", api: "anthropic-messages", provider: "minimax-code" }),
+			// No minimax-cn row: the China plan falls back to the international peer.
+			createSpec({ id: "MiniMax-M3.1-Flash-Preview", api: "anthropic-messages", provider: "minimax-code-cn" }),
+		];
+
+		const result = applyPricingPeerFallback(models);
+
+		expect(result[2]?.cost).toEqual(m3Cost);
+		expect(result[3]?.cost).toEqual(m27Cost);
+		expect(result[4]?.cost).toEqual(zeroCost);
+		expect(result[5]?.cost).toEqual(m3Cost);
 	});
 });

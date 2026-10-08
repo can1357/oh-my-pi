@@ -344,6 +344,124 @@ describe("pi-natives", () => {
 	});
 
 	describe("grep", () => {
+		it("completes concurrent provider searches without starving pooled filesystem reads", async () => {
+			const script = `
+import * as fs from "node:fs/promises";
+import * as os from "node:os";
+import * as path from "node:path";
+import { grep, glob } from ${JSON.stringify(addonUrl)};
+
+const root = await fs.mkdtemp(path.join(os.tmpdir(), "natives-provider-pool-"));
+try {
+	const fixture = path.join(root, "SKILL.md");
+	const temp = path.join(root, "result.md.tmp");
+	const artifact = path.join(root, "result.md");
+	await fs.writeFile(fixture, "# Heading\\nbody\\n");
+	const filesystem = {
+		nativeLocalPaths: true,
+		handler: async (_error, request) => {
+			await fs.stat(fixture);
+			return { local: request.path === "skill://stall" ? root : fixture };
+		},
+	};
+	const results = await Promise.all(Array.from({ length: 8 }, () =>
+		grep({ pattern: "^# ", path: "skill://stall/SKILL.md", filesystem, timeoutMs: 2_000 })
+	));
+	if (results.some(result => result.totalMatches !== 1)) throw new Error("provider grep missed heading");
+	const listings = await Promise.all(Array.from({ length: 8 }, () =>
+		glob({ pattern: "*.md", path: "skill://stall", filesystem, timeoutMs: 2_000 })
+	));
+	if (listings.some(result => result.totalMatches !== 1)) throw new Error("provider glob missed file");
+	await Bun.write(temp, "published");
+	const readback = await Bun.file(temp).slice(0, 1).arrayBuffer();
+	if (readback.byteLength !== 1) throw new Error("artifact verification read failed");
+	await fs.rename(temp, artifact);
+	const controller = new AbortController();
+	const entered = Promise.withResolvers();
+	const stalledFilesystem = {
+		nativeLocalPaths: true,
+		handler: async () => {
+			entered.resolve();
+			await Promise.withResolvers().promise;
+			return { local: fixture };
+		},
+	};
+	const cancelled = grep({
+		pattern: "^# ",
+		path: "skill://pending/SKILL.md",
+		filesystem: stalledFilesystem,
+		signal: controller.signal,
+	});
+	await entered.promise;
+	controller.abort();
+	try {
+		await cancelled;
+		throw new Error("cancelled search fulfilled");
+	} catch (error) {
+		if (error.name !== "AbortError") throw error;
+	}
+	// Exercise the native deadline against a provider Promise that cannot settle.
+	try {
+		await grep({ pattern: "^# ", path: "skill://pending/SKILL.md", filesystem: stalledFilesystem, timeoutMs: 50 });
+		throw new Error("timed-out search fulfilled");
+	} catch (error) {
+		if (!String(error).includes("Aborted: Timeout")) throw error;
+	}
+	if (await fs.readFile(artifact, "utf8") !== "published") throw new Error("artifact not published");
+	console.log("ok");
+} finally {
+	await fs.rm(root, { recursive: true, force: true });
+}
+`;
+			const child = Bun.spawn([process.execPath, "--eval", script], {
+				env: { ...process.env, UV_THREADPOOL_SIZE: "4" },
+				stdout: "pipe",
+				stderr: "pipe",
+			});
+			// A stuck native callback never reaches a JS timeout; kill the subprocess on regression.
+			const timer = setTimeout(() => child.kill("SIGKILL"), 6_000);
+			try {
+				const [stdout, stderr, exitCode] = await Promise.all([
+					new Response(child.stdout).text(),
+					new Response(child.stderr).text(),
+					child.exited,
+				]);
+				expect({ stdout: stdout.trim(), stderr: stderr.trim(), exitCode }).toEqual({
+					stdout: "ok",
+					stderr: "",
+					exitCode: 0,
+				});
+			} finally {
+				clearTimeout(timer);
+				if (child.exitCode === null) child.kill("SIGKILL");
+			}
+		}, 10_000);
+
+		it("delivers a completed result after the JS thread resumes past its deadline", async () => {
+			const pending = grep({
+				pattern: "TODO",
+				path: testDir,
+				timeoutMs: 1_000,
+			});
+			Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 1_200);
+
+			await expect(pending).resolves.toMatchObject({ totalMatches: 1 });
+		});
+
+		it("discards a completed result when an AbortSignal fires before settlement", async () => {
+			const controller = new AbortController();
+			const pending = grep({
+				pattern: "TODO",
+				path: testDir,
+				timeoutMs: 5_000,
+				signal: controller.signal,
+			});
+			Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 100);
+			controller.abort();
+
+			await expect(pending).rejects.toMatchObject({ name: "AbortError" });
+		});
+
 		it("should find patterns in files", async () => {
 			const result = await grep({
 				pattern: "TODO",
@@ -377,16 +495,6 @@ describe("pi-natives", () => {
 			expect(result.totalMatches).toBe(2); // "Test" in title + "test" in body
 		});
 
-		it("should return filesWithMatches mode", async () => {
-			const result = await grep({
-				pattern: "return",
-				path: testDir,
-				mode: GrepOutputMode.FilesWithMatches,
-			});
-
-			expect(result.filesWithMatches).toBeGreaterThan(0);
-		});
-
 		it("counts files instead of line matches in filesWithMatches mode", async () => {
 			const scopedDir = await fs.mkdtemp(path.join(os.tmpdir(), "natives-grep-files-"));
 			try {
@@ -405,6 +513,49 @@ describe("pi-natives", () => {
 			} finally {
 				await fs.rm(scopedDir, { recursive: true, force: true });
 			}
+		});
+
+		it("streams matches through onMatches in bounded batches instead of returning them", async () => {
+			const scopedDir = await fs.mkdtemp(path.join(os.tmpdir(), "natives-grep-stream-"));
+			try {
+				const dense = "alpha beta\n".repeat(5_000);
+				for (let i = 0; i < 8; i++) await Bun.write(path.join(scopedDir, `dense-${i}.txt`), dense);
+				await Bun.write(path.join(scopedDir, "quiet.txt"), "nothing here\n");
+
+				const batchSizes: number[] = [];
+				const perFile = new Map<string, number>();
+				const result = await grep({
+					pattern: "beta",
+					path: scopedDir,
+					onMatches: matches => {
+						batchSizes.push(matches.length);
+						for (const match of matches) perFile.set(match.path, (perFile.get(match.path) ?? 0) + 1);
+					},
+				});
+
+				// Every batch has run by the time the promise settles.
+				expect(result).toMatchObject({ totalMatches: 40_000, filesWithMatches: 8, filesSearched: 9 });
+				expect(result.matches).toEqual([]);
+				expect(Math.max(...batchSizes)).toBeLessThanOrEqual(1_024);
+				expect(Object.fromEntries(perFile)).toEqual(
+					Object.fromEntries(Array.from({ length: 8 }, (_, i) => [`dense-${i}.txt`, 5_000])),
+				);
+			} finally {
+				await fs.rm(scopedDir, { recursive: true, force: true });
+			}
+		});
+
+		it("rejects the search with the error an onMatches callback throws", async () => {
+			const failure = new Error("consumer failed");
+			await expect(
+				grep({
+					pattern: "TODO",
+					path: testDir,
+					onMatches: () => {
+						throw failure;
+					},
+				}),
+			).rejects.toBe(failure);
 		});
 
 		it("should treat unknown grep type filter as a strict extension filter", async () => {

@@ -3,6 +3,7 @@ import * as path from "node:path";
 import { setImmediate } from "node:timers/promises";
 import { type } from "@oh-my-pi/omptype";
 import { Agent, type AgentMessage, type AgentTool } from "@oh-my-pi/pi-agent-core";
+import { AsyncJobManager } from "@oh-my-pi/pi-coding-agent/async";
 import type { AssistantMessage, Context, ImageContent } from "@oh-my-pi/pi-ai";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
@@ -10,15 +11,19 @@ import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { ExtensionRuntime, loadExtensionFromFactory } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
 import { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
+import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { IrcBridge, type IrcBridgeHost } from "@oh-my-pi/pi-coding-agent/session/irc-bridge";
 import { convertToLlm, USER_INTERRUPT_LABEL } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionAdvisors } from "@oh-my-pi/pi-coding-agent/session/session-advisors";
+import type { IrcMessage } from "@oh-my-pi/pi-tui/tools/irc";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
+import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
+import { WaitTool } from "@oh-my-pi/pi-coding-agent/tools/wait";
 import * as imageLoading from "@oh-my-pi/pi-coding-agent/utils/image-loading";
-import { TempDir } from "@oh-my-pi/pi-utils";
+import { TempDir, untilAborted } from "@oh-my-pi/pi-utils";
 
 const zeroUsage = {
 	input: 0,
@@ -44,6 +49,7 @@ describe("AgentSession aside delivery", () => {
 		await session?.dispose();
 		authStorage.close();
 		tempDir.removeSync();
+		AsyncJobManager.resetForTests();
 	});
 
 	it("an aside delivered mid-run neither aborts the in-flight tool nor waits for the run to end", async () => {
@@ -144,6 +150,115 @@ describe("AgentSession aside delivery", () => {
 		);
 		expect(asides).toHaveLength(1);
 	});
+
+	it.each([false, true])(
+		"a user aside ends an owned-job wait without consuming the later job result (agent registry: %s)",
+		async withRegistry => {
+			const model = createMockModel({ provider: "openai", id: "gpt-test" }).model;
+			const contexts: Context[] = [];
+			const nextCall = Promise.withResolvers<void>();
+			const waitStarted = Promise.withResolvers<void>();
+			const job = Promise.withResolvers<string>();
+			const manager = new AsyncJobManager({});
+			const settings = Settings.isolated({
+				"compaction.enabled": false,
+				"todo.enabled": false,
+				"launch.enabled": false,
+			});
+			settings.setModelRole("default", `${model.provider}/${model.id}`);
+			const wait = new WaitTool({
+				cwd: tempDir.path(),
+				settings,
+				asyncJobManager: manager,
+				getAgentId: () => "Main",
+				...(withRegistry ? { agentRegistry: AgentRegistry.global() } : {}),
+			} as ToolSession);
+			const agent = new Agent({
+				getApiKey: () => "test-key",
+				initialState: { model, systemPrompt: ["Test"], tools: [wait], messages: [] },
+				convertToLlm,
+				streamFn: (_model, context) => {
+					contexts.push(context);
+					const first = contexts.length === 1;
+					if (contexts.length === 2) nextCall.resolve();
+					const message: AssistantMessage = {
+						role: "assistant",
+						content: first
+							? [{ type: "toolCall", id: "wait-1", name: "wait", arguments: {} }]
+							: [{ type: "text", text: "Acknowledged." }],
+						api: model.api,
+						provider: model.provider,
+						model: model.id,
+						usage: zeroUsage,
+						stopReason: first ? "toolUse" : "stop",
+						timestamp: Date.now(),
+					};
+					const stream = new AssistantMessageEventStream();
+					queueMicrotask(() => {
+						stream.push({ type: "start", partial: message });
+						stream.push({ type: "done", reason: first ? "toolUse" : "stop", message });
+					});
+					return stream;
+				},
+			});
+			session = new AgentSession({
+				agent,
+				sessionManager: SessionManager.inMemory(tempDir.path()),
+				settings,
+				modelRegistry: new ModelRegistry(authStorage),
+				toolRegistry: new Map([[wait.name, wait as unknown as AgentTool]]),
+				agentId: "Main",
+				asyncJobManager: manager,
+			});
+			await session.setWorkPoolYieldItems([{ id: "pool#1", index: 1 }]);
+			await session.deliverIrcMessage({
+				id: "parked-peer",
+				from: "Peer",
+				to: "Main",
+				body: "deferred wake",
+				ts: Date.now(),
+			});
+			await setImmediate();
+			session.subscribe(event => {
+				if (event.type === "tool_execution_start" && event.toolName === "wait") waitStarted.resolve();
+			});
+			manager.register("bash", "pending", () => job.promise, { ownerId: "Main" });
+			const run = session.prompt("go");
+			try {
+				await waitStarted.promise;
+				await Bun.sleep(450);
+				expect(contexts).toHaveLength(1);
+				expect(manager.getRunningJobs({ ownerId: "Main" })).toHaveLength(1);
+				await session.sendUserMessage("ASIDE_DURING_WAIT", { deliverAs: "aside" });
+				const timer = setTimeout(() => nextCall.reject(new Error("Aside remained behind the pending wait")), 1_500);
+				try {
+					await nextCall.promise;
+				} finally {
+					clearTimeout(timer);
+				}
+				expect(JSON.stringify(contexts[1]?.messages)).toContain("ASIDE_DURING_WAIT");
+				expect(JSON.stringify(contexts[1]?.messages)).toContain("Wait interrupted by message.");
+				expect(JSON.stringify(contexts[1]?.messages)).not.toContain("deferred wake");
+				expect(manager.getRunningJobs({ ownerId: "Main" })).toHaveLength(1);
+			} finally {
+				job.resolve("JOB_RESULT_AFTER_ASIDE");
+				await run;
+				await session.settleAsyncWork();
+			}
+			expect(
+				session.agent.state.messages.filter(
+					message => message.role === "user" && JSON.stringify(message.content).includes("ASIDE_DURING_WAIT"),
+				),
+			).toHaveLength(1);
+			expect(JSON.stringify(contexts.at(-1)?.messages)).toContain("JOB_RESULT_AFTER_ASIDE");
+			expect(
+				session.agent.state.messages.filter(message => JSON.stringify(message).includes("JOB_RESULT_AFTER_ASIDE")),
+			).toHaveLength(1);
+			await session.setWorkPoolYieldItems([]);
+			await session.waitForIdle();
+			expect(JSON.stringify(contexts.at(-1)?.messages)).toContain("deferred wake");
+		},
+	);
 
 	it("sendUserMessage delivered as an aside mid-run injects at the next step boundary without draining agent-core queues", async () => {
 		const model = createMockModel({ provider: "openai", id: "gpt-test" }).model;
@@ -767,6 +882,82 @@ describe("AgentSession aside delivery", () => {
 		expect(contexts).toHaveLength(0);
 	});
 
+	it("marks parent IRC but not peer IRC across idle wake and plan-mode persistence", async () => {
+		const manager = SessionManager.inMemory();
+		const wakeRecords: AgentMessage[] = [];
+		const appended: AgentMessage[] = [];
+		let planMode = false;
+		const host: IrcBridgeHost = {
+			agent: {
+				appendMessage: (message: AgentMessage) => appended.push(message),
+			} as unknown as Agent,
+			sessionManager: manager,
+			isDisposed: () => false,
+			isStreaming: () => false,
+			planModeEnabled: () => planMode,
+			emitSessionEvent: async () => {},
+			wakeForIrc: records => wakeRecords.push(...records),
+		};
+		const registry = AgentRegistry.global();
+		const recipient = "ParentMarkerRecipient";
+		registry.register({
+			id: recipient,
+			displayName: "task",
+			kind: "sub",
+			parentId: "ParentMarkerSender",
+			session: null,
+		});
+		try {
+			const irc = new IrcBridge(host);
+			await irc.deliver({
+				id: "parent-wake",
+				from: "ParentMarkerSender",
+				to: recipient,
+				body: "parent assignment",
+				ts: 1,
+			});
+			await irc.deliver({
+				id: "peer-wake",
+				from: "PeerMarkerSender",
+				to: recipient,
+				body: "peer note",
+				ts: 2,
+			});
+
+			expect(wakeRecords[0]).toMatchObject({
+				role: "custom",
+				customType: "irc:incoming",
+				details: { from: "ParentMarkerSender", fromParent: true },
+			});
+			const peerWake = wakeRecords[1];
+			expect(peerWake).toMatchObject({
+				role: "custom",
+				customType: "irc:incoming",
+				details: { from: "PeerMarkerSender" },
+			});
+			if (peerWake?.role !== "custom") throw new Error("Expected peer IRC wake record");
+			expect(peerWake.details).not.toHaveProperty("fromParent");
+
+			planMode = true;
+			await irc.deliver({
+				id: "parent-plan",
+				from: "ParentMarkerSender",
+				to: recipient,
+				body: "plan-mode parent assignment",
+				ts: 3,
+			});
+			expect(appended).toHaveLength(1);
+			const persisted = manager.getBranch().find(entry => entry.type === "custom_message");
+			expect(persisted).toMatchObject({
+				type: "custom_message",
+				customType: "irc:incoming",
+				details: { from: "ParentMarkerSender", fromParent: true },
+			});
+		} finally {
+			registry.unregister(recipient);
+		}
+	});
+
 	it("IrcBridge.restorePending merges a rolled-back snapshot ahead of records queued during the rollback instead of discarding them", () => {
 		// Regression: restorePending used to overwrite the queues wholesale, silently dropping any
 		// record queued between clearPending() and restorePending() (e.g. an in-flight IRC
@@ -1292,5 +1483,169 @@ describe("AgentSession aside delivery", () => {
 			normalizeSpy.mockRestore();
 			setSessionFileSpy.mockRestore();
 		}
+	});
+
+	it("holds the wake observer across the async-result continuation so a late yield still registers (#11564)", async () => {
+		const modelRegistry = new ModelRegistry(authStorage);
+		const started = Promise.withResolvers<void>();
+		const wakeModelCalled = Promise.withResolvers<void>();
+		const observerFinished = Promise.withResolvers<void>();
+		const gate = Promise.withResolvers<string>();
+		const events: string[] = [];
+		const mock = createMockModel({
+			provider: "openai",
+			id: "gpt-test",
+			responses: [
+				() => {
+					started.resolve();
+					return { content: ["go turn"], delayMs: 60_000 };
+				},
+				() => {
+					wakeModelCalled.resolve();
+					return { content: ["started the rebuild"] };
+				},
+				() => {
+					events.push("continuation-ran");
+					return { content: ["rebuild finished"] };
+				},
+			],
+		});
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model: mock.model, systemPrompt: ["Test"], tools: [], messages: [] },
+			convertToLlm,
+			streamFn: mock.stream,
+		});
+		const settings = Settings.isolated({ "compaction.enabled": false, "todo.enabled": false });
+		settings.setModelRole("default", `${mock.model.provider}/${mock.model.id}`);
+		const manager = new AsyncJobManager({});
+		AsyncJobManager.setInstance(manager);
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(tempDir.path()),
+			settings,
+			modelRegistry,
+			toolRegistry: new Map(),
+			agentId: "SubAgent",
+			ownedAsyncJobManager: manager,
+		});
+
+		session.setIrcWakeTurnObserver(_records => {
+			events.push("observer-start");
+			// The agent auto-backgrounded a build during the wake turn: the job
+			// outlives the turn and its async-result continuation is where the
+			// agent would finally yield.
+			manager.register(
+				"bash",
+				"wake rebuild",
+				({ signal }) => untilAborted(signal, gate.promise).then(() => "build ok"),
+				{ id: "wake-job", ownerId: "SubAgent" },
+			);
+			return async () => {
+				events.push("observer-finish");
+				observerFinished.resolve();
+			};
+		});
+
+		// The subagent's own run is executor-driven (agent-attributed), so only the
+		// aside wake turn starts an observation; a user prompt would open its own.
+		const run = session.prompt("go", { attribution: "agent" });
+		await started.promise;
+		await session.sendUserMessage("WAKE_BG_ASIDE", { deliverAs: "aside" });
+		await session.abort({ reason: "internal" });
+		await session.waitForIdle();
+		await run.catch(() => {});
+		await wakeModelCalled.promise;
+
+		// The wake turn ended in prose and the gated job is still running: the
+		// observer finish must wait for the job's continuation, not race it.
+		gate.resolve("BUILD GREEN");
+		await observerFinished.promise;
+		await session.waitForIdle();
+
+		expect(events).toContain("observer-start");
+		expect(mock.calls.length).toBe(3);
+		expect(events.indexOf("continuation-ran")).toBeGreaterThanOrEqual(0);
+		expect(events.indexOf("observer-finish")).toBeGreaterThan(events.indexOf("continuation-ran"));
+		// The continuation turn received the job result through the delivery
+		// (injected as the background-completion system notice).
+		expect(JSON.stringify(mock.calls[2]!.context.messages)).toContain("build ok");
+	});
+
+	it("a plain idle IRC wake holds its observer through a background job's continuation (#11564)", async () => {
+		const modelRegistry = new ModelRegistry(authStorage);
+		const wakeModelCalled = Promise.withResolvers<void>();
+		const observerFinished = Promise.withResolvers<void>();
+		const gate = Promise.withResolvers<string>();
+		const events: string[] = [];
+		const mock = createMockModel({
+			provider: "openai",
+			id: "gpt-test",
+			responses: [
+				() => {
+					wakeModelCalled.resolve();
+					return { content: ["started the rebuild"] };
+				},
+				() => {
+					events.push("continuation-ran");
+					return { content: ["rebuild finished"] };
+				},
+			],
+		});
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model: mock.model, systemPrompt: ["Test"], tools: [], messages: [] },
+			convertToLlm,
+			streamFn: mock.stream,
+		});
+		const settings = Settings.isolated({ "compaction.enabled": false, "todo.enabled": false });
+		settings.setModelRole("default", `${mock.model.provider}/${mock.model.id}`);
+		const manager = new AsyncJobManager({});
+		AsyncJobManager.setInstance(manager);
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(tempDir.path()),
+			settings,
+			modelRegistry,
+			toolRegistry: new Map(),
+			agentId: "SubAgent",
+			ownedAsyncJobManager: manager,
+		});
+
+		session.setIrcWakeTurnObserver(_records => {
+			events.push("observer-start");
+			// The agent auto-backgrounded a build during the plain wake turn.
+			manager.register(
+				"bash",
+				"wake rebuild",
+				({ signal }) => untilAborted(signal, gate.promise).then(() => "build ok"),
+				{ id: "wake-job", ownerId: "SubAgent" },
+			);
+			return async () => {
+				events.push("observer-finish");
+				observerFinished.resolve();
+			};
+		});
+
+		await session.deliverIrcMessage({
+			id: "m1",
+			from: "peer",
+			to: "SubAgent",
+			body: "status?",
+			ts: Date.now(),
+		} as IrcMessage);
+		await wakeModelCalled.promise;
+
+		// The wake turn ended in prose with the gated job still running: the
+		// observer finish must wait for the job's continuation — without
+		// deadlocking the delivery by holding the in-flight bracket.
+		gate.resolve("BUILD GREEN");
+		await observerFinished.promise;
+		await session.waitForIdle();
+
+		expect(events).toContain("observer-start");
+		expect(mock.calls.length).toBe(2);
+		expect(events.indexOf("observer-finish")).toBeGreaterThan(events.indexOf("continuation-ran"));
+		expect(JSON.stringify(mock.calls[1]!.context.messages)).toContain("build ok");
 	});
 });

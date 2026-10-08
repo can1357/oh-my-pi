@@ -94,6 +94,29 @@ fn streaming_preview_keeps_completed_section_when_trailing_header_arrives() {
 	);
 }
 
+#[tokio::test]
+async fn rejection_names_the_path_a_foreign_tag_was_issued_for() {
+	let workspace = common::Workspace::new(EditMode::Hashline);
+	let worktree = workspace.write("wt/crates/a/mcp.rs", "worktree\n");
+	workspace.write("crates/a/mcp.rs", "parent\n");
+	let tag = workspace.snapshot("wt/crates/a/mcp.rs", "worktree\n", None);
+	let writer = common::DiskWriter::default();
+	let input = format!("[crates/a/mcp.rs#{tag}]\nPUT 1.=1:\n+changed\n");
+	let error = workspace
+		.apply_json(&json!({ "input": input }), &writer)
+		.await
+		.expect_err("foreign tag must be rejected")
+		.to_string();
+	let origin = pi_edit::path_policy::canonical_key(&worktree);
+	assert!(
+		error.contains(&format!("Hash #{tag} was issued in this session for {}.", origin.display())),
+		"{error}"
+	);
+	assert!(writer.requests.lock().is_empty());
+	assert_eq!(workspace.read("crates/a/mcp.rs").as_deref(), Some("parent\n"));
+	assert_eq!(workspace.read("wt/crates/a/mcp.rs").as_deref(), Some("worktree\n"));
+}
+
 #[test]
 fn completed_preview_surfaces_stale_hash_error() {
 	let workspace = common::Workspace::new(EditMode::Hashline);

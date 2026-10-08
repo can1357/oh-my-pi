@@ -6,12 +6,12 @@ import { syncAllSessions } from "@oh-my-pi/omp-stats/aggregator";
 import {
 	closeDb,
 	getFileOffset,
-	getOverallStats,
 	getRecentRequests,
 	initDb,
 	insertMessageStats,
 	insertToolCalls,
 } from "@oh-my-pi/omp-stats/db";
+import { getOverallStats } from "@oh-my-pi/omp-stats/rollup";
 import { parseSessionFile } from "@oh-my-pi/omp-stats/parser";
 import { getSessionsDir, getStatsDbPath } from "@oh-my-pi/pi-utils";
 import { installStatsTestIsolation } from "./helpers/temp-agent";
@@ -402,10 +402,10 @@ describe("legacy entries without a recorded price", () => {
 		// Every sentinel that also wipes `file_offsets` is spent, so only the
 		// unpriced marker's sentinel can trigger the re-parse below.
 		const spent = [
-			"user_messages_v8",
+			"user_messages_v9",
 			"tool_calls_v1",
 			"user_message_links_v1",
-			"premium_requests_priority_v1",
+			"premium_requests_priority_v2",
 			"messages_cost_reingest_v1",
 		];
 		for (const key of spent) {

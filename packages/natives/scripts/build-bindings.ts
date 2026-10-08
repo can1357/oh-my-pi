@@ -7,6 +7,9 @@
  *
  * `OMP_NATIVE_CARGO_PROFILE` selects the cargo profile (default `local`:
  * incremental, unstripped). Image builds set `ci` for a stripped addon.
+ *
+ * `OMP_NATIVE_FEATURES` passes extra cargo features to `napi build --features`
+ * (e.g. `wayland-pipewire`). Cargo path only; Bazel builds ignore it.
  */
 
 import * as fsSync from "node:fs";
@@ -15,6 +18,7 @@ import { createRequire } from "node:module";
 import * as path from "node:path";
 import { $ } from "bun";
 import { detectHostAvx2Support, resolveLocalHostAddon } from "../../../scripts/host-detect";
+import { stampNativeVersion } from "../../../scripts/stamp-native-version";
 import { generateEnumExports } from "./gen-enums";
 
 // pcre2-sys prefers a system libpcre2 when pkg-config finds one. Keep the
@@ -229,6 +233,13 @@ const napiArgs = [
 	cargoProfile,
 ];
 
+// Local-only opt-in: pass extra cargo features through to napi build, e.g.
+// OMP_NATIVE_FEATURES=wayland-pipewire bun --cwd=packages/natives run build
+const extraFeatures = Bun.env.OMP_NATIVE_FEATURES?.trim();
+if (extraFeatures) {
+	napiArgs.push("--features", extraFeatures);
+}
+
 // napi-rs / cargo route much failure detail to stdout (e.g. `cargo metadata`
 // errors), so a stderr-only error collapses real failures to a bare message.
 const BUILD_LOG_TAIL_LINES = 40;
@@ -256,6 +267,10 @@ try {
 	}
 
 	const builtAddonPath = await resolveBuiltAddonPath(buildOutputDir, canonicalAddonFilename);
+	// Stamp the release version post-link, before the addon becomes visible
+	// under its canonical name, so a version bump never recompiles the crate.
+	const { version } = (await Bun.file(packageJsonPath).json()) as { version: string };
+	await stampNativeVersion(builtAddonPath, version);
 	if (builtAddonPath !== canonicalAddonPath) {
 		console.log(`Normalizing native addon filename: ${path.basename(builtAddonPath)} → ${canonicalAddonFilename}`);
 		await installBinary(builtAddonPath, canonicalAddonPath);

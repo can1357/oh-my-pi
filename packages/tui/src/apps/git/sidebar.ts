@@ -17,6 +17,10 @@ import { MenuSelection } from "../../components/menu-selection";
 import { ScrollView } from "../../components/scroll-view";
 import { TreeView } from "../../components/tree-view";
 import { matchesKey } from "../../keys";
+import { col, compact, item, keyed, list, node, row, span, stableKey, text } from "../../native/describe";
+import { Memo } from "../../native/memo";
+import type { DescribeContext, NativeChild, NativeNode, NativeUiEvent } from "../../native/node";
+import type { TspProps, TspSpan } from "@oh-my-pi/pi-wire";
 import { TERMINAL } from "../../terminal-capabilities";
 import { truncateToWidth, visibleWidth } from "../../utils";
 import { getEditorTheme, theme } from "../../theme/theme";
@@ -79,6 +83,7 @@ const KIND_LETTER: Record<ChangedFile["kind"], string> = {
 	conflicted: "U",
 };
 
+/** Status tones of the native change pills (the ANSI letter colours). */
 const KIND_COLOR: Record<ChangedFile["kind"], "warning" | "success" | "error" | "accent" | "muted"> = {
 	modified: "warning",
 	added: "success",
@@ -231,6 +236,43 @@ class GitFileTree {
 	}
 }
 
+/** A quiet text button (`Stage all`): a clickable row the role sheet draws as `.btn.quiet`. */
+function quietButton(label: string, act: string, title: string): NativeNode {
+	return node("row", { role: "omp.app.qbtn", actions: { click: act }, title }, [text(label)], act);
+}
+
+/** A text field at rest: its value (or placeholder) as text; a click starts editing it. */
+function fieldText(
+	value: string,
+	placeholder: string,
+	act: string,
+	selected: boolean,
+	role = "omp.app.git.field",
+): NativeNode {
+	return text(value ? value : [span(placeholder, "dim")], {
+		truncate: "end",
+		role: selected ? `${role}.on` : role,
+		actions: { click: act },
+	});
+}
+
+/** Props of an `input` node described by a text field, minus identity. */
+function inputProps(described: NativeNode): TspProps<"input"> {
+	return described.k === "input" ? { ...described.p } : {};
+}
+
+/** The `editor` node inside an {@link Editor}'s description (the editor itself, or the column holding it). */
+function editorNode(described: NativeNode): NativeNode | undefined {
+	if (described.k === "editor") return described;
+	for (const child of described.c ?? []) if ("k" in child && child.k === "editor") return child;
+	return undefined;
+}
+
+/** Props of a described `editor` node. */
+function editorProps(described: NativeNode): TspProps<"editor"> {
+	return described.k === "editor" ? { ...described.p } : {};
+}
+
 /** File row: status letter, dimmed directory, bright basename, +/− counts. */
 function fileRowText(file: ChangedFile, width: number, selected: boolean, focused: boolean, depth?: number): string {
 	const prefix = `${theme.fg(KIND_COLOR[file.kind], KIND_LETTER[file.kind])} `;
@@ -355,6 +397,9 @@ export class Sidebar {
 		| undefined;
 	/** Tree depth per target key (file/dir rows only); parent-jump for `←`. */
 	readonly #entryDepth = new Map<string, number>();
+	/** Native item key → the target it selects, refreshed by every {@link describe}. */
+	readonly #nativeTargets = new Map<string, Target>();
+	readonly #nativeMemo = new Memo();
 	readonly #scrollView = new ScrollView([], { height: 1, totalRows: 0, scrollbar: "never" });
 	/** One-shot: the next render scrolls the selected row into view. Set on
 	 * explicit selection changes so wheel scrolling can roam freely. */
@@ -892,6 +937,465 @@ export class Sidebar {
 		}
 	}
 
+	// ── native ─────────────────────────────────────────────────────────────
+
+	/**
+	 * The changes sheet (NATIVE_REDESIGN §10): a head with the change count,
+	 * the branch and a Path/Tree segmented control; one list per section under
+	 * a quiet head whose `Stage all`/`Unstage all` show on hover; the commit
+	 * composer docked below. A clean tree shows the HEAD commit instead. Text
+	 * fields are live `input`/`editor` nodes only while they own the keys, so
+	 * the terminal's caret follows the keyboard.
+	 */
+	describe(cx: DescribeContext): NativeNode {
+		this.#rebuildTargets();
+		const selected = this.selected;
+		const selectedKey = selected ? targetKey(selected) : undefined;
+		const editing = this.editing ? selected?.kind : undefined;
+		const summaryInput = editing === "summary" ? this.summary.input.describe(cx) : undefined;
+		const aiInput = editing === "stage-ai-input" ? this.aiInput.input.describe(cx) : undefined;
+		const descriptionEditor = editing === "description" ? editorNode(this.description.describe(cx)) : undefined;
+		return this.#nativeMemo.get(
+			[
+				this.#model.clean,
+				this.#model.unstaged,
+				this.#model.staged,
+				this.#model.headCommit,
+				this.#model.branch,
+				selectedKey,
+				this.focused,
+				this.viewStyle,
+				this.#treeVersion,
+				this.amend,
+				this.generating,
+				this.#aiPromptOpen,
+				this.summary.getValue(),
+				this.description.getText(),
+				summaryInput,
+				aiInput,
+				descriptionEditor,
+			],
+			() => {
+				this.#nativeTargets.clear();
+				const on = (target: Target): boolean => this.focused && selectedKey === targetKey(target);
+				const children = this.#model.clean
+					? this.#describeHead(selectedKey)
+					: [
+							this.#describeChangesHead(),
+							keyed(
+								col(
+									[
+										...this.#describeSection("unstaged", selectedKey, on, aiInput),
+										...this.#describeSection("staged", selectedKey, on, undefined),
+									],
+									{ role: "omp.app.git.changes", gap: "sm" },
+								),
+								"changes",
+							),
+							this.#describeCommit(on, summaryInput, descriptionEditor),
+						];
+				return col(children, { role: "omp.app.git.side" });
+			},
+		);
+	}
+
+	/**
+	 * Pointer actions on the changes sheet: list clicks select (a folder also
+	 * folds, a second click on the selected file stages it, as the ANSI click
+	 * does), double clicks activate, the segmented control switches Path/Tree,
+	 * and the quiet buttons run their row's action; selection edits go to the
+	 * text field being edited. False when not the sidebar's event.
+	 */
+	handleNativeEvent(event: NativeUiEvent): boolean {
+		if (event.type === "edit" || event.type === "undo") {
+			const editing = this.editing ? this.selected?.kind : undefined;
+			const field =
+				editing === "summary"
+					? this.summary.input
+					: editing === "stage-ai-input"
+						? this.aiInput.input
+						: editing === "description"
+							? this.description
+							: undefined;
+			field?.handleNativeEvent(event);
+			return field !== undefined;
+		}
+		if (event.type === "select" || event.type === "activate") {
+			if (event.item === "path" || event.item === "tree") {
+				this.viewStyle = event.item;
+				this.#treeVersion++;
+				this.#requestRender();
+				return true;
+			}
+			const target = this.#nativeTargets.get(event.item);
+			if (!target) return false;
+			const wasSelected = this.selected !== undefined && targetKey(this.selected) === targetKey(target);
+			this.#select(target);
+			if (event.type === "activate" || target.kind === "dir" || (target.kind === "file" && wasSelected)) {
+				this.#activate(target);
+			}
+			return true;
+		}
+		if (event.type !== "action") return false;
+		switch (event.act) {
+			case "fold-unstaged":
+			case "fold-staged":
+				this.#toggleSection(event.act === "fold-unstaged" ? "unstaged" : "staged");
+				return true;
+			case "stage-all":
+			case "unstage-all":
+			case "stage-ai":
+				this.#activate({ kind: event.act });
+				return true;
+			case "amend":
+				this.#select({ kind: "amend" });
+				this.#toggleAmend();
+				return true;
+			case "commit":
+				this.#select({ kind: "commit-button" });
+				this.#submitCommit();
+				return true;
+			case "edit-summary":
+				this.#select({ kind: "summary" });
+				return true;
+			case "edit-description":
+				this.#select({ kind: "description" });
+				return true;
+			case "edit-ai":
+				this.#select({ kind: "stage-ai-input" });
+				return true;
+			default:
+				return false;
+		}
+	}
+
+	/** Item key of `target` in the native lists, registered for event lookup. */
+	#nativeKey(target: Target): string {
+		const key = stableKey(targetKey(target));
+		this.#nativeTargets.set(key, target);
+		return key;
+	}
+
+	/** `3 changes on main` and the Path/Tree segmented control. */
+	#describeChangesHead(): NativeNode {
+		const total = this.#model.unstaged.length + this.#model.staged.length;
+		const head = row(
+			[
+				row(
+					compact([
+						text([span(`${total} change${total === 1 ? "" : "s"}`, "strong")]),
+						this.#model.branch !== null && text([span("on", "muted")]),
+						this.#model.branch !== null &&
+							text([span(this.#model.branch, "mono")], { role: "omp.app.git.branch", truncate: "middle" }),
+					]),
+					{ gap: "xs", align: "center", role: "omp.app.git.title" },
+				),
+				this.#describeStyleToggle(),
+			],
+			{ justify: "between", align: "center", role: "omp.app.git.head" },
+		);
+		return keyed(head, "head");
+	}
+
+	#describeStyleToggle(): NativeNode {
+		return node(
+			"tabs",
+			{
+				items: [
+					{ id: "path", label: "Path" },
+					{ id: "tree", label: "Tree" },
+				],
+				active: this.viewStyle,
+				role: "omp.app.seg",
+			},
+			undefined,
+			"style",
+		);
+	}
+
+	/** One section: a quiet head (fold chevron, name, count, hover actions) over its file list. */
+	#describeSection(
+		area: SectionTarget["area"],
+		selectedKey: string | undefined,
+		on: (target: Target) => boolean,
+		aiInput: NativeNode | undefined,
+	): NativeChild[] {
+		const files = area === "unstaged" ? this.#model.unstaged : this.#model.staged;
+		const folded = this.#collapsedSections.has(area);
+		const section: SectionTarget = { kind: "section", area };
+		const actions: NativeNode[] =
+			area === "unstaged"
+				? [
+						quietButton("Stage all", "stage-all", "Stage every change (space on the head)"),
+						node(
+							"icon",
+							{
+								name: "wand",
+								role: "omp.app.ibtn",
+								title: "Stage by description…",
+								aria: "Stage by description",
+								actions: { click: "stage-ai" },
+							},
+							undefined,
+							"ai",
+						),
+					]
+				: [quietButton("Unstage all", "unstage-all", "Unstage every change (space on the head)")];
+		const head = row(
+			[
+				row(
+					[
+						node("icon", { name: folded ? "chev-r" : "chev" }),
+						text(area === "unstaged" ? "Unstaged" : "Staged"),
+						text([span(String(files.length), "num")], { role: "omp.app.git.count" }),
+					],
+					{ gap: "xs", align: "center", actions: { click: `fold-${area}` }, title: folded ? "Show" : "Hide" },
+				),
+				row(files.length > 0 ? actions : [], { gap: "xs", align: "center", role: "omp.app.git.acts" }),
+			],
+			{
+				justify: "between",
+				align: "center",
+				role: on(section) ? "omp.app.git.sechead.on" : "omp.app.git.sechead",
+			},
+		);
+		const out: NativeChild[] = [keyed(head, `${area}-head`)];
+		if (area === "unstaged" && this.#aiPromptOpen) {
+			const target: Target = { kind: "stage-ai-input" };
+			out.push(
+				keyed(
+					aiInput
+						? node("input", {
+								...inputProps(aiInput),
+								placeholder: "What should we stage?",
+								role: "omp.app.git.field.on",
+							})
+						: fieldText(this.aiInput.getValue(), "What should we stage?", "edit-ai", on(target)),
+					"ai",
+				),
+			);
+		}
+		if (!folded) {
+			const entries = this.#fileEntries(files, area);
+			const selected = entries.find(entry => targetKey(entry.target) === selectedKey);
+			out.push(
+				list(
+					entries.map(entry => this.#describeEntry(entry)),
+					{
+						selected: selected ? this.#nativeKey(selected.target) : null,
+						empty: area === "unstaged" ? "Nothing to stage" : "Nothing staged yet",
+						role: "omp.app.git.files",
+						actions: { click: "select", dblclick: "activate" },
+					},
+					area,
+				),
+			);
+		}
+		return out;
+	}
+
+	/** A file row (status pill, name, `+a −d`) or a folder row of the tree view. */
+	#describeEntry(entry: SidebarFileEntry): NativeNode {
+		const depth = Math.min(entry.depth ?? 0, 8);
+		const key = this.#nativeKey(entry.target);
+		const file = entry.file;
+		if (!file) {
+			return item(key, {
+				label: [span(entry.dirName ?? "")],
+				icon: "folder",
+				role: `omp.app.git.dir-d${depth}`,
+				tone: entry.collapsed ? "muted" : undefined,
+			});
+		}
+		const slash = file.path.lastIndexOf("/");
+		const label =
+			this.viewStyle === "tree" || slash < 0
+				? [span(file.path.slice(slash + 1))]
+				: [span(file.path.slice(0, slash + 1), "dim"), span(file.path.slice(slash + 1))];
+		const stats: TspSpan[] = [];
+		if (file.additions) stats.push(span(`+${file.additions}`, "ins num"));
+		if (file.deletions) stats.push(span(`${stats.length > 0 ? " " : ""}−${file.deletions}`, "del num"));
+		return item(key, {
+			label,
+			detail: file.origPath ? [span(`from ${file.origPath}`, "dim")] : undefined,
+			value: stats.length > 0 ? stats : undefined,
+			hint: [KIND_LETTER[file.kind]],
+			tone: KIND_COLOR[file.kind],
+			role: `omp.app.git.file-d${this.viewStyle === "tree" ? depth : 0}`,
+			title: `${file.kind}: ${file.path}`,
+		});
+	}
+
+	/**
+	 * The commit composer (skill §5 "Forms docked in a sheet"): a borderless
+	 * summary with a counter only while typing, the body below, a quiet
+	 * `Amend` toggle and the neutral commit button.
+	 */
+	#describeCommit(
+		on: (target: Target) => boolean,
+		summaryInput: NativeNode | undefined,
+		descriptionEditor: NativeNode | undefined,
+	): NativeNode {
+		const summary = this.summary.getValue();
+		const description = this.description.getText();
+		const left = SUMMARY_LIMIT - summary.length;
+		const summaryField = summaryInput
+			? row(
+					[
+						node("input", { ...inputProps(summaryInput), placeholder: "Summary", grow: 1 }),
+						text([span(String(left), left < 0 ? "warning num" : "num")], { role: "omp.app.git.count" }),
+					],
+					{ gap: "sm", align: "center", role: "omp.app.git.summary.on" },
+				)
+			: fieldText(summary, "Summary", "edit-summary", on({ kind: "summary" }), "omp.app.git.summary");
+		const bodyField = descriptionEditor
+			? node("editor", {
+					...editorProps(descriptionEditor),
+					placeholder: "Description",
+					maxLines: 5,
+					role: "omp.app.git.body.on",
+				})
+			: fieldText(
+					description.split("\n", 1)[0] + (description.includes("\n") ? " …" : ""),
+					"Description",
+					"edit-description",
+					on({ kind: "description" }),
+					"omp.app.git.body",
+				);
+		const hasChanges = this.#model.staged.length > 0 || this.#model.unstaged.length > 0 || this.amend;
+		const canCommit =
+			hasChanges && !this.generating && (summary.trim().length > 0 || description.trim().length === 0);
+		const label = this.generating
+			? "Generating message…"
+			: summary.trim().length === 0 && description.trim().length === 0
+				? "Generate message"
+				: this.#model.staged.length > 0
+					? "Commit"
+					: "Stage all & commit";
+		// The panels' button (omp-panels.css `omp.btn`): accent while the keyboard is on it, muted when it can't run.
+		const commitTone = !canCommit ? "muted" : on({ kind: "commit-button" }) ? "accent" : undefined;
+		return col(
+			[
+				keyed(summaryField, "summary"),
+				keyed(bodyField, "body"),
+				keyed(
+					row(
+						[
+							row([node("icon", { name: this.amend ? "check" : "commit" }), text("Amend")], {
+								gap: "xs",
+								align: "center",
+								role: `omp.app.git.toggle${this.amend ? ".set" : ""}${on({ kind: "amend" }) ? ".on" : ""}`,
+								actions: { click: "amend" },
+								title: "Amend the previous commit",
+							}),
+							row(compact([this.generating && node("spinner", { style: "dots" }), text(label)]), {
+								gap: "xs",
+								align: "center",
+								role: "omp.btn",
+								tone: commitTone,
+								actions: canCommit ? { click: "commit" } : undefined,
+								title:
+									this.#model.staged.length > 0
+										? "Commit the staged changes"
+										: "Stage everything, then commit",
+							}),
+						],
+						{ justify: "between", align: "center", role: "omp.app.git.foot" },
+					),
+					"foot",
+				),
+			],
+			{ gap: "sm", role: "omp.app.git.commit" },
+		);
+	}
+
+	/** Clean tree: the HEAD commit (subject, body, author, parents) over its file list. */
+	#describeHead(selectedKey: string | undefined): NativeChild[] {
+		const head = this.#model.headCommit;
+		if (!head) {
+			return [keyed(text([span("No commits yet", "muted")], { role: "omp.app.git.empty" }), "empty")];
+		}
+		const when = head.authorDate ? new Date(head.authorDate) : null;
+		const initials = head.authorName
+			.split(/\s+/)
+			.filter(Boolean)
+			.slice(0, 2)
+			.map(word => word[0]!.toUpperCase())
+			.join("");
+		const commit = col(
+			compact([
+				text([span(head.subject, "strong")], { wrap: "word", role: "omp.app.git.subject" }),
+				head.body.trim() !== "" && text(head.body.trim(), { wrap: "word", lines: 8, role: "omp.app.git.message" }),
+				row(
+					[
+						text(initials || "?", { role: "omp.app.git.avatar", title: head.authorEmail }),
+						col(
+							compact([
+								text([span(head.authorName, "strong")], { truncate: "end" }),
+								text([span(head.authorEmail, "dim")], { truncate: "end" }),
+							]),
+							{ gap: "none" },
+						),
+					],
+					{ gap: "sm", align: "center", role: "omp.app.git.author" },
+				),
+				node("kv", {
+					items: compact([
+						when && !Number.isNaN(when.getTime()) ? { k: "authored", v: when.toLocaleString() } : undefined,
+						head.parents.length > 0
+							? {
+									k: head.parents.length === 1 ? "parent" : "parents",
+									v: [span(head.parents.map(sha => sha.slice(0, 8)).join(" "), "mono accent")],
+								}
+							: undefined,
+					]),
+					layout: "grid",
+				}),
+			]),
+			{ gap: "sm", role: "omp.app.git.commit-info" },
+		);
+		const out: NativeChild[] = [keyed(commit, "head")];
+		if (!head.filesLoaded) {
+			out.push(keyed(text([span("Loading changed files…", "muted")]), "loading"));
+			return out;
+		}
+		const additions = head.files.reduce((sum, file) => sum + (file.additions ?? 0), 0);
+		const deletions = head.files.reduce((sum, file) => sum + (file.deletions ?? 0), 0);
+		out.push(
+			keyed(
+				row(
+					[
+						text([
+							span(`${head.files.length} file${head.files.length === 1 ? "" : "s"}`, "strong"),
+							span("  "),
+							span(`+${additions}`, "ins num"),
+							span(" "),
+							span(`−${deletions}`, "del num"),
+							span(`  ${head.shortSha}`, "dim mono"),
+						]),
+						this.#describeStyleToggle(),
+					],
+					{ justify: "between", align: "center", role: "omp.app.git.head" },
+				),
+				"files-head",
+			),
+		);
+		const entries = this.#fileEntries(head.files, "commit");
+		const selected = entries.find(entry => targetKey(entry.target) === selectedKey);
+		out.push(
+			list(
+				entries.map(entry => this.#describeEntry(entry)),
+				{
+					selected: selected ? this.#nativeKey(selected.target) : null,
+					role: "omp.app.git.files",
+					actions: { click: "select", dblclick: "activate" },
+				},
+				"commit-files",
+			),
+		);
+		return out;
+	}
+
 	/** Wheel scroll over the sidebar. */
 	handleWheel(delta: number): void {
 		this.#scrollView.scroll(delta * 3);
@@ -1195,7 +1699,12 @@ export class Sidebar {
 					png,
 					"image/png",
 					{ fallbackColor: text => theme.fg("dim", text) },
-					{ maxHeightCells: 3, budget: this.#imageBudget, imageKey: `git-avatar:${email}` },
+					{
+						maxHeightCells: 3,
+						budget: this.#imageBudget,
+						imageKey: `git-avatar:${email}`,
+						requestRender: this.#requestRender,
+					},
 				),
 			};
 		}

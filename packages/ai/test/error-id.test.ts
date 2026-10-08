@@ -163,6 +163,18 @@ describe("error-id classification", () => {
 		expect(AIError.isProviderRetryableError(new AIError.ProviderHttpError(errorMessage, 400))).toBe(false);
 	});
 
+	it("keeps transport wording on a terminal 4xx terminal while 408/429/5xx stay retryable (#13807)", () => {
+		const body =
+			"Upstream request failed: This Go model requires Global regions. Select Global in your workspace's Privacy settings to use it. (type=server_error)";
+		const denied = AIError.classify(message({ errorStatus: 400, errorMessage: `400 ${body}` }));
+		expect(AIError.is(denied, AIError.Flag.Transient)).toBe(false);
+		expect(AIError.retriable(denied)).toBe(false);
+		for (const errorStatus of [408, 429, 503]) {
+			const id = AIError.classify(message({ errorStatus, errorMessage: `${errorStatus} ${body}` }));
+			expect(AIError.retriable(id)).toBe(true);
+		}
+	});
+
 	it("keeps Flag.Timeout when a timeout message also reads as a truncation", () => {
 		const id = AIError.classifyMessage(message({ errorMessage: "read timed out: unexpected EOF" }));
 		expect(AIError.is(id, AIError.Flag.Timeout)).toBe(true);
@@ -327,12 +339,6 @@ describe("error-id classification", () => {
 			const id = AIError.classifyMessage(message({ provider: "cursor", model: "cursor-grok-4.6", errorMessage }));
 			expect(AIError.is(id, AIError.Flag.AccountPolicy)).toBe(false);
 		}
-	});
-
-	it("keeps raw status fallback unclassified", () => {
-		const id = 503;
-		expect(AIError.is(id, AIError.Flag.Class)).toBe(false);
-		expect(id).toBe(503);
 	});
 
 	it("gates stale Responses replay errors by API", () => {

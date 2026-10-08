@@ -1,7 +1,7 @@
 // Provider-wire compat for "fireworks"; regenerated from the frozen census using deployment contract selectors.
 
 provider "fireworks" priority=-1 {
-	default-model "kimi-k2.7-code"
+	default-model "kimi-k3"
 	env "FIREWORKS_API_KEY"
 	discovery label="Fireworks"
 

@@ -3,7 +3,13 @@
  *
  * Subagents can call this tool incrementally or terminally depending on `type`.
  */
-import type { AgentTool, AgentToolContext, AgentToolResult, AgentToolUpdateCallback } from "@oh-my-pi/pi-agent-core";
+import type {
+	AgentMessage,
+	AgentTool,
+	AgentToolContext,
+	AgentToolResult,
+	AgentToolUpdateCallback,
+} from "@oh-my-pi/pi-agent-core";
 import type { TSchema } from "@oh-my-pi/pi-ai/types";
 import {
 	dereferenceJsonSchema,
@@ -20,6 +26,41 @@ import type { ToolSession } from ".";
 import { buildOutputValidator, formatAllValidationIssues } from "./output-schema-validator";
 
 const YIELD_FORMAT_HINT = 'Submit success as {"data":<your output>} or failure as {"error":"message"}.';
+
+export function resolveYieldReportText(messages: readonly AgentMessage[], toolCallId: string): string | undefined {
+	const current = messages.at(-1);
+	if (current?.role !== "assistant" || ["error", "aborted", "length"].includes(current.stopReason)) return;
+	const calls = current.content.filter(block => block.type === "toolCall");
+	if (calls.length !== 1 || calls[0].name !== "yield" || calls[0].id !== toolCallId) return;
+	const currentText = current.content
+		.filter(block => block.type === "text")
+		.map(block => block.text)
+		.join("\n");
+	if (currentText.trim()) return currentText;
+	for (let index = messages.length - 2; index >= 0; index--) {
+		const previous = messages[index];
+		if (previous.role === "developer") {
+			const blocks =
+				typeof previous.content === "string" ? [{ type: "text", text: previous.content }] : previous.content;
+			if (
+				blocks.length &&
+				blocks.every(block => block.type === "text" && block.text.startsWith("<system-reminder>"))
+			)
+				continue;
+		}
+		if (
+			previous.role !== "assistant" ||
+			previous.stopReason !== "stop" ||
+			previous.content.some(block => block.type === "toolCall")
+		)
+			return;
+		const text = previous.content
+			.filter(block => block.type === "text")
+			.map(block => block.text)
+			.join("\n");
+		return text.trim() ? text : undefined;
+	}
+}
 
 export interface YieldDetails {
 	/** Successful result payload, or omitted when `useLastTurn` requests last-turn extraction. */
@@ -254,6 +295,8 @@ export class YieldTool implements AgentTool<TSchema, YieldDetails> {
 
 	readonly #validate?: (value: unknown) => JsonSchemaValidationResult;
 	readonly #validateSection?: ReadonlyMap<string, (value: unknown) => JsonSchemaValidationResult>;
+	readonly #normalizeData?: (value: unknown) => unknown;
+	readonly #normalizeSection?: (label: string, value: unknown) => unknown;
 	#rejectUnknownSections = false;
 	#knownSectionLabels: readonly string[] = [];
 	#isKnownSection?: (label: string) => boolean;
@@ -284,6 +327,8 @@ export class YieldTool implements AgentTool<TSchema, YieldDetails> {
 
 	constructor(session: ToolSession) {
 		let validate: ((value: unknown) => JsonSchemaValidationResult) | undefined;
+		let normalizeData: ((value: unknown) => unknown) | undefined;
+		let normalizeSection: ((label: string, value: unknown) => unknown) | undefined;
 		let validateSection: ReadonlyMap<string, (value: unknown) => JsonSchemaValidationResult> | undefined;
 		let rejectUnknownSections = false;
 		let knownSectionLabels: readonly string[] = [];
@@ -313,6 +358,10 @@ export class YieldTool implements AgentTool<TSchema, YieldDetails> {
 			if (!schemaError && normalizedSchema !== undefined) {
 				const strictProbe = tryEnforceStrictSchema(normalizedSchema);
 				if (strictProbe.strict) {
+					if (validator) {
+						normalizeData = value => validator.normalize(value);
+						normalizeSection = (label, value) => validator.normalizeSection(label, value);
+					}
 					sanitizedSchema = sanitizeSchemaForStrictMode(normalizedSchema);
 				} else {
 					sanitizedSchema = normalizedSchema;
@@ -348,11 +397,15 @@ export class YieldTool implements AgentTool<TSchema, YieldDetails> {
 				looseRecordSchema(`Structured JSON output (schema processing failed: ${errorMsg})`),
 			);
 			validate = undefined;
+			normalizeData = undefined;
+			normalizeSection = undefined;
 			this.#schemaStrict = false;
 		}
 
 		this.#session = session;
 		this.#validate = validate;
+		this.#normalizeData = normalizeData;
+		this.#normalizeSection = normalizeSection;
 		this.#validateSection = validateSection;
 		this.#rejectUnknownSections = rejectUnknownSections;
 		this.#knownSectionLabels = knownSectionLabels;
@@ -387,7 +440,7 @@ export class YieldTool implements AgentTool<TSchema, YieldDetails> {
 	}
 
 	async execute(
-		_toolCallId: string,
+		toolCallId: string,
 		params: unknown,
 		_signal?: AbortSignal,
 		_onUpdate?: AgentToolUpdateCallback<YieldDetails>,
@@ -414,7 +467,7 @@ export class YieldTool implements AgentTool<TSchema, YieldDetails> {
 		} else {
 			yieldType = parseYieldType(raw.type);
 		}
-		const useLastTurn = errorMessage === undefined && data === undefined && yieldType !== undefined;
+		let useLastTurn = errorMessage === undefined && data === undefined && yieldType !== undefined;
 		// Incremental array-typed sections carry partial data (one finding, one
 		// field) that cannot satisfy the full output schema; the assembled result
 		// is validated as a whole at finalization (executor finalizeSubprocessOutput).
@@ -486,9 +539,10 @@ export class YieldTool implements AgentTool<TSchema, YieldDetails> {
 			status === "success" &&
 			useLastTurn &&
 			(isIncremental || !this.#hasIncrementalSections) &&
-			this.#session.getLastAssistantText !== undefined
+			(this.#session.getLastAssistantText !== undefined || this.#session.getYieldReportText !== undefined)
 		) {
-			const lastTurnText = this.#session.getLastAssistantText();
+			const resolveReport = !isIncremental && this.#session.getYieldReportText;
+			const lastTurnText = resolveReport ? resolveReport(toolCallId) : this.#session.getLastAssistantText?.();
 			if (lastTurnText === undefined || lastTurnText.trim().length === 0) {
 				this.#emptyResultFailures++;
 				if (this.#emptyResultFailures > MAX_EMPTY_RESULT_RETRIES) {
@@ -511,7 +565,20 @@ export class YieldTool implements AgentTool<TSchema, YieldDetails> {
 						`Put your result in \`data\`: ${YIELD_FORMAT_HINT} Empty last-turn result retries remaining before abort: ${remaining}.`,
 				);
 			}
+			if (resolveReport) {
+				data = lastTurnText;
+				useLastTurn = false;
+			}
 		}
+		const normalizeData = (value: unknown): unknown =>
+			workPoolItemId !== undefined
+				? value
+				: Array.isArray(yieldType) && yieldType.length === 1
+					? (this.#normalizeSection?.(yieldType[0], value) ?? value)
+					: !isIncremental
+						? (this.#normalizeData?.(value) ?? value)
+						: value;
+		if (status === "success" && data !== undefined) data = normalizeData(data);
 		if (status === "success" && !useLastTurn) {
 			const validateData = (value: unknown): JsonSchemaValidationResult | undefined =>
 				workPoolItemId !== undefined
@@ -533,9 +600,10 @@ export class YieldTool implements AgentTool<TSchema, YieldDetails> {
 				// and then warn post-mortem instead of giving a retryable error.
 				const decoded = parseJsonEncodedValue(data);
 				if (decoded.parsed && decoded.value !== null) {
-					const revalidated = validateData(decoded.value);
+					const normalized = normalizeData(decoded.value);
+					const revalidated = validateData(normalized);
 					if (revalidated === undefined || revalidated.success) {
-						data = decoded.value;
+						data = normalized;
 						sectionFailure = revalidated;
 					}
 				}

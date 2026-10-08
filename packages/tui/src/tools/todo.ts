@@ -11,6 +11,11 @@ import { renderStatusLine, renderTreeList } from "../render";
 import { framedToolCard } from "../render/tool-card";
 
 import { formatErrorDetail, formatMoreItems, PREVIEW_LIMITS, pluralize, replaceTabs } from "../render/render-utils";
+import type { TspChecklistItem, TspChecklistPhase } from "@oh-my-pi/pi-wire";
+import { node } from "../native/describe";
+import { OwnerMemo } from "../native/memo";
+import { errorText, noteText, resultText } from "./native-view";
+import type { NativeToolView, ToolRenderResult } from "./renderer";
 
 // =============================================================================
 // Types
@@ -59,11 +64,31 @@ export interface TodoToolDetails {
  * that would collide across unrelated todos. */
 const TODO_DESCRIPTION_MIN_OVERLAP = 6;
 
+/** Bound on {@link normalizedTodoCache}; cleared wholesale when exceeded. */
+const NORMALIZED_TODO_CACHE_LIMIT = 1024;
+const normalizedTodoCache = new Map<string, string>();
+
 function normalizeForTodoMatch(value: string): string {
-	return value
+	let normalized = normalizedTodoCache.get(value);
+	if (normalized !== undefined) return normalized;
+	normalized = value
 		.toLowerCase()
 		.replace(/[^\p{L}\p{N}]+/gu, " ")
 		.trim();
+	if (normalizedTodoCache.size >= NORMALIZED_TODO_CACHE_LIMIT) normalizedTodoCache.clear();
+	normalizedTodoCache.set(value, normalized);
+	return normalized;
+}
+
+/** Match a pre-normalized target against pre-normalized, non-empty candidates. */
+function matchesNormalizedCandidates(target: string, candidates: readonly string[]): boolean {
+	if (!target) return false;
+	for (const candidate of candidates) {
+		if (target === candidate) return true;
+		if (target.length >= TODO_DESCRIPTION_MIN_OVERLAP && candidate.includes(target)) return true;
+		if (candidate.length >= TODO_DESCRIPTION_MIN_OVERLAP && target.includes(candidate)) return true;
+	}
+	return false;
 }
 
 /**
@@ -82,14 +107,12 @@ function normalizeForTodoMatch(value: string): string {
 export function todoMatchesAnyDescription(content: string, descriptions: readonly string[]): boolean {
 	const target = normalizeForTodoMatch(content);
 	if (!target) return false;
+	const candidates: string[] = [];
 	for (const desc of descriptions) {
 		const candidate = normalizeForTodoMatch(desc);
-		if (!candidate) continue;
-		if (target === candidate) return true;
-		if (target.length >= TODO_DESCRIPTION_MIN_OVERLAP && candidate.includes(target)) return true;
-		if (candidate.length >= TODO_DESCRIPTION_MIN_OVERLAP && target.includes(candidate)) return true;
+		if (candidate) candidates.push(candidate);
 	}
-	return false;
+	return matchesNormalizedCandidates(target, candidates);
 }
 
 /** Whether a todo is settled: completed or deliberately abandoned. Shared so
@@ -305,24 +328,37 @@ function strikethroughText(text: string): string {
 	return `${STRIKE_START}${text}${STRIKE_END}`;
 }
 
-function partialStrikethrough(text: string, visibleChars: number): string {
+/** Display label for a todo row, with its code points split once for the strike animation. */
+interface TodoLabel {
+	text: string;
+	chars?: string[];
+}
+
+function labelChars(label: TodoLabel): string[] {
+	label.chars ??= [...label.text];
+	return label.chars;
+}
+
+function partialStrikethrough(label: TodoLabel, visibleChars: number): string {
+	const text = label.text;
 	if (visibleChars <= 0) return text;
-	const chars = [...text];
+	const chars = labelChars(label);
 	if (visibleChars >= chars.length) return strikethroughText(text);
 	return `${strikethroughText(chars.slice(0, visibleChars).join(""))}${chars.slice(visibleChars).join("")}`;
 }
 
-function strikeRevealCount(text: string, frame: number | undefined): number | undefined {
+function strikeRevealCount(label: TodoLabel, frame: number | undefined): number | undefined {
 	if (frame === undefined) return undefined;
 	if (frame <= TODO_STRIKE_HOLD_FRAMES) return 0;
-	const chars = [...text];
-	if (chars.length === 0) return undefined;
+	const count = labelChars(label).length;
+	if (count === 0) return undefined;
 	const revealFrame = Math.min(frame - TODO_STRIKE_HOLD_FRAMES, TODO_STRIKE_REVEAL_FRAMES);
-	return Math.ceil((chars.length * revealFrame) / TODO_STRIKE_REVEAL_FRAMES);
+	return Math.ceil((count * revealFrame) / TODO_STRIKE_REVEAL_FRAMES);
 }
 
 function formatTodoLine(
 	item: TodoItem,
+	label: TodoLabel,
 	uiTheme: Theme,
 	prefix: string,
 	completionKeys: Set<string>,
@@ -330,31 +366,27 @@ function formatTodoLine(
 	matched = false,
 ): string {
 	const checkbox = uiTheme.checkbox;
-	// Sanitize only for display. A mirrored Cursor snapshot carries provider text
-	// verbatim, and a label holding ANSI/C0 sequences would otherwise rewrite the
-	// terminal every time the list renders or replays. `item.content` stays raw
-	// everywhere else: it is the identity key the local list is looked up by
-	// (`findTaskByContent`) and what gets persisted.
-	const label = forDisplay(item.content);
+	// `label` is the display-sanitized content (see `forDisplay`); `item.content`
+	// stays raw everywhere else as the identity key and persisted value.
+	const text = label.text;
 	switch (item.status) {
 		case "completed": {
 			const revealCount = completionKeys.has(item.content) ? strikeRevealCount(label, frame) : undefined;
-			const content =
-				revealCount === undefined ? strikethroughText(label) : partialStrikethrough(label, revealCount);
+			const content = revealCount === undefined ? strikethroughText(text) : partialStrikethrough(label, revealCount);
 			return uiTheme.fg("success", `${prefix}${checkbox.checked} ${content}`);
 		}
 		case "in_progress":
-			return uiTheme.fg("accent", `${prefix}${checkbox.unchecked} ${label}`);
+			return uiTheme.fg("accent", `${prefix}${checkbox.unchecked} ${text}`);
 		case "abandoned":
-			return uiTheme.fg("error", `${prefix}${checkbox.unchecked} ${strikethroughText(label)}`);
+			return uiTheme.fg("error", `${prefix}${checkbox.unchecked} ${strikethroughText(text)}`);
 		case "blocked": {
 			const note = item.blocker ? `blocked: ${forDisplay(item.blocker)}` : "blocked";
-			return uiTheme.fg("warning", `${prefix}${checkbox.unchecked} ${label} (${note})`);
+			return uiTheme.fg("warning", `${prefix}${checkbox.unchecked} ${text} (${note})`);
 		}
 		default:
 			// A pending todo lit by a live subagent match renders accent, matching
 			// the sticky HUD's convention (#5873).
-			return uiTheme.fg(matched ? "accent" : "dim", `${prefix}${checkbox.unchecked} ${label}`);
+			return uiTheme.fg(matched ? "accent" : "dim", `${prefix}${checkbox.unchecked} ${text}`);
 	}
 }
 
@@ -426,6 +458,75 @@ let activeTodoDescriptionsProvider: () => readonly string[] = () => [];
 /** Wire the live-subagent description source for {@link todoToolRenderer}. */
 export function setActiveTodoDescriptionsProvider(provider: () => readonly string[]): void {
 	activeTodoDescriptionsProvider = provider;
+}
+
+/** omp todo status → checklist item status (§7.5). */
+const CHECKLIST_STATUS: Record<TodoStatus, TspChecklistItem["status"]> = {
+	pending: "pending",
+	in_progress: "active",
+	completed: "done",
+	abandoned: "dropped",
+	blocked: "blocked",
+};
+
+/** Checklist item for one todo; a pending todo an in-flight subagent executes reads as active. */
+function checklistItem(task: TodoItem, id: string, matched = false): TspChecklistItem {
+	const status = task.status === "pending" && matched ? "active" : CHECKLIST_STATUS[task.status];
+	const note = task.status === "blocked" && task.blocker ? forDisplay(task.blocker) : undefined;
+	return note === undefined
+		? { id, text: forDisplay(task.content), status }
+		: { id, text: forDisplay(task.content), status, note };
+}
+
+/**
+ * Checklist phases for native terminals: plain phase titles (no roman
+ * numerals — the terminal numbers nothing), completed phases folded.
+ */
+export function todoChecklistPhases(
+	phases: readonly { name: string; tasks: readonly TodoItem[] }[],
+	isMatched: (task: TodoItem) => boolean = () => false,
+): TspChecklistPhase[] {
+	return phases.map((phase, p) => ({
+		id: `p${p}`,
+		title: forDisplay(phase.name),
+		items: phase.tasks.map((task, t) => checklistItem(task, `p${p}.${t}`, isMatched(task))),
+		collapsed: phase.tasks.length > 0 && phase.tasks.every(isClosedTodo),
+	}));
+}
+
+const todoResultMemo = new OwnerMemo<NativeToolView | undefined>();
+
+/**
+ * Native todo result: head `Todo closed/total`, body one `checklist` node.
+ * Renderers get no describe context, so the checklist is always emitted;
+ * terminals that do not list the kind draw its unknown-kind fallback (§3).
+ */
+function describeTodoResult(
+	result: ToolRenderResult<TodoToolDetails>,
+	options: RenderResultOptions,
+): NativeToolView | undefined {
+	if (result.isError) {
+		return {
+			tool: { title: "Todo" },
+			tone: "error",
+			body: [errorText(resultText(result) || "Todo operation failed")],
+		};
+	}
+	const phases = (result.details?.phases ?? []).filter(phase => phase.tasks.length > 0);
+	const total = phases.reduce((sum, phase) => sum + phase.tasks.length, 0);
+	if (total === 0) {
+		return { tool: { title: "Todo" }, body: [noteText(forDisplay(resultText(result) || "No todos"))] };
+	}
+	const closed = phases.reduce((sum, phase) => sum + phase.tasks.filter(isClosedTodo).length, 0);
+	const activeDescs = options.expanded ? [] : activeTodoDescriptionsProvider();
+	const isMatched = (task: TodoItem): boolean =>
+		activeDescs.length > 0 && todoMatchesAnyDescription(task.content, activeDescs);
+	return {
+		tool: { title: "Todo", target: `${closed}/${total}`, targetKind: "text" },
+		body: [node("checklist", { mode: "full", phases: todoChecklistPhases(phases, isMatched) }, [], "checklist")],
+		preview: "none",
+		open: true,
+	};
 }
 
 /** Render todo operations and phased task snapshots. */
@@ -506,6 +607,40 @@ export const todoToolRenderer = {
 			return new Text(`${header}\n  ${uiTheme.fg("dim", fallback)}`, 0, 0);
 		}
 
+		// Everything below is fixed for this result; only the spinner frame and
+		// the live subagent description set vary per frame, so derive labels,
+		// touched phases and normalized match state once and reuse them.
+		const labels = new Map<TodoItem, TodoLabel>();
+		const labelFor = (task: TodoItem): TodoLabel => {
+			let label = labels.get(task);
+			if (!label) {
+				// Sanitize only for display: a mirrored Cursor snapshot carries
+				// provider text verbatim (ANSI/C0 would rewrite the terminal).
+				label = { text: forDisplay(task.content) };
+				labels.set(task, label);
+			}
+			return label;
+		};
+		let touchedComputed = false;
+		let touchedPhases: Set<string> | null = null;
+		let lastDescs: readonly string[] | undefined;
+		let candidates: string[] = [];
+		const matchByContent = new Map<string, boolean>();
+		const syncActiveDescs = (descs: readonly string[]): void => {
+			if (lastDescs === descs) return;
+			if (lastDescs && lastDescs.length === descs.length && lastDescs.every((d, i) => d === descs[i])) {
+				lastDescs = descs;
+				return;
+			}
+			lastDescs = descs;
+			candidates = [];
+			for (const desc of descs) {
+				const candidate = normalizeForTodoMatch(desc);
+				if (candidate) candidates.push(candidate);
+			}
+			matchByContent.clear();
+		};
+
 		return framedToolCard(uiTheme, () => {
 			const { expanded, spinnerFrame } = options;
 			const multiPhase = phases.length > 1;
@@ -513,13 +648,28 @@ export const todoToolRenderer = {
 			// Collapse phases this update didn't touch down to a one-line summary so
 			// a single task flip doesn't redraw every phase's full task list. The
 			// manual expand toggle (and the no-signal fallback) still shows all.
-			const touched = expanded || !multiPhase ? null : computeTouchedPhases(args, phases, completedTasks);
+			let touched: Set<string> | null = null;
+			if (!expanded && multiPhase) {
+				if (!touchedComputed) {
+					touchedPhases = computeTouchedPhases(args, phases, completedTasks);
+					touchedComputed = true;
+				}
+				touched = touchedPhases;
+			}
 			// A pending todo counts as active work when an in-flight subagent is
 			// executing it — the transient result surfaces the same active set the
 			// sticky HUD does (#5873). Empty outside an interactive session.
 			const activeDescs = expanded ? [] : activeTodoDescriptionsProvider();
-			const isMatched = (task: TodoItem): boolean =>
-				activeDescs.length > 0 && todoMatchesAnyDescription(task.content, activeDescs);
+			if (activeDescs.length > 0) syncActiveDescs(activeDescs);
+			const isMatched = (task: TodoItem): boolean => {
+				if (activeDescs.length === 0) return false;
+				let matched = matchByContent.get(task.content);
+				if (matched === undefined) {
+					matched = matchesNormalizedCandidates(normalizeForTodoMatch(task.content), candidates);
+					matchByContent.set(task.content, matched);
+				}
+				return matched;
+			};
 			const bodyLines: string[] = [];
 			for (let p = 0; p < phases.length; p++) {
 				const phase = phases[p];
@@ -545,7 +695,8 @@ export const todoToolRenderer = {
 								items: phase.tasks,
 								expanded,
 								itemType: "todo",
-								renderItem: todo => formatTodoLine(todo, uiTheme, "", completionKeys, spinnerFrame),
+								renderItem: todo =>
+									formatTodoLine(todo, labelFor(todo), uiTheme, "", completionKeys, spinnerFrame),
 							},
 							uiTheme,
 						)
@@ -557,7 +708,15 @@ export const todoToolRenderer = {
 									itemType: "todo",
 									trailingSummary: selection.summary,
 									renderItem: todo =>
-										formatTodoLine(todo, uiTheme, "", completionKeys, spinnerFrame, isMatched(todo)),
+										formatTodoLine(
+											todo,
+											labelFor(todo),
+											uiTheme,
+											"",
+											completionKeys,
+											spinnerFrame,
+											isMatched(todo),
+										),
 								},
 								uiTheme,
 							);
@@ -576,5 +735,21 @@ export const todoToolRenderer = {
 			};
 		});
 	},
+	describeCall(args: TodoRenderArgs): NativeToolView {
+		const ops = normalizeTodoArg(args).map(e => {
+			const parts = [forDisplay(e.op ?? "update")];
+			if (e.task) parts.push(forDisplay(e.task));
+			if (e.phase) parts.push(forDisplay(e.phase));
+			if (Array.isArray(e.items) && e.items.length)
+				parts.push(`${e.items.length} ${pluralize("item", e.items.length)}`);
+			return parts.join(" ");
+		});
+		return { tool: { title: "Todo", target: ops.length === 0 ? "update" : ops.join(", "), targetKind: "text" } };
+	},
+
+	describeResult(result: ToolRenderResult<TodoToolDetails>, options: RenderResultOptions): NativeToolView | undefined {
+		return todoResultMemo.get(result, [options.expanded], () => describeTodoResult(result, options));
+	},
+
 	mergeCallAndResult: true,
 } satisfies ToolRenderer<TodoRenderArgs, TodoToolDetails>;

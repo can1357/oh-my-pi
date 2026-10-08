@@ -10,6 +10,12 @@ describe("theme color mode", () => {
 		expect(colorToAnsi("#f5e0ac", mode)).toBe("\x1b[38;5;223m");
 	});
 
+	it("keeps repeated foreground conversions separate across color depths", () => {
+		expect(colorToAnsi("#f5e0ac", "truecolor")).toBe("\x1b[38;2;245;224;172m");
+		expect(colorToAnsi("#f5e0ac", "256color")).toBe("\x1b[38;5;223m");
+		expect(colorToAnsi("#f5e0ac", "truecolor")).toBe("\x1b[38;2;245;224;172m");
+	});
+
 	it("emits 256-color session accents for macOS Terminal.app", async () => {
 		const proc = Bun.spawn(
 			[

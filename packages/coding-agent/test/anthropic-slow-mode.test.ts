@@ -1,7 +1,11 @@
 import { beforeEach, describe, expect, it } from "bun:test";
 import type { AnthropicSlowModeFailure, AnthropicSlowModeHooks, AnthropicSlowModeSignal, Model } from "@oh-my-pi/pi-ai";
 import { Settings } from "../src/config/settings";
-import { type AnthropicSlowModeController, AnthropicSlowModeLanes } from "../src/session/anthropic-slow-mode";
+import {
+	type AnthropicSlowModeController,
+	AnthropicSlowModeLanes,
+	formatUsageLimitLabel,
+} from "../src/session/anthropic-slow-mode";
 import { createSettingsAwareStreamFn } from "../src/session/settings-stream-fn";
 
 const LANE = "cred:1";
@@ -47,7 +51,7 @@ describe("AnthropicSlowModeController", () => {
 		expect(retry).toEqual({ delayMs: 0, capacityWait: false });
 		expect(controller.isActive()).toBe(true);
 		expect(controller.activeResetsAtSec()).toBe(resetsAt);
-		expect(notices[0]).toContain("continuing at lower priority");
+		expect(notices[0]).toContain("Claude session limit reached — continuing at low priority");
 	});
 
 	it("keeps each Claude account's lane separate", async () => {
@@ -164,10 +168,79 @@ describe("AnthropicSlowModeController", () => {
 		expect(controller.isActive(Date.now() + 7_300_000)).toBe(false);
 	});
 
-	it("reports the remaining allowance in the status label", async () => {
+	it("reports structured low-priority state without host-formatted time", async () => {
 		await hooks().onFailure(wall(nowSec() + 3_600));
 		hooks().observe(signal({ status: "active", budgetUtilization: 0.38 }), LANE);
-		expect(controller.statusLabel()).toContain("62% left");
+		expect(controller.status()).toEqual({
+			stage: "low_priority",
+			resetsAtSec: expect.any(Number),
+			allowanceLeftPercent: 62,
+		});
+	});
+
+	describe("wrap-up allowance", () => {
+		const graceSignal = (overrides: Partial<AnthropicSlowModeSignal> = {}) =>
+			signal({
+				graceUtilization: { fiveHour: 0.2, sevenDay: 0 },
+				fiveHourResetAtSec: nowSec() + 3_600,
+				weeklyResetAtSec: nowSec() + 400_000,
+				...overrides,
+			});
+
+		it("reports structured wrap-up state and hints only when low priority cannot pick the work up", () => {
+			hooks().observe(graceSignal(), LANE);
+			expect(controller.status()).toEqual({
+				stage: "wrap_up",
+				resetsAtSec: expect.any(Number),
+				extraUsage: false,
+			});
+			expect(notices).toHaveLength(1);
+			// `/slow on` and the lane is still offerable: low priority carries on, no hint.
+			expect(controller.wrapUpHintKey(true)).toBeUndefined();
+			// `/slow off`: nothing continues past the allowance.
+			const key = controller.wrapUpHintKey(false);
+			expect(key).toBeDefined();
+			// Later responses in the same window keep its key and stay quiet.
+			hooks().observe(graceSignal({ graceUtilization: { fiveHour: 0.6, sevenDay: 0 } }), LANE);
+			expect(controller.wrapUpHintKey(false)).toBe(key);
+			expect(notices).toHaveLength(1);
+		});
+
+		it("hints even with /slow on past the weekly limit, and never when extra usage follows", () => {
+			hooks().observe(graceSignal({ graceUtilization: { fiveHour: 0, sevenDay: 0.1 } }), LANE);
+			expect(controller.wrapUpHintKey(true)).toBeDefined();
+			expect(formatUsageLimitLabel(controller.status())).toContain("wrapping up");
+
+			const extra = new AnthropicSlowModeLanes();
+			extra.hooks({}).observe(graceSignal({ overageAllowed: true }), LANE);
+			expect(extra.lane(LANE).wrapUpHintKey(false)).toBeUndefined();
+			expect(formatUsageLimitLabel(extra.lane(LANE).status())).toBe("limit reached · wrap-up, then extra usage");
+		});
+
+		it("closes on a zero reading, and at the wall hands over to low priority", async () => {
+			hooks().observe(graceSignal(), LANE);
+			hooks().observe(graceSignal({ graceUtilization: { fiveHour: 0, sevenDay: 0 } }), LANE);
+			expect(formatUsageLimitLabel(controller.status())).toBeUndefined();
+
+			hooks().observe(graceSignal(), LANE);
+			await hooks().onFailure(wall(nowSec() + 3_600));
+			expect(controller.isActive()).toBe(true);
+			expect(controller.wrapUpHintKey(false)).toBeUndefined();
+			expect(notices.at(-1)).toContain("Wrap-up allowance used — continuing at low priority");
+			expect(formatUsageLimitLabel(controller.status())).toStartWith("low priority until ");
+		});
+
+		it("with /slow off records the offer without taking the lane or sending the slow header", async () => {
+			const off = lanes.hooks({ lowPriority: () => false });
+			hooks().observe(graceSignal(), LANE);
+			expect(await off.onFailure(wall(nowSec() + 3_600))).toBeUndefined();
+			expect(controller.isActive()).toBe(false);
+			expect(formatUsageLimitLabel(controller.status())).toBeUndefined();
+			// A later `/slow on` enters the recorded offer right away.
+			expect(controller.accept().kind).toBe("available");
+			expect(off.isActive(LANE)).toBe(false);
+			expect(hooks().isActive(LANE)).toBe(true);
+		});
 	});
 });
 
@@ -192,13 +265,18 @@ describe("createSettingsAwareStreamFn slow-mode wiring", () => {
 		return { calls, lanes, seenLanes };
 	}
 
-	it("attaches hooks only to anthropic requests, and only when the mode is not off", () => {
+	it("attaches hooks to every anthropic request; the mode gates only the low-priority lane", async () => {
 		const auto = capture("auto").calls;
 		expect(auto[0]?.hooks).toBeDefined();
 		expect(auto[1]?.hooks).toBeUndefined();
 
-		expect(capture(undefined).calls[0]?.hooks).toBeUndefined();
-		expect(capture("off").calls[0]?.hooks).toBeUndefined();
+		for (const mode of [undefined, "off"] as const) {
+			const off = capture(mode);
+			const hooks = off.calls[0]?.hooks;
+			expect(hooks).toBeDefined();
+			expect(await hooks?.onFailure(wall(nowSec() + 3_600))).toBeUndefined();
+			expect(off.lanes.lane(LANE).isActive()).toBe(false);
+		}
 	});
 
 	it("auto switches to the slow lane at the limit and reports the lane", async () => {

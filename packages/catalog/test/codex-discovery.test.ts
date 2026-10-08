@@ -3,6 +3,7 @@ import { describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { shouldSendServiceTier } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { fetchCodexModels } from "@oh-my-pi/pi-catalog/discovery/codex";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
@@ -120,6 +121,31 @@ describe("Codex model discovery", () => {
 		expect(terra).toMatchObject({ preferWebsockets: true, useResponsesLite: true });
 		const legacy = result?.models.find(model => model.id === "gpt-5.5");
 		expect(legacy?.useResponsesLite).toBeUndefined();
+	});
+
+	it("gates Ultrafast on the discovered service_tiers list", async () => {
+		const fetchFn: typeof fetch = Object.assign(
+			async () =>
+				Response.json({
+					models: [
+						{
+							slug: "gpt-6.1-sol",
+							service_tiers: [
+								{ id: "priority", name: "Fast", description: "1.5x speed, increased usage" },
+								{ id: "ultrafast", name: "Ultrafast", description: "The fastest available responses." },
+							],
+						},
+						{ slug: "gpt-6-sol", service_tiers: [{ id: "priority", name: "Fast", description: "" }] },
+						{ slug: "gpt-5.5" },
+					],
+				}),
+			{ preconnect() {} },
+		);
+		const result = await fetchCodexModels({ accessToken: "test-token", fetchFn });
+		const ultrafastBySlug = Object.fromEntries(
+			result!.models.map(spec => [spec.id, shouldSendServiceTier("ultrafast", buildModel(spec))]),
+		);
+		expect(ultrafastBySlug).toEqual({ "gpt-6.1-sol": true, "gpt-6-sol": false, "gpt-5.5": false });
 	});
 
 	it("floors GPT-5.6 luna/sol/terra at the 1M window when upstream omits context_window (#5705)", async () => {
@@ -254,7 +280,7 @@ describe("Codex model discovery", () => {
 			// retains the standard window; the registry expands it only when
 			// extended context is enabled.
 			expect(builtModel.cost).toEqual({ input: 10, output: 50, cacheRead: 1, cacheWrite: 0 });
-			expect(builtModel.serviceTierCost).toEqual({ flex: 0.5, priority: 2.5 });
+			expect(builtModel.serviceTierCost).toEqual({ flex: 0.5, priority: 2.5, ultrafast: 8 });
 			expect(builtModel).toMatchObject({
 				contextWindow: 272_000,
 				maxTokens: 128_000,
@@ -262,13 +288,15 @@ describe("Codex model discovery", () => {
 		}
 	});
 
-	it("applies GPT-6 Sol and Luna pricing to discovered plain and worker routes", async () => {
+	it("applies GPT-6 / GPT-6.1 Sol and Luna pricing to discovered plain and worker routes", async () => {
 		const fetchFn: typeof fetch = Object.assign(
 			async () =>
 				Response.json({
-					models: ["sol", "luna"].map(name => ({
-						slug: `gpt-6-${name}-wm`,
-						display_name: `GPT-6 ${name}`,
+					// GPT-6 plain rows are bundled, so their `-wm` listing also yields
+					// the plain route; GPT-6.1 Sol is not yet bundled and ships both.
+					models: ["gpt-6-sol-wm", "gpt-6-luna-wm", "gpt-6.1-sol", "gpt-6.1-sol-wm"].map(slug => ({
+						slug,
+						display_name: slug,
 						default_reasoning_level: "medium",
 						supported_reasoning_levels: ["low", "medium", "high"],
 						input_modalities: ["text", "image"],
@@ -288,15 +316,19 @@ describe("Codex model discovery", () => {
 			"gpt-6-luna-wm",
 			"gpt-6-sol",
 			"gpt-6-sol-wm",
+			"gpt-6.1-sol",
+			"gpt-6.1-sol-wm",
 		]);
 		for (const model of result!.models) {
 			// Discovery has no rates; the generated KDL policy supplies them
 			// when the discovered spec becomes a usable model.
 			expect(model.cost).toEqual({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
 			expect(buildModel(model).cost).toEqual(
-				model.id.startsWith("gpt-6-sol")
-					? { input: 2, output: 10, cacheRead: 0.2, cacheWrite: 0 }
-					: { input: 0.1, output: 0.5, cacheRead: 0.01, cacheWrite: 0 },
+				model.id.startsWith("gpt-6.1-sol")
+					? { input: 2, output: 10, cacheRead: 0.1, cacheWrite: 0 }
+					: model.id.startsWith("gpt-6-sol")
+						? { input: 2, output: 10, cacheRead: 0.2, cacheWrite: 0 }
+						: { input: 0.1, output: 0.5, cacheRead: 0.01, cacheWrite: 0 },
 			);
 		}
 	});

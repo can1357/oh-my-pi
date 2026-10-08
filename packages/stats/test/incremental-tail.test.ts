@@ -4,7 +4,8 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { syncAllSessions } from "@oh-my-pi/omp-stats/aggregator";
-import { closeDb, getFileOffset, getOverallStats, getRecentRequests, initDb } from "@oh-my-pi/omp-stats/db";
+import { closeDb, getFileOffset, getRecentRequests, initDb } from "@oh-my-pi/omp-stats/db";
+import { getOverallStats } from "@oh-my-pi/omp-stats/rollup";
 import { getSessionsDir, getStatsDbPath } from "@oh-my-pi/pi-utils";
 import { installStatsTestIsolation } from "./helpers/temp-agent";
 
@@ -169,18 +170,22 @@ describe("incremental stats ingestion", () => {
 		});
 	}
 
-	it("reads only appended bytes after reopening the database and retains priority accounting", async () => {
-		const file = await session(
+	it("limits reads to appended or replaced transcripts across restarts and retains priority accounting", async () => {
+		const content =
 			tier("priority") +
-				JSON.stringify({ type: "custom", padding: "x".repeat(2_000_000) }) +
-				"\n" +
-				assistant("first"),
+			JSON.stringify({ type: "custom", padding: "x".repeat(2_000_000) }) +
+			"\n" +
+			assistant("first");
+		const file = await session(content);
+		await Bun.write(
+			path.join(path.dirname(file), "unrelated.jsonl"),
+			`${JSON.stringify({ type: "custom", padding: "y".repeat(2_000_000) })}\n`,
 		);
 		await syncAllSessions({ workers: 1 });
 		closeDb();
 		const tail = assistant("second");
 		await fs.appendFile(file, tail);
-		const prototype = Object.getPrototypeOf(Bun.file(file)) as Bun.BunFile;
+		const prototype: Bun.BunFile = Object.getPrototypeOf(Bun.file(file));
 		const original = prototype.bytes;
 		let readBytes = 0;
 		const observer = spyOn(prototype, "bytes").mockImplementation(async function (this: Bun.BunFile) {
@@ -190,12 +195,18 @@ describe("incremental stats ingestion", () => {
 		});
 		try {
 			await syncAllSessions({ workers: 1 });
+			expect(readBytes).toBeLessThan(Buffer.byteLength(tail) + 4096);
+
+			await fs.copyFile(file, `${file}.replacement`);
+			await fs.rename(`${file}.replacement`, file);
+			readBytes = 0;
+			await syncAllSessions({ workers: 1 });
+			expect(readBytes).toBeLessThan(Buffer.byteLength(content + tail) + 4096);
 		} finally {
 			observer.mockRestore();
 		}
 		expect(getOverallStats().totalRequests).toBe(2);
 		expect(getOverallStats().totalPremiumRequests).toBe(2);
-		expect(readBytes).toBeLessThan(Buffer.byteLength(tail) + 4096);
 	});
 
 	for (const operation of ["replace", "truncate"] as const) {
@@ -283,6 +294,92 @@ describe("incremental stats ingestion", () => {
 		await syncAllSessions({ workers: 1 });
 		expect(getRecentRequests().map(row => row.entryId)).toEqual(["new"]);
 	});
+
+	for (const workers of [1, 2]) {
+		it(`rolls back every replacement and cursor in a failed batch with ${workers} parsing workers`, async () => {
+			const first = await session(assistant("oldA"));
+			const second = path.join(path.dirname(first), "second.jsonl");
+			await Bun.write(second, assistant("oldB"));
+			await syncAllSessions({ workers });
+			const offsets = [getFileOffset(first), getFileOffset(second)];
+			const db = await initDb();
+			db.exec(`
+				CREATE TRIGGER reject_second_replacement BEFORE INSERT ON messages
+				WHEN NEW.entry_id IN ('replacementA', 'replacementB')
+					AND EXISTS (SELECT 1 FROM messages WHERE entry_id IN ('replacementA', 'replacementB'))
+				BEGIN SELECT RAISE(ABORT, 'batch write failure'); END;
+			`);
+			await fs.writeFile(first, assistant("replacementA"));
+			await fs.writeFile(second, assistant("replacementB"));
+			const reported: string[] = [];
+			await expect(
+				syncAllSessions({
+					workers,
+					onProgress(progress) {
+						reported.push(progress.sessionFile);
+					},
+				}),
+			).rejects.toThrow("batch write failure");
+			expect(
+				getRecentRequests()
+					.map(row => row.entryId)
+					.sort(),
+			).toEqual(["oldA", "oldB"]);
+			expect([getFileOffset(first), getFileOffset(second)]).toEqual(offsets);
+			expect(reported).toEqual([]);
+
+			db.exec("DROP TRIGGER reject_second_replacement");
+			await syncAllSessions({
+				workers,
+				onProgress(progress) {
+					// A reported replacement must already be visible to database readers.
+					const id = progress.sessionFile === first ? "replacementA" : "replacementB";
+					expect(getFileOffset(progress.sessionFile)?.offset).toBe(Buffer.byteLength(assistant(id)));
+				},
+			});
+			expect(
+				getRecentRequests()
+					.map(row => row.entryId)
+					.sort(),
+			).toEqual(["replacementA", "replacementB"]);
+		}, 15_000);
+	}
+
+	it("stops pooled ingestion after a committed-batch callback interrupts sync, then resumes without duplicates", async () => {
+		const folder = path.join(getSessionsDir(), "--tmp--tail");
+		const count = 1025;
+		for (let index = 0; index < count; index++) {
+			await Bun.write(path.join(folder, `${index}.jsonl`), assistant(`entry-${index}`));
+		}
+		let reports = 0;
+		let committed: string[] = [];
+		await expect(
+			syncAllSessions({
+				workers: 2,
+				onProgress() {
+					reports++;
+					if (reports === 1) {
+						committed = getRecentRequests(count)
+							.map(row => row.entryId)
+							.sort();
+						throw new Error("interrupted batch progress");
+					}
+				},
+			}),
+		).rejects.toThrow("interrupted batch progress");
+		closeDb();
+		await initDb();
+		expect(reports).toBe(1);
+		expect(committed.length).toBeLessThan(count);
+		expect(
+			getRecentRequests(count)
+				.map(row => row.entryId)
+				.sort(),
+		).toEqual(committed);
+		await syncAllSessions({ workers: 2 });
+		expect(getOverallStats().totalRequests).toBe(count);
+		expect(getOverallStats().totalInputTokens).toBe(count * 10);
+	}, 15_000);
 
 	it("keeps a request still present in a fork when its original transcript is replaced", async () => {
 		const file = await session(assistant("shared"));

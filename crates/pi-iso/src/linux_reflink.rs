@@ -2,7 +2,8 @@
 //!
 //! This backend recursively builds a writable directory tree at `merged` from
 //! `lower`. Directories and symlinks are recreated, while regular files are
-//! cloned with the Linux `FICLONE` ioctl so filesystems such as btrfs, XFS,
+//! cloned with [`cow`](crate::cow) (the Linux
+//! `FICLONE` ioctl) so filesystems such as btrfs, XFS,
 //! OCFS2, and bcachefs can share extents until either side is modified. There
 //! is no mount or kernel state to undo, so [`stop`](IsolationBackend::stop) is
 //! a recursive remove.
@@ -79,38 +80,32 @@ impl IsolationBackend for LinuxReflinkBackend {
 mod imp {
 	use std::{
 		ffi::CString,
-		fs::{self, File, OpenOptions},
-		os::{
-			fd::AsRawFd,
-			unix::{
-				ffi::OsStrExt,
-				fs::{MetadataExt, PermissionsExt},
-			},
+		fs::{self, FileTimes, FileType},
+		os::unix::{
+			ffi::OsStrExt,
+			fs::{MetadataExt, PermissionsExt},
 		},
-		path::{Path, PathBuf},
+		path::Path,
 	};
 
-	use crate::{IsoError, IsoResult};
-
-	// `libc::Ioctl` is `c_int` on musl and `c_ulong` on glibc; the constant fits
-	// both.
-	const FICLONE: libc::Ioctl = 0x4004_9409;
+	use crate::{
+		IsoError, IsoResult, cow,
+		tree::{self, TreeCopy},
+	};
 
 	pub fn start(lower: &Path, merged: &Path) -> IsoResult<()> {
-		let lower = canonical_existing_dir(lower)?;
-		prepare_destination(merged)?;
-
-		let result = recursive_reflink(&lower, merged, None);
-		if result.is_err() {
-			let _ = fs::remove_dir_all(merged);
-		}
-		result
+		clone_tree(lower, merged, &[])
 	}
 
 	pub fn clone_tree(lower: &Path, merged: &Path, skip: &[&std::ffi::OsStr]) -> IsoResult<()> {
-		let lower = canonical_existing_dir(lower)?;
-		prepare_destination(merged)?;
-		let result = recursive_reflink(&lower, merged, Some(skip));
+		let lower = tree::canonical_existing_dir(lower, "reflink source", IsoError::other)?;
+		tree::prepare_destination(merged, "reflink clone", tree::remove_existing)?;
+		let result = (|| {
+			fs::create_dir(merged)
+				.map_err(|err| IsoError::other(format!("create {}: {err}", merged.display())))?;
+			tree::copy_dir_contents(&lower, merged, skip, &Reflink)?;
+			Reflink.finish_dir(&lower, merged)
+		})();
 		if result.is_err() {
 			let _ = fs::remove_dir_all(merged);
 		}
@@ -128,138 +123,60 @@ mod imp {
 		}
 	}
 
-	fn canonical_existing_dir(path: &Path) -> IsoResult<PathBuf> {
-		let resolved = if path.is_absolute() {
-			path.to_path_buf()
-		} else {
-			std::env::current_dir().map_or_else(|_| path.to_path_buf(), |cwd| cwd.join(path))
-		};
-		let meta = fs::metadata(&resolved).map_err(|err| {
-			IsoError::other(format!("invalid reflink source {}: {err}", resolved.display()))
-		})?;
-		if !meta.is_dir() {
-			return Err(IsoError::other(format!(
-				"reflink source {} is not a directory",
-				resolved.display()
-			)));
-		}
-		Ok(fs::canonicalize(&resolved).unwrap_or(resolved))
-	}
+	struct Reflink;
 
-	fn prepare_destination(merged: &Path) -> IsoResult<()> {
-		if let Some(parent) = merged.parent() {
-			fs::create_dir_all(parent).map_err(|err| {
-				IsoError::other(format!("create parent of {}: {err}", merged.display()))
-			})?;
-		}
-		match fs::symlink_metadata(merged) {
-			Ok(meta) if meta.is_dir() => fs::remove_dir_all(merged).map_err(|err| {
-				IsoError::other(format!(
-					"unable to clear {} before reflink clone: {err}",
-					merged.display()
-				))
-			})?,
-			Ok(_) => fs::remove_file(merged).map_err(|err| {
-				IsoError::other(format!(
-					"unable to clear {} before reflink clone: {err}",
-					merged.display()
-				))
-			})?,
-			Err(err) if err.kind() == std::io::ErrorKind::NotFound => {},
-			Err(err) => {
-				return Err(IsoError::other(format!(
-					"unable to inspect {} before reflink clone: {err}",
-					merged.display()
-				)));
-			},
-		}
-		Ok(())
-	}
-
-	fn recursive_reflink(
-		src: &Path,
-		dst: &Path,
-		skip: Option<&[&std::ffi::OsStr]>,
-	) -> IsoResult<()> {
-		let meta = fs::symlink_metadata(src)
-			.map_err(|err| IsoError::other(format!("symlink_metadata {}: {err}", src.display())))?;
-		fs::create_dir(dst)
-			.map_err(|err| IsoError::other(format!("create {}: {err}", dst.display())))?;
-
-		let entries = fs::read_dir(src)
-			.map_err(|err| IsoError::other(format!("read_dir {}: {err}", src.display())))?;
-		for entry in entries {
-			let entry = entry
-				.map_err(|err| IsoError::other(format!("dir entry in {}: {err}", src.display())))?;
-			if skip.is_some_and(|names| names.contains(&entry.file_name().as_os_str())) {
-				continue;
+	impl TreeCopy for Reflink {
+		fn symlink(&self, src: &Path, dst: &Path, file_type: FileType) -> IsoResult<()> {
+			tree::copy_symlink(src, dst, file_type)?;
+			if let Ok(meta) = fs::symlink_metadata(src) {
+				let _ = set_times_nofollow(dst, &meta);
 			}
-			let file_type = entry.file_type().map_err(|err| {
-				IsoError::other(format!("file_type {}: {err}", entry.path().display()))
-			})?;
-			let src_path = entry.path();
-			let dst_path = dst.join(entry.file_name());
-			if file_type.is_symlink() {
-				clone_symlink(&src_path, &dst_path)?;
-			} else if file_type.is_dir() {
-				recursive_reflink(&src_path, &dst_path, None)?;
-			} else if file_type.is_file() {
-				clone_file(&src_path, &dst_path)?;
-			} else {
+			Ok(())
+		}
+
+		fn file(&self, src: &Path, dst: &Path, file_type: FileType) -> IsoResult<()> {
+			if !file_type.is_file() {
 				return Err(IsoError::other(format!(
 					"unsupported file type in reflink source: {}",
-					src_path.display()
+					src.display()
 				)));
 			}
+			clone_file(src, dst)
 		}
 
-		preserve_permissions(dst, &meta)?;
-		let _ = set_times_nofollow(dst, &meta);
-		Ok(())
-	}
-
-	fn clone_symlink(src: &Path, dst: &Path) -> IsoResult<()> {
-		let target = fs::read_link(src)
-			.map_err(|err| IsoError::other(format!("read_link {}: {err}", src.display())))?;
-		std::os::unix::fs::symlink(target, dst)
-			.map_err(|err| IsoError::other(format!("symlink {}: {err}", dst.display())))?;
-		if let Ok(meta) = fs::symlink_metadata(src) {
+		fn finish_dir(&self, src: &Path, dst: &Path) -> IsoResult<()> {
+			let meta = fs::symlink_metadata(src)
+				.map_err(|err| IsoError::other(format!("symlink_metadata {}: {err}", src.display())))?;
+			preserve_permissions(dst, &meta)?;
 			let _ = set_times_nofollow(dst, &meta);
+			Ok(())
 		}
-		Ok(())
 	}
 
+	/// Clones the regular file `src` into the fresh tree, then gives the clone
+	/// `src`'s mode and timestamps through the descriptors the clone used.
 	fn clone_file(src: &Path, dst: &Path) -> IsoResult<()> {
-		let meta = fs::symlink_metadata(src)
-			.map_err(|err| IsoError::other(format!("symlink_metadata {}: {err}", src.display())))?;
-		let src_file = File::open(src)
-			.map_err(|err| IsoError::other(format!("open {}: {err}", src.display())))?;
-		let dst_file = OpenOptions::new()
-			.write(true)
-			.create_new(true)
-			.open(dst)
-			.map_err(|err| IsoError::other(format!("create {}: {err}", dst.display())))?;
-
-		// SAFETY: both file descriptors are valid for the duration of the call.
-		// FICLONE copies metadata into `dst_file` and does not retain either fd.
-		let rc = unsafe { libc::ioctl(dst_file.as_raw_fd(), FICLONE, src_file.as_raw_fd()) };
-		if rc != 0 {
-			let err = std::io::Error::last_os_error();
-			let _ = fs::remove_file(dst);
-			return Err(map_clone_error(src, dst, err));
+		let (src_file, dst_file) =
+			cow::clone_new(src, dst).map_err(|err| map_clone_error(src, dst, &err))?;
+		let meta = src_file
+			.metadata()
+			.map_err(|err| IsoError::other(format!("metadata {}: {err}", src.display())))?;
+		dst_file
+			.set_permissions(meta.permissions())
+			.map_err(|err| IsoError::other(format!("set permissions on {}: {err}", dst.display())))?;
+		let mut times = FileTimes::new();
+		if let Ok(accessed) = meta.accessed() {
+			times = times.set_accessed(accessed);
 		}
-
-		preserve_permissions(dst, &meta)?;
-		let _ = set_times_nofollow(dst, &meta);
+		if let Ok(modified) = meta.modified() {
+			times = times.set_modified(modified);
+		}
+		let _ = dst_file.set_times(times);
 		Ok(())
 	}
 
-	fn map_clone_error(src: &Path, dst: &Path, err: std::io::Error) -> IsoError {
-		if let Some(code) = err.raw_os_error()
-			&& matches!(
-				code,
-				libc::EXDEV | libc::EOPNOTSUPP | libc::ENOTTY | libc::EINVAL | libc::ENOSYS
-			) {
+	fn map_clone_error(src: &Path, dst: &Path, err: &std::io::Error) -> IsoError {
+		if cow::is_unsupported(err) {
 			return IsoError::unavailable(format!(
 				"FICLONE unsupported for {} -> {}: {err}",
 				src.display(),

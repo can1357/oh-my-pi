@@ -24,7 +24,7 @@ use uucore::{
 
 use crate::{
 	file_backup::{backup_display, backup_path},
-	host::{Host, Utility, format_usage, matches_parser, util},
+	host::{Host, Utility, format_usage, matches_parser, strip_errno, util},
 };
 
 struct Settings {
@@ -594,14 +594,6 @@ fn link(host: &mut Host, src: &Path, dst: &Path, settings: &Settings) -> LnResul
 		}
 	}
 	Ok(())
-}
-
-fn strip_errno(error: &std::io::Error) -> String {
-	let rendered = error.to_string();
-	rendered
-		.rsplit_once(" (os error ")
-		.map_or(rendered.as_str(), |(message, _)| message)
-		.to_string()
 }
 
 /// Creates the symbolic link `link` holding the literal text `target`.

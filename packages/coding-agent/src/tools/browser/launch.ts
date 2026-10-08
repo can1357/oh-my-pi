@@ -1,11 +1,20 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { $which, getPuppeteerDir, logger, removeWithRetries } from "@oh-my-pi/pi-utils";
+import {
+	$which,
+	getPuppeteerDir,
+	isRecord,
+	logger,
+	removeWithRetries,
+	toError,
+	untilAborted,
+} from "@oh-my-pi/pi-utils";
 import type * as BrowsersNs from "@oh-my-pi/pi-utils/browsers";
 import type {
 	Browser,
 	CDPSession,
+	ConnectOptions,
 	Device,
 	JSHandle,
 	NetworkConditions,
@@ -28,6 +37,7 @@ import stealthHardwareScript from "../puppeteer/11_stealth_hardware.txt" with { 
 import stealthCodecsScript from "../puppeteer/12_stealth_codecs.txt" with { type: "text" };
 import stealthWorkerScript from "../puppeteer/13_stealth_worker.txt" with { type: "text" };
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import { withDownload } from "../../downloads/activity";
 
 export const DEFAULT_VIEWPORT = { width: 1365, height: 768, deviceScaleFactor: 1.25 };
 
@@ -182,6 +192,20 @@ export async function loadPuppeteerInWorker(safeDir: string): Promise<typeof Pup
 	return loaded;
 }
 
+/** Normalize transport event rejections before they cross browser or worker boundaries. */
+export async function connectPuppeteer(puppeteer: typeof Puppeteer, options: ConnectOptions): Promise<Browser> {
+	try {
+		return await puppeteer.connect(options);
+	} catch (error) {
+		// The WebSocket transports can reject with ErrorEvent rather than Error.
+		// Its message includes the actual debugger endpoint and handshake failure.
+		if (!(error instanceof Error) && isRecord(error) && typeof error.message === "string") {
+			throw new Error(error.message, { cause: error });
+		}
+		throw toError(error);
+	}
+}
+
 /** Return device descriptors from the already-loaded Puppeteer module. */
 export function loadedKnownDevices(): Readonly<Record<string, Device>> {
 	if (!knownDevices) throw new ToolError("Puppeteer device descriptors are not loaded");
@@ -254,22 +278,25 @@ export async function ensureChromiumExecutable(): Promise<string | undefined> {
 			platform,
 			cacheDir,
 		});
-		let lastReportedPercent = -1;
-		await browsers.install({
-			buildId,
-			cacheDir,
-			platform,
-			downloadProgressCallback: ({ downloadedBytes, totalBytes }) => {
-				if (totalBytes <= 0) return;
-				const pct = Math.floor((downloadedBytes / totalBytes) * 100);
-				if (pct >= lastReportedPercent + 10 || downloadedBytes === totalBytes) {
-					lastReportedPercent = pct;
-					logger.debug(
-						`Chromium download: ${pct}% (${Math.round(downloadedBytes / 1_000_000)} / ${Math.round(totalBytes / 1_000_000)} MB)`,
+		await withDownload("Chromium", tracker =>
+			browsers.install({
+				buildId,
+				cacheDir,
+				platform,
+				downloadProgressCallback: ({ downloadedBytes, totalBytes }) => {
+					if (totalBytes <= 0) {
+						tracker.update({ loaded: downloadedBytes });
+						return;
+					}
+					// The archive is unpacked after the last byte arrives.
+					tracker.update(
+						downloadedBytes >= totalBytes
+							? { loaded: downloadedBytes, total: totalBytes, detail: "extracting" }
+							: { loaded: downloadedBytes, total: totalBytes },
 					);
-				}
-			},
-		});
+				},
+			}),
+		);
 		return executablePath;
 	})().catch(async err => {
 		// Cache a successful fallback too: the open preflight and the actual
@@ -617,6 +644,21 @@ export async function applyViewport(
 		height: viewport.height,
 		deviceScaleFactor: viewport.deviceScaleFactor ?? DEFAULT_VIEWPORT.deviceScaleFactor,
 	});
+}
+
+/** The emulated viewport, else the window's own: connected and visible browsers emulate none. */
+export async function readPageViewport(
+	page: Page,
+	signal?: AbortSignal,
+): Promise<{ width: number; height: number; deviceScaleFactor?: number }> {
+	const emulated = page.viewport();
+	if (emulated) return emulated;
+	return await untilAborted(signal, () =>
+		page.evaluate(() => {
+			const win = globalThis as unknown as { innerWidth: number; innerHeight: number; devicePixelRatio: number };
+			return { width: win.innerWidth, height: win.innerHeight, deviceScaleFactor: win.devicePixelRatio };
+		}),
+	);
 }
 
 // =====================================================================

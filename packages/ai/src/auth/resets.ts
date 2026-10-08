@@ -5,12 +5,15 @@ import { claudeResetClearedBlockScopes, consumeClaudeResetCredit, listClaudeRese
 import { consumeCodexResetCredit, listCodexResetCredits, pickSoonestExpiringCredit } from "../usage/openai-codex-reset";
 import type { CredentialBlocks } from "./blocks";
 import { providerTypeKey } from "./blocks";
+import { raceSignal } from "./abort";
+import { isUsageLimitReached } from "./usage-report";
 import type { OAuthAccounts } from "./oauth";
 import type { CredentialPool } from "./pool";
 import type { AuthCredentialStore } from "./store";
 import type {
 	ListResetCreditsOptions,
 	OAuthAccess,
+	OAuthAccountSummary,
 	RedeemResetCreditOptions,
 	ResetCreditAccountStatus,
 	ResetCreditRedeemOutcome,
@@ -34,10 +37,11 @@ export class ResetCredits implements ResetsApi {
 	#deps: ResetCreditsDeps;
 	/** Manual and automatic attempts on one stored account share a mutation. */
 	#resetInFlight = new Map<string, { creditId?: string; promise: Promise<ResetCreditRedeemOutcome> }>();
+	#listInFlight = new Map<string, Promise<ResetCreditAccountStatus[]>>();
 	/** Ambiguous Claude claims retain their idempotency key until reconciled. */
 	#pendingClaudeResets = new Map<
 		string,
-		{ creditId: string; requestId: string; program?: string; remainingCount?: number; startedAt: number }
+		{ creditId: string; requestId: string; program?: string; remainingCount?: number }
 	>();
 
 	constructor(deps: ResetCreditsDeps) {
@@ -48,34 +52,72 @@ export class ResetCredits implements ResetsApi {
 	async list(options?: ListResetCreditsOptions): Promise<ResetCreditAccountStatus[]> {
 		const provider = options?.provider ?? "openai-codex";
 		if (provider !== "openai-codex" && provider !== "anthropic") return [];
-		const accounts = this.#deps.oauth.accounts(provider, options?.sessionId);
 		const baseUrl = options?.baseUrlResolver?.(provider);
-		return Promise.all(
-			accounts.map(async (account): Promise<ResetCreditAccountStatus> => {
-				const base = { ...account, provider };
-				const access = await this.#deps.oauth.accessById(provider, account.credentialId, {
-					signal: options?.signal,
-				});
-				if (!access?.ok)
-					return {
-						...base,
-						availableCount: 0,
-						credits: [],
-						error: access?.error ?? "Account no longer available",
-					};
-				const auth = { ...access, baseUrl, fetch: this.#deps.usage.fetch, signal: options?.signal };
-				const list =
-					provider === "anthropic" ? await listClaudeResetCredits(auth) : await listCodexResetCredits(auth);
-				if (!list)
-					return {
-						...base,
-						availableCount: 0,
-						credits: [],
-						error: "Failed to load saved resets",
-					};
-				return { ...base, ...list };
-			}),
-		);
+		if (provider !== "anthropic") return this.#listAccounts(provider, baseUrl, options);
+		options?.signal?.throwIfAborted();
+		const activeId = this.#deps.oauth
+			.accounts(provider, options?.sessionId)
+			.find(account => account.active)?.credentialId;
+		// Discovery is sequential and probes the active account first, so only
+		// callers sharing that account can share one pass.
+		const key = JSON.stringify([provider, baseUrl, activeId]);
+		let pending = this.#listInFlight.get(key);
+		if (!pending) {
+			pending = this.#listAccounts(provider, baseUrl, { ...options, signal: undefined }).finally(() =>
+				this.#listInFlight.delete(key),
+			);
+			this.#listInFlight.set(key, pending);
+		}
+		return raceSignal(pending, options?.signal, "Reset discovery aborted");
+	}
+
+	async #listAccounts(
+		provider: string,
+		baseUrl: string | undefined,
+		options?: ListResetCreditsOptions,
+	): Promise<ResetCreditAccountStatus[]> {
+		const accounts = this.#deps.oauth.accounts(provider, options?.sessionId);
+		const loadAccount = async (account: OAuthAccountSummary): Promise<ResetCreditAccountStatus> => {
+			const base = { ...account, provider };
+			const access = await this.#deps.oauth.accessById(provider, account.credentialId, {
+				signal: options?.signal,
+			});
+			if (!access?.ok)
+				return {
+					...base,
+					availableCount: 0,
+					credits: [],
+					error: access?.error ?? "Account no longer available",
+				};
+			let retryAfterMs: number | undefined;
+			const auth = {
+				...access,
+				baseUrl,
+				fetch: this.#deps.usage.fetch,
+				signal: options?.signal,
+				onRateLimited: (delay: number | undefined) => {
+					retryAfterMs = delay ?? 0;
+				},
+			};
+			const list = provider === "anthropic" ? await listClaudeResetCredits(auth) : await listCodexResetCredits(auth);
+			if (!list)
+				return {
+					...base,
+					availableCount: 0,
+					credits: [],
+					error: "Failed to load saved resets",
+					...(retryAfterMs !== undefined ? { retryAfterMs } : {}),
+				};
+			return { ...base, ...list };
+		};
+		if (provider !== "anthropic") return Promise.all(accounts.map(loadAccount));
+		const results: ResetCreditAccountStatus[] = [];
+		accounts.sort((left, right) => Number(right.active) - Number(left.active));
+		for (const account of accounts) {
+			options?.signal?.throwIfAborted();
+			results.push(await loadAccount(account));
+		}
+		return results;
 	}
 
 	/**
@@ -142,7 +184,11 @@ export class ResetCredits implements ResetsApi {
 			}
 			creditId = selected.id;
 			let pending = this.#pendingClaudeResets.get(accountKey);
-			if (pending && Date.now() - pending.startedAt >= 10 * 60_000) {
+			const pendingCreditId = pending?.creditId;
+			// The ambiguous claim's credit left the live offer: it was consumed or
+			// expired. Either way its idempotency key can never settle, and the
+			// account is at a wall again now, so a new offer is a fresh claim.
+			if (pendingCreditId !== undefined && !list.credits.some(credit => credit.id === pendingCreditId)) {
 				this.#pendingClaudeResets.delete(accountKey);
 				pending = undefined;
 			}
@@ -154,20 +200,16 @@ export class ResetCredits implements ResetsApi {
 					selected.remainingCount < pending.remainingCount
 				) {
 					this.#pendingClaudeResets.delete(accountKey);
-					this.#deps.usageCache.invalidate(provider, options.baseUrl);
+					this.#deps.usageCache.invalidateAfterReset(provider, options.baseUrl, {
+						resetSpentCredentialId: access.credentialId,
+					});
 					return { ...identity, ok: false, code: "already_redeemed", creditId };
 				}
 				if (pending.program === "juniper_tide") {
 					return { ...identity, ok: false, code: "reset_unconfirmed", creditId };
 				}
 			}
-			const credential = this.#deps.pool.entries(provider).find(entry => entry.id === access.credentialId);
-			if (credential?.credential.type === "oauth") {
-				report = await this.#deps.usage.report(provider, credential.credential, {
-					baseUrl: options.baseUrl,
-					signal: options.signal,
-				});
-			}
+			report = list.report ?? null;
 			const requestId = pending?.requestId ?? crypto.randomUUID();
 			options.signal?.throwIfAborted();
 			this.#pendingClaudeResets.set(accountKey, {
@@ -175,7 +217,6 @@ export class ResetCredits implements ResetsApi {
 				requestId,
 				program: selected.program,
 				remainingCount: selected.remainingCount,
-				startedAt: pending?.startedAt ?? Date.now(),
 			});
 			const consumed = await consumeClaudeResetCredit({
 				...auth,
@@ -217,9 +258,11 @@ export class ResetCredits implements ResetsApi {
 			result = { ...identity, ok: consumed.ok, code: consumed.code, creditId };
 		}
 		if (result.ok) {
-			this.#deps.usageCache.invalidate(provider, options.baseUrl);
+			this.#deps.usageCache.invalidateAfterReset(provider, options.baseUrl, {
+				resetSpentCredentialId: access.credentialId,
+			});
 			if (this.#deps.store.invalidateUsageCache) {
-				await this.#deps.store.invalidateUsageCache(options.signal).catch(err => {
+				await this.#deps.store.invalidateUsageCache(provider, options.signal).catch(err => {
 					logger.debug("Failed to notify store of stale usage", { err });
 				});
 			}
@@ -229,11 +272,36 @@ export class ResetCredits implements ResetsApi {
 					const cleared = result.cleared ?? [];
 					if (
 						report &&
+						Number.isFinite(report.fetchedAt) &&
 						Date.now() - report.fetchedAt <= USAGE_REPORT_TTL_MS &&
 						cleared.length > 0 &&
 						this.#deps.pool.entries(provider).some(entry => entry.id === access.credentialId)
 					) {
-						for (const scope of claudeResetClearedBlockScopes(cleared, report)) {
+						const scopes = claudeResetClearedBlockScopes(cleared, report);
+						if (scopes.includes(undefined)) {
+							// A legacy global block may be the only stored evidence of a
+							// tier wall. Preserve that independent wall before lifting it.
+							for (const limit of report.limits) {
+								const tier = limit.scope.tier;
+								const reset = limit.window?.resetsAt;
+								if (
+									(tier !== "fable" && tier !== "mythos") ||
+									cleared.includes(limit.id) ||
+									!isUsageLimitReached([limit]) ||
+									typeof reset !== "number" ||
+									!Number.isFinite(reset) ||
+									reset <= Date.now()
+								)
+									continue;
+								this.#deps.blocks.upsert({
+									credentialId: access.credentialId,
+									providerKey: providerTypeKey(provider, "oauth"),
+									blockScope: `tier:${tier}`,
+									blockedUntilMs: reset,
+								});
+							}
+						}
+						for (const scope of scopes) {
 							this.#deps.blocks.clearScope(
 								provider,
 								access.credentialId,

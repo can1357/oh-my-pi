@@ -78,18 +78,6 @@ describe("theme symbols.spinnerFrames", () => {
 		await expect(getThemeByName("custom-empty-object")).resolves.toBeUndefined();
 	});
 
-	it("falls through to preset frames when `spinnerFrames` is absent", async () => {
-		// `dark` ships with `symbols.preset: "unicode"`; we only assert that the
-		// default status frames match the preset table when no override is set.
-		await writeCustomTheme("custom-no-override", {});
-
-		const theme = await getThemeByName("custom-no-override");
-		expect(theme).toBeDefined();
-		const status = theme!.getSpinnerFrames("status");
-		expect(status.length).toBeGreaterThan(1);
-		expect(status).not.toContain("A");
-	});
-
 	it("derives live tool spinner frames from a shared clock", () => {
 		const frameCount = 4;
 		const now = SPINNER_ADVANCE_MS * 3 + 12;

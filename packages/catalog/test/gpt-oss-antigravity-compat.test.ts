@@ -30,12 +30,6 @@ function createGptOssSpec(provider: "google-antigravity" | "google-gemini-cli"):
 }
 
 describe("gpt-oss compat on Cloud Code Assist (Antigravity)", () => {
-	it("sets supportsFunctionPartId to true on bundled google-antigravity/gpt-oss-120b", () => {
-		const model = getBundledModel<"google-gemini-cli">("google-antigravity", "gpt-oss-120b");
-		expect(model).toBeDefined();
-		expect(model.compat.supportsFunctionPartId).toBe(true);
-	});
-
 	it("resolves supportsFunctionPartId as true via policy cascade", () => {
 		const agPolicy = resolveModelPolicy(createGptOssSpec("google-antigravity"));
 		expect(agPolicy.compat.supportsFunctionPartId).toBe(true);

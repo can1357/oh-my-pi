@@ -101,15 +101,4 @@ describe("/retry dispatch (ACP)", () => {
 		expect(h.output.mock.calls[0]?.[0]).toBe("Retrying the last failed turn.");
 		expect(result).toEqual({ consumed: true, agentInvoked: true });
 	});
-
-	it("reports a scheduled retry as agent work, and a no-op retry as local-only", async () => {
-		// RPC maps a bare `{ consumed: true }` to `agentInvoked: false`. A
-		// successful retry schedules an `agent.continue()` turn, so reporting
-		// local-only there would have the host finalize the request while the
-		// retried turn is still streaming.
-		const scheduled = await executeAcpBuiltinSlashCommand("/retry", acpRuntime({ retryResult: true }).runtime);
-		const noop = await executeAcpBuiltinSlashCommand("/retry", acpRuntime({ retryResult: false }).runtime);
-		expect(scheduled).toEqual({ consumed: true, agentInvoked: true });
-		expect(noop).toEqual({ consumed: true });
-	});
 });

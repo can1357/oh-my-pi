@@ -1,6 +1,6 @@
 import { $env } from "@oh-my-pi/pi-utils";
 import type { ResponseInput, ResponseInputItem } from "./providers/openai-responses-wire";
-import { redactSensitiveCredentials } from "./providers/transform-messages";
+import { isMalformedToolCallName, redactSensitiveCredentials } from "./providers/transform-messages";
 import type { CacheRetention, OpenAIResponsesHistoryPayload, ProviderPayload } from "./types";
 
 type OpenAIResponsesReplayItem = ResponseInput[number];
@@ -119,10 +119,10 @@ export function stripOpenAIResponsesOutputOnlyStatusesForReplay<TItem extends { 
  * top-level items and `message.content[]`. Avoids a deep tree walk/clone of
  * every history node on providers that reject native-resolution images.
  */
-function clampReplayItemImageDetail(
-	item: Record<string, unknown>,
+function clampReplayItemImageDetail<TItem extends { type?: unknown; detail?: unknown; content?: unknown }>(
+	item: TItem,
 	supportsImageDetailOriginal: boolean,
-): Record<string, unknown> {
+): TItem {
 	if (supportsImageDetailOriginal) return item;
 
 	if (item.type === "input_image" && item.detail === "original") {
@@ -140,6 +140,21 @@ function clampReplayItemImageDetail(
 		return { ...record, detail: "auto" };
 	});
 	return changed ? { ...item, content } : item;
+}
+
+/** Clamp replayed images without changing item identities or other native replay fields. */
+export function clampOpenAIResponsesImageDetailForReplay<
+	TItem extends { type?: unknown; detail?: unknown; content?: unknown },
+>(items: TItem[], supportsImageDetailOriginal: boolean): TItem[] {
+	if (supportsImageDetailOriginal) return items;
+	let clamped: TItem[] | undefined;
+	for (let index = 0; index < items.length; index++) {
+		const item = items[index]!;
+		const clampedItem = clampReplayItemImageDetail(item, supportsImageDetailOriginal);
+		if (clampedItem !== item && !clamped) clamped = items.slice(0, index);
+		clamped?.push(clampedItem);
+	}
+	return clamped ?? items;
 }
 
 function isOpenAIResponsesClientInputBoundary(item: Record<string, unknown>): boolean {
@@ -219,12 +234,13 @@ export function sanitizeOpenAIResponsesHistoryItemsForReplay(
 	items: Array<Record<string, unknown>>,
 	options: OpenAIResponsesReplaySanitizeOptions = {},
 ): ResponseInput {
-	const supportsImageDetailOriginal = options.supportsImageDetailOriginal !== false;
+	const replayItems = dropMalformedOpenAIResponsesToolCalls(items);
+	const supportsImageDetailOriginal = options.supportsImageDetailOriginal === true;
 	const computerLinkedReasoningItems =
 		options.supportsComputerUse === false
 			? undefined
-			: collectOpenAIResponsesComputerLinkedReasoningItems(items, false);
-	const sanitized = items.flatMap(item => {
+			: collectOpenAIResponsesComputerLinkedReasoningItems(replayItems, false);
+	const sanitized = replayItems.flatMap(item => {
 		const preserveForComputer = computerLinkedReasoningItems?.has(item) === true;
 		const sanitizedItem = sanitizeOpenAIResponsesHistoryItemForReplay(
 			item,
@@ -441,18 +457,143 @@ export function sanitizeOpenAIResponsesAssistantFallbackItemsForReplay(items: Re
 	return sanitized;
 }
 
+/** Native tool call whose name {@link isMalformedToolCallName} rejects. */
+function isMalformedOpenAIResponsesToolCall(item: { type?: unknown; name?: unknown }): boolean {
+	return (item.type === "function_call" || item.type === "custom_tool_call") && isMalformedToolCallName(item.name);
+}
+
+type MalformedResponsesCallKind = "function" | "custom";
+
+function malformedResponsesCallKind(type: unknown): MalformedResponsesCallKind | undefined {
+	if (type === "function_call") return "function";
+	if (type === "custom_tool_call") return "custom";
+	return undefined;
+}
+
+function malformedResponsesOutputKind(type: unknown): MalformedResponsesCallKind | undefined {
+	if (type === "function_call_output") return "function";
+	if (type === "custom_tool_call_output") return "custom";
+	return undefined;
+}
+
+/** Tool results stay inside the pairing window; other client input starts a new one. */
+function isResponsesToolResultItem(type: unknown): boolean {
+	return (
+		type === "function_call_output" ||
+		type === "custom_tool_call_output" ||
+		type === "computer_call_output" ||
+		type === "local_shell_call_output" ||
+		type === "shell_call_output" ||
+		type === "apply_patch_call_output"
+	);
+}
+
+/**
+ * User/developer messages and other non-result client input end the current
+ * call/output window. A malformed call whose output never arrived must not
+ * consume a later valid call that reuses the same `call_id`.
+ */
+function breaksMalformedResponsesPairingWindow(item: { type?: unknown; role?: unknown; execution?: unknown }): boolean {
+	if (isResponsesToolResultItem(item.type)) return false;
+	return isOpenAIResponsesClientInputBoundary(item as unknown as Record<string, unknown>);
+}
+
+/**
+ * Drop each native tool call with a malformed name and only the matching
+ * `function_call_output` / `custom_tool_call_output` in the same window.
+ *
+ * `call_id` is not unique across a snapshot. Pair the same way
+ * `sanitizeMalformedToolCalls` does for transcript messages: a per-id FIFO of
+ * malformed-ness, keyed by function vs custom, cleared at user/developer and
+ * other non-result client boundaries so a missing result cannot eat the next
+ * window's output. Returns `items` itself when nothing is malformed.
+ */
+export function dropMalformedOpenAIResponsesToolCalls<
+	T extends { type?: unknown; call_id?: unknown; name?: unknown; role?: unknown },
+>(items: readonly T[]): T[] {
+	let hasMalformed = false;
+	for (const item of items) {
+		if (isMalformedOpenAIResponsesToolCall(item)) {
+			hasMalformed = true;
+			break;
+		}
+	}
+	if (!hasMalformed) return items as T[];
+
+	const dropQueues = new Map<string, boolean[]>();
+	const kept: T[] = [];
+	for (const item of items) {
+		const callKind = malformedResponsesCallKind(item.type);
+		if (callKind) {
+			const malformed = isMalformedOpenAIResponsesToolCall(item);
+			const callId = typeof item.call_id === "string" ? item.call_id : undefined;
+			if (callId !== undefined) {
+				const key = `${callKind}\0${callId}`;
+				const queue = dropQueues.get(key);
+				if (queue) queue.push(malformed);
+				else dropQueues.set(key, [malformed]);
+			}
+			if (malformed) continue;
+			kept.push(item);
+			continue;
+		}
+
+		const outputKind = malformedResponsesOutputKind(item.type);
+		if (outputKind) {
+			const callId = typeof item.call_id === "string" ? item.call_id : undefined;
+			if (callId !== undefined) {
+				const key = `${outputKind}\0${callId}`;
+				const queue = dropQueues.get(key);
+				if (queue && queue.length > 0) {
+					const drop = queue.shift() === true;
+					if (queue.length === 0) dropQueues.delete(key);
+					if (drop) continue;
+				}
+			}
+			kept.push(item);
+			continue;
+		}
+
+		if (breaksMalformedResponsesPairingWindow(item)) dropQueues.clear();
+		kept.push(item);
+	}
+	return kept;
+}
+
+/**
+ * Replay history is immutable and re-sanitized on every request, so remember
+ * which `arguments` string each item was already validated with instead of
+ * re-parsing every historical call (large write/edit payloads) per request.
+ */
+const validatedReplayArguments = new WeakMap<object, string>();
+
+function hasValidReplayArguments(item: Record<string, unknown>): boolean {
+	const args = item.arguments;
+	if (typeof args !== "string") return false;
+	if (validatedReplayArguments.get(item) === args) return true;
+	if (args.trim().length === 0) return false;
+	try {
+		JSON.parse(args);
+	} catch {
+		return false;
+	}
+	validatedReplayArguments.set(item, args);
+	return true;
+}
+
 function sanitizeOpenAIResponsesHistoryItemForReplay(
 	item: Record<string, unknown>,
 	supportsImageDetailOriginal: boolean,
 	preserveReasoningItemIds: boolean,
 ): OpenAIResponsesReplayItem | undefined {
+	// Pair filtering already removed malformed calls and the outputs that answer
+	// them. This remains so a malformed name cannot be replayed if it reaches
+	// per-item sanitization without that pass.
+	if (isMalformedOpenAIResponsesToolCall(item)) {
+		return undefined;
+	}
 	if (item.type === "function_call") {
-		if (typeof item.arguments !== "string" || item.arguments.trim().length === 0) return undefined;
-		try {
-			JSON.parse(item.arguments);
-		} catch {
-			return undefined;
-		}
+		if (!hasValidReplayArguments(item)) return undefined;
 	}
 	if (item.type === "item_reference") return undefined;
 	if (item.type === "image_generation_call") return sanitizeOpenAIResponsesImageGenerationCallForReplay(item);

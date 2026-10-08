@@ -11,7 +11,7 @@ import { type SttStreamHandle, sttClient } from "./asr-client";
 import { downloadSttModel, isSttModelCached } from "./downloader";
 import { resolveSttModelSpec, type SttModelKey } from "./models";
 import { evaluateSubmitTrigger } from "./submit-trigger";
-import { encodePcm16Wav } from "./wav";
+import { encodePcm16Wav, floatToPcm16 } from "./wav";
 
 import { cfgSttLanguage, cfgSttSubmitTrigger } from "./settings";
 
@@ -73,7 +73,8 @@ export class STTController {
 
 	// Buffered cloud capture.
 	#cloudModel: Model<Api> | null = null;
-	#cloudAudio: Float32Array[] = [];
+	/** Captured cloud-dictation audio, converted to 16-bit PCM on arrival (half the Float32 footprint). */
+	#cloudAudio: Int16Array[] = [];
 
 	/** Creates a controller; tests may replace the hardware capture boundary. */
 	constructor();
@@ -162,26 +163,18 @@ export class STTController {
 		// modelRoles.dictation mid-session re-runs preflight for the new model.
 		if (this.#resolvedModelKey === modelKey) return modelKey;
 		try {
-			// Only clear the status line when preflight emitted progress; the
-			// cached-model fast path emits nothing.
-			let wroteStatus = false;
-			const status = (msg: string): void => {
-				wroteStatus = true;
-				options.showStatus(msg);
-			};
 			// Loading the multi-hundred-MB speech model into the worker is what made
 			// the old "Checking STT dependencies…" step slow. Don't pay it before
 			// recording: when the weights are already cached, start now and warm the
 			// model in the background — the stream/transcribe paths load it on demand
 			// (memoized in the worker) and it is hot by the time recording stops.
-			// Only a genuine first-use download blocks, with explicit progress, so we
-			// never record silently against missing weights.
+			// Only a genuine first-use download blocks (its progress shows in the
+			// download HUD), so we never record silently against missing weights.
 			if (await isSttModelCached(modelKey)) {
 				this.#warmModel(modelKey);
 			} else {
-				await downloadSttModel(modelKey, p => status(`Downloading speech model ${p.label} (${p.percent}%)`));
+				await downloadSttModel(modelKey);
 			}
-			if (wroteStatus) options.showStatus("");
 			this.#resolvedModelKey = modelKey;
 			return modelKey;
 		} catch (err) {
@@ -275,7 +268,7 @@ export class STTController {
 					options.showWarning(error.message);
 					return;
 				}
-				if (samples.length > 0) this.#cloudAudio.push(samples.slice());
+				if (samples.length > 0) this.#cloudAudio.push(floatToPcm16(samples));
 			});
 		} catch (err) {
 			this.#streamAbort?.abort();

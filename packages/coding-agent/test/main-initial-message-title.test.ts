@@ -19,9 +19,11 @@ describe.skipIf(!hasPtyHarness)("CLI initial-message title generation", () => {
 		const outputPath = path.join(root, "probe.json");
 		try {
 			await fs.mkdir(agentDir, { recursive: true });
+			// `title.generator: tiny` routes straight to the stubbed title model; the default `fork` waits for a
+			// reply the stubbed `prompt` never starts (fork titling is covered by agent-session-title-fork.test.ts).
 			await Bun.write(
 				path.join(agentDir, "config.yml"),
-				"setupVersion: 1\nstartup:\n  setupWizard: false\n  showSplash: false\n  checkUpdate: false\nproviders:\n  tinyModel: online\n",
+				"setupVersion: 1\nstartup:\n  setupWizard: false\n  showSplash: false\n  checkUpdate: false\nproviders:\n  tinyModel: online\ntitle:\n  generator: tiny\n",
 			);
 			const command = [
 				JSON.stringify(process.execPath),
@@ -33,7 +35,9 @@ describe.skipIf(!hasPtyHarness)("CLI initial-message title generation", () => {
 				"anthropic/claude-sonnet-4-5",
 				JSON.stringify("implement X"),
 			].join(" ");
-			const proc = Bun.spawn(["timeout", "10s", "script", "-q", "-c", command, "/dev/null"], {
+			// The child cold-starts and transpiles the CLI graph; loaded CI runners need far more than an idle
+			// boot. `timeout` stays below the test budget so a hung interactive session is killed and cleaned up.
+			const proc = Bun.spawn(["timeout", "25s", "script", "-q", "-c", command, "/dev/null"], {
 				cwd: repoRoot,
 				stdout: "pipe",
 				stderr: "pipe",
@@ -61,5 +65,5 @@ describe.skipIf(!hasPtyHarness)("CLI initial-message title generation", () => {
 		} finally {
 			await removeWithRetries(root);
 		}
-	}, 15_000);
+	}, 30_000);
 });

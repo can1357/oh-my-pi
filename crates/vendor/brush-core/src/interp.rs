@@ -8,7 +8,7 @@ use std::{
 use brush_parser::ast::{self, CommandPrefixOrSuffixItem};
 use itertools::Itertools;
 
-use tokio_util::sync::CancellationToken;
+use tokio_util::{sync::CancellationToken, task::AbortOnDropHandle};
 
 use crate::{
 	ShellFd,
@@ -595,7 +595,7 @@ fn spawn_async_ao_list_in_task<SE: extensions::ShellExtensions>(
 	});
 
 	jobs::Job::new(
-		[jobs::JobTask::Internal(join_handle)],
+		[jobs::JobTask::Internal(AbortOnDropHandle::new(join_handle))],
 		ao_list.to_string(),
 		jobs::JobState::Running,
 	)
@@ -860,6 +860,24 @@ async fn wait_for_pipeline_processes_and_update_status(
 
 	// Clear our the pipeline status so we can start filling it out.
 	shell.last_pipeline_statuses_mut().clear();
+
+	// Use the exact external member set as the stop scope for a multi-process
+	// pipeline. A process group remains an additional scope because a detached
+	// pipe-input stage can leave the recorded group while still belonging to
+	// the pipeline. A lone process needs no shared scope: its wait checks its
+	// own PID.
+	let external_pid = |result: &ExecutionSpawnResult| match result {
+		ExecutionSpawnResult::StartedProcess(child) => child.pid(),
+		ExecutionSpawnResult::Completed(_) | ExecutionSpawnResult::StartedTask(_) => None,
+	};
+	if process_spawn_results.iter().filter_map(external_pid).nth(1).is_some() {
+		let pipeline_pids: Arc<[_]> = process_spawn_results.iter().filter_map(external_pid).collect();
+		for result in &mut process_spawn_results {
+			if let ExecutionSpawnResult::StartedProcess(child) = result {
+				child.set_stop_pids(Arc::clone(&pipeline_pids));
+			}
+		}
+	}
 
 	while let Some(child) = process_spawn_results.pop_front() {
 		ensure_not_cancelled(params)?;
@@ -1131,7 +1149,7 @@ impl Execute for ast::CoprocessCommand {
 		});
 
 		let job = shell.jobs_mut().add_as_current(jobs::Job::new(
-			[jobs::JobTask::Internal(join_handle)],
+			[jobs::JobTask::Internal(AbortOnDropHandle::new(join_handle))],
 			format!("coproc {name}"),
 			jobs::JobState::Running,
 		));
