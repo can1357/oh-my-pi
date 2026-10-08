@@ -100,6 +100,16 @@ class "anthropic" {
 		revision ">=5.5 <10" {
 			supports-sampling-params #false
 		}
+		// Haiku 5.5 bills every rate 5x for prompts over 100K. Derived from each
+		// host's list price so non-Anthropic hosts get the band too; the Claude
+		// API pins absolute rates further down.
+		// https://platform.claude.com/docs/en/models/haiku-5-5/overview#pricing
+		revision ">=5.5 <6" {
+			long-context-cost {
+				input-threshold 100000
+				multiplier 5.0
+			}
+		}
 	}
 	// On-demand compaction (compact-2026-09-04) works on the Claude API, Vertex,
 	// and Amazon Bedrock's `/anthropic` routes, not Bedrock Converse.
