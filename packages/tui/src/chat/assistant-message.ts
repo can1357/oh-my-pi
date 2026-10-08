@@ -9,7 +9,7 @@ import { formatDuration, formatNumber } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
 import { LRUCache } from "@oh-my-pi/pi-utils/lru";
 import type { AssistantThinkingRenderer } from "./extension-types";
-import { ensureThemeSync, getMarkdownTheme, getThemeEpoch, theme } from "../theme";
+import { ensureThemeSync, getMarkdownTheme, getMarkdownThemeWithLinkTargets, getThemeEpoch, theme } from "../theme";
 import { card, col, elapsed, node, span, text } from "../native/describe";
 import { hasTranscriptActions, runTranscriptAction } from "./transcript-actions";
 import type { NativeChild, NativeNode, NativeUiEvent } from "../native/node";
@@ -394,7 +394,7 @@ export class AssistantMessageComponent extends Container {
 		if (this.#markdownTheme) return this.#markdownTheme;
 		const base = getMarkdownTheme();
 		const snapshot = this.#linkTargets;
-		const markdownTheme = snapshot.size > 0 ? { ...base, resolveLink: (href: string) => snapshot.get(href) } : base;
+		const markdownTheme = snapshot.size > 0 ? getMarkdownThemeWithLinkTargets(snapshot) : base;
 		this.#markdownTheme = markdownTheme;
 		return markdownTheme;
 	}

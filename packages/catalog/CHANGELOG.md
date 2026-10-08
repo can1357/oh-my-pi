@@ -2,16 +2,14 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added prompt-cache lookback support for Claude models across all hosts, including the public `prompt-cache-lookback` catalog axis and `resolvePromptCacheLookback` API.
+
 ### Fixed
 
 - Scoped generic resource-exhaustion capacity backoff to Google Antigravity, preserving quota handling on other Google deployments ([#11713](https://github.com/can1357/oh-my-pi/pull/11713) by [@iliaal](https://github.com/iliaal)).
-### Added
-
-- Added the `prompt-cache-lookback` catalog axis and `resolvePromptCacheLookback`, giving Claude models on every host their 20-position prompt-cache lookback ([#14751](https://github.com/can1357/oh-my-pi/pull/14751) by [@will-bogusz](https://github.com/will-bogusz))
-
-### Fixed
-
-- Fixed one newly published model this build cannot resolve hiding every other discovered model of its provider (a new Claude Haiku 5.5 made Claude Sonnet 5.5 unknown); it is now skipped with a warning
+- Fixed model discovery failing when a newly published provider model was not yet recognized; unsupported models are now skipped with a warning so other available models remain discoverable.
 
 ## [18.8.5] - 2026-10-08
 

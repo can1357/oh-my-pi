@@ -5,15 +5,11 @@
 ### Fixed
 
 - Fixed generic Google Antigravity 429 responses imposing a 30-minute quota cooldown; they now use a 45–75-second capacity backoff while preserving explicit quota errors and credential rotation ([#11713](https://github.com/can1357/oh-my-pi/pull/11713) by [@iliaal](https://github.com/iliaal)).
-### Added
-
-- Added scalarizeTypeArrays option to normalize schemas, enabling multi-type arrays to be split into anyOf branches
-- Added dropForeignTypeKeywords to remove irrelevant keywords when normalizing types
-
-### Fixed
-
 - Fixed Google Gemini and Cloud Code Assist (Antigravity) requests failing with HTTP 400 when a tool schema uses `uniqueItems`, `contains`, `contentEncoding` or similar unsupported array/content keywords ([#14766](https://github.com/can1357/oh-my-pi/pull/14766) by [@jwaldrip](https://github.com/jwaldrip))
 - Fixed auth broker clients judging an account by a sibling account's usage when only the sibling's usage fetch succeeded, so account selection and usage-limit blocks acted on the wrong quota ([#14904](https://github.com/can1357/oh-my-pi/pull/14904) by [@will-bogusz](https://github.com/will-bogusz))
+- Fixed Gemini rejecting tool parameters that allow multiple JSON Schema types, including combinations such as string-or-array fields.
+- Fixed auth broker account selection and usage-limit enforcement using the correct account's quota when multiple accounts are present.
+- Fixed Anthropic-family model streams so encoded marker tokens are decoded consistently in text, tool-call deltas, partial messages, and completed tool calls.
 
 ## [18.8.5] - 2026-10-08
 
@@ -55,7 +51,6 @@
 - Fixed session-affinity pins growing without bound in long-lived gateways (now capped at 256 sessions per provider) ([#14672](https://github.com/can1357/oh-my-pi/pull/14672) by [@H4vC](https://github.com/H4vC))
 - Fixed completed Cursor turns failing with "Cursor stream ended before turnEnded" when the connection closed after the answer had fully arrived ([#14851](https://github.com/can1357/oh-my-pi/pull/14851) by [@kyle-elliott-asymptote](https://github.com/kyle-elliott-asymptote)).
 - Fixed Cursor provider errors that Cursor marks as not retryable being retried until the retry budget ran out ([#14851](https://github.com/can1357/oh-my-pi/pull/14851) by [@kyle-elliott-asymptote](https://github.com/kyle-elliott-asymptote)).
-- Fixed Anthropic-family model streams leaking raw `⟦U…⟧` glyph tokens through text and tool-call deltas, live partial messages, and completed tool calls; previously only the final message was decoded
 
 ## [18.8.3] - 2026-10-07
 
