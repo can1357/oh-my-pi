@@ -37,6 +37,7 @@ import type {
 } from "@oh-my-pi/pi-agent-core";
 import type { CompactionResult } from "@oh-my-pi/pi-agent-core/compaction";
 import type { ContextUsage } from "@oh-my-pi/pi-tui/status-line/types";
+import type { TaskEffort } from "@oh-my-pi/pi-tui/thinking";
 import type {
 	Api,
 	AssistantMessage,
@@ -857,6 +858,24 @@ export interface BeforeSubagentSpawnEvent {
 	/** Agent definition name being spawned. */
 	agent: string;
 	invocationKind: "task" | "eval";
+	/** Assignment dispatched to this worker. */
+	assignment: string;
+	/** Shared batch or workpool context, trimmed. Omitted when blank. */
+	context?: string;
+	/** Task spawns only. Absent for eval `agent()` and workpool. */
+	solutionSpace?: string;
+	/**
+	 * Caller's per-spawn effort. It wins over the agent's thinking level and is mapped onto the
+	 * final model's supported range after this hook, so `thinkingLevel` is omitted when it is set.
+	 */
+	effort?: TaskEffort;
+	/** Agent's concrete thinking level. Omitted when `effort` is set or the level is `auto` or unset. */
+	thinkingLevel?: ThinkingLevel;
+	/**
+	 * Set by the runner for each handler: aborts when this spawn is cancelled or this handler's timeout expires.
+	 * A value passed to `emitBeforeSubagentSpawn` is not forwarded; it is composed into the spawn's cancellation.
+	 */
+	signal?: AbortSignal;
 	/** Pre-expansion role alias the patterns came from (`@task` -> "task"); undefined for explicit selectors. */
 	modelRole?: string;
 	/** Expanded model patterns core would spawn with, in attempt order. */

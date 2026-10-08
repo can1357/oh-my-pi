@@ -1,3 +1,5 @@
+import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
+import { AUTO_THINKING } from "@oh-my-pi/pi-tui/thinking";
 import { afterEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
@@ -516,6 +518,7 @@ describe("structured subagent primitive", () => {
 				type: "before_subagent_spawn",
 				agent: "worker",
 				invocationKind: "task",
+				assignment: "Inspect the target.",
 				modelRole: "definition",
 				patterns: ["anthropic/claude-opus-4-5"],
 			},
@@ -533,6 +536,66 @@ describe("structured subagent primitive", () => {
 		expect(error as StructuredSubagentError).toMatchObject({ kind: "preflight", message: "pool exhausted" });
 		expect(run).not.toHaveBeenCalled();
 		expect(artifactsDirsFromRegistry()).toEqual([]);
+	});
+
+	it("forwards assignment, context, solutionSpace, and the effort or baseline thinking level, and omits solutionSpace for eval", async () => {
+		mockDiscovery({ ...AGENT, thinkingLevel: ThinkingLevel.High });
+		const events: BeforeSubagentSpawnEvent[] = [];
+		const childSession = session();
+		childSession.emitBeforeSubagentSpawn = async event => {
+			events.push(event);
+		};
+		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async () => result());
+
+		const taskSettled = await runStructuredSubagent(
+			request({
+				session: childSession,
+				assignment: "Rename the helper.",
+				context: "  shared batch  ",
+				solutionSpace: "  one fix: rename, names given  ",
+				retainArtifacts: true,
+			}),
+		);
+		const evalSettled = await runStructuredSubagent(
+			request({
+				session: childSession,
+				invocationKind: "eval",
+				assignment: "Classify this.",
+				context: "   ",
+				solutionSpace: "should not leak",
+				retainArtifacts: true,
+			}),
+		);
+		const effortSettled = await runStructuredSubagent(
+			request({ session: childSession, effort: "lo", retainArtifacts: true }),
+		);
+		mockDiscovery({ ...AGENT, thinkingLevel: AUTO_THINKING });
+		const autoSettled = await runStructuredSubagent(
+			request({ session: childSession, solutionSpace: "still task", retainArtifacts: true }),
+		);
+
+		expect(events[0]).toMatchObject({
+			assignment: "Rename the helper.",
+			context: "shared batch",
+			solutionSpace: "one fix: rename, names given",
+			thinkingLevel: ThinkingLevel.High,
+			invocationKind: "task",
+		});
+		expect(events[0]).not.toHaveProperty("signal");
+		expect(events[0]).not.toHaveProperty("effort");
+		expect(events[1]).toMatchObject({ assignment: "Classify this.", invocationKind: "eval", thinkingLevel: "high" });
+		expect(events[1]).not.toHaveProperty("solutionSpace");
+		expect(events[1]).not.toHaveProperty("context");
+		// The executor maps `effort` onto the final model, overriding the agent's `high`; the event must not report it.
+		expect(events[2]).toMatchObject({ effort: "lo" });
+		expect(events[2]).not.toHaveProperty("thinkingLevel");
+		expect(events[3]).toMatchObject({ invocationKind: "task", solutionSpace: "still task" });
+		expect(events[3]).not.toHaveProperty("thinkingLevel");
+		expect(events[3]).not.toHaveProperty("effort");
+		await fs.rm(taskSettled.artifactsDir, { recursive: true, force: true });
+		await fs.rm(evalSettled.artifactsDir, { recursive: true, force: true });
+		await fs.rm(effortSettled.artifactsDir, { recursive: true, force: true });
+		await fs.rm(autoSettled.artifactsDir, { recursive: true, force: true });
 	});
 
 	it("does not assign a role when a child uses an explicit model selector", async () => {

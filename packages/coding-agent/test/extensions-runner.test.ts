@@ -6,7 +6,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } 
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { Type } from "@oh-my-pi/omptype/typebox";
-import type { AgentMessage, AgentTool, AgentToolContext } from "@oh-my-pi/pi-agent-core";
+import { ThinkingLevel, type AgentMessage, type AgentTool, type AgentToolContext } from "@oh-my-pi/pi-agent-core";
 import { streamAnthropic } from "@oh-my-pi/pi-ai/providers/anthropic";
 import type { MessageCreateParams } from "@oh-my-pi/pi-ai/providers/anthropic-wire";
 import type { ImageContent, TextContent } from "@oh-my-pi/pi-ai";
@@ -95,6 +95,170 @@ describe("ExtensionRunner", () => {
 			errors: result.errors.filter(error => isTestScoped(error.path)),
 		};
 	};
+
+	it("passes spawn context through and aborts the handler signal when the spawn is cancelled", async () => {
+		const eventPath = path.join(tempDir.path(), "before-subagent.json");
+		const abortedPath = path.join(tempDir.path(), "before-subagent-aborted");
+		fs.writeFileSync(
+			path.join(extensionsDir, "routing.ts"),
+			`
+				import fs from "node:fs";
+				export default function(pi) {
+					pi.on("before_subagent_spawn", async (event) => {
+						fs.writeFileSync(${JSON.stringify(eventPath)}, JSON.stringify({
+							assignment: event.assignment,
+							context: event.context,
+							solutionSpace: event.solutionSpace,
+							thinkingLevel: event.thinkingLevel,
+							hasSignal: event.signal instanceof AbortSignal,
+						}));
+						const { promise, resolve } = Promise.withResolvers();
+						const finish = () => {
+							fs.writeFileSync(${JSON.stringify(abortedPath)}, event.signal?.aborted ? "aborted" : "open");
+							resolve(undefined);
+						};
+						if (event.signal?.aborted) finish();
+						else event.signal?.addEventListener("abort", finish, { once: true });
+						await promise;
+						return { model: "anthropic/claude-sonnet-4-5", note: "late" };
+					});
+				}
+			`,
+		);
+		const result = await loadTestExtensions();
+		const runner = new ExtensionRunner(
+			result.extensions,
+			result.runtime,
+			tempDir.path(),
+			sessionManager,
+			modelRegistry,
+		);
+		const seen = Promise.withResolvers<void>();
+		const watcher = fs.watch(tempDir.path(), (_event, filename) => {
+			if (filename === "before-subagent.json") seen.resolve();
+		});
+		const controller = new AbortController();
+		const pending = runner.emitBeforeSubagentSpawn(
+			{
+				type: "before_subagent_spawn",
+				invocationKind: "task",
+				assignment: "route this worker",
+				context: "ordinary context",
+				solutionSpace: "one fix: rename, names given",
+				agent: "worker",
+				thinkingLevel: ThinkingLevel.Medium,
+				modelRole: "task",
+				patterns: ["anthropic/claude-sonnet-4-5"],
+			},
+			controller.signal,
+		);
+		await seen.promise;
+		watcher.close();
+		expect(JSON.parse(fs.readFileSync(eventPath, "utf8"))).toEqual({
+			assignment: "route this worker",
+			context: "ordinary context",
+			solutionSpace: "one fix: rename, names given",
+			thinkingLevel: "medium",
+			hasSignal: true,
+		});
+		controller.abort();
+		expect(await pending).toBeUndefined();
+		expect(fs.readFileSync(abortedPath, "utf8")).toBe("aborted");
+	});
+
+	it("composes a caller-supplied event signal into the spawn cancellation", async () => {
+		const startedPath = path.join(tempDir.path(), "before-subagent-started");
+		const abortedPath = path.join(tempDir.path(), "before-subagent-caller-aborted");
+		fs.writeFileSync(
+			path.join(extensionsDir, "routing-caller-signal.ts"),
+			`
+				import fs from "node:fs";
+				export default function(pi) {
+					pi.on("before_subagent_spawn", async (event) => {
+						const { promise, resolve } = Promise.withResolvers();
+						event.signal?.addEventListener("abort", () => {
+							fs.writeFileSync(${JSON.stringify(abortedPath)}, "aborted");
+							resolve(undefined);
+						}, { once: true });
+						fs.writeFileSync(${JSON.stringify(startedPath)}, "started");
+						await promise;
+						return { model: "anthropic/claude-sonnet-4-5" };
+					});
+				}
+			`,
+		);
+		const result = await loadTestExtensions();
+		const runner = new ExtensionRunner(
+			result.extensions,
+			result.runtime,
+			tempDir.path(),
+			sessionManager,
+			modelRegistry,
+		);
+		const started = Promise.withResolvers<void>();
+		const watcher = fs.watch(tempDir.path(), (_event, filename) => {
+			if (filename === "before-subagent-started") started.resolve();
+		});
+		const caller = new AbortController();
+		const spawn = new AbortController();
+		const pending = runner.emitBeforeSubagentSpawn(
+			{
+				type: "before_subagent_spawn",
+				invocationKind: "task",
+				assignment: "route this worker",
+				agent: "worker",
+				patterns: ["anthropic/claude-sonnet-4-5"],
+				signal: caller.signal,
+			},
+			spawn.signal,
+		);
+		await started.promise;
+		watcher.close();
+		caller.abort();
+
+		expect(await pending).toBeUndefined();
+		expect(fs.readFileSync(abortedPath, "utf8")).toBe("aborted");
+		expect(spawn.signal.aborted).toBe(false);
+	});
+
+	it("aborts the before_subagent_spawn handler signal when the handler times out", async () => {
+		// The handler timeout is the platform clock under test; fake timers do not drive AbortSignal.timeout here.
+		const eventPath = path.join(tempDir.path(), "before-subagent-timeout");
+		fs.writeFileSync(
+			path.join(extensionsDir, "routing-timeout.ts"),
+			`
+				import fs from "node:fs";
+				export default function(pi) {
+					pi.on("before_subagent_spawn", async (event) => {
+						event.signal?.addEventListener("abort", () => {
+							fs.writeFileSync(${JSON.stringify(eventPath)}, "aborted");
+						}, { once: true });
+						await Promise.withResolvers().promise;
+					});
+				}
+			`,
+		);
+		const result = await loadTestExtensions();
+		const runner = new ExtensionRunner(
+			result.extensions,
+			result.runtime,
+			tempDir.path(),
+			sessionManager,
+			modelRegistry,
+		);
+		testSetExtensionHandlerTimeoutMs(30);
+
+		const decision = await runner.emitBeforeSubagentSpawn({
+			type: "before_subagent_spawn",
+			invocationKind: "task",
+			assignment: "route this worker",
+			agent: "worker",
+			patterns: ["anthropic/claude-sonnet-4-5"],
+		});
+
+		expect(decision).toBeUndefined();
+		expect(fs.readFileSync(eventPath, "utf8")).toBe("aborted");
+	});
 
 	it("reflects SessionManager.moveTo() changes instead of the constructor-time snapshot (/move)", async () => {
 		const dirA = tempDir.join("dirA");

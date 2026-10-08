@@ -493,6 +493,10 @@ export const TOP_LEVEL_AGENT: ExtensionAgentIdentity = Object.freeze({
 	depth: 0,
 });
 
+function bindSpawnHandlerSignal(event: BeforeSubagentSpawnEvent, signal: AbortSignal): BeforeSubagentSpawnEvent {
+	return { ...event, signal };
+}
+
 export class ExtensionRunner {
 	#uiContext: ExtensionUIContext;
 	#mode: ExtensionMode = "print";
@@ -1493,11 +1497,14 @@ export class ExtensionRunner {
 		timeoutMs: number,
 		onFailure?: (kind: "timeout" | "error", message: string) => R,
 		outerSignal?: AbortSignal,
+		bindSignal?: (event: TEvent, handlerSignal: AbortSignal) => TEvent,
 	): Promise<R | undefined> {
 		// `session_stop` carries its own signal on the event; `tool_call` receives
 		// the outer dispatch signal (loop request or wrapper execute) so an abort
 		// while a handler awaits a human dialog cancels the dialog and settles the
 		// gate without executing the underlying tool. Compose whichever apply.
+		// `bindSignal` lets an emitter hand each handler its own signal (outer
+		// signal plus this handler's timeout) on the event it receives.
 		const sessionStopSignal =
 			event.type === "session_stop" && "signal" in event && event.signal instanceof AbortSignal
 				? event.signal
@@ -1520,8 +1527,9 @@ export class ExtensionRunner {
 								handlerSignal,
 								event.type === "tool_call" ? budget : undefined,
 							);
+							const handlerEvent = bindSignal ? bindSignal(event, handlerSignal) : event;
 							result = await this.#toolRegistrationScope.run(registrationScope, () =>
-								handler(event, handlerContext),
+								handler(handlerEvent, handlerContext),
 							);
 						} catch (error) {
 							handlerFailure = { error };
@@ -2155,12 +2163,14 @@ export class ExtensionRunner {
 	/**
 	 * Runs `before_subagent_spawn` handlers; a `block` short-circuits, the last defined `model` wins.
 	 * `signal` (the spawn's abort signal) cancels an awaiting handler instead of parking until the timeout.
+	 * An `event.signal` from the caller is composed into it. Each handler receives its own `event.signal`.
 	 */
 	async emitBeforeSubagentSpawn(
 		event: BeforeSubagentSpawnEvent,
 		signal?: AbortSignal,
 	): Promise<BeforeSubagentSpawnEventResult | undefined> {
 		if (!this.hasHandlers("before_subagent_spawn")) return undefined;
+		const spawnSignal = event.signal && signal ? AbortSignal.any([event.signal, signal]) : (event.signal ?? signal);
 		const ctx = this.createContext();
 		let chosen: Pick<BeforeSubagentSpawnEventResult, "model" | "note"> | undefined;
 
@@ -2176,7 +2186,8 @@ export class ExtensionRunner {
 					ext,
 					extensionHandlerTimeoutMs,
 					undefined,
-					signal,
+					spawnSignal,
+					bindSpawnHandlerSignal,
 				);
 				if (!handlerResult) continue;
 				const result = handlerResult as BeforeSubagentSpawnEventResult;
