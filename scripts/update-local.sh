@@ -123,15 +123,19 @@ done
 step() { printf '\n▶ %s\n' "$1"; }
 done_step() { printf '✓ %s\n' "$1"; }
 
-SCRIPT_PATH="${BASH_SOURCE[0]}"
-while [ -L "$SCRIPT_PATH" ]; do
-	LINK_TARGET=$(readlink "$SCRIPT_PATH")
-	case "$LINK_TARGET" in
-		/*) SCRIPT_PATH="$LINK_TARGET" ;;
-		*) SCRIPT_PATH="$(dirname -- "$SCRIPT_PATH")/$LINK_TARGET" ;;
-	esac
-done
-REPO_ROOT=$(CDPATH='' cd -- "$(dirname -- "$SCRIPT_PATH")/.." && pwd -P)
+if [ -n "${OMP_REPO_ROOT-}" ]; then
+	REPO_ROOT="$OMP_REPO_ROOT"
+else
+	SCRIPT_PATH="${BASH_SOURCE[0]}"
+	while [ -L "$SCRIPT_PATH" ]; do
+		LINK_TARGET=$(readlink "$SCRIPT_PATH")
+		case "$LINK_TARGET" in
+			/*) SCRIPT_PATH="$LINK_TARGET" ;;
+			*) SCRIPT_PATH="$(dirname -- "$SCRIPT_PATH")/$LINK_TARGET" ;;
+		esac
+	done
+	REPO_ROOT=$(CDPATH='' cd -- "$(dirname -- "$SCRIPT_PATH")/.." && pwd -P)
+fi
 cd "$REPO_ROOT"
 
 git rev-parse --git-dir >/dev/null 2>&1 ||
