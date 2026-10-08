@@ -36,6 +36,7 @@ import { getVertexAccessToken } from "./providers/google-auth";
 import type { GoogleGeminiCliOptions } from "./providers/google-gemini-cli";
 import type { GoogleVertexOptions } from "./providers/google-vertex";
 import type { GrokbotOptions } from "./providers/grokbot";
+import type { GrokbotChatOptions } from "./providers/grokbot-chat";
 import { streamKimi } from "./providers/kimi";
 import type { OllamaChatOptions } from "./providers/ollama";
 import type { OpenAICompletionsOptions } from "./providers/openai-completions";
@@ -52,6 +53,7 @@ import {
 	streamGoogleGeminiCli,
 	streamGoogleVertex,
 	streamGrokBot,
+	streamGrokbotChat,
 	streamOllama,
 	streamOpenAICodexResponses,
 	streamOpenAICompletions,
@@ -1056,6 +1058,13 @@ function streamDispatch<TApi extends Api>(
 
 		case "grokbot-sand":
 			return streamGrokBot(providerModel as Model<"grokbot-sand">, context, providerOptions as GrokbotOptions);
+
+		case "grokbot-chat":
+			return streamGrokbotChat(
+				providerModel as Model<"grokbot-chat">,
+				context,
+				providerOptions as GrokbotChatOptions,
+			);
 
 		case "apple-foundation-models":
 			return streamAppleFoundationModels(
@@ -2348,6 +2357,8 @@ function mapOptionsForApi<TApi extends Api>(
 				chatModelUid: resolveWireModelId(devinModel, effort),
 			});
 		}
+		case "grokbot-chat":
+			return castApi<"grokbot-chat">({ ...base, toolChoice: options?.toolChoice });
 		case "grokbot-sand": {
 			const grokbotModel = model as Model<"grokbot-sand">;
 			const allowed = grokbotModel.sandParameterIds ?? [];

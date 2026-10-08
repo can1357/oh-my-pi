@@ -391,6 +391,17 @@ export function factoryDroidModelManagerOptions(
 // ---------------------------------------------------------------------------
 // Grok Bot native Sand inference
 // ---------------------------------------------------------------------------
+
+export function grokbotChatModelManagerOptions(config: { baseUrl?: string } = {}): ModelManagerOptions<"grokbot-chat"> {
+	return {
+		providerId: "grokbot-chat",
+		staticModels: seedModels<"grokbot-chat">("grokbot-chat").map(model => ({
+			...structuredClone(model),
+			...(config.baseUrl ? { baseUrl: config.baseUrl } : {}),
+		})),
+	};
+}
+
 export interface GrokbotModelManagerConfig {
 	apiKey?: string;
 	baseUrl?: string;

@@ -51,6 +51,7 @@ import type { GoogleOptions } from "./providers/google";
 import type { GoogleGeminiCliOptions } from "./providers/google-gemini-cli";
 import type { GoogleVertexOptions } from "./providers/google-vertex";
 import type { GrokbotOptions } from "./providers/grokbot";
+import type { GrokbotChatOptions } from "./providers/grokbot-chat";
 import type { OllamaChatOptions } from "./providers/ollama";
 import type { OpenAICodexResponsesOptions } from "./providers/openai-codex-responses";
 import type { OpenAICompletionsOptions } from "./providers/openai-completions";
@@ -90,6 +91,7 @@ export interface ApiOptionsMap {
 	"gitlab-duo-agent": GitLabDuoWorkflowOptions;
 	"devin-agent": DevinOptions;
 	"grokbot-sand": GrokbotOptions;
+	"grokbot-chat": GrokbotChatOptions;
 	"apple-foundation-models": AppleFoundationModelsOptions;
 }
 // Compile-time exhaustiveness check - this will fail if ApiOptionsMap doesn't have all KnownApi keys

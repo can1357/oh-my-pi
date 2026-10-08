@@ -35,6 +35,7 @@ export type KnownProvider =
 	| "google-gemini-cli"
 	| "google-vertex"
 	| "grokbot"
+	| "grokbot-chat"
 	| "groq"
 	| "helmcode"
 	| "huggingface"

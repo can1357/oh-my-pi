@@ -24,6 +24,7 @@ import * as GoogleProvider from "./google";
 import * as GoogleGeminiCliProvider from "./google-gemini-cli";
 import * as GoogleVertexProvider from "./google-vertex";
 import * as GrokbotProvider from "./grokbot";
+import * as GrokbotChatProvider from "./grokbot-chat";
 import * as OllamaProvider from "./ollama";
 import * as OpenAICodexResponsesProvider from "./openai-codex-responses";
 import * as OpenAICompletionsProvider from "./openai-completions";
@@ -75,6 +76,8 @@ interface StreamLimits {
 	 * stream timeouts. Keep the shared watchdog from racing it with generic errors.
 	 */
 	providerHandlesStreamTimeouts?: boolean;
+	/** Let resource-owning providers finish graceful abort cleanup before publishing their result. */
+	providerHandlesCallerAbort?: boolean;
 	/**
 	 * The provider retries or fails over when no first event arrives, while the
 	 * shared wrapper continues to own steady-state idle detection.
@@ -153,7 +156,7 @@ function forwardStream<TApi extends Api>(
 				onIdle: () => abortTracker.abortLocally(new AIError.StreamTimeoutError(STREAM_IDLE_TIMEOUT_ERROR)),
 				onFirstItemTimeout: () =>
 					abortTracker.abortLocally(new AIError.StreamTimeoutError(STREAM_FIRST_EVENT_TIMEOUT_ERROR)),
-				abortSignal: options.signal,
+				abortSignal: limits?.providerHandlesCallerAbort ? undefined : options.signal,
 				// The synthetic `start` event is yielded immediately by every provider before
 				// the upstream model has emitted any tokens. Treating it as the first "real"
 				// item would flip the watchdog from `firstItemTimeoutMs` to the much shorter
@@ -293,6 +296,11 @@ export const streamDevin = createProviderStream<"devin-agent">((model, context, 
 /** Stream Grok Bot's native Sand inference through the shared watchdog. */
 export const streamGrokBot = createProviderStream<"grokbot-sand">((model, context, options) =>
 	GrokbotProvider.streamGrokBot(model, context, options),
+);
+
+export const streamGrokbotChat = createProviderStream<"grokbot-chat">(
+	(model, context, options) => GrokbotChatProvider.streamGrokbotChat(model, context, options),
+	{ ...PROVIDER_HANDLED_STREAM_TIMEOUTS, providerHandlesCallerAbort: true },
 );
 
 /** Stream Apple's on-device Foundation Model through the shared watchdog. */

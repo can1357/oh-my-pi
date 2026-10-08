@@ -23,6 +23,7 @@ export type KnownApi =
 	| "gitlab-duo-agent"
 	| "devin-agent"
 	| "grokbot-sand"
+	| "grokbot-chat"
 	| "apple-foundation-models";
 export type Api = KnownApi | (string & {});
 

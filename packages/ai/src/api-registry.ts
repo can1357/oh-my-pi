@@ -33,6 +33,7 @@ const BUILTIN_API_IDS = [
 	"gitlab-duo-agent",
 	"devin-agent",
 	"grokbot-sand",
+	"grokbot-chat",
 	"apple-foundation-models",
 ] as const satisfies readonly KnownApi[];
 
