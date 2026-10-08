@@ -62,6 +62,7 @@ import {
 	persistForeignSession,
 } from "../../session/foreign-session-import";
 import type { ForeignSessionInfo, ForeignSessionSource } from "../../session/foreign-session-store";
+import { setModelCompactionPoint } from "../../session/model-compaction-threshold";
 import { isTranscriptEntry, type TranscriptEntry } from "../../session/session-context";
 import { isUserRequestEntry } from "@oh-my-pi/pi-tui/chat/transcript-entry";
 import type { SessionEntry, SessionTreeNode } from "../../session/session-entries";
@@ -1090,6 +1091,21 @@ export class SelectorController {
 						);
 					} catch (error) {
 						this.ctx.showError(error instanceof Error ? error.message : String(error));
+					}
+				},
+				onCompactionPointChange: (model, input) => {
+					try {
+						const entry = setModelCompactionPoint(this.ctx.settings, model, input);
+						const selector = `${model.provider}/${model.id}`;
+						this.ctx.showStatus(
+							entry === undefined
+								? `Compaction point for ${selector} reset`
+								: `Compaction point for ${selector}: ${typeof entry === "number" ? `${entry.toLocaleString("en-US")} tokens` : entry}`,
+						);
+						this.ctx.statusLine.invalidate();
+						return undefined;
+					} catch (error) {
+						return error instanceof Error ? error.message : String(error);
 					}
 				},
 				onSavePreset: name => {

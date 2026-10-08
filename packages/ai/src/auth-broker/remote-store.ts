@@ -8,7 +8,7 @@
  * runs isn't required.
  */
 import * as os from "node:os";
-import { getAppName, getInstallId, logger } from "@oh-my-pi/pi-utils";
+import { getAppName, getInstallId, logger, postmortem } from "@oh-my-pi/pi-utils";
 import type { AuthCredentialStore } from "../auth/store";
 import {
 	type AuthCredential,
@@ -69,6 +69,8 @@ const BACKGROUND_BACKOFF_INITIAL_MS = 500;
 const BACKGROUND_BACKOFF_MAX_MS = 30_000;
 /** Idle window after the last foreground store use before background sync parks. */
 const BACKGROUND_IDLE_MS = 20_000;
+/** Longest a process exit waits for the final observed-usage report to reach the broker. */
+const OBSERVED_USAGE_EXIT_FLUSH_MS = 2_000;
 
 function toCredentialBlockSnapshot(block: StoredCredentialBlock): CredentialBlockSnapshot {
 	return {
@@ -318,6 +320,10 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 	readonly #observedUsageFlushMs: number;
 	/** Latched once the broker answered 404 — old broker, never report again. */
 	#observedUsageUnsupported = false;
+	/** Tail of the serialized observed-usage sends; each flush waits for the one before it. */
+	#observedUsageFlush: Promise<void> = Promise.resolve();
+	/** Cancels the exit flush registered with the first buffered usage. */
+	#cancelObservedUsageExitFlush: (() => void) | undefined;
 
 	constructor(opts: RemoteAuthCredentialStoreOptions) {
 		this.#client = opts.client;
@@ -1456,9 +1462,10 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 
 	/**
 	 * Fold locally observed request usage into the pending report and schedule
-	 * a flush. One `POST /v1/usage/observed` at most per flush interval; on
-	 * failure the batch is retained and retried with the next flush. A 404
-	 * (pre-endpoint broker) disables reporting for the life of this store.
+	 * a flush. One `POST /v1/usage/observed` at most per flush interval, plus a
+	 * final one when the process exits; on failure the batch is retained and
+	 * retried with the next flush. A 404 (pre-endpoint broker) disables
+	 * reporting for the life of this store.
 	 *
 	 * `client` overrides the reporting identity — the auth-gateway attributes
 	 * each request to the originating install/app instead of the gateway host.
@@ -1488,9 +1495,31 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 			}, this.#observedUsageFlushMs);
 			this.#observedUsageTimer.unref?.();
 		}
+		// The timer never holds the process open, so a process that exits first (a
+		// one-shot run, a signal) sends what is still buffered on the way out. The
+		// wait is bounded: an unreachable broker must not stall the exit.
+		this.#cancelObservedUsageExitFlush ??= postmortem.register("auth-broker-observed-usage", () =>
+			raceSignal(
+				this.#flushObservedUsage(),
+				AbortSignal.timeout(OBSERVED_USAGE_EXIT_FLUSH_MS),
+				"observed usage exit flush timed out",
+			).catch(error => {
+				logger.debug("auth-broker observed usage dropped at exit", { error: String(error) });
+			}),
+		);
 	}
 
-	async #flushObservedUsage(): Promise<void> {
+	#flushObservedUsage(): Promise<void> {
+		// The tail never rejects, so one failed send cannot stall every later flush.
+		this.#observedUsageFlush = this.#observedUsageFlush
+			.then(() => this.#sendObservedUsage())
+			.catch(error => {
+				logger.debug("auth-broker observed usage flush failed", { error: String(error) });
+			});
+		return this.#observedUsageFlush;
+	}
+
+	async #sendObservedUsage(): Promise<void> {
 		if (this.#observedUsage.size === 0 || this.#observedUsageUnsupported) return;
 		const batch = [...this.#observedUsage.values()];
 		this.#observedUsage.clear();
@@ -1539,8 +1568,9 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 			clearTimeout(this.#observedUsageTimer);
 			this.#observedUsageTimer = undefined;
 		}
-		// Best-effort final flush; failures are dropped (the process is exiting).
-		if (this.#observedUsage.size > 0) void this.#flushObservedUsage();
+		// Final flush. The exit registration outlives close() until it settles, so a
+		// process exiting right after close() still sends it; failures are dropped.
+		void this.#flushObservedUsage().finally(() => this.#cancelObservedUsageExitFlush?.());
 		this.#cache.clear();
 		this.#usageOverlays.clear();
 	}

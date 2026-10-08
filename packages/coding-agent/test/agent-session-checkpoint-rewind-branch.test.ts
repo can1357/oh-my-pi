@@ -382,6 +382,74 @@ describe("AgentSession checkpoint rewind branch context", () => {
 		).toBe(true);
 	});
 
+	it("records the prompt a rewound sibling reply was produced under on the rewind branch", async () => {
+		const report = "investigation complete";
+		const taskSchema = type({ goal: type("string") });
+		const taskTool: AgentTool<typeof taskSchema, unknown> = {
+			name: "task",
+			label: "Task",
+			description: "Run a subagent",
+			parameters: taskSchema,
+			async execute() {
+				return { content: [{ type: "text", text: "<task-result>completed work</task-result>" }] };
+			},
+		};
+		const promptChangingCheckpoint: AgentTool<typeof checkpointSchema, { startedAt: string }> = {
+			...checkpointTool,
+			async execute(toolCallId, params, signal, onUpdate, context) {
+				// The exploration after the checkpoint runs under a different prompt.
+				session.agent.setSystemPrompt(["Changed"]);
+				return checkpointTool.execute(toolCallId, params, signal, onUpdate, context);
+			},
+		};
+		const { session } = await createHarness(
+			[
+				{
+					content: [{ type: "toolCall", id: "checkpoint", name: "checkpoint", arguments: { goal: "inspect" } }],
+					stopReason: "toolUse",
+				},
+				{
+					content: [
+						{ type: "toolCall", id: "rewind", name: "rewind", arguments: { report } },
+						{ type: "toolCall", id: "task", name: "task", arguments: { goal: "complete work" } },
+					],
+					stopReason: "toolUse",
+				},
+				{ content: ["DONE"], stopReason: "stop" },
+			],
+			[promptChangingCheckpoint as AgentTool, rewindTool as AgentTool, taskTool as AgentTool],
+		);
+		const recordedPromptBefore = (entryId: string): unknown => {
+			for (let entry = session.sessionManager.getEntry(entryId); entry;) {
+				if (entry.type === "custom" && entry.customType === "system-prompt-digest") return entry.data;
+				entry = entry.parentId ? session.sessionManager.getEntry(entry.parentId) : undefined;
+			}
+			return undefined;
+		};
+
+		await session.prompt("investigate with a subagent");
+
+		const replies = session.sessionManager
+			.getEntries()
+			.filter(entry => entry.type === "message" && entry.message.role === "assistant");
+		const rewindReply = replies.find(
+			entry =>
+				entry.type === "message" &&
+				entry.message.role === "assistant" &&
+				entry.message.content.some(block => block.type === "toolCall" && block.id === "rewind"),
+		);
+		const reparentedReply = replies.find(
+			entry =>
+				entry !== rewindReply &&
+				entry.type === "message" &&
+				entry.message.role === "assistant" &&
+				entry.message.content.some(block => block.type === "toolCall" && block.id === "task"),
+		);
+		if (!rewindReply || !reparentedReply) throw new Error("expected the rewind reply and its reparented sibling");
+		expect(recordedPromptBefore(reparentedReply.id)).toBe(recordedPromptBefore(rewindReply.id));
+		expect(recordedPromptBefore(reparentedReply.id)).not.toBe(recordedPromptBefore(replies[0]!.id));
+	});
+
 	it("shows a transient checkpoint-active reminder that is branch-cut away on rewind", async () => {
 		const report = "findings: transient reminder";
 		const proceed = Promise.withResolvers<void>();
