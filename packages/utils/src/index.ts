@@ -2,6 +2,7 @@ export { once, untilAborted } from "./abortable";
 export * from "./async";
 export * from "./binary";
 export * from "./color";
+export * from "./connect-frame";
 export * from "./dirs";
 export * from "./env";
 export * from "./executable";
