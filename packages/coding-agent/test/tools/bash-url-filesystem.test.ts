@@ -74,6 +74,37 @@ describe("bash internal URLs through the shell filesystem", () => {
 		expect(await fs.readFile(path.join(localRoot, "work", "rel.txt"), "utf-8")).toBe("rel\n");
 	});
 
+	it("hands an external program the files that backed URL arguments alias", async () => {
+		const script = path.join(tempDir, "argv.js");
+		await fs.writeFile(script, "console.log(process.argv.slice(2).join('\\n'));\n");
+		await fs.mkdir(localRoot, { recursive: true });
+		await fs.writeFile(path.join(localRoot, "data.txt"), "payload\n");
+		await fs.mkdir(path.join(localRoot, "index"), { recursive: true });
+
+		const { text, isError } = await run(
+			`'${process.execPath}' '${script}' local://data.txt --index=local://index https://example.com/a.txt`,
+		);
+
+		expect(isError).toBeUndefined();
+		expect(text).toContain(path.join(localRoot, "data.txt"));
+		expect(text).toContain(`--index=${path.join(localRoot, "index")}`);
+		expect(text).toContain("https://example.com/a.txt");
+	});
+
+	it("starts an external program in the directory a URL working directory aliases", async () => {
+		const script = path.join(tempDir, "cwd.js");
+		await fs.writeFile(script, "console.log(process.cwd());\nconsole.log(process.env.PWD);\n");
+		await fs.mkdir(path.join(localRoot, "work"), { recursive: true });
+
+		const { text, isError } = await run(`'${process.execPath}' '${script}'`, "local://work");
+
+		const work = path.join(localRoot, "work");
+		expect(isError).toBeUndefined();
+		// `PWD` must agree with `getcwd()`: a program reading the variable
+		// directly cannot open the URL spelling.
+		expect(text).toContain(`${work}\n${work}`);
+	});
+
 	it("fails a redirection into a read-only scheme", async () => {
 		const { isError } = await run("printf 'x' > omp://README.md");
 

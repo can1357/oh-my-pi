@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Commands in `bash` can hand `skill://`, `local://`, and other file-backed URLs to external programs again (`python skill://example-skill/tool.py "query"`), and can run them from a `cd`'d URL directory ([#14838](https://github.com/can1357/oh-my-pi/pull/14838) by [@koyzdev](https://github.com/koyzdev)).
+
 ## [18.8.6] - 2026-10-08
 
 ### Added
