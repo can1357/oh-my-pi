@@ -1375,8 +1375,9 @@ export interface AgentAdvisorSelection {
  * runs unadvised. The settings override decides enablement first ("off" wins,
  * "on" enables with the agent's own model pattern or the `advisor` role, any
  * other value is a custom model pattern); otherwise the agent definition's
- * `advisor` field applies. A returned pattern lands on the spawned session's
- * `modelRoles.advisor`, so role aliases and `:level` suffixes resolve there.
+ * `advisor` field applies. Callers expand a returned pattern against the
+ * owner's roles (`resolveAgentAdvisorRolePattern`) before it lands on the
+ * spawned session's `modelRoles.advisor`, so `@advisor` cannot point at itself.
  */
 export function resolveAgentAdvisorSelection(
 	options: AgentAdvisorResolutionOptions,

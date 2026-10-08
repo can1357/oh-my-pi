@@ -12,6 +12,7 @@
 
 ### Fixed
 
+- Fixed Google Gemini and Cloud Code Assist (Antigravity) requests failing with HTTP 400 when a tool schema uses `uniqueItems`, `contains`, `contentEncoding` or similar unsupported array/content keywords ([#14766](https://github.com/can1357/oh-my-pi/pull/14766) by [@jwaldrip](https://github.com/jwaldrip))
 - Fixed auth broker clients judging an account by a sibling account's usage when only the sibling's usage fetch succeeded, so account selection and usage-limit blocks acted on the wrong quota ([#14904](https://github.com/can1357/oh-my-pi/pull/14904) by [@will-bogusz](https://github.com/will-bogusz))
 
 ## [18.8.5] - 2026-10-08

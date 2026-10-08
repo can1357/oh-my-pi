@@ -275,7 +275,7 @@ Related APIs:
 - `sendCustomMessage({ customType, content, ... }, { deliverAs?, triggerTurn? })`
 - `abort()`
 
-`deliverAs: "aside"` (both APIs) delivers at the next agent step boundary without interrupting the current tool batch, instead of steering (which skips remaining tools) or waiting for the run to finish. When the session is idle both start a turn instead (in plan mode the custom message is folded into context without a turn).
+`deliverAs: "aside"` (both APIs) delivers at the next agent step boundary without interrupting the current tool batch, instead of steering (which skips remaining tools) or waiting for the run to finish. The one exception is a running interruptible `wait` or `vibe_wait`, which an aside ends so the message is not delayed behind it. When the session is idle both start a turn instead (in plan mode the custom message is folded into context without a turn).
 
 ## `AgentSession` lifecycle and disposal
 
