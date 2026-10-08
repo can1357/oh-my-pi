@@ -25,7 +25,7 @@ async function submit(tool: YieldTool, args: Record<string, unknown>, terminal: 
 	const result = await tool.execute("consumer-fixture", args);
 	const handler = subprocessToolRegistry.getHandler("yield");
 	if (!handler?.extractData || !handler.shouldTerminate) throw new Error("yield registration unavailable");
-	// Match the subprocess JSONL boundary, including omitted undefined fields.
+	// Exercise serialization round-trip resilience; this is not a live executor event-reader fixture.
 	const event = JSON.parse(
 		JSON.stringify({ toolName: "yield", toolCallId: "consumer-fixture", args, result, isError: false }),
 	);
@@ -96,16 +96,21 @@ describe("yield shape production consumers", () => {
 
 	it("keeps single-label data direct and rejects a label wrapper rather than unwrapping it", async () => {
 		const tool = new YieldTool(session(schema));
-		await expect(tool.execute("wrapped-item", { type: ["findings"], data: { findings: [{ title: "wrapped" }] } }))
-			.rejects.toThrow(/does not match schema/);
-		await expect(tool.execute("wrapped-scalar", { type: ["note"], data: { note: "wrapped" } }))
-			.rejects.toThrow(/does not match schema/);
+		await expect(
+			tool.execute("wrapped-item", { type: ["findings"], data: { findings: [{ title: "wrapped" }] } }),
+		).rejects.toThrow(/does not match schema/);
+		await expect(tool.execute("wrapped-scalar", { type: ["note"], data: { note: "wrapped" } })).rejects.toThrow(
+			/does not match schema/,
+		);
 		const items = [
 			await submit(tool, { type: ["findings"], data: { title: "direct" } }, false),
 			await submit(tool, { type: ["note"], data: "direct note" }, false),
 			await submit(tool, { type: "result" }, true),
 		];
-		expect(JSON.parse(finalize(items, schema).rawOutput)).toEqual({ findings: [{ title: "direct" }], note: "direct note" });
+		expect(JSON.parse(finalize(items, schema).rawOutput)).toEqual({
+			findings: [{ title: "direct" }],
+			note: "direct note",
+		});
 	});
 
 	it("prefers a valid nested array item and preserves an object item whose field matches its label", async () => {
@@ -227,7 +232,9 @@ describe("yield shape production consumers", () => {
 			additionalProperties: false,
 		};
 		const tool = new YieldTool(session(combined));
-		await expect(tool.execute("bad-batch", { type: ["rows"], data: [{ title: null }] })).rejects.toThrow(/does not match schema/);
+		await expect(tool.execute("bad-batch", { type: ["rows"], data: [{ title: null }] })).rejects.toThrow(
+			/does not match schema/,
+		);
 		const item = await submit(tool, { type: ["rows"], data: [{ title: "text", detail: null }, { title: 7 }] }, false);
 		const output = finalize([item], combined);
 		expect(output.exitCode).toBe(0);
@@ -237,7 +244,9 @@ describe("yield shape production consumers", () => {
 	it("replaces accumulated sections only with a complete terminal and never treats a partial patch as complete", async () => {
 		const tool = new YieldTool(session(schema));
 		const section = await submit(tool, { type: ["findings"], data: { title: "earlier" } }, false);
-		await expect(tool.execute("partial-terminal", { type: "result", data: { note: "partial" } })).rejects.toThrow(/does not match schema/);
+		await expect(tool.execute("partial-terminal", { type: "result", data: { note: "partial" } })).rejects.toThrow(
+			/does not match schema/,
+		);
 		const invalid = finalize([section, { status: "success", type: "result", data: { note: "partial" } }], schema);
 		expect(invalid.exitCode).toBe(1);
 		expect(invalid.structuredOutput?.status).toBe("invalid");
@@ -288,7 +297,10 @@ describe("yield shape production consumers", () => {
 		const tool = new YieldTool(session(undefined));
 		const data = { left: "one", right: "two" };
 		const item = await submit(tool, { type: ["left", "right"], data }, false);
-		expect(assembleYieldResult([item], undefined, yieldSectionShapes(undefined))?.data).toEqual({ left: data, right: data });
+		expect(assembleYieldResult([item], undefined, yieldSectionShapes(undefined))?.data).toEqual({
+			left: data,
+			right: data,
+		});
 		const pool = new YieldTool({ ...session(undefined), getWorkPoolYieldItems: () => [{ id: "entry", index: 1 }] });
 		const pooled = await submit(pool, { key: 1, data: [1, 2] }, true);
 		expect(assembleYieldResult([pooled], undefined, yieldSectionShapes(undefined))?.data).toEqual({ entry: [1, 2] });
@@ -312,8 +324,9 @@ describe("yield shape production consumers", () => {
 		const output = finalize([sections, count], declaration);
 		expect(output.exitCode).toBe(0);
 		expect(JSON.parse(output.rawOutput)).toEqual({ findings: [{ title: "one" }], note: "summary", count: 1 });
-		await expect(tool.execute("missing-mapping-key", { type: ["findings", "note"], data: { title: "broadcast" } }))
-			.rejects.toThrow(/mapping each label/);
+		await expect(
+			tool.execute("missing-mapping-key", { type: ["findings", "note"], data: { title: "broadcast" } }),
+		).rejects.toThrow(/mapping each label/);
 	});
 
 	it("keeps whole-array oneOf exclusivity at finalization even when an incremental item fits both variants", async () => {
@@ -335,5 +348,159 @@ describe("yield shape production consumers", () => {
 		const output = finalize([section], exclusive);
 		expect(output.exitCode).toBe(1);
 		expect(output.structuredOutput?.status).toBe("invalid");
+	});
+
+	it("accepts values allowed by an undeclared open union branch through the parameter and final consumers", async () => {
+		const open = {
+			oneOf: [
+				{
+					type: "object",
+					properties: { issue_key: { type: "string" }, verdict: { type: "string" } },
+					required: ["issue_key", "verdict"],
+					additionalProperties: false,
+				},
+				{
+					type: "object",
+					properties: { notes: { type: "string" } },
+					required: ["notes"],
+				},
+			],
+		};
+		const tool = new YieldTool(session(open));
+		const args = { type: ["issue_key"], data: 17 };
+		expect(validateJsonSchemaValue(tool.parameters, args).success).toBe(true);
+		const items = [
+			await submit(tool, args, false),
+			await submit(tool, { type: ["notes"], data: "ok" }, false),
+			await submit(tool, { type: "result" }, true),
+		];
+		const output = finalize(items, open);
+		expect(output.exitCode).toBe(0);
+		expect(JSON.parse(output.rawOutput)).toEqual({ issue_key: 17, notes: "ok" });
+		expect(finalize([...items, { status: "success", data: { issue_key: 17, notes: 9 } }], open).exitCode).toBe(1);
+	});
+
+	it("keeps array items, batches and additionalProperties scalars distinct across real terminals", async () => {
+		const union = {
+			oneOf: [
+				{
+					type: "object",
+					properties: { rows: { type: "array", items: { type: "string" } }, verdict: { type: "string" } },
+					required: ["rows", "verdict"],
+					additionalProperties: false,
+				},
+				{
+					type: "object",
+					properties: { notes: { type: "string" } },
+					required: ["notes"],
+					additionalProperties: { type: "integer" },
+				},
+			],
+		};
+		const tool = new YieldTool(session(union));
+		await expect(tool.execute("bad-extra-value", { type: ["rows"], data: false })).rejects.toThrow(
+			/does not match schema/,
+		);
+		const items = [
+			await submit(tool, { type: ["rows"], data: 17 }, false),
+			await submit(tool, { type: ["notes"], data: "ok" }, false),
+			await submit(tool, { type: "result" }, true),
+		];
+		const output = finalize(items, union);
+		expect(output.exitCode).toBe(0);
+		expect(JSON.parse(output.rawOutput)).toEqual({ rows: 17, notes: "ok" });
+		for (const sample of [
+			{ data: "one", expected: ["one"] },
+			{ data: ["one", "two"], expected: ["one", "two"] },
+		]) {
+			const arrayTool = new YieldTool(session(union));
+			const args = { type: ["rows"], data: sample.data };
+			expect(validateJsonSchemaValue(arrayTool.parameters, args).success).toBe(true);
+			const arrayItems = [
+				await submit(arrayTool, args, false),
+				await submit(arrayTool, { type: ["verdict"], data: "ok" }, false),
+				await submit(arrayTool, { type: "result" }, true),
+			];
+			const arrayOutput = finalize(arrayItems, union);
+			expect(arrayOutput.exitCode).toBe(0);
+			expect(JSON.parse(arrayOutput.rawOutput)).toEqual({ rows: sample.expected, verdict: "ok" });
+		}
+		const overlapping = {
+			...union,
+			oneOf: [
+				{
+					...union.oneOf[0],
+					properties: {
+						...union.oneOf[0].properties,
+						rows: { type: "array", items: { type: "integer" } },
+					},
+				},
+				union.oneOf[1],
+			],
+		};
+		const overlapTool = new YieldTool(session(overlapping));
+		const overlapItems = [
+			await submit(overlapTool, { type: ["rows"], data: 17 }, false),
+			await submit(overlapTool, { type: ["verdict"], data: "ok" }, false),
+			await submit(overlapTool, { type: "result" }, true),
+		];
+		const overlapOutput = finalize(overlapItems, overlapping);
+		expect(overlapOutput.exitCode).toBe(0);
+		expect(JSON.parse(overlapOutput.rawOutput)).toEqual({ rows: [17], verdict: "ok" });
+	});
+
+	it("includes matching patternProperties in a closed union branch's section value domain", async () => {
+		const union = {
+			anyOf: [
+				{
+					type: "object",
+					properties: { issue_key: { type: "string" } },
+					required: ["issue_key"],
+					additionalProperties: false,
+				},
+				{
+					type: "object",
+					properties: { notes: { type: "string" } },
+					patternProperties: { "^issue_": { type: "integer" } },
+					required: ["notes"],
+					additionalProperties: false,
+				},
+			],
+		};
+		const tool = new YieldTool(session(union));
+		const items = [
+			await submit(tool, { type: ["issue_key"], data: 17 }, false),
+			await submit(tool, { type: ["notes"], data: "ok" }, false),
+		];
+		const output = finalize(items, union);
+		expect(output.exitCode).toBe(0);
+		expect(JSON.parse(output.rawOutput)).toEqual({ issue_key: 17, notes: "ok" });
+		await expect(tool.execute("bad-pattern", { type: ["issue_key"], data: false })).rejects.toThrow(
+			/does not match schema/,
+		);
+	});
+
+	it("does not let an open union alternative erase a parent conjunct's value restriction", async () => {
+		const combined = {
+			type: "object",
+			properties: { issue_key: { type: "string" } },
+			allOf: [
+				{
+					anyOf: [
+						{ type: "object", properties: { issue_key: { type: "integer" } } },
+						{ type: "object", properties: { notes: { type: "string" } }, required: ["notes"] },
+					],
+				},
+			],
+		};
+		const tool = new YieldTool(session(combined));
+		await expect(tool.execute("parent-restriction", { type: ["issue_key"], data: 17 })).rejects.toThrow(
+			/does not match schema/,
+		);
+		const items = [
+			await submit(tool, { type: ["issue_key"], data: "key" }, false),
+			await submit(tool, { type: ["notes"], data: "ok" }, false),
+		];
+		expect(finalize(items, combined).exitCode).toBe(0);
 	});
 });

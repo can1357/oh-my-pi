@@ -1229,11 +1229,11 @@ describe("YieldTool", () => {
 		// $defs should NOT be in parameters — refs are inlined
 		expect(parametersRecord.$defs).toBeUndefined();
 		const dataSchema = getDataSchema(parametersRecord);
-		// The inlined anyOf[0] should be the A definition (not a $ref)
-		const anyOfVariants = dataSchema.anyOf as Array<Record<string, unknown>>;
-		expect(anyOfVariants).toBeDefined();
-		expect(anyOfVariants[0].$ref).toBeUndefined();
-		expect(toRecord(anyOfVariants[0].properties).kind).toBeDefined();
+		// Section variants wrap the complete inlined union in the first data branch.
+		const fullSchema = toRecord((dataSchema.anyOf as unknown[])[0]);
+		const fullVariants = fullSchema.anyOf as Array<Record<string, unknown>>;
+		expect(fullVariants[0].$ref).toBeUndefined();
+		expect(toRecord(fullVariants[0].properties).kind).toBeDefined();
 
 		const toolDefinition: Tool = {
 			name: tool.name,

@@ -18,17 +18,14 @@ import {
 	sanitizeSchemaForStrictMode,
 	tryEnforceStrictSchema,
 } from "@oh-my-pi/pi-ai/utils/schema";
-import {
-	resolveYieldSectionValue,
-	type YieldSectionShapes,
-} from "@oh-my-pi/pi-tui/tools/task-yield-assembly";
+import { resolveYieldSectionValue, type YieldSectionShapes } from "@oh-my-pi/pi-tui/tools/task-yield-assembly";
 import { prompt } from "@oh-my-pi/pi-utils";
 import yieldDescription from "../prompts/tools/yield.md" with { type: "text" };
 import { subprocessToolRegistry } from "../task/subprocess-tool-registry";
 import { yieldSectionShapes } from "../task/yield-assembly";
 import type { WorkPoolYieldItem } from "../task/workpool-yield";
 import type { ToolSession } from ".";
-import { buildOutputValidator, formatAllValidationIssues } from "./output-schema-validator";
+import { buildOutputValidator, buildSectionSchemas, formatAllValidationIssues } from "./output-schema-validator";
 
 const YIELD_FORMAT_HINT = 'Submit success as {"data":<your output>} or failure as {"error":"message"}.';
 
@@ -195,27 +192,14 @@ function formatYieldLabels(labels: readonly string[]): string {
  * Runtime validation still distinguishes terminal and incremental submissions.
  */
 function withSectionVariants(dataSchema: Record<string, unknown>): Record<string, unknown> {
-	const sectionProperties: Record<string, unknown> = {};
-	const collect = (schema: Record<string, unknown>): void => {
-		if (isPlainRecord(schema.properties)) {
-			for (const name in schema.properties) {
-				const property = schema.properties[name];
-				const prior = sectionProperties[name];
-				sectionProperties[name] = prior === undefined ? property : { anyOf: [prior, property] };
-			}
-		}
-		for (const keyword of ["allOf", "oneOf", "anyOf"] as const) {
-			const variants = schema[keyword];
-			if (!Array.isArray(variants)) continue;
-			for (const variant of variants) if (isPlainRecord(variant)) collect(variant);
-		}
-	};
-	collect(dataSchema);
-	if (Object.keys(sectionProperties).length === 0) return dataSchema;
+	const sectionSchemas = buildSectionSchemas(dataSchema);
+	if (sectionSchemas.size === 0) return dataSchema;
 	const { description, ...fullWithoutDescription } = dataSchema;
 	const branches: unknown[] = [];
 	const seen = new Set<string>();
 	const add = (schema: unknown): void => {
+		if (schema === false) return;
+		if (schema === true) schema = {};
 		if (schema === null || typeof schema !== "object") return;
 		const key = JSON.stringify(schema);
 		if (seen.has(key)) return;
@@ -224,8 +208,7 @@ function withSectionVariants(dataSchema: Record<string, unknown>): Record<string
 	};
 	add(fullWithoutDescription);
 	const mappingProperties: Record<string, unknown> = {};
-	for (const name in sectionProperties) {
-		const prop = sectionProperties[name];
+	for (const [name, prop] of sectionSchemas) {
 		add(prop);
 		const itemVariants: unknown[] = [];
 		const collectItems = (schema: unknown): void => {
@@ -244,14 +227,12 @@ function withSectionVariants(dataSchema: Record<string, unknown>): Record<string
 		mappingProperties[name] = itemVariants.length > 0 ? { anyOf: [prop, ...itemVariants] } : prop;
 	}
 	if (branches.length <= 1) return dataSchema;
-	add(
-		sanitizeSchemaForStrictMode({
-			type: "object",
-			properties: mappingProperties,
-			required: [],
-			additionalProperties: false,
-		}),
-	);
+	add({
+		type: "object",
+		properties: mappingProperties,
+		required: [],
+		additionalProperties: false,
+	});
 	return description !== undefined ? { description, anyOf: branches } : { anyOf: branches };
 }
 
@@ -388,15 +369,18 @@ export class YieldTool implements AgentTool<TSchema, YieldDetails> {
 				: `Structured output matching the schema:\n${schemaHint}`;
 			let sanitizedSchema: Record<string, unknown> | undefined;
 			if (!schemaError && normalizedSchema !== undefined) {
-				const strictProbe = tryEnforceStrictSchema(normalizedSchema);
+				const expandedSchema = withSectionVariants(
+					dereferenceJsonSchema(normalizedSchema) as Record<string, unknown>,
+				);
+				const strictProbe = tryEnforceStrictSchema(expandedSchema);
 				if (strictProbe.strict) {
 					if (validator) {
 						normalizeData = value => validator.normalize(value);
 						normalizeSection = (label, value) => validator.normalizeSection(label, value);
 					}
-					sanitizedSchema = sanitizeSchemaForStrictMode(normalizedSchema);
+					sanitizedSchema = sanitizeSchemaForStrictMode(expandedSchema);
 				} else {
-					sanitizedSchema = normalizedSchema;
+					sanitizedSchema = expandedSchema;
 					this.#schemaStrict = false;
 				}
 			} else if (!schemaError && normalized === true) {
@@ -413,7 +397,7 @@ export class YieldTool implements AgentTool<TSchema, YieldDetails> {
 				if (hasUnresolvedRefs(resolved)) {
 					throw new Error("schema contains unresolved $ref after dereferencing");
 				}
-				dataSchema = withSectionVariants(resolved);
+				dataSchema = resolved;
 			} else {
 				this.#schemaStrict = false;
 				dataSchema = looseRecordSchema(

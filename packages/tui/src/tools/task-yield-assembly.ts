@@ -9,6 +9,8 @@ import type { YieldItem } from "./task";
 export type YieldSectionShapes = ReadonlyMap<string, "array" | "scalar"> & {
 	/** Prefer a schema-valid array item over a batch when the input is ambiguous. */
 	readonly acceptsItem?: (label: string, value: unknown) => boolean;
+	/** Mixed sections append array items/batches but keep independently valid scalar alternatives direct. */
+	readonly acceptsArray?: (label: string, value: unknown) => boolean;
 };
 
 /** Outcome of folding a run's yield calls into one payload, with provenance flags. */
@@ -154,8 +156,12 @@ export function assembleYieldResult(
 		missingData ||= resolved.missingData;
 		if (labels.length === 0) schemaOverridden ||= overridden;
 		for (const label of labels) {
-			const shape = sectionShapes?.get(label);
+			const declaredShape = sectionShapes?.get(label);
 			const value = resolveYieldSectionValue(resolved.value, labels, label, sectionShapes);
+			const shape =
+				declaredShape === "array" && sectionShapes?.acceptsArray?.(label, value) === false
+					? "scalar"
+					: declaredShape;
 			appendYieldSection(sections, sectionCounts, label, value, shape, sectionShapes);
 			if (shape === "scalar") {
 				if (overridden) overriddenScalars.add(label);
