@@ -769,7 +769,7 @@ describe("devin catalog seed", () => {
 	});
 });
 
-describe("devin cost-fallback", () => {
+describe("devin catalog pricing", () => {
 	const zero = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
 
 	function spec(id: string, cost = zero): ModelSpec<"devin-agent"> {
@@ -790,7 +790,7 @@ describe("devin cost-fallback", () => {
 
 	it("prices plan-included SWE-2 at the promo fallback without a recurring tariff", () => {
 		const model = buildModel(spec("swe-2"));
-		expect(model.cost).toMatchObject({ input: 0.75, output: 3.75, cacheRead: 0.075, cacheWrite: 0.75 });
+		expect(model.cost).toMatchObject({ input: 0.75, output: 3.75, cacheRead: 0.075, cacheWrite: 0 });
 		expect(model.cost.timeBased).toBeUndefined();
 	});
 
@@ -798,7 +798,7 @@ describe("devin cost-fallback", () => {
 		const clock = spyOn(Date, "now").mockReturnValue(Date.parse("2027-01-01T00:00:00Z"));
 		try {
 			const model = buildModel(spec("swe-2"));
-			expect(model.cost).toMatchObject({ input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3 });
+			expect(model.cost).toMatchObject({ input: 3, output: 15, cacheRead: 0.3, cacheWrite: 0 });
 			expect(model.cost.timeBased).toBeUndefined();
 		} finally {
 			clock.mockRestore();
@@ -809,5 +809,14 @@ describe("devin cost-fallback", () => {
 		const model = buildModel(spec("swe-2", { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3 }));
 		expect(model.cost).toMatchObject({ input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3 });
 		expect(model.cost.timeBased).toBeUndefined();
+	});
+
+	it("bills Claude and GPT-5.6+ cache writes at 1.25x input and earlier GPT writes at nothing", () => {
+		const haiku = buildModel(spec("claude-haiku-5-5", { input: 0.1, output: 0.5, cacheRead: 0.01, cacheWrite: 0 }));
+		expect(haiku.cost.cacheWrite).toBeCloseTo(0.125, 10);
+		const terra = buildModel(spec("gpt-5-6-terra", { input: 2, output: 12, cacheRead: 0.2, cacheWrite: 0 }));
+		expect(terra.cost.cacheWrite).toBe(2.5);
+		const gpt55 = buildModel(spec("gpt-5-5", { input: 5, output: 30, cacheRead: 0.5, cacheWrite: 0 }));
+		expect(gpt55.cost.cacheWrite).toBe(0);
 	});
 });

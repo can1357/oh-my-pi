@@ -105,8 +105,8 @@ function devinCostDenominatorTokens(denominator: string): number {
 /**
  * Per-million-token rates from the config's cost dimensions. `COST_FUZZY` marks
  * an estimated rate, not a different unit, so both kinds are read. `cacheWrite`
- * has no Cascade dimension — Devin bills cache writes at the input rate — and
- * stays 0.
+ * has no Cascade dimension and stays 0; the provider's `cache-write-rate` rules
+ * supply Devin's published rate.
  *
  * Composite configs (`fusion`) flatten their own rate card plus every
  * dispatched component's card into one `modelDimensions` list. A `Sidekick`
