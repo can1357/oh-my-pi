@@ -1241,4 +1241,77 @@ describe("Agent hub row ordering", () => {
 			hub.dispose();
 		}
 	});
+
+	it("displays short names in tree mode, full names in flat mode, and full names for orphaned children", () => {
+		geometry = stubStdoutGeometry(120);
+		geometry.setRows(32);
+		const agents = new AgentRegistry();
+		agents.register({ id: "Parent", displayName: "Parent", kind: "sub", parentId: "Main", session: null });
+		agents.register({
+			id: "Parent.Child",
+			displayName: "Child",
+			kind: "sub",
+			parentId: "Parent",
+			session: null,
+		});
+		agents.register({
+			id: "Parent.Child.Grandchild",
+			displayName: "Grandchild",
+			kind: "sub",
+			parentId: "Parent.Child",
+			session: null,
+		});
+		agents.register({
+			id: "MissingParent.OrphanChild",
+			displayName: "OrphanChild",
+			kind: "sub",
+			parentId: "MissingParent",
+			session: null,
+		});
+
+		const hub = makeHub(agents);
+
+		try {
+			// In flat mode (default), all agents show full id
+			const flatIds = renderedAgentIds(hub);
+			expect(flatIds).toContain("Parent");
+			expect(flatIds).toContain("Parent.Child");
+			expect(flatIds).toContain("Parent.Child.Grandchild");
+			expect(flatIds).toContain("MissingParent.OrphanChild");
+
+			// Switch to tree mode ("By parent")
+			hub.handleInput("t");
+
+			// In tree mode:
+			// - Child under Parent shows short name "Child"
+			// - Grandchild under Parent.Child shows short name "Grandchild"
+			// - Orphan child without rendered parent keeps full name "MissingParent.OrphanChild"
+			const treeIds = renderedAgentIds(hub);
+			expect(treeIds).toContain("Parent");
+			expect(treeIds).toContain("Child");
+			expect(treeIds).toContain("Grandchild");
+			expect(treeIds).toContain("MissingParent.OrphanChild");
+			expect(treeIds).not.toContain("Parent.Child");
+			expect(treeIds).not.toContain("Parent.Child.Grandchild");
+
+			// Check rendered tree lines
+			const childLine = Bun.stripANSI(renderedRosterHeaderLineRaw(hub, "Child", 120));
+			expect(childLine).toContain("└── ⟳ Child");
+
+			const grandchildLine = Bun.stripANSI(renderedRosterHeaderLineRaw(hub, "Grandchild", 120));
+			expect(grandchildLine).toContain("└── ⟳ Grandchild");
+
+			const orphanLine = Bun.stripANSI(renderedRosterHeaderLineRaw(hub, "MissingParent.OrphanChild", 120));
+			expect(orphanLine).toContain("⟳ MissingParent.OrphanChild");
+
+			// Switch back to flat mode
+			hub.handleInput("t");
+			const backToFlatIds = renderedAgentIds(hub);
+			expect(backToFlatIds).toContain("Parent.Child");
+			expect(backToFlatIds).toContain("Parent.Child.Grandchild");
+			expect(backToFlatIds).not.toContain("Grandchild");
+		} finally {
+			hub.dispose();
+		}
+	});
 });

@@ -1,6 +1,10 @@
 # Changelog
 
 ## [Unreleased]
+### Changed
+
+- In the Agent Hub tree view, subagents display their short name under their parent, keeping the full name in flat view and for orphaned agents
+
 
 ## [18.8.4] - 2026-10-08
 
