@@ -228,9 +228,7 @@ export class WaitTool implements AgentTool<typeof waitSchema, CoordinationDetail
 			}
 			if (manager && jobs.length > 0) return buildJobResult(this.session, manager, "wait", jobs, []);
 			if (wake === "timeout" && serviceError !== undefined)
-				throw new ToolError(
-					`Service state unavailable: ${serviceError}. Last-known service state is not current.`,
-				);
+				throw new ToolError(`Service state unavailable: ${serviceError}. Last-known service state is not current.`);
 			return {
 				content: [
 					{
