@@ -145,8 +145,11 @@ export async function executeBuiltinSlashCommand(
 
 	const command = BUILTIN_SLASH_COMMAND_LOOKUP.get(parsed.name);
 	if (!command) return false;
-	if (parsed.args.length > 0 && !command.allowArgs) {
-		return false;
+	const usageError = getBuiltinSlashCommandUsageError(parsed);
+	if (usageError) {
+		runtime.ctx.showError(usageError);
+		clearSubmittedText(runtime);
+		return true;
 	}
 	// Collab guests run a read-mostly replica: session-mutating builtins are
 	// host-only; the allowlist covers purely local/read-only commands.
@@ -193,3 +196,9 @@ export function lookupBuiltinSlashCommand(name: string): SlashCommandSpec | unde
 }
 
 export type { ParsedSlashCommand, SlashCommandResult, SlashCommandRuntime, SlashCommandSpec, TuiSlashCommandRuntime };
+
+/** Validate arguments that the builtin metadata explicitly disallows. */
+export function getBuiltinSlashCommandUsageError(command: ParsedSlashCommand): string | undefined {
+	const spec = BUILTIN_SLASH_COMMAND_LOOKUP.get(command.name);
+	return spec && command.args && !spec.allowArgs ? `Usage: /${spec.name}` : undefined;
+}
