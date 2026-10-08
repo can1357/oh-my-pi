@@ -113,13 +113,13 @@ import lengthStopRetryTemplate from "../prompts/system/length-stop-retry.md" wit
 
 import {
 	type CompactionSettings,
-	cfgCompaction,
 	cfgCompactionAutoContinue,
 	cfgCompactionEnabled,
 	cfgCompactionMethodOrder,
 	cfgContextPromotionEnabled,
 	cfgSnapcompactShape,
 } from "./context-settings";
+import { resolveModelCompactionSettings } from "./model-compaction-threshold";
 import { cfgRetry } from "./settings";
 
 export type CompactionCheckResult = Readonly<{
@@ -555,6 +555,11 @@ export class SessionMaintenance {
 		return this.#host.model();
 	}
 
+	/** Compaction policy in force for the active model (its `compaction.modelThresholds` entry applied). */
+	get #compactionSettings(): CompactionSettings {
+		return resolveModelCompactionSettings(this.#host.settings, this.#model);
+	}
+
 	get #tokenizer() {
 		return this.#host.agent.tokenizer;
 	}
@@ -570,7 +575,7 @@ export class SessionMaintenance {
 	/** Experimental rollover is safe only when the current effective tool surface can recover its state. */
 	#usesExperimentalContextManagement(): boolean {
 		return (
-			cfgCompaction.get(this.#host.settings).experimentalContextManagement === true &&
+			this.#compactionSettings.experimentalContextManagement === true &&
 			this.#host.hasExperimentalContextRolloverTools()
 		);
 	}
@@ -582,7 +587,7 @@ export class SessionMaintenance {
 	 */
 	#maybeQueueExperimentalNotesReminder(contextTokens: number, contextWindow: number): void {
 		if (!this.#usesExperimentalContextManagement()) return;
-		const settings = cfgCompaction.get(this.#host.settings);
+		const settings = this.#compactionSettings;
 		if (!settings.enabled || this.isCompacting || this.#host.isGeneratingHandoff()) return;
 		const thresholdTokens = resolveThresholdTokens(contextWindow, settings);
 		if (contextTokens >= thresholdTokens) return;
@@ -681,7 +686,7 @@ export class SessionMaintenance {
 			this.#tokenizer,
 			this.#withPlanProtection({
 				...DEFAULT_PRUNE_CONFIG,
-				pruneUseless: cfgCompaction.get(this.#host.settings).dropUseless,
+				pruneUseless: this.#compactionSettings.dropUseless,
 				// Cache-stable boundary: never re-write the warm, already-sent prefix
 				// (deep stale/age victims) or summarized-away entries every turn.
 				keepBoundaryId,
@@ -717,7 +722,7 @@ export class SessionMaintenance {
 	 * provider prompt cache.
 	 */
 	async #pruneStaleToolResults(): Promise<{ prunedCount: number; tokensSaved: number } | undefined> {
-		const { supersedeReads, dropUseless } = cfgCompaction.get(this.#host.settings);
+		const { supersedeReads, dropUseless } = this.#compactionSettings;
 		if (!supersedeReads && !dropUseless) return undefined;
 		const branchEntries = this.#host.sessionManager.getBranchView();
 		const keepBoundaryId = getLatestCompactionEntry(branchEntries)?.firstKeptEntryId;
@@ -1009,7 +1014,7 @@ export class SessionMaintenance {
 
 	/** One-shot, artifact-backed mechanical reduction for a pre-output Responses body-read timeout. */
 	async shakeForRequestBodyReadTimeout(generation: number): Promise<boolean> {
-		const settings = cfgCompaction.get(this.#host.settings);
+		const settings = this.#compactionSettings;
 		if (!settings.enabled || !resolveCompactionMethodOrder(settings.methodOrder).includes("shake")) return false;
 		const isCurrent = () => !this.#host.isDisposed() && this.#host.promptGeneration() === generation;
 		if (!isCurrent()) return false;
@@ -1167,7 +1172,7 @@ export class SessionMaintenance {
 				return result;
 			}
 
-			const compactionSettings = cfgCompaction.get(this.#host.settings);
+			const compactionSettings = this.#compactionSettings;
 			methods = resolveCompactionMethodOrder(compactMode?.overrides.methodOrder ?? compactionSettings.methodOrder);
 			const explicitSnapcompact = compactMode?.name === "snapcompact";
 			let selectedMethod: CompactionMethod | undefined;
@@ -1571,7 +1576,7 @@ export class SessionMaintenance {
 		onCommitted: () => void,
 	): Promise<CompactionResult> {
 		const entries = this.#host.sessionManager.getBranch();
-		const settings = cfgCompaction.get(this.#host.settings);
+		const settings = this.#compactionSettings;
 		const preparation = prepareCompaction(entries, settings, model, this.#tokenizer);
 		if (!preparation)
 			throw new ManualCompactionNoOpError("Nothing to compact (session too small or already rolled over)");
@@ -1674,7 +1679,7 @@ export class SessionMaintenance {
 	): Promise<CompactionCheckResult> {
 		const model = this.#model;
 		if (!model || this.isCompacting) return COMPACTION_CHECK_NONE;
-		const settings = cfgCompaction.get(this.#host.settings);
+		const settings = this.#compactionSettings;
 		const branch = this.#host.sessionManager.getBranch();
 		const preparation = prepareCompaction(branch, settings, model, this.#tokenizer);
 		if (!preparation) return COMPACTION_CHECK_BLOCK_AUTOMATIC_CONTINUATION;
@@ -2012,7 +2017,7 @@ export class SessionMaintenance {
 		const entries = this.#host.sessionManager.getBranch();
 		const messageCount = entries.filter(e => e.type === "message").length;
 		if (messageCount < 2) throw new Error("Nothing to hand off (no messages yet)");
-		const compactionSettings = cfgCompaction.get(this.#host.settings);
+		const compactionSettings = this.#compactionSettings;
 		const preparation = prepareCompaction(
 			entries,
 			resolveMethodSettings(compactionSettings, "handoff"),
@@ -2058,7 +2063,7 @@ export class SessionMaintenance {
 	 */
 	maybeStartSpeculativeCompaction(contextTokens: number, contextWindow: number): void {
 		if (contextWindow <= 0 || this.#host.isDisposed()) return;
-		const settings = cfgCompaction.get(this.#host.settings);
+		const settings = this.#compactionSettings;
 		if (this.#usesExperimentalContextManagement()) {
 			this.#maybeQueueExperimentalNotesReminder(contextTokens, contextWindow);
 			return;
@@ -2155,7 +2160,7 @@ export class SessionMaintenance {
 	 */
 	deferThresholdCompactionToSpeculation(contextTokens: number, contextWindow: number): boolean {
 		if (contextWindow <= 0 || this.#host.isDisposed()) return false;
-		const settings = cfgCompaction.get(this.#host.settings);
+		const settings = this.#compactionSettings;
 		if (this.#usesExperimentalContextManagement()) return false;
 		if (!settings.enabled || settings.asyncEnabled === false || !hasConfiguredCompactionMethod(settings))
 			return false;
@@ -2199,7 +2204,7 @@ export class SessionMaintenance {
 		};
 		const model = this.#model;
 		if (!model) return clear();
-		const settings = cfgCompaction.get(this.#host.settings);
+		const settings = this.#compactionSettings;
 		const effectiveSettings = resolveMethodSettings(settings, method);
 		const branch = this.#host.sessionManager.getBranch();
 		const snapshotLeafId = branch[branch.length - 1]?.id;
@@ -2300,7 +2305,7 @@ export class SessionMaintenance {
 	): boolean {
 		const model = this.#model;
 		if (!model) return false;
-		const settings = cfgCompaction.get(this.#host.settings);
+		const settings = this.#compactionSettings;
 		if (
 			armed.result.preserveData &&
 			!remotePreserveReusable(armed.result.preserveData, model, resolveMethodSettings(settings, armed.method))
@@ -2371,7 +2376,7 @@ export class SessionMaintenance {
 			run.controller.abort();
 			return undefined;
 		}
-		const settings = cfgCompaction.get(this.#host.settings);
+		const settings = this.#compactionSettings;
 		if (settings.asyncEnabled === false) return undefined;
 		if (this.#host.extensionRunner?.hasHandlers("session_before_compact")) return undefined;
 		if (!this.#armedSpeculationValid(run.armed, triggerContextTokens, pendingContextTokens)) {
@@ -2534,7 +2539,7 @@ export class SessionMaintenance {
 		if (!model) return;
 		const contextWindow = model.contextWindow ?? 0;
 		if (contextWindow <= 0) return;
-		const compactionSettings = cfgCompaction.get(this.#host.settings);
+		const compactionSettings = this.#compactionSettings;
 		const contextTokens = this.#estimatePrePromptContextTokens(messages, contextWindow);
 		const pendingMidTurnDeadEnd = this.#midTurnDeadEndPendingPrePrompt;
 		this.#midTurnDeadEndPendingPrePrompt = false;
@@ -2616,7 +2621,7 @@ export class SessionMaintenance {
 		const model = this.#model;
 		const contextWindow = model?.contextWindow ?? 0;
 		if (contextWindow <= 0) return;
-		const compactionSettings = cfgCompaction.get(this.#host.settings);
+		const compactionSettings = this.#compactionSettings;
 		const experimentalNewContextRequest =
 			this.#usesExperimentalContextManagement() && this.#host.takeExperimentalContextRolloverRequest(context);
 
@@ -2846,7 +2851,7 @@ export class SessionMaintenance {
 		// already complaining about (#11482).
 		// (Named distinctly from the `compactionSettings` used further down in
 		// this function's later, unrelated threshold check.)
-		const payloadCompactionSettings = cfgCompaction.get(this.#host.settings);
+		const payloadCompactionSettings = this.#compactionSettings;
 		const payloadModel = this.#model;
 		const compactionAvailable =
 			payloadCompactionSettings.enabled &&
@@ -3080,7 +3085,7 @@ export class SessionMaintenance {
 		// output cap. Unlike overflow, the *input* is fine, so a reachable handoff
 		// preference may run.
 		if (sameModel && !errorIsFromBeforeCompaction && assistantMessage.stopReason === "length") {
-			const incompleteCompactionSettings = cfgCompaction.get(this.#host.settings);
+			const incompleteCompactionSettings = this.#compactionSettings;
 			const incompleteContextTokens = calculateContextTokens(assistantMessage.usage);
 			// Unknown windows keep compacting: there is no evidence the window had room.
 			const windowExhausted =
@@ -3213,7 +3218,7 @@ export class SessionMaintenance {
 			? undefined
 			: await this.#pruneStaleToolResults();
 
-		const compactionSettings = cfgCompaction.get(this.#host.settings);
+		const compactionSettings = this.#compactionSettings;
 		if (
 			!compactionSettings.enabled ||
 			(!this.#usesExperimentalContextManagement() && !hasConfiguredCompactionMethod(compactionSettings))
@@ -3867,7 +3872,7 @@ export class SessionMaintenance {
 	#compactionCreatedHeadroom(): boolean {
 		const contextWindow = this.#model?.contextWindow ?? 0;
 		if (contextWindow <= 0) return true;
-		const compactionSettings = cfgCompaction.get(this.#host.settings);
+		const compactionSettings = this.#compactionSettings;
 		const residualTokens = compactionContextTokens(
 			this.#host.getContextUsage({ contextWindow })?.tokens ?? 0,
 			this.#estimateStoredContextTokens(),
@@ -3916,7 +3921,7 @@ export class SessionMaintenance {
 		const storedExcludedTokens = activeExcludedMessage
 			? this.#tokenizer.countMessage(activeExcludedMessage, { excludeEncryptedReasoning: true })
 			: 0;
-		const compactionSettings = cfgCompaction.get(this.#host.settings);
+		const compactionSettings = this.#compactionSettings;
 		const residualTokens = compactionContextTokens(
 			Math.max(0, (this.#host.getContextUsage({ contextWindow })?.tokens ?? 0) - providerExcludedTokens),
 			Math.max(0, this.#estimateStoredContextTokens() - storedExcludedTokens),
@@ -3972,7 +3977,7 @@ export class SessionMaintenance {
 		// a threshold-derived frame budget.
 		const frameRescue = await this.#rescueSnapcompactFrameOverflow(
 			this.#host.sessionManager.getBranch(),
-			resolveMethodSettings(cfgCompaction.get(this.#host.settings), "snapcompact"),
+			resolveMethodSettings(this.#compactionSettings, "snapcompact"),
 			signal,
 		);
 		if (frameRescue !== undefined && options.hasProgress()) return true;
@@ -4271,7 +4276,7 @@ export class SessionMaintenance {
 			excludeMediaMethods?: boolean;
 		} = {},
 	): Promise<CompactionCheckResult> {
-		const compactionSettings = cfgCompaction.get(this.#host.settings);
+		const compactionSettings = this.#compactionSettings;
 		// An explicit model-requested rollover bypasses the Auto-Compact toggle;
 		// automatic threshold rollover stays gated exactly as before.
 		const explicitNewContextRequest = options.explicitNewContextRequest === true;
@@ -5375,7 +5380,7 @@ export class SessionMaintenance {
 			// without that pre-shake savings, shake can advance to the next preference
 			// even though the post-prune history is already inside the recovery band.
 			const contextWindow = this.#model?.contextWindow ?? 0;
-			const compactionSettings = cfgCompaction.get(this.#host.settings);
+			const compactionSettings = this.#compactionSettings;
 			let stillOverThreshold = false;
 			if (contextWindow > 0) {
 				if (typeof triggerContextTokens === "number" && Number.isFinite(triggerContextTokens)) {
