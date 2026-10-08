@@ -251,15 +251,14 @@ fi
 
 # Default to wrapper mode unless the caller overrides --mode.
 HAS_MODE=0
-for arg in "${INSTALL_ARGS[@]-}"; do
+for arg in ${INSTALL_ARGS[@]+"${INSTALL_ARGS[@]}"}; do
 	if [ "$arg" = "--mode" ]; then
 		HAS_MODE=1
 		break
 	fi
 done
 if [ "$HAS_MODE" -eq 0 ]; then
-	INSTALL_ARGS=(--mode wrapper "${INSTALL_ARGS[@]-}")
+	INSTALL_ARGS=(--mode wrapper ${INSTALL_ARGS[@]+"${INSTALL_ARGS[@]}"})
 fi
-
 step "install (${INSTALL_ARGS[*]})"
-exec "$REPO_ROOT/scripts/install-local.sh" "${INSTALL_ARGS[@]-}"
+exec "$REPO_ROOT/scripts/install-local.sh" "${INSTALL_ARGS[@]}"
