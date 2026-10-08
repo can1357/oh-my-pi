@@ -26,7 +26,7 @@
  */
 
 import type { TspSpan } from "@oh-my-pi/pi-wire";
-import { formatKeyHint, formatKeyHints } from "../../app-keybindings";
+import { formatKeyHint, formatKeyHints, formatTooltipKey } from "../../app-keybindings";
 import { SplitPane } from "../../components/layout/split-pane";
 import { Stack } from "../../components/layout/stack";
 import { matchesKey } from "../../keys";
@@ -1030,8 +1030,8 @@ class GitTuiComponent implements Component {
 		const right: NativeNode[] = [
 			row(
 				[
-					iconButton("chev-up", "prev-hunk", `Previous change (${formatKeyHint("alt+up")})`),
-					iconButton("chev", "next-hunk", `Next change (${formatKeyHint("alt+down")})`),
+					iconButton("chev-up", "prev-hunk", `Previous change (${formatTooltipKey("alt+up")})`),
+					iconButton("chev", "next-hunk", `Next change (${formatTooltipKey("alt+down")})`),
 				],
 				{ gap: "none", align: "center" },
 			),
@@ -1052,13 +1052,13 @@ class GitTuiComponent implements Component {
 					"type",
 					"whitespace",
 					this.#whitespace === "off"
-						? `Ignore whitespace (${formatKeyHint("b")})`
+						? `Ignore whitespace (${formatTooltipKey("b")})`
 						: this.#whitespace === "whitespace"
-							? `Ignoring whitespace; also ignore formatting (${formatKeyHint("b")})`
-							: `Ignoring formatting and imports; show all (${formatKeyHint("b")})`,
+							? `Ignoring whitespace; also ignore formatting (${formatTooltipKey("b")})`
+							: `Ignoring formatting and imports; show all (${formatTooltipKey("b")})`,
 					this.#whitespace !== "off",
 				),
-				iconButton("corner-down-right", "wrap", `Wrap lines (${formatKeyHint("w")})`, this.#pane.wrap),
+				iconButton("corner-down-right", "wrap", `Wrap lines (${formatTooltipKey("w")})`, this.#pane.wrap),
 			);
 		}
 		if (file?.area === "unstaged" || file?.area === "staged") {
@@ -1070,8 +1070,8 @@ class GitTuiComponent implements Component {
 			);
 		}
 		right.push(
-			iconButton("keyboard", "help", `Keyboard shortcuts (${formatKeyHint("?")})`),
-			iconButton("x", "close", `Close (${formatKeyHint("q")})`),
+			iconButton("keyboard", "help", `Keyboard shortcuts (${formatTooltipKey("?")})`),
+			iconButton("x", "close", `Close (${formatTooltipKey("q")})`),
 		);
 		return keyed(
 			row(

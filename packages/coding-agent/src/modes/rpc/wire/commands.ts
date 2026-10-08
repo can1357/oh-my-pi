@@ -67,6 +67,11 @@ export const rpcCommands: readonly RpcCommandSpec[] = [
 		completion: "prompt_result",
 	},
 	{
+		name: "abort_and_restore_queue",
+		doc: "Withdraw queued user input, then abort the current run; returns the withdrawn input.",
+		result: "AbortAndRestoreQueueResult",
+	},
+	{
 		name: "new_session",
 		doc: "Start a new session.",
 		params: { "parentSession?": "string" },
@@ -85,6 +90,13 @@ export const rpcCommands: readonly RpcCommandSpec[] = [
 		doc: "Enable or disable fast mode for the session.",
 		params: { enabled: "boolean" },
 		result: "FastModeResult",
+	},
+	{
+		name: "set_slow_mode",
+		doc: "Turn `/slow` on or off for the active model; returns whether it is now on.",
+		params: { enabled: "boolean" },
+		result: { enabled: "boolean" },
+		unwrap: "enabled",
 	},
 	{
 		name: "goal",
@@ -310,6 +322,19 @@ export const rpcCommands: readonly RpcCommandSpec[] = [
 		unwrap: "providerId",
 		timeoutMs: 600_000,
 	},
+	{
+		name: "get_logout_accounts",
+		doc: "List the stored credentials `logout` can remove for a provider, active first.",
+		params: { providerId: "string" },
+		result: { accounts: "LogoutAccount[]" },
+		unwrap: "accounts",
+	},
+	{
+		name: "logout",
+		doc: "Remove one stored credential; fails when it is no longer stored. `remainingSource` names auth that still applies.",
+		params: { providerId: "string", credentialId: "number.integer" },
+		result: { "remainingSource?": "string" },
+	},
 
 	{
 		name: "predict_word",
@@ -325,5 +350,25 @@ export const rpcCommands: readonly RpcCommandSpec[] = [
 		name: "predict_word_feedback",
 		doc: "Report a shown suggestion as accepted or typed past.",
 		params: { text: "string", cursor: "number.integer", suggestion: "string", accepted: "boolean" },
+	},
+	{
+		name: "btw",
+		doc: "Ask a side question, or a follow-up in topic `recordId`; returns the record once it is running.",
+		params: { question: "string", "recordId?": "string" },
+		result: { record: "BtwHistoryRecord" },
+		unwrap: "record",
+	},
+	{
+		name: "btw_cancel",
+		doc: "Cancel the running side question (only topic `recordId` when given); false when none matches.",
+		params: { "recordId?": "string" },
+		result: { cancelled: "boolean" },
+		unwrap: "cancelled",
+	},
+	{
+		name: "get_btw_history",
+		doc: "List the session's side-question records, newest first.",
+		result: { records: "BtwHistoryRecord[]" },
+		unwrap: "records",
 	},
 ];

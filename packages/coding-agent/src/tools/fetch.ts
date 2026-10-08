@@ -9,6 +9,7 @@ import { type FetchImpl, getEnvApiKey, type ImageContent, type TextContent } fro
 import { htmlToMarkdown, notebookToEditableText } from "@oh-my-pi/pi-natives";
 import { $which, ptree } from "@oh-my-pi/pi-utils";
 import { type ArchiveFormat, listArchiveRoot, sniffArchiveFormat } from "@oh-my-pi/pi-utils/ar";
+import type { ModelRegistry } from "../config/model-registry";
 import type { Settings } from "../config/settings";
 import type { ToolSession } from "../sdk";
 import type { AgentStorage } from "../session/agent-storage";
@@ -21,7 +22,7 @@ import { findFirecrawlApiKey, scrapeWithFirecrawl } from "../web/firecrawl";
 import { extractWithParallel, findParallelApiKey, getParallelExtractContent } from "../web/parallel";
 import type { RenderResult, SpecialHandler } from "../web/scrapers/types";
 import { finalizeOutput, loadPage, looksLikeHtml, MAX_BYTES, MAX_OUTPUT_CHARS } from "../web/scrapers/types";
-import { convertWithMarkit, fetchBinary } from "../web/scrapers/utils";
+import { type BinaryFetchResult, convertWithMarkit, fetchBinary } from "../web/scrapers/utils";
 import { findCredential } from "../web/search/providers/utils";
 import { applyListLimit } from "@oh-my-pi/pi-tui/tools/list-limit";
 import { parseTailCount } from "./path-utils";
@@ -794,6 +795,13 @@ function shouldSkipBodyDownload(contentType: string): boolean {
 	);
 }
 
+/** Generic MIME types servers use for downloads whose real type is only known from the URL extension. */
+const GENERIC_BINARY_MIMES: Record<string, true> = {
+	"application/octet-stream": true,
+	"binary/octet-stream": true,
+	"application/x-download": true,
+};
+
 function getArchiveFormatHint(mime: string, extensionHint: string): ArchiveFormat | undefined {
 	if (extensionHint === ".zip" || mime === "application/zip" || mime === "application/x-zip-compressed") {
 		return "zip";
@@ -894,6 +902,8 @@ async function tryRenderBinaryPayload(
 	signal: AbortSignal | undefined,
 	fetchedAt: string,
 	notes: readonly string[],
+	/** The convertible-document download already made for this URL; reused instead of downloading again. */
+	prefetched?: BinaryFetchResult,
 ): Promise<FetchRenderResult | null> {
 	const hasNotebookHint = isNotebookHint(mime, extHint);
 	const hasSqliteHint = isSqliteHint(mime, extHint);
@@ -904,9 +914,10 @@ async function tryRenderBinaryPayload(
 	}
 
 	const resultNotes = [...notes];
-	const binary = await fetchBinary(finalUrl, timeout, signal);
+	const binary = prefetched ?? (await fetchBinary(finalUrl, timeout, signal));
 	if (!binary.ok) {
-		resultNotes.push(binary.error ? `Binary fetch failed: ${binary.error}` : "Binary fetch failed");
+		// A prefetched failure was already noted by the conversion step.
+		if (!prefetched) resultNotes.push(binary.error ? `Binary fetch failed: ${binary.error}` : "Binary fetch failed");
 		return buildBinaryPayloadResult(
 			url,
 			finalUrl,
@@ -1036,13 +1047,14 @@ async function handleSpecialUrls(
 	timeout: number,
 	signal: AbortSignal | undefined,
 	storage: AgentStorage | null,
+	modelRegistry: ModelRegistry | undefined,
 ): Promise<FetchRenderResult | null> {
 	const specialHandlers = await loadSpecialHandlers();
 	for (const handler of specialHandlers) {
 		if (signal?.aborted) {
 			throw new ToolAbortError();
 		}
-		const result = await handler(url, timeout, signal, storage);
+		const result = await handler(url, timeout, signal, storage, modelRegistry);
 		if (result) return result;
 	}
 	return null;
@@ -1062,6 +1074,7 @@ async function renderUrl(
 	settings: Settings,
 	signal: AbortSignal | undefined,
 	storage: AgentStorage | null,
+	modelRegistry: ModelRegistry | undefined,
 	fetchOverride?: FetchImpl,
 	excludeWebP?: true,
 ): Promise<FetchRenderResult> {
@@ -1090,12 +1103,27 @@ async function renderUrl(
 
 	// Step 1: Try special handlers for known sites (unless raw mode)
 	if (!raw) {
-		const specialResult = await handleSpecialUrls(url, timeout, signal, storage);
+		const specialResult = await handleSpecialUrls(url, timeout, signal, storage, modelRegistry);
 		if (specialResult) return specialResult;
 	}
 
 	// Step 2: Fetch page
-	const response = await loadPage(url, { timeout, signal, skipBodyForContentType: shouldSkipBodyDownload });
+	// Generic-MIME responses for convertible extensions (e.g. octet-stream .pdf) are re-fetched
+	// via fetchBinary below, so skip the first body read to download the bytes only once.
+	const requestExtHint = getExtensionHint(url);
+	const skipBody = (contentType: string): boolean =>
+		shouldSkipBodyDownload(contentType) ||
+		(GENERIC_BINARY_MIMES[normalizeMime(contentType)] === true && CONVERTIBLE_EXTENSIONS.has(requestExtHint));
+	let response = await loadPage(url, { timeout, signal, skipBodyForContentType: skipBody });
+	if (
+		response.ok &&
+		response.bodySkipped &&
+		!shouldSkipBodyDownload(response.contentType) &&
+		!CONVERTIBLE_EXTENSIONS.has(getExtensionHint(response.finalUrl))
+	) {
+		// Redirect dropped the convertible extension; the body is needed after all.
+		response = await loadPage(url, { timeout, signal, skipBodyForContentType: shouldSkipBodyDownload });
+	}
 	if (signal?.aborted) {
 		throw new ToolAbortError();
 	}
@@ -1224,8 +1252,10 @@ async function renderUrl(
 	}
 
 	// Step 3: Handle convertible binary files (PDF, DOCX, etc.)
+	let convertibleBinary: BinaryFetchResult | undefined;
 	if (!skipConvertibleBinaryRetry && isConvertible(mime, extHint)) {
 		const binary = await fetchBinary(finalUrl, timeout, signal);
+		convertibleBinary = binary;
 		if (binary.ok) {
 			const ext = getExtensionHint(finalUrl, binary.contentDisposition) || extHint;
 			const converted = await convertWithMarkit(binary.buffer, ext, timeout, signal);
@@ -1268,6 +1298,7 @@ async function renderUrl(
 		signal,
 		fetchedAt,
 		notes,
+		convertibleBinary,
 	);
 	if (binaryPayloadResult) return binaryPayloadResult;
 
@@ -1632,6 +1663,7 @@ export async function fetchReadUrl(
 		session.settings,
 		signal,
 		storage,
+		session.modelRegistry,
 		session.fetch,
 		webpExclusionForModel(session.getActiveModel?.()),
 	);

@@ -108,21 +108,6 @@ const fn found_application(app_path: PathBuf, bundle_id: String) -> ApplicationS
 	ApplicationState::Found { app_path, bundle_id }
 }
 
-fn valid_scheme(value: &str) -> bool {
-	let mut bytes = value.bytes();
-	matches!(bytes.next(), Some(b'a'..=b'z'))
-		&& bytes.all(|byte| {
-			byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'+' | b'.' | b'-')
-		})
-}
-
-fn valid_id(value: &str) -> bool {
-	!value.is_empty()
-		&& value
-			.bytes()
-			.all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
-}
-
 fn valid_bundle_id(value: &str) -> bool {
 	let mut bytes = value.bytes();
 	matches!(bytes.next(), Some(byte) if byte.is_ascii_alphanumeric())
@@ -137,12 +122,8 @@ fn is_safe_absolute_path(path: &Path) -> bool {
 }
 
 fn validate_context(context: &Context) -> Result<()> {
-	if !valid_scheme(&context.scheme) {
-		bail!("invalid macOS OAuth callback scheme");
-	}
-	if !valid_id(&context.id) {
-		bail!("invalid macOS OAuth callback transaction identifier");
-	}
+	super::validate_scheme(&context.scheme)?;
+	super::validate_transaction_id(&context.id)?;
 	if !is_safe_absolute_path(&context.directory)
 		|| !is_safe_absolute_path(&context.callback_path)
 		|| context.callback_path.parent() != Some(context.directory.as_path())
@@ -469,7 +450,7 @@ fn valid_legacy_record(context: &Context, record: &LegacyRecoveryRecord) -> bool
 		&& record.bundle_id.len() > BUNDLE_PREFIX.len()
 		&& valid_bundle_id(&record.bundle_id)
 		&& record.pid > 0
-		&& valid_scheme(&record.scheme)
+		&& super::validate_scheme(&record.scheme).is_ok()
 		&& (record.previous_handler.is_empty()
 			|| (valid_bundle_id(&record.previous_handler)
 				&& !record.previous_handler.starts_with(BUNDLE_PREFIX)))
@@ -886,7 +867,8 @@ mod tests {
 				fs::metadata(staging_executable)
 					.unwrap()
 					.permissions()
-					.mode() & 0o777,
+					.mode()
+					& 0o777,
 				0o700
 			);
 		}

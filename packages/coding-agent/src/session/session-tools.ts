@@ -1,10 +1,11 @@
 import { AsyncLocalStorage } from "node:async_hooks";
-import type { Agent, AgentTool, AgentToolContext } from "@oh-my-pi/pi-agent-core";
+import type { Agent, AgentMessage, AgentTool, AgentToolContext } from "@oh-my-pi/pi-agent-core";
 import type { Model } from "@oh-my-pi/pi-ai";
 import { resolveDelegationBias } from "@oh-my-pi/pi-catalog/compat/delegation";
 import { isRecord, logger, prompt, stringProperty, structuredCloneJSON, untilAborted } from "@oh-my-pi/pi-utils";
 import { reset as resetCapabilities } from "../capability";
 import type { EffectiveExtensionRoots } from "../capability/types";
+import { shouldInlineToolDescriptors } from "../config/inline-tool-descriptors-mode";
 import type { ModelRegistry } from "../config/model-registry";
 import { formatModelString } from "../config/model-resolver";
 import type { Settings } from "../config/settings";
@@ -47,12 +48,14 @@ import { buildToolNamespacesInfo, resolveCodeMode, type ToolNamespacesInfo } fro
 import { toolReadsSkillUris } from "../system-prompt";
 
 import type { CustomMessage } from "./messages";
+import type { SessionEntry } from "./session-entries";
 import type { SessionManager } from "./session-manager";
 
 import { cfgDisabledExtensions, cfgSkills, type SkillsSettings } from "../extensibility/settings";
 import {
 	cfgExternalThinking,
 	cfgIncludeModelInPrompt,
+	cfgInlineToolDescriptors,
 	cfgProvidersOpenaiCodexCodeMode,
 	cfgProvidersOpenaiCodexCodeModeDirectTools,
 	cfgSkillful,
@@ -221,6 +224,22 @@ const XDEV_MOUNT_NOTICE_MESSAGE_TYPE = "xdev-mount-notice";
 const EVAL_PRELUDE_NOTICE_MESSAGE_TYPE = "eval-prelude-notice";
 const SESSION_AGENT_NOTICE_MESSAGE_TYPE = "session-agent-notice";
 
+/** Custom entry holding the digest of the base prompt the branch's primary model calls are built from. */
+const SYSTEM_PROMPT_DIGEST_CUSTOM_TYPE = "system-prompt-digest";
+
+/** Equal digests mean equal prompt blocks. */
+function systemPromptDigest(blocks: readonly string[]): string {
+	let hash = BigInt(blocks.length);
+	for (const block of blocks) hash = Bun.hash.wyhash(block, hash);
+	return hash.toString(16);
+}
+
+/** The digest a branch entry records, `undefined` for a malformed record, or `null` when it is not a record. */
+function promptDigestOfEntry(entry: SessionEntry): string | undefined | null {
+	if (entry.type !== "custom" || entry.customType !== SYSTEM_PROMPT_DIGEST_CUSTOM_TYPE) return null;
+	return typeof entry.data === "string" ? entry.data : undefined;
+}
+
 /**
  * Structured payload persisted on each {@link XDEV_MOUNT_NOTICE_MESSAGE_TYPE}
  * custom message. Lets a resumed session reconstruct which dynamic devices the
@@ -305,6 +324,23 @@ export class SessionTools {
 	 */
 	#basePromptReflectsRosterDelta = false;
 	/**
+	 * Newest assistant reply restored with the transcript this session was
+	 * created with, and the recorded digest of the prompt that transcript was
+	 * sent with, until this session's first primary model call; see
+	 * {@link #implicitRebuildBinding}.
+	 */
+	#restoredTranscript: { reply: AgentMessage; promptDigest: string } | undefined;
+	/** Base-prompt digest of the last primary model call, until its reply ends. */
+	#capturedPromptDigest: string | undefined;
+	/** Base-prompt digest each primary reply with provider output was produced under. */
+	readonly #replyPromptDigests = new WeakMap<AgentMessage, string>();
+	/**
+	 * Newest digest found in a branch view and how much of it was scanned. The
+	 * session manager's memoized view only grows in place, so a later read of
+	 * the same array scans just the appended entries.
+	 */
+	#recordedDigestScan: { branch: readonly SessionEntry[]; scanned: number; digest: string | undefined } | undefined;
+	/**
 	 * Dynamic (`xd://`) devices the model has already been told are mounted.
 	 * Seeded lazily from persisted history on resume (see
 	 * {@link #ensureAnnouncedMountsSeeded}) and updated as notices are emitted, so
@@ -324,6 +360,8 @@ export class SessionTools {
 	 * drop it before the request. Cleared when the turn ends.
 	 */
 	#turnSystemPromptOverride: string[] | undefined;
+	/** The latest per-turn override and the base its hook was given; kept after the turn ends. */
+	#lastTurnSystemPromptOverride: { prompt: string[]; base: string[] } | undefined;
 	#lastAppliedToolSignature: string | undefined;
 	/** Full enabled set, including tools demoted from the model-visible surface. */
 	#enabledToolNames = new Set<string>();
@@ -434,6 +472,12 @@ export class SessionTools {
 		if (this.#xdev) this.#xdev.decorateExecution = tool => this.#wrapToolForAcpPermission(tool);
 		this.#setActiveToolNames = options.setActiveToolNames;
 		this.#baseSystemPrompt = options.baseSystemPrompt;
+		const restoredReply = this.#latestReply();
+		const restoredPromptDigest = restoredReply && this.recordedPromptDigest();
+		this.#restoredTranscript =
+			restoredReply && restoredPromptDigest
+				? { reply: restoredReply, promptDigest: restoredPromptDigest }
+				: undefined;
 		this.#skills = options.skills ?? [];
 		this.#skillWarnings = options.skillWarnings ?? [];
 		this.#skillsSettings = options.skillsSettings;
@@ -480,9 +524,18 @@ export class SessionTools {
 	 * applies it to the agent. Base rebuilds during the turn preserve it until
 	 * {@link clearTurnSystemPromptOverride}.
 	 */
-	setTurnSystemPromptOverride(prompt: string[]): void {
+	setTurnSystemPromptOverride(prompt: string[], base: string[]): void {
 		this.#turnSystemPromptOverride = prompt;
+		this.#lastTurnSystemPromptOverride = { prompt, base };
 		this.#host.agent.setSystemPrompt(prompt);
+	}
+
+	/**
+	 * The base prompt a system prompt the agent sent was built from: the hook's input when it is a
+	 * per-turn override, else the prompt itself, since every other prompt applied to the agent is a base.
+	 */
+	baseOfSystemPrompt(prompt: string[]): string[] {
+		return prompt === this.#lastTurnSystemPromptOverride?.prompt ? this.#lastTurnSystemPromptOverride.base : prompt;
 	}
 
 	/** Drops the active per-turn override; later rebuilds fall back to the base prompt. */
@@ -818,7 +871,13 @@ export class SessionTools {
 		const activeModel = this.#host.model();
 		if (!activeModel) return undefined;
 		if (cfgIncludeModelInPrompt.get(this.#host.settings)) return formatModelString(activeModel);
-		return `delegation-bias:${resolveDelegationBias(activeModel)}`;
+		// The inline-descriptor decision is per model and selects both the prompt's
+		// tool catalog and provider-side description pruning (see `sdk.ts`).
+		const inlineDescriptors = shouldInlineToolDescriptors(
+			cfgInlineToolDescriptors.get(this.#host.settings),
+			activeModel.id,
+		);
+		return `delegation-bias:${resolveDelegationBias(activeModel)}|inline-descriptors:${inlineDescriptors}`;
 	}
 
 	/** Rebuilds model-dependent tool prompts after a model change. */
@@ -1170,6 +1229,8 @@ export class SessionTools {
 		let rebuiltSystemPrompt: string[] | undefined;
 		let rebuiltSignature: string | undefined;
 		let frozenSignature: string | undefined;
+		// Trigger of an implicit (non-forced) rebuild, rechecked at commit.
+		let implicitRebuildSignature: string | undefined;
 		let rebuiltXdevCatalogNames: readonly string[] | undefined;
 		let candidateSurface: PromptSurface | undefined;
 		try {
@@ -1222,9 +1283,7 @@ export class SessionTools {
 				const freezeImplicitPromptRefresh =
 					!forcePromptRefresh &&
 					triggerSignature !== this.#lastAppliedToolSignature &&
-					this.#lastAppliedToolSignature !== undefined &&
-					this.#host.model()?.thinking?.prefixBinding === true &&
-					this.#host.agent.state.messages.some(message => message.role === "assistant");
+					this.#implicitRebuildBinding() === "frozen";
 				if (freezeImplicitPromptRefresh) {
 					frozenSignature = triggerSignature;
 				} else if (forcePromptRefresh || triggerSignature !== this.#lastAppliedToolSignature) {
@@ -1236,6 +1295,7 @@ export class SessionTools {
 						),
 					);
 					rebuiltSystemPrompt = built.systemPrompt;
+					if (!forcePromptRefresh) implicitRebuildSignature = triggerSignature;
 					rebuiltSignature = signature;
 					rebuiltXdevCatalogNames = built.xdevCatalogNames;
 					candidateSurface = candidate;
@@ -1277,8 +1337,26 @@ export class SessionTools {
 			this.#codeModeDirectWireSignature = codeMode.active
 				? this.#computeCodeModeDirectWireSignature(appliedNames)
 				: undefined;
+			// The first primary model call can capture the prompt while the rebuild
+			// awaits; that prompt is bound from then on, so an implicit rebuild ends
+			// exactly as if it had frozen up front. Before that call, a resumed
+			// transcript binds the prompt it was sent with: only a rebuild that
+			// reproduces it commits.
+			let restoresTranscriptPrompt = false;
+			if (rebuiltSystemPrompt && implicitRebuildSignature !== undefined) {
+				const binding = this.#implicitRebuildBinding();
+				restoresTranscriptPrompt =
+					typeof binding === "object" && systemPromptDigest(rebuiltSystemPrompt) === binding.promptDigest;
+				if (binding !== "free" && !restoresTranscriptPrompt) {
+					rebuiltSystemPrompt = undefined;
+					frozenSignature = implicitRebuildSignature;
+				}
+			}
 			if (rebuiltSystemPrompt && rebuiltSignature) {
-				if (this.#lastAppliedToolSignature !== undefined) this.#host.clearInheritedProviderPromptCacheKey();
+				// The restored transcript was sent with this prompt under the inherited cache key.
+				if (this.#lastAppliedToolSignature !== undefined && !restoresTranscriptPrompt) {
+					this.#host.clearInheritedProviderPromptCacheKey();
+				}
 				this.#baseSystemPrompt = rebuiltSystemPrompt;
 				this.#host.clearMemoryPromotionSnapshot();
 				this.#applyAgentSystemPrompt(this.#baseSystemPrompt);
@@ -1317,6 +1395,105 @@ export class SessionTools {
 
 	#setBasePromptXdevNames(names: readonly string[] | undefined): void {
 		this.#basePromptXdevNames = new Set(names);
+	}
+
+	#latestReply(): AgentMessage | undefined {
+		return this.#host.agent.state.messages.findLast(message => message.role === "assistant");
+	}
+
+	/** Digest of the base prompt the current branch's newest reply with provider output was produced under. */
+	recordedPromptDigest(): string | undefined {
+		const branch = this.#host.sessionManager.getBranchView();
+		const scan = this.#recordedDigestScan;
+		if (scan?.branch === branch) {
+			for (let index = scan.scanned; index < branch.length; index++) {
+				const digest = promptDigestOfEntry(branch[index]);
+				if (digest !== null) scan.digest = digest;
+			}
+			scan.scanned = branch.length;
+			return scan.digest;
+		}
+		let digest: string | undefined;
+		for (let index = branch.length - 1; index >= 0; index--) {
+			const found = promptDigestOfEntry(branch[index]);
+			if (found !== null) {
+				digest = found;
+				break;
+			}
+		}
+		this.#recordedDigestScan = { branch, scanned: branch.length, digest };
+		return digest;
+	}
+
+	/**
+	 * Called with the prompt a primary model call captures, before the request is
+	 * sent. From then on the transcript's signed thinking may be bound to that
+	 * prompt, whatever later history edits (`/tree`, fork, recovery) leave as the
+	 * newest reply, so the restored transcript is dropped for good. The capture
+	 * is not recorded yet: the call may still stop before it is sent; see
+	 * {@link bindReplyToCapturedPrompt}. Side requests (`runEphemeralTurn`) do
+	 * not count.
+	 */
+	recordPrimaryModelCall(prompt: string[]): void {
+		this.#restoredTranscript = undefined;
+		this.#capturedPromptDigest = systemPromptDigest(this.baseOfSystemPrompt(prompt));
+	}
+
+	/**
+	 * Called synchronously when a primary reply ends. A reply carrying provider
+	 * output was produced under the last captured prompt; one without (a call
+	 * stopped before it was sent, an abort before the first event) binds nothing,
+	 * so the replies before it keep their prompt.
+	 */
+	bindReplyToCapturedPrompt(reply: AgentMessage): void {
+		const digest = this.#capturedPromptDigest;
+		this.#capturedPromptDigest = undefined;
+		if (digest === undefined || reply.role !== "assistant") return;
+		if (reply.content.some(block => block.type !== "text" || block.text.length > 0)) {
+			this.#replyPromptDigests.set(reply, digest);
+		}
+	}
+
+	/**
+	 * Called just before a primary reply is appended to the branch: records the
+	 * digest of the prompt it was produced under when it differs from the
+	 * branch's, ahead of the reply so every path to the reply carries it.
+	 */
+	recordReplyPrompt(reply: AgentMessage): void {
+		this.recordPromptDigest(this.#replyPromptDigests.get(reply));
+	}
+
+	/** Records `digest` on the current branch unless it is already the branch's newest record. */
+	recordPromptDigest(digest: string | undefined): void {
+		if (digest !== undefined && digest !== this.recordedPromptDigest()) {
+			this.#host.sessionManager.appendCustomEntry(SYSTEM_PROMPT_DIGEST_CUSTOM_TYPE, digest);
+		}
+	}
+
+	/** Drops retained transcript references when the session is disposed. */
+	releaseRestoredTranscript(): void {
+		this.#restoredTranscript = undefined;
+		this.#recordedDigestScan = undefined;
+	}
+
+	/**
+	 * What an implicit prompt rebuild must keep when the model binds signed
+	 * thinking to its prompt prefix. `"free"`: no prompt is committed yet, the
+	 * model does not bind, or the transcript holds no reply. `"frozen"`: the
+	 * transcript may be bound to the current prompt. Otherwise the newest reply is
+	 * the restored one and no primary model call has run: a resumed process builds
+	 * its base prompt before tools that register late (extension tools, MCP
+	 * servers), so a rebuild may commit only when it reproduces the prompt the
+	 * transcript was sent with. A transcript restored without a recorded digest,
+	 * or switched in later, stays frozen.
+	 */
+	#implicitRebuildBinding(): "free" | "frozen" | { promptDigest: string } {
+		if (this.#lastAppliedToolSignature === undefined || this.#host.model()?.thinking?.prefixBinding !== true) {
+			return "free";
+		}
+		const latest = this.#latestReply();
+		if (latest === undefined) return "free";
+		return latest === this.#restoredTranscript?.reply ? this.#restoredTranscript : "frozen";
 	}
 
 	#notifyToolRosterDelta(previousActiveToolNames: readonly string[], appliedNames: readonly string[]): void {

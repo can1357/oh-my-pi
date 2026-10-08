@@ -44,12 +44,6 @@ struct ShellSessionCore {
 	filesystem: Fs,
 }
 
-impl Drop for ShellSessionCore {
-	fn drop(&mut self) {
-		terminate_internal_background_jobs(&mut self.shell);
-	}
-}
-
 #[derive(Clone, Default)]
 struct ShellAbortState(Arc<TokioMutex<Option<AbortToken>>>);
 
@@ -1724,15 +1718,12 @@ async fn terminate_run(registry: &process::SpawnRegistry) {
 		}
 	}
 }
-fn terminate_internal_background_jobs(shell: &mut BrushShell) {
-	for job in &mut shell.jobs_mut().jobs {
-		job.abort_internal_tasks();
-	}
-}
 
 fn terminate_background_jobs(shell: &mut BrushShell) {
 	let mut targets = process::TerminationTargets::new();
-	terminate_internal_background_jobs(shell);
+	for job in &mut shell.jobs_mut().jobs {
+		job.abort_internal_tasks();
+	}
 	for job in &shell.jobs().jobs {
 		if let Some(pgid) = job.process_group_id() {
 			targets.add_pgid(pgid);
@@ -3217,6 +3208,109 @@ mod tests {
 				.next()
 				.is_some_and(|value| value == pid.to_string())
 		}));
+	}
+
+	/// Contract: `read` from a file consumes exactly one line of the shared
+	/// offset — the next `read`, and any later reader of the same descriptor,
+	/// resumes right after it.
+	#[tokio::test(flavor = "multi_thread")]
+	async fn read_from_a_file_leaves_the_rest_for_the_next_reader() {
+		let dir = tempfile::tempdir().expect("temporary directory");
+		let path = dir.path().join("lines.txt");
+		std::fs::write(&path, "one\ntwo\nthree\nfour\n").expect("write fixture");
+		let path = path.to_string_lossy().replace('\\', "/");
+		let (result, output) = execute_captured(format!(
+			"{{ read -r a; read -r b; echo \"[$a][$b]\"; cat; }} < '{path}'"
+		))
+		.await;
+		assert_eq!(result.exit_code, Some(0), "{output:?}");
+		assert_eq!(output, "[one][two]\nthree\nfour\n");
+	}
+
+	/// Contract: `read` assigns UTF-8 input as text, not one Latin-1
+	/// character per byte.
+	#[tokio::test(flavor = "multi_thread")]
+	async fn read_decodes_utf8_input() {
+		let (result, output) = execute_captured(
+			"printf 'é ü\\n' | { read -r first rest; echo \"$first|$rest\"; }".to_owned(),
+		)
+		.await;
+		assert_eq!(result.exit_code, Some(0), "{output:?}");
+		assert_eq!(output, "é|ü\n");
+	}
+
+	/// Contract: `read -n` counts characters, not bytes, as bash does in a
+	/// UTF-8 locale; a multibyte character is never split.
+	#[tokio::test(flavor = "multi_thread")]
+	async fn read_count_takes_whole_utf8_characters() {
+		let (result, output) = execute_captured(
+			"printf 'éa\\n' | { read -r -n 1 first; read -r rest; echo \"$first|$rest\"; }".to_owned(),
+		)
+		.await;
+		assert_eq!(result.exit_code, Some(0), "{output:?}");
+		assert_eq!(output, "é|a\n");
+	}
+
+	/// Contract: `mapfile -n` from a file consumes exactly the lines it
+	/// stores; a later reader of the descriptor gets the rest.
+	#[tokio::test(flavor = "multi_thread")]
+	async fn mapfile_count_from_a_file_leaves_the_rest_for_the_next_reader() {
+		let dir = tempfile::tempdir().expect("temporary directory");
+		let path = dir.path().join("lines.txt");
+		std::fs::write(&path, "one\ntwo\nthree\nfour\n").expect("write fixture");
+		let path = path.to_string_lossy().replace('\\', "/");
+		let (result, output) = execute_captured(format!(
+			"{{ mapfile -t -n 2 lines; echo \"${{lines[*]}}\"; cat; }} < '{path}'"
+		))
+		.await;
+		assert_eq!(result.exit_code, Some(0), "{output:?}");
+		assert_eq!(output, "one two\nthree\nfour\n");
+	}
+
+	/// Contract: a `mapfile -C` callback that reads the same piped stdin gets
+	/// the lines after the one mapfile stored, as in bash; mapfile must not
+	/// have read them ahead.
+	#[tokio::test(flavor = "multi_thread")]
+	async fn mapfile_callback_reads_the_next_line_of_a_pipe() {
+		let (result, output) = execute_captured(
+			"cb() { read -r x; echo \"cb:$1:$2:$x\"; }; seq 1 4 | { mapfile -t -C cb -c 1 arr; echo \
+			 \"arr=${arr[*]}\"; }"
+				.to_owned(),
+		)
+		.await;
+		assert_eq!(result.exit_code, Some(0), "{output:?}");
+		assert_eq!(output, "cb:0:1:2\ncb:1:3:4\narr=1 3\n");
+	}
+
+	/// Contract: the same holds for a regular file, whose read-ahead mapfile
+	/// gives back to the shared offset before each callback.
+	#[tokio::test(flavor = "multi_thread")]
+	async fn mapfile_callback_reads_the_next_line_of_a_file() {
+		let dir = tempfile::tempdir().expect("temporary directory");
+		let path = dir.path().join("lines.txt");
+		std::fs::write(&path, "1\n2\n3\n4\n").expect("write fixture");
+		let path = path.to_string_lossy().replace('\\', "/");
+		let (result, output) = execute_captured(format!(
+			"cb() {{ read -r x; echo \"cb:$1:$2:$x\"; }}; {{ mapfile -t -C cb -c 1 arr; echo \
+			 \"arr=${{arr[*]}}\"; }} < '{path}'"
+		))
+		.await;
+		assert_eq!(result.exit_code, Some(0), "{output:?}");
+		assert_eq!(output, "cb:0:1:2\ncb:1:3:4\narr=1 3\n");
+	}
+
+	/// Contract: `mapfile` into a readonly array fails before reading, as in
+	/// bash: the array is unchanged and the piped input stays for the next
+	/// reader.
+	#[tokio::test(flavor = "multi_thread")]
+	async fn mapfile_into_a_readonly_array_leaves_the_input_unread() {
+		let (_, output) = execute_captured(
+			"printf 'a\\nb\\n' | { arr=(x); readonly arr; mapfile -t -O 1 arr; echo \"rc=$? \
+			 ${arr[*]}\"; cat; }"
+				.to_owned(),
+		)
+		.await;
+		assert!(output.ends_with("rc=1 x\na\nb\n"), "{output:?}");
 	}
 
 	#[tokio::test(flavor = "multi_thread")]
@@ -5597,7 +5691,8 @@ mod tests {
 			std::fs::metadata(dir.path().join(name))
 				.expect("created file")
 				.permissions()
-				.mode() & 0o777
+				.mode()
+				& 0o777
 		};
 		assert_eq!(mode("redirect"), 0o600, "redirections use the shell umask");
 		assert_eq!(mode("builtin"), 0o600, "builtins use the shell umask");
@@ -6105,6 +6200,56 @@ replace = [{ pattern = "hello", replacement = "HI" }]
 			!marker.path().exists(),
 			"an internal background job outlived its one-shot shell session"
 		);
+	}
+
+	/// Lets in-flight writes land, empties `path`, and reports whether anything
+	/// wrote to it again: a background `yes` still running refills it within
+	/// milliseconds.
+	async fn still_written(path: &std::path::Path) -> bool {
+		time::sleep(Duration::from_millis(300)).await;
+		std::fs::File::options()
+			.write(true)
+			.open(path)
+			.and_then(|file| file.set_len(0))
+			.expect("truncate output");
+		time::sleep(Duration::from_millis(300)).await;
+		std::fs::metadata(path).expect("stat output").len() > 0
+	}
+
+	/// A background builtin started in a subshell ends with the subshell, as an
+	/// external one does. Left running it was out of reach — no process for
+	/// `pkill`, no job for `kill %N` — and spun for the life of the host.
+	#[tokio::test(flavor = "multi_thread")]
+	async fn subshell_exit_ends_its_background_builtins() {
+		let _guard = shell_test_lock().lock().await;
+		let output = tempfile::NamedTempFile::new().expect("output file");
+		let shell = Shell::new(None);
+		let command = format!("(yes > {} &)", quote_arg(&output.path().to_string_lossy()));
+
+		shell
+			.run(ShellRunOptions { command, ..Default::default() }, None, CancelToken::default())
+			.await
+			.expect("run subshell");
+
+		assert!(!still_written(output.path()).await, "background `yes` outlived its subshell");
+	}
+
+	/// `kill %N` ends a background job running inside the shell, which has no
+	/// process to deliver the signal to.
+	#[tokio::test(flavor = "multi_thread")]
+	async fn kill_jobspec_ends_in_process_background_job() {
+		let _guard = shell_test_lock().lock().await;
+		let output = tempfile::NamedTempFile::new().expect("output file");
+		let shell = Shell::new(None);
+		let command = format!("yes > {} & kill %1", quote_arg(&output.path().to_string_lossy()));
+
+		let result = shell
+			.run(ShellRunOptions { command, ..Default::default() }, None, CancelToken::default())
+			.await
+			.expect("run kill");
+
+		assert_eq!(result.exit_code, Some(0), "kill %1 failed");
+		assert!(!still_written(output.path()).await, "`yes` kept running after kill %1");
 	}
 
 	/// `live_background_job_count` reports 0 when the session has no live

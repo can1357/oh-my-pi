@@ -102,6 +102,26 @@ export class YieldQueue {
 		return false;
 	}
 
+	/**
+	 * Non-consuming check for an entry of `kind` that the drain would deliver.
+	 * Unlike {@link has}, it skips entries the dispatcher reports stale, since
+	 * the drain drops those without a message.
+	 */
+	hasDeliverable(kind: string): boolean {
+		const entries = this.#entries.get(kind);
+		if (!entries || entries.length === 0) return false;
+		const isStale = this.#dispatchers.get(kind)?.isStale;
+		if (!isStale) return true;
+		return entries.some(entry => {
+			try {
+				return !isStale(entry.value);
+			} catch {
+				// The drain rejects an entry whose stale check throws.
+				return false;
+			}
+		});
+	}
+
 	/** Arrange an idle flush for entries queued near the end of a streaming run. */
 	requestIdleFlush(): void {
 		for (const [kind, dispatcher] of this.#dispatchers) {

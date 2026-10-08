@@ -15,6 +15,7 @@ import type { ModelManagerOptions } from "../model-manager";
 import { getBundledModel } from "../models";
 import type { Api, FetchImpl, Model, ModelSpec } from "../types";
 import { DEVIN_DEFAULT_BASE_URL } from "../wire/devin";
+import { unionAccountCatalogs } from "./account-access";
 import { toModelSpec } from "./bundled-references";
 import { resolveModelCacheProviderId } from "./cache-provider-id";
 
@@ -88,9 +89,8 @@ export function openaiCodexModelManagerOptions(
 }
 
 /**
- * Merge complete per-account Codex catalogs into one authoritative list,
- * deduped by model id. The first account to expose an id supplies its spec;
- * account access is merged from every account whose catalog lists that id.
+ * Merge complete per-account Codex catalogs into one authoritative list via
+ * {@link unionAccountCatalogs}.
  *
  * Returns `null` when any account's fetch failed transiently, so a partial list
  * cannot replace the previous or bundled authoritative catalog. An account
@@ -102,8 +102,7 @@ export function openaiCodexModelManagerOptions(
 function unionCodexModels(
 	results: readonly { accountId: string | undefined; result: CodexModelDiscoveryResult | null }[],
 ): ModelSpec<"openai-codex-responses">[] | null {
-	const byId = new Map<string, ModelSpec<"openai-codex-responses">>();
-	let catalogs = 0;
+	const catalogs: ModelSpec<"openai-codex-responses">[][] = [];
 	for (const { accountId, result } of results) {
 		if (!result) return null;
 		if (result.rejectedStatus !== undefined) {
@@ -113,20 +112,9 @@ function unionCodexModels(
 			});
 			continue;
 		}
-		catalogs++;
-		for (const model of result.models) {
-			const existing = byId.get(model.id);
-			if (!existing) {
-				byId.set(model.id, model);
-			} else if (model.accountAccess) {
-				byId.set(model.id, {
-					...existing,
-					accountAccess: { ...existing.accountAccess, ...model.accountAccess },
-				});
-			}
-		}
+		catalogs.push(result.models);
 	}
-	return catalogs > 0 ? [...byId.values()] : null;
+	return catalogs.length > 0 ? unionAccountCatalogs(catalogs) : null;
 }
 
 // ---------------------------------------------------------------------------
