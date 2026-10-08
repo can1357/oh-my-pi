@@ -1789,11 +1789,26 @@ export class TurnRecovery {
 	/** Live session role for chain lookup, provided its assignment still matches the active model. */
 	#liveRetryRoleHint(currentModel: Model | null | undefined): string | undefined {
 		const role = this.#host.sessionManager?.getLastModelChangeRole?.();
-		if (!role || role === EPHEMERAL_MODEL_CHANGE_ROLE || !currentModel) return undefined;
-		const configured = this.#host.settings.getModelRole(role);
-		if (!configured) return undefined;
-		const resolved = resolveModelOverride([configured], this.#host.modelRegistry, this.#host.settings);
-		return resolved.model && modelsAreEqual(resolved.model, currentModel) ? role : undefined;
+		if (role && role !== EPHEMERAL_MODEL_CHANGE_ROLE && currentModel) {
+			const configured = this.#host.settings.getModelRole(role);
+			if (configured) {
+				const resolved = resolveModelOverride([configured], this.#host.modelRegistry, this.#host.settings);
+				if (resolved.model && modelsAreEqual(resolved.model, currentModel)) return role;
+			}
+		}
+		if (currentModel) {
+			// Subagent sessions hold an explicit `subagent:<id>` role assigned to their primary.
+			for (const key in this.#host.settings.getModelRoles()) {
+				if (key.startsWith("subagent:")) {
+					const configured = this.#host.settings.getModelRole(key);
+					if (configured) {
+						const resolved = resolveModelOverride([configured], this.#host.modelRegistry, this.#host.settings);
+						if (resolved.model && modelsAreEqual(resolved.model, currentModel)) return key;
+					}
+				}
+			}
+		}
+		return undefined;
 	}
 
 	/** Finds fallback candidates that follow the active selector. */
