@@ -150,22 +150,39 @@ cd "$REPO_ROOT"
 git rev-parse --git-dir >/dev/null 2>&1 ||
 	{ printf 'error: not a git checkout: %s\n' "$REPO_ROOT" >&2; exit 1; }
 
-if [ "$NO_SYNC" -eq 0 ]; then
-	if git remote get-url "$UPSTREAM_REMOTE" >/dev/null 2>&1; then
-		step "upstream remote: $UPSTREAM_REMOTE ($(git remote get-url "$UPSTREAM_REMOTE"))"
-	else
-		step "add $UPSTREAM_REMOTE remote ($UPSTREAM_URL)"
-		git remote add -t "$UPSTREAM_BRANCH" "$UPSTREAM_REMOTE" "$UPSTREAM_URL"
-	fi
-	# Pin the upstream remote to UPSTREAM_BRANCH only: rewrite any stale
-	# wildcard fetch refspec so no other upstream branch is ever pulled.
-	git config "remote.$UPSTREAM_REMOTE.fetch" "+refs/heads/$UPSTREAM_BRANCH:refs/remotes/$UPSTREAM_REMOTE/$UPSTREAM_BRANCH"
-	step "fetch $UPSTREAM_REMOTE/$UPSTREAM_BRANCH (main only)"
-	git fetch "$UPSTREAM_REMOTE" "$UPSTREAM_BRANCH"
+# Pin fetching to the minimum: upstream (can1357) tracks only
+# $UPSTREAM_BRANCH, origin (ynsr) tracks only main and $BRANCH, and neither
+# remote auto-follows tags — so no other branch or tag is ever fetched.
+# Stale remote-tracking refs are deleted outright.
+if git remote get-url "$UPSTREAM_REMOTE" >/dev/null 2>&1; then
+	step "upstream remote: $UPSTREAM_REMOTE ($(git remote get-url "$UPSTREAM_REMOTE"))"
+else
+	step "add $UPSTREAM_REMOTE remote ($UPSTREAM_URL)"
+	git remote add -t "$UPSTREAM_BRANCH" "$UPSTREAM_REMOTE" "$UPSTREAM_URL"
 fi
+git config "remote.$UPSTREAM_REMOTE.fetch" "+refs/heads/$UPSTREAM_BRANCH:refs/remotes/$UPSTREAM_REMOTE/$UPSTREAM_BRANCH"
+git config "remote.$UPSTREAM_REMOTE.tagopt" "--no-tags"
+git config remote.origin.tagopt "--no-tags"
+git for-each-ref --format='%(refname)' "refs/remotes/$UPSTREAM_REMOTE/" |
+	while IFS= read -r ref; do
+		case "$ref" in
+			"refs/remotes/$UPSTREAM_REMOTE/$UPSTREAM_BRANCH" | "refs/remotes/$UPSTREAM_REMOTE/HEAD") ;;
+			*) git update-ref -d "$ref" ;;
+		esac
+	done
+step "fetch $UPSTREAM_REMOTE/$UPSTREAM_BRANCH (other branches + tags excluded)"
+git fetch --prune --no-tags "$UPSTREAM_REMOTE" "+refs/heads/$UPSTREAM_BRANCH:refs/remotes/$UPSTREAM_REMOTE/$UPSTREAM_BRANCH"
+git for-each-ref --format='%(refname)' refs/remotes/origin/ |
+	while IFS= read -r ref; do
+		case "$ref" in
+			refs/remotes/origin/main | "refs/remotes/origin/$BRANCH" | refs/remotes/origin/HEAD) ;;
+			*) git update-ref -d "$ref" ;;
+		esac
+	done
+step "fetch origin (main + $BRANCH only, no tags)"
+git fetch --prune --no-tags origin "+refs/heads/main:refs/remotes/origin/main" "+refs/heads/$BRANCH:refs/remotes/origin/$BRANCH"
 
-step "fetch origin"
-git fetch origin
+
 
 if [ "$ALLOW_DIRTY" -eq 0 ] && [ -n "$(git status --porcelain)" ]; then
 	printf 'error: working tree is dirty; commit, stash, or pass --allow-dirty\n' >&2
@@ -201,7 +218,7 @@ fi
 if [ "$NO_SYNC" -eq 0 ]; then
 	step "update local main to $UPSTREAM_REF"
 	ensure_branch main "$UPSTREAM_REF"
-	git pull --ff-only "$UPSTREAM_REMOTE" "$UPSTREAM_BRANCH"
+	git pull --ff-only --no-tags "$UPSTREAM_REMOTE" "$UPSTREAM_BRANCH"
 	done_step "main at $(git rev-parse --short HEAD)"
 fi
 
@@ -324,7 +341,7 @@ fi
 if [ "$FORCE_RESET" -eq 1 ] && [ "$NO_SYNC" -eq 0 ] && [ "$NO_PUSH" -eq 0 ]; then
 	step "reset origin/main to $UPSTREAM_REF (exact mirror)"
 	git push --force-with-lease=refs/heads/main:origin/main origin "$UPSTREAM_REF:refs/heads/main"
-	git fetch origin main
+	git fetch --prune --no-tags origin "+refs/heads/main:refs/remotes/origin/main"
 	done_step "origin/main mirrors $UPSTREAM_REF"
 elif [ "$FORCE_RESET" -eq 1 ] && [ "$NO_SYNC" -eq 1 ]; then
 	printf 'warning: --force-reset needs upstream sync; skipping reset (--no-sync)\n' >&2
@@ -340,7 +357,7 @@ if [ "$NO_PUSH" -eq 1 ] && [ "$PUSHED" -eq 0 ] \
 	done_step "synced to $(git rev-parse --short HEAD) (not pushed, not pulled)"
 else
 	step "pull origin/$BRANCH"
-	git pull --ff-only origin "$BRANCH"
+	git pull --ff-only --no-tags origin "$BRANCH"
 	done_step "updated to $(git rev-parse --short HEAD)"
 fi
 
