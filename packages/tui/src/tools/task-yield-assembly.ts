@@ -88,30 +88,43 @@ function resolveYieldPayload(
 
 function appendYieldSection(
 	sections: Record<string, unknown>,
-	sectionCounts: Map<string, number>,
+	sectionArrayOwnership: Map<string, boolean>,
 	label: string,
 	value: unknown,
 	shape: "array" | "scalar" | undefined,
 	sectionShapes?: YieldSectionShapes,
 ): void {
-	const count = sectionCounts.get(label) ?? 0;
+	const ownsArray = sectionArrayOwnership.get(label);
 	const existing = sections[label];
 	if (shape === "scalar") {
 		sections[label] = value;
+		sectionArrayOwnership.set(label, false);
 	} else if (shape === "array") {
 		const values = isYieldSectionBatch(value, label, sectionShapes?.acceptsItem) ? value : [value];
-		if (count === 0 || !Array.isArray(existing)) sections[label] = values.slice();
-		else for (const element of values) existing.push(element);
-	} else if (count === 0) {
+		if (ownsArray === undefined || !Array.isArray(existing)) {
+			sections[label] = values.slice();
+			sectionArrayOwnership.set(label, true);
+		} else if (values.length > 0) {
+			const accumulator = ownsArray ? existing : existing.slice();
+			for (const element of values) accumulator.push(element);
+			if (!ownsArray) {
+				sections[label] = accumulator;
+				sectionArrayOwnership.set(label, true);
+			}
+		}
+	} else if (ownsArray === undefined) {
 		sections[label] = value;
+		sectionArrayOwnership.set(label, false);
 	} else if (Array.isArray(existing)) {
-		// A first unknown section borrows its payload; copy only when it becomes an accumulator.
-		if (count === 1) sections[label] = [...existing, value];
-		else existing.push(value);
+		if (ownsArray) existing.push(value);
+		else {
+			sections[label] = [...existing, value];
+			sectionArrayOwnership.set(label, true);
+		}
 	} else {
 		sections[label] = [existing, value];
+		sectionArrayOwnership.set(label, true);
 	}
-	sectionCounts.set(label, count + 1);
 }
 
 /**
@@ -147,7 +160,8 @@ export function assembleYieldResult(
 	// label is what nested a finalize payload (`type: "result"`, `data: {…}`) one
 	// level deep and made output-schema validation report every field missing.
 	const sections: Record<string, unknown> = {};
-	const sectionCounts = new Map<string, number>();
+	// Absent means unseen, false means borrowed payload, true means an owned array accumulator.
+	const sectionArrayOwnership = new Map<string, boolean>();
 	const overriddenScalars = new Set<string>();
 	let schemaOverridden = false;
 	let missingData = false;
@@ -167,7 +181,7 @@ export function assembleYieldResult(
 				declaredShape === "array" && sectionShapes?.acceptsArray?.(label, value) === false
 					? "scalar"
 					: declaredShape;
-			appendYieldSection(sections, sectionCounts, label, value, shape, sectionShapes);
+			appendYieldSection(sections, sectionArrayOwnership, label, value, shape, sectionShapes);
 			if (shape === "scalar") {
 				if (overridden) overriddenScalars.add(label);
 				else overriddenScalars.delete(label);

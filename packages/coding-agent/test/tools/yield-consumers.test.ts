@@ -346,6 +346,98 @@ describe("yield shape production consumers", () => {
 		}
 	});
 
+	it("owns mixed array accumulators across early and late scalar resets without changing native payloads", async () => {
+		const mixedSection = { anyOf: [{ type: "array", items: { type: "integer" } }, {}] };
+		const mixed = {
+			type: "object",
+			properties: { rows: mixedSection, other: mixedSection },
+			required: ["rows", "other"],
+			additionalProperties: false,
+		};
+		const tool = new YieldTool(session(mixed));
+		const first = await submit(tool, { type: ["rows", "other"], data: { rows: ["text"], other: ["keep"] } }, false);
+		const firstData = first.data;
+		if (!isRecord(firstData) || !Array.isArray(firstData.rows) || !Array.isArray(firstData.other)) {
+			throw new Error("Expected mapped array payloads");
+		}
+		Object.freeze(firstData.rows);
+		Object.freeze(firstData.other);
+
+		const item = await submit(tool, { type: ["rows"], data: 1 }, false);
+		const batch = await submit(tool, { type: ["rows"], data: [2, 3] }, false);
+		const reset = await submit(tool, { type: ["rows"], data: ["reset"] }, false);
+		const empty = await submit(tool, { type: ["rows"], data: [] }, false);
+		const afterReset = await submit(tool, { type: ["rows"], data: 4 }, false);
+		const finalBatch = await submit(tool, { type: ["rows"], data: [5, 6] }, false);
+		for (const arrayItem of [batch, reset, empty, finalBatch]) {
+			if (!Array.isArray(arrayItem.data)) throw new Error("Expected direct array payload");
+			Object.freeze(arrayItem.data);
+		}
+
+		const context = yieldSectionShapes(mixed);
+		expect(context.acceptsItem?.("rows", firstData.rows)).toBe(false);
+		expect(context.acceptsArray?.("rows", firstData.rows)).toBe(false);
+		expect(context.acceptsArray?.("rows", item.data)).toBe(true);
+		expect(context.acceptsArray?.("rows", reset.data)).toBe(false);
+		expect(context.acceptsArray?.("rows", empty.data)).toBe(true);
+		const items = [first, item, batch, reset, empty, afterReset, finalBatch];
+		const original = structuredClone(items);
+		const expectedRows = [
+			firstData.rows,
+			["text", 1],
+			["text", 1, 2, 3],
+			reset.data,
+			reset.data,
+			["reset", 4],
+			["reset", 4, 5, 6],
+		];
+		for (let length = 1; length <= items.length; length++) {
+			const prefix = items.slice(0, length);
+			const expected = { rows: expectedRows[length - 1], other: firstData.other };
+			for (let repeat = 0; repeat < 2; repeat++) {
+				const assembled = assembleYieldResult(prefix, undefined, context)?.data;
+				if (!isRecord(assembled)) throw new Error("Expected assembled mixed sections");
+				expect(assembled).toEqual(expected);
+				expect(assembled.other).toBe(firstData.other);
+				if (length === 1) expect(assembled.rows).toBe(firstData.rows);
+				if (length === 4 || length === 5) expect(assembled.rows).toBe(reset.data);
+				const output = finalize(prefix, mixed);
+				expect(output.exitCode).toBe(0);
+				expect(output.structuredOutput?.status).toBe("valid");
+				expect(JSON.parse(output.rawOutput)).toEqual(expected);
+				expect(items).toEqual(original);
+			}
+		}
+	});
+
+	it("keeps frozen declared batches separate from their owned result accumulator", async () => {
+		const declared = {
+			type: "object",
+			properties: { rows: { type: "array", items: { type: "integer" } } },
+			required: ["rows"],
+			additionalProperties: false,
+		};
+		const tool = new YieldTool(session(declared));
+		const first = await submit(tool, { type: ["rows"], data: [1, 2] }, false);
+		const batch = await submit(tool, { type: ["rows"], data: [3, 4] }, false);
+		for (const item of [first, batch]) {
+			if (!Array.isArray(item.data)) throw new Error("Expected declared batch");
+			Object.freeze(item.data);
+		}
+		const context = yieldSectionShapes(declared);
+		const single = assembleYieldResult([first], undefined, context)?.data;
+		if (!isRecord(single)) throw new Error("Expected declared array section");
+		expect(single.rows).toEqual([1, 2]);
+		expect(single.rows).not.toBe(first.data);
+		const items = [first, batch, await submit(tool, { type: ["rows"], data: 5 }, false)];
+		const original = structuredClone(items);
+		for (let repeat = 0; repeat < 2; repeat++) {
+			expect(assembleYieldResult(items, undefined, context)?.data).toEqual({ rows: [1, 2, 3, 4, 5] });
+			expect(finalize(items, declared).exitCode).toBe(0);
+			expect(items).toEqual(original);
+		}
+	});
+
 	it("exposes legal multi-label subsets and item batches to the provider parameter validator", async () => {
 		const declaration = {
 			...schema,

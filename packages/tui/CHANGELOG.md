@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- Fixed incremental task results nesting array batches, mixing independently labelled section values, and mutating original yield payloads during assembly.
+- Fixed incremental task results nesting array batches, mixing independently labelled section values, and mutating original yield payloads during repeated or mixed-section assembly.
 
 ## [18.8.4] - 2026-10-08
 
