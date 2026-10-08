@@ -736,7 +736,7 @@ fn render_change(
 				push_new_path(&mut text, change);
 				text.push('\n');
 				let old_data = prepared.old.data.as_slice().unwrap_or_default();
-				let sink = GitHunks { out: &mut text, old_data, budget };
+				let sink = GitHunks::new(&mut text, old_data, budget);
 				gix::diff::blob::UnifiedDiff::new(
 					&diff,
 					&input,
@@ -823,6 +823,65 @@ struct GitHunks<'a> {
 	/// Remaining-budget check threaded from `render_change`; `None` when the
 	/// caller set no `max_bytes`.
 	budget:   Option<RenderBudget>,
+	context:  FunctionContext<'a>,
+}
+
+impl<'a> GitHunks<'a> {
+	fn new(out: &'a mut String, old_data: &'a [u8], budget: Option<RenderBudget>) -> Self {
+		Self { out, old_data, budget, context: FunctionContext::default() }
+	}
+}
+
+/// Funcname scan state for hunk headers. Hunks arrive in ascending order, so
+/// each lookup resumes where the previous one stopped and keeps the last
+/// match, like git's xemit, instead of rescanning from the top per hunk.
+#[derive(Default)]
+struct FunctionContext<'a> {
+	/// Lines of `old_data` scanned so far.
+	lines:  usize,
+	/// Byte offset of the next unscanned line; past the end once exhausted.
+	offset: usize,
+	last:   Option<&'a [u8]>,
+}
+
+impl<'a> FunctionContext<'a> {
+	/// The funcname for a hunk starting at 1-based line `hunk_start`: the last
+	/// earlier line accepted by git's default rule.
+	fn before(&mut self, data: &'a [u8], hunk_start: u32) -> Option<&'a [u8]> {
+		let wanted = usize::try_from(hunk_start.saturating_sub(1)).ok()?;
+		if wanted < self.lines {
+			*self = Self::default();
+		}
+		while self.lines < wanted && self.offset <= data.len() {
+			let rest = &data[self.offset..];
+			let len = rest
+				.iter()
+				.position(|&byte| byte == b'\n')
+				.unwrap_or(rest.len());
+			if let Some(name) = git_funcname(&rest[..len]) {
+				self.last = Some(name);
+			}
+			self.offset += len + 1;
+			self.lines += 1;
+		}
+		self.last
+	}
+}
+
+/// git's default funcname rule (xemit's `def_ff`): the line starts with an
+/// ASCII letter, `_` or `$`; it is cut to 80 bytes, then trailing whitespace
+/// is trimmed.
+fn git_funcname(line: &[u8]) -> Option<&[u8]> {
+	let first = *line.first()?;
+	if !(first.is_ascii_alphabetic() || first == b'_' || first == b'$') {
+		return None;
+	}
+	let line = &line[..line.len().min(80)];
+	let end = line
+		.iter()
+		.rposition(|byte| !matches!(byte, b' ' | b'\t' | b'\n' | b'\x0b' | b'\x0c' | b'\r'))
+		.map_or(0, |index| index + 1);
+	Some(&line[..end])
 }
 
 /// Conservative worst-case byte length `bytes` will occupy in `self.out`
@@ -885,13 +944,8 @@ impl gix::diff::blob::unified_diff::ConsumeHunk for GitHunks<'_> {
 		self.out.push_str(" +");
 		push_range(self.out, new_start, header.after_hunk_len);
 		self.out.push_str(" @@");
-		if let Some(function) = function_context(self.old_data, header.before_hunk_start) {
+		if let Some(function) = self.context.before(self.old_data, header.before_hunk_start) {
 			self.out.push(' ');
-			// `function_context` returns the complete preceding
-			// non-whitespace/non-`}` line from `old_data`, independent of the
-			// hunk's own line lengths: a pathological invalid-UTF-8 line here
-			// must be bounded the same way an ordinary hunk line is below,
-			// before the lossy conversion runs.
 			self.check_budget_for(function)?;
 			self.out.push_str(&String::from_utf8_lossy(function));
 		}
@@ -1400,21 +1454,6 @@ fn display_id(id: gix::ObjectId, full: bool) -> String {
 	}
 }
 
-fn function_context(data: &[u8], hunk_start: u32) -> Option<&[u8]> {
-	let before = usize::try_from(hunk_start.saturating_sub(1)).ok()?;
-	let mut candidate = None;
-	for line in data.split(|&byte| byte == b'\n').take(before) {
-		let line = line.strip_suffix(b"\r").unwrap_or(line);
-		if line
-			.first()
-			.is_some_and(|byte| !byte.is_ascii_whitespace() && *byte != b'}')
-		{
-			candidate = Some(line);
-		}
-	}
-	candidate
-}
-
 const fn zero_start(start: u32, len: u32) -> u32 {
 	if len == 0 {
 		start.saturating_sub(1)
@@ -1662,6 +1701,55 @@ mod tests {
 	}
 
 	#[test]
+	fn hunk_function_context_matches_git() {
+		// One hunk per section: git names each with the last earlier line that
+		// starts with a letter, `_` or `$`, cut to 80 bytes with trailing
+		// whitespace trimmed. `#`, `{`, `//`, `}` and indented lines never
+		// qualify, and a hunk with no new candidate reuses the previous one.
+		let dir = fixture();
+		let long = format!("long_{}()", "x".repeat(90));
+		let headers = [
+			long.as_str(),
+			"#include <stdio.h>",
+			"{",
+			"// comment",
+			"$dollar \t",
+			"_under",
+			"}",
+			"  indented",
+		];
+		let section = |index: usize, header: &str, changed: bool| {
+			let mut text = format!("{header}\n");
+			for row in 0..10 {
+				let body = if changed && row == 5 {
+					"edited"
+				} else {
+					"body"
+				};
+				writeln!(text, "    {body} {index} {row}").expect("write to String");
+			}
+			text
+		};
+		let render = |changed: bool| -> String {
+			headers
+				.iter()
+				.enumerate()
+				.map(|(index, header)| section(index, header, changed))
+				.collect()
+		};
+		fs::write(dir.path().join("funcs.txt"), render(false)).expect("write");
+		git(dir.path(), &["add", "funcs.txt"]);
+		git(dir.path(), &["commit", "-qm", "funcs"]);
+		fs::write(dir.path().join("funcs.txt"), render(true)).expect("modify");
+		let repo = GitRepo::discover(dir.path())
+			.expect("discover")
+			.expect("repository");
+		let expected = git(dir.path(), &["diff", "--no-ext-diff"]);
+		assert!(expected.contains(" @@ $dollar\n"), "{expected}");
+		assert_eq!(repo.diff_text(&DiffOptions::default()).expect("diff"), expected);
+	}
+
+	#[test]
 	fn binary_and_missing_newline_match_git() {
 		let dir = fixture();
 		fs::write(dir.path().join("binary.dat"), [0, 1, 2, 3, 4, 5]).expect("write binary");
@@ -1706,11 +1794,12 @@ mod tests {
 		);
 	}
 
-	// Regression: an isolated-task baseline once rendered the whole index-vs-HEAD
-	// patch before anyone looked at its size; on a 15-way jj conflict exported to
-	// git that was ~1.7M blobs and grew the process to 141 GB. A cap one byte
-	// under the patch must surface as `OutputTooLarge`; a cap equal to it must
-	// return the same bytes as an uncapped render.
+	// Regression: an isolated-task baseline once rendered the whole
+	// index-vs-HEAD patch before anyone looked at its size; on a 15-way jj
+	// conflict exported to git that was ~1.7M blobs and grew the process to
+	// 141 GB. A cap one byte under the patch must surface as
+	// `OutputTooLarge`; a cap equal to it must return the same bytes as an
+	// uncapped render.
 	#[test]
 	fn max_bytes_rejects_oversized_patch_and_passes_one_within_cap() {
 		let dir = fixture();
@@ -1773,7 +1862,7 @@ mod tests {
 			.collect();
 		let full_len: usize = lines.iter().map(|(_, content)| content.len()).sum();
 		let budget = Some(RenderBudget { limit: 100, already: 0 });
-		let mut sink = GitHunks { out: &mut out, old_data: b"", budget };
+		let mut sink = GitHunks::new(&mut out, b"", budget);
 		let header = HunkHeader {
 			before_hunk_start: 1,
 			before_hunk_len:   0,
@@ -1811,7 +1900,7 @@ mod tests {
 		let invalid_line = vec![0x80_u8; 1_000_000];
 		let lines: Vec<(DiffLineKind, &[u8])> = vec![(DiffLineKind::Add, invalid_line.as_slice())];
 		let budget = Some(RenderBudget { limit: 100, already: 0 });
-		let mut sink = GitHunks { out: &mut out, old_data: b"", budget };
+		let mut sink = GitHunks::new(&mut out, b"", budget);
 		let header = HunkHeader {
 			before_hunk_start: 1,
 			before_hunk_len:   0,
@@ -1833,50 +1922,46 @@ mod tests {
 		);
 	}
 
-	// Regression for the round-2 reviewer finding: `function_context` returns
-	// the complete preceding non-whitespace/non-`}` line from `old_data`,
-	// independent of the hunk's own line lengths. `consume_hunk` used to
-	// lossy-convert and append that slice before any budget check ran (the
-	// first `check_budget()` call comes after the header line, but only once
-	// the function-context text has already been pushed onto `out`), so a
-	// pathological function-context line could still balloon `out` up to 3x
-	// its size before the error surfaced. It must be bounded the same way an
-	// ordinary hunk line already is.
+	// The function-context line is lossy-converted onto the header, so a tight
+	// `max_bytes` must refuse it before converting. git's 80-byte funcname cap
+	// bounds the conversion itself; the line still needs a qualifying (ASCII
+	// letter) first byte to be picked at all.
 	#[test]
 	fn hunk_writer_bounds_the_function_context_line_before_converting_it() {
 		use gix::diff::blob::unified_diff::{ConsumeHunk, DiffLineKind, HunkHeader};
 
-		let mut out = String::new();
-		// Every byte is its own maximal invalid subsequence, so lossy
-		// conversion expands this 3x: 1,000,000 bytes -> 3,000,000 bytes.
-		let invalid_context_line = vec![0x80_u8; 1_000_000];
-		let mut old_data = invalid_context_line.clone();
-		old_data.push(b'\n');
-		old_data.extend_from_slice(b"unchanged\n");
+		let mut old_data = vec![b'A'];
+		old_data.extend(std::iter::repeat_n(0x80_u8, 1_000_000));
+		old_data.extend_from_slice(b"\nunchanged\n");
 		let lines: Vec<(DiffLineKind, &[u8])> = vec![(DiffLineKind::Add, b"x\n".as_slice())];
-		let budget = Some(RenderBudget { limit: 100, already: 0 });
-		let mut sink = GitHunks { out: &mut out, old_data: &old_data, budget };
-		// `before_hunk_start: 2` makes `function_context` scan exactly the
-		// first line of `old_data` — the pathological one — and return it.
+		// `before_hunk_start: 2` makes the function context the first line of
+		// `old_data`: `A` followed by 79 invalid bytes after the cap, 240 bytes
+		// once each becomes U+FFFD.
 		let header = HunkHeader {
 			before_hunk_start: 2,
 			before_hunk_len:   0,
 			after_hunk_start:  1,
 			after_hunk_len:    1,
 		};
+
+		let mut out = String::new();
+		let mut sink =
+			GitHunks::new(&mut out, &old_data, Some(RenderBudget { limit: 100, already: 0 }));
 		let err = sink.consume_hunk(header, &lines).unwrap_err();
 		assert!(
 			err.get_ref()
 				.is_some_and(|inner| inner.downcast_ref::<BudgetExceeded>().is_some()),
 			"{err:?}"
 		);
-		assert!(
-			out.len() < invalid_context_line.len() / 10,
-			"hunk writer converted the oversized function-context line before checking the budget: \
-			 wrote {} bytes for a {}-byte context line",
-			out.len(),
-			invalid_context_line.len()
-		);
+		assert!(out.len() <= 100, "wrote {} bytes past a 100-byte budget: {out:?}", out.len());
+
+		let mut out = String::new();
+		let mut sink =
+			GitHunks::new(&mut out, &old_data, Some(RenderBudget { limit: 1_000, already: 0 }));
+		sink
+			.consume_hunk(header, &lines)
+			.expect("capped context fits");
+		assert_eq!(out, format!("@@ -1,0 +1 @@ A{}\n+x\n", "\u{FFFD}".repeat(79)));
 	}
 
 	// Regression for the P1 gap: base85-encoding a binary body can expand well

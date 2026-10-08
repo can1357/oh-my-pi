@@ -67,6 +67,7 @@ async function createContext() {
 	let editorText = "";
 	const keyMap: Record<string, KeyId[]> = {
 		"app.display.reset": ["alt+l"],
+		"app.stt.pushToTalk": ["space"],
 		"app.thinking.toggle": ["ctrl+t"],
 		"app.history.search": ["ctrl+r"],
 		"app.editor.external": ["ctrl+g"],
@@ -336,6 +337,25 @@ describe("InputController keybinding setup", () => {
 		expect(spies.showModelSelector).toHaveBeenNthCalledWith(1, { temporaryOnly: true });
 		expect(spies.showModelSelector).toHaveBeenNthCalledWith(2);
 		expect(spies.resetDisplayAfterAppearanceRefresh).toHaveBeenCalledTimes(1);
+	});
+
+	it("enters Python mode only once whitespace follows a typed sigil", async () => {
+		const { InputController, ctx, editor } = await createContext();
+		const controller = new InputController(ctx);
+
+		controller.setupKeyHandlers();
+
+		for (const draft of ["$", "$H", "$$", "$$a"]) {
+			editor.onChange?.(draft);
+			expect(ctx.isPythonMode).toBe(false);
+		}
+		expect(ctx.updateEditorBorderColor).not.toHaveBeenCalled();
+
+		editor.onChange?.("$$ ");
+		expect(ctx.isPythonMode).toBe(true);
+		editor.onChange?.("$$ a");
+		expect(ctx.isPythonMode).toBe(true);
+		expect(ctx.updateEditorBorderColor).toHaveBeenCalledTimes(1);
 	});
 
 	it("does not mark pasted shell prompts as Python mode while editing", async () => {

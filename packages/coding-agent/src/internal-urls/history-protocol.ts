@@ -19,6 +19,7 @@
  */
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
+import { LRUCache } from "@oh-my-pi/pi-utils/lru";
 import type { AgentRef } from "../registry/agent-registry";
 import { AgentRegistry } from "../registry/agent-registry";
 import { ensurePersistedRoster } from "../registry/persisted-agents";
@@ -37,7 +38,7 @@ import {
 import { loadSessionMessagesReadOnly } from "../session/session-loader";
 import type { SessionEntry } from "../session/session-entries";
 import historyPromptDoc from "../prompts/internal-urls/history.md" with { type: "text" };
-import { sessionFilesFromDisk } from "./registry-helpers";
+import { artifactsDirsFromRegistry, sessionFilesFromDisk } from "./registry-helpers";
 import type {
 	InternalResource,
 	InternalUrl,
@@ -46,6 +47,23 @@ import type {
 	SchemeSpec,
 	UrlCompletion,
 } from "./types";
+
+/**
+ * On-disk transcript ids for `complete()`, keyed by the scanned dir set.
+ * Completion runs per keystroke and the scan is recursive, so a short reuse
+ * window replaces a full rescan on every key.
+ */
+const completionDiskIds = new LRUCache<string, Promise<string[]>>({ max: 8, ttl: 2000 });
+
+function diskIdsForCompletion(): Promise<string[]> {
+	const key = artifactsDirsFromRegistry().join("\0");
+	const cached = completionDiskIds.get(key);
+	if (cached) return cached;
+	const ids = sessionFilesFromDisk().then(files => [...files.keys()]);
+	completionDiskIds.set(key, ids);
+	ids.catch(() => completionDiskIds.delete(key));
+	return ids;
+}
 
 /** Registry lookup for a `history://<id>` URL, bound to the caller's root. */
 interface RefLookup {
@@ -311,10 +329,11 @@ export class HistoryProtocolHandler implements ProtocolHandler {
 	}
 
 	/**
-	 * Find the registry ref for `agentId` (exact, then case-insensitive),
-	 * skipping advisor transcripts.
+	 * The registry roster as the caller sees it: the caller root's persisted
+	 * roster is refreshed first, and its artifact dir leads every on-disk scan.
+	 * Both the bare index and `history://<id>` lookups read this one source.
 	 */
-	async #lookup(agentId: string, context: ResolveContext | undefined): Promise<RefLookup> {
+	async #roster(context: ResolveContext | undefined): Promise<Omit<RefLookup, "ref">> {
 		const registry = AgentRegistry.global();
 		// A caller resolving a possibly-parked id refreshes its own root's
 		// persisted roster first: a same-named parked ref restored by another
@@ -330,7 +349,16 @@ export class HistoryProtocolHandler implements ProtocolHandler {
 		// Advisor transcripts are observability-only — surfaced in the Agent Hub, never
 		// in the agent-facing roster. Hide them from the index, lookup, and completions.
 		const visible = registry.list().filter(ref => ref.kind !== "advisor");
-		let ref = registry.get(agentId);
+		return { visible, preferredArtifactDir };
+	}
+
+	/**
+	 * Find the registry ref for `agentId` (exact, then case-insensitive),
+	 * skipping advisor transcripts.
+	 */
+	async #lookup(agentId: string, context: ResolveContext | undefined): Promise<RefLookup> {
+		const { visible, preferredArtifactDir } = await this.#roster(context);
+		let ref = AgentRegistry.global().get(agentId);
 		if (ref?.kind === "advisor") ref = undefined;
 		if (!ref) {
 			// Case-insensitive fallback: agent ids are human-typed (e.g. AuthLoader).
@@ -363,10 +391,8 @@ export class HistoryProtocolHandler implements ProtocolHandler {
 		if (isCurrentFullRoute(url)) return this.#resolveCurrentFull(url, context);
 		const agentId = url.rawHost || url.hostname;
 		if (!agentId) {
-			const visible = AgentRegistry.global()
-				.list()
-				.filter(ref => ref.kind !== "advisor");
-			const content = await this.#renderIndex(visible);
+			const { visible, preferredArtifactDir } = await this.#roster(context);
+			const content = await this.#renderIndex(visible, preferredArtifactDir);
 			return {
 				url: url.href,
 				content,
@@ -453,7 +479,7 @@ export class HistoryProtocolHandler implements ProtocolHandler {
 		return match;
 	}
 
-	async #renderIndex(refs: AgentRef[]): Promise<string> {
+	async #renderIndex(refs: AgentRef[], preferredArtifactDir: string | undefined): Promise<string> {
 		const entries: IndexEntry[] = refs.map(ref => ({
 			id: ref.id,
 			status: ref.status,
@@ -463,7 +489,7 @@ export class HistoryProtocolHandler implements ProtocolHandler {
 		}));
 		// Merge on-disk transcripts for agents absent from the registry.
 		const registered = new Set(refs.map(ref => ref.id));
-		const disk = await sessionFilesFromDisk();
+		const disk = await sessionFilesFromDisk(preferredArtifactDir);
 		for (const id of disk.keys()) {
 			if (registered.has(id)) continue;
 			entries.push({ id, status: "on disk", kind: "—", parent: "—", lastActivity: "—" });
@@ -493,8 +519,7 @@ export class HistoryProtocolHandler implements ProtocolHandler {
 				description: `${ref.status} · ${ref.kind}${ref.parentId ? ` · parent ${ref.parentId}` : ""}`,
 			});
 		}
-		const disk = await sessionFilesFromDisk();
-		for (const id of disk.keys()) {
+		for (const id of await diskIdsForCompletion()) {
 			if (seen.has(id)) continue;
 			seen.add(id);
 			completions.push({ value: id, description: "on disk" });

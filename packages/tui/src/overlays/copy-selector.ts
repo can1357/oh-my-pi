@@ -48,10 +48,10 @@ import { actionHint, hintsRow, type NativeHint, overlayCard } from "../native/ov
 import { CLOSE_ACTION, type PickerEvent, picker, pickerAction, pickerEvent } from "../native/picker";
 
 /** Key of the leading list item that replays the history older than the startup tail. */
-export const EARLIER_TURNS_KEY = "earlier";
+const EARLIER_TURNS_KEY = "earlier";
 
 /** Leading item of a truncated transcript list; selecting it loads the older turns. */
-export const earlierTurnsItem: NativeNode = node(
+const earlierTurnsItem: NativeNode = node(
 	"item",
 	{ label: [span("Earlier turns…", "muted")], hint: ["a"] },
 	undefined,
@@ -112,7 +112,7 @@ function entryTime(entry: TranscriptEntry): string {
  * One list item per outline target, keyed by the turn's opening entry id:
  * the plain turn summary as label, `detail` (or the entry time) on the right.
  */
-export function turnItem(target: OutlineTarget, detail?: TspText): NativeNode {
+function turnItem(target: OutlineTarget, detail?: TspText): NativeNode {
 	const entry = target.entries[0]!;
 	const { label, role } = turnSummary(entry);
 	const time = entryTime(entry);
@@ -164,14 +164,14 @@ function toolCallLabel(name: string, args: Record<string, unknown> | undefined):
 }
 
 /** The timeline pickers' one fact column: a user turn's clock time. */
-export const TIMELINE_COLUMNS: readonly TspPickerColumn[] = [{ id: "at", format: "dim", priority: 1 }];
+const TIMELINE_COLUMNS: readonly TspPickerColumn[] = [{ id: "at", format: "dim", priority: 1 }];
 
 /**
  * The `timeline` picker item of one outline target (rewind, copy), keyed by
  * the turn's opening entry id: user turns carry their `HH:MM`, pure tool turns
  * the tool's role and a `name target` label.
  */
-export function timelineItem(target: OutlineTarget): TspPickerItem {
+function timelineItem(target: OutlineTarget): TspPickerItem {
 	const entry = target.entries[0]!;
 	const id = target.turnId;
 	const summary = turnSummary(entry);
@@ -203,7 +203,7 @@ export function timelineItem(target: OutlineTarget): TspPickerItem {
 }
 
 /** Timeline picker items for `targets`, reused while `targets` is the same array. */
-export class TimelineItems {
+class TimelineItems {
 	#memo: { targets: readonly OutlineTarget[]; items: TspPickerItem[] } | undefined;
 
 	of(targets: readonly OutlineTarget[]): TspPickerItem[] {
@@ -274,6 +274,7 @@ export interface CopySelectorDeps {
 	cwd: string;
 	hideThinkingBlock?: () => boolean;
 	proseOnlyThinking?: () => boolean;
+	expandThinkingBlocks?: () => boolean;
 	linkTargets?: ReadonlyMap<string, string>;
 	requestRender: () => void;
 	/** Replaces the "Copy" header when the picker is reused for another purpose. */
@@ -326,6 +327,12 @@ interface ControlRegion {
 	end: number;
 }
 
+/** A block's preview rows (highlighted, width-cut, plus the "more lines" row) and its full line count. */
+interface BlockPreview {
+	rows: string[];
+	lineCount: number;
+}
+
 export class CopySelectorComponent implements Component {
 	#builder: ChatTranscriptBuilder;
 	#browser: TranscriptBrowser;
@@ -347,6 +354,8 @@ export class CopySelectorComponent implements Component {
 
 	/** Last described root and the state it was built from. */
 	#native: { memo: string; targets: OutlineTarget[]; blocks: CopyBlock[] | undefined; node: NativeNode } | undefined;
+	/** ANSI block previews (syntax highlight + width cut) of the exploded turn. */
+	#blockPreviews: { blocks: CopyBlock[]; inner: number; previews: readonly BlockPreview[] } | undefined;
 	/** Transcript list items, rebuilt only when the replayed targets change. */
 	#nativeItems: { targets: OutlineTarget[]; truncated: boolean; items: NativeNode[] } | undefined;
 	/** Timeline picker items of the replayed targets. */
@@ -379,6 +388,7 @@ export class CopySelectorComponent implements Component {
 			cwd: this.deps.cwd,
 			hideThinkingBlock: this.deps.hideThinkingBlock,
 			proseOnlyThinking: this.deps.proseOnlyThinking,
+			expandThinkingBlocks: this.deps.expandThinkingBlocks,
 			linkTargets: this.deps.linkTargets,
 			requestRender: this.deps.requestRender,
 		});
@@ -412,6 +422,7 @@ export class CopySelectorComponent implements Component {
 	}
 
 	invalidate(): void {
+		this.#blockPreviews = undefined;
 		this.#builder.container.invalidate();
 		this.#browser.invalidate();
 	}
@@ -943,18 +954,13 @@ export class CopySelectorComponent implements Component {
 	 */
 	#composeBlocks(blocks: CopyBlock[], columnWidth: number, lineOffset: number): ComposedColumn {
 		const inner = Math.max(10, columnWidth - 4);
+		const previews = this.#previewBlocks(blocks, inner);
 		const lines: string[] = [];
 		let selStart = -1;
 		let selEnd = -1;
 		for (let index = 0; index < blocks.length; index++) {
 			const block = blocks[index]!;
-			const raw = block.content.split("\n");
-			const shown = raw.slice(0, BLOCK_PREVIEW_LINES);
-			const styled = block.language ? highlightCode(shown.join("\n"), block.language) : shown;
-			const rows = styled.map(row => truncateToWidth(replaceTabs(row), inner));
-			if (raw.length > shown.length) {
-				rows.push(theme.fg("dim", `… +${raw.length - shown.length} more lines`));
-			}
+			const { rows, lineCount } = previews[index]!;
 			const selected = index === this.#blockSelected;
 			const captionColor: ThemeColor = selected ? OUTLINE_COLOR : "dim";
 			const controls: Array<{ action: ControlRegion["action"]; text: string }> = [
@@ -963,7 +969,7 @@ export class CopySelectorComponent implements Component {
 			if (block.href && this.deps.onOpen) controls.push({ action: "open", text: `${theme.cmd.share} open` });
 			const controlsWidth = controls.reduce((sum, control) => sum + visibleWidth(control.text) + 2, 0);
 			const summary = truncateToWidth(
-				`${index + 1}/${blocks.length}${theme.sep.dot}${block.label}${theme.sep.dot}${raw.length} line${raw.length === 1 ? "" : "s"}`,
+				`${index + 1}/${blocks.length}${theme.sep.dot}${block.label}${theme.sep.dot}${lineCount} line${lineCount === 1 ? "" : "s"}`,
 				Math.max(4, inner - controlsWidth),
 			);
 			// Caption: two-space gutter, summary, then the controls, each preceded by two spaces.
@@ -995,6 +1001,24 @@ export class CopySelectorComponent implements Component {
 		}
 		lines.push("");
 		return { lines, selStart, selEnd };
+	}
+
+	/** Highlighted, width-cut previews of each block; rebuilt when the block set or width changes. */
+	#previewBlocks(blocks: CopyBlock[], inner: number): readonly BlockPreview[] {
+		const cached = this.#blockPreviews;
+		if (cached?.blocks === blocks && cached.inner === inner) return cached.previews;
+		const previews = blocks.map(block => {
+			const raw = block.content.split("\n");
+			const shown = raw.slice(0, BLOCK_PREVIEW_LINES);
+			const styled = block.language ? highlightCode(shown.join("\n"), block.language) : shown;
+			const rows = styled.map(row => truncateToWidth(replaceTabs(row), inner));
+			if (raw.length > shown.length) {
+				rows.push(theme.fg("dim", `… +${raw.length - shown.length} more lines`));
+			}
+			return { rows, lineCount: raw.length };
+		});
+		this.#blockPreviews = { blocks, inner, previews };
+		return previews;
 	}
 }
 

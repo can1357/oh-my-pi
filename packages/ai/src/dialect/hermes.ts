@@ -1,8 +1,10 @@
 import { parseJsonWithRepair, parseStreamingJson } from "@oh-my-pi/pi-utils";
 import type { Message, ToolCall } from "../types";
+import { parseToolCallArguments } from "../utils/tool-call-arguments";
 import { asRecord, mintToolCallId, partialSuffixOverlapAny } from "./coercion";
 import dialectPrompt from "./hermes.md" with { type: "text" };
 import { renderChatMlTranscript, renderDelimitedThinking, renderToolResponseResults, stringifyJson } from "./rendering";
+import { TerminatorWait } from "./terminator-wait";
 import type {
 	DialectDefinition,
 	DialectRenderOptions,
@@ -27,6 +29,7 @@ export class HermesInbandScanner implements InbandScanner {
 	#parseThinking: boolean;
 	#inThinking = false;
 	#thinking = "";
+	readonly #closeWait = new TerminatorWait();
 
 	constructor(options: InbandScannerOptions = {}) {
 		this.#parseThinking = options.parseThinking === true;
@@ -34,11 +37,15 @@ export class HermesInbandScanner implements InbandScanner {
 
 	feed(text: string): InbandScanEvent[] {
 		if (text.length === 0) return [];
-		this.#buffer += text;
-		return this.#consume(false);
+		if (this.#closeWait.absorb(text)) return [];
+		this.#buffer = this.#closeWait.release(this.#buffer) + text;
+		const events = this.#consume(false);
+		if (this.#inside && this.#started && !this.#inThinking) this.#closeWait.arm(TOOL_CLOSE, this.#buffer);
+		return events;
 	}
 
 	flush(): InbandScanEvent[] {
+		this.#buffer = this.#closeWait.release(this.#buffer);
 		return this.#consume(true);
 	}
 
@@ -147,11 +154,7 @@ export class HermesInbandScanner implements InbandScanner {
 			if (typeof parsed.name !== "string" || parsed.name.length === 0) return undefined;
 			let args = parsed.arguments;
 			if (typeof args === "string") {
-				try {
-					args = parseJsonWithRepair<unknown>(args);
-				} catch {
-					args = {};
-				}
+				args = parseToolCallArguments(args);
 			}
 			return { name: parsed.name, arguments: asRecord(args) };
 		} catch {

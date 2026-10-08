@@ -3,6 +3,7 @@
 provider "openai-codex" {
 	default-model "gpt-5.5"
 	env "OPENAI_CODEX_OAUTH_TOKEN"
+	dynamic-models-authoritative #true
 	kind-apis {
 		image "openai-codex-responses"
 	}
@@ -24,9 +25,13 @@ provider "openai-codex" {
 	}
 
 	// Replaces the Codex provider's handwritten flex/priority pricing fallback.
+	// Fast (priority) draws included subscription usage at 2.5x Standard on
+	// every model that supports it; purchased credits and Enterprise
+	// pay-as-you-go bill 2x. See
+	// https://learn.chatgpt.com/docs/agent-configuration/speed.
 	service-tier-cost {
 		flex 0.5
-		priority 2
+		priority 2.5
 	}
 	// Harmony-protocol leak detection/mitigation applies to every Codex model,
 	// current and future; replaces the provider check in harmony-leak.ts.
@@ -75,6 +80,12 @@ provider "openai-codex" {
 		service-tier-cost {
 			flex 0.5
 			priority 2.5
+			// Ultrafast is Astra-only. This table uses OpenAI's included-usage
+			// multipliers for Codex: Ultrafast 8x and Fast 2.5x Standard (purchased
+			// credits / Enterprise pay-as-you-go bill 6x and 2x instead). See
+			// https://learn.chatgpt.com/docs/agent-configuration/speed and
+			// https://learn.chatgpt.com/docs/pricing.
+			ultrafast 8
 		}
 		limits-patch {
 			context-window 272000
@@ -125,14 +136,6 @@ provider "openai-codex" {
 		}
 		revision "<5.4" {
 			supports-reasoning-summary #false
-		}
-		// Subscription Codex rates the priority service tier at 2.5x for the
-		// GPT-5.5 generation (2x elsewhere).
-		revision "=5.5" {
-			service-tier-cost {
-				flex 0.5
-				priority 2.5
-			}
 		}
 		// Codex discovery reports inconsistent priorities for the GPT-5.4
 		// family; normalize by variant. Mini/nano also keep the lower prompt

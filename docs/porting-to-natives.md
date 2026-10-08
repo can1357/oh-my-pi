@@ -15,21 +15,19 @@ The package has no `packages/natives/src/<module>` wrapper layer. Its entrypoint
 - eager root: `native/index.js` with generated `native/index.d.ts`;
 - lazy desktop wrapper: `native/desktop.js` / `desktop.d.ts`;
 - lazy clipboard wrapper: `native/clipboard.js` / `clipboard.d.ts`;
+- lazy Windows-path wrapper: `native/path.js` / `path.d.ts` (`@oh-my-pi/pi-natives/path`); other platforms return the input unchanged without loading;
 - lazy vcs wrapper: `native/vcs.js` / `vcs.d.ts` (`@oh-my-pi/pi-natives/vcs`).
 
-The vcs subpath exposes the backend-neutral `Vcs*` repository API (added in
-18.0.9, with `VcsGitRepo.mergeBase()` following in 18.0.10): discovery and
-Git/Jujutsu operations through `git()` / `repo()` / `require()` / `requireGit()`
-returning `VcsGitRepo` / `VcsRepo` / `VcsJjWorkspace` handles (refs and status,
-diffs, staging, commits, branches, worktrees, patch application, stash,
-cherry-pick, CLI-backed push/fetch/clone, all cancellation-aware), plus the
-JS-side error helpers (`isVcsError`) and the `watch(repo, onChange)` head-change
-watcher built on `VcsRepo.watchTarget()`.
+The VCS subpath exposes discovery and Git/Jujutsu operations through `git`,
+`repo`, `repoForDisplay`, `require`, `requireGit`, and `jj`, plus metadata,
+clone/detach/patch helpers, error predicates, and a head-change watcher built
+on `VcsRepo.watchTarget()`. `repoForDisplay` prefers Jujutsu on equal-root
+ties; Git-safe automation uses `repo` instead.
 
 Two commands serve different purposes:
 
 - `bun --cwd=packages/natives run build:bindings` runs napi-rs for the host, installs a local variant addon and generated declarations, and regenerates explicit ESM/enum exports. Use this when the Rust public type surface changes.
-- `bun --cwd=packages/natives run build` invokes `scripts/bazel-natives.ts host --dest native`. The host target builds through the local cargo/napi-rs backend by default (`OMP_NATIVE_BUILD_BACKEND=bazel` opts into bazel) but does not regenerate declarations.
+- `bun --cwd=packages/natives run build` invokes `scripts/bazel-natives.ts host --dest native`. The host target builds through the local cargo/napi-rs backend by default and therefore also regenerates declarations and exports; `OMP_NATIVE_BUILD_BACKEND=bazel` opts into Bazel, which leaves those committed files unchanged.
 
 Release builds use Bazel targets and publish `.node` files in platform leaf packages. The core publish rewrite removes addons and injects lockstep optional dependencies generated from `LEAF_TARGETS` in `gen-npm-packages.ts`.
 
@@ -77,7 +75,7 @@ Then verify:
 
 ### 3. Add a lazy entrypoint only when justified
 
-The root eagerly loads the addon. If a worker must import without paying that startup cost, follow the desktop/clipboard pattern:
+The root eagerly loads the addon. If a worker must import without paying that startup cost, follow an existing lazy subpath pattern:
 
 - a small JS wrapper calls `loadNative()` inside the exported function;
 - a matching `.d.ts` imports/re-exports root types;
@@ -123,19 +121,19 @@ Run the narrow scenario against the addon you just built. When diagnosing a cand
 bun -e 'import { createRequire } from "node:module"; const require = createRequire(import.meta.url); const mod = require(process.argv[1]); console.log(Object.keys(mod).sort())' -- /path/to/pi_natives.<tag>[-variant].node
 ```
 
-Confirm the export is present and `__piNativesBuildVersion()` reports the package version. Do not add optional consumer checks for a required export to conceal an artifact mismatch.
+Confirm the export is present and `__piNativesBuildVersion()` reports the package version for the newly built addon. The canonical driver also probes a host-loadable installed addon in a child process, with a 60-second timeout. Do not add optional consumer checks for a required export to conceal an artifact mismatch.
 
 ## Common failures
 
 ### Stale variant or cache wins
 
-x64 candidate order is modern → baseline → unsuffixed for a modern host, and baseline → unsuffixed for a baseline host. Compiled and staged Windows loads can also win from `<getNativesDir()>/<version>` before package paths.
+x64 candidate order is modern → baseline → unsuffixed for a modern host, and baseline → unsuffixed for a baseline host. Compiled and staged Windows loads can also win from `<getNativesDir()>/<version>` before package paths. The root honors `PI_NATIVES_DIR` first (trimmed, `~`-expanded, and normalized; empty or relative values are ignored), then `$XDG_DATA_HOME/omp/natives` when `$XDG_DATA_HOME/omp` exists, otherwise `~/.omp/natives`.
 
-Remove only the stale local artifacts/cache identified by loader diagnostics, then rebuild. The loader best-effort deletes cache directories from valid older releases after a successful load, but it intentionally preserves the current-version directory.
+Remove only the stale local artifacts/cache identified by loader diagnostics, then rebuild. The loader best-effort deletes older `major.minor.patch` cache directories after a successful load only when their mtime is at least ten minutes old; it preserves the current-version directory.
 
 ### Declarations changed but shipping addon did not
 
-`build:bindings` owns declaration generation; `build` owns the Bazel host artifact. CI/release targets own cross-platform artifacts. Verify both generated source control outputs and the actual binary used by the scenario.
+`build:bindings` and the default Cargo-backed `build` regenerate host declarations and exports. A Bazel-backed `build` and explicit CI/release targets produce artifacts without regenerating those files. Verify both generated source-control outputs and the actual binary used by the scenario.
 
 ### Same-version incomplete addon
 

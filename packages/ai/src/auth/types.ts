@@ -214,6 +214,9 @@ export type CompletionProbeCredential =
 			email?: string;
 			enterpriseUrl?: string;
 			apiEndpoint?: string;
+			orgId?: string;
+			region?: string;
+			inferenceRegion?: "global" | "eu" | "us";
 	  };
 
 /**
@@ -254,6 +257,8 @@ export interface CheckCredentialsOptions {
 	completionProbe?: CompletionProbe;
 	/** Per-credential completion probe timeout (ms). Defaults to `timeoutMs`. */
 	completionTimeoutMs?: number;
+	/** Providers whose credentials are skipped entirely (not probed, not reported). */
+	excludeProviders?: ReadonlySet<string>;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -484,7 +489,16 @@ export type AuthApiKeyOptions = {
 	forceRefresh?: boolean;
 	/** Explicit provider-401 recovery; generic force refreshes leave this unset. */
 	refreshReason?: OAuthRefreshReason;
+	/** When false, select as `sessionId` would without recording the choice as that session's sticky credential. */
+	recordAffinity?: boolean;
 };
+
+/** Non-secret identity bound to the OAuth credential selected for one request attempt. */
+export interface OAuthRequestIdentity {
+	orgId?: string;
+	region?: string;
+	inferenceRegion?: "global" | "eu" | "us";
+}
 
 /**
  * Refreshed OAuth access plus identity metadata returned by
@@ -505,6 +519,8 @@ export interface OAuthAccess {
 	/** Organization/workspace the credential is scoped to (Anthropic/ChatGPT multi-subscription). */
 	orgId?: string;
 	orgName?: string;
+	region?: string;
+	inferenceRegion?: "global" | "eu" | "us";
 }
 
 /**
@@ -569,6 +585,8 @@ export interface OAuthAccountSummary {
 	orgName?: string;
 	/** True when this account is the session-sticky OAuth credential requested by `listOAuthAccounts`. */
 	active: boolean;
+	/** Last use recorded on the session sticky; set only on the `active` account. */
+	lastUsedAtMs?: number;
 }
 /** Scope a matching-key invalidation to a session or signal. */
 export interface InvalidateCredentialMatchingOptions {
@@ -876,9 +894,20 @@ export interface KeysApi {
 	 * 4. API key persisted by a successful `/login`
 	 * 5. Environment variable
 	 * 6. Stored API key (e.g. a broker-migrated copy) — last resort, so an explicit env var wins
+	 *
+	 * Resolves `undefined` when no permitted credential can serve, including when
+	 * OAuth refresh failed transiently (network, timeout, 5xx), so availability
+	 * probes move on to their next candidate. Request paths use
+	 * {@link KeysApi.getWithCredential}, which surfaces that failure.
 	 */
 	get(provider: string, sessionId?: string, options?: AuthApiKeyOptions): Promise<string | undefined>;
-	/** Resolve a bearer together with its durable stored credential row id, when known. */
+	/**
+	 * Resolve a bearer together with its durable stored credential row id, when known.
+	 * Same precedence as {@link KeysApi.get}, but rejects with
+	 * `OAuthRefreshUnavailableError` (transient, retryable) when OAuth refresh failed
+	 * with a retryable error and no other permitted source could serve the request;
+	 * the stored credential is kept.
+	 */
 	getWithCredential(
 		provider: string,
 		sessionId?: string,
@@ -999,9 +1028,11 @@ export interface OAuthApi {
 	 * `enterpriseUrl`). For pure "give me the bytes for `Authorization`"
 	 * scenarios, prefer {@link AuthStorage.keys.get}.
 	 *
-	 * Returns `undefined` when no OAuth credential is available, the
-	 * credential fails to refresh, or runtime/config overrides have replaced
-	 * OAuth with an explicit API key.
+	 * Returns `undefined` when no usable OAuth credential is available (none
+	 * stored, or every one definitively failed to refresh) or runtime/config
+	 * overrides have replaced OAuth with an explicit API key. Rejects with
+	 * `OAuthRefreshUnavailableError` (transient, retryable) when a retryable
+	 * refresh failure left no usable credential.
 	 */
 	access(provider: string, sessionId?: string, options?: AuthApiKeyOptions): Promise<OAuthAccess | undefined>;
 	/**
@@ -1070,6 +1101,12 @@ export interface OAuthApi {
 	): Promise<StoredOAuthRefreshResult<T>>;
 }
 
+/**
+ * Handle for one {@link SessionsApi.restrict} call. {@link SessionsApi.unrestrict}
+ * lifts a restriction only with the lease of the call that installed it.
+ */
+export type SessionRestrictionLease = symbol;
+
 /** Session credential affinity operations. */
 export interface SessionsApi {
 	/**
@@ -1095,6 +1132,27 @@ export interface SessionsApi {
 	 * source session.
 	 */
 	inherit(sourceSessionId: string, targetSessionId: string): number;
+	/**
+	 * Restrict one session's credentials for `provider` to the OAuth accounts
+	 * whose identity key (`email:<address>|org:<id>` for org-scoped providers;
+	 * otherwise `account:`, `email:`, or `project:` — the keys broker account
+	 * pools use) is listed. Selection, session pins, inherited affinity,
+	 * fallback passes, and rotation never leave the list, and runtime, config,
+	 * environment, and stored API keys are not used for that session; when no
+	 * listed account can serve, key resolution fails instead of borrowing
+	 * another account. An empty list allows no account. Replaces any earlier
+	 * restriction for the same provider and session; {@link inherit} does not
+	 * copy restrictions. Restrictions are never evicted, because that would
+	 * widen a live session; the owner passes the returned lease to
+	 * {@link unrestrict} when the session ends.
+	 */
+	restrict(provider: string, sessionId: string, identityKeys: readonly string[]): SessionRestrictionLease;
+	/**
+	 * Lift the restriction that `lease` installed. Once a later {@link restrict}
+	 * call has replaced it for the same provider and session, this does nothing,
+	 * so a stale owner never lifts the restriction a newer owner relies on.
+	 */
+	unrestrict(provider: string, sessionId: string, lease: SessionRestrictionLease): void;
 	/**
 	 * Release a session's sticky credential so its next {@link getApiKey} call
 	 * re-runs native pool ranking. This never blocks or penalizes the released

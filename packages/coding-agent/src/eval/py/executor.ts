@@ -149,6 +149,8 @@ export interface PythonResult {
 	truncated: boolean;
 	/** Artifact ID if full output was saved to artifact storage */
 	artifactId?: string;
+	/** Bytes the artifact cap dropped from the saved file's middle (the artifact is a head/tail sample). */
+	artifactElidedBytes?: number;
 	artifactError?: OutputArtifactError;
 	/** Total number of lines in the output stream */
 	totalLines: number;

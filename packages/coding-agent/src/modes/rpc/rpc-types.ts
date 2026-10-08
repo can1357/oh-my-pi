@@ -10,13 +10,20 @@ import type { AssistantMessageEvent, Effort, ImageContent, Model, ToolExample } 
 import type { BashResult } from "../../exec/bash-executor";
 import type { ContextUsage } from "../../extensibility/extensions/types";
 import type { AgentSessionEvent, SessionStats } from "../../session/agent-session";
+import type { RestoredQueuedMessage } from "../../session/agent-session-types";
 import type { CacheWarmingMode } from "../../session/cache-warmer";
 import type { FileEntry, SessionEntry, SessionTreeNode } from "../../session/session-entries";
+import type { UsageLimitState } from "../../session/usage-limit";
 import type { AvailableSlashCommandSource } from "../../slash-commands/available-commands";
 import type { AgentProgress } from "@oh-my-pi/pi-tui/tools/task";
 import type { SubagentEventPayload, SubagentLifecyclePayload, SubagentProgressPayload } from "../../task";
 import type { TodoPhase } from "@oh-my-pi/pi-tui/tools/todo";
+import type { LogoutAccount } from "@oh-my-pi/pi-tui/overlays/logout-account-selector";
+import type { LivePhase } from "@oh-my-pi/pi-tui/apps/live-visualizer";
 import type { RpcMessagesPage } from "./rpc-messages";
+import type { GoalModeState } from "../../goals/state";
+import type { RpcGoalOp, RpcGoalResult } from "./rpc-goal";
+import type { BtwHistoryRecord } from "../../session/btw-history";
 
 // ============================================================================
 // RPC Commands (stdin)
@@ -34,14 +41,25 @@ export type RpcCommand =
 	| { id?: string; type: "steer"; message: string; images?: ImageContent[] }
 	| { id?: string; type: "follow_up"; message: string; images?: ImageContent[] }
 	| { id?: string; type: "remove_queued_message"; message: string; queue: "steering" | "followUp" }
+	| { id?: string; type: "promote_queued_message"; message: string }
 	| { id?: string; type: "abort" }
 	| { id?: string; type: "abort_and_prompt"; message: string; images?: ImageContent[] }
+	| { id?: string; type: "abort_and_restore_queue" }
 	| { id?: string; type: "new_session"; parentSession?: string }
-	| { id?: string; type: "open_session"; sessionDir: string }
+	| { id?: string; type: "open_session"; sessionDir: string; provider?: string; modelId?: string }
 
 	// State
 	| { id?: string; type: "get_state" }
 	| { id?: string; type: "set_fast_mode"; enabled: boolean }
+	| { id?: string; type: "set_slow_mode"; enabled: boolean }
+	| {
+			id?: string;
+			type: "goal";
+			op: RpcGoalOp;
+			objective?: string;
+			token_budget?: number;
+	  }
+	| { id?: string; type: "set_ask_dialog"; enabled: boolean }
 	| { id?: string; type: "get_available_commands" }
 	| { id?: string; type: "get_entries"; since?: string }
 	| { id?: string; type: "get_tree" }
@@ -52,6 +70,12 @@ export type RpcCommand =
 	| { id?: string; type: "set_event_filter"; events: string[] | null; messageUpdates?: RpcMessageUpdates }
 	| { id?: string; type: "get_subagents" }
 	| { id?: string; type: "get_subagent_messages"; subagentId?: string; sessionFile?: string; fromByte?: number }
+	| { id?: string; type: "cancel_subagent"; subagentId: string }
+	| { id?: string; type: "steer_subagent"; subagentId: string; message: string }
+	// Live voice (GPT live bound to this session)
+	| { id?: string; type: "live_start"; voice?: string; instructions?: string }
+	| { id?: string; type: "live_stop" }
+	| { id?: string; type: "live_mute"; muted?: boolean }
 
 	// Model
 	| { id?: string; type: "set_model"; provider: string; modelId: string }
@@ -86,8 +110,9 @@ export type RpcCommand =
 	// Session
 	| { id?: string; type: "get_session_stats" }
 	| { id?: string; type: "export_html"; outputPath?: string }
-	| { id?: string; type: "switch_session"; sessionPath: string }
+	| { id?: string; type: "switch_session"; sessionPath: string; provider?: string; modelId?: string }
 	| { id?: string; type: "branch"; entryId: string }
+	| { id?: string; type: "fork"; entryId?: string }
 	| { id?: string; type: "get_branch_messages" }
 	| { id?: string; type: "get_last_assistant_text" }
 	| { id?: string; type: "set_session_name"; name: string }
@@ -99,7 +124,25 @@ export type RpcCommand =
 
 	// Login
 	| { id?: string; type: "get_login_providers" }
-	| { id?: string; type: "login"; providerId: string };
+	| { id?: string; type: "login"; providerId: string }
+	| { id?: string; type: "get_logout_accounts"; providerId: string }
+	| { id?: string; type: "logout"; providerId: string; credentialId: number }
+
+	// Word prediction (composer ghost text); `cursor` is a UTF-16 offset into `text`
+	| { id?: string; type: "predict_word"; text: string; cursor: number }
+	| {
+			id?: string;
+			type: "predict_word_feedback";
+			text: string;
+			cursor: number;
+			suggestion: string;
+			accepted: boolean;
+	  }
+
+	// Side questions (/btw); answers stream as `btw_delta` / `btw_record` frames
+	| { id?: string; type: "btw"; question: string; recordId?: string }
+	| { id?: string; type: "btw_cancel"; recordId?: string }
+	| { id?: string; type: "get_btw_history" };
 
 // ============================================================================
 // RPC State
@@ -119,6 +162,17 @@ export interface RpcSessionState {
 	autoCompactionEnabled: boolean;
 	fastModeEnabled: boolean;
 	fastModeActive: boolean;
+	/** `/slow` applies to the active model (flex tier on OpenAI/Google, low priority on Claude subscriptions). */
+	slowModeSupported: boolean;
+	/** `/slow` is on for the active model; always `false` when `slowModeSupported` is `false`. */
+	slowModeEnabled: boolean;
+	/**
+	 * Where the active model's `/slow` lives: `global` (persisted config shared by every
+	 * session, e.g. Claude low priority) or `session` (this session's flex tier). Absent when unsupported.
+	 */
+	slowModeScope?: "session" | "global";
+	/** Usage-limit stage of the active model's account; absent outside wrap-up and low priority. */
+	usageLimit?: UsageLimitState;
 	tokensPerSecond: number | null;
 	messageCount: number;
 	queuedMessageCount: number;
@@ -136,6 +190,8 @@ export interface RpcSessionState {
 	dumpTools?: Array<{ name: string; description: string; parameters: unknown; examples?: readonly ToolExample[] }>;
 	/** Current context window usage. */
 	contextUsage?: ContextUsage;
+	/** Current goal-mode state; `null` when the session has no goal. */
+	goal: GoalModeState | null;
 }
 
 export interface RpcAvailableSlashCommand {
@@ -197,12 +253,65 @@ export interface RpcSessionSettledFrame {
 	type: "session_settled";
 }
 
+// ============================================================================
+// Live Voice Frames (stdout, unsolicited; not session events, so `set_event_filter` never drops them)
+// ============================================================================
+
+/** Live session phase change. */
+export interface RpcLivePhaseFrame {
+	type: "live_phase";
+	phase: LivePhase;
+}
+
+/** Microphone/speaker RMS in [0, 1], at most one frame per 100 ms carrying the latest values. */
+export interface RpcLiveLevelsFrame {
+	type: "live_levels";
+	input: number;
+	output: number;
+}
+
+/** Incremental (`final: false`) or final transcript of one realtime turn; coalesce on `role` + `turn`. */
+export interface RpcLiveTranscriptFrame {
+	type: "live_transcript";
+	role: "user" | "assistant";
+	turn: number;
+	text: string;
+	final: boolean;
+}
+
+/** Emitted exactly once per live session when it has ended; `error` carries the failure cause. */
+export interface RpcLiveEndFrame {
+	type: "live_end";
+	error?: string;
+}
+
+export type RpcLiveFrame = RpcLivePhaseFrame | RpcLiveLevelsFrame | RpcLiveTranscriptFrame | RpcLiveEndFrame;
+
 /** `open_session` result: `resumed` is false when a fresh session was started in the directory. */
 export interface RpcOpenSessionResult {
 	cancelled: boolean;
 	resumed: boolean;
 	sessionId: string;
 	sessionFile?: string;
+}
+
+/** `remove_queued_message` result. */
+export interface RpcRemoveQueuedMessageResult {
+	removed: boolean;
+	/** The removed message's images, so the client can restore them with its text. */
+	images?: ImageContent[];
+	/** Set when the images exceeded the transport limit and were omitted; the removal still happened. */
+	imagesDropped?: true;
+}
+
+/** `abort_and_restore_queue` result: the user-authored queued input withdrawn before the abort, oldest first. */
+export interface RpcAbortAndRestoreQueueResult {
+	steering: RestoredQueuedMessage[];
+	followUp: RestoredQueuedMessage[];
+	/** Set when the full result exceeded the transport limit and every entry's `images` was omitted. */
+	imagesDropped?: true;
+	/** Set when even the text-only result exceeded the limit: only an oldest-first prefix is listed. */
+	truncated?: true;
 }
 
 export interface RpcReadyFrame {
@@ -271,9 +380,23 @@ export type RpcResponse =
 	| { id?: string; type: "response"; command: "prompt"; success: true; data?: { agentInvoked: boolean } }
 	| { id?: string; type: "response"; command: "steer"; success: true }
 	| { id?: string; type: "response"; command: "follow_up"; success: true }
-	| { id?: string; type: "response"; command: "remove_queued_message"; success: true; data: { removed: boolean } }
+	| {
+			id?: string;
+			type: "response";
+			command: "remove_queued_message";
+			success: true;
+			data: RpcRemoveQueuedMessageResult;
+	  }
+	| { id?: string; type: "response"; command: "promote_queued_message"; success: true; data: { promoted: boolean } }
 	| { id?: string; type: "response"; command: "abort"; success: true }
 	| { id?: string; type: "response"; command: "abort_and_prompt"; success: true }
+	| {
+			id?: string;
+			type: "response";
+			command: "abort_and_restore_queue";
+			success: true;
+			data: RpcAbortAndRestoreQueueResult;
+	  }
 	| { id?: string; type: "response"; command: "new_session"; success: true; data: { cancelled: boolean } }
 	| { id?: string; type: "response"; command: "open_session"; success: true; data: RpcOpenSessionResult }
 
@@ -286,6 +409,9 @@ export type RpcResponse =
 			success: true;
 			data: { enabled: boolean; active: boolean };
 	  }
+	| { id?: string; type: "response"; command: "set_slow_mode"; success: true; data: { enabled: boolean } }
+	| { id?: string; type: "response"; command: "goal"; success: true; data: RpcGoalResult }
+	| { id?: string; type: "response"; command: "set_ask_dialog"; success: true; data: { enabled: boolean } }
 	| {
 			id?: string;
 			type: "response";
@@ -338,6 +464,14 @@ export type RpcResponse =
 			success: true;
 			data: RpcSubagentMessagesResult;
 	  }
+	| {
+			id?: string;
+			type: "response";
+			command: "cancel_subagent";
+			success: true;
+			data: { cancelled: boolean };
+	  }
+	| { id?: string; type: "response"; command: "steer_subagent"; success: true }
 
 	// Model
 	| {
@@ -404,6 +538,7 @@ export type RpcResponse =
 	| { id?: string; type: "response"; command: "export_html"; success: true; data: { path: string } }
 	| { id?: string; type: "response"; command: "switch_session"; success: true; data: { cancelled: boolean } }
 	| { id?: string; type: "response"; command: "branch"; success: true; data: { text: string; cancelled: boolean } }
+	| { id?: string; type: "response"; command: "fork"; success: true; data: { cancelled: boolean } }
 	| {
 			id?: string;
 			type: "response";
@@ -419,6 +554,10 @@ export type RpcResponse =
 			data: { text: string | null };
 	  }
 	| { id?: string; type: "response"; command: "set_session_name"; success: true }
+	// Live voice
+	| { id?: string; type: "response"; command: "live_start"; success: true; data: { voice: string } }
+	| { id?: string; type: "response"; command: "live_stop"; success: true }
+	| { id?: string; type: "response"; command: "live_mute"; success: true; data: { muted: boolean } }
 	| { id?: string; type: "response"; command: "handoff"; success: true; data: RpcHandoffResult | null }
 
 	// Messages
@@ -434,9 +573,49 @@ export type RpcResponse =
 			data: { providers: Array<{ id: string; name: string; available: boolean; authenticated: boolean }> };
 	  }
 	| { id?: string; type: "response"; command: "login"; success: true; data: { providerId: string } }
+	| {
+			id?: string;
+			type: "response";
+			command: "get_logout_accounts";
+			success: true;
+			data: { accounts: LogoutAccount[] };
+	  }
+	| { id?: string; type: "response"; command: "logout"; success: true; data: { remainingSource?: string } }
+
+	// Word prediction
+	| { id?: string; type: "response"; command: "predict_word"; success: true; data: { suffix: string | null } }
+	| { id?: string; type: "response"; command: "predict_word_feedback"; success: true }
+
+	// Side questions (/btw)
+	| { id?: string; type: "response"; command: "btw"; success: true; data: { record: BtwHistoryRecord } }
+	| { id?: string; type: "response"; command: "btw_cancel"; success: true; data: { cancelled: boolean } }
+	| {
+			id?: string;
+			type: "response";
+			command: "get_btw_history";
+			success: true;
+			data: { records: readonly BtwHistoryRecord[] };
+	  }
 
 	// Error response (any command can fail); `code` is an optional machine-readable reason.
 	| { id?: string; type: "response"; command: string; success: false; error: string; code?: string };
+
+// ============================================================================
+// Side question (/btw) frames (stdout)
+// ============================================================================
+
+/** Text appended to the running side question's latest answer. */
+export interface RpcBtwDeltaFrame {
+	type: "btw_delta";
+	recordId: string;
+	delta: string;
+}
+
+/** Full record snapshot on every lifecycle change: started, complete, cancelled, error. */
+export interface RpcBtwRecordFrame {
+	type: "btw_record";
+	record: BtwHistoryRecord;
+}
 
 // ============================================================================
 // Subagent Events (stdout)
@@ -498,6 +677,17 @@ export interface RpcExtensionUISelectOptionDetail {
 	description?: string;
 }
 
+/** One question of an RPC `ask` dialog. Options never include "Other"; hosts always offer free text. */
+export interface RpcAskDialogQuestion {
+	id: string;
+	question: string;
+	header?: string;
+	options: Array<{ label: string; description?: string; preview?: string }>;
+	multi?: boolean;
+	/** Index of the recommended option. */
+	recommended?: number;
+}
+
 /** Emitted when an extension needs user input */
 export type RpcExtensionUIRequest =
 	| {
@@ -525,6 +715,14 @@ export type RpcExtensionUIRequest =
 			title: string;
 			prefill?: string;
 			promptStyle?: boolean;
+	  }
+	/** Emitted only after the host opts in with `set_ask_dialog`. */
+	| {
+			type: "extension_ui_request";
+			id: string;
+			method: "ask";
+			questions: RpcAskDialogQuestion[];
+			timeout?: number;
 	  }
 	| { type: "extension_ui_request"; id: string; method: "cancel"; targetId: string }
 	| {
@@ -675,7 +873,13 @@ export interface RpcHostUriResult {
 export type RpcExtensionUIResponse =
 	| { type: "extension_ui_response"; id: string; value: string }
 	| { type: "extension_ui_response"; id: string; confirmed: boolean }
-	| { type: "extension_ui_response"; id: string; cancelled: true; timedOut?: boolean };
+	| { type: "extension_ui_response"; id: string; cancelled: true; timedOut?: boolean }
+	/** Answers to an `ask` request, one per question in request order. */
+	| {
+			type: "extension_ui_response";
+			id: string;
+			answers: Array<{ id: string; selectedOptions: string[]; customInput?: string }>;
+	  };
 
 // ============================================================================
 // Helper type for extracting command types

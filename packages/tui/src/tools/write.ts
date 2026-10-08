@@ -1,5 +1,7 @@
+import * as path from "node:path";
 import type { HighlightStream } from "@oh-my-pi/pi-natives";
 import type { Component } from "../tui";
+import { fencedCode } from "../components/markdown";
 import { Text } from "../components/text";
 import { getLanguageFromPath } from "../lang-from-path";
 import { createHighlightStream, highlightCode, type Theme } from "../theme/theme";
@@ -31,8 +33,8 @@ import {
 	type ProcWriteDetails,
 } from "./proc-render";
 import type { TspTone } from "@oh-my-pi/pi-wire";
-import { code, compact, node, span } from "../native/describe";
-import type { NativeChild } from "../native/node";
+import { code, compact, md, node, span } from "../native/describe";
+import type { NativeChild, NativeNode } from "../native/node";
 import { diagnosticsBadge, diagnosticsSection, displayPath, errorText, fileHref, resultText } from "./native-view";
 import { describeCfgWrite, renderCfgWrite, type CfgWriteDetails } from "./cfg-render";
 import type { FileDiagnosticsResult } from "./lsp";
@@ -44,6 +46,7 @@ import type {
 	RenderResultOptions,
 	ToolActivityContext,
 	ToolActivitySummary,
+	ToolFigure,
 	ToolRenderer,
 } from "./renderer";
 import { splitUrlScheme } from "./url-scheme-host";
@@ -90,6 +93,80 @@ interface WriteRenderArgs {
 const WRITE_PREVIEW_LINES = 6;
 /** Collapsed native write body: the first lines of the file (§7.3). */
 const NATIVE_WRITE_PREVIEW = { lines: 8 } as const;
+/**
+ * Collapsed clamp of a write drawn as a figure: Tern's model figure (its head
+ * over a 320px stage) clears the clamp's fade at 16px lines.
+ */
+const NATIVE_FIGURE_PREVIEW_LINES = 26;
+
+/**
+ * Fence language per extension of a written file that transcripts draw as a
+ * figure, as they draw that fence in assistant text: svg and mermaid, plus
+ * the 3D formats only Tern draws (stencil-markdown's model fences).
+ */
+const FIGURE_FENCES: Readonly<Record<string, string>> = {
+	svg: "svg",
+	mmd: "mermaid",
+	mermaid: "mermaid",
+	obj: "obj",
+	ply: "ply",
+	wrl: "wrl",
+	vrml: "vrml",
+	x3dv: "x3dv",
+	stl: "stl",
+	gltf: "gltf",
+	usda: "usda",
+	usd: "usd",
+};
+
+/** A write tool result as the renderer receives it. */
+interface WriteResult {
+	content: Array<{ type: string; text?: string }>;
+	details?: WriteToolDetails;
+	isError?: boolean;
+}
+
+/**
+ * The fence a file write draws as while its content streams and after: its
+ * extension names a figure language and it has content, closed once the args
+ * are final. None for URL-card writes, or after an error.
+ */
+function writeFigure(
+	args: WriteRenderArgs | undefined,
+	result: WriteResult | undefined,
+	options: RenderResultOptions,
+): ToolFigure | undefined {
+	if (result?.isError || result?.details?.xdev) return undefined;
+	const rawPath =
+		typeof args?.file_path === "string" ? args.file_path : typeof args?.path === "string" ? args.path : "";
+	const lang = FIGURE_FENCES[path.extname(rawPath).slice(1).toLowerCase()];
+	const content = args?.content;
+	if (!lang || typeof content !== "string" || !/\S/.test(content) || writeUrlCard(rawPath, result?.details)) {
+		return undefined;
+	}
+	return {
+		lang,
+		source: content.includes("\r") ? content.replace(/\r/g, "") : content,
+		closed: result !== undefined || options.argsComplete === true,
+	};
+}
+
+/**
+ * The `md` node drawing a figure write as its fence draws in a reply: open
+ * and streaming while the content arrives. A mermaid figure waits for the
+ * fence to close, as Tern shows an open one as code, which the source is.
+ */
+function describeFigure(figure: ToolFigure | undefined): NativeNode | undefined {
+	if (!figure || (figure.lang === "mermaid" && !figure.closed)) return undefined;
+	const text = fencedCode(figure.lang, figure.source, { open: !figure.closed });
+	return { ...md(text, { role: "omp.tool.write.figure", stream: !figure.closed }), key: "figure" };
+}
+
+/** The written content as numbered code, keyed so it keeps its node as the figure above it comes and goes. */
+function describeSource(rawPath: string, content: string): NativeNode {
+	const lang = rawPath ? getLanguageFromPath(rawPath) : undefined;
+	return { ...code(content, { lang, numbers: true }), key: "source" };
+}
 
 function countLines(text: string): number {
 	if (!text) return 0;
@@ -589,7 +666,7 @@ export const writeToolRenderer = {
 	},
 
 	renderResult(
-		result: { content: Array<{ type: string; text?: string }>; details?: WriteToolDetails; isError?: boolean },
+		result: WriteResult,
 		options: RenderResultOptions & { renderContext?: WriteRenderContext },
 		uiTheme: Theme,
 		args?: WriteRenderArgs,
@@ -707,22 +784,17 @@ export const writeToolRenderer = {
 			return describeXdevCall(xdev.name, args.content, options, options.renderContext?.resolveXdevMounted);
 		}
 		const content = normalizeDisplayText(args.content);
+		// A figure write draws as it arrives, over its streaming source.
+		const figure = writeFigure(args, undefined, options);
 		return {
 			tool: writeToolHead(rawPath, content),
-			body: content
-				? [
-						code(content, {
-							lang: rawPath ? getLanguageFromPath(rawPath) : undefined,
-							numbers: true,
-						}),
-					]
-				: [],
-			preview: NATIVE_WRITE_PREVIEW,
+			body: content ? compact([describeFigure(figure), describeSource(rawPath, content)]) : [],
+			preview: figure ? { lines: NATIVE_FIGURE_PREVIEW_LINES } : NATIVE_WRITE_PREVIEW,
 		};
 	},
 
 	describeResult(
-		result: { content: Array<{ type: string; text?: string }>; details?: WriteToolDetails; isError?: boolean },
+		result: WriteResult,
 		options: RenderResultOptions & { renderContext?: WriteRenderContext },
 		args?: WriteRenderArgs,
 	): NativeToolView | undefined {
@@ -744,19 +816,20 @@ export const writeToolRenderer = {
 		});
 		if (result.isError) return { tool, tone: "error", body: [errorText(resultText(result))] };
 		const progressText = resultText(result);
+		// A figure write leads with the drawing, drawn as its fence in a reply;
+		// its source follows below the collapsed clamp.
+		const figure = writeFigure(args, result, options);
 		const body = compact<NativeChild>([
 			isPartial &&
 				progressText.length > 0 &&
 				node("text", { spans: [span(progressText, "muted")], truncate: "end" }),
-			fileContent.length > 0 &&
-				code(fileContent, {
-					lang: rawPath ? getLanguageFromPath(rawPath) : undefined,
-					numbers: true,
-				}),
+			describeFigure(figure),
+			fileContent.length > 0 && describeSource(rawPath, fileContent),
 			diagnosticsSection(diagnostics),
 		]);
-		return { tool, body, preview: NATIVE_WRITE_PREVIEW };
+		return { tool, body, preview: figure ? { lines: NATIVE_FIGURE_PREVIEW_LINES } : NATIVE_WRITE_PREVIEW };
 	},
+	figure: writeFigure,
 	mergeCallAndResult: true,
 	// The collapsed pending preview follows the streaming edge with a tail
 	// window once the content outgrows it (`… (N earlier lines)` + last rows);

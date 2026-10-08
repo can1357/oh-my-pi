@@ -179,9 +179,13 @@ function sessionPreview(session: SessionSelectorEntry, forkedFrom: string | unde
 	]);
 }
 
+/** Absolute dates of week-old sessions; `toLocaleDateString` goes through Intl on every call. */
+const localeDateCache = new WeakMap<Date, { time: number; text: string }>();
+
 /** Relative age of a session's last modification (`"3 hours ago"`), falling back to the date after a week. */
 function formatSessionDate(date: Date): string {
-	const diffMs = Date.now() - date.getTime();
+	const time = date.getTime();
+	const diffMs = Date.now() - time;
 	const diffMins = Math.floor(diffMs / 60000);
 	const diffHours = Math.floor(diffMs / 3600000);
 	const diffDays = Math.floor(diffMs / 86400000);
@@ -192,7 +196,11 @@ function formatSessionDate(date: Date): string {
 	if (diffDays === 1) return "1 day ago";
 	if (diffDays < 7) return `${diffDays} days ago`;
 
-	return date.toLocaleDateString();
+	const cached = localeDateCache.get(date);
+	if (cached?.time === time) return cached.text;
+	const text = date.toLocaleDateString();
+	localeDateCache.set(date, { time, text });
+	return text;
 }
 
 /** A cached native session item and the inputs it was built from. */
@@ -545,6 +553,8 @@ class SessionList<T extends SessionSelectorEntry> implements Component {
 	#lastFilterQuery = "";
 	/** Bumped whenever the visible session set may have changed (native memo key). */
 	#itemsVersion = 0;
+	/** Per-row line heights of the visible list for the ANSI window, reused until the set changes. */
+	#rowHeights: { items: readonly T[]; length: number; version: number; heights: readonly number[] } | undefined;
 	#itemsNative:
 		| { version: number; showCwd: boolean; currentPath: string | undefined; items: NativeNode[] }
 		| undefined;
@@ -1130,14 +1140,13 @@ class SessionList<T extends SessionSelectorEntry> implements Component {
 		// worst-case count-based window would leave (then padded by
 		// fill-height).
 		const filtered = this.#menu.visibleItems;
-		const itemHeight = (session: T): number => (session.title ? 4 : 3);
 		const budget = this.#lineBudget();
 		const {
 			startIndex,
 			endIndex,
 			rowOffset: offsetRows,
 			totalRows: rawTotalRows,
-		} = getMenuWindow(filtered.map(itemHeight), this.#menu.selectedIndex, budget);
+		} = getMenuWindow(this.#visibleRowHeights(filtered), this.#menu.selectedIndex, budget);
 
 		// Each session block is built into sessionLines, then wrapped by ScrollView
 		// so the right-edge scrollbar is proportional at the physical-line level.
@@ -1230,6 +1239,17 @@ class SessionList<T extends SessionSelectorEntry> implements Component {
 		lines.push(...svLines);
 
 		return lines;
+	}
+
+	/** Line height per visible session (3, or 4 when a title adds a preview line), memoized per visible set. */
+	#visibleRowHeights(items: readonly T[]): readonly number[] {
+		const cached = this.#rowHeights;
+		if (cached?.items === items && cached.length === items.length && cached.version === this.#itemsVersion) {
+			return cached.heights;
+		}
+		const heights = items.map(session => (session.title ? 4 : 3));
+		this.#rowHeights = { items, length: items.length, version: this.#itemsVersion, heights };
+		return heights;
 	}
 
 	handleInput(keyData: string): void {
@@ -1376,7 +1396,8 @@ export class SessionSelectorComponent<T extends SessionSelectorEntry = SessionSe
 	/** The native picker shows `#message`'s error until the next key or pointer event. */
 	#pickerErrorOpen = false;
 	readonly #standalone: boolean;
-	readonly #pickerTitle: string;
+	/** A caller's heading for the picker head; the default `/resume` picker has none (the search names it). */
+	readonly #pickerTitle: string | undefined;
 	/** The open delete confirmation's two answers, for the picker's confirm strip. */
 	#deleteChoice: DeleteChoice<T> | null = null;
 	/** The preview pane's content and the session it shows; follows the selection once it settles. */
@@ -1423,7 +1444,7 @@ export class SessionSelectorComponent<T extends SessionSelectorEntry = SessionSe
 		this.#getTerminalRows = options.getTerminalRows ?? (() => 24);
 		this.#fillHeight = options.fillHeight ?? false;
 		this.#title = options.title ?? "Resume Session";
-		this.#pickerTitle = options.title ?? "Resume session";
+		this.#pickerTitle = options.title;
 		this.#standalone = options.standalone ?? false;
 		this.#scopeLabel = options.scopeLabel;
 		this.title = this.#headerLabel();
@@ -1709,10 +1730,11 @@ export class SessionSelectorComponent<T extends SessionSelectorEntry = SessionSe
 	}
 
 	/**
-	 * `lg` cards sheet (`screen` for the standalone app): This folder / All
-	 * projects tabs, sessions grouped by day (ranked flat while searching),
-	 * the selected session's preview, the delete confirm strip, and the
-	 * actions of the keys Enter, Delete/Backspace, Tab and Esc.
+	 * `lg` cards sheet (`screen` for the standalone app): sessions grouped by
+	 * day (ranked flat while searching), the selected session's preview, the
+	 * delete confirm strip, and the actions of the keys Enter, Delete/Backspace,
+	 * Tab (the scope toggle, labelled with the scope it switches to) and Esc.
+	 * Untitled unless the caller named it; the placeholder says the scope.
 	 */
 	#describePicker(): NativeNode {
 		const list = this.#sessionList;
@@ -1742,11 +1764,17 @@ export class SessionSelectorComponent<T extends SessionSelectorEntry = SessionSe
 		actions.push(
 			pickerAction("close", "Close", boundKeys("app.interrupt", ["escape"])[0] ?? "escape", { end: true }),
 		);
-		const subtitle = this.#scopeLabel === false ? undefined : (this.#scopeLabel ?? path.basename(getProjectDir()));
+		const folder = this.#scopeLabel === false ? undefined : (this.#scopeLabel ?? path.basename(getProjectDir()));
+		const title = this.#pickerTitle;
+		const placeholder =
+			loading || this.#scope === "all"
+				? "Search all sessions…"
+				: folder && !title
+					? `Search sessions in ${folder}…`
+					: "Search sessions…";
 		const result = picker(
 			{
-				title: this.#pickerTitle,
-				...(subtitle ? { subtitle } : {}),
+				...(title ? { title, ...(folder ? { subtitle: folder } : {}) } : {}),
 				icon: "history",
 				noun: "sessions",
 				size: this.#standalone ? "screen" : "lg",
@@ -1754,16 +1782,7 @@ export class SessionSelectorComponent<T extends SessionSelectorEntry = SessionSe
 				preview: "side",
 				query: view.query,
 				cursor: view.cursor,
-				placeholder: "Search sessions…",
-				...(this.#hasScopeTabs()
-					? {
-							tabs: [
-								{ id: "folder", label: "This folder" },
-								{ id: "all", label: "All projects" },
-							],
-							tab: loading ? "all" : this.#scope,
-						}
-					: {}),
+				placeholder,
 				columns: [
 					{ id: "when", format: "time" },
 					{ id: "size", format: "dim" },
@@ -1846,7 +1865,7 @@ export class SessionSelectorComponent<T extends SessionSelectorEntry = SessionSe
 		} else if (choice) return;
 		else if (ev.act === "resume") list.resumeSelected();
 		else if (ev.act === "delete") list.requestDelete();
-		else if (ev.act === "scope" || (ev.act === "tab" && ev.value !== undefined && ev.value !== this.#scope)) {
+		else if (ev.act === "scope") {
 			list.onToggleScope?.();
 		} else if (ev.act === "clear") list.clearSearch();
 	}

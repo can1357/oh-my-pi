@@ -3,7 +3,8 @@
  * Replaces per-provider JSON files with a single cache.db.
  */
 import type { Database } from "bun:sqlite";
-import { getModelDbPath, isSqliteCorruptionError, openSqliteDatabaseSync, VERSION } from "@oh-my-pi/pi-utils";
+import * as path from "node:path";
+import { getModelDbPath, isSqliteCorruptionError, logger, openSqliteDatabaseSync, VERSION } from "@oh-my-pi/pi-utils";
 import RULES from "./compat/rules.json" with { type: "json" };
 import type { Api, Model } from "./types";
 
@@ -25,6 +26,8 @@ import type { Api, Model } from "./types";
 // effort-tier variant collapsing (raw `-low`/`-high`/`-thinking` member ids);
 // v4 dropped the pre-efforts ThinkingConfig shape.
 const CACHE_SCHEMA_VERSION = 13;
+/** Oldest schema whose rows are guaranteed never to carry request headers. */
+const FIRST_HEADERLESS_SCHEMA_VERSION = 11;
 const HEADER_RESTORE_VERSION = 1;
 /**
  * Explicit compatibility gate for materialized rows. Bump whenever buildModel
@@ -44,18 +47,85 @@ function materializationPolicy(): string {
 	return cachedMaterializationPolicy;
 }
 
-interface CacheRow {
+interface CacheRowMeta {
 	provider_id: string;
 	version: number;
 	materialization_policy: string;
 	updated_at: number;
 	authoritative: number;
 	static_fingerprint: string;
-	models: string;
+	/**
+	 * `Bun.hash` of `models`; empty for rows written before the column existed
+	 * (never equal). An in-place `UPDATE` of `models` that leaves the hash
+	 * untouched resets it to empty (`model_cache_models_hash_reset` trigger).
+	 */
+	models_hash: string;
 	header_omitted_model_ids: string;
 	unrestorable_header_model_ids: string;
 	header_restore_version: number;
+	/** `model_cache_refresh` columns joined onto the payload row; null when absent. */
+	refresh_payload_updated_at: number | null;
+	refresh_updated_at: number | null;
+	refresh_authoritative: number | null;
 }
+
+interface CacheRow extends CacheRowMeta {
+	models: string;
+}
+
+/**
+ * Payload rows are multi-MB and SQLite rewrites a whole record (including its
+ * overflow pages) on any column update. Freshness that advances without a
+ * payload change therefore lives in `model_cache_refresh`, a small side row
+ * keyed by provider. It applies only while `payload_updated_at` still matches
+ * the payload row's `updated_at`, so a payload rewritten by another binary
+ * silently invalidates it.
+ */
+const CACHE_ROW_FROM = `
+	FROM model_cache m
+	LEFT JOIN model_cache_refresh r ON r.provider_id = m.provider_id
+	WHERE m.provider_id = ?
+`;
+const CACHE_ROW_REFRESH_COLUMNS = `
+		r.payload_updated_at AS refresh_payload_updated_at,
+		r.updated_at AS refresh_updated_at,
+		r.authoritative AS refresh_authoritative`;
+const SELECT_CACHE_ROW = `SELECT m.*, ${CACHE_ROW_REFRESH_COLUMNS} ${CACHE_ROW_FROM}`;
+/** Scalar columns plus `models_hash`: validates a memoized parse without reading the multi-MB payload. */
+const SELECT_CACHE_ROW_META = `
+	SELECT m.provider_id, m.version, m.materialization_policy, m.updated_at, m.authoritative,
+		m.static_fingerprint, m.models_hash, m.header_omitted_model_ids,
+		m.unrestorable_header_model_ids, m.header_restore_version, ${CACHE_ROW_REFRESH_COLUMNS}
+	${CACHE_ROW_FROM}
+`;
+
+/** Cumulative model-cache write counters for this process. */
+export interface ModelCacheWriteStats {
+	/** Payload rows (re)written because their stored content changed. */
+	payloadWrites: number;
+	/** Serialized model bytes written by `payloadWrites`. */
+	payloadBytes: number;
+	/** Unchanged payloads whose freshness/authority advanced via the side table. */
+	refreshWrites: number;
+	/** Writes that matched the stored row exactly and touched nothing. */
+	skippedWrites: number;
+	/** Provider ids of the most recent payload writes (bounded). */
+	recentPayloadProviders: readonly string[];
+}
+
+const writeStats = { payloadWrites: 0, payloadBytes: 0, refreshWrites: 0, skippedWrites: 0 };
+const recentPayloadProviders: string[] = [];
+const RECENT_PAYLOAD_PROVIDERS_MAX = 64;
+
+/** Snapshot of this process's model-cache write counters. */
+export function getModelCacheWriteStats(): ModelCacheWriteStats {
+	return { ...writeStats, recentPayloadProviders: [...recentPayloadProviders] };
+}
+
+type StoredRowState = Pick<
+	CacheRow,
+	"updated_at" | "authoritative" | "refresh_payload_updated_at" | "refresh_updated_at" | "refresh_authoritative"
+>;
 
 interface TableInfoRow {
 	name: string;
@@ -97,8 +167,11 @@ let sharedDbPath: string | null = null;
 interface ReadRowCacheEntry {
 	/** `PRAGMA data_version` of the shared connection when validated; null for per-call connections. */
 	dataVersion: number | null;
-	/** Raw row the entry was parsed from; null when the row was absent or rejected. */
-	row: CacheRow | null;
+	/**
+	 * Scalar columns (plus `models_hash`) of the row the entry was parsed from;
+	 * null when the row was absent or rejected. Never the multi-MB payload itself.
+	 */
+	meta: CacheRowMeta | null;
 	entry: CacheEntry<Api> | null;
 }
 
@@ -130,7 +203,7 @@ function withFreshness<TApi extends Api>(
 }
 function invalidateReadRow(providerId: string, dbPath?: string): void {
 	try {
-		readRowCache.delete(readCacheKey(dbPath ?? getModelDbPath(), providerId));
+		readRowCache.delete(readCacheKey(resolveCacheDb(dbPath).resolvedPath, providerId));
 	} catch {
 		// Best-effort only; a missed invalidation just costs one extra parse.
 	}
@@ -144,9 +217,11 @@ function invalidateReadPath(resolvedPath: string): void {
 
 function initializeDb(db: Database): void {
 	// The shared opener installs the busy handler before any lock-taking
-	// statement. Schema invalidation can delete rows containing credentials
-	// written by old versions, so scrub deleted cells (#5780).
-	db.run("PRAGMA secure_delete = ON");
+	// statement. Current rows never persist request headers, so routine
+	// replacements do not need freed overflow pages zero-filled (that doubled
+	// the I/O of every multi-MB refresh). The legacy credential purge (#5780)
+	// re-enables ON just around its DELETE.
+	db.run("PRAGMA secure_delete = FAST");
 	db.run("PRAGMA journal_mode = WAL");
 	db.run(`
 		CREATE TABLE IF NOT EXISTS model_cache (
@@ -159,10 +234,30 @@ function initializeDb(db: Database): void {
 			header_omitted_model_ids TEXT NOT NULL DEFAULT '[]',
 			unrestorable_header_model_ids TEXT NOT NULL DEFAULT '[]',
 			header_restore_version INTEGER NOT NULL DEFAULT 0,
+			models_hash TEXT NOT NULL DEFAULT '',
 			models TEXT NOT NULL
 		)
 	`);
+	db.run(`
+		CREATE TABLE IF NOT EXISTS model_cache_refresh (
+			provider_id TEXT PRIMARY KEY,
+			payload_updated_at INTEGER NOT NULL,
+			updated_at INTEGER NOT NULL,
+			authoritative INTEGER NOT NULL
+		)
+	`);
 	migrateCacheSchema(db);
+	// `models_hash` is the only payload-change detector for the read memo and the
+	// unchanged-write skip. Writers here replace whole rows; this keeps an
+	// in-place edit of `models` by any other tool or binary from reusing a stale hash.
+	db.run(`
+		CREATE TRIGGER IF NOT EXISTS model_cache_models_hash_reset
+		AFTER UPDATE OF models ON model_cache
+		WHEN NEW.models_hash = OLD.models_hash
+		BEGIN
+			UPDATE model_cache SET models_hash = '' WHERE provider_id = NEW.provider_id;
+		END
+	`);
 }
 
 function closeSharedDb(): void {
@@ -170,6 +265,16 @@ function closeSharedDb(): void {
 	sharedDb.close();
 	sharedDb = null;
 	sharedDbPath = null;
+}
+
+/**
+ * Closes the shared handle to the default `<agent-dir>/models.db`; the next
+ * default-path access reopens it. Call before deleting an agent directory the
+ * cache was opened under — Windows cannot remove a database that is still open.
+ */
+export function closeModelCache(): void {
+	if (sharedDbPath) invalidateReadPath(sharedDbPath);
+	closeSharedDb();
 }
 
 function runModelCacheDb<T>(resolvedPath: string, shared: boolean, useDb: (db: Database) => T): T {
@@ -208,8 +313,22 @@ function runModelCacheDb<T>(resolvedPath: string, shared: boolean, useDb: (db: D
 }
 
 function withModelCacheDb<T>(dbPath: string | undefined, useDb: (db: Database) => T): T {
-	const resolvedPath = dbPath ?? getModelDbPath();
-	return runModelCacheDb(resolvedPath, dbPath === undefined, useDb);
+	const { resolvedPath, shared } = resolveCacheDb(dbPath);
+	return runModelCacheDb(resolvedPath, shared, useDb);
+}
+
+/**
+ * An explicit path naming the default `models.db` (e.g. the SDK passing
+ * `getModelDbPath(agentDir)` for the default agent dir) shares the long-lived
+ * handle, so it gets the `data_version` fast path instead of opening,
+ * initializing and re-reading the row on every call.
+ */
+function resolveCacheDb(dbPath: string | undefined): { resolvedPath: string; shared: boolean } {
+	const defaultPath = getModelDbPath();
+	if (dbPath === undefined || dbPath === defaultPath || path.resolve(dbPath) === path.resolve(defaultPath)) {
+		return { resolvedPath: defaultPath, shared: true };
+	}
+	return { resolvedPath: dbPath, shared: false };
 }
 
 function migrateCacheSchema(db: Database): void {
@@ -234,18 +353,38 @@ function migrateCacheSchema(db: Database): void {
 			// header matching was introduced.
 			db.run("ALTER TABLE model_cache ADD COLUMN header_restore_version INTEGER NOT NULL DEFAULT 0");
 		}
+		if (!columns.some(column => column.name === "models_hash")) {
+			// Rows from older binaries keep '' (never equal), so they are re-read in
+			// full until the next write records their hash; no version bump needed.
+			// Older binaries rewriting a row via INSERT OR REPLACE reset it to ''.
+			db.run("ALTER TABLE model_cache ADD COLUMN models_hash TEXT NOT NULL DEFAULT ''");
+		}
 	} finally {
 		stmt.finalize();
 	}
-	// Delete rows written under any older schema so they cannot be reused. The
-	// legacy `UPDATE ... WHERE version = 2` migration silently promoted the very
-	// first cache version to whatever the current one is, defeating every
-	// subsequent invalidation (see #4146: pre-V2 Codex rows kept the legacy
-	// compaction path even after CACHE_SCHEMA_VERSION was bumped).
-	db.run("DELETE FROM model_cache WHERE version <> ? OR materialization_policy <> ?", [
-		CACHE_SCHEMA_VERSION,
-		materializationPolicy(),
-	]);
+	// Rows predating v11 may carry credential-bearing request headers (v10 could
+	// still persist derived computer-use headers), so purge them and scrub the
+	// freed cells (#5780). Every other non-current row (v11/v12, a newer schema,
+	// or another materialization policy from a different app version sharing
+	// this file) never persisted headers: readers gate on the exact version and
+	// policy, treat it as absent, and the next write for that provider replaces
+	// it lazily, so switching versions does not wipe and re-download every
+	// provider. Never promote old rows in place: the legacy `UPDATE ... WHERE
+	// version = 2` migration did, defeating every later invalidation (#4146).
+	const legacyStmt = db.prepare("SELECT 1 AS found FROM model_cache WHERE version < ? LIMIT 1");
+	let hasLegacyRows: boolean;
+	try {
+		hasLegacyRows = legacyStmt.get(FIRST_HEADERLESS_SCHEMA_VERSION) !== null;
+	} finally {
+		legacyStmt.finalize();
+	}
+	if (!hasLegacyRows) return;
+	db.run("PRAGMA secure_delete = ON");
+	try {
+		db.run("DELETE FROM model_cache WHERE version < ?", [FIRST_HEADERLESS_SCHEMA_VERSION]);
+	} finally {
+		db.run("PRAGMA secure_delete = FAST");
+	}
 }
 
 function isMaterializedModel(value: unknown): value is PersistedModel<Api> {
@@ -260,8 +399,9 @@ function isMaterializedModel(value: unknown): value is PersistedModel<Api> {
 		model.api.length === 0 ||
 		typeof model.provider !== "string" ||
 		model.provider.length === 0 ||
+		// Empty is legitimate: Azure-style providers resolve the endpoint from
+		// configuration at request time, and their bundled rows carry "".
 		typeof model.baseUrl !== "string" ||
-		model.baseUrl.length === 0 ||
 		typeof model.reasoning !== "boolean" ||
 		!Array.isArray(model.input) ||
 		model.input.length === 0 ||
@@ -332,15 +472,14 @@ export function readModelCache<TApi extends Api>(
 	dbPath?: string,
 ): CacheEntry<TApi> | null {
 	try {
-		const resolvedPath = dbPath ?? getModelDbPath();
-		const key = readCacheKey(resolvedPath, providerId);
 		// Monotonic change signal: same-shaped WAL overwrites after checkpoint
 		// can leave every size:mtime pair identical, so file metadata alone
 		// cannot invalidate. PRAGMA data_version increments on each committed
 		// write transaction visible to a new reader. It is only comparable
 		// across calls on the same connection, so it gates the no-query fast
 		// path for the shared handle only.
-		const shared = dbPath === undefined;
+		const { resolvedPath, shared } = resolveCacheDb(dbPath);
+		const key = readCacheKey(resolvedPath, providerId);
 		return runModelCacheDb(resolvedPath, shared, db => {
 			const dataVersion = shared ? dbDataVersion(db) : null;
 			const cached = readRowCache.get(key);
@@ -349,33 +488,32 @@ export function readModelCache<TApi extends Api>(
 				// cached row's updatedAt so a long-lived process goes stale.
 				return withFreshness(cached.entry as CacheEntry<TApi> | null, ttlMs, now);
 			}
-			// Any commit (to any provider's row) bumps data_version. Re-read this
-			// row, but reuse the parsed entry when its bytes are unchanged.
-			const stmt = db.query<CacheRow, [string]>("SELECT * FROM model_cache WHERE provider_id = ?");
-			let row: CacheRow | null;
-			try {
-				row = stmt.get(providerId);
-			} finally {
-				stmt.finalize();
+			// Any commit (to any provider's row) bumps data_version. Validate the
+			// memoized parse against the row's scalar columns and payload hash
+			// first; only a changed payload pays for the multi-MB `models` read.
+			let entry: CacheEntry<TApi> | null = null;
+			let meta: CacheRowMeta | null = null;
+			if (cached?.entry && cached.meta) {
+				meta = queryRow<CacheRowMeta>(db, SELECT_CACHE_ROW_META, providerId);
+				if (meta && meta.materialization_policy === materializationPolicy() && cacheRowsEqual(cached.meta, meta)) {
+					// Payload unchanged; only side-table freshness may have moved.
+					entry = withFreshness(withRowState(cached.entry as CacheEntry<TApi>, meta), ttlMs, now);
+				} else {
+					meta = null;
+				}
 			}
-			let entry: CacheEntry<TApi> | null;
-			if (
-				cached?.entry &&
-				cached.row &&
-				row &&
-				row.materialization_policy === materializationPolicy() &&
-				cacheRowsEqual(cached.row, row)
-			) {
-				entry = withFreshness(cached.entry as CacheEntry<TApi>, ttlMs, now);
-			} else {
+			if (entry === null) {
+				// One statement reads payload and scalars from the same snapshot.
+				const row = queryRow<CacheRow>(db, SELECT_CACHE_ROW, providerId);
 				entry = parseCacheRow<TApi>(db, providerId, row, ttlMs, now);
+				if (entry !== null && row !== null) {
+					// Drop the payload so the memo never pins the multi-MB `models` string.
+					const { models: _models, ...rowScalars } = row;
+					meta = rowScalars;
+				}
 			}
 			if (readRowCache.size >= READ_ROW_CACHE_MAX) readRowCache.clear();
-			readRowCache.set(key, {
-				dataVersion,
-				row: entry === null ? null : row,
-				entry: entry as CacheEntry<Api> | null,
-			});
+			readRowCache.set(key, { dataVersion, meta, entry: entry as CacheEntry<Api> | null });
 			return entry;
 		});
 	} catch {
@@ -383,7 +521,20 @@ export function readModelCache<TApi extends Api>(
 	}
 }
 
-function cacheRowsEqual(left: CacheRow, right: CacheRow): boolean {
+function queryRow<T>(db: Database, sql: string, providerId: string): T | null {
+	const stmt = db.query<T, [string]>(sql);
+	try {
+		return stmt.get(providerId);
+	} finally {
+		stmt.finalize();
+	}
+}
+
+/**
+ * Whether two rows carry the same payload record (refresh side-row columns
+ * excluded). Payloads compare by `models_hash`; rows without one never match.
+ */
+function cacheRowsEqual(left: CacheRowMeta, right: CacheRowMeta): boolean {
 	return (
 		left.version === right.version &&
 		left.materialization_policy === right.materialization_policy &&
@@ -393,8 +544,28 @@ function cacheRowsEqual(left: CacheRow, right: CacheRow): boolean {
 		left.header_omitted_model_ids === right.header_omitted_model_ids &&
 		left.unrestorable_header_model_ids === right.unrestorable_header_model_ids &&
 		left.header_restore_version === right.header_restore_version &&
-		left.models === right.models
+		left.models_hash !== "" &&
+		left.models_hash === right.models_hash
 	);
+}
+
+/** Effective freshness/authority: the side row wins while it refers to this payload. */
+function rowState(row: StoredRowState): { updatedAt: number; authoritative: boolean } {
+	if (
+		row.refresh_updated_at !== null &&
+		row.refresh_payload_updated_at === row.updated_at &&
+		row.refresh_authoritative !== null
+	) {
+		return { updatedAt: row.refresh_updated_at, authoritative: row.refresh_authoritative === 1 };
+	}
+	return { updatedAt: row.updated_at, authoritative: row.authoritative === 1 };
+}
+
+function withRowState<TApi extends Api>(entry: CacheEntry<TApi>, row: StoredRowState): CacheEntry<TApi> {
+	const { updatedAt, authoritative } = rowState(row);
+	return entry.updatedAt === updatedAt && entry.authoritative === authoritative
+		? entry
+		: { ...entry, updatedAt, authoritative };
 }
 
 function parseCacheRow<TApi extends Api>(
@@ -413,17 +584,19 @@ function parseCacheRow<TApi extends Api>(
 	if (models === null || headerOmittedModelIds === null || unrestorableHeaderModelIds === null) {
 		// Fail closed on corrupt header provenance: treating malformed
 		// markers as empty could return a model with required credentials
-		// silently absent. secure_delete scrubs the rejected payload.
+		// silently absent. Current-schema rows never persist headers, so the
+		// rejected payload needs no secure scrub.
 		db.run("DELETE FROM model_cache WHERE provider_id = ?", [providerId]);
 		return null;
 	}
-	const ageMs = now() - row.updated_at;
+	const { updatedAt, authoritative } = rowState(row);
+	const ageMs = now() - updatedAt;
 	const fresh = Number.isFinite(ageMs) && ageMs >= 0 && ageMs <= ttlMs;
 	return {
 		models,
 		fresh,
-		authoritative: row.authoritative === 1,
-		updatedAt: row.updated_at,
+		authoritative,
+		updatedAt,
 		headerOmittedModelIds,
 		unrestorableHeaderModelIds,
 		legacyHeaderRestoreMarkers: row.header_restore_version < HEADER_RESTORE_VERSION,
@@ -468,6 +641,16 @@ function headersEqual(left: Record<string, string> | undefined, right: Record<st
 	return true;
 }
 
+/**
+ * Persist a provider snapshot.
+ *
+ * When the stored payload (models, header provenance, fingerprint, schema and
+ * materialization policy) is byte-identical, the multi-MB row is left alone and
+ * only `model_cache_refresh` records the new freshness and authority; a write
+ * that changes nothing at all is skipped. Every model persisted here is
+ * validated with the reader's own predicate, so a row this writes is never
+ * rejected (and deleted) by `readModelCache`.
+ */
 export function writeModelCache<TApi extends Api>(
 	providerId: string,
 	updatedAt: number,
@@ -484,8 +667,16 @@ export function writeModelCache<TApi extends Api>(
 			const headerOmittedModelIds: string[] = [];
 			const unrestorableHeaderModelIds: string[] = [];
 			const cachedModels: PersistedModel<TApi>[] = [];
+			const rejectedModelIds: string[] = [];
 			const staticById = new Map(staticHeaderSources.map(model => [model.id, model]));
 			for (const model of models) {
+				const cachedModel = toCachedModel(model);
+				if (!isMaterializedModel(cachedModel)) {
+					// One unreadable model must not make the whole row fail
+					// validation on read (which deletes it and refetches forever).
+					rejectedModelIds.push(model.id);
+					continue;
+				}
 				if (hasModelHeaders(model)) {
 					headerOmittedModelIds.push(model.id);
 					// Synthesized variants (e.g. Copilot `-1m`) have no same-id static
@@ -507,27 +698,100 @@ export function writeModelCache<TApi extends Api>(
 						unrestorableHeaderModelIds.push(model.id);
 					}
 				}
-				cachedModels.push(toCachedModel(model));
+				cachedModels.push(cachedModel);
 			}
-			db.run(
-				`INSERT OR REPLACE INTO model_cache (
-					provider_id, version, materialization_policy, updated_at, authoritative, static_fingerprint,
-					header_omitted_model_ids, unrestorable_header_model_ids,
-					header_restore_version, models
-				) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-				[
-					providerId,
-					CACHE_SCHEMA_VERSION,
-					materializationPolicy(),
-					updatedAt,
-					authoritative ? 1 : 0,
-					staticFingerprint,
-					JSON.stringify(headerOmittedModelIds),
-					JSON.stringify(unrestorableHeaderModelIds),
-					HEADER_RESTORE_VERSION,
-					JSON.stringify(cachedModels),
-				],
-			);
+			if (rejectedModelIds.length > 0) {
+				logger.debug("model cache skipped models that would fail cache validation", {
+					provider: providerId,
+					models: rejectedModelIds,
+				});
+			}
+			const policy = materializationPolicy();
+			const authoritativeFlag = authoritative ? 1 : 0;
+			const serializedHeaderOmitted = JSON.stringify(headerOmittedModelIds);
+			const serializedUnrestorable = JSON.stringify(unrestorableHeaderModelIds);
+			const serializedModels = JSON.stringify(cachedModels);
+			// Length prefix: a collision would also need an equal payload size.
+			const modelsHash = `${serializedModels.length.toString(36)}:${Bun.hash(serializedModels).toString(36)}`;
+			const outcome = db
+				.transaction((): "skipped" | "refreshed" | "written" => {
+					const matchStmt = db.prepare<
+						StoredRowState,
+						[string, number, string, string, string, string, number, string]
+					>(
+						`SELECT m.updated_at, m.authoritative,
+							r.payload_updated_at AS refresh_payload_updated_at,
+							r.updated_at AS refresh_updated_at,
+							r.authoritative AS refresh_authoritative
+						FROM model_cache m
+						LEFT JOIN model_cache_refresh r ON r.provider_id = m.provider_id
+						WHERE m.provider_id = ? AND m.version = ? AND m.materialization_policy = ?
+							AND m.static_fingerprint = ? AND m.header_omitted_model_ids = ?
+							AND m.unrestorable_header_model_ids = ? AND m.header_restore_version = ? AND m.models_hash = ?`,
+					);
+					let stored: StoredRowState | null;
+					try {
+						stored = matchStmt.get(
+							providerId,
+							CACHE_SCHEMA_VERSION,
+							policy,
+							staticFingerprint,
+							serializedHeaderOmitted,
+							serializedUnrestorable,
+							HEADER_RESTORE_VERSION,
+							modelsHash,
+						);
+					} finally {
+						matchStmt.finalize();
+					}
+					if (stored) {
+						const state = rowState(stored);
+						if (state.updatedAt === updatedAt && state.authoritative === authoritative) return "skipped";
+						db.run(
+							`INSERT INTO model_cache_refresh (provider_id, payload_updated_at, updated_at, authoritative)
+							VALUES (?, ?, ?, ?)
+							ON CONFLICT(provider_id) DO UPDATE SET
+								payload_updated_at = excluded.payload_updated_at,
+								updated_at = excluded.updated_at,
+								authoritative = excluded.authoritative`,
+							[providerId, stored.updated_at, updatedAt, authoritativeFlag],
+						);
+						return "refreshed";
+					}
+					db.run(
+						`INSERT OR REPLACE INTO model_cache (
+							provider_id, version, materialization_policy, updated_at, authoritative, static_fingerprint,
+							header_omitted_model_ids, unrestorable_header_model_ids,
+							header_restore_version, models_hash, models
+						) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+						[
+							providerId,
+							CACHE_SCHEMA_VERSION,
+							policy,
+							updatedAt,
+							authoritativeFlag,
+							staticFingerprint,
+							serializedHeaderOmitted,
+							serializedUnrestorable,
+							HEADER_RESTORE_VERSION,
+							modelsHash,
+							serializedModels,
+						],
+					);
+					db.run("DELETE FROM model_cache_refresh WHERE provider_id = ?", [providerId]);
+					return "written";
+				})
+				.immediate();
+			if (outcome === "skipped") {
+				writeStats.skippedWrites++;
+			} else if (outcome === "refreshed") {
+				writeStats.refreshWrites++;
+			} else {
+				writeStats.payloadWrites++;
+				writeStats.payloadBytes += serializedModels.length;
+				if (recentPayloadProviders.length >= RECENT_PAYLOAD_PROVIDERS_MAX) recentPayloadProviders.shift();
+				recentPayloadProviders.push(providerId);
+			}
 		});
 	} catch {
 		// Cache writes are best-effort; failures should not break model resolution.

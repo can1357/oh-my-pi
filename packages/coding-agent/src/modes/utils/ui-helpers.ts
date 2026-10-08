@@ -45,7 +45,13 @@ import { decodeStreamedToolArgs, streamingStringKeysForTool } from "../../modes/
 import { materializeImageReferenceLinksSync } from "@oh-my-pi/pi-tui/prompt/image-references";
 import { imageAttachmentSource } from "@oh-my-pi/pi-tui/prompt/image-source";
 import { theme } from "@oh-my-pi/pi-tui/theme";
-import type { CompactionQueuedMessage, InteractiveModeContext, RenderSessionContextOptions } from "../../modes/types";
+import type {
+	CompactionQueuedMessage,
+	InteractiveModeContext,
+	RenderSessionContextOptions,
+	ShowStatusOptions,
+} from "../../modes/types";
+import { extractVisibleAssistantText } from "../rpc/rpc-live";
 import { LAUNCH_COMPLETION_MESSAGE_TYPE } from "../../session/launch-completion";
 import {
 	BACKGROUND_TAN_DISPATCH_MESSAGE_TYPE,
@@ -56,6 +62,8 @@ import {
 	type SkillPromptDetails,
 } from "../../session/messages";
 import type { SessionContext, StrippedToolCallsMarker } from "../../session/session-context";
+import { executeBuiltinSlashCommand, lookupBuiltinSlashCommand } from "../../slash-commands/builtin-registry";
+import { parseSlashCommand } from "../../slash-commands/helpers/parse";
 import { buildSkillCommandPrompt, invokeSkillCommandFromText, isKnownSkillCommand } from "../skill-command";
 import {
 	createAssistantMessageComponent,
@@ -136,23 +144,24 @@ export class UiHelpers {
 	 * If multiple status messages are emitted back-to-back (without anything else being added to the chat),
 	 * we update the previous status line instead of appending new ones to avoid log spam.
 	 */
-	showStatus(message: string, options?: { dim?: boolean }): void {
+	showStatus(message: string, options?: ShowStatusOptions): void {
 		const children = this.ctx.chatContainer.children;
 		const last = children.length > 0 ? children[children.length - 1] : undefined;
 		const useDim = options?.dim ?? true;
 		// Resolve the dim color lazily so a later theme change re-shapes the line
 		// instead of leaving the palette that was active when it was presented.
 		const styleFn = useDim ? (t: string) => theme.fg("dim", t) : undefined;
+		const notice = { styleFn, toast: options?.toast };
 
 		if (last && last === this.ctx.lastStatus) {
-			this.ctx.lastStatus.setMessage(message, styleFn);
+			this.ctx.lastStatus.setMessage(message, notice);
 			this.ctx.ui.requestRender();
 			return;
 		}
 
-		const notice = new StatusNotice(message, styleFn);
-		this.ctx.present([notice]);
-		this.ctx.lastStatus = notice;
+		const status = new StatusNotice(message, notice);
+		this.ctx.present([status]);
+		this.ctx.lastStatus = status;
 	}
 
 	addMessageToChat(message: AgentMessage, options?: AddMessageOptions): Component[] {
@@ -450,7 +459,7 @@ export class UiHelpers {
 			if (
 				nextToolName === "wait" &&
 				previous.isDisplaceableBlock() &&
-				this.ctx.chatContainer.canRemoveBlock(previous)
+				this.ctx.chatContainer.canDisplaceBlock(previous)
 			) {
 				this.ctx.chatContainer.removeChild(previous);
 			}
@@ -956,7 +965,10 @@ export class UiHelpers {
 			this.ctx.chatContainer = stagedChatContainer;
 			this.ctx.transcriptMessageComponents = new WeakMap<AgentMessage, Component>();
 			this.ctx.pendingTools = new Map<string, ToolExecutionHandle>();
-			this.ctx.pendingMessagesContainer.disposeChildren();
+			// Drops deferred bash/python blocks with the old transcript, then repaints
+			// the queued-message bar from the live session queue: a mid-turn rebuild
+			// (rewind, /tree) keeps the queue, so it must stay visible and editable.
+			this.ctx.updatePendingMessagesDisplay();
 			this.ctx.pendingBashComponents = [];
 			this.ctx.pendingPythonComponents = [];
 			while (true) {
@@ -1090,13 +1102,12 @@ export class UiHelpers {
 		const queuedMessages = this.ctx.viewSession.getQueuedMessages() as QueuedMessages;
 
 		const steeringMessages = [...queuedMessages.steering];
-		for (const entry of this.ctx.compactionQueuedMessages as CompactionQueuedMessage[]) {
-			if (entry.mode === "steer") steeringMessages.push(entry.text);
-		}
-
 		const followUpMessages = [...queuedMessages.followUp];
-		for (const entry of this.ctx.compactionQueuedMessages as CompactionQueuedMessage[]) {
-			if (entry.mode === "followUp") followUpMessages.push(entry.text);
+		if (!this.ctx.focusedAgentId) {
+			for (const entry of this.ctx.compactionQueuedMessages as CompactionQueuedMessage[]) {
+				if (entry.mode === "steer") steeringMessages.push(entry.text);
+				else followUpMessages.push(entry.text);
+			}
 		}
 
 		const groups = [
@@ -1138,6 +1149,22 @@ export class UiHelpers {
 	}
 
 	async #deliverQueuedMessage(message: CompactionQueuedMessage): Promise<void> {
+		const builtin = await executeBuiltinSlashCommand(message.text, {
+			ctx: this.ctx,
+			input: message.images ? { images: message.images } : undefined,
+		});
+		if (builtin === true) {
+			this.#parkLoopOnLocalConsume(message.text, false);
+			return;
+		}
+		if (typeof builtin === "string") {
+			const forwarded = await this.ctx.session.prompt(builtin, {
+				streamingBehavior: message.mode,
+				images: message.images,
+			});
+			this.#parkLoopOnLocalConsume(message.text, forwarded);
+			return;
+		}
 		if (
 			await invokeSkillCommandFromText(this.ctx, message.text, message.mode, {
 				propagateErrors: true,
@@ -1164,6 +1191,9 @@ export class UiHelpers {
 
 	isKnownSlashCommand(text: string): boolean {
 		if (!text.startsWith("/")) return false;
+		const parsed = parseSlashCommand(text);
+		const builtin = parsed && lookupBuiltinSlashCommand(parsed.name);
+		if (builtin && (builtin.allowArgs || !parsed.args)) return true;
 		const spaceIndex = text.indexOf(" ");
 		const commandName = spaceIndex === -1 ? text.slice(1) : text.slice(1, spaceIndex);
 		if (!commandName) return false;
@@ -1219,8 +1249,7 @@ export class UiHelpers {
 			}
 			if (firstPromptIndex === -1) {
 				for (const message of queuedMessages) {
-					const forwarded = await this.ctx.session.prompt(message.text);
-					this.#parkLoopOnLocalConsume(message.text, forwarded);
+					await this.#deliverQueuedMessage(message);
 				}
 				return;
 			}
@@ -1306,12 +1335,6 @@ export class UiHelpers {
 	}
 
 	extractAssistantText(message: AssistantMessage): string {
-		let text = "";
-		for (const content of message.content) {
-			if (content.type === "text") {
-				text += content.text;
-			}
-		}
-		return text.trim();
+		return extractVisibleAssistantText(message);
 	}
 }

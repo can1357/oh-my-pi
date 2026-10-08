@@ -4,7 +4,7 @@
  *
  * Lazily opens one `TextPredictor` per requested engine, keeps each learning
  * engine current with `history.db` (rows past a persisted row-id cursor, on
- * open and on every `sync`), persists on a debounce and on exit, and exits
+ * open and on every `sync`), persists on a 5-minute debounce and on exit, and exits
  * after an idle window. A learning engine that starts from empty state first
  * learns the Claude Code and Codex prompt histories (`foreign-history.ts`).
  * `smollm` requests are answered by SmolLM and ngram together (`blend.ts`).
@@ -14,7 +14,7 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import type { Database } from "bun:sqlite";
 import { type PredictedWord, TextPredictor } from "@oh-my-pi/pi-natives";
-import { getHistoryDbPath, isEnoent, logger, VERSION } from "@oh-my-pi/pi-utils";
+import { getHistoryDbPath, getPredictStateDir, isEnoent, logger, VERSION } from "@oh-my-pi/pi-utils";
 import { JsonLineServer } from "../tiny/worker-server";
 import { openSqliteReadConnection } from "../tools/sqlite-reader";
 import { blendPredictions } from "./blend";
@@ -31,12 +31,23 @@ import { getSmolLmModelDir, smolLmWeightsReady } from "./smollm-weights";
 
 /** Exit after this long without a request; clients restart the daemon on demand. */
 const IDLE_EXIT_MS = 15 * 60_000;
-/** Persist learned state this long after the last change. */
-const PERSIST_DEBOUNCE_MS = 30_000;
+/**
+ * Persist learned state once changes have been quiet this long. Each persist
+ * rewrites the whole engine snapshot (~1 MB for ngram) plus `cursor.json`, so
+ * typing must not trigger one every few seconds. Durability trade-off: a crash
+ * loses only accept/reject feedback since the last persist; prompts are
+ * re-learned on the next open by ingesting `history.db` rows past the persisted
+ * cursor. Idle exit and shutdown still persist (`onStop`).
+ */
+const PERSIST_DEBOUNCE_MS = 5 * 60_000;
+/** Persist at the latest this long after the first unpersisted change, even while changes keep arriving. */
+const PERSIST_MAX_DIRTY_MS = 15 * 60_000;
 /** History rows per `observe` batch during ingestion. */
 const INGEST_BATCH = 1_000;
 /** After an engine fails to open, requests for it fail fast for this long before a retry. */
 const OPEN_RETRY_MS = 60_000;
+/** While SmolLM weights are missing (composer still fetching), recheck the marker at most this often. */
+const WEIGHTS_RECHECK_MS = 5_000;
 const CURSOR_FILE = "cursor.json";
 
 /** Persisted history cursor, or `undefined` when the engine has no persisted state yet. */
@@ -60,6 +71,46 @@ class SmolLmWeightsMissingError extends Error {
 		super(
 			"SmolLM weights are not downloaded yet (the editor fetches them on first use, or run `omp tiny-models download smollm`)",
 		);
+	}
+}
+
+/**
+ * Trailing debounce capped by a maximum dirty age: each change pushes the
+ * flush to `debounceMs` after it, but never past `maxDirtyMs` after the first
+ * unflushed change. Consecutive flushes are therefore at least `debounceMs`
+ * apart, and a steady stream of changes still flushes every `maxDirtyMs`.
+ */
+export class PersistCadence {
+	readonly #debounceMs: number;
+	readonly #maxDirtyMs: number;
+	readonly #flush: () => void;
+	#timer: NodeJS.Timeout | undefined;
+	#dirtySince: number | undefined;
+
+	constructor(debounceMs: number, maxDirtyMs: number, flush: () => void) {
+		this.#debounceMs = debounceMs;
+		this.#maxDirtyMs = maxDirtyMs;
+		this.#flush = flush;
+	}
+
+	/** Record a change and (re)arm the flush. */
+	touch(): void {
+		const now = Date.now();
+		this.#dirtySince ??= now;
+		const delay = Math.max(0, Math.min(this.#debounceMs, this.#dirtySince + this.#maxDirtyMs - now));
+		clearTimeout(this.#timer);
+		this.#timer = setTimeout(() => {
+			this.#timer = undefined;
+			this.#dirtySince = undefined;
+			this.#flush();
+		}, delay);
+	}
+
+	/** Drop a pending flush (the caller persists on stop instead). */
+	cancel(): void {
+		clearTimeout(this.#timer);
+		this.#timer = undefined;
+		this.#dirtySince = undefined;
 	}
 }
 
@@ -163,7 +214,9 @@ class TextPredictDaemon {
 	#historyDbPath: string;
 	#engines = new Map<TextPredictMethod, Promise<Engine>>();
 	#failedAt = new Map<TextPredictMethod, number>();
-	#persistTimer: NodeJS.Timeout | undefined;
+	/** Engines whose weights were missing, keyed to when that was observed. */
+	#missingAt = new Map<TextPredictMethod, number>();
+	#persistCadence = new PersistCadence(PERSIST_DEBOUNCE_MS, PERSIST_MAX_DIRTY_MS, () => void this.#persistAll());
 	#server = new JsonLineServer<TextPredictRequest, TextPredictResponse>({
 		name: "text-predict",
 		cleanupLabel: "text-predict-daemon",
@@ -172,10 +225,7 @@ class TextPredictDaemon {
 		banner: textPredictReadyBanner,
 		onRequest: (request, reply) =>
 			void this.#server.busy(() => this.#dispatch(request)).then(response => reply.send(response)),
-		beforeStop: () => {
-			clearTimeout(this.#persistTimer);
-			this.#persistTimer = undefined;
-		},
+		beforeStop: () => this.#persistCadence.cancel(),
 		onStop: () => this.#persistAll(),
 	});
 
@@ -219,7 +269,7 @@ class TextPredictDaemon {
 				const engine = await this.#engine(request.method);
 				await engine.predictor.feedback(request.before, request.prefix, request.suggestion, request.accepted);
 				engine.markDirty();
-				this.#schedulePersist();
+				this.#persistCadence.touch();
 				return { id: request.id, ok: true, op: "feedback" };
 			}
 			case "sync": {
@@ -228,7 +278,7 @@ class TextPredictDaemon {
 					const engine = await pending.catch(() => undefined);
 					if (engine) ingested += await engine.ingest(this.#historyDbPath);
 				}
-				if (ingested > 0) this.#schedulePersist();
+				if (ingested > 0) this.#persistCadence.touch();
 				return { id: request.id, ok: true, op: "sync", ingested };
 			}
 			case "shutdown":
@@ -254,9 +304,15 @@ class TextPredictDaemon {
 	}
 
 	#engine(method: TextPredictMethod): Promise<Engine> {
+		const now = Date.now();
 		const failedAt = this.#failedAt.get(method);
-		if (failedAt !== undefined && Date.now() - failedAt >= OPEN_RETRY_MS) {
+		if (failedAt !== undefined && now - failedAt >= OPEN_RETRY_MS) {
 			this.#failedAt.delete(method);
+			this.#engines.delete(method);
+		}
+		const missingAt = this.#missingAt.get(method);
+		if (missingAt !== undefined && now - missingAt >= WEIGHTS_RECHECK_MS) {
+			this.#missingAt.delete(method);
 			this.#engines.delete(method);
 		}
 		let pending = this.#engines.get(method);
@@ -265,8 +321,8 @@ class TextPredictDaemon {
 			this.#engines.set(method, pending);
 			pending.catch(error => {
 				if (error instanceof SmolLmWeightsMissingError) {
-					// Checked again on the next request: the composer is fetching them.
-					this.#engines.delete(method);
+					// Rechecked after WEIGHTS_RECHECK_MS: the composer is fetching them.
+					this.#missingAt.set(method, Date.now());
 					return;
 				}
 				this.#failedAt.set(method, Date.now());
@@ -277,13 +333,13 @@ class TextPredictDaemon {
 	}
 
 	async #open(method: TextPredictMethod): Promise<Engine> {
-		const stateDir = path.join(this.#agentDir, "predict", method);
-		await fs.mkdir(stateDir, { recursive: true });
 		let modelDir: string | undefined;
 		if (method === "smollm") {
 			if (!(await smolLmWeightsReady())) throw new SmolLmWeightsMissingError();
 			modelDir = getSmolLmModelDir();
 		}
+		const stateDir = getPredictStateDir(this.#agentDir, method);
+		await fs.mkdir(stateDir, { recursive: true });
 		const startedAt = performance.now();
 		// SmolLM only serves the blend, which gates on its own score.
 		const showThreshold = method === "smollm" ? 0 : undefined;
@@ -304,21 +360,13 @@ class TextPredictDaemon {
 		}
 		const engine = new Engine(method, stateDir, predictor, cursor);
 		const ingested = await engine.ingest(this.#historyDbPath);
-		if (ingested > 0) this.#schedulePersist();
+		if (ingested > 0) this.#persistCadence.touch();
 		logger.debug("text-predict: engine ready", {
 			method,
 			ingested,
 			ms: Math.round(performance.now() - startedAt),
 		});
 		return engine;
-	}
-
-	#schedulePersist(): void {
-		if (this.#persistTimer) return;
-		this.#persistTimer = setTimeout(() => {
-			this.#persistTimer = undefined;
-			void this.#persistAll();
-		}, PERSIST_DEBOUNCE_MS);
 	}
 
 	async #persistAll(): Promise<void> {

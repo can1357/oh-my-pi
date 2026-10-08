@@ -55,6 +55,12 @@ export const handleNuGet: SpecialHandler = async (
 		const requestedVersion = match[2] ? decodeURIComponent(match[2]) : null;
 		const fetchedAt = new Date().toISOString();
 
+		// The download-stats search is independent of the registration walk; start it now.
+		const searchUrl = `https://api.nuget.org/v3/query?q=packageid:${encodeURIComponent(packageName)}&prerelease=true&take=1`;
+		const searchPromise = loadPage(searchUrl, { timeout: Math.min(timeout, 5), signal });
+		// Early returns below leave it unawaited; a rejection is still rethrown where it is awaited.
+		searchPromise.catch(() => {});
+
 		// Fetch from NuGet registration API (package name must be lowercase)
 		const apiUrl = `https://api.nuget.org/v3/registration5-gz-semver2/${packageName.toLowerCase()}/index.json`;
 		const result = await loadPage(apiUrl, { timeout, signal });
@@ -115,10 +121,9 @@ export const handleNuGet: SpecialHandler = async (
 			targetEntry = latestItem.catalogEntry;
 		}
 
-		// Fetch download stats via search API
+		// Download stats via search API
 		let totalDownloads: number | null = null;
-		const searchUrl = `https://api.nuget.org/v3/query?q=packageid:${encodeURIComponent(packageName)}&prerelease=true&take=1`;
-		const searchResult = await loadPage(searchUrl, { timeout: Math.min(timeout, 5), signal });
+		const searchResult = await searchPromise;
 
 		if (searchResult.ok) {
 			const searchData = tryParseJson<{ data?: Array<{ totalDownloads?: number }> }>(searchResult.content);

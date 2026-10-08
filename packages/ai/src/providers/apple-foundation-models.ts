@@ -11,8 +11,9 @@
  */
 import type { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { appleFmAvailability, appleFmCancel, appleFmGenerate } from "@oh-my-pi/pi-natives";
-import { parseStreamingJson } from "@oh-my-pi/pi-utils";
+import { parseStreamingJsonThrottled } from "@oh-my-pi/pi-utils";
 import * as AIError from "../error";
+import { parseToolCallArguments } from "../utils/tool-call-arguments";
 import type {
 	AssistantMessage,
 	Context,
@@ -25,7 +26,7 @@ import type {
 	ToolChoice,
 } from "../types";
 import { normalizeSystemPrompts } from "../utils";
-import { clearStreamingPartialJson, kStreamingPartialJson } from "../utils/block-symbols";
+import { clearStreamingPartialJson, kStreamingLastParseLen, kStreamingPartialJson } from "../utils/block-symbols";
 import { AssistantMessageEventStream } from "../utils/event-stream";
 import { decodeFoundationModelsArguments, toFoundationModelsSchema, toolWireSchema } from "../utils/schema";
 import { transformMessages } from "./transform-messages";
@@ -97,6 +98,7 @@ const CONTENT_BLOCKED_CODES: Record<string, true> = { guardrail_violation: true,
 
 type ToolCallBlock = Extract<AssistantMessage["content"][number], { type: "toolCall" }> & {
 	[kStreamingPartialJson]?: string;
+	[kStreamingLastParseLen]?: number;
 };
 
 /** Probes whether the on-device model can generate on this machine. */
@@ -341,8 +343,13 @@ export const streamAppleFoundationModels: StreamFunction<"apple-foundation-model
 						}
 						const delta = event.arguments ?? "";
 						const block = output.content[index] as ToolCallBlock;
-						block[kStreamingPartialJson] = (block[kStreamingPartialJson] ?? "") + delta;
-						block.arguments = parseStreamingJson<Record<string, unknown>>(block[kStreamingPartialJson]);
+						const partialJson = (block[kStreamingPartialJson] ?? "") + delta;
+						block[kStreamingPartialJson] = partialJson;
+						const throttled = parseStreamingJsonThrottled(partialJson, block[kStreamingLastParseLen] ?? 0);
+						if (throttled) {
+							block.arguments = throttled.value;
+							block[kStreamingLastParseLen] = throttled.parsedLen;
+						}
 						stream.push({ type: "toolcall_delta", contentIndex: index, delta, partial: output });
 						firstTokenTime ??= performance.now();
 						break;
@@ -367,7 +374,7 @@ export const streamAppleFoundationModels: StreamFunction<"apple-foundation-model
 			for (const index of toolIndices.values()) {
 				const block = output.content[index] as ToolCallBlock;
 				block.arguments = decodeFoundationModelsArguments(
-					parseStreamingJson<Record<string, unknown>>(block[kStreamingPartialJson] ?? ""),
+					parseToolCallArguments(block[kStreamingPartialJson]),
 					encodedPaths.get(block.name) ?? [],
 				);
 				clearStreamingPartialJson(block);

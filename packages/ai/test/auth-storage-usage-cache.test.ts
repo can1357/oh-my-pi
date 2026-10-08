@@ -18,6 +18,7 @@ import {
 	AuthStorage,
 	type StoredAuthCredential,
 } from "@oh-my-pi/pi-ai/auth-storage";
+import { usageCacheIdentity } from "@oh-my-pi/pi-ai/auth/usage-cache";
 import type { UsageLimit, UsageProvider, UsageReport } from "@oh-my-pi/pi-ai/usage";
 import { alibabaTokenPlanUsageProvider } from "@oh-my-pi/pi-ai/usage/alibaba-token-plan";
 import * as claudeUsage from "@oh-my-pi/pi-ai/usage/claude";
@@ -277,6 +278,44 @@ describe("AuthStorage usage cache: last-good failure fallback", () => {
 		expect(reports[0]?.metadata?.source).toBe("custom-provider");
 	});
 
+	it("keys reports by a runtime usage provider's cache version, not the configured resolver's", async () => {
+		const base = makeReport("a@example.com");
+		vi.spyOn(claudeUsage.claudeUsageProvider, "fetchUsage").mockResolvedValue({
+			...base,
+			metadata: { ...base.metadata, source: "built-in" },
+		});
+		// A second process on the same agent.db, without the extension provider.
+		const extensionless = new AuthStorage(store, {
+			usageProviderResolver: provider => (provider === "anthropic" ? claudeUsage.claudeUsageProvider : undefined),
+		});
+		await extensionless.credentials.reload();
+		let overrideCalls = 0;
+		storage.usage.setProvider("anthropic", {
+			...claudeUsage.claudeUsageProvider,
+			cacheVersion: 2564,
+			async fetchUsage() {
+				overrideCalls += 1;
+				return { ...base, metadata: { ...base.metadata, source: "override" } };
+			},
+		});
+
+		try {
+			const shared = anthropicReports(await extensionless.usage.reports());
+			const overridden = anthropicReports(await storage.usage.reports());
+
+			expect(shared[0]?.metadata?.source).toBe("built-in");
+			expect(overrideCalls).toBe(1);
+			expect(overridden[0]?.metadata?.source).toBe("override");
+
+			// Removing the override restores the configured provider's cached rows.
+			storage.usage.removeProvider("anthropic");
+			await extensionless.usage.reports();
+			expect(anthropicReports(await storage.usage.reports())[0]?.metadata?.source).toBe("built-in");
+		} finally {
+			extensionless.close();
+		}
+	});
+
 	it("caches null on a cold failure for the backoff window, then retries after it expires", async () => {
 		let calls = 0;
 		vi.spyOn(claudeUsage.claudeUsageProvider, "fetchUsage").mockImplementation(async () => {
@@ -420,6 +459,53 @@ describe("AuthStorage usage cache: Claude saved resets", () => {
 			const second = requireAnthropicReport(await storage.usage.reports());
 			expect(second.fetchedAt).toBeGreaterThanOrEqual(first.fetchedAt);
 			expect(second.resetCredits).toMatchObject({ availableCount: 1, nextCreditId: "grant_1" });
+		} finally {
+			storage.close();
+		}
+	});
+});
+
+describe("AuthStorage usage cache: Claude rate limits", () => {
+	afterEach(() => {
+		vi.restoreAllMocks();
+	});
+
+	it("waits a minute before re-polling Claude usage after a 429", async () => {
+		let now = 1_800_000_000_000;
+		vi.spyOn(Date, "now").mockImplementation(() => now);
+		vi.spyOn(Math, "random").mockReturnValue(0.5);
+		let usageRequests = 0;
+		const usageFetch = (async (input: string | URL | Request) => {
+			const url = new URL(typeof input === "string" ? input : input instanceof URL ? input.href : input.url);
+			if (url.search === "") usageRequests += 1;
+			if (usageRequests === 1) {
+				return Response.json(
+					{ error: { type: "rate_limit_error", message: "Rate limited. Please try again later." } },
+					{ status: 429, headers: { "retry-after": "0" } },
+				);
+			}
+			return Response.json({
+				five_hour: { utilization: 25, resets_at: "2099-09-23T00:00:00Z" },
+				cedar_ember: null,
+				juniper_tide: null,
+			});
+		}) as unknown as typeof fetch;
+		const storage = new AuthStorage(makeStore([oauthRow(1, "a@example.com")]), {
+			usageFetch,
+			usageProviderResolver: provider => (provider === "anthropic" ? claudeUsage.claudeUsageProvider : undefined),
+		});
+		try {
+			await storage.credentials.reload();
+			expect(anthropicReports(await storage.usage.reports())).toEqual([]);
+
+			now += 30_000;
+			expect(anthropicReports(await storage.usage.reports())).toEqual([]);
+			expect(usageRequests).toBe(1);
+
+			now += 31_000;
+			const recovered = requireAnthropicReport(await storage.usage.reports());
+			expect(requireLimit(recovered, "anthropic:5h").amount.used).toBe(25);
+			expect(usageRequests).toBe(2);
 		} finally {
 			storage.close();
 		}
@@ -1000,7 +1086,7 @@ describe("AuthStorage usage cache: header ingestion", () => {
 		expect(await storage.usage.reports()).toHaveLength(1);
 		expect(calls).toBe(1);
 
-		now.mockReturnValue(start + 12_501);
+		now.mockReturnValue(start + 75_001);
 		expect(await storage.usage.reports()).toHaveLength(1);
 		expect(calls).toBe(2);
 	});
@@ -1392,5 +1478,25 @@ describe("AuthStorage usage cache: org-only identity stability", () => {
 			storage.close();
 			vi.restoreAllMocks();
 		}
+	});
+});
+
+describe("AuthStorage usage cache: organization scope identity", () => {
+	it("isolates usage caches across organizations, WorkOS selections and residency", () => {
+		const credential = {
+			type: "oauth" as const,
+			accessToken: "token",
+			accountId: "user",
+			orgId: "org-a",
+			activeOrganizationId: "workos-a",
+			region: "global",
+			inferenceRegion: "us" as const,
+		};
+		const key = usageCacheIdentity(credential);
+		expect(key).toBe(usageCacheIdentity({ ...credential, accessToken: "refreshed" }));
+		expect(key).not.toBe(usageCacheIdentity({ ...credential, orgId: "org-b" }));
+		expect(key).not.toBe(usageCacheIdentity({ ...credential, activeOrganizationId: "workos-b" }));
+		expect(key).not.toBe(usageCacheIdentity({ ...credential, region: "eu" }));
+		expect(key).not.toBe(usageCacheIdentity({ ...credential, inferenceRegion: "global" }));
 	});
 });

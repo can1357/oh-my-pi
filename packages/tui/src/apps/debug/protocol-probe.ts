@@ -23,6 +23,8 @@ import { Text } from "../../components/text";
 import { ImageProtocol, NotifyProtocol, TERMINAL } from "../../terminal-capabilities";
 import { DynamicBorder } from "../../chrome/dynamic-border";
 import { theme } from "../../theme/theme";
+import { ansi } from "../../native/describe";
+import type { NativeNode } from "../../native/node";
 
 const PNG_SIGNATURE = Uint8Array.of(0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a);
 
@@ -148,13 +150,20 @@ function imageProtocolLabel(): string {
 /**
  * Deliberate exception to the normal text/data components: OSC 66 probes must
  * reach the terminal byte-for-byte, without sanitization, wrapping, clipping,
- * or padding that could invalidate the protocol sample.
+ * or padding that could invalidate the protocol sample. A native terminal
+ * gets the same bytes as one `ansi` block.
  */
 class RawLines implements Component {
 	readonly #lines: readonly string[];
+	readonly #native: NativeNode;
 
 	constructor(lines: readonly string[]) {
 		this.#lines = lines.slice();
+		this.#native = ansi(this.#lines.join("\n"));
+	}
+
+	describe(): NativeNode {
+		return this.#native;
 	}
 
 	render(): readonly string[] {

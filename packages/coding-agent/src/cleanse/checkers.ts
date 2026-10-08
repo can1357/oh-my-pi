@@ -2,7 +2,7 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { $which, isRecord, ptree, sanitizeText } from "@oh-my-pi/pi-utils";
-import { CLEANSE_PARSER_KINDS, type CleanseParserKind, parseCleanseDiagnostics } from "./parsers";
+import { CLEANSE_PARSER_KINDS, CleanseStreamParser, type CleanseParserKind, parseCleanseDiagnostics } from "./parsers";
 import type { CleanseCheckResult, CleanseDiagnostic, CleanseDiagnosticReport, SkippedCleanseCheck } from "./types";
 
 const IGNORED_DIRECTORIES: Record<string, true> = {
@@ -1228,14 +1228,7 @@ async function runChecker(
 		});
 		if (fresh.length > 0) onDiagnostics(fresh);
 	};
-	const parse = (stdout: string, stderr: string): CleanseDiagnostic[] =>
-		parseCleanseDiagnostics(plan.parser, {
-			checker: plan.label,
-			projectCwd,
-			checkerCwd: plan.cwd,
-			stdout,
-			stderr,
-		});
+	const context = { checker: plan.label, projectCwd, checkerCwd: plan.cwd };
 	const inProject = (diagnostics: CleanseDiagnostic[]): CleanseDiagnostic[] =>
 		diagnostics.filter(diagnostic => diagnostic.file === undefined || allowedFiles.has(diagnostic.file));
 	const result = (exitCode: number | null, diagnostics: CleanseDiagnostic[]): CleanseCheckResult => ({
@@ -1249,8 +1242,8 @@ async function runChecker(
 	});
 	try {
 		using child = ptree.spawn([plan.executable, ...plan.args], { cwd: plan.cwd, signal, stderr: "full" });
-		const stdout: OutputAccumulator = { text: "" };
-		const stderr: OutputAccumulator = { text: "" };
+		const stdout: OutputAccumulator = { chunks: [], read: 0 };
+		const stderr: OutputAccumulator = { chunks: [], read: 0 };
 		const pumps = Promise.all([pumpStream(child.stdout, stdout), pumpStream(child.stderr, stderr)]);
 		let running = true;
 		// Mutating checkers rewrite files while running; only stream partials
@@ -1258,12 +1251,13 @@ async function runChecker(
 		const poller =
 			onDiagnostics && !plan.mutates
 				? (async () => {
+						// Parses only output completed since the previous tick; torn
+						// trailing lines and open JSON documents wait for the next one.
+						const partial = new CleanseStreamParser(plan.parser, context);
 						while (running) {
 							await Bun.sleep(flushMs);
 							if (!running) break;
-							// Cut at the last newline: truncated trailing lines and
-							// unterminated JSON documents parse as garbage or nothing.
-							emit(inProject(parse(completeLines(stdout.text), completeLines(stderr.text))));
+							emit(inProject(partial.push(takeUnread(stdout), takeUnread(stderr))));
 						}
 					})()
 				: undefined;
@@ -1275,10 +1269,16 @@ async function runChecker(
 		}
 		await pumps;
 		await poller;
-		const parsedDiagnostics = parse(stdout.text, stderr.text);
+		const stdoutText = stdout.chunks.join("");
+		const stderrText = stderr.chunks.join("");
+		const parsedDiagnostics = parseCleanseDiagnostics(plan.parser, {
+			...context,
+			stdout: stdoutText,
+			stderr: stderrText,
+		});
 		const diagnostics = inProject(parsedDiagnostics);
 		if (exitCode !== 0 && parsedDiagnostics.length === 0) {
-			diagnostics.push(checkerFailureDiagnostic(plan, exitCode, stdout.text, stderr.text));
+			diagnostics.push(checkerFailureDiagnostic(plan, exitCode, stdoutText, stderrText));
 		}
 		emit(diagnostics);
 		return result(exitCode, diagnostics);
@@ -1290,21 +1290,28 @@ async function runChecker(
 	}
 }
 
+/** Decoded output chunks; `read` counts chunks already handed to the partial parser. */
 interface OutputAccumulator {
-	text: string;
+	chunks: string[];
+	read: number;
 }
 
 async function pumpStream(stream: ReadableStream<Uint8Array> | undefined, into: OutputAccumulator): Promise<void> {
 	if (!stream) return;
 	const decoder = new TextDecoder();
-	for await (const chunk of stream) into.text += decoder.decode(chunk, { stream: true });
-	into.text += decoder.decode();
+	for await (const chunk of stream) {
+		const text = decoder.decode(chunk, { stream: true });
+		if (text) into.chunks.push(text);
+	}
+	const tail = decoder.decode();
+	if (tail) into.chunks.push(tail);
 }
 
-/** Truncate to the last complete line so partial parses never see a torn record. */
-function completeLines(text: string): string {
-	const cut = text.lastIndexOf("\n");
-	return cut < 0 ? "" : text.slice(0, cut + 1);
+/** Text appended since the previous call. */
+function takeUnread(output: OutputAccumulator): string {
+	const unread = output.chunks.length === output.read ? "" : output.chunks.slice(output.read).join("");
+	output.read = output.chunks.length;
+	return unread;
 }
 
 /** Identity key matching {@link deduplicateProjectDiagnostics}; used for exactly-once streaming emission. */

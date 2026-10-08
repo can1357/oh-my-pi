@@ -95,5 +95,15 @@
 		"pageBg": "lightSand",
 		"cardBg": "#ffffff",
 		"infoBg": "foam"
+	},
+	"terminal": {
+		"background": "lightSand",
+		"foreground": "#37474f",
+		"chrome": "sand",
+		"widget": "#ffffff",
+		"ansi": [
+			"#263238", "#c94a40", "#2e7d5b", "#9b6c11", "#0277bd", "#8e4f9e", "oceanDeep", "shell",
+			"driftwood", "#d8685f", "#3c9670", "#b48115", "oceanTeal", "#b06ab8", "#389899", "foam"
+		]
 	}
 }

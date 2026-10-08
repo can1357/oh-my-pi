@@ -47,7 +47,6 @@ test.skipIf(process.platform !== "linux")("bash tool children never inherit sess
 		directory: logsDir,
 		filenamePrefix: "omp",
 		filenameSuffix: String(process.pid),
-		auditFile: path.join(logsDir, "audit.json"),
 		maxBytes: 1 << 20,
 		maxFiles: 2,
 	});

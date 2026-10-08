@@ -1,10 +1,13 @@
 import { Database } from "bun:sqlite";
-import { afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, spyOn, vi } from "bun:test";
 import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
 import { Agent, type AgentTool } from "@oh-my-pi/pi-agent-core";
+import * as ai from "@oh-my-pi/pi-ai";
+import type { Api, AssistantMessage, Model } from "@oh-my-pi/pi-ai";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { hindsightBackend, rebindMemoryBackendForCwd } from "@oh-my-pi/pi-coding-agent/hindsight/backend";
@@ -18,6 +21,7 @@ import type { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { executeAcpBuiltinSlashCommand } from "@oh-my-pi/pi-coding-agent/slash-commands/acp-builtins";
 import { BUILTIN_TOOLS, type ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
+import { tinyModelClient } from "@oh-my-pi/pi-coding-agent/tiny/title-client";
 import { resetMemoryForTests } from "@oh-my-pi/pi-mnemopi";
 import { getProjectAgentDir, getProjectDir, setProjectDir, TempDir } from "@oh-my-pi/pi-utils";
 import { createInMemoryAuthStorage } from "./helpers/agent-session-setup";
@@ -60,6 +64,7 @@ describe("AgentSession memory backend lifecycle", () => {
 		await session?.dispose();
 		session = undefined;
 		resetMemoryForTests();
+		vi.restoreAllMocks();
 		authStorage.close();
 		// `Settings.loadIsolated` opens agent.db under tempDir; close it before the directory goes away.
 		AgentStorage.close();
@@ -105,6 +110,170 @@ describe("AgentSession memory backend lifecycle", () => {
 		});
 		return session;
 	}
+
+	async function startMemoryCompletion(models: Model<Api>[]) {
+		settings = Settings.isolated({
+			"compaction.enabled": false,
+			"memory.backend": "mnemopi",
+			"mnemopi.noEmbeddings": true,
+			"mnemopi.llmMode": "smol",
+			"mnemopi.autoRetain": false,
+			modelRoles: { memory: `${models[0]!.provider}/${models[0]!.id}` },
+			"retry.fallbackChains": { memory: models.slice(1).map(model => `${model.provider}/${model.id}`) },
+		});
+		const current = createSession(async () => []);
+		for (const model of models) authStorage.keys.setRuntime(model.provider, "test-key");
+		spyOn(current.modelRegistry, "getAvailable").mockReturnValue(models);
+		spyOn(current.modelRegistry, "getApiKeyForProvider").mockResolvedValue(undefined);
+		await current.applyMemoryBackend();
+		const llm = getMnemopiSessionState(current)!.config.providerOptions.llm;
+		const complete =
+			typeof llm === "function"
+				? llm
+				: llm && typeof llm === "object" && "complete" in llm
+					? llm.complete
+					: undefined;
+		if (!complete) throw new Error("Expected managed memory completion");
+		return { current, complete };
+	}
+
+	function memoryReply(model: Model<Api>, stopReason: AssistantMessage["stopReason"] = "stop"): AssistantMessage {
+		return {
+			role: "assistant",
+			content: [{ type: "text", text: "Sam works at Globex." }],
+			api: model.api,
+			provider: model.provider,
+			model: model.id,
+			usage: {
+				input: 8,
+				output: 4,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 12,
+				cost: { input: 0.000024, output: 0.00006, cacheRead: 0, cacheWrite: 0, total: 0.000084 },
+			},
+			stopReason,
+			errorMessage: stopReason === "error" ? "Invalid request" : undefined,
+			timestamp: Date.now(),
+		};
+	}
+
+	it("journals one remote memory completion with its reported usage on the active branch", async () => {
+		const model = getBundledModel("anthropic", "claude-sonnet-4-6")!;
+		const response = memoryReply(model);
+		spyOn(ai, "completeSimple").mockImplementation(async (_model, _context, options) => {
+			options?.onAttempt?.(response);
+			return response;
+		});
+		const { current, complete } = await startMemoryCompletion([model]);
+		const manager = current.sessionManager;
+		manager.appendMessage({ role: "user", content: "Remember Sam's employer.", timestamp: 1 });
+		const leafBefore = manager.getLeafId();
+
+		await complete("Sam works at Globex.");
+
+		const usage = manager.getBranch().filter(entry => entry.type === "model_usage");
+		expect(usage).toHaveLength(1);
+		expect(usage[0]).toMatchObject({
+			parentId: leafBefore,
+			purpose: "memory",
+			role: "memory",
+			api: model.api,
+			provider: model.provider,
+			model: model.id,
+			usage: response.usage,
+			stopReason: "stop",
+		});
+		expect(manager.getLeafId()).toBe(usage[0]!.id);
+	});
+
+	it("journals both the billed memory failure and its successful remote fallback", async () => {
+		const model = getBundledModel("anthropic", "claude-sonnet-4-6")!;
+		const backup = { ...model, id: "memory-backup" };
+		const failed = memoryReply(model, "error");
+		const succeeded = memoryReply(backup);
+		spyOn(ai, "completeSimple").mockImplementation(async (candidate, _context, options) => {
+			const response = candidate.id === model.id ? failed : succeeded;
+			options?.onAttempt?.(response);
+			return response;
+		});
+		const { current, complete } = await startMemoryCompletion([model, backup]);
+
+		expect(await complete("Sam works at Globex.")).toBe("Sam works at Globex.");
+
+		const usage = current.sessionManager.getBranch().filter(entry => entry.type === "model_usage");
+		expect(usage).toHaveLength(2);
+		expect(usage).toMatchObject([
+			{
+				purpose: "memory",
+				role: "memory",
+				model: model.id,
+				usage: failed.usage,
+				stopReason: "error",
+				errorMessage: "Invalid request",
+			},
+			{ purpose: "memory", role: "memory", model: backup.id, usage: succeeded.usage, stopReason: "stop" },
+		]);
+	});
+
+	it("does not journal unbilled local-inference memory completions", async () => {
+		const model = getBundledModel("local", "qwen2.5-1.5b")!;
+		spyOn(tinyModelClient, "complete").mockResolvedValue("Sam works at Globex.");
+		const { current, complete } = await startMemoryCompletion([model]);
+
+		expect(await complete("Sam works at Globex.")).toBe("Sam works at Globex.");
+		expect(current.sessionManager.getBranch().filter(entry => entry.type === "model_usage")).toEqual([]);
+	});
+
+	it("drops a late memory usage entry after the session changes", async () => {
+		const model = getBundledModel("anthropic", "claude-sonnet-4-6")!;
+		const started = Promise.withResolvers<void>();
+		const response = Promise.withResolvers<AssistantMessage>();
+		spyOn(ai, "completeSimple").mockImplementation(async (_model, _context, options) => {
+			started.resolve();
+			const message = await response.promise;
+			options?.onAttempt?.(message);
+			return message;
+		});
+		const { current, complete } = await startMemoryCompletion([model]);
+		const pending = complete("Sam works at Globex.");
+		await started.promise;
+		await current.sessionManager.newSession();
+		response.resolve(memoryReply(model));
+
+		expect(await pending).toBe("Sam works at Globex.");
+		expect(current.sessionManager.getBranch().filter(entry => entry.type === "model_usage")).toEqual([]);
+	});
+
+	it("journals a successful memory completion on the session that started after a switch", async () => {
+		const model = getBundledModel("anthropic", "claude-sonnet-4-6")!;
+		const response = memoryReply(model);
+		spyOn(ai, "completeSimple").mockImplementation(async (_model, _context, options) => {
+			options?.onAttempt?.(response);
+			return response;
+		});
+		const { current, complete } = await startMemoryCompletion([model]);
+		const previousSessionId = current.sessionManager.getSessionId();
+		await current.sessionManager.newSession();
+		expect(current.sessionManager.getSessionId()).not.toBe(previousSessionId);
+		current.sessionManager.appendMessage({ role: "user", content: "Remember Sam's employer.", timestamp: 1 });
+		const leafBefore = current.sessionManager.getLeafId();
+
+		expect(await complete("Sam works at Globex.")).toBe("Sam works at Globex.");
+
+		const usage = current.sessionManager.getBranch().filter(entry => entry.type === "model_usage");
+		expect(usage).toHaveLength(1);
+		expect(usage[0]).toMatchObject({
+			parentId: leafBefore,
+			purpose: "memory",
+			role: "memory",
+			api: model.api,
+			provider: model.provider,
+			model: model.id,
+			usage: response.usage,
+			stopReason: "stop",
+		});
+	});
 
 	it("removes unusable Hindsight tools after a cwd reload clears the URL and restores them when configured", async () => {
 		const apiUrl = "http://127.0.0.1:1";

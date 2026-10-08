@@ -31,6 +31,8 @@ export interface QueryCacheStats {
 interface CacheEntry<T> {
 	readonly scope: string;
 	readonly normalized: string;
+	/** Distinct words of {@link normalized}, for the tier-4 overlap test. */
+	readonly words: ReadonlySet<string>;
 	readonly results: readonly T[];
 	readonly embedding: QueryEmbedding | null;
 }
@@ -66,7 +68,9 @@ export function isQueryCacheEnabled(useCache = true, env: Env = process.env, con
  *
  * - Tier 1: exact normalized query match.
  * - Tiers 2/3: query embedding cosine >= 0.88, or >= 0.78 plus word overlap.
- * - Tier 4: normalized word overlap.
+ * - Tier 4: shared distinct words cover at least 70% of the new query and half of the
+ *   cached one, so a reworded or trimmed query hits but a short query never lands
+ *   inside a long cached prompt that merely contains its words.
  */
 export class QueryCache<T = QueryCacheResult> {
 	readonly maxSize: number;
@@ -122,7 +126,13 @@ export class QueryCache<T = QueryCacheResult> {
 					const results = JSON.parse(row.results_json) as T[];
 					const embedding = row.embedding_json === null ? null : (JSON.parse(row.embedding_json) as number[]);
 					const { scope, normalized } = splitEntryKey(row.normalized);
-					this.#entries.set(row.normalized, { scope, normalized, results, embedding });
+					this.#entries.set(row.normalized, {
+						scope,
+						normalized,
+						words: this.#wordSet(normalized),
+						results,
+						embedding,
+					});
 					this.#rememberKey(row.normalized, now);
 				} catch {
 					// Match Python's best-effort persistence loading: corrupt rows are ignored.
@@ -197,11 +207,11 @@ export class QueryCache<T = QueryCacheResult> {
 		for (const [cachedKey, cached] of this.#entries) {
 			if (cached.scope !== scope) continue;
 			if (this.#isExpired(cachedKey, now)) continue;
-			queryWords ??= new Set(normalized.split(/\s+/));
+			queryWords ??= this.#wordSet(normalized);
 			if (queryWords.size === 0) continue;
-			let overlap = 0;
-			for (const cachedWord of cached.normalized.split(/\s+/)) if (queryWords.has(cachedWord)) overlap += 1;
-			if (overlap >= queryWords.size * 0.7 && overlap >= 2) {
+			let shared = 0;
+			for (const word of queryWords) if (cached.words.has(word)) shared += 1;
+			if (shared >= 2 && shared >= queryWords.size * 0.7 && shared >= cached.words.size * 0.5) {
 				this.#touchKey(cachedKey);
 				this.hits += 1;
 				this.tier4Hits += 1;
@@ -222,7 +232,13 @@ export class QueryCache<T = QueryCacheResult> {
 		const storedEmbedding =
 			embedding !== undefined && embedding !== null && embedding.length !== 0 ? embedding : null;
 		this.#entries.delete(key);
-		this.#entries.set(key, { scope, normalized, results, embedding: storedEmbedding });
+		this.#entries.set(key, {
+			scope,
+			normalized,
+			words: this.#wordSet(normalized),
+			results,
+			embedding: storedEmbedding,
+		});
 		this.#rememberKey(key, now);
 		this.#putPersistent(key, results, storedEmbedding);
 		this.#evictIfNeeded();

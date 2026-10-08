@@ -15,6 +15,7 @@ import { buildContextReportText } from "./helpers/context-report";
 import { formatCoarseDuration } from "@oh-my-pi/pi-tui/chrome/format";
 import { sanitizeText } from "@oh-my-pi/pi-utils";
 import { handleMcpAcp } from "./helpers/mcp";
+import { markdownFenceFor } from "../utils/markdown-fence";
 import { commandConsumed, errorMessage, parseSubcommand, usage } from "./helpers/parse";
 import { describeRedeemOutcome, toResetUsageAccounts } from "./helpers/reset-usage";
 import type { ResetUsageAccount } from "@oh-my-pi/pi-tui/overlays/reset-usage-selector";
@@ -324,12 +325,18 @@ export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 		icon: "jobs",
 		description: "Show async background jobs status",
 		acpDescription: "Show background jobs",
+		acpInputHint: "[full]",
+		subcommands: [{ name: "full", description: "Show full, untruncated command lines" }],
+		allowArgs: true,
 		getTuiAutocompleteDescription: runtime => {
 			const snapshot = runtime.ctx.session.getAsyncJobSnapshot({ recentLimit: 5 });
 			if (!snapshot || (snapshot.running.length === 0 && snapshot.recent.length === 0)) return "Jobs: none";
 			return `Jobs: ${snapshot.running.length} running, ${snapshot.recent.length} recent`;
 		},
-		handle: async (_command, runtime) => {
+		handle: async (command, runtime) => {
+			const { verb, rest } = parseSubcommand(command.args);
+			if (rest || (verb && verb !== "full")) return usage("Usage: /jobs [full]", runtime);
+			const full = verb === "full";
 			const snapshot = runtime.session.getAsyncJobSnapshot({ recentLimit: 5 });
 			if (!snapshot || (snapshot.running.length === 0 && snapshot.recent.length === 0)) {
 				await runtime.output(
@@ -338,12 +345,18 @@ export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 				return commandConsumed();
 			}
 			const now = Date.now();
+			const describe = (job: { label: string; command?: string }): string => {
+				if (!full) return `    ${job.label}`;
+				const text = sanitizeText(job.command ?? job.label);
+				const fence = markdownFenceFor(text);
+				return `${fence}\n${text}\n${fence}`;
+			};
 			const lines: string[] = ["Background Jobs", `Running: ${snapshot.running.length}`];
 			if (snapshot.running.length > 0) {
 				lines.push("", "Running Jobs");
 				for (const job of snapshot.running) {
 					lines.push(`  [${job.id}] ${job.type} (${job.status}) — ${formatCoarseDuration(now - job.startTime)}`);
-					lines.push(`    ${job.label}`);
+					lines.push(describe(job));
 				}
 			}
 			if (snapshot.recent.length > 0) {
@@ -352,14 +365,19 @@ export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 					lines.push(
 						`  [${job.id}] ${job.type} (${job.status}) — ${formatCoarseDuration((job.endTime ?? now) - job.startTime)}`,
 					);
-					lines.push(`    ${job.label}`);
+					lines.push(describe(job));
 				}
 			}
 			await runtime.output(lines.join("\n"));
 			return commandConsumed();
 		},
-		handleTui: async (_command, runtime) => {
-			await runtime.ctx.handleJobsCommand();
+		handleTui: async (command, runtime) => {
+			const { verb, rest } = parseSubcommand(command.args);
+			if (rest || (verb && verb !== "full")) {
+				runtime.ctx.showStatus("Usage: /jobs [full]");
+			} else {
+				await runtime.ctx.handleJobsCommand({ full: verb === "full" });
+			}
 			clearSubmittedText(runtime);
 		},
 	},

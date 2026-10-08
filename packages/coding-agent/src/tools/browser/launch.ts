@@ -1,11 +1,20 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { $which, getPuppeteerDir, logger, removeWithRetries } from "@oh-my-pi/pi-utils";
+import {
+	$which,
+	getPuppeteerDir,
+	isRecord,
+	logger,
+	removeWithRetries,
+	toError,
+	untilAborted,
+} from "@oh-my-pi/pi-utils";
 import type * as BrowsersNs from "@oh-my-pi/pi-utils/browsers";
 import type {
 	Browser,
 	CDPSession,
+	ConnectOptions,
 	Device,
 	JSHandle,
 	NetworkConditions,
@@ -181,6 +190,20 @@ export async function loadPuppeteerInWorker(safeDir: string): Promise<typeof Pup
 	const loaded = await loadPuppeteerImport(safeDir, false);
 	puppeteerModuleWorker = loaded;
 	return loaded;
+}
+
+/** Normalize transport event rejections before they cross browser or worker boundaries. */
+export async function connectPuppeteer(puppeteer: typeof Puppeteer, options: ConnectOptions): Promise<Browser> {
+	try {
+		return await puppeteer.connect(options);
+	} catch (error) {
+		// The WebSocket transports can reject with ErrorEvent rather than Error.
+		// Its message includes the actual debugger endpoint and handshake failure.
+		if (!(error instanceof Error) && isRecord(error) && typeof error.message === "string") {
+			throw new Error(error.message, { cause: error });
+		}
+		throw toError(error);
+	}
 }
 
 /** Return device descriptors from the already-loaded Puppeteer module. */
@@ -621,6 +644,21 @@ export async function applyViewport(
 		height: viewport.height,
 		deviceScaleFactor: viewport.deviceScaleFactor ?? DEFAULT_VIEWPORT.deviceScaleFactor,
 	});
+}
+
+/** The emulated viewport, else the window's own: connected and visible browsers emulate none. */
+export async function readPageViewport(
+	page: Page,
+	signal?: AbortSignal,
+): Promise<{ width: number; height: number; deviceScaleFactor?: number }> {
+	const emulated = page.viewport();
+	if (emulated) return emulated;
+	return await untilAborted(signal, () =>
+		page.evaluate(() => {
+			const win = globalThis as unknown as { innerWidth: number; innerHeight: number; devicePixelRatio: number };
+			return { width: win.innerWidth, height: win.innerHeight, deviceScaleFactor: win.devicePixelRatio };
+		}),
+	);
 }
 
 // =====================================================================

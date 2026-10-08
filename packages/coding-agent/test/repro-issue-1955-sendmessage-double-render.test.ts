@@ -112,6 +112,7 @@ function createHarness(): Harness {
 	const ctx = {
 		chatContainer: new Container(),
 		pendingMessagesContainer: new Container(),
+		updatePendingMessagesDisplay: vi.fn(),
 		pendingBashComponents: [],
 		pendingPythonComponents: [],
 		transcriptMessageComponents: new WeakMap(),

@@ -202,6 +202,19 @@ function setByPath(obj: RawSettings, segments: readonly string[], value: unknown
 }
 
 /**
+ * Assign `obj[key]` as an own property. Plain assignment of a parsed
+ * `__proto__` key (an agent name, say) would replace the prototype instead,
+ * silently dropping that entry.
+ */
+function setOwn(obj: RawSettings, key: string, value: unknown): void {
+	if (key === "__proto__") {
+		Object.defineProperty(obj, key, { value, enumerable: true, writable: true, configurable: true });
+	} else {
+		obj[key] = value;
+	}
+}
+
+/**
  * Removes the value at `segments`, pruning the parent objects the removal leaves empty. Every record on the
  * path below `obj` is replaced by a copy rather than edited: a merged view or a cached read may share it.
  */
@@ -290,6 +303,9 @@ interface OwnLayers {
 	configOverlay: RawSettings;
 	overrides: RawSettings;
 }
+
+/** The layers an {@link Settings.overlay} child writes locally; see {@link Settings.overlayLayers}. */
+export type OverlayLayers = Readonly<Pick<OwnLayers, "global" | "overrides">>;
 
 /** A persisted layer re-read from disk: its new value, the file(s) it came from, and the read-side state it commits. */
 interface LayerRefresh {
@@ -777,6 +793,24 @@ export class Settings {
 		return child;
 	}
 
+	/**
+	 * Deep copy of this {@link overlay}'s own layers (its `set` and `override` writes). Passing it to
+	 * {@link restoreOverlay} on the same parent rebuilds an equivalent child, so a holder can keep
+	 * this plain data instead of the live child with its merged view, memoized values and listeners.
+	 */
+	overlayLayers(): OverlayLayers {
+		return structuredClone({ global: this.#global, overrides: this.#overrides });
+	}
+
+	/** {@link overlay} of this instance whose own layers are `layers` (from {@link overlayLayers}). */
+	restoreOverlay(layers: OverlayLayers): Settings {
+		const child = this.overlay();
+		child.#global = structuredClone(layers.global);
+		child.#overrides = structuredClone(layers.overrides);
+		child.#rebuildMerged();
+		return child;
+	}
+
 	/** Re-merges after a parent change and forwards it unless the child's own layers pin the value. */
 	#applyParentChange(setting: AnySetting): void {
 		this.#syncParent();
@@ -870,14 +904,17 @@ export class Settings {
 		}
 		if (layer === "override") this.#softPins.delete(setting);
 		const prev = setting.get(this);
+		// Re-setting the persisted global value is a no-op for config.yml: staging it would still
+		// queue a full re-read, rewrite, fsync, and rename of the file.
+		const persistGlobal = layer === "global" && !this.#globalWriteIsNoop(setting.segments, value);
 		if (layer === "global") {
-			this.#stageGlobal(setting.segments, value);
+			if (persistGlobal) this.#stageGlobal(setting.segments, value);
 			this.#releaseSoftPin(setting);
 		} else {
 			setByPath(this.#overrides, setting.segments, value);
 		}
 		this.#rebuildMerged();
-		if (layer === "global") this.#queueSave();
+		if (persistGlobal) this.#queueSave();
 		this.#fireIfChanged(setting, prev);
 	}
 
@@ -909,7 +946,11 @@ export class Settings {
 		if (setting.type !== "record") throw new Error(`Setting ${setting.id} is not a record`);
 		if (value !== undefined) setting.assertWritable({ [key]: value });
 		const record = getByPath(this.#global, setting.segments);
-		const staged = value !== undefined || (isRecord(record) && Object.hasOwn(record, key));
+		// An entry re-set to its persisted value stages nothing (no config.yml rewrite).
+		const staged =
+			value !== undefined
+				? !this.#globalWriteIsNoop([...setting.segments, key], value)
+				: isRecord(record) && Object.hasOwn(record, key);
 		if (!staged && !this.#softPins.has(setting)) return;
 		const prev = setting.get(this);
 		this.#releaseSoftPin(setting);
@@ -1093,19 +1134,39 @@ export class Settings {
 			else targets.set(dir, new Set([name]));
 		};
 		const addFile = (file: string) => {
-			const dir = path.dirname(file);
-			// A missing directory cannot be watched; watch its parent for the
-			// directory's creation instead (the next sync re-arms the real watch).
-			if (fs.existsSync(dir)) addTarget(dir, path.basename(file));
-			else addTarget(path.dirname(dir), path.basename(dir));
-			// Symlinked configs (dotfile managers) change at the link target.
-			let real: string;
-			try {
-				real = fs.realpathSync(file);
-			} catch {
-				return;
+			// Walk physically so every symlink hop (including profile/ancestor
+			// directory links) is observed, not just the logical file and final
+			// realpath. Physical directory keys also re-arm a watch after retargeting.
+			const absolute = path.resolve(file);
+			let dir = path.parse(absolute).root;
+			let segments = physicalTargetSegments(absolute);
+			let hops = 0;
+			while (segments.length > 0) {
+				const segment = segments.shift()!;
+				if (segment === "" || segment === ".") continue;
+				if (segment === "..") {
+					dir = path.dirname(dir);
+					continue;
+				}
+				const current = path.join(dir, segment);
+				if (segments.length === 0) addTarget(dir, segment);
+				try {
+					if (fs.lstatSync(current).isSymbolicLink()) {
+						addTarget(dir, segment);
+						if (++hops > MAX_SYMLINK_HOPS) return;
+						const target = fs.readlinkSync(current);
+						if (path.isAbsolute(target)) dir = path.parse(target).root;
+						segments = [...physicalTargetSegments(target), ...segments];
+					} else {
+						dir = current;
+					}
+				} catch {
+					// Watch the nearest existing parent, even when several
+					// directories or a symlink's referent are missing.
+					addTarget(dir, segment);
+					return;
+				}
 			}
-			if (real !== file) addTarget(path.dirname(real), path.basename(real));
 		};
 		for (const filename of MAIN_CONFIG_FILENAMES) addFile(path.join(this.#agentDir, filename));
 		const projectCwd = path.resolve(this.#cwd);
@@ -1285,7 +1346,13 @@ export class Settings {
 	async #reloadPersistedLayers(mode: PersistedReloadMode): Promise<void> {
 		const keepLastGood = mode === "keep-last-good";
 		for (;;) {
-			await this.flush();
+			try {
+				await this.flush();
+			} catch (error) {
+				// The failed writes stay pending for the next flush and are re-applied over the
+				// layers read below, so an unwritable config never blocks a reload or reverts them.
+				logger.warn("Settings: reloading over unsaved changes", { error: String(error) });
+			}
 			const mutationGeneration = this.#persistedMutationGeneration;
 
 			const [globalResult, projectResult, overlayResult] = await Promise.allSettled([
@@ -1304,10 +1371,15 @@ export class Settings {
 
 			const refreshed: LayerRefresh[] = [];
 			if (globalResult.status === "fulfilled") {
-				const { settings, configPath } = globalResult.value;
+				const { configPath } = globalResult.value;
+				// A config this instance moved aside as malformed reads as missing until a save
+				// recreates it; keep the last good layer instead of rebuilding it from pending writes.
+				const quarantined = this.#configPath !== null && this.#quarantinedYamlTargets.has(this.#configPath);
+				const settings = globalResult.value.settings ?? (quarantined ? structuredClone(this.#global) : {});
+				this.#applyPendingGlobalWrites(settings);
 				refreshed.push({
 					layer: "global",
-					settings: settings ?? {},
+					settings,
 					source: configPath ?? path.join(this.#agentDir, MAIN_CONFIG_FILENAMES[0]),
 					commit: () => {
 						this.#configPath = configPath;
@@ -1316,6 +1388,7 @@ export class Settings {
 			}
 			if (projectResult.status === "fulfilled") {
 				const project = projectResult.value;
+				this.#applyPendingProjectWrites(project.settings);
 				refreshed.push({
 					layer: "project",
 					settings: project.settings,
@@ -1653,22 +1726,26 @@ export class Settings {
 	 */
 	setModelRole(role: ModelRole | string, modelId: string | undefined): void {
 		const prev = cfgModelRoles.get(this);
-		const current = this.#modelRolesFromLayer(this.#global);
-		this.#captureGlobalMutation(role, this.#modifiedGlobalModelRoleMutations, current[role]);
-		if (modelId === undefined) {
-			delete current[role];
-		} else {
-			current[role] = modelId;
+		// Re-setting the persisted role (or clearing an absent one) stages no config.yml rewrite;
+		// the runtime-override sync below still applies.
+		if (!this.#globalWriteIsNoop(["modelRoles", role], modelId)) {
+			const current = this.#modelRolesFromLayer(this.#global);
+			this.#captureGlobalMutation(role, this.#modifiedGlobalModelRoleMutations, current[role]);
+			if (modelId === undefined) {
+				delete current[role];
+			} else {
+				current[role] = modelId;
+			}
+			// Persist per-role rather than marking the whole `modelRoles` path
+			// modified: #saveNow merges only the changed role into the re-read
+			// file, so a concurrent external edit to a sibling role is not
+			// clobbered by this process's stale in-memory snapshot.
+			setByPath(this.#global, ["modelRoles"], current);
+			this.#modifiedGlobalModelRoles.add(role);
+			this.#persistedMutationGeneration++;
+			this.#rebuildMerged();
+			this.#queueSave();
 		}
-		// Persist per-role rather than marking the whole `modelRoles` path
-		// modified: #saveNow merges only the changed role into the re-read
-		// file, so a concurrent external edit to a sibling role is not
-		// clobbered by this process's stale in-memory snapshot.
-		setByPath(this.#global, ["modelRoles"], current);
-		this.#modifiedGlobalModelRoles.add(role);
-		this.#persistedMutationGeneration++;
-		this.#rebuildMerged();
-		this.#queueSave();
 		this.#fireIfChanged(cfgModelRoles, prev);
 		if (this.isProjectModelRoleRuntimeOverrideActive(role)) {
 			return;
@@ -1756,6 +1833,36 @@ export class Settings {
 		if (this.getProjectModelRole(role)) return "project";
 		if (this.getGlobalModelRole(role)) return "global";
 		return "default";
+	}
+
+	/**
+	 * Raw `modelPresets` entry for `name` from the highest-precedence layer that
+	 * defines it (runtime override → config overlay → project → global), whole —
+	 * same-name entries are NOT deep-merged across layers. A `null` entry on a
+	 * tombstoning layer (runtime, overlay) hides the preset; a `null` anywhere
+	 * else counts as unset. Falls back to the parent chain like the model-role
+	 * layer helpers.
+	 */
+	getOwnedModelPreset(
+		name: string,
+	): { entry: unknown; source: "runtime" | "overlay" | "project" | "global" } | undefined {
+		const layers = [
+			{ layer: this.#overrides, source: "runtime", tombstone: true },
+			{ layer: this.#configOverlay, source: "overlay", tombstone: true },
+			{ layer: projectLayerForMerge(this.#project), source: "project", tombstone: false },
+			{ layer: this.#global, source: "global", tombstone: false },
+		] as const;
+		for (const { layer, source, tombstone } of layers) {
+			const presets = getByPath(layer, ["modelPresets"]);
+			if (!isRecord(presets) || !Object.hasOwn(presets, name)) continue;
+			const entry = presets[name];
+			if (entry === null || entry === undefined) {
+				if (tombstone) return undefined;
+				continue;
+			}
+			return { entry, source };
+		}
+		return this.#parent?.getOwnedModelPreset(name);
 	}
 
 	/**
@@ -1867,6 +1974,29 @@ export class Settings {
 			generation: this.#readYamlGeneration(this.#configPath),
 			baseValue: structuredClone(baseValue),
 		});
+	}
+
+	/**
+	 * Whether a global write of `value` at `segments` would leave config.yml unchanged: the global
+	 * layer already holds it and so does the file on disk (unparseable, legacy-shaped, or externally
+	 * edited files report false, so the write is staged and the save re-reads and merges as usual).
+	 */
+	#globalWriteIsNoop(segments: readonly string[], value: unknown): boolean {
+		if (!settingValuesEqual(getByPath(this.#global, segments), value)) return false;
+		if (!this.#persist || !this.#configPath) return true;
+		let source: string;
+		try {
+			source = fs.readFileSync(this.#configPath, "utf8");
+		} catch (error) {
+			return isEnoent(error) && value === undefined;
+		}
+		let onDisk: unknown;
+		try {
+			onDisk = YAML.parse(source);
+		} catch {
+			return false;
+		}
+		return settingValuesEqual(isRecord(onDisk) ? getByPath(onDisk, segments) : undefined, value);
 	}
 
 	async #loadYaml(filePath: string): Promise<RawSettings> {
@@ -2306,10 +2436,12 @@ export class Settings {
 		if (rejectedWarnings) {
 			throw new Error(`Project settings failed to parse: ${rejectedWarnings.join("; ")}`);
 		}
+		// A native config this instance moved aside reads as missing until a save recreates it;
+		// keep its last good contents, as `#saveProjectNow` does.
 		const nativeProject = quarantineInvalid
 			? await this.#loadYaml(projectConfigPath)
 			: (this.#unwrapYamlLoadResult(projectConfigPath, await this.#loadYamlIfPresent(projectConfigPath, false)) ??
-				{});
+				(this.#quarantinedYamlTargets.has(projectConfigPath) ? structuredClone(this.#projectFileSettings) : {}));
 		const nativeModelRoles = getByPath(nativeProject, ["modelRoles"]);
 		if (nativeModelRoles !== undefined) {
 			merged = this.#deepMerge(merged, { modelRoles: nativeModelRoles });
@@ -2421,7 +2553,7 @@ export class Settings {
 
 		if (migrated && Object.keys(settings).length > 0) {
 			try {
-				await this.#writeYamlAtomically(this.#configPath, settings);
+				await this.#writeYamlAtomically(this.#configPath, stringifyYamlConfig(settings));
 				logger.debug("Settings: migrated to config.yml", { path: this.#configPath });
 			} catch (error) {
 				logger.warn("Settings: failed to write migrated config.yml", {
@@ -3030,6 +3162,24 @@ export class Settings {
 			delete raw["advisor.subagents"];
 		}
 
+		// task.completionProbeMs (poll period, 0 = off) → task.completionProbe
+		// (on/off with a built-in backoff schedule). Mapped IN THE SAME LAYER so a
+		// project-level `0` keeps overriding a global period; an explicit new key wins.
+		{
+			const taskObj = isRecord(raw.task) ? raw.task : undefined;
+			const legacyProbeMs =
+				taskObj && "completionProbeMs" in taskObj ? taskObj.completionProbeMs : raw["task.completionProbeMs"];
+			if (typeof legacyProbeMs === "number") {
+				const target = taskObj ?? {};
+				if (!("completionProbe" in target) && !("task.completionProbe" in raw)) {
+					target.completionProbe = legacyProbeMs > 0;
+				}
+				raw.task = target;
+			}
+			if (taskObj) delete taskObj.completionProbeMs;
+			delete raw["task.completionProbeMs"];
+		}
+
 		// Early per-agent toggles were persisted as booleans even though the
 		// runtime record contract is "on"/"off"/model pattern. Normalize each
 		// layer before merging so project-level false still overrides global true.
@@ -3389,14 +3539,14 @@ export class Settings {
 	// Saving
 	// ─────────────────────────────────────────────────────────────────────────
 
-	async #writeYamlAtomically(filePath: string, settings: RawSettings): Promise<void> {
+	async #writeYamlAtomically(filePath: string, content: string): Promise<void> {
 		const tempPath = `${filePath}.${process.pid}.${randomUUID()}.tmp`;
 		let removeTemp = false;
 		try {
 			const handle = await fs.promises.open(tempPath, "wx", 0o600);
 			removeTemp = true;
 			try {
-				await handle.writeFile(stringifyYamlConfig(settings), "utf8");
+				await handle.writeFile(content, "utf8");
 				await handle.sync();
 			} finally {
 				await handle.close();
@@ -3534,7 +3684,12 @@ export class Settings {
 				}
 
 				if (shouldWrite) {
-					await this.#writeYamlAtomically(writePath, current);
+					// Merging pending changes can reproduce the file exactly (a change reverted before the
+					// debounce fired, an external edit that already holds the value): leave it untouched.
+					const content = stringifyYamlConfig(current);
+					if (loaded.generation.kind !== "content" || loaded.generation.source !== content) {
+						await this.#writeYamlAtomically(writePath, content);
+					}
 				}
 				this.#quarantinedYamlTargets.delete(configPath);
 				// This write changed the file only at `writtenPaths`. A change staged after this save's snapshot at
@@ -3618,26 +3773,39 @@ export class Settings {
 	 * Notifies every setting whose effective value changed.
 	 */
 	#adoptSavedGlobal(saved: RawSettings, source: string): void {
-		if (this.#modifiedGlobalModelRoles.size > 0) {
-			const liveRoles = getByPath(this.#global, ["modelRoles"]);
-			const savedRoles = getByPath(saved, ["modelRoles"]);
-			const roles: Record<string, unknown> = isRecord(savedRoles) ? savedRoles : {};
-			for (const role of this.#modifiedGlobalModelRoles) {
-				if (isRecord(liveRoles) && Object.hasOwn(liveRoles, role)) roles[role] = liveRoles[role];
-				else delete roles[role];
-			}
-			setByPath(saved, ["modelRoles"], roles);
-		}
-		for (const segments of this.#modified.values()) {
-			const value = getByPath(this.#global, segments);
-			if (value === undefined) deleteByPath(saved, segments);
-			else setByPath(saved, segments, value);
-		}
+		this.#applyPendingGlobalWrites(saved);
 		if (!this.#acceptsLayers({ ...this.#ownLayers(), global: saved }, source)) return;
 		const previous = this.#snapshot();
 		this.#global = saved;
 		this.#rebuildMerged();
 		this.#fireChangesSince(previous);
+	}
+
+	/** Re-applies every global write still pending a save onto `target`, a global layer read from disk. */
+	#applyPendingGlobalWrites(target: RawSettings): void {
+		if (this.#modifiedGlobalModelRoles.size > 0) {
+			const liveRoles = getByPath(this.#global, ["modelRoles"]);
+			const targetRoles = getByPath(target, ["modelRoles"]);
+			const roles: Record<string, unknown> = isRecord(targetRoles) ? targetRoles : {};
+			for (const role of this.#modifiedGlobalModelRoles) {
+				if (isRecord(liveRoles) && Object.hasOwn(liveRoles, role)) roles[role] = liveRoles[role];
+				else delete roles[role];
+			}
+			setByPath(target, ["modelRoles"], roles);
+		}
+		for (const segments of this.#modified.values()) {
+			const value = getByPath(this.#global, segments);
+			if (value === undefined) deleteByPath(target, segments);
+			else setByPath(target, segments, value);
+		}
+	}
+
+	/** Re-applies every project model role still pending a save onto `target`, a project layer read from disk. */
+	#applyPendingProjectWrites(target: RawSettings): void {
+		const liveRoles = getByPath(this.#project, ["modelRoles"]);
+		for (const role of this.#modifiedProjectModelRoles) {
+			setByPath(target, ["modelRoles", role], isRecord(liveRoles) ? liveRoles[role] : undefined);
+		}
 	}
 
 	#queueProjectSave(): void {
@@ -3681,7 +3849,7 @@ export class Settings {
 					setByPath(projectSettings, ["modelRoles", role], value);
 				}
 
-				await this.#writeYamlAtomically(writePath, projectSettings);
+				await this.#writeYamlAtomically(writePath, stringifyYamlConfig(projectSettings));
 				this.#projectFileSettings = structuredClone(projectSettings);
 				this.#quarantinedYamlTargets.delete(projectConfigPath);
 			});
@@ -3743,7 +3911,7 @@ export class Settings {
 		const result: RawSettings = {};
 		for (const key of Object.keys(overrides)) {
 			const override = overrides[key];
-			const baseVal = base[key];
+			const baseVal = Object.hasOwn(base, key) ? base[key] : undefined;
 
 			if (override === undefined) continue;
 
@@ -3755,12 +3923,12 @@ export class Settings {
 				baseVal !== null &&
 				!Array.isArray(baseVal)
 			) {
-				result[key] = this.#deepMerge(baseVal as RawSettings, override as RawSettings);
+				setOwn(result, key, this.#deepMerge(baseVal as RawSettings, override as RawSettings));
 			} else {
-				result[key] = override;
+				setOwn(result, key, override);
 			}
 		}
-		for (const key of Object.keys(base)) if (!Object.hasOwn(result, key)) result[key] = base[key];
+		for (const key of Object.keys(base)) if (!Object.hasOwn(result, key)) setOwn(result, key, base[key]);
 		return result;
 	}
 }
