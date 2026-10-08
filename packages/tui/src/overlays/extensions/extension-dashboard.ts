@@ -137,8 +137,7 @@ function providerInitials(label: string): string {
 export function buildPickerScopes(tabs: ProviderTab[]): TspPickerScope[] {
 	return tabs.map(tab => {
 		if (tab.id === "all") return { id: tab.id, label: "All", icon: "extension", count: tab.count };
-		if (tab.id === MCP_SERVERS_TAB_ID)
-			return { id: tab.id, label: tab.label, icon: "server", count: tab.count };
+		if (tab.id === MCP_SERVERS_TAB_ID) return { id: tab.id, label: tab.label, icon: "server", count: tab.count };
 		const emptyEnabled = tab.count === 0 && tab.enabled;
 		return {
 			id: tab.id,
@@ -277,7 +276,10 @@ export class ExtensionDashboard implements Component {
 	 * the bottom border.
 	 */
 	render(width: number): readonly string[] {
-		if (this.#mcpActionPanel) return this.#mcpActionPanel.render(width);
+		if (this.#mcpActionPanel) {
+			this.#mcpActionPanel.terminalHeight = this.#terminalRows();
+			return this.#mcpActionPanel.render(width);
+		}
 		const height = Math.max(14, this.#terminalRows());
 		const innerWidth = Math.max(1, width - 4);
 
@@ -667,7 +669,10 @@ export class ExtensionDashboard implements Component {
 	 * changes arrive as render requests, which bump the version).
 	 */
 	describe(cx: DescribeContext): NativeNode {
-		if (this.#mcpActionPanel) return col([this.#mcpActionPanel]);
+		if (this.#mcpActionPanel) {
+			this.#mcpActionPanel.terminalHeight = this.#terminalRows();
+			return col([this.#mcpActionPanel]);
+		}
 		const sheet = this.nativeSheet(cx);
 		const toolFrame = snapshotToolRuntimeSource(this.#toolSource);
 		let tools = "";
@@ -794,6 +799,10 @@ export class ExtensionDashboard implements Component {
 	 * `close` closes. Provider tabs in the page route to the {@link TabBar}.
 	 */
 	handleNativeEvent(event: NativeUiEvent): void {
+		if (this.#mcpActionPanel) {
+			if (event.type === "action" && event.act === "close") this.#mcpActionPanel.handleInput("\x1b");
+			return;
+		}
 		const pick = pickerEvent(event);
 		if (pick) {
 			this.#handlePick(pick);

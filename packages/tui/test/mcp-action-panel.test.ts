@@ -48,6 +48,19 @@ async function flushAsyncWork(): Promise<void> {
 }
 
 describe("MCPActionPanel", () => {
+	test("uses the supplied viewport and keeps the footer visible after resizing", () => {
+		const runtime: MCPActionPanelRuntime = {
+			loadState: async () => state([action("test")]),
+			runAction: async () => "Connected.",
+		};
+		const panel = new MCPActionPanel(extension, state([action("test")]), runtime, 31);
+		expect(panel.render(80)).toHaveLength(31);
+		panel.terminalHeight = 14;
+		const resized = panel.render(80);
+		expect(resized).toHaveLength(14);
+		expect(Bun.stripANSI(resized[12]!)).toContain("Esc: back");
+	});
+
 	test("requires a second confirmation before clearing authentication", async () => {
 		const calls: MCPActionId[] = [];
 		const didChange = Promise.withResolvers<void>();

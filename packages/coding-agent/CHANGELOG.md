@@ -45,6 +45,9 @@
 ### Changed
 
 - Web search now prefers an authenticated `xai-oauth` login over an `xai` API key when both are available, unless `modelProviderOrder` specifies a different order.
+### Added
+
+* Added a consolidated **MCP Servers** tab to `/extensions`, with live cross-source connection status, tool/resource/prompt inspection, and contextual test, reconnect, reauthenticate, credential-clear, enable, and disable actions ([#12764](https://github.com/can1357/oh-my-pi/pull/12764) by [@alexvitiello](https://github.com/alexvitiello)).
 
 ### Fixed
 
@@ -1250,9 +1253,6 @@
 - Fixed edit operations that could loop after empty insertions or fail on Unicode no-op and overlapping duplicate matches.
 - Fixed live subagent messages being delayed by agent discovery and roster discovery looping on dot-named transcripts.
 - Fixed llama.cpp discovery and routing for PrismML Bonsai 2 27B GGUF models, including support for cached models and the Qwen 3.8 thinking-level ladder.
-### Added
-
-* Added a consolidated **MCP Servers** tab to `/extensions`, with live cross-source connection status, tool/resource/prompt inspection, and contextual test, reconnect, reauthenticate, credential-clear, enable, and disable actions.
 
 ## [18.2.6] - 2026-09-18
 

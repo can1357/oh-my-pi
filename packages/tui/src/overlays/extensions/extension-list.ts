@@ -500,11 +500,12 @@ export class ExtensionList implements Component {
 					]
 				: undefined,
 			facts: { kind: this.#getKindLabel(ext.kind) },
-			disabled: effectivelyDisabled
-				? masterDisabled
-					? "Provider disabled"
-					: `Disabled · ${formatKeyHint("space")} to enable`
-				: undefined,
+			disabled:
+				effectivelyDisabled && !(ext.kind === "mcp" && this.#callbacks.onActivate)
+					? masterDisabled
+						? "Provider disabled"
+						: `Disabled · ${formatKeyHint("space")} to enable`
+					: undefined,
 		};
 	}
 

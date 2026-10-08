@@ -97,14 +97,14 @@ export class MCPActionPanel implements Component {
 		readonly extension: Extension,
 		state: MCPActionPanelState,
 		readonly runtime: MCPActionPanelRuntime,
-		readonly terminalHeight: number,
+		public terminalHeight: number,
 	) {
 		this.#state = sanitizePanelState(state);
 		this.#selectedIndex = this.#firstEnabledIndex();
 	}
 
 	render(width: number): readonly string[] {
-		const height = Math.max(14, process.stdout.rows || this.terminalHeight || 24);
+		const height = Math.max(14, this.terminalHeight || 24);
 		const lines: string[] = [topBorder(width, `MCP Server · ${sanitizeDisplayLine(this.#state.name)}`)];
 		const push = (text = "") => lines.push(row(text, width));
 		const statusColor =

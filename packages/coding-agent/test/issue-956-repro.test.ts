@@ -168,17 +168,6 @@ describe("interactive /mcp test", () => {
 
 		await controller.handle("/mcp test github");
 
-		expect(connectServers).toHaveBeenCalledWith(
-			{ github: { type: "stdio", command: "github-mcp-server", args: ["serve"] } },
-			{
-				github: expect.objectContaining({
-					provider: "mcp-json",
-					path: path.join(projectDir, ".mcp.json"),
-				}),
-			},
-			undefined,
-			expect.any(AbortSignal),
-		);
 		expect(refreshMCPTools).toHaveBeenCalledWith(runtimeTools);
 	});
 

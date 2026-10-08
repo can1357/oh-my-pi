@@ -26,6 +26,9 @@
 - Added package exports for the native Tern/TSP modules, allowing extensions in compiled `omp` binaries to import them.
 - Fixed the Tern `/model` picker's Roles tab so typing and Backspace consistently edit the search field without triggering role commands.
 - Fixed the session picker so sessions retain and display their directory when switching between the current folder and all-project views.
+### Added
+
+* Added the MCP server action panel for the Extension Control Center, including live status, capability counts, disabled-action reasons, destructive-action confirmation, cancellable operations, and manual OAuth callback input ([#12764](https://github.com/can1357/oh-my-pi/pull/12764) by [@alexvitiello](https://github.com/alexvitiello)).
 
 ## [18.8.5] - 2026-10-08
 
@@ -557,9 +560,6 @@
 ### Fixed
 
 - Prevented magic keywords from triggering spelling autocorrect and underlining
-### Added
-
-* Added the MCP server action panel for the Extension Control Center, including live status, capability counts, disabled-action reasons, destructive-action confirmation, cancellable operations, and manual OAuth callback input.
 
 ## [18.2.5] - 2026-09-17
 
