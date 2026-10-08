@@ -863,6 +863,11 @@ export interface BeforeSubagentSpawnEvent {
 	patterns: string[];
 	/** Stable per-spawn key for deterministic selection, when the caller supplies one. */
 	spawnKey?: string;
+	/**
+	 * Caller routing flag. Read-only: a handler sees it and cannot change it.
+	 * `"off"` keeps the configured model; `block` and `note` still apply.
+	 */
+	routing: "auto" | "off";
 }
 
 export type {

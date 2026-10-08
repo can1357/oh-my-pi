@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Task parameters accept optional `routing: "auto" | "off"`.
+
 ## [18.8.4] - 2026-10-08
 
 ### Changed

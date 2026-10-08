@@ -28,6 +28,7 @@ const agentArgsSchema = type({
 	"label?": "string",
 	"schema?": "unknown",
 	"schemaMode?": "'permissive' | 'strict'",
+	"routing?": "'auto' | 'off'",
 	"isolated?": "boolean",
 	"apply?": "boolean",
 	"merge?": "boolean",
@@ -41,6 +42,7 @@ interface EvalAgentArgs {
 	label?: string;
 	schema?: unknown;
 	schemaMode?: StructuredSubagentSchemaMode;
+	routing?: "auto" | "off";
 	isolated?: boolean;
 	apply?: boolean;
 	merge?: boolean;
@@ -195,6 +197,7 @@ export async function runEvalAgent(args: unknown, options: EvalAgentBridgeOption
 			session: options.session,
 			invocationKind: "eval",
 			assignment: parsed.prompt,
+			...(parsed.routing !== undefined ? { routing: parsed.routing } : {}),
 			...(parsed.agent !== undefined ? { agent: parsed.agent } : {}),
 			...(Object.hasOwn(parsed, "schema") ? { outputSchema: parsed.schema } : {}),
 			...(parsed.schemaMode !== undefined ? { schemaMode: parsed.schemaMode } : {}),
@@ -218,6 +221,7 @@ export async function runEvalAgent(args: unknown, options: EvalAgentBridgeOption
 						session: options.session,
 						invocationKind: "eval",
 						assignment: parsed.prompt,
+						...(parsed.routing !== undefined ? { routing: parsed.routing } : {}),
 						...(parsed.agent !== undefined ? { agent: parsed.agent } : {}),
 						...(Object.hasOwn(parsed, "schema") ? { outputSchema: parsed.schema } : {}),
 						...(parsed.schemaMode !== undefined ? { schemaMode: parsed.schemaMode } : {}),

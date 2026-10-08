@@ -92,6 +92,8 @@ export interface WorkPoolCreateOptions {
 	policy: EffectiveSubagentPolicy;
 	context?: string;
 	customTools?: CustomTool[];
+	/** Extension model routing mode used for each worker's first turn. */
+	routing?: "auto" | "off";
 }
 
 interface TurnOutcome {
@@ -112,6 +114,7 @@ export class WorkPool {
 	readonly policy: EffectiveSubagentPolicy;
 	readonly context?: string;
 	readonly customTools: CustomTool[];
+	readonly routing: "auto" | "off";
 	readonly freshAgents: boolean;
 	readonly agents: WorkPoolAgent[] = [];
 	readonly items: WorkPoolItem[] = [];
@@ -131,6 +134,7 @@ export class WorkPool {
 		this.name = options.name;
 		this.ownerId = session.getAgentId?.() ?? MAIN_AGENT_ID;
 		this.session = session;
+		this.routing = options.routing ?? "auto";
 		this.policy = options.policy;
 		this.context = options.context;
 		this.customTools = options.customTools ?? [];
@@ -384,6 +388,7 @@ export class WorkPool {
 							assignment: message,
 							...(this.context ? { context: this.context } : {}),
 							agent: this.policy.agentName,
+							routing: this.routing,
 							identity: { id: agent.id },
 							customTools: this.customTools,
 							outputSchema,

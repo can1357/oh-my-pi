@@ -116,6 +116,50 @@ describe("task wire schema", () => {
 		expect("role" in item).toBe(false);
 		expect(item.task).toBe("x");
 	});
+
+	it.each([
+		["flat without isolation", false, false],
+		["flat with isolation", true, false],
+		["batch without isolation", false, true],
+		["batch with isolation", true, true],
+	] as const)("retains routing:'off' for %s", (_label, isolationEnabled, batchEnabled) => {
+		const schema = getTaskSchema({ isolationEnabled, batchEnabled });
+		const input = batchEnabled
+			? { context: "shared context", tasks: [{ task: "inspect", solutionSpace: "c", routing: "off" as const }] }
+			: {
+					task: "inspect",
+					solutionSpace: "c",
+					routing: "off" as const,
+					...(isolationEnabled ? { isolated: true } : {}),
+				};
+		const parsed = schema(input);
+		expect(parsed instanceof type.errors).toBe(false);
+		if (parsed instanceof type.errors) return;
+		if (batchEnabled) {
+			expect(parsedItems(parsed)[0]?.routing).toBe("off");
+		} else if (parsed && typeof parsed === "object" && "routing" in parsed) {
+			expect(parsed.routing).toBe("off");
+		} else {
+			throw new Error("flat schema dropped routing");
+		}
+	});
+
+	it("retains routing off on a dynamic schema and rejects any other value", () => {
+		const dynamic = getTaskSchema({
+			isolationEnabled: false,
+			batchEnabled: false,
+			effortEnabled: true,
+			evalToolsEnabled: false,
+			defaultAgent: "scout",
+		});
+		const kept = dynamic({ agent: "scout", task: "inspect", solutionSpace: "c", routing: "off", effort: "lo" });
+		if (kept instanceof type.errors || kept === null || typeof kept !== "object" || !("routing" in kept)) {
+			throw new Error("dynamic schema dropped routing");
+		}
+		expect(kept.routing).toBe("off");
+		expect(taskSchema({ task: "inspect", solutionSpace: "c", routing: "model" }) instanceof type.errors).toBe(true);
+		expect(dynamic({ task: "inspect", solutionSpace: "c", routing: "none" }) instanceof type.errors).toBe(true);
+	});
 });
 
 // Contract: `agent` and `name` shape the spawned subagent's identity and the

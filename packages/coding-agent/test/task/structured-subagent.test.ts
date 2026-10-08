@@ -518,6 +518,7 @@ describe("structured subagent primitive", () => {
 				invocationKind: "task",
 				modelRole: "definition",
 				patterns: ["anthropic/claude-opus-4-5"],
+				routing: "auto",
 			},
 		]);
 		await fs.rm(settled.artifactsDir, { recursive: true, force: true });
@@ -994,5 +995,59 @@ describe("structured subagent primitive", () => {
 		expect(artifactsDirsFromRegistry()).toContain(settled.artifactsDir);
 		expect(await fs.stat(artifactsDir ?? "")).toBeDefined();
 		await fs.rm(settled.artifactsDir, { recursive: true, force: true });
+	});
+
+	it("still emits before_subagent_spawn when routing is off and ignores a returned model", async () => {
+		mockDiscovery({ ...AGENT, model: ["anthropic/claude-sonnet-4"] });
+		const offSession = session();
+		const autoSession = session();
+		const omittedSession = session();
+		const offEvents: BeforeSubagentSpawnEvent[] = [];
+		offSession.emitBeforeSubagentSpawn = async event => {
+			offEvents.push(event);
+			return { model: "openai/gpt-4o", note: "kept" };
+		};
+		autoSession.emitBeforeSubagentSpawn = async () => ({ model: "openai/gpt-4o", note: "routed" });
+		omittedSession.emitBeforeSubagentSpawn = async () => ({ model: "openai/gpt-4o", note: "routed" });
+		const dispatched: executorModule.ExecutorOptions[] = [];
+		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
+			dispatched.push(options);
+			return result();
+		});
+		const baseline = await resolveEffectiveSubagentPolicy(request({ session: offSession, routing: "off" }));
+
+		const off = await runStructuredSubagent(request({ session: offSession, routing: "off", retainArtifacts: true }));
+		const auto = await runStructuredSubagent(request({ session: autoSession, routing: "auto", retainArtifacts: true }));
+		const omitted = await runStructuredSubagent(request({ session: omittedSession, retainArtifacts: true }));
+
+		expect(offEvents).toHaveLength(1);
+		expect(offEvents[0]?.routing).toBe("off");
+		expect(dispatched[0]?.modelOverride).toEqual(baseline.modelOverride);
+		expect(dispatched[0]?.modelRoute).toBe("kept");
+		expect(dispatched[1]?.modelOverride).toEqual(["openai/gpt-4o"]);
+		expect(dispatched[1]?.modelRoute).toBe("routed");
+		expect(dispatched[2]?.modelOverride).toEqual(["openai/gpt-4o"]);
+		await fs.rm(off.artifactsDir, { recursive: true, force: true });
+		await fs.rm(auto.artifactsDir, { recursive: true, force: true });
+		await fs.rm(omitted.artifactsDir, { recursive: true, force: true });
+	});
+
+	it("still blocks a spawn when routing is off", async () => {
+		mockDiscovery();
+		const blockedSession = session();
+		let calls = 0;
+		blockedSession.emitBeforeSubagentSpawn = async event => {
+			calls += 1;
+			expect(event.routing).toBe("off");
+			return { block: true, reason: "pool exhausted", model: "openai/gpt-4o" };
+		};
+		const run = vi.spyOn(executorModule, "runSubprocess");
+		const error = await runStructuredSubagent(request({ session: blockedSession, routing: "off" })).catch(
+			(cause: unknown) => cause,
+		);
+		expect(calls).toBe(1);
+		expect(error).toBeInstanceOf(StructuredSubagentError);
+		expect(error as StructuredSubagentError).toMatchObject({ kind: "preflight", message: "pool exhausted" });
+		expect(run).not.toHaveBeenCalled();
 	});
 });

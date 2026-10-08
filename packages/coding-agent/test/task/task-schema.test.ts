@@ -94,4 +94,9 @@ describe("task spawn validation", () => {
 		const text = await executeText({ agent: "scout" });
 		expect(text).toContain("Missing `task`");
 	});
+
+	it("rejects an invalid routing value that bypasses the wire schema", async () => {
+		const text = await executeText({ agent: "scout", task: "...", routing: "model" });
+		expect(text).toContain("invalid `routing` value");
+	});
 });

@@ -228,7 +228,7 @@ For task dispatch, model precedence is:
 
 Role aliases in either of the first two sources are expanded through `modelRoles`. The shared eval bridge can also supply an invocation-local model override ahead of the settings override; the task wire schema does not expose that field.
 
-After policy resolution, the `before_subagent_spawn` extension hook runs once for the actual dispatch. It can block the spawn or replace the resolved model patterns; a routing note is carried into progress metadata.
+After policy resolution, the `before_subagent_spawn` extension hook runs once for the actual dispatch. The event carries read-only `routing`. It can block the spawn or, unless `routing` is `"off"`, replace the resolved model patterns; a routing note is carried into progress metadata either way. `routing: "off"` keeps the configured model and cannot bypass a block.
 
 The `Alt+P` task model pick is session-only; saving a model in `/agents` replaces that runtime selection for the current session and persists the new value for future sessions.
 

@@ -44,12 +44,14 @@ export interface SubagentEventPayload {
 const outputSchemaInputSchema = type("object | boolean | string | null");
 // Coarse per-spawn thinking effort; must stay in sync with TASK_EFFORTS in ../thinking.
 const effortRule = '"lo" | "med" | "hi"' as const;
+const routingRule = '"auto" | "off"' as const;
 
 export const taskItemSchema = type({
 	"name?": "string",
 	agent: "string = 'task'",
 	task: "string",
 	solutionSpace: "string",
+	"routing?": routingRule,
 	"outputSchema?": outputSchemaInputSchema,
 	"schemaMode?": '"permissive" | "strict"',
 	"tools?": "string[]",
@@ -60,6 +62,7 @@ const taskItemSchemaIsolated = type({
 	agent: "string = 'task'",
 	task: "string",
 	solutionSpace: "string",
+	"routing?": routingRule,
 	"outputSchema?": outputSchemaInputSchema,
 	"schemaMode?": '"permissive" | "strict"',
 	"tools?": "string[]",
@@ -72,6 +75,7 @@ export const taskSchema = type({
 	agent: "string = 'task'",
 	task: "string",
 	solutionSpace: "string",
+	"routing?": routingRule,
 	"outputSchema?": outputSchemaInputSchema,
 	"schemaMode?": '"permissive" | "strict"',
 	"tools?": "string[]",
@@ -83,6 +87,7 @@ const taskSchemaNoIsolation = type({
 	agent: "string = 'task'",
 	task: "string",
 	solutionSpace: "string",
+	"routing?": routingRule,
 	"outputSchema?": outputSchemaInputSchema,
 	"schemaMode?": '"permissive" | "strict"',
 	"tools?": "string[]",
@@ -133,6 +138,7 @@ function createTaskSchema(options: {
 				agent,
 				task: "string",
 				solutionSpace: "string",
+				"routing?": routingRule,
 				...effortField,
 				"outputSchema?": outputSchemaInputSchema,
 				"schemaMode?": '"permissive" | "strict"',
@@ -151,6 +157,7 @@ function createTaskSchema(options: {
 			agent,
 			task: "string",
 			solutionSpace: "string",
+			"routing?": routingRule,
 			...effortField,
 			"outputSchema?": outputSchemaInputSchema,
 			"schemaMode?": '"permissive" | "strict"',
@@ -169,6 +176,7 @@ function createTaskSchema(options: {
 			agent,
 			task: "string",
 			solutionSpace: "string",
+			"routing?": routingRule,
 			...effortField,
 			"outputSchema?": outputSchemaInputSchema,
 			"schemaMode?": '"permissive" | "strict"',
@@ -182,6 +190,7 @@ function createTaskSchema(options: {
 		agent,
 		task: "string",
 		solutionSpace: "string",
+		"routing?": routingRule,
 		...effortField,
 		"outputSchema?": outputSchemaInputSchema,
 		"schemaMode?": '"permissive" | "strict"',
