@@ -5,6 +5,8 @@
 ### Added
 
 - Auth gateway route option `excludeProviders` leaves those providers' accounts out of `/v1/usage` and `/v1/credentials/check` ([#14755](https://github.com/can1357/oh-my-pi/pull/14755) by [@will-bogusz](https://github.com/will-bogusz))
+- Devin turns now record the plan-quota share and overage dollars Devin billed them (`usage.credits.quotaPercent`, `usage.credits.overageUsd`); `usage.cost` stays the catalog estimate ([#14759](https://github.com/can1357/oh-my-pi/pull/14759) by [@will-bogusz](https://github.com/will-bogusz))
+
 ### Breaking Changes
 
 - `AuthBrokerClient.notifyUsageStale` and `UsageLedgerStore.invalidateUsageCache` (including `RemoteAuthCredentialStore.invalidateUsageCache`) now take an optional leading `provider` argument: the signature is `(provider?: string, signal?: AbortSignal)` instead of `(signal?: AbortSignal)` ([#14761](https://github.com/can1357/oh-my-pi/pull/14761) by [@will-bogusz](https://github.com/will-bogusz))
@@ -21,10 +23,6 @@
 ### Added
 
 - Added `OAuthRefreshUnavailableError`, a retryable error that `keys.getWithCredential` and `oauth.access` reject with when every usable OAuth credential failed to refresh transiently; `keys.get` resolves `undefined` instead so availability probes move on to their next candidate ([#14843](https://github.com/can1357/oh-my-pi/pull/14843) by [@H4vC](https://github.com/H4vC))
-
-### Added
-
-- Devin turns now record the plan-quota share and overage dollars Devin billed them (`usage.credits.quotaPercent`, `usage.credits.overageUsd`); `usage.cost` stays the catalog estimate ([#14759](https://github.com/can1357/oh-my-pi/pull/14759) by [@will-bogusz](https://github.com/will-bogusz))
 
 ### Fixed
 
