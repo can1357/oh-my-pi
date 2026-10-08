@@ -99,6 +99,10 @@
       "types": "./src/components/*.ts",
       "import": "./src/components/*.ts"
     },
+    "./native/*": {
+      "types": "./src/native/*.ts",
+      "import": "./src/native/*.ts"
+    },
     "./*.js": "./src/*.ts"
   }
 }

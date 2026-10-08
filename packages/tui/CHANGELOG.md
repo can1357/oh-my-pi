@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Exposed `@oh-my-pi/pi-tui/native/*` as a package export so extensions in the compiled `omp` binary can import the native Tern/TSP modules ([#14834](https://github.com/can1357/oh-my-pi/issues/14834), [#14835](https://github.com/can1357/oh-my-pi/pull/14835) by [@carterlasalle](https://github.com/carterlasalle))
+
 ## [18.8.5] - 2026-10-08
 
 ### Added
