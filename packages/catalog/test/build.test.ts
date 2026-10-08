@@ -1226,6 +1226,63 @@ describe("OpenRouter model discovery", () => {
 		});
 	});
 
+	it("bills discovered Haiku 5.5 rows at 5x their own rates above 100K input", async () => {
+		const haiku = {
+			name: "Anthropic: Claude Haiku 5.5",
+			supported_parameters: ["tools", "tool_choice", "reasoning"],
+			architecture: { input_modalities: ["text", "image"] },
+			top_provider: { max_completion_tokens: 128_000 },
+			context_length: 1_000_000,
+		};
+		const options = openrouterModelManagerOptions({
+			fetch: async url =>
+				String(url) !== "https://openrouter.ai/api/v1/models"
+					? Response.json({ data: [] })
+					: Response.json({
+							// Live OpenRouter wire prices (USD per token) for the standard and batch rows.
+							data: [
+								{
+									...haiku,
+									id: "anthropic/claude-haiku-5.5",
+									pricing: {
+										prompt: "0.0000001",
+										completion: "0.0000005",
+										input_cache_read: "0.00000001",
+										input_cache_write: "0.000000125",
+									},
+								},
+								{
+									...haiku,
+									id: "anthropic/claude-haiku-5.5:batch",
+									pricing: {
+										prompt: "0.00000005",
+										completion: "0.00000025",
+										input_cache_read: "0.000000005",
+										input_cache_write: "0.0000000625",
+									},
+								},
+							],
+						}),
+		});
+		const specs = (await options.fetchDynamicModels?.()) ?? [];
+		const tier = (id: string) => {
+			const spec = specs.find(model => model.id === id);
+			if (!spec) throw new Error(`Expected discovered ${id}`);
+			return buildModel(spec).cost.longContext;
+		};
+
+		const standard = tier("anthropic/claude-haiku-5.5");
+		expect(standard?.inputThreshold).toBe(100_000);
+		expect(standard?.input).toBeCloseTo(0.5, 10);
+		expect(standard?.output).toBeCloseTo(2.5, 10);
+		expect(standard?.cacheRead).toBeCloseTo(0.05, 10);
+		expect(standard?.cacheWrite).toBeCloseTo(0.625, 10);
+		// The batch row bills half price, so its tier must scale from its own card.
+		const batch = tier("anthropic/claude-haiku-5.5:batch");
+		expect(batch?.input).toBeCloseTo(0.25, 10);
+		expect(batch?.output).toBeCloseTo(1.25, 10);
+	});
+
 	it("ignores legacy OpenRouter chat-completions cache rows", async () => {
 		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-catalog-openrouter-legacy-cache-"));
 		const dbPath = path.join(tempDir, "models.db");
@@ -1253,6 +1310,30 @@ describe("OpenRouter model discovery", () => {
 		} finally {
 			await fs.rm(tempDir, { recursive: true, force: true });
 		}
+	});
+});
+
+describe("GitHub Copilot catalog corrections", () => {
+	it("prices Copilot Haiku 5.5 cache legs per tier without a second long-context tier", () => {
+		// `billing.token_prices` carries no cache prices for Haiku 5.5, so both
+		// discovered tiers arrive with $0 cache legs.
+		const base = buildModel(
+			completionsSpec({
+				id: "claude-haiku-5.5",
+				provider: "github-copilot",
+				cost: { input: 0.1, output: 0.5, cacheRead: 0, cacheWrite: 0 },
+			}),
+		);
+		expect(base.cost).toEqual({ input: 0.1, output: 0.5, cacheRead: 0.01, cacheWrite: 0.125 });
+		// The `-1m` sibling is the long tier itself; a nested tier would charge it 5x twice.
+		const long = buildModel(
+			completionsSpec({
+				id: "claude-haiku-5.5-1m",
+				provider: "github-copilot",
+				cost: { input: 0.5, output: 2.5, cacheRead: 0, cacheWrite: 0 },
+			}),
+		);
+		expect(long.cost).toEqual({ input: 0.5, output: 2.5, cacheRead: 0.05, cacheWrite: 0.625 });
 	});
 });
 
