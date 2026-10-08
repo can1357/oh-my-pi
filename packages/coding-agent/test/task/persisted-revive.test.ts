@@ -568,6 +568,29 @@ describe("persisted subagent revival", () => {
 		expect(capturedOptions?.agentName).toBe("scout");
 	});
 
+	it("restores the live account pool for the persisted agent name, so a revived agent stays restricted", async () => {
+		const cwd = makeTempDir("@pi-revive-account-pool-");
+		const sessionFile = await createPersistedSession(cwd, undefined, undefined, undefined, { agent: "scout" });
+		let capturedOptions: CreateAgentSessionOptions | undefined;
+		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async options => {
+			capturedOptions = options;
+			return { session: createRevivedSession([]).session } as CreateAgentSessionResult;
+		});
+		const settings = Settings.isolated({
+			"task.agentAccountPools": {
+				scout: { anthropic: ["email:a@example.com|org:org-a"] },
+				other: { anthropic: [] },
+			},
+		});
+
+		const ref = createRef(sessionFile);
+		const reviver = await createFactory(cwd, undefined, { settings })(ref);
+		if (!reviver) throw new Error("Expected a persisted reviver");
+		await reviver(ref);
+
+		expect(capturedOptions?.oauthAccountPools).toEqual({ anthropic: ["email:a@example.com|org:org-a"] });
+	});
+
 	it("falls back to the ref display name reviving a legacy session file without a persisted agent name", async () => {
 		const cwd = makeTempDir("@pi-revive-agent-name-legacy-");
 		const sessionFile = await createPersistedSession(cwd);

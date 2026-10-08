@@ -366,6 +366,9 @@ export async function runModelsListing(options: RunModelsListingOptions): Promis
 		// Discover runtime (extension) provider catalogs now that they are registered.
 		await modelRegistry.refreshRuntimeProviders(action === "refresh" ? "online" : "online-if-uncached");
 
+		for (const warning of modelRegistry.drainConfigWarnings()) {
+			process.stderr.write(`${chalk.yellow(`Warning: ${warning}`)}\n`);
+		}
 		renderProviderModels(modelRegistry, action, pattern, json, kind);
 	} finally {
 		await emitSessionShutdownEvent(extensionRunner);

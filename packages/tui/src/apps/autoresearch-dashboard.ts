@@ -17,8 +17,8 @@ import {
 import { formatNum, type ExperimentResult, type ExperimentState } from "../tools/autoresearch";
 import type { TspSpan, TspTableColumn, TspText } from "@oh-my-pi/pi-wire";
 import { card, col, elapsed, keyed, node, row, span, text } from "../native/describe";
-import type { DescribeContext, NativeNode } from "../native/node";
-import { hintsRow } from "../native/overlay";
+import type { DescribeContext, NativeNode, NativeUiEvent } from "../native/node";
+import { actionBar, actionButton, hintsRow } from "../native/overlay";
 import { Memo } from "../native/memo";
 import { isNativeRendering } from "../native/state";
 
@@ -190,9 +190,9 @@ export function createDashboardController(): DashboardController {
 											{ keys: ["up", "down", "j", "k"], label: "scroll" },
 											{ keys: ["pageUp", "pageDown"], label: "page" },
 											{ keys: ["g", "shift+g"], label: "top/bottom" },
-											{ keys: ["escape"], label: "close" },
 										]),
 									);
+									children.push(actionBar([null, actionButton("Close", "close", { keys: "escape" })]));
 									return col(children, { gap: "md", role: "omp.app.autoresearch" });
 								},
 							);
@@ -213,6 +213,10 @@ export function createDashboardController(): DashboardController {
 							scrollView.setLines(body);
 							scrollView.setHeight(viewportRows);
 							return [header, ...scrollView.render(width), renderOverlayFooter(width, theme)];
+						},
+						/** The Close button runs Esc's path. */
+						handleNativeEvent(event: NativeUiEvent): void {
+							if (event.type === "action" && event.act === "close") done(undefined);
 						},
 						handleInput(data: string): void {
 							if (matchesKey(data, "escape") || matchesKey(data, "esc") || data === "q") {

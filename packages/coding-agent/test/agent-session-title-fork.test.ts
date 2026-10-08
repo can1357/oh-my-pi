@@ -85,8 +85,7 @@ describe("AgentSession title fork", () => {
 		await target.prompt(FIRST_MESSAGE);
 		await titled;
 
-		expect(target.sessionName).toBe("Fix flaky park tests");
-		expect(target.sessionManager.getSessionTitleCard()).toEqual({ code: "FLAKY", emoji: "🧪", nf: "nf-md-flask" });
+		expect(target.sessionName).toBe("🧪 FLAKY: Fix flaky park tests");
 		expect(titleModel).not.toHaveBeenCalled();
 		const mainCall = main.calls[0]!;
 		const sideCall = side.calls[0]!;
@@ -120,7 +119,6 @@ describe("AgentSession title fork", () => {
 		await titled;
 
 		expect(target.sessionName).toBe("Fix flaky park tests");
-		expect(target.sessionManager.getSessionTitleCard()).toBeUndefined();
 		expect(titleInputs).toHaveLength(1);
 		expect(titleInputs[0]).toContain(FIRST_MESSAGE);
 	});
@@ -147,8 +145,7 @@ describe("AgentSession title fork", () => {
 		titleModelReply.resolve(createAssistantMessage("<title/>"));
 		await titled;
 
-		expect(target.sessionName).toBe("Fix flaky park tests");
-		expect(target.sessionManager.getSessionTitleCard()).toEqual({ code: "FLAKY", emoji: "🧪", nf: "nf-md-flask" });
+		expect(target.sessionName).toBe("🧪 FLAKY: Fix flaky park tests");
 		expect(side.calls).toHaveLength(2);
 		expect(titleModel).toHaveBeenCalledTimes(1);
 	});
@@ -165,7 +162,6 @@ describe("AgentSession title fork", () => {
 		await titled;
 
 		expect(target.sessionName).toBe("Fix flaky park tests");
-		expect(target.sessionManager.getSessionTitleCard()).toBeUndefined();
 		expect(side.calls).toHaveLength(0);
 	});
 
@@ -182,7 +178,7 @@ describe("AgentSession title fork", () => {
 		await target.prompt(FIRST_MESSAGE);
 		await titled;
 
-		expect(target.sessionName).toBe("Fix flaky park tests");
+		expect(target.sessionName).toBe("🧪 FLAKY: Fix flaky park tests");
 		expect(side.calls).toHaveLength(1);
 		expect(titleModel).not.toHaveBeenCalled();
 	});

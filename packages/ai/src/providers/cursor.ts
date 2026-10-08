@@ -611,7 +611,7 @@ function classifyCursorStructuredError(structured: CursorStructuredError): Error
 	if (code === 21) return new AIError.AbortError(fullMessage);
 	const status = CURSOR_ERROR_STATUS[code];
 	if (status !== undefined) return new AIError.ProviderHttpError(fullMessage, status, { code: name });
-	if (retryable === true || CURSOR_RETRYABLE_ERROR_CODES.has(code)) {
+	if (retryable === true || (retryable === undefined && CURSOR_RETRYABLE_ERROR_CODES.has(code))) {
 		return new AIError.ProviderHttpError(fullMessage, 503, { code: name });
 	}
 	return new AIError.ProviderHttpError(fullMessage, 400, { code: name });
@@ -1089,6 +1089,9 @@ function streamCursorWithWireMode(
 		const h2Completion = Promise.withResolvers<void>();
 		let h2Settled = false;
 		let sawTurnEnded = false;
+		// After the final step's `stepCompleted`, only a repeat checkpoint and the
+		// `turnEnded` usage frame follow.
+		let stepCompletedIsLatest = false;
 		let endStreamError: Error | null = null;
 		let progressVersion = 0;
 		let latestCheckpointProgressVersion = -1;
@@ -1115,6 +1118,20 @@ function streamCursorWithWireMode(
 				return;
 			}
 			if (!sawTurnEnded) {
+				// A stream cut after the final step lost only usage and a repeat
+				// checkpoint, so the turn is complete. The final step ends on answer
+				// text; a step that ended on tool calls, or left one open, may be
+				// followed by another step and is still treated as truncated.
+				if (
+					stepCompletedIsLatest &&
+					output.content.at(-1)?.type === "text" &&
+					openBlockState?.currentToolCall === null &&
+					openBlockState.openToolCalls.size === 0
+				) {
+					logger.debug("cursor stream ended after stepCompleted without turnEnded", { model: model.id });
+					h2Completion.resolve();
+					return;
+				}
 				h2Completion.reject(
 					new AIError.ProviderResponseError("Cursor stream ended before turnEnded", {
 						kind: "incomplete-stream",
@@ -1348,6 +1365,15 @@ function streamCursorWithWireMode(
 						if (interactionCase !== "heartbeat") {
 							sawProgressOrSideEffect = true;
 							progressVersion++;
+						}
+						if (interactionCase === "stepCompleted") {
+							stepCompletedIsLatest = true;
+						} else if (
+							interactionCase !== "heartbeat" &&
+							serverMessage.message.case !== "conversationCheckpointUpdate" &&
+							serverMessage.message.case !== "kvServerMessage"
+						) {
+							stepCompletedIsLatest = false;
 						}
 						if (serverMessage.message.case === "conversationCheckpointUpdate") {
 							latestCheckpoint = serverMessage.message.value;
