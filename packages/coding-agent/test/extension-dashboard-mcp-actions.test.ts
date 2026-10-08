@@ -6,8 +6,11 @@ import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config
 import { initializeWithSettings } from "@oh-my-pi/pi-coding-agent/discovery";
 import { createMCPActionRuntime } from "@oh-my-pi/pi-coding-agent/modes/components/extensions/mcp-action-runtime";
 import { loadAllExtensions } from "@oh-my-pi/pi-coding-agent/modes/components/extensions/state-manager";
-import type { MCPServerConnection } from "@oh-my-pi/pi-coding-agent/mcp/types";
+import * as mcpClient from "@oh-my-pi/pi-coding-agent/mcp/client";
+import type { MCPServerConfig, MCPServerConnection } from "@oh-my-pi/pi-coding-agent/mcp/types";
 import { mcpOAuthCredentialId } from "@oh-my-pi/pi-coding-agent/mcp/oauth-flow";
+import { createMCPJsonRpcError, MCPTransportError } from "@oh-my-pi/pi-coding-agent/mcp/errors";
+import type { MCPLoadResult } from "@oh-my-pi/pi-coding-agent/mcp/manager";
 import { MCPServerActions } from "@oh-my-pi/pi-coding-agent/mcp/server-actions";
 import { cfgMcpEnableProjectConfig } from "@oh-my-pi/pi-coding-agent/mcp/settings";
 import type { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
@@ -37,6 +40,7 @@ describe("extensions dashboard MCP actions", () => {
 	});
 
 	afterEach(async () => {
+		vi.restoreAllMocks();
 		resetSettingsForTest();
 		__resetDirsFromEnvForTests();
 		await removeWithRetries(projectDir);
@@ -134,11 +138,57 @@ describe("extensions dashboard MCP actions", () => {
 		await expect(actions.test(target)).resolves.toMatchObject({ message: "Connected. 1 tool(s) available." });
 		expect(request).toHaveBeenCalledWith("ping", {}, { signal: expect.any(AbortSignal) });
 
-		request.mockRejectedValueOnce(new Error("MCP error -32601: Method not found"));
+		request.mockRejectedValueOnce(createMCPJsonRpcError("http", { code: -32601, message: "Method not found" }));
 		await expect(actions.test(target)).resolves.toMatchObject({ action: "test" });
+
+		// A gateway error page is not a JSON-RPC reply from the server, even when its body says so.
+		request.mockRejectedValueOnce(
+			new MCPTransportError({
+				transport: "http",
+				stage: "receive",
+				failure: "http_status",
+				message: 'HTTP 404: {"error":{"code":-32601,"message":"Method not found"}}',
+				retryable: false,
+				code: 404,
+			}),
+		);
+		await expect(actions.test(target)).rejects.toThrow("HTTP 404");
 
 		request.mockRejectedValueOnce(new Error("fetch failed: ECONNREFUSED"));
 		await expect(actions.test(target)).rejects.toThrow("ECONNREFUSED");
+	});
+
+	test("test and reconnect deadlines follow OMP_MCP_TIMEOUT_MS over the server timeout", async () => {
+		const connection = {
+			name: "github",
+			config: CONFIG,
+			transport: { connected: true, request: vi.fn(() => new Promise(() => {})), notify: vi.fn(), close: vi.fn() },
+			serverInfo: { name: "github", version: "1.0" },
+			capabilities: { tools: {} },
+		} as unknown as MCPServerConnection;
+		const manager = createMcpManagerStub({
+			getConnectionStatus: vi.fn(() => "connected" as const),
+			getConnection: vi.fn(() => connection),
+			reconnectServer: vi.fn(() => new Promise<null>(() => {})),
+		});
+		const actions = new MCPServerActions({
+			cwd: projectDir,
+			manager,
+			authStorage: AUTH_STORAGE,
+			refreshMCPTools: async () => {},
+		});
+		// The environment wins over the server's own timeout. Kept under the test
+		// timeout so a regression fails on the wrong deadline instead of hanging.
+		const target = { name: "github", config: { ...CONFIG, timeout: 1_000 } };
+		const previous = Bun.env.OMP_MCP_TIMEOUT_MS;
+		Bun.env.OMP_MCP_TIMEOUT_MS = "20";
+		try {
+			await expect(actions.test(target)).rejects.toThrow("within 20ms");
+			await expect(actions.reconnect(target)).rejects.toThrow("after 20ms");
+		} finally {
+			if (previous === undefined) delete Bun.env.OMP_MCP_TIMEOUT_MS;
+			else Bun.env.OMP_MCP_TIMEOUT_MS = previous;
+		}
 	});
 
 	test("completes enable and disable persistence without a runtime manager", async () => {
@@ -265,6 +315,60 @@ describe("extensions dashboard MCP actions", () => {
 		} finally {
 			if (previousKey === undefined) delete Bun.env.DASHBOARD_TEST_API_KEY;
 			else Bun.env.DASHBOARD_TEST_API_KEY = previousKey;
+		}
+	});
+
+	test("test connects with the discovery-equivalent config for each source", async () => {
+		const probed: MCPServerConfig[] = [];
+		vi.spyOn(mcpClient, "connectToServer").mockImplementation(async (name, config) => {
+			probed.push(config);
+			return {
+				name,
+				config,
+				transport: { close: async () => {} },
+				capabilities: { tools: {} },
+				tools: [],
+			} as unknown as MCPServerConnection;
+		});
+		const connectServers = vi.fn(async (_configs: Record<string, MCPServerConfig>) => ({}) as MCPLoadResult);
+		const manager = createMcpManagerStub({
+			getConnectionStatus: vi.fn(() => "disconnected" as const),
+			connectServers,
+		});
+		const actions = new MCPServerActions({
+			cwd: projectDir,
+			manager,
+			authStorage: AUTH_STORAGE,
+			refreshMCPTools: async () => {},
+		});
+		const previousBin = Bun.env.DASHBOARD_TEST_BIN;
+		Bun.env.DASHBOARD_TEST_BIN = "/opt/tool/bin/server";
+		try {
+			// Writable on-disk entry: expanded for the probe AND for the manager attach,
+			// or the manager would spawn the literal placeholder after a passing probe.
+			await actions.test({
+				name: "local",
+				config: { type: "stdio", command: "${DASHBOARD_TEST_BIN}" },
+				source: { provider: "omp", providerName: "OMP", path: configPath, level: "user" },
+			});
+			expect(probed.at(-1)).toMatchObject({ command: "/opt/tool/bin/server" });
+			expect(connectServers.mock.calls.at(-1)?.[0]).toEqual({
+				local: { type: "stdio", command: "/opt/tool/bin/server" },
+			});
+
+			// Plugin discovery result: literal env values are opaque and must reach the server verbatim.
+			await actions.test({
+				name: "plugin",
+				config: { type: "stdio", command: "server", env: { TOKEN: "${DASHBOARD_TEST_BIN}" }, envPolicy: "literal" },
+				source: { provider: "agent-plugins", providerName: "Plugins", path: "/plugins/p/mcp.json", level: "user" },
+			});
+			expect(probed.at(-1)).toMatchObject({ env: { TOKEN: "${DASHBOARD_TEST_BIN}" } });
+			expect(connectServers.mock.calls.at(-1)?.[0]).toMatchObject({
+				plugin: { env: { TOKEN: "${DASHBOARD_TEST_BIN}" } },
+			});
+		} finally {
+			if (previousBin === undefined) delete Bun.env.DASHBOARD_TEST_BIN;
+			else Bun.env.DASHBOARD_TEST_BIN = previousBin;
 		}
 	});
 });

@@ -265,6 +265,14 @@ export { MCPOAuthCancelledError };
 /** Reason recorded on the OAuth flow's AbortController when the user hits Esc. */
 const MCP_OAUTH_USER_CANCEL_REASON = "MCP OAuth flow cancelled by user";
 
+/**
+ * Editor Escape handler each MCP OAuth flow installed, mapped to the handler it
+ * displaced. A superseding flow restores past a still-installed predecessor
+ * instead of to it, and a flow only restores while its own handler is current,
+ * so a cancelled predecessor never strips the replacement's Escape.
+ */
+const mcpOAuthEscapeHandlers = new WeakMap<() => void, (() => void) | undefined>();
+
 type MCPAddScope = "user" | "project";
 type MCPAddTransport = "http" | "sse";
 
@@ -1126,8 +1134,17 @@ export class MCPCommandController {
 			name,
 			config: found.config,
 			source: found.source,
-			disabled: found.config.enabled === false,
+			disabled: this.#isEffectivelyDisabled(name, found.config),
 		};
+	}
+
+	/**
+	 * The raw `enabled: false` flag is not the effective state: a user
+	 * `enabledServers` override loads a tool-owned server despite it. Any server
+	 * the runtime manager holds was admitted by discovery and is enabled.
+	 */
+	#isEffectivelyDisabled(name: string, config: MCPServerConfig): boolean {
+		return config.enabled === false && !this.ctx.mcpManager?.getServerConfig(name);
 	}
 
 	async #waitForServerConnectionWithAnimation(
@@ -1496,11 +1513,14 @@ export class MCPCommandController {
 				);
 				return;
 			}
-			if (found.config.enabled === false) {
+			if (this.#isEffectivelyDisabled(name, found.config)) {
 				this.ctx.mcpTestEscapeHandlers.delete(handleEscape);
 				this.ctx.showError(`Server "${name}" is disabled. Run /mcp enable ${name} first.`);
 				return;
 			}
+			// Esc may have been consumed during the awaited lookup, before any
+			// hint existed. Bail out instead of advertising a cancellation that
+			// is already gone.
 			if (abortController.signal.aborted) {
 				this.ctx.mcpTestEscapeHandlers.delete(handleEscape);
 				this.ctx.showStatus(`Cancelled MCP test for "${name}"`);
@@ -1641,10 +1661,16 @@ export class MCPCommandController {
 		options: { authChallenge?: MCPAuthChallenge; reload: boolean },
 	): Promise<MCPServerActionResult> {
 		const flowAbort = new AbortController();
-		const originalOnEscape = this.ctx.editor.onEscape;
+		const currentOnEscape = this.ctx.editor.onEscape;
+		const originalOnEscape =
+			currentOnEscape && mcpOAuthEscapeHandlers.has(currentOnEscape)
+				? mcpOAuthEscapeHandlers.get(currentOnEscape)
+				: currentOnEscape;
+		const onEscape = () => flowAbort.abort(new MCPOAuthCancelledError(MCP_OAUTH_USER_CANCEL_REASON));
+		mcpOAuthEscapeHandlers.set(onEscape, originalOnEscape);
 		const manualInput = this.ctx.oauthManualInput;
 		let manualInputClaim: { promise: Promise<string>; clear: (reason?: string) => void } | undefined;
-		this.ctx.editor.onEscape = () => flowAbort.abort(new MCPOAuthCancelledError(MCP_OAUTH_USER_CANCEL_REASON));
+		this.ctx.editor.onEscape = onEscape;
 		const interaction: MCPInteractiveOAuthInteraction = {
 			onAuthorization: info => {
 				const block = new TranscriptBlock();
@@ -1707,7 +1733,7 @@ export class MCPCommandController {
 			]);
 			return result;
 		} finally {
-			this.ctx.editor.onEscape = originalOnEscape;
+			if (this.ctx.editor.onEscape === onEscape) this.ctx.editor.onEscape = originalOnEscape;
 			manualInputClaim?.clear("Manual MCP OAuth input cleared");
 		}
 	}
@@ -1820,7 +1846,7 @@ export class MCPCommandController {
 				name,
 				config,
 				source: this.ctx.mcpManager.getSource(name),
-				disabled: config.enabled === false,
+				disabled: this.#isEffectivelyDisabled(name, config),
 			});
 			this.#showMessage(
 				[

@@ -33,6 +33,11 @@
 - Fixed interrupting a reply to send a queued steer message briefly showing omp as idle (title, progress, working indicator) before the steer ran; RPC and SDK clients also no longer see a final `agent_end` for that interrupt.
 - Fixed browser tab recordings and video frame/contact-sheet extraction creating `omp-browser-recording-*` and `omp-video-*` scratch directories in your working directory instead of the system temp directory.
 - Fixed edit snapshots retaining excess history when metadata or displayed-line provenance grows; the 64 MiB snapshot budget now counts UTF-8 bytes, so CJK- and emoji-heavy files keep fewer versions ([#14975](https://github.com/can1357/oh-my-pi/pull/14975) by [@iliaal](https://github.com/iliaal)).
+- Added a consolidated **MCP Servers** tab to `/extensions`, with live cross-source connection status, tool/resource/prompt inspection, and contextual test, reconnect, reauthenticate, credential-clear, enable, and disable actions ([#12764](https://github.com/can1357/oh-my-pi/pull/12764) by [@alexvitiello](https://github.com/alexvitiello)).
+
+### Fixed
+
+- Fixed `/mcp test` reporting a server as disabled when a user `enabledServers` override had enabled it despite its source's `enabled: false`.
 
 ## [18.8.6] - 2026-10-08
 
@@ -45,9 +50,6 @@
 ### Changed
 
 - Web search now prefers an authenticated `xai-oauth` login over an `xai` API key when both are available, unless `modelProviderOrder` specifies a different order.
-### Added
-
-* Added a consolidated **MCP Servers** tab to `/extensions`, with live cross-source connection status, tool/resource/prompt inspection, and contextual test, reconnect, reauthenticate, credential-clear, enable, and disable actions ([#12764](https://github.com/can1357/oh-my-pi/pull/12764) by [@alexvitiello](https://github.com/alexvitiello)).
 
 ### Fixed
 

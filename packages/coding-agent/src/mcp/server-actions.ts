@@ -29,6 +29,7 @@ import {
 } from "./oauth-discovery";
 import { mcpOAuthCredentialId } from "./oauth-flow";
 import type { McpConnectionStatusEvent } from "./startup-events";
+import { resolveMCPTimeoutMs } from "./timeout";
 import type { MCPAuthChallenge, MCPAuthConfig, MCPServerConfig, MCPServerConnection, MCPToolDefinition } from "./types";
 
 export type MCPServerActionName =
@@ -103,8 +104,20 @@ export function isProjectMCPConfigBlocked(
 	return enableProjectConfig === false && source?.level === "project";
 }
 
+/** Action deadline with the same precedence as transports: `OMP_MCP_TIMEOUT_MS`, then config; 0 disables. */
 function getServerTimeout(config: MCPServerConfig): number {
-	return config.timeout ?? 30_000;
+	return resolveMCPTimeoutMs(config.timeout);
+}
+
+/**
+ * Config to connect with. Writable sources carry the on-disk entry (placeholders
+ * intact so persistence never writes resolved secrets); discovery deep-expands
+ * those same files, so expand them identically here. Every other source already
+ * holds the discovery result, whose literal env/header policies the manager
+ * enforces, so expanding it again would rewrite values marked opaque.
+ */
+function runtimeConfig(target: Pick<MCPServerActionTarget, "config" | "source">): MCPServerConfig {
+	return writableSourcePath(target.source) ? expandEnvVarsDeep(target.config) : target.config;
 }
 
 function stripOAuthAuth(config: MCPServerConfig): MCPServerConfig {
@@ -123,9 +136,7 @@ async function testMCPConfig(options: {
 }): Promise<MCPToolDefinition[]> {
 	const manager = new TemporaryMCPManager(options.cwd);
 	if (options.authStorage) manager.setAuthStorage(options.authStorage);
-	// Callers pass the on-disk entry (placeholders intact, so persistence never writes
-	// resolved secrets); expand here so the probe connects the way startup would.
-	const resolvedConfig = await manager.prepareConfig(expandEnvVarsDeep(options.config), { oauth: options.oauth });
+	const resolvedConfig = await manager.prepareConfig(options.config, { oauth: options.oauth });
 	let connection: MCPServerConnection | undefined;
 	try {
 		connection = await connectToServer(
@@ -234,16 +245,17 @@ export class MCPServerActions {
 			}
 		}
 
+		const config = runtimeConfig(target);
 		const tools = await testMCPConfig({
 			cwd: this.#options.cwd,
 			authStorage: this.#options.authStorage,
-			config: target.config,
+			config,
 			signal,
 		});
 		if (manager && manager.getConnectionStatus(target.name) === "disconnected") {
 			await raceAbortSignal(
 				manager.connectServers(
-					{ [target.name]: target.config },
+					{ [target.name]: config },
 					target.source ? { [target.name]: target.source } : {},
 					undefined,
 					undefined,
@@ -310,7 +322,8 @@ export class MCPServerActions {
 		const authStorage = this.#requireAuthStorage();
 		const currentAuth = target.config.auth;
 		const baseConfig = stripOAuthAuth(target.config);
-		const runtimeBaseConfig = expandEnvVarsDeep(baseConfig);
+		const runtimeTargetConfig = runtimeConfig(target);
+		const runtimeBaseConfig = stripOAuthAuth(runtimeTargetConfig);
 		const oauth = await raceAbortSignal(
 			resolveOAuthEndpointsFromServer({
 				cwd: this.#options.cwd,
@@ -324,7 +337,7 @@ export class MCPServerActions {
 		const url = serverUrl(runtimeBaseConfig);
 		if (!url) throw new Error("Reauthentication is available only for HTTP and SSE servers");
 
-		const runtimeAuth = currentAuth ? expandEnvVarsDeep(currentAuth) : undefined;
+		const runtimeAuth = runtimeTargetConfig.auth;
 		const configuredClientId = runtimeBaseConfig.oauth?.clientId?.trim() || undefined;
 		const configuredClientSecret = runtimeBaseConfig.oauth?.clientSecret;
 		const existingCredential = lookupMcpOAuthCredentialForServer(authStorage, currentAuth, url)?.credential;
@@ -345,7 +358,7 @@ export class MCPServerActions {
 			(configuredClientId === flowClientId ? target.config.oauth?.clientSecret : undefined) ??
 			(persistedClientId === flowClientId ? currentAuth?.clientSecret : undefined);
 		const hasConfiguredOnlySecret = configuredClientId === undefined && configuredClientSecret !== undefined;
-		const currentAuthResource = currentAuth?.resource ? expandEnvVarsDeep(currentAuth.resource) : undefined;
+		const currentAuthResource = runtimeAuth?.resource;
 		const oauthResource = oauth.resource ?? currentAuthResource ?? url;
 		const oauthResourceIsFallback = !oauth.resource && !currentAuthResource;
 

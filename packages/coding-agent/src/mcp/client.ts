@@ -6,6 +6,7 @@
 import * as path from "node:path";
 import * as url from "node:url";
 import { getProjectDir, logger, withTimeout } from "@oh-my-pi/pi-utils";
+import { MCPTransportError } from "./errors";
 import { describeMCPTimeout, isMCPTimeoutEnabled, resolveMCPTimeoutMs } from "./timeout";
 import { createHttpTransport } from "./transports/http";
 import { LegacySseConnectionTimeoutError, createSseTransport } from "./transports/sse";
@@ -251,14 +252,15 @@ export async function listTools(
 
 /**
  * Confirm a connected server still responds by sending the spec `ping` request.
- * A JSON-RPC "method not found" reply still proves the server answered, so it
- * counts as alive; transport failures, timeouts, and aborts are rethrown.
+ * A JSON-RPC -32601 reply still proves the server answered, so it counts as
+ * alive. Only the structured error qualifies: an HTTP error body or transport
+ * failure that merely mentions "method not found" is rethrown with everything else.
  */
 export async function pingServer(connection: MCPServerConnection, options?: MCPRequestOptions): Promise<void> {
 	try {
 		await connection.transport.request("ping", {}, options);
 	} catch (error) {
-		if (!isMethodNotFoundError(error)) throw error;
+		if (!(error instanceof MCPTransportError && error.failure === "json_rpc" && error.code === -32601)) throw error;
 	}
 }
 

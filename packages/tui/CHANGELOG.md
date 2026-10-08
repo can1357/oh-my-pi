@@ -14,6 +14,7 @@
 - Reduced memory retained by discarded TSP images and previews ([#14336](https://github.com/can1357/oh-my-pi/pull/14336) by [@iliaal](https://github.com/iliaal)).
 - Fixed startup capability probes printing as text in the prompt (e.g. `25a1;stsp;q;{…}pppppp`) on terminals that cannot parse them, such as macOS Terminal.app.
 - Fixed the `/resume` picker flashing while a search runs over a large session history: background fuzzy matches now land in one update instead of reordering the list dozens of times per keystroke.
+- Added the MCP server action panel for the Extension Control Center, including live status, capability counts, disabled-action reasons, destructive-action confirmation, cancellable operations, and manual OAuth callback input ([#12764](https://github.com/can1357/oh-my-pi/pull/12764) by [@alexvitiello](https://github.com/alexvitiello)).
 
 ## [18.8.6] - 2026-10-08
 
@@ -26,9 +27,6 @@
 - Added package exports for the native Tern/TSP modules, allowing extensions in compiled `omp` binaries to import them.
 - Fixed the Tern `/model` picker's Roles tab so typing and Backspace consistently edit the search field without triggering role commands.
 - Fixed the session picker so sessions retain and display their directory when switching between the current folder and all-project views.
-### Added
-
-* Added the MCP server action panel for the Extension Control Center, including live status, capability counts, disabled-action reasons, destructive-action confirmation, cancellable operations, and manual OAuth callback input ([#12764](https://github.com/can1357/oh-my-pi/pull/12764) by [@alexvitiello](https://github.com/alexvitiello)).
 
 ## [18.8.5] - 2026-10-08
 
