@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
 import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
-import type { Api, AssistantMessage, Model } from "@oh-my-pi/pi-ai";
+import { Effort, type Api, type AssistantMessage, type Model } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import * as sdkModule from "@oh-my-pi/pi-coding-agent/sdk";
@@ -28,6 +28,23 @@ function model(provider: string, id: string): Model<Api> {
 		api: "openai-completions",
 		baseUrl: provider === "openrouter" ? "https://openrouter.ai/api/v1" : `https://${provider}.example.test`,
 		reasoning: false,
+		input: ["text"],
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: 128000,
+		maxTokens: 8192,
+	});
+}
+
+/** Reasoning model with a thinking ladder, so a spawn `effort` maps onto a concrete level. */
+function effortModel(provider: string, id: string): Model<Api> {
+	return buildModel({
+		provider,
+		id,
+		name: id,
+		api: "openai-completions",
+		baseUrl: `https://${provider}.example.test`,
+		reasoning: true,
+		thinking: { mode: "effort", efforts: [Effort.Low, Effort.Medium, Effort.High] },
 		input: ["text"],
 		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 		contextWindow: 128000,
@@ -324,6 +341,75 @@ describe("subagent runtime model resolution", () => {
 			"fallback/working-model",
 			"configured/last-model",
 		]);
+	});
+
+	it("keys the primary model chain on the effort-applied selector", async () => {
+		const primary = effortModel("primary", "bad-runtime-model");
+		const fallback = model("fallback", "working-model");
+		const configured = model("configured", "last-model");
+		const available = [primary, fallback, configured];
+		let childFallbackChains: Record<string, string[]> | undefined;
+		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async options => {
+			if (!options) throw new Error("Expected createAgentSession options");
+			childFallbackChains = options.settings ? cfgRetryFallbackChains.get(options.settings) : undefined;
+			return { session: createYieldingSession(), extensionsResult: {}, setToolUIContext: () => {} } as never;
+		});
+		await runSubprocess({
+			cwd: "/tmp",
+			agent: { name: "task", description: "test", systemPrompt: "test", source: "bundled" },
+			task: "work",
+			index: 0,
+			id: "effort-key",
+			modelOverride: ["primary/bad-runtime-model", "fallback/working-model"],
+			effort: "lo",
+			settings: Settings.isolated({
+				"retry.fallbackChains": { "primary/bad-runtime-model:low": ["configured/last-model"] },
+			}),
+			modelRegistry: {
+				refresh: async () => {},
+				getAvailable: () => available,
+				getApiKey: async () => "test-key",
+				find: (provider: string, id: string) =>
+					available.find(item => item.provider === provider && item.id === id),
+				hasProvider: (provider: string) => available.some(item => item.provider === provider),
+			} as never,
+			enableLsp: false,
+		});
+		expect(childFallbackChains?.["subagent:effort-key"]).toEqual(["fallback/working-model", "configured/last-model"]);
+	});
+
+	it("resolves a wildcard model-key entry against the primary, not the ordered hop", async () => {
+		const primary = model("primary", "alpha");
+		const ordered = model("ordered", "beta");
+		const mirror = model("mirror", "alpha");
+		const available = [primary, ordered, mirror];
+		let childFallbackChains: Record<string, string[]> | undefined;
+		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async options => {
+			if (!options) throw new Error("Expected createAgentSession options");
+			childFallbackChains = options.settings ? cfgRetryFallbackChains.get(options.settings) : undefined;
+			return { session: createYieldingSession(), extensionsResult: {}, setToolUIContext: () => {} } as never;
+		});
+		await runSubprocess({
+			cwd: "/tmp",
+			agent: { name: "task", description: "test", systemPrompt: "test", source: "bundled" },
+			task: "work",
+			index: 0,
+			id: "wildcard-hop",
+			modelOverride: ["primary/alpha", "ordered/beta"],
+			settings: Settings.isolated({
+				"retry.fallbackChains": { "primary/alpha": ["mirror/*"] },
+			}),
+			modelRegistry: {
+				refresh: async () => {},
+				getAvailable: () => available,
+				getApiKey: async () => "test-key",
+				find: (provider: string, id: string) =>
+					available.find(item => item.provider === provider && item.id === id),
+				hasProvider: (provider: string) => available.some(item => item.provider === provider),
+			} as never,
+			enableLsp: false,
+		});
+		expect(childFallbackChains?.["subagent:wildcard-hop"]).toEqual(["ordered/beta", "mirror/alpha"]);
 	});
 
 	it("does not put the model-key chain ahead of an inherited single-model chain", async () => {
@@ -946,5 +1032,4 @@ describe("subagent runtime model resolution", () => {
 		} as unknown as TurnRecoveryHost);
 		expect(recovery.retryFallbackChainKeys("primary/bad-runtime-model")[0]).toBe("primary/bad-runtime-model");
 	});
-
 });

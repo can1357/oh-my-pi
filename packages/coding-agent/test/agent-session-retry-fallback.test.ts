@@ -36,6 +36,7 @@ import {
 	installRetryFallbackRole,
 	markOrderedSubagentRole,
 	type ServingModel,
+	subagentSuppliedOrderedBackups,
 	validateRetryFallbackChains,
 } from "@oh-my-pi/pi-coding-agent/session/retry-fallback-chains";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
@@ -5801,6 +5802,22 @@ describe("AgentSession retry fallback", () => {
 		expect(requestedModels[0]).toBe(primarySelector);
 		expect(requestedModels[1]).toBe(modelKeySelector);
 		expect(requestedModels).not.toContain(inheritedSelector);
+	});
+
+	it("cannot pin a retry role from a config.yml ordered-backup value", async () => {
+		using projectDir = TempDir.createSync("@pi-retry-ordered-config-");
+		await Bun.write(
+			path.join(projectDir.path(), ".omp", "config.yml"),
+			Bun.YAML.stringify({ retry: { orderedSubagentRoles: ["subagent:config-pinned"] } }),
+		);
+		const settings = await Settings.loadIsolated({
+			cwd: projectDir.path(),
+			agentDir: path.join(projectDir.path(), "agent"),
+			inMemory: true,
+		});
+		// The marker is runtime provenance, not a settings entry: a config value
+		// can neither create nor read it, so it cannot pin the retry precedence.
+		expect(subagentSuppliedOrderedBackups(settings, "subagent:config-pinned")).toBe(false);
 	});
 
 	it("clamps a fallback selector's explicit thinking level to the session effort ceiling", async () => {

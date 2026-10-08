@@ -305,7 +305,21 @@ interface OwnLayers {
 }
 
 /** The layers an {@link Settings.overlay} child writes locally; see {@link Settings.overlayLayers}. */
-export type OverlayLayers = Readonly<Pick<OwnLayers, "global" | "overrides">>;
+export type OverlayLayers = Readonly<Pick<OwnLayers, "global" | "overrides">> & {
+	sessionState: SettingsSessionState;
+};
+
+/**
+ * Session-local state a settings instance carries beside its layers.
+ *
+ * Unlike a setting it is never validated, persisted, or listed, and no config
+ * file can supply it. It rides {@link Settings.overlayLayers} /
+ * {@link Settings.restoreOverlay}, so a rebuilt overlay (warm revival) keeps it.
+ */
+export interface SettingsSessionState {
+	/** Roles whose spawn selector listed ordered backups, for retry-fallback precedence. */
+	orderedSubagentRoles?: readonly string[];
+}
 
 /** A persisted layer re-read from disk: its new value, the file(s) it came from, and the read-side state it commits. */
 interface LayerRefresh {
@@ -602,6 +616,8 @@ export class Settings {
 	#overlayShellPathSource: string | undefined;
 	/** Runtime overrides (not persisted) */
 	#overrides: RawSettings = {};
+	/** Session-local state carried across overlay restore; see {@link SettingsSessionState}. */
+	#sessionState: SettingsSessionState = {};
 	/** Settings whose runtime override is a soft-pinned default ({@link pinDefaultValue}). */
 	#softPins = new Set<AnySetting>();
 	/** Merged view (global + project + overrides) */
@@ -776,6 +792,7 @@ export class Settings {
 		const child = new Settings({ inMemory: true, cwd: this.#cwd, agentDir: this.#agentDir, overrides });
 		child.#storage = this.#storage;
 		child.#parent = this;
+		child.#sessionState = structuredClone(this.#sessionState);
 		inheritWarnings(child, this);
 		child.#rebuildMerged();
 		// The parent holds only a weak reference, so a discarded child is collected without an
@@ -799,7 +816,7 @@ export class Settings {
 	 * this plain data instead of the live child with its merged view, memoized values and listeners.
 	 */
 	overlayLayers(): OverlayLayers {
-		return structuredClone({ global: this.#global, overrides: this.#overrides });
+		return structuredClone({ global: this.#global, overrides: this.#overrides, sessionState: this.#sessionState });
 	}
 
 	/** {@link overlay} of this instance whose own layers are `layers` (from {@link overlayLayers}). */
@@ -807,8 +824,19 @@ export class Settings {
 		const child = this.overlay();
 		child.#global = structuredClone(layers.global);
 		child.#overrides = structuredClone(layers.overrides);
+		child.#sessionState = structuredClone(layers.sessionState);
 		child.#rebuildMerged();
 		return child;
+	}
+
+	/** Session-local state this instance carries; see {@link SettingsSessionState}. */
+	getSessionState(): SettingsSessionState {
+		return this.#sessionState;
+	}
+
+	/** Merge `patch` into this instance's session-local state; never persisted or validated. */
+	updateSessionState(patch: Partial<SettingsSessionState>): void {
+		this.#sessionState = { ...this.#sessionState, ...patch };
 	}
 
 	/** Re-merges after a parent change and forwards it unless the child's own layers pin the value. */
@@ -1299,6 +1327,7 @@ export class Settings {
 		const layers = { ...cloned.#ownLayers(), overrides: this.#buildOriginalOverrides() };
 		for (const setting of cloned.#settlePins(layers)) cloned.#softPins.delete(setting);
 		cloned.#overrides = layers.overrides;
+		cloned.#sessionState = structuredClone(this.#sessionState);
 		cloned.#rebuildMerged();
 		inheritWarnings(cloned, this);
 		cloned.#validateAll();

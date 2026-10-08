@@ -13,7 +13,7 @@ import {
 import { resolveConfiguredModelPatterns, resolveModelRoleValue } from "../config/model-resolver";
 import { getRoleInfo, isKindRole } from "../config/model-roles";
 
-import { cfgOrderedSubagentRoles, cfgRetryFallbackChains, cfgRetryFallbackRevertPolicy } from "./settings";
+import { cfgRetryFallbackChains, cfgRetryFallbackRevertPolicy } from "./settings";
 
 /** Configured fallback chains keyed by role or model selector. */
 export type RetryFallbackChains = Record<string, string[]>;
@@ -223,18 +223,27 @@ export function installRetryFallbackRole(
 	cfgRetryFallbackChains.override(settings, fallbackChains);
 }
 
-/** Records that `role` was installed from selector backups. Lives in the settings overlay. */
+/**
+ * Session-local marker for roles whose spawn selector listed ordered backups.
+ *
+ * It lives in the settings instance's session-local state, not as a setting:
+ * `config.yml` cannot pin a role and `omp config list` never shows it, yet the
+ * marker rides {@link Settings.overlayLayers}/{@link Settings.restoreOverlay},
+ * so a rebuilt overlay (warm revival) keeps it. Cold revival keeps the
+ * persisted `session_init` flag.
+ */
+
+/** Records that `role` was installed from selector backups. */
 export function markOrderedSubagentRole(settings: Settings, role: string): void {
-	const existing = cfgOrderedSubagentRoles.get(settings);
-	if (existing.includes(role)) return;
-	cfgOrderedSubagentRoles.override(settings, [...existing, role]);
+	const roles = settings.getSessionState().orderedSubagentRoles ?? [];
+	if (roles.includes(role)) return;
+	settings.updateSessionState({ orderedSubagentRoles: [...roles, role] });
 }
 
 /** Whether spawn installed `role` from an ordered selector list rather than a single model. */
 export function subagentSuppliedOrderedBackups(settings: Settings, role: string): boolean {
-	return cfgOrderedSubagentRoles.get(settings).includes(role);
+	return settings.getSessionState().orderedSubagentRoles?.includes(role) ?? false;
 }
-
 
 function resolutionLookup(modelLookup: RetryFallbackModelLookup): RetryFallbackModelLookup {
 	return {
@@ -248,6 +257,11 @@ function resolutionLookup(modelLookup: RetryFallbackModelLookup): RetryFallbackM
  * Chain configured for the resolved primary under the same key resolution turn
  * recovery uses: exact selector, effort-normalized, suffixless base, then a
  * provider wildcard. Role and `default` keys are not the primary's chain.
+ *
+ * `selector` MUST be the primary's effective selector (its thinking/effort
+ * suffix applied), so an effort-keyed chain resolves the same way it does at
+ * runtime. Wildcard entries are resolved against this primary, not against
+ * whatever hop is failing when the composed chain is later walked.
  */
 export function resolvePrimaryModelKeyChain(
 	settings: Settings,
@@ -256,19 +270,28 @@ export function resolvePrimaryModelKeyChain(
 	model: Model | null | undefined,
 ): string[] {
 	const chains = getRetryFallbackChains(settings);
-	const key = resolveRetryFallbackChainKey(
-		{
-			chains,
-			getModelRole: role => settings.getModelRole(role),
-			modelLookup: resolutionLookup(modelLookup),
-		},
-		selector,
-		model,
-	);
+	const context: RetryFallbackResolutionContext = {
+		chains,
+		getModelRole: role => settings.getModelRole(role),
+		modelLookup: resolutionLookup(modelLookup),
+	};
+	const key = resolveRetryFallbackChainKey(context, selector, model);
 	if (!key || !isRetryFallbackModelKey(key)) return [];
 	const chain = chains[key];
 	if (!Array.isArray(chain)) return [];
-	return chain.filter(entry => typeof entry === "string");
+	const entries = chain.filter(entry => typeof entry === "string");
+	if (!entries.some(isRetryFallbackWildcardKey)) return entries;
+	const primary =
+		parseRetryFallbackSelector(selector, context.modelLookup) ??
+		(model
+			? parseRetryFallbackSelector(
+					formatModelSelectorValue(formatModelString(model), undefined),
+					context.modelLookup,
+				)
+			: undefined);
+	return entries.map(entry =>
+		isRetryFallbackWildcardKey(entry) ? (parseRetryFallbackChainEntry(context, entry, primary)?.raw ?? entry) : entry,
+	);
 }
 
 /** Ordered backups first, then the primary's model-key chain, earlier entry wins. */

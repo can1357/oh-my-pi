@@ -79,9 +79,13 @@ import { SKILL_PROMPT_MESSAGE_TYPE } from "../session/messages";
 import { hasConversationalHistory, SessionManager } from "../session/session-manager";
 import { truncateTail } from "@oh-my-pi/pi-tui/tools/streaming-output";
 import {
+	AUTO_THINKING,
 	type ConfiguredThinkingLevel,
+	concreteThinkingLevel,
 	prewalkWouldBeNoop,
+	resolveProvisionalAutoLevel,
 	resolveTaskEffortLevel,
+	resolveThinkingLevelForModel,
 	type TaskEffort,
 } from "@oh-my-pi/pi-tui/thinking";
 import type { ContextFileEntry, ToolSession } from "../tools";
@@ -147,6 +151,7 @@ import {
 import { cfgDisabledProviders } from "../config/model-settings";
 import {
 	chainAfterOrderedBackups,
+	formatRetryFallbackSelector,
 	getRetryFallbackRole,
 	installRetryFallbackRole,
 	markOrderedSubagentRole,
@@ -308,10 +313,20 @@ function installSubagentRetryFallbackChain(args: {
 	candidates: SubagentRetryFallbackCandidate[];
 	inheritedFallbackChain: string[] | undefined;
 	model: Model<Api> | undefined;
+	effectiveThinkingLevel: ConfiguredThinkingLevel | undefined;
 	modelRegistry: ModelRegistry;
 	authFallbackUsed: boolean;
 }): string | undefined {
-	const { settings, id, candidates, inheritedFallbackChain, model, modelRegistry, authFallbackUsed } = args;
+	const {
+		settings,
+		id,
+		candidates,
+		inheritedFallbackChain,
+		model,
+		effectiveThinkingLevel,
+		modelRegistry,
+		authFallbackUsed,
+	} = args;
 	if (!model || authFallbackUsed || candidates.length === 0) return undefined;
 
 	const selectedIndex = candidates.findIndex(
@@ -320,12 +335,21 @@ function installSubagentRetryFallbackChain(args: {
 	if (selectedIndex < 0) return undefined;
 	const fallbackSelectors = candidates.slice(selectedIndex + 1).map(candidate => candidate.selector);
 	const selected = candidates[selectedIndex];
+	// The chain lookup keys on the selector the child session will actually run
+	// this model at (effort applied), not the bare pattern selector, so an
+	// effort-keyed `retry.fallbackChains` entry resolves as turn recovery does.
+	const primarySelector = formatRetryFallbackSelector(
+		selected.model,
+		effectiveThinkingLevel === AUTO_THINKING
+			? resolveProvisionalAutoLevel(selected.model)
+			: resolveThinkingLevelForModel(selected.model, concreteThinkingLevel(effectiveThinkingLevel)),
+	);
 	// A single model reuses its inherited chain. Ordered backups stay first, then the model-key chain.
 	const fallbackChain =
 		fallbackSelectors.length > 0
 			? chainAfterOrderedBackups(
 					fallbackSelectors,
-					resolvePrimaryModelKeyChain(settings, modelRegistry, selected.selector, selected.model),
+					resolvePrimaryModelKeyChain(settings, modelRegistry, primarySelector, selected.model),
 				)
 			: inheritedFallbackChain;
 	if (
@@ -4161,24 +4185,6 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 								resolvedModel,
 								inheritedSubagentServiceTiers(settings, options.parentServiceTier),
 							);
-			const retryFallbackRole = installSubagentRetryFallbackChain({
-				settings: subagentSettings,
-				id,
-				candidates: resolveSubagentRetryFallbackCandidates(modelPatterns, modelRegistry, subagentSettings),
-				inheritedFallbackChain: inheritedRetryFallbackChain,
-				model,
-				modelRegistry,
-				authFallbackUsed,
-			});
-			if (retryFallbackRole) {
-				logger.debug("Configured subagent runtime model fallback chain", {
-					role: retryFallbackRole,
-					requested: modelPatterns,
-				});
-			}
-			if (model?.contextWindow && model.contextWindow > 0) {
-				progress.contextWindow = model.contextWindow;
-			}
 			// Caller-requested coarse effort maps onto the resolved model's
 			// supported range, then respects the operator-configured ceiling.
 			// Undefined (no effort, or no controllable effort surface) falls
@@ -4204,6 +4210,25 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			// pattern-derived level.
 			const effectiveThinkingLevel =
 				effortLevel ?? (explicitThinkingLevel ? resolvedThinkingLevel : (thinkingLevel ?? resolvedThinkingLevel));
+			const retryFallbackRole = installSubagentRetryFallbackChain({
+				settings: subagentSettings,
+				id,
+				candidates: resolveSubagentRetryFallbackCandidates(modelPatterns, modelRegistry, subagentSettings),
+				inheritedFallbackChain: inheritedRetryFallbackChain,
+				model,
+				effectiveThinkingLevel,
+				modelRegistry,
+				authFallbackUsed,
+			});
+			if (retryFallbackRole) {
+				logger.debug("Configured subagent runtime model fallback chain", {
+					role: retryFallbackRole,
+					requested: modelPatterns,
+				});
+			}
+			if (model?.contextWindow && model.contextWindow > 0) {
+				progress.contextWindow = model.contextWindow;
+			}
 			resolvedAt = performance.now();
 			const effectiveCwd = worktree ?? cwd;
 			const sessionManagerPromise = sessionFile

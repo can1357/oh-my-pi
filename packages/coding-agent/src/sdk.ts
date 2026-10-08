@@ -202,6 +202,7 @@ import {
 	chainAfterOrderedBackups,
 	expandDefaultRetryFallbackChains,
 	findRetryFallbackCandidates,
+	formatRetryFallbackSelector,
 	installRetryFallbackRole,
 	markOrderedSubagentRole,
 	resolvePrimaryModelKeyChain,
@@ -3053,9 +3054,15 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					}
 				}
 				if (!authFallbackUsed && options.modelPatternFallbackRole) {
-					const primarySelector = formatModelSelectorValue(
-						formatModelStringWithRouting(primary.model),
-						primary.thinkingLevel,
+					// Key the model-key chain on the primary's effective selector (its
+					// thinking/effort applied), so an effort-keyed entry resolves the
+					// same way turn recovery resolves the live selector.
+					const primaryLevel = pickInitialThinkingLevel(primary.model);
+					const primarySelector = formatRetryFallbackSelector(
+						primary.model,
+						primaryLevel === AUTO_THINKING
+							? resolveProvisionalAutoLevel(primary.model)
+							: resolveThinkingLevelForModel(primary.model, concreteThinkingLevel(primaryLevel)),
 					);
 					const seenSelectors = new Set<string>([primarySelector]);
 					const fallbackSelectors: string[] = [];
