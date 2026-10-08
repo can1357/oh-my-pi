@@ -1831,7 +1831,8 @@ describe("yield Responses wire fixtures", () => {
 			expect(codex).toHaveLength(1);
 			expect(validateJsonSchemaValue(fixture.outputSchema, fixture.whole)).toEqual({ success: true, issues: [] });
 			if (fixture.item) {
-				const validator = buildOutputValidator(fixture.outputSchema);
+				const { validator } = buildOutputValidator(fixture.outputSchema);
+				if (!validator) throw new Error("Missing constrained fixture validator");
 				expect(validator.isSectionItem(fixture.item.label, fixture.item.data, 0)).toBe(true);
 			}
 
