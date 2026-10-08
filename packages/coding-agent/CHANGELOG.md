@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 - `before_subagent_spawn` now includes the assignment, shared context, task-only solution space, baseline thinking level, and a per-handler abort signal.
+- `before_subagent_spawn` reports model and effort locks from per-agent model overrides and explicit effort, and ignores a hook model when the model is locked.
 
 ## [18.8.4] - 2026-10-08
 

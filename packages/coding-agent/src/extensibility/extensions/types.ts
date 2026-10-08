@@ -866,6 +866,13 @@ export interface BeforeSubagentSpawnEvent {
 	/** Baseline concrete thinking level. Omitted when the baseline is `auto` or unset. */
 	thinkingLevel?: ThinkingLevel;
 	/**
+	 * True when `task.agentModelOverrides` has a non-empty entry for this agent.
+	 * The internal `StructuredSubagentRequest.model` (SDK callers) is not a lock.
+	 */
+	modelLocked: boolean;
+	/** True when `modelLocked` or the caller set `effort`. Hook effort results are ignored. */
+	effortLocked: boolean;
+	/**
 	 * Aborts when this spawn is cancelled or this handler's timeout expires.
 	 * The runner sets a fresh signal per handler.
 	 */
