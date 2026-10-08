@@ -819,4 +819,49 @@ describe("devin catalog pricing", () => {
 		const gpt55 = buildModel(spec("gpt-5-5", { input: 5, output: 30, cacheRead: 0.5, cacheWrite: 0 }));
 		expect(gpt55.cost.cacheWrite).toBe(0);
 	});
+
+	it("derives a GPT-6 Fast lane's long-context tier from its own price", () => {
+		const fast = buildModel(spec("gpt-6-sol-fast", { input: 4, output: 20, cacheRead: 0.4, cacheWrite: 0 }));
+		expect(fast.cost.longContext).toEqual({
+			inputThreshold: 272_000,
+			input: 8,
+			output: 30,
+			cacheRead: 0.8,
+			cacheWrite: 10,
+		});
+	});
+
+	it("tiers the standard GPT-5.6 lanes but not their undocumented Fast lanes", () => {
+		const standard = buildModel(spec("gpt-5-6-sol-high", { input: 4, output: 20, cacheRead: 0.4, cacheWrite: 0 }));
+		expect(standard.cost.longContext).toEqual({
+			inputThreshold: 272_000,
+			input: 8,
+			output: 30,
+			cacheRead: 0.8,
+			cacheWrite: 10,
+		});
+		const fast = buildModel(
+			spec("gpt-5-6-sol-high-priority", { input: 8, output: 40, cacheRead: 0.8, cacheWrite: 0 }),
+		);
+		expect(fast.cost.longContext).toBeUndefined();
+	});
+
+	it("doubles every Grok leg but raises Gemini Pro output only 1.5x above 200K", () => {
+		const grok = buildModel(spec("grok-4-7", { input: 2, output: 6, cacheRead: 0.5, cacheWrite: 0 }));
+		expect(grok.cost.longContext).toEqual({
+			inputThreshold: 200_000,
+			input: 4,
+			output: 12,
+			cacheRead: 1,
+			cacheWrite: 0,
+		});
+		const gemini = buildModel(spec("gemini-3-1-pro", { input: 2, output: 12, cacheRead: 0.2, cacheWrite: 0 }));
+		expect(gemini.cost.longContext).toEqual({
+			inputThreshold: 200_000,
+			input: 4,
+			output: 18,
+			cacheRead: 0.4,
+			cacheWrite: 0,
+		});
+	});
 });

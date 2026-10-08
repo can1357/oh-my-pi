@@ -107,4 +107,68 @@ provider "devin" {
 	models "adaptive" {
 		cache-write-rate 1.0
 	}
+
+	// Long-context tiers come from the same page's `longContextFamilies`,
+	// which no Devin endpoint carries. A tier bills the whole request once
+	// total prompt tokens (uncached input, cache reads, and cache writes)
+	// exceed the threshold. GPT and Gemini Pro tiers double input and cache
+	// rates and raise output 1.5x; Grok doubles every leg. Cache writes
+	// follow `cache-write-rate`.
+	class "openai" {
+		family "gpt" {
+			// Every GPT-6 lane, Fast (`-priority`) lanes included.
+			revision ">=6" {
+				long-context-cost {
+					input-threshold 272000
+					multiplier 2.0
+					output-multiplier 1.5
+				}
+			}
+		}
+	}
+	// residue: GPT-5.4 through 5.6 tiers cover only the standard lanes; the
+	// Fast (`-priority`) lanes and GPT-5.4 mini share their class rank.
+	models "gpt-5-4" "gpt-5-4-none" "gpt-5-4-low" "gpt-5-4-medium" "gpt-5-4-high" "gpt-5-4-xhigh" \
+		"gpt-5-5" "gpt-5-5-none" "gpt-5-5-low" "gpt-5-5-medium" "gpt-5-5-high" "gpt-5-5-xhigh" \
+		"gpt-5-6-sol" "gpt-5-6-sol-none" "gpt-5-6-sol-low" "gpt-5-6-sol-medium" "gpt-5-6-sol-high" \
+		"gpt-5-6-sol-xhigh" "gpt-5-6-sol-max" \
+		"gpt-5-6-terra" "gpt-5-6-terra-none" "gpt-5-6-terra-low" "gpt-5-6-terra-medium" "gpt-5-6-terra-high" \
+		"gpt-5-6-terra-xhigh" "gpt-5-6-terra-max" \
+		"gpt-5-6-luna" "gpt-5-6-luna-none" "gpt-5-6-luna-low" "gpt-5-6-luna-medium" "gpt-5-6-luna-high" \
+		"gpt-5-6-luna-xhigh" "gpt-5-6-luna-max" {
+		long-context-cost {
+			input-threshold 272000
+			multiplier 2.0
+			output-multiplier 1.5
+		}
+	}
+	class "gemini" {
+		family "pro" {
+			revision ">=2.5" {
+				long-context-cost {
+					input-threshold 200000
+					multiplier 2.0
+					output-multiplier 1.5
+				}
+			}
+		}
+	}
+	// residue: Gemini 2.5 Pro's legacy uid carries no model identity.
+	models "MODEL_GOOGLE_GEMINI_2_5_PRO" {
+		long-context-cost {
+			input-threshold 200000
+			multiplier 2.0
+			output-multiplier 1.5
+		}
+	}
+	class "xai" {
+		family "grok" {
+			revision ">=4.5" {
+				long-context-cost {
+					input-threshold 200000
+					multiplier 2.0
+				}
+			}
+		}
+	}
 }
