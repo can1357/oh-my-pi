@@ -352,7 +352,6 @@ describe("Cloud Code Assist Claude tool schema conversion", () => {
 			type: "object",
 			properties: {
 				mode: { type: "string", enum: ["read", "read"] },
-				tags: { type: "array", items: { type: "string" }, uniqueItems: "true" },
 			},
 			required: ["mode"],
 		} as unknown;

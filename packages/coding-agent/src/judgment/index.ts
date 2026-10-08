@@ -153,7 +153,8 @@ interface RegistryWithRejections extends ModelRegistry {
 
 /**
  * {@link judgeRoleChain}, reused for {@link CANDIDATE_TTL_MS} across judges over the same settings and registry.
- * A settings change (e.g. a new judge role) resolves afresh, so a judge never disagrees with {@link hasNativeJudge}.
+ * A settings change (e.g. a new judge role) resolves afresh; registry or credential changes still wait out the TTL,
+ * so {@link hasNativeJudge} (uncached) can briefly see a different chain after a login or discovery change.
  */
 function cachedJudgeRoleChain(settings: Settings, registry: RegistryWithRejections): RoleChainCandidate[] {
 	const now = Date.now();

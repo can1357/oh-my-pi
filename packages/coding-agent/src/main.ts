@@ -723,6 +723,10 @@ async function runInteractiveMode(
 			}
 		}
 
+		if (!resuming && joinLink === undefined) {
+			await mode.maybeAutoCreateWorktree();
+		}
+
 		// `omp join <link>`: dispatch through the same builtin path as a typed
 		// `/join` so collab guards and error rendering stay in one place.
 		if (joinLink !== undefined) {
@@ -872,33 +876,37 @@ async function moveMissingCwdSessionIfNeeded(
 		return { status: "not-needed" };
 	}
 
-	const movePromptResult = await askToMoveSession(session);
-	if (movePromptResult === "unavailable") {
-		throw new SessionResolutionError(
-			`Session "${sessionArg}" belongs to a directory that no longer exists (${sourceCwd}); run interactively to move it into the current project.`,
-		);
+	// A removed worktree of this checkout's repository: its session belongs here, no question to ask.
+	if (!(await SessionManager.isFromRemovedWorktree(session, cwd, sessionDir))) {
+		const movePromptResult = await askToMoveSession(session);
+		if (movePromptResult === "unavailable") {
+			throw new SessionResolutionError(
+				`Session "${sessionArg}" belongs to a directory that no longer exists (${sourceCwd}); run interactively to move it into the current project.`,
+			);
+		}
+		if (movePromptResult === "declined") {
+			return { status: "declined" };
+		}
 	}
-	if (movePromptResult === "declined") {
-		return { status: "declined" };
-	}
+	return { status: "moved", manager: await openRelocatedSession(session, cwd, sessionDir) };
+}
 
-	// Open anchored at the (now-missing) recorded cwd: `open` otherwise falls back
-	// to the launch cwd, which would make the `moveTo` below a no-op whenever the
-	// move target equals the current project dir. moveTo never chdirs, so the
-	// stale cwd is only a relocation source, not a directory we enter.
-	const manager = await SessionManager.open(session.path, sessionDir, undefined, { initialCwd: sourceCwd });
+/** {@link SessionManager.openRelocated} into `cwd`, reporting a live-writer refusal as a CLI error. */
+async function openRelocatedSession(
+	session: SessionInfo,
+	cwd: string,
+	sessionDir: string | undefined,
+): Promise<SessionManager> {
 	try {
-		await manager.moveTo(cwd, sessionDir);
+		return await SessionManager.openRelocated(session.path, session.cwd, cwd, sessionDir);
 	} catch (err) {
 		if (!(err instanceof SessionMoveRefusedError)) throw err;
-		await manager.close();
 		// Its directory is gone, so it cannot be resumed in place either.
 		throw new SessionResolutionError(
 			err.message,
 			"Close the session in the other omp process, then resume it again.",
 		);
 	}
-	return { status: "moved", manager };
 }
 
 type ResumedProjectResult = { cwd: string; chdirFailed?: string };
@@ -2128,8 +2136,16 @@ export async function runRootCommand(
 				stopStartupWatchdog();
 				process.exit(0);
 			}
-			sessionManager = await SessionManager.open(selected.path);
+			try {
+				sessionManager = (await SessionManager.isFromRemovedWorktree(selected, cwd, parsedArgs.sessionDir))
+					? await openRelocatedSession(selected, cwd, parsedArgs.sessionDir)
+					: await SessionManager.open(selected.path);
+			} catch (error: unknown) {
+				if (error instanceof SessionResolutionError) exitForSessionResolutionError(error);
+				throw error;
+			}
 			const previousCwd = cwd;
+			// A relocated session's `selected.cwd` is the removed worktree: missing, so the launch cwd stays.
 			const recordedCwd = selected.cwd || sessionManager.getRecordedCwd() || sessionManager.getCwd();
 			const resumedProject = await switchToResumedProject(
 				recordedCwd,
