@@ -836,8 +836,7 @@ export class MCPCommandController {
 			cancellationRequested = true;
 			if (!flowAbort.signal.aborted) flowAbort.abort(new MCPOAuthCancelledError(reason));
 		};
-		const originalOnEscape = this.ctx.editor.onEscape;
-		this.ctx.editor.onEscape = () => requestCancellation(MCP_OAUTH_USER_CANCEL_REASON);
+		const releaseEscape = this.#claimOAuthEscape(() => requestCancellation(MCP_OAUTH_USER_CANCEL_REASON));
 		const externalSignal = opts?.abortSignal;
 		const onExternalAbort = (): void => {
 			const reason = externalSignal?.reason;
@@ -958,7 +957,7 @@ export class MCPCommandController {
 			}
 			throw new Error(`OAuth authentication failed: ${errorMsg}`);
 		} finally {
-			this.ctx.editor.onEscape = originalOnEscape;
+			releaseEscape();
 			externalSignal?.removeEventListener("abort", onExternalAbort);
 			manualInputClaim?.clear("Manual MCP OAuth input cleared");
 		}
@@ -1145,6 +1144,21 @@ export class MCPCommandController {
 	 */
 	#isEffectivelyDisabled(name: string, config: MCPServerConfig): boolean {
 		return config.enabled === false && !this.ctx.mcpManager?.getServerConfig(name);
+	}
+
+	/**
+	 * Install an OAuth flow's Escape handler and return its release. Every MCP
+	 * OAuth path (add, wizard, reauth) goes through here so supersession across
+	 * paths keeps one consistent owner; see {@link mcpOAuthEscapeHandlers}.
+	 */
+	#claimOAuthEscape(onEscape: () => void): () => void {
+		const current = this.ctx.editor.onEscape;
+		const displaced = current && mcpOAuthEscapeHandlers.has(current) ? mcpOAuthEscapeHandlers.get(current) : current;
+		mcpOAuthEscapeHandlers.set(onEscape, displaced);
+		this.ctx.editor.onEscape = onEscape;
+		return () => {
+			if (this.ctx.editor.onEscape === onEscape) this.ctx.editor.onEscape = displaced;
+		};
 	}
 
 	async #waitForServerConnectionWithAnimation(
@@ -1661,16 +1675,11 @@ export class MCPCommandController {
 		options: { authChallenge?: MCPAuthChallenge; reload: boolean },
 	): Promise<MCPServerActionResult> {
 		const flowAbort = new AbortController();
-		const currentOnEscape = this.ctx.editor.onEscape;
-		const originalOnEscape =
-			currentOnEscape && mcpOAuthEscapeHandlers.has(currentOnEscape)
-				? mcpOAuthEscapeHandlers.get(currentOnEscape)
-				: currentOnEscape;
-		const onEscape = () => flowAbort.abort(new MCPOAuthCancelledError(MCP_OAUTH_USER_CANCEL_REASON));
-		mcpOAuthEscapeHandlers.set(onEscape, originalOnEscape);
+		const releaseEscape = this.#claimOAuthEscape(() =>
+			flowAbort.abort(new MCPOAuthCancelledError(MCP_OAUTH_USER_CANCEL_REASON)),
+		);
 		const manualInput = this.ctx.oauthManualInput;
 		let manualInputClaim: { promise: Promise<string>; clear: (reason?: string) => void } | undefined;
-		this.ctx.editor.onEscape = onEscape;
 		const interaction: MCPInteractiveOAuthInteraction = {
 			onAuthorization: info => {
 				const block = new TranscriptBlock();
@@ -1733,7 +1742,7 @@ export class MCPCommandController {
 			]);
 			return result;
 		} finally {
-			if (this.ctx.editor.onEscape === onEscape) this.ctx.editor.onEscape = originalOnEscape;
+			releaseEscape();
 			manualInputClaim?.clear("Manual MCP OAuth input cleared");
 		}
 	}

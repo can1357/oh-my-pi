@@ -930,7 +930,10 @@ describe("/mcp auth commands", () => {
 		});
 	});
 
-	test("Esc still cancels a replacement reauth after the superseded flow ends", async () => {
+	test.each([
+		["reauth", "/mcp reauth envserver"],
+		["URL quick-add", `/mcp add quickserver --url ${EXPANDED_SERVER_URL}`],
+	])("Esc still cancels a replacement reauth after a superseded %s flow ends", async (_kind, firstCommand) => {
 		const authStorage = freshAuthStorage();
 		await authStorage.credentials.reload();
 		vi.spyOn(mcpClient, "connectToServer").mockRejectedValue(AUTH_ERROR);
@@ -950,7 +953,7 @@ describe("/mcp auth commands", () => {
 		const preLogin = () => {};
 		editor.onEscape = preLogin;
 
-		const first = controller.handle("/mcp reauth envserver");
+		const first = controller.handle(firstCommand);
 		await loginEntered.promise;
 		const firstEscape = editor.onEscape;
 		loginEntered = Promise.withResolvers<void>();
