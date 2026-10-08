@@ -91,7 +91,7 @@ describe("buildOutputValidator", () => {
 		expect(validator?.validate({ name: null, receipt: null }).success).toBe(false);
 	});
 
-	it("exposes per-label sub-validators that accept items (not whole arrays) for elements properties", () => {
+	it("exposes per-label validators that accept single items and batches for elements properties", () => {
 		const { validator } = buildOutputValidator({
 			properties: {
 				overall_correctness: { enum: ["correct", "incorrect"] },
@@ -114,9 +114,10 @@ describe("buildOutputValidator", () => {
 		// String property: any string passes, non-strings fail.
 		expect(sections?.get("explanation")?.("ok").success).toBe(true);
 		expect(sections?.get("explanation")?.(123).success).toBe(false);
-		// Array property: each section validates ONE item against the items schema, not the whole array.
+		// Array sections validate item contents; finalization checks the assembled array.
 		expect(sections?.get("findings")?.({ title: "t", body: "b" }).success).toBe(true);
-		expect(sections?.get("findings")?.([{ title: "t", body: "b" }]).success).toBe(false);
+		expect(sections?.get("findings")?.([{ title: "t", body: "b" }]).success).toBe(true);
+		expect(sections?.get("findings")?.([{ title: "t", body: 7 }]).success).toBe(false);
 		// Unknown labels have no validator so user-defined sections stay loose.
 		expect(sections?.has("scratchpad")).toBe(false);
 	});

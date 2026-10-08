@@ -177,4 +177,34 @@ describe("task renderer: malformed yield slot (#1987)", () => {
 		expect(text).toContain("Findings:");
 		expect(text).toContain("Handle null response");
 	});
+
+	it("renders each finding from a batch and reads independently mapped verdict fields", async () => {
+		const first = {
+			title: "First batched finding",
+			body: "A synthetic first failure.",
+			priority: 1,
+			confidence: 0.8,
+			file_path: "src/first.ts",
+			line_start: 1,
+			line_end: 1,
+		};
+		const second = { ...first, title: "Second batched finding", file_path: "src/second.ts" };
+		const text = await renderResultText({
+			yield: [
+				{
+					type: ["findings", "overall_correctness", "explanation", "confidence"],
+					data: {
+						findings: [first, second],
+						overall_correctness: "incorrect",
+						explanation: "Two synthetic failures.",
+						confidence: 0.8,
+					},
+					status: "success",
+				},
+			],
+		});
+		expect(text).toContain("Patch is incorrect");
+		expect(text).toContain("First batched finding");
+		expect(text).toContain("Second batched finding");
+	});
 });

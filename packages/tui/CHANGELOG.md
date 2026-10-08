@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed incremental task results nesting array batches and mixing independently labelled section values.
+
 ## [18.8.4] - 2026-10-08
 
 ### Changed

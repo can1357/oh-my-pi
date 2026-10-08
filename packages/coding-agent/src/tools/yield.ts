@@ -18,9 +18,14 @@ import {
 	sanitizeSchemaForStrictMode,
 	tryEnforceStrictSchema,
 } from "@oh-my-pi/pi-ai/utils/schema";
+import {
+	resolveYieldSectionValue,
+	type YieldSectionShapes,
+} from "@oh-my-pi/pi-tui/tools/task-yield-assembly";
 import { prompt } from "@oh-my-pi/pi-utils";
 import yieldDescription from "../prompts/tools/yield.md" with { type: "text" };
 import { subprocessToolRegistry } from "../task/subprocess-tool-registry";
+import { yieldSectionShapes } from "../task/yield-assembly";
 import type { WorkPoolYieldItem } from "../task/workpool-yield";
 import type { ToolSession } from ".";
 import { buildOutputValidator, formatAllValidationIssues } from "./output-schema-validator";
@@ -185,22 +190,28 @@ function formatYieldLabels(labels: readonly string[]): string {
 }
 
 /**
- * Expand a plain-object `data` schema into a strict union that ALSO accepts each
- * top-level section value (and array element) on its own. Agents that yield
- * incrementally (`type: ["findings"]`, `type: ["confidence"]`, …) submit one
- * section per call, so `data` is a single finding object or a lone verdict value
- * — never the full output object. Without this, strict-mode providers constrain
- * `data` to the whole schema and reject/—under constrained decoding—forbid the
- * partial. Every branch is a typed sub-schema, so strict representability holds;
- * the full-output object stays the first (terminal) branch. The assembled whole
- * is still validated against the full schema at finalization. Non-object / loose
- * schemas are returned unchanged.
+ * Parameter data admits the full terminal output, direct section items/batches,
+ * and multi-label mappings. Properties from composition branches participate too.
+ * Runtime validation still distinguishes terminal and incremental submissions.
  */
 function withSectionVariants(dataSchema: Record<string, unknown>): Record<string, unknown> {
-	if (dataSchema.type !== "object") return dataSchema;
-	const props = dataSchema.properties;
-	if (props === null || typeof props !== "object") return dataSchema;
-	const propRecord = props as Record<string, unknown>;
+	const sectionProperties: Record<string, unknown> = {};
+	const collect = (schema: Record<string, unknown>): void => {
+		if (isPlainRecord(schema.properties)) {
+			for (const name in schema.properties) {
+				const property = schema.properties[name];
+				const prior = sectionProperties[name];
+				sectionProperties[name] = prior === undefined ? property : { anyOf: [prior, property] };
+			}
+		}
+		for (const keyword of ["allOf", "oneOf", "anyOf"] as const) {
+			const variants = schema[keyword];
+			if (!Array.isArray(variants)) continue;
+			for (const variant of variants) if (isPlainRecord(variant)) collect(variant);
+		}
+	};
+	collect(dataSchema);
+	if (Object.keys(sectionProperties).length === 0) return dataSchema;
 	const { description, ...fullWithoutDescription } = dataSchema;
 	const branches: unknown[] = [];
 	const seen = new Set<string>();
@@ -212,15 +223,35 @@ function withSectionVariants(dataSchema: Record<string, unknown>): Record<string
 		branches.push(schema);
 	};
 	add(fullWithoutDescription);
-	for (const name in propRecord) {
-		const prop = propRecord[name];
+	const mappingProperties: Record<string, unknown> = {};
+	for (const name in sectionProperties) {
+		const prop = sectionProperties[name];
 		add(prop);
-		if (prop !== null && typeof prop === "object") {
-			const propObj = prop as Record<string, unknown>;
-			if (propObj.type === "array") add(propObj.items);
-		}
+		const itemVariants: unknown[] = [];
+		const collectItems = (schema: unknown): void => {
+			if (!isPlainRecord(schema)) return;
+			if (schema.type === "array" && schema.items !== undefined) {
+				add(schema.items);
+				itemVariants.push(schema.items);
+				return;
+			}
+			for (const keyword of ["allOf", "oneOf", "anyOf"] as const) {
+				const variants = schema[keyword];
+				if (Array.isArray(variants)) for (const variant of variants) collectItems(variant);
+			}
+		};
+		collectItems(prop);
+		mappingProperties[name] = itemVariants.length > 0 ? { anyOf: [prop, ...itemVariants] } : prop;
 	}
 	if (branches.length <= 1) return dataSchema;
+	add(
+		sanitizeSchemaForStrictMode({
+			type: "object",
+			properties: mappingProperties,
+			required: [],
+			additionalProperties: false,
+		}),
+	);
 	return description !== undefined ? { description, anyOf: branches } : { anyOf: branches };
 }
 
@@ -297,6 +328,7 @@ export class YieldTool implements AgentTool<TSchema, YieldDetails> {
 	readonly #validateSection?: ReadonlyMap<string, (value: unknown) => JsonSchemaValidationResult>;
 	readonly #normalizeData?: (value: unknown) => unknown;
 	readonly #normalizeSection?: (label: string, value: unknown) => unknown;
+	readonly #sectionShapes?: YieldSectionShapes;
 	#rejectUnknownSections = false;
 	#knownSectionLabels: readonly string[] = [];
 	#isKnownSection?: (label: string) => boolean;
@@ -411,6 +443,7 @@ export class YieldTool implements AgentTool<TSchema, YieldDetails> {
 		this.#knownSectionLabels = knownSectionLabels;
 		this.#isKnownSection = isKnownSection;
 		this.#parameters = parameters;
+		if (validate) this.#sectionShapes = yieldSectionShapes(session.outputSchema);
 	}
 
 	/**
@@ -570,14 +603,22 @@ export class YieldTool implements AgentTool<TSchema, YieldDetails> {
 				useLastTurn = false;
 			}
 		}
-		const normalizeData = (value: unknown): unknown =>
-			workPoolItemId !== undefined
-				? value
-				: Array.isArray(yieldType) && yieldType.length === 1
-					? (this.#normalizeSection?.(yieldType[0], value) ?? value)
-					: !isIncremental
-						? (this.#normalizeData?.(value) ?? value)
-						: value;
+		const normalizeData = (value: unknown): unknown => {
+			if (workPoolItemId !== undefined) return value;
+			if (!isIncremental) return this.#normalizeData?.(value) ?? value;
+			const labels = yieldType as string[];
+			if (labels.length === 1) return this.#normalizeSection?.(labels[0], value) ?? value;
+			if (!isPlainRecord(value) || !labels.every(label => Object.hasOwn(value, label))) return value;
+			let normalized: Record<string, unknown> | undefined;
+			for (const label of labels) {
+				const section = resolveYieldSectionValue(value, labels, label, this.#sectionShapes);
+				const result = this.#normalizeSection?.(label, section) ?? section;
+				if (result === section) continue;
+				normalized ??= { ...value };
+				normalized[label] = result;
+			}
+			return normalized ?? value;
+		};
 		if (status === "success" && data !== undefined) data = normalizeData(data);
 		if (status === "success" && !useLastTurn) {
 			const validateData = (value: unknown): JsonSchemaValidationResult | undefined =>
@@ -690,12 +731,19 @@ export class YieldTool implements AgentTool<TSchema, YieldDetails> {
 	 * handled separately by `#unknownIncrementalLabels` and never reach this validator.
 	 */
 	#validateIncrementalSection(labels: string[], data: unknown): JsonSchemaValidationResult | undefined {
+		if (
+			this.#validate &&
+			labels.length > 1 &&
+			(!isPlainRecord(data) || !labels.every(label => Object.hasOwn(data, label)))
+		) {
+			throw new Error("Multi-label schema sections require an object mapping each label to its own value");
+		}
 		const subValidators = this.#validateSection;
 		if (!subValidators || subValidators.size === 0) return undefined;
 		for (const label of labels) {
 			const sub = subValidators.get(label);
 			if (!sub) continue;
-			const parsed = sub(data);
+			const parsed = sub(resolveYieldSectionValue(data, labels, label, this.#sectionShapes));
 			if (!parsed.success) return parsed;
 		}
 		return undefined;

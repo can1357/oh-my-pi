@@ -2,11 +2,14 @@ import type { YieldItem } from "./task";
 
 /**
  * Output-schema shape of each declared top-level property, keyed by incremental yield label.
- * `array` sections accumulate into a list (even a lone yield); `scalar` sections keep the
- * latest yield, since the schema admits exactly one value. Undeclared labels accumulate
- * into a list only once repeated.
+ * `array` sections append items or batches into a list; `scalar` sections keep the
+ * latest value. The item validator preserves arrays that themselves constitute one
+ * valid item. Undeclared labels accumulate into a list only once repeated.
  */
-export type YieldSectionShapes = ReadonlyMap<string, "array" | "scalar">;
+export type YieldSectionShapes = ReadonlyMap<string, "array" | "scalar"> & {
+	/** Prefer a schema-valid array item over a batch when the input is ambiguous. */
+	readonly acceptsItem?: (label: string, value: unknown) => boolean;
+};
 
 /** Outcome of folding a run's yield calls into one payload, with provenance flags. */
 interface AssembledYieldResult {
@@ -18,6 +21,28 @@ interface AssembledYieldResult {
 
 function isIncrementalYieldType(type: YieldItem["type"]): type is string[] {
 	return Array.isArray(type) && type.length > 0;
+}
+
+/** Multiple schema-bound labels carry independent values; a single label always carries direct data. */
+export function resolveYieldSectionValue(
+	data: unknown,
+	labels: readonly string[],
+	label: string,
+	sectionShapes?: YieldSectionShapes,
+): unknown {
+	if (labels.length <= 1 || !sectionShapes || (!sectionShapes.acceptsItem && sectionShapes.size === 0)) return data;
+	if (data === null || typeof data !== "object" || Array.isArray(data)) return data;
+	const record = data as Record<string, unknown>;
+	return labels.every(key => Object.hasOwn(record, key)) ? record[label] : data;
+}
+
+/** Arrays satisfying the item schema retain their original single-item meaning. */
+export function isYieldSectionBatch(
+	value: unknown,
+	label: string,
+	acceptsItem?: YieldSectionShapes["acceptsItem"],
+): boolean {
+	return Array.isArray(value) && acceptsItem?.(label, value) !== true;
 }
 
 function getYieldLabels(type: YieldItem["type"]): string[] {
@@ -62,13 +87,18 @@ function appendYieldSection(
 	label: string,
 	value: unknown,
 	shape: "array" | "scalar" | undefined,
+	sectionShapes?: YieldSectionShapes,
 ): void {
 	const count = sectionCounts.get(label) ?? 0;
 	const existing = sections[label];
 	if (shape === "scalar") {
 		sections[label] = value;
+	} else if (shape === "array") {
+		const values = isYieldSectionBatch(value, label, sectionShapes?.acceptsItem) ? (value as unknown[]) : [value];
+		if (count === 0 || !Array.isArray(existing)) sections[label] = values.slice();
+		else for (const element of values) existing.push(element);
 	} else if (count === 0) {
-		sections[label] = shape === "array" ? [value] : value;
+		sections[label] = value;
 	} else if (Array.isArray(existing)) {
 		existing.push(value);
 	} else {
@@ -80,13 +110,11 @@ function appendYieldSection(
 /**
  * Assemble typed yield calls into the final payload consumed by schema validation.
  *
- * A non-empty array `type` contributes an incremental section and never decides
- * termination by itself. A string `type` with omitted `data` makes the last
- * assistant turn the raw terminal result. Other string-typed yields contribute
- * the terminal labelled section. Untyped terminal yields keep the historical
- * "last yield wins" behavior unless no terminal yield exists, in which case
- * accumulated typed sections finalize on idle. Repeated sections merge per
- * `sectionShapes` (see {@link YieldSectionShapes}).
+ * A non-empty array `type` contributes incremental sections without terminating.
+ * Single labels carry direct data; schema-bound multi-label mappings carry one value
+ * per label. Explicit terminal payloads replace accumulated sections wholesale.
+ * A data-less terminal keeps accumulated sections, or uses the last assistant text
+ * if no sections exist. Repeated sections merge per `sectionShapes`.
  */
 export function assembleYieldResult(
 	yieldItems: YieldItem[],
@@ -127,7 +155,8 @@ export function assembleYieldResult(
 		if (labels.length === 0) schemaOverridden ||= overridden;
 		for (const label of labels) {
 			const shape = sectionShapes?.get(label);
-			appendYieldSection(sections, sectionCounts, label, resolved.value, shape);
+			const value = resolveYieldSectionValue(resolved.value, labels, label, sectionShapes);
+			appendYieldSection(sections, sectionCounts, label, value, shape, sectionShapes);
 			if (shape === "scalar") {
 				if (overridden) overriddenScalars.add(label);
 				else overriddenScalars.delete(label);

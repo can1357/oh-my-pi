@@ -2,20 +2,7 @@
 import { dereferenceJsonSchema } from "@oh-my-pi/pi-ai/utils/schema";
 import type { YieldSectionShapes } from "@oh-my-pi/pi-tui/tools/task-yield-assembly";
 import { isRecord } from "@oh-my-pi/pi-utils";
-import { buildOutputValidator } from "../tools/output-schema-validator";
-
-/** True when `value` is a JSON-schema node whose instances are arrays. */
-function isArrayTypedSchema(value: unknown): boolean {
-	if (value === null || typeof value !== "object") return false;
-	const record = value as Record<string, unknown>;
-	if (record.type === "array") return true;
-	if (Array.isArray(record.type) && record.type.includes("array")) return true;
-	for (const key of ["anyOf", "oneOf", "allOf"] as const) {
-		const variants = record[key];
-		if (Array.isArray(variants) && variants.some(isArrayTypedSchema)) return true;
-	}
-	return false;
-}
+import { buildOutputValidator, isArraySectionSchema } from "../tools/output-schema-validator";
 
 /**
  * Record the shape of every property declared by `schema` or by its `allOf`/`oneOf`/`anyOf`
@@ -26,7 +13,7 @@ function collectPropertyShapes(schema: Record<string, unknown>, shapes: Map<stri
 	const properties = schema.properties;
 	if (isRecord(properties)) {
 		for (const key in properties) {
-			const shape = isArrayTypedSchema(properties[key]) ? "array" : "scalar";
+			const shape = isArraySectionSchema(properties[key]) ? "array" : "scalar";
 			const existing = shapes.get(key);
 			shapes.set(key, existing === undefined || existing === shape ? shape : "mixed");
 		}
@@ -57,7 +44,7 @@ export function yieldSectionShapes(outputSchema: unknown): YieldSectionShapes {
 	// Use the JTD-converted JSON Schema (matches what validation runs against):
 	// JTD `optionalProperties.findings.elements` becomes `properties.findings`
 	// with `type: "array"`, which raw `normalizeSchema` would not expose.
-	const { jsonSchema } = buildOutputValidator(outputSchema);
+	const { jsonSchema, validator } = buildOutputValidator(outputSchema);
 	if (jsonSchema === undefined) return shapes;
 	const dereferenced = dereferenceJsonSchema(jsonSchema);
 	const collected = new Map<string, "array" | "scalar" | "mixed">();
@@ -65,5 +52,5 @@ export function yieldSectionShapes(outputSchema: unknown): YieldSectionShapes {
 	for (const [key, shape] of collected) {
 		if (shape !== "mixed") shapes.set(key, shape);
 	}
-	return shapes;
+	return Object.assign(shapes, { acceptsItem: validator?.isSectionItem });
 }

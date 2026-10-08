@@ -14,6 +14,7 @@ import {
 	type JsonSchemaValidationResult,
 	validateJsonSchemaValue,
 } from "@oh-my-pi/pi-ai/utils/schema";
+import { isYieldSectionBatch } from "@oh-my-pi/pi-tui/tools/task-yield-assembly";
 import { isRecord } from "@oh-my-pi/pi-utils";
 import { LRUCache } from "@oh-my-pi/pi-utils/lru";
 import { jtdToJsonSchema, normalizeSchema } from "./jtd-to-json-schema";
@@ -24,15 +25,15 @@ export interface OutputValidator {
 	validate(value: unknown): JsonSchemaValidationResult;
 	/** Treat strict-provider nulls for optional non-nullable properties as omitted before validation and delivery. */
 	normalize(value: unknown): unknown;
-	/** Apply the same normalization to one incremental section (array sections carry one item). */
+	/** Apply the same normalization to one incremental section item or batch. */
 	normalizeSection(label: string, value: unknown): unknown;
+	/** Whether the payload is a single section item after strict optional-null normalization. */
+	isSectionItem(label: string, value: unknown): boolean;
 	/** Top-level required property names. Empty if the schema has no `required` array at root. */
 	readonly requiredFields: readonly string[];
 	/**
-	 * Per-label validators for incremental yields (`type: ["<label>"]`). Each entry validates the
-	 * `data` payload of a single section against the matching top-level property's sub-schema —
-	 * array-typed properties (e.g. `findings`) use the items schema since each yield contributes
-	 * one element, while scalar properties use the property schema directly.
+	 * Per-label validators for incremental yields. Array-typed properties accept
+	 * an item or a batch; whole-array constraints apply at finalization.
 	 */
 	readonly validateSection: ReadonlyMap<string, (value: unknown) => JsonSchemaValidationResult>;
 	/** Whether top-level schema closure makes unknown incremental yield labels invalid. */
@@ -128,9 +129,31 @@ function buildOutputValidatorUncached(schema: unknown): BuildOutputValidatorResu
 	const required = extractRequiredFields(labelSchema);
 	const sectionLabels = buildSectionLabelMetadata(labelSchema);
 	const sectionSchemas = buildSectionSchemas(labelSchema);
+	const sectionItemSchemas = new Map<string, unknown>();
+	const arraySections = new Set<string>();
+	for (const [label, schema] of sectionSchemas) {
+		sectionItemSchemas.set(label, buildSectionItemSchema(schema));
+		if (isArraySectionSchema(schema)) arraySections.add(label);
+	}
+	const acceptsSectionItem = (label: string, value: unknown): boolean => {
+		const itemSchema = sectionItemSchemas.get(label);
+		if (itemSchema === undefined) return false;
+		return validateJsonSchemaValue(itemSchema, normalizeStrictOutput(value, itemSchema)).success;
+	};
 	const sectionValidators = new Map<string, (value: unknown) => JsonSchemaValidationResult>();
 	for (const [label, sectionSchema] of sectionSchemas) {
-		sectionValidators.set(label, value => validateJsonSchemaValue(sectionSchema, value));
+		sectionValidators.set(label, value => {
+			const itemSchema = sectionItemSchemas.get(label);
+			if (!arraySections.has(label)) return validateJsonSchemaValue(sectionSchema, value);
+			if (!isYieldSectionBatch(value, label, acceptsSectionItem)) {
+				return validateJsonSchemaValue(itemSchema, value);
+			}
+			for (const item of value as unknown[]) {
+				const result = validateJsonSchemaValue(itemSchema, item);
+				if (!result.success) return result;
+			}
+			return { success: true, issues: [] };
+		});
 	}
 	return {
 		normalized,
@@ -139,7 +162,14 @@ function buildOutputValidatorUncached(schema: unknown): BuildOutputValidatorResu
 			requiredFields: required,
 			validate: value => validateJsonSchemaValue(jsonSchemaRecord, value),
 			normalize: value => normalizeStrictOutput(value, labelSchema),
-			normalizeSection: (label, value) => normalizeStrictOutput(value, sectionSchemas.get(label)),
+			normalizeSection: (label, value) =>
+				normalizeStrictOutput(
+					value,
+					arraySections.has(label) && !isYieldSectionBatch(value, label, acceptsSectionItem)
+						? sectionItemSchemas.get(label)
+						: sectionSchemas.get(label),
+				),
+			isSectionItem: acceptsSectionItem,
 			validateSection: sectionValidators,
 			rejectUnknownSections: sectionLabels.rejectUnknownSections,
 			knownSectionLabels: sectionLabels.labels,
@@ -148,34 +178,100 @@ function buildOutputValidatorUncached(schema: unknown): BuildOutputValidatorResu
 	};
 }
 
-/** Derive the schema for each incremental section, selecting array items when the section submits one element. */
+/** Preserve property schemas so incremental batches and single items share item validation. */
 function buildSectionSchemas(jsonSchema: Record<string, unknown>): ReadonlyMap<string, unknown> {
 	const schemas = new Map<string, unknown>();
 	const properties = jsonSchema.properties;
-	if (!isRecord(properties)) return schemas;
-	for (const label in properties) {
-		const raw = properties[label];
-		const propRecord = isRecord(raw) ? raw : undefined;
-		schemas.set(
-			label,
-			propRecord?.type === "array" && propRecord.items !== undefined && propRecord.items !== null
-				? propRecord.items
-				: raw,
-		);
+	if (isRecord(properties)) {
+		for (const label in properties) schemas.set(label, properties[label]);
+	}
+	for (const keyword of ["allOf", "oneOf", "anyOf"] as const) {
+		const branches = jsonSchema[keyword];
+		if (!Array.isArray(branches)) continue;
+		const variants = new Map<string, unknown>();
+		for (const branch of branches) {
+			if (!isRecord(branch)) continue;
+			for (const [label, schema] of buildSectionSchemas(branch)) {
+				const prior = variants.get(label);
+				variants.set(
+					label,
+					prior === undefined ? schema : { [keyword === "allOf" ? "allOf" : "anyOf"]: [prior, schema] },
+				);
+			}
+		}
+		for (const [label, schema] of variants) {
+			const prior = schemas.get(label);
+			schemas.set(label, prior === undefined ? schema : { allOf: [prior, schema] });
+		}
 	}
 	return schemas;
 }
 
+/** Array-declared section schema, shared by validation and consumer shape collection. */
+export function isArraySectionSchema(schema: unknown): boolean {
+	if (!isRecord(schema)) return false;
+	if (schema.type === "array" || (Array.isArray(schema.type) && schema.type.includes("array"))) return true;
+	for (const keyword of ["allOf", "oneOf", "anyOf"] as const) {
+		const branches = schema[keyword];
+		if (Array.isArray(branches) && branches.some(isArraySectionSchema)) return true;
+	}
+	return false;
+}
+
+/** Strip only the outer array layer; item objects/arrays keep their full nested schema. */
+function buildSectionItemSchema(schema: unknown): unknown {
+	if (!isRecord(schema)) return schema;
+	if (schema.type === "array" || (Array.isArray(schema.type) && schema.type.includes("array"))) {
+		return schema.items ?? {};
+	}
+	let itemSchema = schema;
+	for (const keyword of ["allOf", "oneOf", "anyOf"] as const) {
+		const branches = schema[keyword];
+		if (!Array.isArray(branches)) continue;
+		itemSchema = { ...itemSchema, [keyword === "oneOf" ? "anyOf" : keyword]: branches.map(buildSectionItemSchema) };
+		if (keyword === "oneOf") delete itemSchema.oneOf;
+	}
+	return itemSchema;
+}
+
+/** Required fields remain required across all conjuncts during optional-null normalization. */
+function collectConjunctRequiredFields(
+	schema: Record<string, unknown>,
+	inherited?: ReadonlySet<string>,
+): ReadonlySet<string> | undefined {
+	let fields = inherited;
+	let own: Set<string> | undefined;
+	if (Array.isArray(schema.required)) {
+		for (const field of schema.required) {
+			if (typeof field !== "string" || fields?.has(field)) continue;
+			own ??= new Set(fields);
+			own.add(field);
+			fields = own;
+		}
+	}
+	if (Array.isArray(schema.allOf)) {
+		for (const branch of schema.allOf) {
+			if (isRecord(branch)) fields = collectConjunctRequiredFields(branch, fields);
+		}
+	}
+	return fields;
+}
+
 // Remove provider-injected nulls only when the declared property schema rejects null.
-function normalizeStrictOutput(value: unknown, schema: unknown): unknown {
+function normalizeStrictOutput(value: unknown, schema: unknown, requiredFields?: ReadonlySet<string>): unknown {
 	if (!isRecord(schema)) return value;
 	if (Array.isArray(schema.anyOf) && schema.anyOf.length === 2) {
 		const [first, second] = schema.anyOf;
-		if (isRecord(first) && first.type === "null") return normalizeStrictOutput(value, second);
-		if (isRecord(second) && second.type === "null") return normalizeStrictOutput(value, first);
+		if (isRecord(first) && first.type === "null") {
+			return normalizeStrictOutput(value, second, collectConjunctRequiredFields(schema, requiredFields));
+		}
+		if (isRecord(second) && second.type === "null") {
+			return normalizeStrictOutput(value, first, collectConjunctRequiredFields(schema, requiredFields));
+		}
 	}
 	if (Array.isArray(schema.allOf)) {
-		for (const branch of schema.allOf) value = normalizeStrictOutput(value, branch);
+		if (isRecord(value)) requiredFields = collectConjunctRequiredFields(schema, requiredFields);
+		for (const branch of schema.allOf) value = normalizeStrictOutput(value, branch, requiredFields);
 	}
 	// For unions, accept a candidate only when it satisfies the entire original schema.
 	for (const keyword of ["oneOf", "anyOf"]) {
@@ -183,7 +279,7 @@ function normalizeStrictOutput(value: unknown, schema: unknown): unknown {
 		if (!Array.isArray(branches)) continue;
 		if (validateJsonSchemaValue(schema, value).success) return value;
 		for (const branch of branches) {
-			const candidate = normalizeStrictOutput(value, branch);
+			const candidate = normalizeStrictOutput(value, branch, collectConjunctRequiredFields(schema, requiredFields));
 			if (candidate !== value && validateJsonSchemaValue(schema, candidate).success) return candidate;
 		}
 	}
@@ -206,6 +302,7 @@ function normalizeStrictOutput(value: unknown, schema: unknown): unknown {
 		const propertySchema = schema.properties[key];
 		if (
 			value[key] === null &&
+			!requiredFields?.has(key) &&
 			!(Array.isArray(schema.required) && schema.required.includes(key)) &&
 			!validateJsonSchemaValue(propertySchema, null).success
 		) {

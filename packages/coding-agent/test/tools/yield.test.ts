@@ -3,7 +3,7 @@ import { Agent, type AgentEvent } from "@oh-my-pi/pi-agent-core";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { convertOpenAICodexResponsesTools } from "@oh-my-pi/pi-ai/providers/openai-codex-responses";
 import type { Model, Tool, ToolCall } from "@oh-my-pi/pi-ai/types";
-import { enforceStrictSchema } from "@oh-my-pi/pi-ai/utils/schema";
+import { enforceStrictSchema, validateJsonSchemaValue } from "@oh-my-pi/pi-ai/utils/schema";
 import { validateToolArguments } from "@oh-my-pi/pi-ai/utils/validation";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -1082,16 +1082,11 @@ describe("YieldTool", () => {
 		);
 		const dataSchema = getDataSchema(tool.parameters as unknown as Record<string, unknown>);
 		expect(tool.strict).toBe(true);
-		expect(Array.isArray(dataSchema.anyOf)).toBe(true);
-
-		const variants = dataSchema.anyOf as Array<Record<string, unknown>>;
-		const objectVariant = variants.find(variant => variant.type === "object");
-		const nullVariant = variants.find(variant => variant.type === "null");
-
-		expect(objectVariant).toBeDefined();
-		expect((objectVariant as Record<string, unknown>).properties).toEqual({ name: { type: "string" } });
-		expect((objectVariant as Record<string, unknown>).required).toEqual(["name"]);
-		expect(nullVariant).toEqual({ type: "null" });
+		const strictDataSchema = enforceStrictSchema(dataSchema);
+		expect(validateJsonSchemaValue(strictDataSchema, { name: "valid" }).success).toBe(true);
+		expect(validateJsonSchemaValue(strictDataSchema, null).success).toBe(true);
+		expect(validateJsonSchemaValue(strictDataSchema, { name: 7 }).success).toBe(false);
+		expect(validateJsonSchemaValue(strictDataSchema, {}).success).toBe(false);
 	});
 
 	it("converts mixed JTD and JSON Schema output definitions into provider-valid schemas", async () => {

@@ -2,6 +2,8 @@
 {{else}}Submit subagent output: `{ data: <your output> }` for success, `{ error: "message" }` for failure. Never both; never a bare payload outside `data`.
 
 Omit `type` for the usual single terminal structured result. Pass `type: ["section"]` to submit an incremental, non-terminal section that accumulates.
+{{#if hasOutputSchema}}Section labels MUST be accepted by the declared schema. For one array-valued section, submit one valid item or a batch of items; an array that itself matches the item schema remains one item. For a single label, put the section value directly in `data`; do not add a label wrapper. For multiple labels, provide an object mapping each label to its own value.
+{{/if}}
 {{/if}}
 {{#unless workPoolItems}}
 {{#if hasOutputSchema}}
