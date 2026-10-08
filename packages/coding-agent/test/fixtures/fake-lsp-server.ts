@@ -22,6 +22,31 @@ interface CloseDocumentParams {
 }
 
 let initializeCount = 0;
+let stopReading = false;
+// A helper subprocess that outlives this server, for the mux's tree-termination
+// coverage: it is reparented away when this process exits, so a descendant walk
+// rooted at the dead server can no longer find it.
+if (Bun.env.TEST_LSP_HELPER_PID_FILE) {
+	const helper = Bun.spawn(["sleep", "60"], { stdin: "ignore", stdout: "ignore", stderr: "ignore" });
+	helper.unref();
+	await Bun.write(Bun.env.TEST_LSP_HELPER_PID_FILE, String(helper.pid));
+}
+// A helper that itself has a child and is killed while the shutdown handshake
+// runs, so the grandchild is reparented out of reach of both the helper and
+// this server before the mux gets to terminate anything.
+let dyingHelperPid: number | null = null;
+if (Bun.env.TEST_LSP_GRANDCHILD_PID_FILE) {
+	const grandchildFile = Bun.env.TEST_LSP_GRANDCHILD_PID_FILE;
+	const helper = Bun.spawn(["/bin/sh", "-c", `sleep 60 & echo $! > ${grandchildFile}; exec sleep 60`], {
+		stdin: "ignore",
+		stdout: "ignore",
+		stderr: "ignore",
+	});
+	helper.unref();
+	dyingHelperPid = helper.pid;
+	while (!(await Bun.file(grandchildFile).exists())) await Bun.sleep(5);
+}
+let shutdownReceived = false;
 let processId: number | null = null;
 const didOpen: Record<string, number> = {};
 const didChange: Record<string, number[]> = {};
@@ -83,6 +108,10 @@ async function handleRequest(message: JsonRpcMessage): Promise<void> {
 			initializeCount++;
 			const params = message.params as { processId?: number | null } | undefined;
 			processId = params?.processId ?? null;
+			if (Bun.env.TEST_LSP_INITIALIZE_ERROR === "1") {
+				respond(id, undefined, { code: -32603, message: "fake initialize failure" });
+				break;
+			}
 			respond(id, {
 				capabilities: {},
 				serverInfo: { name: "fake-lsp", version: String(process.pid) },
@@ -110,21 +139,56 @@ async function handleRequest(message: JsonRpcMessage): Promise<void> {
 		case "test/echo":
 			respond(id, message.params);
 			break;
+		case "test/stopReading":
+			stopReading = true;
+			respond(id, null);
+			break;
 		case "test/serverRequest": {
 			const params = message.params as { method: string; params: unknown };
 			const response = await requestClient(params.method, params.params);
 			respond(id, response);
 			break;
 		}
-		case "shutdown":
+		case "shutdown": {
+			shutdownReceived = true;
+			if (dyingHelperPid !== null) {
+				try {
+					process.kill(dyingHelperPid, "SIGKILL");
+				} catch {}
+				dyingHelperPid = null;
+			}
+			// A helper born inside the handshake window: it exists in no snapshot
+			// taken before `shutdown` was sent, and this server exits on `exit`, so
+			// it is reparented away before the mux terminates anything.
+			const handshakeFile = Bun.env.TEST_LSP_HANDSHAKE_HELPER_PID_FILE;
+			if (handshakeFile) {
+				const helper = Bun.spawn(["sleep", "60"], { stdin: "ignore", stdout: "ignore", stderr: "ignore" });
+				helper.unref();
+				await Bun.write(handshakeFile, String(helper.pid));
+			}
+			// The same helper, but `setsid(2)` on the way in, so it inherits this
+			// server's process group and then leaves it. Nothing this server passed
+			// on still names it.
+			const escapeFile = Bun.env.TEST_LSP_ESCAPING_HELPER_PID_FILE;
+			if (escapeFile) {
+				const helper = Bun.spawn(["sleep", "60"], {
+					stdin: "ignore",
+					stdout: "ignore",
+					stderr: "ignore",
+					detached: true,
+				});
+				helper.unref();
+				await Bun.write(escapeFile, String(helper.pid));
+			}
 			respond(id, null);
 			break;
+		}
 		default:
 			respond(id, undefined, { code: -32601, message: `Method not found: ${message.method}` });
 	}
 }
 
-function handleNotification(message: JsonRpcMessage): void {
+async function handleNotification(message: JsonRpcMessage): Promise<void> {
 	if (message.method === undefined) return;
 	notifications.push(message.method);
 
@@ -155,6 +219,10 @@ function handleNotification(message: JsonRpcMessage): void {
 			break;
 		}
 		case "exit":
+			if (Bun.env.TEST_LSP_IGNORE_EXIT === "1") break;
+			if (Bun.env.TEST_LSP_SHUTDOWN_FILE) {
+				await Bun.write(Bun.env.TEST_LSP_SHUTDOWN_FILE, JSON.stringify({ shutdownReceived, exitReceived: true }));
+			}
 			process.exit(0);
 	}
 }
@@ -162,7 +230,7 @@ function handleNotification(message: JsonRpcMessage): void {
 function handleMessage(message: JsonRpcMessage): void {
 	if (message.method !== undefined) {
 		if (message.id !== undefined) void handleRequest(message);
-		else handleNotification(message);
+		else void handleNotification(message);
 		return;
 	}
 	if (message.id === undefined) return;
@@ -178,4 +246,5 @@ for await (const chunk of Bun.stdin.stream()) {
 	for (const text of framer.drain(() => {})) {
 		handleMessage(JSON.parse(text) as JsonRpcMessage);
 	}
+	if (stopReading) await Bun.sleep(60_000);
 }

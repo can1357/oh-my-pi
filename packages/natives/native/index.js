@@ -83,6 +83,7 @@ export const getWindowsShortPath = nativeBindings.getWindowsShortPath ?? missing
 export const getWorkProfile = nativeBindings.getWorkProfile ?? missingNativeExport("getWorkProfile");
 export const glob = nativeBindings.glob ?? missingNativeExport("glob");
 export const grep = nativeBindings.grep ?? missingNativeExport("grep");
+export const groupOutlivesItsLeader = nativeBindings.groupOutlivesItsLeader ?? missingNativeExport("groupOutlivesItsLeader");
 export const hashlineCountOps = nativeBindings.hashlineCountOps ?? missingNativeExport("hashlineCountOps");
 export const hashlineFileHash = nativeBindings.hashlineFileHash ?? missingNativeExport("hashlineFileHash");
 export const hashlineFormatHeader = nativeBindings.hashlineFormatHeader ?? missingNativeExport("hashlineFormatHeader");

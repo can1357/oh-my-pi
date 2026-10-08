@@ -225,7 +225,43 @@ mod proc_snapshot {
 	)]
 	impl ProcInfo {
 		pub fn all() -> Vec<Self> {
-			sys::pids().filter_map(Self::from_pid).collect()
+			Self::all_checked().0
+		}
+
+		/// Every visible process, and whether the walk saw everything it should
+		/// have.
+		///
+		/// A caller reasoning about the *absence* of a process needs to tell an
+		/// empty answer apart from a failed one. Losing `/proc` itself, or an entry
+		/// that is there but unreadable, is a gap; a numeric entry that has since
+		/// gone is ordinary churn and not reported as one.
+		pub fn all_checked() -> (Vec<Self>, bool) {
+			let Ok(entries) = fs::read_dir("/proc") else {
+				return (Vec::new(), false);
+			};
+			let mut result = Vec::new();
+			let mut complete = true;
+			for entry in entries {
+				let Ok(entry) = entry else {
+					complete = false;
+					continue;
+				};
+				let Some(pid) = entry
+					.file_name()
+					.to_str()
+					.and_then(|name| name.parse::<i32>().ok())
+				else {
+					continue;
+				};
+				match Self::from_pid(pid) {
+					Some(process) => result.push(process),
+					// Gone between the directory read and this one, which is the normal
+					// way a process table changes under a walk.
+					None if !pid_is_visible(pid) => {},
+					None => complete = false,
+				}
+			}
+			(result, complete)
 		}
 
 		fn from_pid(pid: i32) -> Option<Self> {
@@ -386,6 +422,12 @@ mod proc_snapshot {
 		pub const fn nice(&self) -> Option<i32> {
 			Some(self.stat.nice)
 		}
+	}
+
+	/// Whether `/proc/{pid}` is still there at all, which separates a process
+	/// that exited under the walk from one that is present but unreadable.
+	fn pid_is_visible(pid: i32) -> bool {
+		fs::metadata(format!("/proc/{pid}")).is_ok()
 	}
 
 	/// Lists every thread of each process, main thread first.
@@ -620,6 +662,16 @@ mod proc_snapshot {
 		reason = "Option returns match the cross-platform ProcInfo contract"
 	)]
 	impl ProcInfo {
+		/// Whether the walk saw everything it should have.
+		///
+		/// This platform's enumeration surfaces no partial-failure status of its
+		/// own, so it reports no gap. That is the absence of evidence rather than
+		/// evidence of completeness, and callers get the same answer they got
+		/// before the status existed.
+		pub fn all_checked() -> (Vec<Self>, bool) {
+			(Self::all(), true)
+		}
+
 		pub fn all() -> Vec<Self> {
 			sys::pids().into_iter().filter_map(Self::from_pid).collect()
 		}
@@ -1410,6 +1462,16 @@ mod proc_snapshot {
 		reason = "Option returns match the cross-platform ProcInfo contract"
 	)]
 	impl ProcInfo {
+		/// Whether the walk saw everything it should have.
+		///
+		/// This platform's enumeration surfaces no partial-failure status of its
+		/// own, so it reports no gap. That is the absence of evidence rather than
+		/// evidence of completeness, and callers get the same answer they got
+		/// before the status existed.
+		pub fn all_checked() -> (Vec<Self>, bool) {
+			(Self::all(), true)
+		}
+
 		pub fn all() -> Vec<Self> {
 			let mut handles = HashMap::new();
 			for entry in sys::processes() {

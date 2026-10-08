@@ -162,7 +162,10 @@ crate.from_cargo(
     # The root manifest covers all workspace members, including the vendored
     # brush fork (members so their sources render hermetically; the
     # [patch.crates-io] entry redirects brush-core's registry dep to it).
-    manifests = ["//:Cargo.toml"],
+    manifests = [
+        "//:Cargo.toml",
+        "//crates/pi-shell:Cargo.toml",
+    ],
     # Exactly the shipped addon triples: crate BUILD files get
     # target_compatible_with selects over this set (defaults omit darwin-x64
     # and musl), and features/deps resolve per-triple from Cargo.lock.

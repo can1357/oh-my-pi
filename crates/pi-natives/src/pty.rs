@@ -391,6 +391,10 @@ fn run_pty_sync(
 	drop(pair.slave);
 	let child_process_id = child.process_id();
 	let child_pid = child_process_id.and_then(|value| i32::try_from(value).ok());
+	let pinned_child = child_pid.and_then(pi_shell::process::Process::from_pid);
+	if child_pid.is_some() && pinned_child.is_none() {
+		log::warn!("PTY child {child_pid:?} could not be pinned; its descendants are unreachable");
+	}
 	if let Some(callback) = on_start.as_ref() {
 		callback.call(Ok(child_process_id.unwrap_or(0)), ThreadsafeFunctionCallMode::NonBlocking);
 	}
@@ -464,7 +468,6 @@ fn run_pty_sync(
 	if let Some(pgid) = master.process_group_leader().filter(|pgid| *pgid > 0) {
 		targets.add_pgid(pgid);
 	}
-	let pinned_child = child_pid.and_then(pi_shell::process::Process::from_pid);
 	if let Some(process) = &pinned_child {
 		targets.add_process(process.clone());
 	}
