@@ -378,6 +378,22 @@ describe("collectUnreportedAccounts", () => {
 		expect(collectUnreportedAccounts([aliceReport], [alice, bob, orgOnly])).toEqual([bob]);
 	});
 
+	it("does not let one Antigravity account's report cover a sibling on the same Google project", () => {
+		const project = "aicode-consumers";
+		const alice: UsageAccountIdentity = {
+			provider: "google-antigravity",
+			type: "oauth",
+			email: "alice@example.test",
+			projectId: project,
+		};
+		const bob: UsageAccountIdentity = { ...alice, email: "bob@example.test" };
+		const aliceReport = {
+			...makeReport("google-antigravity", alice.email!, []),
+			metadata: { email: alice.email, projectId: project },
+		};
+		expect(collectUnreportedAccounts([aliceReport], [alice, bob])).toEqual([bob]);
+	});
+
 	it("keeps an org-less account covered by its own org-less report when org-scoped siblings exist", () => {
 		// Live incident shape: legacy org-less rows (pre-org-capture logins)
 		// beside fresh org-scoped logins. Every account fetched successfully —
@@ -540,6 +556,35 @@ describe("formatUsageBreakdown", () => {
 		);
 
 		expect(text).toContain("policy: priority 10 · reserve 0% (override) · exhausted · 0.0% left");
+	});
+
+	it("reports an account sitting exactly on its reserve as inside reserve", () => {
+		const reports = [
+			makeReport("openai-codex", "boundary@example.test", [
+				makeLimit({
+					id: "5h",
+					provider: "openai-codex",
+					usedFraction: 0.7,
+					durationMs: FIVE_HOURS,
+					windowId: "5h",
+				}),
+			]),
+		];
+		const policyOptions: UsagePolicyDiagnosticsOptions = {
+			globalReservePct: 10,
+			getAccountPolicy: () => ({
+				provider: "openai-codex",
+				account: { email: "boundary@example.test" },
+				reservePct: 30,
+			}),
+		};
+
+		const text = stripVTControlCharacters(
+			formatUsageBreakdown(reports, [], Date.now(), undefined, [], policyOptions),
+		);
+		const policyLine = text.split("\n").find(line => line.includes("policy:"));
+		expect(policyLine).toContain("· inside reserve ·");
+		expect(policyLine).toContain("30.0% left");
 	});
 
 	it("reports a provider-flagged exhausted window as exhausted even with fractional quota left", () => {

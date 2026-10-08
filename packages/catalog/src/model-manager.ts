@@ -1,4 +1,4 @@
-import { VERSION } from "@oh-my-pi/pi-utils";
+import { logger, VERSION } from "@oh-my-pi/pi-utils";
 import { buildModel } from "./build";
 import { collapseBuiltVariants } from "./compat/collapse";
 import { applyCatalogMetrics, CatalogMetricsIndex } from "./identity/metrics";
@@ -708,19 +708,40 @@ function preferDiscoveryLimit(discoveryLimit: number | null, fallbackLimit: numb
 	return discoveryLimit;
 }
 
+/**
+ * Materializes a remote source's rows. A row `buildModel` rejects (an id newer
+ * than this build's rule tree that lands on an equal-rank overlap) is skipped
+ * with a warning instead of discarding the source's other rows.
+ *
+ * @throws the first build error when rows were present but none built, so the
+ * caller treats the source as failed (cache/static fallback) rather than as an
+ * intentionally empty catalog that an authoritative provider would prune to.
+ */
 function buildDiscoveredModelSpecs<TApi extends Api>(value: unknown): DiscoveredModelSet<TApi> {
 	const models: Model<TApi>[] = [];
 	const explicitKindModels = new Set<Model<TApi>>();
 	if (!Array.isArray(value)) {
 		return { models, explicitKindModels };
 	}
+	const failures: unknown[] = [];
 	for (const item of value) {
-		if (isModelLike(item)) {
-			const model = buildModel(item as ModelSpec<TApi>);
-			models.push(model);
-			if (item.kind !== undefined) explicitKindModels.add(model);
+		if (!isModelLike(item)) continue;
+		let model: Model<TApi>;
+		try {
+			model = buildModel(item as ModelSpec<TApi>);
+		} catch (error) {
+			failures.push(error);
+			logger.warn("model discovery skipped a model that failed to build", {
+				provider: item.provider,
+				model: item.id,
+				error: error instanceof Error ? error.message : String(error),
+			});
+			continue;
 		}
+		models.push(model);
+		if (item.kind !== undefined) explicitKindModels.add(model);
 	}
+	if (models.length === 0 && failures.length > 0) throw failures[0];
 	return { models, explicitKindModels };
 }
 

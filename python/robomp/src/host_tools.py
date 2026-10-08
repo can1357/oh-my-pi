@@ -2238,18 +2238,16 @@ def _build_submit_pr_review(bindings: ToolBindings) -> HostTool[Any, Any]:
                     error=f"anchor validation skipped: {exc.status} {exc.message}",
                 )
             else:
+                # Dropped anchors ride on the terminal audit row: an early
+                # error-free row would satisfy `has_successful_tool_call` and
+                # mark the PR reviewed even if the POST below fails.
                 filtered, dropped = _filter_anchorable_comments(staged, pr_files)
                 if dropped:
-                    _audit(
-                        bindings,
-                        "submit_pr_review",
-                        args,
-                        result={"dropped": [f"{c.path}:{c.line}" for c in dropped]},
-                    )
                     body += "\n\n## Not anchored to diff"
                     for c in dropped:
                         body += f"\n- **`{c.path}:{c.line}`** — {c.body}"
                     comments = [_review_comment_to_payload(c) for c in filtered]
+        dropped_anchors = [f"{c.path}:{c.line}" for c in dropped]
         try:
             review = _run_coro(
                 bindings.loop,
@@ -2308,6 +2306,7 @@ def _build_submit_pr_review(bindings: ToolBindings) -> HostTool[Any, Any]:
                     "fallback": "issue_comments",
                     "summary": True,
                     "inline": posted_inline,
+                    "dropped": dropped_anchors,
                     "cleared": cleared,
                 },
             )
@@ -2322,7 +2321,7 @@ def _build_submit_pr_review(bindings: ToolBindings) -> HostTool[Any, Any]:
             result={
                 "review_id": review.id,
                 "comments": len(comments),
-                "dropped": len(dropped),
+                "dropped": dropped_anchors,
                 "cleared": cleared,
                 "event": "COMMENT",
             },

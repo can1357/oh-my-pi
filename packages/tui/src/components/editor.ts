@@ -74,9 +74,12 @@ export interface NativeEditorLayout {
 	readonly caret: string;
 }
 
-/** Vim mode as the TSP `editor.mode` label. */
-const VIM_MODE_LABELS: Record<VimMode, string> = {
-	insert: "INSERT",
+/**
+ * Vim mode as the TSP `editor.mode` label. Insert carries none: Insert edits like a plain field,
+ * and a host such as Tern stops native editing (selection, ⌘A/⌘C/⌘X) for any labelled mode.
+ */
+const VIM_MODE_LABELS: Record<VimMode, string | undefined> = {
+	insert: undefined,
 	normal: "NORMAL",
 	visual: "VISUAL",
 	"visual-line": "VISUAL",

@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `AgentLoopConfig.hasQueuedAsides` (also on `Agent`), a non-consuming peek that lets a queued aside end a running interruptible `wait` without signaling other tools ([#14731](https://github.com/can1357/oh-my-pi/pull/14731) by [@mgpai22](https://github.com/mgpai22))
+- Added `cacheLookbackPositions` and `convertToLlm` to `PruneConfig` and `SupersedePruneConfig` so warm-cache pruning stays within the model's prompt-cache lookback, counting app messages as they are sent, and `getMessageFromEntry` to the compaction exports ([#14751](https://github.com/can1357/oh-my-pi/pull/14751) by [@will-bogusz](https://github.com/will-bogusz))
+
+### Fixed
+
+- Fixed warm-cache tool-result pruning re-writing a whole Anthropic prompt cache when the pruned result sat behind many small turns ([#14751](https://github.com/can1357/oh-my-pi/pull/14751) by [@will-bogusz](https://github.com/will-bogusz))
+- Added warm-cache-aware pruning for Anthropic prompt caches, preserving cache efficiency while keeping pruned conversation history within the model’s prompt-cache lookback window.
+
 ## [18.8.1] - 2026-10-07
 
 ### Added
