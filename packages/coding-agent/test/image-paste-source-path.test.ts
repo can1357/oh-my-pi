@@ -256,8 +256,10 @@ describe("path-pasted image source path (#12244)", () => {
 		expect(Buffer.from(await Bun.file(savedPath).arrayBuffer()).toBase64()).toBe(TINY_PNG);
 		const link = editor.pendingImageLinks[0];
 		if (!link) throw new Error("Expected a clickable pasted image");
+		// Auto-resize upscales the 1x1 payload; the chip must still open the bytes as pasted.
+		expect(editor.pendingImages[0]?.data).not.toBe(TINY_PNG);
 		applyHyperlinkSetting("always");
-		expect(Buffer.from(await Bun.file(chipPath(link)).arrayBuffer()).toBase64()).toBe(editor.pendingImages[0]?.data);
+		expect(Buffer.from(await Bun.file(chipPath(link)).arrayBuffer()).toBase64()).toBe(TINY_PNG);
 
 		await session.prompt("What is in [Image #1]?", { images: [...editor.pendingImages] });
 		expect(modelVisibleText(session)).toContain(source);
@@ -288,9 +290,7 @@ describe("path-pasted image source path (#12244)", () => {
 			expect(pathAfterMove).not.toBe(pathBeforeMove);
 			expect(Buffer.from(await Bun.file(pathAfterMove).arrayBuffer()).toBase64()).toBe(TINY_PNG);
 			applyHyperlinkSetting("always");
-			expect(Buffer.from(await Bun.file(chipPath(link)).arrayBuffer()).toBase64()).toBe(
-				editor.pendingImages[0]?.data,
-			);
+			expect(Buffer.from(await Bun.file(chipPath(link)).arrayBuffer()).toBase64()).toBe(TINY_PNG);
 			// A transcript rebuilt from session images must also link to a file.
 			const { ctx } = createPasteContext(sessionManager);
 			const viewCtx: InteractiveModeContext = {
@@ -307,22 +307,20 @@ describe("path-pasted image source path (#12244)", () => {
 			const transcriptTarget = rendered?.match(/\x1b\]8;[^;]*;(file:[^\x1b]*)/)?.[1];
 			if (!transcriptTarget) throw new Error("Expected a linked transcript image chip");
 			expect(Buffer.from(await Bun.file(url.fileURLToPath(transcriptTarget)).arrayBuffer()).toBase64()).toBe(
-				editor.pendingImages[0]?.data,
+				TINY_PNG,
 			);
 			// A draft restored with the image (/tree, rewind, branch) must also link to a file.
 			const restored = new CustomEditor(getEditorTheme());
 			let restoredLinks: Promise<(string | undefined)[]> | undefined;
 			restored.draftImageLinkMaterializer = images => {
-				restoredLinks = materializeImageChipLinks(images, sessionManager.putBlob.bind(sessionManager));
+				restoredLinks = materializeImageChipLinks(images, sessionManager);
 				return restoredLinks;
 			};
 			restored.setDraft("What is in [Image #1]?", [...editor.pendingImages]);
 			await restoredLinks;
 			const restoredLink = restored.imageLinks?.[0];
 			if (!restoredLink) throw new Error("Expected a linked restored draft image");
-			expect(Buffer.from(await Bun.file(chipPath(restoredLink)).arrayBuffer()).toBase64()).toBe(
-				editor.pendingImages[0]?.data,
-			);
+			expect(Buffer.from(await Bun.file(chipPath(restoredLink)).arrayBuffer()).toBase64()).toBe(TINY_PNG);
 			// Tools addressing `attachment://1` get the post-move filesystem path.
 			expect(moving.getImageAttachments()[0]?.sourcePath).toBe(pathAfterMove);
 		} finally {

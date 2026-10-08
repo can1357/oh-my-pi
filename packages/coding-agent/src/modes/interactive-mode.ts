@@ -1858,8 +1858,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.editor.attachmentChips = attachmentChips;
 		// Restored drafts (esc-esc, /tree, branch) re-materialize chip links off the render
 		// path so their chip tokens become clickable again instead of degrading to dead text.
-		this.editor.draftImageLinkMaterializer = images =>
-			materializeImageChipLinks(images, this.sessionManager.putBlob.bind(this.sessionManager));
+		this.editor.draftImageLinkMaterializer = images => materializeImageChipLinks(images, this.sessionManager);
 		this.editorContainer = new Container();
 		this.editorContainer.addChild(this.editor);
 		this.statusLine = new StatusLineComponent(session, statusLineHost);

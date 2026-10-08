@@ -1,3 +1,5 @@
+import * as fs from "node:fs";
+import * as path from "node:path";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, ImageContent, Usage } from "@oh-my-pi/pi-ai";
 import { getStreamingPartialJson } from "@oh-my-pi/pi-ai/utils/block-symbols";
@@ -47,6 +49,7 @@ import {
 	materializeImageReferenceLinks,
 	materializeImageReferenceLinksSync,
 } from "@oh-my-pi/pi-tui/prompt/image-references";
+import { normalizeBlobExtension } from "@oh-my-pi/pi-tui/prompt/image-format";
 import { imageAttachmentSource } from "@oh-my-pi/pi-tui/prompt/image-source";
 import { theme } from "@oh-my-pi/pi-tui/theme";
 import type {
@@ -130,35 +133,88 @@ type AddMessageOptions = {
 	reuseSettledComponent?: boolean;
 };
 
+type ImageChipSessionManager = Pick<
+	InteractiveModeContext["sessionManager"],
+	"putBlob" | "putBlobSync" | "getArtifactsDir" | "getSessionId"
+>;
+
+/** Where an image chip's bytes live: a file the chip opens directly, or the file behind an internal URL. */
+type ImageChipSource = { kind: "file"; path: string } | { kind: "internal"; path: string };
+
 /**
- * The on-disk file an image chip should open, or undefined when the chip needs a blob copy.
  * Internal URLs (`local://`) stay on the image for the model but resolve against the
- * session root, so a chip pointing at one breaks (and goes stale across `/move`).
+ * session root, which `/move` relocates, so a chip cannot point at them. Their backing
+ * file holds the original pasted bytes (the payload may be auto-resized), so the chip
+ * opens a stable blob copy of that file. Undefined when no file backs the image.
  */
-function imageChipSourcePath(image: ImageContent): string | undefined {
+function imageChipSource(image: ImageContent, sessionManager: ImageChipSessionManager): ImageChipSource | undefined {
 	const sourcePath = imageAttachmentSource(image)?.path;
-	return sourcePath && !InternalUrlRouter.instance().canHandle(sourcePath) ? sourcePath : undefined;
+	if (!sourcePath) return undefined;
+	const router = InternalUrlRouter.instance();
+	if (!router.canHandle(sourcePath)) return { kind: "file", path: sourcePath };
+	try {
+		const located = router.locateSync(sourcePath, {
+			localProtocolOptions: {
+				getArtifactsDir: () => sessionManager.getArtifactsDir(),
+				getSessionId: () => sessionManager.getSessionId(),
+			},
+		});
+		return located === undefined ? undefined : { kind: "internal", path: located };
+	} catch {
+		return undefined;
+	}
 }
 
-/** Chip targets for attached images: each file on disk, else a blob copy written only for images that need one. */
+/** Chip targets for attached images: each file on disk, else a blob copy of the original bytes (or the payload). */
 export async function materializeImageChipLinks(
 	images: readonly ImageContent[],
-	putBlob: InteractiveModeContext["sessionManager"]["putBlob"],
+	sessionManager: ImageChipSessionManager,
 ): Promise<(string | undefined)[]> {
-	const sources = images.map(imageChipSourcePath);
-	const needBlob = images.filter((_, index) => sources[index] === undefined);
-	const blobs = needBlob.length > 0 ? await materializeImageReferenceLinks(needBlob, putBlob) : undefined;
-	let next = 0;
-	return sources.map(source => source ?? blobs?.[next++]);
+	const putBlob = sessionManager.putBlob.bind(sessionManager);
+	return Promise.all(
+		images.map(async image => {
+			const source = imageChipSource(image, sessionManager);
+			if (source?.kind === "file") return source.path;
+			if (source) {
+				try {
+					const bytes = await fs.promises.readFile(source.path);
+					return (await putBlob(bytes, { extension: normalizeBlobExtension(path.extname(source.path)) }))
+						.displayPath;
+				} catch (error) {
+					logger.warn("Failed to copy original image for its chip", {
+						path: source.path,
+						error: error instanceof Error ? error.message : String(error),
+					});
+				}
+			}
+			return (await materializeImageReferenceLinks([image], putBlob))?.[0];
+		}),
+	);
 }
 
+/** Synchronous {@link materializeImageChipLinks} for transcript rebuilds. */
 function imageLinksForMessage(
 	images: readonly ImageContent[],
-	putBlobSync: InteractiveModeContext["sessionManager"]["putBlobSync"],
+	sessionManager: ImageChipSessionManager,
 ): (string | undefined)[] | undefined {
 	if (images.length === 0) return undefined;
-	const materialized = materializeImageReferenceLinksSync(images, putBlobSync);
-	return images.map((image, index) => imageChipSourcePath(image) ?? materialized?.[index]);
+	const putBlobSync = sessionManager.putBlobSync.bind(sessionManager);
+	return images.map(image => {
+		const source = imageChipSource(image, sessionManager);
+		if (source?.kind === "file") return source.path;
+		if (source) {
+			try {
+				const bytes = fs.readFileSync(source.path);
+				return putBlobSync(bytes, { extension: normalizeBlobExtension(path.extname(source.path)) }).displayPath;
+			} catch (error) {
+				logger.warn("Failed to copy original image for its chip", {
+					path: source.path,
+					error: error instanceof Error ? error.message : String(error),
+				});
+			}
+		}
+		return materializeImageReferenceLinksSync([image], putBlobSync)?.[0];
+	});
 }
 
 export class UiHelpers {
@@ -324,11 +380,7 @@ export class UiHelpers {
 					} else {
 						const images = imageContent(message.content);
 						const imageLinks =
-							options?.imageLinks ??
-							imageLinksForMessage(
-								images,
-								this.ctx.viewSession.sessionManager.putBlobSync.bind(this.ctx.viewSession.sessionManager),
-							);
+							options?.imageLinks ?? imageLinksForMessage(images, this.ctx.viewSession.sessionManager);
 						userComponent = new UserMessageComponent(userText, {
 							synthetic: isSynthetic,
 							imageLinks,
