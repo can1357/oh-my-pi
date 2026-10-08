@@ -1086,10 +1086,7 @@ function boundWalk(node: IR): (value: unknown, path?: PropertyKey[]) => unknown 
 	let fn = tagged[kWalk];
 	if (!fn) {
 		fn = (value: unknown, path?: PropertyKey[]) => walk(node, value, path);
-		// Primitive IR nodes cannot be tagged — return the closure directly.
-		if (typeof node === "object" && node !== null) {
-			tagged[kWalk] = fn;
-		}
+		tagged[kWalk] = fn;
 	}
 	return fn;
 }
@@ -1104,12 +1101,6 @@ const allowsCache = new WeakMap<IR, (value: unknown) => value is unknown>();
 /** Compile `ir` into a specialized validator. */
 export function compile(ir: IR): (value: unknown) => unknown {
 	const root = resolvedRoot(ir);
-	// Primitive IR nodes (string, number, boolean, etc.) are not valid WeakMap keys.
-	// Skip the cache and build directly — they're leaf validators that don't benefit
-	// from cross-call caching.
-	if (typeof root !== "object" || root === null) {
-		return new Builder().build(root);
-	}
 	const validator = compiledCache.get(root);
 	if (validator === undefined) {
 		// Publish a deferred wrapper before building: recursive schemas re-enter
@@ -1130,10 +1121,6 @@ export function compile(ir: IR): (value: unknown) => unknown {
 /** Compile `ir` into an allocation-free boolean validator. */
 export function compileAllows(ir: IR): (value: unknown) => value is unknown {
 	const root = resolvedRoot(ir);
-	// Primitive IR nodes are not valid WeakMap keys — skip cache, build directly.
-	if (typeof root !== "object" || root === null) {
-		return new Builder().buildAllows(root);
-	}
 	const validator = allowsCache.get(root);
 	if (validator === undefined) {
 		const built: { value?: (value: unknown) => value is unknown } = {};
