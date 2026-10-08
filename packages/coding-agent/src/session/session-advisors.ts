@@ -36,7 +36,13 @@ import type {
 	ServiceTier,
 	SimpleStreamOptions,
 } from "@oh-my-pi/pi-ai";
-import { isUsageLimitOutcome, resolveModelServiceTier, streamSimple } from "@oh-my-pi/pi-ai";
+import {
+	calculateRateLimitBackoffMs,
+	isUsageLimitOutcome,
+	parseRateLimitReason,
+	resolveModelServiceTier,
+	streamSimple,
+} from "@oh-my-pi/pi-ai";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { extractProviderRetryHint } from "@oh-my-pi/pi-ai/utils/retry-after";
 import { modelsAreEqual } from "@oh-my-pi/pi-catalog/models";
@@ -145,10 +151,10 @@ const ADVISOR_SIBLING_UNBLOCK_BUFFER_MS = 1_000;
  * Mirrors the primary turn-recovery wait: a transient credential block (a short
  * provider retry-after / `blockedUntilMs`, or a sibling that frees soon via
  * `retryAtMs`) is waited out; a wait past `retry.maxDelayMs`, an exhausted retry
- * budget, or an error with no authoritative timing at all falls through to the
- * permanent latch (a genuine multi-hour quota window). Uses the block window,
- * not the classification, so a per-minute burst limit misclassified as
- * `QUOTA_EXHAUSTED` still recovers.
+ * budget, or an error with no authoritative timing or policy-backed capacity
+ * backoff falls through to the permanent latch (a genuine multi-hour quota
+ * window). Uses the block window rather than the classification alone, so a
+ * per-minute burst limit misclassified as `QUOTA_EXHAUSTED` still recovers.
  *
  * @returns the wait in ms (≥0) when the advisor should sleep and retry, or
  *   `undefined` when it should decline (latch).
@@ -157,6 +163,7 @@ export function planAdvisorUsageLimitWait(args: {
 	retryAtMs?: number;
 	blockedUntilMs?: number;
 	retryAfterMs?: number;
+	capacityRetryAfterMs?: number;
 	reportResetAtMs?: number;
 	requestedBlockedUntilMs?: number;
 	priorBlockedUntilMs?: number;
@@ -169,6 +176,7 @@ export function planAdvisorUsageLimitWait(args: {
 		retryAtMs,
 		blockedUntilMs,
 		retryAfterMs,
+		capacityRetryAfterMs,
 		reportResetAtMs,
 		requestedBlockedUntilMs,
 		priorBlockedUntilMs,
@@ -211,8 +219,10 @@ export function planAdvisorUsageLimitWait(args: {
 			// selection still enforces; never wake before it.
 			credentialUnblockAtMs = blockedUntilMs;
 		}
+	} else if (capacityRetryAfterMs !== undefined) {
+		credentialUnblockAtMs = blockedUntilMs ?? nowMs + capacityRetryAfterMs;
 	}
-	// Hintless with no complete report → blockedUntilMs is only the default
+	// Hintless with no complete report or capacity policy → blockedUntilMs is only the default
 	// heuristic (e.g. a permanent 402 balance/spend cap). Never wait on it: a
 	// sibling unblock (retryAtMs) may still authorize a wait, otherwise decline
 	// instead of retrying the dead credential until the budget drains.
@@ -504,7 +514,12 @@ export interface SessionAdvisorsHost {
 		currentModel?: Model | null,
 	): RetryFallbackSelector[];
 	isRetryFallbackSelectorSuppressed(selector: RetryFallbackSelector): boolean;
-	noteRetryFallbackCooldown(currentSelector: string, retryAfterMs: number | undefined, errorMessage: string): void;
+	noteRetryFallbackCooldown(
+		currentSelector: string,
+		retryAfterMs: number | undefined,
+		errorMessage: string,
+		currentModel: Model,
+	): void;
 	createCodexCompactionContext(options: {
 		trigger: CodexCompactionContext["trigger"];
 		reason: CodexCompactionContext["reason"];
@@ -2081,6 +2096,12 @@ export class SessionAdvisors {
 		}
 
 		const retryAfterMs = extractProviderRetryHint(currentModel.provider, message);
+		const capacityRetryAfterMs =
+			retryAfterMs === undefined &&
+			parseRateLimitReason(message, currentModel) === "MODEL_CAPACITY_EXHAUSTED" &&
+			parseRateLimitReason(message) === "QUOTA_EXHAUSTED"
+				? calculateRateLimitBackoffMs("MODEL_CAPACITY_EXHAUSTED")
+				: undefined;
 		const usageLimit =
 			AIError.is(errorId, AIError.Flag.UsageLimit) ||
 			isUsageLimitOutcome(extractHttpStatusFromError(error), message);
@@ -2095,7 +2116,7 @@ export class SessionAdvisors {
 				currentModel.provider,
 				advisor.providerSessionId,
 				{
-					retryAfterMs,
+					retryAfterMs: retryAfterMs ?? capacityRetryAfterMs,
 					providerTimed: retryAfterMs !== undefined,
 					baseUrl: currentModel.baseUrl,
 					modelId: currentModel.id,
@@ -2129,6 +2150,7 @@ export class SessionAdvisors {
 							blockedUntilMs: usageBlockedUntilMs,
 							requestedBlockedUntilMs: usageRequestedBlockedUntilMs,
 							retryAfterMs,
+							capacityRetryAfterMs,
 							reportResetAtMs: usageReportResetAtMs,
 							priorBlockedUntilMs: usagePriorBlockedUntilMs,
 							priorBlockedUntilTimed: usagePriorBlockedUntilTimed,
@@ -2151,7 +2173,13 @@ export class SessionAdvisors {
 			return declineUsageLimit();
 		}
 
-		this.#host.noteRetryFallbackCooldown(currentSelector, retryAfterMs, message);
+		const capacityCooldownMs =
+			capacityRetryAfterMs === undefined
+				? undefined
+				: usageBlockedUntilMs === undefined
+					? capacityRetryAfterMs
+					: Math.max(1, usageBlockedUntilMs - Date.now());
+		this.#host.noteRetryFallbackCooldown(currentSelector, retryAfterMs ?? capacityCooldownMs, message, currentModel);
 		for (const role of chainKeys) {
 			for (const selector of this.#host.findRetryFallbackCandidates(role, currentSelector, currentModel)) {
 				if (this.#host.isRetryFallbackSelectorSuppressed(selector)) continue;
@@ -2205,6 +2233,7 @@ export class SessionAdvisors {
 			blockedUntilMs?: number;
 			requestedBlockedUntilMs?: number;
 			retryAfterMs?: number;
+			capacityRetryAfterMs?: number;
 			reportResetAtMs?: number;
 			priorBlockedUntilMs?: number;
 			priorBlockedUntilTimed?: boolean;
@@ -2216,6 +2245,7 @@ export class SessionAdvisors {
 			blockedUntilMs: timing.blockedUntilMs,
 			requestedBlockedUntilMs: timing.requestedBlockedUntilMs,
 			retryAfterMs: timing.retryAfterMs,
+			capacityRetryAfterMs: timing.capacityRetryAfterMs,
 			reportResetAtMs: timing.reportResetAtMs,
 			priorBlockedUntilMs: timing.priorBlockedUntilMs,
 			priorBlockedUntilTimed: timing.priorBlockedUntilTimed,
