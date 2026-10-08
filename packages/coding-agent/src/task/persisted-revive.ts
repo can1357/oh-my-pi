@@ -142,7 +142,12 @@ export function createPersistedSubagentReviverFactory(
 			// transcript alone cannot rebuild it (multi-model agent patterns and
 			// inherited role chains are resolved only at spawn).
 			if (init.retryFallback) {
-				installRetryFallbackRole(subagentSettings, subagentRetryFallbackRole(ref.id), init.retryFallback);
+				installRetryFallbackRole(
+					subagentSettings,
+					subagentRetryFallbackRole(ref.id),
+					init.retryFallback,
+					ctx.modelRegistry,
+				);
 			}
 			// Account pools are owner policy, like the extension roots below: take the
 			// live exact-name `task.agentAccountPools` entry, never a transcript copy.

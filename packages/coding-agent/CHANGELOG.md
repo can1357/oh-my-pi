@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed subagent-specific fallback chains (`task.agentModelOverrides`) being shadowed by inherited model-selector and wildcard chains matching the primary selector ([#13550](https://github.com/can1357/oh-my-pi/issues/13550), [#14915](https://github.com/can1357/oh-my-pi/pull/14915) by [@twotnguyen](https://github.com/twotnguyen))
+
 ## [18.8.4] - 2026-10-08
 
 ### Changed

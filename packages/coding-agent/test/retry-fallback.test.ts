@@ -5,11 +5,15 @@ import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import {
 	expandDefaultRetryFallbackChains,
 	findRetryFallbackCandidates,
+	installRetryFallbackRole,
+	isShadowingRetryFallbackKey,
+	parseRetryFallbackSelector,
 	type RetryFallbackResolutionContext,
 	resolveRetryFallbackChainKey,
 	validateRetryFallbackChains,
 } from "@oh-my-pi/pi-coding-agent/session/retry-fallback-chains";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { cfgRetryFallbackChains } from "@oh-my-pi/pi-coding-agent/session/settings";
 
 function createContext(
 	chains: RetryFallbackResolutionContext["chains"],
@@ -258,6 +262,60 @@ describe("retry fallback selector resolution", () => {
 		// Model-selector keys stay effort-exact.
 		const modelKey = createContext({ [high]: ["openai/gpt-4o-mini"] });
 		expect(resolveRetryFallbackChainKey(modelKey, xhigh, model)).toBeUndefined();
+	});
+
+	it("isShadowingRetryFallbackKey identifies exact, base, and wildcard keys matching primary (#13550)", () => {
+		const primary = parseRetryFallbackSelector("anthropic/claude-opus-5-5:xhigh")!;
+		expect(isShadowingRetryFallbackKey("anthropic/claude-opus-5-5:xhigh", primary)).toBe(true);
+		expect(isShadowingRetryFallbackKey("anthropic/claude-opus-5-5", primary)).toBe(true);
+		expect(isShadowingRetryFallbackKey("anthropic/*", primary)).toBe(true);
+		expect(isShadowingRetryFallbackKey("anthropic/claude-opus-5-5:low", primary)).toBe(false);
+		expect(isShadowingRetryFallbackKey("openai/gpt-4o", primary)).toBe(false);
+		expect(isShadowingRetryFallbackKey("openai/*", primary)).toBe(false);
+	});
+
+	it("prefers a subagent-pinned role hint over an inherited exact model key (#13550)", () => {
+		const primary = "anthropic/claude-opus-5-5:xhigh";
+		const subagentRole = "subagent:review-code-opus";
+		const context = createContext(
+			{
+				[primary]: [],
+				[subagentRole]: ["xai-oauth/grok-4.7:xhigh", "openai-codex/gpt-6-astra:xhigh"],
+			},
+			{ [subagentRole]: primary },
+		);
+
+		// With subagent role hinted, the subagent's explicit chain must win over the exact model key
+		expect(resolveRetryFallbackChainKey(context, primary, undefined, subagentRole)).toBe(subagentRole);
+	});
+
+	it("installRetryFallbackRole suppresses shadowing model-selector and wildcard keys matching primary (#13550)", () => {
+		const primary = "anthropic/claude-opus-5-5:xhigh";
+		const subagentRole = "subagent:review-code-opus";
+		const settings = Settings.isolated({
+			modelRoles: { reviewOpus: primary },
+			"retry.fallbackChains": {
+				[primary]: [],
+				"anthropic/*": ["other-provider/*"],
+				"openai/gpt-4o": ["openai/gpt-4o-mini"],
+				reviewOpus: ["xai-oauth/grok-4.7:xhigh"],
+			},
+		});
+
+		installRetryFallbackRole(settings, subagentRole, {
+			primary,
+			chain: ["xai-oauth/grok-4.7:xhigh", "openai-codex/gpt-6-astra:xhigh"],
+		});
+
+		const configuredChains = cfgRetryFallbackChains.get(settings);
+		// The subagent role is installed
+		expect(configuredChains[subagentRole]).toEqual(["xai-oauth/grok-4.7:xhigh", "openai-codex/gpt-6-astra:xhigh"]);
+		// Shadowing keys for primary are suppressed
+		expect(configuredChains[primary]).toBeUndefined();
+		expect(configuredChains["anthropic/*"]).toBeUndefined();
+		// Non-shadowing keys are preserved
+		expect(configuredChains["openai/gpt-4o"]).toEqual(["openai/gpt-4o-mini"]);
+		expect(configuredChains.reviewOpus).toEqual(["xai-oauth/grok-4.7:xhigh"]);
 	});
 });
 
