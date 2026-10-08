@@ -10,6 +10,7 @@
 ### Fixed
 
 - Fixed warm-cache tool-result pruning re-writing a whole Anthropic prompt cache when the pruned result sat behind many small turns ([#14751](https://github.com/can1357/oh-my-pi/pull/14751) by [@will-bogusz](https://github.com/will-bogusz))
+- Added warm-cache-aware pruning for Anthropic prompt caches, preserving cache efficiency while keeping pruned conversation history within the model’s prompt-cache lookback window.
 
 ## [18.8.1] - 2026-10-07
 
