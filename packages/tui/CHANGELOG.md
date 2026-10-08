@@ -3,7 +3,7 @@
 ## [Unreleased]
 ### Changed
 
-- In the Agent Hub tree view, subagents display their short name under their parent, keeping the full name in flat view and for orphaned agents
+- In the Agent Hub tree view, subagents display their short name under their parent, keeping the full name in flat view and for orphaned agents ([#14913](https://github.com/can1357/oh-my-pi/pull/14913) by [@kmccleary3301](https://github.com/kmccleary3301))
 
 
 ## [18.8.4] - 2026-10-08
