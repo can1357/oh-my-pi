@@ -2,10 +2,6 @@
 
 ## [Unreleased]
 
-### Fixed
-
-- Preserved opaque custom-message source metadata during compaction and branch reconstruction without using it to classify steering authority ([#14921](https://github.com/can1357/oh-my-pi/pull/14921) by [@vavilonska](https://github.com/vavilonska))
-
 ## [18.8.1] - 2026-10-07
 
 ### Added

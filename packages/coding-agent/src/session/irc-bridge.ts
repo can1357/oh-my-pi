@@ -42,21 +42,18 @@ export class IrcBridge {
 	readonly #pendingReplies = new Set<Promise<void>>();
 	/** Only identities still in flight; the journal owns committed identities. */
 	#reservations = new Map<string, Set<string>>();
+	/** Queue ownership follows the logical session, not a wait consumer's branch token. */
 	#sessionId: string;
-	#consumptionBoundary: object;
 
 	constructor(host: IrcBridgeHost) {
 		this.#host = host;
 		this.#sessionId = host.sessionManager.getSessionId();
-		this.#consumptionBoundary = host.sessionManager.captureIrcConsumptionBoundary();
 	}
 
 	#bindSession(): void {
 		const sessionId = this.#host.sessionManager.getSessionId();
-		const boundary = this.#host.sessionManager.captureIrcConsumptionBoundary();
-		if (sessionId === this.#sessionId && boundary === this.#consumptionBoundary) return;
+		if (sessionId === this.#sessionId) return;
 		this.#sessionId = sessionId;
-		this.#consumptionBoundary = boundary;
 		this.#reservations.clear();
 		this.#interrupts = [];
 		this.#asides = [];

@@ -41,14 +41,12 @@ export type CustomMessageContent = string | (TextContent | ImageContent)[];
 /** Public input accepted by `pi.sendMessage` and `AgentSession.sendCustomMessage`. */
 export type CustomMessagePayload<T = unknown> =
 	| string
-	| Partial<
-			Pick<CustomMessage<T>, "customType" | "content" | "display" | "details" | "attribution" | "steeringSource">
-	  >;
+	| Partial<Pick<CustomMessage<T>, "customType" | "content" | "display" | "details" | "attribution">>;
 
 /** Custom message payload after applying runtime defaults. */
 export type NormalizedCustomMessagePayload<T = unknown> = Pick<
 	CustomMessage<T>,
-	"customType" | "content" | "display" | "details" | "attribution" | "steeringSource"
+	"customType" | "content" | "display" | "details" | "attribution"
 >;
 
 /** Details persisted on a `/tan` background-dispatch breadcrumb. */
@@ -156,9 +154,7 @@ function normalizeCustomMessageAttribution(attribution: unknown): MessageAttribu
 
 function isCustomMessagePayloadObject<T>(
 	payload: unknown,
-): payload is Partial<
-	Pick<CustomMessage<T>, "customType" | "content" | "display" | "details" | "attribution" | "steeringSource">
-> {
+): payload is Partial<Pick<CustomMessage<T>, "customType" | "content" | "display" | "details" | "attribution">> {
 	return payload !== null && typeof payload === "object" && !Array.isArray(payload);
 }
 
@@ -189,7 +185,6 @@ export function normalizeCustomMessagePayload<T = unknown>(
 		display: typeof payload.display === "boolean" ? payload.display : false,
 		details: payload.details,
 		attribution: normalizeCustomMessageAttribution(payload.attribution),
-		...(typeof payload.steeringSource === "string" ? { steeringSource: payload.steeringSource } : {}),
 	};
 }
 
@@ -239,8 +234,6 @@ export interface CustomMessage<T = unknown> {
 	details?: T;
 	/** Who initiated this message for billing/attribution semantics. */
 	attribution?: MessageAttribution;
-	/** Opaque origin metadata; never determines role, attribution, or authority. */
-	steeringSource?: string;
 	timestamp: number;
 }
 

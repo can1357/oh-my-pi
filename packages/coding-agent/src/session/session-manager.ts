@@ -3573,7 +3573,6 @@ export class SessionManager {
 		details?: T,
 		attribution: MessageAttribution | undefined = "agent",
 		timestamp?: number,
-		steeringSource?: string,
 	): string {
 		const normalized = normalizeCustomMessagePayload<T>({
 			customType,
@@ -3581,7 +3580,6 @@ export class SessionManager {
 			display,
 			details,
 			attribution,
-			steeringSource,
 		});
 		const fresh = this.#freshEntryFields();
 		const entry: CustomMessageEntry<T> = {
@@ -3592,7 +3590,6 @@ export class SessionManager {
 			// Drop AgentSession-internal transient fields before disk persistence.
 			details: stripInternalDetailsFields(normalized.details),
 			attribution: normalized.attribution,
-			...(normalized.steeringSource !== undefined ? { steeringSource: normalized.steeringSource } : {}),
 			...fresh,
 			// Prefer the initiating message's own timestamp: without it the entry
 			// records the emission time, which on rebuild excludes provider

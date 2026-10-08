@@ -4,9 +4,10 @@
 
 ### Fixed
 
-- Fixed IRC messages being delivered twice across pending delivery, wait consumption, and session restore; duplicate detection is scoped to sender and message ID and uses an incrementally maintained journal index ([#14921](https://github.com/can1357/oh-my-pi/pull/14921) by [@vavilonska](https://github.com/vavilonska))
-- Preserved IRC transport identity and custom source metadata through session persistence and transcript restore without changing message authority or parent steering envelopes ([#14921](https://github.com/can1357/oh-my-pi/pull/14921) by [@vavilonska](https://github.com/vavilonska))
+- Deduplicated IRC transport identities across pending delivery, wait consumption, and session restore, scoped to sender and message ID ([#14921](https://github.com/can1357/oh-my-pi/pull/14921) by [@vavilonska](https://github.com/vavilonska))
+- Preserved IRC transport identity through session persistence and transcript restore without changing message authority or parent steering envelopes ([#14921](https://github.com/can1357/oh-my-pi/pull/14921) by [@vavilonska](https://github.com/vavilonska))
 - Released undelivered IRC identities when interrupting and discarding queued parent steering, and prevented a late wait refresh from consuming a replacement session or branch's inbox ([#14921](https://github.com/can1357/oh-my-pi/pull/14921) by [@vavilonska](https://github.com/vavilonska))
+- Kept accepted IRC messages and deferred wakes pending across same-session rewind and length-stop recovery, including session-switch rollback ([#14921](https://github.com/can1357/oh-my-pi/pull/14921) by [@vavilonska](https://github.com/vavilonska))
 
 ## [18.8.4] - 2026-10-08
 

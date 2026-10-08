@@ -848,14 +848,12 @@ describe("AgentSession aside delivery", () => {
 	});
 
 	it("IrcBridge.restorePending merges a rolled-back snapshot ahead of records queued during the rollback instead of discarding them", () => {
-		// Regression: restorePending used to overwrite the queues wholesale, silently dropping any
-		// record queued between clearPending() and restorePending() (e.g. an in-flight IRC
-		// auto-reply appending while a rolled-back switchSession's async load/hooks were still
-		// running). Exercise the bridge directly with a minimal host stub — the queue ops under
-		// test never touch the host.
+		// Exercise the real restoreState boundary change used by a failed switchSession.
+		const manager = SessionManager.inMemory();
+		const state = manager.captureState();
 		const host: IrcBridgeHost = {
-			agent: {} as Agent,
-			sessionManager: {} as SessionManager,
+			agent: new Agent(),
+			sessionManager: manager,
 			isDisposed: () => false,
 			isStreaming: () => false,
 			planModeEnabled: () => false,
@@ -882,6 +880,9 @@ describe("AgentSession aside delivery", () => {
 			timestamp: Date.now(),
 		};
 		irc.queueAside([duringRollback]);
+		const boundary = manager.captureIrcConsumptionBoundary();
+		manager.restoreState(state);
+		expect(manager.captureIrcConsumptionBoundary()).not.toBe(boundary);
 
 		irc.restorePending(snapshot);
 
@@ -895,9 +896,11 @@ describe("AgentSession aside delivery", () => {
 		// are discarded: the later contract clear would otherwise wake the new
 		// transcript with a peer message belonging to the previous session.
 		// Rollback restores the same ordering guarantee as the other queues.
+		const manager = SessionManager.inMemory();
+		const state = manager.captureState();
 		const host: IrcBridgeHost = {
-			agent: {} as Agent,
-			sessionManager: {} as SessionManager,
+			agent: new Agent(),
+			sessionManager: manager,
 			isDisposed: () => false,
 			isStreaming: () => false,
 			planModeEnabled: () => false,
@@ -918,8 +921,11 @@ describe("AgentSession aside delivery", () => {
 		const snapshot = irc.clearPending();
 		expect(irc.hasPending()).toBe(false);
 		expect(irc.drainDeferredWakes()).toEqual([]);
+		const laterWake: AgentMessage = { ...wake, content: "synthetic later wake", timestamp: wake.timestamp + 1 };
+		irc.queueDeferredWake([laterWake]);
+		manager.restoreState(state);
 		irc.restorePending(snapshot);
-		expect(irc.drainDeferredWakes()).toEqual([wake]);
+		expect(irc.drainDeferredWakes()).toEqual([wake, laterWake]);
 		expect(irc.hasPending()).toBe(false);
 	});
 	it("IrcBridge parks deferred wakes where turn injection cannot flush them", () => {
@@ -927,11 +933,14 @@ describe("AgentSession aside delivery", () => {
 		// pre-dispatch flush and loop aside poll: with no observer attached,
 		// flushing it as an ordinary aside would answer the sender never.
 		const emitted: AgentMessage[] = [];
+		const agent = new Agent();
+		agent.subscribe(event => {
+			if (event.type === "message_start" || event.type === "message_end") emitted.push(event.message);
+		});
+		const manager = SessionManager.inMemory();
 		const host: IrcBridgeHost = {
-			agent: {
-				emitExternalEvent: (event: { message: AgentMessage }) => emitted.push(event.message),
-			} as unknown as Agent,
-			sessionManager: {} as SessionManager,
+			agent,
+			sessionManager: manager,
 			isDisposed: () => false,
 			isStreaming: () => false,
 			planModeEnabled: () => false,
@@ -956,6 +965,7 @@ describe("AgentSession aside delivery", () => {
 		};
 		irc.queueDeferredWake([wake]);
 		irc.queueAside([aside]);
+		manager.branchWithSummary(null, "synthetic rewind");
 		expect(irc.hasPending()).toBe(true);
 		irc.flushPending();
 		expect(emitted).toEqual([aside, aside]);

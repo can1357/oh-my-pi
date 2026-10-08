@@ -185,7 +185,6 @@ function getMessageFromEntry(entry: SessionEntry): AgentMessage | undefined {
 				entry.details,
 				entry.timestamp,
 				entry.attribution,
-				entry.steeringSource,
 			);
 
 		case "branch_summary":

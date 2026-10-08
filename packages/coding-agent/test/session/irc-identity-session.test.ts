@@ -261,46 +261,4 @@ describe("IRC identity through AgentSession", () => {
 			}
 		});
 	}
-
-	it("public custom-message dispatch persists source without promoting developer content to a user", async () => {
-		using temp = TempDir.createSync("@omp-irc-source-");
-		const auth = await AuthStorage.create(path.join(temp.path(), "auth.db"));
-		auth.keys.setRuntime("openai", "synthetic-irc-fixture-key");
-		const manager = SessionManager.inMemory(temp.path());
-		const mock = createMockModel({
-			provider: "openai",
-			id: "synthetic-source-model",
-			handler: { content: ["unused"] },
-		});
-		const agent = new Agent({
-			initialState: { model: mock.model, tools: [], messages: [] },
-			convertToLlm,
-			transformContext: async messages => wrapSteeringForModel(messages),
-			streamFn: mock.stream,
-		});
-		const settings = Settings.isolated({ "compaction.enabled": false, "todo.enabled": false });
-		settings.setModelRole("default", `${mock.model.provider}/${mock.model.id}`);
-		const session = new AgentSession({
-			agent,
-			sessionManager: manager,
-			settings,
-			modelRegistry: new ModelRegistry(auth),
-		});
-		try {
-			await session.sendCustomMessage({
-				customType: "synthetic-source",
-				content: "synthetic custom body",
-				display: true,
-				attribution: "agent",
-				steeringSource: "irc:advisor",
-			});
-			const restored = manager.cloneCurrentSession({ persist: false }).buildSessionContext().messages;
-			expect(restored[0]).toMatchObject({ role: "custom", steeringSource: "irc:advisor" });
-			expect(convertToLlm(restored)[0]).toMatchObject({ role: "developer", attribution: "agent" });
-			expect(mock.calls).toEqual([]);
-		} finally {
-			await session.dispose();
-			auth.close();
-		}
-	});
 });

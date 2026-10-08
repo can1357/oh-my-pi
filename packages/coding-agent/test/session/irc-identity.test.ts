@@ -2,14 +2,13 @@ import { afterEach, describe, expect, it, vi } from "bun:test";
 import * as path from "node:path";
 import { Agent, type AgentMessage, steeringQueueState } from "@oh-my-pi/pi-agent-core";
 import type { IrcMessage } from "@oh-my-pi/pi-tui/tools/irc";
-import { customMessageEntryMessage } from "@oh-my-pi/pi-tui/chat/transcript-entry";
 import { prompt, TempDir } from "@oh-my-pi/pi-utils";
 import { ircSource, type IrcSteeringMessage } from "../../src/irc/identity";
 import { messageResult } from "../../src/irc/messaging";
 import { AgentRegistry } from "../../src/registry/agent-registry";
 import { escapeHarnessTags } from "../../src/session/harness-tags";
 import { IrcBridge, type IrcBridgeHost } from "../../src/session/irc-bridge";
-import { convertToLlm, type CustomMessage, wrapSteeringForModel } from "../../src/session/messages";
+import { convertToLlm, wrapSteeringForModel } from "../../src/session/messages";
 import { SessionManager } from "../../src/session/session-manager";
 import { sessionMessagePersistenceKey, planTurnPersistence } from "../../src/session/turn-persistence";
 import parentTemplate from "../../src/prompts/steering/parent-irc.md" with { type: "text" };
@@ -54,7 +53,6 @@ function persist(manager: SessionManager, bridge: IrcBridge, record: AgentMessag
 			record.details,
 			record.attribution,
 			record.timestamp,
-			record.steeringSource,
 		);
 	} else if (record.role === "user") manager.appendMessage(record);
 	else throw new Error("Expected an incoming message");
@@ -197,6 +195,30 @@ describe("IRC identity at session consumers", () => {
 		expect(target.bridge.drainInboxMessages(mail.to).map(message => message.from)).toEqual(["NewPeer"]);
 	});
 
+	it("restores accepted mail and deferred wakes after the same-session rollback boundary changes", async () => {
+		const manager = SessionManager.inMemory();
+		const state = manager.captureState();
+		const target = recipient(manager);
+		const later = { ...mail, id: "later-id" };
+		const wake: AgentMessage = { role: "user", content: "synthetic original wake", timestamp: 1 };
+		const laterWake: AgentMessage = { role: "user", content: "synthetic later wake", timestamp: 2 };
+		await target.bridge.deliver(mail);
+		target.bridge.queueDeferredWake([wake]);
+		const pending = target.bridge.clearPending();
+		await target.bridge.deliver(later);
+		target.bridge.queueDeferredWake([laterWake]);
+		const boundary = manager.captureIrcConsumptionBoundary();
+		manager.restoreState(state);
+		expect(manager.captureIrcConsumptionBoundary()).not.toBe(boundary);
+		target.bridge.restorePending(pending);
+		await target.bridge.deliver(mail);
+		await target.bridge.deliver(later);
+		expect(target.observations).toHaveLength(2);
+		expect(target.bridge.drainInboxMessages(mail.to)).toEqual([mail, later]);
+		expect(target.bridge.drainDeferredWakes()).toEqual([wake, laterWake]);
+		expect(target.bridge.hasPending()).toBe(false);
+	});
+
 	it("tree navigation/reset do not redeliver consumed mail; a new branch inherits only retained journal entries", async () => {
 		const manager = SessionManager.inMemory();
 		const root = manager.appendMessage({ role: "user", content: "synthetic root", timestamp: 1 });
@@ -222,18 +244,35 @@ describe("IRC identity at session consumers", () => {
 		expect(target.bridge.drainInboxMessages(mail.to)).toEqual([mail]);
 	});
 
-	for (const transition of ["branch", "resetLeaf", "clear"] as const) {
-		it(`discards pending content and reservations at the same-session ${transition} boundary`, async () => {
+	for (const transition of ["branch", "resetLeaf", "clear", "rewind", "discard"] as const) {
+		it(`preserves accepted input and reservations across the same-session ${transition}`, async () => {
 			const manager = SessionManager.inMemory();
 			const root = manager.appendMessage({ role: "user", content: "synthetic root", timestamp: 1 });
+			const discarded = manager.appendMessage({ role: "user", content: "synthetic abandoned turn", timestamp: 2 });
 			const target = recipient(manager);
 			await target.bridge.deliver(mail);
+			const aside: AgentMessage = { role: "user", content: "synthetic aside", timestamp: 3 };
+			const wake: AgentMessage = { role: "user", content: "synthetic deferred wake", timestamp: 4 };
+			target.bridge.queueAside([aside]);
+			target.bridge.queueDeferredWake([wake]);
+			const boundary = manager.captureIrcConsumptionBoundary();
 			if (transition === "branch") manager.branch(root);
 			else if (transition === "resetLeaf") manager.resetLeaf();
-			else manager.appendResetBoundary();
-			expect(target.bridge.drainPending()).toEqual([]);
+			else if (transition === "clear") manager.appendResetBoundary();
+			else if (transition === "rewind") manager.branchWithSummary(root, "synthetic rewind report");
+			else await manager.discardEntryDurably(discarded);
+			expect(manager.captureIrcConsumptionBoundary()).not.toBe(boundary);
+			expect(target.bridge.hasInterrupts()).toBe(true);
+			expect(target.bridge.hasPending()).toBe(true);
 			await target.bridge.deliver(mail);
-			expect(target.bridge.drainInboxMessages(mail.to)).toEqual([mail]);
+			expect(target.observations).toHaveLength(1);
+			const records = target.bridge.drainPending();
+			expect(records).toHaveLength(2);
+			expect(records[1]).toBe(aside);
+			expect(target.bridge.drainDeferredWakes()).toEqual([wake]);
+			for (const record of records) persist(manager, target.bridge, record);
+			await target.bridge.deliver(mail);
+			expect(target.observations).toHaveLength(1);
 		});
 	}
 
@@ -368,37 +407,4 @@ describe("source preservation without authority changes", () => {
 		expect(new Set(keys).size).toBe(3);
 		expect(planTurnPersistence(keys, new Set([keys[0]!]))).toEqual({ kind: "ok", toPersist: [1, 2] });
 	});
-
-	for (const source of ["irc:peer", "irc:advisor", "agent"]) {
-		it(`round-trips ${source} metadata through persistence/TUI without changing custom provider authority`, async () => {
-			using temp = TempDir.createSync("@omp-irc-source-");
-			const manager = await openJournal(temp.path());
-			try {
-				manager.appendCustomMessageEntry(
-					"irc:incoming",
-					"synthetic custom",
-					true,
-					{ ...ircSource(mail, true), message: mail.body },
-					"agent",
-					42,
-					source,
-				);
-				const file = manager.getSessionFile()!;
-				await manager.close();
-				const reopened = await SessionManager.open(file, temp.path(), undefined, { suppressBreadcrumb: true });
-				try {
-					const entry = reopened.getBranch()[0]!;
-					if (entry.type !== "custom_message") throw new Error("Expected custom message entry");
-					const restored = customMessageEntryMessage(entry) as CustomMessage;
-					expect(restored.steeringSource).toBe(source);
-					expect(steeringQueueState([restored])).toEqual({ queued: true, source: "system" });
-					expect(convertToLlm([restored])[0]).toMatchObject({ role: "developer", attribution: "agent" });
-				} finally {
-					await reopened.close();
-				}
-			} finally {
-				await manager.close();
-			}
-		});
-	}
 });

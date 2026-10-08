@@ -24,8 +24,6 @@ export interface CustomMessage<T = unknown> {
 	details?: T;
 	/** Who initiated this message for billing/attribution semantics. */
 	attribution?: MessageAttribution;
-	/** Opaque origin metadata; never determines role, attribution, or authority. */
-	steeringSource?: string;
 	timestamp: number;
 }
 
@@ -181,7 +179,6 @@ export function createCustomMessage(
 	details: unknown | undefined,
 	timestamp: string,
 	attribution?: MessageAttribution,
-	steeringSource?: string,
 ): CustomMessage {
 	return {
 		role: "custom",
@@ -190,7 +187,6 @@ export function createCustomMessage(
 		display,
 		details,
 		attribution,
-		...(typeof steeringSource === "string" ? { steeringSource } : {}),
 		timestamp: new Date(timestamp).getTime(),
 	};
 }

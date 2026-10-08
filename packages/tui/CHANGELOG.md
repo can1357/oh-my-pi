@@ -2,10 +2,6 @@
 
 ## [Unreleased]
 
-### Fixed
-
-- Preserved custom-message source metadata when normalizing extension messages and rebuilding persisted transcripts ([#14921](https://github.com/can1357/oh-my-pi/pull/14921) by [@vavilonska](https://github.com/vavilonska))
-
 ## [18.8.4] - 2026-10-08
 
 ### Changed
