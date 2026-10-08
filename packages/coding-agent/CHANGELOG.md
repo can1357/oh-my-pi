@@ -2,34 +2,35 @@
 
 ## [Unreleased]
 
-### Added
-
-- Added `worktree.onStart` and `worktree.onExit` settings to start each session in its own worktree and clean it up on exit ([#14908](https://github.com/can1357/oh-my-pi/pull/14908) by [@gitpushoriginmaster](https://github.com/gitpushoriginmaster))
-- Added X post search to xAI web search: Grok can now search X alongside the web, `site:x.com` searches X only, and `after:`/`before:` limit the X post date range.
-- Added X post search to xAI web search: Grok can now search X alongside the web; `site:x.com`, `site:x.com/<handle>`, and `from:<handle>` search X only (limited to those authors), `-from:<handle>` leaves authors out, and `after:`/`before:` or `recency` limit the post dates.
-- Added xAI-first routing for X-only searches (`site:x.com`, `from:<handle>`) when xAI credentials exist, even if another engine is the web search model.
-- Added reading X links through Grok's X tools when logged in to xAI: posts with their thread and replies, profiles with recent posts, searches, and hashtags. This replaces the Nitter mirrors, which no longer serve X.
-
-### Changed
-
-- Changed web search to try an `xai-oauth` login before an `xai` API key wherever both are in the web search chain, unless `modelProviderOrder` says otherwise.
-
 ### Fixed
 
 - Workpools now settle rejected batches and remain usable after background-job admission fails. ([#12286](https://github.com/can1357/oh-my-pi/pull/12286) by [@iliaal](https://github.com/iliaal))
-- Fixed judge-gated features resolving a new judge role while the next judgment still used the previous role's cached model chain ([#14861](https://github.com/can1357/oh-my-pi/pull/14861) by [@alnaggar-dev](https://github.com/alnaggar-dev))
-- Fixed tool-result pruning re-writing the whole Anthropic prompt cache when the pruned result sat behind many small turns ([#14751](https://github.com/can1357/oh-my-pi/pull/14751) by [@will-bogusz](https://github.com/will-bogusz))
-- Fixed resumed Claude sessions losing earlier thinking and prompt-cache reuse when extension or MCP tools they last ran with register before the first message; applies to sessions saved by this version or later ([#14754](https://github.com/can1357/oh-my-pi/pull/14754) by [@will-bogusz](https://github.com/will-bogusz))
-- Fixed a subagent advisor set to `@advisor` in `/agents` running on the built-in `slow` model (e.g. `gpt-5.6-sol`) instead of your configured advisor role ([#14972](https://github.com/can1357/oh-my-pi/pull/14972) by [@H4vC](https://github.com/H4vC))
-- Fixed `/switch` and the alt+p model picker crashing the TUI when stored model speed stats contained an entry without a model name ([#14784](https://github.com/can1357/oh-my-pi/issues/14784))
-- Fixed the `lsp` tool and `generate_image` hanging on a FIFO or terminal path, or exhausting memory on `/dev/zero`; such files are now refused before they're read ([#14730](https://github.com/can1357/oh-my-pi/pull/14730) by [@DrFaustus-vic](https://github.com/DrFaustus-vic))
-- Fixed an `aside` message (such as one sent by an extension) waiting behind a running `wait`: it now ends the wait and reaches the model at the next step, and the job result still arrives later ([#14731](https://github.com/can1357/oh-my-pi/pull/14731) by [@mgpai22](https://github.com/mgpai22))
-- Fixed extensions importing `@oh-my-pi/pi-tui/native/*` (e.g. `native/overlay`, `native/spans`) failing to load in the compiled `omp` binary with `Cannot find package '@oh-my-pi/pi-tui'` ([#14834](https://github.com/can1357/oh-my-pi/issues/14834), [#14835](https://github.com/can1357/oh-my-pi/pull/14835) by [@carterlasalle](https://github.com/carterlasalle))
-- Fixed judge-gated features using a stale model chain after switching to a different judge role.
+
+## [18.8.6] - 2026-10-08
+
+### Added
+
+- Added per-session Git worktree support with `worktree.onStart` and `worktree.onExit` settings to create an isolated worktree for each session and clean it up when the session ends.
+- Expanded xAI web search with X post search, including X-only and author-specific queries, author exclusions, date and recency filters, and automatic xAI routing when credentials are available.
+- Added xAI-powered reading of X posts, threads and replies, profiles, searches, and hashtags when logged in, replacing the unavailable Nitter mirrors.
+
+### Changed
+
+- Web search now prefers an authenticated `xai-oauth` login over an `xai` API key when both are available, unless `modelProviderOrder` specifies a different order.
+
+### Fixed
+
+- Fixed judge-gated features continuing to use a stale model chain after switching judge roles.
 - Improved Anthropic prompt-cache reuse when pruning tool results from long conversations.
-- Fixed resumed Claude sessions losing earlier thinking context and prompt-cache reuse when extension or MCP tools were registered before the first message; applies to sessions saved with this version or later.
-- Fixed subagent advisors configured with `@advisor` incorrectly using the built-in `slow` model instead of the configured advisor role.
-- Fixed Anthropic idle recaps, `/btw` and `/omfg` replies, and streaming previews displaying raw token markers instead of Nerd Font icons.
+- Fixed resumed Claude sessions losing earlier thinking context and prompt-cache reuse when extensions or MCP tools were registered before the first message.
+- Fixed subagent advisors configured with `@advisor` using the built-in `slow` model instead of the configured advisor role.
+- Fixed the `/switch` command and alternate model picker crashing when stored model speed statistics contained an unnamed model.
+- Fixed `lsp` and `generate_image` attempting to read FIFO, terminal, or unbounded device paths, which could hang or exhaust memory.
+- Fixed aside messages from extensions being blocked behind a running wait operation.
+- Fixed extensions importing `@oh-my-pi/pi-tui/native/*` failing to load in compiled `omp` binaries.
+- Fixed raw token markers appearing instead of Nerd Font icons in Anthropic idle recaps, `/btw` and `/omfg` replies, and streaming previews.
+- Fixed sessions moved with `/wt` disappearing from resume lists; sessions in Git worktrees now remain discoverable and can be resumed or relocated if their worktree was removed.
+- Fixed live config reload ignoring edits made during startup or right after a config symlink was retargeted, until the next unrelated edit.
 
 ## [18.8.5] - 2026-10-08
 
