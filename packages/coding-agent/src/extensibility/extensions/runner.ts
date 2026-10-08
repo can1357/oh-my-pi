@@ -1520,8 +1520,10 @@ export class ExtensionRunner {
 								handlerSignal,
 								event.type === "tool_call" ? budget : undefined,
 							);
+							const handlerEvent =
+								event.type === "before_subagent_spawn" ? ({ ...event, signal: handlerSignal } as TEvent) : event;
 							result = await this.#toolRegistrationScope.run(registrationScope, () =>
-								handler(event, handlerContext),
+								handler(handlerEvent, handlerContext),
 							);
 						} catch (error) {
 							handlerFailure = { error };
@@ -2162,7 +2164,7 @@ export class ExtensionRunner {
 	): Promise<BeforeSubagentSpawnEventResult | undefined> {
 		if (!this.hasHandlers("before_subagent_spawn")) return undefined;
 		const ctx = this.createContext();
-		let chosen: Pick<BeforeSubagentSpawnEventResult, "model" | "note"> | undefined;
+		let chosen: Pick<BeforeSubagentSpawnEventResult, "model" | "note" | "thinkingLevel"> | undefined;
 
 		for (const ext of this.extensions) {
 			const handlers = ext.handlers.get("before_subagent_spawn");
@@ -2175,13 +2177,27 @@ export class ExtensionRunner {
 					ctx,
 					ext,
 					extensionHandlerTimeoutMs,
-					undefined,
+					(kind, message) => ({
+						block: true,
+						reason:
+							kind === "timeout"
+								? `before_subagent_spawn ${message}`
+								: `before_subagent_spawn handler failed: ${message}`,
+					}),
 					signal,
 				);
 				if (!handlerResult) continue;
 				const result = handlerResult as BeforeSubagentSpawnEventResult;
 				if (result.block) return result;
-				if (result.model !== undefined) chosen = { model: result.model, note: result.note };
+				if (result.model !== undefined) {
+					chosen = {
+						model: result.model,
+						note: result.note,
+						...(result.thinkingLevel !== undefined ? { thinkingLevel: result.thinkingLevel } : {}),
+					};
+				} else if (result.thinkingLevel !== undefined) {
+					chosen = { ...chosen, thinkingLevel: result.thinkingLevel };
+				}
 			}
 		}
 
