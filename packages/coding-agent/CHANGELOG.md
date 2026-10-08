@@ -5,6 +5,14 @@
 ### Added
 
 - Added `worktree.onStart` and `worktree.onExit` settings to start each session in its own worktree and clean it up on exit ([#14908](https://github.com/can1357/oh-my-pi/pull/14908) by [@gitpushoriginmaster](https://github.com/gitpushoriginmaster))
+- Added X post search to xAI web search: Grok can now search X alongside the web, `site:x.com` searches X only, and `after:`/`before:` limit the X post date range.
+- Added X post search to xAI web search: Grok can now search X alongside the web; `site:x.com`, `site:x.com/<handle>`, and `from:<handle>` search X only (limited to those authors), `-from:<handle>` leaves authors out, and `after:`/`before:` or `recency` limit the post dates.
+- Added xAI-first routing for X-only searches (`site:x.com`, `from:<handle>`) when xAI credentials exist, even if another engine is the web search model.
+- Added reading X links through Grok's X tools when logged in to xAI: posts with their thread and replies, profiles with recent posts, searches, and hashtags. This replaces the Nitter mirrors, which no longer serve X.
+
+### Changed
+
+- Changed web search to try an `xai-oauth` login before an `xai` API key wherever both are in the web search chain, unless `modelProviderOrder` says otherwise.
 
 ### Fixed
 
@@ -17,6 +25,11 @@
 - Fixed the `lsp` tool and `generate_image` hanging on a FIFO or terminal path, or exhausting memory on `/dev/zero`; such files are now refused before they're read ([#14730](https://github.com/can1357/oh-my-pi/pull/14730) by [@DrFaustus-vic](https://github.com/DrFaustus-vic))
 - Fixed an `aside` message (such as one sent by an extension) waiting behind a running `wait`: it now ends the wait and reaches the model at the next step, and the job result still arrives later ([#14731](https://github.com/can1357/oh-my-pi/pull/14731) by [@mgpai22](https://github.com/mgpai22))
 - Fixed extensions importing `@oh-my-pi/pi-tui/native/*` (e.g. `native/overlay`, `native/spans`) failing to load in the compiled `omp` binary with `Cannot find package '@oh-my-pi/pi-tui'` ([#14834](https://github.com/can1357/oh-my-pi/issues/14834), [#14835](https://github.com/can1357/oh-my-pi/pull/14835) by [@carterlasalle](https://github.com/carterlasalle))
+- Fixed judge-gated features using a stale model chain after switching to a different judge role.
+- Improved Anthropic prompt-cache reuse when pruning tool results from long conversations.
+- Fixed resumed Claude sessions losing earlier thinking context and prompt-cache reuse when extension or MCP tools were registered before the first message; applies to sessions saved with this version or later.
+- Fixed subagent advisors configured with `@advisor` incorrectly using the built-in `slow` model instead of the configured advisor role.
+- Fixed Anthropic idle recaps, `/btw` and `/omfg` replies, and streaming previews displaying raw token markers instead of Nerd Font icons.
 
 ## [18.8.5] - 2026-10-08
 
@@ -83,7 +96,6 @@
 - Fixed quadratic slowdown in `omp cleanse` on large tsc/clippy/golangci output ([#14706](https://github.com/can1357/oh-my-pi/pull/14706) by [@H4vC](https://github.com/H4vC))
 - Fixed documents served as `application/octet-stream` being downloaded twice ([#14708](https://github.com/can1357/oh-my-pi/pull/14708) by [@H4vC](https://github.com/H4vC))
 - Fixed collab TUI guests rebuilding the transcript per token ([#14715](https://github.com/can1357/oh-my-pi/pull/14715) by [@H4vC](https://github.com/H4vC))
-- Fixed idle recaps, `/btw` and `/omfg` replies, and live streaming previews showing raw `⟦U…⟧` tokens instead of Nerd Font icons with Anthropic models
 
 ## [18.8.3] - 2026-10-07
 
