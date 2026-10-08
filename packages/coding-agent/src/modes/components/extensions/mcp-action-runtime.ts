@@ -11,6 +11,8 @@ import type { EffectiveExtensionRoots } from "../../../capability/types";
 import type { MCPServer } from "../../../capability/mcp";
 import type { Settings } from "../../../config/settings";
 import type { CustomTool } from "../../../extensibility/custom-tools/types";
+import { cfgDisabledExtensions } from "../../../extensibility/settings";
+import { cfgMcpEnableProjectConfig } from "../../../mcp/settings";
 import { classifyMCPServer } from "../../../mcp/auth-capability";
 import { mcpServerToConfig } from "../../../mcp/config";
 import type { MCPManager } from "../../../mcp/manager";
@@ -84,7 +86,7 @@ export function createMCPActionRuntime(options: CreateMCPActionRuntimeOptions): 
 		cwd,
 		manager: mcpManager,
 		authStorage,
-		enableProjectConfig: settings.get("mcp.enableProjectConfig") ?? true,
+		enableProjectConfig: cfgMcpEnableProjectConfig.get(settings),
 		filterExa: true,
 		filterBrowser: browserMcpFilterEnabled?.() ?? false,
 		getExtensionRoots,
@@ -94,7 +96,7 @@ export function createMCPActionRuntime(options: CreateMCPActionRuntimeOptions): 
 	});
 	const latestExtensions = new Map<string, Extension>();
 	const refreshExtension = async (extension: Extension): Promise<Extension> => {
-		const loaded = await loadAllExtensions(cwd, settings.get("disabledExtensions") ?? []);
+		const loaded = await loadAllExtensions(cwd, cfgDisabledExtensions.get(settings));
 		const current =
 			loaded.find(item => item.id === extension.id && item.path === extension.path && !isShadowedExtension(item)) ??
 			loaded.find(item => item.id === extension.id && !isShadowedExtension(item)) ??

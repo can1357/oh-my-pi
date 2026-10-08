@@ -351,7 +351,7 @@ export class MCPCommandController {
 			cwd: getProjectDir(),
 			manager: this.ctx.mcpManager,
 			authStorage: this.ctx.session.modelRegistry?.authStorage,
-			enableProjectConfig: this.ctx.settings.get("mcp.enableProjectConfig") ?? true,
+			enableProjectConfig: cfgMcpEnableProjectConfig.get(this.ctx.settings),
 			filterExa: true,
 			filterBrowser: this.ctx.session.getEvalPreludes().some(definition => definition.name === "browser"),
 			getExtensionRoots: () => this.ctx.session.effectiveExtensionRoots,

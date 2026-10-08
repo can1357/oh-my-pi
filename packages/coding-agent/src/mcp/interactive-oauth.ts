@@ -169,7 +169,7 @@ export async function runMCPInteractiveOAuth(options: MCPInteractiveOAuthOptions
 			resource: flow.resource,
 			authorizationUrl: flow.authorizationUrl,
 		};
-		await authStorage.set(credentialId, storedCredential);
+		await authStorage.credentials.set(credentialId, storedCredential);
 		return { credentials: storedCredential, credentialId };
 	} catch (error) {
 		if (cancellationRequested || signal?.aborted || isAbortError(error)) throw new MCPOAuthCancelledError();

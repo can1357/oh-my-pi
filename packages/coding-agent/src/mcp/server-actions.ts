@@ -206,6 +206,7 @@ export class MCPServerActions {
 					{ [target.name]: target.config },
 					target.source ? { [target.name]: target.source } : {},
 					undefined,
+					undefined,
 					signal,
 				),
 				signal,

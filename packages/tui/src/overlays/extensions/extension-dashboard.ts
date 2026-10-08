@@ -137,6 +137,8 @@ function providerInitials(label: string): string {
 export function buildPickerScopes(tabs: ProviderTab[]): TspPickerScope[] {
 	return tabs.map(tab => {
 		if (tab.id === "all") return { id: tab.id, label: "All", icon: "extension", count: tab.count };
+		if (tab.id === MCP_SERVERS_TAB_ID)
+			return { id: tab.id, label: tab.label, icon: "server", count: tab.count };
 		const emptyEnabled = tab.count === 0 && tab.enabled;
 		return {
 			id: tab.id,
@@ -655,7 +657,7 @@ export class ExtensionDashboard implements Component {
 
 	/** The dashboard is a `picker` sheet (scopes = providers, preview = inspector) wherever Tern draws pickers. */
 	nativeSheet(cx: DescribeContext): boolean {
-		return cx.supports("picker");
+		return !this.#mcpActionPanel && cx.supports("picker");
 	}
 
 	/**
@@ -665,6 +667,7 @@ export class ExtensionDashboard implements Component {
 	 * changes arrive as render requests, which bump the version).
 	 */
 	describe(cx: DescribeContext): NativeNode {
+		if (this.#mcpActionPanel) return col([this.#mcpActionPanel]);
 		const sheet = this.nativeSheet(cx);
 		const toolFrame = snapshotToolRuntimeSource(this.#toolSource);
 		let tools = "";
@@ -824,7 +827,7 @@ export class ExtensionDashboard implements Component {
 				if (pick.value) this.#tabBar.selectTab(pick.value);
 				return;
 			case "toggle":
-				this.#mainList.activateSelected();
+				this.#mainList.activateSelected("toggle");
 				this.#requestRender();
 				return;
 			case "expand":

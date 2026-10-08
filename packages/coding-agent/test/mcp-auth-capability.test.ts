@@ -27,7 +27,7 @@ describe("classifyMCPServer", () => {
 
 	test("enables clear-authentication only when an OMP-managed credential exists", () => {
 		const authStorage = {
-			get: () => ({ type: "oauth", access: "stored-access-token" }),
+			credentials: { get: () => ({ type: "oauth", access: "stored-access-token" }) },
 		} as unknown as AuthStorage;
 		const classified = classifyMCPServer({ config: directHttp, authStorage });
 		expect(classified.authenticationMode).toBe("managed-oauth");

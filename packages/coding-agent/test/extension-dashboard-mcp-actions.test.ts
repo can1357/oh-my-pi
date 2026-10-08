@@ -14,7 +14,7 @@ import { __resetDirsFromEnvForTests, removeWithRetries, setAgentDir } from "@oh-
 import { createMcpManagerStub } from "./helpers/interactive-mode-context";
 
 const CONFIG = { type: "http" as const, url: "https://mcp.example.com/mcp" };
-const AUTH_STORAGE = { get: () => undefined } as unknown as AuthStorage;
+const AUTH_STORAGE = { credentials: { get: () => undefined } } as unknown as AuthStorage;
 
 describe("extensions dashboard MCP actions", () => {
 	let projectDir = "";
@@ -125,10 +125,12 @@ describe("extensions dashboard MCP actions", () => {
 		const credentialId = mcpOAuthCredentialId(CONFIG.url);
 		let credential: { type: "oauth" } | undefined = { type: "oauth" };
 		const authStorage = {
-			get: (id: string) => (id === credentialId ? credential : undefined),
-			remove: vi.fn(async (id: string) => {
-				if (id === credentialId) credential = undefined;
-			}),
+			credentials: {
+				get: (id: string) => (id === credentialId ? credential : undefined),
+				remove: vi.fn(async (id: string) => {
+					if (id === credentialId) credential = undefined;
+				}),
+			},
 		} as unknown as AuthStorage;
 		const config = {
 			...CONFIG,
