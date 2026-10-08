@@ -6,6 +6,7 @@
 
 - Fixed IRC messages being delivered twice across pending delivery, wait consumption, and session restore; duplicate detection is scoped to sender and message ID and uses an incrementally maintained journal index.
 - Preserved IRC transport identity and custom source metadata through session persistence and transcript restore without changing message authority or parent steering envelopes.
+- Released undelivered IRC identities when interrupting and discarding queued parent steering, and prevented a late wait refresh from consuming a replacement session or branch's inbox.
 
 ## [18.8.4] - 2026-10-08
 

@@ -81,6 +81,106 @@ describe("IRC identity through AgentSession", () => {
 		}
 	});
 
+	for (const delivery of ["queued", "dequeued"] as const) {
+		it(`interrupt discards ${delivery} parent steering without blocking a same-identity resend`, async () => {
+			using temp = TempDir.createSync("@omp-irc-interrupt-");
+			const auth = await AuthStorage.create(path.join(temp.path(), "auth.db"));
+			const manager = SessionManager.inMemory(temp.path());
+			const recipient = `IrcInterrupt-${delivery}`;
+			const parent = "IrcInterruptParent";
+			const message: IrcMessage = {
+				id: "interrupt-id", from: parent, to: recipient, body: "synthetic parent update", ts: 42,
+			};
+			const interrupted = Promise.withResolvers<void>();
+			const releaseInterrupted = Promise.withResolvers<void>();
+			const retryReady = Promise.withResolvers<void>();
+			const releaseRetry = Promise.withResolvers<void>();
+			let session: AgentSession | undefined;
+			let firstResponse = true;
+			let modelCalls = 0;
+			let retry = false;
+			const mock = createMockModel({
+				provider: "openai",
+				id: "synthetic-interrupt-model",
+				handler: async () => {
+					if (firstResponse) {
+						firstResponse = false;
+						if (delivery === "dequeued") await session!.deliverIrcMessage(message);
+						else {
+							interrupted.resolve();
+							await releaseInterrupted.promise;
+						}
+					}
+					return { content: ["synthetic response"] };
+				},
+			});
+			const agent = new Agent({
+				getApiKey: () => "synthetic-key",
+				initialState: { model: mock.model, tools: [], messages: [] },
+				convertToLlm,
+				streamFn: mock.stream,
+			});
+			const removeGate = agent.addBeforeModelCallHook(async () => {
+				modelCalls++;
+				if (retry) {
+					retryReady.resolve();
+					await releaseRetry.promise;
+				} else if (delivery === "dequeued" && modelCalls > 1) {
+					interrupted.resolve();
+					await releaseInterrupted.promise;
+				}
+			});
+			const settings = Settings.isolated({ "compaction.enabled": false, "todo.enabled": false });
+			settings.setModelRole("default", `${mock.model.provider}/${mock.model.id}`);
+			const registry = AgentRegistry.global();
+			try {
+				session = new AgentSession({
+					agent, sessionManager: manager, settings, modelRegistry: new ModelRegistry(auth), agentId: recipient,
+				});
+				const ref = registry.register({
+					id: recipient, displayName: "synthetic recipient", kind: "sub", parentId: parent, session,
+				});
+				try {
+					const run = session.prompt("synthetic initial request");
+					await interrupted.promise;
+					if (delivery === "queued") {
+						await session.deliverIrcMessage(message);
+						session.clearQueue();
+						expect(agent.peekSteeringQueue()).toHaveLength(1);
+					} else {
+						expect(agent.peekSteeringQueue()).toEqual([]);
+					}
+					expect(manager.hasReceivedIrcMessage(parent, message.id)).toBe(false);
+					session.clearQueue({ forInterrupt: true });
+					const abort = session.abort();
+					releaseInterrupted.resolve();
+					await abort;
+					await run;
+					expect(agent.hasQueuedMessages()).toBe(false);
+					expect(manager.hasReceivedIrcMessage(parent, message.id)).toBe(false);
+					retry = true;
+					const resumed = session.prompt("synthetic retry request");
+					await retryReady.promise;
+					await session.deliverIrcMessage(message);
+					expect(agent.peekSteeringQueue()).toHaveLength(1);
+					releaseRetry.resolve();
+					await resumed;
+					await session.waitForIdle();
+					expect(manager.hasReceivedIrcMessage(parent, message.id)).toBe(true);
+				} finally {
+					registry.unregister(recipient, ref);
+				}
+			} finally {
+				releaseInterrupted.resolve();
+				releaseRetry.resolve();
+				removeGate();
+				await session?.abort();
+				await session?.dispose();
+				auth.close();
+			}
+		});
+	}
+
 	it("public custom-message dispatch persists source without promoting developer content to a user", async () => {
 		using temp = TempDir.createSync("@omp-irc-source-");
 		const auth = await AuthStorage.create(path.join(temp.path(), "auth.db"));

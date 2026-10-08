@@ -33,8 +33,18 @@ interface WaitMessaging {
 	consumptionBoundary: object | undefined;
 }
 
+/** The wait must still own this inbox before a destructive drain or bus take. */
+function isCurrentInbox(messaging: WaitMessaging | undefined): messaging is WaitMessaging {
+	if (!messaging) return false;
+	const currentManager = messaging.registry.get(messaging.senderId)?.session?.sessionManager;
+	return (
+		currentManager === messaging.sessionManager &&
+		(currentManager === undefined || currentManager.captureIrcConsumptionBoundary() === messaging.consumptionBoundary)
+	);
+}
+
 function takeQueuedMessage(messaging: WaitMessaging | undefined): IrcMessage | undefined {
-	if (!messaging) return undefined;
+	if (!isCurrentInbox(messaging)) return undefined;
 	return drainPendingInbox(messaging.registry, messaging.senderId) ?? IrcBus.global().take(messaging.senderId);
 }
 
@@ -127,7 +137,7 @@ export class WaitTool implements AgentTool<typeof waitSchema, CoordinationDetail
 		const serviceLeg = serviceRunning ? waitForOwnedServiceCompletion(this.session, serviceAbort.signal) : undefined;
 		const busAbort = new AbortController();
 		// Only `busAbort` can reject this leg, and it fires once the wait has settled.
-		const busLeg = messaging
+		const busLeg = isCurrentInbox(messaging)
 			? IrcBus.global()
 					.wait(messaging.senderId, {}, 0, busAbort.signal)
 					.catch(() => null)

@@ -3593,11 +3593,11 @@ export class AgentSession implements SettingsScope {
 			if (message.role === "custom" && message.customType === "ttsr-injection") {
 				this.#ttsr.markInjectedFromDetails(message.details);
 			}
-			this.#irc.markPersisted(message);
+			this.#irc.releaseReservation(message);
 			return;
 		}
 		this.#persistSessionMessageIfMissing(message);
-		this.#irc.markPersisted(message);
+		this.#irc.releaseReservation(message);
 	}
 
 	/**
@@ -8874,8 +8874,11 @@ export class AgentSession implements SettingsScope {
 			? isAdvisorCard
 			: m => !isUserAuthoredQueuedMessage(m) && !isHiddenUserCompanion(m);
 		for (const message of [...steeringAll, ...followUpAll]) {
-			if (!keep(message) && message.role === "custom" && message.customType === "ttsr-injection") {
-				this.#ttsr.releaseDeferredReservationFromDetails(message.details);
+			if (!keep(message)) {
+				this.#irc.releaseReservation(message);
+				if (message.role === "custom" && message.customType === "ttsr-injection") {
+					this.#ttsr.releaseDeferredReservationFromDetails(message.details);
+				}
 			}
 		}
 		this.agent.replaceQueues(steeringAll.filter(keep), followUpAll.filter(keep));

@@ -63,8 +63,8 @@ export class IrcBridge {
 		this.#deferredWakes = [];
 	}
 
-	/** Release only after the owning session has journaled message_end. */
-	markPersisted(record: AgentMessage): void {
+	/** Release after journaling or when the recipient explicitly discards undelivered input. */
+	releaseReservation(record: AgentMessage): void {
 		this.#bindSession();
 		const identity = incomingIrcIdentity(record);
 		if (!isRecord(identity) || typeof identity.from !== "string" || typeof identity.id !== "string") return;
@@ -230,7 +230,7 @@ export class IrcBridge {
 					...(wakeRelay === true ? { wakeRelay: true } : {}),
 				};
 				this.#host.sessionManager.recordConsumedIrcMessage(message);
-				this.markPersisted(record);
+				this.releaseReservation(record);
 				messages.push(message);
 			}
 		}
@@ -312,7 +312,7 @@ export class IrcBridge {
 					record.attribution ?? "agent",
 					record.timestamp,
 				);
-				this.markPersisted(record);
+				this.releaseReservation(record);
 				void this.#host.emitSessionEvent({ type: "irc_message", message: record });
 				return "injected";
 			}

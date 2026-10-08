@@ -51,7 +51,7 @@ function persist(manager: SessionManager, bridge: IrcBridge, record: AgentMessag
 		);
 	} else if (record.role === "user") manager.appendMessage(record);
 	else throw new Error("Expected an incoming message");
-	bridge.markPersisted(record);
+	bridge.releaseReservation(record);
 }
 
 afterEach(() => { vi.restoreAllMocks(); });
