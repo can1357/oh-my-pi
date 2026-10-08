@@ -10,6 +10,7 @@ import { claudeRankingStrategy } from "@oh-my-pi/pi-ai/usage/claude";
 import {
 	ATTEMPT_COOLDOWN_MS,
 	DEBOUNCE_BUCKET_MS,
+	IMMINENT_RESET_EXPIRY_MS,
 	REPORT_FRESHNESS_MS,
 	SALVAGE_MIN_USED_FRACTION,
 	type CodexResetTrigger,
@@ -173,12 +174,15 @@ function skipForEpisode(
 	input: ClaudeResetPlanInput,
 	accountKey: string,
 	attemptKey: string,
+	{ imminent = false }: { imminent?: boolean } = {},
 ): "already-attempted" | "deferred" | "cooldown" | undefined {
 	if (input.attemptedKeys.has(attemptKey)) return "already-attempted";
-	const blockedPrefix = `block|${accountKey}|`;
-	const salvagePrefix = `salvage|${accountKey}|`;
-	for (const [key, until] of input.deferredUntilByKey) {
-		if (until > input.nowMs && (key.startsWith(blockedPrefix) || key.startsWith(salvagePrefix))) return "deferred";
+	if (!imminent) {
+		const blockedPrefix = `block|${accountKey}|`;
+		const salvagePrefix = `salvage|${accountKey}|`;
+		for (const [key, until] of input.deferredUntilByKey) {
+			if (until > input.nowMs && (key.startsWith(blockedPrefix) || key.startsWith(salvagePrefix))) return "deferred";
+		}
 	}
 	const lastAttemptAt = input.lastAttemptAtByAccount.get(accountKey);
 	if (lastAttemptAt !== undefined && input.nowMs - lastAttemptAt < ATTEMPT_COOLDOWN_MS) return "cooldown";
@@ -253,7 +257,8 @@ export function planClaudeResetRedemptions(input: ClaudeResetPlanInput): ClaudeR
 			skip("credit-expired");
 			continue;
 		}
-		if (status.availableCount - Math.max(0, Math.trunc(input.settings.keepCredits)) < 1) {
+		const imminent = expiresAtMs !== undefined && expiresAtMs - input.nowMs <= IMMINENT_RESET_EXPIRY_MS;
+		if (!imminent && status.availableCount - Math.max(0, Math.trunc(input.settings.keepCredits)) < 1) {
 			skip("reserve");
 			continue;
 		}
@@ -310,6 +315,10 @@ export function planClaudeResetRedemptions(input: ClaudeResetPlanInput): ClaudeR
 		for (const snapshot of snapshots) {
 			const skip = (reason: ClaudeResetSkipReason) =>
 				skipped.push({ accountKey: snapshot.accountKey, rule: "blocked-account", reason });
+			if (snapshot.availableCount - Math.max(0, Math.trunc(input.settings.keepCredits)) < 1) {
+				skip("reserve");
+				continue;
+			}
 			const clears = new Set(snapshot.credit.clears ?? []);
 			const reportedBlockers = snapshot.limits
 				.filter(limit => isExhausted(limit) || (snapshot.credit.usedFractions?.[limit.id] ?? 0) >= 0.999)
@@ -416,88 +425,99 @@ export function planClaudeResetRedemptions(input: ClaudeResetPlanInput): ClaudeR
 	}
 
 	const salvages: ClaudeResetAction[] = [];
-	if (input.settings.salvageHorizonMs > 0) {
-		for (const snapshot of snapshots) {
-			if (snapshot.accountKey === restore?.accountKey) continue;
-			const skip = (reason: ClaudeResetSkipReason) =>
-				skipped.push({ accountKey: snapshot.accountKey, rule: "expiring-credit", reason });
-			if (snapshot.credit.program !== CEDAR_PROGRAM) {
-				skip("unsupported-program");
-				continue;
-			}
-			const expiresAtMs = creditExpiryMs(snapshot.credit);
-			if (
-				expiresAtMs === undefined ||
-				!Number.isFinite(expiresAtMs) ||
-				expiresAtMs <= input.nowMs ||
-				expiresAtMs - input.nowMs > input.settings.salvageHorizonMs
-			) {
-				skip("no-expiring-credit");
-				continue;
-			}
-			const clears = new Set(snapshot.credit.clears ?? []);
-			const serverBlockers = snapshot.credit.blocking ?? [];
-			if (serverBlockers.some(id => !snapshot.limits.some(limit => limit.id === id))) {
-				skip("unsupported-window");
-				continue;
-			}
-			const exhausted = [
-				...new Set([...snapshot.limits.filter(isExhausted).map(limit => limit.id), ...serverBlockers]),
-			];
-			if (exhausted.some(id => !clears.has(id))) {
-				skip("incomplete-coverage");
-				continue;
-			}
-			const covered = snapshot.limits.filter(limit => clears.has(limit.id));
-			if (covered.length === 0) {
-				skip("unsupported-window");
-				continue;
-			}
-			let fullest: { id: string; used: number } | undefined;
-			for (const limit of covered) {
-				const resolved = resolveUsedFraction(limit);
-				const observed = resolved === undefined || !Number.isFinite(resolved) ? 0 : Math.max(0, resolved);
-				const server = snapshot.credit.usedFractions?.[limit.id];
-				const used = Math.max(observed, typeof server === "number" && Number.isFinite(server) ? server : 0);
-				if (!fullest || used > fullest.used) fullest = { id: limit.id, used };
-			}
-			if (!fullest || fullest.used < SALVAGE_MIN_USED_FRACTION) {
-				skip("window-mostly-free");
-				continue;
-			}
-			if (snapshot.credit.requiresLimit === true && serverBlockers.length === 0 && !covered.some(isExhausted)) {
-				skip("no-blocked-window");
-				continue;
-			}
-			const attemptKey = claudeSalvageAttemptKey(
-				snapshot.accountKey,
-				snapshot.credit.id,
-				snapshot.credit.remainingCount ?? 0,
-				expiresAtMs,
-			);
-			const episodeSkip = skipForEpisode(input, snapshot.accountKey, attemptKey);
-			if (episodeSkip) {
-				skip(episodeSkip);
-				continue;
-			}
-			salvages.push({
-				reason: "expiring-credit",
-				target: snapshot.target,
-				accountKey: snapshot.accountKey,
-				attemptKey,
-				label: snapshot.label,
-				availableCount: snapshot.availableCount,
-				expiresInMs: expiresAtMs - input.nowMs,
-				salvageWindow: fullest.id,
-				salvageUsedFraction: fullest.used,
-				active: snapshot.active,
-				program: snapshot.credit.program,
-				title: snapshot.credit.title,
-				requiresLimit: snapshot.credit.requiresLimit === true,
-			});
+	for (const snapshot of snapshots) {
+		if (snapshot.accountKey === restore?.accountKey) continue;
+		const skip = (reason: ClaudeResetSkipReason) =>
+			skipped.push({ accountKey: snapshot.accountKey, rule: "expiring-credit", reason });
+		const expiresAtMs = creditExpiryMs(snapshot.credit);
+		const imminent =
+			expiresAtMs !== undefined &&
+			Number.isFinite(expiresAtMs) &&
+			expiresAtMs > input.nowMs &&
+			expiresAtMs - input.nowMs <= IMMINENT_RESET_EXPIRY_MS;
+		// The last-chance window is independent of the configured savings horizon.
+		if (!imminent && input.settings.salvageHorizonMs <= 0) continue;
+		if (!imminent && snapshot.credit.program !== CEDAR_PROGRAM) {
+			skip("unsupported-program");
+			continue;
 		}
-		salvages.sort((left, right) => (left.expiresInMs ?? 0) - (right.expiresInMs ?? 0));
+		if (
+			expiresAtMs === undefined ||
+			!Number.isFinite(expiresAtMs) ||
+			expiresAtMs <= input.nowMs ||
+			(!imminent && expiresAtMs - input.nowMs > input.settings.salvageHorizonMs)
+		) {
+			skip("no-expiring-credit");
+			continue;
+		}
+		const clears = new Set(snapshot.credit.clears ?? []);
+		const serverBlockers = snapshot.credit.blocking ?? [];
+		if (serverBlockers.some(id => !snapshot.limits.some(limit => limit.id === id))) {
+			skip("unsupported-window");
+			continue;
+		}
+		const exhausted = [
+			...new Set([...snapshot.limits.filter(isExhausted).map(limit => limit.id), ...serverBlockers]),
+		];
+		if (
+			exhausted.some(id => !clears.has(id)) ||
+			(snapshot.credit.program === JUNIPER_PROGRAM && exhausted.some(id => id !== FIVE_HOUR_LIMIT_ID))
+		) {
+			skip("incomplete-coverage");
+			continue;
+		}
+		const covered = snapshot.limits.filter(
+			limit =>
+				clears.has(limit.id) && (snapshot.credit.program !== JUNIPER_PROGRAM || limit.id === FIVE_HOUR_LIMIT_ID),
+		);
+		if (covered.length === 0) {
+			skip("unsupported-window");
+			continue;
+		}
+		let fullest: { id: string; used: number } | undefined;
+		for (const limit of covered) {
+			const resolved = resolveUsedFraction(limit);
+			const observed = resolved === undefined || !Number.isFinite(resolved) ? 0 : Math.max(0, resolved);
+			const server = snapshot.credit.usedFractions?.[limit.id];
+			const used = Math.max(observed, typeof server === "number" && Number.isFinite(server) ? server : 0);
+			if (!fullest || used > fullest.used) fullest = { id: limit.id, used };
+		}
+		if (!fullest || (!imminent && fullest.used < SALVAGE_MIN_USED_FRACTION)) {
+			skip("window-mostly-free");
+			continue;
+		}
+		if (snapshot.credit.requiresLimit === true && serverBlockers.length === 0 && !covered.some(isExhausted)) {
+			skip("no-blocked-window");
+			continue;
+		}
+		const attemptKey = claudeSalvageAttemptKey(
+			snapshot.accountKey,
+			snapshot.credit.id,
+			snapshot.credit.remainingCount ?? 0,
+			expiresAtMs,
+		);
+		const episodeSkip = skipForEpisode(input, snapshot.accountKey, attemptKey, { imminent });
+		if (episodeSkip) {
+			skip(episodeSkip);
+			continue;
+		}
+		salvages.push({
+			reason: "expiring-credit",
+			target: snapshot.target,
+			accountKey: snapshot.accountKey,
+			attemptKey,
+			label: snapshot.label,
+			availableCount: snapshot.availableCount,
+			expiresInMs: expiresAtMs - input.nowMs,
+			salvageWindow: fullest.id,
+			salvageUsedFraction: fullest.used,
+			active: snapshot.active,
+			program: snapshot.credit.program ?? "",
+			title: snapshot.credit.title,
+			requiresLimit: snapshot.credit.requiresLimit === true,
+		});
 	}
+	salvages.sort((left, right) => (left.expiresInMs ?? 0) - (right.expiresInMs ?? 0));
 
 	return { actions: restore ? [restore, ...salvages] : salvages, skipped };
 }

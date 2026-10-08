@@ -18,7 +18,8 @@ pub fn supports(program: &str) -> bool {
 			| "diff"
 			| "format"
 			| "pipe"
-			| "ps" | "ping"
+			| "ps"
+			| "ping"
 			| "ssh"
 			| "sops"
 	)
@@ -663,11 +664,16 @@ fn is_count_summary(trimmed: &str) -> bool {
 				matches!(
 					kind,
 					"failed"
-						| "passed" | "skipped"
-						| "flaky" | "pass"
-						| "fail" | "error"
-						| "errors" | "warning"
-						| "warnings" | "information"
+						| "passed"
+						| "skipped"
+						| "flaky"
+						| "pass"
+						| "fail"
+						| "error"
+						| "errors"
+						| "warning"
+						| "warnings"
+						| "information"
 						| "informations"
 				)
 			});

@@ -260,7 +260,8 @@ impl AtSpiAx {
 		let root = Self::object(&root).clone();
 		let (item, object) = self.rt.block_on(self.resolve_menu(&root, path))?;
 		require_command(&item)?;
-		// Recheck the resolver and ancestor chain after discovery, before dispatch.
+		// Recheck the resolver and ancestor chain after discovery, before
+		// dispatch.
 		if Self::object(&self.window_root(window)?) != &root {
 			return Err(failure("target frame changed during menu discovery"));
 		}

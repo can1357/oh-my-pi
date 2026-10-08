@@ -4,6 +4,26 @@ provider "mistral" {
 	default-model "devstral-medium-latest"
 	env "MISTRAL_API_KEY"
 
+	// Public-preview aliases and current USD / 1M token pricing:
+	// https://docs.mistral.ai/models/mistral-large-4-0 (2026-10-06).
+	// Public preview is 50% off: input $0.68, output $2.09, cached input $0.07.
+	// List prices: input $1.36, output $4.18, cached input $0.14; update when preview ends.
+	// No separate maximum output-token limit is published.
+	seed api="openai-completions" base-url="https://api.mistral.ai/v1" bundle="always" {
+		model "mistral-large-4" name="Mistral Large 4" {
+			reasoning #true
+			input "text" "image"
+			cost input=0.68 output=2.09 cache-read=0.07 cache-write=0
+			limits context=1000000
+		}
+		model "mistral-large-4-0" name="Mistral Large 4" {
+			reasoning #true
+			input "text" "image"
+			cost input=0.68 output=2.09 cache-read=0.07 cache-write=0
+			limits context=1000000
+		}
+	}
+
 	thinking-mode "effort"
 	class "unknown" {
 		thinking-efforts "minimal" "low" "medium" "high" "xhigh"

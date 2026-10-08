@@ -28,7 +28,7 @@ import { providerEntry } from "@oh-my-pi/pi-catalog/compat/providers";
 import { MODEL_KINDS, modelKind, type ModelKind } from "@oh-my-pi/pi-catalog/types";
 import type { Component, TUI } from "../tui";
 import { extractPrintableText, matchesKey } from "../keys";
-import { fuzzyFilter } from "../fuzzy";
+import { FuzzyCorpus } from "../fuzzy";
 import { formatKeyHint, formatKeyHints } from "../app-keybindings";
 import { boundKeys, editorKey, editorKeys } from "../chrome/keybinding-hints";
 import type { KeyName } from "../key-hint-format";
@@ -170,6 +170,12 @@ export interface ModelHubCallbacks {
 	onSwitchPreset?: (name: string) => void | Promise<void>;
 	/** Persist a new quick-switch cycle order (the ctrl+p role cycle). */
 	onCycleOrderChange?: (order: string[]) => void;
+	/**
+	 * Persist typed text as `model`'s own compaction point: a token count (`90000`,
+	 * `90k`, `1M`), a percentage (`80%`), or empty to reset. Returns an error
+	 * message for input it rejects, which keeps the field open.
+	 */
+	onCompactionPointChange?: (model: Model, input: string) => string | undefined;
 	onCancel: () => void;
 }
 
@@ -224,6 +230,14 @@ type StripState =
 			kind: "name";
 			purpose: "role" | "preset";
 			input: Input;
+	  }
+	| {
+			/** Footer text input setting `model`'s compaction point; `error` is the last rejection. */
+			kind: "name";
+			purpose: "compaction";
+			model: Model;
+			input: Input;
+			error?: string;
 	  };
 
 /** A Roles-view command; keys and the picker's action bar both run {@link ModelHubComponent}'s `#runRolesAction`. */
@@ -236,6 +250,7 @@ type RolesAction =
 	| "later"
 	| "new"
 	| "thinking"
+	| "compaction"
 	| "save"
 	| "nextPreset"
 	| "prevPreset";
@@ -249,6 +264,7 @@ const ROLES_ACTION_KEYS: Record<string, RolesAction> = {
 	"]": "later",
 	n: "new",
 	t: "thinking",
+	k: "compaction",
 	s: "save",
 	// Letter twins of ctrl+←/→, which macOS reserves for switching Spaces.
 	p: "nextPreset",
@@ -286,6 +302,8 @@ function providerInitials(providerId: string): string {
 
 const PROVIDER_REFRESH_DEBOUNCE_MS = 120;
 const RECENT_LIMIT = 15;
+/** Accepted compaction point input, shown beside the field. */
+const COMPACTION_INPUT_HINT = "90000 · 90k · 1m · 80% · empty resets";
 const MODEL_KIND_TABS: ReadonlyArray<"all" | ModelKind> = ["all", ...MODEL_KINDS];
 const ROLE_TABS = ["all", "chat", "kind"] as const;
 type RoleTab = (typeof ROLE_TABS)[number];
@@ -334,7 +352,15 @@ export class ModelHubComponent implements Component {
 	#roles: RoleAssignments = {};
 	#availableItems: ModelBrowserItem[] = [];
 	#recentItems: ModelBrowserItem[] = [];
+	/** Selectors of {@link #recentItems}, rebuilt with it, for search hit counts. */
+	#recentSelectors: ReadonlySet<string> = new Set();
 	#candidateItems: ModelBrowserItem[] = [];
+	/** {@link #availableItems} when the candidates are that whole catalog (All scope, no role filter). */
+	#candidateCatalog: readonly ModelBrowserItem[] | undefined;
+	/** {@link #availableItems} when the browser's base items are that whole catalog; its query ranking then covers every count. */
+	#browserCatalog: readonly ModelBrowserItem[] | undefined;
+	/** Fuzzy index over {@link #availableItems}, for match counts while the browser holds a narrower scope. */
+	#catalogCorpus: { items: readonly ModelBrowserItem[]; corpus: FuzzyCorpus<ModelBrowserItem> } | undefined;
 	#modelKindTab: "all" | ModelKind = "all";
 	#roleTab: RoleTab = "all";
 	#configError: string | undefined;
@@ -428,6 +454,7 @@ export class ModelHubComponent implements Component {
 				row: RolesRow | undefined;
 				roles: RoleAssignments;
 				rows: readonly RolesRow[];
+				revision: number;
 				children: readonly NativeChild[];
 		  }
 		| undefined;
@@ -587,6 +614,7 @@ export class ModelHubComponent implements Component {
 			if (item) this.#recentItems.push(item);
 			if (this.#recentItems.length >= RECENT_LIMIT) break;
 		}
+		this.#recentSelectors = new Set(this.#recentItems.map(item => item.selector));
 
 		this.#buildSidebar(allModels, availableModels);
 		this.#restoreSidebarAnchor(anchor);
@@ -823,11 +851,13 @@ export class ModelHubComponent implements Component {
 				? items.filter(item => this.#settings.getRoleInfo(assigning.role).accepts(item.model))
 				: items;
 		this.#candidateItems = [...scoped];
+		this.#candidateCatalog = scoped === this.#availableItems ? this.#availableItems : undefined;
 		this.#applyModelKind();
 	}
 
 	#applyModelKind(): void {
 		const kind = this.#modelKindTab;
+		this.#browserCatalog = kind === "all" ? this.#candidateCatalog : undefined;
 		this.#browser.setItems(
 			kind === "all"
 				? [...this.#candidateItems]
@@ -936,16 +966,14 @@ export class ModelHubComponent implements Component {
 			this.#composeEntries();
 			return;
 		}
-		const matches = fuzzyFilter(this.#availableItems, query, modelSearchText);
+		const matches = this.#catalogMatches(query);
 		const counts = new Map<string, number>();
+		let recentCount = 0;
 		for (const item of matches) {
 			counts.set(item.provider, (counts.get(item.provider) ?? 0) + 1);
+			if (this.#recentSelectors.has(item.selector)) recentCount++;
 		}
-		const recentSelectors = new Set(this.#recentItems.map(item => item.selector));
-		this.#recentSearchCount = matches.reduce(
-			(total, item) => total + (recentSelectors.has(item.selector) ? 1 : 0),
-			0,
-		);
+		this.#recentSearchCount = recentCount;
 		this.#searchTotal = matches.length;
 		this.#searchCounts = counts;
 		this.#composeEntries();
@@ -957,6 +985,24 @@ export class ModelHubComponent implements Component {
 		) {
 			this.#setActiveEntry("all");
 		}
+	}
+
+	/**
+	 * Catalog items matching a non-blank `query`. When the browser holds the
+	 * whole catalog its ranking for this query already ran, so reuse it;
+	 * otherwise scan a catalog index kept across keystrokes.
+	 */
+	#catalogMatches(query: string): readonly ModelBrowserItem[] {
+		if (this.#browserCatalog === this.#availableItems && this.#browser.query === query) {
+			const ranked = this.#browser.queryMatches;
+			if (ranked) return ranked;
+		}
+		let cached = this.#catalogCorpus;
+		if (cached?.items !== this.#availableItems) {
+			cached = { items: this.#availableItems, corpus: new FuzzyCorpus(this.#availableItems, modelSearchText) };
+			this.#catalogCorpus = cached;
+		}
+		return cached.corpus.rank(query).map(result => result.item);
 	}
 
 	/**
@@ -1731,10 +1777,39 @@ export class ModelHubComponent implements Component {
 		this.#strip = { kind: "name", purpose, input: new Input() };
 	}
 
-	/** Validate and commit the name strip: a new role jumps into assigning it, a preset name saves it. */
+	/** The model a Roles row resolves to (assigned role or resolvable fallback), whose compaction point `k` edits. */
+	#roleRowModel(): Model | undefined {
+		const row = this.#rolesRows[this.#roleIndex];
+		if (row?.kind === "role") return this.#roles[row.role]?.model;
+		if (row?.kind === "fallback") return this.#resolveFallbackEntry(row.role, row.chainIndex)?.item.model;
+		return undefined;
+	}
+
+	/** Open the footer input for the Roles row's model compaction point, prefilled with its own entry. */
+	#openCompactionStrip(): void {
+		if (!this.#callbacks.onCompactionPointChange) return;
+		const model = this.#roleRowModel();
+		if (!model) return;
+		const input = new Input();
+		input.setValue(this.#settings.compactionPointFor?.(model)?.draft ?? "");
+		this.#strip = { kind: "name", purpose: "compaction", model, input };
+	}
+
+	/** Validate and commit the name strip: a new role, a preset name, or a compaction point. */
 	#submitNameStrip(): void {
 		const strip = this.#strip;
 		if (strip?.kind !== "name") return;
+		if (strip.purpose === "compaction") {
+			const error = this.#callbacks.onCompactionPointChange?.(strip.model, strip.input.getValue());
+			if (error !== undefined) {
+				strip.error = error;
+				return;
+			}
+			this.#strip = null;
+			this.#frame.chipRanges = [];
+			this.#refreshAfterMutation();
+			return;
+		}
 		if (strip.purpose === "preset") {
 			this.#submitPresetName();
 			return;
@@ -1993,6 +2068,7 @@ export class ModelHubComponent implements Component {
 				return;
 			}
 			strip.input.handleInput(data);
+			if (strip.purpose === "compaction") strip.error = undefined;
 			return;
 		}
 		if (moveStripSelection(strip, data)) return;
@@ -2155,6 +2231,9 @@ export class ModelHubComponent implements Component {
 			case "nextPreset":
 			case "prevPreset":
 				this.#switchPreset(action === "nextPreset" ? 1 : -1);
+				return;
+			case "compaction":
+				this.#openCompactionStrip();
 				return;
 			case "thinking":
 				if (role) {
@@ -2631,6 +2710,7 @@ export class ModelHubComponent implements Component {
 		const strip = this.#strip;
 		if (strip) {
 			if (strip.kind === "name") {
+				if (strip.purpose === "compaction") return `${enter} set compaction point · ${cancel} cancel`;
 				if (strip.purpose === "preset") {
 					return `${enter} save preset · ${cancel} cancel`;
 				}
@@ -2662,13 +2742,17 @@ export class ModelHubComponent implements Component {
 				return `${upDown} providers · ${enterRight} roles · ${altLeftRight} tabs${presets} · ${cancel} close`;
 			}
 			const row = this.#rolesRows[this.#roleIndex];
+			const compaction =
+				this.#callbacks.onCompactionPointChange && this.#roleRowModel()
+					? ` · ${formatKeyHint("k")} compaction limit`
+					: "";
 			if (row?.kind === "fallback") {
 				// Advertise `t` only when the entry resolves: wildcards always
 				// inherit and unknown models have no ladder to offer, so the
 				// action would be inert there.
 				const editable = this.#resolveFallbackEntry(row.role, row.chainIndex) !== undefined;
 				const thinking = editable ? ` · ${formatKeyHint("t")} thinking` : "";
-				return `${upDown} rows · ${enter} replace · ${formatKeyHint("f")} add another · ${formatKeyHint("x")} remove${thinking} · [/] reorder · ${left} providers`;
+				return `${upDown} rows · ${enter} replace · ${formatKeyHint("f")} add another · ${formatKeyHint("x")} remove${thinking}${compaction} · [/] reorder · ${left} providers`;
 			}
 			if (row?.kind === "chainKey") {
 				return `${upDown} rows · ${formatKeyHints(["enter", "f"])} add fallback · ${formatKeyHint("x")} clear chain · ${left} providers`;
@@ -2682,7 +2766,7 @@ export class ModelHubComponent implements Component {
 			const thinking = editable ? ` · ${formatKeyHint("t")} thinking` : "";
 			const savePreset = this.#callbacks.onSavePreset ? ` · ${formatKeyHint("s")} save preset` : "";
 			const switchPreset = this.#presets().names.length > 0 ? ` · ${formatKeyHints(["p", "shift+p"])} preset` : "";
-			return `${upDown} rows · ${enter} pick · ${formatKeyHint("f")} fallback · ${formatKeyHint("x")} clear${thinking} · ${formatKeyHint("c")} cycle · [/] reorder · ${formatKeyHint("n")} new${savePreset}${switchPreset}`;
+			return `${upDown} rows · ${enter} pick · ${formatKeyHint("f")} fallback · ${formatKeyHint("x")} clear${thinking}${compaction} · ${formatKeyHint("c")} cycle · [/] reorder · ${formatKeyHint("n")} new${savePreset}${switchPreset}`;
 		}
 		if (entry.kind === "provider" && entry.locked) {
 			return entry.oauth
@@ -2707,12 +2791,22 @@ export class ModelHubComponent implements Component {
 
 	#renderStrip(width: number, strip: StripState): string {
 		if (strip.kind === "name") {
-			const preset = strip.purpose === "preset";
-			const labelText = preset ? "Preset name:" : "New role name:";
+			const labelText =
+				strip.purpose === "compaction"
+					? `Compact ${strip.model.id} at:`
+					: strip.purpose === "preset"
+						? "Preset name:"
+						: "New role name:";
 			const label = theme.fg("accent", labelText);
 			const inputWidth = Math.max(8, Math.min(32, width - visibleWidth(labelText) - 24));
 			const inputLine = strip.input.render(inputWidth)[0] ?? "";
-			return truncateToWidth(`${label} ${inputLine} ${theme.fg("dim", "(letters, digits, - and _)")}`, width);
+			const hint =
+				strip.purpose !== "compaction"
+					? theme.fg("dim", "(letters, digits, - and _)")
+					: strip.error
+						? theme.fg("error", strip.error)
+						: theme.fg("dim", COMPACTION_INPUT_HINT);
+			return truncateToWidth(`${label} ${inputLine} ${hint}`, width);
 		}
 
 		const prefix =
@@ -3363,12 +3457,14 @@ export class ModelHubComponent implements Component {
 		if (strip) {
 			const apply =
 				strip.kind === "name"
-					? pickerAction(
-							strip.purpose === "preset" ? "presetName" : "roleName",
-							strip.purpose === "preset" ? "Save preset" : "Create role",
-							"enter",
-							{ primary: true },
-						)
+					? strip.purpose === "compaction"
+						? pickerAction("compactionPoint", "Set compaction point", "enter", { primary: true })
+						: pickerAction(
+								strip.purpose === "preset" ? "presetName" : "roleName",
+								strip.purpose === "preset" ? "Save preset" : "Create role",
+								"enter",
+								{ primary: true },
+							)
 					: pickerAction(
 							"stripApply",
 							strip.kind === "thinking" ? "Apply" : strip.kind === "scope" ? "Save to scope" : "Assign / clear",
@@ -3393,6 +3489,10 @@ export class ModelHubComponent implements Component {
 			const roleAction = (action: RolesAction, label: string, key: string, primary = false) =>
 				pickerAction(`roles:${action}`, label, key, primary ? { primary: true } : undefined);
 			const actions: (TspPickerAction | undefined)[] = [];
+			const compaction =
+				this.#callbacks.onCompactionPointChange && this.#roleRowModel()
+					? roleAction("compaction", "Compaction limit", "k")
+					: undefined;
 			switch (row?.kind) {
 				case "role": {
 					const assigned = this.#roles[row.role];
@@ -3401,6 +3501,7 @@ export class ModelHubComponent implements Component {
 						roleAction("fallback", "Add fallback", "f"),
 						assigned && !assigned.autoSelected ? roleAction("clear", "Clear", "x") : undefined,
 						this.#roleThinkingTarget(row.role) ? roleAction("thinking", "Thinking", "t") : undefined,
+						compaction,
 						roleAction("cycle", this.#cycleOrder().includes(row.role) ? "Leave cycle" : "Add to cycle", "c"),
 						roleAction("new", "New role", "n"),
 						this.#callbacks.onSavePreset ? roleAction("save", "Save preset", "s") : undefined,
@@ -3416,6 +3517,7 @@ export class ModelHubComponent implements Component {
 						this.#resolveFallbackEntry(row.role, row.chainIndex)
 							? roleAction("thinking", "Thinking", "t")
 							: undefined,
+						compaction,
 						roleAction("earlier", "Earlier", "["),
 						roleAction("later", "Later", "]"),
 					);
@@ -3452,6 +3554,19 @@ export class ModelHubComponent implements Component {
 	/** The open strip as the picker's chip strip (role assignment, save scope, thinking level, new role name). */
 	#pickerStrip(strip: StripState): NonNullable<TspPickerProps["strip"]> {
 		if (strip.kind === "name") {
+			if (strip.purpose === "compaction") {
+				return {
+					label: [
+						span("Compact ", "muted"),
+						span(strip.model.id, "mono"),
+						span(" at ", "muted"),
+						span(strip.input.getValue(), "mono"),
+						span("▏", "accent"),
+						span(`  ${strip.error ?? COMPACTION_INPUT_HINT}`, strip.error ? "error" : "dim"),
+					],
+					items: [],
+				};
+			}
 			return {
 				label: [
 					span(strip.purpose === "preset" ? "Preset name " : "New role name ", "muted"),
@@ -3591,7 +3706,14 @@ export class ModelHubComponent implements Component {
 	/** The selected Roles-view row's preview: its model's facts and its fallback chain. */
 	#rolePreview(row: RolesRow | undefined): readonly NativeChild[] {
 		const memo = this.#pickerRolePreview;
-		if (memo !== undefined && memo.row === row && memo.roles === this.#roles && memo.rows === this.#rolesRows) {
+		const revision = this.#settings.revision;
+		if (
+			memo !== undefined &&
+			memo.row === row &&
+			memo.roles === this.#roles &&
+			memo.rows === this.#rolesRows &&
+			memo.revision === revision
+		) {
 			return memo.children;
 		}
 		const children: NativeChild[] = [];
@@ -3665,7 +3787,7 @@ export class ModelHubComponent implements Component {
 				);
 				break;
 		}
-		this.#pickerRolePreview = { row, roles: this.#roles, rows: this.#rolesRows, children };
+		this.#pickerRolePreview = { row, roles: this.#roles, rows: this.#rolesRows, revision, children };
 		return children;
 	}
 
@@ -3765,6 +3887,9 @@ export class ModelHubComponent implements Component {
 			case "presetName":
 				this.#submitPresetName();
 				return;
+			case "compactionPoint":
+				this.#submitNameStrip();
+				return;
 			case "cancel":
 				if (this.#strip) this.#closeStrip();
 				return;
@@ -3815,6 +3940,18 @@ export class ModelHubComponent implements Component {
 		const strip = this.#strip;
 		if (!strip) return undefined;
 		if (strip.kind === "name") {
+			if (strip.purpose === "compaction") {
+				return node(
+					"row",
+					{ gap: "sm", align: "center" },
+					[
+						text([span(`Compact ${strip.model.id} at:`, "accent")]),
+						col([strip.input], { grow: 1 }),
+						text([span(strip.error ?? COMPACTION_INPUT_HINT, strip.error ? "error" : "dim")]),
+					],
+					"compactionPoint",
+				);
+			}
 			const preset = strip.purpose === "preset";
 			return node(
 				"row",
@@ -3868,9 +4005,11 @@ export class ModelHubComponent implements Component {
 		if (strip) {
 			switch (strip.kind) {
 				case "name":
-					return strip.purpose === "preset"
-						? [keys("save preset", "enter"), cancel("cancel")]
-						: [keys("create + pick model", "enter"), cancel("cancel")];
+					return strip.purpose === "compaction"
+						? [keys("set compaction point", "enter"), cancel("cancel")]
+						: strip.purpose === "preset"
+							? [keys("save preset", "enter"), cancel("cancel")]
+							: [keys("create + pick model", "enter"), cancel("cancel")];
 				case "role":
 					return [keys("choose", "left", "right"), keys("assign/clear", "enter"), cancel("cancel")];
 				case "scope":
@@ -3904,6 +4043,8 @@ export class ModelHubComponent implements Component {
 				];
 			}
 			const row = this.#rolesRows[this.#roleIndex];
+			const compaction =
+				this.#callbacks.onCompactionPointChange && this.#roleRowModel() ? keys("compaction limit", "k") : undefined;
 			if (row?.kind === "fallback") {
 				// Advertise `t` only where a strip would open, as the ANSI footer does.
 				const editable = this.#resolveFallbackEntry(row.role, row.chainIndex) !== undefined;
@@ -3913,6 +4054,7 @@ export class ModelHubComponent implements Component {
 					keys("add another", "f"),
 					keys("remove", "x"),
 					editable ? keys("thinking", "t") : undefined,
+					compaction,
 					reorder,
 					keys("providers", "left"),
 				];
@@ -3935,6 +4077,7 @@ export class ModelHubComponent implements Component {
 				keys("fallback", "f"),
 				keys("clear", "x"),
 				editable ? keys("thinking", "t") : undefined,
+				compaction,
 				keys("cycle", "c"),
 				reorder,
 				keys("new", "n"),

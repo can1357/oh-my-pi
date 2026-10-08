@@ -3316,6 +3316,56 @@ func (v *LoginProvider) decodeFrom(raw map[string]json.RawMessage) error {
 	return nil
 }
 
+// A stored credential `logout` can remove; `active` marks credentials the session may be using.
+type LogoutAccount struct {
+	CredentialID int64             `json:"credentialId"`
+	Provider     string            `json:"provider"`
+	Label        string            `json:"label"`
+	Detail       string            `json:"detail"`
+	Type         LogoutAccountType `json:"type"`
+	Active       bool              `json:"active"`
+}
+
+func (v *LogoutAccount) UnmarshalJSON(data []byte) error {
+	return decodeWith(data, "LogoutAccount", v.decodeFrom)
+}
+
+func (v *LogoutAccount) decodeFrom(raw map[string]json.RawMessage) error {
+	var out LogoutAccount
+	d := fieldDecoder{raw: raw, owner: "LogoutAccount"}
+	d.required("credentialId", &out.CredentialID)
+	d.required("provider", &out.Provider)
+	d.required("label", &out.Label)
+	d.required("detail", &out.Detail)
+	d.required("type", &out.Type)
+	d.required("active", &out.Active)
+	if d.err != nil {
+		return d.err
+	}
+	*v = out
+	return nil
+}
+
+type LogoutAccountType string
+
+const (
+	LogoutAccountTypeAPIKey LogoutAccountType = "api_key"
+	LogoutAccountTypeOauth  LogoutAccountType = "oauth"
+)
+
+func (v *LogoutAccountType) UnmarshalJSON(data []byte) error {
+	s, err := decodeString(data, "LogoutAccountType")
+	if err != nil {
+		return err
+	}
+	switch value := LogoutAccountType(s); value {
+	case LogoutAccountTypeAPIKey, LogoutAccountTypeOauth:
+		*v = value
+		return nil
+	}
+	return unknownValue("LogoutAccountType", s)
+}
+
 type HandoffResult struct {
 	SavedPath *string `json:"savedPath,omitempty"`
 }
@@ -7167,6 +7217,44 @@ func (v *LoginResult) decodeFrom(raw map[string]json.RawMessage) error {
 	return nil
 }
 
+type GetLogoutAccountsResult struct {
+	Accounts []LogoutAccount `json:"accounts"`
+}
+
+func (v *GetLogoutAccountsResult) UnmarshalJSON(data []byte) error {
+	return decodeWith(data, "GetLogoutAccountsResult", v.decodeFrom)
+}
+
+func (v *GetLogoutAccountsResult) decodeFrom(raw map[string]json.RawMessage) error {
+	var out GetLogoutAccountsResult
+	d := fieldDecoder{raw: raw, owner: "GetLogoutAccountsResult"}
+	d.required("accounts", &out.Accounts)
+	if d.err != nil {
+		return d.err
+	}
+	*v = out
+	return nil
+}
+
+type LogoutResult struct {
+	RemainingSource *string `json:"remainingSource,omitempty"`
+}
+
+func (v *LogoutResult) UnmarshalJSON(data []byte) error {
+	return decodeWith(data, "LogoutResult", v.decodeFrom)
+}
+
+func (v *LogoutResult) decodeFrom(raw map[string]json.RawMessage) error {
+	var out LogoutResult
+	d := fieldDecoder{raw: raw, owner: "LogoutResult"}
+	d.optional("remainingSource", &out.RemainingSource)
+	if d.err != nil {
+		return d.err
+	}
+	*v = out
+	return nil
+}
+
 type PredictWordResult struct {
 	Suffix *string `json:"suffix"`
 }
@@ -7865,6 +7953,31 @@ func (c Commands) Login(ctx context.Context, p LoginCommand) (string, error) {
 	var out LoginResult
 	err := c.call(ctx, "login", p, 600*time.Second, &out)
 	return out.ProviderID, err
+}
+
+// GetLogoutAccountsCommand holds the parameters of "get_logout_accounts".
+type GetLogoutAccountsCommand struct {
+	ProviderID string `json:"providerId"`
+}
+
+// GetLogoutAccounts sends "get_logout_accounts": List the stored credentials `logout` can remove for a provider, active first.
+func (c Commands) GetLogoutAccounts(ctx context.Context, p GetLogoutAccountsCommand) ([]LogoutAccount, error) {
+	var out GetLogoutAccountsResult
+	err := c.call(ctx, "get_logout_accounts", p, 0, &out)
+	return out.Accounts, err
+}
+
+// LogoutCommand holds the parameters of "logout".
+type LogoutCommand struct {
+	ProviderID   string `json:"providerId"`
+	CredentialID int64  `json:"credentialId"`
+}
+
+// Logout sends "logout": Remove one stored credential; fails when it is no longer stored. `remainingSource` names auth that still applies.
+func (c Commands) Logout(ctx context.Context, p LogoutCommand) (LogoutResult, error) {
+	var out LogoutResult
+	err := c.call(ctx, "logout", p, 0, &out)
+	return out, err
 }
 
 // PredictWordCommand holds the parameters of "predict_word".

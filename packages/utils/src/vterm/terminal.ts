@@ -2,10 +2,10 @@ import {
 	BufferLine,
 	type BufferState,
 	BufferView,
-	blankCell,
 	type CellAttributes,
 	type CellData,
-	defaultAttributes,
+	DEFAULT_CELL_ATTRIBUTES,
+	sharedBlankCell,
 } from "./buffer";
 
 const segmenter = new Intl.Segmenter();
@@ -39,7 +39,7 @@ export interface TerminalBuffers {
 interface SavedCursor {
 	x: number;
 	y: number;
-	attrs: CellAttributes;
+	attrs: Readonly<CellAttributes>;
 }
 
 function createState(columns: number, rows: number): BufferState {
@@ -52,8 +52,36 @@ function createState(columns: number, rows: number): BufferState {
 	};
 }
 
-function cloneCell(cell: CellData): CellData {
-	return { chars: cell.chars, width: cell.width, attrs: { ...cell.attrs } };
+function sameAttributes(a: Readonly<CellAttributes>, b: Readonly<CellAttributes>): boolean {
+	return (
+		a.bold === b.bold &&
+		a.dim === b.dim &&
+		a.italic === b.italic &&
+		a.underline === b.underline &&
+		a.inverse === b.inverse &&
+		a.strikethrough === b.strikethrough &&
+		a.overline === b.overline &&
+		a.fgMode === b.fgMode &&
+		a.fg === b.fg &&
+		a.bgMode === b.bgMode &&
+		a.bg === b.bg
+	);
+}
+
+/** Parses CSI parameters (`;`/`:` separated); null when the body holds anything but digits. */
+function parseCsiParams(body: string): number[] | null {
+	const params: number[] = [];
+	let value = 0;
+	for (let index = 0; index < body.length; index++) {
+		const code = body.charCodeAt(index);
+		if (code >= 0x30 && code <= 0x39) value = value * 10 + (code - 0x30);
+		else if (code === 0x3b || code === 0x3a) {
+			params.push(value);
+			value = 0;
+		} else return null;
+	}
+	params.push(value);
+	return params;
 }
 
 /** Behavior-compatible reimplementation of @xterm/headless's used surface. */
@@ -72,7 +100,12 @@ export class Terminal {
 	#alternate: BufferState;
 	#active: BufferState;
 	#usingAlternate = false;
-	#attrs = defaultAttributes();
+	// Renditions are immutable and shared by every cell printed with them;
+	// SGR builds a new frozen object instead of mutating this one.
+	#attrs: Readonly<CellAttributes> = DEFAULT_CELL_ATTRIBUTES;
+	// Frozen printable-ASCII cells for #attrs, indexed by char code - 0x20.
+	#asciiCells: CellData[] = [];
+	#asciiCellsAttrs: Readonly<CellAttributes> | undefined;
 	#scrollTop = 0;
 	#scrollBottom: number;
 	#originMode = false;
@@ -149,13 +182,30 @@ export class Terminal {
 	}
 
 	#parse(text: string): void {
-		let printable = "";
-		const flush = () => {
-			if (!printable) return;
-			for (const part of segmenter.segment(printable)) this.#print(part.segment);
-			printable = "";
-		};
-		for (const char of text) {
+		const length = text.length;
+		let index = 0;
+		while (index < length) {
+			if (this.#state === "ground") {
+				let end = index;
+				while (end < length) {
+					const code = text.charCodeAt(end);
+					if (code < 0x20 || code === 0x7f) break;
+					end++;
+				}
+				if (end > index) {
+					this.#printRun(text, index, end);
+					index = end;
+					continue;
+				}
+				const char = text[index]!;
+				index++;
+				if (char === "\x1b") this.#state = "escape";
+				else this.#handleControl(char);
+				continue;
+			}
+			const code = text.codePointAt(index)!;
+			const char = code > 0xffff ? text.slice(index, index + 2) : text[index]!;
+			index += char.length;
 			if (this.#state === "string") {
 				if (this.#stringEscape && char === "\\") {
 					this.#state = "ground";
@@ -172,30 +222,41 @@ export class Terminal {
 				this.#handleEscape(char);
 				continue;
 			}
-			if (this.#state === "csi") {
-				if (char >= "@" && char <= "~") {
-					this.#handleCsi(this.#sequence, char);
-					this.#sequence = "";
-					this.#state = "ground";
-				} else if (char === "\x1b") {
-					this.#state = "escape";
-					this.#sequence = "";
-				} else {
-					this.#sequence += char;
-				}
-				continue;
-			}
-			if (char === "\x1b") {
-				flush();
+			if (char >= "@" && char <= "~") {
+				this.#handleCsi(this.#sequence, char);
+				this.#sequence = "";
+				this.#state = "ground";
+			} else if (char === "\x1b") {
 				this.#state = "escape";
-			} else if (char < " " || char === "\x7f") {
-				flush();
-				this.#handleControl(char);
+				this.#sequence = "";
 			} else {
-				printable += char;
+				this.#sequence += char;
 			}
 		}
-		flush();
+	}
+
+	/**
+	 * Prints a run of non-control text. Printable ASCII is one cell wide and
+	 * every boundary between two ASCII characters is a grapheme break, so ASCII
+	 * stretches skip segmentation; the last ASCII character before non-ASCII text
+	 * may start a cluster (combining mark, keycap) and goes to the segmenter.
+	 */
+	#printRun(text: string, start: number, end: number): void {
+		let index = start;
+		while (index < end) {
+			let asciiEnd = index;
+			while (asciiEnd < end && text.charCodeAt(asciiEnd) < 0x80) asciiEnd++;
+			if (asciiEnd < end && asciiEnd > index) asciiEnd--;
+			for (; index < asciiEnd; index++) this.#putAscii(text.charCodeAt(index));
+			if (index >= end) return;
+			// Segment up to the first break between two ASCII characters.
+			let clusterEnd = index + 1;
+			while (clusterEnd < end && !(text.charCodeAt(clusterEnd) < 0x80 && text.charCodeAt(clusterEnd - 1) < 0x80)) {
+				clusterEnd++;
+			}
+			for (const part of segmenter.segment(text.slice(index, clusterEnd))) this.#print(part.segment);
+			index = clusterEnd;
+		}
 	}
 
 	#handleControl(char: string): void {
@@ -262,10 +323,12 @@ export class Terminal {
 		const privateMode = raw.startsWith("?");
 		const greater = raw.startsWith(">");
 		const body = privateMode || greater ? raw.slice(1) : raw;
-		const params = body
-			.replaceAll(":", ";")
-			.split(";")
-			.map(value => (value === "" ? 0 : Number(value)));
+		const params =
+			parseCsiParams(body) ??
+			body
+				.replaceAll(":", ";")
+				.split(";")
+				.map(value => (value === "" ? 0 : Number(value)));
 		const first = params[0] ?? 0;
 		const amount = Math.max(1, first);
 		switch (final) {
@@ -359,12 +422,30 @@ export class Terminal {
 	}
 
 	#print(grapheme: string): void {
-		let width = Bun.stringWidth(grapheme);
+		const width = Bun.stringWidth(grapheme);
 		if (width === 0) {
 			this.#appendCombining(grapheme);
 			return;
 		}
-		width = Math.min(2, width);
+		const cellWidth = Math.min(2, width);
+		this.#placeCell(Object.freeze({ chars: grapheme, width: cellWidth, attrs: this.#attrs }), cellWidth);
+	}
+
+	#putAscii(code: number): void {
+		if (this.#asciiCellsAttrs !== this.#attrs) {
+			this.#asciiCells = [];
+			this.#asciiCellsAttrs = this.#attrs;
+		}
+		const slot = code - 0x20;
+		let cell = this.#asciiCells[slot];
+		if (!cell) {
+			cell = Object.freeze({ chars: String.fromCharCode(code), width: 1, attrs: this.#attrs });
+			this.#asciiCells[slot] = cell;
+		}
+		this.#placeCell(cell, 1);
+	}
+
+	#placeCell(cell: CellData, width: number): void {
 		if (this.#pendingWrap || (width === 2 && this.#active.cursorX === this.cols - 1)) {
 			if (!this.#autowrap) {
 				this.#active.cursorX = this.cols - width;
@@ -377,9 +458,9 @@ export class Terminal {
 		const column = Math.min(this.#active.cursorX, this.cols - 1);
 		if (this.#insertMode) this.#shiftCells(line, column, width);
 		this.#clearWideAt(line, column);
-		line.cells[column] = { chars: grapheme, width, attrs: { ...this.#attrs } };
+		line.cells[column] = cell;
 		if (width === 2 && column + 1 < this.cols) {
-			line.cells[column + 1] = { chars: "", width: 0, attrs: { ...this.#attrs } };
+			line.cells[column + 1] = Object.freeze({ chars: "", width: 0, attrs: cell.attrs });
 		}
 		this.#active.cursorX = column + width;
 		this.#pendingWrap = this.#active.cursorX >= this.cols;
@@ -396,7 +477,9 @@ export class Terminal {
 		if (!line) return;
 		while (column >= 0 && line.cells[column]?.width === 0) column--;
 		const cell = line.cells[column];
-		if (cell?.chars) cell.chars += mark;
+		// Cells are frozen and may be shared; replace instead of mutating.
+		if (cell?.chars)
+			line.cells[column] = Object.freeze({ chars: cell.chars + mark, width: cell.width, attrs: cell.attrs });
 	}
 
 	#lineFeed(wrapped: boolean): void {
@@ -489,8 +572,8 @@ export class Terminal {
 	}
 
 	#eraseRange(line: BufferLine, start: number, end: number): void {
-		for (let column = Math.max(0, start); column < Math.min(this.cols, end); column++)
-			line.cells[column] = blankCell(this.#attrs);
+		const blank = sharedBlankCell(this.#attrs);
+		for (let column = Math.max(0, start); column < Math.min(this.cols, end); column++) line.cells[column] = blank;
 		this.#repairWideCells(line);
 	}
 
@@ -521,14 +604,18 @@ export class Terminal {
 	}
 
 	#shiftCells(line: BufferLine, column: number, count: number): void {
-		line.cells.splice(column, 0, ...Array.from({ length: count }, () => blankCell(this.#attrs)));
+		// Inserting more than a row's worth only pushes everything past the edge.
+		const blank = sharedBlankCell(this.#attrs);
+		const blanks = Array.from({ length: Math.min(count, this.cols) }, () => blank);
+		line.cells.splice(column, 0, ...blanks);
 		line.cells.length = this.cols;
 	}
 
 	#deleteCells(count: number): void {
 		const line = this.#currentLine();
 		line.cells.splice(this.#active.cursorX, count);
-		while (line.cells.length < this.cols) line.cells.push(blankCell(this.#attrs));
+		const blank = sharedBlankCell(this.#attrs);
+		while (line.cells.length < this.cols) line.cells.push(blank);
 		this.#repairWideCells(line);
 	}
 
@@ -537,64 +624,67 @@ export class Terminal {
 	}
 
 	#clearWideAt(line: BufferLine, column: number): void {
-		if (line.cells[column]?.width === 0 && column > 0) line.cells[column - 1] = blankCell(this.#attrs);
-		if (line.cells[column]?.width === 2 && column + 1 < this.cols) line.cells[column + 1] = blankCell(this.#attrs);
+		const width = line.cells[column]?.width;
+		if (width === 0 && column > 0) line.cells[column - 1] = sharedBlankCell(this.#attrs);
+		if (width === 2 && column + 1 < this.cols) line.cells[column + 1] = sharedBlankCell(this.#attrs);
 	}
 
 	#repairWideCells(line: BufferLine): void {
 		for (let column = 0; column < this.cols; column++) {
 			const cell = line.cells[column]!;
 			if (cell.width === 0 && (column === 0 || line.cells[column - 1]?.width !== 2))
-				line.cells[column] = blankCell(this.#attrs);
+				line.cells[column] = sharedBlankCell(this.#attrs);
 			if (cell.width === 2 && (column === this.cols - 1 || line.cells[column + 1]?.width !== 0))
-				line.cells[column] = blankCell(this.#attrs);
+				line.cells[column] = sharedBlankCell(this.#attrs);
 		}
 	}
 
 	#setRendition(values: number[]): void {
 		const params = values.length === 0 ? [0] : values;
+		// Copy-on-write: cells keep referencing the previous rendition object.
+		const attrs: CellAttributes = { ...this.#attrs };
 		for (let index = 0; index < params.length; index++) {
 			const code = params[index] ?? 0;
-			if (code === 0) this.#attrs = defaultAttributes();
-			else if (code === 1) this.#attrs.bold = true;
-			else if (code === 2) this.#attrs.dim = true;
-			else if (code === 3) this.#attrs.italic = true;
-			else if (code === 4 || code === 21) this.#attrs.underline = true;
-			else if (code === 7) this.#attrs.inverse = true;
-			else if (code === 9) this.#attrs.strikethrough = true;
+			if (code === 0) Object.assign(attrs, DEFAULT_CELL_ATTRIBUTES);
+			else if (code === 1) attrs.bold = true;
+			else if (code === 2) attrs.dim = true;
+			else if (code === 3) attrs.italic = true;
+			else if (code === 4 || code === 21) attrs.underline = true;
+			else if (code === 7) attrs.inverse = true;
+			else if (code === 9) attrs.strikethrough = true;
 			else if (code === 22) {
-				this.#attrs.bold = false;
-				this.#attrs.dim = false;
-			} else if (code === 23) this.#attrs.italic = false;
-			else if (code === 24) this.#attrs.underline = false;
-			else if (code === 27) this.#attrs.inverse = false;
-			else if (code === 29) this.#attrs.strikethrough = false;
-			else if (code === 53) this.#attrs.overline = true;
-			else if (code === 55) this.#attrs.overline = false;
+				attrs.bold = false;
+				attrs.dim = false;
+			} else if (code === 23) attrs.italic = false;
+			else if (code === 24) attrs.underline = false;
+			else if (code === 27) attrs.inverse = false;
+			else if (code === 29) attrs.strikethrough = false;
+			else if (code === 53) attrs.overline = true;
+			else if (code === 55) attrs.overline = false;
 			else if (code >= 30 && code <= 37) {
-				this.#attrs.fgMode = 1;
-				this.#attrs.fg = code - 30;
+				attrs.fgMode = 1;
+				attrs.fg = code - 30;
 			} else if (code >= 40 && code <= 47) {
-				this.#attrs.bgMode = 1;
-				this.#attrs.bg = code - 40;
+				attrs.bgMode = 1;
+				attrs.bg = code - 40;
 			} else if (code >= 90 && code <= 97) {
-				this.#attrs.fgMode = 1;
-				this.#attrs.fg = code - 82;
+				attrs.fgMode = 1;
+				attrs.fg = code - 82;
 			} else if (code >= 100 && code <= 107) {
-				this.#attrs.bgMode = 1;
-				this.#attrs.bg = code - 92;
-			} else if (code === 39) this.#attrs.fgMode = 0;
-			else if (code === 49) this.#attrs.bgMode = 0;
+				attrs.bgMode = 1;
+				attrs.bg = code - 92;
+			} else if (code === 39) attrs.fgMode = 0;
+			else if (code === 49) attrs.bgMode = 0;
 			else if (code === 38 || code === 48) {
 				const foreground = code === 38;
 				const mode = params[index + 1];
 				if (mode === 5 && params[index + 2] !== undefined) {
 					if (foreground) {
-						this.#attrs.fgMode = 1;
-						this.#attrs.fg = params[index + 2]! & 0xff;
+						attrs.fgMode = 1;
+						attrs.fg = params[index + 2]! & 0xff;
 					} else {
-						this.#attrs.bgMode = 1;
-						this.#attrs.bg = params[index + 2]! & 0xff;
+						attrs.bgMode = 1;
+						attrs.bg = params[index + 2]! & 0xff;
 					}
 					index += 2;
 				} else if (mode === 2 && params[index + 4] !== undefined) {
@@ -603,16 +693,18 @@ export class Terminal {
 						((params[index + 3]! & 0xff) << 8) |
 						(params[index + 4]! & 0xff);
 					if (foreground) {
-						this.#attrs.fgMode = 2;
-						this.#attrs.fg = color;
+						attrs.fgMode = 2;
+						attrs.fg = color;
 					} else {
-						this.#attrs.bgMode = 2;
-						this.#attrs.bg = color;
+						attrs.bgMode = 2;
+						attrs.bg = color;
 					}
 					index += 4;
 				}
 			}
 		}
+		if (sameAttributes(attrs, this.#attrs)) return;
+		this.#attrs = sameAttributes(attrs, DEFAULT_CELL_ATTRIBUTES) ? DEFAULT_CELL_ATTRIBUTES : Object.freeze(attrs);
 	}
 
 	#setScrollRegion(params: number[]): void {
@@ -643,21 +735,20 @@ export class Terminal {
 	}
 
 	#saveCursor(): void {
-		this.#saved = { x: this.#active.cursorX, y: this.#active.cursorY, attrs: { ...this.#attrs } };
+		this.#saved = { x: this.#active.cursorX, y: this.#active.cursorY, attrs: this.#attrs };
 	}
 
 	#restoreCursor(): void {
 		if (!this.#saved) return;
 		this.#active.cursorX = Math.min(this.cols - 1, this.#saved.x);
 		this.#active.cursorY = Math.min(this.rows - 1, this.#saved.y);
-		this.#attrs = { ...this.#saved.attrs };
+		this.#attrs = this.#saved.attrs;
 		this.#pendingWrap = false;
 	}
 
 	#enterAlternate(saveCursor: boolean): void {
 		if (this.#usingAlternate) return;
-		if (saveCursor)
-			this.#alternateSaved = { x: this.#normal.cursorX, y: this.#normal.cursorY, attrs: { ...this.#attrs } };
+		if (saveCursor) this.#alternateSaved = { x: this.#normal.cursorX, y: this.#normal.cursorY, attrs: this.#attrs };
 		this.#alternate = createState(this.cols, this.rows);
 		this.#active = this.#alternate;
 		this.#usingAlternate = true;
@@ -673,7 +764,7 @@ export class Terminal {
 		if (restoreCursor && this.#alternateSaved) {
 			this.#normal.cursorX = this.#alternateSaved.x;
 			this.#normal.cursorY = this.#alternateSaved.y;
-			this.#attrs = { ...this.#alternateSaved.attrs };
+			this.#attrs = this.#alternateSaved.attrs;
 		}
 		this.#scrollTop = 0;
 		this.#scrollBottom = this.rows - 1;
@@ -681,7 +772,7 @@ export class Terminal {
 	}
 
 	#reset(): void {
-		this.#attrs = defaultAttributes();
+		this.#attrs = DEFAULT_CELL_ATTRIBUTES;
 		this.#normal = createState(this.cols, this.rows);
 		this.#alternate = createState(this.cols, this.rows);
 		this.#usingAlternate = false;
@@ -704,7 +795,8 @@ export class Terminal {
 			const group = groups.at(-1)!;
 			const used = line.isWrapped || state.lines[row + 1]?.isWrapped ? line.cells.length : this.#usedColumns(line);
 			if (row === absoluteCursor) group.cursorOffset = group.cells.length + state.cursorX;
-			for (let column = 0; column < used; column++) group.cells.push(cloneCell(line.cells[column]!));
+			// Cells are immutable, so the reflowed grid reuses them.
+			for (let column = 0; column < used; column++) group.cells.push(line.cells[column]!);
 		}
 		const lines: BufferLine[] = [];
 		let cursorAbsolute = 0;
@@ -725,8 +817,9 @@ export class Terminal {
 							continue;
 						}
 						if (cell.width === 2 && target === columns - 1) break;
-						line.cells[target] = cloneCell(cell);
-						if (cell.width === 2) line.cells[target + 1] = { chars: "", width: 0, attrs: { ...cell.attrs } };
+						line.cells[target] = cell;
+						if (cell.width === 2)
+							line.cells[target + 1] = Object.freeze({ chars: "", width: 0, attrs: cell.attrs });
 						target += cell.width;
 						source += cell.width;
 					}

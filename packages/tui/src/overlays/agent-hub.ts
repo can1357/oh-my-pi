@@ -200,6 +200,12 @@ const DATA_CHANGE_RENDER_COALESCE_MS = 100;
 /** Double-tap window for the table's left-left "close hub" gesture. */
 const LEFT_TAP_WINDOW_MS = 500;
 
+function compareRosterAgents(a: AgentRecordLike, b: AgentRecordLike): number {
+	return (
+		STATUS_ORDER[a.status] - STATUS_ORDER[b.status] || b.lastActivity - a.lastActivity || a.id.localeCompare(b.id)
+	);
+}
+
 function activityGlyph(row: AgentActivityRow): string {
 	if (row.status === "error") return theme.fg("error", theme.status.error);
 	if (row.status === "aborted") return theme.fg("warning", theme.status.aborted);
@@ -358,11 +364,10 @@ export class AgentHubOverlayComponent<TRecord extends AgentRecordLike = AgentRec
 	#rows: TRecord[] = [];
 	#statusCounts: Record<AgentStatus, number> = { running: 0, idle: 0, parked: 0, aborted: 0 };
 	#selectedRow = 0;
-	/** Stable roster order captured on first refresh: keyboard navigation must
-	 *  not jump as agents heartbeat. Existing agent generations keep their rank
-	 *  while the hub is open; newly appearing generations append at the end. */
+	/** Initial status/recency rank stays fixed while open; new generations
+	 *  prepend without changing the relative order of existing rows. */
 	#rowOrder: Map<TRecord, number> | undefined;
-	#nextRowOrder = 0;
+	#nextNewRowOrder = 0;
 	#hoveredRow: number | null = null;
 	/** Per-render screen-line to agent-row map, shared by click and hover routing. */
 	#hitRows: Array<number | undefined> = [];
@@ -614,6 +619,11 @@ export class AgentHubOverlayComponent<TRecord extends AgentRecordLike = AgentRec
 	 */
 	armCloseTap(): void {
 		this.#lastLeftTap = Date.now();
+	}
+
+	/** Show `section`, as a slash-command deep link into an already-open hub does. */
+	showSection(section: AgentHubSection): void {
+		this.#switchSection(section);
 	}
 
 	/**
@@ -1519,35 +1529,35 @@ export class AgentHubOverlayComponent<TRecord extends AgentRecordLike = AgentRec
 		const refs = this.#registry.list().filter(ref => ref.id !== MAIN_AGENT_ID);
 		this.#observedById = new Map();
 		for (const session of this.#observers.getSessions()) this.#observedById.set(session.id, session);
-		// Stable roster order: capture the status+recency ranking once so keyboard
-		// navigation is not disrupted by heartbeats (issue #10524). Existing rows
-		// keep their rank while the hub is open; new agents append at the end.
-		// Defer the capture until persisted-subagent discovery settles so a
-		// mid-scan refresh cannot freeze a partial roster (the remaining agents
-		// would otherwise append in readdir order instead of being ranked).
+		// Capture the status+recency ranking once so keyboard navigation does
+		// not jump on heartbeats. Defer until persisted-subagent discovery
+		// settles so a partial roster is not frozen in readdir order.
 		const rowOrder = this.#rowOrder;
 		let ordered: TRecord[];
 		if (!rowOrder) {
-			ordered = refs.sort(
-				(a, b) =>
-					STATUS_ORDER[a.status] - STATUS_ORDER[b.status] ||
-					b.lastActivity - a.lastActivity ||
-					a.id.localeCompare(b.id),
-			);
+			ordered = refs.sort(compareRosterAgents);
 			if (!this.#loadingPersistedSubagents && ordered.length > 0) {
-				this.#rowOrder = new Map();
-				for (const ref of ordered) this.#rowOrder.set(ref, this.#nextRowOrder++);
+				const rowOrder = new Map<TRecord, number>();
+				for (const [index, ref] of ordered.entries()) rowOrder.set(ref, index);
+				this.#rowOrder = rowOrder;
 			}
 		} else {
 			for (const rankedRef of rowOrder.keys()) {
 				if (!refs.includes(rankedRef)) rowOrder.delete(rankedRef);
 			}
-			ordered = refs.sort(
-				(a, b) => (rowOrder.get(a) ?? Number.MAX_SAFE_INTEGER) - (rowOrder.get(b) ?? Number.MAX_SAFE_INTEGER),
-			);
-			for (const ref of ordered) {
-				if (!rowOrder.has(ref)) rowOrder.set(ref, this.#nextRowOrder++);
+			// Each batch of newly appearing generations uses the initial sort,
+			// then takes ranks above every agent already on screen.
+			let newcomers: TRecord[] | undefined;
+			for (const ref of refs) {
+				if (!rowOrder.has(ref)) (newcomers ??= []).push(ref);
 			}
+			if (newcomers) {
+				newcomers.sort(compareRosterAgents);
+				for (let i = newcomers.length - 1; i >= 0; i--) {
+					rowOrder.set(newcomers[i]!, --this.#nextNewRowOrder);
+				}
+			}
+			ordered = refs.sort((a, b) => rowOrder.get(a)! - rowOrder.get(b)!);
 		}
 		const query = this.#agentFilter.getValue().trim();
 		const rosterRows =
@@ -1556,7 +1566,7 @@ export class AgentHubOverlayComponent<TRecord extends AgentRecordLike = AgentRec
 				: ordered;
 
 		if (this.#viewMode === "tree") {
-			const tree = projectAgentTree(rosterRows);
+			const tree = projectAgentTree(rosterRows, rowOrder);
 			this.#rows = tree.rows;
 			this.#treeDepthById = tree.depthById;
 			this.#treeParentById = tree.parentById;
@@ -1589,7 +1599,8 @@ export class AgentHubOverlayComponent<TRecord extends AgentRecordLike = AgentRec
 		for (const ref of rosterRows) this.#statusCounts[ref.status]++;
 		this.#refreshAggregate();
 		this.#refreshActivityData(rosterRows);
-		this.#refreshActivityRows();
+		// The 2,000-row activity query only feeds the Activity tab; switching to it refreshes.
+		if (this.#section === "activity") this.#refreshActivityRows();
 	}
 
 	#refreshActivityData(refs: readonly TRecord[]): void {
@@ -1620,7 +1631,7 @@ export class AgentHubOverlayComponent<TRecord extends AgentRecordLike = AgentRec
 		void Promise.all(pending)
 			.then(() => {
 				if (this.#disposed || generation !== this.#activitySyncGeneration) return;
-				this.#refreshActivityRows();
+				if (this.#section === "activity") this.#refreshActivityRows();
 				this.#requestRender();
 			})
 			.catch(() => {

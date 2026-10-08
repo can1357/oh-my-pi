@@ -1794,11 +1794,12 @@ mod tests {
 		);
 	}
 
-	// Regression: an isolated-task baseline once rendered the whole index-vs-HEAD
-	// patch before anyone looked at its size; on a 15-way jj conflict exported to
-	// git that was ~1.7M blobs and grew the process to 141 GB. A cap one byte
-	// under the patch must surface as `OutputTooLarge`; a cap equal to it must
-	// return the same bytes as an uncapped render.
+	// Regression: an isolated-task baseline once rendered the whole
+	// index-vs-HEAD patch before anyone looked at its size; on a 15-way jj
+	// conflict exported to git that was ~1.7M blobs and grew the process to
+	// 141 GB. A cap one byte under the patch must surface as
+	// `OutputTooLarge`; a cap equal to it must return the same bytes as an
+	// uncapped render.
 	#[test]
 	fn max_bytes_rejects_oversized_patch_and_passes_one_within_cap() {
 		let dir = fixture();

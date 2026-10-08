@@ -497,11 +497,11 @@ async fn miss_with_cjk_content_returns_match_error_without_panicking() {
 
 #[tokio::test]
 async fn overlapping_selection_spans_report_a_miss_without_panicking() {
-	// Garbled ⟪…⟫ marker glyphs can resolve overlapping selection spans. Splicing
-	// a multibyte (CJK) replacement into the mutated `content[start..end]` rewrite
-	// buffer then re-indexes it on a mid-char edge and panicked the worker instead
-	// of reporting the miss. The unmappable selection must surface as a match
-	// error. (#12529)
+	// Garbled ⟪…⟫ marker glyphs can resolve overlapping selection spans.
+	// Splicing a multibyte (CJK) replacement into the mutated
+	// `content[start..end]` rewrite buffer then re-indexes it on a mid-char
+	// edge and panicked the worker instead of reporting the miss. The
+	// unmappable selection must surface as a match error. (#12529)
 	let workspace = Workspace::new(EditMode::Sloppy);
 	workspace.write("a.txt", "d");
 	let writer = DiskWriter::default();

@@ -4,6 +4,7 @@ import { parseToolCallArguments } from "../utils/tool-call-arguments";
 import { asRecord, mintToolCallId, partialSuffixOverlapAny } from "./coercion";
 import dialectPrompt from "./deepseek.md" with { type: "text" };
 import { assistantTranscriptParts, collectToolResultRun, messageContentText, stringifyJson } from "./rendering";
+import { TerminatorWait } from "./terminator-wait";
 import type {
 	DialectDefinition,
 	DialectRenderOptions,
@@ -141,6 +142,7 @@ export class DeepSeekInbandScanner implements InbandScanner {
 	#bareDsmlOpenVisible = false;
 	/** Last few visible characters, so a bare opener split across chunks is still seen. */
 	#visibleTail = "";
+	readonly #closeWait = new TerminatorWait();
 
 	constructor(options: InbandScannerOptions = {}) {
 		this.#parseThinking = options.parseThinking ?? true;
@@ -148,11 +150,17 @@ export class DeepSeekInbandScanner implements InbandScanner {
 
 	feed(text: string): InbandScanEvent[] {
 		if (text.length === 0) return [];
-		this.#buffer += text;
-		return this.#consume(false);
+		if (this.#closeWait.absorb(text)) return [];
+		this.#buffer = this.#closeWait.release(this.#buffer) + text;
+		const events = this.#consume(false);
+		if (this.#state === "args" || this.#state === "legacyArgs") {
+			this.#closeWait.arm(DEEPSEEK_TOOL_CALL_END, this.#buffer);
+		}
+		return events;
 	}
 
 	flush(): InbandScanEvent[] {
+		this.#buffer = this.#closeWait.release(this.#buffer);
 		return this.#consume(true);
 	}
 

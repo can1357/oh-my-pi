@@ -574,8 +574,9 @@ impl Worker {
 			.then(|| InputLease::acquire(token))
 			.transpose()?;
 		token.check()?;
-		// A full capture replaces coordinates only if it completes in its original
-		// generation. Keep the previous frame by move, not by cloning an atlas.
+		// A full capture replaces coordinates only if it completes in its
+		// original generation. Keep the previous frame by move, not by
+		// cloning an atlas.
 		let previous_frame = request
 			.frame_target()
 			.and_then(|target| self.frames.remove(target.key()));

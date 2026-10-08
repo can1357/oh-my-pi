@@ -326,7 +326,8 @@ impl Session {
 
 			let mut tag: Option<String> = None;
 			// Updated files register their response rows (plus still-valid prior
-			// provenance) against the minted tag: (store key, carried lines, drifted).
+			// provenance) against the minted tag: (store key, carried lines,
+			// drifted).
 			let mut provenance: Option<(PathBuf, Vec<u32>, bool)> = None;
 			match file.op {
 				FileOp::Delete => self.store.invalidate(&canonical),
@@ -379,8 +380,9 @@ impl Session {
 				.map_or_else(|| format!("[{header_path}]"), |tag| format!("[{header_path}#{tag}]"));
 			let text = format_file_text(&file, &header);
 			if let (Some((key, mut seen_lines, drifted)), Some(tag)) = (provenance, &response_tag) {
-				// A drifted write shows rows of the previewed text, not of the recorded
-				// version the tag names, so only carried lines stay anchorable.
+				// A drifted write shows rows of the previewed text, not of the
+				// recorded version the tag names, so only carried lines
+				// stay anchorable.
 				if !drifted {
 					seen_lines.extend(seen_lines_from_body(&text));
 				}

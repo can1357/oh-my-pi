@@ -3,7 +3,6 @@ import { stripVTControlCharacters } from "node:util";
 import {
 	clearRenderCache,
 	extractMarkdownLinks,
-	LEX_WINDOW_BYTES,
 	Markdown,
 	renderInlineMarkdown,
 } from "@oh-my-pi/pi-tui/components/markdown";
@@ -14,7 +13,6 @@ import { type Component, TUI } from "@oh-my-pi/pi-tui/tui";
 import { visibleWidth } from "@oh-my-pi/pi-tui/utils";
 import { Chalk } from "@oh-my-pi/pi-utils/chalk";
 import { mathStartIndex } from "@oh-my-pi/pi-utils/math-delimiters";
-import { straddleFirstWindow } from "./markdown-fixtures.js";
 import { defaultMarkdownTheme } from "./test-themes.js";
 import { VirtualTerminal } from "./virtual-terminal.js";
 
@@ -2615,11 +2613,9 @@ describe("math start hint", () => {
 	});
 });
 
-describe("windowed lexing (documents past WINDOWED_LEX_MIN_BYTES)", () => {
-	// Large documents are lexed in bounded windows because Bun's regex engine
-	// rescans the whole remaining source for marked's `^`-anchored block rules.
-	// Every construct below straddles window cuts; a bad cut is visible in the
-	// rendered output.
+describe("large documents", () => {
+	// Large documents lex in one pass; these pin the constructs that span many
+	// blocks and the linear cost of the display-math block scans.
 	afterEach(() => clearRenderCache());
 
 	const filler = (label: string, lines: number) =>
@@ -2632,13 +2628,11 @@ describe("windowed lexing (documents past WINDOWED_LEX_MIN_BYTES)", () => {
 			.render(width)
 			.map(line => stripVTControlCharacters(line).trimEnd());
 
-	// A document containing CR is lexed in one pass (marked normalizes CRLF,
-	// which shifts raw offsets), so its CRLF twin is the one-pass oracle. Each
-	// test also asserts the rows a bad cut changes, which still hold if CR text
-	// is ever windowed too.
+	// marked normalizes CRLF before tokenizing, so the CRLF twin is an oracle
+	// for the LF document.
 	const onePass = (text: string, width = 100) => plain(text.replaceAll("\n", "\r\n"), width);
 
-	it("resolves a reference definition that lands in a later window", () => {
+	it("resolves a reference definition at the end of a large document", () => {
 		const doc = `Follow [the label][ref] first.\n\n${filler("body", 400)}\n\n[ref]: https://example.com/late\n`;
 		expect(doc.length).toBeGreaterThan(16 * 1024);
 
@@ -2650,14 +2644,13 @@ describe("windowed lexing (documents past WINDOWED_LEX_MIN_BYTES)", () => {
 		expect(rendered.filter(line => line.includes("https://example.com/late"))).toHaveLength(1);
 	});
 
-	it("keeps a fenced block longer than one window intact", () => {
+	it("keeps a long fenced block intact", () => {
 		const code = Array.from({ length: 200 }, (_, i) => `const value${i} = ${i};`).join("\n");
 		const doc = `${filler("intro", 300)}\n\n\`\`\`ts\n${code}\n\`\`\`\n\n${filler("outro", 20)}`;
 		expect(code.length).toBeGreaterThan(2 * 1024);
 
 		const rendered = plain(doc);
-		// Exactly one fence pair: a window cut inside the block would close and
-		// reopen it (or spill code lines into prose).
+		// Exactly one fence pair: no code line spills into prose.
 		expect(rendered.filter(line => line.trimStart().startsWith("```"))).toHaveLength(2);
 		const first = rendered.findIndex(line => line.includes("const value0 = 0;"));
 		expect(first).toBeGreaterThan(-1);
@@ -2666,7 +2659,7 @@ describe("windowed lexing (documents past WINDOWED_LEX_MIN_BYTES)", () => {
 		}
 	});
 
-	it("numbers an ordered list continuously across window cuts", () => {
+	it("numbers a long ordered list continuously", () => {
 		const items = Array.from({ length: 400 }, (_, i) => `${i + 1}. item ${i} padded with extra words to add bytes`);
 		const doc = `${filler("intro", 60)}\n\n${items.join("\n")}\n`;
 		expect(doc.length).toBeGreaterThan(16 * 1024);
@@ -2675,7 +2668,7 @@ describe("windowed lexing (documents past WINDOWED_LEX_MIN_BYTES)", () => {
 		for (const n of [1, 137, 400]) {
 			expect(rendered.some(line => line.includes(`${n}. item ${n - 1} `))).toBe(true);
 		}
-		// A window cut that restarted the list would renumber later items.
+		// A restarted list would renumber later items.
 		expect(rendered.filter(line => line.includes(" 1. item 0 ")).length).toBeLessThanOrEqual(1);
 	});
 
@@ -2685,7 +2678,7 @@ describe("windowed lexing (documents past WINDOWED_LEX_MIN_BYTES)", () => {
 		["$$", "$$"],
 		["\\[", "\\]"],
 	] as const) {
-		it(`keeps a ${opener} display-math block with blank lines intact across window cuts`, () => {
+		it(`keeps a ${opener} display-math block with blank lines intact`, () => {
 			const doc = ["Intro line before the math.", "", opener, mathLines, closer, "", filler("outro", 250)].join(
 				"\n",
 			);
@@ -2693,8 +2686,8 @@ describe("windowed lexing (documents past WINDOWED_LEX_MIN_BYTES)", () => {
 			expect(doc.lastIndexOf(closer) - doc.indexOf(opener)).toBeGreaterThan(2 * 1024);
 
 			const rendered = plain(doc);
-			// A cut inside the block renders the delimiters (`$$`, or `[` for the
-			// escaped bracket) and the raw TeX (`x{0} = y{0} + z_{0}`) as prose.
+			// A split block renders the delimiters (`$$`, or `[` for the escaped
+			// bracket) and the raw TeX (`x{0} = y{0} + z_{0}`) as prose.
 			expect(rendered.slice(0, 3)).toEqual(["Intro line before the math.", "", "x₀ = y₀ + z₀"]);
 			expect(rendered.filter(line => ["$$", "[", "]"].includes(line.trim()))).toEqual([]);
 			expect(rendered.filter(line => line.includes("{"))).toEqual([]);
@@ -2720,34 +2713,8 @@ describe("windowed lexing (documents past WINDOWED_LEX_MIN_BYTES)", () => {
 		expect(rendered).toEqual(onePass(doc));
 	});
 
-	it("does not cut a fence whose blank line ends at the probe window's edge", () => {
-		const doc = straddleFirstWindow("```", i => `code line ${i}`, "```", filler("outro", 400));
-		expect(doc.length).toBeGreaterThan(16 * 1024);
-		const rendered = plain(doc);
-		expect(rendered.filter(line => line.trimStart().startsWith("```"))).toHaveLength(2);
-		expect(rendered).toEqual(onePass(doc));
-	});
-
-	it("does not cut an HTML comment whose blank line ends at the probe window's edge", () => {
-		const doc = straddleFirstWindow("<!--", i => `comment line ${i}`, "-->", filler("outro", 400));
-		expect(doc.length).toBeGreaterThan(16 * 1024);
-		const rendered = plain(doc);
-		expect(rendered.filter(line => line.includes("<!--"))).toEqual([]);
-		expect(rendered).toEqual(onePass(doc));
-	});
-
-	it("does not cut an HTML block whose blank line ends at the probe window's edge", () => {
-		const doc = straddleFirstWindow("<div>", i => `html line ${i}`, "</div>", filler("outro", 400));
-		expect(doc.length).toBeGreaterThan(16 * 1024);
-		const rendered = plain(doc);
-		// A cut at the window's edge drops the blank row in front of the block's
-		// last line.
-		expect(rendered[rendered.findLastIndex(line => line.startsWith("html line ")) - 1]).toBe("");
-		expect(rendered).toEqual(onePass(doc));
-	});
-
-	// Windowing exists to keep lexing linear, so the display-math check at a
-	// window cut must not rescan the rest of the document for every opener.
+	// The display-math block scans must not rescan the rest of the document for
+	// every opener.
 	const displayMathScans: ReadonlyArray<readonly [string, (bytes: number) => string]> = [
 		// Each paragraph opens a `\[` block that no `\]` line ever closes.
 		[
@@ -2757,11 +2724,26 @@ describe("windowed lexing (documents past WINDOWED_LEX_MIN_BYTES)", () => {
 				return unit.repeat(Math.ceil(bytes / unit.length));
 			},
 		],
-		// One `\[` block spans the document, so every window short of its `\]`
-		// stops at the opener.
+		// One `\[` block spans the document.
 		[
 			"one `\\[` block whose `\\]` ends the document",
 			bytes => `Intro.\n\n\\[\n${filler("inside", Math.ceil(bytes / 60))}\n\\]\n\nOutro.\n`,
+		],
+		// Each heading is followed by a bare environment that no `\end` closes.
+		[
+			"bare math environments that never close",
+			bytes => {
+				const unit = "# heading\n\\begin{align}\na &= b\n";
+				return unit.repeat(Math.ceil(bytes / unit.length));
+			},
+		],
+		// Consecutive closed bare environments with no blank line between them.
+		[
+			"consecutive closed bare math environments",
+			bytes => {
+				const unit = "\\begin{align}\na &= b\n\\end{align}\n";
+				return unit.repeat(Math.ceil(bytes / unit.length));
+			},
 		],
 	];
 	for (const [name, doc] of displayMathScans) {
@@ -2782,12 +2764,12 @@ describe("windowed lexing (documents past WINDOWED_LEX_MIN_BYTES)", () => {
 		});
 	}
 
-	it("continues a numbered list across a no-break-space line that a window cut reaches", () => {
+	it("continues a numbered list across a no-break-space line", () => {
 		// The lexer's blank line is any whitespace-only line, so the list goes on
-		// past the no-break-space line. A cut in front of it restarted the list.
+		// past the no-break-space line.
 		let list = "";
 		let count = 0;
-		while (list.length <= LEX_WINDOW_BYTES) list += `${++count}. step ${count} of a tight numbered list\n`;
+		while (list.length <= 2048) list += `${++count}. step ${count} of a tight numbered list\n`;
 		const doc = `${list}\n\u00a0\n1. the step after the spacer line\n\n${filler("body", 350)}\n`;
 		expect(doc.length).toBeGreaterThan(16 * 1024);
 		const rendered = plain(doc);
@@ -2795,11 +2777,8 @@ describe("windowed lexing (documents past WINDOWED_LEX_MIN_BYTES)", () => {
 		expect(rendered).toEqual(onePass(doc));
 	});
 
-	it("keeps the blank line before a bare math environment where a window cut reaches it", () => {
-		// The first window ends one character into `\begin{align}`, so the cut
-		// falls on the blank line above it, which then renders as a blank row.
+	it("keeps the blank line before a bare math environment after a long tight list", () => {
 		const list = Array.from({ length: 80 }, (_, i) => `- item ${i} of a tight list`).join("\n");
-		expect(list.length).toBeGreaterThan(LEX_WINDOW_BYTES);
 		const doc = `${list}\n\n\\begin{align}\na &= b \\\\\nc &= d\n\\end{align}\n\n${filler("body", 350)}\n`;
 		const rendered = plain(doc);
 		expect(rendered[rendered.findIndex(line => line.includes("item 79")) + 1]).toBe("");

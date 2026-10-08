@@ -1,10 +1,7 @@
+import type { OAuthAccess } from "@oh-my-pi/pi-ai";
 import type { Api, Model } from "@oh-my-pi/pi-ai/types";
 import type { ModelResolutionSource } from "@oh-my-pi/pi-catalog/model-manager";
-import {
-	MODELS_DEV_CATALOG_PROVIDER_IDS,
-	type OpenAICodexAccount,
-	PROVIDER_DESCRIPTORS,
-} from "@oh-my-pi/pi-catalog/provider-models";
+import { MODELS_DEV_CATALOG_PROVIDER_IDS, PROVIDER_DESCRIPTORS } from "@oh-my-pi/pi-catalog/provider-models";
 import type { AuthStorage, OAuthCredential } from "../session/auth-storage";
 
 /**
@@ -145,32 +142,41 @@ export function getOAuthCredentialsForProvider(authStorage: AuthStorage, provide
 }
 
 /**
- * Resolve every configured Codex OAuth account for catalog discovery, refreshing
- * each credential exactly once. Codex `/models` is account-scoped, so discovery
- * must fetch per account and union the results; resolving a single access token
- * (as before) hid models available only through a sibling account (#6265).
+ * Resolve every stored OAuth account of an account-scoped discovery provider
+ * (Codex `/models`, Antigravity `fetchAvailableModels`), refreshing each
+ * credential exactly once. Discovery must fetch per account and union the
+ * results; resolving a single access token hid models available only through
+ * a sibling account (#6265, #14924).
+ *
+ * `resolvedAccessToken` is the token the discovery preflight resolved; it is
+ * appended when it belongs to no stored account (runtime or env credential).
  *
  * Returns `null` when any stored account fails to resolve (e.g. a transient
- * refresh failure): the Codex manager is authoritative, so unioning only the
+ * refresh failure): both managers are authoritative, so unioning only the
  * accounts that resolved would cache a partial catalog and hide the failed
  * account's models for the cache TTL. Aborting keeps the previous/bundled
  * catalog instead.
  */
-export async function resolveCodexDiscoveryAccounts(
+export async function resolveOAuthDiscoveryAccounts(
 	authStorage: AuthStorage,
+	provider: string,
 	resolvedAccessToken: string,
-): Promise<OpenAICodexAccount[] | null> {
-	const accesses = await authStorage.oauth.accessAll("openai-codex");
-	const accounts: OpenAICodexAccount[] = [];
+): Promise<OAuthAccess[] | null> {
+	const accesses = await authStorage.oauth.accessAll(provider);
+	const accounts: OAuthAccess[] = [];
 	for (const access of accesses) {
 		if (!access.ok) return null;
-		accounts.push({ accessToken: access.accessToken, accountId: access.accountId });
+		accounts.push(access);
 	}
 	if (!accounts.some(account => account.accessToken === resolvedAccessToken)) {
-		const matchingCredential = getOAuthCredentialsForProvider(authStorage, "openai-codex").find(
+		const matchingCredential = getOAuthCredentialsForProvider(authStorage, provider).find(
 			credential => credential.access === resolvedAccessToken,
 		);
-		accounts.push({ accessToken: resolvedAccessToken, accountId: matchingCredential?.accountId });
+		accounts.push({
+			accessToken: resolvedAccessToken,
+			accountId: matchingCredential?.accountId,
+			email: matchingCredential?.email,
+		});
 	}
 	return accounts;
 }

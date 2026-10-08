@@ -168,9 +168,8 @@ export async function detectLspmux(): Promise<LspmuxState> {
  * Check if a server command is supported by lspmux.
  */
 export function isLspmuxSupported(command: string): boolean {
-	// Extract base command name (handle full paths)
-	const baseName = command.split("/").pop() ?? command;
-	return DEFAULT_SUPPORTED_SERVERS.has(baseName);
+	// `command` is often an absolute `Bun.which` path; `path.win32` splits on both `/` and `\`.
+	return DEFAULT_SUPPORTED_SERVERS.has(path.win32.basename(command).replace(/\.exe$/i, ""));
 }
 
 export interface LspmuxWrappedCommand {
@@ -200,8 +199,7 @@ export function wrapWithLspmux(
 		return { command: originalCommand, args: originalArgs ?? [] };
 	}
 
-	const baseName = originalCommand.split("/").pop() ?? originalCommand;
-	const isDefaultRustAnalyzer = baseName === "rust-analyzer" && originalCommand === "rust-analyzer";
+	const isDefaultRustAnalyzer = originalCommand === "rust-analyzer";
 	const hasArgs = originalArgs && originalArgs.length > 0;
 
 	// rust-analyzer from $PATH with no args - lspmux's default, simplest case
