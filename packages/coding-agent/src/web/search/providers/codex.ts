@@ -603,30 +603,50 @@ export async function searchCodex(params: SearchParams): Promise<SearchResponse>
 		const seed = await params.authStorage.oauth.access(params.model.provider, params.sessionId, {
 			signal: params.signal,
 		});
-		if (!seed) {
-			throw new Error(`No Codex OAuth credentials found for selected provider "${params.model.provider}".`);
-		}
-
-		result = await withOAuthAccess(
-			params.authStorage,
-			params.model.provider,
-			async access => {
-				// A refreshed/rotated credential can carry a different bearer and
-				// ChatGPT account id than the seed used to select the first attempt.
-				const accountId = access.accountId ?? getCodexAccountId(access.accessToken);
-				const requestTransport = await resolveCodexSearchTransport(params);
-				return callCodexSearch({ accessToken: access.accessToken, accountId }, query, {
+		if (seed) {
+			result = await withOAuthAccess(
+				params.authStorage,
+				params.model.provider,
+				async access => {
+					// A refreshed/rotated credential can carry a different bearer and
+					// ChatGPT account id than the seed used to select the first attempt.
+					const accountId = access.accountId ?? getCodexAccountId(access.accessToken);
+					const requestTransport = await resolveCodexSearchTransport(params);
+					return callCodexSearch({ accessToken: access.accessToken, accountId }, query, {
+						signal: params.signal,
+						timeoutMs: params.timeoutMs,
+						systemPrompt: params.systemPrompt,
+						searchContextSize: "high",
+						modelId: params.model.id,
+						fetch: params.fetch,
+						transport: requestTransport,
+					});
+				},
+				{ sessionId: params.sessionId, signal: params.signal, seed },
+			);
+		} else {
+			const keyOrResolver = params.modelRegistry.resolver(params.model, params.sessionId);
+			result = await withAuth(
+				keyOrResolver,
+				async accessToken => {
+					const accountId = getCodexAccountId(accessToken);
+					const requestTransport = await resolveCodexSearchTransport(params);
+					return callCodexSearch({ accessToken, accountId }, query, {
+						signal: params.signal,
+						timeoutMs: params.timeoutMs,
+						systemPrompt: params.systemPrompt,
+						searchContextSize: "high",
+						modelId: params.model.id,
+						fetch: params.fetch,
+						transport: requestTransport,
+					});
+				},
+				{
 					signal: params.signal,
-					timeoutMs: params.timeoutMs,
-					systemPrompt: params.systemPrompt,
-					searchContextSize: "high",
-					modelId: params.model.id,
-					fetch: params.fetch,
-					transport: requestTransport,
-				});
-			},
-			{ sessionId: params.sessionId, signal: params.signal, seed },
-		);
+					missingKeyMessage: `No Codex OAuth credentials found for selected provider "${params.model.provider}".`,
+				},
+			);
+		}
 	}
 
 	let sources = result.sources;

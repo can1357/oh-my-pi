@@ -747,4 +747,39 @@ describe("searchCodex model selection", () => {
 			status: 429,
 		});
 	});
+
+	it("uses OPENAI_CODEX_OAUTH_TOKEN from environment when OAuth access has no seed (#12537)", async () => {
+		const emptyAuthStorage = createAuthStorage();
+		vi.spyOn(emptyAuthStorage.oauth, "access").mockResolvedValue(undefined);
+		emptyAuthStorage.keys.setRuntime("openai-codex", residencyToken);
+		const registry = new ModelRegistry(emptyAuthStorage);
+
+		const result = await searchCodex({
+			...makeSearchParams("env token search", mockCodexFetch("gpt-5.6-luna")),
+			authStorage: emptyAuthStorage,
+			modelRegistry: registry,
+		});
+
+		const headers = new Headers(capturedRequest?.headers);
+		expect(headers.get("authorization")).toBe(`Bearer ${residencyToken}`);
+		expect(headers.get("chatgpt-account-id")).toBe("acct-test");
+		expect(result.answer).toBe("Codex answer");
+		emptyAuthStorage.close();
+	});
+
+	it("throws missing credentials error when neither OAuth seed nor environment token exists", async () => {
+		const emptyAuthStorage = createAuthStorage();
+		vi.spyOn(emptyAuthStorage.oauth, "access").mockResolvedValue(undefined);
+		const registry = new ModelRegistry(emptyAuthStorage);
+
+		await expect(
+			searchCodex({
+				...makeSearchParams("unauthenticated search", mockCodexFetch("gpt-5.6-luna")),
+				authStorage: emptyAuthStorage,
+				modelRegistry: registry,
+			}),
+		).rejects.toThrow('No Codex OAuth credentials found for selected provider "openai-codex".');
+
+		emptyAuthStorage.close();
+	});
 });

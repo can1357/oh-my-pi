@@ -8,6 +8,7 @@
 
 ### Fixed
 
+- Fixed Codex web search failing with a missing credentials error when authentication is supplied via environment token (such as `OPENAI_CODEX_OAUTH_TOKEN`) rather than stored OAuth login (fixing [#12537](https://github.com/can1357/oh-my-pi/issues/12537))
 - Fixed relative file links in Tern assistant replies opening against the folder omp was started in after `/wt` or `/move`; they now open the file in the session's working directory ([#14879](https://github.com/can1357/oh-my-pi/pull/14879) by [@H4vC](https://github.com/H4vC))
 
 ## [18.8.3] - 2026-10-07
