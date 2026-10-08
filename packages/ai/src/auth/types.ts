@@ -62,6 +62,8 @@ export interface AuthAccountPolicy {
 	readonly priority?: number;
 	/** Protected remaining quota percentage for this account. */
 	readonly reservePct?: number;
+	/** Remaining quota percentage, above the reserve, at which this account takes back lower-priority warm pins. */
+	readonly reclaimAbovePct?: number;
 }
 
 /** Read-only set of per-account routing policies. */
