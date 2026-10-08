@@ -158,7 +158,7 @@ describe("yield through native AgentSession events", () => {
 			const executed: Array<{ id: string; failed: boolean }> = [];
 			const unsubscribe = live.subscribe(event => {
 				if (event.type === "tool_execution_end" && event.toolName === "yield") {
-					executed.push({ id: event.toolCallId, failed: event.isError });
+					executed.push({ id: event.toolCallId, failed: event.isError === true });
 				}
 			});
 			try {

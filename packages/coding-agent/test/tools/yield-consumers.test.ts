@@ -2,6 +2,7 @@ import { describe, expect, it } from "bun:test";
 import type { YieldItem } from "@oh-my-pi/pi-tui/tools/task";
 import { assembleYieldResult } from "@oh-my-pi/pi-tui/tools/task-yield-assembly";
 import { enforceStrictSchema, validateJsonSchemaValue } from "@oh-my-pi/pi-ai/utils/schema";
+import { isRecord } from "@oh-my-pi/pi-utils";
 import { Settings } from "../../src/config/settings";
 import { finalizeSubprocessOutput } from "../../src/task/executor";
 import { subprocessToolRegistry } from "../../src/task/subprocess-tool-registry";
@@ -318,7 +319,9 @@ describe("yield shape production consumers", () => {
 			data: { findings: { title: "one", detail: null }, note: "summary", count: null },
 			error: null,
 		};
-		expect(validateJsonSchemaValue(enforceStrictSchema(tool.parameters), args).success).toBe(true);
+		const parameters = tool.parameters;
+		if (!isRecord(parameters)) throw new Error("Yield parameter schema must be a JSON object");
+		expect(validateJsonSchemaValue(enforceStrictSchema(parameters), args).success).toBe(true);
 		const sections = await submit(tool, args, false);
 		const count = await submit(tool, { type: ["count"], data: 1 }, false);
 		const output = finalize([sections, count], declaration);
