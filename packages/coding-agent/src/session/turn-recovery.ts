@@ -40,7 +40,9 @@ import {
 	AUTO_THINKING,
 	type ConfiguredThinkingLevel,
 	clampThinkingLevelToCeiling,
+	concreteThinkingLevel,
 	modelSupportsEffortCeiling,
+	resolveProvisionalAutoLevel,
 	resolveThinkingLevelForModel,
 } from "@oh-my-pi/pi-tui/thinking";
 import type { EditMode } from "@oh-my-pi/pi-tui/tools/edit";
@@ -448,9 +450,13 @@ export class TurnRecovery {
 		if (this.#lastServed?.sessionId === previousSessionId) {
 			this.#lastServed = { ...this.#lastServed, sessionId };
 		}
-		if (this.#fallbackRoutedFor === previousSessionId) {
-			this.#fallbackRoutedFor = sessionId;
-		}
+		this.#reanchorFallbackRouting(previousSessionId);
+	}
+
+	#reanchorFallbackRouting(previousSessionId: string): boolean {
+		if (this.#fallbackRoutedFor !== previousSessionId) return false;
+		this.#markFallbackRouted();
+		return true;
 	}
 
 	/** Resets per-prompt recovery counters and terminal-stop acceptance. */
@@ -707,9 +713,46 @@ export class TurnRecovery {
 		return this.#runRecoveryCompactionWithRollback(reason, message, options);
 	}
 
-	/** Selected model beneath an unfinished request-scoped refusal fallback. */
-	get requestScopedFallbackPrimarySelector(): string | undefined {
-		return this.#activeRetryFallback?.restoreAfterSuccess ? this.#activeRetryFallback.originalSelector : undefined;
+	/** Persist the selected model beneath a live fallback without promoting its effort or routing. */
+	persistNewSessionModelState(previousSessionId: string): void {
+		const model = this.#host.model();
+		const fallback = this.#activeRetryFallback?.restoreAfterSuccess ? this.#activeRetryFallback : undefined;
+		const configuredThinkingLevel = this.#host.configuredThinkingLevel();
+		let selectedThinkingLevel = configuredThinkingLevel;
+		let selectedConcreteThinkingLevel = this.#host.thinkingLevel();
+		if (fallback) {
+			const restoreOriginalThinking = configuredThinkingLevel === fallback.lastAppliedFallbackThinkingLevel;
+			if (restoreOriginalThinking) selectedThinkingLevel = fallback.originalThinkingLevel;
+			const selector = parseRetryFallbackSelector(fallback.originalSelector, this.#host.modelRegistry);
+			const primaryModel =
+				resolveModelOverride([fallback.originalSelector], this.#host.modelRegistry, this.#host.settings).model ??
+				(selector ? this.#host.modelRegistry.find(selector.provider, selector.id) : undefined);
+			const requestedThinkingLevel =
+				selectedThinkingLevel === AUTO_THINKING
+					? resolveProvisionalAutoLevel(primaryModel)
+					: (concreteThinkingLevel(selectedThinkingLevel) ??
+						(restoreOriginalThinking ? selector?.thinkingLevel : undefined));
+			selectedConcreteThinkingLevel = primaryModel
+				? clampThinkingLevelToCeiling(
+						primaryModel,
+						resolveThinkingLevelForModel(primaryModel, requestedThinkingLevel),
+						this.#host.thinkingLevelCeiling(),
+					)
+				: requestedThinkingLevel;
+		}
+		// Carry only the unfinished route. Produced-work attribution belongs to
+		// the old conversation, unlike a fork which retains that conversation.
+		const carriedFallback = fallback !== undefined && this.#reanchorFallbackRouting(previousSessionId);
+		this.#host.sessionManager.appendThinkingLevelChange(selectedConcreteThinkingLevel, selectedThinkingLevel);
+		const selectedModel = fallback?.originalSelector ?? (model ? formatModelStringWithRouting(model) : undefined);
+		if (selectedModel) this.#host.sessionManager.appendModelChange(selectedModel);
+		if (carriedFallback && model) {
+			this.#host.sessionManager.appendModelChange(
+				formatModelStringWithRouting(model),
+				EPHEMERAL_MODEL_CHANGE_ROLE,
+				true,
+			);
+		}
 	}
 
 	/**
@@ -2028,6 +2071,10 @@ export class TurnRecovery {
 			reason?: string;
 		},
 	): Promise<boolean> {
+		const fallbackGeneration = this.#retryFallbackGeneration;
+		const generation = this.#host.promptGeneration();
+		const previousModel = this.#host.model();
+		const previousFallback = this.#activeRetryFallback;
 		const resolved = resolveModelOverride([selector.raw], this.#host.modelRegistry, this.#host.settings);
 		const candidate = resolved.model ?? this.#host.modelRegistry.find(selector.provider, selector.id);
 		if (!candidate) {
@@ -2036,10 +2083,20 @@ export class TurnRecovery {
 		const apiKey =
 			options?.apiKey ??
 			(await this.#host.modelRegistry.getApiKey(candidate, this.#host.sessionId(), { signal: options?.signal }));
+		if (
+			options?.signal?.aborted ||
+			this.#retryFallbackGeneration !== fallbackGeneration ||
+			this.#activeRetryFallback !== previousFallback ||
+			this.#host.model() !== previousModel ||
+			this.#host.promptGeneration() !== generation ||
+			this.#host.isDisposed() ||
+			this.#host.abortInProgress()
+		) {
+			return false;
+		}
 		if (!apiKey) {
 			throw new Error(`No API key for retry fallback ${selector.raw}`);
 		}
-		if (options?.signal?.aborted) return false;
 
 		// Capture the configured selector (auto-aware) so a fallback chain preserves
 		// `auto` instead of collapsing it to the level it resolved to this turn.
@@ -2053,7 +2110,6 @@ export class TurnRecovery {
 				? requestedThinkingLevel
 				: clampThinkingLevelToCeiling(candidate, requestedThinkingLevel, this.#host.thinkingLevelCeiling());
 		const candidateSelector = formatModelStringWithRouting(candidate);
-		const previousModel = this.#host.model();
 		// Capture the edit mode under the outgoing model so the base system prompt
 		// can be re-synced once the swap commits — `edit.modelVariants` and other
 		// model-dependent prompt policy would otherwise stay pinned to the
@@ -2065,13 +2121,22 @@ export class TurnRecovery {
 		// candidate as fallback-routed. Attribution itself is safe regardless — it
 		// names the last model that served, which this swap has not changed.
 		const routedBeforeSwap = this.#fallbackRoutedFor;
-		const previousFallback = this.#activeRetryFallback;
 		const startRequestScopedFallback =
 			options?.restoreAfterSuccess === true && !previousFallback?.restoreAfterSuccess;
 		const servedBeforeSwap = this.#activeRetryFallback?.served;
 		this.#markFallbackRouted();
 		if (this.#activeRetryFallback && !startRequestScopedFallback) this.#activeRetryFallback.served = false;
 		await this.#host.setModelWithProviderSessionReset(candidate);
+		// An explicit re-selection can keep the same candidate object while
+		// relinquishing automatic fallback ownership. Do not re-arm or roll it back.
+		if (
+			this.#retryFallbackGeneration !== fallbackGeneration ||
+			this.#activeRetryFallback !== previousFallback ||
+			this.#host.promptGeneration() !== generation ||
+			this.#host.isDisposed()
+		) {
+			return false;
+		}
 		if (options?.signal?.aborted) {
 			this.#fallbackRoutedFor = routedBeforeSwap;
 			if (this.#activeRetryFallback) this.#activeRetryFallback.served = servedBeforeSwap;
@@ -2126,6 +2191,8 @@ export class TurnRecovery {
 			wrapAround?: boolean;
 		},
 	): Promise<boolean> {
+		const fallbackGeneration = this.#retryFallbackGeneration;
+		const generation = this.#host.promptGeneration();
 		const ceiling = this.#host.thinkingLevelCeiling();
 		const latestAssistant = options?.preserveFailedTurn
 			? failedMessage
@@ -2190,10 +2257,19 @@ export class TurnRecovery {
 					continue;
 				}
 				const apiKey = await this.#host.modelRegistry.getApiKey(candidate, this.#host.sessionId());
+				if (
+					this.#retryFallbackGeneration !== fallbackGeneration ||
+					this.#host.promptGeneration() !== generation ||
+					this.#host.isDisposed() ||
+					this.#host.abortInProgress()
+				) {
+					return false;
+				}
 				if (!apiKey) continue;
 				const previousEditMode = this.#host.resolveActiveEditMode();
 				const applied = await this.applyRetryFallbackCandidate(role, selector, currentSelector, {
 					...options,
+					apiKey,
 					reason: `Request failed: ${failedMessage.errorMessage ?? "provider returned an error without details"}`,
 				});
 				const editModeChanged = this.#host.resolveActiveEditMode() !== previousEditMode;
@@ -2684,17 +2760,23 @@ export class TurnRecovery {
 		const restoreAfterSuccess =
 			(classifierRefusal || AIError.is(id, AIError.Flag.ContentBlocked)) &&
 			cfgRetryRefusalFallbackRevertPolicy.get(this.#host.settings) === "after-success";
+		// Account rotations may spend the budget before any model fallback runs.
+		// Allow that first request-scoped hop, but keep subsequent refusal hops bounded.
+		const exhaustedRefusalChain =
+			retryBudgetExhausted &&
+			(classifierRefusal || restoreAfterSuccess) &&
+			(!accountPolicyDenial || this.#activeRetryFallback?.restoreAfterSuccess === true);
 
 		if (!staleOpenAIResponsesReplayError && !switchedCredential && currentSelector) {
-			// A refusal chain stops at the retry budget: the exhausted-attempt
-			// last resort is for provider failures, not classifier decisions.
+			// Classifier loops stop at the budget; exhausted account rotations still
+			// get their first configured model fallback.
 			if (
 				allowModelFallback &&
 				retrySettings.modelFallback &&
 				!thinkingLoop &&
 				!sameModelSteerReplay &&
 				!waitForSiblingCredential &&
-				!(retryBudgetExhausted && (classifierRefusal || restoreAfterSuccess)) &&
+				!exhaustedRefusalChain &&
 				!this.#isFirstAttemptMidStreamSocketDrop(message, id, retryBudgetExhausted)
 			) {
 				if (!classifierRefusal && !restoreAfterSuccess) {

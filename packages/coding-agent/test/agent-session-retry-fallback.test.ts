@@ -23,6 +23,7 @@ import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream"
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { writeModelCache } from "@oh-my-pi/pi-catalog/model-cache";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
+import * as autoThinkingClassifier from "@oh-my-pi/pi-coding-agent/auto-thinking/classifier";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { parseModelString } from "@oh-my-pi/pi-tui/overlays/model-selector";
 import { parseModelPattern } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
@@ -31,6 +32,7 @@ import { editVariantForModel } from "@oh-my-pi/pi-coding-agent/utils/edit-mode";
 import { ExtensionRuntime, loadExtensionFromFactory } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
 import { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
+import { AUTO_THINKING } from "@oh-my-pi/pi-tui/thinking";
 import { createAgentSession } from "@oh-my-pi/pi-coding-agent/sdk";
 import { AgentSession, type AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
@@ -3716,7 +3718,7 @@ describe("AgentSession retry fallback", () => {
 		expect(session.consumeActiveFallbackCreditRedemption()).toBeUndefined();
 	});
 
-	it("bounds cyclic content-block fallbacks without retrying an invocation indefinitely", async () => {
+	it.each([0, 2])("bounds cyclic content-block fallbacks with a retry budget of %s", async maxRetries => {
 		const primaryModel = getBundledModel("openai-codex", "gpt-5.6-sol")!;
 		const fallbackModel = getBundledModel("openai", "gpt-4o-mini")!;
 		const primary = `${primaryModel.provider}/${primaryModel.id}`;
@@ -3735,7 +3737,7 @@ describe("AgentSession retry fallback", () => {
 		});
 		const settings = Settings.isolated({
 			"compaction.enabled": false,
-			"retry.maxRetries": 2,
+			"retry.maxRetries": maxRetries,
 			"retry.fallbackChains": { [primary]: [fallback], [fallback]: [primary] },
 			"retry.refusalFallbackRevertPolicy": "after-success",
 		});
@@ -3745,9 +3747,9 @@ describe("AgentSession retry fallback", () => {
 		await session.prompt("Handle a persistent policy rejection");
 		await session.waitForIdle();
 
-		expect(requestedModels).toEqual([primary, fallback, primary]);
+		expect(requestedModels).toEqual(maxRetries === 0 ? [primary, fallback] : [primary, fallback, primary]);
 		expect(retryEndEvents).toHaveLength(1);
-		expect(retryEndEvents[0]).toMatchObject({ success: false, attempt: 2 });
+		expect(retryEndEvents[0]).toMatchObject({ success: false, attempt: maxRetries === 0 ? 1 : 2 });
 		expect(session.getLastAssistantMessage()?.stopReason).toBe("error");
 	});
 
@@ -3865,10 +3867,9 @@ describe("AgentSession retry fallback", () => {
 			const fallback = `${fallbackModel.provider}/${fallbackModel.id}`;
 			const requestedModels: string[] = [];
 			const responses: MockResponse[] = [
+				...(startsOnFallback ? [{ content: ["Completed work in the previous conversation"] }] : []),
 				{ stopReason: "error", errorMessage: "Content flagged (code=cyber_policy)" },
-				...(startsOnFallback
-					? [{ content: ["Interrupted fallback"], stopReason: "aborted" as const, errorMessage: "Cancelled" }]
-					: []),
+				...(startsOnFallback ? [{ content: [], stopReason: "aborted" as const, errorMessage: "Cancelled" }] : []),
 				{ content: ["Recovered using the fallback"] },
 				{ content: ["Continued after restarting"] },
 			];
@@ -3897,23 +3898,42 @@ describe("AgentSession retry fallback", () => {
 			session = new AgentSession({ agent, sessionManager: manager, settings, modelRegistry });
 
 			if (startsOnFallback) {
+				await session.prompt("Finish an earlier conversation");
+				await session.waitForIdle();
 				await session.prompt("Leave an unfinished refusal fallback");
 				await session.waitForIdle();
 				expect(session.model?.id).toBe(fallbackModel.id);
+				expect(session.servingModel).toMatchObject({ modelIdentity: primary, isFallback: false });
 			}
 
 			await session.newSession();
+			if (startsOnFallback) {
+				expect(session.servingModel).toMatchObject({ modelIdentity: fallback, isFallback: true });
+			}
 			await session.prompt("Recover this new conversation");
 			await session.waitForIdle();
-			const beforeResume = startsOnFallback ? [primary, fallback, fallback] : [primary, fallback];
+			const beforeResume = startsOnFallback ? [primary, primary, fallback, fallback] : [primary, fallback];
 			expect(requestedModels).toEqual(beforeResume);
 			expect(session.model?.id).toBe(primaryModel.id);
+			if (startsOnFallback) {
+				expect(session.servingModel).toMatchObject({ modelIdentity: fallback, isFallback: true });
+			}
 			await session.flushToDisk();
 			const sessionFile = session.sessionFile!;
 			await session.dispose();
 			session = undefined;
 
 			const resumedManager = await SessionManager.open(sessionFile, tempDir.join("resumed-refusal"));
+			if (startsOnFallback) {
+				expect(resumedManager.getEntries()).toContainEqual(
+					expect.objectContaining({
+						type: "model_change",
+						model: fallback,
+						role: "fallback",
+						resolvedModelIsFallback: true,
+					}),
+				);
+			}
 			const resumed = await createAgentSession({
 				cwd: tempDir.path(),
 				agentDir: tempDir.path(),
@@ -3939,6 +3959,95 @@ describe("AgentSession retry fallback", () => {
 			await session.prompt("Continue after restarting");
 			await session.waitForIdle();
 			expect(requestedModels).toEqual([...beforeResume, primary]);
+		},
+	);
+
+	it.each([
+		[Effort.High, undefined],
+		[AUTO_THINKING, undefined],
+		[Effort.High, Effort.Medium],
+	] as const)(
+		"cold-resumes the primary's %s thinking across an unfinished /new fallback (manual override: %s)",
+		async (originalThinking, manualOverride) => {
+			const primaryModel = getBundledModel("anthropic", "claude-sonnet-4-5")!;
+			const fallbackModel = getBundledModel("anthropic", "claude-opus-4-1")!;
+			const primary = `${primaryModel.provider}/${primaryModel.id}`;
+			const fallback = `${fallbackModel.provider}/${fallbackModel.id}`;
+			const requestedModels: string[] = [];
+			const responses: MockResponse[] = [
+				{ stopReason: "error", stopDetails: { type: "sensitive" }, errorMessage: "Content rejected" },
+				{ content: ["Interrupted fallback"], stopReason: "aborted", errorMessage: "Cancelled" },
+				{ content: ["Still unfinished in the new conversation"], stopReason: "aborted", errorMessage: "Cancelled" },
+				{ content: ["Continued after restarting"] },
+			];
+			if (originalThinking === AUTO_THINKING) {
+				vi.spyOn(autoThinkingClassifier, "classifyDifficulty").mockResolvedValue(Effort.High);
+			}
+			const agent = new Agent({
+				getApiKey: model => `${model.provider}-test-key`,
+				initialState: { model: primaryModel, systemPrompt: ["Test"], tools: [], messages: [] },
+				streamFn: (model, context, options) => {
+					requestedModels.push(`${model.provider}/${model.id}`);
+					const response = responses.shift();
+					if (!response) throw new Error("Unexpected request after refusal recovery");
+					return createMockModel({ provider: model.provider, id: model.id, responses: [response] }).stream(
+						model,
+						context,
+						options,
+					);
+				},
+			});
+			const settings = Settings.isolated({
+				"compaction.enabled": false,
+				"retry.fallbackChains": { [primary]: [`${fallback}:low`] },
+				"retry.refusalFallbackRevertPolicy": "after-success",
+			});
+			settings.setModelRole("default", `${primary}:${originalThinking}`);
+			const manager = SessionManager.create(tempDir.path(), tempDir.join("new-session-refusal-thinking"));
+			manager.appendModelChange(`${primary}:${originalThinking}`);
+			session = new AgentSession({ agent, sessionManager: manager, settings, modelRegistry });
+			session.setThinkingLevel(originalThinking);
+			await session.prompt("Leave an unfinished refusal fallback");
+			await session.waitForIdle();
+			expect(session.model?.id).toBe(fallbackModel.id);
+			if (manualOverride !== undefined) session.setThinkingLevel(manualOverride);
+			await session.newSession();
+			// Persisting the primary's effort must not prematurely change the live fallback.
+			expect(session.configuredThinkingLevel()).toBe(manualOverride ?? Effort.Low);
+			await session.prompt("Continue the unfinished fallback");
+			await session.waitForIdle();
+			await session.flushToDisk();
+			const sessionFile = session.sessionFile!;
+			await session.dispose();
+			session = undefined;
+
+			const resumedManager = await SessionManager.open(sessionFile, tempDir.join("resumed-refusal-thinking"));
+			const resumed = await createAgentSession({
+				cwd: tempDir.path(),
+				agentDir: tempDir.path(),
+				authStorage,
+				modelRegistry,
+				sessionManager: resumedManager,
+				settings,
+				disableExtensionDiscovery: true,
+				skills: [],
+				contextFiles: [],
+				promptTemplates: [],
+				slashCommands: [],
+				enableMCP: false,
+				enableLsp: false,
+				enableIrc: false,
+				skipPythonPreflight: true,
+				toolNames: [],
+				restrictToolNames: true,
+			});
+			session = resumed.session;
+			session.agent.streamFn = agent.streamFn;
+			expect(session.model?.id).toBe(primaryModel.id);
+			expect(session.configuredThinkingLevel()).toBe(manualOverride ?? originalThinking);
+			await session.prompt("Continue after restarting");
+			await session.waitForIdle();
+			expect(requestedModels).toEqual([primary, fallback, fallback, primary]);
 		},
 	);
 
@@ -4058,11 +4167,16 @@ describe("AgentSession retry fallback", () => {
 		expect(requestedModels).toEqual([primary, fallback, selected]);
 	});
 
-	it.each(["different model", "same model"] as const)(
-		"preserves an explicit selection of the %s during restoration reconciliation, including on reload",
-		async selection => {
+	it.each([
+		["application", "different model"],
+		["application", "same model"],
+		["restoration", "different model"],
+		["restoration", "same model"],
+	] as const)(
+		"preserves explicit %s reconciliation selections of the %s, including on reload",
+		async (phase, selection) => {
 			const primaryModel = getBundledModel("anthropic", "claude-sonnet-4-5")!;
-			const fallbackModel = getBundledModel("openai", "gpt-4o-mini")!;
+			const fallbackModel = getBundledModel("openai", "gpt-5")!;
 			const primary = `${primaryModel.provider}/${primaryModel.id}`;
 			const fallback = `${fallbackModel.provider}/${fallbackModel.id}`;
 			const requestedModels: string[] = [];
@@ -4095,17 +4209,19 @@ describe("AgentSession retry fallback", () => {
 				thinkingLevel: Effort.High,
 			});
 			session = activeSession;
+			// Model choices must be durable even if application stops before a successful reply.
+			await sessionManager.ensureOnDisk();
 			const reconciliationStarted = Promise.withResolvers<void>();
 			const releaseReconciliation = Promise.withResolvers<void>();
-			let pauseRestoration = true;
+			let pauseReconciliation = true;
 			const reconcileThinkTool = SessionTools.prototype.reconcileThinkTool;
 			vi.spyOn(SessionTools.prototype, "reconcileThinkTool").mockImplementation(async function (this: SessionTools) {
 				if (
-					pauseRestoration &&
-					requestedModels.at(-1) === fallback &&
-					activeSession.model?.id === primaryModel.id
+					pauseReconciliation &&
+					requestedModels.at(-1) === (phase === "application" ? primary : fallback) &&
+					activeSession.model?.id === (phase === "application" ? fallbackModel.id : primaryModel.id)
 				) {
-					pauseRestoration = false;
+					pauseReconciliation = false;
 					reconciliationStarted.resolve();
 					await releaseReconciliation.promise;
 				}
@@ -4119,6 +4235,7 @@ describe("AgentSession retry fallback", () => {
 				selectedModel =
 					selection === "same model" ? activeSession.model! : getBundledModel("anthropic", "claude-opus-4-1")!;
 				await activeSession.setModel(selectedModel, "temporary");
+				if (selection === "same model") expect(activeSession.model).toBe(selectedModel);
 				activeSession.setThinkingLevel(Effort.Low);
 			} finally {
 				releaseReconciliation.resolve();
@@ -4139,7 +4256,9 @@ describe("AgentSession retry fallback", () => {
 
 			await activeSession.prompt("Use the model I selected");
 			await activeSession.waitForIdle();
-			expect(requestedModels).toEqual([primary, fallback, selected]);
+			expect(requestedModels).toEqual(phase === "application" ? [primary, selected] : [primary, fallback, selected]);
+			expect(activeSession.model?.id).toBe(selectedModel.id);
+			expect(activeSession.thinkingLevel).toBe(Effort.Low);
 		},
 	);
 

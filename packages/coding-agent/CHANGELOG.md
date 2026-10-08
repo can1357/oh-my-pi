@@ -13,6 +13,8 @@
 ### Fixed
 
 - Fixed resumed `/new` conversations staying on a refusal fallback, and unfinished refusal fallbacks overriding another session's selected model ([#12239](https://github.com/can1357/oh-my-pi/pull/12239) by [@endophysics](https://github.com/endophysics)).
+- Fixed refusal fallback being skipped after Codex account rotations and overriding explicit same-model selections during fallback application ([#12239](https://github.com/can1357/oh-my-pi/pull/12239) by [@endophysics](https://github.com/endophysics)).
+- Fixed `/new` losing refusal-fallback attribution or resuming the primary with the fallback's thinking effort instead of its saved level or `auto` configuration ([#12239](https://github.com/can1357/oh-my-pi/pull/12239) by [@endophysics](https://github.com/endophysics)).
 
 ## [18.8.6] - 2026-10-08
 

@@ -9696,6 +9696,7 @@ export class AgentSession implements SettingsScope {
 		using _transition = this.#beginSessionTransition();
 		this.#assertVibeSessionTransitionAllowed("start a new session");
 		const previousSessionFile = this.sessionFile;
+		const previousSessionId = this.sessionManager.getSessionId();
 
 		// Emit session_before_switch event with reason "new" (can be cancelled)
 		if (this.#extensionRunner?.hasHandlers("session_before_switch")) {
@@ -9778,7 +9779,6 @@ export class AgentSession implements SettingsScope {
 			this.#queuedMessageDrainBlocked = false;
 			this.#usagePreflightReadyForNextModelCall = false;
 
-			this.sessionManager.appendThinkingLevelChange(this.thinkingLevel, this.configuredThinkingLevel());
 			this.sessionManager.appendServiceTierChange(this.#models.serviceTierEntry());
 
 			this.#todo.resetCycle();
@@ -9791,13 +9791,7 @@ export class AgentSession implements SettingsScope {
 			// Match SDK startup: persist the selected model before a fallback response
 			// can become the legacy-inferred default on resume. Mode teardown may
 			// restore the pre-plan model, so record the baseline after it settles.
-			const model = this.model;
-			const selectedModel =
-				this.#recovery.requestScopedFallbackPrimarySelector ??
-				(model ? `${model.provider}/${model.id}` : undefined);
-			if (selectedModel) {
-				this.sessionManager.appendModelChange(selectedModel);
-			}
+			this.#recovery.persistNewSessionModelState(previousSessionId);
 			// Drop the process-lifetime context-file cache so the rebuild re-reads
 			// AGENTS.md and friends from disk: the user may have edited them since
 			// the previous session started, and refreshBaseSystemPrompt() re-runs

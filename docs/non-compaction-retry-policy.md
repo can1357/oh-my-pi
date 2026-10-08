@@ -214,7 +214,9 @@ This uses the existing `retry.fallbackChains`, structured `refusal` / `sensitive
 stop metadata, and the normalized `AIError.Flag.ContentBlocked` classification
 (including Codex `cyber_policy` errors). It does not match ordinary assistant
 refusal prose. Account-policy errors still try sibling credentials before selecting
-a fallback model. Restoration happens after the first successful fallback response
+a fallback model. Exhausted credential rotations still permit the first
+request-scoped model hop; subsequent refusal hops remain retry-budget bounded.
+Restoration happens after the first successful fallback response
 and its tool execution, before the next model invocation—even within the same user
 turn. Failed, aborted, and empty responses do not restore the model; the existing
 retry budget still bounds failed attempts. A request-scoped content block does not
@@ -223,13 +225,21 @@ create an availability cooldown for the model it restores.
 The previous model must still be available and outside any existing cooldown.
 If the session was already on an availability fallback, that fallback and its
 original restoration policy resume rather than jumping to an unavailable primary.
-Explicit model changes take precedence. Response attribution stays with the model
+Explicit model changes take precedence, including re-selecting the incoming model
+while an automatic swap is pending. Response attribution stays with the model
 that produced it. The restored model receives the continued conversation, so a
 later invocation can trigger another refusal and fallback.
 
 `/new` saves the selected-model baseline for resume, including the previous model
 when a request-scoped refusal fallback is still unfinished. A fallback answer must
 not become the new transcript's selected model just because it answered last.
+
+The baseline includes the primary's configured thinking level (`auto` included)
+instead of the fallback's temporary effort. A manual thinking-level override made
+on the fallback remains authoritative. `/new` reanchors only unfinished fallback
+routing and records the active fallback as an ephemeral model change; it does not
+carry produced-work attribution from the previous conversation.
+
 Switching to a different session, or supplying an explicit model while switching,
 discards the outgoing session's fallback ownership only after the switch commits;
 a rejected switch preserves its pending restoration.
