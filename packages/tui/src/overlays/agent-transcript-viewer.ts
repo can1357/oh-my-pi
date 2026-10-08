@@ -41,8 +41,8 @@ import { sanitizeErrorLine } from "../chrome/error-block";
 import type { ScrollRangeAnchor } from "../components/scroll-view";
 import { formatContextUsage } from "../chrome/context-thresholds";
 import { node, span, text } from "../native/describe";
-import type { DescribeContext, NativeChild, NativeNode } from "../native/node";
-import { actionHint, hintsRow, overlayCard } from "../native/overlay";
+import type { DescribeContext, NativeChild, NativeNode, NativeUiEvent } from "../native/node";
+import { actionHint, escCloseButton, hintsRow, overlayCard } from "../native/overlay";
 
 /** Parsed message and model metadata relevant to a transcript viewer. */
 export type AgentTranscriptEntry = SessionMessageEntryLike | { type: "model_change"; model: string };
@@ -559,12 +559,7 @@ export class AgentTranscriptViewer implements Component {
 		}
 
 		if (matchesKey(data, "escape")) {
-			if (this.#editor && this.#editor.getText().trim() !== "") {
-				this.#editor.setText("");
-				this.#deps.requestRender();
-				return;
-			}
-			this.#deps.onClose();
+			this.#escape();
 			return;
 		}
 
@@ -647,6 +642,21 @@ export class AgentTranscriptViewer implements Component {
 		return lines;
 	}
 
+	/** The top-right `esc` runs Esc. */
+	handleNativeEvent(event: NativeUiEvent): void {
+		if (event.type === "action" && event.act === "close") this.#escape();
+	}
+
+	/** Esc: clear a non-empty draft first, else close the viewer. */
+	#escape(): void {
+		if (this.#editor && this.#editor.getText().trim() !== "") {
+			this.#editor.setText("");
+			this.#deps.requestRender();
+			return;
+		}
+		this.#deps.onClose();
+	}
+
 	/**
 	 * Header, transcript body (the builder's container, which describes its own
 	 * blocks), notice, message editor, stats and key hints. Scrolling is the
@@ -675,6 +685,8 @@ export class AgentTranscriptViewer implements Component {
 
 		const id = this.#deps.agentId;
 		const children: NativeChild[] = [];
+		// Top row: the agent's meta on the left, a clickable `esc` (close) on the right.
+		const top: NativeChild[] = [];
 		if (ref) {
 			const kindTag = ref.parentId ? `${ref.kind} ${theme.sep.dot} of ${ref.parentId}` : ref.kind;
 			const meta: NativeChild[] = [
@@ -683,8 +695,12 @@ export class AgentTranscriptViewer implements Component {
 				text([span(kindTag, "dim")], { truncate: "end" }),
 			];
 			if (this.#model) meta.push(text([span(this.#model, "muted")], { truncate: "end" }));
-			children.push(node("row", { gap: "sm", align: "center" }, meta, "meta"));
+			top.push(node("row", { gap: "sm", align: "center", grow: 1, min: { w: 0 } }, meta, "meta"));
+		} else {
+			top.push(node("spacer", { grow: 1 }));
 		}
+		top.push(escCloseButton());
+		children.push(node("row", { gap: "md", align: "center" }, top, "top"));
 		children.push(
 			placeholder === undefined
 				? node("col", { grow: 1 }, [this.#builder.container], "transcript")
@@ -747,7 +763,6 @@ export class AgentTranscriptViewer implements Component {
 		children.push(
 			hintsRow([
 				this.#editor ? actionHint("tui.input.submit", "send") : undefined,
-				{ keys: ["escape"], label: "close" },
 				{ keys: [this.#deps.expandKeys[0] ?? "ctrl+o"], label: "expand" },
 			]),
 		);

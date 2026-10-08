@@ -2,7 +2,7 @@
  * `omp auth-broker` command handlers.
  *
  * Sub-verbs:
- *   - `serve [--bind=…]` — boots the broker against the local SQLite store.
+ *   - `serve [--bind=…] [--trust-proxy-headers]` — boots the broker against the local SQLite store.
  *   - `token` / `token --regenerate` — manages the bearer token file.
  *   - `login <provider> [--via=user@host]` — logs into a provider locally, or
  *     via SSH tunnel into a remote broker host.
@@ -48,6 +48,7 @@ export interface AuthBrokerCommandArgs {
 	flags: {
 		json?: boolean;
 		bind?: string;
+		trustProxyHeaders?: boolean;
 		regenerate?: boolean;
 		via?: string;
 		provider?: string;
@@ -142,6 +143,7 @@ async function runServe(flags: AuthBrokerCommandArgs["flags"]): Promise<void> {
 		storage,
 		bind,
 		bearerTokens: [token],
+		trustProxyHeaders: flags.trustProxyHeaders,
 		version: VERSION,
 	});
 	logger.info("auth-broker listening", { url: handle.url });

@@ -2,14 +2,21 @@
 
 ## [Unreleased]
 
-### Added
-
-- Added `PI_NATIVES_DIR` to choose where a compiled binary extracts its native addon; the version subdirectory is still appended, so runs with separate `HOME`s can share one copy without sharing other data ([#14735](https://github.com/can1357/oh-my-pi/pull/14735) by [@alphastorm](https://github.com/alphastorm))
+## [18.8.4] - 2026-10-08
 
 ### Fixed
 
-- Fixed background builtins started in a subshell, such as `(yes > /dev/null &)`, running forever inside the host process after the subshell exited; they now end with it, as external commands already did
-- Fixed `kill %N` failing with `failed to send signal` on background jobs that run inside the shell (builtins, functions, compound commands); it now stops them
+- Fixed long output from a failing `jq` command hiding its error message: the output minimizer now shortens `jq` output only when the command succeeded ([#14657](https://github.com/can1357/oh-my-pi/pull/14657) by [@will-bogusz](https://github.com/will-bogusz))
+
+## [18.8.1] - 2026-10-07
+
+### Added
+
+- Added the `PI_NATIVES_DIR` configuration option to control where compiled native addons are extracted. The version-specific subdirectory remains appended, allowing separate `HOME` environments to share the same native addon copy without sharing other data.
+
+### Fixed
+
+- Fixed background shell builtins and other in-process commands so they terminate when their subshell exits and can be stopped with `kill %N`, matching the behavior of external commands.
 
 ## [18.7.0] - 2026-10-06
 
