@@ -26,6 +26,8 @@ export interface StatusLineSession {
 	sessionFile?: string;
 	isStreaming: boolean;
 	isAutoThinking: boolean;
+	/** Last live context percent used only to reserve startup layout width while the displayed percent is unknown. */
+	startupContextPercent?: number | null;
 	contextUsageRevision?: number;
 	systemPrompt?: readonly string[];
 	agent?: { state?: { tools?: readonly Pick<Tool, "name" | "description" | "parameters">[] }; tokenizer?: unknown };

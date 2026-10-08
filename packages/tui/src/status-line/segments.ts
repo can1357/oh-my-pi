@@ -759,6 +759,17 @@ const tokenInSegment: StatusLineSegment = singleStatSegment("token_in", "input",
 
 const tokenOutSegment: StatusLineSegment = singleStatSegment("token_out", "output", "output", "statusLineOutput");
 
+function tokenTotalBreakdown(ctx: SegmentContext): string | null {
+	const { input, output, cacheWrite, orchestrationInput, orchestrationOutput } = ctx.usageStats;
+	const parts: string[] = [];
+	const inTotal = input + cacheWrite;
+	const orchTotal = orchestrationInput + orchestrationOutput;
+	if (inTotal > 0) parts.push(`in:${formatNumber(inTotal)}`);
+	if (output > 0) parts.push(`out:${formatNumber(output)}`);
+	if (orchTotal > 0) parts.push(`orch:${formatNumber(orchTotal)}`);
+	return parts.length > 0 ? parts.join(" ") : null;
+}
+
 const tokenTotalSegment: StatusLineSegment = {
 	id: "token_total",
 	render(ctx) {
@@ -772,15 +783,9 @@ const tokenTotalSegment: StatusLineSegment = {
 		if (!total) return { content: "", visible: false };
 
 		if (ctx.options.token_total?.breakdown === true) {
-			const inTotal = input + cacheWrite;
-			const outTotal = output;
-			const orchTotal = orchestrationInput + orchestrationOutput;
-			const parts: string[] = [];
-			if (inTotal > 0) parts.push(`in:${formatNumber(inTotal)}`);
-			if (outTotal > 0) parts.push(`out:${formatNumber(outTotal)}`);
-			if (orchTotal > 0) parts.push(`orch:${formatNumber(orchTotal)}`);
-			if (parts.length === 0) return { content: "", visible: false };
-			return { content: theme.fg("statusLineSpend", parts.join(" ")), visible: true };
+			const breakdown = tokenTotalBreakdown(ctx);
+			if (!breakdown) return { content: "", visible: false };
+			return { content: theme.fg("statusLineSpend", breakdown), visible: true };
 		}
 
 		const content = formatMetric({
@@ -793,6 +798,10 @@ const tokenTotalSegment: StatusLineSegment = {
 		const { input, output, cacheWrite, orchestrationInput, orchestrationOutput } = ctx.usageStats;
 		const total = input + output + cacheWrite + orchestrationInput + orchestrationOutput;
 		if (!total) return null;
+		if (ctx.options.token_total?.breakdown === true) {
+			const breakdown = tokenTotalBreakdown(ctx);
+			return breakdown ? segView([span(breakdown, "statusLineSpend")], "tokens") : null;
+		}
 		return segView([span(formatNumber(total), "statusLineSpend")], "tokens");
 	},
 };

@@ -39,6 +39,8 @@ export interface StatusLineStartupData {
 	readonly fastMode: boolean;
 	/** Whether `model` bills through a subscription (drives the cost segment's prefix). */
 	readonly usingSubscription: boolean;
+	/** Last live percent; reserves its formatted width without displaying stale usage in the startup frame. */
+	readonly contextPercent?: number | null;
 	readonly autoCompactEnabled: boolean;
 	readonly compactionBoundaries: CompactionBoundaries | null;
 }
@@ -65,6 +67,7 @@ export function createStartupStatusLine(data: StatusLineStartupData): StatusLine
 		messages: NO_MESSAGES,
 		isStreaming: false,
 		isAutoThinking: data.autoThinking,
+		startupContextPercent: data.contextPercent,
 		sessionManager: {
 			getSessionName: () => undefined,
 			getSessionId: () => "",
@@ -157,11 +160,13 @@ export function readStatusLineStartupData(value: unknown): StatusLineStartupData
 	const thinkingLevel = typeof value.thinkingLevel === "string" ? parseThinkingLevel(value.thinkingLevel) : undefined;
 	if (value.thinkingLevel !== undefined && thinkingLevel === undefined) return undefined;
 	const compactionBoundaries = readCompactionBoundaries(value.compactionBoundaries);
+	const contextPercent = value.contextPercent;
 	if (
 		typeof value.gitEnabled !== "boolean" ||
 		typeof value.autoThinking !== "boolean" ||
 		typeof value.fastMode !== "boolean" ||
 		typeof value.usingSubscription !== "boolean" ||
+		(contextPercent !== undefined && contextPercent !== null && typeof contextPercent !== "number") ||
 		typeof value.autoCompactEnabled !== "boolean" ||
 		compactionBoundaries === undefined
 	) {
@@ -175,6 +180,7 @@ export function readStatusLineStartupData(value: unknown): StatusLineStartupData
 		autoThinking: value.autoThinking,
 		fastMode: value.fastMode,
 		usingSubscription: value.usingSubscription,
+		contextPercent,
 		autoCompactEnabled: value.autoCompactEnabled,
 		compactionBoundaries,
 	};

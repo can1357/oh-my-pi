@@ -3648,6 +3648,7 @@ export class InteractiveMode implements InteractiveModeContext {
 				autoThinking: this.session.isAutoThinking,
 				fastMode: this.session.isFastModeActive(),
 				usingSubscription: model ? this.session.modelRegistry.isUsingOAuth(model) : false,
+				contextPercent: this.session.getContextUsage()?.percent,
 				autoCompactEnabled: this.session.autoCompactionEnabled,
 				compactionBoundaries: model?.contextWindow
 					? statusLineHost.computeCompactionBoundaries(this.session, model.contextWindow, model)

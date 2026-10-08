@@ -3023,14 +3023,19 @@ export class StatusLineComponent<TSession extends StatusLineSession = StatusLine
 		// context segment is gone, and the gauge silently omits its labels too.
 		const embeddedContextWidth = embedContext
 			? embeddedContextGaugeMinWidth(
-					ctx.contextPercent,
+					ctx.contextPercent ?? ctx.session.startupContextPercent ?? null,
 					ctx.contextWindow,
 					embedCompactContext,
 					showEmbeddedContextWindow,
 				)
 			: 0;
 		const embeddedContextPercentWidth = embedContext
-			? embeddedContextGaugeMinWidth(ctx.contextPercent, ctx.contextWindow, embedCompactContext, false)
+			? embeddedContextGaugeMinWidth(
+					ctx.contextPercent ?? ctx.session.startupContextPercent ?? null,
+					ctx.contextWindow,
+					embedCompactContext,
+					false,
+				)
 			: 0;
 		// A default (non-compact) gauge may fall back to its short percentage-only
 		// label when both context labels cannot coexist with the final ordinary
