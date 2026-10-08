@@ -1991,7 +1991,13 @@ export class ModelHubComponent implements Component {
 
 		if (rolesView) {
 			const printable = extractPrintableText(data);
-			if (this.#focus === "scope" && printable !== undefined && printable.trim().length > 0) {
+			// Typing searches the catalog from the sidebar, and from the rows
+			// while a query is live (the picker shows its search field only
+			// then); otherwise the rows' letter commands own printable keys.
+			const typed = printable !== undefined && printable.trim().length > 0;
+			const editsQuery =
+				this.#browser.query.length > 0 && (printable !== undefined || matchesKey(data, "backspace"));
+			if ((this.#focus === "scope" && typed) || editsQuery) {
 				this.#setActiveEntry("all");
 				this.#focus = "list";
 				this.#browser.handleInput(data);
@@ -2434,9 +2440,14 @@ export class ModelHubComponent implements Component {
 			Math.max(0, active),
 		);
 		const { names, active: activePreset } = this.#presets();
+		// p/P type into a live query instead of switching presets.
+		const presetKeys =
+			this.#browser.query.length > 0
+				? formatKeyHints(["ctrl+left", "ctrl+right"])
+				: `${formatKeyHints(["ctrl+left", "ctrl+right"])} · ${formatKeyHints(["p", "shift+p"])}`;
 		const preset =
 			names.length > 0
-				? `   ${theme.fg("dim", "Preset:")} ${activePreset ? theme.fg("accent", activePreset) : theme.fg("muted", "custom")}  ${theme.fg("dim", `${formatKeyHints(["ctrl+left", "ctrl+right"])} · ${formatKeyHints(["p", "shift+p"])}`)}`
+				? `   ${theme.fg("dim", "Preset:")} ${activePreset ? theme.fg("accent", activePreset) : theme.fg("muted", "custom")}  ${theme.fg("dim", presetKeys)}`
 				: "";
 		return truncateToWidth(
 			` ${theme.fg("dim", "Roles:")} ${track}  ${theme.fg("dim", formatKeyHints(["alt+left", "alt+right"]))}${preset}`,
@@ -2740,6 +2751,10 @@ export class ModelHubComponent implements Component {
 				const presets =
 					this.#presets().names.length > 0 ? ` · ${formatKeyHints(["ctrl+left", "ctrl+right"])} preset` : "";
 				return `${upDown} providers · ${enterRight} roles · ${altLeftRight} tabs${presets} · ${cancel} close`;
+			}
+			// A live query takes printable keys and backspace, so the letter commands rest.
+			if (this.#browser.query.length > 0) {
+				return `${upDown} rows · ${enter} pick · type to search · ${left} providers · ${cancel} close`;
 			}
 			const row = this.#rolesRows[this.#roleIndex];
 			const compaction =
@@ -3228,7 +3243,9 @@ export class ModelHubComponent implements Component {
 			size: "lg",
 			layout: "rows",
 			preview: "side",
-			query: this.#browser.query,
+			// The Roles rows' letter commands own printable keys until a query
+			// is live, so the sheet offers no search field to type into.
+			query: rolesView && this.#browser.query.length === 0 ? null : this.#browser.query,
 			cursor: this.#browser.cursor,
 			placeholder: "Search models…",
 			scopes: this.#pickerScopes(),
@@ -3486,8 +3503,15 @@ export class ModelHubComponent implements Component {
 		}
 		if (rolesView) {
 			const row = this.#rolesRows[this.#roleIndex];
+			// A live query takes the letter keys: those buttons keep working but lose their keycaps.
+			const searching = this.#browser.query.length > 0;
 			const roleAction = (action: RolesAction, label: string, key: string, primary = false) =>
-				pickerAction(`roles:${action}`, label, key, primary ? { primary: true } : undefined);
+				pickerAction(
+					`roles:${action}`,
+					label,
+					searching && key !== "enter" ? undefined : key,
+					primary ? { primary: true } : undefined,
+				);
 			const actions: (TspPickerAction | undefined)[] = [];
 			const compaction =
 				this.#callbacks.onCompactionPointChange && this.#roleRowModel()
@@ -4038,6 +4062,17 @@ export class ModelHubComponent implements Component {
 					upDown("providers"),
 					keys("roles", "enter", "right"),
 					keys("tabs", "alt+left", "alt+right"),
+					presetHint,
+					cancel("close"),
+				];
+			}
+			// A live query takes printable keys and backspace, so the letter commands rest.
+			if (this.#browser.query.length > 0) {
+				return [
+					upDown("rows"),
+					keys("pick", "enter"),
+					search,
+					keys("providers", "left"),
 					presetHint,
 					cancel("close"),
 				];
