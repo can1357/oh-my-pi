@@ -2,7 +2,8 @@
 # Update omp from a local checkout.
 #
 #   scripts/update-local.sh [--allow-dirty] [--no-sync] [--no-push]
-#                           [--force-reset] [branch] [-- install-local args...]
+#                           [--force-reset] [--resolve-ai] [branch]
+#                           [-- install-local args...]
 #
 # Upstream (can1357/oh-my-pi) is always read from its `main` branch.
 # <branch> (default: dev) is the fork working branch: it is created from
@@ -29,13 +30,14 @@ UPSTREAM_REMOTE="upstream"
 UPSTREAM_URL="https://github.com/can1357/oh-my-pi.git"
 UPSTREAM_BRANCH="main"
 FORCE_RESET=0
+RESOLVE_AI=0
 NO_SYNC=0
 NO_PUSH=0
 
 usage() {
 	cat <<'EOF'
 Usage: update-local.sh [--allow-dirty] [--no-sync] [--no-push]
-                       [--force-reset]
+                       [--force-reset] [--resolve-ai]
                        [--upstream-remote NAME] [--upstream-url URL]
                        [--upstream-branch NAME]
                        [branch] [-- install-local args...]
@@ -48,6 +50,9 @@ Usage: update-local.sh [--allow-dirty] [--no-sync] [--no-push]
   --no-push         rebase locally but do not push the result to origin
   --force-reset     after pushing <branch>, reset origin/main to exactly
                     upstream/main (discards fork-only commits on main)
+  --resolve-ai      on rebase conflict, ask `omp --auto-approve -p` to
+                    resolve markers in place; on agent failure, abort and
+                    print manual recovery steps (default: abort immediately)
   --upstream-remote remote name for can1357/oh-my-pi (default: upstream)
   --upstream-url    URL used when adding the upstream remote
                     (default: https://github.com/can1357/oh-my-pi.git)
@@ -79,6 +84,10 @@ while [ $# -gt 0 ]; do
 			;;
 		--force-reset)
 			FORCE_RESET=1
+			shift
+			;;
+		--resolve-ai)
+			RESOLVE_AI=1
 			shift
 			;;
 		--upstream-remote)
@@ -200,6 +209,67 @@ if [ "$BRANCH" != "main" ]; then
 	ensure_branch "$BRANCH" "origin/main"
 fi
 
+print_manual_recovery() {
+	# print_manual_recovery <upstream-ref>: context for hand-resolving a
+	# conflict after the rebase was aborted and the branch is unchanged.
+	local ref="$1" files commit
+	printf '\nerror: rebase onto %s failed; aborted, local branch unchanged\n' "$ref" >&2
+	printf '\nConflicted files:\n' >&2
+	git diff --name-only --diff-filter=U >&2 || true
+	files=$(git diff --name-only --diff-filter=U || true)
+	if [ -n "$files" ]; then
+		printf '\nWhat upstream changed in those files:\n' >&2
+		while IFS= read -r commit; do
+			[ -n "$commit" ] || continue
+			git log --oneline "$ref" -- "$commit" | head -5 >&2
+		done <<EOFILES
+$files
+EOFILES
+	fi
+	printf '\nWhat your branch changed (commits being replayed):\n' >&2
+	git log --oneline "$ref..HEAD" | head -10 >&2
+	cat >&2 <<'EOFSTEPS'
+
+To resolve manually:
+  1. git checkout -b resolve/dev-<date>   # never resolve on dev directly
+  2. git rebase <upstream-ref>            # reproduce the conflict
+  3. edit markers, git add <files>, git rebase --continue
+     (or `git checkout --theirs -- <file>` if upstream already did it,
+      `git rebase --skip` if your commit is now obsolete)
+  4. git checkout dev && git reset --hard resolve/dev-<date>
+  5. re-run omp-update
+EOFSTEPS
+}
+
+resolve_conflict_ai() {
+	# resolve_conflict_ai <upstream-ref>: the rebase is paused with markers
+	# in the worktree. Ask the omp agent to resolve, stage, and continue.
+	# Returns 0 only if the rebase completes with a clean tree.
+	local ref="$1" files prompt
+	files=$(git diff --name-only --diff-filter=U || true)
+	[ -n "$files" ] || return 1
+	command -v omp >/dev/null 2>&1 || return 1
+	prompt="You are resolving a git rebase conflict in $REPO_ROOT.
+Rebase of $BRANCH onto $ref is paused. Conflicted files:
+$files
+
+Rules:
+1. Read each conflicted file, understand BOTH sides (ours = fork commits, theirs = upstream).
+2. Prefer upstream code for shared logic; keep fork-specific behavior (INSTALL.md docs, fork tooling, update-local.sh) intact.
+3. If upstream already implemented what a fork commit did, prefer upstream and drop the duplicate.
+4. NEVER leave conflict markers. NEVER commit — only resolve files and \`git add\` them.
+5. When every conflicted file is staged and marker-free, run \`git rebase --continue\`. If further conflicts appear in later commits, repeat.
+6. If a commit is fully obsolete (upstream supersedes it), run \`git rebase --skip\` for that step.
+7. Verify with \`git status\` and \`git diff --check\` before continuing past each step."
+	if omp --auto-approve -p "$prompt"; then
+		! git rev-parse --verify --quiet REBASE_HEAD >/dev/null \
+			&& [ -z "$(git diff --name-only --diff-filter=U || true)" ] \
+			&& [ -z "$(git status --porcelain)" ]
+	else
+		return 1
+	fi
+}
+
 if [ "$NO_SYNC" -eq 0 ]; then
 	step "rebase $BRANCH onto $UPSTREAM_REF"
 	BEFORE=$(git rev-parse HEAD)
@@ -212,9 +282,27 @@ if [ "$NO_SYNC" -eq 0 ]; then
 		else
 			PUSHED=0
 		fi
+	elif [ "$RESOLVE_AI" -eq 1 ]; then
+		step "rebase conflict — asking omp agent to resolve"
+		if resolve_conflict_ai "$UPSTREAM_REF"; then
+			AFTER=$(git rev-parse HEAD)
+			done_step "agent resolved rebase at $AFTER"
+			if [ "$BEFORE" != "$AFTER" ] && [ "$NO_PUSH" -eq 0 ]; then
+				step "push rebased $BRANCH to origin (updates fork)"
+				git push --force-with-lease origin "$BRANCH"
+				PUSHED=1
+			else
+				PUSHED=0
+			fi
+		else
+			printf 'warning: AI resolution failed or agent errored; aborting\n' >&2
+			git rebase --abort || true
+			print_manual_recovery "$UPSTREAM_REF"
+			exit 1
+		fi
 	else
 		git rebase --abort || true
-		printf 'error: rebase onto %s failed; aborted, local branch unchanged\n' "$UPSTREAM_REF" >&2
+		print_manual_recovery "$UPSTREAM_REF"
 		exit 1
 	fi
 else
