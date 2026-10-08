@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Bench detects local OpenAI-compatible backends (llama.cpp, Ollama, LM Studio, vLLM, plus loopback/private-baseUrl endpoints) and runs benches that are entirely on them at `--par 1` — `--detailed` included, whose headers and summary now report the measured concurrency — when `--par` is not explicitly provided, since a single local server thrashes its KV cache under parallel load; mixed runs keep the requested `--par` with a note on stderr, and an explicit `--par` is respected as given. ([#13614](https://github.com/can1357/oh-my-pi/pull/13614) by [@yomgui1](https://github.com/yomgui1))
+
 ### Changed
 
 - Reduced memory retained after merging unchanged discovered and cached models ([#14252](https://github.com/can1357/oh-my-pi/pull/14252) by [@iliaal](https://github.com/iliaal)).
