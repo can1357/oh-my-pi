@@ -9,7 +9,13 @@
 // are never undercounted; only Opus/Sonnet/Haiku revisions known to predate
 // 4.7 take the standard tier. Separator-collapsed revisions parse as two
 // digits (`claude-opus-45` is Opus 4.5 → 45), so 10–46 is standard too.
+// Claude's prompt cache finds an earlier request's entry only within 20 block
+// positions back from a breakpoint, counting the breakpoint; a run of
+// consecutive tool_use or tool_result blocks is one position. Warm-cache
+// tool-result pruning keeps its rewrites inside this window.
+// https://platform.claude.com/docs/en/build-with-claude/prompt-caching
 class "anthropic" {
+	prompt-cache-lookback 20
 	image-tokenization {
 		regime "anthropic-patch"
 		max-edge 2576
@@ -102,7 +108,8 @@ class "anthropic" {
 		}
 		// Haiku 5.5 bills every rate 5x for prompts over 100K. Derived from each
 		// host's list price so non-Anthropic hosts get the band too; the Claude
-		// API pins absolute rates further down.
+		// API and Cursor pin absolute rates, and GitHub Copilot opts out because
+		// its long tier is the `-1m` sibling row.
 		// https://platform.claude.com/docs/en/models/haiku-5-5/overview#pricing
 		revision ">=5.5 <6" {
 			long-context-cost {

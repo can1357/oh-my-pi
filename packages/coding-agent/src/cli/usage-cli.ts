@@ -13,6 +13,7 @@ import {
 	type AuthStorage,
 	type DisabledCredentialSummary,
 	type OAuthAccountIdentity,
+	isWithinUsageReserve,
 	resolveCredentialIdentityKey,
 	resolveUsedFraction,
 	type UsageHistoryEntry,
@@ -664,11 +665,11 @@ function formatPolicyLine(
 		const unmeasured = exhausted ? "exhausted" : "reserve unknown";
 		return `policy: priority ${priority} · reserve ${reserveLabel} · ${unmeasured}`;
 	}
-	const remainingPct = Math.max(0, 1 - Math.max(...usedFractions)) * 100;
+	const remainingFraction = Math.max(0, 1 - Math.max(...usedFractions));
 	let state = "eligible";
-	if (exhausted || remainingPct <= 0) state = "exhausted";
-	else if (remainingPct <= reservePct) state = "inside reserve";
-	return `policy: priority ${priority} · reserve ${reserveLabel} · ${state} · ${remainingPct.toFixed(1)}% left`;
+	if (exhausted || remainingFraction <= 0) state = "exhausted";
+	else if (isWithinUsageReserve(remainingFraction, reservePct / 100)) state = "inside reserve";
+	return `policy: priority ${priority} · reserve ${reserveLabel} · ${state} · ${(remainingFraction * 100).toFixed(1)}% left`;
 }
 
 /**
