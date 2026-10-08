@@ -140,6 +140,13 @@ import { modelMentionDisplayName } from "@oh-my-pi/pi-tui/prompt/model-mention-s
 import { modelMentionChipLabel, shiftImageMarkers } from "@oh-my-pi/pi-tui/prompt/composer-attachments";
 import type { SessionContext } from "../session/session-context";
 import type { SessionManager } from "../session/session-manager";
+import {
+	canAutoCreateWorktree,
+	planWorktreeExit,
+	removeExitWorktrees,
+	type SessionWorktree,
+	type WorktreeExitPlan,
+} from "../session/session-worktree";
 import type { ShakeMode } from "../session/shake-types";
 import { BUILTIN_SLASH_COMMAND_RESERVED_NAMES, buildTuiBuiltinSlashCommands } from "../slash-commands/builtin-registry";
 import { buildStaticInlineHint } from "../slash-commands/builtin-completions";
@@ -377,6 +384,7 @@ import {
 	cfgTuiVimModeDisplay,
 } from "./settings";
 import { cfgTasksTodoClearDelay } from "../tools/settings";
+import { cfgWorktreeOnExit, cfgWorktreeOnStart } from "../task/settings";
 import { cfgExpandThinkingBlocks, cfgProseOnlyThinking } from "../session/settings";
 import { cfgHideThinkingBlock } from "../session/settings";
 import { cfgCycleOrder, cfgModelRoles } from "../config/model-settings";
@@ -1449,6 +1457,8 @@ export class InteractiveMode implements InteractiveModeContext {
 	get teardownFailed(): boolean {
 		return this.#teardownFailed;
 	}
+	/** Worktrees this launch created (auto-start or `/wt`), considered on exit per `worktree.onExit`. */
+	#ownedWorktrees: SessionWorktree[] = [];
 	/** True once `shutdown()` has begun teardown. Surfaced to the input
 	 *  controller so a Ctrl+C arriving while teardown is in flight can hard-
 	 *  abort the remaining work instead of stacking another no-op call. */
@@ -2777,7 +2787,7 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	#scheduleLoopAutoSubmit(): void {
 		this.#cancelLoopAutoSubmit();
-		if (!this.loopModeEnabled || !this.loopPrompt) return;
+		if (!this.loopModeEnabled || !this.loopPrompt || this.#isShuttingDown) return;
 		const prompt = this.loopPrompt;
 		const loopAction = cfgLoopMode.get(settings);
 		this.#deferLoopAutoSubmit(() => {
@@ -6804,11 +6814,15 @@ export class InteractiveMode implements InteractiveModeContext {
 			return;
 		}
 		this.#isShuttingDown = true;
+		const worktreePlan = await this.#planOwnedWorktreeExit();
 		try {
 			await this.#teardown();
 		} catch (error) {
 			this.#handleTeardownError("close", error);
 			return;
+		}
+		for (const message of await removeExitWorktrees(worktreePlan)) {
+			process.stderr.write(`${chalk.yellow(message)}\n`);
 		}
 
 		// Print resumption hint only if the session was actually materialized to
@@ -6835,6 +6849,30 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.#teardownFailed
 				? `Could not ${action} session: ${detail}\nPress ${appKey(this.keybindings, "app.clear")} again to exit without saving the session log.`
 				: `Could not ${action} session: ${detail}`,
+		);
+	}
+
+	/**
+	 * Apply `worktree.onExit` to worktrees this launch created and return the ones
+	 * to remove after teardown. Stops the agent turn and live commands first so the
+	 * prompts describe a worktree nothing is still writing to. Never throws.
+	 */
+	async #planOwnedWorktreeExit(): Promise<WorktreeExitPlan[]> {
+		const policy = cfgWorktreeOnExit.get(this.settings);
+		if (policy === "keep" || this.#ownedWorktrees.length === 0) return [];
+		this.#abortLoopCondition();
+		this.#cancelLoopAutoSubmit();
+		try {
+			await this.session.abort();
+			await this.#liveCommandController.stop();
+		} catch (err) {
+			this.showWarning(err instanceof Error ? err.message : String(err));
+		}
+		return planWorktreeExit(
+			this.#ownedWorktrees,
+			policy,
+			(title, message) => this.showHookConfirm(title, message),
+			message => this.showWarning(message),
 		);
 	}
 
@@ -7656,9 +7694,34 @@ export class InteractiveMode implements InteractiveModeContext {
 		await this.#commandController.handleMoveCommand(targetPath);
 	}
 
-	async handleWorktreeCommand(branch?: string): Promise<void> {
+	async handleWorktreeCommand(branch?: string, options?: { keepChanges?: boolean }): Promise<void> {
 		if (this.#vibeSessionTransitionBlocked()) return;
-		await this.#commandController.handleWorktreeCommand(branch);
+		const worktree = await this.#commandController.handleWorktreeCommand(branch, options);
+		if (worktree) this.#ownedWorktrees.push(worktree);
+	}
+
+	/**
+	 * Apply `worktree.onStart` to a fresh launch: optionally move the session into
+	 * a new worktree forked from clean `HEAD`. Silent no-op outside git checkouts;
+	 * failures become a warning so startup continues.
+	 */
+	async maybeAutoCreateWorktree(): Promise<void> {
+		try {
+			const policy = cfgWorktreeOnStart.get(this.settings);
+			if (policy === "off" || !(await canAutoCreateWorktree(this.sessionManager.getCwd()))) return;
+			if (
+				policy === "ask" &&
+				!(await this.showHookConfirm(
+					"Create a worktree for this session?",
+					"Work happens on a new wt/* branch; this checkout stays untouched.",
+				))
+			) {
+				return;
+			}
+			await this.handleWorktreeCommand(undefined, { keepChanges: false });
+		} catch (err) {
+			this.showWarning(`Worktree not created: ${err instanceof Error ? err.message : String(err)}`);
+		}
 	}
 
 	withBtwSessionMove(operation: () => Promise<boolean>): Promise<boolean> {
