@@ -24,6 +24,7 @@ export type AnthropicSandToolsWire =
 	| "sand-default-fallback"
 	| "automation"
 	| "keep-model"
+	| "text-tools"
 	| "parent-chat"
 	| "auto";
 
@@ -54,6 +55,7 @@ export function resolveAnthropicSandToolsWire(
 	}
 	if (raw === "automation" || raw === "product") return "automation";
 	if (raw === "keep-model" || raw === "keep-id" || raw === "keep") return "keep-model";
+	if (raw === "text-tools") return "text-tools";
 	if (raw === "parent-chat" || raw === "parent") return "parent-chat";
 	if (raw === "native") return "native";
 	if (raw === "error") return "error";
@@ -164,6 +166,17 @@ export function applyAnthropicSandToolWire(
 	const modelId = input.modelId?.trim() || input.requestedModel.modelId;
 	if (toolCount === 0) return input;
 	if (wire === "native") return { ...input, wireMode: "native" };
+	if (wire === "text-tools") {
+		if (!isAnthropicSandModelId(modelId))
+			throw new Error("Grok Bot text-tools wire is only supported for Anthropic-class models");
+		return {
+			...input,
+			requestedModel: input.requestedModel,
+			tools: [],
+			wireMode: "text-tools",
+			originalModelId: modelId,
+		};
+	}
 
 	if (wire === "keep-model") {
 		const anthropic = isAnthropicSandModelId(modelId);

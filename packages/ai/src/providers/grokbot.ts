@@ -60,6 +60,7 @@ import {
 	promoteJsonTextToolCallsFromContent,
 } from "./grokbot/json-text-tool-call";
 import { nativeToolParametersForIdentity } from "./grokbot/tool-policy";
+import { grokbotTextToolMessages } from "./grokbot/text-tools";
 import {
 	augmentToolIndexForProductWire,
 	parseSendToUserContent,
@@ -1407,6 +1408,10 @@ export const streamGrokBot: StreamFunction<"grokbot-sand"> = (
 					if (anthropicWire.acceptedUnadvertisedToolNames?.length) {
 						body.acceptedUnadvertisedToolNames = anthropicWire.acceptedUnadvertisedToolNames;
 					}
+					if (anthropicWire.wireMode === "text-tools") {
+						body.messages = grokbotTextToolMessages(messages, context.tools ?? []);
+						body.conversationId = crypto.randomUUID();
+					}
 					if (
 						anthropicWire.wireMode === "automation" ||
 						anthropicWire.wireMode === "parent-chat" ||
@@ -2187,14 +2192,23 @@ export const streamGrokBot: StreamFunction<"grokbot-sand"> = (
 					}) &&
 					!output.content.some(b => b.type === "toolCall")
 				) {
-					const advertised = advertisedNamesForJsonTextToolCall(body.tools, context.tools);
+					const advertised =
+						anthropicWire.wireMode === "text-tools"
+							? new Set((context.tools ?? []).map(tool => tool.name))
+							: advertisedNamesForJsonTextToolCall(body.tools, context.tools);
 					const excluded = new Set(sendToUserTextIndexes);
+					if (anthropicWire.wireMode === "text-tools") {
+						for (let index = 0; index < output.content.length; index++) {
+							if (output.content[index]?.type === "thinking") excluded.add(index);
+						}
+					}
 					const promotion = promoteJsonTextToolCallsFromContent(
 						output.content,
 						advertised,
 						excluded,
 						context.tools,
 						name => grammarTools.get(name)?.name ?? name,
+						anthropicWire.wireMode === "text-tools" ? "json-only" : undefined,
 					);
 					const promotedList = promotion.calls;
 					if (promotedList.length > 0) {

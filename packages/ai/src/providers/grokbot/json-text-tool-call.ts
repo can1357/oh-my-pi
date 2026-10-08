@@ -26,7 +26,7 @@ export function shouldPromoteJsonTextToolCall(opts: {
 }): boolean {
 	if (opts.sandPromoteJsonTextTools === true) return true;
 	const wire = opts.wireMode;
-	return wire === "automation" || wire === "parent-chat" || wire === "keep-model";
+	return wire === "automation" || wire === "parent-chat" || wire === "keep-model" || wire === "text-tools";
 }
 
 function stripMarkdownFence(text: string): string | undefined {
@@ -408,7 +408,13 @@ export function promoteJsonTextToolCallsFromContent(
 	excludeIndexes?: ReadonlySet<number>,
 	ompTools?: ReadonlyArray<OmpToolNameSource>,
 	resolveToolName?: (name: string) => string,
+	format?: "json-only",
 ): JsonTextToolCallPromotion {
+	const parse = (text: string): JsonTextToolCall[] => {
+		if (format !== "json-only") return parsePromotableToolCallsFromText(text, advertisedNames);
+		const call = parseJsonTextToolCall(text, advertisedNames);
+		return call ? [call] : [];
+	};
 	type BlockPromotion = {
 		index: number;
 		type: string;
@@ -421,7 +427,7 @@ export function promoteJsonTextToolCallsFromContent(
 		if (!block) continue;
 		const text = blockTextForJsonPromotion(block);
 		if (!text?.trim()) continue;
-		const promoted = parsePromotableToolCallsFromText(text, advertisedNames);
+		const promoted = parse(text);
 		if (promoted.length > 0) {
 			blocks.push({ index: i, type: block.type, calls: promoted });
 		}
@@ -454,7 +460,7 @@ export function promoteJsonTextToolCallsFromContent(
 	}
 	const combined = assistantTextForJsonPromotion(content, excludeIndexes);
 	if (!combined.trim()) return { calls: [], sourceIndexes: [] };
-	const fallback = parsePromotableToolCallsFromText(combined, advertisedNames);
+	const fallback = parse(combined);
 	if (fallback.length === 0) return { calls: [], sourceIndexes: [] };
 	// Combined fallback: every joined text/thinking block was part of the source.
 	const fallbackIndexes: number[] = [];
