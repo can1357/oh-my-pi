@@ -1409,6 +1409,12 @@ async function runLoopBody(
 					return;
 				}
 
+				config.onPreparedProviderCall?.(
+					currentContext.messages,
+					preparedProviderCall.context,
+					preparedProviderCall.model,
+				);
+
 				if (!turnOpen) {
 					stream.push({ type: "turn_start" });
 					emitInputMessages(stream, turnMessages);

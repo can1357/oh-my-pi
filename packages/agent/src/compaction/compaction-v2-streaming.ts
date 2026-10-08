@@ -210,7 +210,7 @@ export function buildCompactionV2Request(
 				}
 			: {}),
 		...(promptCacheKey ? { prompt_cache_key: promptCacheKey } : {}),
-		...(options?.tools && options.tools.length > 0 ? { tools: options.tools, tool_choice: "auto" } : {}),
+		...(options?.tools && options.tools.length > 0 ? { tools: options.tools } : {}),
 	};
 	if (model.useResponsesLite) {
 		applyCodexResponsesLiteShape(body);

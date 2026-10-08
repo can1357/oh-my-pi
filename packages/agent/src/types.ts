@@ -385,6 +385,8 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	 * the run is canceled or its deadline expires.
 	 */
 	beforeModelCall?: AgentBeforeModelCall;
+	/** Records the source history and completed provider projection for native side requests. */
+	onPreparedProviderCall?: (source: AgentMessage[], context: Context, model: Model) => void;
 
 	/**
 	 * Optional transform applied to tool call arguments before execution.

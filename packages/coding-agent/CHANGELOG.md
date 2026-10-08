@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed native OpenAI Responses compaction losing extension context and normal tool definitions, reducing prompt-cache reuse ([#14923](https://github.com/can1357/oh-my-pi/issues/14923)).
+
 ## [18.8.4] - 2026-10-08
 
 ### Changed

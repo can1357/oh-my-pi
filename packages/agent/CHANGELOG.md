@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed OpenAI Responses V2 compaction requests omitting prepared context, normal tools, and replay-safe native history ([#14923](https://github.com/can1357/oh-my-pi/issues/14923)).
+
 ## [18.8.1] - 2026-10-07
 
 ### Added

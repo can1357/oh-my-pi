@@ -99,6 +99,14 @@ function refreshToolChoiceForActiveTools(
 	return tools.some(tool => tool.name === toolName) ? toolChoice : undefined;
 }
 
+/** Completed provider request paired with the source history that produced it. */
+export interface PreparedProviderProjection {
+	source: readonly AgentMessage[];
+	sourceLength: number;
+	context: Context;
+	model: Model;
+}
+
 export class AgentBusyError extends Error {
 	constructor(
 		message: string = "Agent is already processing. Use steer() or followUp() to queue messages, or wait for completion.",
@@ -497,6 +505,8 @@ export class Agent {
 	#onBeforeYield?: () => Promise<void> | void;
 	#onTurnEnd?: (messages: AgentMessage[], signal?: AbortSignal, context?: AgentTurnEndContext) => Promise<void> | void;
 	#onModelCallSystemPrompt?: (systemPrompt: string[]) => void;
+	#lastPreparedProviderCall?: PreparedProviderProjection;
+
 	#beforeModelCall?: AgentBeforeModelCall;
 	#additionalBeforeModelCalls = new Set<AgentBeforeModelCall>();
 	#asideMessageProvider?: () => AsideMessage[] | Promise<AsideMessage[]>;
@@ -1147,6 +1157,11 @@ export class Agent {
 	/** Called with the exact system prompt each model call is built from, after before-model-call hooks. */
 	setOnModelCallSystemPrompt(fn: ((systemPrompt: string[]) => void) | undefined): void {
 		this.#onModelCallSystemPrompt = fn;
+	}
+
+	/** Completed request projection, retained with its source history for native compaction. */
+	get lastPreparedProviderCall(): PreparedProviderProjection | undefined {
+		return this.#lastPreparedProviderCall;
 	}
 
 	/**
@@ -1850,6 +1865,14 @@ export class Agent {
 				context.systemPrompt = this.#state.systemPrompt;
 				this.#onModelCallSystemPrompt?.(context.systemPrompt);
 				context.tools = this.#toolsForModel(this.#state.model ?? model);
+			},
+			onPreparedProviderCall: (source, prepared, preparedModel) => {
+				this.#lastPreparedProviderCall = {
+					source,
+					sourceLength: source.length,
+					context: prepared,
+					model: preparedModel,
+				};
 			},
 			beforeModelCall:
 				this.#beforeModelCall || this.#additionalBeforeModelCalls.size > 0

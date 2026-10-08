@@ -2286,6 +2286,8 @@ export class AgentSession implements SettingsScope {
 				}
 				return { ...live, messages: live.messages.slice(0, cut) };
 			},
+			buildOpenAiV2Context: (messages, model, projection, signal) =>
+				this.#providerBoundary.buildOpenAiV2Context(messages, model, projection, signal),
 			obfuscateTextForProvider: text => this.#obfuscateTextForProvider(text),
 			obfuscatePreparationForProvider: preparation => this.#obfuscatePreparationForProvider(preparation),
 			closeCodexProviderSessionsForHistoryRewrite: () => this.#closeCodexProviderSessionsForHistoryRewrite(),

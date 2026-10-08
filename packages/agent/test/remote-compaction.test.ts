@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test, vi } from "bun:test";
+import { type } from "@oh-my-pi/omptype";
 import { ThinkingLevel, Tokenizer } from "@oh-my-pi/pi-agent-core";
 import {
 	type CompactionPreparation,
@@ -31,6 +32,7 @@ import {
 	buildTransformedCodexRequestBody,
 	getOpenAICodexTransportDetails,
 } from "@oh-my-pi/pi-ai/providers/openai-codex-responses";
+import { buildParams, convertTools } from "@oh-my-pi/pi-ai/providers/openai-responses";
 import type {
 	AssistantMessage,
 	CodexCompactionContext,
@@ -1044,6 +1046,56 @@ describe("requestCompactionV2Streaming", () => {
 		expect(result.usedTokens).toBe(123);
 		expect(result.usage?.cachedInputTokens).toBe(7);
 		expect(result.usage?.reasoningOutputTokens).toBe(1);
+	});
+
+	test("sends the ordinary Responses default tool choice with V2 tools", async () => {
+		const model = makeOpenAiModel({
+			remoteCompaction: { enabled: true, v2StreamingEnabled: true },
+		});
+		const tool = { name: "lookup", description: "Find a record", parameters: type({ query: "string" }) };
+		const { params: ordinary } = buildParams(
+			model,
+			{ messages: [{ role: "user", content: "Find the record", timestamp: 0 }], tools: [tool] },
+			undefined,
+			undefined,
+		);
+		const tools = convertTools([tool], model.compat.supportsStrictMode, model);
+		const request = buildCompactionV2Request(
+			model,
+			[{ type: "message", role: "user", content: [{ type: "input_text", text: "Find the record" }] }],
+			"Compact the conversation",
+			{ tools, reasoning: { effort: "high", summary: "auto" } },
+		);
+		let body: Record<string, unknown> | undefined;
+		await requestCompactionV2Streaming(model, "test-key", request, undefined, {
+			fetch: async (_input, init) => {
+				body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+				return sseResponse([
+					{
+						type: "response.output_item.done",
+						output_index: 0,
+						item: { type: "compaction", encrypted_content: "enc" },
+					},
+					{ type: "response.completed", response: { usage: { input_tokens: 1 } } },
+				]);
+			},
+		});
+
+		expect(ordinary.tools).toEqual(tools);
+		expect(body?.tools).toEqual(ordinary.tools);
+		expect(ordinary.tool_choice).toBeUndefined();
+		expect(body).not.toHaveProperty("tool_choice");
+		expect(body?.tool_choice).toBe(ordinary.tool_choice);
+		expect(body).toMatchObject({
+			model: model.id,
+			instructions: "Compact the conversation",
+			stream: true,
+			store: false,
+			reasoning: { effort: "high", summary: "auto" },
+			include: ["reasoning.encrypted_content"],
+		});
+		if (!Array.isArray(body?.input)) throw new Error("V2 request omitted its input");
+		expect(body.input.at(-1)).toEqual({ type: "compaction_trigger" });
 	});
 	test.each(["The socket connection was closed unexpectedly", "socket connection closed unexpectedly"] as const)(
 		"retries a transient socket closure: %s",
@@ -2410,6 +2462,149 @@ describe("compact() remote compaction failure handling", () => {
 			"Remote compaction preserved provider-native history for this session. Compaction processed 55 input tokens.",
 		);
 		expect(completeSpy).not.toHaveBeenCalled();
+	});
+
+	test("sends the completed provider projection in native V2 history", async () => {
+		const preparation = makePreparation();
+		preparation.settings = { ...preparation.settings, remoteStreamingV2Enabled: true };
+		preparation.messagesToSummarize = [
+			{ role: "user", content: "original first", timestamp: 1 },
+			{ role: "user", content: "original second", timestamp: 2 },
+		];
+		preparation.recentMessages = [{ role: "user", content: "new tail", timestamp: 3 }];
+		const model = makeOpenAiModel({ remoteCompaction: { enabled: true, v2StreamingEnabled: true } });
+		const context: ai.Context = {
+			systemPrompt: ["ordinary instructions"],
+			tools: [
+				{
+					name: "read",
+					description: "Read a file. Example: read a.txt",
+					parameters: {
+						type: "object",
+						properties: { path: { type: "string" }, i: { type: "string" } },
+						required: ["path", "i"],
+					},
+				},
+			],
+			messages: [
+				{ role: "user", content: "date/cwd reminder", timestamp: 0 },
+				{ role: "user", content: "extension restored second", timestamp: 2 },
+				{ role: "user", content: "extension inserted", timestamp: 2 },
+				{ role: "user", content: "original first", timestamp: 1 },
+				{ role: "user", content: "new tail", timestamp: 3 },
+			],
+		};
+		const ordinary = buildParams(model, context, undefined, undefined).params;
+		let bodyText = "";
+		let projections = 0;
+		await compact(preparation, model, "test-key", undefined, undefined, {
+			buildOpenAiV2Context: async () => {
+				projections++;
+				return context;
+			},
+			fetch: async (_input, init) => {
+				bodyText = String(init?.body);
+				return sseResponse([
+					{
+						type: "response.output_item.done",
+						output_index: 0,
+						item: { type: "compaction", encrypted_content: "enc" },
+					},
+					{ type: "response.completed", response: { usage: { input_tokens: 20 } } },
+				]);
+			},
+		});
+		const body = JSON.parse(bodyText);
+		expect(projections).toBe(1);
+		expect(body.input.slice(0, -1)).toEqual(ordinary.input);
+		expect(body.input.at(-1)).toEqual({ type: "compaction_trigger" });
+		expect(body.tools).toEqual(ordinary.tools);
+		expect(body.instructions).toBe("");
+	});
+
+	test("sanitizes saved V2 native replay before sending a second Responses compaction", async () => {
+		const previousHistory = [
+			{
+				type: "compaction",
+				id: "cmp_old",
+				status: "completed",
+				encrypted_content: "opaque-native-content",
+				content: [{ type: "opaque_native_content", payload: "keep me" }],
+			},
+			{
+				type: "function_call",
+				id: "fc_old",
+				call_id: "call_read_old",
+				name: "read",
+				arguments: "{}",
+				status: "completed",
+			},
+			{ type: "function_call_output", id: "fco_old", call_id: "call_read_old", output: "prior result" },
+			{
+				type: "computer_call",
+				id: "ctc_old",
+				call_id: "call_computer_old",
+				actions: [{ type: "screenshot" }],
+				status: "completed",
+			},
+			{
+				type: "computer_call_output",
+				id: "ctco_old",
+				call_id: "call_computer_old",
+				output: { type: "computer_screenshot", file_id: "file_old" },
+			},
+		];
+		const preparation = makePreparation();
+		preparation.settings = { ...preparation.settings, remoteStreamingV2Enabled: true };
+		preparation.previousPreserveData = {
+			openaiRemoteCompaction: { version: "v2", provider: "openai", replacementHistory: previousHistory },
+		};
+		const model = makeOpenAiModel({
+			supportsComputerUse: true,
+			remoteCompaction: { enabled: true, v2StreamingEnabled: true },
+		});
+		let requestInput: Array<Record<string, unknown>> = [];
+		const fetchMock: FetchImpl = async (_url, init) => {
+			const body = JSON.parse(String(init?.body)) as { input: Array<Record<string, unknown>> };
+			requestInput = body.input;
+			return sseResponse([
+				{
+					type: "response.output_item.done",
+					output_index: 0,
+					item: { type: "compaction", encrypted_content: "next-native-content" },
+				},
+				{
+					type: "response.completed",
+					response: { usage: { input_tokens: 55, output_tokens: 3, total_tokens: 58 } },
+				},
+			]);
+		};
+
+		await compact(preparation, model, "test-key", undefined, undefined, { fetch: fetchMock });
+
+		expect(requestInput.slice(0, previousHistory.length)).toEqual([
+			{
+				type: "compaction",
+				encrypted_content: "opaque-native-content",
+				content: [{ type: "opaque_native_content", payload: "keep me" }],
+			},
+			{ type: "function_call", call_id: "call_read_old", name: "read", arguments: "{}" },
+			{ type: "function_call_output", call_id: "call_read_old", output: "prior result" },
+			{
+				type: "computer_call",
+				id: "ctc_old",
+				call_id: "call_computer_old",
+				actions: [{ type: "screenshot" }],
+				status: "completed",
+			},
+			{
+				type: "computer_call_output",
+				call_id: "call_computer_old",
+				output: { type: "computer_screenshot", file_id: "file_old" },
+			},
+		]);
+		expect(previousHistory[0]).toHaveProperty("id", "cmp_old");
+		expect(previousHistory[0]).toHaveProperty("status", "completed");
 	});
 
 	test.each(["v2", "codex-v2"])(

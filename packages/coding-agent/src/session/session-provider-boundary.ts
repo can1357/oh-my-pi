@@ -1,8 +1,22 @@
 /** Provider-facing message, image, secret, and stream normalization for a session. */
 
-import type { Agent, AgentMessage } from "@oh-my-pi/pi-agent-core";
+import {
+	normalizeMessagesForProvider,
+	type Agent,
+	type AgentMessage,
+	type PreparedProviderProjection,
+} from "@oh-my-pi/pi-agent-core";
 import type { CompactionPreparation } from "@oh-my-pi/pi-agent-core/compaction";
-import type { AssistantMessage, ImageContent, Message, Model, SimpleStreamOptions, TextContent } from "@oh-my-pi/pi-ai";
+import type {
+	AssistantMessage,
+	Context,
+	ImageContent,
+	Message,
+	Model,
+	SimpleStreamOptions,
+	TextContent,
+} from "@oh-my-pi/pi-ai";
+import { modelsAreEqual } from "@oh-my-pi/pi-catalog/models";
 import { isRecord, logger } from "@oh-my-pi/pi-utils";
 import * as snapcompact from "@oh-my-pi/snapcompact";
 import type { ModelRegistry } from "../config/model-registry";
@@ -196,6 +210,45 @@ export class SessionProviderBoundary {
 	async convertMessagesToLlm(messages: AgentMessage[], signal?: AbortSignal): Promise<Message[]> {
 		const transformedMessages = await this.#host.transformContext(messages, signal);
 		return await this.#host.convertToLlm(transformedMessages);
+	}
+	/** Reuses the completed live projection when its source is a prefix of the compaction history. */
+	async buildOpenAiV2Context(
+		messages: AgentMessage[],
+		model: Model,
+		projection: PreparedProviderProjection | undefined,
+		signal?: AbortSignal,
+	): Promise<Context | undefined> {
+		if (!modelsAreEqual(model, this.#host.agent.state.model)) return undefined;
+		if (projection && modelsAreEqual(model, projection.model) && projection.sourceLength <= messages.length) {
+			let shared = true;
+			for (let index = 0; index < projection.sourceLength; index++) {
+				const source = projection.source[index];
+				const current = messages[index];
+				if (
+					source !== current &&
+					!(
+						index === 0 &&
+						source?.role === "compactionSummary" &&
+						current?.role === "compactionSummary" &&
+						source.timestamp === current.timestamp
+					)
+				) {
+					shared = false;
+					break;
+				}
+			}
+			if (shared) {
+				if (projection.sourceLength === messages.length) return projection.context;
+				const tail = messages.slice(projection.sourceLength);
+				const converted = this.convertToLlmForSideRequest(tail);
+				return {
+					...projection.context,
+					messages: [...projection.context.messages, ...normalizeMessagesForProvider(converted, model)],
+				};
+			}
+		}
+		const transformed = await this.#host.transformContext(messages, signal);
+		return this.#host.agent.buildSideRequestContext(this.convertToLlmForSideRequest(transformed));
 	}
 
 	/** Applies session-level stream hooks and provider defaults to a side request. */

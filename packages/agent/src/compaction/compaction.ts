@@ -34,7 +34,11 @@ import {
 import type { InputItem as CodexInputItem } from "@oh-my-pi/pi-ai/providers/openai-codex/request-transformer";
 import { convertTools } from "@oh-my-pi/pi-ai/providers/openai-responses";
 import { buildResponsesInput, resolveOpenAICompatPolicy } from "@oh-my-pi/pi-ai/providers/openai-shared";
-import { stripOpenAIResponsesOutputOnlyStatusesForReplay } from "@oh-my-pi/pi-ai/utils";
+import {
+	sanitizeOpenAIResponsesHistoryItemsForReplay,
+	normalizeSystemPrompts,
+	stripOpenAIResponsesOutputOnlyStatusesForReplay,
+} from "@oh-my-pi/pi-ai/utils";
 import { preferredDialect } from "@oh-my-pi/pi-catalog/identity";
 import { clampThinkingLevelForModel } from "@oh-my-pi/pi-catalog/model-thinking";
 import { isRecord, logger, prompt } from "@oh-my-pi/pi-utils";
@@ -688,6 +692,12 @@ export interface SummaryOptions {
 		retained: AgentMessage[],
 		signal?: AbortSignal,
 	) => Promise<Context>;
+	/** Provider projection for the full V2 history, including new messages after the shared prefix. */
+	buildOpenAiV2Context?: (
+		messages: AgentMessage[],
+		model: Model,
+		signal?: AbortSignal,
+	) => Promise<Context | undefined>;
 	/**
 	 * Whether a message is a turn the user wrote. Remote Compaction V2 keeps these
 	 * next to the compaction item. Defaults to `role === "user"`; hosts whose
@@ -1523,6 +1533,7 @@ function buildOpenAiResponsesCompactionInput(
 	messages: Message[],
 	model: Model<"openai-responses" | "azure-openai-responses" | "openai-codex-responses">,
 	previousReplacementHistory: Array<Record<string, unknown>> | undefined,
+	inlineSystemPrompt?: string[],
 ): Array<Record<string, unknown>> {
 	const input = buildResponsesInput({
 		model,
@@ -1533,16 +1544,29 @@ function buildOpenAiResponsesCompactionInput(
 		includeThinkingSignatures: true,
 		repairOrphanOutputs: true,
 	});
+	const previousInput = previousReplacementHistory
+		? sanitizeOpenAIResponsesHistoryItemsForReplay(previousReplacementHistory, {
+				supportsImageDetailOriginal: openAiCompatSupportsImageDetailOriginal(model),
+				supportsComputerUse: model.supportsComputerUse === true,
+			})
+		: [];
 	const nativeInput: Array<Record<string, unknown>> = [];
+	for (const systemPrompt of inlineSystemPrompt ?? []) {
+		nativeInput.push({ role: "developer", content: systemPrompt });
+	}
+	for (const item of previousInput) {
+		if (!isRecord(item)) {
+			throw new Error("Stored OpenAI Responses V2 compaction history contains a non-object item");
+		}
+		nativeInput.push(item);
+	}
 	for (const item of input) {
 		if (!isRecord(item)) {
 			throw new Error("OpenAI Responses compaction input contains a non-object item");
 		}
 		nativeInput.push(item);
 	}
-	return stripOpenAIResponsesOutputOnlyStatusesForReplay(
-		previousReplacementHistory ? [...previousReplacementHistory, ...nativeInput] : nativeInput,
-	);
+	return stripOpenAIResponsesOutputOnlyStatusesForReplay(nativeInput);
 }
 
 /**
@@ -1632,6 +1656,7 @@ export async function compact(
 		metadata: options?.metadata,
 		convertToLlm: options?.convertToLlm,
 		buildProviderContext: options?.buildProviderContext,
+		buildOpenAiV2Context: options?.buildOpenAiV2Context,
 		isUserAuthored: options?.isUserAuthored,
 		telemetry: options?.telemetry,
 		// Honor /model thinking selection on every fan-out summarizer.
@@ -1697,7 +1722,15 @@ export async function compact(
 				? previousRemoteCompaction.replacementHistory
 				: undefined;
 		const convertToLlm = summaryOptions.convertToLlm ?? defaultConvertToLlm;
-		const messages = convertToLlm(remoteMessages);
+		const liveContext = !isCodexResponsesModel(model)
+			? await summaryOptions.buildOpenAiV2Context?.(remoteMessages, model, signal)
+			: undefined;
+		const messages = liveContext?.messages ?? convertToLlm(remoteMessages);
+		const inlineSystemPrompt =
+			liveContext?.systemPrompt &&
+			resolveOpenAICompatPolicy(model, { endpoint: "responses" }).messages.systemRole === "developer"
+				? normalizeSystemPrompts(liveContext.systemPrompt)
+				: undefined;
 		// Replacement history keeps what the user wrote. Summaries, archive
 		// migrations, and custom/hook messages can serialize as user-role items
 		// too, so pick the user's own messages before serialization erases that,
@@ -1755,7 +1788,12 @@ export async function compact(
 				retainedUserItems.push(...(userBody.input ?? []));
 			}
 		} else {
-			remoteHistory = buildOpenAiResponsesCompactionInput(messages, model, previousReplacementHistory);
+			remoteHistory = buildOpenAiResponsesCompactionInput(
+				messages,
+				model,
+				previousReplacementHistory,
+				inlineSystemPrompt,
+			);
 			for (const message of userMessages) {
 				retainedUserItems.push(...buildOpenAiResponsesCompactionInput([message], model, undefined));
 			}
@@ -1766,13 +1804,19 @@ export async function compact(
 					? typeof codexBody.instructions === "string"
 						? codexBody.instructions
 						: ""
-					: remoteSystemPrompt.join("\n\n");
+					: inlineSystemPrompt
+						? ""
+						: normalizeSystemPrompts(liveContext?.systemPrompt ?? remoteSystemPrompt).join("\n\n");
 				const tools = codexBody
 					? Array.isArray(codexBody.tools)
 						? codexBody.tools
 						: undefined
-					: summaryOptions.tools
-						? convertTools(summaryOptions.tools, model.compat.supportsStrictMode, model)
+					: liveContext?.tools !== undefined || summaryOptions.tools !== undefined
+						? convertTools(
+								liveContext?.tools ?? summaryOptions.tools ?? [],
+								model.compat.supportsStrictMode,
+								model,
+							)
 						: undefined;
 				const trimmed = trimRemoteCompactionInputToContextWindow(
 					remoteHistory,

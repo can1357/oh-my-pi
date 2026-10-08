@@ -4,6 +4,7 @@ import { scheduler } from "node:timers/promises";
 import {
 	type Agent,
 	type AgentMessage,
+	type PreparedProviderProjection,
 	type AgentTurnEndContext,
 	type MessageCountOptions,
 	resolveTelemetry,
@@ -457,6 +458,13 @@ export interface SessionMaintenanceHost {
 		signal?: AbortSignal,
 	): Promise<Context>;
 	obfuscateTextForProvider(text: string | undefined): string | undefined;
+	/** Builds an OpenAI native-compaction context from a pinned ordinary request projection. */
+	buildOpenAiV2Context(
+		messages: AgentMessage[],
+		model: Model,
+		projection: PreparedProviderProjection | undefined,
+		signal?: AbortSignal,
+	): Promise<Context | undefined>;
 	obfuscatePreparationForProvider(preparation: CompactionPreparation): CompactionPreparation;
 	closeCodexProviderSessionsForHistoryRewrite(): void;
 	resetCodexProviderAfterCompaction(compaction: CodexCompactionContext): void;
@@ -2207,6 +2215,7 @@ export class SessionMaintenance {
 		const preparation = prepareCompaction(branch, effectiveSettings, model, this.#tokenizer);
 		if (!preparation) return clear();
 		const signal = run.controller.signal;
+		const projection = this.#host.agent.lastPreparedProviderCall;
 		let armed: ArmedSpeculation;
 		if (method === "handoff") {
 			const generated = await this.#host.generateHandoffDocument(AUTO_HANDOFF_THRESHOLD_FOCUS, {
@@ -2253,6 +2262,8 @@ export class SessionMaintenance {
 					promptOverride: this.#host.obfuscateTextForProvider(compactionPrep.hookPrompt),
 					extraContext: compactionPrep.hookContext,
 					remoteSystemPrompt: this.#host.agent.state.systemPrompt,
+					buildOpenAiV2Context: (messages, candidate, requestSignal) =>
+						this.#host.buildOpenAiV2Context(messages, candidate, projection, requestSignal),
 					codexCompaction,
 					// Isolate from the live turn: remote compaction transports key
 					// sticky provider sessions by sessionId, and a speculation
@@ -3441,6 +3452,7 @@ export class SessionMaintenance {
 		const candidates =
 			precomputedCandidates ?? this.#getCompactionModelCandidates(this.#host.modelRegistry.getAvailable());
 		const telemetry = resolveTelemetry(this.#host.agent.telemetry, this.#host.sessionId());
+		const projection = this.#host.agent.lastPreparedProviderCall;
 		let nativeCompactionFailure: { error: NativeCompactionError; provider: string } | undefined;
 
 		for (const candidate of candidates) {
@@ -3467,6 +3479,10 @@ export class SessionMaintenance {
 						convertToLlm: messages => this.#host.convertToLlmForSideRequest(messages),
 						buildProviderContext: (summarized, retained, signal) =>
 							this.#host.buildLiveProviderContext(summarized, retained, signal),
+						buildOpenAiV2Context:
+							options?.buildOpenAiV2Context ??
+							((messages, requestModel, requestSignal) =>
+								this.#host.buildOpenAiV2Context(messages, requestModel, projection, requestSignal)),
 						isUserAuthored: isUserAuthoredMessage,
 						telemetry,
 						// Honor the user's /model thinking selection (incl. `off`) on
@@ -4271,6 +4287,7 @@ export class SessionMaintenance {
 			excludeMediaMethods?: boolean;
 		} = {},
 	): Promise<CompactionCheckResult> {
+		const projection = this.#host.agent.lastPreparedProviderCall;
 		const compactionSettings = cfgCompaction.get(this.#host.settings);
 		// An explicit model-requested rollover bypasses the Auto-Compact toggle;
 		// automatic threshold rollover stays gated exactly as before.
@@ -4905,6 +4922,8 @@ export class SessionMaintenance {
 									convertToLlm: messages => this.#host.convertToLlmForSideRequest(messages),
 									buildProviderContext: (summarized, retained, signal) =>
 										this.#host.buildLiveProviderContext(summarized, retained, signal),
+									buildOpenAiV2Context: (messages, requestModel, requestSignal) =>
+										this.#host.buildOpenAiV2Context(messages, requestModel, projection, requestSignal),
 									isUserAuthored: isUserAuthoredMessage,
 									telemetry,
 									// Honor the user's /model thinking selection on the
