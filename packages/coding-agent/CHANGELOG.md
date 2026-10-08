@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- `before_subagent_spawn` now includes the assignment, shared context, task-only solution space, baseline thinking level, and a per-handler abort signal ([#14935](https://github.com/can1357/oh-my-pi/pull/14935) by [@ff-zeno](https://github.com/ff-zeno))
+
 ## [18.8.4] - 2026-10-08
 
 ### Changed

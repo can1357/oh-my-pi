@@ -28,7 +28,7 @@ import subagentUserPromptTemplate from "../prompts/system/subagent-user-prompt.m
 import isolationRecoveryHintTemplate from "../prompts/tools/isolation-recovery-hint.md" with { type: "text" };
 import salvagedChildHintTemplate from "../prompts/tools/salvaged-child-hint.md" with { type: "text" };
 import { MAIN_AGENT_ID } from "../registry/agent-registry";
-import type { TaskEffort } from "@oh-my-pi/pi-tui/thinking";
+import { concreteThinkingLevel, type TaskEffort } from "@oh-my-pi/pi-tui/thinking";
 import type { ToolSession } from "../tools";
 import { isIrcEnabled } from "../irc/messaging";
 import { buildOutputValidator } from "../tools/output-schema-validator";
@@ -452,11 +452,18 @@ async function applySpawnHook(
 		request.identity?.id ??
 		request.identity?.label ??
 		(request.parentToolCallId !== undefined ? `${request.parentToolCallId}:${request.index ?? 0}` : undefined);
+	const context = request.context?.trim();
+	const solutionSpace = request.invocationKind === "task" ? request.solutionSpace?.trim() : undefined;
+	const baselineThinkingLevel = concreteThinkingLevel(policy.effectiveAgent.thinkingLevel);
 	const spawnResult = await emit(
 		{
 			type: "before_subagent_spawn",
 			agent: policy.agentName,
 			invocationKind: request.invocationKind,
+			assignment: request.assignment,
+			...(context ? { context } : {}),
+			...(solutionSpace ? { solutionSpace } : {}),
+			...(baselineThinkingLevel !== undefined ? { thinkingLevel: baselineThinkingLevel } : {}),
 			modelRole: policy.modelRole,
 			patterns: policy.modelOverride ?? [],
 			spawnKey,
