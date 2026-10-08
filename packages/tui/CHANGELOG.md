@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `ModelHubOptions.quickPick`: Enter on a model assigns it to the `default` role without the role strip, and the hub closes once the thinking choice is confirmed or kept ([#14479](https://github.com/can1357/oh-my-pi/pull/14479) by [@lockwo](https://github.com/lockwo)).
 ### Fixed
 
 - Reduced memory retained by discarded TSP images and previews ([#14336](https://github.com/can1357/oh-my-pi/pull/14336) by [@iliaal](https://github.com/iliaal)).

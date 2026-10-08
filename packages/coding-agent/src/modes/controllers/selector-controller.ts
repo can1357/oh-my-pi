@@ -134,7 +134,12 @@ import type { SessionObserverRegistry } from "@oh-my-pi/pi-tui/overlays/session-
 
 import { cfgAdvisorSyncBacklog } from "../../advisor/settings";
 import { cfgBranchSummaryEnabled } from "../../session/context-settings";
-import { cfgCycleOrder, cfgDisabledProviders, cfgModelRoleStorage } from "../../config/model-settings";
+import {
+	cfgCycleOrder,
+	cfgDisabledProviders,
+	cfgModelHubQuickPick,
+	cfgModelRoleStorage,
+} from "../../config/model-settings";
 import { cfgDefaultThinkingLevel, cfgRetryFallbackChains } from "../../session/settings";
 import {
 	cfgStatusLineCompactThinkingLevel,
@@ -1136,6 +1141,7 @@ export class SelectorController {
 			},
 			{
 				initialProviderId: hubOptions.initialProviderId,
+				quickPick: cfgModelHubQuickPick.get(this.ctx.settings),
 				currentSelector: this.ctx.session.model
 					? `${this.ctx.session.model.provider}/${this.ctx.session.model.id}`
 					: undefined,

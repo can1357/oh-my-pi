@@ -184,6 +184,12 @@ export interface ModelHubOptions {
 	initialProviderId?: string;
 	/** `provider/id` of the session's model, marked current in the native picker. */
 	currentSelector?: string;
+	/**
+	 * One-pick flow: Enter on a model assigns it to the `default` role directly (no role strip),
+	 * and the hub closes once the thinking choice is confirmed or kept. Models that cannot fill
+	 * `default` still open the role strip. The roles view and Assign mode are unchanged.
+	 */
+	quickPick?: boolean;
 }
 
 interface SidebarEntry extends HubSidebarEntry<"recent" | "roles" | "all" | "separator" | "provider"> {
@@ -212,6 +218,12 @@ interface StripChip extends HubStripChip<
 	scope?: ModelRoleSelectionScope;
 }
 
+/**
+ * Where the hub lands once an assignment's follow-up strips finish: back on the
+ * model list, on the Roles view, or closed (the `quickPick` one-pick flow).
+ */
+type StripLanding = "list" | "roles" | "close";
+
 type StripState =
 	| (HubStripState<StripChip> & {
 			kind: "role" | "scope" | "thinking";
@@ -220,8 +232,8 @@ type StripState =
 			/** Set when a thinking strip edits a fallback-chain entry instead of a role assignment. */
 			fallbackIndex?: number;
 			scope?: ModelRoleSelectionScope;
-			/** Where to land when a scope or thinking strip closes. */
-			returnToRoles: boolean;
+			/** Where to land when a scope or thinking strip finishes. */
+			after: StripLanding;
 			/** Thinking value already committed for this strip. */
 			initialThinkingLevel?: ConfiguredThinkingLevel;
 	  })
@@ -443,6 +455,7 @@ export class ModelHubComponent implements Component {
 	#nativeVersion = 0;
 	#nativeCache: { version: number; picker: boolean; node: NativeNode } | undefined;
 	#currentSelector: string | undefined;
+	#quickPick: boolean;
 	/** The opening online catalog refresh is still in flight (an empty scope then shows as loading). */
 	#catalogRefreshing = false;
 	#kindTabsMemo: { candidates: readonly ModelBrowserItem[]; tabs: TspPickerProps["tabs"] } | undefined;
@@ -473,6 +486,7 @@ export class ModelHubComponent implements Component {
 		this.#scopedModels = scopedModels;
 		this.#callbacks = callbacks;
 		this.#currentSelector = options.currentSelector;
+		this.#quickPick = options.quickPick === true;
 
 		this.#browser = new ModelBrowser(settings, {
 			emptyText: () => this.#emptyStateMessage(),
@@ -1181,12 +1195,16 @@ export class ModelHubComponent implements Component {
 			const target = this.#assigning;
 			this.#assigning = null;
 			if (target.kind === "role") {
-				this.#assignRole(item, target.role, true);
+				this.#assignRole(item, target.role, "roles");
 			} else if (target.kind === "fallbackKey") {
 				this.#openFallbackKeyStrip(item);
 			} else {
 				this.#commitFallback(item, target);
 			}
+			return;
+		}
+		if (this.#quickPick && this.#settings.getRoleInfo("default").accepts(item.model)) {
+			this.#assignRole(item, "default", "close");
 			return;
 		}
 		this.#openRoleStrip(item);
@@ -1236,9 +1254,9 @@ export class ModelHubComponent implements Component {
 	 * open the thinking strip — skipped for models with no reasoning surface,
 	 * where every chip would be a no-op ({@link #thinkingOptionsFor}).
 	 */
-	#assignRole(item: ModelBrowserItem, role: string, returnToRoles: boolean, scope?: ModelRoleSelectionScope): void {
+	#assignRole(item: ModelBrowserItem, role: string, after: StripLanding, scope?: ModelRoleSelectionScope): void {
 		if (this.#settings.modelRoleStorage === "project" && scope === undefined) {
-			this.#openScopeStrip(item, role, returnToRoles);
+			this.#openScopeStrip(item, role, after);
 			return;
 		}
 
@@ -1255,13 +1273,10 @@ export class ModelHubComponent implements Component {
 		this.#finishAssignment(result, () => {
 			this.#refreshAfterMutation();
 			if (supported.length === 0) {
-				if (returnToRoles) {
-					this.#setActiveEntry("roles");
-					this.#focus = "list";
-				}
+				this.#land(after);
 				return;
 			}
-			this.#openThinkingStrip(item, role, returnToRoles, scope, level);
+			this.#openThinkingStrip(item, role, after, scope, level);
 		});
 	}
 
@@ -1358,21 +1373,21 @@ export class ModelHubComponent implements Component {
 		if (this.#settings.getRoleInfo("default").accepts(item.model)) {
 			chips.push({ label: "fallback", styled: theme.fg("muted", "retry-fallback"), action: "fallback" });
 		}
-		this.#strip = { kind: "role", item, chips, index: 0, returnToRoles: false };
+		this.#strip = { kind: "role", item, chips, index: 0, after: "list" };
 	}
 
-	#openScopeStrip(item: ModelBrowserItem, role: string, returnToRoles: boolean): void {
+	#openScopeStrip(item: ModelBrowserItem, role: string, after: StripLanding): void {
 		const chips: StripChip[] = [
 			{ label: "project", styled: theme.fg("accent", "project"), action: "scope", scope: "project" },
 			{ label: "global", styled: theme.fg("muted", "global"), action: "scope", scope: "global" },
 		];
-		this.#strip = { kind: "scope", item, role, chips, index: 0, returnToRoles };
+		this.#strip = { kind: "scope", item, role, chips, index: 0, after };
 	}
 
 	#openThinkingStrip(
 		item: ModelBrowserItem,
 		role: string,
-		returnToRoles: boolean,
+		after: StripLanding,
 		scope?: ModelRoleSelectionScope,
 		committedLevel?: ConfiguredThinkingLevel,
 	): void {
@@ -1391,7 +1406,7 @@ export class ModelHubComponent implements Component {
 			scope,
 			chips,
 			index: preselect >= 0 ? preselect : 0,
-			returnToRoles,
+			after,
 			initialThinkingLevel: current,
 		};
 	}
@@ -1507,7 +1522,7 @@ export class ModelHubComponent implements Component {
 			fallbackIndex: row.chainIndex,
 			chips,
 			index: Math.max(0, options.indexOf(current)),
-			returnToRoles: true,
+			after: "roles",
 		};
 	}
 
@@ -1534,13 +1549,34 @@ export class ModelHubComponent implements Component {
 		if (rowIndex >= 0) this.#roleIndex = rowIndex;
 	}
 
-	#closeStrip(): void {
+	/** Leave the strip chain: back to the list, the Roles view, or the whole hub. */
+	#land(after: StripLanding): void {
+		switch (after) {
+			case "close":
+				this.#callbacks.onCancel();
+				return;
+			case "roles":
+				this.#setActiveEntry("roles");
+				this.#focus = "list";
+				return;
+			case "list":
+				return;
+		}
+	}
+
+	/**
+	 * Close the strip. A thinking strip finishing a one-pick flow also closes the hub, unless
+	 * `keepHubOpen` (the change is still being applied). Esc on a one-pick scope strip backs out
+	 * to the model list: nothing was assigned yet.
+	 */
+	#closeStrip(options?: { keepHubOpen?: boolean }): void {
 		const strip = this.#strip;
 		this.#strip = null;
 		this.#frame.chipRanges = [];
-		if ((strip?.kind === "scope" || strip?.kind === "thinking") && strip.returnToRoles) {
-			this.#setActiveEntry("roles");
-			this.#focus = "list";
+		if (strip?.kind === "thinking") {
+			if (strip.after !== "close" || !options?.keepHubOpen) this.#land(strip.after);
+		} else if (strip?.kind === "scope" && strip.after === "roles") {
+			this.#land("roles");
 		}
 	}
 
@@ -1553,7 +1589,7 @@ export class ModelHubComponent implements Component {
 			case "assign":
 				if (chip.role) {
 					this.#strip = null;
-					this.#assignRole(strip.item, chip.role, false, chip.scope);
+					this.#assignRole(strip.item, chip.role, "list", chip.scope);
 				}
 				return;
 			case "unassign":
@@ -1582,7 +1618,7 @@ export class ModelHubComponent implements Component {
 			case "scope":
 				if (strip.role && chip.scope) {
 					this.#strip = null;
-					this.#assignRole(strip.item, strip.role, strip.returnToRoles, chip.scope);
+					this.#assignRole(strip.item, strip.role, strip.after, chip.scope);
 				}
 				return;
 			case "thinking": {
@@ -1603,8 +1639,11 @@ export class ModelHubComponent implements Component {
 						strip.item.selector,
 						strip.scope,
 					);
-					this.#closeStrip();
-					this.#finishAssignment(result, () => this.#refreshAfterMutation());
+					this.#closeStrip({ keepHubOpen: true });
+					this.#finishAssignment(result, () => {
+						this.#refreshAfterMutation();
+						if (strip.after === "close") this.#land("close");
+					});
 				} else {
 					this.#closeStrip();
 				}
@@ -1670,7 +1709,7 @@ export class ModelHubComponent implements Component {
 				action: "fallbackProvider",
 			},
 		];
-		this.#strip = { kind: "role", item, chips, index: 0, returnToRoles: false };
+		this.#strip = { kind: "role", item, chips, index: 0, after: "list" };
 	}
 
 	/** Write the picked model into the target chain slot, dedupe, and land back on its Roles row. */
@@ -2244,7 +2283,7 @@ export class ModelHubComponent implements Component {
 			case "thinking":
 				if (role) {
 					const target = this.#roleThinkingTarget(role);
-					if (target) this.#openThinkingStrip(target.item, role, true, target.scope);
+					if (target) this.#openThinkingStrip(target.item, role, "roles", target.scope);
 				} else if (row?.kind === "fallback") {
 					this.#openFallbackThinkingStrip(row);
 				}
