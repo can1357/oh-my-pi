@@ -54,6 +54,19 @@ export const cfgBrowserRelayUrl = register({
 	},
 });
 
+export const cfgBrowserRelayAllowedSites = register({
+	id: "browser.relayAllowedSites",
+	type: "array",
+	default: [] as string[],
+	ui: {
+		tab: "tools",
+		group: "Grep & Browser",
+		label: "Browser Relay Allowed Sites",
+		description:
+			"Hostnames the agent may drive through the browser relay without asking first: exact hosts (example.com) or *.example.com wildcards (the bare domain matches too). Any other site asks for consent — Allow once / Always allow / Deny — before a relay tab opens at or navigates to it.",
+	},
+});
+
 export const cfgBrowserHeadless = register({
 	id: "browser.headless",
 	type: "boolean",

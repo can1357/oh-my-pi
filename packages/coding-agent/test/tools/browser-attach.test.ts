@@ -112,6 +112,27 @@ const RELAY_ENTRIES = [
 	},
 ];
 
+/** /json entries where the user granted the second tab by dragging it into the omp group. */
+const RELAY_GRANTED_ENTRIES = [
+	{
+		id: "PAGE_ACTIVE",
+		type: "page",
+		title: "Active",
+		url: "https://active.example.com",
+		active: "true",
+		discarded: "false",
+	},
+	{
+		id: "PAGE_GRANTED",
+		type: "page",
+		title: "Granted",
+		url: "https://granted.example.com",
+		active: "false",
+		discarded: "false",
+		ompGroupGranted: "true",
+	},
+];
+
 interface FakePageOptions {
 	url: string;
 	title: string;
@@ -129,6 +150,7 @@ function fakePage(options: FakePageOptions): Page {
 function fakeTarget(type: string, page: Page | null): Target {
 	return {
 		type: () => type,
+		url: () => page?.url() ?? "",
 		page: async () => page,
 	} as unknown as Target;
 }
@@ -603,7 +625,7 @@ describe("pickElectronTarget", () => {
 
 	// Launches real headless Chromium; skipped where Chrome's system libraries are absent.
 	test.skipIf(!CHROMIUM_AVAILABLE)(
-		"navigates a fresh attached tab and releases its handle without closing the target",
+		"opens a dedicated attached tab and releases its handle without closing existing targets",
 		async () => {
 			const launched = sharedHeadless;
 			if (!launched || !("browser" in launched)) throw new Error("Expected a shared Puppeteer browser");
@@ -617,6 +639,7 @@ describe("pickElectronTarget", () => {
 			const requested = "data:text/html,<title>attached-navigation-target</title>";
 			const targetPage = (await launched.browser.pages())[0];
 			if (!targetPage) throw new Error("Expected the launched browser to expose a page target");
+			const before = await launched.browser.pages();
 
 			try {
 				await invokeBrowser({
@@ -627,11 +650,17 @@ describe("pickElectronTarget", () => {
 				});
 				opened = true;
 
+				// A dedicated tab is opened for the managed session instead of
+				// adopting (and navigating) whatever page happens to exist.
+				const after = await launched.browser.pages();
+				expect(after.length).toBe(before.length + 1);
+				expect(after.some(page => page !== targetPage && page.url() === requested)).toBe(true);
+				expect(targetPage.url()).not.toBe(requested);
+
 				const closeResult = await invokeBrowser({ action: "close", name: tabName });
 				opened = false;
 				expect(closeResult.content).toEqual([{ type: "text", text: `Released managed tab "${tabName}"` }]);
 				expect(targetPage.isClosed()).toBe(false);
-				expect(targetPage.url()).toBe(requested);
 			} finally {
 				if (opened) await invokeBrowser({ action: "close", name: tabName });
 			}
@@ -642,29 +671,36 @@ describe("pickElectronTarget", () => {
 	test.skipIf(!CHROMIUM_AVAILABLE)(
 		"does not retry an attached navigation failure as worker startup",
 		async () => {
-			// An earlier form raced a real navigation timeout against a hanging
-			// local server, but Puppeteer installs its timeout watcher before
-			// Page.navigate: under load the timeout could win before Chrome
-			// dispatched any HTTP request, and the request-count assertion read 0.
-			// Abort the navigation via request interception on the exact page
-			// attach adopts instead — the navigation fails deterministically on
-			// its first request, and a wrongly retried worker startup would
-			// navigate again and read 2.
+			// Abort the navigation via request interception on the dedicated tab
+			// attach opens — the navigation fails deterministically on its first
+			// request, and a wrongly retried worker startup would navigate again
+			// and read 2.
 			const launched = sharedHeadless;
 			if (!launched || !("browser" in launched)) throw new Error("Expected a shared Puppeteer browser");
 			const endpoint = new URL(launched.browser.wsEndpoint());
-			const targetPage = (await launched.browser.pages())[0];
-			if (!targetPage) throw new Error("Expected the launched browser to expose a page target");
 
-			// Count navigations only: after the abort Chrome renders its error page,
-			// whose inline data: icons also surface as intercepted requests.
+			// Count navigations only: after the abort Chrome renders its error
+			// page, whose inline data: icons also surface as intercepted requests.
 			let requestCount = 0;
 			const onRequest = (request: HTTPRequest) => {
 				if (request.isNavigationRequest()) requestCount++;
 				void request.abort("failed");
 			};
-			await targetPage.setRequestInterception(true);
-			targetPage.on("request", onRequest);
+			const interceptedPages = new Set<Page>();
+			const onTargetCreated = async (target: Target) => {
+				const page = await target.page().catch(() => null);
+				if (!page || interceptedPages.has(page)) return;
+				interceptedPages.add(page);
+				await page.setRequestInterception(true).catch(() => undefined);
+				page.on("request", onRequest);
+			};
+			launched.browser.on("targetcreated", target => void onTargetCreated(target));
+			// Intercept the pre-existing pages too, in case attach adopts one.
+			for (const page of await launched.browser.pages()) {
+				interceptedPages.add(page);
+				await page.setRequestInterception(true);
+				page.on("request", onRequest);
+			}
 			let attached: BrowserHandle | undefined;
 
 			let attempted = false;
@@ -675,10 +711,6 @@ describe("pickElectronTarget", () => {
 					{ cwd: process.cwd() },
 				);
 				attempted = true;
-				// Plain await, not `.rejects`: on Windows, once an earlier test has
-				// spawned a piped child, Bun's `.rejects` loop spin stops servicing
-				// this thread's CDP socket, so the paused request never reaches
-				// `onRequest` and worker init times out instead.
 				const error = await rejectionOf(
 					acquireTab(tabName, attached, {
 						// Loopback keeps a hypothetical interception miss local and
@@ -696,8 +728,11 @@ describe("pickElectronTarget", () => {
 				expect(getTab(tabName)).toBeUndefined();
 				expect(attached.refCount).toBe(0);
 			} finally {
-				targetPage.off("request", onRequest);
-				await targetPage.setRequestInterception(false);
+				launched.browser.off("targetcreated", target => void onTargetCreated(target));
+				for (const page of interceptedPages) {
+					page.off("request", onRequest);
+					await page.setRequestInterception(false).catch(() => undefined);
+				}
 				if (attached && !attempted) await releaseBrowser(attached, { kill: false });
 			}
 		},
@@ -807,6 +842,19 @@ describe("pickElectronTarget relay path", () => {
 			t => (t as unknown as { page: { mock: { calls: unknown[] } } }).page.mock.calls.length,
 		);
 		expect(attachCalls).toEqual([0, 1, 0]);
+	});
+
+	it("prefers a granted tab over the merely active one", async () => {
+		relayEntries = RELAY_GRANTED_ENTRIES;
+		const activePage = makePage([() => {}], RELAY_GRANTED_ENTRIES[0]!.url).page;
+		const grantedPage = makePage([() => {}], RELAY_GRANTED_ENTRIES[1]!.url).page;
+		const active = makeTarget("PAGE_ACTIVE", activePage);
+		const granted = makeTarget("PAGE_GRANTED", grantedPage);
+
+		const picked = await pickElectronTarget(makeBrowser([active.target, granted.target]), { relayJson });
+
+		expect(picked).toBe(grantedPage);
+		expect(active.pageSpy).not.toHaveBeenCalled();
 	});
 
 	it("matcher skips a discarded matching tab", async () => {

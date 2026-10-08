@@ -466,6 +466,8 @@ interface RelayJsonEntry {
 	url: string;
 	active?: string;
 	discarded?: string;
+	/** `"true"` on tabs the user granted by dragging them into the browser's omp tab group. */
+	ompGroupGranted?: string;
 }
 
 /** Attach to one target under a deadline; unresponsive targets resolve to null. */
@@ -555,6 +557,10 @@ function selectRelayEntry(entries: RelayJsonEntry[], options: PickTargetOptions)
 		e =>
 			e.discarded !== "true" && !ATTACH_TARGET_SKIP_PATTERN.test(e.url) && !ATTACH_TARGET_SKIP_PATTERN.test(e.title),
 	);
+	// A tab dragged into the omp group is an explicit user grant: it wins over
+	// the merely-active tab when picking without a matcher.
+	const granted = usable.filter(e => e.ompGroupGranted === "true");
+	if (granted.length > 0) return granted.find(e => e.active === "true") ?? granted[0]!;
 	return usable.find(e => e.active === "true") ?? usable[0] ?? null;
 }
 
@@ -663,6 +669,28 @@ export async function pickElectronTarget(browser: Browser, options: PickTargetOp
 		throw new ToolError("No page targets available on the attached browser");
 	}
 	return pickPageFromList(fallbackPages, options);
+}
+
+/**
+ * URL of the relay page `matcher` selects from /json metadata — the origin a
+ * target adoption would drive, without attaching first. Undefined when the
+ * metadata is unavailable or selects nothing, so callers fall back to their
+ * own selection-time error.
+ */
+export async function relayTargetUrl(
+	relayJson: string,
+	matcher: string | undefined,
+	signal?: AbortSignal,
+): Promise<string | undefined> {
+	const entries = await fetchRelayEntries(relayJson, signal);
+	if (!entries) return undefined;
+	const pages = entries.filter(e => e.type === "page");
+	if (pages.length === 0) return undefined;
+	try {
+		return selectRelayEntry(pages, { matcher })?.url ?? undefined;
+	} catch {
+		return undefined;
+	}
 }
 
 async function enrichPages(

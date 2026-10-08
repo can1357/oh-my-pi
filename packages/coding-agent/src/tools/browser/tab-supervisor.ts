@@ -1512,17 +1512,35 @@ async function buildInitPayload(browser: PuppeteerBrowserHandle, opts: AcquireTa
 			ignoreHttpsErrors: opts.ignoreHttpsErrors,
 		};
 	}
-	// Connected and relay browsers are user-driven. When no target is requested,
-	// adopt the visible tab and avoid raising it before screenshots. An explicit
-	// target may be backgrounded, so retain activation for target-correct pixels.
+	// Connected and relay browsers are user-driven — a real, logged-in browser
+	// carrying the human's own tabs. An explicit target opts into attaching to
+	// one of those tabs (matched by URL/title substring); without one, silently
+	// adopting whatever tab happens to be on top would hijack content the user
+	// is reading. Open a dedicated new tab instead — the backend still
+	// claims/groups it the same way (see #claimRelayTarget in tab-worker.ts),
+	// so it stays visually and organizationally isolated from the user's tabs.
 	const userDriven = browser.kind.kind === "connected" || browser.kind.kind === "relay";
-	const activateForScreenshot = !userDriven || !shouldPreserveConnectedBrowserFocus(opts.target);
-	const page = await pickElectronTarget(browser.browser, {
-		matcher: opts.target,
-		preferVisible: !activateForScreenshot,
-		relayJson: browser.kind.kind === "relay" ? browser.kind.cdpUrl : undefined,
-		signal: opts.signal,
-	});
+	const forceNewTab = userDriven && !opts.target;
+	// Screenshots raise the tab first unless a human is using it. Relay tabs are
+	// never raised: Chrome answers a raise by dropping the extension's
+	// `chrome.debugger` attachment for that tab and then refusing to re-attach
+	// (measured: `Page.bringToFront` + capture loses the attachment 2/2 runs on a
+	// TanStack-Router SPA, 0/2 without the raise), which destroys the very session
+	// that asked for the screenshot. A hidden relay tab therefore keeps the
+	// stricter rule — its capture is refused with "switch to it before taking a
+	// screenshot" instead of the session being silently killed.
+	const activateForScreenshot =
+		browser.kind.kind === "relay"
+			? false
+			: forceNewTab || !userDriven || !shouldPreserveConnectedBrowserFocus(opts.target);
+	const page = forceNewTab
+		? await browser.browser.newPage()
+		: await pickElectronTarget(browser.browser, {
+				matcher: opts.target,
+				preferVisible: !activateForScreenshot,
+				relayJson: browser.kind.kind === "relay" ? browser.kind.cdpUrl : undefined,
+				signal: opts.signal,
+			});
 	const targetId = await targetIdForPage(page);
 	return {
 		mode: "attach",
@@ -1536,6 +1554,19 @@ async function buildInitPayload(browser: PuppeteerBrowserHandle, opts: AcquireTa
 		userAgent: opts.userAgent,
 		ignoreHttpsErrors: opts.ignoreHttpsErrors,
 		activateForScreenshot,
+		// Focus emulation stays off for user-driven (relay/connected) tabs, even
+		// though a freshly created one is OMP-owned: `Emulation.setFocusEmulationEnabled`
+		// on a real Chrome tab makes Chrome drop the extension's `chrome.debugger`
+		// attachment a beat later, then refuse every later attach with "Cannot access
+		// a chrome-extension:// URL of different extension" (measured on a
+		// TanStack-Router SPA: 4/4 runs with the emulation, 0/4 without). A poisoned
+		// tab fails every relayed command for its remaining lifetime. The action
+		// layer does not need it: click, fill and type resolve handles through CDP
+		// geometry and raw input dispatch, verified working on a hidden relay tab.
+		// Screenshots are the one operation that does need a rendered tab, and they
+		// keep refusing while the tab is hidden rather than raising it (see
+		// `activateForScreenshot` above).
+		emulateFocus: false,
 	};
 }
 
