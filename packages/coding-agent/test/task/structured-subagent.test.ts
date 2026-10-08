@@ -1017,7 +1017,9 @@ describe("structured subagent primitive", () => {
 		const baseline = await resolveEffectiveSubagentPolicy(request({ session: offSession, routing: "off" }));
 
 		const off = await runStructuredSubagent(request({ session: offSession, routing: "off", retainArtifacts: true }));
-		const auto = await runStructuredSubagent(request({ session: autoSession, routing: "auto", retainArtifacts: true }));
+		const auto = await runStructuredSubagent(
+			request({ session: autoSession, routing: "auto", retainArtifacts: true }),
+		);
 		const omitted = await runStructuredSubagent(request({ session: omittedSession, retainArtifacts: true }));
 
 		expect(offEvents).toHaveLength(1);

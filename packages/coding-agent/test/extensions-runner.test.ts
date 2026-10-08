@@ -24,6 +24,7 @@ import {
 	testSetSessionShutdownHandlerTimeoutMs,
 } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
 import type {
+	BeforeSubagentSpawnEvent,
 	Extension,
 	ExtensionError,
 	ExtensionUIContext,
@@ -4644,6 +4645,72 @@ describe("ExtensionRunner", () => {
 				);
 			});
 			expect(cachedTexts).toEqual(["persisted user", "persisted assistant"]);
+		});
+	});
+
+	describe("before_subagent_spawn", () => {
+		const spawnEvent = (routing: "auto" | "off"): BeforeSubagentSpawnEvent => ({
+			type: "before_subagent_spawn",
+			agent: "worker",
+			invocationKind: "task",
+			patterns: ["anthropic/claude-sonnet-4"],
+			routing,
+		});
+
+		const spawnRunner = async (source: string): Promise<ExtensionRunner> => {
+			fs.writeFileSync(path.join(extensionsDir, "spawn-hook.ts"), source);
+			const result = await loadTestExtensions();
+			return new ExtensionRunner(result.extensions, result.runtime, tempDir.path(), sessionManager, modelRegistry);
+		};
+
+		it("retains a note-only result so routing off still surfaces the note", async () => {
+			const runner = await spawnRunner(`
+				export default function(pi) {
+					pi.on("before_subagent_spawn", async () => ({ note: "kept" }));
+				}
+			`);
+			const result = await runner.emitBeforeSubagentSpawn(spawnEvent("off"));
+			expect(result?.note).toBe("kept");
+			expect(result?.model).toBeUndefined();
+		});
+
+		it("keeps the last defined model with its note", async () => {
+			const runner = await spawnRunner(`
+				export default function(pi) {
+					pi.on("before_subagent_spawn", async () => ({ model: "openai/a", note: "first" }));
+					pi.on("before_subagent_spawn", async () => ({ model: "openai/b", note: "second" }));
+				}
+			`);
+			expect(await runner.emitBeforeSubagentSpawn(spawnEvent("auto"))).toEqual({
+				model: "openai/b",
+				note: "second",
+			});
+		});
+
+		it("leaves the winning model's note alone when a later handler returns note-only", async () => {
+			const runner = await spawnRunner(`
+				export default function(pi) {
+					pi.on("before_subagent_spawn", async () => ({ model: "openai/a", note: "router" }));
+					pi.on("before_subagent_spawn", async () => ({ note: "logger" }));
+				}
+			`);
+			expect(await runner.emitBeforeSubagentSpawn(spawnEvent("off"))).toEqual({
+				model: "openai/a",
+				note: "router",
+			});
+		});
+
+		it("returns a block result immediately and skips later handlers", async () => {
+			const runner = await spawnRunner(`
+				export default function(pi) {
+					pi.on("before_subagent_spawn", async () => ({ block: true, reason: "pool exhausted" }));
+					pi.on("before_subagent_spawn", async () => ({ model: "openai/late" }));
+				}
+			`);
+			expect(await runner.emitBeforeSubagentSpawn(spawnEvent("off"))).toEqual({
+				block: true,
+				reason: "pool exhausted",
+			});
 		});
 	});
 });

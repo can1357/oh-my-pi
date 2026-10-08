@@ -2154,6 +2154,8 @@ export class ExtensionRunner {
 
 	/**
 	 * Runs `before_subagent_spawn` handlers; a `block` short-circuits, the last defined `model` wins.
+	 * A result that names no model is retained when it carries a `note`, so `routing: "off"` can still
+	 * surface the routing explanation a handler returned.
 	 * `signal` (the spawn's abort signal) cancels an awaiting handler instead of parking until the timeout.
 	 */
 	async emitBeforeSubagentSpawn(
@@ -2181,7 +2183,14 @@ export class ExtensionRunner {
 				if (!handlerResult) continue;
 				const result = handlerResult as BeforeSubagentSpawnEventResult;
 				if (result.block) return result;
-				if (result.model !== undefined) chosen = { model: result.model, note: result.note };
+				if (result.model !== undefined) {
+					chosen = { model: result.model, note: result.note };
+				} else if (result.note !== undefined && chosen?.model === undefined) {
+					// Note-only results survive so a caller that ignores `model` (routing: "off")
+					// still receives the note. Once a handler names a model, that model and its
+					// note are the winning result, so `auto` routing is unchanged.
+					chosen = { model: chosen?.model, note: result.note };
+				}
 			}
 		}
 

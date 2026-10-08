@@ -1,11 +1,22 @@
-import { afterEach, describe, expect, it, vi } from "bun:test";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
+import * as fs from "node:fs/promises";
 import { AsyncJobManager } from "../../src/async";
+import { ModelRegistry } from "../../src/config/model-registry";
 import { Settings } from "../../src/config/settings";
+import { ExtensionRuntime, loadExtensionFromFactory } from "../../src/extensibility/extensions/loader";
+import { ExtensionRunner } from "../../src/extensibility/extensions/runner";
+import type {
+	BeforeSubagentSpawnEvent,
+	BeforeSubagentSpawnEventResult,
+} from "../../src/extensibility/extensions/types";
 import { AgentRegistry } from "../../src/registry/agent-registry";
 import { AgentLifecycleManager } from "../../src/registry/agent-lifecycle";
 import type { AgentSession } from "../../src/session/agent-session";
+import { AuthStorage } from "../../src/session/auth-storage";
 import { WaitTool } from "../../src/tools/wait";
 import type { CustomMessage } from "../../src/session/messages";
+import { SessionManager } from "../../src/session/session-manager";
+import * as discoveryModule from "../../src/task/discovery";
 import * as executor from "../../src/task/executor";
 import type { EffectiveSubagentPolicy, StructuredSubagentResult } from "../../src/task/structured-subagent";
 import * as structured from "../../src/task/structured-subagent";
@@ -13,6 +24,7 @@ import type { AgentDefinition } from "../../src/task/types";
 import type { SingleResult } from "@oh-my-pi/pi-tui/tools/task";
 import { WorkPool, WorkPoolRegistry } from "../../src/task/workpool";
 import type { ToolSession } from "../../src/tools";
+import { EventBus } from "../../src/utils/event-bus";
 
 const AGENT: AgentDefinition = {
 	name: "scout",
@@ -71,6 +83,71 @@ function makeSession(
 		kind: "main",
 		status: "idle",
 		session: { emitIrcRelayObservation: (card: CustomMessage) => cards.push(card) } as unknown as AgentSession,
+	});
+	return session;
+}
+
+let hookAuthStorage: AuthStorage;
+let hookModelRegistry: ModelRegistry;
+
+beforeAll(async () => {
+	hookAuthStorage = await AuthStorage.create(":memory:");
+	hookModelRegistry = new ModelRegistry(hookAuthStorage);
+});
+
+afterAll(() => {
+	hookAuthStorage.close();
+});
+
+/**
+ * A session whose `emitBeforeSubagentSpawn` dispatches through a real
+ * {@link ExtensionRunner}, so the routing test exercises the actual
+ * `before_subagent_spawn` handler path instead of a stubbed seam.
+ */
+async function routingSession(
+	handler: (event: BeforeSubagentSpawnEvent) => BeforeSubagentSpawnEventResult | undefined,
+): Promise<ToolSession> {
+	const runtime = new ExtensionRuntime();
+	const extension = await loadExtensionFromFactory(
+		pi => {
+			pi.on("before_subagent_spawn", async event => handler(event));
+		},
+		"/tmp",
+		new EventBus(),
+		runtime,
+		"workpool-routing-hook",
+	);
+	const sessionManager = SessionManager.inMemory("/tmp");
+	const runner = new ExtensionRunner([extension], runtime, "/tmp", sessionManager, hookModelRegistry);
+	const manager = new AsyncJobManager({ retentionMs: 0 });
+	managers.add(manager);
+	const session: ToolSession = {
+		cwd: "/tmp",
+		hasUI: false,
+		settings: Settings.isolated({
+			"task.maxConcurrency": 2,
+			"task.maxRuntimeMs": 0,
+			"eval.workpool.freshAgents": true,
+			"launch.enabled": false,
+			"task.isolation.enabled": false,
+			"isolation.backend": "rcopy",
+			"task.enableLsp": false,
+		}),
+		asyncJobManager: manager,
+		getAgentId: () => "Main",
+		getSessionFile: () => null,
+		getSessionSpawns: () => "*",
+		getSessionAgents: () => [],
+		getPlanModeState: () => undefined,
+		getArtifactsDir: () => null,
+	};
+	session.emitBeforeSubagentSpawn = (event, signal) => runner.emitBeforeSubagentSpawn(event, signal);
+	AgentRegistry.global().register({
+		id: "Main",
+		displayName: "Main",
+		kind: "main",
+		status: "idle",
+		session: null,
 	});
 	return session;
 }
@@ -393,21 +470,57 @@ describe("WorkPool dispatch", () => {
 		expect(workpool.status().freshAgents).toBe(true);
 	});
 
-	it("forwards routing off onto each worker's first turn and defaults to auto", async () => {
-		const session = makeSession([], 2, true);
-		const runSpy = vi.spyOn(structured, "runStructuredSubagent").mockImplementation(async request => {
-			markIdle(request.identity?.id ?? "missing");
-			return execution(request.identity?.id ?? "missing");
+	it("keeps the configured model under routing off and still applies a hook block", async () => {
+		vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({
+			agents: [{ ...AGENT, model: ["anthropic/claude-sonnet-4"] }],
+			projectAgentsDir: null,
 		});
-		const optedOut = new WorkPool(session, { name: "routed", policy: POLICY, routing: "off" });
-		optedOut.push(["one", "two"]);
-		await finishPool(session, optedOut);
-		const plain = new WorkPool(session, { name: "plain", policy: POLICY });
-		plain.push(["three"]);
-		await finishPool(session, plain);
+		const dispatched: executor.ExecutorOptions[] = [];
+		const artifactDirs: string[] = [];
+		const runSpy = vi.spyOn(executor, "runSubprocess").mockImplementation(async options => {
+			dispatched.push(options);
+			if (options.artifactsDir) artifactDirs.push(options.artifactsDir);
+			return singleResult(options.id ?? "worker");
+		});
 
-		expect(runSpy.mock.calls.slice(0, 2).map(([request]) => request.routing)).toEqual(["off", "off"]);
-		expect(runSpy.mock.calls.at(-1)?.[0].routing).toBe("auto");
+		const offSession = await routingSession(() => ({ note: "kept" }));
+		const off = new WorkPool(offSession, { name: "routed-off", policy: POLICY, routing: "off" });
+		off.push(["one", "two"]);
+		await finishPool(offSession, off);
+
+		// The hook returned note-only; `off` ignores any model and the configured
+		// model reaches the executor unchanged, while the note still rides along.
+		expect(dispatched).toHaveLength(2);
+		expect(dispatched.map(options => options.modelOverride)).toEqual([
+			["anthropic/claude-sonnet-4"],
+			["anthropic/claude-sonnet-4"],
+		]);
+		expect(dispatched.map(options => options.modelRoute)).toEqual(["kept", "kept"]);
+
+		dispatched.length = 0;
+		const autoSession = await routingSession(() => ({ model: "openai/gpt-4o", note: "routed" }));
+		const auto = new WorkPool(autoSession, { name: "routed-auto", policy: POLICY });
+		auto.push(["three"]);
+		await finishPool(autoSession, auto);
+
+		expect(dispatched).toHaveLength(1);
+		expect(dispatched[0]?.modelOverride).toEqual(["openai/gpt-4o"]);
+		expect(dispatched[0]?.modelRoute).toBe("routed");
+
+		dispatched.length = 0;
+		const blockedSession = await routingSession(() => ({ block: true, reason: "pool exhausted" }));
+		const blocked = new WorkPool(blockedSession, {
+			name: "routed-blocked",
+			policy: POLICY,
+			routing: "off",
+		});
+		blocked.push(["four"]);
+		await finishPool(blockedSession, blocked);
+
+		expect(runSpy).toHaveBeenCalledTimes(3);
+		expect(dispatched).toHaveLength(0);
+		expect(blocked.batches[0]?.status).toBe("failed");
+		for (const dir of artifactDirs) await fs.rm(dir, { recursive: true, force: true });
 	});
 
 	it("close drops queued items but lets the in-flight turn finish", async () => {
