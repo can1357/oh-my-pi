@@ -658,7 +658,7 @@ export const writeToolRenderer = {
 			while (bodyLines.length > 0 && bodyLines[0].trim() === "") bodyLines.shift();
 			return {
 				header,
-				sections: bodyLines.length > 0 ? [{ content: bodyLines }] : [],
+				sections: bodyLines.length > 0 ? [{ content: bodyLines, verbatim: true, expanded: options?.expanded }] : [],
 				phase: "pending",
 				borderColor: "borderMuted",
 			};
@@ -757,7 +757,7 @@ export const writeToolRenderer = {
 			while (bodyLines.length > 0 && bodyLines[0].trim() === "") bodyLines.shift();
 			return {
 				header,
-				sections: bodyLines.length > 0 ? [{ content: bodyLines }] : [],
+				sections: bodyLines.length > 0 ? [{ content: bodyLines, verbatim: true, expanded }] : [],
 				phase: isPartial ? "partial" : "success",
 				borderColor: "borderMuted",
 			};

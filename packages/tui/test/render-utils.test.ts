@@ -579,6 +579,24 @@ describe("sanitizeDisplayLines", () => {
 	it("collapses carriage-return progress overwrites to the final segment", () => {
 		expect(sanitizeDisplayLines("50%\r100%")).toEqual(["100%"]);
 	});
+
+	// A final `\n`/`\r\n` line terminator ends the last real row; the split
+	// yields exactly one empty element past it that is terminator, not text.
+	// Exactly that one artifact is dropped — real trailing blank rows survive
+	// ("foo\n\n" holds one row plus one real blank line).
+	it("drops only the split artifact past a final line terminator", () => {
+		expect(sanitizeDisplayLines("foo\n")).toEqual(["foo"]);
+		expect(sanitizeDisplayLines("foo\n\n")).toEqual(["foo", ""]);
+		expect(sanitizeDisplayLines("foo\n\nbar\n")).toEqual(["foo", "", "bar"]);
+		expect(sanitizeDisplayLines("\n\n")).toEqual(["", ""]);
+	});
+
+	// A trailing lone `\r` is a progress overwrite, not a line terminator: its
+	// final segment is a real display row (`50%\r` overwrites the row to empty)
+	// and must never be popped away as a terminator artifact.
+	it("keeps the final segment of a trailing CR progress overwrite as a row", () => {
+		expect(sanitizeDisplayLines("50%\r")).toEqual([""]);
+	});
 });
 
 describe("sanitizeDisplayWarning", () => {
