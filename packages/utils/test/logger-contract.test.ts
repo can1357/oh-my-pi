@@ -5,8 +5,8 @@ import * as path from "node:path";
 
 const fixtureDir = path.join(import.meta.dir, "fixtures");
 const probePath = path.join(fixtureDir, "logger-contract-probe.ts");
+const fatalProbePath = path.join(fixtureDir, "logger-fatal-flush-probe.ts");
 const preloadPath = path.join(fixtureDir, "logger-fixed-date-preload.ts");
-const apiProbePath = path.join(fixtureDir, "logger-api-probe.ts");
 const fixedNow = "2026-01-02T03:04:05.006Z";
 const fixedTimestamp = "2026-01-01T22:04:05.006-05:00";
 const roots: string[] = [];
@@ -21,18 +21,14 @@ interface ScenarioResult {
 	readonly stderr: string;
 }
 
-interface AuditFile {
-	readonly keep: { readonly days: boolean; readonly amount: number };
-	readonly auditLog: string;
-	readonly files: Array<{ readonly date: number; readonly name: string; readonly hash: string }>;
-	readonly hashType: string;
-}
-
 afterEach(async () => {
 	await Promise.all(roots.splice(0).map(root => fs.rm(root, { recursive: true, force: true })));
 });
 
-async function runScenario(scenario: string): Promise<ScenarioResult> {
+async function runScenario(
+	scenario: string,
+	options: { logLevel?: string; probe?: string; exitCode?: number } = {},
+): Promise<ScenarioResult> {
 	const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-logger-contract-"));
 	roots.push(root);
 	const primaryDir = path.join(root, "primary");
@@ -41,7 +37,16 @@ async function runScenario(scenario: string): Promise<ScenarioResult> {
 	const stdoutPath = path.join(root, "stdout.log");
 	await Promise.all([fs.mkdir(primaryDir), fs.mkdir(secondaryDir)]);
 	const proc = Bun.spawn(
-		[process.execPath, "--preload", preloadPath, probePath, scenario, primaryDir, secondaryDir, resultPath],
+		[
+			process.execPath,
+			"--preload",
+			preloadPath,
+			options.probe ?? probePath,
+			scenario,
+			primaryDir,
+			secondaryDir,
+			resultPath,
+		],
 		{
 			cwd: path.resolve(import.meta.dir, "../../.."),
 			env: {
@@ -60,6 +65,7 @@ async function runScenario(scenario: string): Promise<ScenarioResult> {
 				// spewing bun/@t@/*.pile into the repo root (the child's cwd) — disable it.
 				BUN_RUNTIME_TRANSPILER_CACHE_PATH: "0",
 				OMP_LOGGER_TEST_NOW: fixedNow,
+				OMP_LOG_LEVEL: options.logLevel ?? "",
 				TZ: "Etc/GMT+5",
 			},
 			stdout: Bun.file(stdoutPath),
@@ -67,7 +73,7 @@ async function runScenario(scenario: string): Promise<ScenarioResult> {
 		},
 	);
 	const [stderr, exitCode] = await Promise.all([new Response(proc.stderr).text(), proc.exited]);
-	expect(exitCode, stderr).toBe(0);
+	expect(exitCode, stderr).toBe(options.exitCode ?? 0);
 	const stdout = await fs.readFile(stdoutPath, "utf8");
 	return { pid: proc.pid, root, primaryDir, secondaryDir, resultPath, stdout, stderr };
 }
@@ -84,6 +90,19 @@ async function readSingleLog(directory: string): Promise<{ name: string; text: s
 	const name = names[0];
 	if (!name) throw new Error("expected one log file");
 	return { name, text: await fs.readFile(path.join(directory, name), "utf8") };
+}
+
+interface LogEntry {
+	readonly level: string;
+	readonly message: string;
+}
+
+async function readLogEntries(directory: string): Promise<LogEntry[]> {
+	const lines = (await readSingleLog(directory)).text.split(os.EOL).filter(line => line.length > 0);
+	return lines.map(line => {
+		const entry: LogEntry = JSON.parse(line);
+		return entry;
+	});
 }
 
 function expectedLine(
@@ -129,10 +148,13 @@ describe("central logger byte contract", () => {
 					cause: { name: "Error", message: "downstream", stack: "CAUSE_STACK" },
 				},
 			}),
+			expectedLine(result.pid, "error", "tojson-error", {
+				wrapped: { err: { name: "Error", message: "wrapped", stack: "WRAPPED_STACK" } },
+			}),
 		].join("");
 		expect(log.text).toBe(expected);
 		expect(log.text.endsWith(os.EOL)).toBe(true);
-		expect(await fs.readFile(path.join(result.primaryDir, `.omp.${result.pid}-audit.json`), "utf8")).not.toBe("");
+		expect((await fs.readdir(result.primaryDir)).filter(name => name.endsWith("-audit.json"))).toEqual([]);
 	});
 
 	test("treats Winston format tokens as a splat branch and omits context", async () => {
@@ -163,14 +185,54 @@ describe("central logger byte contract", () => {
 		const result = await runScenario("serialization-failures");
 		expect(result.stdout).toBe("");
 		expect(result.stderr).toBe("");
-		const log = await readSingleLog(result.primaryDir);
-		expect(log.text).toBe("");
+		// Nothing serialized, so the lazily created file never appears.
+		expect(await logFileNames(result.primaryDir)).toEqual([]);
 		const payload = JSON.parse(await fs.readFile(result.resultPath, "utf8")) as {
 			events: Array<{ level: string; message: string; sameContext: boolean; timestamp: string }>;
 		};
 		expect(payload.events).toEqual([
 			{ level: "info", message: "circular-drop", sameContext: true, timestamp: fixedNow },
 			{ level: "error", message: "bigint-drop", sameContext: true, timestamp: fixedNow },
+		]);
+	});
+});
+
+describe("central logger file level and batching", () => {
+	test("persists debug records by default", async () => {
+		const result = await runScenario("debug-only");
+		expect(result.stdout).toBe("");
+		expect(result.stderr).toBe("");
+		expect((await readSingleLog(result.primaryDir)).text).toBe(
+			expectedLine(result.pid, "debug", "debug-only-first", { ordinal: 1 }) +
+				expectedLine(result.pid, "debug", "debug-only-second", { ordinal: 2 }),
+		);
+	});
+
+	test("OMP_LOG_LEVEL=warn gates info and debug while warn and error stay on disk", async () => {
+		const result = await runScenario("matrix", { logLevel: "WARN" });
+		expect((await readLogEntries(result.primaryDir)).map(entry => entry.message)).toEqual([
+			"level-error",
+			"level-warn",
+			"reserved-primary metadata-message",
+			"error-matrix",
+			"tojson-error",
+		]);
+	});
+
+	test("the fatal record lands after the buffered records that preceded it", async () => {
+		const result = await runScenario("uncaught", { probe: fatalProbePath, exitCode: 1 });
+		expect((await readLogEntries(result.primaryDir)).map(entry => [entry.level, entry.message])).toEqual([
+			["info", "before-crash-info"],
+			["debug", "before-crash-debug"],
+			["error", "Uncaught exception"],
+		]);
+	});
+
+	test("a hard exit through exitProcess writes the buffered records", async () => {
+		const result = await runScenario("exit-process", { probe: fatalProbePath, exitCode: 3 });
+		expect((await readLogEntries(result.primaryDir)).map(entry => [entry.level, entry.message])).toEqual([
+			["info", "before-exit-info"],
+			["debug", "before-exit-debug"],
 		]);
 	});
 });
@@ -279,7 +341,7 @@ describe("central logger transport lifecycle", () => {
 });
 
 describe("DailyRotateFile option and retention contract", () => {
-	test("uses local-day names, a PID audit, SHA-256, and retains exactly five rotations", async () => {
+	test("uses local-day names and retains exactly five rotations without an audit file", async () => {
 		const result = await runScenario("date-retention");
 		expect(result.stdout).toBe("");
 		expect(result.stderr).toBe("");
@@ -292,18 +354,7 @@ describe("DailyRotateFile option and retention contract", () => {
 				expectedLine(result.pid, "info", `date-${day}`, {}, timestamp),
 			);
 		}
-
-		const auditPath = path.join(result.primaryDir, `.omp.${result.pid}-audit.json`);
-		const audit = JSON.parse(await fs.readFile(auditPath, "utf8")) as AuditFile;
-		expect(audit.keep).toEqual({ days: false, amount: 5 });
-		expect(audit.auditLog).toBe(auditPath);
-		expect(audit.hashType).toBe("sha256");
-		expect(audit.files.map(file => file.name)).toEqual(expectedNames.map(name => path.join(result.primaryDir, name)));
-		for (const file of audit.files) {
-			const hash = Bun.SHA256.hash(`${file.name}LOG_FILE${file.date}`, "hex");
-			expect(file.hash).toBe(hash);
-			expect(file.hash).toMatch(/^[0-9a-f]{64}$/);
-		}
+		expect((await fs.readdir(result.primaryDir)).sort()).toEqual(expectedNames);
 	});
 
 	test("crosses 10 MiB before rolling the following record to suffix .1", async () => {
@@ -329,50 +380,6 @@ describe("DailyRotateFile option and retention contract", () => {
 		expect(await fs.readFile(path.join(result.primaryDir, rotatedName), "utf8")).toBe(
 			expectedLine(result.pid, "info", "rotation-trigger"),
 		);
-		const audit = JSON.parse(
-			await fs.readFile(path.join(result.primaryDir, `.omp.${result.pid}-audit.json`), "utf8"),
-		) as AuditFile;
-		expect(audit.keep).toEqual({ days: false, amount: 5 });
-		expect(audit.files.map(file => path.basename(file.name))).toEqual([baseName, rotatedName]);
-	});
-});
-
-test("root and direct source entry points expose identical public logger functions", async () => {
-	const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-logger-api-"));
-	roots.push(root);
-	const outputPath = path.join(root, "result.json");
-	const proc = Bun.spawn([process.execPath, apiProbePath, outputPath], {
-		cwd: path.resolve(import.meta.dir, "../../.."),
-		stdout: "pipe",
-		stderr: "pipe",
-	});
-	const [stdout, stderr, exitCode] = await Promise.all([
-		new Response(proc.stdout).text(),
-		new Response(proc.stderr).text(),
-		proc.exited,
-	]);
-	expect(exitCode, stderr).toBe(0);
-	expect(stdout).toBe("");
-	expect(stderr).toBe("");
-	const payload = JSON.parse(await fs.readFile(outputPath, "utf8")) as { identities: boolean; keys: string[] };
-	expect(payload).toEqual({
-		identities: true,
-		keys: [
-			"debug",
-			"endTiming",
-			"error",
-			"info",
-			"openSpanPath",
-			"printTimings",
-			"recordModuleLoadSpan",
-			"registerLogSink",
-			"setTransports",
-			"shouldExitAfterTimings",
-			"startTiming",
-			"startupMarker",
-			"time",
-			"timingModeIncludes",
-			"warn",
-		],
+		expect((await fs.readdir(result.primaryDir)).sort()).toEqual([baseName, rotatedName]);
 	});
 });

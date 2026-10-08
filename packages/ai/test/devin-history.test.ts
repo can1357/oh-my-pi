@@ -1,9 +1,13 @@
 import { describe, expect, it } from "bun:test";
 import { gunzipSync } from "node:zlib";
 import { streamDevin } from "@oh-my-pi/pi-ai/providers/devin";
-import type { AssistantMessage, Context, Model } from "@oh-my-pi/pi-ai/types";
+import type { AssistantMessage, Context, Model, StreamOptions } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
-import { GetChatMessageRequestSchema, GetUserJwtResponseSchema } from "@oh-my-pi/pi-catalog/discovery/devin-proto";
+import {
+	type GetChatMessageRequest,
+	GetChatMessageRequestSchema,
+	GetUserJwtResponseSchema,
+} from "@oh-my-pi/pi-catalog/discovery/devin-proto";
 import { create, fromBinary, toBinary } from "@oh-my-pi/pi-catalog/discovery/protobuf";
 
 const devinModel: Model<"devin-agent"> = buildModel({
@@ -42,7 +46,7 @@ function assistant(overrides: Partial<AssistantMessage>): AssistantMessage {
 	};
 }
 
-async function captureRequest(context: Context) {
+async function captureRequest(context: Context, onPayload?: StreamOptions["onPayload"]) {
 	const authPayload = toBinary(GetUserJwtResponseSchema, create(GetUserJwtResponseSchema, { userJwt: "jwt" }));
 	let requestPayload: Uint8Array | undefined;
 	const fetchImpl = (async (input: string | URL | Request, init?: RequestInit) => {
@@ -51,7 +55,7 @@ async function captureRequest(context: Context) {
 		return new Response(new Uint8Array());
 	}) as typeof fetch;
 
-	await streamDevin(devinModel, context, { apiKey: "token", fetch: fetchImpl }).result();
+	await streamDevin(devinModel, context, { apiKey: "token", fetch: fetchImpl, onPayload }).result();
 	if (!requestPayload) throw new Error("Devin chat request was not captured");
 	const length = new DataView(requestPayload.buffer, requestPayload.byteOffset, requestPayload.byteLength).getUint32(
 		1,
@@ -115,5 +119,17 @@ describe("streamDevin history handoff", () => {
 		});
 
 		expect(request.prompt).toBe("You are a test.");
+	});
+
+	it("passes the chat request through onPayload and sends its replacement", async () => {
+		let seenPrompt: string | undefined;
+		const request = await captureRequest({ messages: [{ role: "user", content: "hi", timestamp: 0 }] }, payload => {
+			const original = payload as GetChatMessageRequest;
+			seenPrompt = original.chatMessagePrompts.at(-1)?.prompt;
+			return create(GetChatMessageRequestSchema, { ...original, prompt: "replaced" });
+		});
+
+		expect(seenPrompt).toBe("hi");
+		expect(request.prompt).toBe("replaced");
 	});
 });

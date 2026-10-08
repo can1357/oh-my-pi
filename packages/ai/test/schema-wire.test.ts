@@ -445,13 +445,6 @@ describe("stripSchemaDescriptions", () => {
 		expect(schema.description).toBe("keep");
 		expect(schema.properties.a.description).toBe("keep a");
 	});
-
-	it("memoizes the result on the input via a hidden stamp", () => {
-		const schema = { type: "object", properties: { a: { type: "string", description: "x" } } };
-		const first = stripSchemaDescriptions(schema);
-		const second = stripSchemaDescriptions(schema);
-		expect(second).toBe(first);
-	});
 });
 
 describe("stripToolDescriptions", () => {

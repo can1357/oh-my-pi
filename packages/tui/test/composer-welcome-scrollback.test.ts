@@ -25,7 +25,7 @@ it("makes an oversized startup changelog available in scrollback after the intro
 	const composer = new Composer({
 		terminal,
 		tuiOptions: { renderScheduler: scheduler },
-		preferences: { spellingTypoDetection: false, spellingAutocomplete: false, spellingAutocorrect: false },
+		preferences: { spellingTypoDetection: false, spellingAutocomplete: "off", spellingAutocorrect: false },
 	});
 	const entries = Array.from({ length: 60 }, (_, i) => `Changelog entry ${i}`);
 	composer.setHeaderExtras([], [new Text(entries.join("\n"), 0, 0)]);

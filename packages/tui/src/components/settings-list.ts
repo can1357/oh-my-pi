@@ -1,11 +1,18 @@
+import { formatKeyHint } from "../app-keybindings";
+import { editorKey, editorKeys } from "../chrome/keybinding-hints";
 import { fuzzyFilter } from "../fuzzy";
 import { getKeybindings } from "../keybindings";
 import { extractPrintableText } from "../keys";
 import type { MouseRoutable, SgrMouseEvent } from "../mouse";
+import type { TspPrefsControl, TspPrefsRow, TspPrefsSection, TspProps, TspSpan } from "@oh-my-pi/pi-wire";
+import { col, node, span } from "../native/describe";
+import { sameItems, sameProps } from "../native/memo";
+import { plainLine, plainText } from "../native/spans";
+import type { DescribeContext, NativeChild, NativeNode, NativeUiEvent } from "../native/node";
 import type { Component } from "../tui";
 import { Ellipsis, padding, replaceTabs, truncateToWidth, visibleWidth, wrapTextWithAnsi } from "../utils";
 import { ScrollView } from "./scroll-view";
-import { FormField, type FormFieldOptions, type FormFieldTheme } from "./form";
+import { FormField, type FormFieldOptions, type FormFieldTheme, SelectFormField, TextFormField } from "./form";
 import { MenuSelection } from "./menu-selection";
 
 function sanitizeSingleLine(text: string): string {
@@ -13,6 +20,13 @@ function sanitizeSingleLine(text: string): string {
 		.replace(/[\r\n]+/g, " ")
 		.replace(/\s+/g, " ")
 		.trim();
+}
+
+/** Described `item` node cached on the setting, rebuilt when a visible field (e.g. `currentValue`) changes. */
+const kNativeItem = Symbol("settingsList.nativeItem");
+
+interface NativeDescribedSetting extends SettingItem {
+	[kNativeItem]?: { signature: string; node: NativeNode };
 }
 
 function hasMouseRouter(component: Component): component is Component & MouseRoutable {
@@ -36,8 +50,57 @@ export interface SettingItem {
 	submenu?: (currentValue: string, done: (selectedValue?: string) => void) => Component;
 	/** True when the displayed setting differs from its default value. */
 	changed?: boolean;
+	/** The default, as a native settings page names it in the changed dot's title. */
+	defaultLabel?: string;
 	/** Render as a non-interactive section heading. Skipped by navigation and search. */
 	heading?: boolean;
+}
+
+/** A row's open editor as a native settings page shows it (`TspPrefsProps.editing`). */
+export interface PrefsEditing {
+	row: string;
+	draft?: string;
+	cursor?: number;
+	option?: string;
+}
+
+/** A submenu that reports the option it highlights (multiselect toggles) to a native settings page. */
+export interface PrefsOptionSource {
+	readonly prefsOption: string | undefined;
+}
+
+/** Where a setting row goes on a native settings page: its section and, for search results, its page. */
+export interface PrefsSectionRef {
+	id: string;
+	title: string;
+	page?: string;
+}
+
+/** The section id for a section title (`"Status Line"` → `"status-line"`). */
+export function prefsSectionId(title: string): string {
+	return title
+		.toLowerCase()
+		.replace(/[^a-z0-9]+/g, "-")
+		.replace(/^-|-$/g, "");
+}
+
+/** A setting as a native settings row, given its typed control; `undefined` for headings. */
+export function settingPrefsRow(item: SettingItem, control: TspPrefsControl): TspPrefsRow | undefined {
+	if (item.heading) return undefined;
+	const row: TspPrefsRow = {
+		id: item.id,
+		label: plainLine(item.label),
+		hint: item.description ? plainLine(item.description) : undefined,
+		warning: item.warning ? plainLine(item.warning) : undefined,
+		changed: item.changed === true ? true : undefined,
+		defaultLabel: item.changed && item.defaultLabel ? plainLine(item.defaultLabel) : undefined,
+		control,
+	};
+	return row;
+}
+
+function hasPrefsOption(component: Component): component is Component & PrefsOptionSource {
+	return "prefsOption" in component;
 }
 
 export interface SettingsListTheme {
@@ -131,6 +194,8 @@ export class SettingsList implements Component {
 	#hitRows: (string | undefined)[] = [];
 	#sidebarHitRows: (string | undefined)[] = [];
 	#sidebarHitCol = 0;
+	#nativeList?: { props: TspProps<"list">; items: readonly NativeNode[]; node: NativeNode };
+	#nativeRoot?: { body: NativeChild; hint: string; node: NativeNode };
 	constructor(
 		items: SettingItem[],
 		maxVisible: number,
@@ -218,6 +283,98 @@ export class SettingsList implements Component {
 	/** True while an item submenu owns input. */
 	hasOpenSubmenu(): boolean {
 		return this.#submenuComponent !== null;
+	}
+
+	/** The open submenu and the row that opened it, if any. */
+	get openSubmenu(): { id: string; component: Component } | undefined {
+		const component = this.#submenuComponent;
+		const id = this.#submenuItemId;
+		return component && id !== null ? { id, component } : undefined;
+	}
+
+	/**
+	 * The visible settings as native page sections: rows in list order, each
+	 * in the section `sectionOf` (given the row and the heading above it) names,
+	 * sections in order of their first row (ranked search results gather
+	 * under their section). Rows `control` has no typed control for are left
+	 * out.
+	 */
+	prefsSections(
+		sectionOf: (item: SettingItem, heading: SettingItem | undefined) => PrefsSectionRef,
+		control: (item: SettingItem) => TspPrefsControl | undefined,
+	): TspPrefsSection[] {
+		const sections: { ref: PrefsSectionRef; rows: TspPrefsRow[] }[] = [];
+		let heading: SettingItem | undefined;
+		for (const item of this.#filteredItems) {
+			if (item.heading) {
+				heading = item;
+				continue;
+			}
+			const typed = control(item);
+			const row = typed && settingPrefsRow(item, typed);
+			if (!row) continue;
+			const ref = sectionOf(item, heading);
+			const section = sections.find(candidate => candidate.ref.id === ref.id);
+			if (section) section.rows.push(row);
+			else sections.push({ ref, rows: [row] });
+		}
+		return sections.map(({ ref, rows }) => ({ ...ref, rows }));
+	}
+
+	/** The row with keyboard focus, or while the section rail has focus the focused section's heading label. */
+	prefsFocus(): { row?: string; section?: string } {
+		if (this.#sectionFocus) {
+			const sections = this.#sections();
+			return { section: sections[this.#activeSectionIndex(sections)]?.name };
+		}
+		return { row: this.getSelectedItem()?.id };
+	}
+
+	/**
+	 * The open editor as a native page draws it: a choice's highlighted option
+	 * (when `inlineMenu(id)` says the row's choices fit its popup menu), a text
+	 * field's draft and cursor (dots when masked), a multiselect's highlighted
+	 * option; `null` when nothing is open or the editor has no native control
+	 * (the host shows that one itself).
+	 */
+	prefsEditing(inlineMenu: (id: string) => boolean): PrefsEditing | null {
+		const open = this.openSubmenu;
+		if (!open) return null;
+		const { id, component } = open;
+		if (component instanceof SelectFormField) {
+			if (!inlineMenu(id)) return null;
+			return { row: id, option: component.selectList.getSelectedItem()?.value };
+		}
+		if (component instanceof TextFormField) {
+			const draft = component.getValue();
+			return {
+				row: id,
+				draft: component.input.mask ? "•".repeat(draft.length) : draft,
+				cursor: component.input.getCursor(),
+			};
+		}
+		if (hasPrefsOption(component)) return { row: id, option: component.prefsOption };
+		return null;
+	}
+
+	/** Applies `value` to a cycling (boolean/enum) row the way Enter does: the row shows it and `onChange` runs. */
+	applyValue(id: string, value: string): void {
+		const item = this.#items.find(candidate => !candidate.heading && candidate.id === id);
+		if (!item || item.submenu || !item.values?.includes(value)) return;
+		this.selectItem(id);
+		item.currentValue = value;
+		this.#onChange(item.id, value);
+	}
+
+	/** Opens row `id`'s submenu the way Enter does (leaving one already open for it); returns it. */
+	openSubmenuFor(id: string): Component | undefined {
+		const open = this.openSubmenu;
+		if (open?.id === id) return open.component;
+		if (open || !this.selectItem(id)) return undefined;
+		const item = this.getSelectedItem();
+		if (!item?.submenu) return undefined;
+		this.#activateItem();
+		return this.#submenuComponent ?? undefined;
 	}
 
 	#notifySelection(): void {
@@ -482,6 +639,113 @@ export class SettingsList implements Component {
 		return this.#padLines(this.#renderMainList(width));
 	}
 
+	/**
+	 * A `list` of setting `item`s (label, current value on the right, risk note
+	 * and description as detail; headings as disabled items) keyed by setting id,
+	 * with the selection and search query, plus the footer hint. An open submenu
+	 * replaces the list and describes itself.
+	 */
+	describe(_cx: DescribeContext): NativeNode {
+		let body: NativeChild;
+		let hint = "";
+		if (this.#submenuComponent) {
+			body = this.#submenuComponent;
+		} else {
+			body = this.#describeList();
+			hint = this.#options.hint === "" ? "" : plainLine(this.#hintText());
+		}
+		const cached = this.#nativeRoot;
+		if (cached && cached.body === body && cached.hint === hint) return cached.node;
+		const children: NativeChild[] = [body];
+		if (hint) children.push(node("text", { spans: [span(hint, "muted")] }, undefined, "hint"));
+		const root = col(children, { role: "omp.settings", gap: "sm" });
+		this.#nativeRoot = { body, hint, node: root };
+		return root;
+	}
+
+	/**
+	 * Pointer actions do what a click does in the settings hosts: `select` moves
+	 * the selection to the row, or activates it (Enter) when it already is the
+	 * selection; `activate` selects and activates.
+	 */
+	handleNativeEvent(event: NativeUiEvent): void {
+		if (this.#submenuComponent || (event.type !== "select" && event.type !== "activate")) return;
+		const wasSelected = this.getSelectedItem()?.id === event.item;
+		if (!this.selectItem(event.item)) return;
+		if (event.type === "activate" || wasSelected) this.#activateItem();
+	}
+
+	#describeList(): NativeNode {
+		const items: NativeNode[] = [];
+		for (const item of this.#filteredItems) items.push(this.#describeItem(item));
+		const cachedMax = this.#nativeList?.props.max;
+		const props: TspProps<"list"> = {
+			selected: this.getSelectedItem()?.id ?? null,
+			filter: this.#filterQuery.trim() || undefined,
+			empty:
+				this.#items.length === 0 ? (this.#options.emptyText ?? "No settings available") : "No matching settings",
+			max:
+				typeof cachedMax === "object" && cachedMax.lines === this.#maxVisible
+					? cachedMax
+					: { lines: this.#maxVisible },
+		};
+		const cached = this.#nativeList;
+		if (cached && sameProps(cached.props, props) && sameItems(cached.items, items)) return cached.node;
+		const list = node("list", props, items, "list");
+		this.#nativeList = { props, items, node: list };
+		return list;
+	}
+
+	#describeItem(item: NativeDescribedSetting): NativeNode {
+		const value = plainLine(String(item.currentValue ?? ""));
+		const changed = item.changed === true;
+		const signature = `${item.heading === true}\0${item.label}\0${value}\0${changed}\0${item.warning ?? ""}\0${item.description ?? ""}`;
+		const cached = item[kNativeItem];
+		if (cached?.signature === signature) return cached.node;
+		let described: NativeNode;
+		if (item.heading) {
+			described = node(
+				"item",
+				{ label: [span(plainLine(item.label), "strong")], disabled: true, role: "omp.settings.heading" },
+				undefined,
+				item.id,
+			);
+		} else {
+			const label: TspSpan[] = [span(plainLine(item.label), changed ? "accent" : undefined)];
+			if (item.warning && this.#theme.warningMark)
+				label.push(span(` ${plainText(this.#theme.warningMark)}`, "warning"));
+			const detail: TspSpan[] = [];
+			if (item.warning) detail.push(span(plainLine(item.warning), "warning"));
+			if (item.description) {
+				if (detail.length > 0) detail.push(span(" "));
+				detail.push(span(plainLine(item.description), "muted"));
+			}
+			described = node(
+				"item",
+				{
+					label,
+					value: [span(value, changed ? "accent" : "muted")],
+					detail: detail.length > 0 ? detail : undefined,
+				},
+				undefined,
+				item.id,
+			);
+		}
+		item[kNativeItem] = { signature, node: described };
+		return described;
+	}
+
+	#hintText(): string {
+		const jumpHint =
+			this.#sections().length >= 2
+				? `${editorKeys("tui.select.pageUp", "tui.select.pageDown")} to jump sections · `
+				: "";
+		return (
+			this.#options.hint ??
+			`${editorKey("tui.select.confirm")}/${formatKeyHint("space")} to change · ${jumpHint}Type to search · ${editorKey("tui.select.cancel")} to cancel`
+		);
+	}
+
 	/** Warning glyph suffix for a row that carries a risk note, or "" when none applies. */
 	#warningMark(item: SettingItem): string {
 		return item.warning && this.#theme.warningMark ? ` ${this.#theme.warningMark}` : "";
@@ -547,7 +811,9 @@ export class SettingsList implements Component {
 			}
 			lines.push(this.#theme.hint("  No matching settings"));
 			lines.push("");
-			lines.push(truncateToWidth(this.#theme.hint("  Backspace to edit search · Esc to cancel"), width));
+			const editKey = editorKey("tui.editor.deleteCharBackward");
+			const cancelKey = editorKey("tui.select.cancel");
+			lines.push(truncateToWidth(this.#theme.hint(`  ${editKey} to edit search · ${cancelKey} to cancel`), width));
 			return lines;
 		}
 
@@ -638,9 +904,7 @@ export class SettingsList implements Component {
 		// Add hint (suppressed entirely when the host owns the footer)
 		if (this.#options.hint !== "") {
 			lines.push("");
-			const jumpHint = sections.length >= 2 ? "PgUp/PgDn to jump sections · " : "";
-			const hintText = this.#options.hint ?? `Enter/Space to change · ${jumpHint}Type to search · Esc to cancel`;
-			lines.push(truncateToWidth(this.#theme.hint(`  ${hintText}`), width));
+			lines.push(truncateToWidth(this.#theme.hint(`  ${this.#hintText()}`), width));
 		}
 
 		return lines;

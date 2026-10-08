@@ -4,10 +4,10 @@ import type { VirtualTerminal } from "./virtual-terminal";
 /**
  * Longest delay a throttled frame can ask for: the 30 Hz cadence. Adaptive
  * backpressure adds nothing under a virtual clock (a frame costs 0 virtual ms),
- * and every deferred window the engine arms is longer — multiplexer resize
- * debounce 50 ms, resize viewport settle 120 ms, ConPTY post-paint settle
- * 150 ms — so this horizon separates "frames the pipeline owes us now" from
- * "windows a test must open deliberately".
+ * and the deferred windows a test must open deliberately are all longer —
+ * multiplexer resize debounce 50 ms, resize viewport settle 120 ms, ConPTY
+ * post-paint settle 150 ms — so this horizon separates "frames the pipeline
+ * owes us now" from "windows a test must open deliberately".
  */
 const FRAME_HORIZON_MS = 40;
 
@@ -69,11 +69,16 @@ export class VirtualRenderScheduler implements RenderScheduler {
 
 	/**
 	 * Run the frames the engine owes — immediates plus timers landing within
-	 * `horizonMs` of the clock, including the ones those frames schedule — until
-	 * the pipeline is quiescent. Deferred windows stay armed.
+	 * `horizonMs` of the call, including follow-ups those frames chain inside
+	 * that window — until the pipeline is quiescent. The window is fixed at
+	 * entry: a deferred frame that re-arms on a short retry cadence (the 10 ms
+	 * output-backlog retry) fires at most a few times and then stays pending,
+	 * instead of pushing the horizon out forever. Call `settle` again to slide
+	 * the window forward.
 	 */
 	async settle(term: VirtualTerminal, horizonMs = FRAME_HORIZON_MS): Promise<void> {
-		await this.#drain(term, () => this.#now + horizonMs);
+		const deadline = this.#now + horizonMs;
+		await this.#drain(term, () => deadline);
 	}
 
 	/**

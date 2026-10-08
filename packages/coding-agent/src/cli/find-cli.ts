@@ -5,11 +5,8 @@
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import { formatBytes, formatDuration, formatNumber } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
-import { ModelRegistry } from "../config/model-registry";
-import { Settings } from "../config/settings";
 import { InternalUrlFilesystem, isUrlPath } from "../internal-urls/url-filesystem";
-import { resolveJudge } from "../judgment";
-import { discoverAuthStorage, loadCliExtensionProviders } from "../sdk";
+import { openStandaloneJudge } from "../judgment/standalone";
 import { formatPathRelativeToCwd, resolveSearchResultPath } from "../tools/path-utils";
 import { type CascadeResult, runCascade } from "../tools/jfind/cascade";
 import { rankedHeat } from "../tools/jfind/passages";
@@ -95,13 +92,8 @@ export async function runFindCommand(cmd: FindCommandArgs): Promise<void> {
 	// scope has none of its own, so it keeps the caller's.
 	const baseCwd = root.type === "directory" && !isUrlPath(root.path) ? root.path : cwd;
 	log("resolving judge");
-	const settings = await Settings.init({ cwd: baseCwd });
-	const authStorage = await discoverAuthStorage(undefined, { settings });
+	const { judge, close } = await openStandaloneJudge(baseCwd, "find");
 	try {
-		const registry = new ModelRegistry(authStorage);
-		await registry.refresh();
-		await loadCliExtensionProviders(registry, settings, baseCwd);
-		const judge = resolveJudge({ settings, registry, sessionId: Bun.randomUUIDv7() });
 		const started = performance.now();
 		const raw = await runCascade({
 			root,
@@ -126,9 +118,9 @@ export async function runFindCommand(cmd: FindCommandArgs): Promise<void> {
 		} else {
 			printReport(cmd, formatPathRelativeToCwd(root.path, cwd), result, elapsedMs);
 		}
-		// `exitCode`, not `exit`: process.exit skips the finally below, and with it authStorage.close().
+		// `exitCode`, not `exit`: process.exit skips the finally below, and with it close().
 		if (result.stats.requests > 0 && result.stats.errors === result.stats.requests) process.exitCode = 1;
 	} finally {
-		authStorage.close();
+		close();
 	}
 }

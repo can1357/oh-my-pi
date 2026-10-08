@@ -1,5 +1,5 @@
 import { createGradientHighlighter, type KeywordHighlighter } from "./gradient-highlight";
-import { keywordInProse } from "./markdown-prose";
+import { keywordInProse, maskNonProse } from "./markdown-prose";
 
 /**
  * Magic-keyword engine: standalone prose words the host registers via
@@ -39,6 +39,8 @@ function magicKeywordRegex(word: string, flags = ""): RegExp {
 interface RegisteredKeyword {
 	readonly word: string;
 	readonly highlight: KeywordHighlighter;
+	/** Global standalone-prose matcher, walked over masked text. */
+	readonly pattern: RegExp;
 }
 
 let registry: readonly RegisteredKeyword[] = [];
@@ -62,6 +64,7 @@ function matcherFor(word: string): RegExp {
 export function setMagicKeywords(specs: readonly MagicKeywordSpec[]): void {
 	registry = specs.map(({ word, hue: [from, to] }) => ({
 		word,
+		pattern: magicKeywordRegex(word, "g"),
 		highlight: createGradientHighlighter({
 			probe: word,
 			highlight: magicKeywordRegex(word, "g"),
@@ -111,14 +114,41 @@ export function highlightMagicKeywords(text: string, resetTo?: string, phase?: n
 }
 
 /**
+ * UTF-16 ranges of every registered keyword standing as prose in `text`
+ * (never inside code or XML/HTML sections), for decorating the keywords
+ * without painting them: a TSP terminal draws the gradient sweep itself.
+ */
+export function magicKeywordRanges(text: string): { from: number; to: number }[] {
+	const ranges: { from: number; to: number }[] = [];
+	let masked: string | undefined;
+	for (const keyword of registry) {
+		if (!text.includes(keyword.word)) continue;
+		masked ??= maskNonProse(text);
+		for (const match of masked.matchAll(keyword.pattern)) {
+			ranges.push({ from: match.index, to: match.index + match[0].length });
+		}
+	}
+	return ranges.sort((a, b) => a.from - b.from);
+}
+
+/** Last {@link hasMagicKeyword} answer: the live editor asks once per layout segment with the same buffer. */
+let lastProbe: { text: string; registry: readonly RegisteredKeyword[]; found: boolean } | undefined;
+
+/**
  * Cheap test for "does this text contain any registered keyword as standalone
  * prose?". Short-circuits on a substring probe before paying for the
  * markdown-aware prose check, so the common "no keyword in buffer" path is one
  * `String#includes` per word. Used by the live editor to gate the shimmer timer.
  */
 export function hasMagicKeyword(text: string): boolean {
+	if (lastProbe?.text === text && lastProbe.registry === registry) return lastProbe.found;
+	let found = false;
 	for (const keyword of registry) {
-		if (text.includes(keyword.word) && containsMagicKeyword(text, keyword.word)) return true;
+		if (text.includes(keyword.word) && containsMagicKeyword(text, keyword.word)) {
+			found = true;
+			break;
+		}
 	}
-	return false;
+	lastProbe = { text, registry, found };
+	return found;
 }

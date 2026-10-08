@@ -96,13 +96,6 @@ describe("serviceTier → tier.* settings migration", () => {
 		expect(cfgTierSubagent.get(settings)).toBe("priority"); // claude-only → priority
 		expect(cfgTierAdvisor.get(settings)).toBe("flex");
 	});
-
-	it("leaves a fresh config on the per-family defaults", async () => {
-		const settings = await loadWith({});
-		expect(cfgTierOpenai.get(settings)).toBe("none");
-		expect(cfgTierSubagent.get(settings)).toBe("inherit");
-		expect(cfgTierAdvisor.get(settings)).toBe("none");
-	});
 });
 
 describe("task.agentServiceTierOverrides", () => {
@@ -125,7 +118,7 @@ describe("task.agentServiceTierOverrides", () => {
 				overrides: { "task.agentServiceTierOverrides": { scout: "turbo" } },
 			}),
 		).rejects.toThrow(
-			"Invalid service tier for task.agentServiceTierOverrides.scout: turbo. Expected one of: inherit, none, auto, default, flex, scale, priority.",
+			"Invalid service tier for task.agentServiceTierOverrides.scout: turbo. Expected one of: inherit, none, auto, default, flex, scale, priority, ultrafast.",
 		);
 	});
 

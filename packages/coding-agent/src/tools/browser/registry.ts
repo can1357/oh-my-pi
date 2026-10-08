@@ -9,6 +9,7 @@ import type { CmuxKind } from "./cmux/rpc";
 import { CmuxSocketClient } from "./cmux/socket-client";
 import {
 	BROWSER_PROTOCOL_TIMEOUT_MS,
+	connectPuppeteer,
 	DEFAULT_VIEWPORT,
 	launchHeadlessBrowser,
 	loadPuppeteer,
@@ -20,6 +21,8 @@ import { ensureRelayDaemon, isLoopbackRelayUrl } from "./relay/daemon";
 import type { RelayKind } from "./relay/kind";
 import { waitForRelayExtension } from "./relay/probe";
 import { ensureSharedBrowser } from "./shared-daemon";
+import type { TernKind } from "./tern/kind";
+import { TernSocketClient } from "./tern/wire";
 
 export type PuppeteerBrowserKind =
 	| {
@@ -34,7 +37,7 @@ export type PuppeteerBrowserKind =
 	| { kind: "connected"; cdpUrl: string }
 	| RelayKind;
 
-export type BrowserKind = PuppeteerBrowserKind | CmuxKind;
+export type BrowserKind = PuppeteerBrowserKind | CmuxKind | TernKind;
 
 export type BrowserKindTag = BrowserKind["kind"];
 
@@ -70,7 +73,14 @@ export interface CmuxBrowserHandle extends BrowserHandleCommon {
 	surface?: string;
 }
 
-export type BrowserHandle = PuppeteerBrowserHandle | CmuxBrowserHandle;
+/** A connection to the Tern daemon whose browser PiPs host this handle's tabs. */
+export interface TernBrowserHandle extends BrowserHandleCommon {
+	kind: TernKind;
+	/** The daemon connection every tab of this handle drives its PiP through. */
+	tern: TernSocketClient;
+}
+
+export type BrowserHandle = PuppeteerBrowserHandle | CmuxBrowserHandle | TernBrowserHandle;
 
 /** Controls bounded browser-handle teardown and identifies the owning resource in timeout diagnostics. */
 export interface ReleaseBrowserOptions {
@@ -95,6 +105,8 @@ export function browserKey(kind: BrowserKind): string {
 			return `relay:${kind.cdpUrl}`;
 		case "cmux":
 			return `cmux:${kind.socketPath}`;
+		case "tern":
+			return `tern:${kind.socketPath}:${kind.pane}`;
 	}
 }
 
@@ -111,7 +123,7 @@ export async function acquireBrowser(kind: BrowserKind, opts: AcquireBrowserOpti
 		const existing = browsers.get(key);
 		if (existing) {
 			if ("client" in existing) return existing;
-			if (existing.browser.connected) return existing;
+			if ("tern" in existing ? existing.tern.connected : existing.browser.connected) return existing;
 			browsers.delete(key);
 			await disposeBrowserHandle(existing, { kill: false });
 			continue;
@@ -176,6 +188,11 @@ async function openBrowserHandle(kind: BrowserKind, opts: AcquireBrowserOptions)
 			refCount: 0,
 		};
 	}
+	if (kind.kind === "tern") {
+		const tern = new TernSocketClient({ socketPath: kind.socketPath });
+		await tern.connect();
+		return { key: browserKey(kind), kind, tern, refCount: 0 };
+	}
 	if (kind.kind === "headless") {
 		// Every real omp process (session, subagent, worker — anything with a CLI
 		// worker host) MUST go through the project-shared broker-owned Chromium:
@@ -204,7 +221,7 @@ async function openBrowserHandle(kind: BrowserKind, opts: AcquireBrowserOptions)
 		const cdpUrl = normalizeConnectedCdpUrl(kind.cdpUrl);
 		await waitForCdp(cdpUrl, 5_000, opts.signal);
 		const puppeteer = await loadPuppeteer();
-		const browser = await puppeteer.connect({
+		const browser = await connectPuppeteer(puppeteer, {
 			browserURL: cdpUrl,
 			defaultViewport: null,
 			protocolTimeout: BROWSER_PROTOCOL_TIMEOUT_MS,
@@ -241,8 +258,23 @@ async function openBrowserHandle(kind: BrowserKind, opts: AcquireBrowserOptions)
 				`omp browser relay is serving at ${cdpUrl} but its extension never connected. Install it with \`omp browser-relay install\` and check the toolbar badge shows "on".`,
 			);
 		}
+		if (outcome === "extension-gone") {
+			throw new ToolError(
+				`omp browser relay is serving at ${cdpUrl} but its extension disconnected and has not come back. Open Chrome with the OMP Browser Relay extension and check the toolbar badge shows "on".`,
+			);
+		}
+		if (outcome === "outdated-relay") {
+			throw new ToolError(
+				`The browser relay at ${cdpUrl} is out of date. Restart the relay under this OMP version, then retry.`,
+			);
+		}
+		if (outcome === "outdated-extension") {
+			throw new ToolError(
+				"The OMP Browser Relay extension is out of date. Run `omp browser-relay install` and reload the extension in Chrome.",
+			);
+		}
 		const puppeteer = await loadPuppeteer();
-		const browser = await puppeteer.connect({
+		const browser = await connectPuppeteer(puppeteer, {
 			browserURL: cdpUrl,
 			defaultViewport: null,
 			protocolTimeout: BROWSER_PROTOCOL_TIMEOUT_MS,
@@ -298,7 +330,7 @@ async function openBrowserHandle(kind: BrowserKind, opts: AcquireBrowserOptions)
 	const puppeteer = await loadPuppeteer();
 	let browser: Browser;
 	try {
-		browser = await puppeteer.connect({
+		browser = await connectPuppeteer(puppeteer, {
 			browserURL: cdpUrl,
 			defaultViewport: null,
 			protocolTimeout: BROWSER_PROTOCOL_TIMEOUT_MS,
@@ -339,13 +371,19 @@ async function disposeBrowserHandle(handle: BrowserHandle, opts: ReleaseBrowserO
 		handle.client.close();
 		return;
 	}
+	if ("tern" in handle) {
+		handle.tern.close();
+		return;
+	}
 	if (handle.kind.kind === "headless") {
 		if (handle.sharedDaemon) {
 			// The broker owns the Chromium; this process only drops its CDP
 			// connection. `kill` is scoped to spawned-app browsers — stopping the
 			// shared daemon here would tear down every other session's tabs. The
 			// daemon dies with the last omp client in the project (broker idle
-			// teardown), or via an explicit stop (`write proc://<name>/kill`).
+			// teardown), when its CDP endpoint stops answering after a failed tab
+			// cleanup (`stopSharedBrowserIfUnreachable`), or via an explicit stop
+			// (`write proc://<name>/kill`).
 			if (handle.browser.connected) {
 				try {
 					handle.browser.disconnect();
@@ -428,7 +466,7 @@ async function openSharedHeadlessHandle(
 			);
 		}
 		const puppeteer = await loadPuppeteer();
-		const browser = await puppeteer.connect({
+		const browser = await connectPuppeteer(puppeteer, {
 			browserWSEndpoint: shared.wsEndpoint,
 			defaultViewport: kind.headless
 				? {

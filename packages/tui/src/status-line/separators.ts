@@ -1,10 +1,6 @@
 import type { Theme } from "../theme";
 import type { SeparatorDef, StatusLineSeparatorStyle } from "./types";
 
-function trimSep(value: string): string {
-	return value.trim();
-}
-
 export function getSeparator(style: StatusLineSeparatorStyle, theme: Theme): SeparatorDef {
 	switch (style) {
 		case "powerline":
@@ -17,22 +13,12 @@ export function getSeparator(style: StatusLineSeparatorStyle, theme: Theme): Sep
 					useBgAsFg: true,
 				},
 			};
-		case "powerline-thin":
-			return {
-				left: theme.sep.powerlineThinLeft,
-				right: theme.sep.powerlineThinRight,
-				endCaps: {
-					left: theme.sep.powerlineRight,
-					right: theme.sep.powerlineLeft,
-					useBgAsFg: true,
-				},
-			};
 		case "slash": {
-			const slash = trimSep(theme.sep.slash);
+			const slash = theme.sep.slash.trim();
 			return { left: slash, right: slash };
 		}
 		case "pipe": {
-			const pipe = trimSep(theme.sep.pipe);
+			const pipe = theme.sep.pipe.trim();
 			return { left: pipe, right: pipe };
 		}
 		case "block":
@@ -41,6 +27,7 @@ export function getSeparator(style: StatusLineSeparatorStyle, theme: Theme): Sep
 			return { left: theme.sep.space, right: theme.sep.space };
 		case "ascii":
 			return { left: theme.sep.asciiLeft, right: theme.sep.asciiRight };
+		// "powerline-thin" is also the fallback for unknown styles.
 		default:
 			return {
 				left: theme.sep.powerlineThinLeft,

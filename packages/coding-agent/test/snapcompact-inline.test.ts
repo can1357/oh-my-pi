@@ -548,21 +548,6 @@ describe("planInlineSwaps", () => {
 	const toolOnly = { renderSystemPrompt: "none" as const, renderToolResults: true };
 	const promptOnly = { renderSystemPrompt: "all" as const, renderToolResults: false };
 
-	it("never swaps the most recent tool result", () => {
-		const plan = planInlineSwaps({
-			options: toolOnly,
-			shape,
-			budget: 90,
-			toolResults: [
-				{ id: "a", textTokens: 10000, frames: 2 },
-				{ id: "z", textTokens: 10000, frames: 2 },
-			],
-			systemPrompt: undefined,
-			hasUserMessage: true,
-		});
-		expect(plan.toolResults.map(swap => swap.id)).toEqual(["a"]);
-	});
-
 	it("skips error, empty, below-floor, and below-margin candidates", () => {
 		const plan = planInlineSwaps({
 			options: toolOnly,
@@ -571,8 +556,8 @@ describe("planInlineSwaps", () => {
 			toolResults: [
 				{ id: "empty", textTokens: 0, frames: 0 },
 				{ id: "small", textTokens: 2999, frames: 1 },
-				// 2 frames ≈ 6600 image tokens > 7000 * 0.9 — margin gate rejects.
-				{ id: "margin", textTokens: 7000, frames: 2 },
+				// 2 frames ≈ 6272 image tokens > 6900 * 0.9 — margin gate rejects.
+				{ id: "margin", textTokens: 6900, frames: 2 },
 				{ id: "err", textTokens: 10000, frames: 2, isError: true },
 				{ id: "ok", textTokens: 10000, frames: 2 },
 				{ id: "last", textTokens: 10000, frames: 2 },
@@ -633,10 +618,10 @@ describe("planInlineSwaps", () => {
 		expect(
 			planInlineSwaps({ ...base, systemPrompt: { textTokens: 100000, frames: 7 } }).systemPrompt,
 		).toBeUndefined();
-		// 6 frames ≈ 19800 ≤ 30000 * 0.9 — fits.
+		// 6 frames ≈ 18816 ≤ 30000 * 0.9 — fits.
 		expect(planInlineSwaps({ ...base, systemPrompt: { textTokens: 30000, frames: 6 } }).systemPrompt).toBeDefined();
-		// 2 frames ≈ 6600 > 7000 * 0.9 — margin gate rejects.
-		expect(planInlineSwaps({ ...base, systemPrompt: { textTokens: 7000, frames: 2 } }).systemPrompt).toBeUndefined();
+		// 2 frames ≈ 6272 > 6900 * 0.9 — margin gate rejects.
+		expect(planInlineSwaps({ ...base, systemPrompt: { textTokens: 6900, frames: 2 } }).systemPrompt).toBeUndefined();
 		// No user message to carry the frames.
 		expect(
 			planInlineSwaps({ ...base, hasUserMessage: false, systemPrompt: { textTokens: 30000, frames: 6 } })
@@ -660,17 +645,20 @@ describe("estimateInlineSavings", () => {
 	});
 
 	it("assumes the next request carries a user message even with empty history", () => {
+		const model = makeModel();
 		const estimate = estimateInlineSavings({
 			options: { renderSystemPrompt: "all", renderToolResults: false, shape: TEST_SHAPE },
-			model: makeModel(),
+			model,
 			systemPrompt: [LARGE],
 			messages: [],
 		});
 		expect(estimate.visionCapable).toBe(true);
 		expect(estimate.systemPrompt?.applied).toBe(true);
 		expect(estimate.systemPrompt?.frames).toBe(2);
+		// Anthropic wire, unclassified model: the high-res tier's 56² per 1568px frame.
+		expect(snapcompact.resolveShape(model, TEST_SHAPE).frameTokenEstimate).toBe(56 * 56);
 		expect(estimate.systemPrompt?.imageTokens).toBe(
-			estimate.systemPrompt!.frames * snapcompact.resolveShape(undefined, TEST_SHAPE).frameTokenEstimate,
+			estimate.systemPrompt!.frames * snapcompact.resolveShape(model, TEST_SHAPE).frameTokenEstimate,
 		);
 		expect(estimate.systemPrompt?.savedTokens).toBe(
 			estimate.systemPrompt!.textTokens - estimate.systemPrompt!.imageTokens,

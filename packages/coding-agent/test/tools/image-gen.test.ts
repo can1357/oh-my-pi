@@ -1,3 +1,5 @@
+import * as fs from "node:fs";
+import * as path from "node:path";
 import { afterAll, describe, expect, it } from "bun:test";
 import { type Api, type FetchImpl, type Model } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
@@ -11,7 +13,7 @@ import {
 	getImageGenToolsWithRegistry,
 	imageGenTool,
 } from "@oh-my-pi/pi-coding-agent/tools/image-gen";
-import { removeWithRetries } from "@oh-my-pi/pi-utils";
+import { hasFsCode, removeWithRetries, TempDir } from "@oh-my-pi/pi-utils";
 import { createInMemoryAuthStorage } from "../helpers/agent-session-setup";
 
 const generatedImagePaths: string[] = [];
@@ -135,10 +137,11 @@ describe("imageGenTool catalog routing", () => {
 		expect(result.details?.model).toBe("requested-image");
 	});
 
-	it("hoists the active provider only within the non-explicit default image chain", async () => {
-		const openai = catalogModel("openai", "gpt-image-1", "openai-responses");
+	it("tries the session model's same-provider image swap before the default image chain", async () => {
+		const openai = catalogModel("openai", "gpt-image-2", "openai-responses");
 		const xai = catalogModel("xai", "grok-imagine-image", "openai-images");
-		const active = catalogModel("xai", "grok-chat", "openai-responses", "chat");
+		const active = catalogModel("xai", "grok-4.5", "openai-responses", "chat");
+		expect(active.imageModel).toBe("grok-imagine-image");
 		const urls: string[] = [];
 		const fetchMock: FetchImpl = async input => {
 			urls.push(input.toString());
@@ -151,7 +154,7 @@ describe("imageGenTool catalog routing", () => {
 			activeModel: active,
 		});
 
-		const result = await imageGenTool.execute("hoist", { subject: "active provider" }, undefined, ctx);
+		const result = await imageGenTool.execute("swap", { subject: "active provider" }, undefined, ctx);
 		collectPaths(result);
 
 		expect(urls).toEqual(["https://xai.example/v1/images/generations"]);
@@ -390,6 +393,31 @@ describe("imageGenTool catalog routing", () => {
 		expect(result.details?.model).toBe("gpt-image-selected");
 	});
 
+	it("lets a hosted-image session model generate by itself when its proxy lacks the swap target", async () => {
+		const proxied = catalogModel("my-proxy", "gpt-5.6-sol", "openai-responses", "chat");
+		expect(proxied.hostedImage).toBe(true);
+		let requestBody: Record<string, unknown> | undefined;
+		const fetchMock: FetchImpl = async (_input, init) => {
+			requestBody = JSON.parse(String(init?.body));
+			return hostedResponse();
+		};
+		const ctx = createContext({
+			models: [proxied],
+			settings: Settings.isolated(),
+			fetch: fetchMock,
+			activeModel: proxied,
+		});
+
+		const result = await imageGenTool.execute("as-is", { subject: "proxy" }, undefined, ctx);
+		collectPaths(result);
+
+		expect(requestBody?.model).toBe("gpt-5.6-sol");
+		const tools = requestBody?.tools;
+		if (!Array.isArray(tools)) throw new Error("Expected hosted image tools");
+		expect(tools[0]).not.toHaveProperty("model");
+		expect(result.details?.imageCount).toBe(1);
+	});
+
 	it("omits the image tool model for Codex hosted image requests", async () => {
 		const image = catalogModel("openai-codex", "gpt-image-selected", "openai-codex-responses");
 		const carrier = catalogModel("openai-codex", "gpt-5.5", "openai-codex-responses", "chat");
@@ -417,4 +445,96 @@ describe("imageGenTool catalog routing", () => {
 		expect(tools[0]).toMatchObject({ type: "image_generation" });
 		expect(tools[0]).not.toHaveProperty("model");
 	});
+
+	it("reports the image model, size, and quality the Codex backend actually ran", async () => {
+		const image = catalogModel("openai-codex", "gpt-image-2", "openai-codex-responses");
+		const carrier = catalogModel("openai-codex", "gpt-5.5", "openai-codex-responses", "chat");
+		// The Codex backend streams the image in `output_item.done`, leaves `response.completed.output` empty,
+		// and echoes its own tool configuration, ignoring the requested model/size/quality.
+		const events = [
+			{
+				type: "response.output_item.done",
+				item: { type: "image_generation_call", result: WEBP_DATA, size: "1774x887", quality: "low" },
+			},
+			{
+				type: "response.completed",
+				response: {
+					output: [],
+					tools: [{ type: "image_generation", model: "gpt-image-2-codex", size: "auto", quality: "auto" }],
+				},
+			},
+		];
+		const fetchMock: FetchImpl = async () =>
+			new Response(events.map(event => `data: ${JSON.stringify(event)}\n\n`).join(""), {
+				status: 200,
+				headers: { "content-type": "text/event-stream" },
+			});
+		const settings = Settings.isolated({ modelRoles: { image: "openai-codex/gpt-image-2" } });
+		const ctx = createContext({ models: [image, carrier], settings, fetch: fetchMock });
+
+		const result = await imageGenTool.execute(
+			"codex-actual",
+			{ subject: "codex", aspect_ratio: "16:9" },
+			undefined,
+			ctx,
+		);
+		collectPaths(result);
+
+		expect(result.details?.model).toBe("gpt-image-2-codex");
+		expect(result.details?.images[0]).toMatchObject({ size: "1774x887", quality: "low" });
+		const text = result.content[0]?.type === "text" ? result.content[0].text : "";
+		expect(text).toContain("Model: gpt-image-2-codex (catalog entry openai-codex/gpt-image-2)");
+		expect(text).toContain("(1774x887, quality low)");
+	});
+
+	it.skipIf(process.platform === "win32")(
+		"rejects a FIFO image input before reading or contacting the provider",
+		async () => {
+			// Real kernel FIFO I/O cannot be driven by fake timers; the race proves the async read rejects boundedly.
+			const tempDir = TempDir.createSync("@omp-image-special-file-");
+			const fifo = path.join(tempDir.path(), "input.png");
+			try {
+				expect(Bun.spawnSync(["mkfifo", fifo]).exitCode).toBe(0);
+				let fetchCalls = 0;
+				const model = catalogModel("deepinfra", "test-image", "openai-images");
+				const ctx = createContext({
+					models: [model],
+					settings: Settings.isolated(),
+					fetch: async () => {
+						fetchCalls++;
+						return imageResponse();
+					},
+				});
+				const loading = imageGenTool
+					.execute(
+						"special-image",
+						{ subject: "edit", model: "deepinfra/test-image", input: [{ path: fifo }] },
+						undefined,
+						ctx,
+					)
+					.then(
+						() => undefined,
+						error => error,
+					);
+				const outcome = await Promise.race([loading, Bun.sleep(1_500).then(() => "HUNG" as const)]);
+				if (outcome === "HUNG") {
+					try {
+						fs.closeSync(fs.openSync(fifo, fs.constants.O_WRONLY | fs.constants.O_NONBLOCK));
+					} catch (error) {
+						if (!hasFsCode(error, "ENXIO")) throw error;
+					}
+					await loading;
+				}
+				expect(outcome).toBeInstanceOf(Error);
+				expect(outcome).toHaveProperty(
+					"message",
+					`Cannot load '${fifo}': it is a FIFO, not a regular file or directory.`,
+				);
+				expect(fetchCalls).toBe(0);
+			} finally {
+				tempDir.removeSync();
+			}
+		},
+		10_000,
+	);
 });

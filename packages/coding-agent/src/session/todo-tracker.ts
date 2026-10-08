@@ -26,6 +26,10 @@ const MUTATING_TOOLS: Record<string, true> = {
 const MID_RUN_NUDGE_MESSAGE_TYPE = "mid-run-todo-nudge";
 const MARKDOWN_PROMPT_PREFIX_RE = /^(?:>\s*)?(?:(?:[-*+]|\d+[.)])\s+)*/;
 const PROMPT_LABEL_RE = /^(?:q(?:uestion)?|ask)\s*\d*\s*[:.)-]\s*/i;
+const INLINE_EMPHASIS_RE = /(\*\*|__)(.*?)\1/g;
+const OPTION_LINE_RE = /^(?:[-*+]|\d+[.)])\s+\S/;
+const RECOMMENDATION_RE = /^(?:i(?:'d| would)?\s+recommend|(?:my\s+)?recommendation)\b/i;
+const CHOICE_CONFIRMATION_RE = /^(?:go|proceed|continue|stick)\s+with\b/i;
 const QUESTION_PROMPT_RE =
 	/^(?:what|which|when|where|why|how|who|whom|whose|do|does|did|can|could|would|will|should|is|are|am|may|shall)\b/i;
 const USER_DIRECTED_PROMPT_RE = /\b(?:you|your|we|our)\b/i;
@@ -40,6 +44,13 @@ const USER_RESPONSE_CUE_RE =
  * as a real user-directed question. Fixes non-Latin prompts going undetected (#7803).
  */
 const NON_ASCII_TEXT_RE = /[^\x00-\x7F]/;
+
+// A question wrapped whole in italics (`*…*`, `_…_`) — or the `*…*` that
+// INLINE_EMPHASIS_RE leaves of `***…***` — must still match the ^-anchored
+// QUESTION_PROMPT_RE. Strikethrough is deliberately absent: `~~…~~` marks the
+// author as having discarded the span, so unwrapping it would promote a retracted
+// question back to a live one and idle the session waiting for an answer nobody is going to give.
+const WRAPPED_EMPHASIS_RE = /^(\*\*\*|\*\*|\*|___|__|_)([\s\S]+)\1$/;
 
 interface PromptLine {
 	text: string;
@@ -369,10 +380,15 @@ function assistantText(message: AssistantMessage): string {
 }
 
 function promptLine(line: string): PromptLine {
-	const withoutMarkdownPrefix = line.trim().replace(MARKDOWN_PROMPT_PREFIX_RE, "").trim();
+	const withoutMarkdownPrefix = line
+		.trim()
+		.replace(INLINE_EMPHASIS_RE, "$2")
+		.replace(MARKDOWN_PROMPT_PREFIX_RE, "")
+		.trim();
 	const withoutPromptLabel = withoutMarkdownPrefix.replace(PROMPT_LABEL_RE, "").trim();
+	const withoutEmphasis = withoutPromptLabel.replace(WRAPPED_EMPHASIS_RE, "$2").trim();
 	return {
-		text: withoutPromptLabel,
+		text: withoutEmphasis,
 		hadPromptLabel: withoutPromptLabel !== withoutMarkdownPrefix,
 	};
 }
@@ -383,6 +399,7 @@ function isQuestionPromptLine(line: string): boolean {
 	return (
 		candidate.hadPromptLabel ||
 		QUESTION_PROMPT_RE.test(candidate.text) ||
+		CHOICE_CONFIRMATION_RE.test(candidate.text) ||
 		USER_DIRECTED_PROMPT_RE.test(candidate.text) ||
 		NON_ASCII_TEXT_RE.test(candidate.text)
 	);
@@ -398,6 +415,37 @@ function isResponseCueLine(line: string): boolean {
 function isAwaitingUserAnswer(message: AssistantMessage): boolean {
 	const text = assistantText(message);
 	if (!text) return false;
-	const lastLine = text.split(/\r?\n/).at(-1)?.trim();
-	return lastLine !== undefined && (isQuestionPromptLine(lastLine) || isResponseCueLine(lastLine));
+	const lines = text.split(/\r?\n/);
+	const lastLine = lines.at(-1)?.trim();
+	if (lastLine !== undefined && (isQuestionPromptLine(lastLine) || isResponseCueLine(lastLine))) return true;
+
+	// Options and a recommendation do not answer the question on the user's behalf.
+	// Stop at other prose so self-answered questions still allow unfinished work to resume.
+	let optionCount = 0;
+	let hasRecommendation = false;
+	for (let index = lines.length - 1; index >= 0; index--) {
+		const line = lines[index].trim();
+		if (!line) continue;
+		if (OPTION_LINE_RE.test(line)) {
+			optionCount++;
+			continue;
+		}
+		const candidate = promptLine(line);
+		if (optionCount > 0) {
+			return (
+				optionCount >= 2 &&
+				isQuestionPromptLine(line) &&
+				(hasRecommendation ||
+					candidate.hadPromptLabel ||
+					USER_DIRECTED_PROMPT_RE.test(candidate.text) ||
+					CHOICE_CONFIRMATION_RE.test(candidate.text))
+			);
+		}
+		if (RECOMMENDATION_RE.test(candidate.text)) {
+			hasRecommendation = true;
+			continue;
+		}
+		return false;
+	}
+	return false;
 }

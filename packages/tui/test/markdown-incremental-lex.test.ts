@@ -258,6 +258,30 @@ describe("Markdown incremental streaming lex (E2)", () => {
 		expect(replaced).toEqual(renderCold("a flat replacement with no double newline at all", 60));
 	});
 
+	it("renders a transient non-append edit that keeps the frozen prefix as a one-shot render does", () => {
+		// The edit keeps the text of the frozen prefix but replaces what follows
+		// it, so the line after the prefix may no longer start a block of its
+		// own: a line of no-break spaces joins the blank run in front of it, and
+		// a same-marker item continues the list above it. Lexing the rest
+		// against that prefix kept the wrong rows through the finished render.
+		for (const [before, after] of [
+			["Para.\n\nnext para here", "Para.\n\n\u00a0\nAfter."],
+			["- a\n\nnext", "- a\n\n- b"],
+		]) {
+			const streaming = new Markdown("", 0, 0, THEME);
+			streaming.transientRenderCache = true;
+			clearRenderCache();
+			streaming.setText(before);
+			streaming.render(60);
+			clearRenderCache();
+			streaming.setText(after);
+			expect(streaming.render(60)).toEqual(renderColdTransient(after, 60));
+			streaming.transientRenderCache = false;
+			clearRenderCache();
+			expect(streaming.render(60)).toEqual(renderCold(after, 60));
+		}
+	});
+
 	it("CRLF text (fallback path) renders identically to a cold lex", () => {
 		const streaming = new Markdown("", 0, 0, THEME);
 		const crlf = "Para one with content.\r\n\r\nPara two with `code`.\r\n\r\nPara three tail.\r\n";
@@ -320,19 +344,6 @@ describe("Markdown incremental streaming lex (E2)", () => {
 		const bullets = "- a\n- b\n\n- c\n- d";
 		assertIdenticalGrowth(bullets, 60, 1);
 		assertIdenticalGrowth(bullets, 60, 3);
-	});
-
-	it("a list closed by a paragraph freezes at the boundary (streaming perf gate)", () => {
-		// The lookahead must actually fire here: the tail after the blank line
-		// is a paragraph, which cannot continue a `-` list, so the rendered
-		// list rows become settled (frozen prefix) on the transient path.
-		const doc = "- alpha\n- beta\n- gamma\n\nClosing paragraph after the list keeps going.";
-		const streaming = new Markdown("", 0, 0, THEME);
-		streaming.transientRenderCache = true;
-		clearRenderCache();
-		streaming.setText(doc);
-		const streamLines = streaming.render(60);
-		expect(streamLines).toEqual(renderCold(doc, 60));
 	});
 
 	it("orphan-fence repair starting mid-stream keeps growth byte-identical", () => {
@@ -405,6 +416,249 @@ describe("Markdown incremental streaming lex (E2)", () => {
 			const streamLines = streaming.render(60);
 			expect(streamLines).toEqual(renderColdTransient(grown, 60));
 		}
+	});
+
+	it("never mutates returned frames and stays byte-identical across finalize and resume", () => {
+		// Streaming reuses private row/highlight caches across frames; a frame
+		// already handed to a caller must never change afterwards. Finalizing
+		// mid-fence (then resuming the stream) releases those caches and must
+		// rebuild byte-identical output.
+		const theme = {
+			...THEME,
+			highlightCode: (code: string): string[] => code.split("\n").map(line => `H<${line}>`),
+			createHighlightStream: () => ({
+				push: (chunk: string): string =>
+					chunk
+						.split("\n")
+						.map((line, i, all) => (i === all.length - 1 ? line : `H<${line}>`))
+						.join("\n"),
+			}),
+		};
+		const renderColdWith = (text: string, transient: boolean): readonly string[] => {
+			clearRenderCache();
+			const md = new Markdown(text, 0, 0, theme);
+			md.transientRenderCache = transient;
+			const lines = md.render(60);
+			clearRenderCache();
+			return lines;
+		};
+		const code = Array.from({ length: 24 }, (_, i) => `const value_${i} = compute(${i});`).join("\n");
+		const doc =
+			"Intro paragraph that freezes first.\n\nSecond paragraph grows the frozen prefix.\n\n" +
+			`\`\`\`ts\n${code}\n\`\`\`\n\nTail prose after the fence keeps streaming on.`;
+		const finalizeAt = doc.indexOf("value_12");
+		const streaming = new Markdown("", 0, 0, theme);
+		streaming.transientRenderCache = true;
+		const handed: Array<{ lines: readonly string[]; snapshot: string[] }> = [];
+		let finalized = false;
+		for (let len = 1; len <= doc.length; len += 5) {
+			const slice = doc.slice(0, len);
+			clearRenderCache();
+			streaming.setText(slice);
+			const lines = streaming.render(60);
+			expect(lines).toEqual(renderColdWith(slice, true));
+			handed.push({ lines, snapshot: [...lines] });
+			if (!finalized && len >= finalizeAt) {
+				finalized = true;
+				streaming.transientRenderCache = false;
+				clearRenderCache();
+				expect(streaming.render(60)).toEqual(renderColdWith(slice, false));
+				streaming.transientRenderCache = true;
+			}
+		}
+		expect(finalized).toBe(true);
+		for (const frame of handed) expect(frame.lines).toEqual(frame.snapshot);
+	});
+});
+
+describe("Streamed Markdown equals a one-shot render across the frozen prefix", () => {
+	/** Stream `full` in `step`-character chunks through one transient instance, as
+	 *  a live message does. Every frame must equal a cold transient render of the
+	 *  same text, and the finalized render a cold final render. Returns the frozen
+	 *  prefix length at the last streamed frame. */
+	function streamAgainstOneShot(full: string, step: number, width = 60): number {
+		const streaming = new Markdown("", 0, 0, THEME);
+		streaming.transientRenderCache = true;
+		for (let len = Math.min(step, full.length); ; len = Math.min(len + step, full.length)) {
+			const slice = full.slice(0, len);
+			clearRenderCache();
+			streaming.setText(slice);
+			expect(streaming.render(width)).toEqual(renderColdTransient(slice, width));
+			if (len === full.length) break;
+		}
+		const frozen = streaming.getLastRenderStableText().length;
+		streaming.transientRenderCache = false;
+		clearRenderCache();
+		expect(streaming.render(width)).toEqual(renderCold(full, width));
+		return frozen;
+	}
+
+	const paragraphs = (count: number) =>
+		Array.from({ length: count }, (_, i) => `Body paragraph ${i} keeps the stream going.`).join("\n\n");
+	const mathBody = Array.from({ length: 6 }, (_, i) => `a_{${i}} + b_{${i}} = c_{${i}}`).join("\n\n");
+
+	for (const step of [1, 7, 40]) {
+		it(`keeps a display-math block with blank lines whole, streamed in ${step}-character chunks`, () => {
+			// The freeze must not cut at a blank line inside the block before its
+			// closer arrives: that left raw `$$` rows even after finalizing.
+			streamAgainstOneShot(`Intro.\n\n$$\n${mathBody}\n$$\n\nAfter the math.\n`, step);
+		});
+	}
+
+	for (const definition of ["> [d]: https://example.com/docs", "- [d]: https://example.com/docs"]) {
+		it(`resolves a reference whose definition streams in nested: ${definition.slice(0, 5)}`, () => {
+			// A definition inside a quote or list resolves the reference above it,
+			// which a frozen prefix lexed without the definition kept raw.
+			const doc = `See [the docs][d] for details.\n\nMiddle paragraph one.\n\nMiddle paragraph two.\n\n${definition}\n`;
+			for (const step of [1, 7, 40]) streamAgainstOneShot(doc, step);
+		});
+	}
+
+	it("resolves a reference that streams in after a nested definition", () => {
+		// The definition sits in a list that a full lex could freeze; a later
+		// tail lexed without it would leave the reference raw.
+		const doc = `- [d]: https://example.com/docs\n\nMiddle paragraph.\n\nSee [the docs][d] for details.\n`;
+		for (const step of [1, 7, 40]) streamAgainstOneShot(doc, step);
+	});
+
+	it("renders an own-line $$ that never closes as a one-shot render does", () => {
+		const doc = `Intro.\n\n$$\nx = 1\n\n${paragraphs(4)}\n`;
+		for (const step of [1, 7, 40]) streamAgainstOneShot(doc, step);
+	});
+
+	it("keeps a display-math block open while its last streamed line could still grow past a closer", () => {
+		// The last streamed line reads as a closer (`$$`, `\]`) until the next
+		// chunk extends it into text, so the block opened above it can still
+		// close further down; freezing past its opener would split that block.
+		for (const doc of [
+			"Intro.\n\n$$\n\n\n$$ E = mc^2 $$\n\nMiddle.\n\n$$\n\nAfter.\n",
+			"Intro.\n\n\\[\n\n\n\\] E = mc^2\n\nMiddle.\n\n\\]\n\nAfter.\n",
+		])
+			streamAgainstOneShot(doc, 1);
+	});
+
+	it("keeps watching an open opener of one kind while blocks of the other kind close below it", () => {
+		// A closer sends the prefix back only to the boundary in front of the
+		// opener of its own kind, so the open opener of the other kind above it
+		// is still watched, and its own closer further down still turns
+		// everything from it on into one block.
+		for (const doc of [
+			`Intro.\n\n\\[\nx = 1\n\n${paragraphs(2)}\n\n$$\na = b\n\nc = d\n$$\n\n${paragraphs(2)}\n\n\\]\n\nAfter.\n`,
+			`Intro.\n\n$$\nx = 1\n\n${paragraphs(2)}\n\n\\[\na = b\n\nc = d\n\\]\n\n${paragraphs(2)}\n\n$$\n\nAfter.\n`,
+		])
+			for (const step of [1, 7, 40]) streamAgainstOneShot(doc, step);
+	});
+
+	it("keeps freezing past a closed $$ pair around a blank body", () => {
+		// mathBlockAt rejects a whitespace-only body and no append can move its
+		// first closer, so this is no math block, and the freeze must not stall
+		// in front of it for the rest of the stream.
+		const doc = `Intro.\n\n$$\n \n$$\n\n${paragraphs(80)}\n`;
+		const frozen = streamAgainstOneShot(doc, 40);
+		expect(frozen).toBeGreaterThan(doc.indexOf("$$\n\n") + 4);
+	});
+
+	it("keeps freezing past a fenced block with an indented line that looks like a definition", () => {
+		// Code registers no reference definitions, so the freeze still advances
+		// over the block once the stream grows past it.
+		const doc = `Intro paragraph.\n\n\`\`\`ts\ninterface Bag {\n    [key: string]: T;\n}\n\`\`\`\n\n${paragraphs(40)}\n`;
+		const frozen = streamAgainstOneShot(doc, 40);
+		expect(frozen).toBeGreaterThan(doc.indexOf("```\n\n") + 3);
+	});
+
+	it("keeps a no-break-space line after a blank line in the blank run", () => {
+		// The lexer's blank line is any whitespace-only line, so the line joins
+		// the blank run above it. A freeze in front of it gave it a blank row of
+		// its own, in every later frame and in the finalized render.
+		streamAgainstOneShot(`Intro.\n\nFirst paragraph.\n\n\u00a0\nAfter.\n\n${paragraphs(3)}\n`, 1);
+	});
+
+	it("finalizes as a one-shot render when the repair drops an orphan fence right after the frozen prefix", () => {
+		// At finalize the orphan `~~~` is deleted (a table and a heading follow
+		// it), so the text after the frozen prefix starts with blank lines that
+		// a one-shot lex joins to the blank line in front of the fence.
+		streamAgainstOneShot("Intro.\n\n~~~\n\n\n| a | b |\n|---|---|\n| 1 | 2 |\n### Heading\n", 7);
+	});
+
+	it("publishes no text past an own-line $$ that an append could still close", () => {
+		// The stable text feeds append-only transcript publication, so it must
+		// stop in front of the opener: the closer below turns everything from the
+		// opener on into one math block.
+		const open = `Intro.\n\n$$\nx = 1\n\n${paragraphs(40)}\n`;
+		const frozen = streamAgainstOneShot(open, 40);
+		expect(frozen).toBeGreaterThan(0);
+		expect(frozen).toBeLessThanOrEqual(open.indexOf("$$"));
+		streamAgainstOneShot(`${open}$$\n\nAfter the math.\n`, 40);
+	});
+
+	/** Wall time of streaming `doc` through one transient instance in `step`-character frames. */
+	function streamTime(doc: string, step: number): number {
+		const streaming = new Markdown("", 0, 0, THEME);
+		streaming.transientRenderCache = true;
+		const start = Bun.nanoseconds();
+		for (let len = step; len < doc.length + step; len += step) {
+			streaming.setText(doc.slice(0, len));
+			streaming.render(100);
+		}
+		return Bun.nanoseconds() - start;
+	}
+
+	/** Streaming `doc` costs less than three times streaming `baseline`, best of up to three runs. */
+	function expectStreamsAsFast(doc: string, baseline: string, step: number): void {
+		clearRenderCache();
+		const base = Math.min(streamTime(baseline, step), streamTime(baseline, step));
+		let cost = Number.POSITIVE_INFINITY;
+		for (let run = 0; run < 3 && cost >= 3 * base; run++) cost = Math.min(cost, streamTime(doc, step));
+		expect(cost).toBeLessThan(3 * base);
+	}
+
+	it("streams past an own-line $$ that never closes as fast as without it", () => {
+		// The opener stays open to the end, so a frozen prefix that stopped in
+		// front of it left every frame re-lexing the whole message.
+		const body = paragraphs(750);
+		expectStreamsAsFast(`Intro.\n\n$$\nx = 1\n\n${body}\n`, `Intro.\n\nx = 1\n\n${body}\n`, 64);
+	});
+
+	it("streams $$ blocks around blank lines below an open \\[ as fast as $$ blocks without them", () => {
+		// A `$$` block with a blank line inside is frozen open until its closer
+		// arrives, and the closer turns only the text from its own opener on
+		// into a math block. So the prefix goes back to the boundary in front of
+		// that opener and keeps its rows there. Going back to the boundary in
+		// front of the `\[`, or rendering the kept prefix again, redid all the
+		// text after the `\[` for every block.
+		let blankInside = "Intro.\n\n\\[\nx = 1\n\n";
+		let noBlank = "Intro.\n\nx = 1\n\n";
+		for (let i = 0; i < 200; i++) {
+			blankInside += `Body paragraph ${i} keeps the stream going.\n\n$$\na_{${i}} = b\n\nc_{${i}} = d\n$$\n\n`;
+			noBlank += `Body paragraph ${i} keeps the stream going.\n\n$$\na_{${i}} = b\nc_{${i}} = d\n$$\n\n`;
+		}
+		expectStreamsAsFast(blankInside, noBlank, 16);
+	});
+
+	it("renders the frame after a last line that only read as a closer from the prefix frozen before it", () => {
+		// A frame ending in `$$` closes the open `$$` above it, as a one-shot
+		// render of that text does. Once the next chunk turns that line into
+		// text, the prefix frozen before it is right again, so the next frame
+		// lexes only the new text instead of everything after the opener.
+		const doc = `Intro.\n\n$$\nx = 1\n\n${paragraphs(1500)}\n\n`;
+		const frameTime = (streaming: Markdown, text: string): number => {
+			const start = Bun.nanoseconds();
+			streaming.setText(text);
+			streaming.render(100);
+			return Bun.nanoseconds() - start;
+		};
+		let closing = 0;
+		let after = Number.POSITIVE_INFINITY;
+		for (let run = 0; run < 3 && after >= closing / 4; run++) {
+			clearRenderCache();
+			const streaming = new Markdown("", 0, 0, THEME);
+			streaming.transientRenderCache = true;
+			for (let len = 4096; len < doc.length; len += 4096) frameTime(streaming, doc.slice(0, len));
+			frameTime(streaming, doc);
+			closing = frameTime(streaming, `${doc}$$`);
+			after = frameTime(streaming, `${doc}$$ E = mc^2 $$ holds.`);
+		}
+		expect(after).toBeLessThan(closing / 4);
 	});
 });
 

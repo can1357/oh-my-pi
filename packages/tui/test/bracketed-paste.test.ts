@@ -7,7 +7,7 @@
  * byte cap only fires on alternate callers that bypass StdinBuffer.
  */
 import { describe, expect, it } from "bun:test";
-import { BracketedPasteHandler } from "@oh-my-pi/pi-tui/bracketed-paste";
+import { BracketedPasteHandler, decodeReencodedPasteControls } from "@oh-my-pi/pi-tui/bracketed-paste";
 
 const PASTE_START = "\x1b[200~";
 const PASTE_END = "\x1b[201~";
@@ -74,6 +74,13 @@ describe("BracketedPasteHandler", () => {
 			expect(handler.process("plain text")).toEqual({ handled: false });
 		});
 
+		it("leaves an unbracketed Enter on the caller's key path", () => {
+			// Editor/Input consult the handler before key dispatch: claiming a bare
+			// CR as paste content would stop Enter from ever submitting.
+			const handler = new BracketedPasteHandler();
+			expect(handler.process("\r")).toEqual({ handled: false });
+		});
+
 		it("assembles a paste delivered as a single chunk with both markers", () => {
 			const handler = new BracketedPasteHandler();
 			const result = handler.process(`${PASTE_START}payload${PASTE_END}tail`);
@@ -82,6 +89,34 @@ describe("BracketedPasteHandler", () => {
 			expect(result.pasteContent).toBe("payload");
 			// @ts-expect-error - remaining carries post-marker input
 			expect(result.remaining).toBe("tail");
+		});
+
+		it("consumes doubled start delimiters without leaking framing into pasted text", () => {
+			const handler = new BracketedPasteHandler();
+			expect(handler.process(`${PASTE_START}${PASTE_START}https://example.com${PASTE_END}`)).toEqual({
+				handled: true,
+				pasteContent: "https://example.com",
+				remaining: "",
+			});
+		});
+
+		it("keeps the payload when a second start arrives in a later chunk", () => {
+			const handler = new BracketedPasteHandler();
+			handler.process(`${PASTE_START}first`);
+			handler.process(PASTE_START);
+			expect(handler.process(`second${PASTE_END}`)).toEqual({
+				handled: true,
+				pasteContent: "firstsecond",
+				remaining: "",
+			});
+		});
+	});
+
+	describe("Re-encoded paste controls", () => {
+		it("decodes an uppercase-letter CSI-u Ctrl chord to its C0 control", () => {
+			// Ctrl+Shift+J re-encoded inside a paste reports uppercase J (74); it
+			// must land as the same LF as lowercase j, not a stray codepoint.
+			expect(decodeReencodedPasteControls("line1\x1b[74;5uline2")).toBe("line1\nline2");
 		});
 	});
 });

@@ -5,8 +5,10 @@ import { untilAborted } from "@oh-my-pi/pi-utils";
 import type { HTTPRequest, HTTPResponse, Page } from "puppeteer-core";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 
-const REQUEST_LOG_LIMIT = 200;
-const RESPONSE_BODY_LIMIT_BYTES = 1024 * 1024;
+/** Maximum number of request records retained per tab; the oldest are evicted first. */
+export const REQUEST_LOG_LIMIT = 200;
+/** Maximum response-body bytes returned by `tab.request()` and embedded in HAR entries. */
+export const RESPONSE_BODY_LIMIT_BYTES = 1024 * 1024;
 const ROUTE_INTERCEPT_PRIORITY = 10;
 const PASS_THROUGH_INTERCEPT_PRIORITY = 0;
 const REQUEST_RECORD = Symbol("omp.browser.requestRecord");
@@ -112,18 +114,24 @@ export type HarContentPolicy = "text" | "all" | "none";
 interface StoredRequest extends NetworkRequestRecord {
 	request: HTTPRequest;
 	response?: HTTPResponse;
-	bodyPromise?: Promise<LoadedBody | undefined>;
+	bodyPromise?: Promise<NetworkResponseBody | undefined>;
 }
 
 interface RequestWithRecord extends HTTPRequest {
 	[REQUEST_RECORD]?: StoredRequest;
 }
 
-interface LoadedBody {
+/** A response body loaded on demand and capped to `RESPONSE_BODY_LIMIT_BYTES`. */
+export interface NetworkResponseBody {
+	/** UTF-8 text for textual content types, base64 bytes otherwise. */
 	value: string | { base64: string };
+	/** Response Content-Type, `application/octet-stream` when absent. */
 	contentType: string;
+	/** Whether `value` was cut at the byte cap. */
 	truncated: boolean;
+	/** Full (uncapped) body size in bytes. */
 	bytes: number;
+	/** Whether `contentType` is textual per `isTextualContentType`. */
 	isText: boolean;
 }
 
@@ -157,9 +165,14 @@ export class BrowserNetworkManager {
 	#interceptionEnabled = false;
 	#started = false;
 	#harSession?: HarSession;
+	/** Main-frame document requests that have neither a response nor a final failure/finish yet. */
+	readonly #pendingNavigations = new Set<HTTPRequest>();
 
 	readonly #onRequest = async (request: HTTPRequest): Promise<void> => {
 		const record = this.#rememberRequest(request);
+		if (request.isNavigationRequest() && request.frame() === this.#page.mainFrame()) {
+			this.#pendingNavigations.add(request);
+		}
 		if (!this.hasPersistentInterception()) return;
 		try {
 			if (!this.#isAllowed(request.url())) {
@@ -196,6 +209,7 @@ export class BrowserNetworkManager {
 	};
 
 	readonly #onResponse = (response: HTTPResponse): void => {
+		this.#pendingNavigations.delete(response.request());
 		const record = (response.request() as RequestWithRecord)[REQUEST_RECORD];
 		if (!record) return;
 		record.response = response;
@@ -207,12 +221,14 @@ export class BrowserNetworkManager {
 	};
 
 	readonly #onRequestFinished = (request: HTTPRequest): void => {
+		this.#pendingNavigations.delete(request);
 		const record = (request as RequestWithRecord)[REQUEST_RECORD];
 		if (!record) return;
 		record.durationMs = Math.max(0, Date.now() - record.ts);
 	};
 
 	readonly #onRequestFailed = (request: HTTPRequest): void => {
+		this.#pendingNavigations.delete(request);
 		const record = (request as RequestWithRecord)[REQUEST_RECORD];
 		if (!record) return;
 		record.failureText ??= request.failure()?.errorText ?? "request failed";
@@ -243,6 +259,7 @@ export class BrowserNetworkManager {
 		this.#page.off("response", this.#onResponse);
 		this.#page.off("requestfinished", this.#onRequestFinished);
 		this.#page.off("requestfailed", this.#onRequestFailed);
+		this.#pendingNavigations.clear();
 		if (this.#interceptionEnabled && !this.#page.isClosed()) {
 			await this.#page.setRequestInterception(false).catch(() => undefined);
 		}
@@ -252,6 +269,11 @@ export class BrowserNetworkManager {
 	/** Whether routes or allowed domains require interception to remain enabled between runs. */
 	hasPersistentInterception(): boolean {
 		return this.#allowedDomains.length > 0 || this.#routes.length > 0;
+	}
+
+	/** Whether a main-frame navigation request is still waiting for its response. */
+	hasPendingMainFrameNavigation(): boolean {
+		return this.#pendingNavigations.size > 0;
 	}
 
 	/** Restore the interception state after raw page interception used by one run. */
@@ -349,16 +371,11 @@ export class BrowserNetworkManager {
 		const records = this.#records.filter(record => record.seq >= session.startSeq);
 		const entries: Record<string, unknown>[] = [];
 		for (const record of records) {
-			entries.push(await this.#harEntry(record, session.content, signal));
+			const body = session.content === "none" ? undefined : await this.#loadBody(record, signal);
+			const statusText = record.response?.statusText() ?? record.failureText ?? "";
+			entries.push(buildHarEntry(record, body, session.content, statusText));
 		}
-		const har = {
-			log: {
-				version: "1.2",
-				creator: { name: "omp-browser", version: "1" },
-				pages: [],
-				entries,
-			},
-		};
+		const har = buildHarLog(entries);
 		await untilAborted(signal, () => fs.mkdir(path.dirname(destination), { recursive: true }));
 		await untilAborted(signal, () => Bun.write(destination, `${JSON.stringify(har, null, 2)}\n`));
 		return destination;
@@ -428,66 +445,83 @@ export class BrowserNetworkManager {
 		return route.urlPattern.test(request.url());
 	}
 
-	async #loadBody(record: StoredRequest, signal?: AbortSignal): Promise<LoadedBody | undefined> {
+	async #loadBody(record: StoredRequest, signal?: AbortSignal): Promise<NetworkResponseBody | undefined> {
 		if (!record.response) return undefined;
 		record.bodyPromise ??= loadResponseBody(record.response);
 		const loaded = await untilAborted(signal, () => record.bodyPromise!);
 		if (loaded && record.sizes.responseBody === undefined) record.sizes.responseBody = loaded.bytes;
 		return loaded;
 	}
-
-	async #harEntry(
-		record: StoredRequest,
-		contentPolicy: HarContentPolicy,
-		signal?: AbortSignal,
-	): Promise<Record<string, unknown>> {
-		const loaded = contentPolicy === "none" ? undefined : await this.#loadBody(record, signal);
-		const requestHeaders = headersToHar(record.requestHeaders);
-		const responseHeaders = headersToHar(record.responseHeaders ?? {});
-		const mimeType = loaded?.contentType ?? headerValue(record.responseHeaders, "content-type") ?? "";
-		const content: Record<string, unknown> = {
-			size: record.sizes.responseBody ?? loaded?.bytes ?? 0,
-			mimeType,
-		};
-		if (loaded && (contentPolicy === "all" || loaded.isText)) {
-			if (typeof loaded.value === "string") content.text = loaded.value;
-			else {
-				content.text = loaded.value.base64;
-				content.encoding = "base64";
-			}
-		}
-		const response = record.response;
-		return {
-			startedDateTime: new Date(record.ts).toISOString(),
-			time: record.durationMs ?? 0,
-			request: {
-				method: record.method,
-				url: record.url,
-				httpVersion: "HTTP/1.1",
-				headers: requestHeaders,
-				queryString: queryStringToHar(record.url),
-				cookies: [],
-				headersSize: -1,
-				bodySize: record.sizes.requestBody,
-			},
-			response: {
-				status: record.status ?? 0,
-				statusText: response?.statusText() ?? record.failureText ?? "",
-				httpVersion: "HTTP/1.1",
-				headers: responseHeaders,
-				cookies: [],
-				content,
-				redirectURL: headerValue(record.responseHeaders, "location") ?? "",
-				headersSize: -1,
-				bodySize: record.sizes.responseBody ?? loaded?.bytes ?? -1,
-			},
-			cache: {},
-			timings: { blocked: 0, dns: -1, connect: -1, send: 0, wait: record.durationMs ?? 0, receive: 0, ssl: -1 },
-		};
-	}
 }
 
-function normalizeAllowedDomains(domains: readonly string[]): string[] {
+/**
+ * Build one HAR 1.2 entry. `body` is ignored under the `"none"` policy and embedded only when the policy is
+ * `"all"` or the body is textual; `statusText` is the response status text (or failure text, or `""`).
+ */
+export function buildHarEntry(
+	record: NetworkRequestRecord,
+	body: NetworkResponseBody | undefined,
+	policy: HarContentPolicy,
+	statusText: string,
+): Record<string, unknown> {
+	const loaded = policy === "none" ? undefined : body;
+	const requestHeaders = headersToHar(record.requestHeaders);
+	const responseHeaders = headersToHar(record.responseHeaders ?? {});
+	const mimeType = loaded?.contentType ?? headerValue(record.responseHeaders, "content-type") ?? "";
+	const content: Record<string, unknown> = {
+		size: record.sizes.responseBody ?? loaded?.bytes ?? 0,
+		mimeType,
+	};
+	if (loaded && (policy === "all" || loaded.isText)) {
+		if (typeof loaded.value === "string") content.text = loaded.value;
+		else {
+			content.text = loaded.value.base64;
+			content.encoding = "base64";
+		}
+	}
+	return {
+		startedDateTime: new Date(record.ts).toISOString(),
+		time: record.durationMs ?? 0,
+		request: {
+			method: record.method,
+			url: record.url,
+			httpVersion: "HTTP/1.1",
+			headers: requestHeaders,
+			queryString: queryStringToHar(record.url),
+			cookies: [],
+			headersSize: -1,
+			bodySize: record.sizes.requestBody,
+		},
+		response: {
+			status: record.status ?? 0,
+			statusText,
+			httpVersion: "HTTP/1.1",
+			headers: responseHeaders,
+			cookies: [],
+			content,
+			redirectURL: headerValue(record.responseHeaders, "location") ?? "",
+			headersSize: -1,
+			bodySize: record.sizes.responseBody ?? loaded?.bytes ?? -1,
+		},
+		cache: {},
+		timings: { blocked: 0, dns: -1, connect: -1, send: 0, wait: record.durationMs ?? 0, receive: 0, ssl: -1 },
+	};
+}
+
+/** Wrap HAR entries in the HAR 1.2 `{ log: { version, creator, pages, entries } }` document. */
+export function buildHarLog(entries: Record<string, unknown>[]): object {
+	return {
+		log: {
+			version: "1.2",
+			creator: { name: "omp-browser", version: "1" },
+			pages: [],
+			entries,
+		},
+	};
+}
+
+/** Validate and normalise an `allowed_domains` list (lowercase, no trailing dot, `*.suffix` wildcards, deduped). */
+export function normalizeAllowedDomains(domains: readonly string[]): string[] {
 	const normalized: string[] = [];
 	for (const value of domains) {
 		if (typeof value !== "string") throw new ToolError("browser.open allowed_domains must contain strings");
@@ -515,7 +549,8 @@ function domainMatches(hostname: string, pattern: string): boolean {
 	return hostname === suffix || hostname.endsWith(`.${suffix}`);
 }
 
-function normalizeRouteOptions(options: NetworkRouteOptions): NetworkRouteOptions {
+/** Validate `tab.route()` options and return a normalised copy (resource types stringified, headers copied). */
+export function normalizeRouteOptions(options: NetworkRouteOptions): NetworkRouteOptions {
 	if (!options || typeof options !== "object" || Array.isArray(options)) {
 		throw new ToolError("tab.route() expects an options object");
 	}
@@ -541,7 +576,8 @@ function normalizeRouteOptions(options: NetworkRouteOptions): NetworkRouteOption
 	};
 }
 
-function cloneRouteOptions(options: NetworkRouteOptions): NetworkRouteOptions {
+/** Deep-enough copy of route options for JSON-safe reporting. */
+export function cloneRouteOptions(options: NetworkRouteOptions): NetworkRouteOptions {
 	return {
 		...options,
 		headers: options.headers ? { ...options.headers } : undefined,
@@ -549,7 +585,8 @@ function cloneRouteOptions(options: NetworkRouteOptions): NetworkRouteOptions {
 	};
 }
 
-function routeFulfills(options: NetworkRouteOptions): boolean {
+/** Whether a route fulfills requests itself (any of status, headers, contentType or body set). */
+export function routeFulfills(options: NetworkRouteOptions): boolean {
 	return (
 		options.status !== undefined ||
 		options.headers !== undefined ||
@@ -558,7 +595,8 @@ function routeFulfills(options: NetworkRouteOptions): boolean {
 	);
 }
 
-function routeResponse(options: NetworkRouteOptions): {
+/** The fulfilled response for a route: status defaults to 200, object bodies become JSON with a JSON content type. */
+export function routeResponse(options: NetworkRouteOptions): {
 	status: number;
 	headers?: Record<string, string>;
 	contentType?: string;
@@ -579,7 +617,8 @@ function routeResponse(options: NetworkRouteOptions): {
 	};
 }
 
-function validatePattern(pattern: NetworkPattern, label: string): void {
+/** Reject empty glob strings and non-RegExp patterns, naming `label` (e.g. `tab.route`) in the error. */
+export function validatePattern(pattern: NetworkPattern, label: string): void {
 	if (typeof pattern === "string") {
 		if (!pattern) throw new ToolError(`${label}() pattern must not be empty`);
 		return;
@@ -587,12 +626,14 @@ function validatePattern(pattern: NetworkPattern, label: string): void {
 	if (!(pattern instanceof RegExp)) throw new ToolError(`${label}() pattern must be a glob string or RegExp`);
 }
 
-function samePattern(left: NetworkPattern, right: NetworkPattern): boolean {
+/** Whether two route patterns are identical (string equality, or same RegExp source and flags). */
+export function samePattern(left: NetworkPattern, right: NetworkPattern): boolean {
 	if (typeof left === "string" || typeof right === "string") return left === right;
 	return left.source === right.source && left.flags === right.flags;
 }
 
-function globToRegExp(glob: string): RegExp {
+/** Compile a URL glob (`*` within a path segment, `**` across segments) into an anchored RegExp. */
+export function globToRegExp(glob: string): RegExp {
 	let source = "^";
 	for (let index = 0; index < glob.length; index++) {
 		const character = glob[index]!;
@@ -606,7 +647,8 @@ function globToRegExp(glob: string): RegExp {
 	return new RegExp(`${source}$`);
 }
 
-function matchesRequest(record: NetworkRequestRecord, options: NetworkRequestsOptions): boolean {
+/** Whether a request record passes the `tab.requests()` filters (throws on an invalid status filter). */
+export function matchesRequest(record: NetworkRequestRecord, options: NetworkRequestsOptions): boolean {
 	if (options.filter !== undefined && !requestFilterMatches(options.filter, record.url)) return false;
 	const types = normalizeStringList(options.type);
 	if (types && !types.includes(record.resourceType)) return false;
@@ -639,14 +681,16 @@ function normalizeStringList(value: string | string[] | undefined): string[] | u
 	return (Array.isArray(value) ? value : [value]).map(item => String(item));
 }
 
-function normalizeLimit(limit: number | undefined): number | undefined {
+/** Validate the `tab.requests()` limit: `undefined` or a non-negative integer. */
+export function normalizeLimit(limit: number | undefined): number | undefined {
 	if (limit === undefined) return undefined;
 	if (!Number.isInteger(limit) || limit < 0)
 		throw new ToolError("tab.requests() limit must be a non-negative integer");
 	return limit;
 }
 
-function toPublicRecord(record: StoredRequest): NetworkRequestRecord {
+/** A detached copy of the public fields of `record` (backend bookkeeping dropped). */
+export function toPublicRecord(record: NetworkRequestRecord): NetworkRequestRecord {
 	return {
 		id: record.id,
 		seq: record.seq,
@@ -664,7 +708,7 @@ function toPublicRecord(record: StoredRequest): NetworkRequestRecord {
 	};
 }
 
-async function loadResponseBody(response: HTTPResponse): Promise<LoadedBody | undefined> {
+async function loadResponseBody(response: HTTPResponse): Promise<NetworkResponseBody | undefined> {
 	let buffer: Buffer;
 	try {
 		buffer = await response.buffer();
@@ -685,7 +729,8 @@ async function loadResponseBody(response: HTTPResponse): Promise<LoadedBody | un
 	};
 }
 
-function isTextualContentType(contentType: string): boolean {
+/** Whether a Content-Type carries text (text/*, JSON, XML, JavaScript, form-encoded, SVG). */
+export function isTextualContentType(contentType: string): boolean {
 	const type = contentType.split(";", 1)[0]!.trim().toLowerCase();
 	return (
 		type.startsWith("text/") ||
@@ -706,7 +751,8 @@ function parseContentLength(headers: Record<string, string>): number | undefined
 	return Number.isFinite(value) && value >= 0 ? value : undefined;
 }
 
-function headerValue(headers: Record<string, string> | undefined, name: string): string | undefined {
+/** Case-insensitive header lookup. */
+export function headerValue(headers: Record<string, string> | undefined, name: string): string | undefined {
 	if (!headers) return undefined;
 	const wanted = name.toLowerCase();
 	for (const key in headers) {

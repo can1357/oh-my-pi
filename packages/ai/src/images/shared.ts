@@ -69,9 +69,12 @@ async function parseImageApiResponse(model: Model, response: Response): Promise<
 	}
 }
 
+/** Request URL, or a builder for routes that depend on the bearer (xAI's `XAI_BASE_URL` rule). */
+type ImageRequestUrl = string | ((bearer: string) => string);
+
 export async function postJson(options: {
 	model: Model;
-	url: string;
+	url: ImageRequestUrl;
 	body: unknown;
 	apiKey: ApiKey;
 	fetch: FetchImpl;
@@ -80,7 +83,8 @@ export async function postJson(options: {
 	return withAuth(
 		options.apiKey,
 		async key => {
-			const response = await options.fetch(options.url, {
+			const url = typeof options.url === "string" ? options.url : options.url(key);
+			const response = await options.fetch(url, {
 				method: "POST",
 				headers: {
 					...(await modelHeaders(options.model, options.signal)),
@@ -99,7 +103,7 @@ export async function postJson(options: {
 
 export async function postMultipart(options: {
 	model: Model;
-	url: string;
+	url: ImageRequestUrl;
 	body: FormData;
 	apiKey: ApiKey;
 	fetch: FetchImpl;
@@ -108,7 +112,8 @@ export async function postMultipart(options: {
 	return withAuth(
 		options.apiKey,
 		async key => {
-			const response = await options.fetch(options.url, {
+			const url = typeof options.url === "string" ? options.url : options.url(key);
+			const response = await options.fetch(url, {
 				method: "POST",
 				headers: {
 					...(await modelHeaders(options.model, options.signal)),
@@ -159,17 +164,25 @@ export async function decodeImageResponse(
 		if (item === null || typeof item !== "object") continue;
 		const image = item as { b64_json?: unknown; url?: unknown; media_type?: unknown };
 		if (typeof image.b64_json === "string" && image.b64_json.length > 0) {
-			const bytes = Buffer.from(image.b64_json, "base64");
 			const mimeType =
 				typeof image.media_type === "string"
 					? image.media_type
-					: (parseImageMetadata(bytes)?.mimeType ?? "image/png");
+					: (sniffBase64ImageMimeType(image.b64_json) ?? "image/png");
 			images.push({ data: image.b64_json, mimeType });
 		} else if (typeof image.url === "string" && image.url.length > 0) {
 			images.push(await imageFromUrl(image.url, fetch, signal));
 		}
 	}
 	return { images, usage: usageFromWire(root.usage) };
+}
+
+/**
+ * Mime type of a base64 image, read from its header only. 64 base64 chars
+ * decode to 48 bytes, past every magic number `parseImageMetadata` checks, so
+ * multi-MB payloads are never fully decoded just to be labelled.
+ */
+export function sniffBase64ImageMimeType(base64: string): string | undefined {
+	return parseImageMetadata(Buffer.from(base64.slice(0, 64), "base64"))?.mimeType;
 }
 
 export function toDataUrl(image: GeneratedImage): string {

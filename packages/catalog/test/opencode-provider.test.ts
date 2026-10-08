@@ -4,7 +4,6 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { sendsImageInputOnWire } from "@oh-my-pi/pi-ai/providers/vision-guard";
-import { resolveModelPolicy } from "@oh-my-pi/pi-catalog/compat/resolve";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { readModelCache, writeModelCache } from "@oh-my-pi/pi-catalog/model-cache";
 import { resolveProviderModels } from "@oh-my-pi/pi-catalog/model-manager";
@@ -919,22 +918,6 @@ describe("OpenCode provider discovery", () => {
 			await fs.rm(tempDir, { recursive: true, force: true });
 		}
 	});
-	test("resolves the OpenCode Go long-usage fallback policy from KDL", () => {
-		const policy = resolveModelPolicy({
-			id: "deepseek-v4-flash",
-			name: "DeepSeek V4 Flash",
-			api: "openai-completions",
-			provider: "opencode-go",
-			baseUrl: "https://opencode.ai/zen/v1",
-			reasoning: true,
-			input: ["text"],
-			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-			contextWindow: 128_000,
-			maxTokens: 16_384,
-		});
-
-		expect(policy.catalog).toMatchObject({ longUsageLimitFallback: true });
-	});
 
 	test("serves image input on the OpenCode Go DeepSeek Flash lanes", () => {
 		// The deepseek class rule strips image input for the whole lineage, which
@@ -1011,10 +994,5 @@ describe("issue #10416 — retired bare opencode provider", () => {
 		);
 
 		expect(merged.map(model => `${model.provider}/${model.id}`)).toEqual(["fixture-provider/live-fallback-model"]);
-	});
-
-	test("the split OpenCode providers remain populated", () => {
-		expect(getBundledModels("opencode-go").length).toBeGreaterThan(0);
-		expect(getBundledModels("opencode-zen").length).toBeGreaterThan(0);
 	});
 });

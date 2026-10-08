@@ -1,3 +1,6 @@
+import { compactText, styledSpans } from "../native/spans";
+import { node } from "../native/describe";
+import type { DescribeContext, NativeNode } from "../native/node";
 import type { Component } from "../tui";
 import { Ellipsis, getWidthConfigEpoch, truncateToWidth, visibleWidth } from "../utils";
 
@@ -87,6 +90,7 @@ export class ProgressBar implements Component {
 	#value: number | undefined;
 	readonly #options: ProgressBarOptions;
 	#cache: { width: number; epoch: number; value: number | undefined; lines: readonly string[] } | undefined;
+	#native: NativeNode | undefined;
 
 	constructor(value: number | undefined, options: ProgressBarOptions) {
 		this.#value = value;
@@ -97,11 +101,35 @@ export class ProgressBar implements Component {
 		if (Object.is(this.#value, value)) return false;
 		this.#value = value;
 		this.#cache = undefined;
+		this.#native = undefined;
 		return true;
 	}
 
 	invalidate(): void {
 		this.#cache = undefined;
+		this.#native = undefined;
+	}
+
+	/** A native `progress` bar (indeterminate when the value is unknown); prefix, suffix and percentage label it. */
+	describe(_cx: DescribeContext): NativeNode {
+		if (this.#native) return this.#native;
+		const options = this.#options;
+		const fraction = progressFraction(this.#value, options.min, options.max);
+		const parts: string[] = [];
+		// Frame punctuation (`[`, `]`, `▕`) around the bar is the terminal's chrome now; only wording labels it.
+		const frame = /^[^\p{L}\p{N}]+|[^\p{L}\p{N}%)]+$/gu;
+		const prefix = singleLine(options.prefix ?? "").replace(frame, "");
+		const suffix = singleLine(options.suffix ?? "").replace(frame, "");
+		if (prefix) parts.push(prefix);
+		if (suffix) parts.push(suffix);
+		if (fraction !== undefined && options.showPercentage === true) {
+			parts.push(singleLine(options.formatPercentage?.(fraction) ?? `${Math.round(fraction * 100)}%`));
+		}
+		this.#native = node("progress", {
+			value: fraction ?? null,
+			label: parts.length > 0 ? compactText(styledSpans(parts.join(" "))) : undefined,
+		});
+		return this.#native;
 	}
 
 	render(width: number): readonly string[] {

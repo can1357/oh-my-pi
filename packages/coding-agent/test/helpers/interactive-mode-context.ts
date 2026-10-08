@@ -34,6 +34,7 @@ import { vi } from "bun:test";
 import { isSettingsInitialized, Settings, settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { MCPManager } from "@oh-my-pi/pi-coding-agent/mcp/manager";
 import type { MCPServerConnection } from "@oh-my-pi/pi-coding-agent/mcp/types";
+import { KeybindingsManager } from "@oh-my-pi/pi-tui/app-keybindings";
 import { ServedModelTracker } from "@oh-my-pi/pi-tui/chat/served-model-marker";
 import { TranscriptContainer } from "@oh-my-pi/pi-tui/chrome/transcript-container";
 import { OAuthManualInputManager } from "@oh-my-pi/pi-coding-agent/modes/oauth-manual-input";
@@ -101,6 +102,8 @@ export function createSessionStub(
 		isCompacting: false,
 		isAborting: false,
 		isRetrying: false,
+		hasPostPromptWork: false,
+		queuedMessageCount: 0,
 		isTtsrAbortPending: false,
 		retryAttempt: 0,
 		messages: [],
@@ -127,6 +130,9 @@ export function createSessionStub(
 		setMCPPromptCommands: vi.fn(),
 		setActiveToolsByName: vi.fn(async () => {}),
 		runIdleCompaction: vi.fn(async () => {}),
+		waitForIdle: async () => {},
+		hasPendingAsyncWork: () => false,
+		settleAsyncWork: async () => {},
 		subscribe: vi.fn(() => () => {}),
 	} satisfies SessionOverrides;
 	if (overrides) layer(stub, overrides);
@@ -205,6 +211,7 @@ export function createInteractiveModeContext(overrides: ContextOverrides = {}): 
 		setFocus: vi.fn(),
 		terminal: { setProgress: vi.fn() },
 		imageBudget: undefined,
+		overlayStack: [],
 	};
 	const mount = (content: Component | readonly Component[]): void => {
 		for (const item of Array.isArray(content) ? content : [content as Component]) chatContainer.addChild(item);
@@ -244,6 +251,7 @@ export function createInteractiveModeContext(overrides: ContextOverrides = {}): 
 		get assistantImagesVisible() {
 			return cfgTerminalShowImages.get(contextSettings);
 		},
+		tableChartsVisible: true,
 		hasDisplayableThinkingContent: false,
 		noteDisplayableThinkingContent: vi.fn(() => false),
 		proseOnlyThinking: true,
@@ -267,6 +275,7 @@ export function createInteractiveModeContext(overrides: ContextOverrides = {}): 
 		optimisticSkillMessagePending: false,
 		locallySubmittedUserSignatures: new Set<string>(),
 		mcpTestEscapeHandlers: new Set<() => void>(),
+		keybindings: KeybindingsManager.inMemory(),
 		todoPhases: [],
 		init: vi.fn(async () => {}),
 		present: vi.fn(mount),

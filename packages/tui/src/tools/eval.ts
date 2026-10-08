@@ -1,11 +1,27 @@
 import type { Component } from "../index";
 import { Markdown, Text } from "../index";
 import { sanitizeText } from "@oh-my-pi/pi-utils";
-import type { RenderResultOptions, ToolRenderer } from "./renderer";
+import type {
+	NativeToolHead,
+	NativeToolView,
+	RenderResultContextOptions,
+	RenderResultOptions,
+	ToolRenderer,
+} from "./renderer";
+import type { TspSpan } from "@oh-my-pi/pi-wire";
+import { ansi, code as codeNode, compact, keyed, md, node, span, text } from "../native/describe";
+import type { NativeChild, NativeNode } from "../native/node";
+import { plainText } from "../native/spans";
+import { footnoteText, resultText } from "./native-view";
 import { renderAgentTreeRow } from "./agent-tree";
 import { truncateToVisualLines } from "../chrome/visual-truncate";
 import { getMarkdownTheme, type Theme } from "../theme/theme";
-import { markFramedBlockComponent, outputBlockContentWidth, renderCodeCell } from "../render/index";
+import {
+	type CodeCellOptions,
+	markFramedBlockComponent,
+	outputBlockContentWidth,
+	renderCodeCell,
+} from "../render/index";
 import { formatOutputPaneLines } from "../render/output-pane";
 import { formatEvalCodeForDisplay } from "./eval-format/index";
 import {
@@ -15,6 +31,7 @@ import {
 	JSON_TREE_MAX_LINES_EXPANDED,
 	JSON_TREE_SCALAR_LEN_COLLAPSED,
 	JSON_TREE_SCALAR_LEN_EXPANDED,
+	describeJsonTree,
 	renderJsonTreeLines,
 } from "./json-tree";
 import { formatStyledTruncationWarning, stripOutputNotice } from "./output-meta";
@@ -30,7 +47,7 @@ import {
 } from "../render/render-utils";
 import type { ImageContent } from "@oh-my-pi/pi-ai";
 import type { OutputMeta } from "./output-meta";
-import type { ConfiguredThinkingLevel } from "../render/render-utils";
+import { type ConfiguredThinkingLevel, expandKeyHint } from "../render/render-utils";
 
 /** Runtime backend that an eval cell dispatches to. */
 export type EvalLanguage = "python" | "js";
@@ -130,6 +147,37 @@ function getRenderCells(args: EvalRenderArgs | undefined): EvalRenderCell[] {
 		});
 	}
 	return out;
+}
+
+/**
+ * A rendered {@link renderCodeCell} box. Its first row is the header bar, the
+ * only row that depends on `spinnerFrame`; the code and output rows below it
+ * are reused across spinner ticks.
+ */
+interface RenderedCodeCell {
+	readonly options: CodeCellOptions;
+	readonly lines: readonly string[];
+}
+
+/**
+ * Append `cell` for `spinnerFrame`. Only a running header animates, so only it
+ * is redrawn for a new frame: `renderOutputBlock` lays the header bar out from
+ * the header fields and width alone, so rendering an empty cell with the same
+ * header yields the identical bar row.
+ */
+function pushCodeCellLines(
+	out: string[],
+	cell: RenderedCodeCell,
+	spinnerFrame: number | undefined,
+	theme: Theme,
+): void {
+	const { options, lines } = cell;
+	const header =
+		options.status === "running" && options.spinnerFrame !== spinnerFrame
+			? renderCodeCell({ ...options, code: "", output: undefined, spinnerFrame }, theme)[0]!
+			: lines[0]!;
+	out.push(header);
+	for (let i = 1; i < lines.length; i++) out.push(lines[i]!);
 }
 
 type AgentEventStatus = "pending" | "running" | "completed" | "failed" | "aborted";
@@ -546,6 +594,192 @@ function formatCellOutputLines(
 	return { lines: formatted.lines, hiddenCount: formatted.hiddenCount };
 }
 
+/** Plain one-line summary of a status event: op plus its scalar fields. */
+function describeStatusEvent(event: EvalStatusEvent): NativeNode {
+	const spans: TspSpan[] = [span(event.op, "accent")];
+	for (const key in event) {
+		if (key === "op" || key === "resolvedThinkingLevel") continue;
+		const value = event[key];
+		if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
+			spans.push(span(` ${key}=`, "muted"), span(sanitizeText(String(value))));
+		}
+	}
+	return text(spans, { truncate: "end", role: "omp.tool.eval.status" });
+}
+
+/**
+ * The eval head (§7.3): a single cell's title as the verb (else "Eval"; with
+ * several cells each section carries its own title), a badge per language in
+ * first-use order, a `background` badge for a backgrounded job, and the cell
+ * count when there are several.
+ */
+function evalToolHead(
+	title: string | undefined,
+	languages: readonly EvalLanguage[],
+	cellCount: number,
+	details?: EvalToolDetails,
+): NativeToolHead {
+	const badges: { text: string; title?: string }[] = [...new Set(languages)].map(language => ({ text: language }));
+	if (details?.async?.state === "running") {
+		badges.push({ text: "background", title: `Backgrounded as job ${details.async.jobId}` });
+	}
+	return {
+		title: (cellCount > 1 ? "" : plainText(title ?? "").trim()) || "Eval",
+		badges: badges.length > 0 ? badges : undefined,
+		meta: cellCount > 1 ? [`${cellCount} cells`] : undefined,
+	};
+}
+
+/** Box-drawing `console.table` output split out of plain text: `text` runs and parsed tables, in order. */
+type EvalOutputPart =
+	| { readonly kind: "text"; readonly text: string }
+	| { readonly kind: "table"; readonly head: readonly string[]; readonly rows: readonly string[][] };
+
+/** The cells of a `│ a │ b │` row, trimmed; undefined when the line is not a table row. */
+function tableRowCells(line: string): string[] | undefined {
+	const plain = plainText(line).trim();
+	if (plain.length < 2 || !plain.startsWith("│") || !plain.endsWith("│")) return undefined;
+	return plain
+		.slice(1, -1)
+		.split("│")
+		.map(cell => cell.trim());
+}
+
+/**
+ * Split `console.table` blocks (`┌…┐` header `├…┤` rows `└…┘`, as Node/Bun
+ * print them) out of cell output so they render as a `table`; anything that
+ * does not parse as one stays text.
+ */
+function splitConsoleTables(output: string): EvalOutputPart[] {
+	const lines = output.split("\n");
+	const parts: EvalOutputPart[] = [];
+	let textStart = 0;
+	const flushText = (end: number): void => {
+		const chunk = lines
+			.slice(textStart, end)
+			.join("\n")
+			.replace(/^\n+|\s+$/g, "");
+		if (chunk.length > 0) parts.push({ kind: "text", text: chunk });
+	};
+	for (let i = 0; i < lines.length; i++) {
+		if (!plainText(lines[i]!).trimStart().startsWith("┌")) continue;
+		const head = tableRowCells(lines[i + 1] ?? "");
+		if (
+			!head ||
+			!plainText(lines[i + 2] ?? "")
+				.trimStart()
+				.startsWith("├")
+		)
+			continue;
+		const rows: string[][] = [];
+		let end = i + 3;
+		for (; end < lines.length; end++) {
+			const cells = tableRowCells(lines[end]!);
+			if (!cells) break;
+			rows.push(cells);
+		}
+		if (
+			!plainText(lines[end] ?? "")
+				.trimStart()
+				.startsWith("└")
+		)
+			continue;
+		if (rows.some(row => row.length !== head.length)) continue;
+		flushText(i);
+		parts.push({ kind: "table", head, rows });
+		i = end;
+		textStart = end + 1;
+	}
+	flushText(lines.length);
+	return parts;
+}
+
+/** One cell's output: markdown, else terminal text with any `console.table` blocks as tables. */
+function evalOutputNodes(output: string, markdown: boolean, running: boolean, error: boolean): NativeNode[] {
+	if (output.trim().length === 0) return [];
+	if (markdown && !error) return [md(output)];
+	const tone = error ? "error" : undefined;
+	return splitConsoleTables(output).map(part =>
+		part.kind === "text"
+			? ansi(part.text, { follow: running, tone, role: "omp.tool.eval.output" })
+			: node("table", {
+					// Node's index column header is noise in a real table.
+					cols: part.head.map((head, i) => ({ id: `c${i}`, head: head === "(index)" ? "" : head })),
+					rows: part.rows.map((cells, r) => ({
+						id: `r${r}`,
+						cells: Object.fromEntries(cells.map((cell, i) => [`c${i}`, cell])),
+					})),
+					role: "omp.tool.eval.table",
+				}),
+	);
+}
+
+/** Inputs of one eval cell section. */
+interface EvalCellSection {
+	readonly language: EvalLanguage;
+	readonly code: string;
+	readonly title?: string;
+	readonly status?: EvalCellResult["status"];
+	readonly durationMs?: number;
+	readonly output?: readonly NativeChild[];
+}
+
+/**
+ * A notebook cell: a gutter mark beside the input (←, muted until the cell
+ * runs, omp's thinking starburst while it does) and beside its output (→).
+ * Only multi-cell calls repeat titles; marks never invent execution counts.
+ */
+function evalCellSection(cell: EvalCellSection, index: number, total: number): NativeNode {
+	let head: TspSpan[] | undefined;
+	if (total > 1) {
+		head = [span(`${index + 1}/${total}`, "muted")];
+		const title = plainText(cell.title ?? "").trim();
+		if (title) head.push(span(` ${title}`, "toolTitle"));
+		if (cell.status === "error") head.push(span(" · failed", "error"));
+		if (cell.durationMs !== undefined) head.push(span(` · ${(cell.durationMs / 1000).toFixed(2)}s`, "muted"));
+	}
+	const inputMark =
+		cell.status === "running"
+			? node("spinner", { style: "starburst", role: "omp.tool.eval.prompt", aria: "Running" })
+			: node("icon", {
+					name: "arrow-left",
+					role: "omp.tool.eval.prompt",
+					aria: "Input",
+					tone: !cell.status || cell.status === "pending" ? "muted" : undefined,
+				});
+	return node(
+		"col",
+		{
+			role: "omp.tool.eval.cell",
+			tone: cell.status === "error" ? "error" : cell.status === "running" ? "pending" : undefined,
+		},
+		compact<NativeChild>([
+			head ? text(head, { role: "omp.tool.eval.caption" }) : undefined,
+			node(
+				"row",
+				{ role: "omp.tool.eval.input", align: "start" },
+				[
+					inputMark,
+					keyed(codeNode(cell.code, { lang: languageForHighlighter(cell.language), numbers: false }), "code"),
+				],
+				"input",
+			),
+			cell.output?.length
+				? node(
+						"row",
+						{ role: "omp.tool.eval.result", align: "start" },
+						[
+							node("icon", { name: "arrow-right", role: "omp.tool.eval.prompt", aria: "Output" }),
+							node("col", { role: "omp.tool.eval.outputs" }, cell.output),
+						],
+						"output",
+					)
+				: undefined,
+		]),
+		`cell-${index}`,
+	);
+}
+
 /** Render eval code cells, structured display output, and progress events. */
 export const evalToolRenderer = {
 	animatedPendingPreview: true,
@@ -559,47 +793,59 @@ export const evalToolRenderer = {
 			return new Text(text, 0, 0);
 		}
 
-		let cached: { key: string; width: number; result: string[] } | undefined;
+		// Cell bodies depend on width, expansion, the viewport window and whether
+		// the call is live; a spinner tick only redraws the running header rows.
+		let bodies: { key: string; cells: RenderedCodeCell[] } | undefined;
+		let cached: { key: string; result: string[] } | undefined;
 
 		return markFramedBlockComponent({
 			render: (width: number): readonly string[] => {
-				const key = `${options.expanded ? 1 : 0}|${options.spinnerFrame ?? "-"}|${previewWindowRows()}|${cells.map(c => `${c.language}:${c.title ?? ""}:${c.code.length}`).join("|")}`;
-				if (cached && cached.key === key && cached.width === width) {
+				const spinnerFrame = options.spinnerFrame;
+				const windowRows = previewWindowRows();
+				const bodyKey = `${width}|${options.expanded ? 1 : 0}|${windowRows}|${spinnerFrame === undefined ? 0 : 1}`;
+				const key = `${bodyKey}|${spinnerFrame ?? "-"}`;
+				if (cached?.key === key) {
 					return cached.result;
 				}
 
+				if (bodies?.key !== bodyKey) {
+					bodies = {
+						key: bodyKey,
+						cells: cells.map((cell, i) => {
+							const cellOptions: CodeCellOptions = {
+								code: cell.code,
+								language: languageForHighlighter(cell.language),
+								showLanguage: true,
+								index: i,
+								total: cells.length,
+								title: cell.title,
+								status: spinnerFrame !== undefined ? "running" : "pending",
+								spinnerFrame,
+								width,
+								// Viewport-sized tail window following the newest streamed code
+								// line; renderResult keeps the same cap so the cell never snaps
+								// open on completion. Only ctrl+o uncaps.
+								codeTail: true,
+								codeMaxLines: windowRows,
+								expanded: options.expanded,
+							};
+							return { options: cellOptions, lines: renderCodeCell(cellOptions, uiTheme) };
+						}),
+					};
+				}
+
 				const lines: string[] = [];
-				for (let i = 0; i < cells.length; i++) {
-					const cell = cells[i];
-					const cellLines = renderCodeCell(
-						{
-							code: cell.code,
-							language: languageForHighlighter(cell.language),
-							showLanguage: true,
-							index: i,
-							total: cells.length,
-							title: cell.title,
-							status: options.spinnerFrame !== undefined ? "running" : "pending",
-							spinnerFrame: options.spinnerFrame,
-							width,
-							// Viewport-sized tail window following the newest streamed code
-							// line; renderResult keeps the same cap so the cell never snaps
-							// open on completion. Only ctrl+o uncaps.
-							codeTail: true,
-							codeMaxLines: previewWindowRows(),
-							expanded: options.expanded,
-						},
-						uiTheme,
-					);
-					lines.push(...cellLines);
+				for (let i = 0; i < bodies.cells.length; i++) {
+					pushCodeCellLines(lines, bodies.cells[i]!, spinnerFrame, uiTheme);
 					if (i < cells.length - 1) {
 						lines.push("");
 					}
 				}
-				cached = { key, width, result: lines };
+				cached = { key, result: lines };
 				return lines;
 			},
 			invalidate: () => {
+				bodies = undefined;
 				cached = undefined;
 			},
 		});
@@ -650,69 +896,106 @@ export const evalToolRenderer = {
 		if (cellResults && cellResults.length > 0) {
 			const displayCells = cellResults.map(cell => {
 				const language = cell.language ?? details?.language ?? "python";
-				return { cell, code: formatEvalCodeForDisplay(cell.code, language), language };
+				const allEvents = cell.statusEvents ?? [];
+				const agentEvents = allEvents.filter(e => e.op === "agent");
+				return {
+					cell,
+					code: formatEvalCodeForDisplay(cell.code, language),
+					language,
+					agentEvents,
+					otherEvents: agentEvents.length > 0 ? allEvents.filter(e => e.op !== "agent") : allEvents,
+					// Running agent rows carry the spinner; settled ones are frame-independent.
+					agentLive: agentEvents.some(e => agentEventStatus(e.status) === "running"),
+				};
 			});
-			let cached: { key: string; width: number; result: string[] } | undefined;
+			// Per-cell rows keyed by everything but the spinner frame: a tick only
+			// redraws running headers and running agent rows.
+			let bodies:
+				| {
+						key: string;
+						cells: { codeCell: RenderedCodeCell; agentLines: string[]; agentFrame: number | undefined }[];
+				  }
+				| undefined;
+			let cached: { key: string; result: string[] } | undefined;
 
 			return markFramedBlockComponent({
 				render: (width: number): readonly string[] => {
+					const spinnerFrame = options.spinnerFrame;
 					const expanded = options.renderContext?.expanded ?? options.expanded;
+					const windowRows = previewWindowRows();
 					const previewLines = Math.min(
 						options.renderContext?.previewLines ?? EVAL_DEFAULT_PREVIEW_LINES,
-						previewWindowRows(),
+						windowRows,
 					);
-					const key = `${expanded}|${previewLines}|${options.spinnerFrame}|${previewWindowRows()}`;
-					if (cached && cached.key === key && cached.width === width) {
+					const bodyKey = `${width}|${expanded}|${previewLines}|${windowRows}`;
+					const key = `${bodyKey}|${spinnerFrame}`;
+					if (cached?.key === key) {
 						return cached.result;
+					}
+
+					if (bodies?.key !== bodyKey) {
+						bodies = {
+							key: bodyKey,
+							cells: displayCells.map(({ cell, code, language, agentEvents, otherEvents }, i) => {
+								const statusLines = renderStatusEvents(otherEvents, uiTheme, expanded);
+								const outputContent = formatCellOutputLines(cell, expanded, previewLines, uiTheme, width);
+								const outputLines = [...outputContent.lines];
+								if (!expanded && outputContent.hiddenCount > 0) {
+									outputLines.push(
+										uiTheme.fg(
+											"dim",
+											`… ${outputContent.hiddenCount} more lines (${expandKeyHint()} to expand)`,
+										),
+									);
+								}
+								if (statusLines.length > 0) {
+									if (outputLines.length > 0) {
+										outputLines.push(uiTheme.fg("dim", "Status"));
+									}
+									outputLines.push(...statusLines);
+								}
+								const cellOptions: CodeCellOptions = {
+									code,
+									language: languageForHighlighter(language),
+									showLanguage: true,
+									index: i,
+									total: cellResults.length,
+									title: cell.title,
+									status: cell.status,
+									spinnerFrame,
+									duration: cell.durationMs,
+									output: outputLines.length > 0 ? outputLines.join("\n") : undefined,
+									outputMaxLines: outputLines.length,
+									// Same viewport-sized tail window as the pending preview so the
+									// cell never snaps open on completion; only ctrl+o uncaps.
+									// `output` keeps its own preview cap from above.
+									codeTail: true,
+									codeMaxLines: windowRows,
+									expanded,
+									width,
+								};
+								return {
+									codeCell: { options: cellOptions, lines: renderCodeCell(cellOptions, uiTheme) },
+									agentLines:
+										agentEvents.length > 0
+											? renderAgentProgressEvents(agentEvents, uiTheme, width, spinnerFrame)
+											: [],
+									agentFrame: spinnerFrame,
+								};
+							}),
+						};
 					}
 
 					const lines: string[] = [];
 					for (let i = 0; i < displayCells.length; i++) {
-						const { cell, code, language } = displayCells[i];
-						const allEvents = cell.statusEvents ?? [];
-						const agentEvents = allEvents.filter(e => e.op === "agent");
-						const otherEvents = agentEvents.length > 0 ? allEvents.filter(e => e.op !== "agent") : allEvents;
-						const statusLines = renderStatusEvents(otherEvents, uiTheme, expanded);
-						const outputContent = formatCellOutputLines(cell, expanded, previewLines, uiTheme, width);
-						const outputLines = [...outputContent.lines];
-						if (!expanded && outputContent.hiddenCount > 0) {
-							outputLines.push(
-								uiTheme.fg("dim", `… ${outputContent.hiddenCount} more lines (ctrl+o to expand)`),
-							);
+						const { agentEvents, agentLive } = displayCells[i]!;
+						const body = bodies.cells[i]!;
+						pushCodeCellLines(lines, body.codeCell, spinnerFrame, uiTheme);
+						if (agentLive && body.agentFrame !== spinnerFrame) {
+							body.agentLines = renderAgentProgressEvents(agentEvents, uiTheme, width, spinnerFrame);
+							body.agentFrame = spinnerFrame;
 						}
-						if (statusLines.length > 0) {
-							if (outputLines.length > 0) {
-								outputLines.push(uiTheme.fg("dim", "Status"));
-							}
-							outputLines.push(...statusLines);
-						}
-						const cellLines = renderCodeCell(
-							{
-								code,
-								language: languageForHighlighter(language),
-								showLanguage: true,
-								index: i,
-								total: cellResults.length,
-								title: cell.title,
-								status: cell.status,
-								spinnerFrame: options.spinnerFrame,
-								duration: cell.durationMs,
-								output: outputLines.length > 0 ? outputLines.join("\n") : undefined,
-								outputMaxLines: outputLines.length,
-								// Same viewport-sized tail window as the pending preview so the
-								// cell never snaps open on completion; only ctrl+o uncaps.
-								// `output` keeps its own preview cap from above.
-								codeTail: true,
-								codeMaxLines: previewWindowRows(),
-								expanded,
-								width,
-							},
-							uiTheme,
-						);
-						lines.push(...cellLines);
-						if (agentEvents.length > 0) {
-							lines.push(...renderAgentProgressEvents(agentEvents, uiTheme, width, options.spinnerFrame));
-						}
+						lines.push(...body.agentLines);
 						if (i < cellResults.length - 1) {
 							lines.push("");
 						}
@@ -730,10 +1013,11 @@ export const evalToolRenderer = {
 					if (warningLine) {
 						lines.push(warningLine);
 					}
-					cached = { key, width, result: lines };
+					cached = { key, result: lines };
 					return lines;
 				},
 				invalidate: () => {
+					bodies = undefined;
 					cached = undefined;
 				},
 			});
@@ -811,7 +1095,7 @@ export const evalToolRenderer = {
 					outputLines.push("");
 					const skippedLine = uiTheme.fg(
 						"dim",
-						`… (${cachedSkipped} earlier lines, showing ${cachedLines.length} of ${cachedSkipped + cachedLines.length}) (ctrl+o to expand)`,
+						`… (${cachedSkipped} earlier lines, showing ${cachedLines.length} of ${cachedSkipped + cachedLines.length}) (${expandKeyHint()} to expand)`,
 					);
 					outputLines.push(truncateToWidth(skippedLine, width));
 				}
@@ -842,6 +1126,105 @@ export const evalToolRenderer = {
 				cachedSkipped = undefined;
 				cachedPreviewLines = undefined;
 			},
+		};
+	},
+
+	describeCall(args: EvalRenderArgs, _options: RenderResultOptions): NativeToolView {
+		const cells = getRenderCells(args);
+		return {
+			tool: evalToolHead(
+				cells[0]?.title,
+				cells.map(cell => cell.language),
+				cells.length,
+			),
+			body: cells.map((cell, i) => evalCellSection(cell, i, cells.length)),
+			preview: { lines: EVAL_DEFAULT_PREVIEW_LINES },
+		};
+	},
+
+	describeResult(
+		result: { content: Array<{ type: string; text?: string }>; details?: EvalToolDetails; isError?: boolean },
+		options: RenderResultContextOptions & { renderContext?: EvalRenderContext },
+		args?: EvalRenderArgs,
+	): NativeToolView {
+		const details = result.details;
+		const isPartial = options.isPartial === true;
+		const previewLines = options.renderContext?.previewLines ?? EVAL_DEFAULT_PREVIEW_LINES;
+		const jsonNodes = (details?.jsonOutputs ?? []).map((value, index) =>
+			keyed(describeJsonTree(value, { hiddenRootKeys: [] }), `display-${index}`),
+		);
+		// A notice and truncation go to one quiet final line (a background job is a head badge).
+		const footer = footnoteText(compact([details?.notice]), details?.meta);
+		const cellResults = details?.cells;
+		let cells: NativeNode[];
+		let head: NativeToolHead;
+		if (cellResults && cellResults.length > 0) {
+			const languages = cellResults.map(cell => cell.language ?? details?.language ?? "python");
+			head = evalToolHead(cellResults[0]!.title, languages, cellResults.length, details);
+			cells = cellResults.map((cell, i) => {
+				const language = languages[i]!;
+				return evalCellSection(
+					{
+						language,
+						code: formatEvalCodeForDisplay(cell.code, language),
+						title: cell.title,
+						status: cell.status,
+						durationMs: cell.durationMs,
+						output: [
+							...evalOutputNodes(
+								cell.output,
+								cell.hasMarkdown === true,
+								cell.status === "running",
+								cell.status === "error",
+							),
+							...(cell.statusEvents ?? []).map(describeStatusEvent),
+							...(i === cellResults.length - 1 ? jsonNodes : []),
+						],
+					},
+					i,
+					cellResults.length,
+				);
+			});
+		} else {
+			// No per-cell results (older details): the call's cells, with the whole output under the last.
+			const argCells = getRenderCells(args);
+			const languages = details?.languages ?? (details?.language ? [details.language] : []);
+			head = evalToolHead(
+				argCells[0]?.title,
+				argCells.length > 0 ? argCells.map(cell => cell.language) : languages,
+				argCells.length,
+				details,
+			);
+			const rawOutput = options.renderContext?.output ?? resultText(result).trimEnd();
+			const output = [
+				...evalOutputNodes(
+					stripOutputNotice(rawOutput, details?.meta).trimEnd(),
+					false,
+					isPartial,
+					result.isError === true,
+				),
+				...(details?.statusEvents ?? []).map(describeStatusEvent),
+				...jsonNodes,
+			];
+			cells =
+				argCells.length > 0
+					? argCells.map((cell, i) =>
+							evalCellSection(
+								{
+									...cell,
+									status: isPartial ? "running" : result.isError ? "error" : "complete",
+									output: i === argCells.length - 1 ? output : undefined,
+								},
+								i,
+								argCells.length,
+							),
+						)
+					: output;
+		}
+		return {
+			tool: head,
+			body: compact<NativeChild>([...cells, footer]),
+			preview: { lines: previewLines },
 		};
 	},
 

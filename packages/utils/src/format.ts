@@ -127,3 +127,8 @@ export function pluralize(label: string, count: number): string {
 export function formatPercent(ratio: number): string {
 	return `${(ratio * 100).toFixed(1)}%`;
 }
+
+/** Round premium-request counters without losing legitimate fractional requests. */
+export function normalizePremiumRequests(value: number): number {
+	return Math.round((value + Number.EPSILON) * 100) / 100;
+}

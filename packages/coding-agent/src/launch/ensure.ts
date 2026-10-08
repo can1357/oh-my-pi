@@ -54,20 +54,28 @@ export async function waitReady(
 	}
 }
 
-/** Best-effort stop before replacing a wedged or endpoint-less daemon. */
+/**
+ * Best-effort stop before replacing a wedged or endpoint-less daemon. Resolves
+ * with the broker's post-stop snapshot when one arrived, so callers that need
+ * proof the daemon actually ended can require a terminal state; a rejected,
+ * unanswered, or aborted stop resolves `undefined` — like the other quiet
+ * helpers here, the RPC failure is logged and absorbed rather than thrown.
+ */
 export async function stopQuietly(
 	client: DaemonBrokerClient,
 	name: string,
 	label: string,
 	signal?: AbortSignal,
-): Promise<void> {
+): Promise<DaemonSnapshot | undefined> {
 	try {
-		await client.request({ op: "stop", name, timeoutMs: STOP_TIMEOUT_MS }, signal);
+		const result = await client.request({ op: "stop", name, timeoutMs: STOP_TIMEOUT_MS }, signal);
+		return result.op === "stop" ? result.daemon : undefined;
 	} catch (error) {
 		throwIfAborted(signal);
 		logger.debug(`${label} stop failed`, {
 			name,
 			error: error instanceof Error ? error.message : String(error),
 		});
+		return undefined;
 	}
 }

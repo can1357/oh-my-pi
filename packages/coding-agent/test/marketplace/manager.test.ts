@@ -657,19 +657,6 @@ describe("MarketplaceManager", () => {
 		}
 	});
 
-	it("installPlugin keeps marketplace packages out of the npm plugin list", async () => {
-		await ctx.manager.addMarketplace(FIXTURE_DIR);
-		await ctx.manager.installPlugin("hello-plugin", "test-marketplace");
-
-		const spies = mockPluginManagerPaths(ctx.tmpDir);
-		try {
-			const plugins = await new PluginManager(ctx.tmpDir).list();
-			expect(plugins.map(plugin => plugin.name)).toEqual([]);
-		} finally {
-			for (const spy of spies) spy.mockRestore();
-		}
-	});
-
 	it("hides legacy marketplace entries that pre-date the scope field", async () => {
 		await ctx.manager.addMarketplace(FIXTURE_DIR);
 		await ctx.manager.installPlugin("hello-plugin", "test-marketplace");

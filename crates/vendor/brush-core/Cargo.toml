@@ -125,6 +125,7 @@ version = "0.1.44"
 
 [dependencies.tokio-util]
 version = "0.7.16"
+features = ["rt"]
 
 [dev-dependencies.anyhow]
 version = "1.0.102"
@@ -180,6 +181,9 @@ features = [
     "term",
     "user",
 ]
+
+[target."cfg(unix)".dependencies.rlimit]
+version = "0.11.0"
 
 [target."cfg(unix)".dependencies.terminfo]
 version = "0.9.0"

@@ -16,7 +16,7 @@ import type {
 	TextEdit,
 	WorkspaceEdit,
 } from "./types";
-import { uriToFile } from "./utils";
+import { readTextFromDisk, uriToFile } from "./utils";
 
 // =============================================================================
 // Text Edit Application
@@ -161,7 +161,7 @@ export function flattenWorkspaceTextEdits(edit: WorkspaceEdit): Map<string, Text
  * Edits are applied in reverse order (bottom-to-top) to preserve line/character indices.
  */
 export async function applyTextEdits(filePath: string, edits: TextEdit[]): Promise<void> {
-	const content = await Bun.file(filePath).text();
+	const content = await readTextFromDisk(filePath);
 	const result = applyTextEditsToString(content, edits);
 	await Bun.write(filePath, result);
 }
@@ -198,7 +198,7 @@ export async function applyEditsThenRename(
 	}
 	const prepared: Array<{ filePath: string; original: string; updated: string }> = [];
 	for (const { filePath, edits } of editsByFile.values()) {
-		const original = await Bun.file(filePath).text();
+		const original = await readTextFromDisk(filePath);
 		prepared.push({ filePath, original, updated: applyTextEditsToString(original, edits) });
 	}
 	let attempted = 0;

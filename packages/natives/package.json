@@ -1,6 +1,6 @@
 {
   "name": "@oh-my-pi/pi-natives",
-  "version": "18.3.1",
+  "version": "18.8.5",
   "description": "Native Rust bindings for PDF conversion, audio, WebRTC, grep, clipboard, image processing, syntax highlighting, PTY, and shell operations via N-API",
   "type": "module",
   "homepage": "https://omp.sh",
@@ -37,8 +37,6 @@
     "test": "bun test --parallel",
     "fix": "oxlint --fix --fix-suggestions . && bun run fmt",
     "fmt": "oxfmt --no-error-on-unmatched-pattern 'src/**/*.{ts,tsx}' '{test,bench,examples,scripts}/**/*.ts' '*.ts'",
-    "gen:native": "bun scripts/embed-native.ts",
-    "gen:native:reset": "bun scripts/embed-native.ts --reset",
     "gen:npm": "bun scripts/gen-npm-packages.ts",
     "bench": "bun bench/grep.ts",
     "bench:text": "bun bench/text.ts"
@@ -72,6 +70,11 @@
       "types": "./native/index.d.ts",
       "import": "./native/index.js",
       "default": "./native/index.js"
+    },
+    "./path": {
+      "types": "./native/path.d.ts",
+      "import": "./native/path.js",
+      "default": "./native/path.js"
     },
     "./desktop": {
       "types": "./native/desktop.d.ts",

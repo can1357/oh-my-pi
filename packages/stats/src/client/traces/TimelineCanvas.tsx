@@ -1,17 +1,18 @@
 /**
- * The trace flamegraph: one DPR-scaled canvas with a DOM gutter (track/lane
- * labels, collapse chevrons) and a DOM tooltip. Implements the Chrome
- * DevTools interaction contract: cursor-anchored wheel zoom, drag pan, WASD,
- * fit/focus keys, hover tooltips, click-to-select, double-click-to-zoom.
+ * The trace flamegraph: a DPR-scaled scene canvas with DOM hover/selection
+ * boxes on top, a DOM gutter (track/lane labels, collapse chevrons) and a
+ * DOM tooltip. Implements the Chrome DevTools interaction contract:
+ * cursor-anchored wheel zoom, drag pan, WASD, fit/focus keys, hover tooltips,
+ * click-to-select, double-click-to-zoom.
  */
 
 import { ChevronDown, ChevronRight } from "lucide-react";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { formatDurationMs } from "../data/formatters";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
+import { formatDurationMs, formatInteger } from "../data/formatters";
 import type { TraceMarker, TraceSpan, TraceSpanKind, TraceTrack } from "../types";
-import { useSystemTheme } from "../useSystemTheme";
 import { buildTicks, formatOffset, type TraceScale } from "./time-scale";
-import { TRACE_THEMES, type TraceTheme } from "./trace-colors";
+import { type TraceTheme, useTraceTheme } from "./trace-colors";
 
 export interface TimelineViewport {
 	u0: number;
@@ -23,9 +24,11 @@ export interface TimelineCanvasProps {
 	scale: TraceScale;
 	viewport: TimelineViewport;
 	onViewportChange: (viewport: TimelineViewport) => void;
-	selection: string | null;
+	/** The selected span with its track (resolved by the trace view). */
+	selected: { span: TraceSpan; track: TraceTrack } | null;
 	onSelect: (spanId: string | null) => void;
-	search: string;
+	/** Spans matching the search; `null` when not searching (everything at full opacity). */
+	matchIds: ReadonlySet<string> | null;
 	collapsed: ReadonlySet<string>;
 	onToggleCollapse: (trackId: string) => void;
 	traceStart: number;
@@ -42,6 +45,8 @@ const MIN_SPAN_PX = 2;
 const HIT_SLOP_PX = 4;
 const LABEL_MIN_PX = 56;
 const SPAN_RADIUS = 3;
+/** Opacity of spans that don't match the search. */
+const DIM_ALPHA = 0.3;
 
 const LANE_ORDER: Array<{ kind: TraceSpanKind; label: string }> = [
 	{ kind: "turn", label: "Input" },
@@ -65,6 +70,8 @@ interface TrackBlock {
 	hasChildren: boolean;
 	headerY: number;
 	lanes: LaneRow[];
+	/** Turn spans of the track (start order), for the alternating turn bands. */
+	turnSpans: TraceSpan[];
 	/** Full vertical extent of the block (header top → last lane bottom). */
 	y0: number;
 	y1: number;
@@ -99,18 +106,27 @@ function buildLayout(tracks: TraceTrack[], collapsed: ReadonlySet<string>): Time
 	for (const track of tracks) {
 		if (isHidden(track)) continue;
 		const depth = track.id === "main" ? 0 : track.id.split("/").length;
+		const byKind: Record<TraceSpanKind, TraceSpan[]> = {
+			turn: [],
+			model: [],
+			tool: [],
+			subagent: [],
+			background: [],
+		};
+		for (const span of track.spans) byKind[span.kind].push(span);
 		const block: TrackBlock = {
 			track,
 			depth,
 			hasChildren: hasChildren.has(track.id),
 			headerY: y,
 			lanes: [],
+			turnSpans: byKind.turn,
 			y0: y,
 			y1: y,
 		};
 		y += HEADER_H;
 		for (const { kind, label } of LANE_ORDER) {
-			const spans = track.spans.filter(span => span.kind === kind);
+			const spans = byKind[kind];
 			// Main always shows the core lanes; optional lanes appear when populated.
 			const isCore = kind === "turn" || kind === "model" || kind === "tool";
 			if (spans.length === 0 && !(track.id === "main" && isCore)) continue;
@@ -124,6 +140,47 @@ function buildLayout(tracks: TraceTrack[], collapsed: ReadonlySet<string>): Time
 		y += TRACK_GAP;
 	}
 	return { blocks, lanes, totalHeight: Math.max(y, RULER_H + 48) };
+}
+
+/** Per-lane span positions on the virtual axis, parallel to `LaneRow.spans`. */
+interface LaneAxis {
+	startU: Float64Array;
+	endU: Float64Array;
+	/** Running max of `endU`; monotonic, so the first visible span is a binary search away. */
+	maxEndU: Float64Array;
+}
+
+export function buildLaneAxes(
+	layout: { lanes: ReadonlyArray<{ spans: ReadonlyArray<Pick<TraceSpan, "start" | "end">> }> },
+	scale: Pick<TraceScale, "toU">,
+): LaneAxis[] {
+	return layout.lanes.map(lane => {
+		const n = lane.spans.length;
+		const startU = new Float64Array(n);
+		const endU = new Float64Array(n);
+		const maxEndU = new Float64Array(n);
+		let maxEnd = Number.NEGATIVE_INFINITY;
+		for (let i = 0; i < n; i++) {
+			const span = lane.spans[i];
+			startU[i] = scale.toU(span.start);
+			endU[i] = scale.toU(span.end);
+			maxEnd = Math.max(maxEnd, endU[i]);
+			maxEndU[i] = maxEnd;
+		}
+		return { startU, endU, maxEndU };
+	});
+}
+
+/** First index whose running-max end reaches `u0`: every earlier span ends before the viewport. */
+export function firstVisible(maxEndU: Float64Array, u0: number): number {
+	let lo = 0;
+	let hi = maxEndU.length;
+	while (lo < hi) {
+		const mid = (lo + hi) >>> 1;
+		if (maxEndU[mid] < u0) lo = mid + 1;
+		else hi = mid;
+	}
+	return lo;
 }
 
 interface SpanHit {
@@ -148,10 +205,10 @@ interface MarkerHit {
 
 type Hit = SpanHit | MarkerHit;
 
-interface HoverState {
-	hit: Hit;
-	clientX: number;
-	clientY: number;
+function sameTarget(a: Hit | null, b: Hit | null): boolean {
+	if (a === null || b === null) return a === b;
+	if (a.kind === "span") return b.kind === "span" && a.span === b.span;
+	return b.kind === "marker" && a.marker === b.marker;
 }
 
 export function TimelineCanvas({
@@ -159,19 +216,24 @@ export function TimelineCanvas({
 	scale,
 	viewport,
 	onViewportChange,
-	selection,
+	selected,
 	onSelect,
-	search,
+	matchIds,
 	collapsed,
 	onToggleCollapse,
 	traceStart,
 }: TimelineCanvasProps) {
-	const theme = useSystemTheme();
-	const colors = TRACE_THEMES[theme];
+	const colors = useTraceTheme();
 	const containerRef = useRef<HTMLDivElement>(null);
 	const canvasRef = useRef<HTMLCanvasElement>(null);
+	const tooltipRef = useRef<HTMLDivElement>(null);
 	const [canvasWidth, setCanvasWidth] = useState(800);
-	const [hover, setHover] = useState<HoverState | null>(null);
+	// Hovered target only; the pointer position lives in a ref and moves the
+	// tooltip directly, so moving within one span doesn't re-render.
+	const [hover, setHover] = useState<Hit | null>(null);
+	const hoverRef = useRef<Hit | null>(null);
+	hoverRef.current = hover;
+	const pointerRef = useRef({ clientX: 0, clientY: 0 });
 	const hitsRef = useRef<Hit[]>([]);
 	const dragRef = useRef<{ pointerId: number; lastX: number; moved: boolean } | null>(null);
 	const hoverXRef = useRef<number | null>(null);
@@ -182,6 +244,7 @@ export function TimelineCanvas({
 	viewportRef.current = viewport;
 
 	const layout = useMemo(() => buildLayout(tracks, collapsed), [tracks, collapsed]);
+	const laneAxes = useMemo(() => buildLaneAxes(layout, scale), [layout, scale]);
 
 	// Observe container width (gutter excluded).
 	useEffect(() => {
@@ -288,6 +351,16 @@ export function TimelineCanvas({
 		return null;
 	}, []);
 
+	// Fixed positioning escapes the scroll frame's clipping; clamp to the window.
+	const positionTooltip = useCallback(() => {
+		const tooltip = tooltipRef.current;
+		if (!tooltip) return;
+		const { clientX, clientY } = pointerRef.current;
+		const left = Math.min(clientX + 14, window.innerWidth - 320);
+		const top = clientY + 16 > window.innerHeight - 140 ? clientY - 120 : clientY + 16;
+		tooltip.style.transform = `translate(${left}px, ${top}px)`;
+	}, []);
+
 	const handlePointerDown = (event: React.PointerEvent<HTMLCanvasElement>) => {
 		event.currentTarget.setPointerCapture(event.pointerId);
 		dragRef.current = { pointerId: event.pointerId, lastX: event.clientX, moved: false };
@@ -309,8 +382,10 @@ export function TimelineCanvas({
 			setHover(null);
 			return;
 		}
+		pointerRef.current = { clientX: event.clientX, clientY: event.clientY };
 		const hit = hitAt(event.clientX, event.clientY);
-		setHover(hit ? { hit, clientX: event.clientX, clientY: event.clientY } : null);
+		if (sameTarget(hit, hoverRef.current)) positionTooltip();
+		else setHover(hit);
 	};
 
 	const handlePointerUp = (event: React.PointerEvent<HTMLCanvasElement>) => {
@@ -329,9 +404,10 @@ export function TimelineCanvas({
 
 	const selectSibling = useCallback(
 		(direction: 1 | -1) => {
-			if (!selection) return;
+			const selectedId = selected?.span.id;
+			if (!selectedId) return;
 			for (const lane of layout.lanes) {
-				const index = lane.spans.findIndex(span => span.id === selection);
+				const index = lane.spans.findIndex(span => span.id === selectedId);
 				if (index === -1) continue;
 				const next = lane.spans[index + direction];
 				if (!next) return;
@@ -345,7 +421,7 @@ export function TimelineCanvas({
 				return;
 			}
 		},
-		[selection, layout, onSelect, scale, viewport, onViewportChange, clampViewport],
+		[selected, layout, onSelect, scale, viewport, onViewportChange, clampViewport],
 	);
 
 	const handleKeyDown = (event: React.KeyboardEvent<HTMLCanvasElement>) => {
@@ -371,12 +447,9 @@ export function TimelineCanvas({
 				onViewportChange({ u0: scale.domain[0], u1: scale.domain[1] });
 				break;
 			case "f":
-			case "F": {
-				if (!selection) break;
-				const selected = tracks.flatMap(track => track.spans).find(s => s.id === selection);
-				if (selected) zoomToSpan(selected);
+			case "F":
+				if (selected) zoomToSpan(selected.span);
 				break;
-			}
 			case "Escape":
 				onSelect(null);
 				break;
@@ -397,26 +470,33 @@ export function TimelineCanvas({
 		canvasRef.current?.focus({ preventScroll: true });
 	}, []);
 
-	// Draw.
+	// Scene: everything except hover/selection, so pointer moves never repaint it.
 	useEffect(() => {
 		const canvas = canvasRef.current;
 		if (!canvas) return;
 		const raf = requestAnimationFrame(() => {
-			draw(canvas, layout, scale, viewport, colors, {
-				width: canvasWidth,
-				selection,
-				hoverId: hover?.hit.kind === "span" ? hover.hit.span.id : null,
-				search,
-				hits: hitsRef,
-			});
+			hitsRef.current = drawScene(canvas, layout, laneAxes, scale, viewport, colors, canvasWidth, matchIds);
 		});
 		return () => cancelAnimationFrame(raf);
-	}, [layout, scale, viewport, colors, canvasWidth, selection, hover, search]);
+	}, [layout, laneAxes, scale, viewport, colors, canvasWidth, matchIds]);
 
-	const tooltip = hover ? renderTooltip(hover, traceStart) : null;
+	// Hover tint + selection outline are DOM boxes over the scene, so pointer
+	// moves never repaint it and need no second full-size bitmap.
+	const hoverBox = hover?.kind === "span" ? placeSpan(hover, layout, scale, viewport, canvasWidth) : null;
+	const selectedBox = selected ? placeSpan(selected, layout, scale, viewport, canvasWidth) : null;
+
+	// A new tooltip target mounts at the latest pointer position.
+	useLayoutEffect(() => {
+		if (hover) positionTooltip();
+	}, [hover, positionTooltip]);
+
+	const tooltip = hover ? renderTooltip(hover, traceStart, tooltipRef) : null;
+	const pixelWidth = Math.floor(canvasWidth * devicePixelRatio);
+	const pixelHeight = Math.floor(layout.totalHeight * devicePixelRatio);
+	const cssSize = { width: canvasWidth, height: layout.totalHeight };
 
 	return (
-		<div ref={containerRef} className="stats-trace-timeline">
+		<div ref={containerRef} className="traces-timeline">
 			{/* Gutter: track/lane labels + collapse chevrons (DOM, not canvas). */}
 			<div style={{ width: GUTTER_W, flexShrink: 0, position: "relative", height: layout.totalHeight }}>
 				{layout.blocks.map(block => (
@@ -443,18 +523,18 @@ export function TimelineCanvas({
 											? `Expand ${block.track.label}`
 											: `Collapse ${block.track.label}`
 									}
-									className="stats-trace-chevron"
+									className="traces-chevron"
 								>
 									{collapsed.has(block.track.id) ? <ChevronRight size={12} /> : <ChevronDown size={12} />}
 								</button>
 							) : (
 								<span style={{ width: 12, flexShrink: 0 }} />
 							)}
-							<span className="stats-trace-gutter-track truncate" style={{ minWidth: 0 }}>
+							<span className="traces-gutter-track truncate" style={{ minWidth: 0 }}>
 								{block.track.label}
 							</span>
 							{block.track.model && (
-								<span className="stats-trace-gutter-model truncate" style={{ flexShrink: 1, minWidth: 0 }}>
+								<span className="traces-gutter-model mono truncate" style={{ flexShrink: 1, minWidth: 0 }}>
 									{block.track.model}
 								</span>
 							)}
@@ -462,7 +542,7 @@ export function TimelineCanvas({
 						{block.lanes.map(lane => (
 							<div
 								key={`${lane.track.id}:${lane.kind}`}
-								className="stats-trace-gutter-lane"
+								className="traces-gutter-lane"
 								style={{ top: lane.y, left: 20 + block.depth * 14, lineHeight: `${LANE_H}px` }}
 							>
 								{lane.label}
@@ -472,37 +552,60 @@ export function TimelineCanvas({
 				))}
 			</div>
 
-			<canvas
-				ref={canvasRef}
-				className="stats-trace-canvas"
-				width={Math.floor(canvasWidth * devicePixelRatio)}
-				height={Math.floor(layout.totalHeight * devicePixelRatio)}
-				style={{ width: canvasWidth, height: layout.totalHeight }}
-				tabIndex={0}
-				role="application"
-				aria-label="Trace timeline. W and S zoom, A and D pan, 0 fits all, F focuses the selection."
-				onPointerDown={handlePointerDown}
-				onPointerMove={handlePointerMove}
-				onPointerUp={handlePointerUp}
-				onPointerLeave={() => {
-					hoverXRef.current = null;
-					setHover(null);
-				}}
-				onDoubleClick={handleDoubleClick}
-				onKeyDown={handleKeyDown}
-			/>
+			<div className="traces-canvas-stack" style={cssSize}>
+				<canvas
+					ref={canvasRef}
+					className="traces-canvas"
+					width={pixelWidth}
+					height={pixelHeight}
+					style={cssSize}
+					tabIndex={0}
+					role="application"
+					aria-label="Trace timeline. W and S zoom, A and D pan, 0 fits all, F focuses the selection."
+					onPointerDown={handlePointerDown}
+					onPointerMove={handlePointerMove}
+					onPointerUp={handlePointerUp}
+					onPointerLeave={() => {
+						hoverXRef.current = null;
+						setHover(null);
+					}}
+					onDoubleClick={handleDoubleClick}
+					onKeyDown={handleKeyDown}
+				/>
+				{hoverBox && hover?.kind === "span" && (
+					<div
+						className="traces-canvas-hover"
+						aria-hidden="true"
+						style={{
+							left: hoverBox.x,
+							top: hoverBox.y,
+							width: hoverBox.w,
+							height: LANE_H,
+							borderRadius: SPAN_RADIUS,
+							opacity: matchIds === null || matchIds.has(hover.span.id) ? 1 : DIM_ALPHA,
+						}}
+					/>
+				)}
+				{selectedBox && selected && (
+					<div
+						className="traces-canvas-selection"
+						aria-hidden="true"
+						style={{
+							left: selectedBox.x - 1,
+							top: selectedBox.y - 1,
+							width: selectedBox.w + 2,
+							height: LANE_H + 2,
+							borderRadius: SPAN_RADIUS,
+							borderColor: colors.selection,
+							opacity: matchIds === null || matchIds.has(selected.span.id) ? 1 : DIM_ALPHA,
+						}}
+					/>
+				)}
+			</div>
 
-			{tooltip}
+			{tooltip && createPortal(tooltip, document.body)}
 		</div>
 	);
-}
-
-interface DrawOptions {
-	width: number;
-	selection: string | null;
-	hoverId: string | null;
-	search: string;
-	hits: React.MutableRefObject<Hit[]>;
 }
 
 /** Rounded span rect, degrading to a plain rect for slivers. */
@@ -512,17 +615,20 @@ function spanPath(ctx: CanvasRenderingContext2D, x: number, y: number, w: number
 	else ctx.rect(x, y, w, h);
 }
 
-function draw(
+/** Paint the scene and return the hit-test boxes, topmost last. */
+function drawScene(
 	canvas: HTMLCanvasElement,
 	layout: TimelineLayout,
+	laneAxes: LaneAxis[],
 	scale: TraceScale,
 	viewport: TimelineViewport,
 	colors: TraceTheme,
-	options: DrawOptions,
-): void {
+	width: number,
+	matchIds: ReadonlySet<string> | null,
+): Hit[] {
+	const nextHits: Hit[] = [];
 	const ctx = canvas.getContext("2d");
-	if (!ctx) return;
-	const { width, selection, hoverId, search, hits } = options;
+	if (!ctx) return nextHits;
 	const height = layout.totalHeight;
 	const dpr = devicePixelRatio;
 	ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
@@ -531,12 +637,10 @@ function draw(
 	const { u0, u1 } = viewport;
 	const uSpan = Math.max(u1 - u0, 1e-9);
 	const toX = (u: number) => ((u - u0) / uSpan) * width;
-	const needle = search.trim().toLowerCase();
-	const nextHits: Hit[] = [];
 
 	// Turn bands: alternating fill between turn boundaries per track.
 	for (const block of layout.blocks) {
-		const turnSpans = block.track.spans.filter(span => span.kind === "turn");
+		const turnSpans = block.turnSpans;
 		for (let i = 0; i < turnSpans.length; i++) {
 			const bandStart = toX(scale.toU(turnSpans[i].start));
 			const bandEnd = i + 1 < turnSpans.length ? toX(scale.toU(turnSpans[i + 1].start)) : width;
@@ -560,7 +664,8 @@ function draw(
 		}
 	}
 
-	// Idle-gap bridges.
+	// Idle-gap bridges and the ruler share the mono label font.
+	ctx.font = `9px ${colors.fontMono}`;
 	for (const gap of scale.gaps) {
 		const x = toX(gap.uMid);
 		if (x < -24 || x > width + 24) continue;
@@ -573,14 +678,12 @@ function draw(
 		ctx.stroke();
 		ctx.restore();
 		ctx.fillStyle = colors.tick;
-		ctx.font = "9px system-ui, sans-serif";
 		ctx.textAlign = "center";
 		ctx.fillText(`⋯ ${formatDurationMs(gap.t1 - gap.t0)}`, x, RULER_H - 4);
 		ctx.textAlign = "left";
 	}
 
 	// Ruler: major ticks get a full-height gridline, minors stay in the ruler.
-	ctx.font = "9px system-ui, sans-serif";
 	for (const tick of buildTicks(scale, u0, u1, width)) {
 		const x = Math.round(toX(tick.u)) + 0.5;
 		ctx.strokeStyle = colors.grid;
@@ -608,26 +711,32 @@ function draw(
 	ctx.lineTo(width, RULER_H + 0.5);
 	ctx.stroke();
 
-	// Spans per lane.
-	for (const lane of layout.lanes) {
+	// Spans per lane. Labels are the only text from here on.
+	ctx.font = `10px ${colors.fontSans}`;
+	for (let laneIndex = 0; laneIndex < layout.lanes.length; laneIndex++) {
+		const lane = layout.lanes[laneIndex];
+		const { startU, endU, maxEndU } = laneAxes[laneIndex];
 		const isTurnLane = lane.kind === "turn";
-		for (const span of lane.spans) {
-			const uStart = scale.toU(span.start);
+		for (let i = firstVisible(maxEndU, u0); i < lane.spans.length; i++) {
+			const uStart = startU[i];
 			if (uStart > u1) break; // spans sorted by start
-			const uEnd = scale.toU(span.end);
+			const uEnd = endU[i];
 			if (uEnd < u0) continue;
+			const span = lane.spans[i];
 			const x = toX(uStart);
 			const w = Math.max(MIN_SPAN_PX, toX(uEnd) - x);
 			const y = lane.y;
-			const matches = needle === "" || `${span.label} ${span.detail ?? ""}`.toLowerCase().includes(needle);
+			const alpha = matchIds === null || matchIds.has(span.id) ? 1 : DIM_ALPHA;
 			const color = colors.category[span.kind];
 
-			ctx.globalAlpha = matches ? 1 : 0.3;
+			ctx.globalAlpha = alpha;
 			if (isTurnLane) {
 				// Turn ranges read as context, not work: soft fill + solid start cap.
-				ctx.fillStyle = `${color}3a`;
+				ctx.fillStyle = color;
+				ctx.globalAlpha = alpha * 0.23;
 				spanPath(ctx, x, y, w, LANE_H);
 				ctx.fill();
+				ctx.globalAlpha = alpha;
 				ctx.fillStyle = color;
 				ctx.fillRect(x, y, 2, LANE_H);
 			} else {
@@ -636,7 +745,7 @@ function draw(
 				ctx.fill();
 			}
 			if (span.isError) {
-				ctx.fillStyle = `${colors.error}55`;
+				ctx.fillStyle = colors.errorSoft;
 				spanPath(ctx, x, y, w, LANE_H);
 				ctx.fill();
 				ctx.fillStyle = colors.error;
@@ -659,25 +768,12 @@ function draw(
 				ctx.stroke();
 				ctx.restore();
 			}
-			if (hoverId === span.id) {
-				ctx.fillStyle = "rgba(255,255,255,0.16)";
-				spanPath(ctx, x, y, w, LANE_H);
-				ctx.fill();
-			}
-			if (selection === span.id) {
-				ctx.strokeStyle = colors.selection;
-				ctx.lineWidth = 1.5;
-				spanPath(ctx, x - 1, y - 1, w + 2, LANE_H + 2);
-				ctx.stroke();
-				ctx.lineWidth = 1;
-			}
 			if (w > LABEL_MIN_PX) {
 				ctx.save();
 				ctx.beginPath();
 				ctx.rect(x + 3, y, w - 6, LANE_H);
 				ctx.clip();
 				ctx.fillStyle = isTurnLane ? colors.tick : colors.spanText;
-				ctx.font = "10px system-ui, sans-serif";
 				ctx.fillText(span.label, x + 5, y + LANE_H - 5);
 				ctx.restore();
 			}
@@ -706,63 +802,69 @@ function draw(
 		}
 	}
 
-	hits.current = nextHits;
+	return nextHits;
 }
 
-function renderTooltip(hover: HoverState, traceStart: number) {
-	// Fixed positioning escapes the scroll frame's clipping; clamp to the window.
-	const left = Math.min(hover.clientX + 14, window.innerWidth - 320);
-	const top = hover.clientY + 16 > window.innerHeight - 140 ? hover.clientY - 120 : hover.clientY + 16;
-	const style: React.CSSProperties = {
-		position: "fixed",
-		left,
-		top,
-		zIndex: 60,
-		maxWidth: 300,
-		pointerEvents: "none",
-		background: "var(--surface-2)",
-		border: "1px solid var(--border-strong)",
-		borderRadius: 6,
-		padding: "7px 10px",
-		fontSize: 11,
-		lineHeight: 1.5,
-		boxShadow: "0 1px 2px rgba(0,0,0,0.2), 0 4px 16px rgba(0,0,0,0.25)",
-	};
+interface SpanBox {
+	x: number;
+	y: number;
+	w: number;
+}
 
-	if (hover.hit.kind === "marker") {
-		const { marker } = hover.hit;
+/** Scene geometry of a drawn span, or null when it isn't on screen. */
+function placeSpan(
+	{ span, track }: { span: TraceSpan; track: TraceTrack },
+	layout: TimelineLayout,
+	scale: TraceScale,
+	viewport: TimelineViewport,
+	width: number,
+): SpanBox | null {
+	const { u0, u1 } = viewport;
+	const uStart = scale.toU(span.start);
+	const uEnd = scale.toU(span.end);
+	if (uStart > u1 || uEnd < u0) return null;
+	const lane = layout.lanes.find(candidate => candidate.track === track && candidate.kind === span.kind);
+	if (!lane) return null;
+	const uSpan = Math.max(u1 - u0, 1e-9);
+	const x = ((uStart - u0) / uSpan) * width;
+	const xEnd = ((uEnd - u0) / uSpan) * width;
+	return { x, y: lane.y, w: Math.max(MIN_SPAN_PX, xEnd - x) };
+}
+
+function renderTooltip(hover: Hit, traceStart: number, ref: React.RefObject<HTMLDivElement | null>) {
+	// Positioned by `transform` from the pointer handler (see positionTooltip).
+	const style: React.CSSProperties = { left: 0, top: 0 };
+
+	if (hover.kind === "marker") {
+		const { marker } = hover;
 		return (
-			<div style={style}>
-				<div className="stats-font-medium stats-text-primary">{marker.label}</div>
-				<div className="stats-text-muted">
+			<div ref={ref} className="traces-tooltip" style={style}>
+				<div className="traces-tooltip-title">{marker.label}</div>
+				<div className="muted num">
 					{new Date(marker.time).toLocaleTimeString()} ({formatOffset(marker.time - traceStart)})
 				</div>
 			</div>
 		);
 	}
 
-	const { span } = hover.hit;
+	const { span } = hover;
 	return (
-		<div style={style}>
-			<div className="stats-font-medium stats-text-primary truncate">{span.label}</div>
-			<div className="stats-text-muted">
+		<div ref={ref} className="traces-tooltip" style={style}>
+			<div className="traces-tooltip-title truncate">{span.label}</div>
+			<div className="muted num">
 				{formatDurationMs(span.end - span.start)} · {new Date(span.start).toLocaleTimeString()} (
 				{formatOffset(span.start - traceStart)}){span.unterminated ? " · unterminated" : ""}
 			</div>
 			{span.kind === "model" && (
-				<div className="stats-text-muted">
-					{span.tokens !== undefined && <>{span.tokens.toLocaleString()} tok</>}
+				<div className="muted num">
+					{span.tokens !== undefined && <>{formatInteger(span.tokens)} tok</>}
 					{span.cost !== undefined && <> · ${span.cost.toFixed(4)}</>}
 					{span.ttft !== undefined && <> · TTFT {formatDurationMs(span.ttft)}</>}
 					{span.isError && <> · error</>}
 				</div>
 			)}
-			{span.kind === "subagent" && span.model && <div className="stats-text-muted">{span.model}</div>}
-			{span.detail && (
-				<div className="stats-text-secondary" style={{ wordBreak: "break-word" }}>
-					{span.detail}
-				</div>
-			)}
+			{span.kind === "subagent" && span.model && <div className="muted num">{span.model}</div>}
+			{span.detail && <div className="traces-tooltip-detail">{span.detail}</div>}
 		</div>
 	);
 }

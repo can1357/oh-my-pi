@@ -70,6 +70,27 @@ describe("applyEditsThenRename", () => {
 		expect(await Bun.file(dest).exists()).toBe(false);
 	});
 
+	it.skipIf(process.platform === "win32")(
+		"rejects a device reference before rewriting earlier references",
+		async () => {
+			const dest = path.join(dir, "renamed.ts");
+			await expect(
+				applyEditsThenRename(
+					[
+						{ filePath: ref, edits: importEdit },
+						{ filePath: "/dev/null", edits: [] },
+					],
+					source,
+					dest,
+				),
+			).rejects.toThrow(/not a regular file or directory/);
+
+			expect(await Bun.file(ref).text()).toBe(refBefore);
+			expect(await Bun.file(source).exists()).toBe(true);
+			expect(await Bun.file(dest).exists()).toBe(false);
+		},
+	);
+
 	it("validates later edits before rewriting earlier references", async () => {
 		const second = path.join(dir, "second.ts");
 		await Bun.write(second, refBefore);

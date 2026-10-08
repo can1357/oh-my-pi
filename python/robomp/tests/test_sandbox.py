@@ -2,9 +2,12 @@ from __future__ import annotations
 
 import os
 import platform
+import shlex
+import shutil
 import signal
 import stat
 import subprocess
+import tempfile
 import threading
 from pathlib import Path
 from types import SimpleNamespace
@@ -1514,15 +1517,17 @@ def test_run_git_kills_hung_child(tmp_path: Path, monkeypatch: pytest.MonkeyPatc
     timeout."""
     from robomp.git_ops import GitCommandError, _run_git
 
+    sleep = shutil.which("sleep")
+    assert sleep is not None
+
     fakebin = tmp_path / "bin"
     fakebin.mkdir()
     fake_git = fakebin / "git"
-    # Use `exec /bin/sleep 30` so the kill from `subprocess.run`'s timeout
-    # actually terminates the wait — `sh` with a non-exec `sleep` would
-    # keep the parent alive on SIGTERM, and the absolute path means the
-    # shim doesn't depend on PATH (we point PATH at fakebin so `git`
-    # itself resolves to our shim).
-    fake_git.write_text("#!/bin/sh\nexec /bin/sleep 30\n")
+    # Use `exec` with an absolute path so the kill from `subprocess.run`'s
+    # timeout actually terminates the wait — `sh` with a non-exec `sleep`
+    # would keep the parent alive on SIGTERM, and the shim must not depend on
+    # PATH (we point PATH at fakebin so `git` itself resolves to our shim).
+    fake_git.write_text(f"#!/bin/sh\nexec {shlex.quote(sleep)} 30\n")
     fake_git.chmod(0o755)
     monkeypatch.setenv("PATH", str(fakebin))
 
@@ -1571,7 +1576,7 @@ def _partial_clone_upstream(tmp_path: Path) -> Path:
 
 def _commit_new_blob_upstream(upstream: Path, tmp_path: Path, *, path: str, content: str, ref: str = "main") -> str:
     """Add a fresh blob upstream and return the new commit SHA."""
-    contrib = tmp_path / f"contrib-{path.replace('/', '_')}"
+    contrib = Path(tempfile.mkdtemp(dir=tmp_path, prefix=f"contrib-{path.replace('/', '_')}-"))
     _git(["clone", f"file://{upstream}", str(contrib)], cwd=tmp_path)
     (contrib / path).write_text(content, encoding="utf-8")
     _git(["-C", str(contrib), "add", path], cwd=tmp_path)
@@ -1598,10 +1603,11 @@ def _commit_new_blob_upstream(upstream: Path, tmp_path: Path, *, path: str, cont
     return sha
 
 
-def _missing_object_oids(repo: Path, rev: str) -> list[str]:
-    """OIDs of promisor-deferred objects reachable from ``rev``."""
+def _missing_object_oids(repo: Path, rev: str, *, history: bool = False) -> list[str]:
+    """OIDs of promisor-deferred objects in ``rev``'s tree (or its whole history)."""
+    depth = [] if history else ["-n1"]
     proc = subprocess.run(
-        ["git", "-C", str(repo), "rev-list", "--objects", "--missing=print", rev],
+        ["git", "-C", str(repo), "rev-list", "--objects", "--missing=print", *depth, rev],
         check=True,
         capture_output=True,
         text=True,
@@ -1631,8 +1637,13 @@ def test_fetch_ref_backfills_missing_blobs_into_partial_clone(tmp_path: Path) ->
         cwd=tmp_path,
     )
 
-    # New upstream commit → fresh blob not yet pulled into the pool.
+    # Two new upstream commits → fresh blobs not yet pulled into the pool; the
+    # first one's blob is history only (the tip replaces it).
+    _commit_new_blob_upstream(upstream, tmp_path, path="payload.txt", content="v1 contents here\n")
     _commit_new_blob_upstream(upstream, tmp_path, path="payload.txt", content="v2 contents here\n")
+    v1_blob = subprocess.run(
+        ["git", "hash-object", "--stdin"], input="v1 contents here\n", check=True, capture_output=True, text=True
+    ).stdout.strip()
 
     # Pool refresh mirrors `SandboxManager.ensure_clone` → inherits filter.
     git_fetch_prune(pool, token=None)
@@ -1646,11 +1657,14 @@ def test_fetch_ref_backfills_missing_blobs_into_partial_clone(tmp_path: Path) ->
     assert "partialclonefilter = blob:none" in cfg_before
     assert "promisor = true" in cfg_before
 
-    # The fix: fetch_ref backfills every reachable blob in a single call.
+    # The fix: fetch_ref backfills the tip tree's blobs in a single call…
     git_fetch_ref(pool, "main", token=None)
 
     missing_after = _missing_object_oids(pool, "origin/main")
     assert missing_after == [], f"fetch_ref left missing objects: {missing_after}"
+    # …and only those: re-downloading history (the old `--refetch`) cost a
+    # full pack of the repo and minutes of index-pack CPU on every task.
+    assert v1_blob in _missing_object_oids(pool, "origin/main", history=True)
 
     # And the partial-clone config is intact — `fetch_prune` stays cheap on
     # the next pool refresh; only the explicit pre-checkout fetch eagerly

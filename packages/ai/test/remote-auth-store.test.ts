@@ -161,6 +161,74 @@ describe("RemoteAuthCredentialStore + AuthStorage integration", () => {
 		remoteStore.close();
 	});
 
+	test.each([
+		["logout", undefined],
+		["re-login", "server-access-relogin"],
+	] as const)("a refresh reply delayed past a broker %s cannot overwrite the newer state", async (_, relogin) => {
+		vi.spyOn(oauthUtils, "refreshOAuthToken").mockResolvedValue({
+			access: "server-access-rotated",
+			refresh: "server-refresh-rotated",
+			expires: Date.now() + 120_000,
+			accountId: "account-1",
+			email: "a@example.com",
+		});
+		const brokerClient = new AuthBrokerClient({ url: handle!.url, token });
+		const initial = await brokerClient.fetchSnapshot();
+		if (initial.status !== 200) throw new Error("expected snapshot");
+		const entry = initial.snapshot.credentials[0];
+		if (entry?.credential.type !== "oauth") throw new Error("expected OAuth credential");
+		const streaming = Promise.withResolvers<void>();
+		const remoteStore = new RemoteAuthCredentialStore({
+			client: brokerClient,
+			initialSnapshot: initial.snapshot,
+			onSnapshot: () => streaming.resolve(),
+		});
+		const replyParked = Promise.withResolvers<void>();
+		const releaseReply = Promise.withResolvers<void>();
+		const refresh = brokerClient.refreshCredential.bind(brokerClient);
+		vi.spyOn(brokerClient, "refreshCredential").mockImplementation(async (...args) => {
+			const reply = await refresh(...args);
+			replyParked.resolve();
+			await releaseReply.promise;
+			return reply;
+		});
+		const otherClient = new AuthBrokerClient({ url: handle!.url, token });
+		const accessTokens = () =>
+			remoteStore
+				.listAuthCredentials("anthropic")
+				.map(row => row.credential.type === "oauth" && row.credential.access);
+		const expected = relogin ? [relogin] : [];
+		try {
+			await streaming.promise;
+			const outcome = remoteStore.refreshOAuthCredential("anthropic", entry.id, entry.credential).then(
+				credential => credential.access,
+				() => "rejected",
+			);
+			await replyParked.promise;
+			if (relogin) {
+				await otherClient.uploadCredential("anthropic", {
+					type: "oauth",
+					access: relogin,
+					refresh: "server-refresh-relogin",
+					expires: Date.now() + 120_000,
+					accountId: "account-1",
+					email: "a@example.com",
+				});
+			} else {
+				await otherClient.disableCredential(entry.id, "logout");
+			}
+			await remoteStore.refreshSnapshot();
+			expect(accessTokens()).toEqual(expected);
+
+			releaseReply.resolve();
+			expect(await outcome).toBe(relogin ?? "rejected");
+			expect(accessTokens()).toEqual(expected);
+		} finally {
+			releaseReply.resolve();
+			remoteStore.close();
+		}
+	});
+
 	test("invalidated OAuth tokens disable the remote row and rotate to a sibling", async () => {
 		await serverStore!.upsertAuthCredential("anthropic", {
 			type: "oauth",
@@ -195,7 +263,7 @@ describe("RemoteAuthCredentialStore + AuthStorage integration", () => {
 			credentialId: first.credentialId,
 		});
 
-		expect(rotated).toBe(true);
+		expect(rotated.switched).toBe(true);
 		expect(serverStore!.listAuthCredentials("anthropic").map(row => row.id)).not.toContain(first.credentialId);
 		const next = await clientStorage.oauth.access("anthropic", "invalidated-session");
 		expect(next?.credentialId).not.toBe(first.credentialId);
@@ -755,14 +823,116 @@ describe("RemoteAuthCredentialStore + AuthStorage integration", () => {
 		}
 	});
 
+	test("hands a provider's lone usage report only to a credential its identity cannot contradict", async () => {
+		// Bob's fetch succeeded and Alice's failed, so the aggregate holds one
+		// Antigravity report. The shared project must not give Alice Bob's
+		// exhausted pool, and her header overlay must not land on his row.
+		const brokerClient = new AuthBrokerClient({ url: "http://127.0.0.1:9", token: "unused" });
+		const now = Date.now();
+		const projectId = "shared-project";
+		const weeklyLimit = (usedFraction: number): UsageLimit => ({
+			id: "google-antigravity:weekly",
+			label: "Weekly",
+			scope: { provider: "google-antigravity", projectId, windowId: "weekly" },
+			window: { id: "weekly", label: "Weekly" },
+			amount: { usedFraction, unit: "percent" },
+			status: usedFraction >= 1 ? "exhausted" : "ok",
+		});
+		const bobReport: UsageReport = {
+			provider: "google-antigravity",
+			fetchedAt: now,
+			limits: [weeklyLimit(1)],
+			metadata: { email: "bob@example.com", projectId },
+		};
+		// Lone reports stay usable when they share no identity field with the
+		// credential, or match one Gemini copied verbatim into a limit scope.
+		const cursorReport: UsageReport = {
+			provider: "cursor",
+			fetchedAt: now,
+			limits: [],
+			metadata: { email: "carol@example.com" },
+		};
+		const geminiReport: UsageReport = {
+			provider: "google-gemini-cli",
+			fetchedAt: now,
+			limits: [
+				{
+					id: "google-gemini-cli:pro",
+					label: "Pro",
+					scope: { provider: "google-gemini-cli", accountId: " account-dave " },
+					amount: { usedFraction: 0.2, unit: "percent" },
+				},
+			],
+			metadata: { currentTierId: "standard-tier" },
+		};
+		vi.spyOn(brokerClient, "fetchUsage").mockResolvedValue({
+			generatedAt: now,
+			reports: [bobReport, cursorReport, geminiReport],
+		});
+		const remoteStore = new RemoteAuthCredentialStore({
+			client: brokerClient,
+			streamSnapshots: false,
+			initialSnapshot: {
+				generation: 1,
+				generatedAt: now,
+				serverNowMs: now,
+				refresher: { enabled: false, intervalMs: 0, skewMs: 0, nextSweepInMs: Number.MAX_SAFE_INTEGER },
+				credentials: [],
+			},
+		});
+		const credential = (identity: { email?: string; accountId?: string; projectId?: string }) => ({
+			type: "oauth" as const,
+			access: `remote-access-${identity.email ?? "anonymous"}`,
+			refresh: REMOTE_REFRESH_SENTINEL,
+			expires: now + 120_000,
+			...identity,
+		});
+		const alice = credential({ email: "alice@example.com", projectId });
+		try {
+			expect(await remoteStore.getUsageReport("google-antigravity", alice)).toBeNull();
+			const bob = await remoteStore.getUsageReport(
+				"google-antigravity",
+				credential({ email: "bob@example.com", projectId }),
+			);
+			expect(bob?.metadata?.email).toBe("bob@example.com");
+			const cursor = await remoteStore.getUsageReport("cursor", credential({}));
+			expect(cursor?.metadata?.email).toBe("carol@example.com");
+			for (const dave of [
+				{ email: "dave@example.com" },
+				{ email: "dave@example.com", accountId: " account-dave " },
+			]) {
+				const gemini = await remoteStore.getUsageReport("google-gemini-cli", credential(dave));
+				expect(gemini?.metadata?.currentTierId).toBe("standard-tier");
+			}
+
+			const aliceOverlay: UsageReport = {
+				provider: "google-antigravity",
+				fetchedAt: now,
+				limits: [weeklyLimit(0.1)],
+				metadata: { email: "alice@example.com", projectId },
+			};
+			expect(remoteStore.ingestUsageReport("google-antigravity", alice, aliceOverlay)).toBe(true);
+			const antigravityRows = (await remoteStore.fetchUsageReports())
+				?.filter(report => report.provider === "google-antigravity")
+				.map(report => [report.metadata?.email, requireLimit(report, "google-antigravity:weekly").status])
+				.toSorted();
+			expect(antigravityRows).toEqual([
+				["alice@example.com", "ok"],
+				["bob@example.com", "exhausted"],
+			]);
+		} finally {
+			remoteStore.close();
+		}
+	});
+
 	test("applies block upserts before broker acknowledgement and retains them when persistence is rejected", async () => {
 		const futureBlock = Date.now() + 60_000;
 		const laterBlock = futureBlock + 60_000;
 		const brokerClient = new AuthBrokerClient({ url: "http://127.0.0.1:9", token: "unused" });
 		const fetchSnapshotPending = Promise.withResolvers<FetchSnapshotResult>();
-		const fetchSnapshotSpy = vi.spyOn(brokerClient, "fetchSnapshot").mockReturnValue(fetchSnapshotPending.promise);
+		vi.spyOn(brokerClient, "fetchSnapshot").mockReturnValue(fetchSnapshotPending.promise);
 		const upsertPending = Promise.withResolvers<CredentialBlockResponse>();
-		const upsertSpy = vi.spyOn(brokerClient, "upsertCredentialBlock").mockReturnValue(upsertPending.promise);
+		vi.spyOn(brokerClient, "upsertCredentialBlock").mockReturnValue(upsertPending.promise);
 		const remoteStore = new RemoteAuthCredentialStore({
 			client: brokerClient,
 			streamSnapshots: false,
@@ -796,7 +966,6 @@ describe("RemoteAuthCredentialStore + AuthStorage integration", () => {
 		try {
 			expect(remoteStore.getCredentialBlock(7, "anthropic:oauth", "tier:fable")).toBe(futureBlock);
 
-			fetchSnapshotSpy.mockClear();
 			remoteStore.upsertCredentialBlock({
 				credentialId: 7,
 				providerKey: "anthropic:oauth",
@@ -805,19 +974,65 @@ describe("RemoteAuthCredentialStore + AuthStorage integration", () => {
 			});
 
 			expect(remoteStore.getCredentialBlock(7, "anthropic:oauth", "tier:fable")).toBe(laterBlock);
-			expect(upsertSpy).toHaveBeenCalledWith(7, {
-				providerKey: "anthropic:oauth",
-				blockScope: "tier:fable",
-				blockedUntilMs: laterBlock,
-			});
-			remoteStore.deleteCredentialBlock(7, "anthropic:oauth", "tier:fable");
-			expect(remoteStore.getCredentialBlock(7, "anthropic:oauth", "tier:fable")).toBe(laterBlock);
 			expect(remoteStore.getCredentialBlock(7, "anthropic:oauth", "shared")).toBe(futureBlock);
 			upsertPending.reject(new Error("500 persistent credential block store unavailable"));
 			await upsertPending.promise.catch(() => {});
 			await Promise.resolve();
-			expect(fetchSnapshotSpy).not.toHaveBeenCalled();
 			expect(remoteStore.getCredentialBlock(7, "anthropic:oauth", "tier:fable")).toBe(laterBlock);
+		} finally {
+			remoteStore.close();
+		}
+	});
+	test("keeps an unacknowledged block across broker snapshots until the broker reports it", async () => {
+		const blockedUntilMs = Date.now() + 60_000;
+		const brokerClient = new AuthBrokerClient({ url: "http://127.0.0.1:9", token: "unused" });
+		const entry = {
+			id: 7,
+			provider: "anthropic",
+			credential: {
+				type: "oauth" as const,
+				access: "remote-access",
+				refresh: REMOTE_REFRESH_SENTINEL,
+				expires: blockedUntilMs,
+				accountId: "remote-account",
+				email: "remote@example.com",
+			},
+			identityKey: "email:remote@example.com",
+			rotatesInMs: null,
+		};
+		const block = { providerKey: "anthropic:oauth", blockScope: "", blockedUntilMs, updatedAtMs: Date.now() };
+		let incoming: SnapshotResponse = {
+			generation: 1,
+			generatedAt: Date.now(),
+			serverNowMs: Date.now(),
+			refresher: { enabled: false, intervalMs: 0, skewMs: 0, nextSweepInMs: Number.MAX_SAFE_INTEGER },
+			credentials: [entry],
+		};
+		vi.spyOn(brokerClient, "fetchSnapshot").mockImplementation(async () => ({
+			status: 200,
+			generation: incoming.generation,
+			snapshot: incoming,
+		}));
+		vi.spyOn(brokerClient, "upsertCredentialBlock").mockRejectedValue(new Error("broker write unavailable"));
+		const remoteStore = new RemoteAuthCredentialStore({
+			client: brokerClient,
+			streamSnapshots: false,
+			initialSnapshot: incoming,
+		});
+		try {
+			remoteStore.upsertCredentialBlock({ credentialId: 7, ...block });
+			await new Promise<void>(resolve => setImmediate(resolve));
+			// The failed write never reached the broker, whose snapshot lacks the row.
+			await remoteStore.refreshSnapshot();
+			expect(remoteStore.getCredentialBlock(7, block.providerKey, "")).toBe(blockedUntilMs);
+
+			// Once the broker reports the row it is authoritative, including a later
+			// deletion by a sibling that redeemed a reset.
+			incoming = { ...incoming, generation: 2, credentials: [{ ...entry, blocks: [block] }] };
+			await remoteStore.refreshSnapshot();
+			incoming = { ...incoming, generation: 3, credentials: [entry] };
+			await remoteStore.refreshSnapshot();
+			expect(remoteStore.getCredentialBlock(7, block.providerKey, "")).toBeUndefined();
 		} finally {
 			remoteStore.close();
 		}
@@ -1126,6 +1341,215 @@ describe("RemoteAuthCredentialStore + AuthStorage integration", () => {
 		clientStorage.close();
 	});
 
+	test.each(["", "tier:fable"])("scoped block deletion removes only the exact broker row (%s)", async blockScope => {
+		const credential = serverStore!.listAuthCredentials("anthropic")[0];
+		if (!credential) throw new Error("expected credential");
+		const providerKey = "anthropic:oauth";
+		const scopes = ["", "tier:fable", "model-account-policy:claude-test"];
+		const blockedUntilMs = Date.now() + 60_000;
+		for (const scope of scopes) {
+			serverStorage!.blocks.upsert({
+				credentialId: credential.id,
+				providerKey,
+				blockScope: scope,
+				blockedUntilMs,
+			});
+		}
+		const brokerClient = new AuthBrokerClient({ url: handle!.url, token });
+		const initial = await brokerClient.fetchSnapshot();
+		if (initial.status !== 200) throw new Error("expected snapshot");
+		const remoteStore = new RemoteAuthCredentialStore({
+			client: brokerClient,
+			initialSnapshot: initial.snapshot,
+			streamSnapshots: false,
+		});
+		const propagated = Promise.withResolvers<void>();
+		const removeBlock = brokerClient.deleteCredentialBlock.bind(brokerClient);
+		vi.spyOn(brokerClient, "deleteCredentialBlock").mockImplementation(async (...args) => {
+			try {
+				return await removeBlock(...args);
+			} finally {
+				propagated.resolve();
+			}
+		});
+		try {
+			remoteStore.deleteCredentialBlock(credential.id, providerKey, blockScope);
+			expect(remoteStore.getCredentialBlock(credential.id, providerKey, blockScope)).toBeUndefined();
+			for (const scope of scopes.filter(scope => scope !== blockScope)) {
+				expect(remoteStore.getCredentialBlock(credential.id, providerKey, scope)).toBe(blockedUntilMs);
+			}
+			await propagated.promise;
+			expect(serverStore!.getCredentialBlock(credential.id, providerKey, blockScope)).toBeUndefined();
+			for (const scope of scopes.filter(scope => scope !== blockScope)) {
+				expect(serverStore!.getCredentialBlock(credential.id, providerKey, scope)).toBe(blockedUntilMs);
+			}
+
+			const observer = new AuthBrokerClient({ url: handle!.url, token });
+			const updated = await observer.fetchSnapshot();
+			if (updated.status !== 200) throw new Error("expected snapshot");
+			expect(
+				updated.snapshot.credentials
+					.find(entry => entry.id === credential.id)
+					?.blocks?.map(block => block.blockScope)
+					.sort(),
+			).toEqual(scopes.filter(scope => scope !== blockScope).sort());
+
+			const malformed = await fetch(`${handle!.url}/v1/credential/${credential.id}/block`, {
+				method: "DELETE",
+				headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+				body: JSON.stringify({ providerKey }),
+			});
+			expect(malformed.status).toBe(400);
+			for (const scope of scopes.filter(scope => scope !== blockScope)) {
+				expect(serverStore!.getCredentialBlock(credential.id, providerKey, scope)).toBe(blockedUntilMs);
+			}
+		} finally {
+			remoteStore.close();
+		}
+	});
+
+	test("scoped deletion masks racing old snapshots without hiding newer blocks or failed deletes", async () => {
+		const brokerClient = new AuthBrokerClient({ url: handle!.url, token });
+		const initial = await brokerClient.fetchSnapshot();
+		if (initial.status !== 200) throw new Error("expected snapshot");
+		const entry = initial.snapshot.credentials[0];
+		if (!entry) throw new Error("expected credential");
+		const now = Date.now();
+		const globalBlock = {
+			providerKey: "anthropic:oauth",
+			blockScope: "",
+			blockedUntilMs: now + 60_000,
+			updatedAtMs: now,
+		};
+		const scopedBlock = { ...globalBlock, blockScope: "tier:fable" };
+		let incoming: SnapshotResponse = {
+			...initial.snapshot,
+			credentials: [{ ...entry, blocks: [globalBlock, scopedBlock] }],
+		};
+		const backgroundSnapshot = Promise.withResolvers<FetchSnapshotResult>();
+		vi.spyOn(brokerClient, "fetchSnapshot")
+			.mockReturnValueOnce(backgroundSnapshot.promise)
+			.mockImplementation(async () => ({
+				status: 200,
+				generation: incoming.generation,
+				snapshot: incoming,
+			}));
+		const deletion = Promise.withResolvers<CredentialBlockResponse>();
+		const deleteSpy = vi.spyOn(brokerClient, "deleteCredentialBlock").mockReturnValue(deletion.promise);
+		const remoteStore = new RemoteAuthCredentialStore({
+			client: brokerClient,
+			initialSnapshot: incoming,
+			streamSnapshots: false,
+		});
+		try {
+			remoteStore.deleteCredentialBlock(entry.id, globalBlock.providerKey, "");
+			await remoteStore.refreshSnapshot();
+			expect(remoteStore.getCredentialBlock(entry.id, globalBlock.providerKey, "")).toBeUndefined();
+			expect(remoteStore.getCredentialBlock(entry.id, globalBlock.providerKey, "tier:fable")).toBe(
+				globalBlock.blockedUntilMs,
+			);
+
+			deletion.resolve({ ok: true });
+			await remoteStore.refreshSnapshot();
+			expect(remoteStore.getCredentialBlock(entry.id, globalBlock.providerKey, "")).toBeUndefined();
+
+			incoming = {
+				...incoming,
+				generation: incoming.generation + 1,
+				credentials: [{ ...entry, blocks: [{ ...globalBlock, updatedAtMs: now + 1 }, scopedBlock] }],
+			};
+			await remoteStore.refreshSnapshot();
+			expect(remoteStore.getCredentialBlock(entry.id, globalBlock.providerKey, "")).toBe(globalBlock.blockedUntilMs);
+
+			deleteSpy.mockRejectedValueOnce(new Error("broker write unavailable"));
+			remoteStore.deleteCredentialBlock(entry.id, globalBlock.providerKey, "");
+			await new Promise<void>(resolve => setImmediate(resolve));
+			await remoteStore.refreshSnapshot();
+			expect(remoteStore.getCredentialBlock(entry.id, globalBlock.providerKey, "")).toBe(globalBlock.blockedUntilMs);
+			expect(remoteStore.getCredentialBlock(entry.id, globalBlock.providerKey, "tier:fable")).toBe(
+				globalBlock.blockedUntilMs,
+			);
+		} finally {
+			deletion.resolve({ ok: true });
+			remoteStore.close();
+		}
+	});
+
+	test("invalidated broker usage flights serialize one fresh successor for every caller", async () => {
+		const brokerClient = new AuthBrokerClient({ url: handle!.url, token });
+		const initialSnapshot = await brokerClient.fetchSnapshot();
+		if (initialSnapshot.status !== 200) throw new Error("expected snapshot");
+		const release = Promise.withResolvers<void>();
+		const started = Promise.withResolvers<void>();
+		const stale: UsageReport = {
+			provider: "anthropic",
+			fetchedAt: 1,
+			limits: [],
+			metadata: { accountId: "account-1" },
+		};
+		const fresh: UsageReport = { ...stale, fetchedAt: 2 };
+		let calls = 0;
+		let active = 0;
+		let peak = 0;
+		vi.spyOn(brokerClient, "fetchUsage").mockImplementation(async () => {
+			calls += 1;
+			active += 1;
+			peak = Math.max(peak, active);
+			try {
+				if (calls !== 1) return { generatedAt: 2, reports: [fresh] };
+				started.resolve();
+				await release.promise;
+				return { generatedAt: 1, reports: [stale] };
+			} finally {
+				active -= 1;
+			}
+		});
+		vi.spyOn(brokerClient, "notifyUsageStale").mockResolvedValue({ ok: true });
+		const remoteStore = new RemoteAuthCredentialStore({
+			client: brokerClient,
+			initialSnapshot: initialSnapshot.snapshot,
+			streamSnapshots: false,
+		});
+		try {
+			const initial = remoteStore.fetchUsageReports();
+			await started.promise;
+			await remoteStore.invalidateUsageCache();
+			const refreshed = remoteStore.fetchUsageReports();
+			await remoteStore.invalidateUsageCache();
+			const peer = remoteStore.fetchUsageReports();
+			release.resolve();
+			expect(await Promise.all([initial, refreshed, peer])).toEqual([[fresh], [fresh], [fresh]]);
+			expect(calls).toBe(2);
+			expect(peak).toBe(1);
+		} finally {
+			release.resolve();
+			remoteStore.close();
+		}
+	});
+
+	test("broker connection failure cooldown survives repeated usage invalidations", async () => {
+		const brokerClient = new AuthBrokerClient({ url: handle!.url, token });
+		const initial = await brokerClient.fetchSnapshot();
+		if (initial.status !== 200) throw new Error("expected snapshot");
+		const fetchSpy = vi.spyOn(brokerClient, "fetchUsage").mockRejectedValue(new Error("broker unavailable"));
+		vi.spyOn(brokerClient, "notifyUsageStale").mockResolvedValue({ ok: true });
+		const remoteStore = new RemoteAuthCredentialStore({
+			client: brokerClient,
+			initialSnapshot: initial.snapshot,
+			streamSnapshots: false,
+		});
+		try {
+			expect(await remoteStore.fetchUsageReports()).toBeNull();
+			await remoteStore.invalidateUsageCache();
+			expect(await remoteStore.fetchUsageReports()).toBeNull();
+			await remoteStore.invalidateUsageCache();
+			expect(await remoteStore.fetchUsageReports()).toBeNull();
+			expect(fetchSpy).toHaveBeenCalledTimes(1);
+		} finally {
+			remoteStore.close();
+		}
+	});
+
 	test("remote store cache invalidation notifies broker to invalidate server-side cache", async () => {
 		const brokerClient = new AuthBrokerClient({ url: handle!.url, token });
 		const initialResult = await brokerClient.fetchSnapshot();
@@ -1185,6 +1609,58 @@ describe("RemoteAuthCredentialStore + AuthStorage integration", () => {
 		try {
 			expect(await clientStorage.usage.reports()).toHaveLength(1);
 			await clientStorage.usage.invalidate();
+			expect(await clientStorage.usage.reports()).toEqual([]);
+			expect(fetchSpy).toHaveBeenCalledTimes(2);
+		} finally {
+			clientStorage.close();
+		}
+	});
+
+	test("a client's single-provider usage refresh leaves the broker's other providers cached", async () => {
+		const credential = serverStore!.listAuthCredentials("anthropic")[0];
+		if (credential?.credential.type !== "oauth") throw new Error("expected OAuth credential");
+		serverStore!.updateAuthCredential(credential.id, {
+			...credential.credential,
+			expires: Date.now() + 3_600_000,
+		});
+		await serverStorage!.credentials.reload();
+
+		let calls = 0;
+		const fetchSpy = vi.spyOn(claudeUsage.claudeUsageProvider, "fetchUsage").mockImplementation(async () => {
+			calls += 1;
+			if (calls > 1) return null;
+			return {
+				provider: "anthropic",
+				fetchedAt: Date.now(),
+				limits: [
+					{
+						id: "anthropic:5h",
+						label: "Claude 5 Hour",
+						scope: { provider: "anthropic", windowId: "5h" },
+						amount: { used: 80, limit: 100, unit: "percent" },
+						status: "ok",
+					},
+				],
+				metadata: { accountId: "account-1", email: "a@example.com" },
+			};
+		});
+		const brokerClient = new AuthBrokerClient({ url: handle!.url, token });
+		const initialResult = await brokerClient.fetchSnapshot();
+		if (initialResult.status !== 200) throw new Error("expected snapshot");
+		const remoteStore = new RemoteAuthCredentialStore({
+			client: brokerClient,
+			initialSnapshot: initialResult.snapshot,
+		});
+		const clientStorage = new AuthStorage(remoteStore);
+		await clientStorage.credentials.reload();
+		try {
+			expect(await clientStorage.usage.reports()).toHaveLength(1);
+			await clientStorage.usage.invalidate("openai-codex");
+			const reports = await clientStorage.usage.reports();
+			expect(reports?.map(report => report.provider)).toEqual(["anthropic"]);
+			expect(fetchSpy).toHaveBeenCalledTimes(1);
+
+			await clientStorage.usage.invalidate("anthropic");
 			expect(await clientStorage.usage.reports()).toEqual([]);
 			expect(fetchSpy).toHaveBeenCalledTimes(2);
 		} finally {

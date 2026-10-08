@@ -2,17 +2,23 @@ import type { AssistantMessage, ImageContent, TextContent } from "@oh-my-pi/pi-a
 import { type Component, Container } from "../tui";
 import { Image, type ImageBudget } from "../components/image";
 import { ImageProtocol, TERMINAL } from "../terminal-capabilities";
-import { Markdown, type MarkdownTheme } from "../components/markdown";
+import { Markdown, type MarkdownTheme, rewriteMarkdownLinkDestinations } from "../components/markdown";
 import { Spacer } from "../components/spacer";
 import { Text } from "../components/text";
-import { formatNumber } from "@oh-my-pi/pi-utils";
+import { formatDuration, formatNumber } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
 import { LRUCache } from "@oh-my-pi/pi-utils/lru";
 import type { AssistantThinkingRenderer } from "./extension-types";
-import { ensureThemeSync, getMarkdownTheme, theme } from "../theme";
+import { ensureThemeSync, getMarkdownTheme, getThemeEpoch, theme } from "../theme";
+import { card, col, elapsed, node, span, text } from "../native/describe";
+import { hasTranscriptActions, runTranscriptAction } from "./transcript-actions";
+import type { NativeChild, NativeNode, NativeUiEvent } from "../native/node";
+import { isNativeRendering } from "../native/state";
+import { NativeImageCache } from "../native/blobs";
+import { Memo } from "../native/memo";
 import { EMPTY_LINK_TARGETS, resolveImageOptions } from "../render/render-utils";
 import { WidthAwareText } from "../render";
-import { convertImageToPng } from "./image-loading";
+import { cachedPngConversion, convertImageToPngShared, imagePayloadKey } from "./image-loading";
 import { canonicalizeMessage, formatThinkingForDisplay, hasDisplayableThinking } from "./thinking-display";
 import { resolveAssistantErrorPresentation } from "./transcript-render-helpers";
 import { type CacheInvalidation, CacheInvalidationMarkerComponent } from "./cache-invalidation-marker";
@@ -20,6 +26,11 @@ import { formatErrorBlock } from "../chrome/error-block";
 import { type ServedModelMismatch, ServedModelMarkerComponent } from "./served-model-marker";
 import { isReactionTarget, type ReactionSplit, type ReactionTarget, splitReaction } from "./reaction";
 import { isRowPrefix, type TranscriptStableRow, trimBlankEdges } from "../chrome/transcript-container";
+import { formatTurnUsage, type TurnUsageSummary } from "../overlays/usage-row";
+import { FigureMarkdown } from "./figure-markdown";
+import { svgFigureRendering } from "./svg-figure";
+import { hasSvgFence } from "./svg-source";
+import { describeTableChart, hasChartTable, lookupTableChart, splitTableCharts } from "./table-chart";
 
 /**
  * Max wrapped rows of a turn-ending provider error rendered inline in the
@@ -31,9 +42,26 @@ import { isRowPrefix, type TranscriptStableRow, trimBlankEdges } from "../chrome
 const MAX_TRANSCRIPT_ERROR_ROWS = 8;
 const EMPTY_STABLE_RENDER: readonly string[] = [];
 
+/** The native head of a finished thinking block: "Thought for 12s", or "Thought" when it was never seen streaming. */
+function thoughtLabel(clock: { start: number; end?: number } | undefined): string {
+	if (clock?.end === undefined) return "Thought";
+	const ms = clock.end - clock.start;
+	return `Thought for ${ms < 60_000 ? `${Math.max(1, Math.round(ms / 1000))}s` : formatDuration(ms)}`;
+}
+
 type ThinkingContentBlock = Extract<AssistantMessage["content"][number], { type: "thinking" }>;
+/** Renders one text or thinking block: Markdown, or {@link FigureMarkdown} for text holding a ```svg fence. */
+type ProseBlock = Markdown | FigureMarkdown;
+/** A streamed block the fast path updates in place. */
+interface FastPathItem {
+	md: ProseBlock;
+	contentIndex: number;
+	blockType: "text" | "thinking";
+	lastText: string;
+}
 type DisplayThinkingContentBlock = ThinkingContentBlock & { rawThinking?: string };
-type StablePart = { kind: "thinking" | "text"; text: string } | { kind: "spacer" };
+type StablePartKind = "thinking" | "text";
+type StablePart = { kind: StablePartKind; text: string } | { kind: "spacer" };
 
 /**
  * One published prefix of the block's finished content. Later snapshots extend
@@ -45,6 +73,37 @@ interface StableSnapshot {
 	// Earlier parts are immutable; only the final part needs a historical offset.
 	readonly partCount: number;
 	readonly lastTextLength: number;
+}
+
+/**
+ * Stable-row renders at one width. `rows` renders snapshot `newest`; every
+ * count in `ends` renders byte-identically to `rows.slice(0, end)` — checked
+ * against `rows` when recorded — so an earlier prefix is a slice of the newest
+ * render instead of a re-render, and one row array stays resident per width.
+ */
+interface StableRowLedger {
+	newest: number;
+	rows: readonly string[];
+	readonly ends: Map<number, number>;
+	/** Rendered rows of parts a snapshot has closed (full text final), by part index. */
+	readonly parts: (
+		| { readonly kind: StablePartKind; readonly text: string; readonly rows: readonly string[] }
+		| undefined
+	)[];
+}
+
+/** One Markdown instance reused while a stable part's text grows between renders. */
+interface StablePartRenderer {
+	readonly index: number;
+	readonly kind: StablePartKind;
+	readonly md: Markdown;
+}
+
+/** Theme inputs cached stable renders were produced with; any change drops them. */
+interface StableRenderInputs {
+	readonly prose: MarkdownTheme;
+	readonly markdown: MarkdownTheme;
+	readonly color: ((text: string) => string) | undefined;
 }
 
 function isSnapshotExtension(previous: readonly StablePart[], current: readonly StablePart[]): boolean {
@@ -184,12 +243,30 @@ export class AssistantMessageComponent extends Container {
 	#cacheMarker?: CacheInvalidationMarkerComponent;
 	#servedModelMarker?: ServedModelMarkerComponent;
 	#lastMessage?: AssistantMessage;
-	#emergencyText?: Markdown;
+	#emergencyText?: ProseBlock;
 	#toolImagesByCallId = new Map<string, ImageContent[]>();
-	#convertedKittyImages = new Map<string, ImageContent>();
+	/**
+	 * Payload keys ({@link imagePayloadKey}) whose Kitty PNG conversion this
+	 * component is awaiting, so a re-delivered image neither re-encodes nor
+	 * schedules a second {@link updateContent} cascade. The conversions
+	 * themselves live in the bounded process-wide cache behind
+	 * {@link convertImageToPngShared}; an evicted one is redone on the next
+	 * render instead of being pinned here for the session.
+	 */
+	#kittyConversionsAwaited = new Set<string>();
+	/**
+	 * Conversions the current image children display, by payload key. Rebuilt
+	 * on every full render pass ({@link updateContent}), so a conversion is held
+	 * only while it is on screen — a re-render after the shared cache evicted
+	 * it still finds it — and released once hidden or replaced.
+	 */
+	#kittyDisplayed = new Map<string, ImageContent>();
+	/** The previous pass's {@link #kittyDisplayed}, readable only during a render pass. */
+	#kittyPreviouslyDisplayed: Map<string, ImageContent> | undefined;
 	#showImages = true;
 	#showToolResultImages = true;
-	#kittyConversionsInFlight = new Set<string>();
+	/** Charts under numeric tables; off for subagent transcripts. */
+	#showTableCharts = true;
 	#transcriptBlockFinalized: boolean;
 	/** See {@link setMidStreamPublication}; the wire's `stream-revision` axis decides it. */
 	#midStreamPublication = true;
@@ -209,6 +286,12 @@ export class AssistantMessageComponent extends Container {
 	 * provider error whose tail would otherwise be unreachable in the live TUI.
 	 */
 	#errorExpanded = false;
+	/** The deduplicated message the native error frame shows (its "Copy error" copies it). */
+	#errorText: string | undefined;
+	/** A TTSR rule aborted this text; the turn re-streams below it. */
+	#rewound = false;
+	/** The turn's totals when this answer ends it; a TSP terminal shows them under the answer. */
+	#turnUsage: TurnUsageSummary | undefined;
 	/**
 	 * True when the current {@link updateContent} message carries a truncatable
 	 * inline provider error (the `#appendErrorBlock` path) — set whether or not
@@ -231,9 +314,13 @@ export class AssistantMessageComponent extends Container {
 	#lastUpdateTransient = false;
 	// Fast-path state: reuse Markdown children when message shape is stable during streaming.
 	#fastPathKey: string | undefined;
-	#fastPathItems:
-		| Array<{ md: Markdown; contentIndex: number; blockType: "text" | "thinking"; lastText: string }>
-		| undefined;
+	#fastPathItems: FastPathItem[] | undefined;
+	/**
+	 * Text blocks whose ```svg fences are lifted into figures, by content index.
+	 * Kept across slow-path rebuilds so a figure keeps its raster (and its
+	 * in-flight one) instead of starting over on every update.
+	 */
+	#figureBlocks = new Map<number, FigureMarkdown>();
 	/** Live "thinking" pulse shown in place of a hidden thinking block while it
 	 *  streams; undefined when not animating. Driven by {@link #thinkingDotsTimer}. */
 	#thinkingDots: Text | undefined;
@@ -250,13 +337,20 @@ export class AssistantMessageComponent extends Container {
 	#nextStableRowId = 0;
 	#transcriptStableRows: TranscriptStableRow[] = [];
 	/**
-	 * Rendered rows per published snapshot index and width. The container asks
-	 * for several different counts in one frame (emitted, offered end,
-	 * projected, pressure-loop +1s); a 2-entry LRU thrashes across those and
-	 * re-renders the whole prefix per miss. Sized generously so the live prefix
-	 * stays cached; cleared on reset/finalize like before.
+	 * Verified stable-row renders per width ({@link StableRowLedger}). The
+	 * container asks for several counts per frame (emitted, offered end,
+	 * projected) and each publication re-checks the previous prefix; the ledger
+	 * answers all of them from the newest render. A few widths cover resizes.
+	 * Cleared on reset, finalize, and theme change.
 	 */
-	#stableRenderCache = new LRUCache<string, readonly string[]>({ max: 64 });
+	#stableLedgers = new LRUCache<number, StableRowLedger>({ max: 4 });
+	/** Prefixes handed out as ledger slices or rendered off-ledger, by `${count}:${width}`. */
+	#stableRenderCache = new LRUCache<string, readonly string[]>({ max: 8 });
+	/** Reused for the growing final part of each publication candidate. */
+	#stableHeadRenderer: StablePartRenderer | undefined;
+	/** Reused for final parts of published snapshots rendered off-ledger (reflow, replay). */
+	#stableReplayRenderer: StablePartRenderer | undefined;
+	#stableRenderInputs: StableRenderInputs | undefined;
 	/** Provider-reported tokens in the live thinking block — reasoning tokens when
 	 *  the provider streams them, else total output — shown dimmed beside the
 	 *  speed badge. 0 when no thinking is streaming. */
@@ -270,10 +364,27 @@ export class AssistantMessageComponent extends Container {
 	#textColorTransform?: (text: string) => string;
 	#linkTargets: ReadonlyMap<string, string> = EMPTY_LINK_TARGETS;
 	#markdownTheme: MarkdownTheme | undefined;
+	/** Text-block sources with {@link #linkTargets} applied, for the native `md` nodes; reset with the targets. */
+	#nativeLinkSources = new Map<string, string>();
 	/** Block this reply reacts to; undefined when the preceding block takes no reactions. */
 	#reactionTarget: ReactionTarget | undefined;
 	/** Reaction lifted from the reply's opening emoji, once resolved. */
 	#reaction: string | undefined;
+	/** Display form of {@link #lastMessage} (reaction handled) the native description is built from. */
+	#displayedMessage: AssistantMessage | undefined;
+	/** Thinking-extension components per content index, recorded when the slow path mounts them. */
+	#thinkingExtensions = new Map<number, Component[]>();
+	/** Collapse state of thinking sections toggled in the terminal, by content index; cleared by {@link setHideThinkingBlock}. */
+	#thinkingCollapsed = new Map<number, boolean>();
+	/** When each thinking block was seen streaming and when it stopped (native "Thought for 12s"), by content index. */
+	#thinkingClock = new Map<number, { start: number; end?: number; tokens: number }>();
+	#nativeViewVersion = 0;
+	readonly #native = new Memo();
+	/** Markdown nodes by key, reused while their text and streaming flag are unchanged. */
+	#nativeParts = new Map<string, { text: string; stream: boolean; node: NativeNode }>();
+	readonly #nativeImages = new NativeImageCache();
+	/** Smart table chart picks a TSP describe is waiting on. */
+	readonly #chartPicks = new Set<Promise<void>>();
 
 	setTextColorTransform(transform?: (text: string) => string): void {
 		this.#textColorTransform = transform;
@@ -305,6 +416,9 @@ export class AssistantMessageComponent extends Container {
 		this.#markdownTheme = undefined;
 		this.#fastPathKey = undefined;
 		this.#fastPathItems = undefined;
+		for (const block of this.#figureBlocks.values()) block.restyle();
+		this.#nativeLinkSources.clear();
+		this.#nativeViewVersion++;
 		if (this.#lastMessage) {
 			this.updateContent(this.#lastMessage, { transient: this.#lastUpdateTransient });
 		}
@@ -374,6 +488,7 @@ export class AssistantMessageComponent extends Container {
 	readonly #thinkingRenderers: readonly AssistantThinkingRenderer[];
 	readonly #imageBudget?: ImageBudget;
 	#proseOnlyThinking: boolean;
+	#expandThinkingBlocks: boolean;
 
 	constructor(
 		message?: AssistantMessage,
@@ -383,6 +498,7 @@ export class AssistantMessageComponent extends Container {
 		imageBudget?: ImageBudget,
 		proseOnlyThinking = true,
 		linkTargets?: ReadonlyMap<string, string>,
+		expandThinkingBlocks = false,
 	) {
 		super();
 		this.#hideThinkingBlock = hideThinkingBlock;
@@ -390,6 +506,7 @@ export class AssistantMessageComponent extends Container {
 		this.#thinkingRenderers = thinkingRenderers;
 		this.#imageBudget = imageBudget;
 		this.#proseOnlyThinking = proseOnlyThinking;
+		this.#expandThinkingBlocks = expandThinkingBlocks;
 
 		ensureThemeSync();
 		this.#transcriptBlockFinalized = message !== undefined;
@@ -420,6 +537,12 @@ export class AssistantMessageComponent extends Container {
 		this.#refreshMarkers();
 	}
 
+	/** Mark this answer as the end of a turn with the turn's totals (native only: ANSI keeps them in the status line). */
+	setTurnUsage(summary: TurnUsageSummary | undefined): void {
+		this.#turnUsage = summary;
+		this.#nativeViewVersion++;
+	}
+
 	/**
 	 * Show or clear the trailing served-model divider. Set once the turn's
 	 * signed thinking block (or router report) has named the model that actually
@@ -446,6 +569,7 @@ export class AssistantMessageComponent extends Container {
 		this.#markdownTheme = undefined;
 		this.#fastPathKey = undefined;
 		this.#fastPathItems = undefined;
+		for (const block of this.#figureBlocks.values()) block.restyle();
 		if (this.#lastMessage) {
 			this.updateContent(this.#lastMessage, { transient: this.#lastUpdateTransient });
 		}
@@ -453,6 +577,7 @@ export class AssistantMessageComponent extends Container {
 
 	setHideThinkingBlock(hide: boolean): void {
 		this.#hideThinkingBlock = hide;
+		this.#thinkingCollapsed.clear();
 	}
 
 	/**
@@ -471,6 +596,16 @@ export class AssistantMessageComponent extends Container {
 		this.#proseOnlyThinking = proseOnly;
 	}
 
+	/**
+	 * Keep finished thinking sections expanded instead of folding them to "Thought for 12s".
+	 * Sections the user folded or unfolded by hand keep that choice.
+	 */
+	setExpandThinkingBlocks(expand: boolean): void {
+		if (this.#expandThinkingBlocks === expand) return;
+		this.#expandThinkingBlocks = expand;
+		this.#nativeViewVersion++;
+	}
+
 	override dispose(): void {
 		this.#stopThinkingAnimation();
 		super.dispose();
@@ -485,14 +620,30 @@ export class AssistantMessageComponent extends Container {
 	 * Once text starts, a tool call streams, or the block is sealed, the pulse ends.
 	 */
 	#shouldAnimateThinking(message: AssistantMessage): boolean {
-		if (!this.#hideThinkingBlock || this.#transcriptBlockFinalized) return false;
+		return this.#hideThinkingBlock && this.#thinkingTailIndex(message) !== undefined;
+	}
+
+	/**
+	 * Content index of the thinking block the model is producing right now:
+	 * the block is still streaming (not finalized), no tool call has started,
+	 * and the tail visible block is thinking. Undefined otherwise.
+	 */
+	#thinkingTailIndex(message: AssistantMessage): number | undefined {
+		if (this.#transcriptBlockFinalized) return undefined;
 		let tail: "text" | "thinking" | undefined;
-		for (const content of message.content) {
-			if (content.type === "toolCall") return false;
-			if (content.type === "text" && canonicalizeMessage(content.text)) tail = "text";
-			else if (content.type === "thinking" && canonicalizeMessage(content.thinking)) tail = "thinking";
+		let tailIndex = -1;
+		for (let index = 0; index < message.content.length; index++) {
+			const content = message.content[index]!;
+			if (content.type === "toolCall") return undefined;
+			if (content.type === "text" && canonicalizeMessage(content.text)) {
+				tail = "text";
+				tailIndex = index;
+			} else if (content.type === "thinking" && canonicalizeMessage(content.thinking)) {
+				tail = "thinking";
+				tailIndex = index;
+			}
 		}
-		return tail === "thinking";
+		return tail === "thinking" ? tailIndex : undefined;
 	}
 
 	#thinkingDotsLabel(): string {
@@ -522,7 +673,8 @@ export class AssistantMessageComponent extends Container {
 	}
 
 	#startThinkingAnimation(): void {
-		if (this.#thinkingDotsTimer) return;
+		// A native terminal clocks the described starburst itself.
+		if (this.#thinkingDotsTimer || isNativeRendering()) return;
 		this.#scheduleThinkingFrame();
 	}
 
@@ -543,7 +695,7 @@ export class AssistantMessageComponent extends Container {
 
 	#advanceThinkingDots(): void {
 		this.#thinkingDotsTimer = undefined;
-		if (!this.#thinkingDots) {
+		if (!this.#thinkingDots || isNativeRendering()) {
 			this.#stopThinkingAnimation();
 			return;
 		}
@@ -594,10 +746,315 @@ export class AssistantMessageComponent extends Container {
 		return this.#transcriptBlockFinalized;
 	}
 
+	/** Whether a figure still waits for the raster of its final source; the transcript holds retirement meanwhile. */
+	isTranscriptBlockPending(): boolean {
+		for (const block of this.#figureBlocks.values()) if (block.pending) return true;
+		return false;
+	}
+
 	override render(width: number): readonly string[] {
 		const rows = super.render(width);
 		this.#publishStableSnapshot(rows, width);
 		return rows;
+	}
+
+	/**
+	 * A `col` (role `omp.assistant`) of `md` nodes keyed by content index, so
+	 * streamed deltas reach the terminal as `text append` on the same node;
+	 * the tail block carries `stream: true` until the message finalizes.
+	 * Thinking blocks are quiet collapsible `section`s: a muted "Thinking…"
+	 * shimmer while live, then "Thought for 12s"; tokens and rate ride in the
+	 * head's `title`. With `hideThinkingBlock` only the live head shows (collapsed)
+	 * and a finished thought emits nothing.
+	 */
+	override describe(): NativeNode {
+		const tail = this.#displayedMessage ? this.#thinkingTailIndex(this.#displayedMessage) : undefined;
+		const rate =
+			tail !== undefined && this.#lastUpdateTransient && this.#thinkingRateLive
+				? Math.round(Math.min(SPEED_MAX, sharedSpeedTracker.getSpeed()) * 10) / 10
+				: 0;
+		const key = [
+			this.#blockVersion,
+			this.#transcriptBlockFinalized,
+			this.#hideThinkingBlock,
+			this.#showImages,
+			this.#showToolResultImages,
+			this.#errorExpanded,
+			this.#nativeViewVersion,
+			rate,
+			getThemeEpoch(),
+		];
+		return this.#native.get(key, () => this.#describeMessage(tail, rate));
+	}
+
+	/**
+	 * A TTSR rule rewound this partial answer: a native terminal dims it and
+	 * tags it `↺ rewound` (the ANSI render leaves it as it stopped).
+	 */
+	markRewound(): void {
+		if (this.#rewound) return;
+		this.#rewound = true;
+		this.#nativeViewVersion++;
+	}
+
+	/** Mirrors a thinking section collapsed or expanded in the terminal. */
+	handleNativeEvent(event: NativeUiEvent): void {
+		if (event.type === "action") {
+			this.#handleErrorAction(event.act);
+			return;
+		}
+		if (event.type !== "toggle" || !event.key.startsWith("k")) return;
+		const index = Number(event.key.slice(1));
+		if (!Number.isInteger(index)) return;
+		this.#thinkingCollapsed.set(index, event.collapsed);
+		this.#nativeViewVersion++;
+	}
+
+	#describeMessage(thinkingTail: number | undefined, rate: number): NativeNode {
+		const message = this.#displayedMessage;
+		const previousParts = this.#nativeParts;
+		const parts = new Map<string, { text: string; stream: boolean; node: NativeNode }>();
+		// `slot` identifies the node across rebuilds; `key` is its sibling key inside its parent.
+		const markdown = (slot: string, key: string, source: string, stream: boolean): NativeNode => {
+			const cached = previousParts.get(slot);
+			const entry =
+				cached?.text === source && cached.stream === stream
+					? cached
+					: {
+							text: source,
+							stream,
+							node: node("md", stream ? { text: source, stream: true } : { text: source }, undefined, key),
+						};
+			parts.set(slot, entry);
+			return entry.node;
+		};
+		const children: NativeChild[] = [];
+		if (message) {
+			const live = !this.#transcriptBlockFinalized && this.#lastUpdateTransient;
+			let tailIndex = -1;
+			for (let index = 0; index < message.content.length; index++) {
+				const content = message.content[index]!;
+				if (
+					(content.type === "text" && canonicalizeMessage(content.text)) ||
+					(content.type === "thinking" && canonicalizeMessage(content.thinking))
+				) {
+					tailIndex = index;
+				}
+			}
+			for (let index = 0; index < message.content.length; index++) {
+				const content = message.content[index]!;
+				const streaming = live && index === tailIndex;
+				if (content.type === "text" && canonicalizeMessage(content.text)) {
+					const source = content.text.trim();
+					// The terminal renders this source itself and would resolve a relative
+					// link against its own idea of the cwd: hand it the session-resolved
+					// targets (resolved once the segment closes, so never while streaming).
+					const linked = (text: string, live: boolean): string => {
+						if (live || this.#linkTargets.size === 0) return text;
+						const targets = this.#linkTargets;
+						const resolved =
+							this.#nativeLinkSources.get(text) ??
+							rewriteMarkdownLinkDestinations(text, href => targets.get(href));
+						this.#nativeLinkSources.set(text, resolved);
+						return resolved;
+					};
+					if (!this.#showImages || !this.#showTableCharts || !hasChartTable(source)) {
+						children.push(markdown(`t${index}`, `t${index}`, linked(source, streaming), streaming));
+						continue;
+					}
+					// A chart follows its table as an SVG image node; the prose splits around it.
+					const segments = splitTableCharts(source, streaming);
+					segments.forEach((segment, part) => {
+						const slot = part === 0 ? `t${index}` : `t${index}.${part}`;
+						if (segment.kind === "markdown") {
+							const live = streaming && part === segments.length - 1;
+							children.push(markdown(slot, slot, linked(segment.text.trim(), live), live));
+							return;
+						}
+						const chart = lookupTableChart(segment.table);
+						if (chart instanceof Promise) this.#awaitChart(chart);
+						else if (chart) children.push(describeTableChart(chart, slot));
+					});
+				} else if (content.type === "thinking") {
+					const display = resolveThinkingDisplay(content, this.#proseOnlyThinking);
+					if (!display.visible) continue;
+					const thinkingLive = streaming && thinkingTail === index;
+					const clock = this.#thinkingClock.get(index);
+					if (thinkingLive) {
+						if (clock) clock.tokens = this.#thinkingTokens || clock.tokens;
+						else this.#thinkingClock.set(index, { start: performance.now(), tokens: this.#thinkingTokens });
+					} else if (clock && clock.end === undefined) {
+						clock.end = performance.now();
+					}
+					// Hidden (Ctrl+T): only the live "Thinking…" head shows; a finished thought leaves nothing.
+					if (this.#hideThinkingBlock && !thinkingLive) continue;
+					const tokens = thinkingLive ? this.#thinkingTokens : (clock?.tokens ?? 0);
+					const title = tokens > 0 ? `${formatNumber(tokens)} tokens` : undefined;
+					// Live: starburst · "Thinking…" · ticking timer · tok/s. Done: "Thought for 12s".
+					const head = thinkingLive
+						? node(
+								"row",
+								{ gap: "sm", title },
+								[
+									node("spinner", { style: "starburst", role: "omp.thinking.spin" }),
+									text([span("Thinking…", "muted")]),
+									elapsed(performance.now() - (this.#thinkingClock.get(index)?.start ?? performance.now())),
+									...(rate >= 0.05 ? [node("rate", { value: rate, unit: "tok/s" })] : []),
+								],
+								"head",
+							)
+						: node("text", { spans: [span(thoughtLabel(clock), "muted")], title }, undefined, "head");
+					const body = markdown(`k${index}`, "body", display.text, streaming);
+					children.push(
+						node(
+							"section",
+							{
+								// `.live` while streaming: the body clamps to its tail under a fade.
+								role: thinkingLive ? "omp.thinking.live" : "omp.thinking",
+								collapsible: true,
+								// Open while it streams; a finished thought folds to its "Thought for 12s" line unless the user keeps thinking expanded.
+								collapsed:
+									this.#thinkingCollapsed.get(index) ??
+									(this.#hideThinkingBlock || (!thinkingLive && !this.#expandThinkingBlocks)),
+								// Tern's fold head sums it into "Worked for 12s".
+								took: clock?.end === undefined ? undefined : Math.max(0, Math.round(clock.end - clock.start)),
+							},
+							[head, body],
+							`k${index}`,
+						),
+					);
+					if (!this.#hideThinkingBlock) children.push(...(this.#thinkingExtensions.get(index) ?? []));
+				} else if (content.type === "image" && content.data && content.mimeType && this.#showImages) {
+					children.push(this.#nativeImages.get(`i${index}`, content.data, content.mimeType));
+				}
+			}
+			if (this.#showImages && this.#showToolResultImages) {
+				for (const [toolCallId, images] of this.#toolImagesByCallId) {
+					images.forEach((image, index) => {
+						children.push(this.#nativeImages.get(`r${toolCallId}:${index}`, image.data, image.mimeType));
+					});
+				}
+			}
+			const errorNode = this.#describeError(message);
+			if (errorNode) children.push(errorNode);
+		}
+		this.#nativeParts = parts;
+		children.push(...this.#markerSlot.children);
+		if (this.#rewound) {
+			children.push(
+				node(
+					"badge",
+					{ text: "↺ rewound", tone: "muted", role: "omp.assistant.rewound-tag" },
+					undefined,
+					"rewound",
+				),
+			);
+		}
+		if (this.#turnUsage) {
+			const usage = formatTurnUsage(this.#turnUsage);
+			children.push(
+				node(
+					"row",
+					{ role: "omp.turn.usage", gap: "xs", align: "center", title: usage.title },
+					[
+						node("icon", { name: "time" }, undefined, "icon"),
+						node("text", { text: usage.text }, undefined, "text"),
+					],
+					"turn-usage",
+				),
+			);
+		}
+		return col(children, { role: this.#rewound ? "omp.assistant.rewound" : "omp.assistant" });
+	}
+
+	/**
+	 * Turn-ending error, recovered-retry note or abort label. A failed request
+	 * is one error frame (head: "Request failed" + the HTTP status chip; body:
+	 * the message once; then Retry / Copy error / Switch model), and stays in
+	 * the transcript: unlike ANSI, the pinned banner does not hide it natively.
+	 * A recovered attempt is an inline row that discloses the original error.
+	 */
+	#describeError(message: AssistantMessage): NativeNode | undefined {
+		const presentation = resolveAssistantErrorPresentation(message);
+		if (presentation.kind === "compact-recovered") {
+			const attempt = message.retryRecovery?.attempt ?? 1;
+			const body = [message.errorMessage?.trim(), presentation.text].filter(
+				(line, index, all): line is string => !!line && all.indexOf(line) === index,
+			);
+			return node(
+				"section",
+				{
+					role: "omp.assistant.recovered",
+					head: [span(`↻ Recovered after ${attempt} ${attempt === 1 ? "retry" : "retries"}`, "muted")],
+					collapsible: true,
+					collapsed: true,
+				},
+				[text([span(body.join("\n"), "mono")], { wrap: "word" })],
+				"error",
+			);
+		}
+		if (presentation.kind !== "full" || message.content.some(content => content.type === "toolCall"))
+			return undefined;
+		if (message.stopReason === "aborted") {
+			return text([span(presentation.text, "error")], { wrap: "word", key: "error", role: "omp.assistant.abort" });
+		}
+		const lines = presentation.text
+			.split("\n")
+			.map(line => line.trim())
+			.filter(line => line.length > 0);
+		// "500 upstream overloaded" → chip "500", then the message once: a
+		// line the next one repeats with more detail is dropped.
+		const code = /^(\d{3})\s+/.exec(lines[0] ?? "");
+		if (code) lines[0] = lines[0]!.slice(code[0].length);
+		const detail = lines.filter((line, index) => !lines.slice(index + 1).some(next => next.startsWith(line)));
+		const errorText = detail.join("\n") || "Unknown error";
+		const children: NativeChild[] = [
+			node(
+				"row",
+				{ gap: "sm" },
+				[
+					text([span("Request failed", "error strong")]),
+					...(code ? [node("badge", { text: code[1]!, tone: "error", role: "omp.error.code" })] : []),
+				],
+				"head",
+			),
+			text([span(errorText, "mono")], {
+				wrap: "word",
+				lines: this.#errorExpanded ? undefined : MAX_TRANSCRIPT_ERROR_ROWS,
+				role: "omp.error.message",
+				key: "message",
+			}),
+		];
+		if (message.stopReason === "error" && hasTranscriptActions()) {
+			const button = (act: string, label: string, keys: readonly string[], title: string): NativeNode =>
+				node(
+					"row",
+					{ gap: "xs", role: "omp.error.action", actions: { click: act }, title },
+					keys.length > 0 ? [text(label), node("kbd", { keys })] : [text(label)],
+					act,
+				);
+			children.push(
+				node(
+					"row",
+					{ gap: "sm", role: "omp.error.actions" },
+					[
+						button("retry", "Retry", ["F5"], "Retry the failed turn"),
+						button("copy-error", "Copy error", [], "Copy the error message"),
+						button("switch-model", "Switch model", ["⌥P"], "Pick another model for this session"),
+					],
+					"actions",
+				),
+			);
+		}
+		this.#errorText = errorText;
+		return card({ role: "omp.error", tone: "error", key: "error" }, children);
+	}
+
+	/** Error frame action clicks: omp's own retry, clipboard and model-picker paths. */
+	#handleErrorAction(act: string): void {
+		if (act === "retry") runTranscriptAction({ act: "retry" });
+		else if (act === "switch-model") runTranscriptAction({ act: "switch-model" });
+		else if (act === "copy-error" && this.#errorText) runTranscriptAction({ act: "copy", text: this.#errorText });
 	}
 
 	/** Width-independent stable identities for the streamed leading thinking run. */
@@ -616,22 +1073,33 @@ export class AssistantMessageComponent extends Container {
 		this.#stableSnapshots = [];
 		this.#stableParts = [];
 		this.#transcriptStableRows = [];
-		this.#stableRenderCache.clear();
+		this.#dropStableRenders();
 	}
 
 	renderTranscriptStableRows(count: number, width: number): readonly string[] {
 		const index = Math.min(Math.trunc(count), this.#stableSnapshots.length);
 		if (index <= 0) return EMPTY_STABLE_RENDER;
+		this.#syncStableRenderInputs();
+		const ledger = this.#stableLedgers.get(width);
+		if (ledger?.newest === index) return ledger.rows;
 		const key = `${index}:${width}`;
 		const cached = this.#stableRenderCache.get(key);
 		if (cached) return cached;
-		const snapshot = this.#stableSnapshots[index - 1]!;
-		const parts = this.#stableParts.slice(0, snapshot.partCount);
-		const last = parts.at(-1);
-		if (last && last.kind !== "spacer") {
-			parts[parts.length - 1] = { kind: last.kind, text: last.text.slice(0, snapshot.lastTextLength) };
+		const end = ledger?.ends.get(index);
+		let rows: readonly string[];
+		if (ledger !== undefined && end !== undefined) {
+			rows = ledger.rows.slice(0, end);
+		} else {
+			const snapshot = this.#stableSnapshots[index - 1]!;
+			rows = this.#renderStableParts(
+				this.#stableParts,
+				snapshot.partCount,
+				snapshot.lastTextLength,
+				width,
+				"replay",
+			);
+			if (this.#recordStableRows(index, width, rows)) return rows;
 		}
-		const rows = this.#renderStableSnapshot(parts, width);
 		this.#stableRenderCache.set(key, rows);
 		return rows;
 	}
@@ -652,9 +1120,12 @@ export class AssistantMessageComponent extends Container {
 		if (!last || last.kind === "spacer") return;
 		const snapshot = { partCount: parts.length, lastTextLength: last.text.length };
 		const previous = this.#stableSnapshots.at(-1);
-		if (previous && !isSnapshotExtension(this.#stableParts, parts)) return;
+		// An unmoved boundary publishes nothing whether or not it still extends
+		// the last snapshot, so most frames skip the whole-document comparison.
 		if (previous?.partCount === snapshot.partCount && previous.lastTextLength === snapshot.lastTextLength) return;
-		const currentRows = this.#renderStableSnapshot(parts, width);
+		if (previous && !isSnapshotExtension(this.#stableParts, parts)) return;
+		this.#syncStableRenderInputs();
+		const currentRows = this.#renderStableParts(parts, parts.length, last.text.length, width, "head");
 		// The container verifies stable rows against the blank-trimmed render.
 		if (!isRowPrefix(currentRows, trimBlankEdges(rendered))) return;
 		const previousRows = previous
@@ -666,7 +1137,7 @@ export class AssistantMessageComponent extends Container {
 		this.#stableParts = parts;
 		this.#stableSnapshots.push(snapshot);
 		this.#transcriptStableRows.push({ key: `thinking:${this.#nextStableRowId++}` });
-		this.#stableRenderCache.set(`${this.#stableSnapshots.length}:${width}`, currentRows);
+		this.#recordStableRows(this.#stableSnapshots.length, width, currentRows);
 	}
 
 	/**
@@ -686,12 +1157,18 @@ export class AssistantMessageComponent extends Container {
 		for (const child of this.#contentContainer.children) {
 			const item = items[itemIndex];
 			if (item?.md === child) {
+				const md = item.md;
+				if (md instanceof FigureMarkdown) {
+					// Plain Markdown reproduces only the prose ahead of the first figure.
+					if (md.leadingProse) parts.push({ kind: item.blockType, text: md.leadingProse });
+					break;
+				}
 				if (itemIndex === items.length - 1) {
 					// Streaming child: publish Markdown's frozen prefix, and only
 					// once non-blank content exists past it — the block's last
 					// non-blank line is still being written (thinking's prose fold
 					// may rewrite it) and must stay out of published bytes.
-					const raw = item.md.getLastRenderStableText();
+					const raw = md.getLastRenderStableText();
 					const frozen = raw.trim();
 					if (frozen.length > 0 && /\S/.test(item.lastText.slice(raw.length))) {
 						parts.push({ kind: item.blockType, text: frozen });
@@ -716,35 +1193,186 @@ export class AssistantMessageComponent extends Container {
 		return parts;
 	}
 
-	#renderStableSnapshot(parts: readonly StablePart[], width: number): readonly string[] {
+	/**
+	 * Render the first `partCount` stable parts, the final one cut to
+	 * `lastLength`. Rows match fresh Markdown renders of each part byte for
+	 * byte — {@link #createMarkdown} builds the live children too — but a
+	 * closed part renders once per width, and the growing final part reuses one
+	 * Markdown instance so its already-frozen blocks are not re-lexed.
+	 */
+	#renderStableParts(
+		parts: readonly StablePart[],
+		partCount: number,
+		lastLength: number,
+		width: number,
+		role: "head" | "replay",
+	): readonly string[] {
+		const ledger = this.#stableLedger(width);
 		const rows: string[] = [];
-		for (const part of parts) {
+		const lastIndex = partCount - 1;
+		for (let index = 0; index < partCount; index++) {
+			const part = parts[index]!;
 			if (part.kind === "spacer") {
 				rows.push("");
 				continue;
 			}
-			// Constructor args mirror the live child Markdown exactly so these
-			// rows are byte-identical to the block render's prefix — including the
-			// trim the live children apply, which drops the trailing blank line a
-			// frozen prefix still carries.
-			const text = part.text.trim();
-			const markdown =
-				part.kind === "text"
-					? new Markdown(
-							text,
-							1,
-							0,
-							this.#getProseTheme(),
-							this.#textColorTransform ? { color: this.#textColorTransform } : undefined,
-							0,
-						)
-					: new Markdown(text, 1, 0, getMarkdownTheme(), {
-							color: (value: string) => theme.fg("thinkingText", value),
-							italic: true,
-						});
-			rows.push(...markdown.render(width));
+			const closed = index < lastIndex;
+			const text = closed || lastLength === part.text.length ? part.text : part.text.slice(0, lastLength);
+			const cached = ledger.parts[index];
+			let partRows: readonly string[];
+			if (cached?.kind === part.kind && cached.text === text) {
+				partRows = cached.rows;
+			} else {
+				partRows = this.#renderStablePart(index, part.kind, text, width, closed ? undefined : role);
+				if (closed) ledger.parts[index] = { kind: part.kind, text, rows: partRows };
+			}
+			for (const row of partRows) rows.push(row);
 		}
 		return rows;
+	}
+
+	/**
+	 * Render one part's Markdown. `role` names the instance reused for a final
+	 * part as its text grows; a closed part continues whichever instance was
+	 * already growing it, else renders once. Finalized blocks keep no instance.
+	 */
+	#renderStablePart(
+		index: number,
+		kind: StablePartKind,
+		text: string,
+		width: number,
+		role: "head" | "replay" | undefined,
+	): readonly string[] {
+		// Trim like the live children, dropping the trailing blank line a frozen
+		// prefix still carries.
+		const trimmed = text.trim();
+		if (this.#transcriptBlockFinalized) return this.#createMarkdown(kind, trimmed).render(width);
+		const head = this.#stableHeadRenderer;
+		const replay = this.#stableReplayRenderer;
+		const renderer = role === "head" ? head : role === "replay" ? replay : head?.index === index ? head : replay;
+		if (renderer?.index === index && renderer.kind === kind) {
+			renderer.md.setText(trimmed);
+			return renderer.md.render(width);
+		}
+		const md = this.#createMarkdown(kind, trimmed);
+		if (role === "head") this.#stableHeadRenderer = { index, kind, md };
+		else if (role === "replay") this.#stableReplayRenderer = { index, kind, md };
+		return md.render(width);
+	}
+
+	/** Markdown for a text or thinking block; live children and stable-row renders share it so stable rows prefix the block render. */
+	#createMarkdown(kind: StablePartKind, text: string): Markdown {
+		return kind === "text"
+			? new Markdown(
+					text,
+					1,
+					0,
+					this.#getProseTheme(),
+					this.#textColorTransform ? { color: this.#textColorTransform } : undefined,
+					0,
+				)
+			: new Markdown(text, 1, 0, getMarkdownTheme(), {
+					color: (value: string) => theme.fg("thinkingText", value),
+					italic: true,
+				});
+	}
+
+	/**
+	 * Whether `text` holds a ```svg fence this terminal draws as a figure, or a
+	 * table it draws a chart under. Native (TSP) terminals receive the fence
+	 * verbatim in the `md` node and draw it themselves, and get charts as image
+	 * nodes from {@link describe}; image-less terminals keep fences as code and
+	 * tables as tables.
+	 */
+	#liftsFigures(text: string): boolean {
+		return (
+			this.#showImages &&
+			TERMINAL.imageProtocol !== null &&
+			!isNativeRendering() &&
+			((svgFigureRendering() && hasSvgFence(text)) || (this.#showTableCharts && hasChartTable(text)))
+		);
+	}
+
+	/** Re-describe once a smart table chart pick lands. */
+	#awaitChart(pick: Promise<void>): void {
+		if (this.#chartPicks.has(pick)) return;
+		this.#chartPicks.add(pick);
+		void pick.then(() => {
+			this.#chartPicks.delete(pick);
+			this.#blockVersion++;
+			this.#onImageUpdate?.();
+		});
+	}
+
+	/**
+	 * The component for text block `index`: Markdown, or a {@link FigureMarkdown}
+	 * when it holds a ```svg fence to lift or a table to chart — taken over from
+	 * `previous` so its figures keep their rasters across rebuilds.
+	 */
+	#proseBlock(index: number, text: string, previous: ReadonlyMap<number, FigureMarkdown>): ProseBlock {
+		if (!this.#liftsFigures(text)) return this.#createMarkdown("text", text);
+		let block = previous.get(index);
+		if (block) {
+			block.setText(text);
+		} else {
+			block = new FigureMarkdown(text, {
+				markdown: value => this.#createMarkdown("text", value),
+				charts: this.#showTableCharts,
+				budget: this.#imageBudget,
+				onChange: () => {
+					this.#blockVersion++;
+					this.#onImageUpdate?.();
+				},
+			});
+		}
+		this.#figureBlocks.set(index, block);
+		return block;
+	}
+
+	#stableLedger(width: number): StableRowLedger {
+		let ledger = this.#stableLedgers.get(width);
+		if (ledger === undefined) {
+			ledger = { newest: 0, rows: EMPTY_STABLE_RENDER, ends: new Map(), parts: [] };
+			this.#stableLedgers.set(width, ledger);
+		}
+		return ledger;
+	}
+
+	/**
+	 * Remember `rows` as snapshot `index`'s render at `width`. A newer snapshot
+	 * becomes the ledger's newest render — keeping earlier counts only when it
+	 * extends their rows; an older one that prefixes the newest keeps just its
+	 * row count. Returns whether `rows` is now the newest render.
+	 */
+	#recordStableRows(index: number, width: number, rows: readonly string[]): boolean {
+		const ledger = this.#stableLedger(width);
+		if (index > ledger.newest) {
+			if (!isRowPrefix(ledger.rows, rows)) ledger.ends.clear();
+			ledger.newest = index;
+			ledger.rows = rows;
+			ledger.ends.set(index, rows.length);
+			return true;
+		}
+		if (index < ledger.newest && isRowPrefix(rows, ledger.rows)) ledger.ends.set(index, rows.length);
+		return false;
+	}
+
+	/** Drop cached stable renders once the themes they were rendered with change. */
+	#syncStableRenderInputs(): void {
+		const prose = this.#getProseTheme();
+		const markdown = getMarkdownTheme();
+		const color = this.#textColorTransform;
+		const inputs = this.#stableRenderInputs;
+		if (inputs?.prose === prose && inputs.markdown === markdown && inputs.color === color) return;
+		this.#dropStableRenders();
+		this.#stableRenderInputs = { prose, markdown, color };
+	}
+
+	#dropStableRenders(): void {
+		this.#stableLedgers.clear();
+		this.#stableRenderCache.clear();
+		this.#stableHeadRenderer = undefined;
+		this.#stableReplayRenderer = undefined;
 	}
 
 	/** Render completed prose rather than an earlier thinking row under emergency viewport pressure. */
@@ -759,7 +1387,7 @@ export class AssistantMessageComponent extends Container {
 
 	markTranscriptBlockFinalized(): void {
 		this.#transcriptBlockFinalized = true;
-		this.#stableRenderCache.clear();
+		this.#dropStableRenders();
 		this.#stopThinkingAnimation();
 		// If the live pulse was on screen when the block sealed, drop the fast path
 		// and rebuild so the placeholder is removed — finalized blocks never animate.
@@ -820,6 +1448,18 @@ export class AssistantMessageComponent extends Container {
 		}
 	}
 
+	/** Toggle charts under numeric tables (the main session's transcript only, never a subagent's). */
+	setTableChartsVisible(visible: boolean): void {
+		if (this.#showTableCharts === visible) return;
+		this.#showTableCharts = visible;
+		// Figure blocks bake the switch in; rebuild them rather than reuse.
+		for (const block of this.#figureBlocks.values()) block.dispose();
+		this.#figureBlocks.clear();
+		if (this.#lastMessage) {
+			this.updateContent(this.#lastMessage, { transient: this.#lastUpdateTransient });
+		}
+	}
+
 	/** Toggle only images produced by tool results; assistant-native images remain governed by setImagesVisible. */
 	setToolResultImagesVisible(visible: boolean): void {
 		if (this.#showToolResultImages === visible) return;
@@ -832,16 +1472,6 @@ export class AssistantMessageComponent extends Container {
 	setToolResultImages(toolCallId: string, images: ImageContent[]): void {
 		if (!toolCallId) return;
 		const validImages = images.filter(img => img.type === "image" && img.data && img.mimeType);
-		for (const key of Array.from(this.#convertedKittyImages.keys())) {
-			if (key.startsWith(`${toolCallId}:`)) {
-				this.#convertedKittyImages.delete(key);
-			}
-		}
-		for (const key of Array.from(this.#kittyConversionsInFlight)) {
-			if (key.startsWith(`${toolCallId}:`)) {
-				this.#kittyConversionsInFlight.delete(key);
-			}
-		}
 		if (validImages.length === 0) {
 			this.#toolImagesByCallId.delete(toolCallId);
 		} else {
@@ -853,23 +1483,31 @@ export class AssistantMessageComponent extends Container {
 		}
 	}
 
+	/** A displayable Kitty PNG for a non-PNG `image`: the shared cache, else this component's displayed copy. */
+	#kittyConversion(image: ImageContent): ImageContent | undefined {
+		const cached = cachedPngConversion(image);
+		if (cached) return cached;
+		const key = imagePayloadKey(image);
+		return this.#kittyDisplayed.get(key) ?? this.#kittyPreviouslyDisplayed?.get(key);
+	}
+
 	#convertImagesForKitty(entries: Array<{ image: ImageContent; key: string }>): void {
 		if (TERMINAL.imageProtocol !== ImageProtocol.Kitty) return;
-		for (const { image, key } of entries) {
-			if (image.mimeType === "image/png") continue;
-			if (this.#convertedKittyImages.has(key) || this.#kittyConversionsInFlight.has(key)) continue;
-			this.#kittyConversionsInFlight.add(key);
-			convertImageToPng(image)
-				.then(converted => {
-					this.#kittyConversionsInFlight.delete(key);
-					this.#convertedKittyImages.set(key, converted);
+		for (const { image } of entries) {
+			if (image.mimeType === "image/png" || this.#kittyConversion(image)) continue;
+			const key = imagePayloadKey(image);
+			if (this.#kittyConversionsAwaited.has(key)) continue;
+			this.#kittyConversionsAwaited.add(key);
+			convertImageToPngShared(image)
+				.then(() => {
+					this.#kittyConversionsAwaited.delete(key);
 					if (this.#lastMessage) {
 						this.updateContent(this.#lastMessage, { transient: this.#lastUpdateTransient });
 					}
 					this.#onImageUpdate?.();
 				})
 				.catch(() => {
-					this.#kittyConversionsInFlight.delete(key);
+					this.#kittyConversionsAwaited.delete(key);
 				});
 		}
 	}
@@ -880,17 +1518,23 @@ export class AssistantMessageComponent extends Container {
 
 		if (withLeadingSpacer) this.#contentContainer.addChild(new Spacer(1));
 		for (const { image, key } of entries) {
-			const displayImage =
-				TERMINAL.imageProtocol === ImageProtocol.Kitty && image.mimeType !== "image/png"
-					? this.#convertedKittyImages.get(key)
-					: image;
+			let displayImage: ImageContent | undefined = image;
+			if (TERMINAL.imageProtocol === ImageProtocol.Kitty && image.mimeType !== "image/png") {
+				displayImage = this.#kittyConversion(image);
+				if (displayImage) this.#kittyDisplayed.set(imagePayloadKey(image), displayImage);
+			}
 			if (TERMINAL.imageProtocol && displayImage) {
 				this.#contentContainer.addChild(
 					new Image(
 						displayImage.data,
 						displayImage.mimeType,
 						{ fallbackColor: (text: string) => theme.fg("toolOutput", text) },
-						{ ...resolveImageOptions(), budget: this.#imageBudget, imageKey: key },
+						{
+							...resolveImageOptions(),
+							budget: this.#imageBudget,
+							imageKey: key,
+							requestRender: this.#onImageUpdate,
+						},
 					),
 				);
 				continue;
@@ -908,6 +1552,8 @@ export class AssistantMessageComponent extends Container {
 	}
 
 	#appendThinkingExtensions(contentIndex: number, thinkingIndex: number, text: string): void {
+		const mounted: Component[] = [];
+		this.#thinkingExtensions.set(contentIndex, mounted);
 		for (const renderer of this.#thinkingRenderers) {
 			try {
 				const component = renderer(
@@ -921,6 +1567,7 @@ export class AssistantMessageComponent extends Container {
 				);
 				if (component) {
 					this.#contentContainer.addChild(component);
+					mounted.push(component);
 				}
 			} catch {
 				// Ignore extension renderer failures and keep the original thinking block visible.
@@ -929,10 +1576,14 @@ export class AssistantMessageComponent extends Container {
 	}
 
 	#computeShapeKey(message: AssistantMessage): string {
-		const parts: string[] = [`htb:${this.#hideThinkingBlock ? 1 : 0}|pot:${this.#proseOnlyThinking ? 1 : 0}`];
+		const parts: string[] = [
+			`htb:${this.#hideThinkingBlock ? 1 : 0}|pot:${this.#proseOnlyThinking ? 1 : 0}|etb:${this.#expandThinkingBlocks ? 1 : 0}`,
+		];
 		for (const content of message.content) {
 			if (content.type === "text") {
-				parts.push(canonicalizeMessage(content.text) ? "T1" : "T0");
+				parts.push(
+					!canonicalizeMessage(content.text) ? "T0" : this.#liftsFigures(content.text.trim()) ? "TF" : "T1",
+				);
 			} else if (content.type === "thinking") {
 				if (this.#hideThinkingBlock) {
 					// Match the pulse's empty/nonempty transition without formatting hidden text.
@@ -1040,6 +1691,7 @@ export class AssistantMessageComponent extends Container {
 		// Everything below renders the display form; #lastMessage keeps the
 		// verbatim message so re-renders re-derive the reaction deterministically.
 		message = this.#displayMessage(message, this.#lastUpdateTransient);
+		this.#displayedMessage = message;
 
 		// Streaming-speed gauge: only a live, in-flight render of the single
 		// animating hidden-thinking block feeds the shared session tracker. The
@@ -1053,7 +1705,10 @@ export class AssistantMessageComponent extends Container {
 		// the gauge and pollute the next block. Providers that report usage only at
 		// turn end leave the live count flat, so the rate stays 0 and the badge
 		// self-suppresses (see #thinkingDotsLabel).
-		const isThinkingNow = this.#lastUpdateTransient && this.#shouldAnimateThinking(message);
+		// Native terminals show the live rate on visible thinking too, not only the hidden pulse.
+		const isThinkingNow =
+			this.#lastUpdateTransient &&
+			(isNativeRendering() ? this.#thinkingTailIndex(message) !== undefined : this.#shouldAnimateThinking(message));
 		if (isThinkingNow) {
 			const currentTokens = message.usage.reasoningTokens ?? message.usage.output;
 			this.#thinkingTokens = currentTokens;
@@ -1082,15 +1737,18 @@ export class AssistantMessageComponent extends Container {
 
 		// Clear content container
 		this.#contentContainer.clear();
+		this.#kittyPreviouslyDisplayed = this.#kittyDisplayed;
+		this.#kittyDisplayed = new Map();
+		this.#thinkingExtensions.clear();
 		this.#emergencyText = undefined;
 		this.#thinkingDots = undefined;
 		this.#hasTruncatableError = false;
 
 		// Determine if we should capture Markdown instances for next fast path
 		const shouldCapture = this.#canFastPath(message);
-		const captureItems:
-			| Array<{ md: Markdown; contentIndex: number; blockType: "text" | "thinking"; lastText: string }>
-			| undefined = shouldCapture ? [] : undefined;
+		const captureItems: FastPathItem[] | undefined = shouldCapture ? [] : undefined;
+		const previousFigures = this.#figureBlocks;
+		this.#figureBlocks = new Map();
 
 		const hasVisibleContent = message.content.some(
 			c =>
@@ -1109,8 +1767,7 @@ export class AssistantMessageComponent extends Container {
 			if (content.type === "text" && canonicalizeMessage(content.text)) {
 				// Set paddingY=0 to avoid extra spacing before tool executions
 				const trimmed = content.text.trim();
-				const mdOptions = this.#textColorTransform ? { color: this.#textColorTransform } : undefined;
-				const md = new Markdown(trimmed, 1, 0, this.#getProseTheme(), mdOptions, 0);
+				const md = this.#proseBlock(i, trimmed, previousFigures);
 				this.#contentContainer.addChild(md);
 				this.#emergencyText = md;
 				captureItems?.push({ md, contentIndex: i, blockType: "text", lastText: trimmed });
@@ -1135,10 +1792,7 @@ export class AssistantMessageComponent extends Container {
 					);
 
 				// Thinking traces in thinkingText color, italic
-				const md = new Markdown(thinkingText, 1, 0, getMarkdownTheme(), {
-					color: (text: string) => theme.fg("thinkingText", text),
-					italic: true,
-				});
+				const md = this.#createMarkdown("thinking", thinkingText);
 				md.transientRenderCache = this.#lastUpdateTransient;
 				this.#contentContainer.addChild(md);
 				captureItems?.push({ md, contentIndex: i, blockType: "thinking", lastText: thinkingText });
@@ -1153,6 +1807,9 @@ export class AssistantMessageComponent extends Container {
 				hasRenderedContent ||= this.#showImages;
 			}
 		}
+		for (const [index, block] of previousFigures) {
+			if (this.#figureBlocks.get(index) !== block) block.dispose();
+		}
 
 		if (this.#shouldAnimateThinking(message)) {
 			if (hasVisibleContent) this.#contentContainer.addChild(new Spacer(1));
@@ -1164,6 +1821,7 @@ export class AssistantMessageComponent extends Container {
 		}
 
 		this.#renderToolImages();
+		this.#kittyPreviouslyDisplayed = undefined;
 		const errorPresentation = resolveAssistantErrorPresentation(message);
 		const hasToolCalls = message.content.some(c => c.type === "toolCall");
 		if (errorPresentation.kind === "compact-recovered") {

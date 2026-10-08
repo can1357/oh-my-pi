@@ -14,7 +14,11 @@ import {
 } from "../render/render-utils";
 import { classifyGroupedLines, groupLineIndicesByBlank } from "./grouped-file-output";
 import type { OutputMeta } from "./output-meta";
-import type { RenderResultOptions, ToolRenderer } from "./renderer";
+import type { NativeToolHead, NativeToolView, RenderResultOptions, ToolRenderer } from "./renderer";
+import { code, compact, diff, node, span, text } from "../native/describe";
+import type { NativeChild, NativeNode } from "../native/node";
+import { diffStatsMeta, displayPath, errorText, fileDiffSection, noteText, resultText, statsText } from "./native-view";
+import { getLanguageFromPath } from "../lang-from-path";
 
 /** Display metadata returned by ast-edit. */
 export interface AstEditToolDetails {
@@ -49,13 +53,19 @@ interface AstEditRenderArgs {
 const COLLAPSED_CHANGE_LIMIT = PREVIEW_LIMITS.COLLAPSED_LINES * 2;
 
 /**
- * Flatten pre-styled change groups into frame body lines. Groups are separated
- * by a blank line and carry no tree guides — the frame border is the container,
- * so nested `├─ │` gutters would just be noise. Collapsed mode always shows at
- * least the first group, then fills up to `budget` lines before summarizing the
- * rest as `… N more changes`.
+ * Flatten change groups (line indices, styled on demand) into frame body
+ * lines. Groups are separated by a blank line and carry no tree guides — the
+ * frame border is the container, so nested `├─ │` gutters would just be
+ * noise. Collapsed mode always shows at least the first group, then fills up
+ * to `budget` lines before summarizing the rest as `… N more changes`.
  */
-function buildChangeBody(groups: string[][], expanded: boolean, budget: number, theme: Theme): string[] {
+function buildChangeBody(
+	groups: readonly (readonly number[])[],
+	styleLine: (index: number) => string,
+	expanded: boolean,
+	budget: number,
+	theme: Theme,
+): string[] {
 	const lines: string[] = [];
 	let shown = 0;
 	for (let i = 0; i < groups.length; i++) {
@@ -66,7 +76,7 @@ function buildChangeBody(groups: string[][], expanded: boolean, budget: number, 
 		// Always emit the first group; budget only gates subsequent ones.
 		if (!expanded && shown > 0 && lines.length + separator + group.length + reserved > budget) break;
 		if (separator) lines.push("");
-		lines.push(...group);
+		for (const index of group) lines.push(styleLine(index));
 		shown++;
 	}
 	const remaining = groups.length - shown;
@@ -80,6 +90,86 @@ function buildChangeBody(groups: string[][], expanded: boolean, budget: number, 
 function patternPreview(pat: string | undefined): string | undefined {
 	const collapsed = pat?.replace(/\s+/g, " ").trim();
 	return collapsed || undefined;
+}
+
+const AST_EDIT_HEADER_RE = /^(#+)\s+(.*)$/;
+const AST_EDIT_CHANGE_LINE_RE = /^([+\- ])\s*(\d+)(?:│|[:|])(.*)$/;
+const AST_EDIT_HEADER_SUFFIX_RE = /\s+\([^)]*\)\s*$/;
+
+/** One file's proposed rewrite: its unified diff text and change counts. */
+interface AstEditFileDiff {
+	path: string;
+	lines: string[];
+	added: number;
+	removed: number;
+	lastOld?: number;
+}
+
+/**
+ * Parse ast-edit display content (`# dir/`, `## file (N replacements)`,
+ * `-12│old` / `+12│new`) into one unified diff per file.
+ */
+function parseAstEditChanges(lines: readonly string[]): AstEditFileDiff[] {
+	const files: AstEditFileDiff[] = [];
+	const dirs: string[] = [];
+	let file: AstEditFileDiff | undefined;
+	const flush = () => {
+		if (file && file.lines.length > 0) files.push(file);
+		file = undefined;
+	};
+	for (const line of lines) {
+		const header = AST_EDIT_HEADER_RE.exec(line);
+		if (header) {
+			flush();
+			const depth = header[1]!.length;
+			const rest = header[2]!.trimEnd().replace(AST_EDIT_HEADER_SUFFIX_RE, "");
+			dirs.length = depth - 1;
+			if (rest.endsWith("/")) {
+				dirs[depth - 1] = rest.slice(0, -1);
+				continue;
+			}
+			const prefix = dirs.filter(Boolean).join("/");
+			file = { path: prefix ? `${prefix}/${rest}` : rest, lines: [], added: 0, removed: 0 };
+			continue;
+		}
+		if (!file || line.trim().length === 0) continue;
+		const change = AST_EDIT_CHANGE_LINE_RE.exec(line);
+		if (!change) continue;
+		const lineNumber = Number.parseInt(change[2]!, 10);
+		if (file.lastOld === undefined || lineNumber > file.lastOld + 1 || lineNumber < file.lastOld) {
+			file.lines.push(`@@ -${lineNumber} +${lineNumber} @@`);
+		}
+		file.lastOld = lineNumber;
+		if (change[1] === "+") file.added++;
+		else if (change[1] === "-") file.removed++;
+		file.lines.push(`${change[1]}${change[3]}`);
+	}
+	flush();
+	return files;
+}
+
+/** A file's proposed rewrite as a `diff`: highlighted by the path's language, no path header. */
+function astEditDiff(file: AstEditFileDiff): NativeNode {
+	return diff(file.lines.join("\n"), { lang: getLanguageFromPath(file.path) });
+}
+
+/** The single rewrite pattern (`target:"pattern"`), or the rewrite count, for the head. */
+function astEditPatternHead(args: AstEditRenderArgs | undefined): Pick<NativeToolHead, "target" | "targetKind"> {
+	const rewriteCount = args?.ops?.length ?? 0;
+	if (rewriteCount === 1) {
+		const pattern = patternPreview(args?.ops?.[0]?.pat);
+		return pattern ? { target: pattern, targetKind: "pattern" } : {};
+	}
+	return rewriteCount > 1 ? { target: `${rewriteCount} rewrites`, targetKind: "text" } : {};
+}
+
+/** Scope facts for the final quiet line: `in src · searched 12 files · limit reached; narrow path`. */
+function astEditScopeStats(details: AstEditToolDetails | undefined): NativeNode | undefined {
+	const parts: string[] = [];
+	if (details?.scopePath) parts.push(`in ${details.scopePath}`);
+	if (details?.filesSearched) parts.push(`searched ${formatCount("file", details.filesSearched)}`);
+	if (details?.limitReached) parts.push("limit reached; narrow path");
+	return statsText(parts);
 }
 
 /** Render AST edit calls and results. */
@@ -155,29 +245,36 @@ export const astEditToolRenderer = {
 		// Resolve hyperlinks over the whole output so nested directory headers
 		// reconstruct across the blank-line groups the tree list collapses by.
 		const contexts = classifyGroupedLines(allLines, details?.cwd ?? details?.searchPath, details?.searchPath);
-		const styledLines = allLines.map((line, index) => {
+		// Style lazily: collapsed bodies show only the first groups.
+		const styledLines: (string | undefined)[] = Array.from({ length: allLines.length }, () => undefined);
+		const styleLine = (index: number): string => {
+			const cached = styledLines[index];
+			if (cached !== undefined) return cached;
 			const ctx = contexts[index]!;
 			// Swap the inner code-frame gutter `│` for a space so it does not nest a
 			// second vertical bar inside the frame border.
-			const display = replaceTabs(line.replace("│", " "));
+			const display = replaceTabs(allLines[index]!.replace("│", " "));
+			let styled: string;
 			if (ctx.kind === "dir") {
-				const styled = uiTheme.fg("accent", display);
-				return ctx.headerPath ? fileHyperlink(ctx.headerPath, styled) : styled;
+				const accent = uiTheme.fg("accent", display);
+				styled = ctx.headerPath ? fileHyperlink(ctx.headerPath, accent) : accent;
+			} else if (ctx.kind === "file") {
+				const tinted = uiTheme.fg(ctx.depth === 1 ? "accent" : "dim", display);
+				styled = ctx.headerPath ? fileHyperlink(ctx.headerPath, tinted) : tinted;
+			} else if (display.startsWith("+")) {
+				styled = uiTheme.fg("toolDiffAdded", display);
+			} else if (display.startsWith("-")) {
+				styled = uiTheme.fg("toolDiffRemoved", display);
+			} else {
+				styled = uiTheme.fg("toolOutput", display);
 			}
-			if (ctx.kind === "file") {
-				const styled = uiTheme.fg(ctx.depth === 1 ? "accent" : "dim", display);
-				return ctx.headerPath ? fileHyperlink(ctx.headerPath, styled) : styled;
-			}
-			if (display.startsWith("+")) return uiTheme.fg("toolDiffAdded", display);
-			if (display.startsWith("-")) return uiTheme.fg("toolDiffRemoved", display);
-			return uiTheme.fg("toolOutput", display);
+			styledLines[index] = styled;
+			return styled;
+		};
+		const changeGroups = groupLineIndicesByBlank(allLines).filter(indices => {
+			const first = allLines[indices[0]!]!;
+			return !first.startsWith("Safety cap reached") && !first.startsWith("Parse issues:");
 		});
-		const changeGroups = groupLineIndicesByBlank(allLines)
-			.filter(indices => {
-				const first = allLines[indices[0]!]!;
-				return !first.startsWith("Safety cap reached") && !first.startsWith("Parse issues:");
-			})
-			.map(indices => indices.map(index => styledLines[index]!));
 
 		const badge = { label: "proposed", color: "warning" as const };
 		const header = renderStatusLine(
@@ -194,17 +291,117 @@ export const astEditToolRenderer = {
 				uiTheme.fg("warning", formatParseErrorsCountLabel(details.parseErrors, details.parseErrorsTotal)),
 			);
 		}
-		return framedToolCard(uiTheme, ({ contentWidth }) => {
-			const changeLines = buildChangeBody(changeGroups, Boolean(options.expanded), COLLAPSED_CHANGE_LIMIT, uiTheme);
-			const bodyLines = [...changeLines, ...extraLines].map(l => truncateToWidth(l, contentWidth, Ellipsis.Omit));
-			while (bodyLines.length > 0 && bodyLines[0].trim() === "") bodyLines.shift();
+		// The body is spinner-invariant: rebuild it only on expansion/width change.
+		let bodyMemo: { expanded: boolean; width: number; lines: readonly string[] } | undefined;
+		return framedToolCard(
+			uiTheme,
+			({ contentWidth }) => {
+				const expanded = Boolean(options.expanded);
+				if (bodyMemo === undefined || bodyMemo.expanded !== expanded || bodyMemo.width !== contentWidth) {
+					const changeLines = buildChangeBody(changeGroups, styleLine, expanded, COLLAPSED_CHANGE_LIMIT, uiTheme);
+					const lines = [...changeLines, ...extraLines].map(l => truncateToWidth(l, contentWidth, Ellipsis.Omit));
+					while (lines.length > 0 && lines[0].trim() === "") lines.shift();
+					bodyMemo = { expanded, width: contentWidth, lines };
+				}
+				const bodyLines = bodyMemo.lines;
+				return {
+					header,
+					sections: bodyLines.length > 0 ? [{ content: bodyLines }] : [],
+					phase: options.isPartial ? "partial" : "success",
+					borderColor: "borderMuted",
+				};
+			},
+			{ onInvalidate: () => (bodyMemo = undefined) },
+		);
+	},
+	describeCall(args: AstEditRenderArgs): NativeToolView {
+		return {
+			tool: {
+				title: "AST Edit",
+				...astEditPatternHead(args),
+				meta: args.paths?.length ? [`in ${args.paths.map(displayPath).join(", ")}`] : undefined,
+			},
+		};
+	},
+
+	describeResult(
+		result: { content: Array<{ type: string; text?: string }>; details?: AstEditToolDetails; isError?: boolean },
+		_options: RenderResultOptions,
+		args?: AstEditRenderArgs,
+	): NativeToolView {
+		const details = result.details;
+		const patternHead = astEditPatternHead(args);
+		if (result.isError) {
 			return {
-				header,
-				sections: bodyLines.length > 0 ? [{ content: bodyLines }] : [],
-				phase: options.isPartial ? "partial" : "success",
-				borderColor: "borderMuted",
+				tool: { title: "AST Edit", ...patternHead },
+				tone: "error",
+				body: [errorText(resultText(result) || "Unknown error")],
 			};
-		});
+		}
+		const parseErrors = details?.parseErrors ?? [];
+		const parseNote: NativeChild | undefined =
+			parseErrors.length > 0
+				? node(
+						"section",
+						{
+							head: [span(formatParseErrorsCountLabel(parseErrors, details?.parseErrorsTotal), "warning")],
+							collapsible: true,
+							collapsed: true,
+						},
+						[code(parseErrors.join("\n"))],
+						"parse-errors",
+					)
+				: undefined;
+		const totalReplacements = details?.totalReplacements ?? 0;
+		if (totalReplacements === 0) {
+			return {
+				tool: { title: "AST Edit", ...patternHead, meta: ["0 replacements"] },
+				tone: "warning",
+				body: compact<NativeChild>([parseNote, astEditScopeStats(details)]),
+			};
+		}
+		const limitReached = details?.limitReached ?? false;
+		const allLines = (details?.displayContent ?? resultText(result)).split("\n");
+		const kept = groupLineIndicesByBlank(allLines)
+			.filter(indices => {
+				const first = allLines[indices[0]!]!;
+				return !first.startsWith("Safety cap reached") && !first.startsWith("Parse issues:");
+			})
+			.flatMap(indices => indices.map(index => allLines[index]!));
+		const files = parseAstEditChanges(kept);
+		const fileCount = Math.max(details?.filesTouched ?? 0, files.length);
+		let added = 0;
+		let removed = 0;
+		for (const file of files) {
+			added += file.added;
+			removed += file.removed;
+		}
+		// Same shape as edit: one file heads the call by path with a bare diff;
+		// several head it as `N files` with one borderless section per file.
+		const single = fileCount === 1 && files.length === 1 ? files[0] : undefined;
+		const changes: NativeChild[] = single
+			? [astEditDiff(single)]
+			: files.map(file => fileDiffSection(file, [astEditDiff(file)], { role: "omp.tool.ast_edit.file" }));
+		// The head names the files, so a single rewrite's pattern moves to a quiet context line.
+		const pattern = args?.ops?.length === 1 ? patternPreview(args.ops[0]?.pat) : undefined;
+		return {
+			tool: {
+				title: "AST Edit",
+				target: single ? displayPath(single.path) : formatCount("file", fileCount),
+				targetKind: single ? "path" : "text",
+				meta: compact([diffStatsMeta(added, removed), formatCount("replacement", totalReplacements)]),
+				badges: details?.applied ? undefined : [{ text: "proposed", tone: "warning" }],
+			},
+			tone: limitReached ? "warning" : undefined,
+			body: compact<NativeChild>([
+				pattern !== undefined &&
+					text([span(pattern, "code")], { lines: 1, truncate: "end", role: "omp.tool.context" }),
+				...(changes.length > 0 ? changes : [noteText(kept.join("\n"))]),
+				parseNote,
+				astEditScopeStats(details),
+			]),
+			preview: { lines: COLLAPSED_CHANGE_LIMIT },
+		};
 	},
 	mergeCallAndResult: true,
 } satisfies ToolRenderer<AstEditRenderArgs, AstEditToolDetails>;

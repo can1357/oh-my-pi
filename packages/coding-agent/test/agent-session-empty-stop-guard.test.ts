@@ -728,10 +728,10 @@ describe("AgentSession empty stop guard", () => {
 		await session.waitForIdle();
 		// Persisted identity must win regardless of branch enumeration order. The
 		// coarse matcher otherwise selects the commentary when it is encountered first.
-		const getBranch = session.sessionManager.getBranch.bind(session.sessionManager);
+		const getBranchView = session.sessionManager.getBranchView.bind(session.sessionManager);
 		const branchSpy = vi
-			.spyOn(session.sessionManager, "getBranch")
-			.mockImplementation(() => getBranch().slice().reverse());
+			.spyOn(session.sessionManager, "getBranchView")
+			.mockImplementation(() => getBranchView().slice().reverse());
 		await session.followUp("continue after commentary");
 		await session.waitForIdle();
 		branchSpy.mockRestore();

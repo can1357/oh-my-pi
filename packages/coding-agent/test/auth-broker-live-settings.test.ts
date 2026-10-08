@@ -4,6 +4,7 @@ import { AuthStorage, SqliteAuthCredentialStore } from "@oh-my-pi/pi-ai";
 import { type AuthBrokerServerHandle, startAuthBroker } from "@oh-my-pi/pi-ai/auth-broker";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { discoverAuthStorage } from "@oh-my-pi/pi-coding-agent/sdk";
+import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
 import { createAuthStorageSettingsSync } from "@oh-my-pi/pi-coding-agent/session/auth-broker-config";
 import { TempDir } from "@oh-my-pi/pi-utils";
 
@@ -53,6 +54,8 @@ describe("auth broker settings take effect live", () => {
 			const value = savedEnv[key];
 			if (value !== undefined) process.env[key] = value;
 		}
+		// `Settings.loadIsolated` opened `<agentDir>/agent.db`; Windows cannot delete it while open.
+		AgentStorage.close();
 		tempDir.removeSync();
 	});
 

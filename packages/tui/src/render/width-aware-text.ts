@@ -1,4 +1,6 @@
 import { Text } from "../components/text";
+import { col } from "../native/describe";
+import type { DescribeContext, NativeNode } from "../native/node";
 import type { Component } from "../tui";
 import { getPaddingX } from "../utils";
 
@@ -23,6 +25,8 @@ export class WidthAwareText implements Component {
 	#cachedContentWidth = -1;
 	#cachedText: string | undefined;
 	#ignoreTight = false;
+	#nativeCols = -1;
+	#native: NativeNode | undefined;
 
 	constructor(format: (contentWidth: number) => string, paddingX = 1, paddingY = 1) {
 		this.#format = format;
@@ -45,6 +49,31 @@ export class WidthAwareText implements Component {
 		this.#cachedContentWidth = -1;
 		this.#cachedText = undefined;
 		this.#inner.invalidate();
+	}
+
+	/**
+	 * Re-run the formatter on the next render because its inputs changed.
+	 * Unlike {@link invalidate}, the inner `Text` keeps its wrap cache, so a
+	 * reformat that yields the same string skips re-wrapping and re-tinting.
+	 */
+	reformat(): void {
+		this.#cachedText = undefined;
+	}
+
+	/**
+	 * The inner `Text` as the only child, fed the formatter's output. The
+	 * formatter is width-bound by contract, so it runs once per surface width
+	 * (the only width a describer knows) and again on `reformat()`.
+	 */
+	describe(cx: DescribeContext): NativeNode {
+		if (this.#cachedText === undefined || cx.cols !== this.#nativeCols) {
+			this.#nativeCols = cx.cols;
+			this.#cachedContentWidth = -1;
+			this.#cachedText = this.#format(Math.max(1, cx.cols));
+			this.#inner.setText(this.#cachedText);
+		}
+		this.#native ??= col([this.#inner]);
+		return this.#native;
 	}
 
 	render(width: number): readonly string[] {

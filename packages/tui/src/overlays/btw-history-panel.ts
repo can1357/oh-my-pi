@@ -28,11 +28,16 @@ import {
 import type { SpaceHoldHandler } from "../space-hold";
 import { sanitizeErrorLine } from "../chrome/error-block";
 import { sanitizeDisplayLine, sanitizeDisplayText } from "./extensions/display-text";
-import { editorKey, rawKeyHint } from "../chrome/keybinding-hints";
+import { editorKey, editorKeys, keyHint, rawKeyHint } from "../chrome/keybinding-hints";
+import { formatKeyHint, type KeyId } from "../app-keybindings";
 import { bottomBorder, row, topBorder } from "../chrome/overlay-box";
 import { padToWidth } from "../render/utils";
 import { SplitPane } from "../components/layout/split-pane";
 import { clampSelection, contentRowWidth, padLinesToHeight, renderScrollableList } from "../chrome/selector-helpers";
+import type { TspScrollBy, TspSpan } from "@oh-my-pi/pi-wire";
+import type { NativeChild, NativeNode, NativeScroll, NativeUiEvent } from "../native/node";
+import { col, md, node, span, text } from "../native/describe";
+import { actionBar, actionButton, actionHint, hintsRow, type NativeHint, statusHintsRow } from "../native/overlay";
 
 interface BtwHistoryPanelOptions {
 	records: readonly BtwHistoryRecord[];
@@ -41,10 +46,17 @@ interface BtwHistoryPanelOptions {
 	onCancel: (record: BtwHistoryRecord) => void;
 	canFollowUp?: (record: BtwHistoryRecord) => boolean;
 	onFollowUp?: (record: BtwHistoryRecord, question: string, signal: AbortSignal) => Promise<boolean>;
-	/** Space-bar push-to-talk for a follow-up composer: dictates into `input` while Space is held. */
+	/** Configured push-to-talk keys for a follow-up composer. */
+	spaceHoldKeys?: readonly KeyId[];
 	spaceHold?: (input: Input) => SpaceHoldHandler;
 	requestRender: () => void;
 	getHeight: () => number;
+	/**
+	 * Esc closes the panel even while the selected answer runs (it keeps
+	 * streaming in the background) and `x` cancels it, instead of Esc cancelling
+	 * first. For a host with no inline panel to fall back to (Tern).
+	 */
+	escapeHides?: boolean;
 }
 
 interface FollowUpComposer {
@@ -60,6 +72,21 @@ interface RenderedTurn {
 	answer: Markdown;
 	lines: readonly string[];
 	width: number;
+}
+
+/** The visible inputs of the last native description; any change rebuilds it. */
+interface BtwHistoryNativeMemo {
+	records: readonly BtwHistoryRecord[];
+	selectedId: string | undefined;
+	focus: "list" | "answer";
+	focused: boolean;
+	composer: FollowUpComposer | undefined;
+	notice: string | undefined;
+	followUpPending: boolean;
+	canFollowUp: boolean;
+	copied: boolean;
+	scroll: NativeScroll | undefined;
+	node: NativeNode;
 }
 
 const STATUS: Record<BtwHistoryRecord["status"], { label: string; color: ThemeColor }> = {
@@ -88,6 +115,9 @@ export class BtwHistoryPanel implements Component, Focusable {
 	#detailDirty = true;
 	#lastCopiedId: string | undefined;
 	#lastCopiedText: string | undefined;
+	#native: BtwHistoryNativeMemo | undefined;
+	/** The last answer-pane scroll key, forwarded natively (see {@link NativeNode.scroll}). */
+	#scroll: NativeScroll | undefined;
 	readonly #detail = new ScrollView([], {
 		height: 1,
 		scrollbar: "auto",
@@ -139,6 +169,7 @@ export class BtwHistoryPanel implements Component, Focusable {
 		this.#options = options;
 		this.#records = options.records;
 		this.#selectedId = options.records[0]?.id;
+		if (options.records.length === 1) this.#focus = "answer";
 	}
 
 	get focused(): boolean {
@@ -167,6 +198,8 @@ export class BtwHistoryPanel implements Component, Focusable {
 			this.#followLatest = false;
 			this.#detail.scrollToTop();
 		}
+		// One side question has nothing to pick: its answer keeps the arrow keys.
+		if (records.length === 1) this.#focus = "answer";
 		this.#options.requestRender();
 	}
 
@@ -189,6 +222,7 @@ export class BtwHistoryPanel implements Component, Focusable {
 		this.#turns = [];
 		this.#composer?.input.invalidate();
 		this.#detailDirty = true;
+		this.#native = undefined;
 		this.#split.invalidate();
 		this.#labels.invalidate();
 	}
@@ -226,9 +260,30 @@ export class BtwHistoryPanel implements Component, Focusable {
 		return true;
 	}
 
+	/** Select a record with its answer pane focused, read from the top (a just-asked /btw). */
+	showRecord(recordId: string): void {
+		const index = this.#records.findIndex(record => record.id === recordId);
+		if (index === -1) return;
+		this.#select(index);
+		this.#focus = "answer";
+		this.#options.requestRender();
+	}
+
+	/**
+	 * Jump the answer pane to its bottom once (opening or sending a follow-up):
+	 * text mode keeps following the newest row at render until a scroll key;
+	 * natively the sheet body scrolls to its end. Tern reports no wheel scroll,
+	 * so streamed updates never re-pin it there and a reader is never yanked.
+	 */
+	#jumpToEnd(): void {
+		this.#followLatest = true;
+		this.#scroll = { by: "end", n: (this.#scroll?.n ?? 0) + 1 };
+	}
+
 	#openComposer(record: BtwHistoryRecord): void {
 		const input = new Input();
 		input.prompt = theme.fg("accent", "Follow up: ");
+		if (this.#options.spaceHoldKeys !== undefined) input.spaceHold.keys = this.#options.spaceHoldKeys;
 		input.spaceHold.handler = this.#options.spaceHold?.(input);
 		const composer: FollowUpComposer = { recordId: record.id, input, abortController: new AbortController() };
 		input.onEscape = () => {
@@ -240,6 +295,8 @@ export class BtwHistoryPanel implements Component, Focusable {
 		};
 		this.#composer = composer;
 		this.#focus = "answer";
+		// Following up reads from the newest turn, right above the composer.
+		this.#jumpToEnd();
 		this.#options.requestRender();
 	}
 
@@ -265,18 +322,23 @@ export class BtwHistoryPanel implements Component, Focusable {
 				this.#composer = undefined;
 				this.#selectedId = composer.recordId;
 				this.#focus = "answer";
-				this.#followLatest = true;
+				this.#jumpToEnd();
 			} else {
-				composer.notice = "Follow-up was not started. Your draft is kept; Enter to retry.";
+				composer.notice = `Follow-up was not started. Your draft is kept; ${editorKey("tui.input.submit")} to retry.`;
 			}
 		} catch {
 			if (this.#composer === composer) {
-				composer.notice = "Could not start the follow-up. Your draft is kept; Enter to retry.";
+				composer.notice = `Could not start the follow-up. Your draft is kept; ${editorKey("tui.input.submit")} to retry.`;
 			}
 		} finally {
 			this.#followUpPending = false;
 			this.#options.requestRender();
 		}
+	}
+
+	/** Only an active follow-up composer can claim its configured push-to-talk keys. */
+	capturesInput(data: string): boolean {
+		return this.#composer?.input.capturesInput(data) ?? false;
 	}
 
 	/** Enhanced clipboard pastes belong only to the active composer. */
@@ -293,9 +355,15 @@ export class BtwHistoryPanel implements Component, Focusable {
 			return;
 		}
 		const record = this.#selected();
+		const running = record !== undefined && getBtwLatestTurn(record).status === "running" ? record : undefined;
+		const hides = this.#options.escapeHides === true;
 		if (matchesSelectCancel(data) || matchesKey(data, "escape")) {
-			if (record && getBtwLatestTurn(record).status === "running") this.#options.onCancel(record);
+			if (running && !hides) this.#options.onCancel(running);
 			else this.#options.onClose();
+			return;
+		}
+		if (hides && matchesKey(data, "x")) {
+			if (running) this.#options.onCancel(running);
 			return;
 		}
 		if (matchesKey(data, "f") || matchesKey(data, "enter")) {
@@ -314,11 +382,12 @@ export class BtwHistoryPanel implements Component, Focusable {
 			matchesKey(data, "ctrl+_") ||
 			data === String.fromCharCode(31)
 		) {
-			this.#focus = this.#focus === "list" ? "answer" : "list";
+			// One side question has nothing to pick: its answer keeps the arrow keys.
+			if (this.#records.length > 1) this.#focus = this.#focus === "list" ? "answer" : "list";
 		} else if (matchesKey(data, "right")) {
 			this.#focus = "answer";
 		} else if (matchesKey(data, "left")) {
-			this.#focus = "list";
+			if (this.#records.length > 1) this.#focus = "list";
 		} else if (this.#focus === "list") {
 			const index = this.#selectedIndex();
 			if (matchesSelectUp(data)) this.#select(index - 1);
@@ -329,14 +398,223 @@ export class BtwHistoryPanel implements Component, Focusable {
 			else if (matchesKey(data, "end")) this.#select(this.#records.length - 1);
 			else return;
 		} else {
-			if (matchesSelectUp(data)) this.#detail.scroll(-1);
-			else if (matchesSelectDown(data)) this.#detail.scroll(1);
-			else if (matchesSelectPageUp(data)) this.#detail.page(-1);
-			else if (matchesSelectPageDown(data)) this.#detail.page(1);
+			const by: TspScrollBy | undefined = matchesSelectUp(data)
+				? "line-up"
+				: matchesSelectDown(data)
+					? "line-down"
+					: matchesSelectPageUp(data)
+						? "page-up"
+						: matchesSelectPageDown(data)
+							? "page-down"
+							: matchesKey(data, "home")
+								? "start"
+								: matchesKey(data, "end")
+									? "end"
+									: undefined;
+			if (by === "line-up") this.#detail.scroll(-1);
+			else if (by === "line-down") this.#detail.scroll(1);
+			else if (by === "page-up") this.#detail.page(-1);
+			else if (by === "page-down") this.#detail.page(1);
 			else if (!this.#detail.handleScrollKey(data)) return;
+			if (by) this.#scroll = { by, n: (this.#scroll?.n ?? 0) + 1 };
 			this.#followLatest = matchesKey(data, "end");
 		}
 		this.#options.requestRender();
+	}
+
+	/** A large glass sheet titled "BTW history". */
+	readonly nativeOverlay = { role: "omp.overlay.btwHistory", size: "lg", head: "BTW history" } as const;
+
+	describe(): NativeNode {
+		const record = this.#selected();
+		const composer = this.#composer;
+		const canFollowUp = record !== undefined && this.#canFollowUp(record);
+		const copied = record !== undefined && this.#isCopied(record);
+		const memo = this.#native;
+		if (
+			memo?.records === this.#records &&
+			memo.selectedId === this.#selectedId &&
+			memo.focus === this.#focus &&
+			memo.focused === this.#focused &&
+			memo.composer === composer &&
+			memo.notice === composer?.notice &&
+			memo.followUpPending === this.#followUpPending &&
+			memo.canFollowUp === canFollowUp &&
+			memo.copied === copied &&
+			memo.scroll === this.#scroll
+		) {
+			return memo.node;
+		}
+		// Plain columns, not `section`s: Tern draws a section as a foldable `##` heading,
+		// and a flex item's min-content width (a long code line in the answer) would
+		// crush the list pane. The answer pane may shrink to nothing; the list may not.
+		// With one side question the list and the pane labels are noise: the answer alone.
+		const showList = this.#records.length > 1;
+		const detail = this.#describeDetail(record, copied);
+		const answerPane: NativeNode = {
+			...node(
+				"col",
+				{ gap: "sm", grow: 1, basis: 0, min: { w: 0 } },
+				showList ? [text(this.#describeFocusLabel("answer"), { truncate: "end", lines: 1 }), detail] : [detail],
+				"details",
+			),
+			// Natively the sheet body is the scroller; arrow/page keys on the answer pane move it.
+			scroll: this.#scroll,
+		};
+		const panes: NativeChild[] = showList
+			? [
+					node(
+						"col",
+						{ gap: "sm", shrink: 0, basis: 0.3, max: { w: "40ch" } },
+						[text(this.#describeFocusLabel("list"), { truncate: "end", lines: 1 }), this.#describeList()],
+						"history",
+					),
+					answerPane,
+				]
+			: [answerPane];
+		const children: NativeChild[] = [node("row", { gap: "lg", align: "start" }, panes, "body")];
+		if (composer) {
+			composer.input.focused = this.#focused;
+			const lines: NativeChild[] = [
+				text([span(`Topic: ${sanitizeDisplayLine(record?.question ?? "")}`, "dim")], { truncate: "end" }),
+			];
+			if (composer.notice) {
+				lines.push(text([span(composer.notice, this.#followUpPending ? "dim" : "warning")], { wrap: "word" }));
+			}
+			lines.push(composer.input);
+			children.push(node("col", undefined, lines, "composer"));
+		}
+		children.push({ ...this.#describeFooter(record, canFollowUp, copied), key: "footer" });
+		// Clicking Close always dismisses the sheet; the Esc keycap only shows where Esc does too.
+		const running = record !== undefined && getBtwLatestTurn(record).status === "running";
+		const escapeCloses = !composer && !(running && !this.#options.escapeHides);
+		children.push({
+			...actionBar([null, actionButton("Close", "close", escapeCloses ? { keys: "escape" } : undefined)]),
+			key: "actions",
+		});
+		// The sheet is the frame (`nativeOverlay`): a borderless column.
+		const described = col(children, { gap: "md" });
+		this.#native = {
+			records: this.#records,
+			selectedId: this.#selectedId,
+			focus: this.#focus,
+			focused: this.#focused,
+			composer,
+			notice: composer?.notice,
+			followUpPending: this.#followUpPending,
+			canFollowUp,
+			copied,
+			scroll: this.#scroll,
+			node: described,
+		};
+		return described;
+	}
+
+	handleNativeEvent(event: NativeUiEvent): void {
+		if (event.type === "action" && event.act === "close") {
+			this.#options.onClose();
+			return;
+		}
+		if ((event.type !== "select" && event.type !== "activate") || this.#composer) return;
+		const index = this.#records.findIndex(record => record.id === event.item);
+		if (index === -1) return;
+		this.#select(index);
+		this.#focus = "list";
+		// Enter on a history row opens the follow-up composer.
+		if (event.type === "activate") this.openFollowUp(event.item);
+		this.#options.requestRender();
+	}
+
+	#describeFocusLabel(focus: "list" | "answer"): TspSpan[] {
+		const label = focus === "list" ? `History (${this.#records.length})` : "Details";
+		return this.#focus === focus ? [span(`${theme.nav.cursor} ${label}`, "accent strong")] : [span(label, "muted")];
+	}
+
+	#describeList(): NativeNode {
+		const items = this.#records.map(record => {
+			const status = STATUS[getBtwLatestTurn(record).status];
+			return node(
+				"item",
+				{
+					label: sanitizeDisplayLine(record.question),
+					detail: [span(this.#timeFormat.format(record.createdAt), "dim")],
+					value: [span(status.label, status.color)],
+				},
+				undefined,
+				record.id,
+			);
+		});
+		return node(
+			"list",
+			{
+				selected: this.#selectedId ?? null,
+				empty: [span("No side questions yet. Use /btw QUESTION to start one.", "muted")],
+			},
+			items,
+			"records",
+		);
+	}
+
+	#describeDetail(record: BtwHistoryRecord | undefined, copied: boolean): NativeNode {
+		if (!record)
+			return text([span("No side questions yet. Use /btw QUESTION to start one.", "muted")], { wrap: "word" });
+		const children: NativeChild[] = [];
+		if (copied)
+			children.push(node("text", { spans: [span("✓ Copied to clipboard", "success")] }, undefined, "copied"));
+		const turns = getBtwTurns(record);
+		for (let index = 0; index < turns.length; index++) {
+			if (index > 0) children.push(node("rule", undefined, undefined, `rule-${index}`));
+			children.push(this.#describeTurn(turns[index]!, `turn-${index}`));
+		}
+		return col(children, { gap: "md" });
+	}
+
+	#describeTurn(turn: BtwHistoryTurn, key: string): NativeNode {
+		const status = STATUS[turn.status];
+		const answer = turn.answer.trim()
+			? md(sanitizeDisplayText(turn.answer), { stream: turn.status === "running" })
+			: text([span(turn.status === "running" ? "Waiting for response…" : "No answer text.", "dim")]);
+		// Plain labels, not `section`s (Tern draws those as foldable `##` headings);
+		// the question stays markdown so its inline code and links render.
+		const children: NativeChild[] = [
+			text(
+				[
+					span("Question", "accent strong"),
+					span(" · ", "dim"),
+					span(status.label, status.color),
+					span(` · ${this.#dateFormat.format(turn.createdAt)}`, "dim"),
+				],
+				{ wrap: "word" },
+			),
+			md(sanitizeDisplayText(turn.question)),
+			text([span("Answer", "accent strong")]),
+			answer,
+		];
+		if (turn.error) children.push(text([span(sanitizeErrorLine(turn.error), "error")], { wrap: "word" }));
+		if (turn.status === "interrupted") children.push(text([span("Not resumed in this view.", "muted")]));
+		return node("col", { gap: "sm" }, children, key);
+	}
+
+	#describeFooter(record: BtwHistoryRecord | undefined, canFollowUp: boolean, copied: boolean): NativeNode {
+		if (this.#composer) {
+			return hintsRow([
+				actionHint("tui.input.submit", this.#followUpPending ? "starting…" : "send"),
+				actionHint("tui.select.cancel", "cancel"),
+			]);
+		}
+		const latest = record ? getBtwLatestTurn(record) : undefined;
+		const running = latest?.status === "running";
+		const hints: (NativeHint | undefined)[] = [
+			actionHint("tui.select.cancel", running && !this.#options.escapeHides ? "cancel" : "close"),
+			running && this.#options.escapeHides ? { keys: ["x"], label: "cancel" } : undefined,
+			this.#records.length > 1 ? { keys: ["tab", "ctrl+/"], label: "switch pane" } : undefined,
+			actionHint(["tui.select.up", "tui.select.down"], this.#focus === "list" ? "select" : "scroll"),
+		];
+		if (canFollowUp) hints.push({ keys: ["f", "enter"], label: "follow up" });
+		if (record && getBtwCopyText(record) !== undefined) {
+			hints.push({ keys: ["c"], label: copied ? "copy again" : "copy answer" });
+		}
+		return copied ? statusHintsRow([span("✓ copied", "success")], hints) : hintsRow(hints);
 	}
 
 	#renderList(width: number, height: number): readonly string[] {
@@ -506,16 +784,22 @@ export class BtwHistoryPanel implements Component, Focusable {
 		const record = this.#selected();
 		const composer = this.#composer;
 		const latest = record ? getBtwLatestTurn(record) : undefined;
+		const running = latest?.status === "running";
 		const actions = composer
-			? [rawKeyHint("Enter", this.#followUpPending ? "starting…" : "send"), rawKeyHint("Esc", "cancel")]
+			? [
+					keyHint("tui.input.submit", this.#followUpPending ? "starting…" : "send"),
+					keyHint("tui.select.cancel", "cancel"),
+				]
 			: [
-					rawKeyHint("Esc", latest?.status === "running" ? "cancel" : "close"),
-					rawKeyHint("Tab/Ctrl+/", "switch pane"),
+					keyHint("tui.select.cancel", running && !this.#options.escapeHides ? "cancel" : "close"),
+					...(running && this.#options.escapeHides ? [rawKeyHint("x", "cancel")] : []),
+					...(this.#records.length > 1 ? [rawKeyHint(["tab", "ctrl+/"], "switch pane")] : []),
 				];
 		if (!composer) {
-			if (record && this.#canFollowUp(record)) actions.push(rawKeyHint("f/Enter", "follow up"));
+			if (record && this.#canFollowUp(record)) actions.push(rawKeyHint(["f", "enter"], "follow up"));
 			if (record && getBtwCopyText(record) !== undefined) {
-				if (this.#isCopied(record)) actions.push(theme.fg("success", "✓ copied · c to copy again"));
+				if (this.#isCopied(record))
+					actions.push(theme.fg("success", `✓ copied · ${formatKeyHint("c")} to copy again`));
 				else actions.push(rawKeyHint("c", inner < 40 ? "copy" : "copy answer"));
 			}
 		}
@@ -577,10 +861,8 @@ export class BtwHistoryPanel implements Component, Focusable {
 			if (showNavigation) {
 				lines.push(
 					row(
-						rawKeyHint(
-							`${editorKey("tui.select.up")}/${editorKey("tui.select.down")}`,
-							this.#focus === "list" ? "select" : "scroll",
-						),
+						theme.fg("dim", editorKeys("tui.select.up", "tui.select.down")) +
+							theme.fg("muted", ` ${this.#focus === "list" ? "select" : "scroll"}`),
 						width,
 					),
 				);

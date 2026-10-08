@@ -74,9 +74,11 @@ describe("writeFileWithFallback", () => {
 			}),
 		);
 
-		await writeFileWithFallback("/denied/path.txt", "payload", denyingFile(fsError("EACCES")) as never);
+		// The seam brokers the resolved path (Windows grafts the cwd's drive on).
+		const dst = path.resolve("/denied/path.txt");
+		await writeFileWithFallback(dst, "payload", denyingFile(fsError("EACCES")) as never);
 
-		expect(seen).toEqual([{ dst: "/denied/path.txt", content: "payload" }]);
+		expect(seen).toEqual([{ dst, content: "payload" }]);
 	});
 
 	it("names the session that issued the write, and reports none outside a tool call", async () => {
@@ -241,6 +243,10 @@ describe("writeFileWithFallback", () => {
 	// nothing and every expectation here would fail for a reason unrelated to this
 	// seam. Root is real for a Docker-based local run and for a self-hosted runner.
 	describe.skipIf(process.getuid?.() === 0)("against real kernel permissions", () => {
+		// Windows has no directory mode bits (`chmod` only toggles a file's read-only
+		// attribute), so a 0o500/0o000 directory denies nothing there.
+		const posixDirModeIt = it.skipIf(process.platform === "win32");
+
 		let root = "";
 
 		beforeEach(async () => {
@@ -264,7 +270,7 @@ describe("writeFileWithFallback", () => {
 			return dir;
 		}
 
-		it("diverts a real EACCES from creating a file in an unwritable directory", async () => {
+		posixDirModeIt("diverts a real EACCES from creating a file in an unwritable directory", async () => {
 			const dst = path.join(await lockedDir(), "new.txt");
 			const seen: Array<{ dst: string; content: string; code: unknown }> = [];
 			disposers.push(
@@ -279,7 +285,7 @@ describe("writeFileWithFallback", () => {
 			expect(seen).toEqual([{ dst, content: "payload", code: "EACCES" }]);
 		});
 
-		it("unmasks a denied parent mkdir that Bun reports as ENOENT", async () => {
+		posixDirModeIt("unmasks a denied parent mkdir that Bun reports as ENOENT", async () => {
 			// Bun's write creates missing parents itself and, when that mkdir is denied,
 			// surfaces the open()'s ENOENT instead of the denial. Without unmasking, a
 			// sandboxed write into a new out-of-tree directory never reaches a handler.
@@ -297,7 +303,7 @@ describe("writeFileWithFallback", () => {
 			expect(seen).toEqual([{ dst, content: "payload", code: "EACCES" }]);
 		});
 
-		it("attaches the recovered denial as `cause` when no handler takes the write", async () => {
+		posixDirModeIt("attaches the recovered denial as `cause` when no handler takes the write", async () => {
 			// The thrown error stays the ENOENT Bun reported, so behaviour matches a host
 			// with no fallback registered. But this code has already proven the real
 			// boundary is EACCES, and discarding that would hand the caller back exactly
@@ -322,8 +328,9 @@ describe("writeFileWithFallback", () => {
 				}),
 			);
 
+			// Bun on Windows reports its own parent mkdir's EEXIST for a file in the path.
 			await expect(writeFileWithFallback(path.join(blocker, "child.txt"), "payload")).rejects.toMatchObject({
-				code: expect.stringMatching(/^(ENOTDIR|ENOENT)$/),
+				code: expect.stringMatching(/^(ENOTDIR|ENOENT|EEXIST)$/),
 			});
 			expect(called).toBe(false);
 		});
@@ -401,7 +408,7 @@ describe("writeFileWithFallback", () => {
 			}
 		});
 
-		it("refuses to broker a write through a dangling symlink", async () => {
+		posixDirModeIt("refuses to broker a write through a dangling symlink", async () => {
 			// `realpath` cannot name where a dangling link points, and the write follows
 			// it, so there is no destination to hand a privileged writer. Refusing is the
 			// only honest answer, and it is the one `confineToWorkspace` already gives.
@@ -425,7 +432,7 @@ describe("writeFileWithFallback", () => {
 			expect(called).toBe(false);
 		});
 
-		it("refuses to broker a write whose own metadata is behind the boundary", async () => {
+		posixDirModeIt("refuses to broker a write whose own metadata is behind the boundary", async () => {
 			// A sandbox that denies the write often hides the target's metadata too, so
 			// the final component cannot be shown to be a plain name rather than a link —
 			// and `open` follows a link there. The delete seam keeps working in this shape
@@ -489,7 +496,8 @@ describe("deleteFileWithFallback", () => {
 		expect(writeCalled).toBe(false);
 	});
 
-	describe.skipIf(process.getuid?.() === 0)("against real kernel permissions", () => {
+	// Root and Windows: mode bits deny nothing; see the write-side note above.
+	describe.skipIf(process.getuid?.() === 0 || process.platform === "win32")("against real kernel permissions", () => {
 		let root = "";
 		let locked = "";
 

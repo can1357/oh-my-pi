@@ -58,7 +58,11 @@ export interface EffectiveSettingsScope {
  * global instance when it targets the same agent dir (and cwd, when given), else a
  * read-only load so `--config`/`PI_CONFIG_FILES`/project overlays still apply.
  */
-async function resolveEffectiveSettings({ settings, cwd, agentDir = getAgentDir() }: EffectiveSettingsScope) {
+export async function resolveEffectiveSettings({
+	settings,
+	cwd,
+	agentDir = getAgentDir(),
+}: EffectiveSettingsScope = {}): Promise<Settings> {
 	if (settings) return settings;
 	const current = await Settings.current;
 	if (

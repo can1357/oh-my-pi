@@ -12,7 +12,7 @@
 ## Registration / Visibility
 
 - Requires `compaction.experimentalContextManagement = true`, an undisposed session, and a session journal whose ID matches the tool session's owner ID.
-- The setting defaults to `false`. Enable **Notes-backed context windows (experimental)** under `/settings` → Context → Compaction; the running session gains the tool immediately.
+- The setting defaults to `false`. Enable **Notes-backed context windows (experimental)** under `/settings` → Context → Compaction; ordinary running sessions reconcile the tool immediately. Restricted sessions retain their host-provided tool list.
 - Metadata: `strict = true`, `loadMode = "essential"`. Calls without a `text` property request read approval; calls with that property request write approval.
 - Notes-backed rollover requires all four tools to be active: `context_notes`, `new_context`, `read`, and `grep`.
 
@@ -35,7 +35,7 @@
 4. Recheck cancellation, session ownership, feature availability, and the branch leaf before appending an `experimental_context_notes` custom entry with `{ version: 1, text }`.
 5. Flush the journal before returning success.
 
-The latest visible notebook is included in experimental context reconstruction and survives rollover and disk resume. A context reset hides earlier notebook revisions. Clearing the notebook appends an empty revision; it does not delete earlier journal entries.
+The latest valid, nonempty notebook is included in experimental context reconstruction and survives rollover and disk resume. Invalid historical notebook entries are skipped instead of masking an earlier valid revision. A context reset hides earlier notebook revisions. Clearing the notebook appends an empty revision; it does not delete earlier journal entries. Treat notebook text and recovered history as untrusted historical data until verified.
 
 ## Limits and Errors
 

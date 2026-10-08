@@ -161,7 +161,7 @@ describe("codex SSE request body zstd compression", () => {
 
 	it("falls back to plain JSON when local compression fails", async () => {
 		await withEnv({ PI_CODEX_ZSTD: undefined }, async () => {
-			vi.spyOn(Bun, "zstdCompressSync").mockImplementation(() => {
+			vi.spyOn(Bun, "zstdCompress").mockImplementation(async () => {
 				throw new Error("zstd unavailable");
 			});
 			const { body, headers } = await runAndCaptureRequest();

@@ -4,7 +4,9 @@ import * as path from "node:path";
 import {
 	type AuthCredential,
 	type AuthCredentialStore,
+	parseServiceTier,
 	SqliteAuthCredentialStore,
+	type ServiceTier,
 	type StoredAuthCredential,
 } from "@oh-my-pi/pi-ai";
 import {
@@ -26,10 +28,9 @@ type SettingsRow = {
 	value: string;
 };
 
-/** Row shape for model_usage table queries */
+/** Row shape for the model_usage MRU query (ordering column stays in SQL) */
 type ModelUsageRow = {
 	model_key: string;
-	last_used_at: number;
 };
 
 /** Row shape for model_perf table queries */
@@ -51,6 +52,8 @@ type StatsMessageRow = {
 	output_tokens: number;
 	duration: number;
 	ttft: number | null;
+	/** Served service tier; absent on stats databases written before the column existed. */
+	service_tier?: string | null;
 };
 
 /** Per-model running sums accumulated during a backfill walk. */
@@ -98,15 +101,40 @@ export interface ModelPerfStats {
  */
 const MODEL_PERF_DECAY_AT = 256;
 /** meta-table marker set once historical stats.db rows have been imported into model_perf. */
-const MODEL_PERF_BACKFILL_KEY = "model_perf_backfill";
-/** Batch window for deferred model_perf writes; matches prompt-history's drain cadence. */
-const MODEL_PERF_FLUSH_DELAY_MS = 100;
+const MODEL_PERF_BACKFILL_KEY = "model_perf_backfill_v2";
+/**
+ * Marker the v1 import wrote. Its presence means the aggregates already hold
+ * the stats history (tierless, so blended into the bare rows), so the v2 pass
+ * keeps the live aggregates and only records itself complete instead of adding
+ * the same history again.
+ */
+const MODEL_PERF_BACKFILL_V1_KEY = "model_perf_backfill";
+/**
+ * Batch window for deferred model_perf writes. Perf aggregates are advisory, so
+ * one transaction per minute replaces one per turn; the timer is unref'd and the
+ * pending batch is flushed by {@link AgentStorage.close}, which the exit-only
+ * postmortem hook runs on every real exit (normal, signal, fatal), and by
+ * {@link AgentStorage.getModelPerf}, so in-process reads never lag the window.
+ */
+const MODEL_PERF_FLUSH_DELAY_MS = 60_000;
 /** Backfill ignores stats.db history older than this; decay makes stale provider speeds worthless anyway. */
 const MODEL_PERF_BACKFILL_MAX_AGE_MS = 90 * 86_400_000;
 /** Rows fetched per synchronous backfill chunk — keeps per-chunk event-loop blocking under ~20ms even on cold I/O. */
 const MODEL_PERF_BACKFILL_CHUNK = 2048;
 /** Hard ceiling on rows scanned per backfill run, whatever the age cutoff admits — bounds total CPU on very high-volume databases (models only seen earlier than the newest N measurable rows get no backfill). */
 const MODEL_PERF_BACKFILL_MAX_ROWS = 250_000;
+
+/**
+ * `model_perf` row key: the model, plus the service tier when the turn ran on a
+ * non-default one (`provider/model@ultrafast`). Tier rows keep a fast serving
+ * path's throughput from blending into the standard average — a 300 t/s
+ * ultrafast turn and a 25 t/s standard turn are different measurements, not one
+ * 160 t/s model. Readers that do not know the tier read the bare
+ * `provider/model` row, which stays the standard/default-tier aggregate.
+ */
+export function modelPerfKey(modelKey: string, serviceTier?: ServiceTier | null): string {
+	return serviceTier && serviceTier !== "auto" && serviceTier !== "default" ? `${modelKey}@${serviceTier}` : modelKey;
+}
 
 /**
  * Validates one request timing and shapes it for the model_perf upsert.
@@ -123,6 +151,16 @@ function normalizeModelPerfSample(modelKey: string, sample: ModelPerfSample): Mo
 			: undefined;
 	return { modelKey, outputTokens, durationMs, ttftSamples: ttftMs !== undefined ? 1 : 0, ttftMs: ttftMs ?? 0 };
 }
+
+/**
+ * Named usage counters kept in agent.db, one `<kind>_usage` table each:
+ * `command` ranks slash-command autocomplete, `hint` retires learned composer hints.
+ */
+export type UsageKind = (typeof USAGE_KINDS)[number];
+const USAGE_KINDS = ["command", "hint"] as const;
+
+/** Prepared statements for one `<kind>_usage` table. */
+type UsageStatements = { upsert: Statement; list: Statement };
 
 /** Current agent.db schema version; bump when schema changes require migration. */
 export const SCHEMA_VERSION = 6;
@@ -146,15 +184,14 @@ export class AgentStorage {
 	#listModelUsageStmt: Statement;
 	#upsertModelPerfStmt: Statement;
 	#listModelPerfStmt: Statement;
-	#upsertCommandUsageStmt: Statement;
-	#listCommandUsageStmt: Statement;
+	#usageStmts: Record<UsageKind, UsageStatements>;
 	#modelUsageCache: string[] | null = null;
 	/** Only the real user db auto-imports stats.db history; custom paths (tests, embedding) opt in explicitly. */
 	#autoPerfBackfill: boolean;
 	/** One backfill *check* per process; the persistent gate is the meta marker. */
 	#perfBackfillChecked = false;
 	/** Coalesces per-turn perf samples into one deferred transaction off the turn's hot path. */
-	#perfDrain = new AsyncDrain<ModelPerfInsert>(MODEL_PERF_FLUSH_DELAY_MS);
+	#perfDrain = new AsyncDrain<ModelPerfInsert>(MODEL_PERF_FLUSH_DELAY_MS, { unref: true });
 	#closing = false;
 
 	private constructor(db: Database, dbPath: string) {
@@ -171,9 +208,7 @@ export class AgentStorage {
 		this.#upsertModelUsageStmt = this.#db.prepare(
 			`INSERT INTO model_usage (model_key, last_used_at) VALUES (?, ${SQLITE_NOW_EPOCH}) ON CONFLICT(model_key) DO UPDATE SET last_used_at = ${SQLITE_NOW_EPOCH}`,
 		);
-		this.#listModelUsageStmt = this.#db.prepare(
-			"SELECT model_key, last_used_at FROM model_usage ORDER BY last_used_at DESC",
-		);
+		this.#listModelUsageStmt = this.#db.prepare("SELECT model_key FROM model_usage ORDER BY last_used_at DESC");
 		// Recency-weighted upsert: past MODEL_PERF_DECAY_AT samples, every new
 		// sample first halves the aggregates so old measurements fade out.
 		this.#upsertModelPerfStmt = this.#db.prepare(
@@ -187,14 +222,26 @@ ON CONFLICT(model_key) DO UPDATE SET
 	ttft_ms = (CASE WHEN model_perf.samples >= ${MODEL_PERF_DECAY_AT} THEN model_perf.ttft_ms * 0.5 ELSE model_perf.ttft_ms END) + excluded.ttft_ms,
 	updated_at = ${SQLITE_NOW_EPOCH}`,
 		);
+		// `model_key TEXT PRIMARY KEY` admits NULL (SQLite rowid-table quirk); a NULL
+		// key would break every consumer that treats perf keys as selectors.
 		this.#listModelPerfStmt = this.#db.prepare(
-			"SELECT model_key, samples, output_tokens, gen_ms, ttft_samples, ttft_ms FROM model_perf",
+			"SELECT model_key, samples, output_tokens, gen_ms, ttft_samples, ttft_ms FROM model_perf WHERE model_key IS NOT NULL",
 		);
-		this.#upsertCommandUsageStmt = this.#db.prepare(
-			`INSERT INTO command_usage (name, count, last_used_at) VALUES (?, 1, ${SQLITE_NOW_EPOCH})
-ON CONFLICT(name) DO UPDATE SET count = command_usage.count + 1, last_used_at = ${SQLITE_NOW_EPOCH}`,
-		);
-		this.#listCommandUsageStmt = this.#db.prepare("SELECT name, count FROM command_usage");
+		this.#usageStmts = {
+			command: this.#prepareUsageStatements("command"),
+			hint: this.#prepareUsageStatements("hint"),
+		};
+	}
+
+	#prepareUsageStatements(kind: UsageKind): UsageStatements {
+		const table = `${kind}_usage`;
+		return {
+			upsert: this.#db.prepare(
+				`INSERT INTO ${table} (name, count, last_used_at) VALUES (?, 1, ${SQLITE_NOW_EPOCH})
+ON CONFLICT(name) DO UPDATE SET count = ${table}.count + 1, last_used_at = ${SQLITE_NOW_EPOCH}`,
+			),
+			list: this.#db.prepare(`SELECT name, count FROM ${table}`),
+		};
 	}
 
 	/**
@@ -227,6 +274,12 @@ CREATE TABLE IF NOT EXISTS command_usage (
 	last_used_at INTEGER NOT NULL DEFAULT (${SQLITE_NOW_EPOCH})
 );
 
+CREATE TABLE IF NOT EXISTS hint_usage (
+	name TEXT PRIMARY KEY,
+	count INTEGER NOT NULL DEFAULT 0,
+	last_used_at INTEGER NOT NULL DEFAULT (${SQLITE_NOW_EPOCH})
+);
+
 CREATE TABLE IF NOT EXISTS meta (
 	key TEXT PRIMARY KEY,
 	value TEXT NOT NULL
@@ -235,7 +288,10 @@ CREATE TABLE IF NOT EXISTS meta (
 CREATE TABLE IF NOT EXISTS schema_version (version INTEGER PRIMARY KEY);
 `);
 
-		const settingsInfo = this.#db.prepare("PRAGMA table_info(settings)").all() as Array<{ name?: string }>;
+		// One-off statements are scoped with `using`: an unfinalized statement keeps the SQLite
+		// connection (and agent.db) open after close() until GC collects it.
+		using settingsInfoStmt = this.#db.prepare("PRAGMA table_info(settings)");
+		const settingsInfo = settingsInfoStmt.all() as Array<{ name?: string }>;
 		const hasSettingsTable = settingsInfo.length > 0;
 		const hasKey = settingsInfo.some(column => column.name === "key");
 		const hasValue = settingsInfo.some(column => column.name === "value");
@@ -251,7 +307,8 @@ CREATE TABLE settings (
 		} else if (!hasKey || !hasValue) {
 			// Migrate v1 schema: single JSON blob in `data` column → per-key rows
 			let legacySettings: Record<string, unknown> | null = null;
-			const row = this.#db.prepare("SELECT data FROM settings WHERE id = 1").get() as { data?: string } | undefined;
+			using legacyRowStmt = this.#db.prepare("SELECT data FROM settings WHERE id = 1");
+			const row = legacyRowStmt.get() as { data?: string } | undefined;
 			if (row?.data) {
 				try {
 					const parsed = JSON.parse(row.data);
@@ -275,7 +332,7 @@ CREATE TABLE settings (
 );
 `);
 				if (settings) {
-					const insert = this.#db.prepare(
+					using insert = this.#db.prepare(
 						`INSERT INTO settings (key, value, updated_at) VALUES (?, ?, ${SQLITE_NOW_EPOCH})`,
 					);
 					for (const [key, value] of Object.entries(settings)) {
@@ -290,9 +347,8 @@ CREATE TABLE settings (
 			migrate(legacySettings);
 		}
 
-		const versionRow = this.#db.prepare("SELECT version FROM schema_version ORDER BY version DESC LIMIT 1").get() as
-			| { version?: number }
-			| undefined;
+		using versionStmt = this.#db.prepare("SELECT version FROM schema_version ORDER BY version DESC LIMIT 1");
+		const versionRow = versionStmt.get() as { version?: number } | undefined;
 		const schemaVersion = typeof versionRow?.version === "number" ? versionRow.version : 0;
 		if (versionRow?.version !== undefined && versionRow.version !== SCHEMA_VERSION) {
 			logger.warn("AgentStorage schema version mismatch", {
@@ -302,8 +358,11 @@ CREATE TABLE settings (
 		}
 		if (schemaVersion < SCHEMA_VERSION) {
 			this.#migrateSchema(schemaVersion);
+			// Only an upgrade (or a fresh db) records the version; rewriting the same
+			// row on every open was a write transaction per process start.
+			using recordVersionStmt = this.#db.prepare("INSERT OR REPLACE INTO schema_version(version) VALUES (?)");
+			recordVersionStmt.run(SCHEMA_VERSION);
 		}
-		this.#db.prepare("INSERT OR REPLACE INTO schema_version(version) VALUES (?)").run(SCHEMA_VERSION);
 	}
 
 	#migrateSchema(fromVersion: number): void {
@@ -320,7 +379,8 @@ CREATE TABLE settings (
 			// Purge the old aggregates and re-arm the stats.db backfill so
 			// history is re-imported through the corrected fold.
 			this.#db.run("DELETE FROM model_perf");
-			this.#db.prepare("DELETE FROM meta WHERE key = ?").run(MODEL_PERF_BACKFILL_KEY);
+			using clearBackfillStmt = this.#db.prepare("DELETE FROM meta WHERE key = ?");
+			clearBackfillStmt.run(MODEL_PERF_BACKFILL_KEY);
 		}
 	}
 
@@ -410,8 +470,11 @@ FROM model_usage_legacy
 		this.#listModelUsageStmt.finalize();
 		this.#upsertModelPerfStmt.finalize();
 		this.#listModelPerfStmt.finalize();
-		this.#upsertCommandUsageStmt.finalize();
-		this.#listCommandUsageStmt.finalize();
+		for (const kind of USAGE_KINDS) {
+			const stmts = this.#usageStmts[kind];
+			stmts.upsert.finalize();
+			stmts.list.finalize();
+		}
 		// SqliteAuthCredentialStore.close() finalizes its own statements and
 		// closes the shared #db handle — must run after our statements finalize.
 		this.#authStore.close();
@@ -481,30 +544,30 @@ FROM model_usage_legacy
 		}
 	}
 	/**
-	 * Records one slash-command invocation, bumping its usage count and
-	 * last-used timestamp. Frequency-ranked autocomplete reads these counts.
-	 * @param name - Canonical command name (e.g. "model", "skill:review")
+	 * Records one use of `name`, bumping its count and last-used timestamp.
+	 * Failures are logged, never thrown: usage counts are advisory.
+	 * @param name - Counter key, e.g. a canonical command name ("model", "skill:review") or hint id
 	 */
-	recordCommandUsage(name: string): void {
+	recordUsage(kind: UsageKind, name: string): void {
 		try {
-			this.#upsertCommandUsageStmt.run(name);
+			this.#usageStmts[kind].upsert.run(name);
 		} catch (error) {
-			logger.warn("AgentStorage failed to record command usage", { name, error: String(error) });
+			logger.warn("AgentStorage failed to record usage", { kind, name, error: String(error) });
 		}
 	}
 
 	/**
-	 * Gets slash-command usage counts keyed by canonical command name.
-	 * @returns Command name → invocation count
+	 * Gets usage counts of one kind; empty when the read fails.
+	 * @returns Counter key → use count
 	 */
-	listCommandUsage(): Record<string, number> {
+	listUsage(kind: UsageKind): Record<string, number> {
 		try {
-			const rows = this.#listCommandUsageStmt.all() as Array<{ name: string; count: number }>;
+			const rows = this.#usageStmts[kind].list.all() as Array<{ name: string; count: number }>;
 			const counts: Record<string, number> = {};
 			for (const row of rows) counts[row.name] = row.count;
 			return counts;
 		} catch (error) {
-			logger.warn("AgentStorage failed to list command usage", { error: String(error) });
+			logger.warn("AgentStorage failed to list usage", { kind, error: String(error) });
 			return {};
 		}
 	}
@@ -521,9 +584,11 @@ FROM model_usage_legacy
 	 * the turn-completion hot path. Fire-and-forget safe — flush failures are
 	 * logged, never thrown; await the returned promise only to observe the flush.
 	 * @param modelKey - Model key in "provider/modelId" format
+	 * @param serviceTier - Tier the turn ran on; non-default tiers aggregate in
+	 * their own row (see {@link modelPerfKey})
 	 */
-	recordModelPerf(modelKey: string, sample: ModelPerfSample): Promise<void> {
-		const row = normalizeModelPerfSample(modelKey, sample);
+	recordModelPerf(modelKey: string, sample: ModelPerfSample, serviceTier?: ServiceTier | null): Promise<void> {
+		const row = normalizeModelPerfSample(modelPerfKey(modelKey, serviceTier), sample);
 		if (!row) return Promise.resolve();
 		return this.#perfDrain.push(row, rows => this.#flushModelPerf(rows));
 	}
@@ -549,9 +614,12 @@ FROM model_usage_legacy
 	 * Returns recency-weighted TPS/TTFT averages for every model with recorded
 	 * requests, keyed by "provider/modelId". Read by the /models browser.
 	 * Also kicks the one-time background stats.db import; until it completes,
-	 * models without live samples are simply absent.
+	 * models without live samples are simply absent. Drains the pending perf
+	 * batch first so reads reflect every sample this process has recorded.
 	 */
 	getModelPerf(): Map<string, ModelPerfStats> {
+		// The drain handler runs synchronously, so the batch is committed before the read.
+		void this.#perfDrain.flush();
 		this.#kickModelPerfBackfill();
 		const stats = new Map<string, ModelPerfStats>();
 		try {
@@ -583,15 +651,24 @@ FROM model_usage_legacy
 		if (!this.#autoPerfBackfill || this.#perfBackfillChecked) return;
 		this.#perfBackfillChecked = true;
 		try {
-			const marker = this.#db.prepare("SELECT value FROM meta WHERE key = ?").get(MODEL_PERF_BACKFILL_KEY);
+			using markerStmt = this.#db.prepare("SELECT value FROM meta WHERE key = ?");
+			const marker = markerStmt.get(MODEL_PERF_BACKFILL_KEY);
 			if (marker) return;
+			// The v1 import already folded the stats history into the bare rows, and no
+			// stats row written before the served-tier field carries a tier, so
+			// re-importing would only double-count it. Keep the live aggregates (blended
+			// history decays out of them) and just record v2.
+			if (markerStmt.get(MODEL_PERF_BACKFILL_V1_KEY)) {
+				using markCompleteStmt = this.#db.prepare("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)");
+				markCompleteStmt.run(MODEL_PERF_BACKFILL_KEY, "complete");
+				return;
+			}
 			const statsDbPath = getStatsDbPath();
 			if (!fs.existsSync(statsDbPath)) return;
 			void this.backfillModelPerfFromStats(statsDbPath)
 				.then(imported => {
-					this.#db
-						.prepare("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)")
-						.run(MODEL_PERF_BACKFILL_KEY, "complete");
+					using markCompleteStmt = this.#db.prepare("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)");
+					markCompleteStmt.run(MODEL_PERF_BACKFILL_KEY, "complete");
 					logger.info("AgentStorage imported model perf history from stats.db", { imported });
 				})
 				.catch(error => {
@@ -621,8 +698,14 @@ FROM model_usage_legacy
 		const statsDb = new Database(statsDbPath, { readonly: true });
 		try {
 			statsDb.run(`PRAGMA busy_timeout = ${getDbBusyTimeoutMs()}`);
-			const select = statsDb.prepare(
-				`SELECT rowid, timestamp, provider, model, output_tokens, duration, ttft
+			// Stats databases written before the served-tier column existed cannot
+			// separate a fast serving path's samples from standard ones; those rows
+			// import as standard-tier history.
+			const hasTier = (statsDb.prepare("PRAGMA table_info(messages)").all() as { name: string }[]).some(
+				column => column.name === "service_tier",
+			);
+			using select = statsDb.prepare(
+				`SELECT rowid, timestamp, provider, model, output_tokens, duration, ttft${hasTier ? ", service_tier" : ""}
 FROM messages
 WHERE (timestamp < ?1 OR (timestamp = ?1 AND rowid < ?2))
 	AND timestamp >= ?3
@@ -645,7 +728,7 @@ LIMIT ?4`,
 				cursorTimestamp = last.timestamp;
 				cursorRowid = last.rowid;
 				for (const row of rows) {
-					const key = `${row.provider}/${row.model}`;
+					const key = modelPerfKey(`${row.provider}/${row.model}`, parseServiceTier(row.service_tier));
 					let accum = sums.get(key);
 					if (accum && accum.samples >= MODEL_PERF_DECAY_AT) continue;
 					const normalized = normalizeModelPerfSample(key, {
@@ -670,7 +753,7 @@ LIMIT ?4`,
 				await Bun.sleep(0);
 			}
 			if (sums.size > 0) {
-				const upsert = this.#db.prepare(
+				using upsert = this.#db.prepare(
 					`INSERT INTO model_perf (model_key, samples, output_tokens, gen_ms, ttft_samples, ttft_ms, updated_at)
 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ${SQLITE_NOW_EPOCH})
 ON CONFLICT(model_key) DO UPDATE SET
@@ -722,7 +805,7 @@ ON CONFLICT(model_key) DO UPDATE SET
 		const credentials = this.#authStore.listAuthCredentials(provider);
 		if (!includeDisabled) return credentials;
 
-		const stmt = this.#db.prepare(
+		using stmt = this.#db.prepare(
 			provider
 				? "SELECT id, provider, credential_type, data, disabled_cause FROM auth_credentials WHERE provider = ? ORDER BY id ASC"
 				: "SELECT id, provider, credential_type, data, disabled_cause FROM auth_credentials ORDER BY id ASC",
@@ -815,19 +898,30 @@ ON CONFLICT(model_key) DO UPDATE SET
 		this.#authStore.cleanExpiredCache();
 	}
 
+	/**
+	 * Restricts the agent dir to 0700 and the db to 0600, touching each only when
+	 * its mode differs. POSIX modes are meaningless on Windows, so it is a no-op there.
+	 */
 	#hardenPermissions(dbPath: string): void {
+		if (process.platform === "win32") return;
 		const dir = path.dirname(dbPath);
-		try {
-			fs.chmodSync(dir, 0o700);
-		} catch (error) {
-			logger.warn("AgentStorage failed to chmod agent dir", { path: dir, error: String(error) });
-		}
+		AgentStorage.#chmodIfNeeded(dir, 0o700, "AgentStorage failed to chmod agent dir");
+		AgentStorage.#chmodIfNeeded(dbPath, 0o600, "AgentStorage failed to chmod db file");
+	}
 
-		if (!fs.existsSync(dbPath)) return;
+	static #chmodIfNeeded(target: string, mode: number, failureMessage: string): void {
+		let current: number;
 		try {
-			fs.chmodSync(dbPath, 0o600);
+			current = fs.statSync(target).mode & 0o777;
+		} catch {
+			// Missing target (e.g. db not yet materialized): nothing to harden.
+			return;
+		}
+		if (current === mode) return;
+		try {
+			fs.chmodSync(target, mode);
 		} catch (error) {
-			logger.warn("AgentStorage failed to chmod db file", { path: dbPath, error: String(error) });
+			logger.warn(failureMessage, { path: target, error: String(error) });
 		}
 	}
 }

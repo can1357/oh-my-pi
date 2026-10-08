@@ -84,6 +84,18 @@ describe("#4297 anthropic-messages replay-unsigned-thinking classification", () 
 		expect(compat.officialEndpoint).toBe(false);
 	});
 
+	it("demotes unsigned thinking on AWS Bedrock Mantle's /anthropic route (known signing host)", () => {
+		const compat = resolveModelPolicy(
+			spec({
+				provider: "bedrock-mantle",
+				baseUrl: "https://bedrock-mantle.us-east-1.api.aws/anthropic",
+				id: "anthropic.claude-opus-5-5",
+			}),
+		).compat;
+		expect(compat.replayUnsignedThinking).toBe(false);
+		expect(compat.signingEndpoint).toBe(true);
+	});
+
 	it("demotes unsigned thinking on Azure AI Inference / Foundry Anthropic routes (known signing host)", () => {
 		for (const baseUrl of [
 			"https://my-project.inference.ai.azure.com/anthropic/v1",

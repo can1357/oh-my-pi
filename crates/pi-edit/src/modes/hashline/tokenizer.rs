@@ -103,16 +103,20 @@ impl Tokenizer {
 			return Ok(Vec::new());
 		}
 		self.buffer.push_str(chunk);
+		// Classify complete rows in place, then drop them with one drain:
+		// draining per row shifted the rest of the buffer each time, quadratic
+		// in the rows of a large chunk.
 		let mut tokens = Vec::new();
-		while let Some(index) = self.buffer.find('\n') {
-			let mut line = self.buffer[..index].to_string();
-			if line.ends_with('\r') {
-				line.pop();
-			}
-			self.buffer.drain(..=index);
-			tokens.push(classify_line(&line, self.next_line_num));
+		let mut start = 0;
+		while let Some(offset) = self.buffer[start..].find('\n') {
+			let end = start + offset;
+			let line = &self.buffer[start..end];
+			let line = line.strip_suffix('\r').unwrap_or(line);
+			tokens.push(classify_line(line, self.next_line_num));
 			self.next_line_num = self.next_line_num.saturating_add(1);
+			start = end + 1;
 		}
+		self.buffer.drain(..start);
 		Ok(tokens)
 	}
 
@@ -556,6 +560,11 @@ pub fn header_path_has_orphan_bracket(path: &str) -> bool {
 	false
 }
 
+/// Split a `[PATH]` / `[PATH#TAG]` header row.
+///
+/// A valid trailing 4-hex tag disambiguates the path, so a tagged path may
+/// itself contain `#` (yadm alt files: `conf.yaml##hostname.home`). An
+/// untagged path may not: `[a.ts#1A2G]` is a malformed tag, not a file name.
 fn parse_header(line: &str) -> Option<(String, Option<String>)> {
 	let line = line.trim_end();
 	let body = line
@@ -566,7 +575,6 @@ fn parse_header(line: &str) -> Option<(String, Option<String>)> {
 	}
 	if let Some((path, hash)) = body.rsplit_once(HL_FILE_HASH_SEP) {
 		if path.is_empty()
-			|| path.contains('#')
 			|| header_path_has_orphan_bracket(path)
 			|| hash.len() != HL_FILE_HASH_LENGTH
 			|| !hash.bytes().all(|byte| byte.is_ascii_hexdigit())
@@ -575,7 +583,7 @@ fn parse_header(line: &str) -> Option<(String, Option<String>)> {
 		}
 		return Some((path.to_string(), Some(hash.to_ascii_uppercase())));
 	}
-	if body.contains('#') || header_path_has_orphan_bracket(body) {
+	if header_path_has_orphan_bracket(body) {
 		None
 	} else {
 		Some((body.to_string(), None))

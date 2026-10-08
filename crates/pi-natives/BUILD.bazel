@@ -1,51 +1,36 @@
 load("@crates//:defs.bzl", "aliases", "all_crate_deps")
-load("@applefm_swift//:defs.bzl", "APPLEFM_LINKOPTS")
-load("@rules_cc//cc:defs.bzl", "cc_library")
 load("@rules_rust//rust:defs.bzl", "rust_binary", "rust_shared_library", "rust_test")
+load("//bazel/toolchains/swift:defs.bzl", "applefm_bridge")
+load(":darwin_helper.bzl", "darwin_helper")
 
 package(default_visibility = ["//visibility:public"])
 
 exports_files(["Cargo.toml"])
 
-genrule(
+darwin_helper(
     name = "oauth_callback_darwin_helper",
-    srcs = ["src/oauth_callback/darwin-helper.m"],
-    outs = ["oauth_callback_darwin_helper.bin"],
-    cmd = select({
-        "//bazel/triples:aarch64-apple-darwin": "/usr/bin/xcrun clang -x objective-c -fobjc-arc -fblocks -fno-ident -Os -mmacosx-version-min=12.0 -arch arm64 -framework AppKit -Wl,-dead_strip -Wl,-adhoc_codesign $(location src/oauth_callback/darwin-helper.m) -o $@",
-        "//bazel/triples:x86_64-apple-darwin": "/usr/bin/xcrun clang -x objective-c -fobjc-arc -fblocks -fno-ident -Os -mmacosx-version-min=12.0 -arch x86_64 -framework AppKit -Wl,-dead_strip -Wl,-adhoc_codesign $(location src/oauth_callback/darwin-helper.m) -o $@",
-        "//conditions:default": "echo 'macOS OAuth callback helper selected for a non-macOS target' >&2; exit 1",
-    }),
-    target_compatible_with = ["@platforms//os:macos"],
+    src = "src/oauth_callback/darwin-helper.m",
 )
 
-# Apple Foundation Models bridge (src/applefm/build-bridge.sh): bridge.swift
-# with the toolchain @applefm_swift detected, else stub.c. The toolchain
-# fingerprint in toolchain.txt is an input, so cached outputs never cross
-# toolchains. build.rs does the same for cargo builds.
-genrule(
+darwin_helper(
+    name = "capture_darwin_helper",
+    src = "src/desktop/macos/capture/helper.m",
+    frameworks = ["AppKit", "ScreenCaptureKit", "CoreGraphics"],
+    minimum_macos = "14.0",
+)
+
+# Apple Foundation Models bridge (src/applefm/build-bridge.sh): a bridge.swift
+# dylib built with the //bazel/toolchains/swift toolchain (host Xcode on mac
+# exec hosts, pinned swift.org Swift + @macos_sdk on linux ones), else an empty
+# file. The addon embeds it as compile data and dlopens it only on macOS 27+.
+# Mac hosts key the action on the detected toolchain's fingerprint
+# (toolchain.txt), linux hosts on the pinned toolchain's files, so cached
+# outputs never cross toolchains. build.rs does the same for cargo builds.
+applefm_bridge(
     name = "applefm_bridge",
-    srcs = [
-        "src/applefm/bridge.swift",
-        "src/applefm/build-bridge.sh",
-        "src/applefm/stub.c",
-        "@applefm_swift//:toolchain.txt",
-    ],
-    outs = ["libomp_applefm.a"],
-    cmd = select({
-        "//bazel/triples:aarch64-apple-darwin": "/bin/sh $(location src/applefm/build-bridge.sh) build $@ arm64 $$(cut -f1,2 $(location @applefm_swift//:toolchain.txt))",
-        "//conditions:default": "/bin/sh $(location src/applefm/build-bridge.sh) build $@ x86_64",
-    }),
-    target_compatible_with = ["@platforms//os:macos"],
-)
-
-cc_library(
-    name = "applefm_bridge_lib",
-    srcs = [":applefm_bridge"],
-    linkopts = select({
-        "//bazel/triples:aarch64-apple-darwin": APPLEFM_LINKOPTS,
-        "//conditions:default": [],
-    }),
+    src = "src/applefm/bridge.swift",
+    out = "libomp_applefm.dylib",
+    script = "src/applefm/build-bridge.sh",
     target_compatible_with = ["@platforms//os:macos"],
 )
 
@@ -70,6 +55,7 @@ rust_binary(
         "//bazel/triples:x86_64-unknown-linux-musl": ["-Ctarget-feature=-crt-static"],
         "//bazel/triples:aarch64-unknown-linux-musl": ["-Ctarget-feature=-crt-static"],
         "//bazel/triples:x86_64-pc-windows-msvc": ["-Ctarget-feature=+crt-static"],
+        "//bazel/triples:aarch64-pc-windows-msvc": ["-Ctarget-feature=+crt-static"],
         "//conditions:default": [],
     }),
 )
@@ -91,7 +77,11 @@ rust_shared_library(
         "src/desktop/linux/wayland/testdata/*.xkb",
         "fixtures/*.json",
     ]) + select({
-        "@platforms//os:macos": [":oauth_callback_darwin_helper"],
+        "@platforms//os:macos": [
+            ":applefm_bridge",
+            ":oauth_callback_darwin_helper",
+            ":capture_darwin_helper",
+        ],
         "//conditions:default": [":oauth_callback_relay"],
     }),
     crate_features = [],
@@ -99,7 +89,9 @@ rust_shared_library(
     proc_macro_deps = all_crate_deps(proc_macro = True),
     rustc_env = select({
         "@platforms//os:macos": {
+            "OMP_APPLEFM_BRIDGE": "$(execpath :applefm_bridge)",
             "OMP_OAUTH_DARWIN_HELPER": "$(execpath :oauth_callback_darwin_helper)",
+            "OMP_CAPTURE_DARWIN_HELPER": "$(execpath :capture_darwin_helper)",
         },
         "//conditions:default": {
             "OMP_OAUTH_RELAY_BINARY": "$(execpath :oauth_callback_relay)",
@@ -115,7 +107,12 @@ rust_shared_library(
         # keeps the addon resident across Worker teardown on linux-gnu (napi
         # emits it for gnu; harmless under musl's loader). windows-msvc needs
         # nothing — napi-sys v3 imports node.exe via raw-dylib.
-        "@platforms//os:macos": ["-Clink-arg=-Wl,-undefined,dynamic_lookup"],
+        # -adhoc_codesign: linkers sign arm64 ad hoc by default but not
+        # x86_64; every shipped darwin addon carries a signature.
+        "@platforms//os:macos": [
+            "-Clink-arg=-Wl,-undefined,dynamic_lookup",
+            "-Clink-arg=-Wl,-adhoc_codesign",
+        ],
         "@platforms//os:linux": ["-Clink-arg=-Wl,-z,nodelete"],
         "//conditions:default": [],
     }) + select({
@@ -130,22 +127,23 @@ rust_shared_library(
         # switched to /MT in lock-step via the static_link_msvcrt cc feature in
         # the native_addon transition (bazel/defs.bzl).
         "//bazel/triples:x86_64-pc-windows-msvc": ["-Ctarget-feature=+crt-static"],
+        "//bazel/triples:aarch64-pc-windows-msvc": ["-Ctarget-feature=+crt-static"],
         "//conditions:default": [],
     }),
     version = "17.1.5",
-    deps = all_crate_deps(normal = True) + select({
-        "@platforms//os:macos": [":applefm_bridge_lib"],
-        "//conditions:default": [],
-    }) + [
+    deps = all_crate_deps(normal = True) + [
         "//crates/pi-ast",
+        "//crates/pi-builtins",
         "//crates/pi-diff",
         "//crates/pi-edit",
         "//crates/pi-iso",
+        "//crates/pi-predict",
         "//crates/pi-shell",
         "//crates/pi-vcs",
         "//crates/pi-vfs",
         "//crates/pi-voice",
         "//crates/pi-walker",
+        "//crates/vendor/napi",
     ],
 )
 

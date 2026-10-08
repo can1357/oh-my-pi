@@ -197,6 +197,19 @@ export function isLineInRanges(lineNumber: number, ranges: readonly LineRange[])
 	return false;
 }
 
+/**
+ * Kind of a non-regular, non-directory file, or undefined. Reading one in-process can block
+ * forever (a FIFO, `/dev/stdin` on the TUI's terminal) or never end (`/dev/zero`).
+ */
+export function specialFileKind(stat: fs.Stats): string | undefined {
+	if (stat.isFile() || stat.isDirectory()) return undefined;
+	if (stat.isCharacterDevice()) return "character device";
+	if (stat.isBlockDevice()) return "block device";
+	if (stat.isFIFO()) return "FIFO";
+	if (stat.isSocket()) return "socket";
+	return "special file";
+}
+
 /** Windows path naming an NTFS stream: a colon after the root (`C:\`, `\\?\C:\`, UNC). */
 function needsWindowsStreamExistenceCheck(resolved: string): boolean {
 	return process.platform === "win32" && resolved.slice(path.win32.parse(resolved).root.length).includes(":");
@@ -713,6 +726,39 @@ export async function splitDelimitedPathEntry(
 	);
 }
 
+/**
+ * Split a `;` list that names URLs alongside local paths
+ * (`https://x;src/a.ts:1-20`, `omp://;Makefile:1-3`). Engages only when URL
+ * detection would otherwise claim the whole entry; everything else keeps the
+ * normal image/sqlite/archive/literal ordering. Every part must be a URL (per
+ * `isUrl`) or an existing literal path without glob characters, so a URL that
+ * merely contains `;` (`https://a/x;v=1`) and a literal file named with `;`
+ * (including `a;b.md:1-2`, issue #4618) stay whole.
+ */
+export async function splitMixedUrlPathList(
+	entry: string,
+	cwd: string,
+	isUrl: (part: string) => boolean,
+): Promise<string[] | null> {
+	const normalizedEntry = normalizePathLikeInput(entry);
+	if (!normalizedEntry.includes(";") || !isUrl(normalizedEntry)) return null;
+	if (!isInternalUrlPath(normalizedEntry)) {
+		if ((await probeLiteralPathExists(normalizedEntry, cwd)) !== "missing") return null;
+		const selectorSplit = splitPathAndSel(normalizedEntry);
+		if (selectorSplit.sel !== undefined && (await probeLiteralPathExists(selectorSplit.path, cwd)) !== "missing") {
+			return null;
+		}
+	}
+	const parts = await tryDelimitedPathSplit(normalizedEntry, cwd, parseSearchPath, "semicolon", "none");
+	if (!parts) return null;
+	for (const part of parts) {
+		if (isUrl(part)) continue;
+		const partPath = splitPathAndSel(part).path;
+		if (hasGlobPathChars(partPath) || (await probeLiteralPathExists(partPath, cwd)) !== "exists") return null;
+	}
+	return parts;
+}
+
 /** Expand delimited entries in-place while preserving unsplit entries. */
 export async function expandDelimitedPathEntries(
 	entries: readonly string[],
@@ -743,6 +789,7 @@ export interface ParsedFindPattern {
 export interface ResolvedSearchTarget {
 	basePath: string;
 	glob?: string;
+	bareGlob?: boolean;
 }
 
 export interface ResolvedMultiSearchPath {
@@ -830,6 +877,10 @@ export function parseSearchPath(filePath: string): ParsedSearchPath {
 		basePath: segments.slice(0, firstGlobIndex).join("/"),
 		glob: segments.slice(firstGlobIndex).join("/"),
 	};
+}
+
+function isBareSearchGlob(raw: string, parsed: ParsedSearchPath): boolean {
+	return Boolean(parsed.glob) && ((!raw.includes("/") && !raw.includes("\\")) || parsed.basePath.endsWith("://"));
 }
 
 /**
@@ -1023,10 +1074,15 @@ async function resolveSearchPathItems(
 	const demotesFileItem =
 		fanOutFileItems && !allExactFiles && parsedItems.some(item => !item.parsedPath.glob && item.type === "file");
 	const targets =
-		hostItems.length < parsedItems.length || (parsedItems.length > 1 && (!commonIsRequestedScope || demotesFileItem))
+		hostItems.length < parsedItems.length ||
+		(parsedItems.length > 1 &&
+			(!commonIsRequestedScope ||
+				demotesFileItem ||
+				(fanOutFileItems && parsedItems.some(item => item.parsedPath.glob))))
 			? parsedItems.map(item => ({
 					basePath: item.absoluteBasePath,
 					glob: item.parsedPath.glob ? combineSearchGlobs(item.parsedPath.glob, suffixGlob) : suffixGlob,
+					bareGlob: isBareSearchGlob(item.raw, item.parsedPath),
 				}))
 			: undefined;
 
@@ -1332,6 +1388,7 @@ export interface ToolScopeResolution {
 	searchPath: string;
 	scopePath: string;
 	globFilter: string | undefined;
+	bareGlob: boolean;
 	isDirectory: boolean;
 	multiTargets?: ResolvedSearchTarget[];
 	exactFilePaths?: string[];
@@ -1422,12 +1479,14 @@ export async function resolveToolSearchScope(opts: ToolScopeOptions): Promise<To
 	let searchPath: string;
 	let scopePath: string;
 	let globFilter: string | undefined;
+	let bareGlob = false;
 	let multiTargets: ResolvedSearchTarget[] | undefined;
 	let exactFilePaths: string[] | undefined;
 	if (effectivePaths.length === 1) {
 		const parsedPath = await parseSearchPathPreferringLiteral(effectivePaths[0] ?? ".", cwd);
 		searchPath = resolveSearchBase(parsedPath.basePath, cwd);
 		globFilter = parsedPath.glob;
+		bareGlob = isBareSearchGlob(effectivePaths[0]!, parsedPath);
 		scopePath = formatPathRelativeToCwd(searchPath, cwd);
 	} else {
 		const multiSearchPath = await resolveExplicitSearchPaths(
@@ -1469,6 +1528,7 @@ export async function resolveToolSearchScope(opts: ToolScopeOptions): Promise<To
 		searchPath,
 		scopePath,
 		globFilter,
+		bareGlob,
 		isDirectory,
 		multiTargets,
 		exactFilePaths,

@@ -366,6 +366,32 @@ impl Drop for TempDir {
 	}
 }
 
+#[cfg(windows)]
+#[test]
+fn native_path_metadata_matches_the_open_file_identity() {
+	let dir = TempDir::new("identity");
+	let path = dir.0.join("file");
+	std::fs::write(&path, "content").unwrap();
+	let fs = BlockingFs::native();
+	let path_meta = fs.metadata(&path).unwrap();
+	let file_meta = fs.open(&path).unwrap().metadata().unwrap();
+	assert!(path_meta.same_file(&file_meta));
+	assert_eq!(path_meta.len(), file_meta.len());
+	let missing_identity =
+		Metadata::native_with_handle(std::fs::metadata(&path).unwrap(), crate::native::HandleInfo {
+			volume_serial: 1,
+			file_index:    0,
+			nlink:         1,
+		});
+	assert!(missing_identity.file_id().is_none());
+	assert!(!missing_identity.same_file(&path_meta));
+	let link = dir.0.join("link");
+	if std::os::windows::fs::symlink_file("file", &link).is_ok() {
+		assert!(fs.symlink_metadata(&link).unwrap().is_symlink());
+		assert!(fs.metadata(&link).unwrap().same_file(&path_meta));
+	}
+}
+
 #[cfg(unix)]
 #[test]
 fn native_canonicalize_matches_uucore_modes() {
@@ -413,6 +439,50 @@ fn native_canonicalize_matches_uucore_modes() {
 		.unwrap(),
 		file
 	);
+}
+
+/// A creation mask stands in for the process umask on host files,
+/// directories, and temp files created through the facade, without touching
+/// the process umask.
+#[cfg(unix)]
+#[test]
+fn creation_mask_clears_bits_from_host_creations() {
+	use std::os::unix::fs::PermissionsExt;
+
+	let dir = TempDir::new("mask");
+	let fs = Fs::native().with_creation_mask(Some(0o077)).blocking();
+	let mode = |path: &Path| std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
+
+	fs.create(dir.0.join("file")).unwrap();
+	fs.create_dir(dir.0.join("dir")).unwrap();
+	let (temp, _file) = fs
+		.create_temp(&dir.0, &TempOptions::new().prefix("t").mode(0o644))
+		.unwrap();
+	assert_eq!(mode(&dir.0.join("file")), 0o600);
+	assert_eq!(mode(&dir.0.join("dir")), 0o700);
+	assert_eq!(mode(&temp), 0o600);
+
+	// Opening an existing file never re-applies the mask.
+	std::fs::set_permissions(dir.0.join("file"), std::fs::Permissions::from_mode(0o644)).unwrap();
+	fs.open_with(dir.0.join("file"), OpenOptions::new().write(true).create(true))
+		.unwrap();
+	assert_eq!(mode(&dir.0.join("file")), 0o644);
+
+	// A mask looser than the process umask keeps the bits the umask clears,
+	// for every kind of entry, and for each directory a recursive create
+	// makes.
+	let loose = Fs::native().with_creation_mask(Some(0)).blocking();
+	loose.create(dir.0.join("open")).unwrap();
+	loose.create_dir(dir.0.join("loose")).unwrap();
+	loose.create_dir_all(dir.0.join("deep/er")).unwrap();
+	loose
+		.make_node(dir.0.join("fifo"), crate::NodeKind::Fifo, 0o666)
+		.unwrap();
+	assert_eq!(mode(&dir.0.join("open")), 0o666);
+	assert_eq!(mode(&dir.0.join("loose")), 0o777);
+	assert_eq!(mode(&dir.0.join("deep")), 0o777);
+	assert_eq!(mode(&dir.0.join("deep/er")), 0o777);
+	assert_eq!(mode(&dir.0.join("fifo")), 0o666);
 }
 
 #[test]
