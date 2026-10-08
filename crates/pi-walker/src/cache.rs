@@ -95,10 +95,16 @@ impl ScanCache {
 		self.entries.insert(key, entry);
 	}
 
-	fn invalidate(&mut self, target: Option<&Path>) {
+	/// Drops entries under `target` (all when `None`) and, in the same pass,
+	/// every TTL-expired entry: invalidation runs after each agent write, so
+	/// this releases stale snapshots (up to the byte cap) without waiting for
+	/// the next cache lookup.
+	fn invalidate(&mut self, target: Option<&Path>, now: Instant) {
 		self.generation = self.generation.wrapping_add(1);
 		self.entries.retain(|key, entry| {
-			if target.is_none_or(|target| target.starts_with(&key.root)) {
+			if target.is_none_or(|target| target.starts_with(&key.root))
+				|| now.saturating_duration_since(entry.created_at) >= self.ttl
+			{
 				self.bytes -= entry.bytes;
 				false
 			} else {
@@ -534,7 +540,7 @@ where
 
 /// Invalidate cache entries whose root contains `target`.
 pub fn invalidate_path(target: &Path) {
-	SCAN_CACHE.lock().invalidate(Some(target));
+	SCAN_CACHE.lock().invalidate(Some(target), Instant::now());
 }
 
 /// Resolve a possibly relative path and invalidate matching cache roots.
@@ -561,7 +567,7 @@ pub fn invalidate_path_string(path: &str) {
 
 /// Clear the entire scan cache.
 pub fn invalidate_all() {
-	SCAN_CACHE.lock().invalidate(None);
+	SCAN_CACHE.lock().invalidate(None, Instant::now());
 }
 
 #[cfg(test)]
@@ -590,9 +596,10 @@ mod tests {
 				.expect("system time is after UNIX_EPOCH")
 				.as_nanos();
 			let counter = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
-			// nextest runs each test in its own process, so the counter restarts at 0
-			// and macOS clocks tick in microseconds: without the pid, two tests
-			// starting together share a directory and one's Drop deletes the other's.
+			// nextest runs each test in its own process, so the counter restarts
+			// at 0 and macOS clocks tick in microseconds: without the
+			// pid, two tests starting together share a directory and
+			// one's Drop deletes the other's.
 			let pid = std::process::id();
 			let path =
 				std::env::temp_dir().join(format!("pi-fs-cache-test-{pid}-{timestamp}-{counter}"));
@@ -728,11 +735,28 @@ mod tests {
 	}
 
 	#[test]
+	fn invalidation_releases_expired_payloads_outside_the_target() {
+		let now = std::time::Instant::now();
+		let ttl = Duration::from_millis(10);
+		let mut cache = super::ScanCache::new(ttl, 16, 4096);
+		let expired = cached_entry("expired", 0, now);
+		let weak = std::sync::Arc::downgrade(&expired.entries);
+		cache.insert(key("expired"), expired, 0, now);
+		let fresh = cached_entry("fresh", 0, now + Duration::from_millis(1));
+		let fresh_bytes = fresh.bytes;
+		cache.insert(key("fresh"), fresh, 0, now + Duration::from_millis(1));
+		cache.invalidate(Some(Path::new("elsewhere/file")), now + ttl);
+		assert!(weak.upgrade().is_none(), "expired snapshot must be freed at invalidation");
+		assert_eq!(cache.entries.len(), 1);
+		assert_eq!(cache.bytes, fresh_bytes);
+	}
+
+	#[test]
 	fn cache_rejects_inserts_carrying_a_pre_invalidation_generation() {
 		let now = std::time::Instant::now();
 		let mut cache = super::ScanCache::new(Duration::from_secs(60), 16, 4096);
 		let generation = cache.generation;
-		cache.invalidate(Some(Path::new("root/changed")));
+		cache.invalidate(Some(Path::new("root/changed")), now);
 		cache.insert(key("root"), cached_entry("stale", 0, now), generation, now);
 		assert!(cache.get(&key("root"), now).is_none());
 		let generation = cache.generation;
@@ -818,7 +842,7 @@ mod tests {
 			worker.join().unwrap();
 		}
 		let mut cache = cache.lock();
-		cache.invalidate(None);
+		cache.invalidate(None, std::time::Instant::now());
 		assert_eq!(cache.bytes, 0);
 		assert!(cache.entries.is_empty());
 	}

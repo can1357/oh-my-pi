@@ -56,9 +56,9 @@ describe("SessionManager.peekSessionInit", () => {
 		const sessionFile = manager.getSessionFile();
 		if (!sessionFile) throw new Error("Expected a persisted session file path");
 
-		manager.appendSessionInit({ systemPrompt: "first", task: "t1", tools: ["read"], spawns: "" });
+		manager.appendSessionInit({ systemPrompt: ["first"], task: "t1", tools: ["read"], spawns: "" });
 		manager.appendSessionInit({
-			systemPrompt: "second",
+			systemPrompt: ["second", "rules"],
 			task: "t2",
 			tools: ["read", "bash", "yield"],
 			spawns: "task",
@@ -71,7 +71,7 @@ describe("SessionManager.peekSessionInit", () => {
 		const peek = await SessionManager.peekSessionInit(sessionFile);
 		expect(peek?.cwd).toBe(manager.getCwd());
 		// Latest init wins — the reviver must rebuild from the most recent contract.
-		expect(peek?.init?.systemPrompt).toBe("second");
+		expect(peek?.init?.systemPrompt).toEqual(["second", "rules"]);
 		expect(peek?.init?.tools).toEqual(["read", "bash", "yield"]);
 		expect(peek?.init?.spawns).toBe("task");
 		expect(peek?.init?.readSummarize).toBe(false);
@@ -84,13 +84,13 @@ describe("SessionManager.peekSessionInit", () => {
 		const sessionFile = manager.getSessionFile();
 		if (!sessionFile) throw new Error("Expected a persisted session file path");
 
-		manager.appendSessionInit({ systemPrompt: "first", task: "task", tools: ["read"], spawns: "" });
-		manager.appendSessionInit({ systemPrompt: "second", task: "task", tools: ["read"], spawns: "" });
+		manager.appendSessionInit({ systemPrompt: ["first"], task: "task", tools: ["read"], spawns: "" });
+		manager.appendSessionInit({ systemPrompt: ["second"], task: "task", tools: ["read"], spawns: "" });
 		manager.appendMessage(assistantMessage("journal tail"));
 
 		const peek = await SessionManager.peekSessionInit(sessionFile, new LargeFileSessionStorage());
 		expect(peek?.cwd).toBe(manager.getCwd());
-		expect(peek?.init?.systemPrompt).toBe("second");
+		expect(peek?.init?.systemPrompt).toEqual(["second"]);
 	});
 
 	it("preserves non-file storage behavior", async () => {
@@ -99,13 +99,13 @@ describe("SessionManager.peekSessionInit", () => {
 		const manager = SessionManager.create(cwd, path.join(cwd, "sessions"), storage);
 		const sessionFile = manager.getSessionFile();
 		if (!sessionFile) throw new Error("Expected a persisted session file path");
-		manager.appendSessionInit({ systemPrompt: "first", task: "task", tools: ["read"], spawns: "" });
-		manager.appendSessionInit({ systemPrompt: "second", task: "task", tools: ["read"], spawns: "" });
+		manager.appendSessionInit({ systemPrompt: ["first"], task: "task", tools: ["read"], spawns: "" });
+		manager.appendSessionInit({ systemPrompt: ["second"], task: "task", tools: ["read"], spawns: "" });
 		manager.appendMessage(assistantMessage("journal tail"));
 
 		const peek = await SessionManager.peekSessionInit(sessionFile, storage);
 		expect(peek?.cwd).toBe(manager.getCwd());
-		expect(peek?.init?.systemPrompt).toBe("second");
+		expect(peek?.init?.systemPrompt).toEqual(["second"]);
 	});
 
 	it("returns init: null for a session file with no session_init (a main/legacy session)", async () => {
@@ -118,6 +118,28 @@ describe("SessionManager.peekSessionInit", () => {
 		const peek = await SessionManager.peekSessionInit(sessionFile);
 		expect(peek?.cwd).toBe(manager.getCwd());
 		expect(peek?.init).toBeNull();
+	});
+
+	it("reads a legacy joined-string system prompt as one block", async () => {
+		const file = path.join(makeTempDir("@pi-peek-legacy-prompt-"), "legacy.jsonl");
+		const content = [
+			{ type: "session", version: 3, id: "legacy", timestamp: "2026-08-15T00:00:00.000Z", cwd: "/tmp" },
+			{
+				type: "session_init",
+				id: "legacy-init",
+				parentId: null,
+				timestamp: "2026-08-15T00:00:00.000Z",
+				systemPrompt: "base\n\nrules",
+				task: "task",
+				tools: [],
+			},
+		]
+			.map(entry => JSON.stringify(entry))
+			.join("\n");
+		await Bun.write(file, `${content}\n`);
+
+		const peek = await SessionManager.peekSessionInit(file);
+		expect(peek?.init?.systemPrompt).toEqual(["base\n\nrules"]);
 	});
 
 	it("returns null when the first entry is not a session header", async () => {

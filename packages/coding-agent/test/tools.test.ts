@@ -1759,6 +1759,24 @@ describe("Coding Agent Tools", () => {
 			expect(result.details?.isDirectory).toBe(true);
 		});
 
+		it("re-reads an archive rewritten in place with the same size and restored mtime", async () => {
+			const archivePath = path.join(testDir, "rewritten.zip");
+			// A whole-second mtime round-trips exactly through utimes on every platform.
+			const pinnedMtime = new Date("2024-01-01T00:00:00Z");
+			fs.writeFileSync(archivePath, createZipArchive([{ path: "alpha.txt", content: "first\n" }]));
+			fs.utimesSync(archivePath, pinnedMtime, pinnedMtime);
+			expect(getTextOutput(await readTool.execute("test-call-zip-before", { path: archivePath }))).toContain(
+				"alpha.txt",
+			);
+
+			// Same-length name and content: the rewrite keeps the size; the mtime is put back.
+			fs.writeFileSync(archivePath, createZipArchive([{ path: "bravo.txt", content: "other\n" }]));
+			fs.utimesSync(archivePath, pinnedMtime, pinnedMtime);
+			const output = getTextOutput(await readTool.execute("test-call-zip-after", { path: archivePath }));
+			expect(output).toContain("bravo.txt");
+			expect(output).not.toContain("alpha.txt");
+		});
+
 		it("should list zip archives without inflating member payloads", async () => {
 			const archivePath = path.join(testDir, "header-only.zip");
 			fs.writeFileSync(

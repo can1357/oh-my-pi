@@ -1,14 +1,22 @@
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
 import { KeybindingsManager } from "@oh-my-pi/pi-tui/app-keybindings";
-import { setKeybindings, type TUI } from "@oh-my-pi/pi-tui";
-import type { DescribeContext, NativeChild, NativeNode } from "@oh-my-pi/pi-tui/native/node";
+import { setKeybindings, type Component, type TerminalFrameProvider, type TUI } from "@oh-my-pi/pi-tui";
+import { md } from "@oh-my-pi/pi-tui/native/describe";
+import type { DescribeContext, NativeChild, NativeNode, NativeSurfaceProvider } from "@oh-my-pi/pi-tui/native/node";
 import { AskDialogComponent, type ExtensionAskDialogQuestion } from "@oh-my-pi/pi-tui/overlays/ask-dialog";
 import { LoginDialogComponent } from "@oh-my-pi/pi-tui/overlays/login-dialog";
 import { PlanReviewOverlay } from "@oh-my-pi/pi-tui/overlays/plan-review-overlay";
+import { setNativeRendering } from "@oh-my-pi/pi-tui/native/state";
 import { getThemeByName, setThemeInstance } from "@oh-my-pi/pi-tui/theme";
+import { TspHarness } from "./native/tsp-harness";
 
 const ENTER = "\n";
+const UP = "\x1b[A";
 const DOWN = "\x1b[B";
+const RIGHT = "\x1b[C";
+const LEFT = "\x1b[D";
+const SHIFT_RIGHT = "\x1b[1;2C";
+const SHIFT_LEFT = "\x1b[1;2D";
 
 /** A terminal that draws every kind (`meter` included). */
 const CX: DescribeContext = { cols: 100, reduceMotion: false, dark: true, supports: () => true, feature: () => true };
@@ -91,17 +99,42 @@ describe("dialogs under a native surface", () => {
 		).toEqual([["Park them"], ["No"]]);
 	});
 
-	it("ask: tab and option events reach the dialog through the hoisted sheet's keypaths", () => {
+	it("ask: tab and option events reach the dialog through its described keypaths", () => {
 		const onSubmit = vi.fn();
 		const dialog = ask(onSubmit);
 		const tabs = find(dialog.describe(CX), node => node.k === "tabs");
-		expect(tabs?.path.startsWith("^")).toBe(true);
 		dialog.handleNativeEvent({ type: "select", key: tabs!.path, item: "1" });
 		const options = find(dialog.describe(CX), node => node.p?.role === "omp.ask.options");
 		expect(options?.node.key).toBe("q1");
 		dialog.handleNativeEvent({ type: "activate", key: options!.path, item: "option:0" });
 		dialog.handleNativeEvent({ type: "action", key: "x", act: "submit", mods: [] });
 		expect(onSubmit.mock.calls[0]?.[0].results[1].selectedOptions).toEqual(["Yes"]);
+	});
+
+	it("ask: docks in place of the composer instead of a modal sheet over the transcript", async () => {
+		// A modal bottom sheet hid the transcript rows explaining the question and blocked scrolling.
+		const transcript: Component = { render: () => [], invalidate: () => {}, describe: () => md("Why this decision") };
+		const dialog = ask();
+		const provider: TerminalFrameProvider & NativeSurfaceProvider = {
+			renderFrame: () => ({ viewport: [] }),
+			acknowledgeHistory: () => {},
+			describeSurface: () => ({ main: [transcript], dock: [dialog] }),
+		};
+		const harness = await TspHarness.start(tui => {
+			tui.setFrameProvider(provider);
+			tui.setFocus(dialog);
+		});
+		try {
+			expect(harness.errors).toEqual([]);
+			expect(harness.region("layer")?.c ?? []).toEqual([]);
+			const dock = harness.region("dock")!;
+			// Framed as the prompt composer (its root role), so Tern spaces it the same way.
+			const root = dock.c?.find(node => node.p?.role === "omp.editor");
+			expect(root?.c?.some(node => node.p?.role === "omp.ask.options")).toBe(true);
+			expect(harness.findAll(node => node.k === "overlay")).toEqual([]);
+		} finally {
+			harness.stop();
+		}
 	});
 
 	it("ask: Skip cancels like Esc; the recommended option loses its suffix for the badge", () => {
@@ -136,6 +169,39 @@ describe("dialogs under a native surface", () => {
 		pointed.handleNativeEvent({ type: "action", key: "tools/copyPlan", act: "copyPlan", mods: [] });
 		expect(viaButton.mock.calls).toEqual(viaKey.mock.calls);
 		expect(viaKey).toHaveBeenCalledTimes(1);
+	});
+
+	it("plan review: ←/→ walk the horizontal decision bar, Shift+←/→ step the model slider, ↑ leaves it", () => {
+		const onPick = vi.fn();
+		const onChange = vi.fn();
+		const overlay = new PlanReviewOverlay(
+			"# Plan\n\nbody\n",
+			{
+				options: ["Approve", "Refine", "Stay"],
+				slider: { segments: [{ label: "Fast" }, { label: "Smart" }], index: 0, onChange },
+			},
+			{ onPick, onCancel: vi.fn() },
+		);
+		setNativeRendering(true);
+		try {
+			// → → ← lands on the middle option; Shift+→ then Shift+← round-trips the slider.
+			overlay.handleInput(RIGHT);
+			overlay.handleInput(RIGHT);
+			overlay.handleInput(LEFT);
+			overlay.handleInput(SHIFT_RIGHT);
+			overlay.handleInput(SHIFT_LEFT);
+			// ↓ has nothing below the bar: the selection stays put.
+			overlay.handleInput(DOWN);
+			// ↑ hands focus to the body, where Enter returns to the bar instead of confirming.
+			overlay.handleInput(UP);
+			overlay.handleInput(ENTER);
+			expect(onPick).not.toHaveBeenCalled();
+			overlay.handleInput(ENTER);
+		} finally {
+			setNativeRendering(false);
+		}
+		expect(onChange.mock.calls).toEqual([[1], [0]]);
+		expect(onPick).toHaveBeenCalledWith("Refine");
 	});
 
 	it("login: Cancel runs Esc's path and Continue submits the pasted code", async () => {

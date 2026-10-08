@@ -711,8 +711,11 @@ export class AskDialogComponent implements Component {
 	}
 
 	/**
-	 * A bottom-anchored glass sheet over the composer (the `overlay` hoists into
-	 * the terminal's layer; the dialog's own slot in the dock stays empty).
+	 * In the dock, in the composer's place and framed as the composer is: a
+	 * `col` with the prompt editor's root role (`omp.editor`), so the terminal
+	 * gives it the composer's insets and spacing. Not a modal `overlay` sheet:
+	 * one anchored at the bottom covered the transcript rows that explain the
+	 * question and blocked scrolling until the question was answered.
 	 */
 	describe(cx: DescribeContext): NativeNode {
 		const inputGuard = this.options.inputGuard;
@@ -728,13 +731,7 @@ export class AskDialogComponent implements Component {
 		if (this.#isSubmitTab()) this.#describeSubmitBody(children);
 		else this.#describeQuestionBody(children);
 		children.push(this.#describeActions(blocked));
-		const sheet = node(
-			"overlay",
-			{ role: "omp.overlay.ask", anchor: "bottom", size: "md", modal: true },
-			[col(children, { gap: "md" })],
-			"sheet",
-		);
-		this.#native = col([sheet]);
+		this.#native = col(children, { role: "omp.editor", gap: "md" });
 		this.#nativeBlocked = blocked;
 		return this.#native;
 	}
@@ -1132,7 +1129,7 @@ export class AskDialogComponent implements Component {
 		const action = question?.multi
 			? `${formatKeyHint("space")} toggle · ${enter} ${enterAction}`
 			: `${enter} select · ${formatKeyHint("n")} note`;
-		const tabs = this.#hasSubmitTab() ? ` · ${formatKeyHints(["tab", "left", "right"])}` : "";
+		const tabs = this.#hasSubmitTab() ? ` · ${formatKeyHints(["tab", "left", "right"])} question` : "";
 		const expand = this.#expandHint();
 		if (this.#questionCanPage && indicator) {
 			const pageKeys = editorKeys("tui.select.pageUp", "tui.select.pageDown");

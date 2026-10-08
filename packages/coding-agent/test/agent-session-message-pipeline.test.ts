@@ -1260,7 +1260,6 @@ describe("AgentSession message pipeline", () => {
 	);
 
 	it.each([
-		["Codex", getBundledModel("openai-codex", "gpt-5.5")],
 		["Antigravity fixed-profile transport", getBundledModel("google-antigravity", "claude-sonnet-4-6")],
 		...(["cursor-agent", "gitlab-duo-agent"] as const).map(
 			api =>
@@ -1269,15 +1268,6 @@ describe("AgentSession message pipeline", () => {
 					buildModel({ ...getBundledModel("openai", "gpt-4o"), api, provider: "custom", compat: undefined }),
 				] as const,
 		),
-		[
-			"custom Codex route",
-			buildModel({
-				...getBundledModel("openai-codex", "gpt-5.5"),
-				provider: "custom",
-				id: "opaque-model",
-				omitMaxOutputTokens: false,
-			}),
-		],
 		[
 			"Ollama Cloud",
 			buildModel({

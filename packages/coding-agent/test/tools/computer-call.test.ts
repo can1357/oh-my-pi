@@ -93,7 +93,9 @@ describe("renderComputerCall", () => {
 					{ method: "click", args: [1, 2] },
 				]),
 			),
-		).toBe("Only desktop.window(id)/desktop.ref(ref) results accept a chained call; got desktop.windows().");
+		).toBe(
+			"Only desktop.window(id)/desktop.display(id)/desktop.ref(ref) results accept a chained call; got desktop.windows().",
+		);
 		expect(
 			errorMessage(() =>
 				renderComputerCall([

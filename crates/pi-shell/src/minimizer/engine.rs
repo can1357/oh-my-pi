@@ -263,8 +263,10 @@ fn is_common_chain_utility(program: &str) -> bool {
 			| "awk"
 			| "sleep"
 			| "seq"
-			| "cp" | "mv"
-			| "rm" | "mkdir"
+			| "cp"
+			| "mv"
+			| "rm"
+			| "mkdir"
 			| "rmdir"
 			| "touch"
 			| "basename"
@@ -274,7 +276,8 @@ fn is_common_chain_utility(program: &str) -> bool {
 			| "true"
 			| "false"
 			| "yes"
-			| "tr" | "tee"
+			| "tr"
+			| "tee"
 			| "sort"
 			| "uniq"
 			| "cut"
@@ -289,7 +292,8 @@ fn is_common_chain_utility(program: &str) -> bool {
 			| "tar"
 			| "gzip"
 			| "gunzip"
-			| "cd" | "pwd"
+			| "cd"
+			| "pwd"
 			| "export"
 			| "env"
 			| "test"
@@ -650,6 +654,21 @@ only_on_exit = [0]
 		let failed = apply("git diff", &diff_input, 1, &cfg);
 		assert_ne!(failed.filter, "pipeline+builtin");
 		assert!(failed.text.contains("file changed"));
+	}
+
+	#[test]
+	fn failing_jq_keeps_the_error_after_long_output() {
+		let cfg = MinimizerConfig { enabled: true, ..Default::default() };
+		let mut input = String::new();
+		for i in 0..100 {
+			let _ = writeln!(input, "{{\"id\": {i}, \"name\": \"row {i}\"}}");
+		}
+		input.push_str("Error: cannot use 1 as object key\n");
+
+		let out = apply("jq -c '.[]' rows.json", &input, 0, &cfg);
+		assert!(out.changed, "a successful run is truncated to its head");
+		let out = apply("jq -c '.[]' rows.json", &input, 5, &cfg);
+		assert!(out.text.ends_with("Error: cannot use 1 as object key\n"), "{:?}", out.text);
 	}
 
 	// Regression guards for the builtin npx catch-all def (defs/npx.toml). Its

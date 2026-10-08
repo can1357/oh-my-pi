@@ -26,6 +26,28 @@ function createFixture(modelId = "claude-haiku-4-5") {
 	return { authStorage, modelRegistry, model };
 }
 
+/** A custom `anthropic-messages` provider, which defaults to Claude Code (OAuth) shaping for any key. */
+function createCustomProviderFixture(headers?: Record<string, string>) {
+	const authStorage = createInMemoryAuthStorage();
+	authStorage.keys.setRuntime("custom-claude", "sk-ant-api03-console-key");
+	const modelRegistry = new ModelRegistry(authStorage, undefined, { ignoreLocalModelConfig: true });
+	const model = buildModel({
+		id: "claude-haiku-4-5",
+		name: "Custom Claude Haiku",
+		api: "anthropic-messages",
+		provider: "custom-claude",
+		baseUrl: "https://api.anthropic.com",
+		reasoning: false,
+		input: ["text"],
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: 200_000,
+		maxTokens: 16_384,
+		headers,
+		isOAuth: true,
+	});
+	return { authStorage, modelRegistry, model };
+}
+
 function makeCaptureFetch(): {
 	fetch: FetchImpl;
 	body: () => Record<string, unknown> | undefined;
@@ -204,6 +226,51 @@ describe("Anthropic search request body", () => {
 
 			expect(cap.body()?.model).toBe("claude-haiku-4-5");
 			expect(cap.body()?.temperature).toBe(0.1);
+		} finally {
+			fixture.authStorage.close();
+		}
+	});
+
+	it("shapes a custom provider's API key as Claude Code when the model is marked OAuth", async () => {
+		const fixture = createCustomProviderFixture();
+		try {
+			const cap = makeCaptureFetch();
+			await searchAnthropic({
+				query: "custom provider oauth",
+				systemPrompt: "Use web search.",
+				sessionId: "session-custom",
+				authStorage: fixture.authStorage,
+				modelRegistry: fixture.modelRegistry,
+				model: fixture.model,
+				fetch: cap.fetch,
+			});
+
+			const headers = cap.headers();
+			expect(headers?.get("authorization")).toBe("Bearer sk-ant-api03-console-key");
+			expect(headers?.get("x-api-key")).toBeNull();
+			expect(headers?.get("user-agent")).toStartWith("claude-cli/");
+			const metadata = cap.body()?.metadata as { user_id: string } | undefined;
+			expect(JSON.parse(metadata!.user_id).session_id).toBe("session-custom");
+		} finally {
+			fixture.authStorage.close();
+		}
+	});
+
+	it("merges configured headers case-insensitively under the enforced credential", async () => {
+		const fixture = createCustomProviderFixture({ authorization: "Bearer configured", "X-Tenant": "tenant-a" });
+		try {
+			const cap = makeCaptureFetch();
+			await searchAnthropic({
+				query: "configured headers",
+				systemPrompt: "Use web search.",
+				authStorage: fixture.authStorage,
+				modelRegistry: fixture.modelRegistry,
+				model: fixture.model,
+				fetch: cap.fetch,
+			});
+
+			expect(cap.headers()?.get("authorization")).toBe("Bearer sk-ant-api03-console-key");
+			expect(cap.headers()?.get("x-tenant")).toBe("tenant-a");
 		} finally {
 			fixture.authStorage.close();
 		}

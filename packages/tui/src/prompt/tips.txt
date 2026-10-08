@@ -31,3 +31,4 @@ Try starting your prompt with a ->, and writing a list (1. Do X, 2. Do Y)
 Press {key:shift+tab} to cycle through reasoning effort levels
 omp can reconfigure and extend itself — ask any questions you have!
 Lint/type errors piling up? `omp cleanse` (or /cleanse right here) hunts project diagnostics and fixes them with parallel subagents — {key:escape} cancels
+[NO-TERN] Psst, omp has a natural habitat 🐦 [tern](https://scl.so/tern)
