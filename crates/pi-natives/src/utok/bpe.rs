@@ -66,6 +66,8 @@ impl Hasher for FxHasher {
 type Fx = BuildHasherDefault<FxHasher>;
 type FxMap = HashMap<Box<[u8]>, u32, Fx>;
 
+const SHORT_MAX: usize = 15;
+
 /// A [`pack`]ed short key as four `u32` words. A `u128` key is 16-byte
 /// aligned, which pads every `(key, rank)` bucket from 20 to 32 bytes; the
 /// rank table holds one bucket per short token, ~6 MB of padding on o200k
@@ -96,7 +98,7 @@ impl Hash for ShortKey {
 )]
 fn pack(key: &[u8]) -> Option<ShortKey> {
 	let n = key.len();
-	if n > 15 {
+	if n > SHORT_MAX {
 		return None;
 	}
 	let v: u128 = if let (Some(lo), Some(hi)) = (key.first_chunk::<8>(), key.last_chunk::<8>()) {
@@ -152,56 +154,42 @@ impl RankTable {
 	/// those ranks must never be produced.
 	pub fn parse(zst: &[u8]) -> Self {
 		let raw = zstd::decode_all(zst).expect("utoken: zstd decode failed");
-		assert_eq!(&raw[..6], b"UTOK1\n", "utoken: bad magic");
-		let n = u32::from_le_bytes(raw[6..10].try_into().unwrap()) as usize;
-		assert!(n > 0 || raw.len() == 10, "utoken: trailing bytes in UTOK1 blob");
-		// One (length, bytes) record per rank; zero length marks a dead slot.
-		let entries = || {
-			let mut p = &raw[10..];
-			(0..n as u32).map(move |rank| {
-				let mut len = 0usize;
-				let mut shift = 0;
-				loop {
-					let b = p[0];
-					p = &p[1..];
-					len |= ((b & 0x7f) as usize) << shift;
-					if b < 0x80 {
-						break;
-					}
-					shift += 7;
-				}
-				let key = &p[..len];
-				p = &p[len..];
-				assert!(rank as usize + 1 < n || p.is_empty(), "utoken: trailing bytes in UTOK1 blob");
-				(rank, key)
-			})
-		};
+		let mut p = &raw[..];
+		assert_eq!(&p[..6], b"UTOK1\n", "utoken: bad magic");
+		p = &p[6..];
+		let n = u32::from_le_bytes(p[..4].try_into().unwrap()) as usize;
+		p = &p[4..];
 		// Size `short` to its real population: dead slots and pair/long
 		// tokens would otherwise round a sparse table up a power of two. A
 		// sparse subset table (Jev's base set: 49k short tokens over 200k
 		// ranks) still keeps half the container's slots: it answers mostly
 		// misses, which at a ~0.75 load cost Jev ~12% of its count time.
-		let short_count = entries()
-			.filter(|(_, key)| !key.is_empty() && key.len() != 2 && key.len() <= 15)
-			.count();
+		let short_count = {
+			let mut entries = p;
+			(0..n)
+				.map(|_| read_token(&mut entries))
+				.filter(|key| matches!(key.len(), 1 | 3..=SHORT_MAX))
+				.count()
+		};
 		let mut pairs: Box<[u32; 65536]> =
 			vec![u32::MAX; 65536].into_boxed_slice().try_into().unwrap();
 		let mut short = HashMap::with_capacity_and_hasher(short_count.max(n / 2), Fx::default());
 		let mut long = FxMap::default();
 		let mut max_token_len = 0usize;
-		for (rank, key) in entries() {
-			if key.is_empty() {
-				continue;
+		for rank in 0..n as u32 {
+			let key = read_token(&mut p);
+			if !key.is_empty() {
+				if let [a, b] = key {
+					pairs[usize::from(*a) << 8 | usize::from(*b)] = rank;
+				} else if let Some(k) = pack(key) {
+					short.insert(k, rank);
+				} else {
+					long.insert(key.into(), rank);
+				}
+				max_token_len = max_token_len.max(key.len());
 			}
-			if let [a, b] = key {
-				pairs[usize::from(*a) << 8 | usize::from(*b)] = rank;
-			} else if let Some(k) = pack(key) {
-				short.insert(k, rank);
-			} else {
-				long.insert(key.into(), rank);
-			}
-			max_token_len = max_token_len.max(key.len());
 		}
+		assert!(p.is_empty(), "utoken: trailing bytes in UTOK1 blob");
 		Self { pairs, short, long, max_token_len }
 	}
 
@@ -379,6 +367,23 @@ impl RankTable {
 			s = next[s];
 		}
 	}
+}
+
+fn read_token<'a>(p: &mut &'a [u8]) -> &'a [u8] {
+	let mut len = 0usize;
+	let mut shift = 0;
+	loop {
+		let b = p[0];
+		*p = &p[1..];
+		len |= ((b & 0x7f) as usize) << shift;
+		if b < 0x80 {
+			break;
+		}
+		shift += 7;
+	}
+	let (key, rest) = p.split_at(len);
+	*p = rest;
+	key
 }
 
 /// A full BPE tokenizer: piece splitter + rank table + family flags.
