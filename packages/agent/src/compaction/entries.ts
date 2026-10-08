@@ -71,6 +71,8 @@ export interface CustomMessageEntry<T = unknown> extends SessionEntryBase {
 	display: boolean;
 	/** Who initiated this message for billing/attribution semantics. */
 	attribution?: MessageAttribution;
+	/** Opaque origin metadata, not an authority classification. */
+	steeringSource?: string;
 }
 
 export interface CustomEntry<T = unknown> extends SessionEntryBase {

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Preserved opaque custom-message source metadata during compaction and branch reconstruction without using it to classify steering authority.
+
 ## [18.8.1] - 2026-10-07
 
 ### Added

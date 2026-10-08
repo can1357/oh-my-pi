@@ -14,6 +14,7 @@ import { buildJobResult, snapshotJobs, undeliveredJobs } from "../async/job-cont
 import { hasLiveOwnedService, listServicesTolerant, waitForOwnedServiceCompletion } from "../launch/services";
 import { drainPendingInbox, messageResult } from "../irc/messaging";
 import type { AgentRegistry } from "../registry/agent-registry";
+import type { SessionManager } from "../session/session-manager";
 import type { IrcMessage } from "@oh-my-pi/pi-tui/tools/irc";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
 import type { CoordinationDetails } from "@oh-my-pi/pi-tui/tools/wait";
@@ -28,6 +29,8 @@ const PROGRESS_INTERVAL_MS = 500;
 interface WaitMessaging {
 	registry: AgentRegistry;
 	senderId: string;
+	sessionManager: SessionManager | undefined;
+	consumptionBoundary: object | undefined;
 }
 
 function takeQueuedMessage(messaging: WaitMessaging | undefined): IrcMessage | undefined {
@@ -68,17 +71,28 @@ export class WaitTool implements AgentTool<typeof waitSchema, CoordinationDetail
 	): Promise<AgentToolResult<CoordinationDetails>> {
 		const registry = this.session.agentRegistry;
 		const senderId = this.session.getAgentId?.() ?? undefined;
-		const messaging = registry && senderId ? { registry, senderId } : undefined;
+		const messageManager = registry && senderId ? registry.get(senderId)?.session?.sessionManager : undefined;
+		const messaging =
+			registry && senderId
+				? {
+						registry,
+						senderId,
+						sessionManager: messageManager,
+						consumptionBoundary: messageManager?.captureIrcConsumptionBoundary(),
+					}
+				: undefined;
 		const manager = this.session.asyncJobManager;
 
 		const pending = takeQueuedMessage(messaging);
-		if (pending && messaging) return messageResult(messaging.senderId, pending);
+		if (pending && messaging)
+			return messageResult(messaging.sessionManager, messaging.senderId, pending, messaging.consumptionBoundary);
 		// Refreshes owned-service tracking only; jobs are in-process, so a hung
 		// broker must not turn every wait into an error.
 		if (cfgLaunchEnabled.get(this.session.settings)) {
 			await listServicesTolerant(this.session, signal);
 			const queued = takeQueuedMessage(messaging);
-			if (queued && messaging) return messageResult(messaging.senderId, queued);
+			if (queued && messaging)
+				return messageResult(messaging.sessionManager, messaging.senderId, queued, messaging.consumptionBoundary);
 		}
 		const jobs = manager?.getRunningJobs({ ownerId: senderId }) ?? [];
 		// An accepted completion whose delivery has not reached the transcript
@@ -156,7 +170,8 @@ export class WaitTool implements AgentTool<typeof waitSchema, CoordinationDetail
 			// A dequeued message wins a photo-finish with a job: the job remains
 			// deliverable, whereas a lost message cannot be recovered from the bus.
 			const message = await busLeg;
-			if (message && messaging) return messageResult(messaging.senderId, message);
+			if (message && messaging)
+				return messageResult(messaging.sessionManager, messaging.senderId, message, messaging.consumptionBoundary);
 			if (signal?.aborted) {
 				// Steering, a peer IRC, or a completion notice cut the wait short:
 				// the designed wake path, so the message injects after a normal

@@ -1,6 +1,7 @@
 import type { Agent, AgentMessage } from "@oh-my-pi/pi-agent-core";
-import { prompt } from "@oh-my-pi/pi-utils";
+import { isRecord, prompt } from "@oh-my-pi/pi-utils";
 import { type IrcMessage } from "@oh-my-pi/pi-tui/tools/irc";
+import { incomingIrcIdentity, ircSource, type IrcSteeringMessage } from "../irc/identity";
 import parentIrcSteerTemplate from "../prompts/steering/parent-irc.md" with { type: "text" };
 import ircIncomingTemplate from "../prompts/system/irc-incoming.md" with { type: "text" };
 import { AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-registry";
@@ -20,6 +21,14 @@ export interface IrcBridgeHost {
 	wakeForIrc(records: AgentMessage[]): void;
 }
 
+interface IrcPendingSnapshot {
+	interrupts: AgentMessage[];
+	asides: AgentMessage[];
+	deferredWakes: AgentMessage[];
+	sessionId: string;
+	reservations: Map<string, Set<string>>;
+}
+
 /** Owns incoming IRC queues and the session's non-interrupting aside queue. */
 export class IrcBridge {
 	readonly #host: IrcBridgeHost;
@@ -31,18 +40,48 @@ export class IrcBridge {
 	#deferredWakes: AgentMessage[] = [];
 	/** In-flight wake-turn relays owed to peers. */
 	readonly #pendingReplies = new Set<Promise<void>>();
+	/** Only identities still in flight; the journal owns committed identities. */
+	#reservations = new Map<string, Set<string>>();
+	#sessionId: string;
+	#consumptionBoundary: object;
 
 	constructor(host: IrcBridgeHost) {
 		this.#host = host;
+		this.#sessionId = host.sessionManager.getSessionId();
+		this.#consumptionBoundary = host.sessionManager.captureIrcConsumptionBoundary();
+	}
+
+	#bindSession(): void {
+		const sessionId = this.#host.sessionManager.getSessionId();
+		const boundary = this.#host.sessionManager.captureIrcConsumptionBoundary();
+		if (sessionId === this.#sessionId && boundary === this.#consumptionBoundary) return;
+		this.#sessionId = sessionId;
+		this.#consumptionBoundary = boundary;
+		this.#reservations.clear();
+		this.#interrupts = [];
+		this.#asides = [];
+		this.#deferredWakes = [];
+	}
+
+	/** Release only after the owning session has journaled message_end. */
+	markPersisted(record: AgentMessage): void {
+		this.#bindSession();
+		const identity = incomingIrcIdentity(record);
+		if (!isRecord(identity) || typeof identity.from !== "string" || typeof identity.id !== "string") return;
+		const ids = this.#reservations.get(identity.from);
+		ids?.delete(identity.id);
+		if (ids?.size === 0) this.#reservations.delete(identity.from);
 	}
 
 	/** Whether an incoming peer message can interrupt a wait. */
 	hasInterrupts(): boolean {
+		this.#bindSession();
 		return this.#interrupts.length > 0;
 	}
 
 	/** Whether any undelivered IRC record remains queued. */
 	hasPending(): boolean {
+		this.#bindSession();
 		return this.#interrupts.length > 0 || this.#asides.length > 0 || this.#deferredWakes.length > 0;
 	}
 
@@ -61,6 +100,7 @@ export class IrcBridge {
 
 	/** Takes every queued IRC record in interrupt-before-aside order. */
 	drainPending(): AgentMessage[] {
+		this.#bindSession();
 		const records = [...this.#interrupts, ...this.#asides];
 		this.#interrupts = [];
 		this.#asides = [];
@@ -74,8 +114,16 @@ export class IrcBridge {
 	 *  contract clear could wake the new transcript with a peer message belonging to the
 	 *  previous session. Pass the snapshot to `restorePending` to undo the clear
 	 *  if the transition is rolled back. */
-	clearPending(): { interrupts: AgentMessage[]; asides: AgentMessage[]; deferredWakes: AgentMessage[] } {
-		const snapshot = { interrupts: this.#interrupts, asides: this.#asides, deferredWakes: this.#deferredWakes };
+	clearPending(): IrcPendingSnapshot {
+		this.#bindSession();
+		const snapshot: IrcPendingSnapshot = {
+			interrupts: this.#interrupts,
+			asides: this.#asides,
+			deferredWakes: this.#deferredWakes,
+			sessionId: this.#sessionId,
+			reservations: this.#reservations,
+		};
+		this.#reservations = new Map();
 		this.#interrupts = [];
 		this.#asides = [];
 		this.#deferredWakes = [];
@@ -87,11 +135,19 @@ export class IrcBridge {
 	 *  the rolled-back switch's async load/hooks were still running) instead of overwriting it, so
 	 *  those newly arrived records aren't silently discarded — snapshot records precede them since
 	 *  they arrived first. */
-	restorePending(snapshot: {
-		interrupts: AgentMessage[];
-		asides: AgentMessage[];
-		deferredWakes: AgentMessage[];
-	}): void {
+	restorePending(snapshot: IrcPendingSnapshot): void {
+		this.#bindSession();
+		if (snapshot.sessionId !== this.#sessionId) return;
+		for (const [from, ids] of snapshot.reservations) {
+			let current = this.#reservations.get(from);
+			if (!current) {
+				current = new Set();
+				this.#reservations.set(from, current);
+			}
+			for (const id of ids) {
+				if (!this.#host.sessionManager.hasReceivedIrcMessage(from, id)) current.add(id);
+			}
+		}
 		this.#interrupts = [...snapshot.interrupts, ...this.#interrupts];
 		this.#asides = [...snapshot.asides, ...this.#asides];
 		this.#deferredWakes = [...snapshot.deferredWakes, ...this.#deferredWakes];
@@ -100,6 +156,7 @@ export class IrcBridge {
 	/** Queues records for the next step-boundary aside injection: IRC wakes deferred by a
 	 *  session transition, and extension `deliverAs: "aside"` sends. */
 	queueAside(records: AgentMessage[]): void {
+		this.#bindSession();
 		this.#asides.push(...records);
 	}
 
@@ -107,11 +164,13 @@ export class IrcBridge {
 	 *  asides, these are invisible to turn injection (`flushPending`, the loop
 	 *  aside poll) and resume into a monitored wake once the contract clears. */
 	queueDeferredWake(records: AgentMessage[]): void {
+		this.#bindSession();
 		this.#deferredWakes.push(...records);
 	}
 
 	/** Takes parked wake records for a post-clear monitored wake, oldest first. */
 	drainDeferredWakes(): AgentMessage[] {
+		this.#bindSession();
 		const records = this.#deferredWakes;
 		this.#deferredWakes = [];
 		return records;
@@ -119,6 +178,7 @@ export class IrcBridge {
 
 	/** Surfaces and consumes queued incoming records before automatic injection. */
 	drainInboxMessages(agentId: string, opts?: { from?: string; limit?: number }): IrcMessage[] {
+		this.#bindSession();
 		const messages: IrcMessage[] = [];
 		const remainingInterrupts: AgentMessage[] = [];
 		const remainingAsides: AgentMessage[] = [];
@@ -145,6 +205,9 @@ export class IrcBridge {
 				const from = Reflect.get(details, "from");
 				const body = Reflect.get(details, "message");
 				const replyTo = Reflect.get(details, "replyTo");
+				const to = Reflect.get(details, "to");
+				const ts = Reflect.get(details, "ts");
+				const wakeRelay = Reflect.get(details, "wakeRelay");
 				if (typeof id !== "string" || typeof from !== "string" || typeof body !== "string") {
 					queue.remaining.push(record);
 					continue;
@@ -157,14 +220,18 @@ export class IrcBridge {
 					queue.remaining.push(record);
 					continue;
 				}
-				messages.push({
+				const message: IrcMessage = {
 					id,
 					from,
-					to: agentId,
+					to: typeof to === "string" ? to : agentId,
 					body,
-					ts: record.timestamp,
+					ts: typeof ts === "number" ? ts : record.timestamp,
 					...(typeof replyTo === "string" ? { replyTo } : {}),
-				});
+					...(wakeRelay === true ? { wakeRelay: true } : {}),
+				};
+				this.#host.sessionManager.recordConsumedIrcMessage(message);
+				this.markPersisted(record);
+				messages.push(message);
 			}
 		}
 		this.#interrupts = remainingInterrupts;
@@ -175,6 +242,12 @@ export class IrcBridge {
 	/** Delivers an IRC message into the recipient session without awaiting any wake turn. */
 	async deliver(msg: IrcMessage): Promise<"injected" | "woken"> {
 		if (this.#host.isDisposed()) throw new Error("Recipient session is disposed.");
+		this.#bindSession();
+		if (
+			this.#host.sessionManager.hasReceivedIrcMessage(msg.from, msg.id) ||
+			this.#reservations.get(msg.from)?.has(msg.id)
+		)
+			return "injected";
 		const streaming = this.#host.isStreaming();
 		const planModeIdle = !streaming && this.#host.planModeEnabled();
 		const fromParent = AgentRegistry.global().get(msg.to)?.parentId === msg.from;
@@ -199,44 +272,58 @@ export class IrcBridge {
 			}),
 			display: true,
 			details: {
-				id: msg.id,
-				from: msg.from,
+				...ircSource(msg, fromParent),
 				message: msg.body,
-				...(msg.replyTo ? { replyTo: msg.replyTo } : {}),
-				...(msg.wakeRelay ? { wakeRelay: true } : {}),
-				...(fromParent ? { fromParent: true } : {}),
 			},
 			attribution: "agent",
 			timestamp: msg.ts,
 		};
-		void this.#host.emitSessionEvent({ type: "irc_message", message: record });
-		if (streaming) {
-			if (fromParent) {
-				this.#host.agent.steer({
-					role: "user",
-					content: prompt.render(parentIrcSteerTemplate, { from: msg.from, message: envelopeBody }),
-					attribution: "agent",
-					timestamp: msg.ts,
-					steering: true,
-				});
-			} else {
-				this.#interrupts.push(record);
+		let ids = this.#reservations.get(msg.from);
+		if (!ids) {
+			ids = new Set();
+			this.#reservations.set(msg.from, ids);
+		}
+		ids.add(msg.id);
+		try {
+			if (streaming) {
+				if (fromParent) {
+					const steer: IrcSteeringMessage = {
+						role: "user",
+						content: prompt.render(parentIrcSteerTemplate, { from: msg.from, message: envelopeBody }),
+						attribution: "agent",
+						timestamp: msg.ts,
+						steering: true,
+						ircSource: ircSource(msg, fromParent),
+					};
+					this.#host.agent.steer(steer);
+				} else {
+					this.#interrupts.push(record);
+				}
+				void this.#host.emitSessionEvent({ type: "irc_message", message: record });
+				return "injected";
 			}
-			return "injected";
+			if (this.#host.planModeEnabled()) {
+				this.#host.agent.appendMessage(record);
+				this.#host.sessionManager.appendCustomMessageEntry(
+					record.customType,
+					record.content,
+					record.display,
+					record.details,
+					record.attribution ?? "agent",
+					record.timestamp,
+				);
+				this.markPersisted(record);
+				void this.#host.emitSessionEvent({ type: "irc_message", message: record });
+				return "injected";
+			}
+			this.#host.wakeForIrc([record]);
+			void this.#host.emitSessionEvent({ type: "irc_message", message: record });
+			return "woken";
+		} catch (error) {
+			ids.delete(msg.id);
+			if (ids.size === 0) this.#reservations.delete(msg.from);
+			throw error;
 		}
-		if (this.#host.planModeEnabled()) {
-			this.#host.agent.appendMessage(record);
-			this.#host.sessionManager.appendCustomMessageEntry(
-				record.customType,
-				record.content,
-				record.display,
-				record.details,
-				record.attribution ?? "agent",
-			);
-			return "injected";
-		}
-		this.#host.wakeForIrc([record]);
-		return "woken";
 	}
 
 	/** Emits an IRC relay observation for rendering without persisting it. */

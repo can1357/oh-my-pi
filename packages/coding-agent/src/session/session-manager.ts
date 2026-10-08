@@ -26,6 +26,8 @@ import {
 	toError,
 } from "@oh-my-pi/pi-utils";
 import type { StructuredSubagentSchemaMode } from "@oh-my-pi/pi-tui/tools/task";
+import type { IrcMessage } from "@oh-my-pi/pi-tui/tools/irc";
+import { IrcIdentityIndex, IRC_CONSUMED_ENTRY_TYPE, ircSource } from "../irc/identity";
 import { moveFileAcrossDevices } from "../utils/atomic-file";
 import { ArtifactManager } from "./artifacts";
 import { type BlobPutOptions, type BlobPutResult, BlobStore, lazyImageDataSync } from "./blob-store";
@@ -867,6 +869,9 @@ export class SessionManager {
 	#hasTitleSlot = true;
 	#entries: SessionEntry[] = [];
 	#index = new SessionEntryIndex();
+	readonly #ircIdentityIndex = new IrcIdentityIndex();
+	/** Internal bind token for an in-flight inbox consumer, never serialized. */
+	#ircConsumptionBoundary: object = {};
 
 	/** File reflects all current entries; appends can go incrementally. */
 	#fileIsCurrent = false;
@@ -1969,6 +1974,8 @@ export class SessionManager {
 
 		this.#entries = [];
 		this.#index.clear();
+		this.#ircIdentityIndex.clear();
+		this.#ircConsumptionBoundary = {};
 		this.#fileIsCurrent = false;
 		this.#rewriteRequired = false;
 		this.#forceFileCreation = false;
@@ -1998,6 +2005,8 @@ export class SessionManager {
 	#applyEntries(header: SessionHeader, entries: SessionEntry[]): void {
 		this.#header = header;
 		this.#entries = entries;
+		this.#ircIdentityIndex.clear();
+		this.#ircConsumptionBoundary = {};
 		this.#sessionId = header.id;
 		this.#sessionName = header.title;
 		this.#titleSource = header.titleSource;
@@ -2017,6 +2026,7 @@ export class SessionManager {
 
 	#setLeaf(id: string | null): void {
 		this.#index.setLeaf(id);
+		this.#ircConsumptionBoundary = {};
 		const batch = this.#atomicEntryBatch;
 		if (batch && !batch.collecting) {
 			batch.externalLeafChanged = true;
@@ -2032,8 +2042,10 @@ export class SessionManager {
 		if (entry.type === "message" && entry.message.role === "assistant" && normalizeAssistantUsage(entry.message)) {
 			logger.warn("Assistant message recorded with incomplete usage", { id: entry.id });
 		}
+		if (entry.type === "reset_boundary") this.#ircConsumptionBoundary = {};
 		this.#entries.push(entry);
 		this.#index.insert(entry);
+		this.#ircIdentityIndex.append(entry, this.#entries, this.#bodyRevision);
 		const batch = this.#atomicEntryBatch;
 		if (batch?.collecting) batch.entryIds.add(entry.id);
 		if (batch && !batch.collecting) {
@@ -2059,6 +2071,8 @@ export class SessionManager {
 		const restoredLeaf = retainedAncestor(batch.externalLeafChanged ? batch.externalLeafId : batch.preBatchLeafId);
 		this.#entries = retained;
 		this.#index.rebuild(retained);
+		this.#ircIdentityIndex.clear();
+		this.#ircConsumptionBoundary = {};
 		this.#index.setLeaf(restoredLeaf && this.#index.has(restoredLeaf) ? restoredLeaf : null);
 	}
 
@@ -2922,6 +2936,8 @@ export class SessionManager {
 		this.seal();
 		this.#entries = [];
 		this.#index.clear();
+		this.#ircIdentityIndex.clear();
+		this.#ircConsumptionBoundary = {};
 		this.#inMemoryArtifacts = null;
 		this.#closeWriterEventually();
 		this.#entriesReleased = true;
@@ -3513,6 +3529,25 @@ export class SessionManager {
 		return entry.id;
 	}
 
+	/** Whether this transport identity has already reached this session's journal. */
+	hasReceivedIrcMessage(from: string, id: string): boolean {
+		this.#ircIdentityIndex.bind(this.#entries, this.#bodyRevision);
+		return this.#ircIdentityIndex.has(from, id);
+	}
+
+	/** Capture the explicit session/branch/reset boundary, not an append's leaf. */
+	captureIrcConsumptionBoundary(): object {
+		return this.#ircConsumptionBoundary;
+	}
+
+	/** Journal wait/inbox consumption without injecting the message a second time. */
+	recordConsumedIrcMessage(message: IrcMessage, boundary: object = this.#ircConsumptionBoundary): void {
+		if (this.#released || boundary !== this.#ircConsumptionBoundary) return;
+		if (!this.hasReceivedIrcMessage(message.from, message.id)) {
+			this.appendCustomEntry(IRC_CONSUMED_ENTRY_TYPE, ircSource(message));
+		}
+	}
+
 	/**
 	 * Rewrite the session file after in-place entry updates (e.g. pruning old tool
 	 * outputs). Use sparingly.
@@ -3538,8 +3573,16 @@ export class SessionManager {
 		details?: T,
 		attribution: MessageAttribution | undefined = "agent",
 		timestamp?: number,
+		steeringSource?: string,
 	): string {
-		const normalized = normalizeCustomMessagePayload<T>({ customType, content, display, details, attribution });
+		const normalized = normalizeCustomMessagePayload<T>({
+			customType,
+			content,
+			display,
+			details,
+			attribution,
+			steeringSource,
+		});
 		const fresh = this.#freshEntryFields();
 		const entry: CustomMessageEntry<T> = {
 			type: "custom_message",
@@ -3549,6 +3592,7 @@ export class SessionManager {
 			// Drop AgentSession-internal transient fields before disk persistence.
 			details: stripInternalDetailsFields(normalized.details),
 			attribution: normalized.attribution,
+			...(normalized.steeringSource !== undefined ? { steeringSource: normalized.steeringSource } : {}),
 			...fresh,
 			// Prefer the initiating message's own timestamp: without it the entry
 			// records the emission time, which on rebuild excludes provider
@@ -3758,6 +3802,8 @@ export class SessionManager {
 			}
 			this.#entries = this.#entries.filter(candidate => candidate.id !== entryId);
 			this.#index.rebuild(this.#entries);
+			this.#ircIdentityIndex.clear();
+			this.#ircConsumptionBoundary = {};
 		}
 		this.branchWithSummary(leafId, "", {
 			kind: DISCARDED_ENTRY_BRANCH_MARKER,
@@ -3844,6 +3890,8 @@ export class SessionManager {
 		this.#titleUpdatedAt = timestamp;
 		this.#hasTitleSlot = true;
 		this.#index.rebuild(this.#entries);
+		this.#ircIdentityIndex.clear();
+		this.#ircConsumptionBoundary = {};
 		this.#artifactManager = null;
 		this.#artifactManagerSessionFile = null;
 		this.#forceFileCreation = this.#persist;

@@ -6,6 +6,8 @@ import { IrcBus } from "@oh-my-pi/pi-coding-agent/irc/bus";
 import * as daemonClient from "@oh-my-pi/pi-coding-agent/launch/client";
 import type { DaemonBrokerClient } from "@oh-my-pi/pi-coding-agent/launch/client";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
+import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { WaitTool } from "@oh-my-pi/pi-coding-agent/tools/wait";
 
@@ -141,6 +143,33 @@ describe("wait", () => {
 		expect(result.details?.waited).toMatchObject({ from: "Peer", body: "the file is yours" });
 		expect(manager.getJob(id)?.status).toBe("running");
 		manager.cancel(id);
+	});
+
+	test("the real bus-wait consumer commits identity before its tool result is appended", async () => {
+		const registry = AgentRegistry.global();
+		const transcript = SessionManager.inMemory();
+		registry.register({
+			id: "Main", displayName: "Main", kind: "main",
+			session: { sessionManager: transcript } as AgentSession,
+		});
+		registry.register({ id: "Peer", displayName: "Peer", kind: "sub", parentId: "Main", session: null });
+		const manager = new AsyncJobManager({ onJobComplete: () => {} });
+		const gate = Promise.withResolvers<string>();
+		const id = manager.register("bash", "unfinished", async () => gate.promise, { ownerId: "Main" });
+		try {
+			const waiting = new WaitTool(session(manager)).execute("wait-identity", {});
+			await IrcBus.global().send({ from: "Peer", to: "Main", body: "synthetic message" });
+			const result = await waiting;
+			const waited = result.details?.waited;
+			if (!waited) throw new Error("Expected an IRC wait result");
+			expect(result.content).toEqual([{ type: "text", text: `[${waited.id}] Peer: synthetic message` }]);
+			expect(transcript.cloneCurrentSession({ persist: false }).hasReceivedIrcMessage(waited.from, waited.id)).toBe(true);
+			expect(transcript.buildSessionContext().messages).toEqual([]);
+			expect(manager.getJob(id)?.status).toBe("running");
+		} finally {
+			manager.cancel(id);
+			gate.resolve("released");
+		}
 	});
 
 	test("a hung daemon broker does not fail the wait; the job result still arrives", async () => {

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Preserved custom-message source metadata when normalizing extension messages and rebuilding persisted transcripts.
+
 ## [18.8.4] - 2026-10-08
 
 ### Changed
