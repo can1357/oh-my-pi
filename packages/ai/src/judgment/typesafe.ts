@@ -7,12 +7,14 @@
  * the request and answer wire shape, so one client serves both. Credentials
  * flow through {@link withAuth}, so a stored key rotates on 401/403 exactly
  * like chat providers; transient 429/5xx responses retry with bounded,
- * `retry-after`-aware backoff.
+ * `retry-after`-aware backoff, and a `retry-after` past that bound surfaces
+ * the error at once so the caller can fall back instead of waiting it out.
  *
  * Environment (mirrors the official SDK): `TYPESAFE_API_KEY` is resolved by
  * the auth registry (`rules/auth/typesafe.kdl`), `TYPESAFE_BASE_URL`
  * overrides the API root, `TYPESAFE_DEFAULT_MODEL` the model.
  */
+import { scheduler } from "node:timers/promises";
 import { TYPESAFE_DEFAULT_BASE_URL } from "@oh-my-pi/pi-catalog/discovery";
 import type { Api, FetchImpl } from "@oh-my-pi/pi-catalog/types";
 import { $env } from "@oh-my-pi/pi-utils";
@@ -90,10 +92,8 @@ interface SystemOneResponse {
 	usage: { input_tokens?: number; output_tokens?: number; cost?: number };
 }
 
-/** Server hint wins (capped); otherwise exponential backoff from {@link BACKOFF_BASE_MS}. */
-function backoffMs(attempt: number, headers: Headers | undefined): number {
-	const hinted = headers === undefined ? undefined : getRetryAfterMsFromHeaders(headers);
-	if (hinted !== undefined) return Math.min(hinted, BACKOFF_MAX_MS);
+/** Exponential backoff from {@link BACKOFF_BASE_MS}, capped at {@link BACKOFF_MAX_MS}. */
+function backoffMs(attempt: number): number {
 	return Math.min(BACKOFF_BASE_MS * 2 ** attempt, BACKOFF_MAX_MS);
 }
 
@@ -167,7 +167,7 @@ export class TypeSafeJudge implements Judge {
 				});
 			} catch (error) {
 				if (signal?.aborted || attempt + 1 >= MAX_ATTEMPTS) throw error;
-				await Bun.sleep(backoffMs(attempt, undefined));
+				await scheduler.wait(backoffMs(attempt), { signal });
 				continue;
 			}
 			if (response.ok) return (await response.json()) as T;
@@ -176,8 +176,13 @@ export class TypeSafeJudge implements Judge {
 				headers: response.headers,
 			});
 			const transient = response.status === 408 || response.status === 429 || response.status >= 500;
-			if (!transient || attempt + 1 >= MAX_ATTEMPTS) throw error;
-			await Bun.sleep(backoffMs(attempt, response.headers));
+			// The server hint wins. Retrying before it expires is a guaranteed failure,
+			// so a hint past BACKOFF_MAX_MS surfaces the error instead of sleeping it out.
+			const hinted = getRetryAfterMsFromHeaders(response.headers);
+			if (!transient || attempt + 1 >= MAX_ATTEMPTS || (hinted !== undefined && hinted > BACKOFF_MAX_MS)) {
+				throw error;
+			}
+			await scheduler.wait(hinted ?? backoffMs(attempt), { signal });
 		}
 	}
 }

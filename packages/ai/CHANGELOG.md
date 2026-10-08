@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed native judgments sleeping out a rate limit in 5-second retries even when the server's `Retry-After` is hours away, and ignoring cancellation during that backoff ([#14970](https://github.com/can1357/oh-my-pi/issues/14970))
+
 ## [18.8.5] - 2026-10-08
 
 ### Added

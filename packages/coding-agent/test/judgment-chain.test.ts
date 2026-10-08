@@ -277,6 +277,98 @@ describe("ChainJudge", () => {
 		);
 	});
 
+	it("falls back immediately on a long Retry-After and skips the rate-limited judge until it expires", async () => {
+		const settings = Settings.isolated({
+			modelRoles: { judge: "typesafe/jev-preview" },
+			"retry.fallbackChains": { judge: [`${DECISIONS.provider}/${DECISIONS.id}`] },
+		});
+		const registry = makeRegistry([JEV_PREVIEW, DECISIONS], { typesafe: "ts-key", openrouter: "or-key" });
+		const urls: string[] = [];
+		vi.spyOn(globalThis, "fetch").mockImplementation(
+			asGlobalFetch(async url => {
+				urls.push(String(url));
+				if (String(url).endsWith("/v1/systemone")) {
+					return new Response('{"error":{"type":"FreeUsageLimitError"}}', {
+						status: 429,
+						headers: { "retry-after": "34003" },
+					});
+				}
+				return Response.json({
+					model: "jev-1.13.0",
+					answers: { level: { type: "choice", choice: "high" } },
+					usage: { input_tokens: 8, output_tokens: 2 },
+				});
+			}),
+		);
+		const request = { state: "redesign the scheduler", questions: { level: TIER_QUESTION } };
+		const startedAt = Date.now();
+
+		await new ChainJudge({ settings, registry, purpose: "find" }).judge(request);
+		const second = await new ChainJudge({ settings, registry, purpose: "find" }).judge(request);
+
+		expect(second.answers.level.choice).toBe("high");
+		expect(Date.now() - startedAt).toBeLessThan(1_000);
+		expect(urls).toEqual([
+			"https://judge.example.test/v1/systemone",
+			"https://decisions.example.test/decisions",
+			"https://decisions.example.test/decisions",
+		]);
+
+		const later = vi.spyOn(Date, "now").mockReturnValue(startedAt + 34_004_000);
+		await new ChainJudge({ settings, registry, purpose: "find" }).judge(request);
+		later.mockRestore();
+		expect(urls[3]).toBe("https://judge.example.test/v1/systemone");
+	});
+
+	it("skips a rate-limited judge only until its soonest-recovering credential resets", async () => {
+		const settings = Settings.isolated({
+			modelRoles: { judge: "typesafe/jev-preview" },
+			"retry.fallbackChains": { judge: [`${DECISIONS.provider}/${DECISIONS.id}`] },
+		});
+		const registry = makeRegistry([JEV_PREVIEW, DECISIONS], { typesafe: "ts-key", openrouter: "or-key" });
+		// Two typesafe accounts: the first resets in 10 minutes, the second in 9 hours.
+		const retryAfter: Record<string, string> = { "Bearer account-a": "600", "Bearer account-b": "32400" };
+		vi.spyOn(registry, "resolver").mockImplementation(target => {
+			if (typeof target === "string" || target.provider !== "typesafe") return () => "or-key";
+			return context => {
+				if (context.error === undefined) return "account-a";
+				return context.previousKey === "account-a" ? "account-b" : undefined;
+			};
+		});
+		const urls: string[] = [];
+		vi.spyOn(globalThis, "fetch").mockImplementation(
+			asGlobalFetch(async (url, init) => {
+				urls.push(String(url));
+				const auth = new Headers(init?.headers).get("authorization") ?? "";
+				if (String(url).endsWith("/v1/systemone")) {
+					return new Response("usage limit reached", {
+						status: 429,
+						headers: { "retry-after": retryAfter[auth]! },
+					});
+				}
+				return Response.json({
+					model: "jev-1.13.0",
+					answers: { level: { type: "choice", choice: "high" } },
+					usage: { input_tokens: 8, output_tokens: 2 },
+				});
+			}),
+		);
+		const request = { state: "redesign the scheduler", questions: { level: TIER_QUESTION } };
+		const startedAt = Date.now();
+
+		await new ChainJudge({ settings, registry, purpose: "find" }).judge(request);
+		expect(urls).toEqual([
+			"https://judge.example.test/v1/systemone",
+			"https://judge.example.test/v1/systemone",
+			"https://decisions.example.test/decisions",
+		]);
+
+		const later = vi.spyOn(Date, "now").mockReturnValue(startedAt + 601_000);
+		await new ChainJudge({ settings, registry, purpose: "find" }).judge(request);
+		later.mockRestore();
+		expect(urls[3]).toBe("https://judge.example.test/v1/systemone");
+	});
+
 	it("propagates caller abort without attempting a fallback", async () => {
 		const settings = Settings.isolated({
 			modelRoles: { judge: `${ONLINE.provider}/${ONLINE.id}` },

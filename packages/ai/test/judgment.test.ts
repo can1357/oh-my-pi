@@ -339,6 +339,31 @@ describe("TypeSafeJudge", () => {
 		expect(keys).toEqual(["Bearer stale", "Bearer fresh", "Bearer fresh"]);
 	});
 
+	it("aborts a retry-after backoff as soon as the caller cancels", async () => {
+		const controller = new AbortController();
+		let calls = 0;
+		const judge = new TypeSafeJudge({
+			apiKey: "k",
+			fetch: async () => {
+				calls++;
+				// The caller cancels while the 503 body is read, i.e. right before the backoff.
+				const body = new ReadableStream({
+					pull(stream) {
+						controller.abort(new Error("caller stopped"));
+						stream.enqueue(new TextEncoder().encode("busy"));
+						stream.close();
+					},
+				});
+				return new Response(body, { status: 503, headers: { "retry-after-ms": "4000" } });
+			},
+		});
+		const startedAt = Date.now();
+
+		await expect(judge.judge(request, { signal: controller.signal })).rejects.toThrow();
+		expect(Date.now() - startedAt).toBeLessThan(1_000);
+		expect(calls).toBe(1);
+	});
+
 	it("surfaces validation errors without retrying and rejects answers of the wrong type", async () => {
 		let calls = 0;
 		const rejecting = new TypeSafeJudge({
