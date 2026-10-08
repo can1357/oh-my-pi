@@ -167,6 +167,24 @@ provider "cursor" {
 			cache-write 12.5
 		}
 	}
+	// Claude Haiku 5.5: $0.10/$0.50, cache $0.01/$0.125. Requests above
+	// 100k input tokens bill every leg at 5x ($0.50/$2.50, cache
+	// $0.05/$0.625), on the 1M lane too.
+	models "claude-haiku-5-5" "claude-haiku-5-5-1m" {
+		cost-patch {
+			input 0.1
+			output 0.5
+			cache-read 0.01
+			cache-write 0.125
+		}
+		long-context-cost {
+			input-threshold 100000
+			input 0.5
+			output 2.5
+			cache-read 0.05
+			cache-write 0.625
+		}
+	}
 	// Claude 4.7 Opus: $5/$25, cache $0.50/$6.25. Up to 1M same rates.
 	models "claude-opus-4-7-high" "claude-opus-4-7-low" "claude-opus-4-7-max" "claude-opus-4-7-medium" "claude-opus-4-7-xhigh" {
 		cost-patch {

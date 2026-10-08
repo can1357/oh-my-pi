@@ -122,6 +122,18 @@ export interface ResolvedModelRoleValue {
 	warning?: string;
 }
 
+/** Where auto-compaction triggers for one model, as the model hub's preview shows it (edited from the Roles view). */
+export interface ModelCompactionPoint {
+	/** Context tokens that trigger auto-compaction; undefined when auto-compaction is off or the window is unknown. */
+	tokens: number | undefined;
+	/** The configured percentage of the window, when the trigger is percent-based. */
+	percent?: number;
+	/** What sets it: the matching `compaction.modelThresholds` key, `global`, or `default`. */
+	source: string;
+	/** The model's own exact entry as editable text (`90k`, `80%`); absent when it has none. */
+	draft?: string;
+}
+
 /** Host-provided preferences and model-role resolution for the browser. */
 export interface ModelBrowserSource extends ModelRoleLookup {
 	/**
@@ -143,6 +155,8 @@ export interface ModelBrowserSource extends ModelRoleLookup {
 	getRoleInfo(role: string): ModelBrowserRoleInfo;
 	defaultRoleChain(role: string): string[];
 	resolveRoleValue(value: string | undefined, models: Model[], roleLookup?: ModelRoleLookup): ResolvedModelRoleValue;
+	/** Auto-compaction point for `model`; absent hosts show no compaction row in the preview. */
+	compactionPointFor?(model: Model): ModelCompactionPoint | undefined;
 }
 
 /** Read-only catalog surface consumed by model browsers. */
@@ -2061,7 +2075,7 @@ export class ModelBrowser implements Component {
 	pickerPreview(mode: "full" | "compact", current?: string): readonly NativeChild[] {
 		const selected = this.getSelected();
 		const item = selected && !this.#isDisabled(selected) ? selected : undefined;
-		const key = `${mode}\0${current ?? ""}`;
+		const key = `${mode}\0${current ?? ""}\0${this.#settings.revision}`;
 		const memo = this.#pickerPreview;
 		if (
 			memo !== undefined &&
@@ -2155,6 +2169,17 @@ export class ModelBrowser implements Component {
 			if (v) facts.push({ k: [span(k, "muted")], v: [span(v, "mono")] });
 		};
 		fact("Context", ctx > 0 ? ctx.toLocaleString("en-US") : undefined);
+		const compaction = this.#settings.compactionPointFor?.(model);
+		if (compaction) {
+			const value =
+				compaction.tokens === undefined
+					? "off"
+					: `${compaction.tokens.toLocaleString("en-US")}${compaction.percent !== undefined ? ` · ${compaction.percent}%` : ""}`;
+			facts.push({
+				k: [span("Compacts at", "muted")],
+				v: [span(value, "mono"), span(` · ${compaction.source}`, "dim")],
+			});
+		}
 		fact("Max output", out > 0 ? out.toLocaleString("en-US") : undefined);
 		fact("Price", isFreeModel(model) ? "free" : `${previewPrice(model)} per M`);
 		fact("Speed", speed.length > 0 ? speed.join(" · ") : undefined);

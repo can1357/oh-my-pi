@@ -64,10 +64,9 @@ import type { CompactionEntry, SessionEntry } from "./entries";
 import { NativeCompactionError } from "./errors";
 import {
 	type ConvertToLlm,
-	createBranchSummaryMessage,
 	createCompactionSummaryMessage,
-	createCustomMessage,
 	defaultConvertToLlm,
+	getMessageFromEntry,
 } from "./messages";
 import {
 	assertRemoteCompactionInputFits,
@@ -140,34 +139,6 @@ function extractFileOperations(
 	}
 
 	return fileOps;
-}
-
-// ============================================================================
-// Message Extraction
-// ============================================================================
-
-/**
- * Extract AgentMessage from an entry if it produces one.
- * Returns undefined for entries that don't contribute to LLM context.
- */
-function getMessageFromEntry(entry: SessionEntry): AgentMessage | undefined {
-	if (entry.type === "message") {
-		return entry.message;
-	}
-	if (entry.type === "custom_message") {
-		return createCustomMessage(
-			entry.customType,
-			entry.content,
-			entry.display,
-			entry.details,
-			entry.timestamp,
-			entry.attribution,
-		);
-	}
-	if (entry.type === "branch_summary") {
-		return createBranchSummaryMessage(entry.summary, entry.fromId, entry.timestamp);
-	}
-	return undefined;
 }
 
 /** Result from compact() - SessionManager adds uuid/parentUuid when saving */

@@ -1307,10 +1307,12 @@ function buildClaudeCodeTlsFetchOptions(
 		},
 	};
 }
-function mergeHeaders(...headerSources: (Record<string, string> | undefined)[]): Record<string, string> {
-	// Case-insensitive merge: later sources win and keep their casing. A plain
-	// Object.assign would let `authorization` and `Authorization` coexist, and
-	// the Headers constructor then joins both values comma-separated on the wire.
+/**
+ * Merge headers case-insensitively; later sources win and preserve their key casing.
+ * Undefined sources are ignored. Differently cased duplicates are removed so the
+ * Headers constructor cannot join competing values comma-separated on the wire.
+ */
+export function mergeHeaders(...headerSources: (Record<string, string> | undefined)[]): Record<string, string> {
 	const merged: Record<string, string> = {};
 	const keyByLower = new Map<string, string>();
 	for (const headers of headerSources) {

@@ -2328,6 +2328,76 @@ describe("extractExplicitThinkingSelector", () => {
 		});
 		expect(result).toBe("auto");
 	});
+
+	test("extracts max from a short qualified selector", () => {
+		expect(
+			extractExplicitThinkingSelector("p/a:max", undefined, {
+				isLiteralModelId: () => false,
+			}),
+		).toBe(Effort.Max);
+	});
+
+	test("extracts max from a short unqualified selector when no literal exists", () => {
+		expect(
+			extractExplicitThinkingSelector("a:max", undefined, {
+				isLiteralModelId: (provider, id) => provider !== undefined || id !== "a:max",
+			}),
+		).toBe(Effort.Max);
+	});
+
+	test("requires an exact provider match for qualified literal model ids", () => {
+		expect(
+			extractExplicitThinkingSelector("p/a:max", undefined, {
+				isLiteralModelId: (provider, id) => provider === "other" && id === "a:max",
+			}),
+		).toBe(Effort.Max);
+	});
+
+	test("extracts off from short qualified and unqualified selectors", () => {
+		expect(extractExplicitThinkingSelector("p/a:off")).toBe("off");
+		expect(extractExplicitThinkingSelector("a:off")).toBe("off");
+	});
+
+	test("keeps a strict outer suffix ahead of literal :max detection", () => {
+		expect(
+			extractExplicitThinkingSelector("a:max:off", undefined, {
+				isLiteralModelId: (provider, id) => provider === undefined && id === "a:max",
+			}),
+		).toBe("off");
+	});
+
+	test("extracts max from a role alias targeting a short selector", () => {
+		const settings = Settings.isolated({ modelRoles: { smol: "p/a" } });
+		expect(
+			extractExplicitThinkingSelector("@smol:max", settings, {
+				isLiteralModelId: () => false,
+			}),
+		).toBe(Effort.Max);
+	});
+
+	test("preserves literal qualified and unqualified :max and :auto model ids", () => {
+		const literalIds: Record<string, true> = {
+			"p/a:max": true,
+			"p/a:auto": true,
+			"a:max": true,
+			"a:auto": true,
+		};
+		const isLiteralModelId = (provider: string | undefined, id: string) =>
+			literalIds[provider === undefined ? id : `${provider}/${id}`] === true;
+
+		expect(extractExplicitThinkingSelector("p/a:max", undefined, { isLiteralModelId })).toBeUndefined();
+		expect(extractExplicitThinkingSelector("p/a:auto", undefined, { isLiteralModelId })).toBeUndefined();
+		expect(extractExplicitThinkingSelector("a:max", undefined, { isLiteralModelId })).toBeUndefined();
+		expect(extractExplicitThinkingSelector("a:auto", undefined, { isLiteralModelId })).toBeUndefined();
+	});
+
+	test("treats a missing unqualified literal :auto model id as the auto selector", () => {
+		const availableIds: Record<string, true> = { a: true };
+		const isLiteralModelId = (provider: string | undefined, id: string) =>
+			provider === undefined && availableIds[id] === true;
+
+		expect(extractExplicitThinkingSelector("a:auto", undefined, { isLiteralModelId })).toBe("auto");
+	});
 });
 
 describe("provider routing selector (@upstream)", () => {
