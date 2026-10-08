@@ -18,7 +18,13 @@ export interface NativeBlob {
 	readonly bytes: Uint8Array;
 }
 
-const blobs = new Map<string, NativeBlob>();
+const blobs = new Map<string, WeakRef<NativeBlob>>();
+const registeredBlobs = new Map<string, NativeBlob>();
+const releasedBlobs = new FinalizationRegistry<{ id: string; reference: WeakRef<NativeBlob> }>(({ id, reference }) => {
+	if (blobs.get(id) === reference) blobs.delete(id);
+});
+// Props spreads preserve ownership; wire serialization omits symbol keys.
+const kBlob = Symbol("native.blob");
 // Registration usually repeats with the same bytes object on every describe;
 // the tag skips rehashing it.
 const kBlobId = Symbol("native.blobId");
@@ -27,19 +33,42 @@ interface BlobTagged {
 	[kBlobId]?: string;
 }
 
-/** Register `bytes` and return their content address (sha256 hex) for `image.p.blob`. */
-export function registerNativeBlob(bytes: Uint8Array, mime: string): string {
+function getOrCreateBlob(bytes: Uint8Array, mime: string): NativeBlob {
 	const known = (bytes as BlobTagged)[kBlobId];
-	if (known !== undefined) return known;
-	const id = new Bun.CryptoHasher("sha256").update(bytes).digest("hex");
+	const id = known ?? new Bun.CryptoHasher("sha256").update(bytes).digest("hex");
 	(bytes as BlobTagged)[kBlobId] = id;
-	if (!blobs.has(id)) blobs.set(id, { id, mime, bytes });
-	return id;
+	let blob = blobs.get(id)?.deref();
+	if (!blob) {
+		blob = { id, mime, bytes };
+		const reference = new WeakRef(blob);
+		blobs.set(id, reference);
+		releasedBlobs.register(blob, { id, reference });
+	}
+	return blob;
+}
+
+/** Register bytes for process-lifetime, id-only use. Prefer {@link nativeImageNode} for owned images. */
+export function registerNativeBlob(bytes: Uint8Array, mime: string): string {
+	const blob = getOrCreateBlob(bytes, mime);
+	registeredBlobs.set(blob.id, blob);
+	return blob.id;
 }
 
 /** A registered blob by id. */
 export function getNativeBlob(id: string): NativeBlob | undefined {
-	return blobs.get(id);
+	return blobs.get(id)?.deref();
+}
+
+/** An image whose props own its bytes, including while hidden, unmounted, or awaiting upload. */
+export function nativeImageNode(
+	bytes: Uint8Array,
+	mime: string,
+	p?: Omit<TspProps<"image">, "blob" | "builtin">,
+	key?: string,
+): NativeNode {
+	const blob = getOrCreateBlob(bytes, mime);
+	const props = { ...p, blob: blob.id, [kBlob]: blob };
+	return node("image", props, undefined, key);
 }
 
 /**
@@ -53,9 +82,13 @@ export function base64ImageNode(
 	p?: Omit<TspProps<"image">, "blob" | "builtin" | "w" | "h">,
 	key?: string,
 ): NativeNode {
-	const blob = registerNativeBlob(Buffer.from(data, "base64"), mimeType);
 	const size = getImageDimensions(data, mimeType);
-	return node("image", size ? { ...p, blob, w: size.widthPx, h: size.heightPx } : { ...p, blob }, undefined, key);
+	return nativeImageNode(
+		Buffer.from(data, "base64"),
+		mimeType,
+		size ? { ...p, w: size.widthPx, h: size.heightPx } : p,
+		key,
+	);
 }
 
 /** `image` nodes for base64 payloads, one per slot key, rebuilt only when the slot's payload changes. */

@@ -7,6 +7,7 @@ use std::{
 
 fn main() {
 	napi_build::setup();
+	build_syntax_set();
 	build_oauth_callback_helper();
 	if env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("macos") {
 		build_darwin_native_helper(
@@ -18,6 +19,21 @@ fn main() {
 		);
 		build_applefm_bridge();
 	}
+}
+
+#[path = "src/syntaxes/builder.rs"]
+mod syntax_set_builder;
+
+fn build_syntax_set() {
+	let manifest_dir =
+		PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR should be set"));
+	let sources = manifest_dir.join("src/syntaxes");
+	println!("cargo:rerun-if-changed={}", sources.display());
+	let output = PathBuf::from(env::var_os("OUT_DIR").expect("OUT_DIR should be set"))
+		.join("syntaxes.packdump");
+	syntect::dumps::dump_to_uncompressed_file(&syntax_set_builder::build_syntax_set(), &output)
+		.unwrap_or_else(|error| panic!("failed to write {}: {error}", output.display()));
+	println!("cargo:rustc-env=OMP_SYNTAX_SET={}", output.display());
 }
 
 /// Builds the Apple Foundation Models bridge dylib through
