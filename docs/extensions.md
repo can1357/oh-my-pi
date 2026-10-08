@@ -502,6 +502,9 @@ and `/new`. Commands retain their explicit prefill and session-transition action
   The event also carries the worker `assignment`, optional shared `context` (omitted when blank), the task-only `solutionSpace` (absent for eval `agent()` and workpool), and the baseline `thinkingLevel` when one is already selected.
   Each handler receives its own `signal`. That `AbortSignal` aborts when the spawn is cancelled or that handler's timeout expires.
   A non-empty `task.agentModelOverrides` entry for the agent sets `modelLocked` and `effortLocked`. An explicit `effort` sets `effortLocked` only. The internal `StructuredSubagentRequest.model` (SDK callers) is not a lock. Hook model results are ignored while `modelLocked`; `block` still applies.
+  A handler may return `thinkingLevel`. Core checks it with `getSupportedEfforts` against the applied model and, unless `effortLocked`, pins that model as an unsuffixed selector so a `:level` suffix cannot override the choice. Later patterns stay in the retry chain. The role identity is kept; the unsuffixed selector, not clearing `modelRole`, is what stops the role suffix. `inherit` is ignored. An unsupported level fails preflight.
+  A later handler that returns `model` replaces the model and note, and clears an earlier `thinkingLevel` unless that same handler also returns one. A later `thinkingLevel` without a model still applies to the model already chosen.
+  `SUBAGENT_ROUTING_API_VERSION` is `2`, the first exported marker for this field surface (spawn context, locks, per-handler signal, `thinkingLevel` result). It is not a policy version. `getSupportedEfforts` is exported because a local extension in a compiled binary cannot import the catalog package.
 
 ### Reliability/runtime signals
 

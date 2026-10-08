@@ -209,6 +209,94 @@ describe("ExtensionRunner", () => {
 		expect(fs.readFileSync(eventPath, "utf8")).toBe("aborted");
 	});
 
+	it("merges a model from one before_subagent_spawn handler with a thinking level from another", async () => {
+		fs.writeFileSync(
+			path.join(extensionsDir, "a-model.ts"),
+			`
+				export default function(pi) {
+					pi.on("before_subagent_spawn", () => ({ model: "openai/gpt-4o-mini", note: "pool" }));
+				}
+			`,
+		);
+		fs.writeFileSync(
+			path.join(extensionsDir, "b-level.ts"),
+			`
+				import { ThinkingLevel } from "@oh-my-pi/pi-agent-core/thinking";
+				export default function(pi) {
+					pi.on("before_subagent_spawn", () => ({ thinkingLevel: ThinkingLevel.High }));
+				}
+			`,
+		);
+		const result = await loadTestExtensions();
+		const runner = new ExtensionRunner(
+			result.extensions,
+			result.runtime,
+			tempDir.path(),
+			sessionManager,
+			modelRegistry,
+		);
+
+		const decision = await runner.emitBeforeSubagentSpawn({
+			type: "before_subagent_spawn",
+			invocationKind: "task",
+			assignment: "route this worker",
+			agent: "worker",
+			modelLocked: false,
+			effortLocked: false,
+			patterns: ["anthropic/claude-sonnet-4-5"],
+		});
+
+		expect(decision).toMatchObject({
+			model: "openai/gpt-4o-mini",
+			note: "pool",
+			thinkingLevel: ThinkingLevel.High,
+		});
+	});
+
+	it("drops an earlier thinking level when a later handler returns only a model", async () => {
+		fs.writeFileSync(
+			path.join(extensionsDir, "a-level.ts"),
+			`
+				import { ThinkingLevel } from "@oh-my-pi/pi-agent-core/thinking";
+				export default function(pi) {
+					pi.on("before_subagent_spawn", () => ({
+						model: "anthropic/claude-sonnet-4-5",
+						thinkingLevel: ThinkingLevel.XHigh,
+						note: "first",
+					}));
+				}
+			`,
+		);
+		fs.writeFileSync(
+			path.join(extensionsDir, "b-model.ts"),
+			`
+				export default function(pi) {
+					pi.on("before_subagent_spawn", () => ({ model: "openai/gpt-4o-mini", note: "second" }));
+				}
+			`,
+		);
+		const result = await loadTestExtensions();
+		const runner = new ExtensionRunner(
+			result.extensions,
+			result.runtime,
+			tempDir.path(),
+			sessionManager,
+			modelRegistry,
+		);
+
+		const decision = await runner.emitBeforeSubagentSpawn({
+			type: "before_subagent_spawn",
+			invocationKind: "task",
+			assignment: "route this worker",
+			agent: "worker",
+			modelLocked: false,
+			effortLocked: false,
+			patterns: ["anthropic/claude-sonnet-4-5"],
+		});
+
+		expect(decision).toEqual({ model: "openai/gpt-4o-mini", note: "second" });
+	});
+
 	it("reflects SessionManager.moveTo() changes instead of the constructor-time snapshot (/move)", async () => {
 		const dirA = tempDir.join("dirA");
 		const dirB = tempDir.join("dirB");
