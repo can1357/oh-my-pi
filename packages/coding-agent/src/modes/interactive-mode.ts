@@ -422,6 +422,7 @@ const cfgLiveUiSettings = combine({
 	"tui.vimModeDisplay": cfgTuiVimModeDisplay,
 	"display.pinnedAgents": cfgDisplayPinnedAgents,
 	"display.subagentLivePreview": cfgDisplaySubagentLivePreview,
+	"todo.sticky": cfgTodoSticky,
 	"compaction.idleEnabled": cfgCompactionIdleEnabled,
 	"compaction.idleThresholdTokens": cfgCompactionIdleThresholdTokens,
 	"compaction.idleTimeoutSeconds": cfgCompactionIdleTimeoutSeconds,
@@ -3451,6 +3452,10 @@ export class InteractiveMode implements InteractiveModeContext {
 		if (any("display.pinnedAgents")) this.applyPinnedAgentsSetting();
 		if (any("display.subagentLivePreview")) {
 			this.#renderSubagentList();
+			this.ui.requestRender();
+		}
+		if (any("todo.sticky")) {
+			this.#renderTodoList();
 			this.ui.requestRender();
 		}
 		if (any("compaction.idleEnabled", "compaction.idleThresholdTokens", "compaction.idleTimeoutSeconds")) {
@@ -8190,6 +8195,10 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	setTodoExpanded(expanded: boolean): void {
 		this.todoExpanded = expanded;
+		if (expanded && !cfgTodoSticky.get((this.#todoPhasesOwner ?? this.session).settings)) {
+			this.showWarning("Todo HUD is unpinned (todo.sticky is off); expand has nothing to show.");
+			return;
+		}
 		if (expanded) {
 			const owner = this.#todoPhasesOwner ?? this.viewSession;
 			this.#cancelTodoAutoClearTimer();
