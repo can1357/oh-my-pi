@@ -126,31 +126,32 @@ export async function runMCPInteractiveOAuth(options: MCPInteractiveOAuthOptions
 	if (signal?.aborted) onExternalAbort();
 	else signal?.addEventListener("abort", onExternalAbort, { once: true });
 
-	const flow = new MCPOAuthFlow(
-		{
-			authorizationUrl: endpoints.authorizationUrl,
-			tokenUrl: endpoints.tokenUrl,
-			issuerUrl: endpoints.issuerUrl,
-			registrationUrl: endpoints.registrationUrl,
-			clientId: configured.clientId ?? endpoints.clientId,
-			clientSecret: configured.clientSecret,
-			scopes: configured.scope ?? endpoints.scopes,
-			prompt: configured.prompt,
-			redirectUri: configured.redirectUri,
-			callbackPort: configured.callbackPort,
-			callbackPath: configured.callbackPath,
-			resource: resource ?? endpoints.resource,
-			stripSameOriginResource,
-		},
-		{
-			onAuth: info => interaction.onAuthorization(info),
-			onProgress: message => interaction.onProgress(message),
-			onManualCodeInput: () => interaction.requestManualInput(flowAbort.signal),
-			signal: flowAbort.signal,
-		},
-	);
-
 	try {
+		// Construct inside the cleanup scope: the constructor validates redirect
+		// settings synchronously, and a throw here must still release the flow slot.
+		const flow = new MCPOAuthFlow(
+			{
+				authorizationUrl: endpoints.authorizationUrl,
+				tokenUrl: endpoints.tokenUrl,
+				issuerUrl: endpoints.issuerUrl,
+				registrationUrl: endpoints.registrationUrl,
+				clientId: configured.clientId ?? endpoints.clientId,
+				clientSecret: configured.clientSecret,
+				scopes: configured.scope ?? endpoints.scopes,
+				prompt: configured.prompt,
+				redirectUri: configured.redirectUri,
+				callbackPort: configured.callbackPort,
+				callbackPath: configured.callbackPath,
+				resource: resource ?? endpoints.resource,
+				stripSameOriginResource,
+			},
+			{
+				onAuth: info => interaction.onAuthorization(info),
+				onProgress: message => interaction.onProgress(message),
+				onManualCodeInput: () => interaction.requestManualInput(flowAbort.signal),
+				signal: flowAbort.signal,
+			},
+		);
 		const credentials = await withTimeout(
 			raceAbortSignal(flow.login(), flowAbort.signal),
 			timeoutMs,

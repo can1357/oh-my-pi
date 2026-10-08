@@ -9,6 +9,7 @@ import { loadAllExtensions } from "@oh-my-pi/pi-coding-agent/modes/components/ex
 import type { MCPServerConnection } from "@oh-my-pi/pi-coding-agent/mcp/types";
 import { mcpOAuthCredentialId } from "@oh-my-pi/pi-coding-agent/mcp/oauth-flow";
 import { MCPServerActions } from "@oh-my-pi/pi-coding-agent/mcp/server-actions";
+import { cfgMcpEnableProjectConfig } from "@oh-my-pi/pi-coding-agent/mcp/settings";
 import type { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { __resetDirsFromEnvForTests, removeWithRetries, setAgentDir } from "@oh-my-pi/pi-utils";
 import { createMcpManagerStub } from "./helpers/interactive-mode-context";
@@ -185,5 +186,85 @@ describe("extensions dashboard MCP actions", () => {
 		expect(credential).toBeUndefined();
 		const saved = JSON.parse(await Bun.file(configPath).text());
 		expect(saved.mcpServers.github.auth).toBeUndefined();
+	});
+
+	test("refuses to connect project servers when project MCP config is disabled", async () => {
+		const actions = new MCPServerActions({
+			cwd: projectDir,
+			authStorage: AUTH_STORAGE,
+			enableProjectConfig: false,
+			refreshMCPTools: async () => {},
+		});
+		// If the gate were bypassed, the probe would try to spawn this command and
+		// fail with a spawn error instead of the policy message.
+		const target = {
+			name: "repo-tool",
+			config: { type: "stdio" as const, command: path.join(projectDir, "must-not-run") },
+			source: { provider: "omp", providerName: "OMP", path: configPath, level: "project" as const },
+		};
+		await expect(actions.test(target)).rejects.toThrow("mcp.enableProjectConfig");
+
+		await Bun.write(configPath, `${JSON.stringify({ mcpServers: { github: CONFIG } }, null, 2)}\n`);
+		cfgMcpEnableProjectConfig.set(settings, false);
+		const runtime = createMCPActionRuntime({ cwd: projectDir, settings, authStorage: AUTH_STORAGE });
+		const extension = (await loadAllExtensions(projectDir, [])).find(item => item.id === "mcp:github");
+		const state = await runtime.loadState(extension!);
+		for (const id of ["test", "reauthenticate"] as const) {
+			expect(state.actions.find(item => item.id === id)).toMatchObject({
+				enabled: false,
+				disabledReason: expect.stringContaining("mcp.enableProjectConfig"),
+			});
+		}
+	});
+
+	test("clearing authentication from the dashboard keeps env placeholders in the config file", async () => {
+		const credentialId = mcpOAuthCredentialId(CONFIG.url);
+		let credential: { type: "oauth" } | undefined = { type: "oauth" };
+		const authStorage = {
+			credentials: {
+				get: (id: string) => (id === credentialId ? credential : undefined),
+				remove: vi.fn(async (id: string) => {
+					if (id === credentialId) credential = undefined;
+				}),
+			},
+		} as unknown as AuthStorage;
+		const previousKey = Bun.env.DASHBOARD_TEST_API_KEY;
+		Bun.env.DASHBOARD_TEST_API_KEY = "resolved-secret";
+		try {
+			await Bun.write(
+				configPath,
+				`${JSON.stringify(
+					{
+						mcpServers: {
+							github: {
+								...CONFIG,
+								headers: { "X-Api-Key": "${DASHBOARD_TEST_API_KEY}" },
+								auth: { type: "oauth", credentialId, tokenUrl: "https://auth.example.com/token" },
+							},
+						},
+					},
+					null,
+					2,
+				)}\n`,
+			);
+			const runtime = createMCPActionRuntime({ cwd: projectDir, settings, authStorage });
+			const extension = (await loadAllExtensions(projectDir, [])).find(item => item.id === "mcp:github");
+			await runtime.loadState(extension!);
+
+			await expect(
+				runtime.runAction(extension!, "clear-authentication", {
+					signal: new AbortController().signal,
+					onProgress: () => {},
+					onAuthorization: () => {},
+					requestManualInput: async () => "",
+				}),
+			).resolves.toBe("Stored authentication cleared.");
+			const saved = JSON.parse(await Bun.file(configPath).text());
+			expect(saved.mcpServers.github.auth).toBeUndefined();
+			expect(saved.mcpServers.github.headers["X-Api-Key"]).toBe("${DASHBOARD_TEST_API_KEY}");
+		} finally {
+			if (previousKey === undefined) delete Bun.env.DASHBOARD_TEST_API_KEY;
+			else Bun.env.DASHBOARD_TEST_API_KEY = previousKey;
+		}
 	});
 });

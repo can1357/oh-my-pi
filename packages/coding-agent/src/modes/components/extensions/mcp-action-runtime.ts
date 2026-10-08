@@ -15,8 +15,15 @@ import { cfgDisabledExtensions } from "../../../extensibility/settings";
 import { cfgMcpEnableProjectConfig } from "../../../mcp/settings";
 import { classifyMCPServer } from "../../../mcp/auth-capability";
 import { mcpServerToConfig } from "../../../mcp/config";
+import { getMCPServer } from "../../../mcp/config-writer";
 import type { MCPManager } from "../../../mcp/manager";
-import { MCPServerActions, type MCPServerActionTarget } from "../../../mcp/server-actions";
+import {
+	isProjectMCPConfigBlocked,
+	MCPServerActions,
+	PROJECT_MCP_CONFIG_DISABLED_REASON,
+	type MCPServerActionTarget,
+	writableSourcePath,
+} from "../../../mcp/server-actions";
 import type { AuthStorage } from "../../../session/auth-storage";
 import { copyToClipboard } from "../../../utils/clipboard";
 import type { EventBus } from "../../../utils/event-bus";
@@ -45,13 +52,18 @@ function serverFromExtension(extension: Extension): MCPServer {
 	return server as MCPServer;
 }
 
-function targetFromExtension(extension: Extension, manager?: MCPManager): MCPServerActionTarget {
+async function targetFromExtension(extension: Extension, manager?: MCPManager): Promise<MCPServerActionTarget> {
 	const server = serverFromExtension(extension);
+	// Writable sources pass the on-disk entry, as `/mcp` does: the shared service
+	// expands env placeholders itself and persists auth edits back to that file,
+	// so an already-expanded discovery copy would write resolved secrets into it.
+	const sourcePath = writableSourcePath(server._source);
+	const rawConfig = sourcePath ? await getMCPServer(sourcePath, extension.name) : undefined;
 	const managerSource = manager?.getSource(extension.name);
 	const managerConfig = managerSource?.path === extension.path ? manager?.getServerConfig(extension.name) : undefined;
 	return {
 		name: extension.name,
-		config: managerConfig ?? mcpServerToConfig(server),
+		config: rawConfig ?? managerConfig ?? mcpServerToConfig(server),
 		source: server._source,
 		disabled: extension.state === "disabled",
 		shadowed: extension.state === "shadowed" || Boolean((server as MCPServer & { _shadowed?: boolean })._shadowed),
@@ -82,18 +94,20 @@ export function createMCPActionRuntime(options: CreateMCPActionRuntimeOptions): 
 		getExtensionRoots,
 		hasPendingManualOAuth,
 	} = options;
-	const actions = new MCPServerActions({
-		cwd,
-		manager: mcpManager,
-		authStorage,
-		enableProjectConfig: cfgMcpEnableProjectConfig.get(settings),
-		filterExa: true,
-		filterBrowser: browserMcpFilterEnabled?.() ?? false,
-		getExtensionRoots,
-		onStatus: event => eventBus?.emit(MCP_CONNECTION_STATUS_EVENT_CHANNEL, event),
-		refreshMCPTools: tools => onMcpToolsChanged?.(tools),
-		clearMCPPromptCommands: clearMcpPromptCommands,
-	});
+	// Built per action so a live `mcp.enableProjectConfig` change applies immediately.
+	const createActions = (): MCPServerActions =>
+		new MCPServerActions({
+			cwd,
+			manager: mcpManager,
+			authStorage,
+			enableProjectConfig: cfgMcpEnableProjectConfig.get(settings),
+			filterExa: true,
+			filterBrowser: browserMcpFilterEnabled?.() ?? false,
+			getExtensionRoots,
+			onStatus: event => eventBus?.emit(MCP_CONNECTION_STATUS_EVENT_CHANNEL, event),
+			refreshMCPTools: tools => onMcpToolsChanged?.(tools),
+			clearMCPPromptCommands: clearMcpPromptCommands,
+		});
 	const latestExtensions = new Map<string, Extension>();
 	const refreshExtension = async (extension: Extension): Promise<Extension> => {
 		const loaded = await loadAllExtensions(cwd, cfgDisabledExtensions.get(settings));
@@ -107,7 +121,7 @@ export function createMCPActionRuntime(options: CreateMCPActionRuntimeOptions): 
 
 	const loadState = async (extension: Extension): Promise<MCPActionPanelState> => {
 		const current = await refreshExtension(extension);
-		const target = targetFromExtension(current, mcpManager);
+		const target = await targetFromExtension(current, mcpManager);
 		const server = serverFromExtension(current);
 		const snapshot = snapshotMcpRuntime(server, mcpManager, {
 			enabled: !target.disabled,
@@ -120,32 +134,39 @@ export function createMCPActionRuntime(options: CreateMCPActionRuntimeOptions): 
 			disabled: target.disabled,
 			shadowed: target.shadowed,
 		});
+		const projectBlocked = isProjectMCPConfigBlocked(target.source, cfgMcpEnableProjectConfig.get(settings));
 		const toggleId = target.disabled ? "enable" : "disable";
 		const actionItems: MCPActionItem[] = [
 			action(
 				"test",
 				"Test connection",
 				"Verify the server and list its tools",
-				capabilities.canTest,
-				target.disabled ? "Enable the server first" : undefined,
-			),
-			action(
-				"reconnect",
-				"Reconnect",
-				"Restart the live connection",
-				capabilities.canReconnect && Boolean(mcpManager),
-				!mcpManager
-					? "MCP runtime manager is unavailable"
+				capabilities.canTest && !projectBlocked,
+				projectBlocked
+					? PROJECT_MCP_CONFIG_DISABLED_REASON
 					: target.disabled
 						? "Enable the server first"
 						: undefined,
 			),
 			action(
+				"reconnect",
+				"Reconnect",
+				"Restart the live connection",
+				capabilities.canReconnect && Boolean(mcpManager) && !projectBlocked,
+				!mcpManager
+					? "MCP runtime manager is unavailable"
+					: projectBlocked
+						? PROJECT_MCP_CONFIG_DISABLED_REASON
+						: target.disabled
+							? "Enable the server first"
+							: undefined,
+			),
+			action(
 				"reauthenticate",
 				"Reauthenticate",
 				"Run OMP-managed OAuth",
-				capabilities.canReauthenticate,
-				capabilities.reauthenticateUnavailableReason,
+				capabilities.canReauthenticate && !projectBlocked,
+				projectBlocked ? PROJECT_MCP_CONFIG_DISABLED_REASON : capabilities.reauthenticateUnavailableReason,
 			),
 			action(
 				"clear-authentication",
@@ -189,7 +210,8 @@ export function createMCPActionRuntime(options: CreateMCPActionRuntimeOptions): 
 			actionId: MCPActionId,
 			context: MCPActionExecutionContext,
 		): Promise<string> {
-			const target = targetFromExtension(latestExtensions.get(extension.id) ?? extension, mcpManager);
+			const target = await targetFromExtension(latestExtensions.get(extension.id) ?? extension, mcpManager);
+			const actions = createActions();
 			switch (actionId) {
 				case "test": {
 					context.onProgress(`Testing ${target.name}...`);

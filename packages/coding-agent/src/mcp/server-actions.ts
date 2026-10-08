@@ -78,8 +78,29 @@ function serverUrl(config: MCPServerConfig): string | undefined {
 	return config.type === "http" || config.type === "sse" ? config.url : undefined;
 }
 
-function writableSourcePath(source: SourceMeta | undefined): string | undefined {
-	return source?.provider === "omp" || source?.provider === "mcp-json" ? source.path : undefined;
+/**
+ * Config file an action may persist into. `native` is the discovery provider for
+ * OMP's own `mcp.json` files (the dashboard passes discovery sources), `omp` is the
+ * label `/mcp` assigns to the same files, and `mcp-json` covers standalone files.
+ */
+export function writableSourcePath(source: SourceMeta | undefined): string | undefined {
+	return source?.provider === "native" || source?.provider === "omp" || source?.provider === "mcp-json"
+		? source.path
+		: undefined;
+}
+
+export const PROJECT_MCP_CONFIG_DISABLED_REASON = "Project MCP servers are disabled (mcp.enableProjectConfig)";
+
+/**
+ * True when `mcp.enableProjectConfig: false` excludes this source from startup.
+ * Actions that would connect to such a server must be refused so a project
+ * config cannot be executed through the action surface either.
+ */
+export function isProjectMCPConfigBlocked(
+	source: SourceMeta | undefined,
+	enableProjectConfig: boolean | undefined,
+): boolean {
+	return enableProjectConfig === false && source?.level === "project";
 }
 
 function getServerTimeout(config: MCPServerConfig): number {
@@ -102,7 +123,9 @@ async function testMCPConfig(options: {
 }): Promise<MCPToolDefinition[]> {
 	const manager = new TemporaryMCPManager(options.cwd);
 	if (options.authStorage) manager.setAuthStorage(options.authStorage);
-	const resolvedConfig = await manager.prepareConfig(options.config, { oauth: options.oauth });
+	// Callers pass the on-disk entry (placeholders intact, so persistence never writes
+	// resolved secrets); expand here so the probe connects the way startup would.
+	const resolvedConfig = await manager.prepareConfig(expandEnvVarsDeep(options.config), { oauth: options.oauth });
 	let connection: MCPServerConnection | undefined;
 	try {
 		connection = await connectToServer(
@@ -462,6 +485,12 @@ export class MCPServerActions {
 			shadowed: target.shadowed,
 		});
 		if (action === "enable" || action === "disable") return;
+		if (
+			(action === "test" || action === "reconnect" || action === "reauthenticate") &&
+			isProjectMCPConfigBlocked(target.source, this.#options.enableProjectConfig)
+		) {
+			throw new Error(PROJECT_MCP_CONFIG_DISABLED_REASON);
+		}
 		if (action === "test" && !capabilities.canTest) throw new Error("Enable the MCP server before testing it");
 		if (action === "reconnect" && !capabilities.canReconnect)
 			throw new Error("Enable the MCP server before reconnecting it");
