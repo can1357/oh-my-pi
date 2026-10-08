@@ -10,7 +10,7 @@ import { resolveModelCacheProviderId } from "@oh-my-pi/pi-catalog/provider-model
 import { DEFAULT_MODEL_PER_PROVIDER } from "@oh-my-pi/pi-catalog/provider-models/descriptors";
 import { parseArgs } from "@oh-my-pi/pi-coding-agent/cli/args";
 import { ModelRegistry, type ProviderConfigInput } from "@oh-my-pi/pi-coding-agent/config/model-registry";
-import { getModelMatchPreferences, resolveModelScope } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
+import { getModelMatchPreferences, parseModelPattern, resolveModelScope } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { buildSessionOptions as buildCliSessionOptions } from "@oh-my-pi/pi-coding-agent/main";
 import { createAgentSession, type ExtensionFactory } from "@oh-my-pi/pi-coding-agent/sdk";
@@ -156,6 +156,62 @@ describe("createAgentSession deferred model pattern resolution", () => {
 			await session.dispose();
 		}
 	});
+
+	test.each(["initial", "explicit", "temporary", "ordinary"] as const)(
+		"preserves funding and request auth after saving and resuming an %s model selection",
+		async selection => {
+			const authStorage = createInMemoryAuthStorage();
+			authStoragesToClose.push(authStorage);
+			authStorage.keys.setRuntime("openai-codex", "test-key");
+			const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir, "persist-models.yml"));
+			const selector = "openai-codex/gpt-6.1-sol";
+			const funded = parseModelPattern(`${selector}@credits`, modelRegistry.getAvailable()).model;
+			if (!funded) throw new Error("Expected credit-funded Codex model");
+			const sessionManager = SessionManager.create(tempDir, path.join(tempDir, "sessions"));
+			const options = {
+				...buildSessionOptions(selection === "initial" ? `${selector}@credits` : selector),
+				authStorage,
+				modelRegistry,
+				sessionManager,
+				settings: Settings.isolated(),
+			};
+			const { session } = await createAgentSession(options);
+			try {
+				if (selection === "explicit") await session.setModel(funded);
+				if (selection === "temporary") await session.setModelTemporary(funded);
+				expect(session.model?.usageFunding).toBe(selection === "ordinary" ? undefined : "credits");
+				sessionManager.appendMessage({ role: "user", content: "Persist this selection", timestamp: Date.now() });
+				await sessionManager.ensureOnDisk();
+				await sessionManager.flush();
+			} finally {
+				await session.dispose();
+			}
+			const sessionFile = sessionManager.getSessionFile();
+			if (!sessionFile) throw new Error("Expected saved session file");
+			const { modelPattern: _modelPattern, ...resumeOptions } = options;
+			const { session: resumed, modelFallbackMessage } = await createAgentSession({
+				...resumeOptions,
+				sessionManager: await SessionManager.open(sessionFile, path.join(tempDir, "sessions")),
+			});
+			try {
+				const restored = resumed.model;
+				if (!restored) throw new Error("Expected restored model");
+				expect(restored.provider).toBe("openai-codex");
+				expect(restored.id).toBe("gpt-6.1-sol");
+				expect(restored.usageFunding).toBe(selection === "ordinary" ? undefined : "credits");
+				expect(modelFallbackMessage).toBeUndefined();
+				const authResolution = vi.spyOn(authStorage.keys, "get");
+				expect(await modelRegistry.getApiKey(restored)).toBe("test-key");
+				expect(authResolution).toHaveBeenLastCalledWith(
+					"openai-codex",
+					undefined,
+					expect.objectContaining({ usageFunding: selection === "ordinary" ? undefined : "credits" }),
+				);
+			} finally {
+				await resumed.dispose();
+			}
+		},
+	);
 
 	test("lets a child task spawn a model agent inherited from its parent", async () => {
 		const bundledTask = getBundledAgent("task");
@@ -1100,6 +1156,53 @@ describe("createAgentSession deferred model pattern resolution", () => {
 			await session.dispose();
 		}
 	});
+
+	// The allowance rung must not spend paid credits while a later rung can
+	// serve; the explicit `@credits` rung spends them once those are gone.
+	test.each([
+		["a later rung is healthy", "healthy", "runtime-fallback-model", undefined],
+		["every later rung is depleted", "depleted", "gpt-6.1-sol", "credits"],
+	] as const)(
+		"skips a credits-only allowance rung when %s",
+		async (_case, laterState, expectedId, expectedFunding) => {
+			const settings = Settings.isolated({
+				"retry.usageAwareFallback": true,
+				"retry.usageReservePolicy": "confirm",
+				"retry.fallbackChains": {
+					task: ["runtime-provider/runtime-fallback-model", "openai-codex/gpt-6.1-sol@credits"],
+				},
+			});
+			settings.setModelRole("task", "openai-codex/gpt-6.1-sol");
+			const options = buildSessionOptions("task");
+			const authStorage = createInMemoryAuthStorage();
+			authStoragesToClose.push(authStorage);
+			authStorage.keys.setRuntime("openai-codex", "codex-test-key");
+			options.authStorage = authStorage;
+			options.modelRegistry = new ModelRegistry(authStorage, path.join(tempDir, "credits-models.yml"));
+			vi.spyOn(options.authStorage.health, "model").mockImplementation(async (_provider, healthOptions) => {
+				const state =
+					healthOptions.usageFunding === "credits"
+						? "healthy"
+						: healthOptions.modelId === "gpt-6.1-sol"
+							? "credits"
+							: laterState;
+				return { state, accounts: [{ credentialId: 1, credentialType: "oauth", state }] };
+			});
+			const { session } = await createAgentSession({
+				...options,
+				modelPatternFallbackRole: "subagent:credits-rung",
+				settings,
+				hasUI: false,
+			});
+			try {
+				expect(session.model?.provider).toBe(expectedFunding ? "openai-codex" : "runtime-provider");
+				expect(session.model?.id).toBe(expectedId);
+				expect(session.model?.usageFunding).toBe(expectedFunding);
+			} finally {
+				await session.dispose();
+			}
+		},
+	);
 
 	test("rejects a depleted terminal fallback after startup skips the primary", async () => {
 		const settings = Settings.isolated({

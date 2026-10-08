@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `retry.usageReserveTaperHours` (Reserve Taper, default `0` = unchanged static reserve) and per-account `auth.accountPolicies[].taperHours`: the usage reserve now releases linearly to 0 over that many hours before each quota window resets, so reserved quota is spent instead of expiring unused. `omp usage` policy lines reflect the tapered reserve ([#14074](https://github.com/can1357/oh-my-pi/pull/14074) by [@schickling-assistant](https://github.com/schickling-assistant)).
+- Added the `@credits` selector modifier for an explicit Codex flexible-credits rung in `retry.fallbackChains` (e.g. `openai-codex/gpt-6.1-sol@credits:auto`): that rung serves only accounts whose plan allowance is spent and whose paid credit balance funds overage, ordered by `auth.accountPolicies[].priority`. Providers without credit-overage reporting are rejected and flagged in fallback-chain validation. Usage-aware spawn and turn preflight treat an allowance rung that would only serve from credits like reserve, so later rungs (e.g. Grok, GLM) run before credits are spent; chains without `@credits` keep their previous behavior ([#14134](https://github.com/can1357/oh-my-pi/pull/14134) by [@schickling-assistant](https://github.com/schickling-assistant)).
+
 ### Changed
 
 - Reduced memory retained after merging unchanged discovered and cached models ([#14252](https://github.com/can1357/oh-my-pi/pull/14252) by [@iliaal](https://github.com/iliaal)).

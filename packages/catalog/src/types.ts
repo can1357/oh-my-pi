@@ -1375,6 +1375,14 @@ export interface CursorModelRoute {
 	parameters: readonly CursorModelParameter[];
 	maxMode?: boolean;
 }
+/**
+ * Which funding a request may draw on. Absent: the default allowance-first
+ * ranking. `credits`: the explicit credits rung of a fallback chain, which
+ * serves only from accounts whose allowance is spent and whose paid credit
+ * balance still funds overage.
+ */
+export type UsageFunding = "credits";
+
 // Model interface for the unified model system
 export interface Model<TApi extends Api = Api> {
 	id: string;
@@ -1490,6 +1498,13 @@ export interface Model<TApi extends Api = Api> {
 	 * Claude 5.5) straight to eligible accounts. Absent on bundled/config rows.
 	 */
 	accountAccess?: Readonly<Record<string, ModelAccountAccess>>;
+	/**
+	 * Funding a request on this model may draw on. Set only by a `@credits`
+	 * selector (a fallback chain's credits rung): credential selection then
+	 * serves only accounts whose plan allowance is spent and whose paid credit
+	 * balance funds the overage (Codex flexible credits). Absent on catalog rows.
+	 */
+	usageFunding?: UsageFunding;
 	/** Cursor `RequestedModel.parameters` for this model's default variant. */
 	cursorModelParameters?: readonly CursorModelParameter[];
 	/**

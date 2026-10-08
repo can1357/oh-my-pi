@@ -3,9 +3,10 @@ import * as AIError from "@oh-my-pi/pi-ai/error";
 import { isUsageLimitOutcome } from "@oh-my-pi/pi-ai/error/rate-limit";
 import type { AuthApiKeyOptions, AuthStorage } from "@oh-my-pi/pi-ai/auth-storage";
 import type { Api, Model } from "@oh-my-pi/pi-ai/types";
+import type { UsageFunding } from "@oh-my-pi/pi-catalog/types";
 
 /** Model slice accepted by the model-form `resolver(model, sessionId)` overload. */
-export type ApiKeyResolverModel = Pick<Model<Api>, "provider" | "baseUrl" | "id">;
+export type ApiKeyResolverModel = Pick<Model<Api>, "provider" | "baseUrl" | "id" | "usageFunding">;
 
 export interface ApiKeyResolverOptions {
 	/** Session id for credential stickiness; read at resolve time by the caller. */
@@ -14,6 +15,8 @@ export interface ApiKeyResolverOptions {
 	baseUrl?: string;
 	/** Provider model id forwarded to model-scoped usage ranking/backoff. */
 	modelId?: string;
+	/** `credits` restricts OAuth selection to credit-backed accounts (a fallback chain's credits rung). */
+	usageFunding?: UsageFunding;
 }
 
 /**
@@ -54,7 +57,7 @@ export function createApiKeyResolver(
 	provider: string,
 	options: ApiKeyResolverOptions = {},
 ): ApiKeyResolver {
-	const { sessionId, baseUrl, modelId } = options;
+	const { sessionId, baseUrl, modelId, usageFunding } = options;
 	const resolveKey = (
 		forceRefresh: boolean | undefined,
 		signal?: AbortSignal,
@@ -63,6 +66,7 @@ export function createApiKeyResolver(
 		registry.getApiKeyWithCredentialForProvider(provider, sessionId, {
 			baseUrl,
 			modelId,
+			usageFunding,
 			forceRefresh,
 			signal,
 			refreshReason,

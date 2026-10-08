@@ -3,7 +3,11 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { discoverAuthStorage, loadAuthAccountPolicyConfig, resolveAuthBrokerConfig } from "@oh-my-pi/pi-ai/auth-broker";
-import { type AuthAccountPolicies, DEFAULT_USAGE_RESERVE_PCT } from "@oh-my-pi/pi-ai/auth-storage";
+import {
+	type AuthAccountPolicies,
+	DEFAULT_USAGE_RESERVE_PCT,
+	DEFAULT_USAGE_RESERVE_TAPER_HOURS,
+} from "@oh-my-pi/pi-ai/auth-storage";
 import { writeAuthBrokerSnapshotCache } from "@oh-my-pi/pi-ai/auth-broker/snapshot-cache";
 import type { SnapshotResponse } from "@oh-my-pi/pi-ai/auth-broker/types";
 import * as oauthUtils from "@oh-my-pi/pi-ai/registry/oauth";
@@ -63,30 +67,38 @@ describe("resolveAuthBrokerConfig config discovery", () => {
 		});
 	});
 
-	test("loads account policy config with the configured or default global reserve", async () => {
+	test("loads account policy config with the configured or default global reserve and taper", async () => {
 		const accountPolicies = [
 			{
 				provider: "anthropic",
 				account: { email: "policy@example.com" },
 				reservePct: 25,
+				taperHours: 6,
 			},
 		] satisfies AuthAccountPolicies;
 		await Bun.write(
 			path.join(agentDir, "config.yml"),
-			["auth:", `  accountPolicies: ${JSON.stringify(accountPolicies)}`, "retry:", "  usageReservePct: 17", ""].join(
-				"\n",
-			),
+			[
+				"auth:",
+				`  accountPolicies: ${JSON.stringify(accountPolicies)}`,
+				"retry:",
+				"  usageReservePct: 17",
+				"  usageReserveTaperHours: 24",
+				"",
+			].join("\n"),
 		);
 
 		await expect(loadAuthAccountPolicyConfig({ agentDir })).resolves.toEqual({
 			accountPolicies,
 			defaultReservePct: 17,
+			defaultReserveTaperHours: 24,
 		});
 
 		await Bun.write(path.join(agentDir, "config.yml"), "auth: {}\n");
 		await expect(loadAuthAccountPolicyConfig({ agentDir })).resolves.toEqual({
 			accountPolicies: [],
 			defaultReservePct: DEFAULT_USAGE_RESERVE_PCT,
+			defaultReserveTaperHours: DEFAULT_USAGE_RESERVE_TAPER_HOURS,
 		});
 	});
 
@@ -98,6 +110,7 @@ describe("resolveAuthBrokerConfig config discovery", () => {
 				await expect(loadAuthAccountPolicyConfig({ agentDir })).resolves.toEqual({
 					accountPolicies: [],
 					defaultReservePct: DEFAULT_USAGE_RESERVE_PCT,
+					defaultReserveTaperHours: DEFAULT_USAGE_RESERVE_TAPER_HOURS,
 				});
 			});
 		}
@@ -248,6 +261,18 @@ describe("resolveAuthBrokerConfig config discovery", () => {
 				yaml: [
 					"auth:",
 					"  accountPolicies:",
+					"    - provider: openai-codex",
+					"      account:",
+					"        email: preferred@example.com",
+					"      taperHours: -1",
+					"",
+				].join("\n"),
+				error: "auth.accountPolicies[0].taperHours must be a finite number of at least 0",
+			},
+			{
+				yaml: [
+					"auth:",
+					"  accountPolicies:",
 					'    - provider: " openai-codex"',
 					"      account:",
 					"        email: preferred@example.com",
@@ -258,6 +283,10 @@ describe("resolveAuthBrokerConfig config discovery", () => {
 			{
 				yaml: ["retry:", "  usageReservePct: .inf", ""].join("\n"),
 				error: "retry.usageReservePct must be a finite number",
+			},
+			{
+				yaml: ["retry:", "  usageReserveTaperHours: -1", ""].join("\n"),
+				error: "retry.usageReserveTaperHours must be a finite number of at least 0",
 			},
 		] as const;
 

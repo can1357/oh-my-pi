@@ -467,6 +467,20 @@ describe("formatUsageBreakdown", () => {
 		expect(text).not.toContain("policy:");
 	});
 
+	it("shows eligibility when only the global reserve taper is configured", () => {
+		const policyOptions: UsagePolicyDiagnosticsOptions = {
+			globalReservePct: 10,
+			globalReserveTaperHours: 24,
+			getAccountPolicy: () => undefined,
+		};
+		const text = stripVTControlCharacters(
+			formatUsageBreakdown(reports, accounts, Date.now(), undefined, [], policyOptions),
+		);
+
+		expect(text).toContain("reserve 10% (global), tapers over 24h (global) · eligible · 16.0% left");
+		expect(text.slice(text.indexOf("API key"))).not.toContain("policy:");
+	});
+
 	it("shows an explicit priority and reserve override with the observed eligibility reason", () => {
 		const report = makeReport("openai-codex", "protected@example.test", [
 			makeLimit({

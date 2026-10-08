@@ -772,6 +772,148 @@ describe("AgentSession retry fallback", () => {
 		expect(succeededFromExtension).toEqual(succeededFromSubscribe.map(({ model, role }) => ({ model, role })));
 	});
 
+	for (const laterDepleted of [false, true]) {
+		it(
+			laterDepleted
+				? "spends credits mid-session only after later allowance rungs are depleted"
+				: "hops from a credits-backed primary to a healthy later allowance rung mid-session",
+			async () => {
+				const primaryModel = getBundledModel("openai-codex", "gpt-6.1-sol");
+				const laterModel = getBundledModel("anthropic", "claude-sonnet-4-5");
+				const finalModel = getBundledModel("openai", "gpt-4o-mini");
+				if (!primaryModel || !laterModel || !finalModel) throw new Error("Expected bundled credits models");
+				const primary = `${primaryModel.provider}/${primaryModel.id}`;
+				const later = `${laterModel.provider}/${laterModel.id}`;
+				const credits = `${primary}@credits`;
+				const requestedModels: string[] = [];
+				const mock = createMockModel({
+					responses: [{ content: ["started the task"] }, { content: ["continued the task"] }],
+				});
+				const agent = new Agent({
+					getApiKey: model => `${model.provider}-test-key`,
+					initialState: { model: primaryModel, systemPrompt: ["Test"], tools: [], messages: [] },
+					streamFn: (model, context, options) => {
+						requestedModels.push(`${model.provider}/${model.id}${model.usageFunding ? "@credits" : ""}`);
+						return mock.stream(model, context, options);
+					},
+				});
+				const settings = Settings.isolated({
+					"compaction.enabled": false,
+					"retry.usageAwareFallback": true,
+					"retry.usageReservePolicy": "auto",
+					"retry.fallbackChains": {
+						default: [later, credits, `${finalModel.provider}/${finalModel.id}`],
+					},
+				});
+				settings.setModelRole("default", primary);
+				let allowanceSpent = false;
+				const health = vi
+					.spyOn(modelRegistry.authStorage.health, "model")
+					.mockImplementation(async (provider, options) => {
+						if (!allowanceSpent || options.usageFunding === "credits") return { state: "healthy", accounts: [] };
+						if (provider === primaryModel.provider) return { state: "credits", accounts: [] };
+						return { state: laterDepleted ? "depleted" : "healthy", accounts: [] };
+					});
+				session = new AgentSession({
+					agent,
+					sessionManager: SessionManager.inMemory(),
+					settings,
+					modelRegistry,
+				});
+
+				await session.prompt("Start on renewable allowance");
+				await session.waitForIdle();
+				allowanceSpent = true;
+				await session.prompt("Continue after the allowance runs out");
+				await session.waitForIdle();
+
+				expect(requestedModels).toEqual([primary, laterDepleted ? credits : later]);
+				expect(session.model?.usageFunding).toBe(laterDepleted ? "credits" : undefined);
+				if (laterDepleted) {
+					expect(health).toHaveBeenCalledWith(
+						primaryModel.provider,
+						expect.objectContaining({ modelId: primaryModel.id, usageFunding: "credits" }),
+					);
+				}
+			},
+		);
+	}
+
+	it("requires confirmation for credit-backed allowance and blocks it under live fail-closed policy", async () => {
+		const primaryModel = getBundledModel("openai-codex", "gpt-6.1-sol");
+		const laterModel = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!primaryModel || !laterModel) throw new Error("Expected bundled credits policy models");
+		const primary = `${primaryModel.provider}/${primaryModel.id}`;
+		const later = `${laterModel.provider}/${laterModel.id}`;
+		const requestedModels: string[] = [];
+		const mock = createMockModel({ handler: { content: ["stayed on credits-backed primary"] } });
+		const agent = new Agent({
+			getApiKey: model => `${model.provider}-test-key`,
+			initialState: { model: primaryModel, systemPrompt: ["Test"], tools: [], messages: [] },
+			streamFn: (model, context, options) => {
+				requestedModels.push(`${model.provider}/${model.id}`);
+				return mock.stream(model, context, options);
+			},
+		});
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"retry.usageAwareFallback": true,
+			"retry.usageReservePolicy": "confirm",
+			"retry.fallbackChains": { default: [later] },
+		});
+		settings.setModelRole("default", primary);
+		let health: "credits" | "unknown" = "credits";
+		vi.spyOn(modelRegistry.authStorage.health, "model").mockImplementation(async provider =>
+			provider === primaryModel.provider
+				? {
+						state: health,
+						accounts: [
+							{
+								credentialId: 1,
+								credentialType: "oauth",
+								selected: true,
+								state: health,
+								remainingFraction: 0,
+							},
+						],
+					}
+				: { state: "healthy", accounts: [] },
+		);
+		const confirmFallback = vi.fn(async () => false);
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+		});
+		session.setUsageFallbackConfirmer(confirmFallback);
+		await session.prompt("Approve staying on credits-backed primary");
+		await session.waitForIdle();
+		expect(confirmFallback).toHaveBeenCalledWith(
+			{ from: primary, to: later, remainingPercent: 0 },
+			expect.any(AbortSignal),
+		);
+		health = "unknown";
+		await session.prompt("Continue without quota data");
+		await session.waitForIdle();
+		health = "credits";
+		await session.prompt("Keep the approval when credit-backed quota data returns");
+		await session.waitForIdle();
+		expect(confirmFallback).toHaveBeenCalledTimes(1);
+		await session.setModel({ ...primaryModel, usageFunding: "credits" });
+		await session.prompt("Ask again for the explicit credits route");
+		await session.waitForIdle();
+		expect(confirmFallback).toHaveBeenCalledTimes(2);
+		await session.newSession();
+		await session.setModel({ ...primaryModel, usageFunding: "credits" });
+		await session.prompt("Ask again in a new transcript");
+		await session.waitForIdle();
+		expect(confirmFallback).toHaveBeenCalledTimes(3);
+		cfgRetryUsageReservePolicy.override(settings, "fail-closed");
+		await expect(session.prompt("Never spend credits")).rejects.toThrow("reserve policy is fail-closed");
+		expect(requestedModels).toEqual([primary, primary, primary, primary, primary]);
+	});
+
 	it("confirms before crossing models when every pooled account is inside reserve", async () => {
 		const primaryModel = getBundledModel("anthropic", "claude-sonnet-4-5");
 		const fallbackModel = getBundledModel("openai", "gpt-4o-mini");
@@ -5888,6 +6030,23 @@ describe("AgentSession retry fallback", () => {
 			}
 			descriptorAuthStorage.close();
 		}
+	});
+
+	it("warns for unsupported credits selectors in both chain keys and candidates", () => {
+		const unsupported = "anthropic/claude-sonnet-4-5@credits";
+		const apiKeyOnly = "openai/gpt-4o-mini@credits";
+		const supported = "openai-codex/gpt-6.1-sol@credits";
+		const settings = Settings.isolated({
+			"retry.fallbackChains": {
+				[unsupported]: [supported],
+				default: [apiKeyOnly, supported],
+			},
+		});
+		const warnings: string[] = [];
+		validateRetryFallbackChains(settings, sharedRegistry, message => warnings.push(message));
+		expect(warnings).toHaveLength(2);
+		expect(warnings.some(warning => warning.includes(unsupported))).toBe(true);
+		expect(warnings.some(warning => warning.includes(apiKeyOnly))).toBe(true);
 	});
 
 	it("defers fallback warnings while a selector's provider discovery is pending, then surfaces them once settled", () => {

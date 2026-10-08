@@ -504,6 +504,7 @@ function buildPlanMeterState(
 
 export const openaiCodexUsageProvider: UsageProvider = {
 	id: "openai-codex",
+	supportsCreditOverage: true,
 	supports(params: UsageFetchParams): boolean {
 		return params.provider === "openai-codex" && params.credential.type === "oauth";
 	},
@@ -665,6 +666,9 @@ export const openaiCodexUsageProvider: UsageProvider = {
 			metadata: {
 				planType,
 				...buildPlanMeterState(parsed?.allowed, parsed?.limitReached, creditOverage),
+				// The plan allowance is spent and a paid credit balance funds the
+				// overage: credential selection treats this account as credit-backed.
+				...(creditOverage ? { creditOverage: true } : {}),
 				email,
 				accountId,
 				meterStates,

@@ -15,7 +15,8 @@ import {
  *   with alias-vs-dated pick.
  * - `parseModelPatternWithContext`/`parseModelPattern` layer the selector
  *   grammar on top: trailing `:level` thinking suffixes (`splitThinkingSuffix`)
- *   and `@upstream` provider routing (`splitUpstreamRouting`).
+ *   and `@upstream` provider routing (`splitUpstreamRouting`), whose reserved
+ *   `@credits` slug marks a non-aggregator model's credits rung.
  * - Everything else (`resolveModelFromString`, `resolveModelOverride*`,
  *   `resolveRoleSelection`, `resolveModelScope`, `resolveCliModel`,
  *   `findSmolModel`/`findSlowModel`) adapts inputs — roles, settings patterns,
@@ -25,6 +26,7 @@ import {
 import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { ModelRoleLookup } from "@oh-my-pi/pi-tui/overlays/model-browser";
 import type { Api, Effort, KnownProvider, Model, ModelSpec } from "@oh-my-pi/pi-ai";
+import { defaultUsageProvider } from "@oh-my-pi/pi-ai/usage/registry";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { resolveBareVariantSelector, resolveVariantSelector } from "@oh-my-pi/pi-catalog/compat/collapse";
 import { providerEntry } from "@oh-my-pi/pi-catalog/compat/providers";
@@ -203,8 +205,17 @@ function getSingleUpstreamRoute(model: Model<Api>): string | undefined {
 	return undefined;
 }
 
+/**
+ * Selector modifier naming a route's credits rung: `openai-codex/gpt-6.1-sol@credits:auto`
+ * serves the same model from accounts whose plan allowance is spent and whose
+ * paid credit balance funds the overage. Requires a usage provider that can
+ * identify credit-funded overage; aggregator `@<slug>` routing is unchanged.
+ */
+export const CREDITS_FUNDING_ROUTE = "credits";
+
 export function formatModelStringWithRouting(model: Model<Api>): string {
 	const selector = formatModelString(model);
+	if (model.usageFunding === "credits") return `${selector}@${CREDITS_FUNDING_ROUTE}`;
 	const upstream = getSingleUpstreamRoute(model);
 	return upstream ? `${selector}@${upstream}` : selector;
 }
@@ -803,8 +814,10 @@ function matchModel(
 			// Let the routing fallback apply `@upstream` before fuzzy matching can consume the
 			// slug — but only for aggregator providers (OpenRouter / Vercel Gateway). Other
 			// providers have ids that legitimately end in `@` (Vertex `claude-opus-4-8@default`),
-			// and the fallback never routes them, so they must keep fuzzy matching.
-			if (splitUpstreamRouting(modelId) && providerModels.some(supportsUpstreamRouting)) {
+			// and the fallback never routes them, so they must keep fuzzy matching. The reserved
+			// `@credits` funding modifier is left to the routing fallback on every provider.
+			const routing = splitUpstreamRouting(modelId);
+			if (routing && (routing.upstream === CREDITS_FUNDING_ROUTE || providerModels.some(supportsUpstreamRouting))) {
 				return undefined;
 			}
 			const scored = providerModels
@@ -1004,11 +1017,22 @@ function matchPatternWithContext(
 	// No direct match: a trailing `@upstream` may be a provider-routing selector.
 	// Only honor it when the base resolves to an aggregator model (OpenRouter /
 	// Vercel Gateway); otherwise `@` stays part of the id and `direct` stands.
+	// Otherwise `@credits` requires credit-funded overage reporting.
 	const routing = splitUpstreamRouting(pattern);
 	if (routing) {
 		const routed = parseModelPatternWithContext(routing.base, availableModels, context, options);
 		if (routed.model && supportsUpstreamRouting(routed.model)) {
 			return { ...routed, model: applyUpstreamRouting(routed.model, routing.upstream), upstream: routing.upstream };
+		}
+		if (routed.model && routing.upstream === CREDITS_FUNDING_ROUTE) {
+			if (!defaultUsageProvider(routed.model.provider)?.supportsCreditOverage) {
+				return {
+					...routed,
+					model: undefined,
+					warning: `Provider "${routed.model.provider}" cannot report credit-funded overage for "${pattern}".`,
+				};
+			}
+			return { ...routed, model: { ...routed.model, usageFunding: "credits" } };
 		}
 	}
 	return direct;
@@ -1658,10 +1682,30 @@ export function resolveSessionModelSelector(
 	selector: string,
 ): { model: Model<Api>; thinkingLevel?: ConfiguredThinkingLevel } | undefined {
 	const parsed = parseSessionModelSelector(modelRegistry, selector);
-	if (!parsed) return undefined;
-	const model = modelRegistry.find(parsed.provider, parsed.id);
+	if (parsed) {
+		const model = modelRegistry.find(parsed.provider, parsed.id);
+		if (model && modelRegistry.hasConfiguredAuth(model)) {
+			return { model, thinkingLevel: parsed.thinkingLevel };
+		}
+	}
+	// Saved selections carry their routing/funding modifier (`provider/id@credits`,
+	// aggregator `provider/id@upstream`), which the literal lookup above cannot
+	// see because the modifier rides inside the id. Resolve the base model
+	// through the registry, then re-apply the modifier with the same grammar —
+	// and the same `@credits` validation — a live selector gets.
+	const routing = splitUpstreamRouting(selector);
+	if (!routing) return undefined;
+	const base = parseSessionModelSelector(modelRegistry, routing.base);
+	if (!base) return undefined;
+	const model = modelRegistry.find(base.provider, base.id);
 	if (!model || !modelRegistry.hasConfiguredAuth(model)) return undefined;
-	return { model, thinkingLevel: parsed.thinkingLevel };
+	if (supportsUpstreamRouting(model)) {
+		return { model: applyUpstreamRouting(model, routing.upstream), thinkingLevel: base.thinkingLevel };
+	}
+	if (routing.upstream === CREDITS_FUNDING_ROUTE && defaultUsageProvider(model.provider)?.supportsCreditOverage) {
+		return { model: { ...model, usageFunding: "credits" }, thinkingLevel: base.thinkingLevel };
+	}
+	return undefined;
 }
 
 /**

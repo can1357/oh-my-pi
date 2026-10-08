@@ -23,6 +23,7 @@ import {
 	AuthStorage,
 	type AuthStorageOptions,
 	DEFAULT_USAGE_RESERVE_PCT,
+	DEFAULT_USAGE_RESERVE_TAPER_HOURS,
 	SqliteAuthCredentialStore,
 } from "../auth-storage";
 import * as AIError from "../error";
@@ -85,6 +86,7 @@ interface ConfigSnapshot {
 	token?: string;
 	accountPolicies?: unknown;
 	usageReservePct?: unknown;
+	usageReserveTaperHours?: unknown;
 }
 
 /**
@@ -122,7 +124,12 @@ function parseAuthAccountPolicies(value: unknown): AuthAccountPolicies {
 		}
 		const policy = entry as Record<string, unknown>;
 		const unknownPolicyFields = Object.keys(policy).filter(
-			key => key !== "provider" && key !== "account" && key !== "priority" && key !== "reservePct",
+			key =>
+				key !== "provider" &&
+				key !== "account" &&
+				key !== "priority" &&
+				key !== "reservePct" &&
+				key !== "taperHours",
 		);
 		if (unknownPolicyFields.length > 0) {
 			throw new AIError.ConfigurationError(`${path} has unknown fields: ${unknownPolicyFields.join(", ")}`);
@@ -171,6 +178,12 @@ function parseAuthAccountPolicies(value: unknown): AuthAccountPolicies {
 		) {
 			throw new AIError.ConfigurationError(`${path}.reservePct must be between 0 and 100`);
 		}
+		if (
+			policy.taperHours !== undefined &&
+			(typeof policy.taperHours !== "number" || !Number.isFinite(policy.taperHours) || policy.taperHours < 0)
+		) {
+			throw new AIError.ConfigurationError(`${path}.taperHours must be a finite number of at least 0`);
+		}
 
 		return {
 			provider,
@@ -182,6 +195,7 @@ function parseAuthAccountPolicies(value: unknown): AuthAccountPolicies {
 			},
 			...(typeof policy.priority === "number" ? { priority: policy.priority } : {}),
 			...(typeof policy.reservePct === "number" ? { reservePct: policy.reservePct } : {}),
+			...(typeof policy.taperHours === "number" ? { taperHours: policy.taperHours } : {}),
 		};
 	});
 }
@@ -192,6 +206,14 @@ function parseUsageReservePct(value: unknown): number {
 		throw new AIError.ConfigurationError("retry.usageReservePct must be a finite number");
 	}
 	return reservePct;
+}
+
+function parseUsageReserveTaperHours(value: unknown): number {
+	const taperHours = value === undefined ? DEFAULT_USAGE_RESERVE_TAPER_HOURS : value;
+	if (typeof taperHours !== "number" || !Number.isFinite(taperHours) || taperHours < 0) {
+		throw new AIError.ConfigurationError("retry.usageReserveTaperHours must be a finite number of at least 0");
+	}
+	return taperHours;
 }
 
 async function readConfigYaml(agentDir: string): Promise<ConfigSnapshot> {
@@ -222,6 +244,7 @@ async function readConfigYaml(agentDir: string): Promise<ConfigSnapshot> {
 			token: readDottedString(record, "auth.broker.token"),
 			accountPolicies: readDottedValue(record, "auth.accountPolicies"),
 			usageReservePct: readDottedValue(record, "retry.usageReservePct"),
+			usageReserveTaperHours: readDottedValue(record, "retry.usageReserveTaperHours"),
 		};
 	}
 	return {};
@@ -230,12 +253,14 @@ async function readConfigYaml(agentDir: string): Promise<ConfigSnapshot> {
 export interface AuthAccountPolicyConfig {
 	accountPolicies: AuthAccountPolicies;
 	defaultReservePct: number;
+	defaultReserveTaperHours: number;
 }
 
 export interface LoadAuthAccountPolicyConfigOptions {
 	agentDir?: string;
 	accountPolicies?: unknown;
 	usageReservePct?: unknown;
+	usageReserveTaperHours?: unknown;
 }
 
 /** Load and strictly validate account-selection policy configuration, with main-config fallback. */
@@ -243,7 +268,10 @@ export async function loadAuthAccountPolicyConfig(
 	options: LoadAuthAccountPolicyConfigOptions = {},
 ): Promise<AuthAccountPolicyConfig> {
 	const agentDir = options.agentDir ?? getAgentDir();
-	const needsMainConfigFallback = options.accountPolicies === undefined || options.usageReservePct === undefined;
+	const needsMainConfigFallback =
+		options.accountPolicies === undefined ||
+		options.usageReservePct === undefined ||
+		options.usageReserveTaperHours === undefined;
 	const snapshot = needsMainConfigFallback ? await readConfigYaml(agentDir) : undefined;
 	return {
 		accountPolicies: parseAuthAccountPolicies(
@@ -251,6 +279,11 @@ export async function loadAuthAccountPolicyConfig(
 		),
 		defaultReservePct: parseUsageReservePct(
 			options.usageReservePct === undefined ? snapshot?.usageReservePct : options.usageReservePct,
+		),
+		defaultReserveTaperHours: parseUsageReserveTaperHours(
+			options.usageReserveTaperHours === undefined
+				? snapshot?.usageReserveTaperHours
+				: options.usageReserveTaperHours,
 		),
 	};
 }
@@ -468,10 +501,11 @@ export async function discoverAuthStorage(options: DiscoverAuthStorageOptions = 
 		agentDir,
 		configValueResolver: options.configValueResolver,
 	});
-	const { accountPolicies, defaultReservePct } = await loadAuthAccountPolicyConfig({
+	const { accountPolicies, defaultReservePct, defaultReserveTaperHours } = await loadAuthAccountPolicyConfig({
 		agentDir,
 		accountPolicies: options.accountPolicies,
 		usageReservePct: options.authStorageOptions?.defaultReservePct,
+		usageReserveTaperHours: options.authStorageOptions?.defaultReserveTaperHours,
 	});
 	const { store, sourceLabel } = await openAuthCredentialStore({
 		brokerConfig,
@@ -486,6 +520,7 @@ export async function discoverAuthStorage(options: DiscoverAuthStorageOptions = 
 		sourceLabel,
 		accountPolicies,
 		defaultReservePct,
+		defaultReserveTaperHours,
 	});
 	await storage.credentials.reload();
 	return storage;

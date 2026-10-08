@@ -421,6 +421,8 @@ export interface UsageProvider {
 	id: Provider;
 	/** Bump to retire cached reports of an older shape during last-good retention. */
 	cacheVersion?: number;
+	/** True when usage reports identify paid credit-funded overage via metadata.creditOverage. */
+	supportsCreditOverage?: boolean;
 	fetchUsage(params: UsageFetchParams, ctx: UsageFetchContext): Promise<UsageReport | null>;
 	/** Parse provider rate-limit response headers (lowercased keys) into a usage report, if supported. */
 	parseRateLimitHeaders?(

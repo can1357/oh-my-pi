@@ -984,9 +984,10 @@ export {
  * back into the broker through the {@link AuthStorageOptions.refreshOAuthCredential}
  * override to re-mint access tokens when needed.
  *
- * Account routing (`auth.accountPolicies`, `retry.usageReservePct`) comes from
- * effective settings: `options.settings` when given, else the matching global
- * instance, else a read-only load for `options.cwd`; explicit option values win.
+ * Account routing (`auth.accountPolicies`, `retry.usageReservePct`,
+ * `retry.usageReserveTaperHours`) comes from effective settings: `options.settings`
+ * when given, else the matching global instance, else a read-only load for
+ * `options.cwd`; explicit option values win.
  *
  * Delegates to {@link ./session/auth-broker-config} so the TUI and the catalog
  * generator share the same credential-discovery logic.
@@ -1004,6 +1005,8 @@ export async function discoverAuthStorage(
 		authStorageOptions: {
 			...discoveryOptions.authStorageOptions,
 			defaultReservePct: discoveryOptions.authStorageOptions?.defaultReservePct ?? policy.defaultReservePct,
+			defaultReserveTaperHours:
+				discoveryOptions.authStorageOptions?.defaultReserveTaperHours ?? policy.defaultReserveTaperHours,
 		},
 	});
 }
@@ -2929,8 +2932,12 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					if (resolved.model) {
 						return [
 							{
+								// Rebuild the pattern from the resolved model: `resolveCliModel`
+								// echoes the normalized bare `provider/id` selector, which drops a
+								// routing/funding modifier (`@credits`, aggregator `@upstream`)
+								// and would re-resolve below without it.
 								pattern: formatModelSelectorValue(
-									resolved.selector ?? formatModelStringWithRouting(resolved.model),
+									formatModelStringWithRouting(resolved.model),
 									resolved.thinkingLevel,
 								),
 								retryFallback: undefined,
@@ -2983,6 +2990,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 							modelId: primary.model.id,
 							baseUrl: primary.model.baseUrl,
 							reserveFraction: cfgRetryUsageReservePct.get(settings) / 100,
+							usageFunding: primary.model.usageFunding,
 						});
 					} catch (error) {
 						logger.debug("Usage-aware model preflight failed open", {
@@ -3009,7 +3017,9 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 							continue;
 						}
 					}
-					if (usageHealth?.state === "reserve") {
+					// An allowance rung whose accounts only serve on paid credits yields
+					// like reserve, so later rungs (and an explicit `@credits` rung) run first.
+					if (usageHealth?.state === "reserve" || usageHealth?.state === "credits") {
 						if (usageReservePolicy === "fail-closed") {
 							throw new Error(
 								`Usage reserve reached for ${primary.model.provider}/${primary.model.id}; reserve policy is fail-closed.`,
@@ -4433,7 +4443,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		} else {
 			// Save initial model, thinking level, and service tier for new sessions so they can be restored on resume.
 			if (model) {
-				sessionManager.appendModelChange(`${model.provider}/${model.id}`);
+				sessionManager.appendModelChange(formatModelStringWithRouting(model));
 			}
 			if (!autoThinking) {
 				// Do not write the `auto` selector before the first turn resolves; auto

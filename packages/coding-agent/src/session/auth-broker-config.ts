@@ -41,7 +41,7 @@ import { Settings } from "../config/settings";
 import type { AuthStorage } from "./auth-storage";
 
 import { cfgAuthAccountPolicies, cfgAuthBrokerToken, cfgAuthBrokerUrl } from "../config/model-settings";
-import { cfgRetryUsageReservePct } from "./settings";
+import { cfgRetryUsageReservePct, cfgRetryUsageReserveTaperHours } from "./settings";
 
 export { type AuthBrokerClientConfig, getAuthBrokerTokenFilePath };
 
@@ -75,7 +75,10 @@ export async function resolveEffectiveSettings({
 	return Settings.loadReadOnly({ cwd, agentDir });
 }
 
-/** Resolve `auth.accountPolicies` + `retry.usageReservePct` from effective settings (SDK discovery, auth-gateway). */
+/**
+ * Resolve `auth.accountPolicies` + `retry.usageReservePct` + `retry.usageReserveTaperHours`
+ * from effective settings (SDK discovery, auth-gateway).
+ */
 export async function loadEffectiveAuthAccountPolicyConfig(
 	scope: EffectiveSettingsScope = {},
 ): Promise<AuthAccountPolicyConfig> {
@@ -83,6 +86,7 @@ export async function loadEffectiveAuthAccountPolicyConfig(
 	return loadAuthAccountPolicyConfig({
 		accountPolicies: cfgAuthAccountPolicies.get(settings),
 		usageReservePct: cfgRetryUsageReservePct.get(settings),
+		usageReserveTaperHours: cfgRetryUsageReserveTaperHours.get(settings),
 	});
 }
 
@@ -130,6 +134,7 @@ const cfgAuthStorageSettings = combine({
 	brokerToken: cfgAuthBrokerToken,
 	accountPolicies: cfgAuthAccountPolicies,
 	usageReservePct: cfgRetryUsageReservePct,
+	usageReserveTaperHours: cfgRetryUsageReserveTaperHours,
 });
 
 /** Live link between settings and a long-lived `AuthStorage`; see {@link createAuthStorageSettingsSync}. */
@@ -142,7 +147,8 @@ export interface AuthStorageSettingsSync {
 
 /**
  * Keeps a long-lived `authStorage` in step with the auth settings of `scope`:
- * - `auth.accountPolicies` / `retry.usageReservePct` re-apply account routing policy.
+ * - `auth.accountPolicies` / `retry.usageReservePct` / `retry.usageReserveTaperHours`
+ *   re-apply account routing policy.
  * - `auth.broker.url` / `auth.broker.token` flush pending writes, re-resolve the
  *   broker with startup precedence (env → config.yml → token file; project layers
  *   never redirect credentials), and swap the credential store in place when the
@@ -194,6 +200,7 @@ export function createAuthStorageSettingsSync(scope: ScopeLike, authStorage: Aut
 		const brokerChanged = next.brokerUrl !== previous.brokerUrl || next.brokerToken !== previous.brokerToken;
 		const policiesChanged =
 			next.usageReservePct !== previous.usageReservePct ||
+			next.usageReserveTaperHours !== previous.usageReserveTaperHours ||
 			!Bun.deepEquals(next.accountPolicies, previous.accountPolicies);
 		pending = pending.then(async () => {
 			if (brokerChanged) await applyBroker();

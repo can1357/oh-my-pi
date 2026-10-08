@@ -2,8 +2,17 @@ import type { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { Model } from "@oh-my-pi/pi-ai";
 import type { ModelRegistry } from "../config/model-registry";
 import { cfgModelRoles } from "../config/model-settings";
-import { formatModelSelectorValue, parseModelString } from "@oh-my-pi/pi-tui/overlays/model-selector";
-import { formatModelString, formatModelStringWithRouting } from "../config/model-resolver";
+import {
+	formatModelSelectorValue,
+	parseModelString,
+	splitUpstreamRouting,
+} from "@oh-my-pi/pi-tui/overlays/model-selector";
+import {
+	CREDITS_FUNDING_ROUTE,
+	formatModelString,
+	formatModelStringWithRouting,
+	parseModelPattern,
+} from "../config/model-resolver";
 import type { Settings } from "../config/settings";
 import {
 	type ConfiguredThinkingLevel,
@@ -143,6 +152,16 @@ function formatRetryFallbackBaseSelector(selector: RetryFallbackSelector): strin
 	return `${selector.provider}/${selector.id}`;
 }
 
+/**
+ * Provider/id of a live model for matching chains written without its
+ * aggregator upstream route. A `@credits` rung is its own chain position, not
+ * a routing detail, so it keeps the modifier and never matches the allowance
+ * rung of the same model.
+ */
+function formatPlainModelSelector(model: Model): string {
+	return model.usageFunding === "credits" ? formatModelStringWithRouting(model) : formatModelString(model);
+}
+
 /** Whether a provider is registered or configured for discovery. */
 export function isKnownProvider(
 	modelRegistry: Pick<RetryFallbackModelLookup, "hasProvider">,
@@ -237,6 +256,19 @@ function providerScopedPool(
 	return pool;
 }
 
+/** Explain missing models or unsupported funding modifiers without discarding `@credits`. */
+function fallbackSelectorModelError(
+	modelRegistry: Pick<ModelRegistry, "find">,
+	selector: RetryFallbackSelector,
+): "unknown model" | "unsupported credits funding" | undefined {
+	if (modelRegistry.find(selector.provider, selector.id)) return undefined;
+	const routing = splitUpstreamRouting(selector.id);
+	if (routing?.upstream !== CREDITS_FUNDING_ROUTE) return "unknown model";
+	const base = modelRegistry.find(selector.provider, routing.base);
+	if (!base) return "unknown model";
+	return parseModelPattern(selector.raw, [base]).model ? undefined : "unsupported credits funding";
+}
+
 /**
  * Validates configured fallback chains and reports each warning via `warn`.
  *
@@ -277,11 +309,11 @@ export function validateRetryFallbackChains(
 				const parsedKey = parseRetryFallbackSelector(key, modelRegistry);
 				if (!parsedKey) {
 					report(`Invalid model selector key in retry.fallbackChains: ${key}`);
-				} else if (
-					!modelRegistry.find(parsedKey.provider, parsedKey.id) &&
-					!isDiscoveryPending(parsedKey.provider)
-				) {
-					report(`retry.fallbackChains key references unknown model: ${key}`);
+				} else {
+					const error = fallbackSelectorModelError(modelRegistry, parsedKey);
+					if (error && (error !== "unknown model" || !isDiscoveryPending(parsedKey.provider))) {
+						report(`retry.fallbackChains key references ${error}: ${key}`);
+					}
 				}
 			}
 		}
@@ -335,8 +367,9 @@ export function validateRetryFallbackChains(
 				report(`Invalid fallback selector format in ${keyKind} '${key}': ${selectorStr}`);
 				continue;
 			}
-			if (!modelRegistry.find(parsed.provider, parsed.id) && !isDiscoveryPending(parsed.provider)) {
-				report(`Fallback chain for ${keyKind} '${key}' references unknown model: ${selectorStr}`);
+			const error = fallbackSelectorModelError(modelRegistry, parsed);
+			if (error && (error !== "unknown model" || !isDiscoveryPending(parsed.provider))) {
+				report(`Fallback chain for ${keyKind} '${key}' references ${error}: ${selectorStr}`);
 			}
 		}
 	}
@@ -420,7 +453,7 @@ export function resolveRetryFallbackChainKey(
 ): string | undefined {
 	const parsedConfigured = parseRetryFallbackSelector(currentSelector, context.modelLookup);
 	const currentPlainSelector = currentModel
-		? formatModelSelectorValue(formatModelString(currentModel), parsedConfigured?.thinkingLevel)
+		? formatModelSelectorValue(formatPlainModelSelector(currentModel), parsedConfigured?.thinkingLevel)
 		: undefined;
 	const parsedCurrent =
 		parsedConfigured ??
@@ -562,7 +595,7 @@ function getRetryFallbackEffectiveChain(
 		parsedConfigured ??
 		(currentModel
 			? parseRetryFallbackSelector(
-					formatModelSelectorValue(formatModelString(currentModel), undefined),
+					formatModelSelectorValue(formatPlainModelSelector(currentModel), undefined),
 					context.modelLookup,
 				)
 			: undefined);
@@ -617,7 +650,7 @@ export function findRetryFallbackCandidates(
 	);
 	const parsedConfigured = parseRetryFallbackSelector(currentSelector, context.modelLookup);
 	const currentPlainSelector = currentModel
-		? formatModelSelectorValue(formatModelString(currentModel), parsedConfigured?.thinkingLevel)
+		? formatModelSelectorValue(formatPlainModelSelector(currentModel), parsedConfigured?.thinkingLevel)
 		: undefined;
 	const parsedCurrent =
 		parsedConfigured ??

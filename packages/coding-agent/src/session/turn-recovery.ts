@@ -1825,6 +1825,7 @@ export class TurnRecovery {
 				sessionId: this.#host.sessionId(),
 				baseUrl: currentModel.baseUrl,
 				reserveFraction: cfgRetryUsageReservePct.get(this.#host.settings) / 100,
+				usageFunding: currentModel.usageFunding,
 				signal,
 			});
 		} catch (error) {
@@ -1852,18 +1853,21 @@ export class TurnRecovery {
 		}
 		// Missing quota data is not evidence that the reserve episode ended.
 		if (health.state === "unknown") return false;
-		if (health.state !== "reserve") this.#usageReserveApproval = undefined;
+		// Serving only from paid credits is handled like reserve: a later rung
+		// (including an explicit `@credits` rung) goes first.
+		const reserveLike = health.state === "reserve" || health.state === "credits";
+		if (!reserveLike) this.#usageReserveApproval = undefined;
 
 		const reservePolicy = cfgRetryUsageReservePolicy.get(this.#host.settings);
 		if (reservePolicy === "fail-closed") {
-			const condition = health.state === "reserve" ? "reserve reached" : "usage depleted";
+			const condition = reserveLike ? "reserve reached" : "usage depleted";
 			throw new Error(
 				`${USAGE_PREFLIGHT_BLOCKED_PREFIX} ${condition} for ${currentSelector}; reserve policy is fail-closed.`,
 			);
 		}
 		if (
 			reservePolicy === "confirm" &&
-			health.state === "reserve" &&
+			reserveLike &&
 			this.#usageReserveApproval?.sessionId === sessionId &&
 			this.#usageReserveApproval.model === formatModelStringWithRouting(currentModel)
 		) {
@@ -1893,11 +1897,18 @@ export class TurnRecovery {
 							sessionId: this.#host.sessionId(),
 							baseUrl: candidateModel.baseUrl,
 							reserveFraction: cfgRetryUsageReservePct.get(this.#host.settings) / 100,
+							usageFunding: candidateModel.usageFunding,
 							signal,
 						},
 					);
 					if (signal.aborted || !modelsAreEqual(this.#host.model(), currentModel)) return false;
-					if (candidateHealth.state === "depleted" || candidateHealth.state === "reserve") continue;
+					if (
+						candidateHealth.state === "depleted" ||
+						candidateHealth.state === "reserve" ||
+						candidateHealth.state === "credits"
+					) {
+						continue;
+					}
 					if (candidateHealth.state === "healthy") {
 						const selected = candidateHealth.accounts.find(account => account.selected);
 						if (
@@ -1933,7 +1944,7 @@ export class TurnRecovery {
 		if (!fallback) return false;
 
 		let shouldFallback = health.state === "depleted" || reservePolicy === "auto" || !confirmer;
-		if (!shouldFallback && health.state === "reserve" && confirmer) {
+		if (!shouldFallback && reserveLike && confirmer) {
 			const remainingFraction =
 				selectedAccount?.remainingFraction ??
 				health.accounts.reduce<number | undefined>((minimum, account) => {
