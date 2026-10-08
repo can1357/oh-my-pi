@@ -2,9 +2,11 @@
 
 ## [Unreleased]
 
-- `before_subagent_spawn` now includes the assignment, shared context, task-only solution space, baseline thinking level, and a per-handler abort signal.
-- `before_subagent_spawn` reports model and effort locks from per-agent model overrides and explicit effort, and ignores a hook model when the model is locked.
-- `before_subagent_spawn` may return a thinking level, checked against the applied model and pinned without dropping routed backup patterns.
+### Added
+
+- `before_subagent_spawn` now includes the assignment, shared context, task-only solution space, baseline thinking level, and a per-handler abort signal ([#14935](https://github.com/can1357/oh-my-pi/pull/14935) by [@ff-zeno](https://github.com/ff-zeno))
+- `before_subagent_spawn` reports model and effort locks from per-agent model overrides and explicit effort, and ignores a hook model when the model is locked ([#14937](https://github.com/can1357/oh-my-pi/pull/14937) by [@ff-zeno](https://github.com/ff-zeno))
+- `before_subagent_spawn` may return a thinking level, checked against the applied model and pinned without dropping routed backup patterns ([#14938](https://github.com/can1357/oh-my-pi/pull/14938) by [@ff-zeno](https://github.com/ff-zeno))
 
 ## [18.8.4] - 2026-10-08
 
