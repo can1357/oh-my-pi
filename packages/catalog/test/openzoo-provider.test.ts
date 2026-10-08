@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { getOAuthProviders } from "@oh-my-pi/pi-ai/registry/oauth";
-import { getEnvApiKey } from "@oh-my-pi/pi-ai/stream";
+import { getEnvApiKey } from "@oh-my-pi/pi-ai/env-api-key";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { getBundledModelReferenceIndex } from "@oh-my-pi/pi-catalog/identity/bundled";
 import { resolveModelReference } from "@oh-my-pi/pi-catalog/identity/reference";
