@@ -58,6 +58,21 @@ describe("web model role resolution", () => {
 		});
 	});
 
+	it("builds the default web retry chain from catalog role priorities", () => {
+		const { pool, settings } = createRuntime();
+
+		const candidates = resolveRoleChain("web", settings, pool);
+
+		expect(candidates.slice(0, 4).map(candidate => candidate.model.id)).toEqual([
+			"anysearch",
+			"parallel",
+			"hosted",
+			"exa",
+		]);
+		expect(candidates.slice(0, 4).every(candidate => candidate.explicit === false)).toBe(true);
+		expect(candidates.some(candidate => candidate.model.id === "duckduckgo")).toBe(true);
+	});
+
 	it("admits supported direct OpenAI web models but excludes realtime from candidates", () => {
 		const authStorage = createInMemoryAuthStorage();
 		storages.add(authStorage);

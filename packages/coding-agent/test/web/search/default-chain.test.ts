@@ -6,15 +6,17 @@ import { runSearchQuery } from "@oh-my-pi/pi-coding-agent/web/search";
 import * as provider from "@oh-my-pi/pi-coding-agent/web/search/provider";
 import { SearchProvider } from "@oh-my-pi/pi-coding-agent/web/search/provider";
 import type { SearchParams } from "@oh-my-pi/pi-coding-agent/web/search/providers/base";
-import type { SearchResponse } from "@oh-my-pi/pi-coding-agent/web/search/types";
+import type { SearchProviderId, SearchResponse } from "@oh-my-pi/pi-coding-agent/web/search/types";
 import { createInMemoryAuthStorage } from "../../helpers/agent-session-setup";
 
 /** Records each attempted `provider/id` and fails so the chain keeps walking. */
 class RecordingProvider extends SearchProvider {
-	readonly id = "openai";
 	readonly label = "Recording";
 
-	constructor(private readonly attempted: string[]) {
+	constructor(
+		private readonly attempted: string[],
+		readonly id: SearchProviderId = "openai",
+	) {
 		super();
 	}
 
@@ -44,7 +46,13 @@ describe("default web chain", () => {
 		attempted = [];
 		const recorder = new RecordingProvider(attempted);
 		vi.spyOn(provider, "getGroundedSearchProvider").mockResolvedValue(recorder);
-		vi.spyOn(provider, "getSearchProvider").mockResolvedValue(recorder);
+		vi.spyOn(provider, "getSearchProvider").mockImplementation(async id =>
+			id === "anysearch" ? new RecordingProvider(attempted, "anysearch") : recorder,
+		);
+		const originalSource = authStorage.keys.source.bind(authStorage.keys);
+		vi.spyOn(authStorage.keys, "source").mockImplementation(id =>
+			id === "anysearch" ? undefined : originalSource(id),
+		);
 	});
 
 	afterEach(() => {
@@ -66,8 +74,9 @@ describe("default web chain", () => {
 		);
 
 		// The cheaper same-provider swap runs first; its failure falls back to the session model as-is.
-		expect(attempted.slice(0, 3)).toEqual([
+		expect(attempted.slice(0, 4)).toEqual([
 			"web/parallel",
+			"web/anysearch",
 			"anthropic/claude-haiku-4-5",
 			"anthropic/claude-sonnet-4-5",
 		]);
@@ -78,6 +87,21 @@ describe("default web chain", () => {
 		for (const paid of ["web/perplexity", "web/tavily", "web/kagi", "web/brave", "web/zai"]) {
 			expect(attempted).not.toContain(paid);
 		}
+	});
+
+	it("tries deferred anonymous search after the hosted swap fails, then resumes the session model", async () => {
+		vi.spyOn(provider, "getSearchProvider").mockImplementation(async id => {
+			const recorder = new RecordingProvider(attempted, "anysearch");
+			if (id !== "anysearch") vi.spyOn(recorder, "isAvailable").mockReturnValue(false);
+			return recorder;
+		});
+
+		await runSearchQuery(
+			{ query: "anything" },
+			{ authStorage, modelRegistry, sessionModel: sessionModel("anthropic", "claude-sonnet-4-5") },
+		);
+
+		expect(attempted).toEqual(["anthropic/claude-haiku-4-5", "web/anysearch", "anthropic/claude-sonnet-4-5"]);
 	});
 
 	it("uses the session model as-is when its host does not expose the swap target", async () => {

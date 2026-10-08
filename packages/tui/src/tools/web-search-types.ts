@@ -10,6 +10,7 @@
  * {@link SearchResponse.provider} and search errors.
  */
 export const SEARCH_PROVIDER_LABELS = {
+	anysearch: "AnySearch",
 	parallel: "Parallel",
 	perplexity: "Perplexity",
 	gemini: "Gemini",

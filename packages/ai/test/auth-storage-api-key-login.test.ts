@@ -238,4 +238,18 @@ describe("AuthStorage api-key login upsert", () => {
 		expect(await authStorage.keys.get("opencode-go", "session-opencode-go-login")).toBe("new-opencode-key");
 		expect(await authStorage.keys.peek("opencode-go")).toBe("new-opencode-key");
 	});
+
+	it("keeps a generated API key below a later environment credential", async () => {
+		if (!authStorage) throw new Error("test setup failed");
+
+		expect(await authStorage.credentials.addGeneratedApiKeyIfAbsent("anysearch", "generated-anysearch-key")).toBe(
+			true,
+		);
+		expect(authStorage.credentials.list("anysearch").map(entry => entry.credential)).toEqual([
+			{ type: "api_key", key: "generated-anysearch-key" },
+		]);
+
+		getEnvApiKeySpy.mockImplementation(provider => (provider === "anysearch" ? "env-anysearch-key" : undefined));
+		expect(await authStorage.getApiKey("anysearch", "session-anysearch-env")).toBe("env-anysearch-key");
+	});
 });

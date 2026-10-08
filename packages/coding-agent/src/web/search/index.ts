@@ -8,6 +8,7 @@
 import { type } from "@oh-my-pi/omptype";
 import type { AgentTool, AgentToolContext, AgentToolResult, AgentToolUpdateCallback } from "@oh-my-pi/pi-agent-core";
 import type { Api, AuthStorage, Model } from "@oh-my-pi/pi-ai";
+import { authPolicyFor } from "@oh-my-pi/pi-catalog/compat/auth";
 import { modelKind } from "@oh-my-pi/pi-catalog/types";
 import { formatAge, formatCount, prompt, truncate } from "@oh-my-pi/pi-utils";
 import { ModelRegistry } from "../../config/model-registry";
@@ -26,6 +27,7 @@ import {
 	formatSearchProviderFailures,
 	getGroundedSearchProvider,
 	getSearchProvider,
+	type SearchParams,
 	type SearchProvider,
 } from "./provider";
 import { applyQueryConstraints, parseSearchQuery } from "./query";
@@ -37,7 +39,11 @@ import {
 	type SearchResultDetails,
 } from "./types";
 
-import { cfgProvidersAntigravityEndpoint, cfgProvidersWebSearchTimeoutSeconds } from "../../session/settings";
+import {
+	cfgProvidersAntigravityEndpoint,
+	cfgProvidersWebSearchTimeoutSeconds,
+	cfgRetryFallbackChains,
+} from "../../session/settings";
 
 /** Web search tool parameters schema */
 export const webSearchSchema = type({
@@ -127,6 +133,21 @@ interface ExecuteSearchOptions {
 	signal?: AbortSignal;
 }
 
+interface AnySearchCredentialProvisioningProvider extends SearchProvider {
+	readonly id: "anysearch";
+	searchWithCredentialProvisioning(params: SearchParams): Promise<SearchResponse>;
+}
+
+function isAnySearchCredentialProvisioningProvider(
+	provider: SearchProvider,
+): provider is AnySearchCredentialProvisioningProvider {
+	return (
+		provider.id === "anysearch" &&
+		"searchWithCredentialProvisioning" in provider &&
+		typeof provider.searchWithCredentialProvisioning === "function"
+	);
+}
+
 function isHostedPlaceholder(model: Model<Api>): boolean {
 	return model.provider === "web" && model.id === "hosted";
 }
@@ -161,6 +182,10 @@ async function executeSearch(
 	const { authStorage, sessionId, signal } = options;
 	const modelRegistry = options.modelRegistry ?? new ModelRegistry(authStorage, undefined, { settings });
 	const pool = roleCandidatePool("web", settings, modelRegistry);
+	const primarySelector = params.model ?? settings.getModelRole("web");
+	const explicitPrimary = primarySelector
+		? resolveModelRoleValue(primarySelector, pool, { settings }).model
+		: undefined;
 	const candidates = params.model
 		? (() => {
 				const resolved = resolveModelRoleValue(params.model, pool, { settings });
@@ -169,6 +194,10 @@ async function executeSearch(
 					: [];
 			})()
 		: resolveRoleChain("web", settings, pool);
+	const usesDefaultChain =
+		!params.model &&
+		!Object.hasOwn(settings.getModelRoles(), "web") &&
+		cfgRetryFallbackChains.get(settings).web === undefined;
 	const expanded = candidates.flatMap(candidate => expandHostedCandidate(candidate, options.sessionModel, pool));
 
 	const parsedQuery = parseSearchQuery(params.query);
@@ -195,7 +224,9 @@ async function executeSearch(
 	let availableProviderCount = 0;
 	let lastProvider: { id: string; label: string } | undefined;
 	let failedResponseProvider: SearchResponse["provider"] = "none";
-	for (const candidate of expanded) {
+	let deferredCandidate: RoleChainCandidate | undefined;
+	for (let candidateIndex = 0; candidateIndex < expanded.length; candidateIndex++) {
+		const candidate = expanded[candidateIndex]!;
 		let provider: SearchProvider | undefined;
 		const candidateMeta = { id: candidate.model.id, label: candidate.model.name };
 		lastProvider = candidateMeta;
@@ -223,10 +254,30 @@ async function executeSearch(
 					`${provider.label} web search is unavailable. Configure its credentials or select the automatic provider chain.`,
 				);
 			}
+			if (
+				usesDefaultChain &&
+				availableProviderCount === 0 &&
+				!deferredCandidate &&
+				authPolicyFor(provider.id)?.deferAnonymousSearch &&
+				authStorage.keys.source(provider.id) === undefined
+			) {
+				// Keep scanning lazily for the first available alternative. If none
+				// exists, this candidate remains reachable at the end of the chain.
+				deferredCandidate = candidate;
+				expanded.splice(candidateIndex, 1);
+				expanded.push(candidate);
+				candidateIndex--;
+				continue;
+			}
+			if (deferredCandidate && deferredCandidate !== candidate) {
+				expanded.splice(expanded.indexOf(deferredCandidate), 1);
+				expanded.splice(candidateIndex + 1, 0, deferredCandidate);
+			}
+			deferredCandidate = undefined;
 			availableProviderCount++;
 			lastProvider = provider;
 
-			const response = await provider.search({
+			const searchParams: SearchParams = {
 				query: params.query,
 				parsedQuery,
 				limit: params.limit,
@@ -244,7 +295,16 @@ async function executeSearch(
 				explicit: candidate.explicit,
 				sessionId,
 				antigravityEndpointMode,
-			});
+			};
+			// Only an explicit primary selection may create and persist credentials.
+			// Configured fallbacks are also explicit in the role resolver, but must
+			// never provision an account, even if an unresolved primary was skipped.
+			const response =
+				candidate.explicit &&
+				candidate.model === explicitPrimary &&
+				isAnySearchCredentialProvisioningProvider(provider)
+					? await provider.searchWithCredentialProvisioning(searchParams)
+					: await provider.search(searchParams);
 
 			// A host that silently drops the hosted search tool still answers from the
 			// model's weights; without sources that answer is not a search result.

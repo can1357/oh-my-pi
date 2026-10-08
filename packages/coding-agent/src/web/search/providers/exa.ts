@@ -16,7 +16,7 @@ import { formatQuery, parseSearchQuery, type StructuredQuery } from "../query";
 import { dateToAgeSeconds } from "../utils";
 import type { SearchParams } from "./base";
 import { SearchProvider } from "./base";
-import { classifyProviderHttpError, withHardTimeout } from "./utils";
+import { abortableSleep, classifyProviderHttpError, withHardTimeout } from "./utils";
 
 import { cfgExaEnabled, cfgExaSearchDelayMs } from "../../settings";
 
@@ -45,31 +45,6 @@ function rejectWithAbortReason(reject: (reason?: unknown) => void, signal: Abort
 	} catch (error) {
 		reject(error);
 	}
-}
-
-function abortableSleep(ms: number, signal: AbortSignal | undefined): Promise<void> {
-	if (ms <= 0) return Promise.resolve();
-	signal?.throwIfAborted();
-	const { promise, resolve, reject } = Promise.withResolvers<void>();
-	let timer: NodeJS.Timeout | undefined;
-	const cleanup = (): void => {
-		if (timer) {
-			clearTimeout(timer);
-			timer = undefined;
-		}
-		signal?.removeEventListener("abort", onAbort);
-	};
-	const onAbort = (): void => {
-		cleanup();
-		if (signal) rejectWithAbortReason(reject, signal);
-	};
-	timer = setTimeout(() => {
-		cleanup();
-		resolve();
-	}, ms);
-	signal?.addEventListener("abort", onAbort, { once: true });
-	if (signal?.aborted) onAbort();
-	return promise;
 }
 
 function waitUntilDoneOrAborted<T>(promise: Promise<T>, signal: AbortSignal | undefined): Promise<T> {

@@ -80,6 +80,10 @@ export interface AuthBrokerClientOptions {
 	fetchImpl?: typeof fetch;
 }
 
+interface CredentialUploadOptions {
+	ifProviderAbsent?: boolean;
+}
+
 export class AuthBrokerError extends Error {
 	readonly status: number | undefined;
 	readonly body: string | undefined;
@@ -365,8 +369,13 @@ export class AuthBrokerClient {
 		provider: string,
 		credential: AuthCredential,
 		signal?: AbortSignal,
+		options: CredentialUploadOptions = {},
 	): Promise<CredentialUploadResponse> {
-		const body: CredentialUploadRequest = { provider, credential };
+		const body: CredentialUploadRequest = {
+			provider,
+			credential,
+			...(options.ifProviderAbsent ? { ifProviderAbsent: true } : {}),
+		};
 		return this.#request<CredentialUploadResponse>("POST", "/v1/credential", {
 			body,
 			schema: "credentialUploadResponseSchema",

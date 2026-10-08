@@ -2086,6 +2086,26 @@ describe("Settings", () => {
 			expect(cfgRetryFallbackChains.get(settings).web).toEqual(webExaCandidates.slice(1));
 		});
 
+		it("migrates the AnySearch legacy order to a selectable web role and persists it", async () => {
+			await writeSettings({ providers: { webSearchOrder: ["anysearch", "exa"] } });
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+			expect(settings.getModelRole("web")).toBe("web/anysearch");
+			expect(cfgRetryFallbackChains.get(settings).web?.[0]).toBe("web/exa");
+			expect(cfgRetryFallbackChains.get(settings).web).not.toContain("web/anysearch");
+			cfgDisplayShowTokenUsage.set(settings, true);
+			await settings.flush();
+			const saved = await readSettings();
+			expect(saved.modelRoles).toMatchObject({ web: "web/anysearch" });
+			expect(saved.providers).toBeUndefined();
+		});
+
+		it("keeps a legacy AnySearch exclusion out of both the primary and fallback roles", async () => {
+			await writeSettings({ providers: { webSearchOrder: ["anysearch", "exa"], webSearchExclude: ["anysearch"] } });
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+			expect(settings.getModelRole("web")).toBe("web/exa");
+			expect(cfgRetryFallbackChains.get(settings).web).not.toContain("web/anysearch");
+		});
+
 		it("preserves explicit roles and empty chains while prepending local tiny and memory models", async () => {
 			await writeSettings({
 				modelRoles: {

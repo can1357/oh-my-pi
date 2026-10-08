@@ -1,4 +1,5 @@
 import type { WebSearchGrounding } from "@oh-my-pi/pi-catalog/types";
+import { AnySearchProvider } from "./providers/anysearch";
 import type { SearchProvider } from "./providers/base";
 import { getSearchProviderLabel, type SearchEngineId, SearchProviderError } from "./types";
 
@@ -6,16 +7,16 @@ export type { SearchParams } from "./providers/base";
 export { SearchProvider } from "./providers/base";
 
 /**
- * Search-first-use boundary: every provider module (and its HTTP/MCP/browser
- * dependencies) loads only when a search actually selects it, so the ~40
- * provider modules stay out of interactive startup. Instances are memoized
- * per id, matching the previous singleton-per-provider behavior.
+ * Search-first-use boundary for the HTTP/MCP/browser backends. The lightweight
+ * AnySearch adapter is statically imported; other backends load on selection.
+ * Instances are memoized per id.
  */
 type ProviderLoader = () => Promise<SearchProvider>;
 
 type ProviderRegistry<TId extends string> = { [Id in TId]: ProviderLoader };
 
 const PROVIDER_LOADERS: ProviderRegistry<SearchEngineId> = {
+	anysearch: async () => new AnySearchProvider(),
 	perplexity: () => import("./providers/perplexity").then(m => new m.PerplexityProvider()),
 	zai: () => import("./providers/zai").then(m => new m.ZaiProvider()),
 	exa: () => import("./providers/exa").then(m => new m.ExaProvider()),

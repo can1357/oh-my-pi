@@ -2,6 +2,24 @@
 
 > Run one web query through the configured search chain and return the first usable answer/sources, with optional citations.
 
+## AnySearch through the web role
+
+Select AnySearch with `modelRoles.web: web/anysearch`. Configure alternatives under `retry.fallbackChains.web`, or override the role for one CLI request with `omp web-search --model web/anysearch "query"`.
+
+```yaml
+modelRoles:
+  web: web/anysearch
+retry:
+  fallbackChains:
+    web:
+      - web/parallel
+      - web/public
+```
+
+Credentials come from `/login anysearch` or `ANYSEARCH_API_KEY`. When explicitly selected as the primary model without a key, AnySearch can use anonymous quota and provision a generated API key after that quota is exhausted. Registration polling, persistence, and activation retries share the provider timeout. Generated credentials are saved without overwriting credentials added concurrently, and registration secrets are never returned in tool output.
+
+With no custom web role or fallback chain, AnySearch runs first with a key. Without a key, OMP first attempts the first available alternative in its original order, then anonymous AnySearch if that attempt fails, and finally the remaining alternatives. Unavailable engines do not count as attempts. If no alternative is available, anonymous AnySearch runs directly. Explicit primary and fallback configuration is not reordered. Each successful search ends the chain; the order is evaluated again for the next request. When anonymous quota is exhausted, the search falls back to the next available candidate. An AnySearch entry in a configured fallback chain may use anonymous quota, but never polls registration, saves generated credentials, or retries with a generated key. Legacy AnySearch order and exclusion settings migrate to the web role configuration.
+
 ## Source
 - Entry: `packages/coding-agent/src/web/search/index.ts`
 - Model-facing prompt: `packages/coding-agent/src/prompts/tools/web-search.md`
@@ -98,6 +116,7 @@ Each provider search transport receives a hard timeout from `providers.webSearch
    - `timeoutMs`, derived from `providers.webSearchTimeoutSeconds`,
    - `systemPrompt` from `packages/coding-agent/src/prompts/system/web-search.md`,
    - the parsed structured query, including recognized directives and date/domain/title/URL/filetype constraints.
+   AnySearch uses its credential-provisioning path only when explicitly selected as the primary; configured fallbacks use ordinary search.
 6. After a provider responds, `applyQueryConstraints()` leniently post-filters its sources for constraints not guaranteed upstream. It applies each filterable dimension in turn; any dimension that would eliminate every remaining result is relaxed and a leading `Note: no results matched ...` is emitted. Answer/citation text is not rewritten.
 7. Grounded chat responses must contain sources or citations; answer-only completions are rejected with status `204`. Any response with no renderable content is also rejected. The first acceptable response is formatted into one text block.
 8. If a provider throws, `executeSearch()` records the error and tries the next provider. There is no provider-level parallel fan-out; fallback is sequential.
@@ -114,8 +133,9 @@ Each provider search transport receives a hard timeout from `providers.webSearch
   - **Fallbacks**: `retry.fallbackChains.web`. If it is set (even as an empty list), exactly those selectors follow the primary and are explicit. If it is unset, every entry of the built-in `web` priority list that matches an available model follows as a non-explicit candidate. Duplicate models are dropped, and a model listed by any explicit selector stays explicit.
   - **Explicit vs automatic**: explicit candidates use `isExplicitlyAvailable()`, so Perplexity and Public Web can run their unauthenticated paths when you select them. Parallel, Exa, and Firecrawl run their keyless paths in either mode. Automatic candidates use `isAvailable()` and are skipped when their credentials are missing.
   - **Per-request selector**: `SearchQueryParams.model` (`omp q --model web/duckduckgo "…"`) replaces the whole chain with that single explicit candidate.
-  - **Default chain** (`packages/coding-agent/src/priority.json`): `web/parallel`, `web/hosted`, `web/exa`, `web/firecrawl`, `web/searxng`, `web/startpage`, `web/duckduckgo`, `web/ecosia`, `web/google`, `web/mojeek`, `web/public`. Parallel/Exa/Firecrawl offer keyless paths but use configured credentials when available; hosted search uses the session provider's credential. The chain is not a guarantee of zero billing. Other paid engines/chat providers require explicit role/fallback configuration. Public Web is explicit-only and never runs automatically.
+  - **Default chain** (`packages/coding-agent/src/priority.json`): `web/anysearch`, `web/anysearch`, `web/parallel`, `web/hosted`, `web/exa`, `web/firecrawl`, `web/searxng`, `web/startpage`, `web/duckduckgo`, `web/ecosia`, `web/google`, `web/mojeek`, `web/public`. Parallel/Exa/Firecrawl offer keyless paths but use configured credentials when available; hosted search uses the session provider's credential. The chain is not a guarantee of zero billing. Other paid engines/chat providers require explicit role/fallback configuration. Public Web is explicit-only and never runs automatically.
   - **Legacy settings**: on load, `packages/coding-agent/src/config/settings.ts` migrates `providers.webSearch`, `providers.webSearchOrder`, `providers.webSearchExclude`, and `providers.webSearchGeminiModel` into `modelRoles.web` plus `retry.fallbackChains.web`, then deletes the old keys. The migration never overwrites a role or chain that is already set. The migrated chain is the listed providers followed by the default chain, with excluded providers removed; `providers.webSearchGeminiModel` only shapes a listed `gemini` entry.
+  - **AnySearch default ordering**: With credentials, AnySearch runs first. Without credentials, it is deferred until after the first available alternative is attempted, or runs directly if none is available. Automatic and configured fallback attempts never provision credentials.
 - **Provider timeout**: `providers.webSearchTimeoutSeconds` supplies the hard ceiling for each provider's search transport before the automatic chain advances. It defaults to `60`; invalid non-positive values fall back to that default and values above `300` are capped, while provider-specific upstream or aggregate limits may still be shorter.
 - **Provider adapters**
   - **Perplexity** — `packages/coding-agent/src/web/search/providers/perplexity.ts`

@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added AnySearch web search: configured keys run first by default, anonymous search runs after the first available engine, and explicit provider orders are preserved ([#9726](https://github.com/can1357/oh-my-pi/pull/9726) by [@anysearch-ai](https://github.com/anysearch-ai)).
 ### Fixed
 
 - Fixed Claude Opus 5.5 and Sonnet 5.5 disappearing with mixed-access Google Antigravity accounts; models now route to accounts that serve them, and revoked accounts no longer block catalog refresh ([#14924](https://github.com/can1357/oh-my-pi/issues/14924)).
