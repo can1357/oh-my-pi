@@ -4272,6 +4272,15 @@ export class AgentSession implements SettingsScope {
 				}
 			}
 
+			if (this.#recovery.handleTextChannelToolCallStop(msg)) {
+				// The turn's only "calls" were transcribed into its text and never
+				// dispatched. Deterministic evidence — skip the unexpected-stop judge,
+				// tell the model to re-emit through the structured channel, continue.
+				maintenanceRoute("text-channel-tool-call-handled");
+				await emitAgentEndNotification({ willContinue: true });
+				return;
+			}
+
 			if (await this.#recovery.handleUnexpectedAssistantStop(msg)) {
 				maintenanceRoute("unexpected-stop-handled");
 				await emitAgentEndNotification({ willContinue: true });
