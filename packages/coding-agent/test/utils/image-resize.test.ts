@@ -1,7 +1,8 @@
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
 import * as os from "node:os";
 import * as path from "node:path";
-import { formatScreenshot, resizeImage } from "@oh-my-pi/pi-coding-agent/utils/image-resize";
+import * as zlib from "node:zlib";
+import { formatDimensionNote, formatScreenshot, resizeImage } from "@oh-my-pi/pi-coding-agent/utils/image-resize";
 
 describe("formatScreenshot", () => {
 	function fakeResized(
@@ -207,19 +208,6 @@ describe("resizeImage defaults", () => {
 		expect(result.buffer.length).toBeLessThanOrEqual(150 * 1024);
 	});
 
-	it("respects custom maxBytes override even when dimensions already fit", async () => {
-		// 200x200 sits within every dimension cap, but a byte budget below the
-		// source size (after the /4 fast-path headroom) forces a re-encode.
-		const originalBytes = Buffer.from(smallPng, "base64").length;
-
-		const result = await resizeImage({ type: "image", data: smallPng, mimeType: "image/png" }, { maxBytes: 1024 });
-
-		// Either the result fits the budget, or the algorithm exhausted its
-		// fallbacks and shipped its smallest variant — but in both cases the
-		// output must not be larger than the original.
-		expect(result.buffer.length).toBeLessThanOrEqual(originalBytes);
-	});
-
 	it("uses lossy WebP or JPEG (not PNG) for oversized inputs", async () => {
 		// Oversized red strip exceeds the dimension cap, triggering encodeSmallest.
 		// Lossy formats (JPEG/WebP) should win over PNG for a solid-color image
@@ -256,6 +244,71 @@ describe("resizeImage defaults", () => {
 		expect(result.mimeType).not.toBe("image/webp");
 		expect(["image/png", "image/jpeg"]).toContain(result.mimeType);
 	});
+});
+
+// Deterministic xorshift RGB noise as a PNG. Noise defeats every encoder, so a
+// small budget reliably forces the quality and dimension fallback ladders.
+function makeNoisePng(width: number, height: number): Uint8Array {
+	const chunk = (type: string, data: Buffer): Buffer => {
+		const length = Buffer.alloc(4);
+		length.writeUInt32BE(data.length);
+		const typed = Buffer.concat([Buffer.from(type), data]);
+		const crc = Buffer.alloc(4);
+		crc.writeUInt32BE(zlib.crc32(typed));
+		return Buffer.concat([length, typed, crc]);
+	};
+	const stride = width * 3 + 1;
+	const raw = Buffer.alloc(stride * height);
+	let state = 0x12345678;
+	for (let y = 0; y < height; y++) {
+		for (let i = 1; i < stride; i++) {
+			state ^= state << 13;
+			state ^= state >>> 17;
+			state ^= state << 5;
+			raw[y * stride + i] = state & 0xff;
+		}
+	}
+	const header = Buffer.alloc(13);
+	header.writeUInt32BE(width, 0);
+	header.writeUInt32BE(height, 4);
+	header[8] = 8; // bit depth
+	header[9] = 2; // truecolor RGB
+	return Buffer.concat([
+		Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]),
+		chunk("IHDR", header),
+		chunk("IDAT", zlib.deflateSync(raw)),
+		chunk("IEND", Buffer.alloc(0)),
+	]);
+}
+
+describe("resizeImage tight budget fallback", () => {
+	const maxBytes = 20 * 1024;
+	let noisePng: Uint8Array;
+
+	beforeAll(() => {
+		noisePng = makeNoisePng(400, 400);
+	});
+
+	for (const excludeWebP of [false, true]) {
+		it(`returns bytes that decode at the reported size within budget (excludeWebP: ${excludeWebP})`, async () => {
+			// Precondition: the first full-size encode misses the budget, so the result
+			// must come from the fallback ladder.
+			const firstJpeg = await new Bun.Image(noisePng).jpeg({ quality: 80 }).bytes();
+			expect(firstJpeg.length).toBeGreaterThan(maxBytes);
+
+			const result = await resizeImage({ bytes: noisePng, mimeType: "image/png" }, { maxBytes, excludeWebP });
+
+			expect(result.wasResized).toBe(true);
+			expect(result.buffer.length).toBeLessThanOrEqual(maxBytes);
+			expect(result.width).toBeLessThan(400);
+			expect(result.height).toBeLessThan(400);
+			const decoded = await new Bun.Image(result.buffer).metadata();
+			expect(decoded.width).toBe(result.width);
+			expect(decoded.height).toBe(result.height);
+			expect(`image/${decoded.format}`).toBe(result.mimeType);
+			if (excludeWebP) expect(result.mimeType).not.toBe("image/webp");
+		});
+	}
 });
 
 describe("resizeImage decode fallback", () => {
@@ -328,21 +381,18 @@ describe("resizeImage minimum dimension", () => {
 		expect(result.height).toBe(64);
 	});
 
-	it("stretches a degenerate aspect ratio so both edges clear the floor and stay within the cap", async () => {
-		// 1x1600 strip: the cap pulls the long edge to 1568 while the short edge
-		// stays at 1px, so a uniform scale can't satisfy both bounds — the floor
-		// must be reached by fill-stretching the short edge.
-		const strip = await makeRedPng(1, 1600);
+	it("keeps the aspect ratio of a strip the cap stops short of the floor", async () => {
+		// 690x61 toolbar crop: the 1568 cap halts the uniform upscale at 1568x139;
+		// the short edge stays below the floor rather than being stretched to it.
+		const strip = await makeRedPng(690, 61);
 		const result = await resizeImage({ type: "image", data: strip, mimeType: "image/png" });
 
-		expect(result.wasResized).toBe(true);
-		expect(result.width).toBeGreaterThanOrEqual(200);
-		expect(result.height).toBeGreaterThanOrEqual(200);
-		expect(result.width).toBeLessThanOrEqual(1568);
-		expect(result.height).toBeLessThanOrEqual(1568);
+		expect(result.width).toBe(1568);
+		expect(result.height).toBe(139);
 		const meta = await new Bun.Image(Buffer.from(result.data, "base64")).metadata();
-		expect(meta.width).toBeGreaterThanOrEqual(200);
-		expect(meta.height).toBeGreaterThanOrEqual(200);
+		expect(meta.width).toBe(1568);
+		expect(meta.height).toBe(139);
+		expect(formatDimensionNote(result)).toContain("Multiply coordinates by 0.44");
 	});
 });
 

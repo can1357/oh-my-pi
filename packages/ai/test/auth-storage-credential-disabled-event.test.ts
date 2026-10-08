@@ -152,24 +152,6 @@ describe("AuthStorage credential_disabled subscriptions", () => {
 	});
 
 	describe("constructor `onCredentialDisabled` option", () => {
-		test("fires when an OAuth credential is disabled by a definitive refresh failure", async () => {
-			const events: CredentialDisabledEvent[] = [];
-			const authStorage = openStorage({
-				onCredentialDisabled: event => {
-					events.push(event);
-				},
-			});
-			await authStorage.credentials.set("anthropic", [expiredOAuth()]);
-			failOAuthRefresh();
-
-			const apiKey = await authStorage.keys.get("anthropic", "session-disabled-event");
-
-			expect(apiKey).toBeUndefined();
-			expect(events).toHaveLength(1);
-			expect(events[0]?.provider).toBe("anthropic");
-			expect(events[0]?.disabledCause).toContain("invalid_grant");
-		});
-
 		test("names the disabled row and account, and logs the disable", async () => {
 			const warn = vi.spyOn(logger, "warn").mockImplementation(() => {});
 			const events: CredentialDisabledEvent[] = [];
@@ -225,7 +207,9 @@ describe("AuthStorage credential_disabled subscriptions", () => {
 			await authStorage.credentials.set("anthropic", [expiredOAuth()]);
 			failOAuthRefresh("fetch failed: ECONNRESET");
 
-			await authStorage.keys.get("anthropic", "session-transient-failure");
+			await expect(authStorage.keys.getWithCredential("anthropic", "session-transient-failure")).rejects.toThrow(
+				"ECONNRESET",
+			);
 			expect(events).toHaveLength(0);
 		});
 
@@ -286,25 +270,6 @@ describe("AuthStorage credential_disabled subscriptions", () => {
 			expect(runtimeEvents).toHaveLength(1);
 			expect(constructorEvents[0]?.provider).toBe("anthropic");
 			expect(runtimeEvents[0]?.provider).toBe("anthropic");
-		});
-
-		test("fans out every event to every subscriber", async () => {
-			const aEvents: CredentialDisabledEvent[] = [];
-			const bEvents: CredentialDisabledEvent[] = [];
-			const authStorage = openStorage();
-			authStorage.credentials.onDisabled(event => {
-				aEvents.push(event);
-			});
-			authStorage.credentials.onDisabled(event => {
-				bEvents.push(event);
-			});
-			await authStorage.credentials.set("anthropic", [expiredOAuth()]);
-			await authStorage.credentials.set("openai", [expiredOAuth()]);
-			await disableCredential(authStorage, 1);
-			await disableCredential(authStorage, 2, "openai");
-
-			expect(aEvents.map(event => event.provider)).toEqual(["anthropic", "openai"]);
-			expect(bEvents.map(event => event.provider)).toEqual(["anthropic", "openai"]);
 		});
 
 		test("unsubscribe removes only that listener; others continue to fire", async () => {

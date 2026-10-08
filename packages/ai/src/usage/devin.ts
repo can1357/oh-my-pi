@@ -21,7 +21,7 @@ import {
 	type Timestamp,
 } from "@oh-my-pi/pi-catalog/discovery/devin-proto";
 import { create, toBinary } from "@oh-my-pi/pi-catalog/discovery/protobuf";
-import { DEVIN_DEFAULT_BASE_URL, devinCliMetadata, normalizeDevinSessionToken } from "@oh-my-pi/pi-catalog/wire/devin";
+import { DEVIN_DEFAULT_BASE_URL, devinCliMetadata, devinWireMetadata } from "@oh-my-pi/pi-catalog/wire/devin";
 import { decodeDevinUnaryMessage } from "@oh-my-pi/pi-catalog/wire/devin-proto";
 import type {
 	UsageAmount,
@@ -48,11 +48,11 @@ function timestampMs(timestamp: Timestamp): number {
 	return Number(timestamp.seconds) * 1_000 + timestamp.nanos / 1_000_000;
 }
 
-/** Session token as the CLI sends it: the wire format carries the scheme prefix. */
-function devinSessionToken(credential: UsageCredential): string | undefined {
+/** Credential bytes exactly as their storage kind requires on the Cascade wire. */
+function devinCredential(credential: UsageCredential): string | undefined {
 	const raw = credential.type === "oauth" ? credential.accessToken : credential.apiKey;
 	const token = raw?.trim();
-	return token ? normalizeDevinSessionToken(token) : undefined;
+	return token || undefined;
 }
 
 /** `TEAMS_TIER_DEVIN_PRO` → `Devin Pro`, for plans that ship no `plan_name`. */
@@ -261,13 +261,14 @@ function buildDevinReport(response: GetUserStatusResponse): UsageReport | null {
 
 async function fetchDevinUsage(params: UsageFetchParams, ctx: UsageFetchContext): Promise<UsageReport | null> {
 	if (params.provider !== PROVIDER) return null;
-	const token = devinSessionToken(params.credential);
+	const token = devinCredential(params.credential);
 	if (!token) return null;
 	const baseUrl = (params.baseUrl ?? DEVIN_DEFAULT_BASE_URL).replace(/\/+$/, "");
 
+	const metadata = params.credential.type === "oauth" ? devinCliMetadata(token) : devinWireMetadata(token);
 	try {
 		const request = create(GetUserStatusRequestSchema, {
-			metadata: create(MetadataSchema, devinCliMetadata(token)),
+			metadata: create(MetadataSchema, metadata),
 		});
 		const response = await ctx.fetch(`${baseUrl}${GET_USER_STATUS_PATH}`, {
 			method: "POST",
@@ -305,6 +306,6 @@ async function fetchDevinUsage(params: UsageFetchParams, ctx: UsageFetchContext)
 export const devinUsageProvider: UsageProvider = {
 	id: PROVIDER,
 	fetchUsage: fetchDevinUsage,
-	supports: params => params.provider === PROVIDER && devinSessionToken(params.credential) !== undefined,
+	supports: params => params.provider === PROVIDER && devinCredential(params.credential) !== undefined,
 	validatesCredentials: true,
 };

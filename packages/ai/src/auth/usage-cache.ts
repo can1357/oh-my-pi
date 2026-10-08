@@ -6,14 +6,15 @@ import type { UsageCredential, UsageProvider, UsageReport } from "../usage";
 
 const USAGE_CACHE_PREFIX = "usage_cache:";
 const USAGE_FORCE_REFRESH_CACHE_PREFIX = "force-refresh:";
+const USAGE_REPORT_KEY_PREFIX = "report:";
 /** Minimum interval between non-exhausted header snapshots; used by UsageService. */
 export const USAGE_HEADER_INGEST_INTERVAL_MS = 60_000;
 const USAGE_LAST_GOOD_RETENTION_MS = 24 * 60 * 60_000;
 /**
  * Per-credential cool-down after a usage fetch fails. While this window is
  * active we serve the last successful value to avoid dropping the credential
- * from the report; without a previous value we just return null and retry
- * on the next poll. Used by UsageService.
+ * from the report; without a previous value we return null until the
+ * cooldown expires. Report invalidation does not bypass this cooldown.
  */
 export const USAGE_FAILURE_BACKOFF_MS = 10_000;
 /**
@@ -45,6 +46,13 @@ function parseUsageCacheEntry<T>(raw: string): UsageCacheEntry<T> | undefined {
 	}
 }
 
+/** Cached reports drop the provider's upstream `raw` payload; only a fresh fetch carries it. */
+function withoutRawPayload(value: unknown): unknown {
+	if (value === null || typeof value !== "object" || !("raw" in value)) return value;
+	const { raw: _raw, ...rest } = value;
+	return rest;
+}
+
 /** Convert a stored credential for usage providers; used by usage and health services. */
 export function buildUsageCredential(credential: AuthCredential): UsageCredential {
 	if (credential.type === "api_key") {
@@ -65,6 +73,9 @@ export function buildUsageCredential(credential: AuthCredential): UsageCredentia
 		orgName: credential.orgName,
 		enterpriseUrl: credential.enterpriseUrl,
 		apiEndpoint: credential.apiEndpoint,
+		region: credential.region,
+		inferenceRegion: credential.inferenceRegion,
+		activeOrganizationId: credential.activeOrganizationId,
 	};
 }
 
@@ -81,6 +92,9 @@ export function usageCacheIdentity(credential: UsageCredential): string {
 	if (projectId) parts.push(`project:${projectId}`);
 	const enterpriseUrl = credential.enterpriseUrl?.trim().toLowerCase();
 	if (enterpriseUrl) parts.push(`enterprise:${enterpriseUrl}`);
+	if (credential.region) parts.push(`region:${credential.region}`);
+	if (credential.inferenceRegion) parts.push(`inference:${credential.inferenceRegion}`);
+	if (credential.activeOrganizationId) parts.push(`selected-org:${credential.activeOrganizationId}`);
 	// Only fall back to a secret-derived key when a stable account identifier is
 	// unavailable. Including the token hash when accountId/email/orgId are present
 	// causes cache misses on every OAuth refresh — usage data is per-account (or
@@ -118,6 +132,9 @@ export function oauthUsageRequest(
 /** Store-backed usage report cache: keys, epoch, force-refresh markers, invalidation; used by AuthStorage. */
 export class UsageCache {
 	#epoch = 0;
+	#recoveryEpochs: Map<Provider, number> = new Map();
+	#refreshEpochs: Map<Provider, number> = new Map();
+	#allRefreshEpoch = 0;
 	#usageReportCacheKeysByProvider: Map<Provider, Set<string>> = new Map();
 	#store: AuthCredentialStore;
 	#pool: CredentialPool;
@@ -148,6 +165,30 @@ export class UsageCache {
 		this.#epoch += 1;
 	}
 
+	/** Identifies confirmed recoveries that supersede an in-flight failed probe. */
+	recoveryEpoch(provider: Provider): number {
+		return this.#recoveryEpochs.get(provider) ?? 0;
+	}
+
+	/**
+	 * Changes when a user refresh, confirmed reset, or usage-implementation swap
+	 * makes an in-flight probe too old to answer. Block marks do not change it:
+	 * they stop a racing report from being cached, never trigger a re-probe.
+	 */
+	refreshEpoch(provider: Provider): number {
+		return this.#allRefreshEpoch + (this.#refreshEpochs.get(provider) ?? 0);
+	}
+
+	#bumpRefreshEpoch(provider: Provider | undefined): void {
+		if (provider === undefined) this.#allRefreshEpoch += 1;
+		else this.#refreshEpochs.set(provider, (this.#refreshEpochs.get(provider) ?? 0) + 1);
+	}
+
+	/** Failure cooldowns survive report invalidation and process restarts. */
+	failureKey(reportKey: string): string {
+		return `failure:${reportKey}`;
+	}
+
 	get<T>(key: string): UsageCacheEntry<T> | undefined {
 		const raw = this.#store.getCache(`${USAGE_CACHE_PREFIX}${key}`);
 		if (!raw) return undefined;
@@ -163,12 +204,13 @@ export class UsageCache {
 	}
 
 	set<T>(key: string, entry: UsageCacheEntry<T>): void {
+		const value = withoutRawPayload(entry.value);
 		const payload = JSON.stringify({
-			value: entry.value,
+			value,
 			expiresAt: entry.expiresAt,
 		});
 		const durableExpiresAt =
-			entry.value === null ? entry.expiresAt : Math.max(entry.expiresAt, Date.now() + USAGE_LAST_GOOD_RETENTION_MS);
+			value === null ? entry.expiresAt : Math.max(entry.expiresAt, Date.now() + USAGE_LAST_GOOD_RETENTION_MS);
 		this.#store.setCache(`${USAGE_CACHE_PREFIX}${key}`, payload, Math.floor(durableExpiresAt / 1000));
 	}
 
@@ -239,7 +281,7 @@ export class UsageCache {
 		const baseUrl = this.#normalizeUsageBaseUrl(request.baseUrl) || "default";
 		const identity = usageCacheIdentity(request.credential);
 		const providerKey = this.#usageCacheProviderKey(request.provider);
-		const cacheKey = `report:${providerKey}:${baseUrl}:${identity}`;
+		const cacheKey = `${USAGE_REPORT_KEY_PREFIX}${providerKey}:${baseUrl}:${identity}`;
 		const cacheKeys = this.#usageReportCacheKeysByProvider.get(request.provider) ?? new Set<string>();
 		cacheKeys.add(cacheKey);
 		this.#usageReportCacheKeysByProvider.set(request.provider, cacheKeys);
@@ -260,19 +302,37 @@ export class UsageCache {
 	/**
 	 * Force the next usage fetch for `provider` to bypass the 5-min cache, so
 	 * `/usage` reflects a freshly-redeemed reset instead of stale numbers.
+	 * `resetSpentCredentialId` also forgets that credential's cached saved-reset
+	 * block, so a failed follow-up reset probe cannot carry the pre-spend
+	 * inventory forward.
 	 */
-	invalidate(provider: string, baseUrl?: string): void {
+	invalidate(provider: string, baseUrl?: string, options?: { resetSpentCredentialId?: number }): void {
 		this.#epoch += 1;
 		const expired = Date.now() - 1;
 		for (const entry of this.#pool.entries(provider)) {
 			if (entry.credential.type !== "oauth") continue;
 			const cacheKey = this.reportKey(oauthUsageRequest(provider, entry.credential, baseUrl));
-			const existing = this.getStale<UsageReport | null>(cacheKey);
-			this.set(cacheKey, {
-				value: existing?.value ?? null,
-				expiresAt: expired,
-			});
+			let value = this.getStale<UsageReport | null>(cacheKey)?.value ?? null;
+			if (value?.resetCredits && entry.id === options?.resetSpentCredentialId) {
+				const { resetCredits: _spent, ...rest } = value;
+				value = rest;
+			}
+			this.set(cacheKey, { value, expiresAt: expired });
 		}
+	}
+
+	/** A confirmed reset permits one fresh probe even during a pre-reset failure cooldown. */
+	invalidateAfterReset(provider: Provider, baseUrl?: string, options?: { resetSpentCredentialId?: number }): void {
+		this.#recoveryEpochs.set(provider, this.recoveryEpoch(provider) + 1);
+		this.#bumpRefreshEpoch(provider);
+		if (!this.deletePrefix(`failure:report:${this.#usageCacheProviderKey(provider)}:`)) {
+			const keys = new Set(this.#usageReportCacheKeysByProvider.get(provider));
+			for (const entry of this.#pool.entries(provider)) {
+				keys.add(this.reportKey(usageRequest(provider, buildUsageCredential(entry.credential), baseUrl)));
+			}
+			for (const key of keys) this.set(this.failureKey(key), { value: null, expiresAt: 0 });
+		}
+		this.invalidate(provider, baseUrl, options);
 	}
 
 	/**
@@ -281,8 +341,9 @@ export class UsageCache {
 	 */
 	invalidateForProvider(provider: Provider): void {
 		this.#epoch += 1;
+		this.#bumpRefreshEpoch(provider);
 		const expired = Date.now() - 1;
-		const prefix = `report:${this.#usageCacheProviderKey(provider)}:`;
+		const prefix = `${USAGE_REPORT_KEY_PREFIX}${this.#usageCacheProviderKey(provider)}:`;
 		if (this.deletePrefix(prefix)) return;
 		const cacheKeys = new Set(this.#usageReportCacheKeysByProvider.get(provider));
 		for (const entry of this.#pool.entries(provider)) {
@@ -308,7 +369,10 @@ export class UsageCache {
 		collectRequests: () => Promise<UsageRequestDescriptor[]>,
 	): Promise<void> {
 		this.#epoch += 1;
-		const prefix = provider ? `report:${this.#usageCacheProviderKey(provider)}:` : "report:";
+		this.#bumpRefreshEpoch(provider);
+		const prefix = provider
+			? `${USAGE_REPORT_KEY_PREFIX}${this.#usageCacheProviderKey(provider)}:`
+			: USAGE_REPORT_KEY_PREFIX;
 		if (!this.deletePrefix(prefix)) {
 			// Third-party stores may not support prefix deletion. Clear every active
 			// request key instead, including API-key and environment credentials.

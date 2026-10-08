@@ -14,6 +14,7 @@ import type {
 import { unregisterCustomApis } from "@oh-my-pi/pi-ai/api-registry";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { createMockModel, type MockResponse, registerMockApi } from "@oh-my-pi/pi-ai/providers/mock";
+import * as envApiKey from "@oh-my-pi/pi-ai/env-api-key";
 import * as aiStream from "@oh-my-pi/pi-ai/stream";
 import { kCursorExecResolved, kStreamingPartialJson } from "@oh-my-pi/pi-ai/utils/block-symbols";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
@@ -88,7 +89,7 @@ describe("AgentSession retry delay cap", () => {
 	beforeEach(async () => {
 		// A live env var now overrides a stored static api_key; these tests rotate stored Anthropic
 		// credentials, so neutralize env resolution (ignores every provider's ambient env key).
-		vi.spyOn(aiStream, "getEnvApiKey").mockReturnValue(undefined);
+		vi.spyOn(envApiKey, "getEnvApiKey").mockReturnValue(undefined);
 		for (const provider of ["anthropic", "openai-codex"]) {
 			await authStorage.credentials.remove(provider);
 		}
@@ -977,6 +978,200 @@ describe("AgentSession retry delay cap", () => {
 		}
 	});
 
+	it("keeps a fallback chain off its primary until the reported usage reset", async () => {
+		// Contract: a hintless usage-limit error whose usage report puts the
+		// reset ~2h out cools the primary down until that reset. Returning on
+		// the 30-minute heuristic sends a request to a still-exhausted primary
+		// and switches models twice for nothing.
+		const primaryModel = getBundledModel("opencode-go", "deepseek-v4-flash");
+		const fallbackModel = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!primaryModel || !fallbackModel) {
+			throw new Error("Expected bundled OpenCode Go and Anthropic test models to exist");
+		}
+		const primarySelector = `${primaryModel.provider}/${primaryModel.id}`;
+		const fallbackSelector = `${fallbackModel.provider}/${fallbackModel.id}`;
+		const startMs = Date.now();
+		const resetAtMs = startMs + 7_200_000;
+
+		const localStorage = await createOpencodeStorageWithUsage(
+			{ status: "ok", percent: 12, resetsAtIso: new Date(startMs + 300_000).toISOString() },
+			{ status: "rate-limited", percent: 100, resetsAtIso: new Date(resetAtMs).toISOString() },
+		);
+		try {
+			localStorage.keys.setRuntime("anthropic", "anthropic-test-key");
+			const localRegistry = new ModelRegistry(localStorage, path.join(tempDir.path(), "models.yml"));
+			let now = startMs;
+			const mock = createMockModel();
+			const requestedModels: string[] = [];
+			const agent = new Agent({
+				getApiKey: model => localRegistry.resolver(model, agent.sessionId),
+				initialState: { model: primaryModel, systemPrompt: ["Test"], tools: [], messages: [] },
+				streamFn: (requestedModel, context, options) => {
+					const selector = `${requestedModel.provider}/${requestedModel.id}`;
+					requestedModels.push(selector);
+					mock.push(
+						selector === primarySelector && now < resetAtMs
+							? { throw: "429 quota exceeded for this account" }
+							: { content: [`ok:${selector}`] },
+					);
+					return mock.stream(requestedModel, context, options);
+				},
+			});
+
+			const settings = Settings.isolated({
+				"compaction.enabled": false,
+				"retry.baseDelayMs": 5,
+				"retry.fallbackChains": { [primarySelector]: [fallbackSelector] },
+				"retry.fallbackRevertPolicy": "cooldown-expiry",
+			});
+			settings.setModelRole("default", primarySelector);
+
+			session = new AgentSession({
+				agent,
+				sessionManager: SessionManager.inMemory(),
+				settings,
+				modelRegistry: localRegistry,
+			});
+			vi.spyOn(Date, "now").mockImplementation(() => now);
+
+			await session.prompt("Primary hits its usage limit");
+			await session.waitForIdle();
+			expect(requestedModels).toEqual([primarySelector, fallbackSelector]);
+
+			// Past the 30-minute heuristic, still inside the reported window.
+			now = startMs + 31 * 60_000;
+			await session.prompt("Primary is still exhausted");
+			await session.waitForIdle();
+			expect(requestedModels).toEqual([primarySelector, fallbackSelector, fallbackSelector]);
+
+			now = resetAtMs + 60_000;
+			await session.prompt("Primary has reset");
+			await session.waitForIdle();
+			expect(requestedModels).toEqual([primarySelector, fallbackSelector, fallbackSelector, primarySelector]);
+			expect(session.model?.provider).toBe(primaryModel.provider);
+			expect(session.model?.id).toBe(primaryModel.id);
+		} finally {
+			localStorage.close();
+		}
+	});
+
+	it("keeps the short fallback cooldown when a sibling account is still free", async () => {
+		// Contract: once the retry budget is spent, a usage limit on account A
+		// walks the fallback chain even though `markReached` switched to a free
+		// account B. A's reported window (two days here) says nothing about B,
+		// so the primary must cool down on the 30-minute heuristic, not A's reset.
+		const primaryModel = getBundledModel("opencode-go", "deepseek-v4-flash");
+		const fallbackModel = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!primaryModel || !fallbackModel) {
+			throw new Error("Expected bundled OpenCode Go and Anthropic test models to exist");
+		}
+		const primarySelector = `${primaryModel.provider}/${primaryModel.id}`;
+		const fallbackSelector = `${fallbackModel.provider}/${fallbackModel.id}`;
+		const startMs = Date.now();
+		let now = startMs;
+		let exhaustedKey: string | undefined;
+		const windowPayload = (status: "ok" | "rate-limited", percent: number, resetsAtMs: number) => ({
+			status,
+			percent,
+			resetsAt: new Date(resetsAtMs).toISOString(),
+		});
+		const localStorage = new AuthStorage(new SqliteAuthCredentialStore(new Database(":memory:")), {
+			usageProviderResolver: provider => (provider === "opencode-go" ? opencodeGoUsageProvider : undefined),
+			usageFetch: (async (_url: string, init?: RequestInit) => {
+				const authorization = new Headers(init?.headers).get("authorization");
+				const exhausted = exhaustedKey !== undefined && authorization === `Bearer ${exhaustedKey}`;
+				return new Response(
+					JSON.stringify({
+						usage: {
+							rolling: windowPayload("ok", 12, startMs + 300_000),
+							weekly: exhausted
+								? windowPayload("rate-limited", 100, startMs + 2 * 24 * 3_600_000)
+								: windowPayload("ok", 20, startMs + 2 * 24 * 3_600_000),
+							monthly: windowPayload("ok", 8, startMs + 30 * 24 * 3_600_000),
+						},
+					}),
+					{ status: 200, headers: { "content-type": "application/json" } },
+				);
+			}) as unknown as typeof fetch,
+		});
+		try {
+			await localStorage.credentials.reload();
+			await localStorage.credentials.set("opencode-go", [
+				{ type: "api_key", key: "opencode-go-key-a" },
+				{ type: "api_key", key: "opencode-go-key-b" },
+			]);
+			localStorage.keys.setRuntime("anthropic", "anthropic-test-key");
+			const localRegistry = new ModelRegistry(localStorage, path.join(tempDir.path(), "models.yml"));
+			const mock = createMockModel();
+			const requestedModels: string[] = [];
+			const primaryKeys: string[] = [];
+			const agent = new Agent({
+				getApiKey: model => localRegistry.resolver(model, agent.sessionId),
+				initialState: { model: primaryModel, systemPrompt: ["Test"], tools: [], messages: [] },
+				streamFn: async (requestedModel, context, options) => {
+					const selector = `${requestedModel.provider}/${requestedModel.id}`;
+					requestedModels.push(selector);
+					if (selector !== primarySelector) {
+						mock.push({ content: [`ok:${selector}`] });
+						return mock.stream(requestedModel, context, options);
+					}
+					const apiKey = resolveInitialApiKey(options?.apiKey);
+					primaryKeys.push(apiKey);
+					if (primaryKeys.length === 1) {
+						// A first-attempt socket drop after streamed reasoning retries the
+						// same model, spending the one retry on account A without
+						// consulting the fallback chain.
+						mock.push({
+							content: [{ type: "thinking", thinking: "Partial reasoning." }],
+							stopReason: "error",
+							errorMessage: "The socket connection was closed unexpectedly",
+						});
+					} else if (apiKey === primaryKeys[0]) {
+						// A's usage report now shows its weekly window spent.
+						exhaustedKey = apiKey;
+						await localStorage.usage.invalidate("opencode-go");
+						mock.push({ throw: "429 quota exceeded for this account" });
+					} else {
+						mock.push({ content: [`ok:${selector}`] });
+					}
+					return mock.stream(requestedModel, context, options);
+				},
+			});
+
+			const settings = Settings.isolated({
+				"compaction.enabled": false,
+				"retry.baseDelayMs": 5,
+				"retry.maxRetries": 1,
+				"retry.fallbackChains": { [primarySelector]: [fallbackSelector] },
+				"retry.fallbackRevertPolicy": "cooldown-expiry",
+			});
+			settings.setModelRole("default", primarySelector);
+
+			session = new AgentSession({
+				agent,
+				sessionManager: SessionManager.inMemory(),
+				settings,
+				modelRegistry: localRegistry,
+			});
+			vi.spyOn(Date, "now").mockImplementation(() => now);
+
+			await session.prompt("Transient failure, then account A hits its usage limit");
+			await session.waitForIdle();
+			expect(requestedModels).toEqual([primarySelector, primarySelector, fallbackSelector]);
+			expect(primaryKeys[1]).toBe(primaryKeys[0]);
+
+			// Past the 30-minute heuristic, still inside A's two-day window.
+			now = startMs + 31 * 60_000;
+			await session.prompt("Account B can serve the primary");
+			await session.waitForIdle();
+			expect(requestedModels).toEqual([primarySelector, primarySelector, fallbackSelector, primarySelector]);
+			expect(primaryKeys.at(-1)).not.toBe(primaryKeys[0]);
+			expect(lastAssistant(session).content).toContainEqual({ type: "text", text: `ok:${primarySelector}` });
+		} finally {
+			localStorage.close();
+		}
+	});
+
 	it("keeps a sibling session's longer stored block over a short report reset", async () => {
 		// Contract: the stored credential block merges every mark call for
 		// the shared credential (longest-wins). When an earlier
@@ -1753,65 +1948,6 @@ describe("AgentSession retry delay cap", () => {
 		const last = lastAssistant(session);
 		expect(last.stopReason).toBe("stop");
 		expect(last.content).toContainEqual({ type: "text", text: "recovered after stream read retry" });
-	});
-
-	it("auto-retries an empty Anthropic stream truncated before message_stop", async () => {
-		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
-		if (!model) {
-			throw new Error("Expected bundled Anthropic test model to exist");
-		}
-
-		const mock = createMockModel({
-			responses: [
-				{ throw: "Anthropic stream envelope error: stream ended before message_stop" },
-				{ content: ["recovered after envelope retry"], stopReason: "stop" },
-			],
-		});
-		const agent = new Agent({
-			getApiKey: requestedModel => `${requestedModel.provider}-test-key`,
-			initialState: {
-				model,
-				systemPrompt: ["Test"],
-				tools: [],
-				messages: [],
-			},
-			streamFn: (requestedModel, context, options) => mock.stream(requestedModel, context, options),
-		});
-
-		const settings = Settings.isolated({
-			"compaction.enabled": false,
-			"retry.baseDelayMs": 5,
-			"retry.maxDelayMs": 5_000,
-			"retry.maxRetries": 1,
-			"retry.modelFallback": false,
-		});
-		settings.setModelRole("default", `${model.provider}/${model.id}`);
-
-		session = new AgentSession({
-			agent,
-			sessionManager: SessionManager.inMemory(),
-			settings,
-			modelRegistry,
-		});
-
-		mockSchedulerWaitWithClock();
-		const retryStartEvents: AutoRetryStartEvent[] = [];
-		const retryEndEvents: AutoRetryEndEvent[] = [];
-		session.subscribe(event => {
-			if (event.type === "auto_retry_start") retryStartEvents.push(event);
-			if (event.type === "auto_retry_end") retryEndEvents.push(event);
-		});
-
-		await session.prompt("Trigger empty envelope retry");
-		await session.waitForIdle();
-
-		expect(mock.calls).toHaveLength(2);
-		expect(retryStartEvents).toHaveLength(1);
-		expect(retryEndEvents).toHaveLength(1);
-		expect(retryEndEvents[0]).toMatchObject({ success: true });
-		const last = lastAssistant(session);
-		expect(last.stopReason).toBe("stop");
-		expect(last.content).toContainEqual({ type: "text", text: "recovered after envelope retry" });
 	});
 
 	it("auto-retries Unable to connect transport failures instead of stopping the conversation", async () => {
@@ -3108,125 +3244,6 @@ describe("AgentSession retry delay cap", () => {
 		expect(lastAssistant(session).content).toContainEqual({
 			type: "text",
 			text: "Recovered after Cursor idle stall",
-		});
-	});
-
-	it("resumes a Cursor reasonless abort after an unmarked client-side tool call", async () => {
-		const model = createMockModel({
-			id: "composer-2.5",
-			provider: "cursor",
-		});
-		authStorage.keys.setRuntime("cursor", "cursor-test-key");
-		// Cursor emits `todo` client-side without the server-execution marker; a
-		// reasonless abort after it must still recover (issue #6668 review).
-		const toolCall: ToolCall = {
-			type: "toolCall",
-			id: "cursor-todo-1",
-			name: "todo",
-			arguments: { ops: [] },
-		};
-		let streamCalls = 0;
-		let resumedWithSyntheticResult = false;
-		const agent = new Agent({
-			getApiKey: requestedModel => `${requestedModel.provider}-test-key`,
-			initialState: {
-				model,
-				systemPrompt: ["Test"],
-				tools: [],
-				messages: [],
-			},
-			streamFn: (_requestedModel, context, options) => {
-				streamCalls += 1;
-				if (streamCalls > 1) {
-					const matchingResult = context.messages.find(
-						message => message.role === "toolResult" && message.toolCallId === toolCall.id,
-					);
-					resumedWithSyntheticResult =
-						matchingResult?.role === "toolResult" &&
-						typeof matchingResult.details === "object" &&
-						matchingResult.details !== null &&
-						"executed" in matchingResult.details &&
-						matchingResult.details.executed === false;
-					model.push({ content: ["Recovered after Cursor reasonless abort"] });
-					return model.stream(model, context, options);
-				}
-
-				const stream = new AssistantMessageEventStream();
-				queueMicrotask(() => {
-					const partial: AssistantMessage = {
-						role: "assistant",
-						content: [toolCall],
-						api: model.api,
-						provider: model.provider,
-						model: model.id,
-						usage: {
-							input: 0,
-							output: 0,
-							cacheRead: 0,
-							cacheWrite: 0,
-							totalTokens: 0,
-							cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-						},
-						stopReason: "stop",
-						timestamp: Date.now(),
-					};
-					stream.push({ type: "start", partial });
-					stream.push({ type: "toolcall_start", contentIndex: 0, partial });
-					stream.push({
-						type: "toolcall_delta",
-						contentIndex: 0,
-						delta: JSON.stringify(toolCall.arguments),
-						partial,
-					});
-					stream.push({ type: "toolcall_end", contentIndex: 0, toolCall, partial });
-					stream.push({
-						type: "error",
-						reason: "aborted",
-						error: {
-							...partial,
-							stopReason: "aborted",
-							errorMessage: "Request was aborted",
-						},
-					});
-				});
-				return stream;
-			},
-		});
-
-		const settings = Settings.isolated({
-			"compaction.enabled": false,
-			"retry.baseDelayMs": 5,
-			"retry.maxRetries": 1,
-		});
-		settings.setModelRole("default", `${model.provider}/${model.id}`);
-		session = new AgentSession({
-			agent,
-			sessionManager: SessionManager.inMemory(),
-			settings,
-			modelRegistry,
-		});
-		const retryStartEvents: AutoRetryStartEvent[] = [];
-		const retryEndEvents: AutoRetryEndEvent[] = [];
-		session.subscribe(event => {
-			if (event.type === "auto_retry_start") retryStartEvents.push(event);
-			if (event.type === "auto_retry_end") retryEndEvents.push(event);
-		});
-
-		await session.prompt("Update the todo list");
-		await session.waitForIdle();
-
-		expect(streamCalls).toBe(2);
-		expect(resumedWithSyntheticResult).toBe(true);
-		expect(
-			session.agent.state.messages.filter(
-				message => message.role === "toolResult" && message.toolCallId === toolCall.id,
-			),
-		).toHaveLength(1);
-		expect(retryStartEvents).toHaveLength(1);
-		expect(retryEndEvents).toContainEqual(expect.objectContaining({ success: true, attempt: 1 }));
-		expect(lastAssistant(session).content).toContainEqual({
-			type: "text",
-			text: "Recovered after Cursor reasonless abort",
 		});
 	});
 

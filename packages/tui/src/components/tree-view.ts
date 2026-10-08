@@ -1,3 +1,7 @@
+import type { TspSpan, TspTreeNode } from "@oh-my-pi/pi-wire";
+import { styledSpans } from "../native/spans";
+import { node } from "../native/describe";
+import type { DescribeContext, NativeNode } from "../native/node";
 import type { Theme } from "../theme/theme";
 import type { Component } from "../tui";
 import { replaceTabs, truncateToWidth, visibleWidth } from "../utils";
@@ -191,6 +195,11 @@ export interface TreeViewOptions<T, K extends TreeKey> extends FlattenTreeOption
 	scrollbarTheme?: ScrollViewTheme;
 }
 
+/** A tree node under construction; frozen into the wire shape once described. */
+type MutableTreeNode = {
+	-readonly [P in keyof TspTreeNode]: P extends "children" ? MutableTreeNode[] : TspTreeNode[P];
+};
+
 /** Result of a tree render, including whether a row or line budget omitted content. */
 export interface TreeViewRenderResult {
 	lines: readonly string[];
@@ -219,6 +228,7 @@ export class TreeView<T, K extends TreeKey = string> implements Component {
 	#version = 0;
 	#cache?: { width: number; version: number; result: TreeViewRenderResult };
 	#childByKey = new Map<K, Component>();
+	#native?: { version: number; node: NativeNode | null };
 
 	constructor(options: TreeViewOptions<T, K>) {
 		this.#options = options;
@@ -325,6 +335,61 @@ export class TreeView<T, K extends TreeKey = string> implements Component {
 
 	render(width: number): readonly string[] {
 		return this.renderWithState(width).lines;
+	}
+
+	/**
+	 * A native disclosure `tree` over the filtered rows, nested by hierarchy
+	 * (a filtered-out ancestor lifts its visible descendants to the nearest
+	 * visible one). Gutters, windowing and the scrollbar are the terminal's;
+	 * the selected row is marked with the `mark` token. Rows whose body is a
+	 * component can't be tree labels, so such a tree stays on `rows`.
+	 */
+	describe(_cx: DescribeContext): NativeNode | null {
+		this.#ensureRows();
+		if (this.#native?.version === this.#version) return this.#native.node;
+		const rows = this.#rows;
+		const byKey = new Map<K, MutableTreeNode>();
+		const roots: MutableTreeNode[] = [];
+		let described: NativeNode | null = null;
+		let componentRow = false;
+		for (let rowIndex = 0; rowIndex < rows.length; rowIndex++) {
+			const row = rows[rowIndex]!;
+			const selected = row.key === this.#selectedKey;
+			const rendered = this.#options.renderRow(row.item, {
+				row,
+				selected,
+				rowIndex,
+				windowStart: 0,
+				windowEnd: rows.length,
+				windowRows: rows,
+				width: Number.POSITIVE_INFINITY,
+				contentWidth: Number.POSITIVE_INFINITY,
+				prefix: { first: "", continuation: "" },
+			});
+			if (typeof rendered !== "string" && "render" in rendered) {
+				this.#replaceChild(row.key, rendered);
+				componentRow = true;
+				continue;
+			}
+			this.#replaceChild(row.key, undefined);
+			let label: TspSpan[] = styledSpans(typeof rendered === "string" ? rendered : rendered.join("\n"));
+			if (selected) label = label.map(part => ({ ...part, s: part.s ? `${part.s} mark` : "mark" }));
+			const treeNode: MutableTreeNode = { id: String(row.key), label };
+			byKey.set(row.key, treeNode);
+			let parentKey = row.parentKey;
+			while (parentKey !== undefined && !byKey.has(parentKey)) parentKey = this.#rowByKey.get(parentKey)?.parentKey;
+			const parent = parentKey === undefined ? undefined : byKey.get(parentKey);
+			if (parent) {
+				parent.children ??= [];
+				parent.open = true;
+				parent.children.push(treeNode);
+			} else {
+				roots.push(treeNode);
+			}
+		}
+		if (!componentRow) described = node("tree", { nodes: roots });
+		this.#native = { version: this.#version, node: described };
+		return described;
 	}
 
 	/** Render lines plus budget/window metadata for adapters that append an ellipsis. */

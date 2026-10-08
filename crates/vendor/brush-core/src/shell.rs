@@ -154,6 +154,17 @@ pub struct Shell<SE: extensions::ShellExtensions = extensions::DefaultShellExten
 
 	/// History of commands executed in the shell.
 	history: Option<crate::history::History>,
+
+	/// Resource limits applied to spawned external commands (`ulimit`).
+	#[cfg_attr(feature = "serde", serde(skip))]
+	resource_limits: crate::rlimits::ResourceLimits,
+
+	/// File mode creation mask set by `umask`; `None` inherits the host
+	/// process's. Like the resource limits it never touches the host process:
+	/// it reaches external commands between fork and exec and files created
+	/// through the shell's filesystem (see [`Shell::set_umask`]).
+	#[cfg_attr(feature = "serde", serde(skip))]
+	umask: Option<u32>,
 }
 
 impl<SE: extensions::ShellExtensions> Clone for Shell<SE> {
@@ -193,6 +204,8 @@ impl<SE: extensions::ShellExtensions> Clone for Shell<SE> {
 			parser_impl: self.parser_impl,
 			key_bindings: self.key_bindings.clone(),
 			history: self.history.clone(),
+			resource_limits: self.resource_limits.clone(),
+			umask: self.umask,
 			depth: self.depth + 1,
 		}
 	}
@@ -275,6 +288,32 @@ impl<SE: extensions::ShellExtensions> Shell<SE> {
 }
 
 impl<SE: extensions::ShellExtensions> Shell<SE> {
+	/// Returns the resource limits applied to spawned external commands.
+	pub const fn resource_limits(&self) -> &crate::rlimits::ResourceLimits {
+		&self.resource_limits
+	}
+
+	/// Returns a mutable reference to the resource limits applied to spawned
+	/// external commands.
+	pub const fn resource_limits_mut(&mut self) -> &mut crate::rlimits::ResourceLimits {
+		&mut self.resource_limits
+	}
+
+	/// Returns the file mode creation mask set by `umask`, or `None` while the
+	/// shell still inherits the host process's.
+	pub const fn umask(&self) -> Option<u32> {
+		self.umask
+	}
+
+	/// Sets the shell's file mode creation mask. The host process umask is left
+	/// alone: the mask is applied to each external command between fork and
+	/// exec, and to files created through the shell's filesystem, which keeps
+	/// it across later [`Shell::set_filesystem`] calls.
+	pub fn set_umask(&mut self, mask: u32) {
+		self.umask = Some(mask);
+		self.filesystem = self.filesystem.with_creation_mask(Some(mask));
+	}
+
 	/// Increments the interactive line offset in the shell by the indicated
 	/// number of lines.
 	///
@@ -555,7 +594,10 @@ impl<SE: extensions::ShellExtensions> ShellState for Shell<SE> {
 	/// effect for subsequent operations; files already open stay bound to the
 	/// filesystem that opened them.
 	pub fn set_filesystem(&mut self, filesystem: pi_vfs::Fs) {
-		self.filesystem = filesystem;
+		self.filesystem = match self.umask {
+			Some(mask) => filesystem.with_creation_mask(Some(mask)),
+			None => filesystem,
+		};
 	}
 
 	/// Returns the shell's current working directory.

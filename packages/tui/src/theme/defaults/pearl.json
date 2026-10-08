@@ -89,5 +89,15 @@
 		"pageBg": "#f9f9fc",
 		"cardBg": "#ffffff",
 		"infoBg": "#f8f4fc"
+	},
+	"terminal": {
+		"background": "#f9f9fc",
+		"foreground": "deepOyster",
+		"chrome": "userMsgBg",
+		"widget": "#ffffff",
+		"ansi": [
+			"deepOyster", "#a06060", "#608060", "#a08050", "#6070a0", "#805070", "#508080", "#a09ca8",
+			"#807880", "#b87070", "#709070", "#aa8b56", "oysterBlue", "#a06090", "#609494", "shellLayer"
+		]
 	}
 }

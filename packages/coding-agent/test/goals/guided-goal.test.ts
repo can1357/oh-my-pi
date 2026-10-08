@@ -1,7 +1,8 @@
 import { afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
 import * as path from "node:path";
-import { Agent, AgentBusyError } from "@oh-my-pi/pi-agent-core";
-import type { ImageContent } from "@oh-my-pi/pi-ai";
+import { Agent, type AgentMessage, AgentBusyError } from "@oh-my-pi/pi-agent-core";
+import type { AssistantMessage, ImageContent } from "@oh-my-pi/pi-ai";
+import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { GoalTool } from "@oh-my-pi/pi-coding-agent/goals/tools/goal-tool";
@@ -92,6 +93,49 @@ async function createHarness(options?: { goalEnabled?: boolean }): Promise<Guide
 			resetSettingsForTest();
 		},
 	};
+}
+
+function assistantTurn(content: AssistantMessage["content"]): AgentMessage {
+	return {
+		role: "assistant",
+		content,
+		api: "anthropic-messages",
+		provider: "anthropic",
+		model: "claude-sonnet-4-5",
+		usage: {
+			input: 1,
+			output: 1,
+			cacheRead: 0,
+			cacheWrite: 0,
+			totalTokens: 2,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+		},
+		stopReason: "stop",
+		timestamp: Date.now(),
+	};
+}
+
+/** Start the mode so it subscribes to session events, then kick off an interview. */
+async function startInterview(harness: GuidedGoalHarness): Promise<void> {
+	vi.spyOn(vcs, "repo").mockReturnValue(null);
+	vi.spyOn(vcs, "git").mockReturnValue(null);
+	await harness.mode.init({ suppressWelcomeIntro: true });
+	vi.spyOn(harness.session, "prompt").mockResolvedValue(true);
+	await harness.mode.handleGuidedGoalCommand("ship it");
+}
+
+/** Emit `agent_end` and resolve once the session has delivered it to subscribers (the mode included). */
+async function endTurn(harness: GuidedGoalHarness, messages: AgentMessage[]): Promise<void> {
+	const delivered = Promise.withResolvers<void>();
+	const unsubscribe = harness.session.subscribe(event => {
+		if (event.type === "agent_end") delivered.resolve();
+	});
+	try {
+		harness.session.agent.emitExternalEvent({ type: "agent_end", messages });
+		await delivered.promise;
+	} finally {
+		unsubscribe();
+	}
 }
 
 describe("guided goal setup", () => {
@@ -280,6 +324,51 @@ describe("guided goal setup", () => {
 			expect(explicit.map(tool => tool.name)).not.toContain("goal");
 		} finally {
 			await disabled.cleanup();
+		}
+	});
+
+	it("keeps the interview active across question turns and ends it once a turn makes tool calls", async () => {
+		const harness = await createHarness();
+		try {
+			await startInterview(harness);
+			expect(harness.mode.isGuidedGoalInterviewActive()).toBe(true);
+
+			await endTurn(harness, [assistantTurn([{ type: "text", text: "Which option: a, b, or c?" }])]);
+			expect(harness.mode.isGuidedGoalInterviewActive()).toBe(true);
+
+			// Abandoned for real work: the interview is tool-free, so tool use ends it.
+			await endTurn(harness, [
+				assistantTurn([{ type: "toolCall", id: "call-1", name: "read", arguments: { path: "x" } }]),
+			]);
+			expect(harness.mode.isGuidedGoalInterviewActive()).toBe(false);
+		} finally {
+			await harness.cleanup();
+		}
+	});
+
+	it("ends the interview when the agent creates the goal", async () => {
+		const harness = await createHarness();
+		try {
+			await startInterview(harness);
+			await harness.goalTool.execute("call-1", { op: "create", objective: "## Objective\nShip it." });
+			for (let i = 0; i < 10; i++) await Promise.resolve();
+			expect(harness.mode.isGuidedGoalInterviewActive()).toBe(false);
+		} finally {
+			await harness.cleanup();
+		}
+	});
+
+	it("does not leave the interview active when the kickoff fails", async () => {
+		const harness = await createHarness();
+		try {
+			vi.spyOn(harness.session, "prompt").mockRejectedValue(new Error("provider down"));
+			vi.spyOn(harness.mode, "showError").mockImplementation(() => {});
+
+			await harness.mode.handleGuidedGoalCommand("ship it");
+
+			expect(harness.mode.isGuidedGoalInterviewActive()).toBe(false);
+		} finally {
+			await harness.cleanup();
 		}
 	});
 });

@@ -1,5 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import { streamAnthropic } from "@oh-my-pi/pi-ai/providers/anthropic";
+import { streamSimple } from "@oh-my-pi/pi-ai/stream";
 import type { AssistantMessage, Context, Model, ModelSpec } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
@@ -19,12 +20,15 @@ function makeAnthropicModel(id: string): Model<"anthropic-messages"> {
 	});
 }
 
-function makeMiniMaxAnthropicModel(id: string): Model<"anthropic-messages"> {
+function makeMiniMaxAnthropicModel(
+	id: string,
+	provider: "minimax" | "minimax-code" = "minimax",
+): Model<"anthropic-messages"> {
 	return buildModel({
 		id,
 		name: id,
 		api: "anthropic-messages",
-		provider: "minimax",
+		provider,
 		baseUrl: "https://api.minimax.io/anthropic",
 		reasoning: true,
 		input: ["text", "image"],
@@ -140,8 +144,8 @@ function answered(text: string, turn: CapturedTurn): AssistantMessage {
 const READ_TOOL = { name: "read", description: "Read a file.", parameters: { type: "object", properties: {} } };
 
 describe("Anthropic preserved-thinking request shaping", () => {
-	it("opts Fable 5.1 into dropping prefix-mismatched thinking", async () => {
-		const payload = await capturePayload(makeAnthropicModel("claude-fable-5-1"), {
+	it.each(["claude-fable-5-1", "claude-opus-5-5"])("opts %s into dropping prefix-mismatched thinking", async id => {
+		const payload = await capturePayload(makeAnthropicModel(id), {
 			thinkingEnabled: true,
 			reasoning: Effort.High,
 		});
@@ -166,7 +170,7 @@ describe("Anthropic preserved-thinking request shaping", () => {
 			cacheRetention: "long",
 		});
 
-		expect(payload.system?.[1]?.cache_control?.ttl).toBe("1h");
+		expect(payload.system?.at(-1)?.cache_control?.ttl).toBe("1h");
 		const messageContent = payload.messages?.[0]?.content;
 		if (!Array.isArray(messageContent)) throw new Error("expected block message content");
 		expect(messageContent.at(-1)?.cache_control?.ttl).toBe("1h");
@@ -322,6 +326,40 @@ describe("Anthropic adaptive-only thinking disable", () => {
 		expect(payload.output_config?.effort).toBe("low");
 	});
 
+	it("turns thinking off with between_tools on Sonnet 5.5, without an effort pin or block_binding", async () => {
+		const payload = await capturePayload(makeAnthropicModel("claude-sonnet-5-5"), {
+			thinkingEnabled: false,
+		});
+		expect(payload.thinking).toEqual({ type: "between_tools" });
+		expect(payload.output_config?.effort).toBeUndefined();
+	});
+
+	it("keeps Sonnet 5 on adaptive-only omission, never sending between_tools", async () => {
+		const payload = await capturePayload(makeAnthropicModel("claude-sonnet-5"), {
+			thinkingEnabled: false,
+		});
+		expect(payload.thinking?.type).not.toBe("between_tools");
+	});
+
+	it("falls back to default adaptive when Sonnet 5.5 has xhigh effort in force (between_tools 400s above high)", async () => {
+		const model = makeAnthropicModel("claude-sonnet-5-5");
+		const first = await captureTurn(model, { thinkingEnabled: true, reasoning: Effort.XHigh });
+		const payload = await capturePayload(
+			model,
+			{ thinkingEnabled: false },
+			{
+				...CONTEXT,
+				messages: [
+					...CONTEXT.messages,
+					answered("sunny", first),
+					{ role: "user", content: "continue", timestamp: Date.now() },
+				],
+			},
+		);
+		expect(first.payload.output_config?.effort).toBe("xhigh");
+		expect(payload.thinking).toBeUndefined();
+	});
+
 	it("still sends thinking.type:'disabled' for budget-based (non-adaptive) models", async () => {
 		const payload = await capturePayload(makeAnthropicModel("claude-3-7-sonnet-20250219"), {
 			thinkingEnabled: false,
@@ -362,6 +400,56 @@ describe("MiniMax Anthropic adaptive thinking", () => {
 	it("maps every MiniMax M2 reasoning tier to the documented adaptive tag", async () => {
 		const payload = await capturePayload(makeMiniMaxAnthropicModel("MiniMax-M2.7"), {
 			reasoning: Effort.Low,
+			thinkingEnabled: true,
+		});
+
+		expect(payload.thinking).toEqual({ type: "adaptive" });
+		expect(payload.output_config?.effort).toBeUndefined();
+	});
+
+	// `high` must beat the M3 family's adaptive-tag map; `max` sits past the
+	// M3 family ladder.
+	it.each([
+		[Effort.High, "high"],
+		[Effort.Max, "max"],
+	] as const)("sends MiniMax-M3.1-Flash-Preview %s effort as output_config.effort", async (effort, wire) => {
+		const payload = await capturePayload(makeMiniMaxAnthropicModel("MiniMax-M3.1-Flash-Preview", "minimax-code"), {
+			reasoning: effort,
+			thinkingEnabled: true,
+		});
+
+		expect(payload.thinking).toEqual({ type: "adaptive" });
+		expect(payload.output_config?.effort).toBe(wire);
+	});
+
+	// The model 400s on `thinking.type: "disabled"` (error 2013), so the row is
+	// mandatory-reasoning: no off level, and forced-off or effort-less requests
+	// clamp to the lowest effort before reaching the transport.
+	it.each([
+		["an effort-less request", {}],
+		["a forced-off request", { forceReasoningOff: true }],
+		["a disabled-reasoning request", { disableReasoning: true }],
+	] as const)("clamps MiniMax-M3.1-Flash-Preview %s to low effort with thinking on", async (_label, opts) => {
+		const model = makeMiniMaxAnthropicModel("MiniMax-M3.1-Flash-Preview", "minimax-code");
+		expect(model.thinking?.requiresEffort).toBe(true);
+
+		let payload: CapturedPayload | undefined;
+		await streamSimple(model, CONTEXT, {
+			apiKey: "test-key",
+			signal: abortedSignal(),
+			onPayload: captured => {
+				payload = captured as CapturedPayload;
+			},
+			...opts,
+		}).result();
+
+		expect(payload?.thinking).toEqual({ type: "adaptive" });
+		expect(payload?.output_config?.effort).toBe("low");
+	});
+
+	it("drives Token Plan MiniMax-M3 through the adaptive tag like the pay-as-you-go host", async () => {
+		const payload = await capturePayload(makeMiniMaxAnthropicModel("MiniMax-M3", "minimax-code"), {
+			reasoning: Effort.High,
 			thinkingEnabled: true,
 		});
 

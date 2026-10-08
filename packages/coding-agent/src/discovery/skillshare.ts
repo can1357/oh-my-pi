@@ -69,7 +69,8 @@ async function loadLockedSkill(
 		// Registry content is untrusted: keep `skill://` access inside the unpacked package.
 		containRoot: realStoreDir,
 		level,
-		_source: createSourceMeta(SKILLSHARE_PROVIDER_ID, skillPath, level, `skillshare:${id}@${entry.version}`),
+		// Namespace by package name, not by the versioned store path.
+		_source: createSourceMeta(SKILLSHARE_PROVIDER_ID, skillPath, level, `skillshare:${id}@${entry.version}`, name),
 	};
 }
 

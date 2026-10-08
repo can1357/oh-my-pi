@@ -6,13 +6,24 @@ import {
 	type Agent,
 	type AgentEvent,
 	type AgentMessage,
+	type AgentTool,
+	type AgentToolContext,
+	type AgentToolResult,
+	type BeforeToolCallContext,
+	type BeforeToolCallResult,
 	createToolScopedAbortReason,
 } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, Judge, ToolCall } from "@oh-my-pi/pi-ai";
 import { logger, prompt, relativePathWithinRoot, withTimeout } from "@oh-my-pi/pi-utils";
 import type { Rule } from "../capability/rule";
 import type { Settings } from "../config/settings";
-import { judgeRules, type TtsrManager, type TtsrMatchContext, type TtsrOutput } from "../export/ttsr";
+import {
+	judgeRules,
+	type TtsrCheckOptions,
+	type TtsrManager,
+	type TtsrMatchContext,
+	type TtsrOutput,
+} from "../export/ttsr";
 import ttsrInterruptTemplate from "../prompts/system/ttsr-interrupt.md" with { type: "text" };
 import ttsrToolReminderTemplate from "../prompts/system/ttsr-tool-reminder.md" with { type: "text" };
 import ttsrWarningTemplate from "../prompts/system/ttsr-warning.md" with { type: "text" };
@@ -29,6 +40,9 @@ type TtsrContinueSkipReason =
 
 /** How long a finishing run waits for in-flight judgments; later verdicts still arrive as asides. */
 const JUDGED_SETTLE_TIMEOUT_MS = 5_000;
+/** Mid-stream checks may defer conditions that can span lines; the stream's end settles them. */
+const PARTIAL_CHECK: TtsrCheckOptions = { final: false };
+const FINAL_CHECK: TtsrCheckOptions = { final: true };
 
 interface TtsrContinueOptions {
 	source: string;
@@ -133,6 +147,7 @@ export class TtsrCoordinator {
 		let matchContext: TtsrMatchContext | undefined;
 		let streamingToolCall: ToolCall | undefined;
 		let delta: string | undefined;
+		let isFinal = false;
 		if (assistantEvent.type === "text_delta") {
 			matchContext = { source: "text" };
 			delta = assistantEvent.delta;
@@ -147,23 +162,78 @@ export class TtsrCoordinator {
 			streamingToolCall = assistantEvent.toolCall;
 			matchContext = this.#inspector.matchContext(streamingToolCall, assistantEvent.contentIndex);
 			delta = "";
+			isFinal = true;
+		} else if (
+			(assistantEvent.type === "text_end" || assistantEvent.type === "thinking_end") &&
+			// An empty block streamed nothing; a pending TTSR abort already discards this response.
+			assistantEvent.content.length > 0 &&
+			!this.#abortPending
+		) {
+			matchContext = { source: assistantEvent.type === "text_end" ? "text" : "thinking" };
+			delta = "";
+			isFinal = true;
 		}
 		if (!matchContext || delta === undefined) return false;
 		const targetMessageTimestamp = event.message.role === "assistant" ? event.message.timestamp : undefined;
-		const matches = this.#checkStream(delta, matchContext, streamingToolCall, assistantEvent.type === "toolcall_end");
+		const matches = this.#checkStream(delta, matchContext, streamingToolCall, isFinal);
 		if (matches.length > 0 && this.#handleMatches(matches, matchContext, targetMessageTimestamp)) return true;
-		// AST rules match whole-file structure against the reconstructed edit/write
-		// snapshot, so they run once on the finalized call: per-delta snapshots are
-		// always partial source (a truncated prefix of the final arguments) and
-		// each run costs a native `astMatch` pass (~90ms at 150KB × entries ×
-		// rules). Awaiting that per delta serializes hundreds of milliseconds onto
-		// the streaming event path and wedges the loop (ui.loop-blocked).
-		if (assistantEvent.type === "toolcall_end" && matchContext.source === "tool" && this.#manager.hasAstRules()) {
-			const astMatches = await this.#checkAstStream(matchContext, streamingToolCall);
-			if (astMatches.length > 0 && this.#handleMatches(astMatches, matchContext, targetMessageTimestamp))
-				return true;
-		}
 		return false;
+	}
+
+	/** AST parsing runs once on finalized arguments, before execution, not in
+	 * fire-and-forget stream listeners or on partial deltas. */
+	async beforeToolCall(ctx: BeforeToolCallContext): Promise<BeforeToolCallResult | undefined> {
+		if (!this.#manager?.hasAstRules()) return undefined;
+		const toolCall = { ...ctx.toolCall, arguments: ctx.args };
+		const matchContext = this.#inspector.matchContext(toolCall, 0);
+		const matches = await this.#checkAstStream(matchContext, toolCall);
+		if (matches.length > 0 && this.#handleMatches(matches, matchContext, ctx.assistantMessage.timestamp)) {
+			// Generation already ended: stop the tool turn before TTSR recovery retries it.
+			const reason = this.#formatAbortReason(matches);
+			ctx.assistantMessage.stopReason = "aborted";
+			ctx.assistantMessage.errorMessage = reason;
+			return { block: true, reason };
+		}
+		return undefined;
+	}
+
+	/** Checks finalized arguments for a tool call issued through eval or another non-loop bridge. */
+	async beforeBridgedToolCall(
+		toolCallId: string,
+		tool: AgentTool,
+		args: unknown,
+	): Promise<{ block?: boolean; reason?: string } | undefined> {
+		if (!this.#manager?.hasRules()) return undefined;
+		const toolCall = { type: "toolCall", id: toolCallId, name: tool.name, arguments: args } as ToolCall;
+		const matchContext = this.#inspector.matchContext(toolCall, 0);
+		let matches: Rule[];
+		try {
+			matches = [
+				...this.#checkStream("", matchContext, toolCall, true),
+				...(await this.#checkAstStream(matchContext, toolCall)),
+			].filter((rule, index, all) => all.findIndex(candidate => candidate.name === rule.name) === index);
+		} finally {
+			if (matchContext.streamKey) this.#manager.clearStream(matchContext.streamKey);
+		}
+		if (matches.length === 0) return undefined;
+
+		this.#emitTriggerOnce(matchContext, matches);
+		if (!this.#shouldInterrupt(matches, matchContext)) {
+			this.#addPerToolInjections(toolCallId, matches, { markInjected: false });
+			return undefined;
+		}
+
+		const reminder = matches
+			.map(rule =>
+				prompt.render(ttsrInterruptTemplate, {
+					name: rule.name,
+					path: this.#displayRulePath(rule.path),
+					content: rule.content,
+				}),
+			)
+			.join("\n\n");
+		this.#markInjected(matches.map(rule => rule.name));
+		return { block: true, reason: this.#formatAbortReason(matches) + "\n" + reminder };
 	}
 
 	/** Settles the previous resume gate, queues any deferred injection, and starts judged-rule checks. */
@@ -210,11 +280,39 @@ export class TtsrCoordinator {
 		this.#releaseDeferredReservation(deliveryId, ruleNames);
 	}
 
-	/** Folds per-tool reminders into the matched tool's result. */
+	/** Delivers per-tool reminders through the trusted passive-context channel. */
 	afterToolCall(ctx: AfterToolCallContext): AfterToolCallResult | undefined {
-		const rules = this.#perToolInjections.get(ctx.toolCall.id);
+		const reminder = this.#buildToolReminder(ctx.toolCall.id);
+		return reminder ? { additionalContext: reminder } : undefined;
+	}
+
+	/**
+	 * Bridged calls (Cursor exec handlers, eval) bypass the agent loop's `afterToolCall`. When the caller
+	 * installed a passive-context sink the reminder goes there and the result stays untouched; without one
+	 * (eval-bridged calls) it is folded into the result as a leading block, the only channel left.
+	 */
+	afterBridgedToolCall(
+		toolCallId: string,
+		result: AgentToolResult,
+		context?: AgentToolContext,
+	): AgentToolResult | undefined {
+		const reminder = this.#buildToolReminder(toolCallId);
+		if (!reminder) return undefined;
+		if (context?.addAdditionalContext) {
+			context.addAdditionalContext(reminder);
+			return undefined;
+		}
+		return { ...result, content: [{ type: "text", text: reminder }, ...result.content] };
+	}
+
+	cancelBridgedToolCall(toolCallId: string): void {
+		this.#perToolInjections.delete(toolCallId);
+	}
+
+	#buildToolReminder(toolCallId: string): string | undefined {
+		const rules = this.#perToolInjections.get(toolCallId);
 		if (!rules || rules.length === 0) return undefined;
-		this.#perToolInjections.delete(ctx.toolCall.id);
+		this.#perToolInjections.delete(toolCallId);
 		const reminder = rules
 			.map(rule =>
 				prompt.render(ttsrToolReminderTemplate, {
@@ -225,8 +323,8 @@ export class TtsrCoordinator {
 			)
 			.join("\n\n");
 		const ruleNames = rules.map(rule => rule.name.trim()).filter(name => name.length > 0);
-		if (ruleNames.length > 0) this.#host.sessionManager.appendTtsrInjection(ruleNames);
-		return { content: [{ type: "text", text: reminder }, ...ctx.result.content] };
+		if (ruleNames.length > 0) this.#markInjected(ruleNames);
+		return reminder;
 	}
 
 	/** Resolves and clears the current resume gate. */
@@ -308,7 +406,11 @@ export class TtsrCoordinator {
 		return id.length > 0 ? id : undefined;
 	}
 
-	#addPerToolInjections(toolCallId: string, rules: Rule[]): void {
+	#addPerToolInjections(
+		toolCallId: string,
+		rules: Rule[],
+		{ markInjected = true }: { markInjected?: boolean } = {},
+	): void {
 		const bucket = this.#perToolInjections.get(toolCallId) ?? [];
 		const seen = new Set(bucket.map(rule => rule.name));
 		const claimedElsewhere = new Set<string>();
@@ -325,7 +427,7 @@ export class TtsrCoordinator {
 		}
 		if (bucket.length === 0) return;
 		this.#perToolInjections.set(toolCallId, bucket);
-		if (newlyAdded.length > 0) this.#manager?.markInjectedByNames(newlyAdded);
+		if (markInjected && newlyAdded.length > 0) this.#manager?.markInjectedByNames(newlyAdded);
 	}
 
 	#markInjected(ruleNames: string[]): void {
@@ -502,18 +604,23 @@ export class TtsrCoordinator {
 		isFinal = false,
 	): Rule[] {
 		if (!this.#manager) return [];
+		const options = isFinal ? FINAL_CHECK : PARTIAL_CHECK;
 		const entries = this.#inspector.entries(toolCall);
 		if (entries) {
 			const matches: Rule[] = [];
 			for (const entry of entries) {
 				matches.push(
-					...this.#manager.checkSnapshot(entry.digest, this.#inspector.perFileContext(matchContext, entry.path)),
+					...this.#manager.checkSnapshot(
+						entry.digest,
+						this.#inspector.perFileContext(matchContext, entry.path),
+						options,
+					),
 				);
 			}
 			return matches;
 		}
 		const digest = this.#inspector.digest(toolCall);
-		if (digest !== undefined) return this.#manager.checkSnapshot(digest, matchContext);
+		if (digest !== undefined) return this.#manager.checkSnapshot(digest, matchContext, options);
 		// Tools without matcher hooks accumulate raw argument deltas. Providers
 		// that emit toolcall_start -> toolcall_end with no intermediate deltas
 		// (Cursor exec synthesis, OpenAI lossy-proxy fallback) leave that buffer
@@ -523,7 +630,7 @@ export class TtsrCoordinator {
 			const snapshot = typeof finalArgs === "string" ? finalArgs : JSON.stringify(finalArgs);
 			return this.#manager.checkSnapshot(snapshot, matchContext);
 		}
-		return this.#manager.checkDelta(delta, matchContext);
+		return this.#manager.checkDelta(delta, matchContext, options);
 	}
 
 	async #checkAstStream(matchContext: TtsrMatchContext, toolCall: ToolCall | undefined): Promise<Rule[]> {
@@ -612,11 +719,12 @@ export class TtsrCoordinator {
 					);
 					this.#markInjected(details.rules);
 				}
-				try {
-					await this.#host.agent.continue();
-				} catch {
-					this.resolveResume();
-				}
+				this.#host.scheduleAgentContinue({
+					source: "ttsr-interrupt",
+					generation,
+					onSkip: () => this.resolveResume(),
+					onError: () => this.resolveResume(),
+				});
 			},
 			{ delayMs: 50 },
 		);

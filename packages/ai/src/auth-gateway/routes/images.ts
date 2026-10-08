@@ -5,7 +5,7 @@ import { generateImage } from "../../images";
 import * as imagesServer from "../../providers/images-server";
 import { deterministicUuid } from "../../utils/deterministic-id";
 import {
-	type AuthGatewayBootOptions,
+	type AuthGatewayRouteOptions,
 	buildGatewayApiKeyResolver,
 	mirrorRequestAbort,
 	recordGatewayUsage,
@@ -23,7 +23,7 @@ function isGatewayImageApi(api: string): boolean {
 }
 
 async function handleImages(
-	bootOpts: AuthGatewayBootOptions,
+	bootOpts: AuthGatewayRouteOptions,
 	req: Request,
 	peer: string,
 	kind: imagesServer.ImageRequestKind,
@@ -77,7 +77,7 @@ async function handleImages(
 	const sessionId = deterministicUuid(`images\u0000${model.provider}/${model.id}`);
 	const apiKey = await resolveGatewayApiKey(bootOpts.storage, model, sessionId, controller.signal, peer);
 	if (controller.signal.aborted) return aborted();
-	if (typeof apiKey !== "string") return imagesServer.formatError(apiKey.status, apiKey.type, apiKey.message);
+	if ("status" in apiKey) return imagesServer.formatError(apiKey.status, apiKey.type, apiKey.message);
 
 	logger.info("auth-gateway request", {
 		requestId,
@@ -119,13 +119,13 @@ async function handleImages(
 }
 
 export function handleImageGenerations(
-	bootOpts: AuthGatewayBootOptions,
+	bootOpts: AuthGatewayRouteOptions,
 	req: Request,
 	peer: string,
 ): Promise<Response> {
 	return handleImages(bootOpts, req, peer, "generations");
 }
 
-export function handleImageEdits(bootOpts: AuthGatewayBootOptions, req: Request, peer: string): Promise<Response> {
+export function handleImageEdits(bootOpts: AuthGatewayRouteOptions, req: Request, peer: string): Promise<Response> {
 	return handleImages(bootOpts, req, peer, "edits");
 }

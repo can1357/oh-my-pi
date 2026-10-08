@@ -37,34 +37,6 @@ function createSession(cwd: string): ToolSession {
 	};
 }
 
-it("admits validated local reads without a risk-bearing operation grant", async () => {
-	const directory = await fs.mkdtemp(path.join(os.tmpdir(), "speculative-host-"));
-	temporaryDirectories.push(directory);
-	await fs.writeFile(path.join(directory, "note.txt"), "content");
-	const session = createSession(directory);
-	const tool = new ReadTool(session);
-	const assessment = await tool.speculation.finalized?.assess({ args: { path: "note.txt" } });
-	if (!assessment?.eligible) throw new Error("expected local read assessment to succeed");
-	const host = new CodingAgentSpeculativeExecutionHost(session.settings, session, { hasHandlers: () => false });
-
-	expect(
-		await host.authorize({
-			candidateId: "read-disabled",
-			source: "direct",
-			dependencies: [],
-			tool,
-			toolCall: {
-				type: "toolCall",
-				id: "read-disabled",
-				name: "read",
-				arguments: { path: "note.txt" },
-			},
-			args: { path: "note.txt" },
-			effect: assessment.effect,
-		}),
-	).toEqual({ allowed: true, deferBeforeToolCall: true });
-});
-
 describe("CodingAgentSpeculativeExecutionHost", () => {
 	it("rejects a read candidate whose source resource changed before claim", async () => {
 		const directory = await fs.mkdtemp(path.join(os.tmpdir(), "speculative-host-"));

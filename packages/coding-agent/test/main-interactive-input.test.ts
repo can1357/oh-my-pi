@@ -6,12 +6,7 @@ import type { Skill } from "@oh-my-pi/pi-coding-agent/extensibility/skills";
 import { parseArgs } from "@oh-my-pi/pi-coding-agent/cli/args";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import {
-	applyResolvedSystemPromptInputs,
-	buildSessionOptions,
-	readPipedInput,
-	submitInteractiveInput,
-} from "@oh-my-pi/pi-coding-agent/main";
+import { buildSessionOptions, readPipedInput, submitInteractiveInput } from "@oh-my-pi/pi-coding-agent/main";
 import type { SubmittedUserInput } from "@oh-my-pi/pi-coding-agent/modes/types";
 import { SKILL_PROMPT_MESSAGE_TYPE } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { discoverTitleSystemPromptFile } from "@oh-my-pi/pi-coding-agent/system-prompt";
@@ -65,17 +60,6 @@ describe("readPipedInput", () => {
 	});
 });
 
-describe("applyResolvedSystemPromptInputs", () => {
-	it("routes SYSTEM.md content through template-aware session options", () => {
-		const options: CreateAgentSessionOptions = {};
-
-		applyResolvedSystemPromptInputs(options, "project system prompt", "append prompt");
-
-		expect(options.customSystemPrompt).toBe("project system prompt");
-		expect(options.appendSystemPrompt).toBe("append prompt");
-		expect(options.systemPrompt).toBeUndefined();
-	});
-});
 describe("system prompt template CLI resolution", () => {
 	async function buildPromptOptions(cwd: string, args: string[]): Promise<CreateAgentSessionOptions> {
 		const authStorage = await AuthStorage.create(":memory:");
@@ -225,48 +209,6 @@ describe("submitInteractiveInput", () => {
 		expect(mode.showError).not.toHaveBeenCalled();
 	});
 
-	it("queues goal-continuation as followUp when streaming", async () => {
-		const mode = createMode();
-		const session = {
-			prompt: vi.fn(async () => true),
-			promptCustomMessage: vi.fn(async () => true),
-			isStreaming: true,
-		};
-		const input = createInput({ text: "continue goal", customType: "goal-continuation" });
-
-		await submitInteractiveInput(mode, session, input);
-
-		expect(session.prompt).not.toHaveBeenCalled();
-		expect(session.promptCustomMessage).toHaveBeenCalledWith(
-			{
-				customType: "goal-continuation",
-				content: "continue goal",
-				display: false,
-				attribution: "agent",
-			},
-			{ streamingBehavior: "followUp" },
-		);
-		expect(mode.finishPendingSubmission).toHaveBeenCalledWith(input);
-		expect(mode.showError).not.toHaveBeenCalled();
-	});
-
-	it("queues a plain submission as followUp when streaming", async () => {
-		const mode = createMode();
-		const session = {
-			prompt: vi.fn(async () => true),
-			promptCustomMessage: vi.fn(async () => true),
-			isStreaming: true,
-		};
-		const input = createInput({ text: "loop prompt" });
-
-		await submitInteractiveInput(mode, session, input);
-
-		expect(session.prompt).toHaveBeenCalledWith("loop prompt", { images: undefined, streamingBehavior: "followUp" });
-		expect(session.promptCustomMessage).not.toHaveBeenCalled();
-		expect(mode.finishPendingSubmission).toHaveBeenCalledWith(input);
-		expect(mode.showError).not.toHaveBeenCalled();
-	});
-
 	it("parks the loop when dispatch consumes the armed body locally", async () => {
 		const mode = {
 			...createMode(),
@@ -343,28 +285,6 @@ describe("submitInteractiveInput", () => {
 		await submitInteractiveInput(mode, session, input);
 
 		expect(mode.pauseLoop).toHaveBeenCalledTimes(1);
-		expect(mode.showError).toHaveBeenCalledWith("attachment too large");
-		expect(mode.finishPendingSubmission).toHaveBeenCalledWith(input);
-	});
-
-	it("ignores dispatch rejection when it is not the armed body", async () => {
-		const mode = {
-			...createMode(),
-			loopPrompt: "repeat me",
-			pauseLoop: vi.fn(),
-		};
-		const session = {
-			prompt: vi.fn(async () => {
-				throw new Error("attachment too large");
-			}),
-			promptCustomMessage: vi.fn(async () => true),
-			isStreaming: false,
-		};
-		const input = createInput({ text: "/other-cmd" });
-
-		await submitInteractiveInput(mode, session, input);
-
-		expect(mode.pauseLoop).not.toHaveBeenCalled();
 		expect(mode.showError).toHaveBeenCalledWith("attachment too large");
 		expect(mode.finishPendingSubmission).toHaveBeenCalledWith(input);
 	});

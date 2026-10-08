@@ -191,17 +191,37 @@ describe("transformMessages drops malformed (empty-name) tool calls", () => {
 		expect(toolResults[0]).toMatchObject({ toolCallId: "call_real" });
 	});
 
-	it("is a no-op when no tool call has an empty name (identity returns same array reference)", () => {
+	it("drops calls whose name carries invocation text or exceeds 128 chars, with their paired results", () => {
+		const longestValidName = "t".repeat(128);
 		const messages: Message[] = [
-			{ role: "user", content: "ping", timestamp: 1 },
-			assistant([{ type: "toolCall", id: "call_ok", name: "read", arguments: { path: "a" } }], 2),
-			toolResult("call_ok", "ok", 3),
+			{ role: "user", content: "inspect the repo", timestamp: 1 },
+			assistant(
+				[
+					{ type: "toolCall", id: "call_script", name: "eval>\n<code>\nprint('hi')", arguments: {} },
+					{ type: "toolCall", id: "call_nul", name: 'bash\0arg_key="command"\0arg_value="ls"', arguments: {} },
+					{ type: "toolCall", id: "call_spaced", name: 'bash command="ls -la"', arguments: {} },
+					{ type: "toolCall", id: "call_oversized", name: "t".repeat(129), arguments: {} },
+					{ type: "toolCall", id: "call_longest", name: longestValidName, arguments: {} },
+					{ type: "toolCall", id: "call_real", name: "read", arguments: { path: "foo" } },
+				],
+				2,
+			),
+			toolResult("call_script", "Tool not found", 3),
+			toolResult("call_nul", "Tool not found", 4),
+			toolResult("call_spaced", "Tool not found", 5),
+			toolResult("call_oversized", "Tool not found", 6),
+			toolResult("call_longest", "longest result", 7),
+			toolResult("call_real", "file contents", 8),
+			{ role: "user", content: "continue", timestamp: 9 },
 		];
 
 		const transformed = transformMessages(messages, model);
 
-		expect(getToolCalls(transformed)).toHaveLength(1);
-		expect(transformed.filter(m => m.role === "toolResult")).toHaveLength(1);
+		expect(getToolCalls(transformed).map(call => call.id)).toEqual(["call_longest", "call_real"]);
+		expect(transformed.flatMap(message => (message.role === "toolResult" ? [message.toolCallId] : []))).toEqual([
+			"call_longest",
+			"call_real",
+		]);
 	});
 
 	// Regression for PR #3459 review feedback: a tool-call id can legitimately

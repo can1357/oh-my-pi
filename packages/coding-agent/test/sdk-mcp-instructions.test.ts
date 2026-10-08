@@ -3,12 +3,12 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { AuthStorage } from "@oh-my-pi/pi-ai";
+import { closeModelCache } from "@oh-my-pi/pi-catalog/model-cache";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { createAgentSession } from "@oh-my-pi/pi-coding-agent/sdk";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
-import { USER_APPEND_HEADING } from "@oh-my-pi/pi-coding-agent/system-prompt";
 import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
 import { getAgentDir, setAgentDir } from "@oh-my-pi/pi-utils/dirs";
 import {
@@ -34,6 +34,8 @@ const CONTEXT_MODE_ROUTE = '- "ctx_execute" → `xd://mcp__context_mode_ctx_exec
 const CONTEXT_MODE_MCP_TOOL_NAME = "mcp__context_mode_ctx_execute";
 /** Sentinel proving the user's append prompt stays a block of its own. */
 const USER_APPEND_MARKER = "USER_APPEND_SENTINEL_7d13f2: prefer Bun APIs over Node APIs.";
+/** Heading that opens the user's append section, asserted literally rather than imported. */
+const USER_APPEND_SECTION_HEADING = "## User Instructions";
 /** The route section's instruction to read an `xd://` path before first use. */
 const READ_FIRST_CLAUSE = "for docs + JSON schema before first use";
 
@@ -69,6 +71,9 @@ describe("createAgentSession MCP server instructions (deferred UI)", () => {
 
 	afterAll(() => {
 		authStorage.close();
+		// The model registry opened the shared `<isolatedAgentDir>/models.db` cache;
+		// release it so Windows can delete the isolated home.
+		closeModelCache();
 		setAgentDir(originalAgentDir);
 		for (const dir of [isolatedHome]) {
 			if (dir && fs.existsSync(dir)) {
@@ -245,7 +250,7 @@ describe("createAgentSession MCP server instructions (deferred UI)", () => {
 			expect(prompt).toContain(SERVER_INSTRUCTIONS);
 			// The user's append prompt is its own block, never the trailing
 			// paragraph of the server-controlled section above it.
-			const boundary = prompt.indexOf(USER_APPEND_HEADING);
+			const boundary = prompt.indexOf(`\n${USER_APPEND_SECTION_HEADING}\n\n`);
 			expect(boundary).toBeGreaterThan(prompt.indexOf(SERVER_INSTRUCTIONS));
 			expect(prompt.slice(prompt.indexOf("## MCP Server Instructions"), boundary)).not.toContain(USER_APPEND_MARKER);
 			expect(prompt.slice(boundary)).toContain(USER_APPEND_MARKER);

@@ -2,6 +2,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { getAgentDir, isEnoent, ptree, withFileLock, writeRuntimeManifest } from "@oh-my-pi/pi-utils";
 import { ToolError } from "@oh-my-pi/pi-tui/tools/tool-errors";
+import { trackDownload } from "../../downloads/activity";
 import { resolveExecutablePath } from "../../subprocess/worker-client";
 import { normalizePackageRequirements } from "../package-requirements";
 
@@ -142,9 +143,9 @@ export async function installJsPackages(options: InstallJsPackagesOptions): Prom
 		async () => {
 			options.signal?.throwIfAborted();
 			if (mode === "managed") await ensureManagedManifest(environment, options.autoProvision, options.signal);
-			const result = await ptree.exec(
-				[resolveExecutablePath(), "add", "--cwd", environment.root, "--ignore-scripts", ...packages],
-				{
+			const tracker = trackDownload("npm packages", { detail: packages.join(" ") });
+			const result = await ptree
+				.exec([resolveExecutablePath(), "add", "--cwd", environment.root, "--ignore-scripts", ...packages], {
 					// In a compiled distribution the resolved executable is omp.
 					// BUN_BE_BUN re-enters Bun's real package-manager
 					// CLI instead of recursively dispatching omp's command parser.
@@ -152,9 +153,20 @@ export async function installJsPackages(options: InstallJsPackagesOptions): Prom
 					signal: options.signal,
 					allowNonZero: true,
 					stderr: "full",
-				},
-			);
-			if (!result.ok) throw installFailure(environment, result.stdout, result.stderr, result.exitCode);
+				})
+				.catch((error: unknown) => {
+					tracker.fail(error);
+					throw error;
+				});
+			if (!result.ok) {
+				// Bun's own `error: …` line names the failing package; the thrown error carries the full log.
+				const bunError = result.stderr.split("\n").findLast(line => line.startsWith("error:"));
+				tracker.fail(
+					bunError?.slice("error:".length).trim() || `bun add exited ${result.exitCode ?? "abnormally"}`,
+				);
+				throw installFailure(environment, result.stdout, result.stderr, result.exitCode);
+			}
+			tracker.done();
 			options.signal?.throwIfAborted();
 			const dependencies = await currentDependencies(environment.root);
 			options.signal?.throwIfAborted();

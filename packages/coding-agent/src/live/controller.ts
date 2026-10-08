@@ -54,6 +54,11 @@ export interface LiveSessionControllerOptions {
 	extractAssistantText(message: AssistantMessage): string;
 	/** Realtime output voice, defaulting to sol. */
 	voice?: string;
+	/**
+	 * Handlebars template replacing the bundled live instructions; rendered with
+	 * `{ username, firstName }` like the bundled prompt.
+	 */
+	instructions?: string;
 }
 
 function errorFrom(cause: unknown): Error {
@@ -93,6 +98,7 @@ export class LiveSessionController {
 	readonly #callbacks: LiveSessionCallbacks;
 	readonly #extractAssistantText: (message: AssistantMessage) => string;
 	readonly #voice: string;
+	readonly #instructionsTemplate: string;
 
 	#transport: CodexLiveTransport | undefined;
 	#recorder: AudioCapture | undefined;
@@ -107,6 +113,9 @@ export class LiveSessionController {
 	#phase: LivePhase = "connecting";
 	#inputLevel = 0;
 	#outputLevel = 0;
+	/** Last pair passed to `onLevels`; repeated identical levels are not re-emitted. */
+	#emittedInputLevel = -1;
+	#emittedOutputLevel = -1;
 	#activeDelegationId: string | undefined;
 	#userTranscript = "";
 	#assistantTranscript = "";
@@ -121,6 +130,7 @@ export class LiveSessionController {
 		this.#callbacks = options.callbacks;
 		this.#extractAssistantText = options.extractAssistantText;
 		this.#voice = options.voice?.trim() || DEFAULT_LIVE_VOICE;
+		this.#instructionsTemplate = options.instructions ?? liveInstructionsTemplate;
 	}
 
 	/** Current realtime call phase. */
@@ -150,7 +160,7 @@ export class LiveSessionController {
 
 		try {
 			const user = currentUser();
-			const instructions = prompt.render(liveInstructionsTemplate, user);
+			const instructions = prompt.render(this.#instructionsTemplate, user);
 			const transport = new CodexLiveTransport({
 				authStorage: this.#session.modelRegistry.authStorage,
 				sessionId: this.#session.sessionId,
@@ -481,8 +491,13 @@ export class LiveSessionController {
 	}
 
 	#emitLevels(): void {
+		if (this.#inputLevel === this.#emittedInputLevel && this.#outputLevel === this.#emittedOutputLevel) return;
+		const input = this.#inputLevel;
+		const output = this.#outputLevel;
 		try {
-			this.#callbacks.onLevels(this.#inputLevel, this.#outputLevel);
+			this.#callbacks.onLevels(input, output);
+			this.#emittedInputLevel = input;
+			this.#emittedOutputLevel = output;
 		} catch (cause) {
 			this.#reportFailure(errorFrom(cause));
 		}

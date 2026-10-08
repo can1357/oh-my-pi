@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, test, vi } from "bun:test";
-import { completeSimple, getEnvApiKey, stream, streamSimple } from "@oh-my-pi/pi-ai/stream";
+import { getEnvApiKey } from "@oh-my-pi/pi-ai/env-api-key";
+import { stream, streamSimple } from "@oh-my-pi/pi-ai/stream";
 import type { Context, Tool } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
@@ -404,29 +405,6 @@ describe("ollama-cloud provider support", () => {
 		expect(response.usage.output).toBe(4);
 	});
 
-	test("supports ollama-cloud through completeSimple top-level contract", async () => {
-		const fetchMock: FetchImpl = vi.fn(async () =>
-			createNdjsonResponse([
-				{
-					model: "gpt-oss:120b",
-					message: { role: "assistant", content: "Completed through completeSimple" },
-					done: false,
-				},
-				{ model: "gpt-oss:120b", done: true, done_reason: "stop", prompt_eval_count: 3, eval_count: 5 },
-			]),
-		);
-
-		const response = await completeSimple(
-			cloudModel,
-			{ messages: [{ role: "user", content: "Finish this", timestamp: Date.now() }] },
-			{ apiKey: "cloud-test-key", fetch: fetchMock },
-		);
-
-		expect(response.stopReason).toBe("stop");
-		expect(response.content).toEqual([{ type: "text", text: "Completed through completeSimple" }]);
-		expect(response.usage.input).toBe(3);
-		expect(response.usage.output).toBe(5);
-	});
 	test("streams tool calls and maps native tool stop reasons", async () => {
 		const fetchMock: FetchImpl = vi.fn(async () =>
 			createNdjsonResponse([

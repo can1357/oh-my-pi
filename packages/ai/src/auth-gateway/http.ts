@@ -51,10 +51,44 @@ export function gatewayResponseHeaders(
 	return headers;
 }
 
-export function resolvePeer(req: Request): string {
-	const fwd = req.headers.get("x-forwarded-for");
-	if (fwd) return fwd.split(",")[0].trim();
-	return req.headers.get("x-real-ip") ?? "unknown";
+/**
+ * Decode each run of percent-escapes on its own, so one malformed escape
+ * elsewhere in the URL cannot hide an encoded token. A run that is not valid
+ * UTF-8 still has its ASCII escapes decoded.
+ */
+function decodeUrlLeniently(location: string): string {
+	return location.replace(/(?:%[0-9A-Fa-f]{2})+/g, run => {
+		try {
+			return decodeURIComponent(run);
+		} catch {
+			return run.replace(/%([0-7][0-9A-Fa-f])/g, (_, hex: string) => String.fromCharCode(Number.parseInt(hex, 16)));
+		}
+	});
+}
+
+/** Keep configured gateway credentials out of URL and forwarded/logged request fields. */
+export function hasMisplacedBearer(req: Request, url: URL, tokens: ReadonlySet<string>): boolean {
+	if (tokens.size === 0) return false;
+	const location = url.pathname + url.search;
+	const decodedLocation = decodeUrlLeniently(location);
+	const headers = req.headers;
+	for (const token of tokens) {
+		if (location.includes(token) || decodedLocation.includes(token)) return true;
+		for (const [name, value] of headers) {
+			if (
+				(PASSTHROUGH_HEADER_NAMES[name] ||
+					name.startsWith("x-stainless-") ||
+					name.startsWith("x-omp-") ||
+					name === "x-forwarded-for" ||
+					name === "x-real-ip" ||
+					name === "forwarded") &&
+				value.includes(token)
+			) {
+				return true;
+			}
+		}
+	}
+	return false;
 }
 
 /**

@@ -32,6 +32,9 @@ async function repository() {
 	await git(root, "init", "-b", "main");
 	await git(root, "config", "user.name", "Native Test");
 	await git(root, "config", "user.email", "native@example.test");
+	// Assertions compare exact LF bytes; Git for Windows' system
+	// `core.autocrlf=true` would check files out as CRLF.
+	await git(root, "config", "core.autocrlf", "false");
 	await writeFile(join(root, "tracked.txt"), "one\ntwo\n");
 	await git(root, "add", "tracked.txt");
 	await git(root, "commit", "-m", "initial");
@@ -145,6 +148,17 @@ describe("in-process VCS bindings", () => {
 
 		await expect(repo.head(controller.signal)).rejects.toMatchObject({ name: "VcsError", code: "Canceled" });
 		expect(controller.signal.onabort).toBe(onAbort);
+	});
+
+	test("keeps the VcsError shape when an AbortSignal fires before task settlement", async () => {
+		const root = await repository();
+		const repo = vcsGitDiscover(root)!;
+		const controller = new AbortController();
+		const pending = repo.head(controller.signal);
+		Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 100);
+		controller.abort();
+
+		await expect(pending).rejects.toMatchObject({ name: "VcsError", code: "Canceled" });
 	});
 });
 

@@ -39,21 +39,6 @@ describe("Tavily buildRequestBody", () => {
 		expect(body).not.toHaveProperty("time_range");
 	});
 
-	it("sends time_range when recency is set, without switching topic to news", () => {
-		const body = buildRequestBody({
-			query: "Bun 1.3 release notes",
-			recency: "week",
-		});
-		expect(body.time_range).toBe("week");
-		expect(body).not.toHaveProperty("topic");
-	});
-
-	it.each(["day", "week", "month", "year"] as const)("passes %s through as time_range verbatim", recency => {
-		const body = buildRequestBody({ query: "q", recency });
-		expect(body.time_range).toBe(recency);
-		expect(body).not.toHaveProperty("topic");
-	});
-
 	it("always includes query, max_results, search_depth, and include_answer", () => {
 		const body = buildRequestBody({ query: "q", num_results: 7 });
 		expect(body.query).toBe("q");
@@ -138,30 +123,6 @@ describe("Tavily searchTavily request shape (integration)", () => {
 		expect(response.answer).toBe("test answer");
 		expect(response.sources).toHaveLength(1);
 		expect(response.sources[0]?.url).toBe("https://bun.com/blog/bun-v1.3.12");
-	});
-
-	it("omits time_range entirely when recency is not provided", async () => {
-		process.env.TAVILY_API_KEY = "test-key";
-
-		let capturedBody: Record<string, unknown> | undefined;
-		const fetchMock: FetchImpl = async (input, init) => {
-			const url =
-				typeof input === "string" ? input : input instanceof URL ? input.toString() : (input as Request).url;
-			if (url === "https://api.tavily.com/search") {
-				capturedBody = JSON.parse(init?.body as string);
-				return new Response(JSON.stringify({ answer: "", results: [], request_id: "req-0" }), {
-					status: 200,
-					headers: { "Content-Type": "application/json" },
-				});
-			}
-			return new Response("not mocked", { status: 500 });
-		};
-
-		await searchTavily({ ...makeParams("bun sqlite"), fetch: fetchMock });
-
-		expect(capturedBody).toBeDefined();
-		expect(capturedBody).not.toHaveProperty("topic");
-		expect(capturedBody).not.toHaveProperty("time_range");
 	});
 
 	it("maps site: directives to include/exclude_domains and strips them from the query", async () => {

@@ -2,6 +2,7 @@
  * Settings declared by this domain (see `config/registry.ts`). Declaration order is the
  * settings-panel order; `config/all-settings.ts` registers every domain.
  */
+import { type OAuthAccountPools, validateAgentAccountPools } from "../config/account-pools";
 import {
 	type AgentCompactionThresholdOverride,
 	validateAgentCompactionThresholdOverrides,
@@ -15,6 +16,7 @@ import { getThinkingLevelMetadata } from "@oh-my-pi/pi-tui/thinking";
 
 const EMPTY_AGENT_SERVICE_TIER_OVERRIDES: Record<string, ServiceTierInheritSettingValue> = {};
 const EMPTY_AGENT_COMPACTION_THRESHOLD_OVERRIDES: Record<string, AgentCompactionThresholdOverride> = {};
+const EMPTY_AGENT_ACCOUNT_POOLS: Record<string, OAuthAccountPools> = {};
 
 const DEFAULT_AGENT_MODEL_OVERRIDES: Record<string, string | string[]> = {};
 
@@ -206,6 +208,19 @@ export const cfgTaskBatch = register({
 	},
 });
 
+export const cfgTaskSpeculativeLaunch = register({
+	id: "task.speculativeLaunch",
+	type: "boolean",
+	default: true,
+	ui: {
+		tab: "tasks",
+		group: "Subagents",
+		label: "Speculative Task Launch",
+		description:
+			"Start each batch subagent as soon as its tasks[] item finishes streaming instead of waiting for the whole task call. Launched agents are aborted if the finished call fails validation, is blocked, or its arguments change. Requires auto-allowed task approval and no extension tool lifecycle handlers.",
+	},
+});
+
 export const cfgTaskEnableEffort = register({
 	id: "task.enableEffort",
 	type: "boolean",
@@ -292,6 +307,19 @@ export const cfgTaskMaxRuntimeMs = register({
 			{ value: "1800000", label: "30 minutes" },
 			{ value: "3600000", label: "1 hour" },
 		],
+	},
+});
+
+export const cfgTaskCompletionProbe = register({
+	id: "task.completionProbe",
+	type: "boolean",
+	default: true,
+	ui: {
+		tab: "tasks",
+		group: "Subagents",
+		label: "Subagent Completion Probe",
+		description:
+			"Ask a working subagent, through a cached side request like /btw, to estimate how complete its task is: after 2, 5, 10 and 30 more minutes, then hourly. The estimate shows next to the subagent in wait and task views. Only subagents spawned by the main agent of an interactive session are asked; print, RPC, ACP and SDK runs never probe.",
 	},
 });
 
@@ -383,6 +411,14 @@ export const cfgTaskAgentCompactionThresholdOverrides = register({
 	type: "record",
 	default: EMPTY_AGENT_COMPACTION_THRESHOLD_OVERRIDES,
 	validate: validateAgentCompactionThresholdOverrides,
+});
+
+export const cfgTaskAgentAccountPools = register({
+	id: "task.agentAccountPools",
+	protocolDefault: ["rpc", "acp"],
+	type: "record",
+	default: EMPTY_AGENT_ACCOUNT_POOLS,
+	validate: validateAgentAccountPools,
 });
 
 export const cfgTaskAgentPrewalk = register({

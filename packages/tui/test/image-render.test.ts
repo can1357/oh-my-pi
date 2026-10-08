@@ -22,7 +22,7 @@ const BASE64_ONE_PIXEL_PNG =
 	"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAAAAAA6fptVAAAACklEQVR4nGNgAAAAAgABSK+kcQAAAABJRU5ErkJggg==";
 const ORIGINAL_TMUX = Bun.env.TMUX;
 
-function parseKittyParam(sequence: string, key: "c" | "r" | "C"): number | null {
+function parseKittyParam(sequence: string, key: "c" | "r"): number | null {
 	const match = sequence.match(new RegExp(`${key}=(\\d+)`));
 	if (!match) return null;
 	return Number.parseInt(match[1], 10);
@@ -65,17 +65,6 @@ describe("terminal image rendering", () => {
 		expect(result?.rows).toBe(2);
 		expect(parseKittyParam(result?.sequence ?? "", "c")).toBe(2);
 		expect(parseKittyParam(result?.sequence ?? "", "r")).toBe(2);
-	});
-
-	it("anchors Kitty display commands before renderer-managed cursor movement", () => {
-		terminal.imageProtocol = ImageProtocol.Kitty;
-		const result = renderImage(BASE64_DUMMY, SQUARE_DIMENSIONS, {
-			maxWidthCells: 10,
-			maxHeightCells: 2,
-		});
-
-		expect(result).not.toBeNull();
-		expect(parseKittyParam(result?.sequence ?? "", "C")).toBe(1);
 	});
 
 	it("re-renders a cached fallback once an image protocol becomes available", () => {
@@ -172,17 +161,39 @@ describe("terminal image rendering", () => {
 		expect(result?.sequence).toContain("height=auto");
 	});
 
-	it("encodes SIXEL output when protocol is SIXEL", () => {
+	it("sizes SIXEL encodes to whole 6px bands and reserves rows while one is pending", () => {
+		terminal.imageProtocol = ImageProtocol.Sixel;
+		const requested: Array<[number, number]> = [];
+		const pending = renderImage(BASE64_ONE_PIXEL_PNG, SQUARE_DIMENSIONS, {
+			maxWidthCells: 10,
+			maxHeightCells: 2,
+			sixel: (widthPx, heightPx) => {
+				requested.push([widthPx, heightPx]);
+				return undefined;
+			},
+		});
+
+		// SIXEL height is rounded DOWN to a multiple of 6 (band size) so it
+		// never exceeds the caller's maxHeightCells cap. With 10px cells and
+		// maxHeightCells=2, targetHeightPx=18 (not 20) and the width scales by
+		// the same 18/20, rows=2 — within cap.
+		expect(requested).toEqual([[18, 18]]);
+		expect(pending).toEqual({ sequence: undefined, rows: 2 });
+		const failed = renderImage(BASE64_ONE_PIXEL_PNG, SQUARE_DIMENSIONS, {
+			maxWidthCells: 10,
+			maxHeightCells: 2,
+			sixel: () => null,
+		});
+		expect(failed).toBeNull();
+	});
+
+	it("encodes SIXEL synchronously when the caller supplies no provider", () => {
 		terminal.imageProtocol = ImageProtocol.Sixel;
 		const result = renderImage(BASE64_ONE_PIXEL_PNG, SQUARE_DIMENSIONS, {
 			maxWidthCells: 10,
 			maxHeightCells: 2,
 		});
 
-		expect(result).not.toBeNull();
-		// SIXEL height is rounded DOWN to a multiple of 6 (band size) so it
-		// never exceeds the caller's maxHeightCells cap. With 10px cells and
-		// maxHeightCells=2, targetHeightPx=18 (not 20), rows=2 — within cap.
 		expect(result?.rows).toBe(2);
 		expect((result?.sequence ?? "").startsWith("\x1bP")).toBe(true);
 	});

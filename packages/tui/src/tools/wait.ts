@@ -26,6 +26,13 @@ import {
 import type { StructuredSubagentOutput } from "./task";
 import type { RenderResultOptions, ToolRenderer, ToolActivitySummary } from "./renderer";
 import type { IrcDeliveryReceipt, IrcMessage } from "./irc";
+import type { TspSpan } from "@oh-my-pi/pi-wire";
+import { card as cardNode, compact, elapsed, md, node, row, span, text } from "../native/describe";
+import type { NativeNode } from "../native/node";
+import { OwnerMemo } from "../native/memo";
+import { plainText } from "../native/spans";
+import { errorView, resultText, toolHead } from "./native-view";
+import type { NativeToolView, ToolRenderResult } from "./renderer";
 
 /** Whether a wait snapshot contains only running jobs and no cancellations. */
 export function isWaitingPollDetails(details: unknown): boolean {
@@ -54,6 +61,8 @@ export interface JobSnapshot {
 	resolvedThinkingLevel?: ConfiguredThinkingLevel;
 	/** True when the task progress reports an attached live advisor. */
 	advisor?: boolean;
+	/** The task agent's latest self-estimated completion (0–100); see `AgentProgress.completionPercent`. */
+	completionPercent?: number;
 	resultText?: string;
 	errorText?: string;
 	/** Source-output metadata retained for per-job warnings and persisted row rendering. */
@@ -196,7 +205,7 @@ function jobsRenderResult(
 	options: RenderResultOptions,
 	uiTheme: Theme,
 ): Component {
-	let jobs = result.details?.jobs ?? [];
+	const jobs = result.details?.jobs ?? [];
 	const agents = result.details?.agents ?? [];
 
 	if (jobs.length === 0 && agents.length === 0) {
@@ -205,15 +214,7 @@ function jobsRenderResult(
 		return new Text([header, formatEmptyMessage(fallback, uiTheme)].join("\n"), 0, 0);
 	}
 
-	// Agent-carrying results (jobs snapshot / empty-wait roster) are real
-	// snapshots, not displaceable waiting frames — only agentless waits
-	// collapse their still-running rows once sealed.
-	if (!options.isPartial && agents.length === 0) {
-		jobs = jobs.filter(job => job.status !== "running");
-		if (jobs.length === 0) {
-			return new Text("", 0, 0);
-		}
-	}
+	// Sealing freezes the snapshot; still-running rows remain meaningful history.
 
 	const counts = { completed: 0, failed: 0, cancelled: 0, running: 0 };
 	for (const job of jobs) counts[job.status]++;
@@ -274,6 +275,39 @@ function jobsRenderResult(
 	});
 
 	let cached: RenderCache | undefined;
+	// Per-job preview rows are invariant across spinner/shimmer frames (the job
+	// snapshots are frozen for this result), so the envelope strip, flatten and
+	// wrap run once per (job, expanded, width) instead of every animated frame.
+	const previewRows = new Map<JobSnapshot, { expanded: boolean; width: number; lines: readonly string[] }>();
+	const jobPreviewRows = (job: JobSnapshot, expanded: boolean, continuationWidth: number): readonly string[] => {
+		const hit = previewRows.get(job);
+		if (hit !== undefined && hit.expanded === expanded && hit.width === continuationWidth) return hit.lines;
+		const artifactError = job.meta?.artifactError ?? job.artifactError;
+		// Legacy rows did not retain full metadata. Strip the known warning
+		// footer so the dedicated row/root warning remains the only copy.
+		const previewError =
+			artifactError ?? (outputMeta?.source?.type !== "report" ? outputMeta?.artifactError : undefined);
+		const previewMeta = job.meta ?? (previewError ? { artifactError: previewError } : undefined);
+		const preview = flattenStructuredPreview(
+			stripTaskResultEnvelope(
+				stripOutputNotice(job.errorText?.trim() || job.resultText?.trim() || "", previewMeta).trim(),
+			),
+		);
+		const lines: string[] = [];
+		if (preview) {
+			const maxLines = expanded ? PREVIEW_LINES_EXPANDED : PREVIEW_LINES_COLLAPSED;
+			const previewLines = getPreviewLines(
+				preview,
+				maxLines,
+				Math.min(PREVIEW_LINE_WIDTH, continuationWidth),
+				Ellipsis.Unicode,
+			);
+			const tone = job.errorText ? "error" : "dim";
+			for (const pl of previewLines) lines.push(`  ${uiTheme.fg(tone, pl)}`);
+		}
+		previewRows.set(job, { expanded, width: continuationWidth, lines });
+		return lines;
+	};
 	return {
 		render(width: number): readonly string[] {
 			const expanded = options.expanded;
@@ -310,7 +344,11 @@ function jobsRenderResult(
 							job.status === "running" ? options.spinnerFrame : undefined,
 						)}${job.exitCode === undefined ? "" : `${uiTheme.sep.dot}${uiTheme.fg(job.exitCode === 0 ? "muted" : "error", `exit ${job.exitCode}`)}`}`;
 						const typeBadge = formatBadge(job.type, statusToColor(job.status), uiTheme);
-						const durationSuffix = `${uiTheme.sep.dot}${uiTheme.fg("dim", formatDuration(job.durationMs))}`;
+						const completion =
+							job.status === "running" && job.completionPercent !== undefined
+								? `${uiTheme.sep.dot}${uiTheme.fg("accent", `${job.completionPercent}%`)}`
+								: "";
+						const durationSuffix = `${completion}${uiTheme.sep.dot}${uiTheme.fg("dim", formatDuration(job.durationMs))}`;
 						const displayId = truncateToWidth(
 							replaceTabs(job.id).replace(/\s+/g, " "),
 							Math.max(0, rowWidth - visibleWidth(`${icon} ${typeBadge} ${durationSuffix}`)),
@@ -372,30 +410,7 @@ function jobsRenderResult(
 							);
 						}
 
-						// Legacy rows did not retain full metadata. Strip the known warning
-						// footer so the dedicated row/root warning remains the only copy.
-						const previewError =
-							artifactError ?? (outputMeta?.source?.type !== "report" ? outputMeta?.artifactError : undefined);
-						const previewMeta = job.meta ?? (previewError ? { artifactError: previewError } : undefined);
-
-						const preview = flattenStructuredPreview(
-							stripTaskResultEnvelope(
-								stripOutputNotice(job.errorText?.trim() || job.resultText?.trim() || "", previewMeta).trim(),
-							),
-						);
-						if (preview) {
-							const maxLines = expanded ? PREVIEW_LINES_EXPANDED : PREVIEW_LINES_COLLAPSED;
-							const previewLines = getPreviewLines(
-								preview,
-								maxLines,
-								Math.min(PREVIEW_LINE_WIDTH, continuationWidth),
-								Ellipsis.Unicode,
-							);
-							const tone = job.errorText ? "error" : "dim";
-							for (const pl of previewLines) {
-								lines.push(`  ${uiTheme.fg(tone, pl)}`);
-							}
-						}
+						for (const previewLine of jobPreviewRows(job, expanded, continuationWidth)) lines.push(previewLine);
 						return lines;
 					},
 				},
@@ -541,7 +556,7 @@ export function createIrcMessageCard(
 	if (card.replyTo) meta.push("reply");
 	const age = messageAge(card.timestamp);
 	if (age) meta.push(age);
-	return createCachedComponent(
+	const component = createCachedComponent(
 		getExpanded,
 		(width, expanded) => {
 			const lines = [renderStatusLine({ iconOverride: ircGlyph(uiTheme), title, meta }, uiTheme)];
@@ -552,7 +567,166 @@ export function createIrcMessageCard(
 		},
 		{ paddingX: 1 },
 	);
+	// Terminal-local collapse replaces `getExpanded`; the node never changes after creation.
+	const described = cardNode(
+		{
+			role: `omp.irc.${card.kind}`,
+			tone: "info",
+			head: [
+				span(plainText(title), "toolTitle strong"),
+				...meta.filter(part => part !== age).map(part => span(` ${part}`, "muted")),
+			],
+			collapsible: body.trim().length > 0,
+			preview: { lines: 3 },
+		},
+		compact([
+			card.timestamp
+				? row([elapsed(Date.now() - card.timestamp), text([span("ago", "dim")])], { gap: "xs" })
+				: undefined,
+			body.trim() ? md(body) : undefined,
+		]),
+	);
+	return Object.assign(component, { describe: () => described });
 }
+
+/** One job row: type badge, id + label, terminal-clocked duration (live while running), preview below. */
+function describeJob(job: JobSnapshot, isPartial: boolean): NativeNode {
+	const running = job.status === "running" && isPartial;
+	const label = job.label.trim() !== job.id ? plainText(job.label.split(/\r?\n/)[0] ?? "") : "";
+	const spans: TspSpan[] = [
+		span(plainText(job.id), running ? "accent" : "toolOutput", running ? { fx: "shimmer" } : undefined),
+	];
+	if (label) spans.push(span(` ${label}`, "toolOutput"));
+	if (job.exitCode !== undefined) spans.push(span(` exit ${job.exitCode}`, job.exitCode === 0 ? "muted" : "error"));
+	const tone =
+		job.status === "completed"
+			? "success"
+			: job.status === "failed"
+				? "error"
+				: job.status === "cancelled"
+					? "warning"
+					: "accent";
+	const artifactError = job.meta?.artifactError ?? job.artifactError;
+	const preview = flattenStructuredPreview(
+		stripTaskResultEnvelope(
+			stripOutputNotice(job.errorText?.trim() || job.resultText?.trim() || "", job.meta).trim(),
+		),
+	);
+	return node(
+		"col",
+		{ role: "omp.wait.job", tone },
+		compact([
+			row(
+				compact([
+					node("badge", { text: job.type, tone }),
+					text(spans, { truncate: "end", grow: 1 }),
+					job.status === "running" && job.completionPercent !== undefined
+						? node("progress", {
+								value: job.completionPercent / 100,
+								label: `${job.completionPercent}%`,
+								tone: "accent",
+								title: "Agent's own completion estimate",
+							})
+						: undefined,
+					elapsed(job.durationMs, !running),
+				]),
+				{ gap: "sm" },
+			),
+			artifactError && text([span(formatArtifactErrorNotice(artifactError), "warning")], { wrap: "word" }),
+			preview
+				? text([span(plainText(preview), job.errorText ? "error" : "dim")], {
+						wrap: "word",
+						lines: PREVIEW_LINES_EXPANDED,
+					})
+				: undefined,
+		]),
+		job.id,
+	);
+}
+
+function describeJobsResult(
+	result: ToolRenderResult<CoordinationDetails>,
+	isPartial: boolean,
+): NativeToolView | undefined {
+	const jobs = result.details?.jobs ?? [];
+	const agents = result.details?.agents ?? [];
+	if (jobs.length === 0 && agents.length === 0) {
+		return {
+			head: toolHead("Wait"),
+			tone: "warning",
+			body: [text([span(plainText(resultText(result) || "No jobs to process"), "dim")])],
+		};
+	}
+	const counts = { completed: 0, failed: 0, cancelled: 0, running: 0 };
+	for (const job of jobs) counts[job.status]++;
+	const noun = jobs.length === 1 ? "job" : "jobs";
+	const title =
+		jobs.length === 0
+			? `${agents.length} running agent${agents.length === 1 ? "" : "s"} — no jobs`
+			: counts.running > 0
+				? counts.running === jobs.length
+					? `waiting on ${jobs.length} ${noun}`
+					: `waiting on ${counts.running} of ${jobs.length} ${noun}`
+				: `${jobs.length} ${noun} settled`;
+	const head: TspSpan[] = [span(title, "toolTitle strong")];
+	if (counts.completed > 0) head.push(span(` ${counts.completed} done`, "success"));
+	if (counts.failed > 0) head.push(span(` ${counts.failed} failed`, "error"));
+	if (counts.cancelled > 0) head.push(span(` ${counts.cancelled} cancelled`, "warning"));
+	const order: Record<JobSnapshot["status"], number> = { running: 0, failed: 1, cancelled: 2, completed: 3 };
+	const sorted = [...jobs].sort((a, b) => order[a.status] - order[b.status] || b.durationMs - a.durationMs);
+	const body: NativeNode[] = sorted.map(job => describeJob(job, isPartial));
+	for (const agent of agents) {
+		const spans: TspSpan[] = [span(plainText(agent.id), "muted")];
+		if (agent.activity) spans.push(span(` ${plainText(agent.activity)}`, "toolOutput"));
+		if (agent.parentId) spans.push(span(` ← ${plainText(agent.parentId)}`, "dim"));
+		body.push(
+			node(
+				"row",
+				{ gap: "sm", role: "omp.wait.agent" },
+				[
+					node("badge", {
+						text: agent.live ? "agent" : "agent · no turn",
+						tone: agent.live ? "accent" : "warning",
+					}),
+					text(spans, { truncate: "end", grow: 1 }),
+					elapsed(agent.ageMs, !agent.live || !isPartial),
+				],
+				`agent:${agent.id}`,
+			),
+		);
+	}
+	return {
+		head,
+		tone: counts.failed > 0 ? "warning" : counts.running > 0 || agents.length > 0 ? "info" : "success",
+		body,
+	};
+}
+
+/** Received-message view: sender head, terminal-clocked age, markdown body. */
+function describeMessage(
+	from: string,
+	ts: number | undefined,
+	bodyText: string,
+	meta: readonly string[],
+): NativeToolView {
+	const head: TspSpan[] = [span(`IRC ← ${plainText(from)}`, "toolTitle strong")];
+	for (const part of meta) head.push(span(` ${part}`, "muted"));
+	return {
+		head,
+		tone: "info",
+		preview: { lines: BODY_LINES_COLLAPSED + 1 },
+		body: compact([
+			ts
+				? row([text([span("received", "dim")]), elapsed(Date.now() - ts), text([span("ago", "dim")])], {
+						gap: "xs",
+					})
+				: undefined,
+			bodyText.trim() ? md(bodyText) : undefined,
+		]),
+	};
+}
+
+const waitResultMemo = new OwnerMemo<NativeToolView | undefined>();
 
 /** Render either a received message or a background-job snapshot. */
 export const waitToolRenderer = {
@@ -562,6 +736,24 @@ export const waitToolRenderer = {
 		return { label: "Wait", detail: "Background work or peer message" };
 	},
 	renderCall: waitRenderCall,
+	describeCall(): NativeToolView {
+		return { head: toolHead("Wait"), inline: true };
+	},
+	describeResult(
+		result: ToolRenderResult<CoordinationDetails>,
+		options: RenderResultOptions,
+	): NativeToolView | undefined {
+		return waitResultMemo.get(result, [options.isPartial], () => {
+			if (result.isError) return errorView("Wait", resultText(result));
+			const details = result.details;
+			if (details?.interrupted) {
+				return { head: toolHead("Wait", "interrupted by message"), tone: "info", inline: true };
+			}
+			const waited = details?.waited;
+			if (!waited) return describeJobsResult(result, options.isPartial);
+			return describeMessage(waited.from, waited.ts, waited.body, waited.replyTo ? ["reply"] : []);
+		});
+	},
 	renderResult(
 		result: { content: Array<{ type: string; text?: string }>; details?: CoordinationDetails; isError?: boolean },
 		options: RenderResultOptions,

@@ -7,8 +7,6 @@ import { type AstFindMatch, astGrep, type ShellFilesystem } from "@oh-my-pi/pi-n
 import { prompt, untilAborted } from "@oh-my-pi/pi-utils";
 import { getEditStore } from "../edit/store";
 
-import { formatHashlineHeader } from "@oh-my-pi/pi-tui/tools/hashline-format";
-
 import { sessionResolveContext } from "../internal-urls/context";
 import { InternalUrlFilesystem } from "../internal-urls/url-filesystem";
 import astGrepDescription from "../prompts/tools/ast-grep.md" with { type: "text" };
@@ -20,7 +18,7 @@ import type { ToolSession } from ".";
 import { resolveToolTier } from "./approval";
 import { materializeReadUrlToFile, parseReadUrlTarget } from "./fetch";
 import { createFileRecorder, formatResultPath, resultSnapshotPath } from "./file-recorder";
-import { formatGroupedFiles } from "@oh-my-pi/pi-tui/tools/grouped-file-output";
+import { type FileMatchSection, formatFileMatches } from "@oh-my-pi/pi-tui/tools/grouped-file-output";
 import { formatMatchLine } from "@oh-my-pi/pi-tui/tools/match-line-format";
 
 import { relativeSearchResultPath, resolveSearchResultPath, resolveToolSearchScope } from "./path-utils";
@@ -136,13 +134,18 @@ export class AstGrepTool implements AgentTool<typeof astGrepSchema, AstGrepToolD
 	readonly label = "AST Grep";
 	readonly summary = "Search code with AST patterns (structural grep)";
 	get description(): string {
-		return prompt.render(astGrepDescription, {
-			eagerDelegation: sessionDelegationBias(this.session) === "eager",
-			scoutAvailable: isScoutSpawnable(
-				cfgTaskDisabledAgents.get(this.session.settings),
-				this.session.getSessionSpawns?.() ?? "*",
-			),
-		});
+		const eagerDelegation = sessionDelegationBias(this.session) === "eager";
+		const scoutAvailable = isScoutSpawnable(
+			cfgTaskDisabledAgents.get(this.session.settings),
+			this.session.getSessionSpawns?.() ?? "*",
+		);
+		// Both render inputs are booleans; pack them so repeat reads skip the template render.
+		const key = (eagerDelegation ? 1 : 0) | (scoutAvailable ? 2 : 0);
+		if (key !== this.#descriptionKey) {
+			this.#description = prompt.render(astGrepDescription, { eagerDelegation, scoutAvailable });
+			this.#descriptionKey = key;
+		}
+		return this.#description;
 	}
 	readonly parameters = astGrepSchema;
 	readonly strict = true;
@@ -170,6 +173,8 @@ export class AstGrepTool implements AgentTool<typeof astGrepSchema, AstGrepToolD
 		},
 	];
 	readonly loadMode = "discoverable";
+	#descriptionKey = -1;
+	#description = "";
 
 	constructor(private readonly session: ToolSession) {}
 
@@ -287,19 +292,23 @@ export class AstGrepTool implements AgentTool<typeof astGrepSchema, AstGrepToolD
 			const useHashLines = resolveFileDisplayMode(this.session).hashLines;
 			const hashContexts = new Map<string, { tag: string; path: string }>();
 			if (useHashLines) {
-				for (const relativePath of fileList) {
-					// Immutable schemes get no host file; mutable URLs (`local://`) bind to their backing file.
-					const snapshotPath = await resultSnapshotPath(relativePath, this.session.cwd, resolveContext);
+				// Immutable schemes get no host file; mutable URLs (`local://`) bind to their backing file.
+				const snapshotPaths = await Promise.all(
+					fileList.map(relativePath => resultSnapshotPath(relativePath, this.session.cwd, resolveContext)),
+				);
+				const store = getEditStore(this.session);
+				for (let index = 0; index < fileList.length; index++) {
+					const snapshotPath = snapshotPaths[index];
 					if (snapshotPath === undefined) continue;
 					// Whole-file content tag: any anchor validates while the file is
 					// unchanged; over-cap / unreadable files get no tag (plain output).
-					const tag = getEditStore(this.session).recordSnapshotFile(snapshotPath);
-					if (tag) hashContexts.set(relativePath, { tag, path: snapshotPath });
+					const tag = store.recordSnapshotFile(snapshotPath);
+					if (tag) hashContexts.set(fileList[index], { tag, path: snapshotPath });
 				}
 			}
 			const outputLines: string[] = [];
 			const displayLines: string[] = [];
-			const renderMatchesForFile = (relativePath: string): { model: string[]; display: string[] } => {
+			const renderMatchesForFile = (relativePath: string): FileMatchSection => {
 				const modelOut: string[] = [];
 				const displayOut: string[] = [];
 				const fileMatches = matchesByFile.get(relativePath) ?? [];
@@ -337,38 +346,12 @@ export class AstGrepTool implements AgentTool<typeof astGrepSchema, AstGrepToolD
 						modelOut.join("\n"),
 					);
 				}
-				return { model: modelOut, display: displayOut };
+				return { model: modelOut, display: displayOut, tag: hashContext?.tag };
 			};
 
-			if (isDirectory) {
-				const grouped = formatGroupedFiles(fileList, relativePath => {
-					const rendered = renderMatchesForFile(relativePath);
-					const hashContext = hashContexts.get(relativePath);
-					return {
-						modelLines: rendered.model,
-						displayLines: rendered.display,
-						headerSuffix: hashContext?.tag ? `#${hashContext.tag}` : "",
-						skip: rendered.model.length === 0,
-					};
-				});
-				outputLines.push(...grouped.model);
-				displayLines.push(...grouped.display);
-			} else {
-				for (const relativePath of fileList) {
-					const rendered = renderMatchesForFile(relativePath);
-					if (rendered.model.length === 0) continue;
-					if (outputLines.length > 0) {
-						outputLines.push("");
-						displayLines.push("");
-					}
-					const hashContext = hashContexts.get(relativePath);
-					if (hashContext?.tag) {
-						outputLines.push(formatHashlineHeader(relativePath, hashContext.tag));
-					}
-					outputLines.push(...rendered.model);
-					displayLines.push(...rendered.display);
-				}
-			}
+			const matchOutput = formatFileMatches(fileList, isDirectory, renderMatchesForFile);
+			outputLines.push(...matchOutput.model);
+			displayLines.push(...matchOutput.display);
 
 			const details: AstGrepToolDetails = {
 				...baseDetails,

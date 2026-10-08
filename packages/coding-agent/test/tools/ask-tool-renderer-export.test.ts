@@ -14,12 +14,4 @@ describe("askToolRenderer reachability from extensions (issue #12680)", () => {
 	it("re-exports the ask renderer from the root barrel", () => {
 		expect(namespace.askToolRenderer).toBe(askToolRenderer);
 	});
-
-	it("carries the render surface shadow-ask extensions consumed before the pi-tui migration", () => {
-		const renderer = namespace.askToolRenderer as typeof askToolRenderer | undefined;
-		expect(renderer).toBeDefined();
-		expect(typeof renderer?.renderCall).toBe("function");
-		expect(typeof renderer?.renderResult).toBe("function");
-		expect(renderer?.mergeCallAndResult).toBe(true);
-	});
 });

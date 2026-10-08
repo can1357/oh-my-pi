@@ -70,6 +70,12 @@ grep-searcher = "0.1"
 hex = "0.4.3"
 hifijson = "0.2.0"
 hostname = "0.4"
+# `sort` collates and reads numbers per call from the shell's locale; uucore's
+# i18n helpers cache one process-wide locale.
+icu_collator = { version = "2.0", default-features = false, features = ["compiled_data"] }
+icu_decimal = { version = "2.0", default-features = false, features = ["compiled_data"] }
+icu_locale_core = { version = "2.0", default-features = false, features = ["alloc"] }
+icu_provider = { version = "2.0", default-features = false }
 ignore = "0.4"
 indicatif = "0.18.0"
 jaq-core = "2.1.1"
@@ -95,12 +101,10 @@ self_cell = "1.0.4"
 serde_json = "1"
 smallvec.workspace = true
 similar = "3.2.0"
-same-file = "1.0.6"
 tempfile = "3.15.0"
 tokio-util = "0.7"
 xutf.workspace = true
 libc = "0.2.172"
-memmap2 = "0.9"
 uutils_term_grid = "0.8"
 yansi = "1.0.1"
 
@@ -139,6 +143,10 @@ features = [
   "wide",
   "update-control",
 ]
+
+# `cp`'s copy-on-write clones (`pi_iso::cow`).
+[target."cfg(any(unix, windows))".dependencies.pi-iso]
+workspace = true
 
 [target."cfg(any(unix, windows))".dependencies.tokio]
 version = "1.50.0"

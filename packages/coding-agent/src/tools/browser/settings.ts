@@ -79,6 +79,19 @@ export const cfgBrowserCmux = register({
 	},
 });
 
+export const cfgBrowserTern = register({
+	id: "browser.tern",
+	type: "boolean",
+	default: true,
+	ui: {
+		tab: "tools",
+		group: "Grep & Browser",
+		label: "Tern Browser",
+		description:
+			"Inside a Tern pane, open browser tabs as picture-in-pictures over omp's pane (native web view) instead of headless Chromium; falls back to Chromium when no Tern window can host them. Explicit app options, the relay and Browser CDP URL take precedence; app.tern:false opts one open out. Set PI_BROWSER_TERN=0 or PI_BROWSER_TERN=1 to override.",
+	},
+});
+
 export const cfgBrowserFreezeOnTurnEnd = register({
 	id: "browser.freezeOnTurnEnd",
 	type: "boolean",
@@ -101,7 +114,7 @@ export const cfgBrowserIdleCloseSec = register({
 		group: "Grep & Browser",
 		label: "Browser Idle Close Timeout",
 		description:
-			"Close OMP-owned headless browser tabs idle longer than this many seconds (0 = never; session dispose still reaps). Applies only to OMP-launched headless tabs, never relay/CDP/spawned browsers or other sessions' tabs.",
+			"Close OMP-owned headless browser tabs and Tern browser picture-in-pictures idle longer than this many seconds (0 = never; session dispose still reaps). Never touches relay/CDP/spawned browsers or other sessions' tabs.",
 		options: [
 			{ value: "0", label: "Never" },
 			{ value: "900", label: "15 minutes" },
